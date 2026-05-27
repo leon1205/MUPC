@@ -2,6 +2,8 @@
 //!
 //! Phase 1 仅定义接口
 
+pub mod errors;
 pub mod strategies;
 
+pub use errors::StrategyError;
 pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, ValidationResult};
