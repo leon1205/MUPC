@@ -1,0 +1,21 @@
+[package]
+name = "device-trait"
+version = "0.1.0"
+edition = "2021"
+authors = ["MUPC Team"]
+license = "MIT"
+rust-version = "1.75"
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+chrono = { workspace = true }

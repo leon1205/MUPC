@@ -1,0 +1,22 @@
+[package]
+name = "mupc-security"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+ring = "0.17"
+rustls = "0.23"
+x509-parser = "0.16"
+pem = "3"
+base64 = "0.22"
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"

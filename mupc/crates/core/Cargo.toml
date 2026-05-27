@@ -1,0 +1,19 @@
+[package]
+name = "mupc-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+once_cell.workspace = true
+mupc-common = { path = "../common" }
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/core",
+    "crates/gateway",
+    "crates/intercore",
+    "crates/data-processing",
+    "crates/strategy-engine",
+    "crates/web-api",
+    "crates/security",
+    "crates/iec61850-plugin",
+    "crates/mqtt-plugin",
+    "crates/device-trait",
+    "crates/plugin-loader",
+    "crates/rs485-plugin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["MUPC Team"]
+license = "MIT"
+rust-version = "1.75"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = "1.3"
+hyper-util = { version = "0.1", features = ["full"] }
+tokio-net = "0.1"
+libloading = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+parking_lot = "0.12"
+once_cell = "1.19"
+byteorder = "1.5"
+async-trait = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,19 @@
+[package]
+name = "mupc-iec61850-plugin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+mupc-core = { path = "../core" }
+mupc-security = { path = "../security" }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"
