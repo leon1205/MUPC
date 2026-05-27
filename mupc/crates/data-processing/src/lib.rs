@@ -7,9 +7,13 @@ pub mod telemetry;
 pub mod recorder;
 pub mod collector;
 pub mod high_freq_telemetry;
+pub mod database;
+pub mod fault_recorder_impl;
 
 pub use telemetry::{DataCollector, HighFrequencyTelemetry, DataReporter, DataPackage, FaultCondition, WaveformData};
 pub use recorder::FaultRecorder;
 pub use errors::DataProcessingError;
 pub use collector::DataCollectorImpl;
 pub use high_freq_telemetry::HighFreqTelemetryImpl;
+pub use fault_recorder_impl::{FaultRecorderImpl, FaultRecord, FaultType};
+pub use database::init_database;

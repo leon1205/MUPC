@@ -13,7 +13,10 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait = "0.1"
+thiserror.workspace = true
 mupc-common = { path = "../common" }
+rusqlite = "0.32"
+chrono.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
