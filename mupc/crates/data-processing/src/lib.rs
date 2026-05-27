@@ -6,8 +6,10 @@ pub mod errors;
 pub mod telemetry;
 pub mod recorder;
 pub mod collector;
+pub mod high_freq_telemetry;
 
 pub use telemetry::{DataCollector, HighFrequencyTelemetry, DataReporter, DataPackage, FaultCondition, WaveformData};
 pub use recorder::FaultRecorder;
 pub use errors::DataProcessingError;
 pub use collector::DataCollectorImpl;
+pub use high_freq_telemetry::HighFreqTelemetryImpl;
