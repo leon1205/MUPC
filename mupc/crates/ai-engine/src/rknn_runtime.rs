@@ -94,22 +94,27 @@ impl RknnRuntime {
         Ok(vec![0.0; output_size])
     }
 
-    /// 获取输入形状
-    pub fn get_input_shape(&self) -> Vec<i32> {
-        // 同步获取，需要访问 ctx
-        // 注意：这是一个简化实现，实际应返回真实形状
-        vec![1, 64]
+    /// 获取输入形状（异步访问 ctx）
+    pub async fn get_input_shape(&self) -> Vec<i32> {
+        let ctx = self.ctx.read().await;
+        match ctx.as_ref() {
+            Some(ctx) => ctx.input_shape.clone(),
+            None => vec![],
+        }
     }
 
-    /// 获取输出形状
-    pub fn get_output_shape(&self) -> Vec<i32> {
-        vec![1, 8]
+    /// 获取输出形状（异步访问 ctx）
+    pub async fn get_output_shape(&self) -> Vec<i32> {
+        let ctx = self.ctx.read().await;
+        match ctx.as_ref() {
+            Some(ctx) => ctx.output_shape.clone(),
+            None => vec![],
+        }
     }
 
     /// 检查模型是否已加载
-    pub fn is_loaded(&self) -> bool {
-        // 简化检查，实际应查询 ctx 状态
-        true
+    pub async fn is_loaded(&self) -> bool {
+        self.ctx.read().await.is_some()
     }
 }
 
@@ -127,9 +132,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rknn_runtime_load() {
+    async fn test_rknn_runtime_is_loaded_after_load() {
         let runtime = RknnRuntime::new(Path::new("/tmp/test.rknn")).unwrap();
-        // 文件不存在会失败，但结构体创建成功
-        assert!(!runtime.is_loaded());
+        assert!(!runtime.is_loaded().await);
     }
 }
