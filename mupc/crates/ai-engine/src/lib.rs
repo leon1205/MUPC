@@ -11,6 +11,7 @@ pub mod lstm_model;
 pub mod model_manager;
 pub mod online_updater;
 pub mod rknn_runtime;
+pub mod rknn_runtime_sys;
 pub mod rknn_types;
 pub mod rl_model;
 

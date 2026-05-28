@@ -3,8 +3,8 @@
 //! Phase 3C.2 实现完整功能
 //! 当前为框架实现，支持数据收集和缓冲区管理
 
-use crate::error::AiEngineError;
 use crate::config::OnlineUpdateConfig;
+use crate::error::AiEngineError;
 
 /// 增量数据点
 #[derive(Debug, Clone)]
@@ -62,13 +62,13 @@ impl OnlineUpdater {
     pub fn update(&self) -> Result<(), AiEngineError> {
         if !self.config.enabled {
             return Err(AiEngineError::OnlineUpdateFailed(
-                "在线微调未启用".to_string()
+                "在线微调未启用".to_string(),
             ));
         }
 
         // Phase 3C.2 实现
         Err(AiEngineError::OnlineUpdateFailed(
-            "待 Phase 3C.2 实现".to_string()
+            "待 Phase 3C.2 实现".to_string(),
         ))
     }
 
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn test_online_updater_buffer_overflow() {
         let mut config = create_test_config();
-        config.batch_size = 2;  // 容量 = 2 * 10 = 20
+        config.batch_size = 2; // 容量 = 2 * 10 = 20
 
         let mut updater = OnlineUpdater::new(config);
 

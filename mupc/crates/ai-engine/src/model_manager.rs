@@ -2,10 +2,10 @@
 //!
 //! 统一调度 LSTM 预测和 RL 决策模型
 
-use crate::error::AiEngineError;
 use crate::config::AiEngineConfig;
-use crate::lstm_model::{LstmModel, LstmInput, LstmOutput};
-use crate::rl_model::{RLModel, SystemState, ActionOutput};
+use crate::error::AiEngineError;
+use crate::lstm_model::{LstmInput, LstmModel, LstmOutput};
+use crate::rl_model::{ActionOutput, RLModel, SystemState};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -67,16 +67,14 @@ impl ModelManager {
     /// 预测（LSTM）
     pub async fn predict(&self, input: &LstmInput) -> Result<LstmOutput, AiEngineError> {
         let lstm = self.lstm_model.read().await;
-        let lstm = lstm.as_ref()
-            .ok_or(AiEngineError::ModelNotLoaded)?;
+        let lstm = lstm.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
         lstm.predict(input).await
     }
 
     /// 决策（RL）
     pub async fn decide(&self, state: &SystemState) -> Result<ActionOutput, AiEngineError> {
         let rl = self.rl_model.read().await;
-        let rl = rl.as_ref()
-            .ok_or(AiEngineError::ModelNotLoaded)?;
+        let rl = rl.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
         rl.decide(state).await
     }
 
@@ -104,7 +102,7 @@ impl ModelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LstmConfig, RlConfig, RlAlgorithm, OnlineUpdateConfig};
+    use crate::config::{LstmConfig, OnlineUpdateConfig, RlAlgorithm, RlConfig};
 
     fn create_test_config() -> AiEngineConfig {
         AiEngineConfig {

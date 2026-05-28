@@ -14,6 +14,9 @@ pub enum GmError {
     #[error("验签失败: {0}")]
     VerifyFailed(String),
 
+    #[error("密钥派生失败: {0}")]
+    KeyDeriveFailed(String),
+
     #[error("加密失败: {0}")]
     EncryptFailed(String),
 
@@ -31,6 +34,12 @@ pub enum GmError {
 
     #[error("不支持的操作: {0}")]
     Unsupported(String),
+
+    #[error("无效参数: {0}")]
+    InvalidParam(String),
+
+    #[error("密钥长度无效: {0}")]
+    InvalidKeyLength(String),
 }
 
 /// Result 类型别名

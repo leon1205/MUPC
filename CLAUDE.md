@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主控架构"中的**非实时处理核心**（大脑），与"实时控制核心模块"（小脑）协同工作。
 
 **核心职责：**
+
 - 北向通信：与调度主站（IEC 104）、配电自动化（IEC 61850）、物联平台（MQTT）通信
 - 南向通信：与台区设备（TTU、光伏逆变器、充电桩、柔性负荷）通信
 - 本地策略引擎（AI 失效时的兜底）
@@ -22,46 +23,65 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 
 ```
 mupc/
-├── Cargo.toml              # Workspace 配置
+├── Cargo.toml              # Workspace 配置（18 个 crate）
 ├── crates/
 │   ├── common/             # 公共库：日志、错误类型
-│   ├── gateway/             # 北向通信网关（IEC 104）
+│   ├── core/               # 核心组件
+│   ├── gateway/            # 北向通信网关（IEC 104）
 │   ├── intercore/           # 核间通信（TCP/RJ45）
-│   ├── data-processing/     # 数据处理（接口预留 Phase 1）
-│   └── strategy-engine/      # 本地策略引擎（接口预留 Phase 1）
+│   ├── data-processing/     # 遥测数据采集
+│   ├── strategy-engine/    # 本地策略引擎 + AI 集成
+│   ├── ai-engine/          # AI 优化引擎（LSTM/MADDPG/RKNN Runtime）
+│   ├── security/           # 安全模块
+│   ├── web-api/             # Web API
+│   ├── plugin-loader/       # 插件加载器
+│   ├── iec61850-plugin/    # IEC 61850 协议插件
+│   ├── mqtt-plugin/         # MQTT 协议插件
+│   ├── rs485-plugin/        # RS485 通信插件
+│   ├── mqtt-bridge/         # MQTT 桥接
+│   └── device-trait/        # 设备特性抽象
 └── tests/                  # 集成测试
 ```
 
 ## 开发状态
 
-- **Phase 1** 设计和 PRD 已通过评审（`docs/superpowers/specs/`）
-- 源码尚未创建（项目初始化阶段）
+- **Phase 1**: 核心架构完成
+- **Phase 3C**: AI 优化引擎已完成（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）
+- **Phase 2+**: IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密（规划中）
 - 技术债清单见 `docs/technical-debt.md`
 
 ## 开发命令
 
-> 注：Phase 1 阶段源码尚未创建，以下为项目初始化后的占位命令。
-
 - 构建：`cargo build --release`
 - 测试：`cargo test`
 - 代码检查：`cargo clippy`
-- 单个测试：`cargo test <test_name>`
+- 单个测试：`cargo test -p <crate> <test_name>`
+- 单 crate 构建：`cargo build -p <crate>`
 - 格式化：`cargo fmt`
 
-## 开发工作流（强制）
+## 项目协作配置
 
-所有任务必须完成评审才能进入下一阶段，未完成评审禁止推进。
+本项目采用一套自定义的AI代理（Agents）协作框架进行开发。该框架定义了完整的角色、工作流程和质量门禁。
 
-| 阶段 | 评审 | 标记 |
-|------|------|------|
-| 需求阶段 | 需求评审 | `[REVIEWED: PASS]` |
-| 设计阶段 | 设计评审 | `[DESIGN_APPROVED]` |
-| 开发阶段 | 代码评审 | `[CODE_REVIEWED: PASS]` |
-| 测试阶段 | 测试评审 | `[TEST_PASSED]` |
+## 如何启用AI团队
 
-流程定义：`AI_WORKFLOW/02_WORKFLOW.md`
-AI Agent 角色定义：`AI_WORKFLOW/01_AGENTS.md`（包含需求分析师、架构师、开发者、代码评审员等角色职责）
-AI 协作 prompt 模板：`prompts/` 目录
+当您需要开发新功能、修复Bug或进行任何代码变更时，**请直接提出您的需求**。
+
+例如：
+
+- “我们需要开发一个用户登录功能。”
+- “修复首页图片无法加载的问题。”
+- “根据这份PRD，开始进行开发。”
+
+提出需求后，**本项目配置的‘项目经理’（Manager）Agent将被自动触发**。他将根据 `/.claude/agents/` 目录下的角色定义和 `/.claude/agents/AI_WORKFLOW/02_WORKFLOW.md` 定义的流程，调度需求分析师、架构师、开发工程师等角色，带领团队完成从需求分析到测试交付的全过程。
+
+## 框架核心
+
+- **角色定义**：所有Agent角色定义文件位于 `/.claude/agents/` 目录下。
+- **工作流**：遵循 **合同与路径驱动** 流程，定义在 `/.claude/agents/AI_WORKFLOW/02_WORKFLOW.md`。项目经理将根据项目特征选择“标准”、“简单”或“纯端”路径执行。
+- **术语**：核心概念和技能定义在 `/.claude/agents/AI_WORKFLOW/05_GLOSSARY.md`。
+
+## 文件结构
 
 ## 约束
 
@@ -82,19 +102,21 @@ AI 协作 prompt 模板：`prompts/` 目录
 
 ### 关键组件
 
-| 模块 | 职责 |
-|------|------|
-| **common** | 日志（tracing）、统一错误类型、通用工具 |
-| **gateway** | 北向 IEC 104 协议通信、连接管理、数据收发 |
-| **intercore** | TCP 网络通信、指令下发、数据读取、心跳/看门狗 |
-| **data-processing** | 遥测数据采集、高频上报（≥1Hz）、故障录波（接口预留） |
-| **strategy-engine** | 兜底策略（削峰填谷、需量控制、防逆流），AI 指令安全校验（接口预留） |
+
+| 模块                | 职责                                                             |
+| ------------------- | ---------------------------------------------------------------- |
+| **common**          | 日志（tracing）、统一错误类型、通用工具                          |
+| **gateway**         | 北向 IEC 104 协议通信、连接管理、数据收发                        |
+| **intercore**       | TCP 网络通信、指令下发、数据读取、心跳/看门狗                    |
+| **ai-engine**       | LSTM 时序预测、MADDPG/PPO 强化学习决策、RKNN Runtime（NPU 推理） |
+| **strategy-engine** | 兜底策略（削峰填谷、需量控制、防逆流），AI 指令安全校验          |
 
 ### 核间通信
 
 与实时控制模块通过 **TCP Socket (RJ45)** 交互。
 
 **关键信号（通过 TCP 帧传输）：**
+
 - `ai_ready`：AI 引擎可用状态
 - `strategy_mode`：当前策略模式（基础/智能/兜底）
 - `control_cmd`：下发给实时控制模块的指令
@@ -104,26 +126,29 @@ AI 协作 prompt 模板：`prompts/` 目录
 代码变更后，必须按以下清单验证：
 
 **编译与测试**
-- [ ] `cargo build` 编译成功
-- [ ] `cargo clippy` 无警告
-- [ ] `cargo test` 所有测试通过
-- [ ] `cargo fmt` 格式化通过
+
+- [ ]  `cargo build` 编译成功
+- [ ]  `cargo clippy` 无警告
+- [ ]  `cargo test` 所有测试通过
+- [ ]  `cargo fmt` 格式化通过
 
 **功能回归**（根据变更模块选择验证）
+
 - 通信网关：IEC 104/IEC 61850/MQTT 连接建立、协议转换数据一致性
 - 数据处理：遥测数据上送频率 ≥1Hz、故障录波触发
 - 策略引擎：削峰填谷、需量控制、防逆流策略
 - 核间通信：`ai_ready`、`strategy_mode`、`control_cmd` 信号
 
 **安全验证**
+
 - 无硬编码密钥（检查 SM2/SM4 密钥残留）
 - 无新增 `unsafe` 块
 - 错误类型实现 `std::error::Error`
 
 ## 技术债
 
-Phase 1 已识别的技术债（记录于 `docs/technical-debt.md`）：
-- data-processing 和 strategy-engine 仅定义接口，实现延后
-- IEC 61850-7-420、MQTT over TLS、国密 SM2/SM4（Phase 2+）
-- AI 优化引擎（LSTM/TCN、MADDPG/PPO）（Phase 2+）
+Phase 1/3C 已完成的技术债更新（记录于 `docs/technical-debt.md`）：
+
+- **AI 优化引擎**：LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理（Phase 3C 完成）
+- IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密（Phase 2+）
 - 南向通信（RS485/HPLC）、OTA 升级、安全启动（Phase 2+）

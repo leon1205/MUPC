@@ -4,8 +4,8 @@
 //! 输入：历史时间序列数据
 //! 输出：未来预测值及置信度
 
-use crate::error::AiEngineError;
 use crate::config::LstmConfig;
+use crate::error::AiEngineError;
 use crate::rknn_runtime::RknnRuntime;
 use async_trait::async_trait;
 
@@ -79,9 +79,7 @@ impl LstmModel {
         // 实际应使用贝叶斯方法或集成方法
         let variance = if predictions.len() > 1 {
             let mean = predictions.iter().sum::<f32>() / predictions.len() as f32;
-            predictions.iter()
-                .map(|p| (p - mean).powi(2))
-                .sum::<f32>() / predictions.len() as f32
+            predictions.iter().map(|p| (p - mean).powi(2)).sum::<f32>() / predictions.len() as f32
         } else {
             0.0
         };
@@ -116,8 +114,8 @@ mod tests {
     fn create_test_config() -> LstmConfig {
         LstmConfig {
             model_path: std::path::PathBuf::from("/tmp/test_lstm.rknn"),
-            input_window_secs: 3600,     // 60 分钟
-            output_horizon_secs: 1800,  // 30 分钟
+            input_window_secs: 3600,   // 60 分钟
+            output_horizon_secs: 1800, // 30 分钟
             quantization: crate::config::QuantizationType::INT8,
         }
     }

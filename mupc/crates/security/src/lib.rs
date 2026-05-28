@@ -5,13 +5,15 @@
 mod cert;
 mod errors;
 mod sm2;
+mod sm3;
 mod sm4;
 mod tls;
 
-pub use cert::{CertStore, GmCert};
+pub use cert::{CertStore, Sm2Cert, load_sm2_certificate};
 pub use errors::{GmError, Result};
-pub use sm2::{sm2_sign, sm2_verify, Sm2Signature};
-pub use sm4::{sm4_gcm_decrypt, sm4_gcm_encrypt, Sm4Key};
+pub use sm2::{sm2_sign, sm2_verify, sm2_key_generate, sm2_derive_shared_key, Sm2KeyPair, Sm2Signature};
+pub use sm3::{sm3_hash, sm3_derive_key};
+pub use sm4::{Sm4Key, sm4_cbc_encrypt, sm4_cbc_decrypt, sm4_gcm_encrypt, sm4_gcm_decrypt, generate_iv};
 pub use tls::{TlsClientConfig, TlsConnector};
 
 /// 国密配置
