@@ -14,6 +14,7 @@ members = [
     "crates/device-trait",
     "crates/plugin-loader",
     "crates/rs485-plugin",
+    "crates/mqtt-bridge",
 ]
 
 [workspace.package]
@@ -46,6 +47,7 @@ parking_lot = "0.12"
 once_cell = "1.19"
 byteorder = "1.5"
 async-trait = "0.1"
+rustls = "0.22"
 
 [profile.release]
 opt-level = 3
