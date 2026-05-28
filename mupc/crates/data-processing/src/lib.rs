@@ -1,6 +1,6 @@
 //! MUPC 数据处理模块
 //!
-//! Phase 1 仅定义接口
+//! Phase 3B: 集成 mqtt-bridge 支持 MQTT 通信
 
 pub mod telemetry;
 pub mod recorder;
@@ -16,6 +16,11 @@ pub use fault_recorder_impl::FaultRecorderImpl;
 pub use errors::DataProcessingError;
 pub use telemetry::{DataCollector, HighFrequencyTelemetry, DataReporter, DataPackage, FaultCondition, WaveformData};
 pub use recorder::FaultRecorder;
+
+// Re-export MQTT bridge components for convenience
+pub use mupc_mqtt_bridge::{LocalMqttClient, NorthMqttClient, MqttBridge, MqttBridgeError};
+pub use mupc_mqtt_bridge::config::{LocalMqttConfig, NorthMqttConfig, MqttConfig};
+pub use mupc_mqtt_bridge::topics::{LOCAL_TELEMETRY, LOCAL_STRATEGY_COMMAND, NORTH_TELEMETRY, NORTH_FAULT};
 
 #[cfg(test)]
 mod telemetry_test;
