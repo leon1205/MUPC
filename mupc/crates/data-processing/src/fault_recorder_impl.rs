@@ -73,10 +73,29 @@ impl FaultRecorderImpl {
             [],
         ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
+        // 清理超过30天的旧记录
+        if let Err(e) = Self::cleanup_old_records_impl(&conn, 30) {
+            tracing::warn!("清理旧故障记录失败: {}", e);
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
         })
+    }
+
+    fn cleanup_old_records_impl(conn: &Connection, retention_days: i64) -> Result<usize, DataProcessingError> {
+        let cutoff = Utc::now().timestamp() - (retention_days * 86400);
+        let deleted = conn.execute(
+            "DELETE FROM fault_records WHERE trigger_time < ?1",
+            [cutoff],
+        ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+        Ok(deleted)
+    }
+
+    pub fn cleanup_old_records(&self, retention_days: i64) -> Result<usize, DataProcessingError> {
+        let conn = self.conn.lock().unwrap();
+        Self::cleanup_old_records_impl(&conn, retention_days)
     }
 
     pub fn new_in_memory() -> Result<Self, DataProcessingError> {
@@ -102,7 +121,7 @@ impl FaultRecorderImpl {
         })
     }
 
-    pub fn trigger_sync(&self, condition: &FaultCondition) -> Result<(), DataProcessingError> {
+    pub fn record_sync(&self, condition: &FaultCondition) -> Result<(), DataProcessingError> {
         let conn = self.conn.lock().unwrap();
         let trigger_time = Utc::now().timestamp();
 
@@ -169,8 +188,13 @@ impl FaultRecorderImpl {
 
 #[async_trait]
 impl FaultRecorder for FaultRecorderImpl {
-    async fn trigger(&self, condition: &FaultCondition) -> Result<(), MupcError> {
-        self.trigger_sync(condition)
+    async fn record(&self, condition: &FaultCondition) -> Result<(), MupcError> {
+        self.record_sync(condition)
+            .map_err(|e| MupcError::new(mupc_common::ErrorCode::InternalError, &e.to_string()))
+    }
+
+    async fn query(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, MupcError> {
+        self.query_sync(start, end)
             .map_err(|e| MupcError::new(mupc_common::ErrorCode::InternalError, &e.to_string()))
     }
 

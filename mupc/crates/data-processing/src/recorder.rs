@@ -10,8 +10,11 @@ use super::telemetry::{FaultCondition, WaveformData};
 /// 故障录波器 trait
 #[async_trait]
 pub trait FaultRecorder: Send + Sync {
-    /// 触发录波
-    async fn trigger(&self, condition: &FaultCondition) -> Result<(), MupcError>;
+    /// 记录故障事件
+    async fn record(&self, event: &FaultCondition) -> Result<(), MupcError>;
+
+    /// 查询故障记录（指定时间范围）
+    async fn query(&self, start: i64, end: i64) -> Result<Vec<super::fault_recorder_impl::FaultRecord>, MupcError>;
 
     /// 获取波形数据
     async fn get_waveform(&self) -> Result<WaveformData, MupcError>;

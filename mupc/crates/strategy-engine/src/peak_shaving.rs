@@ -35,6 +35,8 @@ impl PeakShavingStrategy {
             phase_compensation: None,
             start_stop: Some(true),
             priority: 1,
+            pv_limit: None,
+            load_shedding: None,
         }
     }
 

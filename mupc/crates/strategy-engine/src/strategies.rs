@@ -31,6 +31,10 @@ pub struct ControlCommand {
     pub start_stop: Option<bool>,
     /// 优先级
     pub priority: u8,
+    /// PV 限功率比例 (0.0-1.0)，用于防逆流策略
+    pub pv_limit: Option<f64>,
+    /// 负荷切除功率 (kW)，用于需量控制策略
+    pub load_shedding: Option<f64>,
 }
 
 /// 命令类型

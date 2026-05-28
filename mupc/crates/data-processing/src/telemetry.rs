@@ -82,6 +82,9 @@ pub trait HighFrequencyTelemetry: Send + Sync {
 }
 
 /// 数据上报接口
+///
+/// 注意：此接口实现延后到 Phase 3B（消息总线扩展 AMQP/MQTT）
+/// Phase 3A 仅保留接口定义
 #[async_trait]
 pub trait DataReporter: Send + Sync {
     /// 上报数据

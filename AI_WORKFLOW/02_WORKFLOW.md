@@ -4,7 +4,7 @@
 >
 > - 需求评审：必须有明确的通过/不通过结论
 > - 设计评审：必须检查技术选型和实现计划
-> - 代码评审：必须调用 code-review-and-quality 技能
+> - 代码评审：必须调用 `superpowers:requesting-code-review` 技能
 > - 违者：代码回退 + 重新走评审流程
 
 所有开发任务必须严格遵循以下工作流流程。
@@ -24,6 +24,33 @@
 ```
 需求启动 → 需求评审 → 计划制定 → 开发 → 代码评审 → 测试 → 重构验证
 ```
+
+---
+
+## 技能选择决策树
+
+```
+用户指令类型判断：
+
+"继续执行" / "开始 Phase X" / "执行已有计划"
+  → 直接进入【阶段三：开发与交付】
+  → 调用 `superpowers:subagent-driven-development` 或 `superpowers:executing-plans`
+
+"我们要做 X" / "我想实现 X" / "新需求" / "添加功能"
+  → 进入【阶段一：需求与计划】
+  → 调用 `superpowers:brainstorming`
+
+"修复 Bug" / "排查问题"
+  → 调用 `superpowers:systematic-debugging`
+
+"代码审查" / "评审"
+  → 调用 `superpowers:requesting-code-review`
+```
+
+**注意**：
+- 严禁在已有设计/计划的情况下重复调用 brainstorming
+- 简单需求走快速通道，但必须完成评审
+- 复杂需求必须走完所有阶段
 
 ---
 
@@ -122,7 +149,7 @@
 
 ### 9. 代码评审
 
-联调测试通过后，管理者调度【代码评审员】。评审员调用 code-review-and-quality 技能进行审查：
+联调测试通过后，管理者调度【代码评审员】。评审员调用 `superpowers:requesting-code-review` 技能进行审查（使用 `superpowers:code-reviewer` 子代理类型）：
 - 如果发现严重问题，直接打回给相应开发组修复
 - 审查通过后，标记 `[CODE_REVIEWED: PASS]`，进入自动化测试阶段
 
@@ -183,3 +210,22 @@
 | 测试阶段 | 测试评审 | `[TEST_PASSED]` 或 `[TEST_FAILED]` | 自动化测试工程师 |
 
 **注意**：未完成评审标记的任务，禁止进入下一阶段！
+
+---
+
+## 附录：输出路径规范
+
+| 文档类型 | 输出路径 | 命名格式 | 生成角色 |
+|----------|---------|---------|---------|
+| PRD 需求文档 | `docs/superpowers/specs/` | `YYYY-MM-DD-<需求名>-PRD.md` | prd_writer |
+| 需求评审报告 | `docs/superpowers/specs/` | `*-review.md` | prd_reviewer |
+| 技术设计文档 | `docs/superpowers/plans/` | `YYYY-MM-DD-<功能名>-design.md` | architect → writing-plans |
+| 实施计划 | `docs/superpowers/plans/` | `YYYY-MM-DD-<功能名>-实施计划.md` | architect → writing-plans |
+| 代码评审报告 | 项目根目录 `mupc/` | `PHASE<X>_CODE_REVIEW.md` | code_reviewer |
+| 测试报告 | `docs/` | `*-test-report.md` | qa_engineer |
+| UI/UX 设计 | `docs/` | `UI_UX_DESIGN.md` | ui_ux_designer |
+
+**路径原则**：
+- `specs/` = 需求相关文档（What）- PRD、需求评审
+- `plans/` = 技术/实施相关文档（How）- 设计、实施计划
+- 评审报告与被评审内容同目录
