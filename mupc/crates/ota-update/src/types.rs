@@ -292,7 +292,7 @@ mod tests {
         let state = OtaState::Downloading { progress: 75 };
 
         let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, "{\" Downloading\":{\"progress\":75}}");
+        assert_eq!(json, "{\"downloading\":{\"progress\":75}}");
 
         let parsed: OtaState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, OtaState::Downloading { progress: 75 });
