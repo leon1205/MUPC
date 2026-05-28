@@ -35,6 +35,25 @@ const RKNN_MODEL标识: &[u8] = b"RKNM"; // 某些变体可能使用此标识
 const MIN_RKNN_SIZE: u64 = 1_048_576; // 1MB
 const MAX_RKNN_SIZE: u64 = 524_288_000; // 500MB
 
+/// 平台最低版本要求（platform_version -> 最低版本号）
+const PLATFORM_MIN_VERSION: &[(&str, u32)] = &[
+    ("RK3588", 8),
+    ("RK3588S", 8),
+    ("RK3568", 6),
+    ("RK3568S", 6),
+];
+
+/// 检查 RKNN 魔数是否有效
+///
+/// # 参数
+/// * `header` - 文件头前 16+ 字节
+fn is_valid_rknn_magic(header: &[u8]) -> bool {
+    header.starts_with(b"RKNN")
+        || header.starts_with(b"RKNM")
+        || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4E) // "RKNN" 的另一种字节序
+        || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4D) // "RKNM"
+}
+
 impl Verifier {
     /// 创建新的验证器实例
     ///
@@ -231,13 +250,7 @@ impl Verifier {
             .map_err(|e| OtaError::VerificationFailed(format!("读取文件头失败: {}", e)))?;
 
         // 检查是否为有效的 RKNN 魔数
-        // RKNN 格式：开头可能是 "RKNN" 或 "RKNM" 或其他变体
-        let is_valid_magic = header.starts_with(b"RKNN")
-            || header.starts_with(b"RKNM")
-            || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4E) // "RKNN" 的另一种字节序
-            || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4D); // "RKNM"
-
-        if !is_valid_magic {
+        if !is_valid_rknn_magic(&header) {
             return Err(OtaError::VerificationFailed(
                 "无效的 RKNN 文件头：魔数不匹配".to_string(),
             ));
@@ -291,11 +304,7 @@ impl Verifier {
             .map_err(|e| OtaError::VerificationFailed(format!("读取 RKNN 头部失败: {}", e)))?;
 
         // 验证 RKNN 魔数
-        let is_valid_magic = header.starts_with(b"RKNN")
-            || header.starts_with(b"RKNM")
-            || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4E);
-
-        if !is_valid_magic {
+        if !is_valid_rknn_magic(&header) {
             return Err(OtaError::VerificationFailed(
                 "平台兼容性验证失败：文件头魔数不匹配，可能不是有效的 RKNN 模型".to_string(),
             ));
@@ -318,17 +327,22 @@ impl Verifier {
             file_path, platform_version, version
         );
 
-        // 平台版本比较
-        match platform_version {
-            "RK3588" => {
-                // RK3588 要求版本 >= 8（简化判断：版本字段非零表示有效）
-                if version == 0 {
-                    tracing::warn!("RKNN 模型版本字段为零，可能无法确定平台兼容性");
-                }
+        // 查询最低版本要求
+        let min_version = PLATFORM_MIN_VERSION
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(platform_version))
+            .map(|(_, min)| *min);
+
+        // 如果是已知的平台，进行版本校验
+        if let Some(min_ver) = min_version {
+            if version < min_ver {
+                return Err(OtaError::VersionIncompatible {
+                    current: version.to_string(),
+                    required: min_ver.to_string(),
+                });
             }
-            _ => {
-                tracing::info!("未知的平台版本 {}，跳过详细校验", platform_version);
-            }
+        } else {
+            tracing::info!("未知的平台版本 {}，跳过详细校验", platform_version);
         }
 
         Ok(())
