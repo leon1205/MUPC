@@ -3,6 +3,7 @@
 //! Phase 3C.2 OTA 模型自动更新模块的模型应用器实现
 //! 负责将下载并验证通过的模型文件应用到生产环境
 
+use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,6 +19,14 @@ use crate::error::OtaError;
 use crate::types::{ModelType, ModelVersion};
 use crate::verifier::Verifier;
 use mupc_ai_engine::RknnRuntime;
+
+/// 常量：模型文件名
+const MODEL_FILENAME: &str = "model.rknn";
+
+/// 缓存的正则表达式：用于从路径提取版本号
+static VERSION_PATTERN: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"v?(\d+\.\d+\.\d+)").unwrap()
+});
 
 /// 策略引擎通知回调类型
 type StrategyEngineNotifyFn = Box<dyn Fn(ModelType) + Send + Sync>;
@@ -133,7 +142,7 @@ impl ModelApplicator {
         self.notify_strategy_engine(model_type);
 
         // 7. 计算新模型校验和
-        let current_model_path = self.current_dir(model_type).join("model.rknn");
+        let current_model_path = self.current_dir(model_type).join(MODEL_FILENAME);
         let checksum = self.calculate_checksum(&current_model_path).await?;
 
         // 8. 获取新版本信息
@@ -167,10 +176,10 @@ impl ModelApplicator {
         model_type: ModelType,
     ) -> Result<PathBuf, OtaError> {
         let current_dir = self.current_dir(model_type);
-        let current_model_path = current_dir.join("model.rknn");
+        let current_model_path = current_dir.join(MODEL_FILENAME);
 
         // 获取当前版本
-        let current_version = self.get_current_version(model_type)?;
+        let current_version = self.get_current_version(model_type).await?;
         let rollback_dir = self.rollback_dir(&current_version.version);
 
         // 创建回滚目录
@@ -180,7 +189,7 @@ impl ModelApplicator {
 
         // 如果当前模型存在，复制到回滚目录
         if current_model_path.exists() {
-            let backup_path = rollback_dir.join("model.rknn");
+            let backup_path = rollback_dir.join(MODEL_FILENAME);
             fs::copy(&current_model_path, &backup_path).await.map_err(|e| {
                 OtaError::RollbackFailed(format!("备份模型文件失败: {}", e))
             })?;
@@ -268,22 +277,25 @@ impl ModelApplicator {
 
     /// 解压 gzip 文件
     async fn decompress_gzip(&self, package: &Path, temp_dir: &Path) -> Result<(), OtaError> {
-        let file = File::open(package).await.map_err(|e| {
-            OtaError::DecompressionFailed(format!("打开压缩文件失败: {}", e))
+        let contents = fs::read(package).await.map_err(|e| {
+            OtaError::DecompressionFailed(format!("读取压缩文件失败: {}", e))
         })?;
 
-        let mut decoder = GzDecoder::new(file);
-        let mut contents = Vec::new();
-        decoder.read_to_end(&mut contents).await.map_err(|e| {
-            OtaError::DecompressionFailed(format!("解压 gzip 失败: {}", e))
-        })?;
+        let decompressed = tokio::task::spawn_blocking(move || {
+            let mut decoder = GzDecoder::new(contents.as_slice());
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).map(|_| out)
+        })
+        .await
+        .map_err(|e| OtaError::DecompressionFailed(e.to_string()))?
+        .map_err(|e| OtaError::DecompressionFailed(format!("解压 gzip 失败: {}", e)))?;
 
-        let output_path = temp_dir.join("model.rknn");
+        let output_path = temp_dir.join(MODEL_FILENAME);
         let mut output_file = File::create(&output_path).await.map_err(|e| {
             OtaError::DecompressionFailed(format!("创建解压文件失败: {}", e))
         })?;
 
-        output_file.write_all(&contents).await.map_err(|e| {
+        output_file.write_all(&decompressed).await.map_err(|e| {
             OtaError::DecompressionFailed(format!("写入解压数据失败: {}", e))
         })?;
 
@@ -292,14 +304,19 @@ impl ModelApplicator {
 
     /// 解压 tar.gz 文件
     async fn decompress_tar_gz(&self, package: &Path, temp_dir: &Path) -> Result<(), OtaError> {
-        let file = File::open(package).await.map_err(|e| {
-            OtaError::DecompressionFailed(format!("打开压缩文件失败: {}", e))
+        let contents = fs::read(package).await.map_err(|e| {
+            OtaError::DecompressionFailed(format!("读取压缩文件失败: {}", e))
         })?;
 
-        let mut decoder = GzDecoder::new(file);
-        let mut archive = Archive::new(&mut decoder);
-
-        archive.unpack(temp_dir).map_err(|e| {
+        let temp_dir = temp_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let mut decoder = GzDecoder::new(contents.as_slice());
+            let mut archive = Archive::new(&mut decoder);
+            archive.unpack(&temp_dir)
+        })
+        .await
+        .map_err(|e| OtaError::DecompressionFailed(e.to_string()))?
+        .map_err(|e| {
             OtaError::DecompressionFailed(format!("解压 tar.gz 失败: {}", e))
         })?;
 
@@ -312,13 +329,20 @@ impl ModelApplicator {
             OtaError::DecompressionFailed(format!("打开压缩文件失败: {}", e))
         })?;
 
-        let file = tokio::sync::Mutex::new(file);
-        let mut archive = ZipArchive::new(file).map_err(|e| {
-            OtaError::DecompressionFailed(format!("解析 zip 文件失败: {}", e))
-        })?;
-
-        archive.extract(temp_dir).map_err(|e| {
-            OtaError::DecompressionFailed(format!("解压 zip 失败: {}", e))
+        let temp_dir = temp_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            use zip::ZipArchive;
+            let file = file.into_std().await;
+            ZipArchive::new(file)
+        })
+        .await
+        .map_err(|e| OtaError::DecompressionFailed(e.to_string()))?
+        .map_err(|e| OtaError::DecompressionFailed(format!("解析 zip 文件失败: {}", e)))
+        .and_then(|mut archive| {
+            archive.extract(&temp_dir).map_err(|e| {
+                OtaError::DecompressionFailed(format!("解压 zip 失败: {}", e))
+            })
         })?;
 
         Ok(())
@@ -330,11 +354,14 @@ impl ModelApplicator {
             OtaError::DecompressionFailed(format!("读取 xz 文件失败: {}", e))
         })?;
 
-        let decompressed = lzma_rs::decompress(&contents).map_err(|e| {
-            OtaError::DecompressionFailed(format!("解压 xz 失败: {}", e))
-        })?;
+        let decompressed = tokio::task::spawn_blocking(move || {
+            lzma_rs::decompress(&contents)
+        })
+        .await
+        .map_err(|e| OtaError::DecompressionFailed(e.to_string()))?
+        .map_err(|e| OtaError::DecompressionFailed(format!("解压 xz 失败: {}", e)))?;
 
-        let output_path = temp_dir.join("model.rknn");
+        let output_path = temp_dir.join(MODEL_FILENAME);
         fs::write(&output_path, decompressed).await.map_err(|e| {
             OtaError::DecompressionFailed(format!("写入解压数据失败: {}", e))
         })?;
@@ -379,7 +406,7 @@ impl ModelApplicator {
             OtaError::VerificationFailed(format!("创建模型目录失败: {}", e))
         })?;
 
-        let dest_path = current_dir.join("model.rknn");
+        let dest_path = current_dir.join(MODEL_FILENAME);
 
         // 如果目标已存在，先删除
         if dest_path.exists() {
@@ -404,7 +431,7 @@ impl ModelApplicator {
     async fn warmup_model(&self, model_type: ModelType) -> Result<(), OtaError> {
         tracing::info!("开始预热模型: {}", model_type);
 
-        let model_path = self.current_dir(model_type).join("model.rknn");
+        let model_path = self.current_dir(model_type).join(MODEL_FILENAME);
 
         // 如果模型文件不存在，跳过预热
         if !model_path.exists() {
@@ -490,7 +517,7 @@ impl ModelApplicator {
     }
 
     /// 获取当前模型版本
-    pub fn get_current_version(&self, model_type: ModelType) -> Result<ModelVersion, OtaError> {
+    pub async fn get_current_version(&self, model_type: ModelType) -> Result<ModelVersion, OtaError> {
         let version_file = self.version_file_path();
 
         if !version_file.exists() {
@@ -499,7 +526,7 @@ impl ModelApplicator {
             ));
         }
 
-        let contents = std::fs::read_to_string(&version_file).map_err(|e| {
+        let contents = fs::read_to_string(&version_file).await.map_err(|e| {
             OtaError::VersionQueryFailed(format!("读取版本文件失败: {}", e))
         })?;
 
@@ -533,7 +560,7 @@ impl ModelApplicator {
 
         // 读取现有版本信息
         let mut version_file_data = if version_file.exists() {
-            let contents = std::fs::read_to_string(&version_file).map_err(|e| {
+            let contents = fs::read_to_string(&version_file).await.map_err(|e| {
                 OtaError::VersionQueryFailed(format!("读取版本文件失败: {}", e))
             })?;
             serde_json::from_str::<VersionFile>(&contents).unwrap_or(VersionFile { models: vec![] })
@@ -550,7 +577,7 @@ impl ModelApplicator {
             OtaError::VersionQueryFailed(format!("序列化版本信息失败: {}", e))
         })?;
 
-        std::fs::write(&version_file, json).map_err(|e| {
+        fs::write(&version_file, json).await.map_err(|e| {
             OtaError::VersionQueryFailed(format!("写入版本文件失败: {}", e))
         })?;
 
@@ -565,9 +592,8 @@ fn extract_version_from_path(path: &Path) -> Result<String, OtaError> {
 
     let path_str = path.display().to_string();
 
-    // 查找 v 开头的版本号模式
-    let version_pattern = regex::Regex::new(r"v?(\d+\.\d+\.\d+)").unwrap();
-    if let Some(captures) = version_pattern.captures(&path_str) {
+    // 查找 v 开头的版本号模式（使用缓存的正则）
+    if let Some(captures) = VERSION_PATTERN.captures(&path_str) {
         if let Some(version) = captures.get(1) {
             return Ok(version.as_str().to_string());
         }
@@ -706,7 +732,7 @@ mod tests {
 
         let applicator = ModelApplicator::new(models_dir, verifier, None).unwrap();
 
-        let result = applicator.get_current_version(ModelType::Lstm);
+        let result = applicator.get_current_version(ModelType::Lstm).await;
         assert!(result.is_err());
     }
 
@@ -739,7 +765,7 @@ mod tests {
         });
         fs::write(&version_file, version_data.to_string()).await.unwrap();
 
-        let result = applicator.get_current_version(ModelType::Lstm);
+        let result = applicator.get_current_version(ModelType::Lstm).await;
         assert!(result.is_ok());
         let version = result.unwrap();
         assert_eq!(version.version, "1.2.0");
@@ -775,7 +801,7 @@ mod tests {
         });
         fs::write(&version_file, version_data.to_string()).await.unwrap();
 
-        let result = applicator.get_current_version(ModelType::Maddpg);
+        let result = applicator.get_current_version(ModelType::Maddpg).await;
         assert!(result.is_err());
     }
 
@@ -811,7 +837,7 @@ mod tests {
         assert!(version_file.exists());
 
         // 验证内容
-        let contents = std::fs::read_to_string(&version_file).unwrap();
+        let contents = fs::read_to_string(&version_file).await.unwrap();
         assert!(contents.contains("1.3.0"));
         assert!(contents.contains("lstm"));
     }
@@ -865,7 +891,7 @@ mod tests {
         assert!(result.is_ok());
 
         // 验证更新
-        let contents = std::fs::read_to_string(&version_file).unwrap();
+        let contents = fs::read_to_string(&version_file).await.unwrap();
         assert!(contents.contains("1.3.0"));
         assert!(contents.contains("maddpg")); // maddpg 应保留
     }
