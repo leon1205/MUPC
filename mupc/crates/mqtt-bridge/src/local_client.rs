@@ -5,7 +5,8 @@
 use async_trait::async_trait;
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
+use tokio::time::{sleep, Duration};
 use crate::error::MqttBridgeError;
 use crate::client::MqttBridge;
 use crate::config::LocalMqttConfig;
@@ -15,6 +16,7 @@ pub struct LocalMqttClient {
     client: AsyncClient,
     eventloop: Arc<Mutex<EventLoop>>,
     connected: Arc<Mutex<bool>>,
+    reconnect_config: crate::config::ReconnectConfig,
 }
 
 impl LocalMqttClient {
@@ -39,6 +41,7 @@ impl LocalMqttClient {
             client,
             eventloop: Arc::new(Mutex::new(eventloop)),
             connected: Arc::new(Mutex::new(true)),
+            reconnect_config: config.reconnect.clone(),
         })
     }
 
@@ -60,6 +63,58 @@ impl LocalMqttClient {
                 Err(MqttBridgeError::ConnectionFailed(e.to_string()))
             }
         }
+    }
+
+    /// 运行事件循环，支持自动重连
+    /// 按照 reconnect_config 的策略进行指数退避重连
+    pub async fn run(&self) -> Result<(), MqttBridgeError> {
+        let mut interval_secs = self.reconnect_config.initial_interval_secs;
+
+        loop {
+            match self.process_events().await {
+                Ok(_) => {
+                    // 重置退避间隔
+                    interval_secs = self.reconnect_config.initial_interval_secs;
+                }
+                Err(e) => {
+                    tracing::warn!("MQTT 连接错误: {}, 等待 {} 秒后重连", e, interval_secs);
+                    sleep(Duration::from_secs(interval_secs)).await;
+
+                    // 计算下一次重连间隔（指数退避）
+                    let max_interval = self.reconnect_config.max_interval_secs;
+                    interval_secs = ((interval_secs as f64) * self.reconnect_config.backoff_multiplier)
+                        .min(max_interval as f64) as u64;
+                    interval_secs = interval_secs.max(1); // 最小1秒
+                }
+            }
+        }
+    }
+
+    /// 启动后台任务处理事件（不阻塞）
+    pub fn start_event_loop(&self) {
+        let eventloop = Arc::clone(&self.eventloop);
+        let connected = Arc::clone(&self.connected);
+
+        tokio::spawn(async move {
+            let mut interval_secs = 1u64;
+
+            loop {
+                let mut el = eventloop.lock().await;
+                match el.poll().await {
+                    Ok(Event::Connected(_)) => {
+                        *connected.lock().unwrap() = true;
+                        interval_secs = 1; // 重置
+                    }
+                    Ok(Event::Disconnected) => {
+                        *connected.lock().unwrap() = false;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        *connected.lock().unwrap() = false;
+                    }
+                }
+            }
+        });
     }
 }
 

@@ -42,6 +42,32 @@ pub struct NorthMqttConfig {
     pub reconnect: ReconnectConfig,
 }
 
+impl Default for NorthMqttConfig {
+    fn default() -> Self {
+        Self {
+            broker_addr: "mqtt.example.com:8883".to_string(),
+            client_id: "mupc-north".to_string(),
+            keepalive_secs: 60,
+            tls: TlsConfig {
+                // 测试用 dummy 路径，生产环境应提供真实路径
+                ca_cert: PathBuf::from("/etc/mupc/certs/ca.crt"),
+                client_cert: PathBuf::from("/etc/mupc/certs/client.crt"),
+                client_key: PathBuf::from("/etc/mupc/certs/client.key"),
+            },
+            reconnect: ReconnectConfig::default(),
+        }
+    }
+}
+
+/// 北向配置的测试工厂方法
+impl NorthMqttConfig {
+    /// 创建测试用配置（使用 dummy 证书路径）
+    #[cfg(test)]
+    pub fn test_config() -> Self {
+        Self::default()
+    }
+}
+
 /// TLS 配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Transport, TlsOptions};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 use crate::error::MqttBridgeError;
 use crate::client::MqttBridge;
 use crate::config::NorthMqttConfig;
@@ -16,6 +17,7 @@ pub struct NorthMqttClient {
     client: AsyncClient,
     eventloop: Arc<Mutex<EventLoop>>,
     connected: Arc<Mutex<bool>>,
+    reconnect_config: crate::config::ReconnectConfig,
 }
 
 impl NorthMqttClient {
@@ -32,11 +34,14 @@ impl NorthMqttClient {
             port,
         );
         mqtt_options.set_keep_alive(std::time::Duration::from_secs(config.keepalive_secs));
+        // 北向通信需要持久化会话，支持断线重连后恢复
+        mqtt_options.set_clean_session(false);
 
-        // 配置 TLS
+        // 配置 TLS（双向证书认证）
         let tls_options = TlsOptions::new()
             .ca_file(&config.tls.ca_cert)
-            .client_auth(&config.tls.client_cert, &config.tls.client_key);
+            .client_auth(&config.tls.client_cert, &config.tls.client_key)
+            .verify(true); // 启用证书验证
         mqtt_options.set_transport(Transport::tls(tls_options));
 
         let (client, eventloop) = AsyncClient::new(mqtt_options, 100);
@@ -45,6 +50,7 @@ impl NorthMqttClient {
             client,
             eventloop: Arc::new(Mutex::new(eventloop)),
             connected: Arc::new(Mutex::new(true)),
+            reconnect_config: config.reconnect.clone(),
         })
     }
 
@@ -66,6 +72,56 @@ impl NorthMqttClient {
                 Err(MqttBridgeError::ConnectionFailed(e.to_string()))
             }
         }
+    }
+
+    /// 运行事件循环，支持自动重连
+    /// 按照 reconnect_config 的策略进行指数退避重连
+    pub async fn run(&self) -> Result<(), MqttBridgeError> {
+        let mut interval_secs = self.reconnect_config.initial_interval_secs;
+
+        loop {
+            match self.process_events().await {
+                Ok(_) => {
+                    interval_secs = self.reconnect_config.initial_interval_secs;
+                }
+                Err(e) => {
+                    tracing::warn!("MQTT 北向连接错误: {}, 等待 {} 秒后重连", e, interval_secs);
+                    sleep(Duration::from_secs(interval_secs)).await;
+
+                    let max_interval = self.reconnect_config.max_interval_secs;
+                    interval_secs = ((interval_secs as f64) * self.reconnect_config.backoff_multiplier)
+                        .min(max_interval as f64) as u64;
+                    interval_secs = interval_secs.max(1);
+                }
+            }
+        }
+    }
+
+    /// 启动后台任务处理事件（不阻塞）
+    pub fn start_event_loop(&self) {
+        let eventloop = Arc::clone(&self.eventloop);
+        let connected = Arc::clone(&self.connected);
+
+        tokio::spawn(async move {
+            let mut interval_secs = 1u64;
+
+            loop {
+                let mut el = eventloop.lock().await;
+                match el.poll().await {
+                    Ok(Event::Connected(_)) => {
+                        *connected.lock().unwrap() = true;
+                        interval_secs = 1;
+                    }
+                    Ok(Event::Disconnected) => {
+                        *connected.lock().unwrap() = false;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        *connected.lock().unwrap() = false;
+                    }
+                }
+            }
+        });
     }
 }
 
