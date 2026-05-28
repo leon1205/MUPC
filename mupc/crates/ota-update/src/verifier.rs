@@ -29,7 +29,7 @@ pub struct Verifier {
 /// RKNN 文件魔数标识（文件头前 16 字节）
 /// RKNN 文件通常以特定字节序列开头，用于标识文件格式
 const RKNN_MAGIC: &[u8] = b"RKNN";
-const RKNN_MODEL标识: &[u8] = b"RKNM"; // 某些变体可能使用此标识
+const RKNN_MODEL_MAGIC_ALT: &[u8] = b"RKNM"; // 某些变体可能使用此标识
 
 /// 文件大小约束（字节）
 const MIN_RKNN_SIZE: u64 = 1_048_576; // 1MB

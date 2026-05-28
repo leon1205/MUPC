@@ -18,7 +18,6 @@ use zip::ZipArchive;
 use crate::error::OtaError;
 use crate::types::{ModelType, ModelVersion};
 use crate::verifier::Verifier;
-use mupc_ai_engine::RknnRuntime;
 
 /// 常量：模型文件名
 const MODEL_FILENAME: &str = "model.rknn";
@@ -429,40 +428,20 @@ impl ModelApplicator {
     ///
     /// 调用 ai-engine 的 RKNN Runtime 进行模型预热
     async fn warmup_model(&self, model_type: ModelType) -> Result<(), OtaError> {
-        tracing::info!("开始预热模型: {}", model_type);
-
         let model_path = self.current_dir(model_type).join(MODEL_FILENAME);
 
-        // 如果模型文件不存在，跳过预热
         if !model_path.exists() {
             tracing::warn!("模型文件不存在，跳过预热: {}", model_path.display());
             return Ok(());
         }
 
-        // 初始化 RKNN Runtime 并加载模型
-        // 注意：当前 ai-engine 的 RKNN Runtime 是 FFI stub，
-        // 完整的 RKNN Runtime 集成将在 Phase 4 完成
-        let runtime = RknnRuntime::new(&model_path).map_err(|e| {
-            OtaError::VerificationFailed(format!("创建 RKNN Runtime 失败: {}", e))
-        })?;
+        // RknnRuntime 是 FFI stub，当前 Phase 3C.2 为占位实现
+        // 实际 RKNN Runtime 集成在 Phase 4 完成
+        tracing::info!("模型预热占位: RknnRuntime FFI 待 Phase 4 实现");
 
-        // 加载模型（调用 rknn_init）
-        runtime.load().await.map_err(|e| {
-            OtaError::VerificationFailed(format!("加载模型失败: {}", e))
-        })?;
-
-        // 执行一次推理预热
-        // 根据模型类型构造适当的输入 tensor
-        let input = self.create_warmup_input(model_type).await?;
-        let output = runtime.run(&input).await.map_err(|e| {
-            OtaError::VerificationFailed(format!("预热推理失败: {}", e))
-        })?;
-
-        tracing::info!(
-            "模型预热完成: {}, output_len={}",
-            model_type,
-            output.len()
-        );
+        // 验证模型文件存在且可读，作为预热成功的替代
+        tokio::fs::metadata(&model_path).await
+            .map_err(|e| OtaError::ModelLoadFailed(format!("预热检查失败: {}", e)))?;
 
         Ok(())
     }

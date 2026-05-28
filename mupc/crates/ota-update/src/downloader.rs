@@ -118,14 +118,7 @@ impl Downloader {
             .await?;
 
         // 校验文件完整性
-        // 完整下载（start_offset == 0）：直接验证哈希
-        // 断点续传：下载完成后对完整文件重新计算哈希验证
-        let hash = if start_offset == 0 {
-            compute_file_hash(&temp_path).await?
-        } else {
-            // 断点续传场景：重新计算完整文件哈希
-            compute_file_hash(&temp_path).await?
-        };
+        let hash = compute_file_hash(&temp_path).await?;
 
         if hash != expected_hash {
             // 删除损坏的文件

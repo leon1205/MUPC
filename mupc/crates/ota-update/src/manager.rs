@@ -254,6 +254,7 @@ impl OtaManagerImpl {
     /// 查询版本信息（模拟实现）
     ///
     /// 从 OTA 服务器获取当前可用的模型版本信息
+    // TODO: 实际实现应请求 OTA 服务器
     async fn query_versions_from_server(&self) -> Result<Vec<ModelVersion>, OtaError> {
         // 实际实现中，这里会发送 HTTP 请求到 OTA 服务器
         // 这里使用模拟数据
