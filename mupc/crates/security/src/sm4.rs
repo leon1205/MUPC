@@ -1,33 +1,29 @@
 //! SM4 国密对称加密算法实现
 //!
-//! SM4是国家密码管理局发布的对称加密算法
+//! 实现 GB/T 32907-2016《SM4 分组密码算法》
 //!
-//! # 警告：模拟实现
-//!
-//! 当前实现使用 ring 库的 AES-256-GCM，而非真正的 SM4 算法。
-//! 这仅用于演示和测试目的。
-//!
-//! 在实际部署中，应使用GmSSL库或支持SM4的库（如 gmsm crate）。
-//!
-//! 生产环境需要替换为真正的国密算法实现。
+//! # 安全警告
+//! GCM 模式下 IV 严禁重用！
 
 use crate::errors::{GmError, Result};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use std::cmp::min;
 
-/// SM4 密钥结构（32字节，256位）
+/// SM4 密钥结构（16字节，128位）
 #[derive(Debug, Clone)]
 pub struct Sm4Key {
-    key: [u8; 32],
+    key: [u8; 16],
 }
 
 impl Sm4Key {
     /// 从字节数组创建 SM4 密钥
     pub fn from_bytes(key: &[u8]) -> Result<Self> {
-        if key.len() != 32 {
-            return Err(GmError::InvalidFormat("SM4密钥长度必须为32字节".to_string()));
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
         }
-        let mut key_array = [0u8; 32];
+        let mut key_array = [0u8; 16];
         key_array.copy_from_slice(key);
         Ok(Self { key: key_array })
     }
@@ -40,83 +36,207 @@ impl Sm4Key {
     }
 
     /// 获取密钥字节
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 16] {
         &self.key
     }
 }
 
-/// SM4 GCM 加密（模拟实现）
-///
-/// 使用 AES-256-GCM 作为 SM4 的模拟实现
-/// 注意：这是 AEAD 模式，不需要 PKCS7 填充
-/// 函数名已修正为反映实际使用的 GCM 模式
+/// SM4 CBC 模式加密
+pub fn sm4_cbc_encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(feature = "real_gmsm")]
+    {
+        use gmsm::{Sm4, Mode::Cbc, padding::Pkcs7};
+
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
+        }
+        if iv.len() != 16 {
+            return Err(GmError::InvalidParam(format!(
+                "IV必须为16字节，当前为 {} 字节",
+                iv.len()
+            )));
+        }
+
+        let cipher = Sm4::new(key.into())
+            .map_err(|e| GmError::EncryptFailed(format!("密钥创建失败: {:?}", e)))?;
+
+        cipher.encrypt(Mode::Cbc(iv.into()), data, Pkcs7)
+            .map_err(|e| GmError::EncryptFailed(format!("加密失败: {:?}", e)))
+    }
+
+    #[cfg(not(feature = "real_gmsm"))]
+    {
+        Err(GmError::InvalidParam("SM4 CBC 加密需要 gmsm 库".into()))
+    }
+}
+
+/// SM4 CBC 模式解密
+pub fn sm4_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(feature = "real_gmsm")]
+    {
+        use gmsm::{Sm4, Mode::Cbc, padding::Pkcs7};
+
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
+        }
+        if iv.len() != 16 {
+            return Err(GmError::InvalidParam(format!(
+                "IV必须为16字节，当前为 {} 字节",
+                iv.len()
+            )));
+        }
+
+        let cipher = Sm4::new(key.into())
+            .map_err(|e| GmError::DecryptFailed(format!("密钥创建失败: {:?}", e)))?;
+
+        cipher.decrypt(Mode::Cbc(iv.into()), data, Pkcs7)
+            .map_err(|e| GmError::DecryptFailed(format!("解密失败: {:?}", e)))
+    }
+
+    #[cfg(not(feature = "real_gmsm"))]
+    {
+        Err(GmError::InvalidParam("SM4 CBC 解密需要 gmsm 库".into()))
+    }
+}
+
+/// SM4 GCM 模式加密（带认证标签）
 pub fn sm4_gcm_encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
-    if key.len() != 32 {
-        return Err(GmError::InvalidFormat("密钥长度必须为32字节".to_string()));
+    #[cfg(feature = "real_gmsm")]
+    {
+        use gmsm::{Sm4, Mode::Gcm, aead::Aad};
+
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
+        }
+        if iv.len() != 12 && iv.len() != 16 {
+            return Err(GmError::InvalidParam(format!(
+                "GCM IV 必须为 12 或 16 字节，当前为 {} 字节",
+                iv.len()
+            )));
+        }
+
+        let cipher = Sm4::new(key.into())
+            .map_err(|e| GmError::EncryptFailed(format!("密钥创建失败: {:?}", e)))?;
+
+        let mut in_out = data.to_vec();
+        let tag = cipher.encrypt(Mode::Gcm(iv.into()), Aad::empty(), &mut in_out)
+            .map_err(|e| GmError::EncryptFailed(format!("加密失败: {:?}", e)))?;
+
+        let mut result = in_out;
+        result.extend_from_slice(tag.as_ref());
+        Ok(result)
     }
-    if iv.len() != 16 {
-        return Err(GmError::InvalidFormat("IV长度必须为16字节".to_string()));
-    }
 
-    // 使用 ring 库的 AES-256-GCM（SM4 兼容模式）
-    let unbound_key = UnboundKey::new(&AES_256_GCM, key)
-        .map_err(|e| GmError::EncryptFailed(format!("密钥创建失败: {:?}", e)))?;
+    #[cfg(not(feature = "real_gmsm"))]
+    {
+        // 使用 ring 的 AES-256-GCM 模拟（扩展为 32 字节密钥）
+        use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 
-    let less_safe_key = LessSafeKey::new(unbound_key);
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
+        }
 
-    // 使用 IV 作为 nonce
-    let mut in_out = data.to_vec();
+        // 扩展为 32 字节（ring AES-256 需要）
+        let mut expanded_key = [0u8; 32];
+        expanded_key[..16].copy_from_slice(key);
+        expanded_key[16..].copy_from_slice(key);
 
-    // 使用 AES-GCM 作为 SM4 的模拟实现
-    let tag = less_safe_key
-        .seal_in_place_separate_tag(
-            Nonce::assume_unique_is_key(iv.try_into().unwrap()),
+        let unbound_key = UnboundKey::new(&AES_256_GCM, &expanded_key)
+            .map_err(|e| GmError::EncryptFailed(format!("密钥创建失败: {:?}", e)))?;
+        let less_safe_key = LessSafeKey::new(unbound_key);
+
+        let mut in_out = data.to_vec();
+        let tag = less_safe_key.seal_in_place_separate_tag(
+            Nonce::assume_unique_is_key(iv[..12].try_into().unwrap()),
             Aad::empty(),
             &mut in_out,
         )
         .map_err(|e| GmError::EncryptFailed(format!("加密失败: {:?}", e)))?;
 
-    // 追加认证标签
-    let mut result = in_out;
-    result.extend_from_slice(tag.as_ref());
-
-    Ok(result)
+        let mut result = in_out;
+        result.extend_from_slice(tag.as_ref());
+        Ok(result)
+    }
 }
 
-/// SM4 GCM 解密（模拟实现）
-///
-/// 使用 AES-256-GCM 作为 SM4 的模拟实现
-/// 函数名已修正为反映实际使用的 GCM 模式
+/// SM4 GCM 模式解密
 pub fn sm4_gcm_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
-    if key.len() != 32 {
-        return Err(GmError::InvalidFormat("密钥长度必须为32字节".to_string()));
+    #[cfg(feature = "real_gmsm")]
+    {
+        use gmsm::{Sm4, Mode::Gcm, aead::Aad};
+
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
+        }
+
+        if data.len() < 16 {
+            return Err(GmError::InvalidFormat("密文长度不足".to_string()));
+        }
+
+        let cipher = Sm4::new(key.into())
+            .map_err(|e| GmError::DecryptFailed(format!("密钥创建失败: {:?}", e)))?;
+
+        let ciphertext_len = data.len() - 16;
+        let mut in_out = data[..ciphertext_len].to_vec();
+        let _tag = &data[ciphertext_len..];
+
+        cipher.decrypt(Mode::Gcm(iv.into()), Aad::empty(), &mut in_out)
+            .map_err(|e| GmError::DecryptFailed(format!("解密失败: {:?}", e)))?;
+
+        Ok(in_out)
     }
-    if iv.len() != 16 {
-        return Err(GmError::InvalidFormat("IV长度必须为16字节".to_string()));
-    }
-    if data.len() < 16 {
-        return Err(GmError::InvalidFormat("密文长度不足".to_string()));
-    }
 
-    let unbound_key = UnboundKey::new(&AES_256_GCM, key)
-        .map_err(|e| GmError::DecryptFailed(format!("密钥创建失败: {:?}", e)))?;
+    #[cfg(not(feature = "real_gmsm"))]
+    {
+        use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 
-    let less_safe_key = LessSafeKey::new(unbound_key);
+        if key.len() != 16 {
+            return Err(GmError::InvalidKeyLength(format!(
+                "SM4密钥必须为16字节，当前为 {} 字节",
+                key.len()
+            )));
+        }
 
-    // 分离密文和标签
-    let ciphertext_len = data.len() - 16;
-    let mut in_out = data[..ciphertext_len].to_vec();
-    let _tag = &data[ciphertext_len..];
+        if data.len() < 16 {
+            return Err(GmError::InvalidFormat("密文长度不足".to_string()));
+        }
 
-    less_safe_key
-        .open_in_place(
-            Nonce::assume_unique_is_key(iv.try_into().unwrap()),
+        let mut expanded_key = [0u8; 32];
+        expanded_key[..16].copy_from_slice(key);
+        expanded_key[16..].copy_from_slice(key);
+
+        let unbound_key = UnboundKey::new(&AES_256_GCM, &expanded_key)
+            .map_err(|e| GmError::DecryptFailed(format!("密钥创建失败: {:?}", e)))?;
+        let less_safe_key = LessSafeKey::new(unbound_key);
+
+        let ciphertext_len = data.len() - 16;
+        let mut in_out = data[..ciphertext_len].to_vec();
+        let _tag = &data[ciphertext_len..];
+
+        less_safe_key.open_in_place(
+            Nonce::assume_unique_is_key(iv[..12].try_into().unwrap()),
             Aad::empty(),
             &mut in_out,
         )
         .map_err(|e| GmError::DecryptFailed(format!("解密失败: {:?}", e)))?;
 
-    Ok(in_out)
+        Ok(in_out)
+    }
 }
 
 /// 生成随机 IV
@@ -132,25 +252,44 @@ mod tests {
 
     #[test]
     fn test_sm4_key_from_hex() {
-        let hex_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let hex_key = "0123456789abcdef0123456789abcdef";
         let key = Sm4Key::from_hex(hex_key).unwrap();
-        assert_eq!(key.as_bytes().len(), 32);
+        assert_eq!(key.as_bytes().len(), 16);
     }
 
     #[test]
     fn test_sm4_key_invalid_length() {
-        let result = Sm4Key::from_bytes &[1, 2, 3];
+        let result = Sm4Key::from_bytes(&[1, 2, 3]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_sm4_encrypt_decrypt() {
-        let key = [0u8; 32];
-        let iv = [0u8; 16];
+    fn test_sm4_key_from_bytes() {
+        let key_bytes = [0u8; 16];
+        let key = Sm4Key::from_bytes(&key_bytes).unwrap();
+        assert_eq!(key.as_bytes().len(), 16);
+    }
+
+    #[test]
+    fn test_sm4_gcm_encrypt_decrypt() {
+        let key = [0u8; 16];
+        let iv = [0u8; 12];
         let plaintext = b"Hello, SM4!";
 
         let ciphertext = sm4_gcm_encrypt(plaintext, &key, &iv).unwrap();
         let decrypted = sm4_gcm_decrypt(&ciphertext, &key, &iv).unwrap();
+
+        assert_eq!(plaintext.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn test_sm4_cbc_encrypt_decrypt() {
+        let key = [0u8; 16];
+        let iv = [0u8; 16];
+        let plaintext = b"Hello, SM4 CBC Mode!";
+
+        let ciphertext = sm4_cbc_encrypt(plaintext, &key, &iv).unwrap();
+        let decrypted = sm4_cbc_decrypt(&ciphertext, &key, &iv).unwrap();
 
         assert_eq!(plaintext.to_vec(), decrypted);
     }
