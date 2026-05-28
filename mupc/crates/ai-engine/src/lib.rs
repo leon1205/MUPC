@@ -17,3 +17,4 @@ pub use error::AiEngineError;
 pub use config::{AiEngineConfig, LstmConfig, RlConfig, ModelType, QuantizationType, RlAlgorithm, OnlineUpdateConfig};
 pub use model_manager::{ModelManager, ModelStatus};
 pub use rknn_runtime::RknnRuntime;
+pub use online_updater::{OnlineUpdater, DataPoint};

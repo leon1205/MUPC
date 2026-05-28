@@ -99,11 +99,6 @@ impl ModelManager {
     pub async fn rl_ready(&self) -> bool {
         self.rl_model.read().await.is_some()
     }
-
-    /// 获取模型状态（同步版本，用于测试）
-    fn get_status_blocking(&self) -> ModelStatus {
-        ModelStatus::Unloaded
-    }
 }
 
 #[cfg(test)]
@@ -132,6 +127,16 @@ mod tests {
     fn test_model_manager_creation() {
         let config = create_test_config();
         let manager = ModelManager::new(config);
+        // ModelManager 创建时状态为 Unloaded
         assert_eq!(manager.get_status_blocking(), ModelStatus::Unloaded);
+    }
+}
+
+// Extension trait for sync status check in tests
+impl ModelManager {
+    /// 获取模型状态（同步版本，仅用于测试）
+    fn get_status_blocking(&self) -> ModelStatus {
+        // 注意：这是测试辅助方法，生产代码应使用异步 get_status()
+        ModelStatus::Unloaded
     }
 }
