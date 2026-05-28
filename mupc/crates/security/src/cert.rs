@@ -21,6 +21,11 @@ pub struct CertStore {
 }
 
 impl CertStore {
+    /// 创建证书存储
+    pub fn new() -> Self {
+        Self { certs: Vec::new() }
+    }
+
     /// 从 PEM 文件加载证书
     pub fn from_pem_file(path: &str) -> Result<Self> {
         #[cfg(feature = "real_gmsm")]
@@ -43,6 +48,20 @@ impl CertStore {
     /// 添加证书
     pub fn add_cert(&mut self, cert: Sm2Cert) {
         self.certs.push(cert);
+    }
+
+    /// 加载 CA 证书
+    pub fn load_ca_cert(&mut self, path: &str) -> Result<()> {
+        let cert = load_sm2_certificate(path)?;
+        self.certs.push(cert);
+        Ok(())
+    }
+
+    /// 加载客户端证书
+    pub fn load_client_cert(&mut self, path: &str) -> Result<()> {
+        let cert = load_sm2_certificate(path)?;
+        self.certs.push(cert);
+        Ok(())
     }
 
     /// 验证证书链
