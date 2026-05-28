@@ -12,9 +12,27 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 reqwest = "0.12"
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 parking_lot = "0.12"
+mupc-ai-engine = { path = "../ai-engine" }
+
+# 压缩解压支持
+flate2 = "1.0"
+tar = "0.4"
+zip = "2.0"
+lzma-rs = "0.3"
+regex = "1.0"
+
+# 签名验证（可选，通过 feature 启用）
+ed25519-dalek = { version = "2.0", optional = true }
+sm2 = { version = "0.3", optional = true }
+
+[features]
+default = []
+ed25519 = ["dep:ed25519-dalek"]
+sm2 = ["dep:sm2"]
 
 [dev-dependencies]
 tokio-test = "0.4"
