@@ -48,6 +48,30 @@ impl serde::Serialize for WirelessError {
 impl<'de> serde::Deserialize<'de> for WirelessError {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(WirelessError::ConnectionFailed(s))
+        Ok(deserialize_wireless_error(&s))
+    }
+}
+
+/// 根据 `Display` 输出的中文前缀反向匹配，恢复正确的错误变体。
+///
+/// 前缀列表与 `thiserror` 的 `#[error("...")]` 格式字符串一一对应。
+fn deserialize_wireless_error(s: &str) -> WirelessError {
+    if let Some(msg) = s.strip_prefix("连接建立失败: ") {
+        WirelessError::ConnectionFailed(msg.to_string())
+    } else if let Some(msg) = s.strip_prefix("连接已断开: ") {
+        WirelessError::Disconnected(msg.to_string())
+    } else if let Some(msg) = s.strip_prefix("发送数据失败: ") {
+        WirelessError::SendFailed(msg.to_string())
+    } else if let Some(msg) = s.strip_prefix("接收数据失败: ") {
+        WirelessError::RecvFailed(msg.to_string())
+    } else if let Some(msg) = s.strip_prefix("设备配对失败: ") {
+        WirelessError::PairingFailed(msg.to_string())
+    } else if let Some(msg) = s.strip_prefix("加密错误: ") {
+        WirelessError::EncryptionError(msg.to_string())
+    } else if let Some(msg) = s.strip_prefix("不支持的设备: ") {
+        WirelessError::UnsupportedDevice(msg.to_string())
+    } else {
+        // 无法匹配前缀时默认回退为 ConnectionFailed
+        WirelessError::ConnectionFailed(s.to_string())
     }
 }

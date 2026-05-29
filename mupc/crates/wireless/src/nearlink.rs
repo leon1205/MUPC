@@ -27,6 +27,7 @@ use crate::errors::WirelessError;
 ///
 /// 包含设备标识、信道选择、功率控制和接收增益等参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NearLinkConfig {
     /// 星闪设备节点 ID（唯一标识）
     pub device_node_id: String,
@@ -103,6 +104,7 @@ pub trait NearLinkDriver: Send + Sync {
 /// 默认的空实现（用于不需要星闪功能的场景）
 ///
 /// 所有操作返回 `UnsupportedDevice` 错误，表示星闪功能尚未启用。
+#[derive(Debug, Clone, Copy)]
 pub struct NoOpNearLinkDriver;
 
 #[async_trait]

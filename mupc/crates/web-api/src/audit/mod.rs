@@ -5,10 +5,13 @@
 //! 本模块定义了 Web 层专用的 `WebAuditEntry` 结构体，并提供了到
 //! `mupc_security::audit::AuditLogEntry` 格式的转换。
 //!
-//! 实际存储由 `mupc_security::audit::AuditLogger` 负责。
+//! 实际存储由 `mupc_security::audit::AuditLogger` 负责，
+//! 通过 `tokio::sync::Mutex` 保证并发安全。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use mupc_security::audit::{AuditEventType, AuditSeverity, AuditLogEntry};
 
 /// 审计日志条目（Web 层专用格式）
@@ -79,9 +82,10 @@ impl WebAuditEntry {
 
 /// 审计日志记录器
 ///
-/// 包装 `mupc_security::audit::AuditLogger`，提供 Web 层专用的便捷接口。
+/// 包装 `mupc_security::audit::AuditLogger`，通过 `Arc<tokio::sync::Mutex<>>`
+/// 保证并发安全，提供 Web 层专用的便捷接口。
 pub struct AuditLogger {
-    inner: mupc_security::audit::AuditLogger,
+    inner: Arc<Mutex<mupc_security::audit::AuditLogger>>,
 }
 
 impl AuditLogger {
@@ -91,31 +95,41 @@ impl AuditLogger {
     pub fn new(log_dir: &str) -> Result<Self, String> {
         let inner = mupc_security::audit::AuditLogger::new(log_dir)
             .map_err(|e| format!("创建审计日志记录器失败: {}", e))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner)),
+        })
     }
 
-    /// 记录一条审计日志
+    /// 记录一条审计日志（异步版本）
     ///
     /// 将 `WebAuditEntry` 映射到 security 的日志格式并写入 JSONL 文件。
+    /// 通过 `tokio::sync::Mutex` 保证并发安全。
     pub async fn log(&self, entry: WebAuditEntry) -> Result<(), String> {
-        // 注意：security::AuditLogger::log 需要 &mut self
-        // 但由于 Web 层并发访问，这里使用内部可变性策略：
-        // 直接调用 security 的 log，内部状态通过代码控制
-        //
-        // 实际使用中，AuditLogger 应该被 Arc<Mutex<>> 包裹使用
-        tracing::warn!(
-            "审计日志记录需要通过 Arc<Mutex<AuditLogger>> 调用，直接调用暂不支持。条目: {:?}",
-            entry.id
-        );
-        Err("AuditLogger 需要可变引用，请使用 Arc<Mutex<AuditLogger>> 包装".to_string())
+        let security_entry = entry.to_security_entry();
+        let mut guard = self.inner.lock().await;
+        guard
+            .log(
+                security_entry.event_type,
+                security_entry.severity,
+                &security_entry.source,
+                &security_entry.message,
+                &security_entry.operator,
+                &security_entry.ip_address,
+            )
+            .map_err(|e| format!("审计日志写入失败: {}", e))
     }
 
-    /// 记录一条审计日志（可变引用版本）
+    /// 记录一条审计日志（同步版本，非阻塞）
     ///
-    /// 此方法需要 `&mut self`，适用于单线程或已加锁的上下文。
-    pub fn log_sync(&mut self, entry: WebAuditEntry) -> Result<(), String> {
+    /// 使用 `try_lock()` 避免在异步上下文中阻塞。
+    /// 如果当前无法获取锁，返回错误。
+    pub fn log_sync(&self, entry: WebAuditEntry) -> Result<(), String> {
         let security_entry = entry.to_security_entry();
-        self.inner
+        let mut guard = self
+            .inner
+            .try_lock()
+            .map_err(|_| "审计日志锁定失败，请稍后重试".to_string())?;
+        guard
             .log(
                 security_entry.event_type,
                 security_entry.severity,
@@ -138,10 +152,12 @@ impl AuditLogger {
         end: DateTime<Utc>,
         user: Option<&str>,
     ) -> Result<Vec<WebAuditEntry>, String> {
-        let entries = self
-            .inner
+        let guard = self.inner.lock().await;
+        let entries = guard
             .query(start, end)
             .map_err(|e| format!("审计日志查询失败: {}", e))?;
+        // 在锁外处理结果，避免长时间持锁
+        drop(guard);
 
         let mut results: Vec<WebAuditEntry> = entries
             .into_iter()
@@ -158,31 +174,31 @@ impl AuditLogger {
 
     /// 导出审计日志为 CSV 文件
     ///
-    /// 委托到 security::AuditLogger::export，返回导出的条目数量。
+    /// 委托到 security::AuditLogger::export，直接使用返回的条目数量，
+    /// 避免重复全量 I/O。
     pub async fn export_csv(&self, output_path: &str) -> Result<usize, String> {
-        self.inner
+        let guard = self.inner.lock().await;
+        guard
             .export(output_path)
-            .map_err(|e| format!("审计日志导出失败: {}", e))?;
-
-        // export 不返回数量，重新查询来计算
-        let entries = self
-            .inner
-            .query(DateTime::UNIX_EPOCH, Utc::now())
-            .map_err(|e| format!("审计日志导出计数查询失败: {}", e))?;
-
-        Ok(entries.len())
+            .map_err(|e| format!("审计日志导出失败: {}", e))
     }
 
     /// 验证审计日志哈希链完整性
+    ///
+    /// 使用 `blocking_lock()` 从同步上下文中获取锁。
     pub fn verify_chain(&self) -> Result<bool, String> {
-        self.inner
+        let guard = self.inner.blocking_lock();
+        guard
             .verify_chain()
             .map_err(|e| format!("审计日志哈希链验证失败: {}", e))
     }
 
     /// 刷新审计日志到磁盘
-    pub fn flush(&mut self) -> Result<(), String> {
-        self.inner
+    ///
+    /// 使用 `blocking_lock()` 从同步上下文中获取锁。
+    pub fn flush(&self) -> Result<(), String> {
+        let mut guard = self.inner.blocking_lock();
+        guard
             .flush()
             .map_err(|e| format!("审计日志刷盘失败: {}", e))
     }
@@ -196,14 +212,9 @@ impl AuditLogger {
         Ok(0)
     }
 
-    /// 获取内部 security::AuditLogger 的引用
-    pub fn inner(&self) -> &mupc_security::audit::AuditLogger {
-        &self.inner
-    }
-
-    /// 获取内部 security::AuditLogger 的可变引用
-    pub fn inner_mut(&mut self) -> &mut mupc_security::audit::AuditLogger {
-        &mut self.inner
+    /// 获取 Arc 克隆用于跨线程共享
+    pub fn arc_clone(&self) -> Arc<Mutex<mupc_security::audit::AuditLogger>> {
+        Arc::clone(&self.inner)
     }
 }
 

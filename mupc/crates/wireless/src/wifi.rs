@@ -52,6 +52,7 @@ pub struct WiFiScanResult {
 
 /// WiFi 通信配置参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WiFiConfig {
     /// 网络 SSID
     pub ssid: String,
@@ -128,6 +129,7 @@ pub trait WiFiDriver: Send + Sync {
 /// 默认的空实现（用于不需要 WiFi 功能的场景）
 ///
 /// 所有操作返回 `UnsupportedDevice` 错误，表示 WiFi 功能尚未启用。
+#[derive(Debug, Clone, Copy)]
 pub struct NoOpWiFiDriver;
 
 #[async_trait]

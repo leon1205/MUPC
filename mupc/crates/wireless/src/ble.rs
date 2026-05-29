@@ -36,6 +36,7 @@ pub struct BleScanResult {
 
 /// BLE 通信配置参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BleConfig {
     /// 目标设备名称（用于扫描过滤）
     pub device_name: String,
@@ -115,6 +116,7 @@ pub trait BleDriver: Send + Sync {
 /// 默认的空实现（用于不需要 BLE 功能的场景）
 ///
 /// 所有操作返回 `UnsupportedDevice` 错误，表示 BLE 功能尚未启用。
+#[derive(Debug, Clone, Copy)]
 pub struct NoOpBleDriver;
 
 #[async_trait]

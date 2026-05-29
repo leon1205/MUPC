@@ -321,11 +321,25 @@ impl AuditLogger {
 
                 let stored_chain_hash = entry["sm3_chain_hash"]
                     .as_str()
-                    .unwrap_or("")
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "审计日志条目缺少 sm3_chain_hash 字段: 文件={}, 行={}",
+                            file_path.display(),
+                            line_no + 1
+                        );
+                        ""
+                    })
                     .to_string();
                 let stored_prev_hash = entry["prev_sm3_hash"]
                     .as_str()
-                    .unwrap_or("")
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "审计日志条目缺少 prev_sm3_hash 字段: 文件={}, 行={}",
+                            file_path.display(),
+                            line_no + 1
+                        );
+                        ""
+                    })
                     .to_string();
 
                 // 验证前驱哈希
@@ -445,7 +459,9 @@ impl AuditLogger {
     ///
     /// CSV 包含以下列：
     /// sequence, timestamp, event_type, severity, source, message, operator, ip_address, sm3_chain_hash, prev_sm3_hash
-    pub fn export(&self, output_path: &str) -> Result<(), SecurityError> {
+    ///
+    /// 返回导出的条目数量。
+    pub fn export(&self, output_path: &str) -> Result<usize, SecurityError> {
         let files = self.list_audit_files()?;
         let output_path = Path::new(output_path);
 
@@ -510,7 +526,7 @@ impl AuditLogger {
             count
         );
 
-        Ok(())
+        Ok(count)
     }
 
     /// 获取当前序列号
@@ -675,11 +691,12 @@ fn compute_genesis_hash() -> String {
 fn extract_date_from_filename(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     if name.starts_with("audit_") && name.ends_with(".jsonl") {
-        let date_part = &name[6..16]; // "YYYY-MM-DD"
-        Some(date_part.to_string())
-    } else {
-        None
+        let inner = &name[6..name.len() - 6]; // "audit_" 前缀 + ".jsonl" 后缀 = 11 字节
+        if inner.len() == 10 && inner.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            return Some(inner.to_string());
+        }
     }
+    None
 }
 
 /// CSV 字段转义：如果包含逗号、引号或换行符，用引号包裹

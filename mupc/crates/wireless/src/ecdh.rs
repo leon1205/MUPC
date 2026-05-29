@@ -16,7 +16,7 @@
 //! - 会话密钥派生使用 HKDF-SHA256
 
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Deserializer, Serializer};
 
 use crate::errors::WirelessError;
 
@@ -31,20 +31,40 @@ const AES256_KEY_LEN: usize = 32;
 ///
 /// 包含 P-256 椭圆曲线上的私钥和对应的公钥。
 /// 私钥为 32 字节，公钥为 65 字节（未压缩格式 04||x||y）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # 安全注意事项
+///
+/// - 自定义 `Serialize` 仅序列化公钥，私钥不会离开进程
+/// - 自定义 `Deserialize` 仅恢复公钥，私钥字段为空（反序列化后的密钥对不可用于 ECDH）
+#[derive(Debug, Clone)]
 pub struct EcdhKeyPair {
     /// 私钥（32 字节，P-256 曲线）
-    pub private_key: Vec<u8>,
+    private_key: Vec<u8>,
     /// 公钥（65 字节，未压缩格式 04 || x || y）
     pub public_key: Vec<u8>,
 }
 
-impl Default for EcdhKeyPair {
-    fn default() -> Self {
-        Self {
-            private_key: vec![0u8; P256_PRIVATE_KEY_LEN],
-            public_key: vec![0u8; P256_PUBLIC_KEY_LEN],
+impl Serialize for EcdhKeyPair {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EcdhKeyPair", 1)?;
+        state.serialize_field("public_key", &self.public_key)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EcdhKeyPair {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Helper {
+            public_key: Vec<u8>,
         }
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(EcdhKeyPair {
+            // 私钥不持久化，反序列化后不可用于 ECDH 派生操作
+            private_key: Vec::new(),
+            public_key: helper.public_key,
+        })
     }
 }
 
@@ -76,6 +96,9 @@ impl EcdhKeyPair {
     }
 
     /// 从对方公钥派生共享密钥
+    ///
+    /// ⚠️ 占位实现 - 非加密安全：当前使用 XOR 混淆替代真实 ECDH 计算。
+    /// Phase 2+ 必须替换为 `p256::ecdh::diffie_hellman()` 实际调用。
     ///
     /// 使用己方私钥与对方公钥进行 ECDH 计算，
     /// 得到双方一致的共享密钥。
@@ -115,9 +138,8 @@ impl EcdhKeyPair {
 
     /// 从私钥计算公钥（P-256 未压缩格式）
     ///
-    /// # Phase 2+ 集成
-    ///
-    /// 替换为实际 `p256::SecretKey` + `p256::PublicKey` 计算。
+    /// ⚠️ 占位实现 - 非加密安全：当前使用简单的线性映射替代真实椭圆曲线点乘。
+    /// Phase 2+ 必须替换为实际 `p256::SecretKey` + `p256::PublicKey` 计算。
     fn derive_public_key_from_private(private_key: &[u8]) -> Result<Vec<u8>, WirelessError> {
         if private_key.len() != P256_PRIVATE_KEY_LEN {
             return Err(WirelessError::EncryptionError(format!(
@@ -157,10 +179,12 @@ impl EcdhKeyPair {
 /// # 返回
 /// - `Ok(Vec<u8>)` AES-256 会话密钥（32 字节）
 pub fn derive_aes_key(shared_secret: &[u8]) -> Result<Vec<u8>, WirelessError> {
-    if shared_secret.len() < 16 {
-        return Err(WirelessError::EncryptionError(
-            "共享密钥长度不足，至少需要 16 字节".into(),
-        ));
+    if shared_secret.len() != P256_PRIVATE_KEY_LEN {
+        return Err(WirelessError::EncryptionError(format!(
+            "共享密钥长度无效: 期望 {} 字节，实际 {} 字节",
+            P256_PRIVATE_KEY_LEN,
+            shared_secret.len()
+        )));
     }
 
     // Phase 2+ 集成：替换为 HKDF-SHA256 实际实现
@@ -205,7 +229,8 @@ mod tests {
             .derive_shared_secret(&alice.public_key)
             .expect("Bob 派生共享密钥失败");
 
-        // Phase 2+: 双方共享密钥应当一致（当前占位实现不保证）
+        // ⚠️ Phase 2+ 必须验证: 替换为真实 ECDH 实现后，双方共享密钥应当一致
+        // assert_eq!(alice_shared, bob_shared);
         assert_eq!(alice_shared.len(), 32);
         assert_eq!(bob_shared.len(), 32);
     }
@@ -233,12 +258,5 @@ mod tests {
         let invalid_public = vec![0u8; 32]; // 错误的长度
         let result = keypair.derive_shared_secret(&invalid_public);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ecdh_keypair_default() {
-        let default_kp = EcdhKeyPair::default();
-        assert_eq!(default_kp.private_key.len(), P256_PRIVATE_KEY_LEN);
-        assert_eq!(default_kp.public_key.len(), P256_PUBLIC_KEY_LEN);
     }
 }
