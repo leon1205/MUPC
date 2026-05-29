@@ -55,6 +55,10 @@ impl FaultRecorderImpl {
         let conn = Connection::open(db_path)
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
+        // 启用 WAL 模式提升并发读写性能
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS fault_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,10 +67,23 @@ impl FaultRecorderImpl {
                 over_voltage REAL,
                 under_voltage REAL,
                 over_current REAL,
-                frequency_abnormal REAL
+                frequency_abnormal REAL,
+                waveform_path TEXT,
+                sample_rate INTEGER,
+                pre_trigger_ms INTEGER,
+                post_trigger_ms INTEGER,
+                channel_mask INTEGER,
+                trigger_type TEXT,
+                trigger_threshold REAL,
+                file_size_bytes INTEGER,
+                checksum TEXT,
+                exported INTEGER DEFAULT 0
             )",
             [],
         ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+
+        // 对已存在的旧表执行 ALTER TABLE 添加新列（忽略"列已存在"错误）
+        Self::migrate_waveform_columns(&conn);
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trigger_time ON fault_records(trigger_time)",
@@ -82,6 +99,26 @@ impl FaultRecorderImpl {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
         })
+    }
+
+    /// 为已存在的旧表迁移添加波形元数据列（幂等：忽略"duplicate column"错误）
+    fn migrate_waveform_columns(conn: &Connection) {
+        let columns = [
+            "ALTER TABLE fault_records ADD COLUMN waveform_path TEXT",
+            "ALTER TABLE fault_records ADD COLUMN sample_rate INTEGER",
+            "ALTER TABLE fault_records ADD COLUMN pre_trigger_ms INTEGER",
+            "ALTER TABLE fault_records ADD COLUMN post_trigger_ms INTEGER",
+            "ALTER TABLE fault_records ADD COLUMN channel_mask INTEGER",
+            "ALTER TABLE fault_records ADD COLUMN trigger_type TEXT",
+            "ALTER TABLE fault_records ADD COLUMN trigger_threshold REAL",
+            "ALTER TABLE fault_records ADD COLUMN file_size_bytes INTEGER",
+            "ALTER TABLE fault_records ADD COLUMN checksum TEXT",
+            "ALTER TABLE fault_records ADD COLUMN exported INTEGER DEFAULT 0",
+        ];
+        for sql in columns {
+            // 忽略"duplicate column name"错误（新表已通过 CREATE TABLE 包含全部列）
+            let _ = conn.execute(sql, []);
+        }
     }
 
     fn cleanup_old_records_impl(conn: &Connection, retention_days: i64) -> Result<usize, DataProcessingError> {
@@ -102,6 +139,10 @@ impl FaultRecorderImpl {
         let conn = Connection::open_in_memory()
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
+        // 启用 WAL 模式
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+
         conn.execute(
             "CREATE TABLE fault_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +151,17 @@ impl FaultRecorderImpl {
                 over_voltage REAL,
                 under_voltage REAL,
                 over_current REAL,
-                frequency_abnormal REAL
+                frequency_abnormal REAL,
+                waveform_path TEXT,
+                sample_rate INTEGER,
+                pre_trigger_ms INTEGER,
+                post_trigger_ms INTEGER,
+                channel_mask INTEGER,
+                trigger_type TEXT,
+                trigger_threshold REAL,
+                file_size_bytes INTEGER,
+                checksum TEXT,
+                exported INTEGER DEFAULT 0
             )",
             [],
         ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
