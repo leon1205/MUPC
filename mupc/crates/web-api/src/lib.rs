@@ -5,6 +5,10 @@
 pub mod routes;
 pub mod auth;
 pub mod ws;
+pub mod sse;
+pub mod audit;
 
 pub use auth::{AuthHandler, SessionManager};
 pub use ws::WsLogStreamer;
+pub use sse::SsePushService;
+pub use audit::AuditLogger;
