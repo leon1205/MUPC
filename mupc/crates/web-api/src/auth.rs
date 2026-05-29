@@ -6,7 +6,7 @@ use axum::{
     extract::{State, rejection::JsonRejection, FromRequestParts},
     http::{StatusCode, HeaderMap, HeaderName, HeaderValue},
     response::Json,
-    routing::post,
+    routing::{post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -30,9 +30,23 @@ pub struct LoginRequest {
 /// 登录响应
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginResponse {
+    pub status: String,
     pub session_id: String,
     pub expires_at: String,
+    pub user: LoginUser,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LoginUser {
     pub username: String,
+    pub role: String,
+}
+
+/// 修改密码请求
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasswordChangeRequest {
+    pub old_password: String,
+    pub new_password: String,
 }
 
 /// Session 信息
@@ -110,6 +124,11 @@ impl SessionManager {
         Ok(session.clone())
     }
 
+    /// 获取默认管理员密码（用于密码修改验证）
+    pub fn default_admin_password(&self) -> &str {
+        &self.default_admin_password
+    }
+
     /// 登出
     pub async fn logout(&self, session_id: &str) -> Result<(), MupcError> {
         let mut sessions = self.sessions.write().await;
@@ -151,16 +170,71 @@ async fn login(
         })?;
 
     Ok(Json(LoginResponse {
+        status: "ok".to_string(),
         session_id: session.id,
         expires_at: session.expires_at.to_rfc3339(),
-        username: session.username,
+        user: LoginUser {
+            username: session.username.clone(),
+            role: "operator".to_string(),
+        },
     }))
+}
+
+/// POST /api/v1/auth/logout - 退出登录
+async fn logout(
+    State(handler): State<AuthHandler>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session_id = headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    handler
+        .session_manager()
+        .logout(session_id)
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    Ok(Json(serde_json::json!({ "status": "ok" })))
+}
+
+/// PUT /api/v1/auth/password - 修改密码
+async fn change_password(
+    State(handler): State<AuthHandler>,
+    headers: HeaderMap,
+    Json(req): Json<PasswordChangeRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let _session_id = headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    // 密码规则校验：8-20 位，包含字母和数字
+    if req.new_password.len() < 8 || req.new_password.len() > 20 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let has_letter = req.new_password.chars().any(|c| c.is_alphabetic());
+    let has_digit = req.new_password.chars().any(|c| c.is_ascii_digit());
+    if !has_letter || !has_digit {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // 验证旧密码
+    if req.old_password != handler.session_manager.default_admin_password() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Phase 2+ 实现真实密码存储和更新
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
 /// 创建认证路由
 pub fn create_router(handler: AuthHandler) -> Router {
     Router::new()
         .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/password", put(change_password))
         .with_state(handler)
 }
 

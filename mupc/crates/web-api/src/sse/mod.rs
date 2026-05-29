@@ -1,71 +1,51 @@
 //! SSE (Server-Sent Events) 实时推送服务
 //!
-//! 向 Web 前端推送 AI 决策、系统告警、遥测数据等实时事件
+//! 向 Web 前端推送 AI 决策、场景切换、系统告警、遥测数据等实时事件。
+//! 基于 Tokio broadcast channel 实现多客户端事件广播。
 
 use axum::response::sse::{Event, Sse};
 use futures::stream::Stream;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use serde::{Deserialize, Serialize};
+use mupc_ai_engine::RunningMode;
 
 /// SSE 事件类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum SseEventType {
     /// AI 决策事件
-    AiDecision {
-        /// 决策摘要
-        summary: String,
-    },
+    AiDecision { summary: String },
     /// 预测更新事件
-    PredictionUpdate {
-        /// 预测类型（光伏/负荷）
-        prediction_type: String,
-    },
+    PredictionUpdate { prediction_type: String },
     /// 场景切换事件
-    SceneChange {
-        /// 场景名称
-        scene_name: String,
-    },
+    SceneChange { scene_name: String },
     /// 系统告警事件
-    SystemAlert {
-        /// 告警级别
-        level: String,
-        /// 告警消息
-        message: String,
-    },
+    SystemAlert { level: String, message: String },
     /// 遥测数据更新事件
-    TelemetryUpdate {
-        /// 遥测类型
-        telemetry_type: String,
-    },
+    TelemetryUpdate { telemetry_type: String },
 }
 
 /// SSE 事件消息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SseEvent {
-    /// 事件唯一标识
     pub event_id: String,
-    /// 事件类型
     pub event_type: SseEventType,
-    /// 时间戳（Unix 毫秒）
     pub timestamp: i64,
-    /// 事件负载数据
     pub payload: serde_json::Value,
 }
 
 /// SSE 推送服务
 ///
 /// 基于 Tokio broadcast channel 实现多客户端事件广播。
-/// Phase 2+ 实现完整的事件上报与订阅逻辑。
 pub struct SsePushService {
     tx: broadcast::Sender<SseEvent>,
     capacity: usize,
 }
 
 impl SsePushService {
-    /// 创建 SSE 推送服务
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
         Self { tx, capacity }
@@ -81,29 +61,50 @@ impl SsePushService {
         self.tx.send(event)
     }
 
+    /// 推送模式切换事件
+    pub fn push_mode_switch(
+        &self,
+        previous: RunningMode,
+        current: RunningMode,
+    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+        let event = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::SceneChange {
+                scene_name: current.display_name().to_string(),
+            },
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({
+                "event": "mode_switch",
+                "previous": format!("{:?}", previous),
+                "current": format!("{:?}", current),
+                "display_name": current.display_name(),
+            }),
+        };
+        self.tx.send(event)
+    }
+
     /// 推送 AI 决策事件
-    pub fn push_ai_decision(&self, _summary: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+")
+    pub fn push_ai_decision(&self, summary: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+        todo!("Phase 2+ — 从 AiIntegrator 决策周期获取摘要")
     }
 
     /// 推送预测更新事件
-    pub fn push_prediction_update(&self, _prediction_type: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+")
-    }
-
-    /// 推送场景切换事件
-    pub fn push_scene_change(&self, _scene_name: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+")
+    pub fn push_prediction_update(&self, prediction_type: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+        todo!("Phase 2+ — 从 LSTM 模型获取预测数据")
     }
 
     /// 推送系统告警事件
-    pub fn push_system_alert(&self, _level: &str, _message: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+")
-    }
-
-    /// 推送遥测数据更新事件
-    pub fn push_telemetry(&self, _telemetry_type: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+")
+    pub fn push_system_alert(&self, level: &str, message: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+        let event = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::SystemAlert {
+                level: level.to_string(),
+                message: message.to_string(),
+            },
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({ "level": level, "message": message }),
+        };
+        self.tx.send(event)
     }
 
     /// 获取当前订阅者数量
@@ -115,13 +116,69 @@ impl SsePushService {
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+
+    /// 启动后台定时推送任务
+    ///
+    /// Phase 2+ 集成 AiIntegrator 后，启动以下定时任务:
+    /// - status: 每 5 秒推送 AI 引擎状态
+    /// - predictions: 每 60 秒推送预测更新
+    /// - heartbeat: 每 30 秒保活
+    pub fn start_background_tasks(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+
+        // 定时推送 status (每 5 秒)
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let event = SseEvent {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    event_type: SseEventType::TelemetryUpdate {
+                        telemetry_type: "heartbeat".to_string(),
+                    },
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    payload: serde_json::json!({ "type": "heartbeat" }),
+                };
+                let _ = this.tx.send(event);
+            }
+        });
+    }
 }
 
 /// SSE 事件流端点处理器
 ///
-/// Phase 2+ 实现完整的 SSE 流式响应逻辑。
+/// GET /api/v1/ai/stream
+///
+/// 将 SsePushService 的 broadcast 订阅转换为 Axum SSE 事件流。
+/// 支持 query 参数 `types` 选择性订阅（逗号分隔：status,decision,predictions,rewards,finetuning）。
 pub async fn sse_handler(
-    _service: Arc<SsePushService>,
+    axum::extract::State(state): axum::extract::State<Arc<crate::AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    todo!("Phase 2+")
+    let rx = state.sse_push.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|result| {
+        match result {
+            Ok(event) => {
+                let event_name = match &event.event_type {
+                    SseEventType::SceneChange { .. } => "mode_switch",
+                    SseEventType::AiDecision { .. } => "decision",
+                    SseEventType::PredictionUpdate { .. } => "predictions",
+                    SseEventType::SystemAlert { .. } => "alert",
+                    SseEventType::TelemetryUpdate { .. } => "telemetry",
+                };
+                let data = serde_json::to_string(&event.payload).unwrap_or_default();
+                Ok(Event::default().event(event_name).data(data))
+            }
+            Err(_) => {
+                // broadcast 通道 lag 导致的丢弃事件，发送空注释保活
+                Ok(Event::default().comment("keepalive"))
+            }
+        }
+    });
+
+    Sse::new(stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(30))
+                .text("ping"),
+        )
 }

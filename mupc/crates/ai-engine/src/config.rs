@@ -10,7 +10,7 @@ pub struct AiEngineConfig {
     pub rl: RlConfig,
     pub online_update: OnlineUpdateConfig,
     pub fusion: FusionConfig,
-    pub scene_classifier: SceneClassifierConfig,
+    pub mode: ModeConfig,
     pub action_constraint: ActionConstraintConfig,
     pub reward_weights: SceneWeights,
     pub npu: NpuConfig,
@@ -23,7 +23,7 @@ impl Default for AiEngineConfig {
             rl: RlConfig::default(),
             online_update: OnlineUpdateConfig::default(),
             fusion: FusionConfig::default(),
-            scene_classifier: SceneClassifierConfig::default(),
+            mode: ModeConfig::default(),
             action_constraint: ActionConstraintConfig::default(),
             reward_weights: SceneWeights::default(),
             npu: NpuConfig::default(),
@@ -128,20 +128,30 @@ impl Default for FusionConfig {
     }
 }
 
-/// 场景分类器配置
+/// 模式选择配置（v2.0 替代 SceneClassifierConfig）
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SceneClassifierConfig {
-    pub classification_period_secs: u64,
-    pub min_confidence: f64,
-    pub oscillation_lock_minutes: u32,
+pub struct ModeConfig {
+    /// 系统启动时的默认模式
+    #[serde(default = "default_mode_name")]
+    pub default_mode: String,
+    /// 模式持久化文件路径
+    #[serde(default = "default_mode_persist_path")]
+    pub persist_path: String,
 }
 
-impl Default for SceneClassifierConfig {
+fn default_mode_name() -> String {
+    "AgriculturalIrrigation".to_string()
+}
+
+fn default_mode_persist_path() -> String {
+    "/var/lib/mupc/current_mode".to_string()
+}
+
+impl Default for ModeConfig {
     fn default() -> Self {
         Self {
-            classification_period_secs: 60,
-            min_confidence: 0.6,
-            oscillation_lock_minutes: 30,
+            default_mode: default_mode_name(),
+            persist_path: default_mode_persist_path(),
         }
     }
 }

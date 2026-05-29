@@ -2,9 +2,10 @@
 //!
 //! 统一调度 LSTM 预测和 RL 决策模型
 
-use crate::config::AiEngineConfig;
+use crate::config::{AiEngineConfig, ModeConfig};
 use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput};
+use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::rl_model::{ActionOutput, RLModel, SystemState};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -20,23 +21,34 @@ pub enum ModelStatus {
 
 /// 模型管理器
 ///
-/// 统一管理 LSTM 预测和 RL 决策模型
+/// 统一管理 LSTM 预测、RL 决策模型和运行场景选择
 /// 提供线程安全的异步访问接口
 pub struct ModelManager {
     config: AiEngineConfig,
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
     rl_model: Arc<RwLock<Option<RLModel>>>,
     status: Arc<RwLock<ModelStatus>>,
+    /// v2.0: 运行场景选择器（互斥保证）
+    mode_selector: Arc<ModeSelector>,
 }
 
 impl ModelManager {
     /// 创建模型管理器
     pub fn new(config: AiEngineConfig) -> Self {
+        let initial_mode = parse_initial_mode(&config.mode);
+        let persist_path = if config.mode.persist_path.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&config.mode.persist_path))
+        };
+        let mode_selector = Arc::new(ModeSelector::new(initial_mode, persist_path));
+
         Self {
             config,
             lstm_model: Arc::new(RwLock::new(None)),
             rl_model: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
+            mode_selector,
         }
     }
 
@@ -97,12 +109,37 @@ impl ModelManager {
     pub async fn rl_ready(&self) -> bool {
         self.rl_model.read().await.is_some()
     }
+
+    /// 获取模式选择器引用
+    pub fn mode_selector(&self) -> &Arc<ModeSelector> {
+        &self.mode_selector
+    }
+
+    /// 获取当前运行场景
+    pub fn current_mode(&self) -> RunningMode {
+        self.mode_selector.current()
+    }
+
+    /// 切换运行场景
+    pub async fn switch_mode(
+        &self,
+        new_mode: RunningMode,
+        source: SwitchSource,
+    ) -> Result<RunningMode, AiEngineError> {
+        self.mode_selector.switch(new_mode, source).await
+    }
+}
+
+/// 从配置解析初始运行模式
+fn parse_initial_mode(config: &ModeConfig) -> RunningMode {
+    crate::mode_selector::parse_mode_name(&config.default_mode)
+        .unwrap_or(RunningMode::AgriculturalIrrigation)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LstmConfig, OnlineUpdateConfig, RlAlgorithm, RlConfig};
+    use crate::config::{LstmConfig, ModeConfig, OnlineUpdateConfig, RlAlgorithm, RlConfig};
 
     fn create_test_config() -> AiEngineConfig {
         AiEngineConfig {
@@ -118,6 +155,7 @@ mod tests {
                 quantization: crate::config::QuantizationType::INT8,
             },
             online_update: OnlineUpdateConfig::default(),
+            mode: ModeConfig::default(),
             ..Default::default()
         }
     }

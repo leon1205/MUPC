@@ -20,15 +20,19 @@ pub struct SystemStatus {
     pub uptime_secs: u64,
     pub cpu_temperature: Option<f64>,
     pub memory_usage: Option<f64>,
-    pub connections: ConnectionStatus,
+    pub iec104_status: String,
+    pub intercore_status: String,
+    pub ai_engine_status: String,
+    pub strategy_mode: String,
+    pub recent_alarms: Vec<AlarmEntry>,
 }
 
-/// 连接状态
+/// 告警条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionStatus {
-    pub iec104_connected: bool,
-    pub iec104_count: usize,
-    pub intercore_connected: bool,
+pub struct AlarmEntry {
+    pub time: String,
+    pub level: String,
+    pub message: String,
 }
 
 /// 状态处理器
@@ -52,13 +56,13 @@ impl StatusHandler {
             firmware_version: env!("CARGO_PKG_VERSION").to_string(),
             build_time: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: uptime,
-            cpu_temperature: None, // TODO: 从系统获取
-            memory_usage: None, // TODO: 从系统获取
-            connections: ConnectionStatus {
-                iec104_connected: false, // TODO: 从 gateway 获取
-                iec104_count: 0,
-                intercore_connected: false, // TODO: 从 intercore 获取
-            },
+            cpu_temperature: None,
+            memory_usage: None,
+            iec104_status: "unknown".to_string(),
+            intercore_status: "unknown".to_string(),
+            ai_engine_status: "unknown".to_string(),
+            strategy_mode: "unknown".to_string(),
+            recent_alarms: Vec::new(),
         })
     }
 }

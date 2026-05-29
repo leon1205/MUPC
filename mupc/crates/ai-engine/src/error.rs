@@ -34,8 +34,8 @@ pub enum AiEngineError {
     #[error("数据融合失败: {0}")]
     FusionFailed(String),
 
-    #[error("场景分类失败: {0}")]
-    SceneClassificationFailed(String),
+    #[error("模式切换失败: {0}")]
+    ModeSwitchFailed(String),
 
     #[error("动作校验失败: {0}")]
     ActionValidationFailed(String),

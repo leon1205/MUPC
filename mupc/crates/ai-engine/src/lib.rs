@@ -8,6 +8,7 @@
 pub mod config;
 pub mod error;
 pub mod lstm_model;
+pub mod mode_selector;
 pub mod model_manager;
 pub mod online_updater;
 pub mod rknn_runtime;
@@ -16,11 +17,13 @@ pub mod rknn_types;
 pub mod rl_model;
 
 pub use config::{
-    ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModelType, NpuConfig,
-    OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig, SceneClassifierConfig,
-    SceneWeights,
+    ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModeConfig, ModelType,
+    NpuConfig, OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig, SceneWeights,
 };
 pub use error::AiEngineError;
+pub use mode_selector::{
+    parse_mode_name, ModeSelector, ModeSwitchEvent, RunningMode, SwitchSource,
+};
 pub use model_manager::{ModelManager, ModelStatus};
 pub use online_updater::{DataPoint, OnlineUpdater};
 pub use rknn_runtime::RknnRuntime;

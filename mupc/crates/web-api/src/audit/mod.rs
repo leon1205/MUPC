@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 use mupc_security::audit::{AuditEventType, AuditSeverity, AuditLogEntry};
 
 /// 审计日志条目（Web 层专用格式）
@@ -215,6 +216,42 @@ impl AuditLogger {
     /// 获取 Arc 克隆用于跨线程共享
     pub fn arc_clone(&self) -> Arc<Mutex<mupc_security::audit::AuditLogger>> {
         Arc::clone(&self.inner)
+    }
+
+    /// 便捷方法：记录模式切换等简单操作（同步非阻塞）
+    ///
+    /// 用于模式切换、权重修改等操作的即时审计记录。
+    pub fn log_action(
+        &self,
+        operator: &str,
+        action: &str,
+        detail: &str,
+        result: &str,
+    ) {
+        let entry = WebAuditEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            user: operator.to_string(),
+            role: String::new(),
+            action: action.to_string(),
+            resource: "/api/v1/mode".to_string(),
+            method: "PUT".to_string(),
+            status_code: if result == "ok" { 200 } else { 500 },
+            ip_address: "127.0.0.1".to_string(),
+            user_agent: String::new(),
+        };
+        let _ = self.log_sync(entry);
+    }
+
+    /// 创建空操作审计记录器（测试用）
+    pub fn new_noop() -> Self {
+        // 使用临时目录避免对生产日志产生影响
+        let tmp = std::env::temp_dir().join(format!("mupc_audit_test_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&tmp);
+        Self::new(&tmp.to_string_lossy()).unwrap_or_else(|_| {
+            // 兜底：创建一个无法写入但不会 panic 的记录器
+            panic!("无法创建测试审计记录器")
+        })
     }
 }
 

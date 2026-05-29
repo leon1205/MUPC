@@ -20,12 +20,14 @@ tower-http.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 chrono.workspace = true
+tokio-stream = "0.1"
 uuid.workspace = true
 futures.workspace = true
 async-trait = "0.1"
 mupc-common = { path = "../common" }
 mupc-core = { path = "../core" }
 mupc-security = { path = "../security" }
+mupc-ai-engine = { path = "../ai-engine" }
 
 [dev-dependencies]
 tokio-test = "0.4"

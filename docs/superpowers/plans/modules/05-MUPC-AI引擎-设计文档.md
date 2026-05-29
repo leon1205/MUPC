@@ -2,7 +2,7 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v1.0 | 2026-05-29 | 架构师 | 合并版 |
+| v2.0 | 2026-05-29 | 架构师 | 合并版（含预设运行场景改造） |
 
 ---
 
@@ -11,6 +11,8 @@
 [DESIGN_APPROVED]: true — RKNN Runtime FFI 设计（6 项验收标准验证通过）
 
 [DESIGN_APPROVED]: true — AI 场景自适应与强化学习完整设计（6 个修复项验证通过，设计评审批准）
+
+[DESIGN_APPROVED]: true — AI 预设运行场景与互斥模式选择（ModeSelector 替代 SceneClassifier，设计评审批准）
 
 ---
 
@@ -21,8 +23,10 @@
 | Phase 3C AI 优化引擎设计文档 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-设计文档.md` | [DESIGN_APPROVED] |
 | Phase 3C 实施计划 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-实施计划.md` | 已归档 |
 | RKNN Runtime FFI 设计文档 | `docs/superpowers/plans/2026-05-28-RKNN-Runtime-FFI实现-设计文档.md` | [DESIGN_APPROVED] |
-| AI 场景自适应与 RL 设计文档 | `docs/superpowers/plans/2026-05-29-MUPC-AI场景自适应与RL-设计文档.md` | [DESIGN_APPROVED] |
-| AI 引擎 PRD | `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` | 合并版 |
+| AI 场景自适应与 RL 设计文档 | `docs/superpowers/plans/2026-05-29-MUPC-AI场景自适应与RL-设计文档.md` | [DESIGN_APPROVED]（第 4 章已被 v2.0 废弃） |
+| AI 预设运行场景与互斥模式选择设计 | `docs/superpowers/plans/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` | **[DESIGN_APPROVED]** |
+| AI 引擎 PRD | `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` | v2.0 |
+| 预设运行场景 PRD | `docs/superpowers/specs/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` | [REVIEWED: PASS] |
 
 ---
 
@@ -111,7 +115,7 @@
 | 模块 | 职责 |
 |------|------|
 | `DataFusionEngine` | 1Hz 频率从 5 个数据源汇聚 23 个字段，输出 FusedSystemState |
-| `SceneClassifier` | 基于负荷特征识别当前运行场景（5 种场景 + Default）|
+| `ModeSelector` | 运行场景选择器，互斥保证，接收远程/本地切换指令（v2.0 替代 SceneClassifier） |
 | `RewardCalculator` | 根据场景选择奖励函数计算奖励值，用于在线微调 |
 | `LSTMModel` | 时序预测（光伏出力、负荷预测未来 15 分钟）|
 | `RLModel` | MADDPG/PPO 强化学习决策，输出 7 维动作空间 |
@@ -132,9 +136,9 @@
 ```
 历史数据 → LSTMModel.predict() → 光伏/负荷预测值 → 供 RL 模型使用
                                                          ↓
-融合数据 → SceneClassifier → 场景标签 → 权重映射 + 奖励函数选择
+远程指令/本地选择 → ModeSelector → 运行模式 → 权重映射 + 奖励函数选择
                                                          ↓
-融合数据 + 预测值 + 场景标签 → RLModel.decide_fused() → ActionOutput
+融合数据 + 预测值 → RLModel.decide_fused() → ActionOutput
                                                          ↓
 ActionOutput → ActionValidator (6条约束规则) → strategy-engine (指令校验 + 兜底)
                                                          ↓
@@ -145,12 +149,12 @@ ActionOutput → ActionValidator (6条约束规则) → strategy-engine (指令�
 
 ```
 ModelManager.full_decision_cycle():
-  1. DataFusionEngine.fuse_once()      — 数据融合 (<1ms)
-  2. SceneClassifier.recognize()       — 场景识别 (<5s)
-  3. RLModel.decide_fused()            — RL 决策 (<100ms)
-  4. ActionValidator.validate()        — 动作约束校验 (<0.5ms)
-  5. RewardCalculator.calculate()      — 奖励计算 (<1ms)
-  6. 输出 DecisionCycleResult          — 总延迟 <120ms
+  1. DataFusionEngine.fuse_once()       — 数据融合 (<1ms)
+  2. mode_selector.current()            — 获取当前运行模式 (<0.001ms，v2.0 替代场景识别)
+  3. RLModel.decide_fused()             — RL 决策 (<100ms)
+  4. ActionValidator.validate()         — 动作约束校验 (<0.5ms)
+  5. RewardCalculator.calculate(mode)   — 奖励计算 (<1ms，传入 RunningMode)
+  6. 输出 DecisionCycleResult           — 总延迟 <120ms
 ```
 
 ---
@@ -525,9 +529,13 @@ impl DataFusionEngine {
 
 ---
 
-## 4. 场景分类器设计
+## 4. 场景分类器设计 ~~→ v2.0 废弃，替换为 ModeSelector~~
 
-### 4.1 SceneClassifier
+> **v2.0 设计变更：** 本章 SceneClassifier 自动分类器已被废弃。运行场景确定方式从"规则引擎自动分类"改为"预设互斥模式选择"。详见 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED]。
+>
+> 以下为 v1.1 原设计内容（保留作为历史参考，实现时请使用 ModeSelector 替代）。
+
+### 4.1 SceneClassifier（已废弃）
 
 **文件：** `mupc/crates/ai-engine/src/scene_classifier.rs`
 
@@ -1587,8 +1595,8 @@ pub struct ModelManager {
     config: AiEngineConfig,
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
     rl_model: Arc<RwLock<Option<RLModel>>>,
-    // 场景自适应子模块
-    scene_classifier: Arc<RwLock<Option<SceneClassifier>>>,
+    // v2.0: scene_classifier → mode_selector
+    mode_selector: Arc<ModeSelector>,
     data_fusion: Arc<RwLock<Option<DataFusionEngine>>>,
     reward_calculator: Arc<RwLock<Option<RewardCalculator>>>,
     action_validator: Arc<RwLock<Option<ActionValidator>>>,
@@ -2044,7 +2052,7 @@ impl AiMessageBus {
 | Topic | 发布者 | 订阅者 | 频率 |
 |-------|--------|--------|------|
 | `ai/fused_state` | DataFusionEngine | RLModel, SceneClassifier | 1Hz |
-| `ai/scene_change` | SceneClassifier | ModelManager, Web UI | 事件 |
+| `ai/mode_switch` | ModeSelector | RewardCalculator, ModelManager, Web UI | 事件驱动 |
 | `ai/action_output` | ModelManager | strategy-engine, intercore | 1Hz |
 | `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | 1Hz |
 | `ai/model_status` | ModelManager | Web UI, 告警模块 | 1Hz |
@@ -2192,3 +2200,20 @@ strategy-engine 进入兜底模式
 | 4 | VPP 辅助服务的容量价格和里程价格是否有标准合同模板？还是由 VPP 平台实时下发？ | 中 | 影响 R_ancillary_service 的参数来源 |
 | 5 | 在线微调是否需要经过审批流程（安全考虑）？还是自动触发？ | 中 | 影响 OnlineUpdater 的触发策略 |
 | 6 | 气象数据连续缺失时长 10 个周期是融合周期（10 秒）还是 10 个 15 分钟气象更新周期（150 分钟）？ | 中 | 影响 FUSION 告警阈值配置 |
+
+---
+
+## v2.0 修订记录
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | SceneClassifier → ModeSelector | 1.1~1.5、4、8、10、11、13 | 删除 rule-based 自动场景分类器，替换为 ModeSelector 互斥模式选择器 |
+| 2 | 更新架构图与数据流 | 1.1、1.4、1.5 | 架构图新增选择层（IEC 104/61850/Web UI → ModeSelector）；数据流移除 SceneClassifier；决策周期步骤 2 从 scene_classifier.recognize() 改为 mode_selector.current() |
+| 3 | 章节 4 标记废弃 | 4. 标题 + 4.1 | SceneClassifier 设计保留作为历史参考，添加 v2.0 废弃说明和迁移指引 |
+| 4 | ModelManager 结构更新 | 8.1 | scene_classifier → mode_selector 字段替换 |
+| 5 | 消息总线 topic 更新 | 13. 消息 Topic 定义 | ai/scene_change → ai/mode_switch |
+| 6 | 新增设计文档引用 | 文档头部参考表 | 新增 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED] |
+| 7 | 版本号更新 | 文档头部 | v1.0 → v2.0 |
+
+**修订依据：** `docs/superpowers/specs/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS]
+**配套设计：** `docs/superpowers/plans/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED]

@@ -1,21 +1,47 @@
 //! 场景管理端点
 //!
-//! 查询当前场景分类和历史场景
+//! GET /api/v1/ai/scenes/current — 获取当前运行场景
+//! GET /api/v1/ai/scenes/history — 获取历史场景切换记录
 
 use axum::{Json, extract::State};
+use serde::Serialize;
 use std::sync::Arc;
-use crate::routes::config::AppState;
+use crate::AppState;
 
-/// GET /api/v1/ai/scenes/current — 获取当前场景
-pub async fn get_current_scene(
-    State(_state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    todo!("Phase 2+")
+/// 当前场景响应
+#[derive(Debug, Serialize)]
+pub struct CurrentSceneResponse {
+    pub current: String,
+    pub display_name: String,
+    pub description: String,
+    pub source: String,
 }
 
-/// GET /api/v1/ai/scenes/history — 获取历史场景
+/// 历史场景条目
+#[derive(Debug, Serialize)]
+pub struct SceneHistoryEntry {
+    pub previous: String,
+    pub current: String,
+    pub source: String,
+    pub timestamp: String,
+}
+
+/// GET /api/v1/ai/scenes/current
+pub async fn get_current_scene(
+    State(state): State<Arc<AppState>>,
+) -> Json<CurrentSceneResponse> {
+    let current = state.mode_selector.current();
+    Json(CurrentSceneResponse {
+        current: format!("{:?}", current),
+        display_name: current.display_name().to_string(),
+        description: current.description().to_string(),
+        source: "LocalConfig".to_string(),
+    })
+}
+
+/// GET /api/v1/ai/scenes/history
 pub async fn get_scene_history(
     State(_state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    todo!("Phase 2+")
+    todo!("Phase 2+ — 从审计存储查询历史 mode_switch 事件")
 }

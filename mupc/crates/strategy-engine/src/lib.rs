@@ -20,6 +20,7 @@ pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput,
 pub use config::{PeakShavingConfig, DemandControlConfig, AntiReverseConfig};
 pub use errors::StrategyError;
 pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
+pub use ai_integration::{AiIntegrator, AiEngineStatusInfo, ModeInfo};
 
 // AI Engine re-exports
 pub use mupc_ai_engine::{ModelManager, ModelStatus, LstmModel, RLModel, SystemState, ActionOutput, LstmInput, LstmOutput};

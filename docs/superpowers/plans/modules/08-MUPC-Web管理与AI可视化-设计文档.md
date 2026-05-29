@@ -2,7 +2,9 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v1.1 | 2026-05-29 | 架构师 | 合并修订 **[DESIGN_APPROVED]** |
+| v1.2 | 2026-05-29 | 架构师 | 合并修订 **[DESIGN_APPROVED]** |
+
+> **v1.2 修订说明：** 同步 v2.0 预设运行场景设计，移除自动识别/置信度/兜底模式/恢复自动识别。详细变更见 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED]。
 
 **来源文档：**
 - `docs/superpowers/specs/modules/08-MUPC-Web管理与AI可视化-PRD.md` — 产品需求文档 **[REVIEWED: PASS]**
@@ -34,7 +36,7 @@
 │  │ 系统管理路由       │ │ AI 可视化路由    │ │ 专家干预路由          │   │
 │  │ /api/status        │ │ /api/ai/         │ │ PUT /api/ai/weights   │   │
 │  │ /api/config        │ │ predictions      │ │ PUT /api/ai/mode      │   │
-│  │ /api/logs          │ │ decision         │ │ PUT /api/ai/mode/auto │   │
+│  │ /api/logs          │ │ decision         │ │ PUT /api/v1/mode      │   │
 │  │ /ws/logs (WS)      │ │ rewards          │ └──────────┬─────────────┘   │
 │  │ /api/auth/*        │ │ status           │            │                 │
 │  └────────────────────┘ │ finetuning       │  ┌─────────┴─────────────┐   │
@@ -58,8 +60,7 @@
 │    ├── get_decision() → DecisionCache                                    │
 │    ├── get_reward_history() → SQLite 查询                                │
 │    ├── apply_weight_changes() → ModelManager::set_weights()              │
-│    ├── apply_mode_switch() → ModelManager::set_mode()                    │
-│    ├── resume_auto_mode() → ModelManager::resume_auto_mode()             │
+│    ├── apply_mode_switch() → ModeSelector::switch() (v2.0)               │
 │    ├── get_model_versions() → manifest.json                              │
 │    ├── create_ab_test() → AbTestRouter + ModelManager                    │
 │    ├── get_ab_test_result() → SQLite 查询                                │
@@ -300,7 +301,7 @@ event: rewards
 data: { "total": 22.5, "components": [...], "timestamp": "..." }
 
 event: status
-data: { "engine_status": "ready", "scene_mode": {...} }
+data: { "engine_status": "ready", "running_mode": {...} }
 
 event: finetuning
 data: { "state": "collecting", "buffer_size": 128, ... }
@@ -500,28 +501,27 @@ impl SsePushService {
 - [ ] 历史数据查询响应时间 < 1 秒（查询范围 7 天内）
 - [ ] 当历史数据不足时，趋势图显示"数据收集中"提示
 
-### 3.6 场景识别状态展示 **[DESIGN_APPROVED]**
+### 3.6 运行模式状态展示 **[DESIGN_APPROVED]**
 
 #### 3.6.1 功能描述
 
-在 AI 决策面板顶部显示当前场景识别状态和运行模式，包括自动识别结果和手动切换状态。
+在 AI 决策面板顶部显示当前预设运行模式和切换来源。模式由调度主站远程指令或本地策略管理员选择确定（v2.0 预设互斥场景，无自动识别）。
 
 #### 3.6.2 显示内容
 
 | 数据项 | 说明 | 更新频率 |
 |--------|------|----------|
-| 当前运行模式 | 自动识别或手动指定的模式名称 | 每决策周期 |
-| 识别置信度 | 场景识别模型的置信度百分比（自动识别时有效） | 每决策周期 |
-| 模式来源 | 自动识别 / 手动指定 / 兜底模式 | 模式变更时 |
-| 手动切换标记 | 若由专家手动指定，显示"手动"标签 | 模式变更时 |
+| 当前运行模式 | 5 种预设模式之一 | 每决策周期 |
+| 模式来源 | 远程调度（IEC 104/61850）/ 本地Web / 配置文件 | 模式变更时 |
+| 切换标记 | 远程来源显示"远程"，本地来源显示"本地" | 模式变更时 |
+| 生效时间 | 当前模式生效的时间戳 | 模式变更时 |
 
 #### 3.6.3 验收标准 **[REVIEWED: PASS]**
 
 - [ ] 当前运行模式名称在面板顶部居中展示，字号大于其他内容
-- [ ] 自动识别模式下显示识别置信度百分比
-- [ ] 手动切换的模式带有"手动"标签，与自动识别模式在视觉上区分
-- [ ] 兜底模式使用橙色背景突出显示，提示运维人员需关注
-- [ ] 模式切换事件记录时间戳，可供审计查询
+- [ ] 远程切换的模式带有"远程"标签，本地切换的模式带有"本地"标签
+- [ ] 模式切换事件记录时间戳和来源，可供审计查询
+- [ ] AI 引擎未启用时显示"AI 引擎未启用，系统运行于本地策略模式"
 
 ### 3.7 模型在线微调监控（路由 `/ai/finetuning`） **[DESIGN_APPROVED]**
 
@@ -613,39 +613,37 @@ Web UI → 二次确认对话框 → PUT /api/ai/weights
 - [ ] 权限不足的用户（调度人员）仅看到只读的当前值，无操作控件
 - [ ] 权重值在设备重启后保持最后一次手动设置的值
 
-### 4.3 强制切换运行模式 **[DESIGN_APPROVED]**
+### 4.3 强制切换运行模式（本地选择） **[DESIGN_APPROVED]**
 
 #### 4.3.1 功能描述
 
-支持在合法模式之间手动切换运行模式。手动切换后的模式将替代自动识别结果，直到管理员取消手动指定。
+策略管理员通过 Web UI 在 5 种预设运行场景中手动选择当前运行模式。API 端点：`PUT /api/v1/mode`。同一时刻仅 1 种模式生效（互斥），调度主站远程切换优先级高于本地选择。
 
 #### 4.3.2 可切换的运行模式
 
-| 模式名称 | 说明 | 适用场景 |
-|----------|------|----------|
-| 农网灌溉模式 | 以光伏消纳和电压治理为主要目标 | 农网台区灌溉季节 |
-| 工商业-自主套利 | 以电价差套利为主要目标 | 工商业储能峰谷套利 |
-| 工商业-需量控制 | 以减少需量罚金为主要目标 | 变压器容量受限场景 |
-| 工商业-虚拟电厂 | 以辅助服务收益为主要目标 | 参与 VPP 聚合调度 |
-| 工商业-极致绿色 | 以绿电消纳最大化为主要目标 | 绿色认证要求高的场景 |
-| 本地兜底模式 | 降级至本地策略引擎 | AI 异常或特殊维护场景 |
+| 模式名称 | 对应枚举 | 适用场景 |
+|----------|---------|----------|
+| 农网灌溉模式 | `AgriculturalIrrigation` | 农网台区灌溉季节 |
+| 自主套利模式 | `CommercialArbitrage` | 工商业储能峰谷套利 |
+| 需量控制模式 | `DemandControl` | 变压器容量受限场景 |
+| 虚拟电厂模式 | `VirtualPowerPlant` | 参与 VPP 聚合调度 |
+| 极致绿色模式 | `UltraGreen` | 绿色认证要求高的场景 |
+
+> **v2.0 说明：** 无"本地兜底模式"。AI 引擎异常时系统自动降级至本地策略（由 strategy-engine 内部处理）。无"恢复自动识别"功能（不存在自动识别）。
 
 #### 4.3.3 交互规范
 
-- 模式切换下拉列表仅展示当前模式下可切换的选项（不包含当前模式自身）
+- 模式切换下拉列表展示 5 种预设场景（不包含当前模式自身）
 - 切换操作需要二次确认对话框确认
-- 切换到"本地兜底模式"时需要三级确认："切换到兜底模式将关闭 AI 优化，确认继续？"
-- 提供"恢复自动识别"按钮，在手动模式状态下可用，自动模式下隐藏
-- 手动切换的模式在设备重启后仍保持，直到管理员手动恢复自动识别
+- 若同时收到远程调度指令，远程指令优先，本地操作被拒绝并提示"远程调度优先"
+- 手动切换的模式在设备重启后保持（持久化到 `/var/lib/mupc/current_mode`）
 
 #### 4.3.4 验收标准 **[REVIEWED: PASS]**
 
-- [ ] 模式切换下拉列表仅展示合法选项（不含当前模式）
-- [ ] 切换操作需要二次确认
-- [ ] 确认后 2 秒内新模式生效，页面同步更新
-- [ ] 切换后当前运行模式显示"手动"标记
-- [ ] 切换到"本地兜底模式"时额外弹出三级确认提示
-- [ ] "恢复自动识别"按钮在手动模式下可见，自动模式下隐藏
+- [ ] 模式切换下拉列表展示 5 种预设场景选项（不含当前模式）
+- [ ] 切换操作需要二次确认，确认后 1s 内新模式生效
+- [ ] 切换后当前运行模式显示"本地"来源标签
+- [ ] 远程指令冲突时显示"远程调度优先"提示
 - [ ] 操作记录写入审计日志：操作人、原模式、新模式、来源
 - [ ] 权限不足的用户仅看到只读的当前模式信息
 - [ ] 手动切换的模式在设备重启后保持
@@ -661,10 +659,10 @@ Web UI → 二次确认对话框 → PUT /api/ai/weights
 - 按钮：「取消」（次按钮）、「确认」（主按钮）
 
 **三级确认（高危操作）**：
-- 应用场景：切换到本地兜底模式、执行模型回滚
+- 应用场景：执行模型回滚
 - 步骤：
   1. 第一层：操作目的确认（"确认要执行此操作？"）
-  2. 第二层：操作影响确认（如"切换到兜底模式将关闭 AI 优化"）
+  2. 第二层：操作影响确认（"回滚将替换当前在线模型，决策可能暂时中断"）
   3. 第三层：输入操作人密码进行二次身份验证
 
 ### 4.5 审计日志设计
@@ -676,7 +674,7 @@ Web UI → 二次确认对话框 → PUT /api/ai/weights
 | 操作 ID | UUID | 全局唯一标识 |
 | 操作时间 | DateTime | 精确到毫秒的 UTC 时间戳 |
 | 操作人 | String | 执行操作的用户名 |
-| 操作类型 | Enum | weight_adjust / mode_switch / resume_auto / ab_test_start / ab_test_stop / model_rollback |
+| 操作类型 | Enum | weight_adjust / mode_switch / ab_test_start / ab_test_stop / model_rollback |
 | 操作详情 | JSON | 操作前后的完整参数快照 |
 | 操作结果 | Enum | success / failed |
 | 失败原因 | String? | 操作失败时的错误描述 |
@@ -692,7 +690,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     id TEXT PRIMARY KEY,                   -- UUID
     timestamp TEXT NOT NULL,               -- ISO 8601
     operator TEXT NOT NULL,
-    action_type TEXT NOT NULL,             -- weight_adjust | mode_switch | resume_auto | ab_test_start | ab_test_stop | model_rollback
+    action_type TEXT NOT NULL,             -- weight_adjust | mode_switch | ab_test_start | ab_test_stop | model_rollback
     action_detail TEXT NOT NULL,           -- JSON
     result TEXT NOT NULL,                  -- success | failed
     fail_reason TEXT,
@@ -764,12 +762,19 @@ battery_degradation = 2.0
 
 ### 4.7 模式持久化
 
-```toml
-# /etc/mupc/mode.toml
-mode_source = "manual"           # "auto" | "manual"
-manual_mode = "agriculture"      # manual 时有效
-switched_at = "2026-05-29T10:02:00Z"
+v2.0 使用单字节文件存储当前模式（简化为 `RunningMode` 枚举值 1~5）：
+
+```rust
+// ModeSelector 内部处理持久化，web-api 不直接读写
+// 持久化文件: /var/lib/mupc/current_mode
+// 内容: "1"~"5" (RunningMode 枚举值)
+// 文件损坏时回退至 AgriculturalIrrigation (MODE-01)
 ```
+
+**与 v1.1 的区别：**
+- v1.1: `/etc/mupc/mode.toml` 含 `mode_source` 和 `manual_mode` 字段
+- v2.0: `/var/lib/mupc/current_mode` 单字节文件，由 ModeSelector 管理
+- 配置中的 `[mode] default_mode` 仅用于系统首次启动
 
 ---
 
@@ -1012,17 +1017,20 @@ AiIntegrator::decide()
 | GET | `/api/ai/predictions` | 获取预测曲线数据 | Session | 全部角色 |
 | GET | `/api/ai/decision` | 获取当前决策状态 | Session | 全部角色 |
 | GET | `/api/ai/rewards` | 获取奖励值（含历史） | Session | 全部角色 |
-| GET | `/api/ai/status` | 获取 AI 引擎状态和场景模式 | Session | 全部角色 |
+| GET | `/api/ai/status` | 获取 AI 引擎状态和运行模式 | Session | 全部角色 |
 | GET | `/api/ai/finetuning` | 获取在线微调状态 | Session | 专家 + 管理员 |
 | GET | `/api/ai/stream` | SSE 实时推送连接 | Session | 全部角色 |
+| GET | `/api/v1/mode` | 获取当前运行场景 | Session | 全部角色 |
+| GET | `/api/v1/mode/list` | 获取所有可用场景列表 | Session | 全部角色 |
 
 ### 6.3 专家干预端点
 
 | 方法 | 路由 | 功能 | 认证 | 角色权限 |
 |------|------|------|------|---------|
 | PUT | `/api/ai/weights` | 更新优化目标权重 | Session | 专家 + 管理员 |
-| PUT | `/api/ai/mode` | 强制切换运行模式 | Session | 专家 + 管理员 |
-| PUT | `/api/ai/mode/auto` | 恢复自动场景识别 | Session | 专家 + 管理员 |
+| PUT | `/api/v1/mode` | 切换运行场景（v2.0 替代 /api/ai/mode） | Session | 专家 + 管理员 |
+| GET | `/api/v1/mode` | 获取当前运行场景 | Session | 全部角色 |
+| GET | `/api/v1/mode/list` | 获取所有可用场景列表 | Session | 全部角色 |
 | GET | `/api/ai/audit` | 查询审计日志 | Session | 专家 + 管理员 |
 
 ### 6.4 A/B 测试与模型管理端点
@@ -1198,10 +1206,10 @@ type: Option<String>  // 可选过滤："pv" | "load"，不传则返回全部
     "pv_limit_ratio": 1.0,
     "confidence": 0.873
   },
-  "scene": {
-    "current_mode": "commercial_arbitrage",
-    "confidence": 0.94,
-    "source": "auto_detected",
+  "mode": {
+    "current": "CommercialArbitrage",
+    "display_name": "自主套利模式",
+    "source": "LocalWeb",
     "switched_at": "2026-05-29T08:00:00Z"
   },
   "reward_breakdown": [
@@ -1256,10 +1264,10 @@ range: Option<String>    // 快捷范围："1h" | "6h" | "24h" | "7d"，优先�
     "lstm": "ready",
     "rl": "ready"
   },
-  "scene_mode": {
-    "current_mode": "commercial_arbitrage",
-    "confidence": 0.94,
-    "source": "auto_detected",
+  "running_mode": {
+    "current": "CommercialArbitrage",
+    "display_name": "自主套利模式",
+    "source": "RemoteDispatch",
     "switched_at": "2026-05-29T08:00:00Z"
   },
   "uptime_secs": 36000,
@@ -1316,37 +1324,25 @@ range: Option<String>    // 快捷范围："1h" | "6h" | "24h" | "7d"，优先�
 }
 ```
 
-#### 6.5.13 PUT /api/ai/mode
+#### 6.5.13 PUT /api/v1/mode（v2.0 替代 /api/ai/mode）
 
 **请求体：**
 ```json
 {
-  "mode": "agriculture",
-  "reason": "灌溉季节开始，需要优先保障光伏消纳和电压质量"
+  "mode": "CommercialArbitrage"
 }
 ```
 
-**mode 可选值：** `agriculture`, `commercial_arbitrage`, `commercial_demand`, `commercial_vpp`, `commercial_green`, `local_fallback`
+**mode 可选值：** `AgriculturalIrrigation`, `CommercialArbitrage`, `DemandControl`, `VirtualPowerPlant`, `UltraGreen`
 
 **成功响应 200：**
 ```json
 {
   "status": "ok",
-  "previous_mode": "commercial_arbitrage",
-  "current_mode": "agriculture",
+  "previous_mode": "AgriculturalIrrigation",
+  "current_mode": "CommercialArbitrage",
+  "display_name": "自主套利模式",
   "switched_at": "2026-05-29T10:02:00Z"
-}
-```
-
-#### 6.5.14 PUT /api/ai/mode/auto
-
-**成功响应 200：**
-```json
-{
-  "status": "ok",
-  "mode_source": "auto_detected",
-  "current_mode": "commercial_arbitrage",
-  "switched_at": "2026-05-29T10:03:00Z"
 }
 ```
 
@@ -1384,7 +1380,7 @@ page_size: Option<u32>      // 每页条数，默认 20，最大 100
 }
 ```
 
-**action_type 枚举：** `weight_adjust`, `mode_switch`, `resume_auto`, `ab_test_start`, `ab_test_stop`, `model_rollback`
+**action_type 枚举：** `weight_adjust`, `mode_switch`, `ab_test_start`, `ab_test_stop`, `model_rollback`
 
 **CSV 导出：** 添加 `Accept: text/csv` 请求头时返回 CSV 格式，单次不超过 10000 条。
 
@@ -1763,7 +1759,7 @@ mupc/crates/web-api/src/
 │       ├── status.rs          ~60 行  GET /api/ai/status
 │       ├── finetuning.rs      ~60 行  GET /api/ai/finetuning
 │       ├── weights.rs         ~100 行 PUT /api/ai/weights (含验证)
-│       ├── mode.rs            ~80 行  PUT /api/ai/mode, PUT /api/ai/mode/auto
+│       ├── mode.rs            ~120 行  GET/PUT /api/v1/mode, GET /api/v1/mode/list
 │       ├── models.rs          ~60 行  GET /api/ai/models
 │       ├── abtest.rs          ~120 行 POST/GET/DELETE /api/ai/abtest
 │       └── rollback.rs        ~100 行 POST /api/ai/rollback
@@ -1912,7 +1908,7 @@ CREATE TABLE IF NOT EXISTS reward_history (
     timestamp INTEGER NOT NULL,          -- Unix 时间戳秒
     total_reward REAL NOT NULL,
     components_json TEXT NOT NULL,       -- JSON 数组
-    scene_mode TEXT NOT NULL
+    running_mode TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reward_timestamp ON reward_history(timestamp);
 
@@ -1978,7 +1974,7 @@ AI 模型在加载、推理或运行过程中可能出现各种异常状态，�
 |------|---------|---------|----------------|
 | 9.3.1 | 手动权重值超出有效范围（< 0.0 或 > 5.0） | 前端滑块限制在 0.0-5.0 范围内，无法拖出边界；数值输入框在输入越界值时显示红色边框和错误文字"权重值需在 0.0-5.0 之间"；后端二次校验拒绝写入并返回 400 错误 | 将权重值调整至有效范围内重新提交 |
 | 9.3.2 | 强制切换模式被后端拒绝（如安全校验未通过） | 显示错误 Toast 提示，文案为拒绝原因（如"模式切换被拒绝：安全校验未通过"），当前模式保持不变 | 确认拒绝原因；联系系统管理员；等待安全条件满足后重试 |
-| 9.3.3 | 模式切换冲突（多用户同时操作或系统正在执行自动模式切换） | 显示冲突提示"模式切换冲突：{冲突详情}"，说明当前操作被哪个来源覆盖；优先级规则：本地运维 > 策略管理员 > AI 自动 | 确认冲突来源；若需覆盖，由更高优先级用户执行操作 |
+| 9.3.3 | 模式切换冲突（远程调度指令与本地操作并发） | 显示冲突提示"远程调度优先，本地操作被拒绝"；v2.0 优先级：调度主站 > 策略管理员 | 确认冲突来源；等待远程指令完成后重试 |
 | 9.3.4 | 权重配置文件损坏（文件解析失败或格式错误） | 页面顶部显示黄色警告横幅"权重配置已重置为默认值"，系统自动加载默认权重替换损坏配置 | 确认当前权重值是否符合预期；可通过专家干预页面重新调整权重 |
 
 **验收标准：**
@@ -2131,3 +2127,20 @@ A/B 测试流程中的边界条件处理和异常恢复机制。
 | 章节重编号 | 原"第 9 章 技术决策记录" → "第 10 章 技术决策记录" |
 | 版本更新 | v1.0 → v1.1 |
 | 修订依据 | 设计覆盖度审查 CONDITIONAL_PASS 整改要求（PRD 第 9 章边界条件未在设计文档中体现） |
+
+### v1.2 修订记录
+
+| 修订项 | 说明 |
+|--------|------|
+| 同步 v2.0 预设运行场景 | 全局替换：自动识别→预设选择、SceneClassifier→ModeSelector |
+| 删除 `/api/ai/mode/auto` | 无自动识别功能，删除恢复端点（API 表 + 6.5.14 节 + routes 清单） |
+| 更新模式切换 API | `/api/ai/mode` → `/api/v1/mode`，mode 值重命名（agriculture→AgriculturalIrrigation 等） |
+| 新增模式查询 API | `GET /api/v1/mode` + `GET /api/v1/mode/list` |
+| 移除"本地兜底模式" | 5 种预设场景（非 6 种），AI 降级由系统内部处理 |
+| 移除"置信度"概念 | 3.6 + 6.5.8 + 6.5.10: scene_mode → running_mode，删除 confidence 字段 |
+| 更新模式持久化 | mode.toml → current_mode 单字节文件 + config [mode] 段 |
+| 更新审计操作类型 | 移除 resume_auto 枚举值 |
+| 更新边界条件 | 9.3.3: "AI 自动"优先级移除，改为"调度主站 > 策略管理员" |
+| 版本更新 | v1.1 → v1.2 |
+| 修订依据 | `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS] |
+| 配套设计 | `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED] |
