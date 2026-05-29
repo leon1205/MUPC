@@ -44,6 +44,33 @@ impl Default for GooseConfig {
     }
 }
 
+/// MMS TLS 配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct MmsTlsConfig {
+    /// 是否启用 TLS
+    pub enabled: bool,
+    /// CA 证书路径
+    pub ca_cert_path: String,
+    /// 客户端证书路径
+    pub client_cert_path: String,
+    /// 客户端私钥路径
+    pub client_key_path: String,
+    /// 是否验证对端证书
+    pub verify_peer: bool,
+}
+
+impl Default for MmsTlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            verify_peer: true,
+        }
+    }
+}
+
 /// MMS 配置
 #[derive(Debug, Clone, Deserialize)]
 pub struct MmsConfig {
@@ -52,6 +79,12 @@ pub struct MmsConfig {
     pub remote_ip: String,
     pub remote_port: u16,
     pub max_connections: u32,
+    /// 连接超时（毫秒）
+    pub connect_timeout_ms: u64,
+    /// 读取超时（毫秒）
+    pub read_timeout_ms: u64,
+    /// TLS 配置
+    pub tls: Option<MmsTlsConfig>,
 }
 
 impl Default for MmsConfig {
@@ -59,9 +92,12 @@ impl Default for MmsConfig {
         Self {
             local_ip: "0.0.0.0".to_string(),
             local_port: 102,
-            remote_ip: "127.0.0.1".to_string(),
+            remote_ip: "192.168.1.100".to_string(),
             remote_port: 102,
             max_connections: 10,
+            connect_timeout_ms: 5000,
+            read_timeout_ms: 3000,
+            tls: None,
         }
     }
 }
