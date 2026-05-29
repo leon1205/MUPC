@@ -7,12 +7,16 @@ mod device;
 mod errors;
 mod goose;
 mod mms_client;
+mod mms_types;
+mod asn1_utils;
 
 pub use config::{Iec61850Config, GooseConfig, MmsConfig};
 pub use device::{Iec61850DeviceImpl, Iec61850Device};
 pub use errors::{Iec61850Error, Result};
 pub use goose::{GooseSubscriber, GooseMessage};
 pub use mms_client::MmsClient;
+pub use mms_types::{DataObject, MmsRequest, MmsResponse, MmsService};
+pub use asn1_utils::{encode_mms_request, decode_mms_response};
 
 /// IEC 61850 设备状态
 #[derive(Debug, Clone, PartialEq)]

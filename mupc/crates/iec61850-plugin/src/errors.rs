@@ -31,6 +31,12 @@ pub enum Iec61850Error {
 
     #[error("协议错误: {0}")]
     ProtocolError(String),
+
+    #[error("ASN.1 编码失败: {0}")]
+    Asn1EncodeFailed(String),
+
+    #[error("MMS 协议错误: {0}")]
+    MmsProtocolError(String),
 }
 
 /// Result 类型别名
