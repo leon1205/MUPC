@@ -9,12 +9,35 @@ mod sm3;
 mod sm4;
 mod tls;
 
-pub use cert::{CertStore, Sm2Cert, load_sm2_certificate};
-pub use errors::{GmError, Result};
-pub use sm2::{sm2_sign, sm2_verify, sm2_key_generate, sm2_derive_shared_key, Sm2KeyPair, Sm2Signature};
-pub use sm3::{sm3_hash, sm3_derive_key};
-pub use sm4::{Sm4Key, sm4_cbc_encrypt, sm4_cbc_decrypt, sm4_gcm_encrypt, sm4_gcm_decrypt, generate_iv};
+// Phase 2+ 模块
+pub mod alarm;
+pub mod audit;
+pub mod cert_mgr;
+pub mod compliance;
+pub mod lea;
+pub mod lea_vici;
+pub mod policy;
+pub mod secure_boot;
+pub mod tls_sm2;
+
+// 基础国密原语
+pub use cert::{load_sm2_certificate, CertStore, Sm2Cert};
+pub use errors::{GmError, Result, SecurityError};
+pub use sm2::{sm2_derive_shared_key, sm2_key_generate, sm2_sign, sm2_verify, Sm2KeyPair, Sm2Signature};
+pub use sm3::{sm3_derive_key, sm3_hash};
+pub use sm4::{generate_iv, sm4_cbc_decrypt, sm4_cbc_encrypt, sm4_gcm_decrypt, sm4_gcm_encrypt, Sm4Key};
 pub use tls::{TlsClientConfig, TlsConnector};
+
+// Phase 2+ 重导出
+pub use alarm::{AlertEvent, AlertManager, AlertSeverity, AlertSink, AlertType};
+pub use audit::{AuditEventType, AuditLogEntry, AuditLogger, AuditSeverity};
+pub use cert_mgr::{CertManager, CertMeta, CrlManager};
+pub use compliance::{ComplianceChecker, ComplianceItem, ComplianceReport};
+pub use lea::{LeaConfig, LeaManager, TunnelState};
+pub use lea_vici::ViciClient;
+pub use policy::{ChannelPolicy, PolicyManager};
+pub use secure_boot::{BootChainStatus, SecureBootManager};
+pub use tls_sm2::{Sm2ServerCertVerifier, SmCryptoProvider};
 
 /// 国密配置
 #[derive(Debug, Clone, serde::Deserialize)]

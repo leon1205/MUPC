@@ -40,7 +40,40 @@ pub enum GmError {
 
     #[error("密钥长度无效: {0}")]
     InvalidKeyLength(String),
+
+    #[error("IO 错误: {0}")]
+    IoError(String),
+
+    #[error("隧道错误: {0}")]
+    TunnelError(String),
+
+    #[error("审计错误: {0}")]
+    AuditError(String),
+
+    #[error("策略错误: {0}")]
+    PolicyError(String),
+
+    #[error("合规检查失败: {0}")]
+    ComplianceError(String),
+
+    #[error("告警错误: {0}")]
+    AlertError(String),
+
+    #[error("安全启动错误: {0}")]
+    BootError(String),
+
+    #[error("完整性校验失败: {0}")]
+    IntegrityError(String),
+
+    #[error("加密操作错误: {0}")]
+    CryptoError(String),
+
+    #[error("配置错误: {0}")]
+    ConfigError(String),
 }
 
 /// Result 类型别名
 pub type Result<T> = std::result::Result<T, GmError>;
+
+/// SecurityError 类型别名（供 Phase 2+ 新模块使用）
+pub type SecurityError = GmError;
