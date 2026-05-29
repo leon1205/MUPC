@@ -249,6 +249,26 @@ impl PluginMeta {
     }
 }
 
+/// CRC 校验模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrcMode {
+    /// 无 CRC
+    None,
+    /// CRC16_MODBUS
+    Crc16Modbus,
+    /// CRC16_XMODEM
+    Crc16Xmodem,
+    /// CRC8
+    Crc8,
+}
+
+impl Default for CrcMode {
+    fn default() -> Self {
+        CrcMode::Crc16Modbus
+    }
+}
+
 /// RS485 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rs485Config {
@@ -264,6 +284,14 @@ pub struct Rs485Config {
     pub parity: Parity,
     /// 通信超时（毫秒）
     pub timeout_ms: u64,
+    /// 设备地址
+    pub device_addr: u8,
+    /// CRC 校验模式
+    pub crc_mode: CrcMode,
+    /// DE 引脚 (Driver Enable) - RS485 半双工发送使能
+    pub de_gpio: Option<u32>,
+    /// RE 引脚 (Receiver Enable) - RS485 半双工接收使能
+    pub re_gpio: Option<u32>,
 }
 
 impl Default for Rs485Config {
@@ -275,6 +303,10 @@ impl Default for Rs485Config {
             stop_bits: 1,
             parity: Parity::None,
             timeout_ms: 1000,
+            device_addr: 0x01,
+            crc_mode: CrcMode::Crc16Modbus,
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 }
@@ -300,4 +332,20 @@ impl Parity {
             Parity::Odd => "odd",
         }
     }
+}
+
+/// 计算 CRC16 Modbus
+pub fn crc16_modbus(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for byte in data {
+        crc ^= *byte as u16;
+        for _ in 0..8 {
+            if (crc & 0x0001) != 0 {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    crc
 }

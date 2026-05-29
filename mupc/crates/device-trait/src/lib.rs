@@ -18,6 +18,7 @@ pub mod message_bus;
 pub mod plugin;
 pub mod plugin_loader;
 pub mod registry;
+pub mod south_device;
 pub mod types;
 
 // Re-export commonly used types
@@ -27,7 +28,11 @@ pub use message_bus::{MessageBus, MessageHandler, NoOpMessageHandler};
 pub use plugin::{NoOpPlugin, Plugin, PluginState};
 pub use plugin_loader::PluginLoader;
 pub use registry::DeviceRegistry;
+pub use south_device::{
+    ChargerHandler, HplcConfig, HplcDriver, HplcError, InverterHandler, ModbusHandler,
+    ProtocolHandler, ProtocolHandlerRegistry, SouthDevice, TtuHandler,
+};
 pub use types::{
-    DataFrame, DataQuality, DeviceStatus, DeviceType, Message, Parity, PluginMeta, Rs485Config,
-    Topic,
+    CrcMode, DataFrame, DataQuality, DeviceStatus, DeviceType, Message, Parity, PluginMeta,
+    Rs485Config, Topic, crc16_modbus,
 };

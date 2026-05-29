@@ -1,6 +1,6 @@
 //! RS485 配置解析
 
-use device_trait::{Parity, Rs485Config};
+use device_trait::{CrcMode, Parity, Rs485Config};
 use serde::{Deserialize, Serialize};
 
 /// RS485 设备配置
@@ -22,20 +22,10 @@ pub struct Config {
     pub device_addr: u8,
     /// CRC 校验模式
     pub crc_mode: CrcMode,
-}
-
-/// CRC 校验模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CrcMode {
-    /// 无 CRC
-    None,
-    /// CRC16_MODBUS
-    Crc16Modbus,
-    /// CRC16_XMODEM
-    Crc16Xmodem,
-    /// CRC8
-    Crc8,
+    /// DE 引脚 (Driver Enable) - 控制发送使能
+    pub de_gpio: Option<u32>,
+    /// RE 引脚 (Receiver Enable) - 控制接收使能
+    pub re_gpio: Option<u32>,
 }
 
 impl Default for Config {
@@ -49,6 +39,8 @@ impl Default for Config {
             timeout_ms: 1000,
             device_addr: 0x01,
             crc_mode: CrcMode::Crc16Modbus,
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 }
@@ -76,6 +68,10 @@ impl Config {
             stop_bits: self.stop_bits,
             parity: self.parity,
             timeout_ms: self.timeout_ms,
+            device_addr: self.device_addr,
+            crc_mode: self.crc_mode,
+            de_gpio: self.de_gpio,
+            re_gpio: self.re_gpio,
         }
     }
 }
@@ -93,6 +89,12 @@ impl Config {
         if self.stop_bits < 1 || self.stop_bits > 2 {
             return Err("停止位必须在 1-2 之间".to_string());
         }
+        // DE 和 RE 引脚不能相同
+        if let (Some(de), Some(re)) = (self.de_gpio, self.re_gpio) {
+            if de == re {
+                return Err("DE 和 RE 引脚不能相同".to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -107,6 +109,8 @@ mod tests {
         assert_eq!(config.baud_rate, 9600);
         assert_eq!(config.data_bits, 8);
         assert_eq!(config.device_addr, 0x01);
+        assert_eq!(config.de_gpio, None);
+        assert_eq!(config.re_gpio, None);
     }
 
     #[test]
@@ -128,10 +132,38 @@ mod tests {
             "parity": "even",
             "timeout_ms": 2000,
             "device_addr": 2,
-            "crc_mode": "crc16_modbus"
+            "crc_mode": "crc16_modbus",
+            "de_gpio": 17,
+            "re_gpio": 27
         }"#;
         let config = Config::from_json(json).unwrap();
         assert_eq!(config.baud_rate, 19200);
         assert_eq!(config.device_addr, 2);
+        assert_eq!(config.de_gpio, Some(17));
+        assert_eq!(config.re_gpio, Some(27));
+    }
+
+    #[test]
+    fn test_config_with_gpio() {
+        let json = r#"{
+            "port": "/dev/ttyUSB1",
+            "baud_rate": 115200,
+            "de_gpio": 18,
+            "re_gpio": 22
+        }"#;
+        let config = Config::from_json(json).unwrap();
+        assert_eq!(config.de_gpio, Some(18));
+        assert_eq!(config.re_gpio, Some(22));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_same_gpio() {
+        let mut config = Config::default();
+        config.de_gpio = Some(17);
+        config.re_gpio = Some(17);
+        let result = config.validate();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "DE 和 RE 引脚不能相同");
     }
 }

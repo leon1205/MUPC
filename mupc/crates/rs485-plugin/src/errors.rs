@@ -33,6 +33,10 @@ pub enum Rs485Error {
     #[error("设备未连接: {0}")]
     NotConnected(String),
 
+    /// GPIO 控制错误
+    #[error("GPIO 控制错误: {0}")]
+    GpioError(String),
+
     /// 串口 IO 错误
     #[error("串口 IO 错误: {0}")]
     IoError(#[from] std::io::Error),
@@ -67,6 +71,11 @@ impl Rs485Error {
     /// 创建未连接错误
     pub fn not_connected(device_id: impl Into<String>) -> Self {
         Self::NotConnected(device_id.into())
+    }
+
+    /// 创建 GPIO 错误
+    pub fn gpio_error(msg: impl Into<String>) -> Self {
+        Self::GpioError(msg.into())
     }
 
     /// 创建协议错误

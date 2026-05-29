@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+device-trait = { path = "../device-trait" }
 tokio.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -17,7 +18,7 @@ async-trait.workspace = true
 parking_lot = "0.12"
 
 # MMS 协议栈 (libIEC61850 FFI 绑定)
-iec61850-sys = { version = "0.3", features = ["tls"], optional = true }
+iec61850 = { version = "0.1.0", optional = true }
 
 # TLS 支持
 rustls = "0.23"
@@ -27,6 +28,7 @@ webpki-roots = "0.26"
 tokio-test = "0.4"
 
 [features]
-default = ["real_iec61850"]
-real_iec61850 = ["dep:iec61850-sys"]
+# 暂时禁用 real_iec61850，因为没有实际的 FFI 实现
+# 后续需要集成 libIEC61850 C 库时再启用
+real_iec61850 = ["dep:iec61850"]
 fake_iec61850 = []

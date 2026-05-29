@@ -3,7 +3,7 @@
 //! 支持 Modbus RTU 等常见 RS485 协议
 
 use crate::errors::Rs485Error;
-use crate::config::CrcMode;
+use device_trait::CrcMode;
 
 /// 协议数据帧
 #[derive(Debug, Clone)]
