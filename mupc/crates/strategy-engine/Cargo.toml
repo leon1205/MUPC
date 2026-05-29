@@ -17,6 +17,7 @@ async-trait = "0.1"
 mupc-common = { path = "../common" }
 mupc-data-processing = { path = "../data-processing" }
 mupc-ai-engine = { path = "../ai-engine" }
+chrono.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

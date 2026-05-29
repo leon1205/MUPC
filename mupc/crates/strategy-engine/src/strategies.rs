@@ -97,6 +97,15 @@ impl ValidationResult {
             suggested_command: None,
         }
     }
+
+    /// 创建降级通过结果（数据不可用但允许通过，保守安全策略）
+    pub fn degraded_pass(reason: impl Into<String>) -> Self {
+        Self {
+            valid: true,
+            message: format!("[降级通过] {}", reason.into()),
+            suggested_command: None,
+        }
+    }
 }
 
 /// AI 命令
