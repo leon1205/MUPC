@@ -20,6 +20,7 @@ members = [
     "crates/hplc-plugin",
     "crates/system-monitor",
     "crates/storage",
+    "crates/wireless",
 ]
 
 [workspace.package]

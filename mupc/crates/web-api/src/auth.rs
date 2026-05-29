@@ -136,7 +136,7 @@ impl AuthHandler {
 
 const SESSION_HEADER: &str = "X-Session-Id";
 
-/// POST /api/auth/login - 登录
+/// POST /api/v1/auth/login - 登录
 async fn login(
     State(handler): State<AuthHandler>,
     Json(req): Json<LoginRequest>,
@@ -160,7 +160,7 @@ async fn login(
 /// 创建认证路由
 pub fn create_router(handler: AuthHandler) -> Router {
     Router::new()
-        .route("/api/auth/login", post(login))
+        .route("/api/v1/auth/login", post(login))
         .with_state(handler)
 }
 

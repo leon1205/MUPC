@@ -85,7 +85,7 @@ impl LogsHandler {
     }
 }
 
-/// GET /api/logs - 获取日志列表
+/// GET /api/v1/logs - 获取日志列表
 async fn get_logs(
     State(handler): State<LogsHandler>,
     Query(query): Query<LogQuery>,
@@ -100,6 +100,6 @@ async fn get_logs(
 /// 创建日志路由
 pub fn create_router(handler: LogsHandler) -> Router {
     Router::new()
-        .route("/api/logs", get(get_logs))
+        .route("/api/v1/logs", get(get_logs))
         .with_state(handler)
 }

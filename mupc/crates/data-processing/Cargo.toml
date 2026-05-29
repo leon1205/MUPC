@@ -17,7 +17,7 @@ thiserror.workspace = true
 parking_lot = { workspace = true }
 mupc-common = { path = "../common" }
 mupc_mqtt_bridge = { path = "../mqtt-bridge" }
-rusqlite = "0.32"
+rusqlite = "0.29"
 chrono.workspace = true
 crc64 = "2.0"
 

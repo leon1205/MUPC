@@ -11,7 +11,7 @@ rust-version.workspace = true
 gmsm = { version = "0.1.0", optional = true }
 # 兼容旧代码 (ring 模拟实现)
 ring = { version = "0.17", optional = true }
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 x509-parser = "0.16"
 pem = "3"
 base64 = "0.22"
@@ -21,6 +21,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
 chrono.workspace = true
+sha2 = "0.10"
 
 [features]
 default = ["real_gmsm"]
@@ -30,3 +31,4 @@ fake_gmsm = ["dep:ring"]  # 用于测试的模拟实现
 [dev-dependencies]
 tokio-test = "0.4"
 zeroize = "1"
+tempfile = "3"

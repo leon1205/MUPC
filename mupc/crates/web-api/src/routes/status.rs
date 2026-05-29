@@ -15,10 +15,10 @@ use mupc_common::MupcError;
 /// 系统状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatus {
-    pub version: String,
+    pub firmware_version: String,
     pub build_time: String,
     pub uptime_secs: u64,
-    pub cpu_temp: Option<f64>,
+    pub cpu_temperature: Option<f64>,
     pub memory_usage: Option<f64>,
     pub connections: ConnectionStatus,
 }
@@ -49,10 +49,10 @@ impl StatusHandler {
         let uptime = self.start_time.elapsed().as_secs();
 
         Ok(SystemStatus {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            firmware_version: env!("CARGO_PKG_VERSION").to_string(),
             build_time: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: uptime,
-            cpu_temp: None, // TODO: 从系统获取
+            cpu_temperature: None, // TODO: 从系统获取
             memory_usage: None, // TODO: 从系统获取
             connections: ConnectionStatus {
                 iec104_connected: false, // TODO: 从 gateway 获取
@@ -63,7 +63,7 @@ impl StatusHandler {
     }
 }
 
-/// GET /api/status - 获取系统状态
+/// GET /api/v1/status - 获取系统状态
 async fn get_status(
     State(handler): State<StatusHandler>,
 ) -> Result<Json<SystemStatus>, StatusCode> {
@@ -77,6 +77,6 @@ async fn get_status(
 /// 创建状态路由
 pub fn create_router(handler: StatusHandler) -> Router {
     Router::new()
-        .route("/api/status", get(get_status))
+        .route("/api/v1/status", get(get_status))
         .with_state(handler)
 }

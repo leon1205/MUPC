@@ -122,7 +122,7 @@ impl ConfigHandler {
     }
 }
 
-/// GET /api/config - 获取配置
+/// GET /api/v1/config - 获取配置
 async fn get_config(
     State(handler): State<ConfigHandler>,
 ) -> Result<Json<AppConfig>, StatusCode> {
@@ -133,7 +133,7 @@ async fn get_config(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// PUT /api/config - 更新配置
+/// PUT /api/v1/config - 更新配置
 async fn update_config(
     State(handler): State<ConfigHandler>,
     Json(new_config): Json<AppConfig>,
@@ -151,7 +151,7 @@ async fn update_config(
 /// 创建配置路由
 pub fn create_router(handler: ConfigHandler) -> Router {
     Router::new()
-        .route("/api/config", get(get_config).put(update_config))
+        .route("/api/v1/config", get(get_config).put(update_config))
         .with_state(handler)
 }
 

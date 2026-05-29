@@ -45,7 +45,7 @@ impl Default for LstmConfig {
         Self {
             model_path: PathBuf::from("/etc/mupc/models/lstm.rknn"),
             input_window_secs: 3600,
-            output_horizon_secs: 1800,
+            output_horizon_secs: 900,
             quantization: QuantizationType::INT8,
         }
     }

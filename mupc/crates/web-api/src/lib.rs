@@ -11,4 +11,4 @@ pub mod audit;
 pub use auth::{AuthHandler, SessionManager};
 pub use ws::WsLogStreamer;
 pub use sse::SsePushService;
-pub use audit::AuditLogger;
+pub use audit::{AuditLogger, WebAuditEntry};

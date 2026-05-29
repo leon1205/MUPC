@@ -47,7 +47,7 @@ impl Default for WsLogStreamer {
     }
 }
 
-/// GET /api/logs/stream - WebSocket 日志流
+/// GET /ws/logs - WebSocket 日志流
 async fn ws_logs(
     ws: WebSocketUpgrade,
     State(streamer): State<WsLogStreamer>,
@@ -89,6 +89,6 @@ async fn ws_logs(
 /// 创建 WebSocket 路由
 pub fn create_router(streamer: WsLogStreamer) -> Router {
     Router::new()
-        .route("/api/logs/stream", get(ws_logs))
+        .route("/ws/logs", get(ws_logs))
         .with_state(streamer)
 }
