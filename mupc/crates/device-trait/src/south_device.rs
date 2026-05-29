@@ -228,9 +228,9 @@ impl ProtocolHandlerRegistry {
                 config.device_addr,
                 config.crc_mode,
             ))),
-            "ttu" => Some(Arc::new(TtuHandler::new())),
-            "inverter" => Some(Arc::new(InverterHandler::new())),
-            "charger" => Some(Arc::new(ChargerHandler::new())),
+            "ttu" => Some(Arc::new(TtuHandler::new(config.device_addr))),
+            "inverter" => Some(Arc::new(InverterHandler::new(config.device_addr))),
+            "charger" => Some(Arc::new(ChargerHandler::new(config.device_addr))),
             _ => None,
         }
     }
@@ -303,13 +303,15 @@ impl ProtocolHandler for ModbusHandler {
 
 /// TTU 协议处理器
 pub struct TtuHandler {
+    device_addr: u8,
     protocol_version: u8,
 }
 
 impl TtuHandler {
     /// 创建新的 TTU 处理器
-    pub fn new() -> Self {
+    pub fn new(device_addr: u8) -> Self {
         Self {
+            device_addr,
             protocol_version: 0x10,
         }
     }
@@ -354,19 +356,21 @@ impl ProtocolHandler for TtuHandler {
 
 impl Default for TtuHandler {
     fn default() -> Self {
-        Self::new()
+        Self::new(0x01)
     }
 }
 
 /// 光伏逆变器协议处理器
 pub struct InverterHandler {
+    device_addr: u8,
     manufacturer_code: u16,
 }
 
 impl InverterHandler {
     /// 创建新的逆变器处理器
-    pub fn new() -> Self {
+    pub fn new(device_addr: u8) -> Self {
         Self {
+            device_addr,
             manufacturer_code: 0x0000,
         }
     }
@@ -400,19 +404,21 @@ impl ProtocolHandler for InverterHandler {
 
 impl Default for InverterHandler {
     fn default() -> Self {
-        Self::new()
+        Self::new(0x01)
     }
 }
 
 /// 充电桩协议处理器（GB/T 27930）
 pub struct ChargerHandler {
+    device_addr: u8,
     protocol_version: u8,
 }
 
 impl ChargerHandler {
     /// 创建新的充电桩处理器
-    pub fn new() -> Self {
+    pub fn new(device_addr: u8) -> Self {
         Self {
+            device_addr,
             protocol_version: 0x01,
         }
     }
@@ -446,7 +452,7 @@ impl ProtocolHandler for ChargerHandler {
 
 impl Default for ChargerHandler {
     fn default() -> Self {
-        Self::new()
+        Self::new(0x01)
     }
 }
 
@@ -492,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_ttu_handler_encode_decode() {
-        let handler = TtuHandler::new();
+        let handler = TtuHandler::new(0x01);
         let data = vec![0x01, 0x02, 0x03];
         let frame = handler.encode_request("ttu_001", &data);
         assert_eq!(frame[0], 0x68); // 起始符
@@ -504,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_inverter_handler_encode_decode() {
-        let handler = InverterHandler::new();
+        let handler = InverterHandler::new(0x01);
         let data = vec![0x10, 0x00];
         let frame = handler.encode_request("inv_001", &data);
         assert!(frame.len() >= 4);
@@ -515,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_charger_handler_encode_decode() {
-        let handler = ChargerHandler::new();
+        let handler = ChargerHandler::new(0x01);
         let data = vec![0x01, 0x00];
         let frame = handler.encode_request("charger_001", &data);
         assert_eq!(frame[0], 0xFF);

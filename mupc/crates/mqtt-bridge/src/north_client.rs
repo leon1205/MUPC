@@ -4,12 +4,13 @@
 //! 支持 TLS + 双向证书认证
 
 use async_trait::async_trait;
+use device_trait::MqttBridge;
+use device_trait::errors::PluginError;
 use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Transport, TlsOptions};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::error::MqttBridgeError;
-use crate::client::MqttBridge;
 use crate::config::NorthMqttConfig;
 
 /// 北向 MQTT 客户端实现
@@ -127,7 +128,21 @@ impl NorthMqttClient {
 
 #[async_trait]
 impl MqttBridge for NorthMqttClient {
-    async fn publish(&self, topic: &str, payload: &[u8], qos: u8) -> Result<(), MqttBridgeError> {
+    async fn connect(&mut self) -> Result<(), PluginError> {
+        if self.is_connected() {
+            return Ok(());
+        }
+        // 北向客户端连接由构造函数建立，此处标记重连意图
+        *self.connected.blocking_lock() = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), PluginError> {
+        *self.connected.blocking_lock() = false;
+        Ok(())
+    }
+
+    async fn publish(&self, topic: &str, payload: &[u8], qos: u8) -> Result<(), PluginError> {
         let qos = match qos {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
@@ -136,10 +151,10 @@ impl MqttBridge for NorthMqttClient {
         self.client
             .publish(topic, qos, false, payload)
             .await
-            .map_err(|e| MqttBridgeError::PublishFailed(e.to_string()))
+            .map_err(|e| PluginError::Other(format!("发布失败: {}", e)))
     }
 
-    async fn subscribe(&self, topic: &str, qos: u8) -> Result<(), MqttBridgeError> {
+    async fn subscribe(&self, topic: &str, qos: u8) -> Result<(), PluginError> {
         let qos = match qos {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
@@ -148,11 +163,15 @@ impl MqttBridge for NorthMqttClient {
         self.client
             .subscribe(topic, qos)
             .await
-            .map_err(|e| MqttBridgeError::SubscribeFailed(e.to_string()))
+            .map_err(|e| PluginError::Other(format!("订阅失败: {}", e)))
     }
 
     fn is_connected(&self) -> bool {
         *self.connected.blocking_lock()
+    }
+
+    fn name(&self) -> &'static str {
+        "NorthMqttClient"
     }
 }
 

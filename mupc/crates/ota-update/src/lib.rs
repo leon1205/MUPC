@@ -1,4 +1,7 @@
-//! OTA 更新模块
+//! 固件与模型 OTA 升级引擎
+//!
+//! NOTE: 根据 ADR-007，此 crate 对外逻辑名称为 "update-engine"，
+//! 目录名保持 ota-update 以兼容现有引用。
 //!
 //! Phase 3C.2 OTA 模型自动更新模块
 //! Phase 2+ 固件 OTA 升级子系统

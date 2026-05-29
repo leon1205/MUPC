@@ -21,6 +21,34 @@ pub mod registry;
 pub mod south_device;
 pub mod types;
 
+// ============================================================================
+// MqttBridge trait - MQTT 桥接接口
+// ============================================================================
+
+/// MQTT 桥接 trait
+///
+/// 定义 MQTT 客户端与设备之间的桥接接口
+#[async_trait::async_trait]
+pub trait MqttBridge: Send + Sync {
+    /// 连接到 MQTT Broker
+    async fn connect(&mut self) -> Result<(), PluginError>;
+
+    /// 断开连接
+    async fn disconnect(&mut self) -> Result<(), PluginError>;
+
+    /// 发布消息
+    async fn publish(&self, topic: &str, payload: &[u8], qos: u8) -> Result<(), PluginError>;
+
+    /// 订阅主题
+    async fn subscribe(&self, topic: &str, qos: u8) -> Result<(), PluginError>;
+
+    /// 是否已连接
+    fn is_connected(&self) -> bool;
+
+    /// 获取 Bridge 名称
+    fn name(&self) -> &'static str;
+}
+
 // Re-export commonly used types
 pub use device::{Device, DeviceCommand};
 pub use errors::{BusError, DeviceError, PluginError, RegistryError};

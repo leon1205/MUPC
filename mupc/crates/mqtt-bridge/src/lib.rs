@@ -14,6 +14,7 @@ pub mod north_client;
 pub use error::MqttBridgeError;
 pub use config::{MqttConfig, LocalMqttConfig, NorthMqttConfig, TlsConfig};
 pub use topics::{LOCAL_TELEMETRY, LOCAL_STRATEGY_COMMAND, LOCAL_AI_READY, NORTH_TELEMETRY, NORTH_FAULT, NORTH_STRATEGY_COMMAND, NORTH_STATUS};
-pub use client::MqttBridge;
+// MqttBridge trait 迁移至 device-trait，在此 re-export 以保持兼容性
+pub use device_trait::MqttBridge;
 pub use local_client::LocalMqttClient;
 pub use north_client::NorthMqttClient;
