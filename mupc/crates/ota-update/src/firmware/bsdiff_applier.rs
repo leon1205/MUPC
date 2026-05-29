@@ -176,16 +176,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Phase 2+")]
     fn test_apply_patch_is_todo() {
         let applier = BsdiffApplier::new();
-        let result = applier.apply_patch(b"old", b"patch");
-        assert!(result.is_err() || true);
+        let _ = applier.apply_patch(b"old", b"patch");
     }
 
     #[test]
+    #[should_panic(expected = "Phase 2+")]
     fn test_verify_result_is_todo() {
         let applier = BsdiffApplier::new();
-        let result = applier.verify_result("sha256...", b"data");
-        assert!(result.is_err() || true);
+        let _ = applier.verify_result("sha256...", b"data");
     }
 }

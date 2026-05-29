@@ -276,12 +276,9 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Phase 2+")]
     fn test_detect_partitions_is_todo() {
         let mut manager = PartitionManager::new();
-        let result = manager.detect_partitions();
-        assert!(result.is_err() || {
-            // todo!() 会 panic，但编译期检查通过即可
-            true
-        });
+        let _ = manager.detect_partitions();
     }
 }

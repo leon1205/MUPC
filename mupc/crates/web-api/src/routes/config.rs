@@ -1,7 +1,7 @@
 //! 配置管理 API
 
 use axum::{
-    extract::{State, Query, Path},
+    extract::State,
     http::StatusCode,
     response::Json,
     routing::{get, put},

@@ -312,10 +312,10 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Phase 2+")]
     fn test_parse_is_todo() {
         let data = vec![0u8; 128];
-        let result = MupcPackage::parse(&data);
-        assert!(result.is_err() || true);
+        let _ = MupcPackage::parse(&data);
     }
 
     #[test]

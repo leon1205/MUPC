@@ -57,4 +57,13 @@ pub fn ai_routes() -> Router {
         .route("/api/v1/ai/ab-test/results", get(ab_test::get_ab_test_results))
         // 干预历史
         .route("/api/v1/ai/interventions", get(intervention::get_interventions))
+        // 系统状态
+        .route("/api/v1/ai/status", get(status::get_ai_status))
+        // 决策解释
+        .route("/api/v1/ai/explain", get(explain::get_explanation))
+        // 实时指标
+        .route("/api/v1/ai/metrics", get(metrics::get_realtime_metrics))
+        // 历史记录
+        .route("/api/v1/ai/history/decisions", get(history::get_decision_history))
+        .route("/api/v1/ai/history/accuracy", get(history::get_prediction_accuracy_history))
 }

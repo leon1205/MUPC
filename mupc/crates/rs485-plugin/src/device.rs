@@ -74,11 +74,15 @@ impl Rs485Device {
         {
             use std::os::unix::io::FromRawFd;
 
+            use std::ffi::CString;
+
             let port_path = self.config.port.clone();
+            let c_path = CString::new(port_path.as_str())
+                .map_err(|_| Rs485Error::config_failed("无效的端口路径"))?;
 
             // 打开串口
             let fd = unsafe { libc::open(
-                port_path.as_ptr() as *const libc::c_char,
+                c_path.as_ptr(),
                 libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK,
             ) };
 
@@ -86,8 +90,11 @@ impl Rs485Device {
                 return Err(Rs485Error::open_failed(&self.config.port));
             }
 
-            // 配置串口参数
-            self.configure_port(fd)?;
+            // 配置串口参数；失败时关闭 fd 防止泄漏
+            if let Err(e) = self.configure_port(fd) {
+                unsafe { libc::close(fd); }
+                return Err(e);
+            }
 
             *self.port_fd.lock() = Some(fd);
             self.opened.store(true, Ordering::SeqCst);

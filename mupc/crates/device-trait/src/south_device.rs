@@ -267,8 +267,9 @@ impl ProtocolHandler for ModbusHandler {
         let mut frame = vec![self.device_addr];
         frame.extend_from_slice(data);
         let crc = crc16_modbus(&frame);
-        frame.push((crc >> 8) as u8);
+        // Modbus RTU wire format: CRC low byte first (little-endian)
         frame.push(crc as u8);
+        frame.push((crc >> 8) as u8);
         tracing::debug!(
             "ModbusHandler 编码请求 device_id={} addr={} data={:?}",
             device_id,
@@ -286,7 +287,8 @@ impl ProtocolHandler for ModbusHandler {
         if frame[0] != self.device_addr {
             return Err(DeviceError::protocol_error("Modbus 地址不匹配"));
         }
-        let frame_crc = ((frame[frame.len() - 2] as u16) << 8) | (frame[frame.len() - 1] as u16);
+        // Modbus RTU wire format: CRC low byte first (little-endian)
+        let frame_crc = ((frame[frame.len() - 1] as u16) << 8) | (frame[frame.len() - 2] as u16);
         let calc_crc = crc16_modbus(&frame[..frame.len() - 2]);
         if frame_crc != calc_crc {
             return Err(DeviceError::checksum_failed("Modbus CRC 校验失败"));

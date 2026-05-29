@@ -96,7 +96,7 @@ pub enum QuantizationType {
 }
 
 /// 模型类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelType {
     LSTM,
     MADDPG,
@@ -104,7 +104,7 @@ pub enum ModelType {
 }
 
 /// 强化学习算法
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RlAlgorithm {
     MADDPG,
     PPO,

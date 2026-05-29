@@ -103,8 +103,7 @@ impl FwOtaState {
         use FwOtaState::*;
 
         // 任意状态都可以转换到 Failed（出现不可恢复的错误）
-        if to == Failed(String::new()) {
-            // 匹配任意 Failed 变体（忽略具体错误信息）
+        if matches!(to, Failed(_)) {
             return !matches!(from, Failed(_) | Idle);
         }
 

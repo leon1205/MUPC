@@ -258,9 +258,9 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Phase 2+")]
     fn test_read_is_todo() {
         let env = BootloaderEnv::new();
-        let result = env.read("boot_partition");
-        assert!(result.is_err() || true);
+        let _ = env.read("boot_partition");
     }
 }
