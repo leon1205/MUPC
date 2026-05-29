@@ -15,5 +15,17 @@ mupc-core = { path = "../core" }
 mupc-security = { path = "../security" }
 async-trait.workspace = true
 
+# MMS 协议栈 (libIEC61850 FFI 绑定)
+iec61850-sys = { version = "0.3", features = ["tls"], optional = true }
+
+# TLS 支持
+rustls = "0.23"
+webpki-roots = "0.26"
+
 [dev-dependencies]
 tokio-test = "0.4"
+
+[features]
+default = ["real_iec61850"]
+real_iec61850 = ["dep:iec61850-sys"]
+fake_iec61850 = []
