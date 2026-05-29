@@ -1,0 +1,17 @@
+[package]
+name = "mupc_system_monitor"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite"] }
+mupc-common = { path = "../common" }
