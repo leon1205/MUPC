@@ -56,13 +56,47 @@ pub enum InverterStatus {
 }
 
 /// 数据汇聚接口
+///
+/// 与设计文档对齐：
+/// - `start()` — 启动数据采集
+/// - `stop()` — 停止数据采集
+/// - `get_latest_data()` — 获取最新遥测数据
+///
+/// 注意：原 `collect()` 方法保留为内部方法，不再作为 trait 方法暴露。
 #[async_trait]
 pub trait DataCollector: Send + Sync {
-    /// 汇聚数据
-    async fn collect(&self) -> Result<DataPackage, MupcError>;
+    /// 启动数据采集
+    async fn start(&mut self) -> Result<(), MupcError>;
 
-    /// 获取数据源名称
-    fn name(&self) -> &str;
+    /// 停止数据采集
+    async fn stop(&mut self) -> Result<(), MupcError>;
+
+    /// 获取最新遥测数据
+    fn get_latest_data(&self) -> Option<TelemetryData>;
+}
+
+/// 遥测数据（与 DataPackage 区分，用于外部接口返回）
+#[derive(Debug, Clone)]
+pub struct TelemetryData {
+    /// 电气量
+    pub electrical: ElectricalData,
+    /// 电池数据
+    pub battery: BatteryData,
+    /// 设备状态
+    pub device_status: DeviceStatus,
+    /// 时间戳（UTC）
+    pub timestamp: u64,
+}
+
+impl From<DataPackage> for TelemetryData {
+    fn from(pkg: DataPackage) -> Self {
+        Self {
+            electrical: pkg.electrical,
+            battery: pkg.battery,
+            device_status: pkg.device_status,
+            timestamp: pkg.timestamp,
+        }
+    }
 }
 
 /// 高频遥测接口
