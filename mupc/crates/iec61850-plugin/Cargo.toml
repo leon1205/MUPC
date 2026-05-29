@@ -14,6 +14,7 @@ serde_json.workspace = true
 mupc-core = { path = "../core" }
 mupc-security = { path = "../security" }
 async-trait.workspace = true
+parking_lot = "0.12"
 
 # MMS 协议栈 (libIEC61850 FFI 绑定)
 iec61850-sys = { version = "0.3", features = ["tls"], optional = true }
