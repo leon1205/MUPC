@@ -16,8 +16,9 @@ pub mod rknn_types;
 pub mod rl_model;
 
 pub use config::{
-    AiEngineConfig, LstmConfig, ModelType, OnlineUpdateConfig, QuantizationType, RlAlgorithm,
-    RlConfig,
+    ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModelType, NpuConfig,
+    OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig, SceneClassifierConfig,
+    SceneWeights,
 };
 pub use error::AiEngineError;
 pub use model_manager::{ModelManager, ModelStatus};

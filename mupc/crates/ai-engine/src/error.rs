@@ -30,4 +30,22 @@ pub enum AiEngineError {
 
     #[error("在线微调失败: {0}")]
     OnlineUpdateFailed(String),
+
+    #[error("数据融合失败: {0}")]
+    FusionFailed(String),
+
+    #[error("场景分类失败: {0}")]
+    SceneClassificationFailed(String),
+
+    #[error("动作校验失败: {0}")]
+    ActionValidationFailed(String),
+
+    #[error("数据源过期: {0}")]
+    DataSourceStale(String),
+
+    #[error("NPU 温度过高: current={current}°C, limit={limit}°C")]
+    NpuOverheating { current: f32, limit: f32 },
+
+    #[error("奖励计算错误: {0}")]
+    RewardCalculationError(String),
 }

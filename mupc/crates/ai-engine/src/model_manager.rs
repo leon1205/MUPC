@@ -118,6 +118,7 @@ mod tests {
                 quantization: crate::config::QuantizationType::INT8,
             },
             online_update: OnlineUpdateConfig::default(),
+            ..Default::default()
         }
     }
 

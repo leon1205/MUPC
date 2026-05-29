@@ -9,6 +9,26 @@ pub struct AiEngineConfig {
     pub lstm: LstmConfig,
     pub rl: RlConfig,
     pub online_update: OnlineUpdateConfig,
+    pub fusion: FusionConfig,
+    pub scene_classifier: SceneClassifierConfig,
+    pub action_constraint: ActionConstraintConfig,
+    pub reward_weights: SceneWeights,
+    pub npu: NpuConfig,
+}
+
+impl Default for AiEngineConfig {
+    fn default() -> Self {
+        Self {
+            lstm: LstmConfig::default(),
+            rl: RlConfig::default(),
+            online_update: OnlineUpdateConfig::default(),
+            fusion: FusionConfig::default(),
+            scene_classifier: SceneClassifierConfig::default(),
+            action_constraint: ActionConstraintConfig::default(),
+            reward_weights: SceneWeights::default(),
+            npu: NpuConfig::default(),
+        }
+    }
 }
 
 /// LSTM 模型配置
@@ -88,4 +108,100 @@ pub enum ModelType {
 pub enum RlAlgorithm {
     MADDPG,
     PPO,
+}
+
+/// 数据融合配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FusionConfig {
+    pub fusion_period_secs: u64,
+    pub data_source_timeout_secs: u64,
+    pub enable_health_monitoring: bool,
+}
+
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            fusion_period_secs: 1,
+            data_source_timeout_secs: 10,
+            enable_health_monitoring: true,
+        }
+    }
+}
+
+/// 场景分类器配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SceneClassifierConfig {
+    pub classification_period_secs: u64,
+    pub min_confidence: f64,
+    pub oscillation_lock_minutes: u32,
+}
+
+impl Default for SceneClassifierConfig {
+    fn default() -> Self {
+        Self {
+            classification_period_secs: 60,
+            min_confidence: 0.6,
+            oscillation_lock_minutes: 30,
+        }
+    }
+}
+
+/// 动作约束配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActionConstraintConfig {
+    pub p_batt_ramp_limit_kw: f64,
+    pub q_batt_ramp_limit_kvar: f64,
+    pub max_apparent_power_kva: f64,
+    pub pv_limit_min: f64,
+}
+
+impl Default for ActionConstraintConfig {
+    fn default() -> Self {
+        Self {
+            p_batt_ramp_limit_kw: 50.0,
+            q_batt_ramp_limit_kvar: 30.0,
+            max_apparent_power_kva: 500.0,
+            pv_limit_min: 0.1,
+        }
+    }
+}
+
+/// NPU 配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NpuConfig {
+    pub temperature_limit_c: f32,
+    pub throttle_factor: f64,
+    pub enable_fallback_to_cpu: bool,
+}
+
+impl Default for NpuConfig {
+    fn default() -> Self {
+        Self {
+            temperature_limit_c: 85.0,
+            throttle_factor: 0.5,
+            enable_fallback_to_cpu: true,
+        }
+    }
+}
+
+/// 场景权重映射
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SceneWeights {
+    pub agricultural_irrigation: [f64; 4],
+    pub commercial_arbitrage: [f64; 2],
+    pub demand_control: [f64; 2],
+    pub virtual_power_plant: [f64; 3],
+    pub ultra_green: [f64; 2],
+}
+
+impl Default for SceneWeights {
+    fn default() -> Self {
+        Self {
+            agricultural_irrigation: [0.25, 0.25, 0.25, 0.25],
+            commercial_arbitrage: [0.5, 0.5],
+            demand_control: [0.5, 0.5],
+            virtual_power_plant: [0.4, 0.3, 0.3],
+            ultra_green: [0.5, 0.5],
+        }
+    }
 }

@@ -2,7 +2,7 @@
 //!
 //! 用于微电网能量管理决策
 //! 输入：系统状态 (SOC, PV, Load, Grid, Transformer)
-//! 输出：最优动作 (电池功率, 负荷切除, PV限制)
+//! 输出：最优动作 (电池功率, 无功功率, 三相补偿, 负荷切除, PV限制)
 
 use crate::config::{ModelType, RlAlgorithm, RlConfig};
 use crate::error::AiEngineError;
@@ -51,15 +51,26 @@ impl SystemState {
 }
 
 /// RL 模型输出（决策动作）
+///
+/// 包含 7 个动作维度 + 1 个置信度，共 8 个字段，
+/// 对应 RL 模型输出向量的 8 个元素。
 #[derive(Debug, Clone)]
 pub struct ActionOutput {
-    /// 电池功率设定 (kW)
+    /// 电池有功功率设定值 (kW), [-500.0, 500.0]
     pub p_batt_set: f64,
-    /// 负荷切除 (kW)
+    /// 无功功率设定值 (kVar), [-300.0, 300.0]
+    pub q_batt_set: f64,
+    /// A 相分相补偿系数, [-1.0, 1.0]
+    pub compens_factor_a: f64,
+    /// B 相分相补偿系数, [-1.0, 1.0]
+    pub compens_factor_b: f64,
+    /// C 相分相补偿系数, [-1.0, 1.0]
+    pub compens_factor_c: f64,
+    /// 可中断负荷切除量 (kW), [0.0, 500.0]
     pub load_shedding: f64,
-    /// PV 限功率 (0.0-1.0)
+    /// 光伏限功率比例, [0.0, 1.0]
     pub pv_limit: f64,
-    /// 决策置信度 (0.0-1.0)
+    /// 决策置信度 (0.0 ~ 1.0)
     pub confidence: f64,
 }
 
@@ -98,14 +109,23 @@ impl RLModel {
         let output = self.runtime.run(&input).await?;
 
         // 解析输出
-        // 输出格式: [p_batt_set, load_shedding, pv_limit, confidence, ...]
-        let p_batt_set = output[0] as f64;
-        let load_shedding = output[1] as f64;
-        let pv_limit = (output[2] as f64).clamp(0.0, 1.0);
-        let confidence = (output.get(3).copied().unwrap_or(0.8) as f64).clamp(0.0, 1.0);
+        // 输出格式: [p_batt_set, q_batt_set, compens_a, compens_b, compens_c,
+        //             load_shedding, pv_limit, confidence]
+        let p_batt_set = (output[0] as f64).clamp(-500.0, 500.0);
+        let q_batt_set = (output[1] as f64).clamp(-300.0, 300.0);
+        let compens_factor_a = (output[2] as f64).clamp(-1.0, 1.0);
+        let compens_factor_b = (output[3] as f64).clamp(-1.0, 1.0);
+        let compens_factor_c = (output[4] as f64).clamp(-1.0, 1.0);
+        let load_shedding = (output[5] as f64).clamp(0.0, 500.0);
+        let pv_limit = (output[6] as f64).clamp(0.0, 1.0);
+        let confidence = (output.get(7).copied().unwrap_or(0.8) as f64).clamp(0.0, 1.0);
 
         Ok(ActionOutput {
             p_batt_set,
+            q_batt_set,
+            compens_factor_a,
+            compens_factor_b,
+            compens_factor_c,
             load_shedding,
             pv_limit,
             confidence,
