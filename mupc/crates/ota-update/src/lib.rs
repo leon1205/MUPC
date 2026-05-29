@@ -1,10 +1,12 @@
 //! OTA 更新模块
 //!
 //! Phase 3C.2 OTA 模型自动更新模块
+//! Phase 2+ 固件 OTA 升级子系统
 
 pub mod config;
 pub mod downloader;
 pub mod error;
+pub mod firmware;
 pub mod manager;
 pub mod rollback;
 pub mod scheduler;
