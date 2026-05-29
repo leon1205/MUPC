@@ -1,0 +1,20 @@
+[package]
+name = "dummy-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 插件接口
+device-trait = { path = "../../mupc/crates/device-trait" }
+
+[profile.release]
+opt-level = 3
+lto = true
