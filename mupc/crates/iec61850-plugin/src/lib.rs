@@ -10,13 +10,12 @@ mod mms_client;
 mod mms_types;
 mod asn1_utils;
 
-pub use config::{Iec61850Config, GooseConfig, MmsConfig};
+pub use config::{Iec61850Config, GooseConfig, MmsConfig, MmsTlsConfig};
 pub use device::{Iec61850DeviceImpl, Iec61850Device};
 pub use errors::{Iec61850Error, Result};
 pub use goose::{GooseSubscriber, GooseMessage};
-pub use mms_client::MmsClient;
-pub use mms_types::{DataObject, MmsRequest, MmsResponse, MmsService};
-pub use asn1_utils::{encode_mms_request, decode_mms_response};
+pub use mms_client::{MmsClient, MmsClientState, MmsClientTrait};
+pub use mms_types::{MmsRequest, MmsResponse, MmsService, DataObject};
 
 /// IEC 61850 设备状态
 #[derive(Debug, Clone, PartialEq)]
@@ -45,5 +44,11 @@ mod tests {
         assert_eq!(Iec61850Status::Connected.to_string(), "Connected");
         assert_eq!(Iec61850Status::Disconnected.to_string(), "Disconnected");
         assert_eq!(Iec61850Status::Error("test".to_string()).to_string(), "Error: test");
+    }
+
+    #[test]
+    fn test_mms_types_export() {
+        let req = MmsRequest::read("LLN0", "ST$Pos");
+        assert_eq!(req.service, MmsService::Read);
     }
 }
