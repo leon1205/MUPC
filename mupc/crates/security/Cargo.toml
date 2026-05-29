@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 # 国密实现 (gmsm)
-gmsm = { version = "0.14", features = ["sm2", "sm3", "sm4", "x509"], optional = true }
+gmsm = { version = "0.1.0", optional = true }
 # 兼容旧代码 (ring 模拟实现)
 ring = { version = "0.17", optional = true }
 rustls = "0.23"

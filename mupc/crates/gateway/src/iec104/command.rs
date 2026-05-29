@@ -18,6 +18,10 @@ pub struct ControlCommand {
     pub switch_state: Option<bool>,
     /// 优先级
     pub priority: u8,
+    /// 一次调频 K 值
+    pub k_value: Option<f64>,
+    /// 一次调频死区 (Hz)
+    pub deadband: Option<f64>,
 }
 
 /// 命令类型

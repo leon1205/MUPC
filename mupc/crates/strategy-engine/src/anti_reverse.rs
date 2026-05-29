@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crate::config::AntiReverseConfig;
 use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
 use async_trait::async_trait;
@@ -7,18 +9,18 @@ use mupc_data_processing::telemetry::DataPackage;
 /// 防逆流策略
 pub struct AntiReverseStrategy {
     config: AntiReverseConfig,
-    pv_limit_count: u8,
+    pv_limit_count: AtomicU8,
 }
 
 impl AntiReverseStrategy {
     pub fn new(config: AntiReverseConfig) -> Self {
         Self {
             config,
-            pv_limit_count: 0,
+            pv_limit_count: AtomicU8::new(0),
         }
     }
 
-    pub fn evaluate_sync(&mut self, data: &DataPackage) -> ControlCommand {
+    pub fn evaluate_sync(&self, data: &DataPackage) -> ControlCommand {
         let grid_power = data.electrical.active_power.unwrap_or(0.0);
         let pv_power = data.device_status.pv_power.unwrap_or(0.0);
         let battery_soc = data.battery.soc.unwrap_or(50.0);
@@ -26,9 +28,9 @@ impl AntiReverseStrategy {
         let (p_batt, pv_limit) = self.decide(grid_power, pv_power, battery_soc);
 
         if pv_limit > 0.0 {
-            self.pv_limit_count += 1;
+            self.pv_limit_count.fetch_add(1, Ordering::SeqCst);
         } else {
-            self.pv_limit_count = 0;
+            self.pv_limit_count.store(0, Ordering::SeqCst);
         }
 
         ControlCommand {
@@ -44,7 +46,7 @@ impl AntiReverseStrategy {
         }
     }
 
-    fn decide(&mut self, grid_power: f64, pv_power: f64, battery_soc: f64) -> (f64, f64) {
+    fn decide(&self, grid_power: f64, pv_power: f64, battery_soc: f64) -> (f64, f64) {
         let p_batt: f64;
         let pv_limit: f64;
 
@@ -53,7 +55,7 @@ impl AntiReverseStrategy {
                 p_batt = (pv_power * 0.8).min(self.config.max_charge_power);
                 pv_limit = 0.0;
             } else {
-                pv_limit = pv_power * (self.pv_limit_count as f64 * 0.1).min(0.5);
+                pv_limit = pv_power * (self.pv_limit_count.load(Ordering::Relaxed) as f64 * 0.1).min(0.5);
                 p_batt = 0.0;
             }
         } else {
