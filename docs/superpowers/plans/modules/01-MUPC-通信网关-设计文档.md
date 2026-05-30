@@ -5,9 +5,7 @@
 | v1.1 | 2026-05-29 | 架构师 | **[DESIGN_APPROVED]** |
 
 **来源文档：**
-- `docs/superpowers/plans/2026-05-27-MUPC-通信管理模块-技术设计.md` — 主技术设计（gateway/IEC104 部分）
 - `docs/superpowers/plans/2026-05-28-IEC61850-MMS-客户端真正实现-实施计划.md` — IEC 61850 MMS 实施计划
-- `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-消息总线扩展-设计文档.md` — **[DESIGN_APPROVED]**
 - `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-实施计划.md` — Phase 3B 实施计划
 - `docs/superpowers/specs/modules/01-MUPC-通信网关-PRD.md` — 通信网关 PRD
 
@@ -1230,9 +1228,7 @@ mupc/docker/mosquitto/
 | 文档 | 路径 | 状态 |
 |------|------|------|
 | 通信网关 PRD | `docs/superpowers/specs/modules/01-MUPC-通信网关-PRD.md` | 合并修订版 v1.0 |
-| 通信管理模块技术设计 | `docs/superpowers/plans/2026-05-27-MUPC-通信管理模块-技术设计.md` | v1.1 待复审 |
 | IEC61850 MMS 实施计划 | `docs/superpowers/plans/2026-05-28-IEC61850-MMS-客户端真正实现-实施计划.md` | — |
-| Phase 3B 消息总线设计 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-消息总线扩展-设计文档.md` | **[DESIGN_APPROVED]** |
 | Phase 3B 实施计划 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-实施计划.md` | — |
 
 ---

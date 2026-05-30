@@ -6,7 +6,6 @@
 
 **合并来源：**
 - `docs/superpowers/specs/modules/04-MUPC-策略引擎-PRD.md`（产品需求）
-- `docs/superpowers/plans/2026-05-27-MUPC-通信管理模块-技术设计.md`（主技术设计，第 2.2/5/6 节）
 - `docs/superpowers/plans/2026-05-27-MUPC-Phase3A-实施计划.md`（Task 5-10 实现细节）
 - 代码库 `mupc/crates/strategy-engine/src/`（当前实现对齐）
 

@@ -20,13 +20,8 @@
 
 | 文档 | 路径 | 状态 |
 |------|------|------|
-| Phase 3C AI 优化引擎设计文档 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-设计文档.md` | [DESIGN_APPROVED] |
 | Phase 3C 实施计划 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-实施计划.md` | 已归档 |
-| RKNN Runtime FFI 设计文档 | `docs/superpowers/plans/2026-05-28-RKNN-Runtime-FFI实现-设计文档.md` | [DESIGN_APPROVED] |
-| AI 场景自适应与 RL 设计文档 | `docs/superpowers/plans/2026-05-29-MUPC-AI场景自适应与RL-设计文档.md` | [DESIGN_APPROVED]（第 4 章已被 v2.0 废弃） |
-| AI 预设运行场景与互斥模式选择设计 | `docs/superpowers/plans/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` | **[DESIGN_APPROVED]** |
 | AI 引擎 PRD | `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` | v2.0 |
-| 预设运行场景 PRD | `docs/superpowers/specs/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` | [REVIEWED: PASS] |
 
 ---
 
@@ -531,7 +526,7 @@ impl DataFusionEngine {
 
 ## 4. 场景分类器设计 ~~→ v2.0 废弃，替换为 ModeSelector~~
 
-> **v2.0 设计变更：** 本章 SceneClassifier 自动分类器已被废弃。运行场景确定方式从"规则引擎自动分类"改为"预设互斥模式选择"。详见 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED]。
+> **v2.0 设计变更：** 本章 SceneClassifier 自动分类器已被废弃。运行场景确定方式从"规则引擎自动分类"改为"预设互斥模式选择"。
 >
 > 以下为 v1.1 原设计内容（保留作为历史参考，实现时请使用 ModeSelector 替代）。
 
@@ -2212,8 +2207,7 @@ strategy-engine 进入兜底模式
 | 3 | 章节 4 标记废弃 | 4. 标题 + 4.1 | SceneClassifier 设计保留作为历史参考，添加 v2.0 废弃说明和迁移指引 |
 | 4 | ModelManager 结构更新 | 8.1 | scene_classifier → mode_selector 字段替换 |
 | 5 | 消息总线 topic 更新 | 13. 消息 Topic 定义 | ai/scene_change → ai/mode_switch |
-| 6 | 新增设计文档引用 | 文档头部参考表 | 新增 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED] |
+| 6 | 新增设计文档引用 | 文档头部参考表 | 新增预设运行场景与互斥模式选择设计文档引用 |
 | 7 | 版本号更新 | 文档头部 | v1.0 → v2.0 |
 
-**修订依据：** `docs/superpowers/specs/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS]
-**配套设计：** `docs/superpowers/plans/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED]
+**修订依据：** 预设运行场景与互斥模式选择设计（v2.0 核心变更）

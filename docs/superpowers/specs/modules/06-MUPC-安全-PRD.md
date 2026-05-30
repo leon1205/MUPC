@@ -1128,10 +1128,6 @@ Phase 5: 安全告警与合规仪表盘（P1）
 
 | 文档 | 路径 |
 |------|------|
-| SM2/SM4 国密设计文档 | `docs/superpowers/specs/2026-05-28-SM2-SM4-国密真正实现-设计文档.md` |
-| 安全启动 PRD | `docs/superpowers/specs/2026-05-29-MUPC-安全启动-PRD.md` |
-| 电力合规 PRD | `docs/superpowers/specs/2026-05-29-MUPC-电力安全合规增强-PRD.md` |
-| 主 PRD | `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` |
 | 功能清单 | `docs/微电网特种调控装置（MUPC）通信管理模块功能清单.md` |
 | 技术债清单 | `docs/technical-debt.md` |
 

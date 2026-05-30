@@ -6,7 +6,6 @@
 
 **来源文档：**
 - `docs/superpowers/specs/modules/10-MUPC-核间通信-PRD.md` v1.0
-- `docs/superpowers/plans/2026-05-27-MUPC-通信管理模块-技术设计.md` v1.1（提取 intercore 部分）
 - `mupc/crates/intercore/src/` 代码库实际实现
 
 ---

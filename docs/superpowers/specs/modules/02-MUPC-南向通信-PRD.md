@@ -971,9 +971,6 @@ hplc-plugin → device-trait
 
 | 文档 | 说明 |
 |------|------|
-| `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` | 主 PRD（Phase 1，提取南向通信部分） |
-| `docs/superpowers/specs/2026-05-27-MUPC-Phase2-规格文档.md` | Phase 2 规格文档（南向通信架构、Device trait） |
-| `docs/superpowers/specs/2026-05-29-MUPC-南向通信扩展-设计文档.md` | 南向通信扩展设计（SouthDevice、ProtocolHandler、HPLC） |
 | `docs/superpowers/specs/2026-05-29-MUPC-动态插件-FFI绑定规范.md` | 动态插件 FFI 绑定规范 |
 
 ---

@@ -767,11 +767,7 @@ Web UI 显示安全告警信息
 | 文档 | 路径 |
 |------|------|
 | 功能清单 | `docs/微电网特种调控装置（MUPC）通信管理模块功能清单.md` |
-| 主 PRD | `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` |
-| Web UI 设计 | `docs/superpowers/plans/2026-05-27-MUPC-WebUI-设计.md` |
-| OTA 模块 PRD | `docs/superpowers/specs/2026-05-28-Phase3C2-OTA模型自动更新-PRD.md` |
 | 需求覆盖度报告 | `docs/superpowers/reports/2026-05-29-MUPC-需求覆盖度审查报告.md` |
-| 原始 PRD | `docs/superpowers/specs/2026-05-29-MUPC-本地无线通信-PRD.md` |
 
 ---
 

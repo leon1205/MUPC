@@ -4,7 +4,7 @@
 |------|------|------|------|
 | v1.0 | 2026-05-29 | 需求分析师 | 初稿 |
 
-**来源文档：** `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` v1.3
+> 本文档为核间通信模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
 
 ---
 
@@ -582,7 +582,7 @@ strategy-engine ──→ intercore ──→ 实时控制模块
 
 | 文档 | 路径 |
 |------|------|
-| 主 PRD | `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` |
+| 项目需求主文档 | `docs/superpowers/specs/PROJECT-MUPC-项目需求主文档.md` |
 | 项目架构说明 | `CLAUDE.md` |
 | 技术债清单 | `docs/technical-debt.md` |
 

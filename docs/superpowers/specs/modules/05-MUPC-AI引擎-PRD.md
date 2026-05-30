@@ -6,12 +6,9 @@
 
 ---
 
-**来源文档：**
-- `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md`（主 PRD，AI 引擎部分）
-- `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-设计文档.md`（Phase 3C AI 引擎设计）
-- `docs/superpowers/specs/2026-05-28-RKNN-Runtime-FFI实现-PRD.md` [REVIEWED: PASS]
-- `docs/superpowers/specs/2026-05-29-MUPC-AI场景自适应与强化学习完整定义-PRD.md`
-- `docs/superpowers/specs/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` **[REVIEWED: PASS]**
+> 本文档为 AI 优化引擎模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
+>
+> **v2.0 核心变更：** SceneClassifier 自动分类器已删除，替换为 ModeSelector 互斥模式选择器。详见第 4 章。
 
 ---
 
@@ -234,7 +231,7 @@ DataFusionEngine 负责周期性（默认 1Hz）从多个数据源采集数据�
 
 ## 4. 预设运行场景与互斥模式选择
 
-> **设计变更说明（v2.0）：** 本章从 v1.1 的"场景自适应识别（自动分类）"改造为"预设运行场景 + 互斥模式选择（人工/远程指定）"。SceneClassifier 自动分类器已删除，替换为 ModeSelector 模式选择器。详细变更逻辑见 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS]。
+> **设计变更说明（v2.0）：** 本章从 v1.1 的"场景自适应识别（自动分类）"改造为"预设运行场景 + 互斥模式选择（人工/远程指定）"。SceneClassifier 自动分类器已删除，替换为 ModeSelector 模式选择器。
 
 ### 4.1 功能概述
 
@@ -1013,11 +1010,8 @@ mupc/crates/ai-engine/
 **文档状态：** 合并版（v2.0）
 
 **来源文档：**
-1. `2026-05-27-MUPC-通信管理模块-PRD.md` -- AI 引擎定位、降级流程、兜底策略（Section 5.1, 6.2, 6.3）
-2. `2026-05-28-MUPC-Phase3C-AI优化引擎-设计文档.md` -- 架构、LSTM、RL、ModelManager、在线微调核心设计
-3. `2026-05-28-RKNN-Runtime-FFI实现-PRD.md` [REVIEWED: PASS] -- RKNN Runtime FFI 完整规范
-4. `2026-05-29-MUPC-AI场景自适应与强化学习完整定义-PRD.md` -- 场景分类器、完整状态/动作空间、5 种奖励函数、数据融合（第 4 章场景分类器已被 v2.0 废弃）
-5. `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` **[REVIEWED: PASS]** -- 预设运行场景与互斥模式选择（v2.0 核心变更）
+1. 历史来源文档已在 v1.0 文档体系重构中合并至本文档，不再单独维护
+2. v2.0 修订依据为预设运行场景与互斥模式选择设计方案
 
 ---
 
@@ -1048,4 +1042,4 @@ mupc/crates/ai-engine/
 | 7 | 更新验收标准汇总 | 10.3、10.7 | 场景识别验收标准替换为运行场景选择验收标准 |
 | 8 | 版本号更新 | 文档头部/尾部 | v1.1 → v2.0 |
 
-**修订依据：** `docs/superpowers/specs/2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS]
+**修订依据：** 预设运行场景与互斥模式选择设计（v2.0 核心变更）

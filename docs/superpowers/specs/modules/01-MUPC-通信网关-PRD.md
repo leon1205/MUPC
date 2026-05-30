@@ -4,11 +4,7 @@
 |------|------|------|------|
 | v1.1 | 2026-05-29 | 需求分析师 | **[REVIEWED: PASS]** |
 
-**来源文档：**
-- `2026-05-27-MUPC-通信管理模块-PRD.md` — **[REVIEWED: PASS]**
-- `2026-05-27-MUPC-Phase2-规格文档.md` — **[REVIEWED: PASS]**
-- `2026-05-28-IEC61850-MMS-客户端真正实现-设计文档.md` — **DRAFT**
-- `2026-05-28-MUPC-Phase3B-消息总线扩展-设计文档.md` — **[DESIGN_APPROVED]**
+> 本文档为通信网关模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
 
 ---
 
@@ -732,10 +728,7 @@ pub enum BusError {
 
 | 文档 | 路径 | 评审状态 |
 |------|------|----------|
-| 通信管理模块 PRD | `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` | **[REVIEWED: PASS]** |
-| Phase 2 规格文档 | `docs/superpowers/specs/2026-05-27-MUPC-Phase2-规格文档.md` | **[REVIEWED: PASS]** |
-| IEC61850 MMS 设计文档 | `docs/superpowers/specs/2026-05-28-IEC61850-MMS-客户端真正实现-设计文档.md` | **DRAFT** |
-| 消息总线扩展设计文档 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-消息总线扩展-设计文档.md` | **[DESIGN_APPROVED]** |
+| 项目需求主文档 | `docs/superpowers/specs/PROJECT-MUPC-项目需求主文档.md` | **[REVIEWED: PASS]** |
 | 技术债清单 | `docs/technical-debt.md` | — |
 
 ---

@@ -4,12 +4,10 @@
 |------|------|------|------|
 | v1.2 | 2026-05-29 | 架构师 | 合并修订 **[DESIGN_APPROVED]** |
 
-> **v1.2 修订说明：** 同步 v2.0 预设运行场景设计，移除自动识别/置信度/兜底模式/恢复自动识别。详细变更见 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED]。
+> **v1.2 修订说明：** 同步 v2.0 预设运行场景设计，移除自动识别/置信度/兜底模式/恢复自动识别。
 
 **来源文档：**
 - `docs/superpowers/specs/modules/08-MUPC-Web管理与AI可视化-PRD.md` — 产品需求文档 **[REVIEWED: PASS]**
-- `docs/superpowers/plans/2026-05-27-MUPC-WebUI-设计.md` — Web UI 设计文档 **[DESIGN_APPROVED]**
-- `docs/superpowers/plans/2026-05-29-MUPC-AI可视化与专家干预-设计文档.md` — AI 可视化与专家干预技术设计 **[DESIGN_APPROVED]**
 
 **目标 crate：** `web-api`
 **关联 crate：** `ai-engine`、`strategy-engine`、`data-processing`
@@ -2103,8 +2101,6 @@ A/B 测试流程中的边界条件处理和异常恢复机制。
 
 **来源文档状态：**
 - `08-MUPC-Web管理与AI可视化-PRD.md` — **[REVIEWED: PASS]**
-- `2026-05-27-MUPC-WebUI-设计.md` — **[DESIGN_APPROVED]**
-- `2026-05-29-MUPC-AI可视化与专家干预-设计文档.md` — **[DESIGN_APPROVED]**
 
 **变更说明：**
 - **v1.0**：合并三份文档中与 Web 管理和 AI 可视化相关的全部内容
@@ -2142,5 +2138,4 @@ A/B 测试流程中的边界条件处理和异常恢复机制。
 | 更新审计操作类型 | 移除 resume_auto 枚举值 |
 | 更新边界条件 | 9.3.3: "AI 自动"优先级移除，改为"调度主站 > 策略管理员" |
 | 版本更新 | v1.1 → v1.2 |
-| 修订依据 | `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS] |
-| 配套设计 | `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-设计文档.md` [DESIGN_APPROVED] |
+| 修订依据 | 预设运行场景与互斥模式选择设计（v2.0 核心变更） |

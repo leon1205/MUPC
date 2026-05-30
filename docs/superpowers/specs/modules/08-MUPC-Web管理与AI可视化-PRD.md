@@ -5,12 +5,8 @@
 | v1.1 | 2026-05-29 | 需求分析师 | 合并修订 |
 
 > **v1.1 修订说明：** 同步 v2.0 预设运行场景设计，移除自动识别/置信度/兜底模式/恢复自动识别概念。
-> 详细变更见 `2026-05-29-MUPC-AI预设运行场景与互斥模式选择-PRD.md` [REVIEWED: PASS]。
 
-**来源文档：**
-- `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` — Web UI 章节（3.6）及非功能需求 **[REVIEWED: PASS]**
-- `docs/superpowers/plans/2026-05-27-MUPC-WebUI-设计.md` — UI 设计（提取需求层规格）
-- `docs/superpowers/specs/2026-05-29-MUPC-AI可视化与专家干预-PRD.md` — AI 可视化与专家干预完整功能 **[REVIEWED: PASS]**
+> 本文档为 Web 管理与 AI 可视化模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
 
 **目标 crate：** `web-api`
 
@@ -956,10 +952,6 @@ persist_path = "/var/lib/mupc/current_mode"  # 持久化文件路径
 
 | 文档 | 路径 |
 |------|------|
-| 通信管理模块 PRD | `docs/superpowers/specs/2026-05-27-MUPC-通信管理模块-PRD.md` |
-| Web UI 设计文档 | `docs/superpowers/plans/2026-05-27-MUPC-WebUI-设计.md` |
-| AI 可视化与专家干预 PRD | `docs/superpowers/specs/2026-05-29-MUPC-AI可视化与专家干预-PRD.md` |
-| AI 优化引擎设计文档 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-设计文档.md` |
 | 功能清单 | `docs/微电网特种调控装置（MUPC）通信管理模块功能清单.md` |
 
 ### 14.3 依赖的外部 crate
