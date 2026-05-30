@@ -55,30 +55,25 @@
 │                                                                             │
 │  数据源层                       融合层                 决策层               │
 │  ┌──────────┐              ┌──────────────┐       ┌──────────────┐        │
-│  │intercore │────TCP──────▶│              │       │ SceneClassifier│       │
-│  │(实时数据) │              │ DataFusion   │──────▶│ (场景识别)    │       │
+│  │intercore │────TCP──────▶│              │       │ RewardCalculator│     │
+│  │(实时数据) │              │ DataFusion   │──────▶│ (奖励计算)    │       │
 │  ├──────────┤              │ Engine       │       └──────┬───────┘        │
 │  │ LSTM     │────预测─────▶│ (1Hz融合)    │              │                 │
 │  │ (预测值)  │              │              │       ┌──────▼───────┐        │
-│  ├──────────┤              │ 输出:        │       │ RewardCalculator│      │
-│  │气象 API  │────拉取─────▶│ FusedSystem  │──────▶│ (奖励计算)    │       │
+│  ├──────────┤              │ 输出:        │       │ RLModel       │        │
+│  │气象 API  │────拉取─────▶│ FusedSystem  │──────▶│ (决策模型)    │       │
 │  │          │              │ State        │       └──────┬───────┘        │
 │  ├──────────┤              │ (50维向量)   │              │                 │
-│  │物联平台   │────订阅─────▶│              │       ┌──────▼───────┐        │
-│  │(电价)    │              │              │       │ RLModel       │        │
-│  ├──────────┤              │              │       │ (决策模型)    │        │
-│  │gateway   │────事件─────▶│              │       └──────┬───────┘        │
-│  │(调度指令) │              └──────────────┘              │                 │
-│  └──────────┘                                          │                 │
-│                                                  ┌──────▼───────┐        │
-│                                                  │ ActionValidator│       │
-│                                                  │ (约束校验)    │       │
-│                                                  └──────┬───────┘        │
-│                                                         │                 │
-│                                                  ┌──────▼───────┐        │
-│                                                  │ ModelManager  │        │
-│                                                  │ (统一调度)    │        │
-│                                                  └──────┬───────┘        │
+│  │物联平台   │────订阅─────▶│              │              │                 │
+│  │(电价)    │              │              │       ┌──────▼───────┐        │
+│  ├──────────┤              │              │       │ ActionValidator│       │
+│  │gateway   │────事件─────▶│              │       │ (约束校验)    │       │
+│  │(调度指令) │              └──────┬───────┘       └──────┬───────┘        │
+│  ├──────────┤                     │                      │                 │
+│  │ModeSelector│───模式选择───────▶│               ┌──────▼───────┐        │
+│  │(预设场景) │                    │               │ ModelManager  │        │
+│  └──────────┘                     │               │ (统一调度)    │        │
+│                                   │               └──────┬───────┘        │
 │                                                         │                 │
 │                    ┌────────▼────────┐                   │                 │
 │                    │  RKNN Runtime   │ ─── FFI ─── librknnrt.so            │
@@ -1599,7 +1594,8 @@ pub struct ModelManager {
     inference_backend: Arc<RwLock<FallbackRuntime>>,
     // 状态
     status: Arc<RwLock<ModelStatus>>,
-    current_scene: Arc<RwLock<SceneRecognitionResult>>,
+    // v2.0: current_scene → current_mode (RunningMode)
+    current_mode: Arc<RwLock<RunningMode>>,
     // 上一周期状态（用于 delta_SOC 等差分奖励计算）
     previous_state: Arc<RwLock<Option<FusedSystemState>>>,
 }
@@ -1612,7 +1608,7 @@ pub struct ModelManager {
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionCycleResult {
     pub fused_state: FusedSystemState,
-    pub scene: SceneRecognitionResult,
+    pub mode: RunningMode,
     pub action: ActionOutput,
     pub validation: ValidationReport,
     pub reward: Option<SceneRewardValue>,
@@ -1620,7 +1616,7 @@ pub struct DecisionCycleResult {
 }
 
 impl ModelManager {
-    /// 完整决策流程（含场景识别 + 融合 + 推理 + 校验）
+    /// 完整决策流程（含模式选择 + 融合 + 推理 + 校验）
     pub async fn full_decision_cycle(&self) -> Result<DecisionCycleResult, AiEngineError> {
         let start = Instant::now();
 
@@ -1629,14 +1625,12 @@ impl ModelManager {
             .as_ref().ok_or(AiEngineError::ModelNotLoaded)?
             .fuse_once().await?;
 
-        // 2. 场景识别
-        let scene = self.scene_classifier.read().await
-            .as_ref().ok_or(AiEngineError::ModelNotLoaded)?
-            .recognize(&fused_state).await;
+        // 2. 获取当前运行模式
+        let mode = self.mode_selector.current();
 
-        // 3. 更新权重
+        // 3. 更新权重（传入 RunningMode）
         let weights = self.reward_calculator.read().await
-            .as_ref().map(|rc| rc.get_weights(scene.scene));
+            .as_ref().map(|rc| rc.get_weights_for_mode(mode));
 
         // 4. RL 决策
         let raw_action = self.rl_model.read().await
@@ -1666,7 +1660,7 @@ impl ModelManager {
 
         // 保存上一周期状态
         *self.previous_state.write().await = Some(fused_state.clone());
-        *self.current_scene.write().await = scene.clone();
+        *self.current_mode.write().await = mode;
 
         let elapsed = start.elapsed();
 
@@ -1704,7 +1698,7 @@ impl ModelManager {
 
 ```rust
 use mupc_ai_engine::{
-    FusedSystemState, SceneRecognitionResult, SceneRewardValue,
+    FusedSystemState, SceneRewardValue,
     ActionValidator, ValidationReport, DecisionCycleResult,
 };
 
@@ -1712,13 +1706,13 @@ use mupc_ai_engine::{
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<ModelManager>>>,
     status: Arc<RwLock<ModelStatus>>,
-    scene_rx: broadcast::Receiver<SceneRecognitionResult>,
+    mode_rx: broadcast::Receiver<ModeSwitchEvent>,
     context: Arc<RwLock<AiIntegrationContext>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AiIntegrationContext {
-    pub current_scene: SceneRecognitionResult,
+    pub current_mode: RunningMode,
     pub last_action: Option<ActionOutput>,
     pub last_reward: Option<f64>,
     pub cycle_count: u64,
@@ -1733,7 +1727,7 @@ impl AiIntegrator {
         let result = manager.full_decision_cycle().await?;
 
         let mut ctx = self.context.write().await;
-        ctx.current_scene = result.scene.clone();
+        ctx.current_mode = result.mode;
         ctx.last_action = Some(result.action.clone());
         ctx.last_reward = result.reward;
         ctx.cycle_count += 1;
@@ -1751,8 +1745,8 @@ impl AiIntegrator {
         let action_validator = self.model_manager.read().await
             .as_ref().unwrap().action_validator();
         let mut action_clone = action.clone();
-        let scene = self.context.read().await.current_scene.scene;
-        let ai_report = action_validator.validate(&mut action_clone, state, Some(scene));
+        let mode = self.context.read().await.current_mode;
+        let ai_report = action_validator.validate(&mut action_clone, state, Some(mode));
 
         // 2. strategy-engine 的 AiCommandValidator (策略约束)
         let cmd = self.action_to_command(&action_clone);
@@ -1839,7 +1833,7 @@ mupc/crates/ai-engine/
 │   ├── model_manager.rs          # 模型管理器（统一调度）
 │   ├── lstm_model.rs             # LSTM 预测模型
 │   ├── rl_model.rs               # MADDPG/PPO 决策模型（含 SystemState、ActionOutput）
-│   ├── scene_classifier.rs       # 场景分类器（SceneClassifier + RuleBasedClassifier）
+│   ├── mode_selector.rs          # 模式选择器（v2.0 替代 scene_classifier.rs）
 │   ├── reward_calculator.rs      # 奖励函数计算器（5 种场景奖励函数）
 │   ├── data_fusion.rs            # 多源数据融合引擎（5 个数据源适配器）
 │   ├── action_validator.rs       # 动作约束校验器（6 条约束规则）
@@ -1879,7 +1873,7 @@ pub struct AiEngineConfig {
     pub rl: RlConfig,
     pub online_update: OnlineUpdateConfig,
     pub fusion: FusionConfig,
-    pub scene_classifier: SceneClassifierConfig,
+    pub mode: ModeConfig,
     pub action_constraint: ActionConstraintConfig,
     pub reward_weights: HashMap<String, SceneWeights>,
     pub npu: NpuConfig,
@@ -1918,16 +1912,11 @@ pub struct FusionConfig {
     pub enable_health_monitor: bool,  // 默认 true
 }
 
-/// 场景分类器配置
+/// 运行模式配置（v2.0 替代 SceneClassifierConfig）
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SceneClassifierConfig {
-    pub enabled: bool,                       // 默认 true
-    pub window_size: usize,                  // 默认 30
-    pub classification_interval_secs: u64,   // 默认 60
-    pub min_confidence: f64,                 // 默认 0.6
-    pub oscillation_window_mins: u64,        // 默认 5
-    pub oscillation_lock_mins: u64,          // 默认 30
-    pub use_ml_auxiliary: bool,              // 默认 false
+pub struct ModeConfig {
+    pub default_mode: String,          // 默认 "AgriculturalIrrigation"
+    pub persist_path: String,          // 默认 "/var/lib/mupc/mode/current"
 }
 
 /// 动作约束配置
@@ -2024,7 +2013,7 @@ pub enum AiEngineError {
 /// AI 消息总线
 pub struct AiMessageBus {
     pub fused_state_tx: broadcast::Sender<FusedSystemState>,
-    pub scene_change_tx: broadcast::Sender<SceneRecognitionResult>,
+    pub mode_switch_tx: broadcast::Sender<ModeSwitchEvent>,
     pub action_output_tx: broadcast::Sender<ActionOutput>,
     pub reward_value_tx: broadcast::Sender<SceneRewardValue>,
     pub model_status_tx: broadcast::Sender<ModelStatusMessage>,
@@ -2046,7 +2035,7 @@ impl AiMessageBus {
 
 | Topic | 发布者 | 订阅者 | 频率 |
 |-------|--------|--------|------|
-| `ai/fused_state` | DataFusionEngine | RLModel, SceneClassifier | 1Hz |
+| `ai/fused_state` | DataFusionEngine | RLModel | 1Hz |
 | `ai/mode_switch` | ModeSelector | RewardCalculator, ModelManager, Web UI | 事件驱动 |
 | `ai/action_output` | ModelManager | strategy-engine, intercore | 1Hz |
 | `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | 1Hz |
@@ -2147,7 +2136,7 @@ impl AiMessageBus {
 | RL 推理 | RL-01~03, AI-02, AI-04 | P0 |
 | RKNN Runtime | RK-01~08, NPU-01~06 | P0 |
 | 数据融合 | FUSION-01~10 | P0/P1 |
-| 场景识别 | SCENE-01~06 | P0 |
+| 模式选择 | MODE-01~07 | P0 |
 | 状态/动作空间 | STATE-01~05, ACT-07~11 | P0 |
 | 动作约束校验 | ACT-01~06 | P0 |
 | 奖励函数 | REWARD-A1~E4 | P0 |
