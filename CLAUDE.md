@@ -110,22 +110,24 @@ mupc/
 
 ### 数据流
 
-| 方向 | 组件 | 说明 |
-|------|------|------|
-| 北向↑ | gateway → data-processing → strategy-engine | 调度数据处理 |
-| 南向↓ | strategy-engine → rs485-plugin/hplc-plugin | 设备控制 |
-| 核间↕ | intercore (TCP/RJ45) | 与实时控制模块通信 |
-| AI → | strategy-engine ← ai-engine | LSTM 预测 + RL 决策 |
+
+| 方向   | 组件                                          | 说明                |
+| ------ | --------------------------------------------- | ------------------- |
+| 北向↑ | gateway → data-processing → strategy-engine | 调度数据处理        |
+| 南向↓ | strategy-engine → rs485-plugin/hplc-plugin   | 设备控制            |
+| 核间↕ | intercore (TCP/RJ45)                          | 与实时控制模块通信  |
+| AI →  | strategy-engine ← ai-engine                  | LSTM 预测 + RL 决策 |
 
 ### 关键组件
 
-| 模块 | 职责 |
-|------|------|
-| **common** | 日志（tracing）、统一错误类型、通用工具 |
-| **gateway** | 北向 IEC 104 协议通信、连接管理、数据收发 |
-| **intercore** | TCP 网络通信、指令下发、数据读取、心跳/看门狗 |
-| **ai-engine** | LSTM 时序预测、MADDPG/PPO 强化学习决策、RKNN Runtime（NPU 推理） |
-| **strategy-engine** | 兜底策略（削峰填谷、需量控制、防逆流），AI 指令安全校验 |
+
+| 模块                | 职责                                                             |
+| ------------------- | ---------------------------------------------------------------- |
+| **common**          | 日志（tracing）、统一错误类型、通用工具                          |
+| **gateway**         | 北向 IEC 104 协议通信、连接管理、数据收发                        |
+| **intercore**       | TCP 网络通信、指令下发、数据读取、心跳/看门狗                    |
+| **ai-engine**       | LSTM 时序预测、MADDPG/PPO 强化学习决策、RKNN Runtime（NPU 推理） |
+| **strategy-engine** | 兜底策略（削峰填谷、需量控制、防逆流），AI 指令安全校验          |
 
 ### 核间通信
 
@@ -145,22 +147,25 @@ rs485-plugin/hplc-plugin ←→ device-trait (统一抽象) ←→ strategy-engi
 
 **核心 trait：**
 
-| Trait | 说明 |
-|-------|------|
-| `SouthDevice` | 统一南向设备接口（RS485/HPLC） |
+
+| Trait             | 说明                                       |
+| ----------------- | ------------------------------------------ |
+| `SouthDevice`     | 统一南向设备接口（RS485/HPLC）             |
 | `ProtocolHandler` | 协议处理器注入（Modbus/TTU/逆变器/充电桩） |
-| `HplcDriver` | HPLC 芯片驱动抽象（预留 FFI） |
+| `HplcDriver`      | HPLC 芯片驱动抽象（预留 FFI）              |
 
 **协议处理器（ProtocolHandler）：**
 
-| 处理器 | 协议 | 支持设备 |
-|--------|------|----------|
-| `ModbusHandler` | Modbus RTU | 通用 Modbus 设备 |
-| `TtuHandler` | TTU 专用 | 配变终端 |
-| `InverterHandler` | 厂商私有 | 光伏逆变器 |
-| `ChargerHandler` | GB/T 27930 | 充电桩 |
+
+| 处理器            | 协议       | 支持设备         |
+| ----------------- | ---------- | ---------------- |
+| `ModbusHandler`   | Modbus RTU | 通用 Modbus 设备 |
+| `TtuHandler`      | TTU 专用   | 配变终端         |
+| `InverterHandler` | 厂商私有   | 光伏逆变器       |
+| `ChargerHandler`  | GB/T 27930 | 充电桩           |
 
 **配置文件格式：**
+
 - RS485：`handler` 字段指定协议类型（modbus/ttu/inverter/charger）
 - HPLC：`serial_port`（Linux=/dev/ttyUSB0, Windows=COM3）
 - RS485 半双工：DE/RE GPIO 控制
@@ -175,6 +180,7 @@ plugin-loader (动态加载 .so/.dll)
 ```
 
 **FFI 导出函数：**
+
 - `create_plugin()` → `*mut dyn Plugin`（插件工厂）
 - `plugin_meta()` → `PluginMeta`（获取插件元信息）
 
@@ -191,6 +197,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 ```
 
 **数据流：**
+
 1. LSTM 时序预测（光伏出力/负荷）
 2. RL 模型基于预测结果决策
 3. AiValidator 校验 AI 指令安全性
@@ -201,37 +208,41 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 代码变更后，必须按以下清单验证：
 
 **编译与测试**
-- [ ] `cargo build --release` 编译成功
-- [ ] `cargo clippy` 无警告
-- [ ] `cargo test` 所有测试通过
-- [ ] `cargo fmt` 格式化通过
+
+- [ ]  `cargo build --release` 编译成功
+- [ ]  `cargo clippy` 无警告
+- [ ]  `cargo test` 所有测试通过
+- [ ]  `cargo fmt` 格式化通过
 
 **功能回归**（根据变更模块选择验证）
 
-| 模块 | 验证项 |
-|------|--------|
+
+| 模块     | 验证项                                              |
+| -------- | --------------------------------------------------- |
 | 通信网关 | IEC 104/IEC 61850/MQTT 连接建立、协议转换数据一致性 |
-| 数据处理 | 遥测数据上送频率 ≥1Hz、故障录波触发 |
-| 策略引擎 | 削峰填谷、需量控制、防逆流策略 |
-| 南向通信 | RS485 协议处理器、ProtocolHandler 注入、HPLC 驱动 |
-| AI 引擎 | LSTM 预测 <1s、RL 决策 <1s、RKNN Runtime NPU 推理 |
-| 核间通信 | `ai_ready`、`strategy_mode`、`control_cmd` 信号 |
+| 数据处理 | 遥测数据上送频率 ≥1Hz、故障录波触发                |
+| 策略引擎 | 削峰填谷、需量控制、防逆流策略                      |
+| 南向通信 | RS485 协议处理器、ProtocolHandler 注入、HPLC 驱动   |
+| AI 引擎  | LSTM 预测 <1s、RL 决策 <1s、RKNN Runtime NPU 推理   |
+| 核间通信 | `ai_ready`、`strategy_mode`、`control_cmd` 信号     |
 
 **安全验证**
-- [ ] 无硬编码密钥（检查 SM2/SM4 密钥残留）
-- [ ] 无新增 `unsafe` 块
-- [ ] 错误类型实现 `std::error::Error`
+
+- [ ]  无硬编码密钥（检查 SM2/SM4 密钥残留）
+- [ ]  无新增 `unsafe` 块
+- [ ]  错误类型实现 `std::error::Error`
 
 ## 技术债
 
 Phase 1/3C 已完成的技术债更新（记录于 `docs/technical-debt.md`）：
 
-| Phase | 内容 | 状态 |
-|-------|------|------|
-| Phase 1 | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
-| Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理） | ✅ 完成 |
-| Phase 2+ | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密 | 规划中 |
-| Phase 2+ | 南向通信（RS485/HPLC）、OTA 升级、安全启动 | 规划中 |
+
+| Phase    | 内容                                                             | 状态    |
+| -------- | ---------------------------------------------------------------- | ------- |
+| Phase 1  | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
+| Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）     | ✅ 完成 |
+| Phase 2+ | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密                     | 规划中  |
+| Phase 2+ | 南向通信（RS485/HPLC）、OTA 升级、安全启动                       | 规划中  |
 
 ## 文档管理原则（2026-05-29 生效）
 
