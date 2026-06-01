@@ -4,7 +4,7 @@
 //! 基于 Tokio broadcast channel 实现多客户端事件广播。
 
 use axum::response::sse::{Event, Sse};
-use futures::stream::Stream;
+use futures::stream::{Stream, StreamExt};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,12 +85,34 @@ impl SsePushService {
 
     /// 推送 AI 决策事件
     pub fn push_ai_decision(&self, summary: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+ — 从 AiIntegrator 决策周期获取摘要")
+        let event = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::AiDecision {
+                summary: summary.to_string(),
+            },
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({
+                "event": "ai_decision",
+                "summary": summary
+            }),
+        };
+        self.tx.send(event)
     }
 
     /// 推送预测更新事件
     pub fn push_prediction_update(&self, prediction_type: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        todo!("Phase 2+ — 从 LSTM 模型获取预测数据")
+        let event = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::PredictionUpdate {
+                prediction_type: prediction_type.to_string(),
+            },
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({
+                "event": "prediction_update",
+                "type": prediction_type
+            }),
+        };
+        self.tx.send(event)
     }
 
     /// 推送系统告警事件

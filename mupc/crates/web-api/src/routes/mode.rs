@@ -8,14 +8,14 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Json,
-    routing::{get, put},
+    routing::get,
     Router,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use mupc_ai_engine::mode_selector::{ModeSelector, RunningMode, SwitchSource};
+use mupc_ai_engine::mode_selector::{RunningMode, SwitchSource};
 use crate::AppState;
 
 /// 模式状态响应
@@ -117,7 +117,7 @@ async fn list_modes() -> Json<ModeListResponse> {
 }
 
 /// 创建模式管理路由
-pub fn create_router() -> Router {
+pub fn create_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/mode", get(get_mode).put(switch_mode))
         .route("/api/v1/mode/list", get(list_modes))
@@ -134,11 +134,12 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use mupc_ai_engine::mode_selector::RunningMode;
+    use mupc_ai_engine::mode_selector::{ModeSelector, RunningMode};
     use mupc_strategy_engine::AiIntegrator;
     use crate::audit::AuditLogger;
     use crate::auth::SessionManager;
     use crate::sse::SsePushService;
+    use tower::ServiceExt;
 
     fn make_test_state() -> Arc<AppState> {
         let config = crate::routes::config::AppConfig::default();

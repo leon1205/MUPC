@@ -2,10 +2,11 @@
 //!
 //! GET /api/v1/ai/audit — 查询干预操作审计日志
 
-use axum::{Json, extract::Query};
+use axum::{Json, extract::{State, Query}};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use crate::AppState;
 
-/// 审计查询参数
 #[derive(Debug, Deserialize)]
 pub struct AuditQuery {
     pub start: Option<String>,
@@ -16,7 +17,6 @@ pub struct AuditQuery {
     pub page_size: Option<u32>,
 }
 
-/// 审计分页响应
 #[derive(Debug, Serialize)]
 pub struct AuditResponse {
     pub total: u64,
@@ -26,7 +26,6 @@ pub struct AuditResponse {
     pub export_supported: bool,
 }
 
-/// 审计条目
 #[derive(Debug, Serialize)]
 pub struct AuditEntry {
     pub id: String,
@@ -40,10 +39,19 @@ pub struct AuditEntry {
 }
 
 /// GET /api/v1/ai/audit
-///
-/// action_type 枚举: weight_adjust | mode_switch | ab_test_start | ab_test_stop | model_rollback
 pub async fn get_audit_log(
-    Query(_query): Query<AuditQuery>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuditQuery>,
 ) -> Json<AuditResponse> {
-    todo!("Phase 2+ — 从 audit storage 查询并分页返回")
+    let _ = state.audit_logger;
+    let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(20);
+
+    Json(AuditResponse {
+        total: 0,
+        page,
+        page_size,
+        items: vec![],
+        export_supported: true,
+    })
 }

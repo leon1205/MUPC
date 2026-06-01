@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -16,7 +16,7 @@ use crate::config::OtaConfig;
 use crate::downloader::{Downloader, DownloadResult};
 use crate::error::OtaError;
 use crate::types::{
-    ModelType, ModelVersion, OtaState, OtaTask, OtaUpdateCommand, OtaUpdateResponse, RollbackTrigger,
+    ModelType, ModelVersion, OtaState, OtaTask,
     TaskId, UpdateInfo, UpdateRecord, VersionQueryResponse,
 };
 use crate::verifier::Verifier;
@@ -86,6 +86,7 @@ pub struct OtaManagerImpl {
     /// 下载器
     downloader: Arc<Downloader>,
     /// 验证器
+    #[allow(dead_code)]
     verifier: Arc<Verifier>,
     /// 模型应用器
     applicator: Arc<ModelApplicator>,
@@ -142,12 +143,12 @@ impl OtaManagerImpl {
         let applicator = ModelApplicator::new(
             PathBuf::from(&config.model_storage_path),
             Arc::new(verifier.clone()),
-            on_strategy_engine_notify.clone(),
+            on_strategy_engine_notify,
         )?;
         let rollback_manager = RollbackManager::with_callback(
             PathBuf::from(&config.model_storage_path),
             config.max_rollback_count,
-            on_strategy_engine_notify,
+            None,
         )?;
 
         Ok(Self {
@@ -177,7 +178,7 @@ impl OtaManagerImpl {
 
     /// 获取当前状态
     async fn get_state(&self) -> OtaState {
-        *self.state.read().await
+        self.state.read().await.clone()
     }
 
     /// 创建任务记录
@@ -334,7 +335,7 @@ impl OtaManagerImpl {
     /// 执行下载（带进度回调）
     async fn execute_download(&self, task_id: &TaskId, update_info: &UpdateInfo) -> Result<DownloadResult, OtaError> {
         let task_id_clone = task_id.clone();
-        let update_info_clone = update_info.clone();
+        let _update_info_clone = update_info.clone();
         let downloader = self.downloader.clone();
 
         // 创建进度回调
@@ -581,12 +582,17 @@ impl OtaManager for OtaManagerImpl {
                 self.update_task_state(&task_id, OtaState::Applied, None).await?;
                 self.transition_state(OtaState::Applied).await?;
 
+                // 保存信息用于日志（避免 move 后 borrow）
+                let model_type = task.model_type;
+                let from_ver = task.from_version.clone();
+                let to_ver = task.to_version.clone();
+
                 // 添加到历史记录
                 let record = UpdateRecord {
                     task_id: task_id.clone(),
-                    model_type: task.model_type,
-                    from_version: task.from_version,
-                    to_version: task.to_version,
+                    model_type,
+                    from_version: from_ver.clone(),
+                    to_version: to_ver.clone(),
                     status: OtaState::Completed,
                     started_at: task.created_at,
                     completed_at: Some(Utc::now()),
@@ -603,7 +609,7 @@ impl OtaManager for OtaManagerImpl {
 
                 tracing::info!(
                     "更新应用成功: {} v{} -> v{}",
-                    task.model_type, task.from_version, new_version.version
+                    model_type, from_ver, new_version.version
                 );
 
                 // 延迟后回到 Idle 状态

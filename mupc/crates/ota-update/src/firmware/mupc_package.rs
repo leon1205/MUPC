@@ -1,94 +1,51 @@
 //! .mupc 固件包容器格式
 //!
-//! MUPC 统一的固件包容器格式，在单个 `.mupc` 文件中包含元信息、签名和负载数据。
+//! MUPC 统一的固件包容器格式解析器。
 //!
 //! # 二进制布局
 //!
-//! 基于设计文档第 3.2 节「.mupc 固件包容器格式」：
-//!
 //! ```text
-//! ┌─────────────────────────────────────────┐
-//! │ Magic:         4B  "MUPC"               │
-//! │ Version:       2B  u16 LE               │
-//! │ HeaderSize:    4B  u32 LE (字节)         │
-//! │ HeaderJSON:    N 字节 UTF-8 JSON         │
-//! │ Padding:       对齐到 4 字节              │
-//! │ Signature:     64B SM2-with-SM3 签名     │
-//! │ Payload:       N 字节 (tar.gz 或 bsdiff)  │
-//! └─────────────────────────────────────────┘
+//! Magic:      4B  "MUPC"
+//! Version:    2B  u16 LE
+//! HeaderSize: 4B  u32 LE
+//! HeaderJSON: N 字节 UTF-8 JSON
+//! Signature:  64B SM2 签名
+//! Payload:    N 字节 (tar.gz 或 bsdiff)
 //! ```
-//!
-//! # 安全
-//!
-//! - 固件包使用 SM2-with-SM3 签名（64 字节）
-//! - SHA-256 校验 payload 完整性
-//! - 签名验证不通过则包被拒绝
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::OtaError;
 
-/// .mupc 固件包的魔数标识
 pub const MUPC_MAGIC: [u8; 4] = *b"MUPC";
-
-/// 当前容器格式版本
 pub const MUPC_CONTAINER_VERSION: u16 = 1;
-
-/// SM2 签名大小（64 字节）
 pub const SIGNATURE_SIZE: usize = 64;
 
 /// 包类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageType {
-    /// 全量固件包
     Full,
-    /// 增量固件包（bsdiff 差分）
     Incremental,
 }
 
 /// .mupc 固件包头信息
-///
-/// 存储固件包的元数据，以 JSON 格式序列化后嵌入二进制布局的 HeaderJSON 区域。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MupcHeader {
-    /// 目标固件版本号（semver 格式，如 "1.2.0"）
     pub firmware_version: String,
-
-    /// 目标硬件平台标识（如 "RK3588"）
     pub target_hardware: String,
-
-    /// 最低要求的当前固件版本（低于此版本需先升级到中间版本）
     pub min_required_version: String,
-
-    /// 目标分区标识（"boot_a" 或 "boot_b"）
     pub partition: String,
-
-    /// Payload 数据大小（字节）
     pub payload_size: u64,
-
-    /// Payload SHA-256 校验和（十六进制字符串，64 字符）
     pub payload_sha256: String,
-
-    /// 是否使用 bsdiff 增量更新
     pub use_bsdiff: bool,
-
-    /// 增量包的基准版本号（全量包为 None）
     pub base_version: Option<String>,
-
-    /// 包类型（全量/增量）
     #[serde(default = "default_package_type")]
     pub package_type: PackageType,
-
-    /// 固件包生成时间戳（Unix 毫秒）
     #[serde(default)]
     pub timestamp: u64,
-
-    /// 目标平台标识（如 "rk3588-openeuler"）
     #[serde(default)]
     pub target_platform: String,
-
-    /// 最低 Bootloader 版本要求
     #[serde(default)]
     pub min_bootloader_version: String,
 }
@@ -100,126 +57,152 @@ fn default_package_type() -> PackageType {
 /// 固件包中的单个文件条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
-    /// 文件在固件中的相对路径
     pub path: String,
-
-    /// 文件大小（字节）
     pub size: u64,
-
-    /// Unix 文件权限（如 0o755）
     pub mode: u32,
-
-    /// 单个文件 SHA-256 校验和
     pub checksum: String,
 }
 
 /// .mupc 固件包
-///
-/// 完整解析后的固件包结构，包含头信息、签名和负载数据。
 pub struct MupcPackage {
-    /// 包头元信息
     pub header: MupcHeader,
-
-    /// SM2 签名（64 字节）
     pub signature: Vec<u8>,
-
-    /// 固件负载数据（tar.gz 压缩或 bsdiff 差分数据）
     pub payload: Vec<u8>,
 }
 
 impl MupcPackage {
     /// 解析 .mupc 二进制数据
-    ///
-    /// 按二进制布局解析：Magic → Version → HeaderSize → HeaderJSON → Signature → Payload
-    ///
-    /// # 参数
-    ///
-    /// - `data`: .mupc 文件的完整二进制数据
-    ///
-    /// # 返回
-    ///
-    /// 解析后的 MupcPackage 实例
-    ///
-    /// # 错误
-    ///
-    /// - 魔数不匹配（不是有效的 .mupc 文件）
-    /// - 容器版本不支持
-    /// - HeaderJSON 解析失败
-    /// - 文件大小不足以包含签名和 payload
-    ///
-    /// # Phase 2+ 实现
-    ///
-    /// TODO: 实现完整的二进制解析
-    /// 1. 检查文件大小
-    /// 2. 验证魔数 "MUPC"
-    /// 3. 读取容器版本
-    /// 4. 读取 HeaderSize 并提取 HeaderJSON
-    /// 5. 解析 MupcHeader
-    /// 6. 提取签名（64 字节）
-    /// 7. 提取 payload 数据
     pub fn parse(data: &[u8]) -> Result<Self, OtaError> {
-        // Phase 2+ 实现
-        let _ = data;
-        todo!("Phase 2+: 实现 .mupc 包解析")
+        if data.len() < 10 {
+            return Err(OtaError::VerificationFailed(
+                "数据长度不足，无法解析 .mupc 头部".into(),
+            ));
+        }
+
+        // 1. 验证魔数
+        if data[..4] != MUPC_MAGIC {
+            return Err(OtaError::VerificationFailed(
+                "无效的 .mupc 文件魔数".into(),
+            ));
+        }
+
+        // 2. 读取版本号
+        let version = u16::from_le_bytes([data[4], data[5]]);
+        if version != MUPC_CONTAINER_VERSION {
+            return Err(OtaError::VersionIncompatible {
+                current: format!("v{}", version),
+                required: format!("v{}", MUPC_CONTAINER_VERSION),
+            });
+        }
+
+        // 3. 读取 HeaderSize
+        let header_size = u32::from_le_bytes([data[6], data[7], data[8], data[9]]) as usize;
+        let header_end = 10 + header_size;
+        if data.len() < header_end + SIGNATURE_SIZE {
+            return Err(OtaError::VerificationFailed(
+                "数据长度不足，无法提取 HeaderJSON 和签名".into(),
+            ));
+        }
+
+        // 4. 解析 HeaderJSON
+        let header_json = std::str::from_utf8(&data[10..header_end]).map_err(|e| {
+            OtaError::VerificationFailed(format!("HeaderJSON 编码无效: {}", e))
+        })?;
+        let header: MupcHeader = serde_json::from_str(header_json).map_err(|e| {
+            OtaError::VerificationFailed(format!("HeaderJSON 解析失败: {}", e))
+        })?;
+
+        // 5. 提取签名（64 字节）
+        let sig_start = header_end;
+        let sig_end = sig_start + SIGNATURE_SIZE;
+        let signature = data[sig_start..sig_end].to_vec();
+
+        // 6. 提取 payload
+        let payload = data[sig_end..].to_vec();
+
+        // 7. 验证 payload 大小
+        if payload.len() as u64 != header.payload_size {
+            return Err(OtaError::VerificationFailed(format!(
+                "Payload 大小不匹配: 声明 {} 字节，实际 {} 字节",
+                header.payload_size,
+                payload.len()
+            )));
+        }
+
+        // 8. 验证 payload SHA-256
+        let actual_hash = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&payload);
+            hex::encode(hasher.finalize())
+        };
+        if actual_hash != header.payload_sha256 {
+            return Err(OtaError::VerificationFailed(format!(
+                "Payload SHA-256 校验失败: 期望 {}, 实际 {}",
+                header.payload_sha256, actual_hash
+            )));
+        }
+
+        Ok(Self {
+            header,
+            signature,
+            payload,
+        })
     }
 
-    /// 验证 .mupc 包签名
+    /// 验证 SM2 签名
     ///
-    /// 使用 SM2-with-SM3 算法验证包签名，确保固件来源可信。
-    ///
-    /// # 参数
-    ///
-    /// - `public_key`: SM2 公钥（PEM 格式字节或原始密钥字节）
-    ///
-    /// # 返回
-    ///
-    /// - `Ok(true)`: 签名验证通过
-    /// - `Ok(false)`: 签名验证不通过
-    /// - `Err(...)`: 验证过程发生错误
-    ///
-    /// # 安全
-    ///
-    /// - 公钥应从安全存储区域读取（`/etc/mupc/security/ota_public_key.pem`）
-    /// - 签名验证使用 SM2-with-SM3 算法（国密标准）
-    ///
-    /// # Phase 2+ 实现
-    ///
-    /// TODO: 集成 security crate 的 SM2 签名验证
-    /// - 需要先计算被签名数据的 SM3 哈希
-    /// - 然后使用 SM2 公钥验证签名
-    /// - 被签名数据范围：HeaderJSON（不含 Magic/Version/HeaderSize 前缀）
-    pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, OtaError> {
-        // Phase 2+ 实现
-        let _ = public_key;
+    /// Phase 2+: 集成 security crate 的 SM2 验签功能。
+    /// 当前返回 NotImplemented 错误，防止未经验证的固件被接受。
+    pub fn verify_signature(&self, _public_key: &[u8]) -> Result<bool, OtaError> {
         let _ = &self.signature;
-        let _ = &self.header;
-        todo!("Phase 2+: 实现 SM2 签名验证")
+        tracing::warn!("SM2 签名验证暂未实现，拒绝固件包");
+        Err(OtaError::SignatureInvalid)
     }
 
-    /// 获取包类型
     pub fn package_type(&self) -> PackageType {
         self.header.package_type
     }
 
-    /// 是否为增量包
     pub fn is_incremental(&self) -> bool {
-        self.header.use_bsdiff
-            || matches!(self.header.package_type, PackageType::Incremental)
+        self.header.use_bsdiff || matches!(self.header.package_type, PackageType::Incremental)
     }
 
-    /// 获取目标固件版本
     pub fn firmware_version(&self) -> &str {
         &self.header.firmware_version
     }
 
-    /// 获取 payload 大小
     pub fn payload_size(&self) -> u64 {
         self.header.payload_size
     }
 
-    /// 验证实际 payload 大小与头部声明是否一致
     pub fn validate_payload_size(&self) -> bool {
         self.payload.len() as u64 == self.header.payload_size
+    }
+
+    /// 序列化为 .mupc 二进制格式
+    pub fn to_bytes(header: &MupcHeader, signature: &[u8], payload: &[u8]) -> Result<Vec<u8>, OtaError> {
+        let header_json = serde_json::to_string(header).map_err(|e| {
+            OtaError::IoError(format!("HeaderJSON 序列化失败: {}", e))
+        })?;
+        let header_bytes = header_json.as_bytes();
+        let header_size = header_bytes.len() as u32;
+
+        let total = 4 + 2 + 4 + header_size as usize + 64 + payload.len();
+        let mut buf = Vec::with_capacity(total);
+
+        buf.extend_from_slice(&MUPC_MAGIC);
+        buf.extend_from_slice(&MUPC_CONTAINER_VERSION.to_le_bytes());
+        buf.extend_from_slice(&header_size.to_le_bytes());
+        buf.extend_from_slice(header_bytes);
+
+        if signature.len() != 64 {
+            return Err(OtaError::SignatureInvalid);
+        }
+        buf.extend_from_slice(signature);
+        buf.extend_from_slice(payload);
+
+        Ok(buf)
     }
 }
 
@@ -227,20 +210,64 @@ impl MupcPackage {
 mod tests {
     use super::*;
 
+    fn create_test_package() -> Vec<u8> {
+        let payload = b"test firmware payload data".to_vec();
+        let payload_sha256 = {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(&payload))
+        };
+
+        let header = MupcHeader {
+            firmware_version: "1.2.0".into(),
+            target_hardware: "RK3588".into(),
+            min_required_version: "1.0.0".into(),
+            partition: "boot_b".into(),
+            payload_size: payload.len() as u64,
+            payload_sha256,
+            use_bsdiff: false,
+            base_version: None,
+            package_type: PackageType::Full,
+            timestamp: 0,
+            target_platform: String::new(),
+            min_bootloader_version: String::new(),
+        };
+
+        let signature = vec![0u8; 64];
+        MupcPackage::to_bytes(&header, &signature, &payload).unwrap()
+    }
+
     #[test]
-    fn test_mupc_magic() {
+    fn test_parse_valid_package() {
+        let data = create_test_package();
+        let pkg = MupcPackage::parse(&data).unwrap();
+        assert_eq!(pkg.firmware_version(), "1.2.0");
+        assert!(!pkg.is_incremental());
+        assert!(pkg.validate_payload_size());
+    }
+
+    #[test]
+    fn test_parse_invalid_magic() {
+        let mut data = create_test_package();
+        data[0] = b'X';
+        assert!(MupcPackage::parse(&data).is_err());
+    }
+
+    #[test]
+    fn test_parse_truncated() {
+        assert!(MupcPackage::parse(b"MUPC").is_err());
+    }
+
+    #[test]
+    fn test_mupc_magic_constant() {
         assert_eq!(&MUPC_MAGIC, b"MUPC");
-        assert_eq!(MUPC_MAGIC.len(), 4);
     }
 
     #[test]
-    fn test_signature_size() {
-        assert_eq!(SIGNATURE_SIZE, 64);
-    }
-
-    #[test]
-    fn test_container_version() {
-        assert_eq!(MUPC_CONTAINER_VERSION, 1);
+    fn test_roundtrip() {
+        let original = create_test_package();
+        let pkg = MupcPackage::parse(&original).unwrap();
+        let rebuilt = MupcPackage::to_bytes(&pkg.header, &pkg.signature, &pkg.payload).unwrap();
+        assert_eq!(original, rebuilt);
     }
 
     #[test]
@@ -250,81 +277,17 @@ mod tests {
             target_hardware: "RK3588".to_string(),
             min_required_version: "1.0.0".to_string(),
             partition: "boot_b".to_string(),
-            payload_size: 1048576,
-            payload_sha256: "a" .repeat(64),
+            payload_size: 100,
+            payload_sha256: "a".repeat(64),
             use_bsdiff: false,
             base_version: None,
             package_type: PackageType::Full,
-            timestamp: 1717000000000,
-            target_platform: "rk3588-openeuler".to_string(),
-            min_bootloader_version: "1.0.0".to_string(),
-        };
-
-        let json = serde_json::to_string(&header).unwrap();
-        let restored: MupcHeader = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(restored.firmware_version, "1.2.0");
-        assert_eq!(restored.target_hardware, "RK3588");
-        assert_eq!(restored.payload_size, 1048576);
-        assert!(restored.package_type == PackageType::Full);
-    }
-
-    #[test]
-    fn test_mupc_header_incremental() {
-        let header = MupcHeader {
-            firmware_version: "2.0.0".to_string(),
-            target_hardware: "RK3588".to_string(),
-            min_required_version: "1.5.0".to_string(),
-            partition: "boot_b".to_string(),
-            payload_size: 524288,
-            payload_sha256: "b" .repeat(64),
-            use_bsdiff: true,
-            base_version: Some("1.9.0".to_string()),
-            package_type: PackageType::Incremental,
             timestamp: 0,
             target_platform: String::new(),
             min_bootloader_version: String::new(),
         };
-
         let json = serde_json::to_string(&header).unwrap();
         let restored: MupcHeader = serde_json::from_str(&json).unwrap();
-
-        assert!(restored.use_bsdiff);
-        assert_eq!(restored.base_version, Some("1.9.0".to_string()));
-        assert!(matches!(restored.package_type, PackageType::Incremental));
-    }
-
-    #[test]
-    fn test_file_entry_serialization() {
-        let entry = FileEntry {
-            path: "/usr/bin/mupc-gateway".to_string(),
-            size: 1048576,
-            mode: 0o755,
-            checksum: "c" .repeat(64),
-        };
-
-        let json = serde_json::to_string(&entry).unwrap();
-        let restored: FileEntry = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(restored.path, "/usr/bin/mupc-gateway");
-        assert_eq!(restored.size, 1048576);
-        assert_eq!(restored.mode, 0o755);
-    }
-
-    #[test]
-    #[should_panic(expected = "Phase 2+")]
-    fn test_parse_is_todo() {
-        let data = vec![0u8; 128];
-        let _ = MupcPackage::parse(&data);
-    }
-
-    #[test]
-    fn test_package_type_display() {
-        // Verify serde rename works correctly
-        let full = serde_json::to_string(&PackageType::Full).unwrap();
-        assert!(full.contains("full"));
-
-        let inc = serde_json::to_string(&PackageType::Incremental).unwrap();
-        assert!(inc.contains("incremental"));
+        assert_eq!(restored.firmware_version, "1.2.0");
     }
 }

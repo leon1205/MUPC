@@ -10,10 +10,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use tar::Archive;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use zip::ZipArchive;
 
 use crate::error::OtaError;
 use crate::types::{ModelType, ModelVersion};
@@ -33,7 +33,6 @@ type StrategyEngineNotifyFn = Box<dyn Fn(ModelType) + Send + Sync>;
 /// 模型应用器
 ///
 /// 负责将下载并验证通过的模型文件应用到生产环境
-#[derive(Debug)]
 pub struct ModelApplicator {
     /// 模型存储根目录
     model_storage_path: PathBuf,
@@ -43,6 +42,17 @@ pub struct ModelApplicator {
     verifier: Arc<Verifier>,
     /// 策略引擎通知回调
     notify_strategy_engine: Option<StrategyEngineNotifyFn>,
+}
+
+impl std::fmt::Debug for ModelApplicator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelApplicator")
+            .field("model_storage_path", &self.model_storage_path)
+            .field("rollback_path", &self.rollback_path)
+            .field("verifier", &self.verifier)
+            .field("notify_strategy_engine", &self.notify_strategy_engine.as_ref().map(|_| "Fn(...)"))
+            .finish()
+    }
 }
 
 impl ModelApplicator {
@@ -221,7 +231,7 @@ impl ModelApplicator {
             .unwrap_or("")
             .to_lowercase();
 
-        let stem = package
+        let _stem = package
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
@@ -328,23 +338,18 @@ impl ModelApplicator {
             OtaError::DecompressionFailed(format!("打开压缩文件失败: {}", e))
         })?;
 
+        let std_file = file.into_std().await;
+
         let temp_dir = temp_dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            use std::io::Read;
-            use zip::ZipArchive;
-            let file = file.into_std().await;
-            ZipArchive::new(file)
+            let mut archive = zip::ZipArchive::new(std_file)
+                .map_err(|e| OtaError::DecompressionFailed(format!("解析 zip 文件失败: {}", e)))?;
+            archive.extract(&temp_dir)
+                .map_err(|e| OtaError::DecompressionFailed(format!("解压 zip 失败: {}", e)))?;
+            Ok::<_, OtaError>(())
         })
         .await
         .map_err(|e| OtaError::DecompressionFailed(e.to_string()))?
-        .map_err(|e| OtaError::DecompressionFailed(format!("解析 zip 文件失败: {}", e)))
-        .and_then(|mut archive| {
-            archive.extract(&temp_dir).map_err(|e| {
-                OtaError::DecompressionFailed(format!("解压 zip 失败: {}", e))
-            })
-        })?;
-
-        Ok(())
     }
 
     /// 解压 xz 文件
@@ -354,11 +359,13 @@ impl ModelApplicator {
         })?;
 
         let decompressed = tokio::task::spawn_blocking(move || {
-            lzma_rs::decompress(&contents)
+            let mut output = Vec::new();
+            lzma_rs::xz_decompress(&mut std::io::Cursor::new(&contents), &mut output)
+                .map(|_| output)
+                .map_err(|e| OtaError::DecompressionFailed(format!("解压 xz 失败: {}", e)))
         })
         .await
-        .map_err(|e| OtaError::DecompressionFailed(e.to_string()))?
-        .map_err(|e| OtaError::DecompressionFailed(format!("解压 xz 失败: {}", e)))?;
+        .map_err(|e| OtaError::DecompressionFailed(e.to_string()))??;
 
         let output_path = temp_dir.join(MODEL_FILENAME);
         fs::write(&output_path, decompressed).await.map_err(|e| {
@@ -379,9 +386,8 @@ impl ModelApplicator {
 
     /// 递归查找指定扩展名的文件
     fn find_file_by_extension(&self, dir: &Path, extension: &str) -> Option<PathBuf> {
-        let mut entries = fs::read_dir(dir).ok()?;
-        while let Some(entry) = entries.next() {
-            let entry = entry.ok()?;
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 if let Some(found) = self.find_file_by_extension(&path, extension) {
@@ -449,6 +455,7 @@ impl ModelApplicator {
     /// 创建预热输入 tensor
     ///
     /// 根据模型类型生成合适的输入数据
+    #[allow(dead_code)]
     async fn create_warmup_input(&self, model_type: ModelType) -> Result<Vec<f32>, OtaError> {
         // 不同模型类型有不同的输入形状
         // 这里使用模型类型的特征维度构造输入
@@ -666,7 +673,7 @@ mod tests {
 
         let applicator = ModelApplicator::new(models_dir, verifier, None).unwrap();
 
-        let test_file = temp_dir.into_path().join("test_file.txt");
+        let test_file = temp_dir.join("test_file.txt");
         fs::write(&test_file, b"hello world").await.unwrap();
 
         let checksum = applicator.calculate_checksum(&test_file).await.unwrap();

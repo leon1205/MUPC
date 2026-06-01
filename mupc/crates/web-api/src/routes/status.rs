@@ -8,7 +8,6 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 use mupc_common::MupcError;
 

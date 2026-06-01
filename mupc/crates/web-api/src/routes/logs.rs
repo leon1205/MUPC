@@ -4,7 +4,7 @@ use axum::{
     extract::{State, Query},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ pub struct LogListResponse {
 /// 日志处理器
 #[derive(Clone)]
 pub struct LogsHandler {
+    #[allow(dead_code)]
     log_directory: PathBuf,
 }
 
@@ -65,8 +66,8 @@ impl LogsHandler {
 
     /// 获取日志列表
     pub async fn get_logs(&self, query: LogQuery) -> Result<LogListResponse, MupcError> {
-        let limit = query.limit.unwrap_or(100).min(10000);
-        let offset = query.offset.unwrap_or(0);
+        let _limit = query.limit.unwrap_or(100).min(10000);
+        let _offset = query.offset.unwrap_or(0);
 
         // TODO: 实际读取日志文件
         // 目前返回模拟数据
@@ -79,7 +80,7 @@ impl LogsHandler {
     }
 
     /// 导出日志
-    pub async fn export_logs(&self, query: LogQuery) -> Result<Vec<u8>, MupcError> {
+    pub async fn export_logs(&self, _query: LogQuery) -> Result<Vec<u8>, MupcError> {
         // TODO: 实际导出日志文件
         Ok(Vec::new())
     }

@@ -8,4 +8,3 @@ pub mod mode;
 pub use config::ConfigHandler;
 pub use status::StatusHandler;
 pub use logs::LogsHandler;
-pub use mode::ModeHandler;

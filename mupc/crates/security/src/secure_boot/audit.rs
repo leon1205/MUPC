@@ -18,20 +18,55 @@ pub struct BootAuditLogger {
     logs: Vec<BootAuditLog>,
 }
 
+impl Default for BootAuditLogger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BootAuditLogger {
     pub fn new() -> Self {
-        todo!("Phase 2+")
+        Self { logs: Vec::new() }
     }
 
     pub fn record(&mut self, event: &str, result: bool, details: &str) -> Result<(), SecurityError> {
-        todo!("Phase 2+")
+        self.logs.push(BootAuditLog {
+            timestamp: Utc::now(),
+            event: event.to_string(),
+            result,
+            details: details.to_string(),
+        });
+        Ok(())
     }
 
     pub fn get_logs(&self) -> &[BootAuditLog] {
-        todo!("Phase 2+")
+        &self.logs
     }
 
     pub fn clear(&mut self) {
-        todo!("Phase 2+")
+        self.logs.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_boot_audit_record() {
+        let mut logger = BootAuditLogger::new();
+        logger.record("boot_verify", true, "链验证通过").unwrap();
+        assert_eq!(logger.get_logs().len(), 1);
+
+        logger.record("image_check", false, "镜像校验失败").unwrap();
+        assert_eq!(logger.get_logs().len(), 2);
+    }
+
+    #[test]
+    fn test_boot_audit_clear() {
+        let mut logger = BootAuditLogger::new();
+        logger.record("test", true, "").unwrap();
+        logger.clear();
+        assert!(logger.get_logs().is_empty());
     }
 }

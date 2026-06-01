@@ -23,12 +23,15 @@ pub enum SignatureAlgorithm {
 #[derive(Debug, Clone)]
 pub struct Verifier {
     /// 公钥文件路径
+    #[allow(dead_code)]
     public_key_path: PathBuf,
 }
 
 /// RKNN 文件魔数标识（文件头前 16 字节）
 /// RKNN 文件通常以特定字节序列开头，用于标识文件格式
+#[allow(dead_code)]
 const RKNN_MAGIC: &[u8] = b"RKNN";
+#[allow(dead_code)]
 const RKNN_MODEL_MAGIC_ALT: &[u8] = b"RKNM"; // 某些变体可能使用此标识
 
 /// 文件大小约束（字节）
@@ -191,10 +194,10 @@ impl Verifier {
     pub async fn verify_signature(
         &self,
         file_path: &Path,
-        signature: &[u8],
+        _signature: &[u8],
     ) -> Result<(), OtaError> {
         // 读取文件数据
-        let data = tokio::fs::read(file_path)
+        let _data = tokio::fs::read(file_path)
             .await
             .map_err(|e| OtaError::VerificationFailed(format!("读取文件失败: {}", e)))?;
 
@@ -390,7 +393,7 @@ mod tests {
 
     // ========== Verifier 创建测试 ==========
 
-    #[tokio::test]
+    #[test]
     fn test_verifier_new_valid_path() {
         let temp_dir = TempDir::new().unwrap().into_path();
         let key_path = temp_dir.join("public_key.pem");
@@ -403,7 +406,7 @@ mod tests {
         assert_eq!(verifier.unwrap().public_key_path, key_path);
     }
 
-    #[tokio::test]
+    #[test]
     fn test_verifier_new_invalid_path() {
         let verifier = Verifier::new(PathBuf::from("/nonexistent/path/key.pem"));
         assert!(verifier.is_err());

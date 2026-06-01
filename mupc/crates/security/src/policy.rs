@@ -30,37 +30,81 @@ impl Default for ChannelPolicy {
     }
 }
 
-/// 策略管理器（Phase 2+ 实现）
+/// 策略管理器
 pub struct PolicyManager {
     policies: Vec<ChannelPolicy>,
 }
 
+impl Default for PolicyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PolicyManager {
     pub fn new() -> Self {
-        todo!("Phase 2+")
+        Self {
+            policies: Vec::new(),
+        }
     }
 
     pub fn load_defaults(&mut self) {
-        todo!("Phase 2+")
+        self.policies = vec![
+            ChannelPolicy {
+                channel_name: "iec104".into(),
+                ..Default::default()
+            },
+            ChannelPolicy {
+                channel_name: "iec61850".into(),
+                ..Default::default()
+            },
+            ChannelPolicy {
+                channel_name: "mqtt".into(),
+                ..Default::default()
+            },
+            ChannelPolicy {
+                channel_name: "intercore".into(),
+                ..Default::default()
+            },
+        ];
     }
 
     pub fn add_policy(&mut self, policy: ChannelPolicy) {
-        todo!("Phase 2+")
+        self.policies.retain(|p| p.channel_name != policy.channel_name);
+        self.policies.push(policy);
     }
 
     pub fn get_policy(&self, channel: &str) -> Option<&ChannelPolicy> {
-        todo!("Phase 2+")
+        self.policies.iter().find(|p| p.channel_name == channel)
     }
 
     pub fn remove_policy(&mut self, channel: &str) -> bool {
-        todo!("Phase 2+")
+        let len_before = self.policies.len();
+        self.policies.retain(|p| p.channel_name != channel);
+        self.policies.len() < len_before
     }
 
     pub fn list_channels(&self) -> Vec<&str> {
-        todo!("Phase 2+")
+        self.policies.iter().map(|p| p.channel_name.as_str()).collect()
     }
 
-    pub fn validate(&self) -> Result<(), Vec<String>> {
-        todo!("Phase 2+")
+    pub fn validate(&self) -> Result<(), crate::errors::SecurityError> {
+        let mut errors = Vec::new();
+        for policy in &self.policies {
+            if policy.channel_name.is_empty() {
+                errors.push("策略缺少 channel_name".to_string());
+            }
+            if policy.encryption_required && policy.allowed_ciphers.is_empty() {
+                errors.push(format!(
+                    "通道 {} 要求加密但未配置任何算法",
+                    policy.channel_name
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::errors::SecurityError::PolicyError(errors.join("; ")))
+        }
     }
 }

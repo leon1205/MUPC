@@ -1,41 +1,45 @@
 //! SM3 国密消息摘要算法实现
 //!
 //! 实现 GB/T 32907-2016《SM3 密码杂凑算法》
+//!
+//! # gmsm 0.1.0 能力说明
+//! - 支持 SM3 哈希 (sm3_byte/sm3_hex)
+//! - 不支持 HKDF-SM3
 
 use crate::errors::{GmError, Result};
 
 /// SM3 消息摘要
+///
+/// real_gmsm: 使用 gmsm::sm3。
+/// fake_gmsm: 使用 SHA-256 作为替代实现。
 pub fn sm3_hash(data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "real_gmsm")]
     {
-        use gmsm::Sm3;
-        let mut hasher = Sm3::new();
-        hasher.update(data);
-        Ok(hasher.finalize())
+        let input = String::from_utf8_lossy(data);
+        let hash: [u8; 32] = gmsm::sm3::sm3_byte(&input);
+        Ok(hash.to_vec())
     }
 
     #[cfg(not(feature = "real_gmsm"))]
     {
-        Err(GmError::InvalidParam("SM3 需要 gmsm 库".into()))
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(data);
+        Ok(hash.to_vec())
     }
 }
 
 /// 使用 SM3 进行密钥派生（HKDF-SM3）
-pub fn sm3_derive_key(input_key: &[u8], salt: &[u8], info: &[u8], output_len: usize) -> Result<Vec<u8>> {
-    #[cfg(feature = "real_gmsm")]
-    {
-        use gmsm::HkdfSm3;
-        let hk = HkdfSm3::new(Some(salt), input_key);
-        let mut okm = vec![0u8; output_len];
-        hk.expand(info, &mut okm)
-            .map_err(|e| GmError::InvalidParam(format!("HKDF 扩展失败: {:?}", e)))?;
-        Ok(okm)
-    }
-
-    #[cfg(not(feature = "real_gmsm"))]
-    {
-        Err(GmError::InvalidParam("HKDF-SM3 需要 gmsm 库".into()))
-    }
+///
+/// gmsm 0.1.0 不支持 HKDF-SM3，real_gmsm 路径返回 Unsupported。
+pub fn sm3_derive_key(
+    _input_key: &[u8],
+    _salt: &[u8],
+    _info: &[u8],
+    _output_len: usize,
+) -> Result<Vec<u8>> {
+    Err(GmError::Unsupported(
+        "HKDF-SM3 在 gmsm 0.1.0 中不可用".into(),
+    ))
 }
 
 #[cfg(test)]

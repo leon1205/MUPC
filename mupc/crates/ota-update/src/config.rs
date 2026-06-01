@@ -106,7 +106,7 @@ impl OtaConfig {
         }
 
         let hour: u32 = parts[0].parse().map_err(|_| OtaConfigError::InvalidHour(parts[0].to_string()))?;
-        let minute: u32 = parts[1].parse().map_err(|_| OtaConfigError::InvalidMinute(parts[1].to_string()))?;
+        let minute: u32 = parts[1].parse().map_err(|_| OtaConfigError::InvalidTimeFormat(time_str.to_string()))?;
 
         if hour > 23 {
             return Err(OtaConfigError::HourOutOfRange(hour));

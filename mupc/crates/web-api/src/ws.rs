@@ -1,13 +1,13 @@
 //! WebSocket 日志推送
 
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
+    extract::{ws::{Message, WebSocketUpgrade}, State},
     response::Response,
     routing::get,
     Router,
 };
 use tokio::sync::broadcast;
-use tracing::{info, error};
+use tracing::info;
 
 /// 日志消息
 #[derive(Debug, Clone)]
@@ -52,31 +52,31 @@ async fn ws_logs(
     ws: WebSocketUpgrade,
     State(streamer): State<WsLogStreamer>,
 ) -> Response {
-    ws.on_upgrade(|socket| async move {
+    ws.on_upgrade(|mut socket| async move {
         let mut rx = streamer.subscribe();
 
-        let (mut sender, mut receiver) = socket.split();
-
-        // 接收消息
-        let _ = receiver.recv().await;
-
-        // 发送日志
         loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    let json = serde_json::json!({
-                        "level": msg.level,
-                        "timestamp": msg.timestamp,
-                        "module": msg.module,
-                        "message": msg.message,
-                    });
-
-                    if sender.send(Message::Text(json.to_string())).is_err() {
-                        break;
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(msg) => {
+                            let json = serde_json::json!({
+                                "level": msg.level,
+                                "timestamp": msg.timestamp,
+                                "module": msg.module,
+                                "message": msg.message,
+                            });
+                            if socket.send(Message::Text(json.to_string())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            break;
+                        }
                     }
                 }
-                Err(_) => {
-                    // Channel closed
+                _ = socket.recv() => {
+                    // Client closed or sent a message; exit
                     break;
                 }
             }

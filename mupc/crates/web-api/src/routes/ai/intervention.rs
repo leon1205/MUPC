@@ -2,13 +2,45 @@
 //!
 //! 查询人工专家干预记录
 
-use axum::{Json, extract::State};
+use axum::{Json, extract::{State, Query}};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::routes::config::AppState;
+use crate::AppState;
 
-/// GET /api/v1/ai/interventions — 获取专家干预记录
+#[derive(Debug, Deserialize)]
+pub struct InterventionQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InterventionResponse {
+    pub total: u64,
+    pub page: u32,
+    pub items: Vec<InterventionItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InterventionItem {
+    pub id: String,
+    pub timestamp: String,
+    pub operator: String,
+    pub action_type: String,
+    pub description: String,
+    pub result: String,
+}
+
+/// GET /api/v1/ai/interventions
 pub async fn get_interventions(
-    State(_state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    todo!("Phase 2+")
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<InterventionQuery>,
+) -> Json<InterventionResponse> {
+    let _ = state;
+    let page = query.page.unwrap_or(1);
+
+    Json(InterventionResponse {
+        total: 0,
+        page,
+        items: vec![],
+    })
 }

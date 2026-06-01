@@ -2,10 +2,11 @@
 //!
 //! GET /api/v1/ai/finetuning — 获取在线微调状态
 
-use axum::Json;
+use axum::{Json, extract::State};
 use serde::Serialize;
+use std::sync::Arc;
+use crate::AppState;
 
-/// 微调状态响应
 #[derive(Debug, Serialize)]
 pub struct FinetuningResponse {
     pub enabled: bool,
@@ -37,6 +38,22 @@ pub struct FinetuningHistoryEntry {
 }
 
 /// GET /api/v1/ai/finetuning
-pub async fn get_finetuning() -> Json<FinetuningResponse> {
-    todo!("Phase 2+ — 从 ai-engine OnlineUpdater 查询微调状态")
+pub async fn get_finetuning(
+    State(state): State<Arc<AppState>>,
+) -> Json<FinetuningResponse> {
+    let _ = state;
+
+    Json(FinetuningResponse {
+        enabled: false,
+        state: "idle".to_string(),
+        buffer_size: 1000,
+        batch_size: 32,
+        buffer_progress: 0.0,
+        progress_percent: None,
+        total_epochs: None,
+        completed_epochs: None,
+        last_update: None,
+        last_metrics: None,
+        recent_history: vec![],
+    })
 }

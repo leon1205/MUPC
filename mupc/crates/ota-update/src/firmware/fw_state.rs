@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 /// 固件 OTA 状态（17 状态）
 ///
 /// 覆盖固件升级全生命周期：空闲 → 检查 → 下载 → 验证 → 预检 → 切换 → 应用 → 后验证 → 完成/回滚。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FwOtaState {
     /// 空闲状态，未进行任何升级操作
     Idle,

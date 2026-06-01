@@ -20,6 +20,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+/// 审计负载（用于哈希计算，不含哈希字段自身）
+#[derive(Debug, Serialize)]
+struct AuditPayload {
+    sequence: u64,
+    timestamp: DateTime<Utc>,
+    event_type: AuditEventType,
+    severity: AuditSeverity,
+    source: String,
+    message: String,
+    operator: String,
+    ip_address: String,
+}
+
 /// 哈希链创世种子（Phase 2+ 从安全存储读取）
 const GENESIS_SEED: &[u8] = b"MUPC_AUDIT_GENESIS_SEED_V1";
 
@@ -103,7 +116,7 @@ pub enum AuditSeverity {
 /// 审计日志记录器（JSONL + SHA-256 哈希链）
 ///
 /// # 示例
-/// ```ignore
+/// ```no_run
 /// use mupc_security::audit::{AuditLogger, AuditEventType, AuditSeverity};
 ///
 /// let mut logger = AuditLogger::new("/var/log/mupc/audit").unwrap();
@@ -195,26 +208,26 @@ impl AuditLogger {
 
         let prev_hash = self.chain_hash.clone();
 
-        // 构建条目 JSON（不含哈希字段，用于计算链式哈希）
-        let entry_json = serde_json::json!({
-            "sequence": self.sequence,
-            "timestamp": timestamp.to_rfc3339(),
-            "event_type": event_type,
-            "severity": severity,
-            "source": source,
-            "message": message,
-            "operator": operator,
-            "ip_address": ip_address,
-        });
+        // 构建审计负载（用于计算链式哈希，不含哈希字段自身）
+        let payload = AuditPayload {
+            sequence: self.sequence,
+            timestamp,
+            event_type: event_type.clone(),
+            severity: severity.clone(),
+            source: source.to_string(),
+            message: message.to_string(),
+            operator: operator.to_string(),
+            ip_address: ip_address.to_string(),
+        };
 
-        let entry_json_str = serde_json::to_string(&entry_json).map_err(|e| {
+        let payload_str = serde_json::to_string(&payload).map_err(|e| {
             SecurityError::AuditError(format!("序列化审计条目失败: {}", e))
         })?;
 
-        // 计算链式哈希: SHA-256(prev_hash || entry_json)
+        // 计算链式哈希: SHA-256(prev_hash || payload_json)
         let mut hasher = Sha256::new();
         hasher.update(prev_hash.as_bytes());
-        hasher.update(entry_json_str.as_bytes());
+        hasher.update(payload_str.as_bytes());
         let chain_hash = hex::encode(hasher.finalize());
 
         // 构建完整条目（包含哈希字段）
@@ -308,8 +321,8 @@ impl AuditLogger {
                     continue;
                 }
 
-                // 解析为 serde_json::Value 以提取不含哈希字段的负载
-                let entry: serde_json::Value =
+                // 解析完整的 AuditLogEntry
+                let entry: AuditLogEntry =
                     serde_json::from_str(&line).map_err(|e| {
                         SecurityError::AuditError(format!(
                             "解析审计日志 {} 行 {} 失败: {}",
@@ -319,74 +332,51 @@ impl AuditLogger {
                         ))
                     })?;
 
-                let stored_chain_hash = entry["sm3_chain_hash"]
-                    .as_str()
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "审计日志条目缺少 sm3_chain_hash 字段: 文件={}, 行={}",
-                            file_path.display(),
-                            line_no + 1
-                        );
-                        ""
-                    })
-                    .to_string();
-                let stored_prev_hash = entry["prev_sm3_hash"]
-                    .as_str()
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "审计日志条目缺少 prev_sm3_hash 字段: 文件={}, 行={}",
-                            file_path.display(),
-                            line_no + 1
-                        );
-                        ""
-                    })
-                    .to_string();
-
-                // 验证前驱哈希
-                if stored_prev_hash != expected_hash {
+                // 验证前驱哈希连续性
+                if entry.prev_sm3_hash != expected_hash {
                     tracing::error!(
                         "哈希链断裂: 文件={}, 行={}, 期望前驱={}, 实际前驱={}",
                         file_path.display(),
                         line_no + 1,
                         expected_hash,
-                        stored_prev_hash
+                        entry.prev_sm3_hash
                     );
                     return Ok(false);
                 }
 
-                // 构建不含哈希和序列的负载 JSON 用于重新计算
-                let payload = serde_json::json!({
-                    "sequence": entry["sequence"],
-                    "timestamp": entry["timestamp"],
-                    "event_type": entry["event_type"],
-                    "severity": entry["severity"],
-                    "source": entry["source"],
-                    "message": entry["message"],
-                    "operator": entry["operator"],
-                    "ip_address": entry["ip_address"],
-                });
+                // 重新计算哈希以检测负载篡改
+                // 使用与 log() 完全相同的 AuditPayload 序列化方式
+                let payload = AuditPayload {
+                    sequence: entry.sequence,
+                    timestamp: entry.timestamp,
+                    event_type: entry.event_type,
+                    severity: entry.severity,
+                    source: entry.source,
+                    message: entry.message,
+                    operator: entry.operator,
+                    ip_address: entry.ip_address,
+                };
                 let payload_str = serde_json::to_string(&payload).map_err(|e| {
                     SecurityError::AuditError(format!("序列化验证负载失败: {}", e))
                 })?;
 
-                // 重新计算哈希
                 let mut hasher = Sha256::new();
                 hasher.update(expected_hash.as_bytes());
                 hasher.update(payload_str.as_bytes());
                 let computed_hash = hex::encode(hasher.finalize());
 
-                if computed_hash != stored_chain_hash {
+                if computed_hash != entry.sm3_chain_hash {
                     tracing::error!(
                         "哈希不匹配: 文件={}, 行={}, 计算={}, 存储={}",
                         file_path.display(),
                         line_no + 1,
                         computed_hash,
-                        stored_chain_hash
+                        entry.sm3_chain_hash
                     );
                     return Ok(false);
                 }
 
-                expected_hash = computed_hash;
+                expected_hash = entry.sm3_chain_hash;
             }
         }
 
@@ -605,17 +595,15 @@ impl AuditLogger {
             for file_path in &files {
                 if let Ok(f) = File::open(file_path) {
                     let reader = BufReader::new(f);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            if let Ok(entry) =
-                                serde_json::from_str::<AuditLogEntry>(&line)
-                            {
-                                last_sequence = entry.sequence;
-                                last_hash = entry.sm3_chain_hash;
-                            }
+                    for line in reader.lines().map_while(Result::ok) {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        if let Ok(entry) =
+                            serde_json::from_str::<AuditLogEntry>(&line)
+                        {
+                            last_sequence = entry.sequence;
+                            last_hash = entry.sm3_chain_hash;
                         }
                     }
                 }

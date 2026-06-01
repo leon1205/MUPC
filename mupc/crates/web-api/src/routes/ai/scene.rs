@@ -8,7 +8,6 @@ use serde::Serialize;
 use std::sync::Arc;
 use crate::AppState;
 
-/// 当前场景响应
 #[derive(Debug, Serialize)]
 pub struct CurrentSceneResponse {
     pub current: String,
@@ -17,7 +16,6 @@ pub struct CurrentSceneResponse {
     pub source: String,
 }
 
-/// 历史场景条目
 #[derive(Debug, Serialize)]
 pub struct SceneHistoryEntry {
     pub previous: String,
@@ -41,7 +39,11 @@ pub async fn get_current_scene(
 
 /// GET /api/v1/ai/scenes/history
 pub async fn get_scene_history(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    todo!("Phase 2+ — 从审计存储查询历史 mode_switch 事件")
+    let _ = state;
+    Json(serde_json::json!({
+        "entries": [],
+        "total": 0
+    }))
 }

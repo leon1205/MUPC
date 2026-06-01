@@ -70,6 +70,9 @@ pub enum GmError {
 
     #[error("配置错误: {0}")]
     ConfigError(String),
+
+    #[error("未找到: {0}")]
+    NotFound(String),
 }
 
 /// Result 类型别名

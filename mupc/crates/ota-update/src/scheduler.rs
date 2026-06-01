@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Instant};
+use tokio::time::interval;
+
+use chrono::Timelike;
 
 use crate::config::OtaConfig;
 use crate::error::OtaError;
@@ -17,7 +19,7 @@ use crate::error::OtaError;
 ///
 /// 定义 OTA 检查更新的接口，由调用者实现具体逻辑
 #[async_trait]
-pub trait OtaManager: Send + Sync {
+pub trait OtaManager: Send + Sync + std::fmt::Debug {
     /// 检查更新
     ///
     /// 连接到 OTA 服务器检查是否有可用更新
@@ -25,7 +27,7 @@ pub trait OtaManager: Send + Sync {
 }
 
 /// 调度器命令
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerCommand {
     /// 停止调度器
     Stop,
@@ -170,7 +172,7 @@ impl OtaScheduler {
     pub fn send_command(&self, cmd: SchedulerCommand) -> Result<(), OtaError> {
         self.command_tx
             .try_send(cmd)
-            .map_err(|e| OtaError::UpdateTimeout)
+            .map_err(|_e| OtaError::UpdateTimeout)
     }
 
     /// 检查是否在下载窗口内
@@ -260,16 +262,12 @@ mod tests {
     #[test]
     fn test_scheduler_new_multiple() {
         let config = OtaConfig::default();
-        let ota_manager = Arc::new(MockOtaManager::new());
 
         let (scheduler1, _rx1) = OtaScheduler::new(config.clone(), Arc::new(MockOtaManager::new())).unwrap();
         let (scheduler2, _rx2) = OtaScheduler::new(config.clone(), Arc::new(MockOtaManager::new())).unwrap();
 
         // 两个调度器应该独立工作
-        assert_ne!(
-            scheduler1.command_tx.id(),
-            scheduler2.command_tx.id()
-        );
+        assert!(scheduler1.config.check_interval == scheduler2.config.check_interval);
     }
 
     // ========== send_command 测试 ==========

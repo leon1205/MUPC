@@ -13,9 +13,11 @@ serde_json = "1.0"
 tracing = "0.1"
 reqwest = "0.12"
 sha2 = "0.10"
+hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 parking_lot = "0.12"
+tempfile = "3.10"
 mupc-ai-engine = { path = "../ai-engine" }
 
 # 压缩解压支持
@@ -37,4 +39,3 @@ sm2 = ["dep:sm2"]
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.10"

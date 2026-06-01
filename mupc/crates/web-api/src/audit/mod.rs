@@ -12,7 +12,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 use mupc_security::audit::{AuditEventType, AuditSeverity, AuditLogEntry};
 
 /// 审计日志条目（Web 层专用格式）
@@ -225,7 +224,7 @@ impl AuditLogger {
         &self,
         operator: &str,
         action: &str,
-        detail: &str,
+        _detail: &str,
         result: &str,
     ) {
         let entry = WebAuditEntry {

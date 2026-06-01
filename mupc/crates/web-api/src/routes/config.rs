@@ -4,11 +4,10 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Json,
-    routing::{get, put},
+    routing::get,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -42,6 +41,15 @@ pub struct GatewayConfig {
 fn default_listen_port() -> u16 { 2404 }
 fn default_heartbeat_interval() -> u64 { 10 }
 
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: default_listen_port(),
+            heartbeat_interval_secs: default_heartbeat_interval(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntercoreConfig {
     #[serde(default = "default_intercore_port")]
@@ -55,6 +63,16 @@ pub struct IntercoreConfig {
 fn default_intercore_port() -> u16 { 2500 }
 fn default_intercore_remote_port() -> u16 { 2501 }
 
+impl Default for IntercoreConfig {
+    fn default() -> Self {
+        Self {
+            listen_port: default_intercore_port(),
+            remote_addr: "0.0.0.0".to_string(),
+            remote_port: default_intercore_remote_port(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     #[serde(default = "default_log_level")]
@@ -62,6 +80,14 @@ pub struct SystemConfig {
 }
 
 fn default_log_level() -> String { "info".to_string() }
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            log_level: default_log_level(),
+        }
+    }
+}
 
 impl Default for AppConfig {
     fn default() -> Self {

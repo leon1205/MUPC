@@ -54,6 +54,10 @@ pub enum OtaError {
     /// 版本查询失败
     #[error("版本查询失败: {0}")]
     VersionQueryFailed(String),
+
+    /// IO 错误
+    #[error("IO 错误: {0}")]
+    IoError(String),
 }
 
 #[cfg(test)]

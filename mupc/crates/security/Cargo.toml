@@ -7,26 +7,29 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# 国密实现 (gmsm)
+# 国密实现 (gmsm) — 提供 SM2 加密/SM3 哈希/SM4 CBC
 gmsm = { version = "0.1.0", optional = true }
-# 兼容旧代码 (ring 模拟实现)
-ring = { version = "0.17", optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# ring — 始终可用，作为 gmsm 不支持的功能（签名/GCM/HKDF）的兜底实现
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 x509-parser = "0.16"
 pem = "3"
 base64 = "0.22"
 hex = "0.4"
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio.workspace = true
 chrono.workspace = true
 sha2 = "0.10"
+getrandom = "0.2"
+uuid.workspace = true
+tracing.workspace = true
 
 [features]
 default = ["real_gmsm"]
 real_gmsm = ["dep:gmsm"]
-fake_gmsm = ["dep:ring"]  # 用于测试的模拟实现
+fake_gmsm = []  # 仅使用 ring 实现（无 gmsm 依赖）
 
 [dev-dependencies]
 tokio-test = "0.4"

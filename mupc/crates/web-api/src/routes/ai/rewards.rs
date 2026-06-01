@@ -2,10 +2,11 @@
 //!
 //! GET /api/v1/ai/rewards — 获取奖励值（含历史趋势）
 
-use axum::{Json, extract::Query};
+use axum::{Json, extract::{State, Query}};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use crate::AppState;
 
-/// 奖励查询参数
 #[derive(Debug, Deserialize)]
 pub struct RewardsQuery {
     pub start: Option<String>,
@@ -13,7 +14,6 @@ pub struct RewardsQuery {
     pub range: Option<String>,
 }
 
-/// 奖励值响应
 #[derive(Debug, Serialize)]
 pub struct RewardsResponse {
     pub current: CurrentReward,
@@ -51,7 +51,22 @@ pub struct RewardStats {
 
 /// GET /api/v1/ai/rewards
 pub async fn get_rewards(
+    State(state): State<Arc<AppState>>,
     Query(_query): Query<RewardsQuery>,
 ) -> Json<RewardsResponse> {
-    todo!("Phase 2+ — 从 SQLite/data-processing 查询奖励历史")
+    let _ = state;
+
+    Json(RewardsResponse {
+        current: CurrentReward {
+            total: 0.0,
+            components: vec![],
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        },
+        history: vec![],
+        stats: RewardStats {
+            max: 0.0,
+            min: 0.0,
+            avg: 0.0,
+        },
+    })
 }

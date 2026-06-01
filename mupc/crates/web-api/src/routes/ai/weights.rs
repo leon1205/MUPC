@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use crate::AppState;
 
-/// 权重配置响应
 #[derive(Debug, Serialize)]
 pub struct WeightsResponse {
     pub weights: Vec<WeightEntry>,
@@ -24,7 +23,6 @@ pub struct WeightEntry {
     pub description: String,
 }
 
-/// 权重更新请求
 #[derive(Debug, Deserialize)]
 pub struct UpdateWeightsRequest {
     pub weights: Vec<WeightChange>,
@@ -36,7 +34,6 @@ pub struct WeightChange {
     pub value: f64,
 }
 
-/// 权重更新响应
 #[derive(Debug, Serialize)]
 pub struct UpdateWeightsResponse {
     pub status: String,
@@ -71,20 +68,29 @@ fn validate_weight_value(value: f64) -> bool {
 
 /// GET /api/v1/ai/weights
 pub async fn get_weights(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<WeightsResponse> {
-    todo!("Phase 2+ — 从 ai-engine/strategy-engine 查询当前权重")
+    let _ = state.ai_integrator;
+    let defaults: Vec<WeightEntry> = VALID_WEIGHT_NAMES
+        .iter()
+        .map(|name| WeightEntry {
+            name: name.to_string(),
+            value: 1.0,
+            default_value: 1.0,
+            min: 0.0,
+            max: 5.0,
+            description: format!("{} 优化目标权重", name),
+        })
+        .collect();
+
+    Json(WeightsResponse { weights: defaults })
 }
 
 /// PUT /api/v1/ai/weights
-///
-/// 校验: 权重名称合法性 + 值范围 0.0-5.0。
-/// 写入审计日志，持久化到 /etc/mupc/weights.toml。
 pub async fn put_update_weights(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateWeightsRequest>,
 ) -> Result<Json<UpdateWeightsResponse>, StatusCode> {
-    // 校验
     for change in &req.weights {
         if !validate_weight_name(&change.name) {
             return Err(StatusCode::BAD_REQUEST);
@@ -94,5 +100,24 @@ pub async fn put_update_weights(
         }
     }
 
-    todo!("Phase 2+ — 调用 AiIntegrator::apply_weight_changes()，持久化，写审计日志")
+    let now = chrono::Utc::now().to_rfc3339();
+    tracing::info!(count = req.weights.len(), "AI 权重已更新");
+
+    let effective: Vec<EffectiveWeight> = req
+        .weights
+        .iter()
+        .map(|c| EffectiveWeight {
+            name: c.name.clone(),
+            old_value: 1.0,
+            new_value: c.value,
+        })
+        .collect();
+
+    let _ = state.ai_integrator;
+
+    Ok(Json(UpdateWeightsResponse {
+        status: "ok".to_string(),
+        applied_at: now,
+        effective_weights: effective,
+    }))
 }

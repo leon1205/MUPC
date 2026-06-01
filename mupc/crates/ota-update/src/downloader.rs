@@ -3,13 +3,13 @@
 //! Phase 3C.2 OTA 模块断点续传下载器
 //! 支持 HTTP Range 请求、重试机制、SHA-256 校验
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};
 
 use super::error::OtaError;
@@ -455,15 +455,13 @@ mod tests {
 
     #[test]
     fn test_progress_callback() {
-        let mut received: (u64, u64) = (0, 0);
-
-        let callback = Arc::new(move |downloaded: u64, total: u64| {
-            received = (downloaded, total);
+        let received = Arc::new(std::sync::Mutex::new((0u64, 0u64)));
+        let received_clone = received.clone();
+        let callback: ProgressCallback = Arc::new(move |downloaded, total| {
+            *received_clone.lock().unwrap() = (downloaded, total);
         });
-
         callback(100, 1000);
-
-        assert_eq!(received, (100, 1000));
+        assert_eq!(*received.lock().unwrap(), (100, 1000));
     }
 
     // ========== SHA-256 测试 ==========

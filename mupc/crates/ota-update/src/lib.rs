@@ -20,7 +20,7 @@ pub mod applicator;
 pub use config::OtaConfig;
 pub use downloader::{compute_file_hash, Downloader, DownloadResult, ProgressCallback};
 pub use error::OtaError;
-pub use manager::{OtaManager, OtaManagerImpl};
+pub use manager::{OtaManager, OtaManagerImpl, UpdateStatus};
 pub use rollback::RollbackManager;
 pub use scheduler::{OtaScheduler, OtaManager as SchedulerOtaManager, SchedulerCommand};
 pub use types::*;

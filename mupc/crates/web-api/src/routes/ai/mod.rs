@@ -21,7 +21,7 @@ mod rollback;
 
 use axum::{Router, routing::{get, put, post, delete}};
 use std::sync::Arc;
-use crate::routes::config::AppState;
+use crate::AppState;
 
 /// 注册 AI 可视化路由
 ///

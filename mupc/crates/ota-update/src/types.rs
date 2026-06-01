@@ -5,7 +5,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
 
 /// 任务 ID 类型别名
 pub type TaskId = String;
@@ -54,7 +53,7 @@ pub struct UpdateInfo {
 }
 
 /// OTA 更新状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OtaState {
     /// 空闲状态
@@ -312,10 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ota_state_copy() {
+    fn test_ota_state_clone() {
         let state = OtaState::Applying;
-        let _copy = state;
+        let copy = state.clone();
         assert_eq!(state, OtaState::Applying);
+        assert_eq!(copy, OtaState::Applying);
     }
 
     // ========== OtaTask 测试 ==========
