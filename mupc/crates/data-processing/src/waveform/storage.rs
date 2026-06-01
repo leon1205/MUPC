@@ -83,7 +83,7 @@ pub struct WaveformWriter {
     /// 输出路径
     path: PathBuf,
     /// CRC64 累加器
-    crc: crc64::Digest,
+    crc: crc64::Crc64,
 }
 
 impl WaveformWriter {
@@ -105,19 +105,19 @@ impl WaveformWriter {
 
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
-        let mut crc = crc64::Digest::new();
+        let mut crc = crc64::Crc64::new();
 
         // 写入文件头 (64 bytes)
         let header = build_header(meta);
         writer.write_all(&header)?;
-        crc.write(&header);
+        let _ = crc.write(&header);
 
         // 确保文件头占满 64 字节
         let pos = writer.stream_position()?;
         if pos < HEADER_SIZE {
             let padding = vec![0u8; (HEADER_SIZE - pos) as usize];
             writer.write_all(&padding)?;
-            crc.write(&padding);
+            let _ = crc.write(&padding);
         }
 
         writer.flush()?;
@@ -137,7 +137,7 @@ impl WaveformWriter {
     pub fn write_channel(&mut self, samples: &[f64]) -> std::io::Result<()> {
         let bytes = f64_slice_to_bytes(samples);
         self.writer.write_all(&bytes)?;
-        self.crc.write(&bytes);
+        let _ = self.crc.write(&bytes);
         Ok(())
     }
 
@@ -149,7 +149,7 @@ impl WaveformWriter {
     pub fn write_timestamps(&mut self, timestamps: &[i64]) -> std::io::Result<()> {
         let bytes = i64_slice_to_bytes(timestamps);
         self.writer.write_all(&bytes)?;
-        self.crc.write(&bytes);
+        let _ = self.crc.write(&bytes);
         Ok(())
     }
 
@@ -159,7 +159,7 @@ impl WaveformWriter {
     ///
     /// 包含文件路径和校验和的结构体
     pub fn finalize(mut self) -> std::io::Result<WaveformFileInfo> {
-        let checksum = self.crc.sum64();
+        let checksum = self.crc.get();
         self.writer.write_all(&checksum.to_le_bytes())?;
         self.writer.flush()?;
 
@@ -197,7 +197,7 @@ impl WaveformReader {
     /// 文件不存在、格式错误或读取错误时返回 `std::io::Error`
     pub fn open(path: &Path) -> std::io::Result<Self> {
         let file = File::open(path)?;
-        let file_size = file.metadata()?.len();
+        let _file_size = file.metadata()?.len();
         let mut reader = BufReader::new(file);
 
         // 读取文件头
@@ -305,7 +305,7 @@ impl WaveformReader {
 
         // 读取所有数据部分计算 CRC
         self.reader.seek(SeekFrom::Start(0))?;
-        let mut crc = crc64::Digest::new();
+        let mut crc = crc64::Crc64::new();
         let mut remaining = data_size;
         let mut buf = [0u8; 8192];
 
@@ -315,7 +315,7 @@ impl WaveformReader {
             if n == 0 {
                 break;
             }
-            crc.write(&buf[..n]);
+            let _ = crc.write(&buf[..n]);
             remaining -= n as u64;
         }
 
@@ -325,7 +325,7 @@ impl WaveformReader {
         self.reader.read_exact(&mut stored_checksum_buf)?;
         let stored_checksum = u64::from_le_bytes(stored_checksum_buf);
 
-        Ok(crc.sum64() == stored_checksum)
+        Ok(crc.get() == stored_checksum)
     }
 }
 

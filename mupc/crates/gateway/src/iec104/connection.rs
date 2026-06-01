@@ -43,15 +43,11 @@ mod tests {
 }
 
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
-use super::{Iec104Frame, protocol::FrameType, protocol::UFrameType, TypeId, Cot};
-use super::command::CommandHandler;
+use super::{Iec104Frame, protocol::FrameType, protocol::UFrameType};
 
 /// 连接状态
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,7 +61,7 @@ pub enum ConnectionState {
 
 /// IEC 104 连接
 pub struct Connection {
-    pub stream: TcpStream,
+    pub stream: Option<TcpStream>,
     pub addr: SocketAddr,
     pub state: ConnectionState,
     pub send_seq: u16,
@@ -76,7 +72,7 @@ pub struct Connection {
 impl Connection {
     pub fn new(stream: TcpStream, addr: SocketAddr) -> Self {
         Self {
-            stream,
+            stream: Some(stream),
             addr,
             state: ConnectionState::Disconnected,
             send_seq: 0,
@@ -164,7 +160,7 @@ impl Connection {
         writer: &mut (impl AsyncWriteExt + Unpin),
     ) -> Result<(), mupc_common::MupcError> {
         let send_seq = frame.send_sequence();
-        let recv_seq = frame.recv_sequence();
+        let _recv_seq = frame.recv_sequence();
 
         // 检查接收序号
         if send_seq != self.recv_seq {

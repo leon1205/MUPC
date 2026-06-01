@@ -4,6 +4,7 @@
 
 use crate::config::HplcConfig;
 use crate::errors::HplcError;
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Mock HPLC 驱动（用于开发测试）
@@ -104,6 +105,7 @@ impl super::HplcDriver for MockHplcDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HplcDriver;
 
     #[test]
     fn test_mock_hplc_driver_init() {
@@ -153,14 +155,14 @@ mod tests {
         let config = HplcConfig::new("/dev/ttyUSB0", 115200);
         driver.init(config).unwrap();
 
-        // 注入多条数据
+        // 注入多条数据（recv 以 LIFO 顺序返回：后进先出）
         driver.inject_data(vec![0x01]);
         driver.inject_data(vec![0x02]);
         driver.inject_data(vec![0x03]);
 
-        assert_eq!(driver.recv(100).unwrap(), vec![0x01]);
-        assert_eq!(driver.recv(100).unwrap(), vec![0x02]);
         assert_eq!(driver.recv(100).unwrap(), vec![0x03]);
+        assert_eq!(driver.recv(100).unwrap(), vec![0x02]);
+        assert_eq!(driver.recv(100).unwrap(), vec![0x01]);
     }
 
     #[test]

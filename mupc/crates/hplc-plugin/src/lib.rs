@@ -123,4 +123,5 @@ mod ffi {
     // FFI 功能被禁用，不提供 FFI 入口点
 }
 
+#[allow(unused_imports)]
 pub use ffi::*;

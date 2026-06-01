@@ -53,17 +53,4 @@ pub use mupc_mqtt_bridge::{LocalMqttClient, NorthMqttClient, MqttBridge, MqttBri
 pub use mupc_mqtt_bridge::config::{LocalMqttConfig, NorthMqttConfig, MqttConfig};
 pub use mupc_mqtt_bridge::topics::{LOCAL_TELEMETRY, LOCAL_STRATEGY_COMMAND, NORTH_TELEMETRY, NORTH_FAULT};
 
-#[cfg(test)]
-mod telemetry_test;
-#[cfg(test)]
-mod recorder_test;
-#[cfg(test)]
-mod collector_test;
-#[cfg(test)]
-mod high_freq_telemetry_test;
-#[cfg(test)]
-mod fault_recorder_impl_test;
-#[cfg(test)]
-mod database_test;
-#[cfg(test)]
-mod errors_test;
+// No inline test modules — integration tests live in tests/

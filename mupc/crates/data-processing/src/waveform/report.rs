@@ -48,6 +48,7 @@ pub struct FaultEventSummary {
 ///
 /// 提供 IEC 104 和 MQTT 两种北向通道的上报接口。
 /// 当前为 stub 实现（TODO 标记），待 gateway 和 MQTT 模块完成集成后对接。
+#[allow(dead_code)]
 pub struct WaveformReporter {
     /// 最大重试次数
     max_retries: u32,
@@ -138,7 +139,8 @@ impl WaveformReporter {
             reported.push(event_id);
             // 限制已上报集合大小，保留最近 10000 条
             if reported.len() > 10000 {
-                reported.drain(0..reported.len() - 5000);
+                let drain_end = reported.len() - 5000;
+                reported.drain(0..drain_end);
             }
         }
     }

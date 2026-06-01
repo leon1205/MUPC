@@ -4,7 +4,7 @@
 
 use crate::config::MmsConfig;
 use crate::errors::{Iec61850Error, Result};
-use crate::mms_types::{MmsRequest, MmsResponse, MmsService};
+use crate::mms_types::{MmsRequest, MmsResponse};
 use crate::asn1_utils::{encode_mms_request, decode_mms_response};
 use async_trait::async_trait;
 use std::sync::Arc;

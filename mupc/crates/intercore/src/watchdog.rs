@@ -3,9 +3,7 @@
 //! 10秒超时检测
 
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
-use tokio::time::timeout;
 use tracing::{info, warn, error};
 
 use super::HeartbeatManager;
@@ -67,7 +65,7 @@ impl Watchdog {
 
     /// 检查是否超时
     pub async fn check_timeout(&mut self) -> bool {
-        let all_status = self.heartbeat_manager.read().await.get_all_status();
+        let all_status = self.heartbeat_manager.read().await.get_all_status().await;
 
         let any_online = all_status.values().any(|s| s.online);
 

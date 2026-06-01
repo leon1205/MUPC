@@ -31,4 +31,5 @@ pub enum MqttError {
 }
 
 /// Result 类型别名
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, MqttError>;

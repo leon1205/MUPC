@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
-use tracing::{info, warn};
+use tracing::warn;
 
 /// 心跳状态
 #[derive(Debug, Clone)]

@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 /// MQTT QoS 级别
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum MqttQos {
     AtMostOnce = 0,   // QoS 0: 最多一次
     AtLeastOnce = 1,  // QoS 1: 至少一次

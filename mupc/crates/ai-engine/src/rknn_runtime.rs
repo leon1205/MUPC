@@ -14,6 +14,7 @@ use crate::error::AiEngineError;
 use crate::rknn_runtime_sys::{rknn_input, rknn_output};
 
 /// RKNN 上下文（RAII 资源管理）
+#[allow(dead_code)]
 struct RknnContext {
     ctx: u64,
     input_count: u32,
@@ -22,7 +23,7 @@ struct RknnContext {
 
 impl Drop for RknnContext {
     fn drop(&mut self) {
-        unsafe { crate::rknn_runtime_sys::rknn_destroy(self.ctx) }
+        unsafe { crate::rknn_runtime_sys::rknn_destroy(self.ctx); }
     }
 }
 
@@ -50,7 +51,8 @@ impl RknnRuntime {
             let mut ctx_handle: u64 = 0;
 
             // 使用 CString 确保 null-terminated 字符串
-            let c_path = CString::new(model_path.to_string_lossy().as_bytes())?;
+            let c_path = CString::new(model_path.to_string_lossy().as_bytes())
+                .map_err(|e| AiEngineError::ModelLoadFailed(format!("路径包含空字节: {}", e)))?;
             let ret = unsafe {
                 crate::rknn_runtime_sys::rknn_init(
                     &mut ctx_handle,
@@ -195,8 +197,7 @@ mod tests {
 
     #[test]
     fn test_rknn_runtime_creation() {
-        let runtime = RknnRuntime::new(Path::new("/nonexistent/model.rknn"));
-        assert!(runtime.is_ok());
+        let runtime = RknnRuntime::new(Path::new("/nonexistent/model.rknn")).unwrap();
         assert!(!runtime.is_loaded());
     }
 

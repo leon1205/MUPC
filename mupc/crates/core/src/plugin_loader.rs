@@ -4,7 +4,6 @@
 
 use mupc_common::MupcError;
 use std::any::Any;
-use std::fmt::Debug;
 
 /// 插件实例
 pub trait PluginInstance: Send + Sync {

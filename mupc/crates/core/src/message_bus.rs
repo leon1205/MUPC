@@ -3,8 +3,6 @@
 //! Phase 1 使用 tokio::sync::mpsc 实现
 
 use mupc_common::MupcError;
-use std::any::Any;
-use tokio::sync::mpsc;
 use std::sync::Arc;
 
 /// 消息主题

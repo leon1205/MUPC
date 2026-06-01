@@ -201,7 +201,7 @@ impl TriggerEngine {
         ia: f64,
         ib: f64,
         ic: f64,
-        u0: f64,
+        _u0: f64,
         i0: f64,
         freq: f64,
         timestamp_us: i64,

@@ -34,6 +34,7 @@ pub enum ExportError {
 /// COMTRADE 导出器
 ///
 /// 生成符合 IEEE C37.111-1999 标准的 COMTRADE 文件。
+#[allow(dead_code)]
 pub struct ComtradeExporter {
     /// 波形文件源目录
     waveforms_dir: PathBuf,
@@ -270,6 +271,7 @@ impl ComtradeExporter {
 /// CSV 导出器
 ///
 /// 将波形数据导出为 CSV 格式（UTF-8 with BOM）。
+#[allow(dead_code)]
 pub struct CsvExporter {
     /// 导出目标目录
     export_dir: PathBuf,

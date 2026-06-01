@@ -2,7 +2,7 @@
 
 use mupc_common::{MupcError, ErrorCode};
 use std::io::Cursor;
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::ReadBytesExt;
 
 /// 帧类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,10 +161,10 @@ impl Iec104Frame {
         }
 
         // 控制字段
-        let control1 = cursor.read_u8()?;
-        let control2 = cursor.read_u8()?;
-        let control3 = cursor.read_u8()?;
-        let control4 = cursor.read_u8()?;
+        let control1 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control1", "gateway"))?;
+        let control2 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control2", "gateway"))?;
+        let control3 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control3", "gateway"))?;
+        let control4 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control4", "gateway"))?;
 
         // 确定帧类型
         let frame_type = Self::determine_frame_type(control1, control2, control3, control4);

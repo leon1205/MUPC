@@ -10,6 +10,7 @@ mod pdu_tags {
     pub const CONFIRMED_REQUEST_PDU: u8 = 0x01;
     pub const CONFIRMED_RESPONSE_PDU: u8 = 0x02;
     pub const CONFIRMED_ERROR_PDU: u8 = 0x03;
+    #[allow(dead_code)]
     pub const UNCONFIRMED_PDU: u8 = 0x04;
     pub const REJECTED_PDU: u8 = 0x05;
 }
@@ -140,12 +141,12 @@ fn encode_write_service(object_name: &str, payload: &[u8]) -> Vec<u8> {
 }
 
 /// 编码 DefineVariableAccess 请求
-fn encode_define_request(object: &DataObject) -> Result<Vec<u8>> {
+fn encode_define_request(_object: &DataObject) -> Result<Vec<u8>> {
     Err(Iec61850Error::Asn1EncodeFailed("DefineVariableAccess 未实现".into()))
 }
 
 /// 编码 GetDataAccessAttributes 请求
-fn encode_getda_request(object: &DataObject) -> Result<Vec<u8>> {
+fn encode_getda_request(_object: &DataObject) -> Result<Vec<u8>> {
     Err(Iec61850Error::Asn1EncodeFailed("GetDataAccessAttributes 未实现".into()))
 }
 

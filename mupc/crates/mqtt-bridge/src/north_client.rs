@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use device_trait::MqttBridge;
 use device_trait::errors::PluginError;
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Transport, TlsOptions};
+use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Transport, Packet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -31,7 +31,7 @@ impl NorthMqttClient {
 
         let mut mqtt_options = MqttOptions::new(
             config.client_id.clone(),
-            host,
+            *host,
             port,
         );
         mqtt_options.set_keep_alive(std::time::Duration::from_secs(config.keepalive_secs));
@@ -39,11 +39,13 @@ impl NorthMqttClient {
         mqtt_options.set_clean_session(false);
 
         // 配置 TLS（双向证书认证）
-        let tls_options = TlsOptions::new()
-            .ca_file(&config.tls.ca_cert)
-            .client_auth(&config.tls.client_cert, &config.tls.client_key)
-            .verify(true); // 启用证书验证
-        mqtt_options.set_transport(Transport::tls(tls_options));
+        let ca = std::fs::read(&config.tls.ca_cert)
+            .map_err(|e| MqttBridgeError::CertificateError(format!("读取 CA 证书失败: {}", e)))?;
+        let client_cert = std::fs::read(&config.tls.client_cert)
+            .map_err(|e| MqttBridgeError::CertificateError(format!("读取客户端证书失败: {}", e)))?;
+        let client_key = std::fs::read(&config.tls.client_key)
+            .map_err(|e| MqttBridgeError::CertificateError(format!("读取客户端密钥失败: {}", e)))?;
+        mqtt_options.set_transport(Transport::tls(ca, Some((client_cert, client_key)), None));
 
         let (client, eventloop) = AsyncClient::new(mqtt_options, 100);
 
@@ -59,17 +61,17 @@ impl NorthMqttClient {
     pub async fn process_events(&self) -> Result<(), MqttBridgeError> {
         let mut eventloop = self.eventloop.lock().await;
         match eventloop.poll().await {
-            Ok(Event::Connected(_)) => {
-                *self.connected.lock().unwrap() = true;
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                *self.connected.lock().await = true;
                 Ok(())
             }
-            Ok(Event::Disconnected) => {
-                *self.connected.lock().unwrap() = false;
+            Ok(Event::Incoming(Packet::Disconnect)) => {
+                *self.connected.lock().await = false;
                 Err(MqttBridgeError::Disconnected("连接断开".to_string()))
             }
             Ok(_) => Ok(()),
             Err(e) => {
-                *self.connected.lock().unwrap() = false;
+                *self.connected.lock().await = false;
                 Err(MqttBridgeError::ConnectionFailed(e.to_string()))
             }
         }
@@ -104,21 +106,21 @@ impl NorthMqttClient {
         let connected = Arc::clone(&self.connected);
 
         tokio::spawn(async move {
-            let mut interval_secs = 1u64;
+            let mut _interval_secs = 1u64;
 
             loop {
                 let mut el = eventloop.lock().await;
                 match el.poll().await {
-                    Ok(Event::Connected(_)) => {
-                        *connected.lock().unwrap() = true;
-                        interval_secs = 1;
+                    Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                        *connected.lock().await = true;
+                        _interval_secs = 1;
                     }
-                    Ok(Event::Disconnected) => {
-                        *connected.lock().unwrap() = false;
+                    Ok(Event::Incoming(Packet::Disconnect)) => {
+                        *connected.lock().await = false;
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        *connected.lock().unwrap() = false;
+                        *connected.lock().await = false;
                     }
                 }
             }

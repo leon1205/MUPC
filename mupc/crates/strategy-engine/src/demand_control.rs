@@ -1,7 +1,7 @@
 use crate::config::DemandControlConfig;
 use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
 use async_trait::async_trait;
-use mupc_common::{MupcError, ErrorCode};
+use mupc_common::MupcError;
 use mupc_data_processing::telemetry::DataPackage;
 
 /// 需量控制策略
@@ -33,7 +33,7 @@ impl DemandControlStrategy {
         }
     }
 
-    fn get_transformer_load(&self, data: &DataPackage) -> f64 {
+    pub(crate) fn get_transformer_load(&self, data: &DataPackage) -> f64 {
         let load_power = data.device_status.load_power.unwrap_or(0.0);
         let ev_power = data.device_status.ev_charger_power.unwrap_or(0.0);
         (load_power + ev_power) / self.config.transformer_capacity
@@ -41,7 +41,7 @@ impl DemandControlStrategy {
 
     fn decide(&self, transformer_load: f64, battery_soc: f64) -> (f64, f64, u8) {
         let level: u8;
-        let p_batt: f64;
+        let mut p_batt: f64;
         let load_shedding: f64;
 
         if transformer_load > self.config.emergency_threshold {

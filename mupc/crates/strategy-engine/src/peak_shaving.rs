@@ -40,7 +40,7 @@ impl PeakShavingStrategy {
         }
     }
 
-    fn is_peak_hour(&self, hour: u8) -> bool {
+    pub(crate) fn is_peak_hour(&self, hour: u8) -> bool {
         self.config.peak_hours.iter().any(|(start, end)| {
             if *start <= *end {
                 hour >= *start && hour < *end
@@ -50,7 +50,7 @@ impl PeakShavingStrategy {
         })
     }
 
-    fn is_valley_hour(&self, hour: u8) -> bool {
+    pub(crate) fn is_valley_hour(&self, hour: u8) -> bool {
         self.config.valley_hours.iter().any(|(start, end)| {
             if *start <= *end {
                 hour >= *start && hour < *end

@@ -172,6 +172,7 @@ mod tests {
 // Extension trait for sync status check in tests
 impl ModelManager {
     /// 获取模型状态（同步版本，仅用于测试）
+    #[allow(dead_code)]
     fn get_status_blocking(&self) -> ModelStatus {
         // 注意：这是测试辅助方法，生产代码应使用异步 get_status()
         ModelStatus::Unloaded

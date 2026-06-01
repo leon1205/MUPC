@@ -1,6 +1,5 @@
 //! 插件加载器实现
 
-use crate::errors::LoaderError;
 use device_trait::{Plugin, PluginError, PluginLoader, PluginMeta};
 use libloading::{Library, Symbol};
 use parking_lot::RwLock;
@@ -41,6 +40,7 @@ impl PluginLoaderImpl {
     }
 
     /// 查找插件路径
+    #[allow(dead_code)]
     fn find_plugin_path(&self, plugin_name: &str) -> Option<std::path::PathBuf> {
         let paths = self.search_paths.read();
         for path in paths.iter() {

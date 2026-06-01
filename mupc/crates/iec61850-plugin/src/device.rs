@@ -3,23 +3,24 @@
 //! 实现 Iec61850Device trait，支持与 IEC 61850 IED 设备通信
 
 use crate::config::Iec61850Config;
-use crate::errors::{Iec61850Error, Result};
-use crate::goose::{GooseMessage, GooseSubscriber};
+use crate::errors::Iec61850Error;
+use crate::goose::GooseSubscriber;
 use crate::mms_client::MmsClient;
 use crate::Iec61850Status;
 use async_trait::async_trait;
-use mupc_core::device::{DataFrame, DataQuality, Device, DeviceError, DeviceStatus};
+use crate::config::GooseConfig;
+use device_trait::{DataFrame, DataQuality, Device, DeviceError, DeviceStatus};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 /// IEC 61850 设备接口
 #[async_trait]
 pub trait Iec61850Device: Device {
     /// 读取数据对象（DataObject）
-    async fn read_do(&self, ln: &str, do_name: &str) -> Result<DataFrame>;
+    async fn read_do(&self, ln: &str, do_name: &str) -> std::result::Result<DataFrame, Iec61850Error>;
 
     /// 写入数据对象
-    async fn write_do(&self, ln: &str, do_name: &str, value: &[u8]) -> Result<()>;
+    async fn write_do(&self, ln: &str, do_name: &str, value: &[u8]) -> std::result::Result<(), Iec61850Error>;
 
     /// 订阅 GOOSE 消息
     fn subscribe_goose(&self, go_id: &str) -> Arc<GooseSubscriber>;
@@ -28,21 +29,25 @@ pub trait Iec61850Device: Device {
 /// IEC 61850 设备实现
 pub struct Iec61850DeviceImpl {
     device_id: String,
+    #[allow(dead_code)]
     config: Iec61850Config,
     mms_client: Arc<MmsClient>,
     status: Arc<RwLock<Iec61850Status>>,
-    goose_subscribers: RwLock<Vec<Arc<RwLock<Option<GooseSubscriber>>>>>,
+    goose_subscribers: RwLock<Vec<Arc<GooseSubscriber>>>,
 }
 
 impl Iec61850DeviceImpl {
     /// 创建 IEC 61850 设备实例
     pub fn new(device_id: String, config: Iec61850Config) -> Self {
-        let mms_config = mms_client::MmsConfig {
+        let mms_config = crate::config::MmsConfig {
             local_ip: config.local_ip.clone(),
             local_port: config.local_port,
             remote_ip: config.remote_ip.clone(),
             remote_port: config.remote_port,
             max_connections: 10,
+            connect_timeout_ms: 5000,
+            read_timeout_ms: 3000,
+            tls: None,
         };
 
         Self {
@@ -55,20 +60,20 @@ impl Iec61850DeviceImpl {
     }
 
     /// 连接到 IED
-    pub async fn connect(&self) -> Result<()> {
+    pub async fn connect(&self) -> std::result::Result<(), Iec61850Error> {
         self.mms_client.connect().await?;
 
-        let mut status = self.status.write().await;
+        let mut status = self.status.write();
         *status = Iec61850Status::Connected;
 
         Ok(())
     }
 
     /// 断开连接
-    pub async fn disconnect(&self) -> Result<()> {
-        self.mms_client.disconnect().await?;
+    pub async fn disconnect(&self) -> std::result::Result<(), Iec61850Error> {
+        self.mms_client.disconnect();
 
-        let mut status = self.status.write().await;
+        let mut status = self.status.write();
         *status = Iec61850Status::Disconnected;
 
         Ok(())
@@ -76,7 +81,7 @@ impl Iec61850DeviceImpl {
 
     /// 获取设备状态
     pub async fn get_status(&self) -> Iec61850Status {
-        self.status.read().await.clone()
+        self.status.read().clone()
     }
 
     /// 获取 MMS 客户端
@@ -95,9 +100,9 @@ impl Device for Iec61850DeviceImpl {
         "IEC61850"
     }
 
-    fn status(&self) -> Result<DeviceStatus, DeviceError> {
+    fn status(&self) -> std::result::Result<DeviceStatus, DeviceError> {
         // 转换状态
-        let status = self.status.blocking_read();
+        let status = self.status.read();
         match &*status {
             Iec61850Status::Connected => Ok(DeviceStatus::Online),
             Iec61850Status::Disconnected => Ok(DeviceStatus::Offline),
@@ -105,13 +110,13 @@ impl Device for Iec61850DeviceImpl {
         }
     }
 
-    fn read(&self) -> Result<DataFrame, DeviceError> {
+    fn read(&self) -> std::result::Result<DataFrame, DeviceError> {
         Err(DeviceError::ProtocolError(
             "IEC 61850 设备请使用 read_do 方法读取特定数据对象".to_string(),
         ))
     }
 
-    fn write(&self, data: &[u8]) -> Result<(), DeviceError> {
+    fn write(&self, _data: &[u8]) -> std::result::Result<(), DeviceError> {
         Err(DeviceError::ProtocolError(
             "IEC 61850 设备请使用 write_do 方法写入特定数据对象".to_string(),
         ))
@@ -120,9 +125,9 @@ impl Device for Iec61850DeviceImpl {
 
 #[async_trait]
 impl Iec61850Device for Iec61850DeviceImpl {
-    async fn read_do(&self, ln: &str, do_name: &str) -> Result<DataFrame> {
+    async fn read_do(&self, ln: &str, do_name: &str) -> std::result::Result<DataFrame, Iec61850Error> {
         let data = self.mms_client.read_do(ln, do_name).await
-            .map_err(|e| DeviceError::ProtocolError(e.to_string()))?;
+            .map_err(|e| Iec61850Error::ProtocolError(e.to_string()))?;
 
         Ok(DataFrame {
             device_id: self.device_id.clone(),
@@ -132,9 +137,9 @@ impl Iec61850Device for Iec61850DeviceImpl {
         })
     }
 
-    async fn write_do(&self, ln: &str, do_name: &str, value: &[u8]) -> Result<()> {
+    async fn write_do(&self, ln: &str, do_name: &str, value: &[u8]) -> std::result::Result<(), Iec61850Error> {
         self.mms_client.write_do(ln, do_name, value).await
-            .map_err(|e| DeviceError::ProtocolError(e.to_string()))
+            .map_err(|e| Iec61850Error::ProtocolError(e.to_string()))
     }
 
     fn subscribe_goose(&self, go_id: &str) -> Arc<GooseSubscriber> {
@@ -148,7 +153,7 @@ impl Iec61850Device for Iec61850DeviceImpl {
         let subscriber = Arc::new(subscriber);
 
         // 保存订阅者
-        let mut subs = self.goose_subscribers.write().unwrap();
+        let mut subs = self.goose_subscribers.write();
         subs.push(subscriber.clone());
 
         subscriber

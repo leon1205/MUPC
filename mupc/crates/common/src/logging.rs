@@ -54,7 +54,7 @@ pub fn init_logging(config: LogConfig) -> Result<(), Box<dyn std::error::Error>>
 
     // 创建文件滚动器
     let file_appender = RollingFileAppender::new(
-        Rotation::ZIPPED,
+        Rotation::DAILY,
         &config.directory,
         "mupc.log",
     );
@@ -77,22 +77,16 @@ pub fn init_logging(config: LogConfig) -> Result<(), Box<dyn std::error::Error>>
         .with_span_events(FmtSpan::CLOSE);
 
     // 收集所有层
-    let final_subscriber = if config.console {
+    let subscriber = subscriber.with(env_filter).with(file_layer);
+    if config.console {
         let console_layer = fmt::layer()
             .with_target(true)
             .with_thread_ids(false)
             .with_span_events(FmtSpan::CLOSE);
-
-        subscriber
-            .with(env_filter)
-            .with(file_layer)
-            .with(console_layer)
+        subscriber.with(console_layer).init();
     } else {
-        subscriber.with(env_filter).with(file_layer)
-    };
-
-    // 初始化
-    final_subscriber.init();
+        subscriber.init();
+    }
 
     tracing::info!("日志系统初始化完成，日志目录: {}", config.directory);
 

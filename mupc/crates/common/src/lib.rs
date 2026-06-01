@@ -6,5 +6,5 @@ pub mod error;
 pub mod logging;
 pub mod macros;
 
-pub use error::{ErrorCode, MupcError, define_error};
+pub use error::{ErrorCode, MupcError};
 pub use logging::init_logging;

@@ -1,13 +1,12 @@
 //! IEC 104 服务器
 
 use mupc_common::{MupcError, ErrorCode};
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn, error};
 
-use super::{Connection, ConnectionState, Iec104Frame, protocol::FrameType};
+use super::{Connection, ConnectionState, Iec104Frame};
 use super::command::CommandHandler;
 
 /// IEC 104 服务器配置
@@ -41,7 +40,7 @@ impl Default for Iec104Config {
 pub struct Iec104Server {
     config: Iec104Config,
     connections: Arc<RwLock<Vec<Arc<RwLock<Connection>>>>>,
-    shutdown_tx: broadcast::Sender<()>>,
+    shutdown_tx: broadcast::Sender<()>,
 }
 
 impl Iec104Server {
@@ -84,20 +83,19 @@ impl Iec104Server {
 
                                 if conn_count >= max_connections {
                                     warn!("Max connections reached, rejecting {}", addr);
-                                    let _ = stream.shutdown().await;
+                                    drop(stream);
                                     continue;
                                 }
 
                                 info!("New connection from {}", addr);
                                 let conn = Arc::new(RwLock::new(Connection::new(stream, addr)));
-                                let conn_clone = conn.clone();
-                                connections.write().await.push(conn);
+                                connections.write().await.push(conn.clone());
 
                                 // 处理连接
-                                let conn_for_task = conn.clone();
-                                let handler = command_handler.clone();
+                                let conn_for_task = conn;
+                                let _handler = command_handler.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(conn_for_task, handler).await {
+                                    if let Err(e) = Self::handle_connection(conn_for_task, _handler).await {
                                         error!("Connection error: {}", e);
                                     }
                                 });
@@ -121,9 +119,11 @@ impl Iec104Server {
     /// 处理单个连接
     async fn handle_connection(
         conn: Arc<RwLock<Connection>>,
-        handler: Arc<dyn CommandHandler>,
+        _handler: Arc<dyn CommandHandler>,
     ) -> Result<(), MupcError> {
-        let (read_half, mut write_half) = tokio::io::split(conn.read().await.stream.clone());
+        let stream = conn.write().await.stream.take()
+            .ok_or_else(|| MupcError::new(ErrorCode::Unknown, "Stream already taken from connection", "gateway"))?;
+        let (read_half, mut write_half) = tokio::io::split(stream);
 
         // 读取循环
         let read_conn = conn.clone();
@@ -150,7 +150,10 @@ impl Iec104Server {
                         };
 
                         let mut conn_guard = read_conn.write().await;
-                        conn_guard.handle_frame(frame, &mut write_half).await?;
+                        if let Err(e) = conn_guard.handle_frame(frame, &mut write_half).await {
+                            error!("Frame handling error: {}", e);
+                            break;
+                        }
 
                         if conn_guard.state == ConnectionState::Disconnected {
                             break;

@@ -2,7 +2,7 @@
 
 use mupc_data_processing::telemetry::{BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus};
 
-use crate::ai_validator::{AiCommandValidatorImpl, MockAiModel, ModelInput};
+use crate::ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput};
 use crate::strategies::{AiCommandValidator, CommandType, ControlCommand};
 
 /// 构造测试用遥测数据
@@ -136,6 +136,8 @@ fn test_validator_switch_command_passthrough() {
         phase_compensation: None,
         start_stop: Some(true),
         priority: 1,
+        pv_limit: None,
+        load_shedding: None,
     };
     let result = validator.validate_sync(&cmd);
     assert!(result.valid); // 开关控制直接通过

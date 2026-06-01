@@ -2,8 +2,6 @@
 //!
 //! 实现 std::error::Error trait，支持错误链
 
-use thiserror::Error;
-
 /// 错误码定义
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u16)]
@@ -206,6 +204,7 @@ pub use predefine::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
 
     #[test]
     fn test_error_code_from_u16() {

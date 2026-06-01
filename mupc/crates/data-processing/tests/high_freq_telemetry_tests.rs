@@ -1,6 +1,6 @@
 #[test]
 fn test_telemetry_impl_new() {
-    use mupc_data_processing::HighFreqTelemetryImpl;
+    use mupc_data_processing::{HighFreqTelemetryImpl, HighFrequencyTelemetry};
 
     let telemetry = HighFreqTelemetryImpl::new(1000);
     assert_eq!(telemetry.period(), 1000);
@@ -9,7 +9,7 @@ fn test_telemetry_impl_new() {
 
 #[test]
 fn test_telemetry_start_stop() {
-    use mupc_data_processing::HighFreqTelemetryImpl;
+    use mupc_data_processing::{HighFreqTelemetryImpl, HighFrequencyTelemetry};
 
     let telemetry = HighFreqTelemetryImpl::new(1000);
     assert!(!telemetry.is_running());
@@ -17,7 +17,7 @@ fn test_telemetry_start_stop() {
     // Start telemetry
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        telemetry.start().await.unwrap();
+        telemetry.start(1000).await.unwrap();
     });
     assert!(telemetry.is_running());
 
@@ -30,7 +30,7 @@ fn test_telemetry_start_stop() {
 
 #[test]
 fn test_telemetry_period() {
-    use mupc_data_processing::HighFreqTelemetryImpl;
+    use mupc_data_processing::{HighFreqTelemetryImpl, HighFrequencyTelemetry};
 
     let telemetry = HighFreqTelemetryImpl::new(500);
     assert_eq!(telemetry.period(), 500);

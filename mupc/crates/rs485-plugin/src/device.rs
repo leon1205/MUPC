@@ -5,15 +5,18 @@
 use crate::config::Config;
 use crate::errors::Rs485Error;
 use crate::protocol::Frame;
-use device_trait::{DataFrame, Device, DeviceError, DeviceStatus, Parity, ProtocolHandler, SouthDevice};
+use device_trait::{DataFrame, Device, DeviceError, DeviceStatus, ProtocolHandler, SouthDevice};
+#[allow(unused_imports)]
+use device_trait::Parity;
 use parking_lot::Mutex;
+#[cfg(unix)]
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 /// RS485 方向控制
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rs485Dir {
     /// 接收模式
     Recv,
@@ -186,7 +189,7 @@ impl Rs485Device {
     /// 关闭串口
     pub fn close(&self) {
         let mut port_guard = self.port_fd.lock();
-        if let Some(fd) = port_guard.take() {
+        if let Some(_fd) = port_guard.take() {
             #[cfg(unix)]
             {
                 if unsafe { libc::close(fd) } < 0 {
@@ -211,13 +214,13 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(())`: 发送成功
     /// - `Err(Rs485Error)`: 发送失败
-    pub fn send_frame(&self, frame: &[u8]) -> Result<(), Rs485Error> {
+    pub fn send_frame(&self, _frame: &[u8]) -> Result<(), Rs485Error> {
         let port_guard = self.port_fd.lock();
-        let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
+        let _fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
-            let result = unsafe { libc::write(fd, frame.as_ptr() as *const libc::c_void, frame.len()) };
+            let result = unsafe { libc::write(_fd, _frame.as_ptr() as *const libc::c_void, _frame.len()) };
             if result < 0 {
                 return Err(Rs485Error::send_failed("发送失败"));
             }
@@ -238,31 +241,31 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(Vec<u8>)`: 接收到的数据
     /// - `Err(Rs485Error)`: 接收失败
-    pub fn recv_frame(&self, timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
+    pub fn recv_frame(&self, _timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
         let port_guard = self.port_fd.lock();
-        let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
+        let _fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
             // 设置串口超时使用 termios
             let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
             let termios = unsafe {
-                if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
+                if libc::tcgetattr(_fd, termios.as_mut_ptr()) < 0 {
                     return Err(Rs485Error::recv_failed("获取终端属性失败"));
                 }
                 termios.assume_init()
             };
 
             // 设置读取超时：VTIME 为十分之一秒
-            termios.c_cc[libc::VTIME] = (timeout_ms / 100) as i32;
+            termios.c_cc[libc::VTIME] = (_timeout_ms / 100) as i32;
             termios.c_cc[libc::VMIN] = 0;
 
-            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
+            if unsafe { libc::tcsetattr(_fd, libc::TCSANOW, &termios) } < 0 {
                 return Err(Rs485Error::recv_failed("设置终端属性失败"));
             }
 
             let mut buffer = vec![0u8; 1024];
-            let n = unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+            let n = unsafe { libc::read(_fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
 
             if n < 0 {
                 return Err(Rs485Error::recv_failed("接收失败或超时"));
@@ -522,7 +525,7 @@ impl SouthDevice for Rs485Device {
     fn read_batch(&self, count: usize) -> Result<Vec<DataFrame>, DeviceError> {
         let mut results = Vec::with_capacity(count);
         for _ in 0..count {
-            results.push(self.read()?);
+            results.push(Device::read(self)?);
         }
         Ok(results)
     }
@@ -595,14 +598,14 @@ mod tests {
     #[test]
     fn test_device_creation() {
         let device = create_test_device();
-        assert_eq!(device.device_id(), "test_ttu_001");
-        assert_eq!(device.device_type(), "ttu");
+        assert_eq!(device_trait::Device::device_id(&device), "test_ttu_001");
+        assert_eq!(device_trait::Device::device_type(&device), "ttu");
     }
 
     #[test]
     fn test_device_status_offline() {
         let device = create_test_device();
-        let status = device.status().unwrap();
+        let status = device_trait::Device::status(&device).unwrap();
         assert_eq!(status, DeviceStatus::Offline);
     }
 

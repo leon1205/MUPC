@@ -12,7 +12,7 @@ mod asn1_utils;
 
 pub use config::{Iec61850Config, GooseConfig, MmsConfig, MmsTlsConfig};
 pub use device::{Iec61850DeviceImpl, Iec61850Device};
-pub use errors::{Iec61850Error, Result};
+pub use errors::Iec61850Error;
 pub use goose::{GooseSubscriber, GooseMessage};
 pub use mms_client::{MmsClient, MmsClientState, MmsClientTrait};
 pub use mms_types::{MmsRequest, MmsResponse, MmsService, DataObject};
@@ -100,6 +100,7 @@ impl Plugin for Iec61850Plugin {
 /// - 必须通过 Box::from_raw 释放返回的指针
 /// - 同一插件实例不能同时被多个线程使用
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
     let plugin = Iec61850Plugin::new();
     Box::into_raw(Box::new(plugin)) as *mut dyn Plugin
@@ -107,6 +108,7 @@ pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
 
 /// 获取插件元信息（FFI 入口点）
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub unsafe extern "C" fn plugin_meta() -> PluginMeta {
     Iec61850Plugin::new().meta()
 }

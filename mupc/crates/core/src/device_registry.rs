@@ -104,6 +104,7 @@ impl std::fmt::Display for DeviceError {
 impl std::error::Error for DeviceError {}
 
 /// 设备抽象 trait
+#[async_trait::async_trait]
 pub trait Device: Send + Sync {
     /// 设备类型标识
     fn device_type(&self) -> &'static str;

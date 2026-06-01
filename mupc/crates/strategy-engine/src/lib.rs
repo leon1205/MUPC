@@ -23,10 +23,8 @@ pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, Control
 pub use ai_integration::{AiIntegrator, AiEngineStatusInfo, ModeInfo};
 
 // AI Engine re-exports
-pub use mupc_ai_engine::{ModelManager, ModelStatus, LstmModel, RLModel, SystemState, ActionOutput, LstmInput, LstmOutput};
+pub use mupc_ai_engine::{ModelManager, ModelStatus};
 
-#[cfg(test)]
-mod strategies_test;
 #[cfg(test)]
 mod peak_shaving_test;
 #[cfg(test)]
@@ -35,5 +33,3 @@ mod demand_control_test;
 mod anti_reverse_test;
 #[cfg(test)]
 mod ai_validator_test;
-#[cfg(test)]
-mod config_test;

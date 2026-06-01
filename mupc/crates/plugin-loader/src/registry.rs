@@ -3,7 +3,7 @@
 //! 管理已注册插件的元信息和生命周期
 
 use crate::errors::LoaderError;
-use device_trait::{PluginMeta, PluginError};
+use device_trait::PluginMeta;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 

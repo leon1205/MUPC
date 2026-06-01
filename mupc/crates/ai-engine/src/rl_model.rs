@@ -98,7 +98,7 @@ impl RLModel {
     /// 输出：最优动作建议
     pub async fn decide(&self, state: &SystemState) -> Result<ActionOutput, AiEngineError> {
         // 检查模型是否已加载
-        if !self.runtime.is_loaded().await {
+        if !self.runtime.is_loaded() {
             return Err(AiEngineError::ModelNotLoaded);
         }
 

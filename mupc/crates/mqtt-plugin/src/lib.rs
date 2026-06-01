@@ -8,7 +8,7 @@ mod errors;
 
 pub use client::{MqttClient, MqttClientState};
 pub use config::{MqttConfig, MqttQos};
-pub use errors::{MqttError, Result};
+pub use errors::MqttError;
 
 use device_trait::errors::PluginError;
 use device_trait::plugin::Plugin;
@@ -95,6 +95,7 @@ impl Plugin for MqttPlugin {
 /// - 必须通过 Box::from_raw 释放返回的指针
 /// - 同一插件实例不能同时被多个线程使用
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
     let plugin = MqttPlugin::new();
     Box::into_raw(Box::new(plugin)) as *mut dyn Plugin
@@ -102,6 +103,7 @@ pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
 
 /// 获取插件元信息（FFI 入口点）
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub unsafe extern "C" fn plugin_meta() -> PluginMeta {
     MqttPlugin::new().meta()
 }

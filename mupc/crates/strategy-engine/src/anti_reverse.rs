@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use crate::config::AntiReverseConfig;
 use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
 use async_trait::async_trait;
-use mupc_common::{MupcError, ErrorCode};
+use mupc_common::MupcError;
 use mupc_data_processing::telemetry::DataPackage;
 
 /// 防逆流策略

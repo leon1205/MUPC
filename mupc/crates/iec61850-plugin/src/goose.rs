@@ -4,7 +4,6 @@
 
 use crate::config::GooseConfig;
 use crate::errors::{Iec61850Error, Result};
-use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// GOOSE 消息
@@ -40,11 +39,13 @@ impl GooseSubscriber {
     pub async fn recv(&mut self) -> Option<GooseMessage> {
         self.receiver.recv().await.ok()
     }
+}
 
-    /// GOOSE PDU 解析结果
+/// GOOSE PDU 解析结果
 ///
 /// 参考 IEC 61850-8-1 标准进行解析
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GoosePduResult {
     /// APDU 长度
     pub apdu_length: u16,
@@ -79,6 +80,7 @@ pub struct GoosePduResult {
 /// - Security (1 byte)
 /// - TimeAllowed to Wait (4 bytes)
 /// - Data (TLV sequence)
+#[allow(dead_code)]
 pub fn parse_goose_pdu(data: &[u8]) -> Result<GoosePduResult> {
     if data.len() < 8 {
         return Err(Iec61850Error::GooseParseFailed("数据太短".to_string()));
@@ -140,6 +142,7 @@ pub fn parse_goose_pdu(data: &[u8]) -> Result<GoosePduResult> {
 }
 
 /// 解析 TLV 字符串
+#[allow(dead_code)]
 fn parse_tlv_string(data: &[u8]) -> Result<(String, usize)> {
     if data.len() < 3 {
         return Err(Iec61850Error::GooseParseFailed("TLV 数据不足".to_string()));
@@ -163,11 +166,12 @@ fn parse_tlv_string(data: &[u8]) -> Result<(String, usize)> {
 }
 
 /// 从原始数据创建 GOOSE 消息
+#[allow(dead_code)]
 pub fn create_goose_message(data: &[u8]) -> Result<GooseMessage> {
     let pdu = parse_goose_pdu(data)?;
 
     Ok(GooseMessage {
-        app_id: pdu.app_id,
+        app_id: pdu.app_id as u32,
         go_id: pdu.go_id,
         dat_set: pdu.dat_set,
         timestamp: pdu.time_to_live as u64,
@@ -185,12 +189,14 @@ impl GooseSubscriber {
 
 /// GOOSE 数据集定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GooseDataSet {
     pub entries: Vec<GooseDataEntry>,
 }
 
 /// GOOSE 数据条目
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GooseDataEntry {
     pub data_ref: String,
     pub data_type: DataType,
@@ -198,6 +204,7 @@ pub struct GooseDataEntry {
 
 /// 数据类型
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum DataType {
     Boolean,
     Int8,

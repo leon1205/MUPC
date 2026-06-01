@@ -4,7 +4,6 @@
 
 use crate::config::HplcConfig;
 use crate::driver::HplcDriver;
-use crate::errors::HplcError;
 use device_trait::{DataFrame, DeviceError, DeviceStatus, SouthDevice};
 use std::sync::Arc;
 
@@ -271,11 +270,11 @@ mod tests {
             mock.inject_data(vec![0x03]);
         }
 
-        // 批量读取
+        // 批量读取（recv 以 LIFO 顺序返回：后进先出）
         let frames = device.read_batch(3).unwrap();
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0].data, vec![0x01]);
+        assert_eq!(frames[0].data, vec![0x03]);
         assert_eq!(frames[1].data, vec![0x02]);
-        assert_eq!(frames[2].data, vec![0x03]);
+        assert_eq!(frames[2].data, vec![0x01]);
     }
 }

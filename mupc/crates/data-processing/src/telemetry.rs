@@ -2,7 +2,7 @@
 //!
 //! Phase 1 仅定义接口
 
-use mupc_common::{MupcError, Value};
+use mupc_common::MupcError;
 use async_trait::async_trait;
 
 /// 数据包

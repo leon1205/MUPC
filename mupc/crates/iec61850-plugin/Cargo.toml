@@ -16,6 +16,7 @@ mupc-core = { path = "../core" }
 mupc-security = { path = "../security" }
 async-trait.workspace = true
 parking_lot = "0.12"
+chrono.workspace = true
 
 # MMS 协议栈 (libIEC61850 FFI 绑定)
 iec61850 = { version = "0.1.0", optional = true }

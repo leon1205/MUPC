@@ -7,7 +7,6 @@
 use crate::config::LstmConfig;
 use crate::error::AiEngineError;
 use crate::rknn_runtime::RknnRuntime;
-use async_trait::async_trait;
 
 /// LSTM 模型输入
 #[derive(Debug, Clone)]
@@ -51,7 +50,7 @@ impl LstmModel {
     /// 输出：未来预测值（通常为 30 分钟）
     pub async fn predict(&self, input: &LstmInput) -> Result<LstmOutput, AiEngineError> {
         // 检查模型是否已加载
-        if !self.runtime.is_loaded().await {
+        if !self.runtime.is_loaded() {
             return Err(AiEngineError::ModelNotLoaded);
         }
 

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use tokio::time::{timeout, Duration};
 
-use super::{IntercoreFrame, IntercoreFrameType, HeartbeatManager, protocol::FrameHeader};
+use super::{IntercoreFrame, IntercoreFrameType, HeartbeatManager};
 
 /// 核间通信配置
 #[derive(Debug, Clone)]
@@ -175,8 +175,12 @@ impl IntercoreServer {
         let shutdown_rx = self.shutdown_tx.subscribe();
         let cmd_config = self.cmd_config.clone();
 
+        // clone heartbeat_manager before it's moved into spawns
+        let hb_for_listener = heartbeat_manager.clone();
+        let hb_for_runner = heartbeat_manager.clone();
+
         // 接受连接任务
-        let listener_handle = tokio::spawn(async move {
+        let _listener_handle = tokio::spawn(async move {
             let mut shutdown_rx = shutdown_rx;
 
             loop {
@@ -185,7 +189,7 @@ impl IntercoreServer {
                         match result {
                             Ok((stream, addr)) => {
                                 info!("New intercore connection from {}", addr);
-                                let heartbeat = heartbeat_manager.clone();
+                                let heartbeat = hb_for_listener.clone();
                                 let cfg = cmd_config.clone();
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(stream, addr, heartbeat, cfg).await {
@@ -207,9 +211,8 @@ impl IntercoreServer {
         });
 
         // 启动心跳管理器
-        let heartbeat = heartbeat_manager.clone();
         tokio::spawn(async move {
-            heartbeat.read().await.run().await;
+            hb_for_runner.read().await.run().await;
         });
 
         Ok(heartbeat_manager)
@@ -222,7 +225,7 @@ impl IntercoreServer {
         heartbeat: Arc<RwLock<HeartbeatManager>>,
         cmd_config: CommandConfig,
     ) -> Result<(), MupcError> {
-        let (mut read_half, mut write_half) = tokio::io::split(stream);
+        let (read_half, mut write_half) = tokio::io::split(stream);
 
         // 发送连接注册
         let connect_frame = IntercoreFrame::new_connect();
@@ -245,9 +248,9 @@ impl IntercoreServer {
                 Ok(n) => {
                     match IntercoreFrame::from_bytes(&buf[..n]) {
                         Ok(frame) => {
-                            match frame.frame_type {
+                            match frame.header.frame_type {
                                 IntercoreFrameType::HeartbeatReq | IntercoreFrameType::HeartbeatRsp => {
-                                    heartbeat.read().await.receive_heartbeat(addr);
+                                    heartbeat.read().await.receive_heartbeat(addr).await;
                                 }
                                 IntercoreFrameType::ControlCmd => {
                                     info!("Received control command from {}", addr);
@@ -287,7 +290,7 @@ impl IntercoreServer {
                             }
 
                             // 回复心跳响应
-                            if frame.frame_type == IntercoreFrameType::HeartbeatReq {
+                            if frame.header.frame_type == IntercoreFrameType::HeartbeatReq {
                                 let rsp = IntercoreFrame::new_heartbeat_rsp();
                                 let rsp_data = rsp.to_bytes()?;
                                 Self::send_with_timeout(&mut write_half, &rsp_data, cmd_config.timeout_ms).await?;

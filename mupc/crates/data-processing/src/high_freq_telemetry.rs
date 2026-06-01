@@ -1,18 +1,19 @@
-use crate::errors::DataProcessingError;
 use crate::telemetry::HighFrequencyTelemetry;
 use async_trait::async_trait;
 use mupc_common::MupcError;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// 高频遥测实现
 /// 以 >=1Hz 频率上报遥测数据，内存缓冲 60 条
+#[allow(dead_code)]
 pub struct HighFreqTelemetryImpl {
     /// 上报周期 (ms)
     period_ms: u64,
-    /// 是否运行
-    running: bool,
+    /// 是否运行 (使用 AtomicBool 以支持通过 &self 修改)
+    running: AtomicBool,
     /// 内存缓冲 (Ring Buffer, 60 条)
     buffer: Arc<Mutex<VecDeque<TelemetryPoint>>>,
     /// 发送通道
@@ -21,7 +22,8 @@ pub struct HighFreqTelemetryImpl {
 
 /// 遥测数据点
 #[derive(Debug, Clone)]
-struct TelemetryPoint {
+#[allow(dead_code)]
+pub(crate) struct TelemetryPoint {
     timestamp: u64,
     battery_soc: f64,
     battery_power: f64,
@@ -35,21 +37,23 @@ impl HighFreqTelemetryImpl {
     pub fn new(period_ms: u64) -> Self {
         Self {
             period_ms,
-            running: false,
+            running: AtomicBool::new(false),
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(60))),
             sender: None,
         }
     }
 
-    pub fn with_channel(period_ms: u64, sender: mpsc::Sender<TelemetryPoint>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_channel(period_ms: u64, sender: mpsc::Sender<TelemetryPoint>) -> Self {
         Self {
             period_ms,
-            running: false,
+            running: AtomicBool::new(false),
             buffer: Arc::new(Mutex::new(VecDeque::with_capacity(60))),
             sender: Some(sender),
         }
     }
 
+    #[allow(dead_code)]
     fn push_to_buffer(&self, point: TelemetryPoint) {
         let mut buffer = self.buffer.lock().unwrap();
         if buffer.len() >= 60 {
@@ -76,18 +80,18 @@ impl HighFreqTelemetryImpl {
 
 #[async_trait]
 impl HighFrequencyTelemetry for HighFreqTelemetryImpl {
-    async fn start(&self) -> Result<(), MupcError> {
-        self.running = true;
+    async fn start(&self, _period_ms: u64) -> Result<(), MupcError> {
+        self.running.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn stop(&self) -> Result<(), MupcError> {
-        self.running = false;
+        self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     fn is_running(&self) -> bool {
-        self.running
+        self.running.load(Ordering::SeqCst)
     }
 
     fn period(&self) -> u64 {

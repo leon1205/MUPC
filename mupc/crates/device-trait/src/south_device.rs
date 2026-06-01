@@ -241,6 +241,7 @@ impl ProtocolHandlerRegistry {
 // ============================================================================
 
 /// Modbus RTU 协议处理器
+#[allow(dead_code)]
 pub struct ModbusHandler {
     device_addr: u8,
     crc_mode: CrcMode,
@@ -302,6 +303,7 @@ impl ProtocolHandler for ModbusHandler {
 }
 
 /// TTU 协议处理器
+#[allow(dead_code)]
 pub struct TtuHandler {
     device_addr: u8,
     protocol_version: u8,
@@ -361,6 +363,7 @@ impl Default for TtuHandler {
 }
 
 /// 光伏逆变器协议处理器
+#[allow(dead_code)]
 pub struct InverterHandler {
     device_addr: u8,
     manufacturer_code: u16,
@@ -409,6 +412,7 @@ impl Default for InverterHandler {
 }
 
 /// 充电桩协议处理器（GB/T 27930）
+#[allow(dead_code)]
 pub struct ChargerHandler {
     device_addr: u8,
     protocol_version: u8,
@@ -473,7 +477,6 @@ pub type HplcDriverMarker = ();
 
 // Re-export all public types
 pub use crate::errors::DeviceError as SouthDeviceError;
-pub use crate::types::{CrcMode, DataFrame, DeviceStatus};
 
 // ============================================================================
 // 单元测试
@@ -582,6 +585,6 @@ mod tests {
         // 已知 CRC 测试向量
         let data = vec![0x01, 0x03, 0x00, 0x00, 0x00, 0x10];
         let crc = crc16_modbus(&data);
-        assert_eq!(crc, 0xC4, 0x01); // 简化的 CRC 验证
+        assert_eq!(crc, 0xC4); // 简化的 CRC 验证
     }
 }

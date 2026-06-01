@@ -45,7 +45,7 @@ impl RknnOutput {
     ///
     /// 使用 `align_to` 处理 Vec<u8> 可能不满足 4 字节对齐的情况
     pub fn as_f32(&self) -> Vec<f32> {
-        let (prefix, aligned, suffix) = self.buf.align_to::<f32>();
+        let (prefix, aligned, suffix) = unsafe { self.buf.align_to::<f32>() };
         let mut result = Vec::with_capacity(prefix.len() / 4 + aligned.len() + suffix.len() / 4);
         // 处理前缀中 4 字节对齐的部分
         for chunk in prefix.chunks_exact(4) {
