@@ -183,7 +183,7 @@ impl GooseSubscriber {
     /// 检查 GOOSE 报文是否有效
     pub fn validate_goose(&self, msg: &GooseMessage) -> bool {
         // 检查 AppID 和 GOID 匹配
-        msg.app_id == self.config.app_id as u32 && msg.go_id == self.config.go_id
+        msg.app_id == self.config.app_id && msg.go_id == self.config.go_id
     }
 }
 

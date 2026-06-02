@@ -49,22 +49,47 @@ pub async fn get_decision_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> Json<DecisionHistoryResponse> {
-    let _ = state.ai_integrator;
     let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(20) as usize;
+    let limit = page_size * 5; // fetch more for in-memory pagination
 
-    Json(DecisionHistoryResponse {
-        total: 0,
-        page,
-        items: vec![],
-    })
+    let records = state.storage.decisions.query_recent(limit).await
+        .unwrap_or_default();
+
+    let total = records.len() as u64;
+    let skip = ((page - 1) as usize * page_size).min(records.len());
+    let items: Vec<DecisionHistoryItem> = records.into_iter()
+        .skip(skip)
+        .take(page_size)
+        .map(|r| {
+            let action: serde_json::Value = serde_json::from_str(&r.action_json)
+                .unwrap_or_default();
+            let action_summary = action
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let reward = action
+                .get("reward")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            DecisionHistoryItem {
+                id: r.id.map(|i| i.to_string()).unwrap_or_default(),
+                timestamp: r.timestamp.to_rfc3339(),
+                mode: r.scene_type,
+                action_summary,
+                reward,
+            }
+        })
+        .collect();
+
+    Json(DecisionHistoryResponse { total, page, items })
 }
 
 /// GET /api/v1/ai/history/accuracy
 pub async fn get_prediction_accuracy_history(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> Json<AccuracyHistoryResponse> {
-    let _ = state.ai_integrator;
-
     Json(AccuracyHistoryResponse {
         items: vec![],
         avg_accuracy: 0.0,

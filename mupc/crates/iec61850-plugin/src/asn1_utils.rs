@@ -54,18 +54,16 @@ pub fn decode_mms_response(data: &[u8]) -> Result<MmsResponse> {
 /// 编码 Read 请求
 /// 构建 MMS Read Request APDU (IEC 61850-8-1 SSAP)
 fn encode_read_request(object: &DataObject) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-
     // APDU 头: confirmed-RequestPDU
-    buf.push(pdu_tags::CONFIRMED_REQUEST_PDU);
-
     // invokeId present (tag 0x81)
-    buf.push(0x81);
-    buf.push(0x01);
-    buf.push(0x01); // invokeId = 1
-
     // service: Read (tag 0x82)
-    buf.push(0x82);
+    let mut buf = vec![
+        pdu_tags::CONFIRMED_REQUEST_PDU,
+        0x81,
+        0x01,
+        0x01, // invokeId = 1
+        0x82,
+    ];
     let read_content = encode_read_service(&object.to_string());
     buf.push(0x24); // sequence of
     encode_length(&mut buf, read_content.len());
@@ -76,18 +74,14 @@ fn encode_read_request(object: &DataObject) -> Result<Vec<u8>> {
 
 /// 编码 Read Service 参数
 fn encode_read_service(object_name: &str) -> Vec<u8> {
-    let mut buf = Vec::new();
-
     // specification-with-result (optional, skip for simple read)
-    // variable-access-specification
-    buf.push(0xA0); // list-of-variable-access-specification
-
-    // variable-specification
-    buf.push(0xA1); // variable-specification
-    buf.push(0x07); // length
-
-    // object-name (IEC 61850 path)
-    buf.push(0x80); // object-name tag
+    // variable-access-specification / variable-specification / object-name
+    let mut buf = vec![
+        0xA0, // list-of-variable-access-specification
+        0xA1, // variable-specification
+        0x07, // length
+        0x80, // object-name tag
+    ];
     let name_bytes = object_name.as_bytes();
     encode_length(&mut buf, name_bytes.len());
     buf.extend_from_slice(name_bytes);
@@ -97,18 +91,16 @@ fn encode_read_service(object_name: &str) -> Vec<u8> {
 
 /// 编码 Write 请求
 fn encode_write_request(object: &DataObject, payload: &[u8]) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-
     // APDU 头: confirmed-RequestPDU
-    buf.push(pdu_tags::CONFIRMED_REQUEST_PDU);
-
     // invokeId present (tag 0x81)
-    buf.push(0x81);
-    buf.push(0x01);
-    buf.push(0x01); // invokeId = 1
-
     // service: Write (tag 0x83)
-    buf.push(0x83);
+    let mut buf = vec![
+        pdu_tags::CONFIRMED_REQUEST_PDU,
+        0x81,
+        0x01,
+        0x01, // invokeId = 1
+        0x83,
+    ];
     let write_content = encode_write_service(&object.to_string(), payload);
     buf.push(0x24); // sequence of
     encode_length(&mut buf, write_content.len());
@@ -119,15 +111,13 @@ fn encode_write_request(object: &DataObject, payload: &[u8]) -> Result<Vec<u8>> 
 
 /// 编码 Write Service 参数
 fn encode_write_service(object_name: &str, payload: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    // variable-access-specification
-    buf.push(0xA0); // list-of-variable-access-specification
-
-    // variable-specification
-    buf.push(0xA1); // variable-specification
-    buf.push(0x07); // length
-    buf.push(0x80); // object-name tag
+    // variable-access-specification / variable-specification / object-name
+    let mut buf = vec![
+        0xA0, // list-of-variable-access-specification
+        0xA1, // variable-specification
+        0x07, // length
+        0x80, // object-name tag
+    ];
     let name_bytes = object_name.as_bytes();
     encode_length(&mut buf, name_bytes.len());
     buf.extend_from_slice(name_bytes);

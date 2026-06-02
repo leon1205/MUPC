@@ -150,7 +150,7 @@ impl MupcError {
         self.source = Some(Box::new(source));
         self
     }
-
+  
     /// 获取错误码值
     pub fn code_value(&self) -> u16 {
         self.code as u16

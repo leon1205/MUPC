@@ -29,6 +29,8 @@ mupc-core = { path = "../core" }
 mupc-security = { path = "../security" }
 mupc-ai-engine = { path = "../ai-engine" }
 mupc-strategy-engine = { path = "../strategy-engine" }
+mupc_storage = { path = "../storage" }
+mupc-ota-update = { path = "../ota-update" }
 
 [dev-dependencies]
 tokio-test = "0.4"

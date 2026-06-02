@@ -32,11 +32,28 @@ pub async fn get_explanation(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ExplainQuery>,
 ) -> Json<ExplanationResponse> {
-    let _ = state;
+    let mut summary = "AI 决策基于当前系统状态的综合评估".to_string();
+
+    if let Some(ref decision_id) = query.decision_id {
+        if let Ok(id) = decision_id.parse::<i64>() {
+            if let Ok(Some(record)) = state.storage.decisions.get_by_id(id).await {
+                let action: serde_json::Value = serde_json::from_str(&record.action_json)
+                    .unwrap_or_default();
+                if let Some(action_type) = action.get("type").and_then(|v| v.as_str()) {
+                    summary = format!(
+                        "决策类型: {} (置信度: {:.1}%, 场景: {})",
+                        action_type,
+                        record.confidence * 100.0,
+                        record.scene_type,
+                    );
+                }
+            }
+        }
+    }
 
     Json(ExplanationResponse {
         decision_id: query.decision_id,
-        summary: "AI 决策基于当前系统状态的综合评估".to_string(),
+        summary,
         factors: vec![
             FactorContribution {
                 factor: "电价".to_string(),

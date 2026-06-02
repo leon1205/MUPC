@@ -3,6 +3,9 @@
 //! 提供 AI 引擎状态监控、决策可视化、场景管理、
 //! 权重调整、A/B 测试、预测结果查询、审计日志等端点
 
+pub mod ab_test_manager;
+pub mod auth;
+
 mod decision;
 mod prediction;
 mod scene;
@@ -19,14 +22,14 @@ mod finetuning;
 mod audit;
 mod rollback;
 
-use axum::{Router, routing::{get, put, post, delete}};
+use axum::{Router, routing::{get, post, delete}};
 use std::sync::Arc;
 use crate::AppState;
 
 /// 注册 AI 可视化路由
 ///
-/// Phase 2+ 需要提供 Arc<AppState> 状态来启用 AI 引擎查询。
-pub fn ai_routes() -> Router {
+/// 返回 Router<Arc<AppState>>，调用方需通过 .with_state(app_state) 提供状态。
+pub fn ai_routes() -> Router<Arc<AppState>> {
     Router::new()
         // 预测 (v1.2 对齐: 统一根路径 + 可选 type 参数)
         .route("/api/v1/ai/predictions", get(prediction::get_predictions))
@@ -74,7 +77,7 @@ pub fn ai_routes() -> Router {
 ///
 /// GET /api/v1/ai/stream
 /// 与主 AI 路由分开，因为需要访问 SsePushService。
-pub fn sse_route() -> Router {
+pub fn sse_route() -> Router<Arc<AppState>> {
     use axum::routing::get;
     Router::new()
         .route("/api/v1/ai/stream", get(crate::sse::sse_handler))

@@ -40,6 +40,12 @@ pub struct StatusHandler {
     start_time: std::time::Instant,
 }
 
+impl Default for StatusHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatusHandler {
     pub fn new() -> Self {
         Self {

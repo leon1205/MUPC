@@ -54,19 +54,45 @@ pub async fn get_rewards(
     State(state): State<Arc<AppState>>,
     Query(_query): Query<RewardsQuery>,
 ) -> Json<RewardsResponse> {
-    let _ = state;
+    let records = state.storage.decisions.query_recent(50).await
+        .unwrap_or_default();
+
+    let mut reward_values: Vec<f64> = Vec::new();
+    let mut history: Vec<HistoryReward> = Vec::new();
+
+    for r in &records {
+        let action: serde_json::Value = serde_json::from_str(&r.action_json)
+            .unwrap_or_default();
+        let total_reward = action
+            .get("reward")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        reward_values.push(total_reward);
+        history.push(HistoryReward {
+            timestamp: r.timestamp.to_rfc3339(),
+            total_reward,
+            components: vec![],
+        });
+    }
+
+    let (max, min, avg) = if reward_values.is_empty() {
+        (0.0, 0.0, 0.0)
+    } else {
+        let max = reward_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min = reward_values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let avg = reward_values.iter().sum::<f64>() / reward_values.len() as f64;
+        (max, min, avg)
+    };
+
+    let current_total = reward_values.first().copied().unwrap_or(0.0);
 
     Json(RewardsResponse {
         current: CurrentReward {
-            total: 0.0,
+            total: current_total,
             components: vec![],
             timestamp: chrono::Utc::now().to_rfc3339(),
         },
-        history: vec![],
-        stats: RewardStats {
-            max: 0.0,
-            min: 0.0,
-            avg: 0.0,
-        },
+        history,
+        stats: RewardStats { max, min, avg },
     })
 }

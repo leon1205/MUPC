@@ -1,5 +1,6 @@
 //! Web API 路由
 
+pub mod ai;
 pub mod config;
 pub mod status;
 pub mod logs;

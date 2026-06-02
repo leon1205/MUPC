@@ -104,14 +104,15 @@ impl RknnRuntime {
 
     /// 执行推理（异步）
     pub async fn run(&self, input: &[f32]) -> Result<Vec<f32>, AiEngineError> {
-        let ctx_guard = self.ctx.read().unwrap();
-        let context = ctx_guard.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
+        // Scope the read lock so the guard is dropped before the await point below
+        let (ctx, input_count) = {
+            let ctx_guard = self.ctx.read().unwrap();
+            let context = ctx_guard.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
+            (context.ctx, context.input_count)
+        };
 
-        let input_len = input.len() * std::mem::size_of::<f32>();
+        let input_len = std::mem::size_of_val(input);
         let mut input_buf = input.to_vec();
-
-        let ctx = context.ctx;
-        let input_count = context.input_count;
 
         task::spawn_blocking(move || {
             let mut rknn_in = rknn_input {

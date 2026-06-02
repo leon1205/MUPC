@@ -41,14 +41,19 @@ pub struct FinetuningHistoryEntry {
 pub async fn get_finetuning(
     State(state): State<Arc<AppState>>,
 ) -> Json<FinetuningResponse> {
-    let _ = state;
+    let updater = state.online_updater.lock().await;
+    let enabled = updater.is_enabled();
+    let buffer_size = updater.buffer_size();
+    let batch_size = updater.config().batch_size;
+    let buffer_capacity = 1000usize; // OnlineUpdater 内部默认缓冲区大小
+    let buffer_progress = buffer_size as f64 / buffer_capacity.max(1) as f64;
 
     Json(FinetuningResponse {
-        enabled: false,
-        state: "idle".to_string(),
-        buffer_size: 1000,
-        batch_size: 32,
-        buffer_progress: 0.0,
+        enabled,
+        state: if enabled { "active" } else { "idle" }.to_string(),
+        buffer_size,
+        batch_size,
+        buffer_progress,
         progress_percent: None,
         total_epochs: None,
         completed_epochs: None,

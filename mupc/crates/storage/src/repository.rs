@@ -51,6 +51,7 @@ pub trait DecisionRepository: Send + Sync {
         scene_type: &str,
         limit: usize,
     ) -> Result<Vec<AiDecisionRecord>, StorageError>;
+    async fn get_by_id(&self, id: i64) -> Result<Option<AiDecisionRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -307,6 +308,18 @@ impl DecisionRepository for SqliteDecisionRepo {
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    async fn get_by_id(&self, id: i64) -> Result<Option<AiDecisionRecord>, StorageError> {
+        let row = sqlx::query_as::<_, DecisionRow>(
+            "SELECT id, timestamp, scene_type, action_json, confidence, model_version
+             FROM decisions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(row.map(|r| r.into()))
     }
 }
 

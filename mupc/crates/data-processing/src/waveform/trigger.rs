@@ -167,12 +167,16 @@ impl TriggerEngine {
             cooldown_until: AtomicI64::new(0),
         }
     }
+}
 
+impl Default for TriggerEngine {
     /// 使用默认配置创建触发引擎
-    pub fn default() -> Self {
+    fn default() -> Self {
         Self::new(TriggerConfig::default())
     }
+}
 
+impl TriggerEngine {
     /// 执行触发判定
     ///
     /// 对每个采样点同步调用，检查所有启用的触发条件。
@@ -193,6 +197,7 @@ impl TriggerEngine {
     /// # 返回
     ///
     /// 触发结果，`TriggerResult::None` 表示无触发
+    #[allow(clippy::too_many_arguments)]
     pub fn detect(
         &mut self,
         ua: f64,

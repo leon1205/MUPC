@@ -11,26 +11,29 @@ pub struct DataObject {
     pub do_name: String,
 }
 
-impl DataObject {
+impl std::str::FromStr for DataObject {
+    type Err = std::convert::Infallible;
+
     /// 从字符串创建（如 "LLN0$ST$Pos"）
-    pub fn from_str(s: &str) -> Self {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let parts: Vec<&str> = s.splitn(2, '$').collect();
         if parts.len() == 2 {
-            Self {
+            Ok(Self {
                 ln: parts[0].to_string(),
                 do_name: parts[1].to_string(),
-            }
+            })
         } else {
-            Self {
+            Ok(Self {
                 ln: String::new(),
                 do_name: s.to_string(),
-            }
+            })
         }
     }
+}
 
-    /// 转换为字符串表示（如 "LLN0$ST$Pos"）
-    pub fn to_string(&self) -> String {
-        format!("{}${}", self.ln, self.do_name)
+impl std::fmt::Display for DataObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}${}", self.ln, self.do_name)
     }
 }
 
@@ -123,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_data_object_from_str() {
-        let dobj = DataObject::from_str("LLN0$ST$Pos");
+        let dobj = DataObject::from_str("LLN0$ST$Pos").unwrap();
         assert_eq!(dobj.ln, "LLN0");
         assert_eq!(dobj.do_name, "ST$Pos");
     }

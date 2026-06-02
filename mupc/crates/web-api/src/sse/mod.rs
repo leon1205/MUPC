@@ -3,6 +3,8 @@
 //! 向 Web 前端推送 AI 决策、场景切换、系统告警、遥测数据等实时事件。
 //! 基于 Tokio broadcast channel 实现多客户端事件广播。
 
+#![allow(clippy::result_large_err)]
+
 use axum::response::sse::{Event, Sse};
 use futures::stream::{Stream, StreamExt};
 use std::convert::Infallible;

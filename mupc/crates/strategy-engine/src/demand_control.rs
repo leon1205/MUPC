@@ -27,7 +27,7 @@ impl DemandControlStrategy {
             q_batt_set: None,
             phase_compensation: None,
             start_stop: Some(true),
-            priority: if level >= 3 { 3 } else { level as u8 },
+            priority: if level >= 3 { 3 } else { level },
             pv_limit: None,
             load_shedding: if load_shedding > 0.0 { Some(load_shedding) } else { None },
         }

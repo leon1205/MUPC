@@ -5,6 +5,7 @@
 use axum::{Json, extract::State};
 use serde::Serialize;
 use std::sync::Arc;
+use mupc_ota_update::types::ModelType;
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -38,6 +39,12 @@ pub struct ModelMetric {
     pub samples_processed: u64,
 }
 
+fn get_version(ota: &Arc<dyn mupc_ota_update::manager::OtaManager>, model: ModelType) -> String {
+    ota.get_current_version(model)
+        .map(|v| v.version)
+        .unwrap_or_else(|_| "1.0.0".to_string())
+}
+
 /// GET /api/v1/ai/models/status
 pub async fn get_model_status(
     State(state): State<Arc<AppState>>,
@@ -48,7 +55,7 @@ pub async fn get_model_status(
         ModelInfo {
             name: "LSTM".to_string(),
             status: if info.lstm_ready { "ready" } else { "unloaded" }.to_string(),
-            version: "1.0.0".to_string(),
+            version: get_version(&state.ota_manager, ModelType::Lstm),
             loaded_at: None,
             inference_count: 0,
             avg_inference_ms: 0.0,
@@ -56,7 +63,7 @@ pub async fn get_model_status(
         ModelInfo {
             name: "MADDPG".to_string(),
             status: if info.rl_ready { "ready" } else { "unloaded" }.to_string(),
-            version: "1.0.0".to_string(),
+            version: get_version(&state.ota_manager, ModelType::Maddpg),
             loaded_at: None,
             inference_count: 0,
             avg_inference_ms: 0.0,
@@ -72,10 +79,8 @@ pub async fn get_model_status(
 
 /// GET /api/v1/ai/models/metrics
 pub async fn get_model_metrics(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> Json<ModelMetricsResponse> {
-    let _ = state.ai_integrator;
-
     Json(ModelMetricsResponse {
         metrics: vec![
             ModelMetric {

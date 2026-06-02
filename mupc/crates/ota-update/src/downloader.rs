@@ -253,7 +253,7 @@ impl Downloader {
         // 从 URL 提取文件名
         let filename = url
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("download.tmp")
             .split('?')
             .next()

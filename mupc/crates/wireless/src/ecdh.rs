@@ -126,9 +126,9 @@ impl EcdhKeyPair {
         // Phase 2+ 集成：调用 p256::ecdh::diffie_hellman()
         // 当前使用简化的占位实现，返回 XOR 混淆结果作为框架占位
         let mut shared_secret = vec![0u8; P256_PRIVATE_KEY_LEN];
-        for i in 0..P256_PRIVATE_KEY_LEN {
+        for (i, item) in shared_secret.iter_mut().enumerate().take(P256_PRIVATE_KEY_LEN) {
             // 占位：XOR 混合同胞公钥的 xy 坐标与私钥
-            shared_secret[i] = self.private_key[i]
+            *item = self.private_key[i]
                 ^ peer_public.get(i + 1).copied().unwrap_or(0)
                 ^ peer_public.get(i + 33).copied().unwrap_or(0);
         }
@@ -155,12 +155,12 @@ impl EcdhKeyPair {
         public_key.push(0x04); // 未压缩格式前缀
 
         // 占位：从私钥派生 x 坐标（简单散列映射）
-        for i in 0..32 {
-            public_key.push(private_key[i].wrapping_mul(7).wrapping_add(0x42));
+        for item in private_key.iter().take(32) {
+            public_key.push(item.wrapping_mul(7).wrapping_add(0x42));
         }
         // 占位：从私钥派生 y 坐标（简单散列映射）
-        for i in 0..32 {
-            public_key.push(private_key[i].wrapping_mul(13).wrapping_add(0xAB));
+        for item in private_key.iter().take(32) {
+            public_key.push(item.wrapping_mul(13).wrapping_add(0xAB));
         }
 
         Ok(public_key)
@@ -193,10 +193,10 @@ pub fn derive_aes_key(shared_secret: &[u8]) -> Result<Vec<u8>, WirelessError> {
     // 当前使用简化派生：SHA256-like 占位混合
     let mut aes_key = vec![0u8; AES256_KEY_LEN];
 
-    for i in 0..AES256_KEY_LEN {
+    for (i, item) in aes_key.iter_mut().enumerate().take(AES256_KEY_LEN) {
         let idx = i % shared_secret.len();
         let next_idx = (idx + 1) % shared_secret.len();
-        aes_key[i] = shared_secret[idx]
+        *item = shared_secret[idx]
             .wrapping_mul(0x5B)
             .wrapping_add(shared_secret[next_idx])
             .wrapping_add(i as u8);

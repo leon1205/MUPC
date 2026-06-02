@@ -35,12 +35,32 @@ pub async fn get_interventions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<InterventionQuery>,
 ) -> Json<InterventionResponse> {
-    let _ = state;
     let page = query.page.unwrap_or(1);
+    let page_size = query.page_size.unwrap_or(20) as usize;
 
-    Json(InterventionResponse {
-        total: 0,
-        page,
-        items: vec![],
-    })
+    let end = chrono::Utc::now();
+    let start = end - chrono::Duration::days(30);
+    let events = state.storage.events.query_range(start, end).await
+        .unwrap_or_default();
+
+    let intervention_events: Vec<&_> = events.iter()
+        .filter(|e| e.event_type.contains("intervention") || e.event_type.contains("user_action"))
+        .collect();
+
+    let total = intervention_events.len() as u64;
+    let skip = ((page - 1) as usize * page_size).min(intervention_events.len());
+    let items: Vec<InterventionItem> = intervention_events.into_iter()
+        .skip(skip)
+        .take(page_size)
+        .map(|e| InterventionItem {
+            id: e.id.map(|i| i.to_string()).unwrap_or_default(),
+            timestamp: e.timestamp.to_rfc3339(),
+            operator: e.source.clone(),
+            action_type: e.event_type.clone(),
+            description: e.message.clone(),
+            result: "success".to_string(),
+        })
+        .collect();
+
+    Json(InterventionResponse { total, page, items })
 }

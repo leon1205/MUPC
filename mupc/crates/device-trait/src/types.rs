@@ -96,18 +96,6 @@ pub enum DeviceType {
 }
 
 impl DeviceType {
-    /// 从字符串解析设备类型
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "ttu" => DeviceType::Ttu,
-            "inverter" => DeviceType::Inverter,
-            "charger" => DeviceType::Charger,
-            "flexible_load" | "flexibleload" => DeviceType::FlexibleLoad,
-            "fire_alarm" | "firealarm" => DeviceType::FireAlarm,
-            _ => DeviceType::Unknown,
-        }
-    }
-
     /// 转换为字符串
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -118,6 +106,21 @@ impl DeviceType {
             DeviceType::FireAlarm => "fire_alarm",
             DeviceType::Unknown => "unknown",
         }
+    }
+}
+
+impl std::str::FromStr for DeviceType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "ttu" => DeviceType::Ttu,
+            "inverter" => DeviceType::Inverter,
+            "charger" => DeviceType::Charger,
+            "flexible_load" | "flexibleload" => DeviceType::FlexibleLoad,
+            "fire_alarm" | "firealarm" => DeviceType::FireAlarm,
+            _ => DeviceType::Unknown,
+        })
     }
 }
 
@@ -252,10 +255,12 @@ impl PluginMeta {
 /// CRC 校验模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum CrcMode {
     /// 无 CRC
     None,
     /// CRC16_MODBUS
+    #[default]
     Crc16Modbus,
     /// CRC16_XMODEM
     Crc16Xmodem,
@@ -263,11 +268,6 @@ pub enum CrcMode {
     Crc8,
 }
 
-impl Default for CrcMode {
-    fn default() -> Self {
-        CrcMode::Crc16Modbus
-    }
-}
 
 /// RS485 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -96,7 +96,7 @@ impl ComtradeExporter {
         writeln!(file, "{}", station_name)?;
 
         // 通道总数, 模拟通道数(A), 数字通道数(D)
-        let total_channels = channel_names.len() + 0; // 无数字通道
+        let total_channels = channel_names.len(); // 无数字通道
         writeln!(file, "{},{}A,{}D", total_channels, channel_names.len(), 0)?;
 
         // 模拟通道定义
@@ -165,8 +165,8 @@ impl ComtradeExporter {
             write!(file, ",{}", time_offset as i64)?;
 
             // 各通道值
-            for ch in 0..channel_count {
-                write!(file, ",{}", channels[ch][sample_idx])?;
+            for item in channels.iter().take(channel_count) {
+                write!(file, ",{}", item[sample_idx])?;
             }
             writeln!(file)?;
         }
@@ -336,8 +336,8 @@ impl CsvExporter {
             let time_offset = sample_idx as f64 * dt_ms;
             write!(file, "{:.3}", time_offset)?;
 
-            for ch in 0..channels.len() {
-                write!(file, ",{}", channels[ch][sample_idx])?;
+            for item in channels {
+                write!(file, ",{}", item[sample_idx])?;
             }
             writeln!(file)?;
         }

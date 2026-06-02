@@ -102,6 +102,11 @@ pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
 }
 
 /// 获取插件元信息（FFI 入口点）
+///
+/// # Safety
+///
+/// This function is safe to call from C code. The returned pointer references
+/// a static allocation and does not require deallocation.
 #[no_mangle]
 #[allow(improper_ctypes_definitions)]
 pub unsafe extern "C" fn plugin_meta() -> PluginMeta {

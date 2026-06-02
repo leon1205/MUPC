@@ -16,6 +16,7 @@ pub struct CreateAbTestRequest {
     pub experiment_version: String,
     pub traffic_percent: u8,
     pub duration_hours: u32,
+    #[allow(dead_code)]
     pub metrics: Vec<String>,
 }
 
@@ -32,27 +33,40 @@ pub struct CreateAbTestResponse {
 
 /// GET /api/v1/ai/ab-test/status
 pub async fn get_ab_test_status(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
+    let active: Vec<serde_json::Value> = state.ab_test_manager.list_active().await
+        .into_iter()
+        .map(|t| serde_json::json!({
+            "id": t.id,
+            "model_type": t.model_type,
+            "experiment_version": t.experiment_version,
+            "traffic_percent": t.traffic_percent,
+            "status": t.status,
+            "started_at": t.started_at,
+        }))
+        .collect();
+
     Json(serde_json::json!({
-        "active_tests": [],
-        "total_tests": 0
+        "active_tests": active,
+        "total_tests": active.len()
     }))
 }
 
 /// GET /api/v1/ai/ab-test/results
 pub async fn get_ab_test_results(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
+    let active = state.ab_test_manager.list_active().await;
     Json(serde_json::json!({
-        "test_id": null,
+        "test_id": active.first().map(|t| &t.id),
         "results": []
     }))
 }
 
 /// POST /api/v1/ai/ab-test
 pub async fn post_create_ab_test(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAbTestRequest>,
 ) -> Result<Json<CreateAbTestResponse>, StatusCode> {
     if req.traffic_percent < 1 || req.traffic_percent > 50 {
@@ -70,6 +84,18 @@ pub async fn post_create_ab_test(
         "A/B 测试已创建"
     );
 
+    let test = crate::routes::ai::ab_test_manager::AbTest {
+        id: id.clone(),
+        model_type: req.model_type,
+        control_version: "current".to_string(),
+        experiment_version: req.experiment_version.clone(),
+        traffic_percent: req.traffic_percent,
+        started_at: now.to_rfc3339(),
+        estimated_end_at: end.to_rfc3339(),
+        status: "running".to_string(),
+    };
+    state.ab_test_manager.create(test).await;
+
     Ok(Json(CreateAbTestResponse {
         test_id: id,
         status: "running".to_string(),
@@ -83,11 +109,16 @@ pub async fn post_create_ab_test(
 
 /// DELETE /api/v1/ai/ab-test/{id}
 pub async fn delete_ab_test(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(test_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    tracing::info!(id = %test_id, "A/B 测试已停止");
-    Ok(Json(serde_json::json!({ "status": "ok" })))
+    match state.ab_test_manager.stop(&test_id).await {
+        Some(_) => {
+            tracing::info!(id = %test_id, "A/B 测试已停止");
+            Ok(Json(serde_json::json!({ "status": "ok" })))
+        }
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 #[cfg(test)]

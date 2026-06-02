@@ -73,36 +73,48 @@ pub struct RewardItem {
     pub percentage: f64,
 }
 
+fn parse_action_json(action_json: &str) -> serde_json::Value {
+    serde_json::from_str(action_json).unwrap_or(serde_json::json!({}))
+}
+
+fn empty_system_state() -> SystemStateSnapshot {
+    SystemStateSnapshot {
+        battery_soc: 0.0,
+        pv_power_kw: 0.0,
+        load_power_kw: 0.0,
+        grid_power_kw: 0.0,
+        transformer_load_kw: 0.0,
+    }
+}
+
 /// GET /api/v1/ai/decisions
 pub async fn get_decisions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DecisionQuery>,
 ) -> Json<DecisionListResponse> {
     let page = query.page.unwrap_or(1);
-    let _page_size = query.page_size.unwrap_or(20);
-    let info = state.ai_integrator.engine_status().await;
+    let page_size = query.page_size.unwrap_or(20) as usize;
 
-    let summary = if info.rl_ready {
-        DecisionSummary {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            mode: "auto".to_string(),
-            action_summary: "RL 决策已就绪".to_string(),
-        }
-    } else {
-        DecisionSummary {
-            id: "fallback".to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            mode: "fallback".to_string(),
-            action_summary: "使用兜底策略".to_string(),
-        }
-    };
+    let records = state.storage.decisions.query_recent(page_size).await
+        .unwrap_or_default();
 
-    Json(DecisionListResponse {
-        total: 1,
-        page,
-        decisions: vec![summary],
-    })
+    let total = records.len() as u64;
+    let decisions: Vec<DecisionSummary> = records.into_iter().map(|r| {
+        let action = parse_action_json(&r.action_json);
+        let action_summary = action
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        DecisionSummary {
+            id: r.id.map(|i| i.to_string()).unwrap_or_default(),
+            timestamp: r.timestamp.to_rfc3339(),
+            mode: r.scene_type,
+            action_summary,
+        }
+    }).collect();
+
+    Json(DecisionListResponse { total, page, decisions })
 }
 
 /// GET /api/v1/ai/decisions/latest
@@ -110,21 +122,85 @@ pub async fn get_latest_decision(
     State(state): State<Arc<AppState>>,
 ) -> Json<DecisionDetailResponse> {
     let info = state.ai_integrator.engine_status().await;
+    let records = state.storage.decisions.query_recent(1).await.unwrap_or_default();
+
+    if let Some(record) = records.into_iter().next() {
+        let action = parse_action_json(&record.action_json);
+        Json(DecisionDetailResponse {
+            timestamp: record.timestamp.to_rfc3339(),
+            system_state: empty_system_state(),
+            action: ActionSnapshot {
+                p_batt_set_kw: action.get("p_batt_set_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                load_shedding_kw: action.get("load_shedding_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                pv_limit_ratio: action.get("pv_limit_ratio").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                confidence: record.confidence,
+            },
+            mode: ModeSnapshot {
+                current: record.scene_type,
+                display_name: String::new(),
+                source: "LocalConfig".to_string(),
+                switched_at: String::new(),
+            },
+            reward_breakdown: vec![],
+            ai_engine_enabled: info.ai_engine_enabled,
+        })
+    } else {
+        Json(DecisionDetailResponse {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            system_state: empty_system_state(),
+            action: ActionSnapshot {
+                p_batt_set_kw: 0.0, load_shedding_kw: 0.0,
+                pv_limit_ratio: 1.0, confidence: 0.0,
+            },
+            mode: ModeSnapshot {
+                current: "auto".to_string(),
+                display_name: "自动模式".to_string(),
+                source: "LocalConfig".to_string(),
+                switched_at: String::new(),
+            },
+            reward_breakdown: vec![],
+            ai_engine_enabled: info.ai_engine_enabled,
+        })
+    }
+}
+
+/// GET /api/v1/ai/decisions/{id}
+pub async fn get_decision_detail(
+    State(state): State<Arc<AppState>>,
+    Path(decision_id): Path<String>,
+) -> Json<DecisionDetailResponse> {
+    let info = state.ai_integrator.engine_status().await;
+
+    if let Ok(id) = decision_id.parse::<i64>() {
+        if let Ok(Some(record)) = state.storage.decisions.get_by_id(id).await {
+            let action = parse_action_json(&record.action_json);
+            return Json(DecisionDetailResponse {
+                timestamp: record.timestamp.to_rfc3339(),
+                system_state: empty_system_state(),
+                action: ActionSnapshot {
+                    p_batt_set_kw: action.get("p_batt_set_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    load_shedding_kw: action.get("load_shedding_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    pv_limit_ratio: action.get("pv_limit_ratio").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                    confidence: record.confidence,
+                },
+                mode: ModeSnapshot {
+                    current: record.scene_type,
+                    display_name: String::new(),
+                    source: "LocalConfig".to_string(),
+                    switched_at: String::new(),
+                },
+                reward_breakdown: vec![],
+                ai_engine_enabled: info.ai_engine_enabled,
+            });
+        }
+    }
 
     Json(DecisionDetailResponse {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        system_state: SystemStateSnapshot {
-            battery_soc: 0.0,
-            pv_power_kw: 0.0,
-            load_power_kw: 0.0,
-            grid_power_kw: 0.0,
-            transformer_load_kw: 0.0,
-        },
+        system_state: empty_system_state(),
         action: ActionSnapshot {
-            p_batt_set_kw: 0.0,
-            load_shedding_kw: 0.0,
-            pv_limit_ratio: 1.0,
-            confidence: 0.0,
+            p_batt_set_kw: 0.0, load_shedding_kw: 0.0,
+            pv_limit_ratio: 1.0, confidence: 0.0,
         },
         mode: ModeSnapshot {
             current: "auto".to_string(),
@@ -135,13 +211,4 @@ pub async fn get_latest_decision(
         reward_breakdown: vec![],
         ai_engine_enabled: info.ai_engine_enabled,
     })
-}
-
-/// GET /api/v1/ai/decisions/{id}
-pub async fn get_decision_detail(
-    State(state): State<Arc<AppState>>,
-    Path(decision_id): Path<String>,
-) -> Json<DecisionDetailResponse> {
-    tracing::debug!(id = %decision_id, "查询决策详情");
-    get_latest_decision(State(state)).await
 }

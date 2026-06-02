@@ -4,17 +4,14 @@ use serde::Deserialize;
 
 /// MQTT QoS 级别
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Default)]
 pub enum MqttQos {
+    #[default]
     AtMostOnce = 0,   // QoS 0: 最多一次
     AtLeastOnce = 1,  // QoS 1: 至少一次
     ExactlyOnce = 2,  // QoS 2: 恰好一次
 }
 
-impl Default for MqttQos {
-    fn default() -> Self {
-        MqttQos::AtMostOnce
-    }
-}
 
 impl From<MqttQos> for rumqttc::QoS {
     fn from(qos: MqttQos) -> Self {

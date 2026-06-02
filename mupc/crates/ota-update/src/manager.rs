@@ -498,7 +498,7 @@ impl OtaManager for OtaManagerImpl {
         tasks
             .get(&task_id)
             .map(|t| t.progress)
-            .ok_or_else(|| OtaError::UpdateTimeout)
+            .ok_or(OtaError::UpdateTimeout)
     }
 
     async fn cancel_download(&self, task_id: TaskId) -> Result<(), OtaError> {

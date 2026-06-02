@@ -53,6 +53,7 @@ pub struct WiFiScanResult {
 /// WiFi 通信配置参数
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct WiFiConfig {
     /// 网络 SSID
     pub ssid: String,
@@ -64,16 +65,6 @@ pub struct WiFiConfig {
     pub channel: Option<u8>,
 }
 
-impl Default for WiFiConfig {
-    fn default() -> Self {
-        Self {
-            ssid: String::new(),
-            password: None,
-            security: WiFiSecurity::default(),
-            channel: None,
-        }
-    }
-}
 
 /// WiFi 驱动抽象 trait
 ///

@@ -114,6 +114,12 @@ pub struct ConfigHandler {
     state: AppState,
 }
 
+impl Default for ConfigHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfigHandler {
     pub fn new() -> Self {
         Self {

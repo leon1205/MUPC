@@ -43,15 +43,37 @@ pub async fn get_audit_log(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AuditQuery>,
 ) -> Json<AuditResponse> {
-    let _ = state.audit_logger;
     let page = query.page.unwrap_or(1);
-    let page_size = query.page_size.unwrap_or(20);
+    let page_size = query.page_size.unwrap_or(20) as usize;
+
+    let end = chrono::Utc::now();
+    let start = end - chrono::Duration::days(7);
+
+    let entries = state.audit_logger.query(start, end, None).await
+        .unwrap_or_default();
+
+    let total = entries.len() as u64;
+    let skip = ((page - 1) as usize * page_size).min(entries.len());
+    let items: Vec<AuditEntry> = entries.into_iter()
+        .skip(skip)
+        .take(page_size)
+        .map(|e| AuditEntry {
+            id: e.id,
+            timestamp: e.timestamp.to_rfc3339(),
+            operator: e.user,
+            action_type: e.action,
+            action_detail: serde_json::json!({"resource": e.resource, "method": e.method}),
+            result: "success".to_string(),
+            fail_reason: None,
+            source_ip: String::new(),
+        })
+        .collect();
 
     Json(AuditResponse {
-        total: 0,
+        total,
         page,
-        page_size,
-        items: vec![],
+        page_size: page_size as u32,
+        items,
         export_supported: true,
     })
 }

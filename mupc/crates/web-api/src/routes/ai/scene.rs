@@ -41,9 +41,24 @@ pub async fn get_current_scene(
 pub async fn get_scene_history(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let _ = state;
+    let end = chrono::Utc::now();
+    let start = end - chrono::Duration::days(7);
+    let events = state.storage.events.query_range(start, end).await
+        .unwrap_or_default();
+
+    let entries: Vec<serde_json::Value> = events
+        .into_iter()
+        .filter(|e| e.event_type.contains("mode_switch") || e.event_type.contains("scene"))
+        .map(|e| serde_json::json!({
+            "timestamp": e.timestamp.to_rfc3339(),
+            "event_type": e.event_type,
+            "source": e.source,
+            "message": e.message,
+        }))
+        .collect();
+
     Json(serde_json::json!({
-        "entries": [],
-        "total": 0
+        "entries": entries,
+        "total": entries.len()
     }))
 }

@@ -110,12 +110,11 @@ impl HeartbeatManager {
 
             for (addr, status) in connections.iter_mut() {
                 let elapsed = now - status.last_heartbeat;
-                if elapsed * 1000 > self.watchdog_timeout_ms {
-                    if status.online {
+                if elapsed * 1000 > self.watchdog_timeout_ms
+                    && status.online {
                         warn!("Heartbeat timeout for {}: {} seconds", addr, elapsed);
                         status.online = false;
                     }
-                }
             }
         }
     }

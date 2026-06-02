@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 /// AI 引擎配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Default)]
 pub struct AiEngineConfig {
     pub lstm: LstmConfig,
     pub rl: RlConfig,
@@ -16,20 +17,6 @@ pub struct AiEngineConfig {
     pub npu: NpuConfig,
 }
 
-impl Default for AiEngineConfig {
-    fn default() -> Self {
-        Self {
-            lstm: LstmConfig::default(),
-            rl: RlConfig::default(),
-            online_update: OnlineUpdateConfig::default(),
-            fusion: FusionConfig::default(),
-            mode: ModeConfig::default(),
-            action_constraint: ActionConstraintConfig::default(),
-            reward_weights: SceneWeights::default(),
-            npu: NpuConfig::default(),
-        }
-    }
-}
 
 /// LSTM 模型配置
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -111,11 +111,12 @@ impl MqttClient {
 
     /// 订阅主题
     pub async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), MqttError> {
-        let state = self.state.read().unwrap();
-        if *state != MqttClientState::Connected {
-            return Err(MqttError::Disconnected("未连接".to_string()));
+        {
+            let state = self.state.read().unwrap();
+            if *state != MqttClientState::Connected {
+                return Err(MqttError::Disconnected("未连接".to_string()));
+            }
         }
-        drop(state);
 
         let qos: QoS = qos.into();
         self.inner.subscribe(topic, qos).await
@@ -124,11 +125,12 @@ impl MqttClient {
 
     /// 发布消息
     pub async fn publish(&self, topic: &str, payload: &[u8], qos: MqttQos, retain: bool) -> Result<(), MqttError> {
-        let state = self.state.read().unwrap();
-        if *state != MqttClientState::Connected {
-            return Err(MqttError::Disconnected("未连接".to_string()));
+        {
+            let state = self.state.read().unwrap();
+            if *state != MqttClientState::Connected {
+                return Err(MqttError::Disconnected("未连接".to_string()));
+            }
         }
-        drop(state);
 
         let qos: QoS = qos.into();
         self.inner.publish(topic, qos, retain, payload).await
