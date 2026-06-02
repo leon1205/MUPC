@@ -44,6 +44,7 @@ pub async fn get_scene_history(
     let end = chrono::Utc::now();
     let start = end - chrono::Duration::days(7);
     let events = state.storage.events.query_range(start, end).await
+        .map_err(|e| { tracing::error!(%e, "查询场景历史失败"); e })
         .unwrap_or_default();
 
     let entries: Vec<serde_json::Value> = events

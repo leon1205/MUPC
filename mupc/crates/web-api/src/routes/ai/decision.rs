@@ -97,6 +97,7 @@ pub async fn get_decisions(
     let limit = page_size * 5;
 
     let records = state.storage.decisions.query_recent(limit).await
+        .map_err(|e| { tracing::error!(%e, "查询决策列表失败"); e })
         .unwrap_or_default();
 
     let total = records.len() as u64;
@@ -127,7 +128,9 @@ pub async fn get_latest_decision(
     State(state): State<Arc<AppState>>,
 ) -> Json<DecisionDetailResponse> {
     let info = state.ai_integrator.engine_status().await;
-    let records = state.storage.decisions.query_recent(1).await.unwrap_or_default();
+    let records = state.storage.decisions.query_recent(1).await
+        .map_err(|e| { tracing::error!(%e, "查询最新决策失败"); e })
+        .unwrap_or_default();
 
     if let Some(record) = records.into_iter().next() {
         let action = parse_action_json(&record.action_json);

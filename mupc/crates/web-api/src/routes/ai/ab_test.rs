@@ -9,6 +9,7 @@ use axum::{Json, extract::{State, Path}, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use crate::AppState;
+use super::auth::RequireRole;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateAbTestRequest {
@@ -46,10 +47,11 @@ pub async fn get_ab_test_status(
             "started_at": t.started_at,
         }))
         .collect();
+    let total = state.ab_test_manager.total_count().await;
 
     Json(serde_json::json!({
         "active_tests": active,
-        "total_tests": active.len()
+        "total_tests": total
     }))
 }
 
@@ -109,6 +111,7 @@ pub async fn post_create_ab_test(
 
 /// DELETE /api/v1/ai/ab-test/{id}
 pub async fn delete_ab_test(
+    _role: RequireRole,
     State(state): State<Arc<AppState>>,
     Path(test_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {

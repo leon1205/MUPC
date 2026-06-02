@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use mupc_ota_update::types::ModelType;
 use crate::AppState;
+use super::auth::RequireRole;
 
 #[derive(Debug, Deserialize)]
 pub struct RollbackRequest {
@@ -35,6 +36,7 @@ fn parse_model_type(s: &str) -> Option<ModelType> {
 
 /// POST /api/v1/ai/rollback
 pub async fn post_rollback(
+    _role: RequireRole,
     State(state): State<Arc<AppState>>,
     Json(req): Json<RollbackRequest>,
 ) -> Result<Json<RollbackResponse>, StatusCode> {

@@ -41,6 +41,7 @@ pub async fn get_interventions(
     let end = chrono::Utc::now();
     let start = end - chrono::Duration::days(30);
     let events = state.storage.events.query_range(start, end).await
+        .map_err(|e| { tracing::error!(%e, "查询干预记录失败"); e })
         .unwrap_or_default();
 
     let intervention_events: Vec<&_> = events.iter()

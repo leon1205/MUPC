@@ -54,6 +54,7 @@ pub async fn get_decision_history(
     let limit = page_size * 5; // fetch more for in-memory pagination
 
     let records = state.storage.decisions.query_recent(limit).await
+        .map_err(|e| { tracing::error!(%e, "查询决策历史失败"); e })
         .unwrap_or_default();
 
     let total = records.len() as u64;

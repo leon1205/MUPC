@@ -37,6 +37,9 @@ pub struct FinetuningHistoryEntry {
     pub improvement: f64,
 }
 
+/// OnlineUpdater 内部默认缓冲区容量，用于计算进度百分比
+const DEFAULT_BUFFER_CAPACITY: usize = 1000;
+
 /// GET /api/v1/ai/finetuning
 pub async fn get_finetuning(
     State(state): State<Arc<AppState>>,
@@ -45,8 +48,7 @@ pub async fn get_finetuning(
     let enabled = updater.is_enabled();
     let buffer_size = updater.buffer_size();
     let batch_size = updater.config().batch_size;
-    let buffer_capacity = 1000usize; // OnlineUpdater 内部默认缓冲区大小
-    let buffer_progress = buffer_size as f64 / buffer_capacity.max(1) as f64;
+    let buffer_progress = buffer_size as f64 / DEFAULT_BUFFER_CAPACITY.max(1) as f64;
 
     Json(FinetuningResponse {
         enabled,

@@ -55,6 +55,7 @@ pub async fn get_rewards(
     Query(_query): Query<RewardsQuery>,
 ) -> Json<RewardsResponse> {
     let records = state.storage.decisions.query_recent(50).await
+        .map_err(|e| { tracing::error!(%e, "查询奖励值失败"); e })
         .unwrap_or_default();
 
     let mut reward_values: Vec<f64> = Vec::new();

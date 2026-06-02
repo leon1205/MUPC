@@ -38,6 +38,13 @@ pub struct AuditEntry {
     pub source_ip: String,
 }
 
+fn parse_time(s: &Option<String>, fallback: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    s.as_ref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or(fallback)
+}
+
 /// GET /api/v1/ai/audit
 pub async fn get_audit_log(
     State(state): State<Arc<AppState>>,
@@ -46,15 +53,22 @@ pub async fn get_audit_log(
     let page = query.page.unwrap_or(1);
     let page_size = query.page_size.unwrap_or(20) as usize;
 
-    let end = chrono::Utc::now();
-    let start = end - chrono::Duration::days(7);
+    let end = parse_time(&query.end, chrono::Utc::now());
+    let start = parse_time(&query.start, end - chrono::Duration::days(7));
 
-    let entries = state.audit_logger.query(start, end, None).await
+    let user_filter = query.operator.as_deref();
+    let entries = state.audit_logger.query(start, end, user_filter).await
+        .map_err(|e| { tracing::error!(%e, "查询审计日志失败"); e })
         .unwrap_or_default();
 
-    let total = entries.len() as u64;
-    let skip = ((page - 1) as usize * page_size).min(entries.len());
-    let items: Vec<AuditEntry> = entries.into_iter()
+    let action_filter = query.action_type.as_deref();
+    let filtered: Vec<_> = entries.into_iter()
+        .filter(|e| action_filter.map_or(true, |af| e.action.contains(af)))
+        .collect();
+
+    let total = filtered.len() as u64;
+    let skip = ((page - 1) as usize * page_size).min(filtered.len());
+    let items: Vec<AuditEntry> = filtered.into_iter()
         .skip(skip)
         .take(page_size)
         .map(|e| AuditEntry {
