@@ -1,5 +1,6 @@
 //! device-trait 单元测试
 
+use std::str::FromStr;
 use device_trait::{
     DataFrame, DataQuality, DeviceStatus, DeviceType, Message, Parity, PluginMeta, Rs485Config,
     Topic,
@@ -43,10 +44,10 @@ fn test_data_frame_with_quality() {
 
 #[test]
 fn test_device_type_from_str() {
-    assert_eq!(DeviceType::from_str("ttu"), DeviceType::Ttu);
-    assert_eq!(DeviceType::from_str("inverter"), DeviceType::Inverter);
-    assert_eq!(DeviceType::from_str("charger"), DeviceType::Charger);
-    assert_eq!(DeviceType::from_str("unknown"), DeviceType::Unknown);
+    assert_eq!(DeviceType::from_str("ttu"), Ok(DeviceType::Ttu));
+    assert_eq!(DeviceType::from_str("inverter"), Ok(DeviceType::Inverter));
+    assert_eq!(DeviceType::from_str("charger"), Ok(DeviceType::Charger));
+    assert_eq!(DeviceType::from_str("unknown"), Ok(DeviceType::Unknown));
 }
 
 #[test]

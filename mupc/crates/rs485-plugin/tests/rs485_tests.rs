@@ -1,5 +1,6 @@
 //! rs485-plugin 单元测试
 
+use std::str::FromStr;
 use rs485_plugin::{Config, CrcMode};
 use device_trait::{DeviceStatus, DeviceType, Parity};
 
@@ -79,10 +80,10 @@ fn test_device_status_is_online() {
 
 #[test]
 fn test_device_type_conversion() {
-    assert_eq!(DeviceType::from_str("ttu"), DeviceType::Ttu);
-    assert_eq!(DeviceType::from_str("inverter"), DeviceType::Inverter);
-    assert_eq!(DeviceType::from_str("charger"), DeviceType::Charger);
-    assert_eq!(DeviceType::from_str("unknown"), DeviceType::Unknown);
+    assert_eq!(DeviceType::from_str("ttu"), Ok(DeviceType::Ttu));
+    assert_eq!(DeviceType::from_str("inverter"), Ok(DeviceType::Inverter));
+    assert_eq!(DeviceType::from_str("charger"), Ok(DeviceType::Charger));
+    assert_eq!(DeviceType::from_str("unknown"), Ok(DeviceType::Unknown));
 }
 
 #[test]

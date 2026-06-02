@@ -94,12 +94,17 @@ pub async fn get_decisions(
 ) -> Json<DecisionListResponse> {
     let page = query.page.unwrap_or(1);
     let page_size = query.page_size.unwrap_or(20) as usize;
+    let limit = page_size * 5;
 
-    let records = state.storage.decisions.query_recent(page_size).await
+    let records = state.storage.decisions.query_recent(limit).await
         .unwrap_or_default();
 
     let total = records.len() as u64;
-    let decisions: Vec<DecisionSummary> = records.into_iter().map(|r| {
+    let skip = ((page - 1) as usize * page_size).min(records.len());
+    let decisions: Vec<DecisionSummary> = records.into_iter()
+        .skip(skip)
+        .take(page_size)
+        .map(|r| {
         let action = parse_action_json(&r.action_json);
         let action_summary = action
             .get("type")
