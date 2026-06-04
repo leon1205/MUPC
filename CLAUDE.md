@@ -24,23 +24,28 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 
 ```
 mupc/
-├── Cargo.toml              # Workspace 配置（18 个 crate）
+├── Cargo.toml              # Workspace 配置（20 个 crate）
 ├── crates/
 │   ├── common/             # 公共库：日志、错误类型
 │   ├── core/               # 核心组件
 │   ├── gateway/            # 北向通信网关（IEC 104）
-│   ├── intercore/           # 核间通信（TCP/RJ45）
-│   ├── data-processing/     # 遥测数据采集
+│   ├── intercore/          # 核间通信（TCP/RJ45）
+│   ├── data-processing/    # 遥测数据采集
 │   ├── strategy-engine/    # 本地策略引擎 + AI 集成
 │   ├── ai-engine/          # AI 优化引擎（LSTM/MADDPG/RKNN Runtime）
 │   ├── security/           # 安全模块
-│   ├── web-api/             # Web API
-│   ├── plugin-loader/       # 插件加载器
+│   ├── web-api/            # Web API（Axum REST + SSE）
+│   ├── storage/            # 持久化存储（SQLite/sqlx）
+│   ├── ota-update/         # OTA 固件/模型升级
+│   ├── system-monitor/     # 系统资源监控
+│   ├── wireless/           # 无线通信（WiFi/ECDH 密钥协商）
+│   ├── plugin-loader/      # 插件加载器
 │   ├── iec61850-plugin/    # IEC 61850 协议插件
-│   ├── mqtt-plugin/         # MQTT 协议插件
-│   ├── rs485-plugin/        # RS485 通信插件
-│   ├── mqtt-bridge/         # MQTT 桥接
-│   └── device-trait/        # 设备特性抽象
+│   ├── mqtt-plugin/        # MQTT 协议插件
+│   ├── rs485-plugin/       # RS485 通信插件
+│   ├── hplc-plugin/        # HPLC 通信插件
+│   ├── mqtt-bridge/        # MQTT 桥接
+│   └── device-trait/       # 设备特性抽象
 └── tests/                  # 集成测试
 ```
 
@@ -87,7 +92,8 @@ mupc/
 
 - 大部分 crate 使用 `mupc-` 前缀（如 `mupc-common`、`mupc-ai-engine`）
 - 无前缀的 crate：`device-trait`、`plugin-loader`、`rs485-plugin`、`hplc-plugin`
-- **`mqtt-bridge`**：目录名为 `mqtt-bridge`，但 Cargo.toml name = `mupc_mqtt_bridge`（下划线），在 `Cargo.toml` 依赖中引用时必须用下划线
+- **`mqtt-bridge`**：目录名为 `mqtt-bridge`，Cargo.toml name = `mupc_mqtt_bridge`（下划线），依赖引用时必须用下划线
+- **`storage`**：目录名为 `storage`，Cargo.toml name = `mupc_storage`（下划线），依赖引用时必须用 `mupc_storage`
 
 ## 约束
 
@@ -202,6 +208,40 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 2. RL 模型基于预测结果决策
 3. AiValidator 校验 AI 指令安全性
 4. 通过 intercore 下发给实时控制模块
+
+### Web API 架构
+
+Web API 基于 Axum 0.8，路由位于 `web-api/src/routes/`。
+
+**路由类型约定：**
+
+```rust
+// ai_routes() 返回 Router<Arc<AppState>>，类型参数编译时保证
+pub fn ai_routes() -> Router<Arc<AppState>> { ... }
+
+// 所有 handler 提取 State<Arc<AppState>>
+async fn handler(State(state): State<Arc<AppState>>) -> ...
+```
+
+**数据源注入模式：** handler 不通过 AiIntegrator 访问数据，而是在 AppState 直接注入：
+- `storage: Arc<StorageService>` — 决策记录、事件查询
+- `ota_manager: Arc<dyn OtaManager>` — 模型版本、回滚
+- `online_updater: Arc<Mutex<OnlineUpdater>>` — 在线微调状态
+- `ab_test_manager: Arc<AbTestManager>` — A/B 测试 CRUD
+
+**AI 端点：** 27 个 handler，22 个接入真实数据源，5 个保持占位（predictions×3、weights×2，因上游 AiIntegrator 缺少对应 API）。
+
+**认证：** `RequireRole` 提取器（`X-Session-Id` 头）已接入 `post_rollback` 和 `delete_ab_test`。
+
+## 已知测试失败
+
+以下测试为预存失败，非近期引入：
+
+| Crate | 测试 | 原因 |
+|-------|------|------|
+| device-trait | `test_modbus_crc_calculation`、`test_modbus_handler_encode_decode`、`test_inverter_handler_encode_decode` | south_device 实现不完整 |
+| rs485-plugin | `test_config_with_gpio` | 配置反序列化字段缺失 |
+| mupc-iec61850-plugin | `test_parse_goose_pdu` | GOOSE PDU 解析未完成 |
 
 ## 重构验证
 
