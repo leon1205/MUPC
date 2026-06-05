@@ -1,7 +1,8 @@
 # MUPC AI 引擎 - 模块设计文档（合并版）
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
+
+| 版本 | 日期       | 作者   | 状态                       |
+| ---- | ---------- | ------ | -------------------------- |
 | v2.2 | 2026-06-05 | 架构师 | v2.2 电压感知 P/Q 协同控制 |
 
 [DESIGN_APPROVED] — v2.2 电压感知 P/Q 协同控制（PRD v2.2 级联设计变更）
@@ -20,10 +21,11 @@
 
 **来源文档：**
 
-| 文档 | 路径 | 状态 |
-|------|------|------|
+
+| 文档              | 路径                                                                    | 状态   |
+| ----------------- | ----------------------------------------------------------------------- | ------ |
 | Phase 3C 实施计划 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3C-AI优化引擎-实施计划.md` | 已归档 |
-| AI 引擎 PRD | `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` | v2.0 |
+| AI 引擎 PRD       | `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md`                  | v2.0   |
 
 ---
 
@@ -104,17 +106,18 @@
 
 ### 1.2 核心模块职责
 
-| 模块 | 职责 |
-|------|------|
-| `DataFusionEngine` | 1Hz 频率从 5 个数据源汇聚 23 个字段，输出 FusedSystemState |
-| `ModeSelector` | 运行场景选择器，互斥保证，接收远程/本地切换指令（v2.0 替代 SceneClassifier） |
-| `RewardCalculator` | 根据场景选择奖励函数计算奖励值，用于在线微调 |
-| `LSTMModel` | 时序预测（光伏出力、负荷预测未来 15 分钟）|
-| `RLModel` | MADDPG/PPO 强化学习决策，输出 7 维动作空间 |
-| `ActionValidator` | 6 条约束规则校验，物理约束强制 clamp |
-| `ModelManager` | 统一接口、模型加载、full_decision_cycle 调度 |
-| `OnlineUpdater` | 在线微调（增量学习，Phase 3C.2）|
-| `RknnRuntime` | RK3588 NPU 推理运行时（FFI 绑定）|
+
+| 模块               | 职责                                                                         |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `DataFusionEngine` | 1Hz 频率从 5 个数据源汇聚 23 个字段，输出 FusedSystemState                   |
+| `ModeSelector`     | 运行场景选择器，互斥保证，接收远程/本地切换指令（v2.0 替代 SceneClassifier） |
+| `RewardCalculator` | 根据场景选择奖励函数计算奖励值，用于在线微调                                 |
+| `LSTMModel`        | 时序预测（光伏出力、负荷预测未来 15 分钟）                                   |
+| `RLModel`          | MADDPG/PPO 强化学习决策，输出 7 维动作空间                                   |
+| `ActionValidator`  | 6 条约束规则校验，物理约束强制 clamp                                         |
+| `ModelManager`     | 统一接口、模型加载、full_decision_cycle 调度                                 |
+| `OnlineUpdater`    | 在线微调（增量学习，Phase 3C.2）                                             |
+| `RknnRuntime`      | RK3588 NPU 推理运行时（FFI 绑定）                                            |
 
 ### 1.3 核心设计原则
 
@@ -159,21 +162,23 @@ LSTM（Long Short-Term Memory）时序预测模型，负责预测未来一段时
 
 ### 2.2 预测规格
 
-| 项目 | 值 |
-|------|-----|
+
+| 项目     | 值                                                         |
+| -------- | ---------------------------------------------------------- |
 | 预测目标 | 光伏出力预测（PV forecast）、负荷功率预测（Load forecast） |
-| 预测范围 | 未来 15 分钟，每分钟一个采样点（共 15 个点）|
-| 输入窗口 | 历史 1 小时数据（默认 60 个数据点，每分钟 1 点）|
-| 输入特征 | 历史光伏出力、历史负荷功率、光照强度、环境温度 |
-| 输出格式 | 2 个向量，各 15 个元素 |
-| 模型格式 | ONNX（训练）→ INT8 量化后部署为 .rknn |
+| 预测范围 | 未来 15 分钟，每分钟一个采样点（共 15 个点）               |
+| 输入窗口 | 历史 1 小时数据（默认 60 个数据点，每分钟 1 点）           |
+| 输入特征 | 历史光伏出力、历史负荷功率、光照强度、环境温度             |
+| 输出格式 | 2 个向量，各 15 个元素                                     |
+| 模型格式 | ONNX（训练）→ INT8 量化后部署为 .rknn                     |
 
 ### 2.3 精度要求
 
-| 指标 | 要求 | 测量方法 |
-|------|------|----------|
+
+| 指标          | 要求                      | 测量方法                                 |
+| ------------- | ------------------------- | ---------------------------------------- |
 | 光伏预测 MAPE | <= 10%（15 分钟预测范围） | 回测验证，Mean Absolute Percentage Error |
-| 负荷预测 MAPE | <= 15%（15 分钟预测范围） | 回测验证 |
+| 负荷预测 MAPE | <= 15%（15 分钟预测范围） | 回测验证                                 |
 
 ### 2.4 接口定义
 
@@ -207,12 +212,13 @@ PyTorch → ONNX → rknn-toolkit2 量化 → INT8 模型 (.rknn)
 INT8 模型 → RKNN Runtime → NPU 推理 (< 100ms)
 ```
 
-| 阶段 | 工具 | 输出 |
-|------|------|------|
-| 模型训练 | PyTorch | .pt 文件 |
-| 格式转换 | torch.onnx.export | .onnx 文件 |
-| INT8 量化 | rknn-toolkit2 | .rknn 文件 |
-| 部署推理 | RKNN Runtime (librknnrt.so) | NPU 推理结果 |
+
+| 阶段      | 工具                        | 输出         |
+| --------- | --------------------------- | ------------ |
+| 模型训练  | PyTorch                     | .pt 文件     |
+| 格式转换  | torch.onnx.export           | .onnx 文件   |
+| INT8 量化 | rknn-toolkit2               | .rknn 文件   |
+| 部署推理  | RKNN Runtime (librknnrt.so) | NPU 推理结果 |
 
 ---
 
@@ -268,26 +274,25 @@ pub struct DataSourceValue {
 
 ### 3.3 5 个数据源适配器
 
-| 适配器 | 数据来源 | 通信方式 | 更新频率 | 连续缺失阈值 |
-|--------|----------|----------|----------|--------------|
-| `IntercoreAdapter` | intercore 模块 | 核间 TCP 通道 | 1 Hz | 3 周期 |
-| `WeatherAdapter` | 气象 API (data-processing 转发) | 消息总线订阅 | 15 分钟 | 10 周期 |
-| `PriceAdapter` | 物联平台 (MQTT 通道) | 消息总线订阅 | 15 分钟 / 事件 | 3 周期 |
-| `DispatchAdapter` | gateway (IEC 104/61850) | 消息总线订阅 | 事件驱动 | 不适用 |
-| `DemandAdapter` | data-processing 加工 | 消息总线订阅 | 1 Hz | 3 周期 |
+
+| 适配器             | 数据来源                        | 通信方式      | 更新频率       | 连续缺失阈值 |
+| ------------------ | ------------------------------- | ------------- | -------------- | ------------ |
+| `IntercoreAdapter` | intercore 模块                  | 核间 TCP 通道 | 1 Hz           | 3 周期       |
+| `WeatherAdapter`   | 气象 API (data-processing 转发) | 消息总线订阅  | 15 分钟        | 10 周期      |
+| `PriceAdapter`     | 物联平台 (MQTT 通道)            | 消息总线订阅  | 15 分钟 / 事件 | 3 周期       |
+| `DispatchAdapter`  | gateway (IEC 104/61850)         | 消息总线订阅  | 事件驱动       | 不适用       |
+| `DemandAdapter`    | data-processing 加工            | 消息总线订阅  | 1 Hz           | 3 周期       |
 
 ### 3.4 FusedSystemState 结构定义
-
-> **⚠️ v2.1 废弃：** D5-电能质量已移除（voltage_unbalance 及三相电压/频率）。v2.2 将电压幅值重新加入 D1。以第 15.4.1 节、第 16.3.1 节为准。
 
 ```rust
 /// 融合系统状态（完整 RL 状态空间）
 ///
-/// 总共 25 个字段，7 个大类
+/// 总共 23 个字段，6 个大类（v2.2: D1含三相电压, v2.1: D5电能质量已移除）
 /// 注意: peak_price / valley_price 仅用于奖励函数计算，不纳入 RL 推理输入向量
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FusedSystemState {
-    // ── D1: 实时数据 (6个字段) ──
+    // ── D1: 实时数据 (9个字段) ──
     /// 时间戳 (UTC 毫秒)
     pub timestamp: i64,
     /// 电池荷电状态 [0.0, 1.0]
@@ -302,6 +307,12 @@ pub struct FusedSystemState {
     pub transformer_load: f64,
     /// 电池充放电功率 (kW), [-500.0, 500.0], 负值=充电
     pub battery_power: f64,
+    /// A 相电压标幺值 [0.8, 1.2] p.u.（v2.2 新增）
+    pub voltage_phase_a: f64,
+    /// B 相电压标幺值 [0.8, 1.2] p.u.
+    pub voltage_phase_b: f64,
+    /// C 相电压标幺值 [0.8, 1.2] p.u.
+    pub voltage_phase_c: f64,
 
     // ── D2: 预测数据 (2个向量) ──
     /// 未来15分钟光伏预测 (kW), 每分钟1个点, 固定15个元素
@@ -329,25 +340,13 @@ pub struct FusedSystemState {
     /// 本月最大需量 (kW), [0.0, 10000.0]
     pub peak_demand_this_month: f64,
 
-    // ── D5: 电能质量 (5个字段) ──
-    /// A 相电压标幺值 [0.8, 1.2] p.u.
-    pub voltage_phase_a: f64,
-    /// B 相电压标幺值 [0.8, 1.2] p.u.
-    pub voltage_phase_b: f64,
-    /// C 相电压标幺值 [0.8, 1.2] p.u.
-    pub voltage_phase_c: f64,
-    /// 三相电压不平衡度 [0.0, 0.05]
-    pub voltage_unbalance: f64,
-    /// 电网频率 [49.5, 50.5] Hz
-    pub frequency: f64,
-
-    // ── D6: 气象 (2个字段) ──
+    // ── D5: 气象 (2个字段) ──
     /// 光照强度 (W/m^2), [0.0, 1500.0]
     pub solar_irradiance: f64,
     /// 环境温度 (deg C), [-20.0, 60.0]
     pub temperature: f64,
 
-    // ── D7: 调度指令 (2个Option字段) ──
+    // ── D6: 调度指令 (2个Option字段) ──
     /// 调度有功设定值 (kW), None=无指令
     pub dispatch_p_set: Option<f64>,
     /// 调度无功设定值 (kVar), None=无指令
@@ -355,47 +354,46 @@ pub struct FusedSystemState {
 }
 ```
 
-**状态空间总维度：** 9 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维） + 2 个气象字段 + 5 个电能质量字段。序列化为推理输入向量时，各维度按顺序拼接。
+**状态空间总维度：** 17 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）= 21 个字段。电压不平衡度和频率不纳入 AI 引擎（由实时控制核心模块独立处理）。
 
 ### 3.5 序列化为推理输入向量
-
-> **⚠️ v2.1 废弃：** 输入维度 50→45（移除 D5 的 5 字段）。v2.2: +3 电压字段到 D1。以第 15.4.2 节、第 16.3.2 节为准。
 
 ```rust
 impl FusedSystemState {
     /// 序列化为 RKNN Runtime 输入向量
     ///
-    /// 向量长度 = 50
+    /// 向量长度 = 48 (v2.2: D1含电压=9, D2=30, D3=3, D4=3, D5气象=2, D6调度=1)
     /// 顺序排列:
-    ///   [0..5]   D1 标量 (6个, 不含timestamp)
-    ///   [6..20]  D2 pv_forecast_15min (15个)
-    ///   [21..35] D2 load_forecast_15min (15个)
-    ///   [36..38] D3 电价 (3个)
-    ///   [39..41] D4 需量 (3个)
-    ///   [42..46] D5 电能质量 (5个)
-    ///   [47..48] D6 气象 (2个)
-    ///   [49]     D7 dispatch_p_set (Option→f64, None=0.0)
-    ///   注: dispatch_q_set 暂不纳入输入向量（影响输出约束）
+    ///   [0..8]   D1 标量 (9个, 不含timestamp, 含3个电压)
+    ///   [9..23]  D2 pv_forecast_15min (15个)
+    ///   [24..38] D2 load_forecast_15min (15个)
+    ///   [39..41] D3 电价 (3个)
+    ///   [42..44] D4 需量 (3个)
+    ///   [45..46] D5 气象 (2个)
+    ///   [47]     D6 dispatch_p_set (Option→f64, None=0.0)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(50);
+        let mut v = Vec::with_capacity(48);
 
-        // D1: 实时数据 (6个)
+        // D1: 实时数据 (9个, 含三相电压)
         v.push(self.battery_soc as f32);
         v.push(self.pv_power as f32);
         v.push(self.load_power as f32);
         v.push(self.grid_power as f32);
         v.push(self.transformer_load as f32);
         v.push(self.battery_power as f32);
+        v.push(self.voltage_phase_a as f32);
+        v.push(self.voltage_phase_b as f32);
+        v.push(self.voltage_phase_c as f32);
 
         // D2: 预测数据 (30个)
         for &val in self.pv_forecast_15min.iter().take(15) {
             v.push(val as f32);
         }
-        while v.len() < 6 + 15 { v.push(0.0); }
+        while v.len() < 9 + 15 { v.push(0.0); }
         for &val in self.load_forecast_15min.iter().take(15) {
             v.push(val as f32);
         }
-        while v.len() < 6 + 15 + 15 { v.push(0.0); }
+        while v.len() < 9 + 15 + 15 { v.push(0.0); }
 
         // D3: 电价 (3个)
         v.push(self.current_electricity_price as f32);
@@ -407,21 +405,14 @@ impl FusedSystemState {
         v.push(self.contract_demand as f32);
         v.push(self.peak_demand_this_month as f32);
 
-        // D5: 电能质量 (5个)
-        v.push(self.voltage_phase_a as f32);
-        v.push(self.voltage_phase_b as f32);
-        v.push(self.voltage_phase_c as f32);
-        v.push(self.voltage_unbalance as f32);
-        v.push(self.frequency as f32);
-
-        // D6: 气象 (2个)
+        // D5: 气象 (2个)
         v.push(self.solar_irradiance as f32);
         v.push(self.temperature as f32);
 
-        // D7: 调度指令 (1个, dispatch_p_set)
+        // D6: 调度指令 (1个, dispatch_p_set)
         v.push(self.dispatch_p_set.unwrap_or(0.0) as f32);
 
-        debug_assert!(v.len() == 50, "Input vector must be 50, got {}", v.len());
+        debug_assert!(v.len() == 48, "Input vector must be 48, got {}", v.len());
         v
     }
 }
@@ -514,14 +505,15 @@ impl DataFusionEngine {
 
 ### 3.7 缺失数据处理策略
 
-| 缺失数据源 | 填充策略 | 告警级别 | 降级触发 |
-|------------|----------|----------|----------|
-| intercore | 使用上一周期值 | WARN (3周期) → ERROR (10周期) | 10周期 → AI降级 |
-| LSTM 预测 | 全零向量 | WARN | 不触发 |
-| 电价 | 使用默认分时电价表 | WARN (3周期) | 不触发 |
-| 气象 | 使用上一周期值 | WARN (10周期) | R_green 置 0 |
-| 调度指令 | 置 None | INFO | 不触发 |
-| 需量数据 | 使用上周期值 | WARN (3周期) | 不触发 |
+
+| 缺失数据源 | 填充策略           | 告警级别                       | 降级触发         |
+| ---------- | ------------------ | ------------------------------ | ---------------- |
+| intercore  | 使用上一周期值     | WARN (3周期) → ERROR (10周期) | 10周期 → AI降级 |
+| LSTM 预测  | 全零向量           | WARN                           | 不触发           |
+| 电价       | 使用默认分时电价表 | WARN (3周期)                   | 不触发           |
+| 气象       | 使用上一周期值     | WARN (10周期)                  | R_green 置 0     |
+| 调度指令   | 置 None            | INFO                           | 不触发           |
+| 需量数据   | 使用上周期值       | WARN (3周期)                   | 不触发           |
 
 ---
 
@@ -543,35 +535,39 @@ SceneClassifier 接收 `FusedSystemState`，基于最近 30 分钟的平均负�
 
 **选择理由：**
 
-| 对比维度 | 规则引擎 | 轻量 ML (决策树/逻辑回归) | 深度学习 |
-|----------|----------|--------------------------|----------|
-| 参数可解释性 | 高，每条规则可审查 | 中 | 低 |
-| 部署复杂度 | 零依赖，纯逻辑实现 | 需要额外模型文件 | 需要 NPU 资源 |
-| 训练数据需求 | 无需训练 | 中等 (500+ 样本) | 大 (5000+ 样本) |
-| 准确率 (5 场景) | ~93-96% (规则覆盖充分时) | ~95-98% | ~97-99% |
-| 运行时资源 | <0.1ms, 0 MB | <0.5ms, ~1MB | 10-50ms, ~5MB |
-| 热更新能力 | 配置热加载即可 | 需要模型热加载 | 需要模型热加载 |
+
+| 对比维度        | 规则引擎                 | 轻量 ML (决策树/逻辑回归) | 深度学习        |
+| --------------- | ------------------------ | ------------------------- | --------------- |
+| 参数可解释性    | 高，每条规则可审查       | 中                        | 低              |
+| 部署复杂度      | 零依赖，纯逻辑实现       | 需要额外模型文件          | 需要 NPU 资源   |
+| 训练数据需求    | 无需训练                 | 中等 (500+ 样本)          | 大 (5000+ 样本) |
+| 准确率 (5 场景) | ~93-96% (规则覆盖充分时) | ~95-98%                   | ~97-99%         |
+| 运行时资源      | <0.1ms, 0 MB             | <0.5ms, ~1MB              | 10-50ms, ~5MB   |
+| 热更新能力      | 配置热加载即可           | 需要模型热加载            | 需要模型热加载  |
 
 由于：
+
 1. 5 种场景的特征规则非常清晰（负荷占比、电价时段、VPP 指令等硬边界条件）
 2. 规则引擎可以达到 PRD 要求的 >=95% 准确率
 3. 运维人员可以直观理解和调整分类规则
 4. 零训练数据依赖，部署即用
 
 **采用规则引擎为主方案，同时预留 ML 接口**：
+
 - 主分类器：`RuleBasedClassifier` - 基于确定性规则
 - 辅助校验：可选 `MlClassifier` - 用于规则边界模糊时的置信度校准
 - 最终输出取两者的加权融合
 
 ### 4.3 5 种场景定义
 
-| 场景 ID | 场景名称 | 特征规则 | 典型时段 |
-|---------|----------|----------|----------|
-| SCENE-01 | 农网灌溉模式 (A) | 灌溉负荷占比 > 60% & 当前月份在灌溉季 (4月~9月) | 4月~9月 |
-| SCENE-02 | 工商业模式-自主套利 (B1) | 工商业负荷占比 > 70% & 分时电价在峰时段 | 峰时段 (如 10:00~12:00, 15:00~19:00) |
-| SCENE-03 | 工商业模式-需量控制 (B2) | 当前需量 > 需量阈值的 90% & 上月最大需量 > 需量合同值 | 每月最后一周 |
-| SCENE-04 | 工商业模式-虚拟电厂 (B3) | VPP 调度指令有效 & 已注册 VPP 服务 | VPP 调度时段 |
-| SCENE-05 | 工商业模式-极致绿色 (B5) | 绿色电力消纳比例 < 50% & 碳排强度高于区域均值 | 全天 |
+
+| 场景 ID  | 场景名称                 | 特征规则                                              | 典型时段                             |
+| -------- | ------------------------ | ----------------------------------------------------- | ------------------------------------ |
+| SCENE-01 | 农网灌溉模式 (A)         | 灌溉负荷占比 > 60% & 当前月份在灌溉季 (4月~9月)       | 4月~9月                              |
+| SCENE-02 | 工商业模式-自主套利 (B1) | 工商业负荷占比 > 70% & 分时电价在峰时段               | 峰时段 (如 10:00~12:00, 15:00~19:00) |
+| SCENE-03 | 工商业模式-需量控制 (B2) | 当前需量 > 需量阈值的 90% & 上月最大需量 > 需量合同值 | 每月最后一周                         |
+| SCENE-04 | 工商业模式-虚拟电厂 (B3) | VPP 调度指令有效 & 已注册 VPP 服务                    | VPP 调度时段                         |
+| SCENE-05 | 工商业模式-极致绿色 (B5) | 绿色电力消纳比例 < 50% & 碳排强度高于区域均值         | 全天                                 |
 
 ### 4.4 接口定义
 
@@ -866,12 +862,13 @@ impl SceneClassifier {
 
 ### 4.9 边界条件处理
 
-| 条件 | 处理逻辑 | 输出场景 |
-|------|----------|----------|
-| 所有规则不命中 | `confidence < 0.4` | `Default` |
-| 最高置信度 < 0.6 | 切换至 Default | `Default` |
-| 高频振荡 (5min >= 3 次) | 锁定当前场景 30 分钟 | 当前场景 |
-| 手动覆盖到期 | Default 模式运行 5 分钟后再自动识别 | `Default` → 自动 |
+
+| 条件                    | 处理逻辑                            | 输出场景          |
+| ----------------------- | ----------------------------------- | ----------------- |
+| 所有规则不命中          | `confidence < 0.4`                  | `Default`         |
+| 最高置信度 < 0.6        | 切换至 Default                      | `Default`         |
+| 高频振荡 (5min >= 3 次) | 锁定当前场景 30 分钟                | 当前场景          |
+| 手动覆盖到期            | Default 模式运行 5 分钟后再自动识别 | `Default` → 自动 |
 
 ---
 
@@ -883,46 +880,47 @@ impl SceneClassifier {
 
 RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近端策略优化）算法，基于融合状态、LSTM 预测值和场景标签，输出 7 维动作空间的最优控制指令。
 
-### 5.2 状态空间定义（7 大类，23 个字段）— ⚠️ v2.1/v2.2 废弃，以 15.4.1/16.3.1 为准
+### 5.2 状态空间定义（6 大类，21 个字段）
 
-| 大类 | 字段名 | 类型 | 范围 | 单位 | 来源 |
-|------|--------|------|------|------|------|
-| **D1-实时 (6)** | battery_soc | f64 | [0.0, 1.0] | - | intercore |
-| | pv_power | f64 | [-1000.0, 1000.0] | kW | intercore |
-| | load_power | f64 | [-1000.0, 1000.0] | kW | intercore |
-| | grid_power | f64 | [-1000.0, 1000.0] | kW | intercore |
-| | transformer_load | f64 | [0.0, 2.0] | - | intercore |
-| | battery_power | f64 | [-500.0, 500.0] | kW | intercore |
-| **D2-预测 (2x15)** | pv_forecast_15min | Vec<f64>(15) | [-1000.0, 1000.0] | kW | LSTM |
-| | load_forecast_15min | Vec<f64>(15) | [-1000.0, 1000.0] | kW | LSTM |
-| **D3-电价 (3)** | current_electricity_price | f64 | [0.0, 2.0] | 元/kWh | 物联平台 |
-| | next_period_price | f64 | [0.0, 2.0] | 元/kWh | 物联平台 |
-| | price_tariff_id | u8 | {0=谷,1=平,2=峰,3=尖峰} | 枚举 | 物联平台 |
-| **D4-需量 (3)** | current_demand | f64 | [0.0, 10000.0] | kW | intercore |
-| | contract_demand | f64 | [0.0, 10000.0] | kW | 配置 |
-| | peak_demand_this_month | f64 | [0.0, 10000.0] | kW | data-processing |
-| **D5-电能质量 (5)** | voltage_phase_a/b/c | f64 | [0.8, 1.2] | p.u. | intercore |
-| | voltage_unbalance | f64 | [0.0, 0.05] | - | intercore |
-| | frequency | f64 | [49.5, 50.5] | Hz | intercore |
-| **D6-气象 (2)** | solar_irradiance | f64 | [0.0, 1500.0] | W/m^2 | 气象 API |
-| | temperature | f64 | [-20.0, 60.0] | deg C | 气象 API |
-| **D7-调度 (2)** | dispatch_p_set | Option<f64> | [-1000.0, 1000.0] | kW | gateway |
-| | dispatch_q_set | Option<f64> | [-1000.0, 1000.0] | kVar | gateway |
 
-**序列化输入向量维度：** 50 维
+| 大类                | 字段名                    | 类型         | 范围                    | 单位   | 来源            |
+| ------------------- | ------------------------- | ------------ | ----------------------- | ------ | --------------- |
+| **D1-实时 (9)**     | battery_soc               | f64          | [0.0, 1.0]              | -      | intercore       |
+|                     | pv_power                  | f64          | [-1000.0, 1000.0]       | kW     | intercore       |
+|                     | load_power                | f64          | [-1000.0, 1000.0]       | kW     | intercore       |
+|                     | grid_power                | f64          | [-1000.0, 1000.0]       | kW     | intercore       |
+|                     | transformer_load          | f64          | [0.0, 2.0]              | -      | intercore       |
+|                     | battery_power             | f64          | [-500.0, 500.0]         | kW     | intercore       |
+|                     | voltage_phase_a           | f64          | [0.8, 1.2]              | p.u.   | intercore       |
+|                     | voltage_phase_b           | f64          | [0.8, 1.2]              | p.u.   | intercore       |
+|                     | voltage_phase_c           | f64          | [0.8, 1.2]              | p.u.   | intercore       |
+| **D2-预测 (2x15)**  | pv_forecast_15min         | Vec<f64>(15) | [-1000.0, 1000.0]       | kW     | LSTM            |
+|                     | load_forecast_15min       | Vec<f64>(15) | [-1000.0, 1000.0]       | kW     | LSTM            |
+| **D3-电价 (3)**     | current_electricity_price | f64          | [0.0, 2.0]              | 元/kWh | 物联平台        |
+|                     | next_period_price         | f64          | [0.0, 2.0]              | 元/kWh | 物联平台        |
+|                     | price_tariff_id           | u8           | {0=谷,1=平,2=峰,3=尖峰} | 枚举   | 物联平台        |
+| **D4-需量 (3)**     | current_demand            | f64          | [0.0, 10000.0]          | kW     | intercore       |
+|                     | contract_demand           | f64          | [0.0, 10000.0]          | kW     | 配置            |
+|                     | peak_demand_this_month    | f64          | [0.0, 10000.0]          | kW     | data-processing |
+| **D5-气象 (2)**     | solar_irradiance          | f64          | [0.0, 1500.0]           | W/m^2  | 气象 API        |
+|                     | temperature               | f64          | [-20.0, 60.0]           | deg C  | 气象 API        |
+| **D6-调度 (2)**     | dispatch_p_set            | Option<f64>  | [-1000.0, 1000.0]       | kW     | gateway         |
+|                     | dispatch_q_set            | Option<f64>  | [-1000.0, 1000.0]       | kVar   | gateway         |
 
-### 5.3 动作空间定义（7 个动作维度）— ⚠️ v2.1 废弃，A3a/A3b/A3c 已移除，以 15.3.1 为准
+> 注：原 D5-电能质量已移除（voltage_unbalance、frequency 由实时控制核心处理），三相电压并入 D1。
 
-| 维度 | 字段名 | 类型 | 范围 | 单位 | 说明 |
-|------|--------|------|------|------|------|
-| A1 | p_batt_set | f64 | [-500.0, 500.0] | kW | 电池有功功率（负值=充电）|
-| A2 | q_batt_set | f64 | [-300.0, 300.0] | kVar | 无功功率（负值=感性）|
-| A3a | compens_factor_a | f64 | [-1.0, 1.0] | - | A 相补偿系数 |
-| A3b | compens_factor_b | f64 | [-1.0, 1.0] | - | B 相补偿系数 |
-| A3c | compens_factor_c | f64 | [-1.0, 1.0] | - | C 相补偿系数 |
-| A4 | load_shedding | f64 | [0.0, 500.0] | kW | 可中断负荷切除 |
-| A5 | pv_limit | f64 | [0.0, 1.0] | - | 光伏限功率比例 |
-| - | confidence | f64 | [0.0, 1.0] | - | 决策置信度 |
+**序列化输入向量维度：** 48 维
+
+### 5.3 动作空间定义（4 个动作维度）
+
+
+| 维度 | 字段名           | 类型 | 范围            | 单位 | 说明                      |
+| ---- | ---------------- | ---- | --------------- | ---- | ------------------------- |
+| A1   | p_batt_set       | f64  | [-500.0, 500.0] | kW   | 电池有功功率（负值=充电，正值=放电）    |
+| A2   | q_batt_set       | f64  | [-300.0, 300.0] | kVar | 无功功率（负值=感性=吸收，正值=容性=释放）|
+| A3   | load_shedding    | f64  | [0.0, 500.0]    | kW   | 可中断负荷切除                          |
+| A4   | pv_limit         | f64  | [0.0, 1.0]      | -    | 光伏限功率比例                          |
+| -    | confidence       | f64  | [0.0, 1.0]      | -    | 决策置信度                              |
 
 ### 5.4 RLModel 接口（扩展后）
 
@@ -931,8 +929,8 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 pub struct RLModel {
     config: RlConfig,
     runtime: RknnRuntime,
-    input_dim: usize,    // = 50
-    output_dim: usize,   // = 7 + 1 (7个动作 + confidence)
+    input_dim: usize,    // = 48
+    output_dim: usize,   // = 4 + 1 (4个动作 + confidence)
 }
 
 impl RLModel {
@@ -942,14 +940,14 @@ impl RLModel {
             return Err(AiEngineError::ModelNotLoaded);
         }
 
-        // 1. 序列化为 50 维输入向量
+        // 1. 序列化为 48 维输入向量
         let input = state.to_input_vector();
         debug_assert!(input.len() == self.input_dim);
 
         // 2. NPU 推理
         let output = self.runtime.run(&input).await?;
 
-        // 3. 解析 8 维输出
+        // 3. 解析 5 维输出（4动作 + confidence）
         self.parse_action_output(&output, state)
     }
 
@@ -958,12 +956,9 @@ impl RLModel {
         let mut action = ActionOutput {
             p_batt_set:         raw.get(0).copied().unwrap_or(0.0) as f64,
             q_batt_set:         raw.get(1).copied().unwrap_or(0.0) as f64,
-            compens_factor_a:   raw.get(2).copied().unwrap_or(0.0) as f64,
-            compens_factor_b:   raw.get(3).copied().unwrap_or(0.0) as f64,
-            compens_factor_c:   raw.get(4).copied().unwrap_or(0.0) as f64,
-            load_shedding:      raw.get(5).copied().unwrap_or(0.0) as f64,
-            pv_limit:           raw.get(6).copied().unwrap_or(1.0) as f64,
-            confidence:         raw.get(7).copied().unwrap_or(0.5) as f64,
+            load_shedding:      raw.get(2).copied().unwrap_or(0.0) as f64,
+            pv_limit:           raw.get(3).copied().unwrap_or(1.0) as f64,
+            confidence:         raw.get(4).copied().unwrap_or(0.5) as f64,
         };
 
         // 应用调度指令约束
@@ -976,45 +971,39 @@ impl RLModel {
 }
 ```
 
-### 5.5 动作输出完整定义 — ⚠️ v2.1 废弃，compens_factor_* 已移除，以 15.3.1 为准
+### 5.5 动作输出完整定义
 
 ```rust
 /// RL 决策输出（完整动作空间）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionOutput {
-    /// 电池有功功率设定值 (kW), [-500.0, 500.0], 负值=充电
+    /// A1: 电池有功功率设定值 (kW), [-500.0, 500.0], 负值=充电，正值=放电
     pub p_batt_set: f64,
-    /// 可中断负荷切除量 (kW), [0.0, 500.0]
+    /// A2: 装置无功功率设定值 (kVar), [-300.0, 300.0], 负值=感性=吸收无功，正值=容性=释放无功
+    pub q_batt_set: f64,
+    /// A3: 可中断负荷切除量 (kW), [0.0, 500.0]
     pub load_shedding: f64,
-    /// 光伏限功率比例, [0.0, 1.0], 0.0=完全限功率
+    /// A4: 光伏限功率比例, [0.0, 1.0], 0.0=完全限功率
     pub pv_limit: f64,
     /// 决策置信度 [0.0, 1.0]
     pub confidence: f64,
-    /// 装置无功功率设定值 (kVar), [-300.0, 300.0], 负值=感性
-    pub q_batt_set: f64,
-    /// A 相分相补偿系数, [-1.0, 1.0]
-    pub compens_factor_a: f64,
-    /// B 相分相补偿系数, [-1.0, 1.0]
-    pub compens_factor_b: f64,
-    /// C 相分相补偿系数, [-1.0, 1.0]
-    pub compens_factor_c: f64,
 }
 ```
 
-### 5.6 动作约束校验（ActionValidator）— ⚠️ v2.1 废弃，ACT-04 已移除，以 15.4.3 为准
+### 5.6 动作约束校验（ActionValidator）
 
 **文件：** `mupc/crates/ai-engine/src/action_validator.rs`
 
-#### 6 条约束规则
+#### 5 条约束规则
 
-| 规则 ID | 约束条件 | 默认值 | 说明 |
-|---------|----------|--------|------|
-| ACT-01 | p_batt_set 变化率 <= 50 kW/周期 | 50 kW/s | 防止电池功率突变 |
-| ACT-02 | q_batt_set 变化率 <= 30 kVar/周期 | 30 kVar/s | 防止无功突变 |
-| ACT-03 | sqrt(P^2 + Q^2) <= S_max | 500 kVA | 功率圆限制 |
-| ACT-04 | compens_factor_a + b + c = 0 | - | 三相补偿仅调节不平衡 |
-| ACT-05 | pv_limit >= 0.1（防逆流场景除外） | 0.1 | 光伏限功率下限 |
-| ACT-06 | p_batt_set 绝对值 <= dispatch_p_set | - | 调度指令权限 |
+
+| 规则 ID | 约束条件                            | 默认值    | 说明                 |
+| ------- | ----------------------------------- | --------- | -------------------- |
+| ACT-01  | p_batt_set 变化率 <= 50 kW/周期     | 50 kW/s   | 防止电池功率突变     |
+| ACT-02  | q_batt_set 变化率 <= 30 kVar/周期   | 30 kVar/s | 防止无功突变         |
+| ACT-03  | sqrt(P^2 + Q^2) <= S_max            | 500 kVA   | 功率圆限制           |
+| ACT-04  | pv_limit >= 0.1（防逆流场景除外）   | 0.1       | 光伏限功率下限       |
+| ACT-05  | p_batt_set 绝对值 <= dispatch_p_set | -         | 调度指令权限         |
 
 ```rust
 /// 动作约束校验器
@@ -1082,17 +1071,9 @@ impl ActionValidator {
             report.add_violation("ACT-03", format!("视在功率 {:.1} 超过上限 {:.1}", s, self.config.s_max));
         }
 
-        // ACT-04: 三相补偿系数和为 0
-        let sum = action.compens_factor_a + action.compens_factor_b + action.compens_factor_c;
-        if sum.abs() > 1e-6 {
-            let offset = sum / 3.0;
-            action.compens_factor_a -= offset;
-            action.compens_factor_b -= offset;
-            action.compens_factor_c -= offset;
-            report.add_violation("ACT-04", "三相补偿系数和 != 0, 自动归零");
         }
 
-        // ACT-05: pv_limit >= 0.1 (防逆流场景除外)
+        // ACT-04: pv_limit >= 0.1 (防逆流场景除外)
         if action.pv_limit < self.config.pv_limit_min {
             if !report.is_anti_reverse {
                 action.pv_limit = self.config.pv_limit_min;
@@ -1100,20 +1081,17 @@ impl ActionValidator {
             }
         }
 
-        // ACT-06: 调度指令权限约束
+        // ACT-05: 调度指令权限约束
         if let Some(p_set) = state.dispatch_p_set {
             if action.p_batt_set.abs() > p_set.abs() {
                 action.p_batt_set = action.p_batt_set.clamp(-p_set.abs(), p_set.abs());
-                report.add_violation("ACT-06", "有功设定超过调度指令约束");
+                report.add_violation("ACT-05", "有功设定超过调度指令约束");
             }
         }
 
         // 最终值域 clamp
         action.p_batt_set = action.p_batt_set.clamp(-500.0, 500.0);
         action.q_batt_set = action.q_batt_set.clamp(-300.0, 300.0);
-        action.compens_factor_a = action.compens_factor_a.clamp(-1.0, 1.0);
-        action.compens_factor_b = action.compens_factor_b.clamp(-1.0, 1.0);
-        action.compens_factor_c = action.compens_factor_c.clamp(-1.0, 1.0);
         action.load_shedding = action.load_shedding.clamp(0.0, 500.0);
         action.pv_limit = action.pv_limit.clamp(0.0, 1.0);
         action.confidence = action.confidence.clamp(0.0, 1.0);
@@ -1189,25 +1167,24 @@ pub struct SceneRewardValue {
 
 ### 6.3 SCENE-01: 农网灌溉
 
-> **⚠️ v2.1 废弃：** R_voltage_quality 已移除，权重 w1~w4 → w1~w3。以第 15.4.4 节为准。
 
-**目标：** 最大化光伏消纳 + 电压治理，最小化变压器过载
+**目标：** 最大化光伏消纳，最小化变压器过载（v2.1 移除电压治理项）
 
 ```
-R_agri = w1 * R_pv_consumption + w2 * R_voltage_quality - w3 * P_battery_degradation - w4 * P_transformer_overload
+R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer_overload
 
 R_pv_consumption = min(P_self_consume / P_total, 1.0) * 100
-R_voltage_quality = 100 * max(0, 1 - |V_a-1.0|/0.1 - |V_b-1.0|/0.1 - |V_c-1.0|/0.1)
 P_battery_degradation = alpha * |delta_SOC| / SOC_range * 100
 P_transformer_overload = 200 * max(0, L_transformer - 1.0)
 ```
 
-| 权重 | 默认值 | 说明 |
-|------|--------|------|
-| w1 (primary_reward) | 1.0 | 光伏消纳奖励权重 |
-| w2 (secondary_reward) | 1.0 | 电压质量奖励权重 |
-| w3 (degradation_penalty) | 0.5 | 电池损耗惩罚 |
-| w4 (overload_penalty) | 2.0 | 变压器过载惩罚 |
+
+| 权重                     | 默认值 | 说明             |
+| ------------------------ | ------ | ---------------- |
+| w1 (primary_reward)      | 1.0    | 光伏消纳奖励权重 |
+| w2 (secondary_reward)    | 1.0    | 电压质量奖励权重 |
+| w3 (degradation_penalty) | 0.5    | 电池损耗惩罚     |
+| w4 (overload_penalty)    | 2.0    | 变压器过载惩罚   |
 
 ### 6.4 SCENE-B1: 自主套利
 
@@ -1220,10 +1197,11 @@ R_price_spread = P_batt * delta_t * (price_sell - price_buy) * conversion_factor
 P_battery_degradation = beta * |P_batt| * delta_t / E_total * 100
 ```
 
-| 权重 | 默认值 | 说明 |
-|------|--------|------|
-| w1 (primary_reward) | 1.0 | 电价差收益权重 |
-| w2 (degradation_penalty) | 1.0 | 电池损耗惩罚权重 |
+
+| 权重                     | 默认值 | 说明             |
+| ------------------------ | ------ | ---------------- |
+| w1 (primary_reward)      | 1.0    | 电价差收益权重   |
+| w2 (degradation_penalty) | 1.0    | 电池损耗惩罚权重 |
 
 ### 6.5 SCENE-B2: 需量控制
 
@@ -1236,10 +1214,11 @@ R_demand_penalty_avoidance = max(0, D_peak_baseline - D_peak_actual) * penalty_r
 P_comfort_loss = gamma * P_load_shed * delta_t * price_loss
 ```
 
-| 权重 | 默认值 | 说明 |
-|------|--------|------|
-| w1 (primary_reward) | 1.0 | 需量罚金减免权重 |
-| w2 (overload_penalty) | 0.5 | 舒适度损失惩罚 |
+
+| 权重                  | 默认值 | 说明             |
+| --------------------- | ------ | ---------------- |
+| w1 (primary_reward)   | 1.0    | 需量罚金减免权重 |
+| w2 (overload_penalty) | 0.5    | 舒适度损失惩罚   |
 
 ### 6.6 SCENE-B3: 虚拟电厂
 
@@ -1253,11 +1232,12 @@ R_response_accuracy = 100 * max(0, 1 - |P_actual - P_target| / P_target_range)
 P_deadline_deviation = delta_t_response / T_allowed * 100
 ```
 
-| 权重 | 默认值 | 说明 |
-|------|--------|------|
-| w1 (primary_reward) | 1.0 | 辅助服务收益权重 |
-| w2 (secondary_reward) | 2.0 | 响应精度权重（VPP 考核重点）|
-| w3 (degradation_penalty) | 1.0 | 响应延迟惩罚 |
+
+| 权重                     | 默认值 | 说明                         |
+| ------------------------ | ------ | ---------------------------- |
+| w1 (primary_reward)      | 1.0    | 辅助服务收益权重             |
+| w2 (secondary_reward)    | 2.0    | 响应精度权重（VPP 考核重点） |
+| w3 (degradation_penalty) | 1.0    | 响应延迟惩罚                 |
 
 ### 6.7 SCENE-B5: 极致绿色
 
@@ -1270,10 +1250,11 @@ R_green_consumption = 100 * E_green / E_total
 R_carbon_reduction = 100 * (C_baseline - C_actual) / C_baseline
 ```
 
-| 权重 | 默认值 | 说明 |
-|------|--------|------|
-| w1 (primary_reward) | 1.0 | 绿电消纳比例权重 |
-| w2 (secondary_reward) | 1.0 | 碳减排量权重 |
+
+| 权重                  | 默认值 | 说明             |
+| --------------------- | ------ | ---------------- |
+| w1 (primary_reward)   | 1.0    | 绿电消纳比例权重 |
+| w2 (secondary_reward) | 1.0    | 碳减排量权重     |
 
 ### 6.8 场景-权重映射表
 
@@ -1785,7 +1766,7 @@ impl AiCommandValidatorImpl {
         if !base_result.valid { return base_result; }
 
         // 2. 物理约束校验
-        // ⚠️ v2.1: compens_factor_* 已移除，ActionOutput 现为 5 字段
+        // 
         if let Some(ref av) = self.action_validator {
             let mut action = ActionOutput {
                 p_batt_set: cmd.p_batt_set.unwrap_or(0.0),
@@ -1817,13 +1798,14 @@ impl AiCommandValidatorImpl {
 
 不同场景下本地兜底策略参数自动适配：
 
-| 场景 | 防逆流阈值 | 需量控制阈值 | 削峰填谷策略 |
-|------|-----------|-------------|-------------|
-| 农网灌溉 | 降低至 5% | 正常 (90%) | 侧重光伏消纳 |
-| 自主套利 | 正常 10% | 正常 | 侧重峰谷套利 |
-| 需量控制 | 正常 | 降低至 80% | 侧重削峰 |
-| 虚拟电厂 | 正常 | 正常 | 跟随 VPP 指令 |
-| 极致绿色 | 降低至 3% | 正常 | 侧重绿电消纳 |
+
+| 场景     | 防逆流阈值 | 需量控制阈值 | 削峰填谷策略  |
+| -------- | ---------- | ------------ | ------------- |
+| 农网灌溉 | 降低至 5%  | 正常 (90%)   | 侧重光伏消纳  |
+| 自主套利 | 正常 10%   | 正常         | 侧重峰谷套利  |
+| 需量控制 | 正常       | 降低至 80%   | 侧重削峰      |
+| 虚拟电厂 | 正常       | 正常         | 跟随 VPP 指令 |
+| 极致绿色 | 降低至 3%  | 正常         | 侧重绿电消纳  |
 
 ---
 
@@ -1858,12 +1840,13 @@ mupc/crates/ai-engine/
 
 ### 10.2 strategy-engine crate 变更
 
-| 文件 | 变更类型 | 说明 |
-|------|----------|------|
-| `src/ai_integration.rs` | 修改 | AiIntegrator 扩展: run_full_cycle(), validate_action(), 场景通知 |
-| `src/ai_validator.rs` | 修改 | AiCommandValidatorImpl 扩展: validate_enhanced() + 物理约束集成 |
-| `src/lib.rs` | 修改 | 重新导出新类型 |
-| `Cargo.toml` | 修改 | 新增 mupc-ai-engine 依赖 |
+
+| 文件                    | 变更类型 | 说明                                                             |
+| ----------------------- | -------- | ---------------------------------------------------------------- |
+| `src/ai_integration.rs` | 修改     | AiIntegrator 扩展: run_full_cycle(), validate_action(), 场景通知 |
+| `src/ai_validator.rs`   | 修改     | AiCommandValidatorImpl 扩展: validate_enhanced() + 物理约束集成  |
+| `src/lib.rs`            | 修改     | 重新导出新类型                                                   |
+| `Cargo.toml`            | 修改     | 新增 mupc-ai-engine 依赖                                         |
 
 ---
 
@@ -2039,13 +2022,14 @@ impl AiMessageBus {
 
 ### 消息 Topic 定义
 
-| Topic | 发布者 | 订阅者 | 频率 |
-|-------|--------|--------|------|
-| `ai/fused_state` | DataFusionEngine | RLModel | 1Hz |
-| `ai/mode_switch` | ModeSelector | RewardCalculator, ModelManager, Web UI | 事件驱动 |
-| `ai/action_output` | ModelManager | strategy-engine, intercore | 1Hz |
-| `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | 1Hz |
-| `ai/model_status` | ModelManager | Web UI, 告警模块 | 1Hz |
+
+| Topic              | 发布者           | 订阅者                                 | 频率     |
+| ------------------ | ---------------- | -------------------------------------- | -------- |
+| `ai/fused_state`   | DataFusionEngine | RLModel                                | 1Hz      |
+| `ai/mode_switch`   | ModeSelector     | RewardCalculator, ModelManager, Web UI | 事件驱动 |
+| `ai/action_output` | ModelManager     | strategy-engine, intercore             | 1Hz      |
+| `ai/reward_value`  | RewardCalculator | OnlineUpdater, Web UI                  | 1Hz      |
+| `ai/model_status`  | ModelManager     | Web UI, 告警模块                       | 1Hz      |
 
 ---
 
@@ -2058,6 +2042,7 @@ impl AiMessageBus {
 **决策：** 采用规则引擎为主方案，同时预留 ML 辅助接口。
 
 **理由：**
+
 1. 5 种场景的特征规则非常清晰（负荷占比、电价时段、VPP 指令等硬边界条件）
 2. 规则引擎可以达到 PRD 要求的 >=95% 准确率
 3. 运维人员可以直观理解和调整分类规则
@@ -2071,6 +2056,7 @@ impl AiMessageBus {
 **决策：** 静态链接 `#[link(name = "rknnrt")]` 优先，兜底采用 `libloading` 动态加载。
 
 **理由：**
+
 1. 静态链接在编译时检查符号完整性，减少运行时符号缺失风险
 2. `libloading` 作为兜底，允许在没有 NPU 驱动的开发环境上运行（模拟模式）
 
@@ -2081,6 +2067,7 @@ impl AiMessageBus {
 **决策：** 使用 tract ONNX Runtime 作为 CPU 降级后端。
 
 **理由：**
+
 1. tract 是纯 Rust 实现，无 C 依赖，编译部署简单
 2. 支持 ONNX 模型直接加载，不需要额外的模型转换
 3. 在 ARM64 上有较好的性能表现
@@ -2093,6 +2080,7 @@ impl AiMessageBus {
 **决策：** 使用 `primary_reward` / `secondary_reward` / `degradation_penalty` / `overload_penalty` 具名字段替代 w1/w2/w3/w4。
 
 **理由：**
+
 1. 不同类型权重的语义在不同场景下含义不同，具名字段消除了歧义
 2. 配置文件的 self-documenting 能力增强
 3. 设计评审中确认修复方案
@@ -2104,6 +2092,7 @@ impl AiMessageBus {
 **决策：** `peak_price` 和 `valley_price` 仅用于奖励函数计算中的套利价差计算，不纳入 RL 推理输入向量（50 维向量中不含这两个字段）。
 
 **理由：**
+
 1. RL 模型的输入状态空间应只包含模型决策需要的信息
 2. 套利价差是奖励函数的计算参数，不是决策的输入特征
 3. 避免输入向量维度膨胀，减少 NPU 推理的计算量
@@ -2115,6 +2104,7 @@ impl AiMessageBus {
 **决策：** 所有 FFI 调用使用 `tokio::task::spawn_blocking` 在后台线程执行，不阻塞 Tokio async runtime。
 
 **理由：**
+
 1. C 语言的 `rknn_run` 是同步阻塞调用，直接调用会阻塞 Tokio worker 线程
 2. `spawn_blocking` 将阻塞调用移到专用线程池，不会影响其他异步任务的执行
 3. Tokio 官方推荐的 C FFI 集成模式
@@ -2123,42 +2113,45 @@ impl AiMessageBus {
 
 ## 附录 A：性能指标与延迟预算
 
-| 处理阶段 | 预算上限 | 当前设计估计 |
-|----------|----------|-------------|
-| 数据融合 (单次) | <1ms | ~0.5ms |
+
+| 处理阶段            | 预算上限          | 当前设计估计  |
+| ------------------- | ----------------- | ------------- |
+| 数据融合 (单次)     | <1ms              | ~0.5ms        |
 | 场景分类 (规则引擎) | <5s (含 30s 窗口) | ~0.2ms (规则) |
-| 状态序列化 (50维) | <5ms | ~0.01ms |
-| NPU 推理 | <100ms P99 | ~80ms (INT8) |
-| 动作约束校验 | <0.5ms | ~0.05ms |
-| 奖励函数计算 | <1ms | ~0.1ms |
-| 完整决策周期 | <120ms | ~85ms |
-| 在线微调 (batch=32) | <=10s | TBD |
+| 状态序列化 (50维)   | <5ms              | ~0.01ms       |
+| NPU 推理            | <100ms P99        | ~80ms (INT8)  |
+| 动作约束校验        | <0.5ms            | ~0.05ms       |
+| 奖励函数计算        | <1ms              | ~0.1ms        |
+| 完整决策周期        | <120ms            | ~85ms         |
+| 在线微调 (batch=32) | <=10s             | TBD           |
 
 ## 附录 B：验收标准汇总
 
-| 模块 | ID 范围 | 优先级 |
-|------|---------|--------|
-| LSTM 推理 | LSTM-01~05, AI-01, AI-03, AI-05 | P0 |
-| RL 推理 | RL-01~03, AI-02, AI-04 | P0 |
-| RKNN Runtime | RK-01~08, NPU-01~06 | P0 |
-| 数据融合 | FUSION-01~10 | P0/P1 |
-| 模式选择 | MODE-01~07 | P0 |
-| 状态/动作空间 | STATE-01~05, ACT-07~11 | P0 |
-| 动作约束校验 | ACT-01~06 | P0 |
-| 奖励函数 | REWARD-A1~E4 | P0 |
-| 动态权重 | WEIGHT-01~05 | P1 |
-| 在线微调 | UPDATE-01~04, AI-07 | P1 |
-| 策略集成 | AI-08 | P0 |
-| 模型部署 | 模型大小/内存/MTBF/降级 | P0/P1/P2 |
+
+| 模块          | ID 范围                         | 优先级   |
+| ------------- | ------------------------------- | -------- |
+| LSTM 推理     | LSTM-01~05, AI-01, AI-03, AI-05 | P0       |
+| RL 推理       | RL-01~03, AI-02, AI-04          | P0       |
+| RKNN Runtime  | RK-01~08, NPU-01~06             | P0       |
+| 数据融合      | FUSION-01~10                    | P0/P1    |
+| 模式选择      | MODE-01~07                      | P0       |
+| 状态/动作空间 | STATE-01~05, ACT-07~11          | P0       |
+| 动作约束校验  | ACT-01~06                       | P0       |
+| 奖励函数      | REWARD-A1~E4                    | P0       |
+| 动态权重      | WEIGHT-01~05                    | P1       |
+| 在线微调      | UPDATE-01~04, AI-07             | P1       |
+| 策略集成      | AI-08                           | P0       |
+| 模型部署      | 模型大小/内存/MTBF/降级         | P0/P1/P2 |
 
 ## 附录 C：模型退化处理
 
-| 退化场景 | 检测条件 | 处理措施 |
-|----------|----------|----------|
-| 推理精度持续下降 | loss 连续 10 个周期不下降或上升 | 停止在线微调，回滚至上一检查点 |
-| 推理延迟持续超标 | 连续 100 次推理中 > 10% 超出 150ms | 降级至 CPU 推理模式，记录 ALERT 日志 |
-| 模型文件损坏 | SHA256 校验失败 | 拒绝加载，尝试从 OTA 备份恢复 |
-| 奖励函数计算异常 | 奖励值偏离正常范围（超出 [0, 200]）| 截断至边界值，记录 ERROR 日志 |
+
+| 退化场景         | 检测条件                            | 处理措施                             |
+| ---------------- | ----------------------------------- | ------------------------------------ |
+| 推理精度持续下降 | loss 连续 10 个周期不下降或上升     | 停止在线微调，回滚至上一检查点       |
+| 推理延迟持续超标 | 连续 100 次推理中 > 10% 超出 150ms  | 降级至 CPU 推理模式，记录 ALERT 日志 |
+| 模型文件损坏     | SHA256 校验失败                     | 拒绝加载，尝试从 OTA 备份恢复        |
+| 奖励函数计算异常 | 奖励值偏离正常范围（超出 [0, 200]） | 截断至边界值，记录 ERROR 日志        |
 
 ## 附录 D：数据融合异常降级流程
 
@@ -2182,46 +2175,50 @@ strategy-engine 进入兜底模式
 
 ## 附录 E：待澄清问题
 
-| 序号 | 问题 | 优先级 | 影响评估 |
-|------|------|--------|----------|
-| 1 | 气象数据的外部来源是何种 API（如和风天气、中国气象局）？是否需要额外商务授权？ | 高 | 影响 DataFusionEngine 的气象数据获取实现 |
-| 2 | 电价数据是直接来自物联平台下发，还是需要通过 MUPC 本地配置？ | 高 | 影响 DataFusionEngine 的电价数据管道设计 |
-| 3 | ~~分相补偿系数的硬件限制~~ | ~~高~~ | **v2.1 已闭环：** 分相补偿已从 AI 引擎移除，由实时控制核心模块独立处理 |
-| 4 | VPP 辅助服务的容量价格和里程价格是否有标准合同模板？还是由 VPP 平台实时下发？ | 中 | 影响 R_ancillary_service 的参数来源 |
-| 5 | 在线微调是否需要经过审批流程（安全考虑）？还是自动触发？ | 中 | 影响 OnlineUpdater 的触发策略 |
-| 6 | 气象数据连续缺失时长 10 个周期是融合周期（10 秒）还是 10 个 15 分钟气象更新周期（150 分钟）？ | 中 | 影响 FUSION 告警阈值配置 |
+
+| 序号 | 问题                                                                                          | 优先级 | 影响评估                                                               |
+| ---- | --------------------------------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------- |
+| 1    | 气象数据的外部来源是何种 API（如和风天气、中国气象局）？是否需要额外商务授权？                | 高     | 影响 DataFusionEngine 的气象数据获取实现                               |
+| 2    | 电价数据是直接来自物联平台下发，还是需要通过 MUPC 本地配置？                                  | 高     | 影响 DataFusionEngine 的电价数据管道设计                               |
+| 3    | ~~分相补偿系数的硬件限制~~                                                                    | ~~高~~ | **v2.1 已闭环：** 分相补偿已从 AI 引擎移除，由实时控制核心模块独立处理 |
+| 4    | VPP 辅助服务的容量价格和里程价格是否有标准合同模板？还是由 VPP 平台实时下发？                 | 中     | 影响 R_ancillary_service 的参数来源                                    |
+| 5    | 在线微调是否需要经过审批流程（安全考虑）？还是自动触发？                                      | 中     | 影响 OnlineUpdater 的触发策略                                          |
+| 6    | 气象数据连续缺失时长 10 个周期是融合周期（10 秒）还是 10 个 15 分钟气象更新周期（150 分钟）？ | 中     | 影响 FUSION 告警阈值配置                                               |
 
 ---
 
 ## v2.0 修订记录
 
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | SceneClassifier → ModeSelector | 1.1~1.5、4、8、10、11、13 | 删除 rule-based 自动场景分类器，替换为 ModeSelector 互斥模式选择器 |
-| 2 | 更新架构图与数据流 | 1.1、1.4、1.5 | 架构图新增选择层（IEC 104/61850/Web UI → ModeSelector）；数据流移除 SceneClassifier；决策周期步骤 2 从 scene_classifier.recognize() 改为 mode_selector.current() |
-| 3 | 章节 4 标记废弃 | 4. 标题 + 4.1 | SceneClassifier 设计保留作为历史参考，添加 v2.0 废弃说明和迁移指引 |
-| 4 | ModelManager 结构更新 | 8.1 | scene_classifier → mode_selector 字段替换 |
-| 5 | 消息总线 topic 更新 | 13. 消息 Topic 定义 | ai/scene_change → ai/mode_switch |
-| 6 | 新增设计文档引用 | 文档头部参考表 | 新增预设运行场景与互斥模式选择设计文档引用 |
-| 7 | 版本号更新 | 文档头部 | v1.0 → v2.0 |
+
+| 序号 | 修订项                          | 修订位置                  | 说明                                                                                                                                                              |
+| ---- | ------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | SceneClassifier → ModeSelector | 1.1~1.5、4、8、10、11、13 | 删除 rule-based 自动场景分类器，替换为 ModeSelector 互斥模式选择器                                                                                                |
+| 2    | 更新架构图与数据流              | 1.1、1.4、1.5             | 架构图新增选择层（IEC 104/61850/Web UI → ModeSelector）；数据流移除 SceneClassifier；决策周期步骤 2 从 scene_classifier.recognize() 改为 mode_selector.current() |
+| 3    | 章节 4 标记废弃                 | 4. 标题 + 4.1             | SceneClassifier 设计保留作为历史参考，添加 v2.0 废弃说明和迁移指引                                                                                                |
+| 4    | ModelManager 结构更新           | 8.1                       | scene_classifier → mode_selector 字段替换                                                                                                                        |
+| 5    | 消息总线 topic 更新             | 13. 消息 Topic 定义       | ai/scene_change → ai/mode_switch                                                                                                                                 |
+| 6    | 新增设计文档引用                | 文档头部参考表            | 新增预设运行场景与互斥模式选择设计文档引用                                                                                                                        |
+| 7    | 版本号更新                      | 文档头部                  | v1.0 → v2.0                                                                                                                                                      |
 
 **修订依据：** 预设运行场景与互斥模式选择设计（v2.0 核心变更）
 
 ## v2.1 修订记录 — 移除电能质量与分相补偿
 
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | ActionOutput 移除 compens_factor | 5.3 | 删除 3 个分相补偿字段，动作维度 7→4 |
-| 2 | FusedSystemState 移除 D5 | 3.4 | 删除 5 个电能质量字段，状态维度 23→18 |
-| 3 | ActionValidator 移除 ACT-04 | 5.6 | 删除分相补偿约束，约束规则 6→5 |
-| 4 | SCENE-01 奖励公式更新 | 6.2 | 移除 R_voltage_quality，权重 4→3 |
-| 5 | DataFusionEngine 移除 D5 采集 | 3.2 | D5 数据源适配器移除 |
-| 6 | to_input_vector 维度更新 | 3.5 | 输入向量 50→45 维 |
-| 7 | 版本号更新 | 文档头部 | v2.0 → v2.1 |
+
+| 序号 | 修订项                           | 修订位置 | 说明                                   |
+| ---- | -------------------------------- | -------- | -------------------------------------- |
+| 1    | ActionOutput 移除 compens_factor | 5.3      | 删除 3 个分相补偿字段，动作维度 7→4   |
+| 2    | FusedSystemState 移除 D5         | 3.4      | 删除 5 个电能质量字段，状态维度 23→18 |
+| 3    | ActionValidator 移除 ACT-04      | 5.6      | 删除分相补偿约束，约束规则 6→5        |
+| 4    | SCENE-01 奖励公式更新            | 6.2      | 移除 R_voltage_quality，权重 4→3      |
+| 5    | DataFusionEngine 移除 D5 采集    | 3.2      | D5 数据源适配器移除                    |
+| 6    | to_input_vector 维度更新         | 3.5      | 输入向量 50→45 维                     |
+| 7    | 版本号更新                       | 文档头部 | v2.0 → v2.1                           |
 
 **修订依据：** PRD v2.1 — 三相不平衡治理移交实时控制核心模块
 
 ---
+
 ---
 
 ## 15. v2.1 技术设计：移除电能质量与分相补偿
@@ -2232,12 +2229,13 @@ strategy-engine 进入兜底模式
 
 **变更范围：**
 
-| 移除项 | PRD 位置 | 设计影响 |
-|--------|----------|----------|
-| D5-电能质量（5 字段） | 5.2 状态空间 | FusedSystemState、to_input_vector、DataFusionEngine |
-| A3a/A3b/A3c（3 动作维度） | 5.3 动作空间 | ActionOutput、ActionValidator |
-| R_voltage_quality | 6.2 SCENE-01 | RewardCalculator |
-| power_quality topic | 3.4 消息总线 | DataFusionEngine adapter |
+
+| 移除项                    | PRD 位置     | 设计影响                                            |
+| ------------------------- | ------------ | --------------------------------------------------- |
+| D5-电能质量（5 字段）     | 5.2 状态空间 | FusedSystemState、to_input_vector、DataFusionEngine |
+| A3a/A3b/A3c（3 动作维度） | 5.3 动作空间 | ActionOutput、ActionValidator                       |
+| R_voltage_quality         | 6.2 SCENE-01 | RewardCalculator                                    |
+| power_quality topic       | 3.4 消息总线 | DataFusionEngine adapter                            |
 
 **核心理由：** 三相不平衡治理不涉及电池充放电，AI 引擎无需观测电压/频率数据，也无需输出分相补偿指令。这些功能由 MUPU 实时控制核心模块独立处理。
 
@@ -2245,10 +2243,11 @@ strategy-engine 进入兜底模式
 
 本变更属于纯移除操作，无新功能设计，无需多方案对比。评估了两种执行策略：
 
-| 方案 | 描述 | 优点 | 缺点 | 结论 |
-|------|------|------|------|------|
-| **A: 直接移除（采纳）** | 从代码和设计文档中删除相关定义，编译期强制同步 | 零运行时开销，编译期即暴露遗漏 | 无 | ✅ 采纳 |
-| B: Feature Flag 逐步移除 | 用 `#[cfg(feature = "...")]` 包裹，分阶段关闭 | 可回滚 | 过度工程，增大测试矩阵，2 周内即可完成的移除无需 flag | ❌ 拒绝 |
+
+| 方案                     | 描述                                           | 优点                           | 缺点                                                  | 结论    |
+| ------------------------ | ---------------------------------------------- | ------------------------------ | ----------------------------------------------------- | ------- |
+| **A: 直接移除（采纳）**  | 从代码和设计文档中删除相关定义，编译期强制同步 | 零运行时开销，编译期即暴露遗漏 | 无                                                    | ✅ 采纳 |
+| B: Feature Flag 逐步移除 | 用`#[cfg(feature = "...")]` 包裹，分阶段关闭   | 可回滚                         | 过度工程，增大测试矩阵，2 周内即可完成的移除无需 flag | ❌ 拒绝 |
 
 **决策：方案 A，直接移除。** 一次性删除所有相关代码和设计定义，编译器和单元测试保证收敛。
 
@@ -2309,11 +2308,12 @@ let confidence = raw_output[4];         // 置信度（原索引 7）
 
 #### 15.3.3 其他代码文件
 
-| 文件 | 当前状态 | 是否需要变更 |
-|------|----------|-------------|
-| `model_manager.rs` | 透传 `ActionOutput`，无字段级访问 | 否，结构体变更自动传导 |
-| `strategy-engine/` 下游 | 使用 `ActionOutput` 字段 | 需检查 `ai_integration.rs` 是否访问 `compens_factor_*` |
-| `web-api/src/routes/ai/decision.rs` | 仅访问 `p_batt_set_kw`/`load_shedding_kw`/`pv_limit_ratio`/`confidence` | 否，不访问分相补偿字段 |
+
+| 文件                                | 当前状态                                                               | 是否需要变更                                          |
+| ----------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------- |
+| `model_manager.rs`                  | 透传`ActionOutput`，无字段级访问                                       | 否，结构体变更自动传导                                |
+| `strategy-engine/` 下游             | 使用`ActionOutput` 字段                                                | 需检查`ai_integration.rs` 是否访问 `compens_factor_*` |
+| `web-api/src/routes/ai/decision.rs` | 仅访问`p_batt_set_kw`/`load_shedding_kw`/`pv_limit_ratio`/`confidence` | 否，不访问分相补偿字段                                |
 
 ### 15.4 设计文档级联更新
 
@@ -2341,10 +2341,6 @@ let confidence = raw_output[4];         // 置信度（原索引 7）
 删除以下规则块：
 
 ```rust
-// ACT-04: 三相补偿系数和为 0（已移除，v2.1）
-// let sum = action.compens_factor_a + action.compens_factor_b + action.compens_factor_c;
-// if sum.abs() > 1e-6 {
-//     let offset = sum / 3.0;
 //     ... // 自动归零处理
 // }
 ```
@@ -2364,25 +2360,28 @@ R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer
 
 ### 15.5 接口兼容性
 
-| 接口 | 影响 | 说明 |
-|------|------|------|
-| REST API `/api/v1/ai/decisions/*` | 无 | 响应中的 `action` 字段仅包含 `p_batt_set_kw`/`load_shedding_kw`/`pv_limit_ratio`/`confidence`，不包含分相补偿 |
-| 消息总线 `ai/action_output` | 字段减少 | `ActionOutput` JSON 少 3 个字段，下游订阅方需同步更新 |
-| 核间通信 `control_cmd` | 无 | intercore 协议帧不传输分相补偿指令 |
-| RL 模型文件 (.rknn) | 需重训 | 输出张量维度从 8→5，旧模型不兼容 |
+
+| 接口                             | 影响     | 说明                                                                                                         |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
+| REST API`/api/v1/ai/decisions/*` | 无       | 响应中的`action` 字段仅包含 `p_batt_set_kw`/`load_shedding_kw`/`pv_limit_ratio`/`confidence`，不包含分相补偿 |
+| 消息总线`ai/action_output`       | 字段减少 | `ActionOutput` JSON 少 3 个字段，下游订阅方需同步更新                                                        |
+| 核间通信`control_cmd`            | 无       | intercore 协议帧不传输分相补偿指令                                                                           |
+| RL 模型文件 (.rknn)              | 需重训   | 输出张量维度从 8→5，旧模型不兼容                                                                            |
 
 ### 15.6 验证计划
 
-| 验证项 | 方法 | 预期结果 |
-|--------|------|----------|
-| 编译 | `cargo build -p mupc-ai-engine` | 0 error |
-| 单元测试 | `cargo test -p mupc-ai-engine` | 全部通过 |
-| clippy | `cargo clippy -p mupc-ai-engine` | 0 new warning |
-| 下游 crate 编译 | `cargo check -p mupc-strategy-engine -p mupc-web-api` | 0 error（ActionOutput 变更传导） |
-| ActionOutput JSON 序列化 | 单元测试 | 不包含 `compens_factor_*` 字段 |
-| 动作约束校验 | 单元测试 | 约束规则 5 条，ACT-04 不存在 |
+
+| 验证项                   | 方法                                                  | 预期结果                         |
+| ------------------------ | ----------------------------------------------------- | -------------------------------- |
+| 编译                     | `cargo build -p mupc-ai-engine`                       | 0 error                          |
+| 单元测试                 | `cargo test -p mupc-ai-engine`                        | 全部通过                         |
+| clippy                   | `cargo clippy -p mupc-ai-engine`                      | 0 new warning                    |
+| 下游 crate 编译          | `cargo check -p mupc-strategy-engine -p mupc-web-api` | 0 error（ActionOutput 变更传导） |
+| ActionOutput JSON 序列化 | 单元测试                                              | 不包含`compens_factor_*` 字段    |
+| 动作约束校验             | 单元测试                                              | 约束规则 5 条，ACT-04 不存在     |
 
 ---
+
 ---
 
 ## 16. v2.2 技术设计：电压感知 P/Q 协同控制
@@ -2393,11 +2392,12 @@ R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer
 
 **变更范围：**
 
-| 变更项 | PRD 位置 | 设计影响 |
-|--------|----------|----------|
+
+| 变更项                    | PRD 位置     | 设计影响                                           |
+| ------------------------- | ------------ | -------------------------------------------------- |
 | D1 新增三相电压（3 字段） | 5.2 状态空间 | SystemState 结构体、to/from_features、推理输入维度 |
-| q_batt_set 定义完善 | 5.3 动作空间 | 仅文档（代码中 ActionOutput 结构体不变） |
-| P/Q 控制策略文档化 | 5.1 功能概述 | 无代码变更（策略在 RL 模型内隐式学习） |
+| q_batt_set 定义完善       | 5.3 动作空间 | 仅文档（代码中 ActionOutput 结构体不变）           |
+| P/Q 控制策略文档化        | 5.1 功能概述 | 无代码变更（策略在 RL 模型内隐式学习）             |
 
 **设计目标：** AI 引擎通过感知三相电压幅值，能够检测过/低电压工况，协同调节有功充放（p_batt_set）和无功吸收/释放（q_batt_set），实现电压支撑。
 
@@ -2405,10 +2405,11 @@ R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer
 
 本变更的核心是在 `SystemState` 中新增 3 个电压字段。评估了两种方案：
 
-| 方案 | 描述 | 优点 | 缺点 | 结论 |
-|------|------|------|------|------|
-| **A: 直接扩展 SystemState（采纳）** | 在现有 5 字段后追加 3 个 f64 | 最小改动，符合现有模式，from/to_features 线性扩展 | RL 模型需重训（输入维度 5→8） | ✅ 采纳 |
-| B: 独立 VoltageState 子结构 | 单独 struct，嵌入 SystemState | 封装性 | 过度工程（仅 3 个标量），破坏 to_features 线性布局，增加序列化复杂度 | ❌ 拒绝 |
+
+| 方案                                | 描述                          | 优点                                              | 缺点                                                                 | 结论    |
+| ----------------------------------- | ----------------------------- | ------------------------------------------------- | -------------------------------------------------------------------- | ------- |
+| **A: 直接扩展 SystemState（采纳）** | 在现有 5 字段后追加 3 个 f64  | 最小改动，符合现有模式，from/to_features 线性扩展 | RL 模型需重训（输入维度 5→8）                                       | ✅ 采纳 |
+| B: 独立 VoltageState 子结构         | 单独 struct，嵌入 SystemState | 封装性                                            | 过度工程（仅 3 个标量），破坏 to_features 线性布局，增加序列化复杂度 | ❌ 拒绝 |
 
 **决策：方案 A。** 电压字段是 D1-实时数据的自然延伸，与 battery_soc/pv_power 等同属 intercore 数据源。扩展 SystemState 符合 KISS 原则。
 
@@ -2557,32 +2558,35 @@ fn test_voltage_data_missing_graceful_degradation() {
 
 #### 16.3.5 其他文件影响
 
-| 文件 | 当前状态 | 变更 |
-|------|----------|------|
-| `action_validator.rs` | 未实现 | 无需变更（电压不在约束规则中） |
-| `model_manager.rs` | 透传 | 无需变更 |
-| `data_fusion.rs` | 未实现 | 未来实现时需从 intercore 采集电压数据 |
-| `strategy-engine/` | 不访问 SystemState 字段 | 无需变更 |
+
+| 文件                  | 当前状态                | 变更                                  |
+| --------------------- | ----------------------- | ------------------------------------- |
+| `action_validator.rs` | 未实现                  | 无需变更（电压不在约束规则中）        |
+| `model_manager.rs`    | 透传                    | 无需变更                              |
+| `data_fusion.rs`      | 未实现                  | 未来实现时需从 intercore 采集电压数据 |
+| `strategy-engine/`    | 不访问 SystemState 字段 | 无需变更                              |
 
 ### 16.4 消息总线集成
 
 数据融合引擎需新增电压数据 topic：
 
-| Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
-|-------|--------|--------|----------|------|
-| `ai/voltage` | intercore（经 DataFusionEngine） | RLModel | `{phase_a: f64, phase_b: f64, phase_c: f64}` JSON | 1Hz |
+
+| Topic        | 发布者                           | 订阅者  | 数据格式                                          | 频率 |
+| ------------ | -------------------------------- | ------- | ------------------------------------------------- | ---- |
+| `ai/voltage` | intercore（经 DataFusionEngine） | RLModel | `{phase_a: f64, phase_b: f64, phase_c: f64}` JSON | 1Hz  |
 
 电压数据与现有 D1 电气量同周期采集（1Hz），在 `DataFusionEngine` 的 `fuse()` 方法中统一融合。
 
 ### 16.5 接口兼容性
 
-| 接口 | 影响 | 说明 |
-|------|------|------|
-| REST API `/api/v1/ai/decisions/*` | 无 | 电压是内部状态，不暴露在决策查询响应中（当前 SystemState 字段未序列化到 API） |
-| 消息总线 `ai/action_output` | 无 | q_batt_set 语义不变，仅文档完善 |
-| 核间通信 | 无 | 电压从 intercore 读取，不下发 |
-| RL 模型文件 (.rknn) | **需重训** | 输入张量维度 5→8（或全量 18→21 维 FusedSystemState） |
-| SystemState 序列化 | 字段增加 | 若有持久化/日志，JSON 新增 3 个字段 |
+
+| 接口                             | 影响       | 说明                                                                          |
+| -------------------------------- | ---------- | ----------------------------------------------------------------------------- |
+| REST API`/api/v1/ai/decisions/*` | 无         | 电压是内部状态，不暴露在决策查询响应中（当前 SystemState 字段未序列化到 API） |
+| 消息总线`ai/action_output`       | 无         | q_batt_set 语义不变，仅文档完善                                               |
+| 核间通信                         | 无         | 电压从 intercore 读取，不下发                                                 |
+| RL 模型文件 (.rknn)              | **需重训** | 输入张量维度 5→8（或全量 18→21 维 FusedSystemState）                        |
+| SystemState 序列化               | 字段增加   | 若有持久化/日志，JSON 新增 3 个字段                                           |
 
 ### 16.6 电压缺失降级处理
 
@@ -2602,20 +2606,22 @@ intercore 电压数据 1 个周期无更新
 
 ### 16.7 验证计划
 
-| 验证项 | 方法 | 预期结果 |
-|--------|------|----------|
-| 编译 | `cargo build -p mupc-ai-engine` | 0 error |
-| 单元测试 | `cargo test -p mupc-ai-engine` | 全部通过（含新增 test_voltage_data_missing） |
-| clippy | `cargo clippy -p mupc-ai-engine` | 0 new warning |
-| 下游 crate 编译 | `cargo check -p mupc-strategy-engine` | 0 error（SystemState 变更传导检查） |
-| to_features 维度 | 单元测试 | vec.len() == 8 |
-| 电压缺失降级 | 单元测试 | features.len() < 8 → from_features 返回 None |
+
+| 验证项           | 方法                                  | 预期结果                                      |
+| ---------------- | ------------------------------------- | --------------------------------------------- |
+| 编译             | `cargo build -p mupc-ai-engine`       | 0 error                                       |
+| 单元测试         | `cargo test -p mupc-ai-engine`        | 全部通过（含新增 test_voltage_data_missing）  |
+| clippy           | `cargo clippy -p mupc-ai-engine`      | 0 new warning                                 |
+| 下游 crate 编译  | `cargo check -p mupc-strategy-engine` | 0 error（SystemState 变更传导检查）           |
+| to_features 维度 | 单元测试                              | vec.len() == 8                                |
+| 电压缺失降级     | 单元测试                              | features.len() < 8 → from_features 返回 None |
 
 ### 16.8 与 v2.1 设计的关系
 
-| 版本 | 变更 | 当前实现状态 |
-|------|------|-------------|
+
+| 版本 | 变更                                                      | 当前实现状态           |
+| ---- | --------------------------------------------------------- | ---------------------- |
 | v2.1 | ActionOutput 移除 compens_factor_a/b/c（7→4 维动作空间） | 设计已批准，代码未实施 |
-| v2.2 | SystemState 新增 voltage_phase_a/b/c（5→8 维状态向量） | 本次设计 |
+| v2.2 | SystemState 新增 voltage_phase_a/b/c（5→8 维状态向量）   | 本次设计               |
 
 **实施建议：** v2.1 和 v2.2 可独立实施。建议先实施 v2.2（本次变更仅 1 文件），再实施 v2.1（同样仅 1 文件），两者无冲突。合并后 SystemState = 8 维，ActionOutput = 5 维。
