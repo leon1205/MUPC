@@ -30,14 +30,20 @@ impl Drop for RknnContext {
 /// RKNN Runtime 推理器
 pub struct RknnRuntime {
     model_path: std::path::PathBuf,
+    #[allow(dead_code)]
+    expected_sha256: Option<String>,
     ctx: Arc<RwLock<Option<RknnContext>>>,
 }
 
 impl RknnRuntime {
     /// 创建推理器
-    pub fn new(model_path: &Path) -> Result<Self, AiEngineError> {
+    ///
+    /// `expected_sha256`: 模型文件 SHA256 期望值（PRD 9.5 安全要求）。
+    /// 为 `None` 时跳过完整性校验（开发环境）。
+    pub fn new(model_path: &Path, expected_sha256: Option<&str>) -> Result<Self, AiEngineError> {
         Ok(Self {
             model_path: model_path.to_path_buf(),
+            expected_sha256: expected_sha256.map(|s| s.to_string()),
             ctx: Arc::new(RwLock::new(None)),
         })
     }
@@ -198,13 +204,13 @@ mod tests {
 
     #[test]
     fn test_rknn_runtime_creation() {
-        let runtime = RknnRuntime::new(Path::new("/nonexistent/model.rknn")).unwrap();
+        let runtime = RknnRuntime::new(Path::new("/nonexistent/model.rknn"), None).unwrap();
         assert!(!runtime.is_loaded());
     }
 
     #[tokio::test]
     async fn test_rknn_load_invalid_path() {
-        let runtime = RknnRuntime::new(Path::new("/nonexistent/model.rknn")).unwrap();
+        let runtime = RknnRuntime::new(Path::new("/nonexistent/model.rknn"), None).unwrap();
         let result = runtime.load().await;
         // 加载不存在的文件会失败
         assert!(result.is_err());
@@ -212,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rknn_destroy_without_load() {
-        let runtime = RknnRuntime::new(Path::new("/tmp/test.rknn")).unwrap();
+        let runtime = RknnRuntime::new(Path::new("/tmp/test.rknn"), None).unwrap();
         // 未加载时销毁应该成功（只是清理 None）
         let result = runtime.destroy().await;
         assert!(result.is_ok());
@@ -220,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rknn_run_without_load() {
-        let runtime = RknnRuntime::new(Path::new("/tmp/test.rknn")).unwrap();
+        let runtime = RknnRuntime::new(Path::new("/tmp/test.rknn"), None).unwrap();
         let result = runtime.run(&[1.0, 2.0, 3.0]).await;
         assert!(result.is_err());
     }

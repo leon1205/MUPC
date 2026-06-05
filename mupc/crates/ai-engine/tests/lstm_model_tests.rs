@@ -12,8 +12,9 @@ mod tests {
         LstmConfig {
             model_path: PathBuf::from("/tmp/test_lstm.rknn"),
             input_window_secs: 3600,
-            output_horizon_secs: 1800,
+            output_horizon_secs: 900,
             quantization: mupc_ai_engine::config::QuantizationType::INT8,
+            expected_sha256: None,
         }
     }
 
@@ -21,6 +22,6 @@ mod tests {
     fn test_lstm_config_default() {
         let config = create_test_config();
         assert_eq!(config.input_window_secs, 3600);
-        assert_eq!(config.output_horizon_secs, 1800);
+        assert_eq!(config.output_horizon_secs, 900);
     }
 }

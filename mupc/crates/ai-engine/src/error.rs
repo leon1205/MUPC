@@ -2,10 +2,13 @@
 
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum AiEngineError {
     #[error("模型加载失败: {0}")]
     ModelLoadFailed(String),
+
+    #[error("模型文件校验失败: 期望 {expected}, 实际 {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
 
     #[error("推理失败: {0}")]
     InferenceFailed(String),

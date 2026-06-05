@@ -25,6 +25,9 @@ pub struct LstmConfig {
     pub input_window_secs: u64,
     pub output_horizon_secs: u64,
     pub quantization: QuantizationType,
+    /// SHA256 期望值（PRD 9.5），开发环境为 None 跳过校验
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 impl Default for LstmConfig {
@@ -34,6 +37,7 @@ impl Default for LstmConfig {
             input_window_secs: 3600,
             output_horizon_secs: 900,
             quantization: QuantizationType::INT8,
+            expected_sha256: None,
         }
     }
 }
@@ -44,6 +48,9 @@ pub struct RlConfig {
     pub model_path: PathBuf,
     pub algorithm: RlAlgorithm,
     pub quantization: QuantizationType,
+    /// SHA256 期望值（PRD 9.5），开发环境为 None 跳过校验
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 impl Default for RlConfig {
@@ -52,6 +59,7 @@ impl Default for RlConfig {
             model_path: PathBuf::from("/etc/mupc/models/rl.rknn"),
             algorithm: RlAlgorithm::MADDPG,
             quantization: QuantizationType::INT8,
+            expected_sha256: None,
         }
     }
 }
@@ -194,11 +202,11 @@ pub struct SceneWeights {
 impl Default for SceneWeights {
     fn default() -> Self {
         Self {
-            agricultural_irrigation: [0.25, 0.25, 0.25, 0.25],
-            commercial_arbitrage: [0.5, 0.5],
-            demand_control: [0.5, 0.5],
-            virtual_power_plant: [0.4, 0.3, 0.3],
-            ultra_green: [0.5, 0.5],
+            agricultural_irrigation: [1.0, 0.5, 2.0, 1.0],
+            commercial_arbitrage: [1.0, 1.0],
+            demand_control: [1.0, 0.5],
+            virtual_power_plant: [1.0, 2.0, 1.0],
+            ultra_green: [1.0, 1.0],
         }
     }
 }

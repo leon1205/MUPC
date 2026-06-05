@@ -8,7 +8,7 @@ mod tests {
     fn test_ai_engine_config_default() {
         let lstm = LstmConfig::default();
         assert_eq!(lstm.input_window_secs, 3600);
-        assert_eq!(lstm.output_horizon_secs, 1800);
+        assert_eq!(lstm.output_horizon_secs, 900);
 
         let rl = RlConfig::default();
         assert_eq!(rl.algorithm, RlAlgorithm::MADDPG);

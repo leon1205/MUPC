@@ -1,32 +1,31 @@
 //! MADDPG/PPO 强化学习决策模型
 //!
 //! 用于微电网能量管理决策
-//! 输入：系统状态 (SOC, PV, Load, Grid, Transformer)
-//! 输出：最优动作 (电池功率, 无功功率, 三相补偿, 负荷切除, PV限制)
+//! 输入：系统状态 (SOC, PV, Load, Grid, Transformer, Battery Power, Voltage_A/B/C)
+//! 输出：最优动作 (p_batt_set, q_batt_set, load_shedding, pv_limit, confidence)
 
 use crate::config::{ModelType, RlAlgorithm, RlConfig};
+use crate::data_fusion::{validate_input_vector, FusedSystemState};
 use crate::error::AiEngineError;
 use crate::rknn_runtime::RknnRuntime;
 
-/// 系统状态输入
+/// 系统状态输入（9 维: soc/pv/load/grid/trafo/batt_power/va/vb/vc）
 #[derive(Debug, Clone)]
 pub struct SystemState {
-    /// 电池 SOC (0.0-1.0)
     pub battery_soc: f64,
-    /// 光伏功率 (kW)
     pub pv_power: f64,
-    /// 负荷功率 (kW)
     pub load_power: f64,
-    /// 电网功率 (kW)
     pub grid_power: f64,
-    /// 变压器负载 (kW)
     pub transformer_load: f64,
+    pub battery_power: f64,
+    pub voltage_phase_a: f64,
+    pub voltage_phase_b: f64,
+    pub voltage_phase_c: f64,
 }
 
 impl SystemState {
-    /// 从特征向量构建状态
     pub fn from_features(features: &[f32]) -> Option<Self> {
-        if features.len() < 5 {
+        if features.len() < 9 {
             return None;
         }
         Some(Self {
@@ -35,10 +34,13 @@ impl SystemState {
             load_power: features[2] as f64,
             grid_power: features[3] as f64,
             transformer_load: features[4] as f64,
+            battery_power: features[5] as f64,
+            voltage_phase_a: features[6] as f64,
+            voltage_phase_b: features[7] as f64,
+            voltage_phase_c: features[8] as f64,
         })
     }
 
-    /// 转换为特征向量
     pub fn to_features(&self) -> Vec<f32> {
         vec![
             self.battery_soc as f32,
@@ -46,32 +48,48 @@ impl SystemState {
             self.load_power as f32,
             self.grid_power as f32,
             self.transformer_load as f32,
+            self.battery_power as f32,
+            self.voltage_phase_a as f32,
+            self.voltage_phase_b as f32,
+            self.voltage_phase_c as f32,
         ]
     }
 }
 
-/// RL 模型输出（决策动作）
-///
-/// 包含 7 个动作维度 + 1 个置信度，共 8 个字段，
-/// 对应 RL 模型输出向量的 8 个元素。
+/// RL 模型输出（4 维动作 + 置信度 = 5 字段）
 #[derive(Debug, Clone)]
 pub struct ActionOutput {
-    /// 电池有功功率设定值 (kW), [-500.0, 500.0]
+    /// A1: 电池有功功率设定值 (kW), [-500.0, 500.0], 负=充电, 正=放电
     pub p_batt_set: f64,
-    /// 无功功率设定值 (kVar), [-300.0, 300.0]
+    /// A2: 无功功率设定值 (kVar), [-300.0, 300.0], 负=感性/吸收, 正=容性/释放
     pub q_batt_set: f64,
-    /// A 相分相补偿系数, [-1.0, 1.0]
-    pub compens_factor_a: f64,
-    /// B 相分相补偿系数, [-1.0, 1.0]
-    pub compens_factor_b: f64,
-    /// C 相分相补偿系数, [-1.0, 1.0]
-    pub compens_factor_c: f64,
-    /// 可中断负荷切除量 (kW), [0.0, 500.0]
+    /// A3: 可中断负荷切除量 (kW), [0.0, 500.0]
     pub load_shedding: f64,
-    /// 光伏限功率比例, [0.0, 1.0]
+    /// A4: 光伏限功率比例, [0.0, 1.0]
     pub pv_limit: f64,
-    /// 决策置信度 (0.0 ~ 1.0)
+    /// 决策置信度 [0.0, 1.0]
     pub confidence: f64,
+}
+
+/// 解析 RL 模型原始输出为 ActionOutput
+///
+/// 输出格式: [p_batt_set, q_batt_set, load_shedding, pv_limit, confidence]
+pub fn parse_action_output(raw: &[f32], dispatch_p_set: Option<f64>) -> Option<ActionOutput> {
+    if raw.len() < 5 {
+        return None;
+    }
+    let mut action = ActionOutput {
+        p_batt_set: (raw[0] as f64).clamp(-500.0, 500.0),
+        q_batt_set: (raw[1] as f64).clamp(-300.0, 300.0),
+        load_shedding: (raw[2] as f64).clamp(0.0, 500.0),
+        pv_limit: (raw[3] as f64).clamp(0.0, 1.0),
+        confidence: raw.get(4).copied().unwrap_or(0.5) as f64,
+    };
+    action.confidence = action.confidence.clamp(0.0, 1.0);
+    if let Some(p_set) = dispatch_p_set {
+        action.p_batt_set = action.p_batt_set.clamp(-p_set.abs(), p_set.abs());
+    }
+    Some(action)
 }
 
 /// MADDPG/PPO 决策模型
@@ -81,58 +99,39 @@ pub struct RLModel {
 }
 
 impl RLModel {
-    /// 创建 RL 模型
     pub fn new(config: RlConfig) -> Result<Self, AiEngineError> {
-        let runtime = RknnRuntime::new(&config.model_path)?;
+        let runtime = RknnRuntime::new(&config.model_path, config.expected_sha256.as_deref())?;
         Ok(Self { config, runtime })
     }
 
-    /// 加载模型
     pub async fn load(&mut self) -> Result<(), AiEngineError> {
         self.runtime.load().await
     }
 
-    /// 执行决策
-    ///
-    /// 输入：当前系统状态
-    /// 输出：最优动作建议
+    /// 执行决策（使用 SystemState）
     pub async fn decide(&self, state: &SystemState) -> Result<ActionOutput, AiEngineError> {
-        // 检查模型是否已加载
         if !self.runtime.is_loaded() {
             return Err(AiEngineError::ModelNotLoaded);
         }
-
-        // 转换为特征向量
         let input = state.to_features();
-
-        // 执行推理
         let output = self.runtime.run(&input).await?;
-
-        // 解析输出
-        // 输出格式: [p_batt_set, q_batt_set, compens_a, compens_b, compens_c,
-        //             load_shedding, pv_limit, confidence]
-        let p_batt_set = (output[0] as f64).clamp(-500.0, 500.0);
-        let q_batt_set = (output[1] as f64).clamp(-300.0, 300.0);
-        let compens_factor_a = (output[2] as f64).clamp(-1.0, 1.0);
-        let compens_factor_b = (output[3] as f64).clamp(-1.0, 1.0);
-        let compens_factor_c = (output[4] as f64).clamp(-1.0, 1.0);
-        let load_shedding = (output[5] as f64).clamp(0.0, 500.0);
-        let pv_limit = (output[6] as f64).clamp(0.0, 1.0);
-        let confidence = (output.get(7).copied().unwrap_or(0.8) as f64).clamp(0.0, 1.0);
-
-        Ok(ActionOutput {
-            p_batt_set,
-            q_batt_set,
-            compens_factor_a,
-            compens_factor_b,
-            compens_factor_c,
-            load_shedding,
-            pv_limit,
-            confidence,
-        })
+        parse_action_output(&output, None)
+            .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
     }
 
-    /// 获取模型类型
+    /// 执行决策（使用完整融合状态 FusedSystemState）
+    pub async fn decide_fused(&self, state: &FusedSystemState) -> Result<ActionOutput, AiEngineError> {
+        if !self.runtime.is_loaded() {
+            return Err(AiEngineError::ModelNotLoaded);
+        }
+        let input = state.to_input_vector();
+        debug_assert_eq!(input.len(), 48, "输入维度必须为 48");
+        validate_input_vector(&input)?;
+        let output = self.runtime.run(&input).await?;
+        parse_action_output(&output, state.dispatch_p_set)
+            .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
+    }
+
     pub fn model_type(&self) -> ModelType {
         match self.config.algorithm {
             RlAlgorithm::MADDPG => ModelType::MADDPG,
@@ -140,7 +139,6 @@ impl RLModel {
         }
     }
 
-    /// 获取算法类型
     pub fn algorithm(&self) -> RlAlgorithm {
         self.config.algorithm
     }
@@ -155,6 +153,7 @@ mod tests {
             model_path: std::path::PathBuf::from("/tmp/test_rl.rknn"),
             algorithm: RlAlgorithm::MADDPG,
             quantization: crate::config::QuantizationType::INT8,
+            expected_sha256: None,
         }
     }
 
@@ -165,6 +164,10 @@ mod tests {
             load_power: 5.0,
             grid_power: 2.0,
             transformer_load: 20.0,
+            battery_power: -50.0,
+            voltage_phase_a: 1.0,
+            voltage_phase_b: 1.0,
+            voltage_phase_c: 1.0,
         }
     }
 
@@ -183,20 +186,64 @@ mod tests {
     }
 
     #[test]
-    fn test_system_state_to_features() {
+    fn test_system_state_to_features_9_dim() {
         let state = create_test_state();
         let features = state.to_features();
-        assert_eq!(features.len(), 5);
+        assert_eq!(features.len(), 9);
         assert_eq!(features[0], 0.5);
+        assert_eq!(features[5], -50.0);
+        assert_eq!(features[6], 1.0);
     }
 
     #[test]
     fn test_system_state_from_features() {
-        let features = vec![0.5_f32, 10.0, 5.0, 2.0, 20.0];
+        let features = vec![0.5_f32, 10.0, 5.0, 2.0, 20.0, -50.0, 1.0, 1.0, 1.0];
         let state = SystemState::from_features(&features);
         assert!(state.is_some());
         let state = state.unwrap();
         assert_eq!(state.battery_soc, 0.5);
-        assert_eq!(state.pv_power, 10.0);
+        assert_eq!(state.voltage_phase_a, 1.0);
+    }
+
+    #[test]
+    fn test_system_state_from_features_insufficient_dims() {
+        let features = vec![0.5_f32, 10.0, 5.0, 2.0, 20.0]; // 旧 5 维
+        assert!(SystemState::from_features(&features).is_none());
+    }
+
+    #[test]
+    fn test_parse_action_output_5_fields() {
+        let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
+        let action = parse_action_output(&raw, None).unwrap();
+        assert_eq!(action.p_batt_set, 100.0);
+        assert_eq!(action.q_batt_set, 50.0);
+        assert_eq!(action.load_shedding, 10.0);
+        assert_eq!(action.pv_limit, 0.8);
+        assert_eq!(action.confidence, 0.9);
+    }
+
+    #[test]
+    fn test_parse_action_output_dispatch_constraint() {
+        let raw = vec![200.0_f32, 0.0, 0.0, 1.0, 0.8];
+        let action = parse_action_output(&raw, Some(100.0)).unwrap();
+        assert!(action.p_batt_set <= 100.0);
+    }
+
+    #[test]
+    fn test_parse_action_output_insufficient_dims() {
+        assert!(parse_action_output(&[1.0, 2.0], None).is_none());
+    }
+
+    #[test]
+    fn test_action_output_no_compens_factor() {
+        // 验证 ActionOutput 不包含 compens_factor 字段
+        let action = ActionOutput {
+            p_batt_set: 0.0,
+            q_batt_set: 0.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
+        };
+        assert_eq!(action.confidence, 0.8);
     }
 }

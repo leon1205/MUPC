@@ -35,7 +35,7 @@ pub struct LstmModel {
 impl LstmModel {
     /// 创建 LSTM 模型
     pub fn new(config: LstmConfig) -> Result<Self, AiEngineError> {
-        let runtime = RknnRuntime::new(&config.model_path)?;
+        let runtime = RknnRuntime::new(&config.model_path, config.expected_sha256.as_deref())?;
         Ok(Self { config, runtime })
     }
 
@@ -70,7 +70,7 @@ impl LstmModel {
         let output = self.runtime.run(&input.history).await?;
 
         // 计算输出步数：每分钟一个预测点
-        // output_horizon_secs = 1800s = 30 分钟
+        // output_horizon_secs = 900s = 15 分钟（默认）
         let output_size = self.config.output_horizon_secs as usize / 60;
         let predictions: Vec<f32> = output.into_iter().take(output_size).collect();
 
@@ -114,8 +114,9 @@ mod tests {
         LstmConfig {
             model_path: std::path::PathBuf::from("/tmp/test_lstm.rknn"),
             input_window_secs: 3600,   // 60 分钟
-            output_horizon_secs: 1800, // 30 分钟
+            output_horizon_secs: 900,  // 15 分钟（默认）
             quantization: crate::config::QuantizationType::INT8,
+            expected_sha256: None,
         }
     }
 
@@ -138,6 +139,6 @@ mod tests {
         let config = create_test_config();
         let model = LstmModel::new(config).unwrap();
         assert_eq!(model.input_window_secs(), 3600);
-        assert_eq!(model.output_horizon_secs(), 1800);
+        assert_eq!(model.output_horizon_secs(), 900);
     }
 }
