@@ -278,6 +278,8 @@ pub struct DataSourceValue {
 
 ### 3.4 FusedSystemState 结构定义
 
+> **⚠️ v2.1 废弃：** D5-电能质量已移除（voltage_unbalance 及三相电压/频率）。v2.2 将电压幅值重新加入 D1。以第 15.4.1 节、第 16.3.1 节为准。
+
 ```rust
 /// 融合系统状态（完整 RL 状态空间）
 ///
@@ -356,6 +358,8 @@ pub struct FusedSystemState {
 **状态空间总维度：** 9 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维） + 2 个气象字段 + 5 个电能质量字段。序列化为推理输入向量时，各维度按顺序拼接。
 
 ### 3.5 序列化为推理输入向量
+
+> **⚠️ v2.1 废弃：** 输入维度 50→45（移除 D5 的 5 字段）。v2.2: +3 电压字段到 D1。以第 15.4.2 节、第 16.3.2 节为准。
 
 ```rust
 impl FusedSystemState {
@@ -879,7 +883,7 @@ impl SceneClassifier {
 
 RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近端策略优化）算法，基于融合状态、LSTM 预测值和场景标签，输出 7 维动作空间的最优控制指令。
 
-### 5.2 状态空间定义（7 大类，23 个字段）
+### 5.2 状态空间定义（7 大类，23 个字段）— ⚠️ v2.1/v2.2 废弃，以 15.4.1/16.3.1 为准
 
 | 大类 | 字段名 | 类型 | 范围 | 单位 | 来源 |
 |------|--------|------|------|------|------|
@@ -907,7 +911,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 **序列化输入向量维度：** 50 维
 
-### 5.3 动作空间定义（7 个动作维度）
+### 5.3 动作空间定义（7 个动作维度）— ⚠️ v2.1 废弃，A3a/A3b/A3c 已移除，以 15.3.1 为准
 
 | 维度 | 字段名 | 类型 | 范围 | 单位 | 说明 |
 |------|--------|------|------|------|------|
@@ -972,7 +976,7 @@ impl RLModel {
 }
 ```
 
-### 5.5 动作输出完整定义
+### 5.5 动作输出完整定义 — ⚠️ v2.1 废弃，compens_factor_* 已移除，以 15.3.1 为准
 
 ```rust
 /// RL 决策输出（完整动作空间）
@@ -997,7 +1001,7 @@ pub struct ActionOutput {
 }
 ```
 
-### 5.6 动作约束校验（ActionValidator）
+### 5.6 动作约束校验（ActionValidator）— ⚠️ v2.1 废弃，ACT-04 已移除，以 15.4.3 为准
 
 **文件：** `mupc/crates/ai-engine/src/action_validator.rs`
 
@@ -1184,6 +1188,8 @@ pub struct SceneRewardValue {
 ```
 
 ### 6.3 SCENE-01: 农网灌溉
+
+> **⚠️ v2.1 废弃：** R_voltage_quality 已移除，权重 w1~w4 → w1~w3。以第 15.4.4 节为准。
 
 **目标：** 最大化光伏消纳 + 电压治理，最小化变压器过载
 
@@ -1779,13 +1785,11 @@ impl AiCommandValidatorImpl {
         if !base_result.valid { return base_result; }
 
         // 2. 物理约束校验
+        // ⚠️ v2.1: compens_factor_* 已移除，ActionOutput 现为 5 字段
         if let Some(ref av) = self.action_validator {
             let mut action = ActionOutput {
                 p_batt_set: cmd.p_batt_set.unwrap_or(0.0),
                 q_batt_set: cmd.q_batt_set.unwrap_or(0.0),
-                compens_factor_a: cmd.phase_compensation.map(|p| p[0]).unwrap_or(0.0),
-                compens_factor_b: cmd.phase_compensation.map(|p| p[1]).unwrap_or(0.0),
-                compens_factor_c: cmd.phase_compensation.map(|p| p[2]).unwrap_or(0.0),
                 load_shedding: cmd.load_shedding.unwrap_or(0.0),
                 pv_limit: cmd.pv_limit.unwrap_or(1.0),
                 confidence: 0.8,
@@ -2182,7 +2186,7 @@ strategy-engine 进入兜底模式
 |------|------|--------|----------|
 | 1 | 气象数据的外部来源是何种 API（如和风天气、中国气象局）？是否需要额外商务授权？ | 高 | 影响 DataFusionEngine 的气象数据获取实现 |
 | 2 | 电价数据是直接来自物联平台下发，还是需要通过 MUPC 本地配置？ | 高 | 影响 DataFusionEngine 的电价数据管道设计 |
-| 3 | 分相补偿系数的硬件限制（实际的 SVG/APF 能否按系数调节三相无功）？ | 高 | 影响 ActionValidator 的硬件约束规则 |
+| 3 | ~~分相补偿系数的硬件限制~~ | ~~高~~ | **v2.1 已闭环：** 分相补偿已从 AI 引擎移除，由实时控制核心模块独立处理 |
 | 4 | VPP 辅助服务的容量价格和里程价格是否有标准合同模板？还是由 VPP 平台实时下发？ | 中 | 影响 R_ancillary_service 的参数来源 |
 | 5 | 在线微调是否需要经过审批流程（安全考虑）？还是自动触发？ | 中 | 影响 OnlineUpdater 的触发策略 |
 | 6 | 气象数据连续缺失时长 10 个周期是融合周期（10 秒）还是 10 个 15 分钟气象更新周期（150 分钟）？ | 中 | 影响 FUSION 告警阈值配置 |
