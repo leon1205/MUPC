@@ -2,9 +2,9 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v2.1 | 2026-06-05 | 架构师 | v2.1 移除电能质量与分相补偿 |
+| v2.2 | 2026-06-05 | 架构师 | v2.2 电压感知 P/Q 协同控制 |
 
-[DESIGN_APPROVED] — v2.1 移除电能质量与分相补偿（PRD v2.1 级联设计变更）
+[DESIGN_APPROVED] — v2.2 电压感知 P/Q 协同控制（PRD v2.2 级联设计变更）
 
 ---
 
@@ -2377,3 +2377,241 @@ R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer
 | 下游 crate 编译 | `cargo check -p mupc-strategy-engine -p mupc-web-api` | 0 error（ActionOutput 变更传导） |
 | ActionOutput JSON 序列化 | 单元测试 | 不包含 `compens_factor_*` 字段 |
 | 动作约束校验 | 单元测试 | 约束规则 5 条，ACT-04 不存在 |
+
+---
+---
+
+## 16. v2.2 技术设计：电压感知 P/Q 协同控制
+
+### 16.1 概述
+
+**对应 PRD:** `05-MUPC-AI引擎-PRD.md` v2.2 (`[REVIEWED: PASS]`)
+
+**变更范围：**
+
+| 变更项 | PRD 位置 | 设计影响 |
+|--------|----------|----------|
+| D1 新增三相电压（3 字段） | 5.2 状态空间 | SystemState 结构体、to/from_features、推理输入维度 |
+| q_batt_set 定义完善 | 5.3 动作空间 | 仅文档（代码中 ActionOutput 结构体不变） |
+| P/Q 控制策略文档化 | 5.1 功能概述 | 无代码变更（策略在 RL 模型内隐式学习） |
+
+**设计目标：** AI 引擎通过感知三相电压幅值，能够检测过/低电压工况，协同调节有功充放（p_batt_set）和无功吸收/释放（q_batt_set），实现电压支撑。
+
+### 16.2 技术方案探索
+
+本变更的核心是在 `SystemState` 中新增 3 个电压字段。评估了两种方案：
+
+| 方案 | 描述 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| **A: 直接扩展 SystemState（采纳）** | 在现有 5 字段后追加 3 个 f64 | 最小改动，符合现有模式，from/to_features 线性扩展 | RL 模型需重训（输入维度 5→8） | ✅ 采纳 |
+| B: 独立 VoltageState 子结构 | 单独 struct，嵌入 SystemState | 封装性 | 过度工程（仅 3 个标量），破坏 to_features 线性布局，增加序列化复杂度 | ❌ 拒绝 |
+
+**决策：方案 A。** 电压字段是 D1-实时数据的自然延伸，与 battery_soc/pv_power 等同属 intercore 数据源。扩展 SystemState 符合 KISS 原则。
+
+### 16.3 代码变更清单
+
+#### 16.3.1 `rl_model.rs` — SystemState 结构体
+
+**当前代码（v2.1）：**
+
+```rust
+/// 系统状态输入
+#[derive(Debug, Clone)]
+pub struct SystemState {
+    pub battery_soc: f64,       // 电池 SOC (0.0-1.0)
+    pub pv_power: f64,          // 光伏功率 (kW)
+    pub load_power: f64,        // 负荷功率 (kW)
+    pub grid_power: f64,        // 电网功率 (kW)
+    pub transformer_load: f64,  // 变压器负载 (kW)
+}
+```
+
+**目标代码（v2.2）：**
+
+```rust
+/// 系统状态输入（D1-实时数据）
+#[derive(Debug, Clone)]
+pub struct SystemState {
+    pub battery_soc: f64,         // 电池 SOC (0.0-1.0)
+    pub pv_power: f64,            // 光伏功率 (kW)
+    pub load_power: f64,          // 负荷功率 (kW)
+    pub grid_power: f64,          // 电网功率 (kW)
+    pub transformer_load: f64,    // 变压器负载 (kW)
+    pub voltage_phase_a: f64,     // A 相电压 (p.u.), [0.8, 1.2]
+    pub voltage_phase_b: f64,     // B 相电压 (p.u.), [0.8, 1.2]
+    pub voltage_phase_c: f64,     // C 相电压 (p.u.), [0.8, 1.2]
+}
+```
+
+#### 16.3.2 `rl_model.rs` — to_features / from_features
+
+**当前（v2.1）：**
+
+```rust
+// from_features: min length check = 5
+// to_features: 5 elements
+//                   [0]=soc, [1]=pv, [2]=load, [3]=grid, [4]=trafo
+```
+
+**目标（v2.2）：**
+
+```rust
+impl SystemState {
+    pub fn from_features(features: &[f32]) -> Option<Self> {
+        if features.len() < 8 {               // 5 → 8
+            return None;
+        }
+        Some(Self {
+            battery_soc: features[0] as f64,
+            pv_power: features[1] as f64,
+            load_power: features[2] as f64,
+            grid_power: features[3] as f64,
+            transformer_load: features[4] as f64,
+            voltage_phase_a: features[5] as f64,   // 新增
+            voltage_phase_b: features[6] as f64,   // 新增
+            voltage_phase_c: features[7] as f64,   // 新增
+        })
+    }
+
+    pub fn to_features(&self) -> Vec<f32> {
+        vec![
+            self.battery_soc as f32,       // [0]
+            self.pv_power as f32,          // [1]
+            self.load_power as f32,        // [2]
+            self.grid_power as f32,        // [3]
+            self.transformer_load as f32,  // [4]
+            self.voltage_phase_a as f32,   // [5] 新增
+            self.voltage_phase_b as f32,   // [6] 新增
+            self.voltage_phase_c as f32,   // [7] 新增
+        ]
+    }
+}
+```
+
+#### 16.3.3 `rl_model.rs` — RLModel::decide() 兼容说明
+
+`decide()` 方法本身无需修改——它调用 `state.to_features()` 获取输入向量后传入 RKNN Runtime。但输入向量维度从 5→8，这意味着 **RL 模型必须重新训练/导出** 以匹配新的输入维度。
+
+**过渡期兼容策略：** 在模型重训完成前，使用零填充兼容旧模型：
+
+```rust
+// 过渡方案（运行时自动检测模型输入维度）
+let features = state.to_features();  // 8 维
+let model_input_dim = self.runtime.input_shape()[0]; // 从模型元数据读取
+if model_input_dim == 5 {
+    // 旧模型：仅取前 5 维（丢弃电压数据），模型工作在盲态
+    features.truncate(5);
+}
+// 否则使用完整 8 维特征
+```
+
+此兼容代码在新模型就绪后移除。
+
+#### 16.3.4 `rl_model.rs` — 测试更新
+
+```rust
+fn create_test_state() -> SystemState {
+    SystemState {
+        battery_soc: 0.5,
+        pv_power: 10.0,
+        load_power: 5.0,
+        grid_power: 2.0,
+        transformer_load: 20.0,
+        voltage_phase_a: 1.0,    // 新增：标称值
+        voltage_phase_b: 1.0,    // 新增
+        voltage_phase_c: 1.0,    // 新增
+    }
+}
+
+#[test]
+fn test_system_state_to_features() {
+    let state = create_test_state();
+    let features = state.to_features();
+    assert_eq!(features.len(), 8);   // 5 → 8
+    assert_eq!(features[0], 0.5);
+    assert_eq!(features[5], 1.0);    // 新增：验证电压
+}
+
+#[test]
+fn test_system_state_from_features() {
+    let features = vec![0.5_f32, 10.0, 5.0, 2.0, 20.0, 1.0, 1.0, 1.0];  // 8 维
+    let state = SystemState::from_features(&features);
+    assert!(state.is_some());
+    let state = state.unwrap();
+    assert_eq!(state.voltage_phase_a, 1.0);   // 新增
+}
+
+#[test]
+fn test_voltage_data_missing_graceful_degradation() {
+    // 电压数据不可用时，模型仍可基于前 5 维决策（盲态）
+    let features = vec![0.5_f32, 10.0, 5.0, 2.0, 20.0];  // 旧 5 维
+    // from_features 应返回 None（维度不足），调用方自行处理
+    let state = SystemState::from_features(&features);
+    assert!(state.is_none());
+}
+```
+
+#### 16.3.5 其他文件影响
+
+| 文件 | 当前状态 | 变更 |
+|------|----------|------|
+| `action_validator.rs` | 未实现 | 无需变更（电压不在约束规则中） |
+| `model_manager.rs` | 透传 | 无需变更 |
+| `data_fusion.rs` | 未实现 | 未来实现时需从 intercore 采集电压数据 |
+| `strategy-engine/` | 不访问 SystemState 字段 | 无需变更 |
+
+### 16.4 消息总线集成
+
+数据融合引擎需新增电压数据 topic：
+
+| Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
+|-------|--------|--------|----------|------|
+| `ai/voltage` | intercore（经 DataFusionEngine） | RLModel | `{phase_a: f64, phase_b: f64, phase_c: f64}` JSON | 1Hz |
+
+电压数据与现有 D1 电气量同周期采集（1Hz），在 `DataFusionEngine` 的 `fuse()` 方法中统一融合。
+
+### 16.5 接口兼容性
+
+| 接口 | 影响 | 说明 |
+|------|------|------|
+| REST API `/api/v1/ai/decisions/*` | 无 | 电压是内部状态，不暴露在决策查询响应中（当前 SystemState 字段未序列化到 API） |
+| 消息总线 `ai/action_output` | 无 | q_batt_set 语义不变，仅文档完善 |
+| 核间通信 | 无 | 电压从 intercore 读取，不下发 |
+| RL 模型文件 (.rknn) | **需重训** | 输入张量维度 5→8（或全量 18→21 维 FusedSystemState） |
+| SystemState 序列化 | 字段增加 | 若有持久化/日志，JSON 新增 3 个字段 |
+
+### 16.6 电压缺失降级处理
+
+```
+intercore 电压数据 1 个周期无更新
+    ↓
+使用上一有效值（最多持续 3 个周期）
+    ↓
+超过 3 个周期
+    ↓
+电压值置为 1.0 p.u.（标称值），RL 模型在盲态下决策
+    ↓
+产生 WARN 级别告警："电压数据连续缺失，模型进入盲态决策"
+    ↓
+电压数据恢复后，自动切回正常态
+```
+
+### 16.7 验证计划
+
+| 验证项 | 方法 | 预期结果 |
+|--------|------|----------|
+| 编译 | `cargo build -p mupc-ai-engine` | 0 error |
+| 单元测试 | `cargo test -p mupc-ai-engine` | 全部通过（含新增 test_voltage_data_missing） |
+| clippy | `cargo clippy -p mupc-ai-engine` | 0 new warning |
+| 下游 crate 编译 | `cargo check -p mupc-strategy-engine` | 0 error（SystemState 变更传导检查） |
+| to_features 维度 | 单元测试 | vec.len() == 8 |
+| 电压缺失降级 | 单元测试 | features.len() < 8 → from_features 返回 None |
+
+### 16.8 与 v2.1 设计的关系
+
+| 版本 | 变更 | 当前实现状态 |
+|------|------|-------------|
+| v2.1 | ActionOutput 移除 compens_factor_a/b/c（7→4 维动作空间） | 设计已批准，代码未实施 |
+| v2.2 | SystemState 新增 voltage_phase_a/b/c（5→8 维状态向量） | 本次设计 |
+
+**实施建议：** v2.1 和 v2.2 可独立实施。建议先实施 v2.2（本次变更仅 1 文件），再实施 v2.1（同样仅 1 文件），两者无冲突。合并后 SystemState = 8 维，ActionOutput = 5 维。
