@@ -2,7 +2,9 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v2.0 | 2026-05-29 | 架构师 | 合并版（含预设运行场景改造） |
+| v2.1 | 2026-06-05 | 架构师 | v2.1 移除电能质量与分相补偿 |
+
+[DESIGN_APPROVED] — v2.1 移除电能质量与分相补偿（PRD v2.1 级联设计变更）
 
 ---
 
@@ -2200,3 +2202,178 @@ strategy-engine 进入兜底模式
 | 7 | 版本号更新 | 文档头部 | v1.0 → v2.0 |
 
 **修订依据：** 预设运行场景与互斥模式选择设计（v2.0 核心变更）
+
+## v2.1 修订记录 — 移除电能质量与分相补偿
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | ActionOutput 移除 compens_factor | 5.3 | 删除 3 个分相补偿字段，动作维度 7→4 |
+| 2 | FusedSystemState 移除 D5 | 3.4 | 删除 5 个电能质量字段，状态维度 23→18 |
+| 3 | ActionValidator 移除 ACT-04 | 5.6 | 删除分相补偿约束，约束规则 6→5 |
+| 4 | SCENE-01 奖励公式更新 | 6.2 | 移除 R_voltage_quality，权重 4→3 |
+| 5 | DataFusionEngine 移除 D5 采集 | 3.2 | D5 数据源适配器移除 |
+| 6 | to_input_vector 维度更新 | 3.5 | 输入向量 50→45 维 |
+| 7 | 版本号更新 | 文档头部 | v2.0 → v2.1 |
+
+**修订依据：** PRD v2.1 — 三相不平衡治理移交实时控制核心模块
+
+---
+---
+
+## 15. v2.1 技术设计：移除电能质量与分相补偿
+
+### 15.1 概述
+
+**对应 PRD:** `05-MUPC-AI引擎-PRD.md` v2.1 (`[REVIEWED: PASS]`)
+
+**变更范围：**
+
+| 移除项 | PRD 位置 | 设计影响 |
+|--------|----------|----------|
+| D5-电能质量（5 字段） | 5.2 状态空间 | FusedSystemState、to_input_vector、DataFusionEngine |
+| A3a/A3b/A3c（3 动作维度） | 5.3 动作空间 | ActionOutput、ActionValidator |
+| R_voltage_quality | 6.2 SCENE-01 | RewardCalculator |
+| power_quality topic | 3.4 消息总线 | DataFusionEngine adapter |
+
+**核心理由：** 三相不平衡治理不涉及电池充放电，AI 引擎无需观测电压/频率数据，也无需输出分相补偿指令。这些功能由 MUPU 实时控制核心模块独立处理。
+
+### 15.2 技术方案探索
+
+本变更属于纯移除操作，无新功能设计，无需多方案对比。评估了两种执行策略：
+
+| 方案 | 描述 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| **A: 直接移除（采纳）** | 从代码和设计文档中删除相关定义，编译期强制同步 | 零运行时开销，编译期即暴露遗漏 | 无 | ✅ 采纳 |
+| B: Feature Flag 逐步移除 | 用 `#[cfg(feature = "...")]` 包裹，分阶段关闭 | 可回滚 | 过度工程，增大测试矩阵，2 周内即可完成的移除无需 flag | ❌ 拒绝 |
+
+**决策：方案 A，直接移除。** 一次性删除所有相关代码和设计定义，编译器和单元测试保证收敛。
+
+### 15.3 代码变更清单
+
+#### 15.3.1 `rl_model.rs` — ActionOutput 结构体
+
+**当前代码（v2.0）：**
+
+```rust
+pub struct ActionOutput {
+    pub p_batt_set: f64,
+    pub q_batt_set: f64,
+    pub compens_factor_a: f64,   // ← 删除
+    pub compens_factor_b: f64,   // ← 删除
+    pub compens_factor_c: f64,   // ← 删除
+    pub load_shedding: f64,
+    pub pv_limit: f64,
+    pub confidence: f64,
+}
+```
+
+**目标代码（v2.1）：**
+
+```rust
+/// 强化学习决策输出（4 维动作空间）
+pub struct ActionOutput {
+    pub p_batt_set: f64,       // A1: 电池有功功率 (kW), [-500, 500]
+    pub q_batt_set: f64,       // A2: 无功功率 (kVar), [-300, 300]
+    pub load_shedding: f64,    // A3: 可中断负荷切除 (kW), [0, 500]
+    pub pv_limit: f64,         // A4: 光伏限功率比例, [0, 1]
+    pub confidence: f64,       // 决策置信度 (0~1)
+}
+```
+
+#### 15.3.2 `rl_model.rs` — decide() 方法
+
+**当前代码（v2.0）：**
+
+```rust
+let compens_factor_a = raw_output[2];   // ← 删除
+let compens_factor_b = raw_output[3];   // ← 删除
+let compens_factor_c = raw_output[4];   // ← 删除
+let load_shedding = raw_output[5];      // → 索引改为 [2]
+let pv_limit = raw_output[6];           // → 索引改为 [3]
+let confidence = raw_output[7];         // → 索引改为 [4]
+```
+
+**目标代码（v2.1）：**
+
+```rust
+let load_shedding = raw_output[2];      // A3（原索引 5）
+let pv_limit = raw_output[3];           // A4（原索引 6）
+let confidence = raw_output[4];         // 置信度（原索引 7）
+```
+
+**注意：** 模型输出张量维度从 8 维（2 + 3 + 1 + 1 + 1）缩减为 5 维（2 + 1 + 1 + 1）。需要重新训练/导出 RL 模型以匹配新的动作空间。在完成模型重训前，remap 兼容：`[0]=A1, [1]=A2, skip [2][3][4], [5]=A3, [6]=A4, [7]=conf` → `[0]=A1, [1]=A2, [2]=A3, [3]=A4, [4]=conf`。
+
+#### 15.3.3 其他代码文件
+
+| 文件 | 当前状态 | 是否需要变更 |
+|------|----------|-------------|
+| `model_manager.rs` | 透传 `ActionOutput`，无字段级访问 | 否，结构体变更自动传导 |
+| `strategy-engine/` 下游 | 使用 `ActionOutput` 字段 | 需检查 `ai_integration.rs` 是否访问 `compens_factor_*` |
+| `web-api/src/routes/ai/decision.rs` | 仅访问 `p_batt_set_kw`/`load_shedding_kw`/`pv_limit_ratio`/`confidence` | 否，不访问分相补偿字段 |
+
+### 15.4 设计文档级联更新
+
+以下为设计文档中 v2.0 定义但未实现的部分，v2.1 应标注更新。
+
+#### 15.4.1 FusedSystemState（3.4 节）
+
+```rust
+// v2.1: 移除以下 5 个 D5 字段
+// pub voltage_phase_a: f64,        ← 删除
+// pub voltage_phase_b: f64,        ← 删除
+// pub voltage_phase_c: f64,        ← 删除
+// pub voltage_unbalance: f64,      ← 删除
+// pub frequency: f64,              ← 删除
+```
+
+重编号：原 D6（气象）→ D5，原 D7（调度指令）→ D6。
+
+#### 15.4.2 to_input_vector()（3.5 节）
+
+输入向量从 50 维缩减为 45 维。删除 indices 42-46（5 个 D5 字段），后续索引顺移。
+
+#### 15.4.3 ActionValidator（5.6 节）
+
+删除以下规则块：
+
+```rust
+// ACT-04: 三相补偿系数和为 0（已移除，v2.1）
+// let sum = action.compens_factor_a + action.compens_factor_b + action.compens_factor_c;
+// if sum.abs() > 1e-6 {
+//     let offset = sum / 3.0;
+//     ... // 自动归零处理
+// }
+```
+
+约束规则从 6 条缩减为 5 条（ACT-01~ACT-03, ACT-04(原05), ACT-05(原06)）。
+
+#### 15.4.4 SCENE-01 奖励公式（6.2 节）
+
+```
+# v2.1: R_voltage_quality 移除，w4 移除
+R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer_overload
+```
+
+#### 15.4.5 DataFusionEngine D5 数据表（3.2 节）
+
+移除 power_quality 数据源适配器配置行。IntercoreAdapter 不再收集 voltage/frequency 数据。
+
+### 15.5 接口兼容性
+
+| 接口 | 影响 | 说明 |
+|------|------|------|
+| REST API `/api/v1/ai/decisions/*` | 无 | 响应中的 `action` 字段仅包含 `p_batt_set_kw`/`load_shedding_kw`/`pv_limit_ratio`/`confidence`，不包含分相补偿 |
+| 消息总线 `ai/action_output` | 字段减少 | `ActionOutput` JSON 少 3 个字段，下游订阅方需同步更新 |
+| 核间通信 `control_cmd` | 无 | intercore 协议帧不传输分相补偿指令 |
+| RL 模型文件 (.rknn) | 需重训 | 输出张量维度从 8→5，旧模型不兼容 |
+
+### 15.6 验证计划
+
+| 验证项 | 方法 | 预期结果 |
+|--------|------|----------|
+| 编译 | `cargo build -p mupc-ai-engine` | 0 error |
+| 单元测试 | `cargo test -p mupc-ai-engine` | 全部通过 |
+| clippy | `cargo clippy -p mupc-ai-engine` | 0 new warning |
+| 下游 crate 编译 | `cargo check -p mupc-strategy-engine -p mupc-web-api` | 0 error（ActionOutput 变更传导） |
+| ActionOutput JSON 序列化 | 单元测试 | 不包含 `compens_factor_*` 字段 |
+| 动作约束校验 | 单元测试 | 约束规则 5 条，ACT-04 不存在 |
