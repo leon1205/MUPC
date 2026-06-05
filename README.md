@@ -165,6 +165,7 @@ cargo build --release        # 发布构建
 - 大部分 crate 使用 `mupc-` 前缀（如 `mupc-common`、`mupc-ai-engine`）
 - 无前缀的 crate：`device-trait`、`plugin-loader`、`rs485-plugin`、`hplc-plugin`
 - **`mqtt-bridge`**：目录名为 `mqtt-bridge`，Cargo.toml name = `mupc_mqtt_bridge`（下划线），在 `Cargo.toml` 依赖中引用时必须用下划线
+- **`storage`**：目录名为 `storage`，Cargo.toml name = `mupc_storage`（下划线），在 `Cargo.toml` 依赖中引用时必须用 `mupc_storage`
 
 ---
 

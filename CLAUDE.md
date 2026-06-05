@@ -211,7 +211,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 
 ### Web API 架构
 
-Web API 基于 Axum 0.8，路由位于 `web-api/src/routes/`。
+Web API 基于 Axum 0.7，路由位于 `web-api/src/routes/`。
 
 **路由类型约定：**
 
