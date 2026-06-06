@@ -44,8 +44,8 @@ impl AiIntegrator {
         let (lstm_ready, rl_ready, current_mode) = if let Some(ref mgr) = *manager {
             (
                 mgr.lstm_ready().await,
-                mgr.rl_ready().await,
-                Some(mgr.current_mode()),
+                mgr.registry_ready().await,
+                Some(mgr.current_mode().await),
             )
         } else {
             (false, false, None)
@@ -73,7 +73,10 @@ impl AiIntegrator {
     /// 获取当前运行模式
     pub async fn current_mode(&self) -> Option<RunningMode> {
         let manager = self.model_manager.read().await;
-        manager.as_ref().map(|m| m.current_mode())
+        match manager.as_ref() {
+            Some(m) => Some(m.current_mode().await),
+            None => None,
+        }
     }
 
     /// 切换运行模式
@@ -97,10 +100,10 @@ impl AiIntegrator {
         *self.status.read().await
     }
 
-    /// 获取 ModeSelector 引用
-    pub async fn mode_selector(&self) -> Option<Arc<mupc_ai_engine::ModeSelector>> {
+    /// 获取 ModeSelector 引用（v2.3: 返回 RwLock<ModeSelector> 的 Arc）
+    pub async fn mode_selector(&self) -> Option<Arc<tokio::sync::RwLock<mupc_ai_engine::ModeSelector>>> {
         let manager = self.model_manager.read().await;
-        manager.as_ref().map(|m| m.mode_selector().clone())
+        manager.as_ref().map(|m| m.mode_selector_arc())
     }
 }
 

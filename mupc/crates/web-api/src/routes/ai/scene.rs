@@ -28,7 +28,7 @@ pub struct SceneHistoryEntry {
 pub async fn get_current_scene(
     State(state): State<Arc<AppState>>,
 ) -> Json<CurrentSceneResponse> {
-    let current = state.mode_selector.current();
+    let current = state.mode_selector.read().await.current();
     Json(CurrentSceneResponse {
         current: format!("{:?}", current),
         display_name: current.display_name().to_string(),

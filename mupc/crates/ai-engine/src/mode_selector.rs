@@ -2,6 +2,8 @@
 //!
 //! 5 种预设运行场景，互斥选择，支持远程控制（IEC 104/61850）
 //! 和本地选择（Web UI/配置文件）。同一时刻仅 1 种模式生效。
+//!
+//! v2.3: 场景切换联动 ModelRegistry 热切换 RL 模型。
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -9,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::error::AiEngineError;
+use crate::model_registry::{ModelRegistry, SceneModelState, SceneSwitchResult};
 
 /// 预设运行场景（互斥，无 Default 兜底）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -115,6 +118,8 @@ pub struct ModeSelector {
     current_mode: Arc<Mutex<RunningMode>>,
     switch_tx: broadcast::Sender<ModeSwitchEvent>,
     persist_path: Option<PathBuf>,
+    /// v2.3 新增：模型注册表引用（场景切换时联动热切换 RL 模型）
+    registry: Option<Arc<ModelRegistry>>,
 }
 
 impl ModeSelector {
@@ -124,6 +129,22 @@ impl ModeSelector {
             current_mode: Arc::new(Mutex::new(initial)),
             switch_tx,
             persist_path,
+            registry: None,
+        }
+    }
+
+    /// v2.3 新增：带 ModelRegistry 的构造函数
+    pub fn new_with_registry(
+        initial: RunningMode,
+        persist_path: Option<PathBuf>,
+        registry: Arc<ModelRegistry>,
+    ) -> Self {
+        let (switch_tx, _) = broadcast::channel(64);
+        Self {
+            current_mode: Arc::new(Mutex::new(initial)),
+            switch_tx,
+            persist_path,
+            registry: Some(registry),
         }
     }
 
@@ -144,6 +165,10 @@ impl ModeSelector {
     /// 切换运行场景（原子操作，互斥保护）
     ///
     /// 幂等：如果 new_mode == current，不触发切换事件，直接返回 Ok。
+    ///
+    /// v2.3: 切换时联动 ModelRegistry 热切换 RL 模型。
+    /// 若目标模型需下载（返回 Downloading），仍更新模式状态，
+    /// 但在模型下载完成前 AI 决策使用旧模型。
     pub async fn switch(
         &self,
         new_mode: RunningMode,
@@ -154,6 +179,28 @@ impl ModeSelector {
 
         if previous == new_mode {
             return Ok(previous);
+        }
+
+        // v2.3: 先尝试热切换模型，再切换模式状态
+        if let Some(ref registry) = self.registry {
+            match registry.switch_to(new_mode).await {
+                Ok(SceneSwitchResult::Switched) => {
+                    tracing::info!("场景模型已切换: {} → {}", previous.display_name(), new_mode.display_name());
+                }
+                Ok(SceneSwitchResult::Downloading) => {
+                    tracing::warn!(
+                        "目标场景模型需下载: {}，保持当前模型运行",
+                        new_mode.display_name()
+                    );
+                    // 模式状态仍然切换，但模型保持旧的，待下载完成后重新加载
+                }
+                Err(e) => {
+                    tracing::error!("场景模型切换失败: {}", e);
+                    return Err(AiEngineError::ModeSwitchFailed(format!(
+                        "模型热切换失败: {}", e
+                    )));
+                }
+            }
         }
 
         *current = new_mode;
@@ -186,6 +233,35 @@ impl ModeSelector {
     /// 订阅模式切换事件
     pub fn subscribe(&self) -> broadcast::Receiver<ModeSwitchEvent> {
         self.switch_tx.subscribe()
+    }
+
+    /// v2.3 新增：查询指定场景的模型状态
+    pub fn model_state(&self, mode: RunningMode) -> SceneModelState {
+        match &self.registry {
+            Some(registry) => registry.model_state(mode),
+            None => SceneModelState::NotLoaded,
+        }
+    }
+
+    /// v2.3 新增：获取所有场景的模型状态列表
+    pub fn all_model_states(&self) -> Vec<(RunningMode, SceneModelState)> {
+        match &self.registry {
+            Some(registry) => registry.all_model_states(),
+            None => RunningMode::all()
+                .iter()
+                .map(|&m| (m, SceneModelState::NotLoaded))
+                .collect(),
+        }
+    }
+
+    /// v2.3 新增：设置 ModelRegistry 引用（初始化阶段调用）
+    pub fn set_registry(&mut self, registry: Arc<ModelRegistry>) {
+        self.registry = Some(registry);
+    }
+
+    /// v2.3 新增：获取 ModelRegistry 引用
+    pub fn registry(&self) -> Option<&Arc<ModelRegistry>> {
+        self.registry.as_ref()
     }
 
     async fn persist_mode(&self, mode: RunningMode, path: &PathBuf) -> Result<(), std::io::Error> {

@@ -1,6 +1,8 @@
 //! 模型管理器
 //!
 //! 统一调度 LSTM 预测、数据融合、RL 决策、动作校验和奖励计算。
+//!
+//! v2.3: rl_model 替换为 model_registry（5 个场景独立 RL 模型，双缓冲热切换）。
 
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
@@ -8,8 +10,9 @@ use crate::data_fusion::DataFusionEngine;
 use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput};
 use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
+use crate::model_registry::{ModelRegistry, SceneModelState};
 use crate::reward_calculator::RewardCalculator;
-use crate::rl_model::{ActionOutput, RLModel, SystemState};
+use crate::rl_model::ActionOutput;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -26,12 +29,14 @@ pub enum ModelStatus {
 pub struct ModelManager {
     config: AiEngineConfig,
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
-    rl_model: Arc<RwLock<Option<RLModel>>>,
+    /// v2.3: 替代原来的单一 rl_model，管理 5 个场景 RL 模型
+    model_registry: Arc<RwLock<Option<Arc<ModelRegistry>>>>,
     data_fusion: Arc<RwLock<Option<DataFusionEngine>>>,
     reward_calculator: Arc<RwLock<Option<RewardCalculator>>>,
     action_validator: Arc<RwLock<Option<ActionValidator>>>,
     status: Arc<RwLock<ModelStatus>>,
-    mode_selector: Arc<ModeSelector>,
+    /// v2.3: 使用 RwLock 包裹以支持初始化阶段注入 registry
+    mode_selector: Arc<RwLock<ModeSelector>>,
 }
 
 impl ModelManager {
@@ -42,12 +47,12 @@ impl ModelManager {
         } else {
             Some(std::path::PathBuf::from(&config.mode.persist_path))
         };
-        let mode_selector = Arc::new(ModeSelector::new(initial_mode, persist_path));
+        let mode_selector = Arc::new(RwLock::new(ModeSelector::new(initial_mode, persist_path)));
 
         Self {
             config,
             lstm_model: Arc::new(RwLock::new(None)),
-            rl_model: Arc::new(RwLock::new(None)),
+            model_registry: Arc::new(RwLock::new(None)),
             data_fusion: Arc::new(RwLock::new(None)),
             reward_calculator: Arc::new(RwLock::new(None)),
             action_validator: Arc::new(RwLock::new(None)),
@@ -57,20 +62,55 @@ impl ModelManager {
     }
 
     /// 加载所有模型和子模块
+    ///
+    /// v2.3: 使用 ModelRegistry 替代 RLModel，支持 5 个场景独立模型
     pub async fn load_models(&self) -> Result<(), AiEngineError> {
         *self.status.write().await = ModelStatus::Loading;
 
-        // 加载 LSTM 模型
+        // 加载 LSTM 模型（1 个通用模型）
         let mut lstm = LstmModel::new(self.config.lstm.clone())
             .map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
         lstm.load().await.map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
         *self.lstm_model.write().await = Some(lstm);
 
-        // 加载 RL 模型
-        let mut rl = RLModel::new(self.config.rl.clone())
-            .map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
-        rl.load().await.map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
-        *self.rl_model.write().await = Some(rl);
+        // 加载出厂场景 RL 模型（ModelRegistry）
+        let factory_scene = parse_initial_mode(&self.config.mode);
+        let model_dir = std::path::PathBuf::from(&self.config.mode.model_dir);
+        let manifest_path = std::path::PathBuf::from(&self.config.mode.model_manifest);
+
+        // 确保模型目录和清单目录存在
+        if let Some(parent) = manifest_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                AiEngineError::ModelLoadFailed(format!("创建清单目录失败: {}", e))
+            })?;
+        }
+        tokio::fs::create_dir_all(&model_dir).await.map_err(|e| {
+            AiEngineError::ModelLoadFailed(format!("创建模型目录失败: {}", e))
+        })?;
+
+        // 初始化清单文件（如果不存在）
+        if !manifest_path.exists() {
+            Self::init_default_manifest(&manifest_path, factory_scene).await?;
+        }
+
+        let registry = ModelRegistry::new(
+            &model_dir,
+            &manifest_path,
+            factory_scene,
+            self.config.rl.algorithm,
+            self.config.rl.quantization,
+        )
+        .await?;
+
+        let registry = Arc::new(registry);
+
+        // 将 registry 注入 ModeSelector
+        {
+            let mut selector = self.mode_selector.write().await;
+            selector.set_registry(registry.clone());
+        }
+
+        *self.model_registry.write().await = Some(registry);
 
         // 初始化奖励计算器和动作校验器
         *self.reward_calculator.write().await =
@@ -90,7 +130,9 @@ impl ModelManager {
             return Err(AiEngineError::ModelNotLoaded);
         }
 
-        let running_mode = self.mode_selector.current();
+        let running_mode = {
+            self.mode_selector.read().await.current()
+        };
 
         let fused_state = {
             let mut fusion = self.data_fusion.write().await;
@@ -100,10 +142,14 @@ impl ModelManager {
             }
         };
 
+        // v2.3: 通过 ModelRegistry 执行推理（委托给当前 active 的场景模型）
         let rl_action = {
-            let rl = self.rl_model.read().await;
-            let rl = rl.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
-            rl.decide_fused(&fused_state).await?
+            let registry = self.model_registry.read().await;
+            let registry = registry
+                .as_ref()
+                .ok_or(AiEngineError::ModelNotLoaded)?;
+            let input_vector = fused_state.to_input_vector();
+            registry.decide(&input_vector).await?
         };
 
         let (validated, violations) = {
@@ -147,11 +193,11 @@ impl ModelManager {
         lstm.predict(input).await
     }
 
-    /// 决策（RL — 使用轻量 SystemState）
-    pub async fn decide(&self, state: &SystemState) -> Result<ActionOutput, AiEngineError> {
-        let rl = self.rl_model.read().await;
-        let rl = rl.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
-        rl.decide(state).await
+    /// 决策（通过 ModelRegistry 委托给当前 active 场景模型）
+    pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError> {
+        let registry = self.model_registry.read().await;
+        let registry = registry.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
+        registry.decide(input_vector).await
     }
 
     pub async fn get_status(&self) -> ModelStatus {
@@ -166,16 +212,35 @@ impl ModelManager {
         self.lstm_model.read().await.is_some()
     }
 
-    pub async fn rl_ready(&self) -> bool {
-        self.rl_model.read().await.is_some()
+    /// v2.3: 检查 ModelRegistry 是否就绪（替代原 rl_ready）
+    pub async fn registry_ready(&self) -> bool {
+        self.model_registry.read().await.is_some()
     }
 
-    pub fn mode_selector(&self) -> &Arc<ModeSelector> {
-        &self.mode_selector
+    /// v2.3: 获取当前激活场景的模型状态
+    pub async fn active_scene_model_state(&self) -> Option<SceneModelState> {
+        let registry = self.model_registry.read().await;
+        match registry.as_ref() {
+            Some(r) => {
+                let current_mode = self.mode_selector.read().await.current();
+                Some(r.model_state(current_mode))
+            }
+            None => None,
+        }
     }
 
-    pub fn current_mode(&self) -> RunningMode {
-        self.mode_selector.current()
+    /// 获取 ModeSelector 的只读 guard
+    pub async fn mode_selector(&self) -> tokio::sync::RwLockReadGuard<'_, ModeSelector> {
+        self.mode_selector.read().await
+    }
+
+    /// v2.3: 获取 ModeSelector 的 Arc<RwLock<ModeSelector>> 引用（供外部持有）
+    pub fn mode_selector_arc(&self) -> Arc<RwLock<ModeSelector>> {
+        self.mode_selector.clone()
+    }
+
+    pub async fn current_mode(&self) -> RunningMode {
+        self.mode_selector.read().await.current()
     }
 
     pub async fn switch_mode(
@@ -183,12 +248,63 @@ impl ModelManager {
         new_mode: RunningMode,
         source: SwitchSource,
     ) -> Result<RunningMode, AiEngineError> {
-        self.mode_selector.switch(new_mode, source).await
+        self.mode_selector.write().await.switch(new_mode, source).await
+    }
+
+    /// v2.3: 获取 ModelRegistry 引用
+    pub async fn registry(&self) -> Option<Arc<ModelRegistry>> {
+        self.model_registry.read().await.clone()
+    }
+
+    /// 初始化默认的 manifest.json 文件
+    async fn init_default_manifest(
+        manifest_path: &std::path::Path,
+        factory_scene: RunningMode,
+    ) -> Result<(), AiEngineError> {
+        let scene_key = match factory_scene {
+            RunningMode::AgriculturalIrrigation => "AgriculturalIrrigation",
+            RunningMode::CommercialArbitrage => "CommercialArbitrage",
+            RunningMode::DemandControl => "DemandControl",
+            RunningMode::VirtualPowerPlant => "VirtualPowerPlant",
+            RunningMode::UltraGreen => "UltraGreen",
+        };
+
+        let file_name = match factory_scene {
+            RunningMode::AgriculturalIrrigation => "rl_agricultural.rknn",
+            RunningMode::CommercialArbitrage => "rl_arbitrage.rknn",
+            RunningMode::DemandControl => "rl_demand.rknn",
+            RunningMode::VirtualPowerPlant => "rl_vpp.rknn",
+            RunningMode::UltraGreen => "rl_green.rknn",
+        };
+
+        let manifest = serde_json::json!({
+            "version": "1.0",
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+            "models": {
+                (scene_key): {
+                    "file_name": file_name,
+                    "sha256": "",
+                    "file_size_bytes": 0,
+                    "version": "0.1.0"
+                }
+            }
+        });
+
+        let content = serde_json::to_string_pretty(&manifest).map_err(|e| {
+            AiEngineError::ModelLoadFailed(format!("序列化清单失败: {}", e))
+        })?;
+
+        tokio::fs::write(manifest_path, content).await.map_err(|e| {
+            AiEngineError::ModelLoadFailed(format!("写入清单文件失败: {}", e))
+        })?;
+
+        tracing::info!("已创建默认模型清单: {}", manifest_path.display());
+        Ok(())
     }
 }
 
 fn parse_initial_mode(config: &ModeConfig) -> RunningMode {
-    crate::mode_selector::parse_mode_name(&config.default_mode)
+    crate::mode_selector::parse_mode_name(&config.factory_scene)
         .unwrap_or(RunningMode::AgriculturalIrrigation)
 }
 
@@ -224,11 +340,29 @@ mod tests {
         let manager = ModelManager::new(config);
         assert_eq!(manager.get_status_blocking(), ModelStatus::Unloaded);
     }
+
+    #[test]
+    fn test_parse_initial_mode_uses_factory_scene() {
+        let config = ModeConfig {
+            factory_scene: "DemandControl".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_initial_mode(&config),
+            RunningMode::DemandControl
+        );
+    }
 }
 
 impl ModelManager {
     #[allow(dead_code)]
     fn get_status_blocking(&self) -> ModelStatus {
-        ModelStatus::Unloaded
+        // 使用 try_read 无锁读取实际状态，仅在极低概率写锁冲突时回退
+        match self.status.try_read() {
+            Ok(guard) => *guard,
+            Err(_) => tokio::task::block_in_place(|| {
+                futures::executor::block_on(async { *self.status.read().await })
+            }),
+        }
     }
 }

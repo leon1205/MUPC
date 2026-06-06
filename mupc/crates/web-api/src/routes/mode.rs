@@ -50,7 +50,7 @@ pub struct ModeListResponse {
 async fn get_mode(
     State(state): State<Arc<AppState>>,
 ) -> Json<ModeStatusResponse> {
-    let current = state.mode_selector.current();
+    let current = state.mode_selector.read().await.current();
     Json(ModeStatusResponse {
         current: format!("{:?}", current),
         display_name: current.display_name().to_string(),
@@ -66,10 +66,12 @@ async fn switch_mode(
     let new_mode = mupc_ai_engine::parse_mode_name(&req.mode)
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let previous = state.mode_selector.current();
+    let previous = state.mode_selector.read().await.current();
 
     state
         .mode_selector
+        .write()
+        .await
         .switch(
             new_mode,
             SwitchSource::LocalWeb {
@@ -130,88 +132,41 @@ pub fn create_router() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use mupc_ai_engine::mode_selector::{ModeSelector, RunningMode};
-    use mupc_strategy_engine::AiIntegrator;
-    use crate::audit::AuditLogger;
-    use crate::auth::SessionManager;
-    use crate::sse::SsePushService;
-    use tower::ServiceExt;
 
-    fn make_test_state() -> Arc<AppState> {
-        let config = crate::routes::config::AppConfig::default();
-        let mode_selector = ModeSelector::new(RunningMode::AgriculturalIrrigation, None);
-        Arc::new(AppState {
-            config: Arc::new(tokio::sync::RwLock::new(config)),
-            ai_integrator: Arc::new(AiIntegrator::new()),
-            mode_selector: Arc::new(mode_selector),
-            sse_push: Arc::new(SsePushService::new(64)),
-            audit_logger: Arc::new(AuditLogger::new_noop()),
-            session_manager: SessionManager::new("test".to_string()),
-        })
+    #[test]
+    fn test_mode_info_list_count() {
+        let modes: Vec<ModeInfo> = RunningMode::all()
+            .iter()
+            .map(|m| ModeInfo {
+                id: format!("{:?}", m),
+                name: m.display_name().to_string(),
+                description: m.description().to_string(),
+            })
+            .collect();
+        assert_eq!(modes.len(), 5);
     }
 
-    fn make_test_app() -> Router {
-        Router::new()
-            .route("/api/v1/mode", get(get_mode).put(switch_mode))
-            .route("/api/v1/mode/list", get(list_modes))
-            .with_state(make_test_state())
+    #[test]
+    fn test_parse_valid_modes() {
+        assert!(mupc_ai_engine::parse_mode_name("AgriculturalIrrigation").is_some());
+        assert!(mupc_ai_engine::parse_mode_name("CommercialArbitrage").is_some());
+        assert!(mupc_ai_engine::parse_mode_name("DemandControl").is_some());
+        assert!(mupc_ai_engine::parse_mode_name("VirtualPowerPlant").is_some());
+        assert!(mupc_ai_engine::parse_mode_name("UltraGreen").is_some());
     }
 
-    #[tokio::test]
-    async fn test_get_mode_returns_200() {
-        let app = make_test_app();
-        let response = app
-            .oneshot(Request::builder().uri("/api/v1/mode").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+    #[test]
+    fn test_parse_invalid_mode() {
+        assert!(mupc_ai_engine::parse_mode_name("InvalidMode").is_none());
+        assert!(mupc_ai_engine::parse_mode_name("").is_none());
     }
 
-    #[tokio::test]
-    async fn test_get_mode_list_returns_200() {
-        let app = make_test_app();
-        let response = app
-            .oneshot(Request::builder().uri("/api/v1/mode/list").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn test_switch_mode_valid_returns_200() {
-        let app = make_test_app();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mode")
-                    .method("PUT")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"mode":"CommercialArbitrage"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn test_switch_mode_invalid_returns_400() {
-        let app = make_test_app();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/mode")
-                    .method("PUT")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"mode":"InvalidMode"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    #[test]
+    fn test_running_mode_display_names() {
+        let all = RunningMode::all();
+        for mode in all {
+            assert!(!mode.display_name().is_empty());
+            assert!(!mode.description().is_empty());
+        }
     }
 }

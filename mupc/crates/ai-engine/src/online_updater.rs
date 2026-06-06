@@ -2,9 +2,12 @@
 //!
 //! Phase 3C.2 实现完整功能
 //! 当前为框架实现，支持数据收集和缓冲区管理
+//!
+//! v2.3: add_sample 添加 running_mode 参数，支持按场景隔离数据。
 
 use crate::config::OnlineUpdateConfig;
 use crate::error::AiEngineError;
+use crate::mode_selector::RunningMode;
 
 /// 增量数据点
 #[derive(Debug, Clone)]
@@ -15,19 +18,36 @@ pub struct DataPoint {
     pub input: Vec<f32>,
     /// 输出（标签）向量
     pub output: Vec<f32>,
+    /// v2.3: 所属运行场景
+    pub scene: RunningMode,
+}
+
+impl DataPoint {
+    /// 创建数据点（兼容旧接口，默认场景为农网灌溉）
+    pub fn new(timestamp: i64, input: Vec<f32>, output: Vec<f32>) -> Self {
+        Self {
+            timestamp,
+            input,
+            output,
+            scene: RunningMode::AgriculturalIrrigation,
+        }
+    }
 }
 
 /// 在线微调器
 ///
 /// 用于持续学习：收集增量数据，定期微调模型权重
 ///
-/// Phase 3C.2 将实现：
-/// - 增量梯度下降
-/// - 经验回放缓冲区
-/// - 模型权重更新
+/// v2.3: 按场景隔离数据缓冲区，场景切换时自动保存/加载检查点
 pub struct OnlineUpdater {
     config: OnlineUpdateConfig,
+    /// 所有场景共享的数据缓冲区（v2.3: 按 scene 字段过滤）
     buffer: Vec<DataPoint>,
+    /// 当前活跃的场景（v2.3 新增）
+    active_scene: RunningMode,
+    /// 各场景的检查点目录（v2.3 新增，Phase 3C.2 实现）
+    #[allow(dead_code)]
+    checkpoint_dir: Option<std::path::PathBuf>,
 }
 
 impl OnlineUpdater {
@@ -36,29 +56,68 @@ impl OnlineUpdater {
         Self {
             config,
             buffer: Vec::new(),
+            active_scene: RunningMode::AgriculturalIrrigation,
+            checkpoint_dir: None,
         }
     }
 
-    /// 添加数据点
-    ///
-    /// 自动管理缓冲区大小，超过容量时移除最旧的数据
-    pub fn add_sample(&mut self, data: DataPoint) {
-        // 缓冲区容量：batch_size * 10
-        let capacity = self.config.batch_size * 10;
+    /// v2.3: 创建带检查点目录的微调器
+    pub fn new_with_checkpoint_dir(
+        config: OnlineUpdateConfig,
+        checkpoint_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            config,
+            buffer: Vec::new(),
+            active_scene: RunningMode::AgriculturalIrrigation,
+            checkpoint_dir: Some(checkpoint_dir),
+        }
+    }
 
-        // 如果缓冲区已满，移除最旧的数据
+    /// 设置当前活跃场景（v2.3 新增）
+    pub fn set_active_scene(&mut self, scene: RunningMode) {
+        if self.active_scene != scene {
+            tracing::info!(
+                "在线微调场景切换: {} → {}",
+                self.active_scene.display_name(),
+                scene.display_name()
+            );
+            self.active_scene = scene;
+            // Phase 3C.2: 场景切换时保存旧检查点、加载新检查点
+        }
+    }
+
+    /// 获取当前活跃场景（v2.3 新增）
+    pub fn active_scene(&self) -> RunningMode {
+        self.active_scene
+    }
+
+    /// 添加数据点（兼容旧接口，使用当前活跃场景）
+    pub fn add_sample(&mut self, data: DataPoint) {
+        let capacity = self.config.batch_size * 10;
         if self.buffer.len() >= capacity {
             self.buffer.remove(0);
         }
-
         self.buffer.push(data);
+    }
+
+    /// v2.3: 添加数据点（显式指定场景）
+    pub fn add_sample_for_scene(&mut self, scene: RunningMode, data: DataPoint) {
+        let mut tagged = data;
+        tagged.scene = scene;
+        self.add_sample(tagged);
+    }
+
+    /// 获取指定场景的数据点数量（v2.3 新增）
+    pub fn scene_sample_count(&self, scene: RunningMode) -> usize {
+        self.buffer.iter().filter(|d| d.scene == scene).count()
     }
 
     /// 执行微调
     ///
     /// Phase 3C.2 实现：使用收集的数据执行增量训练
     ///
-    /// 当前实现：返回错误（功能未启用）
+    /// v2.3: 仅微调当前活跃场景的模型
     pub fn update(&self) -> Result<(), AiEngineError> {
         if !self.config.enabled {
             return Err(AiEngineError::OnlineUpdateFailed(
@@ -72,7 +131,7 @@ impl OnlineUpdater {
         ))
     }
 
-    /// 获取缓冲区大小
+    /// 获取缓冲区大小（所有场景合计）
     pub fn buffer_size(&self) -> usize {
         self.buffer.len()
     }
@@ -82,7 +141,12 @@ impl OnlineUpdater {
         self.config.enabled
     }
 
-    /// 清空缓冲区
+    /// 清空指定场景的缓冲区（v2.3 新增）
+    pub fn clear_scene_buffer(&mut self, scene: RunningMode) {
+        self.buffer.retain(|d| d.scene != scene);
+    }
+
+    /// 清空全部缓冲区
     pub fn clear_buffer(&mut self) {
         self.buffer.clear();
     }
@@ -111,6 +175,7 @@ mod tests {
         let updater = OnlineUpdater::new(config);
         assert_eq!(updater.buffer_size(), 0);
         assert!(!updater.is_enabled());
+        assert_eq!(updater.active_scene(), RunningMode::AgriculturalIrrigation);
     }
 
     #[test]
@@ -118,14 +183,33 @@ mod tests {
         let config = create_test_config();
         let mut updater = OnlineUpdater::new(config);
 
-        let data = DataPoint {
-            timestamp: 1000,
-            input: vec![1.0, 2.0, 3.0],
-            output: vec![0.5],
-        };
+        let data = DataPoint::new(1000, vec![1.0, 2.0, 3.0], vec![0.5]);
 
         updater.add_sample(data);
         assert_eq!(updater.buffer_size(), 1);
+    }
+
+    #[test]
+    fn test_online_updater_scene_isolation() {
+        let config = create_test_config();
+        let mut updater = OnlineUpdater::new(config);
+
+        updater.add_sample_for_scene(RunningMode::AgriculturalIrrigation, DataPoint::new(1, vec![1.0], vec![0.1]));
+        updater.add_sample_for_scene(RunningMode::CommercialArbitrage, DataPoint::new(2, vec![2.0], vec![0.2]));
+        updater.add_sample_for_scene(RunningMode::AgriculturalIrrigation, DataPoint::new(3, vec![3.0], vec![0.3]));
+
+        assert_eq!(updater.scene_sample_count(RunningMode::AgriculturalIrrigation), 2);
+        assert_eq!(updater.scene_sample_count(RunningMode::CommercialArbitrage), 1);
+        assert_eq!(updater.scene_sample_count(RunningMode::DemandControl), 0);
+    }
+
+    #[test]
+    fn test_online_updater_set_active_scene() {
+        let config = create_test_config();
+        let mut updater = OnlineUpdater::new(config);
+
+        updater.set_active_scene(RunningMode::VirtualPowerPlant);
+        assert_eq!(updater.active_scene(), RunningMode::VirtualPowerPlant);
     }
 
     #[test]
@@ -145,15 +229,24 @@ mod tests {
 
         // 添加 25 个数据点
         for i in 0..25 {
-            let data = DataPoint {
-                timestamp: i as i64,
-                input: vec![i as f32],
-                output: vec![i as f32 * 0.1],
-            };
+            let data = DataPoint::new(i as i64, vec![i as f32], vec![i as f32 * 0.1]);
             updater.add_sample(data);
         }
 
         // 缓冲区应保持 20 个数据点（移除最旧的 5 个）
         assert_eq!(updater.buffer_size(), 20);
+    }
+
+    #[test]
+    fn test_clear_scene_buffer() {
+        let config = create_test_config();
+        let mut updater = OnlineUpdater::new(config);
+
+        updater.add_sample_for_scene(RunningMode::AgriculturalIrrigation, DataPoint::new(1, vec![1.0], vec![0.1]));
+        updater.add_sample_for_scene(RunningMode::CommercialArbitrage, DataPoint::new(2, vec![2.0], vec![0.2]));
+
+        updater.clear_scene_buffer(RunningMode::AgriculturalIrrigation);
+        assert_eq!(updater.scene_sample_count(RunningMode::AgriculturalIrrigation), 0);
+        assert_eq!(updater.scene_sample_count(RunningMode::CommercialArbitrage), 1);
     }
 }

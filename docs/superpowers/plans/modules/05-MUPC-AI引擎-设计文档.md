@@ -2,15 +2,17 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.2 电压感知 P/Q 协同控制
+[DESIGN_APPROVED] — v2.3 多场景独立模型架构
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
-| v2.2 | 2026-06-05 | 架构师 | 当前版本 |
+| v2.3 | 2026-06-06 | 架构师 | 当前版本 |
 
-**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.2 (`[REVIEWED: PASS]`)
+**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.3 (`[REVIEWED: PENDING]`)
 
 ---
+
+> **v2.3 核心变更：** 1 个通用 RL 模型 → 5 个独立场景 RL 模型。新增 ModelRegistry 管理模型生命周期（懒加载+双缓冲热切换）。LSTM 保持 1 个通用模型。详见第 1 章架构图、4.6a 新节 ModelRegistry、7.2 ModelManager。
 
 ## 目录
 
@@ -47,9 +49,9 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 |  | (实时数据)  |              | DataFusion     |    | (奖励计算)         |   |
 |  +------------+              | Engine         |--->+--------+----------+    |
 |  |    LSTM    |---预测------>| (1Hz融合)      |             |               |
-|  | (预测值)   |              |                |    +--------v----------+    |
-|  +------------+              | 输出:          |    | RLModel            |    |
-|  |  气象 API  |---拉取------>| FusedSystem    |--->| (决策模型)          |   |
+|  | (通用,1个)  |              |                |    +--------v----------+    |
+|  +------------+              | 输出:          |    | ModelRegistry      |    |
+|  |  气象 API  |---拉取------>| FusedSystem    |--->| (5场景RL模型管理)   |   |
 |  +------------+              | State          |    +--------+----------+    |
 |  | 物联平台   |---订阅------>| (48维向量)     |             |               |
 |  | (电价)     |              |                |    +--------v----------+    |
@@ -59,7 +61,7 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 |  +------------+              |                |             |               |
 |  | ModeSelector|---模式----->|                |    +--------v----------+    |
 |  | (预设5场景) |              +-------+--------+    | ModelManager       |    |
-|  +------------+                      |              | (统一调度)          |   |
+|  +------------+            switch_to() ^           | (统一调度)          |   |
 |                                      |              +--------+----------+    |
 |                    +--------v--------+                       |               |
 |                    |  RKNN Runtime   |---FFI--- librknnrt.so |               |
@@ -86,17 +88,18 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| LSTM 预测模型 | `lstm_model.rs` | 光伏出力与负荷功率时序预测，输出 15~30 分钟预测向量 |
+| LSTM 预测模型 | `lstm_model.rs` | 光伏出力与负荷功率时序预测（1 个通用模型），输出 15~30 分钟预测向量 |
 | 多源数据融合 | `data_fusion.rs` | 周期性（1Hz）从 5 个数据源采集数据，融合为 FusedSystemState |
-| 模式选择器 | `mode_selector.rs` | 5 种预设运行场景互斥选择，支持远程（IEC 104/61850）和本地（Web UI）切换 |
-| 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策，4 维动作空间输出 |
+| 模式选择器 | `mode_selector.rs` | 5 种预设运行场景互斥选择，切换时联动 ModelRegistry 热切换 RL 模型 |
+| 模型注册表 | `model_registry.rs` | **v2.3 新增** — 5 个场景 RL 模型懒加载、双缓冲热切换、模型文件校验 |
+| 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策（5 个独立 .rknn，每场景 1 个），4 维动作空间输出 |
 | 奖励计算器 | `reward_calculator.rs` | 5 种场景奖励函数计算，驱动在线微调 |
 | 动作约束校验 | `action_validator.rs` | 5 条约束规则校验，防止异常值危害设备 |
 | RKNN Runtime | `rknn_runtime.rs` | RK3588 NPU FFI 推理封装，异步安全 |
 | FFI 绑定 | `rknn_runtime_sys.rs` | librknnrt.so C API 声明 |
 | RKNN 类型 | `rknn_types.rs` | FFI 边界数据结构 |
 | 模型管理器 | `model_manager.rs` | 统一调度 LSTM 预测 + RL 决策，full_decision_cycle() |
-| 在线微调 | `online_updater.rs` | 基于新数据持续更新模型权重 |
+| 在线微调 | `online_updater.rs` | 基于新数据持续更新**当前场景**模型权重，场景独立检查点 |
 | 配置 | `config.rs` | AiEngineConfig 及所有子配置 |
 | 错误 | `error.rs` | AiEngineError 枚举 |
 
@@ -123,16 +126,16 @@ mupc-web-api          --> mupc-ai-engine (通过 AiIntegrator 门面)
 ```
 历史数据 --> LSTM.predict() --> 光伏/负荷预测值 --> 供 RL 模型使用
                                                           |
-远程指令/本地选择 --> ModeSelector --> 运行模式 --> 权重映射 + 奖励函数选择
+远程指令/本地选择 --> ModeSelector --> ModelRegistry.switch_to() --> 热切换场景 RL 模型 + 奖励函数选择
                                                           |
 5数据源 --> DataFusionEngine.fuse() --> FusedSystemState --> to_input_vector()
                                                           |
-融合向量 + 预测值 + 运行模式 --> RLModel.decide() --> ActionOutput
+融合向量 + 预测值 + 运行模式 --> ModelRegistry.decide() --> ActionOutput
                                                           |
 ActionOutput --> ActionValidator.validate() --> 通过--> 下发 strategy-engine
                                          --> 不通过--> clamp + WARN 日志
                                                           |
-决策-执行对 --> RewardCalculator.calculate() --> 奖励值 --> OnlineUpdater
+决策-执行对 --> RewardCalculator.calculate() --> 奖励值 --> OnlineUpdater.update(active_scene)
 ```
 
 ### 1.5 完整决策周期
@@ -146,10 +149,10 @@ full_decision_cycle():
   3. fused_state = data_fusion.fuse()
   4. input_vector = fused_state.to_input_vector()
   5. scene_weights = SceneWeights::lookup(running_mode)
-  6. action = rl_model.decide(input_vector, lstm_output, scene_weights)
+  6. action = model_registry.decide(input_vector)         // v2.3: 委托给当前激活的场景 RL 模型
   7. validated = action_validator.validate(action)
   8. reward = reward_calculator.calculate(running_mode, action, fused_state)
-  9. online_updater.add_sample(DataPoint { input_vector, validated, reward })
+  9. online_updater.add_sample(running_mode, DataPoint { input_vector, validated, reward })  // v2.3: 携带场景标识
   10. return validated_action
 ```
 
@@ -159,14 +162,15 @@ full_decision_cycle():
 |------|------|
 | NPU 推理延迟 | < 100ms (P99) |
 | AI 完整决策总延迟 | < 120ms（状态输入 + 推理 + 校验） |
-| 场景切换延迟 | < 2s（远程）、< 1s（本地） |
+| 场景切换延迟 | < 2s（本地热切换，目标模型已在本地）、< 60s（OTA 下载+切换） |
 | 数据融合周期 | 1Hz（默认），可配置 1s ~ 60s |
 | 动作约束校验延迟 | < 0.5ms |
 | 奖励函数计算延迟 | < 1ms（单场景） |
 | LSTM 预测延迟 | < 1s |
-| 推理运行时内存 | <= 200MB |
-| 单模型 INT8 大小 | <= 5MB |
+| 推理运行时内存 | <= 200MB（active 模型），standby 槽额外 <= 100MB |
+| 单模型 INT8 大小 | <= 5MB，5 个 RL 全量 <= 25MB |
 | 训练数据本地存储 | <= 1GB（最近 30 天） |
+| 场景检查点存储 | 每场景 <= 100MB，5 场景合计 <= 500MB |
 | AI 引擎 MTBF | >= 1000 小时 |
 | AI 失效自动降级 | < 2s |
 
@@ -630,7 +634,7 @@ impl DataFusionEngine {
 
 ### 4.1 功能概述
 
-RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近端策略优化）算法，基于融合状态向量、LSTM 预测值和运行场景权重，输出 4 维动作空间的最优控制指令。
+RLModel 不再是 1 个通用模型覆盖 5 个场景，而是 5 个独立训练的 RL 模型（每场景 1 个 .rknn 文件）。5 个模型输入/输出形状完全一致（48 维 → 5 维），由 ModelRegistry 统一管理生命周期。每个模型针对其场景的奖励函数和训练数据分布进行专项训练。LSTM 预测模型保持 1 个通用模型不变。
 
 ### 4.2 算法选择
 
@@ -870,6 +874,169 @@ pub struct ViolationRecord {
     pub field: &'static str,
     pub original: f64,
     pub clamped: f64,
+}
+```
+
+### 4.9 ModelRegistry — 多场景模型注册表（v2.3 新增）
+
+ModelRegistry 管理 5 个场景 RL 模型的完整生命周期：加载、卸载、热切换、状态查询。采用双缓冲机制（active + standby 两个 RknnRuntime 槽），保证场景切换时推理不中断。
+
+```rust
+/// 场景模型注册表 — 管理 5 个场景 RL 模型的加载/卸载/双缓冲热切换
+pub struct ModelRegistry {
+    /// 当前激活的场景模型（场景 + RknnRuntime）
+    active: Arc<RwLock<(RunningMode, RknnRuntime)>>,
+    /// 备用模型槽（用于热切换，切换完成后与 active 原子交换）
+    standby: Arc<RwLock<Option<(RunningMode, RknnRuntime)>>>,
+    /// 模型文件存储目录
+    model_dir: PathBuf,
+    /// 模型清单：场景 → 模型元信息
+    manifest: HashMap<RunningMode, ModelManifestEntry>,
+    /// 清单文件路径（持久化 manifest.json）
+    manifest_path: PathBuf,
+}
+
+/// 模型清单条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelManifestEntry {
+    /// 模型文件名（如 "rl_agricultural.rknn"）
+    pub file_name: String,
+    /// 期望的 SHA256 校验值
+    pub sha256: String,
+    /// 文件大小（字节）
+    pub file_size_bytes: u64,
+    /// 模型版本号
+    pub version: String,
+}
+
+/// 场景切换结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneSwitchResult {
+    Switched,     // 切换成功
+    Downloading,  // 模型下载中，当前场景不变
+}
+```
+
+**ModelRegistry 方法：**
+
+```rust
+impl ModelRegistry {
+    /// 创建注册表，初始加载出厂场景模型
+    ///
+    /// 加载流程：
+    /// 1. 从 manifest_path 加载模型清单（manifest.json）
+    /// 2. 查找 factory_scene 对应的模型文件
+    /// 3. SHA256 校验模型文件
+    /// 4. rknn_init 加载到 active 槽
+    /// 5. 加载成功 → 返回 Self，失败 → 返回 AiEngineError
+    pub async fn new(
+        model_dir: &Path,
+        manifest_path: &Path,
+        factory_scene: RunningMode,
+    ) -> Result<Self, AiEngineError>;
+
+    /// 热切换到目标场景模型（双缓冲）
+    ///
+    /// 执行流程：
+    /// 1. 若 target == active.scene → 幂等返回 Switched
+    /// 2. 检查目标模型文件是否存在 + SHA256 校验
+    /// 3. 模型不存在 → 返回 Downloading，后台不启动下载（由调用方决定）
+    /// 4. spawn_blocking 执行 rknn_init 加载到 standby 槽
+    /// 5. 加载完成后，standby ↔ active 原子交换（RwLock write < 1ms）
+    /// 6. 旧 active 槽的 RknnRuntime 延迟 30s 后释放（等待正在进行的推理完成）
+    /// 7. 返回 Switched
+    pub async fn switch_to(&self, mode: RunningMode) -> Result<SceneSwitchResult, AiEngineError>;
+
+    /// 查询指定场景的模型状态
+    pub fn model_state(&self, mode: RunningMode) -> SceneModelState;
+
+    /// 获取所有场景的模型状态列表（供 Web UI 展示）
+    pub fn all_model_states(&self) -> Vec<(RunningMode, SceneModelState)>;
+
+    /// 后台预加载模型到 standby 槽（闲时调用，加速未来切换）
+    ///
+    /// 仅在 standby 槽为空且目标模型文件存在时执行。
+    /// 加载失败不影响 active 槽推理，仅记录 WARN 日志。
+    pub async fn preload(&self, mode: RunningMode) -> Result<(), AiEngineError>;
+
+    /// 从 OTA 下载并校验模型文件到 model_dir
+    ///
+    /// 下载完成后自动更新 manifest.json。
+    /// 若下载的目标场景恰为当前激活场景，不自动切换（需调用方决定）。
+    pub async fn download_model(
+        &self,
+        mode: RunningMode,
+        ota_client: &dyn OtaClient,
+    ) -> Result<(), AiEngineError>;
+
+    /// 获取当前激活的场景
+    pub fn current_mode(&self) -> RunningMode;
+
+    /// 执行推理（委托给当前 active 槽的 RknnRuntime）
+    pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError>;
+
+    /// 重新加载模型清单（OTA 推送新模型后调用）
+    pub async fn reload_manifest(&self) -> Result<(), AiEngineError>;
+}
+```
+
+**双缓冲热切换时序：**
+
+```
+场景切换请求 (MODE-01 → MODE-02)
+  │
+  ├─ 1. 检查目标模型文件 (rl_arbitrage.rknn) 存在 + SHA256 校验
+  │     └─ 缺失 → 返回 Downloading
+  │
+  ├─ 2. spawn_blocking: rknn_init(rl_arbitrage.rknn) → standby 槽
+  │     旧 active (rl_agricultural.rknn) 继续服务推理请求
+  │
+  ├─ 3. rknn_init 完成 → write lock active + standby:
+  │     active ← standby (rl_arbitrage)
+  │     standby ← old_active (rl_agricultural)
+  │     锁定窗口 < 1ms
+  │
+  ├─ 4. 延迟 30s 后释放 standby 中的旧模型
+  │     (等待旧模型上正在进行的推理完成)
+  │
+  └─ 5. 更新 RewardCalculator 权重映射
+       广播 ModeSwitchEvent
+       返回 Switched
+```
+
+**SceneModelState 枚举：**
+
+```rust
+/// 场景模型状态（与 PRD 4.5 定义一致）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneModelState {
+    NotLoaded,   // 未加载（本地无模型文件）
+    Loading,     // 加载中（OTA 下载或 NPU 加载中）
+    Ready,       // 就绪（可直接热切换）
+    Error,       // 加载失败（模型文件损坏或 rknn_init 失败）
+}
+```
+
+**模型清单文件格式（manifest.json）：**
+
+```json
+{
+  "version": "1.0",
+  "updated_at": "2026-06-06T12:00:00Z",
+  "models": {
+    "AgriculturalIrrigation": {
+      "file_name": "rl_agricultural.rknn",
+      "sha256": "abc123...",
+      "file_size_bytes": 4823456,
+      "version": "2.3.0"
+    },
+    "CommercialArbitrage": {
+      "file_name": "rl_arbitrage.rknn",
+      "sha256": "def456...",
+      "file_size_bytes": 4912345,
+      "version": "2.3.0"
+    }
+  }
 }
 ```
 
@@ -1359,7 +1526,7 @@ ModelManager 是 ai-engine crate 的顶层编排器，统一管理 LSTM 预测�
 pub struct ModelManager {
     config: AiEngineConfig,
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
-    rl_model: Arc<RwLock<Option<RLModel>>>,
+    model_registry: Arc<ModelRegistry>,       // v2.3: 替代原来单一的 rl_model
     data_fusion: Option<DataFusionEngine>,
     reward_calculator: RewardCalculator,
     action_validator: ActionValidator,
@@ -1410,8 +1577,8 @@ impl ModelManager {
         // Step 5: 获取场景权重
         let scene_weights = SceneWeights::lookup(&self.config.reward_weights, running_mode);
 
-        // Step 6: RL 决策推理
-        let rl_action = self.decide_rl(&input_vector).await?;
+        // Step 6: RL 决策推理（v2.3: 委托给 ModelRegistry，由其内部 active 模型执行）
+        let rl_action = self.model_registry.decide(&input_vector).await?;
 
         // Step 7: 动作约束校验（5 条规则）
         let (validated, violations) = self.action_validator.validate(
@@ -1431,10 +1598,10 @@ impl ModelManager {
         // Step 8: 奖励计算
         let reward = self.reward_calculator.calculate(running_mode, &validated, &fused_state);
 
-        // Step 9: 在线微调数据收集
+        // Step 9: 在线微调数据收集（v2.3: 携带场景标识）
         {
             let mut updater = self.online_updater.write().await;
-            updater.add_sample(DataPoint {
+            updater.add_sample(running_mode, DataPoint {
                 timestamp: chrono::Utc::now().timestamp_millis(),
                 input: input_vector,
                 output: vec![
@@ -1573,23 +1740,25 @@ mupc/crates/ai-engine/
 ├── src/
 │   ├── lib.rs                    # 模块导出，重新导出所有公共类型
 │   ├── model_manager.rs          # 模型管理器（full_decision_cycle 统一调度）
-│   ├── mode_selector.rs          # 运行场景选择器（5 种互斥场景 + 远程/本地切换）
-│   ├── lstm_model.rs             # LSTM 时序预测模型（LstmInput, LstmOutput, LstmModel）
-│   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel）
+│   ├── mode_selector.rs          # 运行场景选择器（5 种互斥场景 + 联动 ModelRegistry 热切换）
+│   ├── model_registry.rs         # 模型注册表（v2.3 新增：5 场景 RL 模型懒加载、双缓冲热切换、manifest 管理）
+│   ├── lstm_model.rs             # LSTM 时序预测模型（1 个通用模型，LstmInput, LstmOutput, LstmModel）
+│   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel，5 个独立 .rknn）
 │   ├── reward_calculator.rs      # 奖励函数计算器（5 种场景奖励公式 + SceneWeights）
 │   ├── data_fusion.rs            # 多源数据融合引擎（DataSourceAdapter trait + 5 个实现）
 │   ├── action_validator.rs       # 动作约束校验器（5 条约束规则 ACT-01~05）
-│   ├── online_updater.rs         # 在线微调（DataPoint, OnlineUpdater, batch_size=32）
+│   ├── online_updater.rs         # 在线微调（仅更新当前场景模型，场景独立检查点）
 │   ├── rknn_runtime.rs           # RKNN Runtime 推理器（RAII, spawn_blocking, NPU降级）
 │   ├── rknn_runtime_sys.rs       # RKNN Runtime C API FFI 绑定（unsafe extern \"C\"）
 │   ├── rknn_types.rs             # RKNN 类型定义（RknnInput, RknnOutput, as_f32）
 │   ├── error.rs                  # 错误类型枚举（AiEngineError, thiserror）
-│   └── config.rs                 # 配置结构（AiEngineConfig 及 8 个子配置）
+│   └── config.rs                 # 配置结构（AiEngineConfig 及 9 个子配置）
 └── tests/
     ├── ai_engine_tests.rs        # 配置默认值测试
     ├── lstm_model_tests.rs       # LSTM 模型集成测试
     ├── rl_model_tests.rs         # RL 模型集成测试
     ├── rknn_runtime_tests.rs     # RKNN Runtime 集成测试
+    ├── model_registry_tests.rs   # 模型注册表集成测试（v2.3 新增）
     └── online_updater_tests.rs   # 在线微调集成测试
 ```
 
@@ -1601,6 +1770,7 @@ pub mod error;
 pub mod lstm_model;
 pub mod mode_selector;
 pub mod model_manager;
+pub mod model_registry;          // v2.3 新增
 pub mod online_updater;
 pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
@@ -1621,6 +1791,9 @@ pub use mode_selector::{
     parse_mode_name, ModeSelector, ModeSwitchEvent, RunningMode, SwitchSource,
 };
 pub use model_manager::{ModelManager, ModelStatus};
+pub use model_registry::{
+    ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult,
+};
 pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
 pub use rl_model::{ActionOutput, FusedSystemState, RLModel, parse_action_output};
 pub use reward_calculator::RewardCalculator;
@@ -1684,7 +1857,9 @@ data_source_timeout_secs = 10
 enable_health_monitoring = true
 
 [mode]
-default_mode = \"AgriculturalIrrigation\"
+factory_scene = \"AgriculturalIrrigation\"    # v2.3: 设备出厂预装场景
+model_dir = \"/var/lib/mupc/models\"           # v2.3: 场景 RL 模型文件存储目录
+model_manifest = \"/etc/mupc/models/manifest.json\"  # v2.3: 模型清单文件路径
 persist_path = \"/var/lib/mupc/current_mode\"
 
 [action_constraint]
@@ -1716,7 +1891,7 @@ enable_fallback_to_cpu = true
 | RlConfig | model_path, algorithm, quantization | /etc/mupc/models/rl.rknn, MADDPG, INT8 |
 | OnlineUpdateConfig | enabled, batch_size, learning_rate | false, 32, 0.001 |
 | FusionConfig | fusion_period_secs, data_source_timeout_secs, enable_health_monitoring | 1, 10, true |
-| ModeConfig | default_mode, persist_path | \"AgriculturalIrrigation\", \"/var/lib/mupc/current_mode\" |
+| ModeConfig | factory_scene, model_dir, model_manifest, persist_path | \"AgriculturalIrrigation\", \"/var/lib/mupc/models\", \"/etc/mupc/models/manifest.json\", \"/var/lib/mupc/current_mode\" |
 | ActionConstraintConfig | p_batt_ramp_limit_kw, q_batt_ramp_limit_kvar, max_apparent_power_kva, pv_limit_min | 50.0, 30.0, 500.0, 0.1 |
 | SceneWeights | agricultural_irrigation[3], commercial_arbitrage[2], demand_control[2], virtual_power_plant[3], ultra_green[2] | 见上表默认值 |
 | NpuConfig | temperature_limit_c, throttle_factor, enable_fallback_to_cpu | 85.0, 0.5, true |
@@ -1935,6 +2110,22 @@ pub struct DemandData {
 - 模型切换时间 < 30ms
 - 支持模型版本回滚（保留上一个稳定版本）
 
+### 13.8 ADR-008: 5 个独立场景 RL 模型替代 1 个通用模型（v2.3）
+
+**决策：** 将 1 个覆盖 5 个场景的通用 RL 模型拆分为 5 个独立 RL 模型（每场景 1 个），ModelRegistry 管理模型生命周期（懒加载+双缓冲热切换）。LSTM 预测模型保持 1 个通用模型不变。
+
+**理由：**
+- 训练发现 1 个模型覆盖 5 种不同优化目标的场景难以收敛，5 个独立模型各自针对单一场景训练效果更好
+- 每台 MUPC 设备根据销售客户场景出厂预装 1 个场景模型，OTA 按需推送其余 4 个
+- 5 个模型输入/输出形状完全一致（48→5），可在同一双缓冲框架下互换
+- LSTM 预测任务场景无关（光伏/负荷预测），无需拆分
+- 双缓冲机制保证场景切换时推理不中断（旧模型延迟释放 30s）
+
+**权衡：**
+- 存储增加：1 个 RL ≤5MB → 5 个 ≤25MB（仍在可接受范围）
+- 检查点增加：每个场景 ≤100MB，5 场景 ≤500MB
+- 场景切换延迟增加：原 <2s（仅换权重）→ 本地热切换 <2s（换模型，双缓冲），OTA 下载+切换 <60s
+
 ### 13.7 ADR-007: 三相电压从 D1 实时数据中采集（非 D5 电能质量独立分类）
 
 **决策：** 三相电压幅值（voltage_phase_a/b/c）作为 D1 实时数据的子字段，直接进入 RL 输入向量，用于电压感知 P/Q 控制。
@@ -1946,12 +2137,19 @@ pub struct DemandData {
 
 ---
 
-### Critical Files for Implementation
+### Critical Files for Implementation (v2.3)
 
 These are the most critical files that need to be created or significantly modified to implement this design:
 
-- `e:\MUPC2\mupc\crates\ai-engine\src\data_fusion.rs` (new: DataFusionEngine, DataSourceAdapter trait, 5 adapter implementations, FusedSystemState with to_input_vector())
-- `e:\MUPC2\mupc\crates\ai-engine\src\rl_model.rs` (refactor: replace SystemState with FusedSystemState, replace old 8-field ActionOutput with new 5-field ActionOutput, add parse_action_output, add 48-dim input support)
-- `e:\MUPC2\mupc\crates\ai-engine\src\reward_calculator.rs` (new: RewardCalculator with 5 scene formulas, SceneWeights lookup)
-- `e:\MUPC2\mupc\crates\ai-engine\src\action_validator.rs` (new: ActionValidator with 5 constraint rules ACT-01~05, clamp logic, ViolationRecord)
-- `e:\MUPC2\mupc\crates\ai-engine\src\model_manager.rs` (refactor: add full_decision_cycle(), wire in DataFusionEngine, RewardCalculator, ActionValidator)
+**v2.3 新增/变更：**
+- `e:\MUPC2\mupc\crates\ai-engine\src\model_registry.rs` (**new**: ModelRegistry with HashMap<RunningMode, RknnRuntime>, dual-buffer hot-switch, manifest.json management)
+- `e:\MUPC2\mupc\crates\ai-engine\src\mode_selector.rs` (refactor: wire in ModelRegistry.switch_to() on scene switch, add model_state() query)
+- `e:\MUPC2\mupc\crates\ai-engine\src\model_manager.rs` (refactor: replace rl_model with model_registry, update full_decision_cycle())
+- `e:\MUPC2\mupc\crates\ai-engine\src\online_updater.rs` (refactor: add running_mode parameter to add_sample(), per-scene checkpoint save/load)
+- `e:\MUPC2\mupc\crates\ai-engine\src\config.rs` (extend: ModeConfig add factory_scene, model_dir, model_manifest; add manifest.json format)
+
+**Prior version (v2.2):**
+- `e:\MUPC2\mupc\crates\ai-engine\src\data_fusion.rs` (DataFusionEngine, DataSourceAdapter trait, 5 adapter implementations, FusedSystemState with to_input_vector())
+- `e:\MUPC2\mupc\crates\ai-engine\src\rl_model.rs` (FusedSystemState, ActionOutput, parse_action_output, 48-dim input support)
+- `e:\MUPC2\mupc\crates\ai-engine\src\reward_calculator.rs` (RewardCalculator with 5 scene formulas, SceneWeights lookup)
+- `e:\MUPC2\mupc\crates\ai-engine\src\action_validator.rs` (ActionValidator with 5 constraint rules ACT-01~05, clamp logic, ViolationRecord)

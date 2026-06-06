@@ -124,18 +124,33 @@ impl Default for FusionConfig {
 }
 
 /// 模式选择配置（v2.0 替代 SceneClassifierConfig）
+/// v2.3 添加 factory_scene, model_dir, model_manifest
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModeConfig {
-    /// 系统启动时的默认模式
-    #[serde(default = "default_mode_name")]
-    pub default_mode: String,
+    /// 设备出厂预装场景 (v2.3: 替代 default_mode)
+    #[serde(default = "default_factory_scene")]
+    pub factory_scene: String,
+    /// 场景 RL 模型文件存储目录 (v2.3 新增)
+    #[serde(default = "default_model_dir")]
+    pub model_dir: String,
+    /// 模型清单文件路径 (v2.3 新增)
+    #[serde(default = "default_model_manifest")]
+    pub model_manifest: String,
     /// 模式持久化文件路径
     #[serde(default = "default_mode_persist_path")]
     pub persist_path: String,
 }
 
-fn default_mode_name() -> String {
+fn default_factory_scene() -> String {
     "AgriculturalIrrigation".to_string()
+}
+
+fn default_model_dir() -> String {
+    "/var/lib/mupc/models".to_string()
+}
+
+fn default_model_manifest() -> String {
+    "/etc/mupc/models/manifest.json".to_string()
 }
 
 fn default_mode_persist_path() -> String {
@@ -145,7 +160,9 @@ fn default_mode_persist_path() -> String {
 impl Default for ModeConfig {
     fn default() -> Self {
         Self {
-            default_mode: default_mode_name(),
+            factory_scene: default_factory_scene(),
+            model_dir: default_model_dir(),
+            model_manifest: default_model_manifest(),
             persist_path: default_mode_persist_path(),
         }
     }

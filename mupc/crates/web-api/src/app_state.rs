@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use mupc_ai_engine::mode_selector::ModeSelector;
 use mupc_ai_engine::online_updater::OnlineUpdater;
+use tokio::sync::RwLock as TokioRwLock;
 use mupc_ota_update::manager::OtaManager;
 use mupc_storage::services::StorageService;
 use mupc_strategy_engine::AiIntegrator;
@@ -26,8 +27,8 @@ pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     /// AI 引擎集成器
     pub ai_integrator: Arc<AiIntegrator>,
-    /// 运行模式选择器
-    pub mode_selector: Arc<ModeSelector>,
+    /// 运行模式选择器（v2.3: RwLock 以支持初始化阶段注入 ModelRegistry）
+    pub mode_selector: Arc<TokioRwLock<ModeSelector>>,
     /// SSE 推送服务
     pub sse_push: Arc<SsePushService>,
     /// 审计日志记录器
@@ -61,7 +62,7 @@ impl AppState {
         Self {
             config: Arc::new(RwLock::new(config)),
             ai_integrator: Arc::new(ai_integrator),
-            mode_selector: Arc::new(mode_selector),
+            mode_selector: Arc::new(TokioRwLock::new(mode_selector)),
             sse_push: Arc::new(sse_push),
             audit_logger: Arc::new(audit_logger),
             session_manager,
