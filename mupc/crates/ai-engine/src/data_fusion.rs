@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 #[derive(Debug, Clone)]
 pub struct FusedSystemState {
     // ── D1: 实时数据 (9 RL + 1 aux) ──
-    pub timestamp: i64,           // 辅助
+    pub timestamp: i64, // 辅助
     pub battery_soc: f64,
     pub pv_power: f64,
     pub load_power: f64,
@@ -34,8 +34,8 @@ pub struct FusedSystemState {
     pub current_electricity_price: f64,
     pub next_period_price: f64,
     pub price_tariff_id: u8,
-    pub peak_price: f64,          // 辅助
-    pub valley_price: f64,        // 辅助
+    pub peak_price: f64,   // 辅助
+    pub valley_price: f64, // 辅助
     // ── D4: 需量 (3) ──
     pub current_demand: f64,
     pub contract_demand: f64,
@@ -46,6 +46,15 @@ pub struct FusedSystemState {
     // ── D6: 调度指令 (2) ──
     pub dispatch_p_set: Option<f64>,
     pub dispatch_q_set: Option<f64>,
+    // ── D7: 实时模块状态 (1 RL) ──
+    /// 实时模块剩余无功容量比例 [0.0, 1.0]
+    /// 0 = 无功打满，1 = 完全空闲
+    pub q_realtime_margin: f64,
+    // ── D8: 季节时段 (8 fields) ──
+    /// 季节 one-hot 编码（6 维）：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留]
+    pub season_encoding: [f64; 6],
+    /// 时段 one-hot 编码（2 维）：[白天, 夜间]
+    pub time_period_encoding: [f64; 2],
 }
 
 impl Default for FusedSystemState {
@@ -75,25 +84,30 @@ impl Default for FusedSystemState {
             temperature: 25.0,
             dispatch_p_set: None,
             dispatch_q_set: None,
+            q_realtime_margin: 0.5,
+            season_encoding: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0], // 默认常规季
+            time_period_encoding: [1.0, 0.0],                // 默认白天
         }
     }
 }
 
 impl FusedSystemState {
-    /// 序列化为 48 维输入向量
+    /// 序列化为 56 维输入向量
     ///
     /// 布局:
-    ///   [0..9]   D1 (9 标量)
-    ///   [9..24]  D2 pv_forecast (15 维)
-    ///   [24..39] D2 load_forecast (15 维)
-    ///   [39..42] D3 (3 维)
-    ///   [42..45] D4 (3 维)
-    ///   [45..47] D5 (2 维)
-    ///   [47]     D6 dispatch_p_set (None→0.0)
+    ///   [0..9]   D1 (10 标量，含 q_realtime_margin)
+    ///   [10..25] D2 pv_forecast (15 维)
+    ///   [25..40] D2 load_forecast (15 维)
+    ///   [40..43] D3 (3 维)
+    ///   [43..46] D4 (3 维)
+    ///   [46..48] D5 (2 维)
+    ///   [48]     D6 dispatch_p_set (None→0.0)
+    ///   [49]     D7 q_realtime_margin
+    ///   [50..56] D8 season_encoding(6) + time_period_encoding(2)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(48);
+        let mut v = Vec::with_capacity(56);
 
-        // [0..9] D1
+        // D1 [0..10] 10 标量
         v.push(self.battery_soc as f32);
         v.push(self.pv_power as f32);
         v.push(self.load_power as f32);
@@ -103,33 +117,45 @@ impl FusedSystemState {
         v.push(self.voltage_phase_a as f32);
         v.push(self.voltage_phase_b as f32);
         v.push(self.voltage_phase_c as f32);
+        v.push(self.q_realtime_margin as f32);
 
-        // [9..24] D2 pv_forecast
+        // D2 pv_forecast [10..25] 15维
         let pv = pad_or_truncate(&self.pv_forecast_15min, 15);
         v.extend(pv.iter().map(|&x| x as f32));
 
-        // [24..39] D2 load_forecast
+        // D2 load_forecast [25..40] 15维
         let load = pad_or_truncate(&self.load_forecast_15min, 15);
         v.extend(load.iter().map(|&x| x as f32));
 
-        // [39..42] D3
+        // D3 [40..43] 3维
         v.push(self.current_electricity_price as f32);
         v.push(self.next_period_price as f32);
         v.push(self.price_tariff_id as f32);
 
-        // [42..45] D4
+        // D4 [43..46] 3维
         v.push(self.current_demand as f32);
         v.push(self.contract_demand as f32);
         v.push(self.peak_demand_this_month as f32);
 
-        // [45..47] D5
+        // D5 [46..48] 2维
         v.push(self.solar_irradiance as f32);
         v.push(self.temperature as f32);
 
-        // [47] D6
+        // D6 [48] 1维
         v.push(self.dispatch_p_set.unwrap_or(0.0) as f32);
 
-        debug_assert_eq!(v.len(), 48, "输入向量必须为 48 维");
+        // D7 [49] 1维
+        v.push(self.q_realtime_margin as f32);
+
+        // D8 [50..56] 8维
+        for &s in &self.season_encoding {
+            v.push(s as f32);
+        }
+        for &t in &self.time_period_encoding {
+            v.push(t as f32);
+        }
+
+        debug_assert_eq!(v.len(), 56, "输入向量必须为 56 维");
         v
     }
 }
@@ -262,7 +288,11 @@ impl DataFusionEngine {
                     self.source_health[i].mark_failure();
                     // 使用上一周期值回填
                     if let Some(ref prev_state) = prev {
-                        self.copy_fields_from_prev(&mut fused, prev_state, self.sources[i].source_type());
+                        self.copy_fields_from_prev(
+                            &mut fused,
+                            prev_state,
+                            self.sources[i].source_type(),
+                        );
                     }
                 }
             }
@@ -272,7 +302,12 @@ impl DataFusionEngine {
         Ok(fused)
     }
 
-    fn copy_fields_from_prev(&self, fused: &mut FusedSystemState, prev: &FusedSystemState, st: SourceType) {
+    fn copy_fields_from_prev(
+        &self,
+        fused: &mut FusedSystemState,
+        prev: &FusedSystemState,
+        st: SourceType,
+    ) {
         match st {
             SourceType::Realtime => {
                 fused.battery_soc = prev.battery_soc;
@@ -321,38 +356,38 @@ mod tests {
     }
 
     #[test]
-    fn test_to_input_vector_48_dim() {
+    fn test_to_input_vector_v2_5_layout() {
         let mut state = FusedSystemState::default();
         state.pv_forecast_15min = vec![0.1; 15];
         state.load_forecast_15min = vec![0.2; 15];
         let v = state.to_input_vector();
-        assert_eq!(v.len(), 48);
+        assert_eq!(v.len(), 56);
         // D1 [0] = soc
         assert!((v[0] - 0.5_f32).abs() < 1e-6);
         // D1 [6] = voltage_a
         assert!((v[6] - 1.0_f32).abs() < 1e-6);
-        // D2 pv_forecast [9]
-        assert!((v[9] - 0.1_f32).abs() < 1e-6);
-        // D6 [47] = dispatch_p_set (None → 0.0)
-        assert!((v[47] - 0.0_f32).abs() < 1e-6);
+        // D2 pv_forecast [10]
+        assert!((v[10] - 0.1_f32).abs() < 1e-6);
+        // D6 [48] = dispatch_p_set (None → 0.0)
+        assert!((v[48] - 0.0_f32).abs() < 1e-6);
     }
 
     #[test]
     fn test_validate_input_vector_clean() {
-        let v = vec![1.0_f32; 48];
+        let v = vec![1.0_f32; 56];
         assert!(validate_input_vector(&v).is_ok());
     }
 
     #[test]
     fn test_validate_input_vector_nan_rejected() {
-        let mut v = vec![1.0_f32; 48];
+        let mut v = vec![1.0_f32; 56];
         v[23] = f32::NAN;
         assert!(validate_input_vector(&v).is_err());
     }
 
     #[test]
     fn test_validate_input_vector_inf_rejected() {
-        let mut v = vec![1.0_f32; 48];
+        let mut v = vec![1.0_f32; 56];
         v[10] = f32::INFINITY;
         assert!(validate_input_vector(&v).is_err());
     }
@@ -368,5 +403,28 @@ mod tests {
         let v = pad_or_truncate(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3);
         assert_eq!(v.len(), 3);
         assert_eq!(v[2], 3.0);
+    }
+
+    #[test]
+    fn test_fused_state_v2_5_new_fields() {
+        let state = FusedSystemState::default();
+        assert!((state.q_realtime_margin - 0.5).abs() < 1e-6);
+        // 常规季默认
+        assert!((state.season_encoding[3] - 1.0).abs() < 1e-6);
+        // 白天默认
+        assert!((state.time_period_encoding[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_to_input_vector_56_dim() {
+        let mut state = FusedSystemState::default();
+        state.pv_forecast_15min = vec![0.1; 15];
+        state.load_forecast_15min = vec![0.2; 15];
+        let v = state.to_input_vector();
+        assert_eq!(v.len(), 56);
+        // D7 q_realtime_margin 在索引 9
+        assert!((v[9] - 0.5_f32).abs() < 1e-6);
+        // D8 season_encoding[0] 在索引 50
+        assert!((v[50] - 0.0_f32).abs() < 1e-6);
     }
 }
