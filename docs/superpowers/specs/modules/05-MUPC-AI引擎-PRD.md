@@ -394,6 +394,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | voltage_phase_a | f64 | [0.8, 1.2] | p.u. | A 相电压标幺值（用于过/低电压检测，指导 P/Q 控制）| intercore |
 | | voltage_phase_b | f64 | [0.8, 1.2] | p.u. | B 相电压标幺值 | intercore |
 | | voltage_phase_c | f64 | [0.8, 1.2] | p.u. | C 相电压标幺值 | intercore |
+| | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） | intercore |
 | **D2-预测数据** | pv_forecast_15min | Vec<f64>(15~30, 可配置) | [-1000.0, 1000.0] | kW | 未来 15-30 分钟光伏预测（默认 15 分钟）| LSTM |
 | | load_forecast_15min | Vec<f64>(15~30, 可配置) | [-1000.0, 1000.0] | kW | 未来 15-30 分钟负荷预测（默认 15 分钟）| LSTM |
 | **D3-电价** | current_electricity_price | f64 | [0.0, 2.0] | 元/kWh | 当前实时电价 | 物联平台 |
@@ -406,10 +407,12 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | temperature | f64 | [-20.0, 60.0] | deg C | 环境温度 | 气象 API |
 | **D6-调度指令** | dispatch_p_set | Option<f64> | [-1000.0, 1000.0] | kW | 调度主站下发的有功设定值 | gateway |
 | | dispatch_q_set | Option<f64> | [-1000.0, 1000.0] | kVar | 调度主站下发的无功设定值 | gateway |
+| **D7-季节时段（v2.5新增）** | season_encoding | [f64; 6] | one-hot | - | 季节 one-hot 编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
+| | time_period_encoding | [f64; 2] | one-hot | - | 时段 one-hot 编码：[白天, 夜间] | data-processing |
 
-**状态空间总维度：** 17 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维，可配置扩展至 30 维）= 21 个字段。
+**状态空间总维度（v2.5）：** 19 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 1 个定长数组（8 维）= 29 个字段（RL 字段 26 + 辅助 3）。序列化后输入向量为 **56 维**（48 维基础 + 8 维季节时段）。
 
-> **v2.2 说明：** D1 新增三相电压标幺值（voltage_phase_a/b/c），用于 AI 引擎检测过/低电压并执行 P/Q 协同控制。与 v2.1 移除的 D5（电能质量）不同：v2.1 移除的是三相不平衡治理场景（不涉及电池充放电），v2.2 增加的是电压幅值监测（直接指导 P/Q 控制）。电压不平衡度和频率仍由实时控制核心模块独立处理。
+> **v2.5 说明：** D1 新增 `q_realtime_margin`（实时模块剩余无功容量比例），使 AI 引擎能够感知实时模块无功裕度边界；D7 新增 `season_encoding`（6 维）和 `time_period_encoding`（2 维），用于季节性负荷模式识别。输入向量从 48 维扩展至 56 维，RL 模型文件需重新训练或填充默认值向后兼容。
 
 序列化为推理输入向量时，各维度按定义顺序拼接。
 
@@ -496,34 +499,60 @@ RewardCalculator 根据当前场景标签，选择对应的奖励函数公式计
 
 ### 6.2 SCENE-01：台区季节性负荷模式
 
-**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护
+**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + 电压安全
 
-> **v2.4 说明：** Q控制交由实时电压调节器闭环管理，AI动作空间缩减为2维（P_batt + Load_shedding）；
-> 新增电压死区（±5%，越限2步触发）防止高频脉冲过度响应；新增R_ramp变化率惩罚保护电池。
+> **v2.5 说明（分层架构原则）：**
+> - AI 仅在实时模块无功耗尽时才对电压偏差负责（q_realtime_margin <= 10% + 越限连续 2 步）
+> - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
+> - 新增自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
+> - 弃光奖励增加电压前置条件：v_avg >= 1.05 p.u. 时置零
 
-**公式：**
+**v2.5 公式：**
 
 ```
-R_agri = w1 * R_pv_consumption
-         - w2 * P_battery_degradation
+R_agri = w1 * R_pv_consumption          // 弃光奖励（含电压安全前置条件）
+         - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
          - w3 * P_transformer_overload
-         - w4 * P_voltage_deviation
+         - w4 * P_voltage_deviation             // 条件触发式
          - w5 * R_ramp
+```
 
-电压死区: |V - V_ref| ≤ 5% 时 P_voltage_deviation = 0；越限后连续2步才触发惩罚
-R_ramp = lambda * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
-  （归一化到 C-rate 变化率，与电池衰减量纲一致；λ 为变化率惩罚系数）
-  例如 λ=0.5, ΔP=50kW, KWH=200 → R_ramp = 0.5 * 50/200 = 0.125
-  相比未归一化版本（量级 25/步）大幅降低，避免抑制正常的充放电调度决策
+**弃光奖励电压前置条件：**
+```
+R_pv_consumption = 0.0         if v_avg >= V_HIGH_LIMIT (1.05 p.u.)
+                 = min(P_pv_self_consume / P_pv_total, 1.0) * 100.0   otherwise
+```
+
+**自适应损耗系数 α(s)：**
+```
+α(s) = 3.0   // SOC 极低保护：battery_soc < SOC_CRITICAL (10%)，优先级最高
+α(s) = 0.2   // 电压支撑模式：q_realtime_margin <= 10% 且 |V-V_ref| > 5% 连续 >= 2 步
+α(s) = 1.0   // 常规调度：三者均不满足
+```
+
+**条件触发电压惩罚：**
+```
+P_voltage_deviation = 0.0
+    if |V_avg - V_ref| <= V_dead (5%)  OR  q_realtime_margin > Q_MARGIN_THRESHOLD (10%)
+else if 越限连续步数 >= 2  AND  q_realtime_margin <= Q_MARGIN_THRESHOLD:
+    P_voltage_deviation = k_v * (|V_avg - V_ref| - V_dead)^2
+    其中 k_v = 2.0（高电压侧，光伏超发）或 k_v = 1.0（低电压侧，灌溉/炒茶/空调负荷）
+```
+
+**变化率惩罚：**
+```
+R_ramp = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
 ```
 
 | 权重 | 默认值 | 说明 | 可配置范围 |
 |------|--------|------|------------|
-| w1 | 1.0 | 光伏消纳奖励权重 | [0.0, 3.0] |
-| w2 | 0.5 | 电池损耗惩罚权重（C-rate²） | [0.0, 2.0] |
+| w1 | 1.0 | 光伏消纳奖励权重（含电压前置条件） | [0.0, 3.0] |
+| w2 | 0.5 | 电池损耗惩罚权重（C-rate² × α(s)） | [0.0, 2.0] |
 | w3 | 2.0 | 变压器过载惩罚权重 | [0.0, 5.0] |
-| w4 | 1.0 | 电压质量惩罚权重（死区外生效） | [0.0, 3.0] |
+| w4 | 1.0 | 电压质量惩罚权重（条件触发式） | [0.0, 3.0] |
 | w5 | 0.5 | 功率变化率惩罚权重 | [0.0, 2.0] |
+
+> **v2.4 说明（已并入 v2.5）：** Q控制交由实时电压调节器闭环管理，AI动作空间缩减为2维（P_batt + Load_shedding）；新增电压死区（±5%，越限2步触发）防止高频脉冲过度响应；新增R_ramp变化率惩罚保护电池。
 
 ### 6.3 SCENE-B1：工商业模式-自主套利
 
@@ -780,6 +809,31 @@ pub enum AiEngineError {
 | 动作输出校验 | 0.5ms | 约束规则校验 + clamp |
 | **总端到端延迟** | **120ms** | 从状态输入就绪到动作输出可用 |
 
+### 7.12 v2.5 奖励阈值配置（RewardThresholdConfig）
+
+v2.5 新增 `RewardThresholdConfig` 配置结构，用于 SCENE-01 奖励函数的阈值参数：
+
+```toml
+[reward_thresholds]
+# 电压死区（与现有设计一致）
+voltage_deadband = 0.05          # ±5%
+
+# Q 裕度阈值：实时模块剩余容量低于此值视为"无功耗尽"
+q_margin_threshold = 0.10        # 10%
+
+# 弃光前置电压阈值：电压高于此值时弃光奖励不计入
+pv_high_limit = 1.05           # p.u.
+
+# SOC 极低保护阈值
+soc_critical = 0.10            # <此值触发 α=3.0 极低保护
+
+# 电压惩罚系数
+voltage_penalty_high = 2.0       # 高电压侧（光伏超发）
+voltage_penalty_low = 1.0        # 低电压侧（灌溉/炒茶/空调负荷）
+```
+
+> **默认值行为：** 配置文件缺失 `reward_thresholds` 时，所有参数自动回退至默认值，保证 v2.5 行为向后兼容。
+
 ---
 
 ## 8. 在线微调
@@ -920,7 +974,10 @@ AI引擎恢复后，自动切回AI模式
 
 | ID | 标准 | 优先级 | 来源 |
 |----|------|--------|------|
-| STATE-01~STATE-05 | 状态空间完整性（6 大类 21 字段，D1 含三相电压） | P0 | 场景 RL PRD |
+| STATE-01~STATE-05 | 状态空间完整性（7 大类，v2.5 为 29 字段，输入向量 56 维） | P0 | 场景 RL PRD |
+| **STATE-NEW-01** | FusedSystemState 新增 q_realtime_margin 字段，取值 [0.0, 1.0] | P0 | v2.5 PRD |
+| **STATE-NEW-02** | FusedSystemState 新增 season_encoding (6维) + time_period_encoding (2维) one-hot | P0 | v2.5 PRD |
+| **STATE-NEW-03** | to_input_vector() 返回 56 维向量 | P0 | v2.5 PRD |
 | ACT-07~ACT-10 | 动作空间完整性（4 维）+ 5 条约束校验 | P0 | 场景 RL PRD |
 
 ### 10.5 奖励函数验收
@@ -929,6 +986,12 @@ AI引擎恢复后，自动切回AI模式
 |----|------|--------|------|
 | REWARD-A1~A5, B1~B4, C1~C4, D1~D4, E1~E4 | 5 种场景奖励函数 | P0 | 场景 RL PRD |
 | WEIGHT-01~WEIGHT-05 | 动态权重调整 | P1 | 场景 RL PRD |
+| **REWARD-v2.5-01** | q_realtime_margin > 0.10 时 R_voltage = 0（条件不触发） | P0 | v2.5 PRD |
+| **REWARD-v2.5-02** | q_realtime_margin <= 0.10 且电压越限连续2步时触发电压惩罚 | P0 | v2.5 PRD |
+| **REWARD-v2.5-03** | SOC < 10% 时 α = 3.0，电池损耗惩罚加重 | P0 | v2.5 PRD |
+| **REWARD-v2.5-04** | v_avg >= 1.05 p.u. 时弃光奖励 = 0 | P0 | v2.5 PRD |
+| **REWARD-v2.5-05** | α(s) 三状态（常规/电压支撑/SOC极低）互斥，取最高优先级 | P0 | v2.5 PRD |
+| **CONFIG-v2.5-01** | 新增 reward_thresholds 配置项可通过 ai.toml 加载 | P1 | v2.5 PRD |
 
 ### 10.6 在线微调验收
 

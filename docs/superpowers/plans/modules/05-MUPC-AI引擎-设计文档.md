@@ -426,13 +426,13 @@ pub struct DispatchAdapter {
 
 数据字段：dispatch_p_set (Option<f64>), dispatch_q_set (Option<f64>)。通过 gateway 事件驱动接收。缺失时两个字段均为 None，RL 决策跳过调度相关约束 (ACT-05)。
 
-### 3.5 FusedSystemState 结构体（24 字段）
+### 3.5 FusedSystemState 结构体（v2.5：29 字段）
 
 ```rust
-/// 融合系统状态（6 大类，21 个 RL 字段 + 3 个辅助字段 = 24 字段）
+/// 融合系统状态（7 大类，26 个 RL 字段 + 3 个辅助字段 = 29 字段，v2.5）
 #[derive(Debug, Clone)]
 pub struct FusedSystemState {
-    // ------- D1: 实时数据 (9 RL + 1 aux = 10 字段) -------
+    // ------- D1: 实时数据 (10 RL + 1 aux = 11 字段，v2.5 新增 q_realtime_margin) -------
     /// UTC 时间戳（毫秒），辅助字段
     pub timestamp: i64,
     /// 电池荷电状态 [0.0, 1.0]
@@ -453,6 +453,8 @@ pub struct FusedSystemState {
     pub voltage_phase_b: f64,
     /// C 相电压标幺值 [0.8, 1.2]
     pub voltage_phase_c: f64,
+    /// 实时模块剩余无功容量比例 [0.0, 1.0]，0=打满，1=空闲（v2.5 新增）
+    pub q_realtime_margin: f64,
 
     // ------- D2: 预测数据 (2 个向量字段) -------
     /// 未来 15-30 分钟光伏预测 (kW)，默认 15 维
@@ -491,28 +493,36 @@ pub struct FusedSystemState {
     pub dispatch_p_set: Option<f64>,
     /// 调度主站下发的无功设定值 (kVar)，None 表示无调度指令
     pub dispatch_q_set: Option<f64>,
+
+    // ------- D7: 季节时段 (8 字段，v2.5 新增) -------
+    /// 季节 one-hot 编码（6 维）：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留]
+    pub season_encoding: [f64; 6],
+    /// 时段 one-hot 编码（2 维）：[白天, 夜间]
+    pub time_period_encoding: [f64; 2],
 }
 ```
 
-### 3.6 to_input_vector() -- 48 维序列化
+### 3.6 to_input_vector() -- 56 维序列化（v2.5）
 
-将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 48 维向量。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
+将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **56 维向量**（v2.5 从 48 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
 
 ```rust
 impl FusedSystemState {
-    /// 序列化为 48 维输入向量
+    /// 序列化为 56 维输入向量（v2.5）
     /// 布局：
-    ///   [0..9]   D1 实时数据 (9 个标量，不含 timestamp)
-    ///   [9..24]  D2 pv_forecast (15 维)
-    ///   [24..39] D2 load_forecast (15 维)
-    ///   [39..42] D3 电价 (3 个 RL 字段)
-    ///   [42..45] D4 需量 (3 字段)
-    ///   [45..47] D5 气象 (2 字段)
-    ///   [47]     D6 dispatch_p_set (1 维，None 时填 0.0)
+    ///   [0..10]  D1 实时数据 (10 个标量，不含 timestamp，含 q_realtime_margin)
+    ///   [10..25] D2 pv_forecast (15 维)
+    ///   [25..40] D2 load_forecast (15 维)
+    ///   [40..43] D3 电价 (3 个 RL 字段)
+    ///   [43..46] D4 需量 (3 字段)
+    ///   [46..48] D5 气象 (2 字段)
+    ///   [48]     D6 dispatch_p_set (1 维，None 时填 0.0)
+    ///   [49]     D7 q_realtime_margin (1 维)
+    ///   [50..56] D7 season_encoding (6 维) + time_period_encoding (2 维)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(48);
+        let mut v = Vec::with_capacity(56);
 
-        // [0..9] D1: 9 个标量 (不含 timestamp)
+        // [0..10] D1: 10 个标量 (不含 timestamp，含 q_realtime_margin)
         v.push(self.battery_soc as f32);
         v.push(self.pv_power as f32);
         v.push(self.load_power as f32);
@@ -522,6 +532,7 @@ impl FusedSystemState {
         v.push(self.voltage_phase_a as f32);
         v.push(self.voltage_phase_b as f32);
         v.push(self.voltage_phase_c as f32);
+        v.push(self.q_realtime_margin as f32);  // v2.5 新增
 
         // [9..24] D2 pv_forecast: 15 维
         let pv = pad_or_truncate(&self.pv_forecast_15min, 15);
@@ -548,6 +559,14 @@ impl FusedSystemState {
         // [47] D6: dispatch_p_set (None 时 0.0)
         v.push(self.dispatch_p_set.unwrap_or(0.0) as f32);
 
+        // [49] D7: q_realtime_margin (v2.5 新增)
+        v.push(self.q_realtime_margin as f32);
+
+        // [50..56] D7: season_encoding (6 维) + time_period_encoding (2 维)
+        for &s in &self.season_encoding { v.push(s as f32); }
+        for &t in &self.time_period_encoding { v.push(t as f32); }
+
+        debug_assert_eq!(v.len(), 56, "输入向量必须为 56 维");
         v
     }
 }
@@ -672,11 +691,11 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 算法类型由 `RlConfig.algorithm` 指定，训练阶段在 x86 服务器完成，部署阶段仅执行推理。
 
-### 4.3 完整状态空间表（6 大类，21 个字段）
+### 4.3 完整状态空间表（7 大类，29 个字段，v2.5）
 
 | 维度 | 字段名 | 类型 | 取值范围 | 单位 | 说明 |
 |------|--------|------|----------|------|------|
-| **D1-实时** | battery_soc | f64 | [0.0, 1.0] | - | 电池荷电状态 |
+| **D1-实时（v2.5新增 q_realtime_margin）** | battery_soc | f64 | [0.0, 1.0] | - | 电池荷电状态 |
 | | pv_power | f64 | [-1000.0, 1000.0] | kW | 光伏出力 |
 | | load_power | f64 | [-1000.0, 1000.0] | kW | 负荷功率 |
 | | grid_power | f64 | [-1000.0, 1000.0] | kW | 电网交换功率 |
@@ -685,6 +704,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | voltage_phase_a | f64 | [0.8, 1.2] | p.u. | A 相电压标幺值 |
 | | voltage_phase_b | f64 | [0.8, 1.2] | p.u. | B 相电压标幺值 |
 | | voltage_phase_c | f64 | [0.8, 1.2] | p.u. | C 相电压标幺值 |
+| | **q_realtime_margin** | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（v2.5新增，0=打满，1=空闲）|
 | **D2-预测** | pv_forecast_15min | Vec\<f64\> | 15~30 维 | kW | 光伏预测 |
 | | load_forecast_15min | Vec\<f64\> | 15~30 维 | kW | 负荷预测 |
 | **D3-电价** | current_electricity_price | f64 | [0.0, 2.0] | 元/kWh | 当前电价 |
@@ -697,6 +717,10 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | temperature | f64 | [-20.0, 60.0] | deg C | 环境温度 |
 | **D6-调度** | dispatch_p_set | Option\<f64\> | [-1000.0, 1000.0] | kW | 调度有功设定 |
 | | dispatch_q_set | Option\<f64\> | [-1000.0, 1000.0] | kVar | 调度无功设定 |
+| **D7-季节时段（v2.5新增，8 字段）** | season_encoding | [f64; 6] | one-hot | - | 季节编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] |
+| | time_period_encoding | [f64; 2] | one-hot | - | 时段编码：[白天, 夜间] |
+
+**输入向量维度（v2.5）：** 56 维 = 19 个标量 + 2 个 Option + 2 个向量（各 15 维）+ 1 个定长数组（8 维）。
 
 **电压感知 P/Q 协同控制策略：**
 
@@ -943,90 +967,121 @@ impl RewardCalculator {
 
 ### 5.3 SCENE-01：台区季节性负荷模式 (MODE-01)
 
-**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护
+**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + 电压安全
 
-> **v2.4 说明：** Q控制交由实时电压调节器闭环管理，AI动作空间缩减为2维（P_batt + Load_shedding）；
-> 新增电压死区（±5%，越限2步触发）防止高频脉冲过度响应；新增R_ramp变化率惩罚保护电池。
+> **v2.5 说明（分层架构原则）：**
+> - AI 仅在实时模块无功耗尽时才对电压偏差负责（q_realtime_margin <= 10% + 越限连续 2 步）
+> - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
+> - 新增自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
+> - 弃光奖励增加电压前置条件：v_avg >= 1.05 p.u. 时置零
 
-**奖励公式：**
+**v2.5 奖励公式：**
 
 ```
-R_agri = w1 * R_pv_consumption
-         - w2 * P_battery_degradation
+R_agri = w1 * R_pv_consumption          // 弃光奖励（含电压安全前置条件）
+         - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
          - w3 * P_transformer_overload
-         - w4 * P_voltage_deviation
+         - w4 * P_voltage_deviation             // 条件触发式
          - w5 * R_ramp
 ```
 
 **子项定义：**
 
 ```
-R_pv_consumption       = min(P_pv_self_consume / P_pv_total, 1.0) * 100
-P_battery_degradation  = (|P_batt| / BATTERY_CAPACITY_KWH)²   # C-rate²
-P_transformer_overload = Quadratic(L_trafo, start=75%)            # 见 4.5 节
-P_voltage_deviation    = 电压死区内 = 0
-                          |V_avg - 1.0| > 5% 且越限连续≥2步:
-                            = 2.0 * dev² (低电压, dev = (0.95-V_avg)/(0.95-0.85))
-                            = 1.0 * dev² (高电压, dev = (V_avg-1.05)/(1.15-1.05))
+R_pv_consumption       = 0.0                                          if v_avg >= 1.05 (电压偏高)
+                        = min(P_pv_self_consume / P_pv_total, 1.0) * 100   otherwise
+α(s)                   = 3.0   // SOC 极低保护：battery_soc < SOC_CRITICAL (10%)
+                        = 0.2   // 电压支撑模式：q_realtime_margin <= 10% 且越限 >= 2 步
+                        = 1.0   // 常规调度
+P_battery_degradation  = α(s) * (|P_batt| / BATTERY_CAPACITY_KWH)²   # C-rate² × α(s)
+P_transformer_overload = Quadratic(L_trafo, start=75%)                 # 见 4.5 节
+P_voltage_deviation    = 0.0                                          if |V_avg - 1.0| <= 5%
+                                                                                OR q_realtime_margin > 10%
+                        = k_v * dev²                                   if 越限连续 >= 2 步 且 q_margin <= 10%
+                          k_v = 2.0 (低电压侧), 1.0 (高电压侧)
+                          dev = |V_avg - 1.0| - 5%
 R_ramp                 = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
-                          归一化到 C-rate 变化率（kW/kWh = 1/h），与电池衰减量纲一致
-                          例如 λ=0.5, ΔP=50kW, KWH=200 → R_ramp=0.5*50/200=0.125
-                          量级 0.1~1，与 w2·C-rate² 匹配，避免抑制正常调度决策
+                          归一化到 C-rate 变化率
 
 其中 v_avg = (voltage_phase_a + voltage_phase_b + voltage_phase_c) / 3.0
 ```
 
-**权重表：**
+**权重表（v2.5）：**
 
 | 权重 | 默认值 | 说明 | 可配置范围 |
 |------|--------|------|------------|
-| w1 | 1.0 | 光伏消纳奖励 | [0.0, 3.0] |
-| w2 | 0.5 | 电池损耗惩罚（C-rate²） | [0.0, 2.0] |
+| w1 | 1.0 | 光伏消纳奖励（含电压前置条件） | [0.0, 3.0] |
+| w2 | 0.5 | 电池损耗惩罚（C-rate² × α(s)） | [0.0, 2.0] |
 | w3 | 2.0 | 变压器过载惩罚 | [0.0, 5.0] |
-| w4 | 1.0 | 电压质量惩罚（死区外生效） | [0.0, 3.0] |
+| w4 | 1.0 | 电压质量惩罚（条件触发式） | [0.0, 3.0] |
 | w5 | 0.5 | 功率变化率惩罚 | [0.0, 2.0] |
 
-**Rust 代码实现：**
+**Rust 代码实现（v2.5）：**
 
 ```rust
-fn reward_agricultural_irrigation(
-    &self, state: &FusedSystemState, prev_p_batt: f64
-) -> f64 {
-    let w = &self.weights.agricultural_irrigation;
-    let r_pv = (state.pv_power / (state.pv_power + state.grid_power.max(0.0) + 1e-6))
-        .min(1.0) * 100.0;
+/// SCENE-01: 台区季节性负荷模式 v2.5
+fn calc_agri_v2_5(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
+    let w = &self.weights.seasonal_load_management;
 
-    let c_rate = state.battery_power.abs() / self.battery_capacity_kwh;
-    let p_batt_deg = c_rate * c_rate;  // C-rate²
-
-    let p_trafo = self.overload_penalty(state.transformer_load);  // 见 4.5 节
-
-    // 电压质量惩罚: 死区±5%，越限连续2步才触发
+    // 1. 弃光奖励（含电压安全前置条件）
     let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
-    let p_voltage = self.voltage_penalty_with_deadband(v_avg);
+    let r_pv = if v_avg >= self.voltage_high_limit {
+        0.0
+    } else {
+        (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+            .min(1.0) * 100.0
+    };
 
-    // 功率变化率惩罚: 抑制高频微操作
-    let delta_p = (state.battery_power - prev_p_batt).abs();
-    let r_ramp = w[4] * delta_p;
+    // 2. 自适应损耗系数 α(s)
+    let alpha = self.compute_alpha(state);
+
+    // 3. 电池损耗
+    let c_rate = state.battery_power.abs() / self.battery_capacity_kwh;
+    let p_batt_deg = alpha * c_rate * c_rate;
+
+    // 4. 变压器过载
+    let p_trafo = self.overload_penalty(state.transformer_load);
+
+    // 5. 条件触发电压惩罚
+    let p_voltage = self.conditional_voltage_penalty(state);
+
+    // 6. 变化率惩罚
+    let r_ramp = w[4] * (p_batt_set - prev_p_batt).abs() / self.battery_capacity_kwh;
 
     w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
 }
 
-fn voltage_penalty_with_deadband(&self, v_avg: f64) -> f64 {
-    const V_DEAD: f64 = 0.05;  // ±5% 死区
-    const V_REF: f64 = 1.0;
-    let dev = (v_avg - V_REF).abs();
-    if dev <= V_DEAD {
-        return 0.0;  // 死区内无惩罚
+/// 计算自适应损耗系数 α(s)
+fn compute_alpha(&self, state: &FusedSystemState) -> f64 {
+    if state.battery_soc < self.soc_critical {
+        return 3.0;
     }
-    // 越限连续由调用方通过 self.violation_count 判断，此处仅计算单步惩罚值
-    let dev_excess = dev - V_DEAD;
-    if v_avg < V_REF - V_DEAD {
-        // 低电压，斜率更高
-        dev_excess / 0.10 * 2.0 * (dev_excess / 0.10).powi(2)
+    let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+    let v_dev = (v_avg - 1.0).abs();
+    let in_violation = v_dev > 0.05 && self.voltage_violation_count() >= 2;
+    if state.q_realtime_margin <= self.q_margin_threshold && in_violation {
+        return 0.2;
+    }
+    1.0
+}
+
+/// 条件触发电压惩罚
+fn conditional_voltage_penalty(&self, state: &FusedSystemState) -> f64 {
+    let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+    let dev = (v_avg - 1.0).abs();
+    if dev <= 0.05 {
+        self.voltage_violation_count.store(0, Ordering::Relaxed);
+        return 0.0;
+    }
+    let count = self.voltage_violation_count.fetch_add(1, Ordering::Relaxed) + 1;
+    if count < 2 || state.q_realtime_margin > self.q_margin_threshold {
+        return 0.0;
+    }
+    let dev_excess = dev - 0.05;
+    if v_avg < 1.0 {
+        self.voltage_penalty_low * dev_excess * dev_excess
     } else {
-        // 高电压
-        dev_excess / 0.10 * 1.0 * (dev_excess / 0.10).powi(2)
+        self.voltage_penalty_high * dev_excess * dev_excess
     }
 }
 ```
@@ -1735,6 +1790,8 @@ pub struct AiEngineConfig {
     pub reward_weights: SceneWeights,
     /// NPU 推理配置
     pub npu: NpuConfig,
+    /// v2.5 奖励阈值配置
+    pub reward_thresholds: RewardThresholdConfig,
 }
 ```
 
@@ -1799,6 +1856,28 @@ enable_fallback_to_cpu = true
 | ActionConstraintConfig | p_batt_ramp_limit_kw, q_batt_ramp_limit_kvar, max_apparent_power_kva, pv_limit_min | 50.0, 30.0, 500.0, 0.1 |
 | SceneWeights | agricultural_irrigation[3], commercial_arbitrage[2], demand_control[2], virtual_power_plant[3], ultra_green[2] | 见上表默认值 |
 | NpuConfig | temperature_limit_c, throttle_factor, enable_fallback_to_cpu | 85.0, 0.5, true |
+| **RewardThresholdConfig（v2.5新增）** | voltage_deadband, q_margin_threshold, voltage_high_limit, soc_critical, voltage_penalty_high, voltage_penalty_low | 0.05, 0.10, 1.05, 0.10, 2.0, 1.0 |
+
+**RewardThresholdConfig（v2.5）结构定义：**
+
+```rust
+/// v2.5 奖励阈值配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RewardThresholdConfig {
+    /// 电压死区（±5%），与现有设计一致
+    pub voltage_deadband: f64,
+    /// Q 裕度阈值：实时模块剩余容量低于此值视为"无功耗尽"
+    pub q_margin_threshold: f64,
+    /// 弃光前置电压阈值：电压高于此值时弃光奖励不计入
+    pub voltage_high_limit: f64,
+    /// SOC 极低保护阈值
+    pub soc_critical: f64,
+    /// 高电压侧电压惩罚系数（光伏超发）
+    pub voltage_penalty_high: f64,
+    /// 低电压侧电压惩罚系数（灌溉/炒茶/空调负荷）
+    pub voltage_penalty_low: f64,
+}
+```
 
 ### 10.3 枚举类型定义
 
