@@ -2,17 +2,15 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.3 多场景独立模型架构
+[DESIGN_APPROVED] — v2.4 分层控制架构 + 电压死区 + 变化率惩罚
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
-| v2.3 | 2026-06-06 | 架构师 | 当前版本 |
+| v2.4 | 2026-06-07 | 架构师 | 当前版本 |
 
-**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.3 (`[REVIEWED: PENDING]`)
+**对应 PRD:** `docs/MUPC/05-MUPC-AI引擎-PRD.md` v2.4 (`[REVIEWED: PASS]`)
 
 ---
-
-> **v2.3 核心变更：** 1 个通用 RL 模型 → 5 个独立场景 RL 模型。新增 ModelRegistry 管理模型生命周期（懒加载+双缓冲热切换）。LSTM 保持 1 个通用模型。详见第 1 章架构图、4.6a 新节 ModelRegistry、7.2 ModelManager。
 
 ## 目录
 
@@ -49,9 +47,9 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 |  | (实时数据)  |              | DataFusion     |    | (奖励计算)         |   |
 |  +------------+              | Engine         |--->+--------+----------+    |
 |  |    LSTM    |---预测------>| (1Hz融合)      |             |               |
-|  | (通用,1个)  |              |                |    +--------v----------+    |
-|  +------------+              | 输出:          |    | ModelRegistry      |    |
-|  |  气象 API  |---拉取------>| FusedSystem    |--->| (5场景RL模型管理)   |   |
+|  | (预测值)   |              |                |    +--------v----------+    |
+|  +------------+              | 输出:          |    | RLModel            |    |
+|  |  气象 API  |---拉取------>| FusedSystem    |--->| (决策模型)          |   |
 |  +------------+              | State          |    +--------+----------+    |
 |  | 物联平台   |---订阅------>| (48维向量)     |             |               |
 |  | (电价)     |              |                |    +--------v----------+    |
@@ -61,7 +59,7 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 |  +------------+              |                |             |               |
 |  | ModeSelector|---模式----->|                |    +--------v----------+    |
 |  | (预设5场景) |              +-------+--------+    | ModelManager       |    |
-|  +------------+            switch_to() ^           | (统一调度)          |   |
+|  +------------+                      |              | (统一调度)          |   |
 |                                      |              +--------+----------+    |
 |                    +--------v--------+                       |               |
 |                    |  RKNN Runtime   |---FFI--- librknnrt.so |               |
@@ -88,18 +86,17 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| LSTM 预测模型 | `lstm_model.rs` | 光伏出力与负荷功率时序预测（1 个通用模型），输出 15~30 分钟预测向量 |
+| LSTM 预测模型 | `lstm_model.rs` | 光伏出力与负荷功率时序预测，输出 15~30 分钟预测向量 |
 | 多源数据融合 | `data_fusion.rs` | 周期性（1Hz）从 5 个数据源采集数据，融合为 FusedSystemState |
-| 模式选择器 | `mode_selector.rs` | 5 种预设运行场景互斥选择，切换时联动 ModelRegistry 热切换 RL 模型 |
-| 模型注册表 | `model_registry.rs` | **v2.3 新增** — 5 个场景 RL 模型懒加载、双缓冲热切换、模型文件校验 |
-| 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策（5 个独立 .rknn，每场景 1 个），4 维动作空间输出 |
+| 模式选择器 | `mode_selector.rs` | 5 种预设运行场景互斥选择，支持远程（IEC 104/61850）和本地（Web UI）切换 |
+| 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策，4 维动作空间输出 |
 | 奖励计算器 | `reward_calculator.rs` | 5 种场景奖励函数计算，驱动在线微调 |
 | 动作约束校验 | `action_validator.rs` | 5 条约束规则校验，防止异常值危害设备 |
 | RKNN Runtime | `rknn_runtime.rs` | RK3588 NPU FFI 推理封装，异步安全 |
 | FFI 绑定 | `rknn_runtime_sys.rs` | librknnrt.so C API 声明 |
 | RKNN 类型 | `rknn_types.rs` | FFI 边界数据结构 |
 | 模型管理器 | `model_manager.rs` | 统一调度 LSTM 预测 + RL 决策，full_decision_cycle() |
-| 在线微调 | `online_updater.rs` | 基于新数据持续更新**当前场景**模型权重，场景独立检查点 |
+| 在线微调 | `online_updater.rs` | 基于新数据持续更新模型权重 |
 | 配置 | `config.rs` | AiEngineConfig 及所有子配置 |
 | 错误 | `error.rs` | AiEngineError 枚举 |
 
@@ -126,17 +123,19 @@ mupc-web-api          --> mupc-ai-engine (通过 AiIntegrator 门面)
 ```
 历史数据 --> LSTM.predict() --> 光伏/负荷预测值 --> 供 RL 模型使用
                                                           |
-远程指令/本地选择 --> ModeSelector --> ModelRegistry.switch_to() --> 热切换场景 RL 模型 + 奖励函数选择
+远程指令/本地选择 --> ModeSelector --> 运行模式 --> 权重映射 + 奖励函数选择
                                                           |
 5数据源 --> DataFusionEngine.fuse() --> FusedSystemState --> to_input_vector()
                                                           |
-融合向量 + 预测值 + 运行模式 --> ModelRegistry.decide() --> ActionOutput
+融合向量 + 预测值 + 运行模式 --> RLModel.decide() --> ActionOutput
                                                           |
 ActionOutput --> ActionValidator.validate() --> 通过--> 下发 strategy-engine
                                          --> 不通过--> clamp + WARN 日志
                                                           |
-决策-执行对 --> RewardCalculator.calculate() --> 奖励值 --> OnlineUpdater.update(active_scene)
+决策-执行对 --> RewardCalculator.calculate() --> 奖励值 --> OnlineUpdater
 ```
+
+> **v2.4 数据流说明：** Q_batt由实时电压调节器闭环控制，不经过RL模型
 
 ### 1.5 完整决策周期
 
@@ -149,10 +148,10 @@ full_decision_cycle():
   3. fused_state = data_fusion.fuse()
   4. input_vector = fused_state.to_input_vector()
   5. scene_weights = SceneWeights::lookup(running_mode)
-  6. action = model_registry.decide(input_vector)         // v2.3: 委托给当前激活的场景 RL 模型
+  6. action = rl_model.decide(input_vector, lstm_output, scene_weights)
   7. validated = action_validator.validate(action)
   8. reward = reward_calculator.calculate(running_mode, action, fused_state)
-  9. online_updater.add_sample(running_mode, DataPoint { input_vector, validated, reward })  // v2.3: 携带场景标识
+  9. online_updater.add_sample(DataPoint { input_vector, validated, reward })
   10. return validated_action
 ```
 
@@ -162,15 +161,14 @@ full_decision_cycle():
 |------|------|
 | NPU 推理延迟 | < 100ms (P99) |
 | AI 完整决策总延迟 | < 120ms（状态输入 + 推理 + 校验） |
-| 场景切换延迟 | < 2s（本地热切换，目标模型已在本地）、< 60s（OTA 下载+切换） |
+| 场景切换延迟 | < 2s（远程）、< 1s（本地） |
 | 数据融合周期 | 1Hz（默认），可配置 1s ~ 60s |
 | 动作约束校验延迟 | < 0.5ms |
 | 奖励函数计算延迟 | < 1ms（单场景） |
 | LSTM 预测延迟 | < 1s |
-| 推理运行时内存 | <= 200MB（active 模型），standby 槽额外 <= 100MB |
-| 单模型 INT8 大小 | <= 5MB，5 个 RL 全量 <= 25MB |
+| 推理运行时内存 | <= 200MB |
+| 单模型 INT8 大小 | <= 5MB |
 | 训练数据本地存储 | <= 1GB（最近 30 天） |
-| 场景检查点存储 | 每场景 <= 100MB，5 场景合计 <= 500MB |
 | AI 引擎 MTBF | >= 1000 小时 |
 | AI 失效自动降级 | < 2s |
 
@@ -634,7 +632,35 @@ impl DataFusionEngine {
 
 ### 4.1 功能概述
 
-RLModel 不再是 1 个通用模型覆盖 5 个场景，而是 5 个独立训练的 RL 模型（每场景 1 个 .rknn 文件）。5 个模型输入/输出形状完全一致（48 维 → 5 维），由 ModelRegistry 统一管理生命周期。每个模型针对其场景的奖励函数和训练数据分布进行专项训练。LSTM 预测模型保持 1 个通用模型不变。
+RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近端策略优化）算法，基于融合状态向量、LSTM 预测值和运行场景权重，输出 4 维动作空间的最优控制指令。
+
+### 4.1a 分层控制架构（v2.4）
+
+为适应农网灌溉"高频随机脉冲叠加"工况，采用分层控制架构：
+
+**底层（实时控制模块）**
+- 无功补偿（Q_batt）：根据电压实时闭环调节，响应时间 ms 级
+- 三相不平衡：不涉及电池充放电，由实时控制核心模块独立处理
+- 调节方式：查表法或 PID，不经过 AI
+
+**上层（RL决策）**
+- 有功设定值 P_batt：由 RL 策略网络输出
+- 可中断负荷 Load_shedding：由 RL 策略网络输出
+- 动作空间：2 维 ∈ [-1,1] × [0,1]
+
+**分层优点：**
+- P 是 s/min 级慢变量，Q 是 ms 级快变量，单一网络同时学习两个时间尺度任务收敛困难且易振荡
+- RL 专注于能量管理（光伏消纳、SOC平衡、过载预防），电压质量由底层保障
+- 部署时 Q 失控风险与 RL 解耦
+
+**动作空间对比：**
+
+| 维度 | v2.3（4维） | v2.4（2维） | 说明 |
+|------|------------|------------|------|
+| A1 | p_batt_set [-500,500]kW | p_batt_set [-500,500]kW | 电池有功（RL控制） |
+| A2 | q_batt_set [-300,300]kVar | 由实时模块闭环 | 无功（实时控制，不经AI） |
+| A3 | load_shedding [0,500]kW | load_shedding [0,500]kW | 可中断负荷（RL控制） |
+| A4 | pv_limit [0,1] | 由A2/Q替代 | 光伏限功率（由电压调节替代） |
 
 ### 4.2 算法选择
 
@@ -877,169 +903,6 @@ pub struct ViolationRecord {
 }
 ```
 
-### 4.9 ModelRegistry — 多场景模型注册表（v2.3 新增）
-
-ModelRegistry 管理 5 个场景 RL 模型的完整生命周期：加载、卸载、热切换、状态查询。采用双缓冲机制（active + standby 两个 RknnRuntime 槽），保证场景切换时推理不中断。
-
-```rust
-/// 场景模型注册表 — 管理 5 个场景 RL 模型的加载/卸载/双缓冲热切换
-pub struct ModelRegistry {
-    /// 当前激活的场景模型（场景 + RknnRuntime）
-    active: Arc<RwLock<(RunningMode, RknnRuntime)>>,
-    /// 备用模型槽（用于热切换，切换完成后与 active 原子交换）
-    standby: Arc<RwLock<Option<(RunningMode, RknnRuntime)>>>,
-    /// 模型文件存储目录
-    model_dir: PathBuf,
-    /// 模型清单：场景 → 模型元信息
-    manifest: HashMap<RunningMode, ModelManifestEntry>,
-    /// 清单文件路径（持久化 manifest.json）
-    manifest_path: PathBuf,
-}
-
-/// 模型清单条目
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelManifestEntry {
-    /// 模型文件名（如 "rl_agricultural.rknn"）
-    pub file_name: String,
-    /// 期望的 SHA256 校验值
-    pub sha256: String,
-    /// 文件大小（字节）
-    pub file_size_bytes: u64,
-    /// 模型版本号
-    pub version: String,
-}
-
-/// 场景切换结果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SceneSwitchResult {
-    Switched,     // 切换成功
-    Downloading,  // 模型下载中，当前场景不变
-}
-```
-
-**ModelRegistry 方法：**
-
-```rust
-impl ModelRegistry {
-    /// 创建注册表，初始加载出厂场景模型
-    ///
-    /// 加载流程：
-    /// 1. 从 manifest_path 加载模型清单（manifest.json）
-    /// 2. 查找 factory_scene 对应的模型文件
-    /// 3. SHA256 校验模型文件
-    /// 4. rknn_init 加载到 active 槽
-    /// 5. 加载成功 → 返回 Self，失败 → 返回 AiEngineError
-    pub async fn new(
-        model_dir: &Path,
-        manifest_path: &Path,
-        factory_scene: RunningMode,
-    ) -> Result<Self, AiEngineError>;
-
-    /// 热切换到目标场景模型（双缓冲）
-    ///
-    /// 执行流程：
-    /// 1. 若 target == active.scene → 幂等返回 Switched
-    /// 2. 检查目标模型文件是否存在 + SHA256 校验
-    /// 3. 模型不存在 → 返回 Downloading，后台不启动下载（由调用方决定）
-    /// 4. spawn_blocking 执行 rknn_init 加载到 standby 槽
-    /// 5. 加载完成后，standby ↔ active 原子交换（RwLock write < 1ms）
-    /// 6. 旧 active 槽的 RknnRuntime 延迟 30s 后释放（等待正在进行的推理完成）
-    /// 7. 返回 Switched
-    pub async fn switch_to(&self, mode: RunningMode) -> Result<SceneSwitchResult, AiEngineError>;
-
-    /// 查询指定场景的模型状态
-    pub fn model_state(&self, mode: RunningMode) -> SceneModelState;
-
-    /// 获取所有场景的模型状态列表（供 Web UI 展示）
-    pub fn all_model_states(&self) -> Vec<(RunningMode, SceneModelState)>;
-
-    /// 后台预加载模型到 standby 槽（闲时调用，加速未来切换）
-    ///
-    /// 仅在 standby 槽为空且目标模型文件存在时执行。
-    /// 加载失败不影响 active 槽推理，仅记录 WARN 日志。
-    pub async fn preload(&self, mode: RunningMode) -> Result<(), AiEngineError>;
-
-    /// 从 OTA 下载并校验模型文件到 model_dir
-    ///
-    /// 下载完成后自动更新 manifest.json。
-    /// 若下载的目标场景恰为当前激活场景，不自动切换（需调用方决定）。
-    pub async fn download_model(
-        &self,
-        mode: RunningMode,
-        ota_client: &dyn OtaClient,
-    ) -> Result<(), AiEngineError>;
-
-    /// 获取当前激活的场景
-    pub fn current_mode(&self) -> RunningMode;
-
-    /// 执行推理（委托给当前 active 槽的 RknnRuntime）
-    pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError>;
-
-    /// 重新加载模型清单（OTA 推送新模型后调用）
-    pub async fn reload_manifest(&self) -> Result<(), AiEngineError>;
-}
-```
-
-**双缓冲热切换时序：**
-
-```
-场景切换请求 (MODE-01 → MODE-02)
-  │
-  ├─ 1. 检查目标模型文件 (rl_arbitrage.rknn) 存在 + SHA256 校验
-  │     └─ 缺失 → 返回 Downloading
-  │
-  ├─ 2. spawn_blocking: rknn_init(rl_arbitrage.rknn) → standby 槽
-  │     旧 active (rl_agricultural.rknn) 继续服务推理请求
-  │
-  ├─ 3. rknn_init 完成 → write lock active + standby:
-  │     active ← standby (rl_arbitrage)
-  │     standby ← old_active (rl_agricultural)
-  │     锁定窗口 < 1ms
-  │
-  ├─ 4. 延迟 30s 后释放 standby 中的旧模型
-  │     (等待旧模型上正在进行的推理完成)
-  │
-  └─ 5. 更新 RewardCalculator 权重映射
-       广播 ModeSwitchEvent
-       返回 Switched
-```
-
-**SceneModelState 枚举：**
-
-```rust
-/// 场景模型状态（与 PRD 4.5 定义一致）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SceneModelState {
-    NotLoaded,   // 未加载（本地无模型文件）
-    Loading,     // 加载中（OTA 下载或 NPU 加载中）
-    Ready,       // 就绪（可直接热切换）
-    Error,       // 加载失败（模型文件损坏或 rknn_init 失败）
-}
-```
-
-**模型清单文件格式（manifest.json）：**
-
-```json
-{
-  "version": "1.0",
-  "updated_at": "2026-06-06T12:00:00Z",
-  "models": {
-    "AgriculturalIrrigation": {
-      "file_name": "rl_agricultural.rknn",
-      "sha256": "abc123...",
-      "file_size_bytes": 4823456,
-      "version": "2.3.0"
-    },
-    "CommercialArbitrage": {
-      "file_name": "rl_arbitrage.rknn",
-      "sha256": "def456...",
-      "file_size_bytes": 4912345,
-      "version": "2.3.0"
-    }
-  }
-}
-```
-
 ---
 
 ## 5. 奖励函数计算模块
@@ -1079,20 +942,37 @@ impl RewardCalculator {
 
 ### 5.3 SCENE-01：农网灌溉模式 (MODE-01)
 
-**优化目标：** 最大化光伏消纳，最小化变压器过载风险，最小化电池损耗。
+**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护
+
+> **v2.4 说明：** Q控制交由实时电压调节器闭环管理，AI动作空间缩减为2维（P_batt + Load_shedding）；
+> 新增电压死区（±5%，越限2步触发）防止高频脉冲过度响应；新增R_ramp变化率惩罚保护电池。
 
 **奖励公式：**
 
 ```
-R_agri = w1 * R_pv_consumption - w2 * P_battery_degradation - w3 * P_transformer_overload
+R_agri = w1 * R_pv_consumption
+         - w2 * P_battery_degradation
+         - w3 * P_transformer_overload
+         - w4 * P_voltage_deviation
+         - w5 * R_ramp
 ```
 
 **子项定义：**
 
 ```
-R_pv_consumption      = min(P_pv_self_consume / P_pv_total, 1.0) * 100
-P_battery_degradation  = alpha * |delta_SOC| / SOC_total_range * 100
-P_transformer_overload = 200 * max(0, L_transformer - 1.0)
+R_pv_consumption       = min(P_pv_self_consume / P_pv_total, 1.0) * 100
+P_battery_degradation  = (|P_batt| / BATTERY_CAPACITY_KWH)²   # C-rate²
+P_transformer_overload = Quadratic(L_trafo, start=75%)            # 见 4.5 节
+P_voltage_deviation    = 电压死区内 = 0
+                          |V_avg - 1.0| > 5% 且越限连续≥2步:
+                            = 2.0 * dev² (低电压, dev = (0.95-V_avg)/(0.95-0.85))
+                            = 1.0 * dev² (高电压, dev = (V_avg-1.05)/(1.15-1.05))
+R_ramp                 = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
+                          归一化到 C-rate 变化率（kW/kWh = 1/h），与电池衰减量纲一致
+                          例如 λ=0.5, ΔP=50kW, KWH=200 → R_ramp=0.5*50/200=0.125
+                          量级 0.1~1，与 w2·C-rate² 匹配，避免抑制正常调度决策
+
+其中 v_avg = (voltage_phase_a + voltage_phase_b + voltage_phase_c) / 3.0
 ```
 
 **权重表：**
@@ -1100,22 +980,53 @@ P_transformer_overload = 200 * max(0, L_transformer - 1.0)
 | 权重 | 默认值 | 说明 | 可配置范围 |
 |------|--------|------|------------|
 | w1 | 1.0 | 光伏消纳奖励 | [0.0, 3.0] |
-| w2 | 0.5 | 电池损耗惩罚 | [0.0, 2.0] |
+| w2 | 0.5 | 电池损耗惩罚（C-rate²） | [0.0, 2.0] |
 | w3 | 2.0 | 变压器过载惩罚 | [0.0, 5.0] |
+| w4 | 1.0 | 电压质量惩罚（死区外生效） | [0.0, 3.0] |
+| w5 | 0.5 | 功率变化率惩罚 | [0.0, 2.0] |
 
-**代码实现：**
+**Rust 代码实现：**
 
 ```rust
 fn reward_agricultural_irrigation(
-    &self, state: &FusedSystemState
+    &self, state: &FusedSystemState, prev_p_batt: f64
 ) -> f64 {
     let w = &self.weights.agricultural_irrigation;
     let r_pv = (state.pv_power / (state.pv_power + state.grid_power.max(0.0) + 1e-6))
         .min(1.0) * 100.0;
-    let p_batt_deg = self.battery_degradation_alpha
-        * (state.battery_power.abs() / 500.0) * 100.0;
-    let p_trafo = 200.0 * (state.transformer_load - 1.0).max(0.0);
-    w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo
+
+    let c_rate = state.battery_power.abs() / self.battery_capacity_kwh;
+    let p_batt_deg = c_rate * c_rate;  // C-rate²
+
+    let p_trafo = self.overload_penalty(state.transformer_load);  // 见 4.5 节
+
+    // 电压质量惩罚: 死区±5%，越限连续2步才触发
+    let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+    let p_voltage = self.voltage_penalty_with_deadband(v_avg);
+
+    // 功率变化率惩罚: 抑制高频微操作
+    let delta_p = (state.battery_power - prev_p_batt).abs();
+    let r_ramp = w[4] * delta_p;
+
+    w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
+}
+
+fn voltage_penalty_with_deadband(&self, v_avg: f64) -> f64 {
+    const V_DEAD: f64 = 0.05;  // ±5% 死区
+    const V_REF: f64 = 1.0;
+    let dev = (v_avg - V_REF).abs();
+    if dev <= V_DEAD {
+        return 0.0;  // 死区内无惩罚
+    }
+    // 越限连续由调用方通过 self.violation_count 判断，此处仅计算单步惩罚值
+    let dev_excess = dev - V_DEAD;
+    if v_avg < V_REF - V_DEAD {
+        // 低电压，斜率更高
+        dev_excess / 0.10 * 2.0 * (dev_excess / 0.10).powi(2)
+    } else {
+        // 高电压
+        dev_excess / 0.10 * 1.0 * (dev_excess / 0.10).powi(2)
+    }
 }
 ```
 
@@ -1265,13 +1176,13 @@ fn reward_ultra_green(
 
 ### 5.8 SceneWeights 映射表
 
-| 场景 | w1(op1) | w2(op2) | w3(op3) | w4(op4) |
-|------|---------|---------|---------|---------|
-| 农网灌溉 MODE-01 | 1.0 (光伏消纳) | 0.5 (电池损耗) | 2.0 (变压器) | - |
-| 自主套利 MODE-02 | 1.0 (电价收益) | 1.0 (电池损耗) | - | - |
-| 需量控制 MODE-03 | 1.0 (需量减免) | 0.5 (舒适损失) | - | - |
-| VPP MODE-04 | 1.0 (辅助收益) | 2.0 (响应精度) | 1.0 (延迟惩罚) | - |
-| 极致绿色 MODE-05 | 1.0 (绿电消纳) | 1.0 (碳减排) | - | - |
+| 场景 | w1(op1) | w2(op2) | w3(op3) | w4(op4) | w5(op5) |
+|------|---------|---------|---------|---------|---------|
+| 农网灌溉 MODE-01 | 1.0 (光伏消纳) | 0.5 (电池损耗) | 2.0 (变压器) | 1.0 (电压质量) | 0.5 (功率变化率) |
+| 自主套利 MODE-02 | 1.0 (电价收益) | 1.0 (电池损耗) | - | - | - |
+| 需量控制 MODE-03 | 1.0 (需量减免) | 0.5 (舒适损失) | - | - | - |
+| VPP MODE-04 | 1.0 (辅助收益) | 2.0 (响应精度) | 1.0 (延迟惩罚) | - | - |
+| 极致绿色 MODE-05 | 1.0 (绿电消纳) | 1.0 (碳减排) | - | - | - |
 
 权重映射查找逻辑：
 
@@ -1526,7 +1437,7 @@ ModelManager 是 ai-engine crate 的顶层编排器，统一管理 LSTM 预测�
 pub struct ModelManager {
     config: AiEngineConfig,
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
-    model_registry: Arc<ModelRegistry>,       // v2.3: 替代原来单一的 rl_model
+    rl_model: Arc<RwLock<Option<RLModel>>>,
     data_fusion: Option<DataFusionEngine>,
     reward_calculator: RewardCalculator,
     action_validator: ActionValidator,
@@ -1577,8 +1488,8 @@ impl ModelManager {
         // Step 5: 获取场景权重
         let scene_weights = SceneWeights::lookup(&self.config.reward_weights, running_mode);
 
-        // Step 6: RL 决策推理（v2.3: 委托给 ModelRegistry，由其内部 active 模型执行）
-        let rl_action = self.model_registry.decide(&input_vector).await?;
+        // Step 6: RL 决策推理
+        let rl_action = self.decide_rl(&input_vector).await?;
 
         // Step 7: 动作约束校验（5 条规则）
         let (validated, violations) = self.action_validator.validate(
@@ -1598,10 +1509,10 @@ impl ModelManager {
         // Step 8: 奖励计算
         let reward = self.reward_calculator.calculate(running_mode, &validated, &fused_state);
 
-        // Step 9: 在线微调数据收集（v2.3: 携带场景标识）
+        // Step 9: 在线微调数据收集
         {
             let mut updater = self.online_updater.write().await;
-            updater.add_sample(running_mode, DataPoint {
+            updater.add_sample(DataPoint {
                 timestamp: chrono::Utc::now().timestamp_millis(),
                 input: input_vector,
                 output: vec![
@@ -1740,25 +1651,23 @@ mupc/crates/ai-engine/
 ├── src/
 │   ├── lib.rs                    # 模块导出，重新导出所有公共类型
 │   ├── model_manager.rs          # 模型管理器（full_decision_cycle 统一调度）
-│   ├── mode_selector.rs          # 运行场景选择器（5 种互斥场景 + 联动 ModelRegistry 热切换）
-│   ├── model_registry.rs         # 模型注册表（v2.3 新增：5 场景 RL 模型懒加载、双缓冲热切换、manifest 管理）
-│   ├── lstm_model.rs             # LSTM 时序预测模型（1 个通用模型，LstmInput, LstmOutput, LstmModel）
-│   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel，5 个独立 .rknn）
+│   ├── mode_selector.rs          # 运行场景选择器（5 种互斥场景 + 远程/本地切换）
+│   ├── lstm_model.rs             # LSTM 时序预测模型（LstmInput, LstmOutput, LstmModel）
+│   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel）
 │   ├── reward_calculator.rs      # 奖励函数计算器（5 种场景奖励公式 + SceneWeights）
 │   ├── data_fusion.rs            # 多源数据融合引擎（DataSourceAdapter trait + 5 个实现）
 │   ├── action_validator.rs       # 动作约束校验器（5 条约束规则 ACT-01~05）
-│   ├── online_updater.rs         # 在线微调（仅更新当前场景模型，场景独立检查点）
+│   ├── online_updater.rs         # 在线微调（DataPoint, OnlineUpdater, batch_size=32）
 │   ├── rknn_runtime.rs           # RKNN Runtime 推理器（RAII, spawn_blocking, NPU降级）
 │   ├── rknn_runtime_sys.rs       # RKNN Runtime C API FFI 绑定（unsafe extern \"C\"）
 │   ├── rknn_types.rs             # RKNN 类型定义（RknnInput, RknnOutput, as_f32）
 │   ├── error.rs                  # 错误类型枚举（AiEngineError, thiserror）
-│   └── config.rs                 # 配置结构（AiEngineConfig 及 9 个子配置）
+│   └── config.rs                 # 配置结构（AiEngineConfig 及 8 个子配置）
 └── tests/
     ├── ai_engine_tests.rs        # 配置默认值测试
     ├── lstm_model_tests.rs       # LSTM 模型集成测试
     ├── rl_model_tests.rs         # RL 模型集成测试
     ├── rknn_runtime_tests.rs     # RKNN Runtime 集成测试
-    ├── model_registry_tests.rs   # 模型注册表集成测试（v2.3 新增）
     └── online_updater_tests.rs   # 在线微调集成测试
 ```
 
@@ -1770,7 +1679,6 @@ pub mod error;
 pub mod lstm_model;
 pub mod mode_selector;
 pub mod model_manager;
-pub mod model_registry;          // v2.3 新增
 pub mod online_updater;
 pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
@@ -1791,9 +1699,6 @@ pub use mode_selector::{
     parse_mode_name, ModeSelector, ModeSwitchEvent, RunningMode, SwitchSource,
 };
 pub use model_manager::{ModelManager, ModelStatus};
-pub use model_registry::{
-    ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult,
-};
 pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
 pub use rl_model::{ActionOutput, FusedSystemState, RLModel, parse_action_output};
 pub use reward_calculator::RewardCalculator;
@@ -1857,9 +1762,7 @@ data_source_timeout_secs = 10
 enable_health_monitoring = true
 
 [mode]
-factory_scene = \"AgriculturalIrrigation\"    # v2.3: 设备出厂预装场景
-model_dir = \"/var/lib/mupc/models\"           # v2.3: 场景 RL 模型文件存储目录
-model_manifest = \"/etc/mupc/models/manifest.json\"  # v2.3: 模型清单文件路径
+default_mode = \"AgriculturalIrrigation\"
 persist_path = \"/var/lib/mupc/current_mode\"
 
 [action_constraint]
@@ -1891,7 +1794,7 @@ enable_fallback_to_cpu = true
 | RlConfig | model_path, algorithm, quantization | /etc/mupc/models/rl.rknn, MADDPG, INT8 |
 | OnlineUpdateConfig | enabled, batch_size, learning_rate | false, 32, 0.001 |
 | FusionConfig | fusion_period_secs, data_source_timeout_secs, enable_health_monitoring | 1, 10, true |
-| ModeConfig | factory_scene, model_dir, model_manifest, persist_path | \"AgriculturalIrrigation\", \"/var/lib/mupc/models\", \"/etc/mupc/models/manifest.json\", \"/var/lib/mupc/current_mode\" |
+| ModeConfig | default_mode, persist_path | \"AgriculturalIrrigation\", \"/var/lib/mupc/current_mode\" |
 | ActionConstraintConfig | p_batt_ramp_limit_kw, q_batt_ramp_limit_kvar, max_apparent_power_kva, pv_limit_min | 50.0, 30.0, 500.0, 0.1 |
 | SceneWeights | agricultural_irrigation[3], commercial_arbitrage[2], demand_control[2], virtual_power_plant[3], ultra_green[2] | 见上表默认值 |
 | NpuConfig | temperature_limit_c, throttle_factor, enable_fallback_to_cpu | 85.0, 0.5, true |
@@ -2110,22 +2013,6 @@ pub struct DemandData {
 - 模型切换时间 < 30ms
 - 支持模型版本回滚（保留上一个稳定版本）
 
-### 13.8 ADR-008: 5 个独立场景 RL 模型替代 1 个通用模型（v2.3）
-
-**决策：** 将 1 个覆盖 5 个场景的通用 RL 模型拆分为 5 个独立 RL 模型（每场景 1 个），ModelRegistry 管理模型生命周期（懒加载+双缓冲热切换）。LSTM 预测模型保持 1 个通用模型不变。
-
-**理由：**
-- 训练发现 1 个模型覆盖 5 种不同优化目标的场景难以收敛，5 个独立模型各自针对单一场景训练效果更好
-- 每台 MUPC 设备根据销售客户场景出厂预装 1 个场景模型，OTA 按需推送其余 4 个
-- 5 个模型输入/输出形状完全一致（48→5），可在同一双缓冲框架下互换
-- LSTM 预测任务场景无关（光伏/负荷预测），无需拆分
-- 双缓冲机制保证场景切换时推理不中断（旧模型延迟释放 30s）
-
-**权衡：**
-- 存储增加：1 个 RL ≤5MB → 5 个 ≤25MB（仍在可接受范围）
-- 检查点增加：每个场景 ≤100MB，5 场景 ≤500MB
-- 场景切换延迟增加：原 <2s（仅换权重）→ 本地热切换 <2s（换模型，双缓冲），OTA 下载+切换 <60s
-
 ### 13.7 ADR-007: 三相电压从 D1 实时数据中采集（非 D5 电能质量独立分类）
 
 **决策：** 三相电压幅值（voltage_phase_a/b/c）作为 D1 实时数据的子字段，直接进入 RL 输入向量，用于电压感知 P/Q 控制。
@@ -2137,19 +2024,40 @@ pub struct DemandData {
 
 ---
 
-### Critical Files for Implementation (v2.3)
+### Critical Files for Implementation
 
 These are the most critical files that need to be created or significantly modified to implement this design:
 
-**v2.3 新增/变更：**
-- `e:\MUPC2\mupc\crates\ai-engine\src\model_registry.rs` (**new**: ModelRegistry with HashMap<RunningMode, RknnRuntime>, dual-buffer hot-switch, manifest.json management)
-- `e:\MUPC2\mupc\crates\ai-engine\src\mode_selector.rs` (refactor: wire in ModelRegistry.switch_to() on scene switch, add model_state() query)
-- `e:\MUPC2\mupc\crates\ai-engine\src\model_manager.rs` (refactor: replace rl_model with model_registry, update full_decision_cycle())
-- `e:\MUPC2\mupc\crates\ai-engine\src\online_updater.rs` (refactor: add running_mode parameter to add_sample(), per-scene checkpoint save/load)
-- `e:\MUPC2\mupc\crates\ai-engine\src\config.rs` (extend: ModeConfig add factory_scene, model_dir, model_manifest; add manifest.json format)
+- `e:\MUPC2\mupc\crates\ai-engine\src\data_fusion.rs` (new: DataFusionEngine, DataSourceAdapter trait, 5 adapter implementations, FusedSystemState with to_input_vector())
+- `e:\MUPC2\mupc\crates\ai-engine\src\rl_model.rs` (refactor: replace SystemState with FusedSystemState, replace old 8-field ActionOutput with new 5-field ActionOutput, add parse_action_output, add 48-dim input support)
+- `e:\MUPC2\mupc\crates\ai-engine\src\reward_calculator.rs` (new: RewardCalculator with 5 scene formulas, SceneWeights lookup)
+- `e:\MUPC2\mupc\crates\ai-engine\src\action_validator.rs` (new: ActionValidator with 5 constraint rules ACT-01~05, clamp logic, ViolationRecord)
+- `e:\MUPC2\mupc\crates\ai-engine\src\model_manager.rs` (refactor: add full_decision_cycle(), wire in DataFusionEngine, RewardCalculator, ActionValidator)
 
-**Prior version (v2.2):**
-- `e:\MUPC2\mupc\crates\ai-engine\src\data_fusion.rs` (DataFusionEngine, DataSourceAdapter trait, 5 adapter implementations, FusedSystemState with to_input_vector())
-- `e:\MUPC2\mupc\crates\ai-engine\src\rl_model.rs` (FusedSystemState, ActionOutput, parse_action_output, 48-dim input support)
-- `e:\MUPC2\mupc\crates\ai-engine\src\reward_calculator.rs` (RewardCalculator with 5 scene formulas, SceneWeights lookup)
-- `e:\MUPC2\mupc\crates\ai-engine\src\action_validator.rs` (ActionValidator with 5 constraint rules ACT-01~05, clamp logic, ViolationRecord)
+
+---
+
+## v2.3 修订记录 (2026-06-07)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | SCENE-01 恢复电压质量惩罚 | 5.3 奖励函数 | 增加 w4 * P_voltage_deviation 项；三相电压幅值通过 P/Q 协同控制可主动调节，三相不平衡维持实时控制核心独立处理 |
+| 2 | SceneWeights 表更新 | 5.8 | MODE-01 新增 w4=1.0（电压质量）列 |
+| 3 | 版本号更新 | 文档头部 | v2.2 → v2.3 |
+
+**修订依据：** MODE-01 农网灌溉场景中，高电压（光伏超发）和低电压（灌溉抽水导致）均需 AI 引擎主动干预。
+原 v2.1 以"三相不平衡不涉及电池充放"为由完全移除电压奖励属误判——电压幅值偏差与电池充放电、无功输出密切相关，
+AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压幅值惩罚，三相不平衡治理维持实时控制核心独立处理。
+
+## v2.4 修订记录 (2026-06-07)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | 分层控制架构 | 1.1/4.1a/5.3 | 动作空间4维→2维；Q控制交实时控制核心，RL仅输出P_batt+Load_shedding |
+| 2 | 电压死区机制 | 5.3 | ±5%死区，越限连续2步触发惩罚 |
+| 3 | 功率变化率惩罚R_ramp | 5.3 | R_ramp = λ·|ΔP_batt| |
+| 4 | SceneWeights表更新 | 5.8 | MODE-01新增w5列 |
+| 5 | 版本号更新 | 文档头部 | v2.3 → v2.4 |
+
+**修订依据：** 300kW错峰启停产生高频随机脉冲，Q属ms级快变量应由实时控制闭环；AI专注能量管理；电压死区防高频脉冲过度响应；变化率惩罚延长电池寿命。
+
