@@ -17,6 +17,9 @@ Thumbs.db
 *.log
 logs/
 
+# Worktrees
+.worktrees/
+
 # Temporary files
 *.tmp
 *.bak
