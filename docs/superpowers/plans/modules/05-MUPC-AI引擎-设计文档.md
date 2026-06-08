@@ -2,13 +2,14 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.4 分层控制架构 + 电压死区 + 变化率惩罚
+[DESIGN_APPROVED] — v2.5 状态空间扩展 + SCENE-01 奖励函数重写
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
+| v2.5 | 2026-06-08 | 架构师 | 当前版本 |
 | v2.4 | 2026-06-07 | 架构师 | 当前版本 |
 
-**对应 PRD:** `docs/MUPC/05-MUPC-AI引擎-PRD.md` v2.4 (`[REVIEWED: PASS]`)
+**对应 PRD:** `docs/MUPC/05-MUPC-AI引擎-PRD.md` v2.5 (`[REVIEWED: PASS]`)
 
 ---
 
@@ -2060,4 +2061,21 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 5 | 版本号更新 | 文档头部 | v2.3 → v2.4 |
 
 **修订依据：** 300kW错峰启停产生高频随机脉冲，Q属ms级快变量应由实时控制闭环；AI专注能量管理；电压死区防高频脉冲过度响应；变化率惩罚延长电池寿命。
+
+## v2.5 修订记录 (2026-06-08)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | FusedSystemState 新增 q_realtime_margin | 3.1/D1 | 实时模块剩余无功容量比例 [0.0, 1.0]，默认 0.5 |
+| 2 | FusedSystemState 新增 season_encoding | 3.1/D7 | 季节 one-hot (6维)，默认 [0,0,0,1,0,0] 常规季 |
+| 3 | FusedSystemState 新增 time_period_encoding | 3.1/D7 | 时段 one-hot (2维)，默认 [1,0] 白天 |
+| 4 | to_input_vector 扩展至 56 维 | 3.3 | D7 (8字段) 追加至向量末尾 |
+| 5 | RewardThresholdConfig 结构体 | 10.3 | voltage_deadband, q_margin_threshold, voltage_high_limit, soc_critical, voltage_penalty_high/low |
+| 6 | calc_agri_v2_5 替代 calc_agri | 5.3 | 条件触发电压惩罚 + 自适应损耗系数 α(s) + 弃光电压前置 |
+| 7 | compute_alpha 三态 | 5.3 | α(s) ∈ {1.0, 0.2, 3.0}，优先级：SOC极低 > 电压支撑 > 常规 |
+| 8 | conditional_voltage_penalty | 5.3 | 仅 q_margin <= 10% 且越限2步时触发 |
+| 9 | new_with_thresholds 工厂方法 | 5.1 | 支持自定义阈值配置 |
+| 10 | 版本号更新 | 文档头部 | v2.4 → v2.5 |
+
+**修订依据：** 专家评审指出状态空间缺少实时模块能力边界反馈 + 奖励函数未体现有功边际贡献。v2.5 通过 q_realtime_margin 实现 AI 对实时模块裕度的感知，通过条件触发电压惩罚实现分层控制原则。
 
