@@ -17,8 +17,8 @@ use crate::model_registry::{ModelRegistry, SceneModelState, SceneSwitchResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RunningMode {
-    /// MODE-01：农网灌溉模式 — 最大化光伏消纳 + 电压治理
-    AgriculturalIrrigation = 1,
+    /// MODE-01：台区季节性负荷模式 — 夏季灌溉/炒茶/冬季空调等季节性负荷管理
+    SeasonalLoadManagement = 1,
     /// MODE-02：自主套利模式 — 最大化峰谷电价差收益
     CommercialArbitrage = 2,
     /// MODE-03：需量控制模式 — 减免需量罚金
@@ -32,7 +32,7 @@ pub enum RunningMode {
 impl RunningMode {
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            1 => Some(Self::AgriculturalIrrigation),
+            1 => Some(Self::SeasonalLoadManagement),
             2 => Some(Self::CommercialArbitrage),
             3 => Some(Self::DemandControl),
             4 => Some(Self::VirtualPowerPlant),
@@ -43,7 +43,7 @@ impl RunningMode {
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::AgriculturalIrrigation => "农网灌溉模式",
+            Self::SeasonalLoadManagement => "台区季节性负荷模式",
             Self::CommercialArbitrage => "自主套利模式",
             Self::DemandControl => "需量控制模式",
             Self::VirtualPowerPlant => "虚拟电厂模式",
@@ -53,7 +53,9 @@ impl RunningMode {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::AgriculturalIrrigation => "最大化光伏消纳 + 电压治理 + 防止变压器过载",
+            Self::SeasonalLoadManagement => {
+                "最大化光伏消纳 + 防止变压器过载 + 电池寿命保护"
+            }
             Self::CommercialArbitrage => "最大化峰谷电价差收益 + 最小化电池损耗",
             Self::DemandControl => "减免需量罚金 + 最小化舒适度损失",
             Self::VirtualPowerPlant => "最大化辅助服务收益 + 响应精度",
@@ -63,7 +65,7 @@ impl RunningMode {
 
     pub fn all() -> &'static [RunningMode] {
         &[
-            Self::AgriculturalIrrigation,
+            Self::SeasonalLoadManagement,
             Self::CommercialArbitrage,
             Self::DemandControl,
             Self::VirtualPowerPlant,
@@ -280,7 +282,7 @@ impl ModeSelector {
                     AiEngineError::ModeSwitchFailed(format!("持久化文件中无效模式值: {}", v))
                 })
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RunningMode::AgriculturalIrrigation),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RunningMode::SeasonalLoadManagement),
             Err(e) => Err(AiEngineError::ModeSwitchFailed(format!("读取持久化文件失败: {}", e))),
         }
     }
@@ -289,8 +291,10 @@ impl ModeSelector {
 /// 解析模式名称（支持多种格式）
 pub fn parse_mode_name(s: &str) -> Option<RunningMode> {
     match s.to_lowercase().as_str() {
-        "agriculturalirrigation" | "agricultural_irrigation" | "mode-01" | "1" => {
-            Some(RunningMode::AgriculturalIrrigation)
+        // MODE-01: 兼容旧名，新增新名
+        "seasonalloadmanagement" | "seasonal_load_management" | "mode-01" | "1"
+        | "agriculturalirrigation" | "agricultural_irrigation" => {
+            Some(RunningMode::SeasonalLoadManagement)
         }
         "commercialarbitrage" | "commercial_arbitrage" | "mode-02" | "2" => {
             Some(RunningMode::CommercialArbitrage)
@@ -314,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_running_mode_from_u8() {
-        assert_eq!(RunningMode::from_u8(1), Some(RunningMode::AgriculturalIrrigation));
+        assert_eq!(RunningMode::from_u8(1), Some(RunningMode::SeasonalLoadManagement));
         assert_eq!(RunningMode::from_u8(5), Some(RunningMode::UltraGreen));
         assert_eq!(RunningMode::from_u8(0), None);
         assert_eq!(RunningMode::from_u8(6), None);
@@ -322,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_running_mode_display_name() {
-        assert_eq!(RunningMode::AgriculturalIrrigation.display_name(), "农网灌溉模式");
+        assert_eq!(RunningMode::SeasonalLoadManagement.display_name(), "台区季节性负荷模式");
         assert_eq!(RunningMode::CommercialArbitrage.display_name(), "自主套利模式");
     }
 
@@ -333,10 +337,11 @@ mod tests {
 
     #[test]
     fn test_parse_mode_name() {
-        assert_eq!(parse_mode_name("agriculturalirrigation"), Some(RunningMode::AgriculturalIrrigation));
-        assert_eq!(parse_mode_name("AgriculturalIrrigation"), Some(RunningMode::AgriculturalIrrigation));
-        assert_eq!(parse_mode_name("1"), Some(RunningMode::AgriculturalIrrigation));
-        assert_eq!(parse_mode_name("mode-01"), Some(RunningMode::AgriculturalIrrigation));
+        assert_eq!(parse_mode_name("seasonalloadmanagement"), Some(RunningMode::SeasonalLoadManagement));
+        assert_eq!(parse_mode_name("1"), Some(RunningMode::SeasonalLoadManagement));
+        assert_eq!(parse_mode_name("mode-01"), Some(RunningMode::SeasonalLoadManagement));
+        // 兼容旧名
+        assert_eq!(parse_mode_name("agriculturalirrigation"), Some(RunningMode::SeasonalLoadManagement));
         assert_eq!(parse_mode_name("ultragreen"), Some(RunningMode::UltraGreen));
         assert_eq!(parse_mode_name("invalid"), None);
         assert_eq!(parse_mode_name("6"), None);
@@ -344,32 +349,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_mode_selector_initial_current() {
-        let selector = ModeSelector::new(RunningMode::AgriculturalIrrigation, None);
-        assert_eq!(selector.current(), RunningMode::AgriculturalIrrigation);
+        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
+        assert_eq!(selector.current(), RunningMode::SeasonalLoadManagement);
     }
 
     #[tokio::test]
     async fn test_mode_selector_switch() {
-        let selector = ModeSelector::new(RunningMode::AgriculturalIrrigation, None);
+        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
         let prev = selector.switch(RunningMode::CommercialArbitrage, SwitchSource::LocalConfig).await;
-        assert_eq!(prev, Ok(RunningMode::AgriculturalIrrigation));
+        assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
         assert_eq!(selector.current(), RunningMode::CommercialArbitrage);
     }
 
     #[tokio::test]
     async fn test_mode_selector_switch_idempotent() {
-        let selector = ModeSelector::new(RunningMode::AgriculturalIrrigation, None);
-        let prev = selector.switch(RunningMode::AgriculturalIrrigation, SwitchSource::LocalConfig).await;
-        assert_eq!(prev, Ok(RunningMode::AgriculturalIrrigation));
+        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
+        let prev = selector.switch(RunningMode::SeasonalLoadManagement, SwitchSource::LocalConfig).await;
+        assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
     }
 
     #[tokio::test]
     async fn test_mode_selector_subscribe() {
-        let selector = ModeSelector::new(RunningMode::AgriculturalIrrigation, None);
+        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
         let mut rx = selector.subscribe();
         let _ = selector.switch(RunningMode::DemandControl, SwitchSource::LocalConfig).await;
         let event = rx.recv().await.unwrap();
-        assert_eq!(event.previous, RunningMode::AgriculturalIrrigation);
+        assert_eq!(event.previous, RunningMode::SeasonalLoadManagement);
         assert_eq!(event.current, RunningMode::DemandControl);
     }
 }

@@ -364,7 +364,7 @@ impl ModelManager {
         factory_scene: RunningMode,
     ) -> Result<(), AiEngineError> {
         let scene_key = match factory_scene {
-            RunningMode::AgriculturalIrrigation => "AgriculturalIrrigation",
+            RunningMode::SeasonalLoadManagement => "SeasonalLoadManagement",
             RunningMode::CommercialArbitrage => "CommercialArbitrage",
             RunningMode::DemandControl => "DemandControl",
             RunningMode::VirtualPowerPlant => "VirtualPowerPlant",
@@ -372,7 +372,7 @@ impl ModelManager {
         };
 
         let file_name = match factory_scene {
-            RunningMode::AgriculturalIrrigation => "rl_agricultural.rknn",
+            RunningMode::SeasonalLoadManagement => "rl_seasonal.rknn",
             RunningMode::CommercialArbitrage => "rl_arbitrage.rknn",
             RunningMode::DemandControl => "rl_demand.rknn",
             RunningMode::VirtualPowerPlant => "rl_vpp.rknn",
@@ -407,7 +407,7 @@ impl ModelManager {
 
 fn parse_initial_mode(config: &ModeConfig) -> RunningMode {
     crate::mode_selector::parse_mode_name(&config.factory_scene)
-        .unwrap_or(RunningMode::AgriculturalIrrigation)
+        .unwrap_or(RunningMode::SeasonalLoadManagement)
 }
 
 #[cfg(test)]

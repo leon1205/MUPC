@@ -363,7 +363,10 @@ impl ModelRegistry {
         let mut map = HashMap::new();
         for (key, entry) in mf.models {
             let mode = match key.as_str() {
-                "AgriculturalIrrigation" => RunningMode::AgriculturalIrrigation,
+                // MODE-01: 兼容旧 manifest key
+                "SeasonalLoadManagement" | "AgriculturalIrrigation" => {
+                    RunningMode::SeasonalLoadManagement
+                }
                 "CommercialArbitrage" => RunningMode::CommercialArbitrage,
                 "DemandControl" => RunningMode::DemandControl,
                 "VirtualPowerPlant" => RunningMode::VirtualPowerPlant,

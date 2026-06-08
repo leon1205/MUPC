@@ -53,7 +53,7 @@ impl RewardCalculator {
         state: &FusedSystemState,
     ) -> f64 {
         match mode {
-            RunningMode::AgriculturalIrrigation => {
+            RunningMode::SeasonalLoadManagement => {
                 let prev = *self.last_p_batt_set.read().unwrap();
                 self.calc_agri(state, action.p_batt_set, prev)
             }
@@ -72,7 +72,7 @@ impl RewardCalculator {
     /// SCENE-01: 农网灌溉
     /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage_deviation - w5*R_ramp
     fn calc_agri(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
-        let w = &self.weights.agricultural_irrigation;
+        let w = &self.weights.seasonal_load_management;
         let r_pv = (state.pv_power.max(0.0)
             / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
             .min(1.0)
@@ -184,7 +184,7 @@ impl SceneWeights {
     /// 根据运行模式返回对应的权重数组引用
     pub fn lookup(&self, mode: RunningMode) -> &[f64] {
         match mode {
-            RunningMode::AgriculturalIrrigation => &self.agricultural_irrigation,
+            RunningMode::SeasonalLoadManagement => &self.seasonal_load_management,
             RunningMode::CommercialArbitrage => &self.commercial_arbitrage,
             RunningMode::DemandControl => &self.demand_control,
             RunningMode::VirtualPowerPlant => &self.virtual_power_plant,
@@ -225,7 +225,7 @@ mod tests {
     fn test_agri_full_pv_reward() {
         let calc = RewardCalculator::new(SceneWeights::default());
         let r = calc.calculate(
-            RunningMode::AgriculturalIrrigation,
+            RunningMode::SeasonalLoadManagement,
             &make_action(),
             &make_state(),
         );
@@ -237,7 +237,7 @@ mod tests {
         let calc = RewardCalculator::new(SceneWeights::default());
         let mut state = make_state();
         state.transformer_load = 1.2;
-        let r = calc.calculate(RunningMode::AgriculturalIrrigation, &make_action(), &state);
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &make_action(), &state);
         assert!(r < 0.0, "变压器过载应产生负奖励");
     }
 
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn test_weights_lookup() {
         let w = SceneWeights::default();
-        assert_eq!(w.lookup(RunningMode::AgriculturalIrrigation).len(), 5);
+        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 5);
         assert_eq!(w.lookup(RunningMode::CommercialArbitrage).len(), 2);
     }
 

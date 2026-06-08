@@ -29,7 +29,7 @@ impl DataPoint {
             timestamp,
             input,
             output,
-            scene: RunningMode::AgriculturalIrrigation,
+            scene: RunningMode::SeasonalLoadManagement,
         }
     }
 }
@@ -56,7 +56,7 @@ impl OnlineUpdater {
         Self {
             config,
             buffer: Vec::new(),
-            active_scene: RunningMode::AgriculturalIrrigation,
+            active_scene: RunningMode::SeasonalLoadManagement,
             checkpoint_dir: None,
         }
     }
@@ -69,7 +69,7 @@ impl OnlineUpdater {
         Self {
             config,
             buffer: Vec::new(),
-            active_scene: RunningMode::AgriculturalIrrigation,
+            active_scene: RunningMode::SeasonalLoadManagement,
             checkpoint_dir: Some(checkpoint_dir),
         }
     }
@@ -175,7 +175,7 @@ mod tests {
         let updater = OnlineUpdater::new(config);
         assert_eq!(updater.buffer_size(), 0);
         assert!(!updater.is_enabled());
-        assert_eq!(updater.active_scene(), RunningMode::AgriculturalIrrigation);
+        assert_eq!(updater.active_scene(), RunningMode::SeasonalLoadManagement);
     }
 
     #[test]
@@ -194,11 +194,11 @@ mod tests {
         let config = create_test_config();
         let mut updater = OnlineUpdater::new(config);
 
-        updater.add_sample_for_scene(RunningMode::AgriculturalIrrigation, DataPoint::new(1, vec![1.0], vec![0.1]));
+        updater.add_sample_for_scene(RunningMode::SeasonalLoadManagement, DataPoint::new(1, vec![1.0], vec![0.1]));
         updater.add_sample_for_scene(RunningMode::CommercialArbitrage, DataPoint::new(2, vec![2.0], vec![0.2]));
-        updater.add_sample_for_scene(RunningMode::AgriculturalIrrigation, DataPoint::new(3, vec![3.0], vec![0.3]));
+        updater.add_sample_for_scene(RunningMode::SeasonalLoadManagement, DataPoint::new(3, vec![3.0], vec![0.3]));
 
-        assert_eq!(updater.scene_sample_count(RunningMode::AgriculturalIrrigation), 2);
+        assert_eq!(updater.scene_sample_count(RunningMode::SeasonalLoadManagement), 2);
         assert_eq!(updater.scene_sample_count(RunningMode::CommercialArbitrage), 1);
         assert_eq!(updater.scene_sample_count(RunningMode::DemandControl), 0);
     }
@@ -242,11 +242,11 @@ mod tests {
         let config = create_test_config();
         let mut updater = OnlineUpdater::new(config);
 
-        updater.add_sample_for_scene(RunningMode::AgriculturalIrrigation, DataPoint::new(1, vec![1.0], vec![0.1]));
+        updater.add_sample_for_scene(RunningMode::SeasonalLoadManagement, DataPoint::new(1, vec![1.0], vec![0.1]));
         updater.add_sample_for_scene(RunningMode::CommercialArbitrage, DataPoint::new(2, vec![2.0], vec![0.2]));
 
-        updater.clear_scene_buffer(RunningMode::AgriculturalIrrigation);
-        assert_eq!(updater.scene_sample_count(RunningMode::AgriculturalIrrigation), 0);
+        updater.clear_scene_buffer(RunningMode::SeasonalLoadManagement);
+        assert_eq!(updater.scene_sample_count(RunningMode::SeasonalLoadManagement), 0);
         assert_eq!(updater.scene_sample_count(RunningMode::CommercialArbitrage), 1);
     }
 }
