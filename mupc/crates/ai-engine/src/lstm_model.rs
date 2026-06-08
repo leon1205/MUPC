@@ -104,6 +104,11 @@ impl LstmModel {
     pub fn output_horizon_secs(&self) -> u64 {
         self.config.output_horizon_secs
     }
+
+    /// 获取内部 RknnRuntime 引用（用于状态检查）
+    pub fn runtime(&self) -> &RknnRuntime {
+        &self.runtime
+    }
 }
 
 #[cfg(test)]

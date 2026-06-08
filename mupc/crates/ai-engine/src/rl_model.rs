@@ -74,7 +74,9 @@ pub struct ActionOutput {
 /// 解析 RL 模型原始输出为 ActionOutput
 ///
 /// 输出格式: [p_batt_set, q_batt_set, load_shedding, pv_limit, confidence]
-pub fn parse_action_output(raw: &[f32], dispatch_p_set: Option<f64>) -> Option<ActionOutput> {
+/// 注意：v2.4 分层控制架构下 q_batt_set 和 pv_limit 由实时控制模块管理，
+/// 此处仅做值域 clamp，不做 dispatch 约束（由 ActionValidator 统一处理）。
+pub fn parse_action_output(raw: &[f32]) -> Option<ActionOutput> {
     if raw.len() < 5 {
         return None;
     }
@@ -86,9 +88,6 @@ pub fn parse_action_output(raw: &[f32], dispatch_p_set: Option<f64>) -> Option<A
         confidence: raw.get(4).copied().unwrap_or(0.5) as f64,
     };
     action.confidence = action.confidence.clamp(0.0, 1.0);
-    if let Some(p_set) = dispatch_p_set {
-        action.p_batt_set = action.p_batt_set.clamp(-p_set.abs(), p_set.abs());
-    }
     Some(action)
 }
 
@@ -115,7 +114,7 @@ impl RLModel {
         }
         let input = state.to_features();
         let output = self.runtime.run(&input).await?;
-        parse_action_output(&output, None)
+        parse_action_output(&output)
             .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
     }
 
@@ -128,7 +127,7 @@ impl RLModel {
         debug_assert_eq!(input.len(), 48, "输入维度必须为 48");
         validate_input_vector(&input)?;
         let output = self.runtime.run(&input).await?;
-        parse_action_output(&output, state.dispatch_p_set)
+        parse_action_output(&output)
             .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
     }
 
@@ -214,7 +213,7 @@ mod tests {
     #[test]
     fn test_parse_action_output_5_fields() {
         let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
-        let action = parse_action_output(&raw, None).unwrap();
+        let action = parse_action_output(&raw).unwrap();
         assert_eq!(action.p_batt_set, 100.0);
         assert_eq!(action.q_batt_set, 50.0);
         assert_eq!(action.load_shedding, 10.0);
@@ -223,15 +222,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_action_output_dispatch_constraint() {
-        let raw = vec![200.0_f32, 0.0, 0.0, 1.0, 0.8];
-        let action = parse_action_output(&raw, Some(100.0)).unwrap();
-        assert!(action.p_batt_set <= 100.0);
+    fn test_parse_action_output_clamp_bounds() {
+        // p_batt_set 超出范围应被 clamp
+        let raw = vec![600.0_f32, 0.0, 0.0, 1.0, 0.8];
+        let action = parse_action_output(&raw).unwrap();
+        assert!(action.p_batt_set <= 500.0);
+        assert!(action.p_batt_set >= -500.0);
     }
 
     #[test]
     fn test_parse_action_output_insufficient_dims() {
-        assert!(parse_action_output(&[1.0, 2.0], None).is_none());
+        assert!(parse_action_output(&[1.0, 2.0]).is_none());
     }
 
     #[test]

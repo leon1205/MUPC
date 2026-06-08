@@ -4,7 +4,7 @@
 //! 用于在线微调的模型权重更新和 Web UI 决策质量展示。
 //!
 //! 5 种场景奖励函数：
-//! - MODE-01 农网灌溉: R = w1*R_pv - w2*P_batt_deg - w3*P_trafo
+//! - MODE-01 农网灌溉: R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage - w5*R_ramp
 //! - MODE-02 自主套利: R = w1*R_price - w2*P_batt_deg
 //! - MODE-03 需量控制: R = w1*R_demand - w2*P_comfort
 //! - MODE-04 虚拟电厂: R = w1*R_ancillary + w2*R_accuracy - w3*P_deadline
@@ -14,13 +14,22 @@ use crate::config::SceneWeights;
 use crate::data_fusion::FusedSystemState;
 use crate::mode_selector::RunningMode;
 use crate::rl_model::ActionOutput;
+use std::sync::RwLock;
 
 /// 奖励函数计算器
 pub struct RewardCalculator {
     weights: SceneWeights,
     carbon_emission_factor: f64,
     demand_penalty_rate: f64,
+    /// 电池退化系数（保留字段，v2.4 使用 C-rate² 简化计算）
+    #[allow(dead_code)]
     battery_degradation_alpha: f64,
+    /// 电池额定容量 (kWh)，用于 C-rate 计算和 R_ramp 归一化
+    battery_capacity_kwh: f64,
+    /// 上一周期电池有功功率设定值 (kW)，用于 R_ramp 计算
+    last_p_batt_set: RwLock<f64>,
+    /// 电压越限连续步数计数器（用于死区触发）
+    voltage_violation_count: std::sync::atomic::AtomicU32,
 }
 
 impl RewardCalculator {
@@ -30,6 +39,9 @@ impl RewardCalculator {
             carbon_emission_factor: 0.581,
             demand_penalty_rate: 50.0,
             battery_degradation_alpha: 0.01,
+            battery_capacity_kwh: 200.0,
+            last_p_batt_set: RwLock::new(0.0),
+            voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -41,7 +53,10 @@ impl RewardCalculator {
         state: &FusedSystemState,
     ) -> f64 {
         match mode {
-            RunningMode::AgriculturalIrrigation => self.calc_agri(state),
+            RunningMode::AgriculturalIrrigation => {
+                let prev = *self.last_p_batt_set.read().unwrap();
+                self.calc_agri(state, action.p_batt_set, prev)
+            }
             RunningMode::CommercialArbitrage => self.calc_arbitrage(action, state),
             RunningMode::DemandControl => self.calc_demand(action, state),
             RunningMode::VirtualPowerPlant => self.calc_vpp(action, state),
@@ -49,14 +64,72 @@ impl RewardCalculator {
         }
     }
 
-    /// SCENE-01: 农网灌溉 — R = w1*R_pv - w2*P_batt_deg - w3*P_trafo
-    fn calc_agri(&self, state: &FusedSystemState) -> f64 {
+    /// 更新上一周期电池功率设定值（在决策周期结束时调用）
+    pub fn update_last_p_batt(&self, p_batt_set: f64) {
+        *self.last_p_batt_set.write().unwrap() = p_batt_set;
+    }
+
+    /// SCENE-01: 农网灌溉
+    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage_deviation - w5*R_ramp
+    fn calc_agri(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
         let w = &self.weights.agricultural_irrigation;
-        let r_pv = (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
-            .min(1.0) * 100.0;
-        let p_batt_deg = self.battery_degradation_alpha * (state.battery_power.abs() / 500.0) * 100.0;
-        let p_trafo = 200.0 * (state.transformer_load - 1.0).max(0.0);
-        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo
+        let r_pv = (state.pv_power.max(0.0)
+            / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+            .min(1.0)
+            * 100.0;
+
+        let c_rate = state.battery_power.abs() / self.battery_capacity_kwh;
+        let p_batt_deg = c_rate * c_rate;
+
+        let p_trafo = self.overload_penalty(state.transformer_load);
+
+        let v_avg =
+            (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let p_voltage = self.voltage_penalty_with_deadband(v_avg);
+
+        let delta_p = (p_batt_set - prev_p_batt).abs();
+        let r_ramp = w[4] * delta_p / self.battery_capacity_kwh;
+
+        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
+    }
+
+    /// 电压惩罚（±5% 死区，越限连续2步才触发）
+    fn voltage_penalty_with_deadband(&self, v_avg: f64) -> f64 {
+        const V_DEAD: f64 = 0.05;
+        const V_REF: f64 = 1.0;
+        let dev = (v_avg - V_REF).abs();
+
+        if dev <= V_DEAD {
+            self.voltage_violation_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            return 0.0;
+        }
+
+        let count = self
+            .voltage_violation_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+
+        if count < 2 {
+            return 0.0;
+        }
+
+        let dev_excess = dev - V_DEAD;
+        let normalized = dev_excess / 0.10;
+        if v_avg < V_REF - V_DEAD {
+            2.0 * normalized * normalized
+        } else {
+            1.0 * normalized * normalized
+        }
+    }
+
+    /// 变压器过载惩罚（75% 以上开始惩罚）
+    fn overload_penalty(&self, load: f64) -> f64 {
+        if load <= 0.75 {
+            0.0
+        } else {
+            200.0 * (load - 1.0).powi(2)
+        }
     }
 
     /// SCENE-B1: 自主套利 — R = w1*R_price - w2*P_batt_deg
@@ -111,7 +184,7 @@ impl SceneWeights {
     /// 根据运行模式返回对应的权重数组引用
     pub fn lookup(&self, mode: RunningMode) -> &[f64] {
         match mode {
-            RunningMode::AgriculturalIrrigation => &self.agricultural_irrigation[..3],
+            RunningMode::AgriculturalIrrigation => &self.agricultural_irrigation,
             RunningMode::CommercialArbitrage => &self.commercial_arbitrage,
             RunningMode::DemandControl => &self.demand_control,
             RunningMode::VirtualPowerPlant => &self.virtual_power_plant,
@@ -189,7 +262,26 @@ mod tests {
     #[test]
     fn test_weights_lookup() {
         let w = SceneWeights::default();
-        assert_eq!(w.lookup(RunningMode::AgriculturalIrrigation).len(), 3);
+        assert_eq!(w.lookup(RunningMode::AgriculturalIrrigation).len(), 5);
         assert_eq!(w.lookup(RunningMode::CommercialArbitrage).len(), 2);
+    }
+
+    #[test]
+    fn test_voltage_deadband_no_penalty_in_deadband() {
+        let calc = RewardCalculator::new(SceneWeights::default());
+        // v_avg = 1.0 (reference) → 死区内
+        assert!((calc.voltage_penalty_with_deadband(1.0) - 0.0).abs() < 1e-6);
+        // v_avg = 1.03 → 死区边界内
+        assert!((calc.voltage_penalty_with_deadband(1.03) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_voltage_deadband_triggers_after_2_steps() {
+        let calc = RewardCalculator::new(SceneWeights::default());
+        // 第一次越限（v_avg = 1.08 > 1.05），count=1，不触发
+        calc.voltage_penalty_with_deadband(1.08);
+        // 第二次越限，count=2，触发惩罚
+        let penalty = calc.voltage_penalty_with_deadband(1.08);
+        assert!(penalty > 0.0, "越限连续2步应触发惩罚");
     }
 }

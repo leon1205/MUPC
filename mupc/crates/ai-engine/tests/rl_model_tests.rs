@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn test_parse_action_output_5_fields() {
         let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
-        let action = parse_action_output(&raw, None).unwrap();
+        let action = parse_action_output(&raw).unwrap();
         assert_eq!(action.p_batt_set, 100.0);
         assert_eq!(action.q_batt_set, 50.0);
         assert_eq!(action.load_shedding, 10.0);

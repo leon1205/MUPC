@@ -3,6 +3,7 @@
 //! 统一调度 LSTM 预测、数据融合、RL 决策、动作校验和奖励计算。
 //!
 //! v2.3: rl_model 替换为 model_registry（5 个场景独立 RL 模型，双缓冲热切换）。
+//! v2.4: full_decision_cycle 集成 LSTM 预测，预测结果注入融合状态供 RL 使用。
 
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
@@ -13,6 +14,7 @@ use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::model_registry::{ModelRegistry, SceneModelState};
 use crate::reward_calculator::RewardCalculator;
 use crate::rl_model::ActionOutput;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -37,6 +39,10 @@ pub struct ModelManager {
     status: Arc<RwLock<ModelStatus>>,
     /// v2.3: 使用 RwLock 包裹以支持初始化阶段注入 registry
     mode_selector: Arc<RwLock<ModeSelector>>,
+    /// LSTM 历史缓冲（pv_power, load_power 样本，容量 = input_window_secs/60）
+    lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
+    /// LSTM 输入窗口大小（分钟数，即缓冲容量）
+    lstm_input_size: usize,
 }
 
 impl ModelManager {
@@ -49,6 +55,8 @@ impl ModelManager {
         };
         let mode_selector = Arc::new(RwLock::new(ModeSelector::new(initial_mode, persist_path)));
 
+        let lstm_input_size = (config.lstm.input_window_secs / 60) as usize;
+
         Self {
             config,
             lstm_model: Arc::new(RwLock::new(None)),
@@ -58,6 +66,8 @@ impl ModelManager {
             action_validator: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
             mode_selector,
+            lstm_history: Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size))),
+            lstm_input_size,
         }
     }
 
@@ -116,7 +126,7 @@ impl ModelManager {
         *self.reward_calculator.write().await =
             Some(RewardCalculator::new(self.config.reward_weights.clone()));
         *self.action_validator.write().await =
-            Some(ActionValidator::new(self.config.action_constraint.clone()));
+            Some(ActionValidator::new_v2_4(self.config.action_constraint.clone()));
 
         *self.status.write().await = ModelStatus::Ready;
         Ok(())
@@ -124,7 +134,8 @@ impl ModelManager {
 
     /// 完整 AI 决策周期
     ///
-    /// 串联：模式获取 → 数据融合 → RL决策 → 约束校验 → 奖励计算
+    /// 串联：模式获取 → 数据融合 → LSTM预测 → RL决策 → 约束校验 → 奖励计算
+    /// LSTM 预测结果注入融合状态供 RL 使用。
     pub async fn full_decision_cycle(&self) -> Result<ActionOutput, AiEngineError> {
         if !self.is_ready().await {
             return Err(AiEngineError::ModelNotLoaded);
@@ -142,13 +153,27 @@ impl ModelManager {
             }
         };
 
+        // 记录当前实时数据用于 LSTM 历史缓冲（在融合数据之后、更新缓冲之前）
+        let current_pv = fused_state.pv_power;
+        let current_load = fused_state.load_power;
+
+        // LSTM 预测：使用历史缓冲区的数据预测未来光伏/负荷
+        let (pv_forecast, load_forecast) = self.run_lstm_predict().await.unwrap_or_else(|_| {
+            (vec![0.0; 15], vec![0.0; 15])
+        });
+
+        // 将 LSTM 预测结果注入融合状态（克隆以避免借用冲突）
+        let mut fused_state_with_forecast = fused_state.clone();
+        fused_state_with_forecast.pv_forecast_15min = pv_forecast.clone();
+        fused_state_with_forecast.load_forecast_15min = load_forecast.clone();
+
         // v2.3: 通过 ModelRegistry 执行推理（委托给当前 active 的场景模型）
         let rl_action = {
             let registry = self.model_registry.read().await;
             let registry = registry
                 .as_ref()
                 .ok_or(AiEngineError::ModelNotLoaded)?;
-            let input_vector = fused_state.to_input_vector();
+            let input_vector = fused_state_with_forecast.to_input_vector();
             registry.decide(&input_vector).await?
         };
 
@@ -170,6 +195,15 @@ impl ModelManager {
             );
         }
 
+        // 更新 LSTM 历史缓冲（决策完成后再更新，避免用到本周期数据）
+        {
+            let mut history = self.lstm_history.write().await;
+            history.push_back((current_pv, current_load));
+            while history.len() > self.lstm_input_size {
+                history.pop_front();
+            }
+        }
+
         let _reward = {
             let rc = self.reward_calculator.read().await;
             match rc.as_ref() {
@@ -178,7 +212,75 @@ impl ModelManager {
             }
         };
 
+        // 更新奖励计算器中的上一周期电池功率（用于下一周期 R_ramp 计算）
+        if let Some(rc) = self.reward_calculator.read().await.as_ref() {
+            rc.update_last_p_batt(validated.p_batt_set);
+        }
+
         Ok(validated)
+    }
+
+    /// 执行 LSTM 预测（使用历史缓冲区的 pv_power / load_power 样本）
+    ///
+    /// 返回 (pv_forecast, load_forecast)，若 LSTM 未就绪或缓冲不足则返回零向量。
+    async fn run_lstm_predict(&self) -> Result<(Vec<f64>, Vec<f64>), AiEngineError> {
+        let lstm = self.lstm_model.read().await;
+        let lstm = match lstm.as_ref() {
+            Some(m) => m,
+            None => return Ok((vec![0.0; 15], vec![0.0; 15])),
+        };
+
+        if !lstm.runtime().is_loaded() {
+            return Ok((vec![0.0; 15], vec![0.0; 15]));
+        }
+
+        let history = self.lstm_history.read().await;
+        let len = history.len();
+
+        // 需要至少 input_size 个样本才能构建有效输入
+        if len < self.lstm_input_size {
+            tracing::debug!(
+                "LSTM 历史缓冲不足 ({}/{})，跳过本周期预测",
+                len,
+                self.lstm_input_size
+            );
+            return Ok((vec![0.0; 15], vec![0.0; 15]));
+        }
+
+        // 构建 PV 历史输入（取最近的 input_size 个样本）
+        let pv_history: Vec<f32> = history
+            .iter()
+            .rev()
+            .take(self.lstm_input_size)
+            .map(|&(pv, _)| pv as f32)
+            .collect();
+        let pv_history: Vec<f32> = pv_history.into_iter().rev().collect();
+
+        let load_history: Vec<f32> = history
+            .iter()
+            .rev()
+            .take(self.lstm_input_size)
+            .map(|&(_, load)| load as f32)
+            .collect();
+        let load_history: Vec<f32> = load_history.into_iter().rev().collect();
+
+        // 预测 PV（使用 PV 历史）
+        let pv_input = LstmInput {
+            history: pv_history,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+        let pv_output = lstm.predict(&pv_input).await?;
+        let pv_forecast: Vec<f64> = pv_output.predictions.into_iter().map(|v| v as f64).collect();
+
+        // 预测负荷（使用负荷历史）
+        let load_input = LstmInput {
+            history: load_history,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+        let load_output = lstm.predict(&load_input).await?;
+        let load_forecast: Vec<f64> = load_output.predictions.into_iter().map(|v| v as f64).collect();
+
+        Ok((pv_forecast, load_forecast))
     }
 
     /// 设置数据融合引擎（由外部注入）

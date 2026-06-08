@@ -209,7 +209,8 @@ impl Default for NpuConfig {
 /// 场景权重映射
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneWeights {
-    pub agricultural_irrigation: [f64; 4],
+    /// 农网灌溉: [w1光伏消纳, w2电池损耗, w3变压器, w4电压质量, w5功率变化率]
+    pub agricultural_irrigation: [f64; 5],
     pub commercial_arbitrage: [f64; 2],
     pub demand_control: [f64; 2],
     pub virtual_power_plant: [f64; 3],
@@ -219,7 +220,7 @@ pub struct SceneWeights {
 impl Default for SceneWeights {
     fn default() -> Self {
         Self {
-            agricultural_irrigation: [1.0, 0.5, 2.0, 1.0],
+            agricultural_irrigation: [1.0, 0.5, 2.0, 1.0, 0.5],
             commercial_arbitrage: [1.0, 1.0],
             demand_control: [1.0, 0.5],
             virtual_power_plant: [1.0, 2.0, 1.0],

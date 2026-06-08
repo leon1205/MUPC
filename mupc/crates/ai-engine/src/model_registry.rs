@@ -297,7 +297,7 @@ impl ModelRegistry {
     pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError> {
         let active = self.active.read().await;
         active.1.run(input_vector).await.and_then(|output| {
-            parse_action_output(&output, None)
+            parse_action_output(&output)
                 .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
         })
     }
