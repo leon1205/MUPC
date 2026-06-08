@@ -26,11 +26,7 @@ impl RollbackProtection {
     /// 检查目标版本是否允许安装（不低于最低版本）
     pub fn check_version(&self, version: u32) -> Result<bool, SecurityError> {
         if version < self.min_version {
-            tracing::warn!(
-                proposed = version,
-                min = self.min_version,
-                "检测到回滚尝试"
-            );
+            tracing::warn!(proposed = version, min = self.min_version, "检测到回滚尝试");
             return Ok(false);
         }
         Ok(true)
@@ -39,11 +35,7 @@ impl RollbackProtection {
     /// 记录当前版本
     pub fn record_version(&mut self, version: u32) -> Result<(), SecurityError> {
         if version > self.current_version {
-            tracing::info!(
-                old = self.current_version,
-                new = version,
-                "固件版本已更新"
-            );
+            tracing::info!(old = self.current_version, new = version, "固件版本已更新");
             self.current_version = version;
         }
         Ok(())

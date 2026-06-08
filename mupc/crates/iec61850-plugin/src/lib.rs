@@ -2,20 +2,20 @@
 //!
 //! 实现 IEC 61850 协议客户端，支持 MMS 读写和 GOOSE 订阅
 
+mod asn1_utils;
 mod config;
 mod device;
 mod errors;
 mod goose;
 mod mms_client;
 mod mms_types;
-mod asn1_utils;
 
-pub use config::{Iec61850Config, GooseConfig, MmsConfig, MmsTlsConfig};
-pub use device::{Iec61850DeviceImpl, Iec61850Device};
+pub use config::{GooseConfig, Iec61850Config, MmsConfig, MmsTlsConfig};
+pub use device::{Iec61850Device, Iec61850DeviceImpl};
 pub use errors::Iec61850Error;
-pub use goose::{GooseSubscriber, GooseMessage};
+pub use goose::{GooseMessage, GooseSubscriber};
 pub use mms_client::{MmsClient, MmsClientState, MmsClientTrait};
-pub use mms_types::{MmsRequest, MmsResponse, MmsService, DataObject};
+pub use mms_types::{DataObject, MmsRequest, MmsResponse, MmsService};
 
 use device_trait::errors::PluginError;
 use device_trait::plugin::Plugin;
@@ -125,7 +125,10 @@ mod tests {
     fn test_iec61850_status_display() {
         assert_eq!(Iec61850Status::Connected.to_string(), "Connected");
         assert_eq!(Iec61850Status::Disconnected.to_string(), "Disconnected");
-        assert_eq!(Iec61850Status::Error("test".to_string()).to_string(), "Error: test");
+        assert_eq!(
+            Iec61850Status::Error("test".to_string()).to_string(),
+            "Error: test"
+        );
     }
 
     #[test]

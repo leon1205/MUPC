@@ -60,13 +60,10 @@ impl Default for PluginLoaderImpl {
 }
 
 impl PluginLoader for PluginLoaderImpl {
-    fn load(
-        &self,
-        plugin_path: &str,
-        _config: serde_json::Value,
-    ) -> Result<(), PluginError> {
+    fn load(&self, plugin_path: &str, _config: serde_json::Value) -> Result<(), PluginError> {
         let path = Path::new(plugin_path);
-        let plugin_name = path.file_stem()
+        let plugin_name = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .ok_or_else(|| PluginError::load_failed("无效的插件路径"))?
             .to_string();
@@ -88,12 +85,14 @@ impl PluginLoader for PluginLoaderImpl {
 
         // 获取插件符号 - 使用 unsafe 块
         let create_fn: Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
-            library.get(b"create_plugin")
+            library
+                .get(b"create_plugin")
                 .map_err(|e| PluginError::LoadFailed(format!("create_plugin: {}", e)))?
         };
 
         let meta_fn: Symbol<unsafe extern "C" fn() -> PluginMeta> = unsafe {
-            library.get(b"plugin_meta")
+            library
+                .get(b"plugin_meta")
                 .map_err(|e| PluginError::LoadFailed(format!("plugin_meta: {}", e)))?
         };
 

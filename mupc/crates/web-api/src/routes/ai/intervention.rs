@@ -2,10 +2,13 @@
 //!
 //! 查询人工专家干预记录
 
-use axum::{Json, extract::{State, Query}};
+use crate::AppState;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct InterventionQuery {
@@ -40,17 +43,26 @@ pub async fn get_interventions(
 
     let end = chrono::Utc::now();
     let start = end - chrono::Duration::days(30);
-    let events = state.storage.events.query_range(start, end).await
-        .map_err(|e| { tracing::error!(%e, "查询干预记录失败"); e })
+    let events = state
+        .storage
+        .events
+        .query_range(start, end)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "查询干预记录失败");
+            e
+        })
         .unwrap_or_default();
 
-    let intervention_events: Vec<&_> = events.iter()
+    let intervention_events: Vec<&_> = events
+        .iter()
         .filter(|e| e.event_type.contains("intervention") || e.event_type.contains("user_action"))
         .collect();
 
     let total = intervention_events.len() as u64;
     let skip = ((page - 1) as usize * page_size).min(intervention_events.len());
-    let items: Vec<InterventionItem> = intervention_events.into_iter()
+    let items: Vec<InterventionItem> = intervention_events
+        .into_iter()
         .skip(skip)
         .take(page_size)
         .map(|e| InterventionItem {

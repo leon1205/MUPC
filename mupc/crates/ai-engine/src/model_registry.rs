@@ -110,9 +110,10 @@ impl ModelRegistry {
 
         // 加载出厂场景模型
         let runtime = RknnRuntime::new(&model_path, Some(&entry.sha256))?;
-        runtime.load().await.map_err(|e| {
-            AiEngineError::ModelLoadFailed(format!("出厂场景模型加载失败: {}", e))
-        })?;
+        runtime
+            .load()
+            .await
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("出厂场景模型加载失败: {}", e)))?;
 
         scene_states.insert(factory_scene, SceneModelState::Ready);
 
@@ -182,11 +183,10 @@ impl ModelRegistry {
         self.set_scene_state(mode, SceneModelState::Loading);
 
         // 加载到 standby 槽
-        let new_runtime =
-            RknnRuntime::new(&model_path, Some(&entry.sha256)).map_err(|e| {
-                self.set_scene_state(mode, SceneModelState::Error);
-                AiEngineError::ModelLoadFailed(format!("模型初始化失败: {}", e))
-            })?;
+        let new_runtime = RknnRuntime::new(&model_path, Some(&entry.sha256)).map_err(|e| {
+            self.set_scene_state(mode, SceneModelState::Error);
+            AiEngineError::ModelLoadFailed(format!("模型初始化失败: {}", e))
+        })?;
 
         new_runtime.load().await.map_err(|e| {
             self.set_scene_state(mode, SceneModelState::Error);
@@ -206,7 +206,11 @@ impl ModelRegistry {
         // 标记目标场景为 Ready，旧场景状态不变（仍为 Ready，模型文件在本地）
         self.set_scene_state(mode, SceneModelState::Ready);
 
-        tracing::info!("场景模型热切换完成: {} → {}", current_mode.display_name(), mode.display_name());
+        tracing::info!(
+            "场景模型热切换完成: {} → {}",
+            current_mode.display_name(),
+            mode.display_name()
+        );
 
         // 延迟 30s 后释放 standby 中的旧模型（等待进行中的推理完成）
         let standby_arc = self.standby.clone();
@@ -224,7 +228,10 @@ impl ModelRegistry {
     /// 查询指定场景的模型状态
     pub fn model_state(&self, mode: RunningMode) -> SceneModelState {
         let states = self.scene_states.read().unwrap();
-        states.get(&mode).copied().unwrap_or(SceneModelState::NotLoaded)
+        states
+            .get(&mode)
+            .copied()
+            .unwrap_or(SceneModelState::NotLoaded)
     }
 
     /// 获取所有场景的模型状态列表
@@ -351,10 +358,12 @@ impl ModelRegistry {
         states.insert(mode, state);
     }
 
-    async fn load_manifest(path: &Path) -> Result<HashMap<RunningMode, ModelManifestEntry>, AiEngineError> {
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
-            AiEngineError::ModelLoadFailed(format!("读取模型清单失败: {}", e))
-        })?;
+    async fn load_manifest(
+        path: &Path,
+    ) -> Result<HashMap<RunningMode, ModelManifestEntry>, AiEngineError> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("读取模型清单失败: {}", e)))?;
 
         let mf: ManifestFile = serde_json::from_str(&content).map_err(|e| {
             AiEngineError::ModelLoadFailed(format!("模型清单 JSON 解析失败: {}", e))
@@ -390,9 +399,9 @@ impl ModelRegistry {
         }
 
         use sha2::{Digest, Sha256};
-        let data = tokio::fs::read(path).await.map_err(|e| {
-            AiEngineError::ModelLoadFailed(format!("读取模型文件失败: {}", e))
-        })?;
+        let data = tokio::fs::read(path)
+            .await
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("读取模型文件失败: {}", e)))?;
 
         let mut hasher = Sha256::new();
         hasher.update(&data);

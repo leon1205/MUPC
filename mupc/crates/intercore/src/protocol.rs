@@ -3,9 +3,9 @@
 //! 帧格式：0xAA 0x55 + 长度(2字节) + 类型(2字节) + 序号(2字节) + 数据(N字节) + CRC16(2字节)
 //! 总长度：固定 64 字节（不足部分用 padding 填充）
 
-use mupc_common::{MupcError, ErrorCode};
-use std::io::Cursor;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use mupc_common::{ErrorCode, MupcError};
+use std::io::Cursor;
 
 /// 帧目标长度（定长）
 pub const FRAME_FIXED_LENGTH: usize = 64;
@@ -59,7 +59,11 @@ impl FrameHeader {
     /// 从字节流解析帧头
     pub fn from_bytes(data: &[u8]) -> Result<Self, MupcError> {
         if data.len() < Self::FIXED_LENGTH {
-            return Err(MupcError::new(ErrorCode::FrameParseError, "Frame too short", "intercore"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                "Frame too short",
+                "intercore",
+            ));
         }
 
         let mut cursor = Cursor::new(data);
@@ -69,8 +73,11 @@ impl FrameHeader {
         })?;
 
         if magic != Self::MAGIC {
-            return Err(MupcError::new(ErrorCode::FrameParseError,
-                format!("Invalid magic: {:#x}", magic), "intercore"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                format!("Invalid magic: {:#x}", magic),
+                "intercore",
+            ));
         }
 
         let length = cursor.read_u16::<BigEndian>().map_err(|_| {
@@ -78,7 +85,11 @@ impl FrameHeader {
         })?;
 
         let frame_type_val = cursor.read_u16::<BigEndian>().map_err(|_| {
-            MupcError::new(ErrorCode::FrameParseError, "Invalid frame type", "intercore")
+            MupcError::new(
+                ErrorCode::FrameParseError,
+                "Invalid frame type",
+                "intercore",
+            )
         })?;
 
         let seq_no = cursor.read_u16::<BigEndian>().map_err(|_| {
@@ -142,14 +153,26 @@ impl IntercoreFrame {
         let mut result = Vec::new();
 
         // Magic
-        result.write_u16::<BigEndian>(self.header.magic).map_err(|_| {
-            MupcError::new(ErrorCode::SerializeError, "Failed to write magic", "intercore")
-        })?;
+        result
+            .write_u16::<BigEndian>(self.header.magic)
+            .map_err(|_| {
+                MupcError::new(
+                    ErrorCode::SerializeError,
+                    "Failed to write magic",
+                    "intercore",
+                )
+            })?;
 
         // Length
-        result.write_u16::<BigEndian>(self.header.length).map_err(|_| {
-            MupcError::new(ErrorCode::SerializeError, "Failed to write length", "intercore")
-        })?;
+        result
+            .write_u16::<BigEndian>(self.header.length)
+            .map_err(|_| {
+                MupcError::new(
+                    ErrorCode::SerializeError,
+                    "Failed to write length",
+                    "intercore",
+                )
+            })?;
 
         // Frame type
         let frame_type_val = match self.header.frame_type {
@@ -163,13 +186,23 @@ impl IntercoreFrame {
             FrameType::Unknown => 0xFFFF,
         };
         result.write_u16::<BigEndian>(frame_type_val).map_err(|_| {
-            MupcError::new(ErrorCode::SerializeError, "Failed to write frame type", "intercore")
+            MupcError::new(
+                ErrorCode::SerializeError,
+                "Failed to write frame type",
+                "intercore",
+            )
         })?;
 
         // Seq no
-        result.write_u16::<BigEndian>(self.header.seq_no).map_err(|_| {
-            MupcError::new(ErrorCode::SerializeError, "Failed to write seq no", "intercore")
-        })?;
+        result
+            .write_u16::<BigEndian>(self.header.seq_no)
+            .map_err(|_| {
+                MupcError::new(
+                    ErrorCode::SerializeError,
+                    "Failed to write seq no",
+                    "intercore",
+                )
+            })?;
 
         // Data
         result.extend_from_slice(&self.data);
@@ -177,7 +210,11 @@ impl IntercoreFrame {
         // CRC16
         let crc = Self::calculate_crc16(&result);
         result.write_u16::<BigEndian>(crc).map_err(|_| {
-            MupcError::new(ErrorCode::SerializeError, "Failed to write CRC", "intercore")
+            MupcError::new(
+                ErrorCode::SerializeError,
+                "Failed to write CRC",
+                "intercore",
+            )
         })?;
 
         // Padding to fixed 64 bytes
@@ -191,7 +228,11 @@ impl IntercoreFrame {
     /// 从字节流解析帧
     pub fn from_bytes(data: &[u8]) -> Result<Self, MupcError> {
         if data.len() < FrameHeader::FIXED_LENGTH {
-            return Err(MupcError::new(ErrorCode::FrameParseError, "Frame too short", "intercore"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                "Frame too short",
+                "intercore",
+            ));
         }
 
         let header = FrameHeader::from_bytes(data)?;
@@ -203,8 +244,14 @@ impl IntercoreFrame {
         let calculated_crc = Self::calculate_crc16(&data[..data_len]);
 
         if received_crc != calculated_crc {
-            return Err(MupcError::new(ErrorCode::FrameChecksumError,
-                format!("CRC mismatch: expected {:#x}, got {:#x}", calculated_crc, received_crc), "intercore"));
+            return Err(MupcError::new(
+                ErrorCode::FrameChecksumError,
+                format!(
+                    "CRC mismatch: expected {:#x}, got {:#x}",
+                    calculated_crc, received_crc
+                ),
+                "intercore",
+            ));
         }
 
         let payload_start = FrameHeader::FIXED_LENGTH;
@@ -247,8 +294,12 @@ mod tests {
         let bytes = frame.to_bytes().unwrap();
 
         // 验证帧长度为固定的 64 字节
-        assert_eq!(bytes.len(), FRAME_FIXED_LENGTH,
-            "Frame should be exactly 64 bytes, got {}", bytes.len());
+        assert_eq!(
+            bytes.len(),
+            FRAME_FIXED_LENGTH,
+            "Frame should be exactly 64 bytes, got {}",
+            bytes.len()
+        );
     }
 
     #[test]
@@ -271,8 +322,13 @@ mod tests {
             };
             let frame = IntercoreFrame::new(frame_type, 0, data);
             let bytes = frame.to_bytes().unwrap();
-            assert_eq!(bytes.len(), FRAME_FIXED_LENGTH,
-                "Frame type {:?} should be 64 bytes, got {}", frame_type, bytes.len());
+            assert_eq!(
+                bytes.len(),
+                FRAME_FIXED_LENGTH,
+                "Frame type {:?} should be 64 bytes, got {}",
+                frame_type,
+                bytes.len()
+            );
         }
     }
 
@@ -311,7 +367,10 @@ mod tests {
 
         // 从字节流解析回来
         let parsed = IntercoreFrame::from_bytes(&bytes);
-        assert!(parsed.is_ok(), "Frame with valid CRC should parse successfully");
+        assert!(
+            parsed.is_ok(),
+            "Frame with valid CRC should parse successfully"
+        );
     }
 
     #[test]

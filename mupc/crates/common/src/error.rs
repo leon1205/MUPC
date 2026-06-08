@@ -150,7 +150,7 @@ impl MupcError {
         self.source = Some(Box::new(source));
         self
     }
-  
+
     /// 获取错误码值
     pub fn code_value(&self) -> u16 {
         self.code as u16
@@ -209,14 +209,20 @@ mod tests {
     #[test]
     fn test_error_code_from_u16() {
         assert_eq!(ErrorCode::from_u16(0x0001), Some(ErrorCode::Unknown));
-        assert_eq!(ErrorCode::from_u16(0x0101), Some(ErrorCode::FrameParseError));
+        assert_eq!(
+            ErrorCode::from_u16(0x0101),
+            Some(ErrorCode::FrameParseError)
+        );
         assert_eq!(ErrorCode::from_u16(0xFFFF), None);
     }
 
     #[test]
     fn test_error_code_description() {
         assert_eq!(ErrorCode::Unknown.description(), "Unknown error");
-        assert_eq!(ErrorCode::FrameParseError.description(), "Frame parse error");
+        assert_eq!(
+            ErrorCode::FrameParseError.description(),
+            "Frame parse error"
+        );
         assert_eq!(ErrorCode::AuthFailed.description(), "Authentication failed");
     }
 
@@ -241,8 +247,8 @@ mod tests {
     #[test]
     fn test_mupc_error_source() {
         let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "inner error");
-        let err = MupcError::new(ErrorCode::IoError, "outer error", "test-module")
-            .with_source(inner);
+        let err =
+            MupcError::new(ErrorCode::IoError, "outer error", "test-module").with_source(inner);
         let source = err.source();
         assert!(source.is_some());
     }

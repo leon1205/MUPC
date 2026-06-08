@@ -4,13 +4,13 @@
 
 use std::path::Path;
 use tracing::Level;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
     layer::SubscriberExt,
     util::SubscriberInitExt,
     EnvFilter,
 };
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 /// 日志配置
 #[derive(Debug, Clone)]
@@ -53,11 +53,7 @@ pub fn init_logging(config: LogConfig) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // 创建文件滚动器
-    let file_appender = RollingFileAppender::new(
-        Rotation::DAILY,
-        &config.directory,
-        "mupc.log",
-    );
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, &config.directory, "mupc.log");
 
     // 创建环境过滤器
     let env_filter = EnvFilter::try_from_default_env()

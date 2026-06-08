@@ -12,9 +12,9 @@
 
 use async_trait::async_trait;
 use mupc_common::MupcError;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use crate::telemetry::DataPackage;
 

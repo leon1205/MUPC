@@ -2,25 +2,34 @@
 //!
 //! 实现 Iec61850Device trait，支持与 IEC 61850 IED 设备通信
 
+use crate::config::GooseConfig;
 use crate::config::Iec61850Config;
 use crate::errors::Iec61850Error;
 use crate::goose::GooseSubscriber;
 use crate::mms_client::MmsClient;
 use crate::Iec61850Status;
 use async_trait::async_trait;
-use crate::config::GooseConfig;
 use device_trait::{DataFrame, DataQuality, Device, DeviceError, DeviceStatus};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::sync::Arc;
 
 /// IEC 61850 设备接口
 #[async_trait]
 pub trait Iec61850Device: Device {
     /// 读取数据对象（DataObject）
-    async fn read_do(&self, ln: &str, do_name: &str) -> std::result::Result<DataFrame, Iec61850Error>;
+    async fn read_do(
+        &self,
+        ln: &str,
+        do_name: &str,
+    ) -> std::result::Result<DataFrame, Iec61850Error>;
 
     /// 写入数据对象
-    async fn write_do(&self, ln: &str, do_name: &str, value: &[u8]) -> std::result::Result<(), Iec61850Error>;
+    async fn write_do(
+        &self,
+        ln: &str,
+        do_name: &str,
+        value: &[u8],
+    ) -> std::result::Result<(), Iec61850Error>;
 
     /// 订阅 GOOSE 消息
     fn subscribe_goose(&self, go_id: &str) -> Arc<GooseSubscriber>;
@@ -125,8 +134,15 @@ impl Device for Iec61850DeviceImpl {
 
 #[async_trait]
 impl Iec61850Device for Iec61850DeviceImpl {
-    async fn read_do(&self, ln: &str, do_name: &str) -> std::result::Result<DataFrame, Iec61850Error> {
-        let data = self.mms_client.read_do(ln, do_name).await
+    async fn read_do(
+        &self,
+        ln: &str,
+        do_name: &str,
+    ) -> std::result::Result<DataFrame, Iec61850Error> {
+        let data = self
+            .mms_client
+            .read_do(ln, do_name)
+            .await
             .map_err(|e| Iec61850Error::ProtocolError(e.to_string()))?;
 
         Ok(DataFrame {
@@ -137,8 +153,15 @@ impl Iec61850Device for Iec61850DeviceImpl {
         })
     }
 
-    async fn write_do(&self, ln: &str, do_name: &str, value: &[u8]) -> std::result::Result<(), Iec61850Error> {
-        self.mms_client.write_do(ln, do_name, value).await
+    async fn write_do(
+        &self,
+        ln: &str,
+        do_name: &str,
+        value: &[u8],
+    ) -> std::result::Result<(), Iec61850Error> {
+        self.mms_client
+            .write_do(ln, do_name, value)
+            .await
             .map_err(|e| Iec61850Error::ProtocolError(e.to_string()))
     }
 

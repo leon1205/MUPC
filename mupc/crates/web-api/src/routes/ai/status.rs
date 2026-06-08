@@ -2,10 +2,10 @@
 //!
 //! GET /api/v1/ai/status — 获取 AI 引擎整体运行状态
 
-use axum::{Json, extract::State};
+use crate::AppState;
+use axum::{extract::State, Json};
 use serde::Serialize;
 use std::sync::Arc;
-use crate::AppState;
 
 /// AI 状态响应
 #[derive(Debug, Serialize)]
@@ -33,15 +33,21 @@ pub struct RunningModeInfo {
 }
 
 /// GET /api/v1/ai/status
-pub async fn get_ai_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<AiStatusResponse> {
+pub async fn get_ai_status(State(state): State<Arc<AppState>>) -> Json<AiStatusResponse> {
     let info = state.ai_integrator.engine_status().await;
     Json(AiStatusResponse {
         engine_status: info.engine_status.to_string(),
         model_status: ModelStatusInfo {
-            lstm: if info.lstm_ready { "ready".to_string() } else { "unloaded".to_string() },
-            rl: if info.rl_ready { "ready".to_string() } else { "unloaded".to_string() },
+            lstm: if info.lstm_ready {
+                "ready".to_string()
+            } else {
+                "unloaded".to_string()
+            },
+            rl: if info.rl_ready {
+                "ready".to_string()
+            } else {
+                "unloaded".to_string()
+            },
         },
         running_mode: info.current_mode.map(|m| RunningModeInfo {
             current: m.id,

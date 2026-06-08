@@ -39,12 +39,8 @@ const MIN_RKNN_SIZE: u64 = 1_048_576; // 1MB
 const MAX_RKNN_SIZE: u64 = 524_288_000; // 500MB
 
 /// 平台最低版本要求（platform_version -> 最低版本号）
-const PLATFORM_MIN_VERSION: &[(&str, u32)] = &[
-    ("RK3588", 8),
-    ("RK3588S", 8),
-    ("RK3568", 6),
-    ("RK3568S", 6),
-];
+const PLATFORM_MIN_VERSION: &[(&str, u32)] =
+    &[("RK3588", 8), ("RK3588S", 8), ("RK3568", 6), ("RK3568S", 6)];
 
 /// 检查 RKNN 魔数是否有效
 ///
@@ -54,7 +50,8 @@ fn is_valid_rknn_magic(header: &[u8]) -> bool {
     header.starts_with(b"RKNN")
         || header.starts_with(b"RKNM")
         || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4E) // "RKNN" 的另一种字节序
-        || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4D) // "RKNM"
+        || (header[0] == 0x52 && header[1] == 0x4B && header[2] == 0x4E && header[3] == 0x4D)
+    // "RKNM"
 }
 
 impl Verifier {
@@ -135,19 +132,17 @@ impl Verifier {
             .await
             .map_err(|e| OtaError::VerificationFailed(format!("读取公钥文件失败: {}", e)))?;
 
-        let verifying_key = VerifyingKey::from_bytes(
-            key_bytes.as_slice().try_into().map_err(|_| {
+        let verifying_key =
+            VerifyingKey::from_bytes(key_bytes.as_slice().try_into().map_err(|_| {
                 OtaError::VerificationFailed("无效的 Ed25519 公钥格式".to_string())
-            })?,
-        )
-        .map_err(|e| OtaError::VerificationFailed(format!("解析 Ed25519 公钥失败: {}", e)))?;
+            })?)
+            .map_err(|e| OtaError::VerificationFailed(format!("解析 Ed25519 公钥失败: {}", e)))?;
 
-        let sig = Signature::from_bytes(
-            signature.try_into().map_err(|_| {
+        let sig =
+            Signature::from_bytes(signature.try_into().map_err(|_| {
                 OtaError::VerificationFailed("无效的 Ed25519 签名格式".to_string())
-            })?,
-        )
-        .map_err(|e| OtaError::VerificationFailed(format!("解析 Ed25519 签名失败: {}", e)))?;
+            })?)
+            .map_err(|e| OtaError::VerificationFailed(format!("解析 Ed25519 签名失败: {}", e)))?;
 
         verifying_key
             .verify(data, &sig)
@@ -230,10 +225,7 @@ impl Verifier {
     /// # 参数
     /// * `file_path` - 模型文件路径
     pub async fn verify_model_format(&self, file_path: &Path) -> Result<(), OtaError> {
-        let extension = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         if !extension.eq_ignore_ascii_case("rknn") {
             return Err(OtaError::VerificationFailed(format!(
@@ -327,7 +319,9 @@ impl Verifier {
 
         tracing::info!(
             "平台兼容性校验: 文件 {:?}, 平台版本 {}, RKNN 头部版本 {}",
-            file_path, platform_version, version
+            file_path,
+            platform_version,
+            version
         );
 
         // 查询最低版本要求
@@ -375,7 +369,8 @@ impl Verifier {
         self.verify_model_format(file_path).await?;
 
         // 4. 平台兼容性校验
-        self.verify_platform_compatibility(file_path, "RK3588").await?;
+        self.verify_platform_compatibility(file_path, "RK3588")
+            .await?;
 
         tracing::info!("模型文件 {:?} 验证通过", file_path);
         Ok(())
@@ -495,7 +490,9 @@ mod tests {
         let file_path = temp_dir.join("model.rknn");
 
         // 写入有效的 RKNN 文件头
-        tokio::fs::write(&file_path, b"RKNN\x00\x00\x00\x08RK3588 model data").await.unwrap();
+        tokio::fs::write(&file_path, b"RKNN\x00\x00\x00\x08RK3588 model data")
+            .await
+            .unwrap();
 
         let result = verifier.verify_model_format(&file_path).await;
         assert!(result.is_ok());
@@ -526,7 +523,9 @@ mod tests {
         let file_path = temp_dir.join("model.rknn");
 
         // 写入无效的魔数
-        tokio::fs::write(&file_path, b"INVALID_HEADER_DATA").await.unwrap();
+        tokio::fs::write(&file_path, b"INVALID_HEADER_DATA")
+            .await
+            .unwrap();
 
         let result = verifier.verify_model_format(&file_path).await;
         assert!(result.is_err());
@@ -541,7 +540,9 @@ mod tests {
         let verifier = Verifier::new(key_path).unwrap();
         let file_path = temp_dir.join("modelfile");
 
-        tokio::fs::write(&file_path, b"RKNN\x00\x00\x00\x08RK3588").await.unwrap();
+        tokio::fs::write(&file_path, b"RKNN\x00\x00\x00\x08RK3588")
+            .await
+            .unwrap();
 
         let result = verifier.verify_model_format(&file_path).await;
         assert!(result.is_err());
@@ -581,7 +582,9 @@ mod tests {
         let file_path = temp_dir.join("model.rknn");
 
         // 创建小于 1MB 的文件
-        tokio::fs::write(&file_path, b"RKNN\x00\x00\x00\x08").await.unwrap();
+        tokio::fs::write(&file_path, b"RKNN\x00\x00\x00\x08")
+            .await
+            .unwrap();
 
         let result = verifier
             .verify_platform_compatibility(&file_path, "RK3588")
@@ -655,9 +658,7 @@ mod tests {
         // 在没有 ed25519 和 sm2 feature 时，verify_signature 应返回错误
         #[cfg(not(any(feature = "ed25519", feature = "sm2")))]
         {
-            let result = verifier
-                .verify_signature(&file_path, &[])
-                .await;
+            let result = verifier.verify_signature(&file_path, &[]).await;
             assert!(result.is_err());
         }
     }

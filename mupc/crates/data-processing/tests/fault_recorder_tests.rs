@@ -1,6 +1,6 @@
-use mupc_data_processing::telemetry::FaultCondition;
 use mupc_data_processing::fault_recorder_impl::{FaultRecorderImpl, FaultType};
 use mupc_data_processing::recorder::FaultRecorder;
+use mupc_data_processing::telemetry::FaultCondition;
 use std::path::PathBuf;
 
 fn create_temp_db() -> PathBuf {

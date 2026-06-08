@@ -24,8 +24,7 @@ impl PeakShavingStrategy {
         let pv_power = data.device_status.pv_power.unwrap_or(0.0);
         let load_power = data.device_status.load_power.unwrap_or(0.0);
 
-        let (p_batt, cmd_type) =
-            self.decide(battery_soc, pv_power, load_power, is_peak, is_valley);
+        let (p_batt, cmd_type) = self.decide(battery_soc, pv_power, load_power, is_peak, is_valley);
 
         ControlCommand {
             cmd_id: 1,

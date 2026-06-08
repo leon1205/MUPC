@@ -64,11 +64,8 @@ impl TrendAnalyzer {
 
         let cpu_values: Vec<f32> = window.iter().map(|s| s.cpu.usage_percent).collect();
         let mean = cpu_values.iter().sum::<f32>() / cpu_values.len() as f32;
-        let variance: f32 = cpu_values
-            .iter()
-            .map(|v| (v - mean).powi(2))
-            .sum::<f32>()
-            / cpu_values.len() as f32;
+        let variance: f32 =
+            cpu_values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / cpu_values.len() as f32;
         let std_dev = variance.sqrt() as f64;
 
         let latest = window.last().unwrap();
@@ -197,13 +194,19 @@ impl ThresholdAnalyzer {
         // 温度检查
         if snapshot.temperature.cpu_temp_c >= self.temp_critical {
             severity = AnalysisSeverity::Critical;
-            findings.push(format!("CPU 温度过高: {}°C", snapshot.temperature.cpu_temp_c));
+            findings.push(format!(
+                "CPU 温度过高: {}°C",
+                snapshot.temperature.cpu_temp_c
+            ));
             recommendations.push("降频或增加散热".into());
         } else if snapshot.temperature.cpu_temp_c >= self.temp_warning {
             if severity != AnalysisSeverity::Critical {
                 severity = AnalysisSeverity::Warning;
             }
-            findings.push(format!("CPU 温度偏高: {}°C", snapshot.temperature.cpu_temp_c));
+            findings.push(format!(
+                "CPU 温度偏高: {}°C",
+                snapshot.temperature.cpu_temp_c
+            ));
         }
 
         if findings.is_empty() {

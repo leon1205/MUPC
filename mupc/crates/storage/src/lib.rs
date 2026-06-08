@@ -10,4 +10,6 @@ pub use repository::{
     SqliteAssetRepo, SqliteDecisionRepo, SqliteEventRepo, SqliteFaultRepo, SqliteTelemetryRepo,
     TelemetryRepository,
 };
-pub use services::{run_migrations, RetentionManager, RetentionReport, StorageService, WriteBuffer};
+pub use services::{
+    run_migrations, RetentionManager, RetentionReport, StorageService, WriteBuffer,
+};

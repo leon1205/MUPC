@@ -16,7 +16,7 @@
 //! - 会话密钥派生使用 HKDF-SHA256
 
 use rand::RngCore;
-use serde::{Deserialize, Serialize, Deserializer, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::errors::WirelessError;
 
@@ -81,9 +81,8 @@ impl EcdhKeyPair {
 
         // 生成 32 字节随机私钥
         let mut private_key = vec![0u8; P256_PRIVATE_KEY_LEN];
-        rng.try_fill_bytes(&mut private_key).map_err(|e| {
-            WirelessError::EncryptionError(format!("生成随机私钥失败: {}", e))
-        })?;
+        rng.try_fill_bytes(&mut private_key)
+            .map_err(|e| WirelessError::EncryptionError(format!("生成随机私钥失败: {}", e)))?;
 
         // 使用 p256 crate 计算公钥
         // Phase 2+ 集成时替换为实际 p256 crate 调用
@@ -118,15 +117,17 @@ impl EcdhKeyPair {
         }
 
         if self.private_key.len() != P256_PRIVATE_KEY_LEN {
-            return Err(WirelessError::EncryptionError(
-                "己方私钥长度无效".into(),
-            ));
+            return Err(WirelessError::EncryptionError("己方私钥长度无效".into()));
         }
 
         // Phase 2+ 集成：调用 p256::ecdh::diffie_hellman()
         // 当前使用简化的占位实现，返回 XOR 混淆结果作为框架占位
         let mut shared_secret = vec![0u8; P256_PRIVATE_KEY_LEN];
-        for (i, item) in shared_secret.iter_mut().enumerate().take(P256_PRIVATE_KEY_LEN) {
+        for (i, item) in shared_secret
+            .iter_mut()
+            .enumerate()
+            .take(P256_PRIVATE_KEY_LEN)
+        {
             // 占位：XOR 混合同胞公钥的 xy 坐标与私钥
             *item = self.private_key[i]
                 ^ peer_public.get(i + 1).copied().unwrap_or(0)

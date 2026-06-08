@@ -48,10 +48,7 @@ impl PluginEntry {
 
     /// 检查插件是否可用
     pub fn is_available(&self) -> bool {
-        matches!(
-            self.state,
-            PluginState::Initialized | PluginState::Running
-        )
+        matches!(self.state, PluginState::Initialized | PluginState::Running)
     }
 }
 
@@ -78,10 +75,7 @@ impl PluginRegistry {
     ) -> Result<(), LoaderError> {
         let mut entries = self.entries.write();
         if entries.contains_key(&name) {
-            return Err(LoaderError::load_failed(format!(
-                "插件 {} 已注册",
-                name
-            )));
+            return Err(LoaderError::load_failed(format!("插件 {} 已注册", name)));
         }
 
         let entry = PluginEntry::new(name.clone(), meta, path);
@@ -162,12 +156,7 @@ mod tests {
     use super::*;
 
     fn create_test_entry() -> PluginEntry {
-        let meta = PluginMeta::new(
-            "test-plugin",
-            "1.0.0",
-            "Test Author",
-            "A test plugin",
-        );
+        let meta = PluginMeta::new("test-plugin", "1.0.0", "Test Author", "A test plugin");
         PluginEntry::new(
             "test-plugin".to_string(),
             meta,
@@ -188,7 +177,11 @@ mod tests {
         let meta = entry.meta.clone();
 
         registry
-            .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+            .register(
+                "test-plugin".to_string(),
+                meta,
+                "/path/to/plugin.so".to_string(),
+            )
             .unwrap();
         assert_eq!(registry.count(), 1);
     }
@@ -200,7 +193,11 @@ mod tests {
         let meta = entry.meta.clone();
 
         registry
-            .register("test-plugin".to_string(), meta.clone(), "/path/to/plugin.so".to_string())
+            .register(
+                "test-plugin".to_string(),
+                meta.clone(),
+                "/path/to/plugin.so".to_string(),
+            )
             .unwrap();
 
         let result = registry.register(
@@ -218,7 +215,11 @@ mod tests {
         let meta = entry.meta.clone();
 
         registry
-            .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+            .register(
+                "test-plugin".to_string(),
+                meta,
+                "/path/to/plugin.so".to_string(),
+            )
             .unwrap();
         assert_eq!(registry.count(), 1);
 
@@ -233,7 +234,11 @@ mod tests {
         let meta = entry.meta.clone();
 
         registry
-            .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+            .register(
+                "test-plugin".to_string(),
+                meta,
+                "/path/to/plugin.so".to_string(),
+            )
             .unwrap();
 
         let retrieved = registry.get("test-plugin");
@@ -249,10 +254,18 @@ mod tests {
         let meta2 = PluginMeta::new("plugin2", "1.0.0", "Author", "Plugin 2");
 
         registry
-            .register("plugin1".to_string(), meta1, "/path/to/plugin1.so".to_string())
+            .register(
+                "plugin1".to_string(),
+                meta1,
+                "/path/to/plugin1.so".to_string(),
+            )
             .unwrap();
         registry
-            .register("plugin2".to_string(), meta2, "/path/to/plugin2.so".to_string())
+            .register(
+                "plugin2".to_string(),
+                meta2,
+                "/path/to/plugin2.so".to_string(),
+            )
             .unwrap();
 
         let names = registry.names();

@@ -3,13 +3,11 @@ mod anti_reverse_test {
     use crate::anti_reverse::AntiReverseStrategy;
     use crate::config::AntiReverseConfig;
     use crate::strategies::{CommandType, FallbackStrategy};
-    use mupc_data_processing::telemetry::{BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus};
+    use mupc_data_processing::telemetry::{
+        BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
+    };
 
-    fn create_test_data(
-        grid_power: f64,
-        pv_power: f64,
-        battery_soc: f64,
-    ) -> DataPackage {
+    fn create_test_data(grid_power: f64, pv_power: f64, battery_soc: f64) -> DataPackage {
         DataPackage {
             timestamp: 3600 * 8,
             electrical: ElectricalData {
@@ -81,7 +79,10 @@ mod anti_reverse_test {
         let config = AntiReverseConfig::default();
         let strategy = AntiReverseStrategy::new(config);
 
-        assert_eq!(strategy.strategy_type(), crate::strategies::StrategyType::Fallback);
+        assert_eq!(
+            strategy.strategy_type(),
+            crate::strategies::StrategyType::Fallback
+        );
     }
 
     #[test]

@@ -2,10 +2,10 @@
 //!
 //! 提供 AI 引擎实时运行指标
 
-use axum::{Json, extract::State};
+use crate::AppState;
+use axum::{extract::State, Json};
 use serde::Serialize;
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct RealtimeMetricsResponse {

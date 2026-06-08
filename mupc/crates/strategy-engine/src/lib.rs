@@ -2,34 +2,37 @@
 //!
 //! Phase 3C: 集成 AI 优化引擎
 
-pub mod strategies;
-pub mod peak_shaving;
-pub mod demand_control;
-pub mod anti_reverse;
 pub mod ai_validator;
+pub mod anti_reverse;
 pub mod config;
+pub mod demand_control;
 pub mod errors;
+pub mod peak_shaving;
+pub mod strategies;
 
 // AI Engine integration
 pub mod ai_integration;
 
-pub use peak_shaving::PeakShavingStrategy;
-pub use demand_control::DemandControlStrategy;
+pub use ai_integration::{AiEngineStatusInfo, AiIntegrator, ModeInfo};
+pub use ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput, ModelOutput};
 pub use anti_reverse::AntiReverseStrategy;
-pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput, MockAiModel};
-pub use config::{PeakShavingConfig, DemandControlConfig, AntiReverseConfig};
+pub use config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
+pub use demand_control::DemandControlStrategy;
 pub use errors::StrategyError;
-pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
-pub use ai_integration::{AiIntegrator, AiEngineStatusInfo, ModeInfo};
+pub use peak_shaving::PeakShavingStrategy;
+pub use strategies::{
+    AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
+    ValidationResult,
+};
 
 // AI Engine re-exports
 pub use mupc_ai_engine::{ModelManager, ModelStatus};
 
 #[cfg(test)]
-mod peak_shaving_test;
-#[cfg(test)]
-mod demand_control_test;
+mod ai_validator_test;
 #[cfg(test)]
 mod anti_reverse_test;
 #[cfg(test)]
-mod ai_validator_test;
+mod demand_control_test;
+#[cfg(test)]
+mod peak_shaving_test;

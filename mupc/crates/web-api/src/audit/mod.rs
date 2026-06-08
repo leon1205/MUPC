@@ -9,10 +9,10 @@
 //! 通过 `tokio::sync::Mutex` 保证并发安全。
 
 use chrono::{DateTime, Utc};
+use mupc_security::audit::{AuditEventType, AuditLogEntry, AuditSeverity};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use mupc_security::audit::{AuditEventType, AuditSeverity, AuditLogEntry};
 
 /// 审计日志条目（Web 层专用格式）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,13 +220,7 @@ impl AuditLogger {
     /// 便捷方法：记录模式切换等简单操作（同步非阻塞）
     ///
     /// 用于模式切换、权重修改等操作的即时审计记录。
-    pub fn log_action(
-        &self,
-        operator: &str,
-        action: &str,
-        _detail: &str,
-        result: &str,
-    ) {
+    pub fn log_action(&self, operator: &str, action: &str, _detail: &str, result: &str) {
         let entry = WebAuditEntry {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: Utc::now(),

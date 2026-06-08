@@ -27,9 +27,9 @@ pub struct ControlCommand {
 /// 命令类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CommandType {
-    SwitchControl,      // 开关控制
-    PowerRegulation,    // 功率调节
-    ChargeDischarge,    // 充放电控制
+    SwitchControl,   // 开关控制
+    PowerRegulation, // 功率调节
+    ChargeDischarge, // 充放电控制
 }
 
 /// 命令处理器 trait

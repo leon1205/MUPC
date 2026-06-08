@@ -105,8 +105,7 @@ mod tests {
 
     #[test]
     fn test_hplc_config_serde() {
-        let config = HplcConfig::new("/dev/ttyUSB0", 115200)
-            .with_chip_type("GDM");
+        let config = HplcConfig::new("/dev/ttyUSB0", 115200).with_chip_type("GDM");
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: HplcConfig = serde_json::from_str(&json).unwrap();

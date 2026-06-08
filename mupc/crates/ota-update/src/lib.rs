@@ -6,6 +6,7 @@
 //! Phase 3C.2 OTA 模型自动更新模块
 //! Phase 2+ 固件 OTA 升级子系统
 
+pub mod applicator;
 pub mod config;
 pub mod downloader;
 pub mod error;
@@ -15,14 +16,13 @@ pub mod rollback;
 pub mod scheduler;
 pub mod types;
 pub mod verifier;
-pub mod applicator;
 
+pub use applicator::ModelApplicator;
 pub use config::OtaConfig;
-pub use downloader::{compute_file_hash, Downloader, DownloadResult, ProgressCallback};
+pub use downloader::{compute_file_hash, DownloadResult, Downloader, ProgressCallback};
 pub use error::OtaError;
 pub use manager::{OtaManager, OtaManagerImpl, UpdateStatus};
 pub use rollback::RollbackManager;
-pub use scheduler::{OtaScheduler, OtaManager as SchedulerOtaManager, SchedulerCommand};
+pub use scheduler::{OtaManager as SchedulerOtaManager, OtaScheduler, SchedulerCommand};
 pub use types::*;
 pub use verifier::{SignatureAlgorithm, Verifier};
-pub use applicator::ModelApplicator;

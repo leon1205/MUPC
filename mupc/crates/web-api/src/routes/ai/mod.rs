@@ -6,25 +6,28 @@
 pub mod ab_test_manager;
 pub mod auth;
 
-mod decision;
-mod prediction;
-mod scene;
-mod weights;
 mod ab_test;
-mod model;
-mod status;
+mod audit;
+mod decision;
+mod explain;
+mod finetuning;
 mod history;
 mod intervention;
-mod explain;
 mod metrics;
+mod model;
+mod prediction;
 mod rewards;
-mod finetuning;
-mod audit;
 mod rollback;
+mod scene;
+mod status;
+mod weights;
 
-use axum::{Router, routing::{get, post, delete}};
-use std::sync::Arc;
 use crate::AppState;
+use axum::{
+    routing::{delete, get, post},
+    Router,
+};
+use std::sync::Arc;
 
 /// 注册 AI 可视化路由
 ///
@@ -33,27 +36,51 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
     Router::new()
         // 预测 (v1.2 对齐: 统一根路径 + 可选 type 参数)
         .route("/api/v1/ai/predictions", get(prediction::get_predictions))
-        .route("/api/v1/ai/predictions/current", get(prediction::get_current_prediction))
-        .route("/api/v1/ai/predictions/history", get(prediction::get_prediction_history))
+        .route(
+            "/api/v1/ai/predictions/current",
+            get(prediction::get_current_prediction),
+        )
+        .route(
+            "/api/v1/ai/predictions/history",
+            get(prediction::get_prediction_history),
+        )
         // 决策 (v1.2 对齐: /api/v1/ai/decision 为主端点)
         .route("/api/v1/ai/decisions", get(decision::get_decisions))
-        .route("/api/v1/ai/decisions/latest", get(decision::get_latest_decision))
-        .route("/api/v1/ai/decisions/{id}", get(decision::get_decision_detail))
+        .route(
+            "/api/v1/ai/decisions/latest",
+            get(decision::get_latest_decision),
+        )
+        .route(
+            "/api/v1/ai/decisions/{id}",
+            get(decision::get_decision_detail),
+        )
         // 场景
         .route("/api/v1/ai/scenes/current", get(scene::get_current_scene))
         .route("/api/v1/ai/scenes/history", get(scene::get_scene_history))
         // 权重 (v1.2 新增 PUT)
-        .route("/api/v1/ai/weights", get(weights::get_weights).put(weights::put_update_weights))
+        .route(
+            "/api/v1/ai/weights",
+            get(weights::get_weights).put(weights::put_update_weights),
+        )
         // 模型
         .route("/api/v1/ai/models/status", get(model::get_model_status))
         .route("/api/v1/ai/models/metrics", get(model::get_model_metrics))
         // A/B 测试
-        .route("/api/v1/ai/ab-test/status", get(ab_test::get_ab_test_status))
-        .route("/api/v1/ai/ab-test/results", get(ab_test::get_ab_test_results))
+        .route(
+            "/api/v1/ai/ab-test/status",
+            get(ab_test::get_ab_test_status),
+        )
+        .route(
+            "/api/v1/ai/ab-test/results",
+            get(ab_test::get_ab_test_results),
+        )
         .route("/api/v1/ai/ab-test", post(ab_test::post_create_ab_test))
         .route("/api/v1/ai/ab-test/{id}", delete(ab_test::delete_ab_test))
         // 干预历史
-        .route("/api/v1/ai/interventions", get(intervention::get_interventions))
+        .route(
+            "/api/v1/ai/interventions",
+            get(intervention::get_interventions),
+        )
         // 系统状态
         .route("/api/v1/ai/status", get(status::get_ai_status))
         // 决策解释
@@ -61,8 +88,14 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
         // 实时指标
         .route("/api/v1/ai/metrics", get(metrics::get_realtime_metrics))
         // 历史记录
-        .route("/api/v1/ai/history/decisions", get(history::get_decision_history))
-        .route("/api/v1/ai/history/accuracy", get(history::get_prediction_accuracy_history))
+        .route(
+            "/api/v1/ai/history/decisions",
+            get(history::get_decision_history),
+        )
+        .route(
+            "/api/v1/ai/history/accuracy",
+            get(history::get_prediction_accuracy_history),
+        )
         // v1.2 新增: 奖励值
         .route("/api/v1/ai/rewards", get(rewards::get_rewards))
         // v1.2 新增: 在线微调
@@ -79,6 +112,5 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
 /// 与主 AI 路由分开，因为需要访问 SsePushService。
 pub fn sse_route() -> Router<Arc<AppState>> {
     use axum::routing::get;
-    Router::new()
-        .route("/api/v1/ai/stream", get(crate::sse::sse_handler))
+    Router::new().route("/api/v1/ai/stream", get(crate::sse::sse_handler))
 }

@@ -61,6 +61,6 @@ pub use south_device::{
     ProtocolHandler, ProtocolHandlerRegistry, SouthDevice, TtuHandler,
 };
 pub use types::{
-    CrcMode, DataFrame, DataQuality, DeviceStatus, DeviceType, Message, Parity, PluginMeta,
-    Rs485Config, Topic, crc16_modbus,
+    crc16_modbus, CrcMode, DataFrame, DataQuality, DeviceStatus, DeviceType, Message, Parity,
+    PluginMeta, Rs485Config, Topic,
 };

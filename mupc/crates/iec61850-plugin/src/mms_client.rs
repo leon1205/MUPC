@@ -2,15 +2,15 @@
 //!
 //! 使用 libIEC61850 实现 MMS 协议客户端
 
+use crate::asn1_utils::{decode_mms_response, encode_mms_request};
 use crate::config::MmsConfig;
 use crate::errors::{Iec61850Error, Result};
 use crate::mms_types::{MmsRequest, MmsResponse};
-use crate::asn1_utils::{encode_mms_request, decode_mms_response};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 /// MMS 客户端状态
@@ -97,7 +97,9 @@ impl MmsClient {
         .map_err(|e| Iec61850Error::MmsConnectFailed(format!("连接失败: {}", e)))?;
 
         // 发送请求
-        stream.write_all(&req_data).await
+        stream
+            .write_all(&req_data)
+            .await
             .map_err(|e| Iec61850Error::ProtocolError(format!("发送失败: {}", e)))?;
 
         // 读取响应
@@ -109,15 +111,9 @@ impl MmsClient {
         .await;
 
         match read_result {
-            Ok(Ok(n)) => {
-                decode_mms_response(&resp_buf[..n])
-            }
-            Ok(Err(e)) => {
-                Err(Iec61850Error::ProtocolError(format!("读取失败: {}", e)))
-            }
-            Err(_) => {
-                Err(Iec61850Error::MmsTimeout("读取超时".into()))
-            }
+            Ok(Ok(n)) => decode_mms_response(&resp_buf[..n]),
+            Ok(Err(e)) => Err(Iec61850Error::ProtocolError(format!("读取失败: {}", e))),
+            Err(_) => Err(Iec61850Error::MmsTimeout("读取超时".into())),
         }
     }
 

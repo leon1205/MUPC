@@ -11,8 +11,8 @@
 //! - `mupc_package` — .mupc 固件包格式解析与签名验证
 //! - `bsdiff_applier` — bsdiff 增量补丁应用器
 
-pub mod fw_state;
-pub mod partition;
 pub mod bootloader;
-pub mod mupc_package;
 pub mod bsdiff_applier;
+pub mod fw_state;
+pub mod mupc_package;
+pub mod partition;

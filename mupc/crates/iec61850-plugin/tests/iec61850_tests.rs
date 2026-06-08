@@ -1,6 +1,6 @@
 //! IEC 61850 插件集成测试
 
-use mupc_iec61850_plugin::{Iec61850Config, Iec61850DeviceImpl, GooseConfig};
+use mupc_iec61850_plugin::{GooseConfig, Iec61850Config, Iec61850DeviceImpl};
 
 #[tokio::test]
 async fn test_iec61850_config_default() {

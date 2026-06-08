@@ -1,6 +1,6 @@
 //! MQTT 插件单元测试
 
-use mupc_mqtt_plugin::{MqttConfig, MqttQos, MqttClient};
+use mupc_mqtt_plugin::{MqttClient, MqttConfig, MqttQos};
 
 #[test]
 fn test_mqtt_config_default() {

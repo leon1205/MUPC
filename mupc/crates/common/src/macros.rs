@@ -5,13 +5,17 @@
 macro_rules! impl_module_error {
     ($module:ident, $err_mod:ident) => {
         pub mod $err_mod {
-            use super::super::error::{ErrorCode, MupcError, define_error};
+            use super::super::error::{define_error, ErrorCode, MupcError};
 
             // 模块特定错误
             define_error!(module_not_found, ErrorCode::ModuleNotFound, module_name!());
             define_error!(invalid_param, ErrorCode::InvalidParam, module_name!());
             define_error!(timeout, ErrorCode::Timeout, module_name!());
-            define_error!(connection_failed, ErrorCode::ConnectionFailed, module_name!());
+            define_error!(
+                connection_failed,
+                ErrorCode::ConnectionFailed,
+                module_name!()
+            );
         }
     };
 }
@@ -21,7 +25,7 @@ macro_rules! impl_module_error {
 macro_rules! impl_device_error {
     ($module:ident) => {
         pub mod device_errors {
-            use super::super::error::{ErrorCode, MupcError, define_error};
+            use super::super::error::{define_error, ErrorCode, MupcError};
 
             define_error!(device_offline, ErrorCode::DeviceOffline, $module);
             define_error!(device_busy, ErrorCode::DeviceBusy, $module);

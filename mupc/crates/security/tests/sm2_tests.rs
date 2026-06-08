@@ -3,7 +3,7 @@
 //! # 警告
 //! SM2 实现使用 P-256 曲线模拟，不是真正的国密 SM2
 
-use mupc_security::{sm2_sign, sm2_verify, signature_to_rs, Sm2Signature};
+use mupc_security::{signature_to_rs, sm2_sign, sm2_verify, Sm2Signature};
 
 #[test]
 fn test_sm2_signature_conversion() {

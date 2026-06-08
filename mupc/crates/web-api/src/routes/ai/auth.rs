@@ -3,12 +3,7 @@
 //! 提供 RequireRole 提取器，用于保护 AI 端点。
 //! 通过 X-Session-Id 请求头进行 Session 验证。
 
-use axum::{
-    async_trait,
-    extract::FromRequestParts,
-    http::request::Parts,
-    http::StatusCode,
-};
+use axum::{async_trait, extract::FromRequestParts, http::request::Parts, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
 /// 用户角色
@@ -46,7 +41,9 @@ impl RequireRole {
 
     /// 要求操作员角色
     pub fn operator() -> Self {
-        Self { role: Role::Operator }
+        Self {
+            role: Role::Operator,
+        }
     }
 
     /// 要求只读角色

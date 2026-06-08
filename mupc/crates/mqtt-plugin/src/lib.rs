@@ -126,7 +126,10 @@ mod tests {
 
     #[test]
     fn test_connection_state_display() {
-        assert_eq!(MqttConnectionState::Disconnected.to_string(), "Disconnected");
+        assert_eq!(
+            MqttConnectionState::Disconnected.to_string(),
+            "Disconnected"
+        );
         assert_eq!(MqttConnectionState::Connected.to_string(), "Connected");
     }
 

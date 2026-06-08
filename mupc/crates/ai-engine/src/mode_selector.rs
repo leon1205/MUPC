@@ -53,9 +53,7 @@ impl RunningMode {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::SeasonalLoadManagement => {
-                "最大化光伏消纳 + 防止变压器过载 + 电池寿命保护"
-            }
+            Self::SeasonalLoadManagement => "最大化光伏消纳 + 防止变压器过载 + 电池寿命保护",
             Self::CommercialArbitrage => "最大化峰谷电价差收益 + 最小化电池损耗",
             Self::DemandControl => "减免需量罚金 + 最小化舒适度损失",
             Self::VirtualPowerPlant => "最大化辅助服务收益 + 响应精度",
@@ -84,14 +82,9 @@ impl std::fmt::Display for RunningMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SwitchSource {
     /// 调度主站远程切换（IEC 104 / IEC 61850）
-    RemoteDispatch {
-        protocol: String,
-        address: String,
-    },
+    RemoteDispatch { protocol: String, address: String },
     /// 本地 Web UI 切换
-    LocalWeb {
-        username: String,
-    },
+    LocalWeb { username: String },
     /// 配置文件加载（系统启动时）
     LocalConfig,
 }
@@ -187,7 +180,11 @@ impl ModeSelector {
         if let Some(ref registry) = self.registry {
             match registry.switch_to(new_mode).await {
                 Ok(SceneSwitchResult::Switched) => {
-                    tracing::info!("场景模型已切换: {} → {}", previous.display_name(), new_mode.display_name());
+                    tracing::info!(
+                        "场景模型已切换: {} → {}",
+                        previous.display_name(),
+                        new_mode.display_name()
+                    );
                 }
                 Ok(SceneSwitchResult::Downloading) => {
                     tracing::warn!(
@@ -199,7 +196,8 @@ impl ModeSelector {
                 Err(e) => {
                     tracing::error!("场景模型切换失败: {}", e);
                     return Err(AiEngineError::ModeSwitchFailed(format!(
-                        "模型热切换失败: {}", e
+                        "模型热切换失败: {}",
+                        e
                     )));
                 }
             }
@@ -282,8 +280,13 @@ impl ModeSelector {
                     AiEngineError::ModeSwitchFailed(format!("持久化文件中无效模式值: {}", v))
                 })
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RunningMode::SeasonalLoadManagement),
-            Err(e) => Err(AiEngineError::ModeSwitchFailed(format!("读取持久化文件失败: {}", e))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(RunningMode::SeasonalLoadManagement)
+            }
+            Err(e) => Err(AiEngineError::ModeSwitchFailed(format!(
+                "读取持久化文件失败: {}",
+                e
+            ))),
         }
     }
 }
@@ -292,22 +295,20 @@ impl ModeSelector {
 pub fn parse_mode_name(s: &str) -> Option<RunningMode> {
     match s.to_lowercase().as_str() {
         // MODE-01: 兼容旧名，新增新名
-        "seasonalloadmanagement" | "seasonal_load_management" | "mode-01" | "1"
-        | "agriculturalirrigation" | "agricultural_irrigation" => {
-            Some(RunningMode::SeasonalLoadManagement)
-        }
+        "seasonalloadmanagement"
+        | "seasonal_load_management"
+        | "mode-01"
+        | "1"
+        | "agriculturalirrigation"
+        | "agricultural_irrigation" => Some(RunningMode::SeasonalLoadManagement),
         "commercialarbitrage" | "commercial_arbitrage" | "mode-02" | "2" => {
             Some(RunningMode::CommercialArbitrage)
         }
-        "demandcontrol" | "demand_control" | "mode-03" | "3" => {
-            Some(RunningMode::DemandControl)
-        }
+        "demandcontrol" | "demand_control" | "mode-03" | "3" => Some(RunningMode::DemandControl),
         "virtualpowerplant" | "virtual_power_plant" | "mode-04" | "4" => {
             Some(RunningMode::VirtualPowerPlant)
         }
-        "ultragreen" | "ultra_green" | "mode-05" | "5" => {
-            Some(RunningMode::UltraGreen)
-        }
+        "ultragreen" | "ultra_green" | "mode-05" | "5" => Some(RunningMode::UltraGreen),
         _ => None,
     }
 }
@@ -318,7 +319,10 @@ mod tests {
 
     #[test]
     fn test_running_mode_from_u8() {
-        assert_eq!(RunningMode::from_u8(1), Some(RunningMode::SeasonalLoadManagement));
+        assert_eq!(
+            RunningMode::from_u8(1),
+            Some(RunningMode::SeasonalLoadManagement)
+        );
         assert_eq!(RunningMode::from_u8(5), Some(RunningMode::UltraGreen));
         assert_eq!(RunningMode::from_u8(0), None);
         assert_eq!(RunningMode::from_u8(6), None);
@@ -326,8 +330,14 @@ mod tests {
 
     #[test]
     fn test_running_mode_display_name() {
-        assert_eq!(RunningMode::SeasonalLoadManagement.display_name(), "台区季节性负荷模式");
-        assert_eq!(RunningMode::CommercialArbitrage.display_name(), "自主套利模式");
+        assert_eq!(
+            RunningMode::SeasonalLoadManagement.display_name(),
+            "台区季节性负荷模式"
+        );
+        assert_eq!(
+            RunningMode::CommercialArbitrage.display_name(),
+            "自主套利模式"
+        );
     }
 
     #[test]
@@ -337,11 +347,23 @@ mod tests {
 
     #[test]
     fn test_parse_mode_name() {
-        assert_eq!(parse_mode_name("seasonalloadmanagement"), Some(RunningMode::SeasonalLoadManagement));
-        assert_eq!(parse_mode_name("1"), Some(RunningMode::SeasonalLoadManagement));
-        assert_eq!(parse_mode_name("mode-01"), Some(RunningMode::SeasonalLoadManagement));
+        assert_eq!(
+            parse_mode_name("seasonalloadmanagement"),
+            Some(RunningMode::SeasonalLoadManagement)
+        );
+        assert_eq!(
+            parse_mode_name("1"),
+            Some(RunningMode::SeasonalLoadManagement)
+        );
+        assert_eq!(
+            parse_mode_name("mode-01"),
+            Some(RunningMode::SeasonalLoadManagement)
+        );
         // 兼容旧名
-        assert_eq!(parse_mode_name("agriculturalirrigation"), Some(RunningMode::SeasonalLoadManagement));
+        assert_eq!(
+            parse_mode_name("agriculturalirrigation"),
+            Some(RunningMode::SeasonalLoadManagement)
+        );
         assert_eq!(parse_mode_name("ultragreen"), Some(RunningMode::UltraGreen));
         assert_eq!(parse_mode_name("invalid"), None);
         assert_eq!(parse_mode_name("6"), None);
@@ -356,7 +378,9 @@ mod tests {
     #[tokio::test]
     async fn test_mode_selector_switch() {
         let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
-        let prev = selector.switch(RunningMode::CommercialArbitrage, SwitchSource::LocalConfig).await;
+        let prev = selector
+            .switch(RunningMode::CommercialArbitrage, SwitchSource::LocalConfig)
+            .await;
         assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
         assert_eq!(selector.current(), RunningMode::CommercialArbitrage);
     }
@@ -364,7 +388,12 @@ mod tests {
     #[tokio::test]
     async fn test_mode_selector_switch_idempotent() {
         let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
-        let prev = selector.switch(RunningMode::SeasonalLoadManagement, SwitchSource::LocalConfig).await;
+        let prev = selector
+            .switch(
+                RunningMode::SeasonalLoadManagement,
+                SwitchSource::LocalConfig,
+            )
+            .await;
         assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
     }
 
@@ -372,7 +401,9 @@ mod tests {
     async fn test_mode_selector_subscribe() {
         let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
         let mut rx = selector.subscribe();
-        let _ = selector.switch(RunningMode::DemandControl, SwitchSource::LocalConfig).await;
+        let _ = selector
+            .switch(RunningMode::DemandControl, SwitchSource::LocalConfig)
+            .await;
         let event = rx.recv().await.unwrap();
         assert_eq!(event.previous, RunningMode::SeasonalLoadManagement);
         assert_eq!(event.current, RunningMode::DemandControl);

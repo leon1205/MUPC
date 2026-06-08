@@ -122,8 +122,8 @@ impl MmsResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_data_object_from_str() {

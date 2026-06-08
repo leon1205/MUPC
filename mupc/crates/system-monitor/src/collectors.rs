@@ -145,8 +145,9 @@ fn read_cpu_metrics() -> Result<CpuMetrics, MonitorError> {
 fn read_memory_metrics() -> Result<MemoryMetrics, MonitorError> {
     #[cfg(target_os = "linux")]
     {
-        let meminfo = std::fs::read_to_string("/proc/meminfo")
-            .map_err(|e| MonitorError::CollectionError(format!("读取 /proc/meminfo 失败: {}", e)))?;
+        let meminfo = std::fs::read_to_string("/proc/meminfo").map_err(|e| {
+            MonitorError::CollectionError(format!("读取 /proc/meminfo 失败: {}", e))
+        })?;
 
         let mut total_kb = 0u64;
         let mut available_kb = 0u64;
@@ -226,10 +227,19 @@ fn read_disk_metrics() -> Result<DiskMetrics, MonitorError> {
                 if let Some(line) = stdout.lines().nth(1) {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 5 {
-                        let total = parts[1].trim_end_matches('M').parse::<u64>().unwrap_or(32768);
+                        let total = parts[1]
+                            .trim_end_matches('M')
+                            .parse::<u64>()
+                            .unwrap_or(32768);
                         let used = parts[2].trim_end_matches('M').parse::<u64>().unwrap_or(0);
-                        let available = parts[3].trim_end_matches('M').parse::<u64>().unwrap_or(total);
-                        let usage_pct = parts[4].trim_end_matches('%').parse::<f32>().unwrap_or(50.0);
+                        let available = parts[3]
+                            .trim_end_matches('M')
+                            .parse::<u64>()
+                            .unwrap_or(total);
+                        let usage_pct = parts[4]
+                            .trim_end_matches('%')
+                            .parse::<f32>()
+                            .unwrap_or(50.0);
                         return Ok(DiskMetrics {
                             total_mb: total,
                             used_mb: used,
@@ -310,22 +320,36 @@ impl MetricCollector for CpuCollector {
             timestamp: Utc::now(),
             cpu: read_cpu_metrics()?,
             memory: MemoryMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                swap_total_mb: 0, swap_used_mb: 0, usage_percent: 0.0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                swap_total_mb: 0,
+                swap_used_mb: 0,
+                usage_percent: 0.0,
             },
             disk: DiskMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                usage_percent: 0.0, read_iops: 0, write_iops: 0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                usage_percent: 0.0,
+                read_iops: 0,
+                write_iops: 0,
             },
             temperature: TemperatureMetrics {
-                cpu_temp_c: 0.0, npu_temp_c: None,
-                board_temp_c: 0.0, ambient_temp_c: None,
+                cpu_temp_c: 0.0,
+                npu_temp_c: None,
+                board_temp_c: 0.0,
+                ambient_temp_c: None,
             },
             processes: vec![],
         })
     }
-    fn name(&self) -> &'static str { "cpu" }
-    fn collection_interval_ms(&self) -> u64 { self.interval_ms }
+    fn name(&self) -> &'static str {
+        "cpu"
+    }
+    fn collection_interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 pub struct MemoryCollector {
@@ -344,24 +368,37 @@ impl MetricCollector for MemoryCollector {
         Ok(SystemSnapshot {
             timestamp: Utc::now(),
             cpu: CpuMetrics {
-                usage_percent: 0.0, per_core: vec![],
-                load_avg_1m: 0.0, load_avg_5m: 0.0, load_avg_15m: 0.0,
+                usage_percent: 0.0,
+                per_core: vec![],
+                load_avg_1m: 0.0,
+                load_avg_5m: 0.0,
+                load_avg_15m: 0.0,
                 temperature_c: None,
             },
             memory: read_memory_metrics()?,
             disk: DiskMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                usage_percent: 0.0, read_iops: 0, write_iops: 0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                usage_percent: 0.0,
+                read_iops: 0,
+                write_iops: 0,
             },
             temperature: TemperatureMetrics {
-                cpu_temp_c: 0.0, npu_temp_c: None,
-                board_temp_c: 0.0, ambient_temp_c: None,
+                cpu_temp_c: 0.0,
+                npu_temp_c: None,
+                board_temp_c: 0.0,
+                ambient_temp_c: None,
             },
             processes: vec![],
         })
     }
-    fn name(&self) -> &'static str { "memory" }
-    fn collection_interval_ms(&self) -> u64 { self.interval_ms }
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+    fn collection_interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 pub struct DiskCollector {
@@ -380,24 +417,37 @@ impl MetricCollector for DiskCollector {
         Ok(SystemSnapshot {
             timestamp: Utc::now(),
             cpu: CpuMetrics {
-                usage_percent: 0.0, per_core: vec![],
-                load_avg_1m: 0.0, load_avg_5m: 0.0, load_avg_15m: 0.0,
+                usage_percent: 0.0,
+                per_core: vec![],
+                load_avg_1m: 0.0,
+                load_avg_5m: 0.0,
+                load_avg_15m: 0.0,
                 temperature_c: None,
             },
             memory: MemoryMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                swap_total_mb: 0, swap_used_mb: 0, usage_percent: 0.0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                swap_total_mb: 0,
+                swap_used_mb: 0,
+                usage_percent: 0.0,
             },
             disk: read_disk_metrics()?,
             temperature: TemperatureMetrics {
-                cpu_temp_c: 0.0, npu_temp_c: None,
-                board_temp_c: 0.0, ambient_temp_c: None,
+                cpu_temp_c: 0.0,
+                npu_temp_c: None,
+                board_temp_c: 0.0,
+                ambient_temp_c: None,
             },
             processes: vec![],
         })
     }
-    fn name(&self) -> &'static str { "disk" }
-    fn collection_interval_ms(&self) -> u64 { self.interval_ms }
+    fn name(&self) -> &'static str {
+        "disk"
+    }
+    fn collection_interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 pub struct TemperatureCollector {
@@ -416,24 +466,39 @@ impl MetricCollector for TemperatureCollector {
         Ok(SystemSnapshot {
             timestamp: Utc::now(),
             cpu: CpuMetrics {
-                usage_percent: 0.0, per_core: vec![],
-                load_avg_1m: 0.0, load_avg_5m: 0.0, load_avg_15m: 0.0,
+                usage_percent: 0.0,
+                per_core: vec![],
+                load_avg_1m: 0.0,
+                load_avg_5m: 0.0,
+                load_avg_15m: 0.0,
                 temperature_c: None,
             },
             memory: MemoryMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                swap_total_mb: 0, swap_used_mb: 0, usage_percent: 0.0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                swap_total_mb: 0,
+                swap_used_mb: 0,
+                usage_percent: 0.0,
             },
             disk: DiskMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                usage_percent: 0.0, read_iops: 0, write_iops: 0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                usage_percent: 0.0,
+                read_iops: 0,
+                write_iops: 0,
             },
             temperature: read_temperature_metrics()?,
             processes: vec![],
         })
     }
-    fn name(&self) -> &'static str { "temperature" }
-    fn collection_interval_ms(&self) -> u64 { self.interval_ms }
+    fn name(&self) -> &'static str {
+        "temperature"
+    }
+    fn collection_interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 pub struct ProcessCollector {
@@ -479,27 +544,44 @@ impl MetricCollector for ProcessCollector {
         Ok(SystemSnapshot {
             timestamp: Utc::now(),
             cpu: CpuMetrics {
-                usage_percent: 0.0, per_core: vec![],
-                load_avg_1m: 0.0, load_avg_5m: 0.0, load_avg_15m: 0.0,
+                usage_percent: 0.0,
+                per_core: vec![],
+                load_avg_1m: 0.0,
+                load_avg_5m: 0.0,
+                load_avg_15m: 0.0,
                 temperature_c: None,
             },
             memory: MemoryMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                swap_total_mb: 0, swap_used_mb: 0, usage_percent: 0.0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                swap_total_mb: 0,
+                swap_used_mb: 0,
+                usage_percent: 0.0,
             },
             disk: DiskMetrics {
-                total_mb: 0, used_mb: 0, available_mb: 0,
-                usage_percent: 0.0, read_iops: 0, write_iops: 0,
+                total_mb: 0,
+                used_mb: 0,
+                available_mb: 0,
+                usage_percent: 0.0,
+                read_iops: 0,
+                write_iops: 0,
             },
             temperature: TemperatureMetrics {
-                cpu_temp_c: 0.0, npu_temp_c: None,
-                board_temp_c: 0.0, ambient_temp_c: None,
+                cpu_temp_c: 0.0,
+                npu_temp_c: None,
+                board_temp_c: 0.0,
+                ambient_temp_c: None,
             },
             processes,
         })
     }
-    fn name(&self) -> &'static str { "process" }
-    fn collection_interval_ms(&self) -> u64 { self.interval_ms }
+    fn name(&self) -> &'static str {
+        "process"
+    }
+    fn collection_interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 /// 完整系统快照采集器（聚合所有子采集器）
@@ -525,8 +607,12 @@ impl MetricCollector for FullCollector {
             processes: vec![],
         })
     }
-    fn name(&self) -> &'static str { "full" }
-    fn collection_interval_ms(&self) -> u64 { self.interval_ms }
+    fn name(&self) -> &'static str {
+        "full"
+    }
+    fn collection_interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 #[cfg(test)]

@@ -102,15 +102,14 @@ impl PartitionManager {
     /// 挂载备用分区
     #[cfg(target_os = "linux")]
     pub fn mount_standby(&mut self) -> Result<(), OtaError> {
-        let standby = self.standby_partition().ok_or_else(|| {
-            OtaError::RollbackFailed("未检测到备用分区".into())
-        })?;
+        let standby = self
+            .standby_partition()
+            .ok_or_else(|| OtaError::RollbackFailed("未检测到备用分区".into()))?;
 
         let mount_point = standby.mount_point.clone();
         if !Path::new(&mount_point).exists() {
-            fs::create_dir_all(&mount_point).map_err(|e| {
-                OtaError::RollbackFailed(format!("创建挂载点失败: {}", e))
-            })?;
+            fs::create_dir_all(&mount_point)
+                .map_err(|e| OtaError::RollbackFailed(format!("创建挂载点失败: {}", e)))?;
         }
 
         let output = Command::new("mount")
@@ -131,14 +130,13 @@ impl PartitionManager {
 
     #[cfg(not(target_os = "linux"))]
     pub fn mount_standby(&mut self) -> Result<(), OtaError> {
-        let standby = self.standby_partition().ok_or_else(|| {
-            OtaError::RollbackFailed("未检测到备用分区".into())
-        })?;
+        let standby = self
+            .standby_partition()
+            .ok_or_else(|| OtaError::RollbackFailed("未检测到备用分区".into()))?;
         let mount_point = &standby.mount_point;
         if !Path::new(mount_point).exists() {
-            fs::create_dir_all(mount_point).map_err(|e| {
-                OtaError::RollbackFailed(format!("创建挂载点失败: {}", e))
-            })?;
+            fs::create_dir_all(mount_point)
+                .map_err(|e| OtaError::RollbackFailed(format!("创建挂载点失败: {}", e)))?;
         }
         self.standby_mounted = true;
         Ok(())
@@ -177,14 +175,13 @@ impl PartitionManager {
         if !self.standby_mounted {
             return Err(OtaError::RollbackFailed("备用分区未挂载".into()));
         }
-        let standby = self.standby_partition().ok_or_else(|| {
-            OtaError::RollbackFailed("未检测到备用分区".into())
-        })?;
+        let standby = self
+            .standby_partition()
+            .ok_or_else(|| OtaError::RollbackFailed("未检测到备用分区".into()))?;
 
         let target_file = Path::new(&standby.mount_point).join("firmware_payload.tar.gz");
-        fs::write(&target_file, data).map_err(|e| {
-            OtaError::RollbackFailed(format!("写入备用分区失败: {}", e))
-        })?;
+        fs::write(&target_file, data)
+            .map_err(|e| OtaError::RollbackFailed(format!("写入备用分区失败: {}", e)))?;
 
         self.standby_written = true;
         Ok(())
@@ -195,21 +192,20 @@ impl PartitionManager {
         if !self.standby_written {
             return Ok(false);
         }
-        let standby = self.standby_partition().ok_or_else(|| {
-            OtaError::RollbackFailed("未检测到备用分区".into())
-        })?;
+        let standby = self
+            .standby_partition()
+            .ok_or_else(|| OtaError::RollbackFailed("未检测到备用分区".into()))?;
 
         let target_file = Path::new(&standby.mount_point).join("firmware_payload.tar.gz");
-        let mut file = fs::File::open(&target_file).map_err(|e| {
-            OtaError::VerificationFailed(format!("打开固件文件失败: {}", e))
-        })?;
+        let mut file = fs::File::open(&target_file)
+            .map_err(|e| OtaError::VerificationFailed(format!("打开固件文件失败: {}", e)))?;
 
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 8192];
         loop {
-            let n = file.read(&mut buffer).map_err(|e| {
-                OtaError::VerificationFailed(format!("读取固件文件失败: {}", e))
-            })?;
+            let n = file
+                .read(&mut buffer)
+                .map_err(|e| OtaError::VerificationFailed(format!("读取固件文件失败: {}", e)))?;
             if n == 0 {
                 break;
             }

@@ -7,9 +7,7 @@
 //! - [`InverterHandler`] - 光伏逆变器协议处理器
 //! - [`ChargerHandler`] - 充电桩 GB/T 27930 协议处理器
 
-pub use device_trait::south_device::{
-    ChargerHandler, InverterHandler, ModbusHandler, TtuHandler,
-};
+pub use device_trait::south_device::{ChargerHandler, InverterHandler, ModbusHandler, TtuHandler};
 // device-trait 中的 ProtocolHandlerRegistry 接受 Rs485Config，
 // 本 crate 提供适配层将 Config 转换为 Rs485Config
 use device_trait::south_device::ProtocolHandlerRegistry as DeviceProtocolHandlerRegistry;

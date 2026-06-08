@@ -81,9 +81,7 @@ impl MupcPackage {
 
         // 1. 验证魔数
         if data[..4] != MUPC_MAGIC {
-            return Err(OtaError::VerificationFailed(
-                "无效的 .mupc 文件魔数".into(),
-            ));
+            return Err(OtaError::VerificationFailed("无效的 .mupc 文件魔数".into()));
         }
 
         // 2. 读取版本号
@@ -105,12 +103,10 @@ impl MupcPackage {
         }
 
         // 4. 解析 HeaderJSON
-        let header_json = std::str::from_utf8(&data[10..header_end]).map_err(|e| {
-            OtaError::VerificationFailed(format!("HeaderJSON 编码无效: {}", e))
-        })?;
-        let header: MupcHeader = serde_json::from_str(header_json).map_err(|e| {
-            OtaError::VerificationFailed(format!("HeaderJSON 解析失败: {}", e))
-        })?;
+        let header_json = std::str::from_utf8(&data[10..header_end])
+            .map_err(|e| OtaError::VerificationFailed(format!("HeaderJSON 编码无效: {}", e)))?;
+        let header: MupcHeader = serde_json::from_str(header_json)
+            .map_err(|e| OtaError::VerificationFailed(format!("HeaderJSON 解析失败: {}", e)))?;
 
         // 5. 提取签名（64 字节）
         let sig_start = header_end;
@@ -181,10 +177,13 @@ impl MupcPackage {
     }
 
     /// 序列化为 .mupc 二进制格式
-    pub fn to_bytes(header: &MupcHeader, signature: &[u8], payload: &[u8]) -> Result<Vec<u8>, OtaError> {
-        let header_json = serde_json::to_string(header).map_err(|e| {
-            OtaError::IoError(format!("HeaderJSON 序列化失败: {}", e))
-        })?;
+    pub fn to_bytes(
+        header: &MupcHeader,
+        signature: &[u8],
+        payload: &[u8],
+    ) -> Result<Vec<u8>, OtaError> {
+        let header_json = serde_json::to_string(header)
+            .map_err(|e| OtaError::IoError(format!("HeaderJSON 序列化失败: {}", e)))?;
         let header_bytes = header_json.as_bytes();
         let header_size = header_bytes.len() as u32;
 

@@ -39,9 +39,7 @@ pub use mode_selector::{
     parse_mode_name, ModeSelector, ModeSwitchEvent, RunningMode, SwitchSource,
 };
 pub use model_manager::{ModelManager, ModelStatus};
-pub use model_registry::{
-    ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult,
-};
+pub use model_registry::{ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult};
 pub use online_updater::{DataPoint, OnlineUpdater};
 pub use reward_calculator::RewardCalculator;
 pub use rknn_runtime::RknnRuntime;

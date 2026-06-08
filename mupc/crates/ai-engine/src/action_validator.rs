@@ -68,7 +68,11 @@ impl ActionValidator {
         if let Some(ref prev) = *last {
             let delta = (action.p_batt_set - prev.p_batt_set).abs();
             if delta > self.config.p_batt_ramp_limit_kw {
-                let sign = if action.p_batt_set > prev.p_batt_set { 1.0 } else { -1.0 };
+                let sign = if action.p_batt_set > prev.p_batt_set {
+                    1.0
+                } else {
+                    -1.0
+                };
                 validated.p_batt_set = prev.p_batt_set + sign * self.config.p_batt_ramp_limit_kw;
                 violations.push(ViolationRecord {
                     rule: "ACT-01",
@@ -84,7 +88,11 @@ impl ActionValidator {
             if let Some(ref prev) = *last {
                 let delta = (action.q_batt_set - prev.q_batt_set).abs();
                 if delta > self.config.q_batt_ramp_limit_kvar {
-                    let sign = if action.q_batt_set > prev.q_batt_set { 1.0 } else { -1.0 };
+                    let sign = if action.q_batt_set > prev.q_batt_set {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     validated.q_batt_set =
                         prev.q_batt_set + sign * self.config.q_batt_ramp_limit_kvar;
                     violations.push(ViolationRecord {
@@ -99,8 +107,7 @@ impl ActionValidator {
 
         // ACT-03: 视在功率圆约束（v2.4 跳过，仅约束 p_batt_set 在 S_max 内）
         if !self.v2_4_mode {
-            let s =
-                (validated.p_batt_set.powi(2) + validated.q_batt_set.powi(2)).sqrt();
+            let s = (validated.p_batt_set.powi(2) + validated.q_batt_set.powi(2)).sqrt();
             if s > self.config.max_apparent_power_kva {
                 let scale = self.config.max_apparent_power_kva / s;
                 validated.p_batt_set *= scale;
@@ -228,8 +235,7 @@ mod tests {
         // 先设置历史值
         v.validate(&make_action(0.0, 0.0, 0.0, 1.0), None, false);
         // v2.4 模式：q_batt_set 变化不受限（由实时模块控制）
-        let (a, _violations) =
-            v.validate(&make_action(100.0, 200.0, 0.0, 1.0), None, false);
+        let (a, _violations) = v.validate(&make_action(100.0, 200.0, 0.0, 1.0), None, false);
         assert_eq!(a.q_batt_set, 200.0); // q_batt_set 未被 clamp
     }
 

@@ -169,12 +169,7 @@ mod tests {
     fn create_test_device() -> HplcDevice {
         let config = HplcConfig::new("/dev/ttyUSB0", 115200);
         let driver = Arc::new(MockHplcDriver::new());
-        HplcDevice::new(
-            "hplc_001".to_string(),
-            "hplc".to_string(),
-            config,
-            driver,
-        )
+        HplcDevice::new("hplc_001".to_string(), "hplc".to_string(), config, driver)
     }
 
     #[test]

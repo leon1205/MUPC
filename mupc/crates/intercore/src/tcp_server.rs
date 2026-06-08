@@ -1,17 +1,17 @@
 //! 核间通信 TCP 服务器
 
-use mupc_common::{MupcError, ErrorCode};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{broadcast, RwLock};
-use tracing::{info, warn, error};
+use mupc_common::{ErrorCode, MupcError};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, RwLock};
 use tokio::time::{timeout, Duration};
+use tracing::{error, info, warn};
 
-use super::{IntercoreFrame, IntercoreFrameType, HeartbeatManager};
+use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType};
 
 /// 核间通信配置
 #[derive(Debug, Clone)]
@@ -92,13 +92,16 @@ impl Default for CommandConfig {
 
 /// 指令队列（支持断连缓存）
 pub struct CommandQueue {
-    pending: VecDeque<(Vec<u8>, u32)>,  // (payload, retries_left)
+    pending: VecDeque<(Vec<u8>, u32)>, // (payload, retries_left)
     config: CommandConfig,
 }
 
 impl CommandQueue {
     pub fn new(config: CommandConfig) -> Self {
-        Self { pending: VecDeque::new(), config }
+        Self {
+            pending: VecDeque::new(),
+            config,
+        }
     }
 
     /// 添加指令到队列
@@ -161,9 +164,13 @@ impl IntercoreServer {
     /// 启动服务器
     pub async fn start(&self) -> Result<Arc<RwLock<HeartbeatManager>>, MupcError> {
         let addr = format!("{}:{}", self.config.listen_addr, self.config.listen_port);
-        let listener = TcpListener::bind(&addr)
-            .await
-            .map_err(|e| MupcError::new(ErrorCode::ConnectionFailed, format!("Failed to bind {}: {}", addr, e), "intercore"))?;
+        let listener = TcpListener::bind(&addr).await.map_err(|e| {
+            MupcError::new(
+                ErrorCode::ConnectionFailed,
+                format!("Failed to bind {}: {}", addr, e),
+                "intercore",
+            )
+        })?;
 
         info!("Intercore server listening on {}", addr);
 
@@ -249,7 +256,8 @@ impl IntercoreServer {
                     match IntercoreFrame::from_bytes(&buf[..n]) {
                         Ok(frame) => {
                             match frame.header.frame_type {
-                                IntercoreFrameType::HeartbeatReq | IntercoreFrameType::HeartbeatRsp => {
+                                IntercoreFrameType::HeartbeatReq
+                                | IntercoreFrameType::HeartbeatRsp => {
                                     heartbeat.read().await.receive_heartbeat(addr).await;
                                 }
                                 IntercoreFrameType::ControlCmd => {
@@ -267,7 +275,10 @@ impl IntercoreServer {
                                                 );
                                             }
                                             Err(e) => {
-                                                warn!("Failed to parse ControlCmd JSON payload: {}", e);
+                                                warn!(
+                                                    "Failed to parse ControlCmd JSON payload: {}",
+                                                    e
+                                                );
                                             }
                                         }
                                     }
@@ -293,7 +304,12 @@ impl IntercoreServer {
                             if frame.header.frame_type == IntercoreFrameType::HeartbeatReq {
                                 let rsp = IntercoreFrame::new_heartbeat_rsp();
                                 let rsp_data = rsp.to_bytes()?;
-                                Self::send_with_timeout(&mut write_half, &rsp_data, cmd_config.timeout_ms).await?;
+                                Self::send_with_timeout(
+                                    &mut write_half,
+                                    &rsp_data,
+                                    cmd_config.timeout_ms,
+                                )
+                                .await?;
                             }
                         }
                         Err(e) => {
@@ -328,7 +344,11 @@ impl IntercoreServer {
                 )
             })?
             .map_err(|e| {
-                MupcError::new(ErrorCode::SendFailed, format!("Send error: {}", e), "intercore")
+                MupcError::new(
+                    ErrorCode::SendFailed,
+                    format!("Send error: {}", e),
+                    "intercore",
+                )
             })
     }
 

@@ -64,16 +64,14 @@ impl HighFreqTelemetryImpl {
 
     pub fn get_current_value(&self, point_name: &str) -> Option<f64> {
         let buffer = self.buffer.lock().unwrap();
-        buffer.back().and_then(|p| {
-            match point_name {
-                "battery_soc" => Some(p.battery_soc),
-                "battery_power" => Some(p.battery_power),
-                "pv_output" => Some(p.pv_output),
-                "load_power" => Some(p.load_power),
-                "grid_power" => Some(p.grid_power),
-                "transformer_load" => Some(p.transformer_load),
-                _ => None,
-            }
+        buffer.back().and_then(|p| match point_name {
+            "battery_soc" => Some(p.battery_soc),
+            "battery_power" => Some(p.battery_power),
+            "pv_output" => Some(p.pv_output),
+            "load_power" => Some(p.load_power),
+            "grid_power" => Some(p.grid_power),
+            "transformer_load" => Some(p.transformer_load),
+            _ => None,
         })
     }
 }

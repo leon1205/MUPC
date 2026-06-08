@@ -1,7 +1,7 @@
 //! plugin-loader 单元测试
 
-use plugin_loader::{PluginLoaderImpl, PluginRegistry, PluginState};
 use device_trait::{PluginLoader, PluginMeta};
+use plugin_loader::{PluginLoaderImpl, PluginRegistry, PluginState};
 
 #[test]
 fn test_plugin_registry_creation() {
@@ -14,7 +14,11 @@ fn test_plugin_registry_register() {
     let registry = PluginRegistry::new();
     let meta = PluginMeta::new("test-plugin", "1.0.0", "Test", "Test plugin");
 
-    let result = registry.register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string());
+    let result = registry.register(
+        "test-plugin".to_string(),
+        meta,
+        "/path/to/plugin.so".to_string(),
+    );
     assert!(result.is_ok());
     assert_eq!(registry.count(), 1);
 }
@@ -25,7 +29,11 @@ fn test_plugin_registry_unregister() {
     let meta = PluginMeta::new("test-plugin", "1.0.0", "Test", "Test plugin");
 
     registry
-        .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+        .register(
+            "test-plugin".to_string(),
+            meta,
+            "/path/to/plugin.so".to_string(),
+        )
         .unwrap();
 
     let result = registry.unregister("test-plugin");
@@ -39,7 +47,11 @@ fn test_plugin_registry_get() {
     let meta = PluginMeta::new("test-plugin", "1.0.0", "Test", "Test plugin");
 
     registry
-        .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+        .register(
+            "test-plugin".to_string(),
+            meta,
+            "/path/to/plugin.so".to_string(),
+        )
         .unwrap();
 
     let entry = registry.get("test-plugin");
@@ -55,10 +67,18 @@ fn test_plugin_registry_names() {
     let meta2 = PluginMeta::new("plugin2", "1.0.0", "Author", "Plugin 2");
 
     registry
-        .register("plugin1".to_string(), meta1, "/path/to/plugin1.so".to_string())
+        .register(
+            "plugin1".to_string(),
+            meta1,
+            "/path/to/plugin1.so".to_string(),
+        )
         .unwrap();
     registry
-        .register("plugin2".to_string(), meta2, "/path/to/plugin2.so".to_string())
+        .register(
+            "plugin2".to_string(),
+            meta2,
+            "/path/to/plugin2.so".to_string(),
+        )
         .unwrap();
 
     let names = registry.names();
@@ -71,7 +91,11 @@ fn test_plugin_registry_query_by_state() {
     let meta = PluginMeta::new("test-plugin", "1.0.0", "Test", "Test plugin");
 
     registry
-        .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+        .register(
+            "test-plugin".to_string(),
+            meta,
+            "/path/to/plugin.so".to_string(),
+        )
         .unwrap();
 
     let entries = registry.query_by_state(PluginState::Loaded);
@@ -87,7 +111,11 @@ fn test_plugin_registry_update_state() {
     let meta = PluginMeta::new("test-plugin", "1.0.0", "Test", "Test plugin");
 
     registry
-        .register("test-plugin".to_string(), meta, "/path/to/plugin.so".to_string())
+        .register(
+            "test-plugin".to_string(),
+            meta,
+            "/path/to/plugin.so".to_string(),
+        )
         .unwrap();
 
     let result = registry.update_state("test-plugin", PluginState::Running);

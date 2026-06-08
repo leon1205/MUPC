@@ -3,10 +3,10 @@
 //! GET /api/v1/ai/weights — 查询 AI 模型权重配置
 //! PUT /api/v1/ai/weights — 更新优化目标权重
 
-use axum::{Json, extract::State, http::StatusCode};
+use crate::AppState;
+use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct WeightsResponse {
@@ -67,9 +67,7 @@ fn validate_weight_value(value: f64) -> bool {
 }
 
 /// GET /api/v1/ai/weights
-pub async fn get_weights(
-    State(state): State<Arc<AppState>>,
-) -> Json<WeightsResponse> {
+pub async fn get_weights(State(state): State<Arc<AppState>>) -> Json<WeightsResponse> {
     let _ = state.ai_integrator;
     let defaults: Vec<WeightEntry> = VALID_WEIGHT_NAMES
         .iter()

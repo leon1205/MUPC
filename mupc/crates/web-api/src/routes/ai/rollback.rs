@@ -2,12 +2,12 @@
 //!
 //! POST /api/v1/ai/rollback — 执行模型回滚
 
-use axum::{Json, extract::State, http::StatusCode};
+use super::auth::RequireRole;
+use crate::AppState;
+use axum::{extract::State, http::StatusCode, Json};
+use mupc_ota_update::types::ModelType;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use mupc_ota_update::types::ModelType;
-use crate::AppState;
-use super::auth::RequireRole;
 
 #[derive(Debug, Deserialize)]
 pub struct RollbackRequest {
@@ -44,10 +44,10 @@ pub async fn post_rollback(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let model_type = parse_model_type(&req.model_type)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let model_type = parse_model_type(&req.model_type).ok_or(StatusCode::BAD_REQUEST)?;
 
-    let previous_version = state.ota_manager
+    let previous_version = state
+        .ota_manager
         .get_current_version(model_type)
         .map(|v| v.version.clone())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -60,7 +60,8 @@ pub async fn post_rollback(
                 reason = %req.reason,
                 "模型回滚已执行"
             );
-            let current_version = state.ota_manager
+            let current_version = state
+                .ota_manager
                 .get_current_version(model_type)
                 .map(|v| v.version)
                 .unwrap_or_else(|_| req.target_version.clone());

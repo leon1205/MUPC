@@ -3,15 +3,15 @@
 //! 连接 emqx (可配置地址:8883)，用于北向通信
 //! 支持 TLS + 双向证书认证
 
+use crate::config::NorthMqttConfig;
+use crate::error::MqttBridgeError;
 use async_trait::async_trait;
-use device_trait::MqttBridge;
 use device_trait::errors::PluginError;
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Transport, Packet};
+use device_trait::MqttBridge;
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, Transport};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use crate::error::MqttBridgeError;
-use crate::config::NorthMqttConfig;
 
 /// 北向 MQTT 客户端实现
 pub struct NorthMqttClient {
@@ -29,11 +29,7 @@ impl NorthMqttClient {
         let host = parts.first().unwrap_or(&"mqtt.example.com");
         let port: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(8883);
 
-        let mut mqtt_options = MqttOptions::new(
-            config.client_id.clone(),
-            *host,
-            port,
-        );
+        let mut mqtt_options = MqttOptions::new(config.client_id.clone(), *host, port);
         mqtt_options.set_keep_alive(std::time::Duration::from_secs(config.keepalive_secs));
         // 北向通信需要持久化会话，支持断线重连后恢复
         mqtt_options.set_clean_session(false);
@@ -92,7 +88,8 @@ impl NorthMqttClient {
                     sleep(Duration::from_secs(interval_secs)).await;
 
                     let max_interval = self.reconnect_config.max_interval_secs;
-                    interval_secs = ((interval_secs as f64) * self.reconnect_config.backoff_multiplier)
+                    interval_secs = ((interval_secs as f64)
+                        * self.reconnect_config.backoff_multiplier)
                         .min(max_interval as f64) as u64;
                     interval_secs = interval_secs.max(1);
                 }

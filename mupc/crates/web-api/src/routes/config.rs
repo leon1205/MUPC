@@ -1,12 +1,6 @@
 //! 配置管理 API
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -38,8 +32,12 @@ pub struct GatewayConfig {
     pub heartbeat_interval_secs: u64,
 }
 
-fn default_listen_port() -> u16 { 2404 }
-fn default_heartbeat_interval() -> u64 { 10 }
+fn default_listen_port() -> u16 {
+    2404
+}
+fn default_heartbeat_interval() -> u64 {
+    10
+}
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -60,8 +58,12 @@ pub struct IntercoreConfig {
     pub remote_port: u16,
 }
 
-fn default_intercore_port() -> u16 { 2500 }
-fn default_intercore_remote_port() -> u16 { 2501 }
+fn default_intercore_port() -> u16 {
+    2500
+}
+fn default_intercore_remote_port() -> u16 {
+    2501
+}
 
 impl Default for IntercoreConfig {
     fn default() -> Self {
@@ -79,7 +81,9 @@ pub struct SystemConfig {
     pub log_level: String,
 }
 
-fn default_log_level() -> String { "info".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 impl Default for SystemConfig {
     fn default() -> Self {
@@ -139,7 +143,8 @@ impl ConfigHandler {
     pub async fn update_config(&self, new_config: AppConfig) -> Result<(), MupcError> {
         // 验证配置
         if new_config.gateway.heartbeat_interval_secs < 1
-            || new_config.gateway.heartbeat_interval_secs > 60 {
+            || new_config.gateway.heartbeat_interval_secs > 60
+        {
             return Err(MupcError::new(
                 mupc_common::ErrorCode::InvalidParam,
                 "heartbeat_interval must be between 1 and 60 seconds",
@@ -155,9 +160,7 @@ impl ConfigHandler {
 }
 
 /// GET /api/v1/config - 获取配置
-async fn get_config(
-    State(handler): State<ConfigHandler>,
-) -> Result<Json<AppConfig>, StatusCode> {
+async fn get_config(State(handler): State<ConfigHandler>) -> Result<Json<AppConfig>, StatusCode> {
     handler
         .get_config()
         .await

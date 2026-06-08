@@ -1,7 +1,7 @@
 //! 日志查看 API
 
 use axum::{
-    extract::{State, Query},
+    extract::{Query, State},
     http::StatusCode,
     response::Json,
     routing::get,
@@ -73,10 +73,7 @@ impl LogsHandler {
         // 目前返回模拟数据
         let entries = Vec::new();
 
-        Ok(LogListResponse {
-            total: 0,
-            entries,
-        })
+        Ok(LogListResponse { total: 0, entries })
     }
 
     /// 导出日志

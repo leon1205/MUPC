@@ -268,7 +268,6 @@ pub enum CrcMode {
     Crc8,
 }
 
-
 /// RS485 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rs485Config {

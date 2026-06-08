@@ -12,16 +12,16 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::applicator::ModelApplicator;
 use crate::config::OtaConfig;
-use crate::downloader::{Downloader, DownloadResult};
+use crate::downloader::{DownloadResult, Downloader};
 use crate::error::OtaError;
+use crate::rollback::RollbackManager;
 use crate::types::{
-    ModelType, ModelVersion, OtaState, OtaTask,
-    TaskId, UpdateInfo, UpdateRecord, VersionQueryResponse,
+    ModelType, ModelVersion, OtaState, OtaTask, TaskId, UpdateInfo, UpdateRecord,
+    VersionQueryResponse,
 };
 use crate::verifier::Verifier;
-use crate::applicator::ModelApplicator;
-use crate::rollback::RollbackManager;
 
 /// OTA 管理器 trait
 ///
@@ -182,7 +182,12 @@ impl OtaManagerImpl {
     }
 
     /// 创建任务记录
-    fn create_task(&self, model_type: ModelType, from_version: String, to_version: String) -> OtaTask {
+    fn create_task(
+        &self,
+        model_type: ModelType,
+        from_version: String,
+        to_version: String,
+    ) -> OtaTask {
         let now = Utc::now();
         OtaTask {
             task_id: self.generate_task_id(),
@@ -197,7 +202,12 @@ impl OtaManagerImpl {
     }
 
     /// 更新任务状态
-    async fn update_task_state(&self, task_id: &TaskId, state: OtaState, progress: Option<u8>) -> Result<(), OtaError> {
+    async fn update_task_state(
+        &self,
+        task_id: &TaskId,
+        state: OtaState,
+        progress: Option<u8>,
+    ) -> Result<(), OtaError> {
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(task_id) {
             task.state = state.clone();
@@ -283,11 +293,17 @@ impl OtaManagerImpl {
     }
 
     /// 比较版本确定是否有可用更新
-    fn find_updates(current_versions: &[ModelVersion], available_versions: &[ModelVersion]) -> Vec<UpdateInfo> {
+    fn find_updates(
+        current_versions: &[ModelVersion],
+        available_versions: &[ModelVersion],
+    ) -> Vec<UpdateInfo> {
         let mut updates = Vec::new();
 
         for available in available_versions {
-            if let Some(current) = current_versions.iter().find(|v| v.model_type == available.model_type) {
+            if let Some(current) = current_versions
+                .iter()
+                .find(|v| v.model_type == available.model_type)
+            {
                 // 比较版本号（简化：直接字符串比较）
                 if Self::version_greater(&available.version, &current.version) {
                     updates.push(UpdateInfo {
@@ -297,8 +313,10 @@ impl OtaManagerImpl {
                         size: available.size,
                         checksum: available.md5.clone(),
                         signature: String::new(), // 实际应该从服务器获取
-                        url: format!("https://ota.example.com/models/{}/v{}.rknn",
-                            available.model_type, available.version),
+                        url: format!(
+                            "https://ota.example.com/models/{}/v{}.rknn",
+                            available.model_type, available.version
+                        ),
                         is_incremental: false,
                         base_version: None,
                     });
@@ -313,12 +331,8 @@ impl OtaManagerImpl {
     fn version_greater(new: &str, current: &str) -> bool {
         // 简单的版本比较实现
         // 实际应该使用 semver 解析
-        let new_parts: Vec<u32> = new.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        let current_parts: Vec<u32> = current.split('.')
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let new_parts: Vec<u32> = new.split('.').filter_map(|s| s.parse().ok()).collect();
+        let current_parts: Vec<u32> = current.split('.').filter_map(|s| s.parse().ok()).collect();
 
         for i in 0..new_parts.len().max(current_parts.len()) {
             let new_val = new_parts.get(i).unwrap_or(&0);
@@ -333,7 +347,11 @@ impl OtaManagerImpl {
     }
 
     /// 执行下载（带进度回调）
-    async fn execute_download(&self, task_id: &TaskId, update_info: &UpdateInfo) -> Result<DownloadResult, OtaError> {
+    async fn execute_download(
+        &self,
+        task_id: &TaskId,
+        update_info: &UpdateInfo,
+    ) -> Result<DownloadResult, OtaError> {
         let task_id_clone = task_id.clone();
         let _update_info_clone = update_info.clone();
         let downloader = self.downloader.clone();
@@ -347,7 +365,10 @@ impl OtaManagerImpl {
             };
             tracing::debug!(
                 "任务 {} 下载进度: {}/{} ({}%)",
-                task_id_clone, downloaded, total, progress
+                task_id_clone,
+                downloaded,
+                total,
+                progress
             );
         });
 
@@ -373,21 +394,21 @@ impl OtaManager for OtaManagerImpl {
         let version_file = PathBuf::from(&self.config.model_storage_path).join("version.json");
 
         if !version_file.exists() {
-            return Err(OtaError::VersionQueryFailed("版本信息文件不存在".to_string()));
+            return Err(OtaError::VersionQueryFailed(
+                "版本信息文件不存在".to_string(),
+            ));
         }
 
-        let contents = std::fs::read_to_string(&version_file).map_err(|e| {
-            OtaError::VersionQueryFailed(format!("读取版本文件失败: {}", e))
-        })?;
+        let contents = std::fs::read_to_string(&version_file)
+            .map_err(|e| OtaError::VersionQueryFailed(format!("读取版本文件失败: {}", e)))?;
 
         #[derive(serde::Deserialize)]
         struct VersionFile {
             models: Vec<ModelVersion>,
         }
 
-        let version_file: VersionFile = serde_json::from_str(&contents).map_err(|e| {
-            OtaError::VersionQueryFailed(format!("解析版本文件失败: {}", e))
-        })?;
+        let version_file: VersionFile = serde_json::from_str(&contents)
+            .map_err(|e| OtaError::VersionQueryFailed(format!("解析版本文件失败: {}", e)))?;
 
         version_file
             .models
@@ -428,10 +449,7 @@ impl OtaManager for OtaManagerImpl {
         // 找出可用的更新
         let updates = Self::find_updates(&current_versions, &available_versions);
 
-        tracing::info!(
-            "检查更新完成: 发现 {} 个可用更新",
-            updates.len()
-        );
+        tracing::info!("检查更新完成: 发现 {} 个可用更新", updates.len());
 
         // 转换到 Idle 状态
         self.transition_state(OtaState::Idle).await?;
@@ -467,9 +485,15 @@ impl OtaManager for OtaManagerImpl {
         }
 
         // 转换到 Downloading 状态
-        self.transition_state(OtaState::Downloading { progress: 0 }).await?;
+        self.transition_state(OtaState::Downloading { progress: 0 })
+            .await?;
 
-        tracing::info!("开始下载任务 {}: {:?} -> {}", task_id, update_info.model_type, update_info.available_version);
+        tracing::info!(
+            "开始下载任务 {}: {:?} -> {}",
+            task_id,
+            update_info.model_type,
+            update_info.available_version
+        );
 
         // 执行下载
         let result = self.execute_download(&task_id, update_info).await;
@@ -477,15 +501,24 @@ impl OtaManager for OtaManagerImpl {
         match result {
             Ok(_) => {
                 // 下载成功，转换到 Verifying 状态
-                self.update_task_state(&task_id, OtaState::Verifying, None).await?;
+                self.update_task_state(&task_id, OtaState::Verifying, None)
+                    .await?;
                 self.transition_state(OtaState::Verifying).await?;
                 Ok(task_id)
             }
             Err(e) => {
                 // 下载失败
                 let error_msg = format!("下载失败: {}", e);
-                self.update_task_state(&task_id, OtaState::Failed { error: error_msg.clone() }, None).await?;
-                self.transition_state(OtaState::Failed { error: error_msg }).await?;
+                self.update_task_state(
+                    &task_id,
+                    OtaState::Failed {
+                        error: error_msg.clone(),
+                    },
+                    None,
+                )
+                .await?;
+                self.transition_state(OtaState::Failed { error: error_msg })
+                    .await?;
                 Err(e)
             }
         }
@@ -525,7 +558,9 @@ impl OtaManager for OtaManagerImpl {
                 model_type: t.model_type,
                 from_version: t.from_version,
                 to_version: t.to_version,
-                status: OtaState::Failed { error: "用户取消".to_string() },
+                status: OtaState::Failed {
+                    error: "用户取消".to_string(),
+                },
                 started_at: t.created_at,
                 completed_at: Some(Utc::now()),
                 error_message: Some("用户取消下载".to_string()),
@@ -560,7 +595,8 @@ impl OtaManager for OtaManagerImpl {
 
         // 转换到 Applying 状态
         self.transition_state(OtaState::Applying).await?;
-        self.update_task_state(&task_id, OtaState::Applying, None).await?;
+        self.update_task_state(&task_id, OtaState::Applying, None)
+            .await?;
 
         // 执行模型应用
         // 这里需要从下载结果获取文件路径，简化处理
@@ -570,16 +606,20 @@ impl OtaManager for OtaManagerImpl {
 
         // 注意：实际应该使用下载完成后的文件路径
         // 这里简化处理，假设文件已下载
-        let result = self.applicator.apply(
-            task.model_type,
-            &update_package,
-            "", // checksum 应该从任务中获取
-        ).await;
+        let result = self
+            .applicator
+            .apply(
+                task.model_type,
+                &update_package,
+                "", // checksum 应该从任务中获取
+            )
+            .await;
 
         match result {
             Ok(new_version) => {
                 // 应用成功
-                self.update_task_state(&task_id, OtaState::Applied, None).await?;
+                self.update_task_state(&task_id, OtaState::Applied, None)
+                    .await?;
                 self.transition_state(OtaState::Applied).await?;
 
                 // 保存信息用于日志（避免 move 后 borrow）
@@ -609,7 +649,9 @@ impl OtaManager for OtaManagerImpl {
 
                 tracing::info!(
                     "更新应用成功: {} v{} -> v{}",
-                    model_type, from_ver, new_version.version
+                    model_type,
+                    from_ver,
+                    new_version.version
                 );
 
                 // 延迟后回到 Idle 状态
@@ -622,7 +664,8 @@ impl OtaManager for OtaManagerImpl {
                 // 应用失败，触发回滚
                 tracing::error!("应用更新失败: {}", e);
 
-                self.update_task_state(&task_id, OtaState::RollingBack, None).await?;
+                self.update_task_state(&task_id, OtaState::RollingBack, None)
+                    .await?;
                 self.transition_state(OtaState::RollingBack).await?;
 
                 // 执行回滚
@@ -631,7 +674,8 @@ impl OtaManager for OtaManagerImpl {
                 }
 
                 let error_msg = format!("应用失败: {}", e);
-                self.transition_state(OtaState::Failed { error: error_msg }).await?;
+                self.transition_state(OtaState::Failed { error: error_msg })
+                    .await?;
 
                 Err(e)
             }
@@ -655,7 +699,8 @@ impl OtaManager for OtaManagerImpl {
             }
             Err(e) => {
                 let error_msg = format!("回滚失败: {}", e);
-                self.transition_state(OtaState::Failed { error: error_msg }).await?;
+                self.transition_state(OtaState::Failed { error: error_msg })
+                    .await?;
                 Err(e)
             }
         }
@@ -742,15 +787,13 @@ mod tests {
 
     #[test]
     fn test_find_updates() {
-        let current = vec![
-            ModelVersion {
-                model_type: ModelType::Lstm,
-                version: "1.0.0".to_string(),
-                updated_at: Utc::now(),
-                md5: "abc".to_string(),
-                size: 1000,
-            },
-        ];
+        let current = vec![ModelVersion {
+            model_type: ModelType::Lstm,
+            version: "1.0.0".to_string(),
+            updated_at: Utc::now(),
+            md5: "abc".to_string(),
+            size: 1000,
+        }];
 
         let available = vec![
             ModelVersion {
@@ -779,20 +822,44 @@ mod tests {
 
     #[test]
     fn test_can_transition_valid() {
-        assert!(OtaManagerImpl::can_transition(&OtaState::Idle, &OtaState::Checking));
-        assert!(OtaManagerImpl::can_transition(&OtaState::Checking, &OtaState::Downloading { progress: 0 }));
-        assert!(OtaManagerImpl::can_transition(&OtaState::Downloading { progress: 50 }, &OtaState::Verifying));
-        assert!(OtaManagerImpl::can_transition(&OtaState::Verifying, &OtaState::Applying));
-        assert!(OtaManagerImpl::can_transition(&OtaState::Applying, &OtaState::Applied));
-        assert!(OtaManagerImpl::can_transition(&OtaState::Applied, &OtaState::Completed));
+        assert!(OtaManagerImpl::can_transition(
+            &OtaState::Idle,
+            &OtaState::Checking
+        ));
+        assert!(OtaManagerImpl::can_transition(
+            &OtaState::Checking,
+            &OtaState::Downloading { progress: 0 }
+        ));
+        assert!(OtaManagerImpl::can_transition(
+            &OtaState::Downloading { progress: 50 },
+            &OtaState::Verifying
+        ));
+        assert!(OtaManagerImpl::can_transition(
+            &OtaState::Verifying,
+            &OtaState::Applying
+        ));
+        assert!(OtaManagerImpl::can_transition(
+            &OtaState::Applying,
+            &OtaState::Applied
+        ));
+        assert!(OtaManagerImpl::can_transition(
+            &OtaState::Applied,
+            &OtaState::Completed
+        ));
     }
 
     #[test]
     fn test_can_transition_invalid() {
         // 不能从 Idle 直接到 Downloading
-        assert!(!OtaManagerImpl::can_transition(&OtaState::Idle, &OtaState::Downloading { progress: 0 }));
+        assert!(!OtaManagerImpl::can_transition(
+            &OtaState::Idle,
+            &OtaState::Downloading { progress: 0 }
+        ));
         // 不能从 Completed 直接到 Applying
-        assert!(!OtaManagerImpl::can_transition(&OtaState::Completed, &OtaState::Applying));
+        assert!(!OtaManagerImpl::can_transition(
+            &OtaState::Completed,
+            &OtaState::Applying
+        ));
     }
 
     // ========== UpdateStatus 测试 ==========
@@ -893,11 +960,8 @@ mod tests {
             *notified_clone.lock().unwrap() = Some(model_type);
         });
 
-        let result = OtaManagerImpl::with_callbacks(
-            config,
-            temp_dir.clone().join("temp"),
-            Some(callback),
-        );
+        let result =
+            OtaManagerImpl::with_callbacks(config, temp_dir.clone().join("temp"), Some(callback));
 
         assert!(result.is_ok());
     }
@@ -1286,7 +1350,10 @@ mod tests {
             error_message: None,
         };
 
-        assert!(matches!(status.state, OtaState::Downloading { progress: 50 }));
+        assert!(matches!(
+            status.state,
+            OtaState::Downloading { progress: 50 }
+        ));
         assert_eq!(status.current_task_id, Some("task-123".to_string()));
         assert_eq!(status.download_progress, Some(50));
     }
@@ -1294,7 +1361,9 @@ mod tests {
     #[test]
     fn test_update_status_failed() {
         let status = UpdateStatus {
-            state: OtaState::Failed { error: "checksum mismatch".to_string() },
+            state: OtaState::Failed {
+                error: "checksum mismatch".to_string(),
+            },
             current_task_id: Some("task-456".to_string()),
             current_model_type: Some(ModelType::Maddpg),
             download_progress: Some(75),

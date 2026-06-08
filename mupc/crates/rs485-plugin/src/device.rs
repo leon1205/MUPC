@@ -5,9 +5,9 @@
 use crate::config::Config;
 use crate::errors::Rs485Error;
 use crate::protocol::Frame;
-use device_trait::{DataFrame, Device, DeviceError, DeviceStatus, ProtocolHandler, SouthDevice};
 #[allow(unused_imports)]
 use device_trait::Parity;
+use device_trait::{DataFrame, Device, DeviceError, DeviceStatus, ProtocolHandler, SouthDevice};
 use parking_lot::Mutex;
 #[cfg(unix)]
 use std::mem::MaybeUninit;
@@ -54,7 +54,12 @@ type RawFd = i32;
 
 impl Rs485Device {
     /// 创建新的 RS485 设备
-    pub fn new(device_id: String, device_type: String, config: Config, handler: Arc<dyn ProtocolHandler>) -> Self {
+    pub fn new(
+        device_id: String,
+        device_type: String,
+        config: Config,
+        handler: Arc<dyn ProtocolHandler>,
+    ) -> Self {
         Self {
             device_id,
             device_type,
@@ -84,10 +89,12 @@ impl Rs485Device {
                 .map_err(|_| Rs485Error::config_failed("无效的端口路径"))?;
 
             // 打开串口
-            let fd = unsafe { libc::open(
-                c_path.as_ptr(),
-                libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK,
-            ) };
+            let fd = unsafe {
+                libc::open(
+                    c_path.as_ptr(),
+                    libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK,
+                )
+            };
 
             if fd < 0 {
                 return Err(Rs485Error::open_failed(&self.config.port));
@@ -95,7 +102,9 @@ impl Rs485Device {
 
             // 配置串口参数；失败时关闭 fd 防止泄漏
             if let Err(e) = self.configure_port(fd) {
-                unsafe { libc::close(fd); }
+                unsafe {
+                    libc::close(fd);
+                }
                 return Err(e);
             }
 
@@ -193,7 +202,11 @@ impl Rs485Device {
             #[cfg(unix)]
             {
                 if unsafe { libc::close(fd) } < 0 {
-                    tracing::error!("关闭串口文件描述符 {} 失败: {}", fd, std::io::Error::last_os_error());
+                    tracing::error!(
+                        "关闭串口文件描述符 {} 失败: {}",
+                        fd,
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
         }
@@ -220,7 +233,8 @@ impl Rs485Device {
 
         #[cfg(unix)]
         {
-            let result = unsafe { libc::write(_fd, _frame.as_ptr() as *const libc::c_void, _frame.len()) };
+            let result =
+                unsafe { libc::write(_fd, _frame.as_ptr() as *const libc::c_void, _frame.len()) };
             if result < 0 {
                 return Err(Rs485Error::send_failed("发送失败"));
             }
@@ -265,7 +279,8 @@ impl Rs485Device {
             }
 
             let mut buffer = vec![0u8; 1024];
-            let n = unsafe { libc::read(_fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+            let n =
+                unsafe { libc::read(_fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
 
             if n < 0 {
                 return Err(Rs485Error::recv_failed("接收失败或超时"));
@@ -307,7 +322,11 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(DataFrame)`: 接收到的数据帧
     /// - `Err(Rs485Error)`: 操作失败
-    pub fn transaction(&self, request: &[u8], recv_timeout_ms: u64) -> Result<DataFrame, Rs485Error> {
+    pub fn transaction(
+        &self,
+        request: &[u8],
+        recv_timeout_ms: u64,
+    ) -> Result<DataFrame, Rs485Error> {
         let _guard = self.tx_lock.lock();
 
         // 1. 切换到发送模式
@@ -335,7 +354,11 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(DataFrame)`: 解码后的数据帧
     /// - `Err(Rs485Error)`: 操作失败
-    pub fn transaction_with_handler(&self, data: &[u8], recv_timeout_ms: u64) -> Result<DataFrame, Rs485Error> {
+    pub fn transaction_with_handler(
+        &self,
+        data: &[u8],
+        recv_timeout_ms: u64,
+    ) -> Result<DataFrame, Rs485Error> {
         let _guard = self.tx_lock.lock();
 
         // 1. 使用 handler 编码请求
@@ -354,7 +377,8 @@ impl Rs485Device {
         let response = self.recv_frame(recv_timeout_ms)?;
 
         // 6. 使用 handler 解码响应
-        self.handler.decode_response(&response)
+        self.handler
+            .decode_response(&response)
             .map_err(|e| Rs485Error::ConfigFailed(e.to_string()))
     }
 
@@ -382,7 +406,12 @@ impl Rs485Device {
         ];
 
         // 添加 CRC
-        let crc = Frame::calculate_crc(self.config.device_addr, func_code, &cmd[2..], self.config.crc_mode);
+        let crc = Frame::calculate_crc(
+            self.config.device_addr,
+            func_code,
+            &cmd[2..],
+            self.config.crc_mode,
+        );
         cmd.push((crc >> 8) as u8);
         cmd.push(crc as u8);
 
@@ -425,7 +454,12 @@ impl Rs485Device {
             value as u8,
         ];
 
-        let crc = Frame::calculate_crc(self.config.device_addr, func_code, &cmd[2..], self.config.crc_mode);
+        let crc = Frame::calculate_crc(
+            self.config.device_addr,
+            func_code,
+            &cmd[2..],
+            self.config.crc_mode,
+        );
         cmd.push((crc >> 8) as u8);
         cmd.push(crc as u8);
 
@@ -449,10 +483,12 @@ impl Device for Rs485Device {
         match self.handler.name() {
             "ModbusRTU" => {
                 // 读取设备数据（示例：读取前 10 个保持寄存器）
-                let registers = self.read_holding_registers(0, 10)
+                let registers = self
+                    .read_holding_registers(0, 10)
                     .map_err(|e| DeviceError::Other(e.to_string()))?;
 
-                let data = registers.iter()
+                let data = registers
+                    .iter()
                     .flat_map(|r| vec![(*r >> 8) as u8, *r as u8])
                     .collect();
 
@@ -475,7 +511,12 @@ impl Device for Rs485Device {
         cmd.extend_from_slice(data);
 
         let func_code = cmd[1];
-        let crc = Frame::calculate_crc(self.config.device_addr, func_code, &cmd[2..], self.config.crc_mode);
+        let crc = Frame::calculate_crc(
+            self.config.device_addr,
+            func_code,
+            &cmd[2..],
+            self.config.crc_mode,
+        );
         cmd.push((crc >> 8) as u8);
         cmd.push(crc as u8);
 
@@ -569,7 +610,11 @@ fn gpio_set_value(gpio_num: u32, value: bool) -> Result<(), Rs485Error> {
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         // 其他平台：模拟实现
-        tracing::debug!("GPIO {} set to {} (mock)", gpio_num, if value { "1" } else { "0" });
+        tracing::debug!(
+            "GPIO {} set to {} (mock)",
+            gpio_num,
+            if value { "1" } else { "0" }
+        );
         Ok(())
     }
 }
@@ -591,8 +636,16 @@ mod tests {
             de_gpio: Some(17),
             re_gpio: Some(27),
         };
-        let handler = Arc::new(device_trait::ModbusHandler::new(0x01, device_trait::CrcMode::Crc16Modbus));
-        Rs485Device::new("test_ttu_001".to_string(), "ttu".to_string(), config, handler)
+        let handler = Arc::new(device_trait::ModbusHandler::new(
+            0x01,
+            device_trait::CrcMode::Crc16Modbus,
+        ));
+        Rs485Device::new(
+            "test_ttu_001".to_string(),
+            "ttu".to_string(),
+            config,
+            handler,
+        )
     }
 
     #[test]

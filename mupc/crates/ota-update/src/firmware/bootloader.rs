@@ -72,10 +72,7 @@ impl BootloaderEnv {
         #[cfg(target_os = "linux")]
         {
             // 尝试使用 fw_printenv 读取
-            if let Ok(output) = std::process::Command::new("fw_printenv")
-                .arg(key)
-                .output()
-            {
+            if let Ok(output) = std::process::Command::new("fw_printenv").arg(key).output() {
                 if output.status.success() {
                     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !value.is_empty() {
@@ -86,12 +83,14 @@ impl BootloaderEnv {
         }
 
         // 回退到缓存读取
-        let cache = self.cache.lock().map_err(|e| {
-            OtaError::RollbackFailed(format!("锁获取失败: {}", e))
-        })?;
-        cache.get(key).cloned().ok_or_else(|| {
-            OtaError::VerificationFailed(format!("环境变量 {} 不存在", key))
-        })
+        let cache = self
+            .cache
+            .lock()
+            .map_err(|e| OtaError::RollbackFailed(format!("锁获取失败: {}", e)))?;
+        cache
+            .get(key)
+            .cloned()
+            .ok_or_else(|| OtaError::VerificationFailed(format!("环境变量 {} 不存在", key)))
     }
 
     /// 写入环境变量
@@ -105,9 +104,10 @@ impl BootloaderEnv {
             {
                 if output.status.success() {
                     // 同步更新缓存
-                    let mut cache = self.cache.lock().map_err(|e| {
-                        OtaError::RollbackFailed(format!("锁获取失败: {}", e))
-                    })?;
+                    let mut cache = self
+                        .cache
+                        .lock()
+                        .map_err(|e| OtaError::RollbackFailed(format!("锁获取失败: {}", e)))?;
                     cache.insert(key.to_string(), value.to_string());
                     return Ok(());
                 }
@@ -115,9 +115,10 @@ impl BootloaderEnv {
         }
 
         // 回退到缓存写入
-        let mut cache = self.cache.lock().map_err(|e| {
-            OtaError::RollbackFailed(format!("锁获取失败: {}", e))
-        })?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|e| OtaError::RollbackFailed(format!("锁获取失败: {}", e)))?;
         cache.insert(key.to_string(), value.to_string());
         self.persist_cache(&cache)?;
         Ok(())
@@ -125,9 +126,10 @@ impl BootloaderEnv {
 
     /// 批量写入环境变量
     pub fn batch_write(&self, pairs: &[(&str, &str)]) -> Result<(), OtaError> {
-        let mut cache = self.cache.lock().map_err(|e| {
-            OtaError::RollbackFailed(format!("锁获取失败: {}", e))
-        })?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|e| OtaError::RollbackFailed(format!("锁获取失败: {}", e)))?;
         for (key, value) in pairs {
             cache.insert(key.to_string(), value.to_string());
         }
@@ -139,12 +141,10 @@ impl BootloaderEnv {
         let data = EnvData {
             vars: cache.clone(),
         };
-        let json = serde_json::to_string(&data).map_err(|e| {
-            OtaError::RollbackFailed(format!("序列化环境变量失败: {}", e))
-        })?;
-        fs::write(DEV_ENV_FILE, json).map_err(|e| {
-            OtaError::RollbackFailed(format!("持久化环境变量失败: {}", e))
-        })?;
+        let json = serde_json::to_string(&data)
+            .map_err(|e| OtaError::RollbackFailed(format!("序列化环境变量失败: {}", e)))?;
+        fs::write(DEV_ENV_FILE, json)
+            .map_err(|e| OtaError::RollbackFailed(format!("持久化环境变量失败: {}", e)))?;
         Ok(())
     }
 
@@ -186,9 +186,11 @@ impl BootloaderEnv {
                 return Ok(true);
             }
         }
-        Ok(!self.cache.lock().map_err(|e| {
-            OtaError::RollbackFailed(format!("锁获取失败: {}", e))
-        })?.is_empty())
+        Ok(!self
+            .cache
+            .lock()
+            .map_err(|e| OtaError::RollbackFailed(format!("锁获取失败: {}", e)))?
+            .is_empty())
     }
 }
 

@@ -79,7 +79,11 @@ impl OtaScheduler {
     ///
     /// # 参数
     /// * `check_on_startup` - 是否在启动时执行一次检查
-    pub async fn start(&self, check_on_startup: bool, mut command_rx: mpsc::Receiver<SchedulerCommand>) -> Result<(), OtaError> {
+    pub async fn start(
+        &self,
+        check_on_startup: bool,
+        mut command_rx: mpsc::Receiver<SchedulerCommand>,
+    ) -> Result<(), OtaError> {
         if self.running.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(OtaError::UpdateTimeout); // 避免重复启动
         }
@@ -182,8 +186,7 @@ impl OtaScheduler {
         use chrono::Local;
 
         let now = Local::now();
-        self.config
-            .is_in_download_window(now.hour(), now.minute())
+        self.config.is_in_download_window(now.hour(), now.minute())
     }
 }
 
@@ -263,8 +266,10 @@ mod tests {
     fn test_scheduler_new_multiple() {
         let config = OtaConfig::default();
 
-        let (scheduler1, _rx1) = OtaScheduler::new(config.clone(), Arc::new(MockOtaManager::new())).unwrap();
-        let (scheduler2, _rx2) = OtaScheduler::new(config.clone(), Arc::new(MockOtaManager::new())).unwrap();
+        let (scheduler1, _rx1) =
+            OtaScheduler::new(config.clone(), Arc::new(MockOtaManager::new())).unwrap();
+        let (scheduler2, _rx2) =
+            OtaScheduler::new(config.clone(), Arc::new(MockOtaManager::new())).unwrap();
 
         // 两个调度器应该独立工作
         assert!(scheduler1.config.check_interval == scheduler2.config.check_interval);
@@ -358,11 +363,11 @@ mod tests {
         config.download_window_end = "05:00".to_string();
 
         // 验证 is_in_download_window 逻辑
-        assert!(config.is_in_download_window(2, 0));   // 02:00 - 在窗口内
-        assert!(config.is_in_download_window(3, 30));  // 03:30 - 在窗口内
-        assert!(config.is_in_download_window(5, 0));   // 05:00 - 在窗口内（边界）
-        assert!(!config.is_in_download_window(1, 0));   // 01:00 - 在窗口外
-        assert!(!config.is_in_download_window(6, 0));   // 06:00 - 在窗口外
+        assert!(config.is_in_download_window(2, 0)); // 02:00 - 在窗口内
+        assert!(config.is_in_download_window(3, 30)); // 03:30 - 在窗口内
+        assert!(config.is_in_download_window(5, 0)); // 05:00 - 在窗口内（边界）
+        assert!(!config.is_in_download_window(1, 0)); // 01:00 - 在窗口外
+        assert!(!config.is_in_download_window(6, 0)); // 06:00 - 在窗口外
     }
 
     #[test]
@@ -372,11 +377,11 @@ mod tests {
         config.download_window_start = "22:00".to_string();
         config.download_window_end = "06:00".to_string();
 
-        assert!(config.is_in_download_window(22, 0));  // 22:00 - 在窗口内
+        assert!(config.is_in_download_window(22, 0)); // 22:00 - 在窗口内
         assert!(config.is_in_download_window(23, 30)); // 23:30 - 在窗口内
-        assert!(config.is_in_download_window(0, 0));   // 00:00 - 在窗口内
-        assert!(config.is_in_download_window(6, 0));   // 06:00 - 在窗口内（边界）
-        assert!(!config.is_in_download_window(7, 0));  // 07:00 - 在窗口外
+        assert!(config.is_in_download_window(0, 0)); // 00:00 - 在窗口内
+        assert!(config.is_in_download_window(6, 0)); // 06:00 - 在窗口内（边界）
+        assert!(!config.is_in_download_window(7, 0)); // 07:00 - 在窗口外
         assert!(!config.is_in_download_window(12, 0)); // 12:00 - 在窗口外
     }
 
@@ -444,10 +449,7 @@ mod tests {
                     ota_manager: scheduler.ota_manager.clone(),
                     running: std::sync::atomic::AtomicBool::new(false),
                 };
-                tokio::spawn(async move {
-                    scheduler
-                        .send_command(SchedulerCommand::TriggerCheck)
-                })
+                tokio::spawn(async move { scheduler.send_command(SchedulerCommand::TriggerCheck) })
             })
             .collect();
 

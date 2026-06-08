@@ -220,9 +220,8 @@ impl AuditLogger {
             ip_address: ip_address.to_string(),
         };
 
-        let payload_str = serde_json::to_string(&payload).map_err(|e| {
-            SecurityError::AuditError(format!("序列化审计条目失败: {}", e))
-        })?;
+        let payload_str = serde_json::to_string(&payload)
+            .map_err(|e| SecurityError::AuditError(format!("序列化审计条目失败: {}", e)))?;
 
         // 计算链式哈希: SHA-256(prev_hash || payload_json)
         let mut hasher = Sha256::new();
@@ -244,18 +243,17 @@ impl AuditLogger {
             prev_sm3_hash: prev_hash,
         };
 
-        let full_json = serde_json::to_string(&full_entry).map_err(|e| {
-            SecurityError::AuditError(format!("序列化完整条目失败: {}", e))
-        })?;
+        let full_json = serde_json::to_string(&full_entry)
+            .map_err(|e| SecurityError::AuditError(format!("序列化完整条目失败: {}", e)))?;
 
         // 追加写入 JSONL 文件
-        let file = self.file_handle.as_mut().ok_or_else(|| {
-            SecurityError::AuditError("审计日志文件未打开".to_string())
-        })?;
+        let file = self
+            .file_handle
+            .as_mut()
+            .ok_or_else(|| SecurityError::AuditError("审计日志文件未打开".to_string()))?;
 
-        writeln!(file, "{}", full_json).map_err(|e| {
-            SecurityError::IoError(format!("写入审计日志失败: {}", e))
-        })?;
+        writeln!(file, "{}", full_json)
+            .map_err(|e| SecurityError::IoError(format!("写入审计日志失败: {}", e)))?;
 
         // 更新哈希链状态
         self.chain_hash = chain_hash;
@@ -279,9 +277,8 @@ impl AuditLogger {
     /// 刷新审计日志到磁盘（fsync）
     pub fn flush(&mut self) -> Result<(), SecurityError> {
         if let Some(file) = self.file_handle.as_mut() {
-            file.flush().map_err(|e| {
-                SecurityError::IoError(format!("fsync 审计日志失败: {}", e))
-            })?;
+            file.flush()
+                .map_err(|e| SecurityError::IoError(format!("fsync 审计日志失败: {}", e)))?;
             self.entries_since_flush = 0;
 
             tracing::debug!("审计日志已刷新到磁盘");
@@ -322,15 +319,14 @@ impl AuditLogger {
                 }
 
                 // 解析完整的 AuditLogEntry
-                let entry: AuditLogEntry =
-                    serde_json::from_str(&line).map_err(|e| {
-                        SecurityError::AuditError(format!(
-                            "解析审计日志 {} 行 {} 失败: {}",
-                            file_path.display(),
-                            line_no + 1,
-                            e
-                        ))
-                    })?;
+                let entry: AuditLogEntry = serde_json::from_str(&line).map_err(|e| {
+                    SecurityError::AuditError(format!(
+                        "解析审计日志 {} 行 {} 失败: {}",
+                        file_path.display(),
+                        line_no + 1,
+                        e
+                    ))
+                })?;
 
                 // 验证前驱哈希连续性
                 if entry.prev_sm3_hash != expected_hash {
@@ -356,9 +352,8 @@ impl AuditLogger {
                     operator: entry.operator,
                     ip_address: entry.ip_address,
                 };
-                let payload_str = serde_json::to_string(&payload).map_err(|e| {
-                    SecurityError::AuditError(format!("序列化验证负载失败: {}", e))
-                })?;
+                let payload_str = serde_json::to_string(&payload)
+                    .map_err(|e| SecurityError::AuditError(format!("序列化验证负载失败: {}", e)))?;
 
                 let mut hasher = Sha256::new();
                 hasher.update(expected_hash.as_bytes());
@@ -416,9 +411,8 @@ impl AuditLogger {
 
             let reader = BufReader::new(f);
             for line in reader.lines() {
-                let line = line.map_err(|e| {
-                    SecurityError::IoError(format!("读取审计日志失败: {}", e))
-                })?;
+                let line =
+                    line.map_err(|e| SecurityError::IoError(format!("读取审计日志失败: {}", e)))?;
 
                 if line.trim().is_empty() {
                     continue;
@@ -456,7 +450,11 @@ impl AuditLogger {
         let output_path = Path::new(output_path);
 
         let mut output = File::create(output_path).map_err(|e| {
-            SecurityError::IoError(format!("创建导出文件 {} 失败: {}", output_path.display(), e))
+            SecurityError::IoError(format!(
+                "创建导出文件 {} 失败: {}",
+                output_path.display(),
+                e
+            ))
         })?;
 
         // 写入 CSV 表头
@@ -475,9 +473,8 @@ impl AuditLogger {
 
             let reader = BufReader::new(f);
             for line in reader.lines() {
-                let line = line.map_err(|e| {
-                    SecurityError::IoError(format!("读取审计日志失败: {}", e))
-                })?;
+                let line =
+                    line.map_err(|e| SecurityError::IoError(format!("读取审计日志失败: {}", e)))?;
 
                 if line.trim().is_empty() {
                     continue;
@@ -498,17 +495,16 @@ impl AuditLogger {
                         entry.sm3_chain_hash,
                         entry.prev_sm3_hash
                     );
-                    writeln!(output, "{}", csv_line).map_err(|e| {
-                        SecurityError::IoError(format!("写入 CSV 行失败: {}", e))
-                    })?;
+                    writeln!(output, "{}", csv_line)
+                        .map_err(|e| SecurityError::IoError(format!("写入 CSV 行失败: {}", e)))?;
                     count += 1;
                 }
             }
         }
 
-        output.flush().map_err(|e| {
-            SecurityError::IoError(format!("刷新导出文件失败: {}", e))
-        })?;
+        output
+            .flush()
+            .map_err(|e| SecurityError::IoError(format!("刷新导出文件失败: {}", e)))?;
 
         tracing::info!(
             "审计日志已导出到 {}: {} 条记录",
@@ -556,11 +552,7 @@ impl AuditLogger {
         let today = Utc::now().format("%Y-%m-%d").to_string();
 
         if today != self.current_date {
-            tracing::info!(
-                "审计日志日期切换: {} -> {}",
-                self.current_date,
-                today
-            );
+            tracing::info!("审计日志日期切换: {} -> {}", self.current_date, today);
 
             // 刷新旧文件
             self.flush()?;
@@ -599,9 +591,7 @@ impl AuditLogger {
                         if line.trim().is_empty() {
                             continue;
                         }
-                        if let Ok(entry) =
-                            serde_json::from_str::<AuditLogEntry>(&line)
-                        {
+                        if let Ok(entry) = serde_json::from_str::<AuditLogEntry>(&line) {
                             last_sequence = entry.sequence;
                             last_hash = entry.sm3_chain_hash;
                         }
@@ -637,9 +627,8 @@ impl AuditLogger {
         })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                SecurityError::IoError(format!("读取目录条目失败: {}", e))
-            })?;
+            let entry =
+                entry.map_err(|e| SecurityError::IoError(format!("读取目录条目失败: {}", e)))?;
             let path = entry.path();
 
             if path.is_file() {
@@ -789,17 +778,14 @@ mod tests {
         logger.flush().unwrap();
 
         // 查询所有日志
-        let results = logger
-            .query(DateTime::UNIX_EPOCH, Utc::now())
-            .unwrap();
+        let results = logger.query(DateTime::UNIX_EPOCH, Utc::now()).unwrap();
         assert!(!results.is_empty());
 
         // 查时间范围外（过去）
         let old_results = logger
             .query(
                 DateTime::UNIX_EPOCH,
-                DateTime::UNIX_EPOCH
-                    + chrono::Duration::seconds(1),
+                DateTime::UNIX_EPOCH + chrono::Duration::seconds(1),
             )
             .unwrap();
         assert!(old_results.is_empty());
@@ -823,9 +809,7 @@ mod tests {
         logger.flush().unwrap();
 
         let csv_path = _dir.path().join("export.csv");
-        logger
-            .export(csv_path.to_str().unwrap())
-            .unwrap();
+        logger.export(csv_path.to_str().unwrap()).unwrap();
 
         let csv_content = fs::read_to_string(&csv_path).unwrap();
         assert!(csv_content.starts_with("sequence,timestamp,"));

@@ -119,7 +119,10 @@ impl RLModel {
     }
 
     /// 执行决策（使用完整融合状态 FusedSystemState）
-    pub async fn decide_fused(&self, state: &FusedSystemState) -> Result<ActionOutput, AiEngineError> {
+    pub async fn decide_fused(
+        &self,
+        state: &FusedSystemState,
+    ) -> Result<ActionOutput, AiEngineError> {
         if !self.runtime.is_loaded() {
             return Err(AiEngineError::ModelNotLoaded);
         }

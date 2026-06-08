@@ -5,11 +5,15 @@
 //! POST   /api/v1/ai/ab-test         — 创建 A/B 测试
 //! DELETE /api/v1/ai/ab-test/{id}    — 停止 A/B 测试
 
-use axum::{Json, extract::{State, Path}, http::StatusCode};
+use super::auth::RequireRole;
+use crate::AppState;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
-use super::auth::RequireRole;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateAbTestRequest {
@@ -33,19 +37,22 @@ pub struct CreateAbTestResponse {
 }
 
 /// GET /api/v1/ai/ab-test/status
-pub async fn get_ab_test_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let active: Vec<serde_json::Value> = state.ab_test_manager.list_active().await
+pub async fn get_ab_test_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let active: Vec<serde_json::Value> = state
+        .ab_test_manager
+        .list_active()
+        .await
         .into_iter()
-        .map(|t| serde_json::json!({
-            "id": t.id,
-            "model_type": t.model_type,
-            "experiment_version": t.experiment_version,
-            "traffic_percent": t.traffic_percent,
-            "status": t.status,
-            "started_at": t.started_at,
-        }))
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "model_type": t.model_type,
+                "experiment_version": t.experiment_version,
+                "traffic_percent": t.traffic_percent,
+                "status": t.status,
+                "started_at": t.started_at,
+            })
+        })
         .collect();
     let total = state.ab_test_manager.total_count().await;
 
@@ -56,9 +63,7 @@ pub async fn get_ab_test_status(
 }
 
 /// GET /api/v1/ai/ab-test/results
-pub async fn get_ab_test_results(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+pub async fn get_ab_test_results(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let active = state.ab_test_manager.list_active().await;
     Json(serde_json::json!({
         "test_id": active.first().map(|t| &t.id),
@@ -130,21 +135,29 @@ mod tests {
 
     #[test]
     fn test_create_ab_test_request_validation() {
-        assert!(CreateAbTestRequest {
-            model_type: "lstm".into(),
-            experiment_version: "v2".into(),
-            traffic_percent: 0,
-            duration_hours: 24,
-            metrics: vec![],
-        }.traffic_percent < 1);
+        assert!(
+            CreateAbTestRequest {
+                model_type: "lstm".into(),
+                experiment_version: "v2".into(),
+                traffic_percent: 0,
+                duration_hours: 24,
+                metrics: vec![],
+            }
+            .traffic_percent
+                < 1
+        );
 
-        assert!(CreateAbTestRequest {
-            model_type: "lstm".into(),
-            experiment_version: "v2".into(),
-            traffic_percent: 30,
-            duration_hours: 24,
-            metrics: vec![],
-        }.traffic_percent <= 50);
+        assert!(
+            CreateAbTestRequest {
+                model_type: "lstm".into(),
+                experiment_version: "v2".into(),
+                traffic_percent: 30,
+                duration_hours: 24,
+                metrics: vec![],
+            }
+            .traffic_percent
+                <= 50
+        );
     }
 
     #[test]

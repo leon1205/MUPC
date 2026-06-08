@@ -29,9 +29,8 @@ impl IntegrityMonitor {
             return Ok(true);
         }
 
-        let data = fs::read(path).map_err(|e| {
-            SecurityError::IoError(format!("读取文件 {} 失败: {}", path, e))
-        })?;
+        let data = fs::read(path)
+            .map_err(|e| SecurityError::IoError(format!("读取文件 {} 失败: {}", path, e)))?;
 
         let mut hasher = Sha256::new();
         hasher.update(&data);

@@ -1,10 +1,10 @@
 //! device-trait 单元测试
 
-use std::str::FromStr;
 use device_trait::{
     DataFrame, DataQuality, DeviceStatus, DeviceType, Message, Parity, PluginMeta, Rs485Config,
     Topic,
 };
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[test]
@@ -37,8 +37,8 @@ fn test_data_frame_with_timestamp() {
 
 #[test]
 fn test_data_frame_with_quality() {
-    let frame = DataFrame::new("device_001".to_string(), vec![1, 2, 3])
-        .with_quality(DataQuality::Invalid);
+    let frame =
+        DataFrame::new("device_001".to_string(), vec![1, 2, 3]).with_quality(DataQuality::Invalid);
     assert_eq!(frame.quality, DataQuality::Invalid);
 }
 

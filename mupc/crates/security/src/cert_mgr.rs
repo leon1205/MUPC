@@ -107,7 +107,9 @@ impl CertManager {
         // Phase 2+: 对接 CA 服务签发新证书
         // 当前 stub: 标记需人工更新
         tracing::warn!("证书续期需通过外部 CA 服务完成");
-        Err(SecurityError::ConfigError("证书续期功能待实现，请通过外部 CA 服务手动更新".into()))
+        Err(SecurityError::ConfigError(
+            "证书续期功能待实现，请通过外部 CA 服务手动更新".into(),
+        ))
     }
 
     pub fn revoke_cert(&mut self, serial: &str) -> Result<(), SecurityError> {

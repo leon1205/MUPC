@@ -1,14 +1,19 @@
 //! 削峰填谷策略测试
 
+use crate::config::PeakShavingConfig;
+use crate::peak_shaving::PeakShavingStrategy;
+use crate::strategies::CommandType;
 use mupc_data_processing::telemetry::{
     BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
 };
-use crate::peak_shaving::PeakShavingStrategy;
-use crate::config::PeakShavingConfig;
-use crate::strategies::CommandType;
 
 /// 创建测试用电数据包
-fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power: f64) -> DataPackage {
+fn create_test_data(
+    timestamp: u64,
+    battery_soc: f64,
+    pv_power: f64,
+    load_power: f64,
+) -> DataPackage {
     DataPackage {
         electrical: ElectricalData {
             voltage: Some(220.0),

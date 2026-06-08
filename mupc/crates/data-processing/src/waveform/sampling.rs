@@ -44,10 +44,7 @@ impl DualBufferManager {
     pub fn new(pre_trigger_samples: usize, post_trigger_samples: usize) -> Self {
         let capacity = pre_trigger_samples.max(post_trigger_samples);
         Self {
-            buffers: [
-                vec![0.0f32; capacity],
-                vec![0.0f32; capacity],
-            ],
+            buffers: [vec![0.0f32; capacity], vec![0.0f32; capacity]],
             active_idx: AtomicUsize::new(0),
             capacity,
             write_pos: [AtomicUsize::new(0), AtomicUsize::new(0)],
@@ -136,8 +133,7 @@ impl DualBufferManager {
         } else {
             // 缓冲区已回绕，从当前写位置向前追溯
             for i in 0..count {
-                let idx =
-                    (write_pos + self.capacity - count + i) % self.capacity;
+                let idx = (write_pos + self.capacity - count + i) % self.capacity;
                 result.push(self.buffers[buf_idx][idx]);
             }
         }

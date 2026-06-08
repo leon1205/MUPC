@@ -294,7 +294,10 @@ impl ProtocolHandler for ModbusHandler {
         if frame_crc != calc_crc {
             return Err(DeviceError::checksum_failed("Modbus CRC 校验失败"));
         }
-        Ok(DataFrame::new(format!("modbus_{}", self.device_addr), frame.to_vec()))
+        Ok(DataFrame::new(
+            format!("modbus_{}", self.device_addr),
+            frame.to_vec(),
+        ))
     }
 
     fn name(&self) -> &'static str {
@@ -341,9 +344,9 @@ impl ProtocolHandler for TtuHandler {
         }
         let data_len = frame[2] as usize;
         // 验证 data_len + 3 不越界（data_len + 3 为 payload + checksum 长度）
-        let end_idx = data_len.checked_add(3).ok_or_else(|| {
-            DeviceError::protocol_error("TTU 数据长度计算溢出")
-        })?;
+        let end_idx = data_len
+            .checked_add(3)
+            .ok_or_else(|| DeviceError::protocol_error("TTU 数据长度计算溢出"))?;
         if frame.len() < end_idx {
             return Err(DeviceError::protocol_error("TTU 数据长度不匹配"));
         }

@@ -208,7 +208,11 @@ mod tests {
 
     #[test]
     fn test_frame_crc16_modbus() {
-        let frame = Frame::new(0x01, func_codes::READ_HOLDING_REGISTERS, vec![0x00, 0x00, 0x00, 0x02]);
+        let frame = Frame::new(
+            0x01,
+            func_codes::READ_HOLDING_REGISTERS,
+            vec![0x00, 0x00, 0x00, 0x02],
+        );
         let bytes = frame.to_bytes(CrcMode::Crc16Modbus);
         // 地址(1) + 功能码(1) + 数据(4) + CRC(2) = 8
         assert_eq!(bytes.len(), 8);

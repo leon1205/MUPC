@@ -7,12 +7,12 @@
 
 use axum::response::sse::{Event, Sse};
 use futures::stream::{Stream, StreamExt};
+use mupc_ai_engine::RunningMode;
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use serde::{Deserialize, Serialize};
-use mupc_ai_engine::RunningMode;
 
 /// SSE 事件类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +86,10 @@ impl SsePushService {
     }
 
     /// 推送 AI 决策事件
-    pub fn push_ai_decision(&self, summary: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+    pub fn push_ai_decision(
+        &self,
+        summary: &str,
+    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
         let event = SseEvent {
             event_id: uuid::Uuid::new_v4().to_string(),
             event_type: SseEventType::AiDecision {
@@ -102,7 +105,10 @@ impl SsePushService {
     }
 
     /// 推送预测更新事件
-    pub fn push_prediction_update(&self, prediction_type: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+    pub fn push_prediction_update(
+        &self,
+        prediction_type: &str,
+    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
         let event = SseEvent {
             event_id: uuid::Uuid::new_v4().to_string(),
             event_type: SseEventType::PredictionUpdate {
@@ -118,7 +124,11 @@ impl SsePushService {
     }
 
     /// 推送系统告警事件
-    pub fn push_system_alert(&self, level: &str, message: &str) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+    pub fn push_system_alert(
+        &self,
+        level: &str,
+        message: &str,
+    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
         let event = SseEvent {
             event_id: uuid::Uuid::new_v4().to_string(),
             event_type: SseEventType::SystemAlert {
@@ -199,10 +209,9 @@ pub async fn sse_handler(
         }
     });
 
-    Sse::new(stream)
-        .keep_alive(
-            axum::response::sse::KeepAlive::new()
-                .interval(Duration::from_secs(30))
-                .text("ping"),
-        )
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(30))
+            .text("ping"),
+    )
 }

@@ -1,8 +1,8 @@
 //! rs485-plugin 单元测试
 
-use std::str::FromStr;
-use rs485_plugin::{Config, CrcMode};
 use device_trait::{DeviceStatus, DeviceType, Parity};
+use rs485_plugin::{Config, CrcMode};
+use std::str::FromStr;
 
 #[test]
 fn test_config_default() {

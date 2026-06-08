@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use device_trait::{DataFrame, Device, DeviceError, DeviceStatus};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
 use std::sync::Arc;
-use std::time::Duration;
 use std::sync::RwLock;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// MQTT 客户端状态
@@ -35,11 +35,7 @@ impl MqttClient {
     pub fn new(config: MqttConfig) -> Self {
         let (_event_tx, _) = broadcast::channel::<rumqttc::Event>(100);
 
-        let mut mqtt_opts = MqttOptions::new(
-            &config.client_id,
-            &config.broker_addr,
-            1883,
-        );
+        let mut mqtt_opts = MqttOptions::new(&config.client_id, &config.broker_addr, 1883);
 
         mqtt_opts.set_keep_alive(Duration::from_secs(config.keepalive_secs as u64));
 
@@ -95,7 +91,9 @@ impl MqttClient {
 
     /// 断开连接
     pub async fn disconnect(&self) -> Result<(), MqttError> {
-        self.inner.disconnect().await
+        self.inner
+            .disconnect()
+            .await
             .map_err(|e| MqttError::Disconnected(e.to_string()))?;
 
         let mut state = self.state.write().unwrap();
@@ -119,12 +117,20 @@ impl MqttClient {
         }
 
         let qos: QoS = qos.into();
-        self.inner.subscribe(topic, qos).await
+        self.inner
+            .subscribe(topic, qos)
+            .await
             .map_err(|e| MqttError::SubscribeFailed(e.to_string()))
     }
 
     /// 发布消息
-    pub async fn publish(&self, topic: &str, payload: &[u8], qos: MqttQos, retain: bool) -> Result<(), MqttError> {
+    pub async fn publish(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        qos: MqttQos,
+        retain: bool,
+    ) -> Result<(), MqttError> {
         {
             let state = self.state.read().unwrap();
             if *state != MqttClientState::Connected {
@@ -133,7 +139,9 @@ impl MqttClient {
         }
 
         let qos: QoS = qos.into();
-        self.inner.publish(topic, qos, retain, payload).await
+        self.inner
+            .publish(topic, qos, retain, payload)
+            .await
             .map_err(|e| MqttError::PublishFailed(e.to_string()))
     }
 
@@ -243,12 +251,9 @@ mod tests {
     fn test_mqtt_message_handler() {
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         let received_clone = received.clone();
-        let handler = MqttMessageHandler::new(
-            "test/topic".to_string(),
-            move |topic, payload| {
-                received_clone.lock().unwrap().push((topic, payload));
-            },
-        );
+        let handler = MqttMessageHandler::new("test/topic".to_string(), move |topic, payload| {
+            received_clone.lock().unwrap().push((topic, payload));
+        });
 
         handler.handle("test/topic".to_string(), b"hello".to_vec());
         assert_eq!(received.lock().unwrap().len(), 1);

@@ -2,11 +2,11 @@
 //!
 //! 查询 AI 模型状态和性能指标
 
-use axum::{Json, extract::State};
+use crate::AppState;
+use axum::{extract::State, Json};
+use mupc_ota_update::types::ModelType;
 use serde::Serialize;
 use std::sync::Arc;
-use mupc_ota_update::types::ModelType;
-use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct ModelStatusResponse {
@@ -46,9 +46,7 @@ fn get_version(ota: &Arc<dyn mupc_ota_update::manager::OtaManager>, model: Model
 }
 
 /// GET /api/v1/ai/models/status
-pub async fn get_model_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<ModelStatusResponse> {
+pub async fn get_model_status(State(state): State<Arc<AppState>>) -> Json<ModelStatusResponse> {
     let info = state.ai_integrator.engine_status().await;
 
     let models = vec![
@@ -78,9 +76,7 @@ pub async fn get_model_status(
 }
 
 /// GET /api/v1/ai/models/metrics
-pub async fn get_model_metrics(
-    State(_state): State<Arc<AppState>>,
-) -> Json<ModelMetricsResponse> {
+pub async fn get_model_metrics(State(_state): State<Arc<AppState>>) -> Json<ModelMetricsResponse> {
     Json(ModelMetricsResponse {
         metrics: vec![
             ModelMetric {

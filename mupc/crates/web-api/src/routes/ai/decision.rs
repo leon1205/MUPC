@@ -4,10 +4,13 @@
 //! GET /api/v1/ai/decisions/latest — 获取最新决策
 //! GET /api/v1/ai/decisions/{id}   — 获取决策详情
 
-use axum::{Json, extract::{State, Path, Query}};
+use crate::AppState;
+use axum::{
+    extract::{Path, Query, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct DecisionQuery {
@@ -96,31 +99,44 @@ pub async fn get_decisions(
     let page_size = query.page_size.unwrap_or(20) as usize;
     let limit = page_size * 5;
 
-    let records = state.storage.decisions.query_recent(limit).await
-        .map_err(|e| { tracing::error!(%e, "查询决策列表失败"); e })
+    let records = state
+        .storage
+        .decisions
+        .query_recent(limit)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "查询决策列表失败");
+            e
+        })
         .unwrap_or_default();
 
     let total = records.len() as u64;
     let skip = ((page - 1) as usize * page_size).min(records.len());
-    let decisions: Vec<DecisionSummary> = records.into_iter()
+    let decisions: Vec<DecisionSummary> = records
+        .into_iter()
         .skip(skip)
         .take(page_size)
         .map(|r| {
-        let action = parse_action_json(&r.action_json);
-        let action_summary = action
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        DecisionSummary {
-            id: r.id.map(|i| i.to_string()).unwrap_or_default(),
-            timestamp: r.timestamp.to_rfc3339(),
-            mode: r.scene_type,
-            action_summary,
-        }
-    }).collect();
+            let action = parse_action_json(&r.action_json);
+            let action_summary = action
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            DecisionSummary {
+                id: r.id.map(|i| i.to_string()).unwrap_or_default(),
+                timestamp: r.timestamp.to_rfc3339(),
+                mode: r.scene_type,
+                action_summary,
+            }
+        })
+        .collect();
 
-    Json(DecisionListResponse { total, page, decisions })
+    Json(DecisionListResponse {
+        total,
+        page,
+        decisions,
+    })
 }
 
 /// GET /api/v1/ai/decisions/latest
@@ -128,8 +144,15 @@ pub async fn get_latest_decision(
     State(state): State<Arc<AppState>>,
 ) -> Json<DecisionDetailResponse> {
     let info = state.ai_integrator.engine_status().await;
-    let records = state.storage.decisions.query_recent(1).await
-        .map_err(|e| { tracing::error!(%e, "查询最新决策失败"); e })
+    let records = state
+        .storage
+        .decisions
+        .query_recent(1)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "查询最新决策失败");
+            e
+        })
         .unwrap_or_default();
 
     if let Some(record) = records.into_iter().next() {
@@ -138,9 +161,18 @@ pub async fn get_latest_decision(
             timestamp: record.timestamp.to_rfc3339(),
             system_state: empty_system_state(),
             action: ActionSnapshot {
-                p_batt_set_kw: action.get("p_batt_set_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                load_shedding_kw: action.get("load_shedding_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                pv_limit_ratio: action.get("pv_limit_ratio").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                p_batt_set_kw: action
+                    .get("p_batt_set_kw")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                load_shedding_kw: action
+                    .get("load_shedding_kw")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                pv_limit_ratio: action
+                    .get("pv_limit_ratio")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0),
                 confidence: record.confidence,
             },
             mode: ModeSnapshot {
@@ -157,8 +189,10 @@ pub async fn get_latest_decision(
             timestamp: chrono::Utc::now().to_rfc3339(),
             system_state: empty_system_state(),
             action: ActionSnapshot {
-                p_batt_set_kw: 0.0, load_shedding_kw: 0.0,
-                pv_limit_ratio: 1.0, confidence: 0.0,
+                p_batt_set_kw: 0.0,
+                load_shedding_kw: 0.0,
+                pv_limit_ratio: 1.0,
+                confidence: 0.0,
             },
             mode: ModeSnapshot {
                 current: "auto".to_string(),
@@ -186,9 +220,18 @@ pub async fn get_decision_detail(
                 timestamp: record.timestamp.to_rfc3339(),
                 system_state: empty_system_state(),
                 action: ActionSnapshot {
-                    p_batt_set_kw: action.get("p_batt_set_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    load_shedding_kw: action.get("load_shedding_kw").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    pv_limit_ratio: action.get("pv_limit_ratio").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                    p_batt_set_kw: action
+                        .get("p_batt_set_kw")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    load_shedding_kw: action
+                        .get("load_shedding_kw")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    pv_limit_ratio: action
+                        .get("pv_limit_ratio")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(1.0),
                     confidence: record.confidence,
                 },
                 mode: ModeSnapshot {
@@ -207,8 +250,10 @@ pub async fn get_decision_detail(
         timestamp: chrono::Utc::now().to_rfc3339(),
         system_state: empty_system_state(),
         action: ActionSnapshot {
-            p_batt_set_kw: 0.0, load_shedding_kw: 0.0,
-            pv_limit_ratio: 1.0, confidence: 0.0,
+            p_batt_set_kw: 0.0,
+            load_shedding_kw: 0.0,
+            pv_limit_ratio: 1.0,
+            confidence: 0.0,
         },
         mode: ModeSnapshot {
             current: "auto".to_string(),

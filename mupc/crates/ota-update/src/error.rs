@@ -91,7 +91,7 @@ mod tests {
         assert!(msg.contains("需要"));
         assert!(msg.contains("可用"));
         assert!(msg.contains("104857600")); // 100MB in bytes
-        assert!(msg.contains("52428800"));  // 50MB in bytes
+        assert!(msg.contains("52428800")); // 50MB in bytes
     }
 
     #[test]
@@ -167,7 +167,10 @@ mod tests {
         let errors: Vec<Box<dyn Error>> = vec![
             Box::new(OtaError::NetworkError("test".to_string())),
             Box::new(OtaError::DownloadFailed("test".to_string())),
-            Box::new(OtaError::InsufficientSpace { need: 1, available: 0 }),
+            Box::new(OtaError::InsufficientSpace {
+                need: 1,
+                available: 0,
+            }),
             Box::new(OtaError::VerificationFailed("test".to_string())),
             Box::new(OtaError::SignatureInvalid),
             Box::new(OtaError::ModelLoadFailed("test".to_string())),

@@ -4,4 +4,4 @@
 
 pub mod iec104;
 
-pub use iec104::{Iec104Server, Iec104Config};
+pub use iec104::{Iec104Config, Iec104Server};

@@ -2,7 +2,9 @@
 //! 从 intercore 模块接收实时控制模块的数据
 
 use crate::errors::DataProcessingError;
-use crate::telemetry::{DataPackage, ElectricalData, BatteryData, DeviceStatus, InverterStatus, TelemetryData};
+use crate::telemetry::{
+    BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus, TelemetryData,
+};
 use async_trait::async_trait;
 use mupc_common::MupcError;
 use std::sync::Arc;
@@ -74,7 +76,11 @@ impl DataCollectorImpl {
 
     /// 获取最新遥测数据（TelemetryData 格式）
     pub fn get_latest_telemetry(&self) -> Option<TelemetryData> {
-        self.latest_data.lock().unwrap().clone().map(TelemetryData::from)
+        self.latest_data
+            .lock()
+            .unwrap()
+            .clone()
+            .map(TelemetryData::from)
     }
 }
 

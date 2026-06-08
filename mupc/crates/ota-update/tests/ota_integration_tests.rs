@@ -8,8 +8,8 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use mupc_ota_update::{
-    OtaConfig, OtaError, OtaManager, OtaManagerImpl, OtaScheduler, OtaState,
-    SchedulerCommand, ModelType, ModelVersion, UpdateInfo, VersionQueryResponse,
+    ModelType, ModelVersion, OtaConfig, OtaError, OtaManager, OtaManagerImpl, OtaScheduler,
+    OtaState, SchedulerCommand, UpdateInfo, VersionQueryResponse,
 };
 
 // ============================================================================
@@ -145,7 +145,9 @@ fn test_ota_state_serde() {
         OtaState::Applied,
         OtaState::RollingBack,
         OtaState::Completed,
-        OtaState::Failed { error: "test error".to_string() },
+        OtaState::Failed {
+            error: "test error".to_string(),
+        },
     ];
 
     for state in states {
@@ -182,7 +184,10 @@ fn test_version_query_response_serde() {
 #[test]
 fn test_scheduler_command_clone() {
     assert_eq!(SchedulerCommand::Stop, SchedulerCommand::Stop);
-    assert_eq!(SchedulerCommand::TriggerCheck, SchedulerCommand::TriggerCheck);
+    assert_eq!(
+        SchedulerCommand::TriggerCheck,
+        SchedulerCommand::TriggerCheck
+    );
 }
 
 #[test]

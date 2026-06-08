@@ -90,10 +90,7 @@ impl SelfHealingEngine {
     }
 
     /// 执行自愈动作
-    pub fn execute(
-        &mut self,
-        action: HealingAction,
-    ) -> Result<HealingResult, MonitorError> {
+    pub fn execute(&mut self, action: HealingAction) -> Result<HealingResult, MonitorError> {
         let success = self.can_retry(&action);
 
         let message = match &action {

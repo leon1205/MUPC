@@ -2,10 +2,13 @@
 //!
 //! GET /api/v1/ai/audit — 查询干预操作审计日志
 
-use axum::{Json, extract::{State, Query}};
+use crate::AppState;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct AuditQuery {
@@ -38,7 +41,10 @@ pub struct AuditEntry {
     pub source_ip: String,
 }
 
-fn parse_time(s: &Option<String>, fallback: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+fn parse_time(
+    s: &Option<String>,
+    fallback: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
     s.as_ref()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -57,18 +63,26 @@ pub async fn get_audit_log(
     let start = parse_time(&query.start, end - chrono::Duration::days(7));
 
     let user_filter = query.operator.as_deref();
-    let entries = state.audit_logger.query(start, end, user_filter).await
-        .map_err(|e| { tracing::error!(%e, "查询审计日志失败"); e })
+    let entries = state
+        .audit_logger
+        .query(start, end, user_filter)
+        .await
+        .map_err(|e| {
+            tracing::error!(%e, "查询审计日志失败");
+            e
+        })
         .unwrap_or_default();
 
     let action_filter = query.action_type.as_deref();
-    let filtered: Vec<_> = entries.into_iter()
+    let filtered: Vec<_> = entries
+        .into_iter()
         .filter(|e| action_filter.map_or(true, |af| e.action.contains(af)))
         .collect();
 
     let total = filtered.len() as u64;
     let skip = ((page - 1) as usize * page_size).min(filtered.len());
-    let items: Vec<AuditEntry> = filtered.into_iter()
+    let items: Vec<AuditEntry> = filtered
+        .into_iter()
         .skip(skip)
         .take(page_size)
         .map(|e| AuditEntry {

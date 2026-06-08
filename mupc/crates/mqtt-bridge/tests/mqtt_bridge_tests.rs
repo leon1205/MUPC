@@ -2,11 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use mupc_mqtt_bridge::{
-        LocalMqttClient, LocalMqttConfig,
-        topics::*,
-        MqttBridge,
-    };
+    use mupc_mqtt_bridge::{topics::*, LocalMqttClient, LocalMqttConfig, MqttBridge};
 
     #[test]
     fn test_local_mqtt_config_default() {

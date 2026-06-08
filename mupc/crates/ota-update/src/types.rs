@@ -277,12 +277,23 @@ mod tests {
     fn test_ota_state_display() {
         assert_eq!(format!("{}", OtaState::Idle), "Idle");
         assert_eq!(format!("{}", OtaState::Checking), "Checking");
-        assert_eq!(format!("{}", OtaState::Downloading { progress: 50 }), "Downloading(50%)");
+        assert_eq!(
+            format!("{}", OtaState::Downloading { progress: 50 }),
+            "Downloading(50%)"
+        );
         assert_eq!(format!("{}", OtaState::Verifying), "Verifying");
         assert_eq!(format!("{}", OtaState::Applying), "Applying");
         assert_eq!(format!("{}", OtaState::Applied), "Applied");
         assert_eq!(format!("{}", OtaState::RollingBack), "RollingBack");
-        assert_eq!(format!("{}", OtaState::Failed { error: "test error".to_string() }), "Failed: test error");
+        assert_eq!(
+            format!(
+                "{}",
+                OtaState::Failed {
+                    error: "test error".to_string()
+                }
+            ),
+            "Failed: test error"
+        );
         assert_eq!(format!("{}", OtaState::Completed), "Completed");
     }
 
@@ -299,7 +310,9 @@ mod tests {
 
     #[test]
     fn test_ota_state_failed_serde() {
-        let state = OtaState::Failed { error: "checksum mismatch".to_string() };
+        let state = OtaState::Failed {
+            error: "checksum mismatch".to_string(),
+        };
 
         let json = serde_json::to_string(&state).unwrap();
         let parsed: OtaState = serde_json::from_str(&json).unwrap();
@@ -369,7 +382,9 @@ mod tests {
             model_type: ModelType::Lstm,
             from_version: "1.0.0".to_string(),
             to_version: "1.1.0".to_string(),
-            status: OtaState::Failed { error: "network timeout".to_string() },
+            status: OtaState::Failed {
+                error: "network timeout".to_string(),
+            },
             started_at: Utc.with_ymd_and_hms(2026, 5, 28, 10, 0, 0).unwrap(),
             completed_at: None,
             error_message: Some("network timeout".to_string()),
@@ -457,10 +472,22 @@ mod tests {
 
     #[test]
     fn test_rollback_trigger_debug() {
-        assert_eq!(format!("{:?}", RollbackTrigger::ModelLoadFailed), "ModelLoadFailed");
-        assert_eq!(format!("{:?}", RollbackTrigger::VerificationFailed), "VerificationFailed");
-        assert_eq!(format!("{:?}", RollbackTrigger::WarmupTimeout), "WarmupTimeout");
-        assert_eq!(format!("{:?}", RollbackTrigger::InferenceFailed), "InferenceFailed");
+        assert_eq!(
+            format!("{:?}", RollbackTrigger::ModelLoadFailed),
+            "ModelLoadFailed"
+        );
+        assert_eq!(
+            format!("{:?}", RollbackTrigger::VerificationFailed),
+            "VerificationFailed"
+        );
+        assert_eq!(
+            format!("{:?}", RollbackTrigger::WarmupTimeout),
+            "WarmupTimeout"
+        );
+        assert_eq!(
+            format!("{:?}", RollbackTrigger::InferenceFailed),
+            "InferenceFailed"
+        );
     }
 
     #[test]
@@ -491,7 +518,10 @@ mod tests {
         assert_eq!(OtaState::Idle, OtaState::Idle);
         assert_eq!(OtaState::Applied, OtaState::Applied);
         assert_ne!(OtaState::Idle, OtaState::Checking);
-        assert_ne!(OtaState::Downloading { progress: 10 }, OtaState::Downloading { progress: 20 });
+        assert_ne!(
+            OtaState::Downloading { progress: 10 },
+            OtaState::Downloading { progress: 20 }
+        );
     }
 
     // ========== OtaState Applied 状态测试 (PRD 要求) ==========

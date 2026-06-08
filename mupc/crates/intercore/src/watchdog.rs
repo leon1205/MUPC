@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use super::HeartbeatManager;
 
@@ -20,7 +20,7 @@ pub struct WatchdogConfig {
 impl Default for WatchdogConfig {
     fn default() -> Self {
         Self {
-            timeout_ms: 10000,  // 10秒
+            timeout_ms: 10000, // 10秒
             max_missed_heartbeats: 3,
         }
     }
@@ -73,8 +73,10 @@ impl Watchdog {
             self.missed_heartbeats += 1;
             if self.missed_heartbeats >= self.config.max_missed_heartbeats {
                 self.state = WatchdogState::Timeout;
-                warn!("Watchdog timeout triggered: {} consecutive missed heartbeats",
-                    self.missed_heartbeats);
+                warn!(
+                    "Watchdog timeout triggered: {} consecutive missed heartbeats",
+                    self.missed_heartbeats
+                );
                 return true;
             }
         } else {

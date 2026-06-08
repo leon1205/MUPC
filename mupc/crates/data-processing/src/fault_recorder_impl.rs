@@ -80,7 +80,8 @@ impl FaultRecorderImpl {
                 exported INTEGER DEFAULT 0
             )",
             [],
-        ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+        )
+        .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
         // 对已存在的旧表执行 ALTER TABLE 添加新列（忽略"列已存在"错误）
         Self::migrate_waveform_columns(&conn);
@@ -88,7 +89,8 @@ impl FaultRecorderImpl {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trigger_time ON fault_records(trigger_time)",
             [],
-        ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+        )
+        .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
         // 清理超过30天的旧记录
         if let Err(e) = Self::cleanup_old_records_impl(&conn, 30) {
@@ -121,12 +123,17 @@ impl FaultRecorderImpl {
         }
     }
 
-    fn cleanup_old_records_impl(conn: &Connection, retention_days: i64) -> Result<usize, DataProcessingError> {
+    fn cleanup_old_records_impl(
+        conn: &Connection,
+        retention_days: i64,
+    ) -> Result<usize, DataProcessingError> {
         let cutoff = Utc::now().timestamp() - (retention_days * 86400);
-        let deleted = conn.execute(
-            "DELETE FROM fault_records WHERE trigger_time < ?1",
-            [cutoff],
-        ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM fault_records WHERE trigger_time < ?1",
+                [cutoff],
+            )
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
         Ok(deleted)
     }
 
@@ -164,7 +171,8 @@ impl FaultRecorderImpl {
                 exported INTEGER DEFAULT 0
             )",
             [],
-        ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+        )
+        .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -212,26 +220,33 @@ impl FaultRecorderImpl {
         FaultType::Unknown
     }
 
-    pub fn query_sync(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, DataProcessingError> {
+    pub fn query_sync(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<FaultRecord>, DataProcessingError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, fault_type, trigger_time, over_voltage, under_voltage, over_current, frequency_abnormal
              FROM fault_records WHERE trigger_time BETWEEN ?1 AND ?2"
         ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
-        let records = stmt.query_map([start, end], |row| {
-            Ok(FaultRecord {
-                id: row.get(0)?,
-                fault_type: row.get(1)?,
-                trigger_time: row.get(2)?,
-                over_voltage: row.get(3)?,
-                under_voltage: row.get(4)?,
-                over_current: row.get(5)?,
-                frequency_abnormal: row.get(6)?,
+        let records = stmt
+            .query_map([start, end], |row| {
+                Ok(FaultRecord {
+                    id: row.get(0)?,
+                    fault_type: row.get(1)?,
+                    trigger_time: row.get(2)?,
+                    over_voltage: row.get(3)?,
+                    under_voltage: row.get(4)?,
+                    over_current: row.get(5)?,
+                    frequency_abnormal: row.get(6)?,
+                })
             })
-        }).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
-        records.collect::<Result<Vec<_>, _>>()
+        records
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))
     }
 
@@ -240,7 +255,10 @@ impl FaultRecorderImpl {
     /// 高级事件查询（过滤+分页）
     ///
     /// TODO: 实现完整的过滤和分页逻辑
-    pub fn query_events_sync(&self, filter: &FaultEventFilter) -> Result<crate::recorder::PaginatedEvents, DataProcessingError> {
+    pub fn query_events_sync(
+        &self,
+        filter: &FaultEventFilter,
+    ) -> Result<crate::recorder::PaginatedEvents, DataProcessingError> {
         let conn = self.conn.lock().unwrap();
         let page = filter.page.unwrap_or(1).max(1);
         let page_size = filter.page_size.unwrap_or(20).min(100);
@@ -280,7 +298,11 @@ impl FaultRecorderImpl {
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
         // 获取分页数据
-        sql.push_str(&format!(" ORDER BY trigger_time DESC LIMIT ?{} OFFSET ?{}", params.len() + 1, params.len() + 2));
+        sql.push_str(&format!(
+            " ORDER BY trigger_time DESC LIMIT ?{} OFFSET ?{}",
+            params.len() + 1,
+            params.len() + 2
+        ));
         params.push(Box::new(page_size as i64));
         params.push(Box::new(offset as i64));
 
@@ -316,36 +338,49 @@ impl FaultRecorderImpl {
     }
 
     /// 按故障类型查询事件
-    pub fn query_events_by_type_sync(&self, fault_type: &str) -> Result<Vec<FaultRecord>, DataProcessingError> {
+    pub fn query_events_by_type_sync(
+        &self,
+        fault_type: &str,
+    ) -> Result<Vec<FaultRecord>, DataProcessingError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, fault_type, trigger_time, over_voltage, under_voltage, over_current, frequency_abnormal
              FROM fault_records WHERE fault_type = ?1"
         ).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
-        let records = stmt.query_map([fault_type], |row| {
-            Ok(FaultRecord {
-                id: row.get(0)?,
-                fault_type: row.get(1)?,
-                trigger_time: row.get(2)?,
-                over_voltage: row.get(3)?,
-                under_voltage: row.get(4)?,
-                over_current: row.get(5)?,
-                frequency_abnormal: row.get(6)?,
+        let records = stmt
+            .query_map([fault_type], |row| {
+                Ok(FaultRecord {
+                    id: row.get(0)?,
+                    fault_type: row.get(1)?,
+                    trigger_time: row.get(2)?,
+                    over_voltage: row.get(3)?,
+                    under_voltage: row.get(4)?,
+                    over_current: row.get(5)?,
+                    frequency_abnormal: row.get(6)?,
+                })
             })
-        }).map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
-        records.collect::<Result<Vec<_>, _>>()
+        records
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))
     }
 
     /// 按时间范围查询事件
-    pub fn query_events_by_time_sync(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, DataProcessingError> {
+    pub fn query_events_by_time_sync(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<FaultRecord>, DataProcessingError> {
         self.query_sync(start, end)
     }
 
     /// 按事件 ID 获取波形数据
-    pub fn get_waveform_by_id_sync(&self, event_id: i64) -> Result<WaveformData, DataProcessingError> {
+    pub fn get_waveform_by_id_sync(
+        &self,
+        event_id: i64,
+    ) -> Result<WaveformData, DataProcessingError> {
         // TODO: 从 SQLite 中查询波形元数据，再从文件系统读取波形二进制文件
         let _ = event_id;
         tracing::debug!("[stub] get_waveform_by_id event_id={}", event_id);
@@ -358,7 +393,10 @@ impl FaultRecorderImpl {
     }
 
     /// 获取波形统计概要
-    pub fn get_waveform_summary_sync(&self, event_id: i64) -> Result<WaveformSummary, DataProcessingError> {
+    pub fn get_waveform_summary_sync(
+        &self,
+        event_id: i64,
+    ) -> Result<WaveformSummary, DataProcessingError> {
         // TODO: 从波形文件中计算统计值（max/min/avg/rms/thd）
         let _ = event_id;
         tracing::debug!("[stub] get_waveform_summary event_id={}", event_id);
@@ -373,11 +411,19 @@ impl FaultRecorderImpl {
     }
 
     /// 导出 COMTRADE 格式
-    pub fn export_comtrade_sync(&self, event_id: i64, output_dir: &Path) -> Result<ExportResult, DataProcessingError> {
+    pub fn export_comtrade_sync(
+        &self,
+        event_id: i64,
+        output_dir: &Path,
+    ) -> Result<ExportResult, DataProcessingError> {
         // TODO: 调用 waveform::export::ComtradeExporter 执行实际导出
         let _ = event_id;
         let _ = output_dir;
-        tracing::debug!("[stub] export_comtrade event_id={}, output_dir={:?}", event_id, output_dir);
+        tracing::debug!(
+            "[stub] export_comtrade event_id={}, output_dir={:?}",
+            event_id,
+            output_dir
+        );
         Ok(ExportResult {
             files: vec![],
             format: "COMTRADE".to_string(),
@@ -385,11 +431,19 @@ impl FaultRecorderImpl {
     }
 
     /// 导出 CSV 格式
-    pub fn export_csv_sync(&self, event_id: i64, output_dir: &Path) -> Result<ExportResult, DataProcessingError> {
+    pub fn export_csv_sync(
+        &self,
+        event_id: i64,
+        output_dir: &Path,
+    ) -> Result<ExportResult, DataProcessingError> {
         // TODO: 调用 waveform::export::CsvExporter 执行实际导出
         let _ = event_id;
         let _ = output_dir;
-        tracing::debug!("[stub] export_csv event_id={}, output_dir={:?}", event_id, output_dir);
+        tracing::debug!(
+            "[stub] export_csv event_id={}, output_dir={:?}",
+            event_id,
+            output_dir
+        );
         Ok(ExportResult {
             files: vec![],
             format: "CSV".to_string(),
@@ -400,13 +454,23 @@ impl FaultRecorderImpl {
 #[async_trait]
 impl FaultRecorder for FaultRecorderImpl {
     async fn record(&self, condition: &FaultCondition) -> Result<(), MupcError> {
-        self.record_sync(condition)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+        self.record_sync(condition).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
     async fn query(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, MupcError> {
-        self.query_sync(start, end)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+        self.query_sync(start, end).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
     async fn get_waveform(&self) -> Result<WaveformData, MupcError> {
@@ -424,38 +488,89 @@ impl FaultRecorder for FaultRecorderImpl {
 
     // === P1-16 新增方法实现 ===
 
-    async fn query_events(&self, filter: &FaultEventFilter) -> Result<crate::recorder::PaginatedEvents, MupcError> {
-        self.query_events_sync(filter)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+    async fn query_events(
+        &self,
+        filter: &FaultEventFilter,
+    ) -> Result<crate::recorder::PaginatedEvents, MupcError> {
+        self.query_events_sync(filter).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
     async fn query_events_by_type(&self, fault_type: &str) -> Result<Vec<FaultRecord>, MupcError> {
-        self.query_events_by_type_sync(fault_type)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+        self.query_events_by_type_sync(fault_type).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
-    async fn query_events_by_time(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, MupcError> {
-        self.query_events_by_time_sync(start, end)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+    async fn query_events_by_time(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<FaultRecord>, MupcError> {
+        self.query_events_by_time_sync(start, end).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
     async fn get_waveform_by_id(&self, event_id: i64) -> Result<WaveformData, MupcError> {
-        self.get_waveform_by_id_sync(event_id)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+        self.get_waveform_by_id_sync(event_id).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
     async fn get_waveform_summary(&self, event_id: i64) -> Result<WaveformSummary, MupcError> {
-        self.get_waveform_summary_sync(event_id)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+        self.get_waveform_summary_sync(event_id).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 
-    async fn export_comtrade(&self, event_id: i64, output_dir: &Path) -> Result<ExportResult, MupcError> {
+    async fn export_comtrade(
+        &self,
+        event_id: i64,
+        output_dir: &Path,
+    ) -> Result<ExportResult, MupcError> {
         self.export_comtrade_sync(event_id, output_dir)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+            .map_err(|e| {
+                MupcError::new(
+                    mupc_common::ErrorCode::Unknown,
+                    e.to_string(),
+                    "data-processing",
+                )
+            })
     }
 
-    async fn export_csv(&self, event_id: i64, output_dir: &Path) -> Result<ExportResult, MupcError> {
-        self.export_csv_sync(event_id, output_dir)
-            .map_err(|e| MupcError::new(mupc_common::ErrorCode::Unknown, e.to_string(), "data-processing"))
+    async fn export_csv(
+        &self,
+        event_id: i64,
+        output_dir: &Path,
+    ) -> Result<ExportResult, MupcError> {
+        self.export_csv_sync(event_id, output_dir).map_err(|e| {
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
+                e.to_string(),
+                "data-processing",
+            )
+        })
     }
 }

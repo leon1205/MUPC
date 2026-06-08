@@ -1,13 +1,13 @@
 //! IEC 104 服务器
 
-use mupc_common::{MupcError, ErrorCode};
+use mupc_common::{ErrorCode, MupcError};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use super::{Connection, ConnectionState, Iec104Frame};
 use super::command::CommandHandler;
+use super::{Connection, ConnectionState, Iec104Frame};
 
 /// IEC 104 服务器配置
 #[derive(Debug, Clone)]
@@ -57,9 +57,13 @@ impl Iec104Server {
     /// 启动服务器
     pub async fn start(&self, command_handler: Arc<dyn CommandHandler>) -> Result<(), MupcError> {
         let addr = format!("{}:{}", self.config.listen_addr, self.config.listen_port);
-        let listener = TcpListener::bind(&addr)
-            .await
-            .map_err(|e| MupcError::new(ErrorCode::ConnectionFailed, format!("Failed to bind {}: {}", addr, e), "gateway"))?;
+        let listener = TcpListener::bind(&addr).await.map_err(|e| {
+            MupcError::new(
+                ErrorCode::ConnectionFailed,
+                format!("Failed to bind {}: {}", addr, e),
+                "gateway",
+            )
+        })?;
 
         info!("IEC 104 server listening on {}", addr);
 
@@ -121,8 +125,13 @@ impl Iec104Server {
         conn: Arc<RwLock<Connection>>,
         _handler: Arc<dyn CommandHandler>,
     ) -> Result<(), MupcError> {
-        let stream = conn.write().await.stream.take()
-            .ok_or_else(|| MupcError::new(ErrorCode::Unknown, "Stream already taken from connection", "gateway"))?;
+        let stream = conn.write().await.stream.take().ok_or_else(|| {
+            MupcError::new(
+                ErrorCode::Unknown,
+                "Stream already taken from connection",
+                "gateway",
+            )
+        })?;
         let (read_half, mut write_half) = tokio::io::split(stream);
 
         // 读取循环
@@ -167,7 +176,13 @@ impl Iec104Server {
             }
         });
 
-        read_handle.await.map_err(|e| MupcError::new(ErrorCode::Unknown, format!("Task join error: {}", e), "gateway"))?;
+        read_handle.await.map_err(|e| {
+            MupcError::new(
+                ErrorCode::Unknown,
+                format!("Task join error: {}", e),
+                "gateway",
+            )
+        })?;
 
         // 清理连接
         Ok(())

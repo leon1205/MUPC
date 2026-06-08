@@ -41,9 +41,7 @@ pub fn decode_mms_response(data: &[u8]) -> Result<MmsResponse> {
         pdu_tags::CONFIRMED_ERROR_PDU => {
             Err(Iec61850Error::MmsProtocolError("Confirmed-ErrorPDU".into()))
         }
-        pdu_tags::REJECTED_PDU => {
-            Err(Iec61850Error::MmsProtocolError("RejectedPDU".into()))
-        }
+        pdu_tags::REJECTED_PDU => Err(Iec61850Error::MmsProtocolError("RejectedPDU".into())),
         _ => Err(Iec61850Error::MmsInvalidResponse(format!(
             "未知响应类型: {:02x}",
             data[0]
@@ -132,12 +130,16 @@ fn encode_write_service(object_name: &str, payload: &[u8]) -> Vec<u8> {
 
 /// 编码 DefineVariableAccess 请求
 fn encode_define_request(_object: &DataObject) -> Result<Vec<u8>> {
-    Err(Iec61850Error::Asn1EncodeFailed("DefineVariableAccess 未实现".into()))
+    Err(Iec61850Error::Asn1EncodeFailed(
+        "DefineVariableAccess 未实现".into(),
+    ))
 }
 
 /// 编码 GetDataAccessAttributes 请求
 fn encode_getda_request(_object: &DataObject) -> Result<Vec<u8>> {
-    Err(Iec61850Error::Asn1EncodeFailed("GetDataAccessAttributes 未实现".into()))
+    Err(Iec61850Error::Asn1EncodeFailed(
+        "GetDataAccessAttributes 未实现".into(),
+    ))
 }
 
 /// 编码 ASN.1 长度（TLV 格式）

@@ -2,10 +2,13 @@
 //!
 //! 提供 AI 决策可解释性分析
 
-use axum::{Json, extract::{State, Query}};
+use crate::AppState;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct ExplainQuery {
@@ -37,8 +40,8 @@ pub async fn get_explanation(
     if let Some(ref decision_id) = query.decision_id {
         if let Ok(id) = decision_id.parse::<i64>() {
             if let Ok(Some(record)) = state.storage.decisions.get_by_id(id).await {
-                let action: serde_json::Value = serde_json::from_str(&record.action_json)
-                    .unwrap_or_default();
+                let action: serde_json::Value =
+                    serde_json::from_str(&record.action_json).unwrap_or_default();
                 if let Some(action_type) = action.get("type").and_then(|v| v.as_str()) {
                     summary = format!(
                         "决策类型: {} (置信度: {:.1}%, 场景: {})",

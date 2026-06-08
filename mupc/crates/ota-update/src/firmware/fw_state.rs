@@ -172,7 +172,10 @@ impl FwOtaState {
     /// 终态包括：Idle（升级完成或取消后）、RolledBack（回滚完成）、
     /// Failed（不可恢复的错误，需人工介入）。
     pub fn is_terminal(&self) -> bool {
-        matches!(self, FwOtaState::Idle | FwOtaState::RolledBack | FwOtaState::Failed(_))
+        matches!(
+            self,
+            FwOtaState::Idle | FwOtaState::RolledBack | FwOtaState::Failed(_)
+        )
     }
 
     /// 判断当前是否处于升级进行中状态
@@ -243,7 +246,10 @@ mod tests {
     #[test]
     fn test_normal_flow() {
         // 完整的正常升级流程
-        assert!(FwOtaState::can_transition(FwOtaState::Idle, FwOtaState::CheckingUpdate));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::Idle,
+            FwOtaState::CheckingUpdate
+        ));
         assert!(FwOtaState::can_transition(
             FwOtaState::CheckingUpdate,
             FwOtaState::UpdateAvailable
@@ -256,7 +262,10 @@ mod tests {
             FwOtaState::DownloadComplete,
             FwOtaState::Verifying
         ));
-        assert!(FwOtaState::can_transition(FwOtaState::Verifying, FwOtaState::ReadyToApply));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::Verifying,
+            FwOtaState::ReadyToApply
+        ));
         assert!(FwOtaState::can_transition(
             FwOtaState::ReadyToApply,
             FwOtaState::PreUpgradeCheck
@@ -269,7 +278,10 @@ mod tests {
             FwOtaState::SwitchingToStandby,
             FwOtaState::Applying
         ));
-        assert!(FwOtaState::can_transition(FwOtaState::Applying, FwOtaState::Applied));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::Applying,
+            FwOtaState::Applied
+        ));
         assert!(FwOtaState::can_transition(
             FwOtaState::Applied,
             FwOtaState::PostUpgradeVerify
@@ -283,19 +295,28 @@ mod tests {
     #[test]
     fn test_no_update_returns_to_idle() {
         // 检查后无可用更新，回到空闲
-        assert!(FwOtaState::can_transition(FwOtaState::CheckingUpdate, FwOtaState::Idle));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::CheckingUpdate,
+            FwOtaState::Idle
+        ));
     }
 
     #[test]
     fn test_cancel_during_update_available() {
         // 发现更新但用户取消
-        assert!(FwOtaState::can_transition(FwOtaState::UpdateAvailable, FwOtaState::Idle));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::UpdateAvailable,
+            FwOtaState::Idle
+        ));
     }
 
     #[test]
     fn test_cancel_before_precheck() {
         // 就绪后用户取消
-        assert!(FwOtaState::can_transition(FwOtaState::ReadyToApply, FwOtaState::Idle));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::ReadyToApply,
+            FwOtaState::Idle
+        ));
     }
 
     // ================================================================
@@ -324,10 +345,16 @@ mod tests {
     #[test]
     fn test_verify_failed_flow() {
         // Verifying → VerifyFailed
-        assert!(FwOtaState::can_transition(FwOtaState::Verifying, FwOtaState::VerifyFailed));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::Verifying,
+            FwOtaState::VerifyFailed
+        ));
 
         // VerifyFailed → Idle (清理后恢复)
-        assert!(FwOtaState::can_transition(FwOtaState::VerifyFailed, FwOtaState::Idle));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::VerifyFailed,
+            FwOtaState::Idle
+        ));
     }
 
     // ================================================================
@@ -337,7 +364,10 @@ mod tests {
     #[test]
     fn test_rollback_from_applying() {
         // Applying → RollingBack (应用失败触发回滚)
-        assert!(FwOtaState::can_transition(FwOtaState::Applying, FwOtaState::RollingBack));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::Applying,
+            FwOtaState::RollingBack
+        ));
     }
 
     #[test]
@@ -352,10 +382,16 @@ mod tests {
     #[test]
     fn test_rollback_complete_flow() {
         // RollingBack → RolledBack
-        assert!(FwOtaState::can_transition(FwOtaState::RollingBack, FwOtaState::RolledBack));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::RollingBack,
+            FwOtaState::RolledBack
+        ));
 
         // RolledBack → Idle (回滚完成，系统恢复)
-        assert!(FwOtaState::can_transition(FwOtaState::RolledBack, FwOtaState::Idle));
+        assert!(FwOtaState::can_transition(
+            FwOtaState::RolledBack,
+            FwOtaState::Idle
+        ));
     }
 
     // ================================================================
@@ -468,10 +504,16 @@ mod tests {
     #[test]
     fn test_invalid_transitions() {
         // Idle 不能直接跳到 Downloading
-        assert!(!FwOtaState::can_transition(FwOtaState::Idle, FwOtaState::Downloading));
+        assert!(!FwOtaState::can_transition(
+            FwOtaState::Idle,
+            FwOtaState::Downloading
+        ));
 
         // Idle 不能到 Applying
-        assert!(!FwOtaState::can_transition(FwOtaState::Idle, FwOtaState::Applying));
+        assert!(!FwOtaState::can_transition(
+            FwOtaState::Idle,
+            FwOtaState::Applying
+        ));
 
         // Idle 不能到 Failed (Idle 是终态，必须由某个操作触发)
         assert!(!FwOtaState::can_transition(
@@ -480,13 +522,22 @@ mod tests {
         ));
 
         // Downloading 不能直接到 Applying
-        assert!(!FwOtaState::can_transition(FwOtaState::Downloading, FwOtaState::Applying));
+        assert!(!FwOtaState::can_transition(
+            FwOtaState::Downloading,
+            FwOtaState::Applying
+        ));
 
         // RolledBack 不能到 Downloading (回滚后必须经过 Idle)
-        assert!(!FwOtaState::can_transition(FwOtaState::RolledBack, FwOtaState::Downloading));
+        assert!(!FwOtaState::can_transition(
+            FwOtaState::RolledBack,
+            FwOtaState::Downloading
+        ));
 
         // Applied 不能到 Idle (必须经过 PostUpgradeVerify)
-        assert!(!FwOtaState::can_transition(FwOtaState::Applied, FwOtaState::Idle));
+        assert!(!FwOtaState::can_transition(
+            FwOtaState::Applied,
+            FwOtaState::Idle
+        ));
     }
 
     // ================================================================

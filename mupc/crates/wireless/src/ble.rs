@@ -98,7 +98,8 @@ pub trait BleDriver: Send + Sync {
     /// # 参数
     /// - `char_uuid`: 目标特征值 UUID
     /// - `data`: 待写入的数据
-    async fn write_characteristic(&self, char_uuid: &str, data: &[u8]) -> Result<(), WirelessError>;
+    async fn write_characteristic(&self, char_uuid: &str, data: &[u8])
+        -> Result<(), WirelessError>;
 
     /// 扫描周围的 BLE 设备
     ///
@@ -145,7 +146,11 @@ impl BleDriver for NoOpBleDriver {
         ))
     }
 
-    async fn write_characteristic(&self, _char_uuid: &str, _data: &[u8]) -> Result<(), WirelessError> {
+    async fn write_characteristic(
+        &self,
+        _char_uuid: &str,
+        _data: &[u8],
+    ) -> Result<(), WirelessError> {
         Err(WirelessError::UnsupportedDevice(
             "BLE 功能尚未启用（Phase 2+ 实现）".into(),
         ))

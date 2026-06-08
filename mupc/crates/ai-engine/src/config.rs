@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// AI 引擎配置
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AiEngineConfig {
     pub lstm: LstmConfig,
     pub rl: RlConfig,
@@ -15,8 +14,10 @@ pub struct AiEngineConfig {
     pub action_constraint: ActionConstraintConfig,
     pub reward_weights: SceneWeights,
     pub npu: NpuConfig,
+    /// v2.5 奖励阈值配置（对应 PRD 4.1）
+    #[serde(default)]
+    pub reward_thresholds: RewardThresholdConfig,
 }
-
 
 /// LSTM 模型配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -202,6 +203,36 @@ impl Default for NpuConfig {
             temperature_limit_c: 85.0,
             throttle_factor: 0.5,
             enable_fallback_to_cpu: true,
+        }
+    }
+}
+
+/// v2.5 奖励阈值配置（对应 PRD 4.1）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RewardThresholdConfig {
+    /// 电压死区（±5%），与现有设计一致
+    pub voltage_deadband: f64,
+    /// Q 裕度阈值：实时模块剩余容量低于此值视为"无功耗尽"
+    pub q_margin_threshold: f64,
+    /// 弃光前置电压阈值：电压高于此值时弃光奖励不计入
+    pub voltage_high_limit: f64,
+    /// SOC 极低保护阈值
+    pub soc_critical: f64,
+    /// 高电压侧电压惩罚系数（光伏超发）
+    pub voltage_penalty_high: f64,
+    /// 低电压侧电压惩罚系数（灌溉/炒茶/空调负荷）
+    pub voltage_penalty_low: f64,
+}
+
+impl Default for RewardThresholdConfig {
+    fn default() -> Self {
+        Self {
+            voltage_deadband: 0.05,
+            q_margin_threshold: 0.10,
+            voltage_high_limit: 1.05,
+            soc_critical: 0.10,
+            voltage_penalty_high: 2.0,
+            voltage_penalty_low: 1.0,
         }
     }
 }

@@ -23,9 +23,14 @@ pub mod tls_sm2;
 // 基础国密原语
 pub use cert::{load_sm2_certificate, CertStore, Sm2Cert};
 pub use errors::{GmError, Result, SecurityError};
-pub use sm2::{sm2_derive_shared_key, sm2_key_generate, sm2_sign, sm2_verify, signature_to_rs, rs_to_signature, Sm2KeyPair, Sm2Signature};
+pub use sm2::{
+    rs_to_signature, signature_to_rs, sm2_derive_shared_key, sm2_key_generate, sm2_sign,
+    sm2_verify, Sm2KeyPair, Sm2Signature,
+};
 pub use sm3::{sm3_derive_key, sm3_hash};
-pub use sm4::{generate_iv, sm4_cbc_decrypt, sm4_cbc_encrypt, sm4_gcm_decrypt, sm4_gcm_encrypt, Sm4Key};
+pub use sm4::{
+    generate_iv, sm4_cbc_decrypt, sm4_cbc_encrypt, sm4_gcm_decrypt, sm4_gcm_encrypt, Sm4Key,
+};
 pub use tls::{TlsClientConfig, TlsConnector};
 
 // Phase 2+ 重导出

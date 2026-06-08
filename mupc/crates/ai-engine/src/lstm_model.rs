@@ -118,8 +118,8 @@ mod tests {
     fn create_test_config() -> LstmConfig {
         LstmConfig {
             model_path: std::path::PathBuf::from("/tmp/test_lstm.rknn"),
-            input_window_secs: 3600,   // 60 分钟
-            output_horizon_secs: 900,  // 15 分钟（默认）
+            input_window_secs: 3600,  // 60 分钟
+            output_horizon_secs: 900, // 15 分钟（默认）
             quantization: crate::config::QuantizationType::INT8,
             expected_sha256: None,
         }

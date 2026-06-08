@@ -22,14 +22,22 @@ impl DemandControlStrategy {
 
         ControlCommand {
             cmd_id: 2,
-            cmd_type: if load_shedding > 0.0 { CommandType::SwitchControl } else { CommandType::PowerRegulation },
+            cmd_type: if load_shedding > 0.0 {
+                CommandType::SwitchControl
+            } else {
+                CommandType::PowerRegulation
+            },
             p_batt_set: Some(p_batt),
             q_batt_set: None,
             phase_compensation: None,
             start_stop: Some(true),
             priority: if level >= 3 { 3 } else { level },
             pv_limit: None,
-            load_shedding: if load_shedding > 0.0 { Some(load_shedding) } else { None },
+            load_shedding: if load_shedding > 0.0 {
+                Some(load_shedding)
+            } else {
+                None
+            },
         }
     }
 

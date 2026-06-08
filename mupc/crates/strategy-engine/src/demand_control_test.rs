@@ -1,14 +1,19 @@
 //! 需量控制策略测试
 
+use crate::config::DemandControlConfig;
+use crate::demand_control::DemandControlStrategy;
+use crate::strategies::CommandType;
 use mupc_data_processing::telemetry::{
     BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
 };
-use crate::demand_control::DemandControlStrategy;
-use crate::config::DemandControlConfig;
-use crate::strategies::CommandType;
 
 /// 创建测试用电数据包
-fn create_test_data(timestamp: u64, battery_soc: f64, load_power: f64, ev_power: f64) -> DataPackage {
+fn create_test_data(
+    timestamp: u64,
+    battery_soc: f64,
+    load_power: f64,
+    ev_power: f64,
+) -> DataPackage {
     DataPackage {
         electrical: ElectricalData {
             voltage: Some(220.0),

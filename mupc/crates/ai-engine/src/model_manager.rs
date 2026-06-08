@@ -80,7 +80,9 @@ impl ModelManager {
         // 加载 LSTM 模型（1 个通用模型）
         let mut lstm = LstmModel::new(self.config.lstm.clone())
             .map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
-        lstm.load().await.map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
+        lstm.load()
+            .await
+            .map_err(|e| AiEngineError::ModelLoadFailed(e.to_string()))?;
         *self.lstm_model.write().await = Some(lstm);
 
         // 加载出厂场景 RL 模型（ModelRegistry）
@@ -90,13 +92,13 @@ impl ModelManager {
 
         // 确保模型目录和清单目录存在
         if let Some(parent) = manifest_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                AiEngineError::ModelLoadFailed(format!("创建清单目录失败: {}", e))
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AiEngineError::ModelLoadFailed(format!("创建清单目录失败: {}", e)))?;
         }
-        tokio::fs::create_dir_all(&model_dir).await.map_err(|e| {
-            AiEngineError::ModelLoadFailed(format!("创建模型目录失败: {}", e))
-        })?;
+        tokio::fs::create_dir_all(&model_dir)
+            .await
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("创建模型目录失败: {}", e)))?;
 
         // 初始化清单文件（如果不存在）
         if !manifest_path.exists() {
@@ -125,8 +127,9 @@ impl ModelManager {
         // 初始化奖励计算器和动作校验器
         *self.reward_calculator.write().await =
             Some(RewardCalculator::new(self.config.reward_weights.clone()));
-        *self.action_validator.write().await =
-            Some(ActionValidator::new_v2_4(self.config.action_constraint.clone()));
+        *self.action_validator.write().await = Some(ActionValidator::new_v2_4(
+            self.config.action_constraint.clone(),
+        ));
 
         *self.status.write().await = ModelStatus::Ready;
         Ok(())
@@ -141,9 +144,7 @@ impl ModelManager {
             return Err(AiEngineError::ModelNotLoaded);
         }
 
-        let running_mode = {
-            self.mode_selector.read().await.current()
-        };
+        let running_mode = { self.mode_selector.read().await.current() };
 
         let fused_state = {
             let mut fusion = self.data_fusion.write().await;
@@ -158,9 +159,10 @@ impl ModelManager {
         let current_load = fused_state.load_power;
 
         // LSTM 预测：使用历史缓冲区的数据预测未来光伏/负荷
-        let (pv_forecast, load_forecast) = self.run_lstm_predict().await.unwrap_or_else(|_| {
-            (vec![0.0; 15], vec![0.0; 15])
-        });
+        let (pv_forecast, load_forecast) = self
+            .run_lstm_predict()
+            .await
+            .unwrap_or_else(|_| (vec![0.0; 15], vec![0.0; 15]));
 
         // 将 LSTM 预测结果注入融合状态（克隆以避免借用冲突）
         let mut fused_state_with_forecast = fused_state.clone();
@@ -170,9 +172,7 @@ impl ModelManager {
         // v2.3: 通过 ModelRegistry 执行推理（委托给当前 active 的场景模型）
         let rl_action = {
             let registry = self.model_registry.read().await;
-            let registry = registry
-                .as_ref()
-                .ok_or(AiEngineError::ModelNotLoaded)?;
+            let registry = registry.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
             let input_vector = fused_state_with_forecast.to_input_vector();
             registry.decide(&input_vector).await?
         };
@@ -270,7 +270,11 @@ impl ModelManager {
             timestamp: chrono::Utc::now().timestamp(),
         };
         let pv_output = lstm.predict(&pv_input).await?;
-        let pv_forecast: Vec<f64> = pv_output.predictions.into_iter().map(|v| v as f64).collect();
+        let pv_forecast: Vec<f64> = pv_output
+            .predictions
+            .into_iter()
+            .map(|v| v as f64)
+            .collect();
 
         // 预测负荷（使用负荷历史）
         let load_input = LstmInput {
@@ -278,7 +282,11 @@ impl ModelManager {
             timestamp: chrono::Utc::now().timestamp(),
         };
         let load_output = lstm.predict(&load_input).await?;
-        let load_forecast: Vec<f64> = load_output.predictions.into_iter().map(|v| v as f64).collect();
+        let load_forecast: Vec<f64> = load_output
+            .predictions
+            .into_iter()
+            .map(|v| v as f64)
+            .collect();
 
         Ok((pv_forecast, load_forecast))
     }
@@ -350,7 +358,11 @@ impl ModelManager {
         new_mode: RunningMode,
         source: SwitchSource,
     ) -> Result<RunningMode, AiEngineError> {
-        self.mode_selector.write().await.switch(new_mode, source).await
+        self.mode_selector
+            .write()
+            .await
+            .switch(new_mode, source)
+            .await
     }
 
     /// v2.3: 获取 ModelRegistry 引用
@@ -392,13 +404,12 @@ impl ModelManager {
             }
         });
 
-        let content = serde_json::to_string_pretty(&manifest).map_err(|e| {
-            AiEngineError::ModelLoadFailed(format!("序列化清单失败: {}", e))
-        })?;
+        let content = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("序列化清单失败: {}", e)))?;
 
-        tokio::fs::write(manifest_path, content).await.map_err(|e| {
-            AiEngineError::ModelLoadFailed(format!("写入清单文件失败: {}", e))
-        })?;
+        tokio::fs::write(manifest_path, content)
+            .await
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("写入清单文件失败: {}", e)))?;
 
         tracing::info!("已创建默认模型清单: {}", manifest_path.display());
         Ok(())
@@ -449,10 +460,7 @@ mod tests {
             factory_scene: "DemandControl".to_string(),
             ..Default::default()
         };
-        assert_eq!(
-            parse_initial_mode(&config),
-            RunningMode::DemandControl
-        );
+        assert_eq!(parse_initial_mode(&config), RunningMode::DemandControl);
     }
 }
 

@@ -13,7 +13,7 @@ fn test_sm4_key_creation() {
 #[test]
 fn test_sm4_encrypt_decrypt() {
     let key = [0u8; 16]; // SM4 密钥为 16 字节
-    let iv = [0u8; 12];  // GCM IV 为 12 字节
+    let iv = [0u8; 12]; // GCM IV 为 12 字节
     let plaintext = b"Test data for SM4 encryption";
 
     let encrypted = sm4_gcm_encrypt(plaintext, &key, &iv);

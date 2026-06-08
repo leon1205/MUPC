@@ -48,7 +48,10 @@ impl std::fmt::Debug for RollbackManager {
             .field("max_rollback_count", &self.max_rollback_count)
             .field("rollback_count", &self.rollback_count)
             .field("safe_mode", &self.safe_mode)
-            .field("notify_strategy_engine", &self.notify_strategy_engine.as_ref().map(|_| "Fn(...)"))
+            .field(
+                "notify_strategy_engine",
+                &self.notify_strategy_engine.as_ref().map(|_| "Fn(...)"),
+            )
             .finish()
     }
 }
@@ -63,10 +66,7 @@ impl RollbackManager {
     /// # 返回
     /// * `Ok(Self)` - 回滚管理器实例
     /// * `Err(OtaError)` - 创建失败
-    pub fn new(
-        model_storage_path: PathBuf,
-        max_rollback_count: u32,
-    ) -> Result<Self, OtaError> {
+    pub fn new(model_storage_path: PathBuf, max_rollback_count: u32) -> Result<Self, OtaError> {
         // 确保模型存储目录存在
         if !model_storage_path.exists() {
             return Err(OtaError::VerificationFailed(format!(
@@ -220,9 +220,9 @@ impl RollbackManager {
         let current_model_path = self.current_dir(model_type).join(MODEL_FILENAME);
 
         if current_model_path.exists() {
-            fs::remove_file(&current_model_path).await.map_err(|e| {
-                OtaError::RollbackFailed(format!("删除新模型文件失败: {}", e))
-            })?;
+            fs::remove_file(&current_model_path)
+                .await
+                .map_err(|e| OtaError::RollbackFailed(format!("删除新模型文件失败: {}", e)))?;
             info!("已删除新模型: {}", current_model_path.display());
         }
 
@@ -234,23 +234,19 @@ impl RollbackManager {
         // 查找可用的回滚版本
         let rollback_version = self.find_available_rollback_version(model_type)?;
 
-        let rollback_model_path = self
-            .rollback_dir(&rollback_version)
-            .join(MODEL_FILENAME);
+        let rollback_model_path = self.rollback_dir(&rollback_version).join(MODEL_FILENAME);
         let current_dir = self.current_dir(model_type);
         let current_model_path = current_dir.join(MODEL_FILENAME);
 
         // 确保 current 目录存在
-        fs::create_dir_all(&current_dir).await.map_err(|e| {
-            OtaError::RollbackFailed(format!("创建模型目录失败: {}", e))
-        })?;
+        fs::create_dir_all(&current_dir)
+            .await
+            .map_err(|e| OtaError::RollbackFailed(format!("创建模型目录失败: {}", e)))?;
 
         // 复制旧模型到 current 目录
         fs::copy(&rollback_model_path, &current_model_path)
             .await
-            .map_err(|e| {
-                OtaError::RollbackFailed(format!("恢复模型文件失败: {}", e))
-            })?;
+            .map_err(|e| OtaError::RollbackFailed(format!("恢复模型文件失败: {}", e)))?;
 
         info!(
             "已从回滚目录恢复旧模型: {} -> {}",
@@ -270,9 +266,8 @@ impl RollbackManager {
             return Err(OtaError::RollbackFailed("版本信息文件不存在".to_string()));
         }
 
-        let contents = std::fs::read_to_string(&version_file).map_err(|e| {
-            OtaError::RollbackFailed(format!("读取版本文件失败: {}", e))
-        })?;
+        let contents = std::fs::read_to_string(&version_file)
+            .map_err(|e| OtaError::RollbackFailed(format!("读取版本文件失败: {}", e)))?;
 
         #[derive(serde::Deserialize)]
         struct VersionFile {
@@ -285,9 +280,8 @@ impl RollbackManager {
             version: String,
         }
 
-        let version_file: VersionFile = serde_json::from_str(&contents).map_err(|e| {
-            OtaError::RollbackFailed(format!("解析版本文件失败: {}", e))
-        })?;
+        let version_file: VersionFile = serde_json::from_str(&contents)
+            .map_err(|e| OtaError::RollbackFailed(format!("解析版本文件失败: {}", e)))?;
 
         version_file
             .models
@@ -367,13 +361,12 @@ impl RollbackManager {
             return Ok(Vec::new());
         }
 
-        let contents = fs::read_to_string(&record_path).await.map_err(|e| {
-            OtaError::RollbackFailed(format!("读取回滚记录失败: {}", e))
-        })?;
+        let contents = fs::read_to_string(&record_path)
+            .await
+            .map_err(|e| OtaError::RollbackFailed(format!("读取回滚记录失败: {}", e)))?;
 
-        let records: Vec<RollbackRecord> = serde_json::from_str(&contents).map_err(|e| {
-            OtaError::RollbackFailed(format!("解析回滚记录失败: {}", e))
-        })?;
+        let records: Vec<RollbackRecord> = serde_json::from_str(&contents)
+            .map_err(|e| OtaError::RollbackFailed(format!("解析回滚记录失败: {}", e)))?;
 
         Ok(records)
     }
@@ -383,17 +376,16 @@ impl RollbackManager {
         let record_path = self.rollback_record_path();
 
         // 确保回滚目录存在
-        fs::create_dir_all(&self.rollback_path).await.map_err(|e| {
-            OtaError::RollbackFailed(format!("创建回滚目录失败: {}", e))
-        })?;
+        fs::create_dir_all(&self.rollback_path)
+            .await
+            .map_err(|e| OtaError::RollbackFailed(format!("创建回滚目录失败: {}", e)))?;
 
-        let json = serde_json::to_string_pretty(records).map_err(|e| {
-            OtaError::RollbackFailed(format!("序列化回滚记录失败: {}", e))
-        })?;
+        let json = serde_json::to_string_pretty(records)
+            .map_err(|e| OtaError::RollbackFailed(format!("序列化回滚记录失败: {}", e)))?;
 
-        fs::write(&record_path, json).await.map_err(|e| {
-            OtaError::RollbackFailed(format!("写入回滚记录失败: {}", e))
-        })?;
+        fs::write(&record_path, json)
+            .await
+            .map_err(|e| OtaError::RollbackFailed(format!("写入回滚记录失败: {}", e)))?;
 
         Ok(())
     }
@@ -718,10 +710,7 @@ mod tests {
 
         let manager = RollbackManager::new(models_dir.clone(), 3).unwrap();
 
-        assert_eq!(
-            manager.rollback_path(),
-            models_dir.join("rollback")
-        );
+        assert_eq!(manager.rollback_path(), models_dir.join("rollback"));
         assert_eq!(manager.model_storage_path(), models_dir);
         assert_eq!(manager.max_rollback_count(), 3);
     }

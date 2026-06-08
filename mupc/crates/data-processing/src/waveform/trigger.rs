@@ -277,11 +277,7 @@ impl TriggerEngine {
         }
 
         // 零序过流
-        if self.check_condition(
-            6,
-            i0.abs() > self.config.zero_seq_threshold,
-            timestamp_us,
-        ) {
+        if self.check_condition(6, i0.abs() > self.config.zero_seq_threshold, timestamp_us) {
             return TriggerResult::ZeroSeqOverCurrent;
         }
 
@@ -303,10 +299,8 @@ impl TriggerEngine {
                         self.debounce_counters[idx] = 0;
 
                         // 进入冷却期
-                        let cooldown_us =
-                            timestamp_us + (self.config.cool_down_ms as i64) * 1000;
-                        self.cooldown_until
-                            .store(cooldown_us, Ordering::Release);
+                        let cooldown_us = timestamp_us + (self.config.cool_down_ms as i64) * 1000;
+                        self.cooldown_until.store(cooldown_us, Ordering::Release);
 
                         return true;
                     }
@@ -393,32 +387,32 @@ mod tests {
     #[test]
     fn test_over_voltage_trigger() {
         let mut engine = make_engine();
-        let result =
-            engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
+        let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::OverVoltage);
     }
 
     #[test]
     fn test_under_voltage_trigger() {
         let mut engine = make_engine();
-        let result =
-            engine.detect(180.0, 180.0, 180.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
+        let result = engine.detect(180.0, 180.0, 180.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::UnderVoltage);
     }
 
     #[test]
     fn test_over_current_trigger() {
         let mut engine = make_engine();
-        let result =
-            engine.detect(220.0, 220.0, 220.0, 160.0, 160.0, 160.0, 0.0, 0.0, 50.0, 1000);
+        let result = engine.detect(
+            220.0, 220.0, 220.0, 160.0, 160.0, 160.0, 0.0, 0.0, 50.0, 1000,
+        );
         assert_eq!(result, TriggerResult::OverCurrent);
     }
 
     #[test]
     fn test_short_circuit_trigger() {
         let mut engine = make_engine();
-        let result =
-            engine.detect(220.0, 220.0, 220.0, 600.0, 600.0, 600.0, 0.0, 0.0, 50.0, 1000);
+        let result = engine.detect(
+            220.0, 220.0, 220.0, 600.0, 600.0, 600.0, 0.0, 0.0, 50.0, 1000,
+        );
         assert_eq!(result, TriggerResult::ShortCircuit);
     }
 
@@ -426,18 +420,17 @@ mod tests {
     fn test_cooldown() {
         let mut engine = make_engine();
         // 第一次触发
-        let result =
-            engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
+        let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::OverVoltage);
 
         // 冷却期内不触发
-        let result =
-            engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 50000);
+        let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 50000);
         assert_eq!(result, TriggerResult::None);
 
         // 冷却期过后再次触发
-        let result =
-            engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 200000);
+        let result = engine.detect(
+            430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 200000,
+        );
         assert_eq!(result, TriggerResult::OverVoltage);
     }
 
@@ -446,8 +439,7 @@ mod tests {
         let mut config = TriggerConfig::default();
         config.enabled = false;
         let mut engine = TriggerEngine::new(config);
-        let result =
-            engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
+        let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::None);
     }
 }

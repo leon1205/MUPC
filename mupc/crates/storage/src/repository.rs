@@ -2,14 +2,18 @@ use crate::errors::StorageError;
 use crate::models::*;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::Row;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::Row;
 use std::sync::Arc;
 
 /// 将毫秒时间戳转为 DateTime<Utc>，异常值时记录 ERROR 日志
 fn ts_to_datetime(raw: i64, context: &str) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(raw).unwrap_or_else(|| {
-        tracing::error!(timestamp = raw, context, "数据库中的无效时间戳，使用 epoch 兜底");
+        tracing::error!(
+            timestamp = raw,
+            context,
+            "数据库中的无效时间戳，使用 epoch 兜底"
+        );
         DateTime::default()
     })
 }

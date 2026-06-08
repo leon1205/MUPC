@@ -192,15 +192,12 @@ impl AiCommandValidator for AiCommandValidatorImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mupc_data_processing::telemetry::{BatteryData, DeviceStatus, ElectricalData, InverterStatus};
+    use mupc_data_processing::telemetry::{
+        BatteryData, DeviceStatus, ElectricalData, InverterStatus,
+    };
 
     /// 构造测试用遥测数据
-    fn make_test_data(
-        soc: f64,
-        pv_power: f64,
-        load_power: f64,
-        active_power: f64,
-    ) -> DataPackage {
+    fn make_test_data(soc: f64, pv_power: f64, load_power: f64, active_power: f64) -> DataPackage {
         DataPackage {
             electrical: ElectricalData {
                 voltage: Some(220.0),
@@ -344,9 +341,7 @@ mod tests {
     fn test_degraded_pass_on_stale_data() {
         let mut validator = AiCommandValidatorImpl::new();
         // 设置一个"过期"时间戳（模拟 >5s 前）
-        validator.data_timestamp = Some(
-            chrono::Utc::now() - chrono::Duration::seconds(10),
-        );
+        validator.data_timestamp = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
         validator.latest_data = Some(make_test_data(50.0, 30.0, 20.0, 0.0));
 
         let cmd = ControlCommand {

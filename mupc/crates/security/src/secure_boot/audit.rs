@@ -29,7 +29,12 @@ impl BootAuditLogger {
         Self { logs: Vec::new() }
     }
 
-    pub fn record(&mut self, event: &str, result: bool, details: &str) -> Result<(), SecurityError> {
+    pub fn record(
+        &mut self,
+        event: &str,
+        result: bool,
+        details: &str,
+    ) -> Result<(), SecurityError> {
         self.logs.push(BootAuditLog {
             timestamp: Utc::now(),
             event: event.to_string(),

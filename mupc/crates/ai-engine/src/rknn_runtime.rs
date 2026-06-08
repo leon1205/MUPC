@@ -23,7 +23,9 @@ struct RknnContext {
 
 impl Drop for RknnContext {
     fn drop(&mut self) {
-        unsafe { crate::rknn_runtime_sys::rknn_destroy(self.ctx); }
+        unsafe {
+            crate::rknn_runtime_sys::rknn_destroy(self.ctx);
+        }
     }
 }
 

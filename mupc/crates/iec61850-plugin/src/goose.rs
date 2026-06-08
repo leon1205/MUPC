@@ -26,7 +26,10 @@ impl GooseSubscriber {
     /// 创建 GOOSE 订阅者
     pub fn new(config: GooseConfig) -> (Self, broadcast::Sender<GooseMessage>) {
         let (tx, rx) = broadcast::channel(100);
-        let subscriber = Self { config, receiver: rx };
+        let subscriber = Self {
+            config,
+            receiver: rx,
+        };
         (subscriber, tx)
     }
 
@@ -152,11 +155,16 @@ fn parse_tlv_string(data: &[u8]) -> Result<(String, usize)> {
     let len = data[1] as usize;
 
     if tag != 0x80 {
-        return Err(Iec61850Error::GooseParseFailed(format!("无效 TLV tag: 0x{:02x}", tag)));
+        return Err(Iec61850Error::GooseParseFailed(format!(
+            "无效 TLV tag: 0x{:02x}",
+            tag
+        )));
     }
 
     if data.len() < 2 + len {
-        return Err(Iec61850Error::GooseParseFailed("TLV 数据长度不足".to_string()));
+        return Err(Iec61850Error::GooseParseFailed(
+            "TLV 数据长度不足".to_string(),
+        ));
     }
 
     let value = std::str::from_utf8(&data[2..2 + len])
@@ -238,9 +246,9 @@ mod tests {
             b'T', b'e', b's', b't', b'G', b'o', b'C', b'B', // "TestGoCB"
             0x80, 0x08, // Tag=0x80, Len=8 (DatSet)
             b'D', b'a', b't', b'a', b'S', b'e', b't', b'1', // "DataSet1"
-            0x01,       // StNum = 1
-            0x01,       // SqNum = 1
-            0x00,       // Security = 0
+            0x01, // StNum = 1
+            0x01, // SqNum = 1
+            0x00, // Security = 0
             0x00, 0x00, 0x00, 0x64, // TimeAllowed = 100ms
         ];
 

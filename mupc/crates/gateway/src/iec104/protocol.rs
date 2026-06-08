@@ -1,26 +1,26 @@
 //! IEC 104 协议解析
 
-use mupc_common::{MupcError, ErrorCode};
-use std::io::Cursor;
 use byteorder::ReadBytesExt;
+use mupc_common::{ErrorCode, MupcError};
+use std::io::Cursor;
 
 /// 帧类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrameType {
-    IFrame,  // 编号的信息传输帧
-    SFrame,  // 确认帧
-    UFrame,  // 控制帧
+    IFrame, // 编号的信息传输帧
+    SFrame, // 确认帧
+    UFrame, // 控制帧
 }
 
 /// U 帧类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UFrameType {
-    StartDtAct,   // 启动数据传输激活
-    StartDtCon,   // 启动数据传输确认
-    StopDtAct,    // 停止数据传输激活
-    StopDtCon,    // 停止数据传输确认
-    TestFrAct,    // 测试帧激活
-    TestFrCon,    // 测试帧确认
+    StartDtAct, // 启动数据传输激活
+    StartDtCon, // 启动数据传输确认
+    StopDtAct,  // 停止数据传输激活
+    StopDtCon,  // 停止数据传输确认
+    TestFrAct,  // 测试帧激活
+    TestFrCon,  // 测试帧确认
 }
 
 /// 类型标识 (Type ID)
@@ -28,21 +28,21 @@ pub enum UFrameType {
 #[repr(u8)]
 pub enum TypeId {
     // 监视方向 (Monitoring)
-    MSpNa1 = 1,       // 单点遥信 (M_SP_NA_1)
-    MDpNa1 = 3,       // 双点遥信 (M_DP_NA_1)
-    MMeNa1 = 9,       // 测量值，归一化值 (M_ME_NA_1)
-    MMeNc1 = 13,      // 测量值，短浮点数 (M_ME_NC_1)
-    MSpTa1 = 30,      // 单点遥信带时标 (M_SP_TA_1)
-    MDpTa1 = 31,      // 双点遥信带时标 (M_DP_TA_1)
-    MMeTa1 = 34,      // 测量值带时标，归一化值 (M_ME_TA_1)
-    MMeTd1 = 35,      // 测量值带时标，归一化值 (M_ME_TD_1)
+    MSpNa1 = 1,  // 单点遥信 (M_SP_NA_1)
+    MDpNa1 = 3,  // 双点遥信 (M_DP_NA_1)
+    MMeNa1 = 9,  // 测量值，归一化值 (M_ME_NA_1)
+    MMeNc1 = 13, // 测量值，短浮点数 (M_ME_NC_1)
+    MSpTa1 = 30, // 单点遥信带时标 (M_SP_TA_1)
+    MDpTa1 = 31, // 双点遥信带时标 (M_DP_TA_1)
+    MMeTa1 = 34, // 测量值带时标，归一化值 (M_ME_TA_1)
+    MMeTd1 = 35, // 测量值带时标，归一化值 (M_ME_TD_1)
     // 控制方向 (Control)
-    CScNa1 = 45,      // 单点遥控 (C_SC_NA_1)
-    CDcNa1 = 46,      // 双点遥控 (C_DC_NA_1)
-    CSeNa1 = 48,      // 调节命令 (C_SE_NA_1)
-    CScTa1 = 58,      // 单点遥控带时标 (C_SC_TA_1)
-    CDcTa1 = 59,      // 双点遥控带时标 (C_DC_TA_1)
-    CSeTa1 = 61,      // 调节命令带时标 (C_SE_TA_1)
+    CScNa1 = 45, // 单点遥控 (C_SC_NA_1)
+    CDcNa1 = 46, // 双点遥控 (C_DC_NA_1)
+    CSeNa1 = 48, // 调节命令 (C_SE_NA_1)
+    CScTa1 = 58, // 单点遥控带时标 (C_SC_TA_1)
+    CDcTa1 = 59, // 双点遥控带时标 (C_DC_TA_1)
+    CSeTa1 = 61, // 调节命令带时标 (C_SE_TA_1)
 }
 
 impl TypeId {
@@ -73,14 +73,14 @@ impl TypeId {
 pub struct Cot(pub u8);
 
 impl Cot {
-    pub const PERIODIC: u8 = 1;        // 周期/循环
-    pub const BACKGROUND: u8 = 2;      // 后台扫描
-    pub const SPONTANEOUS: u8 = 3;     // 突发
-    pub const COMMAND: u8 = 6;         // 命令
-    pub const ACTIVATION: u8 = 7;      // 激活
+    pub const PERIODIC: u8 = 1; // 周期/循环
+    pub const BACKGROUND: u8 = 2; // 后台扫描
+    pub const SPONTANEOUS: u8 = 3; // 突发
+    pub const COMMAND: u8 = 6; // 命令
+    pub const ACTIVATION: u8 = 7; // 激活
     pub const ACTIVATION_CON: u8 = 8; // 激活确认
-    pub const DEACTIVATION: u8 = 9;    // 停止激活
-    pub const DEACTIVATION_CON: u8 = 10;// 停止激活确认
+    pub const DEACTIVATION: u8 = 9; // 停止激活
+    pub const DEACTIVATION_CON: u8 = 10; // 停止激活确认
 }
 
 /// 数据质量
@@ -95,11 +95,11 @@ pub enum Quality {
 /// 数据值
 #[derive(Debug, Clone)]
 pub enum Value {
-    SinglePoint(bool),      // 单点 (开/关)
-    DoublePoint(u8),        // 双点 (00=中间,01=开,10=关,11=无效)
-    Normalized(f64),        // 归一化值 (-1.0 ~ 1.0)
-    Scaled(i16),           // 标度化值
-    Float(f64),            // 短浮点数
+    SinglePoint(bool), // 单点 (开/关)
+    DoublePoint(u8),   // 双点 (00=中间,01=开,10=关,11=无效)
+    Normalized(f64),   // 归一化值 (-1.0 ~ 1.0)
+    Scaled(i16),       // 标度化值
+    Float(f64),        // 短浮点数
 }
 
 /// 信息对象地址 (IOA) 3字节
@@ -129,8 +129,8 @@ pub struct AsduHeader {
 #[derive(Debug, Clone)]
 pub struct Iec104Frame {
     pub frame_type: FrameType,
-    pub start: u8,        // 0x68
-    pub length: u8,       // 后续长度
+    pub start: u8,  // 0x68
+    pub length: u8, // 后续长度
     pub control1: u8,
     pub control2: u8,
     pub control3: u8,
@@ -142,29 +142,53 @@ impl Iec104Frame {
     /// 解析 IEC 104 帧
     pub fn parse(data: &[u8]) -> Result<Self, MupcError> {
         if data.len() < 6 {
-            return Err(MupcError::new(ErrorCode::FrameParseError, "Frame too short", "gateway"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                "Frame too short",
+                "gateway",
+            ));
         }
 
         let mut cursor = Cursor::new(data);
 
         // 起始字符
-        let start = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid start byte", "gateway"))?;
+        let start = cursor.read_u8().map_err(|_| {
+            MupcError::new(ErrorCode::FrameParseError, "Invalid start byte", "gateway")
+        })?;
         if start != 0x68 {
-            return Err(MupcError::new(ErrorCode::FrameParseError, format!("Invalid start byte: {:#x}", start), "gateway"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                format!("Invalid start byte: {:#x}", start),
+                "gateway",
+            ));
         }
 
         // 长度
-        let length = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid length", "gateway"))?;
+        let length = cursor
+            .read_u8()
+            .map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid length", "gateway"))?;
 
         if data.len() < (length as usize + 2) {
-            return Err(MupcError::new(ErrorCode::FrameParseError, "Frame length mismatch", "gateway"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                "Frame length mismatch",
+                "gateway",
+            ));
         }
 
         // 控制字段
-        let control1 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control1", "gateway"))?;
-        let control2 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control2", "gateway"))?;
-        let control3 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control3", "gateway"))?;
-        let control4 = cursor.read_u8().map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid control4", "gateway"))?;
+        let control1 = cursor.read_u8().map_err(|_| {
+            MupcError::new(ErrorCode::FrameParseError, "Invalid control1", "gateway")
+        })?;
+        let control2 = cursor.read_u8().map_err(|_| {
+            MupcError::new(ErrorCode::FrameParseError, "Invalid control2", "gateway")
+        })?;
+        let control3 = cursor.read_u8().map_err(|_| {
+            MupcError::new(ErrorCode::FrameParseError, "Invalid control3", "gateway")
+        })?;
+        let control4 = cursor.read_u8().map_err(|_| {
+            MupcError::new(ErrorCode::FrameParseError, "Invalid control4", "gateway")
+        })?;
 
         // 确定帧类型
         let frame_type = Self::determine_frame_type(control1, control2, control3, control4);
@@ -281,11 +305,20 @@ impl Iec104Frame {
     /// 解析 ASDU 头
     pub fn parse_asdu_header(&self) -> Result<AsduHeader, MupcError> {
         if self.asdu.len() < 4 {
-            return Err(MupcError::new(ErrorCode::FrameParseError, "ASDU too short", "gateway"));
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                "ASDU too short",
+                "gateway",
+            ));
         }
 
-        let type_id = TypeId::from_u8(self.asdu[0])
-            .ok_or_else(|| MupcError::new(ErrorCode::AsduTypeMismatch, format!("Unknown TypeID: {}", self.asdu[0]), "gateway"))?;
+        let type_id = TypeId::from_u8(self.asdu[0]).ok_or_else(|| {
+            MupcError::new(
+                ErrorCode::AsduTypeMismatch,
+                format!("Unknown TypeID: {}", self.asdu[0]),
+                "gateway",
+            )
+        })?;
 
         let sq_num = self.asdu[1] & 0x7F;
         let cot = Cot(self.asdu[2]);
@@ -328,7 +361,13 @@ mod tests {
 
         for (val, expected_type, _name) in required_type_ids {
             let type_id = TypeId::from_u8(val);
-            assert_eq!(type_id, Some(expected_type), "TypeID {} should be {:?}", val, expected_type);
+            assert_eq!(
+                type_id,
+                Some(expected_type),
+                "TypeID {} should be {:?}",
+                val,
+                expected_type
+            );
         }
     }
 
@@ -395,7 +434,12 @@ mod tests {
 
         for (data, expected_type) in test_cases {
             let frame = Iec104Frame::parse(&data).unwrap();
-            assert_eq!(frame.u_frame_type(), Some(expected_type), "U frame type mismatch for {:?}", data);
+            assert_eq!(
+                frame.u_frame_type(),
+                Some(expected_type),
+                "U frame type mismatch for {:?}",
+                data
+            );
         }
     }
 

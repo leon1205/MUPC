@@ -46,11 +46,7 @@ pub struct WriteBuffer {
 }
 
 impl WriteBuffer {
-    pub fn new(
-        capacity: usize,
-        flush_interval_ms: u64,
-        pool: Arc<SqlitePool>,
-    ) -> Self {
+    pub fn new(capacity: usize, flush_interval_ms: u64, pool: Arc<SqlitePool>) -> Self {
         Self {
             capacity,
             flush_interval_ms,

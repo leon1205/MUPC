@@ -92,7 +92,11 @@ impl ComtradeExporter {
         let mut file = BufWriter::new(File::create(output_path)?);
 
         // 站点名称, 录波设备标识
-        let station_name = format!("{},{}", self.device_id, self.timestamp_to_filename(meta.timestamp));
+        let station_name = format!(
+            "{},{}",
+            self.device_id,
+            self.timestamp_to_filename(meta.timestamp)
+        );
         writeln!(file, "{}", station_name)?;
 
         // 通道总数, 模拟通道数(A), 数字通道数(D)
@@ -102,14 +106,7 @@ impl ComtradeExporter {
         // 模拟通道定义
         for (i, name) in channel_names.iter().enumerate() {
             let (a, b) = self.get_comtrade_coefficients(name);
-            writeln!(
-                file,
-                "{},{},,,V,{},{},0,65535,1,0,p",
-                i + 1,
-                name,
-                a,
-                b
-            )?;
+            writeln!(file, "{},{},,,V,{},{},0,65535,1,0,p", i + 1, name, a, b)?;
         }
 
         // 采样率
@@ -180,12 +177,12 @@ impl ComtradeExporter {
     /// 返回 (a, b) 系数对，用于 COMTRADE 的线性转换 y = a*x + b
     fn get_comtrade_coefficients(&self, channel_name: &str) -> (f64, f64) {
         match channel_name {
-            "Ua" | "Ub" | "Uc" => (500.0 / 65536.0, 0.0),     // 电压 0~500V
-            "Ia" | "Ib" | "Ic" => (2000.0 / 65536.0, 0.0),    // 电流 0~2000A
-            "U0" => (100.0 / 65536.0, 0.0),                     // 零序电压 0~100V
-            "I0" => (200.0 / 65536.0, 0.0),                     // 零序电流 0~200A
-            "P" | "Q" => (5000.0 / 65536.0, 0.0),              // 功率 0~5000kW
-            _ => (1.0, 0.0),                                     // 默认
+            "Ua" | "Ub" | "Uc" => (500.0 / 65536.0, 0.0), // 电压 0~500V
+            "Ia" | "Ib" | "Ic" => (2000.0 / 65536.0, 0.0), // 电流 0~2000A
+            "U0" => (100.0 / 65536.0, 0.0),               // 零序电压 0~100V
+            "I0" => (200.0 / 65536.0, 0.0),               // 零序电流 0~200A
+            "P" | "Q" => (5000.0 / 65536.0, 0.0),         // 功率 0~5000kW
+            _ => (1.0, 0.0),                              // 默认
         }
     }
 
@@ -349,12 +346,12 @@ impl CsvExporter {
 
 /// 默认的 10 通道名称列表
 pub const DEFAULT_CHANNEL_NAMES: [&str; 10] = [
-    "Ua", "Ub", "Uc",  // 三相电压
-    "Ia", "Ib", "Ic",  // 三相电流
-    "U0",               // 零序电压
-    "I0",               // 零序电流
-    "P",                // 有功功率
-    "Q",                // 无功功率
+    "Ua", "Ub", "Uc", // 三相电压
+    "Ia", "Ib", "Ic", // 三相电流
+    "U0", // 零序电压
+    "I0", // 零序电流
+    "P",  // 有功功率
+    "Q",  // 无功功率
 ];
 
 #[cfg(test)]
@@ -381,7 +378,10 @@ mod tests {
             ..Default::default()
         };
 
-        let names: Vec<String> = DEFAULT_CHANNEL_NAMES.iter().map(|s| s.to_string()).collect();
+        let names: Vec<String> = DEFAULT_CHANNEL_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let cfg_path = dir.path().join("test.cfg");
         let result = exporter.export_cfg(&cfg_path, &meta, &names);
         assert!(result.is_ok());
@@ -400,10 +400,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let exporter = CsvExporter::new(dir.path().to_path_buf());
 
-        let channels: Vec<Vec<f64>> = vec![
-            vec![220.0, 221.0, 222.0],
-            vec![10.0, 11.0, 12.0],
-        ];
+        let channels: Vec<Vec<f64>> = vec![vec![220.0, 221.0, 222.0], vec![10.0, 11.0, 12.0]];
         let names: Vec<String> = vec!["Ua".to_string(), "Ia".to_string()];
 
         let csv_path = dir.path().join("test.csv");

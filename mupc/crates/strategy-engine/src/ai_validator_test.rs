@@ -1,17 +1,14 @@
 //! AI 命令校验器测试
 
-use mupc_data_processing::telemetry::{BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus};
+use mupc_data_processing::telemetry::{
+    BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
+};
 
 use crate::ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput};
 use crate::strategies::{AiCommandValidator, CommandType, ControlCommand};
 
 /// 构造测试用遥测数据
-fn make_test_data(
-    soc: f64,
-    pv_power: f64,
-    load_power: f64,
-    active_power: f64,
-) -> DataPackage {
+fn make_test_data(soc: f64, pv_power: f64, load_power: f64, active_power: f64) -> DataPackage {
     DataPackage {
         electrical: ElectricalData {
             voltage: Some(220.0),

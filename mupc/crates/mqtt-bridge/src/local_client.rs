@@ -2,15 +2,15 @@
 //!
 //! 连接本地 mosquitto (127.0.0.1:1883)，用于进程间通信
 
+use crate::config::LocalMqttConfig;
+use crate::error::MqttBridgeError;
 use async_trait::async_trait;
-use device_trait::MqttBridge;
 use device_trait::errors::PluginError;
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS, Event, Packet};
+use device_trait::MqttBridge;
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use crate::error::MqttBridgeError;
-use crate::config::LocalMqttConfig;
 
 /// 本地 MQTT 客户端实现
 pub struct LocalMqttClient {
@@ -28,11 +28,7 @@ impl LocalMqttClient {
         let host = parts.first().unwrap_or(&"127.0.0.1");
         let port: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1883);
 
-        let mut mqtt_options = MqttOptions::new(
-            config.client_id.clone(),
-            *host,
-            port,
-        );
+        let mut mqtt_options = MqttOptions::new(config.client_id.clone(), *host, port);
         mqtt_options.set_clean_session(config.clean_session);
         mqtt_options.set_keep_alive(std::time::Duration::from_secs(config.keepalive_secs));
 
@@ -83,7 +79,8 @@ impl LocalMqttClient {
 
                     // 计算下一次重连间隔（指数退避）
                     let max_interval = self.reconnect_config.max_interval_secs;
-                    interval_secs = ((interval_secs as f64) * self.reconnect_config.backoff_multiplier)
+                    interval_secs = ((interval_secs as f64)
+                        * self.reconnect_config.backoff_multiplier)
                         .min(max_interval as f64) as u64;
                     interval_secs = interval_secs.max(1); // 最小1秒
                 }

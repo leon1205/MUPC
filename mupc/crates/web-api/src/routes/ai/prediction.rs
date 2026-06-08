@@ -4,10 +4,13 @@
 //! GET /api/v1/ai/predictions/current — 获取当前预测
 //! GET /api/v1/ai/predictions/history — 获取历史预测
 
-use axum::{Json, extract::{State, Query}};
+use crate::AppState;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct PredictionQuery {
@@ -59,9 +62,7 @@ pub async fn get_predictions(
 }
 
 /// GET /api/v1/ai/predictions/current
-pub async fn get_current_prediction(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+pub async fn get_current_prediction(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let info = state.ai_integrator.engine_status().await;
     Json(serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),

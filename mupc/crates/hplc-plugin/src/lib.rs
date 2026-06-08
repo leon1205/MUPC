@@ -16,8 +16,8 @@ pub mod errors;
 pub mod mock;
 
 // Re-export commonly used types
-pub use device_trait::south_device::{HplcConfig, HplcError};
 pub use device::HplcDevice;
+pub use device_trait::south_device::{HplcConfig, HplcError};
 pub use driver::HplcDriver;
 pub use mock::MockHplcDriver;
 

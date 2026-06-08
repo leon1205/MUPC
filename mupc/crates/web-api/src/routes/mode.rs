@@ -4,19 +4,13 @@
 //! PUT  /api/v1/mode      — 切换运行场景
 //! GET  /api/v1/mode/list — 获取所有可用场景列表
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use mupc_ai_engine::mode_selector::{RunningMode, SwitchSource};
 use crate::AppState;
+use mupc_ai_engine::mode_selector::{RunningMode, SwitchSource};
 
 /// 模式状态响应
 #[derive(Debug, Serialize)]
@@ -47,9 +41,7 @@ pub struct ModeListResponse {
 }
 
 /// GET /api/v1/mode — 获取当前运行场景
-async fn get_mode(
-    State(state): State<Arc<AppState>>,
-) -> Json<ModeStatusResponse> {
+async fn get_mode(State(state): State<Arc<AppState>>) -> Json<ModeStatusResponse> {
     let current = state.mode_selector.read().await.current();
     Json(ModeStatusResponse {
         current: format!("{:?}", current),
@@ -63,8 +55,7 @@ async fn switch_mode(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwitchModeRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let new_mode = mupc_ai_engine::parse_mode_name(&req.mode)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let new_mode = mupc_ai_engine::parse_mode_name(&req.mode).ok_or(StatusCode::BAD_REQUEST)?;
 
     let previous = state.mode_selector.read().await.current();
 

@@ -65,7 +65,9 @@ impl WaveformReporterAdapter {
         }
 
         // 同时上报到 IEC 104 和 MQTT 通道
-        let iec104_fut = self.reporter.report_via_iec104(event_id, waveform_path.clone());
+        let iec104_fut = self
+            .reporter
+            .report_via_iec104(event_id, waveform_path.clone());
         let mqtt_fut = self.reporter.report_via_mqtt(event_id, waveform_path);
 
         // 并发上报
@@ -74,20 +76,11 @@ impl WaveformReporterAdapter {
         // 至少一个通道成功即视为上报成功
         match (iec_result, mqtt_result) {
             (Ok(_), _) | (_, Ok(_)) => {
-                tracing::info!(
-                    "故障事件 {} 上报成功 (类型: {:?})",
-                    event_id,
-                    fault_type
-                );
+                tracing::info!("故障事件 {} 上报成功 (类型: {:?})", event_id, fault_type);
                 Ok(())
             }
             (Err(e1), Err(e2)) => {
-                tracing::error!(
-                    "故障事件 {} 上报失败: IEC104={}, MQTT={}",
-                    event_id,
-                    e1,
-                    e2
-                );
+                tracing::error!("故障事件 {} 上报失败: IEC104={}, MQTT={}", event_id, e1, e2);
                 Err(e1) // 返回第一个错误
             }
         }
@@ -99,7 +92,9 @@ impl WaveformReporterAdapter {
         event_id: i64,
         waveform_path: Option<PathBuf>,
     ) -> Result<(), ReportError> {
-        self.reporter.report_via_iec104(event_id, waveform_path).await
+        self.reporter
+            .report_via_iec104(event_id, waveform_path)
+            .await
     }
 
     /// 仅通过 MQTT 上报

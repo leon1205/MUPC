@@ -190,9 +190,10 @@ impl Downloader {
             request = request.header("Range", format!("bytes={}-", start_offset));
         }
 
-        let response = request.send().await.map_err(|e| {
-            OtaError::NetworkError(format!("HTTP 请求失败: {}", e))
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| OtaError::NetworkError(format!("HTTP 请求失败: {}", e)))?;
 
         // 检查响应状态
         let status = response.status();
@@ -207,9 +208,10 @@ impl Downloader {
         let total_size = response.content_length().unwrap_or(0) + start_offset;
 
         // 获取响应体
-        let bytes = response.bytes().await.map_err(|e| {
-            OtaError::NetworkError(format!("读取响应体失败: {}", e))
-        })?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| OtaError::NetworkError(format!("读取响应体失败: {}", e)))?;
 
         let downloaded_size = bytes.len() as u64;
 
@@ -416,9 +418,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap().into_path();
         let file_path = temp_dir.join("test_file.txt");
 
-        tokio::fs::write(&file_path, b"hello world")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, b"hello world").await.unwrap();
 
         let hash = compute_file_hash(&file_path).await.unwrap();
 

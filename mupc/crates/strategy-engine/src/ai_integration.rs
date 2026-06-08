@@ -3,9 +3,7 @@
 //! Phase 3C: 将 AI 优化引擎与策略引擎集成。
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
-use mupc_ai_engine::{
-    AiEngineError, ModelManager, ModelStatus, RunningMode, SwitchSource,
-};
+use mupc_ai_engine::{AiEngineError, ModelManager, ModelStatus, RunningMode, SwitchSource};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -27,7 +25,10 @@ impl AiIntegrator {
     }
 
     /// 初始化并加载模型
-    pub async fn initialize(&self, config: mupc_ai_engine::AiEngineConfig) -> Result<(), AiEngineError> {
+    pub async fn initialize(
+        &self,
+        config: mupc_ai_engine::AiEngineConfig,
+    ) -> Result<(), AiEngineError> {
         let manager = ModelManager::new(config);
         manager.load_models().await?;
         *self.status.write().await = ModelStatus::Ready;
@@ -101,7 +102,9 @@ impl AiIntegrator {
     }
 
     /// 获取 ModeSelector 引用（v2.3: 返回 RwLock<ModeSelector> 的 Arc）
-    pub async fn mode_selector(&self) -> Option<Arc<tokio::sync::RwLock<mupc_ai_engine::ModeSelector>>> {
+    pub async fn mode_selector(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<mupc_ai_engine::ModeSelector>>> {
         let manager = self.model_manager.read().await;
         manager.as_ref().map(|m| m.mode_selector_arc())
     }

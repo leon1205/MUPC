@@ -65,7 +65,6 @@ pub struct WiFiConfig {
     pub channel: Option<u8>,
 }
 
-
 /// WiFi 驱动抽象 trait
 ///
 /// 定义 WiFi 无线通信的标准接口，上层策略引擎通过此 trait 与台区设备交互。

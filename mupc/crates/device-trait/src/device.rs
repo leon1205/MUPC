@@ -64,7 +64,10 @@ pub enum DeviceCommand {
 impl DeviceCommand {
     /// 判断是否为只读命令
     pub fn is_read_only(&self) -> bool {
-        matches!(self, DeviceCommand::Read | DeviceCommand::Status | DeviceCommand::SelfTest)
+        matches!(
+            self,
+            DeviceCommand::Read | DeviceCommand::Status | DeviceCommand::SelfTest
+        )
     }
 }
 

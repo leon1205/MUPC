@@ -30,6 +30,12 @@ pub struct RewardCalculator {
     last_p_batt_set: RwLock<f64>,
     /// 电压越限连续步数计数器（用于死区触发）
     voltage_violation_count: std::sync::atomic::AtomicU32,
+    // v2.5 新增配置参数
+    q_margin_threshold: f64,
+    voltage_high_limit: f64,
+    soc_critical: f64,
+    voltage_penalty_high: f64,
+    voltage_penalty_low: f64,
 }
 
 impl RewardCalculator {
@@ -42,6 +48,32 @@ impl RewardCalculator {
             battery_capacity_kwh: 200.0,
             last_p_batt_set: RwLock::new(0.0),
             voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
+            q_margin_threshold: 0.10,
+            voltage_high_limit: 1.05,
+            soc_critical: 0.10,
+            voltage_penalty_high: 2.0,
+            voltage_penalty_low: 1.0,
+        }
+    }
+
+    /// v2.5: 从配置创建（支持自定义阈值）
+    pub fn new_with_thresholds(
+        weights: SceneWeights,
+        cfg: &crate::config::RewardThresholdConfig,
+    ) -> Self {
+        Self {
+            weights,
+            carbon_emission_factor: 0.581,
+            demand_penalty_rate: 50.0,
+            battery_degradation_alpha: 0.01,
+            battery_capacity_kwh: 200.0,
+            last_p_batt_set: RwLock::new(0.0),
+            voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
+            q_margin_threshold: cfg.q_margin_threshold,
+            voltage_high_limit: cfg.voltage_high_limit,
+            soc_critical: cfg.soc_critical,
+            voltage_penalty_high: cfg.voltage_penalty_high,
+            voltage_penalty_low: cfg.voltage_penalty_low,
         }
     }
 
@@ -55,7 +87,7 @@ impl RewardCalculator {
         match mode {
             RunningMode::SeasonalLoadManagement => {
                 let prev = *self.last_p_batt_set.read().unwrap();
-                self.calc_agri(state, action.p_batt_set, prev)
+                self.calc_agri_v2_5(state, action.p_batt_set, prev)
             }
             RunningMode::CommercialArbitrage => self.calc_arbitrage(action, state),
             RunningMode::DemandControl => self.calc_demand(action, state),
@@ -83,14 +115,112 @@ impl RewardCalculator {
 
         let p_trafo = self.overload_penalty(state.transformer_load);
 
-        let v_avg =
-            (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
         let p_voltage = self.voltage_penalty_with_deadband(v_avg);
 
         let delta_p = (p_batt_set - prev_p_batt).abs();
         let r_ramp = w[4] * delta_p / self.battery_capacity_kwh;
 
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
+    }
+
+    /// SCENE-01: 台区季节性负荷模式 v2.5
+    fn calc_agri_v2_5(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
+        let w = &self.weights.seasonal_load_management;
+
+        // 1. 弃光奖励（含电压安全前置条件）
+        // v_avg >= voltage_high_limit 时置零
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let r_pv = if v_avg >= self.voltage_high_limit {
+            0.0 // 电压偏高，弃光无意义
+        } else {
+            (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+                .min(1.0)
+                * 100.0
+        };
+
+        // 2. 自适应损耗系数 α(s)
+        let alpha = self.compute_alpha(state);
+
+        // 3. 电池损耗
+        let c_rate = state.battery_power.abs() / self.battery_capacity_kwh;
+        let p_batt_deg = alpha * c_rate * c_rate;
+
+        // 4. 变压器过载
+        let p_trafo = self.overload_penalty(state.transformer_load);
+
+        // 5. 条件触发电压惩罚
+        let p_voltage = self.conditional_voltage_penalty(state);
+
+        // 6. 变化率惩罚
+        let r_ramp = w[4] * (p_batt_set - prev_p_batt).abs() / self.battery_capacity_kwh;
+
+        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
+    }
+
+    /// 计算自适应损耗系数 α(s)
+    /// 优先级：SOC 极低保护 > 电压支撑模式 > 常规调度
+    fn compute_alpha(&self, state: &FusedSystemState) -> f64 {
+        // SOC 极低保护：优先级最高
+        if state.battery_soc < self.soc_critical {
+            return 3.0;
+        }
+
+        // 电压支撑模式：q_realtime_margin <= 阈值 且 电压越限连续2步
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_dev = (v_avg - 1.0).abs();
+        let in_voltage_violation = v_dev > 0.05 && self.voltage_violation_count() >= 2;
+        let q_exhausted = state.q_realtime_margin <= self.q_margin_threshold;
+
+        if q_exhausted && in_voltage_violation {
+            return 0.2; // 电压支撑模式，鼓励果断放电
+        }
+
+        1.0 // 常规调度
+    }
+
+    /// 电压越限计数器读取（辅助 compute_alpha）
+    fn voltage_violation_count(&self) -> u32 {
+        self.voltage_violation_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 条件触发电压惩罚
+    /// 仅当 q_realtime_margin <= 阈值 且 电压越限连续2步时才返回惩罚值
+    fn conditional_voltage_penalty(&self, state: &FusedSystemState) -> f64 {
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let dev = (v_avg - 1.0).abs();
+
+        // 死区内，无惩罚，计数器清零
+        if dev <= 0.05 {
+            self.voltage_violation_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            return 0.0;
+        }
+
+        // 越限，计数器 +1
+        let count = self
+            .voltage_violation_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+
+        // 不足 2 步，不惩罚
+        if count < 2 {
+            return 0.0;
+        }
+
+        // q 裕度充足，不惩罚（电压问题是实时模块的责任）
+        if state.q_realtime_margin > self.q_margin_threshold {
+            return 0.0;
+        }
+
+        // 触发惩罚
+        let dev_excess = dev - 0.05;
+        if v_avg < 1.0 {
+            self.voltage_penalty_low * dev_excess * dev_excess // 低电压侧，斜率更高
+        } else {
+            self.voltage_penalty_high * dev_excess * dev_excess // 高电压侧
+        }
     }
 
     /// 电压惩罚（±5% 死区，越限连续2步才触发）
@@ -156,7 +286,8 @@ impl RewardCalculator {
         let w = &self.weights.virtual_power_plant;
         match state.dispatch_p_set {
             Some(p_target) => {
-                let r_accuracy = 100.0 * (1.0 - (action.p_batt_set - p_target).abs() / 100.0).max(0.0);
+                let r_accuracy =
+                    100.0 * (1.0 - (action.p_batt_set - p_target).abs() / 100.0).max(0.0);
                 w[0] * p_target.abs() * 0.01 + w[1] * r_accuracy - w[2] * 0.0
             }
             None => 0.0,
@@ -244,7 +375,11 @@ mod tests {
     #[test]
     fn test_arbitrage_positive_spread() {
         let calc = RewardCalculator::new(SceneWeights::default());
-        let r = calc.calculate(RunningMode::CommercialArbitrage, &make_action(), &make_state());
+        let r = calc.calculate(
+            RunningMode::CommercialArbitrage,
+            &make_action(),
+            &make_state(),
+        );
         assert!(r > 0.0);
     }
 
@@ -283,5 +418,127 @@ mod tests {
         // 第二次越限，count=2，触发惩罚
         let penalty = calc.voltage_penalty_with_deadband(1.08);
         assert!(penalty > 0.0, "越限连续2步应触发惩罚");
+    }
+
+    // ===== v2.5 专项测试 =====
+
+    #[test]
+    fn test_v2_5_conditional_voltage_penalty_q_margin_sufficient() {
+        // q_realtime_margin > threshold 时，即使电压越限也不惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 1.08;
+        state.voltage_phase_b = 1.08;
+        state.voltage_phase_c = 1.08;
+        state.q_realtime_margin = 0.5; // > 0.10，裕度充足
+
+        // 触发越限计数
+        calc.conditional_voltage_penalty(&state);
+        calc.conditional_voltage_penalty(&state);
+
+        let penalty = calc.conditional_voltage_penalty(&state);
+        assert!((penalty - 0.0).abs() < 1e-6, "q裕度充足时不应触发电压惩罚");
+    }
+
+    #[test]
+    fn test_v2_5_conditional_voltage_penalty_q_margin_exhausted() {
+        // q_realtime_margin <= threshold 且电压越限2步 → 触发惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 1.08;
+        state.voltage_phase_b = 1.08;
+        state.voltage_phase_c = 1.08;
+        state.q_realtime_margin = 0.05; // <= 0.10，裕度耗尽
+
+        calc.conditional_voltage_penalty(&state);
+        let penalty = calc.conditional_voltage_penalty(&state);
+        assert!(penalty > 0.0, "q裕度耗尽+越限2步应触发电压惩罚");
+    }
+
+    #[test]
+    fn test_v2_5_r_pv_zero_when_voltage_high() {
+        // v_avg >= 1.05 时，弃光奖励应为 0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.pv_power = 100.0;
+        state.grid_power = 10.0;
+        state.voltage_phase_a = 1.06;
+        state.voltage_phase_b = 1.06;
+        state.voltage_phase_c = 1.06;
+
+        let action = ActionOutput {
+            p_batt_set: -50.0,
+            q_batt_set: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
+        };
+
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        // R_pv 分量应为 0（因为电压 >= 1.05），所以总奖励会很低或为负
+        assert!(r < 50.0, "高电压时弃光奖励应为0，总奖励应较低");
+    }
+
+    #[test]
+    fn test_v2_5_alpha_soc_critical() {
+        // SOC < 10% 时 α = 3.0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.battery_soc = 0.05; // < 10%
+
+        let alpha = calc.compute_alpha(&state);
+        assert!((alpha - 3.0).abs() < 1e-6, "SOC极低时α应为3.0");
+    }
+
+    #[test]
+    fn test_v2_5_alpha_voltage_support() {
+        // q裕度耗尽 + 电压越限2步 → α = 0.2
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.battery_soc = 0.5; // 正常SOC
+        state.q_realtime_margin = 0.05; // <= 0.10
+        state.voltage_phase_a = 1.08;
+        state.voltage_phase_b = 1.08;
+        state.voltage_phase_c = 1.08;
+
+        // 先触发越限计数（需要 count >= 2）
+        calc.conditional_voltage_penalty(&state);
+        calc.conditional_voltage_penalty(&state);
+
+        let alpha = calc.compute_alpha(&state);
+        assert!((alpha - 0.2).abs() < 1e-6, "电压支撑模式α应为0.2");
+    }
+
+    #[test]
+    fn test_v2_5_alpha_normal() {
+        // 常规调度：SOC正常，q裕度充足 → α = 1.0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.battery_soc = 0.5;
+        state.q_realtime_margin = 0.5;
+        state.voltage_phase_a = 1.0;
+        state.voltage_phase_b = 1.0;
+        state.voltage_phase_c = 1.0;
+
+        let alpha = calc.compute_alpha(&state);
+        assert!((alpha - 1.0).abs() < 1e-6, "常规调度α应为1.0");
+    }
+
+    #[test]
+    fn test_v2_5_alpha_priority_soc_over_voltage_support() {
+        // SOC 极低和电压支撑都满足时，SOC极低优先（α=3.0）
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.battery_soc = 0.05; // SOC极低
+        state.q_realtime_margin = 0.05; // 电压支撑条件也满足
+        state.voltage_phase_a = 1.08;
+        state.voltage_phase_b = 1.08;
+        state.voltage_phase_c = 1.08;
+
+        calc.conditional_voltage_penalty(&state);
+        calc.conditional_voltage_penalty(&state);
+
+        let alpha = calc.compute_alpha(&state);
+        assert!((alpha - 3.0).abs() < 1e-6, "SOC极低保护优先级最高");
     }
 }

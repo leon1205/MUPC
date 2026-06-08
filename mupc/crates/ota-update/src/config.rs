@@ -105,8 +105,12 @@ impl OtaConfig {
             return Err(OtaConfigError::InvalidTimeFormat(time_str.to_string()));
         }
 
-        let hour: u32 = parts[0].parse().map_err(|_| OtaConfigError::InvalidHour(parts[0].to_string()))?;
-        let minute: u32 = parts[1].parse().map_err(|_| OtaConfigError::InvalidTimeFormat(time_str.to_string()))?;
+        let hour: u32 = parts[0]
+            .parse()
+            .map_err(|_| OtaConfigError::InvalidHour(parts[0].to_string()))?;
+        let minute: u32 = parts[1]
+            .parse()
+            .map_err(|_| OtaConfigError::InvalidTimeFormat(time_str.to_string()))?;
 
         if hour > 23 {
             return Err(OtaConfigError::HourOutOfRange(hour));
@@ -189,10 +193,8 @@ impl OtaConfig {
     /// 判断当前时间是否在下载窗口内
     pub fn is_in_download_window(&self, current_hour: u32, current_minute: u32) -> bool {
         let current_minutes = current_hour * 60 + current_minute;
-        let start_minutes = Self::time_to_minutes(&self.download_window_start)
-            .unwrap_or(0);
-        let end_minutes = Self::time_to_minutes(&self.download_window_end)
-            .unwrap_or(0);
+        let start_minutes = Self::time_to_minutes(&self.download_window_start).unwrap_or(0);
+        let end_minutes = Self::time_to_minutes(&self.download_window_end).unwrap_or(0);
 
         if start_minutes <= end_minutes {
             // 同一天内的窗口（如 02:00 - 05:00）
@@ -316,14 +318,14 @@ mod tests {
         let config = OtaConfig::default();
 
         // 在窗口内
-        assert!(config.is_in_download_window(2, 0));   // 02:00
-        assert!(config.is_in_download_window(3, 30));  // 03:30
-        assert!(config.is_in_download_window(5, 0));   // 05:00
+        assert!(config.is_in_download_window(2, 0)); // 02:00
+        assert!(config.is_in_download_window(3, 30)); // 03:30
+        assert!(config.is_in_download_window(5, 0)); // 05:00
 
         // 在窗口外
-        assert!(!config.is_in_download_window(1, 0));   // 01:00
-        assert!(!config.is_in_download_window(6, 0));   // 06:00
-        assert!(!config.is_in_download_window(12, 0));  // 12:00
+        assert!(!config.is_in_download_window(1, 0)); // 01:00
+        assert!(!config.is_in_download_window(6, 0)); // 06:00
+        assert!(!config.is_in_download_window(12, 0)); // 12:00
     }
 
     #[test]
@@ -333,13 +335,13 @@ mod tests {
         config.download_window_end = "06:00".to_string();
 
         // 在窗口内 (跨天)
-        assert!(config.is_in_download_window(22, 0));  // 22:00
+        assert!(config.is_in_download_window(22, 0)); // 22:00
         assert!(config.is_in_download_window(23, 30)); // 23:30
-        assert!(config.is_in_download_window(0, 0));   // 00:00
-        assert!(config.is_in_download_window(6, 0));   // 06:00
+        assert!(config.is_in_download_window(0, 0)); // 00:00
+        assert!(config.is_in_download_window(6, 0)); // 06:00
 
         // 在窗口外
-        assert!(!config.is_in_download_window(7, 0));  // 07:00
+        assert!(!config.is_in_download_window(7, 0)); // 07:00
         assert!(!config.is_in_download_window(12, 0)); // 12:00
         assert!(!config.is_in_download_window(21, 0)); // 21:00
     }

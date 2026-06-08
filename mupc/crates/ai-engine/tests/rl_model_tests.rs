@@ -1,7 +1,7 @@
 //! RL Model Integration Tests
 
-use mupc_ai_engine::config::{RlConfig, RlAlgorithm, QuantizationType};
-use mupc_ai_engine::rl_model::{RLModel, SystemState, parse_action_output};
+use mupc_ai_engine::config::{QuantizationType, RlAlgorithm, RlConfig};
+use mupc_ai_engine::rl_model::{parse_action_output, RLModel, SystemState};
 use std::path::PathBuf;
 
 #[cfg(test)]

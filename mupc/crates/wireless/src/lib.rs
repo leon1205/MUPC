@@ -24,15 +24,15 @@
 //! - Phase 1：trait 接口定义 + 配置结构体框架（当前阶段）
 //! - Phase 2+：实际硬件 SDK 集成（星闪芯片 / nl80211 / BlueZ）
 
+pub mod ble;
+pub mod ecdh;
 pub mod errors;
 pub mod nearlink;
 pub mod wifi;
-pub mod ble;
-pub mod ecdh;
 
 // 公开类型 re-export
-pub use errors::WirelessError;
-pub use nearlink::{NearLinkConfig, NearLinkDriver, NoOpNearLinkDriver};
-pub use wifi::{WiFiConfig, WiFiDriver, WiFiScanResult, WiFiSecurity, NoOpWiFiDriver};
 pub use ble::{BleConfig, BleDriver, BleScanResult, NoOpBleDriver};
 pub use ecdh::{derive_aes_key, EcdhKeyPair};
+pub use errors::WirelessError;
+pub use nearlink::{NearLinkConfig, NearLinkDriver, NoOpNearLinkDriver};
+pub use wifi::{NoOpWiFiDriver, WiFiConfig, WiFiDriver, WiFiScanResult, WiFiSecurity};

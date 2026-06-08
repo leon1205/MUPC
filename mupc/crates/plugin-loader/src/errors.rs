@@ -35,7 +35,7 @@ pub enum LoaderError {
 
     /// 动态库加载错误
     #[error("动态库加载错误: {0}")]
-   DlOpenError(String),
+    DlOpenError(String),
 
     /// 符号查找失败
     #[error("符号查找失败: {0}")]

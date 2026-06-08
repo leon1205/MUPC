@@ -9,9 +9,9 @@ use mupc_data_processing::telemetry::DataPackage;
 /// 策略类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StrategyType {
-    Basic,      // 基础策略
+    Basic,       // 基础策略
     Intelligent, // 智能策略 (AI)
-    Fallback,   // 兜底策略
+    Fallback,    // 兜底策略
 }
 
 /// 控制命令
@@ -40,9 +40,9 @@ pub struct ControlCommand {
 /// 命令类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CommandType {
-    SwitchControl,      // 开关控制
-    PowerRegulation,    // 功率调节
-    ChargeDischarge,    // 充放电控制
+    SwitchControl,   // 开关控制
+    PowerRegulation, // 功率调节
+    ChargeDischarge, // 充放电控制
 }
 
 /// 兜底策略 trait

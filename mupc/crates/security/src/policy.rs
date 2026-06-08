@@ -70,7 +70,8 @@ impl PolicyManager {
     }
 
     pub fn add_policy(&mut self, policy: ChannelPolicy) {
-        self.policies.retain(|p| p.channel_name != policy.channel_name);
+        self.policies
+            .retain(|p| p.channel_name != policy.channel_name);
         self.policies.push(policy);
     }
 
@@ -85,7 +86,10 @@ impl PolicyManager {
     }
 
     pub fn list_channels(&self) -> Vec<&str> {
-        self.policies.iter().map(|p| p.channel_name.as_str()).collect()
+        self.policies
+            .iter()
+            .map(|p| p.channel_name.as_str())
+            .collect()
     }
 
     pub fn validate(&self) -> Result<(), crate::errors::SecurityError> {

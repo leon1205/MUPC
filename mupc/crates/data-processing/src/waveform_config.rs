@@ -8,7 +8,7 @@
 //! 本模块将 `waveform::trigger` 中的核心配置类型重新导出，
 //! 提供统一的导入路径 `crate::waveform_config::TriggerConfig`。
 
-pub use crate::waveform::trigger::{TriggerConfig, TriggerResult, ChannelMask};
+pub use crate::waveform::trigger::{ChannelMask, TriggerConfig, TriggerResult};
 
 /// 获取默认触发配置
 pub fn default_trigger_config() -> TriggerConfig {

@@ -4,19 +4,19 @@
 
 use axum::{
     extract::State,
-    http::{StatusCode, HeaderMap},
+    http::{HeaderMap, StatusCode},
     response::Json,
     routing::{post, put},
     Router,
 };
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use chrono::{DateTime, Utc, Duration};
 
-use mupc_common::{MupcError, ErrorCode};
+use mupc_common::{ErrorCode, MupcError};
 
 /// 登录请求
 #[derive(Debug, Clone, Deserialize)]
@@ -83,9 +83,18 @@ impl SessionManager {
     }
 
     /// 登录
-    pub async fn login(&self, username: &str, password: &str, remember: bool) -> Result<Session, MupcError> {
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<Session, MupcError> {
         if username != "admin" || password != self.default_admin_password {
-            return Err(MupcError::new(ErrorCode::AuthFailed, "Invalid username or password", "web-api"));
+            return Err(MupcError::new(
+                ErrorCode::AuthFailed,
+                "Invalid username or password",
+                "web-api",
+            ));
         }
 
         let now = Utc::now();
@@ -109,9 +118,17 @@ impl SessionManager {
     }
 
     /// 修改管理员密码
-    pub async fn update_password(&self, old_password: &str, _new_password: &str) -> Result<(), MupcError> {
+    pub async fn update_password(
+        &self,
+        old_password: &str,
+        _new_password: &str,
+    ) -> Result<(), MupcError> {
         if old_password != self.default_admin_password {
-            return Err(MupcError::new(ErrorCode::AuthFailed, "旧密码错误", "web-api"));
+            return Err(MupcError::new(
+                ErrorCode::AuthFailed,
+                "旧密码错误",
+                "web-api",
+            ));
         }
         // Phase 2+: 持久化到安全存储
         tracing::info!("管理员密码已更新");
@@ -122,11 +139,16 @@ impl SessionManager {
     pub async fn validate(&self, session_id: &str) -> Result<Session, MupcError> {
         let sessions = self.sessions.read().await;
 
-        let session = sessions.get(session_id)
-            .ok_or_else(|| MupcError::new(ErrorCode::InvalidSession, "Session not found", "web-api"))?;
+        let session = sessions.get(session_id).ok_or_else(|| {
+            MupcError::new(ErrorCode::InvalidSession, "Session not found", "web-api")
+        })?;
 
         if session.is_expired() {
-            return Err(MupcError::new(ErrorCode::InvalidSession, "Session expired", "web-api"));
+            return Err(MupcError::new(
+                ErrorCode::InvalidSession,
+                "Session expired",
+                "web-api",
+            ));
         }
 
         Ok(session.clone())
@@ -233,7 +255,10 @@ async fn change_password(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let result = handler.session_manager().update_password(&req.old_password, &req.new_password).await;
+    let result = handler
+        .session_manager()
+        .update_password(&req.old_password, &req.new_password)
+        .await;
     match result {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "ok" }))),
         Err(_) => Err(StatusCode::UNAUTHORIZED),
@@ -255,7 +280,8 @@ mod tests {
 
     // 测试用密码（从环境变量获取或使用默认值供测试）
     fn get_test_password() -> String {
-        std::env::var("TEST_ADMIN_PASSWORD").unwrap_or_else(|_| "test_password_for_unit_tests_only".to_string())
+        std::env::var("TEST_ADMIN_PASSWORD")
+            .unwrap_or_else(|_| "test_password_for_unit_tests_only".to_string())
     }
 
     // ========== Session Tests ==========

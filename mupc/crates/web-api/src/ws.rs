@@ -1,7 +1,10 @@
 //! WebSocket 日志推送
 
 use axum::{
-    extract::{ws::{Message, WebSocketUpgrade}, State},
+    extract::{
+        ws::{Message, WebSocketUpgrade},
+        State,
+    },
     response::Response,
     routing::get,
     Router,
@@ -48,10 +51,7 @@ impl Default for WsLogStreamer {
 }
 
 /// GET /ws/logs - WebSocket 日志流
-async fn ws_logs(
-    ws: WebSocketUpgrade,
-    State(streamer): State<WsLogStreamer>,
-) -> Response {
+async fn ws_logs(ws: WebSocketUpgrade, State(streamer): State<WsLogStreamer>) -> Response {
     ws.on_upgrade(|mut socket| async move {
         let mut rx = streamer.subscribe();
 

@@ -9,7 +9,10 @@ mod tests {
 
         assert_eq!(ConnectionState::Disconnected, ConnectionState::Disconnected);
         assert_eq!(ConnectionState::Connecting, ConnectionState::Connecting);
-        assert_eq!(ConnectionState::WaitingStartDt, ConnectionState::WaitingStartDt);
+        assert_eq!(
+            ConnectionState::WaitingStartDt,
+            ConnectionState::WaitingStartDt
+        );
         assert_eq!(ConnectionState::Connected, ConnectionState::Connected);
         assert_eq!(ConnectionState::Stopped, ConnectionState::Stopped);
     }
@@ -47,14 +50,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
-use super::{Iec104Frame, protocol::FrameType, protocol::UFrameType};
+use super::{protocol::FrameType, protocol::UFrameType, Iec104Frame};
 
 /// 连接状态
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionState {
     Disconnected,
     Connecting,
-    WaitingStartDt,    // 等待 STARTDT
+    WaitingStartDt, // 等待 STARTDT
     Connected,
     Stopped,
 }
@@ -110,7 +113,11 @@ impl Connection {
         writer: &mut (impl AsyncWriteExt + Unpin),
     ) -> Result<(), mupc_common::MupcError> {
         let u_type = frame.u_frame_type().ok_or_else(|| {
-            mupc_common::MupcError::new(mupc_common::ErrorCode::FrameParseError, "Unknown U frame type", "gateway")
+            mupc_common::MupcError::new(
+                mupc_common::ErrorCode::FrameParseError,
+                "Unknown U frame type",
+                "gateway",
+            )
         })?;
 
         match u_type {
@@ -118,7 +125,11 @@ impl Connection {
                 info!("Received STARTDT_ACT, sending STARTDT_CON");
                 let response = Iec104Frame::make_u_frame(UFrameType::StartDtCon);
                 writer.write_all(&response).await.map_err(|e| {
-                    mupc_common::MupcError::new(mupc_common::ErrorCode::SendFailed, format!("Send error: {}", e), "gateway")
+                    mupc_common::MupcError::new(
+                        mupc_common::ErrorCode::SendFailed,
+                        format!("Send error: {}", e),
+                        "gateway",
+                    )
                 })?;
                 self.state = ConnectionState::Connected;
             }
@@ -130,7 +141,11 @@ impl Connection {
                 info!("Received STOPDT_ACT, sending STOPDT_CON");
                 let response = Iec104Frame::make_u_frame(UFrameType::StopDtCon);
                 writer.write_all(&response).await.map_err(|e| {
-                    mupc_common::MupcError::new(mupc_common::ErrorCode::SendFailed, format!("Send error: {}", e), "gateway")
+                    mupc_common::MupcError::new(
+                        mupc_common::ErrorCode::SendFailed,
+                        format!("Send error: {}", e),
+                        "gateway",
+                    )
                 })?;
                 self.state = ConnectionState::Stopped;
             }
@@ -142,7 +157,11 @@ impl Connection {
                 info!("Received TESTFR_ACT, sending TESTFR_CON");
                 let response = Iec104Frame::make_u_frame(UFrameType::TestFrCon);
                 writer.write_all(&response).await.map_err(|e| {
-                    mupc_common::MupcError::new(mupc_common::ErrorCode::SendFailed, format!("Send error: {}", e), "gateway")
+                    mupc_common::MupcError::new(
+                        mupc_common::ErrorCode::SendFailed,
+                        format!("Send error: {}", e),
+                        "gateway",
+                    )
                 })?;
             }
             UFrameType::TestFrCon => {
@@ -164,7 +183,10 @@ impl Connection {
 
         // 检查接收序号
         if send_seq != self.recv_seq {
-            warn!("Sequence mismatch: expected {}, got {}", self.recv_seq, send_seq);
+            warn!(
+                "Sequence mismatch: expected {}, got {}",
+                self.recv_seq, send_seq
+            );
         }
 
         self.recv_seq = send_seq;
@@ -172,12 +194,19 @@ impl Connection {
         // 发送 S 帧确认
         let s_frame = Iec104Frame::make_s_frame(self.send_seq, self.recv_seq);
         writer.write_all(&s_frame).await.map_err(|e| {
-            mupc_common::MupcError::new(mupc_common::ErrorCode::SendFailed, format!("Send error: {}", e), "gateway")
+            mupc_common::MupcError::new(
+                mupc_common::ErrorCode::SendFailed,
+                format!("Send error: {}", e),
+                "gateway",
+            )
         })?;
 
         // 解析 ASDU
         let header = frame.parse_asdu_header()?;
-        info!("Received I frame: type_id={:?}, cot={}", header.type_id, header.cot.0);
+        info!(
+            "Received I frame: type_id={:?}, cot={}",
+            header.type_id, header.cot.0
+        );
 
         Ok(())
     }

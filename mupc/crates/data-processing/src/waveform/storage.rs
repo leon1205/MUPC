@@ -207,11 +207,15 @@ impl WaveformReader {
         let meta = parse_header(&header_buf)?;
 
         // 验证魔数
-        let magic = u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
+        let magic =
+            u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]);
         if magic != WAVE_MAGIC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("无效的 .wave 文件魔数: 0x{:08X}, 期望 0x{:08X}", magic, WAVE_MAGIC),
+                format!(
+                    "无效的 .wave 文件魔数: 0x{:08X}, 期望 0x{:08X}",
+                    magic, WAVE_MAGIC
+                ),
             ));
         }
 
@@ -385,16 +389,16 @@ fn parse_header(header: &[u8; 64]) -> std::io::Result<WaveformMeta> {
     let channel_count = u16::from_le_bytes([header[6], header[7]]);
     let channel_mask = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
     let sample_count = u64::from_le_bytes([
-        header[16], header[17], header[18], header[19],
-        header[20], header[21], header[22], header[23],
+        header[16], header[17], header[18], header[19], header[20], header[21], header[22],
+        header[23],
     ]);
     let sample_rate = u64::from_le_bytes([
-        header[24], header[25], header[26], header[27],
-        header[28], header[29], header[30], header[31],
+        header[24], header[25], header[26], header[27], header[28], header[29], header[30],
+        header[31],
     ]);
     let timestamp = i64::from_le_bytes([
-        header[32], header[33], header[34], header[35],
-        header[36], header[37], header[38], header[39],
+        header[32], header[33], header[34], header[35], header[36], header[37], header[38],
+        header[39],
     ]);
     let pre_trigger_samples = u32::from_le_bytes([header[48], header[49], header[50], header[51]]);
     let post_trigger_samples = u32::from_le_bytes([header[52], header[53], header[54], header[55]]);
@@ -431,8 +435,7 @@ fn bytes_to_f64_slice(bytes: &[u8], out: &mut [f64]) {
     for (i, chunk) in bytes.chunks_exact(8).enumerate() {
         if i < out.len() {
             out[i] = f64::from_le_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3],
-                chunk[4], chunk[5], chunk[6], chunk[7],
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ]);
         }
     }
@@ -452,8 +455,7 @@ fn bytes_to_i64_slice(bytes: &[u8], out: &mut [i64]) {
     for (i, chunk) in bytes.chunks_exact(8).enumerate() {
         if i < out.len() {
             out[i] = i64::from_le_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3],
-                chunk[4], chunk[5], chunk[6], chunk[7],
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ]);
         }
     }

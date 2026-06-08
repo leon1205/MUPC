@@ -55,7 +55,8 @@ impl AntiReverseStrategy {
                 p_batt = (pv_power * 0.8).min(self.config.max_charge_power);
                 pv_limit = 0.0;
             } else {
-                pv_limit = pv_power * (self.pv_limit_count.load(Ordering::Relaxed) as f64 * 0.1).min(0.5);
+                pv_limit =
+                    pv_power * (self.pv_limit_count.load(Ordering::Relaxed) as f64 * 0.1).min(0.5);
                 p_batt = 0.0;
             }
         } else {
