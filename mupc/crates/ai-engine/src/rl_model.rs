@@ -81,7 +81,7 @@ pub fn parse_action_output(raw: &[f32]) -> Option<ActionOutput> {
         return None;
     }
     let mut action = ActionOutput {
-        p_batt_set: (raw[0] as f64).clamp(-500.0, 500.0),
+        p_batt_set: (raw[0] as f64).clamp(-50.0, 50.0),
         q_batt_set: (raw[1] as f64).clamp(-300.0, 300.0),
         load_shedding: (raw[2] as f64).clamp(0.0, 500.0),
         pv_limit: (raw[3] as f64).clamp(0.0, 1.0),
@@ -229,8 +229,8 @@ mod tests {
         // p_batt_set 超出范围应被 clamp
         let raw = vec![600.0_f32, 0.0, 0.0, 1.0, 0.8];
         let action = parse_action_output(&raw).unwrap();
-        assert!(action.p_batt_set <= 500.0);
-        assert!(action.p_batt_set >= -500.0);
+        assert!(action.p_batt_set <= 50.0);
+        assert!(action.p_batt_set >= -50.0);
     }
 
     #[test]

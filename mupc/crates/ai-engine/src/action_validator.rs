@@ -160,7 +160,7 @@ impl ActionValidator {
         }
 
         // 最终值域 clamp
-        validated.p_batt_set = validated.p_batt_set.clamp(-500.0, 500.0);
+        validated.p_batt_set = validated.p_batt_set.clamp(-50.0, 50.0);
         validated.q_batt_set = validated.q_batt_set.clamp(-300.0, 300.0);
         validated.load_shedding = validated.load_shedding.clamp(0.0, 500.0);
         validated.pv_limit = validated.pv_limit.clamp(0.0, 1.0);
