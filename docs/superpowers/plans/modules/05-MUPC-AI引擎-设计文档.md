@@ -681,7 +681,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 |------|------------|-----------------|------------|------|
 | A1 | p_batt_set [-50,50]kW | p_batt_set [-50,50]kW | p_batt_set [-50,50]kW | 电池有功（RL控制） |
 | A2 | q_batt_set [-300,300]kVar | 由实时模块闭环 | 由实时模块闭环 | 无功（实时控制，不经AI） |
-| A3 | load_shedding [0,500]kW | load_shedding [0,500]kW | load_shedding [0,500]kW | 可中断负荷（RL控制） |
+| A3 | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | 可中断负荷（RL控制） |
 | A4 | pv_limit [0,1] | 由A2/Q替代 | pv_limit [0,1] | 光伏限功率（v2.6 恢复主动弃光） |
 
 ### 4.2 算法选择

@@ -83,7 +83,7 @@ pub fn parse_action_output(raw: &[f32]) -> Option<ActionOutput> {
     let mut action = ActionOutput {
         p_batt_set: (raw[0] as f64).clamp(-50.0, 50.0),
         q_batt_set: (raw[1] as f64).clamp(-300.0, 300.0),
-        load_shedding: (raw[2] as f64).clamp(0.0, 500.0),
+        load_shedding: (raw[2] as f64).clamp(0.0, 60.0),
         pv_limit: (raw[3] as f64).clamp(0.0, 1.0),
         confidence: raw.get(4).copied().unwrap_or(0.5) as f64,
     };
