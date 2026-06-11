@@ -204,7 +204,7 @@ impl DynamicConfigLoader {
                 return Err(AiEngineError::ConfigMismatch(format!(
                     "指纹不匹配: expected={}, actual={}",
                     expected, meta.fingerprint
-               )));
+                )));
             }
         }
         Ok(())
@@ -217,7 +217,10 @@ impl DynamicConfigLoader {
     }
 
     /// 重载操作参数（运行时，不影响 RL 模型）
-    pub async fn reload_operational(&self, transformer_id: &str) -> Result<ActionSpaceConfig, AiEngineError> {
+    pub async fn reload_operational(
+        &self,
+        transformer_id: &str,
+    ) -> Result<ActionSpaceConfig, AiEngineError> {
         self.load(transformer_id).await
     }
 

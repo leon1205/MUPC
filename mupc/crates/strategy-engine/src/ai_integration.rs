@@ -3,6 +3,7 @@
 //! Phase 3C: 将 AI 优化引擎与策略引擎集成。
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
+use crate::south_command_sender::SouthCommandDispatcher;
 use mupc_ai_engine::{AiEngineError, ModelManager, ModelStatus, RunningMode, SwitchSource};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,6 +15,8 @@ use tokio::sync::RwLock;
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<ModelManager>>>,
     status: Arc<RwLock<ModelStatus>>,
+    /// 南向命令分发器（用于分发 pv_limit 和 load_shedding）
+    south_dispatcher: Option<Arc<SouthCommandDispatcher>>,
 }
 
 impl AiIntegrator {
@@ -21,6 +24,7 @@ impl AiIntegrator {
         Self {
             model_manager: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
+            south_dispatcher: None,
         }
     }
 
@@ -107,6 +111,58 @@ impl AiIntegrator {
     ) -> Option<Arc<tokio::sync::RwLock<mupc_ai_engine::ModeSelector>>> {
         let manager = self.model_manager.read().await;
         manager.as_ref().map(|m| m.mode_selector_arc())
+    }
+
+    /// 设置南向命令分发器
+    pub fn set_south_dispatcher(&mut self, dispatcher: Arc<SouthCommandDispatcher>) {
+        self.south_dispatcher = Some(dispatcher);
+    }
+
+    /// 执行 AI 决策并分发南向命令
+    ///
+    /// 调用 full_decision_cycle() 获取 ActionOutput，然后：
+    /// - p_batt_set → 通过 intercore 发送到实时控制模块（已由调用方处理）
+    /// - pv_limit → 通过 SouthCommandDispatcher 发送到光伏逆变器
+    /// - load_shedding → 通过 SouthCommandDispatcher 发送到负荷控制装置
+    pub async fn dispatch_ai_decision(&self) -> Result<(), AiEngineError> {
+        let manager = self.model_manager.read().await;
+        let manager = manager.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
+
+        // 调用完整的 AI 决策周期
+        let action = manager.full_decision_cycle().await?;
+
+        // 分发 pv_limit 到南向设备
+        if let Some(ref dispatcher) = self.south_dispatcher {
+            // 分发 pv_limit（限功率比例）
+            if action.pv_limit < 1.0 {
+                let result = dispatcher.dispatch_pv_limit(action.pv_limit, 1).await;
+                if !result.success {
+                    tracing::warn!(
+                        "pv_limit 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
+            }
+
+            // 分发 load_shedding（负荷切除功率）
+            if action.load_shedding > 0.0 {
+                let result = dispatcher
+                    .dispatch_load_shedding(action.load_shedding, 1)
+                    .await;
+                if !result.success {
+                    tracing::warn!(
+                        "load_shedding 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
+            }
+        } else {
+            tracing::debug!("南向分发器未设置，跳过 pv_limit/load_shedding 分发");
+        }
+
+        Ok(())
     }
 }
 

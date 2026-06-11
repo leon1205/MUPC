@@ -102,7 +102,7 @@ impl StorageService {
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
-               Ok(())
+        Ok(())
     }
 
     /// 更新动作空间配置（完整字段，upsert 语义）

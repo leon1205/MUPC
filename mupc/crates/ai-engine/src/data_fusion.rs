@@ -78,7 +78,7 @@ impl Default for FusedSystemState {
             peak_price: 0.8,
             valley_price: 0.3,
             current_demand: 0.0,
-            contract_demand: 500.0,
+            contract_demand: 200.0,
             peak_demand_this_month: 0.0,
             solar_irradiance: 0.0,
             temperature: 25.0,

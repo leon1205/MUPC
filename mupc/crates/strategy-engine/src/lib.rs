@@ -8,6 +8,7 @@ pub mod config;
 pub mod demand_control;
 pub mod errors;
 pub mod peak_shaving;
+pub mod south_command_sender;
 pub mod strategies;
 
 // AI Engine integration
@@ -20,6 +21,10 @@ pub use config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
 pub use demand_control::DemandControlStrategy;
 pub use errors::StrategyError;
 pub use peak_shaving::PeakShavingStrategy;
+pub use south_command_sender::{
+    get_dispatcher, set_dispatcher, LoadSheddingCommand, MockSouthCommandSender, PvLimitCommand,
+    SouthCommandDispatcher, SouthCommandSender, SouthCommandType, SouthSendResult,
+};
 pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
     ValidationResult,
@@ -36,3 +41,5 @@ mod anti_reverse_test;
 mod demand_control_test;
 #[cfg(test)]
 mod peak_shaving_test;
+#[cfg(test)]
+mod south_command_sender_test;

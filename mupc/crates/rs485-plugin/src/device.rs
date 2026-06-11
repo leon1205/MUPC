@@ -393,6 +393,69 @@ impl Rs485Device {
         self.recv_frame(recv_timeout_ms)
     }
 
+    /// 发送光伏限功率命令
+    ///
+    /// # Arguments
+    /// - `limit_ratio`: 限功率比例 [0.0, 1.0]，0.0=完全限功率，1.0=不限功率
+    /// - `recv_timeout_ms`: 接收超时
+    ///
+    /// # Returns
+    /// - `Ok(response)`: 设备响应数据
+    /// - `Err`: 发送失败
+    pub fn send_pv_limit(
+        &self,
+        limit_ratio: f64,
+        recv_timeout_ms: u64,
+    ) -> Result<Vec<u8>, Rs485Error> {
+        // 编码限功率命令数据
+        // 格式: [功能码=0x10, 功率高字节, 功率低字节]
+        // 注意：实际协议格式取决于具体逆变器厂商
+        let limit_ratio = limit_ratio.clamp(0.0, 1.0);
+        let power_value = (limit_ratio * 1000.0) as u16; // 缩放到 0-1000 范围
+        let data = vec![0x10, (power_value >> 8) as u8, power_value as u8];
+
+        tracing::info!(
+            "发送光伏限功率: device_id={}, limit_ratio={:.2} (raw={})",
+            self.device_id,
+            limit_ratio,
+            power_value
+        );
+
+        let frame = self.handler.encode_request(&self.device_id, &data);
+        self.send_recv(&frame, recv_timeout_ms)
+    }
+
+    /// 发送负荷切除命令
+    ///
+    /// # Arguments
+    /// - `power_kw`: 切除功率 (kW)
+    /// - `recv_timeout_ms`: 接收超时
+    ///
+    /// # Returns
+    /// - `Ok(response)`: 设备响应数据
+    /// - `Err`: 发送失败
+    pub fn send_load_shedding(
+        &self,
+        power_kw: f64,
+        recv_timeout_ms: u64,
+    ) -> Result<Vec<u8>, Rs485Error> {
+        // 编码负荷切除命令数据
+        // 格式: [功能码=0x11, 功率高字节, 功率低字节]
+        // 注意：实际协议格式取决于具体负荷控制装置厂商
+        let power_kw = power_kw.max(0.0);
+        let power_value = (power_kw * 10.0) as u16; // 缩放到 0.1kW 分辨率
+        let data = vec![0x11, (power_value >> 8) as u8, power_value as u8];
+
+        tracing::info!(
+            "发送负荷切除: device_id={}, power_kw={:.1}",
+            self.device_id,
+            power_kw
+        );
+
+        let frame = self.handler.encode_request(&self.device_id, &data);
+        self.send_recv(&frame, recv_timeout_ms)
+    }
+
     /// 读取保持寄存器（Modbus 功能码 0x03）
     pub fn read_holding_registers(&self, addr: u16, count: u16) -> Result<Vec<u16>, Rs485Error> {
         let func_code: u8 = 0x03;

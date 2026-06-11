@@ -28,7 +28,6 @@ pub struct ActionSpaceConfig {
     pub pv_limit_min: f64,
 
     // === v2.6 新增字段 ===
-
     /// 变压器额定容量 (kVA)，从 YAML 锁定
     pub transformer_kva: f64,
     /// 电池总容量 (kWh)，从 YAML 锁定

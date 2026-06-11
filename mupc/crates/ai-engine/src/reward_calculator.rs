@@ -4,7 +4,7 @@
 //! 用于在线微调的模型权重更新和 Web UI 决策质量展示。
 //!
 //! 5 种场景奖励函数：
-//! - MODE-01 农网灌溉: R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage - w5*R_ramp
+//! - MODE-01 农网灌溉: R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage - w5*R_ramp - w6*R_voltage_slope
 //! - MODE-02 自主套利: R = w1*R_price - w2*P_batt_deg
 //! - MODE-03 需量控制: R = w1*R_demand - w2*P_comfort
 //! - MODE-04 虚拟电厂: R = w1*R_ancillary + w2*R_accuracy - w3*P_deadline
@@ -28,6 +28,8 @@ pub struct RewardCalculator {
     battery_capacity_kwh: f64,
     /// 上一周期电池有功功率设定值 (kW)，用于 R_ramp 计算
     last_p_batt_set: RwLock<f64>,
+    /// 上一周期平均电压 (p.u.)，用于 R_voltage_slope 计算
+    last_voltage: RwLock<f64>,
     /// 电压越限连续步数计数器（用于死区触发）
     voltage_violation_count: std::sync::atomic::AtomicU32,
     // v2.5 新增配置参数
@@ -45,8 +47,9 @@ impl RewardCalculator {
             carbon_emission_factor: 0.581,
             demand_penalty_rate: 50.0,
             battery_degradation_alpha: 0.01,
-            battery_capacity_kwh: 200.0,
+            battery_capacity_kwh: 100.0,
             last_p_batt_set: RwLock::new(0.0),
+            last_voltage: RwLock::new(1.0),
             voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
             q_margin_threshold: 0.10,
             voltage_high_limit: 1.05,
@@ -66,8 +69,9 @@ impl RewardCalculator {
             carbon_emission_factor: 0.581,
             demand_penalty_rate: 50.0,
             battery_degradation_alpha: 0.01,
-            battery_capacity_kwh: 200.0,
+            battery_capacity_kwh: 100.0,
             last_p_batt_set: RwLock::new(0.0),
+            last_voltage: RwLock::new(1.0),
             voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
             q_margin_threshold: cfg.q_margin_threshold,
             voltage_high_limit: cfg.voltage_high_limit,
@@ -124,7 +128,8 @@ impl RewardCalculator {
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
     }
 
-    /// SCENE-01: 台区季节性负荷模式 v2.5
+    /// SCENE-01: 台区季节性负荷模式 v2.6
+    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage - w5*R_ramp - w6*R_voltage_slope
     fn calc_agri_v2_5(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
         let w = &self.weights.seasonal_load_management;
 
@@ -155,7 +160,16 @@ impl RewardCalculator {
         // 6. 变化率惩罚
         let r_ramp = w[4] * (p_batt_set - prev_p_batt).abs() / self.battery_capacity_kwh;
 
-        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
+        // 7. v2.6 新增：电压变化斜率惩罚 R_voltage_slope = |ΔV|
+        let prev_v = *self.last_voltage.read().unwrap();
+        let r_voltage_slope = (v_avg - prev_v).abs();
+
+        w[0] * r_pv
+            - w[1] * p_batt_deg
+            - w[2] * p_trafo
+            - w[3] * p_voltage
+            - w[4] * r_ramp
+            - w[5] * r_voltage_slope
     }
 
     /// 计算自适应损耗系数 α(s)
@@ -397,7 +411,7 @@ mod tests {
     #[test]
     fn test_weights_lookup() {
         let w = SceneWeights::default();
-        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 5);
+        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 6);
         assert_eq!(w.lookup(RunningMode::CommercialArbitrage).len(), 2);
     }
 

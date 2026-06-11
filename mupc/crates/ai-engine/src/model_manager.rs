@@ -378,7 +378,10 @@ impl ModelManager {
     }
 
     /// v2.6: 校验配置指纹与模型指纹一致性
-    pub async fn validate_config_fingerprint(&self, model_fingerprint: &str) -> Result<(), AiEngineError> {
+    pub async fn validate_config_fingerprint(
+        &self,
+        model_fingerprint: &str,
+    ) -> Result<(), AiEngineError> {
         let loader = self.dynamic_config_loader.read().await;
         if let Some(ref loader) = *loader {
             loader.validate_fingerprint(model_fingerprint).await?;

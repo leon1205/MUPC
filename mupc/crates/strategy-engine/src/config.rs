@@ -43,7 +43,7 @@ pub struct DemandControlConfig {
 impl Default for DemandControlConfig {
     fn default() -> Self {
         Self {
-            transformer_capacity: 500.0,
+            transformer_capacity: 200.0,
             demand_factor: 0.85,
             warning_threshold: 0.80,
             action_threshold: 0.90,

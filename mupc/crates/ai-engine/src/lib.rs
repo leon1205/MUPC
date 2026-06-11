@@ -15,6 +15,8 @@ pub mod action_validator;
 pub mod config;
 pub mod config_loader;
 pub mod data_fusion;
+pub mod dynamic_config_loader;
+pub mod env_config;
 pub mod error;
 pub mod lstm_model;
 pub mod mode_selector;
@@ -26,13 +28,9 @@ pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
 pub mod rknn_types;
 pub mod rl_model;
-pub mod dynamic_config_loader;
-pub mod env_config;
 pub mod safety_config;
 
 pub use action_space::ActionSpaceConfig;
-pub use dynamic_config_loader::DynamicConfigLoader;
-pub use env_config::{EnvConfig, EnvConfigMetadata, OperationalConfig, PhysicalConfig};
 pub use action_validator::{ActionValidator, ViolationRecord};
 pub use config::{
     ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModeConfig, ModelType,
@@ -43,6 +41,8 @@ pub use data_fusion::{
     validate_input_vector, DataFusionEngine, DataSourceAdapter, FusedSystemState, HealthStatus,
     SourceHealth, SourceType,
 };
+pub use dynamic_config_loader::DynamicConfigLoader;
+pub use env_config::{EnvConfig, EnvConfigMetadata, OperationalConfig, PhysicalConfig};
 pub use error::AiEngineError;
 pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
 pub use mode_selector::{

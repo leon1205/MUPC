@@ -183,7 +183,7 @@ impl Default for ActionConstraintConfig {
         Self {
             p_batt_ramp_limit_kw: 50.0,
             q_batt_ramp_limit_kvar: 30.0,
-            max_apparent_power_kva: 500.0,
+            max_apparent_power_kva: 200.0,
             pv_limit_min: 0.1,
         }
     }
@@ -240,8 +240,8 @@ impl Default for RewardThresholdConfig {
 /// 场景权重映射
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneWeights {
-    /// 台区季节性负荷: [w1光伏消纳, w2电池损耗, w3变压器, w4电压质量, w5功率变化率]
-    pub seasonal_load_management: [f64; 5],
+    /// 台区季节性负荷: [w1光伏消纳, w2电池损耗, w3变压器, w4电压质量, w5功率变化率, w6电压斜率]
+    pub seasonal_load_management: [f64; 6],
     pub commercial_arbitrage: [f64; 2],
     pub demand_control: [f64; 2],
     pub virtual_power_plant: [f64; 3],
@@ -251,7 +251,7 @@ pub struct SceneWeights {
 impl Default for SceneWeights {
     fn default() -> Self {
         Self {
-            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5],
+            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5],
             commercial_arbitrage: [1.0, 1.0],
             demand_control: [1.0, 0.5],
             virtual_power_plant: [1.0, 2.0, 1.0],
