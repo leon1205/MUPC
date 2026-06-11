@@ -110,7 +110,8 @@ impl ConfigLoader {
         let row: Option<DbActionSpaceConfig> = sqlx::query_as(
             "SELECT transformer_id, max_batt_charge_power, max_batt_discharge_power,
                     max_load_shedding, max_apparent_power_kva, p_batt_ramp_limit_kw,
-                    q_batt_ramp_limit_kvar, pv_limit_min
+                    q_batt_ramp_limit_kvar, pv_limit_min,
+                    transformer_kva, battery_capacity_kwh, soc_min, soc_max, overload_threshold
              FROM action_space_config WHERE transformer_id = ?",
         )
         .bind(transformer_id)
@@ -127,6 +128,11 @@ impl ConfigLoader {
             p_batt_ramp_limit_kw: r.p_batt_ramp_limit_kw,
             q_batt_ramp_limit_kvar: r.q_batt_ramp_limit_kvar,
             pv_limit_min: r.pv_limit_min,
+            transformer_kva: r.transformer_kva,
+            battery_capacity_kwh: r.battery_capacity_kwh,
+            soc_min: r.soc_min,
+            soc_max: r.soc_max,
+            overload_threshold: r.overload_threshold,
         }))
     }
 
@@ -148,6 +154,12 @@ struct DbActionSpaceConfig {
     p_batt_ramp_limit_kw: f64,
     q_batt_ramp_limit_kvar: f64,
     pv_limit_min: f64,
+    // v2.6 新增字段
+    transformer_kva: f64,
+    battery_capacity_kwh: f64,
+    soc_min: f64,
+    soc_max: f64,
+    overload_threshold: f64,
 }
 
 #[cfg(test)]

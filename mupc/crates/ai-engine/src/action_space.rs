@@ -26,6 +26,19 @@ pub struct ActionSpaceConfig {
     pub q_batt_ramp_limit_kvar: f64,
     /// 光伏限功率下限
     pub pv_limit_min: f64,
+
+    // === v2.6 新增字段 ===
+
+    /// 变压器额定容量 (kVA)，从 YAML 锁定
+    pub transformer_kva: f64,
+    /// 电池总容量 (kWh)，从 YAML 锁定
+    pub battery_capacity_kwh: f64,
+    /// SOC 下限，从 YAML 锁定但可被 DB 覆盖
+    pub soc_min: f64,
+    /// SOC 上限，从 YAML 锁定但可被 DB 覆盖
+    pub soc_max: f64,
+    /// 变压器过载阈值，从 YAML 锁定但可被 DB 覆盖
+    pub overload_threshold: f64,
 }
 
 impl ActionSpaceConfig {
@@ -100,6 +113,12 @@ impl ActionSpaceConfig {
             p_batt_ramp_limit_kw: 50.0,
             q_batt_ramp_limit_kvar: 30.0,
             pv_limit_min: 0.1,
+            // v2.6 新增默认值
+            transformer_kva: 200.0,
+            battery_capacity_kwh: 100.0,
+            soc_min: 0.10,
+            soc_max: 0.90,
+            overload_threshold: 0.85,
         }
     }
 }
@@ -118,6 +137,11 @@ mod tests {
             p_batt_ramp_limit_kw: 50.0,
             q_batt_ramp_limit_kvar: 30.0,
             pv_limit_min: 0.1,
+            transformer_kva: 200.0,
+            battery_capacity_kwh: 100.0,
+            soc_min: 0.10,
+            soc_max: 0.90,
+            overload_threshold: 0.85,
         }
     }
 
