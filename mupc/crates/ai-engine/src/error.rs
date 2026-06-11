@@ -51,4 +51,10 @@ pub enum AiEngineError {
 
     #[error("奖励计算错误: {0}")]
     RewardCalculationError(String),
+
+    #[error("配置加载失败: {0}")]
+    ConfigLoadFailed(String),
+
+    #[error("配置不匹配: {0}")]
+    ConfigMismatch(String),
 }
