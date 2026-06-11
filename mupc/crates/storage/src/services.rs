@@ -102,6 +102,92 @@ impl StorageService {
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
+               Ok(())
+    }
+
+    /// 更新动作空间配置（完整字段，upsert 语义）
+    ///
+    /// v2.6 扩展：新增 transformer_kva, battery_capacity_kwh,
+    /// soc_min, soc_max, overload_threshold 字段。
+    pub async fn update_action_space_config_full(
+        &self,
+        transformer_id: &str,
+        max_batt_charge_power: f64,
+        max_batt_discharge_power: f64,
+        max_load_shedding: f64,
+        max_apparent_power_kva: f64,
+        p_batt_ramp_limit_kw: f64,
+        q_batt_ramp_limit_kvar: f64,
+        pv_limit_min: f64,
+        transformer_kva: f64,
+        battery_capacity_kwh: f64,
+        soc_min: f64,
+        soc_max: f64,
+        overload_threshold: f64,
+    ) -> Result<(), StorageError> {
+        // 先尝试更新
+        let affected = sqlx::query(
+            "UPDATE action_space_config SET
+                max_batt_charge_power = ?,
+                max_batt_discharge_power = ?,
+                max_load_shedding = ?,
+                max_apparent_power_kva = ?,
+                p_batt_ramp_limit_kw = ?,
+                q_batt_ramp_limit_kvar = ?,
+                pv_limit_min = ?,
+                transformer_kva = ?,
+                battery_capacity_kwh = ?,
+                soc_min = ?,
+                soc_max = ?,
+                overload_threshold = ?,
+                updated_at = CURRENT_TIMESTAMP
+             WHERE transformer_id = ?",
+        )
+        .bind(max_batt_charge_power)
+        .bind(max_batt_discharge_power)
+        .bind(max_load_shedding)
+        .bind(max_apparent_power_kva)
+        .bind(p_batt_ramp_limit_kw)
+        .bind(q_batt_ramp_limit_kvar)
+        .bind(pv_limit_min)
+        .bind(transformer_kva)
+        .bind(battery_capacity_kwh)
+        .bind(soc_min)
+        .bind(soc_max)
+        .bind(overload_threshold)
+        .bind(transformer_id)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+        // 若未更新到任何行，则插入
+        if affected.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO action_space_config
+                    (transformer_id, max_batt_charge_power, max_batt_discharge_power,
+                     max_load_shedding, max_apparent_power_kva, p_batt_ramp_limit_kw,
+                     q_batt_ramp_limit_kvar, pv_limit_min,
+                     transformer_kva, battery_capacity_kwh, soc_min, soc_max, overload_threshold)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(transformer_id)
+            .bind(max_batt_charge_power)
+            .bind(max_batt_discharge_power)
+            .bind(max_load_shedding)
+            .bind(max_apparent_power_kva)
+            .bind(p_batt_ramp_limit_kw)
+            .bind(q_batt_ramp_limit_kvar)
+            .bind(pv_limit_min)
+            .bind(transformer_kva)
+            .bind(battery_capacity_kwh)
+            .bind(soc_min)
+            .bind(soc_max)
+            .bind(overload_threshold)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        }
+
         Ok(())
     }
 }
@@ -311,6 +397,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )",
+        // v2.6 扩展字段（ALTER TABLE 兼容已有数据库）
+        "ALTER TABLE action_space_config ADD COLUMN transformer_kva REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE action_space_config ADD COLUMN battery_capacity_kwh REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE action_space_config ADD COLUMN soc_min REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE action_space_config ADD COLUMN soc_max REAL NOT NULL DEFAULT 1.0",
+        "ALTER TABLE action_space_config ADD COLUMN overload_threshold REAL NOT NULL DEFAULT 1.2",
     ];
 
     for stmt in &statements {
