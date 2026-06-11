@@ -10,6 +10,7 @@ use crate::action_space::ActionSpaceConfig;
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
 use crate::data_fusion::DataFusionEngine;
+use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput};
 use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
@@ -47,6 +48,8 @@ pub struct ModelManager {
     lstm_input_size: usize,
     /// v2.5: 动作空间配置（可配置化）
     action_space_config: Arc<RwLock<ActionSpaceConfig>>,
+    /// v2.6: 动态配置加载器（延迟初始化，storage 就绪后注入）
+    dynamic_config_loader: Arc<RwLock<Option<Arc<DynamicConfigLoader>>>>,
 }
 
 impl ModelManager {
@@ -73,6 +76,7 @@ impl ModelManager {
             lstm_history: Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size))),
             lstm_input_size,
             action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
+            dynamic_config_loader: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -366,6 +370,20 @@ impl ModelManager {
     pub async fn set_action_space_config(&self, config: ActionSpaceConfig) {
         let mut cfg = self.action_space_config.write().await;
         *cfg = config;
+    }
+
+    /// v2.6: 注入 DynamicConfigLoader（storage 就绪后调用）
+    pub async fn set_dynamic_config_loader(&self, loader: DynamicConfigLoader) {
+        *self.dynamic_config_loader.write().await = Some(Arc::new(loader));
+    }
+
+    /// v2.6: 校验配置指纹与模型指纹一致性
+    pub async fn validate_config_fingerprint(&self, model_fingerprint: &str) -> Result<(), AiEngineError> {
+        let loader = self.dynamic_config_loader.read().await;
+        if let Some(ref loader) = *loader {
+            loader.validate_fingerprint(model_fingerprint).await?;
+        }
+        Ok(())
     }
 
     pub async fn current_mode(&self) -> RunningMode {
