@@ -26,9 +26,11 @@ pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
 pub mod rknn_types;
 pub mod rl_model;
+pub mod env_config;
 pub mod safety_config;
 
 pub use action_space::ActionSpaceConfig;
+pub use env_config::{EnvConfig, EnvConfigMetadata, OperationalConfig, PhysicalConfig};
 pub use action_validator::{ActionValidator, ViolationRecord};
 pub use config::{
     ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModeConfig, ModelType,
