@@ -8,9 +8,12 @@
 //! - 动作约束校验（ActionValidator）
 //! - 奖励函数计算（RewardCalculator）
 //! - 模型注册表（v2.3: ModelRegistry + 双缓冲热切换）
+//! - v2.5 动作空间参数可配置化（ActionSpaceConfig + ConfigLoader）
 
+pub mod action_space;
 pub mod action_validator;
 pub mod config;
+pub mod config_loader;
 pub mod data_fusion;
 pub mod error;
 pub mod lstm_model;
@@ -24,11 +27,13 @@ pub mod rknn_runtime_sys;
 pub mod rknn_types;
 pub mod rl_model;
 
+pub use action_space::ActionSpaceConfig;
 pub use action_validator::{ActionValidator, ViolationRecord};
 pub use config::{
     ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModeConfig, ModelType,
     NpuConfig, OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig, SceneWeights,
 };
+pub use config_loader::ConfigLoader;
 pub use data_fusion::{
     validate_input_vector, DataFusionEngine, DataSourceAdapter, FusedSystemState, HealthStatus,
     SourceHealth, SourceType,

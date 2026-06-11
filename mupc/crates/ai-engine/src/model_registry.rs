@@ -15,6 +15,7 @@
 //! 3. active (tokio::sync::RwLock)
 //! 任何违反此顺序的代码路径都会导致死锁。
 
+use crate::action_space::ActionSpaceConfig;
 use crate::config::RlAlgorithm;
 use crate::error::AiEngineError;
 use crate::mode_selector::RunningMode;
@@ -301,10 +302,15 @@ impl ModelRegistry {
     }
 
     /// 执行推理（委托给当前 active 模型）
-    pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError> {
+    /// v2.5: 动作空间参数可配置化，接收 ActionSpaceConfig 参数
+    pub async fn decide(
+        &self,
+        input_vector: &[f32],
+        action_space_config: &ActionSpaceConfig,
+    ) -> Result<ActionOutput, AiEngineError> {
         let active = self.active.read().await;
         active.1.run(input_vector).await.and_then(|output| {
-            parse_action_output(&output)
+            parse_action_output(&output, action_space_config)
                 .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
         })
     }

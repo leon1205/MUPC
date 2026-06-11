@@ -4,7 +4,9 @@
 //!
 //! v2.3: rl_model 替换为 model_registry（5 个场景独立 RL 模型，双缓冲热切换）。
 //! v2.4: full_decision_cycle 集成 LSTM 预测，预测结果注入融合状态供 RL 使用。
+//! v2.5: 动作空间参数可配置化（ActionSpaceConfig）
 
+use crate::action_space::ActionSpaceConfig;
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
 use crate::data_fusion::DataFusionEngine;
@@ -43,6 +45,8 @@ pub struct ModelManager {
     lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
     /// LSTM 输入窗口大小（分钟数，即缓冲容量）
     lstm_input_size: usize,
+    /// v2.5: 动作空间配置（可配置化）
+    action_space_config: Arc<RwLock<ActionSpaceConfig>>,
 }
 
 impl ModelManager {
@@ -68,6 +72,7 @@ impl ModelManager {
             mode_selector,
             lstm_history: Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size))),
             lstm_input_size,
+            action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
         }
     }
 
@@ -174,7 +179,8 @@ impl ModelManager {
             let registry = self.model_registry.read().await;
             let registry = registry.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
             let input_vector = fused_state_with_forecast.to_input_vector();
-            registry.decide(&input_vector).await?
+            let action_space_config = self.action_space_config.read().await;
+            registry.decide(&input_vector, &action_space_config).await?
         };
 
         let (validated, violations) = {
@@ -182,7 +188,13 @@ impl ModelManager {
             let av = av.as_ref().ok_or(AiEngineError::ActionValidationFailed(
                 "校验器未初始化".into(),
             ))?;
-            av.validate(&rl_action, fused_state.dispatch_p_set, false)
+            let action_space_config = self.action_space_config.read().await;
+            av.validate(
+                &rl_action,
+                fused_state.dispatch_p_set,
+                false,
+                &action_space_config,
+            )
         };
 
         for v in &violations {
@@ -307,7 +319,8 @@ impl ModelManager {
     pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError> {
         let registry = self.model_registry.read().await;
         let registry = registry.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
-        registry.decide(input_vector).await
+        let action_space_config = self.action_space_config.read().await;
+        registry.decide(input_vector, &action_space_config).await
     }
 
     pub async fn get_status(&self) -> ModelStatus {
@@ -347,6 +360,12 @@ impl ModelManager {
     /// v2.3: 获取 ModeSelector 的 Arc<RwLock<ModeSelector>> 引用（供外部持有）
     pub fn mode_selector_arc(&self) -> Arc<RwLock<ModeSelector>> {
         self.mode_selector.clone()
+    }
+
+    /// v2.5: 设置动作空间配置（可配置化）
+    pub async fn set_action_space_config(&self, config: ActionSpaceConfig) {
+        let mut cfg = self.action_space_config.write().await;
+        *cfg = config;
     }
 
     pub async fn current_mode(&self) -> RunningMode {

@@ -3,7 +3,9 @@
 //! 用于微电网能量管理决策
 //! 输入：系统状态 (SOC, PV, Load, Grid, Transformer, Battery Power, Voltage_A/B/C)
 //! 输出：最优动作 (p_batt_set, q_batt_set, load_shedding, pv_limit, confidence)
+//! v2.5 动作空间参数可配置化：parse_action_output 增加 ActionSpaceConfig 参数
 
+use crate::action_space::ActionSpaceConfig;
 use crate::config::{ModelType, RlAlgorithm, RlConfig};
 use crate::data_fusion::{validate_input_vector, FusedSystemState};
 use crate::error::AiEngineError;
@@ -76,14 +78,18 @@ pub struct ActionOutput {
 /// 输出格式: [p_batt_set, q_batt_set, load_shedding, pv_limit, confidence]
 /// 注意：v2.4 分层控制架构下 q_batt_set 和 pv_limit 由实时控制模块管理，
 /// 此处仅做值域 clamp，不做 dispatch 约束（由 ActionValidator 统一处理）。
-pub fn parse_action_output(raw: &[f32]) -> Option<ActionOutput> {
+/// v2.5 动作空间参数可配置化：值域 clamp 使用 ActionSpaceConfig 中的参数
+pub fn parse_action_output(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutput> {
     if raw.len() < 5 {
         return None;
     }
     let mut action = ActionOutput {
-        p_batt_set: (raw[0] as f64).clamp(-50.0, 50.0),
+        p_batt_set: (raw[0] as f64).clamp(
+            -config.max_batt_discharge_power,
+            config.max_batt_charge_power,
+        ),
         q_batt_set: (raw[1] as f64).clamp(-300.0, 300.0),
-        load_shedding: (raw[2] as f64).clamp(0.0, 60.0),
+        load_shedding: (raw[2] as f64).clamp(0.0, config.max_load_shedding),
         pv_limit: (raw[3] as f64).clamp(0.0, 1.0),
         confidence: raw.get(4).copied().unwrap_or(0.5) as f64,
     };
@@ -95,12 +101,21 @@ pub fn parse_action_output(raw: &[f32]) -> Option<ActionOutput> {
 pub struct RLModel {
     config: RlConfig,
     runtime: RknnRuntime,
+    /// v2.5: 动作空间配置（可配置化），用于 parse_action_output 值域 clamp
+    action_space_config: ActionSpaceConfig,
 }
 
 impl RLModel {
-    pub fn new(config: RlConfig) -> Result<Self, AiEngineError> {
+    pub fn new(
+        config: RlConfig,
+        action_space_config: ActionSpaceConfig,
+    ) -> Result<Self, AiEngineError> {
         let runtime = RknnRuntime::new(&config.model_path, config.expected_sha256.as_deref())?;
-        Ok(Self { config, runtime })
+        Ok(Self {
+            config,
+            runtime,
+            action_space_config,
+        })
     }
 
     pub async fn load(&mut self) -> Result<(), AiEngineError> {
@@ -114,7 +129,7 @@ impl RLModel {
         }
         let input = state.to_features();
         let output = self.runtime.run(&input).await?;
-        parse_action_output(&output)
+        parse_action_output(&output, &self.action_space_config)
             .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
     }
 
@@ -130,7 +145,7 @@ impl RLModel {
         debug_assert_eq!(input.len(), 48, "输入维度必须为 48");
         validate_input_vector(&input)?;
         let output = self.runtime.run(&input).await?;
-        parse_action_output(&output)
+        parse_action_output(&output, &self.action_space_config)
             .ok_or_else(|| AiEngineError::InferenceFailed("输出维度不足".into()))
     }
 
@@ -173,17 +188,23 @@ mod tests {
         }
     }
 
+    fn default_action_space_config() -> ActionSpaceConfig {
+        ActionSpaceConfig::default_config()
+    }
+
     #[test]
     fn test_rl_model_creation() {
         let config = create_test_config();
-        let model = RLModel::new(config);
+        let action_cfg = default_action_space_config();
+        let model = RLModel::new(config, action_cfg);
         assert!(model.is_ok());
     }
 
     #[test]
     fn test_rl_model_type() {
         let config = create_test_config();
-        let model = RLModel::new(config).unwrap();
+        let action_cfg = default_action_space_config();
+        let model = RLModel::new(config, action_cfg).unwrap();
         assert_eq!(model.model_type(), ModelType::MADDPG);
     }
 
@@ -216,7 +237,8 @@ mod tests {
     #[test]
     fn test_parse_action_output_5_fields() {
         let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
-        let action = parse_action_output(&raw).unwrap();
+        let cfg = default_action_space_config();
+        let action = parse_action_output(&raw, &cfg).unwrap();
         assert_eq!(action.p_batt_set, 100.0);
         assert_eq!(action.q_batt_set, 50.0);
         assert_eq!(action.load_shedding, 10.0);
@@ -228,14 +250,16 @@ mod tests {
     fn test_parse_action_output_clamp_bounds() {
         // p_batt_set 超出范围应被 clamp
         let raw = vec![600.0_f32, 0.0, 0.0, 1.0, 0.8];
-        let action = parse_action_output(&raw).unwrap();
+        let cfg = default_action_space_config();
+        let action = parse_action_output(&raw, &cfg).unwrap();
         assert!(action.p_batt_set <= 50.0);
         assert!(action.p_batt_set >= -50.0);
     }
 
     #[test]
     fn test_parse_action_output_insufficient_dims() {
-        assert!(parse_action_output(&[1.0, 2.0]).is_none());
+        let cfg = default_action_space_config();
+        assert!(parse_action_output(&[1.0, 2.0], &cfg).is_none());
     }
 
     #[test]
@@ -249,5 +273,29 @@ mod tests {
             confidence: 0.8,
         };
         assert_eq!(action.confidence, 0.8);
+    }
+
+    #[test]
+    fn test_parse_action_output_uses_action_space_config() {
+        // 自定义配置：充电上限 30kW，放电上限 40kW，负荷上限 30kW
+        let mut cfg = ActionSpaceConfig::default_config();
+        cfg.max_batt_charge_power = 30.0;
+        cfg.max_batt_discharge_power = 40.0;
+        cfg.max_load_shedding = 30.0;
+
+        // p_batt_set = 100（充电）应被 clamp 到 30
+        let raw = vec![100.0_f32, 0.0, 0.0, 1.0, 0.8];
+        let action = parse_action_output(&raw, &cfg).unwrap();
+        assert!(action.p_batt_set <= 30.0);
+
+        // p_batt_set = -100（放电）应被 clamp 到 -40
+        let raw = vec![-100.0_f32, 0.0, 0.0, 1.0, 0.8];
+        let action = parse_action_output(&raw, &cfg).unwrap();
+        assert!(action.p_batt_set >= -40.0);
+
+        // load_shedding = 100 应被 clamp 到 30
+        let raw = vec![0.0_f32, 0.0, 100.0, 1.0, 0.8];
+        let action = parse_action_output(&raw, &cfg).unwrap();
+        assert!(action.load_shedding <= 30.0);
     }
 }

@@ -35,6 +35,75 @@ impl StorageService {
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         Ok(true)
     }
+
+    /// 获取底层数据库连接池（供外部模块使用）
+    pub fn pool(&self) -> &Arc<SqlitePool> {
+        &self.pool
+    }
+
+    /// 更新动作空间配置（upsert 语义）
+    ///
+    /// 若 transformer_id 已存在则更新，若不存在则插入。
+    pub async fn update_action_space_config(
+        &self,
+        transformer_id: &str,
+        max_batt_charge_power: f64,
+        max_batt_discharge_power: f64,
+        max_load_shedding: f64,
+        max_apparent_power_kva: f64,
+        p_batt_ramp_limit_kw: f64,
+        q_batt_ramp_limit_kvar: f64,
+        pv_limit_min: f64,
+    ) -> Result<(), StorageError> {
+        // 先尝试更新
+        let affected = sqlx::query(
+            "UPDATE action_space_config SET
+                max_batt_charge_power = ?,
+                max_batt_discharge_power = ?,
+                max_load_shedding = ?,
+                max_apparent_power_kva = ?,
+                p_batt_ramp_limit_kw = ?,
+                q_batt_ramp_limit_kvar = ?,
+                pv_limit_min = ?,
+                updated_at = CURRENT_TIMESTAMP
+             WHERE transformer_id = ?",
+        )
+        .bind(max_batt_charge_power)
+        .bind(max_batt_discharge_power)
+        .bind(max_load_shedding)
+        .bind(max_apparent_power_kva)
+        .bind(p_batt_ramp_limit_kw)
+        .bind(q_batt_ramp_limit_kvar)
+        .bind(pv_limit_min)
+        .bind(transformer_id)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+        // 若未更新到任何行，则插入
+        if affected.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO action_space_config
+                    (transformer_id, max_batt_charge_power, max_batt_discharge_power,
+                     max_load_shedding, max_apparent_power_kva, p_batt_ramp_limit_kw,
+                     q_batt_ramp_limit_kvar, pv_limit_min)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(transformer_id)
+            .bind(max_batt_charge_power)
+            .bind(max_batt_discharge_power)
+            .bind(max_load_shedding)
+            .bind(max_apparent_power_kva)
+            .bind(p_batt_ramp_limit_kw)
+            .bind(q_batt_ramp_limit_kvar)
+            .bind(pv_limit_min)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        }
+
+        Ok(())
+    }
 }
 
 /// 写入缓冲管理器 — 双缓冲批量写入，事务保证原子性
@@ -228,6 +297,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             last_maintenance INTEGER
         )",
         "CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(device_type)",
+        // v2.5 动作空间配置表
+        "CREATE TABLE IF NOT EXISTS action_space_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transformer_id TEXT NOT NULL UNIQUE,
+            max_batt_charge_power REAL NOT NULL,
+            max_batt_discharge_power REAL NOT NULL,
+            max_load_shedding REAL NOT NULL,
+            max_apparent_power_kva REAL NOT NULL DEFAULT 200.0,
+            p_batt_ramp_limit_kw REAL NOT NULL DEFAULT 50.0,
+            q_batt_ramp_limit_kvar REAL NOT NULL DEFAULT 30.0,
+            pv_limit_min REAL NOT NULL DEFAULT 0.1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )",
     ];
 
     for stmt in &statements {
