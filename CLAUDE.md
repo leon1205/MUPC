@@ -25,6 +25,8 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 ```
 mupc/
 ├── Cargo.toml              # Workspace 配置（20 个 crate）
+├── config/
+│   └── mupc_env_config.yaml # AI 引擎动态配置（v2.6，对齐训练管线）
 ├── crates/
 │   ├── common/             # 公共库：日志、错误类型
 │   ├── core/               # 核心组件
@@ -33,6 +35,12 @@ mupc/
 │   ├── data-processing/    # 遥测数据采集
 │   ├── strategy-engine/    # 本地策略引擎 + AI 集成
 │   ├── ai-engine/          # AI 优化引擎（LSTM/MADDPG/RKNN Runtime）
+│   │   └── src/
+│   │       ├── safety_config.rs      # 安全约束配置（v2.6 新增）
+│   │       ├── env_config.rs         # YAML 配置结构（v2.6 新增）
+│   │       ├── dynamic_config_loader.rs  # 动态配置加载器（v2.6 新增）
+│   │       ├── action_space.rs       # 动作空间配置（v2.6 扩展）
+│   │       └── ...
 │   ├── security/           # 安全模块
 │   ├── web-api/            # Web API（Axum REST + SSE）
 │   ├── storage/            # 持久化存储（SQLite/sqlx）
@@ -53,6 +61,7 @@ mupc/
 
 - **Phase 1**: 核心架构完成
 - **Phase 3C**: AI 优化引擎已完成（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）
+- **Phase 3C 补充**: 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验）
 - **Phase 2+**: IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密（规划中）
 - 技术债清单见 `docs/technical-debt.md`
 
@@ -133,6 +142,9 @@ mupc/
 | **gateway**         | 北向 IEC 104 协议通信、连接管理、数据收发                        | `gateway/src/` |
 | **intercore**       | TCP 网络通信、指令下发、数据读取、心跳/看门狗                    | `intercore/src/` |
 | **ai-engine**       | LSTM 时序预测、MADDPG/PPO 强化学习决策、RKNN Runtime（NPU 推理） | `ai-engine/src/model_manager.rs` |
+| **ai-engine**       | 动态配置加载器（YAML 分层加载、版本指纹校验、操作参数热重载）     | `ai-engine/src/dynamic_config_loader.rs` |
+| **ai-engine**       | 安全约束配置（SOC 硬约束、变压器过载阈值）                      | `ai-engine/src/safety_config.rs` |
+| **ai-engine**       | 环境配置结构（EnvConfig/PhysicalConfig/OperationalConfig）       | `ai-engine/src/env_config.rs` |
 | **strategy-engine** | 兜底策略（削峰填谷、需量控制、防逆流），AI 指令安全校验          | `strategy-engine/src/ai_integration.rs` |
 
 ### 核间通信
@@ -277,12 +289,56 @@ async fn handler(State(state): State<Arc<AppState>>) -> ...
 Phase 1/3C 已完成的技术债更新（记录于 `docs/technical-debt.md`）：
 
 
-| Phase    | 内容                                                             | 状态    |
-| -------- | ---------------------------------------------------------------- | ------- |
-| Phase 1  | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
-| Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）     | ✅ 完成 |
-| Phase 2+ | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密                     | 规划中  |
-| Phase 2+ | 南向通信（RS485/HPLC）、OTA 升级、安全启动                       | 规划中  |
+| Phase       | 内容                                                             | 状态    |
+| ----------- | ---------------------------------------------------------------- | ------- |
+| Phase 1     | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
+| Phase 3C    | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）     | ✅ 完成 |
+| Phase 3C 补充 | 跨项目动态配置系统（YAML 配置加载、分层加载、版本指纹校验）    | ✅ 完成 |
+| Phase 2+    | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密                     | 规划中  |
+| Phase 2+    | 南向通信（RS485/HPLC）、OTA 升级、安全启动                       | 规划中  |
+
+## 配置文件
+
+AI 引擎配置文件位于 `mupc/config/mupc_env_config.yaml`，与训练管线 v2.6 对齐。
+
+**配置结构：**
+
+```yaml
+version:
+  fingerprint: "v2.6-20260611"  # 版本指纹（启动校验）
+  source: "mupc-ai2"
+
+physical:                        # RL 核心参数（YAML 锁定）
+  transformer_kva: 200.0          # 变压器额定容量
+  battery_capacity_kwh: 100.0    # 电池总容量
+  p_batt_max_kw: 50.0            # 最大充放电功率
+  load_shed_max_kw: 60.0         # 最大切负荷
+
+safety:                          # 安全约束（可被 DB 覆盖）
+  soc_min: 0.10                  # SOC 下限
+  soc_max: 0.90                  # SOC 上限
+  overload_threshold: 0.85       # 过载阈值
+
+operational:                     # 操作调优参数（DB 优先）
+  p_batt_ramp_limit_kw: 50.0    # 有功变化率限制
+  q_batt_ramp_limit_kvar: 30.0   # 无功变化率限制
+  pv_limit_min: 0.10             # 光伏限功率下限
+```
+
+**分层加载策略：**
+
+1. YAML 加载 → 基准配置（RL 核心参数锁定）
+2. DB 查询 → 操作参数覆盖（6 个开放参数）
+3. 版本指纹校验 → 启动时校验对齐
+
+**动态配置组件：**
+
+| 组件                   | 文件                                      | 职责                     |
+| ---------------------- | ----------------------------------------- | ------------------------ |
+| `DynamicConfigLoader`  | `ai-engine/src/dynamic_config_loader.rs` | 分层加载 + 指纹校验      |
+| `SafetyConfig`         | `ai-engine/src/safety_config.rs`         | SOC/过载约束              |
+| `EnvConfig`            | `ai-engine/src/env_config.rs`             | YAML 配置结构解析        |
+| `ActionSpaceConfig`    | `ai-engine/src/action_space.rs`           | 扩展 5 个新字段（v2.6）  |
 
 ## 文档管理原则（2026-05-29 生效）
 
