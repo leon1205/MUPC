@@ -2,15 +2,17 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.6 农网台区参数更新
+[DESIGN_APPROVED] — v2.9 Reward 与 Robustness 重构
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
+| v2.9 | 2026-06-14 | 架构师 | 当前版本 |
+| v2.8 | 2026-06-13 | 架构师 | 历史版本 |
+| v2.7 | 2026-06-13 | 架构师 | 当前版本 |
 | v2.6 | 2026-06-10 | 架构师 | 当前版本 |
 | v2.5 | 2026-06-08 | 架构师 | 当前版本 |
-| v2.4 | 2026-06-07 | 架构师 | 当前版本 |
 
-**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.6 (`[REVIEWED: PASS]`)
+**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.8 (`[REVIEWED: PASS]`)
 
 ---
 
@@ -760,6 +762,67 @@ pub struct ActionOutput {
 }
 ```
 
+### 4.5a 双参数 ActionOutput（v2.7）
+
+```rust
+/// 动作输出结构体（v2.7 双参数模式）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionOutput {
+    /// 有功功率基准点 (kW), 范围由 ActionSpaceConfig 确定
+    /// 负值=充电，正值=放电
+    pub p_ref: f64,
+    /// 电压-有功下垂系数 (kW/V), 范围由实时控制模块提供
+    /// 电压每升高 1V，输出功率增加 k_droop kW
+    pub k_droop: f64,
+    /// 可中断负荷切除量 (kW), [0.0, max_load_shedding]
+    pub load_shedding: f64,
+    /// 光伏限功率比例, [0.0, 1.0]
+    pub pv_limit: f64,
+    /// 决策置信度 (0.0 ~ 1.0)
+    pub confidence: f64,
+}
+
+/// 动作输出结构体（v1.x 单参数模式，legacy）
+/// 仅用于兼容旧模式，正常情况下不使用
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionOutputLegacy {
+    pub p_batt_set: f64,      // 废弃
+    pub load_shedding: f64,   // 保留
+    pub pv_limit: f64,        // 保留
+    pub confidence: f64,
+}
+```
+
+### 4.5b parse_action_output 双参数解析（v2.7）
+
+```rust
+/// 解析 RL 模型原始输出为 ActionOutput（双参数模式，v2.7）
+///
+/// 输出格式: [p_ref, k_droop, load_shedding, pv_limit, confidence]
+pub fn parse_action_output(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutput> {
+    if raw.len() < 5 {
+        return None;
+    }
+
+    let k_min = config.k_droop_min.unwrap_or(-100.0);
+    let k_max = config.k_droop_max.unwrap_or(100.0);
+
+    let mut action = ActionOutput {
+        p_ref: (raw[0] as f64).clamp(
+            -config.max_batt_discharge_power,
+            config.max_batt_charge_power,
+        ),
+        k_droop: (raw[1] as f64).clamp(k_min, k_max),
+        load_shedding: (raw[2] as f64).clamp(0.0, config.max_load_shedding),
+        pv_limit: (raw[3] as f64).clamp(0.0, 1.0),
+        confidence: raw.get(4).copied().unwrap_or(0.5) as f64,
+    };
+
+    action.confidence = action.confidence.clamp(0.0, 1.0);
+    Some(action)
+}
+```
+
 ### 4.6 RLModel 结构体
 
 ```rust
@@ -819,6 +882,10 @@ pub struct ActionValidator {
     config: ActionConstraintConfig,
     /// 上一周期的动作输出（用于变化率检测）
     previous_action: Arc<RwLock<Option<ActionOutput>>>,
+    /// v2.7 双参数模式：k_droop 范围（由实时控制模块提供）
+    droop_range: RwLock<(f64, f64)>,
+    /// v2.7 双参数模式：启用 ACT-DUAL-01~04 校验
+    dual_mode: bool,
 }
 ```
 
@@ -916,6 +983,121 @@ impl ActionValidator {
         *self.previous_action.write().await = Some(validated.clone());
         (validated, violations)
     }
+
+    /// v2.7 双参数模式校验（ACT-DUAL-01~04）
+    pub async fn validate_dual(
+        &self,
+        action: &ActionOutput,
+        dispatch_p_set: Option<f64>,
+        is_anti_reverse: bool,
+        action_space_config: &ActionSpaceConfig,
+    ) -> (ActionOutput, Vec<ViolationRecord>) {
+        let mut validated = action.clone();
+        let mut violations = Vec::new();
+        let last = self.previous_action.read().await;
+
+        // ACT-DUAL-01: p_ref 值域约束
+        let p_ref_min = -action_space_config.max_batt_discharge_power;
+        let p_ref_max = action_space_config.max_batt_charge_power;
+        if validated.p_ref < p_ref_min {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-01",
+                field: "p_ref",
+                original: action.p_ref,
+                clamped: p_ref_min,
+            });
+            validated.p_ref = p_ref_min;
+        } else if validated.p_ref > p_ref_max {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-01",
+                field: "p_ref",
+                original: action.p_ref,
+                clamped: p_ref_max,
+            });
+            validated.p_ref = p_ref_max;
+        }
+
+        // ACT-DUAL-02: k_droop 值域约束
+        let (k_min, k_max) = *self.droop_range.read().unwrap();
+        if validated.k_droop < k_min {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-02",
+                field: "k_droop",
+                original: action.k_droop,
+                clamped: k_min,
+            });
+            validated.k_droop = k_min;
+        } else if validated.k_droop > k_max {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-02",
+                field: "k_droop",
+                original: action.k_droop,
+                clamped: k_max,
+            });
+            validated.k_droop = k_max;
+        }
+
+        // ACT-DUAL-03: p_ref 变化率约束
+        if let Some(ref prev) = *last {
+            let delta = (action.p_ref - prev.p_ref).abs();
+            if delta > self.config.p_batt_ramp_limit_kw {
+                let sign = if action.p_ref > prev.p_ref { 1.0 } else { -1.0 };
+                validated.p_ref = prev.p_ref + sign * self.config.p_batt_ramp_limit_kw;
+                violations.push(ViolationRecord {
+                    rule: "ACT-DUAL-03",
+                    field: "p_ref",
+                    original: action.p_ref,
+                    clamped: validated.p_ref,
+                });
+            }
+        }
+
+        // ACT-DUAL-04: 调度指令权限约束
+        if let Some(dp) = dispatch_p_set {
+            if validated.p_ref.abs() > dp.abs() {
+                let sign = validated.p_ref.signum();
+                validated.p_ref = sign * dp.abs();
+                violations.push(ViolationRecord {
+                    rule: "ACT-DUAL-04",
+                    field: "p_ref",
+                    original: action.p_ref,
+                    clamped: validated.p_ref,
+                });
+            }
+        }
+
+        // ACT-DUAL-05: pv_limit 下限（防逆流场景除外）
+        if !is_anti_reverse && validated.pv_limit < self.config.pv_limit_min {
+            validated.pv_limit = self.config.pv_limit_min;
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-05",
+                field: "pv_limit",
+                original: action.pv_limit,
+                clamped: validated.pv_limit,
+            });
+        }
+
+        // load_shedding 和 confidence 最终 clamp
+        validated.load_shedding = validated
+            .load_shedding
+            .clamp(0.0, action_space_config.max_load_shedding);
+        validated.confidence = validated.confidence.clamp(0.0, 1.0);
+
+        *self.previous_action.write().await = Some(validated.clone());
+        (validated, violations)
+    }
+
+    /// 更新 k_droop 范围（由 intercore 从实时控制模块获取后调用）
+    pub fn update_droop_range(&self, k_min: f64, k_max: f64) {
+        let mut range = self.droop_range.write().unwrap();
+        *range = (k_min, k_max);
+        tracing::debug!("Updated k_droop range: [{}, {}]", k_min, k_max);
+    }
+
+    /// 获取当前 k_droop 范围
+    pub fn get_droop_range(&self) -> (f64, f64) {
+        *self.droop_range.read().unwrap()
+    }
 }
 
 /// 约束违规记录
@@ -967,70 +1149,129 @@ impl RewardCalculator {
 
 ### 5.3 SCENE-01：台区季节性负荷模式 (MODE-01)
 
-**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + 电压安全
+**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + P-Q 协同优化
 
-> **v2.6 说明（分层架构原则）：**
+> **v2.8 核心变更（P-Q 协同度奖励）：**
+> - 移除"电压硬惩罚"P_voltage_deviation，改为"行为奖励"R_PQ_coordination
+> - AI 仅控制 P（p_ref），但需感知 Q 裕度做最优决策
+> - 核心原则：Q 有裕度时"偷懒"省电池；Q 饱和时正确出手（低压放电/高压充电）
+> - 弃光场景差异化：高电压时检查 AI 动作方向而非简单置零
+> - 新增下垂系数平滑惩罚 R_smooth，防止 k_droop 极大化导致系统震荡
+
+> **v2.5 分层架构原则（继续适用）：**
 > - AI 仅在实时模块无功耗尽时才对电压偏差负责（q_realtime_margin <= 10% + 越限连续 2 步）
 > - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
-> - 新增自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
-> - 弃光奖励增加电压前置条件：v_avg >= 1.05 p.u. 时置零
-> - **v2.6 新增**：电压变化斜率惩罚 R_voltage_slope = |ΔV|，迫使 AI 平滑调节，避免电压快速变化对电网造成冲击
+> - 自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
 
-**v2.6 奖励公式：**
+**v2.8 奖励公式：**
 
 ```
-R_agri = w1 * R_pv_consumption          // 弃光奖励（含电压安全前置条件）
+R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处理）
          - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
          - w3 * P_transformer_overload
-         - w4 * P_voltage_deviation             // 条件触发式
+         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增，替代原 w4 电压惩罚）
          - w5 * R_ramp
-         - w6 * R_voltage_slope                 // 电压变化斜率惩罚（v2.6 新增）
+         - w6 * R_voltage_slope
+         - w7 * R_smooth                        // 下垂系数平滑惩罚（v2.8 新增）
 ```
+
+**P-Q 协同度奖励 R_PQ_coordination（v2.8 新增）：**
+
+当 |V_deviation| > 5% 时，根据 Q 裕度和 AI 动作方向计算奖励：
+
+```
+// Q 有裕度（q_margin > 10%）：AI 最优解是"偷懒"省电池
+if q_margin > Q_THRESHOLD:
+    if |p_ref| < P_THRESHOLD (省电策略):
+        R_PQ_coordination = +50.0  // 大额奖励
+    else:
+        R_PQ_coordination = -5.0   // 轻微惩罚（强行出力浪费电池）
+
+// Q 已饱和（q_margin <= 10%）：AI 必须正确出手
+else:
+    if v_low && p_ref < 0:                    // 低电压 + 放电（正确）
+        R_PQ_coordination = +50.0
+    elif v_high && p_ref > 0:                  // 高电压 + 充电（正确）
+        R_PQ_coordination = +50.0
+    elif v_low && p_ref >= 0:                  // 低电压 + 不放电（失职）
+        R_PQ_coordination = -30.0
+    elif v_high && p_ref <= 0:                 // 高电压 + 不充电（失职）
+        R_PQ_coordination = -30.0
+    else:
+        R_PQ_coordination = 0.0
+```
+
+其中：`v_low = (v_avg < 0.95)`，`v_high = (v_avg > 1.05)`，`P_THRESHOLD = 5.0 kW`，`Q_THRESHOLD = 0.10`
+
+**弃光奖励差异化（v2.8 改进）：**
+
+```
+// 高电压时（v_avg >= 1.05），检查 AI 动作方向而非简单置零
+if v_avg >= 1.05:
+    if p_ref < 0:                           // 充电消纳光伏
+        R_pv_consumption = min(P_pv_self_consume / P_pv_total, 1.0) * 100.0
+    else:                                    // 反而在放电
+        R_pv_consumption = -20.0            // 严厉惩罚
+else:
+    R_pv_consumption = min(P_pv_self_consume / P_pv_total, 1.0) * 100.0
+```
+
+**下垂系数平滑惩罚 R_smooth（v2.8 新增）：**
+
+```
+R_smooth = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
+```
+
+- `Δk_droop = k_droop_t - k_droop_{t-1}`：防止 AI 频繁调整 k_droop
+- `K_MAX`：k_droop 上限（默认 50.0 kW/V）
+- `λ`：超限惩罚系数（默认 1.0）
 
 **子项定义：**
 
 ```
-R_pv_consumption       = 0.0                                          if v_avg >= 1.05 (电压偏高)
-                        = min(P_pv_self_consume / P_pv_total, 1.0) * 100   otherwise
+R_pv_consumption       = 按差异化逻辑计算（见上）
 α(s)                   = 3.0   // SOC 极低保护：battery_soc < SOC_CRITICAL (10%)
                         = 0.2   // 电压支撑模式：q_realtime_margin <= 10% 且越限 >= 2 步
                         = 1.0   // 常规调度
 P_battery_degradation  = α(s) * (|P_batt| / BATTERY_CAPACITY_KWH)²   # C-rate² × α(s)
 P_transformer_overload = Quadratic(L_trafo, start=75%)                 # 见 4.5 节
-P_voltage_deviation    = 0.0                                          if |V_avg - 1.0| <= 5%
-                                                                                OR q_realtime_margin > 10%
-                        = k_v * dev²                                   if 越限连续 >= 2 步 且 q_margin <= 10%
-                          k_v = 2.0 (低电压侧), 1.0 (高电压侧)
-                          dev = |V_avg - 1.0| - 5%
+R_PQ_coordination      = 按 Q 裕度和动作方向计算（见上）
 R_ramp                 = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
-                          归一化到 C-rate 变化率
-R_voltage_slope        = |V_avg_t - V_avg_{t-1}|                       # v2.6 新增，迫使平滑调节
+R_voltage_slope        = |V_avg_t - V_avg_{t-1}|
+R_smooth               = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
 
 其中 v_avg = (voltage_phase_a + voltage_phase_b + voltage_phase_c) / 3.0
 ```
 
-**权重表（v2.6）：**
+**权重表（v2.8）：**
 
 | 权重 | 默认值 | 说明 | 可配置范围 |
 |------|--------|------|------------|
-| w1 | 1.0 | 光伏消纳奖励（含电压前置条件） | [0.0, 3.0] |
+| w1 | 1.0 | 光伏消纳奖励（含差异化电压处理） | [0.0, 3.0] |
 | w2 | 0.5 | 电池损耗惩罚（C-rate² × α(s)） | [0.0, 2.0] |
 | w3 | 2.0 | 变压器过载惩罚 | [0.0, 5.0] |
-| w4 | 1.0 | 电压质量惩罚（条件触发式） | [0.0, 3.0] |
+| w4 | 1.0 | P-Q 协同度奖励权重（v2.8 新增） | [0.0, 5.0] |
 | w5 | 0.5 | 功率变化率惩罚 | [0.0, 2.0] |
-| w6 | 0.5 | 电压变化斜率惩罚（v2.6 新增） | [0.0, 2.0] |
+| w6 | 0.5 | 电压变化斜率惩罚 | [0.0, 2.0] |
+| w7 | 0.5 | 下垂系数平滑惩罚权重（v2.8 新增） | [0.0, 2.0] |
 
-**Rust 代码实现（v2.5）：**
+**Rust 代码实现（v2.8）：**
 
 ```rust
-/// SCENE-01: 台区季节性负荷模式 v2.5
-fn calc_agri_v2_5(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
+/// SCENE-01: 台区季节性负荷模式 v2.8
+fn calc_agri_v2_8(&self, state: &FusedSystemState, action: &ActionOutput, prev_k_droop: f64) -> f64 {
     let w = &self.weights.seasonal_load_management;
 
-    // 1. 弃光奖励（含电压安全前置条件）
+    // 1. 弃光奖励（含差异化电压处理）
     let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
     let r_pv = if v_avg >= self.voltage_high_limit {
-        0.0
+        if action.p_ref < 0.0 {
+            // 充电消纳光伏
+            (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+                .min(1.0) * 100.0
+        } else {
+            -20.0 // 高电压时反而放电，严厉惩罚
+        }
     } else {
         (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
             .min(1.0) * 100.0
@@ -1046,13 +1287,67 @@ fn calc_agri_v2_5(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt:
     // 4. 变压器过载
     let p_trafo = self.overload_penalty(state.transformer_load);
 
-    // 5. 条件触发电压惩罚
-    let p_voltage = self.conditional_voltage_penalty(state);
+    // 5. P-Q 协同度奖励（v2.8 新增，替代电压惩罚）
+    let r_pq = self.calc_pq_coordination(state, action.p_ref);
 
     // 6. 变化率惩罚
-    let r_ramp = w[4] * (p_batt_set - prev_p_batt).abs() / self.battery_capacity_kwh;
+    let r_ramp = w[4] * (action.p_ref - self.last_p_batt_set()).abs() / self.battery_capacity_kwh;
 
-    w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
+    // 7. 电压变化斜率惩罚
+    let prev_v = *self.last_voltage.read().unwrap();
+    let r_voltage_slope = (v_avg - prev_v).abs();
+
+    // 8. 下垂系数平滑惩罚（v2.8 新增）
+    let r_smooth = self.calc_smooth_penalty(action.k_droop, prev_k_droop);
+
+    w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq - w[4] * r_ramp - w[5] * r_voltage_slope - w[6] * r_smooth
+}
+
+/// P-Q 协同度奖励（v2.8 新增）
+fn calc_pq_coordination(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
+    let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+    let dev = (v_avg - 1.0).abs();
+
+    // 死区内，无协同度问题
+    if dev <= 0.05 {
+        return 0.0;
+    }
+
+    let q_margin = state.q_realtime_margin;
+    let v_low = v_avg < 0.95;
+    let v_high = v_avg > 1.05;
+    const P_THRESHOLD: f64 = 5.0; // kW
+    const Q_THRESHOLD: f64 = 0.10;
+
+    // Q 有裕度：最优解是"偷懒"省电池
+    if q_margin > Q_THRESHOLD {
+        if p_ref.abs() < P_THRESHOLD {
+            return 50.0; // 省电策略，大额奖励
+        } else {
+            return -5.0; // 强行出力，轻微惩罚
+        }
+    }
+
+    // Q 已饱和：AI 必须正确出手
+    if v_low && p_ref < 0.0 {
+        return 50.0;  // 低电压 + 放电（正确）
+    } else if v_high && p_ref > 0.0 {
+        return 50.0;  // 高电压 + 充电（正确）
+    } else if v_low && p_ref >= 0.0 {
+        return -30.0; // 低电压 + 不放电（失职）
+    } else if v_high && p_ref <= 0.0 {
+        return -30.0; // 高电压 + 不充电（失职）
+    }
+    0.0
+}
+
+/// 下垂系数平滑惩罚（v2.8 新增）
+fn calc_smooth_penalty(&self, k_droop: f64, prev_k_droop: f64) -> f64 {
+    const K_MAX: f64 = 50.0; // kW/V
+    const LAMBDA: f64 = 1.0;
+    let delta = (k_droop - prev_k_droop).abs();
+    let excess = (k_droop - K_MAX).max(0.0);
+    delta + LAMBDA * excess
 }
 
 /// 计算自适应损耗系数 α(s)
@@ -1068,25 +1363,26 @@ fn compute_alpha(&self, state: &FusedSystemState) -> f64 {
     }
     1.0
 }
+```
 
-/// 条件触发电压惩罚
-fn conditional_voltage_penalty(&self, state: &FusedSystemState) -> f64 {
-    let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
-    let dev = (v_avg - 1.0).abs();
-    if dev <= 0.05 {
-        self.voltage_violation_count.store(0, Ordering::Relaxed);
-        return 0.0;
-    }
-    let count = self.voltage_violation_count.fetch_add(1, Ordering::Relaxed) + 1;
-    if count < 2 || state.q_realtime_margin > self.q_margin_threshold {
-        return 0.0;
-    }
-    let dev_excess = dev - 0.05;
-    if v_avg < 1.0 {
-        self.voltage_penalty_low * dev_excess * dev_excess
-    } else {
-        self.voltage_penalty_high * dev_excess * dev_excess
-    }
+**RewardCalculator 结构体变更（v2.8）：**
+
+```rust
+pub struct RewardCalculator {
+    weights: SceneWeights,
+    carbon_emission_factor: f64,
+    demand_penalty_rate: f64,
+    battery_degradation_alpha: f64,
+    battery_capacity_kwh: f64,
+    last_p_batt_set: RwLock<f64>,      // 上一周期 p_ref
+    last_voltage: RwLock<f64>,          // 上一周期平均电压
+    last_k_droop: RwLock<f64>,          // 上一周期 k_droop（v2.8 新增）
+    voltage_violation_count: AtomicU32,
+    q_margin_threshold: f64,
+    voltage_high_limit: f64,
+    soc_critical: f64,
+    voltage_penalty_high: f64,
+    voltage_penalty_low: f64,
 }
 ```
 
@@ -2170,4 +2466,34 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 2 | 版本号更新 | 文档头部 | v2.5 → v2.6 |
 
 **修订依据：** 农网台区新规格落地：变压器 200kVA、光伏 150kW、储能 50kW/100kWh、居民负荷 60kW、农业冲击负荷最高 120kW。代码默认值已同步更新。
+
+## v2.7 修订记录 (2026-06-13)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | 双参数 ActionOutput | 4.5a | p_batt_set → p_ref + k_droop 双参数结构 |
+| 2 | parse_action_output 双参数解析 | 4.5b | 输出格式 [p_ref, k_droop, load_shedding, pv_limit, confidence] |
+| 3 | ActionValidator 双参数模式 | 4.8 | 新增 droop_range 和 dual_mode 字段 |
+| 4 | validate_dual 方法 | 4.8 | 实现 ACT-DUAL-01~05 校验规则 |
+| 5 | k_droop 范围动态更新 | 4.8 | update_droop_range / get_droop_range 方法 |
+| 6 | TCP 帧 v2.0 格式 | protocol.rs / tcp_server.rs | ControlCmdPayloadV2 双参数传输 |
+| 7 | 通信中断降级逻辑 | ai_integration.rs | IntercoreConnectionState 保持最后有效参数 |
+| 8 | 版本号更新 | 文档头部 | v2.6 → v2.7 |
+
+**修订依据：** 动作空间重构设计文档（2026-06-13）已合并。双参数模式实现时间尺度解耦：AI 负责稳态全局优化（P_ref），执行器负责毫秒级暂态调节（k_droop × ΔV）。通信中断时执行器保持最后有效参数，继续下垂控制，保障本质安全不停机。
+
+## v2.8 修订记录 (2026-06-13)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | P-Q 协同度奖励 R_PQ_coordination | 5.3 SCENE-01 | 替代原 P_voltage_deviation 电压惩罚；Q 有裕度时奖励"偷懒"，Q 饱和时奖励正确出手 |
+| 2 | 弃光奖励差异化 | 5.3 SCENE-01 | 高电压（v_avg >= 1.05）时根据 AI 动作方向差异化：充电消纳给奖励，放电给惩罚 |
+| 3 | 下垂系数平滑惩罚 R_smooth | 5.3 SCENE-01 | R_smooth = -\|Δk_droop\| - λ·max(0, k_droop - K_MAX) |
+| 4 | RewardCalculator 结构体扩展 | 5.2 | 新增 last_k_droop 字段用于 R_smooth 计算 |
+| 5 | calc_pq_coordination 方法 | 5.3 | 实现 P-Q 协同度奖励逻辑 |
+| 6 | calc_smooth_penalty 方法 | 5.3 | 实现下垂系数平滑惩罚逻辑 |
+| 7 | 权重表更新 | 5.3 | w4 改为 P-Q 协同度，新增 w7 下垂平滑惩罚 |
+| 8 | 版本号更新 | 文档头部 | v2.7 → v2.8 |
+
+**修订依据：** 专家评审指出原有电压惩罚设计会使 AI 在 Q 饱和时"两难"——调了也没用还被罚，最终退化到零策略。P-Q 协同度奖励将考核从"结果惩罚"转变为"行为奖励"，更符合强化学习正向激励原理，同时新增 R_smooth 防止 AI 设置极大 k_droop 导致系统震荡。
 
