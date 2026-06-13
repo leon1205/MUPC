@@ -4,7 +4,8 @@
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
 use crate::south_command_sender::SouthCommandDispatcher;
-use mupc_ai_engine::{AiEngineError, ModelManager, ModelStatus, RunningMode, SwitchSource};
+use mupc_ai_engine::{AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource};
+use mupc_intercore::{DualParamCommand, IntercoreClient};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -17,6 +18,8 @@ pub struct AiIntegrator {
     status: Arc<RwLock<ModelStatus>>,
     /// 南向命令分发器（用于分发 pv_limit 和 load_shedding）
     south_dispatcher: Option<Arc<SouthCommandDispatcher>>,
+    /// v2.7 核间通信客户端（用于发送双参数 p_ref + k_droop 到实时控制模块）
+    intercore_client: Option<Arc<IntercoreClient>>,
     /// v2.6 双参数模式：最后有效的 p_ref（通信中断时使用）
     last_valid_p_ref: RwLock<Option<f64>>,
     /// v2.6 双参数模式：最后有效的 k_droop（通信中断时使用）
@@ -31,6 +34,7 @@ impl AiIntegrator {
             model_manager: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
             south_dispatcher: None,
+            intercore_client: None,
             last_valid_p_ref: RwLock::new(None),
             last_valid_k_droop: RwLock::new(None),
             fallback_active: RwLock::new(false),
@@ -172,18 +176,89 @@ impl AiIntegrator {
         self.south_dispatcher = Some(dispatcher);
     }
 
+    /// v2.7: 设置核间通信客户端（用于发送双参数到实时控制模块）
+    pub fn set_intercore_client(&mut self, client: Arc<IntercoreClient>) {
+        self.intercore_client = Some(client);
+    }
+
     /// 执行 AI 决策并分发南向命令
     ///
     /// 调用 full_decision_cycle() 获取 ActionOutput，然后：
-    /// - p_batt_set → 通过 intercore 发送到实时控制模块（已由调用方处理）
+    /// - p_ref + k_droop → 通过 IntercoreClient 发送到实时控制模块（v2.7）
     /// - pv_limit → 通过 SouthCommandDispatcher 发送到光伏逆变器
     /// - load_shedding → 通过 SouthCommandDispatcher 发送到负荷控制装置
     pub async fn dispatch_ai_decision(&self) -> Result<(), AiEngineError> {
+        // v2.9 新增：异常检测与应急策略
+        {
+            let manager_guard = self.model_manager.read().await;
+            if let Some(manager) = manager_guard.as_ref() {
+                if let Some(state) = manager.get_current_state().await {
+                    let robustness = RobustnessManager::new();
+                    let anomalies = robustness.detect_anomaly(&state);
+
+                    if !anomalies.is_empty() {
+                        // 存在异常，使用应急策略
+                        let primary_anomaly = anomalies[0];
+                        let robust_action = robustness.get_robust_action(primary_anomaly);
+
+                        tracing::warn!(
+                            "Anomaly detected: {:?}, using emergency action: p_ref={}, k_droop={}",
+                            primary_anomaly,
+                            robust_action.p_ref,
+                            robust_action.k_droop
+                        );
+
+                        // 使用应急动作替换正常决策
+                        drop(manager_guard);
+                        return self.dispatch_robust_action(&robust_action).await;
+                    }
+                }
+            }
+        }
+
         let manager = self.model_manager.read().await;
         let manager = manager.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
 
         // 调用完整的 AI 决策周期
         let action = manager.full_decision_cycle().await?;
+
+        // v2.7: 发送双参数到实时控制模块
+        if let Some(ref client) = self.intercore_client {
+            let strategy_mode = self
+                .current_mode()
+                .await
+                .map(|m| format!("{:?}", m))
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let cmd = DualParamCommand::new(
+                action.p_ref,
+                action.k_droop,
+                action.load_shedding,
+                action.pv_limit,
+                true, // ai_ready
+                &strategy_mode,
+            );
+
+            match client.send_dual_param(&cmd).await {
+                Ok(_) => {
+                    tracing::debug!(
+                        "Sent dual-param to realtime control: p_ref={}, k_droop={}",
+                        action.p_ref,
+                        action.k_droop
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send dual-param to realtime control: {:?}", e);
+                    // 不返回错误，因为南向分发可能成功
+                }
+            }
+
+            // 更新最后有效的双参数
+            *self.last_valid_p_ref.write().await = Some(action.p_ref);
+            *self.last_valid_k_droop.write().await = Some(action.k_droop);
+        } else {
+            tracing::debug!("Intercore client not set, skipping dual-param send");
+        }
 
         // 分发 pv_limit 到南向设备
         if let Some(ref dispatcher) = self.south_dispatcher {
@@ -214,6 +289,61 @@ impl AiIntegrator {
             }
         } else {
             tracing::debug!("南向分发器未设置，跳过 pv_limit/load_shedding 分发");
+        }
+
+        Ok(())
+    }
+
+    /// v2.9: 分发应急动作（不经过 RL 模型）
+    ///
+    /// 直接使用 RobustnessManager 生成的应急动作，发送到实时控制模块和南向设备。
+    async fn dispatch_robust_action(&self, action: &mupc_ai_engine::ActionOutput) -> Result<(), AiEngineError> {
+        // 发送双参数到实时控制模块
+        if let Some(ref client) = self.intercore_client {
+            let cmd = DualParamCommand::new(
+                action.p_ref,
+                action.k_droop,
+                action.load_shedding,
+                action.pv_limit,
+                true,
+                "Emergency",
+            );
+            match client.send_dual_param(&cmd).await {
+                Ok(_) => {
+                    tracing::debug!(
+                        "Sent emergency dual-param: p_ref={}, k_droop={}",
+                        action.p_ref,
+                        action.k_droop
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send emergency dual-param: {:?}", e);
+                }
+            }
+        }
+
+        // 分发 pv_limit 和 load_shedding
+        if let Some(ref dispatcher) = self.south_dispatcher {
+            if action.pv_limit < 1.0 {
+                let result = dispatcher.dispatch_pv_limit(action.pv_limit, 1).await;
+                if !result.success {
+                    tracing::warn!(
+                        "Emergency pv_limit 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
+            }
+            if action.load_shedding > 0.0 {
+                let result = dispatcher.dispatch_load_shedding(action.load_shedding, 1).await;
+                if !result.success {
+                    tracing::warn!(
+                        "Emergency load_shedding 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
+            }
         }
 
         Ok(())

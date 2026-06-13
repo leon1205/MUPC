@@ -9,7 +9,7 @@
 use crate::action_space::ActionSpaceConfig;
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
-use crate::data_fusion::DataFusionEngine;
+use crate::data_fusion::{DataFusionEngine, FusedSystemState};
 use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput};
@@ -310,6 +310,20 @@ impl ModelManager {
     /// 设置数据融合引擎（由外部注入）
     pub async fn set_data_fusion(&self, df: DataFusionEngine) {
         *self.data_fusion.write().await = Some(df);
+    }
+
+    /// v2.9: 获取当前系统状态（用于异常检测）
+    ///
+    /// 返回最近一次融合的 FusedSystemState。如果融合引擎未初始化或无数据，返回 None。
+    pub async fn get_current_state(&self) -> Option<FusedSystemState> {
+        let fusion = self.data_fusion.read().await;
+        match fusion.as_ref() {
+            Some(df) => {
+                let state = df.last_fused_state.read().await;
+                state.clone()
+            }
+            None => None,
+        }
     }
 
     /// 预测（LSTM）
