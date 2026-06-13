@@ -58,43 +58,88 @@ impl SystemState {
     }
 }
 
-/// RL 模型输出（4 维动作 + 置信度 = 5 字段）
+/// 动作输出结构体（v2.0 双参数模式）
+///
+/// 有功功率基准点 + 电压-有功下垂系数双参数模式：
+/// - p_ref：有功功率基准点 (kW)，负值=充电，正值=放电
+/// - k_droop：电压-有功下垂系数 (kW/V)，电压每升高 1V，输出功率增加 k_droop kW
 #[derive(Debug, Clone)]
 pub struct ActionOutput {
-    /// A1: 电池有功功率设定值 (kW), [-500.0, 500.0], 负=充电, 正=放电
-    pub p_batt_set: f64,
-    /// A2: 无功功率设定值 (kVar), [-300.0, 300.0], 负=感性/吸收, 正=容性/释放
-    pub q_batt_set: f64,
-    /// A3: 可中断负荷切除量 (kW), [0.0, 500.0]
+    /// 有功功率基准点 (kW), 范围由 ActionSpaceConfig 确定
+    /// 负值=充电，正值=放电
+    pub p_ref: f64,
+    /// 电压-有功下垂系数 (kW/V), 范围由实时控制模块提供
+    /// 电压每升高 1V，输出功率增加 k_droop kW
+    pub k_droop: f64,
+    /// 可中断负荷切除量 (kW), [0.0, max_load_shedding]
     pub load_shedding: f64,
-    /// A4: 光伏限功率比例, [0.0, 1.0]
+    /// 光伏限功率比例, [0.0, 1.0]
     pub pv_limit: f64,
-    /// 决策置信度 [0.0, 1.0]
+    /// 决策置信度 (0.0 ~ 1.0)
     pub confidence: f64,
 }
 
-/// 解析 RL 模型原始输出为 ActionOutput
+/// 动作输出结构体（v1.x 单参数模式，legacy）
 ///
-/// 输出格式: [p_batt_set, q_batt_set, load_shedding, pv_limit, confidence]
-/// 注意：v2.4 分层控制架构下 q_batt_set 和 pv_limit 由实时控制模块管理，
-/// 此处仅做值域 clamp，不做 dispatch 约束（由 ActionValidator 统一处理）。
-/// v2.5 动作空间参数可配置化：值域 clamp 使用 ActionSpaceConfig 中的参数
+/// 仅用于兼容旧模式，正常情况下不使用
+#[derive(Debug, Clone)]
+pub struct ActionOutputLegacy {
+    /// 电池有功功率设定值 (kW), 负=充电, 正=放电（废弃）
+    pub p_batt_set: f64,
+    /// 可中断负荷切除量 (kW), [0.0, max_load_shedding]
+    pub load_shedding: f64,
+    /// 光伏限功率比例, [0.0, 1.0]
+    pub pv_limit: f64,
+    /// 决策置信度 (0.0 ~ 1.0)
+    pub confidence: f64,
+}
+
+/// 解析 RL 模型原始输出为 ActionOutput（双参数模式）
+///
+/// 输出格式: [p_ref, k_droop, load_shedding, pv_limit, confidence]
+/// v2.0 双参数模式：p_ref（有功基准）+ k_droop（电压-有功下垂系数）
 pub fn parse_action_output(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutput> {
     if raw.len() < 5 {
         return None;
     }
+
+    // 获取 k_droop 范围（默认值为安全边界）
+    let k_min = config.k_droop_min.unwrap_or(-100.0);
+    let k_max = config.k_droop_max.unwrap_or(100.0);
+
     let mut action = ActionOutput {
-        p_batt_set: (raw[0] as f64).clamp(
+        p_ref: (raw[0] as f64).clamp(
             -config.max_batt_discharge_power,
             config.max_batt_charge_power,
         ),
-        q_batt_set: (raw[1] as f64).clamp(-300.0, 300.0),
+        k_droop: (raw[1] as f64).clamp(k_min, k_max),
         load_shedding: (raw[2] as f64).clamp(0.0, config.max_load_shedding),
         pv_limit: (raw[3] as f64).clamp(0.0, 1.0),
         confidence: raw.get(4).copied().unwrap_or(0.5) as f64,
     };
+
     action.confidence = action.confidence.clamp(0.0, 1.0);
     Some(action)
+}
+
+/// 解析 RL 模型原始输出为 ActionOutputLegacy（单参数模式，legacy）
+///
+/// 输出格式: [p_batt_set, load_shedding, pv_limit, confidence]
+/// v1.x 单参数模式：p_batt_set 直接作为有功设定值
+pub fn parse_action_output_legacy(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutputLegacy> {
+    if raw.len() < 4 {
+        return None;
+    }
+
+    Some(ActionOutputLegacy {
+        p_batt_set: (raw[0] as f64).clamp(
+            -config.max_batt_discharge_power,
+            config.max_batt_charge_power,
+        ),
+        load_shedding: (raw[1] as f64).clamp(0.0, config.max_load_shedding),
+        pv_limit: (raw[2] as f64).clamp(0.0, 1.0),
+        confidence: raw.get(3).copied().unwrap_or(0.5) as f64,
+    })
 }
 
 /// MADDPG/PPO 决策模型
@@ -236,11 +281,11 @@ mod tests {
 
     #[test]
     fn test_parse_action_output_5_fields() {
-        let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
+        let raw = vec![100.0_f32, 20.0, 10.0, 0.8, 0.9];
         let cfg = default_action_space_config();
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert_eq!(action.p_batt_set, 100.0);
-        assert_eq!(action.q_batt_set, 50.0);
+        assert_eq!(action.p_ref, 100.0);
+        assert_eq!(action.k_droop, 20.0);
         assert_eq!(action.load_shedding, 10.0);
         assert_eq!(action.pv_limit, 0.8);
         assert_eq!(action.confidence, 0.9);
@@ -248,12 +293,12 @@ mod tests {
 
     #[test]
     fn test_parse_action_output_clamp_bounds() {
-        // p_batt_set 超出范围应被 clamp
+        // p_ref 超出范围应被 clamp
         let raw = vec![600.0_f32, 0.0, 0.0, 1.0, 0.8];
         let cfg = default_action_space_config();
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert!(action.p_batt_set <= 50.0);
-        assert!(action.p_batt_set >= -50.0);
+        assert!(action.p_ref <= 50.0);
+        assert!(action.p_ref >= -50.0);
     }
 
     #[test]
@@ -266,8 +311,8 @@ mod tests {
     fn test_action_output_no_compens_factor() {
         // 验证 ActionOutput 不包含 compens_factor 字段
         let action = ActionOutput {
-            p_batt_set: 0.0,
-            q_batt_set: 0.0,
+            p_ref: 0.0,
+            k_droop: 0.0,
             load_shedding: 0.0,
             pv_limit: 1.0,
             confidence: 0.8,
@@ -283,19 +328,54 @@ mod tests {
         cfg.max_batt_discharge_power = 40.0;
         cfg.max_load_shedding = 30.0;
 
-        // p_batt_set = 100（充电）应被 clamp 到 30
+        // p_ref = 100（充电）应被 clamp 到 30
         let raw = vec![100.0_f32, 0.0, 0.0, 1.0, 0.8];
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert!(action.p_batt_set <= 30.0);
+        assert!(action.p_ref <= 30.0);
 
-        // p_batt_set = -100（放电）应被 clamp 到 -40
+        // p_ref = -100（放电）应被 clamp 到 -40
         let raw = vec![-100.0_f32, 0.0, 0.0, 1.0, 0.8];
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert!(action.p_batt_set >= -40.0);
+        assert!(action.p_ref >= -40.0);
 
         // load_shedding = 100 应被 clamp 到 30
         let raw = vec![0.0_f32, 0.0, 100.0, 1.0, 0.8];
         let action = parse_action_output(&raw, &cfg).unwrap();
         assert!(action.load_shedding <= 30.0);
+    }
+
+    #[test]
+    fn test_parse_action_output_k_droop_clamp() {
+        // k_droop 超出范围应被 clamp
+        let mut cfg = default_action_space_config();
+        cfg.k_droop_min = Some(-50.0);
+        cfg.k_droop_max = Some(50.0);
+
+        // k_droop = 200 应被 clamp 到 50
+        let raw = vec![0.0_f32, 200.0, 0.0, 1.0, 0.8];
+        let action = parse_action_output(&raw, &cfg).unwrap();
+        assert!(action.k_droop <= 50.0);
+
+        // k_droop = -200 应被 clamp 到 -50
+        let raw = vec![0.0_f32, -200.0, 0.0, 1.0, 0.8];
+        let action = parse_action_output(&raw, &cfg).unwrap();
+        assert!(action.k_droop >= -50.0);
+    }
+
+    #[test]
+    fn test_parse_action_output_legacy() {
+        let raw = vec![100.0_f32, 10.0, 0.8, 0.9];
+        let cfg = default_action_space_config();
+        let action = parse_action_output_legacy(&raw, &cfg).unwrap();
+        assert_eq!(action.p_batt_set, 100.0);
+        assert_eq!(action.load_shedding, 10.0);
+        assert_eq!(action.pv_limit, 0.8);
+        assert_eq!(action.confidence, 0.9);
+    }
+
+    #[test]
+    fn test_parse_action_output_legacy_insufficient_dims() {
+        let cfg = default_action_space_config();
+        assert!(parse_action_output_legacy(&[1.0, 2.0], &cfg).is_none());
     }
 }

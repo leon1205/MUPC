@@ -91,7 +91,7 @@ impl RewardCalculator {
         match mode {
             RunningMode::SeasonalLoadManagement => {
                 let prev = *self.last_p_batt_set.read().unwrap();
-                self.calc_agri_v2_5(state, action.p_batt_set, prev)
+                self.calc_agri_v2_5(state, action.p_ref, prev)
             }
             RunningMode::CommercialArbitrage => self.calc_arbitrage(action, state),
             RunningMode::DemandControl => self.calc_demand(action, state),
@@ -280,9 +280,9 @@ impl RewardCalculator {
     fn calc_arbitrage(&self, action: &ActionOutput, state: &FusedSystemState) -> f64 {
         let w = &self.weights.commercial_arbitrage;
         let avg_price = (state.peak_price + state.valley_price) / 2.0;
-        let spread = (state.current_electricity_price - avg_price) * action.p_batt_set * 0.001;
+        let spread = (state.current_electricity_price - avg_price) * action.p_ref * 0.001;
         let r_spread = spread * 100.0;
-        let p_deg = 100.0 * action.p_batt_set.abs() / 500.0 * 0.01;
+        let p_deg = 100.0 * action.p_ref.abs() / 500.0 * 0.01;
         w[0] * r_spread - w[1] * p_deg
     }
 
@@ -301,7 +301,7 @@ impl RewardCalculator {
         match state.dispatch_p_set {
             Some(p_target) => {
                 let r_accuracy =
-                    100.0 * (1.0 - (action.p_batt_set - p_target).abs() / 100.0).max(0.0);
+                    100.0 * (1.0 - (action.p_ref - p_target).abs() / 100.0).max(0.0);
                 w[0] * p_target.abs() * 0.01 + w[1] * r_accuracy - w[2] * 0.0
             }
             None => 0.0,
@@ -358,8 +358,8 @@ mod tests {
 
     fn make_action() -> ActionOutput {
         ActionOutput {
-            p_batt_set: -50.0,
-            q_batt_set: 10.0,
+            p_ref: -50.0,
+            k_droop: 10.0,
             load_shedding: 0.0,
             pv_limit: 1.0,
             confidence: 0.8,
@@ -481,8 +481,8 @@ mod tests {
         state.voltage_phase_c = 1.06;
 
         let action = ActionOutput {
-            p_batt_set: -50.0,
-            q_batt_set: 10.0,
+            p_ref: -50.0,
+            k_droop: 10.0,
             load_shedding: 0.0,
             pv_limit: 1.0,
             confidence: 0.8,

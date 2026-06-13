@@ -230,7 +230,7 @@ impl ModelManager {
 
         // 更新奖励计算器中的上一周期电池功率（用于下一周期 R_ramp 计算）
         if let Some(rc) = self.reward_calculator.read().await.as_ref() {
-            rc.update_last_p_batt(validated.p_batt_set);
+            rc.update_last_p_batt(validated.p_ref);
         }
 
         Ok(validated)
