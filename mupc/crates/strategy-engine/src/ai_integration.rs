@@ -17,6 +17,12 @@ pub struct AiIntegrator {
     status: Arc<RwLock<ModelStatus>>,
     /// 南向命令分发器（用于分发 pv_limit 和 load_shedding）
     south_dispatcher: Option<Arc<SouthCommandDispatcher>>,
+    /// v2.6 双参数模式：最后有效的 p_ref（通信中断时使用）
+    last_valid_p_ref: RwLock<Option<f64>>,
+    /// v2.6 双参数模式：最后有效的 k_droop（通信中断时使用）
+    last_valid_k_droop: RwLock<Option<f64>>,
+    /// v2.6 双参数模式：降级状态
+    fallback_active: RwLock<bool>,
 }
 
 impl AiIntegrator {
@@ -25,7 +31,55 @@ impl AiIntegrator {
             model_manager: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
             south_dispatcher: None,
+            last_valid_p_ref: RwLock::new(None),
+            last_valid_k_droop: RwLock::new(None),
+            fallback_active: RwLock::new(false),
         }
+    }
+
+    /// v2.6: 更新最后有效的双参数（由 intercore 调用）
+    pub async fn update_last_valid_params(&self, p_ref: f64, k_droop: f64) {
+        *self.last_valid_p_ref.write().await = Some(p_ref);
+        *self.last_valid_k_droop.write().await = Some(k_droop);
+    }
+
+    /// v2.6: 获取降级动作（使用最后有效的 p_ref 和 k_droop）
+    pub async fn get_fallback_action(&self) -> mupc_ai_engine::ActionOutput {
+        let p_ref = *self.last_valid_p_ref.read().await;
+        let k_droop = *self.last_valid_k_droop.read().await;
+
+        match (p_ref, k_droop) {
+            (Some(p), Some(k)) => {
+                tracing::info!("Fallback: using last valid p_ref={}, k_droop={}", p, k);
+                mupc_ai_engine::ActionOutput {
+                    p_ref: p,
+                    k_droop: k,
+                    load_shedding: 0.0, // 降级时不修改负荷
+                    pv_limit: 1.0,    // 降级时不限制光伏
+                    confidence: 0.0, // 降级模式置信度为 0
+                }
+            }
+            _ => {
+                tracing::warn!("No valid params available, using safe defaults");
+                mupc_ai_engine::ActionOutput {
+                    p_ref: 0.0,
+                    k_droop: 10.0, // 默认下垂系数
+                    load_shedding: 0.0,
+                    pv_limit: 1.0,
+                    confidence: 0.0,
+                }
+            }
+        }
+    }
+
+    /// v2.6: 设置降级状态
+    pub async fn set_fallback_active(&self, active: bool) {
+        *self.fallback_active.write().await = active;
+    }
+
+    /// v2.6: 获取降级状态
+    pub async fn is_fallback_active(&self) -> bool {
+        *self.fallback_active.read().await
     }
 
     /// 初始化并加载模型
