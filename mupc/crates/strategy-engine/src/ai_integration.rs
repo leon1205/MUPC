@@ -4,7 +4,9 @@
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
 use crate::south_command_sender::SouthCommandDispatcher;
-use mupc_ai_engine::{AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource};
+use mupc_ai_engine::{
+    AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource,
+};
 use mupc_intercore::{DualParamCommand, IntercoreClient};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -297,7 +299,17 @@ impl AiIntegrator {
     /// v2.9: 分发应急动作（不经过 RL 模型）
     ///
     /// 直接使用 RobustnessManager 生成的应急动作，发送到实时控制模块和南向设备。
-    async fn dispatch_robust_action(&self, action: &mupc_ai_engine::ActionOutput) -> Result<(), AiEngineError> {
+    async fn dispatch_robust_action(
+        &self,
+        action: &mupc_ai_engine::ActionOutput,
+    ) -> Result<(), AiEngineError> {
+        // 更新最后有效的双参数（用于通信中断时的降级）
+        *self.last_valid_p_ref.write().await = Some(action.p_ref);
+        *self.last_valid_k_droop.write().await = Some(action.k_droop);
+
+        // 设置降级状态
+        self.set_fallback_active(true).await;
+
         // 发送双参数到实时控制模块
         if let Some(ref client) = self.intercore_client {
             let cmd = DualParamCommand::new(
@@ -335,7 +347,9 @@ impl AiIntegrator {
                 }
             }
             if action.load_shedding > 0.0 {
-                let result = dispatcher.dispatch_load_shedding(action.load_shedding, 1).await;
+                let result = dispatcher
+                    .dispatch_load_shedding(action.load_shedding, 1)
+                    .await;
                 if !result.success {
                     tracing::warn!(
                         "Emergency load_shedding 分发失败: device={}, error={:?}",
