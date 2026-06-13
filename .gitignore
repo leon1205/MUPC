@@ -24,3 +24,6 @@ logs/
 *.tmp
 *.bak
 *-bk.mdanthropic.claude-code-*.vsix
+
+# Playwright MCP artifacts
+.playwright-mcp/
