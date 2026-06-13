@@ -68,6 +68,120 @@ impl ControlCmdPayload {
     }
 }
 
+/// 控制指令 JSON Payload v2.0（双参数模式）
+///
+/// v2.0 变更：
+/// - p_batt_set → p_ref（有功基准点）
+/// - q_batt_set → k_droop（电压-有功下垂系数）
+/// - 新增 frame_version 字段
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlCmdPayloadV2 {
+    #[serde(rename = "p_ref")]
+    pub p_ref: Option<f64>,
+    #[serde(rename = "k_droop")]
+    pub k_droop: Option<f64>,
+    #[serde(rename = "load_shedding")]
+    pub load_shedding: Option<f64>,
+    #[serde(rename = "pv_limit")]
+    pub pv_limit: Option<f64>,
+    #[serde(rename = "ai_ready")]
+    pub ai_ready: Option<bool>,
+    #[serde(rename = "strategy_mode")]
+    pub strategy_mode: Option<String>,
+    #[serde(rename = "timestamp_ms")]
+    pub timestamp_ms: Option<u64>,
+    /// 帧版本号，用于区分 v1.x 和 v2.0
+    #[serde(rename = "frame_version")]
+    pub frame_version: Option<u8>,
+}
+
+impl ControlCmdPayloadV2 {
+    pub const FRAME_VERSION: u8 = 2;
+
+    pub fn new() -> Self {
+        Self {
+            p_ref: None,
+            k_droop: None,
+            load_shedding: None,
+            pv_limit: None,
+            ai_ready: None,
+            strategy_mode: None,
+            timestamp_ms: None,
+            frame_version: Some(Self::FRAME_VERSION),
+        }
+    }
+
+    /// 从 JSON 字节解析
+    pub fn from_json(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+
+    /// 序列化为 JSON 字节
+    pub fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    /// 检测帧版本
+    pub fn detect_version(data: &[u8]) -> Result<u8, serde_json::Error> {
+        match Self::from_json(data) {
+            Ok(payload) => Ok(payload.frame_version.unwrap_or(1)),
+            Err(_) => Ok(1), // 解析失败假设为 v1.x
+        }
+    }
+}
+
+/// 核间通信状态（用于通信中断检测和降级）
+pub struct IntercoreConnectionState {
+    /// 最后收到的有效 p_ref
+    pub last_valid_p_ref: RwLock<Option<f64>>,
+    /// 最后收到的有效 k_droop
+    pub last_valid_k_droop: RwLock<Option<f64>>,
+    /// 最后心跳时间戳
+    pub last_heartbeat_ms: RwLock<u64>,
+    /// 连接状态
+    pub connected: RwLock<bool>,
+}
+
+impl IntercoreConnectionState {
+    pub fn new() -> Self {
+        Self {
+            last_valid_p_ref: RwLock::new(None),
+            last_valid_k_droop: RwLock::new(None),
+            last_heartbeat_ms: RwLock::new(0),
+            connected: RwLock::new(false),
+        }
+    }
+
+    /// 更新收到的双参数
+    pub async fn update_valid_params(&self, p_ref: f64, k_droop: f64) {
+        *self.last_valid_p_ref.write().await = Some(p_ref);
+        *self.last_valid_k_droop.write().await = Some(k_droop);
+    }
+
+    /// 获取最后有效的双参数（通信中断时使用）
+    pub async fn get_last_valid_params(&self) -> (Option<f64>, Option<f64>) {
+        let p_ref = *self.last_valid_p_ref.read().await;
+        let k_droop = *self.last_valid_k_droop.read().await;
+        (p_ref, k_droop)
+    }
+
+    /// 检查是否已收到有效参数
+    pub async fn has_valid_params(&self) -> bool {
+        self.last_valid_p_ref.read().await.is_some()
+            && self.last_valid_k_droop.read().await.is_some()
+    }
+
+    /// 设置连接状态
+    pub async fn set_connected(&self, connected: bool) {
+        *self.connected.write().await = connected;
+    }
+
+    /// 获取连接状态
+    pub async fn is_connected(&self) -> bool {
+        *self.connected.read().await
+    }
+}
+
 // ============================================================================
 // P2-16: 指令超时重试和断连缓存
 // ============================================================================
