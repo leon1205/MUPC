@@ -28,6 +28,7 @@ pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
 pub mod rknn_types;
 pub mod rl_model;
+pub mod robustness_manager;
 pub mod safety_config;
 
 pub use action_space::ActionSpaceConfig;
@@ -54,4 +55,5 @@ pub use online_updater::{DataPoint, OnlineUpdater};
 pub use reward_calculator::RewardCalculator;
 pub use rknn_runtime::RknnRuntime;
 pub use rl_model::{parse_action_output, ActionOutput, RLModel, SystemState};
+pub use robustness_manager::{AnomalyType, RobustnessManager};
 pub use safety_config::SafetyConfig;
