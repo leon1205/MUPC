@@ -1,0 +1,51 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e6]:
+    - generic [ref=e7]: AI优先，本地兜底
+    - generic [ref=e8]: MUPC AI引擎 v2.3 多场景独立模型架构
+  - generic [ref=e10]:
+    - generic [ref=e11]: v2.3 独立模型架构
+    - generic [ref=e12]:
+      - paragraph [ref=e13]:
+        - strong [ref=e14]: 核心决策：
+        - text: 1个通用RL模型覆盖5场景难以收敛，拆为5个独立场景模型专项训练（ADR-008），输入输出同形(48维→5维)
+      - paragraph [ref=e15]:
+        - strong [ref=e16]: 四层架构：
+        - text: 数据源层(5源并行) → 融合层(DataFusionEngine) → 决策层(RL双缓冲 + ActionValidator约束 + RewardCalculator) → 输出层(strategy-engine本地兜底)
+      - paragraph [ref=e17]:
+        - strong [ref=e18]: 5模式速览：
+        - text: MODE-01农网灌溉 | MODE-02自主套利 | MODE-03需量控制 | MODE-04 VPP | MODE-05极致绿色 — 双缓冲可互换，OTA按需推送
+    - generic [ref=e19]:
+      - generic [ref=e20]:
+        - generic [ref=e21]: < 2s
+        - generic [ref=e22]: 场景热切换 · 本地双缓冲
+      - generic [ref=e23]:
+        - generic [ref=e24]: < 60s
+        - generic [ref=e25]: OTA下载+切换
+      - generic [ref=e26]:
+        - generic [ref=e27]: < 120ms
+        - generic [ref=e28]: 完整决策周期
+      - generic [ref=e29]:
+        - generic [ref=e30]: < 100ms
+        - generic [ref=e31]: NPU推理延迟 · P99
+  - generic [ref=e33]:
+    - generic [ref=e34]: MODE-01 农网灌溉
+    - generic [ref=e35]:
+      - paragraph [ref=e36]:
+        - strong [ref=e37]: 优化目标：
+        - text: 最大化光伏消纳 + 电压治理(< 0.95 p.u.) + 防止变压器过载 — w3=2.0为5场景最高惩罚权重
+      - paragraph [ref=e38]:
+        - strong [ref=e39]: 核心痛点：
+        - text: 水泵启动产生冲击负荷需LSTM概率预测，变压器容量偏紧，电压骤降 <0.95 p.u. 需P/Q协同控制
+      - paragraph [ref=e40]:
+        - strong [ref=e41]: 适用工况：
+        - text: 灌溉季4月~9月，出厂预装默认场景，本地热切换 <2s，完整决策 <120ms
+    - generic [ref=e42]:
+      - generic [ref=e43]:
+        - generic [ref=e44]: w3 = 2.0
+        - generic [ref=e45]: 变压器过载惩罚 · 5场景最高
+      - generic [ref=e46]:
+        - generic [ref=e47]: < 0.95 p.u.
+        - generic [ref=e48]: 电压治理阈值
+  - contentinfo [ref=e49]:
+    - generic [ref=e50]: "STATUS: MODE-01 — AGRICULTURAL IRRIGATION"
+    - generic [ref=e51]: 1 / 2

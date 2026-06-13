@@ -1,0 +1,23 @@
+# MUPC AI 引擎动态配置
+# 对齐训练管线 v2.6 配置系统
+# 版本: v2.6-20260611
+
+version:
+  fingerprint: "v2.6-20260611"
+  source: "mupc-ai2"
+
+physical:
+  transformer_kva: 200.0
+  battery_capacity_kwh: 100.0
+  p_batt_max_kw: 50.0
+  load_shed_max_kw: 60.0
+
+safety:
+  soc_min: 0.10
+  soc_max: 0.90
+  overload_threshold: 0.85
+
+operational:
+  p_batt_ramp_limit_kw: 50.0
+  q_batt_ramp_limit_kvar: 30.0
+  pv_limit_min: 0.10

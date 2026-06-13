@@ -2,6 +2,7 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
+| v1.1 | 2026-06-10 | 架构师 | 当前版本 |
 | v1.0 | 2026-05-29 | 架构师 | 初版 |
 
 **合并来源：**
@@ -268,7 +269,7 @@ Level 3 (负载率 > 95%):
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `transformer_capacity` | `f64` | `500.0` | 变压器容量（kVA） |
+| `transformer_capacity` | `f64` | `200.0` | 变压器容量（kVA） |
 | `demand_factor` | `f64` | `0.85` | 需量因子 |
 | `warning_threshold` | `f64` | `0.80` | 预警阈值（Level 1 触发） |
 | `action_threshold` | `f64` | `0.90` | 行动阈值（Level 2 触发） |
@@ -800,7 +801,7 @@ pub struct PeakShavingConfig {
 ```rust
 #[derive(Debug, Clone)]
 pub struct DemandControlConfig {
-    pub transformer_capacity: f64,    // 默认: 500.0
+    pub transformer_capacity: f64,    // 默认: 200.0
     pub demand_factor: f64,           // 默认: 0.85
     pub warning_threshold: f64,       // 默认: 0.80
     pub action_threshold: f64,        // 默认: 0.90
@@ -920,7 +921,16 @@ tokio-test = "0.4"
 
 ---
 
-**文档状态：** 初版（v1.0）
-**合并来源：** 通信管理模块技术设计 v1.1 + Phase3A 实施计划 + 策略引擎 PRD v1.0
+**文档状态：** v1.1 当前版本
+**合并来源：** 通信管理模块技术设计 v1.1 + Phase3A 实施计划 + 策略引擎 PRD v1.1
 **对齐代码版本：** Strategy Engine Phase 3C（包括 ai_integration.rs）
 **产出时间：** 2026-05-29
+
+## v1.1 修订记录 (2026-06-10)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | 农网台区参数更新 | DemandControlConfig | 变压器容量 500kVA→200kVA |
+| 2 | 版本号更新 | 文档头部 | v1.0 → v1.1 |
+
+**修订依据：** 农网台区新规格落地：变压器 200kVA、光伏 150kW、储能 50kW/100kWh、居民负荷 60kW、农业冲击负荷最高 120kW。代码默认值已同步更新。
