@@ -126,7 +126,10 @@ pub fn parse_action_output(raw: &[f32], config: &ActionSpaceConfig) -> Option<Ac
 ///
 /// 输出格式: [p_batt_set, load_shedding, pv_limit, confidence]
 /// v1.x 单参数模式：p_batt_set 直接作为有功设定值
-pub fn parse_action_output_legacy(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutputLegacy> {
+pub fn parse_action_output_legacy(
+    raw: &[f32],
+    config: &ActionSpaceConfig,
+) -> Option<ActionOutputLegacy> {
     if raw.len() < 4 {
         return None;
     }

@@ -103,11 +103,7 @@ impl ActionValidator {
         if let Some(ref prev) = *last {
             let delta = (action.p_ref - prev.p_ref).abs();
             if delta > self.config.p_batt_ramp_limit_kw {
-                let sign = if action.p_ref > prev.p_ref {
-                    1.0
-                } else {
-                    -1.0
-                };
+                let sign = if action.p_ref > prev.p_ref { 1.0 } else { -1.0 };
                 validated.p_ref = prev.p_ref + sign * self.config.p_batt_ramp_limit_kw;
                 violations.push(ViolationRecord {
                     rule: "ACT-01",
@@ -128,8 +124,7 @@ impl ActionValidator {
                     } else {
                         -1.0
                     };
-                    validated.k_droop =
-                        prev.k_droop + sign * self.config.q_batt_ramp_limit_kvar;
+                    validated.k_droop = prev.k_droop + sign * self.config.q_batt_ramp_limit_kvar;
                     violations.push(ViolationRecord {
                         rule: "ACT-02",
                         field: "k_droop",
@@ -272,11 +267,7 @@ impl ActionValidator {
         if let Some(ref prev) = *last {
             let delta = (action.p_ref - prev.p_ref).abs();
             if delta > self.config.p_batt_ramp_limit_kw {
-                let sign = if action.p_ref > prev.p_ref {
-                    1.0
-                } else {
-                    -1.0
-                };
+                let sign = if action.p_ref > prev.p_ref { 1.0 } else { -1.0 };
                 validated.p_ref = prev.p_ref + sign * self.config.p_batt_ramp_limit_kw;
                 violations.push(ViolationRecord {
                     rule: "ACT-DUAL-03",

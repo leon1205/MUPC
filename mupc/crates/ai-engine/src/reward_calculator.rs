@@ -300,8 +300,7 @@ impl RewardCalculator {
         let w = &self.weights.virtual_power_plant;
         match state.dispatch_p_set {
             Some(p_target) => {
-                let r_accuracy =
-                    100.0 * (1.0 - (action.p_ref - p_target).abs() / 100.0).max(0.0);
+                let r_accuracy = 100.0 * (1.0 - (action.p_ref - p_target).abs() / 100.0).max(0.0);
                 w[0] * p_target.abs() * 0.01 + w[1] * r_accuracy - w[2] * 0.0
             }
             None => 0.0,

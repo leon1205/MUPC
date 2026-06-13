@@ -55,8 +55,8 @@ impl AiIntegrator {
                     p_ref: p,
                     k_droop: k,
                     load_shedding: 0.0, // 降级时不修改负荷
-                    pv_limit: 1.0,    // 降级时不限制光伏
-                    confidence: 0.0, // 降级模式置信度为 0
+                    pv_limit: 1.0,      // 降级时不限制光伏
+                    confidence: 0.0,    // 降级模式置信度为 0
                 }
             }
             _ => {
