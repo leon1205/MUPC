@@ -38,6 +38,15 @@ pub struct RewardCalculator {
     soc_critical: f64,
     voltage_penalty_high: f64,
     voltage_penalty_low: f64,
+    // v2.8 新增配置参数
+    /// 上一周期下垂系数 (k_droop)，用于 R_smooth 计算
+    last_k_droop: RwLock<f64>,
+    /// 弃光差异化：高电压时放电惩罚系数
+    pv_high_voltage_penalty: f64,
+    /// 下垂系数平滑惩罚系数 λ
+    smooth_lambda: f64,
+    /// 下垂系数硬上限 K_MAX
+    k_droop_max: f64,
 }
 
 impl RewardCalculator {
@@ -56,6 +65,10 @@ impl RewardCalculator {
             soc_critical: 0.10,
             voltage_penalty_high: 2.0,
             voltage_penalty_low: 1.0,
+            last_k_droop: RwLock::new(10.0),
+            pv_high_voltage_penalty: 20.0,
+            smooth_lambda: 10.0,
+            k_droop_max: 30.0,
         }
     }
 
@@ -78,6 +91,10 @@ impl RewardCalculator {
             soc_critical: cfg.soc_critical,
             voltage_penalty_high: cfg.voltage_penalty_high,
             voltage_penalty_low: cfg.voltage_penalty_low,
+            last_k_droop: RwLock::new(10.0),
+            pv_high_voltage_penalty: 20.0,
+            smooth_lambda: 10.0,
+            k_droop_max: 30.0,
         }
     }
 
@@ -91,7 +108,7 @@ impl RewardCalculator {
         match mode {
             RunningMode::SeasonalLoadManagement => {
                 let prev = *self.last_p_batt_set.read().unwrap();
-                self.calc_agri_v2_5(state, action.p_ref, prev)
+                self.calc_agri_v2_8(state, action, prev)
             }
             RunningMode::CommercialArbitrage => self.calc_arbitrage(action, state),
             RunningMode::DemandControl => self.calc_demand(action, state),
@@ -103,6 +120,11 @@ impl RewardCalculator {
     /// 更新上一周期电池功率设定值（在决策周期结束时调用）
     pub fn update_last_p_batt(&self, p_batt_set: f64) {
         *self.last_p_batt_set.write().unwrap() = p_batt_set;
+    }
+
+    /// 更新上一周期下垂系数（在决策周期结束时调用）
+    pub fn update_last_k_droop(&self, k_droop: f64) {
+        *self.last_k_droop.write().unwrap() = k_droop;
     }
 
     /// SCENE-01: 农网灌溉
@@ -128,21 +150,19 @@ impl RewardCalculator {
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
     }
 
-    /// SCENE-01: 台区季节性负荷模式 v2.6
-    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage - w5*R_ramp - w6*R_voltage_slope
-    fn calc_agri_v2_5(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
+    /// SCENE-01: 台区季节性负荷模式 v2.8
+    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo + w4*R_PQ_coordination - w5*R_ramp - w6*R_voltage_slope - w7*R_smooth
+    fn calc_agri_v2_8(
+        &self,
+        state: &FusedSystemState,
+        action: &ActionOutput,
+        prev_p_batt: f64,
+    ) -> f64 {
         let w = &self.weights.seasonal_load_management;
-
-        // 1. 弃光奖励（含电压安全前置条件）
-        // v_avg >= voltage_high_limit 时置零
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
-        let r_pv = if v_avg >= self.voltage_high_limit {
-            0.0 // 电压偏高，弃光无意义
-        } else {
-            (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
-                .min(1.0)
-                * 100.0
-        };
+
+        // 1. 弃光奖励（含高电压差异化）
+        let r_pv = self.calc_pv_reward_v2_8(state, action.p_ref, v_avg);
 
         // 2. 自适应损耗系数 α(s)
         let alpha = self.compute_alpha(state);
@@ -154,22 +174,101 @@ impl RewardCalculator {
         // 4. 变压器过载
         let p_trafo = self.overload_penalty(state.transformer_load);
 
-        // 5. 条件触发电压惩罚
-        let p_voltage = self.conditional_voltage_penalty(state);
+        // 5. P-Q 协同度奖励（v2.8 核心）
+        let r_pq = self.calc_pq_coordination(state, action.p_ref);
 
         // 6. 变化率惩罚
-        let r_ramp = w[4] * (p_batt_set - prev_p_batt).abs() / self.battery_capacity_kwh;
+        let r_ramp = w[4] * (action.p_ref - prev_p_batt).abs() / self.battery_capacity_kwh;
 
-        // 7. v2.6 新增：电压变化斜率惩罚 R_voltage_slope = |ΔV|
+        // 7. 电压变化斜率惩罚
         let prev_v = *self.last_voltage.read().unwrap();
         let r_voltage_slope = (v_avg - prev_v).abs();
 
-        w[0] * r_pv
-            - w[1] * p_batt_deg
-            - w[2] * p_trafo
-            - w[3] * p_voltage
+        // 8. 下垂系数平滑惩罚（v2.8 新增）
+        let r_smooth = self.calc_smooth_penalty(action.k_droop);
+
+        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq
             - w[4] * r_ramp
             - w[5] * r_voltage_slope
+            - w[6] * r_smooth
+    }
+
+    /// v2.8 弃光奖励（含高电压差异化）
+    fn calc_pv_reward_v2_8(&self, state: &FusedSystemState, p_ref: f64, v_avg: f64) -> f64 {
+        if v_avg >= self.voltage_high_limit {
+            // 高电压场景：检查 AI 动作方向
+            if p_ref < 0.0 {
+                // 充电消纳光伏，正常奖励
+                (state.pv_power.max(0.0)
+                    / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+                    .min(1.0)
+                    * 100.0
+            } else {
+                // 高电压时放电，严厉惩罚
+                -self.pv_high_voltage_penalty
+            }
+        } else {
+            // 正常电压，标准计算
+            (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+                .min(1.0)
+                * 100.0
+        }
+    }
+
+    /// v2.8 P-Q 协同度奖励
+    ///
+    /// 当 |V_deviation| > 5% 时：
+    /// - Q 有裕度（q_margin > 10%）：奖励"偷懒"省电池策略
+    /// - Q 已饱和（q_margin <= 10%）：奖励正确出手（低压放电/高压充电）
+    fn calc_pq_coordination(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_dev = (v_avg - 1.0).abs();
+
+        // 电压在死区内，无 P-Q 协同问题
+        if v_dev <= 0.05 {
+            return 0.0;
+        }
+
+        let q_margin = state.q_realtime_margin;
+        const Q_THRESHOLD: f64 = 0.10;
+        const P_THRESHOLD: f64 = 5.0;
+
+        if q_margin > Q_THRESHOLD {
+            // Q 有裕度：AI 最优解是"偷懒"省电池
+            if p_ref.abs() < P_THRESHOLD {
+                50.0 // 大额奖励"偷懒"
+            } else {
+                -5.0 // 轻微惩罚（不必要的电池动作）
+            }
+        } else {
+            // Q 已饱和：AI 必须正确出手
+            let v_low = v_avg < 1.0;
+            let v_high = v_avg > 1.0;
+
+            if v_low && p_ref < 0.0 {
+                50.0 // 低电压 + 放电（正确）
+            } else if v_high && p_ref > 0.0 {
+                50.0 // 高电压 + 充电（正确）
+            } else if v_low && p_ref >= 0.0 {
+                -30.0 // 低电压 + 不放电（失职）
+            } else if v_high && p_ref <= 0.0 {
+                -30.0 // 高电压 + 不充电（失职）
+            } else {
+                0.0
+            }
+        }
+    }
+
+    /// v2.8 下垂系数平滑惩罚
+    ///
+    /// R_smooth = -|Δk_droop| - λ·max(0, k_droop - K_MAX)
+    /// 防止 AI 设置极大 k_droop 导致系统振荡
+    fn calc_smooth_penalty(&self, k_droop: f64) -> f64 {
+        let last_k = *self.last_k_droop.read().unwrap();
+        let delta_k = (k_droop - last_k).abs();
+        let excess = (k_droop - self.k_droop_max).max(0.0);
+
+        -(delta_k + self.smooth_lambda * excess)
     }
 
     /// 计算自适应损耗系数 α(s)
@@ -410,7 +509,7 @@ mod tests {
     #[test]
     fn test_weights_lookup() {
         let w = SceneWeights::default();
-        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 6);
+        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 7);
         assert_eq!(w.lookup(RunningMode::CommercialArbitrage).len(), 2);
     }
 

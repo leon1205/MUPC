@@ -240,8 +240,8 @@ impl Default for RewardThresholdConfig {
 /// 场景权重映射
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneWeights {
-    /// 台区季节性负荷: [w1光伏消纳, w2电池损耗, w3变压器, w4电压质量, w5功率变化率, w6电压斜率]
-    pub seasonal_load_management: [f64; 6],
+    /// 台区季节性负荷: [w1光伏消纳, w2电池损耗, w3变压器, w4PQ协同度, w5功率变化率, w6电压斜率, w7下垂平滑]
+    pub seasonal_load_management: [f64; 7], // 6 → 7
     pub commercial_arbitrage: [f64; 2],
     pub demand_control: [f64; 2],
     pub virtual_power_plant: [f64; 3],
@@ -251,7 +251,7 @@ pub struct SceneWeights {
 impl Default for SceneWeights {
     fn default() -> Self {
         Self {
-            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5],
+            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3], // w7=0.3
             commercial_arbitrage: [1.0, 1.0],
             demand_control: [1.0, 0.5],
             virtual_power_plant: [1.0, 2.0, 1.0],
