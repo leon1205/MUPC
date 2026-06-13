@@ -4,7 +4,7 @@
 //! 用于在线微调的模型权重更新和 Web UI 决策质量展示。
 //!
 //! 5 种场景奖励函数：
-//! - MODE-01 农网灌溉: R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage - w5*R_ramp - w6*R_voltage_slope
+//! - MODE-01 农网灌溉: R = w1*R_pv - w2*P_batt_deg - w3*P_trafo + w4*R_PQ_coordination - w5*R_ramp - w6*R_voltage_slope - w7*R_smooth
 //! - MODE-02 自主套利: R = w1*R_price - w2*P_batt_deg
 //! - MODE-03 需量控制: R = w1*R_demand - w2*P_comfort
 //! - MODE-04 虚拟电厂: R = w1*R_ancillary + w2*R_accuracy - w3*P_deadline
@@ -36,7 +36,11 @@ pub struct RewardCalculator {
     q_margin_threshold: f64,
     voltage_high_limit: f64,
     soc_critical: f64,
+    /// 高电压侧电压惩罚系数（v2.8废弃，仅保留用于兼容）
+    #[allow(dead_code)]
     voltage_penalty_high: f64,
+    /// 低电压侧电压惩罚系数（v2.8废弃，仅保留用于兼容）
+    #[allow(dead_code)]
     voltage_penalty_low: f64,
     // v2.8 新增配置参数
     /// 上一周期下垂系数 (k_droop)，用于 R_smooth 计算
@@ -92,6 +96,8 @@ impl RewardCalculator {
             voltage_penalty_high: cfg.voltage_penalty_high,
             voltage_penalty_low: cfg.voltage_penalty_low,
             last_k_droop: RwLock::new(10.0),
+            // v2.8 参数目前硬编码，暂不支持通过 RewardThresholdConfig 自定义
+            // TODO(v2.10): 扩展 RewardThresholdConfig 以支持 v2.8 参数自定义
             pv_high_voltage_penalty: 20.0,
             smooth_lambda: 10.0,
             k_droop_max: 30.0,
@@ -127,8 +133,8 @@ impl RewardCalculator {
         *self.last_k_droop.write().unwrap() = k_droop;
     }
 
-    /// SCENE-01: 农网灌溉
-    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo - w4*P_voltage_deviation - w5*R_ramp
+    /// 农网灌溉 (legacy, v2.8废弃)
+    #[allow(dead_code)]
     fn calc_agri(&self, state: &FusedSystemState, p_batt_set: f64, prev_p_batt: f64) -> f64 {
         let w = &self.weights.seasonal_load_management;
         let r_pv = (state.pv_power.max(0.0)
@@ -298,8 +304,8 @@ impl RewardCalculator {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 条件触发电压惩罚
-    /// 仅当 q_realtime_margin <= 阈值 且 电压越限连续2步时才返回惩罚值
+    /// 条件触发电压惩罚 (legacy, v2.8废弃)
+    #[allow(dead_code)]
     fn conditional_voltage_penalty(&self, state: &FusedSystemState) -> f64 {
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
         let dev = (v_avg - 1.0).abs();
@@ -336,7 +342,8 @@ impl RewardCalculator {
         }
     }
 
-    /// 电压惩罚（±5% 死区，越限连续2步才触发）
+    /// 电压惩罚（±5% 死区）(legacy, v2.8废弃)
+    #[allow(dead_code)]
     fn voltage_penalty_with_deadband(&self, v_avg: f64) -> f64 {
         const V_DEAD: f64 = 0.05;
         const V_REF: f64 = 1.0;
@@ -652,5 +659,77 @@ mod tests {
 
         let alpha = calc.compute_alpha(&state);
         assert!((alpha - 3.0).abs() < 1e-6, "SOC极低保护优先级最高");
+    }
+
+    // ===== v2.8 专项测试 =====
+
+    #[test]
+    fn test_v2_8_pq_coordination_q_margin_sufficient_idle() {
+        // q_margin > 10%, p_ref near 0 → reward 50 (偷懒)
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 1.08;
+        state.voltage_phase_b = 1.08;
+        state.voltage_phase_c = 1.08;
+        state.q_realtime_margin = 0.5; // > 10%
+
+        let r = calc.calc_pq_coordination(&state, 0.0); // p_ref near 0
+        assert!((r - 50.0).abs() < 1e-6, "偷懒应奖励50");
+    }
+
+    #[test]
+    fn test_v2_8_pq_coordination_q_margin_exhausted_low_voltage_discharge() {
+        // q_margin <= 10%, low voltage, p_ref < 0 → reward 50 (correct)
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 0.92;
+        state.voltage_phase_b = 0.92;
+        state.voltage_phase_c = 0.92;
+        state.q_realtime_margin = 0.05; // <= 10%
+
+        let r = calc.calc_pq_coordination(&state, -10.0); // p_ref < 0 (discharge)
+        assert!((r - 50.0).abs() < 1e-6, "低电压放电应奖励50");
+    }
+
+    #[test]
+    fn test_v2_8_smooth_penalty_exceed_k_max() {
+        // k_droop > k_droop_max → penalty includes λ * excess
+        // 设置 last_k_droop = 10.0, k_droop = 40.0, k_droop_max = 30.0, smooth_lambda = 10.0
+        // delta_k = |40 - 10| = 30
+        // excess = max(0, 40 - 30) = 10
+        // R_smooth = -(30 + 10 * 10) = -130
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.calc_smooth_penalty(40.0);
+        assert!(r < -100.0, "超过K_MAX应有严厉惩罚");
+    }
+
+    #[test]
+    fn test_v2_8_pv_high_voltage_discharge_penalty() {
+        // v_avg >= voltage_high_limit, p_ref > 0 → penalty -20
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.pv_power = 100.0;
+        state.grid_power = 10.0;
+        state.voltage_phase_a = 1.06;
+        state.voltage_phase_b = 1.06;
+        state.voltage_phase_c = 1.06;
+
+        let r = calc.calc_pv_reward_v2_8(&state, 10.0, 1.06); // p_ref > 0 (discharge)
+        assert!((r - (-20.0)).abs() < 1e-6, "高电压放电应惩罚-20");
+    }
+
+    #[test]
+    fn test_v2_8_pv_high_voltage_charge_normal() {
+        // v_avg >= voltage_high_limit, p_ref < 0 → normal reward
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.pv_power = 100.0;
+        state.grid_power = 10.0;
+        state.voltage_phase_a = 1.06;
+        state.voltage_phase_b = 1.06;
+        state.voltage_phase_c = 1.06;
+
+        let r = calc.calc_pv_reward_v2_8(&state, -10.0, 1.06); // p_ref < 0 (charge)
+        assert!(r > 0.0, "高电压充电应正常奖励");
     }
 }
