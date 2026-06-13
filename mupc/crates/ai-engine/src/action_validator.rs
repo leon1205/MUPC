@@ -1,13 +1,13 @@
 //! 动作约束校验器
 //!
-//! 对 RL 模型输出的 ActionOutput 执行 5 条物理约束校验，
+//! 对 RL 模型输出的 ActionOutput 执行约束校验，
 //! 违反时自动 clamp 到安全边界并记录 WARN 日志。
 //!
 //! v2.4 分层控制架构说明：
 //! - q_batt_set 由实时控制模块根据电压闭环管理，不由 AI 控制
-//! - ACT-02（q_batt 变化率）和 ACT-03（视在功率含 q_batt）不再适用于 AI 输出
 //! - v2.4 模式下这两条规则被跳过，仅保留 ACT-01/04/05
 //! - v2.5 动作空间参数可配置化：值域 clamp 使用 ActionSpaceConfig
+//! - v2.6 双参数模式：新增 ACT-DUAL-01~04 校验规则
 
 use crate::action_space::ActionSpaceConfig;
 use crate::config::ActionConstraintConfig;
@@ -20,6 +20,10 @@ pub struct ActionValidator {
     last_action: RwLock<Option<ActionOutput>>,
     /// v2.4 分层控制架构：q_batt_set 由实时控制模块管理，跳过相关约束
     v2_4_mode: bool,
+    /// v2.6 双参数模式：k_droop 范围（由实时控制模块提供）
+    droop_range: RwLock<(f64, f64)>,
+    /// v2.6 双参数模式：启用 ACT-DUAL-01~04 校验
+    dual_mode: bool,
 }
 
 /// 约束违规记录
@@ -38,6 +42,8 @@ impl ActionValidator {
             config,
             last_action: RwLock::new(None),
             v2_4_mode: false,
+            droop_range: RwLock::new((-100.0, 100.0)),
+            dual_mode: false,
         }
     }
 
@@ -47,7 +53,32 @@ impl ActionValidator {
             config,
             last_action: RwLock::new(None),
             v2_4_mode: true,
+            droop_range: RwLock::new((-100.0, 100.0)),
+            dual_mode: false,
         }
+    }
+
+    /// 创建 v2.6 双参数模式校验器（启用 ACT-DUAL-01~04）
+    pub fn new_dual(config: ActionConstraintConfig, k_droop_min: f64, k_droop_max: f64) -> Self {
+        Self {
+            config,
+            last_action: RwLock::new(None),
+            v2_4_mode: true,
+            droop_range: RwLock::new((k_droop_min, k_droop_max)),
+            dual_mode: true,
+        }
+    }
+
+    /// 更新 k_droop 范围（由 intercore 从实时控制模块获取后调用）
+    pub fn update_droop_range(&self, k_min: f64, k_max: f64) {
+        let mut range = self.droop_range.write().unwrap();
+        *range = (k_min, k_max);
+        tracing::debug!("Updated k_droop range: [{}, {}]", k_min, k_max);
+    }
+
+    /// 获取当前 k_droop 范围
+    pub fn get_droop_range(&self) -> (f64, f64) {
+        *self.droop_range.read().unwrap()
     }
 
     /// 校验动作输出，执行约束规则
@@ -173,6 +204,118 @@ impl ActionValidator {
             .load_shedding
             .clamp(0.0, action_space_config.max_load_shedding);
         validated.pv_limit = validated.pv_limit.clamp(0.0, 1.0);
+        validated.confidence = validated.confidence.clamp(0.0, 1.0);
+
+        *self.last_action.write().unwrap() = Some(validated.clone());
+        (validated, violations)
+    }
+
+    /// v2.6 双参数模式校验（ACT-DUAL-01~04）
+    ///
+    /// ACT-DUAL-01: p_ref ∈ [-max_batt_discharge_power, max_batt_charge_power]
+    /// ACT-DUAL-02: k_droop ∈ [k_droop_min, k_droop_max]
+    /// ACT-DUAL-03: Δp_ref 变化率 <= p_batt_ramp_limit_kw / 步
+    /// ACT-DUAL-04: 当 dispatch_p_set 有效时，p_ref 绝对值不得超过 dispatch_p_set 绝对值
+    pub fn validate_dual(
+        &self,
+        action: &ActionOutput,
+        dispatch_p_set: Option<f64>,
+        is_anti_reverse: bool,
+        action_space_config: &ActionSpaceConfig,
+    ) -> (ActionOutput, Vec<ViolationRecord>) {
+        let mut validated = action.clone();
+        let mut violations = Vec::new();
+        let last = self.last_action.read().unwrap();
+
+        // ACT-DUAL-01: p_ref 值域约束
+        let p_ref_min = -action_space_config.max_batt_discharge_power;
+        let p_ref_max = action_space_config.max_batt_charge_power;
+        if validated.p_ref < p_ref_min {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-01",
+                field: "p_ref",
+                original: action.p_ref,
+                clamped: p_ref_min,
+            });
+            validated.p_ref = p_ref_min;
+        } else if validated.p_ref > p_ref_max {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-01",
+                field: "p_ref",
+                original: action.p_ref,
+                clamped: p_ref_max,
+            });
+            validated.p_ref = p_ref_max;
+        }
+
+        // ACT-DUAL-02: k_droop 值域约束
+        let (k_min, k_max) = *self.droop_range.read().unwrap();
+        if validated.k_droop < k_min {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-02",
+                field: "k_droop",
+                original: action.k_droop,
+                clamped: k_min,
+            });
+            validated.k_droop = k_min;
+        } else if validated.k_droop > k_max {
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-02",
+                field: "k_droop",
+                original: action.k_droop,
+                clamped: k_max,
+            });
+            validated.k_droop = k_max;
+        }
+
+        // ACT-DUAL-03: p_ref 变化率约束
+        if let Some(ref prev) = *last {
+            let delta = (action.p_ref - prev.p_ref).abs();
+            if delta > self.config.p_batt_ramp_limit_kw {
+                let sign = if action.p_ref > prev.p_ref {
+                    1.0
+                } else {
+                    -1.0
+                };
+                validated.p_ref = prev.p_ref + sign * self.config.p_batt_ramp_limit_kw;
+                violations.push(ViolationRecord {
+                    rule: "ACT-DUAL-03",
+                    field: "p_ref",
+                    original: action.p_ref,
+                    clamped: validated.p_ref,
+                });
+            }
+        }
+
+        // ACT-DUAL-04: 调度指令权限约束
+        if let Some(dp) = dispatch_p_set {
+            if validated.p_ref.abs() > dp.abs() {
+                let sign = validated.p_ref.signum();
+                validated.p_ref = sign * dp.abs();
+                violations.push(ViolationRecord {
+                    rule: "ACT-DUAL-04",
+                    field: "p_ref",
+                    original: action.p_ref,
+                    clamped: validated.p_ref,
+                });
+            }
+        }
+
+        // ACT-DUAL-05: pv_limit 下限（防逆流场景除外）
+        if !is_anti_reverse && validated.pv_limit < self.config.pv_limit_min {
+            validated.pv_limit = self.config.pv_limit_min;
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-05",
+                field: "pv_limit",
+                original: action.pv_limit,
+                clamped: validated.pv_limit,
+            });
+        }
+
+        // load_shedding 和 confidence 最终 clamp
+        validated.load_shedding = validated
+            .load_shedding
+            .clamp(0.0, action_space_config.max_load_shedding);
         validated.confidence = validated.confidence.clamp(0.0, 1.0);
 
         *self.last_action.write().unwrap() = Some(validated.clone());
