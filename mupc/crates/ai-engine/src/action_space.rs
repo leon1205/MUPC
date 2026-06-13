@@ -38,6 +38,10 @@ pub struct ActionSpaceConfig {
     pub soc_max: f64,
     /// 变压器过载阈值，从 YAML 锁定但可被 DB 覆盖
     pub overload_threshold: f64,
+    /// 电压-有功下垂系数下限 (kW/V)
+    pub k_droop_min: Option<f64>,
+    /// 电压-有功下垂系数上限 (kW/V)
+    pub k_droop_max: Option<f64>,
 }
 
 impl ActionSpaceConfig {
@@ -118,6 +122,8 @@ impl ActionSpaceConfig {
             soc_min: 0.10,
             soc_max: 0.90,
             overload_threshold: 0.85,
+            k_droop_min: Some(-100.0),
+            k_droop_max: Some(100.0),
         }
     }
 }
@@ -141,6 +147,8 @@ mod tests {
             soc_min: 0.10,
             soc_max: 0.90,
             overload_threshold: 0.85,
+            k_droop_min: Some(-100.0),
+            k_droop_max: Some(100.0),
         }
     }
 

@@ -121,6 +121,8 @@ impl DynamicConfigLoader {
             soc_min: r.soc_min,
             soc_max: r.soc_max,
             overload_threshold: r.overload_threshold,
+            k_droop_min: Some(-100.0),
+            k_droop_max: Some(100.0),
         }))
     }
 
@@ -152,6 +154,8 @@ impl DynamicConfigLoader {
                 soc_min: yaml.safety.soc_min,
                 soc_max: yaml.safety.soc_max,
                 overload_threshold: yaml.safety.overload_threshold,
+                k_droop_min: Some(-100.0),
+                k_droop_max: Some(100.0),
             };
             // 异步写入 DB（不阻塞）
             // 注意：update_action_space_config_full 在 Task 6 中添加
@@ -193,6 +197,9 @@ impl DynamicConfigLoader {
             p_batt_ramp_limit_kw: db.p_batt_ramp_limit_kw,
             q_batt_ramp_limit_kvar: db.q_batt_ramp_limit_kvar,
             pv_limit_min: db.pv_limit_min,
+            // v2.6 新增字段：来自 DB（可覆盖），无则用默认值
+            k_droop_min: db.k_droop_min,
+            k_droop_max: db.k_droop_max,
         }
     }
 

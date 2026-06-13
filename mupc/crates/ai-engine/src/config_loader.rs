@@ -133,6 +133,8 @@ impl ConfigLoader {
             soc_min: r.soc_min,
             soc_max: r.soc_max,
             overload_threshold: r.overload_threshold,
+            k_droop_min: Some(-100.0),
+            k_droop_max: Some(100.0),
         }))
     }
 
