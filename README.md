@@ -15,7 +15,7 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 | **北向通信** | 与调度主站（IEC 104）、配电自动化（IEC 61850）、物联平台（MQTT）通信 |
 | **南向通信** | 与台区设备（TTU、光伏逆变器、充电桩、柔性负荷）通信 |
 | **本地策略引擎** | 削峰填谷、需量控制、防逆流 — AI 失效时的兜底保障 |
-| **AI 边缘优化引擎** | LSTM 时序预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 |
+| **AI 边缘优化引擎** | LSTM 时序预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 + 自适应权重优化器（v2.11） |
 | **OTA 升级** | 固件与 AI 模型的远程更新与版本管理 |
 
 ---
@@ -27,7 +27,7 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 | **编程语言** | Rust >= 1.75 |
 | **异步运行时** | Tokio |
 | **网络框架** | Tower + Axum |
-| **AI 推理** | RKNN Runtime (RK3588 NPU, 6 TOPS) |
+| **AI 推理** | RKNN Runtime (RK3588 NPU, 6 TOPS) + LSTM 分位数预测（v2.11） |
 | **目标平台** | Linux (openEuler 22.03+), ARM64 |
 | **硬件** | Rockchip RK3588 |
 | **许可证** | MIT |
@@ -131,6 +131,10 @@ cargo build --release        # 发布构建
 |-------|------|------|
 | Phase 1 | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
 | Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理） | ✅ 完成 |
+| Phase 3C 补充 | 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验） | ✅ 完成 |
+| v2.7 ~ v2.9 | 双参数下垂控制、P-Q 协同度奖励、RobustnessManager + 应急策略 | ✅ 完成 |
+| v2.10 | 安全增强（SafetyOverride + q_realtime_margin 数据通道） | ✅ 完成 |
+| v2.11 | 自适应权重优化器（NSGA-II）+ 冲击负荷概率预测（LSTM 分位数预测 P10/P50/P90） | ✅ 完成 |
 | Phase 2+ | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密 | 规划中 |
 | Phase 2+ | 南向通信（RS485/HPLC）、OTA 升级、安全启动 | 规划中 |
 
