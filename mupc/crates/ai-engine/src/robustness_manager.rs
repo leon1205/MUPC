@@ -207,7 +207,10 @@ mod tests {
         // 0.85 exactly - should NOT trigger sag (threshold is < 0.85)
         let state = make_state(0.85, 0.5);
         let anomalies = rm.detect_anomaly(&state);
-        assert!(!anomalies.contains(&AnomalyType::VoltageSag), "0.85 是阈值边界，不应触发");
+        assert!(
+            !anomalies.contains(&AnomalyType::VoltageSag),
+            "0.85 是阈值边界，不应触发"
+        );
     }
 
     #[test]
@@ -216,7 +219,10 @@ mod tests {
         // 1.15 exactly - should NOT trigger surge (threshold is > 1.15)
         let state = make_state(1.15, 0.5);
         let anomalies = rm.detect_anomaly(&state);
-        assert!(!anomalies.contains(&AnomalyType::VoltageSurge), "1.15 是阈值边界，不应触发");
+        assert!(
+            !anomalies.contains(&AnomalyType::VoltageSurge),
+            "1.15 是阈值边界，不应触发"
+        );
     }
 
     #[test]

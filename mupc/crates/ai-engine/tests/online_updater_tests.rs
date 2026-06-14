@@ -45,7 +45,7 @@ mod tests {
         use mupc_ai_engine::mode_selector::RunningMode;
 
         updater.add_sample_for_scene(
-            RunningMode::AgriculturalIrrigation,
+            RunningMode::SeasonalLoadManagement,
             DataPoint::new(1, vec![1.0], vec![0.1]),
         );
         updater.add_sample_for_scene(
@@ -54,7 +54,7 @@ mod tests {
         );
 
         assert_eq!(
-            updater.scene_sample_count(RunningMode::AgriculturalIrrigation),
+            updater.scene_sample_count(RunningMode::SeasonalLoadManagement),
             1
         );
         assert_eq!(

@@ -52,8 +52,8 @@ mod tests {
         let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
         let cfg = ActionSpaceConfig::default_config();
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert_eq!(action.p_batt_set, 100.0);
-        assert_eq!(action.q_batt_set, 50.0);
+        assert_eq!(action.p_ref, 100.0);
+        assert_eq!(action.k_droop, 50.0);
         assert_eq!(action.load_shedding, 10.0);
         assert_eq!(action.pv_limit, 0.8);
         assert_eq!(action.confidence, 0.9);
