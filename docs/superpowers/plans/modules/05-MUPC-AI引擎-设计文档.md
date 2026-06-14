@@ -722,11 +722,11 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 算法类型由 `RlConfig.algorithm` 指定，训练阶段在 x86 服务器完成，部署阶段仅执行推理。
 
-### 4.3 完整状态空间表（7 大类，29 个字段，v2.5）
+### 4.3 完整状态空间表（10 大类，59 维，v2.11）
 
 | 维度 | 字段名 | 类型 | 取值范围 | 单位 | 说明 |
 |------|--------|------|----------|------|------|
-| **D1-实时（v2.5新增 q_realtime_margin）** | battery_soc | f64 | [0.0, 1.0] | - | 电池荷电状态 |
+| **D1-实时** | battery_soc | f64 | [0.0, 1.0] | - | 电池荷电状态 |
 | | pv_power | f64 | [-1000.0, 1000.0] | kW | 光伏出力 |
 | | load_power | f64 | [-1000.0, 1000.0] | kW | 负荷功率 |
 | | grid_power | f64 | [-1000.0, 1000.0] | kW | 电网交换功率 |
@@ -735,12 +735,13 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | voltage_phase_a | f64 | [0.8, 1.2] | p.u. | A 相电压标幺值 |
 | | voltage_phase_b | f64 | [0.8, 1.2] | p.u. | B 相电压标幺值 |
 | | voltage_phase_c | f64 | [0.8, 1.2] | p.u. | C 相电压标幺值 |
-| | **q_realtime_margin** | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（v2.5新增，0=打满，1=空闲）|
-| **D2-预测** | pv_forecast_15min | Vec\<f64\> | 15~30 维 | kW | 光伏预测 |
-| | load_forecast_15min | Vec\<f64\> | 15~30 维 | kW | 负荷预测 |
+| **D2-预测** | pv_forecast_15min | Vec\<f64\> | 15 维 | kW | 光伏 15 分钟预测 |
+| | load_forecast_15min | Vec\<f64\> | 15 维 | kW | 负荷 15 分钟预测 |
 | **D3-电价** | current_electricity_price | f64 | [0.0, 2.0] | 元/kWh | 当前电价 |
 | | next_period_price | f64 | [0.0, 2.0] | 元/kWh | 下时段电价 |
 | | price_tariff_id | u8 | {0~3} | 枚举 | 谷/平/峰/尖峰 |
+| | peak_price | f64 | [0.0, 2.0] | 元/kWh | 峰值电价（辅助） |
+| | valley_price | f64 | [0.0, 2.0] | 元/kWh | 谷值电价（辅助） |
 | **D4-需量** | current_demand | f64 | [0.0, 10000.0] | kW | 实时需量 |
 | | contract_demand | f64 | [0.0, 10000.0] | kW | 合同需量 |
 | | peak_demand_this_month | f64 | [0.0, 10000.0] | kW | 月最大需量 |
@@ -748,10 +749,19 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | temperature | f64 | [-20.0, 60.0] | deg C | 环境温度 |
 | **D6-调度** | dispatch_p_set | Option\<f64\> | [-1000.0, 1000.0] | kW | 调度有功设定 |
 | | dispatch_q_set | Option\<f64\> | [-1000.0, 1000.0] | kVar | 调度无功设定 |
-| **D7-季节时段（v2.5新增，8 字段）** | season_encoding | [f64; 6] | one-hot | - | 季节编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] |
+| **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） |
+| **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] |
 | | time_period_encoding | [f64; 2] | one-hot | - | 时段编码：[白天, 夜间] |
+| **D9-安全覆盖（v2.10新增）** | safety_override_active | bool | {0, 1} | - | 安全覆盖激活标志 |
+| | safety_override_reason | Option\<String\> | - | - | 触发原因（voltage_violation/q_exhausted/emergency） |
+| | safety_override_p_ref | Option\<f64\> | [-50.0, 50.0] | kW | 强制放电功率 |
+| **D10-概率负荷预测（v2.11新增）** | load_forecast_quantiles | Vec\<f64\> | 15 维 | kW | 分位数负荷预测（P10/P50/P90...） |
+| | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 |
+| | base_load | f64 | [0.0, 1000.0] | kW | 基础负荷（50% 分位数） |
 
-**输入向量维度（v2.5）：** 56 维 = 19 个标量 + 2 个 Option + 2 个向量（各 15 维）+ 1 个定长数组（8 维）。
+**输入向量维度（v2.11）：** 59 维 = 28 个标量 + 2 个 Option + 2 个向量（各 15 维）+ 8 个定长数组。
+
+> **注：** v2.10 安全覆盖状态（D9）使 AI 引擎感知实时控制模块临时覆盖事件，并在奖励函数中获得相应惩罚。v2.11 新增分位数负荷预测（D10），支撑冲击负荷预备度奖励计算。
 
 **电压感知 P/Q 协同控制策略：**
 
