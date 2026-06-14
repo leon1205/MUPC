@@ -7,6 +7,7 @@
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
 | v2.12 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
+| v2.12 | 2026-06-14 | 架构师 | 规划中（R-04~R-07 中优先级） |
 | v2.11 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.9 | 2026-06-14 | 架构师 | 历史版本 |
 | v2.8 | 2026-06-13 | 架构师 | 历史版本 |
@@ -1927,6 +1928,188 @@ fn calc_demand_with_uncertainty(
 | PLF-02 | 冲击概率计算 | 已知分布验证概率值 |
 | PLF-04 | 风险奖励计算 | 风险惩罚正确应用 |
 | PLF-07 | FusedSystemState 存储 | 字段正确填充 |
+
+### 5.11 v2.12 中优先级实现：变压器过载分段惩罚（R-04）
+
+#### 5.11.1 需求描述
+
+当前变压器过载惩罚使用二次函数，不够精细。当负载率在 75%~90% 时为安全区，90%~100% 时风险上升，>100% 时需要硬惩罚。
+
+#### 5.11.2 分段惩罚函数定义
+
+```rust
+/// 变压器过载分段惩罚（v2.12 R-04）
+///
+/// 分段逻辑：
+///   L < 0.75:          0.0                    // 安全区
+///   0.75 <= L < 0.90:  linear 0~10           // 线性增长
+///   0.90 <= L < 1.00:  exponential 10~50     // 指数增长
+///   L >= 1.00:          100.0                 // 硬惩罚
+fn overload_penalty_piecewise(&self, load: f64) -> f64 {
+    if load < 0.75 {
+        0.0
+    } else if load < 0.90 {
+        (load - 0.75) / 0.15 * 10.0  // 线性：0~10
+    } else if load < 1.00 {
+        let excess = (load - 0.90) / 0.10;
+        10.0 + excess * excess * 40.0  // 指数：10~50
+    } else {
+        100.0  // 硬惩罚
+    }
+}
+```
+
+#### 5.11.3 验收标准
+
+| 测试项 | 验收条件 | 测试方法 |
+|--------|---------|---------|
+| TO-01 | L=0.70 时惩罚为 0 | 单元测试 |
+| TO-02 | L=0.90 时惩罚为 10 | 单元测试 |
+| TO-03 | L=1.00 时惩罚为 50 | 单元测试 |
+| TO-04 | L=1.05 时惩罚为 100 | 单元测试 |
+
+#### 5.11.4 影响文件
+
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+
+### 5.12 v2.12 中优先级实现：电压斜率惩罚动态权重（R-05）
+
+#### 5.12.1 需求描述
+
+当前 `w6` 电压变化斜率惩罚权重固定，电压偏差越大应权重越高。
+
+#### 5.12.2 动态权重公式
+
+```rust
+/// 电压斜率惩罚动态权重（v2.12 R-05）
+///
+/// w6(v) = base_w6 × (1.0 + k × |ΔV|)
+///
+/// 参数：
+///   base_w6: 基础权重（默认 0.5）
+///   k: 放大系数（默认 2.0，可配置）
+///   |ΔV|: 电压变化量
+fn dynamic_voltage_slope_weight(&self, delta_v: f64) -> f64 {
+    let base = self.base_w6_voltage_slope;  // 默认 0.5
+    let k = self.voltage_slope_k;           // 默认 2.0
+    base * (1.0 + k * delta_v.abs())
+}
+```
+
+#### 5.12.3 验收标准
+
+| 测试项 | 验收条件 | 测试方法 |
+|--------|---------|---------|
+| DV-01 | ΔV=0 时 w6 = base_w6 | 单元测试 |
+| DV-02 | ΔV=0.05 时 w6 = base × (1.0 + k × 0.05) | 数学验证 |
+| DV-03 | k 值可配置，范围 [0.0, 5.0] | 配置测试 |
+
+#### 5.12.4 影响文件
+
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+
+### 5.13 v2.12 中优先级实现：冲击负荷响应奖励（R-06）
+
+#### 5.13.1 需求描述
+
+当前缺失冲击负荷响应奖励，需量控制鲁棒性不足。结合 v2.11 分位数预测，引入基于风险感知的冲击负荷响应奖励。
+
+#### 5.13.2 冲击负荷响应奖励公式
+
+```rust
+/// 冲击负荷响应奖励（v2.12 R-06）
+///
+/// R_shock = w_shock × load_shedding / max_load_shedding
+///           - λ × response_time / max_response_time
+///
+/// 条件：当 P90 - P50 > threshold（冲击负荷检测）
+fn shock_response_reward(
+    &self,
+    load_shedding: f64,
+    response_time: f64,
+    p90: f64,
+    p50: f64,
+) -> f64 {
+    let threshold = self.shock_threshold_kw;  // 默认 10.0 kW
+    let spread = p90 - p50;
+
+    if spread <= threshold {
+        return 0.0;  // 无冲击负荷
+    }
+
+    let w_shock = self.shock_response_weight;  // 默认 20.0
+    let lambda = self.response_time_penalty;  // 默认 5.0
+    let max_load = 60.0;  // 最大切负荷
+    let max_response = 60.0;  // 最大响应时间（秒）
+
+    let load_reward = w_shock * (load_shedding / max_load);
+    let time_penalty = lambda * (response_time / max_response);
+    load_reward - time_penalty
+}
+```
+
+#### 5.13.3 验收标准
+
+| 测试项 | 验收条件 | 测试方法 |
+|--------|---------|---------|
+| SH-01 | 无冲击负荷时 R_shock = 0 | 单元测试 |
+| SH-02 | 冲击负荷发生时，load_shedding 越大奖励越高 | 单元测试 |
+| SH-03 | 响应时间越长惩罚越大 | 单元测试 |
+
+#### 5.13.4 影响文件
+
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+
+### 5.14 v2.12 中优先级实现：P-Q 协同度阈值可配置化（R-07）
+
+#### 5.14.1 需求描述
+
+当前 `Q_THRESHOLD=0.10` 和 `P_THRESHOLD=5.0kW` 硬编码，不同台区工况差异大，需要支持灵活配置。
+
+#### 5.14.2 配置结构
+
+```rust
+/// P-Q 协同度阈值配置（v2.12 R-07）
+#[derive(Debug, Clone)]
+pub struct PqCoordinationThresholds {
+    /// Q 裕度阈值，低于此值视为"无功耗尽"
+    pub q_margin_threshold: f64,     // 默认 0.10
+    /// P 阈值（kW），省电策略判定阈值
+    pub p_threshold_kw: f64,        // 默认 5.0
+}
+
+impl Default for PqCoordinationThresholds {
+    fn default() -> Self {
+        Self {
+            q_margin_threshold: 0.10,
+            p_threshold_kw: 5.0,
+        }
+    }
+}
+```
+
+#### 5.14.3 配置更新
+
+```toml
+# mupc/config/mupc_env_config.yaml
+[reward_thresholds]
+q_margin_threshold = 0.10    # Q 裕度阈值
+p_threshold_kw = 5.0         # P 阈值（kW）
+```
+
+#### 5.14.4 验收标准
+
+| 测试项 | 验收条件 | 测试方法 |
+|--------|---------|---------|
+| TH-01 | Q_THRESHOLD 可通过配置修改 | 配置测试 |
+| TH-02 | P_THRESHOLD 可通过配置修改 | 配置测试 |
+| TH-03 | 配置缺失时使用默认值 | 单元测试 |
+| TH-04 | 阈值修改后即时生效 | 配置热重载测试 |
+
+#### 5.14.5 影响文件
+
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+- `mupc/config/mupc_env_config.yaml`
 
 ---
 
