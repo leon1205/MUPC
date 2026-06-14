@@ -667,8 +667,8 @@ mod tests {
         assert_eq!(transition5.total_steps(), 5);
         assert_eq!(transition5.remaining_steps(), 5);
 
-        // 走完 5 步后状态变为 Completed
-        for _ in 0..5 {
+        // 走完 6 次调用后状态变为 Completed（初始调用 + 5 步）
+        for _ in 0..6 {
             let _ = transition5.get_interpolated_weights();
         }
         assert_eq!(transition5.state(), TransitionState::Completed);
@@ -682,20 +682,20 @@ mod tests {
     #[test]
     fn test_linear_interpolation_first_last() {
         // CC2: 每步权重线性插值，确保最终权重与目标一致
-        // step 0 返回 current_weights，step 10 返回 target_weights
+        // 初始调用返回 current_weights，第 10 次调用返回 target_weights
         let config = TransitionConfig {
             transition_steps: 10,
         };
         let mut transition = SmoothSceneTransition::new(config);
         transition.on_scene_switch(vec![0.0, 0.0], vec![10.0, 20.0]);
 
-        // Step 0: 应该返回 current_weights
+        // 初始调用（Step 0 后）：应该返回 current_weights
         let weights = transition.get_interpolated_weights();
         assert_eq!(weights.len(), 2);
         assert!((weights[0] - 0.0).abs() < 1e-6);
         assert!((weights[1] - 0.0).abs() < 1e-6);
 
-        // Step 10: 应该返回 target_weights
+        // 第 10 次调用（Step 10 后）：应该返回 target_weights
         for _ in 0..9 {
             let _ = transition.get_interpolated_weights();
         }
