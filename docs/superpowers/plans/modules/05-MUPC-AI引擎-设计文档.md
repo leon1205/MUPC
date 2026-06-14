@@ -703,12 +703,15 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 **动作空间对比：**
 
-| 维度 | v2.3（4维） | v2.4~v2.5（2维） | v2.6（3维） | 说明 |
-|------|------------|-----------------|------------|------|
-| A1 | p_batt_set [-50,50]kW | p_batt_set [-50,50]kW | p_batt_set [-50,50]kW | 电池有功（RL控制） |
-| A2 | q_batt_set [-300,300]kVar | 由实时模块闭环 | 由实时模块闭环 | 无功（实时控制，不经AI） |
-| A3 | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | 可中断负荷（RL控制） |
-| A4 | pv_limit [0,1] | 由A2/Q替代 | pv_limit [0,1] | 光伏限功率（v2.6 恢复主动弃光） |
+| 维度 | v2.3（4维） | v2.4~v2.6（3维） | v2.7~v2.12（4维） | v2.13（5维） | 说明 |
+|------|------------|-----------------|------------------|-------------|------|
+| A1 | p_batt_set [-50,50]kW | p_batt_set [-50,50]kW | p_ref [-50,50]kW | p_ref [-50,50]kW | 有功基准点（RL控制） |
+| A2 | q_batt_set | ~~Q替代~~ | k_droop [0,30]kW/V | k_droop [0,30]kW/V | 下垂系数（v2.7新增，实时模块闭环） |
+| A3 | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | 可中断负荷（南向分发） |
+| A4 | pv_limit [0,1] | pv_limit [0,1] | pv_limit [0,1] | pv_limit [0,1] | 光伏限功率（南向分发） |
+| A5 | - | - | - | confidence [0,1] | 决策置信度（v2.13新增） |
+
+> **注：** q_batt_set 由实时电压调节器闭环控制，不经过 RL 动作空间。v2.7 双参数模式将 Q 控制完全交给实时控制模块，RL 仅输出 P 控制指令，实现时间尺度解耦。
 
 ### 4.2 算法选择
 
@@ -758,59 +761,48 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | 台区季节性负荷 | 电压 < 0.95 p.u. | 放电 (正值) -- 释放有功 | 容性 (正值) -- 释放无功，补偿励磁 |
 | 末端低电压 | 电压 < 0.95 p.u. | 放电 (正值) -- 仅当无功不足时 | 容性 (正值) -- 优先手段，不消耗 SOC |
 
-### 4.4 完整动作空间表（3 维 + confidence，v2.6）
+### 4.4 完整动作空间表（5 维 + confidence，v2.13）
 
-| 维度 | 字段名 | 类型 | 取值范围 | 单位 | 说明 |
-|------|--------|------|----------|------|------|
-| A1 | p_batt_set | f64 | [-50.0, 50.0] | kW | 电池有功设定（负=充电，正=放电） |
-| A2 | load_shedding | f64 | [0.0, 60.0] | kW | 可中断负荷切除 |
-| A3 | pv_limit | f64 | [0.0, 1.0] | - | 光伏限功率比例（v2.6 恢复，0=全限，1=不限） |
-| - | confidence | f64 | [0.0, 1.0] | - | 决策置信度 |
+| 维度 | 字段名 | 类型 | 取值范围 | 单位 | 说明 | 分发路径 |
+|------|--------|------|----------|------|------|----------|
+| A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负=充电，正=放电） | 核间→实时控制模块 |
+| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数 | 核间→实时控制模块 |
+| A3 | load_shedding | f64 | [0.0, 60.0] | kW | 可中断负荷切除 | 南向→负荷控制装置 |
+| A4 | pv_limit | f64 | [0.0, 1.0] | - | 光伏限功率比例（0=全限，1=不限） | 南向→光伏逆变器 |
+| A5 | confidence | f64 | [0.0, 1.0] | - | 决策置信度（v2.13 新增） | - |
 
-> 注：q_batt_set 由实时电压调节器闭环控制，不经过 RL 动作空间。p_batt_set 范围匹配电池最大充放电功率 50kW，load_shedding 范围匹配负荷峰值 60kW。
+> **注：** v2.7 双参数模式将 Q 控制完全交给实时控制模块，RL 仅输出 P 控制指令。p_ref + k_droop 通过核间通信发送到实时控制模块，load_shedding + pv_limit 通过南向通信分发到设备。
 
 ### 4.5 ActionOutput 结构体
 
 ```rust
-/// 强化学习决策输出（3 维动作 + 置信度，v2.6）
+/// 强化学习决策输出（5 维动作 + 置信度，v2.13）
+///
+/// v2.7 双参数模式：p_ref（有功基准）+ k_droop（电压-有功下垂系数）
+/// v2.13 新增：confidence 字段
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionOutput {
-    /// A1: 电池有功功率设定值 (kW), [-50.0, 50.0], 负=充电, 正=放电
-    pub p_batt_set: f64,
-    /// A2: 可中断负荷切除量 (kW), [0.0, 60.0]
+    /// A1: 有功功率基准点 (kW), [-50.0, 50.0], 负=充电, 正=放电
+    pub p_ref: f64,
+    /// A2: 电压-有功下垂系数 (kW/V), [0.0, 30.0], 范围由实时控制模块提供
+    pub k_droop: f64,
+    /// A3: 可中断负荷切除量 (kW), [0.0, 60.0]
     pub load_shedding: f64,
-    /// A3: 光伏限功率比例, [0.0, 1.0], 0=完全限功率, 1=不限功率 (v2.6 恢复)
+    /// A4: 光伏限功率比例, [0.0, 1.0], 0=全限, 1=不限
     pub pv_limit: f64,
-    /// 决策置信度 [0.0, 1.0]
+    /// A5: 决策置信度 [0.0, 1.0]（v2.13 新增）
     pub confidence: f64,
 }
 ```
 
-### 4.5a 双参数 ActionOutput（v2.7）
+### 4.5a 旧版 ActionOutput（legacy，v2.6 及之前）
 
 ```rust
-/// 动作输出结构体（v2.7 双参数模式）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionOutput {
-    /// 有功功率基准点 (kW), 范围由 ActionSpaceConfig 确定
-    /// 负值=充电，正值=放电
-    pub p_ref: f64,
-    /// 电压-有功下垂系数 (kW/V), 范围由实时控制模块提供
-    /// 电压每升高 1V，输出功率增加 k_droop kW
-    pub k_droop: f64,
-    /// 可中断负荷切除量 (kW), [0.0, max_load_shedding]
-    pub load_shedding: f64,
-    /// 光伏限功率比例, [0.0, 1.0]
-    pub pv_limit: f64,
-    /// 决策置信度 (0.0 ~ 1.0)
-    pub confidence: f64,
-}
-
 /// 动作输出结构体（v1.x 单参数模式，legacy）
 /// 仅用于兼容旧模式，正常情况下不使用
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionOutputLegacy {
-    pub p_batt_set: f64,      // 废弃
+    pub p_batt_set: f64,      // 废弃，使用 p_ref 替代
     pub load_shedding: f64,   // 保留
     pub pv_limit: f64,        // 保留
     pub confidence: f64,
