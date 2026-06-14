@@ -121,6 +121,28 @@ impl DiscountedAccumulator {
     }
 }
 
+// ============================================================================
+// v2.12 R-07: P-Q 协同度阈值配置
+// ============================================================================
+
+/// P-Q 协同度阈值配置（v2.12 R-07）
+#[derive(Debug, Clone)]
+pub struct PqCoordinationThresholds {
+    /// Q 裕度阈值：实时模块剩余容量低于此值视为"无功耗尽"
+    pub q_margin_threshold: f64,
+    /// P 有功阈值（kW）：低于此值视为"偷懒"省电池
+    pub p_threshold_kw: f64,
+}
+
+impl Default for PqCoordinationThresholds {
+    fn default() -> Self {
+        Self {
+            q_margin_threshold: 0.10,
+            p_threshold_kw: 5.0,
+        }
+    }
+}
+
 /// 奖励函数计算器
 pub struct RewardCalculator {
     weights: SceneWeights,
@@ -170,6 +192,9 @@ pub struct RewardCalculator {
     shock_response_weight: f64,
     /// 响应时间惩罚系数 λ
     response_time_penalty: f64,
+    // v2.12 R-07 新增：P-Q 协同度阈值配置
+    /// P-Q 协同度阈值配置
+    pq_thresholds: PqCoordinationThresholds,
 }
 
 impl RewardCalculator {
@@ -200,6 +225,8 @@ impl RewardCalculator {
             shock_threshold_kw: 10.0,
             shock_response_weight: 20.0,
             response_time_penalty: 5.0,
+            // v2.12 R-07: P-Q 协同度阈值配置默认值
+            pq_thresholds: PqCoordinationThresholds::default(),
         }
     }
 
@@ -240,6 +267,8 @@ impl RewardCalculator {
             shock_threshold_kw: 10.0,
             shock_response_weight: 20.0,
             response_time_penalty: 5.0,
+            // v2.12 R-07: P-Q 协同度阈值配置默认值
+            pq_thresholds: PqCoordinationThresholds::default(),
         })
     }
 
@@ -294,6 +323,8 @@ impl RewardCalculator {
             shock_threshold_kw: 10.0,
             shock_response_weight: 20.0,
             response_time_penalty: 5.0,
+            // v2.12 R-07: P-Q 协同度阈值配置默认值
+            pq_thresholds: PqCoordinationThresholds::default(),
         }
     }
 
@@ -626,12 +657,12 @@ impl RewardCalculator {
         }
 
         let q_margin = state.q_realtime_margin;
-        const Q_THRESHOLD: f64 = 0.10;
-        const P_THRESHOLD: f64 = 5.0;
+        let q_threshold = self.pq_thresholds.q_margin_threshold;
+        let p_threshold = self.pq_thresholds.p_threshold_kw;
 
-        if q_margin > Q_THRESHOLD {
+        if q_margin > q_threshold {
             // Q 有裕度：AI 最优解是"偷懒"省电池
-            if p_ref.abs() < P_THRESHOLD {
+            if p_ref.abs() < p_threshold {
                 50.0 // 大额奖励"偷懒"
             } else {
                 -5.0 // 轻微惩罚（不必要的电池动作）
@@ -1042,12 +1073,12 @@ impl RewardCalculator {
         }
 
         let q_margin = state.q_realtime_margin;
-        const Q_THRESHOLD: f64 = 0.10;
-        const P_THRESHOLD: f64 = 5.0;
+        // v2.12 R-07: 使用默认阈值配置
+        let thresholds = PqCoordinationThresholds::default();
 
-        if q_margin > Q_THRESHOLD {
+        if q_margin > thresholds.q_margin_threshold {
             // Q 有裕度：AI 最优解是"偷懒"省电池
-            if p_ref.abs() < P_THRESHOLD {
+            if p_ref.abs() < thresholds.p_threshold_kw {
                 50.0
             } else {
                 -5.0
@@ -1865,5 +1896,59 @@ mod tests {
         let calc = RewardCalculator::new(SceneWeights::default());
         let r = calc.shock_response_reward(30.0, 30.0, 60.0, 50.0); // spread = 10 == threshold
         assert!((r - 0.0).abs() < 1e-6);
+    }
+
+    // ===== v2.12 R-07 P-Q 协同度阈值可配置化测试 =====
+
+    #[test]
+    fn test_v2_12_pq_coordination_thresholds_default() {
+        let thresholds = PqCoordinationThresholds::default();
+        assert!((thresholds.q_margin_threshold - 0.10).abs() < 1e-6);
+        assert!((thresholds.p_threshold_kw - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_pq_coordination_with_default_thresholds() {
+        // 使用默认阈值配置测试 P-Q 协同度计算
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 0.92;
+        state.voltage_phase_b = 0.92;
+        state.voltage_phase_c = 0.92;
+        state.q_realtime_margin = 0.05; // <= 10% (q_margin_threshold)
+
+        // 低电压 + 放电（正确），应奖励 50
+        let r = calc.calc_pq_coordination(&state, -10.0);
+        assert!((r - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_pq_coordination_q_margin_sufficient() {
+        // q_margin > q_margin_threshold 时，"偷懒"应奖励 50
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 1.08;
+        state.voltage_phase_b = 1.08;
+        state.voltage_phase_c = 1.08;
+        state.q_realtime_margin = 0.5; // > 10%
+
+        // "偷懒"（p_ref near 0），应奖励 50
+        let r = calc.calc_pq_coordination(&state, 0.0);
+        assert!((r - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_pq_coordination_q_margin_exhausted_wrong_action() {
+        // q_margin <= threshold 且动作错误，应惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 0.92;
+        state.voltage_phase_b = 0.92;
+        state.voltage_phase_c = 0.92;
+        state.q_realtime_margin = 0.05; // <= 10%
+
+        // 低电压 + 不放电（错误），应惩罚 -30
+        let r = calc.calc_pq_coordination(&state, 10.0);
+        assert!((r - (-30.0)).abs() < 1e-6);
     }
 }
