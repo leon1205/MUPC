@@ -12,17 +12,21 @@
 
 pub mod action_space;
 pub mod action_validator;
+pub mod adaptive_weight_optimizer;
 pub mod config;
 pub mod config_loader;
 pub mod data_fusion;
 pub mod dynamic_config_loader;
 pub mod env_config;
 pub mod error;
+pub mod load_covariates;
 pub mod lstm_model;
 pub mod mode_selector;
 pub mod model_manager;
 pub mod model_registry;
 pub mod online_updater;
+pub mod pareto_optimizer;
+pub mod performance_collector;
 pub mod reward_calculator;
 pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
@@ -33,9 +37,14 @@ pub mod safety_config;
 
 pub use action_space::ActionSpaceConfig;
 pub use action_validator::{ActionValidator, ViolationRecord};
+pub use adaptive_weight_optimizer::{
+    AdaptiveWeightOptimizer, HistoricalPerformance, PerformanceCollector, PerformanceFeatures,
+    WeightAdjustment,
+};
 pub use config::{
-    ActionConstraintConfig, AiEngineConfig, FusionConfig, LstmConfig, ModeConfig, ModelType,
-    NpuConfig, OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig, SceneWeights,
+    ActionConstraintConfig, AdaptiveOptimizerConfig, AiEngineConfig, FusionConfig, LstmConfig,
+    ModeConfig, ModelType, NpuConfig, OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig,
+    SceneWeights, WeightBounds, WeightConstraints, ParetoOptimizerConfig,
 };
 pub use config_loader::ConfigLoader;
 pub use data_fusion::{
@@ -45,13 +54,16 @@ pub use data_fusion::{
 pub use dynamic_config_loader::DynamicConfigLoader;
 pub use env_config::{EnvConfig, EnvConfigMetadata, OperationalConfig, PhysicalConfig};
 pub use error::AiEngineError;
-pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
+pub use load_covariates::{DataFusionWeatherAdapter, DefaultWeatherService, LoadCovariates, WeatherService};
+pub use lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction};
 pub use mode_selector::{
     parse_mode_name, ModeSelector, ModeSwitchEvent, RunningMode, SwitchSource,
 };
 pub use model_manager::{ModelManager, ModelStatus};
 pub use model_registry::{ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult};
 pub use online_updater::{DataPoint, OnlineUpdater};
+pub use pareto_optimizer::{OptimizationObjective, ParetoSolution, ParetoWeightOptimizer, WeightCandidate};
+pub use performance_collector::PerformanceCollectorImpl;
 pub use reward_calculator::RewardCalculator;
 pub use rknn_runtime::RknnRuntime;
 pub use rl_model::{parse_action_output, ActionOutput, RLModel, SystemState};

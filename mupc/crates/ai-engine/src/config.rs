@@ -262,6 +262,86 @@ impl Default for RewardThresholdConfig {
     }
 }
 
+/// v2.11 自适应权重优化器配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdaptiveOptimizerConfig {
+    /// 是否启用
+    pub enabled: bool,
+    /// 更新间隔（小时）
+    pub update_interval_hours: u32,
+    /// 元学习率
+    pub meta_learning_rate: f64,
+    /// 权重边界
+    pub weight_bounds: WeightBounds,
+    /// 约束条件
+    pub constraints: WeightConstraints,
+}
+
+impl Default for AdaptiveOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            update_interval_hours: 168, // 周级更新
+            meta_learning_rate: 0.001,
+            weight_bounds: WeightBounds::default(),
+            constraints: WeightConstraints::default(),
+        }
+    }
+}
+
+/// v2.11 权重边界
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WeightBounds {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Default for WeightBounds {
+    fn default() -> Self {
+        Self { min: 0.01, max: 10.0 }
+    }
+}
+
+/// v2.11 权重约束
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WeightConstraints {
+    /// 权重和归一化基准
+    pub sum_normalized: f64,
+    /// 单次最大调整幅度
+    pub max_adjustment_per_update: f64,
+}
+
+impl Default for WeightConstraints {
+    fn default() -> Self {
+        Self {
+            sum_normalized: 8.3,
+            max_adjustment_per_update: 0.2,
+        }
+    }
+}
+
+/// v2.11 NSGA-II Pareto 优化器配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ParetoOptimizerConfig {
+    pub enabled: bool,
+    pub population_size: usize,
+    pub generations: usize,
+    pub crossover_rate: f64,
+    pub mutation_rate: f64,
+}
+
+impl Default for ParetoOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            population_size: 100,
+            generations: 50,
+            crossover_rate: 0.9,
+            mutation_rate: 0.1,
+        }
+    }
+}
+
 /// 场景权重映射
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneWeights {

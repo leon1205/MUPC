@@ -12,6 +12,7 @@
 
 use crate::config::SceneWeights;
 use crate::data_fusion::FusedSystemState;
+use crate::lstm_model::ProbabilisticLoadOutput;
 use crate::mode_selector::RunningMode;
 use crate::rl_model::ActionOutput;
 use std::sync::RwLock;
@@ -278,6 +279,40 @@ impl RewardCalculator {
             RunningMode::CommercialArbitrage => self.calc_arbitrage(action, state),
             RunningMode::DemandControl => self.calc_demand(action, state),
             RunningMode::VirtualPowerPlant => self.calc_vpp(action, state),
+            RunningMode::UltraGreen => self.calc_green(state),
+        }
+    }
+
+    /// v2.11: 使用外部提供的 SceneWeights（由 AdaptiveWeightOptimizer 优化后）
+    ///
+    /// # 输入
+    /// - mode: 运行场景
+    /// - action: 动作输出
+    /// - state: 融合系统状态
+    /// - weights: 外部提供的权重（由自适应权重优化器优化）
+    ///
+    /// # 输出
+    /// - 奖励值
+    pub fn calculate_with_weights(
+        &self,
+        mode: RunningMode,
+        action: &ActionOutput,
+        state: &FusedSystemState,
+        weights: &SceneWeights,
+    ) -> f64 {
+        match mode {
+            RunningMode::SeasonalLoadManagement => {
+                let prev = *self.last_p_batt_set.read().unwrap();
+                // 使用外部权重计算季节性负荷奖励
+                Self::calc_agri_v2_8_with_weights(state, action, prev, weights)
+            }
+            RunningMode::CommercialArbitrage => {
+                Self::calc_arbitrage_with_weights(action, state, weights)
+            }
+            RunningMode::DemandControl => self.calc_demand(action, state),
+            RunningMode::VirtualPowerPlant => {
+                Self::calc_vpp_with_weights(action, state, weights)
+            }
             RunningMode::UltraGreen => self.calc_green(state),
         }
     }
@@ -577,6 +612,20 @@ impl RewardCalculator {
         w[0] * r_spread - w[1] * p_deg
     }
 
+    /// v2.11: SCENE-B1 自主套利（使用外部权重）
+    fn calc_arbitrage_with_weights(
+        action: &ActionOutput,
+        state: &FusedSystemState,
+        weights: &SceneWeights,
+    ) -> f64 {
+        let w = &weights.commercial_arbitrage;
+        let avg_price = (state.peak_price + state.valley_price) / 2.0;
+        let spread = (state.current_electricity_price - avg_price) * action.p_ref * 0.001;
+        let r_spread = spread * 100.0;
+        let p_deg = 100.0 * action.p_ref.abs() / 500.0 * 0.01;
+        w[0] * r_spread - w[1] * p_deg
+    }
+
     /// SCENE-B2: 需量控制 — R = w1*R_demand - w2*P_comfort
     fn calc_demand(&self, action: &ActionOutput, state: &FusedSystemState) -> f64 {
         let w = &self.weights.demand_control;
@@ -584,6 +633,43 @@ impl RewardCalculator {
         let r_avoid = demand_saved * self.demand_penalty_rate;
         let p_comfort = action.load_shedding * 0.5;
         w[0] * r_avoid - w[1] * p_comfort
+    }
+
+    /// v2.11: SCENE-B2 需量控制（含不确定性）
+    ///
+    /// 考虑冲击负荷概率，预留额外安全裕度
+    fn calc_demand_with_uncertainty(
+        &self,
+        action: &ActionOutput,
+        state: &FusedSystemState,
+        load_forecast: &ProbabilisticLoadOutput,
+    ) -> f64 {
+        let w = &self.weights.demand_control;
+
+        // 基础需量控制奖励
+        let demand_saved = (state.contract_demand - state.current_demand).max(0.0);
+        let r_avoid = demand_saved * self.demand_penalty_rate;
+
+        // 风险感知调整（v2.11 新增）
+        // 考虑冲击负荷概率，预留额外安全裕度
+        let high_quantile = load_forecast
+            .quantiles
+            .iter()
+            .find(|q| (q.quantile - 0.9).abs() < 0.01)
+            .map(|q| q.value)
+            .unwrap_or(load_forecast.base_load);
+
+        let risk_adjusted_demand = state.current_demand + 2.0 * (high_quantile - load_forecast.base_load) as f64;
+        let risk_margin = if risk_adjusted_demand > state.contract_demand * 0.95 {
+            // 预留 5% 安全裕度不足，产生风险惩罚
+            -20.0 * ((risk_adjusted_demand - state.contract_demand * 0.95) / state.contract_demand)
+        } else {
+            0.0
+        };
+
+        let p_comfort = action.load_shedding * 0.5;
+
+        w[0] * (r_avoid + risk_margin) - w[1] * p_comfort
     }
 
     /// SCENE-B3: 虚拟电厂 — R = w1*R_ancillary + w2*R_accuracy - w3*P_deadline
@@ -595,6 +681,139 @@ impl RewardCalculator {
                 w[0] * p_target.abs() * 0.01 + w[1] * r_accuracy - w[2] * 0.0
             }
             None => 0.0,
+        }
+    }
+
+    /// v2.11: SCENE-B3 虚拟电厂（使用外部权重）
+    fn calc_vpp_with_weights(
+        action: &ActionOutput,
+        state: &FusedSystemState,
+        weights: &SceneWeights,
+    ) -> f64 {
+        let w = &weights.virtual_power_plant;
+        match state.dispatch_p_set {
+            Some(p_target) => {
+                let r_accuracy = 100.0 * (1.0 - (action.p_ref - p_target).abs() / 100.0).max(0.0);
+                w[0] * p_target.abs() * 0.01 + w[1] * r_accuracy - w[2] * 0.0
+            }
+            None => 0.0,
+        }
+    }
+
+    /// v2.11: SCENE-01 台区季节性负荷模式（使用外部权重）
+    ///
+    /// 简化版本，使用外部提供的权重数组
+    fn calc_agri_v2_8_with_weights(
+        state: &FusedSystemState,
+        action: &ActionOutput,
+        prev_p_batt: f64,
+        weights: &SceneWeights,
+    ) -> f64 {
+        let w = &weights.seasonal_load_management;
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+
+        // 1. 弃光奖励（含高电压差异化）
+        let r_pv = Self::calc_pv_reward_v2_8_static(state, action.p_ref, v_avg);
+
+        // 2. 简化电池损耗计算
+        let battery_capacity_kwh = 100.0;
+        let c_rate = state.battery_power.abs() / battery_capacity_kwh;
+        let p_batt_deg = c_rate * c_rate;
+
+        // 3. 变压器过载惩罚
+        let p_trafo = if state.transformer_load <= 0.75 {
+            0.0
+        } else {
+            200.0 * (state.transformer_load - 1.0).powi(2)
+        };
+
+        // 4. P-Q 协同度奖励（简化）
+        let r_pq = Self::calc_pq_coordination_static(state, action.p_ref);
+
+        // 5. 变化率惩罚
+        let battery_capacity_kwh = 100.0;
+        let r_ramp = w[4] * (action.p_ref - prev_p_batt).abs() / battery_capacity_kwh;
+
+        // 6. 电压变化斜率惩罚（简化，使用默认值）
+        let r_voltage_slope = 0.0;
+
+        // 7. 下垂系数平滑惩罚（简化）
+        let k_droop_max = 30.0;
+        let smooth_lambda = 10.0;
+        let k_droop_diff = (action.k_droop - 10.0).abs(); // 假设 last_k_droop = 10.0
+        let r_smooth = -(k_droop_diff + smooth_lambda * (action.k_droop - k_droop_max).max(0.0));
+
+        // 8. 安全覆盖惩罚（简化）
+        let r_safety_override = if state.safety_override_active { -20.0 } else { 0.0 };
+
+        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq
+            - w[4] * r_ramp
+            - w[5] * r_voltage_slope
+            - w[6] * r_smooth
+            - w[7] * r_safety_override
+    }
+
+    /// v2.11: 弃光奖励（静态版本）
+    fn calc_pv_reward_v2_8_static(state: &FusedSystemState, p_ref: f64, v_avg: f64) -> f64 {
+        let voltage_high_limit = 1.05;
+        let pv_high_voltage_penalty = 20.0;
+
+        if v_avg >= voltage_high_limit {
+            if p_ref < 0.0 {
+                // 充电消纳光伏，正常奖励
+                (state.pv_power.max(0.0)
+                    / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+                    .min(1.0)
+                    * 100.0
+            } else {
+                // 高电压时放电，严厉惩罚
+                -pv_high_voltage_penalty
+            }
+        } else {
+            // 正常电压，标准计算
+            (state.pv_power.max(0.0) / (state.pv_power.max(0.0) + state.grid_power.max(0.0) + 1e-6))
+                .min(1.0)
+                * 100.0
+        }
+    }
+
+    /// v2.11: P-Q 协同度奖励（静态版本）
+    fn calc_pq_coordination_static(state: &FusedSystemState, p_ref: f64) -> f64 {
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_dev = (v_avg - 1.0).abs();
+
+        // 电压在死区内，无 P-Q 协同问题
+        if v_dev <= 0.05 {
+            return 0.0;
+        }
+
+        let q_margin = state.q_realtime_margin;
+        const Q_THRESHOLD: f64 = 0.10;
+        const P_THRESHOLD: f64 = 5.0;
+
+        if q_margin > Q_THRESHOLD {
+            // Q 有裕度：AI 最优解是"偷懒"省电池
+            if p_ref.abs() < P_THRESHOLD {
+                50.0
+            } else {
+                -5.0
+            }
+        } else {
+            // Q 已饱和：AI 必须正确出手
+            let v_low = v_avg < 1.0;
+            let v_high = v_avg > 1.0;
+
+            if v_low && p_ref < 0.0 {
+                50.0
+            } else if v_high && p_ref > 0.0 {
+                50.0
+            } else if v_low && p_ref >= 0.0 {
+                -30.0
+            } else if v_high && p_ref <= 0.0 {
+                -30.0
+            } else {
+                0.0
+            }
         }
     }
 
