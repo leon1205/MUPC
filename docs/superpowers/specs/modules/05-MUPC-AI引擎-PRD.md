@@ -467,7 +467,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | 台区季节性负荷（炒茶/空调等） | 电压降低（<0.95 p.u.） | **放电**（p>0，释放有功）→ 补充能量缺口 | **释放无功/容性**（q>0）→ 就地补偿负载励磁需求 | 减少线路无功电流 → 降低线路压降 → 抬升电压 |
 | 末端低电压（夜间） | 电压降低（<0.95 p.u.） | **放电**（p>0）— 仅当无功补偿不足时 | **释放无功/容性**（q>0）— 优先手段，不消耗 SOC | 就地无功补偿 → 减少长线路无功传输损耗 |
 
-### 5.2 完整状态空间定义（6 大类，21 个字段）
+### 5.2 完整状态空间定义（10 大类，59 维，v2.11）
 
 | 维度 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 | 来源 |
 |------|--------|----------|----------|------|------|------|
@@ -480,26 +480,33 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | voltage_phase_a | f64 | [0.8, 1.2] | p.u. | A 相电压标幺值（用于过/低电压检测，指导 P/Q 控制）| intercore |
 | | voltage_phase_b | f64 | [0.8, 1.2] | p.u. | B 相电压标幺值 | intercore |
 | | voltage_phase_c | f64 | [0.8, 1.2] | p.u. | C 相电压标幺值 | intercore |
-| | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） | intercore |
-| **D2-预测数据** | pv_forecast_15min | Vec<f64>(15~30, 可配置) | [-1000.0, 1000.0] | kW | 未来 15-30 分钟光伏预测（默认 15 分钟）| LSTM |
-| | load_forecast_15min | Vec<f64>(15~30, 可配置) | [-1000.0, 1000.0] | kW | 未来 15-30 分钟负荷预测（默认 15 分钟）| LSTM |
+| **D2-预测数据** | pv_forecast_15min | Vec\<f64\>(15) | [-1000.0, 1000.0] | kW | 未来 15 分钟光伏预测 | LSTM |
+| | load_forecast_15min | Vec\<f64\>(15) | [-1000.0, 1000.0] | kW | 未来 15 分钟负荷预测 | LSTM |
 | **D3-电价** | current_electricity_price | f64 | [0.0, 2.0] | 元/kWh | 当前实时电价 | 物联平台 |
 | | next_period_price | f64 | [0.0, 2.0] | 元/kWh | 下一时段电价 | 物联平台 |
 | | price_tariff_id | u8 | {0=谷,1=平,2=峰,3=尖峰} | 枚举 | 分时电价时段标识 | 物联平台 |
+| | peak_price | f64 | [0.0, 2.0] | 元/kWh | 峰值电价（辅助）| 配置 |
+| | valley_price | f64 | [0.0, 2.0] | 元/kWh | 谷值电价（辅助）| 配置 |
 | **D4-需量状态** | current_demand | f64 | [0.0, 10000.0] | kW | 当前实际需量 | intercore |
 | | contract_demand | f64 | [0.0, 10000.0] | kW | 需量合同值 | 配置 |
 | | peak_demand_this_month | f64 | [0.0, 10000.0] | kW | 本月最大需量 | data-processing |
 | **D5-气象** | solar_irradiance | f64 | [0.0, 1500.0] | W/m^2 | 当前光照强度 | 气象 API |
 | | temperature | f64 | [-20.0, 60.0] | deg C | 环境温度 | 气象 API |
-| **D6-调度指令** | dispatch_p_set | Option<f64> | [-1000.0, 1000.0] | kW | 调度主站下发的有功设定值 | gateway |
-| | dispatch_q_set | Option<f64> | [-1000.0, 1000.0] | kVar | 调度主站下发的无功设定值 | gateway |
-| **D7-季节时段（v2.5新增）** | season_encoding | [f64; 6] | one-hot | - | 季节 one-hot 编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
+| **D6-调度指令** | dispatch_p_set | Option\<f64\> | [-1000.0, 1000.0] | kW | 调度主站下发的有功设定值 | gateway |
+| | dispatch_q_set | Option\<f64\> | [-1000.0, 1000.0] | kVar | 调度主站下发的无功设定值 | gateway |
+| **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） | intercore |
+| **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节 one-hot 编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
 | | time_period_encoding | [f64; 2] | one-hot | - | 时段 one-hot 编码：[白天, 夜间] | data-processing |
 | **D9-安全覆盖状态（v2.10新增）** | safety_override_active | bool | {true, false} | - | 安全覆盖激活标志，true=实时模块正在覆盖 AI 有功指令 | intercore |
 | | safety_override_reason | Option\<String\> | - | - | 安全覆盖触发原因（仅 active=true 时有效）| intercore |
-| | safety_override_p_ref | Option\<f64\> | - | kW | 安全覆盖强制放电功率（仅 active=true 时有效）| intercore |
+| | safety_override_p_ref | Option\<f64\> | [-50.0, 50.0] | kW | 安全覆盖强制放电功率（仅 active=true 时有效）| intercore |
+| **D10-概率负荷预测（v2.11新增）** | load_forecast_quantiles | Vec\<f64\>(15) | [0.0, 10000.0] | kW | 分位数负荷预测（P10/P50/P90...）| LSTM |
+| | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 | LSTM |
+| | base_load | f64 | [0.0, 10000.0] | kW | 基础负荷（50% 分位数）| LSTM |
 
-**状态空间总维度（v2.10）：** 27 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 1 个定长数组（8 维）= 32 个字段（RL 字段 29 + 辅助 3）。序列化后输入向量为 **59 维**（56 维基础 + 3 维安全覆盖状态）。
+**状态空间总维度（v2.11）：** 28 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 8 个定长数组 = **59 维**。
+
+> **v2.11 说明：** D10 新增分位数负荷预测（load_forecast_quantiles 15维 + shock_load_probability + base_load），支撑冲击负荷预备度奖励计算。输入向量保持 59 维。
 
 > **v2.10 说明：** D9 新增安全覆盖状态（3 维：safety_override_active, safety_override_reason, safety_override_p_ref），用于 AI 引擎感知实时控制模块临时覆盖事件。输入向量从 56 维扩展至 59 维，RL 模型文件需重新训练或填充默认值向后兼容。
 
@@ -507,25 +514,31 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 序列化为推理输入向量时，各维度按定义顺序拼接。
 
-### 5.3 完整动作空间定义（3 个动作维度）
+### 5.3 完整动作空间定义（5 维 + confidence，v2.13）
 
-| 维度 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 |
-|------|--------|----------|----------|------|------|
-| A1 | p_batt_set | f64 | [-50.0, 50.0] | kW | 电池有功功率设定值（负值=充电，正值=放电）|
-| A2 | load_shedding | f64 | [0.0, 60.0] | kW | 可中断负荷切除量 |
-| A3 | pv_limit | f64 | [0.0, 1.0] | - | 光伏限功率比例（0.0=完全限功率，1.0=不限功率，v2.6 恢复）|
+| 维度 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 | 分发路径 |
+|------|--------|----------|----------|------|------|----------|
+| A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负值=充电，正值=放电）| 核间→实时控制模块 |
+| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数 | 核间→实时控制模块 |
+| A3 | load_shedding | f64 | [0.0, 60.0] | kW | 可中断负荷切除量 | 南向→负荷控制装置 |
+| A4 | pv_limit | f64 | [0.0, 1.0] | - | 光伏限功率比例（0=全限，1=不限）| 南向→光伏逆变器 |
+| A5 | confidence | f64 | [0.0, 1.0] | - | 决策置信度（v2.13 新增）| - |
 
-> **v2.6 动作空间说明：** 动作空间从 2 维扩展为 3 维，恢复 pv_limit 作为主动弃光手段。p_batt_set 范围匹配电池最大充放电功率 50kW，load_shedding 范围匹配负荷峰值 60kW。Q_batt 由实时电压调节器闭环控制，不经过 RL 动作空间。
+> **v2.7 双参数模式说明：** 动作空间从单参数升级为双参数（P_ref + k_droop），实现下垂控制公式 `P_output = P_ref + k_droop × ΔV`。k_droop 范围由实时控制模块提供，通过 intercore 获取。Q 控制完全交给实时控制模块，实现时间尺度解耦。
 
-### 5.4 动作约束规则
+> **v2.13 新增：** confidence 字段（决策置信度），用于评估动作输出的可靠性。
+
+### 5.4 动作约束规则（v2.13）
 
 | 规则 ID | 约束条件 | 说明 |
 |---------|----------|------|
-| ACT-01 | p_batt_set 的变化率 <= 50 kW/步 | 防止电池功率突变 |
-| ACT-02 | Δq_batt ≤ 30 kVar/步 → 由实时控制核心模块处理，AI动作空间中移除 |
-| ACT-03 | sqrt(p_batt_set^2 + q_batt_set^2) <= S_max, S_max = 200kVA (可配置) | 功率圆限制 |
-| ACT-04 | pv_limit ∈ [0.0, 1.0] | 光伏限功率比例约束（v2.6 恢复） |
-| ACT-05 | 当 dispatch_p_set 有效时，p_batt_set 绝对值不得超过 dispatch_p_set 绝对值 | 调度指令权限约束 |
+| ACT-01 | p_ref 变化率 <= 50 kW/步 | 防止电池功率突变 |
+| ACT-02 | k_droop 变化率 <= 10 kW/V/步 | 防止下垂系数突变 |
+| ACT-03 | p_ref ∈ [p_ref_min, p_ref_max]（由 ActionSpaceConfig 确定）| 有功基准点范围约束 |
+| ACT-04 | k_droop ∈ [k_droop_min, k_droop_max]（由实时控制模块提供）| 下垂系数范围约束 |
+| ACT-05 | load_shedding ∈ [0.0, max_load_shedding] | 负荷切除范围约束 |
+| ACT-06 | pv_limit ∈ [0.0, 1.0] | 光伏限功率比例约束 |
+| ACT-07 | 当 dispatch_p_set 有效时，p_ref 绝对值不得超过 dispatch_p_set 绝对值 | 调度指令权限约束 |
 
 ### 5.4a 双参数模式校验规则（v2.7）
 
@@ -553,30 +566,21 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 ### 5.5 接口定义
 
 ```rust
-/// 强化学习决策输出（3 维动作空间，v2.6）
+/// 强化学习决策输出（5 维动作空间 + confidence，v2.13）
+///
+/// v2.7 双参数模式：p_ref（有功基准）+ k_droop（电压-有功下垂系数）
+/// v2.13 新增：confidence 决策置信度
 #[derive(Debug, Clone)]
 pub struct ActionOutput {
-    pub p_batt_set: f64,              // 电池有功功率设定值 (kW), [-50.0, 50.0]
-    pub load_shedding: f64,           // 可中断负荷切除量 (kW), [0.0, 60.0]
-    pub pv_limit: f64,                // 光伏限功率比例, [0.0, 1.0] (v2.6 恢复)
-    pub confidence: f64,              // 决策置信度 (0.0 ~ 1.0)
-    // 注：q_batt_set 由实时电压调节器闭环控制，不经过 RL 动作输出
+    pub p_ref: f64,           // 有功功率基准点 (kW), [-50.0, 50.0], 负=充电, 正=放电
+    pub k_droop: f64,         // 电压-有功下垂系数 (kW/V), [0.0, 30.0]
+    pub load_shedding: f64,     // 可中断负荷切除量 (kW), [0.0, 60.0]
+    pub pv_limit: f64,         // 光伏限功率比例, [0.0, 1.0]
+    pub confidence: f64,        // 决策置信度 (0.0 ~ 1.0)（v2.13 新增）
 }
 ```
 
-### 5.5a 双参数动作输出结构（v2.7）
-
-```rust
-/// 动作输出结构体（v2.7 双参数模式）
-#[derive(Debug, Clone)]
-pub struct ActionOutput {
-    pub p_ref: f64,           // 有功功率基准点 (kW), 范围由 ActionSpaceConfig 确定
-    pub k_droop: f64,         // 电压-有功下垂系数 (kW/V), 范围由实时控制模块提供
-    pub load_shedding: f64,   // 可中断负荷切除量 (kW), 保留
-    pub pv_limit: f64,         // 光伏限功率比例, 保留
-    pub confidence: f64,      // 决策置信度 (0.0 ~ 1.0)
-}
-```
+> **legacy 版本：** v2.6 及之前的 `ActionOutput` 结构体（使用 `p_batt_set` 字段）已废弃，仅用于兼容旧模式。
 
 ### 5.5b 下垂控制公式（v2.7）
 
@@ -598,29 +602,30 @@ P_output = P_ref + k_droop × ΔV
 
 | Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
 |-------|--------|--------|----------|------|
-| `ai/action_output` | ModelManager | strategy-engine | `ActionOutput` JSON（含 p_ref, k_droop, load_shedding, pv_limit）| 1Hz |
+| `ai/action_output` | ModelManager | strategy-engine | `ActionOutput` JSON（含 p_ref, k_droop, load_shedding, pv_limit, confidence）| 1Hz |
 | `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | `RewardValue` JSON | 1Hz |
 | `ai/model_status` | ModelManager | Web UI, 告警模块 | `ModelStatus` JSON | 1Hz |
 | `ai/droop_range` | intercore | ActionValidator | `{k_min: f64, k_max: f64}` JSON | 按需更新 |
 
-> **指令分发说明（v2.7）：** `ActionOutput` 包含 4 个控制指令，分发路径如下：
+> **指令分发说明（v2.7）：** `ActionOutput` 包含 5 个控制维度，分发路径如下：
 > - `p_ref` + `k_droop` → 通过 intercore（TCP/RJ45）发送到**实时控制模块**，用于下垂控制公式 `P_output = P_ref + k_droop × ΔV`
 > - `pv_limit` → 通过 SouthCommandDispatcher 发送到**光伏逆变器**（南向 RS485/HPLC）
 > - `load_shedding` → 通过 SouthCommandDispatcher 发送到**负荷控制装置**（南向 RS485/HPLC）
+> - `confidence` → 仅用于置信度展示，不参与控制分发
 
 ### 5.7 状态/动作空间验收标准
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
-| STATE-01 | 状态空间结构包含全部 6 个大类、21 个字段 | 单元测试（字段计数验证） |
+| STATE-01 | 状态空间结构包含全部 10 个大类、59 维（v2.11） | 单元测试（字段计数验证） |
 | STATE-02 | 每个字段的数据类型和取值范围与定义严格一致 | 单元测试（边界值验证） |
-| STATE-03 | 预测数据向量长度可配置（默认 15，可配置扩展至 30），超出/不足时自动裁剪/补零 | 单元测试 |
+| STATE-03 | 预测数据向量长度固定 15 维，超出/不足时自动裁剪/补零 | 单元测试 |
 | STATE-04 | Option 字段为 None 时，RL 决策器自动取其维度值 = 0.0 并跳过相关约束 | 集成测试 |
 | STATE-05 | 状态输入到推理开始的总延迟 < 5ms（从融合数据就绪到 RKNN Runtime 接收输入）| 性能测试 |
-| ACT-07 | 动作空间结构包含全部 3 个动作维度 | 单元测试（字段计数验证）|
-| ACT-08 | 每个动作维度的取值范围严格执行定义边界 | 单元测试（边界值验证 + clamp 验证）|
-| ACT-09 | 4 条约束规则（ACT-01/03/04/05）均在动作输出时执行校验，违反约束时自动 clamp 并记录 WARN 日志 | 集成测试 |
-| ACT-10 | 约束校验总延迟 < 0.5ms | 性能测试 |
+| ACT-01 | 动作空间结构包含全部 5 个动作维度 + confidence（v2.13） | 单元测试（字段计数验证）|
+| ACT-02 | 每个动作维度的取值范围严格执行定义边界 | 单元测试（边界值验证 + clamp 验证）|
+| ACT-03 | 动作约束校验违反时自动 clamp 并记录 WARN 日志 | 集成测试 |
+| ACT-04 | 约束校验总延迟 < 0.5ms | 性能测试 |
 | **DUAL-01** | RL 模型输出包含 P_ref 和 k_droop 两个参数 | 单元测试 |
 | **DUAL-02** | P_ref 取值范围符合 ActionSpaceConfig 约束 | 单元测试（边界值验证）|
 | **DUAL-03** | k_droop 取值范围符合实时控制模块提供的 [k_min, k_max] | 集成测试 |

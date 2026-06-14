@@ -763,13 +763,15 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 > **注：** v2.10 安全覆盖状态（D9）使 AI 引擎感知实时控制模块临时覆盖事件，并在奖励函数中获得相应惩罚。v2.11 新增分位数负荷预测（D10），支撑冲击负荷预备度奖励计算。
 
-**电压感知 P/Q 协同控制策略：**
+**电压感知 P/Q 协同控制策略（v2.7 双参数模式）：**
 
-| 场景 | 电压特征 | P 控制 (p_batt_set) | Q 控制 (q_batt_set) |
+| 场景 | 电压特征 | P 控制 (p_ref) | Q 控制（实时模块闭环） |
 |------|----------|---------------------|---------------------|
-| 光伏超发 | 电压 > 1.05 p.u. | 充电 (负值) -- 吸收有功 | 感性 (负值) -- 吸收无功，抑制电压 |
-| 台区季节性负荷 | 电压 < 0.95 p.u. | 放电 (正值) -- 释放有功 | 容性 (正值) -- 释放无功，补偿励磁 |
-| 末端低电压 | 电压 < 0.95 p.u. | 放电 (正值) -- 仅当无功不足时 | 容性 (正值) -- 优先手段，不消耗 SOC |
+| 光伏超发 | 电压 > 1.05 p.u. | 充电 (p_ref<0) → 吸收有功消纳光伏 | 实时控制模块根据电压自动调节 |
+| 台区季节性负荷 | 电压 < 0.95 p.u. | 放电 (p_ref>0) → 释放有功补充缺口 | 实时控制模块根据电压自动调节 |
+| 末端低电压 | 电压 < 0.95 p.u. | 放电 (p_ref>0) — 仅当 Q 裕度不足时 | 实时控制模块优先调节 Q |
+
+> **注：** v2.7 双参数模式将 Q 控制完全交给实时控制模块，RL 仅输出 P 控制指令（P_ref + k_droop），实现时间尺度解耦。
 
 ### 4.4 完整动作空间表（5 维 + confidence，v2.13）
 
@@ -867,8 +869,8 @@ impl RLModel {
 
     /// 执行决策
     ///
-    /// 输入：56 维融合状态向量（v2.5）
-    /// 输出：4 维动作 [(p_batt_set, load_shedding, pv_limit, confidence)]（v2.6）
+    /// 输入：59 维融合状态向量（v2.11）
+    /// 输出：5 维动作 + confidence [(p_ref, k_droop, load_shedding, pv_limit, confidence)]（v2.13）
     pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError>;
 
     /// 获取模型类型
@@ -884,18 +886,19 @@ impl RLModel {
 从 RKNN Runtime 推理输出的 f32 向量解析为 ActionOutput 结构体，并在解析阶段执行 clamp 限幅。
 
 ```rust
-/// 解析 RL 模型输出向量为 ActionOutput（v2.6，3 维动作）
+/// 解析 RL 模型输出向量为 ActionOutput（v2.13，5 维动作 + confidence）
 ///
-/// 输出格式: [p_batt_set, load_shedding, pv_limit, confidence]
-pub fn parse_action_output(raw: &[f32]) -> Option<ActionOutput> {
-    if raw.len() < 4 {
+/// 输出格式: [p_ref, k_droop, load_shedding, pv_limit, confidence]
+pub fn parse_action_output(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutput> {
+    if raw.len() < 5 {
         return None;
     }
     Some(ActionOutput {
-        p_batt_set:   (raw[0] as f64).clamp(-50.0, 50.0),
-        load_shedding:(raw[1] as f64).clamp(0.0, 60.0),
-        pv_limit:     (raw[2] as f64).clamp(0.0, 1.0),
-        confidence:   (raw[3] as f64).clamp(0.0, 1.0),
+        p_ref:        (raw[0] as f64).clamp(-config.max_batt_discharge_power, config.max_batt_charge_power),
+        k_droop:     (raw[1] as f64).clamp(0.0, 30.0),  // 范围由实时控制模块提供
+        load_shedding:(raw[2] as f64).clamp(0.0, config.max_load_shedding),
+        pv_limit:     (raw[3] as f64).clamp(0.0, 1.0),
+        confidence:   (raw[4] as f64).clamp(0.0, 1.0),
     })
 }
 ```
@@ -915,15 +918,17 @@ pub struct ActionValidator {
 }
 ```
 
-**5 条约束规则（ACT-01 ~ ACT-05）：**
+**7 条约束规则（ACT-01 ~ ACT-07，v2.13）：**
 
 | 规则 ID | 约束条件 | 校验逻辑 |
 |---------|----------|----------|
-| ACT-01 | p_batt_set 变化率 <= 50kW/s | `abs(p_batt_new - p_batt_prev) <= config.p_batt_ramp_limit_kw` |
-| ACT-02 | q_batt_set 变化率 <= 30kVar/s | `abs(q_batt_new - q_batt_prev) <= config.q_batt_ramp_limit_kvar` |
-| ACT-03 | sqrt(p^2 + q^2) <= S_max=500kVA | `hypot(p_batt, q_batt) <= config.max_apparent_power_kva` |
-| ACT-04 | pv_limit >= 0.1 (防逆流除外) | `pv_limit >= config.pv_limit_min` (防逆流场景允许 0.0) |
-| ACT-05 | 调度约束 | `abs(p_batt) <= abs(dispatch_p_set)` (仅 dispatch_p_set 不为 None 时) |
+| ACT-01 | p_ref 变化率 <= 50kW/步 | `abs(p_ref_new - p_ref_prev) <= config.p_batt_ramp_limit_kw` |
+| ACT-02 | k_droop 变化率 <= 10 kW/V/步 | `abs(k_droop_new - k_droop_prev) <= config.k_droop_ramp_limit` |
+| ACT-03 | p_ref ∈ [p_ref_min, p_ref_max] | `clamp(p_ref, p_ref_min, p_ref_max)` |
+| ACT-04 | k_droop ∈ [k_droop_min, k_droop_max] | `clamp(k_droop, k_droop_min, k_droop_max)` |
+| ACT-05 | load_shedding ∈ [0.0, max_load_shedding] | `clamp(load_shedding, 0.0, max_load_shedding)` |
+| ACT-06 | pv_limit ∈ [0.0, 1.0] | `clamp(pv_limit, 0.0, 1.0)` |
+| ACT-07 | 调度约束 | `abs(p_ref) <= abs(dispatch_p_set)` (仅 dispatch_p_set 不为 None 时) |
 
 ```rust
 impl ActionValidator {
