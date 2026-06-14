@@ -267,6 +267,137 @@ impl SmoothSceneTransition {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v2.13: 双策略头机制（策略混合替代权重混合）
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::rl_model::ActionOutput;
+
+/// 双策略头状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DualStrategyState {
+    /// 仅运行旧策略
+    OldOnly,
+    /// 过渡中（α 线性增长）
+    Transitioning,
+    /// 仅运行新策略
+    NewOnly,
+}
+
+/// 双策略头管理器（v2.13 新增）
+///
+/// 在场景切换过渡期内同时运行旧策略和新策略，
+/// 最终动作 = (1-α) * a_old + α * a_new
+///
+/// 公式：a_blended = (1 - α) * a_old + α * a_new
+/// 其中 α = step_counter / transition_steps（从 0 线性增长到 1）
+pub struct DualStrategyHead {
+    /// 旧策略动作（上一场景的策略）
+    old_action: Option<ActionOutput>,
+    /// 新策略动作（目标场景的策略）
+    new_action: Option<ActionOutput>,
+    /// 当前混合比例 α
+    alpha: f32,
+    /// 过渡状态
+    state: DualStrategyState,
+    /// 过渡步数计数器
+    step_counter: usize,
+    /// 过渡总步数
+    transition_steps: usize,
+}
+
+impl DualStrategyHead {
+    /// 创建双策略头
+    pub fn new(transition_steps: usize) -> Self {
+        Self {
+            old_action: None,
+            new_action: None,
+            alpha: 0.0,
+            state: DualStrategyState::OldOnly,
+            step_counter: 0,
+            transition_steps,
+        }
+    }
+
+    /// 设置旧策略动作
+    pub fn set_old_action(&mut self, action: ActionOutput) {
+        self.old_action = Some(action);
+    }
+
+    /// 设置新策略动作
+    pub fn set_new_action(&mut self, action: ActionOutput) {
+        self.new_action = Some(action);
+    }
+
+    /// 更新混合比例 α
+    ///
+    /// α 从 0 线性增长到 1
+    fn update_alpha(&mut self) {
+        if self.step_counter >= self.transition_steps {
+            self.alpha = 1.0;
+            self.state = DualStrategyState::NewOnly;
+        } else {
+            self.alpha = self.step_counter as f32 / self.transition_steps as f32;
+            self.state = DualStrategyState::Transitioning;
+        }
+    }
+
+    /// 步进计数器
+    pub fn step(&mut self) {
+        self.step_counter += 1;
+        self.update_alpha();
+    }
+
+    /// 混合动作
+    ///
+    /// 公式：a_blended = (1 - α) * a_old + α * a_new
+    pub fn blend_actions(&self) -> Option<ActionOutput> {
+        let a_old = self.old_action.as_ref()?;
+        let a_new = self.new_action.as_ref()?;
+
+        let alpha = self.alpha as f64;
+        let one_minus_alpha = 1.0 - alpha;
+
+        Some(ActionOutput {
+            p_ref: one_minus_alpha * a_old.p_ref + alpha * a_new.p_ref,
+            k_droop: one_minus_alpha * a_old.k_droop + alpha * a_new.k_droop,
+            load_shedding: one_minus_alpha * a_old.load_shedding + alpha * a_new.load_shedding,
+            pv_limit: one_minus_alpha * a_old.pv_limit + alpha * a_new.pv_limit,
+            confidence: (one_minus_alpha * a_old.confidence + alpha * a_new.confidence).min(1.0),
+        })
+    }
+
+    /// 获取当前混合比例 α
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// 获取当前状态
+    pub fn state(&self) -> DualStrategyState {
+        self.state
+    }
+
+    /// 重置过渡状态
+    pub fn reset(&mut self) {
+        self.old_action = None;
+        self.new_action = None;
+        self.alpha = 0.0;
+        self.step_counter = 0;
+        self.state = DualStrategyState::OldOnly;
+    }
+
+    /// 是否已完成过渡
+    pub fn is_completed(&self) -> bool {
+        self.state == DualStrategyState::NewOnly
+    }
+}
+
+impl Default for DualStrategyHead {
+    fn default() -> Self {
+        Self::new(10) // 默认 10 步过渡
+    }
+}
+
 /// 模式选择器（线程安全，互斥保证）
 pub struct ModeSelector {
     current_mode: Arc<Mutex<RunningMode>>,

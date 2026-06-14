@@ -28,6 +28,7 @@ pub mod online_updater;
 pub mod pareto_optimizer;
 pub mod performance_collector;
 pub mod reward_calculator;
+pub mod reward_normalizer;
 pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
 pub mod rknn_types;
@@ -57,7 +58,8 @@ pub use error::AiEngineError;
 pub use load_covariates::{DataFusionWeatherAdapter, DefaultWeatherService, LoadCovariates, WeatherService};
 pub use lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction};
 pub use mode_selector::{
-    parse_mode_name, ModeSelector, ModeSwitchEvent, RunningMode, SwitchSource,
+    parse_mode_name, DualStrategyHead, DualStrategyState, ModeSelector, ModeSwitchEvent,
+    RunningMode, SwitchSource,
 };
 pub use model_manager::{ModelManager, ModelStatus};
 pub use model_registry::{ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult};
@@ -65,6 +67,7 @@ pub use online_updater::{DataPoint, OnlineUpdater};
 pub use pareto_optimizer::{OptimizationObjective, ParetoSolution, ParetoWeightOptimizer, WeightCandidate};
 pub use performance_collector::PerformanceCollectorImpl;
 pub use reward_calculator::RewardCalculator;
+pub use reward_normalizer::{NormalizedReward, RewardNormalizer, RunningStats};
 pub use rknn_runtime::RknnRuntime;
 pub use rl_model::{parse_action_output, ActionOutput, RLModel, SystemState};
 pub use robustness_manager::{AnomalyType, RobustnessManager};

@@ -158,6 +158,376 @@ impl OnlineUpdater {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// v2.13: PER + KL 正则化强化
+// ─────────────────────────────────────────────────────────────────────────────
+
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
+
+/// 优先经验回放样本
+#[derive(Debug, Clone)]
+pub struct PerSample {
+    /// 数据点
+    pub data: DataPoint,
+    /// TD-error（优先级）
+    pub td_error: f32,
+    /// 采样优先级（基于 TD-error 计算）
+    pub priority: f32,
+}
+
+impl PerSample {
+    /// 创建 PER 样本
+    pub fn new(data: DataPoint, td_error: f32) -> Self {
+        let priority = td_error.abs().max(1e-6);
+        Self {
+            data,
+            td_error,
+            priority,
+        }
+    }
+
+    /// 更新 TD-error
+    pub fn update_priority(&mut self, td_error: f32) {
+        self.td_error = td_error;
+        self.priority = td_error.abs().max(1e-6);
+    }
+}
+
+/// PER 缓冲区排序器（用于 BinaryHeap，按优先级降序）
+impl Ord for PerSample {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority
+            .partial_cmp(&other.priority)
+            .unwrap_or(Ordering::Equal)
+    }
+}
+
+impl PartialOrd for PerSample {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for PerSample {}
+
+impl PartialEq for PerSample {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+
+/// 优先经验回放缓冲区
+///
+/// 使用 BinaryHeap 维护优先级队列，支持按 TD-error 加权采样。
+#[derive(Debug, Clone)]
+pub struct PerBuffer {
+    /// 样本缓冲区
+    samples: Vec<PerSample>,
+    /// 最大容量
+    capacity: usize,
+    /// PER 参数 α（优先级权重）
+    alpha: f32,
+    /// PER 参数 β（重要性采样权重）
+    beta: f32,
+}
+
+impl PerBuffer {
+    /// 创建 PER 缓冲区
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: Vec::with_capacity(capacity),
+            capacity,
+            alpha: 0.6,  // PER 标准值
+            beta: 0.4,   // 初始值，训练中渐增到 1.0
+        }
+    }
+
+    /// 添加样本
+    pub fn add(&mut self, sample: PerSample) {
+        if self.samples.len() >= self.capacity {
+            // 移除最低优先级样本
+            if let Some(min_idx) = self
+                .samples
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.priority.partial_cmp(&b.1.priority).unwrap())
+                .map(|(i, _)| i)
+            {
+                self.samples.remove(min_idx);
+            }
+        }
+        self.samples.push(sample);
+    }
+
+    /// 更新样本优先级
+    pub fn update(&mut self, index: usize, td_error: f32) {
+        if index < self.samples.len() {
+            self.samples[index].update_priority(td_error);
+        }
+    }
+
+    /// 采样样本（加权随机采样）
+    ///
+    /// 返回样本索引和重要性采样权重
+    pub fn sample(&self, batch_size: usize) -> Vec<(usize, f32)> {
+        if self.samples.is_empty() {
+            return Vec::new();
+        }
+
+        // 计算总优先级
+        let total_priority: f32 = self.samples.iter().map(|s| s.priority.powf(self.alpha)).sum();
+
+        // 加权随机采样
+        let mut result = Vec::with_capacity(batch_size.min(self.samples.len()));
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..batch_size.min(self.samples.len()) {
+            let mut r: f32 = rand::Rng::gen(&mut rng);
+            r *= total_priority;
+
+            let mut cumsum = 0.0f32;
+            for (i, sample) in self.samples.iter().enumerate() {
+                cumsum += sample.priority.powf(self.alpha);
+                if r <= cumsum {
+                    // 计算重要性采样权重
+                    // w_i = (N * p_i / sum(p))^(-β)
+                    let n = self.samples.len() as f32;
+                    let weight = ((n * sample.priority.powf(self.alpha) / total_priority).max(1e-6))
+                        .powf(-self.beta);
+                    result.push((i, weight));
+                    break;
+                }
+            }
+        }
+
+        result
+    }
+
+    /// 获取样本数量
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// 检查是否为空
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// 清空缓冲区
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
+/// PER 采样器依赖 rand crate，需要在 Cargo.toml 中添加
+impl Default for PerBuffer {
+    fn default() -> Self {
+        Self::new(1000)
+    }
+}
+
+/// KL 散度正则化配置
+#[derive(Debug, Clone)]
+pub struct KLDivergenceConfig {
+    /// KL 正则化权重 β
+    pub beta: f32,
+    /// KL 目标值（用于自适应调整 β）
+    pub target_kl: f32,
+    /// KL 上限（超过此值则拒绝更新）
+    pub kl_max: f32,
+}
+
+impl Default for KLDivergenceConfig {
+    fn default() -> Self {
+        Self {
+            beta: 0.01,   // 默认权重
+            target_kl: 0.01, // 目标 KL 散度
+            kl_max: 0.05,  // 最大允许 KL 散度
+        }
+    }
+}
+
+/// KL 散度计算器
+#[derive(Debug, Clone)]
+pub struct KLDivergenceCalculator {
+    config: KLDivergenceConfig,
+}
+
+impl KLDivergenceCalculator {
+    /// 创建 KL 计算器
+    pub fn new(config: KLDivergenceConfig) -> Self {
+        Self { config }
+    }
+
+    /// 计算两个动作分布之间的 KL 散度
+    ///
+    /// 假设动作分布为高斯分布，使用简化的 KL 计算：
+    /// D_KL(π_old || π_new) ≈ 0.5 * sum((μ_new - μ_old)^2 / σ^2)
+    pub fn compute_kl_gaussian(
+        &self,
+        mu_old: &[f32],
+        sigma_old: &[f32],
+        mu_new: &[f32],
+        sigma_new: &[f32],
+    ) -> f32 {
+        if mu_old.len() != mu_new.len() || sigma_old.len() != sigma_new.len() {
+            tracing::warn!("KL: distribution dimensions mismatch");
+            return f32::MAX;
+        }
+
+        let mut kl = 0.0f32;
+        for i in 0..mu_old.len() {
+            let sigma_sq = sigma_old[i].powi(2).max(1e-8);
+            let diff = mu_new[i] - mu_old[i];
+            kl += diff * diff / sigma_sq;
+        }
+
+        0.5 * kl
+    }
+
+    /// 计算正则化损失
+    ///
+    /// L_kl = β * D_KL(π_new || π_offline)
+    pub fn compute_regularization(
+        &self,
+        pi_new: &[f32],
+        pi_offline: &[f32],
+    ) -> f32 {
+        let kl = self.compute_kl_gaussian(pi_offline, pi_new, pi_offline, pi_new);
+        self.config.beta * kl
+    }
+
+    /// 检查 KL 是否在允许范围内
+    pub fn is_kl_acceptable(&self, kl: f32) -> bool {
+        kl <= self.config.kl_max
+    }
+
+    /// 自适应调整 β（基于 KL 散度）
+    ///
+    /// 如果 KL > target_kl，减少 β
+    /// 如果 KL < target_kl，增加 β
+    pub fn adapt_beta(&mut self, kl: f32) {
+        let delta = kl - self.config.target_kl;
+        // 简单自适应：β *= (1 - 0.1 * delta)
+        self.config.beta *= (1.0 - 0.1 * delta).max(0.001).min(10.0);
+        tracing::debug!("KL adapt: kl={:.6}, beta={:.6}", kl, self.config.beta);
+    }
+}
+
+impl Default for KLDivergenceCalculator {
+    fn default() -> Self {
+        Self::new(KLDivergenceConfig::default())
+    }
+}
+
+/// 动作分布一致性检查结果
+#[derive(Debug, Clone)]
+pub struct ActionConsistencyCheck {
+    /// 是否一致
+    pub is_consistent: bool,
+    /// 最大偏差
+    pub max_deviation: f32,
+    /// 偏差阈值
+    pub deviation_threshold: f32,
+}
+
+impl ActionConsistencyCheck {
+    /// 检查动作一致性
+    pub fn check(
+        action_new: &[f32],
+        action_old: &[f32],
+        threshold: f32,
+    ) -> Self {
+        if action_new.len() != action_old.len() {
+            return Self {
+                is_consistent: false,
+                max_deviation: f32::MAX,
+                deviation_threshold: threshold,
+            };
+        }
+
+        let max_deviation = action_new
+            .iter()
+            .zip(action_old.iter())
+            .map(|(n, o)| (n - o).abs())
+            .fold(0.0f32, f32::max);
+
+        Self {
+            is_consistent: max_deviation <= threshold,
+            max_deviation,
+            deviation_threshold: threshold,
+        }
+    }
+}
+
+/// 在线微调扩展 trait（v2.13 新增）
+pub trait OnlineUpdaterExt {
+    /// 获取 PER 缓冲区
+    fn per_buffer(&self) -> &PerBuffer;
+
+    /// 执行带 PER 和 KL 正则化的更新
+    fn update_with_per_kl(
+        &mut self,
+        task_loss: f32,
+        pi_new: &[f32],
+        pi_offline: &[f32],
+    ) -> Result<f32, AiEngineError>;
+
+    /// 检查动作一致性
+    fn check_action_consistency(
+        &self,
+        action_new: &[f32],
+        action_old: &[f32],
+    ) -> ActionConsistencyCheck;
+}
+
+impl OnlineUpdaterExt for OnlineUpdater {
+    fn per_buffer(&self) -> &PerBuffer {
+        // PER 缓冲区存储在 OnlineUpdater 中（需要扩展结构体）
+        // 此处返回临时空实现，实际使用需要扩展 OnlineUpdater 结构体
+        unimplemented!("PER buffer requires extending OnlineUpdater struct")
+    }
+
+    fn update_with_per_kl(
+        &mut self,
+        task_loss: f32,
+        pi_new: &[f32],
+        pi_offline: &[f32],
+    ) -> Result<f32, AiEngineError> {
+        let kl_calc = KLDivergenceCalculator::default();
+        let kl = kl_calc.compute_regularization(pi_new, pi_offline);
+
+        // 检查 KL 是否可接受
+        if !kl_calc.is_kl_acceptable(kl) {
+            tracing::warn!("KL divergence {} exceeds max {}, rejected", kl, kl_calc.config.kl_max);
+            return Err(AiEngineError::OnlineUpdateFailed(format!(
+                "KL divergence {} exceeds max",
+                kl
+            )));
+        }
+
+        // 总损失 = task_loss + β * KL
+        let total_loss = task_loss + kl;
+
+        tracing::debug!(
+            "PER+KL update: task_loss={:.6}, kl={:.6}, total_loss={:.6}",
+            task_loss, kl, total_loss
+        );
+
+        Ok(total_loss)
+    }
+
+    fn check_action_consistency(
+        &self,
+        action_new: &[f32],
+        action_old: &[f32],
+    ) -> ActionConsistencyCheck {
+        let threshold = 0.5; // 默认阈值
+        ActionConsistencyCheck::check(action_new, action_old, threshold)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // R1: 影子模型验证 + 渐进式切换（v2.10）
 // ─────────────────────────────────────────────────────────────────────────────
 

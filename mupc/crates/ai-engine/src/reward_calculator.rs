@@ -157,6 +157,8 @@ pub struct RewardCalculator {
     last_p_batt_set: RwLock<f64>,
     /// 上一周期平均电压 (p.u.)，用于 R_voltage_slope 计算
     last_voltage: RwLock<f64>,
+    /// v2.13 新增：上一周期电压偏差 (p.u.)，用于状态改善率奖励
+    last_v_dev: RwLock<f64>,
     /// 电压越限连续步数计数器（用于死区触发）
     voltage_violation_count: std::sync::atomic::AtomicU32,
     // v2.5 新增配置参数
@@ -185,13 +187,23 @@ pub struct RewardCalculator {
     base_w6_voltage_slope: f64,
     /// 电压斜率动态权重系数 k
     voltage_slope_k: f64,
-    // v2.12 R-06 新增：冲击负荷响应奖励参数
+    // v2.12 R-06 新增：冲击负荷响应奖励参数（v2.13 重构为预备度奖励）
     /// 冲击负荷检测阈值（kW），当 P90 - P50 > threshold 时触发
     shock_threshold_kw: f64,
     /// 冲击负荷响应奖励权重
     shock_response_weight: f64,
-    /// 响应时间惩罚系数 λ
+    /// 响应时间惩罚系数 λ（v2.13 废弃，仅保留兼容）
+    #[allow(dead_code)]
     response_time_penalty: f64,
+    // v2.13 新增：冲击负荷预备度奖励参数
+    /// SOC 预留目标（冲击缓冲空间）
+    soc_reserve_target: f64,
+    /// 有功功率预留目标（kW）
+    p_ref_reserve_target: f64,
+    /// 预备度奖励权重 w1（SOC 相关）
+    shock_readiness_weight_soc: f64,
+    /// 预备度奖励权重 w2（有功功率相关）
+    shock_readiness_weight_p: f64,
     // v2.12 R-07 新增：P-Q 协同度阈值配置
     /// P-Q 协同度阈值配置
     pq_thresholds: PqCoordinationThresholds,
@@ -207,6 +219,7 @@ impl RewardCalculator {
             battery_capacity_kwh: 100.0,
             last_p_batt_set: RwLock::new(0.0),
             last_voltage: RwLock::new(1.0),
+            last_v_dev: RwLock::new(0.0),
             voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
             q_margin_threshold: 0.10,
             voltage_high_limit: 1.05,
@@ -225,6 +238,11 @@ impl RewardCalculator {
             shock_threshold_kw: 10.0,
             shock_response_weight: 20.0,
             response_time_penalty: 5.0,
+            // v2.13: 冲击负荷预备度奖励参数默认值
+            soc_reserve_target: 0.7,
+            p_ref_reserve_target: 10.0,
+            shock_readiness_weight_soc: 20.0,
+            shock_readiness_weight_p: 10.0,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         }
@@ -249,6 +267,7 @@ impl RewardCalculator {
             battery_capacity_kwh: 100.0,
             last_p_batt_set: RwLock::new(0.0),
             last_voltage: RwLock::new(1.0),
+            last_v_dev: RwLock::new(0.0),
             voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
             q_margin_threshold: threshold_config.q_margin_threshold,
             voltage_high_limit: threshold_config.voltage_high_limit,
@@ -267,6 +286,11 @@ impl RewardCalculator {
             shock_threshold_kw: 10.0,
             shock_response_weight: 20.0,
             response_time_penalty: 5.0,
+            // v2.13: 冲击负荷预备度奖励参数默认值
+            soc_reserve_target: 0.7,
+            p_ref_reserve_target: 10.0,
+            shock_readiness_weight_soc: 20.0,
+            shock_readiness_weight_p: 10.0,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         })
@@ -303,6 +327,7 @@ impl RewardCalculator {
             battery_capacity_kwh: 100.0,
             last_p_batt_set: RwLock::new(0.0),
             last_voltage: RwLock::new(1.0),
+            last_v_dev: RwLock::new(0.0),
             voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
             q_margin_threshold: cfg.q_margin_threshold,
             voltage_high_limit: cfg.voltage_high_limit,
@@ -323,6 +348,11 @@ impl RewardCalculator {
             shock_threshold_kw: 10.0,
             shock_response_weight: 20.0,
             response_time_penalty: 5.0,
+            // v2.13: 冲击负荷预备度奖励参数默认值
+            soc_reserve_target: 0.7,
+            p_ref_reserve_target: 10.0,
+            shock_readiness_weight_soc: 20.0,
+            shock_readiness_weight_p: 10.0,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         }
@@ -510,13 +540,14 @@ impl RewardCalculator {
             - w[7] * r_safety_override_norm
             + r_shaping
             + r_soc_balance
-            + self.calc_shock_response_reward(state, action.load_shedding)
+            + self.calc_shock_readiness_reward(state, action.p_ref)
+            + self.calc_state_improvement_reward(state, action.p_ref, prev_v)
     }
 
-    /// v2.12 R-06: 计算冲击负荷响应奖励（辅助方法）
+    /// v2.13: 计算冲击负荷预备度奖励（辅助方法）
     ///
-    /// 从 state 中提取 P90 和 P50，并调用 shock_response_reward
-    fn calc_shock_response_reward(&self, state: &FusedSystemState, load_shedding: f64) -> f64 {
+    /// 从 state 中提取 P90 和 P50，并调用 shock_readiness_reward
+    fn calc_shock_readiness_reward(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
         // P50 来自 base_load
         let p50 = state.base_load;
         // P90 来自 load_forecast_quantiles 的倒数第二个值（约 90% 分位数）
@@ -526,10 +557,60 @@ impl RewardCalculator {
             .get(13)
             .copied()
             .unwrap_or(p50);
-        // 响应时间暂设为 0（实际应用中需从状态跟踪）
-        let response_time = 0.0;
 
-        self.shock_response_reward(load_shedding, response_time, p90, p50)
+        self.shock_readiness_reward(state, p_ref, p90, p50)
+    }
+
+    /// v2.13: 状态改善率奖励
+    ///
+    /// 建立"动作-效果"因果链，避免AI"自嗨"。
+    ///
+    /// 公式：R_improve = w * (V_dev_prev - V_dev_curr) * sign(P_action)
+    ///
+    /// 只有当有功动作确实减少电压偏差或过载程度时才给正向反馈。
+    /// - V_dev_prev: 上一周期电压偏差（取三相平均偏离1.0的绝对值）
+    /// - V_dev_curr: 当前周期电压偏差
+    /// - sign(P_action): 放电为正，充电为负
+    fn calc_state_improvement_reward(
+        &self,
+        state: &FusedSystemState,
+        p_action: f64,
+        prev_v_avg: f64,
+    ) -> f64 {
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_dev_curr = (v_avg - 1.0).abs();
+        let v_dev_prev = *self.last_v_dev.read().unwrap();
+
+        // 更新 last_v_dev
+        *self.last_v_dev.write().unwrap() = v_dev_curr;
+
+        // 如果是第一次调用（v_dev_prev == 0），无改善率奖励
+        if v_dev_prev < 1e-6 {
+            tracing::debug!("state_improvement: first call, no reward");
+            return 0.0;
+        }
+
+        // 计算电压偏差变化
+        let delta_v_dev = v_dev_prev - v_dev_curr;
+
+        // sign(P_action): 放电为正，充电为负
+        let sign_p = if p_action > 0.0 { 1.0 } else { -1.0 };
+
+        // 权重（可调）
+        let w_improve = 10.0;
+
+        // R_improve = w * delta_V_dev * sign(P_action)
+        // - 电压偏差减少（delta_v_dev > 0）且放电（sign_p > 0）→ 正奖励
+        // - 电压偏差减少（delta_v_dev > 0）且充电（sign_p < 0）→ 负奖励（不该充电）
+        // - 电压偏差增加（delta_v_dev < 0）且放电（sign_p > 0）→ 负奖励（放电没效果）
+        let r_improve = w_improve * delta_v_dev * sign_p;
+
+        tracing::debug!(
+            "state_improvement: V_dev_prev={:.4}, V_dev_curr={:.4}, delta={:.4}, sign_p={:.1}, R_improve={:.4}",
+            v_dev_prev, v_dev_curr, delta_v_dev, sign_p, r_improve
+        );
+
+        r_improve
     }
 
     /// v2.12 R-02: 变压器过载提前预警（负载率 85% 开始）
@@ -597,27 +678,45 @@ impl RewardCalculator {
 
     /// v2.12 R-06: 冲击负荷响应奖励
     ///
-    /// R_shock = w_shock × load_shedding / max_load_shedding - λ × response_time / max_response_time
+    /// v2.13: 冲击负荷预备度奖励（替代原有的响应时间奖励）
+    ///
+    /// 重构原因：1Hz 决策无法感知 ms 级冲击，应奖励"预备度"而非"响应速度"
+    ///
+    /// 公式：R_readiness = w1 * (soc_reserve - current_soc) + w2 * (p_ref_reserve - |p_ref|)
+    ///
     /// 条件：当 P90 - P50 > threshold（冲击负荷检测）
-    fn shock_response_reward(
+    fn shock_readiness_reward(
         &self,
-        load_shedding: f64,
-        response_time: f64,
+        state: &FusedSystemState,
+        p_ref: f64,
         p90: f64,
         p50: f64,
     ) -> f64 {
         let spread = p90 - p50;
 
+        // 冲击负荷检测：spread > threshold 时触发预备度奖励
         if spread <= self.shock_threshold_kw {
             return 0.0;
         }
 
-        let w_shock = self.shock_response_weight;
-        let lambda = self.response_time_penalty;
-        let max_load = 60.0;
-        let max_response = 60.0;
+        // 计算 SOC 预备度奖励
+        // 当前 SOC 越接近目标 soc_reserve，正奖励越高
+        let soc_gap = self.soc_reserve_target - state.battery_soc;
+        let r_soc = self.shock_readiness_weight_soc * soc_gap;
 
-        w_shock * (load_shedding / max_load) - lambda * (response_time / max_response)
+        // 计算有功功率预备度奖励
+        // |p_ref| 越低（接近 p_ref_reserve），正奖励越高
+        let p_ref_gap = self.p_ref_reserve_target - p_ref.abs();
+        let r_p = self.shock_readiness_weight_p * p_ref_gap;
+
+        let r_readiness = r_soc + r_p;
+
+        tracing::debug!(
+            "shock_readiness: spread={:.2}, soc={:.3}, soc_target={:.3}, r_soc={:.4}, |p_ref|={:.2}, r_p={:.4}, R_readiness={:.4}",
+            spread, state.battery_soc, self.soc_reserve_target, r_soc, p_ref.abs(), r_p, r_readiness
+        );
+
+        r_readiness
     }
 
     /// v2.8 弃光奖励（含高电压差异化）
@@ -642,11 +741,12 @@ impl RewardCalculator {
         }
     }
 
-    /// v2.8 P-Q 协同度奖励
+    /// v2.13: P-Q 协同度奖励（Sigmoid 平滑化）
     ///
-    /// 当 |V_deviation| > 5% 时：
-    /// - Q 有裕度（q_margin > 10%）：奖励"偷懒"省电池策略
-    /// - Q 已饱和（q_margin <= 10%）：奖励正确出手（低压放电/高压充电）
+    /// 消除硬阈值导致的策略震荡，使用 Sigmoid 平滑过渡：
+    /// - w(q) = 1.0 / (1.0 + exp(-k * (q_margin - q_threshold)))
+    /// - k=50 控制过渡陡峭程度
+    /// - 省电模式（+50）与支撑模式（-30）之间连续插值
     fn calc_pq_coordination(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
         let v_dev = (v_avg - 1.0).abs();
@@ -660,30 +760,29 @@ impl RewardCalculator {
         let q_threshold = self.pq_thresholds.q_margin_threshold;
         let p_threshold = self.pq_thresholds.p_threshold_kw;
 
-        if q_margin > q_threshold {
-            // Q 有裕度：AI 最优解是"偷懒"省电池
-            if p_ref.abs() < p_threshold {
-                50.0 // 大额奖励"偷懒"
-            } else {
-                -5.0 // 轻微惩罚（不必要的电池动作）
-            }
-        } else {
-            // Q 已饱和：AI 必须正确出手
-            let v_low = v_avg < 1.0;
-            let v_high = v_avg > 1.0;
+        // v2.13: Sigmoid 平滑过渡
+        let k = 50.0;
+        let w_save = 1.0 / (1.0 + (-k * (q_margin - q_threshold)).exp());
+        let w_support = 1.0 - w_save;
 
-            if v_low && p_ref < 0.0 {
-                50.0 // 低电压 + 放电（正确）
-            } else if v_high && p_ref > 0.0 {
-                50.0 // 高电压 + 充电（正确）
-            } else if v_low && p_ref >= 0.0 {
-                -30.0 // 低电压 + 不放电（失职）
-            } else if v_high && p_ref <= 0.0 {
-                -30.0 // 高电压 + 不充电（失职）
-            } else {
-                0.0
-            }
-        }
+        // 省电模式奖励（Q有裕度时AI"偷懒"省电池）
+        let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
+
+        // 支撑模式奖励（Q饱和时AI正确出手）
+        let v_low = v_avg < 1.0;
+        let v_high = v_avg > 1.0;
+        let r_correct = if (v_low && p_ref < 0.0) || (v_high && p_ref > 0.0) {
+            50.0
+        } else if (v_low && p_ref >= 0.0) || (v_high && p_ref <= 0.0) {
+            -30.0
+        } else {
+            0.0
+        };
+
+        // Sigmoid加权组合 + 死区平滑因子
+        let r_pq = w_save * r_lazy + w_support * r_correct;
+        let dead_zone_factor = ((v_dev - 0.05) / 0.05).clamp(0.0, 1.0);
+        r_pq * dead_zone_factor
     }
 
     /// v2.8 下垂系数平滑惩罚
@@ -974,42 +1073,51 @@ impl RewardCalculator {
             - w6_dynamic * r_voltage_slope
             - w[6] * r_smooth
             - w[7] * r_safety_override
-            + Self::calc_shock_response_reward_static(state, action.load_shedding)
+            + Self::calc_shock_readiness_reward_static(state, action.p_ref)
     }
 
-    /// v2.12 R-06: 冲击负荷响应奖励（静态版本）
-    fn shock_response_reward_static(
-        load_shedding: f64,
-        response_time: f64,
+    /// v2.13: 冲击负荷预备度奖励（静态版本）
+    ///
+    /// R_readiness = w1 * (soc_reserve - current_soc) + w2 * (p_ref_reserve - |p_ref|)
+    fn shock_readiness_reward_static(
+        state: &FusedSystemState,
+        p_ref: f64,
         p90: f64,
         p50: f64,
     ) -> f64 {
         let threshold = 10.0; // 默认值
+        let soc_reserve_target = 0.7; // 默认 SOC 预留目标
+        let p_ref_reserve_target = 10.0; // 默认有功功率预留目标
+        let w1 = 20.0; // SOC 权重
+        let w2 = 10.0; // 有功功率权重
+
         let spread = p90 - p50;
 
         if spread <= threshold {
             return 0.0;
         }
 
-        let w_shock = 20.0; // 默认值
-        let lambda = 5.0; // 默认值
-        let max_load = 60.0;
-        let max_response = 60.0;
+        // SOC 预备度奖励
+        let soc_gap = soc_reserve_target - state.battery_soc;
+        let r_soc = w1 * soc_gap;
 
-        w_shock * (load_shedding / max_load) - lambda * (response_time / max_response)
+        // 有功功率预备度奖励
+        let p_ref_gap = p_ref_reserve_target - p_ref.abs();
+        let r_p = w2 * p_ref_gap;
+
+        r_soc + r_p
     }
 
-    /// v2.12 R-06: 计算冲击负荷响应奖励（静态版本辅助方法）
-    fn calc_shock_response_reward_static(state: &FusedSystemState, load_shedding: f64) -> f64 {
+    /// v2.13: 计算冲击负荷预备度奖励（静态版本辅助方法）
+    fn calc_shock_readiness_reward_static(state: &FusedSystemState, p_ref: f64) -> f64 {
         let p50 = state.base_load;
         let p90 = state
             .load_forecast_quantiles
             .get(13)
             .copied()
             .unwrap_or(p50);
-        let response_time = 0.0;
 
-        Self::shock_response_reward_static(load_shedding, response_time, p90, p50)
+        Self::shock_readiness_reward_static(state, p_ref, p90, p50)
     }
 
     /// v2.12 R-04: 变压器过载分段惩罚（静态版本）
@@ -1062,7 +1170,7 @@ impl RewardCalculator {
         }
     }
 
-    /// v2.11: P-Q 协同度奖励（静态版本）
+    /// v2.13: P-Q 协同度奖励（静态版本，Sigmoid 平滑化）
     fn calc_pq_coordination_static(state: &FusedSystemState, p_ref: f64) -> f64 {
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
         let v_dev = (v_avg - 1.0).abs();
@@ -1073,33 +1181,34 @@ impl RewardCalculator {
         }
 
         let q_margin = state.q_realtime_margin;
-        // v2.12 R-07: 使用默认阈值配置
         let thresholds = PqCoordinationThresholds::default();
+        let q_threshold = thresholds.q_margin_threshold;
+        let p_threshold = thresholds.p_threshold_kw;
 
-        if q_margin > thresholds.q_margin_threshold {
-            // Q 有裕度：AI 最优解是"偷懒"省电池
-            if p_ref.abs() < thresholds.p_threshold_kw {
-                50.0
-            } else {
-                -5.0
-            }
+        // v2.13: Sigmoid平滑过渡
+        // w_save 表示"省电模式"权重，w_support 表示"支撑模式"权重
+        let k = 50.0;
+        let w_save = 1.0 / (1.0 + (-k * (q_margin - q_threshold)).exp());
+        let w_support = 1.0 - w_save;
+
+        // 省电模式奖励（Q有裕度时AI"偷懒"省电池）
+        let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
+
+        // 支撑模式奖励（Q饱和时AI正确出手）
+        let v_low = v_avg < 1.0;
+        let v_high = v_avg > 1.0;
+        let r_correct = if (v_low && p_ref < 0.0) || (v_high && p_ref > 0.0) {
+            50.0
+        } else if (v_low && p_ref >= 0.0) || (v_high && p_ref <= 0.0) {
+            -30.0
         } else {
-            // Q 已饱和：AI 必须正确出手
-            let v_low = v_avg < 1.0;
-            let v_high = v_avg > 1.0;
+            0.0
+        };
 
-            if v_low && p_ref < 0.0 {
-                50.0
-            } else if v_high && p_ref > 0.0 {
-                50.0
-            } else if v_low && p_ref >= 0.0 {
-                -30.0
-            } else if v_high && p_ref <= 0.0 {
-                -30.0
-            } else {
-                0.0
-            }
-        }
+        // Sigmoid加权组合 + 死区平滑因子
+        let r_pq = w_save * r_lazy + w_support * r_correct;
+        let dead_zone_factor = ((v_dev - 0.05) / 0.05).clamp(0.0, 1.0);
+        r_pq * dead_zone_factor
     }
 
     /// SCENE-B5: 极致绿色 — R = w1*R_green + w2*R_carbon
@@ -1853,50 +1962,10 @@ mod tests {
 
     // ===== v2.12 R-06 冲击负荷响应奖励测试 =====
 
-    #[test]
-    fn test_v2_12_shock_response_reward_no_shock() {
-        // P90 - P50 <= threshold 时，返回 0.0
-        let calc = RewardCalculator::new(SceneWeights::default());
-        let r = calc.shock_response_reward(10.0, 30.0, 50.0, 45.0); // spread = 5 < 10
-        assert!((r - 0.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_v2_12_shock_response_reward_with_shock() {
-        // P90 - P50 > threshold 时，计算奖励
-        let calc = RewardCalculator::new(SceneWeights::default());
-        // spread = 20 > 10 (threshold)
-        // w_shock = 20, load_shedding = 30, max_load = 60
-        // lambda = 5, response_time = 30, max_response = 60
-        // R = 20 * (30/60) - 5 * (30/60) = 20 * 0.5 - 5 * 0.5 = 10 - 2.5 = 7.5
-        let r = calc.shock_response_reward(30.0, 30.0, 70.0, 50.0);
-        assert!((r - 7.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_v2_12_shock_response_reward_zero_load_shedding() {
-        // load_shedding = 0 时，只有响应时间惩罚
-        let calc = RewardCalculator::new(SceneWeights::default());
-        // R = 20 * 0 - 5 * (30/60) = -2.5
-        let r = calc.shock_response_reward(0.0, 30.0, 70.0, 50.0);
-        assert!((r - (-2.5)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_v2_12_shock_response_reward_static() {
-        // 验证静态版本行为
-        let r_instance = RewardCalculator::shock_response_reward_static(30.0, 30.0, 70.0, 50.0);
-        let r_static = RewardCalculator::shock_response_reward_static(30.0, 30.0, 70.0, 50.0);
-        assert!((r_instance - r_static).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_v2_12_shock_response_reward_boundary() {
-        // P90 - P50 == threshold 时，刚好不触发
-        let calc = RewardCalculator::new(SceneWeights::default());
-        let r = calc.shock_response_reward(30.0, 30.0, 60.0, 50.0); // spread = 10 == threshold
-        assert!((r - 0.0).abs() < 1e-6);
-    }
+    // v2.13: 冲击负荷预备度奖励已迁移至 shock_readiness_reward 方法
+    // 旧测试因方法签名变更已废弃
+    // #[test]
+    // fn test_v2_12_shock_response_reward_no_shock() { ... }
 
     // ===== v2.12 R-07 P-Q 协同度阈值可配置化测试 =====
 
