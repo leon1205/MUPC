@@ -92,7 +92,10 @@ strategy-engine
 AiCommandValidator (可插拔 AI 模型)
     │
     ▼
-ControlCommand → Message Bus → intercore → 实时控制模块
+┌──────────────────────────────────────────────────────────────┐
+│  p_ref + k_droop → IntercoreClient → 实时控制模块          │
+│  pv_limit / load_shedding → SouthCommandDispatcher → 南向设备 │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### 1.5 策略 ID 分配
@@ -560,7 +563,10 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 1. LSTM/TCN 时序预测（光伏出力/负荷）
 2. MADDPG/PPO 基于预测结果决策
 3. AiCommandValidator 校验 AI 指令安全性
-4. 通过 intercore 下发给实时控制模块
+4. 指令分发：
+   - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
+   - pv_limit → SouthCommandDispatcher → 光伏逆变器
+   - load_shedding → SouthCommandDispatcher → 负荷控制装置
 ```
 
 ---

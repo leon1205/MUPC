@@ -107,10 +107,11 @@
 | `0x0001` | Connect | 双向 | 连接注册帧，连接建立后发送 |
 | `0x0002` | HeartbeatReq | 通信管理模块 → 实时控制模块 | 心跳请求 |
 | `0x0003` | HeartbeatRsp | 实时控制模块 → 通信管理模块 | 心跳响应 |
-| `0x0010` | ControlCmd | 通信管理模块 → 实时控制模块 | 控制指令下发 |
+| `0x0010` | ControlCmd | 通信管理模块 → 实时控制模块 | 控制指令下发（v2.0 双参数模式） |
 | `0x0011` | ControlRsp | 实时控制模块 → 通信管理模块 | 控制指令应答 |
 | `0x0020` | StatusReport | 实时控制模块 → 通信管理模块 | 状态报告（含电气量等） |
-| `0x0030` | DataUpload | 实时控制模块 → 通信管理模块 | 数据上送（周期遥测） |
+| `0x0030` | DataUpload | 实时控制模块 → 通信管理模块 | 数据上送（周期遥测，含 q_realtime_margin） |
+| `0x0040` | SafetyOverride | 实时控制模块 → 通信管理模块 | 安全覆盖触发（v2.10 新增） |
 
 ---
 
@@ -123,17 +124,16 @@
 **需求描述：**
 通信管理模块将经过策略引擎校验的控制指令，通过核间通信通道下发至实时控制模块执行。
 
-**指令类型：**
+**指令类型（v2.0 双参数模式）：**
 
-| 指令 | 类型编码 | 说明 | 数据范围 |
-|------|---------|------|---------|
-| 电池有功设定 | `P_batt_set` | 电池有功功率设定值 | -1000kW ~ 1000kW |
-| 电池无功设定 | `Q_batt_set` | 电池无功功率设定值 | -1000kVar ~ 1000kVar |
-| 分相补偿系数 | `Phase_comp` | 三相分别补偿系数 | 0.0 ~ 1.0（每相） |
-| 启停命令 | `Start_Stop` | 电池/逆变器启停控制 | 启动 / 停止 |
-| 有功设定值 | `P_set` | 调度主站下发的有功设定 | -1000kW ~ 1000kW |
-| 无功设定值 | `Q_set` | 调度主站下发的无功设定 | -1000kVar ~ 1000kVar |
-| 一次调频参数 | `Freq_reg` | K 值、死区设置 | 按参数定义 |
+> **说明**：v2.0 变更（v2.7）将原来的多指令类型简化为**双参数指令**，通过 `p_ref`（有功基准点）和 `k_droop`（下垂系数）实现下垂控制。`load_shedding` 和 `pv_limit` **不通过核间通信发送**，而是通过 SouthCommandDispatcher 发送到南向设备（光伏逆变器、负荷控制装置）。
+
+| 指令 | 字段 | 说明 | 数据范围 |
+|------|------|------|---------|
+| 有功基准点 | `p_ref` | 下垂控制有功基准点 (kW)，实时控制模块据此计算实际出力 | -1000kW ~ 1000kW |
+| 下垂系数 | `k_droop` | 电压-有功下垂系数 (kW/V)，控制有功对电压的响应强度 | 0.0 ~ 100.0 kW/V |
+| AI 就绪状态 | `ai_ready` | AI 引擎是否就绪 | true / false |
+| 策略模式 | `strategy_mode` | 当前策略模式上下文 | Basic / Smart / Fallback |
 | 系统复位 | `Sys_reset` | 触发实时控制模块复位 | — |
 
 **验收标准：**
@@ -335,27 +335,31 @@ Offset  Bytes  Field       Value/Description
 
 ### 6.4 控制指令帧（ControlCmd, 0x0010）
 
-Payload 格式（JSON 编码）：
+> **v2.0 双参数模式（v2.7 起）**：帧格式从多指令类型简化为双参数（`p_ref` + `k_droop`），实现下垂控制。
+
+Payload 格式（JSON 编码，v2.0）：
 
 ```json
 {
-    "cmd_type": "P_batt_set",
-    "value": 100.0,
-    "unit": "kW",
-    "timestamp": 1712345678,
+    "p_ref": 10.5,
+    "k_droop": 15.0,
+    "ai_ready": true,
     "strategy_mode": "Smart",
-    "seq_no": 42
+    "timestamp_ms": 1712345678123,
+    "frame_version": 2
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| cmd_type | string | 指令类型标识 |
-| value | float | 指令数值 |
-| unit | string | 单位 |
-| timestamp | i64 | UTC 时标（Unix 时间戳） |
+| p_ref | f64 | 有功基准点 (kW)，实时控制模块用于下垂控制 |
+| k_droop | f64 | 电压-有功下垂系数 (kW/V) |
+| ai_ready | bool | AI 引擎就绪状态 |
 | strategy_mode | string | 当前策略模式上下文 |
-| seq_no | u16 | 与帧头 SeqNo 一致的序列号 |
+| timestamp_ms | u64 | UTC 时标（毫秒） |
+| frame_version | u8 | 帧版本号，v2.0 为 `2`（用于版本协商） |
+
+> **注意**：`load_shedding` 和 `pv_limit` **不通过此帧发送**，而是通过 SouthCommandDispatcher 发送到南向设备（光伏逆变器、负荷控制装置），避免核间通信负载过大。 |
 
 ### 6.5 控制响应帧（ControlRsp, 0x0011）
 
@@ -410,7 +414,69 @@ Payload 格式（JSON 编码）：
 }
 ```
 
-### 6.7 CRC16 算法
+### 6.7 数据上送帧（DataUpload, 0x0030）
+
+> **v2.10 新增**：DataUpload 帧在 StatusReport 基础上扩展，新增 `q_realtime_margin`（实时模块剩余无功容量比例）字段，用于 AI 引擎决策时考虑实时控制模块的无功裕度。
+
+Payload 格式（JSON 编码，v2.10）：
+
+```json
+{
+    "frame_version": 1,
+    "timestamp_ms": 1712345678123,
+    "q_realtime_margin": 0.65,
+    "battery_soc": 75.5,
+    "voltage_phase_a": 220.5,
+    "voltage_phase_b": 221.0,
+    "voltage_phase_c": 219.8,
+    "battery_power": 10.2
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| frame_version | u8 | 帧版本号，v2.10 为 `1` |
+| timestamp_ms | u64 | UTC 时标（毫秒） |
+| q_realtime_margin | f64 | 实时模块剩余无功容量比例 [0.0, 1.0]，0=无功打满，1=完全空闲 |
+| battery_soc | f64 | 电池荷电状态 (%) |
+| voltage_phase_a/b/c | f64 | 三相电压标幺值 (p.u.) |
+| battery_power | f64 | 电池当前功率 (kW) |
+
+### 6.8 安全覆盖帧（SafetyOverride, 0x0040）
+
+> **v2.10 新增**：当实时控制模块检测到电压越限且无功耗尽时，临时覆盖 AI 有功指令的紧急事件帧。
+
+Payload 格式（JSON 编码，v2.10）：
+
+```json
+{
+    "frame_version": 1,
+    "timestamp_ms": 1712345678123,
+    "trigger_reason": "voltage_sag",
+    "voltage_phase_a": 0.85,
+    "voltage_phase_b": 0.86,
+    "voltage_phase_c": 0.84,
+    "q_realtime_margin": 0.02,
+    "override_p_ref": -30.0,
+    "override_duration_ms": 5000,
+    "recovery_condition": "timer_expired"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| frame_version | u8 | 帧版本号，v2.10 为 `1` |
+| timestamp_ms | u64 | UTC 时标（毫秒） |
+| trigger_reason | string | 触发原因：`voltage_sag`（电压骤降）、`voltage_swell`（电压骤升）、`battery_fault`（电池故障）、`comm_loss`（通信中断） |
+| voltage_phase_a/b/c | f64 | 三相电压标幺值 |
+| q_realtime_margin | f64 | 实时模块剩余无功容量（几乎耗尽） |
+| override_p_ref | f64 | 强制放电功率 (kW)，负值表示放电 |
+| override_duration_ms | u64 | 覆盖持续时间（ms），不超过 10000ms |
+| recovery_condition | string | 恢复条件：`timer_expired`（定时器到期）、`voltage_recovered`（电压恢复） |
+
+**频率限制**：1 分钟内最多触发 3 次，超限后丢弃后续 SafetyOverride 帧并记录告警。
+
+### 6.9 CRC16 算法
 
 采用 MODBUS CRC16 算法：
 

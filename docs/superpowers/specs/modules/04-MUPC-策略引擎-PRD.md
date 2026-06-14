@@ -481,8 +481,16 @@ strategy-engine
 AiCommandValidator (可插拔 AI 模型)
     │
     ▼
-ControlCommand → Message Bus → intercore → 实时控制模块
+┌─────────────────────────────────────────────────────────────────┐
+│                    指令分发层（dispatch）                         │
+├─────────────────────────────────────────────────────────────────┤
+│  p_ref + k_droop  →  IntercoreClient  →  实时控制模块              │
+│  pv_limit         →  SouthCommandDispatcher  →  光伏逆变器        │
+│  load_shedding    →  SouthCommandDispatcher  →  负荷控制装置     │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+> **说明**（v2.7 起）：`p_ref` 和 `k_droop` 通过 `IntercoreClient` 发送到实时控制模块（闭环下垂控制）；`pv_limit` 和 `load_shedding` 通过 `SouthCommandDispatcher` 发送到南向设备（光伏逆变器、负荷控制装置）。`load_shedding` 和 `pv_limit` **不通过核间通信发送**。
 
 ### 9.2 消息主题
 
@@ -490,8 +498,10 @@ ControlCommand → Message Bus → intercore → 实时控制模块
 |------|--------|--------|------|
 | `telemetry.high_freq` | DataCollector | strategy-engine | 高频遥测数据 |
 | `telemetry.fault` | FaultRecorder | 外部 | 故障事件 |
-| `strategy.command` | strategy-engine | intercore | 控制指令 |
+| `strategy.command` | strategy-engine | intercore | 控制指令（p_ref/k_droop） |
 | `strategy.decision` | strategy-engine | DataReporter | 策略决策结果 |
+| `south.command.pv` | strategy-engine | 南向设备 | 光伏限功率指令（pv_limit） |
+| `south.command.load` | strategy-engine | 南向设备 | 负荷切除指令（load_shedding） |
 
 ### 9.3 模块依赖
 
