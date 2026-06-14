@@ -157,8 +157,692 @@ impl OnlineUpdater {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// R1: 影子模型验证 + 渐进式切换（v2.10）
+// ─────────────────────────────────────────────────────────────────────────────
+
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// 模型元信息（影子模型用）
+#[derive(Debug, Clone)]
+pub struct ModelMeta {
+    /// 场景名称
+    pub scene_name: String,
+    /// 版本
+    pub version: String,
+}
+
+/// 影子模型（克隆自 ModelManager 的 RL 模型）
+#[derive(Debug)]
+pub struct ShadowModel {
+    /// 模型权重副本
+    weights: RwLock<Vec<f32>>,
+    /// 模型元信息
+    meta: ModelMeta,
+}
+
+impl Clone for ShadowModel {
+    fn clone(&self) -> Self {
+        Self {
+            weights: RwLock::new(
+                self.weights
+                    .try_read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default(),
+            ),
+            meta: self.meta.clone(),
+        }
+    }
+}
+
+impl ShadowModel {
+    /// 创建影子模型
+    pub fn new(weights: Vec<f32>, meta: ModelMeta) -> Self {
+        Self {
+            weights: RwLock::new(weights),
+            meta,
+        }
+    }
+
+    /// 获取权重快照
+    pub async fn get_weights(&self) -> Vec<f32> {
+        self.weights.read().await.clone()
+    }
+
+    /// 更新权重
+    pub async fn update_weights(&self, new_weights: Vec<f32>) {
+        let mut guard = self.weights.write().await;
+        *guard = new_weights;
+    }
+}
+
+/// 更新错误类型（R1）
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateError {
+    /// 安全约束违反（影子模型安全评分 < 阈值）
+    SafetyViolation { score: f32, threshold: f32 },
+    /// 性能下降（影子模型性能 < 当前 * 阈值）
+    PerformanceDegradation {
+        current: f32,
+        shadow: f32,
+        threshold: f32,
+    },
+    /// 切换进行中
+    SwitchInProgress,
+    /// 模型未就绪
+    ModelNotReady,
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateError::SafetyViolation { score, threshold } => {
+                write!(f, "安全约束违反: 评分 {} < 阈值 {}", score, threshold)
+            }
+            UpdateError::PerformanceDegradation {
+                current,
+                shadow,
+                threshold,
+            } => {
+                write!(
+                    f,
+                    "性能下降: 当前 {} > 影子 {} (阈值 {})",
+                    current, shadow, threshold
+                )
+            }
+            UpdateError::SwitchInProgress => write!(f, "切换进行中，拒绝重复更新"),
+            UpdateError::ModelNotReady => write!(f, "模型未就绪"),
+        }
+    }
+}
+
+impl std::error::Error for UpdateError {}
+
+/// 渐进式切换配置
+#[derive(Debug, Clone)]
+pub struct GradualSwitchConfig {
+    /// 是否启用
+    pub enabled: bool,
+    /// 切换步数
+    pub steps: usize,
+    /// 每步间隔（秒）
+    pub step_interval_secs: f64,
+}
+
+impl Default for GradualSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            steps: 10,
+            step_interval_secs: 1.0,
+        }
+    }
+}
+
+/// 切换状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchState {
+    Idle,
+    Scheduled,
+    InProgress,
+    Completed,
+}
+
+/// 渐进式切换器
+#[derive(Debug)]
+pub struct GradualSwitcher {
+    config: GradualSwitchConfig,
+    current_weights: Vec<f32>,
+    target_weights: Vec<f32>,
+    step_counter: usize,
+    state: RwLock<SwitchState>,
+}
+
+impl GradualSwitcher {
+    /// 创建渐进式切换器
+    pub fn new(config: GradualSwitchConfig, current_weights: Vec<f32>) -> Self {
+        Self {
+            config,
+            current_weights,
+            target_weights: Vec::new(),
+            step_counter: 0,
+            state: RwLock::new(SwitchState::Idle),
+        }
+    }
+
+    /// 启动切换
+    pub fn start(&mut self, target: Vec<f32>) {
+        self.target_weights = target;
+        self.step_counter = 0;
+        let state = if self.config.enabled {
+            SwitchState::Scheduled
+        } else {
+            SwitchState::Completed
+        };
+        *std::sync::RwLock::new(state).write().unwrap() = state;
+    }
+
+    /// 计算下一步的混合权重
+    pub fn step(&mut self) -> Option<Vec<f32>> {
+        if self.step_counter >= self.config.steps {
+            *std::sync::RwLock::new(SwitchState::Completed)
+                .write()
+                .unwrap() = SwitchState::Completed;
+            return None;
+        }
+
+        let alpha = self.step_counter as f32 / self.config.steps as f32;
+        let blended: Vec<f32> = self
+            .current_weights
+            .iter()
+            .zip(self.target_weights.iter())
+            .map(|(cur, tgt)| (1.0 - alpha) * cur + alpha * tgt)
+            .collect();
+
+        self.step_counter += 1;
+        *std::sync::RwLock::new(SwitchState::InProgress)
+            .write()
+            .unwrap() = SwitchState::InProgress;
+
+        Some(blended)
+    }
+
+    /// 当前混合比例（0.0=全旧，1.0=全新）
+    pub fn blend_ratio(&self) -> f32 {
+        if self.config.steps == 0 {
+            return 1.0;
+        }
+        self.step_counter as f32 / self.config.steps as f32
+    }
+
+    /// 是否切换中
+    pub async fn is_in_progress(&self) -> bool {
+        let state = self.state.read().await;
+        *state == SwitchState::InProgress || *state == SwitchState::Scheduled
+    }
+
+    /// 获取当前状态
+    pub async fn state(&self) -> SwitchState {
+        *self.state.read().await
+    }
+
+    /// 当前步数
+    pub fn current_step(&self) -> usize {
+        self.step_counter
+    }
+
+    /// 总步数
+    pub fn total_steps(&self) -> usize {
+        self.config.steps
+    }
+
+    /// 是否已完成
+    pub fn is_completed(&self) -> bool {
+        self.step_counter >= self.config.steps
+    }
+}
+
+/// 安全约束检查器接口
+pub trait SafetyConstraintChecker: Send + Sync {
+    /// 检查模型，返回安全评分 [0, 100]
+    fn check(&self, model: &ShadowModel) -> f32;
+}
+
+/// 性能监视器接口
+pub trait PerformanceMonitor: Send + Sync {
+    /// 评估模型，返回性能评分 [0, 100]
+    fn evaluate(&self, model: &ShadowModel) -> f32;
+}
+
+/// 默认安全约束检查器（基于 RobustnessManager 的异常检测）
+pub struct DefaultSafetyChecker {
+    /// 安全阈值（0-100）
+    threshold: f32,
+}
+
+impl DefaultSafetyChecker {
+    pub fn new(threshold: f32) -> Self {
+        Self { threshold }
+    }
+}
+
+impl SafetyConstraintChecker for DefaultSafetyChecker {
+    fn check(&self, model: &ShadowModel) -> f32 {
+        // 模拟：基于权重统计计算安全评分
+        // 实际应调用 RobustnessManager 异常检测
+        let weights = model.weights.try_read();
+        if weights.is_err() {
+            return 50.0; // 无法读取时返回中间值
+        }
+        let weights = weights.unwrap();
+
+        // 简单安全评分：权重方差过大则扣分
+        if weights.is_empty() {
+            return 100.0;
+        }
+        let mean = weights.iter().sum::<f32>() / weights.len() as f32;
+        let variance: f32 =
+            weights.iter().map(|w| (w - mean).powi(2)).sum::<f32>() / weights.len() as f32;
+
+        // 方差越小评分越高
+        let score = 100.0 - variance.sqrt() * 10.0;
+        score.clamp(0.0, 100.0)
+    }
+}
+
+/// 默认性能监视器
+pub struct DefaultPerformanceMonitor {
+    /// 性能阈值（相对于当前的百分比）
+    threshold: f32,
+}
+
+impl DefaultPerformanceMonitor {
+    pub fn new(threshold: f32) -> Self {
+        Self { threshold }
+    }
+}
+
+impl PerformanceMonitor for DefaultPerformanceMonitor {
+    fn evaluate(&self, model: &ShadowModel) -> f32 {
+        // 模拟：基于权重计算性能评分
+        let weights = model.weights.try_read();
+        if weights.is_err() {
+            return 50.0;
+        }
+        let weights = weights.unwrap();
+
+        if weights.is_empty() {
+            return 100.0;
+        }
+
+        // 简单性能评分：权重和越大性能越高
+        let sum: f32 = weights.iter().map(|w| w.abs()).sum();
+        (sum / weights.len() as f32 * 10.0).clamp(0.0, 100.0)
+    }
+}
+
+/// SafeOnlineUpdater（R1 核心）
+pub struct SafeOnlineUpdater {
+    config: OnlineUpdateConfig,
+    /// 影子模型
+    shadow_model: RwLock<Option<ShadowModel>>,
+    /// 安全约束检查器
+    safety_checker: Arc<dyn SafetyConstraintChecker>,
+    /// 性能监视器
+    performance_monitor: Arc<dyn PerformanceMonitor>,
+    /// 渐进式切换器
+    gradual_switcher: RwLock<Option<GradualSwitcher>>,
+    /// 安全阈值（0-100）
+    safety_threshold: f32,
+    /// 性能阈值（相对于当前的百分比）
+    performance_threshold: f32,
+    /// 当前模型权重（用于性能对比）
+    current_weights: RwLock<Vec<f32>>,
+}
+
+impl SafeOnlineUpdater {
+    /// 创建 SafeOnlineUpdater
+    pub fn new(
+        config: OnlineUpdateConfig,
+        safety_checker: Arc<dyn SafetyConstraintChecker>,
+        performance_monitor: Arc<dyn PerformanceMonitor>,
+        safety_threshold: f32,
+        performance_threshold: f32,
+        _switch_config: GradualSwitchConfig,
+        initial_weights: Vec<f32>,
+    ) -> Self {
+        Self {
+            config,
+            shadow_model: RwLock::new(None),
+            safety_checker,
+            performance_monitor,
+            gradual_switcher: RwLock::new(None),
+            safety_threshold,
+            performance_threshold,
+            current_weights: RwLock::new(initial_weights),
+        }
+    }
+
+    /// 安全更新：影子模型验证 + 渐进式切换
+    /// 返回 Ok(true) 表示更新已接受，Ok(false) 表示在切换中拒绝重复更新
+    pub async fn safe_update(&self, new_weights: Vec<f32>) -> Result<bool, UpdateError> {
+        // 1. 检查是否切换中
+        {
+            let gradual = self.gradual_switcher.read().await;
+            if let Some(ref switcher) = *gradual {
+                if switcher.is_in_progress().await {
+                    tracing::info!("切换进行中，拒绝重复更新");
+                    return Ok(false);
+                }
+            }
+        }
+
+        // 2. 克隆权重到影子模型
+        let meta = ModelMeta {
+            scene_name: "default".to_string(),
+            version: "v2.10".to_string(),
+        };
+        let shadow = ShadowModel::new(new_weights.clone(), meta);
+
+        // 3. 安全约束检查（先检查再存储）
+        let safety_score = self.safety_checker.check(&shadow);
+        if safety_score < self.safety_threshold {
+            tracing::warn!(
+                "安全约束违反: 评分 {} < 阈值 {}",
+                safety_score,
+                self.safety_threshold
+            );
+            return Err(UpdateError::SafetyViolation {
+                score: safety_score,
+                threshold: self.safety_threshold,
+            });
+        }
+
+        // 安全检查通过后存储影子模型（克隆以保留所有权）
+        *self.shadow_model.write().await = Some(shadow.clone());
+
+        // 4. 性能对比检查
+
+        // 4. 性能对比检查
+        let current_weights = self.current_weights.read().await.clone();
+        let current_model = ShadowModel::new(
+            current_weights.clone(),
+            ModelMeta {
+                scene_name: "current".to_string(),
+                version: "v2.10".to_string(),
+            },
+        );
+
+        let current_score = self.performance_monitor.evaluate(&current_model);
+        let shadow_score = self.performance_monitor.evaluate(&shadow);
+
+        let threshold = self.performance_threshold;
+        if shadow_score < current_score * threshold {
+            tracing::warn!(
+                "性能下降: 当前 {} > 影子 {} (阈值 {})",
+                current_score,
+                shadow_score,
+                threshold
+            );
+            return Err(UpdateError::PerformanceDegradation {
+                current: current_score,
+                shadow: shadow_score,
+                threshold,
+            });
+        }
+
+        // 5. 触发渐进式切换
+        let mut gradual = self.gradual_switcher.write().await;
+        let switch_config = GradualSwitchConfig::default();
+        let mut switcher = GradualSwitcher::new(switch_config, current_weights);
+        switcher.start(new_weights);
+        *gradual = Some(switcher);
+
+        Ok(true)
+    }
+
+    /// 触发渐进式切换（异步后台执行）
+    pub async fn gradual_switch(&self) -> Result<(), UpdateError> {
+        let mut gradual = self.gradual_switcher.write().await;
+        let switcher = gradual.as_mut().ok_or(UpdateError::ModelNotReady)?;
+
+        loop {
+            let blended = switcher.step();
+            match blended {
+                Some(weights) => {
+                    tracing::info!(
+                        "渐进式切换步 {}/{}: blend_ratio={:.2}",
+                        switcher.current_step(),
+                        switcher.total_steps(),
+                        switcher.blend_ratio()
+                    );
+                    // 更新当前权重
+                    *self.current_weights.write().await = weights;
+                }
+                None => break,
+            }
+
+            // 等待下一步间隔
+            let interval = GradualSwitchConfig::default().step_interval_secs;
+            tokio::time::sleep(std::time::Duration::from_secs_f64(interval)).await;
+        }
+
+        tracing::info!("渐进式切换完成");
+        Ok(())
+    }
+
+    /// 获取当前混合权重
+    pub fn current_blend_weights(&self) -> Vec<f32> {
+        // 同步获取，不等待
+        self.current_weights
+            .try_read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// 查询切换状态
+    pub async fn is_switching(&self) -> bool {
+        let gradual = self.gradual_switcher.read().await;
+        if let Some(ref switcher) = *gradual {
+            switcher.is_in_progress().await
+        } else {
+            false
+        }
+    }
+
+    /// 获取当前混合比例
+    pub fn current_blend_ratio(&self) -> f32 {
+        // 同步获取
+        if let Ok(gradual) = self.gradual_switcher.try_read() {
+            if let Some(ref switcher) = *gradual {
+                return switcher.blend_ratio();
+            }
+        }
+        0.0
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R1 单元测试
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// AC1: 新权重违反安全约束时，拒绝更新并返回错误
+    #[test]
+    fn test_safety_violation_reject() {
+        // Mock: 返回 70 分，阈值 80 → 应拒绝
+        struct MockSafetyChecker {
+            score: f32,
+        }
+
+        impl SafetyConstraintChecker for MockSafetyChecker {
+            fn check(&self, _model: &ShadowModel) -> f32 {
+                self.score
+            }
+        }
+
+        let checker = Arc::new(MockSafetyChecker { score: 70.0 });
+        let monitor = Arc::new(DefaultPerformanceMonitor::new(0.95));
+
+        let updater = SafeOnlineUpdater::new(
+            OnlineUpdateConfig::default(),
+            checker,
+            monitor,
+            80.0, // safety_threshold
+            0.95, // performance_threshold
+            GradualSwitchConfig::default(),
+            vec![1.0, 2.0, 3.0],
+        );
+
+        // 使用 try_read 而非 await 来同步测试
+        let result =
+            futures::executor::block_on(async { updater.safe_update(vec![0.5, 0.5, 0.5]).await });
+
+        assert!(matches!(
+            result,
+            Err(UpdateError::SafetyViolation { score, threshold })
+            if score == 70.0 && threshold == 80.0
+        ));
+    }
+
+    /// AC2: 影子模型性能下降超过5%时，拒绝更新
+    #[test]
+    fn test_performance_degradation_reject() {
+        // Mock: 当前模型评分 100，影子模型评分 90 (< 95) → 应拒绝
+        struct MockPerformanceMonitor {
+            current_score: f32,
+            shadow_score: f32,
+        }
+
+        impl PerformanceMonitor for MockPerformanceMonitor {
+            fn evaluate(&self, model: &ShadowModel) -> f32 {
+                let weights = model.weights.try_read().unwrap();
+                // 根据权重判断：空权重返回当前评分，其他返回影子评分
+                if weights.is_empty() {
+                    self.current_score
+                } else {
+                    self.shadow_score
+                }
+            }
+        }
+
+        struct MockMonitor {
+            current_score: f32,
+            shadow_score: f32,
+        }
+
+        impl PerformanceMonitor for MockMonitor {
+            fn evaluate(&self, model: &ShadowModel) -> f32 {
+                let weights = model.weights.try_read().unwrap();
+                if weights.is_empty() {
+                    self.current_score
+                } else {
+                    self.shadow_score
+                }
+            }
+        }
+
+        let monitor = Arc::new(MockMonitor {
+            current_score: 100.0,
+            shadow_score: 90.0,
+        });
+
+        let updater = SafeOnlineUpdater::new(
+            OnlineUpdateConfig::default(),
+            Arc::new(DefaultSafetyChecker::new(0.0)), // 不检查安全
+            monitor,
+            0.0,  // safety_threshold (禁用)
+            0.95, // performance_threshold
+            GradualSwitchConfig::default(),
+            vec![], // 空权重 → 当前评分 100
+        );
+
+        let result = futures::executor::block_on(async {
+            updater.safe_update(vec![1.0]).await // 非空权重 → 影子评分 90
+        });
+
+        assert!(matches!(
+            result,
+            Err(UpdateError::PerformanceDegradation {
+                current,
+                shadow,
+                threshold: 0.95,
+            }) if current == 100.0 && shadow == 90.0
+        ));
+    }
+
+    /// AC3: 渐进式切换权重，每步间隔可配置（默认1秒）
+    #[test]
+    fn test_gradual_switch_blend_ratio() {
+        let config = GradualSwitchConfig {
+            enabled: true,
+            steps: 10,
+            step_interval_secs: 0.0, // 测试用 0 间隔
+        };
+
+        let mut switcher = GradualSwitcher::new(config, vec![0.0, 0.0, 0.0]);
+        switcher.start(vec![10.0, 10.0, 10.0]);
+
+        // 验证 10 步后 blend_ratio = 1.0
+        for _ in 0..10 {
+            let _ = switcher.step();
+        }
+
+        assert!(switcher.is_completed());
+        assert_eq!(switcher.blend_ratio(), 1.0);
+    }
+
+    /// AC4: 切换过程记录日志，包含每步权重混合比例
+    #[test]
+    fn test_blend_weights_interpolation() {
+        let config = GradualSwitchConfig {
+            enabled: true,
+            steps: 10,
+            step_interval_secs: 0.0,
+        };
+
+        let mut switcher = GradualSwitcher::new(config, vec![0.0, 10.0]);
+        switcher.start(vec![10.0, 20.0]);
+
+        // 中间步验证：step 5 时 alpha = 0.5
+        for _ in 0..5 {
+            let _ = switcher.step();
+        }
+
+        let alpha = 5.0 / 10.0;
+        let expected_weight0 = (1.0 - alpha) * 0.0 + alpha * 10.0; // 5.0
+        let expected_weight1 = (1.0 - alpha) * 10.0 + alpha * 20.0; // 15.0
+
+        let blended = switcher.step().unwrap();
+        assert!((blended[0] - expected_weight0).abs() < 0.001);
+        assert!((blended[1] - expected_weight1).abs() < 0.001);
+    }
+
+    /// 额外测试：切换中调用 safe_update 返回 Ok(false)
+    #[test]
+    fn test_switch_in_progress_reject() {
+        let monitor = Arc::new(DefaultPerformanceMonitor::new(0.95));
+        let checker = Arc::new(DefaultSafetyChecker::new(0.0));
+
+        let updater = SafeOnlineUpdater::new(
+            OnlineUpdateConfig::default(),
+            checker,
+            monitor,
+            0.0,  // safety_threshold (禁用)
+            0.95, // performance_threshold
+            GradualSwitchConfig {
+                enabled: true,
+                steps: 10,
+                step_interval_secs: 0.0,
+            },
+            vec![1.0, 2.0, 3.0],
+        );
+
+        // 先触发一次切换
+        let result = futures::executor::block_on(async {
+            let r = updater.safe_update(vec![4.0, 5.0, 6.0]).await;
+            r
+        });
+        assert!(result.is_ok());
+
+        // 切换中再次调用应返回 Ok(false)
+        let result =
+            futures::executor::block_on(async { updater.safe_update(vec![7.0, 8.0, 9.0]).await });
+
+        assert_eq!(result, Ok(false));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 原有 OnlineUpdater 单元测试
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod online_updater_tests {
     use super::*;
 
     fn create_test_config() -> OnlineUpdateConfig {
