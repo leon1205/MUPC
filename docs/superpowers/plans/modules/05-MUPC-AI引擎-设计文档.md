@@ -6,6 +6,7 @@
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
+| v2.12 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.11 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.9 | 2026-06-14 | 架构师 | 历史版本 |
 | v2.8 | 2026-06-13 | 架构师 | 历史版本 |
@@ -3220,4 +3221,17 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 7 | 版本号更新 | 文档头部 | v2.10 → v2.11 |
 
 **修订依据：** v2.11 实现两项核心功能：(1) 自适应权重优化器（AdaptiveWeightOptimizer + ParetoWeightOptimizer），基于历史性能数据自动调优奖励函数权重，减少人工调参依赖；(2) 冲击负荷概率预测（LSTM 分位数预测），输出 P10/P50/P90 分位数并计算冲击负荷概率，增强需量控制能力。
+
+## v2.12 修订记录 (2026-06-14)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | **R-01 奖励子项标准化** | 5.3 SCENE-01 | 各子项标准化到 `[-1, 1]` 区间：r_pv_norm = r_pv/100、p_batt_deg_norm = p_batt_deg×10、p_trafo_norm = (load-0.75)/0.25、r_pq_norm = r_pq/50、r_ramp_norm = r_ramp×10、r_voltage_slope_norm = r_voltage_slope×10、r_smooth_norm = r_smooth/130、r_safety_override_norm = r_safety_override/100 |
+| 2 | **R-02 引入塑造奖励** | 5.3 SCENE-01 | 新增 `overload_warning(load)` 和 `soc_warning(soc)` 方法，提前预警稀疏事件 |
+| 3 | **R-03 SOC 均衡奖励** | 5.3 SCENE-01 | 新增 `soc_balance_reward(soc, λ)` 方法，鼓励 SOC 保持在 50% 附近 |
+| 4 | 标准化公式说明 | 5.3 SCENE-01 | 新增 v2.12 改进说明注释，解释标准化系数选择依据 |
+| 5 | 新增测试用例 | 单元测试 | test_v2_12_overload_warning_*、test_v2_12_soc_warning_*、test_v2_12_soc_balance_reward_*、test_v2_12_normalized_* 等 15+ 测试用例 |
+| 6 | 版本号更新 | 文档头部 | v2.11 → v2.12 |
+
+**修订依据：** v2.12 基于 SCENE-01 台区季节性负荷模式的专家建议实现三项改进：(1) 奖励子项标准化解决量纲不一致问题，加速 RL 收敛；(2) 塑造奖励提前预警稀疏事件（变压器过载、SOC 边界），帮助 RL 学习避免危险状态；(3) SOC 均衡奖励延长电池寿命，避免 SOC 长期偏向极值。
 
