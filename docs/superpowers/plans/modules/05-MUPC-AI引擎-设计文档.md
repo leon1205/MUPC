@@ -2,11 +2,11 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.10 安全增强
+[DESIGN_APPROVED] — v2.11 中期实现
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
-| v2.10 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
+| v2.11 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.9 | 2026-06-14 | 架构师 | 历史版本 |
 | v2.8 | 2026-06-13 | 架构师 | 历史版本 |
 | v2.7 | 2026-06-13 | 架构师 | 历史版本 |
@@ -31,6 +31,7 @@
 11. [错误类型](#11-错误类型)
 12. [消息总线集成](#12-消息总线集成)
 13. [技术决策记录](#13-技术决策记录)
+14. [修订记录](#修订记录)
 
 ---
 
@@ -176,6 +177,11 @@ full_decision_cycle():
 | 训练数据本地存储 | <= 1GB（最近 30 天） |
 | AI 引擎 MTBF | >= 1000 小时 |
 | AI 失效自动降级 | < 2s |
+| 权重优化推理延迟 | < 100ms（v2.11）|
+| 权重优化更新周期 | >= 1 小时（v2.11）|
+| 分位数预测延迟 | <= 1s（v2.11）|
+| 冲击负荷概率计算延迟 | <= 10ms（v2.11）|
+| P90 分位数误差 | < 15%（v2.11）|
 
 ---
 
@@ -1766,6 +1772,161 @@ pub fn calculate_discounted(&self, current_reward: f32) -> f32 {
 | `test_discounted_100_steps` | gamma=0.99 时 100 步前权重约 0.366 | 数学验证：0.99^100 ≈ 0.366 |
 | `test_immediate_reward_unchanged` | 即时奖励计算结果不变 | 对比 new_with_discount 前后的即时奖励 |
 
+### 5.10 v2.11 中期实现：冲击负荷概率预测
+
+#### 5.10.1 需求描述
+
+当前负荷预测为确定性格点预测（单一均值），无法捕捉概率分布特征。农网台区灌溉水泵等冲击负荷具有随机性，可能导致需量控制失效。
+
+#### 5.10.2 新增文件
+
+| 文件路径 | 职责 |
+|---------|------|
+| `ai-engine/src/load_covariates.rs` | 负荷协变量结构体（温度、日期类型、灌溉季、小时） |
+| `ai-engine/src/weather_service.rs` | 气象数据服务 trait（PLF-05 数据源定义） |
+
+#### 5.10.3 架构设计
+
+```
+LstmModel
+  ├─ predict()           （原有确定性预测）
+  ├─ predict_quantiles()  （v2.11 分位数预测）
+  └─ erfc()               （正态分布 CDF 近似）
+        ↓
+ProbabilisticLoadOutput
+  ├─ quantiles: Vec<QuantilePrediction>  [P10, P50, P90]
+  ├─ base_load (P50)
+  ├─ shock_probability
+  └─ confidence
+        ↓
+  ┌────┴────┐
+  ↓         ↓
+RewardCalculator  FusedSystemState
+calc_demand_with_   load_forecast_quantiles
+uncertainty()       (v2.11 新增字段)
+```
+
+#### 5.10.4 详细设计
+
+**LoadCovariates：**
+
+```rust
+pub struct LoadCovariates {
+    pub temperature: f32,        // 温度（摄氏度）
+    pub date_type: u8,           // 0=工作日, 1=周末, 2=节假日
+    pub is_irrigation_season: bool, // 是否灌溉季
+    pub hour: u8,               // 小时（0-23）
+}
+```
+
+**ProbabilisticLoadOutput：**
+
+```rust
+pub struct QuantilePrediction {
+    pub quantile: f32,  // 分位数（0.0 ~ 1.0）
+    pub value: f32,      // 预测值 (kW)
+}
+
+pub struct ProbabilisticLoadOutput {
+    pub timestamp: i64,
+    pub quantiles: Vec<QuantilePrediction>,
+    pub base_load: f32,           // 50% 分位数
+    pub shock_probability: f64,   // 冲击负荷概率
+    pub confidence: f64,
+}
+```
+
+**LstmModel 扩展方法：**
+
+```rust
+pub async fn predict_quantiles(
+    &self,
+    input: &LstmInput,
+    covariates: &LoadCovariates,
+) -> Result<ProbabilisticLoadOutput, AiEngineError> {
+    // 1. 获取多分位数预测值
+    let quantile_values = self.predict_multi_quantile(input, covariates).await?;
+    // 2. 提取基础负荷（P50）
+    let base_load = quantile_values.iter().find(|q| (q.quantile - 0.5).abs() < 0.01)...
+    // 3. 计算冲击负荷概率
+    let shock_probability = self.calculate_shock_probability(base_load, high_quantile);
+    // 4. 计算置信度
+    let confidence = self.calculate_confidence(&quantile_values);
+    Ok(ProbabilisticLoadOutput { ... })
+}
+
+fn calculate_shock_probability(&self, base_load: f32, high_quantile: f32) -> f64 {
+    // P(shock) = 1 - Φ((shock_threshold - μ) / σ)
+    // 其中 std ≈ (P90 - P50) / 1.28
+    let spread = (high_quantile - base_load).max(1e-6);
+    let std_approx = spread / 1.28;
+    let shock_threshold = base_load + 2.0 * std_approx;
+    let z_score = (shock_threshold - base_load) / std_approx.max(1e-6);
+    0.5 * Self::erfc(z_score / 1.41421356) as f64
+}
+```
+
+**WeatherService Trait（PLF-05）：**
+
+```rust
+pub trait WeatherService: Send + Sync {
+    fn get_current_temperature(&self) -> Result<f32, AiEngineError>;
+    fn get_temperature_forecast(&self, hours_ahead: u32) -> Result<Vec<f32>, AiEngineError> { Ok(Vec::new()) }
+}
+```
+
+**FusedSystemState 扩展（v2.11）：**
+
+```rust
+// v2.11 新增字段
+pub load_forecast_quantiles: Vec<f64>,  // 分位数负荷预测
+pub shock_load_probability: f64,         // 冲击负荷概率
+pub base_load: f64,                     // 基础负荷（P50）
+```
+
+**RewardCalculator 扩展：**
+
+```rust
+fn calc_demand_with_uncertainty(
+    &self,
+    action: &ActionOutput,
+    state: &FusedSystemState,
+    load_forecast: &ProbabilisticLoadOutput,
+) -> f64 {
+    // 风险感知调整：考虑冲击负荷概率，预留额外安全裕度
+    let high_quantile = load_forecast.quantiles.iter()
+        .find(|q| (q.quantile - 0.9).abs() < 0.01)
+        .map(|q| q.value as f64)
+        .unwrap_or(load_forecast.base_load as f64);
+
+    let risk_adjusted_demand = state.current_demand + 2.0 * (high_quantile - load_forecast.base_load as f64);
+    let risk_margin = if risk_adjusted_demand > state.contract_demand * 0.95 {
+        -20.0 * ((risk_adjusted_demand - state.contract_demand * 0.95) / state.contract_demand)
+    } else { 0.0 };
+
+    let r_avoid = (state.contract_demand - state.current_demand).max(0.0) * self.demand_penalty_rate;
+    let p_comfort = action.load_shedding * 0.5;
+    w[0] * (r_avoid + risk_margin) - w[1] * p_comfort
+}
+```
+
+#### 5.10.5 错误处理
+
+| 错误场景 | 处理策略 |
+|---------|---------|
+| LSTM 模型不支持多输出 | 回退到确定性预测（50% 分位数）|
+| 分位数预测值异常 | 校验范围 [0, max_capacity]，超范围裁剪 |
+| 协变量缺失 | 使用默认值（温度=25°C，日期类型=工作日）|
+
+#### 5.10.6 测试策略
+
+| 测试项 | 验收条件 | 测试方法 |
+|--------|---------|---------|
+| PLF-01 | 分位数输出 P10 < P50 < P90 | 单元测试 |
+| PLF-02 | 冲击概率计算 | 已知分布验证概率值 |
+| PLF-04 | 风险奖励计算 | 风险惩罚正确应用 |
+| PLF-07 | FusedSystemState 存储 | 字段正确填充 |
+
 ---
 
 ## 6. RKNN Runtime 设计
@@ -2235,6 +2396,158 @@ safe_update(new_weights)
 | `test_switch_in_progress_reject` | 切换中调用 safe_update 返回 Ok(false) | 触发切换后立即再调用 |
 | `test_blend_weights_interpolation` | 每步线性插值正确 | 对比中间步的加权平均值 |
 
+### 7b. v2.11 中期实现：自适应权重优化器
+
+#### 7b.1 组件关系
+
+```
+AdaptiveWeightOptimizer
+  ├─ MetaLearner (简化实现：基于规则调整)
+  ├─ PerformanceCollector (trait)
+  └─ WeightBoundsEnforcer
+         ↓
+  SceneWeights
+         ↓
+  RewardCalculator
+
+ParetoWeightOptimizer (NSGA-II)
+  ├─ fast_non_dominated_sort()
+  ├─ calculate_crowding_distance()
+  └─ evolve()
+```
+
+#### 7b.2 新增文件
+
+| 文件路径 | 职责 |
+|---------|------|
+| `ai-engine/src/adaptive_weight_optimizer.rs` | 自适应权重优化器核心实现（MetaRL） |
+| `ai-engine/src/pareto_optimizer.rs` | NSGA-II 多目标优化器 |
+| `ai-engine/src/performance_collector.rs` | 性能指标收集器 |
+
+#### 7b.3 配置结构
+
+```rust
+pub struct AdaptiveOptimizerConfig {
+    pub enabled: bool,
+    pub update_interval_hours: u32,   // 默认 168（周级更新）
+    pub meta_learning_rate: f64,      // 默认 0.001
+    pub weight_bounds: WeightBounds,  // min: 0.01, max: 10.0
+    pub constraints: WeightConstraints, // sum_normalized: 8.3, max_adjustment_per_update: 0.2
+}
+
+pub struct ParetoOptimizerConfig {
+    pub enabled: bool,
+    pub population_size: usize,  // 默认 100
+    pub generations: usize,     // 默认 50
+    pub crossover_rate: f64,     // 默认 0.9
+    pub mutation_rate: f64,      // 默认 0.1
+}
+```
+
+#### 7b.4 AdaptiveWeightOptimizer 详细设计
+
+```rust
+pub struct AdaptiveWeightOptimizer {
+    config: AdaptiveOptimizerConfig,
+    current_weights: RwLock<SceneWeights>,
+    adjustment_history: RwLock<Vec<WeightAdjustment>>,
+    performance_collector: Arc<dyn PerformanceCollector>,
+}
+
+impl AdaptiveWeightOptimizer {
+    pub async fn optimize_weights(
+        &self,
+        historical_performance: &HistoricalPerformance,
+    ) -> Result<SceneWeights, AiEngineError> {
+        // 1. 提取性能特征
+        let features = self.extract_features(historical_performance);
+        // 2. 元学习器预测最优权重调整方向
+        let adjustment = self.meta_learn_predict(&features)?;
+        // 3. 应用调整（带约束剪裁）
+        let new_weights = self.apply_adjustment(&adjustment)?;
+        // 4. 记录调整历史
+        self.record_adjustment(historical_performance, &adjustment).await;
+        Ok(new_weights)
+    }
+
+    pub async fn validate_reward_drift(
+        &self,
+        original_reward: f64,
+        optimized_reward: f64,
+    ) -> bool {
+        // AWO-06：偏移 < 5% 时验证通过
+        if original_reward.abs() < 1e-6 {
+            return (optimized_reward - original_reward).abs() < 0.05;
+        }
+        ((optimized_reward - original_reward) / original_reward).abs() < 0.05
+    }
+}
+
+pub trait PerformanceCollector: Send + Sync {
+    fn collect_historical(&self) -> Result<HistoricalPerformance, AiEngineError>;
+    fn collect_current(&self) -> Result<PerformanceFeatures, AiEngineError>;
+}
+```
+
+#### 7b.5 ParetoWeightOptimizer (NSGA-II) 详细设计
+
+```rust
+pub struct ParetoWeightOptimizer {
+    config: ParetoOptimizerConfig,
+    objectives: Vec<OptimizationObjective>,
+    pareto_front: RwLock<Vec<ParetoSolution>>,
+}
+
+impl ParetoWeightOptimizer {
+    pub async fn find_pareto_front(
+        &self,
+        initial_population: &[WeightCandidate],
+    ) -> Result<Vec<ParetoSolution>, AiEngineError> {
+        let mut population = initial_population.to_vec();
+        for _gen in 0..self.config.generations {
+            let fronts = self.fast_non_dominated_sort(&population);
+            for front in &mut fronts.iter_mut() {
+                self.calculate_crowding_distance(front);
+            }
+            population = self.evolve(&fronts);
+        }
+        let fronts = self.fast_non_dominated_sort(&population);
+        // 返回第一前沿（Pareto 最优解）
+        if let Some(first_front) = fronts.first() {
+            let mut solutions: Vec<ParetoSolution> = first_front.iter()...
+            self.calculate_crowding_distance(&mut solutions);
+            Ok(solutions)
+        } else { Ok(Vec::new()) }
+    }
+
+    fn fast_non_dominated_sort(&self, population: &[WeightCandidate]) -> Vec<Vec<WeightCandidate>> {
+        // NSGA-II 标准实现
+    }
+
+    fn calculate_crowding_distance(&self, front: &mut Vec<ParetoSolution>) {
+        // 保持多样性
+    }
+}
+```
+
+#### 7b.6 错误处理
+
+| 错误场景 | 处理策略 |
+|---------|---------|
+| 元学习器推理失败 | 使用上一有效权重，回退告警 |
+| 权重边界违规 | 强制裁剪到合法范围 |
+| 性能数据缺失 | 跳过本轮优化，使用当前权重 |
+| NSGA-II 收敛失败 | 返回空 Pareto 前沿，不更新权重 |
+
+#### 7b.7 测试策略
+
+| 测试项 | 验收条件 | 测试方法 |
+|--------|---------|---------|
+| AWO-01 | 加载配置 | 配置正确解析，无 panic |
+| AWO-04 | 权重约束 | 权重为正，归一化和正确 |
+| AWO-05 | 调整幅度限制 | 单次变化不超过 20% |
+| AWO-07 | 权重更新后 RL 推理 | 推理延迟 < 1s |
+
 ---
 
 ## 8. 与策略引擎集成设计
@@ -2356,6 +2669,11 @@ mupc/crates/ai-engine/
 │   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel）
 │   ├── reward_calculator.rs      # 奖励函数计算器（5 种场景奖励公式 + SceneWeights）
 │   ├── robustness_manager.rs     # 电压异常应急策略管理器（v2.9 新增）
+│   ├── adaptive_weight_optimizer.rs  # 自适应权重优化器（v2.11 新增）
+│   ├── pareto_optimizer.rs       # NSGA-II Pareto 多目标优化器（v2.11 新增）
+│   ├── performance_collector.rs  # 性能指标收集器（v2.11 新增）
+│   ├── load_covariates.rs        # 负荷协变量结构体（v2.11 新增）
+│   ├── weather_service.rs        # 气象数据服务 trait（v2.11 新增）
 │   ├── data_fusion.rs            # 多源数据融合引擎（DataSourceAdapter trait + 5 个实现）
 │   ├── action_validator.rs       # 动作约束校验器（5 条约束规则 ACT-01~05）
 │   ├── online_updater.rs         # 在线微调（DataPoint, OnlineUpdater, batch_size=32）
@@ -2388,6 +2706,10 @@ pub mod rl_model;
 pub mod data_fusion;
 pub mod reward_calculator;
 pub mod robustness_manager;     // v2.9 新增
+pub mod adaptive_weight_optimizer; // v2.11 新增
+pub mod pareto_optimizer;        // v2.11 新增
+pub mod performance_collector;    // v2.11 新增
+pub mod load_covariates;        // v2.11 新增
 pub mod action_validator;
 
 // 重新导出公共类型
@@ -2405,6 +2727,9 @@ pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
 pub use rl_model::{ActionOutput, FusedSystemState, RLModel, parse_action_output};
 pub use reward_calculator::RewardCalculator;
 pub use robustness_manager::{RobustnessManager, AnomalyType};  // v2.9 新增
+pub use adaptive_weight_optimizer::{AdaptiveWeightOptimizer, PerformanceCollector, PerformanceFeatures, WeightAdjustment, HistoricalPerformance};  // v2.11 新增
+pub use pareto_optimizer::{ParetoWeightOptimizer, ParetoSolution, WeightCandidate, OptimizationObjective};  // v2.11 新增
+pub use load_covariates::{LoadCovariates};  // v2.11 新增
 pub use data_fusion::{DataFusionEngine, DataSourceAdapter, SourceType, FusedSystemState};
 pub use action_validator::{ActionValidator, ViolationRecord};
 pub use online_updater::{DataPoint, OnlineUpdater};
@@ -2881,4 +3206,18 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 12 | **v2.10 短期实现：R3 场景切换平滑过渡** | 4.9 节新增 | SmoothSceneTransition；10 步线性插值过渡 |
 
 **修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚；(4) v2.10 短期实现三项功能：影子模型验证+渐进式切换、折扣累积奖励机制、场景切换平滑过渡。
+
+## v2.11 修订记录 (2026-06-14)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | **v2.11 中期实现：自适应权重优化器** | 7b 节新增 | AdaptiveWeightOptimizer（MetaRL）+ ParetoWeightOptimizer（NSGA-II）+ PerformanceCollector trait |
+| 2 | **v2.11 中期实现：冲击负荷概率预测** | 5.10 节新增 | LSTM 分位数预测（predict_quantiles）+ 冲击概率计算 + LoadCovariates + WeatherService trait |
+| 3 | AdaptiveOptimizerConfig | config.rs | enabled, update_interval_hours, meta_learning_rate, weight_bounds, constraints |
+| 4 | ParetoOptimizerConfig | config.rs | enabled, population_size, generations, crossover_rate, mutation_rate |
+| 5 | validate_reward_drift 方法 | adaptive_weight_optimizer.rs | AWO-06：验证奖励偏移 < 5% |
+| 6 | FusedSystemState 扩展 | data_fusion.rs | load_forecast_quantiles, shock_load_probability, base_load（v2.11 新增） |
+| 7 | 版本号更新 | 文档头部 | v2.10 → v2.11 |
+
+**修订依据：** v2.11 实现两项核心功能：(1) 自适应权重优化器（AdaptiveWeightOptimizer + ParetoWeightOptimizer），基于历史性能数据自动调优奖励函数权重，减少人工调参依赖；(2) 冲击负荷概率预测（LSTM 分位数预测），输出 P10/P50/P90 分位数并计算冲击负荷概率，增强需量控制能力。
 

@@ -1,9 +1,10 @@
 # MUPC AI 优化引擎 - 模块产品需求文档 (PRD)
 
-[REVIEWED: PASS] — v2.10 安全增强
+[REVIEWED: PASS] — v2.11 中期实现
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
+| v2.11 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
 | v2.10 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
 | v2.9 | 2026-06-14 | 需求分析师 | 评审通过 |
 | v2.8 | 2026-06-13 | 需求分析师 | 评审通过 |
@@ -23,6 +24,8 @@
 >
 > **v2.2 核心变更：** D1-实时数据新增三相电压标幺值（voltage_phase_a/b/c），用于电压感知 P/Q 协同控制（过/低电压检测→有功充放+无功调节）。验证 q_batt_set 符号定义完整性。详见第 5 章。
 >
+> **v2.11 核心变更：** 新增自适应权重优化器（MetaRL + NSGA-II）和冲击负荷概率预测（LSTM 分位数预测，P10/P50/P90）。详见第 4.9 节和第 6.9 节。
+
 > **v2.10 核心变更：** 状态空间新增 q_realtime_margin 数据通道（FusedSystemState → 59维），SafetyOverride 帧类型（0x0040）定义极端工况下实时模块临时覆盖 AI 有功指令的接口规范。详见第 2.3 节（状态空间扩展）和第 3 章（安全触发覆盖机制）。
 
 > **v2.9 核心变更：** 新增 RobustnessManager 电压异常应急策略（电压骤升/骤降、电池SOC异常检测 + 应急动作），SCENE-01 奖励函数新增 safety_override_penalty()。详见第 6.2 节（SCENE-01）。
@@ -1165,6 +1168,101 @@ async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError> {
 
 ---
 
+## 8.6 v2.11 中期实现：自适应权重优化器
+
+### 8.6.1 需求描述
+
+当前奖励函数权重表（w1~w7）需人工配置，缺乏自适应调整能力。不同台区工况差异大，固定权重难以普适，人工调参成本高且依赖专家经验。
+
+### 8.6.2 实现方案
+
+自适应权重优化器基于元学习/NSGA-II 自动调优 w1~w7 权重：
+
+| 组件 | 说明 |
+|------|------|
+| AdaptiveWeightOptimizer | MetaRL 元学习器，基于历史性能数据预测最优权重调整方向 |
+| ParetoWeightOptimizer | NSGA-II 多目标优化器，搜索 Pareto 前沿权重候选 |
+| PerformanceCollector | 性能指标收集器trait，收集光伏消纳率、电池循环次数、变压器负载等 |
+
+### 8.6.3 数据流
+
+```
+离线训练管线 → MetaLearner 训练 → AdaptiveWeightOptimizer → SceneWeights 更新
+                                                                        ↓
+                                               RL 模型决策 → PerformanceCollector 收集
+```
+
+### 8.6.4 验收标准
+
+| ID | 标准 | 优先级 | 验证方法 |
+|----|------|--------|----------|
+| AWO-01 | 自适应权重优化器可正确加载配置 | P0 | 单元测试 |
+| AWO-02 | 元学习器可基于历史性能数据输出权重调整 | P1 | 离线仿真验证 |
+| AWO-03 | NSGA-II 可搜索 Pareto 前沿并输出多组权重候选 | P1 | 离线仿真验证 |
+| AWO-04 | 权重调整受物理约束约束（正数、比例） | P0 | 单元测试 |
+| AWO-05 | 单次更新周期内权重变化不超过 max_adjustment_per_update | P0 | 单元测试 |
+| AWO-06 | 优化后的奖励函数与原始策略无显著偏离（偏移 < 5%）| P1 | 集成测试 |
+| AWO-07 | 权重更新后 RL 模型可正常推理（推理延迟 < 1s）| P0 | 集成测试 |
+
+### 8.6.5 影响文件
+
+- `mupc/crates/ai-engine/src/adaptive_weight_optimizer.rs`（新增）
+- `mupc/crates/ai-engine/src/pareto_optimizer.rs`（新增）
+- `mupc/crates/ai-engine/src/performance_collector.rs`（新增）
+- `mupc/crates/ai-engine/src/config.rs`
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+
+---
+
+## 8.7 v2.11 中期实现：冲击负荷概率预测
+
+### 8.7.1 需求描述
+
+当前负荷预测为确定性格点预测（单一均值），无法捕捉概率分布特征。农网台区灌溉水泵等冲击负荷具有随机性，可能导致需量控制失效。
+
+### 8.7.2 实现方案
+
+LSTM 分位数预测，输出负荷分布而非单一均值：
+
+| 新增类型 | 说明 |
+|----------|------|
+| `ProbabilisticLoadOutput` | 概率负荷预测输出（分位数数组 + 冲击概率） |
+| `QuantilePrediction` | 分位数预测（quantile + value） |
+| `LoadCovariates` | 负荷协变量（温度、日期类型、灌溉季、小时） |
+| `predict_quantiles()` | LSTM 分位数预测方法 |
+| `calculate_shock_probability()` | 冲击负荷概率计算（P90-P50 差值法） |
+| `calc_demand_with_uncertainty()` | 需量控制奖励（含不确定性） |
+
+### 8.7.3 数据流
+
+```
+历史负荷数据 → LstmModel.predict_quantiles() → ProbabilisticLoadOutput
+    ├→ RewardCalculator.calc_demand_with_uncertainty()（需量控制奖励）
+    └→ FusedSystemState → StrategyEngine（冲击负荷预警）
+```
+
+### 8.7.4 验收标准
+
+| ID | 标准 | 优先级 | 验证方法 |
+|----|------|--------|----------|
+| PLF-01 | LSTM 可输出多分位数预测（10%、50%、90%）| P0 | 单元测试 |
+| PLF-02 | 冲击负荷概率计算正确（P90 - P50 差值法）| P0 | 单元测试 |
+| PLF-03 | 分位数预测延迟 <= 1s | P0 | 集成测试 |
+| PLF-04 | 需量控制奖励函数考虑冲击负荷概率 | P1 | 单元测试 |
+| PLF-05 | 协变量（温度、日期类型）正确传入 | P1 | 集成测试 |
+| PLF-06 | 概率预测在测试集上 P90 分位数误差 < 15% | P1 | 离线评估 |
+| PLF-07 | FusedSystemState 正确存储分位数预测结果 | P0 | 集成测试 |
+
+### 8.7.5 影响文件
+
+- `mupc/crates/ai-engine/src/lstm_model.rs`
+- `mupc/crates/ai-engine/src/load_covariates.rs`（新增）
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+- `mupc/crates/ai-engine/src/data_fusion.rs`
+- `mupc/crates/ai-engine/src/config.rs`
+
+---
+
 ## 9. 非功能性需求
 
 ### 9.1 推理性能
@@ -1307,7 +1405,31 @@ AI引擎恢复后，自动切回AI模式
 |----|------|--------|------|
 | UPDATE-01~UPDATE-04 | 在线微调 | P1 | Phase3C 设计 + 场景 RL PRD |
 
-### 10.7 精度与性能验收
+### 10.7 v2.11 自适应权重优化器验收
+
+| ID | 标准 | 优先级 | 来源 |
+|----|------|--------|------|
+| AWO-01 | 自适应权重优化器可正确加载配置 | P0 | v2.11 PRD |
+| AWO-02 | 元学习器可基于历史性能数据输出权重调整 | P1 | v2.11 PRD |
+| AWO-03 | NSGA-II 可搜索 Pareto 前沿并输出多组权重候选 | P1 | v2.11 PRD |
+| AWO-04 | 权重调整受物理约束约束（正数、比例）| P0 | v2.11 PRD |
+| AWO-05 | 单次更新周期内权重变化不超过 max_adjustment_per_update | P0 | v2.11 PRD |
+| AWO-06 | 优化后的奖励函数与原始策略无显著偏离（偏移 < 5%）| P1 | v2.11 PRD |
+| AWO-07 | 权重更新后 RL 模型可正常推理（推理延迟 < 1s）| P0 | v2.11 PRD |
+
+### 10.8 v2.11 冲击负荷概率预测验收
+
+| ID | 标准 | 优先级 | 来源 |
+|----|------|--------|------|
+| PLF-01 | LSTM 可输出多分位数预测（10%、50%、90%）| P0 | v2.11 PRD |
+| PLF-02 | 冲击负荷概率计算正确（P90 - P50 差值法）| P0 | v2.11 PRD |
+| PLF-03 | 分位数预测延迟 <= 1s | P0 | v2.11 PRD |
+| PLF-04 | 需量控制奖励函数考虑冲击负荷概率 | P1 | v2.11 PRD |
+| PLF-05 | 协变量（温度、日期类型）正确传入 | P1 | v2.11 PRD |
+| PLF-06 | 概率预测在测试集上 P90 分位数误差 < 15% | P1 | v2.11 PRD |
+| PLF-07 | FusedSystemState 正确存储分位数预测结果 | P0 | v2.11 PRD |
+
+### 10.9 精度与性能验收
 
 | ID | 标准 | 优先级 | 来源 |
 |----|------|--------|------|
@@ -1581,3 +1703,14 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 12 | **v2.10 短期实现：R3 场景切换平滑过渡** | 4.9 新增 | SmoothSceneTransition；10 步线性插值过渡 |
 
 **修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚；(4) v2.10 短期实现三项功能：影子模型验证+渐进式切换、折扣累积奖励机制、场景切换平滑过渡。
+
+## v2.11 修订记录
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | **v2.11 中期实现：自适应权重优化器** | 8.6 新增 | AdaptiveWeightOptimizer + ParetoWeightOptimizer + PerformanceCollector；MetaRL 元学习 + NSGA-II 多目标优化 |
+| 2 | **v2.11 中期实现：冲击负荷概率预测** | 8.7 新增 | LSTM 分位数预测（predict_quantiles）+ 冲击负荷概率计算（calculate_shock_probability）+ LoadCovariates |
+| 3 | 新增验收标准 | 10.7/10.8 | AWO-01~07（自适应权重优化器），PLF-01~07（冲击负荷概率预测） |
+| 4 | 版本号更新 | 文档头部 | v2.10 → v2.11 |
+
+**修订依据：** v2.11 实现两项核心功能：(1) 自适应权重优化器（AdaptiveWeightOptimizer + ParetoWeightOptimizer），基于历史性能数据自动调优奖励函数权重，减少人工调参依赖；(2) 冲击负荷概率预测（LSTM 分位数预测），输出 P10/P50/P90 分位数并计算冲击负荷概率，增强需量控制能力。
