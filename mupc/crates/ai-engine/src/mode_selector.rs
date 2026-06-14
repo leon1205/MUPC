@@ -4,12 +4,14 @@
 //! 和本地选择（Web UI/配置文件）。同一时刻仅 1 种模式生效。
 //!
 //! v2.3: 场景切换联动 ModelRegistry 热切换 RL 模型。
+//! v2.10 R3: 场景切换平滑过渡（Linear Interpolation）
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
+use crate::config::SceneWeights;
 use crate::error::AiEngineError;
 use crate::model_registry::{ModelRegistry, SceneModelState, SceneSwitchResult};
 
@@ -108,6 +110,163 @@ pub struct ModeSwitchEvent {
     pub timestamp: i64,
 }
 
+// ============================================================================
+// v2.10 R3: 场景切换平滑过渡
+// ============================================================================
+
+/// 平滑过渡配置
+#[derive(Debug, Clone)]
+pub struct TransitionConfig {
+    /// 过渡步数（默认 10）
+    pub transition_steps: usize,
+}
+
+impl Default for TransitionConfig {
+    fn default() -> Self {
+        Self {
+            transition_steps: 10,
+        }
+    }
+}
+
+/// 平滑过渡状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionState {
+    Idle,
+    InProgress,
+    Completed,
+}
+
+/// 权重更新事件（用于通知 ModelManager 权重更新）
+#[derive(Debug, Clone)]
+pub struct WeightUpdateEvent {
+    pub blended_weights: Vec<f32>,
+    pub step: usize,
+    pub total_steps: usize,
+}
+
+/// 平滑过渡器
+///
+/// v2.10 R3 新增：场景切换时对权重进行线性插值，避免突变。
+///
+/// 数学定义：
+/// ```text
+/// alpha = step_counter / transition_steps
+/// weight_i = (1 - alpha) * current_weight_i + alpha * target_weight_i
+/// ```
+pub struct SmoothSceneTransition {
+    config: TransitionConfig,
+    current_weights: Option<Vec<f32>>,
+    target_weights: Option<Vec<f32>>,
+    step_counter: usize,
+    state: TransitionState,
+}
+
+impl SmoothSceneTransition {
+    /// 创建平滑过渡器
+    pub fn new(config: TransitionConfig) -> Self {
+        Self {
+            config,
+            current_weights: None,
+            target_weights: None,
+            step_counter: 0,
+            state: TransitionState::Idle,
+        }
+    }
+
+    /// 创建带权重的平滑过渡器
+    pub fn new_with_weights(config: TransitionConfig, current: Vec<f32>, target: Vec<f32>) -> Self {
+        let state = if current == target {
+            TransitionState::Completed
+        } else {
+            TransitionState::InProgress
+        };
+        Self {
+            config,
+            current_weights: Some(current),
+            target_weights: Some(target),
+            step_counter: 0,
+            state,
+        }
+    }
+
+    /// 场景切换时调用（设置起始和目标权重）
+    pub fn on_scene_switch(&mut self, current: Vec<f32>, target: Vec<f32>) {
+        self.current_weights = Some(current);
+        self.target_weights = Some(target);
+        self.step_counter = 0;
+        self.state = TransitionState::InProgress;
+    }
+
+    /// 获取插值权重（每决策周期调用一次）
+    ///
+    /// 返回当前步的线性插值权重，同时步进计数器。
+    /// 过渡完成后持续返回目标权重。
+    pub fn get_interpolated_weights(&mut self) -> &[f32] {
+        let Some(ref current) = self.current_weights else {
+            unreachable!("current_weights must be set before calling get_interpolated_weights");
+        };
+        let Some(ref target) = self.target_weights else {
+            unreachable!("target_weights must be set before calling get_interpolated_weights");
+        };
+
+        if self.state == TransitionState::Completed {
+            return target;
+        }
+
+        let total_steps = self.config.transition_steps;
+        let alpha = self.step_counter as f32 / total_steps as f32;
+
+        // 预分配结果向量（避免每次分配）
+        let min_len = current.len().min(target.len());
+        let result: Vec<f32> = (0..min_len)
+            .map(|i| {
+                let c = current[i] as f32;
+                let t = target[i] as f32;
+                (1.0 - alpha) * c + alpha * t
+            })
+            .collect();
+
+        // 更新状态
+        self.step_counter += 1;
+        if self.step_counter >= total_steps {
+            self.state = TransitionState::Completed;
+            // 返回目标权重
+            return target;
+        }
+
+        // 临时存储结果（下次调用时覆盖）
+        self.current_weights = Some(result);
+        &self.current_weights.as_ref().unwrap()
+    }
+
+    /// 当前过渡状态
+    pub fn state(&self) -> TransitionState {
+        self.state
+    }
+
+    /// 剩余步数
+    pub fn remaining_steps(&self) -> usize {
+        match self.state {
+            TransitionState::Idle => self.config.transition_steps,
+            TransitionState::InProgress => {
+                self.config.transition_steps.saturating_sub(self.step_counter)
+            }
+            TransitionState::Completed => 0,
+        }
+    }
+
+    /// 当前步数
+    pub fn current_step(&self) -> usize {
+        self.step_counter
+    }
+
+    /// 总步数
+    pub fn total_steps(&self) -> usize {
+        self.config.transition_steps
+    }
+}
+
 /// 模式选择器（线程安全，互斥保证）
 pub struct ModeSelector {
     current_mode: Arc<Mutex<RunningMode>>,
@@ -115,6 +274,12 @@ pub struct ModeSelector {
     persist_path: Option<PathBuf>,
     /// v2.3 新增：模型注册表引用（场景切换时联动热切换 RL 模型）
     registry: Option<Arc<ModelRegistry>>,
+    /// v2.10 R3 新增：场景权重映射（用于平滑过渡插值）
+    weights: Arc<SceneWeights>,
+    /// v2.10 R3 新增：平滑过渡器
+    smooth_transition: Option<SmoothSceneTransition>,
+    /// v2.10 R3 新增：平滑过渡配置
+    transition_config: TransitionConfig,
 }
 
 impl ModeSelector {
@@ -125,6 +290,9 @@ impl ModeSelector {
             switch_tx,
             persist_path,
             registry: None,
+            weights: Arc::new(SceneWeights::default()),
+            smooth_transition: None,
+            transition_config: TransitionConfig::default(),
         }
     }
 
@@ -140,6 +308,9 @@ impl ModeSelector {
             switch_tx,
             persist_path,
             registry: Some(registry),
+            weights: Arc::new(SceneWeights::default()),
+            smooth_transition: None,
+            transition_config: TransitionConfig::default(),
         }
     }
 
@@ -164,17 +335,25 @@ impl ModeSelector {
     /// v2.3: 切换时联动 ModelRegistry 热切换 RL 模型。
     /// 若目标模型需下载（返回 Downloading），仍更新模式状态，
     /// 但在模型下载完成前 AI 决策使用旧模型。
+    ///
+    /// v2.10 R3: 触发平滑过渡，权重线性插值。
     pub async fn switch(
-        &self,
+        &mut self,
         new_mode: RunningMode,
         source: SwitchSource,
     ) -> Result<RunningMode, AiEngineError> {
-        let mut current = self.current_mode.lock().await;
-        let previous = *current;
+        let previous = {
+            let mut current = self.current_mode.lock().await;
+            if *current == new_mode {
+                return Ok(*current);
+            }
+            let prev = *current;
+            *current = new_mode;
+            prev
+        }; // current 锁在此处释放
 
-        if previous == new_mode {
-            return Ok(previous);
-        }
+        // v2.10 R3: 触发平滑过渡
+        self.trigger_smooth_transition(previous, new_mode);
 
         // v2.3: 先尝试热切换模型，再切换模式状态
         if let Some(ref registry) = self.registry {
@@ -202,9 +381,6 @@ impl ModeSelector {
                 }
             }
         }
-
-        *current = new_mode;
-        drop(current);
 
         if let Some(ref path) = self.persist_path {
             if let Err(e) = self.persist_mode(new_mode, path).await {
@@ -262,6 +438,72 @@ impl ModeSelector {
     /// v2.3 新增：获取 ModelRegistry 引用
     pub fn registry(&self) -> Option<&Arc<ModelRegistry>> {
         self.registry.as_ref()
+    }
+
+    /// v2.10 R3 新增：设置场景权重映射
+    pub fn set_weights(&mut self, weights: Arc<SceneWeights>) {
+        self.weights = weights;
+    }
+
+    /// v2.10 R3 新增：设置平滑过渡配置
+    pub fn set_transition_config(&mut self, config: TransitionConfig) {
+        self.transition_config = config;
+    }
+
+    /// v2.10 R3 新增：获取当前生效的权重（平滑过渡期间返回插值权重）
+    pub fn current_weights(&mut self) -> Vec<f32> {
+        if let Some(ref mut transition) = self.smooth_transition {
+            if transition.state() == TransitionState::InProgress {
+                return transition.get_interpolated_weights().to_vec();
+            }
+        }
+        self.get_scene_weights_internal()
+    }
+
+    /// v2.10 R3 新增：获取平滑过渡状态
+    pub fn transition_state(&self) -> Option<TransitionState> {
+        self.smooth_transition.as_ref().map(|t| t.state())
+    }
+
+    /// v2.10 R3 新增：获取剩余过渡步数
+    pub fn remaining_transition_steps(&self) -> usize {
+        self.smooth_transition
+            .as_ref()
+            .map(|t| t.remaining_steps())
+            .unwrap_or(0)
+    }
+
+    /// 内部方法：获取当前场景的权重向量
+    fn get_scene_weights_internal(&self) -> Vec<f32> {
+        let mode = self.current();
+        self.weights_to_vec(&self.weights, mode)
+    }
+
+    /// 根据场景获取权重向量
+    fn get_weights_for_mode(&self, mode: RunningMode) -> Vec<f32> {
+        self.weights_to_vec(&self.weights, mode)
+    }
+
+    /// 将 SceneWeights 转换为 Vec<f32>（取较短长度以支持不同维度场景）
+    fn weights_to_vec(&self, weights: &SceneWeights, mode: RunningMode) -> Vec<f32> {
+        let arr: &[f64] = match mode {
+            RunningMode::SeasonalLoadManagement => &weights.seasonal_load_management,
+            RunningMode::CommercialArbitrage => &weights.commercial_arbitrage,
+            RunningMode::DemandControl => &weights.demand_control,
+            RunningMode::VirtualPowerPlant => &weights.virtual_power_plant,
+            RunningMode::UltraGreen => &weights.ultra_green,
+        };
+        arr.iter().map(|&v| v as f32).collect()
+    }
+
+    /// 触发平滑过渡（内部方法，由 switch 调用）
+    fn trigger_smooth_transition(&mut self, old_mode: RunningMode, new_mode: RunningMode) {
+        let current_weights = self.get_weights_for_mode(old_mode);
+        let target_weights = self.get_weights_for_mode(new_mode);
+
+        let mut transition = SmoothSceneTransition::new(self.transition_config.clone());
+        transition.on_scene_switch(current_weights, target_weights);
+        self.smooth_transition = Some(transition);
     }
 
     async fn persist_mode(&self, mode: RunningMode, path: &PathBuf) -> Result<(), std::io::Error> {
@@ -377,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mode_selector_switch() {
-        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
+        let mut selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
         let prev = selector
             .switch(RunningMode::CommercialArbitrage, SwitchSource::LocalConfig)
             .await;
@@ -387,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mode_selector_switch_idempotent() {
-        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
+        let mut selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
         let prev = selector
             .switch(
                 RunningMode::SeasonalLoadManagement,
@@ -399,7 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mode_selector_subscribe() {
-        let selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
+        let mut selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
         let mut rx = selector.subscribe();
         let _ = selector
             .switch(RunningMode::DemandControl, SwitchSource::LocalConfig)
@@ -407,5 +649,192 @@ mod tests {
         let event = rx.recv().await.unwrap();
         assert_eq!(event.previous, RunningMode::SeasonalLoadManagement);
         assert_eq!(event.current, RunningMode::DemandControl);
+    }
+
+    // ========================================================================
+    // v2.10 R3: 场景切换平滑过渡测试用例 (CC1-CC4)
+    // ========================================================================
+
+    #[test]
+    fn test_transition_steps_configurable() {
+        // CC1: 场景切换时触发平滑过渡，过渡步数可配置（默认10步）
+        let config5 = TransitionConfig {
+            transition_steps: 5,
+        };
+        let mut transition5 = SmoothSceneTransition::new(config5);
+        transition5.on_scene_switch(vec![1.0, 2.0], vec![3.0, 4.0]);
+        assert_eq!(transition5.state(), TransitionState::InProgress);
+        assert_eq!(transition5.total_steps(), 5);
+        assert_eq!(transition5.remaining_steps(), 5);
+
+        // 走完 5 步后状态变为 Completed
+        for _ in 0..5 {
+            let _ = transition5.get_interpolated_weights();
+        }
+        assert_eq!(transition5.state(), TransitionState::Completed);
+        assert_eq!(transition5.remaining_steps(), 0);
+
+        // 默认步数为 10
+        let config_default = TransitionConfig::default();
+        assert_eq!(config_default.transition_steps, 10);
+    }
+
+    #[test]
+    fn test_linear_interpolation_first_last() {
+        // CC2: 每步权重线性插值，确保最终权重与目标一致
+        // step 0 返回 current_weights，step 10 返回 target_weights
+        let config = TransitionConfig {
+            transition_steps: 10,
+        };
+        let mut transition = SmoothSceneTransition::new(config);
+        transition.on_scene_switch(vec![0.0, 0.0], vec![10.0, 20.0]);
+
+        // Step 0: 应该返回 current_weights
+        let weights = transition.get_interpolated_weights();
+        assert_eq!(weights.len(), 2);
+        assert!((weights[0] - 0.0).abs() < 1e-6);
+        assert!((weights[1] - 0.0).abs() < 1e-6);
+
+        // Step 10: 应该返回 target_weights
+        for _ in 0..9 {
+            let _ = transition.get_interpolated_weights();
+        }
+        let weights = transition.get_interpolated_weights();
+        assert!((weights[0] - 10.0).abs() < 1e-6);
+        assert!((weights[1] - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_interpolation_middle() {
+        // CC2: 中间步线性验证 - step 5 时每权重 = (current + target) / 2
+        let config = TransitionConfig {
+            transition_steps: 10,
+        };
+        let mut transition = SmoothSceneTransition::new(config);
+        transition.on_scene_switch(vec![0.0, 0.0], vec![10.0, 20.0]);
+
+        // 前进到 step 5
+        for _ in 0..5 {
+            let _ = transition.get_interpolated_weights();
+        }
+
+        let weights = transition.get_interpolated_weights();
+        // alpha = 5/10 = 0.5
+        // weight_i = (1 - 0.5) * 0 + 0.5 * target = target / 2
+        assert!((weights[0] - 5.0).abs() < 1e-6);
+        assert!((weights[1] - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_transition_auto_stop() {
+        // CC4: 过渡完成后自动停止插值，返回目标权重
+        let config = TransitionConfig {
+            transition_steps: 3,
+        };
+        let mut transition = SmoothSceneTransition::new(config);
+        transition.on_scene_switch(vec![0.0], vec![9.0]);
+
+        // 走完 3 步
+        for _ in 0..3 {
+            let _ = transition.get_interpolated_weights();
+        }
+        assert_eq!(transition.state(), TransitionState::Completed);
+
+        // 继续调用应返回目标权重
+        for _ in 0..10 {
+            let weights = transition.get_interpolated_weights();
+            assert!((weights[0] - 9.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_no_control_jump() {
+        // CC3: 过渡期间控制指令无突变（梯度 < 5%）
+        let config = TransitionConfig {
+            transition_steps: 20,
+        };
+        let mut transition = SmoothSceneTransition::new(config);
+        transition.on_scene_switch(vec![100.0], vec![0.0]);
+
+        let mut prev_weight = 100.0;
+        let mut max_jump = 0.0f32;
+
+        for _step in 0..20 {
+            let weights = transition.get_interpolated_weights();
+            let current_weight = weights[0];
+            let jump = (prev_weight - current_weight).abs() / prev_weight.max(1e-6);
+            max_jump = max_jump.max(jump);
+            prev_weight = current_weight;
+        }
+
+        // 最大跳跃应小于 5%
+        assert!(
+            max_jump < 0.05,
+            "Max jump {}% exceeds 5% threshold",
+            max_jump * 100.0
+        );
+    }
+
+    #[test]
+    fn test_smooth_scene_transition_idle_state() {
+        // 初始状态为 Idle
+        let transition = SmoothSceneTransition::new(TransitionConfig::default());
+        assert_eq!(transition.state(), TransitionState::Idle);
+        assert_eq!(transition.remaining_steps(), 10);
+    }
+
+    #[test]
+    fn test_same_weights_immediate_completion() {
+        // 相同权重应立即完成
+        let config = TransitionConfig {
+            transition_steps: 10,
+        };
+        let transition = SmoothSceneTransition::new_with_weights(config, vec![1.0, 2.0], vec![1.0, 2.0]);
+        assert_eq!(transition.state(), TransitionState::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_mode_selector_with_smooth_transition() {
+        // 集成测试：ModeSelector 切换时触发平滑过渡
+        let mut selector = ModeSelector::new(RunningMode::SeasonalLoadManagement, None);
+        selector.set_transition_config(TransitionConfig {
+            transition_steps: 5,
+        });
+
+        // 切换场景，触发平滑过渡
+        let prev = selector
+            .switch(RunningMode::CommercialArbitrage, SwitchSource::LocalConfig)
+            .await;
+        assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
+
+        // 检查平滑过渡状态
+        assert_eq!(selector.transition_state(), Some(TransitionState::InProgress));
+        assert_eq!(selector.remaining_transition_steps(), 5);
+
+        // 获取插值权重
+        let weights = selector.current_weights();
+        assert!(!weights.is_empty());
+
+        // 完成过渡
+        for _ in 0..5 {
+            let _ = selector.current_weights();
+        }
+        assert_eq!(selector.transition_state(), Some(TransitionState::Completed));
+        assert_eq!(selector.remaining_transition_steps(), 0);
+    }
+
+    #[test]
+    fn test_weights_dimension_mismatch() {
+        // 不同维度权重取较短长度
+        let config = TransitionConfig {
+            transition_steps: 10,
+        };
+        let mut transition = SmoothSceneTransition::new(config);
+        // current 有 8 个权重，target 只有 2 个
+        transition.on_scene_switch(vec![1.0; 8], vec![10.0, 20.0]);
+
+        // 应该取 2 个（较短长度）
+        let weights = transition.get_interpolated_weights();
+        assert_eq!(weights.len(), 2);
     }
 }
