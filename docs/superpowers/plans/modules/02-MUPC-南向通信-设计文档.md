@@ -265,6 +265,65 @@ pub enum Rs485Error {
 
 ---
 
+### 2.7 南向控制指令分发（SouthCommandSender）
+
+> **来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
+
+**设计目标：**
+
+策略引擎输出的两类南向控制指令通过 `SouthCommandSender` trait 发送到对应设备，与核间通信的 `p_ref`/`k_droop` 双参数指令分离：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    策略引擎 (strategy-engine)                  │
+├──────────────────────────────────────────────────────────────┤
+│  p_ref + k_droop  →  IntercoreClient  →  实时控制模块        │  ← 核间通信
+│  pv_limit         →  SouthCommandSender  →  光伏逆变器      │  ← 南向通信
+│  load_shedding    →  SouthCommandSender  →  负荷控制装置    │  ← 南向通信
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Trait 定义（定义于 `strategy-engine/src/south_command_sender.rs`）：**
+
+```rust
+#[async_trait]
+pub trait SouthCommandSender: Send + Sync {
+    async fn send_pv_limit(&self, cmd: PvLimitCommand) -> SouthSendResult;
+    async fn send_load_shedding(&self, cmd: LoadSheddingCommand) -> SouthSendResult;
+}
+
+pub struct PvLimitCommand {
+    pub device_id: String,
+    pub limit_ratio: f64,      // [0.0, 1.0]
+    pub priority: u8,
+}
+
+pub struct LoadSheddingCommand {
+    pub device_id: String,
+    pub power_kw: f64,
+    pub priority: u8,
+}
+```
+
+**实现类：**
+
+| 实现 | 文件 | 说明 |
+|------|------|------|
+| `MockSouthCommandSender` | `south_command_sender.rs` | 开发/测试用模拟实现 |
+| `Rs485SouthCommandSender` | Phase 2+ 实现 | 真实 RS485 通信 |
+| `HplcSouthCommandSender` | Phase 2+ 实现 | 真实 HPLC 通信 |
+
+**与核间通信的分工：**
+
+| 指令 | 发送路径 | 目标 |
+|------|----------|------|
+| `p_ref` (有功基准点) | 核间通信 → 实时控制模块 | 下垂闭环控制 |
+| `k_droop` (下垂系数) | 核间通信 → 实时控制模块 | 下垂闭环控制 |
+| `pv_limit` (限功率) | 南向通信 → 光伏逆变器 | 防逆流/功率限制 |
+| `load_shedding` (切负荷) | 南向通信 → 负荷控制装置 | 需量控制 |
+
+---
+
 ## 3. 协议处理器设计
 
 ### 3.1 设计模式

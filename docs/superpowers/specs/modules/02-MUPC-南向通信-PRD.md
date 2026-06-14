@@ -192,6 +192,54 @@ pub enum RegistryError {
 示例: ttu_huawei_osu_001, inverter_sungrow_sg100_001
 ```
 
+### 2.7 南向控制指令分发（SouthCommandSender）
+
+> **来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
+
+策略引擎输出的两类南向控制指令通过 `SouthCommandSender` trait 发送到对应设备：
+
+| 指令 | 目标设备 | 协议处理器 | 说明 |
+|------|----------|------------|------|
+| `pv_limit` | 光伏逆变器 | `InverterHandler` | 光伏限功率比例 [0.0, 1.0]，0=不限功率，0.5=限制到50% |
+| `load_shedding` | 柔性负荷控制装置 | `ModbusHandler` | 可中断负荷切除量 (kW) |
+
+**SouthCommandSender Trait：**
+
+```rust
+#[async_trait]
+pub trait SouthCommandSender: Send + Sync {
+    /// 发送光伏限功率命令
+    async fn send_pv_limit(&self, cmd: PvLimitCommand) -> SouthSendResult;
+
+    /// 发送负荷切除命令
+    async fn send_load_shedding(&self, cmd: LoadSheddingCommand) -> SouthSendResult;
+}
+
+/// 光伏限功率命令
+pub struct PvLimitCommand {
+    pub device_id: String,      // 目标设备ID
+    pub limit_ratio: f64,      // 限功率比例 [0.0, 1.0]
+    pub priority: u8,          // 命令优先级
+}
+
+/// 负荷切除命令
+pub struct LoadSheddingCommand {
+    pub device_id: String,    // 目标设备ID
+    pub power_kw: f64,         // 切除功率 (kW)
+    pub priority: u8,         // 命令优先级
+}
+```
+
+**实现状态：**
+
+| 实现 | 说明 |
+|------|------|
+| `MockSouthCommandSender` | 开发/测试用模拟实现，仅打印日志 |
+| `Rs485SouthCommandSender` | Phase 2+ 真实 RS485 通信实现（待实现） |
+| `HplcSouthCommandSender` | Phase 2+ HPLC 通信实现（待实现） |
+
+> **注意**：`pv_limit` 和 `load_shedding` **不通过核间通信发送**到实时控制模块，而是通过南向通信发送到对应的光伏逆变器和负荷控制装置。核间通信仅传输 `p_ref` 和 `k_droop` 双参数。
+
 ---
 
 ## 3. RS485 设备与协议处理器
