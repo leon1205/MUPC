@@ -1794,9 +1794,9 @@ mod tests {
 
     #[test]
     fn test_v2_12_overload_piecewise_hard_penalty() {
-        // L >= 1.00: 100.0
+        // L >= 1.00: 100.0 (硬惩罚)
         let calc = RewardCalculator::new(SceneWeights::default());
-        assert!((calc.overload_penalty_piecewise(1.00) - 50.0).abs() < 1e-6);
+        assert!((calc.overload_penalty_piecewise(1.00) - 100.0).abs() < 1e-6);
         assert!((calc.overload_penalty_piecewise(1.10) - 100.0).abs() < 1e-6);
         assert!((calc.overload_penalty_piecewise(1.20) - 100.0).abs() < 1e-6);
     }

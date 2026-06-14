@@ -21,3 +21,7 @@ operational:
   p_batt_ramp_limit_kw: 50.0
   q_batt_ramp_limit_kvar: 30.0
   pv_limit_min: 0.10
+
+reward_thresholds:
+  q_margin_threshold: 0.10      # Q 裕度阈值，低于此值视为"无功耗尽"
+  p_threshold_kw: 5.0           # P 阈值（kW），省电策略判定阈值
