@@ -13,6 +13,11 @@ use tracing::{error, info, warn};
 
 use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType};
 
+/// 安全覆盖触发原因的默认值
+const SAFETY_OVERRIDE_REASON_UNKNOWN: &str = "unknown";
+/// 安全覆盖恢复条件的默认值
+const SAFETY_OVERRIDE_RECOVERY_TIMER_EXPIRED: &str = "timer_expired";
+
 /// 核间通信配置
 #[derive(Debug, Clone)]
 pub struct IntercoreConfig {
@@ -24,6 +29,8 @@ pub struct IntercoreConfig {
     pub heartbeat_interval_ms: u64,
     /// 看门狗超时（毫秒）
     pub watchdog_timeout_ms: u64,
+    /// 最大电池放电功率 (kW)，用于安全覆盖时的功率限制
+    pub max_batt_power_kw: f64,
 }
 
 impl Default for IntercoreConfig {
@@ -33,6 +40,7 @@ impl Default for IntercoreConfig {
             listen_port: 2500,
             heartbeat_interval_ms: 1000,
             watchdog_timeout_ms: 10000,
+            max_batt_power_kw: 50.0,
         }
     }
 }
@@ -221,7 +229,7 @@ impl SafetyOverridePayload {
     }
 
     pub fn trigger_reason(&self) -> &str {
-        self.trigger_reason.as_deref().unwrap_or("unknown")
+        self.trigger_reason.as_deref().unwrap_or(SAFETY_OVERRIDE_REASON_UNKNOWN)
     }
 
     pub fn is_active(&self) -> bool {
@@ -501,6 +509,7 @@ impl IntercoreServer {
 
         let shutdown_rx = self.shutdown_tx.subscribe();
         let cmd_config = self.cmd_config.clone();
+        let max_batt_power_kw = self.config.max_batt_power_kw;
 
         // clone heartbeat_manager before it's moved into spawns
         let hb_for_listener = heartbeat_manager.clone();
@@ -521,7 +530,7 @@ impl IntercoreServer {
                                 let intercore_state = Arc::new(IntercoreConnectionState::new());
                                 let state_for_conn = intercore_state.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, heartbeat, cfg, state_for_conn).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, heartbeat, cfg, state_for_conn, max_batt_power_kw).await {
                                         error!("Connection error from {}: {}", addr, e);
                                     }
                                 });
@@ -554,6 +563,7 @@ impl IntercoreServer {
         heartbeat: Arc<RwLock<HeartbeatManager>>,
         cmd_config: CommandConfig,
         intercore_state: Arc<IntercoreConnectionState>, // v2.10 新增
+        max_batt_power_kw: f64,
     ) -> Result<(), MupcError> {
         let (read_half, mut write_half) = tokio::io::split(stream);
 
@@ -662,7 +672,7 @@ impl IntercoreServer {
                                                     continue;
                                                 }
 
-                                                let max_batt_power = 50.0; // TODO: 从配置获取
+                                                let max_batt_power = max_batt_power_kw;
                                                 let clamped_p_ref =
                                                     payload.clamp_override_p_ref(max_batt_power);
                                                 let clamped_duration =
@@ -676,7 +686,7 @@ impl IntercoreServer {
                                                         payload
                                                             .recovery_condition
                                                             .as_deref()
-                                                            .unwrap_or("timer_expired"),
+                                                            .unwrap_or(SAFETY_OVERRIDE_RECOVERY_TIMER_EXPIRED),
                                                     )
                                                     .await;
 
