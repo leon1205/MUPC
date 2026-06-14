@@ -235,8 +235,6 @@ impl AiIntegrator {
             let cmd = DualParamCommand::new(
                 action.p_ref,
                 action.k_droop,
-                action.load_shedding,
-                action.pv_limit,
                 true, // ai_ready
                 &strategy_mode,
             );
@@ -315,8 +313,6 @@ impl AiIntegrator {
             let cmd = DualParamCommand::new(
                 action.p_ref,
                 action.k_droop,
-                action.load_shedding,
-                action.pv_limit,
                 true,
                 "Emergency",
             );

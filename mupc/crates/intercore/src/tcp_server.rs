@@ -88,10 +88,8 @@ pub struct ControlCmdPayloadV2 {
     pub p_ref: Option<f64>,
     #[serde(rename = "k_droop")]
     pub k_droop: Option<f64>,
-    #[serde(rename = "load_shedding")]
-    pub load_shedding: Option<f64>,
-    #[serde(rename = "pv_limit")]
-    pub pv_limit: Option<f64>,
+    /// 注：load_shedding 和 pv_limit 不通过核间通信发送，
+    /// 它们通过 SouthCommandDispatcher 发送到南向设备（光伏逆变器、负荷控制装置）
     #[serde(rename = "ai_ready")]
     pub ai_ready: Option<bool>,
     #[serde(rename = "strategy_mode")]
@@ -110,8 +108,6 @@ impl ControlCmdPayloadV2 {
         Self {
             p_ref: None,
             k_droop: None,
-            load_shedding: None,
-            pv_limit: None,
             ai_ready: None,
             strategy_mode: None,
             timestamp_ms: None,
@@ -779,16 +775,15 @@ impl IntercoreServer {
 // ============================================================================
 
 /// 双参数命令（用于发送到实时控制模块，v2.7）
+///
+/// 注意：load_shedding 和 pv_limit 不通过此命令发送，
+/// 它们通过 SouthCommandDispatcher 发送到南向设备。
 #[derive(Debug, Clone)]
 pub struct DualParamCommand {
     /// 有功功率基准点 (kW)
     pub p_ref: f64,
     /// 电压-有功下垂系数 (kW/V)
     pub k_droop: f64,
-    /// 可中断负荷切除量 (kW)
-    pub load_shedding: f64,
-    /// 光伏限功率比例
-    pub pv_limit: f64,
     /// AI 就绪状态
     pub ai_ready: bool,
     /// 当前策略模式
@@ -797,19 +792,18 @@ pub struct DualParamCommand {
 
 impl DualParamCommand {
     /// 创建双参数命令
+    ///
+    /// 注意：load_shedding 和 pv_limit 不通过核间通信发送，
+    /// 它们通过 SouthCommandDispatcher 发送到南向设备。
     pub fn new(
         p_ref: f64,
         k_droop: f64,
-        load_shedding: f64,
-        pv_limit: f64,
         ai_ready: bool,
         strategy_mode: &str,
     ) -> Self {
         Self {
             p_ref,
             k_droop,
-            load_shedding,
-            pv_limit,
             ai_ready,
             strategy_mode: strategy_mode.to_string(),
         }
@@ -864,8 +858,6 @@ impl IntercoreClient {
         let payload = ControlCmdPayloadV2 {
             p_ref: Some(cmd.p_ref),
             k_droop: Some(cmd.k_droop),
-            load_shedding: Some(cmd.load_shedding),
-            pv_limit: Some(cmd.pv_limit),
             ai_ready: Some(cmd.ai_ready),
             strategy_mode: Some(cmd.strategy_mode.clone()),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
