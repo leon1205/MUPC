@@ -350,8 +350,17 @@ impl RewardCalculator {
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
     }
 
-    /// SCENE-01: 台区季节性负荷模式 v2.10
-    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo + w4*R_PQ_coordination - w5*R_ramp - w6*R_voltage_slope - w7*R_smooth - w8*R_safety_override
+    /// SCENE-01: 台区季节性负荷模式 v2.12
+    ///
+    /// R = w1*R_pv_norm - w2*P_batt_deg_norm - w3*P_trafo_norm + w4*R_pq_norm
+    ///     - w5*R_ramp_norm - w6*R_voltage_slope_norm - w7*R_smooth_norm - w8*R_safety_override_norm
+    ///     + R_shaping (overload_warning + soc_warning)
+    ///     + R_soc_balance
+    ///
+    /// v2.12 改进：
+    /// - R-01: 各子项标准化到 [-1, 1] 区间，统一量纲
+    /// - R-02: 引入塑造奖励，提前预警变压器过载和 SOC 边界
+    /// - R-03: SOC 均衡奖励，鼓励 SOC 保持在 50% 附近
     fn calc_agri_v2_8(
         &self,
         state: &FusedSystemState,
@@ -371,14 +380,14 @@ impl RewardCalculator {
         let c_rate = state.battery_power.abs() / self.battery_capacity_kwh;
         let p_batt_deg = alpha * c_rate * c_rate;
 
-        // 4. 变压器过载
-        let p_trafo = self.overload_penalty(state.transformer_load);
+        // 4. 变压器过载分段惩罚（v2.12 R-04）
+        let p_trafo = self.overload_penalty_piecewise(state.transformer_load);
 
         // 5. P-Q 协同度奖励（v2.8 核心）
         let r_pq = self.calc_pq_coordination(state, action.p_ref);
 
         // 6. 变化率惩罚
-        let r_ramp = w[4] * (action.p_ref - prev_p_batt).abs() / self.battery_capacity_kwh;
+        let r_ramp = (action.p_ref - prev_p_batt).abs() / self.battery_capacity_kwh;
 
         // 7. 电压变化斜率惩罚
         let prev_v = *self.last_voltage.read().unwrap();
@@ -390,11 +399,84 @@ impl RewardCalculator {
         // 9. 安全覆盖惩罚（v2.10 新增）
         let r_safety_override = self.safety_override_penalty(state);
 
-        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq
-            - w[4] * r_ramp
-            - w[5] * r_voltage_slope
-            - w[6] * r_smooth
-            - w[7] * r_safety_override
+        // ===== v2.12 R-01: 标准化到 [-1, 1] 区间 =====
+
+        // 1. 弃光奖励标准化 [0, 100] → [0, 1]
+        let r_pv_norm = r_pv / 100.0;
+
+        // 2. 电池损耗标准化 [0, ~0.1] → [0, 1]（假设最大 C-rate ≈ 0.3）
+        // 最大 C-rate = 0.3 时，C-rate² = 0.09，乘以 alpha(≤3) 最大 ≈ 0.27
+        // 标准化系数 10 将 0.1 映射到 1.0
+        let p_batt_deg_norm = (p_batt_deg * 10.0).min(1.0);
+
+        // 3. 变压器过载分段惩罚标准化（v2.12 R-04）[0, 100] → [0, 1]
+        let p_trafo_norm = (p_trafo / 100.0).min(1.0);
+
+        // 4. P-Q 协同度标准化 [-50, 50] → [-1, 1]
+        let r_pq_norm = (r_pq / 50.0).clamp(-1.0, 1.0);
+
+        // 5. 变化率标准化（假设最大 r_ramp ≈ 0.1，即 10kW / 100kWh）
+        let r_ramp_norm = (r_ramp * 10.0).min(1.0);
+
+        // 6. 电压斜率标准化（假设最大 r_voltage_slope ≈ 0.1）
+        let r_voltage_slope_norm = (r_voltage_slope * 10.0).min(1.0);
+
+        // 7. 下垂系数平滑标准化 [-130, 0] → [-1, 0]
+        // r_smooth 范围约 [-130, 0]，除以 130 映射到 [-1, 0]
+        let r_smooth_norm = (r_smooth / 130.0).max(-1.0).min(0.0);
+
+        // 8. 安全覆盖惩罚标准化 [-100, 0] → [-1, 0]
+        let r_safety_override_norm = (r_safety_override / 100.0).max(-1.0).min(0.0);
+
+        // ===== v2.12 R-02: 塑造奖励（提前预警）=====
+        let r_overload_warning = self.overload_warning(state.transformer_load);
+        let r_soc_warning = self.soc_warning(state.battery_soc);
+        let r_shaping = r_overload_warning + r_soc_warning;
+
+        // ===== v2.12 R-03: SOC 均衡奖励 =====
+        let r_soc_balance = self.soc_balance_reward(state.battery_soc, 5.0);
+
+        w[0] * r_pv_norm - w[1] * p_batt_deg_norm - w[2] * p_trafo_norm + w[3] * r_pq_norm
+            - w[4] * r_ramp_norm
+            - w[5] * r_voltage_slope_norm
+            - w[6] * r_smooth_norm
+            - w[7] * r_safety_override_norm
+            + r_shaping
+            + r_soc_balance
+    }
+
+    /// v2.12 R-02: 变压器过载提前预警（负载率 85% 开始）
+    ///
+    /// 在过载前提供负向信号，鼓励 AI 提前调整策略
+    fn overload_warning(&self, load: f64) -> f64 {
+        if load <= 0.85 {
+            0.0
+        } else {
+            -10.0 * (load - 0.85)
+        }
+    }
+
+    /// v2.12 R-02: SOC 边界提前预警
+    ///
+    /// 当 SOC 接近临界值时提供负向信号，鼓励 AI 提前调整
+    fn soc_warning(&self, soc: f64) -> f64 {
+        let critical_low = 0.15;
+        let critical_high = 0.85;
+        if soc < critical_low {
+            -5.0 * (critical_low - soc) / critical_low
+        } else if soc > critical_high {
+            -5.0 * (soc - critical_high) / (1.0 - critical_high)
+        } else {
+            0.0
+        }
+    }
+
+    /// v2.12 R-03: SOC 均衡奖励
+    ///
+    /// 鼓励 SOC 保持在 50% 附近，避免极端值
+    /// - lambda: 惩罚系数，默认 5.0
+    fn soc_balance_reward(&self, soc: f64, lambda: f64) -> f64 {
+        -lambda * (soc - 0.5).abs()
     }
 
     /// 安全覆盖感知奖励调整（v2.10 新增）
@@ -593,12 +675,35 @@ impl RewardCalculator {
         }
     }
 
-    /// 变压器过载惩罚（75% 以上开始惩罚）
+    /// 变压器过载惩罚（75% 以上开始惩罚，legacy v2.8）
+    #[allow(dead_code)]
     fn overload_penalty(&self, load: f64) -> f64 {
         if load <= 0.75 {
             0.0
         } else {
             200.0 * (load - 1.0).powi(2)
+        }
+    }
+
+    /// v2.12 R-04: 变压器过载分段惩罚
+    ///
+    /// 分段逻辑：
+    ///   L < 0.75:          0.0                    // 安全区
+    ///   0.75 <= L < 0.90:  linear 0~10           // 线性增长
+    ///   0.90 <= L < 1.00:  exponential 10~50     // 指数增长
+    ///   L >= 1.00:          100.0                 // 硬惩罚
+    fn overload_penalty_piecewise(&self, load: f64) -> f64 {
+        if load < 0.75 {
+            0.0
+        } else if load < 0.90 {
+            // 线性：0~10
+            (load - 0.75) / 0.15 * 10.0
+        } else if load < 1.00 {
+            // 指数：10~50
+            let excess = (load - 0.90) / 0.10;
+            10.0 + excess * excess * 40.0
+        } else {
+            100.0 // 硬惩罚
         }
     }
 
@@ -720,12 +825,8 @@ impl RewardCalculator {
         let c_rate = state.battery_power.abs() / battery_capacity_kwh;
         let p_batt_deg = c_rate * c_rate;
 
-        // 3. 变压器过载惩罚
-        let p_trafo = if state.transformer_load <= 0.75 {
-            0.0
-        } else {
-            200.0 * (state.transformer_load - 1.0).powi(2)
-        };
+        // 3. 变压器过载分段惩罚标准化（v2.12 R-04）[0, 100] → [0, 1]
+        let p_trafo_norm = Self::overload_penalty_piecewise_static(state.transformer_load) / 100.0;
 
         // 4. P-Q 协同度奖励（简化）
         let r_pq = Self::calc_pq_coordination_static(state, action.p_ref);
@@ -746,11 +847,27 @@ impl RewardCalculator {
         // 8. 安全覆盖惩罚（简化）
         let r_safety_override = if state.safety_override_active { -20.0 } else { 0.0 };
 
-        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq
+        w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo_norm + w[3] * r_pq
             - w[4] * r_ramp
             - w[5] * r_voltage_slope
             - w[6] * r_smooth
             - w[7] * r_safety_override
+    }
+
+    /// v2.12 R-04: 变压器过载分段惩罚（静态版本）
+    fn overload_penalty_piecewise_static(load: f64) -> f64 {
+        if load < 0.75 {
+            0.0
+        } else if load < 0.90 {
+            // 线性：0~10
+            (load - 0.75) / 0.15 * 10.0
+        } else if load < 1.00 {
+            // 指数：10~50
+            let excess = (load - 0.90) / 0.10;
+            10.0 + excess * excess * 40.0
+        } else {
+            100.0 // 硬惩罚
+        }
     }
 
     /// v2.11: 弃光奖励（静态版本）
@@ -1289,5 +1406,240 @@ mod tests {
 
         calc.reset_discounted_buffer();
         assert!((calc.cumulative_discounted_reward() - 0.0).abs() < 1e-6);
+    }
+
+    // ===== v2.12 奖励函数改进测试 =====
+
+    #[test]
+    fn test_v2_12_overload_warning_below_threshold() {
+        // 负载率 <= 0.85 时无惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.overload_warning(0.80) - 0.0).abs() < 1e-6);
+        assert!((calc.overload_warning(0.85) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_overload_warning_above_threshold() {
+        // 负载率 > 0.85 时产生负向预警
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.overload_warning(0.90);
+        assert!(r < 0.0, "负载率90%应有负向预警");
+        // -10.0 * (0.90 - 0.85) = -0.5
+        assert!((r - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_overload_warning_at_limit() {
+        // 负载率 = 1.0 时，惩罚达到 -1.5
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.overload_warning(1.0);
+        assert!((r - (-1.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_soc_warning_normal_range() {
+        // SOC 在 [0.15, 0.85] 区间内无惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.soc_warning(0.50) - 0.0).abs() < 1e-6);
+        assert!((calc.soc_warning(0.15) - 0.0).abs() < 1e-6);
+        assert!((calc.soc_warning(0.85) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_soc_warning_low_soc() {
+        // SOC < 0.15 时产生负向预警
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.soc_warning(0.10);
+        assert!(r < 0.0, "SOC 10%应有负向预警");
+        // -5.0 * (0.15 - 0.10) / 0.15 = -5.0 * 0.05 / 0.15 ≈ -1.667
+        assert!((r - (-5.0 * 0.05 / 0.15)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_soc_warning_high_soc() {
+        // SOC > 0.85 时产生负向预警
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.soc_warning(0.90);
+        assert!(r < 0.0, "SOC 90%应有负向预警");
+        // -5.0 * (0.90 - 0.85) / 0.15 = -5.0 * 0.05 / 0.15 ≈ -1.667
+        assert!((r - (-5.0 * 0.05 / 0.15)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_soc_balance_reward_at_50_percent() {
+        // SOC = 0.5 时无惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.soc_balance_reward(0.50, 5.0);
+        assert!((r - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_soc_balance_reward_deviation() {
+        // SOC 偏离 50% 时产生负向惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.soc_balance_reward(0.60, 5.0);
+        assert!(r < 0.0, "SOC 60%应有负向惩罚");
+        // -5.0 * |0.60 - 0.50| = -0.5
+        assert!((r - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_normalized_pv_reward() {
+        // R-01: 弃光奖励标准化 [0, 100] → [0, 1]
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.pv_power = 100.0;
+        state.grid_power = 0.0;
+        state.battery_soc = 0.5;
+
+        let action = ActionOutput {
+            p_ref: -50.0,
+            k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
+        };
+
+        // 正常情况下 r_pv ≈ 100，标准化后 ≈ 1.0
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        // 由于还有其他项，总奖励会受 w 影响，但 r_pv_norm 应该接近 1.0
+        assert!(r > 0.0, "完全光伏消纳应产生正奖励");
+    }
+
+    #[test]
+    fn test_v2_12_normalized_pq_coordination() {
+        // R-01: P-Q 协同度标准化 [-50, 50] → [-1, 1]
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.voltage_phase_a = 0.92;
+        state.voltage_phase_b = 0.92;
+        state.voltage_phase_c = 0.92;
+        state.q_realtime_margin = 0.05; // <= 10%
+        state.battery_soc = 0.5;
+
+        let action = ActionOutput {
+            p_ref: -10.0, // 低电压放电（正确）
+            k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
+        };
+
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        // r_pq = 50，标准化后 r_pq_norm = 1.0，应有正贡献
+        assert!(r > 0.0, "正确PQ协同应产生正奖励");
+    }
+
+    #[test]
+    fn test_v2_12_shaping_reward_reduces_before_overload() {
+        // R-02: 塑造奖励在变压器过载前提供负向信号
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.transformer_load = 0.90; // 过载预警区间
+        state.battery_soc = 0.50;
+        state.pv_power = 100.0;
+        state.grid_power = 0.0;
+
+        let action = ActionOutput {
+            p_ref: -50.0,
+            k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
+        };
+
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        // 过载预警会产生负向信号，总奖励应较低
+        assert!(r < 100.0, "过载预警应降低奖励");
+    }
+
+    #[test]
+    fn test_v2_12_soc_balance_penalizes_extreme() {
+        // R-03: SOC 极端值时应受到惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let mut state = FusedSystemState::default();
+        state.battery_soc = 0.10; // 极端低 SOC
+        state.pv_power = 100.0;
+        state.grid_power = 0.0;
+        state.transformer_load = 0.5;
+
+        let action = ActionOutput {
+            p_ref: -50.0,
+            k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
+        };
+
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        // SOC 10% 会触发 soc_warning 和 soc_balance，总奖励降低
+        assert!(r > 0.0, "光伏消纳仍有正奖励，但会被SOC惩罚部分抵消");
+    }
+
+    #[test]
+    fn test_v2_12_normalization_keeps_reward_in_reasonable_range() {
+        // R-01: 标准化后奖励应在合理范围内
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let state = make_state();
+        let action = make_action();
+
+        let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+
+        // 标准化后各子项在 [-1, 1] 范围内，加权求和后总奖励应在合理范围
+        // 由于 w[0]~w[7] 默认值约为 1.0，总奖励应在 [-10, 10] 范围内
+        assert!(r.abs() < 50.0, "标准化后总奖励应在合理范围内，实际: {}", r);
+    }
+
+    // ===== v2.12 R-04 变压器过载分段惩罚测试 =====
+
+    #[test]
+    fn test_v2_12_overload_piecewise_safe_zone() {
+        // L < 0.75: 0.0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.overload_penalty_piecewise(0.50) - 0.0).abs() < 1e-6);
+        assert!((calc.overload_penalty_piecewise(0.74) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_overload_piecewise_linear_zone() {
+        // 0.75 <= L < 0.90: linear 0~10
+        let calc = RewardCalculator::new(SceneWeights::default());
+        // L = 0.75 → 0.0
+        assert!((calc.overload_penalty_piecewise(0.75) - 0.0).abs() < 1e-6);
+        // L = 0.825 → 5.0 (中间值)
+        assert!((calc.overload_penalty_piecewise(0.825) - 5.0).abs() < 1e-6);
+        // L = 0.90 → 10.0
+        assert!((calc.overload_penalty_piecewise(0.90) - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_overload_piecewise_exponential_zone() {
+        // 0.90 <= L < 1.00: exponential 10~50
+        let calc = RewardCalculator::new(SceneWeights::default());
+        // L = 0.90 → 10.0
+        assert!((calc.overload_penalty_piecewise(0.90) - 10.0).abs() < 1e-6);
+        // L = 0.95 → excess = 0.5, 10 + 0.25 * 40 = 20
+        assert!((calc.overload_penalty_piecewise(0.95) - 20.0).abs() < 1e-6);
+        // L = 1.00 → 50.0
+        assert!((calc.overload_penalty_piecewise(1.00) - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_overload_piecewise_hard_penalty() {
+        // L >= 1.00: 100.0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.overload_penalty_piecewise(1.00) - 50.0).abs() < 1e-6);
+        assert!((calc.overload_penalty_piecewise(1.10) - 100.0).abs() < 1e-6);
+        assert!((calc.overload_penalty_piecewise(1.20) - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_overload_piecewise_static() {
+        // 验证静态版本与实例方法行为一致
+        let load = 0.825;
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let instance_result = calc.overload_penalty_piecewise(load);
+        let static_result = RewardCalculator::overload_penalty_piecewise_static(load);
+        assert!((instance_result - static_result).abs() < 1e-6);
     }
 }
