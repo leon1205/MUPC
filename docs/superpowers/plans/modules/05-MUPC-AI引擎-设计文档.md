@@ -2,17 +2,17 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.9 Reward 与 Robustness 重构
+[DESIGN_APPROVED] — v2.10 安全增强
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
-| v2.9 | 2026-06-14 | 架构师 | 当前版本 |
+| v2.10 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
+| v2.9 | 2026-06-14 | 架构师 | 历史版本 |
 | v2.8 | 2026-06-13 | 架构师 | 历史版本 |
-| v2.7 | 2026-06-13 | 架构师 | 当前版本 |
-| v2.6 | 2026-06-10 | 架构师 | 当前版本 |
-| v2.5 | 2026-06-08 | 架构师 | 当前版本 |
+| v2.7 | 2026-06-13 | 架构师 | 历史版本 |
+| v2.6 | 2026-06-10 | 架构师 | 历史版本 |
 
-**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.8 (`[REVIEWED: PASS]`)
+**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.10 (`[REVIEWED: PASS]`)
 
 ---
 
@@ -95,6 +95,7 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 | 模式选择器 | `mode_selector.rs` | 5 种预设运行场景互斥选择，支持远程（IEC 104/61850）和本地（Web UI）切换 |
 | 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策，4 维动作空间输出 |
 | 奖励计算器 | `reward_calculator.rs` | 5 种场景奖励函数计算，驱动在线微调 |
+| 鲁棒性管理器 | `robustness_manager.rs` | 电压异常应急策略，检测并返回应急动作（v2.9 新增） |
 | 动作约束校验 | `action_validator.rs` | 5 条约束规则校验，防止异常值危害设备 |
 | RKNN Runtime | `rknn_runtime.rs` | RK3588 NPU FFI 推理封装，异步安全 |
 | FFI 绑定 | `rknn_runtime_sys.rs` | librknnrt.so C API 声明 |
@@ -429,7 +430,7 @@ pub struct DispatchAdapter {
 
 数据字段：dispatch_p_set (Option<f64>), dispatch_q_set (Option<f64>)。通过 gateway 事件驱动接收。缺失时两个字段均为 None，RL 决策跳过调度相关约束 (ACT-05)。
 
-### 3.5 FusedSystemState 结构体（v2.5：29 字段）
+### 3.5 FusedSystemState 结构体（v2.10：32 字段，59 维输入向量）
 
 ```rust
 /// 融合系统状态（7 大类，26 个 RL 字段 + 3 个辅助字段 = 29 字段，v2.5）
@@ -502,16 +503,24 @@ pub struct FusedSystemState {
     pub season_encoding: [f64; 6],
     /// 时段 one-hot 编码（2 维）：[白天, 夜间]
     pub time_period_encoding: [f64; 2],
+    // ------- D9: 安全覆盖状态 (v2.10 新增，3 字段) -------
+    /// 安全覆盖激活标志
+    /// true = 实时控制模块正在覆盖 AI 有功指令
+    pub safety_override_active: bool,
+    /// 安全覆盖触发原因（仅在 active=true 时有效）
+    pub safety_override_reason: Option<String>,
+    /// 安全覆盖强制放电功率 (kW)（仅在 active=true 时有效）
+    pub safety_override_p_ref: Option<f64>,
 }
 ```
 
-### 3.6 to_input_vector() -- 56 维序列化（v2.5）
+### 3.6 to_input_vector() -- 59 维序列化（v2.10）
 
-将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **56 维向量**（v2.5 从 48 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
+将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **59 维向量**（v2.10 从 56 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
 
 ```rust
 impl FusedSystemState {
-    /// 序列化为 56 维输入向量（v2.5）
+    /// 序列化为 59 维输入向量（v2.10）
     /// 布局：
     ///   [0..10]  D1 实时数据 (10 个标量，不含 timestamp，含 q_realtime_margin)
     ///   [10..25] D2 pv_forecast (15 维)
@@ -521,9 +530,11 @@ impl FusedSystemState {
     ///   [46..48] D5 气象 (2 字段)
     ///   [48]     D6 dispatch_p_set (1 维，None 时填 0.0)
     ///   [49]     D7 q_realtime_margin (1 维)
-    ///   [50..56] D7 season_encoding (6 维) + time_period_encoding (2 维)
+    ///   [50..56] D8 season_encoding (6 维) + time_period_encoding (2 维)
+    ///   [57]     D9 safety_override_active (0.0 or 1.0)
+    ///   [58]     D9 safety_override_p_ref (None→0.0)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(56);
+        let mut v = Vec::with_capacity(59);
 
         // [0..10] D1: 10 个标量 (不含 timestamp，含 q_realtime_margin)
         v.push(self.battery_soc as f32);
@@ -565,11 +576,15 @@ impl FusedSystemState {
         // [49] D7: q_realtime_margin (v2.5 新增)
         v.push(self.q_realtime_margin as f32);
 
-        // [50..56] D7: season_encoding (6 维) + time_period_encoding (2 维)
+        // [50..56] D8: season_encoding (6 维) + time_period_encoding (2 维)
         for &s in &self.season_encoding { v.push(s as f32); }
         for &t in &self.time_period_encoding { v.push(t as f32); }
 
-        debug_assert_eq!(v.len(), 56, "输入向量必须为 56 维");
+        // [57..59] D9: safety_override (3 维，v2.10 新增)
+        v.push(if self.safety_override_active { 1.0 } else { 0.0 });
+        v.push(self.safety_override_p_ref.unwrap_or(0.0) as f32);
+
+        debug_assert_eq!(v.len(), 59, "输入向量必须为 59 维");
         v
     }
 }
@@ -1149,7 +1164,15 @@ impl RewardCalculator {
 
 ### 5.3 SCENE-01：台区季节性负荷模式 (MODE-01)
 
-**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + P-Q 协同优化
+**优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + P-Q 协同优化 + 安全覆盖感知
+
+> **v2.10 核心变更（安全覆盖惩罚）：**
+> - 新增 R_safety_override 惩罚项，当 safety_override_active=true 时触发
+> - AI 引擎感知被实时控制模块覆盖事件，学习避免触发覆盖的策略
+
+> **v2.9 核心变更（RobustnessManager 集成）：**
+> - dispatch_ai_decision 前进行异常检测
+> - 存在异常时使用应急策略（不经过 RL 模型）
 
 > **v2.8 核心变更（P-Q 协同度奖励）：**
 > - 移除"电压硬惩罚"P_voltage_deviation，改为"行为奖励"R_PQ_coordination
@@ -1163,16 +1186,17 @@ impl RewardCalculator {
 > - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
 > - 自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
 
-**v2.8 奖励公式：**
+**v2.10 奖励公式：**
 
 ```
 R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处理）
          - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
          - w3 * P_transformer_overload
-         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增，替代原 w4 电压惩罚）
+         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增）
          - w5 * R_ramp
          - w6 * R_voltage_slope
          - w7 * R_smooth                        // 下垂系数平滑惩罚（v2.8 新增）
+         - w8 * R_safety_override               // 安全覆盖惩罚（v2.10 新增）
 ```
 
 **P-Q 协同度奖励 R_PQ_coordination（v2.8 新增）：**
@@ -1239,11 +1263,25 @@ R_PQ_coordination      = 按 Q 裕度和动作方向计算（见上）
 R_ramp                 = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
 R_voltage_slope        = |V_avg_t - V_avg_{t-1}|
 R_smooth               = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
+R_safety_override      = 安全覆盖惩罚（v2.10 新增，见下）
 
 其中 v_avg = (voltage_phase_a + voltage_phase_b + voltage_phase_c) / 3.0
 ```
 
-**权重表（v2.8）：**
+**安全覆盖惩罚 R_safety_override（v2.10 新增）：**
+
+```
+if safety_override_active:
+    match reason:
+        "voltage_violation" => -50.0   // 电压越限触发
+        "q_exhausted" => -30.0          // 无功耗尽触发
+        "emergency" => -100.0            // 紧急情况（最高惩罚）
+        _ => -20.0
+else:
+    0.0
+```
+
+**权重表（v2.10）：**
 
 | 权重 | 默认值 | 说明 | 可配置范围 |
 |------|--------|------|------------|
@@ -1254,6 +1292,7 @@ R_smooth               = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
 | w5 | 0.5 | 功率变化率惩罚 | [0.0, 2.0] |
 | w6 | 0.5 | 电压变化斜率惩罚 | [0.0, 2.0] |
 | w7 | 0.5 | 下垂系数平滑惩罚权重（v2.8 新增） | [0.0, 2.0] |
+| w8 | 1.0 | 安全覆盖惩罚权重（v2.10 新增） | [0.0, 5.0] |
 
 **Rust 代码实现（v2.8）：**
 
@@ -2011,6 +2050,7 @@ mupc/crates/ai-engine/
 │   ├── lstm_model.rs             # LSTM 时序预测模型（LstmInput, LstmOutput, LstmModel）
 │   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel）
 │   ├── reward_calculator.rs      # 奖励函数计算器（5 种场景奖励公式 + SceneWeights）
+│   ├── robustness_manager.rs     # 电压异常应急策略管理器（v2.9 新增）
 │   ├── data_fusion.rs            # 多源数据融合引擎（DataSourceAdapter trait + 5 个实现）
 │   ├── action_validator.rs       # 动作约束校验器（5 条约束规则 ACT-01~05）
 │   ├── online_updater.rs         # 在线微调（DataPoint, OnlineUpdater, batch_size=32）
@@ -2042,6 +2082,7 @@ pub mod rknn_types;
 pub mod rl_model;
 pub mod data_fusion;
 pub mod reward_calculator;
+pub mod robustness_manager;     // v2.9 新增
 pub mod action_validator;
 
 // 重新导出公共类型
@@ -2058,6 +2099,7 @@ pub use model_manager::{ModelManager, ModelStatus};
 pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
 pub use rl_model::{ActionOutput, FusedSystemState, RLModel, parse_action_output};
 pub use reward_calculator::RewardCalculator;
+pub use robustness_manager::{RobustnessManager, AnomalyType};  // v2.9 新增
 pub use data_fusion::{DataFusionEngine, DataSourceAdapter, SourceType, FusedSystemState};
 pub use action_validator::{ActionValidator, ViolationRecord};
 pub use online_updater::{DataPoint, OnlineUpdater};
@@ -2496,4 +2538,39 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 8 | 版本号更新 | 文档头部 | v2.7 → v2.8 |
 
 **修订依据：** 专家评审指出原有电压惩罚设计会使 AI 在 Q 饱和时"两难"——调了也没用还被罚，最终退化到零策略。P-Q 协同度奖励将考核从"结果惩罚"转变为"行为奖励"，更符合强化学习正向激励原理，同时新增 R_smooth 防止 AI 设置极大 k_droop 导致系统震荡。
+
+## v2.9 修订记录 (2026-06-14)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | 新增 robustness_manager.rs | ai-engine/src/ | 电压异常应急策略管理器 |
+| 2 | AnomalyType 枚举 | robustness_manager.rs | VoltageSag/VoltageSurge/BatterySocCritical/BatterySocOverfull/CommunicationTimeout |
+| 3 | detect_anomaly 方法 | robustness_manager.rs | 异常类型检测逻辑 |
+| 4 | get_robust_action 方法 | robustness_manager.rs | 根据异常类型返回应急动作 |
+| 5 | calc_pq_coordination 方法 | reward_calculator.rs | P-Q 协同度奖励逻辑 |
+| 6 | calc_smooth_penalty 方法 | reward_calculator.rs | 下垂系数平滑惩罚逻辑 |
+| 7 | calc_pv_reward_v2_8 方法 | reward_calculator.rs | 弃光奖励差异化（高电压时放电惩罚） |
+| 8 | calc_agri_v2_8 方法 | reward_calculator.rs | SCENE-01 v2.8 奖励函数（7 权重） |
+| 9 | AiIntegrator 集成 RobustnessManager | strategy-engine/ai_integration.rs | dispatch_ai_decision 前进行异常检测 |
+| 10 | dispatch_robust_action 方法 | strategy-engine/ai_integration.rs | 分发应急动作 |
+| 11 | SceneWeights 扩展至 7 权重 | ai-engine/src/config.rs | seasonal_load_management: [f64; 7] |
+| 12 | 版本号更新 | 文档头部 | v2.8 → v2.9 |
+
+**修订依据：** v2.9 实现两项核心功能：(1) RobustnessManager 电压异常应急策略，检测 VoltageSag/VoltageSurge/BatterySocCritical/BatterySocOverfull 并返回应急动作；(2) v2.8 奖励函数代码落地，P-Q 协同度奖励 + 下垂平滑惩罚。
+
+## v2.10 修订记录 (2026-06-14)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | FusedSystemState 扩展至 59 维 | data_fusion.rs | D9 新增安全覆盖状态（3 字段） |
+| 2 | FrameType::SafetyOverride = 0x0040 | protocol.rs | 新增安全覆盖帧类型 |
+| 3 | DataUploadPayload 结构体 | tcp_server.rs | 含 q_realtime_margin 字段 |
+| 4 | SafetyOverridePayload 结构体 | tcp_server.rs | 含 trigger_reason, override_p_ref, duration_ms, recovery_condition |
+| 5 | IntercoreConnectionState 扩展 | tcp_server.rs | q_margin, safety_override_* 字段 |
+| 6 | safety_override_penalty() 方法 | reward_calculator.rs | 安全覆盖惩罚（v2.10 新增） |
+| 7 | SCENE-01 扩展 8 权重 | 5.3 奖励函数 | w8=1.0 安全覆盖惩罚 |
+| 8 | IntercoreAdapter 数据源适配器 | data_fusion.rs | 从核间通信状态获取 q_realtime_margin 和安全覆盖状态 |
+| 9 | 版本号更新 | 文档头部 | v2.9 → v2.10 |
+
+**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚。
 

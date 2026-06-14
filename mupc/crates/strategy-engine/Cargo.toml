@@ -17,6 +17,7 @@ async-trait = "0.1"
 mupc-common = { path = "../common" }
 mupc-data-processing = { path = "../data-processing" }
 mupc-ai-engine = { path = "../ai-engine" }
+mupc-intercore = { path = "../intercore" }
 chrono.workspace = true
 # 南向设备（用于 SouthCommandSender 真实设备发送）
 rs485-plugin = { path = "../rs485-plugin" }

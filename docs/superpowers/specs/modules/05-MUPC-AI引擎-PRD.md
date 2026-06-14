@@ -1,10 +1,12 @@
 # MUPC AI 优化引擎 - 模块产品需求文档 (PRD)
 
-[REVIEWED: PASS] — v2.9 Reward 与 Robustness
+[REVIEWED: PASS] — v2.10 安全增强
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
+| v2.10 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
 | v2.9 | 2026-06-14 | 需求分析师 | 评审通过 |
+| v2.8 | 2026-06-13 | 需求分析师 | 评审通过 |
 | v2.6 | 2026-06-10 | 需求分析师 | 评审通过 |
 | v2.8 | 2026-06-13 | 需求分析师 | 评审通过 |
 | v2.7 | 2026-06-13 | 需求分析师 | 评审通过 |
@@ -21,6 +23,10 @@
 >
 > **v2.2 核心变更：** D1-实时数据新增三相电压标幺值（voltage_phase_a/b/c），用于电压感知 P/Q 协同控制（过/低电压检测→有功充放+无功调节）。验证 q_batt_set 符号定义完整性。详见第 5 章。
 >
+> **v2.10 核心变更：** 状态空间新增 q_realtime_margin 数据通道（FusedSystemState → 59维），SafetyOverride 帧类型（0x0040）定义极端工况下实时模块临时覆盖 AI 有功指令的接口规范。详见第 2.3 节（状态空间扩展）和第 3 章（安全触发覆盖机制）。
+
+> **v2.9 核心变更：** 新增 RobustnessManager 电压异常应急策略（电压骤升/骤降、电池SOC异常检测 + 应急动作），SCENE-01 奖励函数新增 safety_override_penalty()。详见第 6.2 节（SCENE-01）。
+
 > **v2.8 核心变更：** SCENE-01 奖励函数重构，移除"电压硬惩罚"，引入"P-Q 协同度奖励"R_PQ_coordination + "下垂系数平滑惩罚"R_smooth。AI 仅控制 P 但感知 Q 裕度做最优决策：Q 有裕度时"偷懒"省电池，Q 饱和时正确出手。弃光场景差异化（高电压时检查 AI 动作方向而非简单置零）。详见第 6.2 节（SCENE-01）。
 
 > **v2.7 核心变更：** 动作空间从单参数（p_batt_set）升级为双参数（P_ref + k_droop）模式，实现下垂控制 P_output = P_ref + k_droop × ΔV。AI 负责稳态全局优化（P_ref），执行器负责毫秒级暂态调节（k_droop × ΔV）。通信中断时执行器保持最后有效参数，继续下垂控制，保障本质安全不停机。详见第 5.3 节（双参数动作空间）和第 5.4 节（下垂控制逻辑）。
@@ -419,10 +425,15 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | dispatch_q_set | Option<f64> | [-1000.0, 1000.0] | kVar | 调度主站下发的无功设定值 | gateway |
 | **D7-季节时段（v2.5新增）** | season_encoding | [f64; 6] | one-hot | - | 季节 one-hot 编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
 | | time_period_encoding | [f64; 2] | one-hot | - | 时段 one-hot 编码：[白天, 夜间] | data-processing |
+| **D9-安全覆盖状态（v2.10新增）** | safety_override_active | bool | {true, false} | - | 安全覆盖激活标志，true=实时模块正在覆盖 AI 有功指令 | intercore |
+| | safety_override_reason | Option\<String\> | - | - | 安全覆盖触发原因（仅 active=true 时有效）| intercore |
+| | safety_override_p_ref | Option\<f64\> | - | kW | 安全覆盖强制放电功率（仅 active=true 时有效）| intercore |
 
-**状态空间总维度（v2.5）：** 19 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 1 个定长数组（8 维）= 29 个字段（RL 字段 26 + 辅助 3）。序列化后输入向量为 **56 维**（48 维基础 + 8 维季节时段）。
+**状态空间总维度（v2.10）：** 27 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 1 个定长数组（8 维）= 32 个字段（RL 字段 29 + 辅助 3）。序列化后输入向量为 **59 维**（56 维基础 + 3 维安全覆盖状态）。
 
-> **v2.5 说明：** D1 新增 `q_realtime_margin`（实时模块剩余无功容量比例），使 AI 引擎能够感知实时模块无功裕度边界；D7 新增 `season_encoding`（6 维）和 `time_period_encoding`（2 维），用于季节性负荷模式识别。输入向量从 48 维扩展至 56 维，RL 模型文件需重新训练或填充默认值向后兼容。
+> **v2.10 说明：** D9 新增安全覆盖状态（3 维：safety_override_active, safety_override_reason, safety_override_p_ref），用于 AI 引擎感知实时控制模块临时覆盖事件。输入向量从 56 维扩展至 59 维，RL 模型文件需重新训练或填充默认值向后兼容。
+
+> **v2.5 说明：** D1 新增 `q_realtime_margin`（实时模块剩余无功容量比例），使 AI 引擎能够感知实时模块无功裕度边界；D7 新增 `season_encoding`（6 维）和 `time_period_encoding`（2 维），用于季节性负荷模式识别。输入向量从 48 维扩展至 56 维。
 
 序列化为推理输入向量时，各维度按定义顺序拼接。
 
@@ -579,16 +590,32 @@ RewardCalculator 根据当前场景标签，选择对应的奖励函数公式计
 > - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
 > - 自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
 
-**v2.8 公式：**
+**v2.10 公式：**
 
 ```
 R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处理）
          - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
          - w3 * P_transformer_overload
-         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增，替代原 w4 电压惩罚）
+         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增）
          - w5 * R_ramp
          - w6 * R_voltage_slope
          - w7 * R_smooth                        // 下垂系数平滑惩罚（v2.8 新增）
+         - R_safety_override                    // 安全覆盖惩罚（v2.10 新增）
+```
+
+**安全覆盖惩罚 R_safety_override（v2.10 新增）：**
+
+当 safety_override_active=true 时，AI 应记录此次事件并学习避免触发：
+
+```
+if safety_override_active:
+    match reason:
+        "voltage_violation" => -50.0   // 电压越限触发
+        "q_exhausted" => -30.0          // 无功耗尽触发
+        "emergency" => -100.0          // 紧急情况（最高惩罚）
+        _ => -20.0
+else:
+    0.0
 ```
 
 **P-Q 协同度奖励 R_PQ_coordination（v2.8 新增）：**
@@ -668,7 +695,10 @@ R_voltage_slope = |V_avg_t - V_avg_{t-1}|
 | w5 | 0.5 | 功率变化率惩罚权重 | [0.0, 2.0] |
 | w6 | 0.5 | 电压变化斜率惩罚权重 | [0.0, 2.0] |
 | w7 | 0.5 | 下垂系数平滑惩罚权重（v2.8 新增） | [0.0, 2.0] |
+| w8 | 1.0 | 安全覆盖惩罚权重（v2.10 新增） | [0.0, 5.0] |
 
+> **v2.10 说明：** 新增安全覆盖惩罚项，AI 被实时控制模块覆盖时获得惩罚，激励 AI 学习避免触发覆盖的策略。
+>
 > **v2.8 说明：** P-Q 协同度奖励替代原电压惩罚，实现"行为奖励"而非"结果惩罚"；弃光场景差异化；新增下垂系数平滑惩罚防止系统震荡。
 
 ### 6.3 SCENE-B1：工商业模式-自主套利
@@ -1114,6 +1144,13 @@ AI引擎恢复后，自动切回AI模式
 | **REWARD-v2.8-03** | Q 饱和 + 高电压时 AI 充电（p_ref > 0）→ R_PQ = +50.0；不充电 → R_PQ = -30.0 | P0 | v2.8 PRD |
 | **REWARD-v2.8-04** | v_avg >= 1.05 时 AI 充电消纳 → R_pv 正常；放电 → R_pv = -20.0 | P0 | v2.8 PRD |
 | **REWARD-v2.8-05** | R_smooth 惩罚项存在（|Δk_droop| + λ·超限惩罚）| P0 | v2.8 PRD |
+| **REWARD-v2.10-01** | safety_override_active=true 时 R_safety_override 根据触发原因惩罚 | P0 | v2.10 PRD |
+| **STATE-v2.10-01** | FusedSystemState 新增 safety_override_active/reason/p_ref 字段 | P0 | v2.10 PRD |
+| **STATE-v2.10-02** | to_input_vector() 返回 59 维向量 | P0 | v2.10 PRD |
+| **STATE-v2.10-03** | q_realtime_margin 数据来源为核间 DataUpload 帧 | P0 | v2.10 PRD |
+| **OVERRIDE-01** | SafetyOverride 帧（0x0040）可正确解析 | P0 | v2.10 PRD |
+| **OVERRIDE-02** | FusedSystemState.safety_override_active 在收到帧后正确设置 | P0 | v2.10 PRD |
+| **OVERRIDE-03** | AI 感知 override_active=true 时获得惩罚 | P0 | v2.10 PRD |
 
 ### 10.6 在线微调验收
 
@@ -1359,3 +1396,36 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 5 | 版本号更新 | 文档头部 | v2.7 → v2.8 |
 
 **修订依据：** 专家评审指出原有电压惩罚设计会使 AI 在 Q 饱和时"两难"——调了也没用还被罚，最终退化到零策略。P-Q 协同度奖励将考核从"结果惩罚"转变为"行为奖励"，更符合强化学习正向激励原理，同时防止 AI 通过设置极大 k_droop 拿高分导致系统震荡。
+
+## v2.9 修订记录
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | RobustnessManager 新增 | 新增 robustness_manager.rs | 电压骤升/骤降、电池SOC异常、通信超时应急策略 |
+| 2 | AnomalyType 枚举 | robustness_manager.rs | VoltageSag, VoltageSurge, BatterySocCritical, BatterySocOverfull, CommunicationTimeout |
+| 3 | calc_pq_coordination 方法 | reward_calculator.rs | P-Q 协同度奖励逻辑实现 |
+| 4 | calc_smooth_penalty 方法 | reward_calculator.rs | 下垂系数平滑惩罚逻辑实现 |
+| 5 | calc_pv_reward_v2_8 方法 | reward_calculator.rs | 弃光奖励差异化（高电压时放电惩罚） |
+| 6 | calc_agri_v2_8 方法 | reward_calculator.rs | SCENE-01 v2.8 奖励函数（7 权重） |
+| 7 | strategy-engine 集成 RobustnessManager | ai_integration.rs | dispatch_ai_decision 前进行异常检测 |
+| 8 | dispatch_robust_action 方法 | ai_integration.rs | 分发应急动作（不经过 RL 模型） |
+| 9 | SceneWeights 扩展至 7 权重 | config.rs | seasonal_load_management: [f64; 7]，新增 w7 |
+| 10 | 版本号更新 | 文档头部 | v2.8 → v2.9 |
+
+**修订依据：** v2.9 实现两项核心功能：(1) RobustnessManager 电压异常应急策略，检测 VoltageSag/VoltageSurge/BatterySocCritical/BatterySocOverfull 并返回应急动作；(2) v2.8 奖励函数代码落地，P-Q 协同度奖励 + 下垂平滑惩罚。
+
+## v2.10 修订记录
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | 状态空间扩展至 59 维 | 5.2 / 3.3 | D9 新增安全覆盖状态（3 维：safety_override_active/reason/p_ref） |
+| 2 | SafetyOverride 帧类型 | protocol.rs | FrameType::SafetyOverride = 0x0040 |
+| 3 | DataUploadPayload 结构体 | tcp_server.rs | 含 q_realtime_margin 字段 |
+| 4 | SafetyOverridePayload 结构体 | tcp_server.rs | 含 trigger_reason, override_p_ref, duration_ms, recovery_condition |
+| 5 | IntercoreConnectionState 扩展 | tcp_server.rs | q_margin, safety_override_* 字段 |
+| 6 | safety_override_penalty() | reward_calculator.rs | 安全覆盖惩罚（v2.10 新增） |
+| 7 | SCENE-01 扩展 8 权重 | 6.2 | w8=1.0 安全覆盖惩罚 |
+| 8 | IntercoreAdapter 数据源 | data_fusion.rs | 从核间通信状态获取 q_realtime_margin 和安全覆盖状态 |
+| 9 | 版本号更新 | 文档头部 | v2.9 → v2.10 |
+
+**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚。
