@@ -380,6 +380,62 @@ pub struct ModeSwitchEvent {
 | 无效模式 ID | 指令值超出 1~5 范围 | 拒绝执行，返回否定确认/400 错误，记录 WARN 日志 |
 | 模式切换过程中断电 | 持久化文件写入中断 | 重启时从持久化文件恢复，文件损坏则回退 MODE-01 |
 
+### 4.9 v2.10 短期实现：场景切换平滑过渡（R3）
+
+#### 4.9.1 需求描述
+
+当前场景切换时奖励函数权重突变，可能导致策略震荡、在线微调梯度爆炸、用户体验不佳（控制指令突变）。
+
+#### 4.9.2 实现方案
+
+```rust
+// SmoothSceneTransition 核心逻辑
+pub struct SmoothSceneTransition {
+    transition_steps: usize,  // 过渡步数，默认 10
+    current_weights: Option<Vec<f32>>,
+    target_weights: Option<Vec<f32>>,
+    step_counter: usize,
+}
+
+impl SmoothSceneTransition {
+    pub fn on_scene_switch(&mut self, old_mode: SceneMode, new_mode: SceneMode) {
+        self.current_weights = Some(SceneWeights::lookup(old_mode).to_vec());
+        self.target_weights = Some(SceneWeights::lookup(new_mode).to_vec());
+        self.step_counter = 0;
+    }
+
+    pub fn get_interpolated_weights(&mut self) -> Vec<f32> {
+        if self.step_counter >= self.transition_steps {
+            return self.target_weights.clone().unwrap_or_default();
+        }
+
+        let alpha = self.step_counter as f32 / self.transition_steps as f32;
+        let interpolated: Vec<f32> = self.current_weights.as_ref()
+            .unwrap()
+            .iter()
+            .zip(self.target_weights.as_ref().unwrap().iter())
+            .map(|(&c, &t)| (1.0 - alpha) * c + alpha * t)
+            .collect();
+
+        self.step_counter += 1;
+        interpolated
+    }
+}
+```
+
+#### 4.9.3 验收标准
+
+| 编号 | 验收条件 | 验证方法 |
+|------|----------|----------|
+| CC1 | 场景切换时触发平滑过渡，过渡步数可配置（默认10步） | 单元测试 |
+| CC2 | 每步权重线性插值，确保最终权重与目标一致 | 数学验证 |
+| CC3 | 过渡期间控制指令无突变（梯度 < 5%） | 集成测试 |
+| CC4 | 过渡完成后自动停止插值，返回目标权重 | 单元测试 |
+
+#### 4.9.4 影响文件
+
+- `mupc/crates/ai-engine/src/mode_selector.rs`
+
 ---
 
 ## 5. 强化学习多目标决策（MADDPG/PPO）
@@ -822,6 +878,54 @@ R_carbon_reduction = 100 * (C_baseline - C_actual) / C_baseline
 | REWARD-E4 | 电网排放因子从配置文件读取，默认 0.581 kg CO2/kWh | 配置验证 |
 | REWARD-ALL | 奖励函数完整计算时间 < 1ms（各场景分别验证）| 性能测试 |
 
+### 6.9 v2.10 短期实现：折扣累积奖励机制（R2）
+
+#### 6.9.1 需求描述
+
+当前奖励函数仅计算即时奖励，缺乏对长期累积效应的建模。可能导致短视行为（如过度充放电）和"月末冲刺"现象。
+
+#### 6.9.2 实现方案
+
+```rust
+// DiscountedRewardCalculator 核心逻辑
+pub struct DiscountedRewardCalculator {
+    gamma: f32,           // 折扣因子，默认 0.99
+    reward_buffer: Vec<f32>,  // 奖励历史缓冲区
+    buffer_size: usize,  // 缓冲区大小，默认 1000
+}
+
+impl DiscountedRewardCalculator {
+    pub fn calculate_discounted_reward(&mut self, current_reward: f32) -> f32 {
+        self.reward_buffer.push(current_reward);
+        if self.reward_buffer.len() > self.buffer_size {
+            self.reward_buffer.remove(0);
+        }
+
+        // 计算折扣累积奖励
+        let discounted: f32 = self.reward_buffer.iter()
+            .rev()
+            .enumerate()
+            .map(|(t, &r)| r * self.gamma.powi(t as i32))
+            .sum();
+
+        discounted
+    }
+}
+```
+
+#### 6.9.3 验收标准
+
+| 编号 | 验收条件 | 验证方法 |
+|------|----------|----------|
+| BC1 | 折扣因子 `gamma` 可配置，范围 [0.9, 0.999] | 配置测试 |
+| BC2 | 缓冲区大小可配置，默认1000 | 配置测试 |
+| BC3 | 长期累积奖励对短期决策有影响（gamma=0.99 时，100步前奖励权重约 0.366） | 数学验证 |
+| BC4 | 与现有奖励函数正交，不影响即时奖励计算 | 回归测试 |
+
+#### 6.9.4 影响文件
+
+- `mupc/crates/ai-engine/src/reward_calculator.rs`
+
 ---
 
 ## 7. RKNN Runtime NPU 推理
@@ -1013,6 +1117,51 @@ OnlineUpdater 模块负责基于新产生的运行数据，在设备运行期间
 | UPDATE-02 | 在线微调延迟 <= 10s（单次微调，batch_size=32）| 性能测试 |
 | UPDATE-03 | 微调期间不影响并发推理请求 | 集成测试（并发场景）|
 | UPDATE-04 | Loss 发散时自动停止微调并回滚 | 集成测试（模拟 loss 发散）|
+
+### 8.5 v2.10 短期实现：影子模型验证+渐进式切换（R1）
+
+#### 8.5.1 需求描述
+
+当前 `online_updater.rs` 仅为占位框架（`"待 Phase 3C.2 实现"`），在线微调缺乏安全性约束。本需求实现安全约束的在线微调框架。
+
+#### 8.5.2 实现方案
+
+```rust
+// SafeOnlineUpdater 核心逻辑
+async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError> {
+    // 1. 影子模型验证
+    self.shadow_model.load_weights(new_weights);
+    let safety_score = self.safety_constraints.validate(&self.shadow_model).await?;
+
+    if safety_score < self.safety_threshold {
+        return Err(UpdateError::SafetyViolation);
+    }
+
+    // 2. 性能验证
+    let current_perf = self.performance_monitor.evaluate(&self.current_model).await?;
+    let shadow_perf = self.performance_monitor.evaluate(&self.shadow_model).await?;
+
+    if shadow_perf < current_perf * 0.95 {
+        return Err(UpdateError::PerformanceDegradation);
+    }
+
+    // 3. 渐进式切换
+    self.gradual_switch(new_weights).await
+}
+```
+
+#### 8.5.3 验收标准
+
+| 编号 | 验收条件 | 验证方法 |
+|------|----------|----------|
+| AC1 | 新权重违反安全约束时，拒绝更新并返回错误 | 单元测试 |
+| AC2 | 影子模型性能下降超过5%时，拒绝更新 | 单元测试 |
+| AC3 | 渐进式切换权重，每步间隔可配置（默认1秒） | 集成测试 |
+| AC4 | 切换过程记录日志，包含每步权重混合比例 | 日志审查 |
+
+#### 8.5.4 影响文件
+
+- `mupc/crates/ai-engine/src/online_updater.rs`
 
 ---
 
@@ -1427,5 +1576,8 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 7 | SCENE-01 扩展 8 权重 | 6.2 | w8=1.0 安全覆盖惩罚 |
 | 8 | IntercoreAdapter 数据源 | data_fusion.rs | 从核间通信状态获取 q_realtime_margin 和安全覆盖状态 |
 | 9 | 版本号更新 | 文档头部 | v2.9 → v2.10 |
+| 10 | **v2.10 短期实现：R1 影子模型验证+渐进式切换** | 8.5 新增 | SafeOnlineUpdater、ShadowModel、GradualSwitcher；安全约束验证 + 性能验证 + 渐进式切换 |
+| 11 | **v2.10 短期实现：R2 折扣累积奖励机制** | 6.9 新增 | DiscountedAccumulator；gamma 折扣因子 [0.9, 0.999]，缓冲区 1000 |
+| 12 | **v2.10 短期实现：R3 场景切换平滑过渡** | 4.9 新增 | SmoothSceneTransition；10 步线性插值过渡 |
 
-**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚。
+**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚；(4) v2.10 短期实现三项功能：影子模型验证+渐进式切换、折扣累积奖励机制、场景切换平滑过渡。

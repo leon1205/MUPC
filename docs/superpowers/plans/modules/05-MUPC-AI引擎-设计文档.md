@@ -1125,6 +1125,97 @@ pub struct ViolationRecord {
 }
 ```
 
+### 4.9 v2.10 短期实现：场景切换平滑过渡（R3）
+
+#### 4.9.1 平滑过渡配置
+
+```rust
+// 平滑过渡配置
+#[derive(Debug, Clone)]
+pub struct TransitionConfig {
+    pub transition_steps: usize, // 默认 10
+}
+
+// 平滑过渡状态
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransitionState {
+    Idle,
+    InProgress,
+    Completed,
+}
+```
+
+#### 4.9.2 SmoothSceneTransition 结构体
+
+```rust
+/// 平滑过渡器（嵌入 ModeSelector）
+pub struct SmoothSceneTransition {
+    config: TransitionConfig,
+    current_weights: Option<Vec<f32>>,
+    target_weights: Option<Vec<f32>>,
+    step_counter: usize,
+    state: TransitionState,
+    /// 事件发布器（通知 ModelManager 权重更新）
+    weight_tx: broadcast::Sender<WeightUpdateEvent>,
+}
+
+/// 权重更新事件
+#[derive(Debug, Clone)]
+pub struct WeightUpdateEvent {
+    pub blended_weights: Vec<f32>,
+    pub step: usize,
+    pub total_steps: usize,
+}
+```
+
+#### 4.9.3 线性插值数学定义
+
+```
+alpha = step_counter / transition_steps
+weight_i = (1 - alpha) * current_weight_i + alpha * target_weight_i
+```
+
+- `step = 0` 时：`weight = current_weights`
+- `step = steps` 时：`weight = target_weights`
+- 线性插值确保过渡平滑，避免权重突变
+
+#### 4.9.4 与 ModeSelector 集成
+
+```rust
+pub async fn switch(&self, new_mode: RunningMode, source: SwitchSource) -> Result<RunningMode, AiEngineError> {
+    let mut current = self.current_mode.lock().await;
+    let previous = *current;
+
+    if previous == new_mode {
+        return Ok(previous);
+    }
+
+    // 触发平滑过渡
+    if let Some(ref mut transition) = self.smooth_transition {
+        transition.on_scene_switch(previous, new_mode);
+    }
+
+    // ... 后续现有逻辑（模型热切换、持久化、事件发布）不变 ...
+}
+```
+
+#### 4.9.5 错误处理
+
+| 错误类型 | 触发条件 | 处理策略 |
+|----------|----------|----------|
+| `WeightsNotAvailable` | 场景切换前调用 current_weights | 返回默认权重或错误 |
+| `TransitionNotStarted` | 切换已完成后继续调用 | 直接返回目标权重 |
+
+#### 4.9.6 测试策略
+
+| 测试名称 | 验收条件 | 测试方法 |
+|----------|----------|----------|
+| `test_transition_steps_configurable` | 步数可配置 | 构造 5 步，验证 step 5 后 state = Completed |
+| `test_linear_interpolation_first_last` | 首尾步正确 | step 0 返回 current_weights，step 10 返回 target_weights |
+| `test_interpolation_middle` | 中间步线性 | step 5 时每权重 = (current + target) / 2 |
+| `test_transition_auto_stop` | 完成后自动停止插值 | step > steps 时返回目标权重 |
+| `test_no_control_jump` | 梯度 < 5% | 验证相邻步权重变化 < 5% |
+
 ---
 
 ## 5. 奖励函数计算模块
@@ -1596,6 +1687,85 @@ impl SceneWeights {
 }
 ```
 
+### 5.9 v2.10 短期实现：折扣累积奖励机制（R2）
+
+#### 5.9.1 折扣累积奖励配置
+
+```rust
+// 折扣累积奖励配置
+#[derive(Debug, Clone)]
+pub struct DiscountedConfig {
+    pub gamma: f32,        // 折扣因子，默认 0.99，范围 [0.9, 0.999]
+    pub buffer_size: usize, // 缓冲区大小，默认 1000
+}
+```
+
+#### 5.9.2 DiscountedAccumulator 结构体
+
+```rust
+/// 折扣累积奖励计算器（嵌入 RewardCalculator）
+pub struct DiscountedAccumulator {
+    gamma: f32,
+    buffer: Vec<f32>,
+    buffer_size: usize,
+    cumulative: RwLock<f32>,
+}
+
+impl DiscountedAccumulator {
+    /// 创建折扣累积器
+    /// - gamma: 折扣因子，范围 [0.9, 0.999]
+    /// - 返回 ConfigError 若 gamma 超出范围或 buffer_size 为 0
+    pub fn new(gamma: f32, buffer_size: usize) -> Result<Self, ConfigError>;
+    pub fn push(&mut self, reward: f32);
+    pub fn discounted_sum(&self) -> f32;
+    pub fn reset(&mut self);
+}
+```
+
+#### 5.9.3 折扣因子数学定义
+
+折扣累积奖励（Discounted Cumulative Reward）：
+
+```
+D_t = Σ_{i=0}^{T} γ^i * r_{T-i}
+    = r_t + γ * r_{t-1} + γ² * r_{t-2} + ... + γ^T * r_0
+```
+
+- `γ = 0.99`：每步向后追溯，100 步前奖励权重约为 `0.99^100 ≈ 0.366`
+- `γ = 0.9`：短期记忆，100 步前奖励权重约为 `0.9^100 ≈ 0.000027`
+
+#### 5.9.4 与现有奖励函数正交性
+
+即时奖励计算不受影响：
+
+```rust
+pub fn calculate(&self, mode: RunningMode, action: &ActionOutput, state: &FusedSystemState) -> f64 {
+    let immediate = match mode { /* ... */ }; // 现有逻辑不变
+    immediate // 返回即时奖励
+}
+
+pub fn calculate_discounted(&self, current_reward: f32) -> f32 {
+    self.discounted_accumulator.discounted_sum()
+}
+```
+
+#### 5.9.5 错误处理
+
+| 错误类型 | 触发条件 | 处理策略 |
+|----------|----------|----------|
+| `GammaOutOfRange` | gamma 不在 [0.9, 0.999] | 构造函数返回错误 |
+| `BufferOverflow` | buffer_size = 0 | 构造函数返回错误 |
+
+#### 5.9.6 测试策略
+
+| 测试名称 | 验收条件 | 测试方法 |
+|----------|----------|----------|
+| `test_gamma_range_valid` | gamma ∈ [0.9, 0.999] 正常工作 | 边界测试 gamma = 0.9, 0.999 |
+| `test_gamma_out_of_range_reject` | gamma ∉ [0.9, 0.999] 拒绝 | gamma = 0.8, 1.0 应报错 |
+| `test_discounted_buffer_size` | 缓冲区大小固定 1000 | 填充 1500 个奖励，验证移除最旧 |
+| `test_discounted_100_steps` | gamma=0.99 时 100 步前权重约 0.366 | 数学验证：0.99^100 ≈ 0.366 |
+| `test_immediate_reward_unchanged` | 即时奖励计算结果不变 | 对比 new_with_discount 前后的即时奖励 |
+
 ---
 
 ## 6. RKNN Runtime 设计
@@ -1929,6 +2099,141 @@ impl ModelManager {
     }
 }
 ```
+
+### 7a. v2.10 短期实现：影子模型验证+渐进式切换（R1）
+
+#### 7a.1 组件关系
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        ModelManager                            │
+│  (统一调度入口，管理 LSTM/RL/奖励计算/动作校验)                   │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+        ┌──────────────┼──────────────┐
+        ▼              ▼              ▼
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│ SafeOnlineUpdater │ DiscountedRewardCalculator │ SmoothSceneTransition │
+│    (R1 新增)    │    (R2 新增)    │    (R3 新增)    │
+└───────┬────────┘ └───────┬────────┘ └───────┬────────┘
+        │                  │                  │
+        ▼                  ▼                  ▼
+┌───────────────┐ ┌───────────────┐ ┌───────────────┐
+│ ShadowModel   │ │  RewardCalculator │ │  ModeSelector   │
+│ (克隆现有模型) │ │   (扩展)        │ │  (扩展)        │
+└───────────────┘ └───────────────┘ └───────────────┘
+```
+
+#### 7a.2 接口定义
+
+```rust
+// 核心错误类型
+#[derive(Debug)]
+pub enum UpdateError {
+    SafetyViolation { score: f32, threshold: f32 },
+    PerformanceDegradation { current: f32, shadow: f32 },
+    SwitchInProgress,
+    ModelNotReady,
+}
+
+// 渐进式切换配置
+#[derive(Debug, Clone)]
+pub struct GradualSwitchConfig {
+    pub enabled: bool,
+    pub steps: usize,           // 默认 10
+    pub step_interval_secs: f64, // 默认 1.0
+}
+
+// 安全约束检查器接口（由 RobustnessManager 实现）
+pub trait SafetyConstraintChecker: Send + Sync {
+    fn check(&self, model: &ShadowModel) -> f32; // 返回安全评分 [0, 100]
+}
+
+// 性能监视器接口
+pub trait PerformanceMonitor: Send + Sync {
+    fn evaluate(&self, model: &ShadowModel) -> f32; // 返回性能评分 [0, 100]
+}
+
+// SafeOnlineUpdater 公开 API
+impl SafeOnlineUpdater {
+    pub async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError>;
+    pub async fn gradual_switch(&self, target_weights: &[f32]) -> Result<(), UpdateError>;
+    pub fn is_switching(&self) -> bool;
+    pub fn current_blend_ratio(&self) -> f32; // 当前混合比例 [0.0, 1.0]
+}
+```
+
+#### 7a.3 核心结构
+
+```rust
+/// 影子模型（克隆自 ModelManager 的 RL 模型）
+pub struct ShadowModel {
+    weights: RwLock<Vec<f32>>,
+    meta: ModelMeta,
+}
+
+/// 渐进式切换器
+pub struct GradualSwitcher {
+    config: GradualSwitchConfig,
+    current_weights: Vec<f32>,
+    target_weights: Vec<f32>,
+    step_counter: usize,
+    state: RwLock<SwitchState>,
+}
+
+/// SafeOnlineUpdater（R1 核心，替换现有占位实现）
+pub struct SafeOnlineUpdater {
+    config: OnlineUpdateConfig,
+    shadow_model: ShadowModel,
+    safety_checker: Arc<dyn SafetyConstraintChecker>,
+    performance_monitor: Arc<dyn PerformanceMonitor>,
+    gradual_switcher: GradualSwitcher,
+    safety_threshold: f32,
+    performance_threshold: f32,
+}
+```
+
+#### 7a.4 数据流
+
+```
+safe_update(new_weights)
+  │
+  ├─→ load_weights(new_weights) → shadow_model
+  │
+  ├─→ safety_checker.check(shadow_model) → score
+  │     └→ score < threshold? → Err(SafetyViolation)
+  │
+  ├─→ performance_monitor.evaluate(current_model) → current_score
+  ├─→ performance_monitor.evaluate(shadow_model) → shadow_score
+  │     └→ shadow_score < current_score * 0.95? → Err(PerformanceDegradation)
+  │
+  └─→ gradual_switch(target_weights)
+        │
+        ├─ 启动异步任务（tokio::spawn）
+        ├─ 每步间隔 step_interval_secs
+        │     blend_ratio += 1.0 / steps
+        │     发布混合权重事件
+        └─ 完成后通知 ModelManager
+```
+
+#### 7a.5 错误处理
+
+| 错误类型 | 触发条件 | 处理策略 | 日志级别 |
+|----------|----------|----------|----------|
+| `SafetyViolation` | 影子模型安全评分 < 阈值 | 拒绝更新，保留当前权重 | WARN |
+| `PerformanceDegradation` | 影子模型性能 < 当前 * 0.95 | 拒绝更新，保留当前权重 | WARN |
+| `SwitchInProgress` | 切换进行中再次调用 safe_update | 拒绝，返回 Ok(false) | INFO |
+| `ModelNotReady` | 影子模型未初始化 | 返回错误 | ERROR |
+
+#### 7a.6 测试策略
+
+| 测试名称 | 验收条件 | 测试方法 |
+|----------|----------|----------|
+| `test_safety_violation_reject` | 安全评分 < 阈值时拒绝更新 | Mock SafetyConstraintChecker 返回 70，阈值 80 |
+| `test_performance_degradation_reject` | 影子性能 < 当前 95% 时拒绝 | Mock PerformanceMonitor 返回 90 vs 100 |
+| `test_gradual_switch_blend_ratio` | 10 步后 blend_ratio = 1.0 | 验证 step 10 时返回全目标权重 |
+| `test_switch_in_progress_reject` | 切换中调用 safe_update 返回 Ok(false) | 触发切换后立即再调用 |
+| `test_blend_weights_interpolation` | 每步线性插值正确 | 对比中间步的加权平均值 |
 
 ---
 
@@ -2571,6 +2876,9 @@ AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压
 | 7 | SCENE-01 扩展 8 权重 | 5.3 奖励函数 | w8=1.0 安全覆盖惩罚 |
 | 8 | IntercoreAdapter 数据源适配器 | data_fusion.rs | 从核间通信状态获取 q_realtime_margin 和安全覆盖状态 |
 | 9 | 版本号更新 | 文档头部 | v2.9 → v2.10 |
+| 10 | **v2.10 短期实现：R1 影子模型验证+渐进式切换** | 7a 节新增 | SafeOnlineUpdater、ShadowModel、GradualSwitcher；安全约束验证 + 性能验证 + 渐进式切换 |
+| 11 | **v2.10 短期实现：R2 折扣累积奖励机制** | 5.9 节新增 | DiscountedAccumulator；gamma 折扣因子 [0.9, 0.999]，缓冲区 1000 |
+| 12 | **v2.10 短期实现：R3 场景切换平滑过渡** | 4.9 节新增 | SmoothSceneTransition；10 步线性插值过渡 |
 
-**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚。
+**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚；(4) v2.10 短期实现三项功能：影子模型验证+渐进式切换、折扣累积奖励机制、场景切换平滑过渡。
 
