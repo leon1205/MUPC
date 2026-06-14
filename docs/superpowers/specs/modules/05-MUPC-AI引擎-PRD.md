@@ -599,10 +599,15 @@ P_output = P_ref + k_droop × ΔV
 
 | Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
 |-------|--------|--------|----------|------|
-| `ai/action_output` | ModelManager | strategy-engine, intercore | `ActionOutput` JSON（含 p_ref, k_droop）| 1Hz |
+| `ai/action_output` | ModelManager | strategy-engine | `ActionOutput` JSON（含 p_ref, k_droop, load_shedding, pv_limit）| 1Hz |
 | `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | `RewardValue` JSON | 1Hz |
 | `ai/model_status` | ModelManager | Web UI, 告警模块 | `ModelStatus` JSON | 1Hz |
 | `ai/droop_range` | intercore | ActionValidator | `{k_min: f64, k_max: f64}` JSON | 按需更新 |
+
+> **指令分发说明（v2.7）：** `ActionOutput` 包含 4 个控制指令，分发路径如下：
+> - `p_ref` + `k_droop` → 通过 intercore（TCP/RJ45）发送到**实时控制模块**，用于下垂控制公式 `P_output = P_ref + k_droop × ΔV`
+> - `pv_limit` → 通过 SouthCommandDispatcher 发送到**光伏逆变器**（南向 RS485/HPLC）
+> - `load_shedding` → 通过 SouthCommandDispatcher 发送到**负荷控制装置**（南向 RS485/HPLC）
 
 ### 5.7 状态/动作空间验收标准
 

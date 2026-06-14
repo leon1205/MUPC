@@ -110,7 +110,7 @@ cargo build --release        # 发布构建
 调度主站 ←→ gateway (IEC 104) ←→ data-processing ←→ strategy-engine
                                               ↓              ↑
                               intercore (TCP/RJ45) ←→ 实时控制模块
-                                              ↑
+                                              ↓
 南向设备 ←→ rs485-plugin/hplc-plugin ←─── ProtocolHandler 注入
 ```
 
@@ -119,9 +119,28 @@ cargo build --release        # 发布构建
 | 方向 | 组件 | 说明 |
 |------|------|------|
 | 北向 ↑ | gateway → data-processing → strategy-engine | 调度数据处理与上送 |
-| 南向 ↓ | strategy-engine → rs485-plugin/hplc-plugin | 设备控制指令下发 |
-| 核间 ↔ | intercore (TCP/RJ45) | 与实时控制模块数据交换 |
+| 南向 ↓ | strategy-engine → rs485-plugin/hplc-plugin | 设备控制指令下发（pv_limit、load_shedding） |
+| 核间 ↔ | intercore (TCP/RJ45) | 与实时控制模块数据交换（p_ref、k_droop） |
 | AI → | strategy-engine ← ai-engine | LSTM 预测 + RL 决策 |
+
+### 核间通信指令（实时控制模块）
+
+| 指令 | 方向 | 说明 |
+|------|------|------|
+| `p_ref` | AI → 实时 | 有功基准点 (kW)，用于下垂控制公式 |
+| `k_droop` | AI → 实时 | 下垂系数 (kW/V)，用于下垂控制公式 |
+| `ai_ready` | AI → 实时 | AI 引擎就绪状态 |
+| `strategy_mode` | AI → 实时 | 当前策略模式 |
+| `q_realtime_margin` | 实时 → AI | 实时模块无功裕度 [0,1]（DataUpload 帧） |
+| `voltage_phase_*` | 实时 → AI | 三相电压标幺值（DataUpload 帧） |
+| `SafetyOverride` | 实时 → AI | 安全覆盖触发事件（v2.10） |
+
+### 南向设备指令
+
+| 指令 | 目标设备 | 说明 |
+|------|----------|------|
+| `pv_limit` | 光伏逆变器 | 光伏限功率比例 [0.0, 1.0] |
+| `load_shedding` | 负荷控制装置 | 可中断负荷切除量 (kW) |
 
 ---
 
