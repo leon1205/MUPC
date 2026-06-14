@@ -163,6 +163,13 @@ pub struct RewardCalculator {
     base_w6_voltage_slope: f64,
     /// 电压斜率动态权重系数 k
     voltage_slope_k: f64,
+    // v2.12 R-06 新增：冲击负荷响应奖励参数
+    /// 冲击负荷检测阈值（kW），当 P90 - P50 > threshold 时触发
+    shock_threshold_kw: f64,
+    /// 冲击负荷响应奖励权重
+    shock_response_weight: f64,
+    /// 响应时间惩罚系数 λ
+    response_time_penalty: f64,
 }
 
 impl RewardCalculator {
@@ -189,6 +196,10 @@ impl RewardCalculator {
             // v2.12 R-05: 电压斜率动态权重参数默认值
             base_w6_voltage_slope: 0.5,
             voltage_slope_k: 2.0,
+            // v2.12 R-06: 冲击负荷响应奖励参数默认值
+            shock_threshold_kw: 10.0,
+            shock_response_weight: 20.0,
+            response_time_penalty: 5.0,
         }
     }
 
@@ -225,6 +236,10 @@ impl RewardCalculator {
             // v2.12 R-05: 电压斜率动态权重参数默认值
             base_w6_voltage_slope: 0.5,
             voltage_slope_k: 2.0,
+            // v2.12 R-06: 冲击负荷响应奖励参数默认值
+            shock_threshold_kw: 10.0,
+            shock_response_weight: 20.0,
+            response_time_penalty: 5.0,
         })
     }
 
@@ -275,6 +290,10 @@ impl RewardCalculator {
             // v2.12 R-05: 电压斜率动态权重参数默认值
             base_w6_voltage_slope: 0.5,
             voltage_slope_k: 2.0,
+            // v2.12 R-06: 冲击负荷响应奖励参数默认值
+            shock_threshold_kw: 10.0,
+            shock_response_weight: 20.0,
+            response_time_penalty: 5.0,
         }
     }
 
@@ -460,6 +479,26 @@ impl RewardCalculator {
             - w[7] * r_safety_override_norm
             + r_shaping
             + r_soc_balance
+            + self.calc_shock_response_reward(state, action.load_shedding)
+    }
+
+    /// v2.12 R-06: 计算冲击负荷响应奖励（辅助方法）
+    ///
+    /// 从 state 中提取 P90 和 P50，并调用 shock_response_reward
+    fn calc_shock_response_reward(&self, state: &FusedSystemState, load_shedding: f64) -> f64 {
+        // P50 来自 base_load
+        let p50 = state.base_load;
+        // P90 来自 load_forecast_quantiles 的倒数第二个值（约 90% 分位数）
+        // 假设 quantiles 是 15 维，P90 在索引 13（0-based）
+        let p90 = state
+            .load_forecast_quantiles
+            .get(13)
+            .copied()
+            .unwrap_or(p50);
+        // 响应时间暂设为 0（实际应用中需从状态跟踪）
+        let response_time = 0.0;
+
+        self.shock_response_reward(load_shedding, response_time, p90, p50)
     }
 
     /// v2.12 R-02: 变压器过载提前预警（负载率 85% 开始）
@@ -523,6 +562,31 @@ impl RewardCalculator {
     /// w6(v) = base_w6 × (1.0 + k × |ΔV|)
     fn dynamic_voltage_slope_weight(&self, delta_v: f64) -> f64 {
         self.base_w6_voltage_slope * (1.0 + self.voltage_slope_k * delta_v.abs())
+    }
+
+    /// v2.12 R-06: 冲击负荷响应奖励
+    ///
+    /// R_shock = w_shock × load_shedding / max_load_shedding - λ × response_time / max_response_time
+    /// 条件：当 P90 - P50 > threshold（冲击负荷检测）
+    fn shock_response_reward(
+        &self,
+        load_shedding: f64,
+        response_time: f64,
+        p90: f64,
+        p50: f64,
+    ) -> f64 {
+        let spread = p90 - p50;
+
+        if spread <= self.shock_threshold_kw {
+            return 0.0;
+        }
+
+        let w_shock = self.shock_response_weight;
+        let lambda = self.response_time_penalty;
+        let max_load = 60.0;
+        let max_response = 60.0;
+
+        w_shock * (load_shedding / max_load) - lambda * (response_time / max_response)
     }
 
     /// v2.8 弃光奖励（含高电压差异化）
@@ -879,6 +943,42 @@ impl RewardCalculator {
             - w6_dynamic * r_voltage_slope
             - w[6] * r_smooth
             - w[7] * r_safety_override
+            + Self::calc_shock_response_reward_static(state, action.load_shedding)
+    }
+
+    /// v2.12 R-06: 冲击负荷响应奖励（静态版本）
+    fn shock_response_reward_static(
+        load_shedding: f64,
+        response_time: f64,
+        p90: f64,
+        p50: f64,
+    ) -> f64 {
+        let threshold = 10.0; // 默认值
+        let spread = p90 - p50;
+
+        if spread <= threshold {
+            return 0.0;
+        }
+
+        let w_shock = 20.0; // 默认值
+        let lambda = 5.0; // 默认值
+        let max_load = 60.0;
+        let max_response = 60.0;
+
+        w_shock * (load_shedding / max_load) - lambda * (response_time / max_response)
+    }
+
+    /// v2.12 R-06: 计算冲击负荷响应奖励（静态版本辅助方法）
+    fn calc_shock_response_reward_static(state: &FusedSystemState, load_shedding: f64) -> f64 {
+        let p50 = state.base_load;
+        let p90 = state
+            .load_forecast_quantiles
+            .get(13)
+            .copied()
+            .unwrap_or(p50);
+        let response_time = 0.0;
+
+        Self::shock_response_reward_static(load_shedding, response_time, p90, p50)
     }
 
     /// v2.12 R-04: 变压器过载分段惩罚（静态版本）
@@ -1718,5 +1818,52 @@ mod tests {
         let instance_result = calc.dynamic_voltage_slope_weight(delta_v);
         let static_result = RewardCalculator::dynamic_voltage_slope_weight_static(delta_v);
         assert!((instance_result - static_result).abs() < 1e-6);
+    }
+
+    // ===== v2.12 R-06 冲击负荷响应奖励测试 =====
+
+    #[test]
+    fn test_v2_12_shock_response_reward_no_shock() {
+        // P90 - P50 <= threshold 时，返回 0.0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.shock_response_reward(10.0, 30.0, 50.0, 45.0); // spread = 5 < 10
+        assert!((r - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_shock_response_reward_with_shock() {
+        // P90 - P50 > threshold 时，计算奖励
+        let calc = RewardCalculator::new(SceneWeights::default());
+        // spread = 20 > 10 (threshold)
+        // w_shock = 20, load_shedding = 30, max_load = 60
+        // lambda = 5, response_time = 30, max_response = 60
+        // R = 20 * (30/60) - 5 * (30/60) = 20 * 0.5 - 5 * 0.5 = 10 - 2.5 = 7.5
+        let r = calc.shock_response_reward(30.0, 30.0, 70.0, 50.0);
+        assert!((r - 7.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_shock_response_reward_zero_load_shedding() {
+        // load_shedding = 0 时，只有响应时间惩罚
+        let calc = RewardCalculator::new(SceneWeights::default());
+        // R = 20 * 0 - 5 * (30/60) = -2.5
+        let r = calc.shock_response_reward(0.0, 30.0, 70.0, 50.0);
+        assert!((r - (-2.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_shock_response_reward_static() {
+        // 验证静态版本行为
+        let r_instance = RewardCalculator::shock_response_reward_static(30.0, 30.0, 70.0, 50.0);
+        let r_static = RewardCalculator::shock_response_reward_static(30.0, 30.0, 70.0, 50.0);
+        assert!((r_instance - r_static).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_shock_response_reward_boundary() {
+        // P90 - P50 == threshold 时，刚好不触发
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let r = calc.shock_response_reward(30.0, 30.0, 60.0, 50.0); // spread = 10 == threshold
+        assert!((r - 0.0).abs() < 1e-6);
     }
 }
