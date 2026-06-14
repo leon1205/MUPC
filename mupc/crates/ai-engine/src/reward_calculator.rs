@@ -158,6 +158,11 @@ pub struct RewardCalculator {
     k_droop_max: f64,
     // v2.10 R2 新增：折扣累积奖励器
     discounted_accumulator: RwLock<DiscountedAccumulator>,
+    // v2.12 R-05 新增：电压斜率动态权重参数
+    /// 电压斜率惩罚基础权重
+    base_w6_voltage_slope: f64,
+    /// 电压斜率动态权重系数 k
+    voltage_slope_k: f64,
 }
 
 impl RewardCalculator {
@@ -181,6 +186,9 @@ impl RewardCalculator {
             smooth_lambda: 10.0,
             k_droop_max: 30.0,
             discounted_accumulator: RwLock::new(DiscountedAccumulator::new(0.99, 1000).unwrap()),
+            // v2.12 R-05: 电压斜率动态权重参数默认值
+            base_w6_voltage_slope: 0.5,
+            voltage_slope_k: 2.0,
         }
     }
 
@@ -214,6 +222,9 @@ impl RewardCalculator {
             smooth_lambda: 10.0,
             k_droop_max: 30.0,
             discounted_accumulator,
+            // v2.12 R-05: 电压斜率动态权重参数默认值
+            base_w6_voltage_slope: 0.5,
+            voltage_slope_k: 2.0,
         })
     }
 
@@ -261,6 +272,9 @@ impl RewardCalculator {
             smooth_lambda: 10.0,
             k_droop_max: 30.0,
             discounted_accumulator: RwLock::new(DiscountedAccumulator::new(0.99, 1000).unwrap()),
+            // v2.12 R-05: 电压斜率动态权重参数默认值
+            base_w6_voltage_slope: 0.5,
+            voltage_slope_k: 2.0,
         }
     }
 
@@ -421,6 +435,9 @@ impl RewardCalculator {
         // 6. 电压斜率标准化（假设最大 r_voltage_slope ≈ 0.1）
         let r_voltage_slope_norm = (r_voltage_slope * 10.0).min(1.0);
 
+        // 6.5. v2.12 R-05: 电压斜率惩罚动态权重
+        let w6_dynamic = self.dynamic_voltage_slope_weight(r_voltage_slope);
+
         // 7. 下垂系数平滑标准化 [-130, 0] → [-1, 0]
         // r_smooth 范围约 [-130, 0]，除以 130 映射到 [-1, 0]
         let r_smooth_norm = (r_smooth / 130.0).max(-1.0).min(0.0);
@@ -438,7 +455,7 @@ impl RewardCalculator {
 
         w[0] * r_pv_norm - w[1] * p_batt_deg_norm - w[2] * p_trafo_norm + w[3] * r_pq_norm
             - w[4] * r_ramp_norm
-            - w[5] * r_voltage_slope_norm
+            - w6_dynamic * r_voltage_slope_norm
             - w[6] * r_smooth_norm
             - w[7] * r_safety_override_norm
             + r_shaping
@@ -499,6 +516,13 @@ impl RewardCalculator {
             "emergency" => -100.0,
             _ => -20.0,
         }
+    }
+
+    /// v2.12 R-05: 电压斜率惩罚动态权重
+    ///
+    /// w6(v) = base_w6 × (1.0 + k × |ΔV|)
+    fn dynamic_voltage_slope_weight(&self, delta_v: f64) -> f64 {
+        self.base_w6_voltage_slope * (1.0 + self.voltage_slope_k * delta_v.abs())
     }
 
     /// v2.8 弃光奖励（含高电压差异化）
@@ -838,6 +862,9 @@ impl RewardCalculator {
         // 6. 电压变化斜率惩罚（简化，使用默认值）
         let r_voltage_slope = 0.0;
 
+        // 6.5. v2.12 R-05: 电压斜率惩罚动态权重（静态版本，使用默认值）
+        let w6_dynamic = Self::dynamic_voltage_slope_weight_static(r_voltage_slope);
+
         // 7. 下垂系数平滑惩罚（简化）
         let k_droop_max = 30.0;
         let smooth_lambda = 10.0;
@@ -849,7 +876,7 @@ impl RewardCalculator {
 
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo_norm + w[3] * r_pq
             - w[4] * r_ramp
-            - w[5] * r_voltage_slope
+            - w6_dynamic * r_voltage_slope
             - w[6] * r_smooth
             - w[7] * r_safety_override
     }
@@ -868,6 +895,16 @@ impl RewardCalculator {
         } else {
             100.0 // 硬惩罚
         }
+    }
+
+    /// v2.12 R-05: 电压斜率惩罚动态权重（静态版本）
+    ///
+    /// w6(v) = base_w6 × (1.0 + k × |ΔV|)
+    /// 默认参数：base_w6 = 0.5, k = 2.0
+    fn dynamic_voltage_slope_weight_static(delta_v: f64) -> f64 {
+        let base_w6 = 0.5;
+        let k = 2.0;
+        base_w6 * (1.0 + k * delta_v.abs())
     }
 
     /// v2.11: 弃光奖励（静态版本）
@@ -1640,6 +1677,46 @@ mod tests {
         let calc = RewardCalculator::new(SceneWeights::default());
         let instance_result = calc.overload_penalty_piecewise(load);
         let static_result = RewardCalculator::overload_penalty_piecewise_static(load);
+        assert!((instance_result - static_result).abs() < 1e-6);
+    }
+
+    // ===== v2.12 R-05 电压斜率惩罚动态权重测试 =====
+
+    #[test]
+    fn test_v2_12_dynamic_voltage_slope_weight_zero_delta() {
+        // ΔV = 0 时，w6 = base_w6 = 0.5
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.dynamic_voltage_slope_weight(0.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_dynamic_voltage_slope_weight_positive_delta() {
+        // ΔV = 0.1 时，w6 = 0.5 × (1.0 + 2.0 × 0.1) = 0.5 × 1.2 = 0.6
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.dynamic_voltage_slope_weight(0.1) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_dynamic_voltage_slope_weight_negative_delta() {
+        // ΔV = -0.1 时（取绝对值），w6 = 0.5 × (1.0 + 2.0 × 0.1) = 0.6
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.dynamic_voltage_slope_weight(-0.1) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_dynamic_voltage_slope_weight_large_delta() {
+        // ΔV = 0.5 时，w6 = 0.5 × (1.0 + 2.0 × 0.5) = 0.5 × 2.0 = 1.0
+        let calc = RewardCalculator::new(SceneWeights::default());
+        assert!((calc.dynamic_voltage_slope_weight(0.5) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_12_dynamic_voltage_slope_weight_static() {
+        // 验证静态版本与实例方法行为一致
+        let delta_v = 0.1;
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let instance_result = calc.dynamic_voltage_slope_weight(delta_v);
+        let static_result = RewardCalculator::dynamic_voltage_slope_weight_static(delta_v);
         assert!((instance_result - static_result).abs() < 1e-6);
     }
 }
