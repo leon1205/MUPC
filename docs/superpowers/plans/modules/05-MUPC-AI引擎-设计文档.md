@@ -2,7 +2,7 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.11 中期实现
+[DESIGN_APPROVED] — v2.13 奖励函数精细化
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
@@ -15,7 +15,7 @@
 | v2.7 | 2026-06-13 | 架构师 | 历史版本 |
 | v2.6 | 2026-06-10 | 架构师 | 历史版本 |
 
-**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.10 (`[REVIEWED: PASS]`)
+**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.13 (`[REVIEWED: PASS]`)
 
 ---
 
