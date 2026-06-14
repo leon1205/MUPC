@@ -5,7 +5,7 @@
 //!
 //! v2.3: add_sample 添加 running_mode 参数，支持按场景隔离数据。
 
-use crate::config::OnlineUpdateConfig;
+use crate::config::{GradualSwitchConfig, OnlineUpdateConfig};
 use crate::error::AiEngineError;
 use crate::mode_selector::RunningMode;
 
@@ -259,27 +259,6 @@ impl std::fmt::Display for UpdateError {
 
 impl std::error::Error for UpdateError {}
 
-/// 渐进式切换配置
-#[derive(Debug, Clone)]
-pub struct GradualSwitchConfig {
-    /// 是否启用
-    pub enabled: bool,
-    /// 切换步数
-    pub steps: usize,
-    /// 每步间隔（秒）
-    pub step_interval_secs: f64,
-}
-
-impl Default for GradualSwitchConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            steps: 10,
-            step_interval_secs: 1.0,
-        }
-    }
-}
-
 /// 切换状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchState {
@@ -320,15 +299,18 @@ impl GradualSwitcher {
         } else {
             SwitchState::Completed
         };
-        *std::sync::RwLock::new(state).write().unwrap() = state;
+        let state_lock = self.state.try_write();
+        if let Ok(mut guard) = state_lock {
+            *guard = state;
+        }
     }
 
     /// 计算下一步的混合权重
     pub fn step(&mut self) -> Option<Vec<f32>> {
         if self.step_counter >= self.config.steps {
-            *std::sync::RwLock::new(SwitchState::Completed)
-                .write()
-                .unwrap() = SwitchState::Completed;
+            if let Ok(mut guard) = self.state.try_write() {
+                *guard = SwitchState::Completed;
+            }
             return None;
         }
 
@@ -341,9 +323,9 @@ impl GradualSwitcher {
             .collect();
 
         self.step_counter += 1;
-        *std::sync::RwLock::new(SwitchState::InProgress)
-            .write()
-            .unwrap() = SwitchState::InProgress;
+        if let Ok(mut guard) = self.state.try_write() {
+            *guard = SwitchState::InProgress;
+        }
 
         Some(blended)
     }
@@ -398,6 +380,7 @@ pub trait PerformanceMonitor: Send + Sync {
 /// 默认安全约束检查器（基于 RobustnessManager 的异常检测）
 pub struct DefaultSafetyChecker {
     /// 安全阈值（0-100）
+    #[allow(dead_code)]
     threshold: f32,
 }
 
@@ -434,6 +417,7 @@ impl SafetyConstraintChecker for DefaultSafetyChecker {
 /// 默认性能监视器
 pub struct DefaultPerformanceMonitor {
     /// 性能阈值（相对于当前的百分比）
+    #[allow(dead_code)]
     threshold: f32,
 }
 
@@ -464,6 +448,7 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
 
 /// SafeOnlineUpdater（R1 核心）
 pub struct SafeOnlineUpdater {
+    #[allow(dead_code)]
     config: OnlineUpdateConfig,
     /// 影子模型
     shadow_model: RwLock<Option<ShadowModel>>,
@@ -474,11 +459,15 @@ pub struct SafeOnlineUpdater {
     /// 渐进式切换器
     gradual_switcher: RwLock<Option<GradualSwitcher>>,
     /// 安全阈值（0-100）
+    #[allow(dead_code)]
     safety_threshold: f32,
     /// 性能阈值（相对于当前的百分比）
+    #[allow(dead_code)]
     performance_threshold: f32,
     /// 当前模型权重（用于性能对比）
     current_weights: RwLock<Vec<f32>>,
+    /// v2.10 R1: 渐进式切换配置
+    switch_config: GradualSwitchConfig,
 }
 
 impl SafeOnlineUpdater {
@@ -489,7 +478,7 @@ impl SafeOnlineUpdater {
         performance_monitor: Arc<dyn PerformanceMonitor>,
         safety_threshold: f32,
         performance_threshold: f32,
-        _switch_config: GradualSwitchConfig,
+        switch_config: GradualSwitchConfig,
         initial_weights: Vec<f32>,
     ) -> Self {
         Self {
@@ -501,6 +490,7 @@ impl SafeOnlineUpdater {
             safety_threshold,
             performance_threshold,
             current_weights: RwLock::new(initial_weights),
+            switch_config,
         }
     }
 
@@ -574,8 +564,7 @@ impl SafeOnlineUpdater {
 
         // 5. 触发渐进式切换
         let mut gradual = self.gradual_switcher.write().await;
-        let switch_config = GradualSwitchConfig::default();
-        let mut switcher = GradualSwitcher::new(switch_config, current_weights);
+        let mut switcher = GradualSwitcher::new(self.switch_config.clone(), current_weights);
         switcher.start(new_weights);
         *gradual = Some(switcher);
 
@@ -604,7 +593,7 @@ impl SafeOnlineUpdater {
             }
 
             // 等待下一步间隔
-            let interval = GradualSwitchConfig::default().step_interval_secs;
+            let interval = self.switch_config.step_interval_secs;
             tokio::time::sleep(std::time::Duration::from_secs_f64(interval)).await;
         }
 
@@ -693,23 +682,6 @@ mod tests {
     #[test]
     fn test_performance_degradation_reject() {
         // Mock: 当前模型评分 100，影子模型评分 90 (< 95) → 应拒绝
-        struct MockPerformanceMonitor {
-            current_score: f32,
-            shadow_score: f32,
-        }
-
-        impl PerformanceMonitor for MockPerformanceMonitor {
-            fn evaluate(&self, model: &ShadowModel) -> f32 {
-                let weights = model.weights.try_read().unwrap();
-                // 根据权重判断：空权重返回当前评分，其他返回影子评分
-                if weights.is_empty() {
-                    self.current_score
-                } else {
-                    self.shadow_score
-                }
-            }
-        }
-
         struct MockMonitor {
             current_score: f32,
             shadow_score: f32,

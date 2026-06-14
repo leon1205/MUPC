@@ -71,6 +71,9 @@ pub struct OnlineUpdateConfig {
     pub enabled: bool,
     pub batch_size: usize,
     pub learning_rate: f64,
+    /// v2.10 R1: 渐进式切换配置
+    #[serde(default)]
+    pub gradual_switch: GradualSwitchConfig,
 }
 
 impl Default for OnlineUpdateConfig {
@@ -79,6 +82,28 @@ impl Default for OnlineUpdateConfig {
             enabled: false,
             batch_size: 32,
             learning_rate: 0.001,
+            gradual_switch: GradualSwitchConfig::default(),
+        }
+    }
+}
+
+/// 渐进式切换配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GradualSwitchConfig {
+    /// 是否启用
+    pub enabled: bool,
+    /// 切换步数
+    pub steps: usize,
+    /// 每步间隔（秒）
+    pub step_interval_secs: f64,
+}
+
+impl Default for GradualSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            steps: 10,
+            step_interval_secs: 1.0,
         }
     }
 }
