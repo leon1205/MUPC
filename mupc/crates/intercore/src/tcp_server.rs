@@ -229,7 +229,9 @@ impl SafetyOverridePayload {
     }
 
     pub fn trigger_reason(&self) -> &str {
-        self.trigger_reason.as_deref().unwrap_or(SAFETY_OVERRIDE_REASON_UNKNOWN)
+        self.trigger_reason
+            .as_deref()
+            .unwrap_or(SAFETY_OVERRIDE_REASON_UNKNOWN)
     }
 
     pub fn is_active(&self) -> bool {
@@ -686,7 +688,9 @@ impl IntercoreServer {
                                                         payload
                                                             .recovery_condition
                                                             .as_deref()
-                                                            .unwrap_or(SAFETY_OVERRIDE_RECOVERY_TIMER_EXPIRED),
+                                                            .unwrap_or(
+                                                            SAFETY_OVERRIDE_RECOVERY_TIMER_EXPIRED,
+                                                        ),
                                                     )
                                                     .await;
 
