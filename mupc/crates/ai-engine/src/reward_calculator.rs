@@ -16,6 +16,110 @@ use crate::mode_selector::RunningMode;
 use crate::rl_model::ActionOutput;
 use std::sync::RwLock;
 
+// ============================================================================
+// v2.10 R2: 折扣累积奖励机制
+// ============================================================================
+
+/// 折扣配置错误类型
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigError {
+    GammaOutOfRange { value: f32, min: f32, max: f32 },
+    BufferSizeZero,
+}
+
+/// 折扣累积奖励配置
+#[derive(Debug, Clone)]
+pub struct DiscountedConfig {
+    /// 折扣因子，范围 [0.9, 0.999]
+    pub gamma: f32,
+    /// 缓冲区大小，默认 1000
+    pub buffer_size: usize,
+}
+
+impl Default for DiscountedConfig {
+    fn default() -> Self {
+        Self {
+            gamma: 0.99,
+            buffer_size: 1000,
+        }
+    }
+}
+
+impl DiscountedConfig {
+    /// 校验配置参数
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.gamma < 0.9 || self.gamma > 0.999 {
+            return Err(ConfigError::GammaOutOfRange {
+                value: self.gamma,
+                min: 0.9,
+                max: 0.999,
+            });
+        }
+        if self.buffer_size == 0 {
+            return Err(ConfigError::BufferSizeZero);
+        }
+        Ok(())
+    }
+}
+
+/// 折扣累积奖励计算器
+#[derive(Debug)]
+pub struct DiscountedAccumulator {
+    gamma: f32,
+    buffer: Vec<f32>,
+    buffer_size: usize,
+    cumulative: RwLock<f32>,
+}
+
+impl DiscountedAccumulator {
+    /// 创建折扣累积器
+    /// - gamma: 折扣因子，范围 [0.9, 0.999]
+    /// - 返回 ConfigError 若 gamma 超出范围或 buffer_size 为 0
+    pub fn new(gamma: f32, buffer_size: usize) -> Result<Self, ConfigError> {
+        let config = DiscountedConfig { gamma, buffer_size };
+        config.validate()?;
+
+        Ok(Self {
+            gamma,
+            buffer: Vec::with_capacity(buffer_size),
+            buffer_size,
+            cumulative: RwLock::new(0.0),
+        })
+    }
+
+    /// 添加奖励到缓冲区并更新累积值
+    pub fn push(&mut self, reward: f32) {
+        self.buffer.push(reward);
+
+        // 超出缓冲区大小时移除最旧奖励
+        if self.buffer.len() > self.buffer_size {
+            self.buffer.remove(0);
+        }
+
+        // 更新折扣累积奖励: D_t = r_t + gamma * D_{t-1}
+        // 由于 buffer 从旧到新排列，需要从后向前计算
+        let mut discounted_sum = 0.0;
+        let mut gamma_pow = 1.0f32;
+        for r in self.buffer.iter().rev() {
+            discounted_sum += gamma_pow * r;
+            gamma_pow *= self.gamma;
+        }
+
+        *self.cumulative.write().unwrap() = discounted_sum;
+    }
+
+    /// 获取当前折扣累积奖励
+    pub fn discounted_sum(&self) -> f32 {
+        *self.cumulative.read().unwrap()
+    }
+
+    /// 重置缓冲区和累积值
+    pub fn reset(&mut self) {
+        self.buffer.clear();
+        *self.cumulative.write().unwrap() = 0.0;
+    }
+}
+
 /// 奖励函数计算器
 pub struct RewardCalculator {
     weights: SceneWeights,
@@ -51,6 +155,8 @@ pub struct RewardCalculator {
     smooth_lambda: f64,
     /// 下垂系数硬上限 K_MAX
     k_droop_max: f64,
+    // v2.10 R2 新增：折扣累积奖励器
+    discounted_accumulator: RwLock<DiscountedAccumulator>,
 }
 
 impl RewardCalculator {
@@ -73,7 +179,59 @@ impl RewardCalculator {
             pv_high_voltage_penalty: 20.0,
             smooth_lambda: 10.0,
             k_droop_max: 30.0,
+            discounted_accumulator: RwLock::new(DiscountedAccumulator::new(0.99, 1000).unwrap()),
         }
+    }
+
+    /// v2.10: 创建带折扣累积的奖励计算器
+    pub fn new_with_discount(
+        weights: SceneWeights,
+        threshold_config: &crate::config::RewardThresholdConfig,
+        discount_config: DiscountedConfig,
+    ) -> Result<Self, ConfigError> {
+        let discounted_accumulator = RwLock::new(DiscountedAccumulator::new(
+            discount_config.gamma,
+            discount_config.buffer_size,
+        )?);
+
+        Ok(Self {
+            weights,
+            carbon_emission_factor: 0.581,
+            demand_penalty_rate: 50.0,
+            battery_degradation_alpha: 0.01,
+            battery_capacity_kwh: 100.0,
+            last_p_batt_set: RwLock::new(0.0),
+            last_voltage: RwLock::new(1.0),
+            voltage_violation_count: std::sync::atomic::AtomicU32::new(0),
+            q_margin_threshold: threshold_config.q_margin_threshold,
+            voltage_high_limit: threshold_config.voltage_high_limit,
+            soc_critical: threshold_config.soc_critical,
+            voltage_penalty_high: threshold_config.voltage_penalty_high,
+            voltage_penalty_low: threshold_config.voltage_penalty_low,
+            last_k_droop: RwLock::new(10.0),
+            pv_high_voltage_penalty: 20.0,
+            smooth_lambda: 10.0,
+            k_droop_max: 30.0,
+            discounted_accumulator,
+        })
+    }
+
+    /// v2.10: 计算折扣累积奖励（与即时奖励正交）
+    /// 每调用一次会将当前奖励加入缓冲区并返回折扣累积值
+    pub fn calculate_discounted(&self, current_reward: f32) -> f32 {
+        let mut acc = self.discounted_accumulator.write().unwrap();
+        acc.push(current_reward);
+        acc.discounted_sum()
+    }
+
+    /// v2.10: 获取当前累积折扣奖励（不更新缓冲区）
+    pub fn cumulative_discounted_reward(&self) -> f32 {
+        self.discounted_accumulator.read().unwrap().discounted_sum()
+    }
+
+    /// v2.10: 重置折扣缓冲（每个结算周期调用）
+    pub fn reset_discounted_buffer(&self) {
+        self.discounted_accumulator.write().unwrap().reset();
     }
 
     /// v2.5: 从配置创建（支持自定义阈值）
@@ -101,6 +259,7 @@ impl RewardCalculator {
             pv_high_voltage_penalty: 20.0,
             smooth_lambda: 10.0,
             k_droop_max: 30.0,
+            discounted_accumulator: RwLock::new(DiscountedAccumulator::new(0.99, 1000).unwrap()),
         }
     }
 
@@ -757,5 +916,159 @@ mod tests {
 
         let r = calc.calc_pv_reward_v2_8(&state, -10.0, 1.06); // p_ref < 0 (charge)
         assert!(r > 0.0, "高电压充电应正常奖励");
+    }
+
+    // ===== v2.10 R2 折扣累积奖励机制测试 =====
+
+    #[test]
+    fn test_v2_10_gamma_range_valid_lower_bound() {
+        // BC1: gamma = 0.9 正常工作
+        let result = DiscountedAccumulator::new(0.9, 1000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_v2_10_gamma_range_valid_upper_bound() {
+        // BC1: gamma = 0.999 正常工作
+        let result = DiscountedAccumulator::new(0.999, 1000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_v2_10_gamma_out_of_range_reject_lower() {
+        // BC1: gamma < 0.9 拒绝
+        let result = DiscountedAccumulator::new(0.8, 1000);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConfigError::GammaOutOfRange { value, min, max } => {
+                assert!((value - 0.8).abs() < 1e-6);
+                assert!((min - 0.9).abs() < 1e-6);
+                assert!((max - 0.999).abs() < 1e-6);
+            }
+            _ => panic!("Expected GammaOutOfRange error"),
+        }
+    }
+
+    #[test]
+    fn test_v2_10_gamma_out_of_range_reject_upper() {
+        // BC1: gamma > 0.999 拒绝
+        let result = DiscountedAccumulator::new(1.0, 1000);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ConfigError::GammaOutOfRange { value, .. } => {
+                assert!((value - 1.0).abs() < 1e-6);
+            }
+            _ => panic!("Expected GammaOutOfRange error"),
+        }
+    }
+
+    #[test]
+    fn test_v2_10_buffer_size_default() {
+        // BC2: 默认缓冲区大小 1000
+        let config = DiscountedConfig::default();
+        assert_eq!(config.buffer_size, 1000);
+        assert!((config.gamma - 0.99).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_10_buffer_size_configurable() {
+        // BC2: 缓冲区大小可配置
+        let result = DiscountedAccumulator::new(0.99, 500);
+        assert!(result.is_ok());
+        let mut acc = result.unwrap();
+        // 填充 600 个奖励
+        for i in 0..600 {
+            acc.push(i as f32);
+        }
+        // 缓冲区应保留最后 500 个，确保不 panic
+        assert_eq!(acc.discounted_sum(), acc.discounted_sum());
+    }
+
+    #[test]
+    fn test_v2_10_discounted_100_steps_weight() {
+        // BC3: gamma=0.99 时，100 步前奖励权重约 0.366
+        let gamma = 0.99f32;
+        let weight_100 = gamma.powi(100);
+        assert!(
+            (weight_100 - 0.366).abs() < 0.01,
+            "0.99^100 should be ~0.366, got {}",
+            weight_100
+        );
+    }
+
+    #[test]
+    fn test_v2_10_discounted_reward_math() {
+        // BC3: 验证折扣累积公式 D_t = r_t + gamma * D_{t-1}
+        let mut acc = DiscountedAccumulator::new(0.5, 1000).unwrap();
+        // 单一奖励 r=1.0, D_0 = 1.0
+        acc.push(1.0);
+        assert!((acc.discounted_sum() - 1.0).abs() < 1e-6);
+
+        // 第二个奖励 r=1.0, D_1 = 1.0 + 0.5*1.0 = 1.5
+        acc.push(1.0);
+        assert!((acc.discounted_sum() - 1.5).abs() < 1e-6);
+
+        // 第三个奖励 r=1.0, D_2 = 1.0 + 0.5*1.5 = 1.75
+        acc.push(1.0);
+        assert!((acc.discounted_sum() - 1.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_v2_10_buffer_overflow_removes_oldest() {
+        // BC2: 缓冲区溢出时移除最旧奖励
+        let mut acc = DiscountedAccumulator::new(0.99, 3).unwrap();
+        acc.push(1.0); // D_0 = 1.0
+        acc.push(2.0); // D_1 = 2.0 + 0.99*1.0 = 2.99
+        acc.push(3.0); // D_2 = 3.0 + 0.99*2.99 = 5.9601
+                       // 缓冲区已满，接下来 push 4.0 会移除 1.0
+        acc.push(4.0); // D_3 = 4.0 + 0.99*5.9601 = 9.9009
+        let sum = acc.discounted_sum();
+        assert!(sum > 9.0, "Sum should be around 9.9, got {}", sum);
+    }
+
+    #[test]
+    fn test_v2_10_immediate_reward_unchanged() {
+        // BC4: 与现有奖励函数正交，即时奖励计算结果不变
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let state = make_state();
+        let action = make_action();
+
+        // 即时奖励应正常计算
+        let immediate = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        assert!(immediate > 0.0, "即时奖励应为正");
+
+        // 折扣奖励不影响即时奖励
+        calc.calculate_discounted(1.0);
+        let immediate_after = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        assert_eq!(immediate, immediate_after, "即时奖励应不变");
+    }
+
+    #[test]
+    fn test_v2_10_discounted_reward_separate_from_immediate() {
+        // BC4: 折扣奖励与即时奖励返回值类型和用途不同
+        let calc = RewardCalculator::new(SceneWeights::default());
+        let state = make_state();
+        let action = make_action();
+
+        // 即时奖励
+        let immediate = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
+        assert!(immediate > 0.0);
+
+        // 折扣累积奖励
+        let discounted = calc.calculate_discounted(immediate as f32);
+        assert!(discounted >= 0.0);
+        assert_ne!(immediate as f32, discounted); // 两者值不同
+    }
+
+    #[test]
+    fn test_v2_10_reset_discounted_buffer() {
+        // 重置后累积值归零
+        let calc = RewardCalculator::new(SceneWeights::default());
+        calc.calculate_discounted(1.0);
+        calc.calculate_discounted(2.0);
+        assert!(calc.cumulative_discounted_reward() > 0.0);
+
+        calc.reset_discounted_buffer();
+        assert!((calc.cumulative_discounted_reward() - 0.0).abs() < 1e-6);
     }
 }

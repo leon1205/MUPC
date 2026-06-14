@@ -1,6 +1,6 @@
 //! OnlineUpdater Integration Tests (v2.3: scene-aware)
 
-use mupc_ai_engine::config::OnlineUpdateConfig;
+use mupc_ai_engine::config::{GradualSwitchConfig, OnlineUpdateConfig};
 use mupc_ai_engine::online_updater::{DataPoint, OnlineUpdater};
 
 #[cfg(test)]
@@ -12,6 +12,7 @@ mod tests {
             enabled: false,
             batch_size: 32,
             learning_rate: 0.001,
+            gradual_switch: GradualSwitchConfig::default(),
         }
     }
 
