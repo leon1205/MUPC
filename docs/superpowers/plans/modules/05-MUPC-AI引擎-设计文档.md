@@ -6,6 +6,7 @@
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
+| v2.13 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.12 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.12 | 2026-06-14 | 架构师 | 规划中（R-04~R-07 中优先级） |
 | v2.11 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
@@ -2110,6 +2111,176 @@ p_threshold_kw = 5.0         # P 阈值（kW）
 
 - `mupc/crates/ai-engine/src/reward_calculator.rs`
 - `mupc/config/mupc_env_config.yaml`
+
+### 5.15 v2.13 奖励函数精细化改进
+
+#### 5.15.1 功能概述
+
+v2.13 在 v2.12 基础上进一步精细化奖励函数设计，解决专家建议中的"精细化打磨"与"跨场景泛化"问题。
+
+#### 5.15.2 P-Q协同Sigmoid平滑化
+
+**实现位置**：`reward_calculator.rs` - `calc_pq_coordination()` / `calc_pq_coordination_static()`
+
+```rust
+// v2.13: Sigmoid平滑过渡
+let k = 50.0;
+let w_save = 1.0 / (1.0 + (-k * (q_margin - q_threshold)).exp());
+let w_support = 1.0 - w_save;
+
+// 省电模式奖励（Q有裕度时AI"偷懒"省电池）
+let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
+
+// 支撑模式奖励（Q饱和时AI正确出手）
+let r_correct = if (v_low && p_ref < 0.0) || (v_high && p_ref > 0.0) {
+    50.0
+} else if (v_low && p_ref >= 0.0) || (v_high && p_ref <= 0.0) {
+    -30.0
+} else {
+    0.0
+};
+
+// Sigmoid加权组合 + 死区平滑因子
+let r_pq = w_save * r_lazy + w_support * r_correct;
+let dead_zone_factor = ((v_dev - 0.05) / 0.05).clamp(0.0, 1.0);
+r_pq * dead_zone_factor
+```
+
+#### 5.15.3 动态自适应归一化
+
+**新增文件**：`reward_normalizer.rs`
+
+```rust
+/// 滑动统计量（Welford 在线算法）
+#[derive(Debug, Clone)]
+pub struct RunningStats {
+    mean: f64,
+    m2: f64,
+    count: usize,
+}
+
+impl RunningStats {
+    pub fn update(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    pub fn std(&self) -> f64 {
+        if self.count < 2 { return 1.0; }
+        (self.m2 / (self.count - 1) as f64).sqrt()
+    }
+}
+
+/// 归一化公式：z = (r - μ) / (σ + ε)，clamp到[-1,1]
+pub fn normalize(r: f64, stats: &RunningStats) -> f64 {
+    let z = (r - stats.mean) / (stats.std() + 1e-6);
+    z.clamp(-1.0, 1.0)
+}
+```
+
+#### 5.15.4 状态改善率奖励
+
+**实现位置**：`reward_calculator.rs` - `calc_state_improvement_reward()`
+
+```rust
+/// 公式：R_improve = w * (V_dev_prev - V_dev_curr) * sign(P_action)
+fn calc_state_improvement_reward(&self, state: &FusedSystemState, p_action: f64, prev_v_avg: f64) -> f64 {
+    let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+    let v_dev_curr = (v_avg - 1.0).abs();
+    let v_dev_prev = *self.last_v_dev.read().unwrap();
+
+    *self.last_v_dev.write().unwrap() = v_dev_curr;
+
+    if v_dev_prev < 1e-6 {
+        return 0.0;  // 首次调用，无改善率奖励
+    }
+
+    let delta_v_dev = v_dev_prev - v_dev_curr;
+    let sign_p = if p_action > 0.0 { 1.0 } else { -1.0 };
+    let w_improve = 10.0;
+
+    w_improve * delta_v_dev * sign_p
+}
+```
+
+#### 5.15.5 冲击负荷预备度奖励重构
+
+**实现位置**：`reward_calculator.rs` - `shock_readiness_reward()`
+
+```rust
+/// 重构为"预备度奖励"
+/// R_readiness = w1 * (soc_reserve - current_soc) + w2 * (p_ref_reserve - |p_ref|)
+fn shock_readiness_reward(&self, state: &FusedSystemState, p_ref: f64, p90: f64, p50: f64) -> f64 {
+    let spread = p90 - p50;
+    if spread <= self.shock_threshold_kw {
+        return 0.0;
+    }
+
+    let soc_gap = self.soc_reserve_target - state.battery_soc;
+    let r_soc = self.shock_readiness_weight_soc * soc_gap;
+
+    let p_ref_gap = self.p_ref_reserve_target - p_ref.abs();
+    let r_p = self.shock_readiness_weight_p * p_ref_gap;
+
+    r_soc + r_p
+}
+```
+
+#### 5.15.6 在线微调PER+KL正则化强化
+
+**实现位置**：`online_updater.rs`
+
+```rust
+/// PER 缓冲区（优先经验回放）
+pub struct PerBuffer {
+    samples: Vec<PerSample>,
+    capacity: usize,
+    alpha: f32,  // 优先级权重
+    beta: f32,   // 重要性采样权重
+}
+
+/// KL 散度计算器
+pub struct KLDivergenceCalculator {
+    config: KLDivergenceConfig,
+}
+
+/// L_online = L_task + β * D_KL(π_new || π_offline)
+pub fn compute_online_loss(&self, task_loss: f32, new_logits: &[f32], offline_logits: &[f32]) -> f32 {
+    let kl = self.kl_divergence_calculator.compute(new_logits, offline_logits);
+    let beta_adaptive = self.kl_divergence_calculator.get_adaptive_beta();
+    task_loss + beta_adaptive * kl
+}
+```
+
+#### 5.15.7 策略混合替代权重混合
+
+**实现位置**：`mode_selector.rs` - `blend_actions()`
+
+```rust
+/// 公式：a_blended = (1 - α) * a_old + α * a_new
+pub fn blend_actions(&self, a_old: &ActionOutput, a_new: &ActionOutput, alpha: f64) -> ActionOutput {
+    let one_minus_alpha = 1.0 - alpha;
+    ActionOutput {
+        p_ref: one_minus_alpha * a_old.p_ref + alpha * a_new.p_ref,
+        k_droop: one_minus_alpha * a_old.k_droop + alpha * a_new.k_droop,
+        load_shedding: one_minus_alpha * a_old.load_shedding + alpha * a_new.load_shedding,
+        pv_limit: one_minus_alpha * a_old.pv_limit + alpha * a_new.pv_limit,
+        confidence: (one_minus_alpha * a_old.confidence + alpha * a_new.confidence).min(1.0),
+    }
+}
+```
+
+#### 5.15.8 影响文件
+
+| 文件 | 变更类型 |
+|------|----------|
+| `ai-engine/src/reward_calculator.rs` | 修改 |
+| `ai-engine/src/reward_normalizer.rs` | **新增** |
+| `ai-engine/src/online_updater.rs` | 修改 |
+| `ai-engine/src/mode_selector.rs` | 修改 |
 
 ---
 
