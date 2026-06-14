@@ -130,6 +130,119 @@ impl ControlCmdPayloadV2 {
     }
 }
 
+// ============================================================================
+// v2.10: DataUploadPayload 和 SafetyOverridePayload
+// ============================================================================
+
+/// 数据上传 Payload（v2.10 新增）
+///
+/// 实时控制模块通过 DataUpload 帧上报系统状态，
+/// 包括 q_realtime_margin（实时模块剩余无功容量比例）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataUploadPayload {
+    #[serde(rename = "frame_version")]
+    pub frame_version: Option<u8>,
+    #[serde(rename = "timestamp_ms")]
+    pub timestamp_ms: Option<u64>,
+    /// 实时模块剩余无功容量比例 [0.0, 1.0]
+    /// 0 = 无功打满，1 = 完全空闲
+    #[serde(rename = "q_realtime_margin")]
+    pub q_realtime_margin: Option<f64>,
+    #[serde(rename = "battery_soc")]
+    pub battery_soc: Option<f64>,
+    #[serde(rename = "voltage_phase_a")]
+    pub voltage_phase_a: Option<f64>,
+    #[serde(rename = "voltage_phase_b")]
+    pub voltage_phase_b: Option<f64>,
+    #[serde(rename = "voltage_phase_c")]
+    pub voltage_phase_c: Option<f64>,
+    #[serde(rename = "battery_power")]
+    pub battery_power: Option<f64>,
+}
+
+impl DataUploadPayload {
+    pub const FRAME_VERSION: u8 = 1;
+
+    /// 从 JSON 字节解析
+    pub fn from_json(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+
+    /// 获取 q_realtime_margin，超时返回 None
+    pub fn q_realtime_margin(&self) -> Option<f64> {
+        self.q_realtime_margin
+    }
+
+    /// 校验并获取 q_realtime_margin（clamp 到 [0.0, 1.0]）
+    pub fn q_realtime_margin_clamped(&self) -> Option<f64> {
+        self.q_realtime_margin.map(|v| v.clamp(0.0, 1.0))
+    }
+}
+
+/// 安全覆盖 Payload（v2.10 新增）
+///
+/// 当实时控制模块检测到电压越限且无功耗尽时，
+/// 临时覆盖 AI 有功指令的紧急事件帧。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyOverridePayload {
+    #[serde(rename = "frame_version")]
+    pub frame_version: Option<u8>,
+    #[serde(rename = "timestamp_ms")]
+    pub timestamp_ms: Option<u64>,
+    /// 触发原因
+    #[serde(rename = "trigger_reason")]
+    pub trigger_reason: Option<String>,
+    #[serde(rename = "voltage_phase_a")]
+    pub voltage_phase_a: Option<f64>,
+    #[serde(rename = "voltage_phase_b")]
+    pub voltage_phase_b: Option<f64>,
+    #[serde(rename = "voltage_phase_c")]
+    pub voltage_phase_c: Option<f64>,
+    /// 无功裕度（几乎耗尽）
+    #[serde(rename = "q_realtime_margin")]
+    pub q_realtime_margin: Option<f64>,
+    /// 强制放电功率 (kW)
+    #[serde(rename = "override_p_ref")]
+    pub override_p_ref: Option<f64>,
+    /// 覆盖持续时间 (ms)
+    #[serde(rename = "override_duration_ms")]
+    pub override_duration_ms: Option<u64>,
+    /// 恢复条件
+    #[serde(rename = "recovery_condition")]
+    pub recovery_condition: Option<String>,
+}
+
+impl SafetyOverridePayload {
+    pub const FRAME_VERSION: u8 = 1;
+
+    /// 从 JSON 字节解析
+    pub fn from_json(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+
+    pub fn trigger_reason(&self) -> &str {
+        self.trigger_reason.as_deref().unwrap_or("unknown")
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.override_p_ref.is_some()
+    }
+
+    /// 校验 override_p_ref 不超过 max_batt_discharge_power
+    pub fn clamp_override_p_ref(&self, max_batt_discharge_power: f64) -> f64 {
+        self.override_p_ref
+            .map(|v| v.clamp(-max_batt_discharge_power, max_batt_discharge_power))
+            .unwrap_or(0.0)
+    }
+
+    /// 校验 override_duration_ms 不超过 10000ms
+    pub fn clamp_override_duration_ms(&self) -> u64 {
+        self.override_duration_ms
+            .map(|v| v.min(10000))
+            .unwrap_or(5000)
+    }
+}
+
 /// 核间通信状态（用于通信中断检测和降级）
 pub struct IntercoreConnectionState {
     /// 最后收到的有效 p_ref
@@ -140,6 +253,25 @@ pub struct IntercoreConnectionState {
     pub last_heartbeat_ms: RwLock<u64>,
     /// 连接状态
     pub connected: RwLock<bool>,
+    // v2.10 新增字段
+    /// 最后收到的 q_realtime_margin
+    pub last_q_realtime_margin: RwLock<Option<f64>>,
+    /// q_realtime_margin 连续缺失计数
+    pub q_margin_missing_count: RwLock<u32>,
+    /// 安全覆盖激活标志
+    pub safety_override_active: RwLock<bool>,
+    /// 安全覆盖触发原因
+    pub safety_override_reason: RwLock<Option<String>>,
+    /// 安全覆盖强制放电功率 (kW)
+    pub safety_override_p_ref: RwLock<Option<f64>>,
+    /// 安全覆盖持续时间 (ms)
+    pub safety_override_duration_ms: RwLock<u64>,
+    /// 安全覆盖恢复条件
+    pub safety_override_recovery: RwLock<Option<String>>,
+    /// 安全覆盖触发计数（用于频率限制）
+    pub safety_override_count: RwLock<u32>,
+    /// 安全覆盖首次触发时间戳（用于 1 分钟窗口计算）
+    pub safety_override_first_ts: RwLock<Option<i64>>,
 }
 
 impl IntercoreConnectionState {
@@ -149,6 +281,16 @@ impl IntercoreConnectionState {
             last_valid_k_droop: RwLock::new(None),
             last_heartbeat_ms: RwLock::new(0),
             connected: RwLock::new(false),
+            // v2.10 新增字段
+            last_q_realtime_margin: RwLock::new(None),
+            q_margin_missing_count: RwLock::new(0),
+            safety_override_active: RwLock::new(false),
+            safety_override_reason: RwLock::new(None),
+            safety_override_p_ref: RwLock::new(None),
+            safety_override_duration_ms: RwLock::new(0),
+            safety_override_recovery: RwLock::new(None),
+            safety_override_count: RwLock::new(0),
+            safety_override_first_ts: RwLock::new(None),
         }
     }
 
@@ -179,6 +321,70 @@ impl IntercoreConnectionState {
     /// 获取连接状态
     pub async fn is_connected(&self) -> bool {
         *self.connected.read().await
+    }
+
+    /// 更新 q_realtime_margin（v2.10）
+    pub async fn update_q_margin(&self, q_margin: f64) {
+        *self.last_q_realtime_margin.write().await = Some(q_margin);
+        *self.q_margin_missing_count.write().await = 0;
+    }
+
+    /// 增加 q_margin 缺失计数（v2.10）
+    pub async fn increment_q_margin_missing(&self) -> u32 {
+        let count = *self.q_margin_missing_count.read().await + 1;
+        *self.q_margin_missing_count.write().await = count;
+        count
+    }
+
+    /// 获取最后有效的 q_margin（v2.10）
+    pub async fn get_last_q_margin(&self) -> Option<f64> {
+        *self.last_q_realtime_margin.read().await
+    }
+
+    /// 更新安全覆盖状态（v2.10）
+    pub async fn update_safety_override(
+        &self,
+        reason: &str,
+        p_ref: f64,
+        duration_ms: u64,
+        recovery: &str,
+    ) {
+        *self.safety_override_active.write().await = true;
+        *self.safety_override_reason.write().await = Some(reason.to_string());
+        *self.safety_override_p_ref.write().await = Some(p_ref);
+        *self.safety_override_duration_ms.write().await = duration_ms;
+        *self.safety_override_recovery.write().await = Some(recovery.to_string());
+    }
+
+    /// 清除安全覆盖状态（v2.10）
+    pub async fn clear_safety_override(&self) {
+        *self.safety_override_active.write().await = false;
+        *self.safety_override_reason.write().await = None;
+        *self.safety_override_p_ref.write().await = None;
+        *self.safety_override_duration_ms.write().await = 0;
+        *self.safety_override_recovery.write().await = None;
+    }
+
+    /// 检查并增加安全覆盖计数，返回是否超过频率限制（v2.10）
+    /// 1 分钟内最多 3 次
+    pub async fn check_and_increment_safety_override(&self) -> bool {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut first_ts = self.safety_override_first_ts.write().await;
+        let mut count = self.safety_override_count.write().await;
+
+        // 检查 1 分钟窗口
+        if let Some(ts) = *first_ts {
+            if now - ts > 60000 {
+                // 窗口过期，重置计数
+                *count = 0;
+                *first_ts = Some(now);
+            }
+        } else {
+            *first_ts = Some(now);
+        }
+
+        *count += 1;
+        *count > 3 // 1 分钟内最多 3 次
     }
 }
 
@@ -312,8 +518,10 @@ impl IntercoreServer {
                                 info!("New intercore connection from {}", addr);
                                 let heartbeat = hb_for_listener.clone();
                                 let cfg = cmd_config.clone();
+                                let intercore_state = Arc::new(IntercoreConnectionState::new());
+                                let state_for_conn = intercore_state.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, heartbeat, cfg).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, heartbeat, cfg, state_for_conn).await {
                                         error!("Connection error from {}: {}", addr, e);
                                     }
                                 });
@@ -345,6 +553,7 @@ impl IntercoreServer {
         addr: SocketAddr,
         heartbeat: Arc<RwLock<HeartbeatManager>>,
         cmd_config: CommandConfig,
+        intercore_state: Arc<IntercoreConnectionState>, // v2.10 新增
     ) -> Result<(), MupcError> {
         let (read_half, mut write_half) = tokio::io::split(stream);
 
@@ -405,6 +614,84 @@ impl IntercoreServer {
                                 }
                                 IntercoreFrameType::DataUpload => {
                                     info!("Received data upload from {}", addr);
+                                    // v2.10: 解析 DataUpload JSON payload
+                                    if !frame.data.is_empty() {
+                                        match DataUploadPayload::from_json(&frame.data) {
+                                            Ok(payload) => {
+                                                // v2.10: 更新 q_realtime_margin
+                                                if let Some(q_margin) =
+                                                    payload.q_realtime_margin_clamped()
+                                                {
+                                                    let missing_count = intercore_state
+                                                        .increment_q_margin_missing()
+                                                        .await;
+                                                    intercore_state.update_q_margin(q_margin).await;
+                                                    if missing_count >= 3 {
+                                                        warn!("q_realtime_margin missing for {} cycles", missing_count);
+                                                    }
+                                                } else {
+                                                    let missing_count = intercore_state
+                                                        .increment_q_margin_missing()
+                                                        .await;
+                                                    if missing_count >= 3 {
+                                                        warn!("q_realtime_margin missing for {} cycles", missing_count);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to parse DataUpload JSON payload: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                // v2.10 新增：SafetyOverride 帧处理
+                                IntercoreFrameType::SafetyOverride => {
+                                    info!("Received safety override from {}", addr);
+                                    if !frame.data.is_empty() {
+                                        match SafetyOverridePayload::from_json(&frame.data) {
+                                            Ok(payload) => {
+                                                // 频率限制检查
+                                                if intercore_state
+                                                    .check_and_increment_safety_override()
+                                                    .await
+                                                {
+                                                    error!("SafetyOverride rate limit exceeded, rejecting frame");
+                                                    continue;
+                                                }
+
+                                                let max_batt_power = 50.0; // TODO: 从配置获取
+                                                let clamped_p_ref =
+                                                    payload.clamp_override_p_ref(max_batt_power);
+                                                let clamped_duration =
+                                                    payload.clamp_override_duration_ms();
+
+                                                intercore_state
+                                                    .update_safety_override(
+                                                        payload.trigger_reason(),
+                                                        clamped_p_ref,
+                                                        clamped_duration,
+                                                        payload
+                                                            .recovery_condition
+                                                            .as_deref()
+                                                            .unwrap_or("timer_expired"),
+                                                    )
+                                                    .await;
+
+                                                info!(
+                                                    "SafetyOverride active: reason={}, p_ref={}, duration={}ms",
+                                                    payload.trigger_reason(),
+                                                    clamped_p_ref,
+                                                    clamped_duration
+                                                );
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to parse SafetyOverride JSON payload: {}", e);
+                                            }
+                                        }
+                                    }
                                 }
                                 IntercoreFrameType::Connect => {
                                     info!("Received connect from {}", addr);
@@ -470,5 +757,179 @@ impl IntercoreServer {
     pub async fn shutdown(&self) -> Result<(), MupcError> {
         let _ = self.shutdown_tx.send(());
         Ok(())
+    }
+}
+
+// ============================================================================
+// P2-17: IntercoreClient 主动发送双参数到实时控制模块
+// ============================================================================
+
+/// 双参数命令（用于发送到实时控制模块，v2.7）
+#[derive(Debug, Clone)]
+pub struct DualParamCommand {
+    /// 有功功率基准点 (kW)
+    pub p_ref: f64,
+    /// 电压-有功下垂系数 (kW/V)
+    pub k_droop: f64,
+    /// 可中断负荷切除量 (kW)
+    pub load_shedding: f64,
+    /// 光伏限功率比例
+    pub pv_limit: f64,
+    /// AI 就绪状态
+    pub ai_ready: bool,
+    /// 当前策略模式
+    pub strategy_mode: String,
+}
+
+impl DualParamCommand {
+    /// 创建双参数命令
+    pub fn new(
+        p_ref: f64,
+        k_droop: f64,
+        load_shedding: f64,
+        pv_limit: f64,
+        ai_ready: bool,
+        strategy_mode: &str,
+    ) -> Self {
+        Self {
+            p_ref,
+            k_droop,
+            load_shedding,
+            pv_limit,
+            ai_ready,
+            strategy_mode: strategy_mode.to_string(),
+        }
+    }
+}
+
+/// 核间通信客户端（用于主动发送双参数到实时控制模块）
+///
+/// 与 IntercoreServer 不同，Client 主动连接到实时控制模块，
+/// 并发送 AI 引擎输出的 p_ref 和 k_droop 双参数。
+pub struct IntercoreClient {
+    /// 目标地址（实时控制模块地址）
+    remote_addr: String,
+    /// 指令发送配置
+    cmd_config: CommandConfig,
+    /// 连接状态
+    connected: RwLock<bool>,
+    /// 最后发送的 p_ref（用于通信中断检测）
+    last_p_ref: RwLock<Option<f64>>,
+    /// 最后发送的 k_droop
+    last_k_droop: RwLock<Option<f64>>,
+}
+
+impl IntercoreClient {
+    /// 创建客户端
+    pub fn new(remote_addr: String) -> Self {
+        Self {
+            remote_addr,
+            cmd_config: CommandConfig::default(),
+            connected: RwLock::new(false),
+            last_p_ref: RwLock::new(None),
+            last_k_droop: RwLock::new(None),
+        }
+    }
+
+    /// 带配置创建客户端
+    pub fn with_config(remote_addr: String, cmd_config: CommandConfig) -> Self {
+        Self {
+            remote_addr,
+            cmd_config,
+            connected: RwLock::new(false),
+            last_p_ref: RwLock::new(None),
+            last_k_droop: RwLock::new(None),
+        }
+    }
+
+    /// 发送双参数到实时控制模块（v2.7）
+    ///
+    /// 将 DualParamCommand 封装为 TCP v2.0 帧并发送
+    pub async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError> {
+        // 创建 v2.0 Payload
+        let payload = ControlCmdPayloadV2 {
+            p_ref: Some(cmd.p_ref),
+            k_droop: Some(cmd.k_droop),
+            load_shedding: Some(cmd.load_shedding),
+            pv_limit: Some(cmd.pv_limit),
+            ai_ready: Some(cmd.ai_ready),
+            strategy_mode: Some(cmd.strategy_mode.clone()),
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
+            frame_version: Some(ControlCmdPayloadV2::FRAME_VERSION),
+        };
+
+        let payload_bytes = payload.to_json().map_err(|e| {
+            MupcError::new(
+                ErrorCode::SerializeError,
+                format!("Failed to serialize ControlCmdPayloadV2: {}", e),
+                "intercore",
+            )
+        })?;
+
+        // 创建 TCP 帧
+        let frame = IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, payload_bytes);
+        let frame_bytes = frame.to_bytes()?;
+
+        // 连接并发送
+        let mut stream = TcpStream::connect(&self.remote_addr).await.map_err(|e| {
+            MupcError::new(
+                ErrorCode::ConnectionFailed,
+                format!("Failed to connect to {}: {}", self.remote_addr, e),
+                "intercore",
+            )
+        })?;
+
+        // 设置写入超时
+        tokio::time::timeout(
+            Duration::from_millis(self.cmd_config.timeout_ms),
+            stream.write_all(&frame_bytes),
+        )
+        .await
+        .map_err(|_| {
+            MupcError::new(
+                ErrorCode::IntercoreTimeout,
+                format!("Send timed out after {}ms", self.cmd_config.timeout_ms),
+                "intercore",
+            )
+        })?
+        .map_err(|e| {
+            MupcError::new(
+                ErrorCode::SendFailed,
+                format!("Send error: {}", e),
+                "intercore",
+            )
+        })?;
+
+        // 更新最后发送的参数
+        *self.last_p_ref.write().await = Some(cmd.p_ref);
+        *self.last_k_droop.write().await = Some(cmd.k_droop);
+        *self.connected.write().await = true;
+
+        tracing::debug!(
+            "Sent dual-param ControlCmd: p_ref={}, k_droop={}, ai_ready={}, strategy_mode={}",
+            cmd.p_ref,
+            cmd.k_droop,
+            cmd.ai_ready,
+            cmd.strategy_mode
+        );
+
+        Ok(())
+    }
+
+    /// 获取最后发送的双参数（用于降级判断）
+    pub async fn get_last_params(&self) -> (Option<f64>, Option<f64>) {
+        let p_ref = *self.last_p_ref.read().await;
+        let k_droop = *self.last_k_droop.read().await;
+        (p_ref, k_droop)
+    }
+
+    /// 检查连接状态
+    pub async fn is_connected(&self) -> bool {
+        *self.connected.read().await
+    }
+
+    /// 获取远程地址
+    pub fn remote_addr(&self) -> &str {
+        &self.remote_addr
     }
 }

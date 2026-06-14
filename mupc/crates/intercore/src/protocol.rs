@@ -21,6 +21,7 @@ pub enum FrameType {
     ControlRsp = 0x0011,
     StatusReport = 0x0020,
     DataUpload = 0x0030,
+    SafetyOverride = 0x0040, // v2.10 新增
     Unknown = 0xFFFF,
 }
 
@@ -34,6 +35,7 @@ impl FrameType {
             0x0011 => FrameType::ControlRsp,
             0x0020 => FrameType::StatusReport,
             0x0030 => FrameType::DataUpload,
+            0x0040 => FrameType::SafetyOverride, // v2.10 新增
             _ => FrameType::Unknown,
         }
     }
@@ -183,6 +185,7 @@ impl IntercoreFrame {
             FrameType::ControlRsp => 0x0011,
             FrameType::StatusReport => 0x0020,
             FrameType::DataUpload => 0x0030,
+            FrameType::SafetyOverride => 0x0040, // v2.10 新增
             FrameType::Unknown => 0xFFFF,
         };
         result.write_u16::<BigEndian>(frame_type_val).map_err(|_| {
@@ -313,6 +316,7 @@ mod tests {
             FrameType::ControlRsp,
             FrameType::StatusReport,
             FrameType::DataUpload,
+            FrameType::SafetyOverride, // v2.10
         ];
 
         for frame_type in frame_types {
@@ -471,6 +475,7 @@ mod tests {
         assert_eq!(FrameType::from_u16(0x0011), FrameType::ControlRsp);
         assert_eq!(FrameType::from_u16(0x0020), FrameType::StatusReport);
         assert_eq!(FrameType::from_u16(0x0030), FrameType::DataUpload);
+        assert_eq!(FrameType::from_u16(0x0040), FrameType::SafetyOverride); // v2.10
         assert_eq!(FrameType::from_u16(0xFFFF), FrameType::Unknown);
     }
 

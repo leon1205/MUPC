@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-/// 融合系统状态（6 大类，21 RL 字段 + 3 辅助 = 24 字段）
+/// 融合系统状态（6 大类，24 + 3 RL 字段 = 27 字段，v2.10）
 #[derive(Debug, Clone)]
 pub struct FusedSystemState {
     // ── D1: 实时数据 (9 RL + 1 aux) ──
@@ -50,11 +50,19 @@ pub struct FusedSystemState {
     /// 实时模块剩余无功容量比例 [0.0, 1.0]
     /// 0 = 无功打满，1 = 完全空闲
     pub q_realtime_margin: f64,
-    // ── D8: 季节时段 (8 fields) ──
+    // ── D8: 季节时段 (8 维) ──
     /// 季节 one-hot 编码（6 维）：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留]
     pub season_encoding: [f64; 6],
     /// 时段 one-hot 编码（2 维）：[白天, 夜间]
     pub time_period_encoding: [f64; 2],
+    // ── D9: 安全覆盖状态 (v2.10 新增, 3 维) ──
+    /// 安全覆盖激活标志
+    /// true = 实时模块正在覆盖 AI 有功指令
+    pub safety_override_active: bool,
+    /// 安全覆盖触发原因（仅在 active=true 时有效）
+    pub safety_override_reason: Option<String>,
+    /// 安全覆盖强制放电功率 (kW)（仅在 active=true 时有效）
+    pub safety_override_p_ref: Option<f64>,
 }
 
 impl Default for FusedSystemState {
@@ -87,12 +95,16 @@ impl Default for FusedSystemState {
             q_realtime_margin: 0.5,
             season_encoding: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0], // 默认常规季
             time_period_encoding: [1.0, 0.0],                // 默认白天
+            // v2.10 新增字段
+            safety_override_active: false,
+            safety_override_reason: None,
+            safety_override_p_ref: None,
         }
     }
 }
 
 impl FusedSystemState {
-    /// 序列化为 56 维输入向量
+    /// 序列化为 59 维输入向量（v2.10）
     ///
     /// 布局:
     ///   [0..9]   D1 (10 标量，含 q_realtime_margin)
@@ -104,8 +116,10 @@ impl FusedSystemState {
     ///   [48]     D6 dispatch_p_set (None→0.0)
     ///   [49]     D7 q_realtime_margin
     ///   [50..56] D8 season_encoding(6) + time_period_encoding(2)
+    ///   [57]     D9 safety_override_active (0.0 or 1.0)
+    ///   [58]     D9 safety_override_p_ref (None→0.0)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(56);
+        let mut v = Vec::with_capacity(59);
 
         // D1 [0..10] 10 标量
         v.push(self.battery_soc as f32);
@@ -155,7 +169,15 @@ impl FusedSystemState {
             v.push(t as f32);
         }
 
-        debug_assert_eq!(v.len(), 56, "输入向量必须为 56 维");
+        // D9 [57..59] 3维（v2.10 新增）
+        v.push(if self.safety_override_active {
+            1.0
+        } else {
+            0.0
+        });
+        v.push(self.safety_override_p_ref.unwrap_or(0.0) as f32);
+
+        debug_assert_eq!(v.len(), 59, "输入向量必须为 59 维");
         v
     }
 }
@@ -361,8 +383,8 @@ mod tests {
         state.pv_forecast_15min = vec![0.1; 15];
         state.load_forecast_15min = vec![0.2; 15];
         let v = state.to_input_vector();
-        assert_eq!(v.len(), 56);
-        // D1 [0] = soc
+        assert_eq!(v.len(), 59); // v2.10: 56 → 59
+                                 // D1 [0] = soc
         assert!((v[0] - 0.5_f32).abs() < 1e-6);
         // D1 [6] = voltage_a
         assert!((v[6] - 1.0_f32).abs() < 1e-6);
@@ -374,20 +396,20 @@ mod tests {
 
     #[test]
     fn test_validate_input_vector_clean() {
-        let v = vec![1.0_f32; 56];
+        let v = vec![1.0_f32; 59]; // v2.10: 56 → 59
         assert!(validate_input_vector(&v).is_ok());
     }
 
     #[test]
     fn test_validate_input_vector_nan_rejected() {
-        let mut v = vec![1.0_f32; 56];
+        let mut v = vec![1.0_f32; 59]; // v2.10: 56 → 59
         v[23] = f32::NAN;
         assert!(validate_input_vector(&v).is_err());
     }
 
     #[test]
     fn test_validate_input_vector_inf_rejected() {
-        let mut v = vec![1.0_f32; 56];
+        let mut v = vec![1.0_f32; 59]; // v2.10: 56 → 59
         v[10] = f32::INFINITY;
         assert!(validate_input_vector(&v).is_err());
     }
@@ -416,15 +438,19 @@ mod tests {
     }
 
     #[test]
-    fn test_to_input_vector_56_dim() {
+    fn test_to_input_vector_59_dim() {
         let mut state = FusedSystemState::default();
         state.pv_forecast_15min = vec![0.1; 15];
         state.load_forecast_15min = vec![0.2; 15];
         let v = state.to_input_vector();
-        assert_eq!(v.len(), 56);
-        // D7 q_realtime_margin 在索引 9
+        assert_eq!(v.len(), 59); // v2.10: 56 → 59
+                                 // D7 q_realtime_margin 在索引 9
         assert!((v[9] - 0.5_f32).abs() < 1e-6);
         // D8 season_encoding[0] 在索引 50
         assert!((v[50] - 0.0_f32).abs() < 1e-6);
+        // D9 safety_override_active 在索引 57
+        assert!((v[57] - 0.0_f32).abs() < 1e-6); // 默认 false
+                                                 // D9 safety_override_p_ref 在索引 58
+        assert!((v[58] - 0.0_f32).abs() < 1e-6); // 默认 None → 0.0
     }
 }

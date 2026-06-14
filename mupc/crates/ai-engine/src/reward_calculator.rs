@@ -156,8 +156,8 @@ impl RewardCalculator {
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo - w[3] * p_voltage - r_ramp
     }
 
-    /// SCENE-01: 台区季节性负荷模式 v2.8
-    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo + w4*R_PQ_coordination - w5*R_ramp - w6*R_voltage_slope - w7*R_smooth
+    /// SCENE-01: 台区季节性负荷模式 v2.10
+    /// R = w1*R_pv - w2*P_batt_deg - w3*P_trafo + w4*R_PQ_coordination - w5*R_ramp - w6*R_voltage_slope - w7*R_smooth - w8*R_safety_override
     fn calc_agri_v2_8(
         &self,
         state: &FusedSystemState,
@@ -193,10 +193,36 @@ impl RewardCalculator {
         // 8. 下垂系数平滑惩罚（v2.8 新增）
         let r_smooth = self.calc_smooth_penalty(action.k_droop);
 
+        // 9. 安全覆盖惩罚（v2.10 新增）
+        let r_safety_override = self.safety_override_penalty(state);
+
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq
             - w[4] * r_ramp
             - w[5] * r_voltage_slope
             - w[6] * r_smooth
+            - w[7] * r_safety_override
+    }
+
+    /// 安全覆盖感知奖励调整（v2.10 新增）
+    ///
+    /// 当 safety_override_active=true 时，AI 应记录此次事件并学习避免触发。
+    /// 惩罚值根据触发原因分级：
+    /// - voltage_violation: -50.0（电压越限触发）
+    /// - q_exhausted: -30.0（无功耗尽触发）
+    /// - emergency: -100.0（紧急情况，最高惩罚）
+    fn safety_override_penalty(&self, state: &FusedSystemState) -> f64 {
+        if !state.safety_override_active {
+            return 0.0;
+        }
+
+        let reason = state.safety_override_reason.as_deref().unwrap_or("unknown");
+
+        match reason {
+            "voltage_violation" => -50.0,
+            "q_exhausted" => -30.0,
+            "emergency" => -100.0,
+            _ => -20.0,
+        }
     }
 
     /// v2.8 弃光奖励（含高电压差异化）
@@ -516,7 +542,7 @@ mod tests {
     #[test]
     fn test_weights_lookup() {
         let w = SceneWeights::default();
-        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 7);
+        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 8); // v2.10: 7 → 8
         assert_eq!(w.lookup(RunningMode::CommercialArbitrage).len(), 2);
     }
 
