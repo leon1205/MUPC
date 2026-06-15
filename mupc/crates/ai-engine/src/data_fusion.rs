@@ -55,7 +55,7 @@ pub struct FusedSystemState {
     pub season_encoding: [f64; 6],
     /// 时段 one-hot 编码（2 维）：[白天, 夜间]
     pub time_period_encoding: [f64; 2],
-    // ── D9: 安全覆盖状态 (v2.10 新增, 3 维) ──
+    // ── D9: 安全覆盖状态 (v2.10 新增, 5 维) ──
     /// 安全覆盖激活标志
     /// true = 实时模块正在覆盖 AI 有功指令
     pub safety_override_active: bool,
@@ -63,6 +63,10 @@ pub struct FusedSystemState {
     pub safety_override_reason: Option<String>,
     /// 安全覆盖强制放电功率 (kW)（仅在 active=true 时有效）
     pub safety_override_p_ref: Option<f64>,
+    /// 安全覆盖连续触发次数（v2.14 新增）
+    pub safety_override_consecutive: u32,
+    /// 安全覆盖滑动窗口内覆盖比例（v2.14 新增，范围 [0.0, 1.0]）
+    pub safety_override_ratio: f64,
     // ── D10: 概率负荷预测 (v2.11 新增, 3 维) ──
     /// 分位数负荷预测（15 维，对应 15 分钟预测窗口）
     pub load_forecast_quantiles: Vec<f64>,
@@ -106,6 +110,9 @@ impl Default for FusedSystemState {
             safety_override_active: false,
             safety_override_reason: None,
             safety_override_p_ref: None,
+            // v2.14 新增字段
+            safety_override_consecutive: 0,
+            safety_override_ratio: 0.0,
             // v2.11 新增字段
             load_forecast_quantiles: vec![],
             shock_load_probability: 0.0,
@@ -115,7 +122,7 @@ impl Default for FusedSystemState {
 }
 
 impl FusedSystemState {
-    /// 序列化为 76 维输入向量（v2.11）
+    /// 序列化为 78 维输入向量（v2.14）
     ///
     /// 布局:
     ///   [0..9]   D1 (10 标量，含 q_realtime_margin)
@@ -127,10 +134,10 @@ impl FusedSystemState {
     ///   [48]     D6 dispatch_p_set (None→0.0)
     ///   [49]     D7 q_realtime_margin
     ///   [50..56] D8 season_encoding(6) + time_period_encoding(2)
-    ///   [57..58] D9 safety_override_active + safety_override_p_ref (2 维)
-    ///   [59..73] D10 load_forecast_quantiles (15 维，v2.11 新增)
-    ///   [74]     D10 shock_load_probability (1 维，v2.11 新增)
-    ///   [75]     D10 base_load (1 维，v2.11 新增)
+    ///   [57..60] D9 safety_override (4 维，v2.10 新增，v2.14 扩展 consecutive+ratio)
+    ///   [61..75] D10 load_forecast_quantiles (15 维，v2.11 新增)
+    ///   [76]     D10 shock_load_probability (1 维，v2.11 新增)
+    ///   [77]     D10 base_load (1 维，v2.11 新增)
     pub fn to_input_vector(&self) -> Vec<f32> {
         let mut v = Vec::with_capacity(76);
 
@@ -182,13 +189,15 @@ impl FusedSystemState {
             v.push(t as f32);
         }
 
-        // D9 [57..58] 2维（v2.10 新增）
+        // D9 [57..60] 4维（v2.10 新增，v2.14 扩展）
         v.push(if self.safety_override_active {
             1.0
         } else {
             0.0
         });
         v.push(self.safety_override_p_ref.unwrap_or(0.0) as f32);
+        v.push(self.safety_override_consecutive as f32);
+        v.push(self.safety_override_ratio as f32);
 
         // D10 [59..73] 15维（v2.11 新增：分位数负荷预测）
         let quantiles = pad_or_truncate(&self.load_forecast_quantiles, 15);
@@ -200,7 +209,7 @@ impl FusedSystemState {
         // D10 [75] 1维（v2.11 新增：基础负荷）
         v.push(self.base_load as f32);
 
-        debug_assert_eq!(v.len(), 76, "输入向量必须为 76 维");
+        debug_assert_eq!(v.len(), 78, "输入向量必须为 78 维");
         v
     }
 }
@@ -409,7 +418,7 @@ mod tests {
         state.shock_load_probability = 0.3;
         state.base_load = 100.0;
         let v = state.to_input_vector();
-        assert_eq!(v.len(), 76); // v2.11: 59 → 76
+        assert_eq!(v.len(), 78); // v2.14: 76 → 78
                                  // D1 [0] = soc
         assert!((v[0] - 0.5_f32).abs() < 1e-6);
         // D1 [6] = voltage_a
@@ -418,12 +427,12 @@ mod tests {
         assert!((v[10] - 0.1_f32).abs() < 1e-6);
         // D6 [48] = dispatch_p_set (None → 0.0)
         assert!((v[48] - 0.0_f32).abs() < 1e-6);
-        // D10 quantiles [59]
-        assert!((v[59] - 0.15_f32).abs() < 1e-6);
-        // D10 shock_load_probability [74]
-        assert!((v[74] - 0.3_f32).abs() < 1e-6);
-        // D10 base_load [75]
-        assert!((v[75] - 100.0_f32).abs() < 1e-6);
+        // D10 quantiles [61]
+        assert!((v[61] - 0.15_f32).abs() < 1e-6);
+        // D10 shock_load_probability [76]
+        assert!((v[76] - 0.3_f32).abs() < 1e-6);
+        // D10 base_load [77]
+        assert!((v[77] - 100.0_f32).abs() < 1e-6);
     }
 
     #[test]
@@ -475,18 +484,19 @@ mod tests {
         state.pv_forecast_15min = vec![0.1; 15];
         state.load_forecast_15min = vec![0.2; 15];
         let v = state.to_input_vector();
-        assert_eq!(v.len(), 76); // v2.11: 59 → 76
+        assert_eq!(v.len(), 78); // v2.14: 76 → 78
                                  // D7 q_realtime_margin 在索引 9
         assert!((v[9] - 0.5_f32).abs() < 1e-6);
         // D8 season_encoding[0] 在索引 50
         assert!((v[50] - 0.0_f32).abs() < 1e-6);
-        // D9 safety_override_active 在索引 57
-        assert!((v[57] - 0.0_f32).abs() < 1e-6); // 默认 false
-                                                 // D9 safety_override_p_ref 在索引 58
+        // D9 safety_override (4维): active, p_ref, consecutive, ratio
+        assert!((v[57] - 0.0_f32).abs() < 1e-6); // 默认 false → 0.0
         assert!((v[58] - 0.0_f32).abs() < 1e-6); // 默认 None → 0.0
-                                                 // D10 shock_load_probability 在索引 74
-        assert!((v[74] - 0.0_f32).abs() < 1e-6); // 默认 0.0
-                                                  // D10 base_load 在索引 75
-        assert!((v[75] - 0.0_f32).abs() < 1e-6); // 默认 0.0
+        assert!((v[59] - 0.0_f32).abs() < 1e-6); // 默认 consecutive → 0.0
+        assert!((v[60] - 0.0_f32).abs() < 1e-6); // 默认 ratio → 0.0
+        // D10 shock_load_probability [76]
+        assert!((v[76] - 0.0_f32).abs() < 1e-6); // 默认 0.0
+        // D10 base_load [77]
+        assert!((v[77] - 0.0_f32).abs() < 1e-6); // 默认 0.0
     }
 }

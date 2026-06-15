@@ -209,6 +209,33 @@ pub struct RewardCalculator {
     pq_thresholds: PqCoordinationThresholds,
 }
 
+/// 安全覆盖惩罚 standalone 实现（v2.14）
+///
+/// 基于滑动窗口覆盖比例和连续触发次数计算惩罚，返回归一化值 ∈ [-1.0, 0.0]
+fn safety_override_penalty_impl(state: &FusedSystemState) -> f64 {
+    let k_override = 5.0;
+    let k_consecutive = 10.0;
+    let min_sample_threshold = 10;
+    let norm_divisor = 15.0;
+
+    if state.safety_override_consecutive < min_sample_threshold {
+        if !state.safety_override_active {
+            return 0.0;
+        }
+        let raw: f64 = match state.safety_override_reason.as_deref().unwrap_or("unknown") {
+            "voltage_violation" => -50.0_f64,
+            "q_exhausted" => -30.0_f64,
+            "emergency" => -100.0_f64,
+            _ => -20.0_f64,
+        };
+        return (raw / norm_divisor).max(-1.0).min(0.0);
+    }
+
+    let ratio_penalty = -k_override * state.safety_override_ratio;
+    let consecutive_penalty = -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
+    ((ratio_penalty + consecutive_penalty) / norm_divisor).max(-1.0).min(0.0)
+}
+
 impl RewardCalculator {
     pub fn new(weights: SceneWeights) -> Self {
         Self {
@@ -478,7 +505,13 @@ impl RewardCalculator {
         let p_trafo = self.overload_penalty_piecewise(state.transformer_load);
 
         // 5. P-Q 协同度奖励（v2.8 核心）
-        let r_pq = self.calc_pq_coordination(state, action.p_ref);
+        // 5. P-Q 协同度奖励（v2.8 核心）
+        // 互斥逻辑（v2.14 新增）：当 SafetyOverride 触发时跳过 P-Q 惩罚，避免重复惩罚
+        let r_pq = if state.safety_override_active {
+            0.0
+        } else {
+            self.calc_pq_coordination(state, action.p_ref)
+        };
 
         // 6. 变化率惩罚
         let r_ramp = (action.p_ref - prev_p_batt).abs() / self.battery_capacity_kwh;
@@ -522,8 +555,7 @@ impl RewardCalculator {
         // r_smooth 范围约 [-130, 0]，除以 130 映射到 [-1, 0]
         let r_smooth_norm = (r_smooth / 130.0).max(-1.0).min(0.0);
 
-        // 8. 安全覆盖惩罚标准化 [-100, 0] → [-1, 0]
-        let r_safety_override_norm = (r_safety_override / 100.0).max(-1.0).min(0.0);
+        // 8. 安全覆盖惩罚（v2.14 已归一化，safety_override_penalty 返回 [-1, 0]）
 
         // ===== v2.12 R-02: 塑造奖励（提前预警）=====
         let r_overload_warning = self.overload_warning(state.transformer_load);
@@ -537,7 +569,7 @@ impl RewardCalculator {
             - w[4] * r_ramp_norm
             - w6_dynamic * r_voltage_slope_norm
             - w[6] * r_smooth_norm
-            - w[7] * r_safety_override_norm
+            - w[7] * r_safety_override
             + r_shaping
             + r_soc_balance
             + self.calc_shock_readiness_reward(state, action.p_ref)
@@ -647,26 +679,20 @@ impl RewardCalculator {
         -lambda * (soc - 0.5).abs()
     }
 
-    /// 安全覆盖感知奖励调整（v2.10 新增）
+    /// 安全覆盖惩罚（v2.14 重构）
     ///
-    /// 当 safety_override_active=true 时，AI 应记录此次事件并学习避免触发。
-    /// 惩罚值根据触发原因分级：
-    /// - voltage_violation: -50.0（电压越限触发）
-    /// - q_exhausted: -30.0（无功耗尽触发）
-    /// - emergency: -100.0（紧急情况，最高惩罚）
+    /// 基于滑动窗口覆盖比例和连续触发次数计算惩罚，返回归一化值 ∈ [-1.0, 0.0]：
+    /// - ratio_penalty = -k_override * safety_override_ratio / 15.0
+    /// - consecutive_penalty = -k_consecutive * min(consecutive / 10, 1.0) / 15.0
+    ///
+    /// 系数校准（架构师建议）：
+    /// - k_override = 5.0（覆盖比例惩罚）
+    /// - k_consecutive = 10.0（连续触发惩罚）
+    /// - 除以 15.0 归一化到 [-1.0, 0.0] 区间，与其他惩罚项量纲对齐
+    ///
+    /// 最小样本保护：窗口内决策少于 10 次时，用固定惩罚（归一化后）代替比例惩罚
     fn safety_override_penalty(&self, state: &FusedSystemState) -> f64 {
-        if !state.safety_override_active {
-            return 0.0;
-        }
-
-        let reason = state.safety_override_reason.as_deref().unwrap_or("unknown");
-
-        match reason {
-            "voltage_violation" => -50.0,
-            "q_exhausted" => -30.0,
-            "emergency" => -100.0,
-            _ => -20.0,
-        }
+        safety_override_penalty_impl(state)
     }
 
     /// v2.12 R-05: 电压斜率惩罚动态权重
@@ -1047,7 +1073,13 @@ impl RewardCalculator {
         let p_trafo_norm = Self::overload_penalty_piecewise_static(state.transformer_load) / 100.0;
 
         // 4. P-Q 协同度奖励（简化）
-        let r_pq = Self::calc_pq_coordination_static(state, action.p_ref);
+        // 4. P-Q 协同度奖励（简化）
+        // 互斥逻辑（v2.14 新增）：当 SafetyOverride 触发时跳过 P-Q 惩罚
+        let r_pq = if state.safety_override_active {
+            0.0
+        } else {
+            Self::calc_pq_coordination_static(state, action.p_ref)
+        };
 
         // 5. 变化率惩罚
         let battery_capacity_kwh = 100.0;
@@ -1066,7 +1098,7 @@ impl RewardCalculator {
         let r_smooth = -(k_droop_diff + smooth_lambda * (action.k_droop - k_droop_max).max(0.0));
 
         // 8. 安全覆盖惩罚（简化）
-        let r_safety_override = if state.safety_override_active { -20.0 } else { 0.0 };
+        let r_safety_override = safety_override_penalty_impl(state);
 
         w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo_norm + w[3] * r_pq
             - w[4] * r_ramp
