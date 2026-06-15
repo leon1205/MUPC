@@ -509,11 +509,13 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 | LSTM |
 | | base_load | f64 | [0.0, 10000.0] | kW | 基础负荷（50% 分位数）| LSTM |
 
-**状态空间总维度（v2.14）：** 30 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 8 个定长数组 = **78 维**。
+**状态空间总维度（v2.14）：** 10+30+3+3+2+1+1+8+4+17 = **78 维**。
 
-> **v2.14 说明：** D9 新增 `safety_override_consecutive`（连续触发次数）和 `safety_override_ratio`（滑动窗口覆盖比例），用于精细化 SafetyOverride 惩罚计算。输入向量从 76 维扩展至 78 维。
+> **v2.14 说明：** D9 新增 `safety_override_consecutive`（连续触发次数）和 `safety_override_ratio`（滑动窗口覆盖比例），用于精细化 SafetyOverride 惩罚计算。D9 从 2 维扩展至 4 维，输入向量从 76 维扩展至 78 维。
 
-> **v2.11 说明：** D10 新增分位数负荷预测（load_forecast_quantiles 15维 + shock_load_probability + base_load），支撑冲击负荷预备度奖励计算。输入向量保持 59 维。
+> **v2.11 说明：** D10 新增分位数负荷预测（load_forecast_quantiles 15维 + shock_load_probability + base_load），支撑冲击负荷预备度奖励计算。输入向量从 61 维扩展至 76 维。
+
+> **历史说明：** PRD v2.10/v2.11 中 59 维的描述不准确，实际应为 61 维（v2.10）和 76 维（v2.11）。
 
 > **v2.10 说明：** D9 新增安全覆盖状态（3 维：safety_override_active, safety_override_reason, safety_override_p_ref），用于 AI 引擎感知实时控制模块临时覆盖事件。输入向量从 56 维扩展至 59 维，RL 模型文件需重新训练或填充默认值向后兼容。
 
