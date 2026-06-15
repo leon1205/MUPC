@@ -2,10 +2,11 @@
 
 # MUPC AI 引擎 - 模块设计文档
 
-[DESIGN_APPROVED] — v2.13 奖励函数精细化
+[DESIGN_APPROVED] — v2.14 SafetyOverride 奖励函数增强
 
 | 版本 | 日期       | 作者   | 状态 |
 | ---- | ---------- | ------ | ---- |
+| v2.14 | 2026-06-15 | 架构师 | [DESIGN_APPROVED] |
 | v2.13 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.12 | 2026-06-14 | 架构师 | [DESIGN_APPROVED] |
 | v2.12 | 2026-06-14 | 架构师 | 规划中（R-04~R-07 中优先级） |
@@ -15,7 +16,7 @@
 | v2.7 | 2026-06-13 | 架构师 | 历史版本 |
 | v2.6 | 2026-06-10 | 架构师 | 历史版本 |
 
-**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.13 (`[REVIEWED: PASS]`)
+**对应 PRD:** `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md` v2.14 (`[REVIEWED: PASS]`)
 
 ---
 
@@ -439,7 +440,7 @@ pub struct DispatchAdapter {
 
 数据字段：dispatch_p_set (Option<f64>), dispatch_q_set (Option<f64>)。通过 gateway 事件驱动接收。缺失时两个字段均为 None，RL 决策跳过调度相关约束 (ACT-05)。
 
-### 3.5 FusedSystemState 结构体（v2.10：32 字段，59 维输入向量）
+### 3.5 FusedSystemState 结构体（v2.14：34 字段，78 维输入向量）
 
 ```rust
 /// 融合系统状态（7 大类，26 个 RL 字段 + 3 个辅助字段 = 29 字段，v2.5）
@@ -512,7 +513,7 @@ pub struct FusedSystemState {
     pub season_encoding: [f64; 6],
     /// 时段 one-hot 编码（2 维）：[白天, 夜间]
     pub time_period_encoding: [f64; 2],
-    // ------- D9: 安全覆盖状态 (v2.10 新增，3 字段) -------
+    // ------- D9: 安全覆盖状态 (v2.10 新增，v2.14 扩展至 5 字段) -------
     /// 安全覆盖激活标志
     /// true = 实时控制模块正在覆盖 AI 有功指令
     pub safety_override_active: bool,
@@ -520,18 +521,22 @@ pub struct FusedSystemState {
     pub safety_override_reason: Option<String>,
     /// 安全覆盖强制放电功率 (kW)（仅在 active=true 时有效）
     pub safety_override_p_ref: Option<f64>,
+    /// 安全覆盖连续触发次数（v2.14 新增）
+    pub safety_override_consecutive: u32,
+    /// 安全覆盖滑动窗口内覆盖比例（v2.14 新增，范围 [0.0, 1.0]）
+    pub safety_override_ratio: f64,
 }
 ```
 
-### 3.6 to_input_vector() -- 59 维序列化（v2.10）
+### 3.6 to_input_vector() -- 78 维序列化（v2.14）
 
-将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **59 维向量**（v2.10 从 56 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
+将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **78 维向量**（v2.14 从 76 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
 
 ```rust
 impl FusedSystemState {
-    /// 序列化为 59 维输入向量（v2.10）
+    /// 序列化为 78 维输入向量（v2.14）
     /// 布局：
-    ///   [0..10]  D1 实时数据 (10 个标量，不含 timestamp，含 q_realtime_margin)
+    ///   [0..9]   D1 实时数据 (10 个标量，含 q_realtime_margin)
     ///   [10..25] D2 pv_forecast (15 维)
     ///   [25..40] D2 load_forecast (15 维)
     ///   [40..43] D3 电价 (3 个 RL 字段)
@@ -540,10 +545,12 @@ impl FusedSystemState {
     ///   [48]     D6 dispatch_p_set (1 维，None 时填 0.0)
     ///   [49]     D7 q_realtime_margin (1 维)
     ///   [50..56] D8 season_encoding (6 维) + time_period_encoding (2 维)
-    ///   [57]     D9 safety_override_active (0.0 or 1.0)
-    ///   [58]     D9 safety_override_p_ref (None→0.0)
+    ///   [57..60] D9 safety_override (4 维，v2.10 新增，v2.14 扩展 consecutive+ratio)
+    ///   [61..75] D10 load_forecast_quantiles (15 维，v2.11 新增)
+    ///   [76]     D10 shock_load_probability (1 维，v2.11 新增)
+    ///   [77]     D10 base_load (1 维，v2.11 新增)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(59);
+        let mut v = Vec::with_capacity(78);
 
         // [0..10] D1: 10 个标量 (不含 timestamp，含 q_realtime_margin)
         v.push(self.battery_soc as f32);
@@ -752,16 +759,18 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） |
 | **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] |
 | | time_period_encoding | [f64; 2] | one-hot | - | 时段编码：[白天, 夜间] |
-| **D9-安全覆盖（v2.10新增）** | safety_override_active | bool | {0, 1} | - | 安全覆盖激活标志 |
+| **D9-安全覆盖（v2.10新增，v2.14扩展）** | safety_override_active | bool | {0, 1} | - | 安全覆盖激活标志 |
 | | safety_override_reason | Option\<String\> | - | - | 触发原因（voltage_violation/q_exhausted/emergency） |
 | | safety_override_p_ref | Option\<f64\> | [-50.0, 50.0] | kW | 强制放电功率 |
+| | safety_override_consecutive | u32 | [0, ∞) | - | 连续触发次数（v2.14 新增） |
+| | safety_override_ratio | f64 | [0.0, 1.0] | - | 滑动窗口内覆盖比例（v2.14 新增） |
 | **D10-概率负荷预测（v2.11新增）** | load_forecast_quantiles | Vec\<f64\> | 15 维 | kW | 分位数负荷预测（P10/P50/P90...） |
 | | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 |
 | | base_load | f64 | [0.0, 1000.0] | kW | 基础负荷（50% 分位数） |
 
-**输入向量维度（v2.11）：** 59 维 = 28 个标量 + 2 个 Option + 2 个向量（各 15 维）+ 8 个定长数组。
+**输入向量维度（v2.14）：** 78 维 = 30 个标量 + 2 个 Option + 2 个向量（各 15 维）+ 8 个定长数组。
 
-> **注：** v2.10 安全覆盖状态（D9）使 AI 引擎感知实时控制模块临时覆盖事件，并在奖励函数中获得相应惩罚。v2.11 新增分位数负荷预测（D10），支撑冲击负荷预备度奖励计算。
+> **注：** v2.14 D9 新增 `safety_override_consecutive` 和 `safety_override_ratio` 字段（2 维），用于精细化 SafetyOverride 惩罚计算。v2.10 安全覆盖状态（D9）使 AI 引擎感知实时控制模块临时覆盖事件，并在奖励函数中获得相应惩罚。v2.11 新增分位数负荷预测（D10），支撑冲击负荷预备度奖励计算。
 
 **电压感知 P/Q 协同控制策略（v2.7 双参数模式）：**
 
@@ -1375,17 +1384,48 @@ R_safety_override      = 安全覆盖惩罚（v2.10 新增，见下）
 其中 v_avg = (voltage_phase_a + voltage_phase_b + voltage_phase_c) / 3.0
 ```
 
-**安全覆盖惩罚 R_safety_override（v2.10 新增）：**
+**安全覆盖惩罚 R_safety_override（v2.14 重构）：**
+
+v2.14 采用分层计算策略，结合滑动窗口统计信息：
 
 ```
-if safety_override_active:
-    match reason:
-        "voltage_violation" => -50.0   // 电压越限触发
-        "q_exhausted" => -30.0          // 无功耗尽触发
-        "emergency" => -100.0            // 紧急情况（最高惩罚）
-        _ => -20.0
+// 样本不足时（consecutive < 10）：使用原因固定惩罚，归一化至 [-1, 0]
+if safety_override_consecutive < 10:
+    if safety_override_active:
+        match reason:
+            "voltage_violation" => -50.0 / 15 ≈ -3.33
+            "q_exhausted" => -30.0 / 15 ≈ -2.0
+            "emergency" => -100.0 / 15 ≈ -6.67
+            _ => -20.0 / 15 ≈ -1.33
+    else:
+        0.0
+
+// 样本充足时（consecutive >= 10）：比例 + 连续次数惩罚，归一化至 [-1, 0]
 else:
-    0.0
+    ratio_penalty = -5.0 * safety_override_ratio
+    consecutive_penalty = -10.0 * (consecutive / 10).clamp(0, 1)
+    R_safety_override = (ratio_penalty + consecutive_penalty) / 15
+```
+
+**系数说明（v2.14 校准）：**
+
+| 系数 | 值 | 说明 |
+|------|------|------|
+| k_override | 5.0 | 覆盖比例惩罚系数 |
+| k_consecutive | 10.0 | 连续触发次数惩罚系数 |
+| min_sample_threshold | 10 | 最小样本阈值 |
+| norm_divisor | 15.0 | 归一化除数 |
+
+**互斥惩罚逻辑（v2.14 新增）：**
+
+当 `safety_override_active = true` 时，跳过该步的 **P-Q 协同度惩罚**，避免同一次事件双重惩罚：
+
+```rust
+let r_pq = if state.safety_override_active {
+    0.0  // 互斥：SafetyOverride 事件不重复惩罚
+} else {
+    self.calc_pq_coordination(state, action.p_ref)
+};
 ```
 
 **权重表（v2.10）：**

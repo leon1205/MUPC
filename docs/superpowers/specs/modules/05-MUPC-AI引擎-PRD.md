@@ -1,9 +1,10 @@
 # MUPC AI 优化引擎 - 模块产品需求文档 (PRD)
 
-[REVIEWED: PASS] — v2.13 奖励函数精细化
+[REVIEWED: PASS] — v2.14 SafetyOverride 奖励函数增强
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
+| v2.14 | 2026-06-15 | 需求分析师 | [REVIEWED: PASS] |
 | v2.13 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
 | v2.12 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
 | v2.12 | 2026-06-14 | 需求分析师 | 规划中（R-04~R-07 中优先级） |
@@ -34,6 +35,8 @@
 > - R-05：电压斜率惩罚动态权重 w6(v) = base_w6 × (1.0 + k × |ΔV|)（规划中）
 > - R-06：冲击负荷响应奖励 R_shock_response = f(load_shedding, response_time, P90)（规划中）
 > - R-07：P-Q 协同度阈值可配置化（Q_THRESHOLD、P_THRESHOLD 从配置读取）（规划中）
+
+> **v2.14 核心变更：** FusedSystemState 新增 `safety_override_consecutive`（连续触发次数）和 `safety_override_ratio`（滑动窗口覆盖比例）字段，扩展至 78 维。SafetyOverride 惩罚函数重构为分层计算：样本不足时使用原因固定惩罚，样本充足时使用比例+连续次数惩罚并归一化至 [-1, 0]。新增 P-Q 协同度与 SafetyOverride 惩罚互斥逻辑，避免双重惩罚。详见第 5.2 节（D9 字段扩展）和第 6.2 节（SCENE-01 奖励函数）。
 
 > **v2.11 核心变更：** 新增自适应权重优化器（MetaRL + NSGA-II）和冲击负荷概率预测（LSTM 分位数预测，P10/P50/P90）。详见第 4.9 节和第 6.9 节。
 
@@ -497,14 +500,18 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） | intercore |
 | **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节 one-hot 编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
 | | time_period_encoding | [f64; 2] | one-hot | - | 时段 one-hot 编码：[白天, 夜间] | data-processing |
-| **D9-安全覆盖状态（v2.10新增）** | safety_override_active | bool | {true, false} | - | 安全覆盖激活标志，true=实时模块正在覆盖 AI 有功指令 | intercore |
+| **D9-安全覆盖状态（v2.10新增，v2.14扩展）** | safety_override_active | bool | {true, false} | - | 安全覆盖激活标志，true=实时模块正在覆盖 AI 有功指令 | intercore |
 | | safety_override_reason | Option\<String\> | - | - | 安全覆盖触发原因（仅 active=true 时有效）| intercore |
 | | safety_override_p_ref | Option\<f64\> | [-50.0, 50.0] | kW | 安全覆盖强制放电功率（仅 active=true 时有效）| intercore |
+| | safety_override_consecutive | u32 | [0, ∞) | - | 连续触发次数（v2.14 新增）| intercore |
+| | safety_override_ratio | f64 | [0.0, 1.0] | - | 滑动窗口内覆盖比例（v2.14 新增）| intercore |
 | **D10-概率负荷预测（v2.11新增）** | load_forecast_quantiles | Vec\<f64\>(15) | [0.0, 10000.0] | kW | 分位数负荷预测（P10/P50/P90...）| LSTM |
 | | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 | LSTM |
 | | base_load | f64 | [0.0, 10000.0] | kW | 基础负荷（50% 分位数）| LSTM |
 
-**状态空间总维度（v2.11）：** 28 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 8 个定长数组 = **59 维**。
+**状态空间总维度（v2.14）：** 30 个标量 + 2 个 Option 字段 + 2 个向量字段（各 15 维）+ 8 个定长数组 = **78 维**。
+
+> **v2.14 说明：** D9 新增 `safety_override_consecutive`（连续触发次数）和 `safety_override_ratio`（滑动窗口覆盖比例），用于精细化 SafetyOverride 惩罚计算。输入向量从 76 维扩展至 78 维。
 
 > **v2.11 说明：** D10 新增分位数负荷预测（load_forecast_quantiles 15维 + shock_load_probability + base_load），支撑冲击负荷预备度奖励计算。输入向量保持 59 维。
 
@@ -683,19 +690,50 @@ R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处�
          - R_safety_override                    // 安全覆盖惩罚（v2.10 新增）
 ```
 
-**安全覆盖惩罚 R_safety_override（v2.10 新增）：**
+**安全覆盖惩罚 R_safety_override（v2.14 重构）：**
 
-当 safety_override_active=true 时，AI 应记录此次事件并学习避免触发：
+当 safety_override_active=true 时，AI 应记录此次事件并学习避免触发。v2.14 采用分层计算策略：
 
 ```
-if safety_override_active:
-    match reason:
-        "voltage_violation" => -50.0   // 电压越限触发
-        "q_exhausted" => -30.0          // 无功耗尽触发
-        "emergency" => -100.0          // 紧急情况（最高惩罚）
-        _ => -20.0
+// 样本不足时（consecutive < 10）：使用原因固定惩罚
+if consecutive < 10:
+    if safety_override_active:
+        match reason:
+            "voltage_violation" => -50.0 / 15 ≈ -3.33
+            "q_exhausted" => -30.0 / 15 ≈ -2.0
+            "emergency" => -100.0 / 15 ≈ -6.67
+            _ => -20.0 / 15 ≈ -1.33
+    else:
+        0.0
+
+// 样本充足时（consecutive >= 10）：比例 + 连续次数惩罚，归一化至 [-1, 0]
 else:
-    0.0
+    ratio_penalty = -5.0 * safety_override_ratio
+    consecutive_penalty = -10.0 * (consecutive / 10).clamp(0, 1)
+    R_safety_override = (ratio_penalty + consecutive_penalty) / 15
+```
+
+**系数说明（v2.14 校准）：**
+
+| 系数 | 值 | 说明 |
+|------|------|------|
+| k_override | 5.0 | 覆盖比例惩罚系数 |
+| k_consecutive | 10.0 | 连续触发次数惩罚系数 |
+| min_sample_threshold | 10 | 最小样本阈值 |
+| norm_divisor | 15.0 | 归一化除数 |
+
+**返回值范围：** [-1.0, 0.0]，与其他惩罚项一致
+
+**互斥惩罚逻辑（v2.14 新增）：**
+
+当 `safety_override_active = true` 时，跳过该步的 **P-Q 协同度惩罚**，避免同一次事件双重惩罚：
+
+```
+let r_pq = if state.safety_override_active {
+    0.0  // 互斥：SafetyOverride 事件不重复惩罚
+} else {
+    self.calc_pq_coordination(state, action.p_ref)
+};
 ```
 
 **P-Q 协同度奖励 R_PQ_coordination（v2.8 新增）：**
