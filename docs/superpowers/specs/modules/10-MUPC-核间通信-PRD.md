@@ -359,7 +359,7 @@ Payload 格式（JSON 编码，v2.0）：
 | timestamp_ms | u64 | UTC 时标（毫秒） |
 | frame_version | u8 | 帧版本号，v2.0 为 `2`（用于版本协商） |
 
-> **注意**：`load_shedding` 和 `pv_limit` **不通过此帧发送**，而是通过 SouthCommandDispatcher 发送到南向设备（光伏逆变器、负荷控制装置），避免核间通信负载过大。 |
+> **注意**：`load_shedding` 和 `pv_limit` **不通过此帧发送**，而是通过 SouthCommandDispatcher 发送到南向设备（光伏逆变器、负荷控制装置），避免核间通信负载过大。
 
 ### 6.5 控制响应帧（ControlRsp, 0x0011）
 
@@ -367,7 +367,7 @@ Payload 格式（JSON 编码）：
 
 ```json
 {
-    "cmd_type": "P_batt_set",
+    "cmd_type": "p_ref",
     "seq_no": 42,
     "result": "success",
     "error_msg": "",
@@ -552,7 +552,7 @@ Payload 格式（JSON 编码，v2.10）：
 
 | 编号 | 验收项 | 验证方式 |
 |------|-------|---------|
-| IC-AC-07 | 支持 4 种本地指令类型：P_batt_set、Q_batt_set、分相补偿、启停 | 单元测试 |
+| IC-AC-07 | 支持双参数控制指令：p_ref（有功基准点）+ k_droop（电压-有功下垂系数），v2.7+ | 单元测试 |
 | IC-AC-08 | 支持调度指令转发：P_set、Q_set、一次调频参数 | 集成测试 |
 | IC-AC-09 | 指令下发延迟 ≤ 50ms | 性能测试 |
 | IC-AC-10 | 指令确认超时 5 秒，超时标记失败 | 单元测试 |

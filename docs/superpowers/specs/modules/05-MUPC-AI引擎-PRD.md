@@ -1,56 +1,6 @@
-# MUPC AI 优化引擎 - 模块产品需求文档 (PRD)
+# MUPC AI 优化引擎 - 模块产品需求文档（统一版 v2.14）
 
-[REVIEWED: PASS] — v2.14 SafetyOverride 奖励函数增强
-
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v2.14 | 2026-06-15 | 需求分析师 | [REVIEWED: PASS] |
-| v2.13 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
-| v2.12 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
-| v2.12 | 2026-06-14 | 需求分析师 | 规划中（R-04~R-07 中优先级） |
-| v2.11 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
-| v2.10 | 2026-06-14 | 需求分析师 | [REVIEWED: PASS] |
-| v2.9 | 2026-06-14 | 需求分析师 | 评审通过 |
-| v2.8 | 2026-06-13 | 需求分析师 | 评审通过 |
-| v2.6 | 2026-06-10 | 需求分析师 | 评审通过 |
-| v2.5 | 2026-06-08 | 需求分析师 | 评审通过 |
-| v2.4 | 2026-06-07 | 需求分析师 | 评审通过 |
-
----
-
-> 本文档为 AI 优化引擎模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
->
-> **v2.0 核心变更：** SceneClassifier 自动分类器已删除，替换为 ModeSelector 互斥模式选择器。详见第 4 章。
->
-> **v2.1 核心变更：** 状态空间移除 D5（电能质量），动作空间移除 A3a/A3b/A3c（分相补偿系数）。三相不平衡治理由实时控制核心模块独立处理。详见第 5 章。
->
-> **v2.2 核心变更：** D1-实时数据新增三相电压标幺值（voltage_phase_a/b/c），用于电压感知 P/Q 协同控制（过/低电压检测→有功充放+无功调节）。验证 q_batt_set 符号定义完整性。详见第 5 章。
->
-> **v2.12 核心变更：** SCENE-01 奖励函数七项改进（R-01~R-03 已实现，R-04~R-07 规划中）。详见第 6.2 节（SCENE-01）和第 6.10~6.13 节。
->
-> - R-01：奖励子项标准化到 [-1,1] 区间（已实现）
-> - R-02：引入塑造奖励，提前预警稀疏事件（已实现）
-> - R-03：SOC 均衡奖励，鼓励 SOC 保持在 50% 附近（已实现）
-> - R-04：变压器过载分段惩罚（75%~90% 线性/90%~100% 指数/>100% 硬惩罚）（规划中）
-> - R-05：电压斜率惩罚动态权重 w6(v) = base_w6 × (1.0 + k × |ΔV|)（规划中）
-> - R-06：冲击负荷响应奖励 R_shock_response = f(load_shedding, response_time, P90)（规划中）
-> - R-07：P-Q 协同度阈值可配置化（Q_THRESHOLD、P_THRESHOLD 从配置读取）（规划中）
-
-> **v2.14 核心变更：** FusedSystemState 新增 `safety_override_consecutive`（连续触发次数）和 `safety_override_ratio`（滑动窗口覆盖比例）字段，扩展至 78 维。SafetyOverride 惩罚函数重构为分层计算：样本不足时使用原因固定惩罚，样本充足时使用比例+连续次数惩罚并归一化至 [-1, 0]。新增 P-Q 协同度与 SafetyOverride 惩罚互斥逻辑，避免双重惩罚。详见第 5.2 节（D9 字段扩展）和第 6.2 节（SCENE-01 奖励函数）。
-
-> **v2.11 核心变更：** 新增自适应权重优化器（MetaRL + NSGA-II）和冲击负荷概率预测（LSTM 分位数预测，P10/P50/P90）。详见第 4.9 节和第 6.9 节。
-
-> **v2.10 核心变更：** 状态空间新增 q_realtime_margin 数据通道（FusedSystemState → 59维），SafetyOverride 帧类型（0x0040）定义极端工况下实时模块临时覆盖 AI 有功指令的接口规范。详见第 2.3 节（状态空间扩展）和第 3 章（安全触发覆盖机制）。
-
-> **v2.9 核心变更：** 新增 RobustnessManager 电压异常应急策略（电压骤升/骤降、电池SOC异常检测 + 应急动作），SCENE-01 奖励函数新增 safety_override_penalty()。详见第 6.2 节（SCENE-01）。
-
-> **v2.8 核心变更：** SCENE-01 奖励函数重构，移除"电压硬惩罚"，引入"P-Q 协同度奖励"R_PQ_coordination + "下垂系数平滑惩罚"R_smooth。AI 仅控制 P 但感知 Q 裕度做最优决策：Q 有裕度时"偷懒"省电池，Q 饱和时正确出手。弃光场景差异化（高电压时检查 AI 动作方向而非简单置零）。详见第 6.2 节（SCENE-01）。
-
-> **v2.7 核心变更：** 动作空间从单参数（p_batt_set）升级为双参数（P_ref + k_droop）模式，实现下垂控制 P_output = P_ref + k_droop × ΔV。AI 负责稳态全局优化（P_ref），执行器负责毫秒级暂态调节（k_droop × ΔV）。通信中断时执行器保持最后有效参数，继续下垂控制，保障本质安全不停机。详见第 5.3 节（双参数动作空间）和第 5.4 节（下垂控制逻辑）。
->
-> **v2.6 核心变更：** 动作空间从 2 维扩展为 3 维（恢复 pv_limit 主动弃光）；SCENE-01 奖励函数新增 w6 电压变化斜率惩罚 R_voltage_slope = |ΔV|，迫使 AI 平滑调节。详见第 5 章（动作空间）和第 6 章（奖励函数）。
->
-> **v2.5 核心变更：** 状态空间新增 Q 裕度字段（q_realtime_margin）+ 季节时段编码（season_encoding + time_period_encoding），扩展至 56 维；SCENE-01 奖励函数重写为条件触发式，新增自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0}，弃光奖励增加电压前置条件。详见第 2 章（状态空间）和第 6 章（奖励函数）。
+> **版本：** v2.14 | **状态：** [REVIEWED: PASS] | **更新日期：** 2026-06-15
 
 ---
 
@@ -66,13 +16,13 @@ AI 引擎遵循 **"AI 优先，本地兜底"** 策略：正常时 AI 引擎主�
 
 | 职责 | 说明 |
 |------|------|
-| 时序预测 | LSTM 模型预测光伏出力 / 负荷变化趋势 |
+| 时序预测 | LSTM 模型预测光伏出力 / 负荷变化趋势（含分位数预测） |
 | 预设运行场景选择 | 5 种预设运行场景，支持远程控制/本地选择，同一时刻仅 1 种互斥运行 |
-| 多目标决策 | MADDPG/PPO 强化学习模型，3 维动作空间，5 种奖励函数 |
-| 数据融合 | 融合电气量（含三相电压）、电池数据、电价、气象、调度指令等 6 大类 21 个状态维度 |
+| 多目标决策 | MADDPG/PPO 强化学习模型，5 维动作空间 + confidence，5 种奖励函数 |
+| 数据融合 | 融合电气量、电池数据、电价、气象、调度指令等 10 大类 **78 维**状态 |
 | NPU 推理 | 在 RK3588 NPU 上执行 INT8 量化模型推理 |
-| 在线微调 | 基于新数据持续更新模型权重 |
-| 安全校验 | 输出指令经 ActionValidator 校验后再下发，防止异常值危害设备 |
+| 在线微调 | 基于新数据持续更新模型权重（影子模型验证 + 渐进式切换） |
+| 安全校验 | 输出指令经 ActionValidator 约束校验后再下发 |
 
 ### 1.3 目标平台
 
@@ -80,7 +30,7 @@ AI 引擎遵循 **"AI 优先，本地兜底"** 策略：正常时 AI 引擎主�
 |------|------|
 | 硬件 | RK3588 (NPU: 6 TOPS) |
 | 操作系统 | openEuler 22.03+ |
-| 编程语言 | Rust |
+| 编程语言 | Rust >= 1.75 |
 | 异步运行时 | Tokio |
 | 推理框架 | RKNN Runtime (INT8 量化) |
 | 模型格式 | ONNX（训练）→ .rknn（部署） |
@@ -100,9 +50,9 @@ AI 引擎遵循 **"AI 优先，本地兜底"** 策略：正常时 AI 引擎主�
 | 角色 | 描述 | 权限范围 |
 |------|------|----------|
 | **调度主站** | 上级调度中心，通过 IEC 104/IEC 61850 远程指挥台区运行 | 远程切换运行场景（最高优先级）、下发调度指令 |
-| **AI 运维人员** | 负责 AI 模型训练、部署、监控和维护的技术人员 | 模型版本管理、推理参数配置、在线微调启停、通过 Web UI 查看 AI 决策可视化（预测曲线、决策逻辑、实时奖励，详见模块08-PRD 第6章） |
-| **策略管理员** | 负责本地选择运行场景和调整权重的电力系统运维人员 | 本地场景切换、场景权重配置、奖励函数参数调整、通过 Web UI 查看 AI 决策可视化（预测曲线、决策逻辑、实时奖励，详见模块08-PRD 第6章） |
-| **本地运维人员** | 负责 MUPC 装置日常运维的操作人员 | 查看当前运行场景、查看 AI 决策日志、接收模式切换告警、强制降级至本地策略 |
+| **AI 运维人员** | 负责 AI 模型训练、部署、监控和维护的技术人员 | 模型版本管理、推理参数配置、在线微调启停、Web UI 决策可视化（预测曲线、决策逻辑、实时奖励，详见模块08-PRD 第6章） |
+| **策略管理员** | 负责本地选择运行场景和调整权重的电力系统运维人员 | 本地场景切换、场景权重配置、奖励函数参数调整、Web UI 决策可视化（预测曲线、决策逻辑、实时奖励，详见模块08-PRD 第6章） |
+| **本地运维人员** | 负责 MUPC 装置日常运维的操作人员 | 查看运行场景/AI 决策日志、接收告警、强制降级至本地策略 |
 
 **权限优先级规则：**
 - 调度主站远程切换运行场景优先级最高（全局电网调度视角）
@@ -140,14 +90,7 @@ AI 引擎遵循 **"AI 优先，本地兜底"** 策略：正常时 AI 引擎主�
 │                    ┌────────▼────────┐                        │
 │                    │  RKNN Runtime   │ ←→ librknnrt.so (FFI) │
 │                    │  (NPU 推理)     │                        │
-│                    └────────┬────────┘                        │
-│                             │                                  │
-│              ┌──────────────┼──────────────┐                  │
-│              ▼              ▼              ▼                     │
-│        ┌─────────┐   ┌─────────┐   ┌─────────┐               │
-│        │ RK3588  │   │  x86    │   │ 混合    │               │
-│        │ NPU     │   │ Server  │   │ 部署    │               │
-│        └─────────┘   └─────────┘   └─────────┘               │
+│                    └─────────────────┘                        │
 └─────────────────────────────────────────────────────────────────┘
          │                        │
          ▼                        ▼
@@ -166,30 +109,64 @@ AI 引擎遵循 **"AI 优先，本地兜底"** 策略：正常时 AI 引擎主�
                                                          ↓
 融合数据 + 预测值 + 运行模式 → RLModel.decide() → ActionOutput
                                                          ↓
-ActionOutput → ActionValidator (6条约束规则校验) → strategy-engine
+ActionOutput → ActionValidator (7条约束规则校验) → strategy-engine
                                                          ↓
 新数据积累 → OnlineUpdater.update() → 模型权重增量更新 → 保存
 ```
 
 ---
 
-## 2. LSTM 时序预测（光伏出力 / 负荷预测）
+## 2. 核心业务流程图
 
-### 2.1 功能概述
+```mermaid
+flowchart TD
+    subgraph 数据源层
+        A[intercore 实时数据] --> F[DataFusionEngine]
+        B[LSTM 预测数据] --> F
+        C[气象 API] --> F
+        D[物联平台 电价] --> F
+        E[gateway 调度指令] --> F
+    end
+
+    F --> G[FusedSystemState 78维]
+    G --> H[RLModel.decide]
+    B --> H
+    
+    H --> I[ActionOutput 5维 + confidence]
+    I --> J[ActionValidator 约束校验]
+    J --> K[strategy-engine]
+    
+    K --> L[实时控制模块 执行]
+    L --> M[反馈]
+    M --> F
+    
+    N[ModeSelector] --> O[RunningMode 1-5]
+    O --> P[权重映射 + 奖励函数]
+    P --> H
+```
+
+---
+
+## 3. LSTM 时序预测
+
+### 3.1 功能概述
 
 LSTM（Long Short-Term Memory）时序预测模型负责预测未来一段时间内的光伏出力和负荷功率，为强化学习决策模型提供前瞻性输入。模型架构支持 LSTM 作为主模型，TCN（Temporal Convolutional Network）作为备选方案，两者均通过 ONNX 格式导出并部署为 .rknn。
 
-### 2.2 核心需求
+负荷预测需区分基荷、可调负荷、冲击负荷（如灌溉水泵启动），对冲击负荷进行概率预测（输出概率分布而非点估计）。
+
+### 3.2 核心需求
 
 | 需求 | 说明 |
 |------|------|
-| 预测目标 | 光伏出力预测（PV forecast）、负荷功率预测（Load forecast）。负荷预测需区分基荷（基础用电）、可调负荷（可调度柔性负荷）、冲击负荷（如灌溉水泵启动），对冲击负荷进行概率预测（输出概率分布而非点估计） |
 | 预测范围 | 未来 15-30 分钟（默认 15 分钟，可配置扩展至 30 分钟），每分钟一个采样点 |
 | 输入数据 | 历史光伏出力、历史负荷功率、气象数据（光照、温度） |
 | 模型格式 | ONNX（训练）→ INT8 量化后部署为 .rknn |
 | 部署方式 | RKNN Runtime 在 NPU 上执行推理 |
+| 分位数预测 | 输出 P10/P50/P90 分位数（v2.11） |
+| 冲击负荷概率 | 基于 P90-P50 差值法计算（v2.11） |
 
-### 2.3 接口定义
+### 3.3 接口定义
 
 ```rust
 /// 模型输入
@@ -202,21 +179,24 @@ pub struct ModelInput {
 }
 
 /// 模型输出（预测）
-pub struct PredictionOutput {
-    pub pv_forecast: Vec<f64>,      // 光伏预测（未来N个时间步）
-    pub load_forecast: Vec<f64>,    // 负荷预测
-    pub confidence: f64,            // 置信度
+pub struct LstmOutput {
+    pub pv_forecast: Vec<f32>,              // 光伏预测（15维）
+    pub load_forecast: Vec<f32>,             // 负荷预测（15维）
+    pub load_forecast_quantiles: Vec<f32>,   // 分位数预测（15维，v2.11）
+    pub shock_load_probability: f32,         // 冲击负荷概率（v2.11）
+    pub base_load: f32,                      // 基础负荷（v2.11）
+    pub confidence: f64,
 }
 ```
 
-### 2.4 预测精度要求
+### 3.4 预测精度要求
 
 | 指标 | 要求 | 测量方法 |
 |------|------|----------|
-| 光伏预测 MAPE | <= 10%（15 分钟预测范围） | 回测验证，Mean Absolute Percentage Error |
+| 光伏预测 MAPE | <= 10%（15 分钟预测范围） | 回测验证 |
 | 负荷预测 MAPE | <= 15%（15 分钟预测范围） | 回测验证 |
 
-### 2.5 验收标准
+### 3.5 验收标准
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
@@ -224,99 +204,113 @@ pub struct PredictionOutput {
 | LSTM-02 | LSTM 预测延迟 < 1s | 性能测试 |
 | LSTM-03 | ONNX 模型格式正确 | 模型验证 |
 | LSTM-04 | INT8 量化后模型大小 <= 5MB（.rknn 文件）| 模型文件验证 |
-| LSTM-05 | 预测输出向量长度可配置（默认 15，可配置扩展至 30），超出/不足时自动裁剪/补零 | 单元测试 |
+| LSTM-05 | 预测输出向量长度可配置（默认 15，可配置扩展至 30）| 单元测试 |
+| PLF-01 | LSTM 可输出多分位数预测（10%、50%、90%）| P0 | 单元测试 |
+| PLF-02 | 冲击负荷概率计算正确（P90 - P50 差值法）| P0 | 单元测试 |
+| PLF-03 | 分位数预测延迟 <= 1s | P0 | 集成测试 |
+| PLF-04 | 需量控制奖励函数考虑冲击负荷概率 | P1 | 单元测试 |
+| PLF-05 | 协变量（温度、日期类型）正确传入 | P1 | 集成测试 |
+| PLF-06 | 概率预测在测试集上 P90 分位数误差 < 15% | P1 | 离线评估 |
+| PLF-07 | FusedSystemState 正确存储分位数预测结果 | P0 | 集成测试 |
 
 ---
 
-## 3. 多源数据融合（电气 + 电价 + 气象 + 调度指令）
-
-### 3.1 功能概述
-
-DataFusionEngine 负责周期性（默认 1Hz）从多个数据源采集数据，融合为统一的 `FusedSystemState`，供场景分类器和 RL 决策器使用。
-
-### 3.2 数据源映射
-
-| 融合字段 | 数据来源 | 获取方式 | 更新频率 |
-|----------|----------|----------|----------|
-| 实时电气量 | intercore 模块（实时控制模块） | 核间 TCP 通信 | 1 Hz |
-| 电池数据 | intercore 模块（BMS） | 核间 TCP 通信 | 1 Hz |
-| 电价 | data-processing / MQTT 北向（物联平台） | 定时拉取 + 订阅推送 | 15 分钟（或电价变更事件） |
-| 气象 | data-processing / MQTT 北向（气象 API） | 定时拉取 | 15 分钟 |
-| 调度指令 | gateway (IEC 104 / IEC 61850) | 事件驱动 | 事件触发 |
-
-### 3.3 验收标准
-
-| ID | 标准 | 验证方法 |
-|----|------|----------|
-| FUSION-01 | 融合周期固定 1 秒，支持运行时配置（范围 1 秒 ~ 60 秒） | 配置文件验证 + 运行时 API 测试 |
-| FUSION-02 | 融合输出数据包含全部 6 个大类、21 个状态字段（定义见 5.2 节），缺一不可 | 单元测试 |
-| FUSION-03 | 每个字段的值类型和取值范围符合 5.2 节定义 | 单元测试 |
-| FUSION-04 | 数据源异常不阻塞融合流程，缺失字段标记为 NaN，取上一周期值填充 | 集成测试（模拟数据源故障） |
-| FUSION-05 | 融合数据写入共享内存缓冲区，读写锁冲突等待时间 < 1ms | 性能测试 |
-| FUSION-06 | 融合输出带 UTC 时间戳，精度到毫秒 | 单元测试 |
-| FUSION-07 | 每个数据源记录最后一次成功获取的时间戳和状态码 | 单元测试 |
-| FUSION-08 | 数据源连续 3 个周期无更新时，产生 WARN 级别告警 | 集成测试 |
-| FUSION-09 | 数据源连续 10 个周期无更新时，产生 ERROR 级别告警并通知策略管理员 | 集成测试 |
-| FUSION-10 | 数据源健康状态通过 Web UI 实时展示（绿色=正常，黄色=延迟，红色=断连） | UI 集成测试 |
-
-### 3.4 消息总线集成
-
-| Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
-|-------|--------|--------|----------|------|
-| `ai/fused_state` | DataFusionEngine | RLModel, SceneClassifier | `FusedSystemState` JSON | 1Hz |
-| `price/real_time` | data-processing | DataFusionEngine | `ElectricityPrice` JSON | 15min / 事件 |
-| `weather/forecast` | data-processing | DataFusionEngine | `WeatherData` JSON | 15min |
-| `demand/current` | data-processing | DataFusionEngine | `DemandData` JSON | 1Hz |
-
----
-
-## 4. 预设运行场景与互斥模式选择
-
-> **设计变更说明（v2.0）：** 本章从 v1.1 的"场景自适应识别（自动分类）"改造为"预设运行场景 + 互斥模式选择（人工/远程指定）"。SceneClassifier 自动分类器已删除，替换为 ModeSelector 模式选择器。
+## 4. 多源数据融合
 
 ### 4.1 功能概述
 
+DataFusionEngine 负责周期性（默认 1Hz，可配置 1s~60s）从多个数据源采集数据，融合为统一的 `FusedSystemState`，供场景分类器和 RL 决策器使用。
+
+### 4.2 数据源映射
+
+| 融合字段 | 数据来源 | 获取方式 | 更新频率 |
+|----------|----------|----------|----------|
+| 实时电气量 | intercore 模块 | 核间 TCP 通信 | 1 Hz |
+| 电池数据 | intercore 模块（BMS） | 核间 TCP 通信 | 1 Hz |
+| 电价 | data-processing / MQTT 北向 | 定时拉取 + 订阅推送 | 15 分钟 |
+| 气象 | data-processing / MQTT 北向 | 定时拉取 | 15 分钟 |
+| 调度指令 | gateway (IEC 104 / IEC 61850) | 事件驱动 | 事件触发 |
+
+### 4.3 消息总线集成（数据融合内部）
+
+数据融合引擎通过消息总线订阅外部数据源，发布融合结果：
+
+| Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
+|-------|--------|--------|----------|------|
+| `ai/fused_state` | DataFusionEngine | RLModel, SceneClassifier | FusedSystemState JSON | 1Hz |
+| `price/real_time` | data-processing | DataFusionEngine | ElectricityPrice JSON | 15min / 事件 |
+| `weather/forecast` | data-processing | DataFusionEngine | WeatherData JSON | 15min |
+| `demand/current` | data-processing | DataFusionEngine | DemandData JSON | 1Hz |
+
+### 4.4 验收标准
+
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| FUSION-01 | 融合周期固定 1 秒，支持运行时配置（范围 1s~60s） | 配置验证 + API 测试 |
+| FUSION-02 | 融合输出数据包含全部 10 个大类、78 个状态字段 | 单元测试 |
+| FUSION-03 | 每个字段的值类型和取值范围符合定义 | 单元测试 |
+| FUSION-04 | 数据源异常不阻塞融合流程，缺失字段取上一周期值填充 | 集成测试 |
+| FUSION-05 | 数据源连续 3 周期无更新时 WARN，连续 10 周期 ERROR 并通知 | 集成测试 |
+| FUSION-06 | 融合数据写入共享内存缓冲区，读写锁冲突等待时间 < 1ms | 性能测试 |
+| FUSION-07 | 融合输出带 UTC 时间戳，精度到毫秒 | 单元测试 |
+| FUSION-08 | 每个数据源记录最后一次成功获取的时间戳和状态码 | 单元测试 |
+| FUSION-09 | 数据源连续 3 周期无更新时，产生 WARN 级别告警 | 集成测试 |
+| FUSION-10 | 数据源健康状态通过 Web UI 实时展示（绿色=正常，黄色=延迟，红色=断连）| UI 集成测试 |
+
+### 4.5 SafetyOverride 帧类型接口规范（v2.10）
+
+核间 TCP 通信定义 `FrameType::SafetyOverride = 0x0040` 帧类型（hex 值 0x0040），供实时控制模块在极端工况下临时覆盖 AI 有功指令。
+
+**SafetyOverridePayload 结构体：**
+
+| 字段 | 类型 | 单位 | 说明 |
+|------|------|------|------|
+| trigger_reason | String | - | 触发原因：voltage_violation / q_exhausted / emergency / other |
+| override_p_ref | f64 | kW | 强制放电功率（实时模块计算的代际参考值） |
+| duration_ms | u32 | ms | 覆盖持续时间 |
+| recovery_condition | String | - | 恢复条件：voltage_recovered / q_margin_available / manual_reset |
+
+**数据流：**
+1. 实时控制模块检测到极端工况（电压越限 + q_realtime_margin <= 10%）
+2. 发送 SafetyOverride 帧（0x0040）至 AI 引擎
+3. AI 引擎解析帧，设置 FusedSystemState.safety_override_* 字段
+4. 奖励函数计算 R_safety_override 惩罚
+5. 恢复条件满足后，实时模块发送正常 DataUpload 帧清除覆盖状态
+
+---
+
+## 5. 预设运行场景与互斥模式选择
+
+### 5.1 功能概述
+
 系统内置 5 种预设运行场景（MODE-01 ~ MODE-05），由**调度主站远程控制**或**策略管理员本地选择**来切换。同一时刻仅 1 种场景运行（互斥）。场景确定后，对应的奖励函数与权重映射立即生效。
 
-### 4.2 5 种预设运行场景
+### 5.2 5 种预设运行场景
 
 | 场景 ID | 场景名称 | 优化目标 | 适用工况 |
 |---------|----------|----------|----------|
-| MODE-01 | 台区季节性负荷模式 | 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 | 台区季节性负荷（夏季灌溉/炒茶/冬季空调等） |
-| MODE-02 | 自主套利模式 | 最大化峰谷电价差收益 + 最小化电池损耗 | 工商业台区有分时电价 |
-| MODE-03 | 需量控制模式 | 减免需量罚金 + 最小化舒适度损失 | 工商业台区需量接近合同值 |
-| MODE-04 | 虚拟电厂模式 | 最大化辅助服务收益 + 响应精度 | 已注册 VPP 服务且有调度指令 |
-| MODE-05 | 极致绿色模式 | 最大化绿电消纳比例 + 最小化碳排放 | 绿色电力消纳目标 |
+| MODE-01 | 台区季节性负荷 | 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 | 台区季节性负荷（夏季灌溉/炒茶/冬季空调等） |
+| MODE-02 | 自主套利 | 最大化峰谷电价差收益 + 最小化电池损耗 | 工商业台区有分时电价 |
+| MODE-03 | 需量控制 | 减免需量罚金 + 最小化舒适度损失 | 工商业台区需量接近合同值 |
+| MODE-04 | 虚拟电厂 | 最大化辅助服务收益 + 响应精度 | 已注册 VPP 服务且有调度指令 |
+| MODE-05 | 极致绿色 | 最大化绿电消纳比例 + 最小化碳排放 | 绿色电力消纳目标 |
 
-> **注意：** MODE-01~05 与第 6 章 5 种奖励函数一一对应（MODE-01 = SCENE-01, MODE-02 = SCENE-B1, ...）。奖励函数公式和权重映射表完全保持不变。
+> **注意：** MODE-01~05 与第 7 章 5 种奖励函数一一对应。奖励函数公式和权重映射表完全保持不变。
+>
+> **电能质量要求：** 无功(Q)由实时控制核心模块根据电压自行调节，无需AI控制；AI仅输出有功设定值。
 
-> **电能质量要求：** 无功(Q)由实时控制核心模块根据电压自行调节，无需AI控制；AI仅输出有功设定值P_batt
+### 5.3 场景选择方式
 
-### 4.3 场景选择方式
+| 方式 | 通道/界面 | 说明 | 性能要求 |
+|------|----------|------|----------|
+| 远程 IEC 104 | 信息体地址 0x4001，命令值 1~5 | 通过选择-执行模式切换场景 | < 2s |
+| 远程 IEC 61850 | 逻辑节点 GGIO1.SPCSO1，ctlVal 1~5 | 通过 SetDataValues 映射场景 ID | < 2s |
+| 本地 Web UI | 仪表盘 → AI 控制面板 → 运行场景选择器 | 单选下拉框，确认对话框后即时生效 | < 1s |
+| 配置文件 | `mupc/config/ai.toml` → `[mode] default_scene` | 系统启动时加载的默认场景 | 启动时 |
 
-#### 4.3.1 远程控制选择（调度主站）
+**优先级：** 调度主站远程指令 > 策略管理员本地选择（冲突时远程优先）
 
-| 通道 | 协议 | 指令类型 | 说明 |
-|------|------|----------|------|
-| 北向通道 1 | IEC 104（调度） | 遥控命令（信息体地址 0x4001，命令值 1~5） | 通过选择-执行模式切换场景 |
-| 北向通道 2 | IEC 61850（配电自动化） | SetDataValues（逻辑节点 GGIO1.SPCSO1，ctlVal 1~5） | 通过 ctlVal 映射场景 ID |
-
-**性能要求：** 远程指令下发到模式生效 < 2s
-
-#### 4.3.2 本地选择（Web UI / 配置文件）
-
-| 方式 | 界面/位置 | 说明 |
-|------|----------|------|
-| Web UI | 仪表盘 → AI 控制面板 → 运行场景选择器 | 单选下拉框，确认对话框后即时生效 |
-| 配置文件 | `mupc/config/ai.toml` → `[mode] default_scene = "MODE-01"` | 系统启动时加载的默认场景 |
-
-**性能要求：** Web UI 选择后模式生效 < 1s
-
-#### 4.3.3 选择权限优先级
-
-调度主站远程指令 > 策略管理员本地选择（冲突时远程优先，记录操作日志）
-
-### 4.4 互斥运行机制
+### 5.4 互斥运行机制
 
 | 规则 | 说明 |
 |------|------|
@@ -325,39 +319,49 @@ DataFusionEngine 负责周期性（默认 1Hz）从多个数据源采集数据�
 | 并发控制 | 多来源同时切换时，以时间戳最晚的指令为准（Last-Write-Wins） |
 | 切换通知 | 通过消息总线 topic `ai/mode_switch` 广播切换事件 |
 
-### 4.5 接口定义
+### 5.5 场景切换平滑过渡（v2.10）
+
+场景切换时奖励函数权重线性插值过渡，避免策略震荡：
 
 ```rust
-/// 预设运行场景（互斥，无 Default 兜底）
+pub struct SmoothSceneTransition {
+    transition_steps: usize,              // 过渡步数，默认 10
+    current_weights: Option<Vec<f32>>,    // 旧场景权重
+    target_weights: Option<Vec<f32>>,     // 目标场景权重
+    step_counter: usize,
+}
+```
+
+每步权重线性插值：`α = step_counter / transition_steps`，`weights = (1-α)*old + α*target`
+
+**验收标准：**
+
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| CC1 | 场景切换时触发平滑过渡，过渡步数可配置（默认10步）| 单元测试 |
+| CC2 | 每步权重线性插值，确保最终权重与目标一致 | 数学验证 |
+| CC3 | 过渡期间控制指令无突变（梯度 < 5%）| 集成测试 |
+| CC4 | 过渡完成后自动停止插值，返回目标权重 | 单元测试 |
+
+### 5.6 接口定义
+
+```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RunningMode {
-    AgriculturalIrrigation = 1,   // MODE-01：台区季节性负荷模式
-    CommercialArbitrage = 2,      // MODE-02：自主套利模式
-    DemandControl = 3,            // MODE-03：需量控制模式
-    VirtualPowerPlant = 4,        // MODE-04：虚拟电厂模式
-    UltraGreen = 5,               // MODE-05：极致绿色模式
+    AgriculturalIrrigation = 1,   // MODE-01
+    CommercialArbitrage = 2,      // MODE-02
+    DemandControl = 3,            // MODE-03
+    VirtualPowerPlant = 4,        // MODE-04
+    UltraGreen = 5,               // MODE-05
 }
 
-/// 模式选择器（互斥保证）
-pub struct ModeSelector {
-    current_mode: Arc<tokio::sync::Mutex<RunningMode>>,
-}
-
-impl ModeSelector {
-    pub fn new(initial: RunningMode) -> Self;
-    pub fn current(&self) -> RunningMode;
-    pub async fn switch(&self, new_mode: RunningMode, source: SwitchSource) -> Result<RunningMode, AiEngineError>;
-    pub fn subscribe(&self) -> broadcast::Receiver<ModeSwitchEvent>;
-}
-
-/// 切换来源
 pub enum SwitchSource {
     RemoteDispatch { protocol: String, address: String },
     LocalWeb { username: String },
     LocalConfig,
 }
 
-/// 模式切换事件
+/// 模式切换事件（通过消息总线广播）
 pub struct ModeSwitchEvent {
     pub previous: RunningMode,
     pub current: RunningMode,
@@ -366,113 +370,55 @@ pub struct ModeSwitchEvent {
 }
 ```
 
-### 4.6 消息总线集成
-
-| Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
-|-------|--------|--------|----------|------|
-| `ai/mode_switch` | ModeSelector | RewardCalculator, strategy-engine, Web UI, 审计日志 | `ModeSwitchEvent` JSON | 事件驱动 |
-| `ai/current_mode` | ModeSelector | Web UI（心跳查询） | `RunningMode` JSON | 按需查询 |
-
-### 4.7 验收标准
-
-| ID | 标准 | 验证方法 |
-|----|------|----------|
-| MODE-01 | 系统启动后加载配置指定的默认场景（配置文件缺失时默认 MODE-01） | 启动测试 |
-| MODE-02 | 远程 IEC 104/61850 切换场景延迟 < 2s，本地 Web UI 切换延迟 < 1s | 集成测试 |
-| MODE-03 | 同一时刻仅 1 个场景生效，并发切换时最后到达的指令生效 | 并发测试 |
-| MODE-04 | 场景切换时自动更新优化目标权重和奖励函数 | 集成测试 |
-| MODE-05 | 场景切换锁定窗口 < 100ms，切换期间 AI 决策暂停 1 周期 | 性能测试 |
-| MODE-06 | 所有切换事件写入审计日志（来源、操作人、切换前后模式、时间戳） | 日志验证 |
-| MODE-07 | PUT /api/v1/mode 需要 Operator+ 角色鉴权 | API 测试 |
-| MODE-08 | 远程指令冲突时调度主站优先，本地操作返回"远程指令优先"提示 | 集成测试 |
-
-### 4.8 边界条件与异常处理
+### 5.7 边界条件与异常处理
 
 | 异常场景 | 检测条件 | 处理措施 |
 |----------|----------|----------|
-| 系统启动时无模式配置 | 配置文件缺少 `[mode]` 段 | 默认使用 MODE-01，记录 INFO 日志 |
-| 远程指令与本地操作并发冲突 | 两个来源几乎同时发送切换指令 | 远程指令优先，本地操作被拒绝 |
-| AI 引擎未就绪时收到切换指令 | ai_ready = false | 暂存指令，就绪后立即执行，暂存超时 30s 则丢弃 |
-| 切换到当前已激活模式 | new_mode == current_mode | 幂等处理，不触发切换事件，返回成功 |
-| 无效模式 ID | 指令值超出 1~5 范围 | 拒绝执行，返回否定确认/400 错误，记录 WARN 日志 |
+| 系统启动时无模式配置 | 配置文件缺少 `[mode]` 段 | 默认 MODE-01，记录 INFO |
+| 远程与本地并发冲突 | 两个来源同时发送切换指令 | 远程优先，本地操作被拒绝 |
+| AI 未就绪时收到切换 | ai_ready = false | 暂存指令，就绪后执行，暂存超时 30s 丢弃 |
+| 切换到当前已激活模式 | new_mode == current_mode | 幂等处理，不触发切换 |
+| 无效模式 ID | 指令值超出 1~5 范围 | 拒绝执行，返回 400 错误 |
 | 模式切换过程中断电 | 持久化文件写入中断 | 重启时从持久化文件恢复，文件损坏则回退 MODE-01 |
 
-### 4.9 v2.10 短期实现：场景切换平滑过渡（R3）
+### 5.8 验收标准
 
-#### 4.9.1 需求描述
-
-当前场景切换时奖励函数权重突变，可能导致策略震荡、在线微调梯度爆炸、用户体验不佳（控制指令突变）。
-
-#### 4.9.2 实现方案
-
-```rust
-// SmoothSceneTransition 核心逻辑
-pub struct SmoothSceneTransition {
-    transition_steps: usize,  // 过渡步数，默认 10
-    current_weights: Option<Vec<f32>>,
-    target_weights: Option<Vec<f32>>,
-    step_counter: usize,
-}
-
-impl SmoothSceneTransition {
-    pub fn on_scene_switch(&mut self, old_mode: SceneMode, new_mode: SceneMode) {
-        self.current_weights = Some(SceneWeights::lookup(old_mode).to_vec());
-        self.target_weights = Some(SceneWeights::lookup(new_mode).to_vec());
-        self.step_counter = 0;
-    }
-
-    pub fn get_interpolated_weights(&mut self) -> Vec<f32> {
-        if self.step_counter >= self.transition_steps {
-            return self.target_weights.clone().unwrap_or_default();
-        }
-
-        let alpha = self.step_counter as f32 / self.transition_steps as f32;
-        let interpolated: Vec<f32> = self.current_weights.as_ref()
-            .unwrap()
-            .iter()
-            .zip(self.target_weights.as_ref().unwrap().iter())
-            .map(|(&c, &t)| (1.0 - alpha) * c + alpha * t)
-            .collect();
-
-        self.step_counter += 1;
-        interpolated
-    }
-}
-```
-
-#### 4.9.3 验收标准
-
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
-| CC1 | 场景切换时触发平滑过渡，过渡步数可配置（默认10步） | 单元测试 |
-| CC2 | 每步权重线性插值，确保最终权重与目标一致 | 数学验证 |
-| CC3 | 过渡期间控制指令无突变（梯度 < 5%） | 集成测试 |
-| CC4 | 过渡完成后自动停止插值，返回目标权重 | 单元测试 |
-
-#### 4.9.4 影响文件
-
-- `mupc/crates/ai-engine/src/mode_selector.rs`
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| MODE-01 | 系统启动后加载配置的默认场景，缺失时默认 MODE-01 | 启动测试 |
+| MODE-02 | 远程切换 < 2s，本地切换 < 1s | 集成测试 |
+| MODE-03 | 同一时刻仅 1 个场景生效，并发时最后到达的指令生效 | 并发测试 |
+| MODE-04 | 场景切换时自动更新权重和奖励函数 | 集成测试 |
+| MODE-05 | 切换锁定窗口 < 100ms | 性能测试 |
+| MODE-06 | 所有切换事件写入审计日志 | 日志验证 |
+| MODE-07 | PUT /api/v1/mode 需要 Operator+ 角色鉴权 | API 测试 |
+| MODE-08 | 远程指令冲突时调度主站优先，本地操作返回"远程指令优先"提示 | 集成测试 |
 
 ---
 
-## 5. 强化学习多目标决策（MADDPG/PPO）
+## 6. 强化学习多目标决策
 
-### 5.1 功能概述
+### 6.1 功能概述
 
-RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近端策略优化）算法，基于融合状态、LSTM 预测值和场景标签，输出 4 维动作空间的最优控制指令。
+RLModel 使用 MADDPG 或 PPO 算法，基于融合状态、LSTM 预测值和场景标签，输出 5 维动作空间的最优控制指令。
 
-**v2.2 新增 — 电压感知 P/Q 协同控制：** D1 中新增的三相电压标幺值使 AI 引擎能够感知台区电压水平，在以下三种典型场景中执行有功/无功协调控制：
+**电压感知 P/Q 协同控制（v2.2）：** AI 引擎感知台区电压水平，在以下场景执行有功/无功协调控制：
 
-| 场景 | 电压特征 | P 控制（p_batt_set） | Q 控制（q_batt_set） | 物理机理 |
-|------|----------|---------------------|---------------------|----------|
-| 光伏超发（中午） | 电压升高（>1.05 p.u.） | **充电**（p<0，吸收有功）→ 消纳多余光伏，减少倒送 | **吸收无功/感性**（q<0）→ 抑制电压抬升 | 吸收无功 = 降低电压（Q-V 耦合） |
-| 农网灌溉（抽水） | 电压降低（<0.95 p.u.） | **放电**（p>0，释放有功）→ 补充能量缺口 | **释放无功/容性**（q>0）→ 就地补偿电机励磁需求 | 减少线路无功电流 → 降低线路压降 → 抬升电压 |
-| 台区季节性负荷（炒茶/空调等） | 电压降低（<0.95 p.u.） | **放电**（p>0，释放有功）→ 补充能量缺口 | **释放无功/容性**（q>0）→ 就地补偿负载励磁需求 | 减少线路无功电流 → 降低线路压降 → 抬升电压 |
-| 末端低电压（夜间） | 电压降低（<0.95 p.u.） | **放电**（p>0）— 仅当无功补偿不足时 | **释放无功/容性**（q>0）— 优先手段，不消耗 SOC | 就地无功补偿 → 减少长线路无功传输损耗 |
+| 场景 | 电压特征 | P 控制 | Q 控制 | 物理机理 |
+|------|----------|--------|--------|----------|
+| 光伏超发（中午） | 电压升高（>1.05 p.u.） | 充电消纳多余光伏 | 吸收感性无功抑制抬升 | 吸收无功 = 降低电压 |
+| 农网灌溉（抽水） | 电压降低（<0.95 p.u.） | 放电补充能量缺口 | 释放容性无功补偿励磁 | 减少线路无功流 → 降低压降 |
+| 末端低电压（夜间） | 电压降低（<0.95 p.u.） | 放电（仅当 Q 不足时） | 释放容性无功（优先） | 就地补偿减少传输损耗 |
 
-### 5.2 完整状态空间定义（10 大类，59 维，v2.11）
+**v2.2 架构说明：** 三相电压幅值（D1 实时数据）与 v2.1 移除的电能质量 D5 是不同用途：
+- v2.1 移除的 D5：三相不平衡度 + 频率 → 电能质量监测，由实时控制核心独立处理
+- v2.2 新增到 D1：三相电压幅值 → 过/低电压检测 → P/Q 控制策略，是 AI 引擎决策的必要输入
 
-| 维度 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 | 来源 |
+### 6.2 状态空间定义（10 大类，78 维，v2.14）
+
+⚠️ **[⚠️待确认冲突]** PRD 历史版本标题写"59 维"为错误，实际为 **78 维**
+
+| 类别 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 | 来源 |
 |------|--------|----------|----------|------|------|------|
 | **D1-实时数据** | battery_soc | f64 | [0.0, 1.0] | - | 电池荷电状态 | intercore |
 | | pv_power | f64 | [-1000.0, 1000.0] | kW | 光伏出力（正值=发电）| intercore |
@@ -483,6 +429,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | voltage_phase_a | f64 | [0.8, 1.2] | p.u. | A 相电压标幺值（用于过/低电压检测，指导 P/Q 控制）| intercore |
 | | voltage_phase_b | f64 | [0.8, 1.2] | p.u. | B 相电压标幺值 | intercore |
 | | voltage_phase_c | f64 | [0.8, 1.2] | p.u. | C 相电压标幺值 | intercore |
+| | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲，v2.5 新增）| intercore |
 | **D2-预测数据** | pv_forecast_15min | Vec\<f64\>(15) | [-1000.0, 1000.0] | kW | 未来 15 分钟光伏预测 | LSTM |
 | | load_forecast_15min | Vec\<f64\>(15) | [-1000.0, 1000.0] | kW | 未来 15 分钟负荷预测 | LSTM |
 | **D3-电价** | current_electricity_price | f64 | [0.0, 2.0] | 元/kWh | 当前实时电价 | 物联平台 |
@@ -490,344 +437,281 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | | price_tariff_id | u8 | {0=谷,1=平,2=峰,3=尖峰} | 枚举 | 分时电价时段标识 | 物联平台 |
 | | peak_price | f64 | [0.0, 2.0] | 元/kWh | 峰值电价（辅助）| 配置 |
 | | valley_price | f64 | [0.0, 2.0] | 元/kWh | 谷值电价（辅助）| 配置 |
-| **D4-需量状态** | current_demand | f64 | [0.0, 10000.0] | kW | 当前实际需量 | intercore |
+| **D4-需量** | current_demand | f64 | [0.0, 10000.0] | kW | 当前实际需量 | intercore |
 | | contract_demand | f64 | [0.0, 10000.0] | kW | 需量合同值 | 配置 |
 | | peak_demand_this_month | f64 | [0.0, 10000.0] | kW | 本月最大需量 | data-processing |
-| **D5-气象** | solar_irradiance | f64 | [0.0, 1500.0] | W/m^2 | 当前光照强度 | 气象 API |
-| | temperature | f64 | [-20.0, 60.0] | deg C | 环境温度 | 气象 API |
-| **D6-调度指令** | dispatch_p_set | Option\<f64\> | [-1000.0, 1000.0] | kW | 调度主站下发的有功设定值 | gateway |
+| **D5-气象** | solar_irradiance | f64 | [0.0, 1500.0] | W/m² | 当前光照强度 | 气象 API |
+| | temperature | f64 | [-20.0, 60.0] | °C | 环境温度 | 气象 API |
+| **D6-调度** | dispatch_p_set | Option\<f64\> | [-1000.0, 1000.0] | kW | 调度主站下发的有功设定值 | gateway |
 | | dispatch_q_set | Option\<f64\> | [-1000.0, 1000.0] | kVar | 调度主站下发的无功设定值 | gateway |
-| **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） | intercore |
-| **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节 one-hot 编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
-| | time_period_encoding | [f64; 2] | one-hot | - | 时段 one-hot 编码：[白天, 夜间] | data-processing |
-| **D9-安全覆盖状态（v2.10新增，v2.14扩展）** | safety_override_active | bool | {true, false} | - | 安全覆盖激活标志，true=实时模块正在覆盖 AI 有功指令 | intercore |
-| | safety_override_reason | Option\<String\> | - | - | 安全覆盖触发原因（仅 active=true 时有效）| intercore |
+| **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲）| intercore |
+| **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] | data-processing |
+| | time_period_encoding | [f64; 2] | one-hot | - | 时段编码：[白天, 夜间] | data-processing |
+| **D9-安全覆盖** | safety_override_active | bool | {true, false} | - | 安全覆盖激活标志，true=实时模块正在覆盖 AI 有功指令（v2.10 新增）| intercore |
+| | safety_override_reason | Option\<String\> | - | - | 触发原因（voltage_violation/q_exhausted/emergency，仅 active=true 时有效）| intercore |
 | | safety_override_p_ref | Option\<f64\> | [-50.0, 50.0] | kW | 安全覆盖强制放电功率（仅 active=true 时有效）| intercore |
 | | safety_override_consecutive | u32 | [0, ∞) | - | 连续触发次数（v2.14 新增）| intercore |
 | | safety_override_ratio | f64 | [0.0, 1.0] | - | 滑动窗口内覆盖比例（v2.14 新增）| intercore |
-| **D10-概率负荷预测（v2.11新增）** | load_forecast_quantiles | Vec\<f64\>(15) | [0.0, 10000.0] | kW | 分位数负荷预测（P10/P50/P90...）| LSTM |
-| | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 | LSTM |
-| | base_load | f64 | [0.0, 10000.0] | kW | 基础负荷（50% 分位数）| LSTM |
+| **D10-概率负荷** | load_forecast_quantiles | Vec\<f64\>(15) | [0.0, 10000.0] | kW | 分位数负荷预测（P10/P50/P90...，v2.11 新增）| LSTM |
+| | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率（v2.11 新增）| LSTM |
+| | base_load | f64 | [0.0, 10000.0] | kW | 基础负荷，50% 分位数（v2.11 新增）| LSTM |
 
-**状态空间总维度（v2.14）：** 10+30+3+3+2+1+1+8+4+17 = **78 维**。
+**总维度：** D1(10) + D2(30) + D3(5) + D4(3) + D5(2) + D6(2) + D7(1) + D8(8) + D9(4) + D10(17) = **78 维**。
 
-> **v2.14 说明：** D9 新增 `safety_override_consecutive`（连续触发次数）和 `safety_override_ratio`（滑动窗口覆盖比例），用于精细化 SafetyOverride 惩罚计算。D9 从 2 维扩展至 4 维，输入向量从 76 维扩展至 78 维。
-
-> **v2.11 说明：** D10 新增分位数负荷预测（load_forecast_quantiles 15维 + shock_load_probability + base_load），支撑冲击负荷预备度奖励计算。输入向量从 61 维扩展至 76 维。
-
+> **v2.14 说明：** D9 新增 `safety_override_consecutive` 和 `safety_override_ratio`，用于精细化 SafetyOverride 惩罚计算。D9 从 2 维扩展至 4 维，输入向量从 76 维扩展至 78 维。
+>
+> **v2.11 说明：** D10 新增分位数负荷预测，支撑冲击负荷预备度奖励计算。输入向量从 61 维扩展至 76 维。
+>
+> **v2.10 说明：** D9 新增安全覆盖状态（3 维），AI 引擎感知实时控制模块临时覆盖事件。输入向量从 56 维扩展至 59 维，RL 模型文件需重新训练或填充默认值向后兼容。
+>
+> **v2.5 说明：** D1 新增 `q_realtime_margin`，使 AI 引擎感知实时模块无功裕度边界；D8 新增季节/时段编码，用于季节性负荷模式识别。输入向量从 48 维扩展至 56 维。
+>
 > **历史说明：** PRD v2.10/v2.11 中 59 维的描述不准确，实际应为 61 维（v2.10）和 76 维（v2.11）。
-
-> **v2.10 说明：** D9 新增安全覆盖状态（3 维：safety_override_active, safety_override_reason, safety_override_p_ref），用于 AI 引擎感知实时控制模块临时覆盖事件。输入向量从 56 维扩展至 59 维，RL 模型文件需重新训练或填充默认值向后兼容。
-
-> **v2.5 说明：** D1 新增 `q_realtime_margin`（实时模块剩余无功容量比例），使 AI 引擎能够感知实时模块无功裕度边界；D7 新增 `season_encoding`（6 维）和 `time_period_encoding`（2 维），用于季节性负荷模式识别。输入向量从 48 维扩展至 56 维。
 
 序列化为推理输入向量时，各维度按定义顺序拼接。
 
-### 5.3 完整动作空间定义（5 维 + confidence，v2.13）
+### 6.3 动作空间定义（5 维 + confidence，v2.13）
 
 | 维度 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 | 分发路径 |
 |------|--------|----------|----------|------|------|----------|
 | A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负值=充电，正值=放电）| 核间→实时控制模块 |
-| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数 | 核间→实时控制模块 |
+| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数，范围由实时控制模块提供 | 核间→实时控制模块 |
 | A3 | load_shedding | f64 | [0.0, 60.0] | kW | 可中断负荷切除量 | 南向→负荷控制装置 |
 | A4 | pv_limit | f64 | [0.0, 1.0] | - | 光伏限功率比例（0=全限，1=不限）| 南向→光伏逆变器 |
-| A5 | confidence | f64 | [0.0, 1.0] | - | 决策置信度（v2.13 新增）| - |
+| A5 | confidence | f64 | [0.0, 1.0] | - | 决策置信度（v2.13 新增）| 仅展示 |
 
-> **v2.7 双参数模式说明：** 动作空间从单参数升级为双参数（P_ref + k_droop），实现下垂控制公式 `P_output = P_ref + k_droop × ΔV`。k_droop 范围由实时控制模块提供，通过 intercore 获取。Q 控制完全交给实时控制模块，实现时间尺度解耦。
+**下垂控制公式：** `P_output = P_ref + k_droop × ΔV`
 
-> **v2.13 新增：** confidence 字段（决策置信度），用于评估动作输出的可靠性。
+其中：
+- `P_output`：执行器最终输出的有功功率设定值
+- `P_ref`：AI 输出的有功基准点
+- `k_droop`：AI 输出的下垂系数（电压-有功下垂系数）
+- `ΔV`：电压偏差 = V_actual - V_target，单位 V
 
-### 5.4 动作约束规则（v2.13）
+**k_droop 物理含义：** 电压每升高 1V，输出功率增加 k_droop kW（充电方向）；电压每降低 1V，输出功率减少 k_droop kW（放电方向）。
+
+### 6.4 双参数动作空间（v2.7）
+
+动作空间从单参数升级为双参数（P_ref + k_droop），实现时间尺度解耦：
+- **AI 负责稳态全局优化**（P_ref）
+- **执行器负责毫秒级暂态调节**（k_droop × ΔV）
+
+**通信中断降级规则：**
+- 执行器保持最后收到的 P_ref 和 k_droop，继续下垂控制，保障本质安全不停机
+- P_ref 和 k_droop 同时为 NaN 时，触发 AI 降级
+
+**降级原则：** 通信中断时保持最后有效的 P_ref 和 k_droop，不主动归零。继续按下垂公式 `P_output = P_ref + k_droop × ΔV` 计算，保障基础安全不停机。
+
+### 6.5 动作约束规则
 
 | 规则 ID | 约束条件 | 说明 |
 |---------|----------|------|
 | ACT-01 | p_ref 变化率 <= 50 kW/步 | 防止电池功率突变 |
 | ACT-02 | k_droop 变化率 <= 10 kW/V/步 | 防止下垂系数突变 |
-| ACT-03 | p_ref ∈ [p_ref_min, p_ref_max]（由 ActionSpaceConfig 确定）| 有功基准点范围约束 |
-| ACT-04 | k_droop ∈ [k_droop_min, k_droop_max]（由实时控制模块提供）| 下垂系数范围约束 |
+| ACT-03 | p_ref ∈ [p_ref_min, p_ref_max] | 有功基准点范围约束 |
+| ACT-04 | k_droop ∈ [k_droop_min, k_droop_max] | 下垂系数范围约束 |
 | ACT-05 | load_shedding ∈ [0.0, max_load_shedding] | 负荷切除范围约束 |
-| ACT-06 | pv_limit ∈ [0.0, 1.0] | 光伏限功率比例约束 |
-| ACT-07 | 当 dispatch_p_set 有效时，p_ref 绝对值不得超过 dispatch_p_set 绝对值 | 调度指令权限约束 |
+| ACT-06 | pv_limit ∈ [pv_limit_min, 1.0]（防逆流场景除外）| 光伏限功率比例约束，非零下限 |
+| ACT-07 | dispatch_p_set 有效时，\|p_ref\| <= \|dispatch_p_set\| | 调度指令权限约束 |
 
-### 5.4a 双参数模式校验规则（v2.7）
-
-> **v2.7 双参数模式说明：** 动作空间从单参数（p_batt_set）升级为双参数（P_ref + k_droop），实现下垂控制公式 `P_output = P_ref + k_droop × ΔV`。k_droop 范围由实时控制模块提供，通过 intercore 获取。
-
-| 规则 ID | 约束条件 | 说明 |
-|---------|----------|------|
-| ACT-DUAL-01 | p_ref ∈ [-max_batt_discharge_power, max_batt_charge_power] | 充电/放电功率约束 |
-| ACT-DUAL-02 | k_droop ∈ [k_droop_min, k_droop_max] | 下垂系数范围由实时控制模块提供 |
-| ACT-DUAL-03 | Δp_ref 变化率 <= p_batt_ramp_limit_kw / 步 | 防止基准点突变 |
-| ACT-DUAL-04 | 当 dispatch_p_set 有效时，p_ref 绝对值不得超过 dispatch_p_set 绝对值 | 调度指令权限约束 |
-| ACT-DUAL-05 | pv_limit ∈ [pv_limit_min, 1.0]（防逆流场景除外）| 光伏限功率下限约束 |
-
-### 5.4b 通信中断降级规则（v2.7）
-
-| 异常场景 | 检测条件 | 处理措施 |
-|----------|----------|----------|
-| 通信中断 | intercore TCP 断开检测 | 执行器保持最后收到的 P_ref 和 k_droop，继续按下垂公式计算 |
-| k_droop 超范围 | k_droop < k_min 或 k_droop > k_max | clamp 至 [k_min, k_max]，记录 WARN 日志 |
-| p_ref 超范围 | p_ref < -P_safe 或 p_ref > P_safe | clamp 至 [-P_safe, P_safe]，记录 WARN 日志 |
-| 双参数缺失 | P_ref 和 k_droop 同时为 NaN | 触发 AI 降级，使用兜底策略 |
-
-**降级原则：** 通信中断时保持最后有效的 P_ref 和 k_droop，不主动归零。继续按下垂公式 `P_output = P_ref + k_droop × ΔV` 计算，保障基础安全不停机。
-
-### 5.5 接口定义
+### 6.6 接口定义
 
 ```rust
-/// 强化学习决策输出（5 维动作空间 + confidence，v2.13）
-///
-/// v2.7 双参数模式：p_ref（有功基准）+ k_droop（电压-有功下垂系数）
-/// v2.13 新增：confidence 决策置信度
 #[derive(Debug, Clone)]
 pub struct ActionOutput {
-    pub p_ref: f64,           // 有功功率基准点 (kW), [-50.0, 50.0], 负=充电, 正=放电
-    pub k_droop: f64,         // 电压-有功下垂系数 (kW/V), [0.0, 30.0]
-    pub load_shedding: f64,     // 可中断负荷切除量 (kW), [0.0, 60.0]
-    pub pv_limit: f64,         // 光伏限功率比例, [0.0, 1.0]
-    pub confidence: f64,        // 决策置信度 (0.0 ~ 1.0)（v2.13 新增）
+    pub p_ref: f64,           // 有功功率基准点 (kW), 负=充电, 正=放电
+    pub k_droop: f64,         // 电压-有功下垂系数 (kW/V)
+    pub load_shedding: f64,   // 可中断负荷切除量 (kW)
+    pub pv_limit: f64,        // 光伏限功率比例
+    pub confidence: f64,      // 决策置信度 (v2.13 新增)
 }
 ```
 
 > **legacy 版本：** v2.6 及之前的 `ActionOutput` 结构体（使用 `p_batt_set` 字段）已废弃，仅用于兼容旧模式。
 
-### 5.5b 下垂控制公式（v2.7）
-
-执行器根据下垂公式计算实时功率输出：
-
-```
-P_output = P_ref + k_droop × ΔV
-```
-
-其中：
-- P_output：执行器最终输出的有功功率设定值
-- P_ref：AI 输出的有功基准点
-- k_droop：AI 输出的下垂系数（电压-有功下垂系数）
-- ΔV：电压偏差（V_actual - V_target），单位 V
-
-**k_droop 物理含义：** 电压每升高 1V，输出功率增加 k_droop kW（充电方向）；电压每降低 1V，输出功率减少 k_droop kW（放电方向）。
-
-### 5.6 消息总线集成
+### 6.7 消息总线集成
 
 | Topic | 发布者 | 订阅者 | 数据格式 | 频率 |
 |-------|--------|--------|----------|------|
-| `ai/action_output` | ModelManager | strategy-engine | `ActionOutput` JSON（含 p_ref, k_droop, load_shedding, pv_limit, confidence）| 1Hz |
-| `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | `RewardValue` JSON | 1Hz |
-| `ai/model_status` | ModelManager | Web UI, 告警模块 | `ModelStatus` JSON | 1Hz |
-| `ai/droop_range` | intercore | ActionValidator | `{k_min: f64, k_max: f64}` JSON | 按需更新 |
+| `ai/action_output` | ModelManager | strategy-engine | ActionOutput JSON | 1Hz |
+| `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | RewardValue JSON | 1Hz |
+| `ai/model_status` | ModelManager | Web UI, 告警模块 | ModelStatus JSON | 1Hz |
+| `ai/mode_switch` | ModeSelector | RewardCalculator, strategy-engine | ModeSwitchEvent JSON | 事件驱动 |
+| `ai/droop_range` | intercore | ActionValidator | {k_min, k_max} JSON | 按需更新 |
+| `ai/current_mode` | ModeSelector | Web UI（心跳查询）| RunningMode JSON | 按需查询 |
 
-> **指令分发说明（v2.7）：** `ActionOutput` 包含 5 个控制维度，分发路径如下：
-> - `p_ref` + `k_droop` → 通过 intercore（TCP/RJ45）发送到**实时控制模块**，用于下垂控制公式 `P_output = P_ref + k_droop × ΔV`
-> - `pv_limit` → 通过 SouthCommandDispatcher 发送到**光伏逆变器**（南向 RS485/HPLC）
-> - `load_shedding` → 通过 SouthCommandDispatcher 发送到**负荷控制装置**（南向 RS485/HPLC）
-> - `confidence` → 仅用于置信度展示，不参与控制分发
+**指令分发说明（v2.7）：** ActionOutput 的 5 个控制维度按以下路径分发：
+- `p_ref` + `k_droop` → 通过 intercore（TCP/RJ45）发送到**实时控制模块**，用于下垂控制公式
+- `pv_limit` → 通过 SouthCommandDispatcher 发送到**光伏逆变器**（南向 RS485/HPLC）
+- `load_shedding` → 通过 SouthCommandDispatcher 发送到**负荷控制装置**（南向 RS485/HPLC）
+- `confidence` → 仅用于置信度展示，不参与控制分发
 
-### 5.7 状态/动作空间验收标准
+### 6.8 验收标准
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
-| STATE-01 | 状态空间结构包含全部 10 个大类、59 维（v2.11） | 单元测试（字段计数验证） |
-| STATE-02 | 每个字段的数据类型和取值范围与定义严格一致 | 单元测试（边界值验证） |
-| STATE-03 | 预测数据向量长度固定 15 维，超出/不足时自动裁剪/补零 | 单元测试 |
+| STATE-01 | 状态空间包含全部 10 个大类、78 维 | 单元测试 |
+| STATE-02 | 每个字段的数据类型和取值范围与定义严格一致 | 单元测试 |
+| STATE-03 | 状态输入到推理开始的总延迟 < 5ms | 性能测试 |
 | STATE-04 | Option 字段为 None 时，RL 决策器自动取其维度值 = 0.0 并跳过相关约束 | 集成测试 |
-| STATE-05 | 状态输入到推理开始的总延迟 < 5ms（从融合数据就绪到 RKNN Runtime 接收输入）| 性能测试 |
-| ACT-01 | 动作空间结构包含全部 5 个动作维度 + confidence（v2.13） | 单元测试（字段计数验证）|
-| ACT-02 | 每个动作维度的取值范围严格执行定义边界 | 单元测试（边界值验证 + clamp 验证）|
-| ACT-03 | 动作约束校验违反时自动 clamp 并记录 WARN 日志 | 集成测试 |
+| STATE-05 | 预测数据向量长度固定 15 维，超出/不足时自动裁剪/补零 | 单元测试 |
+| STATE-v2.10-01 | FusedSystemState 新增 safety_override_active/reason/p_ref 字段 | P0 | v2.10 PRD |
+| STATE-v2.10-02 | to_input_vector() 返回 59 维向量（向后兼容）| P0 | v2.10 PRD |
+| STATE-v2.10-03 | q_realtime_margin 数据来源为核间 DataUpload 帧 | P0 | v2.10 PRD |
+| OVERRIDE-01 | SafetyOverride 帧（0x0040）可正确解析 | P0 | v2.10 PRD |
+| OVERRIDE-02 | FusedSystemState.safety_override_active 在收到帧后正确设置 | P0 | v2.10 PRD |
+| OVERRIDE-03 | AI 感知 override_active=true 时获得 R_safety_override 惩罚 | P0 | v2.10 PRD |
+| ACT-01 | 动作空间包含全部 5 个动作维度 + confidence | 单元测试 |
+| ACT-02 | 每个动作维度的取值范围严格执行定义边界 | 单元测试 + clamp 验证 |
+| ACT-03 | 约束校验违反时自动 clamp 并记录 WARN 日志 | 集成测试 |
 | ACT-04 | 约束校验总延迟 < 0.5ms | 性能测试 |
-| **DUAL-01** | RL 模型输出包含 P_ref 和 k_droop 两个参数 | 单元测试 |
-| **DUAL-02** | P_ref 取值范围符合 ActionSpaceConfig 约束 | 单元测试（边界值验证）|
-| **DUAL-03** | k_droop 取值范围符合实时控制模块提供的 [k_min, k_max] | 集成测试 |
-| **DUAL-04** | 双参数通过 intercore 同时下发（TCP 帧 v2.0）| 集成测试（抓包验证）|
-| **DUAL-05** | 下垂公式 P = P_ref + k_droop × ΔV 在执行器端正确执行 | 集成测试（模拟 ΔV）|
-| **DUAL-06** | k_droop 管理权归 AI 引擎，实时控制模块不得修改 | 代码审查 |
-| **DUAL-07** | 通信中断时执行器保持最后有效的 P_ref 和 k_droop | 集成测试（断联测试）|
-| **DUAL-08** | P_ref 和 k_droop 任一超范围时自动 clamp 并记录 WARN 日志 | 集成测试 |
-| **FALLBACK-01** | AI 推理失败时自动降级至本地策略 | 集成测试（模拟推理失败）|
-| **FALLBACK-02** | 通信中断时执行器保持最后有效的 P_ref 和 k_droop | 集成测试（断联测试）|
-| **FALLBACK-03** | 通信恢复后自动切回 AI 双参数控制 | 集成测试 |
-
-### 5.8 RL 决策验收标准
-
-| ID | 标准 | 验证方法 |
-|----|------|----------|
+| DUAL-01 | RL 模型输出包含 P_ref 和 k_droop 两个参数 | 单元测试 |
+| DUAL-02 | P_ref 取值范围符合 ActionSpaceConfig 约束 | 单元测试（边界值验证）|
+| DUAL-03 | k_droop 取值范围符合实时控制模块提供的 [k_min, k_max] | 集成测试 |
+| DUAL-04 | 双参数通过 intercore 同时下发（TCP 帧 v2.0）| 集成测试（抓包验证）|
+| DUAL-05 | 下垂公式 P = P_ref + k_droop × ΔV 在执行器端正确执行 | 集成测试（模拟 ΔV）|
+| DUAL-06 | k_droop 管理权归 AI 引擎，实时控制模块不得修改 | 代码审查 |
+| DUAL-07 | 通信中断时执行器保持最后有效的 P_ref 和 k_droop | 集成测试 |
+| DUAL-08 | P_ref 和 k_droop 任一超范围时自动 clamp 并记录 WARN 日志 | 集成测试 |
+| FALLBACK-01 | AI 推理失败时自动降级至本地策略 | 集成测试 |
+| FALLBACK-02 | 通信中断时执行器保持最后有效的 P_ref 和 k_droop | 集成测试（断联测试）|
+| FALLBACK-03 | 通信恢复后自动切回 AI 双参数控制 | 集成测试 |
 | RL-01 | RL 模型加载成功 | 单元测试 |
 | RL-02 | RL 决策延迟 < 1s | 性能测试 |
-| RL-03 | RL 决策综合回报相比固定策略提升 >= 20% | 对比实验（相同数据，AI 策略 vs 固定策略）|
+| RL-03 | RL 决策综合回报相比固定策略提升 >= 20% | 对比实验 |
+
+### 6.9 电压异常应急策略（v2.9）
+
+RobustnessManager 负责检测电压异常和电池 SOC 异常，在 RL 决策前返回应急动作，保障本质安全。
+
+#### 6.9.1 异常类型
+
+```rust
+pub enum AnomalyType {
+    VoltageSag,               // 电压骤降（< 0.90 p.u.）
+    VoltageSurge,             // 电压骤升（> 1.10 p.u.）
+    BatterySocCritical,        // 电池 SOC 极低（< 10%）
+    BatterySocOverfull,       // 电池 SOC 极满（> 95%）
+    CommunicationTimeout,     // 核间通信超时（> 5s）
+}
+```
+
+#### 6.9.2 应急动作策略
+
+| 异常类型 | 检测条件 | 应急动作 | 说明 |
+|----------|----------|----------|------|
+| VoltageSag | v_avg < 0.90 p.u. | p_ref = max_discharge（放电补充）| 立即响应，不等待 RL |
+| VoltageSurge | v_avg > 1.10 p.u. | p_ref = max_charge（充电消纳）| 防止逆流 |
+| BatterySocCritical | soc < 0.10 | p_ref = 0（停止放电）| SOC 极低保护 |
+| BatterySocOverfull | soc > 0.95 | p_ref = 0（停止充电）| 防止过充 |
+| CommunicationTimeout | intercore 断开 > 5s | 执行器保持最后有效参数 | 通信中断不停机 |
+
+#### 6.9.3 与 strategy-engine 集成
+
+```rust
+// ai_integration.rs
+async fn dispatch_ai_decision(&self, action: ActionOutput) -> Result<(), AiError> {
+    // 1. 先进行异常检测
+    if let Some(robust_action) = self.robustness_manager.detect_and_respond(&self.fused_state).await? {
+        return self.dispatch_robust_action(robust_action).await;
+    }
+    // 2. 正常 RL 决策下发
+    self.rl_model.decide(...).await
+}
+```
+
+#### 6.9.4 验收标准
+
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| RB-01 | VoltageSag 检测延迟 < 100ms | 集成测试 |
+| RB-02 | 应急动作下发延迟 < 200ms | 性能测试 |
+| RB-03 | 应急动作期间 AI 推理暂停，不产生冲突指令 | 集成测试 |
+| RB-04 | 异常恢复后自动切回 AI 模式 | 集成测试 |
 
 ---
 
-## 6. 5 种场景奖励函数
+## 7. 5 种场景奖励函数
 
-### 6.1 功能概述
+### 7.1 功能概述
 
 RewardCalculator 根据当前场景标签，选择对应的奖励函数公式计算奖励值。奖励值用于在线微调阶段的模型权重更新，以及 Web UI 上展示决策质量。
 
-### 6.2 SCENE-01：台区季节性负荷模式
+### 7.2 SCENE-01：台区季节性负荷模式
 
 **优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + P-Q 协同优化
 
-> **v2.8 核心变更（P-Q 协同度奖励）：**
-> - 移除"电压硬惩罚"P_voltage_deviation，改为"行为奖励"R_PQ_coordination
-> - AI 仅控制 P（p_ref），但需感知 Q 裕度（q_realtime_margin）做最优决策
-> - 核心原则：Q 有裕度时 AI"偷懒"省电池；Q 饱和时 AI 必须正确出手
-> - 弃光场景差异化：高电压时检查 AI 动作方向而非简单置零
-> - 新增下垂系数平滑惩罚 R_smooth，防止 k_droop 极大化导致系统震荡
+**v2.5 分层架构原则：**
+- AI 仅在实时模块无功耗尽时才对电压偏差负责（q_realtime_margin <= 10% + 越限连续 2 步）
+- 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
+- 自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
 
-> **v2.5 分层架构原则（继续适用）：**
-> - AI 仅在实时模块无功耗尽时才对电压偏差负责（q_realtime_margin <= 10% + 越限连续 2 步）
-> - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
-> - 自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
-
-**v2.10 公式：**
-
+**完整公式：**
 ```
-R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处理）
-         - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
-         - w3 * P_transformer_overload
-         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增）
-         - w5 * R_ramp
-         - w6 * R_voltage_slope
-         - w7 * R_smooth                        // 下垂系数平滑惩罚（v2.8 新增）
-         - R_safety_override                    // 安全覆盖惩罚（v2.10 新增）
+R_agri = w1 * R_pv_consumption
+       - α(s) * w2 * P_battery_degradation
+       - w3 * P_transformer_overload
+       + w4 * R_PQ_coordination
+       - w5 * R_ramp
+       - w6 * R_voltage_slope
+       - w7 * R_smooth
+       - R_safety_override
 ```
-
-**安全覆盖惩罚 R_safety_override（v2.14 重构）：**
-
-当 safety_override_active=true 时，AI 应记录此次事件并学习避免触发。v2.14 采用分层计算策略：
-
-```
-// 样本不足时（consecutive < 10）：使用原因固定惩罚
-if consecutive < 10:
-    if safety_override_active:
-        match reason:
-            "voltage_violation" => -50.0 / 15 ≈ -3.33
-            "q_exhausted" => -30.0 / 15 ≈ -2.0
-            "emergency" => -100.0 / 15 ≈ -6.67
-            _ => -20.0 / 15 ≈ -1.33
-    else:
-        0.0
-
-// 样本充足时（consecutive >= 10）：比例 + 连续次数惩罚，归一化至 [-1, 0]
-else:
-    ratio_penalty = -5.0 * safety_override_ratio
-    consecutive_penalty = -10.0 * (consecutive / 10).clamp(0, 1)
-    R_safety_override = (ratio_penalty + consecutive_penalty) / 15
-```
-
-**系数说明（v2.14 校准）：**
-
-| 系数 | 值 | 说明 |
-|------|------|------|
-| k_override | 5.0 | 覆盖比例惩罚系数 |
-| k_consecutive | 10.0 | 连续触发次数惩罚系数 |
-| min_sample_threshold | 10 | 最小样本阈值 |
-| norm_divisor | 15.0 | 归一化除数 |
-
-**返回值范围：** [-1.0, 0.0]，与其他惩罚项一致
-
-**互斥惩罚逻辑（v2.14 新增）：**
-
-当 `safety_override_active = true` 时，跳过该步的 **P-Q 协同度惩罚**，避免同一次事件双重惩罚：
-
-```
-let r_pq = if state.safety_override_active {
-    0.0  // 互斥：SafetyOverride 事件不重复惩罚
-} else {
-    self.calc_pq_coordination(state, action.p_ref)
-};
-```
-
-**P-Q 协同度奖励 R_PQ_coordination（v2.8 新增）：**
-
-当 |V_deviation| > 5% 时，根据 Q 裕度和 AI 动作方向计算奖励：
-
-```
-// Q 有裕度（q_margin > 10%）：AI 最优解是"偷懒"省电池
-if q_margin > Q_THRESHOLD:
-    if |p_ref| < P_THRESHOLD (省电策略):
-        R_PQ_coordination = +50.0  // 大额奖励
-    else:
-        R_PQ_coordination = -5.0   // 轻微惩罚（强行出力浪费电池）
-
-// Q 已饱和（q_margin <= 10%）：AI 必须正确出手
-else:
-    if v_low && p_ref < 0:                    // 低电压 + 放电（正确）
-        R_PQ_coordination = +50.0
-    elif v_high && p_ref > 0:                  // 高电压 + 充电（正确）
-        R_PQ_coordination = +50.0
-    elif v_low && p_ref >= 0:                  // 低电压 + 不放电（失职）
-        R_PQ_coordination = -30.0
-    elif v_high && p_ref <= 0:                 // 高电压 + 不充电（失职）
-        R_PQ_coordination = -30.0
-    else:
-        R_PQ_coordination = 0.0
-```
-
-其中：`v_low = (v_avg < 0.95)`，`v_high = (v_avg > 1.05)`，`P_THRESHOLD = 5.0 kW`
-
-**弃光奖励差异化（v2.8 改进）：**
-
-```
-// 高电压时（v_avg >= 1.05），检查 AI 动作方向而非简单置零
-if v_avg >= 1.05:
-    if p_ref < 0:                           // 充电消纳光伏
-        R_pv_consumption = min(P_pv_self_consume / P_pv_total, 1.0) * 100.0
-    else:                                    // 反而在放电
-        R_pv_consumption = -20.0            // 严厉惩罚
-else:
-    R_pv_consumption = min(P_pv_self_consume / P_pv_total, 1.0) * 100.0
-```
-
-**下垂系数平滑惩罚 R_smooth（v2.8 新增）：**
-
-```
-R_smooth = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
-```
-
-- `Δk_droop = k_droop_t - k_droop_{t-1}`：防止 AI 频繁调整 k_droop
-- `K_MAX`：k_droop 上限（默认 50.0 kW/V），防止设置极大值导致系统震荡
-- `λ`：超限惩罚系数（默认 1.0）
 
 **自适应损耗系数 α(s)：**
+| 条件 | α(s) 值 | 说明 |
+|------|---------|------|
+| battery_soc < 10% | 3.0 | SOC 极低保护，优先级最高 |
+| q_realtime_margin <= 10% 且 \|ΔV\| > 5% 连续 >= 2 步 | 0.2 | 电压支撑模式 |
+| 其他 | 1.0 | 常规调度 |
+
+**P-Q 协同度奖励 R_PQ_coordination（v2.8 + v2.13 Sigmoid 平滑化）：**
+```rust
+w_save = 1 / (1 + exp(-k * (q_margin - q_threshold)));
+w_support = 1 - w_save;
+r_pq = w_save * r_lazy + w_support * r_correct;
 ```
-α(s) = 3.0   // SOC 极低保护：battery_soc < SOC_CRITICAL (10%)，优先级最高
-α(s) = 0.2   // 电压支撑模式：q_realtime_margin <= 10% 且 |V-V_ref| > 5% 连续 >= 2 步
-α(s) = 1.0   // 常规调度：三者均不满足
+- Q 有裕度（q_margin > 10%）：AI"偷懒"省电池 → +50
+- Q 饱和（q_margin <= 10%）：低电压 + 放电 或 高电压 + 充电 → +50
+
+**弃光奖励差异化（v2.8）：**
+- v_avg >= 1.05 时：充电消纳 → 正常奖励；放电 → -20 惩罚
+
+**SafetyOverride 惩罚 R_safety_override（v2.14 重构）：**
+```rust
+if consecutive < 10 {
+    // 样本不足：原因固定惩罚 / 15
+    match reason {
+        "voltage_violation" => -50.0 / 15,
+        "q_exhausted" => -30.0 / 15,
+        "emergency" => -100.0 / 15,
+        _ => -20.0 / 15,
+    }
+} else {
+    // 样本充足：比例 + 连续次数惩罚，归一化至 [-1, 0]
+    (-5.0 * ratio - 10.0 * (consecutive / 10).clamp(0, 1)) / 15.0
+}
 ```
 
-**变化率惩罚：**
-```
-R_ramp = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
-```
+**互斥逻辑（v2.14）：** `safety_override_active = true` 时，跳过该步的 P-Q 协同度惩罚
 
-**电压变化斜率惩罚：**
-```
-R_voltage_slope = |V_avg_t - V_avg_{t-1}|
-```
-
+**权重配置：**
 | 权重 | 默认值 | 说明 | 可配置范围 |
 |------|--------|------|------------|
-| w1 | 1.0 | 光伏消纳奖励权重（含差异化电压处理） | [0.0, 3.0] |
-| w2 | 0.5 | 电池损耗惩罚权重（C-rate² × α(s)） | [0.0, 2.0] |
-| w3 | 2.0 | 变压器过载惩罚权重 | [0.0, 5.0] |
-| w4 | 1.0 | P-Q 协同度奖励权重（v2.8 新增） | [0.0, 5.0] |
-| w5 | 0.5 | 功率变化率惩罚权重 | [0.0, 2.0] |
-| w6 | 0.5 | 电压变化斜率惩罚权重 | [0.0, 2.0] |
-| w7 | 0.5 | 下垂系数平滑惩罚权重（v2.8 新增） | [0.0, 2.0] |
-| w8 | 1.0 | 安全覆盖惩罚权重（v2.10 新增） | [0.0, 5.0] |
+| w1 | 1.0 | 光伏消纳奖励 | [0.0, 3.0] |
+| w2 | 0.5 | 电池损耗惩罚 | [0.0, 2.0] |
+| w3 | 2.0 | 变压器过载惩罚 | [0.0, 5.0] |
+| w4 | 1.0 | P-Q 协同度奖励 | [0.0, 5.0] |
+| w5 | 0.5 | 功率变化率惩罚 | [0.0, 2.0] |
+| w6 | 0.5 | 电压变化斜率惩罚 | [0.0, 2.0] |
+| w7 | 0.5 | 下垂系数平滑惩罚 | [0.0, 2.0] |
+| w8 | 1.0 | 安全覆盖惩罚 | [0.0, 5.0] |
 
-> **v2.10 说明：** 新增安全覆盖惩罚项，AI 被实时控制模块覆盖时获得惩罚，激励 AI 学习避免触发覆盖的策略。
->
-> **v2.8 说明：** P-Q 协同度奖励替代原电压惩罚，实现"行为奖励"而非"结果惩罚"；弃光场景差异化；新增下垂系数平滑惩罚防止系统震荡。
+### 7.3 SCENE-B1：自主套利模式
 
-### 6.3 SCENE-B1：工商业模式-自主套利
+**优化目标：** 最大化峰谷电价差收益 + 最小化电池损耗
 
-**优化目标：** 最大化峰谷电价差收益，最小化电池损耗
-
-> **v2.4 说明：** Q由实时控制模块调节，本奖励函数中Q的影响体现在P_batt物理方程中。
-
-**公式：**
+> **v2.4 说明：** Q 由实时控制模块调节，本奖励函数中 Q 的影响体现在 P_batt 物理方程中。
 
 ```
 R_arbitrage = w1 * R_price_spread - w2 * P_battery_degradation
@@ -836,16 +720,9 @@ R_price_spread = sum(P_batt_set * delta_t * (price_sell - price_buy)) * conversi
 P_battery_degradation = beta * sum(|P_batt_set| * delta_t) / E_battery_total * 100
 ```
 
-| 权重 | 默认值 | 说明 | 可配置范围 |
-|------|--------|------|------------|
-| w1 | 1.0 | 电价差收益权重 | [0.0, 3.0] |
-| w2 | 1.0 | 电池损耗惩罚权重 | [0.0, 3.0] |
+### 7.4 SCENE-B2：需量控制模式
 
-### 6.4 SCENE-B2：工商业模式-需量控制
-
-**优化目标：** 减免需量罚金
-
-**公式：**
+**优化目标：** 减免需量罚金 + 最小化舒适度损失
 
 ```
 R_demand = w1 * R_demand_penalty_avoidance - w2 * P_comfort_loss
@@ -854,36 +731,20 @@ R_demand_penalty_avoidance = max(0, D_peak_baseline - D_peak_actual) * penalty_r
 P_comfort_loss = gamma * P_load_shed * delta_t * price_loss
 ```
 
-| 权重 | 默认值 | 说明 | 可配置范围 |
-|------|--------|------|------------|
-| w1 | 1.0 | 需量罚金减免权重 | [0.0, 3.0] |
-| w2 | 0.5 | 舒适度损失惩罚权重 | [0.0, 3.0] |
-
-### 6.5 SCENE-B3：工商业模式-虚拟电厂
+### 7.5 SCENE-B3：虚拟电厂模式
 
 **优化目标：** 最大化辅助服务收益 + 响应精度
-
-**公式：**
 
 ```
 R_vpp = w1 * R_ancillary_service + w2 * R_response_accuracy - w3 * P_deadline_deviation
 
 R_ancillary_service = P_regulation_capacity * capacity_price + P_regulation_mileage * mileage_price
 R_response_accuracy = 100 * max(0, 1 - |P_actual - P_target| / P_target_range)
-P_deadline_deviation = delta_t_response / T_allowed * 100
 ```
 
-| 权重 | 默认值 | 说明 | 可配置范围 |
-|------|--------|------|------------|
-| w1 | 1.0 | 辅助服务收益权重 | [0.0, 3.0] |
-| w2 | 2.0 | 响应精度权重（VPP 考核重点）| [0.0, 5.0] |
-| w3 | 1.0 | 响应延迟惩罚权重 | [0.0, 3.0] |
+### 7.6 SCENE-B5：极致绿色模式
 
-### 6.6 SCENE-B5：工商业模式-极致绿色
-
-**优化目标：** 最大化绿电消纳比例，最小化碳排放
-
-**公式：**
+**优化目标：** 最大化绿电消纳比例 + 最小化碳排放
 
 ```
 R_green = w1 * R_green_consumption + w2 * R_carbon_reduction
@@ -892,34 +753,27 @@ R_green_consumption = 100 * E_green_self_consume / E_total_consume
 R_carbon_reduction = 100 * (C_baseline - C_actual) / C_baseline
 ```
 
-| 权重 | 默认值 | 说明 | 可配置范围 |
-|------|--------|------|------------|
-| w1 | 1.0 | 绿电消纳比例权重 | [0.0, 3.0] |
-| w2 | 1.0 | 碳减排量权重 | [0.0, 3.0] |
+### 7.7 场景-权重映射表
 
-### 6.7 动态权重调整
+| 场景 | w1 | w2 | w3 | w4 | 说明 |
+|------|----|----|----|----|------|
+| 台区季节性负荷 | 1.0 | 0.5 | 2.0 | - | 变压器过载惩罚最重 |
+| 自主套利 | 1.0 | 1.0 | - | - | 经济性主导 |
+| 需量控制 | 1.0 | 0.5 | - | - | 需量费减免为主 |
+| VPP | 1.0 | 2.0 | 1.0 | - | 响应精度权重最高 |
+| 极致绿色 | 1.0 | 1.0 | - | - | 环境效益导向 |
 
-**场景-权重映射表：**
-
-| 场景 | w1(op1) | w2(op2) | w3(op3) | w4(op4) | 说明 |
-|------|---------|---------|---------|---------|------|
-| 台区季节性负荷 | 1.0(光伏消纳) | 0.5(电池损耗) | 2.0(变压器) | - | 变压器过载惩罚最重，v2.1 移除电压质量 |
-| 自主套利 | 1.0(电价收益) | 1.0(电池损耗) | - | - | 经济性主导 |
-| 需量控制 | 1.0(需量减免) | 0.5(舒适损失) | - | - | 需量费减免为主 |
-| VPP | 1.0(辅助收益) | 2.0(响应精度) | 1.0(延迟惩罚) | - | 响应精度权重最高 |
-| 极致绿色 | 1.0(绿电消纳) | 1.0(碳减排) | - | - | 环境效益导向 |
-
-**验收标准：**
+### 7.8 动态权重调整
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
 | WEIGHT-01 | 场景切换时权重映射自动更新，延迟 < 1s | 集成测试 |
 | WEIGHT-02 | 权重映射表可通过配置文件修改，支持热加载 | 配置测试 |
-| WEIGHT-03 | 策略管理员可通过 Web UI 手动调整当前场景权重，调整即时生效 | UI 集成测试 |
-| WEIGHT-04 | 手动调整的权重在下一次场景切换时复位为权重映射表默认值 | 集成测试 |
+| WEIGHT-03 | 策略管理员可通过 Web UI 手动调整当前场景权重 | UI 集成测试 |
+| WEIGHT-04 | 手动调整的权重在下一次场景切换时复位为默认值 | 集成测试 |
 | WEIGHT-05 | 权重修改记录操作日志，包含修改人、修改时间、修改前后值 | 日志验证 |
 
-### 6.8 奖励函数验收标准
+### 7.9 奖励函数验收标准
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
@@ -940,298 +794,57 @@ R_carbon_reduction = 100 * (C_baseline - C_actual) / C_baseline
 | REWARD-E2 | C_actual = 0 时 R_carbon_reduction = 100 | 单元测试 |
 | REWARD-E3 | C_actual >= C_baseline 时 R_carbon_reduction = 0 | 单元测试 |
 | REWARD-E4 | 电网排放因子从配置文件读取，默认 0.581 kg CO2/kWh | 配置验证 |
-| REWARD-ALL | 奖励函数完整计算时间 < 1ms（各场景分别验证）| 性能测试 |
-
-### 6.9 v2.10 短期实现：折扣累积奖励机制（R2）
-
-#### 6.9.1 需求描述
-
-当前奖励函数仅计算即时奖励，缺乏对长期累积效应的建模。可能导致短视行为（如过度充放电）和"月末冲刺"现象。
-
-#### 6.9.2 实现方案
-
-```rust
-// DiscountedRewardCalculator 核心逻辑
-pub struct DiscountedRewardCalculator {
-    gamma: f32,           // 折扣因子，默认 0.99
-    reward_buffer: Vec<f32>,  // 奖励历史缓冲区
-    buffer_size: usize,  // 缓冲区大小，默认 1000
-}
-
-impl DiscountedRewardCalculator {
-    pub fn calculate_discounted_reward(&mut self, current_reward: f32) -> f32 {
-        self.reward_buffer.push(current_reward);
-        if self.reward_buffer.len() > self.buffer_size {
-            self.reward_buffer.remove(0);
-        }
-
-        // 计算折扣累积奖励
-        let discounted: f32 = self.reward_buffer.iter()
-            .rev()
-            .enumerate()
-            .map(|(t, &r)| r * self.gamma.powi(t as i32))
-            .sum();
-
-        discounted
-    }
-}
-```
-
-#### 6.9.3 验收标准
-
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
-| BC1 | 折扣因子 `gamma` 可配置，范围 [0.9, 0.999] | 配置测试 |
-| BC2 | 缓冲区大小可配置，默认1000 | 配置测试 |
-| BC3 | 长期累积奖励对短期决策有影响（gamma=0.99 时，100步前奖励权重约 0.366） | 数学验证 |
-| BC4 | 与现有奖励函数正交，不影响即时奖励计算 | 回归测试 |
-
-#### 6.9.4 影响文件
-
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-
-### 6.10 v2.12 中优先级实现：变压器过载分段惩罚（R-04）
-
-#### 6.10.1 需求描述
-
-当前变压器过载惩罚使用二次函数 `P_transformer_overload = quadratic(L_trafo, start=75%)`，不够精细。当负载率在 75%~90% 时为安全区，90%~100% 时风险上升，>100% 时需要硬惩罚。
-
-#### 6.10.2 实现方案
-
-分段惩罚函数：
-
-```
-P_trafo_overload(L):
-  L < 0.75:          0.0                    // 安全区，无惩罚
-  0.75 <= L < 0.90:  (L - 0.75) / 0.15 * 10  // 线性增长，0~10
-  0.90 <= L < 1.00:  10 + (L - 0.90) / 0.10 * 40  // 指数增长，10~50
-  L >= 1.00:          100.0                  // 硬惩罚，强制电池放电/切负荷
-```
-
-#### 6.10.3 验收标准
-
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
-| TO-01 | L=0.70 时惩罚为 0 | 单元测试 |
-| TO-02 | L=0.90 时惩罚为 10 | 单元测试 |
-| TO-03 | L=1.00 时惩罚为 50 | 单元测试 |
-| TO-04 | L=1.05 时惩罚为 100（硬惩罚） | 单元测试 |
+| REWARD-ALL | 奖励函数完整计算时间 < 1ms | 性能测试 |
+| REWARD-v2.5-01 | q_realtime_margin > 0.10 时 R_voltage = 0（条件不触发）| P0 | v2.5 PRD |
+| REWARD-v2.5-02 | q_realtime_margin <= 0.10 且电压越限连续2步时触发电压惩罚 | P0 | v2.5 PRD |
+| REWARD-v2.5-03 | SOC < 10% 时 α = 3.0，电池损耗惩罚加重 | P0 | v2.5 PRD |
+| REWARD-v2.5-04 | v_avg >= 1.05 p.u. 时弃光奖励 = 0 | P0 | v2.5 PRD |
+| REWARD-v2.5-05 | α(s) 三状态（常规/电压支撑/SOC极低）互斥，取最高优先级 | P0 | v2.5 PRD |
+| REWARD-v2.8-01 | Q 有裕度时 AI 不动作（|p_ref| < 5kW）→ R_PQ = +50.0 | P0 | v2.8 PRD |
+| REWARD-v2.8-02 | Q 饱和 + 低电压时 AI 放电（p_ref < 0）→ R_PQ = +50.0；不放电 → R_PQ = -30.0 | P0 | v2.8 PRD |
+| REWARD-v2.8-03 | Q 饱和 + 高电压时 AI 充电（p_ref > 0）→ R_PQ = +50.0；不充电 → R_PQ = -30.0 | P0 | v2.8 PRD |
+| REWARD-v2.8-04 | v_avg >= 1.05 时 AI 充电消纳 → R_pv 正常；放电 → R_pv = -20.0 | P0 | v2.8 PRD |
+| REWARD-v2.8-05 | R_smooth 惩罚项存在（|Δk_droop| + λ·超限惩罚）| P0 | v2.8 PRD |
+| REWARD-v2.10-01 | safety_override_active=true 时 R_safety_override 根据触发原因惩罚 | P0 | v2.10 PRD |
+| CONFIG-v2.5-01 | reward_thresholds 配置项可通过 ai.toml 加载，缺失时自动回退默认值 | P1 | v2.5 PRD |
+| TO-01 | L=0.70 时变压器过载惩罚为 0 | 单元测试 |
+| TO-02 | L=0.90 时变压器过载惩罚为 10 | 单元测试 |
+| TO-03 | L=1.00 时变压器过载惩罚为 50 | 单元测试 |
+| TO-04 | L=1.05 时变压器过载惩罚为 100（硬惩罚）| 单元测试 |
 | TO-05 | 变压器过载持续时间降低 >= 40% | 对比实验 |
-
-#### 6.10.4 影响文件
-
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-
-### 6.11 v2.12 中优先级实现：电压斜率惩罚动态权重（R-05）
-
-#### 6.11.1 需求描述
-
-当前 `w6` 电压变化斜率惩罚权重固定，电压偏差越大应权重越高，以提高对电压波动的敏感性。
-
-#### 6.11.2 实现方案
-
-动态权重公式：
-
-```
-w6(v) = base_w6 × (1.0 + k × |ΔV|)
-
-其中：
-  base_w6 = 0.5（默认基础权重）
-  k = 2.0（放大系数，可配置）
-  |ΔV| = |V_avg_t - V_avg_{t-1}|（电压变化量）
-```
-
-#### 6.11.3 验收标准
-
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
 | DV-01 | ΔV=0 时 w6 = base_w6 | 单元测试 |
 | DV-02 | ΔV=0.05 时 w6 = base_w6 × (1.0 + k × 0.05) | 数学验证 |
 | DV-03 | k 值可配置，范围 [0.0, 5.0] | 配置测试 |
 | DV-04 | 电压波动幅度降低 >= 25% | 对比实验 |
-
-#### 6.11.4 影响文件
-
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-
-### 6.12 v2.12 中优先级实现：冲击负荷响应奖励（R-06）
-
-#### 6.12.1 需求描述
-
-当前缺失冲击负荷响应奖励，需量控制鲁棒性不足。结合 v2.11 分位数预测（P10/P50/P90），引入基于风险感知的冲击负荷响应奖励。
-
-#### 6.12.2 实现方案
-
-冲击负荷响应奖励公式：
-
-```
-R_shock_response = f(load_shedding, response_time, P90)
-
-条件：
-  当 P90 - P50 > threshold（冲击负荷检测）：
-    R_shock = w_shock × load_shedding / max_load_shedding
-              - λ × response_time / max_response_time
-  否则：
-    R_shock = 0.0
-
-其中：
-  w_shock = 20.0（冲击负荷响应权重，可配置）
-  λ = 5.0（响应时间惩罚系数，可配置）
-  threshold = 10.0 kW（冲击负荷判定阈值）
-```
-
-#### 6.12.3 验收标准
-
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
 | SH-01 | 无冲击负荷时 R_shock = 0 | 单元测试 |
 | SH-02 | 冲击负荷发生时，load_shedding 越大奖励越高 | 单元测试 |
 | SH-03 | 响应时间越长惩罚越大 | 单元测试 |
 | SH-04 | 需量超标次数降低 >= 30% | 对比实验 |
-
-#### 6.12.4 影响文件
-
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-
-### 6.13 v2.12 中优先级实现：P-Q 协同度阈值可配置化（R-07）
-
-#### 6.13.1 需求描述
-
-当前 `Q_THRESHOLD=0.10` 和 `P_THRESHOLD=5.0kW` 硬编码，不同台区工况差异大，需要支持灵活配置。
-
-#### 6.13.2 实现方案
-
-将阈值从配置文件读取：
-
-```toml
-[reward_thresholds]
-# P-Q 协同度阈值（v2.12 新增）
-q_margin_threshold = 0.10      # Q 裕度阈值，低于此值视为"无功耗尽"
-p_threshold_kw = 5.0          # P 阈值（kW），省电策略判定阈值
-```
-
-#### 6.13.3 验收标准
-
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
 | TH-01 | Q_THRESHOLD 可通过配置修改 | 配置测试 |
 | TH-02 | P_THRESHOLD 可通过配置修改 | 配置测试 |
-| TH-03 | 配置缺失时使用默认值（Q=0.10, P=5.0） | 单元测试 |
-| TH-04 | 阈值修改后即时生效（热重载） | 配置热重载测试 |
-
-#### 6.13.4 影响文件
-
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-- `mupc/config/mupc_env_config.yaml`
-
-### 6.14 v2.13 奖励函数精细化改进
-
-[REVIEWED: PASS]
-
-> **v2.13 核心变更：** 基于专家建议（2026-06-14）中有参考意义的 P0/P1 项，采纳吸收实现。
-
-#### 6.14.1 功能概述
-
-v2.13 在 v2.12 基础上进一步精细化奖励函数设计，解决以下专家建议问题：
-
-| 来源 | 问题 | 解决方案 |
-|------|------|----------|
-| 专家建议 §2.2 | P-Q协同硬阈值导致策略震荡 | Sigmoid平滑过渡 |
-| 专家建议 §2.1 | 归一化系数硬编码，跨台区泛化差 | Welford动态归一化 |
-| 专家建议 §2.3 | 缺乏"动作-效果"因果链 | 状态改善率奖励 |
-| 专家建议 §2.5 | 1Hz无法响应ms级冲击 | 冲击负荷预备度奖励 |
-| 专家建议 §3.2 | 在线微调分布偏移风险 | PER+KL正则化 |
-| 专家建议 §3.3 | 场景切换策略真空 | 策略混合 |
-
-#### 6.14.2 P-Q协同Sigmoid平滑化
-
-**问题**：硬阈值 `if q_margin > 0.10 { +50 } else { -30 }` 导致策略在阈值附近震荡。
-
-**方案**：
-```
-w_save = 1 / (1 + exp(-k * (q_margin - q_threshold)))
-w_support = 1 - w_save
-r_pq = w_save * r_lazy + w_support * r_correct
-```
-其中 `k=50` 控制过渡陡峭程度。
-
-#### 6.14.3 动态自适应归一化
-
-**问题**：固定系数（如 `/100`、`*10`）基于200kVA台区参数，设备扩容时失效。
-
-**方案**：
-```rust
-struct RunningStats {
-    mean: f64,      // 滑动均值 μ
-    m2: f64,        // 用于计算方差
-    count: usize,
-}
-// Welford在线算法更新
-// 归一化：z = (r - μ) / (σ + ε)，clamp到[-1,1]
-```
-
-#### 6.14.4 状态改善率奖励
-
-**问题**：AI可能发出放电指令但电压未回升，策略"自嗨"。
-
-**方案**：
-```rust
-R_improve = w * (V_dev_prev - V_dev_curr) * sign(P_action)
-// 只有当有功动作确实减少电压偏差时才给正向反馈
-```
-
-#### 6.14.5 冲击负荷预备度奖励重构
-
-**问题**：`response_time` 硬编码为0（1Hz决策无法感知ms级冲击）。
-
-**方案**：
-```rust
-R_readiness = w1 * (soc_reserve_target - current_soc)
-            + w2 * (p_ref_reserve_target - |p_ref|)
-// 奖励AI保持较高SOC或较低放电基准点，为冲击留出缓冲空间
-```
-
-#### 6.14.6 在线微调PER+KL正则化强化
-
-**问题**：在线微调可能放大错误，策略偏移过远。
-
-**方案**：
-```rust
-L_online = L_task + β * D_KL(π_new || π_offline)
-// PER优先采样高TD-error样本
-// KL散度约束防止策略偏离过远
-```
-
-#### 6.14.7 策略混合替代权重混合
-
-**问题**：权重线性插值不等于策略输出线性变化。
-
-**方案**：
-```rust
-a_blended = (1 - α) * a_old + α * a_new
-// 过渡期同时运行新旧策略，比调整内部权重更安全
-```
-
-#### 6.14.8 影响文件
-
-| 文件 | 变更类型 |
-|------|----------|
-| `ai-engine/src/reward_calculator.rs` | 修改 |
-| `ai-engine/src/reward_normalizer.rs` | 新增 |
-| `ai-engine/src/online_updater.rs` | 修改 |
-| `ai-engine/src/mode_selector.rs` | 修改 |
+| TH-03 | 配置缺失时使用默认值（Q=0.10, P=5.0）| 单元测试 |
+| TH-04 | 阈值修改后即时生效（热重载）| 配置热重载测试 |
 
 ---
 
-## 7. RKNN Runtime NPU 推理
+## 8. RKNN Runtime NPU 推理
 
-[REVIEWED: PASS]
+### 8.1 功能概述
 
-### 7.1 功能概述
+RKNN Runtime 是 Rockchip 提供的 NPU 推理引擎，通过 FFI 调用 `librknnrt.so` C 库，在 RK3588 NPU 上执行 INT8/FP16 量化模型推理。所有 FFI 调用使用 `tokio::task::spawn_blocking` 在后台线程执行。
 
-RKNN Runtime 是 Rockchip 提供的 NPU 推理引擎，通过 FFI 调用 `librknnrt.so` C 库，在 RK3588 NPU 上执行 INT8/FP16 量化模型推理。所有 FFI 调用使用 `tokio::task::spawn_blocking` 在后台线程执行，不阻塞 Tokio async runtime。
+**模型生命周期状态：**
 
-### 7.2 推理流程
+```rust
+pub enum ModelStatus {
+    Unloaded,   // 未加载
+    Loading,    // 加载中
+    Ready,      // 就绪，可推理
+    Error,      // 错误状态（触发降级）
+}
+```
+
+### 8.2 推理流程
 
 ```
 训练阶段 (x86 服务器):
@@ -1241,78 +854,42 @@ PyTorch → ONNX → rknn-toolkit2 量化 → INT8 模型 (.rknn)
 INT8 模型 → RKNN Runtime → NPU 推理 (< 100ms)
 ```
 
-### 7.3 FFI 核心函数
+### 8.3 FFI 核心函数
 
-| C API | 功能 | Rust FFI 签名 | 错误映射 |
-|-------|------|---------------|----------|
-| `rknn_init` | 模型加载与初始化 | `fn rknn_init(ctx: *mut u64, model_path: *const c_char, type: c_int, flag: c_int) -> c_int` | 失败 → `AiEngineError::ModelLoadFailed` |
-| `rknn_inputs_set` | 输入 tensor 设置 | `fn rknn_inputs_set(ctx: u64, n: u32, inputs: *mut RknnInput) -> c_int` | 内部错误 |
-| `rknn_run` | 推理执行 | `fn rknn_run(ctx: u64, reserved: *mut u64) -> c_int` | 失败 → `AiEngineError::InferenceFailed` |
-| `rknn_outputs_get` | 输出 tensor 获取 | `fn rknn_outputs_get(ctx: u64, n: u32, outputs: *mut RknnOutput) -> c_int` | 内部错误 |
-| `rknn_destroy` | 资源释放 | `fn rknn_destroy(ctx: u64) -> c_int` | Drop 中调用，错误日志记录 |
+| C API | 功能 | Rust FFI 签名 |
+|-------|------|---------------|
+| `rknn_init` | 模型加载与初始化 | `fn rknn_init(ctx: *mut u64, model_path: *const c_char, type: c_int, flag: c_int) -> c_int` |
+| `rknn_inputs_set` | 输入 tensor 设置 | `fn rknn_inputs_set(ctx: u64, n: u32, inputs: *mut RknnInput) -> c_int` |
+| `rknn_run` | 推理执行 | `fn rknn_run(ctx: u64, reserved: *mut u64) -> c_int` |
+| `rknn_outputs_get` | 输出 tensor 获取 | `fn rknn_outputs_get(ctx: u64, n: u32, outputs: *mut RknnOutput) -> c_int` |
+| `rknn_destroy` | 资源释放 | `fn rknn_destroy(ctx: u64) -> c_int` |
 
-### 7.4 核心数据结构
+**RKNN 错误码映射：**
 
-```rust
-/// RKNN Runtime 上下文
-pub struct RknnContext {
-    ctx: u64,
-    input_shape: Vec<i32>,
-    output_shape: Vec<i32>,
-}
+| 错误码 | 含义 | 映射错误类型 |
+|--------|------|-------------|
+| 0 | 成功 | - |
+| -1 | 初始化失败 | `ModelLoadFailed` |
+| -2 | 模型格式错误 | `ModelLoadFailed` |
+| -3 | 模型不符合框架要求 | `ModelLoadFailed` |
+| -4 | SDK 版本不匹配 | `ModelLoadFailed` |
+| -5 | 输入数量不匹配 | `InferenceFailed` |
+| -6 | 输出数量不匹配 | `InferenceFailed` |
+| -7 | 输入格式错误 | `InferenceFailed` |
+| -8 | 输出格式错误 | `InferenceFailed` |
+| -9 | 推理超时 | `InferenceFailed` |
+| -10 | 上下文无效 | `InferenceFailed` |
 
-/// RKNN Runtime 推理器
-pub struct RknnRuntime {
-    model_path: PathBuf,
-    ctx: RwLock<Option<RknnContext>>,
-}
-```
+### 8.4 推理延迟预算
 
-### 7.5 异步封装
+| 阶段 | 最大延迟 | 说明 |
+|------|----------|------|
+| 状态输入准备 | 5ms | 融合数据读取 + 特征向量序列化 |
+| NPU 推理 | 100ms | RKNN Runtime run() 调用 |
+| 动作输出校验 | 0.5ms | 约束规则校验 + clamp |
+| **总端到端延迟** | **120ms** | 从状态输入就绪到动作输出可用 |
 
-```rust
-impl RknnRuntime {
-    /// 创建推理器
-    pub fn new(model_path: &Path) -> Result<Self, AiEngineError>;
-
-    /// 加载模型（异步封装 spawn_blocking）
-    pub async fn load(&self) -> Result<(), AiEngineError>;
-
-    /// 执行推理（异步封装 spawn_blocking）
-    pub async fn run(&self, input: &[f32]) -> Result<Vec<f32>, AiEngineError>;
-
-    /// 释放资源
-    pub async fn destroy(&self) -> Result<(), AiEngineError>;
-}
-```
-
-### 7.6 RAII 资源管理
-
-```rust
-impl Drop for RknnContext {
-    fn drop(&mut self) {
-        unsafe { rknn_destroy(self.ctx) }
-    }
-}
-```
-
-### 7.7 错误类型
-
-```rust
-#[derive(Debug, Error)]
-pub enum AiEngineError {
-    #[error("模型加载失败: {0}")]
-    ModelLoadFailed(String),
-    #[error("推理执行失败: {0}")]
-    InferenceFailed(String),
-    #[error("模型未加载")]
-    ModelNotLoaded,
-    #[error("输入形状不匹配: expected {expected:?}, actual {actual:?}")]
-    InputShapeMismatch { expected: Vec<i32>, actual: Vec<i32> },
-}
-```
-
-### 7.8 技术约束
+### 8.5 技术约束
 
 | 约束项 | 说明 |
 |--------|------|
@@ -1322,112 +899,57 @@ pub enum AiEngineError {
 | 内存安全 | 输入/输出缓冲区使用 `Box::into_raw` / `Box::from_raw`，确保无 use-after-free |
 | NPU 独占 | AI 推理任务独占 RK3588 NPU 核心，不与非 AI 任务共享 |
 
-### 7.9 推理性能验收标准
+### 8.6 推理性能验收标准
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
 | NPU-01 | AI 推理任务独占 RK3588 NPU 核心 | 内核调度配置验证 |
-| NPU-02 | NPU 推理延迟 < 100ms（从输入张量就绪到输出张量就绪，P99 < 100ms）| 性能测试（1000 次采样）|
-| NPU-03 | 模型推理总延迟（状态输入 + 推理 + 动作输出校验）< 120ms | 性能测试 |
-| NPU-04 | NPU 推理失败时自动降级至 CPU 推理，降级延迟 < 5s | 集成测试（模拟 NPU 故障）|
-| NPU-05 | CPU 推理模式下推理延迟 < 500ms（降级模式，仅维持基本功能）| 性能测试 |
-| NPU-06 | NPU 温度监控，超过 85 deg C 时触发降频保护，推理频率降低不超过初始频率的 50% | 压力测试 |
-
-### 7.10 RKNN Runtime 验收标准
-
-| ID | 标准 | 验证方法 |
-|----|------|----------|
-| RK-01 | rknn_init 成功加载 .rknn 模型 | 单元测试：使用真实模型文件 |
-| RK-02 | rknn_run 正确执行推理 | 单元测试：比对已知输入输出 |
-| RK-03 | 输入形状验证正确 | 单元测试：验证 shape mismatch 错误 |
-| RK-04 | 输出形状正确 | 单元测试：验证输出维度 |
-| RK-05 | 资源正确释放 (rknn_destroy) | 单元测试：验证资源泄漏检测 |
-| RK-06 | 错误处理正确 | 单元测试：验证各错误场景 |
-| RK-07 | 异步封装不阻塞 runtime | 集成测试：验证并发执行 |
+| NPU-02 | NPU 推理延迟 < 100ms (P99) | 性能测试（1000 次采样） |
+| NPU-03 | AI 完整决策总延迟 < 120ms | 性能测试 |
+| NPU-04 | NPU 推理失败时自动降级至 CPU 推理，降级延迟 < 5s | 集成测试 |
+| NPU-05 | CPU 推理模式下推理延迟 < 500ms | 性能测试 |
+| RK-01 | rknn_init 成功加载 .rknn 模型 | 单元测试 |
+| RK-02 | rknn_run 正确执行推理 | 单元测试 |
+| RK-03 | 输入形状验证正确 | 单元测试 |
+| RK-04 | 输出形状正确 | 单元测试 |
+| RK-05 | 资源正确释放 (rknn_destroy) | 单元测试 |
+| RK-06 | 错误处理正确 | 单元测试 |
+| RK-07 | 异步封装不阻塞 runtime | 集成测试 |
 | RK-08 | Send + Sync 实现正确 | 编译测试 |
-
-### 7.11 推理延迟预算分配
-
-| 阶段 | 最大延迟 | 说明 |
-|------|----------|------|
-| 状态输入准备 | 5ms | 融合数据读取 + 特征向量序列化 |
-| NPU 推理 | 100ms | RKNN Runtime run() 调用 |
-| 动作输出校验 | 0.5ms | 约束规则校验 + clamp |
-| **总端到端延迟** | **120ms** | 从状态输入就绪到动作输出可用 |
-
-### 7.12 v2.5 奖励阈值配置（RewardThresholdConfig）
-
-v2.5 新增 `RewardThresholdConfig` 配置结构，用于 SCENE-01 奖励函数的阈值参数：
-
-```toml
-[reward_thresholds]
-# 电压死区（与现有设计一致）
-voltage_deadband = 0.05          # ±5%
-
-# Q 裕度阈值：实时模块剩余容量低于此值视为"无功耗尽"
-q_margin_threshold = 0.10        # 10%
-
-# 弃光前置电压阈值：电压高于此值时弃光奖励不计入
-pv_high_limit = 1.05           # p.u.
-
-# SOC 极低保护阈值
-soc_critical = 0.10            # <此值触发 α=3.0 极低保护
-
-# 电压惩罚系数
-voltage_penalty_high = 2.0       # 高电压侧（光伏超发）
-voltage_penalty_low = 1.0        # 低电压侧（灌溉/炒茶/空调负荷）
-```
-
-> **默认值行为：** 配置文件缺失 `reward_thresholds` 时，所有参数自动回退至默认值，保证 v2.5 行为向后兼容。
+| NPU-06 | NPU 温度监控，超过 85°C 时触发降频保护，推理频率降低不超过初始频率的 50% | 压力测试 |
 
 ---
 
-## 8. 在线微调
+## 9. 在线微调
 
-### 8.1 功能概述
+### 9.1 功能概述
 
 OnlineUpdater 模块负责基于新产生的运行数据，在设备运行期间对模型权重进行增量更新，使模型持续适应工况变化。
 
-### 8.2 核心需求
+### 9.2 核心需求
 
 | 需求 | 说明 |
 |------|------|
-| 触发方式 | 数据积累达到一定量（batch_size=32）后自动触发 |
-| 触发限制 | 仅在系统闲时（负荷率 < 30%）触发，微调不得影响推理性能 |
+| 触发方式 | 数据积累达到 batch_size=32 后自动触发 |
+| 触发限制 | 仅在系统闲时（负荷率 < 30%）触发 |
 | 更新目标 | LSTM 预测模型权重 + RL 决策模型权重 |
-| 安全保护 | 在线微调阶段的 loss 连续 10 个周期不下降或上升时，停止微调并回滚至上一检查点 |
+| 安全保护 | loss 连续 10 周期不下降或上升时，停止微调并回滚至上一检查点 |
 | 数据存储 | 保留最近 30 天训练数据，本地存储 <= 1GB |
 
-### 8.3 数据流
-
-```
-新数据积累(32个样本) → OnlineUpdater.update() → 权重增量更新 → 保存模型文件
-```
-
-### 8.4 验收标准
-
-| ID | 标准 | 验证方法 |
-|----|------|----------|
-| UPDATE-01 | 在线微调功能正常 | 单元测试 |
-| UPDATE-02 | 在线微调延迟 <= 10s（单次微调，batch_size=32）| 性能测试 |
-| UPDATE-03 | 微调期间不影响并发推理请求 | 集成测试（并发场景）|
-| UPDATE-04 | Loss 发散时自动停止微调并回滚 | 集成测试（模拟 loss 发散）|
-
-### 8.5 v2.10 短期实现：影子模型验证+渐进式切换（R1）
-
-#### 8.5.1 需求描述
-
-当前 `online_updater.rs` 仅为占位框架（`"待 Phase 3C.2 实现"`），在线微调缺乏安全性约束。本需求实现安全约束的在线微调框架。
-
-#### 8.5.2 实现方案
+### 9.3 影子模型验证 + 渐进式切换（v2.10）
 
 ```rust
-// SafeOnlineUpdater 核心逻辑
+pub enum UpdateError {
+    SafetyViolation { score: f32, threshold: f32 },
+    PerformanceDegradation { current: f32, shadow: f32 },
+    SwitchInProgress,
+    ModelNotReady,
+}
+
 async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError> {
     // 1. 影子模型验证
     self.shadow_model.load_weights(new_weights);
     let safety_score = self.safety_constraints.validate(&self.shadow_model).await?;
-
     if safety_score < self.safety_threshold {
         return Err(UpdateError::SafetyViolation);
     }
@@ -1435,7 +957,6 @@ async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError> {
     // 2. 性能验证
     let current_perf = self.performance_monitor.evaluate(&self.current_model).await?;
     let shadow_perf = self.performance_monitor.evaluate(&self.shadow_model).await?;
-
     if shadow_perf < current_perf * 0.95 {
         return Err(UpdateError::PerformanceDegradation);
     }
@@ -1445,38 +966,41 @@ async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError> {
 }
 ```
 
-#### 8.5.3 验收标准
+**UpdateError 错误处理策略：**
 
-| 编号 | 验收条件 | 验证方法 |
-|------|----------|----------|
+| 错误类型 | 触发条件 | 处理策略 | 日志级别 |
+|----------|----------|----------|----------|
+| SafetyViolation | 影子模型安全评分 < 阈值 | 拒绝更新，保留当前权重 | WARN |
+| PerformanceDegradation | 影子模型性能 < 当前 × 0.95 | 拒绝更新，保留当前权重 | WARN |
+| SwitchInProgress | 切换进行中再次调用 safe_update | 拒绝，返回 Ok(false) | INFO |
+| ModelNotReady | 影子模型未初始化 | 返回错误 | ERROR |
+
+### 9.4 验收标准
+
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| UPDATE-01 | 在线微调功能正常 | 单元测试 |
+| UPDATE-02 | 在线微调延迟 <= 10s（单次微调，batch_size=32）| 性能测试 |
+| UPDATE-03 | 微调期间不影响并发推理请求 | 集成测试 |
+| UPDATE-04 | Loss 发散时自动停止微调并回滚 | 集成测试 |
 | AC1 | 新权重违反安全约束时，拒绝更新并返回错误 | 单元测试 |
-| AC2 | 影子模型性能下降超过5%时，拒绝更新 | 单元测试 |
-| AC3 | 渐进式切换权重，每步间隔可配置（默认1秒） | 集成测试 |
+| AC2 | 影子模型性能下降超过 5% 时，拒绝更新 | 单元测试 |
+| AC3 | 渐进式切换权重，每步间隔可配置（默认 1 秒）| 集成测试 |
 | AC4 | 切换过程记录日志，包含每步权重混合比例 | 日志审查 |
 
-#### 8.5.4 影响文件
+### 9.5 自适应权重优化器（v2.11）
 
-- `mupc/crates/ai-engine/src/online_updater.rs`
+AdaptiveWeightOptimizer 基于元学习（MetaRL）和 NSGA-II 多目标优化，自动调优 SCENE-01 奖励函数的 w1~w7 权重，减少人工调参依赖。
 
----
+#### 9.5.1 核心组件
 
-## 8.6 v2.11 中期实现：自适应权重优化器
+| 组件 | 文件 | 说明 |
+|------|------|------|
+| `AdaptiveWeightOptimizer` | `adaptive_weight_optimizer.rs` | MetaRL 元学习器，基于历史性能数据预测最优权重调整方向 |
+| `ParetoWeightOptimizer` | `pareto_optimizer.rs` | NSGA-II 多目标优化器，搜索 Pareto 前沿权重候选 |
+| `PerformanceCollector` | `performance_collector.rs` | 性能指标收集器，采集光伏消纳率、电池循环次数、变压器负载等 |
 
-### 8.6.1 需求描述
-
-当前奖励函数权重表（w1~w7）需人工配置，缺乏自适应调整能力。不同台区工况差异大，固定权重难以普适，人工调参成本高且依赖专家经验。
-
-### 8.6.2 实现方案
-
-自适应权重优化器基于元学习/NSGA-II 自动调优 w1~w7 权重：
-
-| 组件 | 说明 |
-|------|------|
-| AdaptiveWeightOptimizer | MetaRL 元学习器，基于历史性能数据预测最优权重调整方向 |
-| ParetoWeightOptimizer | NSGA-II 多目标优化器，搜索 Pareto 前沿权重候选 |
-| PerformanceCollector | 性能指标收集器trait，收集光伏消纳率、电池循环次数、变压器负载等 |
-
-### 8.6.3 数据流
+#### 9.5.2 数据流
 
 ```
 离线训练管线 → MetaLearner 训练 → AdaptiveWeightOptimizer → SceneWeights 更新
@@ -1484,244 +1008,85 @@ async fn safe_update(&self, new_weights: &[f32]) -> Result<bool, UpdateError> {
                                                RL 模型决策 → PerformanceCollector 收集
 ```
 
-### 8.6.4 验收标准
+#### 9.5.3 约束保护
+
+| 约束 | 说明 |
+|------|------|
+| 权重非负 | w_i >= 0 |
+| 权重比例 | w_i / sum(w) <= max_adjustment_per_update |
+| 物理一致性 | w3（变压器过载）始终为最高权重优先级 |
+
+#### 9.5.4 验收标准
 
 | ID | 标准 | 优先级 | 验证方法 |
 |----|------|--------|----------|
 | AWO-01 | 自适应权重优化器可正确加载配置 | P0 | 单元测试 |
 | AWO-02 | 元学习器可基于历史性能数据输出权重调整 | P1 | 离线仿真验证 |
 | AWO-03 | NSGA-II 可搜索 Pareto 前沿并输出多组权重候选 | P1 | 离线仿真验证 |
-| AWO-04 | 权重调整受物理约束约束（正数、比例） | P0 | 单元测试 |
+| AWO-04 | 权重调整受物理约束约束（正数、比例）| P0 | 单元测试 |
 | AWO-05 | 单次更新周期内权重变化不超过 max_adjustment_per_update | P0 | 单元测试 |
 | AWO-06 | 优化后的奖励函数与原始策略无显著偏离（偏移 < 5%）| P1 | 集成测试 |
 | AWO-07 | 权重更新后 RL 模型可正常推理（推理延迟 < 1s）| P0 | 集成测试 |
 
-### 8.6.5 影响文件
-
-- `mupc/crates/ai-engine/src/adaptive_weight_optimizer.rs`（新增）
-- `mupc/crates/ai-engine/src/pareto_optimizer.rs`（新增）
-- `mupc/crates/ai-engine/src/performance_collector.rs`（新增）
-- `mupc/crates/ai-engine/src/config.rs`
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-
 ---
 
-## 8.7 v2.11 中期实现：冲击负荷概率预测
+## 10. 非功能性需求
 
-### 8.7.1 需求描述
-
-当前负荷预测为确定性格点预测（单一均值），无法捕捉概率分布特征。农网台区灌溉水泵等冲击负荷具有随机性，可能导致需量控制失效。
-
-### 8.7.2 实现方案
-
-LSTM 分位数预测，输出负荷分布而非单一均值：
-
-| 新增类型 | 说明 |
-|----------|------|
-| `ProbabilisticLoadOutput` | 概率负荷预测输出（分位数数组 + 冲击概率） |
-| `QuantilePrediction` | 分位数预测（quantile + value） |
-| `LoadCovariates` | 负荷协变量（温度、日期类型、灌溉季、小时） |
-| `predict_quantiles()` | LSTM 分位数预测方法 |
-| `calculate_shock_probability()` | 冲击负荷概率计算（P90-P50 差值法） |
-| `calc_demand_with_uncertainty()` | 需量控制奖励（含不确定性） |
-
-### 8.7.3 数据流
-
-```
-历史负荷数据 → LstmModel.predict_quantiles() → ProbabilisticLoadOutput
-    ├→ RewardCalculator.calc_demand_with_uncertainty()（需量控制奖励）
-    └→ FusedSystemState → StrategyEngine（冲击负荷预警）
-```
-
-### 8.7.4 验收标准
-
-| ID | 标准 | 优先级 | 验证方法 |
-|----|------|--------|----------|
-| PLF-01 | LSTM 可输出多分位数预测（10%、50%、90%）| P0 | 单元测试 |
-| PLF-02 | 冲击负荷概率计算正确（P90 - P50 差值法）| P0 | 单元测试 |
-| PLF-03 | 分位数预测延迟 <= 1s | P0 | 集成测试 |
-| PLF-04 | 需量控制奖励函数考虑冲击负荷概率 | P1 | 单元测试 |
-| PLF-05 | 协变量（温度、日期类型）正确传入 | P1 | 集成测试 |
-| PLF-06 | 概率预测在测试集上 P90 分位数误差 < 15% | P1 | 离线评估 |
-| PLF-07 | FusedSystemState 正确存储分位数预测结果 | P0 | 集成测试 |
-
-### 8.7.5 影响文件
-
-- `mupc/crates/ai-engine/src/lstm_model.rs`
-- `mupc/crates/ai-engine/src/load_covariates.rs`（新增）
-- `mupc/crates/ai-engine/src/reward_calculator.rs`
-- `mupc/crates/ai-engine/src/data_fusion.rs`
-- `mupc/crates/ai-engine/src/config.rs`
-
----
-
-## 9. 非功能性需求
-
-### 9.1 推理性能
+### 10.1 推理性能
 
 | 指标 | 要求 | 测量方法 |
 |------|------|----------|
-| NPU 推理延迟 | < 100ms (P99) | 1000 次连续推理，计算 P99 百分位 |
-| 场景切换延迟 | < 2s（远程）、< 1s（本地） | 模拟 100 次切换，计算最大延迟 |
-| 状态空间构建延迟 | < 5ms | 1000 次构建，计算平均延迟 |
-| 动作约束校验延迟 | < 0.5ms | 1000 次校验，计算平均延迟 |
-| 奖励函数计算延迟 | < 1ms（单场景）| 各场景 1000 次计算，计算平均延迟 |
-| 数据融合周期 | 1Hz（默认），可配置范围 1s ~ 60s | 运行时观测 |
-| AI 完整决策周期 | 1Hz（默认，与融合周期一致）| 运行时观测 |
-| 在线微调延迟 | <= 10s（单次微调，batch_size=32）| 性能测试 |
+| NPU 推理延迟 | < 100ms (P99) | 1000 次连续推理，计算 P99 |
+| 场景切换延迟 | < 2s（远程）、< 1s（本地） | 模拟 100 次切换 |
+| 状态空间构建延迟 | < 5ms | 1000 次构建 |
+| 动作约束校验延迟 | < 0.5ms | 1000 次校验 |
+| 奖励函数计算延迟 | < 1ms（单场景）| 1000 次计算 |
 | LSTM 预测延迟 | < 1s | 性能测试 |
 | RL 决策延迟 | < 1s | 性能测试 |
+| AI 完整决策周期 | 1Hz（默认，与融合周期一致）| 运行时观测 |
+| 权重优化推理延迟（v2.11）| < 100ms | 性能测试 |
+| 权重优化更新周期（v2.11）| >= 1 小时 | 运行时观测 |
+| 分位数预测延迟（v2.11）| <= 1s | 性能测试 |
+| 冲击负荷概率计算延迟（v2.11）| <= 10ms | 性能测试 |
 
-### 9.2 模型精度
+### 10.2 模型精度
 
 | 指标 | 要求 | 测量方法 |
 |------|------|----------|
-| 场景切换延迟 | < 2s（远程 IEC 104/61850）、< 1s（本地 Web UI）| 集成测试 |
-| 光伏预测 MAPE | <= 10%（15 分钟预测范围） | 回测验证 |
-| 负荷预测 MAPE | <= 15%（15 分钟预测范围） | 回测验证 |
-| RL 决策综合回报 | 相比固定策略提升 >= 20% | 对比实验（相同数据，AI 策略 vs 固定策略）|
+| 光伏预测 MAPE | <= 10% | 回测验证 |
+| 负荷预测 MAPE | <= 15% | 回测验证 |
+| RL 决策综合回报 | 相比固定策略提升 >= 20% | 对比实验 |
 
-### 9.3 模型大小与资源占用
-
-| 指标 | 要求 |
-|------|------|
-| 单模型 INT8 量化后大小 | <= 5MB（.rknn 文件）|
-| 推理运行时内存占用 | <= 200MB（所有模型加载后）|
-| 训练数据本地存储 | <= 1GB（保留最近 30 天训练数据）|
-| 日志存储 | 按系统滚动策略（单文件 10MB，保留 10 个）|
-
-### 9.4 可靠性
+### 10.3 模型大小与资源占用
 
 | 指标 | 要求 |
 |------|------|
-| AI 引擎 MTBF | >= 1,000 小时（不含硬件故障）|
-| AI 失效时自动降级至本地策略 | < 2s（从检测到异常至切换完成）|
-| 模型热加载（替换不中断推理）| 支持（双缓冲模式，加载新模型期间旧模型继续服务）|
-| 模型版本回滚 | 支持回滚至上一次稳定版本，回滚时间 < 30s |
+| 单模型 INT8 量化后大小 | <= 5MB |
+| 推理运行时内存占用 | <= 200MB |
+| 训练数据本地存储 | <= 1GB（30 天） |
+| 日志存储 | 按系统滚动策略（单文件 10MB，保留 10 个） |
+
+### 10.4 可靠性
+
+| 指标 | 要求 |
+|------|------|
+| AI 引擎 MTBF | >= 1,000 小时 |
+| AI 失效时自动降级至本地策略 | < 2s |
+| 模型热加载 | 支持（双缓冲模式） |
+| 模型版本回滚 | 支持，回滚时间 < 30s |
 | A/B 测试框架 | 支持模型版本对比评估（新版本 vs 当前版本），详见模块08-PRD 第8章 |
 
-### 9.5 安全性
+### 10.5 安全性
 
 | 需求 | 说明 |
 |------|------|
 | 模型文件完整性 | 模型文件加载前进行 SHA256 校验，校验失败拒绝加载 |
-| 推理输入验证 | 对输入张量进行 NaN/Inf 检查，异常输入拒绝推理并告警 |
-| 动作输出限幅 | 所有动作输出经 ActionValidator 校验后再下发，防止异常值导致设备损坏 |
+| 推理输入验证 | 对输入张量进行 NaN/Inf 检查，异常输入拒绝推理 |
+| 动作输出限幅 | 所有动作输出经 ActionValidator 校验后再下发 |
 | 在线微调防护 | 在线微调仅在系统闲时（负荷率 < 30%）触发，微调不得影响推理性能 |
 | 配置加密 | 奖励函数权重参数存储在加密配置文件中 |
 
-### 9.6 AI 失效降级流程
-
-```
-AI引擎异常
-    ↓
-检测异常（心跳/状态码）
-    ↓
-自动切换至本地策略引擎 (< 2s)
-    ↓
-系统发出告警（AI模式降级）
-    ↓
-本地策略接管控制
-    ↓
-AI引擎恢复后，自动切回AI模式
-```
-
----
-
-## 10. 验收标准汇总
-
-### 10.1 模型推理验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| LSTM-01 | LSTM 模型加载成功 | P0 | Phase3C 设计 + 场景 RL PRD |
-| LSTM-02 | LSTM 预测延迟 < 1s | P0 | Phase3C 设计 |
-| RL-01 | RL 模型加载成功 | P0 | Phase3C 设计 |
-| RL-02 | RL 决策延迟 < 1s | P0 | Phase3C 设计 |
-| RK-01~RK-08 | RKNN Runtime FFI 全部验收标准 | P0 | [REVIEWED: PASS] |
-| NPU-02 | NPU 推理延迟 < 100ms (P99) | P0 | 场景 RL PRD |
-| NPU-03 | AI 完整决策总延迟 < 120ms | P0 | 场景 RL PRD |
-| NPU-04~NPU-06 | NPU 降级/温控 | P1 | 场景 RL PRD |
-
-### 10.2 数据融合验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| FUSION-01~FUSION-06 | 融合引擎核心功能 | P0 | 场景 RL PRD |
-| FUSION-07~FUSION-10 | 数据源健康监控 | P1 | 场景 RL PRD |
-
-### 10.3 运行场景选择验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| MODE-01~MODE-08 | 预设运行场景选择与互斥机制 | P0 | 场景改造 PRD [REVIEWED: PASS] |
-
-### 10.4 状态/动作空间验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| STATE-01~STATE-05 | 状态空间完整性（7 大类，v2.5 为 29 字段，输入向量 56 维） | P0 | 场景 RL PRD |
-| **STATE-NEW-01** | FusedSystemState 新增 q_realtime_margin 字段，取值 [0.0, 1.0] | P0 | v2.5 PRD |
-| **STATE-NEW-02** | FusedSystemState 新增 season_encoding (6维) + time_period_encoding (2维) one-hot | P0 | v2.5 PRD |
-| **STATE-NEW-03** | to_input_vector() 返回 56 维向量 | P0 | v2.5 PRD |
-| ACT-07~ACT-10 | 动作空间完整性（4 维）+ 5 条约束校验 | P0 | 场景 RL PRD |
-
-### 10.5 奖励函数验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| REWARD-A1~A5, B1~B4, C1~C4, D1~D4, E1~E4 | 5 种场景奖励函数 | P0 | 场景 RL PRD |
-| WEIGHT-01~WEIGHT-05 | 动态权重调整 | P1 | 场景 RL PRD |
-| **REWARD-v2.5-01** | q_realtime_margin > 0.10 时 R_voltage = 0（条件不触发） | P0 | v2.5 PRD |
-| **REWARD-v2.5-02** | q_realtime_margin <= 0.10 且电压越限连续2步时触发电压惩罚 | P0 | v2.5 PRD |
-| **REWARD-v2.5-03** | SOC < 10% 时 α = 3.0，电池损耗惩罚加重 | P0 | v2.5 PRD |
-| **REWARD-v2.5-04** | v_avg >= 1.05 p.u. 时弃光奖励 = 0 | P0 | v2.5 PRD |
-| **REWARD-v2.5-05** | α(s) 三状态（常规/电压支撑/SOC极低）互斥，取最高优先级 | P0 | v2.5 PRD |
-| **CONFIG-v2.5-01** | 新增 reward_thresholds 配置项可通过 ai.toml 加载 | P1 | v2.5 PRD |
-| **REWARD-v2.8-01** | Q 有裕度时 AI 不动作（|p_ref| < 5kW）→ R_PQ = +50.0 | P0 | v2.8 PRD |
-| **REWARD-v2.8-02** | Q 饱和 + 低电压时 AI 放电（p_ref < 0）→ R_PQ = +50.0；不放电 → R_PQ = -30.0 | P0 | v2.8 PRD |
-| **REWARD-v2.8-03** | Q 饱和 + 高电压时 AI 充电（p_ref > 0）→ R_PQ = +50.0；不充电 → R_PQ = -30.0 | P0 | v2.8 PRD |
-| **REWARD-v2.8-04** | v_avg >= 1.05 时 AI 充电消纳 → R_pv 正常；放电 → R_pv = -20.0 | P0 | v2.8 PRD |
-| **REWARD-v2.8-05** | R_smooth 惩罚项存在（|Δk_droop| + λ·超限惩罚）| P0 | v2.8 PRD |
-| **REWARD-v2.10-01** | safety_override_active=true 时 R_safety_override 根据触发原因惩罚 | P0 | v2.10 PRD |
-| **STATE-v2.10-01** | FusedSystemState 新增 safety_override_active/reason/p_ref 字段 | P0 | v2.10 PRD |
-| **STATE-v2.10-02** | to_input_vector() 返回 59 维向量 | P0 | v2.10 PRD |
-| **STATE-v2.10-03** | q_realtime_margin 数据来源为核间 DataUpload 帧 | P0 | v2.10 PRD |
-| **OVERRIDE-01** | SafetyOverride 帧（0x0040）可正确解析 | P0 | v2.10 PRD |
-| **OVERRIDE-02** | FusedSystemState.safety_override_active 在收到帧后正确设置 | P0 | v2.10 PRD |
-| **OVERRIDE-03** | AI 感知 override_active=true 时获得惩罚 | P0 | v2.10 PRD |
-
-### 10.6 在线微调验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| UPDATE-01~UPDATE-04 | 在线微调 | P1 | Phase3C 设计 + 场景 RL PRD |
-
-### 10.7 v2.11 自适应权重优化器验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| AWO-01 | 自适应权重优化器可正确加载配置 | P0 | v2.11 PRD |
-| AWO-02 | 元学习器可基于历史性能数据输出权重调整 | P1 | v2.11 PRD |
-| AWO-03 | NSGA-II 可搜索 Pareto 前沿并输出多组权重候选 | P1 | v2.11 PRD |
-| AWO-04 | 权重调整受物理约束约束（正数、比例）| P0 | v2.11 PRD |
-| AWO-05 | 单次更新周期内权重变化不超过 max_adjustment_per_update | P0 | v2.11 PRD |
-| AWO-06 | 优化后的奖励函数与原始策略无显著偏离（偏移 < 5%）| P1 | v2.11 PRD |
-| AWO-07 | 权重更新后 RL 模型可正常推理（推理延迟 < 1s）| P0 | v2.11 PRD |
-
-### 10.8 v2.11 冲击负荷概率预测验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| PLF-01 | LSTM 可输出多分位数预测（10%、50%、90%）| P0 | v2.11 PRD |
-| PLF-02 | 冲击负荷概率计算正确（P90 - P50 差值法）| P0 | v2.11 PRD |
-| PLF-03 | 分位数预测延迟 <= 1s | P0 | v2.11 PRD |
-| PLF-04 | 需量控制奖励函数考虑冲击负荷概率 | P1 | v2.11 PRD |
-| PLF-05 | 协变量（温度、日期类型）正确传入 | P1 | v2.11 PRD |
-| PLF-06 | 概率预测在测试集上 P90 分位数误差 < 15% | P1 | v2.11 PRD |
-| PLF-07 | FusedSystemState 正确存储分位数预测结果 | P0 | v2.11 PRD |
-
-### 10.9 精度与性能验收
+### 10.6 Phase 3C 验收标准汇总
 
 | ID | 标准 | 优先级 | 来源 |
 |----|------|--------|------|
@@ -1733,288 +1098,333 @@ AI引擎恢复后，自动切回AI模式
 | AI-06 | RK3588 NPU INT8 量化支持 | P0 | Phase3C 设计 |
 | AI-07 | 在线微调功能正常 | P1 | Phase3C 设计 |
 | AI-08 | 与 strategy-engine 集成正确 | P0 | Phase3C 设计 |
-| - | 场景切换延迟 < 2s（远程）、< 1s（本地） | P0 | 场景改造 PRD |
-| - | 光伏预测 MAPE <= 10% | P0 | 场景 RL PRD |
-| - | 负荷预测 MAPE <= 15% | P0 | 场景 RL PRD |
-| - | RL 决策回报相比固定策略提升 >= 20% | P0 | 场景 RL PRD |
-
-### 10.8 模型部署验收
-
-| ID | 标准 | 优先级 | 来源 |
-|----|------|--------|------|
-| - | 单模型 INT8 量化后大小 <= 5MB | P1 | 场景 RL PRD |
-| - | 推理运行时内存占用 <= 200MB | P1 | 场景 RL PRD |
-| - | 训练数据本地存储 <= 1GB | P2 | 场景 RL PRD |
-| - | AI 引擎 MTBF >= 1,000 小时 | P1 | 场景 RL PRD |
-| - | AI 失效自动降级 < 2s | P0 | 场景 RL PRD |
-| - | 模型热加载（双缓冲模式）| P1 | 场景 RL PRD |
-| - | 模型版本回滚 < 30s | P1 | 场景 RL PRD |
 
 ---
 
-## 附录 A：数据缺失处理策略
+## 11. 异常流程与边界条件
+
+### 11.0 错误类型定义
+
+```rust
+#[derive(Error, Debug)]
+pub enum AiEngineError {
+    #[error("模型加载失败: {0}")]
+    ModelLoadFailed(String),
+    #[error("模型文件校验失败: 期望 {expected}, 实际 {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+    #[error("推理失败: {0}")]
+    InferenceFailed(String),
+    #[error("模型未加载")]
+    ModelNotLoaded,
+    #[error("输入形状不匹配: 期望 {expected:?}, 实际 {actual:?}")]
+    InputShapeMismatch { expected: Vec<i32>, actual: Vec<i32> },
+    #[error("输出形状不匹配")]
+    OutputShapeMismatch,
+    #[error("RKNN Runtime 错误: {0}")]
+    RknnError(String),
+    #[error("模型版本不兼容: {0}")]
+    VersionMismatch(String),
+    #[error("在线微调失败: {0}")]
+    OnlineUpdateFailed(String),
+    #[error("数据融合失败: {0}")]
+    FusionFailed(String),
+    #[error("模式切换失败: {0}")]
+    ModeSwitchFailed(String),
+    #[error("动作校验失败: {0}")]
+    ActionValidationFailed(String),
+    #[error("数据源过期: {0}")]
+    DataSourceStale(String),
+    #[error("NPU 温度过高: current={current}°C, limit={limit}°C")]
+    NpuOverheating { current: f32, limit: f32 },
+    #[error("奖励计算错误: {0}")]
+    RewardCalculationError(String),
+}
+```
+
+**错误分类与恢复策略：**
+
+| 错误类别 | 错误变体 | 恢复策略 |
+|----------|----------|----------|
+| 模型加载 | `ModelLoadFailed`, `VersionMismatch` | 拒绝启动，记录 ERROR，触发降级 |
+| 推理运行时 | `InferenceFailed`, `RknnError`, `InputShapeMismatch`, `OutputShapeMismatch` | 重试 1 次，失败后记录 ERROR，连续 3 次后触发 NPU 降级 |
+| 资源状态 | `ModelNotLoaded` | 等待模型加载完成 |
+| 数据异常 | `FusionFailed`, `DataSourceStale` | 按缺失数据处理策略填充，连续 10 周期后触发降级 |
+| 运维操作 | `ModeSwitchFailed`, `ActionValidationFailed`, `OnlineUpdateFailed` | 记录 WARN，操作回滚 |
+| 硬件异常 | `NpuOverheating` | 降频保护，连续 5 周期正常后恢复 |
+
+### 11.1 核心异常处理
+
+| 异常场景 | 检测条件 | 处理措施 |
+|----------|----------|----------|
+| 通信中断 | intercore TCP 断开 | 执行器保持最后 P_ref 和 k_droop，继续下垂控制 |
+| AI 推理失败 | RKNN 返回错误 | 自动降级至本地策略，< 2s 切换完成 |
+| NPU 推理延迟超标 | 连续 100 次推理 > 10% 超出 150ms | 降级至 CPU 推理模式 |
+| NPU 温度过高 | 温度 > 85°C | 触发降频保护，推理频率降低不超过初始频率的 50%；温度连续 5 周期恢复正常后自动恢复全速 |
+| 推理精度持续下降 | loss 连续 10 周期不下降或上升 | 停止在线微调，回滚至上一检查点 |
+| 模型文件损坏 | SHA256 校验失败 | 拒绝加载，尝试 OTA 备份恢复 |
+| 数据源异常 | 连续 3 周期无更新 | WARN 告警；连续 10 周期 → AI 降级 |
+| 无效模式 ID | 指令值超出 1~5 | 拒绝执行，返回 400 错误 |
+| 奖励计算异常 | 奖励值超出 [0, 200] | 截断至边界值，记录 ERROR 日志 |
+| 双参数缺失 | P_ref 和 k_droop 同时为 NaN | 触发 AI 降级至兜底策略 |
+| k_droop 超范围 | k_droop < k_min 或 k_droop > k_max | clamp 至 [k_min, k_max]，记录 WARN 日志 |
+| p_ref 超范围 | p_ref < -P_safe 或 p_ref > P_safe | clamp 至 [-P_safe, P_safe]，记录 WARN 日志 |
+
+### 11.2 数据缺失处理
 
 | 缺失数据 | 处理方式 | 告警级别 |
 |----------|----------|----------|
-| 电价数据 | 使用上一有效值，连续缺失 3 个周期后使用默认分时电价表 | WARN |
-| 气象数据 | 使用上一有效值，连续缺失 10 个周期后 R_green 奖励置 0 | WARN |
-| 调度指令 | 状态空间对应字段置 None，RL 决策跳过相关约束 | INFO |
-| 预测数据（LSTM）| 使用全零向量，RL 决策仅依赖实时数据 | WARN |
-| 实时数据（intercore）| 使用上一有效值，连续缺失 3 个周期后触发 AI 降级 | ERROR → 降级 |
+| 电价数据 | 上一有效值；连续 3 周期 → 默认分时电价表 | WARN |
+| 气象数据 | 上一有效值；连续 10 周期 → R_green 置 0 | WARN |
+| 调度指令 | 置 None，跳过相关约束 | INFO |
+| LSTM 预测 | 全零向量 | WARN |
+| 实时数据 | 上一有效值；连续 3 周期 → WARN；连续 10 周期 → AI 降级 | ERROR → 降级 |
 
-## 附录 B：模型退化处理
+### 11.3 降级流程
 
-| 退化场景 | 检测条件 | 处理措施 |
-|----------|----------|----------|
-| 推理精度持续下降 | loss 连续 10 个周期不下降或上升 | 停止在线微调，回滚至上一检查点，通知 AI 运维人员 |
-| 推理延迟持续超标 | 连续 100 次推理中 > 10% 超出 150ms | 降级至 CPU 推理模式，记录 ALERT 日志 |
-| 模型文件损坏 | SHA256 校验失败 | 拒绝加载，尝试从 OTA 备份恢复，恢复失败则触发 AI 降级 |
-| 奖励函数计算异常 | 奖励值偏离正常范围（超出 [0, 200]）| 截断至边界值，记录 ERROR 日志 |
-
-## 附录 C：数据融合异常降级流程
+**AI 引擎异常检测条件：**
+- ModelStatus == Error
+- 连续 3 次推理失败
+- 数据融合任一数据源连续 10 周期无更新
 
 ```
-任一数据源连续3个周期无更新
+AI引擎异常 → 检测异常（心跳/状态码/连续失败计数）→ 切换至本地策略 (< 2s) → 告警通知 → strategy-engine接管
     ↓
-产生 WARN 告警
-    ↓
-使用上一有效值填充（最多持续 10 个周期）
-    ↓
-超过 10 个周期仍未恢复
-    ↓
-触发 AI 降级流程
-    ↓
-strategy-engine 进入兜底模式
-    ↓
-本地策略引擎接管控制
-    ↓
-待 AI 所需全部数据源恢复 5 个连续周期后，自动切回 AI 模式
+数据恢复 5 连续周期后 → 自动切回 AI 模式
 ```
 
-## 附录 D：ai-engine crate 模块结构
+---
+
+## 12. 配置参数
+
+### 12.1 奖励函数阈值配置
+
+```toml
+[reward_thresholds]
+# === 核心阈值（v2.5 初版，v2.12 R-07 可配置化）===
+voltage_deadband = 0.05       # ±5% 死区
+q_margin_threshold = 0.10     # Q 裕度阈值，低于此值视为"无功耗尽"
+p_threshold_kw = 5.0          # P 阈值（kW），省电策略判定阈值
+pv_high_limit = 1.05          # 弃光前置电压阈值
+soc_critical = 0.10           # SOC 极低保护阈值，<此值触发 α=3.0
+
+# === 电压惩罚系数（v2.5）===
+voltage_penalty_high = 2.0   # 高电压侧（光伏超发）
+voltage_penalty_low = 1.0     # 低电压侧（灌溉/炒茶/空调负荷）
+
+# === 默认值行为（v2.5）===
+# 配置文件缺失 `reward_thresholds` 时，所有参数自动回退至默认值，保证向后兼容
+```
+
+### 12.2 折扣累积奖励机制（v2.10）
+
+```toml
+[discounted_reward]
+gamma = 0.99                 # 折扣因子，范围 [0.9, 0.999]
+buffer_size = 1000            # 奖励历史缓冲区大小
+```
+
+**验收标准：**
+
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| BC1 | 折扣因子 gamma 可配置，范围 [0.9, 0.999] | 配置测试 |
+| BC2 | 缓冲区大小可配置，默认 1000 | 配置测试 |
+| BC3 | gamma=0.99 时 100 步前奖励权重约 0.366 | 数学验证 |
+| BC4 | 与现有奖励函数正交，不影响即时奖励计算 | 回归测试 |
+
+### 12.3 v2.12 奖励函数改进配置
+
+#### 12.3.1 R-01 奖励子项标准化（已实现）
+
+各奖励子项统一归一化到 `[-1, 1]` 区间，解决量纲不一致问题，加速 RL 收敛：
+
+| 子项 | 原始范围 | 归一化方式 | 说明 |
+|------|----------|------------|------|
+| r_pv_norm | [0, 100] | r / 100 | 光伏消纳 |
+| p_batt_deg_norm | [0, ∞) | 线性映射 | 电池损耗 |
+| p_trafo_norm | [0, 100] | r / 100 | 变压器过载 |
+| r_pq_norm | [-30, 50] | (r + 30) / 80 | P-Q 协同度 |
+| r_ramp_norm | [0, ∞) | tanh(r) | 功率变化率 |
+| r_voltage_slope_norm | [0, ∞) | tanh(r) | 电压斜率 |
+| r_smooth_norm | [0, ∞) | tanh(r) | 下垂平滑 |
+| r_safety_override_norm | [-100, 0] | r / 100 | 安全覆盖 |
+
+#### 12.3.2 R-02 塑造奖励（已实现）
+
+引入提前预警机制，帮助 RL 学习避免危险状态：
+
+```rust
+// 过载预警：负载率 > 85% 开始预警，提前引导策略调整
+fn overload_warning(load: f64) -> f64 {
+    if load > 0.85 { (load - 0.85) / 0.15 } else { 0.0 }
+}
+
+// SOC 边界预警：接近 15% 或 85% 时预警
+fn soc_warning(soc: f64, lambda: f64) -> f64 {
+    if soc < 0.15 { lambda * (0.15 - soc) / 0.15 }
+    else if soc > 0.85 { lambda * (soc - 0.85) / 0.15 }
+    else { 0.0 }
+}
+```
+
+#### 12.3.3 R-03 SOC 均衡奖励（已实现）
+
+鼓励 SOC 保持在 50% 附近，延长电池寿命：
+
+```rust
+fn soc_balance_reward(soc: f64, lambda: f64) -> f64 {
+    -lambda * (soc - 0.5).abs()
+}
+```
+
+#### 12.3.4 R-04~R-07 规划项配置
+
+```toml
+[reward_planned]
+# === R-04 变压器过载分段惩罚（规划中）===
+transformer_overload_piecewise = true
+# 分段函数：
+#   L < 0.75:          0.0                    # 安全区
+#   0.75 <= L < 0.90:  (L - 0.75) / 0.15 * 10  # 线性增长，0~10
+#   0.90 <= L < 1.00:  10 + (L - 0.90) / 0.10 * 40  # 指数增长，10~50
+#   L >= 1.00:          100.0                  # 硬惩罚
+
+# === R-05 电压斜率动态权重（规划中）===
+voltage_slope_dynamic_weight = true
+# w6(v) = base_w6 × (1.0 + k × |ΔV|)
+w6_base = 0.5                 # 基础权重
+w6_k = 2.0                   # 放大系数，范围 [0.0, 5.0]
+
+# === R-06 冲击负荷响应奖励（规划中）===
+shock_response_enabled = true
+w_shock = 20.0               # 冲击负荷响应权重
+lambda_shock = 5.0            # 响应时间惩罚系数
+shock_threshold_kw = 10.0     # 冲击负荷判定阈值（P90 - P50 > threshold）
+```
+
+### 12.4 v2.13 精细化改进配置
+
+> **v2.13 核心变更：** 基于专家建议（2026-06-14）中有参考意义的 P0/P1 项，解决以下问题：
+
+| 来源 | 问题 | 解决方案 |
+|------|------|----------|
+| 专家建议 §2.2 | P-Q 协同硬阈值导致策略震荡 | Sigmoid 平滑过渡 |
+| 专家建议 §2.1 | 归一化系数硬编码，跨台区泛化差 | Welford 动态归一化 |
+| 专家建议 §2.3 | 缺乏"动作-效果"因果链 | 状态改善率奖励 |
+| 专家建议 §2.5 | 1Hz 无法响应 ms 级冲击 | 冲击负荷预备度奖励 |
+| 专家建议 §3.2 | 在线微调分布偏移风险 | PER + KL 正则化 |
+| 专家建议 §3.3 | 场景切换策略真空 | 策略混合（动作插值） |
+
+**配置：**
+
+```toml
+[reward_v2_13]
+# === Welford 动态归一化 ===
+welford_epsilon = 1e-6       # 防止除零
+
+# === Sigmoid 平滑化（P-Q 协同度阈值过渡）===
+sigmoid_k = 50.0             # 控制过渡陡峭程度
+
+# === 状态改善率奖励 ===
+state_improve_weight = 1.0    # R_improve = w * (V_dev_prev - V_dev_curr) * sign(P_action)
+
+# === 冲击负荷预备度奖励 ===
+readiness_w1 = 1.0           # SOC 储备权重
+readiness_w2 = 1.0           # P_ref 储备权重
+soc_reserve_target = 0.3      # 目标 SOC 储备
+p_ref_reserve_target = 10.0   # 目标放电基准点储备（kW）
+
+# === PER+KL 正则化（在线微调）===
+per_enabled = true           # 优先采样高 TD-error 样本
+kl_beta = 0.01               # KL 散度约束系数
+# L_online = L_task + β * D_KL(π_new || π_offline)
+
+# === 策略混合（场景切换过渡）===
+policy_mix_enabled = true     # a_blended = (1-α)*a_old + α*a_new
+mix_steps = 10                # 过渡步数
+```
+
+### 12.5 下垂控制参数（v2.7/v2.8）
+
+```toml
+[droop_control]
+K_MAX = 50.0                # k_droop 上限，防止系统震荡
+lambda_smooth = 1.0          # 超限惩罚系数
+# R_smooth = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
+```
+
+### 12.6 在线微调参数（v2.10）
+
+```toml
+[online_updater]
+batch_size = 32              # 触发微调的样本数
+idle_load_threshold = 0.30   # 系统闲时阈值（负荷率 < 30%）
+max_retention_days = 30     # 训练数据保留天数
+max_storage_mb = 1024        # 本地存储上限（MB）
+rollback_checkpoints = 1      # 回滚检查点数量
+```
+
+---
+
+## 13. 历史遗留问题与技术债
+
+| 编号 | 问题 | 说明 | 优先级 | 状态 |
+|------|------|------|--------|------|
+| T-01 | 状态空间维度描述错误 | PRD 历史版本标题写 59 维，实际应为 78 维 | **高** | ✅ 已修复（v2.14 统一版全部修正） |
+| T-02 | R-04 变压器过载分段惩罚 | 分段函数：安全区(0~75%) / 线性(75~90%) / 指数(90~100%) / 硬惩罚(>100%) | 中 | ✅ 已实现（`overload_penalty_piecewise`） |
+| T-03 | R-05 电压斜率动态权重 | w6(v) = base_w6 × (1.0 + k × \|ΔV\|) | 中 | ✅ 已实现（`dynamic_voltage_slope_weight`） |
+| T-04 | R-06 冲击负荷响应奖励 | R_shock = w × load_shedding / max - λ × response_time / max_response | 中 | ⚠️ 未实现（仅有注释掉的测试桩） |
+| T-05 | R-07 P-Q 阈值可配置化 | Q_THRESHOLD / P_THRESHOLD 从硬编码改为配置文件读取 | 中 | ✅ 已实现（`PqCoordinationThresholds` + Default） |
+| T-06 | 在线微调 Phase 3C.2 | 原为占位框架，现已完整实现影子模型验证+渐进式切换 | 中 | ✅ 已实现（`SafeOnlineUpdater::safe_update`） |
+| T-07 | v2.0 前 SceneClassifier | 已废弃，替换为 ModeSelector | 低 | ✅ 已关闭 |
+| T-08 | v2.1 前 D5 电能质量 | 已从 AI 引擎移除，实时控制模块独立处理 | 低 | ✅ 已关闭 |
+| T-09 | AI 引擎与 strategy-engine 集成测试 | RobustnessManager 异常检测→应急动作→正常恢复的端到端测试覆盖不足 | 中 | ⚠️ 待补充 |
+| T-10 | Phase 2+ 协议支持 | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密（影响 AI 引擎数据管道安全） | 低 | 📋 规划中 |
+| T-11 | P90 分位数误差离线评估 | PLF-06 要求 P90 误差 < 15%，需离线回测数据验证 | 低 | ⚠️ 待验证 |
+
+---
+
+## 14. 附录
+
+### 14.1 ai-engine crate 模块结构
 
 ```
 mupc/crates/ai-engine/
-├── Cargo.toml
 ├── src/
 │   ├── lib.rs                    # 模块导出
 │   ├── model_manager.rs          # 模型管理器（统一调度）
-│   ├── mode_selector.rs          # 运行场景选择器（v2.0 新增，替代 scene_classifier.rs）
+│   ├── mode_selector.rs          # 运行场景选择器
 │   ├── lstm_model.rs             # LSTM 预测模型
-│   ├── rl_model.rs               # MADDPG/PPO 决策模型（含 SystemState、ActionOutput）
+│   ├── rl_model.rs               # MADDPG/PPO 决策模型
 │   ├── reward_calculator.rs      # 奖励函数计算器
 │   ├── data_fusion.rs            # 多源数据融合引擎
 │   ├── action_validator.rs       # 动作约束校验器
 │   ├── online_updater.rs         # 在线微调
-│   ├── rknn_runtime.rs           # RKNN Runtime 推理（RK3588 NPU FFI）
+│   ├── rknn_runtime.rs           # RKNN Runtime 推理
+│   ├── robustness_manager.rs    # 电压异常应急策略（v2.9）
+│   ├── reward_normalizer.rs      # Welford 动态归一化（v2.13）
+│   ├── adaptive_weight_optimizer.rs  # 自适应权重优化器（v2.11）
+│   ├── pareto_optimizer.rs       # NSGA-II 多目标优化（v2.11）
+│   ├── performance_collector.rs  # 性能指标收集器（v2.11）
+│   ├── load_covariates.rs        # 负荷协变量（v2.11）
 │   ├── error.rs                  # 错误类型
 │   └── config.rs                 # 配置结构
-└── tests/
 ```
 
-## 附录 E：待澄清问题
+### 14.2 待澄清问题
 
 | 序号 | 问题 | 优先级 | 影响评估 |
 |------|------|--------|----------|
-| 1 | 气象数据的外部来源是何种 API（如和风天气、中国气象局）？是否需要额外商务授权？ | 高 | 影响 DataFusionEngine 的气象数据获取实现 |
-| 2 | 电价数据是直接来自物联平台下发，还是需要通过 MUPC 本地配置？ | 高 | 影响 DataFusionEngine 的电价数据管道设计 |
-| 3 | ~~分相补偿系数的硬件限制（实际的 SVG/APF 能否按系数调节三相无功）？~~ | ~~高~~ | **已闭环（v2.1）：** 分相补偿已从 AI 引擎移除，由实时控制核心模块独立处理 |
-| 4 | VPP 辅助服务的容量价格和里程价格是否有标准合同模板？还是由 VPP 平台实时下发？ | 中 | 影响 R_ancillary_service 的参数来源 |
-| 5 | 在线微调是否需要经过审批流程（安全考虑）？还是自动触发？ | 中 | 影响 OnlineUpdater 的触发策略 |
-| 6 | 气象数据连续缺失时长 10 个周期是融合周期（10 秒）还是 10 个 15 分钟气象更新周期（150 分钟）？ | 中 | 影响 FUSION 告警阈值配置 |
+| 1 | 气象数据的外部来源是何种 API？是否需要额外商务授权？ | 高 | 影响 DataFusionEngine 气象数据获取 |
+| 2 | 电价数据是直接来自物联平台下发，还是需要通过 MUPC 本地配置？ | 高 | 影响 DataFusionEngine 电价数据管道 |
+| 4 | VPP 辅助服务的容量价格和里程价格是否有标准合同模板？ | 中 | 影响 R_ancillary_service 参数来源 |
+| 5 | 在线微调是否需要经过审批流程（安全考虑）？还是自动触发？ | 中 | 影响 OnlineUpdater 触发策略 |
+| 6 | 气象数据连续缺失时长"10 个周期"是以融合周期（10 秒）还是气象更新周期（150 分钟）计？ | 中 | 影响 FUSION 告警阈值配置 |
 
 ---
 
-**文档状态：** 合并版（v2.0）
+**文档状态：** 统一版 v2.14（整合了 v1.0~v2.14 所有历史版本）
 
 **来源文档：**
-1. 历史来源文档已在 v1.0 文档体系重构中合并至本文档，不再单独维护
-2. v2.0 修订依据为预设运行场景与互斥模式选择设计方案
-
----
-
-## v1.1 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 补充 TCN 模型作为备选方案 | 2.1 功能概述 | 新增 TCN（Temporal Convolutional Network）作为 LSTM 的备选时序预测模型，两者均通过 ONNX 导出并部署为 .rknn |
-| 2 | 区分负荷预测类型 | 2.2 核心需求 - 预测目标 | 新增基荷（基础用电）、可调负荷（可调度柔性负荷）、冲击负荷（如灌溉水泵启动）分类；冲击负荷采用概率预测（输出概率分布而非点估计） |
-| 3 | 预测范围扩展至 15-30 分钟可配置 | 2.2 核心需求 - 预测范围 | 预测范围从固定 15 分钟扩展为默认 15 分钟、可配置扩展至 30 分钟 |
-| 4 | AI 决策可视化页面引用 | 1.5 用户角色 | AI 运维人员和策略管理员权限中新增"通过 Web UI 查看 AI 决策可视化（预测曲线、决策逻辑、实时奖励）"，引用模块08-PRD 第6章 |
-| 5 | A/B 测试框架引用 | 9.4 可靠性 | 新增 A/B 测试框架需求行，支持模型版本对比评估，引用模块08-PRD 第8章 |
-| 6 | 预测向量长度可配置 | 2.5 验收标准 (LSTM-05)、5.2 状态空间 (D2)、5.7 验收标准 (STATE-03) | 预测输出向量长度从固定 15 改为可配置（默认 15，可配置扩展至 30）；D2 预测数据字段描述同步更新 |
-| 7 | 版本号更新 | 文档头部/尾部 | v1.0 → v1.1 |
-
-**修订依据：** `docs/superpowers/reports/2026-05-29-MUPC-全量需求与设计覆盖度审查-总报告.md` 模块 05 部分覆盖缺口修复
-
-## v2.0 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 场景自适应→预设互斥运行场景 | 第 4 章（重写） | 删除 SceneClassifier 自动分类器，替换为 ModeSelector 互斥模式选择器；场景确定方式从 AI 自动识别改为调度主站远程/策略管理员本地选择 |
-| 2 | 删除 Default 兜底场景 | 4.2 场景定义 | 5 种预设场景不再包含 Default，系统必须处于明确选中状态；启动时默认 MODE-01 |
-| 3 | 新增调度主站用户角色 | 1.5 用户角色 | 新增调度主站角色，远程切换运行场景（最高优先级） |
-| 4 | 更新架构图与数据流 | 1.6 整体架构、1.7 数据流 | 场景分类器替换为模式选择器；数据流移除自动分类环节 |
-| 5 | 新增 Web API 接口 | 4.7 验收标准 MODE-07 | 新增 GET/PUT /api/v1/mode、GET /api/v1/mode/list 端点 |
-| 6 | 更新模块结构 | 附录 D | scene_classifier.rs → mode_selector.rs |
-| 7 | 更新验收标准汇总 | 10.3、10.7 | 场景识别验收标准替换为运行场景选择验收标准 |
-| 8 | 版本号更新 | 文档头部/尾部 | v1.1 → v2.0 |
-
-**修订依据：** 预设运行场景与互斥模式选择设计（v2.0 核心变更）
-
-## v2.1 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 移除 D5-电能质量 | 5.2 状态空间、3.4 消息总线 | 删除 5 个电能质量字段（三相电压、不平衡度、频率）；三相不平衡治理不涉及电池充放，交由实时控制核心模块独立处理 |
-| 2 | 移除 A3a/A3b/A3c 分相补偿 | 5.3 动作空间、5.4 约束规则、5.5 ActionOutput | 动作空间从 7 维缩减为 4 维；删除 ACT-04 分相补偿约束；约束规则从 6 条缩减为 5 条 |
-| 3 | 级联更新 SCENE-01 奖励函数 | 6.2 农网灌溉模式 | 移除 R_voltage_quality 项；权重从 w1~w4 重编号为 w1~w3 |
-| 4 | 更新统计数据与验收标准 | 1.2 / 3.2 / 5.7 / 10.4 / 10.5 | 状态维度 23→18、动作维度 7→4、约束 6→5、FUSION-02/03 对应更新 |
-| 5 | 版本号更新 | 文档头部/尾部 | v2.0 → v2.1 |
-
-**修订依据：** 三相不平衡治理不再由 AI 引擎处理，移交 MUPU 实时控制核心模块
-
-## v2.2 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | D1 新增三相电压 | 5.2 状态空间 | 新增 voltage_phase_a/b/c（标幺值），用于过/低电压检测；状态维度 18→21 |
-| 2 | 新增电压感知 P/Q 控制策略 | 5.1 功能概述 | 定义光伏超发（高电压）、农网灌溉（低电压）、末端低电压三种场景的 P/Q 协同控制策略表 |
-| 3 | q_batt_set 符号定义验证 | 5.3 动作空间 | 验证"负值=感性，正值=容性"定义完整，覆盖全部电压控制场景，与 Q-V 耦合关系一致 |
-| 4 | 更新统计数据与验收标准 | 1.2 / 3.2 / 5.7 / 10.4 | 状态维度 18→21、FUSION-02 对应更新、STATE-01 更新 |
-| 5 | 版本号更新 | 文档头部/尾部 | v2.1 → v2.2 |
-
-**修订依据：** AI 引擎需感知台区电压水平以执行有功/无功协调控制（光伏超发高电压→充电+感性无功，灌溉/末端低电压→放电+容性无功）
-
-**重要架构说明：** v2.2 新增的三相电压（D1）与 v2.1 移除的电能质量 D5 是不同用途：
-- v2.1 移除的 D5：三相不平衡度 + 频率 → 电能质量监测场景，由实时控制核心独立处理
-- v2.2 新增到 D1：三相电压幅值 → 过/低电压检测 → P/Q 控制策略，是 AI 引擎决策的必要输入
-
-## v2.3 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | SCENE-01 恢复电压质量惩罚 | 6.2 奖励函数 | 增加 w4 * P_voltage_deviation 项；电压幅值通过 P/Q 协同控制可主动调节，三相不平衡仍由实时控制核心处理 |
-| 2 | 更新权重表 | 6.2 权重 | 新增 w4=1.0（电压质量），可配置范围 [0.0, 3.0] |
-| 3 | 更新版本号 | 文档头部 | v2.2 → v2.3 |
-
-**修订依据：** MODE-01 农网灌溉场景中，高电压（光伏超发）和低电压（灌溉抽水导致）均需 AI 引擎主动干预。
-原 v2.1 以"三相不平衡不涉及电池充放"为由完全移除电压奖励属误判——电压幅值偏差与电池充放电、无功输出密切相关，
-AI 引擎可通过 p_batt/q_batt 协同控制主动调节。v2.3 仅恢复电压幅值惩罚，三相不平衡治理维持实时控制核心独立处理。
-
-## v2.4 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 分层控制架构：Q控制从AI动作空间移除 | 5.1/5.3/5.4 | 动作空间从4维缩减为2维（P_batt + Load_shedding）；Q控制完全交实时控制核心闭环调节，三相不平衡同样由实时控制核心处理 |
-| 2 | 增加电压死区机制 | 6.2 SCENE-01 | ±5%死区（[0.95,1.05] p.u.），越限连续2步才触发惩罚，避免AI对瞬时高频脉冲过度响应 |
-| 3 | 增加功率变化率惩罚R_ramp | 6.2 SCENE-01 | R_ramp = λ·|ΔP_batt|/BATTERY_CAPACITY_KWH，归一化到C-rate变化率，与电池衰减量纲一致，避免大功率场景惩罚量级失衡 |
-| 4 | 更新版本号 | 文档头部 | v2.3 → v2.4 |
-
-**修订依据：** 300kW错峰启停工况下，高频随机脉冲要求AI专注于有功管理而非被无功调节分散注意力；电压死区防止瞬时脉冲触发无效响应；功率变化率惩罚延长电池寿命。
-
-## v2.5 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 状态空间扩展：q_realtime_margin | 2.1/2.4/D1 | 实时模块剩余无功容量比例 [0.0, 1.0]，数据源为 intercore TCP 通道 |
-| 2 | 状态空间扩展：季节时段编码 | 2.1/2.2/2.3/D7 | season_encoding (6维) + time_period_encoding (2维)，数据源为 data-processing 历史分析 |
-| 3 | 状态空间扩展：to_input_vector 56维 | 2.6 | 向量维度从 48 扩展至 56，D7（8字段）追加至末尾 |
-| 4 | SCENE-01 奖励函数重写 | 6.2 | 条件触发电压惩罚 + 自适应损耗系数 α(s) + 弃光电压前置条件 |
-| 5 | RewardThresholdConfig 配置结构 | 7.4 | voltage_deadband, q_margin_threshold, voltage_high_limit, soc_critical, voltage_penalty_high/low |
-| 6 | 版本号更新 | 文档头部 | v2.4 → v2.5 |
-
-**修订依据：** 专家评审确认"AI 管有功 P + 实时模块管无功 Q"分层架构工程上正确，但指出两项关键缺失：(1) AI 状态空间缺少实时模块能力边界反馈（q_realtime_margin）；(2) 奖励函数未体现有功对电压治理的边际贡献。v2.5 通过条件触发电压惩罚实现"仅在实时模块无功耗尽时 AI 才介入电压治理"的分层原则。
-
-## v2.6 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 农网台区参数更新 | 默认值 | 变压器容量 500kVA→200kVA，电池容量 200kWh→100kWh，最大充放电功率 100kW→50kW，合同需量 500kW→200kW |
-| 2 | 版本号更新 | 文档头部 | v2.5 → v2.6 |
-
-**修订依据：** 农网台区新规格落地：变压器 200kVA、光伏 150kW、储能 50kW/100kWh、居民负荷 60kW、农业冲击负荷最高 120kW。代码默认值已同步更新。
-
-## v2.7 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 双参数动作空间 | 5.3/5.4a/5.4b/5.5a/5.5b | 动作空间从单参数（p_batt_set）升级为双参数（P_ref + k_droop），实现下垂控制 P_output = P_ref + k_droop × ΔV |
-| 2 | ACT-DUAL-01~05 校验规则 | 5.4a | 新增双参数模式校验规则（p_ref 值域、k_droop 范围、变化率、调度约束、pv_limit 下限） |
-| 3 | 通信中断降级规则 | 5.4b | 执行器保持最后有效的 P_ref 和 k_droop，继续下垂控制，保障本质安全不停机 |
-| 4 | 消息总线 Topic 扩展 | 5.6 | 新增 `ai/droop_range` topic，用于传递 k_droop 范围 |
-| 5 | 双参数验收标准 | 5.7 | 新增 DUAL-01~08 和 FALLBACK-01~03 验收标准 |
-| 6 | 版本号更新 | 文档头部 | v2.6 → v2.7 |
-
-**修订依据：** 动作空间重构 PRD（2026-06-13）已合并。原方案存在暂态响应盲区（AI 推理周期秒级无法覆盖毫秒级电压波动）、通信强依赖（通信中断即失控）、安全裁剪破坏梯度、Sim-to-Real 鸿沟大等问题。v2.7 通过双参数模式实现时间尺度解耦：AI 负责稳态全局优化（P_ref），执行器负责毫秒级暂态调节（k_droop × ΔV）。
-
-## v2.8 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | P-Q 协同度奖励 R_PQ_coordination | 6.2 SCENE-01 | 替代原 P_voltage_deviation 电压惩罚；Q 有裕度时奖励"偷懒"，Q 饱和时奖励正确出手（低压放电/高压充电） |
-| 2 | 弃光奖励差异化 | 6.2 SCENE-01 | 高电压（v_avg >= 1.05）时根据 AI 动作方向差异化：充电消纳光伏给奖励，放电给惩罚 |
-| 3 | 下垂系数平滑惩罚 R_smooth | 6.2 SCENE-01 | R_smooth = -|Δk_droop| - λ·max(0, k_droop - K_MAX)，防止 k_droop 极大化导致系统震荡 |
-| 4 | 权重表更新 | 6.2 权重表 | w4 从"电压质量惩罚"改为"P-Q 协同度奖励"，新增 w7 下垂平滑惩罚 |
-| 5 | 版本号更新 | 文档头部 | v2.7 → v2.8 |
-
-**修订依据：** 专家评审指出原有电压惩罚设计会使 AI 在 Q 饱和时"两难"——调了也没用还被罚，最终退化到零策略。P-Q 协同度奖励将考核从"结果惩罚"转变为"行为奖励"，更符合强化学习正向激励原理，同时防止 AI 通过设置极大 k_droop 拿高分导致系统震荡。
-
-## v2.9 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | RobustnessManager 新增 | 新增 robustness_manager.rs | 电压骤升/骤降、电池SOC异常、通信超时应急策略 |
-| 2 | AnomalyType 枚举 | robustness_manager.rs | VoltageSag, VoltageSurge, BatterySocCritical, BatterySocOverfull, CommunicationTimeout |
-| 3 | calc_pq_coordination 方法 | reward_calculator.rs | P-Q 协同度奖励逻辑实现 |
-| 4 | calc_smooth_penalty 方法 | reward_calculator.rs | 下垂系数平滑惩罚逻辑实现 |
-| 5 | calc_pv_reward_v2_8 方法 | reward_calculator.rs | 弃光奖励差异化（高电压时放电惩罚） |
-| 6 | calc_agri_v2_8 方法 | reward_calculator.rs | SCENE-01 v2.8 奖励函数（7 权重） |
-| 7 | strategy-engine 集成 RobustnessManager | ai_integration.rs | dispatch_ai_decision 前进行异常检测 |
-| 8 | dispatch_robust_action 方法 | ai_integration.rs | 分发应急动作（不经过 RL 模型） |
-| 9 | SceneWeights 扩展至 7 权重 | config.rs | seasonal_load_management: [f64; 7]，新增 w7 |
-| 10 | 版本号更新 | 文档头部 | v2.8 → v2.9 |
-
-**修订依据：** v2.9 实现两项核心功能：(1) RobustnessManager 电压异常应急策略，检测 VoltageSag/VoltageSurge/BatterySocCritical/BatterySocOverfull 并返回应急动作；(2) v2.8 奖励函数代码落地，P-Q 协同度奖励 + 下垂平滑惩罚。
-
-## v2.10 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 状态空间扩展至 59 维 | 5.2 / 3.3 | D9 新增安全覆盖状态（3 维：safety_override_active/reason/p_ref） |
-| 2 | SafetyOverride 帧类型 | protocol.rs | FrameType::SafetyOverride = 0x0040 |
-| 3 | DataUploadPayload 结构体 | tcp_server.rs | 含 q_realtime_margin 字段 |
-| 4 | SafetyOverridePayload 结构体 | tcp_server.rs | 含 trigger_reason, override_p_ref, duration_ms, recovery_condition |
-| 5 | IntercoreConnectionState 扩展 | tcp_server.rs | q_margin, safety_override_* 字段 |
-| 6 | safety_override_penalty() | reward_calculator.rs | 安全覆盖惩罚（v2.10 新增） |
-| 7 | SCENE-01 扩展 8 权重 | 6.2 | w8=1.0 安全覆盖惩罚 |
-| 8 | IntercoreAdapter 数据源 | data_fusion.rs | 从核间通信状态获取 q_realtime_margin 和安全覆盖状态 |
-| 9 | 版本号更新 | 文档头部 | v2.9 → v2.10 |
-| 10 | **v2.10 短期实现：R1 影子模型验证+渐进式切换** | 8.5 新增 | SafeOnlineUpdater、ShadowModel、GradualSwitcher；安全约束验证 + 性能验证 + 渐进式切换 |
-| 11 | **v2.10 短期实现：R2 折扣累积奖励机制** | 6.9 新增 | DiscountedAccumulator；gamma 折扣因子 [0.9, 0.999]，缓冲区 1000 |
-| 12 | **v2.10 短期实现：R3 场景切换平滑过渡** | 4.9 新增 | SmoothSceneTransition；10 步线性插值过渡 |
-
-**修订依据：** v2.10 实现安全增强功能：(1) q_realtime_margin 数据通道通过核间 DataUpload 帧实时同步；(2) SafetyOverride 帧类型（0x0040）定义实时控制模块临时覆盖 AI 有功指令的接口规范；(3) FusedSystemState 扩展至 59 维，AI 引擎感知安全覆盖事件并在奖励函数中获得惩罚；(4) v2.10 短期实现三项功能：影子模型验证+渐进式切换、折扣累积奖励机制、场景切换平滑过渡。
-
-## v2.11 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | **v2.11 中期实现：自适应权重优化器** | 8.6 新增 | AdaptiveWeightOptimizer + ParetoWeightOptimizer + PerformanceCollector；MetaRL 元学习 + NSGA-II 多目标优化 |
-| 2 | **v2.11 中期实现：冲击负荷概率预测** | 8.7 新增 | LSTM 分位数预测（predict_quantiles）+ 冲击负荷概率计算（calculate_shock_probability）+ LoadCovariates |
-| 3 | 新增验收标准 | 10.7/10.8 | AWO-01~07（自适应权重优化器），PLF-01~07（冲击负荷概率预测） |
-| 4 | 版本号更新 | 文档头部 | v2.10 → v2.11 |
-
-**修订依据：** v2.11 实现两项核心功能：(1) 自适应权重优化器（AdaptiveWeightOptimizer + ParetoWeightOptimizer），基于历史性能数据自动调优奖励函数权重，减少人工调参依赖；(2) 冲击负荷概率预测（LSTM 分位数预测），输出 P10/P50/P90 分位数并计算冲击负荷概率，增强需量控制能力。
-
-## v2.12 修订记录
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | **R-01 奖励子项标准化** | 6.2 SCENE-01 | 各子项标准化到 `[-1, 1]` 区间，统一量纲：r_pv_norm、p_batt_deg_norm、p_trafo_norm、r_pq_norm、r_ramp_norm、r_voltage_slope_norm、r_smooth_norm、r_safety_override_norm |
-| 2 | **R-02 引入塑造奖励** | 6.2 SCENE-01 | 新增 `overload_warning(load)`（负载率 >85% 开始预警）和 `soc_warning(soc)`（SOC 接近 15%/85% 边界时预警） |
-| 3 | **R-03 SOC 均衡奖励** | 6.2 SCENE-01 | 新增 `soc_balance_reward(soc, λ) = -λ × |SOC - 0.5|`，鼓励 SOC 保持在 50% 附近 |
-| 4 | 新增测试用例 | 单元测试 | test_v2_12_overload_warning_*、test_v2_12_soc_warning_*、test_v2_12_soc_balance_reward_*、test_v2_12_normalized_* 等 15+ 测试用例 |
-| 5 | 版本号更新 | 文档头部 | v2.11 → v2.12 |
-
-**修订依据：** v2.12 基于 SCENE-01 台区季节性负荷模式的专家建议实现三项改进：(1) 奖励子项标准化解决量纲不一致问题，加速 RL 收敛；(2) 塑造奖励提前预警稀疏事件（变压器过载、SOC 边界），帮助 RL 学习避免危险状态；(3) SOC 均衡奖励延长电池寿命，避免 SOC 长期偏向极值。
+- `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md`（v1.0~v2.14 历史版本合并）
+- `docs/superpowers/plans/modules/05-MUPC-AI引擎-设计文档.md`（设计文档）

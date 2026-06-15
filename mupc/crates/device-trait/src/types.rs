@@ -91,6 +91,8 @@ pub enum DeviceType {
     FlexibleLoad,
     /// 消防控制
     FireAlarm,
+    /// HPLC 载波设备
+    Hplc,
     /// 未知类型
     Unknown,
 }
@@ -104,6 +106,7 @@ impl DeviceType {
             DeviceType::Charger => "charger",
             DeviceType::FlexibleLoad => "flexible_load",
             DeviceType::FireAlarm => "fire_alarm",
+            DeviceType::Hplc => "hplc",
             DeviceType::Unknown => "unknown",
         }
     }
@@ -119,6 +122,7 @@ impl std::str::FromStr for DeviceType {
             "charger" => DeviceType::Charger,
             "flexible_load" | "flexibleload" => DeviceType::FlexibleLoad,
             "fire_alarm" | "firealarm" => DeviceType::FireAlarm,
+            "hplc" => DeviceType::Hplc,
             _ => DeviceType::Unknown,
         })
     }

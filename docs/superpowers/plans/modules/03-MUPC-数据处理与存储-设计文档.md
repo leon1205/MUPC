@@ -1137,6 +1137,8 @@ impl StorageService {
 
 ### 4.3 数据模型与表结构
 
+> **Phase 2+ 状态：** 下文 ER 图与表结构为 Phase 2+ 目标设计。当前实际 SQLite schema 仅 6 张表：`telemetry`（扁平结构，非按月分区）、`faults`、`decisions`、`events`、`assets`（简化字段）、`action_space_config`（v2.5）。`device_nameplate`、`maintenance_record`、`alarm_log`（告警管理）、`battery_YYYYmm`（电池分区表）等均未建表，`telemetry_YYYYmm` 按月分区未实现。
+
 #### 4.3.1 实体关系图
 
 ```

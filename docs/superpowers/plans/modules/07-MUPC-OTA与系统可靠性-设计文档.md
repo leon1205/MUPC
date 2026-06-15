@@ -611,6 +611,8 @@ U-Boot 环境变量 `boot_partition` 控制从哪个分区启动：
 | `max_boot_attempts` | u32 | 最大启动尝试次数（默认 3） |
 | `ota_status` | string | `"idle"`/`"updated"`/`"rollback"`/`"safe"` |
 
+> **Phase 2+ 状态：** A/B 分区切换当前为占位（`switch_to_standby()` 仅记录日志，未通过 BootloaderEnv 实际设置 boot_partition）。下文原子性保证流程为 Phase 2+ 目标设计。
+
 #### 3.1.3 分区切换原子性保证
 
 ```
@@ -929,6 +931,8 @@ pub enum FwOtaState {
 ---
 
 ## 4. 系统监控设计
+
+> **Phase 2+ 状态：** `system-monitor` crate 当前为骨架实现（JSONL 文件存储指标，无 cgroup v2 资源限制、无网络 I/O 监控、无硬件看门狗喂狗、无 OOM 保护）。下文五维监控、cgroup v2、硬件看门狗、OOM 保护等为 Phase 2+ 目标设计。
 
 ### 4.1 整体架构
 

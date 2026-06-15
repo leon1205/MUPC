@@ -7,6 +7,8 @@
 | v1.1 | 2026-05-29 | 架构师 | 已批准 |
 
 **对应模块：** `wireless` crate（新建）
+
+> **Phase 2+ 状态：** WiFi/NearLink/BLE 当前均为 NoOp 驱动（返回"功能尚未启用"占位）。ECDH 密钥协商为 XOR 占位实现（跳过真实 P-256 椭圆曲线计算）。下文 API 签名为 Phase 2+ 目标设计，非当前实现。
 **对应 PRD：** `docs/superpowers/specs/modules/09-MUPC-本地运维通信-PRD.md`
 **对应缺口：** M-01（来自需求覆盖度审查报告）
 **前置依赖：** OTA模块、Web UI、日志系统、security crate

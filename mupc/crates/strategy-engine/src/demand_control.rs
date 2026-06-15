@@ -28,6 +28,8 @@ impl DemandControlStrategy {
                 CommandType::PowerRegulation
             },
             p_batt_set: Some(p_batt),
+            p_ref: None,
+            k_droop: None,
             q_batt_set: None,
             phase_compensation: None,
             start_stop: Some(true),

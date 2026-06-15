@@ -15,6 +15,10 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// SSE 事件类型
+///
+/// NOTE: 设计文档要求 6 种 SSE 事件类型（status, decision, predictions,
+/// rewards, finetuning, heartbeat）。当前只实现了 5 种。
+/// TODO: 添加 `RewardsUpdate` 和 `FinetuningUpdate` 事件类型以对齐设计文档。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum SseEventType {
@@ -192,6 +196,7 @@ pub async fn sse_handler(
     let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|result| {
         match result {
             Ok(event) => {
+                // TODO: 添加 "rewards" 和 "finetuning" 事件名称映射以对齐设计文档
                 let event_name = match &event.event_type {
                     SseEventType::SceneChange { .. } => "mode_switch",
                     SseEventType::AiDecision { .. } => "decision",

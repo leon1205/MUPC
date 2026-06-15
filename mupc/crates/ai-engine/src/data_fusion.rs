@@ -139,7 +139,7 @@ impl FusedSystemState {
     ///   [76]     D10 shock_load_probability (1 维，v2.11 新增)
     ///   [77]     D10 base_load (1 维，v2.11 新增)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(76);
+        let mut v = Vec::with_capacity(78);
 
         // D1 [0..9] 10 标量
         v.push(self.battery_soc as f32);

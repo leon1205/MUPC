@@ -15,7 +15,7 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 | **北向通信** | 与调度主站（IEC 104）、配电自动化（IEC 61850）、物联平台（MQTT）通信 |
 | **南向通信** | 与台区设备（TTU、光伏逆变器、充电桩、柔性负荷）通信 |
 | **本地策略引擎** | 削峰填谷、需量控制、防逆流 — AI 失效时的兜底保障 |
-| **AI 边缘优化引擎** | LSTM 时序预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 + 自适应权重优化器（v2.11）+ 奖励函数精细化（v2.13） |
+| **AI 边缘优化引擎** | LSTM 分位数预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 + 自适应权重优化器 + SafetyOverride 安全覆盖（v2.14 完整版） |
 | **OTA 升级** | 固件与 AI 模型的远程更新与版本管理 |
 
 ---
@@ -149,15 +149,20 @@ cargo build --release        # 发布构建
 | Phase | 内容 | 状态 |
 |-------|------|------|
 | Phase 1 | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
-| Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理） | ✅ 完成 |
-| Phase 3C 补充 | 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验） | ✅ 完成 |
-| v2.7 ~ v2.9 | 双参数下垂控制、P-Q 协同度奖励、RobustnessManager + 应急策略 | ✅ 完成 |
-| v2.10 | 安全增强（SafetyOverride + q_realtime_margin 数据通道） | ✅ 完成 |
-| v2.11 | 自适应权重优化器（NSGA-II）+ 冲击负荷概率预测（LSTM 分位数预测 P10/P50/P90） | ✅ 完成 |
-| v2.12 | SCENE-01 奖励函数改进（R-01~R-07：子项标准化、塑造奖励、SOC均衡、过载分段惩罚、动态权重、冲击负荷响应、P-Q阈值配置） | ✅ 完成 |
-| v2.13 | 奖励函数精细化（Sigmoid平滑、动态归一化、状态改善率、冲击负荷预备度、PER+KL正则化、策略混合） | ✅ 完成 |
-| Phase 2+ | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密 | 规划中 |
-| Phase 2+ | 南向通信（RS485/HPLC）、OTA 升级、安全启动 | 规划中 |
+| Phase 2A | 南向通信（RS485/HPLC）核心架构 | ✅ 基本完成（4 个测试待修） |
+| Phase 2B | MQTT over TLS | ✅ 完成 |
+| Phase 2B | SM2/SM4 国密 | ⚠️ SM3/SM4 CBC 真国密；SM2签名/SM4 GCM 待 gmsm 0.14 |
+| Phase 3C | AI 优化引擎（LSTM、MADDPG/PPO、RKNN Runtime） | ✅ 完成 |
+| Phase 3C 补充 | 跨项目动态配置系统 v2.6 | ✅ 完成 |
+| v2.7 ~ v2.9 | 双参数下垂控制、P-Q 协同度奖励、RobustnessManager 应急策略 | ✅ 完成 |
+| v2.10 | 安全增强（SafetyOverride 帧 0x0040 + q_realtime_margin 数据通道） | ✅ 完成 |
+| v2.11 | 自适应权重优化器（NSGA-II）+ LSTM 分位数预测（P10/P50/P90） | ✅ 完成 |
+| v2.12 | 奖励函数 R-01~R-07（标准化、塑造奖励、SOC均衡、过载分段、动态权重） | ✅ R-06 待实现 |
+| v2.13 | 奖励函数精细化（Sigmoid平滑、动态归一化、状态改善率、PER+KL、策略混合） | ✅ 完成 |
+| v2.14 | SafetyOverride 惩罚重构、FusedSystemState 扩展至 78 维 | ✅ 完成 |
+| Phase 2+ | IEC 61850-7-420（libIEC61850 FFI 待接入） | ⚠️ 骨架就位 |
+| Phase 2+ | OTA 固件升级（A/B 分区待实现）、安全启动（存根） | ⚠️ 模型OTA完成 |
+| Phase 2+ | WiFi/NearLink/BLE 驱动、RBAC 鉴权中间件 | 📋 规划中 |
 
 技术债详见 [`docs/technical-debt.md`](docs/technical-debt.md)
 

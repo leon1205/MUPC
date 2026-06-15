@@ -3,6 +3,7 @@
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
 | v1.0 | 2026-05-27 | 项目经理 | 记录中 |
+| v2.0 | 2026-06-15 | 项目经理 | 审计更新 — 新增文档-代码一致性审计发现 |
 
 ---
 
@@ -142,59 +143,110 @@
 
 ## 5. 已识别待实现功能（Phase 2+）
 
-| 功能 | 说明 | 优先级 |
-|------|------|--------|
-| 动态插件加载 | libloading 加载 .so 插件 | 高 |
-| 南向通信 | RS485/HPLC 驱动 | 高 |
-| 消息总线 | AMQP/MQTT 进程间通信 | 中 |
-| 安全增强 | MQTT over TLS、国密 SM2/SM4 | 中 |
-| 协议扩展 | IEC 61850-7-420 | 中 |
-| AI 优化引擎 | LSTM/TCN 预测、MADDPG/PPO 决策 | 低 |
-| OTA 升级 | 差分升级、安全启动 | 低 |
-| 故障录波 | 完整实现 | 中 |
+| 功能 | 说明 | 优先级 | 状态 |
+|------|------|--------|------|
+| 动态插件加载 | libloading 加载 .so 插件 | 高 | ✅ 已完成 |
+| 南向通信 | RS485/HPLC 驱动 | 高 | ✅ 基本完成（4 个测试待修） |
+| 消息总线 | AMQP/MQTT 进程间通信 | 中 | ✅ MQTT 已完成 |
+| 安全增强 | MQTT over TLS、国密 SM2/SM4 | 中 | ⚠️ 部分实现（SM3/SM4 CBC 完成；SM2签名/SM4 GCM 待 gmsm 0.14） |
+| 协议扩展 | IEC 61850-7-420 | 中 | ⚠️ 部分实现（原始TCP+自研ASN.1，待 libIEC61850 FFI） |
+| AI 优化引擎 | LSTM/TCN 预测、MADDPG/PPO 决策 | 低 | ✅ 已完成 |
+| OTA 升级 | 差分升级、安全启动 | 低 | ⚠️ 模型OTA完成；固件OTA骨架就位（A/B分区/签名待实现） |
+| 故障录波 | 完整实现 | 中 | ⚠️ 4个方法为stub（get_waveform等） |
 
 ---
 
-## 6. 技术债统计
+## 6. 文档-代码一致性审计发现（2026-06-15）
 
-| 类别 | 数量 | 已修复 | 待验证 | 状态 |
+> 来源：全量 PRD/设计文档 vs 代码库一致性审计。已修复项标注状态，未修复项记录于此。
+
+### 6.1 已修复（本轮）
+
+| # | 模块 | 问题 | 修复方式 |
+|---|------|------|----------|
+| F-01 | 05 AI引擎 | `decide_fused()` 断言 48 维，应为 78 维 | 代码：48→78 |
+| F-02 | 05 AI引擎 | `to_input_vector()` capacity 76，应为 78 | 代码：76→78 |
+| F-03 | 04 策略引擎 | `ControlCommand` 缺 `p_ref`/`k_droop`，用旧字段 `p_batt_set` | 代码：新增 p_ref+k_droop，p_batt_set 标记 deprecated |
+| F-04 | 02 南向通信 | `DeviceType` 枚举缺 `Hplc` 变体 | 代码：新增 Hplc |
+| F-05 | 03 数据处理 | `FaultRecorder` trait 缺 `update_trigger_config()`/`get_trigger_config()` | 代码：新增默认实现 |
+| F-06 | 06 安全 | 文档声称 SmCryptoProvider/CertManager/安全启动已实现，实际为存根 | 文档：添加 Phase 2+ 状态说明 |
+| F-07 | 09 运维通信 | 文档描述 WiFi/NearLink/BLE/ECDH 为已实现，实际为 NoOp 占位 | 文档：添加 Phase 2+ 状态说明 |
+| F-08 | 07 OTA | 文档描述 A/B分区切换/cgroup v2/硬件看门狗/OOM 为已实现，实际未实现 | 文档：添加 Phase 2+ 状态说明 |
+| F-09 | 03 存储 | 文档描述 alarm_log/event_log/TELEMETRY_HISTORY 分区表存在，实际不存在 | 文档：记录实际 schema |
+| F-10 | 08 Web | SSE 缺 `RewardsUpdate`/`FinetuningUpdate` 事件类型 | 代码：添加 TODO |
+
+### 6.2 未修复 — 架构级变更（需独立规划）
+
+| # | 模块 | 严重程度 | 问题 | 阻塞原因 |
+|---|------|----------|------|----------|
+| U-01 | 08/05 Web/AI | **P0** | 角色鉴权未实现 — `RequireRole` 硬编码返回 `Role::Admin`，`login()` 硬编码 `role: "operator"` | 需设计完整 RBAC 中间件（token管理、角色存储、权限矩阵） |
+| U-02 | 03 存储 | **P0** | sqlx/rusqlite 双库并存 — `storage` crate 用 sqlx，`data-processing` 用 rusqlite | 需统一迁移方案，评估 sqlx 对故障录波 rusqlite 功能的覆盖度 |
+| U-03 | 06 安全 | **P0** | SM2 签名/SM4 GCM/SM3 HKDF/SM2 ECDH 实际使用 ring 模拟，非真国密 | 需 gmsm crate 升级至 0.14（当前 0.1.0 缺少签名/GCM/HKDF/ECDH API） |
+| U-04 | 06 安全 | **P0** | `SmCryptoProvider` 未实现 `rustls::CryptoProvider` trait，无法用于 TLS | 需完成 SM2/SM3/SM4 的 rustls 密码学套件适配 |
+| U-05 | 06 安全 | **P0** | 安全启动全部为存根 — `verify_boot_chain()` 直接返回 `Verified` | 需 RK3588 硬件信任根（OTP/eFuse）驱动支持 |
+| U-06 | 09 运维通信 | **P0** | WiFi/NearLink/BLE 全部 NoOp 驱动，ECDH 为 XOR 占位 | 需 Hi2821 硬件 + hostapd/wpa_supplicant 集成 |
+| U-07 | 07 OTA | **P1** | 固件 OTA — A/B 分区 `switch_to_standby()` 仅打印日志，SM2 验签返回 `SignatureInvalid` | 需 bootloader 环境变量写入权限 + SM2 验签就绪 |
+| U-08 | 07 监控 | **P1** | cgroup v2 管理、网络 I/O 监控、硬件看门狗、OOM score_adj 均未实现 | 需内核配置验证 + 硬件看门狗驱动 |
+| U-09 | 03 存储 | **P1** | SQLite schema 与 PRD 不符 — 缺 alarm_log/event_log/device_nameplate/maintenance_record 表，遥测无按月分区 | 需评估实际需求后设计迁移脚本 |
+| U-10 | 03 数据 | **P1** | `TriggerConfig` 仅单个 `enabled: bool`，设计文档要求 7 个独立启用标志 | 需重构触发条件配置结构 |
+| U-11 | 06 安全 | **P1** | `CertManager` API 与设计文档完全不同 — 设计文档的 import_cert/import_crl/reload/list_certs 未实现 | 需对齐 API 设计 |
+| U-12 | 08 Web | **P1** | SSE 基于 query 的过滤 (`types=`) 未实现 | 需扩展 SSE handler 参数解析 |
+| U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | 需统一命名（建议代码跟随 PRD 修改） |
+| U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | 低优先级，当前注释保留兼容性 |
+
+---
+
+## 7. 技术债统计
+
+| 类别 | 数量 | 已修复 | 待修复 | 状态 |
 |------|------|--------|--------|------|
-| 严重问题 | 2 | 2 | 0 | ✅ 全部修复 |
-| 警告问题 | 4 | 4 | 0 | ✅ 全部修复 |
-| 优化建议 | 3 | 2 | 1 | 🔄 测试待验证 |
-| **总计** | **9** | **8** | **1** | |
+| 严重问题 (Phase 1) | 2 | 2 | 0 | ✅ 全部修复 |
+| 警告问题 (Phase 1) | 4 | 4 | 0 | ✅ 全部修复 |
+| 优化建议 (Phase 1) | 3 | 2 | 1 | 🔄 1 项待优化 |
+| 审计发现-已修复 (本轮) | 10 | 10 | 0 | ✅ 全部修复 |
+| 审计发现-未修复 (P0) | 6 | 0 | 6 | 🔴 待规划 |
+| 审计发现-未修复 (P1) | 6 | 0 | 6 | 🟡 待排期 |
+| 审计发现-未修复 (P2) | 2 | 0 | 2 | ⚪ 可延后 |
+| **总计** | **33** | **20** | **13** | |
 
 ---
 
-## 7. 修复计划
+## 8. 修复计划
 
 ### 7.1 短期修复（1-2天）
 
 | 问题 | 负责人 | 预计时间 |
 |------|--------|----------|
-| Session 过期检查时序问题 | 开发工程师 | 2小时 |
-| 连接清理问题 | 开发工程师 | 2小时 |
+| U-01 RBAC 鉴权中间件 | 2天 | 需确认角色模型和权限矩阵 |
+| U-02 sqlx/rusqlite 双库统一 | 3天 | 需评估 sqlx 功能覆盖度 |
+| U-09 SQLite schema 对齐 | 2天 | 需确认实际需求 |
 
-### 7.2 中期优化（1周内）
+### 8.2 中期修复（P1 — 本月）
 
-| 问题 | 负责人 | 预计时间 |
-|------|--------|----------|
-| 测试覆盖率提升 | QA工程师 | 1天 |
-| 代码重复优化 | 开发工程师 | 4小时 |
+| 问题 | 预计时间 | 阻塞 |
+|------|----------|------|
+| U-07 固件 OTA 分区切换 + SM2 验签 | 3天 | 需 SM2 签名就绪 |
+| U-08 系统监控完善 | 2天 | 需硬件看门狗驱动 |
+| U-10 TriggerConfig 重构 | 1天 | — |
+| U-11 CertManager API 对齐 | 1天 | — |
+| U-12 SSE query 过滤 | 0.5天 | — |
 
-### 7.3 长期优化（Phase 2）
+### 8.3 长期修复（外部依赖）
 
-| 问题 | 负责人 | 预计时间 |
-|------|--------|----------|
-| 动态插件加载 | 开发工程师 | 3天 |
-| 南向通信驱动 | 开发工程师 | 5天 |
-| 消息总线扩展 | 开发工程师 | 2天 |
+| 问题 | 预计时间 | 阻塞 |
+|------|----------|------|
+| U-03 SM2/SM4 真国密 | 5天 | gmsm 0.14 发布 |
+| U-04 rustls CryptoProvider | 3天 | 依赖 U-03 |
+| U-05 安全启动信任链 | 5天 | RK3588 OTP/eFuse 驱动 |
+| U-06 WiFi/NearLink/BLE | 10天 | Hi2821 硬件 + 内核驱动 |
+| U-13 RunningMode 命名 | 0.5天 | 确认序列化兼容性 |
+| U-14 crate 目录重命名 | 0.5天 | 更新所有引用路径 |
 
 ---
 
-## 8. 附录
+## 9. 附录
 
-### 8.1 术语表
+### 9.1 术语表
 
 | 术语 | 说明 |
 |------|------|

@@ -5,10 +5,9 @@
 | v1.1 | 2026-06-10 | 架构师 | 当前版本 |
 | v1.0 | 2026-05-29 | 架构师 | 初版 |
 
-**合并来源：**
-- `docs/superpowers/specs/modules/04-MUPC-策略引擎-PRD.md`（产品需求）
-- `docs/superpowers/plans/2026-05-27-MUPC-Phase3A-实施计划.md`（Task 5-10 实现细节）
-- 代码库 `mupc/crates/strategy-engine/src/`（当前实现对齐）
+> **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
+
+**合并来源：** PRD v1.1 + Phase3A 实施计划 + 代码库 `mupc/crates/strategy-engine/src/`
 
 ---
 
@@ -68,7 +67,7 @@ AI 引擎失效:
 mupc-strategy-engine
   ├── mupc-common              (MupcError, ErrorCode)
   ├── mupc-data-processing     (DataPackage, telemetry 类型)
-  └── mupc-ai-engine           (ModelManager, ModelStatus, SystemState, ActionOutput)
+  └── mupc-ai-engine           (ModelManager, FusedSystemState, ActionOutput, ModelStatus)
 ```
 
 ### 1.4 整体数据流
@@ -107,26 +106,17 @@ AiCommandValidator (可插拔 AI 模型)
 | 防逆流 | 3 | 固定 ID |
 | 保留 | 4-10 | 供 Phase 2+ 扩展策略使用 |
 
-### 1.6 非功能性需求
+### 1.6 性能与可靠性
 
-| 指标 | 要求 |
-|------|------|
-| 策略决策延迟 | < 100ms（从收到数据到输出控制命令） |
-| 内存占用 | 每个策略实例 < 10MB |
-| 并发评估 | 支持三个策略同时运行，互不阻塞 |
-| AI 失效检测时间 | < 1 个心跳周期（1 秒） |
-| 模式切换时间 | < 50ms |
-| 无单点故障 | 任一策略故障不影响其他策略运行 |
+> 非功能性需求详见 [PRD §10](../specs/modules/04-MUPC-策略引擎-PRD.md)。本条记录设计层面的关键实现约束：策略决策延迟 < 100ms、单实例内存 < 10MB、三策略并发互不阻塞、模式切换 < 50ms。
 
 ---
 
 ## 2. 削峰填谷策略
 
-### 2.1 概述
+> 功能需求详见 [PRD §2](../specs/modules/04-MUPC-策略引擎-PRD.md)。本节记录实现级设计。
 
-基于**固定电价时段表**的经济性策略，在谷时段充电、峰时段放电，实现峰谷套利和变压器削峰。
-
-### 2.2 架构
+### 2.1 架构
 
 - **结构体**: `PeakShavingStrategy`
 - **配置**: `PeakShavingConfig`（位于 `config.rs`）
@@ -206,7 +196,7 @@ fn is_peak_hour(&self, hour: u8) -> bool {
 |------|-----|------|
 | `cmd_id` | 1 | 削峰填谷策略固定 ID |
 | `cmd_type` | `ChargeDischarge` / `PowerRegulation` | 充放电控制或待机 |
-| `p_batt_set` | ±15~30 kW | 电池有功设定 |
+| `p_ref` | ±15~30 kW | 有功基准点（v2.7+ 双参数模式） |
 | `priority` | 1 | 默认优先级 |
 
 ### 2.7 测试覆盖
@@ -227,18 +217,16 @@ fn is_peak_hour(&self, hour: u8) -> bool {
 
 ## 3. 需量控制策略
 
-### 3.1 概述
+> 功能需求详见 [PRD §3](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
-基于**变压器负载率**的阶梯式控制策略，防止变压器过载，保障设备安全运行。
-
-### 3.2 架构
+### 3.1 架构
 
 - **结构体**: `DemandControlStrategy`
 - **配置**: `DemandControlConfig`（位于 `config.rs`）
 - **接口**: 实现 `FallbackStrategy` trait
 - **文件**: `demand_control.rs`
 
-### 3.3 决策逻辑
+### 3.2 决策逻辑
 
 ```
 负载率计算：transformer_load = (load_power + ev_charger_power) / transformer_capacity
@@ -268,7 +256,7 @@ Level 3 (负载率 > 95%):
   当 SOC < 20% 且需要放电时，放电功率限制为 max(-10kW)
 ```
 
-### 3.4 配置参数
+### 3.3 配置参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -278,17 +266,17 @@ Level 3 (负载率 > 95%):
 | `action_threshold` | `f64` | `0.90` | 行动阈值（Level 2 触发） |
 | `emergency_threshold` | `f64` | `0.95` | 紧急阈值（Level 3 触发） |
 
-### 3.5 输出字段
+### 3.4 输出字段
 
 | 字段 | 值 | 说明 |
 |------|-----|------|
 | `cmd_id` | 2 | 需量控制策略固定 ID |
 | `cmd_type` | `PowerRegulation` / `SwitchControl` | Level 1 为功率调节，Level >= 2 为开关控制 |
-| `p_batt_set` | -10/-20/-30 kW | 按等级决定放电功率 |
+| `p_ref` | -10/-20/-30 kW | 有功基准点，按等级决定放电功率 |
 | `load_shedding` | `Some(10/20 kW)` | Level >= 2 时执行负荷切除 |
 | `priority` | 0~3 | 对应策略等级 |
 
-### 3.6 测试覆盖
+### 3.5 测试覆盖
 
 | 测试用例 | 文件 | 验证点 |
 |----------|------|--------|
@@ -304,11 +292,9 @@ Level 3 (负载率 > 95%):
 
 ## 4. 防逆流保护策略
 
-### 4.1 概述
+> 功能需求详见 [PRD §4](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
-防止光伏发电过剩时向电网逆向送电，通过电池充电消纳余电，电池满载时限制 PV 出力。
-
-### 4.2 架构
+### 4.1 架构
 
 - **结构体**: `AntiReverseStrategy`
 - **配置**: `AntiReverseConfig`（位于 `config.rs`）
@@ -316,7 +302,7 @@ Level 3 (负载率 > 95%):
 - **文件**: `anti_reverse.rs`
 - **注意**: 该策略的 `evaluate_sync` 需要 `&mut self`，因其内部维护 `pv_limit_count` 状态
 
-### 4.3 决策逻辑
+### 4.2 决策逻辑
 
 ```
 触发条件：grid_power < reverse_power_threshold（默认 -0.1kW，允许微小逆流）
@@ -338,13 +324,13 @@ Step 3 - PV 已限制且仍逆流：
   pv_limit_count 清零
 ```
 
-### 4.4 状态管理
+### 4.3 状态管理
 
 | 状态字段 | 初始值 | 说明 |
 |----------|--------|------|
 | `pv_limit_count` | 0 | 连续 PV 限制次数，每次逆流且电池满时递增，恢复正常时清零 |
 
-### 4.5 配置参数
+### 4.4 配置参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -353,17 +339,17 @@ Step 3 - PV 已限制且仍逆流：
 | `max_charge_power` | `f64` | `50.0` | 最大充电功率（kW） |
 | `soc_charge_max` | `f64` | `80.0` | SOC 充电上限（%） |
 
-### 4.6 输出字段
+### 4.5 输出字段
 
 | 字段 | 值 | 说明 |
 |------|-----|------|
 | `cmd_id` | 3 | 防逆流策略固定 ID |
 | `cmd_type` | `PowerRegulation` | 功率调节 |
-| `p_batt_set` | 正数（充电）/ 0 | 电池充电功率 |
+| `p_ref` | 正数（充电）/ 0 | 有功基准点，消纳逆流功率 |
 | `pv_limit` | `Some(0.0~0.5)` / `None` | PV 限功率比例，无限制时为 None |
 | `priority` | 2 | 默认优先级 |
 
-### 4.7 测试覆盖
+### 4.6 测试覆盖
 
 | 测试用例 | 文件 | 验证点 |
 |----------|------|--------|
@@ -387,7 +373,7 @@ Step 3 - PV 已限制且仍逆流：
 
 | 字段 | 类型 | 用途 | 范围 |
 |------|------|------|------|
-| `q_batt_set` | `Option<f64>` | 电池无功设定值（kVar） | -1000 ~ +1000 |
+| `q_batt_set` | `Option<f64>` | [LEGACY v2.4~v2.6] 无功由实时控制模块闭环调节 | - |
 | `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 | 各相独立设置 |
 
 ### 5.3 计划策略（Phase 2+）
@@ -456,8 +442,8 @@ pub fn validate_sync(&self, cmd: &ControlCommand) -> ValidationResult {
         return ValidationResult::valid();
     }
 
-    // 3. 无 p_batt_set 时默认通过
-    let p_batt = match cmd.p_batt_set {
+    // 3. 无 p_ref 时默认通过（v2.7+ 双参数模式）
+    let p_ref = match cmd.p_ref {
         Some(p) => p,
         None => return ValidationResult::valid(),
     };
@@ -638,8 +624,9 @@ pub trait FallbackStrategy: Send + Sync {
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID（1-削峰填谷, 2-需量控制, 3-防逆流）
     pub cmd_type: CommandType,                // 命令类型
-    pub p_batt_set: Option<f64>,             // 电池有功设定 (kW)
-    pub q_batt_set: Option<f64>,             // 电池无功设定 (kVar) [预留]
+    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，v2.7+
+    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，v2.7+
+    pub q_batt_set: Option<f64>,             // [LEGACY] 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级（0-3）
@@ -754,7 +741,7 @@ pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput,
 pub use config::{PeakShavingConfig, DemandControlConfig, AntiReverseConfig};
 pub use errors::StrategyError;
 pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
-pub use mupc_ai_engine::{ModelManager, ModelStatus, LstmModel, RLModel, SystemState, ActionOutput, LstmInput, LstmOutput};
+pub use mupc_ai_engine::{ModelManager, FusedSystemState, ActionOutput, ModelStatus, RobustnessManager, AnomalyType};
 ```
 
 ---
@@ -884,7 +871,7 @@ fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power:
 | Phase 2+ | 三相不平衡补偿 | 分相无功补偿 | 规划中 |
 | Phase 2+ | 运行时配置热加载 | 配置修改无需重启 | 规划中 |
 | Phase 2+ | 消息总线扩展（AMQP/MQTT） | 支持更多消费者 | 规划中 |
-| Phase 2+ | ControlCommand 扩展 | `q_batt_set`、`phase_compensation` 字段使用 | 规划中 |
+| — | Q 控制 | 无功由实时控制模块闭环调节（v2.4+），ControlCommand 中 q_batt_set 为 LEGACY | 已关闭 |
 
 ---
 
@@ -940,3 +927,98 @@ tokio-test = "0.4"
 | 2 | 版本号更新 | 文档头部 | v1.0 → v1.1 |
 
 **修订依据：** 农网台区新规格落地：变压器 200kVA、光伏 150kW、储能 50kW/100kWh、居民负荷 60kW、农业冲击负荷最高 120kW。代码默认值已同步更新。
+
+---
+
+## 15. Phase 3A 实现笔记
+
+> 以下内容提取自 Phase 3A 实施计划（`2026-05-27-MUPC-Phase3A-实施计划.md`），为前述章节未覆盖的实现级细节。
+
+### 15.1 高频遥测 Ring Buffer
+
+Phase 3A 在 `HighFrequencyTelemetryImpl` 中使用 `VecDeque` 实现环形缓冲区，容量 60 条记录（对应 1Hz 上报下 60 秒窗口），通过 `Arc<Mutex<VecDeque<TelemetryPoint>>>` 共享：
+
+```rust
+fn push_to_buffer(&self, point: TelemetryPoint) {
+    let mut buffer = self.buffer.lock().unwrap();
+    if buffer.len() >= 60 {
+        buffer.pop_front(); // Ring Buffer: 移除最旧的
+    }
+    buffer.push_back(point);
+}
+```
+
+### 15.2 TelemetryPoint 结构体
+
+`HighFrequencyTelemetryImpl` 内部使用 7 字段遥测点，通过 `get_current_value(&self, point_name: &str) -> Option<f64>` 按名称查询当前值：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `battery_soc` | `f64` | 电池 SOC |
+| `battery_power` | `f64` | 电池功率 (kW) |
+| `pv_output` | `f64` | 光伏出力 (kW) |
+| `load_power` | `f64` | 负荷功率 (kW) |
+| `grid_power` | `f64` | 电网功率 (kW) |
+| `transformer_load` | `f64` | 变压器负载率 |
+
+### 15.3 Timestamp 到小时的转换
+
+削峰填谷策略中，从 Unix 时间戳提取小时（u64 截断到当日秒）：
+
+```rust
+let hour = (data.timestamp % 86400) / 3600;
+```
+
+### 15.4 防逆流策略的可变状态
+
+`AntiReverseStrategy::evaluate_sync` 需要 `&mut self`，因其内部维护 `pv_limit_count: u8`，每次逆流且电池满时递增（`pv_limit_count += 1`），电网恢复正常时清零。渐进式 PV 限功率公式：
+
+```rust
+pv_limit = pv_power * (self.pv_limit_count as f64 * 0.1).min(0.5);
+```
+
+每次限幅 10%，上限 50%。
+
+### 15.5 故障类型枚举 (FaultType)
+
+data-processing 模块定义的故障类型（与策略引擎决策相关）：
+
+| 枚举值 | SQL 标签 | 说明 |
+|--------|----------|------|
+| `BatteryOverTemp` | `BATTERY_OVER_TEMP` | 电池过温 |
+| `BatteryUnderSoc` | `BATTERY_UNDER_SOC` | 电池 SOC 过低 |
+| `GridOverload` | `GRID_OVERLOAD` | 电网过载（电压 > 420V） |
+| `GridReverse` | `GRID_REVERSE` | 电网逆流 |
+| `PvOutputLimit` | `PV_OUTPUT_LIMIT` | 光伏限功率 |
+| `Unknown` | `UNKNOWN` | 未知故障 |
+
+### 15.6 故障录波 SQLite Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS fault_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fault_type TEXT NOT NULL,
+    trigger_time INTEGER NOT NULL,
+    over_voltage REAL,
+    under_voltage REAL,
+    over_current REAL,
+    frequency_abnormal REAL,
+    waveform_path TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trigger_time ON fault_records(trigger_time);
+```
+
+故障记录保留 30 天，支持按时间范围查询（`query_sync(start, end)`）。
+
+### 15.7 TDD 实施方法论
+
+Phase 3A 的 10 个任务均采用统一流程：
+
+1. 写失败测试（验证模块/函数不存在 → 编译失败）
+2. 运行测试确认失败
+3. 编写实现代码
+4. 运行测试确认通过
+5. 提交（每任务独立 commit，14 条 commit message 带 `Co-Authored-By`）
+
+覆盖范围：data-processing（4 任务：错误类型、DataCollector、HighFrequencyTelemetry、FaultRecorder/SQLite）+ strategy-engine（6 任务：错误类型、削峰填谷、需量控制、防逆流、AiValidator、模块导出），共 13 个文件、10 个单元测试。

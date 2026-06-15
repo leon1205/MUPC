@@ -60,10 +60,13 @@ mupc/
 ## 开发状态
 
 - **Phase 1**: 核心架构完成
+- **Phase 2A**: 南向通信（RS485/HPLC）核心架构已完成，剩余 4 个单元测试待修复
+- **Phase 2B**: MQTT over TLS 已完成；SM2/SM4 国密部分实现（SM3/SM4 CBC 真国密，SM2 签名/SM4 GCM 待 gmsm 0.14）
 - **Phase 3C**: AI 优化引擎已完成（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）
 - **Phase 3C 补充**: 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验）
-- **Phase 2+**: IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密（规划中）
-- 技术债清单见 `docs/technical-debt.md`
+- **v2.14**: SafetyOverride 奖励函数重构、FusedSystemState 扩展至 78 维（统一版 PRD 已发布）
+- **Phase 2+**: IEC 61850-7-420（libIEC61850 FFI 待接入）、OTA 固件升级（A/B 分区待实现）、安全启动（硬件信任根待适配）
+- 技术债清单见 `docs/technical-debt.md`（v2.0，含 2026-06-15 文档-代码一致性审计结果）
 
 ## 开发命令
 
@@ -243,7 +246,7 @@ async fn handler(State(state): State<Arc<AppState>>) -> ...
 
 **AI 端点：** 27 个 handler，22 个接入真实数据源，5 个保持占位（predictions×3、weights×2，因上游 AiIntegrator 缺少对应 API）。
 
-**认证：** `RequireRole` 提取器（`X-Session-Id` 头）已接入 `post_rollback` 和 `delete_ab_test`。
+**认证：** `RequireRole` 提取器（`X-Session-Id` 头）已接入 `post_rollback` 和 `delete_ab_test`。⚠️ 当前为占位实现（`login()` 硬编码 `role: "operator"`，`RequireRole` 始终返回 `Role::Admin`），完整的 RBAC 鉴权中间件为 Phase 2+ 待实现（见技术债 U-01）。
 
 ## 已知测试失败
 
@@ -286,16 +289,20 @@ async fn handler(State(state): State<Arc<AppState>>) -> ...
 
 ## 技术债
 
-Phase 1/3C 已完成的技术债更新（记录于 `docs/technical-debt.md`）：
+完整技术债清单见 [`docs/technical-debt.md`](docs/technical-debt.md)（v2.0，2026-06-15 更新）：
 
-
-| Phase       | 内容                                                             | 状态    |
-| ----------- | ---------------------------------------------------------------- | ------- |
-| Phase 1     | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
-| Phase 3C    | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）     | ✅ 完成 |
-| Phase 3C 补充 | 跨项目动态配置系统（YAML 配置加载、分层加载、版本指纹校验）    | ✅ 完成 |
-| Phase 2+    | IEC 61850-7-420、MQTT over TLS、SM2/SM4 国密                     | 规划中  |
-| Phase 2+    | 南向通信（RS485/HPLC）、OTA 升级、安全启动                       | 规划中  |
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| Phase 1 | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
+| Phase 2A | 南向通信（RS485/HPLC）核心架构 | ✅ 基本完成（4 个测试待修） |
+| Phase 2B | MQTT over TLS | ✅ 完成 |
+| Phase 2B | SM2/SM4 国密（SM3/SM4 CBC 真国密；SM2签名/SM4 GCM/SM3 HKDF 待 gmsm 0.14） | ⚠️ 部分实现 |
+| Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理） | ✅ 完成 |
+| Phase 3C 补充 | 跨项目动态配置系统 v2.6 | ✅ 完成 |
+| v2.14 | SafetyOverride 奖励函数重构、FusedSystemState 78维 | ✅ 完成 |
+| Phase 2+ | IEC 61850-7-420（libIEC61850 FFI 待接入） | ⚠️ 骨架就位 |
+| Phase 2+ | OTA 固件升级（A/B 分区切换待实现）、安全启动（存根） | ⚠️ 模型OTA完成 |
+| Phase 2+ | WiFi/NearLink/BLE 驱动、RBAC 鉴权 | 📋 规划中 |
 
 ## 配置文件
 

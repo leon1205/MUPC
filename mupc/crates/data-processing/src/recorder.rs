@@ -146,4 +146,22 @@ pub trait FaultRecorder: Send + Sync {
     /// 导出 CSV 格式
     async fn export_csv(&self, event_id: i64, output_dir: &Path)
         -> Result<ExportResult, MupcError>;
+
+    /// 更新触发配置
+    async fn update_trigger_config(&self, _config: serde_json::Value) -> Result<(), MupcError> {
+        Err(MupcError::new(
+            mupc_common::ErrorCode::Unknown,
+            "update_trigger_config not supported",
+            "data-processing",
+        ))
+    }
+
+    /// 获取当前触发配置
+    async fn get_trigger_config(&self) -> Result<serde_json::Value, MupcError> {
+        Err(MupcError::new(
+            mupc_common::ErrorCode::Unknown,
+            "get_trigger_config not supported",
+            "data-processing",
+        ))
+    }
 }

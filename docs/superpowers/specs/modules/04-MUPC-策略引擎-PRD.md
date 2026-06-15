@@ -110,18 +110,18 @@ AI 引擎失效:
 |------|-----|------|
 | cmd_id | 1 | 削峰填谷策略固定 ID |
 | cmd_type | ChargeDischarge / PowerRegulation | 充放电控制 |
-| p_batt_set | ±15~30 kW | 电池有功设定 |
+| p_ref | ±15~30 kW | 电池有功基准点（v2.7+ 双参数模式） |
 | priority | 1 | 默认优先级 |
 
 ### 2.6 验收标准
 
 | ID | 标准 | 验证方法 |
 |----|------|----------|
-| PS-01 | 峰时段（如 10:00）且 SOC > 80% 时，应放电（p_batt = -20kW） | 单元测试 |
-| PS-02 | 谷时段（如 02:00）且 SOC < 20% 时，应充电（p_batt = 20kW） | 单元测试 |
+| PS-01 | 峰时段（如 10:00）且 SOC > 80% 时，应放电（p_ref = -20kW） | 单元测试 |
+| PS-02 | 谷时段（如 02:00）且 SOC < 20% 时，应充电（p_ref = 20kW） | 单元测试 |
 | PS-03 | 谷时段 + PV 充足时，按 PV 功率充电（min(PV, 30kW)） | 单元测试 |
-| PS-04 | 峰时段、SOC 正常时，应放电（p_batt = -25kW） | 单元测试 |
-| PS-05 | 非峰非谷的平时段，应待机（p_batt = 0，PowerRegulation） | 单元测试 |
+| PS-04 | 峰时段、SOC 正常时，应放电（p_ref = -25kW） | 单元测试 |
+| PS-05 | 非峰非谷的平时段，应待机（p_ref = 0） | 单元测试 |
 | PS-06 | SOC 低于下限（20%）时，强制充电 | 单元测试 |
 | PS-07 | SOC 高于上限（80%）时，强制放电 | 单元测试 |
 | PS-08 | 跨天谷时段（23:00-07:00）检测正确 | 单元测试 |
@@ -177,7 +177,7 @@ Level 3 (负载率 > 95%):
 |------|-----|------|
 | cmd_id | 2 | 需量控制策略固定 ID |
 | cmd_type | PowerRegulation / SwitchControl | Level 1 为功率调节，Level ≥ 2 为开关控制 |
-| p_batt_set | -10/-20/-30 kW | 按等级决定放电功率 |
+| p_ref | -10/-20/-30 kW | 有功基准点，按等级决定放电功率 |
 | load_shedding | 0/10/20 kW | Level ≥ 2 时执行负荷切除 |
 | priority | 0~3 | 对应策略等级 |
 
@@ -243,7 +243,7 @@ Step 3 - PV 已限制且仍逆流：
 |------|-----|------|
 | cmd_id | 3 | 防逆流策略固定 ID |
 | cmd_type | PowerRegulation | 功率调节 |
-| p_batt_set | 正数（充电）/ 0 | 电池充电功率 |
+| p_ref | 正数（充电）/ 0 | 有功基准点，消纳逆流功率 |
 | pv_limit | 0.0~0.5 | PV 限功率比例，无限制时为 None |
 | priority | 2 | 默认优先级 |
 
@@ -271,7 +271,7 @@ ControlCommand 中已包含以下字段，供无功补偿策略使用：
 
 | 字段 | 类型 | 用途 |
 |------|------|------|
-| `q_batt_set` | `Option<f64>` | 电池无功设定值（kVar），范围 -1000 ~ +1000 |
+| `q_batt_set` | `Option<f64>` | [LEGACY v2.4~v2.6] 无功由实时控制模块闭环调节，AI/策略引擎不再输出无功指令 |
 | `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 |
 
 ### 5.3 计划策略（Phase 2+）
@@ -510,7 +510,7 @@ strategy-engine
   ├── core (message_bus)
   ├── data-processing (DataPackage 消费)
   ├── common (MupcError)
-  └── mupc-ai-engine (ModelManager, SystemState, ActionOutput)
+  └── mupc-ai-engine (ModelManager, FusedSystemState, ActionOutput)
 ```
 
 ---
@@ -637,8 +637,9 @@ strategy-engine
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID
     pub cmd_type: CommandType,                // 命令类型
-    pub p_batt_set: Option<f64>,             // 电池有功设定 (kW)
-    pub q_batt_set: Option<f64>,             // 电池无功设定 (kVar)
+    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，v2.7+ 双参数模式
+    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，v2.7+
+    #[deprecated] pub q_batt_set: Option<f64>, // [LEGACY] 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级

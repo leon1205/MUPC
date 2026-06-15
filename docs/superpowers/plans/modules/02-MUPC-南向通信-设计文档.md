@@ -4,6 +4,8 @@
 |------|------|------|------|
 | v1.0 | 2026-05-29 | 架构师 | 定稿 |
 
+> **文档定位：** 本文档记录实现级设计决策。需求级内容（功能描述、验收标准、性能指标）请参考 [02-MUPC-南向通信-PRD](../specs/modules/02-MUPC-南向通信-PRD.md)。
+
 ## 目录
 
 1. [模块架构](#1-模块架构)
@@ -1215,35 +1217,9 @@ tracing = { workspace = true }
 | `libloading` 在 Windows 平台兼容性 | 低 | 测试阶段覆盖 Windows 环境 |
 | 多线程竞争串口访问 | 低 | `StdMutex<()>` 保证事务原子性 |
 
-### 9.4 验收标准汇总
+### 9.4 验收标准
 
-**功能验收：**
-
-| ID | 功能点 | 验收条件 |
-|----|--------|----------|
-| F01 | SouthDevice trait | 所有南向设备统一实现 SouthDevice |
-| F02 | 设备注册表 | 支持注册/注销/按类型查询/列出所有设备 |
-| F03 | RS485 Modbus 通信 | 编码/解码正确，CRC 校验通过 |
-| F04 | RS485 TTU 通信 | 遵循电力行业规约帧格式 |
-| F05 | RS485 逆变器通信 | 支持厂商私有协议帧格式 |
-| F06 | RS485 充电桩通信 | 支持 GB/T 27930 帧格式 |
-| F07 | RS485 半双工控制 | DE/RE GPIO 方向切换正确，事务原子性 |
-| F08 | MockHplcDriver | 支持模拟数据注入 |
-| F09 | HplcDriver trait | 定义完整接口 |
-| F10 | 插件加载 | 支持动态加载 .so/.dll |
-| F11 | 插件生命周期 | Load -> Init -> Start -> Stop -> Unload |
-| F12 | FFI 导出 | 必须导出 create_plugin 和 plugin_meta |
-
-**质量验收：**
-
-| ID | 质量点 | 验收条件 |
-|----|--------|----------|
-| Q01 | 编译通过 | `cargo build --release` 无警告 |
-| Q02 | Clippy | `cargo clippy` 无 Error |
-| Q03 | 单元测试 | `cargo test` 覆盖率 >= 80% |
-| Q04 | 错误处理 | 所有错误实现 `std::error::Error` |
-| Q05 | 无新增 unsafe | 除 FFI 导出外无新增不安全代码 |
-| Q06 | rustdoc | 公共 API 有 rustdoc 注释 |
+> 验收标准（功能验收、质量验收）详见 [02-MUPC-南向通信-PRD](../specs/modules/02-MUPC-南向通信-PRD.md) 第 7 章。
 
 ---
 
@@ -1278,3 +1254,47 @@ tracing = { workspace = true }
 
 **文档状态**: 定稿
 **维护者**: MUPC Team
+
+---
+
+## 10. Phase 2A 实现笔记
+
+> **来源**: `docs/superpowers/reports/2026-05-27-MUPC-Phase2A-南向通信-实施计划.md`（已归档）
+> **状态**: 核心实现已完成，4 个单元测试待修复
+> **团队**: 团队A（2人）
+
+### 10.1 实施任务分解
+
+所有 Task 采用测试优先（TDD）策略：先编写测试，再实现功能。
+
+| Task | 内容 | 提交信息 |
+|------|------|----------|
+| Task 1 | device-trait 设备抽象层（types.rs -> errors.rs -> device.rs -> registry.rs -> message_bus.rs -> lib.rs） | `feat(device-trait): 实现设备抽象层 trait 定义` |
+| Task 2 | rs485-plugin RS485 驱动（配置解析 -> 设备驱动 -> 协议解析） | `feat(rs485-plugin): 实现 RS485 驱动插件` |
+| Task 3 | plugin-loader 动态插件加载（加载器 -> 生命周期管理） | `feat(plugin-loader): 实现动态插件加载器` |
+| Task 4 | 集成与测试（workspace 注册 + 集成测试 + clippy） | `feat(integration): 集成南向通信模块` |
+
+### 10.2 技术栈
+
+| 组件 | 技术选型 |
+|------|----------|
+| 插件系统 | `libloading` + trait object |
+| 串口通信 | `serial` crate |
+| 序列化 | `serde` + `serde_json` |
+| 错误处理 | `thiserror` |
+
+### 10.3 里程碑
+
+| 里程碑 | 内容 | 交付物 |
+|--------|------|--------|
+| M2.1 | 核心 trait 定义 | device-trait crate |
+| M2.2 | RS485 插件 | rs485-plugin crate |
+| M2.3 | 插件加载器 | plugin-loader crate |
+| M2.4 | 集成测试 | 完整南向通信模块 |
+
+### 10.4 实施要点
+
+- 串口操作使用 Unix `libc` termios 直接操作，避免第三方 crate 依赖
+- 事务原子性通过 `StdMutex<()>` 全局锁保证，跨异步任务保证设备独占访问
+- 插件通过 `libloading` 加载 `.so/.dll`，FFI 导出 `create_plugin()` + `plugin_meta()`
+- 依赖顺序：device-trait 先行，plugin-loader 和 rs485-plugin 并行依赖 device-trait

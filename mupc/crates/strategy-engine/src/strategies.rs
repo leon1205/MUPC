@@ -22,7 +22,12 @@ pub struct ControlCommand {
     /// 命令类型
     pub cmd_type: CommandType,
     /// 电池有功设定 (kW)
+    #[deprecated(since = "v2.0", note = "使用 p_ref 替代（双参数模式）")]
     pub p_batt_set: Option<f64>,
+    /// 有功功率基准点 (kW)，负值=充电，正值=放电
+    pub p_ref: Option<f64>,
+    /// 电压-有功下垂系数 (kW/V)
+    pub k_droop: Option<f64>,
     /// 电池无功设定 (kVar)
     pub q_batt_set: Option<f64>,
     /// 分相补偿系数
