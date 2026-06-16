@@ -621,7 +621,7 @@ Web UI → 二次确认对话框 → PUT /api/ai/weights
 
 | 模式名称 | 对应枚举 | 适用场景 |
 |----------|---------|----------|
-| 农网灌溉模式 | `AgriculturalIrrigation` | 农网台区灌溉季节 |
+| 农网灌溉模式 | `SeasonalLoadManagement` | 农网台区灌溉季节 |
 | 自主套利模式 | `CommercialArbitrage` | 工商业储能峰谷套利 |
 | 需量控制模式 | `DemandControl` | 变压器容量受限场景 |
 | 虚拟电厂模式 | `VirtualPowerPlant` | 参与 VPP 聚合调度 |
@@ -766,7 +766,7 @@ v2.0 使用单字节文件存储当前模式（简化为 `RunningMode` 枚举值
 // ModeSelector 内部处理持久化，web-api 不直接读写
 // 持久化文件: /var/lib/mupc/current_mode
 // 内容: "1"~"5" (RunningMode 枚举值)
-// 文件损坏时回退至 AgriculturalIrrigation (MODE-01)
+// 文件损坏时回退至 SeasonalLoadManagement (MODE-01)
 ```
 
 **与 v1.1 的区别：**
@@ -1331,13 +1331,13 @@ range: Option<String>    // 快捷范围："1h" | "6h" | "24h" | "7d"，优先�
 }
 ```
 
-**mode 可选值：** `AgriculturalIrrigation`, `CommercialArbitrage`, `DemandControl`, `VirtualPowerPlant`, `UltraGreen`
+**mode 可选值：** `SeasonalLoadManagement`, `CommercialArbitrage`, `DemandControl`, `VirtualPowerPlant`, `UltraGreen`
 
 **成功响应 200：**
 ```json
 {
   "status": "ok",
-  "previous_mode": "AgriculturalIrrigation",
+  "previous_mode": "SeasonalLoadManagement",
   "current_mode": "CommercialArbitrage",
   "display_name": "自主套利模式",
   "switched_at": "2026-05-29T10:02:00Z"
@@ -2130,7 +2130,7 @@ A/B 测试流程中的边界条件处理和异常恢复机制。
 |--------|------|
 | 同步 v2.0 预设运行场景 | 全局替换：自动识别→预设选择、SceneClassifier→ModeSelector |
 | 删除 `/api/ai/mode/auto` | 无自动识别功能，删除恢复端点（API 表 + 6.5.14 节 + routes 清单） |
-| 更新模式切换 API | `/api/ai/mode` → `/api/v1/mode`，mode 值重命名（agriculture→AgriculturalIrrigation 等） |
+| 更新模式切换 API | `/api/ai/mode` → `/api/v1/mode`，mode 值重命名（agriculture→SeasonalLoadManagement 等） |
 | 新增模式查询 API | `GET /api/v1/mode` + `GET /api/v1/mode/list` |
 | 移除"本地兜底模式" | 5 种预设场景（非 6 种），AI 降级由系统内部处理 |
 | 移除"置信度"概念 | 3.6 + 6.5.8 + 6.5.10: scene_mode → running_mode，删除 confidence 字段 |

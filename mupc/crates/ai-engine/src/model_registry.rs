@@ -378,7 +378,6 @@ impl ModelRegistry {
         let mut map = HashMap::new();
         for (key, entry) in mf.models {
             let mode = match key.as_str() {
-                // MODE-01: 兼容旧 manifest key
                 "SeasonalLoadManagement" | "AgriculturalIrrigation" => {
                     RunningMode::SeasonalLoadManagement
                 }

@@ -825,7 +825,7 @@ green_energy_ratio = null
 ```toml
 # /etc/mupc/ai.toml (v2.0)
 [mode]
-default_mode = "AgriculturalIrrigation"   # 5 种预设场景之一
+default_mode = "SeasonalLoadManagement"   # 5 种预设场景之一
 persist_path = "/var/lib/mupc/current_mode"  # 持久化文件路径
 ```
 

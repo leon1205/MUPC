@@ -1705,7 +1705,7 @@ impl SceneWeights {
     /// 根据运行场景返回对应的权重数组
     pub fn lookup(&self, mode: RunningMode) -> &[f64] {
         match mode {
-            RunningMode::AgriculturalIrrigation => &self.agricultural_irrigation[..3],
+            RunningMode::SeasonalLoadManagement => &self.agricultural_irrigation[..3],
             RunningMode::CommercialArbitrage => &self.commercial_arbitrage[..2],
             RunningMode::DemandControl => &self.demand_control[..2],
             RunningMode::VirtualPowerPlant => &self.virtual_power_plant[..3],
@@ -3167,7 +3167,7 @@ data_source_timeout_secs = 10
 enable_health_monitoring = true
 
 [mode]
-default_mode = \"AgriculturalIrrigation\"
+default_mode = \"SeasonalLoadManagement\"
 persist_path = \"/var/lib/mupc/current_mode\"
 
 [action_constraint]
@@ -3199,7 +3199,7 @@ enable_fallback_to_cpu = true
 | RlConfig | model_path, algorithm, quantization | /etc/mupc/models/rl.rknn, MADDPG, INT8 |
 | OnlineUpdateConfig | enabled, batch_size, learning_rate | false, 32, 0.001 |
 | FusionConfig | fusion_period_secs, data_source_timeout_secs, enable_health_monitoring | 1, 10, true |
-| ModeConfig | default_mode, persist_path | \"AgriculturalIrrigation\", \"/var/lib/mupc/current_mode\" |
+| ModeConfig | default_mode, persist_path | \"SeasonalLoadManagement\", \"/var/lib/mupc/current_mode\" |
 | ActionConstraintConfig | p_batt_ramp_limit_kw, q_batt_ramp_limit_kvar, max_apparent_power_kva, pv_limit_min | 50.0, 30.0, 500.0, 0.1 |
 | SceneWeights | agricultural_irrigation[3], commercial_arbitrage[2], demand_control[2], virtual_power_plant[3], ultra_green[2] | 见上表默认值 |
 | NpuConfig | temperature_limit_c, throttle_factor, enable_fallback_to_cpu | 85.0, 0.5, true |

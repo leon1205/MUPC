@@ -35,7 +35,7 @@
 ```
 mupc/
 ├── crates/
-│   ├── ota-update/              # [改造] 从纯模型OTA扩展为 update-engine（固件+模型双模式OTA）
+│   ├── ota-update/              # [改造] 扩展为固件+模型双模式OTA
 │   └── system-monitor/          # [新增] 系统可靠性守护进程（五维监控+MTBF+自愈）
 ```
 
@@ -63,7 +63,7 @@ mupc/
               │ 集成
               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               update-engine (ota-update 改造)                 │
+│               ota-update (固件+模型双模式OTA)                  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐  │
 │  │ 固件升级  │ │ 模型OTA  │ │ A/B分区  │ │  升级状态机    │  │
 │  │ 状态机    │ │(保留原有) │ │ 管理器   │ │  验证回滚      │  │
@@ -87,7 +87,7 @@ mupc/
 ### 1.3 模块依赖关系
 
 ```
-update-engine (改造后)
+ota-update (改造后)
 ├── common (错误类型、日志)
 ├── gateway (北向通信、接收指令、上报状态)
 ├── strategy-engine (模型加载通知)
@@ -107,7 +107,7 @@ system-monitor (新增)
 ```
 OTA 服务器                               MUPC 设备
 ┌──────────┐   HTTPS (RESTful API)     ┌──────────────────┐
-│ 固件包    │ ◄────────────────────────► │ update-engine    │
+│ 固件包    │ ◄────────────────────────► │ ota-update       │
 │ 管理      │   版本查询/下载/状态上报    │ 下载→验证→写入   │
 │ 灰度发布  │                           │ A/B 分区切换     │
 │ 差分包    │                           └──────┬───────────┘
@@ -140,7 +140,7 @@ OTA 服务器                               MUPC 设备
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    update-engine 模型 OTA 子系统                    │
+│                    ota-update 模型 OTA 子系统                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐            │
 │  │ Scheduler   │  │  Manager    │  │  Config     │            │
@@ -617,7 +617,7 @@ U-Boot 环境变量 `boot_partition` 控制从哪个分区启动：
 
 ```
 升级切换流程:
-1. update-engine 写入 system-b 完成
+1. ota-update 写入 system-b 完成
 2. 计算 system-b 全分区 SHA-256 → 写入 /ota/b_checksum
 3. 写入 env: boot_partition = "b" (带 fsync)
 4. 写入 env: ota_status = "updated" (带 fsync)
@@ -1759,10 +1759,10 @@ pub enum MtbfStatus {
 
 ## 9. 文件结构
 
-### 9.1 update-engine crate 文件结构 （改造 ota-update）
+### 9.1 ota-update crate 文件结构（改造后）
 
 ```
-update-engine/
+ota-update/
 ├── Cargo.toml
 └── src/
     ├── lib.rs                          # 模块导出
@@ -1859,11 +1859,11 @@ system-monitor/
 
 ### 9.3 Cargo.toml
 
-#### update-engine/Cargo.toml
+#### ota-update/Cargo.toml
 
 ```toml
 [package]
-name = "mupc-update-engine"
+name = "mupc-ota-update"
 version = "0.2.0"
 edition = "2021"
 description = "MUPC firmware OTA and model OTA update engine"
@@ -2002,7 +2002,7 @@ db_path = "/var/lib/mupc/monitor/timeseries.db"
 
 | 模块 | 源文件数 | 预估代码行 (Rust) |
 |------|---------|-----------------|
-| **update-engine** (改造) | | |
+| **ota-update** (改造) | | |
 | 核心类型/配置/错误 | 3 | ~500 |
 | 固件升级 (分区/bootloader/包处理) | 4 | ~1,200 |
 | 下载 (增强断点续传/限速) | 2 | ~400 |
@@ -2038,7 +2038,7 @@ db_path = "/var/lib/mupc/monitor/timeseries.db"
 | ADR-004 | 监控模块 | 独立 crate vs 合并到 core | **独立 crate** | 职责单一，编译隔离 |
 | ADR-005 | 状态机 | 统一 vs 分离（固件/模型） | **分离** | 状态差异大（模型 9 状态 vs 固件 17 状态），分离降低复杂度 |
 | ADR-006 | cgroup 版本 | v1 vs v2 | **v2** | openEuler 默认 cgroup v2 |
-| ADR-007 | crate 命名 | ota-update 保留 vs 改名为 update-engine | **改造为 update-engine** | 功能从纯模型 OTA 扩展为固件+模型双模式 |
+| ADR-007 | crate 命名 | ota-update 保留 vs 改名为 update-engine | **保留 ota-update** | 功能已扩展为固件+模型双模式，保持现有命名以减少破坏性变更 |
 | ADR-008 | 签名算法 | SM2 vs Ed25519 | **模型 OTA: 双选；固件 OTA: SM2-with-SM3** | 模型 OTA 兼容两种算法；固件 OTA 强制国密 |
 | ADR-009 | OTA 服务器接口 | RESTful vs gRPC | **RESTful** | 与现有北向网关（IEC 104 / MQTT）更易集成，调试方便 |
 | ADR-010 | 进程监控方法 | pid 文件 + /proc vs systemd 通知 | **pid 文件 + /proc** | 不依赖 systemd，便于容器化部署 |
@@ -2114,4 +2114,4 @@ db_path = "/var/lib/mupc/monitor/timeseries.db"
 
 **文档版本**：v1.0（合并稿）
 **最后更新**：2026-05-29
-**核心模块数**：2 个 crate（update-engine 改造 + system-monitor 新增），约 45 个源文件，预估 ~10,800 行 Rust
+**核心模块数**：2 个 crate（ota-update 改造 + system-monitor 新增），约 45 个源文件，预估 ~10,800 行 Rust

@@ -187,12 +187,12 @@
 | U-06 | 09 运维通信 | **P0** | WiFi/NearLink/BLE 全部 NoOp 驱动，ECDH 为 XOR 占位 | 需 Hi2821 硬件 + hostapd/wpa_supplicant 集成 |
 | U-07 | 07 OTA | **P1** | 固件 OTA — A/B 分区 `switch_to_standby()` 仅打印日志，SM2 验签返回 `SignatureInvalid` | 需 bootloader 环境变量写入权限 + SM2 验签就绪 |
 | U-08 | 07 监控 | **P1** | cgroup v2 管理、网络 I/O 监控、硬件看门狗、OOM score_adj 均未实现 | 需内核配置验证 + 硬件看门狗驱动 |
-| U-09 | 03 存储 | **P1** | SQLite schema 与 PRD 不符 — 缺 alarm_log/event_log/device_nameplate/maintenance_record 表，遥测无按月分区 | 需评估实际需求后设计迁移脚本 |
-| U-10 | 03 数据 | **P1** | `TriggerConfig` 仅单个 `enabled: bool`，设计文档要求 7 个独立启用标志 | 需重构触发条件配置结构 |
-| U-11 | 06 安全 | **P1** | `CertManager` API 与设计文档完全不同 — 设计文档的 import_cert/import_crl/reload/list_certs 未实现 | 需对齐 API 设计 |
-| U-12 | 08 Web | **P1** | SSE 基于 query 的过滤 (`types=`) 未实现 | 需扩展 SSE handler 参数解析 |
-| U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | 需统一命名（建议代码跟随 PRD 修改） |
-| U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | 低优先级，当前注释保留兼容性 |
+| U-09 | 03 存储 | **P1** | SQLite schema 与 PRD 不符 — 缺 alarm_log/event_log/device_nameplate/maintenance_record 表，遥测无按月分区 | ✅ 已修复 — 新增 5 张表（含索引）+ 遥测按月分区函数 |
+| U-10 | 03 数据 | **P1** | `TriggerConfig` 仅单个 `enabled: bool`，设计文档要求 7 个独立启用标志 | ✅ 已修复 — 新增 `TriggerEnableMask`（7 位独立使能） |
+| U-11 | 06 安全 | **P1** | `CertManager` API 与设计文档对齐 — 缺 import_cert/import_crl/reload/list_certs | ✅ 已修复 — 新增 4 个方法 + CertType 枚举 |
+| U-12 | 08 Web | **P1** | SSE 基于 query 的过滤 (`types=`) 未实现 | ✅ 已修复 — sse_handler 支持 ?types= 参数过滤 |
+| U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | ✅ 已修复 — 统一采用 `SeasonalLoadManagement`（代码+文档） |
+| U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | ✅ 已修复 — 设计文档统一为 `ota-update`（ADR-007 决议更新） |
 
 ---
 
@@ -205,9 +205,9 @@
 | 优化建议 (Phase 1) | 3 | 2 | 1 | 🔄 1 项待优化 |
 | 审计发现-已修复 (本轮) | 10 | 10 | 0 | ✅ 全部修复 |
 | 审计发现-未修复 (P0) | 6 | 0 | 6 | 🔴 待规划 |
-| 审计发现-未修复 (P1) | 6 | 0 | 6 | 🟡 待排期 |
-| 审计发现-未修复 (P2) | 2 | 0 | 2 | ⚪ 可延后 |
-| **总计** | **33** | **20** | **13** | |
+| 审计发现-未修复 (P1) | 6 | 4 | 2 | 🟡 待排期 |
+| 审计发现-未修复 (P2) | 2 | 2 | 0 | ✅ 全部修复 |
+| **总计** | **33** | **26** | **7** | |
 
 ---
 
@@ -219,7 +219,6 @@
 |------|--------|----------|
 | U-01 RBAC 鉴权中间件 | 2天 | 需确认角色模型和权限矩阵 |
 | U-02 sqlx/rusqlite 双库统一 | 3天 | 需评估 sqlx 功能覆盖度 |
-| U-09 SQLite schema 对齐 | 2天 | 需确认实际需求 |
 
 ### 8.2 中期修复（P1 — 本月）
 
@@ -227,9 +226,6 @@
 |------|----------|------|
 | U-07 固件 OTA 分区切换 + SM2 验签 | 3天 | 需 SM2 签名就绪 |
 | U-08 系统监控完善 | 2天 | 需硬件看门狗驱动 |
-| U-10 TriggerConfig 重构 | 1天 | — |
-| U-11 CertManager API 对齐 | 1天 | — |
-| U-12 SSE query 过滤 | 0.5天 | — |
 
 ### 8.3 长期修复（外部依赖）
 
@@ -239,8 +235,6 @@
 | U-04 rustls CryptoProvider | 3天 | 依赖 U-03 |
 | U-05 安全启动信任链 | 5天 | RK3588 OTP/eFuse 驱动 |
 | U-06 WiFi/NearLink/BLE | 10天 | Hi2821 硬件 + 内核驱动 |
-| U-13 RunningMode 命名 | 0.5天 | 确认序列化兼容性 |
-| U-14 crate 目录重命名 | 0.5天 | 更新所有引用路径 |
 
 ---
 

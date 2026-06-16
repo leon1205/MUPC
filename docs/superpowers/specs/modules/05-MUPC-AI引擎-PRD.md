@@ -348,7 +348,7 @@ pub struct SmoothSceneTransition {
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RunningMode {
-    AgriculturalIrrigation = 1,   // MODE-01
+    SeasonalLoadManagement = 1,   // MODE-01
     CommercialArbitrage = 2,      // MODE-02
     DemandControl = 3,            // MODE-03
     VirtualPowerPlant = 4,        // MODE-04

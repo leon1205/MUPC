@@ -168,7 +168,7 @@ pub struct ModeConfig {
 }
 
 fn default_factory_scene() -> String {
-    "AgriculturalIrrigation".to_string()
+    "SeasonalLoadManagement".to_string()
 }
 
 fn default_model_dir() -> String {
