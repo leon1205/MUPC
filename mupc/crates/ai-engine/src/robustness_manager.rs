@@ -92,11 +92,11 @@ impl RobustnessManager {
 
     /// 获取电池SOC过充应急动作
     ///
-    /// 注意：pv_limit = 0.0 停止所有光伏输入，用于防止电池过充。
-    /// 在实际部署中可根据电网条件调整此值。
+    /// v2.15 符号约定：p_ref > 0 = 放电。SOC 过满应强制放电以降低 SOC。
+    /// 注意：在实际部署中可根据电网条件调整放电功率。
     pub fn battery_soc_overfull_action(&self) -> ActionOutput {
         ActionOutput {
-            p_ref: -50.0, // 强制充电
+            p_ref: 50.0, // 强制放电（SOC 过满 → 向电网注入功率降低 SOC）
             k_droop: 10.0,
         }
     }
@@ -175,7 +175,7 @@ mod tests {
     fn test_battery_soc_overfull_action() {
         let rm = RobustnessManager::new();
         let action = rm.battery_soc_overfull_action();
-        assert_eq!(action.p_ref, -50.0); // 强制充电
+        assert_eq!(action.p_ref, 50.0); // v2.15: 强制放电（SOC 过满 → 向电网注入功率降低 SOC）
         // v2.15: pv_limit 已从 ActionOutput 移除，由策略引擎防逆流独立控制
     }
 

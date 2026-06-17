@@ -3,6 +3,12 @@
 //! 对 RL 模型输出的 ActionOutput 执行约束校验，
 //! 违反时自动 clamp 到安全边界并记录 WARN 日志。
 //!
+//! ## 符号约定（v2.15 统一声明）
+//!
+//! **p_ref > 0 = 放电（向电网注入功率）、p_ref < 0 = 充电（从电网吸收功率）。**
+//! 此约定与实时控制模块、MUPC-AI2 训练管线保持一致。
+//! k_droop >= 0，电压升高时增加放电，电压降低时减少放电（增加充电）。
+//!
 //! v2.4 分层控制架构说明：
 //! - q_batt_set 由实时控制模块根据电压闭环管理，不由 AI 控制
 //! - v2.4 模式下这两条规则被跳过，仅保留 ACT-01/04/05
@@ -183,9 +189,11 @@ impl ActionValidator {
         }
 
         // 最终值域 clamp（v2.5 使用 ActionSpaceConfig 中的参数）
+        // v2.15 符号约定：p_ref > 0 = 放电，p_ref < 0 = 充电
+        // 放电上限 = max_batt_discharge_power，充电下限 = -max_batt_charge_power
         validated.p_ref = validated.p_ref.clamp(
-            -action_space_config.max_batt_discharge_power,
-            action_space_config.max_batt_charge_power,
+            -action_space_config.max_batt_charge_power,
+            action_space_config.max_batt_discharge_power,
         );
         validated.k_droop = validated.k_droop.clamp(-300.0, 300.0);
         // v2.15: load_shedding/pv_limit/confidence clamp 已移除，这些字段不再属于 ActionOutput
@@ -380,16 +388,17 @@ mod tests {
     fn test_action_space_config_clamp_values() {
         let v = ActionValidator::new(ActionConstraintConfig::default());
         // 自定义配置：充电功率上限 30kW，放电功率上限 40kW
+        // v2.15 符号约定：p_ref > 0 = 放电，p_ref < 0 = 充电
         let mut cfg = ActionSpaceConfig::default_config();
         cfg.max_batt_charge_power = 30.0;
         cfg.max_batt_discharge_power = 40.0;
 
-        // p_ref = 100（充电）应被 clamp 到 30
+        // p_ref = 100（放电）应被 clamp 到放电上限 40
         let (a, _) = v.validate(&make_action(100.0, 0.0), None, false, &cfg);
-        assert!(a.p_ref <= 30.0);
+        assert!(a.p_ref <= 40.0);
 
-        // p_ref = -100（放电）应被 clamp 到 -40
+        // p_ref = -100（充电）应被 clamp 到充电下限 -30
         let (a, _) = v.validate(&make_action(-100.0, 0.0), None, false, &cfg);
-        assert!(a.p_ref >= -40.0);
+        assert!(a.p_ref >= -30.0);
     }
 }
