@@ -217,20 +217,19 @@ fn safety_override_penalty_impl(state: &FusedSystemState) -> f64 {
     let k_consecutive = 10.0;
     let min_sample_threshold = 10;
     let norm_divisor = 15.0;
+    // v2.15: 样本不足时使用固定中等惩罚（删除原 reason 差异化，因 D9 无 reason_code 字段）
+    let cold_start_penalty = -3.33_f64;
 
-    if state.safety_override_consecutive < min_sample_threshold {
-        if !state.safety_override_active {
-            return 0.0;
-        }
-        let raw: f64 = match state.safety_override_reason.as_deref().unwrap_or("unknown") {
-            "voltage_violation" => -50.0_f64,
-            "q_exhausted" => -30.0_f64,
-            "emergency" => -100.0_f64,
-            _ => -20.0_f64,
-        };
-        return (raw / norm_divisor).max(-1.0).min(0.0);
+    if !state.safety_override_active {
+        return 0.0;
     }
 
+    if state.safety_override_consecutive < min_sample_threshold {
+        // 样本不足：固定惩罚（v2.15：不再依赖 safety_override_reason）
+        return cold_start_penalty.max(-1.0).min(0.0);
+    }
+
+    // 样本充足：比例 + 连续次数惩罚，归一化至 [-1, 0]
     let ratio_penalty = -k_override * state.safety_override_ratio;
     let consecutive_penalty = -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
     ((ratio_penalty + consecutive_penalty) / norm_divisor).max(-1.0).min(0.0)

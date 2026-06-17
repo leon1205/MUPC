@@ -60,6 +60,11 @@ pub struct FusedSystemState {
     /// true = 实时模块正在覆盖 AI 有功指令
     pub safety_override_active: bool,
     /// 安全覆盖触发原因（仅在 active=true 时有效）
+    ///
+    /// **v2.15 状态：** 已废弃 — 奖励函数不再按 reason 差异化惩罚（D9 状态空间不含 reason_code）。
+    /// 保留字段是为了与 SafetyOverridePayload 帧格式（v2.10）兼容，字段值仍由 intercore 接收。
+    /// AI 引擎决策不再读取此字段；如需触发原因，请通过日志/审计通道查询。
+    #[deprecated(note = "v2.15 已废弃：D9 不含 reason_code，奖励函数不再按 reason 差异化")]
     pub safety_override_reason: Option<String>,
     /// 安全覆盖强制放电功率 (kW)（仅在 active=true 时有效）
     pub safety_override_p_ref: Option<f64>,
@@ -108,6 +113,7 @@ impl Default for FusedSystemState {
             time_period_encoding: [1.0, 0.0],                // 默认白天
             // v2.10 新增字段
             safety_override_active: false,
+            #[allow(deprecated)]
             safety_override_reason: None,
             safety_override_p_ref: None,
             // v2.14 新增字段
