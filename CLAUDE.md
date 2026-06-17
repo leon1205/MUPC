@@ -65,6 +65,7 @@ mupc/
 - **Phase 3C**: AI 优化引擎已完成（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理）
 - **Phase 3C 补充**: 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验）
 - **v2.14**: SafetyOverride 奖励函数重构、FusedSystemState 扩展至 78 维（统一版 PRD 已发布）
+- **v2.15**: 动作空间精简 5维→2维（p_ref + k_droop），load_shedding/pv_limit 下沉至策略引擎本地兜底
 - **Phase 2+**: IEC 61850-7-420（libIEC61850 FFI 待接入）、OTA 固件升级（A/B 分区待实现）、安全启动（硬件信任根待适配）
 - 技术债清单见 `docs/technical-debt.md`（v2.0，含 2026-06-15 文档-代码一致性审计结果）
 
@@ -300,6 +301,7 @@ async fn handler(State(state): State<Arc<AppState>>) -> ...
 | Phase 3C | AI 优化引擎（LSTM 预测、MADDPG/PPO 决策、RKNN Runtime 推理） | ✅ 完成 |
 | Phase 3C 补充 | 跨项目动态配置系统 v2.6 | ✅ 完成 |
 | v2.14 | SafetyOverride 奖励函数重构、FusedSystemState 78维 | ✅ 完成 |
+| v2.15 | 动作空间精简 5→2 维（p_ref + k_droop），load_shedding/pv_limit 下沉至策略引擎 | ✅ 完成 |
 | Phase 2+ | IEC 61850-7-420（libIEC61850 FFI 待接入） | ⚠️ 骨架就位 |
 | Phase 2+ | OTA 固件升级（A/B 分区切换待实现）、安全启动（存根） | ⚠️ 模型OTA完成 |
 | Phase 2+ | WiFi/NearLink/BLE 驱动、RBAC 鉴权 | 📋 规划中 |

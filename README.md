@@ -15,7 +15,7 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 | **北向通信** | 与调度主站（IEC 104）、配电自动化（IEC 61850）、物联平台（MQTT）通信 |
 | **南向通信** | 与台区设备（TTU、光伏逆变器、充电桩、柔性负荷）通信 |
 | **本地策略引擎** | 削峰填谷、需量控制、防逆流 — AI 失效时的兜底保障 |
-| **AI 边缘优化引擎** | LSTM 分位数预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 + 自适应权重优化器 + SafetyOverride 安全覆盖（v2.14 完整版） |
+| **AI 边缘优化引擎** | LSTM 分位数预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 + 自适应权重优化器 + SafetyOverride 安全覆盖（v2.15：2 维动作空间 p_ref + k_droop） |
 | **OTA 升级** | 固件与 AI 模型的远程更新与版本管理 |
 
 ---
@@ -121,7 +121,7 @@ cargo build --release        # 发布构建
 | 北向 ↑ | gateway → data-processing → strategy-engine | 调度数据处理与上送 |
 | 南向 ↓ | strategy-engine → rs485-plugin/hplc-plugin | 设备控制指令下发（pv_limit、load_shedding） |
 | 核间 ↔ | intercore (TCP/RJ45) | 与实时控制模块数据交换（p_ref、k_droop） |
-| AI → | strategy-engine ← ai-engine | LSTM 预测 + RL 决策 |
+| AI → | strategy-engine ← ai-engine | LSTM 预测 + RL 决策（2 维动作空间：p_ref + k_droop） |
 
 ### 核间通信指令（实时控制模块）
 
@@ -160,6 +160,7 @@ cargo build --release        # 发布构建
 | v2.12 | 奖励函数 R-01~R-07（标准化、塑造奖励、SOC均衡、过载分段、动态权重） | ✅ R-06 待实现 |
 | v2.13 | 奖励函数精细化（Sigmoid平滑、动态归一化、状态改善率、PER+KL、策略混合） | ✅ 完成 |
 | v2.14 | SafetyOverride 惩罚重构、FusedSystemState 扩展至 78 维 | ✅ 完成 |
+| v2.15 | 动作空间精简 5维→2维（p_ref + k_droop），load_shedding/pv_limit 下沉策略引擎 | ✅ 完成 |
 | Phase 2+ | IEC 61850-7-420（libIEC61850 FFI 待接入） | ⚠️ 骨架就位 |
 | Phase 2+ | OTA 固件升级（A/B 分区待实现）、安全启动（存根） | ⚠️ 模型OTA完成 |
 | Phase 2+ | WiFi/NearLink/BLE 驱动、RBAC 鉴权中间件 | 📋 规划中 |
