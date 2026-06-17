@@ -1,6 +1,7 @@
 //! 南向命令发送器（模拟实现）
 //!
 //! 负责将 pv_limit 和 load_shedding 命令发送到南向设备（光伏逆变器、柔性负荷装置）
+//! v2.15: 这些命令**仅由本地策略引擎调用**（防逆流/需量控制），不来自 AI 动作空间。
 //!
 //! Phase 2+ 将替换为真实的 RS485/HPLC 通信实现
 
@@ -283,7 +284,7 @@ impl SouthCommandDispatcher {
         )
     }
 
-    /// 分发 pv_limit 命令
+    /// 分发 pv_limit 命令（v2.15: 仅由本地防逆流策略调用）
     pub async fn dispatch_pv_limit(&self, limit_ratio: f64, priority: u8) -> SouthSendResult {
         let cmd = PvLimitCommand {
             device_id: self.default_pv_device_id.clone(),
@@ -293,7 +294,7 @@ impl SouthCommandDispatcher {
         self.sender.send_pv_limit(cmd).await
     }
 
-    /// 分发 load_shedding 命令
+    /// 分发 load_shedding 命令（v2.15: 仅由本地需量控制策略调用）
     pub async fn dispatch_load_shedding(&self, power_kw: f64, priority: u8) -> SouthSendResult {
         let cmd = LoadSheddingCommand {
             device_id: self.default_load_device_id.clone(),

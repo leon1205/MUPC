@@ -361,9 +361,6 @@ impl DualStrategyHead {
         Some(ActionOutput {
             p_ref: one_minus_alpha * a_old.p_ref + alpha * a_new.p_ref,
             k_droop: one_minus_alpha * a_old.k_droop + alpha * a_new.k_droop,
-            load_shedding: one_minus_alpha * a_old.load_shedding + alpha * a_new.load_shedding,
-            pv_limit: one_minus_alpha * a_old.pv_limit + alpha * a_new.pv_limit,
-            confidence: (one_minus_alpha * a_old.confidence + alpha * a_new.confidence).min(1.0),
         })
     }
 

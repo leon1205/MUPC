@@ -84,11 +84,9 @@ impl ConfigLoader {
                 &config.transformer_id,
                 config.max_batt_charge_power,
                 config.max_batt_discharge_power,
-                config.max_load_shedding,
                 config.max_apparent_power_kva,
                 config.p_batt_ramp_limit_kw,
                 config.q_batt_ramp_limit_kvar,
-                config.pv_limit_min,
             )
             .await
             .map_err(|e| AiEngineError::ActionValidationFailed(format!("数据库操作失败: {}", e)))?;
@@ -109,8 +107,8 @@ impl ConfigLoader {
     ) -> Result<Option<ActionSpaceConfig>, AiEngineError> {
         let row: Option<DbActionSpaceConfig> = sqlx::query_as(
             "SELECT transformer_id, max_batt_charge_power, max_batt_discharge_power,
-                    max_load_shedding, max_apparent_power_kva, p_batt_ramp_limit_kw,
-                    q_batt_ramp_limit_kvar, pv_limit_min,
+                    max_apparent_power_kva, p_batt_ramp_limit_kw,
+                    q_batt_ramp_limit_kvar,
                     transformer_kva, battery_capacity_kwh, soc_min, soc_max, overload_threshold
              FROM action_space_config WHERE transformer_id = ?",
         )
@@ -119,22 +117,25 @@ impl ConfigLoader {
         .await
         .map_err(|e| AiEngineError::ActionValidationFailed(format!("数据库查询失败: {}", e)))?;
 
-        Ok(row.map(|r| ActionSpaceConfig {
-            transformer_id: r.transformer_id,
-            max_batt_charge_power: r.max_batt_charge_power,
-            max_batt_discharge_power: r.max_batt_discharge_power,
-            max_load_shedding: r.max_load_shedding,
-            max_apparent_power_kva: r.max_apparent_power_kva,
-            p_batt_ramp_limit_kw: r.p_batt_ramp_limit_kw,
-            q_batt_ramp_limit_kvar: r.q_batt_ramp_limit_kvar,
-            pv_limit_min: r.pv_limit_min,
-            transformer_kva: r.transformer_kva,
-            battery_capacity_kwh: r.battery_capacity_kwh,
-            soc_min: r.soc_min,
-            soc_max: r.soc_max,
-            overload_threshold: r.overload_threshold,
-            k_droop_min: Some(-100.0),
-            k_droop_max: Some(100.0),
+        Ok(row.map(|r| {
+            let defaults = ActionSpaceConfig::default_config();
+            ActionSpaceConfig {
+                transformer_id: r.transformer_id,
+                max_batt_charge_power: r.max_batt_charge_power,
+                max_batt_discharge_power: r.max_batt_discharge_power,
+                max_load_shedding: defaults.max_load_shedding,
+                max_apparent_power_kva: r.max_apparent_power_kva,
+                p_batt_ramp_limit_kw: r.p_batt_ramp_limit_kw,
+                q_batt_ramp_limit_kvar: r.q_batt_ramp_limit_kvar,
+                pv_limit_min: defaults.pv_limit_min,
+                transformer_kva: r.transformer_kva,
+                battery_capacity_kwh: r.battery_capacity_kwh,
+                soc_min: r.soc_min,
+                soc_max: r.soc_max,
+                overload_threshold: r.overload_threshold,
+                k_droop_min: Some(-100.0),
+                k_droop_max: Some(100.0),
+            }
         }))
     }
 
@@ -151,11 +152,9 @@ struct DbActionSpaceConfig {
     transformer_id: String,
     max_batt_charge_power: f64,
     max_batt_discharge_power: f64,
-    max_load_shedding: f64,
     max_apparent_power_kva: f64,
     p_batt_ramp_limit_kw: f64,
     q_batt_ramp_limit_kvar: f64,
-    pv_limit_min: f64,
     // v2.6 新增字段
     transformer_kva: f64,
     battery_capacity_kwh: f64,

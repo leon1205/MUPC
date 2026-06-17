@@ -980,7 +980,9 @@ impl RewardCalculator {
         let w = &self.weights.demand_control;
         let demand_saved = (state.contract_demand - state.current_demand).max(0.0);
         let r_avoid = demand_saved * self.demand_penalty_rate;
-        let p_comfort = action.load_shedding * 0.5;
+        // v2.15: load_shedding 不再来自 AI action，舒适度惩罚预留为 0
+        // TODO(v2.16): 从策略引擎需量控制观测注入实际负荷切除量
+        let p_comfort = 0.0;
         w[0] * r_avoid - w[1] * p_comfort
     }
 
@@ -1016,7 +1018,9 @@ impl RewardCalculator {
             0.0
         };
 
-        let p_comfort = action.load_shedding * 0.5;
+        // v2.15: load_shedding 不再来自 AI action，舒适度惩罚预留为 0
+        // TODO(v2.16): 从策略引擎需量控制观测注入实际负荷切除量
+        let p_comfort = 0.0;
 
         w[0] * (r_avoid + risk_margin) - w[1] * p_comfort
     }
@@ -1295,9 +1299,6 @@ mod tests {
         ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 0.8,
         }
     }
 
@@ -1418,9 +1419,6 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
@@ -1804,9 +1802,6 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 0.8,
         };
 
         // 正常情况下 r_pv ≈ 100，标准化后 ≈ 1.0
@@ -1829,9 +1824,6 @@ mod tests {
         let action = ActionOutput {
             p_ref: -10.0, // 低电压放电（正确）
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
@@ -1852,9 +1844,6 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
@@ -1875,9 +1864,6 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);

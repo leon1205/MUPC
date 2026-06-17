@@ -1,8 +1,11 @@
 # MUPC 策略引擎模块设计文档
 
+[DESIGN_APPROVED] — v2.15 动作空间精简（AI 2维动作 + 本地策略接管 load_shedding/pv_limit）
+
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v1.1 | 2026-06-10 | 架构师 | 当前版本 |
+| v2.15 | 2026-06-17 | 架构师 | [DESIGN_APPROVED] |
+| v1.1 | 2026-06-10 | 架构师 | 历史版本 |
 | v1.0 | 2026-05-29 | 架构师 | 初版 |
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
@@ -92,10 +95,12 @@ AiCommandValidator (可插拔 AI 模型)
     │
     ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  p_ref + k_droop → IntercoreClient → 实时控制模块          │
-│  pv_limit / load_shedding → SouthCommandDispatcher → 南向设备 │
+│  AI→  p_ref + k_droop → IntercoreClient → 实时控制模块     │
+│  本地策略→ pv_limit / load_shedding → SouthCommandDispatcher → 南向设备 │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+> **v2.15 分发路径更新：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块。pv_limit 和 load_shedding 不再作为 AI 动作维度，仅由本地兜底策略（防逆流/需量控制）设置并通过南向通信分发至设备。
 
 ### 1.5 策略 ID 分配
 
@@ -542,17 +547,18 @@ pub struct AiIntegrator {
 ```rust
 // strategy-engine 通过 AiIntegrator 集成 AI 引擎
 strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
-                                  ├── 决策接口 → ActionOutput
+                                  ├── 决策接口 → ActionOutput (p_ref, k_droop)
                                   └── 状态管理 → ModelStatus
 
-数据流：
+数据流（v2.15）：
 1. LSTM/TCN 时序预测（光伏出力/负荷）
-2. MADDPG/PPO 基于预测结果决策
+2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
 3. AiCommandValidator 校验 AI 指令安全性
-4. 指令分发：
+4. AI 指令分发：
    - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
-   - pv_limit → SouthCommandDispatcher → 光伏逆变器
-   - load_shedding → SouthCommandDispatcher → 负荷控制装置
+5. 本地策略独立执行（不经过 AI）：
+   - pv_limit → 防逆流策略(AntiReverseStrategy) → SouthCommandDispatcher → 光伏逆变器
+   - load_shedding → 需量控制策略(DemandControlStrategy) → SouthCommandDispatcher → 负荷控制装置
 ```
 
 ---
@@ -624,16 +630,18 @@ pub trait FallbackStrategy: Send + Sync {
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID（1-削峰填谷, 2-需量控制, 3-防逆流）
     pub cmd_type: CommandType,                // 命令类型
-    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，v2.7+
-    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，v2.7+
+    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，v2.7+，AI输出或本地策略设置
+    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，v2.7+，AI输出或本地策略设置
     pub q_batt_set: Option<f64>,             // [LEGACY] 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级（0-3）
-    pub pv_limit: Option<f64>,               // PV 限功率比例 (0.0-1.0)
-    pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)
+    pub pv_limit: Option<f64>,               // PV 限功率比例 (0.0-1.0)，v2.15起仅由本地防逆流策略设置
+    pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)，v2.15起仅由本地需量控制策略设置
 }
 ```
+
+> **v2.15 字段语义说明：** `pv_limit` 和 `load_shedding` 保留在 `ControlCommand` 中，但仅由本地兜底策略引擎（`AntiReverseStrategy` / `DemandControlStrategy`）设置，不再作为 AI 引擎（`ActionOutput`）的动作维度。
 
 ### 9.3 CommandType 枚举
 
@@ -914,7 +922,7 @@ tokio-test = "0.4"
 
 ---
 
-**文档状态：** v1.1 当前版本
+**文档状态：** v2.15 当前版本
 **合并来源：** 通信管理模块技术设计 v1.1 + Phase3A 实施计划 + 策略引擎 PRD v1.1
 **对齐代码版本：** Strategy Engine Phase 3C（包括 ai_integration.rs）
 **产出时间：** 2026-05-29
@@ -1022,3 +1030,16 @@ Phase 3A 的 10 个任务均采用统一流程：
 5. 提交（每任务独立 commit，14 条 commit message 带 `Co-Authored-By`）
 
 覆盖范围：data-processing（4 任务：错误类型、DataCollector、HighFrequencyTelemetry、FaultRecorder/SQLite）+ strategy-engine（6 任务：错误类型、削峰填谷、需量控制、防逆流、AiValidator、模块导出），共 13 个文件、10 个单元测试。
+
+---
+
+## 16. v2.15 修订记录 (2026-06-17)
+
+| 序号 | 修订项 | 修订位置 | 说明 |
+|------|--------|----------|------|
+| 1 | AI 指令分发路径更新 | §1.4 整体数据流 | pv_limit/load_shedding 从 AI 分发路径移除，标注为本地策略独立执行 |
+| 2 | AI 引擎集成数据流更新 | §7.5 数据集成 | ActionOutput 仅含 p_ref+k_droop（2维）；pv_limit/load_shedding 下沉至本地策略 |
+| 3 | ControlCommand 字段注释 | §9.2 | pv_limit/load_shedding 保留但标注为仅由本地兜底策略设置，非 AI 动作维度 |
+| 4 | 版本号更新 | 文档头部 | v1.1 → v2.15 |
+
+**修订依据：** PRD v2.15 (`[REVIEWED: PASS]`) 将 AI 动作空间从 5 维精简为 2 维：(1) p_ref/k_droop 继续通过核间通信下发至实时控制模块；(2) load_shedding 下沉至需量控制策略独立执行；(3) pv_limit 下沉至防逆流策略独立执行；(4) ControlCommand 中的 pv_limit/load_shedding 字段保留，但语义上仅由本地兜底策略引擎设置。

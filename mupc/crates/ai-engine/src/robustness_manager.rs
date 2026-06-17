@@ -71,9 +71,6 @@ impl RobustnessManager {
         ActionOutput {
             p_ref: 50.0,
             k_droop: 30.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 1.0,
         }
     }
 
@@ -82,9 +79,6 @@ impl RobustnessManager {
         ActionOutput {
             p_ref: -50.0,
             k_droop: -30.0,
-            load_shedding: 0.0,
-            pv_limit: 0.5,
-            confidence: 1.0,
         }
     }
 
@@ -93,9 +87,6 @@ impl RobustnessManager {
         ActionOutput {
             p_ref: 50.0, // 强制放电
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 1.0,
-            confidence: 1.0,
         }
     }
 
@@ -107,9 +98,6 @@ impl RobustnessManager {
         ActionOutput {
             p_ref: -50.0, // 强制充电
             k_droop: 10.0,
-            load_shedding: 0.0,
-            pv_limit: 0.0, // 停止光伏输入
-            confidence: 1.0,
         }
     }
 
@@ -166,7 +154,6 @@ mod tests {
         let action = rm.voltage_sag_action();
         assert_eq!(action.p_ref, 50.0);
         assert_eq!(action.k_droop, 30.0);
-        assert_eq!(action.confidence, 1.0);
     }
 
     #[test]
@@ -175,7 +162,6 @@ mod tests {
         let action = rm.voltage_surge_action();
         assert_eq!(action.p_ref, -50.0);
         assert_eq!(action.k_droop, -30.0);
-        assert_eq!(action.pv_limit, 0.5);
     }
 
     #[test]
@@ -190,7 +176,7 @@ mod tests {
         let rm = RobustnessManager::new();
         let action = rm.battery_soc_overfull_action();
         assert_eq!(action.p_ref, -50.0); // 强制充电
-        assert_eq!(action.pv_limit, 0.0); // 停止光伏
+        // v2.15: pv_limit 已从 ActionOutput 移除，由策略引擎防逆流独立控制
     }
 
     #[test]
