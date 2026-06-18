@@ -12,7 +12,7 @@ use crate::config::{AiEngineConfig, ModeConfig};
 use crate::data_fusion::{DataFusionEngine, FusedSystemState};
 use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
-use crate::lstm_model::{LstmInput, LstmModel, LstmOutput};
+use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput};
 use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::model_registry::{ModelRegistry, SceneModelState};
 use crate::reward_calculator::RewardCalculator;
@@ -42,10 +42,21 @@ pub struct ModelManager {
     status: Arc<RwLock<ModelStatus>>,
     /// v2.3: 使用 RwLock 包裹以支持初始化阶段注入 registry
     mode_selector: Arc<RwLock<ModeSelector>>,
-    /// LSTM 历史缓冲（pv_power, load_power 样本，容量 = input_window_secs/60）
+    /// LSTM 历史缓冲（pv_power, load_power 样本，容量 = input_window_secs/step_seconds）
+    ///
+    /// v2.16: 容量计算改用 step_seconds（默认 15 分钟步长）
     lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
-    /// LSTM 输入窗口大小（分钟数，即缓冲容量）
+    /// LSTM 输入窗口大小（步数，即缓冲容量）
+    ///
+    /// v2.16: 计算公式从 `input_window_secs / 60` 改为 `input_window_secs / step_seconds`
     lstm_input_size: usize,
+    /// LSTM 采样周期数（每 fusion_period_secs × counter_period 步压入一个样本）
+    ///
+    /// v2.16 新增：用于按 15 分钟步长降采样历史缓冲。
+    /// 计算公式：step_seconds / fusion_period_secs
+    lstm_sample_period: u64,
+    /// LSTM 采样周期计数器
+    lstm_sample_counter: Arc<RwLock<u64>>,
     /// v2.5: 动作空间配置（可配置化）
     action_space_config: Arc<RwLock<ActionSpaceConfig>>,
     /// v2.6: 动态配置加载器（延迟初始化，storage 就绪后注入）
@@ -62,7 +73,16 @@ impl ModelManager {
         };
         let mode_selector = Arc::new(RwLock::new(ModeSelector::new(initial_mode, persist_path)));
 
-        let lstm_input_size = (config.lstm.input_window_secs / 60) as usize;
+        // v2.16: 使用 step_seconds 统一计算输入窗口步数
+        let lstm_input_size =
+            (config.lstm.input_window_secs / config.lstm.step_seconds) as usize;
+
+        // v2.16: 采样周期 = step_seconds / fusion_period_secs
+        // 例如 step=900s, fusion_period=1s → 每 900 步压入一个样本（15 分钟）
+        // v2.16.1 (C-03 修复): 加 max(1) 边界保护，避免 step < fusion 时退化为 0（每周期都采样）
+        let lstm_sample_period = (config.lstm.step_seconds
+            / config.fusion.fusion_period_secs.max(1))
+        .max(1);
 
         Self {
             config,
@@ -75,6 +95,8 @@ impl ModelManager {
             mode_selector,
             lstm_history: Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size))),
             lstm_input_size,
+            lstm_sample_period,
+            lstm_sample_counter: Arc::new(RwLock::new(0)),
             action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
             dynamic_config_loader: Arc::new(RwLock::new(None)),
         }
@@ -167,16 +189,23 @@ impl ModelManager {
         let current_pv = fused_state.pv_power;
         let current_load = fused_state.load_power;
 
-        // LSTM 预测：使用历史缓冲区的数据预测未来光伏/负荷
-        let (pv_forecast, load_forecast) = self
-            .run_lstm_predict()
+        // LSTM 预测：使用历史缓冲区的数据预测未来光伏/负荷（含分位数）
+        // v2.16 (C-02 修复): 在生产路径调用 predict_quantiles 并接通 D10 数据流
+        let (pv_forecast, load_forecast, load_quantiles) = self
+            .run_lstm_predict_with_quantiles()
             .await
-            .unwrap_or_else(|_| (vec![0.0; 15], vec![0.0; 15]));
+            .unwrap_or_else(|_| (vec![0.0; 15], vec![0.0; 15], None));
 
         // 将 LSTM 预测结果注入融合状态（克隆以避免借用冲突）
         let mut fused_state_with_forecast = fused_state.clone();
         fused_state_with_forecast.pv_forecast_15min = pv_forecast.clone();
         fused_state_with_forecast.load_forecast_15min = load_forecast.clone();
+
+        // v2.16: 接通 D10 分位数数据流（PRD §3.6 变更 3）
+        if let Some(ref prob_output) = load_quantiles {
+            self.update_fused_state_quantiles(&mut fused_state_with_forecast, prob_output)
+                .await;
+        }
 
         // v2.3: 通过 ModelRegistry 执行推理（委托给当前 active 的场景模型）
         let rl_action = {
@@ -212,11 +241,19 @@ impl ModelManager {
         }
 
         // 更新 LSTM 历史缓冲（决策完成后再更新，避免用到本周期数据）
+        // v2.16: 按 lstm_sample_period 降采样（每 step_seconds/fusion_period_secs 步压入一个样本）
         {
-            let mut history = self.lstm_history.write().await;
-            history.push_back((current_pv, current_load));
-            while history.len() > self.lstm_input_size {
-                history.pop_front();
+            let should_sample = {
+                let mut counter = self.lstm_sample_counter.write().await;
+                *counter += 1;
+                *counter % self.lstm_sample_period == 0
+            };
+            if should_sample {
+                let mut history = self.lstm_history.write().await;
+                history.push_back((current_pv, current_load));
+                while history.len() > self.lstm_input_size {
+                    history.pop_front();
+                }
             }
         }
 
@@ -236,18 +273,25 @@ impl ModelManager {
         Ok(validated)
     }
 
-    /// 执行 LSTM 预测（使用历史缓冲区的 pv_power / load_power 样本）
+    /// 执行 LSTM 预测（使用历史缓冲区的 pv_power / load_power 样本，含分位数）
     ///
-    /// 返回 (pv_forecast, load_forecast)，若 LSTM 未就绪或缓冲不足则返回零向量。
-    async fn run_lstm_predict(&self) -> Result<(Vec<f64>, Vec<f64>), AiEngineError> {
+    /// v2.16 (C-02 修复): 返回值扩展为 (pv_forecast, load_forecast, Option<ProbabilisticLoadOutput>)。
+    /// 第三项为负荷分位数预测结果（用于接通 D10 数据流）。
+    ///
+    /// 返回值约定：
+    /// - LSTM 未就绪或缓冲不足时，第三项为 None
+    /// - 正常预测时，第三项为 Some(ProbabilisticLoadOutput)
+    async fn run_lstm_predict_with_quantiles(
+        &self,
+    ) -> Result<(Vec<f64>, Vec<f64>, Option<ProbabilisticLoadOutput>), AiEngineError> {
         let lstm = self.lstm_model.read().await;
         let lstm = match lstm.as_ref() {
             Some(m) => m,
-            None => return Ok((vec![0.0; 15], vec![0.0; 15])),
+            None => return Ok((vec![0.0; 15], vec![0.0; 15], None)),
         };
 
         if !lstm.runtime().is_loaded() {
-            return Ok((vec![0.0; 15], vec![0.0; 15]));
+            return Ok((vec![0.0; 15], vec![0.0; 15], None));
         }
 
         let history = self.lstm_history.read().await;
@@ -260,7 +304,7 @@ impl ModelManager {
                 len,
                 self.lstm_input_size
             );
-            return Ok((vec![0.0; 15], vec![0.0; 15]));
+            return Ok((vec![0.0; 15], vec![0.0; 15], None));
         }
 
         // 构建 PV 历史输入（取最近的 input_size 个样本）
@@ -292,7 +336,7 @@ impl ModelManager {
             .map(|v| v as f64)
             .collect();
 
-        // 预测负荷（使用负荷历史）
+        // 预测负荷（使用负荷历史 + 分位数）
         let load_input = LstmInput {
             history: load_history,
             timestamp: chrono::Utc::now().timestamp(),
@@ -304,7 +348,18 @@ impl ModelManager {
             .map(|v| v as f64)
             .collect();
 
-        Ok((pv_forecast, load_forecast))
+        // v2.16: 计算分位数预测（使用默认协变量，C-02 数据流通）
+        // TODO: 后续可从 LoadCovariates 数据源注入真实协变量
+        let covariates = crate::load_covariates::LoadCovariates::default();
+        let load_quantiles = match lstm.predict_quantiles(&load_input, &covariates).await {
+            Ok(pq) => Some(pq),
+            Err(e) => {
+                tracing::warn!("LSTM 分位数预测失败，回退为零向量: {}", e);
+                None
+            }
+        };
+
+        Ok((pv_forecast, load_forecast, load_quantiles))
     }
 
     /// 设置数据融合引擎（由外部注入）
@@ -331,6 +386,31 @@ impl ModelManager {
         let lstm = self.lstm_model.read().await;
         let lstm = lstm.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
         lstm.predict(input).await
+    }
+
+    /// v2.16: 将 LSTM 分位数预测结果写入 FusedSystemState.D10
+    ///
+    /// 修复 D10 数据流未接通的 bug（model_manager 之前未调用 predict_quantiles，
+    /// 导致 FusedSystemState.load_forecast_quantiles 始终为空向量，RL 输入全 0）。
+    ///
+    /// 行为：
+    /// - `load_forecast_quantiles` = 15 步 P90 值（与 `reward_calculator.rs:586` 注释一致）
+    /// - `base_load` = 第 1 步 P50
+    /// - `shock_load_probability` = 冲击概率
+    ///
+    /// 调用方应在 `full_decision_cycle` 中融合 → LSTM 预测之后插入此调用。
+    pub async fn update_fused_state_quantiles(
+        &self,
+        state: &mut FusedSystemState,
+        prob_output: &ProbabilisticLoadOutput,
+    ) {
+        state.load_forecast_quantiles = prob_output
+            .quantile_steps
+            .iter()
+            .map(|s| s.p90 as f64)
+            .collect();
+        state.base_load = prob_output.base_load as f64;
+        state.shock_load_probability = prob_output.shock_probability;
     }
 
     /// 决策（通过 ModelRegistry 委托给当前 active 场景模型）
@@ -486,6 +566,7 @@ mod tests {
                 model_path: std::path::PathBuf::from("/tmp/test_lstm.rknn"),
                 input_window_secs: 3600,
                 output_horizon_secs: 900,
+                step_seconds: 60, // 测试用 1 分钟步长
                 quantization: crate::config::QuantizationType::INT8,
                 expected_sha256: None,
             },

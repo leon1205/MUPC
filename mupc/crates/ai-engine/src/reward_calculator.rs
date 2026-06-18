@@ -1000,13 +1000,12 @@ impl RewardCalculator {
         let demand_saved = (state.contract_demand - state.current_demand).max(0.0);
         let r_avoid = demand_saved * self.demand_penalty_rate;
 
-        // 风险感知调整（v2.11 新增）
+        // 风险感知调整（v2.11 新增，v2.16 适配：quantiles → quantile_steps）
         // 考虑冲击负荷概率，预留额外安全裕度
         let high_quantile = load_forecast
-            .quantiles
-            .iter()
-            .find(|q| (q.quantile - 0.9).abs() < 0.01)
-            .map(|q| q.value)
+            .quantile_steps
+            .first()
+            .map(|s| s.p90)
             .unwrap_or(load_forecast.base_load);
 
         let risk_adjusted_demand = state.current_demand + 2.0 * (high_quantile - load_forecast.base_load) as f64;

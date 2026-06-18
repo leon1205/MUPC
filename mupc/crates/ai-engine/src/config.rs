@@ -25,6 +25,11 @@ pub struct LstmConfig {
     pub model_path: PathBuf,
     pub input_window_secs: u64,
     pub output_horizon_secs: u64,
+    /// v2.16 新增：采样步长（秒），统一输入输出步长计算
+    ///
+    /// 默认 900 秒（15 分钟），与 MUPC-AI2 训练管线对齐。
+    /// 历史硬编码 `/ 60` 假设已废弃。
+    pub step_seconds: u64,
     pub quantization: QuantizationType,
     /// SHA256 期望值（PRD 9.5），开发环境为 None 跳过校验
     #[serde(default)]
@@ -35,8 +40,9 @@ impl Default for LstmConfig {
     fn default() -> Self {
         Self {
             model_path: PathBuf::from("/etc/mupc/models/lstm.rknn"),
-            input_window_secs: 3600,
-            output_horizon_secs: 900,
+            input_window_secs: 21_600,  // 6 小时
+            output_horizon_secs: 22_500, // 225 分钟 = 15 步 × 15 分钟
+            step_seconds: 900,           // 15 分钟步长
             quantization: QuantizationType::INT8,
             expected_sha256: None,
         }
