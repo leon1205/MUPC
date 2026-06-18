@@ -4,6 +4,7 @@
 |------|------|------|------|
 | v1.0 | 2026-05-27 | 项目经理 | 记录中 |
 | v2.0 | 2026-06-15 | 项目经理 | 审计更新 — 新增文档-代码一致性审计发现 |
+| v2.1 | 2026-06-18 | 项目经理 | v2.17 新增：SafetyRLWrapper broadcast channel 组装（U-15）|
 
 ---
 
@@ -193,6 +194,7 @@
 | U-12 | 08 Web | **P1** | SSE 基于 query 的过滤 (`types=`) 未实现 | ✅ 已修复 — sse_handler 支持 ?types= 参数过滤 |
 | U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | ✅ 已修复 — 统一采用 `SeasonalLoadManagement`（代码+文档） |
 | U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | ✅ 已修复 — 设计文档统一为 `ota-update`（ADR-007 决议更新） |
+| U-15 | 05 AI引擎 | **P1** | v2.17 SafetyRLWrapper `event_sender` 未连接 — broadcast channel 需 main.rs 组装，当前 `ModelManager::new()` 传入 `None`，违规时无 SSE 实时推送 | 需系统集成入口（bin crate）创建 broadcast channel，Sender 注入 SafetyRLWrapper，Receiver 转发到 SsePushService（~5 行胶水代码） |
 
 ---
 
@@ -206,8 +208,9 @@
 | 审计发现-已修复 (本轮) | 10 | 10 | 0 | ✅ 全部修复 |
 | 审计发现-未修复 (P0) | 6 | 0 | 6 | 🔴 待规划 |
 | 审计发现-未修复 (P1) | 6 | 4 | 2 | 🟡 待排期 |
+| v2.17 新增 (P1) | 1 | 0 | 1 | 🟡 待排期 |
 | 审计发现-未修复 (P2) | 2 | 2 | 0 | ✅ 全部修复 |
-| **总计** | **33** | **26** | **7** | |
+| **总计** | **34** | **26** | **8** | |
 
 ---
 
