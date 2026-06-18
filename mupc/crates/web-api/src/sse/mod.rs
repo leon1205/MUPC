@@ -16,10 +16,6 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// SSE 事件类型
-///
-/// NOTE: 设计文档要求 6 种 SSE 事件类型（status, decision, predictions,
-/// rewards, finetuning, heartbeat）。当前只实现了 5 种。
-/// TODO: 添加 `RewardsUpdate` 和 `FinetuningUpdate` 事件类型以对齐设计文档。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum SseEventType {
@@ -33,6 +29,13 @@ pub enum SseEventType {
     SystemAlert { level: String, message: String },
     /// 遥测数据更新事件
     TelemetryUpdate { telemetry_type: String },
+    /// v2.17 安全包装器更新事件
+    SafetyWrapperUpdate {
+        check_result: String,
+        reason: String,
+        v_predicted: f64,
+        latency_us: u64,
+    },
 }
 
 /// SSE 事件消息
@@ -128,6 +131,33 @@ impl SsePushService {
         self.tx.send(event)
     }
 
+    /// v2.17: 推送安全包装器更新事件
+    pub fn push_safety_wrapper_update(
+        &self,
+        check_result: &str,
+        reason: &str,
+        v_predicted: f64,
+        latency_us: u64,
+    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+        let event = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::SafetyWrapperUpdate {
+                check_result: check_result.to_string(),
+                reason: reason.to_string(),
+                v_predicted,
+                latency_us,
+            },
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({
+                "check_result": check_result,
+                "reason": reason,
+                "v_predicted": v_predicted,
+                "latency_us": latency_us,
+            }),
+        };
+        self.tx.send(event)
+    }
+
     /// 推送系统告警事件
     pub fn push_system_alert(
         &self,
@@ -201,6 +231,7 @@ fn event_type_name(event_type: &SseEventType) -> &'static str {
         SseEventType::PredictionUpdate { .. } => "predictions",
         SseEventType::SystemAlert { .. } => "alert",
         SseEventType::TelemetryUpdate { .. } => "telemetry",
+        SseEventType::SafetyWrapperUpdate { .. } => "safety_wrapper",
     }
 }
 
