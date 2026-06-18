@@ -1,5 +1,7 @@
 # MUPC Phase 3C AI 优化引擎 - 实施计划
 
+> ⚠️ **v2.16 替代注**：本计划中的 LSTM 配置默认值（`LstmConfig.input_window_secs=3600`、`output_horizon_secs=900`、`/60` 步长硬编码）已被 v2.16 替代。当前生产默认值：`input_window_secs=21600`、`output_horizon_secs=22500`、`step_seconds=900`（15 分钟步长）。详见 [`docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md §3.6`](../specs/modules/05-MUPC-AI引擎-PRD.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 实现 AI 优化引擎，支持 LSTM 预测和 MADDPG/PPO 决策，部署于 RK3588 NPU
