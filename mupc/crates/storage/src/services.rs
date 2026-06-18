@@ -457,6 +457,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )",
+        // v2.17: 安全包装器违规记录
+        "CREATE TABLE IF NOT EXISTS safety_violations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            proposed_p_ref REAL NOT NULL,
+            proposed_k_droop REAL NOT NULL,
+            fallback_p_ref REAL NOT NULL,
+            fallback_k_droop REAL NOT NULL,
+            v_predicted REAL NOT NULL,
+            latency_us INTEGER NOT NULL
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_safety_violations_ts
+         ON safety_violations(timestamp)",
     ];
 
     for stmt in &statements {

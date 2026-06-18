@@ -17,6 +17,7 @@ use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::model_registry::{ModelRegistry, SceneModelState};
 use crate::reward_calculator::RewardCalculator;
 use crate::rl_model::ActionOutput;
+use crate::safety_wrapper::SafetyRLWrapper;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -61,6 +62,8 @@ pub struct ModelManager {
     action_space_config: Arc<RwLock<ActionSpaceConfig>>,
     /// v2.6: 动态配置加载器（延迟初始化，storage 就绪后注入）
     dynamic_config_loader: Arc<RwLock<Option<Arc<DynamicConfigLoader>>>>,
+    /// v2.17: 安全 RL 包装器（物理模型前置过滤器）
+    safety_wrapper: Arc<SafetyRLWrapper>,
 }
 
 impl ModelManager {
@@ -84,6 +87,12 @@ impl ModelManager {
             / config.fusion.fusion_period_secs.max(1))
         .max(1);
 
+        // v2.17: 创建 SafetyRLWrapper（无 event_sender，SSE 推送待 main.rs 注入）
+        let safety_wrapper = Arc::new(SafetyRLWrapper::new(
+            config.safety_wrapper.clone(),
+            None,
+        ));
+
         Self {
             config,
             lstm_model: Arc::new(RwLock::new(None)),
@@ -96,6 +105,7 @@ impl ModelManager {
             lstm_history: Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size))),
             lstm_input_size,
             lstm_sample_period,
+            safety_wrapper,
             lstm_sample_counter: Arc::new(RwLock::new(0)),
             action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
             dynamic_config_loader: Arc::new(RwLock::new(None)),
@@ -216,6 +226,20 @@ impl ModelManager {
             registry.decide(&input_vector, &action_space_config).await?
         };
 
+        // Step 6.5: v2.17 安全包装器检查（RL 决策后、ActionValidator 前）
+        // 基于戴维南等效电路预测电压变化，提前拒绝高风险动作
+        let (safe_action, check_result) = self
+            .safety_wrapper
+            .check_and_fallback(&fused_state, &rl_action)
+            .await;
+
+        if check_result.is_rejected() {
+            tracing::warn!(
+                target = "safety_wrapper",
+                "动作被安全包装器拒绝，回退到 last_safe_action"
+            );
+        }
+
         let (validated, violations) = {
             let av = self.action_validator.read().await;
             let av = av.as_ref().ok_or(AiEngineError::ActionValidationFailed(
@@ -223,7 +247,7 @@ impl ModelManager {
             ))?;
             let action_space_config = self.action_space_config.read().await;
             av.validate(
-                &rl_action,
+                &safe_action,
                 fused_state.dispatch_p_set,
                 false,
                 &action_space_config,

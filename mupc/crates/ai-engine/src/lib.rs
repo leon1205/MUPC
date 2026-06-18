@@ -35,6 +35,7 @@ pub mod rknn_types;
 pub mod rl_model;
 pub mod robustness_manager;
 pub mod safety_config;
+pub mod safety_wrapper;
 
 pub use action_space::ActionSpaceConfig;
 pub use action_validator::{ActionValidator, ViolationRecord};
@@ -45,7 +46,7 @@ pub use adaptive_weight_optimizer::{
 pub use config::{
     ActionConstraintConfig, AdaptiveOptimizerConfig, AiEngineConfig, FusionConfig, LstmConfig,
     ModeConfig, ModelType, NpuConfig, OnlineUpdateConfig, QuantizationType, RlAlgorithm, RlConfig,
-    SceneWeights, WeightBounds, WeightConstraints, ParetoOptimizerConfig,
+    SafetyWrapperConfig, SceneWeights, WeightBounds, WeightConstraints, ParetoOptimizerConfig,
 };
 pub use config_loader::ConfigLoader;
 pub use data_fusion::{
@@ -72,3 +73,8 @@ pub use rknn_runtime::RknnRuntime;
 pub use rl_model::{parse_action_output, ActionOutput, RLModel, SystemState};
 pub use robustness_manager::{AnomalyType, RobustnessManager};
 pub use safety_config::SafetyConfig;
+pub use safety_wrapper::{
+    CheckResult, LineImpedance, LinearSensitivityPredictor, PredictionResult, SafetyBounds,
+    SafetyEventSender, SafetyEventType, SafetyRLWrapper, SafetyStats, SafetyViolation,
+    SafetyWrapperEvent,
+};

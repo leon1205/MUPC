@@ -1,11 +1,12 @@
-# MUPC AI 优化引擎 - 模块产品需求文档（统一版 v2.16）
+# MUPC AI 优化引擎 - 模块产品需求文档（统一版 v2.17）
 
-> **版本：** v2.16 | **状态：** [REVIEWED: PASS] | **更新日期：** 2026-06-18
+> **版本：** v2.17 | **状态：** [REVIEWED: PASS] | **更新日期：** 2026-06-18
 
 ### 变更记录
 
 | 版本 | 日期 | 作者 | 变更说明 | 评审状态 |
 |------|------|------|----------|----------|
+| v2.17 | 2026-06-18 | 需求分析师 | 安全 RL 包装器：物理模型事前预测拒绝、线路阻抗配置化、RobustnessManager 协同、Web API 状态端点、Web UI 监控面板 | [REVIEWED: PASS] |
 | v2.16 | 2026-06-18 | 需求分析师 | LSTM 模型优化：步长统一为 15 分钟、15 步分位数预测、D10 数据流通、删除 confidence 字段、消除冗余推理 | [REVIEWED: PASS] |
 | v2.15 | 2026-06-17 | 需求分析师 | 动作空间精简：5维→2维（移除load_shedding/pv_limit/confidence），下沉至策略引擎 | [REVIEWED: PASS] |
 | v2.14 | 2026-06-15 | - | SafetyOverride 奖励函数重构、FusedSystemState 78维统一 | [REVIEWED: PASS] |
@@ -393,6 +394,307 @@ if output.len() < output_size {
 | #1 真分位数回归 | 📋 训练管线侧工作 | 需 MUPC-AI2 用 Quantile Loss 重训 LSTM，Rust 侧仅标记实验性 |
 | #5 协变量阈值参数化 | ❌ 推迟 | 单台区部署，硬编码可接受 |
 | #6 冲击概率正态假设 | ❌ 推迟 | 需历史冲击负荷统计，当前数据基础不足 |
+
+---
+
+### 3.7 v2.17 安全 RL 包装器（Safety RL Wrapper）
+
+> **来源**：`docs/TODO/安全RL包装器.md`
+
+#### 3.7.1 背景与动机
+
+| 现存问题 | 说明 |
+|----------|------|
+| ActionValidator 仅做静态数值校验（值域、变化率、调度约束）| 无法预测动作施加后电网的短时动态响应 |
+| RobustnessManager（v2.9）属被动防御 | 仅在异常已发生（电压<0.9p.u.）时才介入，存在滞后窗口 |
+| 合法的 `p_ref` 在特定工况下可能引发低电压 | 例如 -30kW 在低电压工况下可致电压从 0.98 骤降至 0.92 |
+
+**设计目标**：在 RL 决策后、ActionValidator 前插入**物理模型前置过滤器**，基于戴维南等效电路预测电压变化，提前拒绝高风险动作。
+
+#### 3.7.2 核心变更
+
+##### 变更 1：SafetyRLWrapper 模块（核心）
+
+**位置**：`crates/ai-engine/src/safety_wrapper.rs`（新增）
+
+**核心结构**：
+
+```rust
+/// 安全包装器
+pub struct SafetyRLWrapper {
+    line_impedance: RwLock<LineImpedance>,
+    last_safe_action: RwLock<ActionOutput>,
+    predictor: Box<dyn SafetyPredictor + Send + Sync>,
+    bounds: SafetyBounds,
+}
+
+/// 物理模型预测器 trait（支持替换为不同精度模型）
+#[async_trait]
+pub trait SafetyPredictor: Send + Sync {
+    async fn predict(&self, state: &FusedSystemState, action: &ActionOutput)
+        -> Result<PredictionResult, AiEngineError>;
+}
+
+/// 预测结果
+pub struct PredictionResult {
+    pub v_predicted: f64,
+    pub dv_dt: f64,
+    pub soc_after: f64,
+    pub is_safe: bool,
+    pub reason: Option<String>,
+}
+
+/// 安全边界
+pub struct SafetyBounds {
+    pub v_min: f64,         // 0.93
+    pub v_max: f64,         // 1.07
+    pub dv_dt_max: f64,     // 0.03
+    pub soc_margin: f64,    // 0.02
+}
+```
+
+**物理模型（戴维南等效 + 灵敏度分析）**：
+
+```
+ΔV ≈ (R·ΔP + X·ΔQ) / V₀
+P_output_new = p_ref_new + k_droop_new × (V_avg - 1.0)
+```
+
+**安全检查入口**：
+
+```rust
+impl SafetyRLWrapper {
+    pub async fn check_and_fallback(
+        &self,
+        state: &FusedSystemState,
+        proposed_action: &ActionOutput,
+    ) -> (ActionOutput, CheckResult) {
+        // 1. 物理模型预测（失败则回退到 last_safe_action）
+        // 2. 安全边界检查（任一不满足则拒绝）
+        // 3. 通过则更新 last_safe_action
+    }
+}
+
+pub enum CheckResult {
+    Passed,
+    Rejected { reason: String },
+    FallbackDueToPredictionError,
+}
+```
+
+##### 变更 2：ModelManager 集成（SAFETY-01）
+
+**集成位置**：`model_manager.full_decision_cycle` 第 6 步（RL 决策）后、ActionValidator 前
+
+```
+RLModel.decide()
+   ↓
+SafetyRLWrapper.check_and_fallback()  ← 新增
+   ↓
+ActionValidator.validate_dual()
+   ↓
+strategy-engine
+```
+
+**与 RobustnessManager 协同**（Q-W3=A）：
+- SafetyRLWrapper **事前**预测拒绝（决策前）
+- RobustnessManager **事中**应急响应（异常已发生时）
+- 两者串联：先 SafetyRLWrapper，再 RobustnessManager，最后 ActionValidator
+
+##### 变更 3：线路阻抗配置化（Q-W2=B）
+
+**新增配置字段**（`mupc/config/ai.toml`）：
+
+```toml
+[safety_wrapper]
+# 线路阻抗参数（从台区档案读取）
+line_impedance_r_ohm = 0.1      # 线路电阻 R（Ω）
+line_impedance_x_ohm = 0.05     # 线路电抗 X（Ω）
+v_base = 220.0                  # 基准电压（V）
+
+# 安全边界
+v_min = 0.93                    # 电压下限（p.u.）
+v_max = 1.07                    # 电压上限（p.u.）
+dv_dt_max = 0.03                # 电压变化率上限（p.u./s）
+soc_margin = 0.02               # SOC 安全裕度（比临界多 2%）
+
+# 性能参数
+max_check_latency_ms = 5        # 单次检查最大延迟
+```
+
+**验收**：单台区档案正确加载，跨台区部署通过修改 ai.toml 适配。
+
+##### 变更 4：检查结果推送（Q-W4=C 触发 Web UI 告警，事件驱动架构）
+
+**事件流架构**（避免 HTTP 轮询开销）：
+
+```
+AI 引擎 SafetyRLWrapper
+   ↓ publish (tokio::sync::broadcast::Sender)
+全局 broadcast::Receiver
+   ↓ forward
+Web API SsePushService
+   ↓ SSE push
+Web UI EventSource（自动接收）
+```
+
+**关键设计决策**（v2.17 修订）：
+- AI 引擎使用 `tokio::sync::broadcast::Sender`（轻量级，无外部依赖）
+- Web API 持有 `broadcast::Receiver`，将事件转为 SSE 推送给 Web UI
+- 依赖注入在 `main.rs` 中组装（AppState）
+- **AI 引擎零 HTTP 依赖，Web UI 零轮询开销**
+
+**事件类型**（`SseEventType::SafetyWrapperUpdate`）：
+
+```rust
+// 扩展 crates/web-api/src/sse/mod.rs 的 SseEventType 枚举
+pub enum SseEventType {
+    // ... 既有类型 ...
+    SafetyWrapperUpdate {
+        check_result: CheckResult,  // Passed / Rejected / Fallback
+        reason: String,
+        v_predicted: f64,
+        latency_us: u64,
+    },
+}
+```
+
+**消息格式**（SSE payload）：
+
+```json
+{
+  "event_id": "uuid",
+  "event_type": "SafetyWrapperUpdate",
+  "timestamp": 1718697000,
+  "payload": {
+    "check_result": "Rejected",
+    "reason": "v_predicted=0.92 < v_min=0.93",
+    "proposed_p_ref": 30.0,
+    "proposed_k_droop": 15.0,
+    "fallback_p_ref": -10.0,
+    "fallback_k_droop": 8.0,
+    "v_predicted": 0.92,
+    "latency_us": 1200
+  }
+}
+```
+
+**违规日志持久化**（独立通道，仅用于审计）：
+- 单独调用 `storage::record_safety_violation()` 持久化
+- Web UI 不依赖此表（仅运维查询用）
+
+**说明**：本设计复用项目现有 `tokio::sync::broadcast` 机制（`web-api/src/sse/mod.rs` 已使用），新增 `SafetyWrapperUpdate` 事件类型即可，无需新增 `message_bus` 模块或第三方依赖。
+
+##### 变更 5：Web API 状态端点
+
+**新增端点**（`crates/web-api/src/routes/ai/safety_wrapper.rs`）：
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| GET | `/api/v1/safety_wrapper/status` | 当前状态（边界条件、line_impedance、累计指标）| Operator+ |
+| GET | `/api/v1/safety_wrapper/recent_violations` | 最近 100 条违规记录 | Operator+ |
+| GET | `/api/v1/safety_wrapper/stats` | 统计（拒绝率、平均延迟等）| Operator+ |
+
+##### 变更 6：Web UI 监控面板
+
+**位置**：`crates/web-api/src/static/ai-monitor.html`（新增）
+
+**面板组件**：
+
+| 组件 | 数据来源 | 刷新频率 |
+|------|----------|----------|
+| 当前安全状态卡片 | `GET /status` | 5s |
+| 拒绝率趋势图（24h）| `GET /stats` | 30s |
+| 最近违规列表（最近 10 条）| `GET /recent_violations` | 10s |
+| 安全边界配置展示 | `GET /status` | 30s |
+| 实时电压预测曲线 | `GET /status` + 历史数据 | 5s |
+
+#### 3.7.3 接口定义
+
+```rust
+/// 单条违规记录（持久化到 storage）
+pub struct SafetyViolation {
+    pub timestamp: i64,
+    pub reason: String,
+    pub proposed_p_ref: f64,
+    pub proposed_k_droop: f64,
+    pub fallback_p_ref: f64,
+    pub fallback_k_droop: f64,
+    pub v_predicted: f64,
+    pub latency_us: u64,
+}
+
+/// 累计指标
+pub struct SafetyStats {
+    pub total_checks: u64,
+    pub total_rejected: u64,
+    pub total_fallback: u64,
+    pub rejection_rate: f64,    // 拒绝率（最近 1h）
+    pub avg_latency_us: u64,    // 平均检查延迟
+    pub max_latency_us: u64,    // 最大检查延迟
+}
+```
+
+#### 3.7.4 验收标准
+
+| ID | 标准 | 验证方法 |
+|----|------|----------|
+| SAFETY-01 | SafetyRLWrapper 在 RL 决策后、ActionValidator 前拦截 | 集成测试 |
+| SAFETY-02 | 单次检查延迟 < 5ms | 性能测试（P99 < 5ms）|
+| SAFETY-03 | v_predicted 计算正确（戴维南等效 + 灵敏度公式）| 单元测试 |
+| SAFETY-04 | 安全边界检查覆盖 5 类（电压下限/上限/变化率/SOC/功率方向）| 单元测试 |
+| SAFETY-05 | 检查失败时回退到 last_safe_action | 单元测试 |
+| SAFETY-06 | 检查通过时更新 last_safe_action | 单元测试 |
+| SAFETY-07 | 物理模型预测失败时回退到 FallbackDueToPredictionError | 单元测试（模拟 panic）|
+| SAFETY-08 | 线路阻抗从配置文件读取，跨台区可配 | 配置测试 |
+| SAFETY-09 | 与 RobustnessManager 协同（事前 vs 事中边界明确）| 集成测试 |
+| SAFETY-10 | 与 ActionValidator 协同（顺序：SafetyWrapper → RobustnessManager → ActionValidator）| 集成测试 |
+| SAFETY-11 | 违规日志通过 tracing 记录 + storage 持久化（无消息总线依赖）| 集成测试 |
+| SAFETY-12 | Web API `GET /api/v1/safety_wrapper/status` 返回当前状态 | API 测试 |
+| SAFETY-13 | Web API `GET /api/v1/safety_wrapper/recent_violations` 返回最近 100 条 | API 测试 |
+| SAFETY-14 | Web API `GET /api/v1/safety_wrapper/stats` 返回统计指标 | API 测试 |
+| SAFETY-15 | Web UI 监控面板可访问且实时刷新 | UI 集成测试 |
+| SAFETY-16 | 拒绝率超过阈值（默认 20%）时触发 Web UI 告警 | 集成测试 |
+| SAFETY-17 | 端到端延迟增加 < 5ms（< 120ms 总预算的 5%）| 性能测试 |
+
+#### 3.7.5 兼容性说明
+
+| 项 | 影响 | 处理 |
+|----|------|------|
+| 新增 SafetyRLWrapper 模块 | 不破坏现有数据流 | 与 ModelManager 集成点明确 |
+| RobustnessManager 已有 | 边界明确即可 | 两者串联，顺序明确 |
+| ActionValidator 已有 | 仅静态校验 | 在 SafetyRLWrapper 后执行 |
+| Web API 新增 3 个端点 | 不影响现有路由 | 路径命名空间 `ai/safety_wrapper/*` |
+| Web UI 新增面板 | 不影响现有 UI | 独立页面 `ai-monitor.html` |
+| 配置文件新增 `[safety_wrapper]` 段 | 默认值兜底 | 缺失时使用代码内默认值 |
+
+#### 3.7.6 非目标（v2.17 不做）
+
+| 项 | 状态 | 理由 |
+|----|------|------|
+| 自适应边界（基于历史数据自动调整 v_min/v_max）| 📋 推迟 | 需积累运行数据 |
+| 多台区协同安全检查 | 📋 推迟 | 单台区部署，无需跨台区协调 |
+| 复杂小信号模型（替换线性灵敏度）| 📋 推迟 | 5ms 性能预算下不适用 |
+| 拒绝率历史趋势机器学习预测 | 📋 推迟 | 增加复杂度，收益有限 |
+
+#### 3.7.7 改动文件清单
+
+| 模块 | 文件 | 类型 |
+|------|------|------|
+| AI 引擎 | `crates/ai-engine/src/safety_wrapper.rs` | 新增 |
+| AI 引擎 | `crates/ai-engine/src/lib.rs` | 导出新模块 |
+| AI 引擎 | `crates/ai-engine/src/model_manager.rs` | 修改（集成点） |
+| AI 引擎 | `crates/ai-engine/src/config.rs` | 修改（SafetyBounds 配置结构） |
+| 配置 | `mupc/config/ai.toml` | 修改（[safety_wrapper] 段） |
+| Web API | `crates/web-api/src/routes/ai/safety_wrapper.rs` | 新增 |
+| Web API | `crates/web-api/src/lib.rs` | 注册路由 |
+| Web UI | `crates/web-api/src/static/ai-monitor.html` | 新增（监控面板）|
+| 文档 | 本 PRD（§3.7）| 修改 |
+| 文档 | 设计文档 §6.x | 后续追加 |
+
+---
+
+## 4. 多源数据融合
 
 ---
 

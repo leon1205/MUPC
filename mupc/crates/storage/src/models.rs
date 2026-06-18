@@ -57,3 +57,17 @@ pub struct AssetRecord {
     pub installed_at: DateTime<Utc>,
     pub last_maintenance: Option<DateTime<Utc>>,
 }
+
+/// v2.17 安全包装器违规记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyViolation {
+    pub id: Option<i64>,
+    pub timestamp: i64,
+    pub reason: String,
+    pub proposed_p_ref: f64,
+    pub proposed_k_droop: f64,
+    pub fallback_p_ref: f64,
+    pub fallback_k_droop: f64,
+    pub v_predicted: f64,
+    pub latency_us: i64,
+}

@@ -2284,6 +2284,743 @@ pub fn blend_actions(&self, a_old: &ActionOutput, a_new: &ActionOutput, alpha: f
 
 ---
 
+### 5.16 v2.17 高优先级实现：安全 RL 包装器（Safety RL Wrapper）
+
+> **状态：** `[DESIGN_APPROVED]` | **设计日期：** 2026-06-18 | **批准轮次：** 第三轮（修复 D-01/D-02/D-03）
+
+> **来源**：`docs/TODO/安全RL包装器.md` + `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md §3.7`
+
+#### 5.16.1 需求描述
+
+**现存问题**：
+- ActionValidator 仅做静态数值校验（值域、变化率、调度约束），无法预测动作施加后电网的短时动态响应
+- RobustnessManager（v2.9 已实现）属被动防御，仅在异常已发生（电压<0.9p.u.）时才介入，存在滞后窗口
+- 合法的 `p_ref`（-30kW）在低电压工况下可致电压从 0.98 骤降至 0.92
+
+**设计目标**：在 RL 决策后、ActionValidator 前插入**物理模型前置过滤器**，基于戴维南等效电路预测电压变化，提前拒绝高风险动作。
+
+**设计原则**（PRD §3.7.1）：
+1. **轻量化**：单次检查 < 5ms（远小于 120ms 总预算）
+2. **保守优先**：预测失败回退到上一有效动作
+3. **可证明安全**：基于简化电路方程，非黑盒
+4. **与现有模块正交**：不修改 RL/ActionValidator/RewardCalculator
+
+#### 5.16.2 数据结构
+
+**核心结构体**：
+
+```rust
+// 文件：crates/ai-engine/src/safety_wrapper.rs
+
+/// 线路阻抗参数（来自配置文件）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LineImpedance {
+    pub r_ohm: f64,        // 电阻 R（Ω）
+    pub x_ohm: f64,        // 电抗 X（Ω）
+    pub v_base: f64,       // 基准电压（V），默认 220.0
+}
+
+/// 安全边界
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafetyBounds {
+    pub v_min: f64,        // 0.93（p.u.）
+    pub v_max: f64,        // 1.07（p.u.）
+    pub dv_dt_max: f64,    // 0.03（p.u./s）
+    pub soc_margin: f64,   // 0.02（比临界多 2%）
+}
+
+/// 物理模型预测结果
+#[derive(Debug, Clone)]
+pub struct PredictionResult {
+    pub v_predicted: f64,       // 预测电压（p.u.）
+    pub dv_dt: f64,             // 电压变化率（p.u./s）
+    pub soc_after: f64,         // 动作后 SOC 估算
+    pub is_safe: bool,          // 综合安全标志
+    pub reason: Option<String>, // 不安全原因
+}
+
+/// 检查结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CheckResult {
+    Passed,
+    Rejected { reason: String },
+    FallbackDueToPredictionError,
+}
+
+/// 安全包装器主结构
+pub struct SafetyRLWrapper {
+    line_impedance: Arc<RwLock<LineImpedance>>,
+    last_safe_action: Arc<RwLock<ActionOutput>>,
+    bounds: SafetyBounds,
+    stats: Arc<RwLock<SafetyStats>>,
+    // v2.17 新增：事件广播（用于 SSE 推送给 Web UI）
+    event_sender: Option<SafetyEventSender>,
+}
+
+/// 累计指标
+#[derive(Debug, Default, Clone)]
+pub struct SafetyStats {
+    pub total_checks: u64,
+    pub total_rejected: u64,
+    pub total_fallback: u64,
+    pub rejection_rate_1h: f64,
+    pub avg_latency_us: u64,
+    pub max_latency_us: u64,
+}
+
+/// 违规记录（持久化）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyViolation {
+    pub timestamp: i64,
+    pub reason: String,
+    pub proposed_p_ref: f64,
+    pub proposed_k_droop: f64,
+    pub fallback_p_ref: f64,
+    pub fallback_k_droop: f64,
+    pub v_predicted: f64,
+    pub latency_us: u64,
+}
+
+/// 安全包装器事件（v2.17 新增，broadcast 推送用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyWrapperEvent {
+    pub timestamp: i64,
+    pub event_type: SafetyEventType,
+    pub check_result: CheckResult,
+    pub proposed_p_ref: f64,
+    pub proposed_k_droop: f64,
+    pub fallback_p_ref: f64,
+    pub fallback_k_droop: f64,
+    pub v_predicted: f64,
+    pub latency_us: u64,
+}
+
+/// 事件类型（区分违规 vs 通过 vs 回退）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SafetyEventType {
+    Passed,
+    Violation,
+    Fallback,
+}
+
+/// 全局事件总线 Sender（由 main.rs 注入）
+pub type SafetyEventSender = tokio::sync::broadcast::Sender<SafetyWrapperEvent>;
+```
+
+**SafetyPredictor trait（可替换）**：
+
+```rust
+#[async_trait]
+pub trait SafetyPredictor: Send + Sync {
+    async fn predict(
+        &self,
+        state: &FusedSystemState,
+        action: &ActionOutput,
+    ) -> Result<PredictionResult, AiEngineError>;
+}
+
+/// 默认线性灵敏度预测器（戴维南等效）
+pub struct LinearSensitivityPredictor {
+    impedance: LineImpedance,
+    bounds: SafetyBounds,
+}
+
+impl LinearSensitivityPredictor {
+    /// 戴维南等效电路 + 灵敏度分析
+    /// 
+    /// 公式：ΔV ≈ (R·ΔP + X·ΔQ) / V₀
+    /// 单位换算：P/Q 单位 kW/kVar → V 单位 V → p.u. (÷v_base)
+    pub async fn predict_inner(
+        &self,
+        state: &FusedSystemState,
+        action: &ActionOutput,
+    ) -> Result<PredictionResult, AiEngineError> {
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        
+        // 当前 P_output（含下垂）
+        let p_cur = state.p_ref_current.unwrap_or(0.0)
+            + state.k_droop_current.unwrap_or(0.0) * (v_avg - 1.0);
+        
+        // 新动作下的 P_output
+        let p_new = action.p_ref + action.k_droop * (v_avg - 1.0);
+        
+        // ΔP 转换为 W
+        let delta_p_w = (p_new - p_cur) * 1000.0;
+        
+        // ΔQ 估算（基于 q_realtime_margin）
+        let q_margin = state.q_realtime_margin;
+        let delta_q_var = if q_margin > 0.20 {
+            0.0  // Q 有裕度，认为实时模块维持当前 Q
+        } else {
+            // Q 饱和：假设实时模块全力调节
+            let q_max_var = 300.0;  // 与 yaml 配置对齐
+            (1.0 - q_margin) * q_max_var * (v_avg - 1.0).signum()
+        };
+        
+        // 灵敏度公式：ΔV ≈ (R·ΔP + X·ΔQ) / V₀
+        let delta_v_volt = (self.impedance.r_ohm * delta_p_w 
+            + self.impedance.x_ohm * delta_q_var) / self.impedance.v_base;
+        let delta_v_pu = delta_v_volt / self.impedance.v_base;
+        
+        let v_predicted = v_avg + delta_v_pu;
+        
+        // 边界检查
+        let is_safe = v_predicted >= self.bounds.v_min
+            && v_predicted <= self.bounds.v_max
+            && delta_v_pu.abs() <= self.bounds.dv_dt_max;
+        
+        // SOC 检查
+        let soc_ok = !(action.p_ref > 0.0 && state.battery_soc < 0.10 + self.bounds.soc_margin);
+        
+        let reason = if !is_safe {
+            Some(format!(
+                "v_predicted={:.3} 越界 [{}, {}]",
+                v_predicted, self.bounds.v_min, self.bounds.v_max
+            ))
+        } else if !soc_ok {
+            Some(format!(
+                "SOC={:.3} 低于安全阈值 {:.3}",
+                state.battery_soc, 0.10 + self.bounds.soc_margin
+            ))
+        } else {
+            None
+        };
+        
+        Ok(PredictionResult {
+            v_predicted,
+            dv_dt: delta_v_pu,
+            soc_after: state.battery_soc,  // 简化：假设 1 秒内 SOC 不变
+            is_safe: is_safe && soc_ok,
+            reason,
+        })
+    }
+}
+```
+
+#### 5.16.3 核心算法：check_and_fallback 流程
+
+```rust
+impl SafetyRLWrapper {
+    pub async fn check_and_fallback(
+        &self,
+        state: &FusedSystemState,
+        proposed_action: &ActionOutput,
+    ) -> (ActionOutput, CheckResult) {
+        let start = std::time::Instant::now();
+        
+        // 1. 物理模型预测
+        let pred = match self.predictor.predict(state, proposed_action).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("SafetyRLWrapper 预测失败: {:?}", e);
+                let latency = start.elapsed().as_micros() as u64;
+                self.update_stats(latency, true).await;
+                let fallback = self.last_safe_action.read().await.clone();
+                return (fallback, CheckResult::FallbackDueToPredictionError);
+            }
+        };
+        
+        // 2. 边界检查
+        let latency = start.elapsed().as_micros() as u64;
+        if !pred.is_safe {
+            tracing::warn!(
+                "SafetyRLWrapper 拒绝动作: reason={:?}, proposed={:?}",
+                pred.reason, proposed_action
+            );
+            self.update_stats(latency, true).await;
+            
+            // 发布违规事件
+            self.publish_violation(state, proposed_action, &pred, latency).await;
+            
+            let fallback = self.last_safe_action.read().await.clone();
+            return (fallback, CheckResult::Rejected { reason: pred.reason.unwrap_or_default() });
+        }
+        
+        // 3. 通过：更新 last_safe_action 和统计
+        *self.last_safe_action.write().await = proposed_action.clone();
+        self.update_stats(latency, false).await;
+        (proposed_action.clone(), CheckResult::Passed)
+    }
+    
+    async fn update_stats(&self, latency_us: u64, was_rejected: bool) {
+        let mut stats = self.stats.write().await;
+        stats.total_checks += 1;
+        if was_rejected { stats.total_rejected += 1; }
+        // 滑动平均延迟
+        stats.avg_latency_us = 
+            (stats.avg_latency_us * (stats.total_checks - 1) + latency_us) / stats.total_checks;
+        if latency_us > stats.max_latency_us { stats.max_latency_us = latency_us; }
+    }
+    
+    async fn publish_violation(
+        &self,
+        state: &FusedSystemState,
+        proposed: &ActionOutput,
+        pred: &PredictionResult,
+        latency_us: u64,
+    ) {
+        let fallback = self.last_safe_action.read().await.clone();
+        let violation = SafetyViolation {
+            timestamp: chrono::Utc::now().timestamp(),
+            reason: pred.reason.clone().unwrap_or_default(),
+            proposed_p_ref: proposed.p_ref,
+            proposed_k_droop: proposed.k_droop,
+            fallback_p_ref: fallback.p_ref,
+            fallback_k_droop: fallback.k_droop,
+            v_predicted: pred.v_predicted,
+            latency_us,
+        };
+        
+        // v2.17 修订（D-01/D-02 修复）：事件驱动架构
+// 使用 tokio::sync::broadcast 推送到全局事件总线
+// Web API SsePushService 订阅后通过 SSE 推送给 Web UI
+        let event = SafetyWrapperEvent {
+            timestamp: violation.timestamp,
+            event_type: SafetyEventType::Violation,
+            check_result: CheckResult::Rejected { reason: violation.reason.clone() },
+            proposed_p_ref: violation.proposed_p_ref,
+            proposed_k_droop: violation.proposed_k_droop,
+            fallback_p_ref: violation.fallback_p_ref,
+            fallback_k_droop: violation.fallback_k_droop,
+            v_predicted: violation.v_predicted,
+            latency_us: violation.latency_us,
+        };
+        
+        // 1. tracing 记录（持久审计日志）
+        tracing::warn!(
+            timestamp = event.timestamp,
+            reason = %violation.reason,
+            v_predicted = event.v_predicted,
+            latency_us = event.latency_us,
+            "SafetyRLWrapper 违规",
+        );
+        
+        // 2. broadcast 推送（实时事件，Web UI 通过 SSE 接收）
+        if let Some(sender) = &self.event_sender {
+            let _ = sender.send(event.clone());  // 失败不影响主流程
+        }
+        
+        // 3. storage 持久化（历史查询用）
+        crate::storage::record_safety_violation(&violation).await.ok();
+    }
+}
+```
+
+#### 5.16.4 ModelManager 集成
+
+**集成位置**：`full_decision_cycle` 第 6 步后、ActionValidator 前
+
+```rust
+// crates/ai-engine/src/model_manager.rs
+
+pub struct ModelManager {
+    // ... 现有字段 ...
+    safety_wrapper: Arc<SafetyRLWrapper>,  // v2.17 新增
+}
+
+// main.rs 中组装示例
+fn setup_safety_wrapper() -> (Arc<SafetyRLWrapper>, SafetyEventSender) {
+    let (tx, _) = tokio::sync::broadcast::channel(256);
+    let wrapper = Arc::new(SafetyRLWrapper {
+        line_impedance: Arc::new(RwLock::new(LineImpedance::default())),
+        last_safe_action: Arc::new(RwLock::new(ActionOutput::default())),
+        bounds: SafetyBounds::default(),
+        stats: Arc::new(RwLock::new(SafetyStats::default())),
+        event_sender: Some(tx.clone()),
+    });
+    (wrapper, tx)
+}
+
+impl ModelManager {
+    pub async fn full_decision_cycle(&self) -> Result<ActionOutput, AiEngineError> {
+        // ... 既有步骤 1-5（数据融合、LSTM预测、RL决策）...
+        
+        // Step 6: RL 决策（已有）
+        let rl_action = registry.decide(&input_vector, &action_space_config).await?;
+        
+        // Step 6.5: v2.17 新增 SafetyRLWrapper 检查
+        let (safe_action, check_result) = self.safety_wrapper.check_and_fallback(
+            &fused_state,
+            &rl_action,
+        ).await;
+        
+        // 记录检查结果
+        tracing::info!("SafetyRLWrapper: {:?}", check_result);
+        
+        // Step 7: ActionValidator（继续使用 safe_action）
+        let (validated, violations) = self.action_validator.validate(
+            &safe_action,
+            fused_state.dispatch_p_set,
+            false,
+            &action_space_config,
+        );
+        
+        // ... 既有步骤 8+ ...
+        Ok(validated)
+    }
+}
+```
+
+**与 RobustnessManager 协同顺序**（Q-W3=A 决策）：
+
+```
+完整决策链：
+
+RLModel.decide() → 原始动作
+   ↓
+[新] SafetyRLWrapper.check_and_fallback()    ← 事前预测（v2.17）
+   ↓ (安全/回退后的动作)
+RobustnessManager.detect_and_respond()       ← 事中应急（v2.9 已有）
+   ↓ (应急动作或原动作)
+ActionValidator.validate_dual()              ← 静态校验（v2.15 已有）
+   ↓
+strategy-engine
+```
+
+**边界明确**：
+- SafetyRLWrapper：**预测**未来电压越界则**事前拒绝**
+- RobustnessManager：**检测**当前异常（v_avg<0.9、>1.1、SOC 极值）则**应急**
+- ActionValidator：**校验**值域/变化率
+
+#### 5.16.5 配置结构
+
+**新增配置结构**（`crates/ai-engine/src/config.rs`）：
+
+```rust
+/// v2.17 安全 RL 包装器配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafetyWrapperConfig {
+    pub line_impedance_r_ohm: f64,    // 默认 0.1
+    pub line_impedance_x_ohm: f64,    // 默认 0.05
+    pub v_base: f64,                  // 默认 220.0
+    pub v_min: f64,                   // 默认 0.93
+    pub v_max: f64,                   // 默认 1.07
+    pub dv_dt_max: f64,               // 默认 0.03
+    pub soc_margin: f64,              // 默认 0.02
+    pub max_check_latency_ms: u64,    // 默认 5
+    pub alert_rejection_rate: f64,    // 默认 0.20（告警阈值）
+}
+
+impl Default for SafetyWrapperConfig {
+    fn default() -> Self {
+        Self {
+            line_impedance_r_ohm: 0.1,
+            line_impedance_x_ohm: 0.05,
+            v_base: 220.0,
+            v_min: 0.93,
+            v_max: 1.07,
+            dv_dt_max: 0.03,
+            soc_margin: 0.02,
+            max_check_latency_ms: 5,
+            alert_rejection_rate: 0.20,
+        }
+    }
+}
+```
+
+**ai.toml 配置段**：
+
+```toml
+[safety_wrapper]
+line_impedance_r_ohm = 0.1      # 线路电阻（Ω），从台区档案读取
+line_impedance_x_ohm = 0.05     # 线路电抗（Ω），从台区档案读取
+v_base = 220.0                  # 基准电压（V）
+v_min = 0.93                    # 电压下限
+v_max = 1.07                    # 电压上限
+dv_dt_max = 0.03                # 电压变化率上限
+soc_margin = 0.02               # SOC 安全裕度
+max_check_latency_ms = 5
+alert_rejection_rate = 0.20     # 拒绝率告警阈值
+```
+
+#### 5.16.6 Web API 设计（SSE 推送为主，HTTP API 仅用于状态查询）
+
+**架构变更**（v2.17 设计修订）：
+- 实时违规通知通过 **SSE 推送**（基于 broadcast channel）
+- HTTP API 仅用于：状态查询、统计查询（冷路径）
+
+**SSE 事件类型扩展**（`crates/web-api/src/sse/mod.rs`）：
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum SseEventType {
+    // ... 既有类型 ...
+    SafetyWrapperUpdate {
+        check_result: CheckResult,
+        reason: String,
+        v_predicted: f64,
+        latency_us: u64,
+    },
+}
+```
+
+**新增路由**（`crates/web-api/src/routes/ai/safety_wrapper.rs`）：
+
+```rust
+use axum::{
+    routing::get,
+    Router,
+    extract::State,
+    Json,
+};
+use crate::AppState;
+
+/// 路由注册
+pub fn safety_wrapper_routes() -> Router<AppState> {
+    Router::new()
+        .route("/status", get(get_status))                  // 状态查询
+        .route("/stats", get(get_stats))                    // 统计查询
+        // 实时通知通过 SSE EventSource 自动推送，无需轮询端点
+}
+
+/// GET /api/v1/safety_wrapper/status
+/// 当前状态（边界条件、line_impedance、累计指标）
+async fn get_status(
+    State(state): State<AppState>,
+    _user: crate::RequireRole<crate::Role>,
+) -> Json<SafetyStatus> {
+    let safety_wrapper = state.safety_wrapper.read().await;
+    Json(SafetyStatus {
+        bounds: safety_wrapper.bounds().clone(),
+        line_impedance: safety_wrapper.line_impedance().clone(),
+        stats: safety_wrapper.stats().clone(),
+    })
+}
+
+/// GET /api/v1/safety_wrapper/stats
+/// 统计指标
+async fn get_stats(
+    State(state): State<AppState>,
+    _user: crate::RequireRole<crate::Role>,
+) -> Json<SafetyStats> {
+    let safety_wrapper = state.safety_wrapper.read().await;
+    Json(safety_wrapper.stats().clone())
+}
+```
+
+**Web API 订阅 broadcast**（`AppState` 初始化时）：
+
+```rust
+// main.rs 或 AppState 初始化
+let safety_event_tx = setup_safety_wrapper_tx();
+let mut safety_event_rx = safety_event_tx.subscribe();
+
+let sse_service_clone = sse_service.clone();
+tokio::spawn(async move {
+    while let Ok(event) = safety_event_rx.recv().await {
+        let sse_event = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::SafetyWrapperUpdate {
+                check_result: event.check_result,
+                reason: event.reason.clone(),
+                v_predicted: event.v_predicted,
+                latency_us: event.latency_us,
+            },
+            timestamp: event.timestamp,
+            payload: serde_json::to_value(&event).unwrap_or_default(),
+        };
+        sse_service_clone.push(sse_event).await;
+    }
+});
+```
+
+**响应结构**：
+
+```rust
+#[derive(Serialize)]
+pub struct SafetyStatus {
+    pub bounds: SafetyBounds,
+    pub line_impedance: LineImpedance,
+    pub stats: SafetyStats,
+    pub current_mode: RunningMode,
+    pub last_check_result: Option<CheckResult>,
+}
+```
+
+**性能对比**：
+
+| 方案 | AI 引擎开销 | Web API 开销 | 实时性 |
+|------|------------|--------------|--------|
+| HTTP 轮询（10s）| 0（被动）| 0.1 req/s/客户端 | 最差 10s 延迟 |
+| **SSE 推送（推荐）** | **0（push 即可）** | **0（无主动查询）** | **<100ms** |
+
+**Web UI 集成**（修改 §5.16.7）：
+- 使用 `EventSource` API 订阅 SSE
+- 收到 `SafetyWrapperUpdate` 事件即更新 UI
+- 无需任何轮询代码
+```
+
+#### 5.16.7 Web UI 设计
+
+**页面**：`crates/web-api/src/static/ai-monitor.html`
+
+**布局（ASCII Mockup）**：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ MUPC AI 安全监控面板                              [刷新 ⇄]   │
+├──────────────────────────────────────────────────────────────┤
+│ ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐      │
+│ │ 当前安全状态 │ │ 拒绝率（24h） │ │ 平均延迟（P99）  │      │
+│ │   ✅ 安全    │ │   12.3%      │ │     1.2 ms       │      │
+│ └──────────────┘ └──────────────┘ └──────────────────┘      │
+│                                                              │
+│ 安全边界配置                                                 │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ 电压下限：0.93 p.u.    电压上限：1.07 p.u.              │ │
+│ │ dv/dt 上限：0.03 p.u./s  SOC 裕度：0.02 (12% 临界)       │ │
+│ │ 线路阻抗：R=0.10Ω, X=0.05Ω                             │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                              │
+│ 拒绝率趋势（24h）[折线图]                                    │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │   ╱╲                                                     │ │
+│ │  ╱  ╲    ╱╲                                              │ │
+│ │ ╱    ╲  ╱  ╲___                                          │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                              │
+│ 最近违规记录（最近 10 条）                                   │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ 2026-06-18 10:30:15 | v_predicted=0.92 | rejected      │ │
+│ │ 2026-06-18 10:30:14 | SOC=0.118 | rejected              │ │
+│ │ 2026-06-18 10:30:13 | v_predicted=0.91 | rejected      │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│                                                              │
+│ ⚠️ 拒绝率超过 20%，建议检查台区状态                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**交互要点**：
+1. **自动刷新**：状态卡片 5s，趋势图 30s，违规列表 10s
+2. **拒绝率告警**：当 `rejection_rate > 0.20` 时顶部显示红色横幅
+3. **点击违规记录**：弹出详情（建议动作、回退动作、v_predicted 等）
+4. **响应式布局**：≥1200px 显示完整布局，<1200px 卡片堆叠
+
+**API 调用**（v2.17 设计修订：SSE EventSource 订阅模式，**无轮询**）：
+
+```javascript
+// === 状态查询（5s 轮询，仅冷路径） ===
+setInterval(async () => {
+  const res = await fetch('/api/v1/safety_wrapper/status');
+  const status = await res.json();
+  updateStatusCards(status);
+  checkAlertThreshold(status.stats.rejection_rate_1h);
+}, 5000);
+
+// === 实时事件订阅（v2.17 新增，通过 SSE） ===
+// 监听 SafetyWrapperUpdate 事件，自动接收违规通知
+const eventSource = new EventSource('/api/v1/sse/safety_wrapper');
+eventSource.addEventListener('SafetyWrapperUpdate', (e) => {
+  const event = JSON.parse(e.data);
+  updateViolationList([event]);  // 立即更新违规列表
+  showAlertBanner(event);       // 显示告警横幅（如需要）
+});
+// 注意：违规列表接收是 push 模式，不是 pull 模式
+// Web UI 收到事件后更新本地状态，无需轮询 AI 引擎
+```
+
+#### 5.16.8 错误处理
+
+| 场景 | 处理策略 |
+|------|----------|
+| 物理模型预测 panic | 返回 `FallbackDueToPredictionError`，回退到 `last_safe_action` |
+| 物理模型预测超时（>5ms）| 返回 `FallbackDueToPredictionError`，记录 WARN |
+| 配置文件缺失 `[safety_wrapper]` | 使用代码内默认值 + 记录 INFO |
+| `LineImpedance` 字段为 0 | 使用默认值 + 记录 WARN |
+| `last_safe_action` 未初始化（首次）| 初始化为 `ActionOutput { p_ref: 0.0, k_droop: 0.0 }` |
+| 消息总线 publish 失败 | 记录 ERROR，不影响主流程 |
+| Storage 持久化失败 | 记录 ERROR，不影响主流程 |
+| Web API 鉴权失败 | 返回 403 |
+
+#### 5.16.9 测试策略
+
+| 测试类型 | 测试项 | 验证方法 |
+|----------|--------|----------|
+| 单元 | `LinearSensitivityPredictor::predict_inner` 数学正确性 | 给定 v_avg=0.98, p_cur=10, p_new=-20, 验证 v_predicted |
+| 单元 | 边界检查（v_min/v_max/dv_dt/soc）| 5 个边界场景 |
+| 单元 | `check_and_fallback` 通过/拒绝/回退 3 路径 | 3 个场景 |
+| 单元 | `update_stats` 累计指标正确性 | 模拟 100 次检查 |
+| 集成 | ModelManager 集成（与 RL/Validator/RobustnessManager 协同）| 模拟完整决策链 |
+| 集成 | 消息总线 publish 正确性 | Mock message_bus |
+| 集成 | Storage 持久化正确性 | 集成测试 |
+| API | 3 个端点返回正确 | API 测试 |
+| UI | 监控面板渲染 + 自动刷新 | Playwright 测试 |
+| 性能 | 单次检查 < 5ms（P99）| 1000 次采样 |
+
+**单元测试示例**：
+
+```rust
+#[test]
+fn test_predict_inner_low_voltage_risk() {
+    let predictor = LinearSensitivityPredictor::new(
+        LineImpedance { r_ohm: 0.1, x_ohm: 0.05, v_base: 220.0 },
+        SafetyBounds::default(),
+    );
+    
+    let state = FusedSystemState {
+        voltage_phase_a: 0.94,
+        voltage_phase_b: 0.94,
+        voltage_phase_c: 0.94,
+        battery_soc: 0.5,
+        q_realtime_margin: 0.5,
+        p_ref_current: Some(0.0),
+        k_droop_current: Some(0.0),
+        ..Default::default()
+    };
+    
+    let action = ActionOutput {
+        p_ref: 30.0,        // 放电 30kW
+        k_droop: 0.0,
+    };
+    
+    let pred = predictor.predict_inner(&state, &action).unwrap();
+    
+    // 放电使电压进一步降低，应触发安全检查
+    assert!(!pred.is_safe);
+    assert!(pred.reason.is_some());
+}
+```
+
+#### 5.16.10 影响文件
+
+| 文件 | 变更类型 | 估算代码行数 |
+|------|----------|-------------|
+| `ai-engine/src/safety_wrapper.rs` | **新增** | ~380 行 |
+| `ai-engine/src/lib.rs` | 修改（导出新模块）| +5 行 |
+| `ai-engine/src/model_manager.rs` | 修改（集成点）| +30 行 |
+| `ai-engine/src/config.rs` | 修改（SafetyWrapperConfig）| +50 行 |
+| `mupc/config/ai.toml` | 修改（[safety_wrapper] 段）| +15 行 |
+| `web-api/src/routes/ai/safety_wrapper.rs` | **新增** | ~60 行 |
+| `web-api/src/routes/ai/mod.rs` | 修改（注册路由）| +3 行 |
+| `web-api/src/sse/mod.rs` | 修改（新增 SafetyWrapperUpdate 事件）| +20 行 |
+| `web-api/src/static/ai-monitor.html` | **新增** | ~250 行 |
+| `storage/src/repository.rs` | 修改（新增 safety_violations 表）| +40 行 |
+| `main.rs` (bin) | 修改（依赖注入 broadcast channel）| +30 行 |
+| **合计** | — | **~880 行** |
+
+> **v2.17 设计修订（D-01/D-02/D-03 修复）**：
+> 1. 事件流采用 `tokio::sync::broadcast`（AI 引擎 → Web API → SSE → Web UI），不依赖 HTTP 轮询
+> 2. AI 引擎 `event_sender: Option<SafetyEventSender>` 字段，main.rs 注入 Sender
+> 3. Web API 订阅 broadcast Receiver，转发到现有 `SsePushService`
+> 4. Web UI 用 `EventSource` 订阅 SSE 端点，零轮询开销
+> 5. storage 持久化作为审计通道（与 broadcast 并行，独立存在）
+
+#### 5.16.11 设计决策记录
+
+| 决策项 | 选择 | 理由 |
+|--------|------|------|
+| 物理模型选择 | 线性灵敏度（戴维南等效）| 5ms 预算下最简单可靠的模型 |
+| 线路阻抗来源 | ai.toml 配置 | 跨台区可配，避免硬编码 |
+| 检查失败时回退目标 | `last_safe_action`（上一周期有效动作）| 与现有"通信中断保持最后参数"一致 |
+| 与 RobustnessManager 顺序 | SafetyRLWrapper 在前 | 事前预测先于事中应急 |
+| 违规日志存储 | 消息总线 + storage 双重 | 实时性 + 持久化查询 |
+| Web UI 技术 | 原生 HTML + JS（无框架）| 单页面简单，无构建工具链 |
+| 拒绝率告警阈值 | 20%（可配置）| 经验值，需现场调优 |
+
+---
+
 ## 6. RKNN Runtime 设计
 
 ### 6.1 功能概述

@@ -17,6 +17,9 @@ pub struct AiEngineConfig {
     /// v2.5 奖励阈值配置（对应 PRD 4.1）
     #[serde(default)]
     pub reward_thresholds: RewardThresholdConfig,
+    /// v2.17 安全 RL 包装器配置
+    #[serde(default)]
+    pub safety_wrapper: SafetyWrapperConfig,
 }
 
 /// LSTM 模型配置
@@ -367,6 +370,45 @@ impl Default for SceneWeights {
             demand_control: [1.0, 0.5],
             virtual_power_plant: [1.0, 2.0, 1.0],
             ultra_green: [1.0, 1.0],
+        }
+    }
+}
+
+/// v2.17 安全 RL 包装器配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafetyWrapperConfig {
+    /// 线路电阻 R（Ω）
+    pub line_impedance_r_ohm: f64,
+    /// 线路电抗 X（Ω）
+    pub line_impedance_x_ohm: f64,
+    /// 基准电压（V）
+    pub v_base: f64,
+    /// 电压下限（p.u.）
+    pub v_min: f64,
+    /// 电压上限（p.u.）
+    pub v_max: f64,
+    /// 电压变化率上限（p.u./s）
+    pub dv_dt_max: f64,
+    /// SOC 安全裕度（比临界 10% 多此值）
+    pub soc_margin: f64,
+    /// 单次检查最大延迟（ms）
+    pub max_check_latency_ms: u64,
+    /// 拒绝率告警阈值
+    pub alert_rejection_rate: f64,
+}
+
+impl Default for SafetyWrapperConfig {
+    fn default() -> Self {
+        Self {
+            line_impedance_r_ohm: 0.1,
+            line_impedance_x_ohm: 0.05,
+            v_base: 220.0,
+            v_min: 0.93,
+            v_max: 1.07,
+            dv_dt_max: 0.03,
+            soc_margin: 0.02,
+            max_check_latency_ms: 5,
+            alert_rejection_rate: 0.20,
         }
     }
 }
