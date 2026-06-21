@@ -249,9 +249,10 @@ impl SmoothSceneTransition {
     pub fn remaining_steps(&self) -> usize {
         match self.state {
             TransitionState::Idle => self.config.transition_steps,
-            TransitionState::InProgress => {
-                self.config.transition_steps.saturating_sub(self.step_counter)
-            }
+            TransitionState::InProgress => self
+                .config
+                .transition_steps
+                .saturating_sub(self.step_counter),
             TransitionState::Completed => 0,
         }
     }
@@ -361,6 +362,9 @@ impl DualStrategyHead {
         Some(ActionOutput {
             p_ref: one_minus_alpha * a_old.p_ref + alpha * a_new.p_ref,
             k_droop: one_minus_alpha * a_old.k_droop + alpha * a_new.k_droop,
+            load_shedding: one_minus_alpha * a_old.load_shedding + alpha * a_new.load_shedding,
+            pv_limit: one_minus_alpha * a_old.pv_limit + alpha * a_new.pv_limit,
+            confidence: (one_minus_alpha * a_old.confidence + alpha * a_new.confidence).min(1.0),
         })
     }
 
@@ -917,7 +921,8 @@ mod tests {
         let config = TransitionConfig {
             transition_steps: 10,
         };
-        let transition = SmoothSceneTransition::new_with_weights(config, vec![1.0, 2.0], vec![1.0, 2.0]);
+        let transition =
+            SmoothSceneTransition::new_with_weights(config, vec![1.0, 2.0], vec![1.0, 2.0]);
         assert_eq!(transition.state(), TransitionState::Completed);
     }
 
@@ -936,7 +941,10 @@ mod tests {
         assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
 
         // 检查平滑过渡状态
-        assert_eq!(selector.transition_state(), Some(TransitionState::InProgress));
+        assert_eq!(
+            selector.transition_state(),
+            Some(TransitionState::InProgress)
+        );
         assert_eq!(selector.remaining_transition_steps(), 5);
 
         // 获取插值权重
@@ -947,7 +955,10 @@ mod tests {
         for _ in 0..5 {
             let _ = selector.current_weights();
         }
-        assert_eq!(selector.transition_state(), Some(TransitionState::Completed));
+        assert_eq!(
+            selector.transition_state(),
+            Some(TransitionState::Completed)
+        );
         assert_eq!(selector.remaining_transition_steps(), 0);
     }
 

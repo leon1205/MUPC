@@ -27,3 +27,12 @@ logs/
 
 # Playwright MCP artifacts
 .playwright-mcp/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# MSSA optimizer cache (auto-generated)
+tools/mssa_optimizer/mssa_cache.json

@@ -20,6 +20,10 @@ pub struct AiEngineConfig {
     /// v2.17 安全 RL 包装器配置
     #[serde(default)]
     pub safety_wrapper: SafetyWrapperConfig,
+    /// v1.0 预测增强配置（VMD + Attention）
+    /// 缺失时全部增强功能禁用，运行于 v2.16 基线模式
+    #[serde(default)]
+    pub prediction_enhancement: Option<PredictionEnhancementConfig>,
 }
 
 /// LSTM 模型配置
@@ -43,7 +47,7 @@ impl Default for LstmConfig {
     fn default() -> Self {
         Self {
             model_path: PathBuf::from("/etc/mupc/models/lstm.rknn"),
-            input_window_secs: 21_600,  // 6 小时
+            input_window_secs: 21_600,   // 6 小时
             output_horizon_secs: 22_500, // 225 分钟 = 15 步 × 15 分钟
             step_seconds: 900,           // 15 分钟步长
             quantization: QuantizationType::INT8,
@@ -307,7 +311,10 @@ pub struct WeightBounds {
 
 impl Default for WeightBounds {
     fn default() -> Self {
-        Self { min: 0.01, max: 10.0 }
+        Self {
+            min: 0.01,
+            max: 10.0,
+        }
     }
 }
 
@@ -373,6 +380,12 @@ impl Default for SceneWeights {
         }
     }
 }
+
+/// 预测增强配置（v1.0，2026-06-21）
+///
+/// 挂载在 `AiEngineConfig.prediction_enhancement` 下。
+/// 缺失时（None）全部增强功能禁用，运行于 v2.16 基线模式。
+pub type PredictionEnhancementConfig = crate::pipeline_config::PredictionEnhancementConfig;
 
 /// v2.17 安全 RL 包装器配置
 #[derive(Debug, Clone, Deserialize, Serialize)]

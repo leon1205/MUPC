@@ -205,7 +205,7 @@ async fn decision_insert_and_query() {
     let (_, svc) = setup().await;
     svc.decisions
         .insert(&make_decision(
-            "SeasonalLoadManagement",
+            "AgriculturalIrrigation",
             r#"{"p_batt": 10}"#,
         ))
         .await
@@ -220,7 +220,7 @@ async fn decision_insert_and_query() {
 
     let by_scene = svc
         .decisions
-        .get_by_scene("SeasonalLoadManagement", 10)
+        .get_by_scene("AgriculturalIrrigation", 10)
         .await
         .unwrap();
     assert_eq!(by_scene.len(), 1);

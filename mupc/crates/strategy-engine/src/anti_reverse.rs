@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mupc_common::MupcError;
 use mupc_data_processing::telemetry::DataPackage;
 
-/// 防逆流策略（v2.15: 本地策略独立执行，非 AI 动作维度）
+/// 防逆流策略
 pub struct AntiReverseStrategy {
     config: AntiReverseConfig,
     pv_limit_count: AtomicU8,
@@ -37,8 +37,6 @@ impl AntiReverseStrategy {
             cmd_id: 3,
             cmd_type: CommandType::PowerRegulation,
             p_batt_set: Some(p_batt),
-            p_ref: None,
-            k_droop: None,
             q_batt_set: None,
             phase_compensation: None,
             start_stop: Some(true),

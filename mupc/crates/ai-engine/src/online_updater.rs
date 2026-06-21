@@ -161,8 +161,8 @@ impl OnlineUpdater {
 // v2.13: PER + KL 正则化强化
 // ─────────────────────────────────────────────────────────────────────────────
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// 优先经验回放样本
 #[derive(Debug, Clone)]
@@ -237,8 +237,8 @@ impl PerBuffer {
         Self {
             samples: Vec::with_capacity(capacity),
             capacity,
-            alpha: 0.6,  // PER 标准值
-            beta: 0.4,   // 初始值，训练中渐增到 1.0
+            alpha: 0.6, // PER 标准值
+            beta: 0.4,  // 初始值，训练中渐增到 1.0
         }
     }
 
@@ -275,7 +275,11 @@ impl PerBuffer {
         }
 
         // 计算总优先级
-        let total_priority: f32 = self.samples.iter().map(|s| s.priority.powf(self.alpha)).sum();
+        let total_priority: f32 = self
+            .samples
+            .iter()
+            .map(|s| s.priority.powf(self.alpha))
+            .sum();
 
         // 加权随机采样
         let mut result = Vec::with_capacity(batch_size.min(self.samples.len()));
@@ -292,8 +296,9 @@ impl PerBuffer {
                     // 计算重要性采样权重
                     // w_i = (N * p_i / sum(p))^(-β)
                     let n = self.samples.len() as f32;
-                    let weight = ((n * sample.priority.powf(self.alpha) / total_priority).max(1e-6))
-                        .powf(-self.beta);
+                    let weight = ((n * sample.priority.powf(self.alpha) / total_priority)
+                        .max(1e-6))
+                    .powf(-self.beta);
                     result.push((i, weight));
                     break;
                 }
@@ -340,9 +345,9 @@ pub struct KLDivergenceConfig {
 impl Default for KLDivergenceConfig {
     fn default() -> Self {
         Self {
-            beta: 0.01,   // 默认权重
+            beta: 0.01,      // 默认权重
             target_kl: 0.01, // 目标 KL 散度
-            kl_max: 0.05,  // 最大允许 KL 散度
+            kl_max: 0.05,    // 最大允许 KL 散度
         }
     }
 }
@@ -388,11 +393,7 @@ impl KLDivergenceCalculator {
     /// 计算正则化损失
     ///
     /// L_kl = β * D_KL(π_new || π_offline)
-    pub fn compute_regularization(
-        &self,
-        pi_new: &[f32],
-        pi_offline: &[f32],
-    ) -> f32 {
+    pub fn compute_regularization(&self, pi_new: &[f32], pi_offline: &[f32]) -> f32 {
         let kl = self.compute_kl_gaussian(pi_offline, pi_new, pi_offline, pi_new);
         self.config.beta * kl
     }
@@ -433,11 +434,7 @@ pub struct ActionConsistencyCheck {
 
 impl ActionConsistencyCheck {
     /// 检查动作一致性
-    pub fn check(
-        action_new: &[f32],
-        action_old: &[f32],
-        threshold: f32,
-    ) -> Self {
+    pub fn check(action_new: &[f32], action_old: &[f32], threshold: f32) -> Self {
         if action_new.len() != action_old.len() {
             return Self {
                 is_consistent: false,
@@ -499,7 +496,11 @@ impl OnlineUpdaterExt for OnlineUpdater {
 
         // 检查 KL 是否可接受
         if !kl_calc.is_kl_acceptable(kl) {
-            tracing::warn!("KL divergence {} exceeds max {}, rejected", kl, kl_calc.config.kl_max);
+            tracing::warn!(
+                "KL divergence {} exceeds max {}, rejected",
+                kl,
+                kl_calc.config.kl_max
+            );
             return Err(AiEngineError::OnlineUpdateFailed(format!(
                 "KL divergence {} exceeds max",
                 kl
@@ -511,7 +512,9 @@ impl OnlineUpdaterExt for OnlineUpdater {
 
         tracing::debug!(
             "PER+KL update: task_loss={:.6}, kl={:.6}, total_loss={:.6}",
-            task_loss, kl, total_loss
+            task_loss,
+            kl,
+            total_loss
         );
 
         Ok(total_loss)

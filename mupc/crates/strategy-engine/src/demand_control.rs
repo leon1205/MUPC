@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use mupc_common::MupcError;
 use mupc_data_processing::telemetry::DataPackage;
 
-/// 需量控制策略（v2.15: 本地策略独立执行，非 AI 动作维度）
+/// 需量控制策略
 pub struct DemandControlStrategy {
     config: DemandControlConfig,
 }
@@ -28,8 +28,6 @@ impl DemandControlStrategy {
                 CommandType::PowerRegulation
             },
             p_batt_set: Some(p_batt),
-            p_ref: None,
-            k_droop: None,
             q_batt_set: None,
             phase_compensation: None,
             start_stop: Some(true),

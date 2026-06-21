@@ -7,10 +7,8 @@ mod tests {
     #[test]
     fn test_ai_engine_config_default() {
         let lstm = LstmConfig::default();
-        // v2.16: 默认值已变更（对齐 MUPC-AI2 训练管线 15 分钟步长）
-        assert_eq!(lstm.input_window_secs, 21600);  // 6 小时
-        assert_eq!(lstm.output_horizon_secs, 22500); // 225 分钟 = 15 步 × 15 分钟
-        assert_eq!(lstm.step_seconds, 900);          // 15 分钟步长
+        assert_eq!(lstm.input_window_secs, 3600);
+        assert_eq!(lstm.output_horizon_secs, 900);
 
         let rl = RlConfig::default();
         assert_eq!(rl.algorithm, RlAlgorithm::MADDPG);

@@ -36,7 +36,7 @@ pub use tls::{TlsClientConfig, TlsConnector};
 // Phase 2+ 重导出
 pub use alarm::{AlertEvent, AlertManager, AlertSeverity, AlertSink, AlertType};
 pub use audit::{AuditEventType, AuditLogEntry, AuditLogger, AuditSeverity};
-pub use cert_mgr::{CertManager, CertMeta, CertType, CrlManager};
+pub use cert_mgr::{CertManager, CertMeta, CrlManager};
 pub use compliance::{ComplianceChecker, ComplianceItem, ComplianceReport};
 pub use lea::{LeaConfig, LeaManager, TunnelState};
 pub use lea_vici::ViciClient;

@@ -22,12 +22,7 @@ pub struct ControlCommand {
     /// 命令类型
     pub cmd_type: CommandType,
     /// 电池有功设定 (kW)
-    #[deprecated(since = "v2.0", note = "使用 p_ref 替代（双参数模式）")]
     pub p_batt_set: Option<f64>,
-    /// 有功功率基准点 (kW)，负值=充电，正值=放电
-    pub p_ref: Option<f64>,
-    /// 电压-有功下垂系数 (kW/V)
-    pub k_droop: Option<f64>,
     /// 电池无功设定 (kVar)
     pub q_batt_set: Option<f64>,
     /// 分相补偿系数
@@ -36,9 +31,9 @@ pub struct ControlCommand {
     pub start_stop: Option<bool>,
     /// 优先级
     pub priority: u8,
-    /// PV 限功率比例 (0.0-1.0)，v2.15起由本地防逆流策略设置，非AI动作维度
+    /// PV 限功率比例 (0.0-1.0)，用于防逆流策略
     pub pv_limit: Option<f64>,
-    /// 负荷切除功率 (kW)，v2.15起由本地需量控制策略设置，非AI动作维度
+    /// 负荷切除功率 (kW)，用于需量控制策略
     pub load_shedding: Option<f64>,
 }
 

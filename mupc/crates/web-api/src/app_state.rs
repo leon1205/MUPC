@@ -13,7 +13,6 @@ use crate::routes::config::AppConfig;
 use crate::sse::SsePushService;
 use mupc_ai_engine::mode_selector::ModeSelector;
 use mupc_ai_engine::online_updater::OnlineUpdater;
-use mupc_ai_engine::safety_wrapper::SafetyRLWrapper;
 use mupc_ota_update::manager::OtaManager;
 use mupc_storage::services::StorageService;
 use mupc_strategy_engine::AiIntegrator;
@@ -44,8 +43,6 @@ pub struct AppState {
     pub online_updater: Arc<Mutex<OnlineUpdater>>,
     /// A/B 测试管理器
     pub ab_test_manager: Arc<AbTestManager>,
-    /// v2.17: 安全 RL 包装器（已内置 RwLock）
-    pub safety_wrapper: Arc<SafetyRLWrapper>,
 }
 
 impl AppState {
@@ -61,7 +58,6 @@ impl AppState {
         ota_manager: Arc<dyn OtaManager>,
         online_updater: OnlineUpdater,
         ab_test_manager: AbTestManager,
-        safety_wrapper: SafetyRLWrapper,
     ) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
@@ -74,7 +70,6 @@ impl AppState {
             ota_manager,
             online_updater: Arc::new(Mutex::new(online_updater)),
             ab_test_manager: Arc::new(ab_test_manager),
-            safety_wrapper: Arc::new(safety_wrapper),
         }
     }
 }

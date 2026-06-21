@@ -43,7 +43,10 @@ pub trait WeatherService: Send + Sync {
     ///
     /// # 返回
     /// - 温度预测数组（按小时排序）
-    fn get_temperature_forecast(&self, _hours_ahead: u32) -> Result<Vec<f32>, crate::error::AiEngineError> {
+    fn get_temperature_forecast(
+        &self,
+        _hours_ahead: u32,
+    ) -> Result<Vec<f32>, crate::error::AiEngineError> {
         // 默认实现：返回空数组，子类可重写
         Ok(Vec::new())
     }
@@ -56,7 +59,9 @@ pub struct DefaultWeatherService {
 
 impl DefaultWeatherService {
     pub fn new(default_temperature: f32) -> Self {
-        Self { default_temperature }
+        Self {
+            default_temperature,
+        }
     }
 }
 
@@ -68,7 +73,9 @@ impl WeatherService for DefaultWeatherService {
 
 /// data_fusion.rs 需提供此 trait（PLF-05）
 pub trait DataFusionProvider: Send + Sync {
-    fn get_fused_state(&self) -> Result<crate::data_fusion::FusedSystemState, crate::error::AiEngineError>;
+    fn get_fused_state(
+        &self,
+    ) -> Result<crate::data_fusion::FusedSystemState, crate::error::AiEngineError>;
 }
 
 /// WeatherService 实现（从 data_fusion.rs 获取气象融合数据）

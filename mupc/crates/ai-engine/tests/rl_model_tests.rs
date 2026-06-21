@@ -2,7 +2,7 @@
 
 use mupc_ai_engine::action_space::ActionSpaceConfig;
 use mupc_ai_engine::config::{QuantizationType, RlAlgorithm, RlConfig};
-use mupc_ai_engine::rl_model::{parse_action_output, parse_action_output_legacy, RLModel, SystemState};
+use mupc_ai_engine::rl_model::{parse_action_output, RLModel, SystemState};
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -48,20 +48,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_action_output_2_fields() {
-        let raw = vec![100.0_f32, 50.0];
+    fn test_parse_action_output_5_fields() {
+        let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
         let cfg = ActionSpaceConfig::default_config();
         let action = parse_action_output(&raw, &cfg).unwrap();
         assert_eq!(action.p_ref, 100.0);
         assert_eq!(action.k_droop, 50.0);
-    }
-
-    #[test]
-    fn test_parse_action_output_legacy_4_fields() {
-        let raw = vec![100.0_f32, 10.0, 0.8, 0.9];
-        let cfg = ActionSpaceConfig::default_config();
-        let action = parse_action_output_legacy(&raw, &cfg).unwrap();
-        assert_eq!(action.p_batt_set, 100.0);
         assert_eq!(action.load_shedding, 10.0);
         assert_eq!(action.pv_limit, 0.8);
         assert_eq!(action.confidence, 0.9);

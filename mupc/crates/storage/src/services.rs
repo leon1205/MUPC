@@ -1,7 +1,6 @@
 use crate::errors::StorageError;
 use crate::models::*;
 use crate::repository::*;
-use chrono::Datelike;
 use parking_lot::Mutex;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
@@ -45,32 +44,37 @@ impl StorageService {
     /// 更新动作空间配置（upsert 语义）
     ///
     /// 若 transformer_id 已存在则更新，若不存在则插入。
-    /// v2.15: 移除 max_load_shedding 和 pv_limit_min 参数（load_shedding/pv_limit 不再属于 AI 动作维度）
     pub async fn update_action_space_config(
         &self,
         transformer_id: &str,
         max_batt_charge_power: f64,
         max_batt_discharge_power: f64,
+        max_load_shedding: f64,
         max_apparent_power_kva: f64,
         p_batt_ramp_limit_kw: f64,
         q_batt_ramp_limit_kvar: f64,
+        pv_limit_min: f64,
     ) -> Result<(), StorageError> {
         // 先尝试更新
         let affected = sqlx::query(
             "UPDATE action_space_config SET
                 max_batt_charge_power = ?,
                 max_batt_discharge_power = ?,
+                max_load_shedding = ?,
                 max_apparent_power_kva = ?,
                 p_batt_ramp_limit_kw = ?,
                 q_batt_ramp_limit_kvar = ?,
+                pv_limit_min = ?,
                 updated_at = CURRENT_TIMESTAMP
              WHERE transformer_id = ?",
         )
         .bind(max_batt_charge_power)
         .bind(max_batt_discharge_power)
+        .bind(max_load_shedding)
         .bind(max_apparent_power_kva)
         .bind(p_batt_ramp_limit_kw)
         .bind(q_batt_ramp_limit_kvar)
+        .bind(pv_limit_min)
         .bind(transformer_id)
         .execute(self.pool.as_ref())
         .await
@@ -81,16 +85,18 @@ impl StorageService {
             sqlx::query(
                 "INSERT INTO action_space_config
                     (transformer_id, max_batt_charge_power, max_batt_discharge_power,
-                     max_apparent_power_kva, p_batt_ramp_limit_kw,
-                     q_batt_ramp_limit_kvar)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                     max_load_shedding, max_apparent_power_kva, p_batt_ramp_limit_kw,
+                     q_batt_ramp_limit_kvar, pv_limit_min)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(transformer_id)
             .bind(max_batt_charge_power)
             .bind(max_batt_discharge_power)
+            .bind(max_load_shedding)
             .bind(max_apparent_power_kva)
             .bind(p_batt_ramp_limit_kw)
             .bind(q_batt_ramp_limit_kvar)
+            .bind(pv_limit_min)
             .execute(self.pool.as_ref())
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
@@ -103,15 +109,16 @@ impl StorageService {
     ///
     /// v2.6 扩展：新增 transformer_kva, battery_capacity_kwh,
     /// soc_min, soc_max, overload_threshold 字段。
-    /// v2.15: 移除 max_load_shedding 和 pv_limit_min 参数。
     pub async fn update_action_space_config_full(
         &self,
         transformer_id: &str,
         max_batt_charge_power: f64,
         max_batt_discharge_power: f64,
+        max_load_shedding: f64,
         max_apparent_power_kva: f64,
         p_batt_ramp_limit_kw: f64,
         q_batt_ramp_limit_kvar: f64,
+        pv_limit_min: f64,
         transformer_kva: f64,
         battery_capacity_kwh: f64,
         soc_min: f64,
@@ -123,9 +130,11 @@ impl StorageService {
             "UPDATE action_space_config SET
                 max_batt_charge_power = ?,
                 max_batt_discharge_power = ?,
+                max_load_shedding = ?,
                 max_apparent_power_kva = ?,
                 p_batt_ramp_limit_kw = ?,
                 q_batt_ramp_limit_kvar = ?,
+                pv_limit_min = ?,
                 transformer_kva = ?,
                 battery_capacity_kwh = ?,
                 soc_min = ?,
@@ -136,9 +145,11 @@ impl StorageService {
         )
         .bind(max_batt_charge_power)
         .bind(max_batt_discharge_power)
+        .bind(max_load_shedding)
         .bind(max_apparent_power_kva)
         .bind(p_batt_ramp_limit_kw)
         .bind(q_batt_ramp_limit_kvar)
+        .bind(pv_limit_min)
         .bind(transformer_kva)
         .bind(battery_capacity_kwh)
         .bind(soc_min)
@@ -154,17 +165,19 @@ impl StorageService {
             sqlx::query(
                 "INSERT INTO action_space_config
                     (transformer_id, max_batt_charge_power, max_batt_discharge_power,
-                     max_apparent_power_kva, p_batt_ramp_limit_kw,
-                     q_batt_ramp_limit_kvar,
+                     max_load_shedding, max_apparent_power_kva, p_batt_ramp_limit_kw,
+                     q_batt_ramp_limit_kvar, pv_limit_min,
                      transformer_kva, battery_capacity_kwh, soc_min, soc_max, overload_threshold)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(transformer_id)
             .bind(max_batt_charge_power)
             .bind(max_batt_discharge_power)
+            .bind(max_load_shedding)
             .bind(max_apparent_power_kva)
             .bind(p_batt_ramp_limit_kw)
             .bind(q_batt_ramp_limit_kvar)
+            .bind(pv_limit_min)
             .bind(transformer_kva)
             .bind(battery_capacity_kwh)
             .bind(soc_min)
@@ -370,16 +383,17 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             last_maintenance INTEGER
         )",
         "CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(device_type)",
-        // v2.5 动作空间配置表（v2.15: max_load_shedding 和 pv_limit_min 已从新表结构中移除，
-        // 旧数据库中的列保留不动，SQLite 不支持 DROP COLUMN）
+        // v2.5 动作空间配置表
         "CREATE TABLE IF NOT EXISTS action_space_config (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             transformer_id TEXT NOT NULL UNIQUE,
             max_batt_charge_power REAL NOT NULL,
             max_batt_discharge_power REAL NOT NULL,
+            max_load_shedding REAL NOT NULL,
             max_apparent_power_kva REAL NOT NULL DEFAULT 200.0,
             p_batt_ramp_limit_kw REAL NOT NULL DEFAULT 50.0,
             q_batt_ramp_limit_kvar REAL NOT NULL DEFAULT 30.0,
+            pv_limit_min REAL NOT NULL DEFAULT 0.1,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )",
@@ -389,88 +403,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
         "ALTER TABLE action_space_config ADD COLUMN soc_min REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE action_space_config ADD COLUMN soc_max REAL NOT NULL DEFAULT 1.0",
         "ALTER TABLE action_space_config ADD COLUMN overload_threshold REAL NOT NULL DEFAULT 1.2",
-        // ── v2.15 新增表（P1 补齐） ──
-        // 设备铭牌参数表
-        "CREATE TABLE IF NOT EXISTS device_nameplate (
-            device_id TEXT PRIMARY KEY,
-            rated_power REAL,
-            rated_capacity REAL,
-            rated_voltage REAL,
-            rated_current REAL,
-            max_charge_power REAL,
-            max_discharge_power REAL,
-            charge_efficiency REAL,
-            discharge_efficiency REAL,
-            soc_min REAL,
-            soc_max REAL,
-            rated_reactive_power REAL,
-            protection_level TEXT,
-            cooling_method TEXT,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )",
-        // 维护记录表
-        "CREATE TABLE IF NOT EXISTS maintenance_record (
-            record_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT NOT NULL,
-            maintenance_date TEXT NOT NULL,
-            maintenance_type TEXT NOT NULL,
-            description TEXT NOT NULL,
-            operator TEXT NOT NULL,
-            result TEXT NOT NULL,
-            next_maintenance_date TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )",
-        "CREATE INDEX IF NOT EXISTS idx_maintenance_device
-         ON maintenance_record(device_id, maintenance_date DESC)",
-        // 告警日志表
-        "CREATE TABLE IF NOT EXISTS alarm_log (
-            alarm_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT NOT NULL,
-            alarm_type TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            description TEXT NOT NULL,
-            trigger_time INTEGER NOT NULL,
-            acknowledge_time INTEGER,
-            acknowledge_by TEXT,
-            clear_time INTEGER,
-            clear_by TEXT,
-            status TEXT NOT NULL DEFAULT 'active'
-        )",
-        "CREATE INDEX IF NOT EXISTS idx_alarm_device_time
-         ON alarm_log(device_id, trigger_time DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_alarm_status
-         ON alarm_log(status)",
-        // 事件记录表（与 events 表互补：event_log 侧重运维审计，events 侧重系统事件）
-        "CREATE TABLE IF NOT EXISTS event_log (
-            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            event_time INTEGER NOT NULL,
-            source TEXT NOT NULL,
-            operator TEXT,
-            description TEXT NOT NULL,
-            detail TEXT NOT NULL DEFAULT '{}'
-        )",
-        "CREATE INDEX IF NOT EXISTS idx_event_log_type_time
-         ON event_log(event_type, event_time DESC)",
-        // 存储配置表（键值对）
-        "CREATE TABLE IF NOT EXISTS storage_config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )",
-        // v2.17: 安全包装器违规记录
-        "CREATE TABLE IF NOT EXISTS safety_violations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER NOT NULL,
-            reason TEXT NOT NULL,
-            proposed_p_ref REAL NOT NULL,
-            proposed_k_droop REAL NOT NULL,
-            fallback_p_ref REAL NOT NULL,
-            fallback_k_droop REAL NOT NULL,
-            v_predicted REAL NOT NULL,
-            latency_us INTEGER NOT NULL
-        )",
-        "CREATE INDEX IF NOT EXISTS idx_safety_violations_ts
-         ON safety_violations(timestamp)",
     ];
 
     for stmt in &statements {
@@ -480,90 +412,4 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             .map_err(|e| StorageError::MigrationError(e.to_string()))?;
     }
     Ok(())
-}
-
-/// 创建指定月份的遥测分区表
-///
-/// 分区策略：按月分区 `telemetry_YYYYmm`，清理时直接 DROP TABLE。
-/// SQLite 不支持原生分区，此函数创建独立物理表。
-///
-/// # 示例
-///
-/// ```ignore
-/// create_telemetry_partition(&pool, "202606").await?;
-/// ```
-pub async fn create_telemetry_partition(
-    pool: &SqlitePool,
-    month: &str,
-) -> Result<(), StorageError> {
-    let table = format!("telemetry_{}", month);
-    let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT NOT NULL,
-            timestamp INTEGER NOT NULL,
-            phase_a_voltage REAL, phase_b_voltage REAL, phase_c_voltage REAL,
-            phase_a_current REAL, phase_b_current REAL, phase_c_current REAL,
-            total_active_power REAL, total_reactive_power REAL, total_apparent_power REAL,
-            power_factor REAL, frequency REAL,
-            phase_a_power REAL, phase_b_power REAL, phase_c_power REAL,
-            total_import_energy REAL, total_export_energy REAL,
-            quality TEXT NOT NULL DEFAULT 'good'
-        )",
-        table
-    );
-    sqlx::query(&create_sql)
-        .execute(pool)
-        .await
-        .map_err(|e| StorageError::MigrationError(e.to_string()))?;
-
-    let index_sql = format!(
-        "CREATE INDEX IF NOT EXISTS idx_{}_dev_time ON {}(device_id, timestamp DESC)",
-        table, table
-    );
-    sqlx::query(&index_sql)
-        .execute(pool)
-        .await
-        .map_err(|e| StorageError::MigrationError(e.to_string()))?;
-
-    tracing::info!(table, "遥测月度分区表已创建");
-    Ok(())
-}
-
-/// 删除超出保留期的遥测分区表（基于表名前缀匹配）
-///
-/// 仅处理 `telemetry_` 前缀且匹配 `YYYYmm` 格式的表。
-pub async fn cleanup_old_telemetry_partitions(
-    pool: &SqlitePool,
-    retention_months: u32,
-) -> Result<usize, StorageError> {
-    let now = chrono::Utc::now();
-    let cutoff = now - chrono::Duration::days(retention_months as i64 * 30);
-    let cutoff_ym = format!("{:04}{:02}", cutoff.year(), cutoff.month());
-    let prefix = "telemetry_";
-
-    // 查询所有 telemetry_ 前缀的表
-    let rows = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?",
-    )
-    .bind(format!("{}%", prefix))
-    .fetch_all(pool)
-    .await
-    .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
-    let mut dropped = 0usize;
-    for name in rows {
-        // 提取 YYYYmm 部分
-        let suffix = &name[prefix.len()..];
-        if suffix.len() == 6 && suffix < cutoff_ym.as_str() {
-            let sql = format!("DROP TABLE IF EXISTS {}", name);
-            sqlx::query(&sql)
-                .execute(pool)
-                .await
-                .map_err(|e| StorageError::MigrationError(e.to_string()))?;
-            dropped += 1;
-            tracing::info!(table = name, "已清理过期遥测分区");
-        }
-    }
-    Ok(dropped)
 }

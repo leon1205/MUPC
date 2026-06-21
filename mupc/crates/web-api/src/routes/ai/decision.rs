@@ -52,11 +52,11 @@ pub struct SystemStateSnapshot {
     pub transformer_load_kw: f64,
 }
 
-/// v2.15: load_shedding 和 pv_limit 不再是 AI 动作维度，
-/// 由本地防逆流/需量控制策略独立设置。ActionSnapshot 不再包含这两项。
 #[derive(Debug, Serialize)]
 pub struct ActionSnapshot {
     pub p_batt_set_kw: f64,
+    pub load_shedding_kw: f64,
+    pub pv_limit_ratio: f64,
     pub confidence: f64,
 }
 
@@ -165,6 +165,14 @@ pub async fn get_latest_decision(
                     .get("p_batt_set_kw")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0),
+                load_shedding_kw: action
+                    .get("load_shedding_kw")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                pv_limit_ratio: action
+                    .get("pv_limit_ratio")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0),
                 confidence: record.confidence,
             },
             mode: ModeSnapshot {
@@ -182,6 +190,8 @@ pub async fn get_latest_decision(
             system_state: empty_system_state(),
             action: ActionSnapshot {
                 p_batt_set_kw: 0.0,
+                load_shedding_kw: 0.0,
+                pv_limit_ratio: 1.0,
                 confidence: 0.0,
             },
             mode: ModeSnapshot {
@@ -214,6 +224,14 @@ pub async fn get_decision_detail(
                         .get("p_batt_set_kw")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0),
+                    load_shedding_kw: action
+                        .get("load_shedding_kw")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    pv_limit_ratio: action
+                        .get("pv_limit_ratio")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(1.0),
                     confidence: record.confidence,
                 },
                 mode: ModeSnapshot {
@@ -233,6 +251,8 @@ pub async fn get_decision_detail(
         system_state: empty_system_state(),
         action: ActionSnapshot {
             p_batt_set_kw: 0.0,
+            load_shedding_kw: 0.0,
+            pv_limit_ratio: 1.0,
             confidence: 0.0,
         },
         mode: ModeSnapshot {

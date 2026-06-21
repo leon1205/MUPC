@@ -60,6 +60,9 @@ impl AiIntegrator {
                 mupc_ai_engine::ActionOutput {
                     p_ref: p,
                     k_droop: k,
+                    load_shedding: 0.0, // 降级时不修改负荷
+                    pv_limit: 1.0,      // 降级时不限制光伏
+                    confidence: 0.0,    // 降级模式置信度为 0
                 }
             }
             _ => {
@@ -67,6 +70,9 @@ impl AiIntegrator {
                 mupc_ai_engine::ActionOutput {
                     p_ref: 0.0,
                     k_droop: 10.0, // 默认下垂系数
+                    load_shedding: 0.0,
+                    pv_limit: 1.0,
+                    confidence: 0.0,
                 }
             }
         }
@@ -177,12 +183,12 @@ impl AiIntegrator {
         self.intercore_client = Some(client);
     }
 
-    /// 执行 AI 决策并分发命令
+    /// 执行 AI 决策并分发南向命令
     ///
     /// 调用 full_decision_cycle() 获取 ActionOutput，然后：
     /// - p_ref + k_droop → 通过 IntercoreClient 发送到实时控制模块（v2.7）
-    /// v2.15: pv_limit/load_shedding 不再是 AI 动作维度，
-    /// 由本地防逆流/需量控制策略独立执行南向分发。
+    /// - pv_limit → 通过 SouthCommandDispatcher 发送到光伏逆变器
+    /// - load_shedding → 通过 SouthCommandDispatcher 发送到负荷控制装置
     pub async fn dispatch_ai_decision(&self) -> Result<(), AiEngineError> {
         // v2.9 新增：异常检测与应急策略
         {
@@ -254,17 +260,35 @@ impl AiIntegrator {
             tracing::debug!("Intercore client not set, skipping dual-param send");
         }
 
-        // v2.15: pv_limit/load_shedding 不再由 AI 动作空间控制，
-        // 由策略引擎本地防逆流/需量控制策略独立执行南向分发
-        match &self.south_dispatcher {
-            Some(_dispatcher) => {
-                tracing::debug!(
-                    "南向分发器就绪，pv_limit/load_shedding 由本地策略独立驱动"
-                );
+        // 分发 pv_limit 到南向设备
+        if let Some(ref dispatcher) = self.south_dispatcher {
+            // 分发 pv_limit（限功率比例）
+            if action.pv_limit < 1.0 {
+                let result = dispatcher.dispatch_pv_limit(action.pv_limit, 1).await;
+                if !result.success {
+                    tracing::warn!(
+                        "pv_limit 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
             }
-            None => {
-                tracing::debug!("南向分发器未设置");
+
+            // 分发 load_shedding（负荷切除功率）
+            if action.load_shedding > 0.0 {
+                let result = dispatcher
+                    .dispatch_load_shedding(action.load_shedding, 1)
+                    .await;
+                if !result.success {
+                    tracing::warn!(
+                        "load_shedding 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
             }
+        } else {
+            tracing::debug!("南向分发器未设置，跳过 pv_limit/load_shedding 分发");
         }
 
         Ok(())
@@ -272,9 +296,7 @@ impl AiIntegrator {
 
     /// v2.9: 分发应急动作（不经过 RL 模型）
     ///
-    /// 直接使用 RobustnessManager 生成的应急动作，发送到实时控制模块。
-    /// v2.15: pv_limit/load_shedding 不再由 AI 应急动作控制，
-    /// 由策略引擎本地防逆流/需量控制策略独立处理。
+    /// 直接使用 RobustnessManager 生成的应急动作，发送到实时控制模块和南向设备。
     async fn dispatch_robust_action(
         &self,
         action: &mupc_ai_engine::ActionOutput,
@@ -288,12 +310,7 @@ impl AiIntegrator {
 
         // 发送双参数到实时控制模块
         if let Some(ref client) = self.intercore_client {
-            let cmd = DualParamCommand::new(
-                action.p_ref,
-                action.k_droop,
-                true,
-                "Emergency",
-            );
+            let cmd = DualParamCommand::new(action.p_ref, action.k_droop, true, "Emergency");
             match client.send_dual_param(&cmd).await {
                 Ok(_) => {
                     tracing::debug!(
@@ -308,8 +325,31 @@ impl AiIntegrator {
             }
         }
 
-        // v2.15: pv_limit/load_shedding 分发由本地策略引擎独立处理
-        tracing::debug!("Emergency: pv_limit/load_shedding left to local fallback strategies");
+        // 分发 pv_limit 和 load_shedding
+        if let Some(ref dispatcher) = self.south_dispatcher {
+            if action.pv_limit < 1.0 {
+                let result = dispatcher.dispatch_pv_limit(action.pv_limit, 1).await;
+                if !result.success {
+                    tracing::warn!(
+                        "Emergency pv_limit 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
+            }
+            if action.load_shedding > 0.0 {
+                let result = dispatcher
+                    .dispatch_load_shedding(action.load_shedding, 1)
+                    .await;
+                if !result.success {
+                    tracing::warn!(
+                        "Emergency load_shedding 分发失败: device={}, error={:?}",
+                        result.device_id,
+                        result.error_message
+                    );
+                }
+            }
+        }
 
         Ok(())
     }

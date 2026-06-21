@@ -9,7 +9,6 @@ use axum::response::sse::{Event, Sse};
 use futures::stream::{Stream, StreamExt};
 use mupc_ai_engine::RunningMode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,13 +28,6 @@ pub enum SseEventType {
     SystemAlert { level: String, message: String },
     /// 遥测数据更新事件
     TelemetryUpdate { telemetry_type: String },
-    /// v2.17 安全包装器更新事件
-    SafetyWrapperUpdate {
-        check_result: String,
-        reason: String,
-        v_predicted: f64,
-        latency_us: u64,
-    },
 }
 
 /// SSE 事件消息
@@ -131,33 +123,6 @@ impl SsePushService {
         self.tx.send(event)
     }
 
-    /// v2.17: 推送安全包装器更新事件
-    pub fn push_safety_wrapper_update(
-        &self,
-        check_result: &str,
-        reason: &str,
-        v_predicted: f64,
-        latency_us: u64,
-    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
-        let event = SseEvent {
-            event_id: uuid::Uuid::new_v4().to_string(),
-            event_type: SseEventType::SafetyWrapperUpdate {
-                check_result: check_result.to_string(),
-                reason: reason.to_string(),
-                v_predicted,
-                latency_us,
-            },
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            payload: serde_json::json!({
-                "check_result": check_result,
-                "reason": reason,
-                "v_predicted": v_predicted,
-                "latency_us": latency_us,
-            }),
-        };
-        self.tx.send(event)
-    }
-
     /// 推送系统告警事件
     pub fn push_system_alert(
         &self,
@@ -214,81 +179,35 @@ impl SsePushService {
     }
 }
 
-/// SSE 查询参数
-#[derive(Debug, Deserialize, Default)]
-pub struct SseQuery {
-    /// 选择性订阅的事件类型，逗号分隔。可选值：
-    /// mode_switch, decision, predictions, alert, telemetry, rewards, finetuning
-    #[serde(default)]
-    types: Option<String>,
-}
-
-/// 将 SseEventType 映射为 SSE 事件名称（与 query `types` 参数匹配）
-fn event_type_name(event_type: &SseEventType) -> &'static str {
-    match event_type {
-        SseEventType::SceneChange { .. } => "mode_switch",
-        SseEventType::AiDecision { .. } => "decision",
-        SseEventType::PredictionUpdate { .. } => "predictions",
-        SseEventType::SystemAlert { .. } => "alert",
-        SseEventType::TelemetryUpdate { .. } => "telemetry",
-        SseEventType::SafetyWrapperUpdate { .. } => "safety_wrapper",
-    }
-}
-
 /// SSE 事件流端点处理器
 ///
-/// GET /api/v1/ai/stream?types=mode_switch,decision,predictions,alert,telemetry
+/// GET /api/v1/ai/stream
 ///
 /// 将 SsePushService 的 broadcast 订阅转换为 Axum SSE 事件流。
-/// 支持 query 参数 `types` 选择性订阅（逗号分隔）。
-/// 不传 `types` 或 `types` 为空时推送全部事件。
+/// 支持 query 参数 `types` 选择性订阅（逗号分隔：status,decision,predictions,rewards,finetuning）。
 pub async fn sse_handler(
     axum::extract::State(state): axum::extract::State<Arc<crate::AppState>>,
-    axum::extract::Query(query): axum::extract::Query<SseQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let allowed_types: Option<HashSet<String>> = query.types.as_ref().and_then(|t| {
-        let trimmed = t.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(
-                trimmed
-                    .split(',')
-                    .map(|s| s.trim().to_lowercase())
-                    .collect(),
-            )
+    let rx = state.sse_push.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|result| {
+        match result {
+            Ok(event) => {
+                let event_name = match &event.event_type {
+                    SseEventType::SceneChange { .. } => "mode_switch",
+                    SseEventType::AiDecision { .. } => "decision",
+                    SseEventType::PredictionUpdate { .. } => "predictions",
+                    SseEventType::SystemAlert { .. } => "alert",
+                    SseEventType::TelemetryUpdate { .. } => "telemetry",
+                };
+                let data = serde_json::to_string(&event.payload).unwrap_or_default();
+                Ok(Event::default().event(event_name).data(data))
+            }
+            Err(_) => {
+                // broadcast 通道 lag 导致的丢弃事件，发送空注释保活
+                Ok(Event::default().comment("keepalive"))
+            }
         }
     });
-
-    let rx = state.sse_push.subscribe();
-    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(
-        move |result| {
-            let allowed = allowed_types.clone();
-            async move {
-                match result {
-                    Ok(event) => {
-                        let event_name = event_type_name(&event.event_type);
-
-                        // 如果客户端指定了 types 过滤，只推送匹配的事件
-                        if let Some(ref allowed) = allowed {
-                            if !allowed.contains(&event_name.to_lowercase()) {
-                                // 客户端未订阅此类型，静默跳过
-                                return None;
-                            }
-                        }
-
-                        let data =
-                            serde_json::to_string(&event.payload).unwrap_or_default();
-                        Some(Ok(Event::default().event(event_name).data(data)))
-                    }
-                    Err(_) => {
-                        // broadcast 通道 lag 导致的丢弃事件，发送空注释保活
-                        Some(Ok(Event::default().comment("keepalive")))
-                    }
-                }
-            }
-        },
-    );
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()

@@ -3,12 +3,6 @@
 //! 对 RL 模型输出的 ActionOutput 执行约束校验，
 //! 违反时自动 clamp 到安全边界并记录 WARN 日志。
 //!
-//! ## 符号约定（v2.15 统一声明）
-//!
-//! **p_ref > 0 = 放电（向电网注入功率）、p_ref < 0 = 充电（从电网吸收功率）。**
-//! 此约定与实时控制模块、MUPC-AI2 训练管线保持一致。
-//! k_droop >= 0，电压升高时增加放电，电压降低时减少放电（增加充电）。
-//!
 //! v2.4 分层控制架构说明：
 //! - q_batt_set 由实时控制模块根据电压闭环管理，不由 AI 控制
 //! - v2.4 模式下这两条规则被跳过，仅保留 ACT-01/04/05
@@ -91,15 +85,13 @@ impl ActionValidator {
     ///
     /// v2.3 模式：ACT-01~05 全部生效
     /// v2.4 模式：跳过 ACT-02（q_batt 变化率）和 ACT-03（视在功率含 q_batt），
-    /// 仅保留 ACT-01（p_batt 变化率）、ACT-05（调度约束）
+    /// 仅保留 ACT-01（p_batt 变化率）、ACT-04（pv_limit 下限）、ACT-05（调度约束）
     /// v2.5 动作空间参数可配置化：值域 clamp 使用 ActionSpaceConfig 中的参数
-    /// v2.15: ACT-04（pv_limit 下限）和 ACT-06（load_shedding/confidence clamp）
-    ///   已移除，pv_limit/load_shedding 下沉至策略引擎本地兜底策略
     pub fn validate(
         &self,
         action: &ActionOutput,
         dispatch_p_set: Option<f64>,
-        _is_anti_reverse: bool, // v2.15: pv_limit clamp 已移除，该参数保留用于 API 兼容
+        is_anti_reverse: bool,
         action_space_config: &ActionSpaceConfig,
     ) -> (ActionOutput, Vec<ViolationRecord>) {
         let mut validated = action.clone();
@@ -172,7 +164,16 @@ impl ActionValidator {
             }
         }
 
-        // ACT-04 已移除（v2.15）：pv_limit 下限校验下沉至策略引擎本地防逆流策略
+        // ACT-04: 光伏限功率下限（防逆流场景除外）
+        if !is_anti_reverse && validated.pv_limit < self.config.pv_limit_min {
+            validated.pv_limit = self.config.pv_limit_min;
+            violations.push(ViolationRecord {
+                rule: "ACT-04",
+                field: "pv_limit",
+                original: action.pv_limit,
+                clamped: validated.pv_limit,
+            });
+        }
 
         // ACT-05: 调度指令权限约束
         if let Some(dp) = dispatch_p_set {
@@ -189,14 +190,16 @@ impl ActionValidator {
         }
 
         // 最终值域 clamp（v2.5 使用 ActionSpaceConfig 中的参数）
-        // v2.15 符号约定：p_ref > 0 = 放电，p_ref < 0 = 充电
-        // 放电上限 = max_batt_discharge_power，充电下限 = -max_batt_charge_power
         validated.p_ref = validated.p_ref.clamp(
-            -action_space_config.max_batt_charge_power,
-            action_space_config.max_batt_discharge_power,
+            -action_space_config.max_batt_discharge_power,
+            action_space_config.max_batt_charge_power,
         );
         validated.k_droop = validated.k_droop.clamp(-300.0, 300.0);
-        // v2.15: load_shedding/pv_limit/confidence clamp 已移除，这些字段不再属于 ActionOutput
+        validated.load_shedding = validated
+            .load_shedding
+            .clamp(0.0, action_space_config.max_load_shedding);
+        validated.pv_limit = validated.pv_limit.clamp(0.0, 1.0);
+        validated.confidence = validated.confidence.clamp(0.0, 1.0);
 
         *self.last_action.write().unwrap() = Some(validated.clone());
         (validated, violations)
@@ -212,7 +215,7 @@ impl ActionValidator {
         &self,
         action: &ActionOutput,
         dispatch_p_set: Option<f64>,
-        _is_anti_reverse: bool, // v2.15: pv_limit clamp 已移除，该参数保留用于 API 兼容
+        is_anti_reverse: bool,
         action_space_config: &ActionSpaceConfig,
     ) -> (ActionOutput, Vec<ViolationRecord>) {
         let mut validated = action.clone();
@@ -289,8 +292,22 @@ impl ActionValidator {
             }
         }
 
-        // ACT-DUAL-05 已移除（v2.15）：pv_limit 下限校验下沉至策略引擎本地防逆流策略
-        // load_shedding/confidence clamp 已移除，这些字段不再属于 ActionOutput
+        // ACT-DUAL-05: pv_limit 下限（防逆流场景除外）
+        if !is_anti_reverse && validated.pv_limit < self.config.pv_limit_min {
+            validated.pv_limit = self.config.pv_limit_min;
+            violations.push(ViolationRecord {
+                rule: "ACT-DUAL-05",
+                field: "pv_limit",
+                original: action.pv_limit,
+                clamped: validated.pv_limit,
+            });
+        }
+
+        // load_shedding 和 confidence 最终 clamp
+        validated.load_shedding = validated
+            .load_shedding
+            .clamp(0.0, action_space_config.max_load_shedding);
+        validated.confidence = validated.confidence.clamp(0.0, 1.0);
 
         *self.last_action.write().unwrap() = Some(validated.clone());
         (validated, violations)
@@ -301,10 +318,13 @@ impl ActionValidator {
 mod tests {
     use super::*;
 
-    fn make_action(p: f64, q: f64) -> ActionOutput {
+    fn make_action(p: f64, q: f64, ls: f64, pv: f64) -> ActionOutput {
         ActionOutput {
             p_ref: p,
             k_droop: q,
+            load_shedding: ls,
+            pv_limit: pv,
+            confidence: 0.8,
         }
     }
 
@@ -317,9 +337,9 @@ mod tests {
         let v = ActionValidator::new(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
         // 先设置一个历史值
-        v.validate(&make_action(0.0, 0.0), None, false, &cfg);
+        v.validate(&make_action(0.0, 0.0, 0.0, 1.0), None, false, &cfg);
         // 再次调用，delta=100kW > 50kW limit
-        let (a, violations) = v.validate(&make_action(150.0, 0.0), None, false, &cfg);
+        let (a, violations) = v.validate(&make_action(150.0, 0.0, 0.0, 1.0), None, false, &cfg);
         assert!(violations.iter().any(|r| r.rule == "ACT-01"));
         assert!(a.p_ref <= 50.0);
     }
@@ -328,20 +348,27 @@ mod tests {
     fn test_act03_power_circle_clamp() {
         let v = ActionValidator::new(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
-        let (a, violations) = v.validate(&make_action(400.0, 400.0), None, false, &cfg);
+        let (a, violations) = v.validate(&make_action(400.0, 400.0, 0.0, 1.0), None, false, &cfg);
         let s = (a.p_ref.powi(2) + a.k_droop.powi(2)).sqrt();
         assert!(s <= 500.0 + 1e-6);
         assert!(!violations.is_empty());
     }
 
     #[test]
-    fn test_act04_removed_v2_15() {
-        // v2.15: ACT-04 (pv_limit clamp) 已从 AI 校验器移除，
-        // pv_limit 下沉至策略引擎本地防逆流策略
+    fn test_act04_pv_limit_clamp() {
         let v = ActionValidator::new(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
-        let (_a, violations) = v.validate(&make_action(0.0, 0.0), None, false, &cfg);
-        // ACT-04 不再由 ActionValidator 触发
+        let (a, violations) = v.validate(&make_action(0.0, 0.0, 0.0, 0.05), None, false, &cfg);
+        assert!((a.pv_limit - 0.1).abs() < 1e-6);
+        assert!(violations.iter().any(|r| r.rule == "ACT-04"));
+    }
+
+    #[test]
+    fn test_act04_anti_reverse_allows_zero() {
+        let v = ActionValidator::new(ActionConstraintConfig::default());
+        let cfg = default_action_space_config();
+        let (a, violations) = v.validate(&make_action(0.0, 0.0, 0.0, 0.0), None, true, &cfg);
+        assert!((a.pv_limit - 0.0).abs() < 1e-6);
         assert!(!violations.iter().any(|r| r.rule == "ACT-04"));
     }
 
@@ -350,7 +377,7 @@ mod tests {
         let v = ActionValidator::new(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
         let (a, violations) =
-            v.validate(&make_action(150.0, 0.0), Some(100.0), false, &cfg);
+            v.validate(&make_action(150.0, 0.0, 0.0, 1.0), Some(100.0), false, &cfg);
         assert!(a.p_ref.abs() <= 100.0);
         assert!(violations.iter().any(|r| r.rule == "ACT-05"));
     }
@@ -360,9 +387,9 @@ mod tests {
         let v = ActionValidator::new_v2_4(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
         // 先设置历史值
-        v.validate(&make_action(0.0, 0.0), None, false, &cfg);
+        v.validate(&make_action(0.0, 0.0, 0.0, 1.0), None, false, &cfg);
         // v2.4 模式：k_droop 变化不受限（由实时模块控制）
-        let (a, _violations) = v.validate(&make_action(100.0, 200.0), None, false, &cfg);
+        let (a, _violations) = v.validate(&make_action(100.0, 200.0, 0.0, 1.0), None, false, &cfg);
         assert_eq!(a.k_droop, 200.0); // k_droop 未被 clamp
     }
 
@@ -370,7 +397,7 @@ mod tests {
     fn test_v2_4_mode_applies_p_batt_only() {
         let v = ActionValidator::new_v2_4(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
-        let (a, violations) = v.validate(&make_action(600.0, 0.0), None, false, &cfg);
+        let (a, violations) = v.validate(&make_action(600.0, 0.0, 0.0, 1.0), None, false, &cfg);
         // v2.4: p_ref clamp 到 S_max
         assert!(a.p_ref.abs() <= 500.0);
         assert!(violations.iter().any(|r| r.rule == "ACT-03"));
@@ -380,25 +407,30 @@ mod tests {
     fn test_no_violations_for_valid_action() {
         let v = ActionValidator::new(ActionConstraintConfig::default());
         let cfg = default_action_space_config();
-        let (_a, violations) = v.validate(&make_action(100.0, 50.0), None, false, &cfg);
+        let (_a, violations) = v.validate(&make_action(100.0, 50.0, 0.0, 1.0), None, false, &cfg);
         assert!(!violations.iter().any(|r| r.rule == "ACT-03"));
+        assert!(!violations.iter().any(|r| r.rule == "ACT-04"));
     }
 
     #[test]
     fn test_action_space_config_clamp_values() {
         let v = ActionValidator::new(ActionConstraintConfig::default());
-        // 自定义配置：充电功率上限 30kW，放电功率上限 40kW
-        // v2.15 符号约定：p_ref > 0 = 放电，p_ref < 0 = 充电
+        // 自定义配置：充电功率上限 30kW，放电功率上限 40kW，切负荷上限 30kW
         let mut cfg = ActionSpaceConfig::default_config();
         cfg.max_batt_charge_power = 30.0;
         cfg.max_batt_discharge_power = 40.0;
+        cfg.max_load_shedding = 30.0;
 
-        // p_ref = 100（放电）应被 clamp 到放电上限 40
-        let (a, _) = v.validate(&make_action(100.0, 0.0), None, false, &cfg);
-        assert!(a.p_ref <= 40.0);
+        // p_ref = 100（充电）应被 clamp 到 30
+        let (a, _) = v.validate(&make_action(100.0, 0.0, 0.0, 1.0), None, false, &cfg);
+        assert!(a.p_ref <= 30.0);
 
-        // p_ref = -100（充电）应被 clamp 到充电下限 -30
-        let (a, _) = v.validate(&make_action(-100.0, 0.0), None, false, &cfg);
-        assert!(a.p_ref >= -30.0);
+        // p_ref = -100（放电）应被 clamp 到 -40
+        let (a, _) = v.validate(&make_action(-100.0, 0.0, 0.0, 1.0), None, false, &cfg);
+        assert!(a.p_ref >= -40.0);
+
+        // load_shedding = 100 应被 clamp 到 30
+        let (a, _) = v.validate(&make_action(0.0, 0.0, 100.0, 1.0), None, false, &cfg);
+        assert!(a.load_shedding <= 30.0);
     }
 }

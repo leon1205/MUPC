@@ -795,12 +795,7 @@ impl DualParamCommand {
     ///
     /// 注意：load_shedding 和 pv_limit 不通过核间通信发送，
     /// 它们通过 SouthCommandDispatcher 发送到南向设备。
-    pub fn new(
-        p_ref: f64,
-        k_droop: f64,
-        ai_ready: bool,
-        strategy_mode: &str,
-    ) -> Self {
+    pub fn new(p_ref: f64, k_droop: f64, ai_ready: bool, strategy_mode: &str) -> Self {
         Self {
             p_ref,
             k_droop,

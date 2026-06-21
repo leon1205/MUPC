@@ -154,8 +154,7 @@ impl LinearSensitivityPredictor {
         state: &FusedSystemState,
         action: &ActionOutput,
     ) -> Result<PredictionResult, AiEngineError> {
-        let v_avg =
-            (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
 
         // 当前 P_output（包含下垂分量）
         let p_cur = 0.0; // 简化：上一周期有效值在 check_and_fallback 中跟踪
@@ -176,8 +175,7 @@ impl LinearSensitivityPredictor {
         };
 
         // 灵敏度公式
-        let delta_v_volt = (self.impedance.r_ohm * delta_p_w
-            + self.impedance.x_ohm * delta_q_var)
+        let delta_v_volt = (self.impedance.r_ohm * delta_p_w + self.impedance.x_ohm * delta_q_var)
             / self.impedance.v_base;
         let delta_v_pu = delta_v_volt / self.impedance.v_base;
 
@@ -188,8 +186,7 @@ impl LinearSensitivityPredictor {
             && v_predicted <= self.bounds.v_max
             && delta_v_pu.abs() <= self.bounds.dv_dt_max;
 
-        let soc_safe = !(action.p_ref > 0.0
-            && state.battery_soc < 0.10 + self.bounds.soc_margin);
+        let soc_safe = !(action.p_ref > 0.0 && state.battery_soc < 0.10 + self.bounds.soc_margin);
 
         let reason = if !v_safe {
             Some(format!(
@@ -229,10 +226,7 @@ pub struct SafetyRLWrapper {
 }
 
 impl SafetyRLWrapper {
-    pub fn new(
-        config: SafetyWrapperConfig,
-        event_sender: Option<SafetyEventSender>,
-    ) -> Self {
+    pub fn new(config: SafetyWrapperConfig, event_sender: Option<SafetyEventSender>) -> Self {
         let impedance = LineImpedance {
             r_ohm: config.line_impedance_r_ohm,
             x_ohm: config.line_impedance_x_ohm,
@@ -251,6 +245,9 @@ impl SafetyRLWrapper {
             last_safe_action: Arc::new(RwLock::new(ActionOutput {
                 p_ref: 0.0,
                 k_droop: 0.0,
+                load_shedding: 0.0,
+                pv_limit: 0.0,
+                confidence: 1.0,
             })),
             stats: Arc::new(RwLock::new(SafetyStats::default())),
             event_sender,
@@ -321,10 +318,7 @@ impl SafetyRLWrapper {
             // v2.17: 违规记录通过 tracing 日志 + broadcast 事件双通道输出
             // storage 持久化由 model_manager 负责（持有 SqlitePool 引用）
 
-            return (
-                fallback,
-                CheckResult::Rejected { reason },
-            );
+            return (fallback, CheckResult::Rejected { reason });
         }
 
         // 3. 通过：更新 last_safe_action
@@ -390,7 +384,9 @@ impl SafetyRLWrapper {
                 v_predicted,
                 latency_us,
             };
-            sender.send(event).map_err(|e| format!("broadcast send failed: {}", e))?;
+            sender
+                .send(event)
+                .map_err(|e| format!("broadcast send failed: {}", e))?;
         }
         Ok(())
     }
@@ -446,14 +442,15 @@ mod tests {
     // SAFETY-03: v_predicted 计算正确
     #[test]
     fn test_predict_normal_action() {
-        let predictor = LinearSensitivityPredictor::new(
-            LineImpedance::default(),
-            SafetyBounds::default(),
-        );
+        let predictor =
+            LinearSensitivityPredictor::new(LineImpedance::default(), SafetyBounds::default());
         let state = test_state();
         let action = ActionOutput {
             p_ref: -10.0,
             k_droop: 0.0,
+            load_shedding: 0.0,
+            pv_limit: 0.0,
+            confidence: 1.0,
         };
         let pred = predictor.predict(&state, &action).unwrap();
         assert!(pred.is_safe);
@@ -463,10 +460,8 @@ mod tests {
     // SAFETY-03: 放电导致低电压拒绝
     #[test]
     fn test_predict_discharge_low_voltage_rejected() {
-        let predictor = LinearSensitivityPredictor::new(
-            LineImpedance::default(),
-            SafetyBounds::default(),
-        );
+        let predictor =
+            LinearSensitivityPredictor::new(LineImpedance::default(), SafetyBounds::default());
         let mut state = test_state();
         state.voltage_phase_a = 0.935;
         state.voltage_phase_b = 0.935;
@@ -474,6 +469,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: 40.0,
             k_droop: 0.0,
+            load_shedding: 0.0,
+            pv_limit: 0.0,
+            confidence: 1.0,
         };
         let pred = predictor.predict(&state, &action).unwrap();
         assert!(!pred.is_safe);
@@ -488,6 +486,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: -5.0,
             k_droop: 5.0,
+            load_shedding: 0.0,
+            pv_limit: 0.0,
+            confidence: 1.0,
         };
         let (result, cr) = wrapper.check_and_fallback(&state, &action).await;
         assert!(matches!(cr, CheckResult::Passed));
@@ -505,6 +506,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: 10.0, // 放电
             k_droop: 0.0,
+            load_shedding: 0.0,
+            pv_limit: 0.0,
+            confidence: 1.0,
         };
         let (_, cr) = wrapper.check_and_fallback(&state, &action).await;
         assert!(matches!(cr, CheckResult::Rejected { .. }));

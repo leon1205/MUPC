@@ -227,7 +227,10 @@ mod tests {
         assert_eq!(cloned.pv_utilization_rate, features.pv_utilization_rate);
         assert_eq!(cloned.battery_cycle_count, features.battery_cycle_count);
         assert_eq!(cloned.trafo_avg_load, features.trafo_avg_load);
-        assert_eq!(cloned.demand_violation_count, features.demand_violation_count);
+        assert_eq!(
+            cloned.demand_violation_count,
+            features.demand_violation_count
+        );
         assert_eq!(cloned.cumulative_reward, features.cumulative_reward);
     }
 

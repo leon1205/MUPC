@@ -18,7 +18,6 @@ mod model;
 mod prediction;
 mod rewards;
 mod rollback;
-mod safety_wrapper;
 mod scene;
 mod status;
 mod weights;
@@ -105,15 +104,6 @@ pub fn ai_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/ai/audit", get(audit::get_audit_log))
         // v1.2 新增: 模型回滚
         .route("/api/v1/ai/rollback", post(rollback::post_rollback))
-        // v2.17: 安全包装器
-        .route(
-            "/api/v1/safety_wrapper/status",
-            get(safety_wrapper::get_safety_status),
-        )
-        .route(
-            "/api/v1/safety_wrapper/stats",
-            get(safety_wrapper::get_safety_stats),
-        )
 }
 
 /// 注册 SSE 实时推送路由（需要 AppState）

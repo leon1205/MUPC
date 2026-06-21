@@ -42,8 +42,8 @@ pub struct TriggerConfig {
     pub channel_mask: u16,
     /// 冷却时间 (ms)，默认 5000
     pub cool_down_ms: u32,
-    /// 触发条件独立启用掩码（7 位，每位对应一种触发条件，0=禁用）
-    pub trigger_enable: u8,
+    /// 是否启用触发引擎
+    pub enabled: bool,
 }
 
 impl Default for TriggerConfig {
@@ -63,7 +63,7 @@ impl Default for TriggerConfig {
             post_trigger_ms: 1000,
             channel_mask: ChannelMask::ALL,
             cool_down_ms: 5000,
-            trigger_enable: TriggerEnableMask::ALL,
+            enabled: true,
         }
     }
 }
@@ -81,36 +81,6 @@ impl ChannelMask {
     pub const POWER: u16 = 0b0011_0000_0000;
     /// 全部通道
     pub const ALL: u16 = 0b0011_1111_1111;
-}
-
-/// 触发条件启用掩码常量
-pub struct TriggerEnableMask;
-impl TriggerEnableMask {
-    /// 短路触发
-    pub const SHORT_CIRCUIT: u8 = 1 << 0;
-    /// 过压触发
-    pub const OVER_VOLTAGE: u8 = 1 << 1;
-    /// 欠压触发
-    pub const UNDER_VOLTAGE: u8 = 1 << 2;
-    /// 过流触发
-    pub const OVER_CURRENT: u8 = 1 << 3;
-    /// 频率过高触发
-    pub const FREQUENCY_HIGH: u8 = 1 << 4;
-    /// 频率过低触发
-    pub const FREQUENCY_LOW: u8 = 1 << 5;
-    /// 零序过流触发
-    pub const ZERO_SEQ_OVER_CURRENT: u8 = 1 << 6;
-    /// 全部启用
-    pub const ALL: u8 = 0x7F;
-}
-
-/// 触发条件启用掩码便捷构造器
-impl TriggerConfig {
-    /// 检查指定触发条件是否启用
-    /// idx→bit: 0=短路, 1=过压, 2=欠压, 3=过流, 4=频率高, 5=频率低, 6=零序
-    fn is_trigger_enabled(&self, idx: usize) -> bool {
-        self.trigger_enable & (1 << idx) != 0
-    }
 }
 
 /// 触发结果枚举
@@ -241,8 +211,7 @@ impl TriggerEngine {
         freq: f64,
         timestamp_us: i64,
     ) -> TriggerResult {
-        // 全部禁用快速返回
-        if self.config.trigger_enable == 0 {
+        if !self.config.enabled {
             return TriggerResult::None;
         }
 
@@ -258,71 +227,57 @@ impl TriggerEngine {
 
         // 依次检查每种触发条件（按优先级）
         // 短路优先级最高
-        if self.config.is_trigger_enabled(0)
-            && self.check_condition(
-                0,
-                max_current > self.config.short_circuit_threshold,
-                timestamp_us,
-            )
-        {
+        if self.check_condition(
+            0,
+            max_current > self.config.short_circuit_threshold,
+            timestamp_us,
+        ) {
             return TriggerResult::ShortCircuit;
         }
 
         // 过压
-        if self.config.is_trigger_enabled(1)
-            && self.check_condition(
-                1,
-                max_voltage > self.config.over_voltage_threshold,
-                timestamp_us,
-            )
-        {
+        if self.check_condition(
+            1,
+            max_voltage > self.config.over_voltage_threshold,
+            timestamp_us,
+        ) {
             return TriggerResult::OverVoltage;
         }
 
         // 欠压
-        if self.config.is_trigger_enabled(2)
-            && self.check_condition(
-                2,
-                max_voltage < self.config.under_voltage_threshold && max_voltage > 0.0,
-                timestamp_us,
-            )
-        {
+        if self.check_condition(
+            2,
+            max_voltage < self.config.under_voltage_threshold && max_voltage > 0.0,
+            timestamp_us,
+        ) {
             return TriggerResult::UnderVoltage;
         }
 
         // 过流
-        if self.config.is_trigger_enabled(3)
-            && self.check_condition(
-                3,
-                max_current > self.config.over_current_threshold,
-                timestamp_us,
-            )
-        {
+        if self.check_condition(
+            3,
+            max_current > self.config.over_current_threshold,
+            timestamp_us,
+        ) {
             return TriggerResult::OverCurrent;
         }
 
         // 频率过高
-        if self.config.is_trigger_enabled(4)
-            && self.check_condition(4, freq > self.config.frequency_high, timestamp_us)
-        {
+        if self.check_condition(4, freq > self.config.frequency_high, timestamp_us) {
             return TriggerResult::FrequencyHigh;
         }
 
         // 频率过低
-        if self.config.is_trigger_enabled(5)
-            && self.check_condition(
-                5,
-                freq < self.config.frequency_low && freq > 0.0,
-                timestamp_us,
-            )
-        {
+        if self.check_condition(
+            5,
+            freq < self.config.frequency_low && freq > 0.0,
+            timestamp_us,
+        ) {
             return TriggerResult::FrequencyLow;
         }
 
         // 零序过流
-        if self.config.is_trigger_enabled(6)
-            && self.check_condition(6, i0.abs() > self.config.zero_seq_threshold, timestamp_us)
-        {
+        if self.check_condition(6, i0.abs() > self.config.zero_seq_threshold, timestamp_us) {
             return TriggerResult::ZeroSeqOverCurrent;
         }
 
@@ -418,7 +373,7 @@ mod tests {
         let mut config = TriggerConfig::default();
         config.debounce_samples = 1; // 测试用，不防抖
         config.cool_down_ms = 100;
-        config.trigger_enable = TriggerEnableMask::ALL;
+        config.enabled = true;
         TriggerEngine::new(config)
     }
 
@@ -482,7 +437,7 @@ mod tests {
     #[test]
     fn test_disabled_engine() {
         let mut config = TriggerConfig::default();
-        config.trigger_enable = 0;
+        config.enabled = false;
         let mut engine = TriggerEngine::new(config);
         let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::None);

@@ -1,0 +1,71 @@
+# ============================================================================
+# MSSA/IPS 超参搜索配置文件 (v1.0, 2026-06-21)
+# 用于 MUPC 第三轮 MSSA/IPS 超参自动优化
+# ============================================================================
+
+# ---- 算法选择 ----
+algorithm: "MSSA"             # "MSSA" (推荐) 或 "IPSO" (备选降级)
+                              # IPSO 在搜索速度优先时使用，全局搜索能力弱于 MSSA
+
+# ---- 随机种子（用于确定性复现）----
+random_seed: 42               # 任意整数，相同 seed + 相同数据 → 确定性结果
+
+# ---- 种群参数 ----
+population:
+  size: 30                    # 种群个体总数 [10, 100]
+  discoverer_ratio: 0.20      # 发现者比例 [0.10, 0.30]
+  scout_ratio: 0.10           # 侦察者比例 [0.05, 0.20]
+  # 加入者比例 = 1 - discoverer_ratio - scout_ratio (自动计算)
+
+# ---- 增强策略（仅 MSSA 生效，IPSO 忽略）----
+enhancement:
+  good_point_set: true        # 佳点集初始化
+  opposition_learning: true   # 反向学习增强
+  opposition_frequency: 5     # 反向学习执行频率（每 N 次迭代）
+  corsi_mutation: true        # Corsi 变异扰动
+  corsi_stagnation: 10        # 触发 Corsi 的停滞阈值（连续无改善次数）
+  corsi_strength: 0.1         # Corsi 变异初始强度 C_0
+  corsi_decay: 2.0            # Corsi 衰减因子 beta
+
+# ---- 终止条件 ----
+termination:
+  max_iterations: 50          # 最大迭代次数
+  no_improvement_rounds: 10   # 连续无改善轮次（|delta_MAPE| < epsilon）
+  epsilon: 1.0e-4             # 收敛阈值（加权 MAPE 绝对改善）
+  max_wall_time_seconds: 7200 # 总搜索时间硬上限 (2 小时)
+  restart_on_stagnation: false  # 停滞时是否自动重启（最多 3 次）[默认 false]
+
+# ---- 目标函数 ----
+objective:
+  pv_weight: 0.5              # 光伏 MAPE 权重
+  load_weight: 0.5            # 负荷 MAPE 权重
+  penalty_score: 1000000.0    # 训练失败惩罚分数
+  training_timeout_seconds: 600  # 单次训练超时 (10 分钟)
+  cache_enabled: true         # 是否启用评估缓存
+  cache_path: "mssa_cache.json"  # 缓存文件路径（相对 mssa_optimizer/）
+
+# ---- 训练脚本调用 ----
+training:
+  script_path: "../../train.py"  # 训练脚本路径（相对 mssa_optimizer/ 或绝对路径）
+  python_executable: null      # Python 解释器 (null = sys.executable)
+  extra_args: []               # 额外命令行参数 (如 ["--gpu", "0"])
+
+# ---- 搜索空间覆盖（可选，用于缩小搜索范围）----
+# 未指定的超参使用 PRD Section 3.5.2 的默认搜索范围
+search_space_overrides:
+  # hidden_size: [32, 64, 96, 128]           # 离散值列表
+  # num_layers: [1, 2, 3]                     # 离散值列表
+  # attn_score: ["additive", "dot", "general"] # 枚举值列表
+  # vmd_k: {min: 2, max: 10}                  # 整数范围
+  # vmd_alpha: {min: 100, max: 5000}           # 连续范围
+  # lr: {min: 1.0e-4, max: 1.0e-2}            # 连续范围（线性空间，内部 log 编码）
+  # batch_size: [16, 32, 64, 128]             # 离散值列表
+  # dropout: {min: 0.0, max: 0.5}             # 连续范围
+  # optimizer: ["Adam", "AdamW", "RMSprop"]    # 枚举值列表
+  # input_window: [12, 24, 36]                # 离散值列表
+
+# ---- 输出 ----
+output:
+  result_path: "mssa_search_result.json"  # 搜索结果输出路径
+  verbose: true                            # 是否输出每次迭代的详细日志
+  log_level: "INFO"                        # 日志级别: DEBUG / INFO / WARNING / ERROR

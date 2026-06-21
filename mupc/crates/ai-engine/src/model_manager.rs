@@ -15,6 +15,8 @@ use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput};
 use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::model_registry::{ModelRegistry, SceneModelState};
+use crate::pipeline_config::EnhancementLevel;
+use crate::prediction_pipeline::PredictionPipeline;
 use crate::reward_calculator::RewardCalculator;
 use crate::rl_model::ActionOutput;
 use crate::safety_wrapper::SafetyRLWrapper;
@@ -64,6 +66,9 @@ pub struct ModelManager {
     dynamic_config_loader: Arc<RwLock<Option<Arc<DynamicConfigLoader>>>>,
     /// v2.17: 安全 RL 包装器（物理模型前置过滤器）
     safety_wrapper: Arc<SafetyRLWrapper>,
+    /// v1.0: 预测增强管线（VMD + Attention 编排器）
+    /// None 表示增强未启用，回退到基线 LSTM 推理路径
+    prediction_pipeline: Arc<RwLock<Option<PredictionPipeline>>>,
 }
 
 impl ModelManager {
@@ -77,35 +82,54 @@ impl ModelManager {
         let mode_selector = Arc::new(RwLock::new(ModeSelector::new(initial_mode, persist_path)));
 
         // v2.16: 使用 step_seconds 统一计算输入窗口步数
-        let lstm_input_size =
-            (config.lstm.input_window_secs / config.lstm.step_seconds) as usize;
+        let lstm_input_size = (config.lstm.input_window_secs / config.lstm.step_seconds) as usize;
 
         // v2.16: 采样周期 = step_seconds / fusion_period_secs
         // 例如 step=900s, fusion_period=1s → 每 900 步压入一个样本（15 分钟）
         // v2.16.1 (C-03 修复): 加 max(1) 边界保护，避免 step < fusion 时退化为 0（每周期都采样）
-        let lstm_sample_period = (config.lstm.step_seconds
-            / config.fusion.fusion_period_secs.max(1))
-        .max(1);
+        let lstm_sample_period =
+            (config.lstm.step_seconds / config.fusion.fusion_period_secs.max(1)).max(1);
 
         // v2.17: 创建 SafetyRLWrapper（无 event_sender，SSE 推送待 main.rs 注入）
-        let safety_wrapper = Arc::new(SafetyRLWrapper::new(
-            config.safety_wrapper.clone(),
-            None,
-        ));
+        let safety_wrapper = Arc::new(SafetyRLWrapper::new(config.safety_wrapper.clone(), None));
+
+        // v1.0: 创建 LSTM 模型和历史缓冲的 Arc（供 PredictionPipeline 复用）
+        let lstm_model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
+        let lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+            Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size)));
+
+        // v1.0: 创建预测增强管线（如果配置了 prediction_enhancement）
+        let prediction_pipeline = if let Some(ref enh_config) = config.prediction_enhancement {
+            let pipeline = PredictionPipeline::new(
+                enh_config.clone(),
+                lstm_model.clone(),
+                lstm_history.clone(),
+                lstm_input_size,
+            );
+            tracing::info!(
+                "预测增强管线已启用: 初始等级={:?}",
+                pipeline.current_level()
+            );
+            Some(pipeline)
+        } else {
+            tracing::info!("预测增强未配置，使用基线 LSTM 推理路径");
+            None
+        };
 
         Self {
             config,
-            lstm_model: Arc::new(RwLock::new(None)),
+            lstm_model,
             model_registry: Arc::new(RwLock::new(None)),
             data_fusion: Arc::new(RwLock::new(None)),
             reward_calculator: Arc::new(RwLock::new(None)),
             action_validator: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
             mode_selector,
-            lstm_history: Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size))),
+            lstm_history,
             lstm_input_size,
             lstm_sample_period,
             safety_wrapper,
+            prediction_pipeline: Arc::new(RwLock::new(prediction_pipeline)),
             lstm_sample_counter: Arc::new(RwLock::new(0)),
             action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
             dynamic_config_loader: Arc::new(RwLock::new(None)),
@@ -200,9 +224,11 @@ impl ModelManager {
         let current_load = fused_state.load_power;
 
         // LSTM 预测：使用历史缓冲区的数据预测未来光伏/负荷（含分位数）
+        //
+        // v1.0: 优先使用预测增强管线（VMD + Attention），失败时自动降级到基线路径
         // v2.16 (C-02 修复): 在生产路径调用 predict_quantiles 并接通 D10 数据流
         let (pv_forecast, load_forecast, load_quantiles) = self
-            .run_lstm_predict_with_quantiles()
+            .run_enhanced_predict()
             .await
             .unwrap_or_else(|_| (vec![0.0; 15], vec![0.0; 15], None));
 
@@ -386,6 +412,161 @@ impl ModelManager {
         Ok((pv_forecast, load_forecast, load_quantiles))
     }
 
+    /// v1.0: 增强预测入口（Pipeline 优先 → 基线降级）
+    ///
+    /// 若预测增强管线可用，优先执行 VMD + Attention 增强预测；
+    /// 否则回退到基线 `run_lstm_predict_with_quantiles()` 路径。
+    ///
+    /// 返回值与 `run_lstm_predict_with_quantiles()` 保持兼容：
+    /// `(pv_forecast, load_forecast, Option<ProbabilisticLoadOutput>)`
+    async fn run_enhanced_predict(
+        &self,
+    ) -> Result<(Vec<f64>, Vec<f64>, Option<ProbabilisticLoadOutput>), AiEngineError> {
+        // 尝试预测增强管线
+        let pipeline_guard = self.prediction_pipeline.read().await;
+        if let Some(ref pipeline) = *pipeline_guard {
+            match pipeline.execute().await {
+                Ok(result) => {
+                    let level = result.enhancement_level;
+                    tracing::debug!(
+                        "增强预测完成: 等级={:?}({}), PV预测={}步, 负荷预测={}步",
+                        level,
+                        level.name(),
+                        result.pv_forecast.len(),
+                        result.load_forecast.len()
+                    );
+                    return Ok((
+                        result.pv_forecast,
+                        result.load_forecast,
+                        result.load_quantiles,
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!("预测增强管线执行失败: {}，降级到基线 LSTM 路径", e);
+                    // 继续执行基线路径
+                }
+            }
+        }
+        drop(pipeline_guard);
+
+        // 降级：基线 LSTM 路径
+        self.run_lstm_predict_with_quantiles().await
+    }
+
+    /// v1.0: 获取当前增强等级（用于监控/日志）
+    ///
+    /// 若增强管线未启用，返回 None。
+    pub async fn enhancement_level(&self) -> Option<EnhancementLevel> {
+        let pipeline = self.prediction_pipeline.read().await;
+        pipeline.as_ref().map(|p| p.current_level())
+    }
+
+    /// v2.0: 获取当前增强等级名称字符串
+    pub async fn enhancement_level_name(&self) -> Option<&'static str> {
+        self.enhancement_level().await.map(|l| l.name())
+    }
+
+    /// v2.0: 加载误差修正模型
+    ///
+    /// 在 PredictionPipeline 创建后、首次推理前调用。
+    /// 若误差修正模型文件不存在或校验失败，记录 WARN 并禁用误差修正。
+    ///
+    /// # 参数
+    ///
+    /// - `ec_model_path`: 误差修正 .rknn 模型文件路径
+    /// - `expected_sha256`: SHA256 期望值（None 时跳过校验）
+    pub async fn load_error_correction_model(
+        &self,
+        ec_model_path: &std::path::Path,
+        expected_sha256: Option<&str>,
+    ) -> Result<(), AiEngineError> {
+        use crate::model_validator::{validate_rknn_model, PredictionModelType};
+
+        // 校验模型文件
+        validate_rknn_model(ec_model_path, PredictionModelType::ErrorCorrection, expected_sha256)?;
+
+        // 加载 EC Runtime（通过 PredictionPipeline 内部管理）
+        // 当前阶段：EC Runtime 在 PredictionPipeline::new() 中已创建。
+        // 若需要热加载（OTA 升级后），可在此处重新创建 Runtime。
+
+        tracing::info!(
+            "误差修正模型加载完成: path={}",
+            ec_model_path.display()
+        );
+        Ok(())
+    }
+
+    /// v2.0: BiLSTM 模型选择逻辑
+    ///
+    /// 根据双重门控（`enabled` AND `gate_passed`）决定加载哪个模型。
+    ///
+    /// # 返回值
+    ///
+    /// - `true` — Go 路径，加载 BiLSTM 模型
+    /// - `false` — No-Go 路径，回退单向 LSTM
+    pub async fn select_bilstm_model(&self) -> bool {
+        let pipeline = self.prediction_pipeline.read().await;
+        if let Some(ref p) = *pipeline {
+            let cfg = p.config();
+            let bilstm_go = cfg.bilstm.enabled && cfg.bilstm.gate_passed;
+
+            if cfg.bilstm.enabled && !cfg.bilstm.gate_passed {
+                tracing::warn!(
+                    "BiLSTM 配置启用但 gate_passed=false（未通过 RK3588 延迟摸底），回退到单向 LSTM"
+                );
+            }
+
+            bilstm_go
+        } else {
+            false
+        }
+    }
+
+    /// v2.0: 模型热切换：从 BiLSTM 降级到单向 LSTM
+    ///
+    /// BiLSTM 推理连续失败后调用此方法。
+    /// 降级通过修改 PipelineHealth 中的等级实现，不涉及模型文件重新加载。
+    ///
+    /// # 恢复条件
+    ///
+    /// 运维修复后手动设 `gate_passed=true` 并重启（或 OTA 下发新版 `bilstm_attn.rknn`）。
+    pub async fn degrade_bilstm_to_lstm(&self) {
+        let pipeline = self.prediction_pipeline.read().await;
+        if let Some(ref p) = *pipeline {
+            let mut health = p.health_write().await;
+            if health.current_level == EnhancementLevel::FullVmdAttentionCorrection
+                || health.current_level == EnhancementLevel::BiLstmVmdAttention
+            {
+                tracing::warn!(
+                    "BiLSTM 模型降级: {:?} → VmdAttention (回退单向LSTM)",
+                    health.current_level
+                );
+                health.current_level = EnhancementLevel::VmdAttention;
+                health.bilstm_consecutive_failures = 0;
+                health.bilstm_consecutive_successes = 0;
+            }
+        }
+    }
+
+    /// v2.0: 获取 BiLSTM 准入状态
+    ///
+    /// 返回 `(enabled, gate_passed)` 用于监控/日志。
+    pub async fn bilstm_gate_status(&self) -> Option<(bool, bool)> {
+        let pipeline = self.prediction_pipeline.read().await;
+        pipeline.as_ref().map(|p| {
+            let cfg = p.config();
+            (cfg.bilstm.enabled, cfg.bilstm.gate_passed)
+        })
+    }
+
+    /// v2.0: 获取误差修正启用状态
+    pub async fn error_correction_status(&self) -> Option<bool> {
+        let pipeline = self.prediction_pipeline.read().await;
+        pipeline
+            .as_ref()
+            .map(|p| p.config().error_correction.enabled)
+    }
+
     /// 设置数据融合引擎（由外部注入）
     pub async fn set_data_fusion(&self, df: DataFusionEngine) {
         *self.data_fusion.write().await = Some(df);
@@ -429,9 +610,9 @@ impl ModelManager {
         prob_output: &ProbabilisticLoadOutput,
     ) {
         state.load_forecast_quantiles = prob_output
-            .quantile_steps
+            .quantiles
             .iter()
-            .map(|s| s.p90 as f64)
+            .map(|q| q.value as f64)
             .collect();
         state.base_load = prob_output.base_load as f64;
         state.shock_load_probability = prob_output.shock_probability;

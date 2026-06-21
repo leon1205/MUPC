@@ -217,22 +217,26 @@ fn safety_override_penalty_impl(state: &FusedSystemState) -> f64 {
     let k_consecutive = 10.0;
     let min_sample_threshold = 10;
     let norm_divisor = 15.0;
-    // v2.15: 样本不足时使用固定中等惩罚（删除原 reason 差异化，因 D9 无 reason_code 字段）
-    let cold_start_penalty = -3.33_f64;
-
-    if !state.safety_override_active {
-        return 0.0;
-    }
 
     if state.safety_override_consecutive < min_sample_threshold {
-        // 样本不足：固定惩罚（v2.15：不再依赖 safety_override_reason）
-        return cold_start_penalty.max(-1.0).min(0.0);
+        if !state.safety_override_active {
+            return 0.0;
+        }
+        let raw: f64 = match state.safety_override_reason.as_deref().unwrap_or("unknown") {
+            "voltage_violation" => -50.0_f64,
+            "q_exhausted" => -30.0_f64,
+            "emergency" => -100.0_f64,
+            _ => -20.0_f64,
+        };
+        return (raw / norm_divisor).max(-1.0).min(0.0);
     }
 
-    // 样本充足：比例 + 连续次数惩罚，归一化至 [-1, 0]
     let ratio_penalty = -k_override * state.safety_override_ratio;
-    let consecutive_penalty = -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
-    ((ratio_penalty + consecutive_penalty) / norm_divisor).max(-1.0).min(0.0)
+    let consecutive_penalty =
+        -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
+    ((ratio_penalty + consecutive_penalty) / norm_divisor)
+        .max(-1.0)
+        .min(0.0)
 }
 
 impl RewardCalculator {
@@ -430,9 +434,7 @@ impl RewardCalculator {
                 Self::calc_arbitrage_with_weights(action, state, weights)
             }
             RunningMode::DemandControl => self.calc_demand(action, state),
-            RunningMode::VirtualPowerPlant => {
-                Self::calc_vpp_with_weights(action, state, weights)
-            }
+            RunningMode::VirtualPowerPlant => Self::calc_vpp_with_weights(action, state, weights),
             RunningMode::UltraGreen => self.calc_green(state),
         }
     }
@@ -791,7 +793,11 @@ impl RewardCalculator {
         let w_support = 1.0 - w_save;
 
         // 省电模式奖励（Q有裕度时AI"偷懒"省电池）
-        let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
+        let r_lazy = if p_ref.abs() < p_threshold {
+            50.0
+        } else {
+            -5.0
+        };
 
         // 支撑模式奖励（Q饱和时AI正确出手）
         let v_low = v_avg < 1.0;
@@ -979,9 +985,7 @@ impl RewardCalculator {
         let w = &self.weights.demand_control;
         let demand_saved = (state.contract_demand - state.current_demand).max(0.0);
         let r_avoid = demand_saved * self.demand_penalty_rate;
-        // v2.15: load_shedding 不再来自 AI action，舒适度惩罚预留为 0
-        // TODO(v2.16): 从策略引擎需量控制观测注入实际负荷切除量
-        let p_comfort = 0.0;
+        let p_comfort = action.load_shedding * 0.5;
         w[0] * r_avoid - w[1] * p_comfort
     }
 
@@ -1000,15 +1004,17 @@ impl RewardCalculator {
         let demand_saved = (state.contract_demand - state.current_demand).max(0.0);
         let r_avoid = demand_saved * self.demand_penalty_rate;
 
-        // 风险感知调整（v2.11 新增，v2.16 适配：quantiles → quantile_steps）
+        // 风险感知调整（v2.11 新增）
         // 考虑冲击负荷概率，预留额外安全裕度
         let high_quantile = load_forecast
-            .quantile_steps
-            .first()
-            .map(|s| s.p90)
+            .quantiles
+            .iter()
+            .find(|q| (q.quantile - 0.9).abs() < 0.01)
+            .map(|q| q.value)
             .unwrap_or(load_forecast.base_load);
 
-        let risk_adjusted_demand = state.current_demand + 2.0 * (high_quantile - load_forecast.base_load) as f64;
+        let risk_adjusted_demand =
+            state.current_demand + 2.0 * (high_quantile - load_forecast.base_load) as f64;
         let risk_margin = if risk_adjusted_demand > state.contract_demand * 0.95 {
             // 预留 5% 安全裕度不足，产生风险惩罚
             -20.0 * ((risk_adjusted_demand - state.contract_demand * 0.95) / state.contract_demand)
@@ -1016,9 +1022,7 @@ impl RewardCalculator {
             0.0
         };
 
-        // v2.15: load_shedding 不再来自 AI action，舒适度惩罚预留为 0
-        // TODO(v2.16): 从策略引擎需量控制观测注入实际负荷切除量
-        let p_comfort = 0.0;
+        let p_comfort = action.load_shedding * 0.5;
 
         w[0] * (r_avoid + risk_margin) - w[1] * p_comfort
     }
@@ -1226,7 +1230,11 @@ impl RewardCalculator {
         let w_support = 1.0 - w_save;
 
         // 省电模式奖励（Q有裕度时AI"偷懒"省电池）
-        let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
+        let r_lazy = if p_ref.abs() < p_threshold {
+            50.0
+        } else {
+            -5.0
+        };
 
         // 支撑模式奖励（Q饱和时AI正确出手）
         let v_low = v_avg < 1.0;
@@ -1297,6 +1305,9 @@ mod tests {
         ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
         }
     }
 
@@ -1417,6 +1428,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
@@ -1800,6 +1814,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
         };
 
         // 正常情况下 r_pv ≈ 100，标准化后 ≈ 1.0
@@ -1822,6 +1839,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: -10.0, // 低电压放电（正确）
             k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
@@ -1842,6 +1862,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
@@ -1862,6 +1885,9 @@ mod tests {
         let action = ActionOutput {
             p_ref: -50.0,
             k_droop: 10.0,
+            load_shedding: 0.0,
+            pv_limit: 1.0,
+            confidence: 0.8,
         };
 
         let r = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);

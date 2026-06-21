@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_parse_valid_modes() {
-        assert!(mupc_ai_engine::parse_mode_name("SeasonalLoadManagement").is_some());
+        assert!(mupc_ai_engine::parse_mode_name("AgriculturalIrrigation").is_some());
         assert!(mupc_ai_engine::parse_mode_name("CommercialArbitrage").is_some());
         assert!(mupc_ai_engine::parse_mode_name("DemandControl").is_some());
         assert!(mupc_ai_engine::parse_mode_name("VirtualPowerPlant").is_some());

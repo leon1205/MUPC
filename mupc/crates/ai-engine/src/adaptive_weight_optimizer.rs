@@ -129,7 +129,8 @@ impl AdaptiveWeightOptimizer {
         let new_weights = self.apply_adjustment(&adjustment).await?;
 
         // 4. 记录调整历史
-        self.record_adjustment(historical_performance, &adjustment).await;
+        self.record_adjustment(historical_performance, &adjustment)
+            .await;
 
         Ok(new_weights)
     }
@@ -199,10 +200,15 @@ impl AdaptiveWeightOptimizer {
 
         // 约束3：单次调整幅度限制
         for i in 0..8 {
-            let diff = (new_weights.seasonal_load_management[i] - current.seasonal_load_management[i]).abs();
-            let max_change = self.config.constraints.max_adjustment_per_update * current.seasonal_load_management[i];
+            let diff = (new_weights.seasonal_load_management[i]
+                - current.seasonal_load_management[i])
+                .abs();
+            let max_change = self.config.constraints.max_adjustment_per_update
+                * current.seasonal_load_management[i];
             if diff > max_change {
-                let sign = if new_weights.seasonal_load_management[i] > current.seasonal_load_management[i] {
+                let sign = if new_weights.seasonal_load_management[i]
+                    > current.seasonal_load_management[i]
+                {
                     1.0
                 } else {
                     -1.0
@@ -266,11 +272,7 @@ impl AdaptiveWeightOptimizer {
     /// # 输出
     /// - true: 偏移 < 5%，验证通过
     /// - false: 偏移 >= 5%，验证失败
-    pub async fn validate_reward_drift(
-        &self,
-        original_reward: f64,
-        optimized_reward: f64,
-    ) -> bool {
+    pub async fn validate_reward_drift(&self, original_reward: f64, optimized_reward: f64) -> bool {
         if original_reward.abs() < 1e-6 {
             // 原始奖励接近零时，使用绝对误差
             return (optimized_reward - original_reward).abs() < 0.05;
@@ -448,8 +450,12 @@ mod tests {
         let new_weights = result.unwrap();
         let sum: f64 = new_weights.seasonal_load_management.iter().sum();
         // 归一化和应为 8.3
-        assert!((sum - config.constraints.sum_normalized).abs() < 0.01,
-            "权重和应为 {}，实际为 {}", config.constraints.sum_normalized, sum);
+        assert!(
+            (sum - config.constraints.sum_normalized).abs() < 0.01,
+            "权重和应为 {}，实际为 {}",
+            config.constraints.sum_normalized,
+            sum
+        );
     }
 
     // ===== AWO-05: 调整幅度限制测试 =====
@@ -474,11 +480,18 @@ mod tests {
 
         // 检查调整幅度
         for i in 0..8 {
-            let diff = (new_weights.seasonal_load_management[i] - weights.seasonal_load_management[i]).abs();
-            let max_change = config.constraints.max_adjustment_per_update * weights.seasonal_load_management[i];
-            assert!(diff <= max_change * 1.01, // 允许浮点误差
+            let diff = (new_weights.seasonal_load_management[i]
+                - weights.seasonal_load_management[i])
+                .abs();
+            let max_change =
+                config.constraints.max_adjustment_per_update * weights.seasonal_load_management[i];
+            assert!(
+                diff <= max_change * 1.01, // 允许浮点误差
                 "权重 {} 变化 {} 超过限制 {}",
-                i, diff, max_change);
+                i,
+                diff,
+                max_change
+            );
         }
     }
 
@@ -541,7 +554,10 @@ mod tests {
         let optimizer = AdaptiveWeightOptimizer::new(config, weights.clone(), collector);
         let current = optimizer.get_current_weights().await;
 
-        assert_eq!(current.seasonal_load_management, weights.seasonal_load_management);
+        assert_eq!(
+            current.seasonal_load_management,
+            weights.seasonal_load_management
+        );
     }
 
     #[tokio::test]
