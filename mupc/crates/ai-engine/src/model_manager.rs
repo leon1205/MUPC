@@ -12,7 +12,7 @@ use crate::config::{AiEngineConfig, ModeConfig};
 use crate::data_fusion::{DataFusionEngine, FusedSystemState};
 use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
-use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput};
+use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction};
 use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::model_registry::{ModelRegistry, SceneModelState};
 use crate::pipeline_config::EnhancementLevel;
@@ -33,6 +33,36 @@ pub enum ModelStatus {
     Error,
 }
 
+/// v3.0: 历史样本（7 维特征）
+///
+/// 与 MUPC-AI2 训练管线 `prepare_data()` 的 7 维特征一一对应：
+/// `[pv_power, load_power, ghi, temp, sin_hour, cos_hour, yesterday_pv]`
+#[derive(Debug, Clone)]
+pub struct HistorySample {
+    pub pv_power: f64,
+    pub load_power: f64,
+    pub solar_irradiance: f64,
+    pub temperature: f64,
+    pub sin_hour: f64,
+    pub cos_hour: f64,
+    pub yesterday_pv: f64,
+}
+
+impl HistorySample {
+    /// 展平为 7 个 f32（按训练管线特征顺序）
+    pub fn to_features(&self) -> [f32; 7] {
+        [
+            self.pv_power as f32,
+            self.load_power as f32,
+            self.solar_irradiance as f32,
+            self.temperature as f32,
+            self.sin_hour as f32,
+            self.cos_hour as f32,
+            self.yesterday_pv as f32,
+        ]
+    }
+}
+
 /// 模型管理器 — AI 引擎统一调度入口
 pub struct ModelManager {
     config: AiEngineConfig,
@@ -45,14 +75,17 @@ pub struct ModelManager {
     status: Arc<RwLock<ModelStatus>>,
     /// v2.3: 使用 RwLock 包裹以支持初始化阶段注入 registry
     mode_selector: Arc<RwLock<ModeSelector>>,
-    /// LSTM 历史缓冲（pv_power, load_power 样本，容量 = input_window_secs/step_seconds）
+    /// v3.0: LSTM 历史缓冲（7 维样本，容量 = input_size + yesterday_offset）
     ///
-    /// v2.16: 容量计算改用 step_seconds（默认 15 分钟步长）
-    lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
-    /// LSTM 输入窗口大小（步数，即缓冲容量）
+    /// 容量 = max(input_window_steps + yesterday_offset_steps, 120)
+    /// 用于构建 (T, 7) 多特征输入 + 提供 96 步前的 yesterday_pv 特征。
+    lstm_history: Arc<RwLock<VecDeque<HistorySample>>>,
+    /// LSTM 输入窗口大小（步数，即缓冲中用于构建输入的最近样本数）
     ///
-    /// v2.16: 计算公式从 `input_window_secs / 60` 改为 `input_window_secs / step_seconds`
+    /// v2.16: 计算公式 `input_window_secs / step_seconds`
     lstm_input_size: usize,
+    /// v3.0: LSTM 历史缓冲总容量（步数）
+    lstm_history_capacity: usize,
     /// LSTM 采样周期数（每 fusion_period_secs × counter_period 步压入一个样本）
     ///
     /// v2.16 新增：用于按 15 分钟步长降采样历史缓冲。
@@ -84,6 +117,10 @@ impl ModelManager {
         // v2.16: 使用 step_seconds 统一计算输入窗口步数
         let lstm_input_size = (config.lstm.input_window_secs / config.lstm.step_seconds) as usize;
 
+        // v3.0: 缓冲容量 = max(input_size + yesterday_offset_steps, 120)
+        // 确保有足够历史数据构建 7 维输入 + yesterday_pv 特征
+        let lstm_history_capacity = (lstm_input_size + config.lstm.yesterday_offset_steps).max(120);
+
         // v2.16: 采样周期 = step_seconds / fusion_period_secs
         // 例如 step=900s, fusion_period=1s → 每 900 步压入一个样本（15 分钟）
         // v2.16.1 (C-03 修复): 加 max(1) 边界保护，避免 step < fusion 时退化为 0（每周期都采样）
@@ -95,20 +132,25 @@ impl ModelManager {
 
         // v1.0: 创建 LSTM 模型和历史缓冲的 Arc（供 PredictionPipeline 复用）
         let lstm_model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>> =
-            Arc::new(RwLock::new(VecDeque::with_capacity(lstm_input_size)));
+        let lstm_history: Arc<RwLock<VecDeque<HistorySample>>> =
+            Arc::new(RwLock::new(VecDeque::with_capacity(lstm_history_capacity)));
 
         // v1.0: 创建预测增强管线（如果配置了 prediction_enhancement）
+        //
+        // v3.0: VMD 路径与多特征 (input_features > 1) 不兼容（VMD 仅适用于单变量时序）。
+        // PredictionPipeline 内部在 input_features > 1 时自动将 VMD 等级降级到 AttentionOnly。
         let prediction_pipeline = if let Some(ref enh_config) = config.prediction_enhancement {
             let pipeline = PredictionPipeline::new(
                 enh_config.clone(),
                 lstm_model.clone(),
                 lstm_history.clone(),
                 lstm_input_size,
+                config.lstm.input_features,
             );
             tracing::info!(
-                "预测增强管线已启用: 初始等级={:?}",
-                pipeline.current_level()
+                "预测增强管线已启用: 初始等级={:?}, input_features={}",
+                pipeline.current_level(),
+                config.lstm.input_features
             );
             Some(pipeline)
         } else {
@@ -127,6 +169,7 @@ impl ModelManager {
             mode_selector,
             lstm_history,
             lstm_input_size,
+            lstm_history_capacity,
             lstm_sample_period,
             safety_wrapper,
             prediction_pipeline: Arc::new(RwLock::new(prediction_pipeline)),
@@ -222,6 +265,8 @@ impl ModelManager {
         // 记录当前实时数据用于 LSTM 历史缓冲（在融合数据之后、更新缓冲之前）
         let current_pv = fused_state.pv_power;
         let current_load = fused_state.load_power;
+        let current_ghi = fused_state.solar_irradiance;
+        let current_temp = fused_state.temperature;
 
         // LSTM 预测：使用历史缓冲区的数据预测未来光伏/负荷（含分位数）
         //
@@ -292,6 +337,7 @@ impl ModelManager {
 
         // 更新 LSTM 历史缓冲（决策完成后再更新，避免用到本周期数据）
         // v2.16: 按 lstm_sample_period 降采样（每 step_seconds/fusion_period_secs 步压入一个样本）
+        // v3.0: 采集全部 7 维特征，包括 GHI、温度、时间编码和昨日 PV
         {
             let should_sample = {
                 let mut counter = self.lstm_sample_counter.write().await;
@@ -299,9 +345,35 @@ impl ModelManager {
                 *counter % self.lstm_sample_period == 0
             };
             if should_sample {
+                // v3.0: 计算时间编码
+                let now = chrono::Utc::now();
+                let hour = (now.timestamp() % 86400) as f64 / 3600.0;
+                let sin_hour = (2.0 * std::f64::consts::PI * hour / 24.0).sin();
+                let cos_hour = (2.0 * std::f64::consts::PI * hour / 24.0).cos();
+
+                // v3.0: 从缓冲头部提取 96 步前的 PV 作为 yesterday_pv
+                // 冷启动时（缓冲不足 yesterday_offset_steps）用当前 PV 回退（与训练侧一致）
+                let yesterday_offset = self.config.lstm.yesterday_offset_steps;
                 let mut history = self.lstm_history.write().await;
-                history.push_back((current_pv, current_load));
-                while history.len() > self.lstm_input_size {
+                let yesterday_pv = if history.len() >= yesterday_offset {
+                    history.get(history.len() - yesterday_offset)
+                        .map(|s| s.pv_power)
+                        .unwrap_or(current_pv)
+                } else {
+                    current_pv // 冷启动 fallback
+                };
+
+                let sample = HistorySample {
+                    pv_power: current_pv,
+                    load_power: current_load,
+                    solar_irradiance: current_ghi,
+                    temperature: current_temp,
+                    sin_hour,
+                    cos_hour,
+                    yesterday_pv,
+                };
+                history.push_back(sample);
+                while history.len() > self.lstm_history_capacity {
                     history.pop_front();
                 }
             }
@@ -323,10 +395,10 @@ impl ModelManager {
         Ok(validated)
     }
 
-    /// 执行 LSTM 预测（使用历史缓冲区的 pv_power / load_power 样本，含分位数）
+    /// 执行 LSTM 预测（使用历史缓冲区构建 7 维联合输入）
     ///
-    /// v2.16 (C-02 修复): 返回值扩展为 (pv_forecast, load_forecast, Option<ProbabilisticLoadOutput>)。
-    /// 第三项为负荷分位数预测结果（用于接通 D10 数据流）。
+    /// v3.0: 构建展平的 (T, 7) 输入，单次 ONNX 推理联合输出 PV + Load + D10 分位数。
+    /// v2.16 兼容: `input_features=1` 时回退到分别预测（PV/Load 各一次推理）。
     ///
     /// 返回值约定：
     /// - LSTM 未就绪或缓冲不足时，第三项为 None
@@ -357,59 +429,146 @@ impl ModelManager {
             return Ok((vec![0.0; 15], vec![0.0; 15], None));
         }
 
-        // 构建 PV 历史输入（取最近的 input_size 个样本）
-        let pv_history: Vec<f32> = history
-            .iter()
-            .rev()
-            .take(self.lstm_input_size)
-            .map(|&(pv, _)| pv as f32)
-            .collect();
-        let pv_history: Vec<f32> = pv_history.into_iter().rev().collect();
+        let input_features = self.config.lstm.input_features.max(1);
 
-        let load_history: Vec<f32> = history
-            .iter()
-            .rev()
-            .take(self.lstm_input_size)
-            .map(|&(_, load)| load as f32)
-            .collect();
-        let load_history: Vec<f32> = load_history.into_iter().rev().collect();
+        // v3.0: 构建展平的 (T, K) 多特征输入
+        // 布局: row-major — [t0_f0, t0_f1, ..., t0_f6, t1_f0, ..., t_{T-1}_f_{K-1}]
+        let mut flat_input = Vec::with_capacity(self.lstm_input_size * input_features);
+        for sample in history.iter().rev().take(self.lstm_input_size).rev() {
+            let features = sample.to_features();
+            // v3.0: 取前 input_features 个特征（支持 input_features < 7 的子集模式）
+            flat_input.extend_from_slice(&features[..input_features.min(7)]);
+        }
 
-        // 预测 PV（使用 PV 历史）
-        let pv_input = LstmInput {
-            history: pv_history,
-            timestamp: chrono::Utc::now().timestamp(),
+        let timestamp = chrono::Utc::now().timestamp();
+        let input = LstmInput {
+            history: flat_input,
+            timestamp,
         };
-        let pv_output = lstm.predict(&pv_input).await?;
-        let pv_forecast: Vec<f64> = pv_output
-            .predictions
-            .into_iter()
-            .map(|v| v as f64)
-            .collect();
 
-        // 预测负荷（使用负荷历史 + 分位数）
-        let load_input = LstmInput {
-            history: load_history,
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-        let load_output = lstm.predict(&load_input).await?;
-        let load_forecast: Vec<f64> = load_output
-            .predictions
-            .into_iter()
-            .map(|v| v as f64)
-            .collect();
+        // 单次 ONNX 联合推理（替代 v2.16 的 PV/Load 分别推理）
+        let output = lstm.predict(&input).await?;
+        let output_len = output.predictions.len();
 
-        // v2.16: 计算分位数预测（使用默认协变量，C-02 数据流通）
-        // TODO: 后续可从 LoadCovariates 数据源注入真实协变量
-        let covariates = crate::load_covariates::LoadCovariates::default();
-        let load_quantiles = match lstm.predict_quantiles(&load_input, &covariates).await {
-            Ok(pq) => Some(pq),
-            Err(e) => {
-                tracing::warn!("LSTM 分位数预测失败，回退为零向量: {}", e);
-                None
+        // v3.0: 根据输出维度自动检测格式并解析
+        match output_len {
+            90 => {
+                // p10p50p90 格式: (2, 15, 3) = [PV:P10(15), PV:P50(15), PV:P90(15),
+                //                                Load:P10(15), Load:P50(15), Load:P90(15)]
+                let pv_p50: Vec<f64> = output.predictions[15..30].iter().map(|&v| v as f64).collect();
+                let load_p50: Vec<f64> = output.predictions[60..75].iter().map(|&v| v as f64).collect();
+
+                // 从同一输出构建 D10 分位数
+                let load_quantiles = self.build_quantiles_from_output(
+                    &output.predictions, timestamp, output_len,
+                );
+
+                Ok((pv_p50, load_p50, load_quantiles))
             }
-        };
+            47 | 30 => {
+                // legacy 格式: [pv(15), load(15), (quantiles(15), shock(1), base(1))]
+                let pv_forecast: Vec<f64> = output.predictions[..15].iter().map(|&v| v as f64).collect();
+                let load_forecast: Vec<f64> = output.predictions[15..30].iter().map(|&v| v as f64).collect();
 
-        Ok((pv_forecast, load_forecast, load_quantiles))
+                let load_quantiles = if output_len >= 47 {
+                    self.build_quantiles_from_output(
+                        &output.predictions, timestamp, output_len,
+                    )
+                } else {
+                    None
+                };
+
+                Ok((pv_forecast, load_forecast, load_quantiles))
+            }
+            _ => {
+                // 未知格式：取前 15 维作为 PV，回退
+                tracing::warn!(
+                    "LSTM 输出维度 {} 未识别，使用前 15 维作为 PV 预测",
+                    output_len
+                );
+                let pv: Vec<f64> = output.predictions.iter().take(15).map(|&v| v as f64).collect();
+                Ok((pv, vec![0.0; 15], None))
+            }
+        }
+    }
+
+    /// v3.0: 从 ONNX 输出构建 ProbabilisticLoadOutput
+    ///
+    /// 根据输出长度自动选择 p10p50p90（90维）或 legacy（47维）解析路径。
+    fn build_quantiles_from_output(
+        &self,
+        predictions: &[f32],
+        timestamp: i64,
+        output_len: usize,
+    ) -> Option<ProbabilisticLoadOutput> {
+        if output_len >= 90 {
+            // p10p50p90: Load P10/P50/P90 分别在 [45..60), [60..75), [75..90)
+            let base_load = *predictions.get(60).unwrap_or(&0.0);
+            let p50_first = *predictions.get(60).unwrap_or(&0.0);
+            let p90_first = *predictions.get(75).unwrap_or(&p50_first);
+
+            let mut quantiles: Vec<QuantilePrediction> = Vec::with_capacity(45);
+            for i in 0..15 {
+                quantiles.push(QuantilePrediction { quantile: 0.10, value: predictions[45 + i] });
+                quantiles.push(QuantilePrediction { quantile: 0.50, value: predictions[60 + i] });
+                quantiles.push(QuantilePrediction { quantile: 0.90, value: predictions[75 + i] });
+            }
+
+            Some(ProbabilisticLoadOutput {
+                timestamp,
+                quantiles,
+                base_load,
+                shock_probability: self.compute_shock_static(p50_first, p90_first),
+                confidence: self.compute_conf_static(p50_first, p90_first),
+            })
+        } else if output_len >= 47 {
+            // legacy: [pv(15), load(15), quantiles(15), shock(1), base(1)]
+            let base_load = *predictions.get(46).unwrap_or(&0.0);
+            let p50_first = *predictions.get(15).unwrap_or(&base_load);
+            let p90_first = *predictions.get(30).unwrap_or(&p50_first);
+
+            let mut quantiles: Vec<QuantilePrediction> = Vec::with_capacity(45);
+            for i in 0..15 {
+                let p50 = *predictions.get(15 + i).unwrap_or(&0.0);
+                let p90 = *predictions.get(30 + i).unwrap_or(&p50);
+                let p10 = (p50 * 0.7).max(0.0);
+                quantiles.push(QuantilePrediction { quantile: 0.10, value: p10 });
+                quantiles.push(QuantilePrediction { quantile: 0.50, value: p50 });
+                quantiles.push(QuantilePrediction { quantile: 0.90, value: p90 });
+            }
+
+            Some(ProbabilisticLoadOutput {
+                timestamp,
+                quantiles,
+                base_load,
+                shock_probability: self.compute_shock_static(p50_first, p90_first),
+                confidence: self.compute_conf_static(p50_first, p90_first),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Static inline shock probability
+    fn compute_shock_static(&self, base_load: f32, high_quantile: f32) -> f64 {
+        let spread = (high_quantile - base_load).max(1e-6);
+        let _std_approx = spread / 1.28;
+        (0.5 * Self::erfc_helper(2.0 / std::f32::consts::SQRT_2)) as f64
+    }
+
+    /// Static inline confidence
+    fn compute_conf_static(&self, p50: f32, p90: f32) -> f64 {
+        let spread_ratio = (p90 - p50) / p50.max(1e-6);
+        (1.0 - spread_ratio.min(1.0)).max(0.0) as f64
+    }
+
+    /// erfc approximation
+    fn erfc_helper(x: f32) -> f32 {
+        let abs_x = x.abs();
+        if abs_x > 8.0 { return 0.0; }
+        let exp_term = (-x * x).exp();
+        let denom = std::f32::consts::PI * abs_x + (std::f32::consts::PI * x * x + 4.0).sqrt();
+        exp_term / denom
     }
 
     /// v1.0: 增强预测入口（Pipeline 优先 → 基线降级）
@@ -774,6 +933,8 @@ mod tests {
                 step_seconds: 60, // 测试用 1 分钟步长
                 quantization: crate::config::QuantizationType::INT8,
                 expected_sha256: None,
+                input_features: 1,
+                yesterday_offset_steps: 96,
             },
             rl: RlConfig {
                 model_path: std::path::PathBuf::from("/tmp/test_rl.rknn"),

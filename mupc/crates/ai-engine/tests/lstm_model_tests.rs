@@ -16,6 +16,8 @@ mod tests {
             step_seconds: 60,
             quantization: mupc_ai_engine::config::QuantizationType::INT8,
             expected_sha256: None,
+            input_features: 1,
+            yesterday_offset_steps: 96,
         }
     }
 

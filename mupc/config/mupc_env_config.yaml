@@ -3,8 +3,15 @@
 # 版本: v2.6-20260611
 
 version:
-  fingerprint: "v2.6-20260611"
+  fingerprint: "v3.0-20260621"
   source: "mupc-ai2"
+
+# ═══════════════════════════════════════════════════════════════
+# LSTM 模型架构配置 (v3.0)
+# ═══════════════════════════════════════════════════════════════
+lstm:
+  input_features: 7               # 输入特征数 (默认 7, 对齐 MUPC-AI2 训练管线)
+  yesterday_offset_steps: 96      # 昨日 PV 偏移步数 (= 24h / step_seconds)
 
 physical:
   transformer_kva: 200.0

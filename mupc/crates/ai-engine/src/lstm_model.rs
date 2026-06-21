@@ -10,9 +10,15 @@ use crate::load_covariates::LoadCovariates;
 use crate::rknn_runtime::RknnRuntime;
 
 /// LSTM 模型输入
+///
+/// v3.0: `history` 为展平的 2D 数组 (T, K)，按 row-major 布局：
+/// `[t0_f0, t0_f1, ..., t0_f6, t1_f0, ..., t_{T-1}_f_{K-1}]`
+/// 长度 = input_window_steps × input_features（默认 24 × 7 = 168）。
+///
+/// 设为 `input_features=1` 时回退到 v2.16 单变量模式（长度 = 24）。
 #[derive(Debug, Clone)]
 pub struct LstmInput {
-    /// 历史时间序列数据（按时间顺序）
+    /// 历史时间序列数据（按时间顺序，展平 row-major）
     pub history: Vec<f32>,
     /// 时间戳（UTC 秒）
     pub timestamp: i64,
@@ -75,22 +81,26 @@ impl LstmModel {
 
     /// 执行预测
     ///
-    /// 输入：历史时间序列（通常为 60 分钟数据点）
-    /// 输出：未来预测值（通常为 30 分钟）
+    /// v3.0: 输入为展平的 (T, K) 序列，长度 = input_window_steps × input_features。
+    /// v2.16 兼容: `input_features=1` 时回退到单变量模式。
+    ///
+    /// 输入：展平的历史时间序列
+    /// 输出：未来预测值
     pub async fn predict(&self, input: &LstmInput) -> Result<LstmOutput, AiEngineError> {
         // 检查模型是否已加载
         if !self.runtime.is_loaded() {
             return Err(AiEngineError::ModelNotLoaded);
         }
 
-        // 计算输入大小：每分钟一个数据点
-        // input_window_secs = 3600s = 60 分钟
-        let input_size = self.config.input_window_secs as usize / 60;
+        // v3.0: 计算输入步数 × 特征数
+        let input_steps = self.config.input_window_secs as usize / self.config.step_seconds as usize;
+        let input_features = self.config.input_features.max(1);
+        let expected_len = input_steps * input_features;
 
         // 验证输入长度
-        if input.history.len() != input_size {
+        if input.history.len() != expected_len {
             return Err(AiEngineError::InputShapeMismatch {
-                expected: vec![1, input_size as i32],
+                expected: vec![1, expected_len as i32],
                 actual: vec![1, input.history.len() as i32],
             });
         }
@@ -98,10 +108,9 @@ impl LstmModel {
         // 执行推理
         let output = self.runtime.run(&input.history).await?;
 
-        // 计算输出步数：每分钟一个预测点
-        // output_horizon_secs = 900s = 15 分钟（默认）
-        let output_size = self.config.output_horizon_secs as usize / 60;
-        let predictions: Vec<f32> = output.into_iter().take(output_size).collect();
+        // v3.0: 输出步数取 output_horizon_secs / step_seconds (默认 15)
+        let output_steps = self.config.output_horizon_secs as usize / self.config.step_seconds as usize;
+        let predictions: Vec<f32> = output.into_iter().take(output_steps).collect();
 
         // 简化置信度计算：基于输出方差
         // 实际应使用贝叶斯方法或集成方法
@@ -293,7 +302,7 @@ impl LstmModel {
     ///
     /// P(shock) = 1 - Φ((median - mean) / std)
     /// 其中 std ≈ P90 - P50（高分位数与中位数的差值反映不确定性）
-    fn calculate_shock_probability(&self, base_load: f32, high_quantile: f32) -> f64 {
+    pub(crate) fn calculate_shock_probability(&self, base_load: f32, high_quantile: f32) -> f64 {
         let spread = (high_quantile - base_load).max(1e-6);
 
         // 假设负荷服从正态分布，spread ≈ 1.28 * std（P90 对应 1.28σ）
@@ -323,7 +332,7 @@ impl LstmModel {
     }
 
     /// v2.11: 计算置信度
-    fn calculate_quantile_confidence(&self, quantiles: &[QuantilePrediction]) -> f64 {
+    pub(crate) fn calculate_quantile_confidence(&self, quantiles: &[QuantilePrediction]) -> f64 {
         if quantiles.len() < 2 {
             return 0.5;
         }
@@ -373,6 +382,8 @@ mod tests {
             step_seconds: 60,         // 测试用 1 分钟步长（小步长便于构造数据）
             quantization: crate::config::QuantizationType::INT8,
             expected_sha256: None,
+            input_features: 1,        // 测试用单变量模式（向后兼容）
+            yesterday_offset_steps: 96,
         }
     }
 

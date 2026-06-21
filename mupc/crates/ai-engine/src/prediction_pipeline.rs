@@ -12,7 +12,8 @@
 
 use crate::error::AiEngineError;
 use crate::load_covariates::LoadCovariates;
-use crate::lstm_model::{LstmInput, LstmModel, ProbabilisticLoadOutput};
+use crate::lstm_model::{LstmInput, LstmModel, ProbabilisticLoadOutput, QuantilePrediction};
+use crate::model_manager::HistorySample;
 use crate::pipeline_config::{EnhancementLevel, PipelineHealth, PredictionEnhancementConfig};
 use crate::residual_buffer::ResidualBuffer;
 use crate::rknn_runtime::RknnRuntime;
@@ -59,20 +60,25 @@ pub struct EnhancedForecastResult {
 ///     lstm_model_arc,
 ///     lstm_history_arc,
 ///     input_size,
+///     input_features,
 /// )?;
 /// let result = pipeline.execute().await?;
 /// ```
 pub struct PredictionPipeline {
     /// VMD 分解器（光伏），None 表示 VMD 未启用
+    ///
+    /// v3.0: `input_features > 1` 时 VMD 路径自动降级（VMD 仅适用于单变量时序）
     vmd_pv: Option<VmdDecomposer>,
     /// VMD 分解器（负荷），None 表示 VMD 未启用
     vmd_load: Option<VmdDecomposer>,
     /// LSTM 模型引用（用于 IMF 推理和降级推理）
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
-    /// 历史缓冲引用（(pv_power, load_power) 样本）
-    lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
+    /// v3.0: 历史缓冲引用（7 维 HistorySample）
+    lstm_history: Arc<RwLock<VecDeque<HistorySample>>>,
     /// 输入窗口大小（步数）
     input_size: usize,
+    /// v3.0: 输入特征数（默认 7，对齐训练管线）
+    input_features: usize,
     /// 增强配置
     config: PredictionEnhancementConfig,
     /// 模块健康状态
@@ -102,10 +108,14 @@ impl PredictionPipeline {
     pub fn new(
         enhancement_config: PredictionEnhancementConfig,
         lstm_model: Arc<RwLock<Option<LstmModel>>>,
-        lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
+        lstm_history: Arc<RwLock<VecDeque<HistorySample>>>,
         input_size: usize,
+        input_features: usize,
     ) -> Self {
-        let (vmd_pv, vmd_load) = if enhancement_config.vmd.enabled {
+        // v3.0: VMD 仅适用于单变量时序 (input_features == 1)。
+        // 多特征模式下自动禁用 VMD，降级到 AttentionOnly/Baseline 路径。
+        let vmd_compatible = input_features <= 1;
+        let (vmd_pv, vmd_load) = if enhancement_config.vmd.enabled && vmd_compatible {
             let k_pv = if enhancement_config.vmd.k_pv == 0 {
                 tracing::warn!("VMD k_pv=0 非法，使用默认值 5");
                 5
@@ -146,7 +156,14 @@ impl PredictionPipeline {
                 Some(VmdDecomposer::new(load_config)),
             )
         } else {
-            tracing::info!("VMD 增强未启用，使用基线 LSTM 推理");
+            if enhancement_config.vmd.enabled && !vmd_compatible {
+                tracing::info!(
+                    "VMD 增强已配置但 input_features={} > 1，VMD 路径自动禁用（VMD 仅适用于单变量）",
+                    input_features
+                );
+            } else {
+                tracing::info!("VMD 增强未启用，使用基线 LSTM 推理");
+            }
             (None, None)
         };
 
@@ -187,13 +204,13 @@ impl PredictionPipeline {
                 (None, None)
             };
 
-        // --- 初始等级确定（R2 扩展：BiLSTM + 误差修正） ---
+        // --- 初始等级确定（R2 扩展：BiLSTM + 误差修正，v3.0: VMD 受 input_features 约束） ---
         let initial_level = {
             let bilstm_go = enhancement_config.bilstm.enabled
                 && enhancement_config.bilstm.gate_passed;
             let ec_enabled = enhancement_config.error_correction.enabled
                 && error_correction_runtime.is_some();
-            let vmd_enabled = vmd_pv.is_some();
+            let vmd_enabled = vmd_pv.is_some() && vmd_compatible;
 
             if bilstm_go && vmd_enabled && ec_enabled {
                 EnhancementLevel::FullVmdAttentionCorrection
@@ -207,12 +224,13 @@ impl PredictionPipeline {
         };
 
         tracing::info!(
-            "预测增强管线创建完成: 初始等级={:?}({}), VMD={}, BiLSTM_Go={}, EC={}",
+            "预测增强管线创建完成: 初始等级={:?}({}), VMD={}, BiLSTM_Go={}, EC={}, input_features={}",
             initial_level,
             initial_level.name(),
-            vmd_pv.is_some(),
+            vmd_pv.is_some() && vmd_compatible,
             enhancement_config.bilstm.enabled && enhancement_config.bilstm.gate_passed,
-            error_correction_runtime.is_some()
+            error_correction_runtime.is_some(),
+            input_features
         );
 
         Self {
@@ -221,6 +239,7 @@ impl PredictionPipeline {
             lstm_model,
             lstm_history,
             input_size,
+            input_features,
             config: enhancement_config,
             health: RwLock::new(PipelineHealth {
                 current_level: initial_level,
@@ -430,12 +449,12 @@ impl PredictionPipeline {
             )));
         }
 
-        // 提取 PV 和负荷历史序列
+        // v3.0: 提取 PV 和负荷历史序列（从 HistorySample）
         let pv_history: Vec<f32> = history
             .iter()
             .rev()
             .take(self.input_size)
-            .map(|&(pv, _)| pv as f32)
+            .map(|s| s.pv_power as f32)
             .collect();
         let pv_history: Vec<f32> = pv_history.into_iter().rev().collect();
 
@@ -443,7 +462,7 @@ impl PredictionPipeline {
             .iter()
             .rev()
             .take(self.input_size)
-            .map(|&(_, load)| load as f32)
+            .map(|s| s.load_power as f32)
             .collect();
         let load_history: Vec<f32> = load_history.into_iter().rev().collect();
 
@@ -751,7 +770,6 @@ impl PredictionPipeline {
             return Err(AiEngineError::PipelineError("LSTM Runtime 未加载".into()));
         }
 
-        // OPT: 读锁 scope 可缩短至提取历史序列后立即释放
         let history = self.lstm_history.read().await;
         let len = history.len();
         if len < self.input_size {
@@ -765,59 +783,21 @@ impl PredictionPipeline {
             });
         }
 
-        // 提取序列
-        let pv_history: Vec<f32> = history
-            .iter()
-            .rev()
-            .take(self.input_size)
-            .map(|&(pv, _)| pv as f32)
-            .collect();
-        let pv_history: Vec<f32> = pv_history.into_iter().rev().collect();
-
-        let load_history: Vec<f32> = history
-            .iter()
-            .rev()
-            .take(self.input_size)
-            .map(|&(_, load)| load as f32)
-            .collect();
-        let load_history: Vec<f32> = load_history.into_iter().rev().collect();
+        // v3.0: 构建展平的 (T, K) 多特征输入
+        let flat_input = self.build_flat_input(&history);
         drop(history);
 
-        // PV 预测
-        let pv_input = LstmInput {
-            history: pv_history,
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-        let pv_output = lstm.predict(&pv_input).await?;
-        let pv_forecast: Vec<f64> = pv_output
-            .predictions
-            .into_iter()
-            .map(|v| v as f64)
-            .collect();
-
-        // 负荷预测
-        let load_input = LstmInput {
-            history: load_history,
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-        let load_output = lstm.predict(&load_input).await?;
-        let load_forecast: Vec<f64> = load_output
-            .predictions
-            .into_iter()
-            .map(|v| v as f64)
-            .collect();
-
-        // 分位数
-        let covariates = LoadCovariates::default();
-        let load_quantiles = match lstm.predict_quantiles(&load_input, &covariates).await {
-            Ok(pq) => Some(pq),
-            Err(e) => {
-                tracing::warn!("分位数预测失败: {}", e);
-                None
-            }
+        let timestamp = chrono::Utc::now().timestamp();
+        let input = LstmInput {
+            history: flat_input,
+            timestamp,
         };
 
-        // lstm 读锁在函数返回时自然释放
+        // 单次 ONNX 联合推理
+        let output = lstm.predict(&input).await?;
+        let (pv_forecast, load_forecast, load_quantiles) =
+            self.parse_baseline_output(&output.predictions, timestamp);
+
         Ok(EnhancedForecastResult {
             pv_forecast,
             load_forecast,
@@ -826,6 +806,117 @@ impl PredictionPipeline {
             vmd_degraded: false,
             error_correction_applied: false,
         })
+    }
+
+    /// v3.0: 从历史缓冲构建展平的 (T, K) 多特征输入
+    ///
+    /// 布局: row-major — [t0_f0, t0_f1, ..., t0_f{K-1}, t1_f0, ...]
+    /// 取最近 input_size 个样本，每个样本展平为 K 个特征值。
+    fn build_flat_input(&self, history: &VecDeque<HistorySample>) -> Vec<f32> {
+        let k = self.input_features.min(7);
+        let mut flat = Vec::with_capacity(self.input_size * k);
+        for sample in history.iter().rev().take(self.input_size).rev() {
+            let features = sample.to_features();
+            flat.extend_from_slice(&features[..k]);
+        }
+        flat
+    }
+
+    /// v3.0: 从 ONNX 原始输出解析 PV 预测、负荷预测和 D10 分位数
+    ///
+    /// 根据输出长度自动检测格式:
+    /// - 90: p10p50p90 — (2, 15, 3) = [PV:P10(15), PV:P50(15), PV:P90(15), Load:P10(15), Load:P50(15), Load:P90(15)]
+    /// - 47: legacy with D10 — [pv(15), load(15), quantiles(15), shock(1), base(1)]
+    /// - 30: legacy no D10 — [pv(15), load(15)]
+    fn parse_baseline_output(
+        &self,
+        predictions: &[f32],
+        timestamp: i64,
+    ) -> (Vec<f64>, Vec<f64>, Option<ProbabilisticLoadOutput>) {
+        let out_len = predictions.len();
+        match out_len {
+            90 => {
+                let pv_p50: Vec<f64> = predictions[15..30].iter().map(|&v| v as f64).collect();
+                let load_p50: Vec<f64> = predictions[60..75].iter().map(|&v| v as f64).collect();
+
+                // 构建 QuantilePrediction 列表 (15步 × 3 分位数)
+                let mut quantiles: Vec<QuantilePrediction> = Vec::with_capacity(45);
+                for i in 0..15 {
+                    quantiles.push(QuantilePrediction { quantile: 0.10, value: predictions[45 + i] }); // Load P10
+                    quantiles.push(QuantilePrediction { quantile: 0.50, value: predictions[60 + i] }); // Load P50
+                    quantiles.push(QuantilePrediction { quantile: 0.90, value: predictions[75 + i] }); // Load P90
+                }
+
+                let p50_first = *predictions.get(60).unwrap_or(&0.0);
+                let p90_first = *predictions.get(75).unwrap_or(&p50_first);
+                let base_load = p50_first;
+
+                let load_quantiles = Some(ProbabilisticLoadOutput {
+                    timestamp,
+                    quantiles,
+                    base_load,
+                    shock_probability: Self::compute_shock_prob(p50_first, p90_first),
+                    confidence: Self::compute_quantile_confidence_static(p50_first, p90_first),
+                });
+                (pv_p50, load_p50, load_quantiles)
+            }
+            47 => {
+                let pv: Vec<f64> = predictions[..15].iter().map(|&v| v as f64).collect();
+                let load: Vec<f64> = predictions[15..30].iter().map(|&v| v as f64).collect();
+                let base_load = *predictions.get(46).unwrap_or(&0.0);
+
+                let mut quantiles: Vec<QuantilePrediction> = Vec::with_capacity(45);
+                for i in 0..15 {
+                    let p50 = *predictions.get(15 + i).unwrap_or(&0.0);
+                    let p90 = *predictions.get(30 + i).unwrap_or(&p50);
+                    let p10 = (p50 * 0.7).max(0.0); // 启发式 P10
+                    quantiles.push(QuantilePrediction { quantile: 0.10, value: p10 });
+                    quantiles.push(QuantilePrediction { quantile: 0.50, value: p50 });
+                    quantiles.push(QuantilePrediction { quantile: 0.90, value: p90 });
+                }
+
+                let p50_first = *predictions.get(15).unwrap_or(&base_load);
+                let p90_first = *predictions.get(30).unwrap_or(&p50_first);
+
+                let load_quantiles = Some(ProbabilisticLoadOutput {
+                    timestamp,
+                    quantiles,
+                    base_load,
+                    shock_probability: Self::compute_shock_prob(p50_first, p90_first),
+                    confidence: Self::compute_quantile_confidence_static(p50_first, p90_first),
+                });
+                (pv, load, load_quantiles)
+            }
+            _ => {
+                tracing::warn!("LSTM 输出维度 {} 未识别，取前 15 维", out_len);
+                let pv: Vec<f64> = predictions.iter().take(15).map(|&v| v as f64).collect();
+                (pv, vec![0.0; 15], None)
+            }
+        }
+    }
+
+    /// 冲击概率计算（静态内联，避免跨模块调用私有方法）
+    fn compute_shock_prob(base_load: f32, high_quantile: f32) -> f64 {
+        let spread = (high_quantile - base_load).max(1e-6);
+        let _std_approx = spread / 1.28;
+        let z_score = 2.0;
+        let shock_prob = 0.5 * Self::erfc_static(z_score / std::f32::consts::SQRT_2);
+        shock_prob as f64
+    }
+
+    /// 置信度计算（静态内联）
+    fn compute_quantile_confidence_static(p50: f32, p90: f32) -> f64 {
+        let spread_ratio = (p90 - p50) / p50.max(1e-6);
+        (1.0 - spread_ratio.min(1.0)).max(0.0) as f64
+    }
+
+    /// erfc 近似
+    fn erfc_static(x: f32) -> f32 {
+        let abs_x = x.abs();
+        if abs_x > 8.0 { return 0.0; }
+        let exp_term = (-x * x).exp();
+        let denom = std::f32::consts::PI * abs_x + (std::f32::consts::PI * x * x + 4.0).sqrt();
+        exp_term / denom
     }
 
     /// 逐 IMF 推理并重构预测结果
@@ -1077,10 +1168,10 @@ mod tests {
     fn test_pipeline_creation_vmd_disabled() {
         let config = create_disabled_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(
             pipeline.current_level(),
             EnhancementLevel::Baseline,
@@ -1096,10 +1187,10 @@ mod tests {
     fn test_pipeline_creation_vmd_enabled() {
         let config = create_vmd_enabled_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(
             pipeline.current_level(),
             EnhancementLevel::VmdAttention,
@@ -1116,10 +1207,10 @@ mod tests {
         let config = create_vmd_enabled_config();
         // 不初始化 LSTM 模型 → VMD+Attention 和 Attention 路径均失败
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
 
         // 执行预测 → 预期降级到 Baseline
         let result = pipeline.execute().await;
@@ -1141,10 +1232,10 @@ mod tests {
     fn test_try_promote_after_5_successes() {
         let config = create_disabled_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
 
         // 手动设置初始状态：AttentionOnly → 期望升至 Baseline(4)
         let mut health = PipelineHealth {
@@ -1171,10 +1262,10 @@ mod tests {
     fn test_try_promote_insufficient_successes() {
         let config = create_disabled_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
 
         let mut health = PipelineHealth {
             vmd_consecutive_successes: 3,
@@ -1196,10 +1287,10 @@ mod tests {
     async fn test_health_state_reading() {
         let config = create_disabled_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
 
         let health = pipeline.health().await;
         assert_eq!(health.current_level, EnhancementLevel::Baseline);
@@ -1213,10 +1304,10 @@ mod tests {
     fn test_default_config_no_vmd() {
         let config = PredictionEnhancementConfig::default();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(pipeline.current_level(), EnhancementLevel::Baseline);
     }
 
@@ -1232,11 +1323,11 @@ mod tests {
         config.vmd.k_load = 0; // 非法值
 
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
         // 即使 k=0，Pipeline 应使用默认值创建（不会 panic）
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(pipeline.current_level(), EnhancementLevel::VmdAttention);
     }
 
@@ -1295,10 +1386,10 @@ mod tests {
     fn test_pipeline_creation_bilstm_go_ec_enabled() {
         let config = create_bilstm_go_ec_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(
             pipeline.current_level(),
             EnhancementLevel::FullVmdAttentionCorrection,
@@ -1314,10 +1405,10 @@ mod tests {
     fn test_pipeline_creation_bilstm_nogo() {
         let config = create_bilstm_nogo_config();
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(
             pipeline.current_level(),
             EnhancementLevel::VmdAttention,
@@ -1336,10 +1427,10 @@ mod tests {
         config.bilstm.gate_passed = false;
 
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         // 应回退到 VmdAttention（等效单向LSTM + VMD）
         assert_eq!(pipeline.current_level(), EnhancementLevel::VmdAttention);
     }
@@ -1354,10 +1445,10 @@ mod tests {
         config.error_correction.enabled = false;
 
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
-        let history: Arc<RwLock<VecDeque<(f64, f64)>>> =
+        let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
-        let pipeline = PredictionPipeline::new(config, model, history, 24);
+        let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
         assert_eq!(
             pipeline.current_level(),
             EnhancementLevel::BiLstmVmdAttention

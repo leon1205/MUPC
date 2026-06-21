@@ -41,6 +41,26 @@ pub struct LstmConfig {
     /// SHA256 期望值（PRD 9.5），开发环境为 None 跳过校验
     #[serde(default)]
     pub expected_sha256: Option<String>,
+    /// v3.0: 输入特征数（默认 7，对齐 MUPC-AI2 训练管线）
+    ///
+    /// 7 维特征: [pv_power, load_power, ghi, temp, sin_hour, cos_hour, yesterday_pv]
+    /// 设为 1 时回退到单变量 univariate 模式（v2.16 兼容）。
+    #[serde(default = "default_input_features")]
+    pub input_features: usize,
+    /// v3.0: 昨日 PV 偏移步数（= 24h / step_seconds）
+    ///
+    /// 用于构建 yesterday_pv 特征（第 7 维），默认 96（900s 步长 × 96 = 24h）。
+    /// 仅在 input_features >= 7 时生效。
+    #[serde(default = "default_yesterday_offset_steps")]
+    pub yesterday_offset_steps: usize,
+}
+
+fn default_input_features() -> usize {
+    7
+}
+
+fn default_yesterday_offset_steps() -> usize {
+    96 // 86400s / 900s = 96
 }
 
 impl Default for LstmConfig {
@@ -52,6 +72,8 @@ impl Default for LstmConfig {
             step_seconds: 900,           // 15 分钟步长
             quantization: QuantizationType::INT8,
             expected_sha256: None,
+            input_features: default_input_features(),
+            yesterday_offset_steps: default_yesterday_offset_steps(),
         }
     }
 }

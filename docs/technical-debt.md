@@ -5,6 +5,7 @@
 | v1.0 | 2026-05-27 | 项目经理 | 记录中 |
 | v2.0 | 2026-06-15 | 项目经理 | 审计更新 — 新增文档-代码一致性审计发现 |
 | v2.1 | 2026-06-18 | 项目经理 | v2.17 新增：SafetyRLWrapper broadcast channel 组装（U-15）|
+| v2.2 | 2026-06-21 | 项目经理 | v3.0 新增：训练-部署输入维度不一致（U-16，P0 已修复）+ 根因分析 |
 
 ---
 
@@ -195,6 +196,28 @@
 | U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | ✅ 已修复 — 统一采用 `SeasonalLoadManagement`（代码+文档） |
 | U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | ✅ 已修复 — 设计文档统一为 `ota-update`（ADR-007 决议更新） |
 | U-15 | 05 AI引擎 | **P1** | v2.17 SafetyRLWrapper `event_sender` 未连接 — broadcast channel 需 main.rs 组装，当前 `ModelManager::new()` 传入 `None`，违规时无 SSE 实时推送 | 需系统集成入口（bin crate）创建 broadcast channel，Sender 注入 SafetyRLWrapper，Receiver 转发到 SsePushService（~5 行胶水代码） |
+| U-16 | 05 AI引擎 | **P0** | v3.0 训练-部署输入维度不一致 — `/work/MUPC-AI` 训练管线 `prepare_data()` 硬编码 7 维特征 `(T, 7)`，`/work/MUPC` Rust 侧全链路传递 1 维单变量 `LstmInput { history: Vec<f32> }`（24 个 f32），导致训练产出的 ONNX 模型无法部署到 Rust 推理侧（shape 不匹配）。**根因**：`LstmInput` 类型签名 `Vec<f32>` 太弱，编译期不区分 24 和 168 个 f32。**复盘**：CNN-LSTM TODO 文档（6/19）已记录该 Gap 但未纳入评审门禁；各次 PR review 均在单侧仓库内执行，无人同时比对两端代码 | ✅ 已修复（v3.0）：`LstmConfig` 新增 `input_features`/`yesterday_offset_steps`，`HistorySample` struct（7 字段），`model_manager` + `prediction_pipeline` 适配 7D flat 输入，VMD 在 `input_features>1` 时自动降级 |
+
+### 6.3 U-16 根因分析
+
+**发现过程**：2026-06-21 启动新一轮完整训练，重新审视训练-部署全链路对齐，逐一比对 `/work/MUPC-AI` Python 训练管线和 `/work/MUPC` Rust 推理侧的数据流，发现两者 ONNX input shape 不一致。
+
+**为什么之前的 review 没发现**：
+
+| 审阅节点 | 审了什么 | 为什么漏了 |
+|----------|----------|-----------|
+| v2.16 技术债审计 (6/15) | `to_input_vector` 48→78 维、FusedSystemState 字段对齐 | 审的是 **Rust 内部**一致性，未对比 Python 训练管线 |
+| 专家评审 (6/14) | 奖励函数、状态空间、安全约束、训练收敛 | 审的是"**策略质量**"，输入特征维度不在评审范围 |
+| v2.17 VMD/PredictionPipeline 重构 (6/18-19) | VMD 分解、Attention、BiLSTM、误差修正 | VMD 是在**单变量 1D 假设**上叠加信号处理增强，未质疑这个假设 |
+| CNN-LSTM TODO (6/19) | **明确写了** 7 维 vs 1 维 Gap | 但定位为"改造要求文档"，不是"已存在的 bug 必须修复" |
+| 各次 PR review | 单侧仓库内的 diff | 无人同时打开两边代码比对 |
+
+**根因**：`LstmInput.history: Vec<f32>` 类型签名太弱。编译期不区分 `24 个 f32（单变量）` 和 `168 个 f32（7 维 × 24 步）`。如果 Rust 类型系统在编译期就表达 `(T, K)` 维度约束，这个不一致会在编译时暴露。
+
+**教训**：
+1. 跨仓库接口契约（ONNX input/output shape）应有**编译期或 CI 自动化校验**，不能依赖人工 review
+2. TODO/设计文档中标记的 Gap 应纳入评审门禁，不能长期停留在"已知待改"
+3. 类型签名应携带维度语义：`Vec<f32>` → `ndarray::Array2<f32>` 或 newtype wrapper
 
 ---
 
@@ -209,8 +232,9 @@
 | 审计发现-未修复 (P0) | 6 | 0 | 6 | 🔴 待规划 |
 | 审计发现-未修复 (P1) | 6 | 4 | 2 | 🟡 待排期 |
 | v2.17 新增 (P1) | 1 | 0 | 1 | 🟡 待排期 |
+| v3.0 新增 (P0, 已修复) | 1 | 1 | 0 | ✅ 已修复 |
 | 审计发现-未修复 (P2) | 2 | 2 | 0 | ✅ 全部修复 |
-| **总计** | **34** | **26** | **8** | |
+| **总计** | **35** | **27** | **8** | |
 
 ---
 
