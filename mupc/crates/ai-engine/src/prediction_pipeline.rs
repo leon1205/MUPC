@@ -584,11 +584,18 @@ impl PredictionPipeline {
                 }
             }
         } else {
+            // v3.1 P5 修复：EC 未配置或 Runtime 已卸载时静默降级，避免升级-降级振荡
             result.error_correction_applied = false;
-            // 误差修正未配置: 降级到 BiLstmVmdAttention
-            return Err(AiEngineError::ErrorCorrectionFailed(
-                "误差修正未配置或 Runtime 不可用".into(),
-            ));
+            result.enhancement_level = EnhancementLevel::BiLstmVmdAttention;
+            tracing::warn!(
+                "误差修正未配置或 Runtime 不可用，静默降级至 BiLstmVmdAttention，"
+            );
+            let mut health = self.health.write().await;
+            health.current_level = EnhancementLevel::BiLstmVmdAttention;
+            health.ec_consecutive_successes = 0;
+            drop(health);
+            // 返回 Ok(未修正结果) 而非 Err，主预测值仍然有效
+            return Ok(result);
         }
 
         Ok(result)
@@ -926,12 +933,19 @@ impl PredictionPipeline {
             // Level 3 (AttentionOnly) → 恢复 VMD
             EnhancementLevel::AttentionOnly => {
                 if vmd_enabled && health.vmd_consecutive_successes >= 5 {
-                    // 优先恢复到 BiLSTM 层级（若 Go），其次 VmdAttention
-                    if bilstm_go && ec_enabled {
+                    // 逐级检查健康计数器，避免跳级引发升级-降级振荡
+                    if bilstm_go
+                        && health.bilstm_consecutive_successes >= 5
+                        && ec_enabled
+                        && health.ec_consecutive_successes >= 5
+                    {
                         Some(EnhancementLevel::FullVmdAttentionCorrection)
-                    } else if bilstm_go {
+                    } else if bilstm_go && health.bilstm_consecutive_successes >= 5 {
                         Some(EnhancementLevel::BiLstmVmdAttention)
+                    } else if ec_enabled && health.ec_consecutive_successes >= 5 {
+                        Some(EnhancementLevel::FullVmdAttentionCorrection)
                     } else {
+                        // 仅 VMD 恢复，BiLSTM/EC 计数器不足时先升到 VmdAttention
                         Some(EnhancementLevel::VmdAttention)
                     }
                 } else {
