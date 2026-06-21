@@ -52,6 +52,8 @@ impl PerformanceCollectorImpl {
                 trafo_avg_load: 0.5,
                 demand_violation_count: 0,
                 cumulative_reward: 0.0,
+                overload_count: 0,
+                voltage_violation_count: 0,
             },
             timestamp: chrono::Utc::now().timestamp(),
         };
@@ -79,6 +81,8 @@ impl PerformanceCollectorImpl {
             trafo_avg_load: 0.5,
             demand_violation_count: 0,
             cumulative_reward: 0.0,
+            overload_count: 0,
+            voltage_violation_count: 0,
         };
 
         // 更新缓存
@@ -142,6 +146,8 @@ mod tests {
             trafo_avg_load: trafo,
             demand_violation_count: demand,
             cumulative_reward: reward,
+            overload_count: 0,
+            voltage_violation_count: 0,
         }
     }
 

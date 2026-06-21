@@ -204,6 +204,8 @@ pub struct RewardCalculator {
     shock_readiness_weight_soc: f64,
     /// 预备度奖励权重 w2（有功功率相关）
     shock_readiness_weight_p: f64,
+    /// v3.1: 伪分位数保守系数（P90 非真分位数回归时的安全折扣，默认 0.7）
+    shock_conservative_coefficient: f64,
     // v2.12 R-07 新增：P-Q 协同度阈值配置
     /// P-Q 协同度阈值配置
     pq_thresholds: PqCoordinationThresholds,
@@ -273,6 +275,7 @@ impl RewardCalculator {
             p_ref_reserve_target: 10.0,
             shock_readiness_weight_soc: 20.0,
             shock_readiness_weight_p: 10.0,
+            shock_conservative_coefficient: 0.7,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         }
@@ -321,6 +324,7 @@ impl RewardCalculator {
             p_ref_reserve_target: 10.0,
             shock_readiness_weight_soc: 20.0,
             shock_readiness_weight_p: 10.0,
+            shock_conservative_coefficient: 0.7,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         })
@@ -383,6 +387,7 @@ impl RewardCalculator {
             p_ref_reserve_target: 10.0,
             shock_readiness_weight_soc: 20.0,
             shock_readiness_weight_p: 10.0,
+            shock_conservative_coefficient: 0.7,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         }
@@ -736,7 +741,9 @@ impl RewardCalculator {
         let p_ref_gap = self.p_ref_reserve_target - p_ref.abs();
         let r_p = self.shock_readiness_weight_p * p_ref_gap;
 
-        let r_readiness = r_soc + r_p;
+        let r_raw = r_soc + r_p;
+        // v3.1: 伪分位数保守折扣 — P90 非真分位数回归时的安全系数
+        let r_readiness = r_raw * self.shock_conservative_coefficient;
 
         tracing::debug!(
             "shock_readiness: spread={:.2}, soc={:.3}, soc_target={:.3}, r_soc={:.4}, |p_ref|={:.2}, r_p={:.4}, R_readiness={:.4}",
@@ -1143,7 +1150,9 @@ impl RewardCalculator {
         let p_ref_gap = p_ref_reserve_target - p_ref.abs();
         let r_p = w2 * p_ref_gap;
 
-        r_soc + r_p
+        // v3.1: 伪分位数保守折扣（静态版本，系数 0.7）
+        const SHOCK_CONSERVATIVE: f64 = 0.7;
+        (r_soc + r_p) * SHOCK_CONSERVATIVE
     }
 
     /// v2.13: 计算冲击负荷预备度奖励（静态版本辅助方法）

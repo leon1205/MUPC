@@ -34,6 +34,25 @@ pub struct PerformanceFeatures {
     pub demand_violation_count: u32,
     /// 累积奖励
     pub cumulative_reward: f64,
+    /// v3.1: 变压器过载次数（用于长期漂移监控）
+    pub overload_count: u32,
+    /// v3.1: 电压越限次数（用于长期漂移监控）
+    pub voltage_violation_count: u32,
+}
+
+/// v3.1: 权重健康度状态
+#[derive(Debug, Clone, PartialEq)]
+pub enum WeightHealthStatus {
+    /// 健康（指标不劣于基线）
+    Healthy,
+    /// 退化中（连续 N 周期劣于基线）
+    Degraded { consecutive: u32 },
+    /// 已冻结（退化超阈值，自动回退基线权重）
+    Frozen,
+    /// 无基线数据（首次运行）
+    NoBaseline,
+    /// 性能采集失败
+    CollectorError,
 }
 
 /// 权重调整量
@@ -91,6 +110,12 @@ pub struct AdaptiveWeightOptimizer {
     adjustment_history: RwLock<Vec<WeightAdjustment>>,
     /// 性能指标收集器引用
     performance_collector: Arc<dyn PerformanceCollector>,
+    /// v3.1: 基线性能快照（首次优化前采集，用于长期漂移检测）
+    baseline_performance: RwLock<Option<PerformanceFeatures>>,
+    /// v3.1: 连续退化周期计数（累计漂移监控）
+    consecutive_degradation_count: std::sync::atomic::AtomicU32,
+    /// v3.1: 优化器是否已冻结（退化超阈值自动冻结）
+    frozen: std::sync::atomic::AtomicBool,
 }
 
 impl AdaptiveWeightOptimizer {
@@ -105,6 +130,9 @@ impl AdaptiveWeightOptimizer {
             current_weights: RwLock::new(initial_weights),
             adjustment_history: RwLock::new(Vec::new()),
             performance_collector,
+            baseline_performance: RwLock::new(None),
+            consecutive_degradation_count: std::sync::atomic::AtomicU32::new(0),
+            frozen: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -119,6 +147,12 @@ impl AdaptiveWeightOptimizer {
         &self,
         historical_performance: &HistoricalPerformance,
     ) -> Result<SceneWeights, AiEngineError> {
+        // v3.1: 冻结检查 — 若优化器已冻结，直接返回当前权重
+        if self.frozen.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::warn!("AdaptiveWeightOptimizer 已冻结，跳过本轮优化");
+            return Ok(self.current_weights.read().await.clone());
+        }
+
         // 1. 提取性能特征
         let features = self.extract_features(historical_performance);
 
@@ -263,6 +297,80 @@ impl AdaptiveWeightOptimizer {
         *self.current_weights.write().await = new_weights;
     }
 
+    /// v3.1: 设置基线性能快照（首次优化前调用）
+    pub async fn set_baseline(&self, perf: PerformanceFeatures) {
+        *self.baseline_performance.write().await = Some(perf);
+        self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// v3.1: 检查优化器是否已冻结
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// v3.1: 手动解冻优化器（运维确认后调用）
+    pub fn unfreeze(&self) {
+        self.frozen.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        tracing::warn!("AdaptiveWeightOptimizer 已手动解冻");
+    }
+
+    /// v3.1: 权重健康度检查 — 累计漂移监控
+    ///
+    /// 当优化后的权重组合导致关键性能指标连续 N 个周期劣于基线时，
+    /// 自动触发权重冻结，回退到基线权重。
+    ///
+    /// # 监控指标
+    /// - 变压器过载次数趋势
+    /// - 电压越限次数趋势
+    /// - 综合奖励偏移趋势
+    pub async fn check_cumulative_health(&self) -> WeightHealthStatus {
+        let baseline = self.baseline_performance.read().await;
+        let Some(ref baseline_pf) = *baseline else {
+            return WeightHealthStatus::NoBaseline;
+        };
+
+        // 获取当前性能
+        let Ok(current_pf) = self.performance_collector.collect_current() else {
+            return WeightHealthStatus::CollectorError;
+        };
+
+        // 关键指标对比
+        let overload_worse = current_pf.overload_count > baseline_pf.overload_count;
+        let voltage_violation_worse =
+            current_pf.voltage_violation_count > baseline_pf.voltage_violation_count;
+        let reward_worse = current_pf.cumulative_reward < baseline_pf.cumulative_reward;
+
+        let degradation_flags = (overload_worse, voltage_violation_worse, reward_worse);
+        let degraded = match degradation_flags {
+            // 任意 2 项劣化 → 计为一次退化
+            (true, true, _) | (true, _, true) | (_, true, true) => true,
+            _ => false,
+        };
+
+        if degraded {
+            let count = self.consecutive_degradation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            tracing::warn!(
+                "权重健康度退化: 连续 {} 周期劣于基线 (overload={}, voltage={}, reward={})",
+                count, overload_worse, voltage_violation_worse, reward_worse
+            );
+
+            // 连续 N 个周期退化 → 自动冻结
+            if count >= self.config.health_freeze_threshold {
+                self.frozen.store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    "权重健康度严重退化 (≥{} 周期)，自动冻结优化器，回退至基线权重",
+                    self.config.health_freeze_threshold
+                );
+                return WeightHealthStatus::Frozen;
+            }
+            WeightHealthStatus::Degraded { consecutive: count }
+        } else {
+            self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+            WeightHealthStatus::Healthy
+        }
+    }
+
     /// AWO-06: 验证奖励偏移（优化后奖励函数与原始策略无显著偏离）
     ///
     /// # 输入
@@ -343,6 +451,8 @@ mod tests {
                 trafo_avg_load: trafo_load,
                 demand_violation_count: demand_violations,
                 cumulative_reward: cum_reward,
+                overload_count: 0,
+                voltage_violation_count: 0,
             },
             timestamp: chrono::Utc::now().timestamp(),
         }
@@ -605,6 +715,8 @@ mod tests {
             trafo_avg_load: 0.6,
             demand_violation_count: 2,
             cumulative_reward: 100.0,
+            overload_count: 0,
+            voltage_violation_count: 0,
         };
 
         let cloned = features.clone();

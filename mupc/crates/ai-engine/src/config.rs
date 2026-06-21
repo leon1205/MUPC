@@ -288,6 +288,8 @@ pub struct AdaptiveOptimizerConfig {
     pub weight_bounds: WeightBounds,
     /// 约束条件
     pub constraints: WeightConstraints,
+    /// v3.1: 权重健康度冻结阈值（连续退化 N 周期后自动冻结，默认 3）
+    pub health_freeze_threshold: u32,
 }
 
 impl Default for AdaptiveOptimizerConfig {
@@ -298,6 +300,7 @@ impl Default for AdaptiveOptimizerConfig {
             meta_learning_rate: 0.001,
             weight_bounds: WeightBounds::default(),
             constraints: WeightConstraints::default(),
+            health_freeze_threshold: 3,
         }
     }
 }
