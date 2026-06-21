@@ -40,8 +40,8 @@ pub struct PerformanceFeatures {
 #[derive(Debug, Clone)]
 pub struct WeightAdjustment {
     /// 各场景权重调整量
-    pub seasonal_load_delta: [f64; 8],
-    pub commercial_arbitrage_delta: [f64; 2],
+    pub seasonal_load_delta: [f64; 9],
+    pub commercial_arbitrage_delta: [f64; 3],
     pub demand_control_delta: [f64; 2],
     pub virtual_power_plant_delta: [f64; 3],
     pub ultra_green_delta: [f64; 2],
@@ -50,8 +50,8 @@ pub struct WeightAdjustment {
 impl Default for WeightAdjustment {
     fn default() -> Self {
         Self {
-            seasonal_load_delta: [0.0; 8],
-            commercial_arbitrage_delta: [0.0; 2],
+            seasonal_load_delta: [0.0; 9],
+            commercial_arbitrage_delta: [0.0; 3],
             demand_control_delta: [0.0; 2],
             virtual_power_plant_delta: [0.0; 3],
             ultra_green_delta: [0.0; 2],
@@ -199,7 +199,7 @@ impl AdaptiveWeightOptimizer {
         }
 
         // 约束3：单次调整幅度限制
-        for i in 0..8 {
+        for i in 0..9 {
             let diff = (new_weights.seasonal_load_management[i]
                 - current.seasonal_load_management[i])
                 .abs();
@@ -465,7 +465,7 @@ mod tests {
         // AWO-05: 单次更新周期内权重变化不超过 max_adjustment_per_update
         let config = make_default_config();
         let weights = SceneWeights {
-            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0],
+            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0, 1.0],
             ..Default::default()
         };
         // 创建一个会触发大调整的性能数据
@@ -479,7 +479,7 @@ mod tests {
         let new_weights = result.unwrap();
 
         // 检查调整幅度
-        for i in 0..8 {
+        for i in 0..9 {
             let diff = (new_weights.seasonal_load_management[i]
                 - weights.seasonal_load_management[i])
                 .abs();
@@ -570,7 +570,7 @@ mod tests {
         let optimizer = AdaptiveWeightOptimizer::new(config, weights.clone(), collector);
 
         let new_weights = SceneWeights {
-            seasonal_load_management: [2.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0],
+            seasonal_load_management: [2.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0, 1.0],
             ..Default::default()
         };
         optimizer.update_weights(new_weights.clone()).await;
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn test_weight_adjustment_default() {
         let delta = WeightAdjustment::default();
-        assert_eq!(delta.seasonal_load_delta, [0.0; 8]);
-        assert_eq!(delta.commercial_arbitrage_delta, [0.0; 2]);
+        assert_eq!(delta.seasonal_load_delta, [0.0; 9]);
+        assert_eq!(delta.commercial_arbitrage_delta, [0.0; 3]);
     }
 }

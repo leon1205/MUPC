@@ -122,26 +122,26 @@ impl Default for FusedSystemState {
 }
 
 impl FusedSystemState {
-    /// 序列化为 78 维输入向量（v2.14）
+    /// 序列化为 78 维输入向量（v2.14, v3.1 修复 D1 重复推送）
     ///
     /// 布局:
-    ///   [0..9]   D1 (10 标量，含 q_realtime_margin)
-    ///   [10..25] D2 pv_forecast (15 维)
-    ///   [25..40] D2 load_forecast (15 维)
-    ///   [40..43] D3 (3 维)
-    ///   [43..46] D4 (3 维)
-    ///   [46..48] D5 (2 维)
-    ///   [48]     D6 dispatch_p_set (None→0.0)
-    ///   [49]     D7 q_realtime_margin
-    ///   [50..56] D8 season_encoding(6) + time_period_encoding(2)
-    ///   [57..60] D9 safety_override (4 维，v2.10 新增，v2.14 扩展 consecutive+ratio)
-    ///   [61..75] D10 load_forecast_quantiles (15 维，v2.11 新增)
-    ///   [76]     D10 shock_load_probability (1 维，v2.11 新增)
-    ///   [77]     D10 base_load (1 维，v2.11 新增)
+    ///   [0..8]   D1 实时数据 (9 维): soc/pv/load/grid/transformer_load/battery_power/va/vb/vc
+    ///   [9..24]  D2 pv_forecast (15 维)
+    ///   [24..39] D2 load_forecast (15 维)
+    ///   [39..42] D3 电价 (3 维)
+    ///   [42..45] D4 需量 (3 维)
+    ///   [45..47] D5 气象 (2 维)
+    ///   [47]     D6 dispatch_p_set (None→0.0)
+    ///   [48]     D7 q_realtime_margin
+    ///   [49..57] D8 season_encoding(6) + time_period_encoding(2)
+    ///   [57..61] D9 safety_override (4 维)
+    ///   [61..76] D10 load_forecast_quantiles (15 维)
+    ///   [76]     D10 shock_load_probability
+    ///   [77]     D10 base_load
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(76);
+        let mut v = Vec::with_capacity(78);
 
-        // D1 [0..9] 10 标量
+        // D1 [0..8] 9 维实时数据
         v.push(self.battery_soc as f32);
         v.push(self.pv_power as f32);
         v.push(self.load_power as f32);
@@ -151,37 +151,36 @@ impl FusedSystemState {
         v.push(self.voltage_phase_a as f32);
         v.push(self.voltage_phase_b as f32);
         v.push(self.voltage_phase_c as f32);
-        v.push(self.q_realtime_margin as f32);
 
-        // D2 pv_forecast [10..25] 15维
+        // D2 pv_forecast [9..24] 15 维
         let pv = pad_or_truncate(&self.pv_forecast_15min, 15);
         v.extend(pv.iter().map(|&x| x as f32));
 
-        // D2 load_forecast [25..40] 15维
+        // D2 load_forecast [24..39] 15 维
         let load = pad_or_truncate(&self.load_forecast_15min, 15);
         v.extend(load.iter().map(|&x| x as f32));
 
-        // D3 [40..43] 3维
+        // D3 [39..42] 3 维
         v.push(self.current_electricity_price as f32);
         v.push(self.next_period_price as f32);
         v.push(self.price_tariff_id as f32);
 
-        // D4 [43..46] 3维
+        // D4 [42..45] 3 维
         v.push(self.current_demand as f32);
         v.push(self.contract_demand as f32);
         v.push(self.peak_demand_this_month as f32);
 
-        // D5 [46..48] 2维
+        // D5 [45..47] 2 维
         v.push(self.solar_irradiance as f32);
         v.push(self.temperature as f32);
 
-        // D6 [48] 1维
+        // D6 [47] 1 维
         v.push(self.dispatch_p_set.unwrap_or(0.0) as f32);
 
-        // D7 [49] 1维
+        // D7 [48] 1 维
         v.push(self.q_realtime_margin as f32);
 
-        // D8 [50..56] 8维
+        // D8 [49..57] 8 维
         for &s in &self.season_encoding {
             v.push(s as f32);
         }
@@ -189,7 +188,7 @@ impl FusedSystemState {
             v.push(t as f32);
         }
 
-        // D9 [57..60] 4维（v2.10 新增，v2.14 扩展）
+        // D9 [57..61] 4 维
         v.push(if self.safety_override_active {
             1.0
         } else {
@@ -199,14 +198,14 @@ impl FusedSystemState {
         v.push(self.safety_override_consecutive as f32);
         v.push(self.safety_override_ratio as f32);
 
-        // D10 [59..73] 15维（v2.11 新增：分位数负荷预测）
+        // D10 [61..76] 15 维分位数负荷预测
         let quantiles = pad_or_truncate(&self.load_forecast_quantiles, 15);
         v.extend(quantiles.iter().map(|&x| x as f32));
 
-        // D10 [74] 1维（v2.11 新增：冲击负荷概率）
+        // D10 [76] 冲击负荷概率
         v.push(self.shock_load_probability as f32);
 
-        // D10 [75] 1维（v2.11 新增：基础负荷）
+        // D10 [77] 基础负荷
         v.push(self.base_load as f32);
 
         debug_assert_eq!(v.len(), 78, "输入向量必须为 78 维");
