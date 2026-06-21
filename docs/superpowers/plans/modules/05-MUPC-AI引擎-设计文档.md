@@ -774,7 +774,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 - 无功补偿（Q_batt）：根据电压实时闭环调节，响应时间 ms 级
 - 三相不平衡：不涉及电池充放电，由实时控制核心模块独立处理
 - 调节方式：查表法或 PID，不经过 AI
-- 执行器按下垂公式 `P_output = P_ref + k_droop × ΔV` 执行毫秒级暂态调节
+- 执行器按下垂公式 `P_output = P_ref - k_droop × ΔV` 执行毫秒级暂态调节
 
 **上层（RL决策）**— v2.15 现行，2 维动作空间
 - `p_ref`（有功基准点，[-50.0, 50.0] kW）：AI 负责稳态全局优化，通过核间 TCP 下发
@@ -1335,8 +1335,8 @@ R_smooth = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
 ```
 
 - `Δk_droop = k_droop_t - k_droop_{t-1}`：防止 AI 频繁调整 k_droop
-- `K_MAX`：k_droop 上限（默认 50.0 kW/V）
-- `λ`：超限惩罚系数（默认 1.0）
+- `K_MAX`：k_droop 惩罚触发阈值（默认 30.0 kW/V）
+- `λ`：超限惩罚系数（默认 10.0）
 
 **子项定义：**
 
@@ -1501,8 +1501,8 @@ fn calc_pq_coordination(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
 
 /// 下垂系数平滑惩罚（v2.8 新增）
 fn calc_smooth_penalty(&self, k_droop: f64, prev_k_droop: f64) -> f64 {
-    const K_MAX: f64 = 50.0; // kW/V
-    const LAMBDA: f64 = 1.0;
+    const K_MAX: f64 = 30.0; // kW/V
+    const LAMBDA: f64 = 10.0;
     let delta = (k_droop - prev_k_droop).abs();
     let excess = (k_droop - K_MAX).max(0.0);
     delta + LAMBDA * excess
@@ -1553,8 +1553,8 @@ pub struct RewardCalculator {
 ```
 R_arbitrage = w1 * R_price_spread - w2 * P_battery_degradation
 
-R_price_spread         = p_ref * delta_t * (price_current - price_average) * conversion_factor
-P_battery_degradation  = beta * abs(p_ref) * delta_t / E_battery_total * 100
+R_price_spread         = (price_current - price_avg) * p_ref * conversion_factor
+P_battery_degradation  = β · (|p_ref| / E_battery_total)²   # C-rate² 应力模型（v2.15）
 ```
 
 **权重表：**
@@ -1569,11 +1569,12 @@ fn reward_commercial_arbitrage(
     &self, state: &FusedSystemState, action: &ActionOutput
 ) -> f64 {
     let w = &self.weights.commercial_arbitrage;
-    // 电价差：当前电价相对于峰谷均价差
     let avg_price = (state.peak_price + state.valley_price) / 2.0;
     let spread = (state.current_electricity_price - avg_price) * action.p_ref * 0.001;
-    let r_spread = spread * 100.0; // 缩放
-    let p_deg = 100.0 * action.p_ref.abs() / 500.0 * 0.01; // 每 kW 损耗
+    let r_spread = spread * 100.0;
+    // C-rate² 应力模型（v2.15，对齐 MODE-01）
+    let c_rate = action.p_ref.abs() / BATTERY_CAPACITY_KWH;
+    let p_deg = c_rate * c_rate * 100.0;
     w[0] * r_spread - w[1] * p_deg
 }
 ```

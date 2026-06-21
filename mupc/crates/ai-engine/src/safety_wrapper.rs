@@ -159,8 +159,8 @@ impl LinearSensitivityPredictor {
         // 当前 P_output（包含下垂分量）
         let p_cur = 0.0; // 简化：上一周期有效值在 check_and_fallback 中跟踪
 
-        // 新动作下的 P_output
-        let p_new = action.p_ref + action.k_droop * (v_avg - 1.0);
+        // 新动作下的 P_output（下垂公式: P = P_ref - k_droop × ΔV）
+        let p_new = action.p_ref - action.k_droop * (v_avg - 1.0);
 
         // ΔP 转换为 W
         let delta_p_w = (p_new - p_cur) * 1000.0;

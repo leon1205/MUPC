@@ -966,7 +966,7 @@ RLModel 使用 MADDPG 或 PPO 算法，基于融合状态、LSTM 预测值和场
 > - **pv_limit（光伏限功率）**：属于南向设备直控，由策略引擎的防逆流策略独立执行，不作为 AI 引擎输出维度
 > - **confidence（决策置信度）**：属于 ActionOutput 元数据而非动作维度，已移至 `ModelOutput`，由 ActionValidator 校验后注入，不参与 AI 决策
 
-**下垂控制公式：** `P_output = P_ref + k_droop × ΔV`
+**下垂控制公式：** `P_output = P_ref - k_droop × ΔV`
 
 其中：
 - `P_output`：执行器最终输出的有功功率设定值
@@ -976,7 +976,7 @@ RLModel 使用 MADDPG 或 PPO 算法，基于融合状态、LSTM 预测值和场
 
 **符号约定（v2.15 统一声明）：** **p_ref > 0 = 放电（向电网注入功率），p_ref < 0 = 充电（从电网吸收功率）。** 此约定与实时控制模块、MUPC-AI2 上游训练管线三方一致。k_droop >= 0 为正常下垂方向。
 
-**k_droop 物理含义：** 电压每升高 1V，输出功率增加 k_droop kW（放电方向 → 向电网注入更多功率，拉低电压）；电压每降低 1V，输出功率减少 k_droop kW（充电方向 → 从电网吸收更多功率，抬升电压）。
+**k_droop 物理含义：** 电压每升高 1V（ΔV > 0），P_output 减小 k_droop kW（趋向充电方向 → 从电网吸收更多功率，拉低电压）；电压每降低 1V（ΔV < 0），P_output 增大 k_droop kW（趋向放电方向 → 向电网注入更多功率，抬升电压）。下垂公式中的减号保证负反馈：电压偏高时自动减少出力，电压偏低时自动增加出力。
 
 ### 6.4 双参数动作空间（v2.7）
 
@@ -988,7 +988,7 @@ RLModel 使用 MADDPG 或 PPO 算法，基于融合状态、LSTM 预测值和场
 - 执行器保持最后收到的 P_ref 和 k_droop，继续下垂控制，保障本质安全不停机
 - P_ref 和 k_droop 同时为 NaN 时，触发 AI 降级
 
-**降级原则：** 通信中断时保持最后有效的 P_ref 和 k_droop，不主动归零。继续按下垂公式 `P_output = P_ref + k_droop × ΔV` 计算，保障基础安全不停机。
+**降级原则：** 通信中断时保持最后有效的 P_ref 和 k_droop，不主动归零。继续按下垂公式 `P_output = P_ref - k_droop × ΔV` 计算，保障基础安全不停机。
 
 ### 6.5 动作约束规则
 
@@ -1175,7 +1175,7 @@ pub struct SafetyBounds {
 
 ```
 ΔV ≈ (R·ΔP + X·ΔQ) / V₀
-P_output_new = p_ref_new + k_droop_new × (V_avg - 1.0)
+P_output_new = p_ref_new - k_droop_new × (V_avg - 1.0)
 ```
 
 **安全检查入口**：
@@ -2207,8 +2207,8 @@ mix_steps = 10                # 过渡步数
 
 ```toml
 [droop_control]
-K_MAX = 50.0                # k_droop 上限，防止系统震荡
-lambda_smooth = 1.0          # 超限惩罚系数
+K_MAX = 30.0                # k_droop 惩罚触发阈值，防止系统震荡
+lambda_smooth = 10.0         # 超限惩罚系数
 # R_smooth = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
 ```
 

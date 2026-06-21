@@ -62,14 +62,14 @@ impl SystemState {
 ///
 /// 有功功率基准点 + 电压-有功下垂系数双参数模式：
 /// - p_ref：有功功率基准点 (kW)，负值=充电，正值=放电
-/// - k_droop：电压-有功下垂系数 (kW/V)，电压每升高 1V，输出功率增加 k_droop kW
+/// - k_droop：电压-有功下垂系数 (kW/V)，电压每升高 1V，输出功率减少 k_droop kW
 #[derive(Debug, Clone)]
 pub struct ActionOutput {
     /// 有功功率基准点 (kW), 范围由 ActionSpaceConfig 确定
     /// 负值=充电，正值=放电
     pub p_ref: f64,
     /// 电压-有功下垂系数 (kW/V), 范围由实时控制模块提供
-    /// 电压每升高 1V，输出功率增加 k_droop kW
+    /// 电压每升高 1V，输出功率减少 k_droop kW（下垂公式: P = P_ref - k_droop × ΔV）
     pub k_droop: f64,
     /// 可中断负荷切除量 (kW), [0.0, max_load_shedding]
     pub load_shedding: f64,
