@@ -398,7 +398,7 @@ pub struct SceneWeights {
 impl Default for SceneWeights {
     fn default() -> Self {
         Self {
-            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0, 1.0],
+            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.5, 1.0, 1.0], // w7=0.5 对齐训练 constants.py
             commercial_arbitrage: [1.0, 1.0, 2.0],
             demand_control: [1.0, 0.5],
             virtual_power_plant: [1.0, 2.0, 1.0],

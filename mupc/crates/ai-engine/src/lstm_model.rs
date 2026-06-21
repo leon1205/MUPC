@@ -25,12 +25,13 @@ pub struct LstmInput {
 }
 
 /// LSTM 模型输出
+///
+/// v2.16 删除 `confidence` 字段（基于预测序列方差计算，数学上无意义，
+/// grep 全工程无任何代码读取该字段）。v3.0 合并时意外回退，已重新删除。
 #[derive(Debug, Clone)]
 pub struct LstmOutput {
-    /// 预测值（未来 N 个时间步）
+    /// 预测值（未来 N 个时间步，长度 = output_horizon_secs / step_seconds）
     pub predictions: Vec<f32>,
-    /// 置信度 (0.0-1.0)
-    pub confidence: f64,
 }
 
 // ============================================================================
@@ -110,22 +111,14 @@ impl LstmModel {
 
         // v3.0: 输出步数取 output_horizon_secs / step_seconds (默认 15)
         let output_steps = self.config.output_horizon_secs as usize / self.config.step_seconds as usize;
+
+        // v2.16: 输出维度校验（原静默 take 截断 → 显式报错）
+        if output.len() < output_steps {
+            return Err(AiEngineError::OutputShapeMismatch);
+        }
         let predictions: Vec<f32> = output.into_iter().take(output_steps).collect();
 
-        // 简化置信度计算：基于输出方差
-        // 实际应使用贝叶斯方法或集成方法
-        let variance = if predictions.len() > 1 {
-            let mean = predictions.iter().sum::<f32>() / predictions.len() as f32;
-            predictions.iter().map(|p| (p - mean).powi(2)).sum::<f32>() / predictions.len() as f32
-        } else {
-            0.0
-        };
-        let confidence = (1.0 - variance.min(1.0)).max(0.0);
-
-        Ok(LstmOutput {
-            predictions,
-            confidence: confidence as f64,
-        })
+        Ok(LstmOutput { predictions })
     }
 
     // ============================================================================

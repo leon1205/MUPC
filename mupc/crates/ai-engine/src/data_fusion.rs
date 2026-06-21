@@ -230,6 +230,84 @@ pub fn validate_input_vector(v: &[f32]) -> Result<(), crate::error::AiEngineErro
     Ok(())
 }
 
+/// v3.0 (P0-1): MinMax 归一化观测向量，镜像 `mupc_env/observation.py:normalize_obs()`
+///
+/// 将 78 维原始观测归一化到 [0, 1]，公式: `(x - lo) / (hi - lo + 1e-9)`。
+/// 与 MUPC-AI2 训练管线严格对齐，确保 ONNX 模型接收的输入分布与训练时一致。
+///
+/// 归一化范围来自 `mupc_env/constants.py`。
+/// identity 维度（one-hot、已在 [0,1] 的维度）保持不变。
+pub fn normalize_observation(v: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(v.len(), 78, "观测向量必须为 78 维");
+    let mut out = vec![0.0_f32; 78];
+
+    // D1 [0..8] 9 维实时数据
+    out[0] = minmax(v[0], 0.0, 1.0);       // SOC
+    out[1] = minmax(v[1], 0.0, 150.0);     // PV power
+    out[2] = minmax(v[2], 0.0, 60.0);      // Load power
+    out[3] = minmax(v[3], -200.0, 200.0);  // Grid power
+    out[4] = v[4];                         // Transformer load: identity [0,1]
+    out[5] = minmax(v[5], -50.0, 50.0);    // Battery power
+    out[6] = minmax(v[6], 0.85, 1.15);     // V_a
+    out[7] = minmax(v[7], 0.85, 1.15);     // V_b
+    out[8] = minmax(v[8], 0.85, 1.15);     // V_c
+
+    // D2 [9..23] pv_forecast 15 维
+    for i in 0..15 {
+        out[9 + i] = minmax(v[9 + i], 0.0, 150.0);
+    }
+
+    // D2 [24..38] load_forecast 15 维
+    for i in 0..15 {
+        out[24 + i] = minmax(v[24 + i], 0.0, 60.0);
+    }
+
+    // D3 [39..41] 3 维电价
+    out[39] = minmax(v[39], 0.0, 1.5);     // current_price
+    out[40] = minmax(v[40], 0.0, 1.5);     // next_price
+    out[41] = minmax(v[41], 0.0, 3.0);     // tariff_id
+
+    // D4 [42..44] 3 维需量
+    out[42] = minmax(v[42], 0.0, 500.0);
+    out[43] = minmax(v[43], 0.0, 500.0);
+    out[44] = minmax(v[44], 0.0, 500.0);
+
+    // D5 [45..46] 2 维气象
+    out[45] = minmax(v[45], 0.0, 1500.0);  // solar_irradiance
+    out[46] = minmax(v[46], -20.0, 60.0);  // temperature
+
+    // D6 [47] dispatch_p_set
+    out[47] = minmax(v[47], -200.0, 200.0);
+
+    // D7 [48] q_realtime_margin: identity [0,1]
+    out[48] = v[48];
+
+    // D8 [49..56] season + time one-hot: identity
+    out[49..57].copy_from_slice(&v[49..57]);
+
+    // D9 [57..60] safety_override: identity
+    out[57..61].copy_from_slice(&v[57..61]);
+
+    // D10 [61..75] load_forecast_quantiles 15 维
+    for i in 0..15 {
+        out[61 + i] = minmax(v[61 + i], 0.0, 60.0);
+    }
+
+    // D10 [76] shock_load_probability: identity [0,1]
+    out[76] = v[76];
+
+    // D10 [77] base_load
+    out[77] = minmax(v[77], 0.0, 60.0);
+
+    out
+}
+
+/// MinMax 归一化: `(x - lo) / (hi - lo + 1e-9)`, clamp 到 [0, 1]
+fn minmax(x: f32, lo: f32, hi: f32) -> f32 {
+    let clipped = x.clamp(lo, hi);
+    ((clipped - lo) / (hi - lo + 1e-9)).clamp(0.0, 1.0)
+}
+
 fn pad_or_truncate(vec: &[f64], target_len: usize) -> Vec<f64> {
     let mut result: Vec<f64> = vec.iter().take(target_len).copied().collect();
     while result.len() < target_len {

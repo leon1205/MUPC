@@ -9,7 +9,7 @@
 use crate::action_space::ActionSpaceConfig;
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
-use crate::data_fusion::{DataFusionEngine, FusedSystemState};
+use crate::data_fusion::{normalize_observation, DataFusionEngine, FusedSystemState};
 use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction};
@@ -289,12 +289,14 @@ impl ModelManager {
         }
 
         // v2.3: 通过 ModelRegistry 执行推理（委托给当前 active 的场景模型）
+        // v3.0 (P0-1): 对观测向量做 MinMax 归一化后再送入 ONNX，对齐训练管线 normalize_obs()
         let rl_action = {
             let registry = self.model_registry.read().await;
             let registry = registry.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
-            let input_vector = fused_state_with_forecast.to_input_vector();
+            let raw_vector = fused_state_with_forecast.to_input_vector();
+            let normalized_vector = normalize_observation(&raw_vector);
             let action_space_config = self.action_space_config.read().await;
-            registry.decide(&input_vector, &action_space_config).await?
+            registry.decide(&normalized_vector, &action_space_config).await?
         };
 
         // Step 6.5: v2.17 安全包装器检查（RL 决策后、ActionValidator 前）
