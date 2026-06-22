@@ -1,11 +1,11 @@
 //! 多源数据融合引擎
 //!
 //! DataFusionEngine 以 1Hz 频率从 5 个数据源采集数据，
-//! 融合为 FusedSystemState（6 大类 24 字段），
-//! 序列化为 48 维向量供 RL 模型推理。
+//! 融合为 FusedSystemState（10 大类 78 维），
+//! 序列化为 78 维向量供 RL 模型推理。
 //!
 //! 关键入口：
-//! - `FusedSystemState::to_input_vector()` — 48 维序列化
+//! - `FusedSystemState::to_input_vector()` — 78 维序列化
 //! - `validate_input_vector()` — NaN/Inf 安全检查（PRD 9.5）
 //! - `DataFusionEngine::fuse()` — 并行采集 + 融合
 

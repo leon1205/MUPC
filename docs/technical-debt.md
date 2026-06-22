@@ -166,8 +166,8 @@
 
 | # | 模块 | 问题 | 修复方式 |
 |---|------|------|----------|
-| F-01 | 05 AI引擎 | `decide_fused()` 断言 48 维，应为 78 维 | 代码：48→78 |
-| F-02 | 05 AI引擎 | `to_input_vector()` capacity 76，应为 78 | 代码：76→78 |
+| ~~F-01~~ | 05 AI引擎 | `decide_fused()` 断言 48 维，应为 78 维 | ✅ 已修复 (v3.1) |
+| ~~F-02~~ | 05 AI引擎 | `to_input_vector()` capacity 76，应为 78 | ✅ 已修复 (v3.1) |
 | F-03 | 04 策略引擎 | `ControlCommand` 缺 `p_ref`/`k_droop`，用旧字段 `p_batt_set` | 代码：新增 p_ref+k_droop，p_batt_set 标记 deprecated |
 | F-04 | 02 南向通信 | `DeviceType` 枚举缺 `Hplc` 变体 | 代码：新增 Hplc |
 | F-05 | 03 数据处理 | `FaultRecorder` trait 缺 `update_trigger_config()`/`get_trigger_config()` | 代码：新增默认实现 |

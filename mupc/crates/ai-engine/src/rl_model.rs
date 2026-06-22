@@ -199,7 +199,7 @@ impl RLModel {
             return Err(AiEngineError::ModelNotLoaded);
         }
         let input = state.to_input_vector();
-        debug_assert_eq!(input.len(), 48, "输入维度必须为 48");
+        debug_assert_eq!(input.len(), 78, "输入向量必须为 78 维");
         validate_input_vector(&input)?;
         let output = self.runtime.run(&input).await?;
         parse_action_output(&output, &self.action_space_config)
