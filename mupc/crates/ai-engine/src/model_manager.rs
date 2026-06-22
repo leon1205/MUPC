@@ -19,7 +19,7 @@ use crate::pipeline_config::EnhancementLevel;
 use crate::prediction_pipeline::PredictionPipeline;
 use crate::reward_calculator::RewardCalculator;
 use crate::rl_model::ActionOutput;
-use crate::safety_wrapper::SafetyRLWrapper;
+use crate::safety_wrapper::{SafetyEventSender, SafetyRLWrapper, SafetyWrapperEvent};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -99,6 +99,8 @@ pub struct ModelManager {
     dynamic_config_loader: Arc<RwLock<Option<Arc<DynamicConfigLoader>>>>,
     /// v2.17: 安全 RL 包装器（物理模型前置过滤器）
     safety_wrapper: Arc<SafetyRLWrapper>,
+    /// v3.1: 安全事件 broadcast Receiver（供 bin crate / SSE 订阅）
+    safety_event_rx: tokio::sync::broadcast::Receiver<SafetyWrapperEvent>,
     /// v1.0: 预测增强管线（VMD + Attention 编排器）
     /// None 表示增强未启用，回退到基线 LSTM 推理路径
     prediction_pipeline: Arc<RwLock<Option<PredictionPipeline>>>,
@@ -127,8 +129,12 @@ impl ModelManager {
         let lstm_sample_period =
             (config.lstm.step_seconds / config.fusion.fusion_period_secs.max(1)).max(1);
 
-        // v2.17: 创建 SafetyRLWrapper（无 event_sender，SSE 推送待 main.rs 注入）
-        let safety_wrapper = Arc::new(SafetyRLWrapper::new(config.safety_wrapper.clone(), None));
+        // v2.17/v3.1: 创建 broadcast channel 并注入 SafetyRLWrapper
+        let (safety_event_tx, safety_event_rx) = tokio::sync::broadcast::channel::<SafetyWrapperEvent>(64);
+        let safety_wrapper = Arc::new(SafetyRLWrapper::new(
+            config.safety_wrapper.clone(),
+            Some(safety_event_tx),
+        ));
 
         // v1.0: 创建 LSTM 模型和历史缓冲的 Arc（供 PredictionPipeline 复用）
         let lstm_model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
@@ -172,11 +178,25 @@ impl ModelManager {
             lstm_history_capacity,
             lstm_sample_period,
             safety_wrapper,
+            safety_event_rx,
             prediction_pipeline: Arc::new(RwLock::new(prediction_pipeline)),
             lstm_sample_counter: Arc::new(RwLock::new(0)),
             action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
             dynamic_config_loader: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// v3.1: 订阅安全事件流（供 bin crate / web-api SSE 推送使用）
+    ///
+    /// 返回 broadcast Receiver，外部可调用 `recv()` 异步接收 SafetyWrapperEvent。
+    /// 所有权转移给调用方，ModelManager 不再持有。
+    ///
+    /// # Panics
+    ///
+    /// 仅可调用一次（Receiver 所有权移出后再次调用将 panic）。
+    pub fn subscribe_safety_events(&mut self) -> tokio::sync::broadcast::Receiver<SafetyWrapperEvent> {
+        // resubscribe() 创建新的 Receiver 订阅同一 Sender
+        self.safety_event_rx.resubscribe()
     }
 
     /// 加载所有模型和子模块

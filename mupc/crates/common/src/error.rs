@@ -184,6 +184,19 @@ macro_rules! define_error {
     };
 }
 
+/// 定义带 source 的错误构造函数
+#[macro_export]
+macro_rules! define_error_with_source {
+    ($name:ident, $code:expr, $module:expr) => {
+        pub fn $name(
+            msg: impl Into<String>,
+            source: impl std::error::Error + Send + Sync + 'static,
+        ) -> MupcError {
+            MupcError::new($code, msg, $module).with_source(source)
+        }
+    };
+}
+
 // 预定义错误构造函数
 mod predefine {
     use super::*;

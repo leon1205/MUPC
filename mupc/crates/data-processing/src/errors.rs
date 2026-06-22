@@ -1,5 +1,12 @@
 use thiserror::Error;
 
+// v3.1: mupc-common 错误构造函数（替代原始 MupcError::new() 调用）
+pub mod mupc_errors {
+    use mupc_common::MupcError;
+    mupc_common::define_error!(unknown_error, mupc_common::ErrorCode::Unknown, "data-processing");
+    mupc_common::define_error!(io_error, mupc_common::ErrorCode::IoError, "data-processing");
+}
+
 #[derive(Error, Debug)]
 pub enum DataProcessingError {
     #[error("数据采集失败: {0}")]

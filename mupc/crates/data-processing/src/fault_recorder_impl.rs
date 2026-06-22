@@ -3,6 +3,7 @@ use crate::recorder::{ExportResult, FaultEventFilter, FaultRecorder, WaveformSum
 use crate::telemetry::{FaultCondition, WaveformData};
 use async_trait::async_trait;
 use chrono::Utc;
+use crate::errors::mupc_errors::unknown_error;
 use mupc_common::MupcError;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -455,20 +456,16 @@ impl FaultRecorderImpl {
 impl FaultRecorder for FaultRecorderImpl {
     async fn record(&self, condition: &FaultCondition) -> Result<(), MupcError> {
         self.record_sync(condition).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
 
     async fn query(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, MupcError> {
         self.query_sync(start, end).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
@@ -493,20 +490,16 @@ impl FaultRecorder for FaultRecorderImpl {
         filter: &FaultEventFilter,
     ) -> Result<crate::recorder::PaginatedEvents, MupcError> {
         self.query_events_sync(filter).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
 
     async fn query_events_by_type(&self, fault_type: &str) -> Result<Vec<FaultRecord>, MupcError> {
         self.query_events_by_type_sync(fault_type).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
@@ -517,30 +510,24 @@ impl FaultRecorder for FaultRecorderImpl {
         end: i64,
     ) -> Result<Vec<FaultRecord>, MupcError> {
         self.query_events_by_time_sync(start, end).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
 
     async fn get_waveform_by_id(&self, event_id: i64) -> Result<WaveformData, MupcError> {
         self.get_waveform_by_id_sync(event_id).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
 
     async fn get_waveform_summary(&self, event_id: i64) -> Result<WaveformSummary, MupcError> {
         self.get_waveform_summary_sync(event_id).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }
@@ -566,10 +553,8 @@ impl FaultRecorder for FaultRecorderImpl {
         output_dir: &Path,
     ) -> Result<ExportResult, MupcError> {
         self.export_csv_sync(event_id, output_dir).map_err(|e| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
+            unknown_error(
                 e.to_string(),
-                "data-processing",
             )
         })
     }

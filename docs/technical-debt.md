@@ -113,7 +113,9 @@
 | **影响范围** | 无法验证核心功能 |
 | **优先级** | 中 |
 | **修复建议** | 实现实际的集成测试用例，覆盖正常流程和异常流程 |
-| **状态** | 🔲 待修复 |
+| **状态** | ✅ 已修复 (v3.1) |
+| **修复日期** | 2026-06-21 |
+| **修复内容** | 新增 `core_pipeline_integration.rs`（13 个集成测试）：78 维序列化、NaN/Inf 校验、动作反归一化、降级层级顺序、下垂公式符号、SceneWeights 维度、缺失值 HLV 语义、冲击保守系数、WCET 预算 |
 
 ---
 
@@ -126,7 +128,8 @@
 | **影响范围** | 代码可维护性 |
 | **优先级** | 低 |
 | **修复建议** | 扩展 `define_error!` 宏的使用，为每个模块生成专用错误创建函数 |
-| **状态** | 🔲 待优化 |
+| **状态** | ✅ 已修复 (v3.1) |
+| **修复内容** | `define_error_with_source!` 宏新增；`impl_module_error_ext!` 宏新增；`data-processing` 通过 `mupc_errors` 子模块统一 11 处调用 |
 
 ---
 
@@ -176,6 +179,7 @@
 | F-08 | 07 OTA | 文档描述 A/B分区切换/cgroup v2/硬件看门狗/OOM 为已实现，实际未实现 | 文档：添加 Phase 2+ 状态说明 |
 | F-09 | 03 存储 | 文档描述 alarm_log/event_log/TELEMETRY_HISTORY 分区表存在，实际不存在 | 文档：记录实际 schema |
 | F-10 | 08 Web | SSE 缺 `RewardsUpdate`/`FinetuningUpdate` 事件类型 | 代码：添加 TODO |
+| F-11 | 05 AI引擎 | v3.0 训练-部署输入维度不一致（ONNX shape (T,7) vs Rust (24,)） | ✅ 已修复（v3.0）：`LstmConfig` 新增 `input_features`，`HistorySample` 7 字段，VMD 多特征自动降级 |
 
 ### 6.2 未修复 — 架构级变更（需独立规划）
 
@@ -196,7 +200,6 @@
 | U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | ✅ 已修复 — 统一采用 `SeasonalLoadManagement`（代码+文档） |
 | U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | ✅ 已修复 — 设计文档统一为 `ota-update`（ADR-007 决议更新） |
 | U-15 | 05 AI引擎 | **P1** | v2.17 SafetyRLWrapper `event_sender` 未连接 — broadcast channel 需 main.rs 组装，当前 `ModelManager::new()` 传入 `None`，违规时无 SSE 实时推送 | 需系统集成入口（bin crate）创建 broadcast channel，Sender 注入 SafetyRLWrapper，Receiver 转发到 SsePushService（~5 行胶水代码） |
-| U-16 | 05 AI引擎 | **P0** | v3.0 训练-部署输入维度不一致 — `/work/MUPC-AI` 训练管线 `prepare_data()` 硬编码 7 维特征 `(T, 7)`，`/work/MUPC` Rust 侧全链路传递 1 维单变量 `LstmInput { history: Vec<f32> }`（24 个 f32），导致训练产出的 ONNX 模型无法部署到 Rust 推理侧（shape 不匹配）。**根因**：`LstmInput` 类型签名 `Vec<f32>` 太弱，编译期不区分 24 和 168 个 f32。**复盘**：CNN-LSTM TODO 文档（6/19）已记录该 Gap 但未纳入评审门禁；各次 PR review 均在单侧仓库内执行，无人同时比对两端代码 | ✅ 已修复（v3.0）：`LstmConfig` 新增 `input_features`/`yesterday_offset_steps`，`HistorySample` struct（7 字段），`model_manager` + `prediction_pipeline` 适配 7D flat 输入，VMD 在 `input_features>1` 时自动降级 |
 
 ### 6.3 U-16 根因分析
 
@@ -228,13 +231,12 @@
 | 严重问题 (Phase 1) | 2 | 2 | 0 | ✅ 全部修复 |
 | 警告问题 (Phase 1) | 4 | 4 | 0 | ✅ 全部修复 |
 | 优化建议 (Phase 1) | 3 | 2 | 1 | 🔄 1 项待优化 |
-| 审计发现-已修复 (本轮) | 10 | 10 | 0 | ✅ 全部修复 |
+| 审计发现-已修复 (本轮) | 11 | 11 | 0 | ✅ 全部修复 |
 | 审计发现-未修复 (P0) | 6 | 0 | 6 | 🔴 待规划 |
 | 审计发现-未修复 (P1) | 6 | 4 | 2 | 🟡 待排期 |
 | v2.17 新增 (P1) | 1 | 0 | 1 | 🟡 待排期 |
-| v3.0 新增 (P0, 已修复) | 1 | 1 | 0 | ✅ 已修复 |
 | 审计发现-未修复 (P2) | 2 | 2 | 0 | ✅ 全部修复 |
-| **总计** | **35** | **27** | **8** | |
+| **总计** | **35** | **25** | **10** | |
 
 ---
 
@@ -276,7 +278,7 @@
 | CRC16 | 循环冗余校验（16位） |
 | MupcError | 统一错误类型 |
 
-### 8.2 参考文档
+### 9.2 参考文档
 
 | 文档 | 路径 |
 |------|------|
