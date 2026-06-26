@@ -48,16 +48,20 @@ pub struct OnlineUpdater {
     /// 各场景的检查点目录（v2.3 新增，Phase 3C.2 实现）
     #[allow(dead_code)]
     checkpoint_dir: Option<std::path::PathBuf>,
+    /// v3.1: PER 优先经验回放缓冲区
+    per_buffer: PerBuffer,
 }
 
 impl OnlineUpdater {
     /// 创建在线微调器
     pub fn new(config: OnlineUpdateConfig) -> Self {
+        let per_capacity = config.batch_size * 10;
         Self {
             config,
             buffer: Vec::new(),
             active_scene: RunningMode::SeasonalLoadManagement,
             checkpoint_dir: None,
+            per_buffer: PerBuffer::new(per_capacity),
         }
     }
 
@@ -66,11 +70,13 @@ impl OnlineUpdater {
         config: OnlineUpdateConfig,
         checkpoint_dir: std::path::PathBuf,
     ) -> Self {
+        let per_capacity = config.batch_size * 10;
         Self {
             config,
             buffer: Vec::new(),
             active_scene: RunningMode::SeasonalLoadManagement,
             checkpoint_dir: Some(checkpoint_dir),
+            per_buffer: PerBuffer::new(per_capacity),
         }
     }
 
@@ -92,13 +98,33 @@ impl OnlineUpdater {
         self.active_scene
     }
 
+    /// v3.1: 获取 PER 缓冲区引用
+    pub fn per_buffer(&self) -> &PerBuffer {
+        &self.per_buffer
+    }
+
     /// 添加数据点（兼容旧接口，使用当前活跃场景）
     pub fn add_sample(&mut self, data: DataPoint) {
         let capacity = self.config.batch_size * 10;
         if self.buffer.len() >= capacity {
             self.buffer.remove(0);
         }
+        // v3.1: 同步写入 PER 缓冲区
+        let td_error = self.estimate_td_error(&data);
+        self.per_buffer.add(PerSample::new(data.clone(), td_error));
         self.buffer.push(data);
+    }
+
+    /// v3.1: 估算 TD-error（推理侧无 Q 网络，用输出幅值近似）
+    fn estimate_td_error(&self, data: &DataPoint) -> f32 {
+        let output_mean = data
+            .output
+            .iter()
+            .map(|v| v.abs())
+            .sum::<f32>()
+            / data.output.len().max(1) as f32;
+        // 输出幅值越大 = 策略探索越远 = TD-error 近似越大
+        output_mean.clamp(0.0, 10.0)
     }
 
     /// v2.3: 添加数据点（显式指定场景）
@@ -162,7 +188,6 @@ impl OnlineUpdater {
 // ─────────────────────────────────────────────────────────────────────────────
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 /// 优先经验回放样本
 #[derive(Debug, Clone)]
@@ -480,9 +505,7 @@ pub trait OnlineUpdaterExt {
 
 impl OnlineUpdaterExt for OnlineUpdater {
     fn per_buffer(&self) -> &PerBuffer {
-        // PER 缓冲区存储在 OnlineUpdater 中（需要扩展结构体）
-        // 此处返回临时空实现，实际使用需要扩展 OnlineUpdater 结构体
-        unimplemented!("PER buffer requires extending OnlineUpdater struct")
+        &self.per_buffer
     }
 
     fn update_with_per_kl(
@@ -675,6 +698,8 @@ impl GradualSwitcher {
         let state_lock = self.state.try_write();
         if let Ok(mut guard) = state_lock {
             *guard = state;
+        } else {
+            tracing::error!("GradualSwitcher::start: 状态锁冲突，切换状态未更新");
         }
     }
 
@@ -683,6 +708,8 @@ impl GradualSwitcher {
         if self.step_counter >= self.config.steps {
             if let Ok(mut guard) = self.state.try_write() {
                 *guard = SwitchState::Completed;
+            } else {
+                tracing::error!("GradualSwitcher::step: 无法写入 Completed 状态");
             }
             return None;
         }
@@ -698,6 +725,8 @@ impl GradualSwitcher {
         self.step_counter += 1;
         if let Ok(mut guard) = self.state.try_write() {
             *guard = SwitchState::InProgress;
+        } else {
+            tracing::error!("GradualSwitcher::step: 无法写入 InProgress 状态");
         }
 
         Some(blended)
@@ -765,27 +794,36 @@ impl DefaultSafetyChecker {
 
 impl SafetyConstraintChecker for DefaultSafetyChecker {
     fn check(&self, model: &ShadowModel) -> f32 {
-        // 模拟：基于权重统计计算安全评分
-        // 实际应调用 RobustnessManager 异常检测
         let weights = model.weights.try_read();
         if weights.is_err() {
-            return 50.0; // 无法读取时返回中间值
+            return 50.0;
         }
         let weights = weights.unwrap();
 
-        // 简单安全评分：权重方差过大则扣分
         if weights.is_empty() {
             return 100.0;
         }
+
+        // NaN/Inf 完整性检查
+        let has_nan = weights.iter().any(|w| w.is_nan());
+        let has_inf = weights.iter().any(|w| w.is_infinite());
+        if has_nan || has_inf {
+            tracing::error!("影子模型权重损坏 (NaN/Inf)，拒绝更新");
+            return 0.0;
+        }
+
         let mean = weights.iter().sum::<f32>() / weights.len() as f32;
         let variance: f32 =
             weights.iter().map(|w| (w - mean).powi(2)).sum::<f32>() / weights.len() as f32;
 
-        // 方差越小评分越高
         let score = 100.0 - variance.sqrt() * 10.0;
         score.clamp(0.0, 100.0)
     }
 }
+
+// Phase 3C.2: 真实鲁棒性安全检查需扩展 SafetyConstraintChecker::check 签名
+// 为 check(&self, model: &ShadowModel, state: Option<&FusedSystemState>)
+// 以接入 RobustnessManager::detect_anomaly() 的电压骤升/骤降/SOC异常检测。
 
 /// 默认性能监视器
 pub struct DefaultPerformanceMonitor {
@@ -904,8 +942,6 @@ impl SafeOnlineUpdater {
 
         // 安全检查通过后存储影子模型（克隆以保留所有权）
         *self.shadow_model.write().await = Some(shadow.clone());
-
-        // 4. 性能对比检查
 
         // 4. 性能对比检查
         let current_weights = self.current_weights.read().await.clone();

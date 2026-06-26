@@ -18,11 +18,19 @@ use crate::model_registry::{ModelRegistry, SceneModelState};
 use crate::pipeline_config::EnhancementLevel;
 use crate::prediction_pipeline::PredictionPipeline;
 use crate::reward_calculator::RewardCalculator;
+use crate::online_updater::{
+    DataPoint, DefaultPerformanceMonitor, DefaultSafetyChecker, OnlineUpdater, SafeOnlineUpdater,
+};
 use crate::rl_model::ActionOutput;
-use crate::safety_wrapper::{SafetyEventSender, SafetyRLWrapper, SafetyWrapperEvent};
+use crate::safety_wrapper::{SafetyRLWrapper, SafetyWrapperEvent};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// 在线微调安全阈值（0-100，权重方差越小评分越高）
+const ONLINE_UPDATE_SAFETY_THRESHOLD: f32 = 70.0;
+/// 在线微调性能阈值（影子模型性能 / 当前模型性能 ≥ 此值才接受更新）
+const ONLINE_UPDATE_PERFORMANCE_THRESHOLD: f32 = 0.95;
 
 /// 模型状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +112,10 @@ pub struct ModelManager {
     /// v1.0: 预测增强管线（VMD + Attention 编排器）
     /// None 表示增强未启用，回退到基线 LSTM 推理路径
     prediction_pipeline: Arc<RwLock<Option<PredictionPipeline>>>,
+    /// v3.1: 在线数据收集器（PER 缓冲区 + 场景隔离）
+    online_updater: Arc<RwLock<OnlineUpdater>>,
+    /// v3.1: 安全在线微调编排器（影子模型验证 + 渐进式切换）
+    safe_updater: Arc<SafeOnlineUpdater>,
 }
 
 impl ModelManager {
@@ -164,6 +176,26 @@ impl ModelManager {
             None
         };
 
+        // v3.1: 初始化在线微调组件
+        let online_updater = Arc::new(RwLock::new(OnlineUpdater::new(
+            config.online_update.clone(),
+        )));
+        let safety_checker = Arc::new(DefaultSafetyChecker::new(
+            ONLINE_UPDATE_SAFETY_THRESHOLD,
+        ));
+        let perf_monitor = Arc::new(DefaultPerformanceMonitor::new(
+            ONLINE_UPDATE_PERFORMANCE_THRESHOLD,
+        ));
+        let safe_updater = Arc::new(SafeOnlineUpdater::new(
+            config.online_update.clone(),
+            safety_checker,
+            perf_monitor,
+            ONLINE_UPDATE_SAFETY_THRESHOLD,
+            ONLINE_UPDATE_PERFORMANCE_THRESHOLD,
+            config.online_update.gradual_switch.clone(),
+            Vec::new(), // initial_weights: 待模型加载后更新
+        ));
+
         Self {
             config,
             lstm_model,
@@ -183,17 +215,15 @@ impl ModelManager {
             lstm_sample_counter: Arc::new(RwLock::new(0)),
             action_space_config: Arc::new(RwLock::new(ActionSpaceConfig::default_config())),
             dynamic_config_loader: Arc::new(RwLock::new(None)),
+            online_updater,
+            safe_updater,
         }
     }
 
     /// v3.1: 订阅安全事件流（供 bin crate / web-api SSE 推送使用）
     ///
-    /// 返回 broadcast Receiver，外部可调用 `recv()` 异步接收 SafetyWrapperEvent。
-    /// 所有权转移给调用方，ModelManager 不再持有。
-    ///
-    /// # Panics
-    ///
-    /// 仅可调用一次（Receiver 所有权移出后再次调用将 panic）。
+    /// 返回一个新的 broadcast Receiver，可多次调用创建多个独立订阅。
+    /// 每个 Receiver 通过 `recv()` 异步接收 SafetyWrapperEvent。
     pub fn subscribe_safety_events(&mut self) -> tokio::sync::broadcast::Receiver<SafetyWrapperEvent> {
         // resubscribe() 创建新的 Receiver 订阅同一 Sender
         self.safety_event_rx.resubscribe()
@@ -414,7 +444,75 @@ impl ModelManager {
             rc.update_last_p_batt(validated.p_ref);
         }
 
+        // v3.1: 在线微调数据收集（写入 OnlineUpdater 的 PER 缓冲区）
+        if self.config.online_update.enabled {
+            let raw_vector = fused_state_with_forecast.to_input_vector();
+            let output = vec![validated.p_ref as f32, validated.k_droop as f32];
+            let data = DataPoint::new(chrono::Utc::now().timestamp(), raw_vector, output);
+            self.online_updater.write().await.add_sample(data);
+        }
+
         Ok(validated)
+    }
+
+    /// v3.1: 尝试触发在线微调更新周期
+    ///
+    /// 当 PER 缓冲区积累足够样本（≥ batch_size）时，执行一次 mini-batch 更新：
+    /// PER 采样 → KL 正则化 → 安全校验 → 渐进式切换。
+    ///
+    /// 当前权重更新部分受限于 RKNN 私有格式（无法原地更新权重），
+    /// 完整的权重热切换需等待 Phase 3C.2 RKNN SDK 适配或走 OTA 全量替换路径。
+    ///
+    /// 返回 `Ok(true)` 表示更新已触发，`Ok(false)` 表示样本不足跳过。
+    pub async fn try_online_update(&self) -> Result<bool, AiEngineError> {
+        if !self.config.online_update.enabled {
+            return Ok(false);
+        }
+
+        let batch_size = self.config.online_update.batch_size;
+        let sample_count = {
+            let updater = self.online_updater.read().await;
+            updater.per_buffer().len()
+        };
+
+        if sample_count < batch_size {
+            tracing::debug!(
+                "在线微调样本不足: per={}, need={}",
+                sample_count,
+                batch_size
+            );
+            return Ok(false);
+        }
+
+        tracing::info!(
+            "在线微调数据就绪: per={} batch={}",
+            sample_count,
+            batch_size
+        );
+
+        // Phase 3C.2 完整实现路径：
+        // 1. 从 .rknn 模型文件提取当前权重（需 RKNN SDK API 或训练侧同步导出 weights.bin）
+        // 2. PerBuffer.sample(batch_size) → mini-batch 梯度更新 → 新权重
+        // 3. SafeOnlineUpdater.safe_update(new_weights) → 安全校验 → 渐进式切换
+        // 4. ModelRegistry.hot_swap_weights() → 写入临时 .rknn → 重载 session
+        //
+        // 当前：数据收集和 PER 管理已就绪，等待 RKNN 权重更新 API
+        tracing::info!(
+            "在线微调数据收集完成（{} 样本），等待 Phase 3C.2 RKNN 权重更新适配",
+            sample_count
+        );
+
+        Ok(false)
+    }
+
+    /// v3.1: 获取在线微调器（供外部监控数据收集状态）
+    pub fn online_updater(&self) -> &Arc<RwLock<OnlineUpdater>> {
+        &self.online_updater
+    }
+
+    /// v3.1: 获取安全微调编排器（供外部查询切换状态）
+    pub fn safe_updater(&self) -> &Arc<SafeOnlineUpdater> {
+        &self.safe_updater
     }
 
     /// 执行 LSTM 预测（使用历史缓冲区构建 7 维联合输入）

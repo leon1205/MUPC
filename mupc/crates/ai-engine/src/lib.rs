@@ -74,7 +74,11 @@ pub use mode_selector::{
 };
 pub use model_manager::{HistorySample, ModelManager, ModelStatus};
 pub use model_registry::{ModelManifestEntry, ModelRegistry, SceneModelState, SceneSwitchResult};
-pub use online_updater::{DataPoint, OnlineUpdater};
+pub use online_updater::{
+    ActionConsistencyCheck, DataPoint, DefaultPerformanceMonitor, DefaultSafetyChecker,
+    GradualSwitcher, KLDivergenceCalculator, OnlineUpdater, PerBuffer, PerSample,
+    SafeOnlineUpdater, ShadowModel, UpdateError,
+};
 pub use pareto_optimizer::{
     OptimizationObjective, ParetoSolution, ParetoWeightOptimizer, WeightCandidate,
 };
