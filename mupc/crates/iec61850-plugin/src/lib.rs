@@ -1,6 +1,25 @@
 //! IEC 61850-7-420 协议插件
 //!
-//! 实现 IEC 61850 协议客户端，支持 MMS 读写和 GOOSE 订阅
+//! 实现 IEC 61850 协议客户端，支持 MMS 读写和 GOOSE 订阅。
+//!
+//! # 实现状态（v3.1）
+//!
+//! **当前编译模式：`fake_iec61850`（mock 实现）。**
+//! 所有 MMS 客户端、GOOSE 订阅者、设备实现均为 mock/stub。
+//!
+//! | 阻塞条件 | 目标 | 状态 |
+//! |----------|------|:--:|
+//! | libIEC61850 C 库（libiec61850.so）交叉编译 | ARM64 openEuler 目标平台 | ❌ 未接入 |
+//! | cmake 编译管线接入 workspace build.rs | Cargo build script | ❌ 未配置 |
+//! | FFI unsafe 绑定（`iec61850` crate 0.1.0） | `Cargo.toml` feature `real_iec61850` | ❌ 未激活 |
+//!
+//! 启用真实 FFI 的步骤：
+//! 1. 交叉编译 libIEC61850 → `libiec61850.so`（ARM64）
+//! 2. 将 `.so` 放入 `target/aarch64-unknown-linux-gnu/release/`
+//! 3. 在 `Cargo.toml` 中将 `default = ["fake_iec61850"]` 改为 `default = ["real_iec61850"]`
+//! 4. 实现 `iec61850` crate 中的 FFI 函数绑定
+//!
+//! 当前 mock 实现提供完整的 API 面用于集成测试和接口验证。
 
 mod asn1_utils;
 mod config;

@@ -18,12 +18,15 @@ pub struct LoadCovariates {
 }
 
 impl Default for LoadCovariates {
+    /// v3.1: 默认值代表典型工况（工作日正午 25°C，非灌溉季）。
+    /// 实际推理时应通过 `WeatherService` trait 注入实时温湿度等协变量，
+    /// 以改善分位数预测的协变量调整精度。
     fn default() -> Self {
         Self {
             temperature: 25.0,
-            date_type: 0,
+            date_type: 0,   // 工作日
             is_irrigation_season: false,
-            hour: 12,
+            hour: 12,       // 正午
         }
     }
 }

@@ -66,8 +66,12 @@ mupc/
 - **Phase 3C 补充**: 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验）
 - **v2.14**: SafetyOverride 奖励函数重构、FusedSystemState 扩展至 78 维（统一版 PRD 已发布）
 - **v2.15**: 动作空间精简 5维→2维（p_ref + k_droop），load_shedding/pv_limit 下沉至策略引擎本地兜底
-- **Phase 2+**: IEC 61850-7-420（libIEC61850 FFI 待接入）、OTA 固件升级（A/B 分区待实现）、安全启动（硬件信任根待适配）
+- **v3.1**: 在线微调 PER/KL/影子模型/渐进式切换集成完成；全项目需求-设计-实现三方审计通过（21 差异中 18 修复）；p256 ECDH 替换 XOR 占位；TokioMessageBus 全局消息总线落地；Rs485SouthSender→策略引擎连通
+- **Phase 2+**: IEC 61850-7-420（libIEC61850 FFI 待接入）、OTA 固件升级（A/B 分区待实现）、安全启动（硬件信任根待适配）、BLE/NearLink/WiFi 无线驱动（NoOp 占位）
 - 技术债清单见 `docs/technical-debt.md`（v2.0，含 2026-06-15 文档-代码一致性审计结果）
+- 全项目审计报告见 `docs/TODO/全项目需求-设计-实现三方差异审计报告-2026-06-26.md`
+- AI 引擎审计报告见 `docs/TODO/需求-设计-实现三方差异审计报告-2026-06-26.md`
+- MUPC-AI2 改造要求见 `docs/TODO/` 目录（7 份吸收方案 + 在线微调闭环对接 + MUPC 推理侧改造清单）
 
 ## 开发命令
 

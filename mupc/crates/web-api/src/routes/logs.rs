@@ -64,22 +64,108 @@ impl LogsHandler {
         }
     }
 
-    /// 获取日志列表
+    /// 获取日志列表（v3.1: 从日志目录读取最近条目）
     pub async fn get_logs(&self, query: LogQuery) -> Result<LogListResponse, MupcError> {
-        let _limit = query.limit.unwrap_or(100).min(10000);
-        let _offset = query.offset.unwrap_or(0);
+        let limit = query.limit.unwrap_or(100).min(10000);
+        let offset = query.offset.unwrap_or(0);
 
-        // TODO: 实际读取日志文件
-        // 目前返回模拟数据
-        let entries = Vec::new();
+        let mut entries = Vec::new();
 
-        Ok(LogListResponse { total: 0, entries })
+        // 从日志目录读取 .log 文件
+        if let Ok(dir) = std::fs::read_dir(&self.log_directory) {
+            let mut log_files: Vec<_> = dir
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "log"))
+                .collect();
+            // 按修改时间排序（最新的在前）
+            log_files.sort_by(|a, b| {
+                b.metadata()
+                    .and_then(|m| m.modified())
+                    .cmp(&a.metadata().and_then(|m| m.modified()))
+            });
+
+            for file in log_files.iter().take(3) {
+                // 只读最新 3 个日志文件
+                if let Ok(content) = std::fs::read_to_string(file.path()) {
+                    for line in content.lines().rev().take(limit + offset) {
+                        // 简易解析: 跳过不足的行
+                        if entries.len() >= limit + offset {
+                            break;
+                        }
+                        // 尝试解析 tracing 格式的日志行
+                        if let Some(entry) = Self::parse_log_line(line) {
+                            // 按级别过滤
+                            if let Some(ref lvl) = query.level {
+                                if entry.level != format!("{:?}", lvl).to_uppercase() {
+                                    continue;
+                                }
+                            }
+                            // 按关键词过滤
+                            if let Some(ref kw) = query.keyword {
+                                if !entry.message.contains(kw.as_str()) {
+                                    continue;
+                                }
+                            }
+                            entries.push(entry);
+                        }
+                    }
+                }
+                if entries.len() >= limit + offset {
+                    break;
+                }
+            }
+        }
+
+        let total = entries.len();
+        let entries = entries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        Ok(LogListResponse { total, entries })
     }
 
-    /// 导出日志
-    pub async fn export_logs(&self, _query: LogQuery) -> Result<Vec<u8>, MupcError> {
-        // TODO: 实际导出日志文件
-        Ok(Vec::new())
+    /// 解析单行日志为 LogEntry（简易解析，兼容 tracing 默认格式）
+    fn parse_log_line(line: &str) -> Option<LogEntry> {
+        // tracing 默认格式: "2026-06-26T10:30:00.123Z  INFO module: message"
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let timestamp = parts[0].to_string();
+        let rest = parts[1].trim();
+
+        let rest_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        let level = rest_parts.first()?.to_string();
+        let module_msg = rest_parts.get(1).unwrap_or(&"");
+
+        let msg_parts: Vec<&str> = module_msg.splitn(2, ':').collect();
+        let (module, message) = if msg_parts.len() == 2 {
+            (msg_parts[0].trim().to_string(), msg_parts[1].trim().to_string())
+        } else {
+            (String::new(), module_msg.trim().to_string())
+        };
+
+        Some(LogEntry {
+            timestamp,
+            level,
+            module,
+            message,
+        })
+    }
+
+    /// 导出日志（v3.1: 读取并打包为文本返回）
+    pub async fn export_logs(&self, query: LogQuery) -> Result<Vec<u8>, MupcError> {
+        let response = self.get_logs(query).await?;
+        let mut output = String::new();
+        for entry in &response.entries {
+            output.push_str(&format!(
+                "{} {} {}: {}\n",
+                entry.timestamp, entry.level, entry.module, entry.message
+            ));
+        }
+        Ok(output.into_bytes())
     }
 }
 

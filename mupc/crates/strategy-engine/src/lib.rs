@@ -23,7 +23,7 @@ pub use errors::StrategyError;
 pub use peak_shaving::PeakShavingStrategy;
 pub use south_command_sender::{
     get_dispatcher, set_dispatcher, LoadSheddingCommand, MockSouthCommandSender, PvLimitCommand,
-    SouthCommandDispatcher, SouthCommandSender, SouthCommandType, SouthSendResult,
+    Rs485SouthSender, SouthCommandDispatcher, SouthCommandSender, SouthCommandType, SouthSendResult,
 };
 pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,

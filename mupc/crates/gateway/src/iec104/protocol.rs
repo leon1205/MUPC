@@ -43,6 +43,7 @@ pub enum TypeId {
     CScTa1 = 58, // 单点遥控带时标 (C_SC_TA_1)
     CDcTa1 = 59, // 双点遥控带时标 (C_DC_TA_1)
     CSeTa1 = 61, // 调节命令带时标 (C_SE_TA_1)
+    FDrNa1 = 122, // 文件传输 (F_DR_NA_1, TI=122) — v3.1 新增
 }
 
 impl TypeId {
@@ -63,6 +64,7 @@ impl TypeId {
             58 => Some(TypeId::CScTa1),
             59 => Some(TypeId::CDcTa1),
             61 => Some(TypeId::CSeTa1),
+            122 => Some(TypeId::FDrNa1),
             _ => None,
         }
     }
@@ -357,6 +359,7 @@ mod tests {
             (58, TypeId::CScTa1, "单点遥控带时标"),
             (59, TypeId::CDcTa1, "双点遥控带时标"),
             (61, TypeId::CSeTa1, "调节命令带时标"),
+            (122, TypeId::FDrNa1, "文件传输"),
         ];
 
         for (val, expected_type, _name) in required_type_ids {

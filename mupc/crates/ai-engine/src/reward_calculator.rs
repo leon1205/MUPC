@@ -220,17 +220,16 @@ fn safety_override_penalty_impl(state: &FusedSystemState) -> f64 {
     let min_sample_threshold = 10;
     let norm_divisor = 15.0;
 
+    // v2.15: 统一固定冷启动惩罚 -3.33，不再按 reason 分支
+    // 原因：D9 字段表已无 reason_code（4 维收窄为 active/p_ref/consecutive/ratio）
+    const COLD_START: f64 = -3.33;
+
+    if !state.safety_override_active && state.safety_override_consecutive < min_sample_threshold {
+        return 0.0;
+    }
+
     if state.safety_override_consecutive < min_sample_threshold {
-        if !state.safety_override_active {
-            return 0.0;
-        }
-        let raw: f64 = match state.safety_override_reason.as_deref().unwrap_or("unknown") {
-            "voltage_violation" => -50.0_f64,
-            "q_exhausted" => -30.0_f64,
-            "emergency" => -100.0_f64,
-            _ => -20.0_f64,
-        };
-        return (raw / norm_divisor).max(-1.0).min(0.0);
+        return COLD_START;
     }
 
     let ratio_penalty = -k_override * state.safety_override_ratio;

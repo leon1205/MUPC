@@ -46,8 +46,10 @@ pub struct FaultEventSummary {
 
 /// 波形波形上报器
 ///
-/// 提供 IEC 104 和 MQTT 两种北向通道的上报接口。
-/// 当前为 stub 实现（TODO 标记），待 gateway 和 MQTT 模块完成集成后对接。
+/// 提供三类上报通道：
+/// - `report_to_local`：本地文件导出（v3.1 可用）
+/// - `report_via_iec104`：IEC 104 TI=122 文件传输（待 gateway 对接）
+/// - `report_via_mqtt`：MQTT QOS1 北向发布（待 mqtt-bridge 对接）
 #[allow(dead_code)]
 pub struct WaveformReporter {
     /// 最大重试次数
@@ -56,6 +58,8 @@ pub struct WaveformReporter {
     retry_interval_ms: u64,
     /// 已上报事件 ID 集合（幂等性保证）
     reported_events: parking_lot::Mutex<Vec<i64>>,
+    /// v3.1: 本地导出目录
+    local_export_dir: Option<PathBuf>,
 }
 
 impl WaveformReporter {
@@ -65,7 +69,67 @@ impl WaveformReporter {
             max_retries: 3,
             retry_interval_ms: 30_000,
             reported_events: parking_lot::Mutex::new(Vec::new()),
+            local_export_dir: None,
         }
+    }
+
+    /// v3.1: 创建带本地导出目录的上报器
+    pub fn with_local_export(local_export_dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&local_export_dir);
+        Self {
+            max_retries: 3,
+            retry_interval_ms: 30_000,
+            reported_events: parking_lot::Mutex::new(Vec::new()),
+            local_export_dir: Some(local_export_dir),
+        }
+    }
+
+    /// v3.1: 将波形文件导出到本地目录（生产可用的本地检索路径）
+    ///
+    /// 在 IEC 104 / MQTT 北向通道就绪前，运维人员可通过
+    /// USB 存储、本地 Web 下载或 OTA 文件同步获取导出的波形文件。
+    pub async fn report_to_local(
+        &self,
+        event_id: i64,
+        waveform_path: Option<PathBuf>,
+    ) -> Result<PathBuf, ReportError> {
+        let export_dir = self.local_export_dir.as_ref().ok_or_else(|| {
+            ReportError::NetworkError("本地导出目录未配置".into())
+        })?;
+
+        let src = waveform_path.ok_or_else(|| {
+            ReportError::FileNotFound(format!("事件 {} 无波形文件", event_id))
+        })?;
+
+        if !src.exists() {
+            return Err(ReportError::FileNotFound(format!(
+                "波形文件不存在: {}",
+                src.display()
+            )));
+        }
+
+        let dest = export_dir.join(
+            src.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("waveform.bin")),
+        );
+
+        std::fs::copy(&src, &dest).map_err(|e| {
+            ReportError::NetworkError(format!("复制波形文件失败: {}", e))
+        })?;
+
+        tracing::info!(
+            "波形文件本地导出成功: event_id={}, path={}",
+            event_id,
+            dest.display()
+        );
+        self.mark_reported(event_id);
+        Ok(dest)
+    }
+
+    /// 设置本地导出目录
+    pub fn set_local_export_dir(&mut self, dir: PathBuf) {
+        let _ = std::fs::create_dir_all(&dir);
+        self.local_export_dir = Some(dir);
     }
 
     /// 通过 IEC 104 通道上报故障事件

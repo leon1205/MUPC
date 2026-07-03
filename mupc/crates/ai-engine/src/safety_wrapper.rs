@@ -153,11 +153,9 @@ impl LinearSensitivityPredictor {
         &self,
         state: &FusedSystemState,
         action: &ActionOutput,
+        p_cur: f64,
     ) -> Result<PredictionResult, AiEngineError> {
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
-
-        // 当前 P_output（包含下垂分量）
-        let p_cur = 0.0; // 简化：上一周期有效值在 check_and_fallback 中跟踪
 
         // 新动作下的 P_output（下垂公式: P = P_ref - k_droop × ΔV）
         let p_new = action.p_ref - action.k_droop * (v_avg - 1.0);
@@ -263,8 +261,15 @@ impl SafetyRLWrapper {
     ) -> (ActionOutput, CheckResult) {
         let start = std::time::Instant::now();
 
+        // 0. 计算上一周期实际 P_output（用于 ΔP 计算）
+        let last = self.last_safe_action.read().await;
+        let v_avg =
+            (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let p_cur = last.p_ref - last.k_droop * (v_avg - 1.0);
+        drop(last);
+
         // 1. 物理模型预测
-        let pred = match self.predictor.predict(state, proposed_action) {
+        let pred = match self.predictor.predict(state, proposed_action, p_cur) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("SafetyRLWrapper 预测失败: {:?}", e);
@@ -355,7 +360,8 @@ impl SafetyRLWrapper {
         if latency_us > s.max_latency_us {
             s.max_latency_us = latency_us;
         }
-        // 简化拒绝率（基于总数，非精确 1h 滑动窗口）
+        // 拒绝率（全局比率；注：字段名 `rejection_rate_1h` 为历史遗留，
+        // 当前实现为全局统计，非精确 1h 滑动窗口）
         s.rejection_rate_1h = if s.total_checks > 0 {
             s.total_rejected as f64 / s.total_checks as f64
         } else {

@@ -9,7 +9,18 @@ mod sm3;
 mod sm4;
 mod tls;
 
-// Phase 2+ 模块
+// Phase 2+ 模块（全部为 stub 骨架，需要硬件/外部SDK支持）
+//
+// 阻塞条件汇总：
+// ┌────────────────────┬──────────────────────────────────┬───────────┐
+// │ 模块               │ 阻塞条件                          │ 目标      │
+// ├────────────────────┼──────────────────────────────────┼───────────┤
+// │ secure_boot        │ 硬件 TPM/信任根 + 安全 ROM 公钥  │ Phase 2+  │
+// │ lea / lea_vici     │ Linux 内核 IPSec + VICI Unix 套接字 │ Phase 2+ │
+// │ cert_mgr (自动续期) │ CA 服务器 API + ACME 协议        │ Phase 2+  │
+// │ compliance         │ 国网/南网合规检查清单定稿          │ Phase 2+  │
+// │ alarm              │ 告警北向推送通道（MQTT/IEC104）   │ Phase 2+  │
+// └────────────────────┴──────────────────────────────────┴───────────┘
 pub mod alarm;
 pub mod audit;
 pub mod cert_mgr;

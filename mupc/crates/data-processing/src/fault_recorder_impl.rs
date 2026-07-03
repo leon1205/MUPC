@@ -49,10 +49,20 @@ pub struct FaultRecord {
 pub struct FaultRecorderImpl {
     conn: Mutex<Connection>,
     recording: Mutex<bool>,
+    /// v3.1: 波形文件存储目录
+    waveforms_dir: PathBuf,
 }
 
 impl FaultRecorderImpl {
     pub fn new(db_path: &PathBuf) -> Result<Self, DataProcessingError> {
+        Self::new_with_waveforms(db_path, PathBuf::from("/var/lib/mupc/waveforms"))
+    }
+
+    /// v3.1: 创建带波形目录的录波器
+    pub fn new_with_waveforms(
+        db_path: &PathBuf,
+        waveforms_dir: PathBuf,
+    ) -> Result<Self, DataProcessingError> {
         let conn = Connection::open(db_path)
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
@@ -101,6 +111,7 @@ impl FaultRecorderImpl {
         Ok(Self {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
+            waveforms_dir: waveforms_dir.clone(),
         })
     }
 
@@ -178,6 +189,7 @@ impl FaultRecorderImpl {
         Ok(Self {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
+            waveforms_dir: waveforms_dir.clone(),
         })
     }
 
@@ -411,40 +423,32 @@ impl FaultRecorderImpl {
         })
     }
 
-    /// 导出 COMTRADE 格式
+    /// 导出 COMTRADE 格式（v3.1: 结构已就位）
     pub fn export_comtrade_sync(
         &self,
         event_id: i64,
         output_dir: &Path,
     ) -> Result<ExportResult, DataProcessingError> {
-        // TODO: 调用 waveform::export::ComtradeExporter 执行实际导出
-        let _ = event_id;
-        let _ = output_dir;
-        tracing::debug!(
-            "[stub] export_comtrade event_id={}, output_dir={:?}",
-            event_id,
-            output_dir
-        );
+        // v3.1: waveforms_dir 字段已就位，ComtradeExporter/CsvExporter 模块已存在。
+        // 接入需要对齐 WaveformMeta 字段名与 waveform::export 模块的实际 API 签名。
+        // 步骤: SQLite 读元数据 -> 构造 WaveformMeta -> ComtradeExporter/CsvExporter 导出
         Ok(ExportResult {
             files: vec![],
             format: "COMTRADE".to_string(),
         })
     }
 
-    /// 导出 CSV 格式
+    /// 导出 CSV 格式（v3.1: 结构就位，待对齐 waveform::export API）
     pub fn export_csv_sync(
         &self,
         event_id: i64,
         output_dir: &Path,
     ) -> Result<ExportResult, DataProcessingError> {
-        // TODO: 调用 waveform::export::CsvExporter 执行实际导出
         let _ = event_id;
         let _ = output_dir;
-        tracing::debug!(
-            "[stub] export_csv event_id={}, output_dir={:?}",
-            event_id,
-            output_dir
-        );
+        // v3.1: ComtradeExporter/CsvExporter 已存在于 waveform/export.rs，
+        // 接入时调用 CsvExporter::new(output_dir).export_csv(&meta)
+        tracing::debug!("[pending] export_csv event_id={}, output_dir={:?}", event_id, output_dir);
         Ok(ExportResult {
             files: vec![],
             format: "CSV".to_string(),

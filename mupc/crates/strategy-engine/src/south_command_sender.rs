@@ -274,10 +274,24 @@ impl SouthCommandDispatcher {
         }
     }
 
-    /// 创建使用模拟发送器的分发器
+    /// 创建使用模拟发送器的分发器（开发/测试阶段）
     pub fn with_mock(default_pv_device_id: &str, default_load_device_id: &str) -> Self {
         Self::new(
             Arc::new(MockSouthCommandSender::new()),
+            default_pv_device_id,
+            default_load_device_id,
+        )
+    }
+
+    /// v3.1: 创建使用真实 RS485 设备的分发器（生产环境）
+    pub fn with_rs485(
+        pv_device: Arc<rs485_plugin::device::Rs485Device>,
+        load_device: Arc<rs485_plugin::device::Rs485Device>,
+        default_pv_device_id: &str,
+        default_load_device_id: &str,
+    ) -> Self {
+        Self::new(
+            Arc::new(Rs485SouthSender::new(pv_device, load_device)),
             default_pv_device_id,
             default_load_device_id,
         )
