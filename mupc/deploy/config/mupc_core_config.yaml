@@ -1,0 +1,39 @@
+# MUPC 主控进程配置文件
+# 安装路径: /opt/mupc/config/mupc_core_config.yaml
+# mupcd 通过 --config 参数指定此文件路径
+
+version: "1.0"
+
+system:
+  log_level: "info"              # info / debug / warn / error
+  log_dir: "/opt/mupc/logs"
+  data_dir: "/opt/mupc/data"
+  plugin_dir: "/opt/mupc/lib/plugins"
+  cert_dir: "/opt/mupc/certs"
+  shutdown_timeout_sec: 30
+
+intercore:
+  host: "192.168.1.2"           # 实时核心 IP
+  port: 9100
+  heartbeat_interval_sec: 5
+  reconnect_interval_sec: 3
+
+web_api:
+  listen_addr: "0.0.0.0:8080"
+  enable_https: false            # Phase 2+ 启用
+  # tls_cert: "/opt/mupc/certs/server.crt"
+  # tls_key: "/opt/mupc/certs/server.key"
+
+ai_engine:
+  model_dir: "/opt/mupc/models"
+  config_file: "/opt/mupc/config/mupc_env_config.yaml"
+  enable_npu: true               # 是否启用 RK3588 NPU
+  inference_timeout_ms: 500
+
+plugins:
+  search_paths:
+    - "/opt/mupc/lib/plugins"
+  auto_load:
+    - "rs485_plugin"
+    - "hplc_plugin"
+    - "mqtt_plugin"

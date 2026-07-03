@@ -77,11 +77,11 @@ impl LogsHandler {
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().map_or(false, |ext| ext == "log"))
                 .collect();
-            // 按修改时间排序（最新的在前）
+            // 按修改时间降序（最新的在前）
             log_files.sort_by(|a, b| {
-                b.metadata()
-                    .and_then(|m| m.modified())
-                    .cmp(&a.metadata().and_then(|m| m.modified()))
+                let ta = a.metadata().and_then(|m| m.modified()).ok();
+                let tb = b.metadata().and_then(|m| m.modified()).ok();
+                tb.cmp(&ta)
             });
 
             for file in log_files.iter().take(3) {

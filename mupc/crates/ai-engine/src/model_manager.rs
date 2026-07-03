@@ -229,6 +229,45 @@ impl ModelManager {
         self.safety_event_rx.resubscribe()
     }
 
+    /// 加载 RKNN 模型到 NPU
+    ///
+    /// 仅在 `npu` feature 启用时实际执行 RKNN Runtime 加载。
+    /// 无 NPU 时记录 WARN 日志并返回 Ok（不阻塞启动）。
+    ///
+    /// # 参数
+    /// - `model_path`: .rknn 模型文件路径
+    /// - `expected_sha256`: 可选的 SHA256 期望值（None 时跳过校验）
+    #[cfg(feature = "npu")]
+    pub async fn load_rknn_model(
+        &self,
+        model_path: &std::path::Path,
+        expected_sha256: Option<&str>,
+    ) -> Result<(), AiEngineError> {
+        use crate::rknn_runtime::RknnRuntime;
+
+        tracing::info!(
+            "加载 RKNN 模型: {} (NPU enabled)",
+            model_path.display()
+        );
+
+        let runtime = RknnRuntime::new(model_path, expected_sha256)?;
+        runtime.load().await?;
+
+        tracing::info!("RKNN 模型加载成功: {}", model_path.display());
+        Ok(())
+    }
+
+    /// 无 NPU 时的回退：记录 WARN 日志，走 CPU LSTM 推理路径
+    #[cfg(not(feature = "npu"))]
+    pub async fn load_rknn_model(
+        &self,
+        _model_path: &std::path::Path,
+        _expected_sha256: Option<&str>,
+    ) -> Result<(), AiEngineError> {
+        tracing::warn!("npu feature 未启用，RKNN 模型加载跳过。使用纯 CPU 推理。");
+        Ok(())
+    }
+
     /// 加载所有模型和子模块
     ///
     /// v2.3: 使用 ModelRegistry 替代 RLModel，支持 5 个场景独立模型

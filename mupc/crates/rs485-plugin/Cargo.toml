@@ -22,3 +22,8 @@ libc = "0.2"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 chrono = { workspace = true }
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+name = "rs485_plugin"
+path = "src/lib.rs"

@@ -22,3 +22,10 @@ nalgebra = "0.33"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[features]
+default = []
+npu = []
+
+[build-dependencies]
+sha2 = "0.10"

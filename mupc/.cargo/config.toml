@@ -3,3 +3,13 @@ protocol = "sparse"
 
 [net]
 retry = 1
+
+# ── MUPC 交叉编译配置 ──
+# 目标: aarch64-unknown-linux-gnu (Ubuntu 22.04, glibc 2.35)
+# 开发主机: x86_64-unknown-linux-gnu
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = [
+    "-C", "link-arg=-Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1",
+]

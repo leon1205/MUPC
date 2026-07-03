@@ -34,10 +34,11 @@ pub mod prediction_pipeline;
 pub mod residual_buffer;
 pub mod reward_calculator;
 pub mod reward_normalizer;
+pub mod rl_model;
+
 pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
 pub mod rknn_types;
-pub mod rl_model;
 pub mod robustness_manager;
 pub mod safety_config;
 pub mod safety_wrapper;

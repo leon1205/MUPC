@@ -1,0 +1,15 @@
+# Cross.toml — 交叉编译配置 (cross-rs)
+#
+# 供 CI 和本地开发者使用 cross 工具进行容器化交叉编译。
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt update && apt install -y libssl-dev:arm64 libsqlite3-dev:arm64 || true",
+]
+
+[build.env]
+passthrough = [
+    "RKNN_VENDOR_DIR",
+    "CARGO_FEATURE_NPU",
+]

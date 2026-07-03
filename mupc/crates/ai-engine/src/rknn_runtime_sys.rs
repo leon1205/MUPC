@@ -1,7 +1,11 @@
 //! RKNN Runtime C API FFI 绑定
 //!
 //! 直接声明 librknnrt.so 的 C 函数，供 rknn_runtime.rs 高层接口调用
-
+//!
+//! ## Feature Gate
+//!
+//! `cargo check` 不链接外部库，可在无 librknnrt.so 环境通过。
+//! 实际链接仅在 `cargo build`（需 librknnrt.so 存在）时发生，由 build.rs 控制。
 use std::os::raw::{c_char, c_int, c_void};
 
 #[repr(C)]

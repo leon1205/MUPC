@@ -1,0 +1,40 @@
+[Unit]
+Description=MUPC 微电网特种调控装置通信管理模块
+Documentation=https://github.com/your-org/mupc
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=simple
+User=mupc
+Group=mupc
+SupplementaryGroups=dialout
+ExecStart=/opt/mupc/bin/mupcd \
+    --config /opt/mupc/config/mupc_core_config.yaml \
+    --model-dir /opt/mupc/models \
+    --log-dir /opt/mupc/logs
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# 安全加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/mupc/data /opt/mupc/logs /opt/mupc/models
+ReadOnlyPaths=/opt/mupc/bin /opt/mupc/lib /opt/mupc/config /opt/mupc/certs
+
+# 资源限制
+LimitNOFILE=4096
+LimitNPROC=512
+MemoryMax=512M
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mupcd
+
+[Install]
+WantedBy=multi-user.target

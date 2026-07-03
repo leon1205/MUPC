@@ -155,6 +155,7 @@ impl FaultRecorderImpl {
     }
 
     pub fn new_in_memory() -> Result<Self, DataProcessingError> {
+        let waveforms_dir = PathBuf::from(".");
         let conn = Connection::open_in_memory()
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 

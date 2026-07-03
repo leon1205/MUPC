@@ -1,0 +1,43 @@
+[package]
+name = "mupc-core-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mupcd"
+path = "src/main.rs"
+
+[features]
+default = []
+npu = ["mupc-ai-engine/npu"]
+
+[dependencies]
+mupc-core = { path = "../core" }
+mupc-common = { path = "../common" }
+mupc-security = { path = "../security" }
+mupc_storage = { path = "../storage" }
+mupc-intercore = { path = "../intercore" }
+mupc-data-processing = { path = "../data-processing" }
+mupc-ai-engine = { path = "../ai-engine" }
+mupc-strategy-engine = { path = "../strategy-engine" }
+mupc-gateway = { path = "../gateway" }
+mupc-web-api = { path = "../web-api" }
+mupc-ota-update = { path = "../ota-update" }
+mupc_system_monitor = { path = "../system-monitor" }
+mupc_mqtt_bridge = { path = "../mqtt-bridge" }
+mupc_wireless = { path = "../wireless" }
+plugin-loader = { path = "../plugin-loader" }
+
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+chrono.workspace = true
+parking_lot.workspace = true

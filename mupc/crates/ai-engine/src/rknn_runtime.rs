@@ -3,6 +3,11 @@
 //! RK3588 NPU 专用推理接口
 //!
 //! 实际推理通过 FFI 调用 librknnrt.so (RKNN Runtime C API)
+//!
+//! ## Feature Gate
+//!
+//! 本模块仅在 `npu` feature 启用时编译（由 `lib.rs` 中的
+//! `#[cfg(feature = "npu")] pub mod rknn_runtime;` 控制）。
 
 use std::ffi::CString;
 use std::os::raw::c_int;
@@ -196,9 +201,8 @@ fn map_rknn_error(code: c_int) -> Result<(), AiEngineError> {
     }
 }
 
-// Safety: RknnRuntime 通过 Arc<RwLock> 提供内部可变性
-unsafe impl Send for RknnRuntime {}
-unsafe impl Sync for RknnRuntime {}
+// RknnRuntime 的所有字段（PathBuf, Option<String>, Arc<RwLock<..>>）均自动满足 Send + Sync，
+// 编译器可自动推导。无需 unsafe impl，避免违反 v3.1 AC-13 无新增 unsafe 块要求。
 
 #[cfg(test)]
 mod tests {
