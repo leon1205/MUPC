@@ -77,7 +77,15 @@ mupc/
 - Rust >= 1.88（推荐使用 [rustup](https://rustup.rs) 管理）
 - Linux (Ubuntu 20.04+ / openEuler 22.03+) 或 Windows 10+（开发调试）
 - RK3588 硬件（生产部署）
-- 详细构建指南见 [`mupc/build.md`](mupc/build.md)
+### 外部依赖安装
+
+```bash
+# 一键安装所有外部依赖
+./scripts/setup-deps.sh --all
+```
+
+> 详细指南见 [`mupc/build.md`](mupc/build.md)，包含三种构建方式（Cargo/CMake/脚本）、
+> 交叉编译工具链下载、RKNN SDK 获取方式、OpenSSL 编译说明、外部依赖矩阵。
 
 ### 本机构建
 
@@ -89,11 +97,11 @@ cargo build -p mupc-core-bin --release
 ### ARM64 交叉编译 (x86_64 → RK3588)
 
 ```bash
-# 前置条件
+# 前置条件（也可用 ./scripts/setup-deps.sh --all 自动安装）
 sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 rustup target add aarch64-unknown-linux-gnu
 
-# 编译 OpenSSL（首次需要）
+# 编译 OpenSSL（首次，setup-deps.sh 可自动完成）
 cd ../external/openssl-4.0.1
 ./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- \
     --prefix=$(pwd)/aarch64-install no-shared
