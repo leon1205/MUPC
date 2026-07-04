@@ -24,11 +24,11 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 
 | 项目 | 选型 |
 |------|------|
-| **编程语言** | Rust >= 1.75 |
+| **编程语言** | Rust >= 1.88 (交叉编译)；>= 1.75 (本机) |
 | **异步运行时** | Tokio |
 | **网络框架** | Tower + Axum |
-| **AI 推理** | RKNN Runtime (RK3588 NPU, 6 TOPS) + LSTM 分位数预测（v2.11）+ 奖励函数精细化（v2.13） |
-| **目标平台** | Linux (openEuler 22.03+), ARM64 |
+| **AI 推理** | RKNN Runtime v2.3.2 (RK3588 NPU, 6 TOPS) + LSTM 7维多特征分位数预测 + PPO/MADDPG 强化学习 |
+| **目标平台** | Linux (Ubuntu 20.04+ / openEuler 22.03+), ARM64 |
 | **硬件** | Rockchip RK3588 |
 | **许可证** | MIT |
 
@@ -59,7 +59,11 @@ mupc/
 │   ├── wireless/                # 本地无线通信 (WiFi/BLE/NearLink)
 │   ├── ota-update/              # OTA 固件升级
 │   ├── system-monitor/          # 系统监控
+│   ├── mupc-core-bin/           # 主控进程入口 (mupcd)
 │   └── storage/                 # 持久化存储
+├── cmake/                       # CMake 模块 (FindRKNN, toolchain)
+├── deploy/                      # 部署配置 (systemd, 脚本)
+├── docker/                      # Docker 交叉编译环境
 ├── tests/                       # 集成测试
 └── docs/                        # 项目文档
 ```
@@ -70,24 +74,47 @@ mupc/
 
 ### 环境要求
 
-- Rust >= 1.75（推荐使用 [rustup](https://rustup.rs) 管理）
-- Linux (openEuler 22.03+) 或 Windows 10+（开发调试）
+- Rust >= 1.88（推荐使用 [rustup](https://rustup.rs) 管理）
+- Linux (Ubuntu 20.04+ / openEuler 22.03+) 或 Windows 10+（开发调试）
 - RK3588 硬件（生产部署）
+- 详细构建指南见 [`mupc/build.md`](mupc/build.md)
 
-### 构建
+### 本机构建
 
 ```bash
 cd mupc
-cargo build --release
+cargo build -p mupc-core-bin --release
 ```
+
+### ARM64 交叉编译 (x86_64 → RK3588)
+
+```bash
+# 前置条件
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+
+# 编译 OpenSSL（首次需要）
+cd ../external/openssl-4.0.1
+./Configure linux-aarch64 --cross-compile-prefix=aarch64-linux-gnu- \
+    --prefix=$(pwd)/aarch64-install no-shared
+make -j$(nproc) && make install_sw
+
+# 编译 MUPC
+cd ../../mupc
+export OPENSSL_DIR=../external/openssl-4.0.1/aarch64-install
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+cargo build --workspace --release --target aarch64-unknown-linux-gnu \
+    --exclude mupc-iec61850-plugin --exclude device-trait
+```
+
+产物：`target/aarch64-unknown-linux-gnu/release/mupcd`
 
 ### 测试
 
 ```bash
-# 全部测试
-cargo test
+cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin --exclude device-trait
 
-# 单个 crate 测试
+# 单个 crate
 cargo test -p mupc-ai-engine
 
 # 带输出
@@ -97,9 +124,8 @@ cargo test -- --nocapture
 ### 代码质量
 
 ```bash
-cargo fmt                    # 格式化
-cargo clippy                 # 静态检查
-cargo build --release        # 发布构建
+cargo fmt --all     # 格式化
+cargo clippy        # 静态检查
 ```
 
 ---
@@ -171,15 +197,14 @@ cargo build --release        # 发布构建
 
 ## 文档体系
 
-本项目采用**二级文档结构**，详见 [`CLAUDE.md`](CLAUDE.md) 中的文档管理原则。
-
-| 层级 | 路径 | 说明 |
-|------|------|------|
-| **项目主文档** | `docs/superpowers/specs/PROJECT-MUPC-项目需求主文档.md` | 项目级需求入口 |
-| | `docs/superpowers/plans/PROJECT-MUPC-项目设计主文档.md` | 项目级设计入口 |
-| **模块文档** | `docs/superpowers/specs/modules/` | 10 个模块的详细 PRD |
-| | `docs/superpowers/plans/modules/` | 10 个模块的详细设计 |
-| **历史报告** | `docs/superpowers/reports/` | 审查报告、交付报告（归档） |
+| 文档 | 说明 |
+|------|------|
+| [`mupc/build.md`](mupc/build.md) | 完整构建指南（三种方式、交叉编译、RKNN SDK） |
+| [`CLAUDE.md`](CLAUDE.md) | AI 协作开发指南 |
+| [`docs/superpowers/specs/`](docs/superpowers/specs/) | 项目需求与模块 PRD |
+| [`docs/superpowers/plans/`](docs/superpowers/plans/) | 项目设计与模块设计 |
+| [`docs/superpowers/reports/`](docs/superpowers/reports/) | 审查报告、交付报告 |
+| [`docs/technical-debt.md`](docs/technical-debt.md) | 技术债清单 |
 
 ---
 

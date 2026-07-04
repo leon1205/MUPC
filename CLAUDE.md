@@ -14,9 +14,9 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 - AI 边缘优化引擎（预测、强化学习决策）
 - OTA 升级与远程维护
 
-**目标平台：** Linux (openEuler)、RK3588 硬件
+**目标平台：** Linux (openEuler 22.03 / Ubuntu 20.04+)、RK3588 硬件
 **编程语言：** Rust
-**Rust 版本：** >= 1.75（workspace 使用 workspace-inheritance）
+**Rust 版本：** >= 1.88（交叉编译）；>= 1.75（本机）
 **异步运行时：** Tokio
 **网络框架：** Tower + tokio-net
 
@@ -53,7 +53,12 @@ mupc/
 │   ├── rs485-plugin/       # RS485 通信插件
 │   ├── hplc-plugin/        # HPLC 通信插件
 │   ├── mqtt-bridge/        # MQTT 桥接
+│   ├── mupc-core-bin/      # 主控进程入口 (mupcd)
 │   └── device-trait/       # 设备特性抽象
+├── cmake/                  # CMake 模块 (FindRKNN, toolchain)
+├── deploy/                 # 部署配置 (systemd, 启停脚本)
+├── docker/                 # Docker 交叉编译环境
+├── vendor/                 # 第三方库 (librknnrt.so)
 └── tests/                  # 集成测试
 ```
 
@@ -66,7 +71,8 @@ mupc/
 - **Phase 3C 补充**: 跨项目动态配置系统 v2.6（YAML 配置加载、分层加载、版本指纹校验）
 - **v2.14**: SafetyOverride 奖励函数重构、FusedSystemState 扩展至 78 维（统一版 PRD 已发布）
 - **v2.15**: 动作空间精简 5维→2维（p_ref + k_droop），load_shedding/pv_limit 下沉至策略引擎本地兜底
-- **v3.1**: 在线微调 PER/KL/影子模型/渐进式切换集成完成；全项目需求-设计-实现三方审计通过（21 差异中 18 修复）；p256 ECDH 替换 XOR 占位；TokioMessageBus 全局消息总线落地；Rs485SouthSender→策略引擎连通
+- **v3.0**: LSTM 输入升级为 7 维多特征（HistorySample），PredictionPipeline 预测增强管线（VMD+Attention+BiLSTM+误差修正），MSSA 超参自动优化工具
+- **v3.1**: 双边审计 P0/P1 修复（观测 MinMax 归一化、动作 2 维反归一化、训练-部署 Gap 消除）；在线微调 PER/KL/影子模型/渐进式切换集成完成；全项目需求-设计-实现三方审计通过（21 差异中 18 修复）；aarch64 交叉编译体系搭建（CMake + build.rs RKNN 自动检测 + Docker）
 - **Phase 2+**: IEC 61850-7-420（libIEC61850 FFI 待接入）、OTA 固件升级（A/B 分区待实现）、安全启动（硬件信任根待适配）、BLE/NearLink/WiFi 无线驱动（NoOp 占位）
 - 技术债清单见 `docs/technical-debt.md`（v2.0，含 2026-06-15 文档-代码一致性审计结果）
 - 全项目审计报告见 `docs/TODO/全项目需求-设计-实现三方差异审计报告-2026-06-26.md`
@@ -75,13 +81,44 @@ mupc/
 
 ## 开发命令
 
-- 所有 cargo 命令必须在 `mupc/` 目录下执行：`cd mupc && cargo build --release`
-- 构建：`cargo build --release`
-- 测试：`cargo test`
-- 代码检查：`cargo clippy`
-- 单个测试：`cargo test -p <crate> <test_name>`
-- 单 crate 构建：`cargo build -p <crate>`
-- 格式化：`cargo fmt`
+- 所有 cargo 命令必须在 `mupc/` 目录下执行
+- 详细构建指南见 `mupc/build.md`
+
+```bash
+# === 本机开发 (x86_64, 无 NPU) ===
+cargo build -p mupc-core-bin --release
+cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin --exclude device-trait
+cargo clippy --workspace
+cargo fmt --all
+
+# === ARM64 交叉编译 (需 aarch64-linux-gnu 工具链) ===
+# 前置: sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+#       rustup target add aarch64-unknown-linux-gnu
+#       export OPENSSL_DIR=/work/MUPC/external/openssl-4.0.1/aarch64-install
+
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+cargo build --workspace --release --target aarch64-unknown-linux-gnu \
+  --exclude mupc-iec61850-plugin --exclude device-trait
+
+# === CMake 构建 ===
+cmake -B build -DRKNN_SDK_ROOT=/work/MUPC/rknn-toolkit2-2.3.2
+cmake --build build
+
+# === 一键构建脚本 ===
+./deploy/scripts/build-for-rk3588.sh --cross
+
+# === 单个 crate ===
+cargo build -p <crate>
+cargo test -p <crate> <test_name>
+```
+
+### npu feature 行为
+
+| 平台 | 默认 | 实际链接 |
+|------|:--:|------|
+| Linux (开发/部署) | `npu` 启用 | 真实 `librknnrt.so` |
+| Windows (开发) | `npu` 启用 | 自动 stub（FFI 返回 -1） |
+| 显式禁用 | `--no-default-features` | stub |
 
 ## 项目协作配置
 
@@ -312,7 +349,21 @@ async fn handler(State(state): State<Arc<AppState>>) -> ...
 
 ## 配置文件
 
-AI 引擎配置文件位于 `mupc/config/mupc_env_config.yaml`，与训练管线 v2.6 对齐。
+### 运行时配置
+
+AI 引擎配置文件位于 `mupc/config/mupc_env_config.yaml`，与训练管线对齐。
+
+### 构建配置
+
+| 文件 | 用途 |
+|------|------|
+| `.cargo/config.toml` | aarch64 linker + rustflags |
+| `CMakeLists.txt` | CMake 编排 (RKNN 检测 → Cargo → 打包) |
+| `cmake/FindRKNN.cmake` | RKNN SDK 自动查找模块 |
+| `cmake/toolchain-aarch64-linux.cmake` | ARM64 交叉编译工具链 |
+| `Cross.toml` | cross-rs 容器化编译配置 |
+| `docker/Dockerfile.build` | ARM64 Docker 编译环境 |
+| `build.md` | 完整构建指南（三种方式） |
 
 **配置结构：**
 
