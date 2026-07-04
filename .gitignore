@@ -36,3 +36,13 @@ __pycache__/
 
 # MSSA optimizer cache (auto-generated)
 tools/mssa_optimizer/mssa_cache.json
+
+# External dependencies (installed via scripts/setup-deps.sh)
+external/
+rknn-toolkit2-*/
+vendor/rknn/librknnrt.so
+vendor/rknn/librknnrt.so.sha256
+
+# Build system artifacts
+build/
+build-*/

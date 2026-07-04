@@ -2,6 +2,52 @@
 
 目标平台：RK3588 ARM64, Ubuntu 20.04+
 
+## 快速开始
+
+```bash
+# 1. 克隆代码
+git clone git@github.com:leon1205/MUPC.git
+cd MUPC/mupc
+
+# 2. 一键安装外部依赖
+./scripts/setup-deps.sh --all
+
+# 3. 本机构建 (x86_64 开发)
+cargo build -p mupc-core-bin --release
+
+# 4. ARM64 交叉编译 (需要 RK3588 部署时)
+export OPENSSL_DIR=../external/openssl-4.0.1/aarch64-install
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+cargo build --workspace --release --target aarch64-unknown-linux-gnu \
+    --exclude mupc-iec61850-plugin --exclude device-trait
+```
+
+> **外部依赖说明**：`rknn-toolkit2-2.3.2` 和 `external/openssl-4.0.1` 不在 git 仓库中。
+> 运行 `./scripts/setup-deps.sh` 自动处理。详见下方各章节。
+
+## 外部依赖
+
+### 依赖矩阵
+
+| 依赖 | x86_64 开发 | ARM64 交叉编译 | ARM64 + NPU |
+|------|:--:|:--:|:--:|
+| libssl-dev (系统包) | 需要 | - | - |
+| gcc-aarch64-linux-gnu | - | 需要 | 需要 |
+| external/openssl-4.0.1 (ARM64) | - | 需要 | 需要 |
+| rknn-toolkit2-2.3.2 | - | - | 需要 |
+
+> `scripts/setup-deps.sh` 自动检测并安装上述依赖。
+
+### rknn-toolkit2-2.3.2（需手动下载）
+
+RKNN SDK 是 Rockchip 专有软件，无法自动下载。获取方式：
+
+1. [Rockchip RKNPU2 SDK](https://console.zbox.filez.com/l/I00fc3)（提取码: rknn）
+2. 或联系 Rockchip FAE 获取
+3. 解压到项目父目录：`unzip rknn-toolkit2-2.3.2.zip -d /work/MUPC/`
+
+> 无 RKNN SDK 时，npu feature 自动使用 stub 实现，x86_64 和 ARM64（无 NPU）开发不受影响。
+
 ## 前置条件
 
 ### 交叉编译工具链
