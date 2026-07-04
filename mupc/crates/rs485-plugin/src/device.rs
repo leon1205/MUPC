@@ -127,7 +127,7 @@ impl Rs485Device {
     fn configure_port(&self, fd: RawFd) -> Result<(), Rs485Error> {
         // 获取终端属性
         let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
-        let termios = unsafe {
+        let mut termios = unsafe {
             if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
                 return Err(Rs485Error::config_failed("获取终端属性失败"));
             }
@@ -181,7 +181,7 @@ impl Rs485Device {
         termios.c_cflag |= libc::CLOCAL | libc::CREAD;
 
         // 设置超时
-        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as i32;
+        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as u8;
         termios.c_cc[libc::VMIN] = 0;
 
         // 应用设置
@@ -198,7 +198,7 @@ impl Rs485Device {
     /// 关闭串口
     pub fn close(&self) {
         let mut port_guard = self.port_fd.lock();
-        if let Some(_fd) = port_guard.take() {
+        if let Some(fd) = port_guard.take() {
             #[cfg(unix)]
             {
                 if unsafe { libc::close(fd) } < 0 {
@@ -263,7 +263,7 @@ impl Rs485Device {
         {
             // 设置串口超时使用 termios
             let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
-            let termios = unsafe {
+            let mut termios = unsafe {
                 if libc::tcgetattr(_fd, termios.as_mut_ptr()) < 0 {
                     return Err(Rs485Error::recv_failed("获取终端属性失败"));
                 }
@@ -271,7 +271,7 @@ impl Rs485Device {
             };
 
             // 设置读取超时：VTIME 为十分之一秒
-            termios.c_cc[libc::VTIME] = (_timeout_ms / 100) as i32;
+            termios.c_cc[libc::VTIME] = (_timeout_ms / 100) as u8;
             termios.c_cc[libc::VMIN] = 0;
 
             if unsafe { libc::tcsetattr(_fd, libc::TCSANOW, &termios) } < 0 {

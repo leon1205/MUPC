@@ -91,21 +91,19 @@ jobs:
       - name: Setup RKNN SDK
         run: |
           mkdir -p vendor/rknn
-          if [ ! -f vendor/rknn/librknnrt.so ]; then
-            echo "WARNING: librknnrt.so not found. Building without npu feature."
-            echo "BUILD_NO_NPU=1" >> $GITHUB_ENV
+          # 默认无 NPU
+          echo "BUILD_NO_NPU=1" >> $GITHUB_ENV
+          # 优先使用 GitHub Secrets 中的 base64 编码 .so
+          if [ -n "$RKNN_SO_B64" ]; then
+            echo "$RKNN_SO_B64" | base64 -d > vendor/rknn/librknnrt.so
+            echo "BUILD_NO_NPU=0" >> $GITHUB_ENV
+          elif [ -f vendor/rknn/librknnrt.so ]; then
+            echo "BUILD_NO_NPU=0" >> $GITHUB_ENV
           else
-            echo "BUILD_NO_NPU=0" >> $GITHUB_ENV
+            echo "WARNING: librknnrt.so not found. Building without npu feature."
           fi
-
-      - name: Decode RKNN SDK from Secrets
         env:
-          RKNN_B64: ${{ secrets.RKNN_SO_B64 }}
-        run: |
-          if [ -n "$RKNN_B64" ]; then
-            echo "$RKNN_B64" | base64 -d > vendor/rknn/librknnrt.so
-            echo "BUILD_NO_NPU=0" >> $GITHUB_ENV
-          fi
+          RKNN_SO_B64: ${{ secrets.RKNN_SO_B64 }}
 
       - name: Cache cross cargo
         uses: actions/cache@v4

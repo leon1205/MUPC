@@ -1,17 +1,21 @@
-# Dockerfile.build — MUPC ARM64 交叉编译构建环境 (骨架)
+# Dockerfile.build — MUPC ARM64 交叉编译构建环境
 #
-# 用于离线/自托管构建场景，当 cross 工具不可用时作为备用方案。
-# Phase 2+ 完善（添加 RKNN SDK 安装、sccache 集成）。
+# 用法:
+#   docker build -t mupc-build -f docker/Dockerfile.build .
+#   docker run --rm -v $(pwd):/workspace/MUPC mupc-build \
+#     cargo build -p mupc-core-bin --release --target aarch64-unknown-linux-gnu --features npu
+#
+# 目标: RK3588 ARM64, Ubuntu 20.04+ (glibc 2.31+)
 
 FROM arm64v8/ubuntu:22.04
 
-LABEL description="MUPC ARM64 Build Environment (Ubuntu 22.04)"
-LABEL version="0.1.0"
+LABEL description="MUPC ARM64 Build Environment (RK3588, Ubuntu 22.04)"
+LABEL version="0.2.0"
 
 # 防止交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 基础开发工具
+# ── 系统依赖 ──
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -20,9 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     libsqlite3-dev \
     libstdc++-12-dev \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Rust 工具链
+# ── Rust 工具链 ──
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
 ENV PATH="$CARGO_HOME/bin:$PATH"
@@ -30,19 +35,25 @@ ENV PATH="$CARGO_HOME/bin:$PATH"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain stable --profile minimal
 
-# 添加 ARM64 target
-RUN rustup target add aarch64-unknown-linux-gnu
+# ── ARM64 交叉编译 target (本机就是 arm64, 无需交叉) ──
 
-# Phase 2+: 添加 RKNN SDK
-# COPY vendor/rknn/librknnrt.so /opt/rknn/lib/
-# ENV RKNN_VENDOR_DIR=/opt/rknn/lib
+# ── RKNN SDK ──
+# 将 librknnrt.so 放在 /opt/rknn/lib/
+# 构建时通过 -v 挂载或 COPY 指令注入
+RUN mkdir -p /opt/rknn/lib /opt/rknn/include
+ENV RKNN_VENDOR_DIR=/opt/rknn/lib
+ENV RKNN_SDK_ROOT=/opt/rknn
 
 # Phase 2+: 添加 sccache
-# RUN cargo install sccache
+# RUN cargo install sccache --version 0.8.0
 # ENV RUSTC_WRAPPER=sccache
 
-WORKDIR /workspace/mupc
+VOLUME ["/workspace"]
+WORKDIR /workspace/MUPC/mupc
 
 # 入口: 编译命令
-# docker run --rm -v $(pwd):/workspace/mupc mupc-build:latest \
-#   cargo build -p mupc-core-bin --release --target aarch64-unknown-linux-gnu --features npu
+# docker run --rm \
+#   -v $(pwd):/workspace/MUPC \
+#   -v /path/to/rknn-toolkit2-2.3.2/rknpu2/runtime/Linux/librknn_api:/opt/rknn \
+#   mupc-build \
+#   cargo build -p mupc-core-bin --release --features npu
