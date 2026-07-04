@@ -24,7 +24,7 @@ pub struct rknn_output {
     pub is_preallocated: c_int,
 }
 
-#[cfg(feature = "npu")]
+#[cfg(all(feature = "npu", target_os = "linux"))]
 #[link(name = "rknnrt")]
 extern "C" {
     pub fn rknn_init(
@@ -45,8 +45,8 @@ extern "C" {
     pub fn rknn_query(ctx: u64, cmd: c_int, info: *mut c_void, size: u32) -> c_int;
 }
 
-// ── 无 NPU feature 时的 stub 实现 ──
-#[cfg(not(feature = "npu"))]
+// ── 非 Linux 或未启用 npu feature 时的 stub 实现 ──
+#[cfg(not(all(feature = "npu", target_os = "linux")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_init(
     _ctx: *mut u64,

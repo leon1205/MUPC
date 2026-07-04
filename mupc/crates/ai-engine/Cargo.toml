@@ -24,7 +24,7 @@ nalgebra = "0.33"
 tokio-test = "0.4"
 
 [features]
-default = []
+default = ["npu"]
 npu = []
 
 [build-dependencies]

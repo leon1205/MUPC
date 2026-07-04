@@ -136,16 +136,24 @@ export PKG_CONFIG_ALLOW_CROSS=1
 ### 方式 1: Cargo 直接编译
 
 ```bash
-# 本机编译 (RK3588 开发板上)
-cargo build -p mupc-core-bin --release --features npu
+# 本机编译 (RK3588 开发板上) — npu feature 默认启用
+cargo build -p mupc-core-bin --release
 
-# 交叉编译 (x86_64 → ARM64)
+# 交叉编译 (x86_64 Linux → ARM64) — npu feature 默认启用
 export RKNN_SDK_ROOT=/work/MUPC/rknn-toolkit2-2.3.2
-cargo build -p mupc-core-bin --release --features npu --target aarch64-unknown-linux-gnu
+cargo build -p mupc-core-bin --release --target aarch64-unknown-linux-gnu
+
+# Windows 开发环境 — npu feature 自动使用 stub 实现，无需 --no-default-features
+cargo build -p mupc-core-bin --release
 
 # 使用 cross-rs 容器化编译
-cross build -p mupc-core-bin --release --features npu --target aarch64-unknown-linux-gnu
+cross build -p mupc-core-bin --release --target aarch64-unknown-linux-gnu
 ```
+
+> **npu feature 默认行为**：
+> - Linux: `npu` 默认启用，`librknnrt.so` 真实链接
+> - Windows: `npu` 默认启用但自动降级为 stub 实现（`rknn_runtime_sys.rs` 中 `target_os = "linux"` 条件编译），无需手动 `--no-default-features`
+> - 显式禁用: `cargo build --no-default-features`
 
 RKNN SDK 自动检测优先级：
 1. `RKNN_VENDOR_DIR` 环境变量 — 直接指定 `librknnrt.so` 所在目录

@@ -17,9 +17,16 @@ use std::path::Path;
 
 fn main() {
     let npu_enabled = std::env::var("CARGO_FEATURE_NPU").is_ok();
+    let is_linux = std::env::var("CARGO_CFG_TARGET_OS").map(|os| os == "linux").unwrap_or(false);
 
     if !npu_enabled {
         println!("cargo:warning=AI Engine: npu feature 未启用，跳过 RKNN FFI 链接");
+        return;
+    }
+
+    if !is_linux {
+        println!("cargo:warning=AI Engine: 非 Linux 平台 ({}), npu feature 使用 stub 实现",
+            std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default());
         return;
     }
 
