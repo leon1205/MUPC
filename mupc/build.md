@@ -51,7 +51,85 @@ cargo install cross
 
 ### RKNN SDK
 
-SDK 默认路径：`<项目父目录>/rknn-toolkit2-2.3.2/`，或通过环境变量指定。
+**RKNN Toolkit 2 (v2.3.2)** 是 Rockchip 提供的 NPU 模型部署工具链，位于项目父目录 `../rknn-toolkit2-2.3.2/`。
+
+SDK 目录结构：
+
+```
+rknn-toolkit2-2.3.2/
+├── doc/                    # 文档（快速入门、用户指南、API 参考）
+├── rknn-toolkit2/          # Python 模型转换工具（PC 端使用）
+├── rknn-toolkit-lite2/     # Python 推理接口（目标板使用）
+├── rknpu2/
+│   ├── runtime/
+│   │   └── Linux/librknn_api/
+│   │       ├── include/    # C API 头文件（rknn_api.h）
+│   │       ├── aarch64/    # ARM64 librknnrt.so（目标平台）
+│   │       └── armhf/      # ARM 32-bit librknnrt.so
+│   └── examples/           # C/C++ 示例（含 CMake 交叉编译脚本）
+└── README.md
+```
+
+本项目的使用方式：
+
+| 用途 | 路径 |
+|------|------|
+| FFI 头文件引用 | `rknpu2/runtime/Linux/librknn_api/include/rknn_api.h` |
+| 目标平台运行时库 | `rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so` |
+| 交叉编译链接 | `build.rs` 自动搜索 `RKNN_SDK_ROOT` 并复制 `.so` 到 `vendor/rknn/` |
+| 部署 | 随 `mupcd` 一同复制到 `/opt/mupc/lib/librknnrt.so` |
+
+环境变量：
+
+```bash
+# 指定 SDK 根目录
+export RKNN_SDK_ROOT=/work/MUPC/rknn-toolkit2-2.3.2
+
+# 或直接指定 .so 所在目录
+export RKNN_VENDOR_DIR=/work/MUPC/rknn-toolkit2-2.3.2/rknpu2/runtime/Linux/librknn_api/aarch64
+```
+
+### OpenSSL 4.0.1
+
+`mupc-core-bin` 依赖 `openssl-sys` crate，交叉编译时需要目标平台的 OpenSSL 库。
+
+本项目使用本地源码 `../external/openssl-4.0.1/` 进行交叉编译，无需系统安装：
+
+```bash
+# 进入 OpenSSL 源码目录
+cd /work/MUPC/external/openssl-4.0.1
+
+# 配置 ARM64 交叉编译
+./Configure linux-aarch64 \
+    --cross-compile-prefix=aarch64-linux-gnu- \
+    --prefix=/work/MUPC/external/openssl-4.0.1/aarch64-install \
+    no-shared
+
+# 编译并安装到本地目录
+make -j$(nproc)
+make install_sw
+```
+
+编译后库文件位置：
+
+```
+external/openssl-4.0.1/aarch64-install/
+├── include/openssl/   # 头文件
+├── lib/
+│   ├── libssl.a       # SSL 静态库
+│   ├── libcrypto.a    # 加密静态库
+│   └── pkgconfig/     # pkg-config 文件
+└── bin/openssl        # ARM64 openssl 工具（可选）
+```
+
+构建 `mupc-core-bin` 时通过环境变量引用：
+
+```bash
+export OPENSSL_DIR=/work/MUPC/external/openssl-4.0.1/aarch64-install
+export PKG_CONFIG_ALLOW_CROSS=1
+```
+
+> **注意**：由于 `librknnrt.so` 仅在 ARM64 目标平台存在，无 NPU feature 时 `rknn_runtime_sys.rs` 自动使用 stub 实现（所有 FFI 函数返回 -1），`build.rs` 跳过链接，无需提供 `librknnrt.so`。
 
 ## 构建方式
 
