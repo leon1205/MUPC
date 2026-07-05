@@ -30,6 +30,7 @@ mupc_system_monitor = { path = "../system-monitor" }
 mupc_mqtt_bridge = { path = "../mqtt-bridge" }
 mupc_wireless = { path = "../wireless" }
 plugin-loader = { path = "../plugin-loader" }
+device-trait = { path = "../device-trait" }
 
 tokio.workspace = true
 async-trait.workspace = true

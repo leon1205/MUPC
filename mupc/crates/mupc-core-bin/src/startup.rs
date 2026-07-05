@@ -7,6 +7,7 @@
 //! Phase 2+ 实现: 11 OTA 管理器已完成初始化。
 //! 剩余 6 个 TODO 见代码注释。
 
+use device_trait::plugin_loader::PluginLoader;
 use mupc_common::{ErrorCode, MupcError};
 use mupc_core::service_coord::ServiceStatus;
 use mupc_core::service_coord_impl::ServiceCoordinatorImpl;
@@ -110,9 +111,14 @@ pub async fn initialize_all(
         for path in &config.plugins.search_paths {
             loader.add_search_path(path.to_string_lossy().to_string());
         }
-        // 自动加载列表已配置，实际 load() 在首次使用时延迟执行
+        // 自动加载配置的插件（libloading FFI 加载 .so）
         for plugin_name in &config.plugins.auto_load {
-            tracing::info!("插件已注册 (延迟加载): {}", plugin_name);
+            let so_name = format!("lib{}.so", plugin_name);
+            tracing::info!("加载插件: {}", so_name);
+            match loader.load(&so_name, serde_json::json!({})) {
+                Ok(()) => tracing::info!("  {} 加载成功", plugin_name),
+                Err(e) => tracing::warn!("  {} 加载失败 (预期内，如 .so 未编译): {}", plugin_name, e),
+            }
         }
         tracing::info!(
             "插件目录已配置: {} 个搜索路径, {} 个自动加载插件",
@@ -302,7 +308,7 @@ pub async fn initialize_all(
     // TODO (Phase 2+): 实例化 NoOp 无线驱动
     coord.register_service("wireless", ServiceStatus::Running);
 
-    tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 3);
+    tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 2);
 
     Ok(StartupContext {
         message_bus,
