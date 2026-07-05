@@ -166,11 +166,70 @@ pub async fn initialize_all(
     coord.register_service("gateway", ServiceStatus::Running);
 
     // ── 10. Web API ──
+    // AppState 所需依赖在步骤 07/08/11 中已初始化
     tracing::info!("[10/14] 初始化 Web API...");
-    // TODO (Phase 2+): 启动 Axum HTTP server
-    //   AppState 构造已就绪（所有依赖可用），阻塞项：
-    //   axum 0.7 Router<Arc<AppState>> → tower_service::Service trait bound
-    //   需 workspace 级别 tower/hyper 版本协调，参考 web-api crate 编译配置
+    let ota_manager: Arc<dyn mupc_ota_update::OtaManager> =
+        Arc::new(mupc_ota_update::manager::OtaManagerImpl::new(
+            mupc_ota_update::OtaConfig::default(),
+            config.system.data_dir.join("ota"),
+        )
+        .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("OTA 管理器初始化失败: {}", e), "startup"))?);
+
+    let web_config: mupc_web_api::routes::config::AppConfig =
+        serde_json::from_str("{}").unwrap_or_default();
+    let web_config = Arc::new(tokio::sync::RwLock::new(web_config));
+    let session_manager = mupc_web_api::SessionManager::new("admin".to_string());
+    let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
+    let audit_logger = Arc::new(
+        mupc_web_api::AuditLogger::new(
+            config.system.log_dir.join("audit").to_str().unwrap_or("/opt/mupc/logs/audit"),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("审计日志初始化失败，使用内存模式: {}", e);
+            mupc_web_api::AuditLogger::new("/tmp/mupc-audit").expect("内存审计日志创建失败")
+        }),
+    );
+    let online_updater = Arc::new(tokio::sync::Mutex::new(
+        mupc_ai_engine::OnlineUpdater::new(mupc_ai_engine::OnlineUpdateConfig::default()),
+    ));
+    let ab_test_manager = Arc::new(mupc_web_api::routes::ai::ab_test_manager::AbTestManager::new());
+    let mode_selector = ai_engine.mode_selector_arc();
+
+    let app_state = Arc::new(mupc_web_api::AppState {
+        config: web_config,
+        ai_integrator: ai_integrator.clone(),
+        mode_selector,
+        sse_push,
+        audit_logger,
+        session_manager,
+        storage: storage.clone(),
+        ota_manager: ota_manager.clone(),
+        online_updater,
+        ab_test_manager,
+    });
+
+    // 组装 Router 并启动 HTTP 服务
+    let app_router = axum::Router::new()
+        .merge(mupc_web_api::routes::mode::create_router())
+        .merge(mupc_web_api::routes::ai::ai_routes())
+        .with_state(app_state.clone());
+
+    let listen_addr = config.web_api.listen_addr.clone();
+    let _web_handle = tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+            Ok(l) => {
+                tracing::info!("Web API 已启动: http://{}", listen_addr);
+                l
+            }
+            Err(e) => {
+                tracing::error!("Web API 绑定 {} 失败: {}", listen_addr, e);
+                return;
+            }
+        };
+        axum::serve(listener, app_router)
+            .await
+            .unwrap_or_else(|e| tracing::error!("Web API 服务器异常退出: {}", e));
+    });
     tracing::info!(
         "Web API 配置: listen={}, https={}",
         config.web_api.listen_addr,
@@ -178,14 +237,8 @@ pub async fn initialize_all(
     );
     coord.register_service("web_api", ServiceStatus::Running);
 
-    // ── 11. OTA 管理器 ──
+    // ── 11. OTA 管理器 (实例已在步骤 10 中创建) ──
     tracing::info!("[11/14] 初始化 OTA 管理器...");
-    let ota_manager: Arc<dyn mupc_ota_update::OtaManager> =
-        Arc::new(mupc_ota_update::manager::OtaManagerImpl::new(
-            mupc_ota_update::OtaConfig::default(),
-            config.system.data_dir.join("ota"),
-        )
-        .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("OTA 管理器初始化失败: {}", e), "startup"))?);
     coord.register_service("ota_update", ServiceStatus::Running);
 
     // ── 12. 系统资源监控 ──
