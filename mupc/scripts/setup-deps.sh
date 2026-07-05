@@ -182,7 +182,48 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 5. 总结
+# 5. liblzma 交叉编译
+# ═══════════════════════════════════════════════════════════════
+
+echo ""
+echo "liblzma ARM64 (OTA 压缩依赖):"
+
+LIBLZMA_DIR="$WORKSPACE_DIR/external/liblzma-master"
+LIBLZMA_INSTALL="$LIBLZMA_DIR/aarch64-install"
+
+if [ -f "$LIBLZMA_INSTALL/lib/liblzma.so" ] || [ -f "$LIBLZMA_INSTALL/lib/liblzma.a" ]; then
+    echo "  ${check_mark} 已编译: $LIBLZMA_INSTALL"
+else
+    echo "  ${cross_mark} 未编译 liblzma ARM64"
+
+    if [ -f "$LIBLZMA_DIR/configure" ]; then
+        if [ "$MODE" = "--all" ]; then
+            if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
+                echo "  ${cross_mark} 需要交叉编译器"
+            else
+                echo "  正在交叉编译 liblzma for aarch64..."
+                cd "$LIBLZMA_DIR"
+                ./configure --host=aarch64-linux-gnu \
+                    --prefix="$LIBLZMA_INSTALL" \
+                    --disable-xz --disable-xzdec --disable-lzmadec \
+                    --disable-lzmainfo --disable-scripts 2>&1 | tail -1
+                make -j$(nproc) 2>&1 | tail -1
+                make install 2>&1 | tail -1
+                echo "  ${check_mark} liblzma ARM64 编译完成: $LIBLZMA_INSTALL"
+            fi
+        else
+            echo "  运行 '$0 --all' 自动编译，或手动执行:"
+            echo "    cd $LIBLZMA_DIR"
+            echo "    ./configure --host=aarch64-linux-gnu --prefix=$LIBLZMA_INSTALL"
+            echo "    make -j\$(nproc) && make install"
+        fi
+    else
+        echo "  ${cross_mark} liblzma 源码不存在: $LIBLZMA_DIR"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# 6. 总结
 # ═══════════════════════════════════════════════════════════════
 
 echo ""

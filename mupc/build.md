@@ -168,12 +168,31 @@ external/openssl-4.0.1/aarch64-install/
 └── bin/openssl        # ARM64 openssl 工具（可选）
 ```
 
+### liblzma (XZ Utils)
+
+OTA 模块使用的压缩库，源码位于 `../external/liblzma-master/`。
+
+```bash
+cd ../external/liblzma-master
+
+# 配置 ARM64 交叉编译
+./configure --host=aarch64-linux-gnu \
+    --prefix=$(pwd)/aarch64-install \
+    --disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-scripts
+
+# 编译并安装
+make -j$(nproc)
+make install
+```
+
+编译后库文件位置：`external/liblzma-master/aarch64-install/lib/{liblzma.a, liblzma.so}`
+
 构建 `mupc-core-bin` 时通过环境变量引用：
 
 ```bash
 export OPENSSL_DIR=/work/MUPC/external/openssl-4.0.1/aarch64-install
 export PKG_CONFIG_ALLOW_CROSS=1
-```
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-L /work/MUPC/external/liblzma-master/aarch64-install/lib"
 
 > **注意**：由于 `librknnrt.so` 仅在 ARM64 目标平台存在，无 NPU feature 时 `rknn_runtime_sys.rs` 自动使用 stub 实现（所有 FFI 函数返回 -1），`build.rs` 跳过链接，无需提供 `librknnrt.so`。
 
