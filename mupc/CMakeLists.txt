@@ -82,7 +82,8 @@ if(CARGO_FEATURES)
     string(JOIN "," CARGO_FEATURES_STR ${CARGO_FEATURES})
     set(CARGO_FEATURE_FLAG "--features=${CARGO_FEATURES_STR}")
 else()
-    set(CARGO_FEATURE_FLAG "")
+    # 无 NPU 时需显式禁用 default features (Cargo.toml 中 default = ["npu"])
+    set(CARGO_FEATURE_FLAG "--no-default-features")
 endif()
 
 # 目标平台

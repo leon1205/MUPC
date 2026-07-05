@@ -76,11 +76,11 @@ ssh_run() {
 
 ssh_sudo() {
     # 要求目标板已配置 sudo NOPASSWD（部署 docs 中有说明）
-    # 若未配置，回退到 sudo -S 交互式密码输入
+    # 若未配置，使用 ssh -t 分配 PTY 交互式输入 sudo 密码
     sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" \
         "sudo -n $*" 2>/dev/null || \
     sshpass -e ssh -t $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" \
-        "sudo -S $*" 2>/dev/null
+        "sudo $*" 2>/dev/null
 }
 
 # ── SCP 函数 ──

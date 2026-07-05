@@ -233,8 +233,8 @@ impl Rs485Device {
 
         #[cfg(unix)]
         {
-            // 清空输出缓冲区，防止残留数据破坏帧结构
-            unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+            // 清空收发缓冲区（TCIOFLUSH），防止残留数据破坏帧结构
+            unsafe { libc::tcflush(fd, libc::TCIOFLUSH) };
 
             let mut written = 0usize;
             while written < frame.len() {
