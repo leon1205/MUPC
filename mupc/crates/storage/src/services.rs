@@ -397,12 +397,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )",
-        // v2.6 扩展字段（ALTER TABLE 兼容已有数据库）
-        "ALTER TABLE action_space_config ADD COLUMN transformer_kva REAL NOT NULL DEFAULT 0.0",
-        "ALTER TABLE action_space_config ADD COLUMN battery_capacity_kwh REAL NOT NULL DEFAULT 0.0",
-        "ALTER TABLE action_space_config ADD COLUMN soc_min REAL NOT NULL DEFAULT 0.0",
-        "ALTER TABLE action_space_config ADD COLUMN soc_max REAL NOT NULL DEFAULT 1.0",
-        "ALTER TABLE action_space_config ADD COLUMN overload_threshold REAL NOT NULL DEFAULT 1.2",
     ];
 
     for stmt in &statements {
@@ -411,5 +405,31 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
             .await
             .map_err(|e| StorageError::MigrationError(e.to_string()))?;
     }
+
+    // v2.6 扩展字段（幂等: 先检查列是否存在再 ALTER TABLE）
+    let existing_cols: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info('action_space_config')",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| StorageError::MigrationError(e.to_string()))?;
+
+    let alter_stmts = [
+        ("transformer_kva",     "ALTER TABLE action_space_config ADD COLUMN transformer_kva REAL NOT NULL DEFAULT 0.0"),
+        ("battery_capacity_kwh", "ALTER TABLE action_space_config ADD COLUMN battery_capacity_kwh REAL NOT NULL DEFAULT 0.0"),
+        ("soc_min",             "ALTER TABLE action_space_config ADD COLUMN soc_min REAL NOT NULL DEFAULT 0.0"),
+        ("soc_max",             "ALTER TABLE action_space_config ADD COLUMN soc_max REAL NOT NULL DEFAULT 1.0"),
+        ("overload_threshold",  "ALTER TABLE action_space_config ADD COLUMN overload_threshold REAL NOT NULL DEFAULT 1.2"),
+    ];
+
+    for (col_name, stmt) in &alter_stmts {
+        if !existing_cols.iter().any(|c| c == col_name) {
+            sqlx::query(*stmt)
+                .execute(pool)
+                .await
+                .map_err(|e| StorageError::MigrationError(e.to_string()))?;
+        }
+    }
+
     Ok(())
 }
