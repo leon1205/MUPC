@@ -98,7 +98,7 @@ pub async fn initialize_all(
 
     // ── 6. 遥测数据采集 ──
     tracing::info!("[06/14] 初始化遥测数据采集...");
-    // TODO (Phase 2): 初始化 mupc_data_processing::DataProcessing
+    // TODO (Phase 2): 初始化 DataCollector + FaultRecorder + HighFreqTelemetry
     // 当前: 占位
     coord.register_service("data_processing", ServiceStatus::Running);
 
@@ -106,25 +106,29 @@ pub async fn initialize_all(
     tracing::info!("[07/14] 初始化 AI 引擎...");
     let ai_config = mupc_ai_engine::AiEngineConfig::default();
     let ai_engine = mupc_ai_engine::ModelManager::new(ai_config);
-    // TODO (Phase 3C): 调用 ai_engine.load_models().await?
-    // 当前: 模型加载通过 mode_selector + model_registry 延迟加载
+    // 加载 AI 模型 (LSTM + RL 场景模型)
+    // 模型文件缺失时降级运行（预测返回 0 向量，RL 决策返回错误）
+    if let Err(e) = ai_engine.load_models().await {
+        tracing::warn!("AI 模型加载失败，降级运行: {}", e);
+    }
     let ai_engine = Arc::new(ai_engine);
     coord.register_service("ai_engine", ServiceStatus::Running);
 
     // ── 8. 策略引擎 ──
     tracing::info!("[08/14] 初始化策略引擎...");
-    // TODO (Phase 2): 初始化 mupc_strategy_engine::StrategyEngine
+    // TODO (Phase 2): 初始化 AiIntegrator + 策略模块 (peak_shaving/demand_control/anti_reverse)
     // 依赖: ai_engine + intercore + data_processing
     coord.register_service("strategy_engine", ServiceStatus::Running);
 
     // ── 9. IEC 104 网关 ──
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
-    // TODO (Phase 2): 初始化 mupc_gateway::Gateway
+    // TODO (Phase 2): 初始化 Iec104Server + 启动监听
     coord.register_service("gateway", ServiceStatus::Running);
 
     // ── 10. Web API ──
     tracing::info!("[10/14] 初始化 Web API...");
-    // TODO (Phase 2+): 初始化 Axum HTTP server, 绑定 listen_addr
+    // TODO (Phase 2+): 启动 Axum HTTP server (Router 已实现)
+    //   axum::serve(TcpListener::bind(config.web_api.listen_addr), app_router).await
     tracing::info!(
         "Web API 配置: listen={}, https={}",
         config.web_api.listen_addr,
@@ -134,7 +138,7 @@ pub async fn initialize_all(
 
     // ── 11. OTA 管理器 ──
     tracing::info!("[11/14] 初始化 OTA 管理器...");
-    // TODO (Phase 2+): 初始化 mupc_ota_update::OtaManager
+    // TODO (Phase 2+): 初始化 OtaManagerImpl (trait + 实现已就绪，待实例化注入)
     coord.register_service("ota_update", ServiceStatus::Running);
 
     // ── 12. 系统资源监控 ──
@@ -152,7 +156,7 @@ pub async fn initialize_all(
     // TODO (Phase 2+): 初始化 mupc_wireless::WirelessManager
     coord.register_service("wireless", ServiceStatus::Running);
 
-    tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 9);
+    tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 10);
 
     Ok(StartupContext {
         message_bus,
