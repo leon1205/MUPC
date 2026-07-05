@@ -57,27 +57,27 @@ pub unsafe fn rknn_init(
     -1 // 未启用 NPU
 }
 
-#[cfg(not(feature = "npu"))]
+#[cfg(not(all(feature = "npu", target_os = "linux")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_inputs_set(
     _ctx: u64, _n: u32, _inputs: *mut rknn_input,
 ) -> c_int { -1 }
 
-#[cfg(not(feature = "npu"))]
+#[cfg(not(all(feature = "npu", target_os = "linux")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_run(_ctx: u64, _reserved: *mut u64) -> c_int { -1 }
 
-#[cfg(not(feature = "npu"))]
+#[cfg(not(all(feature = "npu", target_os = "linux")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_outputs_get(
     _ctx: u64, _n: u32, _outputs: *mut rknn_output,
 ) -> c_int { -1 }
 
-#[cfg(not(feature = "npu"))]
+#[cfg(not(all(feature = "npu", target_os = "linux")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_destroy(_ctx: u64) -> c_int { -1 }
 
-#[cfg(not(feature = "npu"))]
+#[cfg(not(all(feature = "npu", target_os = "linux")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_query(
     _ctx: u64, _cmd: c_int, _info: *mut c_void, _size: u32,

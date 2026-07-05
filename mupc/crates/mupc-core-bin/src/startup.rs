@@ -29,6 +29,8 @@ pub struct StartupContext {
     pub ai_engine: Arc<mupc_ai_engine::ModelManager>,
     pub ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
     pub ota_manager: Arc<dyn mupc_ota_update::OtaManager>,
+    /// 后台任务句柄（Phase 6 优雅退出时 abort）
+    pub background_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// IEC 104 命令处理器（stub 实现，Phase 2+ 接入策略引擎）
@@ -65,6 +67,8 @@ pub async fn initialize_all(
     config: &CoreConfig,
     coord: &ServiceCoordinatorImpl,
 ) -> Result<StartupContext, MupcError> {
+    let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     // ── 1. 消息总线 (无依赖) ──
     tracing::info!("[01/14] 初始化消息总线...");
     let message_bus = Arc::new(mupc_core::TokioMessageBus::new(256));
@@ -131,12 +135,9 @@ pub async fn initialize_all(
 
     // ── 6. 遥测数据采集 ──
     tracing::info!("[06/14] 初始化遥测数据采集...");
-    let _data_collector = Arc::new(mupc_data_processing::DataCollectorImpl::new());
-    let _fault_recorder = Arc::new(
-        mupc_data_processing::FaultRecorderImpl::new(&db_path)
-            .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("故障录波器初始化失败: {}", e), "startup"))?,
-    );
-    let _high_freq_telemetry = Arc::new(mupc_data_processing::HighFreqTelemetryImpl::new(1000));
+    // DataCollectorImpl / HighFreqTelemetryImpl 为纯数据容器，延迟创建
+    let _fault_recorder = mupc_data_processing::FaultRecorderImpl::new(&db_path)
+        .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("故障录波器初始化失败: {}", e), "startup"))?;
     coord.register_service("data_processing", ServiceStatus::Running);
 
     // ── 7. AI 引擎 ──
@@ -168,11 +169,11 @@ pub async fn initialize_all(
     let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
     let cmd_handler = Arc::new(StubCommandHandler);
     let server_clone = iec104_server.clone();
-    tokio::spawn(async move {
+    bg_tasks.push(tokio::spawn(async move {
         if let Err(e) = server_clone.start(cmd_handler).await {
             tracing::error!("IEC 104 服务器异常退出: {}", e);
         }
-    });
+    }));
     coord.register_service("gateway", ServiceStatus::Running);
 
     // ── 10. Web API ──
@@ -185,9 +186,13 @@ pub async fn initialize_all(
         )
         .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("OTA 管理器初始化失败: {}", e), "startup"))?);
 
-    let web_config: mupc_web_api::routes::config::AppConfig =
-        serde_json::from_str("{}").unwrap_or_default();
-    let web_config = Arc::new(tokio::sync::RwLock::new(web_config));
+    let web_config = Arc::new(tokio::sync::RwLock::new(
+        mupc_web_api::routes::config::AppConfig {
+            gateway: Default::default(),
+            intercore: Default::default(),
+            system: Default::default(),
+        },
+    ));
     let session_manager = mupc_web_api::SessionManager::new("admin".to_string());
     let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
     let audit_logger = Arc::new(
@@ -195,8 +200,9 @@ pub async fn initialize_all(
             config.system.log_dir.join("audit").to_str().unwrap_or("/opt/mupc/logs/audit"),
         )
         .unwrap_or_else(|e| {
-            tracing::warn!("审计日志初始化失败，使用内存模式: {}", e);
-            mupc_web_api::AuditLogger::new("/tmp/mupc-audit").expect("内存审计日志创建失败")
+            tracing::warn!("审计日志初始化失败，降级使用 /tmp: {}", e);
+            mupc_web_api::AuditLogger::new("/tmp/mupc-audit")
+                .expect("审计日志初始化致命失败 — 磁盘满或 /tmp 不可写")
         }),
     );
     let online_updater = Arc::new(tokio::sync::Mutex::new(
@@ -225,7 +231,7 @@ pub async fn initialize_all(
         .with_state(app_state.clone());
 
     let listen_addr = config.web_api.listen_addr.clone();
-    let _web_handle = tokio::spawn(async move {
+    bg_tasks.push(tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
             Ok(l) => {
                 tracing::info!("Web API 已启动: http://{}", listen_addr);
@@ -239,7 +245,7 @@ pub async fn initialize_all(
         axum::serve(listener, app_router)
             .await
             .unwrap_or_else(|e| tracing::error!("Web API 服务器异常退出: {}", e));
-    });
+    }));
     tracing::info!(
         "Web API 配置: listen={}, https={}",
         config.web_api.listen_addr,
@@ -265,7 +271,7 @@ pub async fn initialize_all(
     let collector = Arc::new(metrics_collector);
     let _healing_engine = Arc::new(mupc_system_monitor::SelfHealingEngine::new(3, 30));
     let metrics_bg = metrics_store.clone();
-    tokio::spawn(async move {
+    bg_tasks.push(tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
             match collector.collect().await {
@@ -284,7 +290,7 @@ pub async fn initialize_all(
                 Err(e) => tracing::warn!("系统指标采集失败: {}", e),
             }
         }
-    });
+    }));
     coord.register_service("system_monitor", ServiceStatus::Running);
 
     // ── 13. MQTT 桥接 ──
@@ -293,13 +299,13 @@ pub async fn initialize_all(
         &mupc_mqtt_bridge::LocalMqttConfig::default(),
     )
     .map(Arc::new)
-    .map_err(|e| tracing::warn!("本地 MQTT 客户端初始化失败: {}", e))
+    .inspect_err(|e| tracing::warn!("本地 MQTT 客户端初始化失败: {}", e))
     .ok();
     let _north_mqtt = mupc_mqtt_bridge::NorthMqttClient::new(
         &mupc_mqtt_bridge::NorthMqttConfig::default(),
     )
     .map(Arc::new)
-    .map_err(|e| tracing::warn!("北向 MQTT 客户端初始化失败: {}", e))
+    .inspect_err(|e| tracing::warn!("北向 MQTT 客户端初始化失败: {}", e))
     .ok();
     coord.register_service("mqtt_bridge", ServiceStatus::Running);
 
@@ -318,5 +324,6 @@ pub async fn initialize_all(
         ai_engine,
         ai_integrator,
         ota_manager,
+        background_tasks: bg_tasks,
     })
 }
