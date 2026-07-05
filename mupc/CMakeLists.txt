@@ -116,11 +116,17 @@ else()
     set(RKNN_COPY_TARGET "")
 endif()
 
-# Cargo build
+# Cargo build — 显式传播环境变量到构建阶段
+set(RKNN_VENDOR_ENV "")
+if(ENABLE_NPU AND RKNN_FOUND AND RKNN_LIBRARY_DIR)
+    set(RKNN_VENDOR_ENV "RKNN_VENDOR_DIR=$ENV{RKNN_VENDOR_DIR}")
+endif()
+
 add_custom_target(mupc_build ALL
     COMMAND ${CMAKE_COMMAND} -E env
         CARGO_TERM_COLOR=always
         RUST_BACKTRACE=1
+        ${RKNN_VENDOR_ENV}
         ${CARGO_EXECUTABLE} build ${CARGO_PROFILE}
             -p ${CARGO_BUILD_TARGET}
             ${CARGO_FEATURE_FLAG}

@@ -59,27 +59,33 @@ done
 [ -z "$TARGET_IP" ] && err "请指定目标板 IP。用法: $0 <target_ip>"
 
 # ── 密码处理 ──
+# 使用 SSHPASS 环境变量 + sshpass -e 避免命令行暴露密码
+# 生产环境建议 SSH 密钥认证 + sudoers NOPASSWD
 if [ -z "$TARGET_PASS" ]; then
     read -rsp "输入 $TARGET_USER@$TARGET_IP 的密码: " TARGET_PASS
     echo ""
 fi
+export SSHPASS="$TARGET_PASS"
+
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
 
 # ── SSH 执行函数 ──
 ssh_run() {
-    sshpass -p "$TARGET_PASS" ssh -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=5 "${TARGET_USER}@${TARGET_IP}" "$@"
+    sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "$@"
 }
 
 ssh_sudo() {
-    echo "$TARGET_PASS" | sshpass -p "$TARGET_PASS" ssh -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=5 "${TARGET_USER}@${TARGET_IP}" \
-        "echo '$TARGET_PASS' | sudo -S $*" 2>/dev/null
+    # 要求目标板已配置 sudo NOPASSWD（部署 docs 中有说明）
+    # 若未配置，回退到 sudo -S 交互式密码输入
+    sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" \
+        "sudo -n $*" 2>/dev/null || \
+    sshpass -e ssh -t $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" \
+        "sudo -S $*" 2>/dev/null
 }
 
 # ── SCP 函数 ──
 scp_file() {
-    sshpass -p "$TARGET_PASS" scp -o StrictHostKeyChecking=no \
-        -o ConnectTimeout=5 "$1" "${TARGET_USER}@${TARGET_IP}:$2"
+    sshpass -e scp $SSH_OPTS "$1" "${TARGET_USER}@${TARGET_IP}:$2"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -87,15 +93,13 @@ scp_file() {
 # ═══════════════════════════════════════════════════════════════
 
 log "检查目标板连接 $TARGET_USER@$TARGET_IP..."
-if ! sshpass -p "$TARGET_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-    "${TARGET_USER}@${TARGET_IP}" "echo ok" 2>/dev/null; then
+if ! sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "echo ok" 2>/dev/null; then
     err "无法连接到目标板，请检查 IP、用户名和密码"
 fi
 log "连接成功"
 
 # 检查目标架构
-TARGET_ARCH=$(sshpass -p "$TARGET_PASS" ssh -o StrictHostKeyChecking=no \
-    "${TARGET_USER}@${TARGET_IP}" "uname -m" 2>/dev/null)
+TARGET_ARCH=$(sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "uname -m" 2>/dev/null)
 log "目标架构: $TARGET_ARCH"
 
 # ═══════════════════════════════════════════════════════════════

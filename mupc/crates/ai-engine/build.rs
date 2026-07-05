@@ -75,7 +75,10 @@ fn main() {
     let so_path = vendor_dir.join("librknnrt.so");
     if so_path.exists() {
         let hash_file = vendor_dir.join("librknnrt.so.sha256");
+        let unverified_file = vendor_dir.join("librknnrt.so.sha256.unverified");
+
         if hash_file.exists() {
+            // 已验证文件存在 → 校验 SHA256
             let expected = std::fs::read_to_string(&hash_file)
                 .expect("Failed to read SHA256 file");
             let expected = expected
@@ -93,16 +96,31 @@ fn main() {
                 );
             }
             println!("cargo:warning=librknnrt.so SHA256 校验通过");
+        } else if unverified_file.exists() {
+            // 未验证文件存在 → 要求用户手动确认
+            panic!(
+                "librknnrt.so 未验证！请确认 SHA256 与官方 SDK 一致后:\n  \
+                 mv {} {}\n  \
+                 官方 SDK: https://github.com/airockchip/rknn-toolkit2",
+                unverified_file.display(),
+                hash_file.display()
+            );
         } else {
-            // 首次导入：自动生成 .sha256 文件（仅开发/首次构建）
+            // 首次导入 → 生成 .unverified 文件，强制用户确认
             let actual = compute_sha256(
                 &std::fs::read(&so_path).expect("Failed to read librknnrt.so"),
             );
-            std::fs::write(&hash_file, format!("{}  librknnrt.so\n", actual))
+            std::fs::write(&unverified_file, format!("{}  librknnrt.so\n", actual))
                 .expect("Failed to write SHA256 file");
-            println!("cargo:warning=librknnrt.so SHA256 首次导入，已生成校验文件 ({}): {}",
-                hash_file.display(), actual);
-            println!("cargo:warning=请确认 SHA256 与官方 SDK 一致: https://github.com/airockchip/rknn-toolkit2");
+            println!("cargo:warning=╔══════════════════════════════════════════════════════════════╗");
+            println!("cargo:warning=║  librknnrt.so 首次导入 — SHA256 校验文件已生成               ║");
+            println!("cargo:warning=║  SHA256: {} ║", actual);
+            println!("cargo:warning=║  请确认此哈希与 Rockchip 官方 SDK 一致后，重命名文件:        ║");
+            println!("cargo:warning=║    mv {} {} ║",
+                unverified_file.display(), hash_file.display());
+            println!("cargo:warning=║  官方 SDK: https://github.com/airockchip/rknn-toolkit2       ║");
+            println!("cargo:warning=╚══════════════════════════════════════════════════════════════╝");
+            panic!("librknnrt.so 未验证。请按上述提示确认 SHA256 后重命名 .unverified 文件，然后重新构建。");
         }
     } else {
         println!(

@@ -68,6 +68,16 @@ pub async fn initialize_all(
     coord: &ServiceCoordinatorImpl,
 ) -> Result<StartupContext, MupcError> {
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // 错误路径守卫: 初始化中途失败时 abort 所有已启动的后台任务
+    struct TaskGuard(Vec<tokio::task::JoinHandle<()>>);
+    impl Drop for TaskGuard {
+        fn drop(&mut self) {
+            for h in &self.0 {
+                h.abort();
+            }
+        }
+    }
+    let mut guard = TaskGuard(Vec::new());
 
     // ── 1. 消息总线 (无依赖) ──
     tracing::info!("[01/14] 初始化消息总线...");
@@ -171,7 +181,7 @@ pub async fn initialize_all(
     let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
     let cmd_handler = Arc::new(StubCommandHandler);
     let server_clone = iec104_server.clone();
-    bg_tasks.push(tokio::spawn(async move {
+    guard.0.push(tokio::spawn(async move {
         if let Err(e) = server_clone.start(cmd_handler).await {
             tracing::error!("IEC 104 服务器异常退出: {}", e);
         }
@@ -233,7 +243,7 @@ pub async fn initialize_all(
         .with_state(app_state.clone());
 
     let listen_addr = config.web_api.listen_addr.clone();
-    bg_tasks.push(tokio::spawn(async move {
+    guard.0.push(tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
             Ok(l) => {
                 tracing::info!("Web API 已启动: http://{}", listen_addr);
@@ -273,7 +283,7 @@ pub async fn initialize_all(
     let collector = Arc::new(metrics_collector);
     let _healing_engine = Arc::new(mupc_system_monitor::SelfHealingEngine::new(3, 30));
     let metrics_bg = metrics_store.clone();
-    bg_tasks.push(tokio::spawn(async move {
+    guard.0.push(tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
             match collector.collect().await {
@@ -318,6 +328,8 @@ pub async fn initialize_all(
 
     tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 2);
 
+    // 初始化成功，取出 bg_tasks（防止 Drop abort）并移交 StartupContext
+    let bg_tasks = std::mem::take(&mut guard.0);
     Ok(StartupContext {
         message_bus,
         storage,
