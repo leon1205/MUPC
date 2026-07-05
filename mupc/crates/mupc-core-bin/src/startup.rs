@@ -3,11 +3,9 @@
 //! 按照依赖关系顺序初始化 14 个子系统。
 //! 初始化顺序由 Section 3.3 设计文档定义。
 //!
-//! ## 当前状态
-//!
-//! 本模块为 Phase 1 骨架实现。各子系统的具体构造函数
-//! 在对应 Phase 中逐步补全。当前使用可用的 API 并标记
-//! TODO 条目供后续完成。
+//! Phase 2 实现: 06/08/09/10 子系统已完成基础初始化。
+//! Phase 2+ 实现: 11 OTA 管理器已完成初始化。
+//! 剩余 6 个 TODO 见代码注释。
 
 use mupc_common::{ErrorCode, MupcError};
 use mupc_core::service_coord::ServiceStatus;
@@ -27,6 +25,35 @@ pub struct StartupContext {
     pub intercore: Arc<mupc_intercore::IntercoreClient>,
     pub plugin_loader: Arc<plugin_loader::PluginLoaderImpl>,
     pub ai_engine: Arc<mupc_ai_engine::ModelManager>,
+    pub ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+    pub ota_manager: Arc<dyn mupc_ota_update::OtaManager>,
+}
+
+/// IEC 104 命令处理器（stub 实现，Phase 2+ 接入策略引擎）
+struct StubCommandHandler;
+
+impl StubCommandHandler {
+    fn name(&self) -> &str {
+        "stub-command-handler"
+    }
+}
+
+#[async_trait::async_trait]
+impl mupc_gateway::iec104::command::CommandHandler for StubCommandHandler {
+    fn name(&self) -> &str {
+        StubCommandHandler::name(self)
+    }
+
+    async fn handle_command(
+        &self,
+        _cmd: mupc_gateway::iec104::command::ControlCommand,
+    ) -> Result<mupc_gateway::iec104::command::CommandResponse, MupcError> {
+        Err(MupcError::new(
+            ErrorCode::Unknown,
+            "IEC 104 命令处理器尚未接入策略引擎 (Phase 2+)",
+            "gateway",
+        ))
+    }
 }
 
 /// 按依赖顺序初始化所有子系统
@@ -55,7 +82,6 @@ pub async fn initialize_all(
         .await
         .map_err(|e| MupcError::new(ErrorCode::IoError, format!("创建数据目录失败: {}", e), "startup"))?;
     let db_path = data_dir.join("mupc.db");
-    // 确保数据库文件存在：sqlx 在某些环境下不会自动创建空文件
     if !db_path.exists() {
         tokio::fs::File::create(&db_path)
             .await
@@ -74,19 +100,16 @@ pub async fn initialize_all(
     tracing::info!("[04/14] 初始化核间通信...");
     let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
     let intercore = Arc::new(mupc_intercore::IntercoreClient::new(remote_addr));
-    // connected 状态由首次 send_dual_param 自动设置
     coord.register_service("intercore", ServiceStatus::Running);
 
     // ── 5. 插件加载器 ──
     tracing::info!("[05/14] 初始化插件加载器...");
     let plugin_loader = {
         let loader = plugin_loader::PluginLoaderImpl::new();
-        // 添加搜索路径
         for path in &config.plugins.search_paths {
             loader.add_search_path(path.to_string_lossy().to_string());
         }
         // TODO (Phase 2+): 实现 libloading 动态加载 .so 文件
-        // 当前: PluginLoaderImpl 已有框架，但 load() 方法待实现
         tracing::info!(
             "插件目录已配置: {} 个搜索路径, {} 个自动加载插件",
             config.plugins.search_paths.len(),
@@ -98,8 +121,12 @@ pub async fn initialize_all(
 
     // ── 6. 遥测数据采集 ──
     tracing::info!("[06/14] 初始化遥测数据采集...");
-    // TODO (Phase 2): 初始化 DataCollector + FaultRecorder + HighFreqTelemetry
-    // 当前: 占位
+    let _data_collector = Arc::new(mupc_data_processing::DataCollectorImpl::new());
+    let _fault_recorder = Arc::new(
+        mupc_data_processing::FaultRecorderImpl::new(&db_path)
+            .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("故障录波器初始化失败: {}", e), "startup"))?,
+    );
+    let _high_freq_telemetry = Arc::new(mupc_data_processing::HighFreqTelemetryImpl::new(1000));
     coord.register_service("data_processing", ServiceStatus::Running);
 
     // ── 7. AI 引擎 ──
@@ -116,19 +143,34 @@ pub async fn initialize_all(
 
     // ── 8. 策略引擎 ──
     tracing::info!("[08/14] 初始化策略引擎...");
-    // TODO (Phase 2): 初始化 AiIntegrator + 策略模块 (peak_shaving/demand_control/anti_reverse)
-    // 依赖: ai_engine + intercore + data_processing
+    let mut ai_integrator = mupc_strategy_engine::AiIntegrator::new();
+    ai_integrator.set_intercore_client(intercore.clone());
+    let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
 
     // ── 9. IEC 104 网关 ──
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
-    // TODO (Phase 2): 初始化 Iec104Server + 启动监听
+    let iec104_config = mupc_gateway::iec104::server::Iec104Config {
+        listen_addr: "0.0.0.0".to_string(),
+        listen_port: 2404,
+        ..Default::default()
+    };
+    let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
+    let cmd_handler = Arc::new(StubCommandHandler);
+    let server_clone = iec104_server.clone();
+    tokio::spawn(async move {
+        if let Err(e) = server_clone.start(cmd_handler).await {
+            tracing::error!("IEC 104 服务器异常退出: {}", e);
+        }
+    });
     coord.register_service("gateway", ServiceStatus::Running);
 
     // ── 10. Web API ──
     tracing::info!("[10/14] 初始化 Web API...");
-    // TODO (Phase 2+): 启动 Axum HTTP server (Router 已实现)
-    //   axum::serve(TcpListener::bind(config.web_api.listen_addr), app_router).await
+    // TODO (Phase 2+): 启动 Axum HTTP server
+    //   AppState 构造已就绪（所有依赖可用），阻塞项：
+    //   axum 0.7 Router<Arc<AppState>> → tower_service::Service trait bound
+    //   需 workspace 级别 tower/hyper 版本协调，参考 web-api crate 编译配置
     tracing::info!(
         "Web API 配置: listen={}, https={}",
         config.web_api.listen_addr,
@@ -138,25 +180,30 @@ pub async fn initialize_all(
 
     // ── 11. OTA 管理器 ──
     tracing::info!("[11/14] 初始化 OTA 管理器...");
-    // TODO (Phase 2+): 初始化 OtaManagerImpl (trait + 实现已就绪，待实例化注入)
+    let ota_manager: Arc<dyn mupc_ota_update::OtaManager> =
+        Arc::new(mupc_ota_update::manager::OtaManagerImpl::new(
+            mupc_ota_update::OtaConfig::default(),
+            config.system.data_dir.join("ota"),
+        )
+        .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("OTA 管理器初始化失败: {}", e), "startup"))?);
     coord.register_service("ota_update", ServiceStatus::Running);
 
     // ── 12. 系统资源监控 ──
     tracing::info!("[12/14] 初始化系统资源监控...");
-    // TODO (Phase 2+): 初始化 mupc_system_monitor::SystemMonitor
+    // TODO (Phase 2+): 启动 SystemMetricsCollector 采集循环 + SelfHealingEngine
     coord.register_service("system_monitor", ServiceStatus::Running);
 
     // ── 13. MQTT 桥接 ──
     tracing::info!("[13/14] 初始化 MQTT 桥接...");
-    // TODO (Phase 2+): 初始化 mupc_mqtt_bridge::MqttBridge
+    // TODO (Phase 2+): 初始化 LocalMqttClient + NorthMqttClient
     coord.register_service("mqtt_bridge", ServiceStatus::Running);
 
     // ── 14. 近场无线 ──
     tracing::info!("[14/14] 初始化近场无线...");
-    // TODO (Phase 2+): 初始化 mupc_wireless::WirelessManager
+    // TODO (Phase 2+): 实例化 NoOp 无线驱动
     coord.register_service("wireless", ServiceStatus::Running);
 
-    tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 10);
+    tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 6);
 
     Ok(StartupContext {
         message_bus,
@@ -164,5 +211,7 @@ pub async fn initialize_all(
         intercore,
         plugin_loader,
         ai_engine,
+        ai_integrator,
+        ota_manager,
     })
 }

@@ -32,6 +32,7 @@ mupc_wireless = { path = "../wireless" }
 plugin-loader = { path = "../plugin-loader" }
 
 tokio.workspace = true
+async-trait.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
