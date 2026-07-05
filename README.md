@@ -208,6 +208,7 @@ cargo clippy        # 静态检查
 | 文档 | 说明 |
 |------|------|
 | [`mupc/build.md`](mupc/build.md) | 完整构建指南（三种方式、交叉编译、RKNN SDK） |
+| [`mupc/deploy/deploy.md`](mupc/deploy/deploy.md) | 部署指南（一键部署、配置说明、模型部署、运维、故障排查） |
 | [`CLAUDE.md`](CLAUDE.md) | AI 协作开发指南 |
 | [`docs/superpowers/specs/`](docs/superpowers/specs/) | 项目需求与模块 PRD |
 | [`docs/superpowers/plans/`](docs/superpowers/plans/) | 项目设计与模块设计 |
