@@ -264,9 +264,29 @@ cmake --build build --target clean-all # 清理
 
 ## 部署
 
+### 一键部署脚本
+
+```bash
+# 编译 + 部署 + 重启 (一键完成)
+./deploy/scripts/deploy.sh 192.168.3.118 --full
+
+# 仅部署已编译的产物
+./deploy/scripts/deploy.sh 192.168.3.118 --restart
+
+# 指定用户名和密码
+./deploy/scripts/deploy.sh 192.168.3.118 --user root --password mypwd --full
+
+# 仅部署，不重启
+./deploy/scripts/deploy.sh 192.168.3.118
+```
+
+依赖 `sshpass`：`sudo apt install sshpass`
+
+### 手动部署
+
 ```bash
 # 目标设备上创建目录
-sudo mkdir -p /opt/mupc/{bin,lib,config,models,logs,data}
+sudo mkdir -p /opt/mupc/{bin,lib,config,models,logs,data,certs}
 
 # 复制可执行文件和插件
 sudo cp target/aarch64-unknown-linux-gnu/release/mupcd /opt/mupc/bin/
@@ -278,11 +298,15 @@ sudo cp vendor/rknn/librknnrt.so /opt/mupc/lib/
 # 复制配置
 sudo cp config/*.yaml /opt/mupc/config/
 
-# 复制 systemd 服务
-sudo cp deploy/systemd/mupcd.service /etc/systemd/system/
+# 创建 mupc 用户并设置权限
+sudo useradd -r -s /bin/false -d /opt/mupc -M mupc
+sudo chown -R mupc:mupc /opt/mupc
 
-# 启动
+# 安装 systemd 服务
+sudo cp deploy/systemd/mupcd.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable mupcd
+
+# 启动
 sudo systemctl start mupcd
 ```
