@@ -66,6 +66,8 @@ set(CARGO_BUILD_TARGET "mupc-core-bin")
 
 # Cargo feature flags
 set(CARGO_FEATURES "")
+set(CARGO_FEATURES_STR "")
+set(CARGO_FEATURE_FLAG "")
 if(ENABLE_NPU AND RKNN_FOUND)
     list(APPEND CARGO_FEATURES "npu")
 endif()

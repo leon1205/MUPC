@@ -30,6 +30,10 @@ fn main() {
         return;
     }
 
+    println!("cargo:rerun-if-env-changed=RKNN_VENDOR_DIR");
+    println!("cargo:rerun-if-env-changed=RKNN_SDK_ROOT");
+    println!("cargo:rerun-if-changed=vendor/rknn/librknnrt.so");
+
     // ── 1. 确定 RKNN Library 目录 ──
     // 优先级: RKNN_VENDOR_DIR > vendor/rknn (自动复制) > RKNN_SDK_ROOT 自动推导 > 默认 vendor/rknn
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -191,7 +195,8 @@ fn find_rknn_library() -> Option<std::path::PathBuf> {
 fn copy_rknn_to_vendor(src: &Path, vendor_dir: &Path) {
     let dest = vendor_dir.join("librknnrt.so");
     if dest.exists() {
-        return; // 已存在，不覆盖
+        println!("cargo:warning=librknnrt.so 已存在于 {}，跳过复制。如需更新，请手动删除旧文件。", dest.display());
+        return;
     }
     if let Err(e) = std::fs::copy(src, &dest) {
         println!(

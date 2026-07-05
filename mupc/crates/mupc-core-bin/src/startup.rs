@@ -103,7 +103,9 @@ pub async fn initialize_all(
             .await
             .map_err(|e| MupcError::new(ErrorCode::IoError, format!("创建数据库文件失败: {}", e), "startup"))?;
     }
-    let pool = mupc_storage::init_pool(db_path.to_str().unwrap_or("mupc.db"))
+    let db_str = db_path.to_str()
+        .expect("数据目录路径包含非法 UTF-8 字符");
+    let pool = mupc_storage::init_pool(db_str)
         .await
         .map_err(|e| MupcError::new(ErrorCode::ConnectionFailed, format!("数据库连接失败: {}", e), "startup"))?;
     mupc_storage::run_migrations(&pool)
@@ -205,6 +207,7 @@ pub async fn initialize_all(
             system: Default::default(),
         },
     ));
+    // Phase 2+ TODO: 从配置读取管理员用户名，当前硬编码
     let session_manager = mupc_web_api::SessionManager::new("admin".to_string());
     let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
     let audit_logger = Arc::new(

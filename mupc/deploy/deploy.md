@@ -15,8 +15,10 @@
 # 仅部署已编译产物
 ./deploy/scripts/deploy.sh 192.168.3.118 --restart
 
-# 指定用户和密码
-./deploy/scripts/deploy.sh 192.168.3.118 --user pi --password pi --full
+# 指定用户（密码交互式输入，避免命令行暴露）
+./deploy/scripts/deploy.sh 192.168.3.118 --user pi --full
+# 非交互场景使用 SSHPASS 环境变量
+SSHPASS=xxx ./deploy/scripts/deploy.sh 192.168.3.118 --full
 ```
 
 前置条件：`sudo apt install sshpass`
