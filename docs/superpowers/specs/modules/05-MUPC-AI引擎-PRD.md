@@ -2575,6 +2575,19 @@ output_horizon（固定 15） ──→ ONNX output dim_1（无 VMD）/ dim_2（
 
 ---
 
+### 14.5 v3.1 交付变更（2026-07-05）
+
+| 变更 | 说明 |
+|------|------|
+| 7维输入升级 | `LstmConfig` 新增 `input_features`/`yesterday_offset_steps`，`HistorySample` 7 字段 |
+| 观测归一化 | `normalize_observation()` MinMax 78 维，完全镜像训练 `normalize_obs()` |
+| 动作反归一化 | `parse_action_output` 改为 2 维 tanh → 物理值反归一化 |
+| VMD 多特征降级 | `input_features > 1` 时 VMD 路径自动降级至 AttentionOnly |
+| FFI 平台条件编译 | `rknn_runtime_sys` 仅在 Linux + npu 链接真实库，其他平台 stub |
+| npu default feature | Linux 默认启用 npu，Windows 自动 stub |
+| 数据库迁移幂等 | ALTER TABLE 前 PRAGMA table_info 检查 |
+| 双边审计 P0/P1 | 消除训练-部署 7 维/1 维 Gap、观测归一化不一致、动作反归一化缺失 |
+
 **文档状态：** 统一版 v3.1（第 3 章已重构为系统统一描述，整合 v1.0~v3.0 全部历史版本）
 
 **来源文档：**
