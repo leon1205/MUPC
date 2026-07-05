@@ -55,6 +55,12 @@ pub async fn initialize_all(
         .await
         .map_err(|e| MupcError::new(ErrorCode::IoError, format!("创建数据目录失败: {}", e), "startup"))?;
     let db_path = data_dir.join("mupc.db");
+    // 确保数据库文件存在：sqlx 在某些环境下不会自动创建空文件
+    if !db_path.exists() {
+        tokio::fs::File::create(&db_path)
+            .await
+            .map_err(|e| MupcError::new(ErrorCode::IoError, format!("创建数据库文件失败: {}", e), "startup"))?;
+    }
     let pool = mupc_storage::init_pool(db_path.to_str().unwrap_or("mupc.db"))
         .await
         .map_err(|e| MupcError::new(ErrorCode::ConnectionFailed, format!("数据库连接失败: {}", e), "startup"))?;
