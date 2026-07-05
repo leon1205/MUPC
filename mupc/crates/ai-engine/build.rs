@@ -86,21 +86,23 @@ fn main() {
                 &std::fs::read(&so_path).expect("Failed to read librknnrt.so"),
             );
             if expected != actual {
-                println!(
-                    "cargo:warning=librknnrt.so SHA256 mismatch!\n  Expected: {}\n  Got:      {}",
+                panic!(
+                    "librknnrt.so SHA256 校验失败!\n  Expected: {}\n  Actual:   {}\n  \
+                     文件可能被篡改或损坏。如需更换合法版本，请同时删除 .sha256 文件后重新构建。",
                     expected, actual
                 );
-            } else {
-                println!("cargo:warning=librknnrt.so SHA256 校验通过");
             }
+            println!("cargo:warning=librknnrt.so SHA256 校验通过");
         } else {
-            // 首次导入：自动生成 .sha256 文件
+            // 首次导入：自动生成 .sha256 文件（仅开发/首次构建）
             let actual = compute_sha256(
                 &std::fs::read(&so_path).expect("Failed to read librknnrt.so"),
             );
             std::fs::write(&hash_file, format!("{}  librknnrt.so\n", actual))
                 .expect("Failed to write SHA256 file");
-            println!("cargo:warning=已自动生成 librknnrt.so.sha256 校验文件");
+            println!("cargo:warning=librknnrt.so SHA256 首次导入，已生成校验文件 ({}): {}",
+                hash_file.display(), actual);
+            println!("cargo:warning=请确认 SHA256 与官方 SDK 一致: https://github.com/airockchip/rknn-toolkit2");
         }
     } else {
         println!(

@@ -136,6 +136,8 @@ pub async fn initialize_all(
     // ── 6. 遥测数据采集 ──
     tracing::info!("[06/14] 初始化遥测数据采集...");
     // DataCollectorImpl / HighFreqTelemetryImpl 为纯数据容器，延迟创建
+    // FaultRecorderImpl::new() 初始化 SQLite 连接 + 建表（CREATE IF NOT EXISTS），
+    // 完成后即可 drop（连接关闭，表已存在）。后续真正录波时重新打开连接。
     let _fault_recorder = mupc_data_processing::FaultRecorderImpl::new(&db_path)
         .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("故障录波器初始化失败: {}", e), "startup"))?;
     coord.register_service("data_processing", ServiceStatus::Running);
