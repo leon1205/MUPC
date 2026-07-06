@@ -946,10 +946,15 @@ RLModel 使用 MADDPG 或 PPO 算法，基于融合状态、LSTM 预测值和场
 > | load_power | [-1000, 1000] kW | [0, 60] kW |
 > | grid_power | [-1000, 1000] kW | [-200, 200] kW |
 > | battery_power | [-500, 500] kW | [-50, 50] kW |
-> | transformer_load | [0.0, 2.0] | [0.0, 1.5] |
-> | battery_soc | [0.0, 1.0] | [0.1, 0.9] |
-> | solar_irradiance | [0.0, 1500.0] W/m² | [0.0, 1000.0] W/m² |
-> | temperature | [-20.0, 60.0] °C | [-10.0, 45.0] °C |
+> | transformer_load | [0.0, 2.0] | identity（不归一化） |
+> | battery_soc | [0.0, 1.0] | [0.0, 1.0] |
+> | solar_irradiance | [0.0, 1500.0] W/m² | [0.0, 1500.0] W/m² |
+> | temperature | [-20.0, 60.0] °C | [-20.0, 60.0] °C |
+>
+> **v3.1 同步（2026-07-06）：** 归一化范围已对齐上游 MUPC-AI2 `constants.py`：
+> - `battery_soc` [0.1,0.9]→[0.0,1.0]、`transformer_load` MinMax→identity、
+> - `solar_irradiance` [0,1000]→[0,1500]、`temperature` [-10,45]→[-20,60]。
+> 详见 `docs/TODO/下游同步要求-v3.1-归一化与动作空间修正.md`。
 >
 > 若训练管线更新归一化范围，需同步更新 `data_fusion.rs::normalize_observation()` 和本表。
 
