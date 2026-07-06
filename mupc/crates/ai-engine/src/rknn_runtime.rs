@@ -196,9 +196,8 @@ fn map_rknn_error(code: c_int) -> Result<(), AiEngineError> {
     }
 }
 
-// Safety: RknnRuntime 通过 Arc<RwLock> 提供内部可变性
-unsafe impl Send for RknnRuntime {}
-unsafe impl Sync for RknnRuntime {}
+// RknnRuntime 的所有字段（PathBuf, Option<String>, Arc<RwLock<..>>）均自动满足 Send + Sync，
+// 编译器可自动推导。无需 unsafe impl，避免违反 v3.1 AC-13 无新增 unsafe 块要求。
 
 #[cfg(test)]
 mod tests {

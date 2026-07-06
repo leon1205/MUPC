@@ -170,7 +170,12 @@ impl RewardNormalizer {
 
         tracing::debug!(
             "normalize {}: raw={:.4}, mean={:.4}, std={:.4}, z={:.4}, normalized={:.4}",
-            key, value, mean, std, z, clamped
+            key,
+            value,
+            mean,
+            std,
+            z,
+            clamped
         );
 
         NormalizedReward {
@@ -182,10 +187,7 @@ impl RewardNormalizer {
 
     /// 批量归一化奖励值
     pub fn normalize_batch(&self, key: &str, values: &[f64]) -> Vec<NormalizedReward> {
-        values
-            .iter()
-            .map(|&v| self.normalize(key, v))
-            .collect()
+        values.iter().map(|&v| self.normalize(key, v)).collect()
     }
 
     /// 获取指定子项的统计信息

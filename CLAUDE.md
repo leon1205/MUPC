@@ -157,6 +157,29 @@ cargo test -p <crate> <test_name>
 4. **强制评审**：未完成评审禁止推进下一阶段，违规者代码回退并重新走评审流程
 5. 方案描述格式：**背景（Why）** → **方案（How）** → **改动点（What）**
 
+## Git 提交规范（2026-07-06 生效）
+
+本次本次提交（495033b）因 `git add -u` 无差别暂存导致包含未预期的工作区旧版本文件，造成 model_manager.rs 669 行回归等 4 严重 + 5 警告问题。以下规则强制执行以杜绝此类事故。
+
+### 暂存规则
+
+1. **禁止** `git add -u`、`git add -A`、`git add .` 等无差别暂存命令。
+2. 只允许 `git add <path> <path> ...` 逐个文件精确暂存。
+3. 暂存前必须 `git diff --stat` 确认每个文件都是本次意图变更。
+
+### 提交流程
+
+1. `git status` → 确认工作区范围
+2. `git diff --stat` → 逐文件确认变更意图
+3. `git add <specific-files>` → 精确暂存
+4. `git diff --cached --stat` → 再次确认暂存区范围
+5. `git commit` → 提交
+6. 绝对禁止 `git commit -a`
+
+### 开始工作前检查
+
+- 如果 `git status` 不干净（有既有未提交改动），先 `git stash` 隔离，确保本次工作基于干净的工作区。
+
 ## 核心架构
 
 ### 架构模式

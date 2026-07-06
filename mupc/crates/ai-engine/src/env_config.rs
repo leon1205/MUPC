@@ -82,13 +82,16 @@ impl Default for EnvConfig {
 
 impl EnvConfig {
     /// 从 YAML 文件加载
-    // TODO(Task 7): 取消注释，添加 ConfigLoadFailed 到 AiEngineError 后启用
-    // pub fn from_file(path: &PathBuf) -> Result<Self, crate::error::AiEngineError> {
-    //     let content = std::fs::read_to_string(path)
-    //         .map_err(|e| crate::error::AiEngineError::ConfigLoadFailed(format!("读取文件失败: {}", e)))?;
-    //     serde_yaml::from_str(&content)
-    //         .map_err(|e| crate::error::AiEngineError::ConfigLoadFailed(format!("YAML 解析失败: {}", e)))
-    // }
+    ///
+    /// Phase 2+ 启用：需要 AiEngineError::ConfigLoadFailed 变体支持。
+    /// 当前由 DynamicConfigLoader 接管 YAML 加载职责。
+    #[allow(dead_code)]
+    pub fn from_file(path: &std::path::PathBuf) -> Result<Self, crate::error::AiEngineError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| crate::error::AiEngineError::ConfigLoadFailed(format!("读取文件失败: {}", e)))?;
+        serde_yaml::from_str(&content)
+            .map_err(|e| crate::error::AiEngineError::ConfigLoadFailed(format!("YAML 解析失败: {}", e)))
+    }
 
     /// 获取版本指纹
     pub fn fingerprint(&self) -> &str {

@@ -157,15 +157,13 @@ impl DynamicConfigLoader {
                 k_droop_min: Some(-100.0),
                 k_droop_max: Some(100.0),
             };
-            // 异步写入 DB（不阻塞）
-            // 注意：update_action_space_config_full 在 Task 6 中添加
+            // 异步写入 DB（异步，不阻塞启动）
             let storage = self.storage.clone();
             let transformer_id = transformer_id.to_string();
             let cfg_clone = cfg.clone();
             tokio::spawn(async move {
-                // TODO(Task 6): 替换为 update_action_space_config_full
                 let _ = storage
-                    .update_action_space_config(
+                    .update_action_space_config_full(
                         &transformer_id,
                         cfg_clone.max_batt_charge_power,
                         cfg_clone.max_batt_discharge_power,
@@ -174,6 +172,11 @@ impl DynamicConfigLoader {
                         cfg_clone.p_batt_ramp_limit_kw,
                         cfg_clone.q_batt_ramp_limit_kvar,
                         cfg_clone.pv_limit_min,
+                        cfg_clone.transformer_kva,
+                        cfg_clone.battery_capacity_kwh,
+                        cfg_clone.soc_min,
+                        cfg_clone.soc_max,
+                        cfg_clone.overload_threshold,
                     )
                     .await;
             });

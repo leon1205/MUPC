@@ -34,14 +34,33 @@ pub struct PerformanceFeatures {
     pub demand_violation_count: u32,
     /// 累积奖励
     pub cumulative_reward: f64,
+    /// v3.1: 变压器过载次数（用于长期漂移监控）
+    pub overload_count: u32,
+    /// v3.1: 电压越限次数（用于长期漂移监控）
+    pub voltage_violation_count: u32,
+}
+
+/// v3.1: 权重健康度状态
+#[derive(Debug, Clone, PartialEq)]
+pub enum WeightHealthStatus {
+    /// 健康（指标不劣于基线）
+    Healthy,
+    /// 退化中（连续 N 周期劣于基线）
+    Degraded { consecutive: u32 },
+    /// 已冻结（退化超阈值，自动回退基线权重）
+    Frozen,
+    /// 无基线数据（首次运行）
+    NoBaseline,
+    /// 性能采集失败
+    CollectorError,
 }
 
 /// 权重调整量
 #[derive(Debug, Clone)]
 pub struct WeightAdjustment {
     /// 各场景权重调整量
-    pub seasonal_load_delta: [f64; 8],
-    pub commercial_arbitrage_delta: [f64; 2],
+    pub seasonal_load_delta: [f64; 9],
+    pub commercial_arbitrage_delta: [f64; 3],
     pub demand_control_delta: [f64; 2],
     pub virtual_power_plant_delta: [f64; 3],
     pub ultra_green_delta: [f64; 2],
@@ -50,8 +69,8 @@ pub struct WeightAdjustment {
 impl Default for WeightAdjustment {
     fn default() -> Self {
         Self {
-            seasonal_load_delta: [0.0; 8],
-            commercial_arbitrage_delta: [0.0; 2],
+            seasonal_load_delta: [0.0; 9],
+            commercial_arbitrage_delta: [0.0; 3],
             demand_control_delta: [0.0; 2],
             virtual_power_plant_delta: [0.0; 3],
             ultra_green_delta: [0.0; 2],
@@ -91,6 +110,12 @@ pub struct AdaptiveWeightOptimizer {
     adjustment_history: RwLock<Vec<WeightAdjustment>>,
     /// 性能指标收集器引用
     performance_collector: Arc<dyn PerformanceCollector>,
+    /// v3.1: 基线性能快照（首次优化前采集，用于长期漂移检测）
+    baseline_performance: RwLock<Option<PerformanceFeatures>>,
+    /// v3.1: 连续退化周期计数（累计漂移监控）
+    consecutive_degradation_count: std::sync::atomic::AtomicU32,
+    /// v3.1: 优化器是否已冻结（退化超阈值自动冻结）
+    frozen: std::sync::atomic::AtomicBool,
 }
 
 impl AdaptiveWeightOptimizer {
@@ -105,6 +130,9 @@ impl AdaptiveWeightOptimizer {
             current_weights: RwLock::new(initial_weights),
             adjustment_history: RwLock::new(Vec::new()),
             performance_collector,
+            baseline_performance: RwLock::new(None),
+            consecutive_degradation_count: std::sync::atomic::AtomicU32::new(0),
+            frozen: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -119,6 +147,12 @@ impl AdaptiveWeightOptimizer {
         &self,
         historical_performance: &HistoricalPerformance,
     ) -> Result<SceneWeights, AiEngineError> {
+        // v3.1: 冻结检查 — 若优化器已冻结，直接返回当前权重
+        if self.frozen.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::warn!("AdaptiveWeightOptimizer 已冻结，跳过本轮优化");
+            return Ok(self.current_weights.read().await.clone());
+        }
+
         // 1. 提取性能特征
         let features = self.extract_features(historical_performance);
 
@@ -129,7 +163,8 @@ impl AdaptiveWeightOptimizer {
         let new_weights = self.apply_adjustment(&adjustment).await?;
 
         // 4. 记录调整历史
-        self.record_adjustment(historical_performance, &adjustment).await;
+        self.record_adjustment(historical_performance, &adjustment)
+            .await;
 
         Ok(new_weights)
     }
@@ -198,11 +233,16 @@ impl AdaptiveWeightOptimizer {
         }
 
         // 约束3：单次调整幅度限制
-        for i in 0..8 {
-            let diff = (new_weights.seasonal_load_management[i] - current.seasonal_load_management[i]).abs();
-            let max_change = self.config.constraints.max_adjustment_per_update * current.seasonal_load_management[i];
+        for i in 0..9 {
+            let diff = (new_weights.seasonal_load_management[i]
+                - current.seasonal_load_management[i])
+                .abs();
+            let max_change = self.config.constraints.max_adjustment_per_update
+                * current.seasonal_load_management[i];
             if diff > max_change {
-                let sign = if new_weights.seasonal_load_management[i] > current.seasonal_load_management[i] {
+                let sign = if new_weights.seasonal_load_management[i]
+                    > current.seasonal_load_management[i]
+                {
                     1.0
                 } else {
                     -1.0
@@ -257,6 +297,80 @@ impl AdaptiveWeightOptimizer {
         *self.current_weights.write().await = new_weights;
     }
 
+    /// v3.1: 设置基线性能快照（首次优化前调用）
+    pub async fn set_baseline(&self, perf: PerformanceFeatures) {
+        *self.baseline_performance.write().await = Some(perf);
+        self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// v3.1: 检查优化器是否已冻结
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// v3.1: 手动解冻优化器（运维确认后调用）
+    pub fn unfreeze(&self) {
+        self.frozen.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        tracing::warn!("AdaptiveWeightOptimizer 已手动解冻");
+    }
+
+    /// v3.1: 权重健康度检查 — 累计漂移监控
+    ///
+    /// 当优化后的权重组合导致关键性能指标连续 N 个周期劣于基线时，
+    /// 自动触发权重冻结，回退到基线权重。
+    ///
+    /// # 监控指标
+    /// - 变压器过载次数趋势
+    /// - 电压越限次数趋势
+    /// - 综合奖励偏移趋势
+    pub async fn check_cumulative_health(&self) -> WeightHealthStatus {
+        let baseline = self.baseline_performance.read().await;
+        let Some(ref baseline_pf) = *baseline else {
+            return WeightHealthStatus::NoBaseline;
+        };
+
+        // 获取当前性能
+        let Ok(current_pf) = self.performance_collector.collect_current() else {
+            return WeightHealthStatus::CollectorError;
+        };
+
+        // 关键指标对比
+        let overload_worse = current_pf.overload_count > baseline_pf.overload_count;
+        let voltage_violation_worse =
+            current_pf.voltage_violation_count > baseline_pf.voltage_violation_count;
+        let reward_worse = current_pf.cumulative_reward < baseline_pf.cumulative_reward;
+
+        let degradation_flags = (overload_worse, voltage_violation_worse, reward_worse);
+        let degraded = match degradation_flags {
+            // 任意 2 项劣化 → 计为一次退化
+            (true, true, _) | (true, _, true) | (_, true, true) => true,
+            _ => false,
+        };
+
+        if degraded {
+            let count = self.consecutive_degradation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            tracing::warn!(
+                "权重健康度退化: 连续 {} 周期劣于基线 (overload={}, voltage={}, reward={})",
+                count, overload_worse, voltage_violation_worse, reward_worse
+            );
+
+            // 连续 N 个周期退化 → 自动冻结
+            if count >= self.config.health_freeze_threshold {
+                self.frozen.store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    "权重健康度严重退化 (≥{} 周期)，自动冻结优化器，回退至基线权重",
+                    self.config.health_freeze_threshold
+                );
+                return WeightHealthStatus::Frozen;
+            }
+            WeightHealthStatus::Degraded { consecutive: count }
+        } else {
+            self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+            WeightHealthStatus::Healthy
+        }
+    }
+
     /// AWO-06: 验证奖励偏移（优化后奖励函数与原始策略无显著偏离）
     ///
     /// # 输入
@@ -266,11 +380,7 @@ impl AdaptiveWeightOptimizer {
     /// # 输出
     /// - true: 偏移 < 5%，验证通过
     /// - false: 偏移 >= 5%，验证失败
-    pub async fn validate_reward_drift(
-        &self,
-        original_reward: f64,
-        optimized_reward: f64,
-    ) -> bool {
+    pub async fn validate_reward_drift(&self, original_reward: f64, optimized_reward: f64) -> bool {
         if original_reward.abs() < 1e-6 {
             // 原始奖励接近零时，使用绝对误差
             return (optimized_reward - original_reward).abs() < 0.05;
@@ -341,6 +451,8 @@ mod tests {
                 trafo_avg_load: trafo_load,
                 demand_violation_count: demand_violations,
                 cumulative_reward: cum_reward,
+                overload_count: 0,
+                voltage_violation_count: 0,
             },
             timestamp: chrono::Utc::now().timestamp(),
         }
@@ -448,8 +560,12 @@ mod tests {
         let new_weights = result.unwrap();
         let sum: f64 = new_weights.seasonal_load_management.iter().sum();
         // 归一化和应为 8.3
-        assert!((sum - config.constraints.sum_normalized).abs() < 0.01,
-            "权重和应为 {}，实际为 {}", config.constraints.sum_normalized, sum);
+        assert!(
+            (sum - config.constraints.sum_normalized).abs() < 0.01,
+            "权重和应为 {}，实际为 {}",
+            config.constraints.sum_normalized,
+            sum
+        );
     }
 
     // ===== AWO-05: 调整幅度限制测试 =====
@@ -459,7 +575,7 @@ mod tests {
         // AWO-05: 单次更新周期内权重变化不超过 max_adjustment_per_update
         let config = make_default_config();
         let weights = SceneWeights {
-            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0],
+            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0, 1.0],
             ..Default::default()
         };
         // 创建一个会触发大调整的性能数据
@@ -473,12 +589,19 @@ mod tests {
         let new_weights = result.unwrap();
 
         // 检查调整幅度
-        for i in 0..8 {
-            let diff = (new_weights.seasonal_load_management[i] - weights.seasonal_load_management[i]).abs();
-            let max_change = config.constraints.max_adjustment_per_update * weights.seasonal_load_management[i];
-            assert!(diff <= max_change * 1.01, // 允许浮点误差
+        for i in 0..9 {
+            let diff = (new_weights.seasonal_load_management[i]
+                - weights.seasonal_load_management[i])
+                .abs();
+            let max_change =
+                config.constraints.max_adjustment_per_update * weights.seasonal_load_management[i];
+            assert!(
+                diff <= max_change * 1.01, // 允许浮点误差
                 "权重 {} 变化 {} 超过限制 {}",
-                i, diff, max_change);
+                i,
+                diff,
+                max_change
+            );
         }
     }
 
@@ -541,7 +664,10 @@ mod tests {
         let optimizer = AdaptiveWeightOptimizer::new(config, weights.clone(), collector);
         let current = optimizer.get_current_weights().await;
 
-        assert_eq!(current.seasonal_load_management, weights.seasonal_load_management);
+        assert_eq!(
+            current.seasonal_load_management,
+            weights.seasonal_load_management
+        );
     }
 
     #[tokio::test]
@@ -554,7 +680,7 @@ mod tests {
         let optimizer = AdaptiveWeightOptimizer::new(config, weights.clone(), collector);
 
         let new_weights = SceneWeights {
-            seasonal_load_management: [2.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0],
+            seasonal_load_management: [2.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0, 1.0],
             ..Default::default()
         };
         optimizer.update_weights(new_weights.clone()).await;
@@ -589,6 +715,8 @@ mod tests {
             trafo_avg_load: 0.6,
             demand_violation_count: 2,
             cumulative_reward: 100.0,
+            overload_count: 0,
+            voltage_violation_count: 0,
         };
 
         let cloned = features.clone();
@@ -599,7 +727,7 @@ mod tests {
     #[test]
     fn test_weight_adjustment_default() {
         let delta = WeightAdjustment::default();
-        assert_eq!(delta.seasonal_load_delta, [0.0; 8]);
-        assert_eq!(delta.commercial_arbitrage_delta, [0.0; 2]);
+        assert_eq!(delta.seasonal_load_delta, [0.0; 9]);
+        assert_eq!(delta.commercial_arbitrage_delta, [0.0; 3]);
     }
 }

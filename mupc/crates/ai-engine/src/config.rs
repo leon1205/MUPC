@@ -17,6 +17,13 @@ pub struct AiEngineConfig {
     /// v2.5 奖励阈值配置（对应 PRD 4.1）
     #[serde(default)]
     pub reward_thresholds: RewardThresholdConfig,
+    /// v2.17 安全 RL 包装器配置
+    #[serde(default)]
+    pub safety_wrapper: SafetyWrapperConfig,
+    /// v1.0 预测增强配置（VMD + Attention）
+    /// 缺失时全部增强功能禁用，运行于 v2.16 基线模式
+    #[serde(default)]
+    pub prediction_enhancement: Option<PredictionEnhancementConfig>,
 }
 
 /// LSTM 模型配置
@@ -25,20 +32,48 @@ pub struct LstmConfig {
     pub model_path: PathBuf,
     pub input_window_secs: u64,
     pub output_horizon_secs: u64,
+    /// v2.16 新增：采样步长（秒），统一输入输出步长计算
+    ///
+    /// 默认 900 秒（15 分钟），与 MUPC-AI2 训练管线对齐。
+    /// 历史硬编码 `/ 60` 假设已废弃。
+    pub step_seconds: u64,
     pub quantization: QuantizationType,
     /// SHA256 期望值（PRD 9.5），开发环境为 None 跳过校验
     #[serde(default)]
     pub expected_sha256: Option<String>,
+    /// v3.0: 输入特征数（默认 7，对齐 MUPC-AI2 训练管线）
+    ///
+    /// 7 维特征: [pv_power, load_power, ghi, temp, sin_hour, cos_hour, yesterday_pv]
+    /// 设为 1 时回退到单变量 univariate 模式（v2.16 兼容）。
+    #[serde(default = "default_input_features")]
+    pub input_features: usize,
+    /// v3.0: 昨日 PV 偏移步数（= 24h / step_seconds）
+    ///
+    /// 用于构建 yesterday_pv 特征（第 7 维），默认 96（900s 步长 × 96 = 24h）。
+    /// 仅在 input_features >= 7 时生效。
+    #[serde(default = "default_yesterday_offset_steps")]
+    pub yesterday_offset_steps: usize,
+}
+
+fn default_input_features() -> usize {
+    7
+}
+
+fn default_yesterday_offset_steps() -> usize {
+    96 // 86400s / 900s = 96
 }
 
 impl Default for LstmConfig {
     fn default() -> Self {
         Self {
             model_path: PathBuf::from("/etc/mupc/models/lstm.rknn"),
-            input_window_secs: 3600,
-            output_horizon_secs: 900,
+            input_window_secs: 21_600,   // 6 小时
+            output_horizon_secs: 22_500, // 225 分钟 = 15 步 × 15 分钟
+            step_seconds: 900,           // 15 分钟步长
             quantization: QuantizationType::INT8,
             expected_sha256: None,
+            input_features: default_input_features(),
+            yesterday_offset_steps: default_yesterday_offset_steps(),
         }
     }
 }
@@ -168,7 +203,7 @@ pub struct ModeConfig {
 }
 
 fn default_factory_scene() -> String {
-    "AgriculturalIrrigation".to_string()
+    "SeasonalLoadManagement".to_string()
 }
 
 fn default_model_dir() -> String {
@@ -247,6 +282,12 @@ pub struct RewardThresholdConfig {
     pub voltage_penalty_high: f64,
     /// 低电压侧电压惩罚系数（灌溉/炒茶/空调负荷）
     pub voltage_penalty_low: f64,
+    /// v2.8: 光伏高电压惩罚系数（弃光场景）
+    pub pv_high_voltage_penalty: f64,
+    /// v2.8: 平滑系数（动作变化惩罚的平滑权重）
+    pub smooth_lambda: f64,
+    /// v2.8: k_droop 最大值限制
+    pub k_droop_max: f64,
 }
 
 impl Default for RewardThresholdConfig {
@@ -258,6 +299,9 @@ impl Default for RewardThresholdConfig {
             soc_critical: 0.10,
             voltage_penalty_high: 2.0,
             voltage_penalty_low: 1.0,
+            pv_high_voltage_penalty: 20.0,
+            smooth_lambda: 10.0,
+            k_droop_max: 30.0,
         }
     }
 }
@@ -275,6 +319,8 @@ pub struct AdaptiveOptimizerConfig {
     pub weight_bounds: WeightBounds,
     /// 约束条件
     pub constraints: WeightConstraints,
+    /// v3.1: 权重健康度冻结阈值（连续退化 N 周期后自动冻结，默认 3）
+    pub health_freeze_threshold: u32,
 }
 
 impl Default for AdaptiveOptimizerConfig {
@@ -285,6 +331,7 @@ impl Default for AdaptiveOptimizerConfig {
             meta_learning_rate: 0.001,
             weight_bounds: WeightBounds::default(),
             constraints: WeightConstraints::default(),
+            health_freeze_threshold: 3,
         }
     }
 }
@@ -298,7 +345,10 @@ pub struct WeightBounds {
 
 impl Default for WeightBounds {
     fn default() -> Self {
-        Self { min: 0.01, max: 10.0 }
+        Self {
+            min: 0.01,
+            max: 10.0,
+        }
     }
 }
 
@@ -345,9 +395,10 @@ impl Default for ParetoOptimizerConfig {
 /// 场景权重映射
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneWeights {
-    /// 台区季节性负荷: [w1光伏消纳, w2电池损耗, w3变压器, w4PQ协同度, w5功率变化率, w6电压斜率, w7下垂平滑, w8安全覆盖]
-    pub seasonal_load_management: [f64; 8], // v2.10: 7 → 8
-    pub commercial_arbitrage: [f64; 2],
+    /// 台区季节性负荷: [w1光伏消纳, w2电池损耗, w3变压器, w4PQ协同度, w5功率变化率, w6电压斜率, w7下垂平滑, w8安全覆盖, w9冲击预备度]
+    pub seasonal_load_management: [f64; 9],
+    /// 自主套利: [w1价差, w2电池, w3过载]
+    pub commercial_arbitrage: [f64; 3],
     pub demand_control: [f64; 2],
     pub virtual_power_plant: [f64; 3],
     pub ultra_green: [f64; 2],
@@ -356,11 +407,56 @@ pub struct SceneWeights {
 impl Default for SceneWeights {
     fn default() -> Self {
         Self {
-            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.3, 1.0], // v2.10: w8=1.0
-            commercial_arbitrage: [1.0, 1.0],
+            seasonal_load_management: [1.0, 0.5, 2.0, 1.0, 0.5, 0.5, 0.5, 1.0, 1.0], // w7=0.5 对齐训练 constants.py
+            commercial_arbitrage: [1.0, 1.0, 2.0],
             demand_control: [1.0, 0.5],
             virtual_power_plant: [1.0, 2.0, 1.0],
             ultra_green: [1.0, 1.0],
+        }
+    }
+}
+
+/// 预测增强配置（v1.0，2026-06-21）
+///
+/// 挂载在 `AiEngineConfig.prediction_enhancement` 下。
+/// 缺失时（None）全部增强功能禁用，运行于 v2.16 基线模式。
+pub type PredictionEnhancementConfig = crate::pipeline_config::PredictionEnhancementConfig;
+
+/// v2.17 安全 RL 包装器配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SafetyWrapperConfig {
+    /// 线路电阻 R（Ω）
+    pub line_impedance_r_ohm: f64,
+    /// 线路电抗 X（Ω）
+    pub line_impedance_x_ohm: f64,
+    /// 基准电压（V）
+    pub v_base: f64,
+    /// 电压下限（p.u.）
+    pub v_min: f64,
+    /// 电压上限（p.u.）
+    pub v_max: f64,
+    /// 电压变化率上限（p.u./s）
+    pub dv_dt_max: f64,
+    /// SOC 安全裕度（比临界 10% 多此值）
+    pub soc_margin: f64,
+    /// 单次检查最大延迟（ms）
+    pub max_check_latency_ms: u64,
+    /// 拒绝率告警阈值
+    pub alert_rejection_rate: f64,
+}
+
+impl Default for SafetyWrapperConfig {
+    fn default() -> Self {
+        Self {
+            line_impedance_r_ohm: 0.1,
+            line_impedance_x_ohm: 0.05,
+            v_base: 220.0,
+            v_min: 0.93,
+            v_max: 1.07,
+            dv_dt_max: 0.03,
+            soc_margin: 0.02,
+            max_check_latency_ms: 5,
+            alert_rejection_rate: 0.20,
         }
     }
 }

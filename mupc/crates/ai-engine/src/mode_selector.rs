@@ -249,9 +249,10 @@ impl SmoothSceneTransition {
     pub fn remaining_steps(&self) -> usize {
         match self.state {
             TransitionState::Idle => self.config.transition_steps,
-            TransitionState::InProgress => {
-                self.config.transition_steps.saturating_sub(self.step_counter)
-            }
+            TransitionState::InProgress => self
+                .config
+                .transition_steps
+                .saturating_sub(self.step_counter),
             TransitionState::Completed => 0,
         }
     }
@@ -920,7 +921,8 @@ mod tests {
         let config = TransitionConfig {
             transition_steps: 10,
         };
-        let transition = SmoothSceneTransition::new_with_weights(config, vec![1.0, 2.0], vec![1.0, 2.0]);
+        let transition =
+            SmoothSceneTransition::new_with_weights(config, vec![1.0, 2.0], vec![1.0, 2.0]);
         assert_eq!(transition.state(), TransitionState::Completed);
     }
 
@@ -939,7 +941,10 @@ mod tests {
         assert_eq!(prev, Ok(RunningMode::SeasonalLoadManagement));
 
         // 检查平滑过渡状态
-        assert_eq!(selector.transition_state(), Some(TransitionState::InProgress));
+        assert_eq!(
+            selector.transition_state(),
+            Some(TransitionState::InProgress)
+        );
         assert_eq!(selector.remaining_transition_steps(), 5);
 
         // 获取插值权重
@@ -950,7 +955,10 @@ mod tests {
         for _ in 0..5 {
             let _ = selector.current_weights();
         }
-        assert_eq!(selector.transition_state(), Some(TransitionState::Completed));
+        assert_eq!(
+            selector.transition_state(),
+            Some(TransitionState::Completed)
+        );
         assert_eq!(selector.remaining_transition_steps(), 0);
     }
 

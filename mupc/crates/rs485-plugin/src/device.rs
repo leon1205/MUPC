@@ -198,7 +198,7 @@ impl Rs485Device {
     /// 关闭串口
     pub fn close(&self) {
         let mut port_guard = self.port_fd.lock();
-        if let Some(_fd) = port_guard.take() {
+        if let Some(fd) = port_guard.take() {
             #[cfg(unix)]
             {
                 if unsafe { libc::close(fd) } < 0 {
