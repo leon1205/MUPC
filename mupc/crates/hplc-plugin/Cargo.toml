@@ -20,11 +20,6 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 chrono = { workspace = true }
 futures = { workspace = true }
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-name = "hplc_plugin"
-path = "src/lib.rs"
-
 [features]
 default = []
 ffi = []

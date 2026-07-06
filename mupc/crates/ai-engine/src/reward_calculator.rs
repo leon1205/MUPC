@@ -204,8 +204,6 @@ pub struct RewardCalculator {
     shock_readiness_weight_soc: f64,
     /// 预备度奖励权重 w2（有功功率相关）
     shock_readiness_weight_p: f64,
-    /// v3.1: 伪分位数保守系数（P90 非真分位数回归时的安全折扣，默认 0.7）
-    shock_conservative_coefficient: f64,
     // v2.12 R-07 新增：P-Q 协同度阈值配置
     /// P-Q 协同度阈值配置
     pq_thresholds: PqCoordinationThresholds,
@@ -220,24 +218,22 @@ fn safety_override_penalty_impl(state: &FusedSystemState) -> f64 {
     let min_sample_threshold = 10;
     let norm_divisor = 15.0;
 
-    // v2.15: 统一固定冷启动惩罚 -3.33，不再按 reason 分支
-    // 原因：D9 字段表已无 reason_code（4 维收窄为 active/p_ref/consecutive/ratio）
-    const COLD_START: f64 = -3.33;
-
-    if !state.safety_override_active && state.safety_override_consecutive < min_sample_threshold {
-        return 0.0;
-    }
-
     if state.safety_override_consecutive < min_sample_threshold {
-        return COLD_START;
+        if !state.safety_override_active {
+            return 0.0;
+        }
+        let raw: f64 = match state.safety_override_reason.as_deref().unwrap_or("unknown") {
+            "voltage_violation" => -50.0_f64,
+            "q_exhausted" => -30.0_f64,
+            "emergency" => -100.0_f64,
+            _ => -20.0_f64,
+        };
+        return (raw / norm_divisor).max(-1.0).min(0.0);
     }
 
     let ratio_penalty = -k_override * state.safety_override_ratio;
-    let consecutive_penalty =
-        -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
-    ((ratio_penalty + consecutive_penalty) / norm_divisor)
-        .max(-1.0)
-        .min(0.0)
+    let consecutive_penalty = -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
+    ((ratio_penalty + consecutive_penalty) / norm_divisor).max(-1.0).min(0.0)
 }
 
 impl RewardCalculator {
@@ -274,7 +270,6 @@ impl RewardCalculator {
             p_ref_reserve_target: 10.0,
             shock_readiness_weight_soc: 20.0,
             shock_readiness_weight_p: 10.0,
-            shock_conservative_coefficient: 0.7,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         }
@@ -323,7 +318,6 @@ impl RewardCalculator {
             p_ref_reserve_target: 10.0,
             shock_readiness_weight_soc: 20.0,
             shock_readiness_weight_p: 10.0,
-            shock_conservative_coefficient: 0.7,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         })
@@ -386,7 +380,6 @@ impl RewardCalculator {
             p_ref_reserve_target: 10.0,
             shock_readiness_weight_soc: 20.0,
             shock_readiness_weight_p: 10.0,
-            shock_conservative_coefficient: 0.7,
             // v2.12 R-07: P-Q 协同度阈值配置默认值
             pq_thresholds: PqCoordinationThresholds::default(),
         }
@@ -438,7 +431,9 @@ impl RewardCalculator {
                 Self::calc_arbitrage_with_weights(action, state, weights)
             }
             RunningMode::DemandControl => self.calc_demand(action, state),
-            RunningMode::VirtualPowerPlant => Self::calc_vpp_with_weights(action, state, weights),
+            RunningMode::VirtualPowerPlant => {
+                Self::calc_vpp_with_weights(action, state, weights)
+            }
             RunningMode::UltraGreen => self.calc_green(state),
         }
     }
@@ -740,9 +735,7 @@ impl RewardCalculator {
         let p_ref_gap = self.p_ref_reserve_target - p_ref.abs();
         let r_p = self.shock_readiness_weight_p * p_ref_gap;
 
-        let r_raw = r_soc + r_p;
-        // v3.1: 伪分位数保守折扣 — P90 非真分位数回归时的安全系数
-        let r_readiness = r_raw * self.shock_conservative_coefficient;
+        let r_readiness = r_soc + r_p;
 
         tracing::debug!(
             "shock_readiness: spread={:.2}, soc={:.3}, soc_target={:.3}, r_soc={:.4}, |p_ref|={:.2}, r_p={:.4}, R_readiness={:.4}",
@@ -799,11 +792,7 @@ impl RewardCalculator {
         let w_support = 1.0 - w_save;
 
         // 省电模式奖励（Q有裕度时AI"偷懒"省电池）
-        let r_lazy = if p_ref.abs() < p_threshold {
-            50.0
-        } else {
-            -5.0
-        };
+        let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
 
         // 支撑模式奖励（Q饱和时AI正确出手）
         let v_low = v_avg < 1.0;
@@ -1019,8 +1008,7 @@ impl RewardCalculator {
             .map(|q| q.value)
             .unwrap_or(load_forecast.base_load);
 
-        let risk_adjusted_demand =
-            state.current_demand + 2.0 * (high_quantile - load_forecast.base_load) as f64;
+        let risk_adjusted_demand = state.current_demand + 2.0 * (high_quantile - load_forecast.base_load) as f64;
         let risk_margin = if risk_adjusted_demand > state.contract_demand * 0.95 {
             // 预留 5% 安全裕度不足，产生风险惩罚
             -20.0 * ((risk_adjusted_demand - state.contract_demand * 0.95) / state.contract_demand)
@@ -1149,9 +1137,7 @@ impl RewardCalculator {
         let p_ref_gap = p_ref_reserve_target - p_ref.abs();
         let r_p = w2 * p_ref_gap;
 
-        // v3.1: 伪分位数保守折扣（静态版本，系数 0.7）
-        const SHOCK_CONSERVATIVE: f64 = 0.7;
-        (r_soc + r_p) * SHOCK_CONSERVATIVE
+        r_soc + r_p
     }
 
     /// v2.13: 计算冲击负荷预备度奖励（静态版本辅助方法）
@@ -1238,11 +1224,7 @@ impl RewardCalculator {
         let w_support = 1.0 - w_save;
 
         // 省电模式奖励（Q有裕度时AI"偷懒"省电池）
-        let r_lazy = if p_ref.abs() < p_threshold {
-            50.0
-        } else {
-            -5.0
-        };
+        let r_lazy = if p_ref.abs() < p_threshold { 50.0 } else { -5.0 };
 
         // 支撑模式奖励（Q饱和时AI正确出手）
         let v_low = v_avg < 1.0;
@@ -1364,7 +1346,7 @@ mod tests {
     #[test]
     fn test_weights_lookup() {
         let w = SceneWeights::default();
-        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 8); // v2.10: 7 → 8
+        assert_eq!(w.lookup(RunningMode::SeasonalLoadManagement).len(), 9); // v3.0: 8 → 9 (w9冲击预备度)
         assert_eq!(w.lookup(RunningMode::CommercialArbitrage).len(), 2);
     }
 

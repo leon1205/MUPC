@@ -17,15 +17,9 @@ futures = "0.3"
 rand = "0.8"
 mupc_storage = { path = "../storage" }
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "macros"] }
-rustfft = "6.2"
-nalgebra = "0.33"
-
-[dev-dependencies]
-tokio-test = "0.4"
-
-[features]
-default = ["npu"]
-npu = []
 
 [build-dependencies]
 sha2 = "0.10"
+
+[dev-dependencies]
+tokio-test = "0.4"

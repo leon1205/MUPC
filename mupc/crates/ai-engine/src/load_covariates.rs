@@ -18,15 +18,12 @@ pub struct LoadCovariates {
 }
 
 impl Default for LoadCovariates {
-    /// v3.1: 默认值代表典型工况（工作日正午 25°C，非灌溉季）。
-    /// 实际推理时应通过 `WeatherService` trait 注入实时温湿度等协变量，
-    /// 以改善分位数预测的协变量调整精度。
     fn default() -> Self {
         Self {
             temperature: 25.0,
-            date_type: 0,   // 工作日
+            date_type: 0,
             is_irrigation_season: false,
-            hour: 12,       // 正午
+            hour: 12,
         }
     }
 }
@@ -46,10 +43,7 @@ pub trait WeatherService: Send + Sync {
     ///
     /// # 返回
     /// - 温度预测数组（按小时排序）
-    fn get_temperature_forecast(
-        &self,
-        _hours_ahead: u32,
-    ) -> Result<Vec<f32>, crate::error::AiEngineError> {
+    fn get_temperature_forecast(&self, _hours_ahead: u32) -> Result<Vec<f32>, crate::error::AiEngineError> {
         // 默认实现：返回空数组，子类可重写
         Ok(Vec::new())
     }
@@ -62,9 +56,7 @@ pub struct DefaultWeatherService {
 
 impl DefaultWeatherService {
     pub fn new(default_temperature: f32) -> Self {
-        Self {
-            default_temperature,
-        }
+        Self { default_temperature }
     }
 }
 
@@ -76,9 +68,7 @@ impl WeatherService for DefaultWeatherService {
 
 /// data_fusion.rs 需提供此 trait（PLF-05）
 pub trait DataFusionProvider: Send + Sync {
-    fn get_fused_state(
-        &self,
-    ) -> Result<crate::data_fusion::FusedSystemState, crate::error::AiEngineError>;
+    fn get_fused_state(&self) -> Result<crate::data_fusion::FusedSystemState, crate::error::AiEngineError>;
 }
 
 /// WeatherService 实现（从 data_fusion.rs 获取气象融合数据）

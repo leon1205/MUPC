@@ -36,9 +36,9 @@ impl RobustnessManager {
     /// 创建新的 RobustnessManager 实例
     pub fn new() -> Self {
         Self {
-            voltage_sag_threshold: 0.90,
-            voltage_surge_threshold: 1.10,
-            soc_critical_low: 0.10,
+            voltage_sag_threshold: 0.85,
+            voltage_surge_threshold: 1.15,
+            soc_critical_low: 0.05,
             soc_critical_high: 0.95,
         }
     }
@@ -81,7 +81,7 @@ impl RobustnessManager {
     pub fn voltage_surge_action(&self) -> ActionOutput {
         ActionOutput {
             p_ref: -50.0,
-            k_droop: 30.0,
+            k_droop: -30.0,
             load_shedding: 0.0,
             pv_limit: 0.5,
             confidence: 1.0,

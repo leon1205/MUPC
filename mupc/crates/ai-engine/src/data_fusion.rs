@@ -1,11 +1,11 @@
 //! 多源数据融合引擎
 //!
 //! DataFusionEngine 以 1Hz 频率从 5 个数据源采集数据，
-//! 融合为 FusedSystemState（10 大类 78 维），
-//! 序列化为 78 维向量供 RL 模型推理。
+//! 融合为 FusedSystemState（6 大类 24 字段），
+//! 序列化为 48 维向量供 RL 模型推理。
 //!
 //! 关键入口：
-//! - `FusedSystemState::to_input_vector()` — 78 维序列化
+//! - `FusedSystemState::to_input_vector()` — 48 维序列化
 //! - `validate_input_vector()` — NaN/Inf 安全检查（PRD 9.5）
 //! - `DataFusionEngine::fuse()` — 并行采集 + 融合
 
@@ -67,7 +67,7 @@ pub struct FusedSystemState {
     pub safety_override_consecutive: u32,
     /// 安全覆盖滑动窗口内覆盖比例（v2.14 新增，范围 [0.0, 1.0]）
     pub safety_override_ratio: f64,
-    // ── D10: 概率负荷预测 (v2.11 新增, v2.14: 78 维总) ──
+    // ── D10: 概率负荷预测 (v2.11 新增, 3 维) ──
     /// 分位数负荷预测（15 维，对应 15 分钟预测窗口）
     pub load_forecast_quantiles: Vec<f64>,
     /// 冲击负荷发生概率
@@ -84,7 +84,7 @@ impl Default for FusedSystemState {
             pv_power: 0.0,
             load_power: 0.0,
             grid_power: 0.0,
-            transformer_load: 0.5,
+            transformer_load: 1.0,
             battery_power: 0.0,
             voltage_phase_a: 1.0,
             voltage_phase_b: 1.0,
@@ -122,26 +122,26 @@ impl Default for FusedSystemState {
 }
 
 impl FusedSystemState {
-    /// 序列化为 78 维输入向量（v2.14, v3.1 修复 D1 重复推送）
+    /// 序列化为 78 维输入向量（v2.14）
     ///
     /// 布局:
-    ///   [0..8]   D1 实时数据 (9 维): soc/pv/load/grid/transformer_load/battery_power/va/vb/vc
-    ///   [9..24]  D2 pv_forecast (15 维)
-    ///   [24..39] D2 load_forecast (15 维)
-    ///   [39..42] D3 电价 (3 维)
-    ///   [42..45] D4 需量 (3 维)
-    ///   [45..47] D5 气象 (2 维)
-    ///   [47]     D6 dispatch_p_set (None→0.0)
-    ///   [48]     D7 q_realtime_margin
-    ///   [49..57] D8 season_encoding(6) + time_period_encoding(2)
-    ///   [57..61] D9 safety_override (4 维)
-    ///   [61..76] D10 load_forecast_quantiles (15 维, v2.14: 78 维总)
-    ///   [76]     D10 shock_load_probability
-    ///   [77]     D10 base_load
+    ///   [0..9]   D1 (10 标量，含 q_realtime_margin)
+    ///   [10..25] D2 pv_forecast (15 维)
+    ///   [25..40] D2 load_forecast (15 维)
+    ///   [40..43] D3 (3 维)
+    ///   [43..46] D4 (3 维)
+    ///   [46..48] D5 (2 维)
+    ///   [48]     D6 dispatch_p_set (None→0.0)
+    ///   [49]     D7 q_realtime_margin
+    ///   [50..56] D8 season_encoding(6) + time_period_encoding(2)
+    ///   [57..60] D9 safety_override (4 维，v2.10 新增，v2.14 扩展 consecutive+ratio)
+    ///   [61..75] D10 load_forecast_quantiles (15 维，v2.11 新增)
+    ///   [76]     D10 shock_load_probability (1 维，v2.11 新增)
+    ///   [77]     D10 base_load (1 维，v2.11 新增)
     pub fn to_input_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(78);
+        let mut v = Vec::with_capacity(76);
 
-        // D1 [0..8] 9 维实时数据
+        // D1 [0..9] 10 标量
         v.push(self.battery_soc as f32);
         v.push(self.pv_power as f32);
         v.push(self.load_power as f32);
@@ -151,36 +151,37 @@ impl FusedSystemState {
         v.push(self.voltage_phase_a as f32);
         v.push(self.voltage_phase_b as f32);
         v.push(self.voltage_phase_c as f32);
+        v.push(self.q_realtime_margin as f32);
 
-        // D2 pv_forecast [9..24] 15 维
+        // D2 pv_forecast [10..25] 15维
         let pv = pad_or_truncate(&self.pv_forecast_15min, 15);
         v.extend(pv.iter().map(|&x| x as f32));
 
-        // D2 load_forecast [24..39] 15 维
+        // D2 load_forecast [25..40] 15维
         let load = pad_or_truncate(&self.load_forecast_15min, 15);
         v.extend(load.iter().map(|&x| x as f32));
 
-        // D3 [39..42] 3 维
+        // D3 [40..43] 3维
         v.push(self.current_electricity_price as f32);
         v.push(self.next_period_price as f32);
         v.push(self.price_tariff_id as f32);
 
-        // D4 [42..45] 3 维
+        // D4 [43..46] 3维
         v.push(self.current_demand as f32);
         v.push(self.contract_demand as f32);
         v.push(self.peak_demand_this_month as f32);
 
-        // D5 [45..47] 2 维
+        // D5 [46..48] 2维
         v.push(self.solar_irradiance as f32);
         v.push(self.temperature as f32);
 
-        // D6 [47] 1 维
+        // D6 [48] 1维
         v.push(self.dispatch_p_set.unwrap_or(0.0) as f32);
 
-        // D7 [48] 1 维
+        // D7 [49] 1维
         v.push(self.q_realtime_margin as f32);
 
-        // D8 [49..57] 8 维
+        // D8 [50..56] 8维
         for &s in &self.season_encoding {
             v.push(s as f32);
         }
@@ -188,7 +189,7 @@ impl FusedSystemState {
             v.push(t as f32);
         }
 
-        // D9 [57..61] 4 维
+        // D9 [57..60] 4维（v2.10 新增，v2.14 扩展）
         v.push(if self.safety_override_active {
             1.0
         } else {
@@ -198,14 +199,14 @@ impl FusedSystemState {
         v.push(self.safety_override_consecutive as f32);
         v.push(self.safety_override_ratio as f32);
 
-        // D10 [61..76] 15 维分位数负荷预测
+        // D10 [59..73] 15维（v2.11 新增：分位数负荷预测）
         let quantiles = pad_or_truncate(&self.load_forecast_quantiles, 15);
         v.extend(quantiles.iter().map(|&x| x as f32));
 
-        // D10 [76] 冲击负荷概率
+        // D10 [74] 1维（v2.11 新增：冲击负荷概率）
         v.push(self.shock_load_probability as f32);
 
-        // D10 [77] 基础负荷
+        // D10 [75] 1维（v2.11 新增：基础负荷）
         v.push(self.base_load as f32);
 
         debug_assert_eq!(v.len(), 78, "输入向量必须为 78 维");
@@ -228,84 +229,6 @@ pub fn validate_input_vector(v: &[f32]) -> Result<(), crate::error::AiEngineErro
         }
     }
     Ok(())
-}
-
-/// v3.0 (P0-1): MinMax 归一化观测向量，镜像 `mupc_env/observation.py:normalize_obs()`
-///
-/// 将 78 维原始观测归一化到 [0, 1]，公式: `(x - lo) / (hi - lo + 1e-9)`。
-/// 与 MUPC-AI2 训练管线严格对齐，确保 ONNX 模型接收的输入分布与训练时一致。
-///
-/// 归一化范围来自 `mupc_env/constants.py`。
-/// identity 维度（one-hot、已在 [0,1] 的维度）保持不变。
-pub fn normalize_observation(v: &[f32]) -> Vec<f32> {
-    debug_assert_eq!(v.len(), 78, "观测向量必须为 78 维");
-    let mut out = vec![0.0_f32; 78];
-
-    // D1 [0..8] 9 维实时数据
-    out[0] = minmax(v[0], 0.0, 1.0);       // SOC
-    out[1] = minmax(v[1], 0.0, 150.0);     // PV power
-    out[2] = minmax(v[2], 0.0, 60.0);      // Load power
-    out[3] = minmax(v[3], -200.0, 200.0);  // Grid power
-    out[4] = v[4];                         // Transformer load: identity [0,1]
-    out[5] = minmax(v[5], -50.0, 50.0);    // Battery power
-    out[6] = minmax(v[6], 0.85, 1.15);     // V_a
-    out[7] = minmax(v[7], 0.85, 1.15);     // V_b
-    out[8] = minmax(v[8], 0.85, 1.15);     // V_c
-
-    // D2 [9..23] pv_forecast 15 维
-    for i in 0..15 {
-        out[9 + i] = minmax(v[9 + i], 0.0, 150.0);
-    }
-
-    // D2 [24..38] load_forecast 15 维
-    for i in 0..15 {
-        out[24 + i] = minmax(v[24 + i], 0.0, 60.0);
-    }
-
-    // D3 [39..41] 3 维电价
-    out[39] = minmax(v[39], 0.0, 1.5);     // current_price
-    out[40] = minmax(v[40], 0.0, 1.5);     // next_price
-    out[41] = minmax(v[41], 0.0, 3.0);     // tariff_id
-
-    // D4 [42..44] 3 维需量
-    out[42] = minmax(v[42], 0.0, 500.0);
-    out[43] = minmax(v[43], 0.0, 500.0);
-    out[44] = minmax(v[44], 0.0, 500.0);
-
-    // D5 [45..46] 2 维气象
-    out[45] = minmax(v[45], 0.0, 1500.0);  // solar_irradiance
-    out[46] = minmax(v[46], -20.0, 60.0);  // temperature
-
-    // D6 [47] dispatch_p_set
-    out[47] = minmax(v[47], -200.0, 200.0);
-
-    // D7 [48] q_realtime_margin: identity [0,1]
-    out[48] = v[48];
-
-    // D8 [49..56] season + time one-hot: identity
-    out[49..57].copy_from_slice(&v[49..57]);
-
-    // D9 [57..60] safety_override: identity
-    out[57..61].copy_from_slice(&v[57..61]);
-
-    // D10 [61..75] load_forecast_quantiles 15 维
-    for i in 0..15 {
-        out[61 + i] = minmax(v[61 + i], 0.0, 60.0);
-    }
-
-    // D10 [76] shock_load_probability: identity [0,1]
-    out[76] = v[76];
-
-    // D10 [77] base_load
-    out[77] = minmax(v[77], 0.0, 60.0);
-
-    out
-}
-
-/// MinMax 归一化: `(x - lo) / (hi - lo + 1e-9)`, clamp 到 [0, 1]
-fn minmax(x: f32, lo: f32, hi: f32) -> f32 {
-    let clipped = x.clamp(lo, hi);
-    ((clipped - lo) / (hi - lo + 1e-9)).clamp(0.0, 1.0)
 }
 
 fn pad_or_truncate(vec: &[f64], target_len: usize) -> Vec<f64> {
@@ -502,10 +425,8 @@ mod tests {
         assert!((v[6] - 1.0_f32).abs() < 1e-6);
         // D2 pv_forecast [10]
         assert!((v[10] - 0.1_f32).abs() < 1e-6);
-        // D6 [47] = dispatch_p_set (None → 0.0)
-        assert!((v[47] - 0.0_f32).abs() < 1e-6);
-        // D7 [48] = q_realtime_margin (default 0.5)
-        assert!((v[48] - 0.5_f32).abs() < 1e-6);
+        // D6 [48] = dispatch_p_set (None → 0.0)
+        assert!((v[48] - 0.0_f32).abs() < 1e-6);
         // D10 quantiles [61]
         assert!((v[61] - 0.15_f32).abs() < 1e-6);
         // D10 shock_load_probability [76]
@@ -516,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_validate_input_vector_clean() {
-        let v = vec![1.0_f32; 78]; // v2.14: 76 → 78
+        let v = vec![1.0_f32; 76]; // v2.11: 59 → 76
         assert!(validate_input_vector(&v).is_ok());
     }
 
@@ -558,16 +479,16 @@ mod tests {
     }
 
     #[test]
-    fn test_to_input_vector_78_dim() {
+    fn test_to_input_vector_76_dim() {
         let mut state = FusedSystemState::default();
         state.pv_forecast_15min = vec![0.1; 15];
         state.load_forecast_15min = vec![0.2; 15];
         let v = state.to_input_vector();
-        assert_eq!(v.len(), 78); // v2.14: 78 维
-        // D7 q_realtime_margin [48]
-        assert!((v[48] - 0.5_f32).abs() < 1e-6);
-        // D8 season_encoding[0] [49]
-        assert!((v[49] - 0.0_f32).abs() < 1e-6);
+        assert_eq!(v.len(), 78); // v2.14: 76 → 78
+                                 // D7 q_realtime_margin 在索引 9
+        assert!((v[9] - 0.5_f32).abs() < 1e-6);
+        // D8 season_encoding[0] 在索引 50
+        assert!((v[50] - 0.0_f32).abs() < 1e-6);
         // D9 safety_override (4维): active, p_ref, consecutive, ratio
         assert!((v[57] - 0.0_f32).abs() < 1e-6); // 默认 false → 0.0
         assert!((v[58] - 0.0_f32).abs() < 1e-6); // 默认 None → 0.0

@@ -1,9 +1,10 @@
 use crate::errors::DataProcessingError;
 use crate::recorder::{ExportResult, FaultEventFilter, FaultRecorder, WaveformSummary};
 use crate::telemetry::{FaultCondition, WaveformData};
+use crate::waveform::export::{ComtradeExporter, CsvExporter, DEFAULT_CHANNEL_NAMES};
+use crate::waveform::storage::WaveformReader;
 use async_trait::async_trait;
 use chrono::Utc;
-use crate::errors::mupc_errors::unknown_error;
 use mupc_common::MupcError;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -49,20 +50,10 @@ pub struct FaultRecord {
 pub struct FaultRecorderImpl {
     conn: Mutex<Connection>,
     recording: Mutex<bool>,
-    /// v3.1: 波形文件存储目录
-    waveforms_dir: PathBuf,
 }
 
 impl FaultRecorderImpl {
     pub fn new(db_path: &PathBuf) -> Result<Self, DataProcessingError> {
-        Self::new_with_waveforms(db_path, PathBuf::from("/var/lib/mupc/waveforms"))
-    }
-
-    /// v3.1: 创建带波形目录的录波器
-    pub fn new_with_waveforms(
-        db_path: &PathBuf,
-        waveforms_dir: PathBuf,
-    ) -> Result<Self, DataProcessingError> {
         let conn = Connection::open(db_path)
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
@@ -111,7 +102,6 @@ impl FaultRecorderImpl {
         Ok(Self {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
-            waveforms_dir: waveforms_dir.clone(),
         })
     }
 
@@ -155,7 +145,6 @@ impl FaultRecorderImpl {
     }
 
     pub fn new_in_memory() -> Result<Self, DataProcessingError> {
-        let waveforms_dir = PathBuf::from(".");
         let conn = Connection::open_in_memory()
             .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
@@ -190,7 +179,6 @@ impl FaultRecorderImpl {
         Ok(Self {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
-            waveforms_dir: waveforms_dir.clone(),
         })
     }
 
@@ -390,20 +378,89 @@ impl FaultRecorderImpl {
         self.query_sync(start, end)
     }
 
+    /// 从 DB 查询波形的路径和元数据列
+    fn query_waveform_meta(
+        conn: &Connection,
+        event_id: i64,
+    ) -> Result<Option<(String, u32, u32, u32, u16, String, f64)>, DataProcessingError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT waveform_path, sample_rate, pre_trigger_ms, post_trigger_ms,
+                        channel_mask, trigger_type, trigger_threshold
+                 FROM fault_records WHERE id = ?1",
+            )
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+
+        let mut rows = stmt
+            .query_map([event_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, u16>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, f64>(6)?,
+                ))
+            })
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
+
+        rows.next()
+            .transpose()
+            .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))
+    }
+
     /// 按事件 ID 获取波形数据
     pub fn get_waveform_by_id_sync(
         &self,
         event_id: i64,
     ) -> Result<WaveformData, DataProcessingError> {
-        // TODO: 从 SQLite 中查询波形元数据，再从文件系统读取波形二进制文件
-        let _ = event_id;
-        tracing::debug!("[stub] get_waveform_by_id event_id={}", event_id);
-        Ok(WaveformData {
-            channels: vec![],
-            sample_rate: 0,
-            trigger_timestamp: 0,
-            duration_ms: 0,
-        })
+        let conn = self.conn.lock().unwrap();
+        let meta = Self::query_waveform_meta(&conn, event_id)?;
+
+        match meta {
+            Some((waveform_path, sample_rate, pre_ms, post_ms, _channel_mask, trigger_type, _threshold)) => {
+                let path = Path::new(&waveform_path);
+                let (channels, duration_ms) = if path.exists() {
+                    match WaveformReader::open(path) {
+                        Ok(mut reader) => {
+                            let duration = ((reader.meta.sample_count as f64
+                                / reader.meta.sample_rate as f64)
+                                * 1000.0) as u64;
+                            match reader.read_all() {
+                                Ok((ch, _ts)) => (ch, duration),
+                                Err(e) => {
+                                    tracing::warn!("波形文件读取失败 {}: {}", waveform_path, e);
+                                    (vec![], (pre_ms + post_ms) as u64)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("波形文件打开失败 {}: {}", waveform_path, e);
+                            (vec![], (pre_ms + post_ms) as u64)
+                        }
+                    }
+                } else {
+                    (vec![], (pre_ms + post_ms) as u64)
+                };
+
+                Ok(WaveformData {
+                    channels,
+                    sample_rate: sample_rate as u64,
+                    trigger_timestamp: 0,
+                    duration_ms,
+                })
+            }
+            None => {
+                tracing::debug!("未找到 event_id={} 的波形记录", event_id);
+                Ok(WaveformData {
+                    channels: vec![],
+                    sample_rate: 0,
+                    trigger_timestamp: 0,
+                    duration_ms: 0,
+                })
+            }
+        }
     }
 
     /// 获取波形统计概要
@@ -411,66 +468,240 @@ impl FaultRecorderImpl {
         &self,
         event_id: i64,
     ) -> Result<WaveformSummary, DataProcessingError> {
-        // TODO: 从波形文件中计算统计值（max/min/avg/rms/thd）
-        let _ = event_id;
-        tracing::debug!("[stub] get_waveform_summary event_id={}", event_id);
-        Ok(WaveformSummary {
-            event_id,
-            pre_trigger_stats: vec![],
-            post_trigger_stats: vec![],
-            trigger_type: String::new(),
-            trigger_value: 0.0,
-            trigger_timestamp: 0,
-        })
+        let conn = self.conn.lock().unwrap();
+        let meta = Self::query_waveform_meta(&conn, event_id)?;
+
+        match meta {
+            Some((waveform_path, _sr, pre_ms, _post_ms, _cm, trigger_type, trigger_value)) => {
+                let path = Path::new(&waveform_path);
+                let (pre_stats, post_stats, ts) = if path.exists() {
+                    match WaveformReader::open(path) {
+                        Ok(mut reader) => {
+                            let pre_samples = reader.meta.pre_trigger_samples as usize;
+                            let (channels, timestamps) = reader.read_all().unwrap_or_default();
+                            let trigger_ts = timestamps.first().copied().unwrap_or(0);
+                            let ch_names: Vec<String> = DEFAULT_CHANNEL_NAMES
+                                .iter()
+                                .take(channels.len())
+                                .map(|s| s.to_string())
+                                .collect();
+                            let stats = Self::compute_channel_stats(&channels, pre_samples, &ch_names);
+                            (stats.pre, stats.post, trigger_ts)
+                        }
+                        Err(_) => (vec![], vec![], 0),
+                    }
+                } else {
+                    (vec![], vec![], 0)
+                };
+
+                Ok(WaveformSummary {
+                    event_id,
+                    pre_trigger_stats: pre_stats,
+                    post_trigger_stats: post_stats,
+                    trigger_type,
+                    trigger_value,
+                    trigger_timestamp: ts,
+                })
+            }
+            None => Ok(WaveformSummary {
+                event_id,
+                pre_trigger_stats: vec![],
+                post_trigger_stats: vec![],
+                trigger_type: String::new(),
+                trigger_value: 0.0,
+                trigger_timestamp: 0,
+            }),
+        }
     }
 
-    /// 导出 COMTRADE 格式（v3.1: 结构已就位）
+    /// 导出 COMTRADE 格式
     pub fn export_comtrade_sync(
         &self,
         event_id: i64,
         output_dir: &Path,
     ) -> Result<ExportResult, DataProcessingError> {
-        // v3.1: waveforms_dir 字段已就位，ComtradeExporter/CsvExporter 模块已存在。
-        // 接入需要对齐 WaveformMeta 字段名与 waveform::export 模块的实际 API 签名。
-        // 步骤: SQLite 读元数据 -> 构造 WaveformMeta -> ComtradeExporter/CsvExporter 导出
+        let conn = self.conn.lock().unwrap();
+        let meta = Self::query_waveform_meta(&conn, event_id)?;
+
+        let (waveform_path, device_id) = match meta {
+            Some((path, ..)) => (path, "MUPC001".to_string()),
+            None => {
+                return Ok(ExportResult {
+                    files: vec![],
+                    format: "COMTRADE".to_string(),
+                });
+            }
+        };
+
+        let waveform_path = Path::new(&waveform_path);
+        if !waveform_path.exists() {
+            return Ok(ExportResult {
+                files: vec![],
+                format: "COMTRADE".to_string(),
+            });
+        }
+
+        let mut reader = WaveformReader::open(waveform_path).map_err(|e| {
+            DataProcessingError::WaveformError(format!("打开波形文件失败: {}", e))
+        })?;
+        let (channels, _timestamps) = reader.read_all().map_err(|e| {
+            DataProcessingError::WaveformError(format!("读取波形数据失败: {}", e))
+        })?;
+
+        let waveforms_dir = waveform_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let exporter = ComtradeExporter::new(
+            waveforms_dir,
+            output_dir.to_path_buf(),
+            device_id,
+        );
+
+        let channel_names: Vec<String> =
+            DEFAULT_CHANNEL_NAMES.iter().take(channels.len()).map(|s| s.to_string()).collect();
+
+        let base = output_dir.join(format!("event_{}", event_id));
+        let cfg_path = exporter
+            .export_cfg(&base.with_extension("cfg"), &reader.meta, &channel_names)
+            .map_err(|e| DataProcessingError::WaveformError(format!("COMTRADE cfg 导出失败: {}", e)))?;
+        let dat_path = exporter
+            .export_dat(&base.with_extension("dat"), &channels)
+            .map_err(|e| DataProcessingError::WaveformError(format!("COMTRADE dat 导出失败: {}", e)))?;
+
         Ok(ExportResult {
-            files: vec![],
+            files: vec![cfg_path, dat_path],
             format: "COMTRADE".to_string(),
         })
     }
 
-    /// 导出 CSV 格式（v3.1: 结构就位，待对齐 waveform::export API）
+    /// 导出 CSV 格式
     pub fn export_csv_sync(
         &self,
         event_id: i64,
         output_dir: &Path,
     ) -> Result<ExportResult, DataProcessingError> {
-        let _ = event_id;
-        let _ = output_dir;
-        // v3.1: ComtradeExporter/CsvExporter 已存在于 waveform/export.rs，
-        // 接入时调用 CsvExporter::new(output_dir).export_csv(&meta)
-        tracing::debug!("[pending] export_csv event_id={}, output_dir={:?}", event_id, output_dir);
+        let conn = self.conn.lock().unwrap();
+        let meta = Self::query_waveform_meta(&conn, event_id)?;
+
+        let waveform_path = match meta {
+            Some((path, ..)) => path,
+            None => {
+                return Ok(ExportResult {
+                    files: vec![],
+                    format: "CSV".to_string(),
+                });
+            }
+        };
+
+        let waveform_path = Path::new(&waveform_path);
+        if !waveform_path.exists() {
+            return Ok(ExportResult {
+                files: vec![],
+                format: "CSV".to_string(),
+            });
+        }
+
+        let mut reader = WaveformReader::open(waveform_path).map_err(|e| {
+            DataProcessingError::WaveformError(format!("打开波形文件失败: {}", e))
+        })?;
+        let (channels, _timestamps) = reader.read_all().map_err(|e| {
+            DataProcessingError::WaveformError(format!("读取波形数据失败: {}", e))
+        })?;
+
+        let exporter = CsvExporter::new(output_dir.to_path_buf());
+        let channel_names: Vec<String> =
+            DEFAULT_CHANNEL_NAMES.iter().take(channels.len()).map(|s| s.to_string()).collect();
+
+        let csv_path = output_dir.join(format!("event_{}.csv", event_id));
+        let out = exporter
+            .export_csv(&csv_path, &channels, &channel_names, reader.meta.sample_rate)
+            .map_err(|e| DataProcessingError::WaveformError(format!("CSV 导出失败: {}", e)))?;
+
         Ok(ExportResult {
-            files: vec![],
+            files: vec![out],
             format: "CSV".to_string(),
         })
     }
+
+    /// 计算各通道故障前/后的统计值
+    fn compute_channel_stats(
+        channels: &[Vec<f64>],
+        pre_samples: usize,
+        channel_names: &[String],
+    ) -> PerTriggerStats {
+        let mut pre = Vec::with_capacity(channels.len());
+        let mut post = Vec::with_capacity(channels.len());
+
+        for (i, ch) in channels.iter().enumerate() {
+            let name = channel_names.get(i).cloned().unwrap_or_default();
+            let (pre_slice, post_slice) = if pre_samples < ch.len() {
+                (&ch[..pre_samples], &ch[pre_samples..])
+            } else {
+                (&ch[..], &[][..])
+            };
+
+            pre.push(compute_stats(pre_slice, &name));
+            post.push(compute_stats(post_slice, &name));
+        }
+
+        PerTriggerStats { pre, post }
+    }
+}
+
+/// 单通道统计值
+fn compute_stats(samples: &[f64], channel_name: &str) -> crate::recorder::ChannelStats {
+    if samples.is_empty() {
+        return crate::recorder::ChannelStats {
+            channel_name: channel_name.to_string(),
+            max: 0.0,
+            min: 0.0,
+            avg: 0.0,
+            rms: 0.0,
+            thd: None,
+        };
+    }
+
+    let max = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min = samples.iter().cloned().fold(f64::INFINITY, f64::min);
+    let sum: f64 = samples.iter().sum();
+    let avg = sum / samples.len() as f64;
+    let rms = (samples.iter().map(|&x| x * x).sum::<f64>() / samples.len() as f64).sqrt();
+
+    crate::recorder::ChannelStats {
+        channel_name: channel_name.to_string(),
+        max,
+        min,
+        avg,
+        rms,
+        thd: None,
+    }
+}
+
+/// 故障前/后统计分组
+struct PerTriggerStats {
+    pre: Vec<crate::recorder::ChannelStats>,
+    post: Vec<crate::recorder::ChannelStats>,
 }
 
 #[async_trait]
 impl FaultRecorder for FaultRecorderImpl {
     async fn record(&self, condition: &FaultCondition) -> Result<(), MupcError> {
         self.record_sync(condition).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
 
     async fn query(&self, start: i64, end: i64) -> Result<Vec<FaultRecord>, MupcError> {
         self.query_sync(start, end).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
@@ -495,16 +726,20 @@ impl FaultRecorder for FaultRecorderImpl {
         filter: &FaultEventFilter,
     ) -> Result<crate::recorder::PaginatedEvents, MupcError> {
         self.query_events_sync(filter).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
 
     async fn query_events_by_type(&self, fault_type: &str) -> Result<Vec<FaultRecord>, MupcError> {
         self.query_events_by_type_sync(fault_type).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
@@ -515,24 +750,30 @@ impl FaultRecorder for FaultRecorderImpl {
         end: i64,
     ) -> Result<Vec<FaultRecord>, MupcError> {
         self.query_events_by_time_sync(start, end).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
 
     async fn get_waveform_by_id(&self, event_id: i64) -> Result<WaveformData, MupcError> {
         self.get_waveform_by_id_sync(event_id).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
 
     async fn get_waveform_summary(&self, event_id: i64) -> Result<WaveformSummary, MupcError> {
         self.get_waveform_summary_sync(event_id).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }
@@ -558,8 +799,10 @@ impl FaultRecorder for FaultRecorderImpl {
         output_dir: &Path,
     ) -> Result<ExportResult, MupcError> {
         self.export_csv_sync(event_id, output_dir).map_err(|e| {
-            unknown_error(
+            MupcError::new(
+                mupc_common::ErrorCode::Unknown,
                 e.to_string(),
+                "data-processing",
             )
         })
     }

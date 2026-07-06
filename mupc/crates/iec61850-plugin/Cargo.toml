@@ -28,12 +28,8 @@ webpki-roots = "0.26"
 [dev-dependencies]
 tokio-test = "0.4"
 
-[lib]
-crate-type = ["rlib", "cdylib"]
-name = "iec61850_plugin"
-path = "src/lib.rs"
-
 [features]
-default = ["fake_iec61850"]
+# 暂时禁用 real_iec61850，因为没有实际的 FFI 实现
+# 后续需要集成 libIEC61850 C 库时再启用
 real_iec61850 = ["dep:iec61850"]
 fake_iec61850 = []

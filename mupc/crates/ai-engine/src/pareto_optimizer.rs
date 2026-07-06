@@ -149,7 +149,10 @@ impl ParetoWeightOptimizer {
     /// 2. 若 p 被任意 q 支配，则 p 不属于 Pareto 前沿
     /// 3. 若不存在支配 p 的个体，则 p 属于第一前沿
     /// 4. 标记属于第一前沿的个体，从集合中移除，重复上述过程得到后续前沿
-    fn fast_non_dominated_sort(&self, population: &[WeightCandidate]) -> Vec<Vec<WeightCandidate>> {
+    fn fast_non_dominated_sort(
+        &self,
+        population: &[WeightCandidate],
+    ) -> Vec<Vec<WeightCandidate>> {
         let n = population.len();
         if n == 0 {
             return vec![vec![]];
@@ -251,9 +254,8 @@ impl ParetoWeightOptimizer {
             let obj_range = front[n - 1].objectives[obj_idx] - front[0].objectives[obj_idx];
             if obj_range > 0.0 {
                 for i in 1..n - 1 {
-                    front[i].crowding_distance += (front[i + 1].objectives[obj_idx]
-                        - front[i - 1].objectives[obj_idx])
-                        / obj_range;
+                    front[i].crowding_distance +=
+                        (front[i + 1].objectives[obj_idx] - front[i - 1].objectives[obj_idx]) / obj_range;
                 }
             }
         }
@@ -292,10 +294,7 @@ impl ParetoWeightOptimizer {
                     rng.gen_range(0.0..1.0), // demand_violation
                 ];
 
-                WeightCandidate {
-                    weights: w,
-                    objectives,
-                }
+                WeightCandidate { weights: w, objectives }
             })
             .collect()
     }

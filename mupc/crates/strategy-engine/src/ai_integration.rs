@@ -310,7 +310,12 @@ impl AiIntegrator {
 
         // 发送双参数到实时控制模块
         if let Some(ref client) = self.intercore_client {
-            let cmd = DualParamCommand::new(action.p_ref, action.k_droop, true, "Emergency");
+            let cmd = DualParamCommand::new(
+                action.p_ref,
+                action.k_droop,
+                true,
+                "Emergency",
+            );
             match client.send_dual_param(&cmd).await {
                 Ok(_) => {
                     tracing::debug!(

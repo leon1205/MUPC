@@ -13,11 +13,8 @@ mod tests {
             model_path: PathBuf::from("/tmp/test_lstm.rknn"),
             input_window_secs: 3600,
             output_horizon_secs: 900,
-            step_seconds: 60,
             quantization: mupc_ai_engine::config::QuantizationType::INT8,
             expected_sha256: None,
-            input_features: 1,
-            yesterday_offset_steps: 96,
         }
     }
 

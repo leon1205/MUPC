@@ -6,6 +6,8 @@
 | v2.0 | 2026-06-15 | 项目经理 | 审计更新 — 新增文档-代码一致性审计发现 |
 | v2.1 | 2026-06-18 | 项目经理 | v2.17 新增：SafetyRLWrapper broadcast channel 组装（U-15）|
 | v2.2 | 2026-06-21 | 项目经理 | v3.0 新增：训练-部署输入维度不一致（U-16，P0 已修复）+ 根因分析 |
+| v3.0 | 2026-07-06 | 项目经理 | v3.1 审计后更新：U-15 已修复、4 轮代码审查归档、在线微调/交叉编译/部署体系完成、新增 P0 编译错误 + P1 存根项 |
+| v3.1 | 2026-07-06 | 项目经理 | P0 紧急修复 + P2 清理：U-17/U-18 编译错误、4.3 Windows 日志路径、U-21~U-24（reward_config/dynamic_loader/TLS/OTA 请求） |
 
 ---
 
@@ -142,7 +144,7 @@
 | **影响范围** | 开发环境（Windows）不兼容 |
 | **优先级** | 低 |
 | **修复建议** | 根据 `std::env::consts::OS` 选择不同的默认路径 |
-| **状态** | 🔲 待优化 |
+| **状态** | ✅ 已修复 (v3.1) — `LogConfig::default()` 已通过 `cfg!(windows)` 编译时检测自动选择路径 |
 
 ---
 
@@ -156,8 +158,14 @@
 | 安全增强 | MQTT over TLS、国密 SM2/SM4 | 中 | ⚠️ 部分实现（SM3/SM4 CBC 完成；SM2签名/SM4 GCM 待 gmsm 0.14） |
 | 协议扩展 | IEC 61850-7-420 | 中 | ⚠️ 部分实现（原始TCP+自研ASN.1，待 libIEC61850 FFI） |
 | AI 优化引擎 | LSTM/TCN 预测、MADDPG/PPO 决策 | 低 | ✅ 已完成 |
+| 在线微调 | PER/KL/影子模型/热切换 | 中 | ✅ 已完成（2026-07） |
 | OTA 升级 | 差分升级、安全启动 | 低 | ⚠️ 模型OTA完成；固件OTA骨架就位（A/B分区/签名待实现） |
 | 故障录波 | 完整实现 | 中 | ⚠️ 4个方法为stub（get_waveform等） |
+| mupc-core-bin | 主控进程入口（14 子系统编排） | 高 | ✅ 基本完成（2 个 Phase 2+ TODO 遗留） |
+| aarch64 交叉编译 | CMake + build.rs RKNN 检测 + Docker | 高 | ✅ 已完成（2026-07） |
+| 部署体系 | deploy.sh + setup-deps.sh + deploy.md | 中 | ✅ 已完成（2026-07） |
+| 数据库迁移幂等化 | ALTER TABLE 前检查列是否存在 | 中 | ✅ 已完成（2026-07） |
+| npu feature 自动检测 | Linux 默认启用、Windows 自动 stub | 中 | ✅ 已完成（2026-07） |
 
 ---
 
@@ -199,9 +207,23 @@
 | U-12 | 08 Web | **P1** | SSE 基于 query 的过滤 (`types=`) 未实现 | ✅ 已修复 — sse_handler 支持 ?types= 参数过滤 |
 | U-13 | 05 AI引擎 | **P2** | `RunningMode` 代码用 `SeasonalLoadManagement`，PRD 文档用 `AgriculturalIrrigation` | ✅ 已修复 — 统一采用 `SeasonalLoadManagement`（代码+文档） |
 | U-14 | 07 OTA | **P2** | crate 目录名 `ota-update/`，设计文档用 `update-engine` | ✅ 已修复 — 设计文档统一为 `ota-update`（ADR-007 决议更新） |
-| U-15 | 05 AI引擎 | **P1** | v2.17 SafetyRLWrapper `event_sender` 未连接 — broadcast channel 需 main.rs 组装，当前 `ModelManager::new()` 传入 `None`，违规时无 SSE 实时推送 | 需系统集成入口（bin crate）创建 broadcast channel，Sender 注入 SafetyRLWrapper，Receiver 转发到 SsePushService（~5 行胶水代码） |
+| U-15 | 05 AI引擎 | **P1** | v2.17 SafetyRLWrapper `event_sender` 未连接 — broadcast channel 需 main.rs 组装，当前 `ModelManager::new()` 传入 `None`，违规时无 SSE 实时推送 | ✅ 已修复（2026-06-22）：`ModelManager::new()` 创建 broadcast::channel(64)，`subscribe_safety_events()` 暴露给 SSE 推送链路 |
+| U-17 | 05 AI引擎 | **P0** | `safety_wrapper.rs` 测试编译失败 — `predict()` 签名为 `(state, action, p_cur)`（3 参数），但 `:461`、`:482` 处测试仅传 2 个参数 | ✅ 已修复（2026-07-06）：两处测试调用补 `0.0` 作为 `p_cur` 实参 |
+| U-18 | 10 MQTT | **P0** | `mqtt-plugin/tests/mqtt_tests.rs` 编译失败 — `use mupc_mqtt_plugin::` 引用错误 crate 名，应为 `mqtt_plugin` | ✅ 已修复（2026-07-06）：`use mqtt_plugin::` 对齐 Cargo.toml lib name |
 
-### 6.3 U-16 根因分析
+### 6.3 v3.0 新增存根/TODO 项（P1/P2）
+
+| # | 模块 | 严重程度 | 问题 | 说明 |
+|---|------|----------|------|------|
+| U-19 | 05 AI引擎 | **P1** | `prediction_pipeline.rs` EC runtime 推理存根 — `ec_runtime.run()` 调用点为 `TODO`，返回 `vec![0.0]` | ✅ 已修复（2026-07-06）：接入 `ec_runtime.run()` 实际推理，f32→f64 转换，失败时优雅降级为零修正 |
+| U-20 | 03 数据 | **P1** | `fault_recorder_impl.rs` 4 个方法为存根：分页查询、waveform 元数据、文件系统读取、统计聚合 | ✅ 已修复（2026-07-06）：接入 WaveformReader 读取 .wave 文件 + ComtradeExporter/CsvExporter 实际导出 + 通道统计计算 |
+| U-21 | 05 AI引擎 | **P2** | `reward_calculator.rs` v2.8 参数硬编码 — `pv_high_voltage_penalty`、`smooth_lambda` 等未从配置加载 | ✅ 已修复（2026-07-06）：`RewardThresholdConfig` 新增 3 字段，`new_with_thresholds()` 从配置读取 |
+| U-22 | 05 AI引擎 | **P2** | `dynamic_config_loader.rs` 使用旧 API — `TODO(Task 6): 替换为 update_action_space_config_full` | ✅ 已修复（2026-07-06）：替换为 `update_action_space_config_full`，补 5 个缺失参数 |
+| U-23 | 10 MQTT | **P2** | `mqtt-plugin/src/client.rs` TLS 证书加载存根 — `TODO: Implement proper certificate loading from config paths` | ✅ 已修复（2026-07-06）：`build_tls_configuration()` 从 `MqttConfig` 路径加载 CA/客户端证书/密钥 |
+| U-24 | 07 OTA | **P2** | `ota-update/src/manager.rs` OTA 服务器请求存根 — 返回硬编码模拟数据 | ✅ 已修复（2026-07-06）：`query_versions_from_server()` 通过 reqwest 发 HTTP GET 请求，网络不可达时优雅降级 |
+| U-25 | 03 数据 | **P2** | `waveform/report.rs` 4 个 TODO — IEC 104 文件传输、MQTT 桥接对接 | 🔴 阻塞 — 需 gateway IEC 104 TI=122 文件传输 + MQTT 主题发布先完成 |
+
+### 6.4 U-16 根因分析
 
 **发现过程**：2026-06-21 启动新一轮完整训练，重新审视训练-部署全链路对齐，逐一比对 `/work/MUPC-AI` Python 训练管线和 `/work/MUPC` Rust 推理侧的数据流，发现两者 ONNX input shape 不一致。
 
@@ -230,33 +252,55 @@
 |------|------|--------|--------|------|
 | 严重问题 (Phase 1) | 2 | 2 | 0 | ✅ 全部修复 |
 | 警告问题 (Phase 1) | 4 | 4 | 0 | ✅ 全部修复 |
-| 优化建议 (Phase 1) | 3 | 2 | 1 | 🔄 1 项待优化 |
+| 优化建议 (Phase 1) | 3 | 3 | 0 | ✅ 全部修复 |
 | 审计发现-已修复 (本轮) | 11 | 11 | 0 | ✅ 全部修复 |
 | 审计发现-未修复 (P0) | 6 | 0 | 6 | 🔴 待规划 |
 | 审计发现-未修复 (P1) | 6 | 4 | 2 | 🟡 待排期 |
-| v2.17 新增 (P1) | 1 | 0 | 1 | 🟡 待排期 |
+| v2.17 新增 (P1) | 1 | 1 | 0 | ✅ 已修复 |
 | 审计发现-未修复 (P2) | 2 | 2 | 0 | ✅ 全部修复 |
-| **总计** | **35** | **25** | **10** | |
+| v3.0 新增 — P0 编译错误 | 2 | 2 | 0 | ✅ 已修复 |
+| v3.0 新增 — P1 存根/TODO | 2 | 2 | 0 | ✅ 全部修复 |
+| v3.0 新增 — P2 存根/TODO | 5 | 4 | 1 | 🔵 1 项被依赖阻塞 |
+| **总计** | **44** | **35** | **9** | |
 
 ---
 
 ## 8. 修复计划
 
-### 7.1 短期修复（1-2天）
+### 8.1 紧急修复（P0 — 编译错误）✅ 已完成（2026-07-06）
 
-| 问题 | 负责人 | 预计时间 |
-|------|--------|----------|
+| 问题 | 状态 | 说明 |
+|------|------|------|
+| U-17 safety_wrapper 测试签名不匹配 | ✅ | `predict()` 调用补 `p_cur: 0.0` 参数 |
+| U-18 mqtt-plugin 测试 crate 名错误 | ✅ | `use mqtt_plugin::` 替代 `mupc_mqtt_plugin` |
+
+### 8.2 v3.0 P2 清理 ✅ 已完成（2026-07-06）
+
+| 问题 | 状态 | 说明 |
+|------|------|------|
+| 4.3 Windows 日志路径 | ✅ | 已有 `cfg!(windows)` 编译时检测 |
+| U-21 reward_calculator 硬编码参数 | ✅ | `RewardThresholdConfig` 扩展 3 字段 |
+| U-22 dynamic_config_loader 旧 API | ✅ | 替换为 `update_action_space_config_full` |
+| U-23 mqtt-plugin TLS 证书加载 | ✅ | 从 `MqttConfig` 路径加载 CA/客户端证书 |
+| U-24 ota-update OTA 服务器请求 | ✅ | reqwest HTTP GET + 优雅降级 |
+
+### 8.3 短期修复（P0/P1 — 1-2 周）
+
+| 问题 | 预计时间 | 阻塞 |
+|------|----------|------|
 | U-01 RBAC 鉴权中间件 | 2天 | 需确认角色模型和权限矩阵 |
 | U-02 sqlx/rusqlite 双库统一 | 3天 | 需评估 sqlx 功能覆盖度 |
+| ~~U-19~~ prediction_pipeline EC runtime 接入 | ✅ | 已接入 `ec_runtime.run()` 实际推理 + 优雅降级 |
+| ~~U-20~~ fault_recorder 存根实现 | ✅ | 接入 WaveformReader + ComtradeExporter/CsvExporter |
 
-### 8.2 中期修复（P1 — 本月）
+### 8.4 中期修复（P1 — 本月）
 
 | 问题 | 预计时间 | 阻塞 |
 |------|----------|------|
 | U-07 固件 OTA 分区切换 + SM2 验签 | 3天 | 需 SM2 签名就绪 |
 | U-08 系统监控完善 | 2天 | 需硬件看门狗驱动 |
 
-### 8.3 长期修复（外部依赖）
+### 8.5 长期修复（外部依赖）
 
 | 问题 | 预计时间 | 阻塞 |
 |------|----------|------|
@@ -264,6 +308,7 @@
 | U-04 rustls CryptoProvider | 3天 | 依赖 U-03 |
 | U-05 安全启动信任链 | 5天 | RK3588 OTP/eFuse 驱动 |
 | U-06 WiFi/NearLink/BLE | 10天 | Hi2821 硬件 + 内核驱动 |
+| U-25 waveform/report 对接 | 3天 | 依赖 IEC 104 TI=122 + MQTT 主题发布完成 |
 
 ---
 
@@ -290,4 +335,5 @@
 
 **记录人**: 项目经理
 **记录日期**: 2026-05-27
-**版本**: v1.0
+**最后更新**: 2026-07-06
+**版本**: v3.1

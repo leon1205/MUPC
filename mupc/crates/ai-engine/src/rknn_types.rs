@@ -1,11 +1,6 @@
 //! RKNN Runtime 类型定义
 //!
 //! 封装 RKNN C API 的数据结构，用于 FFI 边界
-//!
-//! ## Feature Gate
-//!
-//! 本模块仅在 `npu` feature 启用时编译（由 `lib.rs` 中的
-//! `#[cfg(feature = "npu")] pub mod rknn_types;` 控制）。
 
 use std::os::raw::c_int;
 

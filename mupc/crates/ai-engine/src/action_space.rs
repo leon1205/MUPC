@@ -17,7 +17,6 @@ pub struct ActionSpaceConfig {
     /// 正值，电池放电功率上限 (kW)
     pub max_batt_discharge_power: f64,
     /// 非负，切负荷上限 (kW)
-    /// v2.15: 已下沉至 strategy-engine，本字段保留向后兼容，新代码不应依赖
     pub max_load_shedding: f64,
     /// 视在功率上限 (kVA)
     pub max_apparent_power_kva: f64,
@@ -26,7 +25,6 @@ pub struct ActionSpaceConfig {
     /// 无功变化率限制 (kVar/s)
     pub q_batt_ramp_limit_kvar: f64,
     /// 光伏限功率下限
-    /// v2.15: 已下沉至 strategy-engine，本字段保留向后兼容，新代码不应依赖
     pub pv_limit_min: f64,
 
     // === v2.6 新增字段 ===
@@ -124,8 +122,8 @@ impl ActionSpaceConfig {
             soc_min: 0.10,
             soc_max: 0.90,
             overload_threshold: 0.85,
-            k_droop_min: Some(0.0),
-            k_droop_max: Some(30.0),
+            k_droop_min: Some(-100.0),
+            k_droop_max: Some(100.0),
         }
     }
 }
@@ -149,8 +147,8 @@ mod tests {
             soc_min: 0.10,
             soc_max: 0.90,
             overload_threshold: 0.85,
-            k_droop_min: Some(0.0),
-            k_droop_max: Some(30.0),
+            k_droop_min: Some(-100.0),
+            k_droop_max: Some(100.0),
         }
     }
 

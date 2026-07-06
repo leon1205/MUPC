@@ -698,23 +698,23 @@ impl PredictionPipeline {
         };
 
         // --- Step EC-2: 误差修正推理（NPU, 串行 PV + Load） ---
-        // 注意：误差修正模型输入为残差窗口 [T]，输出为未来修正值 [15]
-        // 当前阶段使用简化的零向量推理（模型文件由 MUPC-AI2 训练管线提供）。
-        // 若 Runtime 未加载，则跳过推理。
-
+        // 误差修正模型输入为残差窗口 [T]，输出为未来修正值 [15]
         let pv_correction: Vec<f64> = if !ec_runtime.is_loaded() {
-            // EC Runtime 未加载时使用零修正（y_corrected = y_pred + 0 = y_pred）
             vec![0.0_f64; pv_pred.len()]
         } else {
-            // 实际推理：ec_runtime.run(&pv_residual_input)
-            // 当前占位：模型就绪后替换为实际推理调用
             tracing::debug!(
                 "EC 推理 PV: input_len={}, output_horizon={}",
                 pv_residual_input.len(),
                 pv_pred.len()
             );
-            // TODO: 接入 ec_runtime.run() 实际推理
-            vec![0.0_f64; pv_pred.len()]
+            ec_runtime
+                .run(&pv_residual_input)
+                .await
+                .map(|v| v.into_iter().map(f64::from).collect())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("EC PV 推理失败，回退零修正: {}", e);
+                    vec![0.0_f64; pv_pred.len()]
+                })
         };
 
         let load_correction: Vec<f64> = if !ec_runtime.is_loaded() {
@@ -725,8 +725,14 @@ impl PredictionPipeline {
                 load_residual_input.len(),
                 load_pred.len()
             );
-            // TODO: 接入 ec_runtime.run() 实际推理
-            vec![0.0_f64; load_pred.len()]
+            ec_runtime
+                .run(&load_residual_input)
+                .await
+                .map(|v| v.into_iter().map(f64::from).collect())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("EC Load 推理失败，回退零修正: {}", e);
+                    vec![0.0_f64; load_pred.len()]
+                })
         };
 
         // --- Step EC-3: 修正输出 ---

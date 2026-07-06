@@ -127,7 +127,7 @@ impl Rs485Device {
     fn configure_port(&self, fd: RawFd) -> Result<(), Rs485Error> {
         // 获取终端属性
         let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
-        let mut termios = unsafe {
+        let termios = unsafe {
             if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
                 return Err(Rs485Error::config_failed("获取终端属性失败"));
             }
@@ -181,7 +181,7 @@ impl Rs485Device {
         termios.c_cflag |= libc::CLOCAL | libc::CREAD;
 
         // 设置超时
-        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as u8;
+        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as i32;
         termios.c_cc[libc::VMIN] = 0;
 
         // 应用设置
@@ -198,7 +198,7 @@ impl Rs485Device {
     /// 关闭串口
     pub fn close(&self) {
         let mut port_guard = self.port_fd.lock();
-        if let Some(fd) = port_guard.take() {
+        if let Some(_fd) = port_guard.take() {
             #[cfg(unix)]
             {
                 if unsafe { libc::close(fd) } < 0 {
@@ -227,28 +227,16 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(())`: 发送成功
     /// - `Err(Rs485Error)`: 发送失败
-    pub fn send_frame(&self, frame: &[u8]) -> Result<(), Rs485Error> {
+    pub fn send_frame(&self, _frame: &[u8]) -> Result<(), Rs485Error> {
         let port_guard = self.port_fd.lock();
-        let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
+        let _fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
-            // 清空收发缓冲区（TCIOFLUSH），防止残留数据破坏帧结构
-            unsafe { libc::tcflush(fd, libc::TCIOFLUSH) };
-
-            let mut written = 0usize;
-            while written < frame.len() {
-                let result = unsafe {
-                    libc::write(
-                        fd,
-                        frame.as_ptr().add(written) as *const libc::c_void,
-                        frame.len() - written,
-                    )
-                };
-                if result < 0 {
-                    return Err(Rs485Error::send_failed("发送失败"));
-                }
-                written += result as usize;
+            let result =
+                unsafe { libc::write(_fd, _frame.as_ptr() as *const libc::c_void, _frame.len()) };
+            if result < 0 {
+                return Err(Rs485Error::send_failed("发送失败"));
             }
             Ok(())
         }
@@ -267,35 +255,32 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(Vec<u8>)`: 接收到的数据
     /// - `Err(Rs485Error)`: 接收失败
-    pub fn recv_frame(&self, timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
+    pub fn recv_frame(&self, _timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
         let port_guard = self.port_fd.lock();
-        let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
+        let _fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
+            // 设置串口超时使用 termios
             let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
-            let mut termios = unsafe {
-                if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
+            let termios = unsafe {
+                if libc::tcgetattr(_fd, termios.as_mut_ptr()) < 0 {
                     return Err(Rs485Error::recv_failed("获取终端属性失败"));
                 }
                 termios.assume_init()
             };
-            let original_termios = termios;
 
             // 设置读取超时：VTIME 为十分之一秒
-            termios.c_cc[libc::VTIME] = (timeout_ms / 100) as u8;
+            termios.c_cc[libc::VTIME] = (_timeout_ms / 100) as i32;
             termios.c_cc[libc::VMIN] = 0;
 
-            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
+            if unsafe { libc::tcsetattr(_fd, libc::TCSANOW, &termios) } < 0 {
                 return Err(Rs485Error::recv_failed("设置终端属性失败"));
             }
 
             let mut buffer = vec![0u8; 1024];
             let n =
-                unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
-
-            // 恢复原始终端属性
-            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original_termios) };
+                unsafe { libc::read(_fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
 
             if n < 0 {
                 return Err(Rs485Error::recv_failed("接收失败或超时"));
@@ -332,7 +317,7 @@ impl Rs485Device {
     ///
     /// # Arguments
     /// - `request`: 请求数据
-    /// - `recvtimeout_ms`: 接收超时（毫秒）
+    /// - `recv_timeout_ms`: 接收超时（毫秒）
     ///
     /// # Returns
     /// - `Ok(DataFrame)`: 接收到的数据帧
@@ -340,7 +325,7 @@ impl Rs485Device {
     pub fn transaction(
         &self,
         request: &[u8],
-        recvtimeout_ms: u64,
+        recv_timeout_ms: u64,
     ) -> Result<DataFrame, Rs485Error> {
         let _guard = self.tx_lock.lock();
 
@@ -354,7 +339,7 @@ impl Rs485Device {
         self.set_dir(Rs485Dir::Recv)?;
 
         // 4. 接收响应
-        let data = self.recv_frame(recvtimeout_ms)?;
+        let data = self.recv_frame(recv_timeout_ms)?;
         Ok(DataFrame::new(self.device_id.clone(), data))
     }
 
@@ -364,7 +349,7 @@ impl Rs485Device {
     ///
     /// # Arguments
     /// - `data`: 原始数据载荷
-    /// - `recvtimeout_ms`: 接收超时（毫秒）
+    /// - `recv_timeout_ms`: 接收超时（毫秒）
     ///
     /// # Returns
     /// - `Ok(DataFrame)`: 解码后的数据帧
@@ -372,7 +357,7 @@ impl Rs485Device {
     pub fn transaction_with_handler(
         &self,
         data: &[u8],
-        recvtimeout_ms: u64,
+        recv_timeout_ms: u64,
     ) -> Result<DataFrame, Rs485Error> {
         let _guard = self.tx_lock.lock();
 
@@ -389,7 +374,7 @@ impl Rs485Device {
         self.set_dir(Rs485Dir::Recv)?;
 
         // 5. 接收响应
-        let response = self.recv_frame(recvtimeout_ms)?;
+        let response = self.recv_frame(recv_timeout_ms)?;
 
         // 6. 使用 handler 解码响应
         self.handler
@@ -403,16 +388,16 @@ impl Rs485Device {
     }
 
     /// 发送并接收数据
-    pub fn send_recv(&self, frame: &[u8], recvtimeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
+    pub fn send_recv(&self, frame: &[u8], recv_timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
         self.send_frame(frame)?;
-        self.recv_frame(recvtimeout_ms)
+        self.recv_frame(recv_timeout_ms)
     }
 
     /// 发送光伏限功率命令
     ///
     /// # Arguments
     /// - `limit_ratio`: 限功率比例 [0.0, 1.0]，0.0=完全限功率，1.0=不限功率
-    /// - `recvtimeout_ms`: 接收超时
+    /// - `recv_timeout_ms`: 接收超时
     ///
     /// # Returns
     /// - `Ok(response)`: 设备响应数据
@@ -420,7 +405,7 @@ impl Rs485Device {
     pub fn send_pv_limit(
         &self,
         limit_ratio: f64,
-        recvtimeout_ms: u64,
+        recv_timeout_ms: u64,
     ) -> Result<Vec<u8>, Rs485Error> {
         // 编码限功率命令数据
         // 格式: [功能码=0x10, 功率高字节, 功率低字节]
@@ -437,14 +422,14 @@ impl Rs485Device {
         );
 
         let frame = self.handler.encode_request(&self.device_id, &data);
-        self.send_recv(&frame, recvtimeout_ms)
+        self.send_recv(&frame, recv_timeout_ms)
     }
 
     /// 发送负荷切除命令
     ///
     /// # Arguments
     /// - `power_kw`: 切除功率 (kW)
-    /// - `recvtimeout_ms`: 接收超时
+    /// - `recv_timeout_ms`: 接收超时
     ///
     /// # Returns
     /// - `Ok(response)`: 设备响应数据
@@ -452,7 +437,7 @@ impl Rs485Device {
     pub fn send_load_shedding(
         &self,
         power_kw: f64,
-        recvtimeout_ms: u64,
+        recv_timeout_ms: u64,
     ) -> Result<Vec<u8>, Rs485Error> {
         // 编码负荷切除命令数据
         // 格式: [功能码=0x11, 功率高字节, 功率低字节]
@@ -468,7 +453,7 @@ impl Rs485Device {
         );
 
         let frame = self.handler.encode_request(&self.device_id, &data);
-        self.send_recv(&frame, recvtimeout_ms)
+        self.send_recv(&frame, recv_timeout_ms)
     }
 
     /// 读取保持寄存器（Modbus 功能码 0x03）

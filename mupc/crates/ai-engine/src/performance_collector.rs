@@ -52,8 +52,6 @@ impl PerformanceCollectorImpl {
                 trafo_avg_load: 0.5,
                 demand_violation_count: 0,
                 cumulative_reward: 0.0,
-                overload_count: 0,
-                voltage_violation_count: 0,
             },
             timestamp: chrono::Utc::now().timestamp(),
         };
@@ -81,8 +79,6 @@ impl PerformanceCollectorImpl {
             trafo_avg_load: 0.5,
             demand_violation_count: 0,
             cumulative_reward: 0.0,
-            overload_count: 0,
-            voltage_violation_count: 0,
         };
 
         // 更新缓存
@@ -146,8 +142,6 @@ mod tests {
             trafo_avg_load: trafo,
             demand_violation_count: demand,
             cumulative_reward: reward,
-            overload_count: 0,
-            voltage_violation_count: 0,
         }
     }
 
@@ -233,10 +227,7 @@ mod tests {
         assert_eq!(cloned.pv_utilization_rate, features.pv_utilization_rate);
         assert_eq!(cloned.battery_cycle_count, features.battery_cycle_count);
         assert_eq!(cloned.trafo_avg_load, features.trafo_avg_load);
-        assert_eq!(
-            cloned.demand_violation_count,
-            features.demand_violation_count
-        );
+        assert_eq!(cloned.demand_violation_count, features.demand_violation_count);
         assert_eq!(cloned.cumulative_reward, features.cumulative_reward);
     }
 

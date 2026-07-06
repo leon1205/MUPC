@@ -8,7 +8,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
 
 /// 分区信息
 #[derive(Debug, Clone)]

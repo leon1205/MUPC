@@ -458,7 +458,7 @@ mod tests {
             pv_limit: 0.0,
             confidence: 1.0,
         };
-        let pred = predictor.predict(&state, &action).unwrap();
+        let pred = predictor.predict(&state, &action, 0.0).unwrap();
         assert!(pred.is_safe);
         assert!((pred.v_predicted - 0.98).abs() < 0.05);
     }
@@ -479,7 +479,7 @@ mod tests {
             pv_limit: 0.0,
             confidence: 1.0,
         };
-        let pred = predictor.predict(&state, &action).unwrap();
+        let pred = predictor.predict(&state, &action, 0.0).unwrap();
         assert!(!pred.is_safe);
         assert!(pred.reason.is_some());
     }
