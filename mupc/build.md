@@ -329,3 +329,63 @@ sudo systemctl enable mupcd
 # 启动
 sudo systemctl start mupcd
 ```
+
+## 协作开发（PR 工作流）
+
+为防止并行开发覆盖，提交必须通过 Pull Request。
+
+### 标准流程
+
+```bash
+# 1. 同步最新代码
+git pull --rebase origin master
+
+# 2. 创建特性分支
+git checkout -b fix/my-change
+
+# 3. 开发 + 编译检查
+# ... 修改代码 ...
+cargo check --workspace
+
+# 4. 逐个精确暂存
+git add <file1> <file2>
+git commit -m "fix: 描述"
+
+# 5. 推送到远程分支（不是 master）
+git push origin fix/my-change
+
+# 6. 在 GitHub 创建 PR
+#    访问 https://github.com/leon1205/MUPC/pull/new/fix/my-change
+#    或推送后终端显示的链接
+```
+
+### PR 检查项
+
+| 检查 | 方式 | 说明 |
+|------|------|------|
+| 编译通过 | CI `cargo check --workspace` | 0 errors |
+| 格式化 | CI `cargo fmt --check` | 无差异 |
+| 代码检查 | CI `cargo clippy --workspace` | 0 warnings |
+| 测试通过 | CI `cargo test --workspace` | 无失败 |
+| 代码审查 | 人工 review | 至少 1 人通过 |
+
+### 禁止事项
+
+| 违规 | 后果 |
+|------|------|
+| `git push origin master`（绕过 PR） | 被分支保护拒绝 |
+| `git push --force` 到 master | 丢失历史，永久禁止 |
+| 不 rebase 直接 push | 合并冲突，可能覆盖他人代码 |
+| `git add -A` / `git add .` | 提交不相关的文件 |
+
+### 分支保护配置
+
+在 GitHub 仓库 `Settings → Branches → Add rule`：
+
+```
+Branch name pattern: master
+☑ Require a pull request before merging
+☑ Require status checks to pass before merging
+☑ Require branches to be up to date before merging
+☐ Allow force pushes  (必须取消勾选)
+```
