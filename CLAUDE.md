@@ -157,6 +157,33 @@ cargo test -p <crate> <test_name>
 4. **强制评审**：未完成评审禁止推进下一阶段，违规者代码回退并重新走评审流程
 5. 方案描述格式：**背景（Why）** → **方案（How）** → **改动点（What）**
 
+## Git 提交规范（防止并行开发覆盖）
+
+### 强制规则
+
+1. **推送前必须 rebase**：`git pull --rebase origin master` 后确认 `cargo check --workspace` 通过再推送
+2. **禁止 `git push --force`** 到 `master` 分支
+3. **推送前检查编译**：`cargo check --workspace` 必须 0 errors
+4. **大范围文件操作必须走 PR**：涉及 >5 个文件或 >200 行的变更，禁止直接 push 到 master
+
+### 并行开发保护
+
+```
+开发前:          git pull --rebase origin master  ← 获取最新代码
+开发中:          在自己的分支上工作
+推送前:          git pull --rebase origin master  ← 再次同步，解决冲突
+                cargo check --workspace          ← 确认编译通过
+                git push origin master           ← 推送
+```
+
+### 常见违规与后果
+
+| 违规 | 后果 | 预防 |
+|------|------|------|
+| 不 rebase 直接 push | 远程旧代码覆盖本地新代码 | `git pull --rebase` 先同步 |
+| 不检查编译直接 push | 推送无法编译的代码 | `cargo check --workspace` |
+| 基于旧基线并行开发 | 合并时丢失他人修复 | 开发前同步 + PR review |
+
 ## Git 提交规范（2026-07-06 生效）
 
 本次本次提交（495033b）因 `git add -u` 无差别暂存导致包含未预期的工作区旧版本文件，造成 model_manager.rs 669 行回归等 4 严重 + 5 警告问题。以下规则强制执行以杜绝此类事故。
