@@ -3,3 +3,20 @@ protocol = "sparse"
 
 [net]
 retry = 1
+
+# ═══════════════════════════════════════════════════════════════
+# MUPC 交叉编译配置
+# ═══════════════════════════════════════════════════════════════
+# 目标: aarch64-unknown-linux-gnu
+#   - RK3588 ARM64, Ubuntu 20.04+ (glibc 2.31+)
+#   - librknnrt.so (RKNN Runtime v2.3.2)
+#
+# 前置条件:
+#   sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+#   (或使用 cross-rs / Docker 构建)
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = [
+    "-C", "link-arg=-Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1",
+]

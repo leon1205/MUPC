@@ -8,6 +8,7 @@ use crate::error::OtaError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::sync::Mutex;
 
 const DEFAULT_ENV_CONFIG_PATH: &str = "/etc/fw_env.config";

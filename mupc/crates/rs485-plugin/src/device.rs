@@ -127,7 +127,7 @@ impl Rs485Device {
     fn configure_port(&self, fd: RawFd) -> Result<(), Rs485Error> {
         // 获取终端属性
         let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
-        let termios = unsafe {
+        let mut termios = unsafe {
             if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
                 return Err(Rs485Error::config_failed("获取终端属性失败"));
             }
@@ -181,7 +181,7 @@ impl Rs485Device {
         termios.c_cflag |= libc::CLOCAL | libc::CREAD;
 
         // 设置超时
-        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as i32;
+        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as u8;
         termios.c_cc[libc::VMIN] = 0;
 
         // 应用设置
@@ -227,16 +227,28 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(())`: 发送成功
     /// - `Err(Rs485Error)`: 发送失败
-    pub fn send_frame(&self, _frame: &[u8]) -> Result<(), Rs485Error> {
+    pub fn send_frame(&self, frame: &[u8]) -> Result<(), Rs485Error> {
         let port_guard = self.port_fd.lock();
-        let _fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
+        let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
-            let result =
-                unsafe { libc::write(_fd, _frame.as_ptr() as *const libc::c_void, _frame.len()) };
-            if result < 0 {
-                return Err(Rs485Error::send_failed("发送失败"));
+            // 清空收发缓冲区（TCIOFLUSH），防止残留数据破坏帧结构
+            unsafe { libc::tcflush(fd, libc::TCIOFLUSH) };
+
+            let mut written = 0usize;
+            while written < frame.len() {
+                let result = unsafe {
+                    libc::write(
+                        fd,
+                        frame.as_ptr().add(written) as *const libc::c_void,
+                        frame.len() - written,
+                    )
+                };
+                if result < 0 {
+                    return Err(Rs485Error::send_failed("发送失败"));
+                }
+                written += result as usize;
             }
             Ok(())
         }
@@ -255,32 +267,35 @@ impl Rs485Device {
     /// # Returns
     /// - `Ok(Vec<u8>)`: 接收到的数据
     /// - `Err(Rs485Error)`: 接收失败
-    pub fn recv_frame(&self, _timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
+    pub fn recv_frame(&self, timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
         let port_guard = self.port_fd.lock();
-        let _fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
+        let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
-            // 设置串口超时使用 termios
             let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
-            let termios = unsafe {
-                if libc::tcgetattr(_fd, termios.as_mut_ptr()) < 0 {
+            let mut termios = unsafe {
+                if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
                     return Err(Rs485Error::recv_failed("获取终端属性失败"));
                 }
                 termios.assume_init()
             };
+            let original_termios = termios;
 
             // 设置读取超时：VTIME 为十分之一秒
-            termios.c_cc[libc::VTIME] = (_timeout_ms / 100) as i32;
+            termios.c_cc[libc::VTIME] = (timeout_ms / 100) as u8;
             termios.c_cc[libc::VMIN] = 0;
 
-            if unsafe { libc::tcsetattr(_fd, libc::TCSANOW, &termios) } < 0 {
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
                 return Err(Rs485Error::recv_failed("设置终端属性失败"));
             }
 
             let mut buffer = vec![0u8; 1024];
             let n =
-                unsafe { libc::read(_fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+                unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+
+            // 恢复原始终端属性
+            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original_termios) };
 
             if n < 0 {
                 return Err(Rs485Error::recv_failed("接收失败或超时"));
