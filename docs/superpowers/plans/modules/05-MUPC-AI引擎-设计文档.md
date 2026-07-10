@@ -27,7 +27,18 @@
 ## 目录
 
 1. [模块架构](#1-模块架构)
-2. [LSTM 模型设计](#2-lstm-模型设计)
+2. [LSTM 预测管线设计](#2-lstm-预测管线设计) — **v3.1 合并** (原 Ch2 + Ch14)
+   - 2.1 功能概述 & 分层增强架构
+   - 2.2 预测规格 (7维输入, 24步, p10p50p90)
+   - 2.3 核心技术选型 (VMD/Attention/7维/BiLSTM/误差修正)
+   - 2.4 核心数据模型 (LstmInput/HistorySample/LstmOutput/EnhancedForecastResult)
+   - 2.5 LSTM 核心模型 (LstmModel)
+   - 2.6 预测增强管线 (PredictionPipeline/增强等级/降级机制)
+   - 2.7 数据流 (基线/VMD/误差修正/full_decision_cycle集成)
+   - 2.8 模块划分
+   - 2.9 性能预算
+   - 2.10 错误处理与降级
+   - 2.11 跨项目接口 (MUPC-AI2)
 3. [多源数据融合设计](#3-多源数据融合设计)
 4. [强化学习模型设计](#4-强化学习模型设计)
    - 4.1 功能概述
@@ -68,17 +79,7 @@
 11. [错误类型](#11-错误类型)
 12. [消息总线集成](#12-消息总线集成)
 13. [技术决策记录](#13-技术决策记录)
-14. [LSTM 预测增强管线设计](#14-lstm-预测增强管线设计) — **v3.0 合并新增**
-   - 14.1 设计目标
-   - 14.2 技术选型（VMD纯Rust / Attention ONNX内嵌 / MIC离线 / BiLSTM双模型+Go/No-Go / MSSA离线 / 误差修正BiLSTM）
-   - 14.3 模块划分（新增vmd.rs/prediction_pipeline.rs/pipeline_config.rs/residual_buffer.rs/model_validator.rs）
-   - 14.4 数据流设计（VMD+Attention / 误差修正 / 降级路径）
-   - 14.5 接口定义（VmdDecomposer / PredictionPipeline / 配置结构体 / 模型文件管理）
-   - 14.6 性能预算（单模块/组合/准入条件/模型大小/内存）
-   - 14.7 配置设计（prediction_enhancement YAML段 / 热加载策略）
-   - 14.8 错误处理与降级（8级降级层级 / 自动升降级逻辑）
-   - 14.9 测试策略
-   - 14.10 风险与缓解
+14. [LSTM 预测增强管线设计](#14-lstm-预测增强管线设计) — **v3.1 已合并至第2章**
 15. [MSSA 超参优化工具设计](#15-mssa-超参优化工具设计) — **v3.0 合并新增**
    - 15.1 模块定位
    - 15.2 文件结构
@@ -242,54 +243,157 @@ full_decision_cycle():
 
 ---
 
-## 2. LSTM 模型设计
+## 2. LSTM 预测管线设计
 
-> **本章定义 LSTM 网络架构和基础推理接口。完整的预测管线设计（VMD 分解、Attention、误差修正、降级层级）见第 14 章「LSTM 预测增强管线设计」。**
+> **v3.0 合并** | 整合原第 2 章"LSTM 模型设计"与第 14 章"LSTM 预测增强管线设计"。
+> 覆盖：核心模型设计 + 接口定义 + VMD/Attention/BiLSTM/误差修正增强 + 性能预算 + 降级策略。
 
 ### 2.1 功能概述
 
-LSTM 时序预测模型负责预测未来 225 分钟（15 步 × 15 分钟）的光伏出力和负荷功率，为 RL 决策模型提供前瞻性输入。模型通过 ONNX 导出并部署为 .rknn，在 RK3588 NPU 上执行 INT8 推理。
+LSTM 时序预测管线负责预测未来 225 分钟（15 步 × 15 分钟）的光伏出力和负荷功率，为 RL 决策模型提供 D2 前瞻性输入和 D10 概率负荷预测。
+
+**v3.0 分层增强架构**（对应论文吸收方案三轮路径）：
+
+```
+基线: LSTM (24步×7维) → 联合预测 (47维或(2,15,3))
+ R1: + VMD 信号分解 (CPU, 纯 Rust) + Attention (ONNX 内嵌)
+ R2: + BiLSTM 可选 + 误差修正 BiLSTM (独立模型)
+ R3: + MSSA 超参自动优化 (离线 Python)
+```
+
+| 维度 | v2.16 (基线) | v3.0 (R1 增强) | v3.0 R2 (最大) |
+|------|:--:|:--:|:--:|
+| 模型架构 | 单向 LSTM | LSTM + AdditiveAttention | BiLSTM + Attention |
+| 信号预处理 | 无 | VMD (K=5 PV / K=6 Load) | VMD |
+| 误差修正 | 无 | 无 | 独立 BiLSTM 残差模型 |
+| 输入维度 | 1 维单变量 | 7 维多特征 | 7 维多特征 |
+| 输入步长 | 24 步 | 24 步 | 24 步 |
+| NPU 推理次数 | 2 (PV+Load 分别) | 1 (联合) 或 K×2 (VMD IMF) | 1-3 |
+| 模型文件数 | 1 | 1 | 1-3 (lstm_attn + bilstm_attn + error_correction) |
 
 ### 2.2 预测规格
 
 | 项目 | 规格 |
 |------|------|
-| 预测目标 | 光伏出力 (PV forecast)、负荷功率 (Load forecast) |
-| 负荷分类 | 基荷（基础用电）、可调负荷（柔性负荷）、冲击负荷（概率预测） |
+| 预测目标 | 光伏出力 (PV)、负荷功率 (Load) 联合预测 |
+| 负荷分类 | 基荷、可调负荷、冲击负荷（D10 概率预测） |
 | 预测范围 | 225 分钟（15 步 × 15 分钟） |
-| 采样间隔 | 15 分钟（900s step_seconds，与 MUPC-AI2 训练管线对齐） |
-| 输入窗口 | 6 小时（24 步 × 15 分钟），MSSA 可搜索 {12, 24, 36} |
-| 输出窗口 | 225 分钟（15 步 × 15 分钟），固定不可配 |
-| 模型格式 | ONNX（训练）→ INT8 量化 → .rknn（部署）|
-| 精度要求 | 光伏 MAPE ≤ 8.5%（R1）/ ≤ 7.5%（R2）；负荷 MAPE ≤ 13%（R1）/ ≤ 12%（R2），详见 PRD §3.11 |
+| 输入窗口 | 6 小时（24 步 × 15 分钟 = 21600s），MSSA 可搜索 {12, 24, 36} |
+| 输入特征 | **7 维**：[pv, load, ghi, temp, sin_hour, cos_hour, yesterday_pv]，展平 row-major 168 f32 |
+| 输出格式 | p10p50p90: `(2, 15, 3)` = 90 f32；legacy: `(47,)` |
+| 模型格式 | ONNX（PyTorch 训练）→ INT8 量化 → .rknn（RK3588 NPU 部署） |
+| 精度要求 | 光伏 MAPE ≤ 8%（R1）/ ≤ 7.5%（R2）；负荷 MAPE ≤ 13%（R1）/ ≤ 12%（R2） |
 
-### 2.3 接口定义
+### 2.3 核心技术选型
+
+#### 2.3.1 VMD 信号分解：纯 Rust 实现
+
+纯 Rust ADMM 迭代，依赖 `rustfft` (FFT) + `nalgebra` (矩阵)。无 FFI 依赖，直接 `cross build` 到 aarch64。性能约束：单次 VMD (N=24, K≤8) ≤ 50ms。
+
+**v3.0 约束**：VMD 仅适用于单变量时序。当 `input_features > 1` 时，VMD 路径自动降级为 AttentionOnly，由 7 维 LSTM 内部的跨特征交互替代 VMD 的角色。
+
+#### 2.3.2 Attention 机制：ONNX 图内嵌
+
+MUPC-AI2 训练管线在 ONNX 导出时将 AdditiveAttention (Bahdanau) 嵌入计算图（MatMul + Tanh + Softmax + ReduceSum，全为 ONNX 标准算子）。Rust 侧零代码改动，推理在 NPU 上执行。
+
+#### 2.3.3 7 维多特征输入 (v3.0)
+
+训练管线硬编码 7 维特征，Rust 侧 `HistorySample` 结构体采集全部特征：
+
+| 索引 | 特征 | Rust 数据来源 |
+|:--:|------|-------------|
+| 0 | pv_power | `FusedSystemState.pv_power` |
+| 1 | load_power | `FusedSystemState.load_power` |
+| 2 | solar_irradiance (GHI) | `FusedSystemState.solar_irradiance` (D5) |
+| 3 | temperature | `FusedSystemState.temperature` (D5) |
+| 4 | sin_hour | CPU 计算 `sin(2π × hour / 24)` |
+| 5 | cos_hour | CPU 计算 `cos(2π × hour / 24)` |
+| 6 | yesterday_pv | 96 步前 pv_power (冷启动 fallback = 当前 PV) |
+
+`LstmConfig.input_features` 默认 7，设为 1 回退 v2.16 单变量模式。
+
+#### 2.3.4 BiLSTM：双模型文件 + Go/No-Go 准入
+
+训练管线导出两个独立模型：`lstm_attn.rknn`（必须）和 `bilstm_attn.rknn`（可选）。
+
+双重门控：
+- **配置门** `bilstm.enabled`: 运维主动开启
+- **硬件验证门** `bilstm.gate_passed`: RK3588 P99 延迟摸底通过后设为 true
+
+No-Go 时自动回退单向 LSTM。
+
+#### 2.3.5 误差修正 BiLSTM：独立模型 + 独立 Runtime
+
+`error_correction.rknn` 为独立模型文件，拥有独立的 `RknnRuntime` 实例。输入为历史残差序列（T 步 actual−predicted），输出为 15 步修正量。与主预测严格串行，总延迟 ≤ 200ms。
+
+冷启动保护：缓冲未满时 `zero_init=true` 使用零向量填充（修正量 = 0，等效直接输出）。
+
+### 2.4 核心数据模型
+
+#### 2.4.1 模型输入 — LstmInput (v3.0)
 
 ```rust
-/// LSTM 模型输入（经 MIC 筛选后的特征序列）
+/// LSTM 模型输入（v3.0: 展平 2D 数组）
+///
+/// 布局: row-major — [t0_f0, t0_f1, ..., t1_f0, ...]
+/// 长度 = input_window_steps × input_features (默认 24 × 7 = 168)
 pub struct LstmInput {
-    /// 输入窗口步数（默认 24，由 input_window_secs / step_seconds 计算）
-    pub window_size: usize,
-    /// 筛选后的特征维度（默认 7，由 MIC top_k 确定）
-    pub num_features: usize,
-}
-
-/// 模型预测输出
-pub struct LstmOutput {
-    pub pv_forecast: Vec<f32>,              // 光伏 P50 点预测（15 维）
-    pub load_forecast: Vec<f32>,             // 负荷 P50 点预测（15 维）
-    pub load_forecast_quantiles: Vec<f32>,   // 负荷 P90 分位数（15 维）
-    pub shock_load_probability: f32,         // 冲击负荷概率
-    pub base_load: f32,                      // 基础负荷（第 1 步 P50）
+    pub history: Vec<f32>,   // 展平的多特征历史序列
+    pub timestamp: i64,
 }
 ```
 
-> **注意：** `confidence` 字段已删除（原算法基于预测序列方差，数学上无意义）。策略引擎的 confidence 来自 `ModelOutput` 元数据字段，与 LSTM 无关。
-
-### 2.4 模型结构体
+#### 2.4.2 历史样本 — HistorySample (v3.0)
 
 ```rust
-/// LSTM 预测模型
+/// 7 维历史样本（与训练管线 prepare_data() 特征顺序一致）
+pub struct HistorySample {
+    pub pv_power: f64,
+    pub load_power: f64,
+    pub solar_irradiance: f64,
+    pub temperature: f64,
+    pub sin_hour: f64,
+    pub cos_hour: f64,
+    pub yesterday_pv: f64,
+}
+```
+
+#### 2.4.3 模型输出
+
+```rust
+/// 点预测输出
+pub struct LstmOutput {
+    pub predictions: Vec<f32>,  // v3.0: 自动检测 90 或 47 维输出格式
+}
+
+/// 概率负荷预测输出（D10 数据流）
+pub struct ProbabilisticLoadOutput {
+    pub timestamp: i64,
+    pub quantiles: Vec<QuantilePrediction>,  // P10/P50/P90 × 15 步
+    pub base_load: f32,
+    pub shock_probability: f64,
+    pub confidence: f64,   // 基于分位数间距，非预测序列方差
+}
+```
+
+> **confidence 字段说明**：`LstmOutput.confidence`（基于预测序列方差）已在 v2.16 删除。`ProbabilisticLoadOutput.confidence`（基于 P50/P90 分位数间距）保留，是有效的统计量。
+
+#### 2.4.4 增强预测结果
+
+```rust
+pub struct EnhancedForecastResult {
+    pub pv_forecast: Vec<f64>,
+    pub load_forecast: Vec<f64>,
+    pub load_quantiles: Option<ProbabilisticLoadOutput>,
+    pub enhancement_level: EnhancementLevel,
+    pub vmd_degraded: bool,
+    pub error_correction_applied: bool,
+}
+```
+
+### 2.5 LSTM 核心模型 — LstmModel
+
+```rust
 pub struct LstmModel {
     config: LstmConfig,
     runtime: RknnRuntime,
@@ -298,46 +402,189 @@ pub struct LstmModel {
 impl LstmModel {
     pub fn new(config: LstmConfig) -> Result<Self, AiEngineError>;
     pub async fn load(&mut self) -> Result<(), AiEngineError>;
+    /// v3.0: 输入展平的 (T, K) 序列，单次 ONNX 联合推理
     pub async fn predict(&self, input: &LstmInput) -> Result<LstmOutput, AiEngineError>;
+    /// 分位数后处理（CPU，基于预测输出计算 P10/P50/P90）
+    pub async fn predict_quantiles(&self, input: &LstmInput, covariates: &LoadCovariates) -> Result<ProbabilisticLoadOutput, AiEngineError>;
     pub fn model_type(&self) -> ModelType;
-    pub fn input_window_secs(&self) -> u64;
-    pub fn output_horizon_secs(&self) -> u64;
 }
 ```
 
-### 2.5 ONNX 到 RKNN 量化流程
+**ONNX 输出格式自动检测**：`predict()` 根据输出长度自动识别：
+- 90 维 → p10p50p90: `(2, 15, 3)`
+- 47 维 → legacy D2+D10
+- 30 维 → legacy D2 only
+
+### 2.6 预测增强管线 — PredictionPipeline
+
+#### 2.6.1 增强等级（降级追踪）
 
 ```
-训练阶段 (x86 服务器, PyTorch):
-  1. 定义 LSTM 模型 + AdditiveAttention（第 14 章）
-  2. 训练至收敛
-  3. torch.onnx.export() 导出 ONNX 模型（含 metadata_props 10 键）
-  4. rknn-toolkit2 加载 ONNX 模型
-  5. 校准数据集 INT8 量化
-  6. rknn.build() 生成 .rknn 模型文件（lstm_attn ≤ 8MB / bilstm_attn ≤ 12MB / error_correction ≤ 3MB）
-
-部署阶段 (RK3588):
-  1. 加载 .rknn 文件到 RKNN Runtime
-  2. NPU 执行 INT8 整数推理
-  3. 输出 f32 预测值
+Level 0: FullVmdAttentionCorrection — VMD + (Bi)LSTM/Attention + 误差修正 (Go 路径)
+Level 1A: BiLstmVmdAttention        — BiLSTM + VMD + Attention (无误差修正)
+Level 2: VmdAttention               — VMD + LSTM/Attention
+Level 3: AttentionOnly              — LSTM/Attention (无 VMD)
+Level 4: Baseline                   — 基线 LSTM (v2.16 等效)
+Level 5: (ModelManager 层) — 全零预测
 ```
 
-### 2.6 预测向量长度处理
+自动升级/降级机制：
+- 连续 **3** 次某模块失败 → 降级到下一层
+- 连续 **5** 次某模块成功 → 尝试升回上一层
 
-预测输出向量长度由 `LstmConfig.output_horizon_secs / step_seconds` 计算（15 步，固定）。当实际输出长度与配置不符时：
-- 超出部分：截断（取前 N 个值）
-- 不足部分：**返回 `OutputShapeMismatch` 错误**（不静默补零）
+#### 2.6.2 管线结构体
 
 ```rust
-let output_size = self.config.output_horizon_secs as usize / self.config.step_seconds as usize;
-// = 22500 / 900 = 15
-if output.len() < output_size {
-    return Err(AiEngineError::OutputShapeMismatch {
-        expected: output_size,
-        actual: output.len(),
-    });
+pub struct PredictionPipeline {
+    vmd_pv: Option<VmdDecomposer>,
+    vmd_load: Option<VmdDecomposer>,
+    lstm_model: Arc<RwLock<Option<LstmModel>>>,
+    lstm_history: Arc<RwLock<VecDeque<HistorySample>>>,
+    input_size: usize,
+    input_features: usize,    // v3.0
+    config: PredictionEnhancementConfig,
+    health: RwLock<PipelineHealth>,
+    error_correction_runtime: Option<RknnRuntime>,   // R2
+    residual_buffer_pv: Option<RwLock<ResidualBuffer>>,  // R2
+    residual_buffer_load: Option<RwLock<ResidualBuffer>>, // R2
 }
 ```
+
+#### 2.6.3 VMD 分解器
+
+```rust
+pub struct VmdDecomposer { config: VmdConfig; }
+
+pub struct VmdConfig {
+    pub k: usize,          // 模态数 (PV=5, Load=6)
+    pub alpha: f64,        // 惩罚因子 (默认 2000)
+    pub tau: f64,          // 噪声容忍度
+    pub tol: f64,          // 收敛容差 (默认 1e-6)
+    pub max_iter: usize,   // 最大迭代 (默认 500)
+}
+
+pub struct VmdResult {
+    pub imfs: Vec<Vec<f32>>,
+    pub reconstructed: Vec<f32>,
+    pub reconstruction_error: f64,
+    pub iterations: usize,
+    pub converged: bool,
+}
+```
+
+#### 2.6.4 残差缓冲 (R2)
+
+```rust
+pub struct ResidualBuffer {
+    capacity: usize,          // = residual_window_steps (默认 24)
+    buffer: VecDeque<f32>,    // FIFO 循环缓冲
+    zero_init: bool,          // 冷启动零填充标志
+    total_pushed: usize,
+}
+```
+
+#### 2.6.5 管线健康状态
+
+```rust
+pub struct PipelineHealth {
+    pub vmd_consecutive_failures: u32,
+    pub vmd_consecutive_successes: u32,
+    pub ec_consecutive_failures: u32,     // R2
+    pub ec_consecutive_successes: u32,    // R2
+    pub bilstm_consecutive_failures: u32, // R2
+    pub bilstm_consecutive_successes: u32,// R2
+    pub current_level: EnhancementLevel,
+}
+```
+
+### 2.7 数据流
+
+#### 2.7.1 基线数据流 (Level 4)
+
+```
+HistorySample Buffer → build_flat_input() → (168,) ONNX 输入
+  → LstmModel::predict() → 单次 NPU 推理 → parse_baseline_output()
+  → {pv_forecast, load_forecast, load_quantiles}
+```
+
+#### 2.7.2 VMD 增强数据流 (Level 0-2, 仅 input_features=1)
+
+```
+pv_history → VMD(K) → {IMF_1..IMF_K} → 逐 IMF NPU 推理 → 重构 (Σ)
+load_history → VMD(K) → {IMF_1..IMF_K} → 逐 IMF NPU 推理 → 重构 (Σ)
+  → 重构值注入 FusedSystemState
+```
+
+#### 2.7.3 误差修正数据流 (Level 0, R2)
+
+```
+主预测 y_pred → ResidualBuffer.build_input() → 误差修正推理 (RknnRuntime #2)
+  → e_pred → y_corrected = y_pred + e_pred → 注入 FusedSystemState
+```
+
+#### 2.7.4 与 full_decision_cycle() 集成
+
+```rust
+// model_manager.rs — 增强路径优先，失败时降级到基线
+let (pv_forecast, load_forecast, load_quantiles) = self
+    .run_enhanced_predict()  // PredictionPipeline 优先
+    .await
+    .unwrap_or_else(|_| self.run_lstm_predict_with_quantiles().await);
+```
+
+### 2.8 模块划分
+
+| 文件 | 职责 | 轮次 |
+|------|------|:--:|
+| `lstm_model.rs` | LSTM 核心模型 (LstmModel, LstmInput, 分位数结构体) | 基线 |
+| `prediction_pipeline.rs` | 增强管线编排器 (VMD→推理→重构→误差修正→降级) | R1+R2 |
+| `vmd.rs` | 纯 Rust VMD 分解 (ADMM) | R1 |
+| `pipeline_config.rs` | 增强配置 (VMD/Attention/BiLSTM/EC 配置 + EnhancementLevel) | R1+R2 |
+| `residual_buffer.rs` | 残差滑动窗口缓冲 | R2 |
+| `model_validator.rs` | ONNX metadata 校验 | R2 |
+| `model_manager.rs` | 集成 PredictionPipeline + 历史缓冲管理 + 7D 输入构建 | R1 |
+| `config.rs` | LstmConfig 扩展 (input_features, yesterday_offset_steps, step_seconds) | 基线 |
+
+**不修改的模块**：`rknn_runtime.rs`（ONNX 内嵌 Attention 对 Runtime 透明）、`data_fusion.rs`（MIC 离线筛选在训练阶段完成）。
+
+### 2.9 性能预算
+
+| 阶段 | 基线 (v2.16) | R1 (VMD+Attn) | R2 (+BiLSTM+EC) |
+|------|:--:|:--:|:--:|
+| VMD 分解 (CPU) | — | ≤ 50ms | ≤ 50ms |
+| 主预测 NPU 推理 | ≤ 200ms | ≤ 250ms | ≤ 500ms |
+| 误差修正推理 | — | — | ≤ 200ms |
+| **总延迟** | **≤ 200ms** | **≤ 300ms** | **≤ 750ms** |
+| 内存增量 | 0 | +5MB (VMD 缓冲) | +8MB (含残差缓冲+第二 Runtime) |
+| 模型文件大小 | ≤ 5MB | ≤ 8MB | ≤ 15MB (三模型) |
+
+### 2.10 错误处理与降级
+
+```
+Level 0 全功能 → 误差修正失败 → Level 1A (BiLSTM+VMD)
+              → BiLSTM 失败   → Level 2 (VMD+Attention)
+              → VMD 失败      → Level 3 (AttentionOnly)
+Level 1A      → BiLSTM 失败   → Level 2
+              → VMD 失败      → Level 3
+Level 2       → VMD 失败      → Level 3
+Level 3       → Attention 失败 → Level 4 (Baseline)
+Level 4       → LSTM 推理失败  → Level 5 (全零预测, ModelManager 层)
+```
+
+关键降级约束：
+- VMD 与 `input_features > 1` 互斥：多特征模式下 VMD 自动禁用（VMD 仅适用于单变量）
+- 误差修正连续 3 次失败后持久化禁用（需 OTA 恢复）
+- 错误码：`VmdFailed` / `VmdNotConverged` / `AttentionDegraded` / `ErrorCorrectionFailed` / `OutputShapeMismatch` / `ModelValidationFailed`
+
+### 2.11 跨项目接口（与 MUPC-AI2 训练管线）
+
+| 接口项 | Rust 侧 (MUPC) | Python 侧 (MUPC-AI2) |
+|------|------|------|
+| ONNX 输入 shape | `(batch, 24, 7)` 展平 168 f32 | `dummy_input = (1, 24, 7)` |
+| ONNX 输出 (p10p50p90) | `(batch, 2, 15, 3)` = 90 f32 | 6 头 Linear，stack 为 (2,15,3) |
+| 特征顺序 | [pv, load, ghi, temp, sin_hour, cos_hour, yesterday_pv] | prepare_data() 同序 |
+| 步长 | step_seconds = 900s | dt_hours = 0.25 |
+| metadata_props | 交叉校验 mupc_model_type / mupc_with_attention / mupc_input_window | 导出时注入 |
 
 ---
 
@@ -4514,1000 +4761,9 @@ These are the most critical files that need to be created or significantly modif
 
 ---
 
-## 14. LSTM 预测增强管线设计
+## 14. LSTM 预测增强管线设计（已合并）
 
-> **v3.0 合并新增** | **来源：** `docs/superpowers/plans/2026-06-21-预测增强分层混合架构-DESIGN.md` v3.0
-> **覆盖轮次：** 第一轮 VMD + Attention (R1) / 第二轮 BiLSTM + 误差修正 (R2) / 第三轮 MSSA (独立章节 15)
-> **PRD 对应：** `docs/superpowers/specs/2026-06-21-预测增强分层混合架构-PRD.md`
-
-### 14.1 设计目标
-
-在现有 `mupc-ai-engine` LSTM 时序预测管线之上，以分层叠加方式集成 VMD 信号分解 + Attention 注意力机制 + 可选 BiLSTM + 残差修正管线，提升光伏出力与台区负荷的预测精度。
-
-**第一轮代码状态：** VMD 纯 Rust 分解器（`vmd.rs`）、预测增强管线编排器（`prediction_pipeline.rs`）、增强配置（`pipeline_config.rs`）均已实现并通过设计评审，Attention 由 MUPC-AI2 训练管线嵌入 ONNX 计算图。
-
-**第二轮新增代码（本设计覆盖）：** BiLSTM 双模型文件加载与 Go/No-Go 准入、误差修正 BiLSTM 独立推理与残差修正管线、扩展 PipelineHealth 为模块级健康状态数组、YAML 配置扩展。
-
-### 14.2 技术选型
-
-#### 14.2.1 VMD 分解：纯 Rust 实现
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | 纯 Rust，依赖 `rustfft`（FFT）+ `nalgebra`（矩阵 SVD/特征分解） |
-| **理由** | (1) 无 FFI 跨编译链依赖，aarch64-openEuler 目标直接 `cross build`；(2) VMD 核心是 ADMM 迭代（FFT + 矩阵运算），Rust 生态已成熟；(3) 去掉 `unsafe` 边界，`cargo test` 全量覆盖 |
-| **备选** | FFI 调用 C `libvmd`：优势是已有验证实现，劣势是 aarch64 交叉编译 fragile、unsafe FFI 边界、调试困难。若 Rust 实现数值稳定性不达标或性能超标，可切换为 FFI 路径 |
-| **Python 预处理** | 不适用 -- 推理阶段需要实时 VMD，不能预计算 |
-| **性能风险** | 若单次 VMD > 50ms，启用 `rayon` 并行化 K 个 IMF 的 ADMM 迭代（每个 IMF 独立求解，天然可并行） |
-
-**依赖 crate：** `rustfft = "6.2"` (aarch64 NEON 优化)、`nalgebra = "0.33"` (矩阵运算)；`rayon = "1.10"` 可选并行。
-
-#### 14.2.2 Attention 机制：ONNX 图内嵌
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | MUPC-AI2 训练管线在 ONNX 导出时将 Attention 节点嵌入计算图（MatMul + Softmax + ReduceSum 均为 ONNX 标准算子），RKNN Toolkit 2 一并转换为 .rknn |
-| **理由** | (1) Rust 侧零代码改动 -- 现有 `RknnRuntime::run()` 直接消费含 Attention 的 .rknn 模型；(2) Attention 计算在 NPU 上执行，延迟增量 <= 15%；(3) 降低 Rust 侧维护负担 |
-| **备选** | Rust 后处理：ONNX 仅输出 LSTM hidden states，Rust 侧 CPU 计算 Attention。劣势：数据 NPU->CPU 搬运开销 + Rust 侧额外计算 + 延迟超标风险。仅保留为调试/可视化用途 |
-| **Attention 权重导出** | ONNX 模型增加一个输出节点 `attention_weights`（shape=[input_window]），Rust 侧可选读取并记录日志用于可视化分析 |
-
-#### 14.2.3 MIC 特征筛选：离线 Python 脚本
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | MUPC-AI2 项目中独立 Python 脚本，使用 `minepy` 库计算 MIC，输出 JSON 结果文件 |
-| **理由** | (1) MIC 仅在训练阶段离线执行，不进入 RK3588 部署路径；(2) Python `minepy` 是 MIC 计算的权威实现；(3) Rust 生态无成熟 MIC crate |
-| **与 Rust 的接口** | JSON 文件。Rust 侧 `PredictionEnhancementConfig` 可引用 `mic_top_k` 值以确定特征维度；实际特征筛选在训练阶段完成，ONNX 输入维度已固定 |
-
-#### 14.2.4 MSSA 超参搜索：纯 Python 离线工具（概述）
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | MUPC 项目 `tools/mssa_optimizer/` 目录下的纯 Python 模块，实现 MSSA（多策略麻雀搜索算法），输出符合 PRD Section 7.4.2 JSON Schema 的最优超参配置，供 MUPC-AI2 训练管线消费 |
-| **Python 版本** | Python >= 3.9，仅依赖 numpy >= 1.24、scipy >= 1.10、pyyaml >= 6.0 |
-| **备选（IPSO 降级路径）** | IPSO 作为备选方案。当 MSSA 搜索时间超预期或收敛不稳定时，通过配置文件 `algorithm: "IPSO"` 切换 |
-| **与 Rust 的接口** | JSON 文件。Rust 侧不消费 MSSA 结果 -- MSSA 输出直接由训练管线读取，映射为 ONNX export 参数。Rust 推理端仅感知最终 ONNX 模型维度，对搜索过程透明 |
-
-> 完整的 MSSA 算法设计、目标函数、搜索空间映射、JSON 输出格式和配置文件设计见 [第 15 章](#15-mssa-超参优化工具设计)。
-
-#### 14.2.5 BiLSTM 可选性：双模型文件 + Go/No-Go 准入条件
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | 训练管线导出两个独立的 .rknn 模型：`lstm_attn.rknn`（单向 LSTM + Attention）和 `bilstm_attn.rknn`（BiLSTM + Attention）。`ModelManager` 根据 `PredictionEnhancementConfig.bilstm.enabled` 和准入条件共同决定加载哪个模型 |
-| **理由** | (1) 推理路径零分支 -- 选中模型后 `RknnRuntime::run()` 逻辑完全不变；(2) 独立文件便于 OTA 独立升级/回滚；(3) 通过 ONNX `metadata_props` 中的 `mupc_model_type` 校验模型类型与配置一致性 |
-
-**双模型文件命名约定与校验：**
-
-| 文件名 | 模型类型 | 要求 | 用途 |
-|--------|----------|------|------|
-| `lstm_attn.rknn` | 单向 LSTM + Attention | 必须存在 | 第一轮部署 + BiLSTM No-Go 回退 |
-| `bilstm_attn.rknn` | BiLSTM + Attention | 第二轮按需发布 | Go 路径下替换单向模型 |
-
-**ONNX metadata_props 交叉校验：** `mupc_model_type` ("lstm"/"bilstm")、`mupc_with_attention` ("true")、`mupc_hidden_size`、`mupc_num_layers`、`mupc_input_window`、`mupc_direction` ("forward"/"bidirectional")、`mupc_version`。启动时与配置交叉校验，不一致时记录 WARN 并自动回退。
-
-**Go/No-Go 准入条件 -- 双重门控：**
-
-| 门控 | 配置项 | 类型 | 默认值 | 说明 |
-|------|--------|------|--------|------|
-| **配置门** | `bilstm.enabled` | `bool` | `false` | 运维人员在配置文件中主动开启 |
-| **硬件验证门** | `bilstm.gate_passed` | `bool` | `false` | 使用 BiLSTM 原型 .rknn 在 RK3588 上完成 P99 延迟摸底后，由运维手动设为 `true` |
-
-**硬件验证条件：** 使用 BiLSTM + Attention 原型模型在 RK3588 NPU 上运行 >= 1000 次连续推理，P99 推理延迟 < 900ms（为 VMD 50ms + 误差修正 200ms 留 750ms 裕度 —— 注意 900ms 门限是**全管线**延迟的预留上限，单 BiLSTM 推理本身应远小于此值）。
-
-**准入失败处理（No-Go）：** 若 P99 >= 900ms，操作步骤：
-1. 保持 `gate_passed = false`（永不为 `true`）
-2. `enabled` 配置无效，系统始终加载单向 LSTM 模型
-3. 第二轮仅部署误差修正管线（`error_correction.rknn`），跳过 BiLSTM 双向替换
-4. 运维在变更日志中记录 No-Go 原因和基准测试数据
-
-**模型加载选择逻辑：**
-
-```rust
-// ModelManager::load_models() 中的选择逻辑（伪代码）
-fn select_prediction_model(config: &PredictionEnhancementConfig) -> ModelSelection {
-    let gate_passed = config.bilstm.gate_passed;
-    let bilstm_enabled = config.bilstm.enabled;
-
-    match (bilstm_enabled, gate_passed) {
-        // Go 路径：配置启用 + 硬件验证通过 → 加载 BiLSTM 模型
-        (true, true) => {
-            let path = config.bilstm.model_path
-                .as_deref()
-                .unwrap_or_else(|| Path::new("/etc/mupc/models/bilstm_attn.rknn"));
-            ModelSelection::BiLstm(path.to_path_buf())
-        }
-        // No-Go 路径 1：配置启用但硬件未验证 → 回退单向，记录 WARN
-        (true, false) => {
-            tracing::warn!("BiLSTM 配置启用但 gate_passed=false（未通过 RK3588 延迟摸底），回退到单向 LSTM");
-            let path = Path::new("/etc/mupc/models/lstm_attn.rknn");
-            ModelSelection::UniLstm(path.to_path_buf())
-        }
-        // No-Go 路径 2：默认单向
-        (false, _) => {
-            let path = Path::new("/etc/mupc/models/lstm_attn.rknn");
-            ModelSelection::UniLstm(path.to_path_buf())
-        }
-    }
-}
-```
-
-#### 14.2.6 Attention 配置校验
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | `AttentionConfig.enabled` 是调试开关：当 ONNX 模型含 Attention 层时，运维可临时设为 `false` 禁用 Attention（退化到等权重模式）。若模型不含 Attention 但配置 `enabled=true`，启动时校验 metadata 后记录 WARN 并自动回退 |
-| **校验时机** | `ModelManager` 加载模型后，查询 `mupc_with_attention` 元数据，与 `AttentionConfig.enabled` 交叉校验 |
-| **不做的事** | Rust 侧不实现 Attention 计算，不实现所有权重相等检测（退化由训练管线负责） |
-
-#### 14.2.7 误差修正 BiLSTM：独立模型 + 独立 Runtime
-
-| 维度 | 决策 |
-|------|------|
-| **方案** | 误差修正 BiLSTM 作为独立 .rknn 模型 (`error_correction.rknn`)，拥有独立的 `RknnRuntime` 实例，与主预测模型完全分离 |
-| **理由** | (1) **模型独立性**：误差修正 BiLSTM 输入为历史残差序列（维度不同于主预测模型输入的特征向量），必须独立建模；(2) **运行时独立性**：主模型和修正模型可能在不同时机加载/卸载、独立 OTA 升级、独立降级；(3) `RknnRuntime` 实例化成本低（< 50ms），两个实例同时驻留在 NPU 内存中是 RK3588 支持的标准操作；(4) 完全隔离意味着误差修正模型的任何故障不影响主预测管线输出 |
-| **备选** | 方案 A -- ONNX 图内嵌：将误差修正节点嵌入主预测 ONNX 计算图。劣势：输入维度不同，需要 ONNX 分支处理，RKNN 对动态分支支持不确定。方案 B -- 同一 RknnRuntime 实例切换模型：需频繁 `rknn_destroy`/`rknn_init` 来回切换，延迟累积不可接受 |
-| **参数量约束** | <= 主预测 LSTM 参数的 50%（PRD ERR-02），INT8 模型文件大小 <= 3MB |
-
-**残差输入构建：**
-
-误差修正 BiLSTM 的输入 = 最近 T 步的观测残差序列（实际值 - 预测值）。`T = residual_window_steps`，默认 24 步（与主预测 input_window 对齐，可通过配置调整）。设计将输入窗口设为可配置的 `residual_window_steps`（默认 24），与主预测 `input_window` 对齐以保持架构一致性；误差修正的 output horizon 为 15 步，与主预测匹配。
-
-```rust
-/// 残差滑动窗口缓冲
-pub struct ResidualBuffer {
-    /// 容量 = residual_window_steps（默认 24）
-    capacity: usize,
-    /// 循环缓冲（FIFO）
-    buffer: VecDeque<f32>,
-    /// 是否已填满（未填满时使用零向量填充 → zero_init=true）
-    filled: bool,
-}
-```
-
-**输入构建规则：**
-
-| 场景 | 输入内容 | 说明 |
-|------|----------|------|
-| 缓冲已满（>= T 步残差） | 最近 T 步残差值 `[e_{t-T+1}, ..., e_t]` | 正常推理路径 |
-| 缓冲未满（冷启动/模型刚加载）且 `zero_init=true` | T 步零向量 `[0.0; T]` | 默认行为，不产生修正（y_corrected = y_pred + 0 = y_pred） |
-| 缓冲未满且 `zero_init=false` | 拒绝推理，返回 `ErrorCorrectionFailed` | 保守模式（生产环境不推荐） |
-| 残差序列含 NaN/Inf | 替换为该位置零值，记录 WARN | 鲁棒性保护 |
-
-**在线残差更新：** 每次主预测完成后，等待下一周期实际值到达时更新 `ResidualBuffer`。每个预测对象（PV、Load）各维护一个独立的 `ResidualBuffer`。
-
-**与主预测管线的并行/串行关系：** 误差修正推理与主预测推理是**严格串行**关系：
-
-```
-Step 1: 主预测推理 (NPU, RknnRuntime #1)
-  └─→ y_pred [15 维]
-
-Step 2: 残差输入构建 (CPU)
-  └─→ ResidualBuffer::build_input() → e_history [T 维]
-
-Step 3: 误差修正推理 (NPU, RknnRuntime #2)
-  └─→ e_pred [15 维]
-
-Step 4: 修正输出 (CPU)
-  └─→ y_corrected = y_pred + e_pred [15 维]
-```
-
-**不可并行的理由：** NPU 同一时刻只能执行一个推理任务（RK3588 NPU 单任务），两个 RknnRuntime 的推理必须串行。误差修正总延迟 ≈ 两次修正推理（PV + Load），<= 200ms。
-
-### 14.3 模块划分
-
-#### 14.3.1 新增模块
-
-| 模块 | 文件 | 职责 | 轮次 |
-|------|------|------|------|
-| **VMD 分解器** | `ai-engine/src/vmd.rs` | 纯 Rust VMD 算法实现 | R1 |
-| **预测增强管线** | `ai-engine/src/prediction_pipeline.rs` | 串联 VMD + NPU 推理 + IMF 重构 + 误差修正的编排器；统一管理增强模块的启用/降级状态 | R1（VMD 编排）+ R2（误差修正编排） |
-| **增强配置** | `ai-engine/src/pipeline_config.rs` | VMD/Attention/BiLSTM/误差修正/特征筛选的配置结构体 | R1（VMD+Attention）+ R2（BiLSTM/ErrorCorrection 扩展） |
-| **残差缓冲** | `ai-engine/src/residual_buffer.rs` | 残差滑动窗口缓冲管理（R2 新增） | R2 |
-| **模型文件校验器** | `ai-engine/src/model_validator.rs` | ONNX metadata_props 读取 + 与配置交叉校验（R2 新增） | R2 |
-
-#### 14.3.2 修改模块
-
-| 模块 | 文件 | 改动内容 | 轮次 |
-|------|------|----------|------|
-| **LSTM 配置** | `ai-engine/src/config.rs` | `LstmConfig` 新增 `prediction_enhancement: Option<PredictionEnhancementConfig>` 字段 | R1 |
-| **LSTM 模型** | `ai-engine/src/lstm_model.rs` | 新增 `predict_with_vmd()` 方法；VMD 状态管理 | R1 |
-| **模型管理器** | `ai-engine/src/model_manager.rs` | `full_decision_cycle()` 集成 PredictionPipeline；**R2 新增**：多 RknnRuntime 管理（1-3 个 .rknn 模型文件）、误差修正状态管理 | R1 + R2 |
-| **错误类型** | `ai-engine/src/error.rs` | R1 新增 `VmdFailed`/`VmdNotConverged`/`AttentionDegraded`/`ErrorCorrectionFailed`；**R2 新增** `ModelValidationFailed`（metadata 校验失败） | R1 + R2 |
-| **公共接口** | `ai-engine/src/lib.rs` | 导出新增模块 | R1 + R2 |
-
-#### 14.3.3 不修改的模块
-
-| 模块 | 理由 |
-|------|------|
-| `mupc-common` | 特征序列化逻辑在 `ai-engine/data_fusion.rs`，预测增强对下游透明 |
-| `mupc-strategy-engine` | `FusedSystemState` 接口不变，`AiIntegrator` 调用 `ModelManager` 接口不变 |
-| `rknn_runtime.rs` | ONNX 内嵌 Attention = 对 Runtime 透明，推理调用不变；R2 误差修正使用同一 RknnRuntime 抽象（R2 新增第二个实例） |
-| `data_fusion.rs` | **不修改**。理由：MIC 离线筛选完成于训练阶段，筛选后的特征维度已固定在 ONNX 输入 shape 中。Rust 侧 `FusedSystemState` 序列化逻辑不感知特征维度变化——特征增减在训练管线一侧（MUPC-AI2）处理，ONNX 模型使用固定特征集，Rust 侧按 ONNX 输入 shape 构造 LstmInput 即可。与 PRD Section 7.1 的差异：PRD 原文提及 `data_fusion.rs` 需适配，但经设计评审确认 MIC 离线筛选 → ONNX 输入维度固定 → `data_fusion.rs` 和 `lstm_model.rs` 无需适配（特征集变更在训练阶段完成，Rust 部署侧所见 ONNX 已是固定维度） |
-
-### 14.4 数据流设计
-
-#### 14.4.1 第一轮全功能数据流（VMD + Attention）
-
-```
-+-----------------------------------------------------------------------------+
-|  PredictionPipeline::execute(state, config)                                  |
-|                                                                              |
-|  Step 1: 特征提取                                                            |
-|    lstm_history --> [pv_history_24, load_history_24]                        |
-|                                                                              |
-|  Step 2: VMD 分解 (CPU, <= 50ms)                                            |
-|    pv_history_24 --> VMD(K_pv, alpha, tol, max_iter)                        |
-|                    --> [IMF_1, IMF_2, ..., IMF_K]  (K 个 24 维向量)          |
-|    load_history_24 --> VMD(K_load, ...) --> [IMF_1, ..., IMF_K]            |
-|                                                                              |
-|  Step 3: 逐 IMF NPU 推理 (K 次, NPU)                                         |
-|    for each IMF_i:                                                           |
-|      LstmInput { history: IMF_i } --> RknnRuntime::run()                   |
-|      --> LstmOutput { predictions: [15] }  // 含 Attention 加权              |
-|                                                                              |
-|  Step 4: 重构 (CPU)                                                          |
-|    PV_pred = Sigma IMF_predictions  (逐元素求和，15 维)                       |
-|    Load_pred = Sigma IMF_load_predictions (15 维)                           |
-|                                                                              |
-|  Step 5: 分位数后处理 (CPU, 复用现有逻辑)                                      |
-|    Load_pred --> predict_quantiles() --> ProbabilisticLoadOutput            |
-|                                                                              |
-|  Step 6: [R2 新增出口] 误差修正入口                                           |
-|    PV_pred / Load_pred --> ErrorCorrectionPipeline (见 14.4.3)               |
-|                                                                              |
-|  Step 7: 注入 FusedSystemState                                               |
-|    FusedSystemState.pv_forecast_15min = PV_final (f64)                      |
-|    FusedSystemState.load_forecast_15min = Load_final (f64)                  |
-|    FusedSystemState.D10 字段 = step_5 输出                                    |
-+-----------------------------------------------------------------------------+
-```
-
-#### 14.4.2 VMD 分解失败时的降级数据流
-
-```
-    VMD 失败 (不收敛 / NaN / 超时)
-      |
-      +--> 记录 WARN 日志 + 递增失败计数
-      +--> 使用原始序列 (未分解) 直接送入 LSTM
-      +--> 后续推理同 Step 3-7（单次推理，无 IMF 循环）
-      +--> 连续 5 次成功后自动升回 VMD 模式
-```
-
-#### 14.4.3 误差修正数据流（R2 实现）
-
-```
-    主预测 PV/Load_pred (Step 4 输出)
-      |
-      +--> 直接输出 (error_correction.enabled = false)
-      |
-      +--> [error_correction.enabled = true AND residual_buffer.filled = true]
-            |
-            | Step EC-1: 残差输入构建 (CPU, < 1ms)
-            |   ResidualBuffer::build_input()
-            |     ├── 缓冲已满 (>= T 步): 取出最近 T 步残差值
-            |     └── 缓冲未满 (< T 步): zero_init=true → 零向量填充
-            |   --> e_history [T 维 float32]
-            |
-            | Step EC-2: 误差修正推理 (NPU, RknnRuntime #2, <= 100ms × 2)
-            |   for target in [PV, Load]:
-            |     LstmInput { history: e_history_target }
-            |     --> error_correction.rknn (轻量 BiLSTM)
-            |     --> e_pred [15 维 float32]
-            |
-            | Step EC-3: 修正输出 (CPU, < 1ms)
-            |   for target in [PV, Load]:
-            |     y_corrected[target] = y_pred[target] + e_pred[target]
-            |
-            | Step EC-4: 残差缓冲更新 (下个周期)
-            |   等待本周期实际值 y_actual 到达后:
-            |     e_new = y_actual - y_pred (每个预测步独立计算)
-            |     ResidualBuffer::push(e_new)
-            |
-            +--> y_corrected [15 维] --> Step 7 注入 FusedSystemState
-```
-
-**误差修正降级数据流（残差缓冲不完整）：**
-
-```
-    error_correction.enabled = true AND residual_buffer 未满 AND zero_init = true
-      |
-      +--> e_history = 零向量 [0.0; T]
-      +--> e_pred = [0.0; 15] (理论输出，实际推理可跳过)
-      +--> y_corrected = y_pred + 0 = y_pred (等效于直接输出)
-      +--> 记录 INFO: "残差缓冲未满 ({filled}/{capacity})，零填充跳过修正"
-```
-
-**误差修正失败降级数据流：**
-
-```
-    误差修正推理失败 (RknnRuntime #2 错误 / 输出 NaN / 超时)
-      |
-      +--> 记录 ERROR: "误差修正推理失败: {reason}"
-      +--> error_correction_consecutive_failures += 1
-      +--> y_corrected = y_pred (使用主预测值，跳过修正)
-      +--> 连续 3 次失败后持久化禁用 (error_correction.enabled = false, 写入 DB)
-      +--> 恢复: OTA 下发新版 error_correction.rknn 后手动重新启用
-```
-
-#### 14.4.4 与现有 `full_decision_cycle()` 的集成点
-
-当前 `ModelManager::full_decision_cycle()` 中 LSTM 预测调用链为：
-
-```rust
-// 现有路径 (model_manager.rs:204-207)
-let (pv_forecast, load_forecast, load_quantiles) = self
-    .run_lstm_predict_with_quantiles()
-    .await
-    .unwrap_or_else(|_| (vec![0.0; 15], vec![0.0; 15], None));
-```
-
-增强后切换为：
-
-```rust
-// 增强路径 (model_manager.rs: 替换上述调用)
-let pipeline = self.prediction_pipeline.read().await;
-let forecast_result = pipeline
-    .as_ref()
-    .map(|p| p.execute().await)
-    .unwrap_or_else(|| self.run_lstm_predict_with_quantiles().await); // 降级
-```
-
-**R2 扩展：** `p.execute()` 内部自动处理误差修正（根据 `ErrorCorrectionConfig.enabled` 决定是否调用 `execute_error_correction()`）。
-
-### 14.5 接口定义
-
-#### 14.5.1 VmdDecomposer
-
-```rust
-/// VMD 分解器
-pub struct VmdDecomposer {
-    config: VmdConfig,
-}
-
-pub struct VmdConfig {
-    /// 模态数 K（光伏 4~6，负荷 5~8）
-    pub k: usize,
-    /// 惩罚因子
-    pub alpha: f64,
-    /// 噪声容忍度（Lagrangian 更新步长，tau=0.0 不做双升更新）
-    pub tau: f64,
-    /// 收敛容差
-    pub tol: f64,
-    /// 最大迭代次数
-    pub max_iter: usize,
-}
-
-/// 单次 VMD 分解结果
-pub struct VmdResult {
-    /// K 个子模态，每个长度 = 输入序列长度
-    pub imfs: Vec<Vec<f32>>,
-    /// 重构序列（所有 IMF 求和）
-    pub reconstructed: Vec<f32>,
-    /// 重构误差 (RMSE)
-    pub reconstruction_error: f64,
-    /// 实际迭代次数
-    pub iterations: usize,
-    /// 是否收敛
-    pub converged: bool,
-}
-
-impl VmdDecomposer {
-    pub fn new(config: VmdConfig) -> Self;
-    pub fn decompose(&self, signal: &[f32]) -> Result<VmdResult, AiEngineError>;
-}
-```
-
-#### 14.5.2 PredictionPipeline（R2 扩展）
-
-```rust
-/// 预测增强管线（R2 扩展：新增误差修正推理、ResidualBuffer 集成）
-pub struct PredictionPipeline {
-    // --- R1 字段 ---
-    vmd_pv: Option<VmdDecomposer>,
-    vmd_load: Option<VmdDecomposer>,
-    lstm_model: Arc<RwLock<Option<LstmModel>>>,
-    lstm_history: Arc<RwLock<VecDeque<(f64, f64)>>>,
-    input_size: usize,
-    config: PredictionEnhancementConfig,
-    health: RwLock<PipelineHealth>,
-
-    // --- R2 新增字段 ---
-    /// 误差修正 RknnRuntime（独立实例，与主模型 Runtime 隔离）
-    error_correction_runtime: Option<RknnRuntime>,
-    /// PV 残差缓冲
-    residual_buffer_pv: Option<RwLock<ResidualBuffer>>,
-    /// Load 残差缓冲
-    residual_buffer_load: Option<RwLock<ResidualBuffer>>,
-}
-
-/// EnhancedForecastResult
-pub struct EnhancedForecastResult {
-    pub pv_forecast: Vec<f64>,
-    pub load_forecast: Vec<f64>,
-    pub load_quantiles: Option<ProbabilisticLoadOutput>,
-    pub enhancement_level: EnhancementLevel,
-    pub vmd_degraded: bool,
-    /// R2 新增：误差修正是否生效（true = 误差修正成功执行且产生非零修正）
-    pub error_correction_applied: bool,
-}
-
-/// 增强等级（降级追踪）
-///
-/// 注意：Level 0-3 由 PredictionPipeline 内部管理；
-/// Level 4 (全降级/v2.16 基线) 和 Level 5 (全零预测/安全兜底)
-/// 由 ModelManager 调用方处理。见 14.8.1 降级层级边界表格。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EnhancementLevel {
-    FullVmdAttentionCorrection = 0,  // VMD + (Bi)LSTM/Attention + 误差修正
-    BiLstmVmdAttention = 1,          // BiLSTM + VMD + Attention (R2 新增)
-    VmdAttention = 2,                // VMD + LSTM/Attention
-    AttentionOnly = 3,               // LSTM/Attention (无 VMD)
-    Baseline = 4,                    // LSTM 基线 (无 VMD, 无 Attention)
-    // Level 5: 全零预测 — 由 ModelManager 调用方处理，不在此枚举
-}
-```
-
-**EnhancementLevel 枚举重新编号说明（R2 变更）：**
-- v1.1 中 Level 0-3 为连续编号，v2.0 因 BiLSTM 中间层插入，重新编号为 0-4
-- `BiLstmVmdAttention (1)` 在 VMD+Attention 之上、误差修正之下，代表"BiLSTM 替换单向 LSTM"这一独立增强维度
-- 若 BiLSTM 为 No-Go（`gate_passed = false`），降级路径中 Level 1 不存在，直接从 Level 0 降级到 Level 2
-
-**PipelineHealth 模块级健康状态（R2 扩展）：**
-
-```rust
-/// 管线模块健康状态（R2 扩展：VMD + 误差修正 双模块追踪）
-///
-/// 首轮仅 VMD 需硬降级追踪（仅使用 vmd_* 字段），
-/// R2 扩展为模块级健康状态数组，逐一追踪每个模块的降级/升级。
-#[derive(Debug, Clone)]
-pub struct PipelineHealth {
-    // VMD 模块
-    pub vmd_consecutive_failures: u32,
-    pub vmd_consecutive_successes: u32,
-    // 误差修正模块（R2 新增）
-    pub ec_consecutive_failures: u32,
-    pub ec_consecutive_successes: u32,
-    // 当前增强等级
-    pub current_level: EnhancementLevel,
-}
-```
-
-#### 14.5.3 PredictionEnhancementConfig
-
-```rust
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct PredictionEnhancementConfig {
-    #[serde(default)]
-    pub vmd: VmdEnhancementConfig,
-    #[serde(default)]
-    pub attention: AttentionConfig,
-    /// R2 扩展：BiLSTM 配置
-    #[serde(default)]
-    pub bilstm: BiLstmConfig,
-    /// R2 扩展：误差修正配置
-    #[serde(default)]
-    pub error_correction: ErrorCorrectionConfig,
-    #[serde(default)]
-    pub feature_selection: FeatureSelectionConfig,
-}
-```
-
-R2 新增字段定义详见 [10.1b 预测增强配置](#101b-预测增强配置-v30-新增)。
-
-#### 14.5.4 模型文件管理（R2 新增）
-
-**模型文件清单与校验规则：**
-
-| 文件名 | 轮次 | 必须存在 | 加载的 RknnRuntime | 用途 |
-|--------|------|----------|-------------------|------|
-| `lstm_attn.rknn` | R1 | 是 | Runtime #1（主预测） | 单向 LSTM + Attention 主预测 |
-| `bilstm_attn.rknn` | R2 | 否（Go/No-Go 按需） | Runtime #1（主预测，替换 lstm_attn） | BiLSTM + Attention 主预测 |
-| `error_correction.rknn` | R2 | 否（error_correction.enabled 按需） | Runtime #2（误差修正，独立实例） | 轻量 BiLSTM 残差修正 |
-
-**ModelManager 中 RknnRuntime 实例管理策略（R2 设计决策）：**
-
-```
-ModelManager
-  |-- lstm_model: Arc<RwLock<Option<LstmModel>>>   // 持有 RknnRuntime #1（主预测）
-  |                                                    //    可能加载 lstm_attn.rknn 或 bilstm_attn.rknn
-  |-- prediction_pipeline: Arc<RwLock<Option<PredictionPipeline>>>
-       |-- error_correction_runtime: Option<RknnRuntime>  // RknnRuntime #2（误差修正，独立）
-```
-
-**设计决策：** 误差修正 RknnRuntime (#2) 挂在 `PredictionPipeline` 而非 `ModelManager` 下，理由：
-- 误差修正与主预测在 PredictionPipeline 内串行编排（14.4.3），同一生命周期管理更简单
-- `ModelManager` 不应感知误差修正的内部实现细节（关注点分离）
-- 若未来误差修正需要独立于主预测管线加载（如 OTA 热加载），可将字段提升至 `ModelManager`
-
-**文件校验规则：**
-
-| 校验项 | 时机 | 方法 | 失败处理 |
-|--------|------|------|----------|
-| 文件存在性 | 模型加载（启动时） | `std::fs::metadata` + 路径存在检查 | 记录 ERROR，若为可选模型（bilstm/error_correction）则跳过；若为必须模型（lstm_attn）则拒绝启动 |
-| SHA256 完整性 | 模型加载 | 与 OTA 下发的校验值比对（预期哈希值存储在 OTA manifest JSON 或 DB `model_versions` 表中） | 触发 OTA 备份恢复流程 |
-| ONNX metadata_props 一致性 | 模型加载 | RKNN runtime 查询 + 与 config 交叉比对（14.2.5 表格） | 记录 ERROR，拒绝部署；若为可选模型则跳过 |
-| RKNN Runtime 版本兼容 | rknn_init | 检查返回码（-4 = SDK 版本不匹配） | 拒绝加载，等待 RKNN Runtime 升级 |
-| 输入/输出维度匹配 | rknn_query | 检查 input/output 数量与期望一致 | 拒绝加载 |
-
-**OTA 升级/回滚策略：**
-
-| 模型文件 | 升级策略 | 回滚策略 |
-|----------|----------|----------|
-| `lstm_attn.rknn` | OTA 下发新版本 → SHA256 校验 → 原子替换（rename） → 下次推理周期生效 | 保留上一版本备份（`lstm_attn.rknn.bak`），SHA256 校验失败时自动恢复 |
-| `bilstm_attn.rknn` | 同上；首次下发后须完成 14.2.5 硬件验证才设 `gate_passed = true` | 同 lstm_attn；可独立回滚（不影响单向 LSTM）。BiLSTM 模型版本变更（`mupc_version` 变化）后 `gate_passed` 自动重置为 `false`，需重新执行硬件验证 |
-| `error_correction.rknn` | OTA 下发 → 校验 → `PredictionPipeline::reload_error_correction()` 热加载 | 回滚到上一版本或直接禁用（`enabled = false`，系统自动降级） |
-
-**三种模型的 OTA 独立性：** 任意一个模型的升级/回滚不影响其他两个模型。`ModelManager` 通过版本号元数据（`mupc_version`）追踪各模型的当前版本。
-
-**BiLSTM 运行时模型热切换机制：** 当 BiLSTM OTA 升级后 `gate_passed` 重置为 `false`，系统继续使用单向 LSTM。完成硬件验证并设 `gate_passed = true` 后，下一推理周期起 `ModelManager::load_models()` 重新执行 `select_prediction_model()` 切换到 BiLSTM。热切换通过预留双 Runtime（主预测 Runtime #1 保持单向 LSTM 服务，新 BiLSTM 模型加载到独立 Context 中，加载完成后原子替换 `lstm_model` 中的 Runtime 引用）实现无感切换，推理不中断。若无法预留双 Runtime（NPU 内存不足），则 fallback 到 destroy+init 路径（短暂推理中断 < 200ms）。
-
-### 14.6 性能预算
-
-#### 14.6.1 单模块延迟预算表
-
-| 阶段 | 位置 | 单次预算 | 测量方法 | 轮次 |
-|------|------|----------|----------|------|
-| VMD 分解（PV） | CPU | <= 25ms | 1000 次 benchmark | R1 |
-| VMD 分解（Load） | CPU | <= 25ms | 1000 次 benchmark | R1 |
-| VMD 合计 | CPU | <= 50ms | 串行 PV + Load | R1 |
-| LSTM/Attention 主推理（单次） | NPU | <= 40ms | 1000 次 rknn_run | R1 |
-| IMF NPU 推理 K 次合计 | NPU | <= 600ms | K_pv + K_load 次推理 | R1 |
-| 分位数后处理 | CPU | <= 10ms | 现有路径 | R1 |
-| **BiLSTM 主推理（单次，Go 路径）** | **NPU** | **<= 80ms** | **1000 次 rknn_run** | **R2** |
-| **误差修正推理（PV，单次）** | **NPU** | **<= 100ms** | **1000 次 rknn_run** | **R2** |
-| **误差修正推理（Load，单次）** | **NPU** | **<= 100ms** | **1000 次 rknn_run** | **R2** |
-| **误差修正合计** | **NPU** | **<= 200ms** | **串行 PV + Load** | **R2** |
-| **残差缓冲更新** | **CPU** | **<= 1ms** | **FIFO push** | **R2** |
-
-#### 14.6.2 组合预算表
-
-**Go 路径（BiLSTM 通过硬件验证 + 误差修正启用，全功能）：**
-
-| 阶段 | 预算 | 累计 |
-|------|------|------|
-| VMD 分解（PV + Load） | <= 50ms | 50ms |
-| IMF BiLSTM 推理（K_pv + K_load 次, NPU） | <= 600ms | 650ms |
-| 分位数后处理 | <= 10ms | 660ms |
-| 误差修正推理（PV + Load） | <= 200ms | 860ms |
-| **端到端总延迟（Go 路径，P99）** | **<= 860ms** | **满足 < 1s** |
-| Go 路径终端余量 | **140ms** | -- |
-
-**Level 1A（Go 路径无误差修正 = BiLSTM + VMD，error_correction.enabled=false 直接进入）：**
-
-| 阶段 | 预算 | 累计 |
-|------|------|------|
-| VMD 分解 | <= 50ms | 50ms |
-| IMF BiLSTM 推理 | <= 600ms | 650ms |
-| 分位数后处理 | <= 10ms | 660ms |
-| **端到端总延迟（Level 1A，P99）** | **<= 660ms** | **满足 < 1s** |
-
-**No-Go 路径 A（BiLSTM No-Go + 误差修正启用）：**
-
-| 阶段 | 预算 | 累计 |
-|------|------|------|
-| VMD 分解（PV + Load） | <= 50ms | 50ms |
-| IMF LSTM/Attention 推理（K_pv + K_load 次, NPU） | <= 490ms | 540ms |
-| 分位数后处理 | <= 10ms | 550ms |
-| 误差修正推理（PV + Load） | <= 200ms | 750ms |
-| **端到端总延迟（No-Go A，P99）** | **<= 750ms** | **满足 < 1s** |
-
-**No-Go 路径 B（BiLSTM No-Go + 误差修正禁用 = 第一轮 VMD + Attention）：**
-
-| 阶段 | 预算 | 累计 |
-|------|------|------|
-| VMD 分解（PV + Load） | <= 50ms | 50ms |
-| IMF LSTM/Attention 推理（K_pv + K_load 次, NPU） | <= 490ms | 540ms |
-| 分位数后处理 | <= 10ms | 550ms |
-| **端到端总延迟（No-Go B，P99）** | **<= 550ms** | **满足 < 1s** |
-
-**Level 3（AttentionOnly，无 VMD/EC）：**
-
-| 阶段 | 预算 | 累计 |
-|------|------|------|
-| LSTM/Attention 推理（单次 PV + Load） | <= 80ms | 80ms |
-| 分位数后处理 | <= 10ms | 90ms |
-| **端到端总延迟（Level 3，P99）** | **<= 90ms** | **满足 < 1s** |
-
-**基线（全降级，v2.16 基线）：**
-
-| 阶段 | 预算 | 累计 |
-|------|------|------|
-| LSTM 基线推理（单次 PV + Load） | <= 80ms | 80ms |
-| 分位数后处理 | <= 10ms | 90ms |
-| **端到端总延迟（基线，P99）** | **<= 90ms** | **满足 < 1s** |
-
-#### 14.6.3 BiLSTM 准入条件的延迟裕度分析
-
-以 Go 路径全功能总延迟 860ms 为基准：
-
-| 边界条件 | 值 | 说明 |
-|----------|-----|------|
-| 全管线延迟硬上限 | < 1s (1000ms) | 系统级约束 |
-| Go 路径预算 | <= 860ms | 剩余 140ms 裕度 |
-| BiLSTM 准入门限 | P99 < 900ms | PRD Section 4.2 定义，为全管线留 100ms 裕度 |
-| BiLSTM 单次推理上限 | <= 80ms | 与单向 LSTM (<= 40ms) 之比 = 2.0x，满足 <= 2.2x 参数量约束 |
-
-**分析结论：** Go 路径 P99 <= 860ms，距离 900ms 准入门限有 40ms 裕度，距离 1s 硬上限有 140ms 裕度。裕度来源于：IMF 推理未并行批处理（K 次串行），实际延迟可能低于 600ms（若支持 batch>1 可降至约 40ms）；误差修正的 200ms 预算中，实际单次修正推理预期 <= 80ms；VMD 的 50ms 预算中，可启用 `rayon` 并行降低至 ~25ms。
-
-#### 14.6.4 模型大小预算
-
-| 模型文件 | 大小 | 轮次 |
-|----------|------|------|
-| `lstm_attn.rknn`（LSTM + Attention, INT8） | <= 8MB（基线 ~5MB + Attention 增 ~3MB） | R1 |
-| `bilstm_attn.rknn`（BiLSTM + Attention, INT8） | <= 12MB（参数量 <= 2.2x lstm_attn） | R2 |
-| `error_correction.rknn`（误差修正 BiLSTM, INT8） | <= 3MB（参数量 <= 主预测的 50%） | R2 |
-| **三个模型文件合计** | **<= 23MB** | -- |
-
-#### 14.6.5 内存预算
-
-| 组件 | 内存 | 轮次 |
-|------|------|------|
-| VMD 分解器工作内存（nalgebra 矩阵） | <= 5MB | R1 |
-| VMD IMF 缓冲（K * input_window * f32） | <= 2MB | R1 |
-| RknnRuntime #1（主预测模型） | <= 200MB | R1 |
-| RknnRuntime #2（误差修正模型） | <= 80MB（独立 NPU 内存段） | R2 |
-| 残差缓冲（2 * T * f32 ≈ 192B） | < 1KB | R2 |
-| **推理运行时总内存（含增强）** | **<= 350MB**（基线 200MB + R1 50MB + R2 100MB） | -- |
-
-### 14.7 配置设计
-
-#### 14.7.1 YAML 配置结构（R2 扩展）
-
-在 `mupc/config/mupc_env_config.yaml` 中新增 `prediction_enhancement` 段：
-
-```yaml
-# ============================================================================
-# 预测增强配置（v3.0，2026-06-21）
-# 缺失时系统运行于 v2.16 基线模式（全部增强功能禁用）
-# ============================================================================
-prediction_enhancement:
-  # ==========================================================================
-  # 第一轮配置项（VMD + Attention）— R1 实现
-  # ==========================================================================
-  vmd:
-    enabled: true               # 启用 VMD 分解
-    k_pv: 5                     # 光伏模态数 [2, 10]
-    k_load: 6                   # 负荷模态数 [2, 10]
-    alpha: 2000.0               # 惩罚因子 [100, 5000]
-    tol: 1.0e-6                 # 收敛容差 [1e-7, 1e-5]
-    max_iter: 500               # 最大迭代次数 [100, 2000]
-    tau: 0.0                    # 噪声容忍度（Lagrangian 更新步长，0.0 = 标准 VMD）
-
-  attention:
-    enabled: true               # Attention 启用（需 ONNX 模型含 Attention 层）
-    score_type: "additive"      # additive | dot | general
-    export_weights: false       # 是否导出注意力权重到日志
-
-  # ==========================================================================
-  # 第二轮配置项（BiLSTM + 误差修正）— R2 实现
-  # ==========================================================================
-  bilstm:
-    enabled: false              # [R2] 是否启用 BiLSTM 双向替换（需硬件验证通过）
-    gate_passed: false          # [R2] Go/No-Go 准入标志：RK3588 硬件延迟摸底通过后设为 true
-    model_path: "/etc/mupc/models/bilstm_attn.rknn"  # [R2] BiLSTM 模型文件路径
-    hidden_size_override: null  # [R2] 隐状态维度覆盖（null = 使用模型内建值，仅调试用途）
-    fallback_on_failure: true   # [R2] BiLSTM 推理失败时是否自动回退单向 LSTM（默认 true）
-
-  error_correction:
-    enabled: false              # [R2] 是否启用误差修正 BiLSTM（主预测偏差 > 3% 时启用）
-    model_path: "/etc/mupc/models/error_correction.rknn"  # [R2] 误差修正模型文件路径
-    residual_window_steps: 24   # [R2] 残差窗口步数（默认 24，与主预测 input_window 对齐）
-    zero_init: true             # [R2] 冷启动/缓冲未满时是否零向量填充（true = 零填充跳过修正，false = 拒绝推理）
-    auto_disable_after_failures: 3  # [R2] 连续失败 N 次后自动禁用误差修正（0 = 不自动禁用）
-    enable_bias_check: true     # [R2] 是否启用系统性偏差检测（主预测 |Bias| > 3% MAPE 才启用修正）
-
-  # ==========================================================================
-  # 特征筛选配置（离线 MIC，R1 定义 + 跨轮次不变）
-  # ==========================================================================
-  feature_selection:
-    mic_top_k: 7                # MIC 筛选 Top-K 特征数
-```
-
-#### 14.7.2 配置项归属（第一轮 vs 第二轮）
-
-| 配置段 | 配置项 | 轮次 | 说明 |
-|--------|--------|------|------|
-| `vmd` | 全部 | R1 | VMD 分解器参数 |
-| `attention` | 全部 | R1 | Attention 调试开关 |
-| `bilstm.enabled` | R2 | R2 | BiLSTM 启用开关 |
-| `bilstm.gate_passed` | R2 | R2 | 硬件验证准入标志 |
-| `bilstm.model_path` | R2 | R2 | 模型文件路径 |
-| `bilstm.hidden_size_override` | R2 | R2 | 调试覆盖（生产不应使用） |
-| `bilstm.fallback_on_failure` | R2 | R2 | 失败回退策略 |
-| `error_correction.enabled` | R2 | R2 | 误差修正启用开关 |
-| `error_correction.model_path` | R2 | R2 | 修正模型文件路径 |
-| `error_correction.residual_window_steps` | R2 | R2 | 残差窗口长度 |
-| `error_correction.zero_init` | R2 | R2 | 冷启动策略 |
-| `error_correction.auto_disable_after_failures` | R2 | R2 | 自动禁用阈值 |
-| `error_correction.enable_bias_check` | R2 | R2 | 偏差检测开关 |
-| `feature_selection` | 全部 | R1 | 离线 MIC 引用 |
-
-#### 14.7.3 配置默认值策略
-
-| 场景 | 行为 |
-|------|------|
-| `prediction_enhancement` 段完全缺失 | 所有增强功能禁用，运行 v2.16 基线模式 |
-| `vmd` 子段缺失 | `vmd.enabled = false` |
-| `attention` 子段缺失 | `attention.enabled = false` |
-| `bilstm` 子段缺失 | 所有 bilstm 字段使用默认值（`enabled = false`, `gate_passed = false`） |
-| `error_correction` 子段缺失 | 所有 error_correction 字段使用默认值（`enabled = false`, `zero_init = true`） |
-| 参数值超出范围（如 `k_pv = 0`） | 使用硬编码默认值（k_pv=5, k_load=6）并记录 WARN |
-| `residual_window_steps < 1` | 使用默认值 24，记录 WARN |
-| `auto_disable_after_failures < 0` | 使用默认值 3，记录 WARN |
-
-#### 14.7.4 配置热加载
-
-配置变更通过 `DynamicConfigLoader` 周期轮询（与现有一致），增强模块支持运行时重新加载：
-
-- `vmd.enabled` 由 true -> false：下一次推理周期起跳过 VMD
-- `vmd.enabled` 由 false -> true：下一次推理周期起尝试 VMD（VmdDecomposer 重新初始化）
-- `attention.enabled` 切换：仅当模型含 Attention 层时生效，否则记录 WARN
-- `bilstm.enabled` 切换：需重新加载模型文件（OTA 场景），运行时切换记录 INFO 但推迟到下次模型加载；`gate_passed` 变更需重启生效（防止运行时突然切换模型导致推理中断）
-- `error_correction.enabled` / `residual_window_steps` / `zero_init` 切换：下一次推理周期起生效（`residual_window_steps` 变更需重建 ResidualBuffer）
-- `error_correction.model_path` 变更：需重新加载模型文件（OTA 场景），下一次推理周期起生效
-
-### 14.8 错误处理与降级
-
-#### 14.8.1 降级层级（R2 扩展）
-
-```
-Level 0: VMD → BiLSTM/Attention → 误差修正         [全功能, Go 路径]
-Level 1A: VMD → BiLSTM/Attention (无误差修正)       [误差修正降级，或 error_correction.enabled=false 直接进入]
-Level 1B: VMD → LSTM/Attention → 误差修正            [BiLSTM No-Go / BiLSTM 降级]
-Level 2: VMD → LSTM/Attention (无误差修正)           [BiLSTM 降级 + 误差修正降级]
-Level 3: LSTM/Attention (无 VMD, 无误差修正)         [VMD 降级]
-Level 4: LSTM 基线 (无 VMD, 无 Attention)            [Attention 降级 = v2.16 基线]
-Level 5: 全零预测 (安全兜底)                          [模型加载完全失败，由 ModelManager 处理]
-```
-
-**降级层级边界说明：**
-
-| EnhancementLevel 枚举值 | 对应降级层级 | 管理者 | 说明 |
-|-------------------------|-------------|--------|------|
-| `FullVmdAttentionCorrection` (0) | Level 0 | PredictionPipeline | R2 实现真正的误差修正，不再直接降级 |
-| `BiLstmVmdAttention` (1) | Level 1A | PredictionPipeline | Go 路径下误差修正失败降到此层，或 error_correction.enabled=false 直接进入 |
-| `VmdAttention` (2) | Level 1B / 2 | PredictionPipeline | No-Go 路径下误差修正启用时从 Level 0 降到此层 |
-| `AttentionOnly` (3) | Level 3 | PredictionPipeline | VMD 失败 |
-| `Baseline` (4) | Level 4 | PredictionPipeline | Attention 失败/未配置 |
-| (无枚举值) | Level 5 | **ModelManager** | `run_lstm_predict_with_quantiles()` 也失败时，返回全零向量 |
-
-**注意：** Level 1A 和 Level 1B 都是 `EnhancementLevel` 枚举中的一个值，但代表不同的降级路径：
-- 1A = BiLSTM (Go) + VMD，误差修正失败
-- 1B = LSTM + VMD + 误差修正，BiLSTM No-Go 或 BiLSTM 推理失败
-
-这两者在当前枚举设计中共用 `VmdAttention` 值（`EnhancementLevel::VmdAttention`），通过 `BiLstmConfig.enabled` 和 `ErrorCorrectionConfig.enabled` 的组合在日志中区分降级原因，不创建两个仅名称不同的枚举值（保持枚举精简），但降级日志中明确标注降级原因：
-
-```
-[WARN] 降级至 VmdAttention (Level 2): BiLSTM 推理失败，已回退单向 LSTM
-[WARN] 降级至 VmdAttention (Level 2): 误差修正连续 3 次失败，已禁用
-```
-
-**BiLSTM 降级层级过渡（R2 新增）：**
-
-```
-BiLSTM 推理失败（单次）或连续 3 次 P99 > 80ms
-  |
-  +--> 自动回退到单向 LSTM + Attention（加载 lstm_attn.rknn）
-  +--> 保留 VMD + 误差修正功能（若启用）
-  +--> 降级原因记录到日志: "BiLSTM -> 单向LSTM"
-  +--> 恢复: 运维修复后手动设 gate_passed=true 并重启（或 OTA 下发新版 bilstm_attn.rknn）
-```
-
-#### 14.8.2 自动升降级逻辑（R2 扩展）
-
-```rust
-// prediction_pipeline.rs 核心逻辑 (R2 扩展)
-
-impl PredictionPipeline {
-    pub async fn execute(&self) -> Result<EnhancedForecastResult, AiEngineError> {
-        let mut level = self.health.read().await.current_level;
-
-        loop {
-            match level {
-                EnhancementLevel::FullVmdAttentionCorrection => {
-                    // R2: 执行真正的 VMD + (Bi)LSTM/Attention + 误差修正
-                    match self.execute_full_with_correction().await {
-                        Ok(r) => {
-                            self.health.write().await.on_success_both();
-                            return Ok(r);
-                        }
-                        Err(e) => {
-                            // 区分错误来源：主预测失败 vs 误差修正失败
-                            if e.is_error_correction_failure() {
-                                tracing::warn!("误差修正失败: {}, 降级至 BiLSTM+VMD", e);
-                                self.health.write().await.on_failure_ec();
-                                level = EnhancementLevel::BiLstmVmdAttention;
-                            } else {
-                                tracing::warn!("主预测失败: {}, 降级至 VMD+Attention", e);
-                                self.health.write().await.on_failure_vmd();
-                                level = EnhancementLevel::VmdAttention;
-                            }
-                        }
-                    }
-                }
-                EnhancementLevel::BiLstmVmdAttention => {
-                    // R2: BiLSTM + VMD（跳过误差修正）
-                    match self.execute_vmd_attention().await {
-                        Ok(mut r) => {
-                            r.error_correction_applied = false;
-                            return Ok(r);
-                        }
-                        Err(e) => { /* 继续降级 */ }
-                    }
-                }
-                EnhancementLevel::VmdAttention => {
-                    match self.execute_vmd_attention().await {
-                        Ok(r) => {
-                            self.try_promote().await;
-                            return Ok(r);
-                        }
-                        Err(e) => {
-                            tracing::warn!("VMD+Attention 失败: {}, 降级至 Attention", e);
-                            self.health.write().await.on_failure_vmd();
-                            level = EnhancementLevel::AttentionOnly;
-                        }
-                    }
-                }
-                EnhancementLevel::AttentionOnly => { /* 同 v1.1 */ }
-                EnhancementLevel::Baseline => { /* 同 v1.1 */ }
-            }
-        }
-    }
-
-    /// R2 扩展：连续成功升级逻辑支持多模块
-    ///
-    /// VMD 连续 5 次成功 → 可升回 VMD 层级
-    /// 误差修正连续 5 次成功 → 可升回误差修正层级
-    /// 每个模块独立追踪，不互相阻塞
-    async fn try_promote(&self) {
-        let mut health = self.health.write().await;
-
-        // VMD 升级（连续 5 次成功升一级）
-        if health.vmd_consecutive_successes >= 5 {
-            // Level 3 → 2, Level 2 → 1A/1B
-        }
-
-        // R2 新增：误差修正升级（连续 5 次成功升一级）
-        if health.ec_consecutive_successes >= 5 {
-            // Level 1A → 0（若 BiLSTM Go），Level 1B → 0（若 BiLSTM No-Go）
-        }
-    }
-}
-```
-
-#### 14.8.3 错误变体
-
-预测增强管线新增的错误变体已定义于 [11.1 AiEngineError 枚举](#111-aiengineerror-枚举)：
-
-| 错误变体 | 用途 | 轮次 |
-|----------|------|------|
-| `VmdFailed(String)` | VMD 分解失败 | R1 |
-| `VmdNotConverged { max_iter, final_error }` | VMD 迭代不收敛 | R1 |
-| `AttentionDegraded` | Attention 层退化 | R1 |
-| `ErrorCorrectionFailed(String)` | 误差修正失败 | R1 |
-| `ModelValidationFailed { model_path, reason }` | 模型 metadata 校验失败 | R2 |
-| `ResidualBufferInsufficient { filled, capacity }` | 残差缓冲不足 | R2 |
-
-### 14.9 测试策略
-
-#### 14.9.1 单元测试（R2 扩展）
-
-| 模块 | 测试项 | 验证标准 | 轮次 |
-|------|--------|----------|------|
-| `vmd.rs` | VMD 分解对 24 步正弦波 + 噪声的合成信号，输出 K=4 个 IMF | VMD-01: IMF 长度 = 输入长度 | R1 |
-| `vmd.rs` | 所有 IMF 求和与原始信号 RMSE <= 1e-4 | VMD-02: 重构保真度 | R1 |
-| `vmd.rs` | max_iter=1 时返回 VmdNotConverged | VMD-06: 不收敛处理 | R1 |
-| `vmd.rs` | 输入含 NaN 时返回 VmdFailed | VMD 异常处理 | R1 |
-| `prediction_pipeline.rs` | VMD 失败时自动降级到 baseline | 降级逻辑 | R1 |
-| `prediction_pipeline.rs` | 连续 5 次成功后自动升级 | 升级逻辑 | R1 |
-| `config.rs` | EnhancementConfig 缺失时全部 default | 配置兼容性 | R1 |
-| `residual_buffer.rs` | 缓冲已满时提取最近 T 步残差 | ERR-08: 历史残差输入 | R2 |
-| `residual_buffer.rs` | 缓冲未满 + zero_init=true 时返回零向量 | ERR-08: 冷启动零填充 | R2 |
-| `residual_buffer.rs` | 缓冲未满 + zero_init=false 时返回错误 | ERR-08: 保守模式 | R2 |
-| `model_validator.rs` | metadata 校验通过 (mupc_model_type="bilstm" + config.enabled=true) | 模型加载校验 | R2 |
-| `model_validator.rs` | metadata 不一致时返回 ModelValidationFailed | 模型加载校验 | R2 |
-| `model_validator.rs` | gate_passed=false + enabled=true 时选择单向模型 | 14.2.5 逻辑 | R2 |
-| `prediction_pipeline.rs` | 误差修正启用 + 缓冲已满 → error_correction_applied=true | ERR 集成测试 | R2 |
-| `prediction_pipeline.rs` | 误差修正启用 + 缓冲未满 + zero_init=true → 跳过修正 | ERR 集成测试 | R2 |
-| `prediction_pipeline.rs` | 误差修正连续 3 次失败 → 自动禁用 | ERR 降级逻辑 | R2 |
-| `prediction_pipeline.rs` | BiLSTM 失败 → 回退单向 LSTM + 保留 VMD/误差修正 | BiLSTM 降级逻辑 | R2 |
-
-#### 14.9.2 性能测试
-
-```rust
-// 单模块性能基准 (R2 扩展)
-
-#[test]
-fn test_error_correction_inference_latency() {
-    // R2: 误差修正推理延迟 <= 100ms (单次 NPU)
-    let runtime = RknnRuntime::new("error_correction.rknn")?;
-    let input = vec![0.0_f32; 24]; // 零向量输入（冷启动场景）
-    let start = std::time::Instant::now();
-    let output = runtime.run(&input)?;
-    let elapsed = start.elapsed();
-    assert!(elapsed.as_millis() <= 100,
-        "误差修正推理超时: {}ms", elapsed.as_millis());
-}
-
-#[test]
-fn test_residual_buffer_update_latency() {
-    // R2: 残差缓冲更新延迟 <= 1ms
-    let mut buf = ResidualBuffer::new(24, true);
-    let start = std::time::Instant::now();
-    for _ in 0..100 {
-        buf.push(0.5);
-    }
-    let elapsed = start.elapsed();
-    assert!(elapsed.as_millis() <= 1,
-        "残差缓冲更新超时: {}ms", elapsed.as_millis());
-}
-```
-
-#### 14.9.3 集成测试（R2 扩展）
-
-| 测试场景 | 预期行为 | 轮次 |
-|----------|----------|------|
-| 启动时 `prediction_enhancement` 缺失 | 运行于 baseline，日志 INFO | R1 |
-| VMD + Attention 全功能路径 | `enhancement_level = VmdAttention` | R1 |
-| VMD 参数非法 (k_pv=0) | 使用默认值，WARN 日志 | R1 |
-| 模型不含 Attention 但配置 `attention.enabled=true` | 自动降级，WARN 日志 | R1 |
-| VMD 连续 3 次失败 | `PipelineHealth.current_level` 降级 | R1 |
-| **BiLSTM gate_passed=true + 模型加载成功** | **enhancement_level = FullVmdAttentionCorrection (若误差修正也启用)** | **R2** |
-| **BiLSTM gate_passed=false + enabled=true** | **加载 lstm_attn.rknn，记录 WARN "gate_passed=false"** | **R2** |
-| **BiLSTM gate_passed=true + 推理失败** | **回退 lstm_attn.rknn，保留 VMD 和误差修正** | **R2** |
-| **误差修正启用 + 残差缓冲已满** | **y_corrected = y_pred + e_pred** | **R2** |
-| **误差修正启用 + 残差缓冲未满 + zero_init=true** | **y_corrected = y_pred，不抛错** | **R2** |
-| **误差修正推理失败** | **跳过修正，主预测值直接输出，连续 3 次后禁用** | **R2** |
-| **全功能 Go 路径端到端** | **VMD + BiLSTM/Attention + 误差修正，延迟 < 1s** | **R2** |
-
-### 14.10 风险与缓解
-
-| 风险 | 概率 | 影响 | 缓解 | 轮次 |
-|------|------|------|------|------|
-| VMD Rust 实现数值不稳定 | 中 | 预测精度不达标 | 与 Python VMD (vmdpy) 输出对比验证；若不达标切换 FFI | R1 |
-| VMD 延迟 > 50ms | 低 | 总延迟超标 | `rayon` 并行 K 个 IMF；减少 K 值；切换 FFI | R1 |
-| RKNN Toolkit 不支持 Attention ONNX 算子 | 低 | Attention 无法 NPU 加速 | MatMul/Softmax/ReduceSum 均为基础算子，RKNN Toolkit 2 已支持 | R1 |
-| IMF 逐个推理导致 NPU 调用次数膨胀 | 中 | 延迟超标 | 若 RKNN 支持 batch>1，拼接 K 个 IMF 为 batch 一次推理 | R1 |
-| VMD 模块引入 unsafe 代码 | 极低 | 安全审计不通过 | `rustfft` 和 `nalgebra` 均为 pure Rust；若引入 FFI 则走 review | R1 |
-| **BiLSTM 参数量超标（> 2.2x 单向）** | **低** | **模型无法加载** | **metadata 校验阶段拦截；训练管线在导出前验证参数量** | **R2** |
-| **BiLSTM 推理延迟超标（P99 > 900ms）** | **中** | **BiLSTM No-Go** | **PRD Section 4.2 准入条件：延迟摸底 P99 >= 900ms → 跳过 BiLSTM，仅保留误差修正** | **R2** |
-| **误差修正推理与主预测 NPU 资源争抢** | **低** | **总延迟超标** | **两个 RknnRuntime 串行调用；NPU 不支持并行推理，设计上已保证串行** | **R2** |
-| **残差缓冲与实际值不同步** | **中** | **误差修正方向错误** | **每个预测周期结束后，等待本周期实际值到达后再更新缓冲；配置 `enable_bias_check` 持续监控修正方向** | **R2** |
-| **误差修正引入负修正（修正后比修正前更差）** | **中** | **预测精度反降** | **`enable_bias_check` 检测修正后 MAPE 是否劣于修正前；连续 3 次劣化自动禁用** | **R2** |
-| **双 RknnRuntime 实例内存超标** | **低** | **OOM** | **误差修正为轻量 BiLSTM（<= 主预测 50% 参数量），内存增量 <= 80MB（14.6.5）** | **R2** |
-
-### 14.11 与现有文档的关系
-
-| 文档 | 关系 |
-|------|------|
-| `2026-06-21-预测增强分层混合架构-PRD.md` (v1.1) | 本设计文档的输入需求 |
-| `modules/05-MUPC-AI引擎-PRD.md` | AI 引擎基线 PRD，本设计在其上增强 |
-| `论文吸收-预测增强.md` | 方法论背景 |
-| `technical-debt.md` | 增强完成后需更新 Phase 3C 增强状态 |
-| `pipeline_config.rs` | 本设计 14.5.3 的代码实现（R1 已实现，R2 将扩展） |
-| `prediction_pipeline.rs` | 本设计 14.5.2 的代码实现（R1 已实现核心编排，R2 将扩展误差修正） |
-| `model_manager.rs` | 本设计 14.4.4 集成点（R1 已集成，R2 将扩展多 Runtime 管理） |
-
-### 14.12 跨项目接口（与 MUPC-AI2 训练管线）
-
-完全遵循 PRD Section 7.4 定义的 JSON Schema：
-
-| 接口 | 方向 | 格式 | Schema 位置 |
-|------|------|------|-------------|
-| MIC 分析结果 | MUPC-AI2 -> MUPC | JSON | PRD Section 7.4.1 |
-| MSSA 搜索最优超参 | MUPC-AI2 -> MUPC-AI2 | JSON | PRD Section 7.4.2 |
-| ONNX 模型（含 Attention） | MUPC-AI2 -> .rknn 转换 -> MUPC | .rknn | PRD Section 7.4.3 |
-| ONNX 模型元数据 | 内嵌于 ONNX | metadata_props | PRD Section 7.4.3 表格 |
-
-**Rust 侧职责：**
-- 读取 ONNX 模型导出时写入的 `metadata_props`（通过 RKNN Toolkit 转后在运行时查询）
-- 校验 `mupc_model_type`、`mupc_with_attention`、`mupc_with_vmd`、`mupc_direction` 与 `PredictionEnhancementConfig` 一致性
-- 含 VMD 模型时校验 `mupc_with_vmd == "true"`，并在 K 维求和重构
-- R2 新增：校验 `mupc_hidden_size` 以间接验证 BiLSTM 参数量约束（<= 2.2x 单向）
-
----
-
+> **v3.1 合并** | 本章内容已合并至 [第 2 章 LSTM 预测管线设计](#2-lstm-预测管线设计)。此处保留章号为向后兼容。
 ## 15. MSSA 超参优化工具设计
 
 > **v3.0 合并新增** | **来源：** `docs/superpowers/plans/2026-06-21-预测增强分层混合架构-DESIGN.md` v3.0, Section 12
