@@ -415,6 +415,15 @@ impl LstmModel {
 - 47 维 → legacy D2+D10
 - 30 维 → legacy D2 only
 
+**输出维度校验**：输出不足时返回 `OutputShapeMismatch` 错误（不静默补零）。
+
+```rust
+let output_steps = self.config.output_horizon_secs / self.config.step_seconds; // = 15
+if output.len() < output_steps {
+    return Err(AiEngineError::OutputShapeMismatch);
+}
+```
+
 ### 2.6 预测增强管线 — PredictionPipeline
 
 #### 2.6.1 增强等级（降级追踪）
@@ -585,6 +594,31 @@ Level 4       → LSTM 推理失败  → Level 5 (全零预测, ModelManager 层
 | 特征顺序 | [pv, load, ghi, temp, sin_hour, cos_hour, yesterday_pv] | prepare_data() 同序 |
 | 步长 | step_seconds = 900s | dt_hours = 0.25 |
 | metadata_props | 交叉校验 mupc_model_type / mupc_with_attention / mupc_input_window | 导出时注入 |
+
+### 2.12 测试策略
+
+| 测试类型 | 覆盖范围 | 工具 |
+|------|------|------|
+| VMD 分解单元测试 | K=2~8，信号长度 24~96，收敛/未收敛/NaN 输入 | `cargo test -p mupc-ai-engine vmd` |
+| 增强管线降级测试 | 5 级降级路径逐级触发，连续 3 次失败→降级，连续 5 次成功→升级 | `cargo test -p mupc-ai-engine pipeline` |
+| 误差修正零填充测试 | ResidualBuffer 冷启动 < capacity → 零向量输入 → 修正量=0 | `cargo test -p mupc-ai-engine residual` |
+| ONNX 输出兼容测试 | 90 维(p10p50p90)、47 维(legacy+D10)、30 维(legacy) 自动检测 | `cargo test -p mupc-ai-engine lstm` |
+| 7 维输入构建测试 | `build_flat_input()` 输出 168 f32，`HistorySample::to_features()` 返回 [f32; 7] | `cargo test -p mupc-ai-engine model_manager` |
+| 模型文件校验测试 | SHA256 匹配/不匹配/文件缺失/RKNN 文件大小=0/类型不匹配 | `cargo test -p mupc-ai-engine model_validator` |
+| 全管线集成测试 | `full_decision_cycle()` 完整流程 (融合→预测→RL决策→安全校验) | `cargo test -p mupc-ai-engine core_pipeline_integration` |
+
+### 2.13 风险与缓解
+
+| 风险 | 概率 | 影响 | 缓解 |
+|------|:--:|:--:|------|
+| Attention ONNX 算子 RKNN 不支持 | 低 | 高 | Softmax/MatMul/Tanh 均为 ONNX 标准算子；提前验证 RKNN Toolkit 2 兼容性 |
+| VMD ADMM 收敛慢 (max_iter=500) | 低 | 中 | 50ms 硬超时 + 自动降级回退原始序列 |
+| BiLSTM 参数量翻倍导致 NPU 内存/延迟超标 | 中 | 中 | Go/No-Go 双重门控；RK3588 延迟摸底通过后才启用 |
+| 残差缓冲冷启动期间无修正效果 | 高 | 低 | `zero_init=true` 零填充，修正量=0 等效直接输出 |
+| 7 维气象特征 (GHI/温度) 采集不到 | 中 | 中 | 缺失时用上一周期值回填；训练侧同时产出 1 维 fallback 模型 |
+| 误差修正 BiLSTM 与主预测模型版本不兼容 | 低 | 中 | OTA 下发的两模型必须包含匹配的 metadata.mupc_version |
+| 历史缓冲冷启动 (前 96 步无 yesterday_pv) | 高 | 低 | 用当前 PV 作为 fallback，与训练侧 `prepare_data()` 一致 |
+| ONNX output shape 与 Rust 预期不一致 | 低 | 高 | `predict()` 中自动检测 90/47/30 维输出格式并分支处理 |
 
 ---
 
