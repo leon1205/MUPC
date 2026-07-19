@@ -2,7 +2,7 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v1.2 | 2026-07-10 | 架构师 | 待复审 — 修复 Design Reviewer 第二轮 5 项反馈 |
+| v1.3 | 2026-07-10 | 架构师 | 待复审 — 修复 Design Reviewer 第三轮 (端口修复) 5 项反馈 |
 
 > **关联 PRD**：`docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` `[REVIEWED: PASS]`
 
@@ -229,7 +229,7 @@ main():
 
                             // PRD SB-06: 重置后立即发布新 episode 初始观测
                             let new_obs = engine.send_reset(&config.scenario).await?;
-                            if let Some(SimResponse::Observation { data, .. }) = new_obs {
+                            if let SimResponse::Observation { data, .. } = new_obs {
                                 mqtt.publish_observation(&data).await?;
                                 current_obs = data;
                             }
@@ -275,10 +275,12 @@ pub struct MqttPublisher {
 
 impl MqttPublisher {
     pub async fn connect(config: &SimBridgeConfig) -> Result<Self> {
+        // 解析 host:port (mqtt_broker 格式: "192.168.3.118:1884")
+        let (host, port) = parse_broker_addr(&config.mqtt_broker)?;
         let mut mqtt_opts = MqttOptions::new(
             &config.mqtt_client_id,
-            &config.mqtt_broker,
-            1883,
+            host,
+            port,
         );
         mqtt_opts.set_keep_alive(Duration::from_secs(5));
 
