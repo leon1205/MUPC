@@ -73,12 +73,11 @@ if [ -z "$TARGET_PASS" ]; then
     read -rsp "输入 $TARGET_USER@$TARGET_IP 的密码: " TARGET_PASS
     echo ""
 fi
-export SSHPASS="$TARGET_PASS"
 SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
 
-ssh_run()  { sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "$@"; }
-ssh_sudo() { sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "sudo $*"; }
-scp_file() { sshpass -e scp $SSH_OPTS "$1" "${TARGET_USER}@${TARGET_IP}:$2"; }
+ssh_run()  { SSHPASS="$TARGET_PASS" sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "$@"; }
+ssh_sudo() { SSHPASS="$TARGET_PASS" sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "sudo $*"; }
+scp_file() { SSHPASS="$TARGET_PASS" sshpass -e scp $SSH_OPTS "$1" "${TARGET_USER}@${TARGET_IP}:$2"; }
 
 # ═══════════════════════════════════════════════════════════════
 # Phase 1: 环境检查
@@ -95,7 +94,7 @@ done
 info "PC 环境就绪 (cargo, python3, sshpass)"
 
 # 目标板检查
-if ! sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "echo ok" 2>/dev/null; then
+if ! SSHPASS="$TARGET_PASS" sshpass -e ssh $SSH_OPTS "${TARGET_USER}@${TARGET_IP}" "echo ok" 2>/dev/null; then
     err "无法连接到 $TARGET_USER@$TARGET_IP"
 fi
 TARGET_ARCH=$(ssh_run "uname -m" 2>/dev/null)

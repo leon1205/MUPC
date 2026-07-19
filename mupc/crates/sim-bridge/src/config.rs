@@ -27,10 +27,10 @@ pub struct SimBridgeConfig {
     pub engine_script: String,
 
     #[serde(default = "default_step_interval_ms")]
-    pub step_interval_ms: u64,
+    pub step_interval_ms: u64,         // Phase 2: 速率限制, 当前由TCP驱动
 
     #[serde(default = "default_max_episode_steps")]
-    pub max_episode_steps: u32,
+    pub max_episode_steps: u32,        // Phase 2: 自动停止, 当前由Ctrl+C控制
 }
 
 fn default_scenario() -> String { "MODE-01".into() }

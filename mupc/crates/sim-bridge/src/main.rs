@@ -191,6 +191,10 @@ async fn main() {
                             }
                             Err(e) => {
                                 tracing::error!("send_step 失败: {}", e);
+                                if let Err(re) = engine.restart(&config).await {
+                                    tracing::error!("引擎重启失败: {}", re);
+                                    break;
+                                }
                             }
                         }
                     }

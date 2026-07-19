@@ -88,7 +88,16 @@ impl MetricsCollector {
         self.current = EpisodeMetrics {
             scenario: scenario.to_string(),
             start_time: Utc::now().to_rfc3339(),
-            ..Self::new(scenario).current
+            end_time: String::new(),
+            total_steps: 0,
+            total_reward: 0.0,
+            avg_step_latency_ms: 0.0,
+            min_step_latency_ms: f64::MAX,
+            max_step_latency_ms: 0.0,
+            p99_step_latency_ms: 0.0,
+            safety_override_count: 0,
+            soc_violations: 0,
+            voltage_violations: 0,
         };
         self.latency_samples.clear();
     }

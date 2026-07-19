@@ -29,9 +29,7 @@ pub enum SimBridgeError {
     #[error("协议错误: {0}")]
     Protocol(String),
 
-    #[error("CRC 校验失败: expected={expected:#06x}, actual={actual:#06x}")]
-    CrcMismatch { expected: u16, actual: u16 },
-
+    // CRC 校验失败在 action_server.rs 中通过日志输出，使用 ReadError::CrcMismatch
     #[error("序列化错误: {0}")]
     Serialize(#[from] serde_json::Error),
 }

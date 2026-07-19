@@ -46,7 +46,7 @@ impl PyEngine {
     pub async fn spawn(config: &SimBridgeConfig) -> Result<Self, SimBridgeError> {
         let mut child = Command::new(&config.python_cmd)
             .arg(&config.engine_script)
-            .arg("--no-grid2op")
+            .arg("--voltage-sim")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -118,7 +118,12 @@ impl PyEngine {
         if let Err(e) = self.send_request(&SimRequest::Shutdown).await {
             tracing::warn!("Python shutdown 请求发送失败: {}", e);
         }
-        let _ = self.child.wait().await;
+        // 带超时等待子进程退出，超时后强制 kill
+        let _ = timeout(Duration::from_secs(5), self.child.wait()).await;
+        if self.child.try_wait().ok().flatten().is_none() {
+            tracing::warn!("Python 引擎未响应 shutdown, 强制 kill");
+            let _ = self.child.kill().await;
+        }
         Ok(())
     }
 
