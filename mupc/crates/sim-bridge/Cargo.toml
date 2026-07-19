@@ -1,0 +1,17 @@
+[package]
+name = "mupc-sim-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "MUPC HIL 仿真桥接代理 — MQTT 发布 + TCP 动作接收 + Python 引擎管理"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = "1.0"
+rumqttc = "0.24"
+clap = { version = "4", features = ["derive"] }
+chrono = { workspace = true }

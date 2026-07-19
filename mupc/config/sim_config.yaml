@@ -1,0 +1,12 @@
+# MUPC 仿真测试环境配置
+# 使用: ./sim-bridge --config config/sim_config.yaml
+
+scenario: "MODE-01"            # MODE-01 ~ MODE-05
+mqtt_broker: "192.168.3.118:1884"  # 仿真独立 Broker (非生产)
+mqtt_topic: "mupc/sim/observation"
+mqtt_client_id: "mupc-sim-bridge"
+action_listen_addr: "0.0.0.0:9100"
+python_cmd: "sim-env/venv/bin/python3"
+engine_script: "sim-env/engine.py"
+step_interval_ms: 200
+max_episode_steps: 96

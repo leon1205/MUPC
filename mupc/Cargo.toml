@@ -21,6 +21,7 @@ members = [
     "crates/system-monitor",
     "crates/storage",
     "crates/wireless",
+    "crates/sim-bridge",
 ]
 
 [workspace.package]
