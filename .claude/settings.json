@@ -1,12 +1,6 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "command": "bash -c 'read cmd; for banned in \"git add -u\" \"git add -A\" \"git add .\" \"git commit -a\"; do if echo \"$cmd\" | grep -qF \"$banned\"; then echo \"[HOOK BLOCKED] 禁止无差别暂存命令: $banned\"; echo \"请使用 git add <specific-file> 逐个精确暂存\"; exit 1; fi; done; exit 0'",
-        "description": "阻止 git add -u/-A/. 和 git commit -a — 强制逐个文件暂存",
-        "onError": "block"
-      }
-    ]
+  "permissions": {
+    "allow": [],
+    "ask": []
   }
 }
