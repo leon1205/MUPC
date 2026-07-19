@@ -120,6 +120,24 @@ cargo test -p <crate> <test_name>
 | Windows (开发) | `npu` 启用 | 自动 stub（FFI 返回 -1） |
 | 显式禁用 | `--no-default-features` | stub |
 
+### 仿真测试环境
+
+```bash
+# 一键部署 + 启动仿真
+./deploy/scripts/deploy-sim.sh 192.168.3.118 --build --generate-data --start
+
+# 仅编译 sim-bridge
+cargo build -p mupc-sim-bridge --release
+
+# 仅部署 (不启动)
+./deploy/scripts/deploy-sim.sh 192.168.3.118 --build
+```
+
+| 文档 | 说明 |
+|------|------|
+| `docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` | 仿真环境 PRD `[REVIEWED: PASS]` |
+| `docs/superpowers/plans/2026-07-10-MUPC-仿真测试环境-DESIGN.md` | 仿真环境设计 `[DESIGN_APPROVED]` |
+
 ## 项目协作配置
 
 本项目采用一套自定义的AI代理（Agents）协作框架进行开发。该框架定义了完整的角色、工作流程和质量门禁。

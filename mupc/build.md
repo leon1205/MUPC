@@ -389,3 +389,35 @@ Branch name pattern: master
 ☑ Require branches to be up to date before merging
 ☐ Allow force pushes  (必须取消勾选)
 ```
+
+## 仿真测试环境
+
+### 构建 sim-bridge
+
+```bash
+cargo build -p mupc-sim-bridge --release
+```
+
+### 一键部署 + 启动
+
+```bash
+./deploy/scripts/deploy-sim.sh 192.168.3.118 --build --generate-data --start
+```
+
+### 仅构建 PC 端
+
+```bash
+# 编译 Rust 代理
+cargo build -p mupc-sim-bridge --release
+
+# 配置 Python 环境
+cd sim-env && python3 -m venv venv && source venv/bin/activate
+pip install numpy
+
+# 手动启动仿真
+cd .. && ./mupc/target/release/mupc-sim-bridge \
+    --config mupc/config/sim_config.yaml \
+    --scenario MODE-01
+```
+
+> 详细设计见 `docs/superpowers/plans/2026-07-10-MUPC-仿真测试环境-DESIGN.md`

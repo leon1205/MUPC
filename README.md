@@ -60,8 +60,10 @@ mupc/
 │   ├── ota-update/              # OTA 固件升级
 │   ├── system-monitor/          # 系统监控
 │   ├── mupc-core-bin/           # 主控进程入口 (mupcd)
+│   ├── sim-bridge/              # 仿真桥接代理 (HIL 测试)
 │   └── storage/                 # 持久化存储
-├── cmake/                       # CMake 模块 (FindRKNN, toolchain)
+├── cmake/                       # CMake 模块
+├── sim-env/                     # Python 仿真引擎 (Grid2Op) (FindRKNN, toolchain)
 ├── deploy/                      # 部署配置 (systemd, 脚本)
 ├── docker/                      # Docker 交叉编译环境
 ├── tests/                       # 集成测试
@@ -113,6 +115,20 @@ export OPENSSL_DIR=../external/openssl-4.0.1/aarch64-install
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 cargo build --workspace --release --target aarch64-unknown-linux-gnu \
     --exclude mupc-iec61850-plugin --exclude device-trait
+```
+
+### 仿真测试环境 (HIL)
+
+```bash
+# 一键部署: PC(仿真) + 嵌入式(MUPC) 全栈
+./deploy/scripts/deploy-sim.sh 192.168.3.118 --build --generate-data --start
+
+# 仅启动仿真 (已编译)
+./deploy/scripts/deploy-sim.sh 192.168.3.118 --start
+
+# 详细文档
+#   PRD:  docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md
+#   设计: docs/superpowers/plans/2026-07-10-MUPC-仿真测试环境-DESIGN.md
 ```
 
 产物：`target/aarch64-unknown-linux-gnu/release/mupcd`
