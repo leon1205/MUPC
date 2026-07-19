@@ -24,11 +24,13 @@ def respond(obj: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MUPC 仿真引擎")
-    parser.add_argument("--grid2op", action="store_true", help="启用 Grid2Op (默认 VoltageSimulator)")
-    parser.add_argument("--no-grid2op", action="store_true", help="使用 VoltageSimulator")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--grid2op", action="store_true", dest="grid2op", help="启用 Grid2Op")
+    group.add_argument("--voltage-sim", action="store_false", dest="grid2op", help="使用 VoltageSimulator (默认)")
+    parser.set_defaults(grid2op=False)
     args = parser.parse_args()
 
-    use_grid2op = args.grid2op and not args.no_grid2op
+    use_grid2op = args.grid2op
     env = MupcEnv(mode="MODE-01", use_grid2op=use_grid2op)
 
     for line in sys.stdin:

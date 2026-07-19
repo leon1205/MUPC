@@ -65,6 +65,9 @@ impl MetricsCollector {
         if let Some(soc) = info.get("soc_violations").and_then(|v| v.as_u64()) {
             self.current.soc_violations = soc as u32;
         }
+        if let Some(vv) = info.get("voltage_violations").and_then(|v| v.as_u64()) {
+            self.current.voltage_violations = vv as u32;
+        }
     }
 
     pub fn reset_episode(&mut self, scenario: &str) {

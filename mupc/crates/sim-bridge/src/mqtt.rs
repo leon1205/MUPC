@@ -79,3 +79,11 @@ impl MqttPublisher {
         Ok(())
     }
 }
+
+impl Drop for MqttPublisher {
+    fn drop(&mut self) {
+        // If shutdown() was not called, abort the event loop task.
+        // Note: AsyncClient's Drop handles disconnect.
+        self.event_loop_handle.abort();
+    }
+}

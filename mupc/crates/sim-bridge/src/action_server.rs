@@ -69,6 +69,11 @@ pub async fn read_frame_with_timeout(
     }
 }
 
+/// 帧格式 (26 字节, 大端):
+///   [0..8)   保留 (帧头/序列号等, 当前未使用)
+///   [8..16)  p_ref    f64 IEEE754 BE
+///   [16..24) k_droop  f64 IEEE754 BE
+///   [24..26) CRC-16/MODBUS u16 BE
 fn parse_frame(buf: &[u8; ACTION_FRAME_LEN]) -> Result<ActionFrame, ReadError> {
     let p_ref = f64::from_be_bytes(buf[8..16].try_into().unwrap());
     let k_droop = f64::from_be_bytes(buf[16..24].try_into().unwrap());

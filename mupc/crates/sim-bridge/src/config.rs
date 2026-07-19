@@ -44,6 +44,7 @@ fn default_step_interval_ms() -> u64 { 200 }
 fn default_max_episode_steps() -> u32 { 96 }
 
 /// Parse "host:port" from broker address string.
+/// Note: IPv4 only (`192.168.3.118:1884`). IPv6 not supported in current simulation topology.
 pub fn parse_broker_addr(addr: &str) -> Result<(&str, u16), SimBridgeError> {
     let (host, port_str) = addr.rsplit_once(':')
         .ok_or_else(|| SimBridgeError::Config(format!("Broker 地址格式错误 (需 host:port): {}", addr)))?;

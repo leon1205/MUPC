@@ -54,8 +54,14 @@ impl PyEngine {
             .spawn()
             .map_err(|e| SimBridgeError::PyEngine(format!("spawn 失败: {}", e)))?;
 
-        let stdin = BufWriter::new(child.stdin.take().unwrap());
-        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let stdin = BufWriter::new(
+            child.stdin.take()
+                .ok_or_else(|| SimBridgeError::PyEngine("stdin 未 piped".into()))?
+        );
+        let stdout = BufReader::new(
+            child.stdout.take()
+                .ok_or_else(|| SimBridgeError::PyEngine("stdout 未 piped".into()))?
+        );
         let stdout_lines = stdout.lines();
 
         tracing::info!("Python 引擎已启动: PID={}", child.id().unwrap_or(0));
@@ -109,9 +115,9 @@ impl PyEngine {
     }
 
     pub async fn send_shutdown(&mut self) -> Result<(), SimBridgeError> {
-        let _ = self
-            .send_request(&SimRequest::Shutdown)
-            .await;
+        if let Err(e) = self.send_request(&SimRequest::Shutdown).await {
+            tracing::warn!("Python shutdown 请求发送失败: {}", e);
+        }
         let _ = self.child.wait().await;
         Ok(())
     }

@@ -157,7 +157,14 @@ async fn main() {
                                     tracing::info!("Episode 完成, 重置中...");
                                     match engine.send_reset(&config.scenario).await {
                                         Ok(SimResponse::Observation { data, .. }) => {
-                                            let _ = mqtt.publish_observation(&data).await;
+                                            if let Err(e) = mqtt.publish_observation(&data).await {
+                                                mqtt.record_failure();
+                                                tracing::warn!("reset 后 MQTT publish 失败: {}", e);
+                                                if mqtt.should_exit() {
+                                                    tracing::error!("MQTT 连续3次失败，退出");
+                                                    break;
+                                                }
+                                            }
                                             current_obs = data;
                                         }
                                         Ok(other) => {

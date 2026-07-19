@@ -195,7 +195,7 @@ ssh_sudo "systemctl stop mupcd 2>/dev/null || pkill mupcd 2>/dev/null" || true
 info "MUPC 已停止"
 
 # 重启
-ssh_sudo "systemctl start mupcd 2>/dev/null || sudo -u mupc $MUPC_DIR/bin/mupcd &>/dev/null &"
+ssh_sudo "systemctl start mupcd 2>/dev/null || nohup sudo -u mupc $MUPC_DIR/bin/mupcd &>/dev/null &"
 sleep 2
 info "MUPC 已启动"
 
@@ -217,8 +217,9 @@ SIM_CONFIG="$PROJECT_DIR/config/sim_config.yaml"
 
 # 更新配置文件中的 broker IP
 if [ -f "$SIM_CONFIG" ]; then
-    sed -i "s/mqtt_broker:.*/mqtt_broker: \"$TARGET_IP:$SIM_BROKER_PORT\"/" "$SIM_CONFIG"
-    sed -i "s/scenario:.*/scenario: \"$SIM_SCENARIO\"/" "$SIM_CONFIG"
+    cp "$SIM_CONFIG" "$SIM_CONFIG.bak"  # O4: 备份后修改
+    sed -i "s/^mqtt_broker:.*/mqtt_broker: \"$TARGET_IP:$SIM_BROKER_PORT\"/" "$SIM_CONFIG"
+    sed -i "s/^scenario:.*/scenario: \"$SIM_SCENARIO\"/" "$SIM_CONFIG"
     info "sim_config.yaml: broker=$TARGET_IP:$SIM_BROKER_PORT, scenario=$SIM_SCENARIO"
 fi
 
