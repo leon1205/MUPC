@@ -650,7 +650,112 @@ for line in sys.stdin:
 
 ---
 
-**文档状态**: 待评审
+---
+
+## 附录A：78 维状态空间数据生成
+
+仿真引擎通过 `engine.py` → `MupcEnv.step()` → `observation.build_observation()` 生成归一化的 78 维观测向量。该向量通过 sim-bridge MQTT 发布到 MUPC。
+
+### A.1 数据流
+
+```
+物理状态 (core.py step())
+  ├── SOC 递推: SOC_new = clip(SOC + p_batt × dt / capacity, 0.10, 0.90)
+  ├── 电压计算: VoltageSimulator (k_p·P_net/S_base - k_q·Q/S_base + noise) 或 Grid2Op 三相潮流
+  ├── 光伏/负荷: 从数据源读取下一时步真实值
+  ├── 电价/需量: 从数据源读取 TOU 价格、合约需量
+  ├── 气象: 从数据源读取辐照度、温度
+  ├── 季节编码: update_season_time_encoding(hour, month) → (6,) + (2,) one-hot
+  └── LSTM 预测: predictor.predict(step_idx) → (30,) = [pv(15), load(15)]
+      ↓
+EnvState (state_builder.py: build_env_state())
+  ├── D1: soc, pv_power, load_power, grid_power, load_rate, battery_power_prev, va, vb, vc
+  ├── D3: current_price, next_price, tariff_id
+  ├── D4: current_demand, peak_demand
+  ├── D5: solar_irradiance, temperature
+  ├── D6: dispatch_p_set
+  ├── D7: q_realtime_margin
+  ├── D8: season_encoding(6), time_period_encoding(2)
+  ├── D9: safety_override_active, safety_override_p_ref, override_consecutive, override_ratio
+  ├── D10: load_forecast_quantiles(15), shock_load_probability, base_load
+  └── forecast: (30,) = [pv_forecast(15), load_forecast(15)]
+      ↓
+build_observation(state, forecast) → 78-dim raw vector
+      ↓
+normalize_obs(obs) → 78-dim MinMax 归一化 [0,1]
+      ↓
+MQTT publish (JSON array of 78 floats)
+```
+
+### A.2 78 维布局（与 Rust FusedSystemState::to_input_vector() 对齐）
+
+| 索引 | 分组 | 维度 | 字段 | 归一化范围 |
+|------|:--:|:--:|------|------------|
+| 0 | D1 | 1 | SOC | [0, 1] |
+| 1 | D1 | 1 | PV power (kW) | [0, 150] |
+| 2 | D1 | 1 | Load power (kW) | [0, 60] |
+| 3 | D1 | 1 | Grid power (kW) | [-200, 200] |
+| 4 | D1 | 1 | Transformer load rate | identity [0,1] |
+| 5 | D1 | 1 | Battery power (kW) | [-50, 50] |
+| 6 | D1 | 1 | V_a (p.u.) | [0.85, 1.15] |
+| 7 | D1 | 1 | V_b (p.u.) | [0.85, 1.15] |
+| 8 | D1 | 1 | V_c (p.u.) | [0.85, 1.15] |
+| 9-23 | D2 | 15 | PV forecast (15 steps) | [0, 150] |
+| 24-38 | D2 | 15 | Load forecast (15 steps) | [0, 60] |
+| 39 | D3 | 1 | Current electricity price | [0, 1.5] |
+| 40 | D3 | 1 | Next period price | [0, 1.5] |
+| 41 | D3 | 1 | Price tariff ID | [0, 3] |
+| 42 | D4 | 1 | Current demand (kW) | [0, 500] |
+| 43 | D4 | 1 | Contract demand (kW) | [0, 500] |
+| 44 | D4 | 1 | Peak demand this month (kW) | [0, 500] |
+| 45 | D5 | 1 | Solar irradiance (W/m²) | [0, 1500] |
+| 46 | D5 | 1 | Temperature (°C) | [-20, 60] |
+| 47 | D6 | 1 | Dispatch P set (kW) | [-200, 200] |
+| 48 | D7 | 1 | Q real-time margin [0,1] | identity |
+| 49-54 | D8 | 6 | Season one-hot (6 dim) | identity |
+| 55-56 | D8 | 2 | Time period one-hot (2 dim) | identity |
+| 57-60 | D9 | 4 | Safety override (active/p_ref/consecutive/ratio) | identity |
+| 61-75 | D10 | 15 | Load forecast quantiles (P90, 15 steps) | [0, 60] |
+| 76 | D10 | 1 | Shock load probability | identity [0,1] |
+| 77 | D10 | 1 | Base load (kW, P50) | [0, 60] |
+
+### A.3 归一化公式
+
+```
+# MinMax: (x - lo) / (hi - lo + 1e-9)
+# D1[4] (load_rate), D7[48] (q_margin), D8 (one-hot), D9 (override), D10[76] (shock_prob):
+#   identity — 已在 [0,1] 范围，不做变换
+
+# Rust 侧等效: data_fusion.rs::normalize_observation()
+# 公式完全镜像 Python normalize_obs()
+```
+
+### A.4 LSTM 预测生成
+
+仿真环境中的预测数据来自以下两种方式之一：
+
+| 模式 | 说明 | engine.py 参数 |
+|------|------|:--:|
+| LSTM 预测 | `lstm_model.py` 加载训练好的权重，基于历史 7 维特征预测未来 15 步 PV + Load | 默认 |
+| Oracle 预测 | 直接读取数据源中的未来真实值 + 5% 噪声 | `--no-lstm`（训练阶段 fallback） |
+
+预测输出格式：`(30,) = [pv_forecast(15), load_forecast(15)]`，在 `build_observation()` 中填入 D2[9:39]。
+
+### A.5 与 Rust 部署侧的差异
+
+| 维度 | 仿真环境 (Python) | 部署环境 (Rust) |
+|------|------|------|
+| 数据源 | 预先加载的 CSV/Parquet 文件 | 实时传感器 + MQTT 遥测 |
+| 预测 | LSTM (PyTorch/ONNX) 或 Oracle | RKNN Runtime on NPU |
+| 电压 | Grid2Op 或 VoltageSimulator | 实时模块测量值 (DataUpload 帧) |
+| 安全覆盖 | 仿真环境不触发 | 实时模块 SafetyOverride 帧 |
+| **观测向量** | **完全一致 78 维 MinMax 归一化** | **完全一致** |
+
+> 仿真环境的关键约束：D9（安全覆盖 4 维）在仿真中固定为 `[0, 0, 0, 0]`，仿真环境不模拟安全覆盖触发。
+
+---
+
+**文档状态**: `[DESIGN_APPROVED]`
 
 **关联文档**:
 - PRD: `docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` `[REVIEWED: PASS]`
