@@ -2,7 +2,7 @@
 
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
-| v1.1 | 2026-07-10 | 架构师 | 待复审 — 修复 Design Reviewer 7 项反馈 |
+| v1.2 | 2026-07-10 | 架构师 | 待复审 — 修复 Design Reviewer 第二轮 5 项反馈 |
 
 > **关联 PRD**：`docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` `[REVIEWED: PASS]`
 
@@ -201,6 +201,9 @@ main():
   8. engine.send_reset(&config.scenario).await? → initial_obs
   9. mqtt.publish_observation(&initial_obs).await?
 
+
+  11. let mut current_obs = initial_obs;  // 跟踪当前观测状态
+
   10. action_srv.accept() → (stream, addr)   // 接受 MUPC 连接
       tracing::info!("MUPC 已连接: {}", addr);
 
@@ -211,12 +214,25 @@ main():
                     Ok(frame) => {
                         let t0 = Instant::now();
                         let resp = engine.send_step(frame.p_ref, frame.k_droop).await?;
-                        mqtt.publish_observation(&resp.data).await?;
+                        current_obs = resp.data.clone();  // 更新当前观测
+                        // 发布观测，失败时累计计数 (PRD EH-01)
+                        if let Err(e) = mqtt.publish_observation(&current_obs).await {
+                            mqtt.record_failure();
+                            tracing::warn!("MQTT publish 失败: {}", e);
+                            if mqtt.should_exit() {
+                                tracing::error!("MQTT 连续3次失败，退出");
+                                break;
+                            }
+                        }
                         let latency = t0.elapsed().as_millis();
-                        metrics.record(latency, resp.reward, &resp.info);
+                        metrics.record_step(latency, resp.reward, &resp.info);
 
-                        if resp.done {
-                            engine.send_reset(&config.scenario).await?;
+                            // PRD SB-06: 重置后立即发布新 episode 初始观测
+                            let new_obs = engine.send_reset(&config.scenario).await?;
+                            if let Some(SimResponse::Observation { data, .. }) = new_obs {
+                                mqtt.publish_observation(&data).await?;
+                                current_obs = data;
+                            }
                             metrics.reset_episode();
                         }
                     }
