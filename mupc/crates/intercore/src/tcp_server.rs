@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
@@ -844,6 +844,8 @@ pub struct IntercoreClient {
     cmd_config: CommandConfig,
     /// 连接状态
     connected: RwLock<bool>,
+    /// 持久连接（复用 TcpStream，避免每次新建）
+    stream: Arc<Mutex<Option<TcpStream>>>,
     /// 最后发送的 p_ref（用于通信中断检测）
     last_p_ref: RwLock<Option<f64>>,
     /// 最后发送的 k_droop
@@ -859,6 +861,7 @@ impl IntercoreClient {
             connected: RwLock::new(false),
             last_p_ref: RwLock::new(None),
             last_k_droop: RwLock::new(None),
+            stream: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -870,6 +873,7 @@ impl IntercoreClient {
             connected: RwLock::new(false),
             last_p_ref: RwLock::new(None),
             last_k_droop: RwLock::new(None),
+            stream: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -899,35 +903,50 @@ impl IntercoreClient {
         let frame = IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, payload_bytes);
         let frame_bytes = frame.to_bytes()?;
 
-        // 连接并发送
-        let mut stream = TcpStream::connect(&self.remote_addr).await.map_err(|e| {
-            MupcError::new(
-                ErrorCode::ConnectionFailed,
-                format!("Failed to connect to {}: {}", self.remote_addr, e),
-                "intercore",
-            )
+        // 获取或建立持久连接（复用 TcpStream，避免每次新建）
+        let mut stream_guard = self.stream.lock().await;
+        if stream_guard.is_none() {
+            match TcpStream::connect(&self.remote_addr).await {
+                Ok(s) => *stream_guard = Some(s),
+                Err(e) => {
+                    return Err(MupcError::new(
+                        ErrorCode::ConnectionFailed,
+                        format!("Failed to connect to {}: {}", self.remote_addr, e),
+                        "intercore",
+                    ))
+                }
+            }
+        }
+        let stream = stream_guard.as_mut().ok_or_else(|| {
+            MupcError::new(ErrorCode::ConnectionFailed, "连接未建立", "intercore")
         })?;
 
-        // 设置写入超时
-        tokio::time::timeout(
+        // 写入帧（失败时重置连接，下次重连）
+        let write_result = timeout(
             Duration::from_millis(self.cmd_config.timeout_ms),
             stream.write_all(&frame_bytes),
         )
-        .await
-        .map_err(|_| {
-            MupcError::new(
-                ErrorCode::IntercoreTimeout,
-                format!("Send timed out after {}ms", self.cmd_config.timeout_ms),
-                "intercore",
-            )
-        })?
-        .map_err(|e| {
-            MupcError::new(
-                ErrorCode::SendFailed,
-                format!("Send error: {}", e),
-                "intercore",
-            )
-        })?;
+        .await;
+
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                *stream_guard = None;
+                return Err(MupcError::new(
+                    ErrorCode::SendFailed,
+                    format!("Send error: {}", e),
+                    "intercore",
+                ));
+            }
+            Err(_) => {
+                *stream_guard = None;
+                return Err(MupcError::new(
+                    ErrorCode::IntercoreTimeout,
+                    format!("Send timed out after {}ms", self.cmd_config.timeout_ms),
+                    "intercore",
+                ));
+            }
+        }
 
         // 更新最后发送的参数
         *self.last_p_ref.write().await = Some(cmd.p_ref);
