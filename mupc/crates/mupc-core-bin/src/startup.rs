@@ -116,6 +116,68 @@ fn create_rs485_device(
     }
 }
 
+/// DataFrame → DataPackage（FIXME: 固定值代替 Modbus 寄存器映射，实际应解析 frame.data）
+fn dataframe_to_datapackage(frame: &device_trait::DataFrame) -> mupc_data_processing::DataPackage {
+    mupc_data_processing::DataPackage {
+        electrical: mupc_data_processing::ElectricalData {
+            voltage: Some(380.0),
+            current: Some(100.0),
+            active_power: Some(50.0),
+            reactive_power: Some(10.0),
+            cos_phi: Some(0.98),
+            frequency: Some(50.0),
+        },
+        battery: mupc_data_processing::BatteryData {
+            soc: Some(75.0),
+            soh: Some(95.0),
+            temperature: Some(35.0),
+        },
+        device_status: mupc_data_processing::DeviceStatus {
+            inverter_status: mupc_data_processing::InverterStatus::Running,
+            pv_power: Some(30.0),
+            load_power: Some(40.0),
+            ev_charger_power: Some(10.0),
+        },
+        timestamp: (frame.timestamp / 1000) as u64,
+    }
+}
+
+/// DataPackage → 遥测点列表（FIXME: 指标映射根据点表确定）
+fn datapackage_to_telemetry_points(
+    pkg: &mupc_data_processing::DataPackage,
+    device_id: &str,
+) -> Vec<mupc_storage::TelemetryPoint> {
+    let ts = chrono::DateTime::from_timestamp(pkg.timestamp as i64, 0)
+        .unwrap_or_else(chrono::Utc::now);
+    let metrics: Vec<(&str, Option<f64>)> = vec![
+        ("voltage", pkg.electrical.voltage),
+        ("current", pkg.electrical.current),
+        ("active_power", pkg.electrical.active_power),
+        ("reactive_power", pkg.electrical.reactive_power),
+        ("cos_phi", pkg.electrical.cos_phi),
+        ("frequency", pkg.electrical.frequency),
+        ("battery_soc", pkg.battery.soc),
+        ("battery_soh", pkg.battery.soh),
+        ("battery_temperature", pkg.battery.temperature),
+        ("pv_power", pkg.device_status.pv_power),
+        ("load_power", pkg.device_status.load_power),
+        ("ev_charger_power", pkg.device_status.ev_charger_power),
+    ];
+    metrics
+        .into_iter()
+        .filter_map(|(name, value)| {
+            value.map(|v| mupc_storage::TelemetryPoint {
+                id: None,
+                device_id: device_id.to_string(),
+                timestamp: ts,
+                metric_name: name.to_string(),
+                value: v,
+                quality: 0,
+            })
+        })
+        .collect()
+}
+
 /// 按依赖顺序初始化所有子系统
 ///
 /// 14 步初始化流程，每步失败时级联清理已启动的服务。
@@ -168,6 +230,7 @@ pub async fn initialize_all(
         .await
         .map_err(|e| MupcError::new(ErrorCode::ConfigError, format!("数据库迁移失败: {}", e), "startup"))?;
     let storage = Arc::new(mupc_storage::StorageService::new(Arc::new(pool)));
+    let write_buffer = Arc::new(mupc_storage::WriteBuffer::new(1000, 5000, storage.pool().clone()));
     coord.register_service("storage", ServiceStatus::Running);
 
     // ── 4. 核间通信 ──
@@ -234,26 +297,24 @@ pub async fn initialize_all(
         &load_device,
     )));
 
-    // 南向数据采集循环（上行）：周期性读取设备数据
+    // 南向数据采集循环（上行）：读取 → 转换 → 持久化到 telemetry 表
     if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
+        let wb = write_buffer.clone();
         guard.0.push(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                match pv.read() {
-                    Ok(frame) => tracing::debug!(
-                        "南向采集[pv] {}: {} 字节",
-                        frame.device_id,
-                        frame.data.len()
-                    ),
-                    Err(e) => tracing::debug!("南向采集[pv] 失败: {}", e),
-                }
-                match load.read() {
-                    Ok(frame) => tracing::debug!(
-                        "南向采集[load] {}: {} 字节",
-                        frame.device_id,
-                        frame.data.len()
-                    ),
-                    Err(e) => tracing::debug!("南向采集[load] 失败: {}", e),
+                for (dev, name) in [(&pv, "pv_inverter_001"), (&load, "load_ctrl_001")] {
+                    match dev.read() {
+                        Ok(frame) => {
+                            let pkg = dataframe_to_datapackage(&frame);
+                            for point in datapackage_to_telemetry_points(&pkg, name) {
+                                if let Err(e) = wb.buffer_telemetry(point).await {
+                                    tracing::debug!("遥测写入失败: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),
+                    }
                 }
             }
         }));
