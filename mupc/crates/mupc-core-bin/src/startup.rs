@@ -30,6 +30,8 @@ pub struct StartupContext {
     pub ai_engine: Arc<mupc_ai_engine::ModelManager>,
     pub ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
     pub ota_manager: Arc<dyn mupc_ota_update::OtaManager>,
+    /// 故障录波器（保留实例供录波使用）
+    pub fault_recorder: Arc<mupc_data_processing::FaultRecorderImpl>,
     /// 后台任务句柄（Phase 6 优雅退出时 abort）
     pub background_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -338,10 +340,16 @@ pub async fn initialize_all(
     // ── 6. 遥测数据采集 ──
     tracing::info!("[06/14] 初始化遥测数据采集...");
     // DataCollectorImpl / HighFreqTelemetryImpl 为纯数据容器，延迟创建
-    // FaultRecorderImpl::new() 初始化 SQLite 连接 + 建表（CREATE IF NOT EXISTS），
-    // 完成后即可 drop（连接关闭，表已存在）。后续真正录波时重新打开连接。
-    let _fault_recorder = mupc_data_processing::FaultRecorderImpl::new(&db_path)
-        .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("故障录波器初始化失败: {}", e), "startup"))?;
+    // FaultRecorderImpl 保留实例（供故障录波使用），避免创建后立即 drop 的反模式
+    let fault_recorder = Arc::new(
+        mupc_data_processing::FaultRecorderImpl::new(&db_path).map_err(|e| {
+            MupcError::new(
+                ErrorCode::Unknown,
+                format!("故障录波器初始化失败: {}", e),
+                "startup",
+            )
+        })?,
+    );
     coord.register_service("data_processing", ServiceStatus::Running);
 
     // ── 7. AI 引擎 ──
@@ -634,6 +642,7 @@ pub async fn initialize_all(
         ai_engine,
         ai_integrator,
         ota_manager,
+        fault_recorder,
         background_tasks: bg_tasks,
     })
 }
