@@ -70,6 +70,7 @@ impl Iec104Server {
         let connections = self.connections.clone();
         let shutdown_rx = self.shutdown_tx.subscribe();
         let max_connections = self.config.max_connections;
+        let timeout_ms = self.config.connection_timeout_ms;
 
         // 接受连接任务
         tokio::spawn(async move {
@@ -100,7 +101,9 @@ impl Iec104Server {
                                 let cleanup_connections = connections.clone();
                                 let conn_for_cleanup = conn.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(conn, handler).await {
+                                    if let Err(e) =
+                                        Self::handle_connection(conn, handler, timeout_ms).await
+                                    {
                                         error!("Connection error: {}", e);
                                     }
                                     // 连接结束（正常或异常），从列表移除，避免连接泄漏
@@ -130,6 +133,7 @@ impl Iec104Server {
     async fn handle_connection(
         conn: Arc<RwLock<Connection>>,
         handler: Arc<dyn CommandHandler>,
+        timeout_ms: u64,
     ) -> Result<(), MupcError> {
         let stream = conn.write().await.stream.take().ok_or_else(|| {
             MupcError::new(
@@ -149,13 +153,19 @@ impl Iec104Server {
             let mut reader = tokio::io::BufReader::new(read_half);
 
             loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => {
+                let read_result = tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    reader.read(&mut buf),
+                )
+                .await;
+
+                match read_result {
+                    Ok(Ok(0)) => {
                         info!("Connection closed");
                         read_conn.write().await.state = ConnectionState::Disconnected;
                         break;
                     }
-                    Ok(n) => {
+                    Ok(Ok(n)) => {
                         let frame = match Iec104Frame::parse(&buf[..n]) {
                             Ok(f) => f,
                             Err(e) => {
@@ -177,8 +187,16 @@ impl Iec104Server {
                             break;
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!("Read error: {}", e);
+                        break;
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            "Connection {} idle timeout after {}ms",
+                            read_conn.read().await.addr, timeout_ms
+                        );
+                        read_conn.write().await.state = ConnectionState::Disconnected;
                         break;
                     }
                 }
