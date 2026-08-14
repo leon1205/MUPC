@@ -230,6 +230,9 @@ impl AiIntegrator {
         // 调用完整的 AI 决策周期
         let action = manager.full_decision_cycle().await?;
 
+        // 正常决策成功，复位降级状态（此前异常触发的 fallback_active 不会自动复位）
+        self.set_fallback_active(false).await;
+
         // v2.7: 发送双参数到实时控制模块
         if let Some(ref client) = self.intercore_client {
             let strategy_mode = self
