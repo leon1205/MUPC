@@ -23,7 +23,6 @@ use crate::core_config::CoreConfig;
 /// 在 Phase 6 优雅退出时用于逆序清理。
 #[allow(dead_code)]
 pub struct StartupContext {
-    pub message_bus: Arc<mupc_core::TokioMessageBus>,
     pub storage: Arc<mupc_storage::StorageService>,
     pub intercore: Arc<mupc_intercore::IntercoreClient>,
     pub plugin_loader: Arc<plugin_loader::PluginLoaderImpl>,
@@ -270,10 +269,9 @@ pub async fn initialize_all(
     }
     let mut guard = TaskGuard(Vec::new());
 
-    // ── 1. 消息总线 (无依赖) ──
-    tracing::info!("[01/14] 初始化消息总线...");
-    let message_bus = Arc::new(mupc_core::TokioMessageBus::new(256));
-    coord.register_service("message_bus", ServiceStatus::Running);
+    // ── 1. 消息总线 ──
+    // 已移除：TokioMessageBus 零使用，数据流走 WriteBuffer + IEC104（见深度审视报告 P2）
+    tracing::info!("[01/14] 消息总线已移除（数据流走 WriteBuffer + IEC104）");
 
     // ── 2. 安全模块 ──
     tracing::info!("[02/14] 初始化安全模块...");
@@ -640,7 +638,6 @@ pub async fn initialize_all(
     // 初始化成功，取出 bg_tasks（防止 Drop abort）并移交 StartupContext
     let bg_tasks = std::mem::take(&mut guard.0);
     Ok(StartupContext {
-        message_bus,
         storage,
         intercore,
         plugin_loader,
