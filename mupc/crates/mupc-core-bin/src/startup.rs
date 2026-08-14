@@ -60,6 +60,58 @@ impl mupc_gateway::iec104::command::CommandHandler for StubCommandHandler {
     }
 }
 
+/// 创建南向命令分发器：优先真实 RS485 设备，失败降级到 mock
+fn create_south_dispatcher() -> mupc_strategy_engine::SouthCommandDispatcher {
+    let pv_device = create_rs485_device("inverter", 0x01, "pv_inverter_001");
+    let load_device = create_rs485_device("modbus", 0x02, "load_ctrl_001");
+
+    match (pv_device, load_device) {
+        (Some(pv), Some(load)) => {
+            tracing::info!("南向 RS485 设备接线成功（真实发送器）");
+            mupc_strategy_engine::SouthCommandDispatcher::new(
+                Arc::new(
+                    mupc_strategy_engine::south_command_sender::Rs485SouthSender::new(pv, load),
+                ),
+                "pv_inverter_001",
+                "load_ctrl_001",
+            )
+        }
+        _ => {
+            tracing::warn!("南向 RS485 设备初始化失败，降级到 mock 发送器");
+            mupc_strategy_engine::SouthCommandDispatcher::with_mock(
+                "pv_inverter_001",
+                "load_ctrl_001",
+            )
+        }
+    }
+}
+
+/// 创建并打开一个 RS485 南向设备；无硬件（串口不存在）时返回 None
+fn create_rs485_device(
+    handler_name: &str,
+    device_addr: u8,
+    device_id: &str,
+) -> Option<Arc<rs485_plugin::device::Rs485Device>> {
+    let config = rs485_plugin::config::Config {
+        device_addr,
+        ..Default::default()
+    };
+    let handler = rs485_plugin::handlers::ProtocolHandlerRegistry::get(handler_name, &config)?;
+    let device = rs485_plugin::device::Rs485Device::new(
+        device_id.to_string(),
+        handler_name.to_string(),
+        config,
+        handler,
+    );
+    match device.open() {
+        Ok(()) => Some(Arc::new(device)),
+        Err(e) => {
+            tracing::warn!("南向设备 {} 串口打开失败: {}", device_id, e);
+            None
+        }
+    }
+}
+
 /// 按依赖顺序初始化所有子系统
 ///
 /// 14 步初始化流程，每步失败时级联清理已启动的服务。
@@ -170,12 +222,7 @@ pub async fn initialize_all(
     tracing::info!("[08/14] 初始化策略引擎...");
     let mut ai_integrator = mupc_strategy_engine::AiIntegrator::new();
     ai_integrator.set_intercore_client(intercore.clone());
-    ai_integrator.set_south_dispatcher(Arc::new(
-        mupc_strategy_engine::SouthCommandDispatcher::with_mock(
-            "pv_inverter_001",
-            "load_ctrl_001",
-        ),
-    ));
+    ai_integrator.set_south_dispatcher(Arc::new(create_south_dispatcher()));
     ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
