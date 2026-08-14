@@ -13,9 +13,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use chrono::Utc;
-use crate::prediction_pipeline::PredictionPipeline;
-
 /// 融合系统状态（6 大类，24 + 3 RL 字段 = 27 字段，v2.10）
 #[derive(Debug, Clone)]
 pub struct FusedSystemState {
@@ -591,10 +588,10 @@ impl DataFusionEngine {
     }
 
     /// 构造数据融合引擎，注入 5 个数据源适配器
-    pub fn new(prediction: Option<Arc<PredictionPipeline>>) -> Self {
+    pub fn new() -> Self {
         let sources: Vec<Box<dyn DataSourceAdapter>> = vec![
             Box::new(RealtimeAdapter),
-            Box::new(PredictionAdapter::new(prediction)),
+            Box::new(PredictionAdapter),
             Box::new(PriceAdapter),
             Box::new(WeatherAdapter),
             Box::new(DispatchAdapter),
@@ -644,16 +641,11 @@ impl DataSourceAdapter for RealtimeAdapter {
     }
 }
 
-/// 预测数据源适配器：调用 PredictionPipeline 获取 pv/load 预测与分位数
-pub struct PredictionAdapter {
-    pipeline: Option<Arc<PredictionPipeline>>,
-}
-
-impl PredictionAdapter {
-    pub fn new(pipeline: Option<Arc<PredictionPipeline>>) -> Self {
-        Self { pipeline }
-    }
-}
+/// 预测数据源适配器（占位）
+///
+/// 预测（pv/load forecast + 分位数）由 `full_decision_cycle` 的 `run_enhanced_predict()`
+/// 计算并注入融合状态，此处不重复执行 PredictionPipeline，返回错误触发降级回填。
+pub struct PredictionAdapter;
 
 #[async_trait::async_trait]
 impl DataSourceAdapter for PredictionAdapter {
@@ -667,29 +659,9 @@ impl DataSourceAdapter for PredictionAdapter {
         2000
     }
     async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
-        let pipeline = self.pipeline.as_ref().ok_or_else(|| {
-            crate::error::AiEngineError::DataSourceStale("预测管线未注入".into())
-        })?;
-        let result = pipeline.execute().await?;
-        let (quantiles, shock_prob, base_load) = match result.load_quantiles {
-            Some(q) => (
-                q.quantiles.iter().map(|qp| qp.value as f64).collect::<Vec<f64>>(),
-                q.shock_probability,
-                q.base_load as f64,
-            ),
-            None => (vec![], 0.0, 0.0),
-        };
-        Ok(SourceData {
-            source_type: SourceType::Prediction,
-            fetch_ts: Utc::now().timestamp(),
-            payload: SourcePayload::Prediction(PredictionData {
-                pv_forecast_15min: result.pv_forecast,
-                load_forecast_15min: result.load_forecast,
-                load_forecast_quantiles: quantiles,
-                shock_load_probability: shock_prob,
-                base_load,
-            }),
-        })
+        Err(crate::error::AiEngineError::DataSourceStale(
+            "预测由 full_decision_cycle 的 run_enhanced_predict 负责，此源不重复执行".into(),
+        ))
     }
 }
 
