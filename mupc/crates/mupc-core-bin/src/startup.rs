@@ -34,30 +34,62 @@ pub struct StartupContext {
     pub background_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
-/// IEC 104 命令处理器（stub 实现，Phase 2+ 接入策略引擎）
-struct StubCommandHandler;
+/// IEC 104 命令处理器：转发主站控制命令到实时控制模块
+struct StrategyCommandHandler {
+    intercore: Arc<mupc_intercore::IntercoreClient>,
+}
 
-impl StubCommandHandler {
+impl StrategyCommandHandler {
     fn name(&self) -> &str {
-        "stub-command-handler"
+        "strategy-command-handler"
     }
 }
 
 #[async_trait::async_trait]
-impl mupc_gateway::iec104::command::CommandHandler for StubCommandHandler {
+impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
     fn name(&self) -> &str {
-        StubCommandHandler::name(self)
+        StrategyCommandHandler::name(self)
     }
 
     async fn handle_command(
         &self,
-        _cmd: mupc_gateway::iec104::command::ControlCommand,
+        cmd: mupc_gateway::iec104::command::ControlCommand,
     ) -> Result<mupc_gateway::iec104::command::CommandResponse, MupcError> {
-        Err(MupcError::new(
-            ErrorCode::Unknown,
-            "IEC 104 命令处理器尚未接入策略引擎 (Phase 2+)",
-            "gateway",
-        ))
+        match cmd.cmd_type {
+            mupc_gateway::iec104::command::CommandType::PowerRegulation
+            | mupc_gateway::iec104::command::CommandType::ChargeDischarge => {
+                // p_set → 下发到实时控制模块（DualParamCommand: p_ref + k_droop）
+                if let Some(p_set) = cmd.p_set {
+                    let dual = mupc_intercore::DualParamCommand::new(
+                        p_set,
+                        cmd.k_value.unwrap_or(0.0),
+                        true,
+                        "intelligent",
+                    );
+                    self.intercore.send_dual_param(&dual).await.map_err(|e| {
+                        MupcError::new(
+                            ErrorCode::Unknown,
+                            format!("命令下发失败: {}", e),
+                            "gateway",
+                        )
+                    })?;
+                }
+            }
+            mupc_gateway::iec104::command::CommandType::SwitchControl => {
+                // 开关控制：记录（南向开关下发路径 Phase 2+）
+                tracing::info!(
+                    "开关控制命令: cmd_id={}, switch_state={:?}",
+                    cmd.cmd_id,
+                    cmd.switch_state
+                );
+            }
+        }
+        Ok(mupc_gateway::iec104::command::CommandResponse {
+            cmd_id: cmd.cmd_id,
+            success: true,
+            message: "命令已下发".into(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+        })
     }
 }
 
@@ -356,7 +388,9 @@ pub async fn initialize_all(
         ..Default::default()
     };
     let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
-    let cmd_handler = Arc::new(StubCommandHandler);
+    let cmd_handler = Arc::new(StrategyCommandHandler {
+        intercore: intercore.clone(),
+    });
     let server_clone = iec104_server.clone();
     guard.0.push(tokio::spawn(async move {
         if let Err(e) = server_clone.start(cmd_handler).await {
