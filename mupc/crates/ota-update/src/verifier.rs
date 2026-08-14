@@ -126,7 +126,7 @@ impl Verifier {
         data: &[u8],
         signature: &[u8],
     ) -> Result<(), OtaError> {
-        use ed25519_dalek::{Signature, VerifyingKey};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         let key_bytes = tokio::fs::read(&self.public_key_path)
             .await
@@ -138,11 +138,8 @@ impl Verifier {
             })?)
             .map_err(|e| OtaError::VerificationFailed(format!("解析 Ed25519 公钥失败: {}", e)))?;
 
-        let sig =
-            Signature::from_bytes(signature.try_into().map_err(|_| {
-                OtaError::VerificationFailed("无效的 Ed25519 签名格式".to_string())
-            })?)
-            .map_err(|e| OtaError::VerificationFailed(format!("解析 Ed25519 签名失败: {}", e)))?;
+        let sig = Signature::from_slice(signature)
+            .map_err(|_| OtaError::VerificationFailed("无效的 Ed25519 签名格式".to_string()))?;
 
         verifying_key
             .verify(data, &sig)
@@ -189,10 +186,10 @@ impl Verifier {
     pub async fn verify_signature(
         &self,
         file_path: &Path,
-        _signature: &[u8],
+        signature: &[u8],
     ) -> Result<(), OtaError> {
         // 读取文件数据
-        let _data = tokio::fs::read(file_path)
+        let data = tokio::fs::read(file_path)
             .await
             .map_err(|e| OtaError::VerificationFailed(format!("读取文件失败: {}", e)))?;
 
@@ -212,6 +209,7 @@ impl Verifier {
 
         #[cfg(not(any(feature = "ed25519", feature = "sm2")))]
         {
+            let _ = (&data, signature);
             Err(OtaError::VerificationFailed(
                 "无可用的签名验证算法，请启用 ed25519 或 sm2 feature".to_string(),
             ))
