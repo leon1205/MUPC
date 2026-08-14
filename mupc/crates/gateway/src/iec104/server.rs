@@ -3,7 +3,7 @@
 use mupc_common::{ErrorCode, MupcError};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use super::command::CommandHandler;
@@ -41,6 +41,7 @@ pub struct Iec104Server {
     config: Iec104Config,
     connections: Arc<RwLock<Vec<Arc<RwLock<Connection>>>>>,
     shutdown_tx: broadcast::Sender<()>,
+    telemetry_txs: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
 }
 
 impl Iec104Server {
@@ -51,6 +52,7 @@ impl Iec104Server {
             config,
             connections: Arc::new(RwLock::new(Vec::new())),
             shutdown_tx,
+            telemetry_txs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -71,6 +73,7 @@ impl Iec104Server {
         let shutdown_rx = self.shutdown_tx.subscribe();
         let max_connections = self.config.max_connections;
         let timeout_ms = self.config.connection_timeout_ms;
+        let telemetry_txs = self.telemetry_txs.clone();
 
         // 接受连接任务
         tokio::spawn(async move {
@@ -97,12 +100,22 @@ impl Iec104Server {
                                 connections.write().await.push(conn.clone());
 
                                 // 处理连接
+                                let (telemetry_tx, telemetry_rx) = mpsc::channel::<Vec<u8>>(100);
+                                {
+                                    let mut txs = telemetry_txs.lock().await;
+                                    txs.push(telemetry_tx);
+                                }
                                 let handler = command_handler.clone();
                                 let cleanup_connections = connections.clone();
                                 let conn_for_cleanup = conn.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) =
-                                        Self::handle_connection(conn, handler, timeout_ms).await
+                                    if let Err(e) = Self::handle_connection(
+                                        conn,
+                                        handler,
+                                        timeout_ms,
+                                        telemetry_rx,
+                                    )
+                                    .await
                                     {
                                         error!("Connection error: {}", e);
                                     }
@@ -134,6 +147,7 @@ impl Iec104Server {
         conn: Arc<RwLock<Connection>>,
         handler: Arc<dyn CommandHandler>,
         timeout_ms: u64,
+        mut telemetry_rx: mpsc::Receiver<Vec<u8>>,
     ) -> Result<(), MupcError> {
         let stream = conn.write().await.stream.take().ok_or_else(|| {
             MupcError::new(
@@ -142,10 +156,25 @@ impl Iec104Server {
                 "gateway",
             )
         })?;
-        let (read_half, mut write_half) = tokio::io::split(stream);
+        let (read_half, write_half) = tokio::io::split(stream);
+        let write_half = Arc::new(Mutex::new(write_half));
+
+        // 遥测发送任务：从 channel 取遥测字节，持续发送（北向上送）
+        let telemetry_write = write_half.clone();
+        let telemetry_handle = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            while let Some(data) = telemetry_rx.recv().await {
+                let mut w = telemetry_write.lock().await;
+                if let Err(e) = w.write_all(&data).await {
+                    tracing::debug!("遥测发送失败: {}", e);
+                    break;
+                }
+            }
+        });
 
         // 读取循环
         let read_conn = conn.clone();
+        let read_write = write_half.clone();
         let read_handle = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
 
@@ -175,13 +204,15 @@ impl Iec104Server {
                         };
 
                         let mut conn_guard = read_conn.write().await;
+                        let mut w = read_write.lock().await;
                         if let Err(e) = conn_guard
-                            .handle_frame(frame, &mut write_half, handler.as_ref())
+                            .handle_frame(frame, &mut *w, handler.as_ref())
                             .await
                         {
                             error!("Frame handling error: {}", e);
                             break;
                         }
+                        drop(w);
 
                         if conn_guard.state == ConnectionState::Disconnected {
                             break;
@@ -211,8 +242,20 @@ impl Iec104Server {
             )
         })?;
 
+        telemetry_handle.abort();
+
         // 清理连接
         Ok(())
+    }
+
+    /// 广播遥测字节到所有已连接的主站（北向遥测上送）
+    ///
+    /// FIXME: 遥测字节的编码（ASDU + I 帧）由调用方负责，本方法仅广播
+    pub async fn broadcast_telemetry(&self, data: Vec<u8>) {
+        let txs = self.telemetry_txs.lock().await;
+        for tx in txs.iter() {
+            let _ = tx.send(data.clone()).await;
+        }
     }
 
     /// 停止服务器

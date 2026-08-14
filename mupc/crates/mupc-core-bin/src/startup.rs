@@ -297,28 +297,6 @@ pub async fn initialize_all(
         &load_device,
     )));
 
-    // 南向数据采集循环（上行）：读取 → 转换 → 持久化到 telemetry 表
-    if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
-        let wb = write_buffer.clone();
-        guard.0.push(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                for (dev, name) in [(&pv, "pv_inverter_001"), (&load, "load_ctrl_001")] {
-                    match dev.read() {
-                        Ok(frame) => {
-                            let pkg = dataframe_to_datapackage(&frame);
-                            for point in datapackage_to_telemetry_points(&pkg, name) {
-                                if let Err(e) = wb.buffer_telemetry(point).await {
-                                    tracing::debug!("遥测写入失败: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),
-                    }
-                }
-            }
-        }));
-    }
     ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
@@ -350,6 +328,44 @@ pub async fn initialize_all(
         }
     }));
     coord.register_service("gateway", ServiceStatus::Running);
+
+    // 南向数据采集循环（上行）：读取 → 转换 → 持久化 + 北向 gateway 上送
+    if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
+        let wb = write_buffer.clone();
+        let g = iec104_server.clone();
+        guard.0.push(tokio::spawn(async move {
+            // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
+            let mut ioa_seq = 0u32;
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                for (dev, name) in [(&pv, "pv_inverter_001"), (&load, "load_ctrl_001")] {
+                    match dev.read() {
+                        Ok(frame) => {
+                            let pkg = dataframe_to_datapackage(&frame);
+                            for point in datapackage_to_telemetry_points(&pkg, name) {
+                                if let Err(e) = wb.buffer_telemetry(point).await {
+                                    tracing::debug!("遥测写入失败: {}", e);
+                                }
+                            }
+                            // 北向上送：取有功功率作为示例（FIXME: 完整点表映射）
+                            if let Some(v) = pkg.electrical.active_power {
+                                ioa_seq = ioa_seq.wrapping_add(1);
+                                let asdu = mupc_gateway::iec104::protocol::encode_telemetry_asdu(
+                                    ioa_seq,
+                                    v as f32,
+                                    1,
+                                );
+                                let frame =
+                                    mupc_gateway::iec104::Iec104Frame::make_i_frame(0, 0, &asdu);
+                                g.broadcast_telemetry(frame).await;
+                            }
+                        }
+                        Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),
+                    }
+                }
+            }
+        }));
+    }
 
     // ── 10. Web API ──
     // AppState 所需依赖在步骤 07/08/11 中已初始化

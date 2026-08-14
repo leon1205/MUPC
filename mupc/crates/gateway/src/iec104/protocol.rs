@@ -330,6 +330,21 @@ impl Iec104Frame {
     }
 }
 
+/// 编码遥测数据为 IEC104 监视方向 ASDU（M_ME_NC_1 短浮点测量值）
+///
+/// FIXME: 简化实现，IOA 与遥测点的映射根据点表确定
+pub fn encode_telemetry_asdu(ioa: u32, value: f32, cot: u8) -> Vec<u8> {
+    // TypeID=13 (M_ME_NC_1), 可变结构限定词=1(单对象), COT, 公共地址 2 字节
+    let mut asdu = vec![TypeId::MMeNc1 as u8, 0x01, cot, 0x00, 0x00];
+    // IOA（3 字节，小端）
+    asdu.push((ioa & 0xFF) as u8);
+    asdu.push(((ioa >> 8) & 0xFF) as u8);
+    asdu.push(((ioa >> 16) & 0xFF) as u8);
+    // 短浮点（IEEE 754 32 位，小端）
+    asdu.extend_from_slice(&value.to_le_bytes());
+    asdu
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
