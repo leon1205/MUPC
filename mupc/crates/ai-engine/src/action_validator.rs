@@ -194,7 +194,9 @@ impl ActionValidator {
             -action_space_config.max_batt_discharge_power,
             action_space_config.max_batt_charge_power,
         );
-        validated.k_droop = validated.k_droop.clamp(-300.0, 300.0);
+        let k_min = action_space_config.k_droop_min.unwrap_or(0.0);
+        let k_max = action_space_config.k_droop_max.unwrap_or(30.0);
+        validated.k_droop = validated.k_droop.clamp(k_min, k_max);
         validated.load_shedding = validated
             .load_shedding
             .clamp(0.0, action_space_config.max_load_shedding);

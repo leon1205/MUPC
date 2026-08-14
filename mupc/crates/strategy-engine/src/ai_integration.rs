@@ -241,7 +241,7 @@ impl AiIntegrator {
             let cmd = DualParamCommand::new(
                 action.p_ref,
                 action.k_droop,
-                true, // ai_ready
+                self.is_ready().await, // ai_ready：反映 AI 引擎真实就绪状态
                 &strategy_mode,
             );
 
