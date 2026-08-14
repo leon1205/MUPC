@@ -555,7 +555,10 @@ pub async fn initialize_all(
     let metrics_collector = mupc_system_monitor::FullCollector::new(60_000);
     let interval_ms = metrics_collector.collection_interval_ms();
     let collector = Arc::new(metrics_collector);
-    let _healing_engine = Arc::new(mupc_system_monitor::SelfHealingEngine::new(3, 30));
+    let healing_engine = Arc::new(tokio::sync::Mutex::new(
+        mupc_system_monitor::SelfHealingEngine::new(3, 30),
+    ));
+    let threshold_analyzer = mupc_system_monitor::ThresholdAnalyzer::default();
     let metrics_bg = metrics_store.clone();
     guard.0.push(tokio::spawn(async move {
         loop {
@@ -571,6 +574,14 @@ pub async fn initialize_all(
                     );
                     if let Err(e) = metrics_bg.store(&snapshot).await {
                         tracing::warn!("保存系统指标失败: {}", e);
+                    }
+                    // 自愈：分析指标 + 执行自愈动作
+                    if let Ok(analysis) = threshold_analyzer.analyze(&snapshot) {
+                        if let Ok(Some(healing)) =
+                            healing_engine.lock().await.auto_heal(&analysis)
+                        {
+                            tracing::info!("自愈动作已执行: {:?}", healing.action);
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("系统指标采集失败: {}", e),
