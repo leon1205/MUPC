@@ -2,30 +2,17 @@
 //!
 //! 实现 GB/T 32907-2016《SM3 密码杂凑算法》
 //!
-//! # gmsm 0.1.0 能力说明
-//! - 支持 SM3 哈希 (sm3_byte/sm3_hex)
-//! - 不支持 HKDF-SM3
+//! 使用 RustCrypto `sm3` crate（真国密 SM3，支持二进制数据）。
+//! 不再依赖 gmsm 0.1.0 的 `sm3_byte`（其仅接受 &str，无法哈希二进制）。
 
 use crate::errors::{GmError, Result};
 
-/// SM3 消息摘要
-///
-/// real_gmsm: 使用 gmsm::sm3。
-/// fake_gmsm: 使用 SHA-256 作为替代实现。
+/// SM3 消息摘要（32 字节）
 pub fn sm3_hash(data: &[u8]) -> Result<Vec<u8>> {
-    #[cfg(feature = "real_gmsm")]
-    {
-        let input = String::from_utf8_lossy(data);
-        let hash: [u8; 32] = gmsm::sm3::sm3_byte(&input);
-        Ok(hash.to_vec())
-    }
-
-    #[cfg(not(feature = "real_gmsm"))]
-    {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(data);
-        Ok(hash.to_vec())
-    }
+    use sm3::{Digest, Sm3};
+    let mut hasher = Sm3::new();
+    hasher.update(data);
+    Ok(hasher.finalize().to_vec())
 }
 
 /// 使用 SM3 进行密钥派生（HKDF-SM3）
