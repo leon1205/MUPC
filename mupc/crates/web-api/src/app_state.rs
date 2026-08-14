@@ -4,7 +4,7 @@
 //! 通过 Axum State extractor 注入到各路由处理器。
 
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::audit::AuditLogger;
 use crate::auth::SessionManager;
@@ -48,8 +48,8 @@ pub struct AppState {
     pub storage: Arc<StorageService>,
     /// OTA 管理器
     pub ota_manager: Arc<dyn OtaManager>,
-    /// 在线微调更新器
-    pub online_updater: Arc<Mutex<OnlineUpdater>>,
+    /// 在线微调更新器（与 ModelManager 共享同一实例）
+    pub online_updater: Arc<RwLock<OnlineUpdater>>,
     /// A/B 测试管理器
     pub ab_test_manager: Arc<AbTestManager>,
 }
@@ -68,7 +68,7 @@ impl AppState {
         ws_streamer: WsLogStreamer,
         storage: StorageService,
         ota_manager: Arc<dyn OtaManager>,
-        online_updater: OnlineUpdater,
+        online_updater: Arc<RwLock<OnlineUpdater>>,
         ab_test_manager: AbTestManager,
     ) -> Self {
         Self {
@@ -83,7 +83,7 @@ impl AppState {
             ws_streamer,
             storage: Arc::new(storage),
             ota_manager,
-            online_updater: Arc::new(Mutex::new(online_updater)),
+            online_updater,
             ab_test_manager: Arc::new(ab_test_manager),
         }
     }

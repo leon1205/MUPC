@@ -42,7 +42,7 @@ const DEFAULT_BUFFER_CAPACITY: usize = 1000;
 
 /// GET /api/v1/ai/finetuning
 pub async fn get_finetuning(State(state): State<Arc<AppState>>) -> Json<FinetuningResponse> {
-    let updater = state.online_updater.lock().await;
+    let updater = state.online_updater.read().await;
     let enabled = updater.is_enabled();
     let buffer_size = updater.buffer_size();
     let batch_size = updater.config().batch_size;

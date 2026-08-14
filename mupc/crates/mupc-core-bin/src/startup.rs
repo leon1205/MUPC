@@ -482,9 +482,8 @@ pub async fn initialize_all(
                 .expect("审计日志初始化致命失败 — 磁盘满或 /tmp 不可写")
         }),
     );
-    let online_updater = Arc::new(tokio::sync::Mutex::new(
-        mupc_ai_engine::OnlineUpdater::new(mupc_ai_engine::OnlineUpdateConfig::default()),
-    ));
+    // 使用 ModelManager 内部的 online_updater（与 AI 引擎共享同一实例，避免两实例不连通）
+    let online_updater = ai_engine.online_updater().clone();
     let ab_test_manager = Arc::new(mupc_web_api::routes::ai::ab_test_manager::AbTestManager::new());
     let mode_selector = ai_engine.mode_selector_arc();
 
