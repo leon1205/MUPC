@@ -574,7 +574,12 @@ impl FaultRecorderImpl {
             .export_cfg(&base.with_extension("cfg"), &reader.meta, &channel_names)
             .map_err(|e| DataProcessingError::WaveformError(format!("COMTRADE cfg 导出失败: {}", e)))?;
         let dat_path = exporter
-            .export_dat(&base.with_extension("dat"), &channels)
+            .export_dat(
+                &base.with_extension("dat"),
+                &channels,
+                reader.meta.sample_rate,
+                reader.meta.pre_trigger_samples,
+            )
             .map_err(|e| DataProcessingError::WaveformError(format!("COMTRADE dat 导出失败: {}", e)))?;
 
         Ok(ExportResult {

@@ -143,6 +143,8 @@ impl ComtradeExporter {
         &self,
         output_path: &Path,
         channels: &[Vec<f64>],
+        sample_rate: u32,
+        pre_trigger_samples: u32,
     ) -> Result<PathBuf, ExportError> {
         if channels.is_empty() || channels[0].is_empty() {
             return Err(ExportError::EmptyData);
@@ -154,12 +156,15 @@ impl ComtradeExporter {
         let sample_count = channels[0].len();
         let channel_count = channels.len();
 
+        let us_per_sample = 1_000_000.0 / sample_rate as f64;
+
         for sample_idx in 0..sample_count {
             // 序号
             write!(file, "{}", sample_idx + 1)?;
-            // 时间戳（微秒偏移）
-            let time_offset = sample_idx as f64 / channels[0].len() as f64 * 1_000_000.0;
-            write!(file, ",{}", time_offset as i64)?;
+            // 时间戳（微秒偏移，触发前为负）
+            let time_offset =
+                (sample_idx as i64 - pre_trigger_samples as i64) * (us_per_sample as i64);
+            write!(file, ",{}", time_offset)?;
 
             // 各通道值
             for item in channels.iter().take(channel_count) {
