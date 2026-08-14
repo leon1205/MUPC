@@ -1,8 +1,6 @@
 # MUPC 南向通信模块 设计文档
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.0 | 2026-05-29 | 架构师 | 定稿 |
+> **版本：** v1.0（2026-05-29）
 
 > **文档定位：** 本文档记录实现级设计决策。需求级内容（功能描述、验收标准、性能指标）请参考 [02-MUPC-南向通信-PRD](../specs/modules/02-MUPC-南向通信-PRD.md)。
 
@@ -267,7 +265,7 @@ pub enum Rs485Error {
 
 ---
 
-### 2.7 南向控制指令分发（SouthCommandSender）
+### 2.8 南向控制指令分发（SouthCommandSender）
 
 > **来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
 
@@ -1195,20 +1193,7 @@ tracing = { workspace = true }
 | 插件隔离 | 同一进程加载（trait object） | 子进程隔离 | 子进程 IPC 开销大，Rust 类型系统可保证安全 |
 | 插件 FFI | `unsafe extern "C" fn` | C ABI struct | 简化绑定，`libloading` 原生支持 |
 
-### 9.2 技术债清单
-
-| 项目 | 说明 | 优先级 |
-|------|------|--------|
-| 串口抗干扰重试 | RS485 通信不稳定时自动重试 | 中 |
-| 热插拔配置重载 | 运行时添加/移除设备配置 | 中 |
-| 插件签名验证 | 加载插件前验证数字签名 | 低 |
-| `SdkHplcDriver` | 对接实际 HPLC 芯片 SDK | 低（Phase 3） |
-| `FireAlarmHandler` | 消防专用协议处理器 | 低（按需实现） |
-| Windows 串口支持 | 实现 Windows 平台串口操作 | 低 |
-| 异步 recv | HPLC driver 异步非阻塞接收 | 低（Mock 使用同步 sleep） |
-| 设备心跳自动检测 | 定时检查设备在线状态 | 中 |
-
-### 9.3 风险与对策
+### 9.2 风险与对策
 
 | 风险 | 等级 | 对策 |
 |------|------|------|
@@ -1217,7 +1202,7 @@ tracing = { workspace = true }
 | `libloading` 在 Windows 平台兼容性 | 低 | 测试阶段覆盖 Windows 环境 |
 | 多线程竞争串口访问 | 低 | `StdMutex<()>` 保证事务原子性 |
 
-### 9.4 验收标准
+### 9.3 验收标准
 
 > 验收标准（功能验收、质量验收）详见 [02-MUPC-南向通信-PRD](../specs/modules/02-MUPC-南向通信-PRD.md) 第 7 章。
 
@@ -1242,59 +1227,12 @@ tracing = { workspace = true }
 | CRC | 循环冗余校验 (Cyclic Redundancy Check) |
 | RKNN | Rockchip Neural Network（RK3588 NPU 推理框架） |
 
-## 附录 B：来源文档
-
-| 文档 | 说明 |
-|------|------|
-| `docs/superpowers/specs/modules/02-MUPC-南向通信-PRD.md` | 产品需求文档 |
-| `docs/superpowers/plans/2026-05-27-MUPC-Phase2A-南向通信-实施计划.md` | Phase2A 实施计划 |
-| `docs/superpowers/plans/2026-05-29-MUPC-南向通信扩展-实施计划.md` | 南向通信扩展实施计划 |
-
 ---
 
-**文档状态**: 定稿
-**维护者**: MUPC Team
+## 附录：版本演进
 
----
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
-## 10. Phase 2A 实现笔记
-
-> **来源**: `docs/superpowers/reports/2026-05-27-MUPC-Phase2A-南向通信-实施计划.md`（已归档）
-> **状态**: 核心实现已完成，4 个单元测试待修复
-> **团队**: 团队A（2人）
-
-### 10.1 实施任务分解
-
-所有 Task 采用测试优先（TDD）策略：先编写测试，再实现功能。
-
-| Task | 内容 | 提交信息 |
-|------|------|----------|
-| Task 1 | device-trait 设备抽象层（types.rs -> errors.rs -> device.rs -> registry.rs -> message_bus.rs -> lib.rs） | `feat(device-trait): 实现设备抽象层 trait 定义` |
-| Task 2 | rs485-plugin RS485 驱动（配置解析 -> 设备驱动 -> 协议解析） | `feat(rs485-plugin): 实现 RS485 驱动插件` |
-| Task 3 | plugin-loader 动态插件加载（加载器 -> 生命周期管理） | `feat(plugin-loader): 实现动态插件加载器` |
-| Task 4 | 集成与测试（workspace 注册 + 集成测试 + clippy） | `feat(integration): 集成南向通信模块` |
-
-### 10.2 技术栈
-
-| 组件 | 技术选型 |
+| 版本 | 主要变更 |
 |------|----------|
-| 插件系统 | `libloading` + trait object |
-| 串口通信 | `serial` crate |
-| 序列化 | `serde` + `serde_json` |
-| 错误处理 | `thiserror` |
-
-### 10.3 里程碑
-
-| 里程碑 | 内容 | 交付物 |
-|--------|------|--------|
-| M2.1 | 核心 trait 定义 | device-trait crate |
-| M2.2 | RS485 插件 | rs485-plugin crate |
-| M2.3 | 插件加载器 | plugin-loader crate |
-| M2.4 | 集成测试 | 完整南向通信模块 |
-
-### 10.4 实施要点
-
-- 串口操作使用 Unix `libc` termios 直接操作，避免第三方 crate 依赖
-- 事务原子性通过 `StdMutex<()>` 全局锁保证，跨异步任务保证设备独占访问
-- 插件通过 `libloading` 加载 `.so/.dll`，FFI 导出 `create_plugin()` + `plugin_meta()`
-- 依赖顺序：device-trait 先行，plugin-loader 和 rs485-plugin 并行依赖 device-trait
+| v1.0 | 初版：定义南向通信模块实现级设计（RS485/HPLC/插件系统） |

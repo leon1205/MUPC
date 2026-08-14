@@ -1,16 +1,7 @@
-[DESIGN_APPROVED]
-
 # MUPC 本地运维通信 - 模块设计文档
-
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.1 | 2026-05-29 | 架构师 | 已批准 |
 
 **对应模块：** `wireless` crate（新建）
 
-> **Phase 2+ 状态：** WiFi/NearLink/BLE 当前均为 NoOp 驱动（返回"功能尚未启用"占位）。ECDH 密钥协商为 XOR 占位实现（跳过真实 P-256 椭圆曲线计算）。下文 API 签名为 Phase 2+ 目标设计，非当前实现。
-**对应 PRD：** `docs/superpowers/specs/modules/09-MUPC-本地运维通信-PRD.md`
-**对应缺口：** M-01（来自需求覆盖度审查报告）
 **前置依赖：** OTA模块、Web UI、日志系统、security crate
 
 ---
@@ -640,16 +631,16 @@ BLE 链路层加密（LESC/Passkey Entry）仅保护配对阶段，不保护配�
 pub struct AuthManager {
     lock_state: Arc<RwLock<HashMap<String, LockEntry>>>,
     config: AuthConfig,
-    // trusted_devices: Arc<RwLock<Vec<TrustedDevice>>>, // Phase 2+ 实现
+    // trusted_devices: Arc<RwLock<Vec<TrustedDevice>>>,
 }
 
 impl AuthManager {
     pub async fn record_auth_failure(&self, identity: &str, channel: ChannelType) -> Result<LockStatus>;
-    // pub async fn manage_trusted_devices(&self, ...) -> Result<()>; // Phase 2+ 实现
+    // pub async fn manage_trusted_devices(&self, ...) -> Result<()>;
 }
 ```
 
-> **注意：信任设备列表管理（白名单，最多 20 个信任设备）延后至 Phase 2+ 实现。Phase 2 仅支持基于密钥的认证（PIN 码 / Passkey Entry / WPA2-PSK）。信任设备列表功能将在 Phase 2+ 通过 `AuthManager` 的 `trusted_devices` 字段实现，支持添加、移除、查询信任设备操作。**
+> **注意：信任设备列表管理（白名单，最多 20 个信任设备）延后实现。Phase 2 仅支持基于密钥的认证（PIN 码 / Passkey Entry / WPA2-PSK）。信任设备列表功能将通过 `AuthManager` 的 `trusted_devices` 字段实现，支持添加、移除、查询信任设备操作。**
 
 ---
 
@@ -1099,7 +1090,7 @@ tempfile.workspace = true
 | **Phase 2** | NearLink + Wi-Fi Station | P1 | 等待星闪模组和 SDK 就绪后实施 |
 | **Phase 3** | BLE 配置读写 + 日志导出 + 固件升级命令 | P1 | BLE 通道功能完善 |
 | **Phase 4** | 定时开关 + 省电策略 + 多通道协同 | P2 | 高级功能 |
-| **Phase 5** | 远程锁机 + 信任设备列表管理（白名单） | P3 | Phase 2+ 增强；Phase 2 仅支持基于密钥的认证，信任设备列表延后至 Phase 2+ |
+| **Phase 5** | 远程锁机 + 信任设备列表管理（白名单） | P3 | Phase 2 仅支持基于密钥的认证，信任设备列表延后实现 |
 
 ### 10.4 边界条件处理
 
@@ -1124,21 +1115,11 @@ tempfile.workspace = true
 
 ---
 
-**文档状态：** 已批准
+## 附录：版本演进
 
-**产出文件：**
-- 新增 crate: `crates/wireless/`（预计 30 个文件，约 4,050 行 Rust 代码）
-- 修改文件: `crates/web-api/src/router.rs`、`crates/web-api/Cargo.toml`、`mupc/Cargo.toml`、`/etc/mupc/mupc.toml`
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
-**核心模块数：** 3（NearLink / Wi-Fi / BLE）+ 8 公共模块
-
----
-
-## v1.1 修订记录
-
-| 修订项 | 说明 | 对应 PRD 要求 |
-|--------|------|-------------|
-| BLE `set_log_config` 命令增加 `max_entries` 参数 | 新增 `max_entries`（u16, 默认 500, 范围 100~2000），控制单次日志导出最大条目数 | PRD 4.4 |
-| AP 模式零影响约束 | 新增 3.2.1 节，明确 AP 模式不修改其他网络接口、不占用有线网卡、CPU < 5%、内存 < 50MB、运行于独立线程不阻塞 Tokio runtime | PRD 3.1 |
-| 信任设备列表管理延后标注 | 在 6.6 节 AuthManager 定义和 10.3 节实施优先级中明确标注"信任设备列表管理（白名单）延后至 Phase 2+ 实现，Phase 2 仅支持基于密钥的认证" | PRD 5.1 |
-| 版本号更新 | 文档版本从 v1.0 更新为 v1.1 | - |
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 初始设计 |
+| v1.1 | 新增 AP 零影响约束、BLE 日志导出 max_entries、信任设备列表延后标注 |

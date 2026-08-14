@@ -1,16 +1,8 @@
 # MUPC 策略引擎模块设计文档
 
-[DESIGN_APPROVED] — v2.15 动作空间精简（AI 2维动作 + 本地策略接管 load_shedding/pv_limit）
-
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v2.15 | 2026-06-17 | 架构师 | [DESIGN_APPROVED] |
-| v1.1 | 2026-06-10 | 架构师 | 历史版本 |
-| v1.0 | 2026-05-29 | 架构师 | 初版 |
+> **版本：** v2.15（2026-06-17）
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
-
-**合并来源：** PRD v1.1 + Phase3A 实施计划 + 代码库 `mupc/crates/strategy-engine/src/`
 
 ---
 
@@ -100,7 +92,7 @@ AiCommandValidator (可插拔 AI 模型)
 └──────────────────────────────────────────────────────────────┘
 ```
 
-> **v2.15 分发路径更新：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块。pv_limit 和 load_shedding 不再作为 AI 动作维度，仅由本地兜底策略（防逆流/需量控制）设置并通过南向通信分发至设备。
+> **分发路径更新：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块。pv_limit 和 load_shedding 不再作为 AI 动作维度，仅由本地兜底策略（防逆流/需量控制）设置并通过南向通信分发至设备。
 
 ### 1.5 策略 ID 分配
 
@@ -128,7 +120,7 @@ AiCommandValidator (可插拔 AI 模型)
 - **接口**: 实现 `FallbackStrategy` trait
 - **文件**: `peak_shaving.rs`
 
-### 2.3 决策逻辑
+### 2.2 决策逻辑
 
 ```
 充电优先级：
@@ -169,7 +161,7 @@ fn decide(&self, battery_soc: f64, pv_power: f64, _load_power: f64,
 }
 ```
 
-### 2.4 时段检测规则
+### 2.3 时段检测规则
 
 峰时段检测和谷时段检测使用同一套跨天兼容的规则：
 
@@ -185,7 +177,13 @@ fn is_peak_hour(&self, hour: u8) -> bool {
 }
 ```
 
-### 2.5 配置参数
+从 Unix 时间戳提取小时（u64 截断到当日秒）：
+
+```rust
+let hour = (data.timestamp % 86400) / 3600;
+```
+
+### 2.4 配置参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -195,16 +193,16 @@ fn is_peak_hour(&self, hour: u8) -> bool {
 | `soc_charge_min` | `f64` | `20.0` | SOC 充电下限（%） |
 | `battery_capacity` | `f64` | `100.0` | 电池容量（kWh） |
 
-### 2.6 输出字段
+### 2.5 输出字段
 
 | 字段 | 值 | 说明 |
 |------|-----|------|
 | `cmd_id` | 1 | 削峰填谷策略固定 ID |
 | `cmd_type` | `ChargeDischarge` / `PowerRegulation` | 充放电控制或待机 |
-| `p_ref` | ±15~30 kW | 有功基准点（v2.7+ 双参数模式） |
+| `p_ref` | ±15~30 kW | 有功基准点（双参数模式） |
 | `priority` | 1 | 默认优先级 |
 
-### 2.7 测试覆盖
+### 2.6 测试覆盖
 
 | 测试用例 | 文件 | 验证点 |
 |----------|------|--------|
@@ -378,7 +376,7 @@ Step 3 - PV 已限制且仍逆流：
 
 | 字段 | 类型 | 用途 | 范围 |
 |------|------|------|------|
-| `q_batt_set` | `Option<f64>` | [LEGACY v2.4~v2.6] 无功由实时控制模块闭环调节 | - |
+| `q_batt_set` | `Option<f64>` | 无功由实时控制模块闭环调节 | - |
 | `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 | 各相独立设置 |
 
 ### 5.3 计划策略（Phase 2+）
@@ -447,7 +445,7 @@ pub fn validate_sync(&self, cmd: &ControlCommand) -> ValidationResult {
         return ValidationResult::valid();
     }
 
-    // 3. 无 p_ref 时默认通过（v2.7+ 双参数模式）
+    // 3. 无 p_ref 时默认通过（双参数模式）
     let p_ref = match cmd.p_ref {
         Some(p) => p,
         None => return ValidationResult::valid(),
@@ -550,7 +548,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
                                   ├── 决策接口 → ActionOutput (p_ref, k_droop)
                                   └── 状态管理 → ModelStatus
 
-数据流（v2.15）：
+数据流：
 1. LSTM/TCN 时序预测（光伏出力/负荷）
 2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
 3. AiCommandValidator 校验 AI 指令安全性
@@ -630,18 +628,18 @@ pub trait FallbackStrategy: Send + Sync {
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID（1-削峰填谷, 2-需量控制, 3-防逆流）
     pub cmd_type: CommandType,                // 命令类型
-    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，v2.7+，AI输出或本地策略设置
-    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，v2.7+，AI输出或本地策略设置
-    pub q_batt_set: Option<f64>,             // [LEGACY] 无功由实时控制模块闭环调节
+    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，AI输出或本地策略设置
+    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，AI输出或本地策略设置
+    pub q_batt_set: Option<f64>,             // 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级（0-3）
-    pub pv_limit: Option<f64>,               // PV 限功率比例 (0.0-1.0)，v2.15起仅由本地防逆流策略设置
-    pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)，v2.15起仅由本地需量控制策略设置
+    pub pv_limit: Option<f64>,               // PV 限功率比例 (0.0-1.0)，仅由本地防逆流策略设置
+    pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)，仅由本地需量控制策略设置
 }
 ```
 
-> **v2.15 字段语义说明：** `pv_limit` 和 `load_shedding` 保留在 `ControlCommand` 中，但仅由本地兜底策略引擎（`AntiReverseStrategy` / `DemandControlStrategy`）设置，不再作为 AI 引擎（`ActionOutput`）的动作维度。
+> **字段语义说明：** `pv_limit` 和 `load_shedding` 保留在 `ControlCommand` 中，但仅由本地兜底策略引擎（`AntiReverseStrategy` / `DemandControlStrategy`）设置，不再作为 AI 引擎（`ActionOutput`）的动作维度。
 
 ### 9.3 CommandType 枚举
 
@@ -879,7 +877,7 @@ fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power:
 | Phase 2+ | 三相不平衡补偿 | 分相无功补偿 | 规划中 |
 | Phase 2+ | 运行时配置热加载 | 配置修改无需重启 | 规划中 |
 | Phase 2+ | 消息总线扩展（AMQP/MQTT） | 支持更多消费者 | 规划中 |
-| — | Q 控制 | 无功由实时控制模块闭环调节（v2.4+），ControlCommand 中 q_batt_set 为 LEGACY | 已关闭 |
+| — | Q 控制 | 无功由实时控制模块闭环调节，ControlCommand 中 q_batt_set 已废弃 | 已关闭 |
 
 ---
 
@@ -922,124 +920,12 @@ tokio-test = "0.4"
 
 ---
 
-**文档状态：** v2.15 当前版本
-**合并来源：** 通信管理模块技术设计 v1.1 + Phase3A 实施计划 + 策略引擎 PRD v1.1
-**对齐代码版本：** Strategy Engine Phase 3C（包括 ai_integration.rs）
-**产出时间：** 2026-05-29
+## 附录：版本演进
 
-## v1.1 修订记录 (2026-06-10)
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | 农网台区参数更新 | DemandControlConfig | 变压器容量 500kVA→200kVA |
-| 2 | 版本号更新 | 文档头部 | v1.0 → v1.1 |
-
-**修订依据：** 农网台区新规格落地：变压器 200kVA、光伏 150kW、储能 50kW/100kWh、居民负荷 60kW、农业冲击负荷最高 120kW。代码默认值已同步更新。
-
----
-
-## 15. Phase 3A 实现笔记
-
-> 以下内容提取自 Phase 3A 实施计划（`2026-05-27-MUPC-Phase3A-实施计划.md`），为前述章节未覆盖的实现级细节。
-
-### 15.1 高频遥测 Ring Buffer
-
-Phase 3A 在 `HighFrequencyTelemetryImpl` 中使用 `VecDeque` 实现环形缓冲区，容量 60 条记录（对应 1Hz 上报下 60 秒窗口），通过 `Arc<Mutex<VecDeque<TelemetryPoint>>>` 共享：
-
-```rust
-fn push_to_buffer(&self, point: TelemetryPoint) {
-    let mut buffer = self.buffer.lock().unwrap();
-    if buffer.len() >= 60 {
-        buffer.pop_front(); // Ring Buffer: 移除最旧的
-    }
-    buffer.push_back(point);
-}
-```
-
-### 15.2 TelemetryPoint 结构体
-
-`HighFrequencyTelemetryImpl` 内部使用 7 字段遥测点，通过 `get_current_value(&self, point_name: &str) -> Option<f64>` 按名称查询当前值：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `battery_soc` | `f64` | 电池 SOC |
-| `battery_power` | `f64` | 电池功率 (kW) |
-| `pv_output` | `f64` | 光伏出力 (kW) |
-| `load_power` | `f64` | 负荷功率 (kW) |
-| `grid_power` | `f64` | 电网功率 (kW) |
-| `transformer_load` | `f64` | 变压器负载率 |
-
-### 15.3 Timestamp 到小时的转换
-
-削峰填谷策略中，从 Unix 时间戳提取小时（u64 截断到当日秒）：
-
-```rust
-let hour = (data.timestamp % 86400) / 3600;
-```
-
-### 15.4 防逆流策略的可变状态
-
-`AntiReverseStrategy::evaluate_sync` 需要 `&mut self`，因其内部维护 `pv_limit_count: u8`，每次逆流且电池满时递增（`pv_limit_count += 1`），电网恢复正常时清零。渐进式 PV 限功率公式：
-
-```rust
-pv_limit = pv_power * (self.pv_limit_count as f64 * 0.1).min(0.5);
-```
-
-每次限幅 10%，上限 50%。
-
-### 15.5 故障类型枚举 (FaultType)
-
-data-processing 模块定义的故障类型（与策略引擎决策相关）：
-
-| 枚举值 | SQL 标签 | 说明 |
-|--------|----------|------|
-| `BatteryOverTemp` | `BATTERY_OVER_TEMP` | 电池过温 |
-| `BatteryUnderSoc` | `BATTERY_UNDER_SOC` | 电池 SOC 过低 |
-| `GridOverload` | `GRID_OVERLOAD` | 电网过载（电压 > 420V） |
-| `GridReverse` | `GRID_REVERSE` | 电网逆流 |
-| `PvOutputLimit` | `PV_OUTPUT_LIMIT` | 光伏限功率 |
-| `Unknown` | `UNKNOWN` | 未知故障 |
-
-### 15.6 故障录波 SQLite Schema
-
-```sql
-CREATE TABLE IF NOT EXISTS fault_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fault_type TEXT NOT NULL,
-    trigger_time INTEGER NOT NULL,
-    over_voltage REAL,
-    under_voltage REAL,
-    over_current REAL,
-    frequency_abnormal REAL,
-    waveform_path TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_trigger_time ON fault_records(trigger_time);
-```
-
-故障记录保留 30 天，支持按时间范围查询（`query_sync(start, end)`）。
-
-### 15.7 TDD 实施方法论
-
-Phase 3A 的 10 个任务均采用统一流程：
-
-1. 写失败测试（验证模块/函数不存在 → 编译失败）
-2. 运行测试确认失败
-3. 编写实现代码
-4. 运行测试确认通过
-5. 提交（每任务独立 commit，14 条 commit message 带 `Co-Authored-By`）
-
-覆盖范围：data-processing（4 任务：错误类型、DataCollector、HighFrequencyTelemetry、FaultRecorder/SQLite）+ strategy-engine（6 任务：错误类型、削峰填谷、需量控制、防逆流、AiValidator、模块导出），共 13 个文件、10 个单元测试。
-
----
-
-## 16. v2.15 修订记录 (2026-06-17)
-
-| 序号 | 修订项 | 修订位置 | 说明 |
-|------|--------|----------|------|
-| 1 | AI 指令分发路径更新 | §1.4 整体数据流 | pv_limit/load_shedding 从 AI 分发路径移除，标注为本地策略独立执行 |
-| 2 | AI 引擎集成数据流更新 | §7.5 数据集成 | ActionOutput 仅含 p_ref+k_droop（2维）；pv_limit/load_shedding 下沉至本地策略 |
-| 3 | ControlCommand 字段注释 | §9.2 | pv_limit/load_shedding 保留但标注为仅由本地兜底策略设置，非 AI 动作维度 |
-| 4 | 版本号更新 | 文档头部 | v1.1 → v2.15 |
-
-**修订依据：** PRD v2.15 (`[REVIEWED: PASS]`) 将 AI 动作空间从 5 维精简为 2 维：(1) p_ref/k_droop 继续通过核间通信下发至实时控制模块；(2) load_shedding 下沉至需量控制策略独立执行；(3) pv_limit 下沉至防逆流策略独立执行；(4) ControlCommand 中的 pv_limit/load_shedding 字段保留，但语义上仅由本地兜底策略引擎设置。
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 初版：定义 `FallbackStrategy`/`AiCommandValidator` 接口与三种兜底策略 |
+| v1.1 | 农网台区参数更新（变压器容量 500kVA→200kVA） |
+| v2.15 | 动作空间精简：AI 2 维动作（p_ref + k_droop），load_shedding/pv_limit 下沉至本地策略 |

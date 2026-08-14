@@ -1,15 +1,6 @@
 # MUPC 数据处理与存储模块 技术设计文档
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.0 | 2026-05-29 | 架构师 | 合并版 |
-
-**合并来源：**
-
-- `2026-05-27-MUPC-Phase3A-实施计划.md` — Phase3A 实施计划（data-processing 部分）
-- `2026-05-29-MUPC-故障录波完整实现-设计文档.md` [DESIGN_APPROVED]
-- `2026-05-29-MUPC-数据存储与设备管理-设计文档.md` [DESIGN_APPROVED]（有条件通过）
-- `03-MUPC-数据处理与存储-PRD.md` — 产品需求文档
+> **版本：** v1.0（2026-05-29）
 
 ---
 
@@ -330,8 +321,6 @@ impl IntercoreSampleSource {
 ---
 
 ## 3. 故障录波设计
-
-**[DESIGN_APPROVED] 设计评审: 2026-05-29, 评审人: Design Reviewer, 结论: 通过**
 
 ### 3.1 总体架构
 
@@ -1023,8 +1012,6 @@ pub struct ChannelStats {
 
 ## 4. 历史数据存储设计
 
-**[DESIGN_APPROVED]**
-
 ### 4.1 技术选型
 
 #### 存储引擎对比
@@ -1137,7 +1124,7 @@ impl StorageService {
 
 ### 4.3 数据模型与表结构
 
-> **Phase 2+ 状态：** 下文 ER 图与表结构为 Phase 2+ 目标设计。当前实际 SQLite schema 仅 6 张表：`telemetry`（扁平结构，非按月分区）、`faults`、`decisions`、`events`、`assets`（简化字段）、`action_space_config`（v2.5）。`device_nameplate`、`maintenance_record`、`alarm_log`（告警管理）、`battery_YYYYmm`（电池分区表）等均未建表，`telemetry_YYYYmm` 按月分区未实现。
+> **实现范围说明：** 注意：以下表结构为 Target 设计，当前实际落地范围（已建表/分区状态）见 docs/technical-debt.md。当前实际 SQLite schema 仅 6 张表：`telemetry`（扁平结构，非按月分区）、`faults`、`decisions`、`events`、`assets`（简化字段）、`action_space_config`。`device_nameplate`、`maintenance_record`、`alarm_log`（告警管理）、`battery_YYYYmm`（电池分区表）等均未建表，`telemetry_YYYYmm` 按月分区未实现。
 
 #### 4.3.1 实体关系图
 
@@ -1414,8 +1401,6 @@ StorageService::init():
 ---
 
 ## 5. 设备台账管理设计
-
-**[DESIGN_APPROVED]**
 
 ### 5.1 设备资产信息管理 (CRUD)
 
@@ -1859,4 +1844,10 @@ mupc/crates/storage/
 
 ---
 
-*本设计文档合并自 Phase3A 实施计划（data-processing 部分）、故障录波完整实现设计文档 [DESIGN_APPROVED]、数据存储与设备管理设计文档 [DESIGN_APPROVED] 和 PRD。完整定义了遥测采集、故障录波、历史数据存储、设备台账管理、数据生命周期管理五大功能域的技术方案，以及数据模型、接口定义、错误类型、文件结构和关键技术决策。*
+## 附录：版本演进
+
+> 正文已整合全部历史补丁，本表仅作演进追溯。
+
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 初版：合并 Phase3A 实施计划、故障录波与数据存储设计，定义数据处理与存储五大功能域 |

@@ -1,14 +1,5 @@
 # MUPC OTA 升级与系统可靠性技术设计文档
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.0 | 2026-05-29 | 架构师 | 合并稿 |
-
-> 本文档为 OTA 升级与系统可靠性模块的权威设计文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
-
-[DESIGN_APPROVED] — 模型 OTA 部分已完成评审并获得批准
-固件 OTA 与系统可靠性部分为草稿状态，待评审
-
 ---
 
 ## 目录
@@ -136,7 +127,7 @@ OTA 服务器                               MUPC 设备
                               └──────────────┘
 ```
 
-### 1.5 模型 OTA 内部架构 (Phase 3C.2 保留)
+### 1.5 模型 OTA 内部架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -166,8 +157,6 @@ OTA 服务器                               MUPC 设备
 ---
 
 ## 2. 模型 OTA 设计
-
-[DESIGN_APPROVED]
 
 ### 2.1 需求概述
 
@@ -611,8 +600,6 @@ U-Boot 环境变量 `boot_partition` 控制从哪个分区启动：
 | `max_boot_attempts` | u32 | 最大启动尝试次数（默认 3） |
 | `ota_status` | string | `"idle"`/`"updated"`/`"rollback"`/`"safe"` |
 
-> **Phase 2+ 状态：** A/B 分区切换当前为占位（`switch_to_standby()` 仅记录日志，未通过 BootloaderEnv 实际设置 boot_partition）。下文原子性保证流程为 Phase 2+ 目标设计。
-
 #### 3.1.3 分区切换原子性保证
 
 ```
@@ -931,8 +918,6 @@ pub enum FwOtaState {
 ---
 
 ## 4. 系统监控设计
-
-> **Phase 2+ 状态：** `system-monitor` crate 当前为骨架实现（JSONL 文件存储指标，无 cgroup v2 资源限制、无网络 I/O 监控、无硬件看门狗喂狗、无 OOM 保护）。下文五维监控、cgroup v2、硬件看门狗、OOM 保护等为 Phase 2+ 目标设计。
 
 ### 4.1 整体架构
 
@@ -1797,7 +1782,7 @@ ota-update/
     │   ├── rollback_manager.rs         # 模型回滚（保留）
     │   └── fw_rollback.rs              # [新增] 固件回滚
     │
-    ├── model/                          # 模型 OTA (保留 Phase 3C.2)
+    ├── model/                          # 模型 OTA
     │   ├── mod.rs
     │   ├── model_manager.rs
     │   └── model_rollback.rs
@@ -2106,12 +2091,10 @@ db_path = "/var/lib/mupc/monitor/timeseries.db"
 
 ---
 
-## 附录 B：说明
+## 附录：版本演进
 
-历史来源文档已在 v1.0 文档体系重构中合并至本文档，不再单独维护。
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
----
-
-**文档版本**：v1.0（合并稿）
-**最后更新**：2026-05-29
-**核心模块数**：2 个 crate（ota-update 改造 + system-monitor 新增），约 45 个源文件，预估 ~10,800 行 Rust
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 从历史来源文档合并为统一设计文档 |

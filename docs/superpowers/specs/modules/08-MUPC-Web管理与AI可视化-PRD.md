@@ -1,13 +1,5 @@
 # MUPC Web 管理与 AI 可视化模块产品需求文档（PRD）
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.1 | 2026-05-29 | 需求分析师 | 合并修订 |
-
-> **v1.1 修订说明：** 同步 v2.0 预设运行场景设计，移除自动识别/置信度/兜底模式/恢复自动识别概念。
-
-> 本文档为 Web 管理与 AI 可视化模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
-
 **目标 crate：** `web-api`
 
 ---
@@ -116,7 +108,7 @@ MUPC Web 管理与 AI 可视化模块是 MUPC 通信管理模块的本地人机�
 | GET | `/api/ai/status` | 获取 AI 引擎状态和运行模式 | Session | 全部角色 |
 | GET | `/api/v1/mode` | 获取当前运行场景 | Session | 全部角色 |
 | GET | `/api/v1/mode/list` | 获取所有可用场景列表 | Session | 全部角色 |
-| PUT | `/api/v1/mode` | 切换运行场景（v2.0 替代 /api/ai/mode） | Session | AI 运维专家、策略管理员 |
+| PUT | `/api/v1/mode` | 切换运行场景 | Session | AI 运维专家、策略管理员 |
 | GET | `/api/ai/finetuning` | 获取在线微调状态 | Session | AI 运维专家、策略管理员 |
 | PUT | `/api/ai/weights` | 更新优化目标权重 | Session | AI 运维专家、策略管理员 |
 | GET | `/api/ai/audit` | 查询审计日志 | Session | AI 运维专家、策略管理员 |
@@ -355,7 +347,7 @@ MUPC Web 管理与 AI 可视化模块是 MUPC 通信管理模块的本地人机�
 
 #### 6.4.1 功能描述
 
-在 AI 决策面板顶部显示当前预设运行模式、切换来源和生效时间。模式由调度主站远程指令或本地策略管理员选择确定（v2.0 预设互斥场景，无自动识别）。
+在 AI 决策面板顶部显示当前预设运行模式、切换来源和生效时间。模式由调度主站远程指令或本地策略管理员选择确定（预设互斥场景，无自动识别）。
 
 #### 6.4.2 显示内容
 
@@ -460,7 +452,7 @@ MUPC Web 管理与 AI 可视化模块是 MUPC 通信管理模块的本地人机�
 | 虚拟电厂模式 | 以辅助服务收益为主要目标 | 参与 VPP 聚合调度 |
 | 极致绿色模式 | 以绿电消纳最大化为主要目标 | 绿色认证要求高的场景 |
 
-> **v2.0 说明：** 无"本地兜底模式"选项。AI 引擎异常时 system 自动降级至本地策略引擎，无需人工选择。远程切换（调度主站）优先级高于本地 Web UI 选择。
+> **说明：** 无"本地兜底模式"选项。AI 引擎异常时 system 自动降级至本地策略引擎，无需人工选择。远程切换（调度主站）优先级高于本地 Web UI 选择。
 
 #### 7.2.3 交互规范
 
@@ -795,7 +787,7 @@ A/B 测试运行期间和结束后，展示实验组与对照组的各项效果�
 | 审计日志 | SQLite | `/var/log/mupc/audit.db` | 独立数据库，仅追加写入 |
 | 奖励历史 | SQLite | `/var/log/mupc/data.db` | 复用 data-processing 数据库 |
 | 权重配置 | TOML | `/etc/mupc/weights.toml` | 重启后保持 |
-| 模式配置 | 单字节文件 | `/var/lib/mupc/current_mode` | 重启后保持（v2.0 简化） |
+| 模式配置 | 单字节文件 | `/var/lib/mupc/current_mode` | 重启后保持（简化） |
 | 模型版本清单 | JSON | `/etc/mupc/models/manifest.json` | 模型版本注册表 |
 | A/B 测试配置 | SQLite | `/var/log/mupc/data.db` | 测试配置和结果持久化 |
 
@@ -823,7 +815,7 @@ green_energy_ratio = null
 ```
 
 ```toml
-# /etc/mupc/ai.toml (v2.0)
+# /etc/mupc/ai.toml
 [mode]
 default_mode = "SeasonalLoadManagement"   # 5 种预设场景之一
 persist_path = "/var/lib/mupc/current_mode"  # 持久化文件路径
@@ -943,7 +935,7 @@ persist_path = "/var/lib/mupc/current_mode"  # 持久化文件路径
 | PPO | 近端策略优化，用于强化学习决策 |
 | Reward | 奖励值，RL 模型优化目标的量化度量 |
 | A/B 测试 | 将流量分配至两个模型版本，对比效果的实验方法 |
-| 兜底模式 | AI 引擎异常时系统内部自动切换至本地策略引擎的运行模式（v2.0：非用户可选模式，由 strategy-engine 内部处理） |
+| 兜底模式 | AI 引擎异常时系统内部自动切换至本地策略引擎的运行模式（非用户可选模式，由 strategy-engine 内部处理） |
 | RKNN | Rockchip NPU 模型格式，用于 RK3588 的 NPU 推理 |
 | SystemState | AI 引擎输入的系统状态结构体（SOC、光伏/负荷/电网功率、变压器负载） |
 | ActionOutput | AI 引擎输出的决策动作结构体（电池功率设定、负荷切除量、PV 限功率、置信度） |
@@ -965,19 +957,11 @@ persist_path = "/var/lib/mupc/current_mode"  # 持久化文件路径
 
 ---
 
-**文档状态：** 合并修订（v1.1）
+## 附录：版本演进
 
-**来源文档评审状态：**
-- `通信管理模块-PRD.md` — **[REVIEWED: PASS]**
-- `AI可视化与专家干预-PRD.md` — **[REVIEWED: PASS]**
-- `WebUI-设计.md` — 设计文档，提取需求层规格纳入
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
-**变更说明：**
-- v1.0: 合并三份文档中与 Web 管理和 AI 可视化相关的需求
-- v1.1: **同步 v2.0 预设运行场景设计**
-  - 删除 `/api/ai/mode/auto` 端点（无自动识别）
-  - 更新模式切换 API 路径为 `/api/v1/mode`
-  - 移除"本地兜底模式"（AI 降级由系统内部处理）
-  - 移除"置信度"和"恢复自动识别"概念
-  - 更新模式持久化方案（`current_mode` 单字节文件）
-  - 更新审计操作类型（移除 `resume_auto`）
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 合并三份文档中与 Web 管理和 AI 可视化相关的需求 |
+| v1.1 | 同步预设运行场景设计，模式切换 API 更新为 /api/v1/mode，移除自动识别/置信度/兜底模式概念 |

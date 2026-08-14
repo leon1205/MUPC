@@ -1,11 +1,6 @@
 # MUPC 策略引擎模块产品需求文档（PRD）
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.1 | 2026-06-10 | 需求分析师 | 待评审 |
-| v1.0 | 2026-05-29 | 需求分析师 | 待评审 |
-
-> 本文档为策略引擎模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
+> 本文档为策略引擎模块的权威需求文档。
 
 ---
 
@@ -110,7 +105,7 @@ AI 引擎失效:
 |------|-----|------|
 | cmd_id | 1 | 削峰填谷策略固定 ID |
 | cmd_type | ChargeDischarge / PowerRegulation | 充放电控制 |
-| p_ref | ±15~30 kW | 电池有功基准点（v2.7+ 双参数模式） |
+| p_ref | ±15~30 kW | 电池有功基准点（双参数模式） |
 | priority | 1 | 默认优先级 |
 
 ### 2.6 验收标准
@@ -271,7 +266,7 @@ ControlCommand 中已包含以下字段，供无功补偿策略使用：
 
 | 字段 | 类型 | 用途 |
 |------|------|------|
-| `q_batt_set` | `Option<f64>` | [LEGACY v2.4~v2.6] 无功由实时控制模块闭环调节，AI/策略引擎不再输出无功指令 |
+| `q_batt_set` | `Option<f64>` | [LEGACY] 无功由实时控制模块闭环调节，AI/策略引擎不再输出无功指令 |
 | `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 |
 
 ### 5.3 计划策略（Phase 2+）
@@ -490,7 +485,7 @@ AiCommandValidator (可插拔 AI 模型)
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-> **说明**（v2.7 起）：`p_ref` 和 `k_droop` 通过 `IntercoreClient` 发送到实时控制模块（闭环下垂控制）；`pv_limit` 和 `load_shedding` 通过 `SouthCommandDispatcher` 发送到南向设备（光伏逆变器、负荷控制装置）。`load_shedding` 和 `pv_limit` **不通过核间通信发送**。
+> **说明**：`p_ref` 和 `k_droop` 通过 `IntercoreClient` 发送到实时控制模块（闭环下垂控制）；`pv_limit` 和 `load_shedding` 通过 `SouthCommandDispatcher` 发送到南向设备（光伏逆变器、负荷控制装置）。`load_shedding` 和 `pv_limit` **不通过核间通信发送**。
 
 ### 9.2 消息主题
 
@@ -637,9 +632,9 @@ strategy-engine
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID
     pub cmd_type: CommandType,                // 命令类型
-    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，v2.7+ 双参数模式
-    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，v2.7+
-    #[deprecated] pub q_batt_set: Option<f64>, // [LEGACY] 无功由实时控制模块闭环调节
+    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，双参数模式
+    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)
+    #[deprecated] pub q_batt_set: Option<f64>, // 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级
@@ -677,7 +672,12 @@ pub enum CommandType {
 | 防逆流 | 防止向电网逆送电的保护策略 |
 
 ---
+## 附录：版本演进
 
-**文档状态：** 初版（v1.0）
-**合并来源：** 通信管理模块 PRD v1.3 + Phase3A 规格文档 v1.0
-**产出时间：** 2026-05-29
+> 正文已整合全部历史补丁，本表仅作演进追溯。
+
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 初版，合并通信管理模块 PRD v1.3 + Phase3A 规格文档 v1.0 |
+| v1.1 | 更新：动作空间精简为 p_ref/k_droop 双参数，q_batt_set 标记 LEGACY，pv_limit/load_shedding 下沉南向 |
+

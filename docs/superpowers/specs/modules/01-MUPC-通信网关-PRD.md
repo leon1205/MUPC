@@ -1,10 +1,6 @@
 # MUPC 通信网关模块产品需求文档（PRD）
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.1 | 2026-05-29 | 需求分析师 | **[REVIEWED: PASS]** |
-
-> 本文档为通信网关模块的权威需求文档。历史来源文档已在 v1.0 文档体系重构中合并，不再单独维护。
+> 本文档为通信网关模块的权威需求文档。
 
 ---
 
@@ -38,11 +34,11 @@
 
 | Crate | 说明 | 状态 |
 |-------|------|------|
-| `gateway` | 北向 IEC 104 协议网关 | Phase 1 ✅ [REVIEWED: PASS] |
-| `iec61850-plugin` | IEC 61850 MMS 客户端插件 | Phase 2+ ✅ [REVIEWED: PASS] |
-| `mqtt-plugin` | MQTT 协议客户端插件（北向扩展） | Phase 2+ ✅ [REVIEWED: PASS] |
-| `mqtt-bridge` | MQTT 网桥（本地+北向分层架构） | Phase 3B ✅ [DESIGN_APPROVED] |
-| `device-trait` | 核心 trait 定义（Plugin、MessageBus 等） | Phase 2+ ✅ [REVIEWED: PASS] |
+| `gateway` | 北向 IEC 104 协议网关 | Phase 1 ✅ |
+| `iec61850-plugin` | IEC 61850 MMS 客户端插件 | Phase 2+ ✅ |
+| `mqtt-plugin` | MQTT 协议客户端插件（北向扩展） | Phase 2+ ✅ |
+| `mqtt-bridge` | MQTT 网桥（本地+北向分层架构） | Phase 3B ✅ |
+| `device-trait` | 核心 trait 定义（Plugin、MessageBus 等） | Phase 2+ ✅ |
 
 ### 1.4 用户角色
 
@@ -61,8 +57,6 @@
 ---
 
 ## 2. IEC 104 功能需求
-
-> 本节内容来源：主 PRD Section 3.2 — **[REVIEWED: PASS]**
 
 ### 2.1 IEC 104 协议通信
 
@@ -153,10 +147,6 @@
 
 ## 3. IEC 61850 功能需求
 
-> 本节内容综合来源：
-> - Phase 2 规格文档 Section 4.2.2 — **[REVIEWED: PASS]**
-> - IEC61850 MMS 实现设计文档 — **DRAFT**
-
 ### 3.1 概述
 
 IEC 61850 插件提供 MMS（制造报文规范）协议客户端能力，支持连接符合 IEC 61850 标准的 IED 设备，实现数据对象读写、GOOSE 消息订阅等功能。
@@ -225,7 +215,7 @@ IEC 61850 插件提供 MMS（制造报文规范）协议客户端能力，支持
 **User Story：**
 > 作为系统，我需要订阅 IED 设备发出的 GOOSE 消息，以便获取实时事件。
 
-**验收标准（[REVIEWED: PASS]）：**
+**验收标准：**
 - 支持订阅 GOOSE 消息
 - 通过 GOOSE ID（`go_id`）识别消息源
 - 消息通过 MessageHandler 回调处理
@@ -298,10 +288,6 @@ mupc/crates/iec61850-plugin/src/
 
 ## 4. MQTT 功能需求
 
-> 本节内容综合来源：
-> - Phase 2 规格文档 Section 4.2.3 — **[REVIEWED: PASS]**
-> - Phase 3B 消息总线设计文档 — **[DESIGN_APPROVED]**
-
 ### 4.1 概述
 
 MQTT 功能分为两个层次：
@@ -337,7 +323,7 @@ MQTT 功能分为两个层次：
 **User Story：**
 > 作为物联平台管理员，我需要通过 MQTT 协议与 MUPC 装置安全通信，以便接收遥测数据和下发指令。
 
-**验收标准（[REVIEWED: PASS]）：**
+**验收标准：**
 
 **连接管理：**
 - 连接可配置的 MQTT Broker（emqx）
@@ -347,12 +333,12 @@ MQTT 功能分为两个层次：
 - 默认 QoS 级别可配置
 - 断线重连：初始间隔 1 秒，指数退避（2 倍），最大间隔 60 秒，无重连次数上限
 
-**TLS 安全（[REVIEWED: PASS]）：**
+**TLS 安全：**
 - 支持 MQTT over TLS 1.2+（默认端口 8883）
 - 支持双向证书认证（CA 证书 + 客户端证书 + 客户端私钥）
 - 证书格式：X.509 v3（PEM）
 
-**QoS 支持（[REVIEWED: PASS]）：**
+**QoS 支持：**
 - QoS 0：至多一次（AtMostOnce）
 - QoS 1：至少一次（AtLeastOnce）
 - QoS 2：恰好一次（ExactlyOnce）
@@ -375,7 +361,7 @@ MQTT 功能分为两个层次：
 **User Story：**
 > 作为系统，我需要通过本地 MQTT 网桥实现模块间松耦合通信，并路由消息至北向 MQTT。
 
-**验收标准（[DESIGN_APPROVED]）：**
+**验收标准：**
 
 **MqttBridge trait：**
 
@@ -480,17 +466,13 @@ pub struct TlsConfig {
 
 ## 5. 消息总线功能需求
 
-> 本节内容综合来源：
-> - 主 PRD Section 3.7.3 — **[REVIEWED: PASS]**
-> - Phase 3B 消息总线设计文档 — **[DESIGN_APPROVED]**
-
 ### 5.1 概述
 
 消息总线是模块间松耦合通信的基础设施，支持 publish/subscribe 模式。Phase 1 使用 `tokio::sync::mpsc` 实现进程内通信，Phase 3B 扩展为基于 MQTT 的分层消息架构，同时支持进程内和进程间通信。
 
 ### 5.2 MessageBus Trait
 
-**验收标准（[REVIEWED: PASS]）：**
+**验收标准：**
 
 ```rust
 /// 消息总线接口
@@ -554,48 +536,48 @@ pub enum BusError {
 
 ### 6.1 性能需求
 
-| 指标 | 要求 | 来源 |
-|------|------|------|
-| IEC 104 数据上报周期 | ≥ 1Hz（可配置） | **[REVIEWED: PASS]** |
-| 调度指令处理延迟（接收→转发） | ≤ 100ms | **[REVIEWED: PASS]** |
-| IEC 104 并发连接数 | ≤ 5 个 | **[REVIEWED: PASS]** |
-| MMS 连接建立时间 | ≤ 5s | DRAFT |
-| MMS Read/Write 响应时间 | ≤ 3s | DRAFT |
-| MMS 操作成功率 | ≥ 99% | **[REVIEWED: PASS]** |
-| MQTT 消息延迟（QoS 0） | < 100ms | **[REVIEWED: PASS]** |
-| MQTT 消息延迟（QoS 1/2） | < 500ms | **[REVIEWED: PASS]** |
-| 进程间消息传递延迟 | < 100ms | **[DESIGN_APPROVED]** |
-| Web UI 页面响应时间 | ≤ 2 秒 | **[REVIEWED: PASS]** |
-| 消息总线吞吐量 | ≥ 10000 msg/s | **[REVIEWED: PASS]** |
-| 消息总线吞吐量（Phase 1 mpsc） | ≥ 1000 msg/s（接口预留） | **[REVIEWED: PASS]** |
-| MQTT 断线重连最大间隔 | 60 秒（指数退避） | **[DESIGN_APPROVED]** |
+| 指标 | 要求 |
+|------|------|
+| IEC 104 数据上报周期 | ≥ 1Hz（可配置） |
+| 调度指令处理延迟（接收→转发） | ≤ 100ms |
+| IEC 104 并发连接数 | ≤ 5 个 |
+| MMS 连接建立时间 | ≤ 5s |
+| MMS Read/Write 响应时间 | ≤ 3s |
+| MMS 操作成功率 | ≥ 99% |
+| MQTT 消息延迟（QoS 0） | < 100ms |
+| MQTT 消息延迟（QoS 1/2） | < 500ms |
+| 进程间消息传递延迟 | < 100ms |
+| Web UI 页面响应时间 | ≤ 2 秒 |
+| 消息总线吞吐量 | ≥ 10000 msg/s |
+| 消息总线吞吐量（Phase 1 mpsc） | ≥ 1000 msg/s（接口预留） |
+| MQTT 断线重连最大间隔 | 60 秒（指数退避） |
 
 ### 6.2 可靠性需求
 
 | 指标 | 要求 | 来源 |
 |------|------|------|
-| 系统 MTBF | ≥ 50,000 小时 | **[REVIEWED: PASS]** |
-| IEC 104 心跳间隔 | 默认 10 秒，可配置（1秒~60秒） | **[REVIEWED: PASS]** |
-| IEC 104 连接超时 | 30 秒 | **[REVIEWED: PASS]** |
-| IEC 104 自动重连 | 5 秒后开始，最多 10 次，之后每 1 分钟尝试 | **[REVIEWED: PASS]** |
-| MQTT 断线重连 | 初始 1 秒，指数退避（2 倍），最大 60 秒，不限次数 | **[DESIGN_APPROVED]** |
-| 消息总线 QoS | 支持 0/1/2 | **[DESIGN_APPROVED]** |
+| 系统 MTBF | ≥ 50,000 小时 | |
+| IEC 104 心跳间隔 | 默认 10 秒，可配置（1秒~60秒） | |
+| IEC 104 连接超时 | 30 秒 | |
+| IEC 104 自动重连 | 5 秒后开始，最多 10 次，之后每 1 分钟尝试 | |
+| MQTT 断线重连 | 初始 1 秒，指数退避（2 倍），最大 60 秒，不限次数 | |
+| 消息总线 QoS | 支持 0/1/2 | |
 | 系统级看门狗 | 通过核间通信监控实时控制模块运行状态，异常时告警并尝试恢复 | 详见模块10-PRD 第4章 |
 
 ### 6.3 安全需求
 
-| 需求 | 说明 | 来源 |
-|------|------|------|
-| **MQTT over TLS** | MQTT 北向连接强制使用 TLS 1.2+，双向证书认证 | **[REVIEWED: PASS]** / **[DESIGN_APPROVED]** |
-| **MMS over TLS** | MMS 连接可选使用 TLS 1.2+，双向证书认证 | DRAFT |
-| **国密算法（SM2/SM4）** | 数字签名、密钥交换、对称加密（Phase 2+） | **[REVIEWED: PASS]** |
-| **证书管理** | X.509 v3 格式，支持 SM2 签名算法，PEM 文件存储 | **[REVIEWED: PASS]** |
-| **密钥管理** | SM2 私钥仅本地存储禁止网络传输，SM4 密钥定期轮换（默认 30 天），文件权限 600 | **[REVIEWED: PASS]** |
-| **Web UI 安全** | Session 登录认证（`POST /api/auth/login`），默认用户 admin | **[REVIEWED: PASS]** |
-| **配置安全** | 敏感配置不得明文存储 | **[REVIEWED: PASS]** |
-| **日志安全** | 日志中不得记录明文密码、密钥 | **[REVIEWED: PASS]** |
-| **Topic 权限** | 进程间 Topic 仅允许本地服务订阅，北向 Topic 按角色分配读写权限 | **[DESIGN_APPROVED]** |
-| **纵向加密认证合规** | 纵向加密认证需符合电力监控系统安全防护规定（发改委14号令），详见模块06-PRD 第5章 | **[REVIEWED: PASS]** |
+| 需求 | 说明 |
+|------|------|
+| **MQTT over TLS** | MQTT 北向连接强制使用 TLS 1.2+，双向证书认证 |
+| **MMS over TLS** | MMS 连接可选使用 TLS 1.2+，双向证书认证 |
+| **国密算法（SM2/SM4）** | 数字签名、密钥交换、对称加密（Phase 2+） |
+| **证书管理** | X.509 v3 格式，支持 SM2 签名算法，PEM 文件存储 |
+| **密钥管理** | SM2 私钥仅本地存储禁止网络传输，SM4 密钥定期轮换（默认 30 天），文件权限 600 |
+| **Web UI 安全** | Session 登录认证（`POST /api/auth/login`），默认用户 admin |
+| **配置安全** | 敏感配置不得明文存储 |
+| **日志安全** | 日志中不得记录明文密码、密钥 |
+| **Topic 权限** | 进程间 Topic 仅允许本地服务订阅，北向 Topic 按角色分配读写权限 |
+| **纵向加密认证合规** | 纵向加密认证需符合电力监控系统安全防护规定（发改委14号令），详见模块06-PRD 第5章 |
 
 ### 6.4 兼容性需求
 
@@ -629,77 +611,77 @@ pub enum BusError {
 
 ### 7.1 IEC 104 验收标准
 
-| ID | 功能点 | 验收条件 | 来源 |
-|----|--------|----------|------|
-| IEC104-01 | 协议兼容 | 全面兼容 IEC 60870-5-104，支持 U/S/I 帧 | **[REVIEWED: PASS]** |
-| IEC104-02 | 连接管理 | 支持状态机、心跳（10s~60s 可配置）、超时判定（30s） | **[REVIEWED: PASS]** |
-| IEC104-03 | 自动重连 | 断连 5s 重试，最多 10 次，之后每 1 分钟尝试 | **[REVIEWED: PASS]** |
-| IEC104-04 | TypeID 支持 | 支持 M_SP_TA_1、M_DP_TA_1、M_ME_TA_1、M_ME_TD_1、C_SC_TA_1、C_DC_TA_1、C_SE_TA_1 | **[REVIEWED: PASS]** |
-| IEC104-05 | 数据上行 | 周期性遥测（默认 1s），告警立即上送，UTC 时标 | **[REVIEWED: PASS]** |
-| IEC104-06 | 数据下行 | 接收确认，遥控命令需经策略引擎校验 | **[REVIEWED: PASS]** |
-| IEC104-07 | 调度指令 | 支持 P_set/Q_set、电池启停、一次调频参数，响应 ≤ 100ms | **[REVIEWED: PASS]** |
-| IEC104-08 | 并发连接 | 支持最多 5 个并发连接 | **[REVIEWED: PASS]** |
+| ID | 功能点 | 验收条件 |
+|----|--------|----------|
+| IEC104-01 | 协议兼容 | 全面兼容 IEC 60870-5-104，支持 U/S/I 帧 |
+| IEC104-02 | 连接管理 | 支持状态机、心跳（10s~60s 可配置）、超时判定（30s） |
+| IEC104-03 | 自动重连 | 断连 5s 重试，最多 10 次，之后每 1 分钟尝试 |
+| IEC104-04 | TypeID 支持 | 支持 M_SP_TA_1、M_DP_TA_1、M_ME_TA_1、M_ME_TD_1、C_SC_TA_1、C_DC_TA_1、C_SE_TA_1 |
+| IEC104-05 | 数据上行 | 周期性遥测（默认 1s），告警立即上送，UTC 时标 |
+| IEC104-06 | 数据下行 | 接收确认，遥控命令需经策略引擎校验 |
+| IEC104-07 | 调度指令 | 支持 P_set/Q_set、电池启停、一次调频参数，响应 ≤ 100ms |
+| IEC104-08 | 并发连接 | 支持最多 5 个并发连接 |
 
 ### 7.2 IEC 61850 / MMS 验收标准
 
-| ID | 功能点 | 验收条件 | 来源 |
-|----|--------|----------|------|
-| MMS-01 | MMS Read | MMS Read 服务正常工作，读取 IED 数据对象 | DRAFT |
-| MMS-02 | MMS Write | MMS Write 服务正常工作，写入 IED 数据对象 | DRAFT |
-| MMS-03 | MMS TLS | MMS over TLS 连接成功（可选） | DRAFT |
-| MMS-04 | 超时处理 | 超时场景下正确处理 | DRAFT |
-| MMS-05 | 错误处理 | 错误响应场景下正确处理 | DRAFT |
-| MMS-06 | 短连接模式 | 每次请求建立新连接 | DRAFT |
-| MMS-07 | GOOSE 订阅 | 支持订阅 GOOSE 消息，通过 MessageHandler 回调处理 | **[REVIEWED: PASS]** |
-| MMS-08 | IED 连接 | 能连接 IEC 61850 IED 设备，读写数据对象；超时 < 5s，成功率 ≥ 99% | **[REVIEWED: PASS]** |
+| ID | 功能点 | 验收条件 |
+|----|--------|----------|
+| MMS-01 | MMS Read | MMS Read 服务正常工作，读取 IED 数据对象 |
+| MMS-02 | MMS Write | MMS Write 服务正常工作，写入 IED 数据对象 |
+| MMS-03 | MMS TLS | MMS over TLS 连接成功（可选） |
+| MMS-04 | 超时处理 | 超时场景下正确处理 |
+| MMS-05 | 错误处理 | 错误响应场景下正确处理 |
+| MMS-06 | 短连接模式 | 每次请求建立新连接 |
+| MMS-07 | GOOSE 订阅 | 支持订阅 GOOSE 消息，通过 MessageHandler 回调处理 |
+| MMS-08 | IED 连接 | 能连接 IEC 61850 IED 设备，读写数据对象；超时 < 5s，成功率 ≥ 99% |
 
 ### 7.3 MQTT 验收标准
 
-| ID | 功能点 | 验收条件 | 来源 |
-|----|--------|----------|------|
-| MQTT-01 | Broker 连接 | 能连接 MQTT Broker，支持订阅/发布 | **[REVIEWED: PASS]** |
-| MQTT-02 | QoS 0 消息 | 至多一次送达，延迟 < 100ms | **[REVIEWED: PASS]** |
-| MQTT-03 | QoS 1/2 消息 | 至少一次 / 恰好一次送达，延迟 < 500ms | **[REVIEWED: PASS]** |
-| MQTT-04 | MQTT over TLS | MQTT over TLS 1.2+ 连接成功，双向证书认证 | **[REVIEWED: PASS]** |
-| MQTT-05 | 断线重连 | 初始 1s，指数退避（2 倍），最大 60s，不限次数 | **[DESIGN_APPROVED]** |
-| MQTT-06 | 消息持久化 | QoS 2 消息持久化正确 | **[DESIGN_APPROVED]** |
+| ID | 功能点 | 验收条件 |
+|----|--------|----------|
+| MQTT-01 | Broker 连接 | 能连接 MQTT Broker，支持订阅/发布 |
+| MQTT-02 | QoS 0 消息 | 至多一次送达，延迟 < 100ms |
+| MQTT-03 | QoS 1/2 消息 | 至少一次 / 恰好一次送达，延迟 < 500ms |
+| MQTT-04 | MQTT over TLS | MQTT over TLS 1.2+ 连接成功，双向证书认证 |
+| MQTT-05 | 断线重连 | 初始 1s，指数退避（2 倍），最大 60s，不限次数 |
+| MQTT-06 | 消息持久化 | QoS 2 消息持久化正确 |
 
 ### 7.4 消息总线验收标准
 
-| ID | 功能点 | 验收条件 | 来源 |
-|----|--------|----------|------|
-| MB-01 | 本地 mosquitto 连接 | 本地 MQTT 连接成功 | **[DESIGN_APPROVED]** |
-| MB-02 | 北向 emqx 连接（TLS） | 北向 MQTT + TLS 连接成功 | **[DESIGN_APPROVED]** |
-| MB-03 | 进程间消息延迟 | < 100ms | **[DESIGN_APPROVED]** |
-| MB-04 | 断线重连自动恢复 | 网络中断后自动恢复 | **[DESIGN_APPROVED]** |
-| MB-05 | QoS 1 消息至少一次到达 | 单元测试验证 | **[DESIGN_APPROVED]** |
-| MB-06 | QoS 2 消息恰好一次到达 | 单元测试验证 | **[DESIGN_APPROVED]** |
-| MB-07 | 证书认证成功 | 集成测试验证 | **[DESIGN_APPROVED]** |
-| MB-08 | 消息持久化正确 | 集成测试验证 | **[DESIGN_APPROVED]** |
+| ID | 功能点 | 验收条件 |
+|----|--------|----------|
+| MB-01 | 本地 mosquitto 连接 | 本地 MQTT 连接成功 |
+| MB-02 | 北向 emqx 连接（TLS） | 北向 MQTT + TLS 连接成功 |
+| MB-03 | 进程间消息延迟 | < 100ms |
+| MB-04 | 断线重连自动恢复 | 网络中断后自动恢复 |
+| MB-05 | QoS 1 消息至少一次到达 | 单元测试验证 |
+| MB-06 | QoS 2 消息恰好一次到达 | 单元测试验证 |
+| MB-07 | 证书认证成功 | 集成测试验证 |
+| MB-08 | 消息持久化正确 | 集成测试验证 |
 
 ### 7.5 安全验收标准
 
-| ID | 安全点 | 验收条件 | 来源 |
-|----|--------|----------|------|
-| S01 | SM2 签名 | 能使用 SM2 签名和验签 | **[REVIEWED: PASS]** |
-| S02 | SM4 加密 | 能使用 SM4 加密和解密 | **[REVIEWED: PASS]** |
-| S03 | 证书验证 | 双向证书认证功能正常 | **[REVIEWED: PASS]** |
-| S04 | MQTT TLS | MQTT over TLS 连接成功 | **[REVIEWED: PASS]** |
-| S05 | MMS TLS | MMS over TLS 连接成功 | DRAFT |
-| S06 | 无硬编码密钥 | 检查 SM2/SM4 密钥残留 | **[REVIEWED: PASS]** |
-| S07 | 无新增 unsafe 块 | Code review 检查 | **[REVIEWED: PASS]** |
-| S08 | 错误实现 std::error::Error | 所有错误类型符合标准 | **[REVIEWED: PASS]** |
+| ID | 安全点 | 验收条件 |
+|----|--------|----------|
+| S01 | SM2 签名 | 能使用 SM2 签名和验签 |
+| S02 | SM4 加密 | 能使用 SM4 加密和解密 |
+| S03 | 证书验证 | 双向证书认证功能正常 |
+| S04 | MQTT TLS | MQTT over TLS 连接成功 |
+| S05 | MMS TLS | MMS over TLS 连接成功 |
+| S06 | 无硬编码密钥 | 检查 SM2/SM4 密钥残留 |
+| S07 | 无新增 unsafe 块 | Code review 检查 |
+| S08 | 错误实现 std::error::Error | 所有错误类型符合标准 |
 
 ### 7.6 质量验收标准
 
-| ID | 质量点 | 验收条件 | 来源 |
-|----|--------|----------|------|
-| Q01 | 编译通过 | `cargo build --release` 无警告 | **[REVIEWED: PASS]** |
-| Q02 | Clippy 检查 | `cargo clippy` 无 Error | **[REVIEWED: PASS]** |
-| Q03 | 单元测试 | `cargo test` 覆盖率 ≥ 80% | **[REVIEWED: PASS]** |
-| Q04 | 错误处理 | 所有错误实现 `std::error::Error` | **[REVIEWED: PASS]** |
-| Q05 | 文档 | 公共 API 有 rustdoc 注释 | **[REVIEWED: PASS]** |
-| Q06 | 格式化 | `cargo fmt` 格式化通过 | **[REVIEWED: PASS]** |
+| ID | 质量点 | 验收条件 |
+|----|--------|----------|
+| Q01 | 编译通过 | `cargo build --release` 无警告 |
+| Q02 | Clippy 检查 | `cargo clippy` 无 Error |
+| Q03 | 单元测试 | `cargo test` 覆盖率 ≥ 80% |
+| Q04 | 错误处理 | 所有错误实现 `std::error::Error` |
+| Q05 | 文档 | 公共 API 有 rustdoc 注释 |
+| Q06 | 格式化 | `cargo fmt` 格式化通过 |
 
 ---
 
@@ -724,28 +706,13 @@ pub enum BusError {
 | SOC | 电池荷电状态 |
 | SOH | 电池健康状态 |
 
-## 附录 B：来源文档索引
-
-| 文档 | 路径 | 评审状态 |
-|------|------|----------|
-| 项目需求主文档 | `docs/superpowers/specs/PROJECT-MUPC-项目需求主文档.md` | **[REVIEWED: PASS]** |
-| 技术债清单 | `docs/technical-debt.md` | — |
-
 ---
+## 附录：版本演进
 
-## 附录 C：v1.1 修订记录
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
-| 编号 | 缺口 | 风险等级 | 修改位置 | 修改内容 |
-|------|------|---------|---------|---------|
-| 1 | 星闪/Wi-Fi/蓝牙本地运维通道 | 高 | 1.4 用户角色 + 6.4 兼容性需求 | 本地运维人员角色补充无线运维通道说明；6.4 新增"本地无线运维通道"行，引用模块09-PRD |
-| 2 | 纵向加密认证合规 | 高 | 6.3 安全需求 | 新增"纵向加密认证合规"行，引用发改委14号令及模块06-PRD 第5章 |
-| 3 | 看门狗监控实时控制模块 | 高 | 1.1 核心职责 + 6.2 可靠性需求 | 核心职责补充"通过核间通信监控实时控制模块运行状态"；6.2 新增"系统级看门狗"行，引用模块10-PRD 第4章 |
-| 4 | IEC 61850-7-420 DER 逻辑节点 | 中 | 3.1 概述 | 补充说明：完整 7-420 DER 逻辑节点模型延后至 Phase 2+ 实现，Phase 2 实现 MMS 传输层基础读写能力 |
-| 5 | OTA 远程升级引用 | 中 | 1.1 核心职责 | 新增"OTA 远程升级（模型 + 固件）"条目，引用模块07-PRD |
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 初版，合并四份来源文档中通信网关模块（gateway、iec61850-plugin、mqtt-plugin、mqtt-bridge、device-trait）相关需求 |
+| v1.1 | 修复 5 项部分覆盖缺口：本地运维无线通道、纵向加密认证合规、看门狗监控实时控制模块、IEC 61850-7-420 DER 逻辑节点、OTA 远程升级引用 |
 
-**修订说明：** 本次修订（v1.0 → v1.1）修复总报告中模块 01 PRD 的 5 项部分覆盖缺口，均采用"补充引用"方式，未修改已有内容逻辑。
-
----
-
-**文档状态：** 合并修订版（v1.1）
-**合并说明：** 合并四份来源文档中与通信网关模块（gateway、iec61850-plugin、mqtt-plugin、mqtt-bridge、device-trait）相关的需求，已去重。所有 **[REVIEWED: PASS]** 标记的功能需求已完整保留。

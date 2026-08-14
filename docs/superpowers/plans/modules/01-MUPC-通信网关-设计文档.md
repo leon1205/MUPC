@@ -1,15 +1,8 @@
 # MUPC 通信网关模块 — 综合技术设计文档
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.2 | 2026-06-15 | 架构师 | **[DESIGN_APPROVED]** |
+> **版本：** v1.2（2026-06-15）
 
 > **文档定位：** 本文档记录实现级设计决策。需求级内容（功能描述、验收标准、性能指标）请参考 [01-MUPC-通信网关-PRD](../specs/modules/01-MUPC-通信网关-PRD.md)。
-
-**来源文档：**
-- `docs/superpowers/reports/2026-05-28-IEC61850-MMS-客户端真正实现-实施计划.md` — IEC 61850 MMS 实施计划
-- `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-实施计划.md` — Phase 3B 实施计划
-- `docs/superpowers/specs/modules/01-MUPC-通信网关-PRD.md` — 通信网关 PRD
 
 **涵盖 Crate：** `gateway`, `iec61850-plugin`, `mqtt-plugin`, `mqtt-bridge`, `device-trait`
 
@@ -66,11 +59,11 @@
 
 | Crate | 职责 | 状态 |
 |-------|------|------|
-| `gateway` | IEC 104 服务端，接收调度主站连接 | Phase 1 ✅ |
-| `iec61850-plugin` | IEC 61850 MMS 客户端，连接 IED 设备 | Phase 2+ ✅ |
-| `mqtt-plugin` | MQTT 北向客户端，连接物联平台 emqx | Phase 2+ ✅ |
-| `mqtt-bridge` | 分层 MQTT 网桥（本地 mosquitto + 北向 emqx） | Phase 3B ✅ **[DESIGN_APPROVED]** |
-| `device-trait` | 核心 trait 定义（MessageBus、Plugin、Device 等） | Phase 2+ ✅ |
+| `gateway` | IEC 104 服务端，接收调度主站连接 | Phase 1 |
+| `iec61850-plugin` | IEC 61850 MMS 客户端，连接 IED 设备 | Phase 2+ |
+| `mqtt-plugin` | MQTT 北向客户端，连接物联平台 emqx | Phase 2+ |
+| `mqtt-bridge` | 分层 MQTT 网桥（本地 mosquitto + 北向 emqx） | Phase 3B |
+| `device-trait` | 核心 trait 定义（MessageBus、Plugin、Device 等） | Phase 2+ |
 
 ### 1.4 目标平台
 
@@ -85,9 +78,6 @@
 ---
 
 ## 2. IEC 104 协议实现设计
-
-> 来源：主技术设计 v1.1 Section 2.1/3.3/4.1，PRD Section 2
-> 状态：Phase 1 ✅ 已实现
 
 ### 2.1 架构设计
 
@@ -300,9 +290,6 @@ pub struct Iec104Config {
 
 ## 3. IEC 61850 MMS 客户端设计
 
-> 来源：IEC61850 MMS 实施计划 Tasks 1-8，PRD Section 3
-> 状态：Phase 2+ ✅ 已实现
-
 ### 3.1 架构概述
 
 采用 **libIEC61850 C 库 + Rust FFI 绑定** 实现真正的 MMS 协议栈。采用**短连接模式**（每次请求建立新连接），支持 MMS over TLS。
@@ -503,14 +490,238 @@ pub struct MmsTlsConfig {
 
 性能指标（连接建立时间、读写响应时间、操作成功率）详见 PRD 第 3.8 节。
 
+### 3.12 架构决策
+
+**目标架构：** 通过 `iec61850-sys` FFI 绑定调用 libIEC61850 C 库实现完整 MMS 协议栈，覆盖 IEC 61850-7-2（ACSI）、7-3（公用数据类）、8-1（特定通信服务映射 SCSM）。
+
+**为何不继续使用纯自研方案：**
+- IEC 61850 MMS 协议栈复杂度高（ASN.1 BER/DER、ACSI 服务映射、SCSM T-Profile/A-Profile），自研完整协议栈工作量巨大
+- libIEC61850 是成熟的工业级 C 实现，已在大量 IED 设备中验证互操作性
+- FFI 方案允许 Phase 2 快速提供基础读写能力，后续按需扩展高级 ACSI 服务（报告、日志、定值组）
+
+**Feature Flag 策略：**
+
+本 crate 通过 Cargo features 支持双模式编译，便于开发阶段在没有 C 库环境下编译测试：
+
+```toml
+[features]
+default = ["real_iec61850"]
+real_iec61850 = ["dep:iec61850-sys"]   # 生产模式：链接 libIEC61850 C 库
+fake_iec61850 = []                      # 开发模式：使用纯 Rust ASN.1 自实现
+```
+
+各模块通过 `#[cfg(feature = "real_iec61850")]` 条件编译，在 Fake 模式下使用纯 Rust ASN.1 编解码，Real 模式下委托给 libIEC61850。
+
+### 3.13 构建管线（cmake + libIEC61850）
+
+libIEC61850 C 库需通过 CMake 交叉编译为目标平台（openEuler / RK3588 aarch64）的静态库（`.a`）或动态库（`.so`）。使用 `cmake` crate 作为 build-dependency 驱动编译：
+
+```toml
+[build-dependencies]
+cmake = "0.1"
+```
+
+`build.rs` 负责：
+1. 检测目标平台（`TARGET` 环境变量）
+2. 调用 cmake 编译 libIEC61850 C 源码（需预置于 `iec61850-sys/vendor/` 或通过 git submodule 引入）
+3. 设置 `cargo:rustc-link-lib=static=IEC61850` 和 `cargo:rustc-link-search` 指向编译产物目录
+4. 生成 FFI 绑定（通过 `bindgen` 或预生成的 `src/bindings.rs`）
+
+依赖关系链：`iec61850-plugin → iec61850-sys → libIEC61850.so`
+
+### 3.14 ASN.1 BER TLV 编码细节
+
+MMS 协议使用 ASN.1 Basic Encoding Rules (BER) 的 TLV（Tag-Length-Value）格式。本 crate 实现了最小化的 BER 编码器，覆盖 MMS Read/Write 请求及响应解码。
+
+**TLV 长度编码算法（encode_length）：**
+
+```
+短格式（长度 < 128）：
+  [length]                           → 1 字节，bit7 = 0
+
+长格式 1 字节（128 <= length < 256）：
+  [0x81][length]                     → 2 字节，首字节 bit7 = 1 指示长格式
+
+长格式 2 字节（256 <= length < 65536）：
+  [0x82][length_hi][length_lo]       → 3 字节，大端序
+```
+
+**实现代码：**
+
+```rust
+fn encode_length(buf: &mut Vec<u8>, len: usize) {
+    if len < 128 {
+        buf.push(len as u8);           // 短格式
+    } else if len < 256 {
+        buf.push(0x81);                // 长格式，1 字节长度
+        buf.push(len as u8);
+    } else {
+        buf.push(0x82);                // 长格式，2 字节长度
+        buf.push((len >> 8) as u8);
+        buf.push((len & 0xFF) as u8);
+    }
+}
+```
+
+**MMS PDU 标签定义：**
+
+```rust
+mod pdu_tags {
+    pub const CONFIRMED_REQUEST_PDU:  u8 = 0x01;
+    pub const CONFIRMED_RESPONSE_PDU: u8 = 0x02;
+    pub const CONFIRMED_ERROR_PDU:    u8 = 0x03;
+    pub const UNCONFIRMED_PDU:        u8 = 0x04;
+    pub const REJECTED_PDU:           u8 = 0x05;
+}
+```
+
+### 3.15 MMS PDU 构造细节
+
+**Read Request APDU 结构**（IEC 61850-8-1 SSAP）：
+
+```
+Confirmed-RequestPDU ::= CHOICE {
+    [1] IMPLICIT Confirmed-RequestPDU-inner
+}
+
+Confirmed-RequestPDU-inner ::= SEQUENCE {
+    invokeId          [0] IMPLICIT Integer32,
+    confirmedService  [2] ConfirmedService
+}
+
+ConfirmedService ::= CHOICE {
+    read  [4] Read-Request
+}
+
+Read-Request ::= SEQUENCE {
+    specification-with-result  [0] IMPLICIT SpecificationWithResult OPTIONAL,
+    variableAccessSpecification [1] VariableAccessSpecification
+}
+```
+
+**实现流程（encode_read_request）：**
+
+1. APDU 头 → `0x01`（Confirmed-RequestPDU）
+2. invokeId → Tag `0x81` + Length `0x01` + Value `0x01`（invokeId 固定为 1）
+3. 服务类型 → Tag `0x82`（confirmedService）
+4. Read Service → Tag `0x24`（SEQUENCE OF）+ 长度 + 内容
+5. 内容：`0xA0`（list-of-variable-access-specification）→ `0xA1`（variable-specification）→ `0x80`（object-name）+ 长度 + UTF-8 路径名
+
+**Write Request 额外增加：**
+- Tag `0x84`（data）+ 长度 + payload octet-string
+
+**响应解码（decode_mms_response）：**
+- 首字节为 `0x02` → 成功响应（Confirmed-ResponsePDU）
+- 首字节为 `0x03` → 协议错误（Confirmed-ErrorPDU）
+- 首字节为 `0x05` → 被拒绝（RejectedPDU）
+- 其他值 → 未知响应类型错误
+
+### 3.16 MMS 客户端请求流程（send_request 详解）
+
+短连接模式下的完整请求-响应流程：
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    send_request(request)                          │
+│                                                                   │
+│  1. 状态检查: state == Connected? ──No──→ Err("未连接")           │
+│       │                                                           │
+│       Yes                                                         │
+│       ▼                                                           │
+│  2. ASN.1 编码: encode_mms_request(&request) → Vec<u8>            │
+│       │  ┌─ Read  → encode_read_request()                         │
+│       │  ├─ Write → encode_write_request()                        │
+│       │  ├─ DefineVariableAccess → Err("未实现")                  │
+│       │  └─ GetDataAccessAttributes → Err("未实现")               │
+│       ▼                                                           │
+│  3. TCP 连接 (短连接):                                            │
+│     timeout(connect_timeout_ms,                                    │
+│       TcpStream::connect(remote_ip:102))                           │
+│       │                                                           │
+│       ├─ 超时 → Err(MmsTimeout)                                   │
+│       └─ TCP 错误 → Err(MmsConnectFailed)                         │
+│       ▼                                                           │
+│  4. 发送请求: stream.write_all(&req_data)                         │
+│       │                                                           │
+│       └─ 失败 → Err(ProtocolError)                                │
+│       ▼                                                           │
+│  5. 读取响应: buf = [0u8; 8192]                                   │
+│     timeout(read_timeout_ms, stream.read(&mut buf))                │
+│       │                                                           │
+│       ├─ 超时 → Err(MmsTimeout)                                   │
+│       ├─ TCP 错误 → Err(ProtocolError)                            │
+│       └─ n 字节 → 继续                                            │
+│       ▼                                                           │
+│  6. ASN.1 解码: decode_mms_response(&buf[..n])                    │
+│       │                                                           │
+│       ├─ 成功 → Ok(MmsResponse { success: true, ... })            │
+│       └─ 失败 → Err(MmsProtocolError / MmsInvalidResponse)        │
+│       ▼                                                           │
+│  7. 返回结果（连接随函数返回自动关闭）                              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**超时配置（默认值）：**
+- `connect_timeout_ms`: 5000ms（IED 连接超时）
+- `read_timeout_ms`: 3000ms（响应读取超时）
+
+**读取缓冲区：** 固定 8192 字节（8KB），足以容纳典型 MMS 响应。
+
+**注意：** 当前实现每次请求都执行 `TcpStream::connect()`，完成后连接自动丢弃。这意味着 `connect()` 方法主要用于状态转换（Disconnected → Connecting → Connected），而非保持长连接。实际请求连接在 `send_request()` 内部管理。
+
+### 3.17 并发模型选型（parking_lot::RwLock）
+
+MmsClient 的状态字段使用 `parking_lot::RwLock` 而非 `tokio::sync::RwLock`：
+
+```rust
+pub struct MmsClient {
+    config: MmsConfig,
+    state: Arc<parking_lot::RwLock<MmsClientState>>,
+}
+```
+
+**选型理由：**
+- MmsClient 的状态读写是**同步操作**（内存赋值），不涉及 `.await`，无需异步锁
+- `parking_lot::RwLock` 在无竞争时的开销低于 `tokio::sync::RwLock`（无调度器交互）
+- MmsClient 自身不是 `Clone`，但 `Arc<parking_lot::RwLock<...>>` 允许在多个异步任务间共享客户端实例
+
+**依赖：** 需在 `Cargo.toml` 中添加 `parking_lot = "0.12"`。
+
+### 3.18 测试策略
+
+各模块采用内联单元测试（`#[cfg(test)] mod tests`），按模块分组：
+
+| 模块 | 测试数量 | 覆盖内容 | 关键测试 |
+|------|---------|---------|---------|
+| `mms_types.rs` | 6 | DataObject 解析/序列化，MmsRequest 构建，MmsResponse 成功/错误 | `test_data_object_from_str`（LLN0$ST$Pos 分割）, `test_mms_request_write`（payload 载体）, `test_mms_response_error`（错误消息保留） |
+| `asn1_utils.rs` | 6 | Read/Write 请求编码，响应解码（成功/错误/空响应/拒绝），长度编码 | `test_encode_read_request`（产出首字节=0x01）, `test_encode_length`（127/200 边界值） |
+| `mms_client.rs` | 4 | 客户端创建，状态转换，未连接时读/写错误 | `test_mms_client_read_do_not_connected`（异步测试）, `test_mms_client_write_do_not_connected`（异步测试） |
+| `lib.rs` | 2 | Iec61850Status Display，MmsService 导出验证 | `test_iec61850_status_display`, `test_mms_types_export` |
+
+**测试运行：**
+```bash
+cargo test -p mupc-iec61850-plugin                    # 全部 18 个测试
+cargo test -p mupc-iec61850-plugin mms_types           # 6 个
+cargo test -p mupc-iec61850-plugin asn1_utils           # 6 个
+cargo test -p mupc-iec61850-plugin mms_client           # 4 个
+```
+
+**已知限制：** MmsClient 的网络集成测试（真实 IED 连接）未包含在单元测试中，因需要可用的 IED 设备。`TestMmsClient` mock（通过 `MmsClientTrait` trait）用于上层集成测试。
+
+### 3.19 未实现的 ACSI 服务
+
+以下 MMS/ACSI 服务在当前计划中有占位定义但返回"未实现"错误：
+
+| 服务 | MmsService 枚举值 | 状态 | 说明 |
+|------|-------------------|------|------|
+| DefineVariableAccess | `DefineVariableAccess` | 未实现 | 用于预先定义变量访问路径以优化批量读取；非 Phase 2 核心需求 |
+| GetDataAccessAttributes | `GetDataAccessAttributes` | 未实现 | 用于查询数据对象的访问属性（读/写权限）；非 Phase 2 核心需求 |
+
+这两个服务在 `asn1_utils.rs` 中对应函数直接返回 `Err(Asn1EncodeFailed("...未实现"))`。Phase 2 仅需 Read/Write 两个基础服务即可满足 DER 数据采集与控制需求。
+
 ---
 
 ## 4. MQTT 通信设计
-
-> 来源：Phase 3B 消息总线设计文档 Section 3-6（[DESIGN_APPROVED]），
->       mqtt-plugin 现有代码（Phase 2+ ✅），
->       PRD Section 4
-> 状态：Phase 2+（mqtt-plugin）✅ + Phase 3B（mqtt-bridge）✅ **[DESIGN_APPROVED]**
 
 ### 4.1 分层 MQTT 架构
 
@@ -541,8 +752,6 @@ MQTT 功能分为两个层次：
 ```
 
 ### 4.2 MQTT 北向客户端 (mqtt-plugin)
-
-> 状态：Phase 2+ ✅ 已实现
 
 #### 核心结构
 
@@ -635,8 +844,6 @@ pub struct MqttConfig {
 | 重连次数 | 无上限 |
 
 ### 4.3 MQTT 本地网桥 (mqtt-bridge)
-
-> 状态：Phase 3B ✅ **[DESIGN_APPROVED]**
 
 #### MqttBridge Trait
 
@@ -737,11 +944,6 @@ pub enum MqttBridgeError {
 
 ## 5. 消息总线设计
 
-> 来源：Phase 3B 消息总线设计文档 Section 2（[DESIGN_APPROVED]），
->       device-trait/src/message_bus.rs（已实现），
->       PRD Section 5
-> 状态：Phase 1（mpsc）✅ + Phase 3B（MQTT）✅ **[DESIGN_APPROVED]**
-
 ### 5.1 MessageBus Trait
 
 定义于 `device-trait/src/message_bus.rs`：
@@ -795,8 +997,6 @@ pub enum BusError {
 
 #### 北向 Topic（emqx）
 
-> 来源：Phase 3B 设计文档 Section 2.2 **[DESIGN_APPROVED]**
-
 | 常量 | Topic | 方向 | QoS | 说明 |
 |------|-------|------|-----|------|
 | `NORTH_TELEMETRY` | `mupc/north/telemetry` | → 物联平台 | 1 | 高频遥测数据 |
@@ -805,8 +1005,6 @@ pub enum BusError {
 | `NORTH_STATUS` | `mupc/north/status` | ↔ 双方 | 0 | 设备状态 |
 
 #### 进程间 Topic（mosquitto）
-
-> 来源：Phase 3B 设计文档 Section 2.2 **[DESIGN_APPROVED]**
 
 | 常量 | Topic | 方向 | QoS | 说明 |
 |------|-------|------|-----|------|
@@ -849,8 +1047,6 @@ intercore → DataCollector → LocalMqttClient → mosquitto (本地)
 ```
 
 ### 5.8 消息持久化策略
-
-> 来源：Phase 3B 设计文档 Section 4.3 **[DESIGN_APPROVED]**
 
 | 消息类型 | QoS | 持久化 | 说明 |
 |---------|-----|--------|------|
@@ -1159,79 +1355,7 @@ max_connections -1
 
 每层错误都实现 `std::error::Error`，支持 `error.source()` 错误链。
 
----
-
-## 附录 A：验收标准参考
-
-验收标准（IEC 104 / IEC 61850 / MQTT / 消息总线 / 安全 / 质量）详见 [PRD 第 7 章](../specs/modules/01-MUPC-通信网关-PRD.md#7-验收标准汇总)。
-
----
-
-## 附录 B：来源文档索引
-
-| 文档 | 路径 | 状态 |
-|------|------|------|
-| 通信网关 PRD | `docs/superpowers/specs/modules/01-MUPC-通信网关-PRD.md` | 合并修订版 v1.0 |
-| IEC61850 MMS 实施计划 | `docs/superpowers/reports/2026-05-28-IEC61850-MMS-客户端真正实现-实施计划.md` | 已归档 |
-| Phase 3B 实施计划 | `docs/superpowers/plans/2026-05-28-MUPC-Phase3B-实施计划.md` | — |
-
----
-
-**文档状态：** 合并版 v1.2
-**合并说明：** 综合 5 份来源文档中与通信网关模块（gateway、iec61850-plugin、mqtt-plugin、mqtt-bridge、device-trait）相关的内容，与现有代码实现保持一致。所有 **[DESIGN_APPROVED]** 和 **[REVIEWED: PASS]** 标记已完整保留。v1.2 新增 IEC 61850 MMS 客户端实现笔记（第 10 章）和技术债清单（第 11 章），并将来源实施计划归档至 reports/。
-
----
-
-## 附录 C：v1.1 修订记录
-
-| 编号 | 缺口 | 风险等级 | 修改位置 | 修改内容 |
-|------|------|---------|---------|---------|
-| 1 | ControlCommand 缺少一次调频参数 | 高 | 2.5 命令处理 + 6.8 IEC 104 命令处理器 | `ControlCommand` 结构体新增 `k_value: Option<f64>`（一次调频 K 值）和 `deadband: Option<f64>`（一次调频死区 Hz）字段 |
-| 2 | UTC 时标未明确 | 中 | 2.2 数据结构定义 | 新增"时标规范"子章节，明确所有带时标 TypeID 使用时标字段使用 UTC 时间，精度到毫秒，按 CP56Time2a 格式编码 |
-| 3 | 跨模块引用缺失 | 高 | 1.1 模块定位 + 1.5 用户角色 + 3.1 架构概述 | 补充跨模块引用：OTA→模块07、看门狗→模块10、安全合规→模块06、无线运维通道→模块09、DER 逻辑节点延后说明 |
-| 4 | 版本号更新 | 低 | 文档头 + 文档尾 | 版本号从 v1.0 更新为 v1.1 |
-
-**修订说明：** 本次修订（v1.0 → v1.1）同步 PRD v1.1 [REVIEWED: PASS] 的变更，修复设计覆盖度审查中 CONDITIONAL_PASS 的三项问题：ControlCommand 字段补全、UTC 时标规范明确、跨模块引用补充。
-
-| 编号 | 缺口 | 风险等级 | 修改位置 | 修改内容 |
-|------|------|---------|---------|---------|
-| 5 | IEC 61850 MMS 实现细节缺失 | 高 | 新增第 10 章 + 第 11 章 | 从实施计划提取 ASN.1 TLV 编码、MMS PDU 构造、send_request 流程、Feature Flag 策略、测试策略、构建管线等实现级细节；新增技术债清单（7 项 IEC 61850 + 1 项通用） |
-| 6 | 实施计划归档 | 低 | 文件路径变更 + 附录 B | 将 `plans/...IEC61850-MMS...实施计划.md` 移至 `reports/...`；更新来源文档索引 |
-
-**修订说明：** 本次修订（v1.1 → v1.2）将 IEC 61850 MMS 实施计划中的实现级设计决策（ASN.1 BER 编码算法、PDU 构造、并发模型选型、测试策略等）合并入设计文档，同时将计划文件归档至 reports/ 并记录未完成项为技术债。
-
----
-
-## 9. Phase 2B 实现笔记（协议部分）
-
-> **来源**: `docs/superpowers/reports/2026-05-27-MUPC-Phase2B-协议安全-实施计划.md`（已归档）
-> **状态**: DRAFT
-> **团队**: 团队B（1人）
-
-### 9.1 协议扩展实施任务
-
-| Task | 内容 | 提交信息 |
-|------|------|----------|
-| Task 1 | iec61850-plugin：MMS 客户端封装 → GOOSE 订阅处理 → Iec61850Device 实现 | `feat(iec61850-plugin): 实现 IEC 61850-7-420 插件` |
-| Task 2 | mqtt-plugin 扩展：TLS 配置字段 → TLS 连接集成 → QoS 1/2 增强 | `feat(mqtt-plugin): 扩展 TLS 和 QoS 支持` |
-| Task 4 | 集成测试：workspace 注册 + TLS 连接 + SM2 签名 + SM4 加密流程 | `feat(integration): 集成协议与安全模块` |
-
-### 9.2 协议扩展技术选型
-
-| 组件 | 选型 | 说明 |
-|------|------|------|
-| IEC 61850 | libIEC61850（Rust 绑定或 FFI） | MMS 客户端、GOOSE 订阅，成熟开源库 |
-| MQTT | `rumqttc` 0.20+ | 纯 Rust MQTT 客户端，支持 TLS |
-| TLS | `rustls` | MQTT over TLS 1.2+，双向证书认证 |
-
-### 9.3 协议扩展里程碑
-
-| 里程碑 | 内容 | 交付物 |
-|--------|------|--------|
-| M2.3 | IEC 61850 插件 | iec61850-plugin crate |
-| M2.4 | MQTT 扩展 | mqtt-plugin crate（TLS + QoS 增强） |
-
-### 9.4 实施风险
+### 8.7 实施风险
 
 | 风险 | 等级 | 对策 |
 |------|------|------|
@@ -1241,264 +1365,20 @@ max_connections -1
 
 ---
 
-## 10. IEC 61850 MMS 客户端实现笔记
+## 附录 A：验收标准参考
 
-> **来源**: `docs/superpowers/plans/2026-05-28-IEC61850-MMS-客户端真正实现-实施计划.md`（计划阶段）
-> **状态**: DRAFT — 设计已完备，部分编码待完成（当前使用原始TCP+自研ASN.1 BER，待libIEC61850 FFI接入）
-> **团队**: 架构师
-
-### 10.1 当前实现状态与架构决策
-
-**现状：** MMS 客户端当前使用原始 TCP 连接 + 自研 ASN.1 BER 编解码，尚未接入 libIEC61850 C 库的 FFI 绑定。MmsClient 通过 `tokio::net::TcpStream` 直接建立短连接，ASN.1 PDU 由本 crate 自行构造与解析。
-
-**目标架构：** 通过 `iec61850-sys` FFI 绑定调用 libIEC61850 C 库实现完整 MMS 协议栈，覆盖 IEC 61850-7-2（ACSI）、7-3（公用数据类）、8-1（特定通信服务映射 SCSM）。
-
-**为何不继续使用纯自研方案：**
-- IEC 61850 MMS 协议栈复杂度高（ASN.1 BER/DER、ACSI 服务映射、SCSM T-Profile/A-Profile），自研完整协议栈工作量巨大
-- libIEC61850 是成熟的工业级 C 实现，已在大量 IED 设备中验证互操作性
-- FFI 方案允许 Phase 2 快速提供基础读写能力，后续按需扩展高级 ACSI 服务（报告、日志、定值组）
-
-**Feature Flag 策略：**
-
-本 crate 通过 Cargo features 支持双模式编译，便于开发阶段在没有 C 库环境下编译测试：
-
-```toml
-[features]
-default = ["real_iec61850"]
-real_iec61850 = ["dep:iec61850-sys"]   # 生产模式：链接 libIEC61850 C 库
-fake_iec61850 = []                      # 开发模式：使用纯 Rust ASN.1 自实现
-```
-
-各模块通过 `#[cfg(feature = "real_iec61850")]` 条件编译，在 Fake 模式下使用纯 Rust ASN.1 编解码，Real 模式下委托给 libIEC61850。
-
-### 10.2 构建管线（cmake + libIEC61850）
-
-libIEC61850 C 库需通过 CMake 交叉编译为目标平台（openEuler / RK3588 aarch64）的静态库（`.a`）或动态库（`.so`）。使用 `cmake` crate 作为 build-dependency 驱动编译：
-
-```toml
-[build-dependencies]
-cmake = "0.1"
-```
-
-`build.rs` 负责：
-1. 检测目标平台（`TARGET` 环境变量）
-2. 调用 cmake 编译 libIEC61850 C 源码（需预置于 `iec61850-sys/vendor/` 或通过 git submodule 引入）
-3. 设置 `cargo:rustc-link-lib=static=IEC61850` 和 `cargo:rustc-link-search` 指向编译产物目录
-4. 生成 FFI 绑定（通过 `bindgen` 或预生成的 `src/bindings.rs`）
-
-依赖关系链：`iec61850-plugin → iec61850-sys → libIEC61850.so`
-
-### 10.3 ASN.1 BER TLV 编码细节
-
-MMS 协议使用 ASN.1 Basic Encoding Rules (BER) 的 TLV（Tag-Length-Value）格式。本 crate 实现了最小化的 BER 编码器，覆盖 MMS Read/Write 请求及响应解码。
-
-**TLV 长度编码算法（encode_length）：**
-
-```
-短格式（长度 < 128）：
-  [length]                           → 1 字节，bit7 = 0
-
-长格式 1 字节（128 <= length < 256）：
-  [0x81][length]                     → 2 字节，首字节 bit7 = 1 指示长格式
-
-长格式 2 字节（256 <= length < 65536）：
-  [0x82][length_hi][length_lo]       → 3 字节，大端序
-```
-
-**实现代码：**
-
-```rust
-fn encode_length(buf: &mut Vec<u8>, len: usize) {
-    if len < 128 {
-        buf.push(len as u8);           // 短格式
-    } else if len < 256 {
-        buf.push(0x81);                // 长格式，1 字节长度
-        buf.push(len as u8);
-    } else {
-        buf.push(0x82);                // 长格式，2 字节长度
-        buf.push((len >> 8) as u8);
-        buf.push((len & 0xFF) as u8);
-    }
-}
-```
-
-**MMS PDU 标签定义：**
-
-```rust
-mod pdu_tags {
-    pub const CONFIRMED_REQUEST_PDU:  u8 = 0x01;
-    pub const CONFIRMED_RESPONSE_PDU: u8 = 0x02;
-    pub const CONFIRMED_ERROR_PDU:    u8 = 0x03;
-    pub const UNCONFIRMED_PDU:        u8 = 0x04;
-    pub const REJECTED_PDU:           u8 = 0x05;
-}
-```
-
-### 10.4 MMS PDU 构造细节
-
-**Read Request APDU 结构**（IEC 61850-8-1 SSAP）：
-
-```
-Confirmed-RequestPDU ::= CHOICE {
-    [1] IMPLICIT Confirmed-RequestPDU-inner
-}
-
-Confirmed-RequestPDU-inner ::= SEQUENCE {
-    invokeId          [0] IMPLICIT Integer32,
-    confirmedService  [2] ConfirmedService
-}
-
-ConfirmedService ::= CHOICE {
-    read  [4] Read-Request
-}
-
-Read-Request ::= SEQUENCE {
-    specification-with-result  [0] IMPLICIT SpecificationWithResult OPTIONAL,
-    variableAccessSpecification [1] VariableAccessSpecification
-}
-```
-
-**实现流程（encode_read_request）：**
-
-1. APDU 头 → `0x01`（Confirmed-RequestPDU）
-2. invokeId → Tag `0x81` + Length `0x01` + Value `0x01`（invokeId 固定为 1）
-3. 服务类型 → Tag `0x82`（confirmedService）
-4. Read Service → Tag `0x24`（SEQUENCE OF）+ 长度 + 内容
-5. 内容：`0xA0`（list-of-variable-access-specification）→ `0xA1`（variable-specification）→ `0x80`（object-name）+ 长度 + UTF-8 路径名
-
-**Write Request 额外增加：**
-- Tag `0x84`（data）+ 长度 + payload octet-string
-
-**响应解码（decode_mms_response）：**
-- 首字节为 `0x02` → 成功响应（Confirmed-ResponsePDU）
-- 首字节为 `0x03` → 协议错误（Confirmed-ErrorPDU）
-- 首字节为 `0x05` → 被拒绝（RejectedPDU）
-- 其他值 → 未知响应类型错误
-
-### 10.5 MMS 客户端请求流程（send_request 详解）
-
-短连接模式下的完整请求-响应流程：
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    send_request(request)                          │
-│                                                                   │
-│  1. 状态检查: state == Connected? ──No──→ Err("未连接")           │
-│       │                                                           │
-│       Yes                                                         │
-│       ▼                                                           │
-│  2. ASN.1 编码: encode_mms_request(&request) → Vec<u8>            │
-│       │  ┌─ Read  → encode_read_request()                         │
-│       │  ├─ Write → encode_write_request()                        │
-│       │  ├─ DefineVariableAccess → Err("未实现")                  │
-│       │  └─ GetDataAccessAttributes → Err("未实现")               │
-│       ▼                                                           │
-│  3. TCP 连接 (短连接):                                            │
-│     timeout(connect_timeout_ms,                                    │
-│       TcpStream::connect(remote_ip:102))                           │
-│       │                                                           │
-│       ├─ 超时 → Err(MmsTimeout)                                   │
-│       └─ TCP 错误 → Err(MmsConnectFailed)                         │
-│       ▼                                                           │
-│  4. 发送请求: stream.write_all(&req_data)                         │
-│       │                                                           │
-│       └─ 失败 → Err(ProtocolError)                                │
-│       ▼                                                           │
-│  5. 读取响应: buf = [0u8; 8192]                                   │
-│     timeout(read_timeout_ms, stream.read(&mut buf))                │
-│       │                                                           │
-│       ├─ 超时 → Err(MmsTimeout)                                   │
-│       ├─ TCP 错误 → Err(ProtocolError)                            │
-│       └─ n 字节 → 继续                                            │
-│       ▼                                                           │
-│  6. ASN.1 解码: decode_mms_response(&buf[..n])                    │
-│       │                                                           │
-│       ├─ 成功 → Ok(MmsResponse { success: true, ... })            │
-│       └─ 失败 → Err(MmsProtocolError / MmsInvalidResponse)        │
-│       ▼                                                           │
-│  7. 返回结果（连接随函数返回自动关闭）                              │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**超时配置（默认值）：**
-- `connect_timeout_ms`: 5000ms（IED 连接超时）
-- `read_timeout_ms`: 3000ms（响应读取超时）
-
-**读取缓冲区：** 固定 8192 字节（8KB），足以容纳典型 MMS 响应。
-
-**注意：** 当前实现每次请求都执行 `TcpStream::connect()`，完成后连接自动丢弃。这意味着 `connect()` 方法主要用于状态转换（Disconnected → Connecting → Connected），而非保持长连接。实际请求连接在 `send_request()` 内部管理。
-
-### 10.6 并发模型选型（parking_lot::RwLock）
-
-MmsClient 的状态字段使用 `parking_lot::RwLock` 而非 `tokio::sync::RwLock`：
-
-```rust
-pub struct MmsClient {
-    config: MmsConfig,
-    state: Arc<parking_lot::RwLock<MmsClientState>>,
-}
-```
-
-**选型理由：**
-- MmsClient 的状态读写是**同步操作**（内存赋值），不涉及 `.await`，无需异步锁
-- `parking_lot::RwLock` 在无竞争时的开销低于 `tokio::sync::RwLock`（无调度器交互）
-- MmsClient 自身不是 `Clone`，但 `Arc<parking_lot::RwLock<...>>` 允许在多个异步任务间共享客户端实例
-
-**依赖：** 需在 `Cargo.toml` 中添加 `parking_lot = "0.12"`。
-
-### 10.7 测试策略
-
-各模块采用内联单元测试（`#[cfg(test)] mod tests`），按模块分组：
-
-| 模块 | 测试数量 | 覆盖内容 | 关键测试 |
-|------|---------|---------|---------|
-| `mms_types.rs` | 6 | DataObject 解析/序列化，MmsRequest 构建，MmsResponse 成功/错误 | `test_data_object_from_str`（LLN0$ST$Pos 分割）, `test_mms_request_write`（payload 载体）, `test_mms_response_error`（错误消息保留） |
-| `asn1_utils.rs` | 6 | Read/Write 请求编码，响应解码（成功/错误/空响应/拒绝），长度编码 | `test_encode_read_request`（产出首字节=0x01）, `test_encode_length`（127/200 边界值） |
-| `mms_client.rs` | 4 | 客户端创建，状态转换，未连接时读/写错误 | `test_mms_client_read_do_not_connected`（异步测试）, `test_mms_client_write_do_not_connected`（异步测试） |
-| `lib.rs` | 2 | Iec61850Status Display，MmsService 导出验证 | `test_iec61850_status_display`, `test_mms_types_export` |
-
-**测试运行：**
-```bash
-cargo test -p mupc-iec61850-plugin                    # 全部 18 个测试
-cargo test -p mupc-iec61850-plugin mms_types           # 6 个
-cargo test -p mupc-iec61850-plugin asn1_utils           # 6 个
-cargo test -p mupc-iec61850-plugin mms_client           # 4 个
-```
-
-**已知限制：** MmsClient 的网络集成测试（真实 IED 连接）未包含在单元测试中，因需要可用的 IED 设备。`TestMmsClient` mock（通过 `MmsClientTrait` trait）用于上层集成测试。
-
-### 10.8 未实现的 ACSI 服务
-
-以下 MMS/ACSI 服务在当前计划中有占位定义但返回"未实现"错误：
-
-| 服务 | MmsService 枚举值 | 状态 | 说明 |
-|------|-------------------|------|------|
-| DefineVariableAccess | `DefineVariableAccess` | 未实现 | 用于预先定义变量访问路径以优化批量读取；非 Phase 2 核心需求 |
-| GetDataAccessAttributes | `GetDataAccessAttributes` | 未实现 | 用于查询数据对象的访问属性（读/写权限）；非 Phase 2 核心需求 |
-
-这两个服务在 `asn1_utils.rs` 中对应函数直接返回 `Err(Asn1EncodeFailed("...未实现"))`。Phase 2 仅需 Read/Write 两个基础服务即可满足 DER 数据采集与控制需求。
+验收标准（IEC 104 / IEC 61850 / MQTT / 消息总线 / 安全 / 质量）详见 [PRD 第 7 章](../specs/modules/01-MUPC-通信网关-PRD.md#7-验收标准汇总)。
 
 ---
 
-## 11. 技术债
+---
 
-> 本节记录 IEC 61850 MMS 客户端实现中已知的未完成项、阻塞原因及优先级。
-> 最后更新：2026-06-15
+## 附录：版本演进
 
-### 11.1 IEC 61850 MMS 客户端
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
-| 编号 | 问题 | 当前状态 | 阻塞原因 | 优先级 |
-|------|------|----------|----------|--------|
-| TD-IEC-01 | libIEC61850 FFI 未集成 | 当前使用原始 TCP + 自研 ASN.1 BER 编解码，`iec61850-sys` 依赖已声明但未实际链接 | C 库需交叉编译为 openEuler / RK3588 aarch64 目标；需 cmake + aarch64-gcc 工具链 | 高 |
-| TD-IEC-02 | TLS handshake in MMS 未接入 send_request() | `MmsTlsConfig` 已定义（ca_cert/client_cert/client_key/verify_peer），但 `MmsClient.send_request()` 使用裸 `TcpStream`，未集成 `rustls` | libIEC61850 FFI 先决条件；TLS 会话需结合 C 库的 TLS 支持或纯 Rust `rustls` 适配 | 中 |
-| TD-IEC-03 | DefineVariableAccess 返回"未实现" | `asn1_utils.rs` 中 `encode_define_request()` stub 直接返回 `Err(Asn1EncodeFailed)` | 非 Phase 2 核心需求（基础数据采集仅需 Read/Write） | 低 |
-| TD-IEC-04 | GetDataAccessAttributes 返回"未实现" | `asn1_utils.rs` 中 `encode_getda_request()` stub 直接返回 `Err(Asn1EncodeFailed)` | 非 Phase 2 核心需求（数据对象属性查询为辅助功能） | 低 |
-| TD-IEC-05 | GOOSE 订阅机制未与 MMS 客户端集成 | `goose.rs` 保持 Phase 1 原有实现，独立于 MMS 客户端运行 | 依赖 MMS 客户端稳定后确定集成方案；GOOSE 使用独立 VLAN 组播，与 MMS TCP 路径不同 | 中 |
-| TD-IEC-06 | cmake 编译 libIEC61850 C 库管线未接入 | `build.rs` 中 cmake 调用待实现；当前仅声明了 `cmake = "0.1"` 依赖 | C 工具链（cmake + gcc-aarch64）在目标平台可用性待确认；C 源码路径约定待定 | 高 |
-| TD-IEC-07 | MMS 客户端无集成测试（真实 IED 连接） | 仅 18 个单元测试，无与 IED 设备的网络集成测试 | 需可用 IED 设备或 IED 模拟器（如 libIEC61850 自带的 server_example） | 中 |
-
-### 11.2 其他模块
-
-| 编号 | 问题 | 当前状态 | 阻塞原因 | 优先级 |
-|------|------|----------|----------|--------|
-| TD-GEN-01 | mqtt-bridge LocalMqttClient 与 NorthMqttClient 共用同一 rumqttc EventLoop 模式的潜在竞态 | `LocalMqttClient` 和 `NorthMqttClient` 各自拥有独立 EventLoop，暂无竞态 | 待压力测试验证双连接并发场景 | 低 |
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 初版：综合 5 份来源文档，定义通信网关实现级设计 |
+| v1.1 | 补全 `ControlCommand` 一次调频参数、明确 UTC 时标规范（CP56Time2a）、补充跨模块引用 |
+| v1.2 | 新增 IEC 61850 MMS 客户端实现级细节（ASN.1 BER 编码、PDU 构造、send_request 流程、测试策略），归档实施计划 |

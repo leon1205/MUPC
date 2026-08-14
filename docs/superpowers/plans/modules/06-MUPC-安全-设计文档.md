@@ -1,19 +1,5 @@
 # MUPC 安全模块 — 完整技术设计文档
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.0 | 2026-05-29 | 架构师 | 合并版 |
-
-**合并来源文档：**
-
-| # | 源文档 | 状态标记 |
-|---|--------|----------|
-| 1 | `2026-05-28-SM2-SM4-国密真正实现-实施计划.md` | — |
-| 2 | `2026-05-27-MUPC-Phase2B-协议安全-实施计划.md` | DRAFT |
-| 3 | `2026-05-29-MUPC-安全启动-设计文档.md` | [DESIGN_APPROVED] |
-| 4 | `2026-05-29-MUPC-电力安全合规增强-设计文档.md` | 待评审 |
-| 5 | `06-MUPC-安全-PRD.md` | [REVIEWED: PASS] |
-
 ---
 
 ## 目录
@@ -96,7 +82,7 @@ mupc/crates/security/                  ← security crate（所有安全功能�
 ├── alarm.rs                           # 安全事件告警
 ├── compliance.rs                      # 合规自检引擎
 ├── errors.rs                          # 统一错误类型
-├── secure_boot/                       # 安全启动模块 [DESIGN_APPROVED]
+├── secure_boot/                       # 安全启动模块
 │   ├── mod.rs                         # 模块入口 + SecureBootService
 │   ├── status.rs                      # 安全启动状态管理
 │   ├── monitor.rs                     # 运行时完整性监控
@@ -121,7 +107,7 @@ mupc/crates/security/                  ← security crate（所有安全功能�
 
 ## 2. SM2/SM4 国密算法设计
 
-### 2.1 技术选型 [DESIGN_APPROVED]
+### 2.1 技术选型
 
 | 特性 | 说明 |
 |------|------|
@@ -217,7 +203,7 @@ pub fn load_sm2_private_key(path: &str) -> Result<Vec<u8>>;
 pub fn load_sm2_public_key(path: &str) -> Result<Vec<u8>>;
 ```
 
-#### 2.3.4 密钥生成要求 [DESIGN_APPROVED]
+#### 2.3.4 密钥生成要求
 
 - 密钥生成必须使用 RK3588 TRNG（硬件真随机数发生器）
 - 私钥加密存储：AES-256-GCM，密码强度不少于 16 位
@@ -266,7 +252,7 @@ pub fn sm4_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>>;
 pub fn generate_iv() -> Vec<u8>;
 ```
 
-**IV 安全策略：** [DESIGN_APPROVED]
+**IV 安全策略：**
 
 | 机制 | 说明 |
 |------|------|
@@ -315,7 +301,7 @@ impl CertStore {
 pub fn load_sm2_certificate(path: &str) -> Result<Sm2Cert>;
 ```
 
-### 2.7 Feature Flag 与兼容性 [DESIGN_APPROVED]
+### 2.7 Feature Flag 与兼容性
 
 | Feature | 说明 | 适用场景 |
 |---------|------|----------|
@@ -333,7 +319,7 @@ use zeroize::Zeroizing;
 let key = Zeroizing::new(sensitive_data);  // 作用域结束后自动清零
 ```
 
-### 2.9 验收标准 [REVIEWED: PASS]
+### 2.9 验收标准
 
 | ID | 验收内容 | 验证方法 |
 |----|----------|----------|
@@ -345,11 +331,94 @@ let key = Zeroizing::new(sensitive_data);  // 作用域结束后自动清零
 | GM-06 | 接口向后兼容 | 现有代码无需修改 |
 | GM-07 | 错误类型正确 | 所有 GmError 实现 `std::error::Error` |
 
+### 2.10 gmsm 0.1.0 实际可用 API
+
+gmsm 当前可用版本为 0.1.0（非计划的 0.14），API 覆盖有限。以下为实测可用的底层 API：
+
+| 功能 | gmsm 0.1.0 API | 状态 | 说明 |
+|------|---------------|------|------|
+| SM3 哈希 | `sm3_byte` | 可用 | 输入 `&[u8]`，输出 32 字节哈希 |
+| SM4 CBC 加密 | `sm4_cbc_encrypt_byte` | 可用 | 16 字节 key + 16 字节 IV，PKCS7 填充 |
+| SM4 CBC 解密 | `sm4_cbc_decrypt_byte` | 可用 | 同上 |
+| SM2 密钥生成 | `sm2_generate_key_hex` | 可用 | 返回十六进制字符串格式密钥对 |
+| SM2 签名 | 无 | 不可用 | gmsm 0.1.0 未暴露签名 API |
+| SM2 验签 | 无 | 不可用 | gmsm 0.1.0 未暴露验签 API |
+| SM4 GCM 加密 | 无 | 不可用 | gmsm 0.1.0 无 AEAD/GCM 模式 |
+| SM4 GCM 解密 | 无 | 不可用 | 同上 |
+| SM3 HKDF | 无 | 不可用 | gmsm 0.1.0 无 HkdfSm3 |
+| SM2 ECDH | 无 | 不可用 | gmsm 0.1.0 无 derive_shared_secret |
+| X.509 证书 | gmsm::x509 | 不可用 | gmsm 0.1.0 x509 feature 不可用 |
+
+### 2.11 Ring 回退策略（fake_gmsm 路径）
+
+对于 gmsm 0.1.0 未提供的 API，`fake_gmsm` feature 路径使用 ring 库提供功能降级回退：
+
+| 目标功能 | fake_gmsm 回退 | 回退算法 | 安全等级差异 |
+|----------|---------------|----------|-------------|
+| SM2 签名 | ring ECDSA P-256 SHA-256 | `ECDSA_P256_SHA256_FIXED_SIGNING` | 曲线不同（P-256 vs sm2p256v1），非真正 SM2 |
+| SM2 验签 | ring ECDSA P-256 SHA-256 | `ECDSA_P256_SHA256_FIXED_VERIFICATION` + `UnparsedPublicKey` | 同上 |
+| SM4 GCM 加密 | ring AES-256-GCM | `LessSafeKey::seal_in_place_separate_tag` | 算法不同（AES vs SM4），密钥 16→32 扩展 |
+| SM4 GCM 解密 | ring AES-256-GCM | `LessSafeKey::open_in_place` | 同上 |
+| SM3 哈希 | 返回 Err | `GmError::InvalidParam("SM3 需要 gmsm 库")` | 不可用 |
+| SM3 HKDF | 返回 Err | `GmError::InvalidParam("HKDF-SM3 需要 gmsm 库")` | 不可用 |
+| SM2 密钥生成 | 返回 Err | `GmError::InvalidParam("密钥生成需要 gmsm 库")` | 不可用 |
+| SM2 ECDH | 返回 Err | `GmError::InvalidParam("共享密钥派生需要 gmsm 库")` | 不可用 |
+
+#### SM4 GCM Ring 回退关键技术细节
+
+由于 SM4 使用 128-bit（16 字节）密钥而 ring 的 `AES_256_GCM` 需要 256-bit（32 字节）密钥，回退实现通过**密钥自复制扩展**适配：
+
+```rust
+// 16 字节 SM4 key → 32 字节 AES-256 key
+let mut expanded_key = [0u8; 32];
+expanded_key[..16].copy_from_slice(key);
+expanded_key[16..].copy_from_slice(key);  // 复制自身以适配 AES-256
+
+let unbound_key = UnboundKey::new(&AES_256_GCM, &expanded_key)?;
+let less_safe_key = LessSafeKey::new(unbound_key);
+
+// 加密：密文尾部附带 16 字节认证标签
+let tag = less_safe_key.seal_in_place_separate_tag(
+    Nonce::assume_unique_is_key(iv[..12].try_into().unwrap()),
+    Aad::empty(),
+    &mut in_out,
+)?;
+```
+
+此回退方案**不是真正的 SM4-GCM**，仅用于开发和 CI 环境功能验证。生产环境必须启用 `real_gmsm` 并等待 gmsm 0.14 的 SM4 GCM 支持。
+
+#### SM2 签名 Ring 回退关键技术细节
+
+```rust
+// 使用 ring ECDSA P-256 模拟 SM2（非真正 SM2）
+use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+
+let ecdsa_key_pair = EcdsaKeyPair::from_pkcs8(
+    &ECDSA_P256_SHA256_FIXED_SIGNING,
+    &private_key_bytes,
+)?;
+let signature = ecdsa_key_pair.sign(data)?;
+```
+
+### 2.12 gmsm 版本差距与升级路线
+
+| 项目 | 当前 | 计划 | 差距 |
+|------|------|------|------|
+| gmsm 版本 | 0.1.0 | 0.14 | 缺少 sign/verify/GCM/HKDF/ECDH/x509 |
+| 可用功能 | SM3 hash + SM4 CBC + SM2 keygen | 全部 SM2/SM3/SM4 + x509 | 5 项核心 API 缺失 |
+| 阻塞项 | 上游未发布新版本 | -- | 等待 gmsm crate 发布 0.14 |
+
+**临时缓解措施**：
+- SM2 签名/验签：CI 环境使用 ring ECDSA P-256 模拟，生产环境等待 gmsm 0.14
+- SM4 GCM：CI 环境使用 ring AES-256-GCM 模拟（含密钥扩展），生产环境等待 gmsm 0.14
+- SM3 HKDF / SM2 ECDH：暂无回退方案，标记为 Unsupported
+- SM2 证书（x509）：gmsm 0.1.0 x509 feature 不可用，生产环境需另行方案
+
 ---
 
 ## 3. SM2 TLS 集成设计
 
-### 3.1 核心挑战 [DESIGN_APPROVED]
+### 3.1 核心挑战
 
 rustls 0.22/0.23 **不原生支持** SM2 签名算法和 SM4 密码套件。需要实现：
 
@@ -380,8 +449,6 @@ rustls 0.22/0.23 **不原生支持** SM2 签名算法和 SM4 密码套件。需�
 ```
 
 ### 3.3 自定义 CryptoProvider
-
-> **Phase 2+ 状态：** `SmCryptoProvider` 当前为简单 struct（含 server_cert/client_cert 字段），**未实现** `rustls::CryptoProvider` trait。下文 API 为 Phase 2+ 目标设计。当前 TLS 加密由 ring 默认 provider 提供。
 
 ```rust
 /// SM2 + SM4 国密 CryptoProvider
@@ -502,7 +569,7 @@ pub fn build_sm2_tls_client_config(
 
 ### 3.8 rustls SM2 方案支持策略
 
-rustls 0.23 的 `SignatureScheme` 枚举当前未包含 `SM2_SIG_SM3`。采用分阶段实施： [DESIGN_APPROVED]
+rustls 0.23 的 `SignatureScheme` 枚举当前未包含 `SM2_SIG_SM3`。采用分阶段实施：
 
 | 阶段 | 方案 | 说明 |
 |------|------|------|
@@ -569,7 +636,7 @@ MQTT PUBLISH User Properties:
   "gm-gcm-iv": "base64(iv)"
 ```
 
-### 3.10 验收标准 [REVIEWED: PASS]
+### 3.10 验收标准
 
 | ID | 验收内容 | 验证方法 |
 |----|----------|----------|
@@ -588,7 +655,7 @@ MQTT PUBLISH User Properties:
 
 ## 4. 纵向加密认证设计
 
-### 4.1 架构策略：strongSwan VICI 协议集成 [DESIGN_APPROVED]
+### 4.1 架构策略：strongSwan VICI 协议集成
 
 由于 Rust 生态尚无成熟的 IPSec IKEv2 原生实现，采用通过 Unix Socket 调用 strongSwan VICI 协议的方式集成。
 
@@ -750,7 +817,7 @@ pub fn remove_tunnel(&self, name: &str) -> Result<()>;
 pub fn list_tunnels(&self) -> Vec<(String, TunnelState)>;
 ```
 
-### 4.6 加密强度降级策略 [REVIEWED: PASS]
+### 4.6 加密强度降级策略
 
 **核心原则：加密强度只可升级不可降级。**
 
@@ -761,7 +828,7 @@ pub fn list_tunnels(&self) -> Vec<(String, TunnelState)>;
 | 协议版本低于 TLS 1.2 | 连接被拒绝 | 必须 TLS 1.2+ |
 | 证书链验证失败 | 连接被拒绝 | 无降级路径 |
 
-### 4.7 验收标准 [REVIEWED: PASS]
+### 4.7 验收标准
 
 | ID | 验收内容 | 优先级 |
 |----|----------|--------|
@@ -783,9 +850,7 @@ pub fn list_tunnels(&self) -> Vec<(String, TunnelState)>;
 
 ---
 
-## 5. 安全启动设计 [DESIGN_APPROVED]
-
-> **当前状态：骨架代码已就位，硬件验证逻辑为 Phase 2+ 待实现。** `SecureBootManager::verify_boot_chain()` 当前为 stub（直接返回 Verified），未执行实际 SPL/U-Boot/Kernel/RootFS 信任链验签。下文详细的四层信任链、OTP 存储布局、恢复模式等均为 Phase 2+ 目标架构。
+## 5. 安全启动设计
 
 ### 5.1 技术选型
 
@@ -797,7 +862,7 @@ pub fn list_tunnels(&self) -> Vec<(String, TunnelState)>;
 | B: GRUB + shim | x86 主流方案，依赖 UEFI Secure Boot | 不适用 | — | — | 淘汰 |
 | C: 自定义 EFI Stub + 签名工具 | 内核自验签或自定义 bootloader | 可行但冗余 | 低 | 极高 | 淘汰 |
 
-**决策结论：采用方案 A，U-Boot Verified Boot（FIT 签名）。** [DESIGN_APPROVED]
+**决策结论：采用方案 A，U-Boot Verified Boot（FIT 签名）。**
 
 ### 5.2 四层信任链架构
 
@@ -855,7 +920,7 @@ pub fn list_tunnels(&self) -> Vec<(String, TunnelState)>;
 | Kernel | rootfs（dm-verity） | SHA-256/SM3（哈希树） | 内核 cmdline 传根哈希 | 启动时 |
 | 运行时 | 关键文件周期性校验 | SM3/SHA-256 | mupc-security 存储 | 每 60s |
 
-**关键说明：** [DESIGN_APPROVED]
+**关键说明：**
 - BootROM 不支持 SM2（Rockchip BootROM 固件算法固定），SPL 签名必须使用 RSA-4096
 - U-Boot SPL 和 U-Boot 主镜像可同时支持 RSA-4096 和 SM2
 - dm-verity 根哈希以明文传递给内核 cmdline，其本身由 FIT 镜像签名保护
@@ -917,7 +982,7 @@ RK3588 OTP（eFuse）存储规划（64 words = 2048 bits）：
 | 16-23 | reserved_1 | 256 | — | 预留 |
 | 32-39 | device_identity | 256 | 出厂前 | 设备唯一标识（可选） |
 
-#### 5.5.3 密钥轮换 [DESIGN_APPROVED]
+#### 5.5.3 密钥轮换
 
 **模式 B：代码内多密钥支持**
 
@@ -977,7 +1042,7 @@ FIT 镜像:
 
 ### 5.7 Failed 处理与恢复机制
 
-#### 5.7.1 安全启动错误码 [DESIGN_APPROVED]
+#### 5.7.1 安全启动错误码
 
 | 错误码 | 阶段 | 含义 | 恢复方式 |
 |--------|:---:|------|----------|
@@ -997,7 +1062,7 @@ FIT 镜像:
 3. 恢复镜像执行：初始化网络 → 连接 OTA 服务器 → 下载带签名修复固件 → 验证签名 → 写入主分区 → 重启
 4. 安全限制：恢复模式不提供 shell 访问，不支持加载任意未签名代码
 
-#### 5.7.3 防回滚计数器 [DESIGN_APPROVED]
+#### 5.7.3 防回滚计数器
 
 ```
 存储: OTP fuses（words 9-15, 共 224 bits）
@@ -1013,7 +1078,7 @@ FIT 镜像:
   = 224（100%）:  CRITICAL 告警（需返厂）
 ```
 
-### 5.8 运行时完整性监控 [DESIGN_APPROVED]
+### 5.8 运行时完整性监控
 
 ```rust
 /// 完整性监控器
@@ -1031,7 +1096,7 @@ impl IntegrityMonitor {
 }
 ```
 
-### 5.9 验收标准 [REVIEWED: PASS]
+### 5.9 验收标准
 
 | ID | 验收内容 | 验证方法 |
 |----|----------|----------|
@@ -1074,8 +1139,6 @@ impl IntegrityMonitor {
 
 ### 6.2 核心接口
 
-> **Phase 2+ 状态：** 当前 `CertManager` 为简化实现（ca_cert/client_cert/client_key + CrlManager），仅支持 `load_ca_cert`/`load_client_cert` 基本操作。下文 `import_cert`/`import_crl`/`revoke_cert`/`list_certs`/`get_cert_chain` 等完整 API 为 Phase 2+ 目标设计。
-
 ```rust
 /// 证书角色
 pub enum CertRole { RootCa, IntermediateCa, TlsServer, TlsClient, Ipsec }
@@ -1116,7 +1179,7 @@ impl CertManager {
 }
 ```
 
-### 6.3 证书导入验证流程 [DESIGN_APPROVED]
+### 6.3 证书导入验证流程
 
 ```
 Step 1: PEM 解码 → DER 解码 → X.509 v3 证书
@@ -1129,7 +1192,7 @@ Step 7: 私钥匹配验证（如提供私钥）
 Step 8: 保存到 /etc/mupc/certs/
 ```
 
-### 6.4 证书热更新设计 [DESIGN_APPROVED]
+### 6.4 证书热更新设计
 
 ```rust
 /// 证书热更新处理器
@@ -1165,7 +1228,7 @@ impl CrlManager {
 }
 ```
 
-### 6.6 验收标准 [REVIEWED: PASS]
+### 6.6 验收标准
 
 | ID | 验收内容 | 优先级 |
 |----|----------|--------|
@@ -1346,7 +1409,7 @@ pub struct LogChainEntry {
 在线保留 30 天，历史日志归档
 ```
 
-### 7.7 验收标准 [REVIEWED: PASS]
+### 7.7 验收标准
 
 | ID | 验收内容 | 优先级 |
 |----|----------|--------|
@@ -1489,7 +1552,7 @@ GET    /api/v1/security/alerts                  # 获取告警列表
 GET    /api/v1/security/audit-log               # 查询审计日志
 ```
 
-### 8.7 验收标准 [REVIEWED: PASS]
+### 8.7 验收标准
 
 | ID | 验收内容 | 优先级 |
 |----|----------|--------|
@@ -1816,7 +1879,7 @@ mupc/crates/web-api/
 | 决策 | 采用 U-Boot Verified Boot（FIT 签名）方案 |
 | 备选 | GRUB+shim、自定义 bootloader |
 | 理由 | RK3588 BSP 原生支持、成熟度高、维护成本低 |
-| 状态 | [DESIGN_APPROVED] |
+| 状态 | 已批准 |
 
 ### ADR-003：IPSec VPN — strongSwan VICI 协议集成
 
@@ -1825,7 +1888,7 @@ mupc/crates/web-api/
 | 决策 | 通过 Unix Socket 调用 strongSwan VICI 协议管理 IPSec |
 | 备选 | 自研 Rust IPSec 库、libipsec FFI |
 | 理由 | Rust 生态无成熟 IPSec IKEv2 实现；strongSwan 是业界标准 IPSec 实现 |
-| 状态 | [DESIGN_APPROVED] |
+| 状态 | 已批准 |
 
 ### ADR-004：rustls SM2 支持策略 — 分阶段实施
 
@@ -1852,7 +1915,7 @@ mupc/crates/web-api/
 | 决策 | SM2/SM4 协商失败时禁止降级到 RSA/AES |
 | 备选 | 允许降级到 RSA/AES（过渡期兼容） |
 | 理由 | 法规强制要求电力监控系统使用国密；降级路径破坏合规性 |
-| 状态 | [REVIEWED: PASS] |
+| 状态 | 已通过评审 |
 
 ### ADR-007：密钥存储策略 — 生产环境离线 HSM
 
@@ -1861,7 +1924,7 @@ mupc/crates/web-api/
 | 决策 | 生产环境私钥存储于离线 HSM；开发测试私钥加密文件存储 |
 | 备选 | 纯软件存储、PKCS#11 HSM |
 | 理由 | 离线 HSM 提供最高安全级别；RK3588 不支持内置 HSM |
-| 状态 | [DESIGN_APPROVED] |
+| 状态 | 已批准 |
 
 ### ADR-008：BootROM 签名算法 — RSA-4096
 
@@ -1870,7 +1933,7 @@ mupc/crates/web-api/
 | 决策 | BootROM 阶段签名算法固定为 RSA-4096 PKCS#1 v1.5 |
 | 备选 | SM2 |
 | 理由 | RK3588 BootROM 固件算法固化于芯片 ROM，不支持 SM2 |
-| 状态 | [DESIGN_APPROVED] |
+| 状态 | 已批准 |
 
 ### ADR-009：防回滚计数器 — OTP 位图方式
 
@@ -1879,7 +1942,7 @@ mupc/crates/web-api/
 | 决策 | 使用 OTP 7 个 word（224 bits）的位图编码实现单调递增计数器 |
 | 备选 | 专用计数器寄存器、eMMC 存储 |
 | 理由 | OTP 不可回写保证安全性；224 位宽覆盖约 9 年 OTA 更新 |
-| 状态 | [DESIGN_APPROVED] |
+| 状态 | 已批准 |
 
 ### ADR-010：证书热更新 — GracefulSwitch 模式
 
@@ -1965,255 +2028,14 @@ mupc/crates/web-api/
 | 6 | SNMP Trap SNMP 库成熟度（`snmp` crate 年久失修） | 低：可降级为 syslog + Webhook | 待决策 |
 | 7 | HSM 对接（PKCS#11 `cryptoki` crate） | 低：后续阶段可选 | 待规划 |
 | 8 | 证书自动续期（ACME 协议） | 低：当前依赖手动导入 | 待规划 |
-| 9 | SM2 签名缺失 (gmsm 0.1.0 无签名API) | fake_gmsm 回退至 ring ECDSA P-256，非真正 SM2 | gmsm 0.1.0 不支持 sm2_sign；需等待 gmsm 0.14 发布 | P0 |
-| 10 | SM4 GCM 回退至 ring AES-128-GCM | fake_gmsm 回退至 ring AES-256-GCM（key 16→32 扩展），非真正 SM4-GCM | gmsm 0.1.0 不支持 SM4 GCM 模式 | P0 |
-| 11 | SM3 HKDF 未实现 | 任何 feature 下均返回 Err(GmError::InvalidParam) | gmsm 0.1.0 无 HkdfSm3 API | P1 |
-| 12 | SM2 ECDH 未实现 | 任何 feature 下均返回 Err(GmError::InvalidParam) | gmsm 0.1.0 无 derive_shared_secret API | P1 |
-| 13 | gmsm 版本 0.1.0 远低于计划的 0.14 | 缺少签名/GCM/HKDF/ECDH API，当前仅 SM3 hash + SM4 CBC + SM2 keygen 可用 | 上游 gmsm crate 尚未发布 0.14 版本 | P0 |
 
 ---
 
-**文档状态：** 合并版 v1.0 — 从四份源文档中提取并整合为统一的设计文档。
+## 附录：版本演进
 
-**保留的设计审批标记：**
-- `[DESIGN_APPROVED]` — 安全启动设计文档（第 5 章）
-- `[REVIEWED: PASS]` — 安全 PRD 的验收标准章节
+> 正文已整合全部历史补丁，本表仅作演进追溯。
 
----
-
-## 12. Phase 2B 实现笔记（安全部分）
-
-> **来源**: `docs/superpowers/reports/2026-05-27-MUPC-Phase2B-协议安全-实施计划.md`（已归档）
-> **状态**: DRAFT
-> **团队**: 团队B（1人）
-
-### 12.1 安全组件实施任务
-
-| Task | 内容 | 提交信息 |
-|------|------|----------|
-| Task 3 | security crate：SM2 签名/验签 → SM4 加密/解密 → 证书管理 → TLS 连接器 | `feat(security): 实现国密 SM2/SM4 和 TLS 支持` |
-
-### 12.2 安全模块技术选型
-
-| 组件 | 选型 | 说明 |
-|------|------|------|
-| SM2 签名/验签 | GmSSL / `ring` | 国密椭圆曲线签名算法 |
-| SM4 加密/解密 | GmSSL / `ring` | 国密分组密码算法 |
-| TLS | `rustls` | 纯 Rust TLS 实现，支持自定义 CryptoProvider |
-| 证书管理 | `rustls` + X.509 | 证书加载、验证、轮换 |
-
-### 12.3 安全里程碑
-
-| 里程碑 | 内容 | 交付物 |
-|--------|------|--------|
-| M2.5 | 安全组件 | security crate（sm2.rs, sm4.rs, cert.rs, tls.rs） |
-
-### 12.4 实施风险
-
-| 风险 | 等级 | 对策 |
-|------|------|------|
-| 国密库 Rust 支持不完善 | 中 | 预备纯软件实现方案（参考 GmSSL Rust 绑定） |
-| TLS 性能开销 | 中 | 优化连接复用，减少握手次数 |
-| `rustls` 自定义 CryptoProvider 稳定性 | 中 | 持续监控，可能需要维护 fork |
-
----
-
-## 13. SM2/SM4 国密实现笔记
-
-> **来源**: `docs/superpowers/plans/2026-05-28-SM2-SM4-国密真正实现-实施计划.md`（原始实施计划，已归档至 reports/）
-> **状态**: 部分实现 -- SM3 hash / SM4 CBC / SM2 密钥生成已完成；SM2 签名 / SM4 GCM / SM3 HKDF / SM2 ECDH 待 gmsm 升级至 0.14
-
-### 13.1 Feature Flag 架构 (real_gmsm vs fake_gmsm)
-
-所有国密函数均通过 Rust 条件编译 (`#[cfg(feature = "real_gmsm")]` / `#[cfg(not(feature = "real_gmsm"))]`) 实现双路径分发：
-
-```toml
-# security/Cargo.toml
-[features]
-default = ["real_gmsm"]
-real_gmsm = ["dep:gmsm"]
-fake_gmsm = ["dep:ring"]
-```
-
-| Feature | 依赖 | 算法实现 | 适用场景 |
-|---------|------|----------|----------|
-| `real_gmsm`（默认） | gmsm 0.1.0（规划升级 0.14） | 真正国密 SM2/SM3/SM4 | 生产环境 |
-| `fake_gmsm` | ring 0.16 | ring ECDSA P-256 / AES-256-GCM 模拟 | CI 测试 / 开发环境 |
-| 无 feature | 无 | 所有函数返回 Err | 编译期验证 |
-
-**关键约束**: 生产环境必须启用 `real_gmsm`。接口签名在两种 feature 下保持一致，业务代码无需修改。
-
-### 13.2 gmsm 0.1.0 实际可用 API
-
-gmsm 当前可用版本为 0.1.0（非计划的 0.14），API 覆盖有限。以下为实测可用的底层 API：
-
-| 功能 | gmsm 0.1.0 API | 状态 | 说明 |
-|------|---------------|------|------|
-| SM3 哈希 | `sm3_byte` | 可用 | 输入 `&[u8]`，输出 32 字节哈希 |
-| SM4 CBC 加密 | `sm4_cbc_encrypt_byte` | 可用 | 16 字节 key + 16 字节 IV，PKCS7 填充 |
-| SM4 CBC 解密 | `sm4_cbc_decrypt_byte` | 可用 | 同上 |
-| SM2 密钥生成 | `sm2_generate_key_hex` | 可用 | 返回十六进制字符串格式密钥对 |
-| SM2 签名 | 无 | 不可用 | gmsm 0.1.0 未暴露签名 API |
-| SM2 验签 | 无 | 不可用 | gmsm 0.1.0 未暴露验签 API |
-| SM4 GCM 加密 | 无 | 不可用 | gmsm 0.1.0 无 AEAD/GCM 模式 |
-| SM4 GCM 解密 | 无 | 不可用 | 同上 |
-| SM3 HKDF | 无 | 不可用 | gmsm 0.1.0 无 HkdfSm3 |
-| SM2 ECDH | 无 | 不可用 | gmsm 0.1.0 无 derive_shared_secret |
-| X.509 证书 | gmsm::x509 | 不可用 | gmsm 0.1.0 x509 feature 不可用 |
-
-### 13.3 Ring 回退策略（fake_gmsm 路径）
-
-对于 gmsm 0.1.0 未提供的 API，`fake_gmsm` feature 路径使用 ring 库提供功能降级回退：
-
-| 目标功能 | fake_gmsm 回退 | 回退算法 | 安全等级差异 |
-|----------|---------------|----------|-------------|
-| SM2 签名 | ring ECDSA P-256 SHA-256 | `ECDSA_P256_SHA256_FIXED_SIGNING` | 曲线不同（P-256 vs sm2p256v1），非真正 SM2 |
-| SM2 验签 | ring ECDSA P-256 SHA-256 | `ECDSA_P256_SHA256_FIXED_VERIFICATION` + `UnparsedPublicKey` | 同上 |
-| SM4 GCM 加密 | ring AES-256-GCM | `LessSafeKey::seal_in_place_separate_tag` | 算法不同（AES vs SM4），密钥 16→32 扩展 |
-| SM4 GCM 解密 | ring AES-256-GCM | `LessSafeKey::open_in_place` | 同上 |
-| SM3 哈希 | 返回 Err | `GmError::InvalidParam("SM3 需要 gmsm 库")` | 不可用 |
-| SM3 HKDF | 返回 Err | `GmError::InvalidParam("HKDF-SM3 需要 gmsm 库")` | 不可用 |
-| SM2 密钥生成 | 返回 Err | `GmError::InvalidParam("密钥生成需要 gmsm 库")` | 不可用 |
-| SM2 ECDH | 返回 Err | `GmError::InvalidParam("共享密钥派生需要 gmsm 库")` | 不可用 |
-
-#### SM4 GCM Ring 回退关键技术细节
-
-由于 SM4 使用 128-bit（16 字节）密钥而 ring 的 `AES_256_GCM` 需要 256-bit（32 字节）密钥，回退实现通过**密钥自复制扩展**适配：
-
-```rust
-// 16 字节 SM4 key → 32 字节 AES-256 key
-let mut expanded_key = [0u8; 32];
-expanded_key[..16].copy_from_slice(key);
-expanded_key[16..].copy_from_slice(key);  // 复制自身以适配 AES-256
-
-let unbound_key = UnboundKey::new(&AES_256_GCM, &expanded_key)?;
-let less_safe_key = LessSafeKey::new(unbound_key);
-
-// 加密：密文尾部附带 16 字节认证标签
-let tag = less_safe_key.seal_in_place_separate_tag(
-    Nonce::assume_unique_is_key(iv[..12].try_into().unwrap()),
-    Aad::empty(),
-    &mut in_out,
-)?;
-```
-
-此回退方案**不是真正的 SM4-GCM**，仅用于开发和 CI 环境功能验证。生产环境必须启用 `real_gmsm` 并等待 gmsm 0.14 的 SM4 GCM 支持。
-
-#### SM2 签名 Ring 回退关键技术细节
-
-```rust
-// 使用 ring ECDSA P-256 模拟 SM2（非真正 SM2）
-use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
-
-let ecdsa_key_pair = EcdsaKeyPair::from_pkcs8(
-    &ECDSA_P256_SHA256_FIXED_SIGNING,
-    &private_key_bytes,
-)?;
-let signature = ecdsa_key_pair.sign(data)?;
-```
-
-### 13.4 gmsm 版本差距与升级路线
-
-| 项目 | 当前 | 计划 | 差距 |
-|------|------|------|------|
-| gmsm 版本 | 0.1.0 | 0.14 | 缺少 sign/verify/GCM/HKDF/ECDH/x509 |
-| 可用功能 | SM3 hash + SM4 CBC + SM2 keygen | 全部 SM2/SM3/SM4 + x509 | 5 项核心 API 缺失 |
-| 阻塞项 | 上游未发布新版本 | -- | 等待 gmsm crate 发布 0.14 |
-
-**临时缓解措施**：
-- SM2 签名/验签：CI 环境使用 ring ECDSA P-256 模拟，生产环境等待 gmsm 0.14
-- SM4 GCM：CI 环境使用 ring AES-256-GCM 模拟（含密钥扩展），生产环境等待 gmsm 0.14
-- SM3 HKDF / SM2 ECDH：暂无回退方案，标记为 Unsupported
-- SM2 证书（x509）：gmsm 0.1.0 x509 feature 不可用，生产环境需另行方案
-
-### 13.5 SM2 证书管理实现要点
-
-证书模块（`cert.rs`）的设计目标为通过 `gmsm::x509` 提供 SM2 X.509 v3 证书解析和验证：
-
-```rust
-#[cfg(feature = "real_gmsm")]
-use gmsm::x509;
-
-pub struct Sm2Cert { cert: x509::Certificate }
-
-impl CertStore {
-    pub fn from_pem_file(path: &str) -> Result<Self> {
-        // 加载 PEM 编码证书 → gmsm::x509::Certificate::from_pem
-    }
-    pub fn verify_chain(&self, root: &Sm2Cert) -> Result<bool> {
-        // 证书链验证（当前为占位实现，返回 true）
-    }
-}
-```
-
-**当前状态**: x509 feature 在 gmsm 0.1.0 中不可用，`CertStore::from_pem_file` 和 `verify_chain` 在 `real_gmsm` 下为占位实现。完整的证书解析、证书链验证、CRL 检查需等待 gmsm 0.14 的 x509 feature。
-
-### 13.6 VICI Client 集成要点
-
-IPSec 隧道管理通过 Unix Socket 与 strongSwan charon 守护进程的 VICI 协议通信：
-
-```
-security::lea_vici::ViciClient
-    ↓ Unix Socket (/var/run/charon.vici)
-strongSwan charon daemon
-    ↓ IKEv2 + SM2 + SM4/SM3
-IPSec SA（加密隧道）
-```
-
-**VICI 报文编码**（segment-based，4 字节大端长度前缀）：
-
-| 类型字节 | 含义 |
-|---------|------|
-| 0x00 | 节段开始 (section start) |
-| 0x01 | 节段结束 (section end) |
-| 0x02 | 键值对（字符串值） |
-| 0x03 | 列表项 (list item) |
-| 0x04 | 键值对（原始字节值） |
-
-**关键操作映射**：
-
-| 操作 | VICI 命令 | 用途 |
-|------|-----------|------|
-| 加载证书 | `load-cert` | 将 SM2 PEM 证书加载到 charon |
-| 加载私钥 | `load-key` | 加载 SM2 私钥 |
-| 创建连接 | `load-conn` | 加载 IKEv2 连接配置 |
-| 发起隧道 | `initiate` | 启动 IKEv2 握手 |
-| 查询状态 | `list-sas` | 获取 SA 状态 |
-| 关闭隧道 | `unload-conn` | 卸载连接配置 |
-
-### 13.7 安全启动信任链实现要点
-
-安全启动采用 **U-Boot Verified Boot (FIT 签名)** 方案，形成四级信任链：
-
-```
-BootROM (OTP 根公钥哈希)
-  → U-Boot SPL (RSA-4096 验签)
-    → U-Boot (RSA-4096/SM2 验签)
-      → FIT 镜像 {kernel + DTB} (RSA-4096/SM2 验签)
-        → RootFS (dm-verity 块级验签)
-```
-
-**关键约束**：
-
-| 阶段 | 签名算法 | 密钥位置 | 说明 |
-|------|----------|----------|------|
-| BootROM | RSA-4096 PKCS#1 v1.5 | OTP fuses (sha256 哈希) | Rockchip BootROM 固件算法固化，不支持 SM2 |
-| U-Boot SPL | RSA-4096 | SPL 内置公钥 | 支持双密钥嵌入（新旧密钥过渡期） |
-| U-Boot/FIT | RSA-4096 或 SM2 | U-Boot 内置公钥 | 若 gmsm 支持，可切换至 SM2 验签 |
-| RootFS | SHA-256/SM3 哈希树 | 内核 cmdline (由 FIT 签名保护) | dm-verity 实时块级校验 |
-
-**OTP 存储布局**（RK3588 eFuse, 64 words = 2048 bits）：
-
-| 偏移(word) | 字段 | 大小(bits) | 写入时机 |
-|:---:|------|:---:|------|
-| 0-7 | root_key_hash | 256 | 出厂前 |
-| 8 | secure_boot_enable | 1 | 出厂前 |
-| 9-15 | anti_rollback_counter | 224 | 每次固件升级 |
-| 16-23 | reserved | 256 | — |
-| 32-39 | device_identity | 256 | 出厂前 |
-
-**防回滚计数器**：使用位图编码（224 bits = 7 words），每位代表一次递增，最大值 224（约 9 年，每月 2 次 OTA）。≥80% WARNING 告警，100% CRITICAL 告警（需返厂）。
-
----
-
-**文档状态：** v1.1 -- 追加 SM2/SM4 国密实现笔记（第 13 章），补充技术债条目（附录 E #9-#13）
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 从五份源文档合并为统一设计文档 |
+| v1.1 | 追加 SM2/SM4 国密实现笔记，补充 gmsm 版本差距技术债条目 |

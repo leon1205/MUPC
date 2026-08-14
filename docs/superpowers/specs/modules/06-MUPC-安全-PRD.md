@@ -1,11 +1,5 @@
 # MUPC 安全模块产品需求文档（PRD）
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.0 | 2026-05-29 | 需求分析师 | 合并版 |
-
-**[REVIEWED: PASS]**
-
 ---
 
 ## 1. 产品概述
@@ -108,7 +102,7 @@ MUPC 微电网特种调控装置作为电力调度与配电自动化的核心边
 
 ### 3.3 SM2 签名与验签
 
-#### 功能 3.3.1：SM2 签名/验签（[REVIEWED: PASS]）
+#### 功能 3.3.1：SM2 签名/验签
 
 **User Story：**
 > 作为安全管理员，我需要使用符合国密标准的 SM2 算法对数据进行签名和验签，以满足电力行业对数据完整性和不可否认性的合规要求。
@@ -133,7 +127,7 @@ pub fn sm2_derive_shared_key(key_pair: &Sm2KeyPair, peer_public_key: &[u8]) -> R
 
 ### 3.4 SM4 对称加密
 
-#### 功能 3.4.1：SM4 加密/解密（[REVIEWED: PASS]）
+#### 功能 3.4.1：SM4 加密/解密
 
 **User Story：**
 > 作为安全管理员，我需要使用符合国密标准的 SM4 算法对通信数据进行加密传输，确保数据机密性。
@@ -158,7 +152,7 @@ pub fn sm4_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>>;
 
 ### 3.5 SM3 消息摘要
 
-#### 功能 3.5.1：SM3 哈希计算（[REVIEWED: PASS]）
+#### 功能 3.5.1：SM3 哈希计算
 
 **User Story：**
 > 作为安全管理员，我需要使用符合国密标准的 SM3 哈希算法进行完整性校验。
@@ -211,7 +205,7 @@ let key = Zeroizing::new(sensitive_data);
 
 ## 4. 双向证书认证与 SM2 TLS
 
-### 4.1 SM2 证书格式兼容性（[REVIEWED: PASS]）
+### 4.1 SM2 证书格式兼容性
 
 #### 功能 4.1.1：SM2 证书格式验证（LEA-20 ~ LEA-24）
 
@@ -228,7 +222,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-23 | MUPC 加载 SM2 证书时报错信息明确区分：证书格式错误、签名算法不匹配、证书已过期、证书链不完整 | 分别构造上述四种错误场景，验证错误信息内容 |
 | LEA-24 | MUPC 支持同时管理至少 3 张 SM2 证书（TLS 服务器证书、TLS 客户端证书、IPSec 证书） | 加载 3 张证书并分别配置到三个通道，验证各通道正常工作 |
 
-### 4.2 SM2 TLS 握手（[REVIEWED: PASS]）
+### 4.2 SM2 TLS 握手
 
 #### 功能 4.2.1：SM2 TLS 握手流程（LEA-25 ~ LEA-29）
 
@@ -245,7 +239,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-28 | SM2 TLS 完整握手性能 ≤ 100ms（RK3588 平台），会话恢复握手 ≤ 10ms | 连续执行 1000 次握手，取 P99 延迟 |
 | LEA-29 | 与 GmSSL 3.x、铜锁(Tongsuo) 8.x、OpenSSL 3.x + SM2 patch 互操作测试通过 | 分别进行 TLS 握手连通性测试 |
 
-### 4.3 MQTT over SM2 TLS（[REVIEWED: PASS]）
+### 4.3 MQTT over SM2 TLS
 
 #### 功能 4.3.1：MQTT 国密集成（LEA-30 ~ LEA-35）
 
@@ -267,7 +261,7 @@ let key = Zeroizing::new(sensitive_data);
 
 ## 5. 纵向加密认证（电力合规）
 
-### 5.1 纵向加密认证合规（[REVIEWED: PASS]）
+### 5.1 纵向加密认证合规
 
 #### 功能 5.1.1：纵向加密认证策略管理与合规（LEA-01 ~ LEA-05）
 
@@ -298,7 +292,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-08 | 支持通过管理接口按需触发合规自检，返回结构化 JSON 报告 | 调用自检 API，验证 JSON 包含所有检查项状态 |
 | LEA-09 | 合规自检覆盖：发改委14号令第十四条、GB/T 36572-2018第6.3节、等保 2.0 第三级安全通信网络要求 | 逐一检查每个法规条文的对应检查项是否在自检清单中 |
 
-### 5.2 纵向加密认证装置对接（[REVIEWED: PASS]）
+### 5.2 纵向加密认证装置对接
 
 #### 功能 5.2.1：IPSec VPN 对接（LEA-10 ~ LEA-16）
 
@@ -342,7 +336,7 @@ let key = Zeroizing::new(sensitive_data);
 
 ## 6. 安全启动（Secure Boot）
 
-### 6.1 安全启动链验证（[REVIEWED: PASS]）
+### 6.1 安全启动链验证
 
 #### 功能 6.1.1：BootROM 级验签（SB-01）
 
@@ -397,7 +391,7 @@ let key = Zeroizing::new(sensitive_data);
 - 分区哈希值存储在已验证的 FIT 镜像内或签名元数据区
 - 校验失败时拒绝挂载并记录告警日志
 
-### 6.2 系统镜像完整性校验（[REVIEWED: PASS]）
+### 6.2 系统镜像完整性校验
 
 #### 功能 6.2.1：运行时完整性度量（SB-13）
 
@@ -420,7 +414,7 @@ let key = Zeroizing::new(sensitive_data);
 - 全检失败时自动触发回滚机制恢复至更新前版本
 - 全检结果通过 web-api 状态接口上报
 
-### 6.3 启动密钥管理（[REVIEWED: PASS]）
+### 6.3 启动密钥管理
 
 #### 功能 6.3.1：密钥生成（SB-05）
 
@@ -460,7 +454,7 @@ let key = Zeroizing::new(sensitive_data);
 - 被吊销公钥签名的固件将被拒绝启动
 - 吊销操作不可逆
 
-### 6.4 签名与验签流程（[REVIEWED: PASS]）
+### 6.4 签名与验签流程
 
 #### 功能 6.4.1：固件签名工具链（SB-14）
 
@@ -480,7 +474,7 @@ let key = Zeroizing::new(sensitive_data);
 - 验签过程不依赖网络连接
 - 整体安全启动时间 ≤ 15 秒（从上电到系统就绪）
 
-### 6.5 启动失败处理与恢复机制（[REVIEWED: PASS]）
+### 6.5 启动失败处理与恢复机制
 
 #### 功能 6.5.1：安全错误状态
 
@@ -511,7 +505,7 @@ let key = Zeroizing::new(sensitive_data);
 - 支持手动设置防回滚计数器（需物理接触 + 授权工具）
 - 计数器溢出时设备需返厂更换硬件
 
-### 6.6 安全启动状态监控与告警（[REVIEWED: PASS]）
+### 6.6 安全启动状态监控与告警
 
 #### 功能 6.6.1：安全启动状态查询（SB-10）
 
@@ -536,7 +530,7 @@ let key = Zeroizing::new(sensitive_data);
 - 检查内容：dm-verity 哈希树完整性、OTP 熔丝状态、防回滚计数器存储可写性、安全启动状态文件
 - 健康检查结果记录到安全日志，异常时触发告警
 
-### 6.7 安全启动日志审计（[REVIEWED: PASS]）
+### 6.7 安全启动日志审计
 
 #### 功能 6.7.1：安全启动事件日志（SB-12）
 
@@ -562,7 +556,7 @@ let key = Zeroizing::new(sensitive_data);
 
 ## 7. 控制指令全链路加密审计
 
-### 7.1 控制指令端到端加密（[REVIEWED: PASS]）（LEA-36 ~ LEA-40）
+### 7.1 控制指令端到端加密（LEA-36 ~ LEA-40）
 
 **User Story：**
 > 作为安全管理员，我需要确保从调度主站下发的控制指令在整个传输链路中始终保持加密状态。
@@ -577,7 +571,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-39 | 解密失败、验签失败、序列号重复的指令被拒绝执行并记录告警 | 分别构造异常指令验证 |
 | LEA-40 | 全链路延迟增量 ≤ 10ms（不含网络传输） | 测量从 gateway 接收到 intercore 发出加密指令的时延 |
 
-### 7.2 加密审计日志（[REVIEWED: PASS]）（LEA-41 ~ LEA-44）
+### 7.2 加密审计日志（LEA-41 ~ LEA-44）
 
 **User Story：**
 > 作为合规审计人员，我需要完整的加密操作日志，以便在安全事件发生时追溯指令的加密状态和路径。
@@ -595,7 +589,7 @@ let key = Zeroizing::new(sensitive_data);
 
 ## 8. 证书生命周期管理
 
-### 8.1 证书导入与存储（[REVIEWED: PASS]）（LEA-52 ~ LEA-55）
+### 8.1 证书导入与存储（LEA-52 ~ LEA-55）
 
 **User Story：**
 > 作为安全管理员，我需要支持通过管理界面上传和安装 SM2 证书，确保证书安全存储。
@@ -609,7 +603,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-54 | 私钥存储文件权限 600（仅 root 可读），存储在 `/etc/mupc/certs/` 目录下 | 验证证书目录文件权限 |
 | LEA-55 | 支持 CA 证书、设备证书、私钥分别存储，支持证书链（CA→中间CA→设备证书） | 导入三级证书链，验证 TLS 握手时完整证书链被发送 |
 
-### 8.2 证书更新与轮换（[REVIEWED: PASS]）（LEA-56 ~ LEA-59）
+### 8.2 证书更新与轮换（LEA-56 ~ LEA-59）
 
 **User Story：**
 > 作为安全管理员，我需要在证书即将过期时能够无中断地更新证书。
@@ -623,7 +617,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-58 | 证书过期后：已有连接继续使用至断开，拒绝新连接 | 系统时间调至过期后验证 |
 | LEA-59 | 自动重载证书配置（10 分钟检测一次文件变更），无需重启服务 | 替换证书文件，等待 10 分钟验证 |
 
-### 8.3 证书吊销（[REVIEWED: PASS]）（LEA-60 ~ LEA-63）
+### 8.3 证书吊销（LEA-60 ~ LEA-63）
 
 **User Story：**
 > 作为安全管理员，我需要在私钥泄露或证书被篡改时能够立即吊销证书。
@@ -641,7 +635,7 @@ let key = Zeroizing::new(sensitive_data);
 
 ## 9. 安全事件告警与合规仪表盘
 
-### 9.1 安全事件告警（[REVIEWED: PASS]）（LEA-45 ~ LEA-48）
+### 9.1 安全事件告警（LEA-45 ~ LEA-48）
 
 **User Story：**
 > 作为安全管理员，我需要系统在安全事件发生时立即产生明确的告警。
@@ -655,7 +649,7 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-47 | 告警支持 syslog、SNMP Trap（v2c/v3）、运行指示灯（LED）三种推送方式 | 分别配置三种方式验证 |
 | LEA-48 | CRITICAL 告警必须在 10 秒内触达操作人员 | 测量告警产生到 syslog 写入时间 |
 
-### 9.2 合规仪表盘（[REVIEWED: PASS]）（LEA-49 ~ LEA-51）
+### 9.2 合规仪表盘（LEA-49 ~ LEA-51）
 
 **User Story：**
 > 作为合规审计人员，我需要一个合规状态仪表盘，以一目了然地查看系统加密合规状态。
@@ -1155,10 +1149,10 @@ Phase 5: 安全告警与合规仪表盘（P1）
 
 ---
 
-**文档状态：** 合并版（v1.0），所有已评审通过的 PRD 内容已合并保留。
+## 附录：版本演进
 
-**原始文档评审状态：**
-- 主 PRD（通信管理模块，安全相关部分）：**[REVIEWED: PASS]**
-- SM2/SM4 国密真正实现设计文档：**DRAFT**
-- 安全启动 PRD：**[REVIEWED: PASS]**
-- 电力安全合规增强 PRD：**[REVIEWED: PASS]**
+> 正文已整合全部历史补丁，本表仅作演进追溯。
+
+| 版本 | 主要变更 |
+|------|----------|
+| v1.0 | 合并已评审通过的安全模块相关 PRD（国密算法、安全启动、电力合规），结构化重整理 |
