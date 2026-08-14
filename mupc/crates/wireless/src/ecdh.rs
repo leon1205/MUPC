@@ -15,8 +15,13 @@
 //! - 每次通信会话应生成新的临时密钥对（Ephemeral ECDH）
 //! - 会话密钥派生使用 HKDF-SHA256
 
-use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use hkdf::Hkdf;
+use p256::ecdh::diffie_hellman;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::{PublicKey, SecretKey};
+use sha2::Sha256;
 
 use crate::errors::WirelessError;
 
@@ -77,15 +82,8 @@ impl EcdhKeyPair {
     /// - `Ok(EcdhKeyPair)` 新生成的密钥对
     /// - `Err(WirelessError)` 生成失败（如随机数源不可用）
     pub fn generate() -> Result<Self, WirelessError> {
-        let mut rng = rand::rngs::OsRng;
-
-        // 生成 32 字节随机私钥
-        let mut private_key = vec![0u8; P256_PRIVATE_KEY_LEN];
-        rng.try_fill_bytes(&mut private_key)
-            .map_err(|e| WirelessError::EncryptionError(format!("生成随机私钥失败: {}", e)))?;
-
-        // 使用 p256 crate 计算公钥
-        // Phase 2+ 集成时替换为实际 p256 crate 调用
+        let secret = SecretKey::random(&mut rand::rngs::OsRng);
+        let private_key = secret.to_bytes().to_vec();
         let public_key = Self::derive_public_key_from_private(&private_key)?;
 
         Ok(Self {
@@ -120,21 +118,13 @@ impl EcdhKeyPair {
             return Err(WirelessError::EncryptionError("己方私钥长度无效".into()));
         }
 
-        // Phase 2+ 集成：调用 p256::ecdh::diffie_hellman()
-        // 当前使用简化的占位实现，返回 XOR 混淆结果作为框架占位
-        let mut shared_secret = vec![0u8; P256_PRIVATE_KEY_LEN];
-        for (i, item) in shared_secret
-            .iter_mut()
-            .enumerate()
-            .take(P256_PRIVATE_KEY_LEN)
-        {
-            // 占位：XOR 混合同胞公钥的 xy 坐标与私钥
-            *item = self.private_key[i]
-                ^ peer_public.get(i + 1).copied().unwrap_or(0)
-                ^ peer_public.get(i + 33).copied().unwrap_or(0);
-        }
+        let secret = SecretKey::from_slice(&self.private_key)
+            .map_err(|e| WirelessError::EncryptionError(format!("己方私钥无效: {}", e)))?;
+        let peer = PublicKey::from_sec1_bytes(peer_public)
+            .map_err(|e| WirelessError::EncryptionError(format!("对方公钥无效: {}", e)))?;
 
-        Ok(shared_secret)
+        let shared = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+        Ok(shared.raw_secret_bytes().to_vec())
     }
 
     /// 从私钥计算公钥（P-256 未压缩格式）
@@ -142,29 +132,10 @@ impl EcdhKeyPair {
     /// ⚠️ 占位实现 - 非加密安全：当前使用简单的线性映射替代真实椭圆曲线点乘。
     /// Phase 2+ 必须替换为实际 `p256::SecretKey` + `p256::PublicKey` 计算。
     fn derive_public_key_from_private(private_key: &[u8]) -> Result<Vec<u8>, WirelessError> {
-        if private_key.len() != P256_PRIVATE_KEY_LEN {
-            return Err(WirelessError::EncryptionError(format!(
-                "私钥长度无效: 期望 {} 字节，实际 {} 字节",
-                P256_PRIVATE_KEY_LEN,
-                private_key.len()
-            )));
-        }
-
-        // 占位实现：生成固定格式的未压缩公钥前缀 0x04
-        // Phase 2+ 替换为实际椭圆曲线点乘计算
-        let mut public_key = Vec::with_capacity(P256_PUBLIC_KEY_LEN);
-        public_key.push(0x04); // 未压缩格式前缀
-
-        // 占位：从私钥派生 x 坐标（简单散列映射）
-        for item in private_key.iter().take(32) {
-            public_key.push(item.wrapping_mul(7).wrapping_add(0x42));
-        }
-        // 占位：从私钥派生 y 坐标（简单散列映射）
-        for item in private_key.iter().take(32) {
-            public_key.push(item.wrapping_mul(13).wrapping_add(0xAB));
-        }
-
-        Ok(public_key)
+        let secret = SecretKey::from_slice(private_key)
+            .map_err(|e| WirelessError::EncryptionError(format!("私钥无效: {}", e)))?;
+        let public = secret.public_key();
+        Ok(public.to_encoded_point(false).as_bytes().to_vec())
     }
 }
 
@@ -188,20 +159,10 @@ pub fn derive_aes_key(shared_secret: &[u8]) -> Result<Vec<u8>, WirelessError> {
         )));
     }
 
-    // Phase 2+ 集成：替换为 HKDF-SHA256 实际实现
-    // hkdf::Hkdf::<sha2::Sha256>::new(None, shared_secret).expand(b"mupc-wireless-aes-key", &mut key)
-    //
-    // 当前使用简化派生：SHA256-like 占位混合
+    let hk = Hkdf::<Sha256>::new(None, shared_secret);
     let mut aes_key = vec![0u8; AES256_KEY_LEN];
-
-    for (i, item) in aes_key.iter_mut().enumerate().take(AES256_KEY_LEN) {
-        let idx = i % shared_secret.len();
-        let next_idx = (idx + 1) % shared_secret.len();
-        *item = shared_secret[idx]
-            .wrapping_mul(0x5B)
-            .wrapping_add(shared_secret[next_idx])
-            .wrapping_add(i as u8);
-    }
+    hk.expand(b"mupc-wireless-aes-key", &mut aes_key)
+        .map_err(|e| WirelessError::EncryptionError(format!("HKDF 派生失败: {}", e)))?;
 
     Ok(aes_key)
 }
@@ -230,10 +191,7 @@ mod tests {
             .derive_shared_secret(&alice.public_key)
             .expect("Bob 派生共享密钥失败");
 
-        // ⚠️ Phase 2+ 必须验证: 替换为真实 ECDH 实现后，双方共享密钥应当一致
-        // assert_eq!(alice_shared, bob_shared);
-        assert_eq!(alice_shared.len(), 32);
-        assert_eq!(bob_shared.len(), 32);
+        assert_eq!(alice_shared, bob_shared);
     }
 
     #[test]
