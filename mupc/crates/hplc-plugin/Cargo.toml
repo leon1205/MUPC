@@ -21,5 +21,8 @@ chrono = { workspace = true }
 futures = { workspace = true }
 
 [features]
-default = []
+default = ["ffi"]
 ffi = []
+
+[lib]
+crate-type = ["lib", "cdylib"]
