@@ -324,8 +324,10 @@ impl ModelManager {
         // 初始化奖励计算器和动作校验器
         *self.reward_calculator.write().await =
             Some(RewardCalculator::new(self.config.reward_weights.clone()));
-        *self.action_validator.write().await = Some(ActionValidator::new_v2_4(
+        *self.action_validator.write().await = Some(ActionValidator::new_dual(
             self.config.action_constraint.clone(),
+            0.0,
+            30.0,
         ));
 
         *self.status.write().await = ModelStatus::Ready;
@@ -408,7 +410,7 @@ impl ModelManager {
                 "校验器未初始化".into(),
             ))?;
             let action_space_config = self.action_space_config.read().await;
-            av.validate(
+            av.validate_dual(
                 &safe_action,
                 fused_state.dispatch_p_set,
                 false,

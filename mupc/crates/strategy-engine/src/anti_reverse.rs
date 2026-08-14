@@ -27,12 +27,6 @@ impl AntiReverseStrategy {
 
         let (p_batt, pv_limit) = self.decide(grid_power, pv_power, battery_soc);
 
-        if pv_limit > 0.0 {
-            self.pv_limit_count.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.pv_limit_count.store(0, Ordering::SeqCst);
-        }
-
         ControlCommand {
             cmd_id: 3,
             cmd_type: CommandType::PowerRegulation,
@@ -47,24 +41,19 @@ impl AntiReverseStrategy {
     }
 
     fn decide(&self, grid_power: f64, pv_power: f64, battery_soc: f64) -> (f64, f64) {
-        let p_batt: f64;
-        let pv_limit: f64;
-
         if grid_power < self.config.reverse_power_threshold {
             if battery_soc < self.config.soc_charge_max {
-                p_batt = (pv_power * 0.8).min(self.config.max_charge_power);
-                pv_limit = 0.0;
+                self.pv_limit_count.store(0, Ordering::SeqCst);
+                ((pv_power * 0.8).min(self.config.max_charge_power), 0.0)
             } else {
-                pv_limit =
-                    pv_power * (self.pv_limit_count.load(Ordering::Relaxed) as f64 * 0.1).min(0.5);
-                p_batt = 0.0;
+                let count = self.pv_limit_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let pv_limit = pv_power * ((count as f64) * 0.1).min(0.5);
+                (0.0, pv_limit)
             }
         } else {
-            p_batt = 0.0;
-            pv_limit = 0.0;
+            self.pv_limit_count.store(0, Ordering::SeqCst);
+            (0.0, 0.0)
         }
-
-        (p_batt, pv_limit)
     }
 }
 

@@ -102,7 +102,7 @@ impl PluginLoader for PluginLoaderImpl {
             return Err(PluginError::load_failed("插件创建返回空指针"));
         }
 
-        let plugin = unsafe { Arc::from_raw(plugin_ptr) };
+        let plugin = unsafe { Arc::from(Box::from_raw(plugin_ptr)) };
         let meta = unsafe { meta_fn() };
 
         // 存储插件

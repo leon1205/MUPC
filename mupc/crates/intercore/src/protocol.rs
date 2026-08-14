@@ -240,11 +240,19 @@ impl IntercoreFrame {
 
         let header = FrameHeader::from_bytes(data)?;
 
-        // 验证 CRC
-        let data_len = data.len() - 2; // exclude CRC
-        let crc_pos = data.len() - 2;
-        let received_crc = ((data[crc_pos + 1] as u16) << 8) | (data[crc_pos] as u16);
-        let calculated_crc = Self::calculate_crc16(&data[..data_len]);
+        // 验证 CRC：CRC 紧跟数据之后（偏移 = header.length - 2），而非整个缓冲区末尾
+        let actual_len = header.length as usize;
+        if actual_len < FrameHeader::FIXED_LENGTH + 2 || actual_len > data.len() {
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                format!("Invalid frame length: {}", actual_len),
+                "intercore",
+            ));
+        }
+
+        let crc_pos = actual_len - 2;
+        let received_crc = ((data[crc_pos] as u16) << 8) | (data[crc_pos + 1] as u16);
+        let calculated_crc = Self::calculate_crc16(&data[..crc_pos]);
 
         if received_crc != calculated_crc {
             return Err(MupcError::new(
@@ -258,7 +266,7 @@ impl IntercoreFrame {
         }
 
         let payload_start = FrameHeader::FIXED_LENGTH;
-        let payload_end = data_len;
+        let payload_end = crc_pos;
         let payload = data[payload_start..payload_end].to_vec();
 
         Ok(Self {
