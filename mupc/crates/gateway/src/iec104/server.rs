@@ -180,8 +180,9 @@ impl Iec104Server {
 
             let mut buf = [0u8; 1024];
             let mut reader = tokio::io::BufReader::new(read_half);
+            let mut pending: Vec<u8> = Vec::new();
 
-            loop {
+            'outer: loop {
                 let read_result = tokio::time::timeout(
                     std::time::Duration::from_millis(timeout_ms),
                     reader.read(&mut buf),
@@ -195,27 +196,41 @@ impl Iec104Server {
                         break;
                     }
                     Ok(Ok(n)) => {
-                        let frame = match Iec104Frame::parse(&buf[..n]) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                error!("Frame parse error: {}", e);
-                                continue;
+                        pending.extend_from_slice(&buf[..n]);
+
+                        // 按 IEC104 帧长（length 字段 + 2）循环提取完整帧（处理半包/粘包）
+                        loop {
+                            if pending.len() < 2 {
+                                break;
                             }
-                        };
+                            let frame_len = (pending[1] as usize) + 2;
+                            if pending.len() < frame_len {
+                                break;
+                            }
 
-                        let mut conn_guard = read_conn.write().await;
-                        let mut w = read_write.lock().await;
-                        if let Err(e) = conn_guard
-                            .handle_frame(frame, &mut *w, handler.as_ref())
-                            .await
-                        {
-                            error!("Frame handling error: {}", e);
-                            break;
-                        }
-                        drop(w);
+                            let frame_bytes: Vec<u8> = pending.drain(..frame_len).collect();
+                            let frame = match Iec104Frame::parse(&frame_bytes) {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    error!("Frame parse error: {}", e);
+                                    continue;
+                                }
+                            };
 
-                        if conn_guard.state == ConnectionState::Disconnected {
-                            break;
+                            let mut conn_guard = read_conn.write().await;
+                            let mut w = read_write.lock().await;
+                            if let Err(e) = conn_guard
+                                .handle_frame(frame, &mut *w, handler.as_ref())
+                                .await
+                            {
+                                error!("Frame handling error: {}", e);
+                                break 'outer;
+                            }
+                            drop(w);
+
+                            if conn_guard.state == ConnectionState::Disconnected {
+                                break 'outer;
+                            }
                         }
                     }
                     Ok(Err(e)) => {
