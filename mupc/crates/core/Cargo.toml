@@ -16,6 +16,7 @@ once_cell.workspace = true
 chrono = { workspace = true }
 mupc-common = { path = "../common" }
 async-trait = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

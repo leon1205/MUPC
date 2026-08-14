@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/common",
     "crates/core",
+    "crates/mupc-core-bin",
     "crates/gateway",
     "crates/intercore",
     "crates/data-processing",
