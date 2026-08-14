@@ -154,9 +154,11 @@ async fn main() {
 /// 优雅退出流程：LIFO 逆序停止各子系统
 async fn graceful_shutdown(
     coord: &ServiceCoordinatorImpl,
-    _ctx: &startup::StartupContext,
+    ctx: &startup::StartupContext,
 ) {
     tracing::info!("停止所有子系统 (逆序)...");
     coord.stop_all().await;
+    // abort 后台任务（此前 _ctx 被忽略，background_tasks 永不 abort）
+    ctx.shutdown().await;
     tracing::info!("所有子系统已停止");
 }

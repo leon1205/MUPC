@@ -34,6 +34,16 @@ pub struct StartupContext {
     pub background_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+impl StartupContext {
+    /// 优雅退出：abort 所有后台任务
+    pub async fn shutdown(&self) {
+        tracing::info!("优雅退出：abort {} 个后台任务", self.background_tasks.len());
+        for handle in &self.background_tasks {
+            handle.abort();
+        }
+    }
+}
+
 /// IEC 104 命令处理器：转发主站控制命令到实时控制模块
 struct StrategyCommandHandler {
     intercore: Arc<mupc_intercore::IntercoreClient>,
