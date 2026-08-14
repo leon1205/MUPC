@@ -5,6 +5,9 @@
 
 use axum::{async_trait, extract::FromRequestParts, http::request::Parts, http::StatusCode};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::AppState;
 
 /// 用户角色
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,27 +62,34 @@ impl Default for RequireRole {
 }
 
 #[async_trait]
-impl<S> FromRequestParts<S> for RequireRole
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<Arc<AppState>> for RequireRole {
     type Rejection = StatusCode;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
         let session_id = parts
             .headers
             .get("X-Session-Id")
-            .and_then(|v| v.to_str().ok());
-
-        match session_id {
-            Some(id) if !id.is_empty() => {
-                tracing::debug!(session_id = %id, "AI 路由认证通过");
-                Ok(RequireRole::admin())
-            }
-            _ => {
+            .and_then(|v| v.to_str().ok())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
                 tracing::warn!("AI 路由认证失败: 缺少 X-Session-Id");
-                Err(StatusCode::UNAUTHORIZED)
-            }
-        }
+                StatusCode::UNAUTHORIZED
+            })?;
+
+        // 真正验证 session（存在 + 未过期），消除「任意非空字符串通过」漏洞
+        state
+            .session_manager
+            .validate(session_id)
+            .await
+            .map_err(|_| {
+                tracing::warn!("AI 路由认证失败: session 无效或已过期");
+                StatusCode::UNAUTHORIZED
+            })?;
+
+        tracing::debug!(session_id = %session_id, "AI 路由认证通过");
+        Ok(RequireRole::admin())
     }
 }
