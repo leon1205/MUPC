@@ -235,11 +235,8 @@ impl AiIntegrator {
 
         // v2.7: 发送双参数到实时控制模块
         if let Some(ref client) = self.intercore_client {
-            let strategy_mode = self
-                .current_mode()
-                .await
-                .map(|m| format!("{:?}", m))
-                .unwrap_or_else(|| "Unknown".to_string());
+            // strategy_mode：策略模式（基础/智能/兜底），此处为正常 AI 决策 = 智能
+            let strategy_mode = "intelligent".to_string();
 
             let cmd = DualParamCommand::new(
                 action.p_ref,
@@ -323,7 +320,7 @@ impl AiIntegrator {
                 action.p_ref,
                 action.k_droop,
                 true,
-                "Emergency",
+                "fallback",
             );
             match client.send_dual_param(&cmd).await {
                 Ok(_) => {
