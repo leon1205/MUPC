@@ -593,23 +593,46 @@ impl IntercoreServer {
                                 }
                                 IntercoreFrameType::ControlCmd => {
                                     info!("Received control command from {}", addr);
-                                    // P2-15: 解析 JSON payload
+                                    // 解析 JSON payload（按帧版本区分 v1.x / v2.0）
                                     if !frame.data.is_empty() {
-                                        match ControlCmdPayload::from_json(&frame.data) {
-                                            Ok(payload) => {
-                                                info!(
-                                                    "ControlCmd parsed: p_batt_set={:?}, q_batt_set={:?}, ai_ready={:?}, strategy_mode={:?}",
-                                                    payload.p_batt_set,
-                                                    payload.q_batt_set,
-                                                    payload.ai_ready,
-                                                    payload.strategy_mode,
-                                                );
+                                        match ControlCmdPayloadV2::detect_version(&frame.data) {
+                                            Ok(2) => {
+                                                match ControlCmdPayloadV2::from_json(&frame.data) {
+                                                    Ok(payload) => {
+                                                        info!(
+                                                            "ControlCmd v2 parsed: p_ref={:?}, k_droop={:?}, ai_ready={:?}, strategy_mode={:?}",
+                                                            payload.p_ref,
+                                                            payload.k_droop,
+                                                            payload.ai_ready,
+                                                            payload.strategy_mode,
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Failed to parse ControlCmd V2 payload: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
                                             }
-                                            Err(e) => {
-                                                warn!(
-                                                    "Failed to parse ControlCmd JSON payload: {}",
-                                                    e
-                                                );
+                                            _ => {
+                                                match ControlCmdPayload::from_json(&frame.data) {
+                                                    Ok(payload) => {
+                                                        info!(
+                                                            "ControlCmd v1 parsed: p_batt_set={:?}, q_batt_set={:?}, ai_ready={:?}, strategy_mode={:?}",
+                                                            payload.p_batt_set,
+                                                            payload.q_batt_set,
+                                                            payload.ai_ready,
+                                                            payload.strategy_mode,
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Failed to parse ControlCmd V1 payload: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                     }
