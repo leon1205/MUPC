@@ -645,6 +645,33 @@ impl AuditLogger {
 
         Ok(files)
     }
+
+    /// 清理早于指定时间的审计日志文件（跳过当前正在写入的文件）
+    pub fn purge_old(&self, before: DateTime<Utc>) -> Result<usize, SecurityError> {
+        let files = self.list_audit_files()?;
+        let mut removed = 0;
+        for file in files {
+            if file == self.current_file {
+                continue; // 跳过当前文件
+            }
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let date_str = name.strip_prefix("audit_").and_then(|s| s.strip_suffix(".jsonl"));
+            if let Some(date_str) = date_str {
+                if let Ok(naive) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    if let Some(file_date) = naive.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc()) {
+                        if file_date < before {
+                            if let Err(e) = fs::remove_file(&file) {
+                                tracing::warn!("删除审计日志 {} 失败: {}", file.display(), e);
+                            } else {
+                                removed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(removed)
+    }
 }
 
 impl Drop for AuditLogger {

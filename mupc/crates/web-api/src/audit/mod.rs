@@ -207,9 +207,11 @@ impl AuditLogger {
     ///
     /// 注意：当前实现不执行实际删除，仅返回 0。
     /// Phase 2+ 实现基于 retention_days 的自动清理。
-    pub async fn purge_old(&self, _before: DateTime<Utc>) -> Result<usize, String> {
-        tracing::info!("审计日志清理请求（Phase 2+ 实现自动清理）");
-        Ok(0)
+    pub async fn purge_old(&self, before: DateTime<Utc>) -> Result<usize, String> {
+        let guard = self.inner.lock().await;
+        guard
+            .purge_old(before)
+            .map_err(|e| format!("审计日志清理失败: {}", e))
     }
 
     /// 获取 Arc 克隆用于跨线程共享
