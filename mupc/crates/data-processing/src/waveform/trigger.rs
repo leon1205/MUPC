@@ -229,7 +229,9 @@ impl TriggerEngine {
         // 短路优先级最高
         if self.check_condition(
             0,
-            max_current > self.config.short_circuit_threshold,
+            max_current,
+            self.config.short_circuit_threshold,
+            true,
             timestamp_us,
         ) {
             return TriggerResult::ShortCircuit;
@@ -238,46 +240,64 @@ impl TriggerEngine {
         // 过压
         if self.check_condition(
             1,
-            max_voltage > self.config.over_voltage_threshold,
+            max_voltage,
+            self.config.over_voltage_threshold,
+            true,
             timestamp_us,
         ) {
             return TriggerResult::OverVoltage;
         }
 
-        // 欠压
-        if self.check_condition(
-            2,
-            max_voltage < self.config.under_voltage_threshold && max_voltage > 0.0,
-            timestamp_us,
-        ) {
+        // 欠压（值 > 0 才判定，避免断电误触发）
+        if max_voltage > 0.0
+            && self.check_condition(
+                2,
+                max_voltage,
+                self.config.under_voltage_threshold,
+                false,
+                timestamp_us,
+            )
+        {
             return TriggerResult::UnderVoltage;
         }
 
         // 过流
         if self.check_condition(
             3,
-            max_current > self.config.over_current_threshold,
+            max_current,
+            self.config.over_current_threshold,
+            true,
             timestamp_us,
         ) {
             return TriggerResult::OverCurrent;
         }
 
         // 频率过高
-        if self.check_condition(4, freq > self.config.frequency_high, timestamp_us) {
+        if self.check_condition(4, freq, self.config.frequency_high, true, timestamp_us) {
             return TriggerResult::FrequencyHigh;
         }
 
-        // 频率过低
-        if self.check_condition(
-            5,
-            freq < self.config.frequency_low && freq > 0.0,
-            timestamp_us,
-        ) {
+        // 频率过低（值 > 0 才判定）
+        if freq > 0.0
+            && self.check_condition(
+                5,
+                freq,
+                self.config.frequency_low,
+                false,
+                timestamp_us,
+            )
+        {
             return TriggerResult::FrequencyLow;
         }
 
         // 零序过流
-        if self.check_condition(6, i0.abs() > self.config.zero_seq_threshold, timestamp_us) {
+        if self.check_condition(
+            6,
+            i0.abs(),
+            self.config.zero_seq_threshold,
+            true,
+            timestamp_us,
+        ) {
             return TriggerResult::ZeroSeqOverCurrent;
         }
 
@@ -288,10 +308,35 @@ impl TriggerEngine {
     ///
     /// 实现防抖逻辑：需要连续 `debounce_samples` 次满足条件才真正触发。
     /// 触发后进入冷却期。
-    fn check_condition(&mut self, idx: usize, condition_met: bool, timestamp_us: i64) -> bool {
+    fn check_condition(
+        &mut self,
+        idx: usize,
+        raw_value: f64,
+        threshold: f64,
+        is_over: bool,
+        timestamp_us: i64,
+    ) -> bool {
+        // 回差：触发阈值与恢复阈值之间留出缓冲区，防止阈值附近抖动
+        let hysteresis = threshold * self.config.hysteresis_pct / 100.0;
+        let recover_threshold = if is_over {
+            threshold - hysteresis
+        } else {
+            threshold + hysteresis
+        };
+        let triggered = if is_over {
+            raw_value > threshold
+        } else {
+            raw_value < threshold
+        };
+        let recovered = if is_over {
+            raw_value < recover_threshold
+        } else {
+            raw_value > recover_threshold
+        };
+
         match self.states[idx] {
             ConditionState::Normal => {
-                if condition_met {
+                if triggered {
                     self.debounce_counters[idx] += 1;
                     if self.debounce_counters[idx] >= self.config.debounce_samples {
                         // 触发确认
@@ -310,24 +355,26 @@ impl TriggerEngine {
                 false
             }
             ConditionState::Triggered => {
-                if !condition_met {
+                if recovered {
                     self.states[idx] = ConditionState::HysteresisWaiting;
                     self.debounce_counters[idx] = 1;
                 }
                 false
             }
             ConditionState::HysteresisWaiting => {
-                if condition_met {
+                if triggered {
                     // 重新满足 → 回到触发态
                     self.states[idx] = ConditionState::Triggered;
                     self.debounce_counters[idx] = 0;
-                } else {
+                } else if recovered {
                     self.debounce_counters[idx] += 1;
                     if self.debounce_counters[idx] >= self.config.debounce_samples {
                         // 完全恢复
                         self.states[idx] = ConditionState::Normal;
                         self.debounce_counters[idx] = 0;
                     }
+                } else {
+                    self.debounce_counters[idx] = 0;
                 }
                 false
             }
