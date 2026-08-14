@@ -3,10 +3,16 @@
 //! Phase 3C: 将 AI 优化引擎与策略引擎集成。
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
+use crate::anti_reverse::AntiReverseStrategy;
+use crate::config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
+use crate::demand_control::DemandControlStrategy;
+use crate::peak_shaving::PeakShavingStrategy;
 use crate::south_command_sender::SouthCommandDispatcher;
+use crate::strategies::FallbackStrategy;
 use mupc_ai_engine::{
     AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource,
 };
+use mupc_data_processing::telemetry::DataPackage;
 use mupc_intercore::{DualParamCommand, IntercoreClient};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,6 +34,8 @@ pub struct AiIntegrator {
     last_valid_k_droop: RwLock<Option<f64>>,
     /// v2.6 双参数模式：降级状态
     fallback_active: RwLock<bool>,
+    /// v3.1: 最新遥测数据（南向采集循环写入，供兜底策略 evaluate）
+    latest_data: Arc<RwLock<Option<DataPackage>>>,
 }
 
 impl AiIntegrator {
@@ -40,6 +48,7 @@ impl AiIntegrator {
             last_valid_p_ref: RwLock::new(None),
             last_valid_k_droop: RwLock::new(None),
             fallback_active: RwLock::new(false),
+            latest_data: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -86,6 +95,45 @@ impl AiIntegrator {
     /// v2.6: 获取降级状态
     pub async fn is_fallback_active(&self) -> bool {
         *self.fallback_active.read().await
+    }
+
+    /// 设置最新遥测数据（南向采集循环调用，供兜底策略 evaluate）
+    pub async fn set_latest_data(&self, data: DataPackage) {
+        *self.latest_data.write().await = Some(data);
+    }
+
+    /// 运行本地兜底策略（AI 失效时）：防逆流→pv_limit、需量控制→load_shedding
+    async fn run_fallback_strategies(&self) -> Result<(), AiEngineError> {
+        let data = self.latest_data.read().await.clone();
+        let Some(data) = data else {
+            tracing::debug!("无遥测数据，跳过兜底策略");
+            return Ok(());
+        };
+
+        let anti_reverse = AntiReverseStrategy::new(AntiReverseConfig::default());
+        let demand = DemandControlStrategy::new(DemandControlConfig::default());
+        let _peak = PeakShavingStrategy::new(PeakShavingConfig::default());
+
+        let mut pv_limit = None;
+        let mut load_shedding = None;
+
+        if let Ok(cmd) = anti_reverse.evaluate(&data).await {
+            pv_limit = cmd.pv_limit;
+        }
+        if let Ok(cmd) = demand.evaluate(&data).await {
+            load_shedding = cmd.load_shedding;
+        }
+
+        if let Some(ref dispatcher) = self.south_dispatcher {
+            if let Some(pv) = pv_limit {
+                dispatcher.dispatch_pv_limit(pv, 1).await;
+            }
+            if let Some(ls) = load_shedding {
+                dispatcher.dispatch_load_shedding(ls, 1).await;
+            }
+        }
+
+        Ok(())
     }
 
     /// 初始化并加载模型
@@ -227,8 +275,16 @@ impl AiIntegrator {
         let manager = self.model_manager.read().await;
         let manager = manager.as_ref().ok_or(AiEngineError::ModelNotLoaded)?;
 
-        // 调用完整的 AI 决策周期
-        let action = manager.full_decision_cycle().await?;
+        // 调用完整的 AI 决策周期；失败（AI 失效）时降级到本地兜底策略
+        let action = match manager.full_decision_cycle().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("AI 决策失败，降级到本地兜底策略: {}", e);
+                self.set_fallback_active(true).await;
+                self.run_fallback_strategies().await?;
+                return Ok(());
+            }
+        };
 
         // 正常决策成功，复位降级状态（此前异常触发的 fallback_active 不会自动复位）
         self.set_fallback_active(false).await;

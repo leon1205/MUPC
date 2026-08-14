@@ -423,6 +423,7 @@ pub async fn initialize_all(
         let wb = write_buffer.clone();
         let g = iec104_server.clone();
         let rt_source = ai_engine.realtime_source();
+        let ai_int = ai_integrator.clone();
         guard.0.push(tokio::spawn(async move {
             // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
             let mut ioa_seq = 0u32;
@@ -434,6 +435,8 @@ pub async fn initialize_all(
                             let pkg = dataframe_to_datapackage(&frame);
                             // 注入实时数据到 AI 融合引擎（供 fuse 使用）
                             *rt_source.write().await = Some(datapackage_to_realtime_data(&pkg));
+                            // 注入遥测到 AiIntegrator（供本地兜底策略 evaluate）
+                            ai_int.set_latest_data(pkg.clone()).await;
                             for point in datapackage_to_telemetry_points(&pkg, name) {
                                 if let Err(e) = wb.buffer_telemetry(point).await {
                                     tracing::debug!("遥测写入失败: {}", e);
