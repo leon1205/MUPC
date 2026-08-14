@@ -301,13 +301,20 @@ pub async fn initialize_all(
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
 
+    // SSE 推送服务（提前创建，供 AI 决策循环推送决策事件）
+    let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
+
     // AI 决策循环：周期执行决策并分发到核间/南向（RL 决策 <1s）
     let decision_integrator = ai_integrator.clone();
+    let decision_sse = sse_push.clone();
     guard.0.push(tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             if let Err(e) = decision_integrator.dispatch_ai_decision().await {
                 tracing::debug!("AI 决策周期失败: {}", e);
+            } else {
+                // 推送 AI 决策事件（SSE 生产者）
+                let _ = decision_sse.push_ai_decision("AI 决策完成");
             }
         }
     }));
@@ -389,7 +396,6 @@ pub async fn initialize_all(
     let status_handler = mupc_web_api::routes::StatusHandler::new();
     let logs_handler = mupc_web_api::routes::LogsHandler::new(config.system.log_dir.clone());
     let ws_streamer = mupc_web_api::WsLogStreamer::new();
-    let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
     let audit_logger = Arc::new(
         mupc_web_api::AuditLogger::new(
             config.system.log_dir.join("audit").to_str().unwrap_or("/opt/mupc/logs/audit"),
