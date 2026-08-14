@@ -52,6 +52,7 @@ pub trait MqttBridge: Send + Sync {
 // Re-export commonly used types
 pub use device::{Device, DeviceCommand};
 pub use errors::{BusError, DeviceError, PluginError, RegistryError};
+// 抽象层预留：MessageBus/DeviceRegistry 未接线，被简化实现（SouthCommandDispatcher + Rs485Device）取代
 pub use message_bus::{MessageBus, MessageHandler, NoOpMessageHandler};
 pub use plugin::{NoOpPlugin, Plugin, PluginState};
 pub use plugin_loader::PluginLoader;

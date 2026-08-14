@@ -110,6 +110,8 @@ mupc-storage (存储 crate，新增)
   SQLite → gateway → IEC 104/MQTT 北向上送(定时/变更触发)
 ```
 
+> **实现说明（2026-08-14）**：当前 Phase 1 实现中，遥测数据流为**南向设备直接采集**（`rs485-plugin` 的 `Rs485Device.read()` → 采集循环 → `DataPackage` → WriteBuffer + gateway 北向上送 + AI 融合引擎），尚未经 intercore 中转。`intercore → DataCollector` 数据源为 Phase 2+ 演进方向（接入实时控制模块后切换）。DataCollector/DataReporter/MessageBus 组件保留作为 Phase 2+ 组件化改造基础。
+
 ---
 
 ## 2. 遥测采集设计

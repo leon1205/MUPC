@@ -467,15 +467,14 @@ impl Default for ChargerHandler {
 // 模块导出
 // ============================================================================
 
-/// SouthDevice 泛型实现标记
-///
-/// 用于标记实现了 SouthDevice trait 的类型
+/// 抽象层预留：以下三个 Marker 类型为泛型实现标记（`pub type = ()`），
+/// 当前未接线，被简化实现取代，保留待 Phase 2+ 泛型化。
 pub type SouthDeviceMarker = ();
 
-/// ProtocolHandler 泛型实现标记
+/// ProtocolHandler 泛型实现标记（抽象层预留）
 pub type ProtocolHandlerMarker = ();
 
-/// HplcDriver 泛型实现标记
+/// HplcDriver 泛型实现标记（抽象层预留）
 pub type HplcDriverMarker = ();
 
 // Re-export all public types
