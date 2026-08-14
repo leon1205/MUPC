@@ -168,6 +168,14 @@ impl Iec104Frame {
             .read_u8()
             .map_err(|_| MupcError::new(ErrorCode::FrameParseError, "Invalid length", "gateway"))?;
 
+        if length < 4 {
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                format!("Invalid length: {} (must be >= 4)", length),
+                "gateway",
+            ));
+        }
+
         if data.len() < (length as usize + 2) {
             return Err(MupcError::new(
                 ErrorCode::FrameParseError,
@@ -561,6 +569,14 @@ mod tests {
     fn test_parse_frame_too_short() {
         // 帧太短
         let data = [0x68, 0x04];
+        let result = Iec104Frame::parse(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_length_too_small() {
+        // length < 4 的恶意帧不应 panic（此前 (length as usize) - 4 下溢），应返回错误
+        let data = [0x68, 0x02, 0x07, 0x00, 0x00, 0x00]; // length=2 < 4
         let result = Iec104Frame::parse(&data);
         assert!(result.is_err());
     }
