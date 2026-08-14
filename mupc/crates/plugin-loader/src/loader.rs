@@ -40,7 +40,6 @@ impl PluginLoaderImpl {
     }
 
     /// 查找插件路径
-    #[allow(dead_code)]
     fn find_plugin_path(&self, plugin_name: &str) -> Option<std::path::PathBuf> {
         let paths = self.search_paths.read();
         for path in paths.iter() {
@@ -60,9 +59,20 @@ impl Default for PluginLoaderImpl {
 }
 
 impl PluginLoader for PluginLoaderImpl {
-    fn load(&self, plugin_path: &str, _config: serde_json::Value) -> Result<(), PluginError> {
-        let path = Path::new(plugin_path);
-        let plugin_name = path
+    fn load(&self, plugin_path: &str, config: serde_json::Value) -> Result<(), PluginError> {
+        // 解析插件路径：优先用传入路径，若文件不存在则在搜索路径中查找
+        let resolved_path = if Path::new(plugin_path).exists() {
+            std::path::PathBuf::from(plugin_path)
+        } else if let Some(found) = self.find_plugin_path(plugin_path) {
+            found
+        } else {
+            return Err(PluginError::load_failed(format!(
+                "插件 {} 未找到（检查搜索路径）",
+                plugin_path
+            )));
+        };
+
+        let plugin_name = resolved_path
             .file_stem()
             .and_then(|s| s.to_str())
             .ok_or_else(|| PluginError::load_failed("无效的插件路径"))?
@@ -80,7 +90,7 @@ impl PluginLoader for PluginLoaderImpl {
         }
 
         // 加载动态库
-        let library = unsafe { Library::new(plugin_path) }
+        let library = unsafe { Library::new(&resolved_path) }
             .map_err(|e| PluginError::LoadFailed(format!("加载动态库失败: {}", e)))?;
 
         // 获取插件符号 - 使用 unsafe 块
@@ -102,8 +112,16 @@ impl PluginLoader for PluginLoaderImpl {
             return Err(PluginError::load_failed("插件创建返回空指针"));
         }
 
-        let plugin = unsafe { Arc::from(Box::from_raw(plugin_ptr)) };
+        let plugin: Arc<dyn Plugin> = unsafe { Arc::from(Box::from_raw(plugin_ptr)) };
         let meta = unsafe { meta_fn() };
+
+        // 生命周期：Load → Init → Start
+        plugin
+            .init(config)
+            .map_err(|e| PluginError::load_failed(format!("插件初始化失败: {}", e)))?;
+        plugin
+            .start()
+            .map_err(|e| PluginError::load_failed(format!("插件启动失败: {}", e)))?;
 
         // 存储插件
         let handle = PluginHandle {
@@ -119,8 +137,10 @@ impl PluginLoader for PluginLoaderImpl {
 
     fn unload(&self, plugin_name: &str) -> Result<(), PluginError> {
         let mut plugins = self.plugins.write();
-        if let Some(_handle) = plugins.remove(plugin_name) {
-            // handle 被 drop，library 会被卸载
+        if let Some(handle) = plugins.remove(plugin_name) {
+            // 停止插件（shutdown 需 Box<Self>，与 Arc 共享冲突，暂以 drop 卸载）
+            let _ = handle.plugin.stop();
+            drop(handle); // handle 被 drop，library 会被卸载
             Ok(())
         } else {
             Err(PluginError::not_found(plugin_name))
