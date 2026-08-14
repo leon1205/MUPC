@@ -490,8 +490,8 @@ impl Rs485Device {
             &cmd[2..],
             self.config.crc_mode,
         );
-        cmd.push((crc >> 8) as u8);
         cmd.push(crc as u8);
+        cmd.push((crc >> 8) as u8);
 
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
 
@@ -538,8 +538,8 @@ impl Rs485Device {
             &cmd[2..],
             self.config.crc_mode,
         );
-        cmd.push((crc >> 8) as u8);
         cmd.push(crc as u8);
+        cmd.push((crc >> 8) as u8);
 
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
 
@@ -595,8 +595,8 @@ impl Device for Rs485Device {
             &cmd[2..],
             self.config.crc_mode,
         );
-        cmd.push((crc >> 8) as u8);
         cmd.push(crc as u8);
+        cmd.push((crc >> 8) as u8);
 
         self.send_frame(&cmd)
             .map_err(|e| DeviceError::Other(e.to_string()))

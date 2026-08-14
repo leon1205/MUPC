@@ -43,7 +43,7 @@ impl Frame {
 
         let crc_from_data = match crc_mode {
             CrcMode::Crc16Modbus => {
-                let crc = ((buf[buf.len() - 2] as u16) << 8) | (buf[buf.len() - 1] as u16);
+                let crc = ((buf[buf.len() - 1] as u16) << 8) | (buf[buf.len() - 2] as u16);
                 let calculated = Self::calculate_crc_raw(&buf[..buf.len() - 2], crc_mode);
                 if crc != calculated {
                     return Err(Rs485Error::crc_failed("CRC 校验失败"));
@@ -51,7 +51,7 @@ impl Frame {
                 crc
             }
             CrcMode::Crc16Xmodem => {
-                let crc = ((buf[buf.len() - 2] as u16) << 8) | (buf[buf.len() - 1] as u16);
+                let crc = ((buf[buf.len() - 1] as u16) << 8) | (buf[buf.len() - 2] as u16);
                 let calculated = Self::calculate_crc_raw(&buf[..buf.len() - 2], crc_mode);
                 if crc != calculated {
                     return Err(Rs485Error::crc_failed("CRC 校验失败"));
@@ -75,8 +75,8 @@ impl Frame {
         result.extend_from_slice(&self.data);
 
         let crc = Self::calculate_crc(self.addr, self.func_code, &self.data, crc_mode);
-        result.push((crc >> 8) as u8);
         result.push(crc as u8);
+        result.push((crc >> 8) as u8);
 
         result
     }
