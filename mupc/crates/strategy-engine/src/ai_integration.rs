@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 /// web-api 通过此门面访问 ai-engine，不直接调用 ai-engine。
 /// 承担安全校验、指令兜底校验职责。
 pub struct AiIntegrator {
-    model_manager: Arc<RwLock<Option<ModelManager>>>,
+    model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
     /// 南向命令分发器（用于分发 pv_limit 和 load_shedding）
     south_dispatcher: Option<Arc<SouthCommandDispatcher>>,
@@ -96,8 +96,14 @@ impl AiIntegrator {
         let manager = ModelManager::new(config);
         manager.load_models().await?;
         *self.status.write().await = ModelStatus::Ready;
-        *self.model_manager.write().await = Some(manager);
+        *self.model_manager.write().await = Some(Arc::new(manager));
         Ok(())
+    }
+
+    /// 注入已创建的 ModelManager（启动编排器复用已加载的模型实例）
+    pub async fn set_model_manager(&self, manager: Arc<ModelManager>) {
+        *self.model_manager.write().await = Some(manager);
+        *self.status.write().await = ModelStatus::Ready;
     }
 
     // ── 查询接口 ──

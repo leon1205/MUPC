@@ -170,8 +170,26 @@ pub async fn initialize_all(
     tracing::info!("[08/14] 初始化策略引擎...");
     let mut ai_integrator = mupc_strategy_engine::AiIntegrator::new();
     ai_integrator.set_intercore_client(intercore.clone());
+    ai_integrator.set_south_dispatcher(Arc::new(
+        mupc_strategy_engine::SouthCommandDispatcher::with_mock(
+            "pv_inverter_001",
+            "load_ctrl_001",
+        ),
+    ));
+    ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
+
+    // AI 决策循环：周期执行决策并分发到核间/南向（RL 决策 <1s）
+    let decision_integrator = ai_integrator.clone();
+    guard.0.push(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if let Err(e) = decision_integrator.dispatch_ai_decision().await {
+                tracing::debug!("AI 决策周期失败: {}", e);
+            }
+        }
+    }));
 
     // ── 9. IEC 104 网关 ──
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
