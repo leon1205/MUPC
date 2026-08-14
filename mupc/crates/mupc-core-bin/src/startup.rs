@@ -280,6 +280,7 @@ pub async fn initialize_all(
     // TODO (Phase 2+): 加载 TLS 证书和 SM2/SM4 密钥
     // 当前: mupc-security 模块无 SecurityModule 类型
     tracing::info!("安全模块初始化 (stub): cert_dir={}", config.system.cert_dir.display());
+    // 占位：security 模块无 SecurityModule 实例，国密/TLS 未真正运行（Phase 2+）
     coord.register_service("security", ServiceStatus::Running);
 
     // ── 3. 持久化存储 ──
@@ -628,6 +629,7 @@ pub async fn initialize_all(
     // ── 14. 近场无线 ──
     tracing::info!("[14/14] 初始化近场无线...");
     // TODO (Phase 2+): 实例化 NoOp 无线驱动
+    // 占位：无线驱动未实例化，ECDH/链路加密未真正运行（Phase 2+）
     coord.register_service("wireless", ServiceStatus::Running);
 
     tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 2);
