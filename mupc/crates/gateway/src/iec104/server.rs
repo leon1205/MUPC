@@ -96,12 +96,18 @@ impl Iec104Server {
                                 connections.write().await.push(conn.clone());
 
                                 // 处理连接
-                                let conn_for_task = conn;
-                                let _handler = command_handler.clone();
+                                let handler = command_handler.clone();
+                                let cleanup_connections = connections.clone();
+                                let conn_for_cleanup = conn.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(conn_for_task, _handler).await {
+                                    if let Err(e) = Self::handle_connection(conn, handler).await {
                                         error!("Connection error: {}", e);
                                     }
+                                    // 连接结束（正常或异常），从列表移除，避免连接泄漏
+                                    cleanup_connections
+                                        .write()
+                                        .await
+                                        .retain(|c| !Arc::ptr_eq(c, &conn_for_cleanup));
                                 });
                             }
                             Err(e) => {
@@ -123,7 +129,7 @@ impl Iec104Server {
     /// 处理单个连接
     async fn handle_connection(
         conn: Arc<RwLock<Connection>>,
-        _handler: Arc<dyn CommandHandler>,
+        handler: Arc<dyn CommandHandler>,
     ) -> Result<(), MupcError> {
         let stream = conn.write().await.stream.take().ok_or_else(|| {
             MupcError::new(
@@ -159,7 +165,10 @@ impl Iec104Server {
                         };
 
                         let mut conn_guard = read_conn.write().await;
-                        if let Err(e) = conn_guard.handle_frame(frame, &mut write_half).await {
+                        if let Err(e) = conn_guard
+                            .handle_frame(frame, &mut write_half, handler.as_ref())
+                            .await
+                        {
                             error!("Frame handling error: {}", e);
                             break;
                         }

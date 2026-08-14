@@ -211,21 +211,18 @@ impl Iec104Frame {
     }
 
     /// 确定帧类型
-    fn determine_frame_type(c1: u8, c2: u8, c3: u8, c4: u8) -> FrameType {
-        // U 帧: 3 字节全为 0x07 或 0x13
-        if c1 == 0x07 && c2 == 0x00 && c3 == 0x07 && c4 == 0x00 {
-            return FrameType::UFrame;
-        }
-        if c1 == 0x13 && c2 == 0x00 && c3 == 0x13 && c4 == 0x00 {
+    fn determine_frame_type(c1: u8, _c2: u8, _c3: u8, _c4: u8) -> FrameType {
+        // U 帧: 控制字段低 2 位 = 0b11（bit0=1, bit1=1）
+        if c1 & 0x03 == 0x03 {
             return FrameType::UFrame;
         }
 
-        // S 帧: 第 1 字节为 0x01
-        if c1 == 0x01 {
+        // S 帧: 控制字段 bit0 = 1, bit1 = 0
+        if c1 & 0x01 == 0x01 {
             return FrameType::SFrame;
         }
 
-        // I 帧: 其他情况
+        // I 帧: bit0 = 0
         FrameType::IFrame
     }
 
@@ -245,9 +242,9 @@ impl Iec104Frame {
 
     /// 创建 S 帧（确认 I 帧）
     pub fn make_s_frame(send_seq: u16, recv_seq: u16) -> Vec<u8> {
-        let s1 = ((send_seq * 2) & 0xFE) as u8;
+        let s1 = (((send_seq << 1) & 0xFE) | 0x01) as u8;
         let s2 = 0x00;
-        let s3 = (((recv_seq * 2) + 1) & 0xFE) as u8;
+        let s3 = (((recv_seq << 1) & 0xFE) | 0x01) as u8;
         let s4 = 0x00;
 
         vec![0x68, 0x04, s1, s2, s3, s4]

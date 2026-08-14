@@ -50,7 +50,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
-use super::{protocol::FrameType, protocol::UFrameType, Iec104Frame};
+use super::command::{CommandHandler, CommandType, ControlCommand};
+use super::{protocol::FrameType, protocol::UFrameType, AsduHeader, Iec104Frame, Ioa, TypeId};
 
 /// 连接状态
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,6 +90,7 @@ impl Connection {
         &mut self,
         frame: Iec104Frame,
         writer: &mut (impl AsyncWriteExt + Unpin),
+        handler: &dyn CommandHandler,
     ) -> Result<(), mupc_common::MupcError> {
         match frame.frame_type {
             FrameType::UFrame => {
@@ -100,7 +102,7 @@ impl Connection {
                 self.recv_seq = frame.send_sequence();
             }
             FrameType::IFrame => {
-                self.handle_i_frame(frame, writer).await?;
+                self.handle_i_frame(frame, writer, handler).await?;
             }
         }
         Ok(())
@@ -177,6 +179,7 @@ impl Connection {
         &mut self,
         frame: Iec104Frame,
         writer: &mut (impl AsyncWriteExt + Unpin),
+        handler: &dyn CommandHandler,
     ) -> Result<(), mupc_common::MupcError> {
         let send_seq = frame.send_sequence();
         let _recv_seq = frame.recv_sequence();
@@ -208,6 +211,21 @@ impl Connection {
             header.type_id, header.cot.0
         );
 
+        // 控制方向命令：解析并调用命令处理器
+        if let Some(cmd) = parse_control_command(&header, &frame.asdu) {
+            match handler.handle_command(cmd).await {
+                Ok(response) => {
+                    info!(
+                        "命令执行成功: cmd_id={}, success={}, msg={}",
+                        response.cmd_id, response.success, response.message
+                    );
+                }
+                Err(e) => {
+                    warn!("命令执行失败: {}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -215,4 +233,54 @@ impl Connection {
     pub fn set_heartbeat_interval(&mut self, secs: u64) {
         self.heartbeat_interval_secs = secs.clamp(1, 60);
     }
+}
+
+/// 从 ASDU 解析控制命令
+///
+/// ASDU 布局：type_id(1) sq(1) cot(1) orig_addr(2) | ioa(3) cmd_value...
+/// 控制方向 TypeId：单点/双点遥控、调节命令（带/不带时标）。
+fn parse_control_command(header: &AsduHeader, asdu: &[u8]) -> Option<ControlCommand> {
+    if asdu.len() < 8 {
+        return None;
+    }
+
+    let ioa = Ioa::new(asdu[5], asdu[6], asdu[7]);
+    let cmd_id = ioa.value() as u16;
+
+    let (cmd_type, switch_state, p_set, q_set) = match header.type_id {
+        TypeId::CScNa1 | TypeId::CScTa1 => {
+            if asdu.len() < 9 {
+                return None;
+            }
+            let state = asdu[8] & 0x01 == 0x01;
+            (CommandType::SwitchControl, Some(state), None, None)
+        }
+        TypeId::CDcNa1 | TypeId::CDcTa1 => {
+            if asdu.len() < 9 {
+                return None;
+            }
+            let state = (asdu[8] & 0x03) == 0x02;
+            (CommandType::SwitchControl, Some(state), None, None)
+        }
+        TypeId::CSeNa1 | TypeId::CSeTa1 => {
+            if asdu.len() < 10 {
+                return None;
+            }
+            let bits = ((asdu[9] as u32) << 8) | (asdu[8] as u32);
+            let value = f32::from_bits(bits) as f64;
+            (CommandType::PowerRegulation, None, Some(value), None)
+        }
+        _ => return None,
+    };
+
+    Some(ControlCommand {
+        cmd_id,
+        cmd_type,
+        p_set,
+        q_set,
+        switch_state,
+        priority: 0,
+        k_value: None,
+        deadband: None,
+    })
 }
