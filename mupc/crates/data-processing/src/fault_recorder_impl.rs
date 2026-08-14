@@ -17,6 +17,10 @@ pub enum FaultType {
     BatteryUnderSoc,
     GridOverload,
     GridReverse,
+    OverVoltage,
+    UnderVoltage,
+    OverCurrent,
+    FrequencyAbnormal,
     PvOutputLimit,
     Unknown,
 }
@@ -28,6 +32,10 @@ impl FaultType {
             FaultType::BatteryUnderSoc => "BATTERY_UNDER_SOC",
             FaultType::GridOverload => "GRID_OVERLOAD",
             FaultType::GridReverse => "GRID_REVERSE",
+            FaultType::OverVoltage => "OVER_VOLTAGE",
+            FaultType::UnderVoltage => "UNDER_VOLTAGE",
+            FaultType::OverCurrent => "OVER_CURRENT",
+            FaultType::FrequencyAbnormal => "FREQUENCY_ABNORMAL",
             FaultType::PvOutputLimit => "PV_OUTPUT_LIMIT",
             FaultType::Unknown => "UNKNOWN",
         }
@@ -206,17 +214,17 @@ impl FaultRecorderImpl {
 
     fn determine_fault_type(&self, condition: &FaultCondition) -> FaultType {
         if condition.over_voltage.is_some() && condition.over_voltage.unwrap() > 420.0 {
-            return FaultType::GridOverload;
+            return FaultType::OverVoltage;
         }
         if condition.over_current.is_some() && condition.over_current.unwrap() > 150.0 {
-            return FaultType::BatteryOverTemp;
+            return FaultType::OverCurrent;
         }
         if condition.under_voltage.is_some() && condition.under_voltage.unwrap() < 200.0 {
-            return FaultType::BatteryUnderSoc;
+            return FaultType::UnderVoltage;
         }
         if let Some(freq) = condition.frequency_abnormal {
             if !(49.5..=50.5).contains(&freq) {
-                return FaultType::GridReverse;
+                return FaultType::FrequencyAbnormal;
             }
         }
         FaultType::Unknown
