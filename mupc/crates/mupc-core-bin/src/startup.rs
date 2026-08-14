@@ -499,18 +499,30 @@ pub async fn initialize_all(
 
     // ── 13. MQTT 桥接 ──
     tracing::info!("[13/14] 初始化 MQTT 桥接...");
-    let _local_mqtt = mupc_mqtt_bridge::LocalMqttClient::new(
+    let local_mqtt = mupc_mqtt_bridge::LocalMqttClient::new(
         &mupc_mqtt_bridge::LocalMqttConfig::default(),
     )
     .map(Arc::new)
     .inspect_err(|e| tracing::warn!("本地 MQTT 客户端初始化失败: {}", e))
     .ok();
-    let _north_mqtt = mupc_mqtt_bridge::NorthMqttClient::new(
+    let north_mqtt = mupc_mqtt_bridge::NorthMqttClient::new(
         &mupc_mqtt_bridge::NorthMqttConfig::default(),
     )
     .map(Arc::new)
     .inspect_err(|e| tracing::warn!("北向 MQTT 客户端初始化失败: {}", e))
     .ok();
+
+    // 启动 MQTT 事件循环（此前创建后立即 drop，从不运行）
+    if let Some(local) = local_mqtt {
+        guard.0.push(tokio::spawn(async move {
+            let _ = local.run().await;
+        }));
+    }
+    if let Some(north) = north_mqtt {
+        guard.0.push(tokio::spawn(async move {
+            let _ = north.run().await;
+        }));
+    }
     coord.register_service("mqtt_bridge", ServiceStatus::Running);
 
     // ── 14. 近场无线 ──
