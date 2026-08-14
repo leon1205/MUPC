@@ -887,6 +887,7 @@ pub enum FrameType {
     ControlRsp = 0x0011,
     StatusReport = 0x0020,
     DataUpload = 0x0030,
+    SafetyOverride = 0x0040,
     Unknown = 0xFFFF,
 }
 

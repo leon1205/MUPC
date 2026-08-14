@@ -697,6 +697,13 @@ CREATE INDEX idx_audit_action_type ON audit_log(action_type);
 - 启用 SQLite WAL 模式以支持并发读
 - 保留期限：不少于 365 天
 
+**自动清理流程（保留期后）：**
+
+- 保留期内（365 天）审计日志不可删改，外部仅 `INSERT`/`SELECT`（见上「安全约束」）
+- 保留期后由后台定时任务自动清理：每日低峰执行，删除 `timestamp < now - 365 天` 的过期记录
+- 分批执行：单次 `DELETE ... LIMIT 1000` + 事务，避免长事务锁表影响查询
+- 清理动作仅由内部任务执行，不暴露 `DELETE` 接口给外部，满足 §4.5.4「审计日志保留 365 天」验收项
+
 #### 4.5.3 AuditLogger 接口
 
 ```rust

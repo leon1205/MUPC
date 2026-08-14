@@ -146,22 +146,37 @@ pub enum SimResponse {
 }
 ```
 
-### 3.3 动作帧 — `ActionFrame` (TCP 二进制)
+### 3.3 动作帧 — `ActionFrame` (复用 intercore 64 字节帧)
+
+> sim-bridge 接收 MUPC 通过核间通信下发的 `ControlCmd` 帧，帧格式**复用 intercore 的 `IntercoreFrame`**（见《10-MUPC-核间通信-设计文档》§3.2/§3.4），而非自定义二进制帧。
 
 ```rust
-pub const ACTION_FRAME_LEN: usize = 26;
+/// 与 intercore/protocol.rs 的 FRAME_FIXED_LENGTH 保持一致
+pub const ACTION_FRAME_LEN: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct ActionFrame {
-    pub frame_id: u32,        // bytes 0..4, BE
-    pub cmd_type: u8,         // byte 4, 0x01 = control
-    pub reserved: u8,         // byte 5, 0x00
-    pub payload_len: u16,     // bytes 6..8, BE, =16
-    pub p_ref: f64,           // bytes 8..16, BE, IEEE754
-    pub k_droop: f64,         // bytes 16..24, BE, IEEE754
-    pub crc16: u16,           // bytes 24..26, BE, CRC-16/MODBUS
+    pub magic: u16,        // bytes 0..2,  BE, = 0xAA55
+    pub length: u16,       // bytes 2..4,  BE, = 64
+    pub frame_type: u16,   // bytes 4..6,  BE, = 0x0010 (ControlCmd)
+    pub seq_no: u16,       // bytes 6..8,  BE
+    pub p_ref: f64,        // 从 JSON payload 反序列化
+    pub k_droop: f64,      // 从 JSON payload 反序列化
+    pub crc16: u16,        // CRC-16/MODBUS (BE)
 }
 ```
+
+**帧布局（64 字节）：**
+
+| 偏移 | 字段 | 大小 | 说明 |
+|------|------|:--:|------|
+| 0..2 | magic | 2B | 0xAA55 |
+| 2..4 | length | 2B | 帧总长度 = 64 |
+| 4..6 | frame_type | 2B | 0x0010 = ControlCmd |
+| 6..8 | seq_no | 2B | 序列号 |
+| 8..8+N | payload | N B | JSON：`{"p_ref": f64, "k_droop": f64}`（`ControlCmdPayloadV2`） |
+| 8+N..8+N+2 | crc16 | 2B | CRC-16/MODBUS，覆盖 header + payload |
+| 其余 | padding | — | 0x00 补齐到 64 字节 |
 
 ### 3.4 Episode 指标 — `EpisodeMetrics`
 
@@ -386,25 +401,30 @@ pub enum ReadError {
 pub const ACTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl ActionFrame {
-    pub fn parse(buf: &[u8; ACTION_FRAME_LEN]) -> Result<Self> {
-        let frame_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let cmd_type = buf[4];
-        let reserved = buf[5];
-        let payload_len = u16::from_be_bytes([buf[6], buf[7]]);
-        let p_ref = f64::from_be_bytes(buf[8..16].try_into().unwrap());
-        let k_droop = f64::from_be_bytes(buf[16..24].try_into().unwrap());
-        let crc16 = u16::from_be_bytes([buf[24], buf[25]]);
+    pub fn parse(buf: &[u8; ACTION_FRAME_LEN]) -> Result<Self, SimBridgeError> {
+        // 1. 帧头校验
+        let magic = u16::from_be_bytes([buf[0], buf[1]]);
+        if magic != 0xAA55 { return Err(SimBridgeError::InvalidMagic); }
+        let length = u16::from_be_bytes([buf[2], buf[3]]);
+        let frame_type = u16::from_be_bytes([buf[4], buf[5]]);
+        if frame_type != 0x0010 { return Err(SimBridgeError::UnexpectedFrameType); }
+        let seq_no = u16::from_be_bytes([buf[6], buf[7]]);
 
-        // CRC 校验
-        let computed = crc16_modbus(&buf[..24]);
+        // 2. 提取 JSON payload，反序列化 p_ref / k_droop
+        //    payload 位于 header 之后、CRC 之前，实际长度由 length 字段界定
+        let v: ControlCmdPayloadV2 = serde_json::from_slice(payload)?;
+
+        // 3. CRC-16/MODBUS 校验（覆盖 header + payload）
+        let computed = crc16_modbus(covered_bytes);
         if crc16 != computed {
             return Err(SimBridgeError::CrcMismatch { expected: computed, actual: crc16 });
         }
-        // 物理约束 clamp (PRD §2.3)
-        let p_ref = p_ref.clamp(-50.0, 50.0);
-        let k_droop = k_droop.clamp(0.0, 30.0);
 
-        Ok(Self { frame_id, cmd_type, reserved, payload_len, p_ref, k_droop, crc16 })
+        // 4. 物理约束 clamp (PRD §2.3)
+        let p_ref = v.p_ref.clamp(-50.0, 50.0);
+        let k_droop = v.k_droop.clamp(0.0, 30.0);
+
+        Ok(Self { magic, length, frame_type, seq_no, p_ref, k_droop, crc16 })
     }
 }
 ```
@@ -596,7 +616,7 @@ mupc/Cargo.toml                             # workspace members: + "crates/sim-b
 | 模块 | 测试类型 | Mock 方式 | 覆盖目标 |
 |------|---------|---------|---------|
 | `config.rs` | 单元 | 提供 valid/invalid YAML 文件 | 必填字段检测 / 默认值 / 路径解析 |
-| `action_server.rs` | 单元 | 用 `tokio::net::TcpStream` 模拟客户端发送 26 字节帧 | 正常帧解析 / CRC 错误 / 连接断开 / 30s 超时 |
+| `action_server.rs` | 单元 | 用 `tokio::net::TcpStream` 模拟客户端发送 64 字节 intercore ControlCmd 帧 | 正常帧解析 / magic 错误 / CRC 错误 / 连接断开 / 30s 超时 |
 | `py_engine.rs` | 单元 | 用 `tokio::process::Command` 启动 mock Python 脚本（echo JSONL） | spawn 成功 / JSONL 解析 / 超时 / EOF 检测 / 质量崩溃重启 (最多3次) |
 | `mqtt.rs` | 单元 | 用 `rumqttc` 连接本地 mosquitto (CI 中安装) | connect / publish / EventLoop 健康检查 / 连续失败计数 |
 | `metrics.rs` | 单元 | 构造 Snapshot 数组 | min/max/avg/p99 计算 / JSON 导出 / reset_episode 清零 |
