@@ -142,6 +142,35 @@ fn dataframe_to_datapackage(frame: &device_trait::DataFrame) -> mupc_data_proces
     }
 }
 
+/// DataPackage → RealtimeData（FIXME: 简化映射，部分字段用近似值/默认值）
+fn datapackage_to_realtime_data(
+    pkg: &mupc_data_processing::DataPackage,
+) -> mupc_ai_engine::RealtimeData {
+    let soc = pkg.battery.soc.unwrap_or(75.0) / 100.0; // 归一化到 [0,1]
+    let pv = pkg.device_status.pv_power.unwrap_or(0.0);
+    let load = pkg.device_status.load_power.unwrap_or(0.0);
+    let active = pkg.electrical.active_power.unwrap_or(0.0);
+    let voltage_pu = pkg.electrical.voltage.unwrap_or(380.0) / 380.0; // 归一化到 1.0 附近
+    mupc_ai_engine::RealtimeData {
+        battery_soc: soc,
+        pv_power: pv,
+        load_power: load,
+        grid_power: active,
+        transformer_load: (load / 200.0).clamp(0.0, 1.0),
+        battery_power: active,
+        voltage_phase_a: voltage_pu,
+        voltage_phase_b: voltage_pu,
+        voltage_phase_c: voltage_pu,
+        current_demand: active,
+        peak_demand_this_month: 0.0,
+        q_realtime_margin: 0.5,
+        safety_override_active: false,
+        safety_override_p_ref: None,
+        safety_override_consecutive: 0,
+        safety_override_ratio: 0.0,
+    }
+}
+
 /// DataPackage → 遥测点列表（FIXME: 指标映射根据点表确定）
 fn datapackage_to_telemetry_points(
     pkg: &mupc_data_processing::DataPackage,
@@ -340,6 +369,7 @@ pub async fn initialize_all(
     if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
         let wb = write_buffer.clone();
         let g = iec104_server.clone();
+        let rt_source = ai_engine.realtime_source();
         guard.0.push(tokio::spawn(async move {
             // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
             let mut ioa_seq = 0u32;
@@ -349,6 +379,8 @@ pub async fn initialize_all(
                     match dev.read() {
                         Ok(frame) => {
                             let pkg = dataframe_to_datapackage(&frame);
+                            // 注入实时数据到 AI 融合引擎（供 fuse 使用）
+                            *rt_source.write().await = Some(datapackage_to_realtime_data(&pkg));
                             for point in datapackage_to_telemetry_points(&pkg, name) {
                                 if let Err(e) = wb.buffer_telemetry(point).await {
                                     tracing::debug!("遥测写入失败: {}", e);

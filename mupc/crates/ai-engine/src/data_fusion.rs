@@ -588,9 +588,9 @@ impl DataFusionEngine {
     }
 
     /// 构造数据融合引擎，注入 5 个数据源适配器
-    pub fn new() -> Self {
+    pub fn new(realtime: Arc<RwLock<Option<RealtimeData>>>) -> Self {
         let sources: Vec<Box<dyn DataSourceAdapter>> = vec![
-            Box::new(RealtimeAdapter),
+            Box::new(RealtimeAdapter::new(realtime)),
             Box::new(PredictionAdapter),
             Box::new(PriceAdapter),
             Box::new(WeatherAdapter),
@@ -619,9 +619,17 @@ impl DataFusionEngine {
 
 /// 实时数据源适配器
 ///
-/// 取数来源（建议）：intercore `DataUpload`/`StatusReport` 帧（实时控制模块上送）。
-/// 该路径当前未接线，`fetch` 返回错误触发 fuse 的「上一周期回填」降级。
-pub struct RealtimeAdapter;
+/// 从共享的实时数据源（南向采集循环写入）读取 D1 实时数据。
+/// 无数据时返回错误触发 fuse 的「上一周期回填」降级。
+pub struct RealtimeAdapter {
+    latest: Arc<RwLock<Option<RealtimeData>>>,
+}
+
+impl RealtimeAdapter {
+    pub fn new(latest: Arc<RwLock<Option<RealtimeData>>>) -> Self {
+        Self { latest }
+    }
+}
 
 #[async_trait::async_trait]
 impl DataSourceAdapter for RealtimeAdapter {
@@ -635,9 +643,18 @@ impl DataSourceAdapter for RealtimeAdapter {
         1000
     }
     async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
-        Err(crate::error::AiEngineError::DataSourceStale(
-            "实时数据源未接线（待 intercore DataUpload 帧）".into(),
-        ))
+        let latest = self.latest.read().await;
+        if let Some(data) = latest.as_ref() {
+            Ok(SourceData {
+                source_type: SourceType::Realtime,
+                fetch_ts: chrono::Utc::now().timestamp(),
+                payload: SourcePayload::Realtime(data.clone()),
+            })
+        } else {
+            Err(crate::error::AiEngineError::DataSourceStale(
+                "实时数据源未注入（待南向采集写入）".into(),
+            ))
+        }
     }
 }
 

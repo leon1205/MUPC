@@ -9,7 +9,7 @@
 use crate::action_space::ActionSpaceConfig;
 use crate::action_validator::ActionValidator;
 use crate::config::{AiEngineConfig, ModeConfig};
-use crate::data_fusion::{normalize_observation, DataFusionEngine, FusedSystemState};
+use crate::data_fusion::{normalize_observation, DataFusionEngine, FusedSystemState, RealtimeData};
 use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
 use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction};
@@ -78,6 +78,8 @@ pub struct ModelManager {
     /// v2.3: 替代原来的单一 rl_model，管理 5 个场景 RL 模型
     model_registry: Arc<RwLock<Option<Arc<ModelRegistry>>>>,
     data_fusion: Arc<RwLock<Option<DataFusionEngine>>>,
+    /// v3.1: 实时数据源（南向采集循环写入，DataFusionEngine 的 RealtimeAdapter 读取）
+    realtime_source: Arc<RwLock<Option<RealtimeData>>>,
     reward_calculator: Arc<RwLock<Option<RewardCalculator>>>,
     action_validator: Arc<RwLock<Option<ActionValidator>>>,
     status: Arc<RwLock<ModelStatus>>,
@@ -176,8 +178,10 @@ impl ModelManager {
             None
         };
 
+        // v3.1: 实时数据源（南向采集循环写入）
+        let realtime_source: Arc<RwLock<Option<RealtimeData>>> = Arc::new(RwLock::new(None));
         // v3.1: 构造数据融合引擎（预测由 full_decision_cycle 的 run_enhanced_predict 负责）
-        let fusion_engine = DataFusionEngine::new();
+        let fusion_engine = DataFusionEngine::new(realtime_source.clone());
 
         // v3.1: 初始化在线微调组件
         let online_updater = Arc::new(RwLock::new(OnlineUpdater::new(
@@ -204,6 +208,7 @@ impl ModelManager {
             lstm_model,
             model_registry: Arc::new(RwLock::new(None)),
             data_fusion: Arc::new(RwLock::new(Some(fusion_engine))),
+            realtime_source,
             reward_calculator: Arc::new(RwLock::new(None)),
             action_validator: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
@@ -893,6 +898,11 @@ impl ModelManager {
     /// 设置数据融合引擎（由外部注入）
     pub async fn set_data_fusion(&self, df: DataFusionEngine) {
         *self.data_fusion.write().await = Some(df);
+    }
+
+    /// 获取实时数据源（供南向采集循环写入 D1 实时数据）
+    pub fn realtime_source(&self) -> Arc<RwLock<Option<RealtimeData>>> {
+        self.realtime_source.clone()
     }
 
     /// v2.9: 获取当前系统状态（用于异常检测）

@@ -58,7 +58,7 @@ pub use config::{
 pub use config_loader::ConfigLoader;
 pub use data_fusion::{
     normalize_observation, validate_input_vector, DataFusionEngine, DataSourceAdapter,
-    FusedSystemState, HealthStatus, SourceHealth, SourceType,
+    FusedSystemState, HealthStatus, RealtimeData, SourceHealth, SourceType,
 };
 pub use dynamic_config_loader::DynamicConfigLoader;
 pub use env_config::{EnvConfig, EnvConfigMetadata, OperationalConfig, PhysicalConfig};
