@@ -111,7 +111,7 @@ pub struct ModelManager {
     safety_event_rx: tokio::sync::broadcast::Receiver<SafetyWrapperEvent>,
     /// v1.0: 预测增强管线（VMD + Attention 编排器）
     /// None 表示增强未启用，回退到基线 LSTM 推理路径
-    prediction_pipeline: Arc<RwLock<Option<PredictionPipeline>>>,
+    prediction_pipeline: Arc<RwLock<Option<Arc<PredictionPipeline>>>>,
     /// v3.1: 在线数据收集器（PER 缓冲区 + 场景隔离）
     online_updater: Arc<RwLock<OnlineUpdater>>,
     /// v3.1: 安全在线微调编排器（影子模型验证 + 渐进式切换）
@@ -170,11 +170,14 @@ impl ModelManager {
                 pipeline.current_level(),
                 config.lstm.input_features
             );
-            Some(pipeline)
+            Some(Arc::new(pipeline))
         } else {
             tracing::info!("预测增强未配置，使用基线 LSTM 推理路径");
             None
         };
+
+        // v3.1: 构造数据融合引擎（注入 PredictionPipeline + 4 个占位适配器）
+        let fusion_engine = DataFusionEngine::new(prediction_pipeline.clone());
 
         // v3.1: 初始化在线微调组件
         let online_updater = Arc::new(RwLock::new(OnlineUpdater::new(
@@ -200,7 +203,7 @@ impl ModelManager {
             config,
             lstm_model,
             model_registry: Arc::new(RwLock::new(None)),
-            data_fusion: Arc::new(RwLock::new(None)),
+            data_fusion: Arc::new(RwLock::new(Some(fusion_engine))),
             reward_calculator: Arc::new(RwLock::new(None)),
             action_validator: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),

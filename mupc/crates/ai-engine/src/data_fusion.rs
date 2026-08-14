@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use chrono::Utc;
+use crate::prediction_pipeline::PredictionPipeline;
+
 /// 融合系统状态（6 大类，24 + 3 RL 字段 = 27 字段，v2.10）
 #[derive(Debug, Clone)]
 pub struct FusedSystemState {
@@ -328,11 +331,79 @@ pub enum SourceType {
     Dispatch,
 }
 
+// ── 数据源载荷 ──
+
+/// 实时数据载荷（D1 实时 + D4 需量 + D7 q_margin + D9 safety_override）
+#[derive(Debug, Clone)]
+pub struct RealtimeData {
+    pub battery_soc: f64,
+    pub pv_power: f64,
+    pub load_power: f64,
+    pub grid_power: f64,
+    pub transformer_load: f64,
+    pub battery_power: f64,
+    pub voltage_phase_a: f64,
+    pub voltage_phase_b: f64,
+    pub voltage_phase_c: f64,
+    pub current_demand: f64,
+    pub peak_demand_this_month: f64,
+    pub q_realtime_margin: f64,
+    pub safety_override_active: bool,
+    pub safety_override_p_ref: Option<f64>,
+    pub safety_override_consecutive: u32,
+    pub safety_override_ratio: f64,
+}
+
+/// 预测数据载荷（D2 预测 + D10 概率负荷预测）
+#[derive(Debug, Clone)]
+pub struct PredictionData {
+    pub pv_forecast_15min: Vec<f64>,
+    pub load_forecast_15min: Vec<f64>,
+    pub load_forecast_quantiles: Vec<f64>,
+    pub shock_load_probability: f64,
+    pub base_load: f64,
+}
+
+/// 电价数据载荷（D3）
+#[derive(Debug, Clone)]
+pub struct PriceData {
+    pub current_electricity_price: f64,
+    pub next_period_price: f64,
+    pub price_tariff_id: u8,
+    pub peak_price: f64,
+    pub valley_price: f64,
+}
+
+/// 气象数据载荷（D5）
+#[derive(Debug, Clone)]
+pub struct WeatherData {
+    pub solar_irradiance: f64,
+    pub temperature: f64,
+}
+
+/// 调度指令载荷（D6）
+#[derive(Debug, Clone)]
+pub struct DispatchData {
+    pub dispatch_p_set: Option<f64>,
+    pub dispatch_q_set: Option<f64>,
+}
+
+/// 数据源载荷（按 source_type 对应）
+#[derive(Debug, Clone)]
+pub enum SourcePayload {
+    Realtime(RealtimeData),
+    Prediction(PredictionData),
+    Price(PriceData),
+    Weather(WeatherData),
+    Dispatch(DispatchData),
+}
+
 /// 数据源采集结果
 #[derive(Debug, Clone)]
 pub struct SourceData {
     pub source_type: SourceType,
     pub fetch_ts: i64,
+    pub payload: SourcePayload,
 }
 
 /// 数据源适配器 trait
@@ -411,8 +482,8 @@ impl DataFusionEngine {
         let prev = self.last_fused_state.read().await.clone();
         for (i, result) in results.iter().enumerate() {
             match result {
-                Ok(Ok(_data)) => {
-                    // 实际实现中根据 source_type 填充 fused 对应字段
+                Ok(Ok(data)) => {
+                    self.apply_payload(&mut fused, data);
                     self.source_health[i].mark_success();
                 }
                 _ => {
@@ -471,6 +542,223 @@ impl DataFusionEngine {
                 // Dispatch 缺失时保持 None（不继承旧值）
             }
         }
+    }
+
+    /// 根据数据源载荷填充融合状态对应字段
+    fn apply_payload(&self, fused: &mut FusedSystemState, data: &SourceData) {
+        match &data.payload {
+            SourcePayload::Realtime(r) => {
+                fused.battery_soc = r.battery_soc;
+                fused.pv_power = r.pv_power;
+                fused.load_power = r.load_power;
+                fused.grid_power = r.grid_power;
+                fused.transformer_load = r.transformer_load;
+                fused.battery_power = r.battery_power;
+                fused.voltage_phase_a = r.voltage_phase_a;
+                fused.voltage_phase_b = r.voltage_phase_b;
+                fused.voltage_phase_c = r.voltage_phase_c;
+                fused.current_demand = r.current_demand;
+                fused.peak_demand_this_month = r.peak_demand_this_month;
+                fused.q_realtime_margin = r.q_realtime_margin;
+                fused.safety_override_active = r.safety_override_active;
+                fused.safety_override_p_ref = r.safety_override_p_ref;
+                fused.safety_override_consecutive = r.safety_override_consecutive;
+                fused.safety_override_ratio = r.safety_override_ratio;
+            }
+            SourcePayload::Prediction(p) => {
+                fused.pv_forecast_15min = p.pv_forecast_15min.clone();
+                fused.load_forecast_15min = p.load_forecast_15min.clone();
+                fused.load_forecast_quantiles = p.load_forecast_quantiles.clone();
+                fused.shock_load_probability = p.shock_load_probability;
+                fused.base_load = p.base_load;
+            }
+            SourcePayload::Price(p) => {
+                fused.current_electricity_price = p.current_electricity_price;
+                fused.next_period_price = p.next_period_price;
+                fused.price_tariff_id = p.price_tariff_id;
+                fused.peak_price = p.peak_price;
+                fused.valley_price = p.valley_price;
+            }
+            SourcePayload::Weather(w) => {
+                fused.solar_irradiance = w.solar_irradiance;
+                fused.temperature = w.temperature;
+            }
+            SourcePayload::Dispatch(d) => {
+                fused.dispatch_p_set = d.dispatch_p_set;
+                fused.dispatch_q_set = d.dispatch_q_set;
+            }
+        }
+    }
+
+    /// 构造数据融合引擎，注入 5 个数据源适配器
+    pub fn new(prediction: Option<Arc<PredictionPipeline>>) -> Self {
+        let sources: Vec<Box<dyn DataSourceAdapter>> = vec![
+            Box::new(RealtimeAdapter),
+            Box::new(PredictionAdapter::new(prediction)),
+            Box::new(PriceAdapter),
+            Box::new(WeatherAdapter),
+            Box::new(DispatchAdapter),
+        ];
+        let source_health = sources
+            .iter()
+            .map(|s| SourceHealth {
+                source_name: s.name().to_string(),
+                last_success_ts: 0,
+                consecutive_failures: 0,
+                status: HealthStatus::Healthy,
+            })
+            .collect();
+        Self {
+            fusion_period: Duration::from_secs(1),
+            last_fused_state: Arc::new(RwLock::new(None)),
+            sources,
+            source_health,
+            health_monitoring: true,
+        }
+    }
+}
+
+// ── 数据源适配器实现 ──
+
+/// 实时数据源适配器
+///
+/// 取数来源（建议）：intercore `DataUpload`/`StatusReport` 帧（实时控制模块上送）。
+/// 该路径当前未接线，`fetch` 返回错误触发 fuse 的「上一周期回填」降级。
+pub struct RealtimeAdapter;
+
+#[async_trait::async_trait]
+impl DataSourceAdapter for RealtimeAdapter {
+    fn name(&self) -> &str {
+        "realtime"
+    }
+    fn source_type(&self) -> SourceType {
+        SourceType::Realtime
+    }
+    fn timeout_ms(&self) -> u64 {
+        1000
+    }
+    async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
+        Err(crate::error::AiEngineError::DataSourceStale(
+            "实时数据源未接线（待 intercore DataUpload 帧）".into(),
+        ))
+    }
+}
+
+/// 预测数据源适配器：调用 PredictionPipeline 获取 pv/load 预测与分位数
+pub struct PredictionAdapter {
+    pipeline: Option<Arc<PredictionPipeline>>,
+}
+
+impl PredictionAdapter {
+    pub fn new(pipeline: Option<Arc<PredictionPipeline>>) -> Self {
+        Self { pipeline }
+    }
+}
+
+#[async_trait::async_trait]
+impl DataSourceAdapter for PredictionAdapter {
+    fn name(&self) -> &str {
+        "prediction"
+    }
+    fn source_type(&self) -> SourceType {
+        SourceType::Prediction
+    }
+    fn timeout_ms(&self) -> u64 {
+        2000
+    }
+    async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
+        let pipeline = self.pipeline.as_ref().ok_or_else(|| {
+            crate::error::AiEngineError::DataSourceStale("预测管线未注入".into())
+        })?;
+        let result = pipeline.execute().await?;
+        let (quantiles, shock_prob, base_load) = match result.load_quantiles {
+            Some(q) => (
+                q.quantiles.iter().map(|qp| qp.value as f64).collect::<Vec<f64>>(),
+                q.shock_probability,
+                q.base_load as f64,
+            ),
+            None => (vec![], 0.0, 0.0),
+        };
+        Ok(SourceData {
+            source_type: SourceType::Prediction,
+            fetch_ts: Utc::now().timestamp(),
+            payload: SourcePayload::Prediction(PredictionData {
+                pv_forecast_15min: result.pv_forecast,
+                load_forecast_15min: result.load_forecast,
+                load_forecast_quantiles: quantiles,
+                shock_load_probability: shock_prob,
+                base_load,
+            }),
+        })
+    }
+}
+
+/// 电价数据源适配器
+///
+/// 取数来源（建议）：gateway IEC 104 电价指令 或 本地 DB 配置。未接线。
+pub struct PriceAdapter;
+
+#[async_trait::async_trait]
+impl DataSourceAdapter for PriceAdapter {
+    fn name(&self) -> &str {
+        "price"
+    }
+    fn source_type(&self) -> SourceType {
+        SourceType::Price
+    }
+    fn timeout_ms(&self) -> u64 {
+        1000
+    }
+    async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
+        Err(crate::error::AiEngineError::DataSourceStale(
+            "电价数据源未接线（待 gateway 电价指令）".into(),
+        ))
+    }
+}
+
+/// 气象数据源适配器
+///
+/// 取数来源（建议）：气象 API 或 实时模块传感器。未接线。
+pub struct WeatherAdapter;
+
+#[async_trait::async_trait]
+impl DataSourceAdapter for WeatherAdapter {
+    fn name(&self) -> &str {
+        "weather"
+    }
+    fn source_type(&self) -> SourceType {
+        SourceType::Weather
+    }
+    fn timeout_ms(&self) -> u64 {
+        1000
+    }
+    async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
+        Err(crate::error::AiEngineError::DataSourceStale(
+            "气象数据源未接线（待气象 API/传感器）".into(),
+        ))
+    }
+}
+
+/// 调度指令数据源适配器
+///
+/// 取数来源（建议）：gateway IEC 104 调度指令（p_set/q_set）。未接线。
+pub struct DispatchAdapter;
+
+#[async_trait::async_trait]
+impl DataSourceAdapter for DispatchAdapter {
+    fn name(&self) -> &str {
+        "dispatch"
+    }
+    fn source_type(&self) -> SourceType {
+        SourceType::Dispatch
+    }
+    fn timeout_ms(&self) -> u64 {
+        1000
+    }
+    async fn fetch(&self) -> Result<SourceData, crate::error::AiEngineError> {
+        Err(crate::error::AiEngineError::DataSourceStale(
+            "调度指令数据源未接线（待 gateway 调度指令）".into(),
+        ))
     }
 }
 
