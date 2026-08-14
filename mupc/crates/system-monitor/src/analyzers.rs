@@ -251,30 +251,15 @@ impl MtbfCalculator {
     }
 
     /// 计算 MTBF（平均故障间隔时间），单位：小时
+    ///
+    /// 设计文档 5.3：`MTBF = sum(running_durations) / crash_count`；
+    /// `crash_count = 0` 时 MTBF = 当前总运行时间。
     pub fn calculate_mtbf_hours(&self) -> f64 {
-        if self.failure_events.len() < 2 {
-            return if self.total_uptime_secs > 0 {
-                self.total_uptime_secs as f64 / 3600.0
-            } else {
-                0.0
-            };
+        let crash_count = self.failure_events.len() as u64;
+        if crash_count == 0 {
+            return self.total_uptime_secs as f64 / 3600.0;
         }
-
-        let mut sorted = self.failure_events.clone();
-        sorted.sort();
-
-        let mut total_interval_secs = 0i64;
-        for i in 1..sorted.len() {
-            let interval = sorted[i] - sorted[i - 1];
-            total_interval_secs += interval.num_seconds();
-        }
-
-        let intervals = sorted.len() - 1;
-        if intervals > 0 {
-            total_interval_secs as f64 / intervals as f64 / 3600.0
-        } else {
-            0.0
-        }
+        self.total_uptime_secs as f64 / crash_count as f64 / 3600.0
     }
 
     /// 计算可用性百分比
