@@ -52,10 +52,18 @@ pub struct LogListResponse {
     pub entries: Vec<LogEntry>,
 }
 
+/// tracing JSON 日志行结构（用于解析 mupc.log 文件）
+#[derive(Debug, Deserialize)]
+struct JsonLogLine {
+    timestamp: Option<String>,
+    level: Option<String>,
+    target: Option<String>,
+    fields: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 /// 日志处理器
 #[derive(Clone)]
 pub struct LogsHandler {
-    #[allow(dead_code)]
     log_directory: PathBuf,
 }
 
@@ -66,22 +74,107 @@ impl LogsHandler {
         }
     }
 
-    /// 获取日志列表
-    pub async fn get_logs(&self, query: LogQuery) -> Result<LogListResponse, MupcError> {
-        let _limit = query.limit.unwrap_or(100).min(10000);
-        let _offset = query.offset.unwrap_or(0);
-
-        // TODO: 实际读取日志文件
-        // 目前返回模拟数据
-        let entries = Vec::new();
-
-        Ok(LogListResponse { total: 0, entries })
+    /// 列出日志目录下的 mupc.log 文件（按名称排序）
+    async fn list_log_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&self.log_directory).await {
+            Ok(e) => e,
+            Err(_) => return files,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("mupc.log") {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+        files.sort();
+        files
     }
 
-    /// 导出日志
+    /// 获取日志列表
+    pub async fn get_logs(&self, query: LogQuery) -> Result<LogListResponse, MupcError> {
+        let limit = query.limit.unwrap_or(100).min(10000);
+        let offset = query.offset.unwrap_or(0);
+
+        let files = self.list_log_files().await;
+        let mut entries: Vec<LogEntry> = Vec::new();
+
+        // 从最新文件开始读（文件按名称排序，最新的在后）
+        for file in files.iter().rev() {
+            let content = tokio::fs::read_to_string(file).await.unwrap_or_default();
+            for line in content.lines() {
+                let Ok(json) = serde_json::from_str::<JsonLogLine>(line) else {
+                    continue;
+                };
+                let timestamp = json.timestamp.unwrap_or_default();
+                let level = json.level.unwrap_or_default();
+                let module = json.target.unwrap_or_default();
+                let message = json
+                    .fields
+                    .and_then(|f| f.get("message").and_then(|v| v.as_str().map(|s| s.to_string())))
+                    .unwrap_or_default();
+
+                // 级别过滤
+                if let Some(lvl) = query.level {
+                    let lvl_str = format!("{:?}", lvl).to_lowercase();
+                    if !level.eq_ignore_ascii_case(&lvl_str) {
+                        continue;
+                    }
+                }
+                // 关键字过滤
+                if let Some(kw) = &query.keyword {
+                    if !message.contains(kw.as_str()) && !module.contains(kw.as_str()) {
+                        continue;
+                    }
+                }
+                // 时间范围过滤（ISO8601 字符串比较）
+                if let Some(start) = &query.start_time {
+                    if timestamp.as_str() < start.as_str() {
+                        continue;
+                    }
+                }
+                if let Some(end) = &query.end_time {
+                    if timestamp.as_str() > end.as_str() {
+                        continue;
+                    }
+                }
+
+                entries.push(LogEntry {
+                    timestamp,
+                    level,
+                    module,
+                    message,
+                });
+            }
+        }
+
+        // 按时间戳倒序（新在前）
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let total = entries.len();
+
+        let paged = entries.into_iter().skip(offset).take(limit).collect();
+
+        Ok(LogListResponse {
+            total,
+            entries: paged,
+        })
+    }
+
+    /// 导出日志（拼接所有日志文件内容）
     pub async fn export_logs(&self, _query: LogQuery) -> Result<Vec<u8>, MupcError> {
-        // TODO: 实际导出日志文件
-        Ok(Vec::new())
+        let files = self.list_log_files().await;
+        let mut output = Vec::new();
+        for file in files {
+            if let Ok(content) = tokio::fs::read_to_string(file).await {
+                output.extend_from_slice(content.as_bytes());
+                output.push(b'\n');
+            }
+        }
+        Ok(output)
     }
 }
 
