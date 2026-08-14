@@ -8,6 +8,7 @@
 //! 剩余 6 个 TODO 见代码注释。
 
 use device_trait::plugin_loader::PluginLoader;
+use device_trait::Device;
 use mupc_common::{ErrorCode, MupcError};
 use mupc_core::service_coord::ServiceStatus;
 use mupc_core::service_coord_impl::ServiceCoordinatorImpl;
@@ -61,16 +62,19 @@ impl mupc_gateway::iec104::command::CommandHandler for StubCommandHandler {
 }
 
 /// 创建南向命令分发器：优先真实 RS485 设备，失败降级到 mock
-fn create_south_dispatcher() -> mupc_strategy_engine::SouthCommandDispatcher {
-    let pv_device = create_rs485_device("inverter", 0x01, "pv_inverter_001");
-    let load_device = create_rs485_device("modbus", 0x02, "load_ctrl_001");
-
+fn create_south_dispatcher(
+    pv_device: &Option<Arc<rs485_plugin::device::Rs485Device>>,
+    load_device: &Option<Arc<rs485_plugin::device::Rs485Device>>,
+) -> mupc_strategy_engine::SouthCommandDispatcher {
     match (pv_device, load_device) {
         (Some(pv), Some(load)) => {
             tracing::info!("南向 RS485 设备接线成功（真实发送器）");
             mupc_strategy_engine::SouthCommandDispatcher::new(
                 Arc::new(
-                    mupc_strategy_engine::south_command_sender::Rs485SouthSender::new(pv, load),
+                    mupc_strategy_engine::south_command_sender::Rs485SouthSender::new(
+                        pv.clone(),
+                        load.clone(),
+                    ),
                 ),
                 "pv_inverter_001",
                 "load_ctrl_001",
@@ -222,7 +226,38 @@ pub async fn initialize_all(
     tracing::info!("[08/14] 初始化策略引擎...");
     let mut ai_integrator = mupc_strategy_engine::AiIntegrator::new();
     ai_integrator.set_intercore_client(intercore.clone());
-    ai_integrator.set_south_dispatcher(Arc::new(create_south_dispatcher()));
+    // 南向设备（下行命令 + 上行采集共享）
+    let pv_device = create_rs485_device("inverter", 0x01, "pv_inverter_001");
+    let load_device = create_rs485_device("modbus", 0x02, "load_ctrl_001");
+    ai_integrator.set_south_dispatcher(Arc::new(create_south_dispatcher(
+        &pv_device,
+        &load_device,
+    )));
+
+    // 南向数据采集循环（上行）：周期性读取设备数据
+    if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
+        guard.0.push(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                match pv.read() {
+                    Ok(frame) => tracing::debug!(
+                        "南向采集[pv] {}: {} 字节",
+                        frame.device_id,
+                        frame.data.len()
+                    ),
+                    Err(e) => tracing::debug!("南向采集[pv] 失败: {}", e),
+                }
+                match load.read() {
+                    Ok(frame) => tracing::debug!(
+                        "南向采集[load] {}: {} 字节",
+                        frame.device_id,
+                        frame.data.len()
+                    ),
+                    Err(e) => tracing::debug!("南向采集[load] 失败: {}", e),
+                }
+            }
+        }));
+    }
     ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
