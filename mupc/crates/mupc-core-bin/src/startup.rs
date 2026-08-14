@@ -227,6 +227,9 @@ pub async fn initialize_all(
     ));
     // Phase 2+ TODO: 从配置读取管理员用户名，当前硬编码
     let session_manager = mupc_web_api::SessionManager::new("admin".to_string());
+    let status_handler = mupc_web_api::routes::StatusHandler::new();
+    let logs_handler = mupc_web_api::routes::LogsHandler::new(config.system.log_dir.clone());
+    let ws_streamer = mupc_web_api::WsLogStreamer::new();
     let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
     let audit_logger = Arc::new(
         mupc_web_api::AuditLogger::new(
@@ -251,6 +254,9 @@ pub async fn initialize_all(
         sse_push,
         audit_logger,
         session_manager,
+        status_handler,
+        logs_handler,
+        ws_streamer,
         storage: storage.clone(),
         ota_manager: ota_manager.clone(),
         online_updater,
@@ -261,6 +267,12 @@ pub async fn initialize_all(
     let app_router = axum::Router::new()
         .merge(mupc_web_api::routes::mode::create_router())
         .merge(mupc_web_api::routes::ai::ai_routes())
+        .merge(mupc_web_api::routes::ai::sse_route())
+        .merge(mupc_web_api::routes::status::create_router())
+        .merge(mupc_web_api::routes::config::create_router())
+        .merge(mupc_web_api::routes::logs::create_router())
+        .merge(mupc_web_api::ws::create_router())
+        .merge(mupc_web_api::auth::create_router())
         .with_state(app_state.clone());
 
     let listen_addr = config.web_api.listen_addr.clone();

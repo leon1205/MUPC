@@ -10,7 +10,10 @@ use crate::audit::AuditLogger;
 use crate::auth::SessionManager;
 use crate::routes::ai::ab_test_manager::AbTestManager;
 use crate::routes::config::AppConfig;
+use crate::routes::logs::LogsHandler;
+use crate::routes::status::StatusHandler;
 use crate::sse::SsePushService;
+use crate::ws::WsLogStreamer;
 use mupc_ai_engine::mode_selector::ModeSelector;
 use mupc_ai_engine::online_updater::OnlineUpdater;
 use mupc_ota_update::manager::OtaManager;
@@ -35,6 +38,12 @@ pub struct AppState {
     pub audit_logger: Arc<AuditLogger>,
     /// Session 管理器
     pub session_manager: SessionManager,
+    /// 系统状态处理器
+    pub status_handler: StatusHandler,
+    /// 日志处理器
+    pub logs_handler: LogsHandler,
+    /// WebSocket 日志流
+    pub ws_streamer: WsLogStreamer,
     /// 持久化存储服务
     pub storage: Arc<StorageService>,
     /// OTA 管理器
@@ -54,6 +63,9 @@ impl AppState {
         sse_push: SsePushService,
         audit_logger: AuditLogger,
         session_manager: SessionManager,
+        status_handler: StatusHandler,
+        logs_handler: LogsHandler,
+        ws_streamer: WsLogStreamer,
         storage: StorageService,
         ota_manager: Arc<dyn OtaManager>,
         online_updater: OnlineUpdater,
@@ -66,6 +78,9 @@ impl AppState {
             sse_push: Arc::new(sse_push),
             audit_logger: Arc::new(audit_logger),
             session_manager,
+            status_handler,
+            logs_handler,
+            ws_streamer,
             storage: Arc::new(storage),
             ota_manager,
             online_updater: Arc::new(Mutex::new(online_updater)),

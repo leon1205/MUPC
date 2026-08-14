@@ -9,8 +9,11 @@ use axum::{
     routing::get,
     Router,
 };
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
+
+use crate::AppState;
 
 /// 日志消息
 #[derive(Debug, Clone)]
@@ -51,9 +54,9 @@ impl Default for WsLogStreamer {
 }
 
 /// GET /ws/logs - WebSocket 日志流
-async fn ws_logs(ws: WebSocketUpgrade, State(streamer): State<WsLogStreamer>) -> Response {
+async fn ws_logs(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
     ws.on_upgrade(|mut socket| async move {
-        let mut rx = streamer.subscribe();
+        let mut rx = state.ws_streamer.subscribe();
 
         loop {
             tokio::select! {
@@ -87,8 +90,6 @@ async fn ws_logs(ws: WebSocketUpgrade, State(streamer): State<WsLogStreamer>) ->
 }
 
 /// 创建 WebSocket 路由
-pub fn create_router(streamer: WsLogStreamer) -> Router {
-    Router::new()
-        .route("/ws/logs", get(ws_logs))
-        .with_state(streamer)
+pub fn create_router() -> Router<Arc<AppState>> {
+    Router::new().route("/ws/logs", get(ws_logs))
 }

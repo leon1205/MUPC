@@ -9,7 +9,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::AppState;
 use mupc_common::MupcError;
 
 /// 日志级别
@@ -85,10 +87,11 @@ impl LogsHandler {
 
 /// GET /api/v1/logs - 获取日志列表
 async fn get_logs(
-    State(handler): State<LogsHandler>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<LogQuery>,
 ) -> Result<Json<LogListResponse>, StatusCode> {
-    handler
+    state
+        .logs_handler
         .get_logs(query)
         .await
         .map(Json)
@@ -96,8 +99,6 @@ async fn get_logs(
 }
 
 /// 创建日志路由
-pub fn create_router(handler: LogsHandler) -> Router {
-    Router::new()
-        .route("/api/v1/logs", get(get_logs))
-        .with_state(handler)
+pub fn create_router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/v1/logs", get(get_logs))
 }

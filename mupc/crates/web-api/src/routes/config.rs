@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::app_state::AppState as GlobalAppState;
 use mupc_common::MupcError;
 
 /// 应用状态
@@ -160,34 +161,33 @@ impl ConfigHandler {
 }
 
 /// GET /api/v1/config - 获取配置
-async fn get_config(State(handler): State<ConfigHandler>) -> Result<Json<AppConfig>, StatusCode> {
-    handler
-        .get_config()
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn get_config(
+    State(state): State<Arc<GlobalAppState>>,
+) -> Result<Json<AppConfig>, StatusCode> {
+    let config = state.config.read().await;
+    Ok(Json(config.clone()))
 }
 
 /// PUT /api/v1/config - 更新配置
 async fn update_config(
-    State(handler): State<ConfigHandler>,
+    State(state): State<Arc<GlobalAppState>>,
     Json(new_config): Json<AppConfig>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    handler
-        .update_config(new_config)
-        .await
-        .map(|_| Json(serde_json::json!({ "status": "ok" })))
-        .map_err(|e| {
-            tracing::error!("Config update error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    if new_config.gateway.heartbeat_interval_secs < 1
+        || new_config.gateway.heartbeat_interval_secs > 60
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut config = state.config.write().await;
+    *config = new_config;
+
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
 /// 创建配置路由
-pub fn create_router(handler: ConfigHandler) -> Router {
-    Router::new()
-        .route("/api/v1/config", get(get_config).put(update_config))
-        .with_state(handler)
+pub fn create_router() -> Router<Arc<GlobalAppState>> {
+    Router::new().route("/api/v1/config", get(get_config).put(update_config))
 }
 
 #[cfg(test)]

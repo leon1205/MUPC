@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::AppState;
 use mupc_common::{ErrorCode, MupcError};
 
 /// 登录请求
@@ -187,11 +188,11 @@ const SESSION_HEADER: &str = "X-Session-Id";
 
 /// POST /api/v1/auth/login - 登录
 async fn login(
-    State(handler): State<AuthHandler>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    let session = handler
-        .session_manager()
+    let session = state
+        .session_manager
         .login(&req.username, &req.password, req.remember)
         .await
         .map_err(|e| {
@@ -212,7 +213,7 @@ async fn login(
 
 /// POST /api/v1/auth/logout - 退出登录
 async fn logout(
-    State(handler): State<AuthHandler>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let session_id = headers
@@ -220,8 +221,8 @@ async fn logout(
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    handler
-        .session_manager()
+    state
+        .session_manager
         .logout(session_id)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -231,7 +232,7 @@ async fn logout(
 
 /// PUT /api/v1/auth/password - 修改密码
 async fn change_password(
-    State(handler): State<AuthHandler>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<PasswordChangeRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -251,12 +252,12 @@ async fn change_password(
     }
 
     // 验证旧密码
-    if req.old_password != handler.session_manager.default_admin_password() {
+    if req.old_password != state.session_manager.default_admin_password() {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let result = handler
-        .session_manager()
+    let result = state
+        .session_manager
         .update_password(&req.old_password, &req.new_password)
         .await;
     match result {
@@ -266,12 +267,11 @@ async fn change_password(
 }
 
 /// 创建认证路由
-pub fn create_router(handler: AuthHandler) -> Router {
+pub fn create_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/password", put(change_password))
-        .with_state(handler)
 }
 
 #[cfg(test)]

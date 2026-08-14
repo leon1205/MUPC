@@ -2,7 +2,9 @@
 
 use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
+use crate::AppState;
 use mupc_common::MupcError;
 
 /// 系统状态
@@ -68,9 +70,10 @@ impl StatusHandler {
 
 /// GET /api/v1/status - 获取系统状态
 async fn get_status(
-    State(handler): State<StatusHandler>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<SystemStatus>, StatusCode> {
-    handler
+    state
+        .status_handler
         .get_status()
         .await
         .map(Json)
@@ -78,8 +81,6 @@ async fn get_status(
 }
 
 /// 创建状态路由
-pub fn create_router(handler: StatusHandler) -> Router {
-    Router::new()
-        .route("/api/v1/status", get(get_status))
-        .with_state(handler)
+pub fn create_router() -> Router<Arc<AppState>> {
+    Router::new().route("/api/v1/status", get(get_status))
 }
