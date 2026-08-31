@@ -134,6 +134,60 @@ impl ControlCmdPayloadV2 {
     }
 }
 
+/// 控制指令 JSON Payload v3.0（分相模式）
+///
+/// v3.0 新增：分相 P/Q 设定（台区储能治理策略下发），兼容 v2 双参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlCmdPayloadV3 {
+    #[serde(rename = "frame_version")]
+    pub frame_version: Option<u8>,          // = 3
+    #[serde(rename = "p_ref")]
+    pub p_ref: Option<f64>,                 // 兼容 v2 双参数（分相模式可为 None）
+    #[serde(rename = "k_droop")]
+    pub k_droop: Option<f64>,
+    #[serde(rename = "phase_p_set")]
+    pub phase_p_set: Option<[f64; 3]>,      // 分相有功 (kW)
+    #[serde(rename = "phase_q_set")]
+    pub phase_q_set: Option<[f64; 3]>,      // 分相无功 (kVAr)
+    #[serde(rename = "ai_ready")]
+    pub ai_ready: Option<bool>,
+    #[serde(rename = "strategy_mode")]
+    pub strategy_mode: Option<String>,
+    #[serde(rename = "timestamp_ms")]
+    pub timestamp_ms: Option<u64>,
+}
+
+impl ControlCmdPayloadV3 {
+    pub const FRAME_VERSION: u8 = 3;
+
+    pub fn new() -> Self {
+        Self {
+            frame_version: Some(Self::FRAME_VERSION),
+            p_ref: None,
+            k_droop: None,
+            phase_p_set: None,
+            phase_q_set: None,
+            ai_ready: None,
+            strategy_mode: None,
+            timestamp_ms: None,
+        }
+    }
+
+    pub fn from_json(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+
+    pub fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    /// 按 frame_version 字段检测版本（1/2/3），解析失败视为 v1
+    pub fn detect_version(data: &[u8]) -> Result<u8, serde_json::Error> {
+        let v: serde_json::Value = serde_json::from_slice(data)?;
+        Ok(v["frame_version"].as_u64().map(|x| x as u8).unwrap_or(1))
+    }
+}
+
 // ============================================================================
 // v2.10: DataUploadPayload 和 SafetyOverridePayload
 // ============================================================================
@@ -593,26 +647,31 @@ impl IntercoreServer {
                                 }
                                 IntercoreFrameType::ControlCmd => {
                                     info!("Received control command from {}", addr);
-                                    // 解析 JSON payload（按帧版本区分 v1.x / v2.0）
                                     if !frame.data.is_empty() {
-                                        match ControlCmdPayloadV2::detect_version(&frame.data) {
-                                            Ok(2) => {
+                                        // 统一版本分派：3=V3 分相，2=V2 双参数，其余=V1
+                                        let ver = ControlCmdPayloadV3::detect_version(&frame.data)
+                                            .unwrap_or(1);
+                                        match ver {
+                                            3 => {
+                                                match ControlCmdPayloadV3::from_json(&frame.data) {
+                                                    Ok(payload) => {
+                                                        info!(
+                                                            "ControlCmd v3 parsed: phase_p={:?}, phase_q={:?}, strategy_mode={:?}",
+                                                            payload.phase_p_set, payload.phase_q_set, payload.strategy_mode
+                                                        );
+                                                    }
+                                                    Err(e) => warn!("Failed to parse ControlCmd V3 payload: {}", e),
+                                                }
+                                            }
+                                            2 => {
                                                 match ControlCmdPayloadV2::from_json(&frame.data) {
                                                     Ok(payload) => {
                                                         info!(
                                                             "ControlCmd v2 parsed: p_ref={:?}, k_droop={:?}, ai_ready={:?}, strategy_mode={:?}",
-                                                            payload.p_ref,
-                                                            payload.k_droop,
-                                                            payload.ai_ready,
-                                                            payload.strategy_mode,
+                                                            payload.p_ref, payload.k_droop, payload.ai_ready, payload.strategy_mode
                                                         );
                                                     }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            "Failed to parse ControlCmd V2 payload: {}",
-                                                            e
-                                                        );
-                                                    }
+                                                    Err(e) => warn!("Failed to parse ControlCmd V2 payload: {}", e),
                                                 }
                                             }
                                             _ => {
@@ -620,18 +679,10 @@ impl IntercoreServer {
                                                     Ok(payload) => {
                                                         info!(
                                                             "ControlCmd v1 parsed: p_batt_set={:?}, q_batt_set={:?}, ai_ready={:?}, strategy_mode={:?}",
-                                                            payload.p_batt_set,
-                                                            payload.q_batt_set,
-                                                            payload.ai_ready,
-                                                            payload.strategy_mode,
+                                                            payload.p_batt_set, payload.q_batt_set, payload.ai_ready, payload.strategy_mode
                                                         );
                                                     }
-                                                    Err(e) => {
-                                                        warn!(
-                                                            "Failed to parse ControlCmd V1 payload: {}",
-                                                            e
-                                                        );
-                                                    }
+                                                    Err(e) => warn!("Failed to parse ControlCmd V1 payload: {}", e),
                                                 }
                                             }
                                         }
@@ -903,7 +954,57 @@ impl IntercoreClient {
         let frame = IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, payload_bytes);
         let frame_bytes = frame.to_bytes()?;
 
-        // 获取或建立持久连接（复用 TcpStream，避免每次新建）
+        // 发送帧（复用持久连接，见 send_frame）
+        self.send_frame(&frame_bytes).await?;
+
+        // 更新最后发送的参数
+        *self.last_p_ref.write().await = Some(cmd.p_ref);
+        *self.last_k_droop.write().await = Some(cmd.k_droop);
+
+        tracing::debug!(
+            "Sent dual-param ControlCmd: p_ref={}, k_droop={}, ai_ready={}, strategy_mode={}",
+            cmd.p_ref,
+            cmd.k_droop,
+            cmd.ai_ready,
+            cmd.strategy_mode
+        );
+
+        Ok(())
+    }
+
+    /// 发送台区储能分相 P/Q 设定到实时控制模块（v3 分相模式）
+    pub async fn send_tai_command(
+        &self,
+        p: [f64; 3],
+        q: [f64; 3],
+        strategy_mode: &str,
+    ) -> Result<(), MupcError> {
+        let payload = ControlCmdPayloadV3 {
+            frame_version: Some(ControlCmdPayloadV3::FRAME_VERSION),
+            p_ref: None,
+            k_droop: None,
+            phase_p_set: Some(p),
+            phase_q_set: Some(q),
+            ai_ready: Some(false),
+            strategy_mode: Some(strategy_mode.to_string()),
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
+        };
+        let payload_bytes = payload.to_json().map_err(|e| {
+            MupcError::new(
+                ErrorCode::SerializeError,
+                format!("Failed to serialize ControlCmdPayloadV3: {}", e),
+                "intercore",
+            )
+        })?;
+        let frame = IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, payload_bytes);
+        let frame_bytes = frame.to_bytes()?;
+        self.send_frame(&frame_bytes).await
+    }
+
+    /// 发送 TCP 帧（获取或建立持久连接，带超时写入）
+    ///
+    /// 失败时重置连接，下次调用将重连。
+    async fn send_frame(&self, frame_bytes: &[u8]) -> Result<(), MupcError> {
         let mut stream_guard = self.stream.lock().await;
         if stream_guard.is_none() {
             match TcpStream::connect(&self.remote_addr).await {
@@ -920,48 +1021,33 @@ impl IntercoreClient {
         let stream = stream_guard.as_mut().ok_or_else(|| {
             MupcError::new(ErrorCode::ConnectionFailed, "连接未建立", "intercore")
         })?;
-
-        // 写入帧（失败时重置连接，下次重连）
         let write_result = timeout(
             Duration::from_millis(self.cmd_config.timeout_ms),
-            stream.write_all(&frame_bytes),
+            stream.write_all(frame_bytes),
         )
         .await;
-
         match write_result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                *self.connected.write().await = true;
+                Ok(())
+            }
             Ok(Err(e)) => {
                 *stream_guard = None;
-                return Err(MupcError::new(
+                Err(MupcError::new(
                     ErrorCode::SendFailed,
                     format!("Send error: {}", e),
                     "intercore",
-                ));
+                ))
             }
             Err(_) => {
                 *stream_guard = None;
-                return Err(MupcError::new(
+                Err(MupcError::new(
                     ErrorCode::IntercoreTimeout,
                     format!("Send timed out after {}ms", self.cmd_config.timeout_ms),
                     "intercore",
-                ));
+                ))
             }
         }
-
-        // 更新最后发送的参数
-        *self.last_p_ref.write().await = Some(cmd.p_ref);
-        *self.last_k_droop.write().await = Some(cmd.k_droop);
-        *self.connected.write().await = true;
-
-        tracing::debug!(
-            "Sent dual-param ControlCmd: p_ref={}, k_droop={}, ai_ready={}, strategy_mode={}",
-            cmd.p_ref,
-            cmd.k_droop,
-            cmd.ai_ready,
-            cmd.strategy_mode
-        );
-
-        Ok(())
     }
 
     /// 获取最后发送的双参数（用于降级判断）
@@ -979,5 +1065,46 @@ impl IntercoreClient {
     /// 获取远程地址
     pub fn remote_addr(&self) -> &str {
         &self.remote_addr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_v3_payload_roundtrip() {
+        let p = ControlCmdPayloadV3 {
+            frame_version: Some(3),
+            p_ref: Some(10.0),
+            k_droop: Some(5.0),
+            phase_p_set: Some([1.0, 2.0, 3.0]),
+            phase_q_set: Some([0.5, 0.5, 0.5]),
+            ai_ready: Some(false),
+            strategy_mode: Some("fallback".into()),
+            timestamp_ms: Some(1_700_000_000_000),
+        };
+        let bytes = p.to_json().unwrap();
+        let parsed = ControlCmdPayloadV3::from_json(&bytes).unwrap();
+        assert_eq!(parsed.phase_p_set, Some([1.0, 2.0, 3.0]));
+        assert_eq!(parsed.phase_q_set, Some([0.5, 0.5, 0.5]));
+        assert_eq!(ControlCmdPayloadV3::detect_version(&bytes).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_v3_payload_missing_phase_ok() {
+        let p = ControlCmdPayloadV3 {
+            frame_version: Some(3),
+            p_ref: Some(10.0),
+            k_droop: Some(5.0),
+            phase_p_set: None,
+            phase_q_set: None,
+            ai_ready: Some(true),
+            strategy_mode: Some("intelligent".into()),
+            timestamp_ms: None,
+        };
+        let bytes = p.to_json().unwrap();
+        let parsed = ControlCmdPayloadV3::from_json(&bytes).unwrap();
+        assert!(parsed.phase_p_set.is_none());
     }
 }
