@@ -48,6 +48,57 @@ mod tai_storage_test {
     }
 
     #[test]
+    fn test_s1_boost_on_reverse_surge() {
+        let cfg = TaiStorageConfig::default(); // boost enabled, slope=6, factor=3
+        let mut st = TaiControllerState::default();
+        st.st = TaiState::S1PvAbsorb;
+        st.p_st = -6.0; // 已在充电
+        st.prev_p = -5.0;
+        // 返送陡增：p 从 -5 突降到 -50（Δ=-45 < -15），仍返送（p < -5）
+        let m = meter(
+            -50.0,
+            [-20.0, -15.0, -15.0],
+            [0.0; 3],
+            [220.0; 3],
+            [0.99; 3],
+        );
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
+        // 加速充电：单周期减幅应 > 普通 slope(6)，接近 slope*factor(18)
+        let drop = -6.0 - st.p_st;
+        assert!(
+            drop > cfg.slope + 1.0,
+            "返送陡增应加速充电，单周期降幅 {}（普通仅 {}）",
+            drop,
+            cfg.slope
+        );
+        assert!(
+            drop <= cfg.slope * cfg.s1_boost_factor + 1e-9,
+            "不超过放大斜坡: {}",
+            drop
+        );
+    }
+
+    #[test]
+    fn test_s1_rapid_exit_on_import_rise() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        st.st = TaiState::S1PvAbsorb;
+        st.p_st = -40.0; // 深度充电
+        st.prev_p = -15.0;
+        // 受电快速上升：p 从 -15 突升到 +3（Δ=+18 > +15），仍在 S1（p < s1_exit=4）
+        let m = meter(3.0, [1.0, 1.0, 1.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
+        // 快速退出充电：单周期向 0 回，减幅 ≥ slope*factor
+        let rise = st.p_st - (-40.0); // 向 0 回 = 增大
+        assert!(
+            rise >= cfg.slope * cfg.s1_boost_factor * 0.9,
+            "受电快升应快速退出充电: 回幅 {}",
+            rise
+        );
+        assert!(st.p_st < 0.0, "仍在充电但应快速收敛: {}", st.p_st);
+    }
+
+    #[test]
     fn test_s3_discharge_on_high_load() {
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();

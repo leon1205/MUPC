@@ -68,6 +68,8 @@ pub struct TaiControllerState {
     pub meter_buf: VecDeque<MeterData>,
     /// 上次控制周期时间戳（节流用）
     pub last_control_ts: u64,
+    /// 上一周期原始净功 meter.p（动态斜坡差分基准，滤波前）
+    pub prev_p: f64,
 }
 
 impl Default for TaiControllerState {
@@ -82,6 +84,7 @@ impl Default for TaiControllerState {
             q_last: [0.0; 3],
             meter_buf: VecDeque::new(),
             last_control_ts: 0,
+            prev_p: 0.0,
         }
     }
 }
@@ -305,9 +308,28 @@ pub fn control(
     }
 
     // 5. 共模 P（增量式积分 + 斜坡限速）
+    // 动态斜坡差分基准：每周期先算净功率变化率并刷新 prev_p（供 S1 动态斜坡）。
+    // 差分用【原始净功 meter.p】（滑动窗滤波前）：5 点窗会把返送陡增 ~5 倍阻尼
+    // （实测 7-04 滤波后 |Δp| 峰值仅 ≈10 kW/周期 < 15 阈值，S1 动态斜坡永不触发，
+    // 回放 KPI 与未加 boost 完全一致）；改用原始净功后 39 kW/min 陡增可即时测到
+    // （Δp ≈ -39 < -15），boost 才真正生效（2026-08-31 回放验证：7-04 返送峰值
+    // 48.6→47.9kW、能量 22.9→22.2kWh，时长 9.4→9.6%）。
+    let dp = meter.p - state.prev_p; // 变化率（负=返送增大，正=受电上升）
+    state.prev_p = meter.p;
     state.p_st = match state.st {
         TaiState::S1PvAbsorb => {
-            let inc = (config.kp * (p - config.p_tgt_s1)).clamp(-config.slope, config.slope);
+            let mut inc = (config.kp * (p - config.p_tgt_s1)).clamp(-config.slope, config.slope);
+            if config.s1_boost_enabled {
+                // ① 返送陡然变大 → 加大充电斜坡（快速吸收），直至净进口接近 0
+                if dp < -config.s1_boost_rate_thr && p < -config.s1_near_zero_thr {
+                    inc = (config.kp * (p - config.p_tgt_s1))
+                        .clamp(-config.slope * config.s1_boost_factor, 0.0);
+                }
+                // ② 受电快速上升（充电未变时）→ 快速降低充电（向 0 回）
+                else if dp > config.s1_cut_rate_thr {
+                    inc = config.slope * config.s1_boost_factor;
+                }
+            }
             (state.p_st + inc).clamp(-config.p_cap, 0.0)
         }
         TaiState::S2Flat => move_toward(state.p_st, 0.0, config.slope),
