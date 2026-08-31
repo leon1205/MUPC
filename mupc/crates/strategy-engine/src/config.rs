@@ -125,6 +125,11 @@ pub struct TaiStorageConfig {
     pub t_clear_end_secs: f64,
     /// S4 日终清空限幅裕度 (kW)：>0 时 P_强制 = min(P_强制, P_表 + 裕度)，避免夜间过度反送（0 = 不限幅，保持满额清空）
     pub s4_limit_margin_kw: f64,
+    /// S3 放电裕度限幅（防负荷回落过冲返送）：true 时 S3 放电不超当前负荷裕度
+    /// `p_st = min(p_st, (P_表 - p_tgt_s3).max(0))`，负荷回落时放电即时跟随，杜绝过冲返送。
+    /// 稳态下 S3 目标即 p_st = P_表 - p_tgt_s3，故该钳位不影响目标跟踪，仅拦截积分过冲。
+    /// 默认 true（2026-08-31 S3 专项回放：两日控制后返送均降至基线以下且 SOC 日终仍达 10% 地板）
+    pub s3_margin_limit: bool,
     /// 滑动滤波窗口（点数）
     pub window_size: u32,
     /// 电池容量 (kWh)
@@ -156,6 +161,7 @@ impl Default for TaiStorageConfig {
             t_clear_start_secs: 21.0 * 3600.0, // 21:00
             t_clear_end_secs: 23.5 * 3600.0,   // 23:30
             s4_limit_margin_kw: 0.0,
+            s3_margin_limit: true,
             window_size: 5,
             battery_capacity_kwh: 120.0,
         }

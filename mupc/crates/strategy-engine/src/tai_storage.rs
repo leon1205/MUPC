@@ -304,7 +304,12 @@ pub fn control(
         TaiState::S2Flat => move_toward(state.p_st, 0.0, config.slope),
         TaiState::S3Peak => {
             let inc = (config.kp * (p - config.p_tgt_s3)).clamp(-config.slope, config.slope);
-            (state.p_st + inc).clamp(0.0, config.p_cap)
+            let mut p_st = (state.p_st + inc).clamp(0.0, config.p_cap);
+            if config.s3_margin_limit {
+                // 放电不超当前负荷裕度（防 S3 过冲返送：负荷快速回落时即时跟随，而非靠斜坡缓慢降）
+                p_st = p_st.min((p - config.p_tgt_s3).max(0.0));
+            }
+            p_st
         }
         TaiState::S4Clear => move_toward(state.p_st, p_force, config.slope),
     };

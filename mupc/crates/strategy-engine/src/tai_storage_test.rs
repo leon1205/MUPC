@@ -59,6 +59,38 @@ mod tai_storage_test {
     }
 
     #[test]
+    fn test_s3_margin_limit_prevents_overshoot() {
+        let mut cfg = TaiStorageConfig::default();
+        cfg.s3_margin_limit = true;
+        let mut st = TaiControllerState::default();
+        // p=10 不满足进入 S3 的阈值（p_dis_trig=30），直接强制置 S3 以直测限幅分支
+        st.st = TaiState::S3Peak;
+        // 模拟 S3 已累积大量放电（负荷快速回落前的过冲场景）
+        st.p_st = 40.0;
+        // 负荷回落到 10kW（目标 5kW）→ 放电应被钳到 ≤5kW，防返送
+        let m = meter(10.0, [4.0, 3.0, 3.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 16);
+        assert_eq!(st.st, TaiState::S3Peak, "S3 应保持（p_st>0 或 p>目标）");
+        assert!(
+            st.p_st <= 5.0 + 1e-9,
+            "S3 限幅应使放电 ≤ 负荷裕度 (10-5): {}",
+            st.p_st
+        );
+        // 对照：关闭限幅时放电不受裕度约束（斜坡/积分继续推高）
+        let mut cfg_off = TaiStorageConfig::default();
+        cfg_off.s3_margin_limit = false;
+        let mut st_off = TaiControllerState::default();
+        st_off.st = TaiState::S3Peak;
+        st_off.p_st = 40.0;
+        let _ = control(&mut st_off, &cfg_off, &m, 0.5, 3600 * 16);
+        assert!(
+            st_off.p_st > 5.0 + 1e-9,
+            "关闭限幅时应保持超裕度放电（对照）: {}",
+            st_off.p_st
+        );
+    }
+
+    #[test]
     fn test_dp_zero_net_energy() {
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();
