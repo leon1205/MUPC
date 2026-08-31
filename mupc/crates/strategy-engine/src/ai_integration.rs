@@ -6,10 +6,10 @@
 use crate::anti_reverse::AntiReverseStrategy;
 use crate::config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
 use crate::demand_control::DemandControlStrategy;
-use crate::tai_storage::TaiStorageStrategy;
 use crate::peak_shaving::PeakShavingStrategy;
 use crate::south_command_sender::SouthCommandDispatcher;
 use crate::strategies::FallbackStrategy;
+use crate::tai_storage::TaiStorageStrategy;
 use mupc_ai_engine::{
     AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource,
 };
@@ -137,21 +137,24 @@ impl AiIntegrator {
             }
         }
 
-        // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块
+        // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块（best-effort，失败仅告警）
         if let Some(tai) = &self.tai_storage {
-            let cmd = tai.evaluate(&data).await.map_err(|e| {
-                AiEngineError::InferenceFailed(format!("TaiStorageStrategy 执行失败: {}", e))
-            })?;
-            if let (Some(p), Some(q)) = (cmd.phase_p_set, cmd.phase_q_set) {
-                if let Some(ref client) = self.intercore_client {
-                    if let Err(e) = client.send_tai_command(p, q, "fallback").await {
-                        tracing::warn!("台区储能分相指令下发失败: {:?}", e);
-                    } else {
-                        tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
+            match tai.evaluate(&data).await {
+                Ok(cmd) => match (cmd.phase_p_set, cmd.phase_q_set) {
+                    (Some(p), Some(q)) => {
+                        if let Some(ref client) = self.intercore_client {
+                            if let Err(e) = client.send_tai_command(p, q, "fallback").await {
+                                tracing::warn!("台区储能分相指令下发失败: {:?}", e);
+                            } else {
+                                tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
+                            }
+                        } else {
+                            tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
+                        }
                     }
-                } else {
-                    tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
-                }
+                    _ => tracing::debug!("台区储能策略未产出完整分相 P/Q，跳过下发"),
+                },
+                Err(e) => tracing::warn!("TaiStorageStrategy 执行失败: {}", e),
             }
         }
 
@@ -477,6 +480,19 @@ mod tests {
     fn test_ai_integrator_creation() {
         let integrator = AiIntegrator::new();
         assert!(!integrator.is_ready_blocking());
+    }
+
+    #[test]
+    fn test_set_tai_storage_strategy() {
+        let mut integrator = AiIntegrator::new();
+        // 未注入前为 None（通过行为验证：set 后正常注入不 panic）
+        let strategy = Arc::new(crate::tai_storage::TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        ));
+        integrator.set_tai_storage_strategy(strategy);
+        // 注入后再次调用兜底流程不报错（无遥测数据时跳过）
+        let result = tokio_test::block_on(integrator.run_fallback_strategies());
+        assert!(result.is_ok(), "无遥测数据时兜底应正常返回 Ok");
     }
 
     impl AiIntegrator {
