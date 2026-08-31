@@ -6,6 +6,7 @@
 use crate::anti_reverse::AntiReverseStrategy;
 use crate::config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
 use crate::demand_control::DemandControlStrategy;
+use crate::tai_storage::TaiStorageStrategy;
 use crate::peak_shaving::PeakShavingStrategy;
 use crate::south_command_sender::SouthCommandDispatcher;
 use crate::strategies::FallbackStrategy;
@@ -36,6 +37,8 @@ pub struct AiIntegrator {
     fallback_active: RwLock<bool>,
     /// v3.1: 最新遥测数据（南向采集循环写入，供兜底策略 evaluate）
     latest_data: Arc<RwLock<Option<DataPackage>>>,
+    /// 台区储能治理策略（v2.16 第 4 策略，AI 失效兜底）
+    tai_storage: Option<Arc<TaiStorageStrategy>>,
 }
 
 impl AiIntegrator {
@@ -49,6 +52,7 @@ impl AiIntegrator {
             last_valid_k_droop: RwLock::new(None),
             fallback_active: RwLock::new(false),
             latest_data: Arc::new(RwLock::new(None)),
+            tai_storage: None,
         }
     }
 
@@ -130,6 +134,24 @@ impl AiIntegrator {
             }
             if let Some(ls) = load_shedding {
                 dispatcher.dispatch_load_shedding(ls, 1).await;
+            }
+        }
+
+        // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块
+        if let Some(tai) = &self.tai_storage {
+            let cmd = tai.evaluate(&data).await.map_err(|e| {
+                AiEngineError::InferenceFailed(format!("TaiStorageStrategy 执行失败: {}", e))
+            })?;
+            if let (Some(p), Some(q)) = (cmd.phase_p_set, cmd.phase_q_set) {
+                if let Some(ref client) = self.intercore_client {
+                    if let Err(e) = client.send_tai_command(p, q, "fallback").await {
+                        tracing::warn!("台区储能分相指令下发失败: {:?}", e);
+                    } else {
+                        tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
+                    }
+                } else {
+                    tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
+                }
             }
         }
 
@@ -235,6 +257,11 @@ impl AiIntegrator {
     /// v2.7: 设置核间通信客户端（用于发送双参数到实时控制模块）
     pub fn set_intercore_client(&mut self, client: Arc<IntercoreClient>) {
         self.intercore_client = Some(client);
+    }
+
+    /// 注入台区储能治理策略（第 4 策略）
+    pub fn set_tai_storage_strategy(&mut self, strategy: Arc<TaiStorageStrategy>) {
+        self.tai_storage = Some(strategy);
     }
 
     /// 执行 AI 决策并分发南向命令

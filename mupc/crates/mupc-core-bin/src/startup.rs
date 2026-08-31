@@ -378,6 +378,13 @@ pub async fn initialize_all(
         &load_device,
     )));
 
+    // v2.16: 注入台区储能治理策略（AI 失效兜底，分相 P/Q 经核间下发）
+    ai_integrator.set_tai_storage_strategy(Arc::new(
+        mupc_strategy_engine::TaiStorageStrategy::new(
+            mupc_strategy_engine::TaiStorageConfig::default(),
+        ),
+    ));
+
     ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
