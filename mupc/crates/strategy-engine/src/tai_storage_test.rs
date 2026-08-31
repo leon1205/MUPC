@@ -85,17 +85,64 @@ mod tai_storage_test {
         st.st = TaiState::S1PvAbsorb;
         st.p_st = -40.0; // 深度充电
         st.prev_p = -15.0;
-        // 受电快速上升：p 从 -15 突升到 +3（Δ=+18 > +15），仍在 S1（p < s1_exit=4）
+        st.prev_p_st = -40.0; // v2.21：上周期同样深度充电（充电功率不变）→ 外部突变
+        // 外部受电快速上升：p 从 -15 突升到 +3（Δp=+18 > +15），仍在 S1（p < s1_exit=4）
         let m = meter(3.0, [1.0, 1.0, 1.0], [0.0; 3], [220.0; 3], [0.99; 3]);
         let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
         // 快速退出充电：单周期向 0 回，减幅 ≥ slope*factor
         let rise = st.p_st - (-40.0); // 向 0 回 = 增大
         assert!(
             rise >= cfg.slope * cfg.s1_boost_factor * 0.9,
-            "受电快升应快速退出充电: 回幅 {}",
+            "外部突变应快速退出充电: 回幅 {}",
             rise
         );
         assert!(st.p_st < 0.0, "仍在充电但应快速收敛: {}", st.p_st);
+    }
+
+    #[test]
+    fn test_s1_no_rapid_exit_on_self_excitation() {
+        // v2.21：储能自激判别——基线恒定返送 −50，boost 充电加深使下一周期净返送
+        // 收窄（Δp_base≈0，外部没变）→ 不应触发 ② 快速退出（否则自激极限环），
+        // 应继续充电吸收。Δp_base 判别 = Δp + Δp_out。
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        st.st = TaiState::S1PvAbsorb;
+        // 周期1：净 −50（储能尚未输出），返送陡增 → boost 充电
+        let m1 = meter(
+            -50.0,
+            [-20.0, -15.0, -15.0],
+            [0.0; 3],
+            [220.0; 3],
+            [0.99; 3],
+        );
+        let _ = control(&mut st, &cfg, &m1, 0.5, 3600 * 12);
+        let p_st1 = st.p_st;
+        assert!(
+            p_st1 < -cfg.slope,
+            "周期1 返送陡增应 boost 加深充电: {}",
+            p_st1
+        );
+        // 周期2：基线仍 −50，但储能输出 p_st1 生效 → 净返送收窄为 −50 − p_st1
+        let m2 = meter(
+            -50.0 - p_st1,
+            [-20.0, -15.0, -15.0],
+            [0.0; 3],
+            [220.0; 3],
+            [0.99; 3],
+        );
+        let _ = control(&mut st, &cfg, &m2, 0.5, 3600 * 12);
+        // 收窄是储能自激（Δp_base≈0），不应快速退出 → 应继续加深充电（普通斜坡）
+        assert!(
+            st.p_st < p_st1,
+            "自激收窄不应快速退出，应继续充电: p_st {} → {}",
+            p_st1, st.p_st
+        );
+        let drop = p_st1 - st.p_st;
+        assert!(
+            drop <= cfg.slope + 1e-9,
+            "普通收窄走正常积分（≤slope），非 boost 放大: {}",
+            drop
+        );
     }
 
     #[test]

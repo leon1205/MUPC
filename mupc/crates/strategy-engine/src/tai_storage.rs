@@ -70,6 +70,8 @@ pub struct TaiControllerState {
     pub last_control_ts: u64,
     /// 上一周期原始净功 meter.p（动态斜坡差分基准，滤波前）
     pub prev_p: f64,
+    /// 上周期共模输出 p_st（S1 ②分支 Δp_out 判别基准，v2.21）
+    pub prev_p_st: f64,
 }
 
 impl Default for TaiControllerState {
@@ -85,6 +87,7 @@ impl Default for TaiControllerState {
             meter_buf: VecDeque::new(),
             last_control_ts: 0,
             prev_p: 0.0,
+            prev_p_st: 0.0,
         }
     }
 }
@@ -316,6 +319,13 @@ pub fn control(
     // 48.6→47.9kW、能量 22.9→22.2kWh，时长 9.4→9.6%）。
     let dp = meter.p - state.prev_p; // 变化率（负=返送增大，正=受电上升）
     state.prev_p = meter.p;
+    // v2.21：重构外部基线变化率 Δp_base，区分净返送收窄是储能自激还是外部变化。
+    // 净功率变化 Δp = Δp_base − Δp_out（外部基线变化 − 储能输出变化），故
+    // Δp_base = Δp + Δp_out。储能自激（boost 充电加深）→ Δp_out 负向大、Δp_base≈0；
+    // 外部返送消失 → Δp_base 正向大。② 仅对外部突变快速退出，消除自激极限环。
+    let dp_out = state.p_st - state.prev_p_st; // 储能输出变化（p_st 更新前为上周期值）
+    state.prev_p_st = state.p_st;              // 记录本周期输出（供下周期差分）
+    let dp_base = dp + dp_out;                 // 重构外部基线变化
     state.p_st = match state.st {
         TaiState::S1PvAbsorb => {
             let mut inc = (config.kp * (p - config.p_tgt_s1)).clamp(-config.slope, config.slope);
@@ -325,8 +335,9 @@ pub fn control(
                     inc = (config.kp * (p - config.p_tgt_s1))
                         .clamp(-config.slope * config.s1_boost_factor, 0.0);
                 }
-                // ② 受电快速上升（充电未变时）→ 快速降低充电（向 0 回）
-                else if dp > config.s1_cut_rate_thr {
+                // ② 外部基线返送快速消失（Δp_base 大）→ 快速退出充电；
+                //    储能自激造成的收窄（Δp_base 小）不响应，走正常积分收敛（防极限环）
+                else if dp_base > config.s1_cut_rate_thr {
                     inc = config.slope * config.s1_boost_factor;
                 }
             }

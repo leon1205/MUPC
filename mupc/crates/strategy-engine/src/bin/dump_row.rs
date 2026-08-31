@@ -54,6 +54,8 @@ fn main() {
             println!("PF_总 (col19) = {:.3}   Q_总(col11)={:.3}", f(row, 19), f(row, 11));
             println!("SOC(col30) = {:.2}   unbal(col39)={:.2}", f(row, 30), f(row, 39));
             println!("相角_A/B/C(27-29) = {:.1} / {:.1} / {:.1}", f(row, 27), f(row, 28), f(row, 29));
+            println!("P调控值(33-35) = {:.3} / {:.3} / {:.3}   Q调控值(36-38) = {:.3} / {:.3} / {:.3}",
+                f(row, 33), f(row, 34), f(row, 35), f(row, 36), f(row, 37), f(row, 38));
         }
     }
 }
