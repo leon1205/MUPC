@@ -194,16 +194,19 @@ mod tai_storage_test {
         }
     }
 
-    fn poll(strategy: &TaiStorageStrategy, ts: u64) -> ControlCommand {
-        let data = create_package(ts, 10.0, 0.5);
+    fn poll(strategy: &TaiStorageStrategy, ts: u64, grid_power: f64) -> ControlCommand {
+        let data = create_package(ts, grid_power, 0.5);
         tokio_test::block_on(strategy.evaluate(&data)).unwrap()
     }
 
     #[test]
     fn test_strategy_throttles_to_60s() {
         let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
-        let cmd1 = poll(&strategy, 3600 * 10);        // first call executes control
-        let cmd2 = poll(&strategy, 3600 * 10 + 1);    // <60s → returns last command
+        // 10:00 受电 10kW → S2（执行控制周期，输出零设定）
+        let cmd1 = poll(&strategy, 3600 * 10, 10.0);
+        // 1s 后返送 -50kW：若重算，经滑动窗均值 (10 + -50)/2 = -20 < -p_abs_trig，
+        // 应进入 S1 充电（负出力）；被节流则返回缓存的 S2 零设定，两者一致。
+        let cmd2 = poll(&strategy, 3600 * 10 + 1, -50.0);
         assert_eq!(cmd1.phase_p_set, cmd2.phase_p_set);
     }
 
@@ -217,10 +220,41 @@ mod tai_storage_test {
     #[test]
     fn test_strategy_outputs_phase_fields() {
         let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
-        let cmd = poll(&strategy, 3600 * 10); // 10:00 grid_power=10 → S2
+        let cmd = poll(&strategy, 3600 * 10, 10.0); // 10:00 grid_power=10 → S2
         assert!(cmd.phase_p_set.is_some());
         assert!(cmd.phase_q_set.is_some());
         assert_eq!(cmd.cmd_id, 4);
         assert_eq!(cmd.cmd_type, CommandType::ChargeDischarge);
+    }
+
+    #[test]
+    fn test_strategy_missing_phase_failsafe() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        // phase=None → data_to_meter 返回默认（零输出），命令为 no-op 零设定
+        let data = DataPackage {
+            timestamp: 3600 * 10,
+            electrical: ElectricalData {
+                voltage: Some(220.0),
+                current: Some(30.0),
+                active_power: Some(-30.0),
+                reactive_power: Some(0.0),
+                cos_phi: Some(0.99),
+                frequency: Some(50.0),
+                phase: None,
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: Some(50.0),
+                soh: None,
+                temperature: None,
+            },
+        };
+        let cmd = tokio_test::block_on(strategy.evaluate(&data)).unwrap();
+        assert_eq!(cmd.phase_p_set, Some([0.0; 3]));
     }
 }

@@ -23,7 +23,7 @@ pub struct DataPackage {
 pub struct PhaseElectricalData {
     /// 分相电压 (V)
     pub voltage: [Option<f64>; 3],
-    /// 分相电流 (A，带符号：正=受电方向，负=返送方向)
+    /// 分相电流 (A，带符号：正=受电方向，负=返送方向；数据源须提供带符号值，不得仅给幅值)
     pub current: [Option<f64>; 3],
     /// 分相有功 (kW，含符号：>0 受电 / <0 返送)
     pub active_power: [Option<f64>; 3],

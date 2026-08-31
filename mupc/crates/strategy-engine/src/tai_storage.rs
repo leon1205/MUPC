@@ -5,7 +5,12 @@
 //! 设计见 04-MUPC-策略引擎-设计文档 §15。
 
 use crate::config::TaiStorageConfig;
+use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
+use async_trait::async_trait;
+use mupc_common::MupcError;
+use mupc_data_processing::telemetry::DataPackage;
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// 台区储能控制器状态（4 状态机）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -337,12 +342,6 @@ pub fn control(
     (pcmd, q)
 }
 
-use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
-use async_trait::async_trait;
-use mupc_common::MupcError;
-use mupc_data_processing::telemetry::DataPackage;
-use std::sync::{Arc, Mutex};
-
 /// 台区储能治理策略（第 4 策略）
 ///
 /// 内部持跨周期控制状态（Arc<Mutex>），实现 FallbackStrategy。
@@ -354,10 +353,13 @@ pub struct TaiStorageStrategy {
 }
 
 impl TaiStorageStrategy {
+    /// 命令 ID（与调度约定）
+    const CMD_ID: u16 = 4;
+
     pub fn new(config: TaiStorageConfig) -> Self {
         let last_cmd = ControlCommand {
-            cmd_id: 4,
-            cmd_type: CommandType::PowerRegulation,
+            cmd_id: Self::CMD_ID,
+            cmd_type: CommandType::ChargeDischarge,
             p_batt_set: None,
             q_batt_set: None,
             phase_compensation: None,
@@ -388,7 +390,7 @@ impl TaiStorageStrategy {
         let (p, q) = control(&mut state, &self.config, &meter, soc, data.timestamp);
 
         let cmd = ControlCommand {
-            cmd_id: 4,
+            cmd_id: Self::CMD_ID,
             cmd_type: CommandType::ChargeDischarge,
             p_batt_set: Some(p.iter().sum()),
             q_batt_set: None,
@@ -421,14 +423,8 @@ fn data_to_meter(data: &DataPackage) -> MeterData {
     let p_i = get(&phase.active_power);
     let q_i = get(&phase.reactive_power);
     let u = get(&phase.voltage);
-    let i_mag = get(&phase.current);
+    let i = get(&phase.current);
     let pf = get(&phase.cos_phi);
-    // 带符号电流：方向由分相有功符号决定
-    let i = [
-        p_i[0].signum() * i_mag[0],
-        p_i[1].signum() * i_mag[1],
-        p_i[2].signum() * i_mag[2],
-    ];
     MeterData {
         p: p_i.iter().sum(),
         q: q_i.iter().sum(),
