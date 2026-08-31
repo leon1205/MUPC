@@ -1,6 +1,6 @@
 # MUPC 策略引擎模块设计文档
 
-> **版本：** v2.16（2026-08-31）
+> **版本：** v2.17（2026-08-31）
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
@@ -9,9 +9,6 @@
 ## 目录
 
 1. [模块架构](#1-模块架构)
-2. [削峰填谷策略](#2-削峰填谷策略)
-3. [需量控制策略](#3-需量控制策略)
-4. [防逆流保护策略](#4-防逆流保护策略)
 5. [电压越限与三相不平衡无功补偿（接口预留）](#5-电压越限与三相不平衡无功补偿接口预留)
 6. [AI 指令安全校验](#6-ai-指令安全校验)
 7. [AI 引擎集成](#7-ai-引擎集成)
@@ -33,7 +30,7 @@
 策略引擎（Strategy Engine）是 MUPC 通信管理模块的**本地决策核心**，对应 workspace crate `mupc-strategy-engine`。
 
 **核心职责：**
-- 提供三种兜底策略：削峰填谷、需量控制、防逆流保护
+- 提供单一兜底策略：台区储能治理（AI 失效时经核间下发分相 P/Q）
 - 对 AI 引擎输出的指令进行安全校验（`AiCommandValidator`）
 - 管理策略模式切换（AI 模式 / 本地兜底模式 / 基础模式）
 - 通过消息总线接收遥测数据，输出控制指令
@@ -54,7 +51,7 @@ AI 引擎失效:
 | 模式 | 决策源 | 校验方式 | 适用场景 |
 |------|--------|----------|----------|
 | AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 默认运行模式 |
-| 本地兜底模式 | 削峰填谷/需量控制/防逆流 | 策略内置边界检查 | AI 失效/指令校验不通过 |
+| 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过 |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
 
 ### 1.3 模块依赖关系
@@ -79,9 +76,6 @@ Message Bus (tokio::sync::mpsc)
     │
     ▼
 strategy-engine
-    ├── 削峰填谷 (PeakShavingStrategy)       ← cmd_id: 1
-    ├── 需量控制 (DemandControlStrategy)     ← cmd_id: 2
-    ├── 防逆流 (AntiReverseStrategy)         ← cmd_id: 3
     │
     ▼
 AiCommandValidator (可插拔 AI 模型)
@@ -89,279 +83,22 @@ AiCommandValidator (可插拔 AI 模型)
     ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  AI→  p_ref + k_droop → IntercoreClient → 实时控制模块     │
-│  本地策略→ pv_limit / load_shedding → SouthCommandDispatcher → 南向设备 │
+│  本地策略→ 台区储能分相 P/Q → IntercoreClient → 实时控制模块 │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-> **分发路径：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块；pv_limit 和 load_shedding 不作为 AI 动作维度，仅由本地兜底策略（防逆流/需量控制）设置并通过南向通信分发至设备。
+> **分发路径：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块；台区储能治理策略（AI 失效兜底）经核间 V3 帧下发分相 P/Q 至实时控制模块。
 
 ### 1.5 策略 ID 分配
 
 | 策略 | cmd_id | 说明 |
 |------|--------|------|
-| 削峰填谷 | 1 | 固定 ID，用于日志追踪和消息路由 |
-| 需量控制 | 2 | 固定 ID |
-| 防逆流 | 3 | 固定 ID |
-| 保留 | 4-10 | 供后续扩展策略使用 |
+| 台区储能治理 | 4 | 固定 ID（AI 失效兜底，经核间 V3 帧下发分相 P/Q） |
+| 保留 | 5-10 | 供后续扩展策略使用 |
 
 ### 1.6 性能与可靠性
 
-> 非功能性需求详见 [PRD §10](../specs/modules/04-MUPC-策略引擎-PRD.md)。本条记录设计层面的关键实现约束：策略决策延迟 < 100ms、单实例内存 < 10MB、三策略并发互不阻塞、模式切换 < 50ms。
-
----
-
-## 2. 削峰填谷策略
-
-> 功能需求详见 [PRD §2](../specs/modules/04-MUPC-策略引擎-PRD.md)。本节记录实现级设计。
-
-### 2.1 架构
-
-- **结构体**: `PeakShavingStrategy`
-- **配置**: `PeakShavingConfig`（位于 `config.rs`）
-- **接口**: 实现 `FallbackStrategy` trait
-- **文件**: `peak_shaving.rs`
-
-### 2.2 决策逻辑
-
-```
-充电优先级：
-  1. 谷时 + PV 低 → 电网充电（15kW）
-  2. 谷时 + PV 高 → PV 充电（min(PV, 30kW)）
-
-放电优先级：
-  1. 峰时 → 放电（25kW）
-
-边界保护：
-  - SOC < soc_charge_min（20%）→ 强制充电（20kW）
-  - SOC > soc_charge_max（80%）→ 强制放电（-20kW）
-  - 非峰非谷的平时段 → 待机（0kW，PowerRegulation 模式）
-```
-
-代码实现路径：
-
-```rust
-fn decide(&self, battery_soc: f64, pv_power: f64, _load_power: f64,
-          is_peak: bool, is_valley: bool) -> (f64, CommandType) {
-    if battery_soc < self.config.soc_charge_min {
-        // 强制充电 20kW
-        (20.0, CommandType::ChargeDischarge)
-    } else if battery_soc > self.config.soc_charge_max {
-        // 强制放电 -20kW
-        (-20.0, CommandType::ChargeDischarge)
-    } else if is_valley {
-        // 谷时：PV 充足则用 PV 充电，不足则电网充电
-        let p_batt = if pv_power > 10.0 { pv_power.min(30.0) } else { 15.0 };
-        (p_batt, CommandType::ChargeDischarge)
-    } else if is_peak {
-        // 峰时：放电 25kW
-        (-25.0, CommandType::ChargeDischarge)
-    } else {
-        // 平时：待机
-        (0.0, CommandType::PowerRegulation)
-    }
-}
-```
-
-### 2.3 时段检测规则
-
-峰时段检测和谷时段检测使用同一套跨天兼容的规则：
-
-```rust
-fn is_peak_hour(&self, hour: u8) -> bool {
-    self.config.peak_hours.iter().any(|(start, end)| {
-        if *start <= *end {
-            hour >= *start && hour < *end    // 同天
-        } else {
-            hour >= *start || hour < *end    // 跨天（如 23:00-07:00）
-        }
-    })
-}
-```
-
-从 Unix 时间戳提取小时（u64 截断到当日秒）：
-
-```rust
-let hour = (data.timestamp % 86400) / 3600;
-```
-
-### 2.4 配置参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `peak_hours` | `Vec<(u8, u8)>` | `[(8, 11), (18, 21)]` | 峰时段列表，(起始小时, 结束小时) |
-| `valley_hours` | `Vec<(u8, u8)>` | `[(23, 7)]` | 谷时段列表，(起始小时, 结束小时) |
-| `soc_charge_max` | `f64` | `80.0` | SOC 充电上限（%） |
-| `soc_charge_min` | `f64` | `20.0` | SOC 充电下限（%） |
-| `battery_capacity` | `f64` | `100.0` | 电池容量（kWh） |
-
-### 2.5 输出字段
-
-| 字段 | 值 | 说明 |
-|------|-----|------|
-| `cmd_id` | 1 | 削峰填谷策略固定 ID |
-| `cmd_type` | `ChargeDischarge` / `PowerRegulation` | 充放电控制或待机 |
-| `p_ref` | ±15~30 kW | 有功基准点（双参数模式） |
-| `priority` | 1 | 默认优先级 |
-
-### 2.6 测试覆盖
-
-| 测试用例 | 文件 | 验证点 |
-|----------|------|--------|
-| `test_peak_hours_detection` | `peak_shaving_test.rs` | 峰时段检测边界 |
-| `test_valley_hours_detection` | `peak_shaving_test.rs` | 谷时段检测边界（含跨天） |
-| `test_discharge_at_peak_when_soc_high` | `peak_shaving_test.rs` | 峰时 + SOC > 80% 放电 -20kW |
-| `test_charge_at_valley_when_soc_low` | `peak_shaving_test.rs` | 谷时 + SOC < 20% 充电 20kW |
-| `test_charge_at_valley_with_pv` | `peak_shaving_test.rs` | 谷时 + PV 充足按 PV 充电 |
-| `test_discharge_at_peak` | `peak_shaving_test.rs` | 峰时 + SOC 正常放电 -25kW |
-| `test_idle_at_normal_hours` | `peak_shaving_test.rs` | 平时段待机 |
-| `test_soc_too_low_force_charge` | `peak_shaving_test.rs` | SOC 低于下限强制充电 |
-| `test_soc_too_high_force_discharge` | `peak_shaving_test.rs` | SOC 高于上限强制放电 |
-
----
-
-## 3. 需量控制策略
-
-> 功能需求详见 [PRD §3](../specs/modules/04-MUPC-策略引擎-PRD.md)。
-
-### 3.1 架构
-
-- **结构体**: `DemandControlStrategy`
-- **配置**: `DemandControlConfig`（位于 `config.rs`）
-- **接口**: 实现 `FallbackStrategy` trait
-- **文件**: `demand_control.rs`
-
-### 3.2 决策逻辑
-
-```
-负载率计算：transformer_load = (load_power + ev_charger_power) / transformer_capacity
-
-Level 0 (负载率 ≤ warning_threshold = 80%):
-  无动作。电池待机，不放电不充电。
-  优先级：0
-
-Level 1 (80% < 负载率 ≤ action_threshold = 90%):
-  电池放电补偿（-10kW）
-  不切除负荷
-  优先级：1
-
-Level 2 (90% < 负载率 ≤ emergency_threshold = 95%):
-  电池放电（-20kW）
-  切除次要负荷（10kW）
-  cmd_type 切换为 SwitchControl
-  优先级：2
-
-Level 3 (负载率 > 95%):
-  紧急放电（-30kW）
-  强制切除非重要负荷（20kW）
-  cmd_type 切换为 SwitchControl
-  优先级：3
-
-低 SOC 保护：
-  当 SOC < 20% 且需要放电时，放电功率限制为 max(-10kW)
-```
-
-### 3.3 配置参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `transformer_capacity` | `f64` | `200.0` | 变压器容量（kVA） |
-| `demand_factor` | `f64` | `0.85` | 需量因子 |
-| `warning_threshold` | `f64` | `0.80` | 预警阈值（Level 1 触发） |
-| `action_threshold` | `f64` | `0.90` | 行动阈值（Level 2 触发） |
-| `emergency_threshold` | `f64` | `0.95` | 紧急阈值（Level 3 触发） |
-
-### 3.4 输出字段
-
-| 字段 | 值 | 说明 |
-|------|-----|------|
-| `cmd_id` | 2 | 需量控制策略固定 ID |
-| `cmd_type` | `PowerRegulation` / `SwitchControl` | Level 1 为功率调节，Level >= 2 为开关控制 |
-| `p_ref` | -10/-20/-30 kW | 有功基准点，按等级决定放电功率 |
-| `load_shedding` | `Some(10/20 kW)` | Level >= 2 时执行负荷切除 |
-| `priority` | 0~3 | 对应策略等级 |
-
-### 3.5 测试覆盖
-
-| 测试用例 | 文件 | 验证点 |
-|----------|------|--------|
-| `test_transformer_load_calculation` | `demand_control_test.rs` | 负载率计算正确性 |
-| `test_level_0_normal` | `demand_control_test.rs` | 负载率 <= 80% 无动作 |
-| `test_level_1_warning` | `demand_control_test.rs` | 80%-90% 放电 -10kW |
-| `test_level_2_action` | `demand_control_test.rs` | 90%-95% 放电 -20kW + 切负荷 10kW |
-| `test_level_3_emergency` | `demand_control_test.rs` | > 95% 紧急放电 -30kW + 切负荷 20kW |
-| `test_low_soc_protection` | `demand_control_test.rs` | SOC < 20% 放电受限 |
-| `test_custom_thresholds` | `demand_control_test.rs` | 支持自定义阈值配置 |
-
----
-
-## 4. 防逆流保护策略
-
-> 功能需求详见 [PRD §4](../specs/modules/04-MUPC-策略引擎-PRD.md)。
-
-### 4.1 架构
-
-- **结构体**: `AntiReverseStrategy`
-- **配置**: `AntiReverseConfig`（位于 `config.rs`）
-- **接口**: 实现 `FallbackStrategy` trait
-- **文件**: `anti_reverse.rs`
-- **注意**: 该策略的 `evaluate_sync` 需要 `&mut self`，因其内部维护 `pv_limit_count` 状态
-
-### 4.2 决策逻辑
-
-```
-触发条件：grid_power < reverse_power_threshold（默认 -0.1kW，允许微小逆流）
-
-Step 1 - 电池有余量（SOC < soc_charge_max = 80%）：
-  电池充电功率 = min(PV出力 × 0.8, max_charge_power = 50kW)
-  不限制 PV 出力
-
-Step 2 - 电池已满（SOC >= soc_charge_max）：
-  限制 PV 出力 = PV出力 × (pv_limit_count × 0.1)，上限 50%
-  电池不充电
-  pv_limit_count 递增
-
-Step 3 - PV 已限制且仍逆流：
-  触发告警（通过消息总线发送，待实现）
-
-恢复正常：
-  当 grid_power >= reverse_power_threshold 时，恢复正常运行
-  pv_limit_count 清零
-```
-
-### 4.3 状态管理
-
-| 状态字段 | 初始值 | 说明 |
-|----------|--------|------|
-| `pv_limit_count` | 0 | 连续 PV 限制次数，每次逆流且电池满时递增，恢复正常时清零 |
-
-### 4.4 配置参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `reverse_power_threshold` | `f64` | `-0.1` | 逆功率阈值（kW），允许微小逆流 |
-| `pv_limit_step` | `f64` | `0.10` | 每次 PV 限制幅度（比例） |
-| `max_charge_power` | `f64` | `50.0` | 最大充电功率（kW） |
-| `soc_charge_max` | `f64` | `80.0` | SOC 充电上限（%） |
-
-### 4.5 输出字段
-
-| 字段 | 值 | 说明 |
-|------|-----|------|
-| `cmd_id` | 3 | 防逆流策略固定 ID |
-| `cmd_type` | `PowerRegulation` | 功率调节 |
-| `p_ref` | 正数（充电）/ 0 | 有功基准点，消纳逆流功率 |
-| `pv_limit` | `Some(0.0~0.5)` / `None` | PV 限功率比例，无限制时为 None |
-| `priority` | 2 | 默认优先级 |
-
-### 4.6 测试覆盖
-
-| 测试用例 | 文件 | 验证点 |
-|----------|------|--------|
-| `test_anti_reverse_charge_when_grid_reverse_and_battery_not_full` | `anti_reverse_test.rs` | 逆流时电池充电 |
-| `test_anti_reverse_limit_pv_when_battery_full` | `anti_reverse_test.rs` | 逆流 + 电池满，限制 PV |
-| `test_anti_reverse_no_action_when_grid_normal` | `anti_reverse_test.rs` | 正常功率时无动作 |
-| `test_strategy_type` | `anti_reverse_test.rs` | 策略类型标记为 Fallback |
-| `test_strategy_name` | `anti_reverse_test.rs` | 策略名称返回 "AntiReverseStrategy" |
+> 非功能性需求详见 [PRD §10](../specs/modules/04-MUPC-策略引擎-PRD.md)。本条记录设计层面的关键实现约束：策略决策延迟 < 100ms、单实例内存 < 10MB、模式切换 < 50ms。
 
 ---
 
@@ -555,9 +292,8 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 3. AiCommandValidator 校验 AI 指令安全性
 4. AI 指令分发：
    - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
-5. 本地策略独立执行（不经过 AI）：
-   - pv_limit → 防逆流策略(AntiReverseStrategy) → SouthCommandDispatcher → 光伏逆变器
-   - load_shedding → 需量控制策略(DemandControlStrategy) → SouthCommandDispatcher → 负荷控制装置
+5. 本地兜底策略独立执行（不经过 AI）：
+   - 台区储能治理(TaiStorageStrategy) → IntercoreClient.send_tai_command()（核间 V3 帧）→ 实时控制模块 → 台区储能 PCS（分相 P/Q）
 ```
 
 ---
@@ -627,7 +363,7 @@ pub trait FallbackStrategy: Send + Sync {
 ```rust
 #[derive(Debug, Clone)]
 pub struct ControlCommand {
-    pub cmd_id: u16,                          // 命令 ID（1-削峰填谷, 2-需量控制, 3-防逆流）
+    pub cmd_id: u16,                          // 命令 ID（4-台区储能治理）
     pub cmd_type: CommandType,                // 命令类型
     pub p_ref: Option<f64>,                  // 有功基准点 (kW)，AI输出或本地策略设置
     pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，AI输出或本地策略设置
@@ -635,15 +371,11 @@ pub struct ControlCommand {
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级（0-3）
-    pub pv_limit: Option<f64>,               // PV 限功率比例 (0.0-1.0)，仅由本地防逆流策略设置
-    pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)，仅由本地需量控制策略设置
     pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW) [A/B/C]，正=放电/注入，仅由台区储能治理策略设置
     pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr) [A/B/C]，仅由台区储能治理策略设置
 }
 ```
 
-> **字段语义说明：** `pv_limit` 和 `load_shedding` 保留在 `ControlCommand` 中，但仅由本地兜底策略引擎（`AntiReverseStrategy` / `DemandControlStrategy`）设置，不再作为 AI 引擎（`ActionOutput`）的动作维度。
->
 > **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §15）设置。设定值经核间 V3 帧下发到实时控制模块，由其转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。
 
 ### 9.3 CommandType 枚举
@@ -651,9 +383,9 @@ pub struct ControlCommand {
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CommandType {
-    SwitchControl,      // 开关控制（需量控制 Level 2/3）
-    PowerRegulation,    // 功率调节（防逆流、削峰填谷平时段）
-    ChargeDischarge,    // 充放电控制（削峰填谷峰谷时段）
+    SwitchControl,      // 开关控制
+    PowerRegulation,    // 功率调节
+    ChargeDischarge,    // 充放电控制
 }
 ```
 
@@ -712,22 +444,19 @@ mupc/crates/strategy-engine/
 │   │                             # CommandType, AiCommandValidator trait,
 │   │                             # ValidationResult, StrategyType, AiCommand
 │   │
-│   ├── peak_shaving.rs           # 削峰填谷策略实现
-│   ├── demand_control.rs         # 需量控制策略实现
-│   ├── anti_reverse.rs           # 防逆流保护策略实现
-│   ├── tai_storage.rs            # 台区储能治理策略实现（第 4 策略）
+│   ├── tai_storage.rs            # 台区储能治理策略实现（唯一兜底策略）
+│   │
+│   │  # 注：已废弃三策略文件（peak_shaving.rs / demand_control.rs / anti_reverse.rs
+│   │  # 及其测试文件）保留于 src/ 但不再编译（lib.rs 不再 mod 声明）
 │   │
 │   ├── ai_validator.rs           # AiCommandValidatorImpl 可插拔校验器
 │   │                             # AiModel trait, MockAiModel, ModelInput/Output
 │   │
 │   ├── ai_integration.rs         # AiIntegrator（AI 引擎集成）
 │   │
-│   ├── config.rs                 # PeakShavingConfig, DemandControlConfig, AntiReverseConfig
+│   ├── config.rs                 # TaiStorageConfig
 │   ├── errors.rs                 # StrategyError 枚举
 │   │
-│   ├── peak_shaving_test.rs      # 削峰填谷策略单元测试（9 tests）
-│   ├── demand_control_test.rs    # 需量控制策略单元测试（7 tests）
-│   ├── anti_reverse_test.rs      # 防逆流策略单元测试（5 tests）
 │   ├── ai_validator_test.rs      # AI 校验器单元测试（8 tests）
 │   └── tai_storage_test.rs       # 台区储能治理策略单元测试（~15 tests）
 ```
@@ -736,21 +465,15 @@ mupc/crates/strategy-engine/
 
 ```rust
 pub mod strategies;
-pub mod peak_shaving;
-pub mod demand_control;
-pub mod anti_reverse;
-pub mod tai_storage;          // 台区储能治理策略（第 4 策略）
+pub mod tai_storage;          // 台区储能治理策略（唯一兜底策略）
 pub mod ai_validator;
 pub mod config;
 pub mod errors;
 pub mod ai_integration;       // AI 引擎集成
 
-pub use peak_shaving::PeakShavingStrategy;
-pub use demand_control::DemandControlStrategy;
-pub use anti_reverse::AntiReverseStrategy;
-pub use tai_storage::{TaiControllerState, TaiStorageConfig, TaiStorageStrategy, TaiState};
+pub use tai_storage::{TaiControllerState, TaiStorageStrategy, TaiState};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput, MockAiModel};
-pub use config::{PeakShavingConfig, DemandControlConfig, AntiReverseConfig};
+pub use config::TaiStorageConfig;
 pub use errors::StrategyError;
 pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
 pub use mupc_ai_engine::{ModelManager, FusedSystemState, ActionOutput, ModelStatus, RobustnessManager, AnomalyType};
@@ -788,45 +511,7 @@ pub enum StrategyError {
 
 ## 12. 配置管理
 
-### 12.1 削峰填谷配置（PeakShavingConfig）
-
-```rust
-#[derive(Debug, Clone)]
-pub struct PeakShavingConfig {
-    pub peak_hours: Vec<(u8, u8)>,       // 默认: [(8, 11), (18, 21)]
-    pub valley_hours: Vec<(u8, u8)>,     // 默认: [(23, 7)]
-    pub soc_charge_max: f64,             // 默认: 80.0
-    pub soc_charge_min: f64,             // 默认: 20.0
-    pub battery_capacity: f64,           // 默认: 100.0
-}
-```
-
-### 12.2 需量控制配置（DemandControlConfig）
-
-```rust
-#[derive(Debug, Clone)]
-pub struct DemandControlConfig {
-    pub transformer_capacity: f64,    // 默认: 200.0
-    pub demand_factor: f64,           // 默认: 0.85
-    pub warning_threshold: f64,       // 默认: 0.80
-    pub action_threshold: f64,        // 默认: 0.90
-    pub emergency_threshold: f64,     // 默认: 0.95
-}
-```
-
-### 12.3 防逆流配置（AntiReverseConfig）
-
-```rust
-#[derive(Debug, Clone)]
-pub struct AntiReverseConfig {
-    pub reverse_power_threshold: f64,   // 默认: -0.1
-    pub pv_limit_step: f64,             // 默认: 0.10
-    pub max_charge_power: f64,          // 默认: 50.0
-    pub soc_charge_max: f64,            // 默认: 80.0
-}
-```
-
-### 12.4 运行时配置热加载
+### 12.1 运行时配置热加载
 
 - 当前实现：所有配置通过 `Default` trait 提供默认值，构造时传入
 - 规划：支持配置文件热加载（修改无需重启）、运行时动态调整
@@ -839,12 +524,10 @@ pub struct AntiReverseConfig {
 
 | 测试文件 | 测试用例数 | 测试内容 |
 |----------|-----------|----------|
-| `peak_shaving_test.rs` | 9 | 峰谷时段检测、SOC 边界、PV 充电优先级 |
-| `demand_control_test.rs` | 7 | 四级负载率、低 SOC 保护、自定义阈值 |
-| `anti_reverse_test.rs` | 5 | 逆流充电、PV 限功率、正常无动作、类型/名称 |
 | `ai_validator_test.rs` | 8 | 模型预测（3）、无模型/有模型校验、开关命令、异步接口 |
+| `tai_storage_test.rs` | ~15 | 状态机切换（S1~S4 进入/退出/滞回）、积分收敛、容量仲裁、failsafe（详见 §15.13） |
 
-**总计：29 个单元测试**
+**总计：约 23 个单元测试**
 
 ### 13.2 测试数据构造模式
 
@@ -877,7 +560,7 @@ fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power:
 | Phase | 内容 | 说明 | 状态 |
 |-------|------|------|------|
 | Phase 1 | 接口定义：`FallbackStrategy` trait 和 `AiCommandValidator` trait | 仅接口预留 | 已完成 |
-| Phase 3A | 完整实现三种兜底策略 + `AiCommandValidatorImpl` + `MockAiModel` | 削峰填谷、需量控制、防逆流实现 | 已完成 |
+| Phase 3A | 兜底策略与 `AiCommandValidatorImpl` + `MockAiModel` | 台区储能治理策略实现 | 已完成（三策略已废弃） |
 | Phase 3C | AI 引擎集成：`AiIntegrator` 集成 LSTM/TCN + MADDPG/PPO | 替换 MockAiModel，真实 AI 决策 + 校验 | 已完成 |
 | Phase 2+ | 电压越限无功补偿 | 完整策略实现 | 规划中 |
 | Phase 2+ | 三相不平衡补偿 | 分相无功补偿 | 规划中 |
@@ -929,7 +612,7 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 实时控制模块 → 台区储能 PCS(分相 P/Q 设定)
 ```
 
-**与现有三策略的关系**：削峰填谷/需量控制/防逆流继续负责各自的南向动作（`pv_limit`/`load_shedding`）；台区储能治理策略负责台区储能分相 P/Q 下发。二者并行运行、互不阻塞（`dispatch_ai_decision` 失败降级时同时执行）。
+**单一兜底策略**：策略引擎现仅保留台区储能治理策略作为本地兜底。AI 失效或指令校验不通过时，降级由该策略生成台区储能分相 P/Q，经核间 V3 帧下发至实时控制模块。原削峰填谷/需量控制/防逆流三策略已废弃（代码保留不编译）。
 
 ### 15.4 状态机（4 状态）
 
@@ -1100,8 +783,7 @@ pub struct TaiStorageStrategy {
 
 - `AiIntegrator` 新增字段 `tai_storage: Arc<Mutex<TaiStorageStrategy>>`；
 - `set_tai_storage_strategy()` 注入（startup 装配时创建并注入）；
-- `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）；
-- 与现有防逆流/需量控制并行执行（各自独立输出，互不阻塞）。
+- `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）。
 
 ### 15.12 离线回放验证
 
@@ -1170,9 +852,7 @@ tokio-test = "0.4"
 | FallbackStrategy | 兜底策略 trait，所有策略实现此接口 |
 | SOC | 电池荷电状态（%） |
 | PV | 光伏（Photovoltaic） |
-| 削峰填谷 | 基于电价时段的充放电策略 |
-| 需量控制 | 基于变压器负载率的阶梯控制 |
-| 防逆流 | 防止向电网逆送电的保护策略 |
+| 台区储能治理 | 单一兜底策略，AI 失效时经核间 V3 帧下发台区储能分相 P/Q |
 | DataPackage | 遥测数据包结构体（定义于 mupc-data-processing） |
 
 ---
@@ -1187,3 +867,4 @@ tokio-test = "0.4"
 | v1.1 | 农网台区参数更新（变压器容量 500kVA→200kVA） |
 | v2.15 | 动作空间精简：AI 2 维动作（p_ref + k_droop），load_shedding/pv_limit 下沉至本地策略 |
 | v2.16 | 新增第 4 策略「台区储能治理」：扩展 DataPackage 分相字段、ControlCommand 分相设定、核间 V3 帧、带状态控制器、离线回放验证 |
+| v2.17 | 策略引擎精简为单一兜底策略「台区储能治理」；三策略（削峰填谷/需量控制/防逆流）废弃（代码保留不编译），pv_limit/load_shedding 从 ControlCommand 移除 |

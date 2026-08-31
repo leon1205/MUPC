@@ -258,7 +258,7 @@ cargo build -p mupc-sim-bridge --release
 | **ai-engine**       | 动态配置加载器（YAML 分层加载、版本指纹校验、操作参数热重载）     | `ai-engine/src/dynamic_config_loader.rs` |
 | **ai-engine**       | 安全约束配置（SOC 硬约束、变压器过载阈值）                      | `ai-engine/src/safety_config.rs` |
 | **ai-engine**       | 环境配置结构（EnvConfig/PhysicalConfig/OperationalConfig）       | `ai-engine/src/env_config.rs` |
-| **strategy-engine** | 兜底策略（削峰填谷、需量控制、防逆流），AI 指令安全校验          | `strategy-engine/src/ai_integration.rs` |
+| **strategy-engine** | 兜底策略（台区储能治理），AI 指令安全校验          | `strategy-engine/src/ai_integration.rs` |
 
 ### 核间通信
 
@@ -386,7 +386,7 @@ async fn handler(State(state): State<Arc<AppState>>) -> ...
 | -------- | --------------------------------------------------- |
 | 通信网关 | IEC 104/IEC 61850/MQTT 连接建立、协议转换数据一致性 |
 | 数据处理 | 遥测数据上送频率 ≥1Hz、故障录波触发                |
-| 策略引擎 | 削峰填谷、需量控制、防逆流策略                      |
+| 策略引擎 | 台区储能治理策略（AI 失效兜底）                      |
 | 南向通信 | RS485 协议处理器、ProtocolHandler 注入、HPLC 驱动   |
 | AI 引擎  | LSTM 预测 <1s、RL 决策 <1s、RKNN Runtime NPU 推理   |
 | 核间通信 | `ai_ready`、`strategy_mode`、`control_cmd` 信号     |

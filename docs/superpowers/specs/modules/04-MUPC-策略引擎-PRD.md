@@ -2,6 +2,8 @@
 
 > 本文档为策略引擎模块的权威需求文档。
 
+> **⚠️ 策略精简（2026-08-31）：** 策略引擎已精简为**单一兜底策略「台区储能治理」**（AI 失效时经核间 V3 帧下发台区储能分相 P/Q）。原三策略——削峰填谷（§2）、需量控制（§3）、防逆流（§4）——已**废弃**，代码保留但不再编译；`pv_limit`/`load_shedding` 不再作为控制指令维度。以下 §2~§4 及对应验收标准（§11.1~§11.3）仅作历史追溯。
+
 ---
 
 ## 1. 产品概述
@@ -11,7 +13,7 @@
 策略引擎（Strategy Engine）是 MUPC 通信管理模块的**本地决策核心**，负责在 AI 引擎正常工作时担任"安全校验闸门"，在 AI 引擎失效时无缝接管控制，保障台区基本安全与运行。
 
 **核心职责：**
-- 提供三种兜底策略：削峰填谷、需量控制、防逆流保护
+- 提供单一兜底策略：台区储能治理（AI 失效时经核间下发分相 P/Q）
 - 对 AI 引擎输出的指令进行安全校验（AiValidator）
 - 管理策略模式切换（AI 模式 / 本地兜底模式 / 基础模式）
 - 通过消息总线接收遥测数据，输出控制指令
@@ -31,7 +33,7 @@ AI 引擎失效:
 | 模式 | 决策源 | 校验方式 | 适用场景 |
 |------|--------|----------|----------|
 | AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 默认运行模式 |
-| 本地兜底模式 | 削峰填谷/需量控制/防逆流 | 策略内置边界检查 | AI 失效/指令校验不通过 |
+| 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过 |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
 
 ### 1.3 目标平台
@@ -48,9 +50,9 @@ AI 引擎失效:
 
 | 模块 | 实现内容 | 优先级 |
 |------|----------|--------|
-| 削峰填谷策略 | 完整实现（固定时间表） | 高 |
-| 需量控制策略 | 完整实现（三级需量控制） | 高 |
-| 防逆流保护策略 | 完整实现（电池充电 + PV 限功率） | 高 |
+| ~~削峰填谷策略~~ | 已废弃（代码保留不编译） | — |
+| ~~需量控制策略~~ | 已废弃（代码保留不编译） | — |
+| ~~防逆流保护策略~~ | 已废弃（代码保留不编译） | — |
 | AI 指令校验 | AiCommandValidator 可插拔接口 | 高 |
 | 策略模式切换 | 与 AI 集成器联动的模式管理 | 中 |
 | 电压越限/无功补偿 | 接口预留，实现延后 | 低 |
@@ -468,9 +470,6 @@ Message Bus (tokio::sync::mpsc)
     │
     ▼
 strategy-engine
-    ├── 削峰填谷 (PeakShavingStrategy)
-    ├── 需量控制 (DemandControlStrategy)
-    ├── 防逆流 (AntiReverseStrategy)
     │
     ▼
 AiCommandValidator (可插拔 AI 模型)
@@ -479,13 +478,12 @@ AiCommandValidator (可插拔 AI 模型)
 ┌─────────────────────────────────────────────────────────────────┐
 │                    指令分发层（dispatch）                         │
 ├─────────────────────────────────────────────────────────────────┤
-│  p_ref + k_droop  →  IntercoreClient  →  实时控制模块              │
-│  pv_limit         →  SouthCommandDispatcher  →  光伏逆变器        │
-│  load_shedding    →  SouthCommandDispatcher  →  负荷控制装置     │
+│  AI: p_ref + k_droop    →  IntercoreClient  →  实时控制模块        │
+│  兜底: 台区储能分相 P/Q →  IntercoreClient  →  实时控制模块（V3 帧）│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-> **说明**：`p_ref` 和 `k_droop` 通过 `IntercoreClient` 发送到实时控制模块（闭环下垂控制）；`pv_limit` 和 `load_shedding` 通过 `SouthCommandDispatcher` 发送到南向设备（光伏逆变器、负荷控制装置）。`load_shedding` 和 `pv_limit` **不通过核间通信发送**。
+> **说明**：AI 指令 `p_ref`/`k_droop` 与本地兜底指令（台区储能分相 `phase_p_set`/`phase_q_set`）均通过 `IntercoreClient` 下发至实时控制模块；兜底分相指令经核间 V3 帧转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。原 `pv_limit`/`load_shedding` 经 `SouthCommandDispatcher` 下发南向设备的分发通道随三策略废弃而移除。
 
 ### 9.2 消息主题
 
@@ -493,10 +491,8 @@ AiCommandValidator (可插拔 AI 模型)
 |------|--------|--------|------|
 | `telemetry.high_freq` | DataCollector | strategy-engine | 高频遥测数据 |
 | `telemetry.fault` | FaultRecorder | 外部 | 故障事件 |
-| `strategy.command` | strategy-engine | intercore | 控制指令（p_ref/k_droop） |
+| `strategy.command` | strategy-engine | intercore | 控制指令（p_ref/k_droop / 台区储能分相 P/Q） |
 | `strategy.decision` | strategy-engine | DataReporter | 策略决策结果 |
-| `south.command.pv` | strategy-engine | 南向设备 | 光伏限功率指令（pv_limit） |
-| `south.command.load` | strategy-engine | 南向设备 | 负荷切除指令（load_shedding） |
 
 ### 9.3 模块依赖
 
@@ -518,7 +514,7 @@ strategy-engine
 |------|------|
 | 策略决策延迟 | < 100ms（从收到数据到输出控制命令） |
 | 内存占用 | 每个策略实例 < 10MB |
-| 并发评估 | 支持三个策略同时运行，互不阻塞 |
+| 并发评估 | 兜底策略与 AI 校验器独立运行，互不阻塞 |
 
 ### 10.2 可靠性需求
 
@@ -548,6 +544,8 @@ strategy-engine
 ---
 
 ## 11. 验收标准汇总
+
+> 注：§11.1~§11.3（削峰填谷/需量控制/防逆流）随三策略废弃，仅作历史追溯。当前策略引擎的验收以台区储能治理策略（详见设计文档 §15）与 AI 指令校验（§11.4）为准。
 
 ### 11.1 削峰填谷（PS）
 
@@ -638,8 +636,8 @@ pub struct ControlCommand {
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级
-    pub pv_limit: Option<f64>,               // PV 限功率比例
-    pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)
+    pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW)，仅由台区储能治理策略设置
+    pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr)，仅由台区储能治理策略设置
 }
 
 pub enum CommandType {
@@ -653,10 +651,8 @@ pub enum CommandType {
 
 | 策略 | cmd_id | 说明 |
 |------|--------|------|
-| 削峰填谷 | 1 | 固定 ID，用于日志追踪和消息路由 |
-| 需量控制 | 2 | 固定 ID |
-| 防逆流 | 3 | 固定 ID |
-| 保留 | 4-10 | 供 Phase 2+ 扩展策略使用 |
+| 台区储能治理 | 4 | 固定 ID（AI 失效兜底，经核间 V3 帧下发分相 P/Q） |
+| 保留 | 5-10 | 供 Phase 2+ 扩展策略使用 |
 
 ## 附录 C：术语表
 
@@ -667,9 +663,7 @@ pub enum CommandType {
 | FallbackStrategy | 兜底策略 trait，所有策略实现此接口 |
 | SOC | 电池荷电状态（%） |
 | PV | 光伏（Photovoltaic） |
-| 削峰填谷 | 基于电价时段的充放电策略 |
-| 需量控制 | 基于变压器负载率的阶梯控制 |
-| 防逆流 | 防止向电网逆送电的保护策略 |
+| 台区储能治理 | 单一兜底策略，AI 失效时经核间 V3 帧下发台区储能分相 P/Q |
 
 ---
 ## 附录：版本演进
@@ -680,4 +674,5 @@ pub enum CommandType {
 |------|----------|
 | v1.0 | 初版，合并通信管理模块 PRD v1.3 + Phase3A 规格文档 v1.0 |
 | v1.1 | 更新：动作空间精简为 p_ref/k_droop 双参数，q_batt_set 标记 LEGACY，pv_limit/load_shedding 下沉南向 |
+| v1.2 | 策略引擎精简为单一兜底策略「台区储能治理」；三策略（削峰填谷/需量控制/防逆流）废弃（代码保留不编译），pv_limit/load_shedding 移除 |
 
