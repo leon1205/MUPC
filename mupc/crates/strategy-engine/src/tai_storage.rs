@@ -146,6 +146,11 @@ fn soc_protect(p_st: f64, soc: f64) -> f64 {
 }
 
 /// 容量仲裁：每相电流 / 总视在 / 总有功约束 + ΔP 重归一
+///
+/// 迭代裁剪：每轮顶格从当前 state 重算 pcmd，避免用陈旧值导致
+/// （a）过限后整轮 8 次重复裁剪（差模最多 8×slope 过剪）或
+/// （b）s_rated 分支对同一尺度反复缩放（×scale⁸）；
+/// 当本轮无违规即 break（多数场景 1~2 轮收敛）。
 fn arbitrate(
     pcmd: &mut [f64; 3],
     q: &mut [f64; 3],
@@ -154,6 +159,10 @@ fn arbitrate(
     u: &[f64; 3],
 ) {
     for _ in 0..8 {
+        // 每轮重算当前指令，避免用陈旧值
+        for (i, v) in pcmd.iter_mut().enumerate() {
+            *v = state.p_st / 3.0 + state.d_p[i];
+        }
         let mut s_total = 0.0;
         let mut violated = false;
         for i in 0..3 {
@@ -330,7 +339,9 @@ pub fn control(
         state.d_p_active = true;
     }
     for i in 0..3 {
-        let inc = config.k_diff * u[i] * (ii[i] - imean);
+        // 差模增量斜坡限速：大不平衡单周期跳变 ≤ slope（设计 §15.6 ΔP_i 每周期 ≤5kW），
+        // 避免一次积分跳满 dp_max（40kW/相，≈180A）造成过流
+        let inc = (config.k_diff * u[i] * (ii[i] - imean)).clamp(-config.slope, config.slope);
         if state.d_p_active && inc.abs() > 0.5f64.max(0.05 * pi[i].abs()) {
             state.d_p[i] = (state.d_p[i] + inc).clamp(-config.dp_max, config.dp_max);
         } else {

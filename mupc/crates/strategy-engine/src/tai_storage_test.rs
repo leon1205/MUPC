@@ -156,12 +156,14 @@ mod tai_storage_test {
     fn test_arbitrate_clips_overcurrent() {
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();
-        // 制造过流：先抬高共模 P 出力，再用强不平衡电流让差模积分拉满单相。
-        // st.p_st=30 → step5 累加 slope=5 至 35；
-        // 不平衡表计 [60,0,0] → unbal=100% → d_p 积分至 [40,-40,-40]。
-        // 合成后 A 相 ≈ 35/3+40 ≈ 51.7kW → 235A > i_rated=190 → arbitrate 必须裁剪。
+        // 制造过流：显式播种差模出力（I-3 修复后单周期差模仅 ±slope 增量，
+        // 无法由 step6 一次拉满单相，故直接注入已累积的 d_p）。
+        // p_st=30 → S2 斜坡降 5 → 25；d_p=[40,-20,-20] 经 step6 微调后
+        // A 相合成 ≈ 43.3kW → 196.97A > i_rated=190 → arbitrate 必须裁剪。
         st.p_st = 30.0;
-        let m = meter(60.0, [60.0, 0.0, 0.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        st.d_p = [40.0, -20.0, -20.0];
+        st.d_p_active = true;
+        let m = meter(10.0, [2.0, 6.0, 2.0], [0.0; 3], [220.0; 3], [0.99; 3]);
         let (p, q) = control(&mut st, &cfg, &m, 0.5, 3600 * 10);
         // 单相电流 ≤ i_rated + 5（裁剪后应回到限值内）
         for i in 0..3 {
@@ -177,6 +179,70 @@ mod tai_storage_test {
         }
         // 总有功 ≤ p_cap
         assert!(p.iter().sum::<f64>().abs() <= cfg.p_cap + 1e-6);
+    }
+
+    #[test]
+    fn test_arbitrate_recomputes_and_breaks() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        // 制造单相过流：p_st=30（S2 斜坡降 5 → 25）、d_p=[40,-20,-20]，
+        // 不平衡表计 [2,6,2]（unbal≈67%）→ 仲裁前 A 相合成 ≈ 43.3kW → 196.97A > i_rated。
+        // I-2 修复：每轮顶格重算 pcmd、干净即 break，避免陈旧 pcmd 导致 8×slope 过剪。
+        st.p_st = 30.0;
+        st.d_p = [40.0, -20.0, -20.0];
+        st.d_p_active = true;
+        let m = meter(10.0, [2.0, 6.0, 2.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        let (p, q) = control(&mut st, &cfg, &m, 0.5, 3600 * 10);
+        // ① 各相电流回到限值内（裁剪后）
+        for i in 0..3 {
+            let s = (p[i].powi(2) + q[i].powi(2)).sqrt();
+            let i_phase = s * 1000.0 / 220.0;
+            assert!(
+                i_phase <= cfg.i_rated + 1e-6,
+                "相{}电流超限: {:.1}A (P={:.1})",
+                i,
+                i_phase,
+                p[i]
+            );
+        }
+        // ② ΣΔP=0 重归一 + 共模守恒：Σp = p_st
+        let dsum: f64 = st.d_p.iter().sum();
+        assert!(dsum.abs() < 1e-6, "ΣΔP 应=0: {}", dsum);
+        let psum: f64 = p.iter().sum();
+        assert!(
+            (psum - st.p_st).abs() < 1e-6,
+            "Σp 应=p_st: {} vs {}",
+            psum,
+            st.p_st
+        );
+        // ③ 只裁剪到限值附近，而非陈旧 pcmd 的 8×slope 过剪（修复前 A 相会被剪到 ≈83A）
+        let i_a = (p[0].powi(2) + q[0].powi(2)).sqrt() * 1000.0 / 220.0;
+        assert!(
+            i_a > 180.0,
+            "A 相被过度裁剪（应仅剪到限值附近而非 8×slope 过剪）: {:.1}A",
+            i_a
+        );
+        assert!(st.d_p[0] > 20.0, "A 相差模被过度裁剪: {:.1}", st.d_p[0]);
+    }
+
+    #[test]
+    fn test_diff_p_slope_limited() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        // 强不平衡表计 [2,6,2]（unbal≈67%），B 相原始差模增量 ≈ 235kW/周期 ≫ slope。
+        // I-3 修复：inc 先被钳到 ±slope(5)，单周期 d_p 跳变受限，避免一次拉满 dp_max(40)。
+        // 注：arbitrate 末尾的 ΣΔP=0 重归一会把最大增量再平移至多 slope，
+        // 故单周期后的 |d_p| 上界为 2·slope（修复前会被一次积分推到 ≈53kW）。
+        st.d_p_active = true;
+        st.d_p = [0.0; 3];
+        let m = meter(10.0, [2.0, 6.0, 2.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 10);
+        // 差模增量应受斜坡限速（含重归一平移）：|d_p| ≤ 2·slope
+        assert!(
+            st.d_p.iter().all(|v| v.abs() <= 2.0 * cfg.slope + 1e-9),
+            "差模增量应受斜坡限速: {:?}",
+            st.d_p
+        );
     }
 
     #[test]
