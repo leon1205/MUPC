@@ -315,9 +315,11 @@ pub struct TaiStorageStrategy {
 
 ### 2.11 集成点（AiIntegrator）
 
-- `AiIntegrator` 新增字段 `tai_storage: Arc<Mutex<TaiStorageStrategy>>`；
+- `AiIntegrator` 持 `tai_storage: Option<Arc<TaiStorageStrategy>>` 字段；
 - `set_tai_storage_strategy()` 注入（startup 装配时创建并注入）；
-- `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）。
+- `run_fallback_strategies()`：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（best-effort，未注入核间客户端则记录警告）；
+- `set_local_priority()` 由 startup 从 `ai_engine.local_priority` 初始化；Web API `/api/v1/strategy-mode` 可运行时热切换（本地优先：AI 旁路，控制以本地策略为准）；
+- 南向采集循环调用 `set_latest_data()` 写入最新遥测，供策略 evaluate 使用。
 
 ### 2.12 离线回放验证
 
@@ -504,8 +506,21 @@ AiCommandValidator.validate(cmd)
 
 ```rust
 pub struct AiIntegrator {
-    model_manager: Arc<RwLock<Option<ModelManager>>>,
+    model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
+    /// 核间通信客户端（p_ref/k_droop 双参数 + 台区储能分相 V3 帧下发）
+    intercore_client: Option<Arc<IntercoreClient>>,
+    /// 双参数降级缓存（通信中断时使用）
+    last_valid_p_ref: RwLock<Option<f64>>,
+    last_valid_k_droop: RwLock<Option<f64>>,
+    /// 降级状态（AI 失效触发）
+    fallback_active: RwLock<bool>,
+    /// 最新遥测数据（南向采集循环写入，供兜底策略 evaluate）
+    latest_data: Arc<RwLock<Option<DataPackage>>>,
+    /// 台区储能治理策略（唯一兜底策略）
+    tai_storage: Option<Arc<TaiStorageStrategy>>,
+    /// 本地策略优先模式（v2.19）：true 时 AI 旁路、控制以本地台区储能策略为准
+    local_priority: RwLock<bool>,
 }
 ```
 
@@ -514,10 +529,13 @@ pub struct AiIntegrator {
 | 方法 | 说明 | 异步 |
 |------|------|------|
 | `new()` | 创建 AI 集成器，初始状态为 Unloaded | 否 |
-| `initialize(config)` | 加载 AI 模型 | 是 |
-| `get_decision(state)` | 获取 AI 决策 | 是 |
-| `is_ready()` | 检查 AI 是否就绪 | 是 |
-| `status()` | 获取当前状态 | 是 |
+| `initialize(config)` / `set_model_manager()` | 加载/注入 AI 模型 | 是 |
+| `set_intercore_client()` | 注入核间通信客户端 | 否 |
+| `set_tai_storage_strategy()` | 注入台区储能治理策略 | 否 |
+| `set_local_priority()` / `is_local_priority()` | 设置/查询本地优先模式 | 是 |
+| `set_latest_data()` | 写入最新遥测（南向采集循环调用） | 是 |
+| `dispatch_ai_decision()` | 决策主循环：默认 AI 优先（失败降级本地）；本地优先模式直接走本地台区储能 | 是 |
+| `is_ready()` / `status()` | 查询 AI 就绪/状态 | 是 |
 
 ### 4.4 状态管理
 
@@ -536,14 +554,19 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
                                   ├── 决策接口 → ActionOutput (p_ref, k_droop)
                                   └── 状态管理 → ModelStatus
 
-数据流：
+数据流（默认 AI 优先）：
 1. LSTM/TCN 时序预测（光伏出力/负荷）
 2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
 3. AiCommandValidator 校验 AI 指令安全性
 4. AI 指令分发：
    - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
-5. 本地兜底策略独立执行（不经过 AI）：
+5. AI 失效/校验不通过 → 降级本地兜底：
    - 台区储能治理(TaiStorageStrategy) → IntercoreClient.send_tai_command()（核间 V3 帧）→ 实时控制模块 → 台区储能 PCS（分相 P/Q）
+
+本地优先模式（v2.19，`local_priority=true`）：
+- `dispatch_ai_decision` 开头判断 `local_priority`，为 true 时直接走本地台区储能治理策略（分相 P/Q 经核间下发）
+- AI 引擎仍加载、仍运行 `full_decision_cycle()`，但结果仅作旁路参考（debug 日志），**不下发核间指令**
+- 通过 YAML 配置 `ai_engine.local_priority` 或 Web API `/api/v1/strategy-mode` 运行时切换
 ```
 
 ---
