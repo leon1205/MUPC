@@ -188,6 +188,12 @@ impl ControlCmdPayloadV3 {
     }
 }
 
+impl Default for ControlCmdPayloadV3 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // v2.10: DataUploadPayload 和 SafetyOverridePayload
 // ============================================================================

@@ -169,51 +169,52 @@ fn main() {
         let p_net_total = p_i_net.iter().sum();
 
         // 控制：按 60s 周期节流
-        let (cmd_p, cmd_q) = if last_ts == 0 || ts.saturating_sub(last_ts) as u64 >= cfg.control_period_s {
-            // 契约：分相电流须带符号（正=受电 / 负=返送），xlsx 仅给幅值，
-            // 以净分相有功符号承载方向。
-            let i_sign = [
-                p_i_net[0].signum() * i_mag[0],
-                p_i_net[1].signum() * i_mag[1],
-                p_i_net[2].signum() * i_mag[2],
-            ];
-            let phase = PhaseElectricalData {
-                voltage: [Some(u[0]), Some(u[1]), Some(u[2])],
-                current: [Some(i_sign[0]), Some(i_sign[1]), Some(i_sign[2])],
-                active_power: [Some(p_i_net[0]), Some(p_i_net[1]), Some(p_i_net[2])],
-                reactive_power: [Some(q_i_net[0]), Some(q_i_net[1]), Some(q_i_net[2])],
-                cos_phi: [Some(pfi[0]), Some(pfi[1]), Some(pfi[2])],
+        let (cmd_p, cmd_q) =
+            if last_ts == 0 || ts.saturating_sub(last_ts) as u64 >= cfg.control_period_s {
+                // 契约：分相电流须带符号（正=受电 / 负=返送），xlsx 仅给幅值，
+                // 以净分相有功符号承载方向。
+                let i_sign = [
+                    p_i_net[0].signum() * i_mag[0],
+                    p_i_net[1].signum() * i_mag[1],
+                    p_i_net[2].signum() * i_mag[2],
+                ];
+                let phase = PhaseElectricalData {
+                    voltage: [Some(u[0]), Some(u[1]), Some(u[2])],
+                    current: [Some(i_sign[0]), Some(i_sign[1]), Some(i_sign[2])],
+                    active_power: [Some(p_i_net[0]), Some(p_i_net[1]), Some(p_i_net[2])],
+                    reactive_power: [Some(q_i_net[0]), Some(q_i_net[1]), Some(q_i_net[2])],
+                    cos_phi: [Some(pfi[0]), Some(pfi[1]), Some(pfi[2])],
+                };
+                let pkg = DataPackage {
+                    timestamp: ts as u64,
+                    electrical: ElectricalData {
+                        voltage: Some(u[0]),
+                        current: Some(i_mag[0]),
+                        active_power: Some(p_net_total),
+                        reactive_power: Some(q_i_net.iter().sum()),
+                        cos_phi: Some(pfi[0]),
+                        frequency: Some(50.0),
+                        phase: Some(phase),
+                    },
+                    device_status: DeviceStatus {
+                        inverter_status: InverterStatus::Running,
+                        pv_power: None,
+                        load_power: None,
+                        ev_charger_power: None,
+                    },
+                    battery: BatteryData {
+                        soc: Some(soc * 100.0),
+                        soh: None,
+                        temperature: None,
+                    },
+                };
+                let c = strategy.evaluate_sync(&pkg);
+                last_ts = ts;
+                n_control += 1;
+                (c.phase_p_set, c.phase_q_set)
+            } else {
+                (last_p_set, last_q_set)
             };
-            let pkg = DataPackage {
-                timestamp: ts as u64,
-                electrical: ElectricalData {
-                    voltage: Some(u[0]),
-                    current: Some(i_mag[0]),
-                    active_power: Some(p_net_total),
-                    reactive_power: Some(q_i_net.iter().sum()),
-                    cos_phi: Some(pfi[0]),
-                    frequency: Some(50.0),
-                    phase: Some(phase),
-                },
-                device_status: DeviceStatus {
-                    inverter_status: InverterStatus::Running,
-                    pv_power: None,
-                    load_power: None,
-                    ev_charger_power: None,
-                },
-                battery: BatteryData {
-                    soc: Some(soc * 100.0),
-                    soh: None,
-                    temperature: None,
-                },
-            };
-            let c = strategy.evaluate_sync(&pkg);
-            last_ts = ts;
-            n_control += 1;
-            (c.phase_p_set, c.phase_q_set)
-        } else {
-            (last_p_set, last_q_set)
-        };
         last_p_set = cmd_p;
         last_q_set = cmd_q;
         // 储能当前输出 = 最新指令（供下一周期测量反馈；本行 KPI/SOC 用生效输出 p_out_prev）
