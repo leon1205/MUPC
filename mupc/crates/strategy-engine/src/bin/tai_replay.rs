@@ -58,6 +58,12 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let path = args.get(1).expect("用法: tai_replay <xlsx路径> [SOC初值]");
     let soc_init: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.50);
+    if soc_init != soc_init.clamp(0.10, 0.90) {
+        eprintln!(
+            "警告: SOC 初值超出 [0.10, 0.90]，已裁剪为 {}",
+            soc_init.clamp(0.10, 0.90)
+        );
+    }
     let soc_init = soc_init.clamp(0.10, 0.90);
 
     let mut workbook: Xlsx<_> = open_workbook(path).expect("无法打开 xlsx");
@@ -80,7 +86,7 @@ fn main() {
     let mut reverse_ctrl_peak = 0.0f64;
     let mut unbal_base_ok_secs = 0.0; // 基线不平衡<20% 时长
     let mut unbal_ctrl_ok_secs = 0.0; // 控制后不平衡<20% 时长
-    let mut pf_good_secs = 0.0; // 控制后分相 PF>0.95 时长（3 相均）
+    let mut pf_good_secs = 0.0; // 基线分相 PF>0.95 时长（控制未建模 Q 补偿，取基线）
     let mut soc_min = f64::MAX;
     let mut soc_max = f64::MIN;
     let mut reverse_ctrl_energy = 0.0; // 有储能返送能量 kwh
@@ -92,6 +98,7 @@ fn main() {
             Some(t) => t,
             None => continue,
         };
+        // 首行 prev_ts == 0 无法求差值，假设 60s 控制间隔；后续行按实际时间差
         let dt = if prev_ts == 0 {
             60.0
         } else {
@@ -209,7 +216,7 @@ fn main() {
         pct(unbal_base_ok_secs),
         pct(unbal_ctrl_ok_secs)
     );
-    println!("分相 PF>0.95 占比: {:.1}%", pct(pf_good_secs));
+    println!("基线分相 PF>0.95 占比: {:.1}%", pct(pf_good_secs));
     println!(
         "SOC 范围: {:.1}% ~ {:.1}%  日终: {:.1}%",
         soc_min * 100.0,
