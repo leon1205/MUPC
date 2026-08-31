@@ -35,6 +35,10 @@ pub struct ControlCommand {
     pub pv_limit: Option<f64>,
     /// 负荷切除功率 (kW)，用于需量控制策略
     pub load_shedding: Option<f64>,
+    /// 台区储能分相有功设定 (kW) [A/B/C]，正=放电/注入，仅由台区储能治理策略设置
+    pub phase_p_set: Option<[f64; 3]>,
+    /// 台区储能分相无功设定 (kVAr) [A/B/C]，仅由台区储能治理策略设置
+    pub phase_q_set: Option<[f64; 3]>,
 }
 
 /// 命令类型
@@ -121,4 +125,28 @@ pub struct AiCommand {
     pub priority: u8,
     /// 原始命令 JSON
     pub raw_command: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_control_command_phase_fields_default_none() {
+        let cmd = ControlCommand {
+            cmd_id: 0,
+            cmd_type: CommandType::PowerRegulation,
+            p_batt_set: None,
+            q_batt_set: None,
+            phase_compensation: None,
+            start_stop: None,
+            priority: 0,
+            pv_limit: None,
+            load_shedding: None,
+            phase_p_set: None,
+            phase_q_set: None,
+        };
+        assert!(cmd.phase_p_set.is_none());
+        assert!(cmd.phase_q_set.is_none());
+    }
 }

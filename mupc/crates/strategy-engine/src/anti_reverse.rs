@@ -37,6 +37,8 @@ impl AntiReverseStrategy {
             priority: 2,
             pv_limit: if pv_limit > 0.0 { Some(pv_limit) } else { None },
             load_shedding: None,
+            phase_p_set: None,
+            phase_q_set: None,
         }
     }
 

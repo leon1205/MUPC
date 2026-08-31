@@ -93,6 +93,8 @@ fn test_validator_without_model() {
         priority: 1,
         pv_limit: None,
         load_shedding: None,
+        phase_p_set: None,
+        phase_q_set: None,
     };
     let result = validator.validate_sync(&cmd);
     assert!(result.valid);
@@ -115,6 +117,8 @@ fn test_validator_with_model() {
         priority: 1,
         pv_limit: None,
         load_shedding: None,
+        phase_p_set: None,
+        phase_q_set: None,
     };
     let result = validator.validate_sync(&cmd);
     // Mock 模型默认 confidence=0.5，小于阈值 0.7，且差异大于 10kW
@@ -136,6 +140,8 @@ fn test_validator_switch_command_passthrough() {
         priority: 1,
         pv_limit: None,
         load_shedding: None,
+        phase_p_set: None,
+        phase_q_set: None,
     };
     let result = validator.validate_sync(&cmd);
     assert!(result.valid); // 开关控制直接通过
@@ -160,6 +166,8 @@ async fn test_validator_async_validate() {
         priority: 1,
         pv_limit: None,
         load_shedding: None,
+        phase_p_set: None,
+        phase_q_set: None,
     };
     let result = validator.validate(&cmd).await;
     assert!(result.valid);

@@ -272,6 +272,8 @@ mod tests {
             priority: 1,
             pv_limit: None,
             load_shedding: None,
+            phase_p_set: None,
+            phase_q_set: None,
         };
         // 无数据时降级通过
         let result = validator.validate_sync(&cmd);
@@ -296,6 +298,8 @@ mod tests {
             priority: 1,
             pv_limit: None,
             load_shedding: None,
+            phase_p_set: None,
+            phase_q_set: None,
         };
         let result = validator.validate_sync(&cmd);
         // Mock 模型默认 confidence=0.5，小于阈值 0.7，且差异可能大于 10kW
@@ -319,6 +323,8 @@ mod tests {
             priority: 1,
             pv_limit: None,
             load_shedding: None,
+            phase_p_set: None,
+            phase_q_set: None,
         };
         let result = validator.validate_sync(&cmd);
         assert!(result.valid); // 开关控制直接通过
@@ -355,6 +361,8 @@ mod tests {
             priority: 1,
             pv_limit: None,
             load_shedding: None,
+            phase_p_set: None,
+            phase_q_set: None,
         };
         let result = validator.validate_sync(&cmd);
         assert!(result.valid);

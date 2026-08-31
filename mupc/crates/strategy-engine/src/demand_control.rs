@@ -38,6 +38,8 @@ impl DemandControlStrategy {
             } else {
                 None
             },
+            phase_p_set: None,
+            phase_q_set: None,
         }
     }
 
