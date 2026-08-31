@@ -92,6 +92,49 @@ mod tai_storage_test {
     }
 
     #[test]
+    fn test_q_channel_compensates_low_pf() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        // PF=0.9 < 0.95 → Q 通道激活。注意：积分输入是表计分相无功 qi，
+        // 若 qi=0 则 inc=s_q_sign*k_q*qi=0，Q 永远不会注入。
+        // 故给非零无功 qi=[5,5,5]，使 q_pcs += s_q_sign*k_q*qi 真实累积。
+        let m = meter(5.0, [2.0, 2.0, 2.0], [5.0, 5.0, 5.0], [220.0; 3], [0.90; 3]);
+        for _ in 0..3 {
+            let (_, q) = control(&mut st, &cfg, &m, 0.5, 3600 * 10);
+            // 至少一相 Q 非零（朝向补偿方向）
+            assert!(q.iter().any(|x| x.abs() > 1e-9), "Q 应注入补偿: {:?}", q);
+            assert!(q.iter().all(|x| x.abs() <= cfg.q_i_max + 1e-9));
+        }
+    }
+
+    #[test]
+    fn test_arbitrate_clips_overcurrent() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        // 制造过流：先抬高共模 P 出力，再用强不平衡电流让差模积分拉满单相。
+        // st.p_st=30 → step5 累加 slope=5 至 35；
+        // 不平衡表计 [60,0,0] → unbal=100% → d_p 积分至 [40,-40,-40]。
+        // 合成后 A 相 ≈ 35/3+40 ≈ 51.7kW → 235A > i_rated=190 → arbitrate 必须裁剪。
+        st.p_st = 30.0;
+        let m = meter(60.0, [60.0, 0.0, 0.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        let (p, q) = control(&mut st, &cfg, &m, 0.5, 3600 * 10);
+        // 单相电流 ≤ i_rated + 5（裁剪后应回到限值内）
+        for i in 0..3 {
+            let s = (p[i].powi(2) + q[i].powi(2)).sqrt();
+            let i_phase = s * 1000.0 / 220.0;
+            assert!(
+                i_phase <= cfg.i_rated + 5.0,
+                "相{}电流超限: {:.1}A (P={:.1})",
+                i,
+                i_phase,
+                p[i]
+            );
+        }
+        // 总有功 ≤ p_cap
+        assert!(p.iter().sum::<f64>().abs() <= cfg.p_cap + 1e-6);
+    }
+
+    #[test]
     fn test_failsafe_nan_regresses_to_zero() {
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();

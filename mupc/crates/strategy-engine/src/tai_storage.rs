@@ -101,7 +101,7 @@ fn sliding_avg(
     while state.meter_buf.len() > config.window_size as usize {
         state.meter_buf.pop_front();
     }
-    let n = state.meter_buf.len() as f64;
+    let n = (state.meter_buf.len() as f64).max(1.0);
     let mut avg = meter.clone();
     for i in 0..3 {
         avg.u[i] = state.meter_buf.iter().map(|m| m.u[i]).sum::<f64>() / n;
@@ -183,8 +183,8 @@ fn arbitrate(
     for v in state.d_p.iter_mut() {
         *v -= d_sum;
     }
-    for i in 0..3 {
-        pcmd[i] = state.p_st / 3.0 + state.d_p[i];
+    for (i, v) in pcmd.iter_mut().enumerate() {
+        *v = state.p_st / 3.0 + state.d_p[i];
     }
 }
 
@@ -199,6 +199,7 @@ pub fn control(
     soc: f64,   // 0..1
     t_now: u64, // unix 秒
 ) -> ([f64; 3], [f64; 3]) {
+    debug_assert!(soc.is_finite(), "soc 必须为有限值");
     // 1. 滤波
     let f = sliding_avg(state, config, meter);
     let p = f.p;
@@ -214,7 +215,12 @@ pub fn control(
         for i in 0..3 {
             state.d_p[i] = move_toward(state.d_p[i], 0.0, config.slope);
         }
-        let pcmd = [state.p_st / 3.0; 3];
+        state.meter_buf.clear();
+        let pcmd = [
+            state.p_st / 3.0 + state.d_p[0],
+            state.p_st / 3.0 + state.d_p[1],
+            state.p_st / 3.0 + state.d_p[2],
+        ];
         return (pcmd, state.q_last);
     }
 
@@ -320,8 +326,8 @@ pub fn control(
 
     // 7. 指令合成
     let mut pcmd = [0.0; 3];
-    for i in 0..3 {
-        pcmd[i] = state.p_st / 3.0 + state.d_p[i];
+    for (i, v) in pcmd.iter_mut().enumerate() {
+        *v = state.p_st / 3.0 + state.d_p[i];
     }
 
     // 8. 容量仲裁

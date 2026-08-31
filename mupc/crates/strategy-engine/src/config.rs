@@ -150,7 +150,7 @@ impl Default for TaiStorageConfig {
             s_rated: 125.0,
             soc_cap_day: 0.70,
             soc_hys: 0.03,
-            t_release_secs: 18.0 * 3600.0,   // 18:00
+            t_release_secs: 18.0 * 3600.0,     // 18:00
             t_clear_start_secs: 21.0 * 3600.0, // 21:00
             t_clear_end_secs: 23.5 * 3600.0,   // 23:30
             window_size: 5,
