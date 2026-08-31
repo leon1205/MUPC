@@ -4,8 +4,6 @@
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
-> **v2.16 变更（2026-08-31）：** 新增「第 4 策略：台区储能治理策略」（AI 失效时的台区治理兜底），整合自 [2026-08-25 台区储能控制策略设计](2026-08-25-台区储能控制策略-design.md)。含：扩展 `DataPackage` 分相字段、扩展 `ControlCommand` 分相设定、扩展核间协议 V3 帧（分相 P/Q 下发）、带状态控制器设计、离线回放验证。
-
 ---
 
 ## 目录
@@ -39,7 +37,7 @@
 - 对 AI 引擎输出的指令进行安全校验（`AiCommandValidator`）
 - 管理策略模式切换（AI 模式 / 本地兜底模式 / 基础模式）
 - 通过消息总线接收遥测数据，输出控制指令
-- 集成 AI 优化引擎（Phase 3C）
+- 集成 AI 优化引擎
 
 ### 1.2 "AI 优先、本地兜底"机制
 
@@ -95,7 +93,7 @@ AiCommandValidator (可插拔 AI 模型)
 └──────────────────────────────────────────────────────────────┘
 ```
 
-> **分发路径更新：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块。pv_limit 和 load_shedding 不再作为 AI 动作维度，仅由本地兜底策略（防逆流/需量控制）设置并通过南向通信分发至设备。
+> **分发路径：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块；pv_limit 和 load_shedding 不作为 AI 动作维度，仅由本地兜底策略（防逆流/需量控制）设置并通过南向通信分发至设备。
 
 ### 1.5 策略 ID 分配
 
@@ -104,7 +102,7 @@ AiCommandValidator (可插拔 AI 模型)
 | 削峰填谷 | 1 | 固定 ID，用于日志追踪和消息路由 |
 | 需量控制 | 2 | 固定 ID |
 | 防逆流 | 3 | 固定 ID |
-| 保留 | 4-10 | 供 Phase 2+ 扩展策略使用 |
+| 保留 | 4-10 | 供后续扩展策略使用 |
 
 ### 1.6 性能与可靠性
 
@@ -323,7 +321,7 @@ Step 2 - 电池已满（SOC >= soc_charge_max）：
   pv_limit_count 递增
 
 Step 3 - PV 已限制且仍逆流：
-  触发告警（通过消息总线发送，Phase 2+ 实现）
+  触发告警（通过消息总线发送，待实现）
 
 恢复正常：
   当 grid_power >= reverse_power_threshold 时，恢复正常运行
@@ -371,7 +369,7 @@ Step 3 - PV 已限制且仍逆流：
 
 ### 5.1 概述
 
-通过电池逆变器提供无功功率支撑，改善台区电压质量和三相不平衡度。当前为**接口预留阶段**，完整的决策逻辑和实现延后至后续 Phase。
+通过电池逆变器提供无功功率支撑，改善台区电压质量和三相不平衡度。当前为**接口预留**，完整的决策逻辑和实现后续补充。
 
 ### 5.2 已预留接口
 
@@ -382,7 +380,7 @@ Step 3 - PV 已限制且仍逆流：
 | `q_batt_set` | `Option<f64>` | 无功由实时控制模块闭环调节 | - |
 | `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 | 各相独立设置 |
 
-### 5.3 计划策略（Phase 2+）
+### 5.3 计划策略
 
 | 策略 | 触发条件 | 动作 |
 |------|----------|------|
@@ -414,7 +412,7 @@ pub trait AiCommandValidator: Send + Sync {
     fn name(&self) -> &str;
 }
 
-/// AI 模型 Trait（可插拔，Phase 3C 替换为 LSTM/TCN）
+/// AI 模型 Trait（可插拔，可替换为真实预测模型）
 pub trait AiModel: Send + Sync {
     fn predict(&self, input: &ModelInput) -> ModelOutput;
 }
@@ -513,7 +511,7 @@ AiCommandValidator.validate(cmd)
 
 ### 7.1 概述
 
-`AiIntegrator` 负责管理 AI 模型生命周期，提供 AI 决策接口。位于 `ai_integration.rs`，仅在 Phase 3C 启用。
+`AiIntegrator` 负责管理 AI 模型生命周期，提供 AI 决策接口。位于 `ai_integration.rs`。
 
 ### 7.2 结构体定义
 
@@ -639,15 +637,14 @@ pub struct ControlCommand {
     pub priority: u8,                        // 优先级（0-3）
     pub pv_limit: Option<f64>,               // PV 限功率比例 (0.0-1.0)，仅由本地防逆流策略设置
     pub load_shedding: Option<f64>,          // 负荷切除功率 (kW)，仅由本地需量控制策略设置
-    // v2.16 新增：台区储能分相设定（仅由台区储能治理策略设置）
-    pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW) [A/B/C]，正=放电/注入
-    pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr) [A/B/C]
+    pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW) [A/B/C]，正=放电/注入，仅由台区储能治理策略设置
+    pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr) [A/B/C]，仅由台区储能治理策略设置
 }
 ```
 
 > **字段语义说明：** `pv_limit` 和 `load_shedding` 保留在 `ControlCommand` 中，但仅由本地兜底策略引擎（`AntiReverseStrategy` / `DemandControlStrategy`）设置，不再作为 AI 引擎（`ActionOutput`）的动作维度。
 >
-> **v2.16 新增：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §15）设置。设定值经核间 V3 帧下发到实时控制模块，由其转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。
+> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §15）设置。设定值经核间 V3 帧下发到实时控制模块，由其转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。
 
 ### 9.3 CommandType 枚举
 
@@ -710,9 +707,6 @@ mupc/crates/strategy-engine/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs                    # 模块导出，AI Engine re-export
-│   │                             # Phase 1: 仅导出 strategies
-│   │                             # Phase 3A: 完整导出 peak_shaving, demand_control, ...
-│   │                             # Phase 3C: 增加 ai_integration 模块
 │   │
 │   ├── strategies.rs             # FallbackStrategy trait, ControlCommand,
 │   │                             # CommandType, AiCommandValidator trait,
@@ -721,12 +715,12 @@ mupc/crates/strategy-engine/
 │   ├── peak_shaving.rs           # 削峰填谷策略实现
 │   ├── demand_control.rs         # 需量控制策略实现
 │   ├── anti_reverse.rs           # 防逆流保护策略实现
-│   ├── tai_storage.rs            # 台区储能治理策略实现（v2.16 第 4 策略）
+│   ├── tai_storage.rs            # 台区储能治理策略实现（第 4 策略）
 │   │
 │   ├── ai_validator.rs           # AiCommandValidatorImpl 可插拔校验器
 │   │                             # AiModel trait, MockAiModel, ModelInput/Output
 │   │
-│   ├── ai_integration.rs         # AiIntegrator（Phase 3C: AI 引擎集成）
+│   ├── ai_integration.rs         # AiIntegrator（AI 引擎集成）
 │   │
 │   ├── config.rs                 # PeakShavingConfig, DemandControlConfig, AntiReverseConfig
 │   ├── errors.rs                 # StrategyError 枚举
@@ -735,7 +729,7 @@ mupc/crates/strategy-engine/
 │   ├── demand_control_test.rs    # 需量控制策略单元测试（7 tests）
 │   ├── anti_reverse_test.rs      # 防逆流策略单元测试（5 tests）
 │   ├── ai_validator_test.rs      # AI 校验器单元测试（8 tests）
-│   └── tai_storage_test.rs       # 台区储能治理策略单元测试（~15 tests，v2.16）
+│   └── tai_storage_test.rs       # 台区储能治理策略单元测试（~15 tests）
 ```
 
 ### lib.rs 模块导出
@@ -745,16 +739,16 @@ pub mod strategies;
 pub mod peak_shaving;
 pub mod demand_control;
 pub mod anti_reverse;
-pub mod tai_storage;          // v2.16 第 4 策略
+pub mod tai_storage;          // 台区储能治理策略（第 4 策略）
 pub mod ai_validator;
 pub mod config;
 pub mod errors;
-pub mod ai_integration;       // Phase 3C
+pub mod ai_integration;       // AI 引擎集成
 
 pub use peak_shaving::PeakShavingStrategy;
 pub use demand_control::DemandControlStrategy;
 pub use anti_reverse::AntiReverseStrategy;
-pub use tai_storage::{TaiControllerState, TaiStorageConfig, TaiStorageStrategy, TaiState}; // v2.16
+pub use tai_storage::{TaiControllerState, TaiStorageConfig, TaiStorageStrategy, TaiState};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput, MockAiModel};
 pub use config::{PeakShavingConfig, DemandControlConfig, AntiReverseConfig};
 pub use errors::StrategyError;
@@ -832,10 +826,10 @@ pub struct AntiReverseConfig {
 }
 ```
 
-### 12.4 运行时配置热加载（Phase 2+）
+### 12.4 运行时配置热加载
 
 - 当前实现：所有配置通过 `Default` trait 提供默认值，构造时传入
-- Phase 2+ 规划：支持配置文件热加载（修改无需重启）、运行时动态调整
+- 规划：支持配置文件热加载（修改无需重启）、运行时动态调整
 
 ---
 
@@ -895,7 +889,7 @@ fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power:
 
 ## 15. 台区储能治理策略（第 4 策略）
 
-> **v2.16 新增（2026-08-31）**。整合自 `2026-08-25-台区储能控制策略-design.md`（方案A：分时状态机 + 共模/差模分解），作为策略引擎**第 4 种兜底策略**，在 AI 引擎不生效时实现台区储能的台区治理目标。
+> 整合自 `2026-08-25-台区储能控制策略-design.md`（方案A：分时状态机 + 共模/差模分解），作为策略引擎**第 4 种兜底策略**，在 AI 引擎不生效时实现台区储能的台区治理目标。
 
 ### 15.1 定位与目标
 
@@ -983,7 +977,7 @@ Q_i = Q_i_补偿
 `ElectricalData` 新增分相字段（`mupc-data-processing/src/telemetry.rs`）：
 
 ```rust
-/// 分相电气数据（台区总表，v2.16 新增）
+/// 分相电气数据（台区总表）
 #[derive(Debug, Clone, Default)]
 pub struct PhaseElectricalData {
     pub voltage: [Option<f64>; 3],        // Ua/Ub/Uc (V)
@@ -995,7 +989,7 @@ pub struct PhaseElectricalData {
 
 pub struct ElectricalData {
     // ... 现有三相总字段
-    /// 分相数据（台区总表），None = 不可用（v2.16 新增）
+    /// 分相数据（台区总表），None = 不可用
     pub phase: Option<PhaseElectricalData>,
 }
 ```
@@ -1010,7 +1004,7 @@ pub struct ElectricalData {
 
 ```rust
 // tcp_server.rs
-/// 控制指令 JSON Payload v3.0（分相模式，v2.16 新增）
+/// 控制指令 JSON Payload v3.0（分相模式）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlCmdPayloadV3 {
     #[serde(rename = "frame_version")]
