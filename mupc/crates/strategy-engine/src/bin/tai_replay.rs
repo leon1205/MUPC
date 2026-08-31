@@ -147,18 +147,24 @@ fn main() {
             unbal_base_ok_secs += dt;
         }
 
-        // net 反馈模型：台区总表测量净功率 = 基线 − 储能当前输出（上一周期指令），
+        // 生效输出：更新前的 last_p_out/last_q_out（上一控制点发出的命令，
+        // 覆盖 [t_{k-1}, t_k] 间隔）。net 测量、KPI/SOC 记账一律用它——
+        // 控制周期行上 evaluate_sync 产生的新命令要到下一间隔才生效。
+        let p_out_prev = last_p_out;
+        let q_out_prev = last_q_out;
+
+        // net 反馈模型：台区总表测量净功率 = 基线 − 储能生效输出（上一周期指令），
         // 与运行时闭环一致（储能输出在测量环内）。电压/电流幅值/PF 取基线
         // （简化，见计划文档说明），带符号电流方向以净分相有功符号承载。
         let p_i_net = [
-            pi[0] - last_p_out[0],
-            pi[1] - last_p_out[1],
-            pi[2] - last_p_out[2],
+            pi[0] - p_out_prev[0],
+            pi[1] - p_out_prev[1],
+            pi[2] - p_out_prev[2],
         ];
         let q_i_net = [
-            qi[0] - last_q_out[0],
-            qi[1] - last_q_out[1],
-            qi[2] - last_q_out[2],
+            qi[0] - q_out_prev[0],
+            qi[1] - q_out_prev[1],
+            qi[2] - q_out_prev[2],
         ];
         let p_net_total = p_i_net.iter().sum();
 
@@ -210,12 +216,12 @@ fn main() {
         };
         last_p_set = cmd_p;
         last_q_set = cmd_q;
-        // 储能当前输出 = 最新指令（供下一周期测量反馈，及 KPI/SOC 净效应）
+        // 储能当前输出 = 最新指令（供下一周期测量反馈；本行 KPI/SOC 用生效输出 p_out_prev）
         last_p_out = cmd_p.unwrap_or([0.0; 3]);
         last_q_out = cmd_q.unwrap_or([0.0; 3]);
 
-        // 控制后净功率 = 基线 - 储能注入
-        let p_st = last_p_out.iter().sum::<f64>();
+        // 控制后净功率 = 基线 - 储能注入（生效间隔输出 p_out_prev）
+        let p_st = p_out_prev.iter().sum::<f64>();
         let p_ctrl = p_total - p_st; // 储能放电 p_st>0 → 净进口下降
         if p_ctrl < 0.0 {
             reverse_ctrl_secs += dt;
