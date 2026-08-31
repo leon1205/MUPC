@@ -58,6 +58,7 @@ async-trait = "0.1"
 rustls = "0.22"
 futures = "0.3"
 sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros"] }
+calamine = { version = "0.24", features = ["dates"] }
 
 [profile.release]
 opt-level = 3
