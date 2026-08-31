@@ -1,6 +1,6 @@
 # MUPC 策略引擎模块设计文档
 
-> **版本：** v2.18（2026-08-31）
+> **版本：** v2.19（2026-08-31）
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
@@ -51,7 +51,10 @@ AI 引擎失效:
 |------|--------|----------|----------|
 | AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 默认运行模式 |
 | 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过 |
+| **本地优先模式** | **台区储能治理（AI 旁路参考，不下发）** | 策略内置边界检查 | 配置 `ai_engine.local_priority: true` 或 Web API `/api/v1/strategy-mode` 设置 |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
+
+**本地优先模式（v2.19 新增）**：可通过 YAML 配置（`ai_engine.local_priority: true`）或 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。
 
 ### 1.3 模块依赖关系
 
@@ -567,6 +570,8 @@ pub enum StrategyType {
 | Fallback | AI 引擎恢复（status == Ready） | Intelligent |
 | Any | 运维人员手动切换 | Basic / Intelligent / Fallback |
 | Basic | 运维人员手动切换 | Intelligent / Fallback |
+| Any | YAML 配置 `ai_engine.local_priority: true` 启动 | 本地优先（AI 旁路） |
+| 本地优先 | Web API `PUT /api/v1/strategy-mode`（local_priority=false） | 恢复 AI 优先 |
 
 ### 5.3 核间通信信号
 
@@ -865,4 +870,5 @@ tokio-test = "0.4"
 | v2.15 | 动作空间精简：AI 2 维动作（p_ref + k_droop），load_shedding/pv_limit 下沉至本地策略 |
 | v2.16 | 新增第 4 策略「台区储能治理」：扩展 DataPackage 分相字段、ControlCommand 分相设定、核间 V3 帧、带状态控制器、离线回放验证 |
 | v2.17 | 策略引擎精简为单一兜底策略「台区储能治理」；三策略（削峰填谷/需量控制/防逆流）废弃（代码保留不编译），pv_limit/load_shedding 从 ControlCommand 移除 |
-| v2.18 | 文档结构重构：台区储能治理策略提升为核心章节 §2，全文档章节重排为连续编号 |
+| v2.18 | 文档结构重构：台区储能治理策略提升为核心章节 §2，全文档章节重排为连续编号 || v2.18 | 文档结构重构：台区储能治理策略提升为核心章节 §2，全文档章节重排为连续编号 |
+| v2.19 | 新增「本地策略优先」模式：YAML 配置 ai_engine.local_priority + Web API /api/v1/strategy-mode 热切换，AI 旁路运行，控制以本地台区储能策略为准 |

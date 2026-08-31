@@ -30,8 +30,11 @@ pub struct AiIntegrator {
     fallback_active: RwLock<bool>,
     /// v3.1: 最新遥测数据（南向采集循环写入，供兜底策略 evaluate）
     latest_data: Arc<RwLock<Option<DataPackage>>>,
-    /// 台区储能治理策略（v2.16 第 4 策略，AI 失效兜底）
+    /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
+    /// 本地策略优先模式（配置或 Web API 可切换）：AI 旁路运行（仍决策作参考，不下发），
+    /// 控制以下发本地策略（台区储能治理）为准
+    local_priority: RwLock<bool>,
 }
 
 impl AiIntegrator {
@@ -45,6 +48,7 @@ impl AiIntegrator {
             fallback_active: RwLock::new(false),
             latest_data: Arc::new(RwLock::new(None)),
             tai_storage: None,
+            local_priority: RwLock::new(false),
         }
     }
 
@@ -226,16 +230,43 @@ impl AiIntegrator {
         self.intercore_client = Some(client);
     }
 
-    /// 注入台区储能治理策略（第 4 策略）
+    /// 注入台区储能治理策略
     pub fn set_tai_storage_strategy(&mut self, strategy: Arc<TaiStorageStrategy>) {
         self.tai_storage = Some(strategy);
     }
 
-    /// 执行 AI 决策并下发核间指令
+    /// 设置本地策略优先模式（true：本地台区储能策略优先，AI 旁路；false：AI 优先）
+    pub async fn set_local_priority(&self, enabled: bool) {
+        *self.local_priority.write().await = enabled;
+    }
+
+    /// 获取本地策略优先状态
+    pub async fn is_local_priority(&self) -> bool {
+        *self.local_priority.read().await
+    }
+
+    /// 执行决策并下发核间指令
     ///
-    /// 调用 full_decision_cycle() 获取 ActionOutput，p_ref + k_droop →
+    /// 默认：调用 full_decision_cycle() 获取 ActionOutput，p_ref + k_droop →
     /// 通过 IntercoreClient 发送到实时控制模块（v2.7）。
+    /// 本地优先模式（local_priority）：AI 旁路运行（仍决策仅作参考，不下发），
+    /// 控制以下发本地台区储能治理策略（分相 P/Q）为准。
     pub async fn dispatch_ai_decision(&self) -> Result<(), AiEngineError> {
+        // 本地策略优先模式：AI 旁路，控制以本地策略为准
+        if *self.local_priority.read().await {
+            if let Some(manager) = self.model_manager.read().await.as_ref() {
+                match manager.full_decision_cycle().await {
+                    Ok(a) => tracing::debug!(
+                        "本地优先模式：AI 旁路决策 p_ref={}, k_droop={}（仅参考，不下发）",
+                        a.p_ref,
+                        a.k_droop
+                    ),
+                    Err(e) => tracing::debug!("本地优先模式：AI 旁路决策失败（忽略）: {}", e),
+                }
+            }
+            return self.run_fallback_strategies().await;
+        }
+
         // v2.9 新增：异常检测与应急策略
         {
             let manager_guard = self.model_manager.read().await;

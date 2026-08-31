@@ -351,6 +351,8 @@ pub async fn initialize_all(
             mupc_strategy_engine::TaiStorageConfig::default(),
         ),
     ));
+    // 本地策略优先模式（YAML 配置：ai_engine.local_priority；Web API 可运行时切换）
+    ai_integrator.set_local_priority(config.ai_engine.local_priority).await;
 
     ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
@@ -493,6 +495,7 @@ pub async fn initialize_all(
     // 组装 Router 并启动 HTTP 服务
     let app_router = axum::Router::new()
         .merge(mupc_web_api::routes::mode::create_router())
+        .merge(mupc_web_api::routes::strategy_mode::create_router())
         .merge(mupc_web_api::routes::ai::ai_routes())
         .merge(mupc_web_api::routes::ai::sse_route())
         .merge(mupc_web_api::routes::status::create_router())

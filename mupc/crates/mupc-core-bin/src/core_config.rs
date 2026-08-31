@@ -93,6 +93,9 @@ pub struct AiEngineConfig {
     /// 推理超时（毫秒），默认 500
     #[serde(default = "default_inference_timeout_ms")]
     pub inference_timeout_ms: u64,
+    /// 本地策略优先模式（默认 false = AI 优先；true = 本地台区储能治理策略优先，AI 旁路）
+    #[serde(default = "default_local_priority")]
+    pub local_priority: bool,
 }
 
 /// 插件配置
@@ -170,6 +173,10 @@ fn default_enable_npu() -> bool {
 
 fn default_inference_timeout_ms() -> u64 {
     500
+}
+
+fn default_local_priority() -> bool {
+    false
 }
 
 fn default_plugin_search_paths() -> Vec<PathBuf> {
@@ -271,6 +278,7 @@ plugins: {}
                 config_file: PathBuf::from("/tmp/config.yaml"),
                 enable_npu: true,
                 inference_timeout_ms: 500,
+                local_priority: false,
             },
             plugins: PluginsConfig {
                 search_paths: vec![PathBuf::from("/tmp/plugins")],
@@ -309,6 +317,7 @@ plugins: {}
                 config_file: PathBuf::from("/tmp"),
                 enable_npu: false,
                 inference_timeout_ms: 500,
+                local_priority: false,
             },
             plugins: PluginsConfig {
                 search_paths: vec![],
