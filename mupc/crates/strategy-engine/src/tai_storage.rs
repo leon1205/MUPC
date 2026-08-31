@@ -336,3 +336,121 @@ pub fn control(
     state.q_last = q;
     (pcmd, q)
 }
+
+use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
+use async_trait::async_trait;
+use mupc_common::MupcError;
+use mupc_data_processing::telemetry::DataPackage;
+use std::sync::{Arc, Mutex};
+
+/// 台区储能治理策略（第 4 策略）
+///
+/// 内部持跨周期控制状态（Arc<Mutex>），实现 FallbackStrategy。
+/// 控制周期节流：距上次控制 ≥ control_period_s 才执行 control()。
+pub struct TaiStorageStrategy {
+    config: TaiStorageConfig,
+    state: Arc<Mutex<TaiControllerState>>,
+    last_cmd: Arc<Mutex<ControlCommand>>,
+}
+
+impl TaiStorageStrategy {
+    pub fn new(config: TaiStorageConfig) -> Self {
+        let last_cmd = ControlCommand {
+            cmd_id: 4,
+            cmd_type: CommandType::PowerRegulation,
+            p_batt_set: None,
+            q_batt_set: None,
+            phase_compensation: None,
+            start_stop: Some(true),
+            priority: 3,
+            pv_limit: None,
+            load_shedding: None,
+            phase_p_set: Some([0.0; 3]),
+            phase_q_set: Some([0.0; 3]),
+        };
+        Self {
+            config,
+            state: Arc::new(Mutex::new(TaiControllerState::default())),
+            last_cmd: Arc::new(Mutex::new(last_cmd)),
+        }
+    }
+
+    /// 同步评估（用于测试与回放）：内部执行控制周期
+    pub fn evaluate_sync(&self, data: &DataPackage) -> ControlCommand {
+        let mut state = self.state.lock().unwrap();
+        if data.timestamp.saturating_sub(state.last_control_ts) < self.config.control_period_s {
+            return self.last_cmd.lock().unwrap().clone();
+        }
+        state.last_control_ts = data.timestamp;
+
+        let meter = data_to_meter(data);
+        let soc = data.battery.soc.unwrap_or(50.0) / 100.0; // 百分比 → 0~1 小数
+        let (p, q) = control(&mut state, &self.config, &meter, soc, data.timestamp);
+
+        let cmd = ControlCommand {
+            cmd_id: 4,
+            cmd_type: CommandType::ChargeDischarge,
+            p_batt_set: Some(p.iter().sum()),
+            q_batt_set: None,
+            phase_compensation: None,
+            start_stop: Some(true),
+            priority: 3,
+            pv_limit: None,
+            load_shedding: None,
+            phase_p_set: Some(p),
+            phase_q_set: Some(q),
+        };
+        *self.last_cmd.lock().unwrap() = cmd.clone();
+        cmd
+    }
+}
+
+/// DataPackage → MeterData（分相字段缺失时按 failsafe：全零）
+fn data_to_meter(data: &DataPackage) -> MeterData {
+    let phase = match data.electrical.phase.as_ref() {
+        Some(ph) => ph,
+        None => return MeterData::default(),
+    };
+    let get = |a: &[Option<f64>; 3]| {
+        [
+            a[0].unwrap_or(0.0),
+            a[1].unwrap_or(0.0),
+            a[2].unwrap_or(0.0),
+        ]
+    };
+    let p_i = get(&phase.active_power);
+    let q_i = get(&phase.reactive_power);
+    let u = get(&phase.voltage);
+    let i_mag = get(&phase.current);
+    let pf = get(&phase.cos_phi);
+    // 带符号电流：方向由分相有功符号决定
+    let i = [
+        p_i[0].signum() * i_mag[0],
+        p_i[1].signum() * i_mag[1],
+        p_i[2].signum() * i_mag[2],
+    ];
+    MeterData {
+        p: p_i.iter().sum(),
+        q: q_i.iter().sum(),
+        pf,
+        u,
+        i,
+        p_i,
+        q_i,
+    }
+}
+
+#[async_trait]
+impl FallbackStrategy for TaiStorageStrategy {
+    async fn evaluate(&self, data: &DataPackage) -> Result<ControlCommand, MupcError> {
+        Ok(self.evaluate_sync(data))
+    }
+
+    fn strategy_type(&self) -> StrategyType {
+        StrategyType::Fallback
+    }
+
+    fn name(&self) -> &str {
+        "TaiStorageStrategy"
+    }
+}

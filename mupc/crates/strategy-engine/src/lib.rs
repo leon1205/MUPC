@@ -31,7 +31,7 @@ pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
     ValidationResult,
 };
-pub use tai_storage::{control, MeterData, TaiControllerState, TaiState};
+pub use tai_storage::{control, MeterData, TaiControllerState, TaiState, TaiStorageStrategy};
 
 // AI Engine re-exports
 pub use mupc_ai_engine::{ModelManager, ModelStatus};

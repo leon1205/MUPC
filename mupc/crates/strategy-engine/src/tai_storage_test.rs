@@ -151,4 +151,76 @@ mod tai_storage_test {
         assert_eq!(move_toward(2.0, 0.0, 5.0), 0.0);
         assert_eq!(move_toward(-10.0, 0.0, 3.0), -7.0);
     }
+
+    use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
+    use crate::tai_storage::TaiStorageStrategy;
+    use mupc_data_processing::telemetry::{
+        BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus, PhaseElectricalData,
+    };
+
+    fn create_phase_data(p: f64) -> PhaseElectricalData {
+        PhaseElectricalData {
+            voltage: [Some(228.0); 3],
+            current: [Some(p.signum() * 10.0); 3],
+            active_power: [Some(p / 3.0); 3],
+            reactive_power: [Some(0.0); 3],
+            cos_phi: [Some(0.99); 3],
+        }
+    }
+
+    fn create_package(timestamp: u64, grid_power: f64, soc: f64) -> DataPackage {
+        DataPackage {
+            timestamp,
+            electrical: ElectricalData {
+                voltage: Some(220.0),
+                current: Some(30.0),
+                active_power: Some(grid_power),
+                reactive_power: Some(0.0),
+                cos_phi: Some(0.99),
+                frequency: Some(50.0),
+                phase: Some(create_phase_data(grid_power)),
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: Some(30.0),
+                load_power: Some(40.0),
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: Some(soc * 100.0),
+                soh: Some(95.0),
+                temperature: Some(25.0),
+            },
+        }
+    }
+
+    fn poll(strategy: &TaiStorageStrategy, ts: u64) -> ControlCommand {
+        let data = create_package(ts, 10.0, 0.5);
+        tokio_test::block_on(strategy.evaluate(&data)).unwrap()
+    }
+
+    #[test]
+    fn test_strategy_throttles_to_60s() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        let cmd1 = poll(&strategy, 3600 * 10);        // first call executes control
+        let cmd2 = poll(&strategy, 3600 * 10 + 1);    // <60s → returns last command
+        assert_eq!(cmd1.phase_p_set, cmd2.phase_p_set);
+    }
+
+    #[test]
+    fn test_strategy_name_and_type() {
+        let s = TaiStorageStrategy::new(TaiStorageConfig::default());
+        assert_eq!(s.name(), "TaiStorageStrategy");
+        assert_eq!(s.strategy_type(), StrategyType::Fallback);
+    }
+
+    #[test]
+    fn test_strategy_outputs_phase_fields() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        let cmd = poll(&strategy, 3600 * 10); // 10:00 grid_power=10 → S2
+        assert!(cmd.phase_p_set.is_some());
+        assert!(cmd.phase_q_set.is_some());
+        assert_eq!(cmd.cmd_id, 4);
+        assert_eq!(cmd.cmd_type, CommandType::ChargeDischarge);
+    }
 }
