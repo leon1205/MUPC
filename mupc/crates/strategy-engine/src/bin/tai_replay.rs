@@ -3,7 +3,7 @@
 //! 读取 data_rule xlsx（sheet「总表」），按 60s 控制周期调用
 //! TaiStorageStrategy::evaluate_sync 逐周期回放，统计 KPI 并打印报告。
 //!
-//! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- <xlsx路径> [SOC初值0.0-1.0]
+//! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw]
 
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDateTime;
@@ -71,7 +71,14 @@ fn main() {
         .worksheet_range("总表")
         .expect("找不到「总表」sheet");
 
-    let cfg = TaiStorageConfig::default();
+    let mut cfg = TaiStorageConfig::default();
+    // 可选参数覆盖：args[3]=soc_cap_day，args[4]=s4_limit_margin_kw
+    if let Some(v) = args.get(3) {
+        cfg.soc_cap_day = v.parse().unwrap_or(cfg.soc_cap_day);
+    }
+    if let Some(v) = args.get(4) {
+        cfg.s4_limit_margin_kw = v.parse().unwrap_or(cfg.s4_limit_margin_kw);
+    }
     let strategy = TaiStorageStrategy::new(cfg.clone());
 
     // 回放统计

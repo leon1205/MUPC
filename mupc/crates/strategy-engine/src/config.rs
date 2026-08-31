@@ -123,6 +123,8 @@ pub struct TaiStorageConfig {
     pub t_clear_start_secs: f64,
     /// S4 清空截止（当日秒，达标目标）
     pub t_clear_end_secs: f64,
+    /// S4 日终清空限幅裕度 (kW)：>0 时 P_强制 = min(P_强制, P_表 + 裕度)，避免夜间过度反送（0 = 不限幅，保持满额清空）
+    pub s4_limit_margin_kw: f64,
     /// 滑动滤波窗口（点数）
     pub window_size: u32,
     /// 电池容量 (kWh)
@@ -153,6 +155,7 @@ impl Default for TaiStorageConfig {
             t_release_secs: 18.0 * 3600.0,     // 18:00
             t_clear_start_secs: 21.0 * 3600.0, // 21:00
             t_clear_end_secs: 23.5 * 3600.0,   // 23:30
+            s4_limit_margin_kw: 0.0,
             window_size: 5,
             battery_capacity_kwh: 120.0,
         }

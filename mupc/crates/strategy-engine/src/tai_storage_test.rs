@@ -92,6 +92,19 @@ mod tai_storage_test {
     }
 
     #[test]
+    fn test_s4_limit_margin_reduces_force() {
+        let mut cfg = TaiStorageConfig::default();
+        cfg.s4_limit_margin_kw = 10.0;
+        let mut st = TaiControllerState::default();
+        // 22:00 S4，夜间低负荷 p=15 → 限幅后 p_force ≤ 25
+        let m = meter(15.0, [5.0, 5.0, 5.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 22);
+        assert_eq!(st.st, TaiState::S4Clear);
+        let sum: f64 = st.p_st;
+        assert!(sum <= 25.0 + 1e-9, "S4 限幅应约束 p_st ≤ 25: {}", sum);
+    }
+
+    #[test]
     fn test_q_channel_compensates_low_pf() {
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();

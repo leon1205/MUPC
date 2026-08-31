@@ -239,6 +239,10 @@ pub fn control(
     let hours_to_clear = ((config.t_clear_end_secs - secs) / 3600.0).max(0.1);
     let mut p_force =
         ((soc - 0.10) * config.battery_capacity_kwh / hours_to_clear).clamp(0.0, config.p_cap);
+    // S4 限幅：避免强制放电超出受电 + 裕度，减少夜间过度反送（可牺牲部分日终清空）
+    if config.s4_limit_margin_kw > 0.0 {
+        p_force = p_force.min(p + config.s4_limit_margin_kw);
+    }
     if u.iter().any(|&x| x > 235.0) {
         p_force = p_force.min(p.max(0.0)); // 电压越限保护
     }
