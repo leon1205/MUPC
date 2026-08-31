@@ -146,9 +146,9 @@ pub struct ControlCmdPayloadV3 {
     #[serde(rename = "k_droop")]
     pub k_droop: Option<f64>,
     #[serde(rename = "phase_p_set")]
-    pub phase_p_set: Option<[f64; 3]>,      // 分相有功 (kW)
+    pub phase_p_set: Option<[f64; 3]>,      // 分相有功 (kW)，索引 0/1/2 = A/B/C 相
     #[serde(rename = "phase_q_set")]
-    pub phase_q_set: Option<[f64; 3]>,      // 分相无功 (kVAr)
+    pub phase_q_set: Option<[f64; 3]>,      // 分相无功 (kVAr)，索引 0/1/2 = A/B/C 相
     #[serde(rename = "ai_ready")]
     pub ai_ready: Option<bool>,
     #[serde(rename = "strategy_mode")]
@@ -181,7 +181,7 @@ impl ControlCmdPayloadV3 {
         serde_json::to_vec(self)
     }
 
-    /// 按 frame_version 字段检测版本（1/2/3），解析失败视为 v1
+    /// 按 frame_version 字段检测版本（1/2/3）；解析失败返回 Err，由调用方回退为 v1
     pub fn detect_version(data: &[u8]) -> Result<u8, serde_json::Error> {
         let v: serde_json::Value = serde_json::from_slice(data)?;
         Ok(v["frame_version"].as_u64().map(|x| x as u8).unwrap_or(1))
@@ -985,7 +985,7 @@ impl IntercoreClient {
             k_droop: None,
             phase_p_set: Some(p),
             phase_q_set: Some(q),
-            ai_ready: Some(false),
+            ai_ready: Some(false), // 台区储能治理为兜底场景，AI 未就绪
             strategy_mode: Some(strategy_mode.to_string()),
             timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
         };

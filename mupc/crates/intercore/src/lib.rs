@@ -10,7 +10,7 @@ pub mod watchdog;
 pub use heartbeat::HeartbeatManager;
 pub use protocol::{FrameHeader, FrameType as IntercoreFrameType, IntercoreFrame};
 pub use tcp_server::{
-    CommandConfig, CommandQueue, ControlCmdPayload, ControlCmdPayloadV2, DualParamCommand,
-    IntercoreClient, IntercoreConfig, IntercoreServer,
+    CommandConfig, CommandQueue, ControlCmdPayload, ControlCmdPayloadV2, ControlCmdPayloadV3,
+    DualParamCommand, IntercoreClient, IntercoreConfig, IntercoreServer,
 };
 pub use watchdog::Watchdog;
