@@ -75,3 +75,84 @@ impl Default for AntiReverseConfig {
         }
     }
 }
+
+/// 台区储能治理策略配置
+#[derive(Debug, Clone)]
+pub struct TaiStorageConfig {
+    /// 控制周期 (s)
+    pub control_period_s: u64,
+    /// S1 返送吸收触发阈值 (kW)：P_表 < -p_abs_trig 进入 S1
+    pub p_abs_trig: f64,
+    /// S3 高峰放电触发阈值 (kW)：P_表 > p_dis_trig 进入 S3
+    pub p_dis_trig: f64,
+    /// S1 退出阈值 (kW)：P_表 >= s1_exit 退出 S1（目标 +4，留 2kW 裕度）
+    pub s1_exit: f64,
+    /// S1 目标进口 (kW)
+    pub p_tgt_s1: f64,
+    /// S3 目标进口 (kW)
+    pub p_tgt_s3: f64,
+    /// 电池功率上限 (kW)
+    pub p_cap: f64,
+    /// 斜坡限速 (kW/周期)
+    pub slope: f64,
+    /// 共模 P 积分增益
+    pub kp: f64,
+    /// 差模 P 积分增益
+    pub k_diff: f64,
+    /// 无功积分增益
+    pub k_q: f64,
+    /// 无功积分方向符号（±1，按表计/PCS 约定；发散则翻转）
+    pub s_q_sign: f64,
+    /// 差模上限 (kW/相)
+    pub dp_max: f64,
+    /// 无功上限 (kVAr/相)
+    pub q_i_max: f64,
+    /// 每相/中线电流额定 (A)
+    pub i_rated: f64,
+    /// 总视在额定 (kVA)
+    pub s_rated: f64,
+    /// 分时 SOC 上限（18:00 前）
+    pub soc_cap_day: f64,
+    /// SOC 滞回
+    pub soc_hys: f64,
+    /// 分时 SOC 上限释放时刻（当日秒）
+    pub t_release_secs: f64,
+    /// S4 清空起点（当日秒）
+    pub t_clear_start_secs: f64,
+    /// S4 清空截止（当日秒，达标目标）
+    pub t_clear_end_secs: f64,
+    /// 滑动滤波窗口（点数）
+    pub window_size: u32,
+    /// 电池容量 (kWh)
+    pub battery_capacity_kwh: f64,
+}
+
+impl Default for TaiStorageConfig {
+    fn default() -> Self {
+        Self {
+            control_period_s: 60,
+            p_abs_trig: 10.0,
+            p_dis_trig: 30.0,
+            s1_exit: 4.0,
+            p_tgt_s1: 2.0,
+            p_tgt_s3: 5.0,
+            p_cap: 60.0,
+            slope: 5.0,
+            kp: 0.4,
+            k_diff: 0.4,
+            k_q: 0.4,
+            s_q_sign: 1.0,
+            dp_max: 40.0,
+            q_i_max: 30.0,
+            i_rated: 190.0,
+            s_rated: 125.0,
+            soc_cap_day: 0.70,
+            soc_hys: 0.03,
+            t_release_secs: 18.0 * 3600.0,   // 18:00
+            t_clear_start_secs: 21.0 * 3600.0, // 21:00
+            t_clear_end_secs: 23.5 * 3600.0,   // 23:30
+            window_size: 5,
+            battery_capacity_kwh: 120.0,
+        }
+    }
+}

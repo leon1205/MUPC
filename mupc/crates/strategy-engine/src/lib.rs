@@ -10,6 +10,7 @@ pub mod errors;
 pub mod peak_shaving;
 pub mod south_command_sender;
 pub mod strategies;
+pub mod tai_storage;
 
 // AI Engine integration
 pub mod ai_integration;
@@ -18,6 +19,7 @@ pub use ai_integration::{AiEngineStatusInfo, AiIntegrator, ModeInfo};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput, ModelOutput};
 pub use anti_reverse::AntiReverseStrategy;
 pub use config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
+pub use config::TaiStorageConfig;
 pub use demand_control::DemandControlStrategy;
 pub use errors::StrategyError;
 pub use peak_shaving::PeakShavingStrategy;
@@ -29,6 +31,7 @@ pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
     ValidationResult,
 };
+pub use tai_storage::{MeterData, TaiControllerState, TaiState};
 
 // AI Engine re-exports
 pub use mupc_ai_engine::{ModelManager, ModelStatus};
