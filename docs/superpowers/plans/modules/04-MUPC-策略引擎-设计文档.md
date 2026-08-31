@@ -1,6 +1,6 @@
 # MUPC 策略引擎模块设计文档
 
-> **版本：** v2.17（2026-08-31）
+> **版本：** v2.18（2026-08-31）
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
@@ -9,17 +9,16 @@
 ## 目录
 
 1. [模块架构](#1-模块架构)
-5. [电压越限与三相不平衡无功补偿（接口预留）](#5-电压越限与三相不平衡无功补偿接口预留)
-6. [AI 指令安全校验](#6-ai-指令安全校验)
-7. [AI 引擎集成](#7-ai-引擎集成)
-8. [策略模式切换](#8-策略模式切换)
-9. [接口定义](#9-接口定义)
-10. [文件结构](#10-文件结构)
-11. [错误处理](#11-错误处理)
-12. [配置管理](#12-配置管理)
-13. [测试体系](#13-测试体系)
-14. [演进路线](#14-演进路线)
-15. [台区储能治理策略（第 4 策略）](#15-台区储能治理策略第-4-策略)
+2. [台区储能治理策略](#2-台区储能治理策略)
+3. [AI 指令安全校验](#3-ai-指令安全校验)
+4. [AI 引擎集成](#4-ai-引擎集成)
+5. [策略模式切换](#5-策略模式切换)
+6. [接口定义](#6-接口定义)
+7. [文件结构](#7-文件结构)
+8. [错误处理](#8-错误处理)
+9. [配置管理](#9-配置管理)
+10. [测试体系](#10-测试体系)
+11. [演进路线](#11-演进路线)
 
 ---
 
@@ -102,479 +101,11 @@ AiCommandValidator (可插拔 AI 模型)
 
 ---
 
-## 5. 电压越限与三相不平衡无功补偿（接口预留）
+## 2. 台区储能治理策略
 
-### 5.1 概述
+> 整合自 `2026-08-25-台区储能控制策略-design.md`（方案A：分时状态机 + 共模/差模分解），作为策略引擎**兜底策略**，在 AI 引擎不生效时实现台区储能的台区治理目标。
 
-通过电池逆变器提供无功功率支撑，改善台区电压质量和三相不平衡度。当前为**接口预留**，完整的决策逻辑和实现后续补充。
-
-### 5.2 已预留接口
-
-`ControlCommand` 中已包含以下字段，供无功补偿策略使用：
-
-| 字段 | 类型 | 用途 | 范围 |
-|------|------|------|------|
-| `q_batt_set` | `Option<f64>` | 无功由实时控制模块闭环调节 | - |
-| `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 | 各相独立设置 |
-
-### 5.3 计划策略
-
-| 策略 | 触发条件 | 动作 |
-|------|----------|------|
-| 电压越限补偿 | 电压超出额定范围 ±7%（或 ±10%，按国标要求） | 电池吸收/发出无功 |
-| 三相不平衡补偿 | 三相电流不平衡度 > 15% | 分相无功补偿 |
-
----
-
-## 6. AI 指令安全校验
-
-### 6.1 概述
-
-`AiCommandValidatorImpl` 作为 AI 引擎与执行层之间的**安全闸门**，对所有 AI 决策指令进行校验。校验不通过时自动降级至本地兜底模式。
-
-### 6.2 架构
-
-- **trait**: `AiCommandValidator`（定义于 `strategies.rs`）
-- **实现**: `AiCommandValidatorImpl`（定义于 `ai_validator.rs`）
-- **可插拔 AI 模型**: `AiModel` trait（定义于 `ai_validator.rs`）
-- **默认模型**: `MockAiModel`（模拟预测逻辑）
-
-### 6.3 接口定义
-
-```rust
-/// AI 指令校验器 Trait（可插拔）
-#[async_trait]
-pub trait AiCommandValidator: Send + Sync {
-    async fn validate(&self, cmd: &ControlCommand) -> ValidationResult;
-    fn name(&self) -> &str;
-}
-
-/// AI 模型 Trait（可插拔，可替换为真实预测模型）
-pub trait AiModel: Send + Sync {
-    fn predict(&self, input: &ModelInput) -> ModelOutput;
-}
-
-/// 模型输入
-pub struct ModelInput {
-    pub battery_soc: f64,     // 电池 SOC（0.0-1.0）
-    pub pv_power: f64,        // 光伏功率（kW）
-    pub load_power: f64,      // 负荷功率（kW）
-    pub grid_power: f64,      // 电网功率（kW）
-}
-
-/// 模型输出
-pub struct ModelOutput {
-    pub recommended_p_batt: f64,  // 推荐电池功率（kW）
-    pub confidence: f64,          // 置信度（0.0-1.0）
-}
-```
-
-### 6.4 校验规则
-
-```rust
-pub fn validate_sync(&self, cmd: &ControlCommand) -> ValidationResult {
-    // 1. 无模型时默认通过
-    if self.model.is_none() {
-        return ValidationResult::valid();
-    }
-
-    // 2. 只校验功率调节命令，开关命令直接通过
-    if cmd.cmd_type != CommandType::PowerRegulation {
-        return ValidationResult::valid();
-    }
-
-    // 3. 无 p_ref 时默认通过（双参数模式）
-    let p_ref = match cmd.p_ref {
-        Some(p) => p,
-        None => return ValidationResult::valid(),
-    };
-
-    // 4. 调用 AI 模型预测比较
-    let model_output = model.predict(&model_input);
-    let diff = (p_batt - model_output.recommended_p_batt).abs();
-    if diff > 10.0 && model_output.confidence < 0.7 {
-        return ValidationResult::invalid("...");
-    }
-
-    ValidationResult::valid()
-}
-```
-
-### 6.5 MockAiModel 模拟逻辑
-
-```rust
-impl AiModel for MockAiModel {
-    fn predict(&self, input: &ModelInput) -> ModelOutput {
-        let recommended_p_batt = if input.battery_soc > 0.8 {
-            (input.pv_power - input.load_power).max(0.0)   // SOC 高，优先放电
-        } else if input.battery_soc < 0.2 {
-            (input.pv_power - input.load_power).min(0.0)   // SOC 低，优先充电
-        } else {
-            0.0                                              // SOC 中等，待机
-        };
-        ModelOutput { recommended_p_batt, confidence: 0.5 }
-    }
-}
-```
-
-### 6.6 降级流程
-
-```
-AiCommandValidator.validate(cmd)
-  ├── 校验通过 → 指令继续下发
-  └── 校验不通过 →
-        ├── 记录告警日志
-        ├── 丢弃 AI 指令
-        ├── 切换至本地兜底模式
-        └── FallbackStrategy.evaluate(data) 生成兜底指令
-```
-
-### 6.7 测试覆盖
-
-| 测试用例 | 文件 | 验证点 |
-|----------|------|--------|
-| `test_mock_ai_model_predict_high_soc` | `ai_validator_test.rs` | SOC 高时推荐放电 |
-| `test_mock_ai_model_predict_low_soc` | `ai_validator_test.rs` | SOC 低时推荐充电 |
-| `test_mock_ai_model_predict_mid_soc` | `ai_validator_test.rs` | SOC 中等时推荐待机 |
-| `test_validator_without_model` | `ai_validator_test.rs` | 无模型时校验默认通过 |
-| `test_validator_with_model` | `ai_validator_test.rs` | 有模型时调用 predict 校验 |
-| `test_validator_switch_command_passthrough` | `ai_validator_test.rs` | 开关命令直接通过 |
-| `test_validator_name` | `ai_validator_test.rs` | 校验器名称返回正确 |
-| `test_validator_async_validate` | `ai_validator_test.rs` | 异步 validate 接口正常 |
-
----
-
-## 7. AI 引擎集成
-
-### 7.1 概述
-
-`AiIntegrator` 负责管理 AI 模型生命周期，提供 AI 决策接口。位于 `ai_integration.rs`。
-
-### 7.2 结构体定义
-
-```rust
-pub struct AiIntegrator {
-    model_manager: Arc<RwLock<Option<ModelManager>>>,
-    status: Arc<RwLock<ModelStatus>>,
-}
-```
-
-### 7.3 关键方法
-
-| 方法 | 说明 | 异步 |
-|------|------|------|
-| `new()` | 创建 AI 集成器，初始状态为 Unloaded | 否 |
-| `initialize(config)` | 加载 AI 模型 | 是 |
-| `get_decision(state)` | 获取 AI 决策 | 是 |
-| `is_ready()` | 检查 AI 是否就绪 | 是 |
-| `status()` | 获取当前状态 | 是 |
-
-### 7.4 状态管理
-
-| AiIntegrator 状态 | 策略模式 | 说明 |
-|--------------------|----------|------|
-| `Unloaded` | Fallback / Basic | 模型未加载，使用兜底策略 |
-| `Loading` | Fallback | 模型加载中，暂用兜底策略 |
-| `Ready` | Intelligent | 模型就绪，AI 决策 + Validator 校验 |
-| `Error` | Fallback | 模型异常，自动降级 |
-
-### 7.5 数据集成
-
-```rust
-// strategy-engine 通过 AiIntegrator 集成 AI 引擎
-strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
-                                  ├── 决策接口 → ActionOutput (p_ref, k_droop)
-                                  └── 状态管理 → ModelStatus
-
-数据流：
-1. LSTM/TCN 时序预测（光伏出力/负荷）
-2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
-3. AiCommandValidator 校验 AI 指令安全性
-4. AI 指令分发：
-   - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
-5. 本地兜底策略独立执行（不经过 AI）：
-   - 台区储能治理(TaiStorageStrategy) → IntercoreClient.send_tai_command()（核间 V3 帧）→ 实时控制模块 → 台区储能 PCS（分相 P/Q）
-```
-
----
-
-## 8. 策略模式切换
-
-### 8.1 模式定义
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StrategyType {
-    Basic,         // 基础模式 - 无自动控制
-    Intelligent,   // 智能模式 - AI 引擎决策
-    Fallback,      // 兜底模式 - 本地策略引擎
-}
-```
-
-### 8.2 切换触发器
-
-| 当前模式 | 切换条件 | 目标模式 |
-|----------|----------|----------|
-| Intelligent | AI 引擎心跳超时 / 状态异常 | Fallback |
-| Intelligent | AiValidator 校验不通过 | Fallback |
-| Fallback | AI 引擎恢复（status == Ready） | Intelligent |
-| Any | 运维人员手动切换 | Basic / Intelligent / Fallback |
-| Basic | 运维人员手动切换 | Intelligent / Fallback |
-
-### 8.3 核间通信信号
-
-策略模式通过 TCP 帧中的 `strategy_mode` 字段同步给实时控制模块：
-
-| 值 | 模式 | 说明 |
-|----|------|------|
-| 0 | 基础模式 | Basic |
-| 1 | 智能模式 | Intelligent |
-| 2 | 兜底模式 | Fallback |
-
-同时，`ai_ready` 字段（u8, 0/1）指示 AI 引擎可用状态。
-
----
-
-## 9. 接口定义
-
-### 9.1 FallbackStrategy Trait（strategies.rs）
-
-```rust
-#[async_trait]
-pub trait FallbackStrategy: Send + Sync {
-    /// 评估数据并生成控制命令
-    async fn evaluate(&self, data: &DataPackage) -> Result<ControlCommand, MupcError>;
-
-    /// 获取策略类型
-    fn strategy_type(&self) -> StrategyType;
-
-    /// 获取策略名称
-    fn name(&self) -> &str;
-}
-```
-
-所有策略实现此 trait 的三个方法：
-- `evaluate()` — 根据遥测数据生成控制命令
-- `strategy_type()` — 均返回 `StrategyType::Fallback`
-- `name()` — 返回策略名称字符串
-
-### 9.2 ControlCommand 结构体
-
-```rust
-#[derive(Debug, Clone)]
-pub struct ControlCommand {
-    pub cmd_id: u16,                          // 命令 ID（4-台区储能治理）
-    pub cmd_type: CommandType,                // 命令类型
-    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，AI输出或本地策略设置
-    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，AI输出或本地策略设置
-    pub q_batt_set: Option<f64>,             // 无功由实时控制模块闭环调节
-    pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
-    pub start_stop: Option<bool>,            // 启停命令
-    pub priority: u8,                        // 优先级（0-3）
-    pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW) [A/B/C]，正=放电/注入，仅由台区储能治理策略设置
-    pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr) [A/B/C]，仅由台区储能治理策略设置
-}
-```
-
-> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §15）设置。设定值经核间 V3 帧下发到实时控制模块，由其转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。
-
-### 9.3 CommandType 枚举
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CommandType {
-    SwitchControl,      // 开关控制
-    PowerRegulation,    // 功率调节
-    ChargeDischarge,    // 充放电控制
-}
-```
-
-### 9.4 AiCommandValidator Trait
-
-```rust
-#[async_trait]
-pub trait AiCommandValidator: Send + Sync {
-    /// 校验 AI 命令
-    async fn validate(&self, cmd: &ControlCommand) -> ValidationResult;
-    /// 获取校验器名称
-    fn name(&self) -> &str;
-}
-```
-
-### 9.5 ValidationResult 结构体
-
-```rust
-#[derive(Debug, Clone)]
-pub struct ValidationResult {
-    pub valid: bool,                              // 是否通过
-    pub message: String,                          // 错误消息
-    pub suggested_command: Option<ControlCommand>,  // 建议命令
-}
-
-impl ValidationResult {
-    pub fn valid() -> Self;                       // 创建通过结果
-    pub fn invalid(message: impl Into<String>) -> Self;  // 创建失败结果
-}
-```
-
-### 9.6 AiCommand 结构体
-
-```rust
-#[derive(Debug, Clone)]
-pub struct AiCommand {
-    pub cmd_id: u16,           // 命令 ID
-    pub p_set: f64,            // 有功设定值 (kW)
-    pub q_set: f64,            // 无功设定值 (kVar)
-    pub priority: u8,          // 优先级
-    pub raw_command: String,   // 原始命令 JSON
-}
-```
-
----
-
-## 10. 文件结构
-
-```
-mupc/crates/strategy-engine/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs                    # 模块导出，AI Engine re-export
-│   │
-│   ├── strategies.rs             # FallbackStrategy trait, ControlCommand,
-│   │                             # CommandType, AiCommandValidator trait,
-│   │                             # ValidationResult, StrategyType, AiCommand
-│   │
-│   ├── tai_storage.rs            # 台区储能治理策略实现（唯一兜底策略）
-│   │
-│   │  # 注：已废弃三策略文件（peak_shaving.rs / demand_control.rs / anti_reverse.rs
-│   │  # 及其测试文件）保留于 src/ 但不再编译（lib.rs 不再 mod 声明）
-│   │
-│   ├── ai_validator.rs           # AiCommandValidatorImpl 可插拔校验器
-│   │                             # AiModel trait, MockAiModel, ModelInput/Output
-│   │
-│   ├── ai_integration.rs         # AiIntegrator（AI 引擎集成）
-│   │
-│   ├── config.rs                 # TaiStorageConfig
-│   ├── errors.rs                 # StrategyError 枚举
-│   │
-│   ├── ai_validator_test.rs      # AI 校验器单元测试（8 tests）
-│   └── tai_storage_test.rs       # 台区储能治理策略单元测试（~15 tests）
-```
-
-### lib.rs 模块导出
-
-```rust
-pub mod strategies;
-pub mod tai_storage;          // 台区储能治理策略（唯一兜底策略）
-pub mod ai_validator;
-pub mod config;
-pub mod errors;
-pub mod ai_integration;       // AI 引擎集成
-
-pub use tai_storage::{TaiControllerState, TaiStorageStrategy, TaiState};
-pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput, MockAiModel};
-pub use config::TaiStorageConfig;
-pub use errors::StrategyError;
-pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
-pub use mupc_ai_engine::{ModelManager, FusedSystemState, ActionOutput, ModelStatus, RobustnessManager, AnomalyType};
-```
-
----
-
-## 11. 错误处理
-
-### 11.1 StrategyError 枚举
-
-```rust
-#[derive(Error, Debug)]
-pub enum StrategyError {
-    #[error("策略执行失败: {0}")]
-    ExecutionFailed(String),
-
-    #[error("AI 模型错误: {0}")]
-    ModelError(String),
-
-    #[error("配置错误: {0}")]
-    ConfigError(String),
-}
-```
-
-### 11.2 错误使用场景
-
-| 错误类型 | 触发场景 | 处理方式 |
-|----------|----------|----------|
-| `ExecutionFailed` | 策略 evaluate() 内部计算异常 | 返回默认安全指令（p_batt=0） |
-| `ModelError` | AI 模型加载失败、预测异常 | 自动降级至兜底模式 |
-| `ConfigError` | 配置参数无效（如空时段列表） | 使用默认配置替代 |
-
----
-
-## 12. 配置管理
-
-### 12.1 运行时配置热加载
-
-- 当前实现：所有配置通过 `Default` trait 提供默认值，构造时传入
-- 规划：支持配置文件热加载（修改无需重启）、运行时动态调整
-
----
-
-## 13. 测试体系
-
-### 13.1 测试覆盖统计
-
-| 测试文件 | 测试用例数 | 测试内容 |
-|----------|-----------|----------|
-| `ai_validator_test.rs` | 8 | 模型预测（3）、无模型/有模型校验、开关命令、异步接口 |
-| `tai_storage_test.rs` | ~15 | 状态机切换（S1~S4 进入/退出/滞回）、积分收敛、容量仲裁、failsafe（详见 §15.13） |
-
-**总计：约 23 个单元测试**
-
-### 13.2 测试数据构造模式
-
-所有策略测试共用 `mupc_data_processing::telemetry::DataPackage` 作为输入，通过辅助函数构造：
-
-```rust
-fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power: f64) -> DataPackage {
-    DataPackage {
-        electrical: ElectricalData { ... },
-        battery: BatteryData { soc: Some(battery_soc), ... },
-        device_status: DeviceStatus { pv_power: Some(pv_power), load_power: Some(load_power), ... },
-        timestamp,
-    }
-}
-```
-
-### 13.3 验证要求
-
-每次代码变更必须通过：
-
-- [ ] `cargo build --release` 编译成功
-- [ ] `cargo clippy` 无警告
-- [ ] `cargo test -p mupc-strategy-engine` 全部通过
-- [ ] `cargo fmt` 格式化通过
-
----
-
-## 14. 演进路线
-
-| Phase | 内容 | 说明 | 状态 |
-|-------|------|------|------|
-| Phase 1 | 接口定义：`FallbackStrategy` trait 和 `AiCommandValidator` trait | 仅接口预留 | 已完成 |
-| Phase 3A | 兜底策略与 `AiCommandValidatorImpl` + `MockAiModel` | 台区储能治理策略实现 | 已完成（三策略已废弃） |
-| Phase 3C | AI 引擎集成：`AiIntegrator` 集成 LSTM/TCN + MADDPG/PPO | 替换 MockAiModel，真实 AI 决策 + 校验 | 已完成 |
-| Phase 2+ | 电压越限无功补偿 | 完整策略实现 | 规划中 |
-| Phase 2+ | 三相不平衡补偿 | 分相无功补偿 | 规划中 |
-| Phase 2+ | 运行时配置热加载 | 配置修改无需重启 | 规划中 |
-| Phase 2+ | 消息总线扩展（AMQP/MQTT） | 支持更多消费者 | 规划中 |
-| — | Q 控制 | 无功由实时控制模块闭环调节，ControlCommand 中 q_batt_set 已废弃 | 已关闭 |
-
----
-
-## 15. 台区储能治理策略（第 4 策略）
-
-> 整合自 `2026-08-25-台区储能控制策略-design.md`（方案A：分时状态机 + 共模/差模分解），作为策略引擎**第 4 种兜底策略**，在 AI 引擎不生效时实现台区储能的台区治理目标。
-
-### 15.1 定位与目标
+### 2.1 定位与目标
 
 台区配光伏 + 储能 + 三相四桥臂 PCS，当 AI 引擎失效（兜底模式）时，由本策略接管储能控制，实现三个治理目标（按优先级）：
 
@@ -584,7 +115,7 @@ fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power:
 
 **目标优先级（2026-08-26 评审）**：日终 SOC 清空（S4 硬约束）> 不平衡度 <20%（物理极限内尽力）> 降低返送（软目标）> PF（软目标）——受电池容量限制，"零返送"与"晚峰全削峰"不可同时完美达成，冲突时按此顺序妥协。
 
-### 15.2 硬件与约束
+### 2.2 硬件与约束
 
 | 项 | 取值 |
 |---|---|
@@ -596,14 +127,14 @@ fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power:
 | PCS 容量边界 | 每相/中线额定电流 190A，过载 1.1×长期（209A）/1.2×1min（228A）；总视在 125kVA |
 | 分时 SOC 上限 | 18:00 前 SOC ≤70%（可标定），之后释放至 90% |
 
-### 15.3 架构（融入策略引擎）
+### 2.3 架构（融入策略引擎）
 
 ```
 台区总表(分相 P/Q/PF/U/I，20s) → DataPackage.ElectricalData.phase(扩展)
         ↓ (南向采集循环写入 set_latest_data)
 AiIntegrator.run_fallback_strategies()          ← AI 失效时调用
         ↓
-TaiStorageStrategy (第 4 策略，持 Arc<Mutex<TaiControllerState>>)
+TaiStorageStrategy (兜底策略，持 Arc<Mutex<TaiControllerState>>)
         · 4 状态机 S1/S2/S3/S4 + 积分器(共模P/差模P/分相Q)
         · 每 60s 一个控制周期 → ControlCommand(phase_p_set/phase_q_set)
         ↓
@@ -614,7 +145,7 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 
 **单一兜底策略**：策略引擎现仅保留台区储能治理策略作为本地兜底。AI 失效或指令校验不通过时，降级由该策略生成台区储能分相 P/Q，经核间 V3 帧下发至实时控制模块。原削峰填谷/需量控制/防逆流三策略已废弃（代码保留不编译）。
 
-### 15.4 状态机（4 状态）
+### 2.4 状态机（4 状态）
 
 | 状态 | 时段/触发 | 主目标 | 共模 P 方向 |
 |---|---|---|---|
@@ -629,7 +160,7 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 - S3 全天负荷触发（无时段门控）；优先级 S4 > S1 > S3 > S2；
 - **failsafe**：总表数据超时（>150s）或坏数 → 冻结积分并斜坡回归 0，保持最后有效 Q，恢复后从 0 重新积分。
 
-### 15.5 控制律（三通道）
+### 2.5 控制律（三通道）
 
 ```
 Q_i = clamp(Q_i[k−1] + s·K_q × Q_meter_i, −Q_i_max, +Q_i_max)   # 分相 Q（PF，积分式，常开）
@@ -647,7 +178,7 @@ Q_i = Q_i_补偿
 - **单相/两相返送（光伏随机接相）**：某相返送而总表仍净受电 → 不触发 S1，改由差模 P 拉向均值（零净能量、不耗电池）；总表净返送超阈值才叠加 S1 充电；
 - **s 符号**（Q 积分方向）：s=±1 以表计/PCS 约定为准，发散则翻转；投运前用小幅 Q 阶跃 + 分相注流核相（强制）。
 
-### 15.6 容量仲裁（每相、每周期）
+### 2.6 容量仲裁（每相、每周期）
 
 - 约束：每相/中线电流 ≤190A、总视在 ≤125kVA、总有功 ≤60kW（电池）；
 - 裁剪顺序（按优先级）：先减 **Q**（PF，软目标）→ 再减 **差模 P**（不平衡）→ 最后减 **共模 P**（返送/能量，S4 不可剪）；仅 SOC 保护可剪共模 P；
@@ -655,7 +186,7 @@ Q_i = Q_i_补偿
 - SOC 保护：充电 ≥90% 共模 P 剪 0、放电 ≤10% 共模 P=0；88%/12% 线性降额；
 - 斜坡限速：P_cm 与 ΔP_i 每周期变化 ≤5kW。
 
-### 15.7 数据接入（DataPackage 扩展）
+### 2.7 数据接入（DataPackage 扩展）
 
 `ElectricalData` 新增分相字段（`mupc-data-processing/src/telemetry.rs`）：
 
@@ -681,7 +212,7 @@ pub struct ElectricalData {
 - 分相数据缺失时：策略按 failsafe 处理（积分冻结、斜坡回归 0）；
 - `DataPackage` 构造处（`dataframe_to_datapackage` 等）同步更新，未填分相字段时 `phase=None`，不破坏现有调用方。
 
-### 15.8 执行路径（核间协议 V3）
+### 2.8 执行路径（核间协议 V3）
 
 核间协议新增分相下发通道（`mupc-intercore`）：
 
@@ -712,7 +243,7 @@ pub struct ControlCmdPayloadV3 {
 - **复用 `IntercoreFrameType::ControlCmd` 帧类型**（帧定长 64 字节，JSON 数据区可承载分相六维），仅新增 payload 版本（`detect_version` 按 `frame_version` 区分 v1/v2/v3）；向后兼容，不新增帧类型；
 - `IntercoreClient` 新增 `send_tai_command(&self, p: [f64;3], q: [f64;3], strategy_mode: &str)`，封装 V3 帧发送，复用现有持久连接。
 
-### 15.9 带状态控制器设计
+### 2.9 带状态控制器设计
 
 现有 `FallbackStrategy` 为无状态纯函数（`evaluate(&self, &DataPackage)`）。台区治理策略需跨周期积分状态（`st/P_st/Q_pcs/dP/...`），采用**策略实例内部持状态**方式，不改动 trait 签名：
 
@@ -761,7 +292,7 @@ pub struct TaiStorageStrategy {
 - **控制周期节流**：`evaluate` 每周期被 `run_fallback_strategies` 调用；内部按 `timestamp` 判断距上次控制 ≥60s 才执行 `control()`，未到期则返回上次指令（避免 1s 决策循环与 60s 控制周期不匹配）；
 - 首次周期初值：`st=S2, p_st=0, q_pcs=d_p=0, q_active=d_p_active=false, q_last=0, meter_buf=空`。
 
-### 15.10 配置（TaiStorageConfig）
+### 2.10 配置（TaiStorageConfig）
 
 | 参数 | 初始值 | 作用 |
 |---|---|---|
@@ -777,15 +308,15 @@ pub struct TaiStorageStrategy {
 | `stale_t` | 150 (s) | failsafe 数据超时 |
 | `battery_capacity_kwh` | 120 | 电池容量 |
 
-初始值为占位，最终值在离线回放（§15.12）中标定（分时 SOC 上限扫 60/70/80%、P_abs_trig 扫 5/10/15/20、Kp 灵敏度）。
+初始值为占位，最终值在离线回放（§2.12）中标定（分时 SOC 上限扫 60/70/80%、P_abs_trig 扫 5/10/15/20、Kp 灵敏度）。
 
-### 15.11 集成点（AiIntegrator）
+### 2.11 集成点（AiIntegrator）
 
 - `AiIntegrator` 新增字段 `tai_storage: Arc<Mutex<TaiStorageStrategy>>`；
 - `set_tai_storage_strategy()` 注入（startup 装配时创建并注入）；
 - `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）。
 
-### 15.12 离线回放验证
+### 2.12 离线回放验证
 
 **工具形态**：独立二进制 `mupc-tai-replay`（workspace 下新增 bin crate 或 `tests/` 集成测试），读取历史 data_rule 数据逐周期回放，输出 KPI 报告。
 
@@ -801,7 +332,7 @@ pub struct TaiStorageStrategy {
 
 **回放报告**：打印每日 KPI 表 + 参数灵敏度（扫分时 SOC 上限、P_abs_trig、Kp），供标定初始值。
 
-### 15.13 测试体系
+### 2.13 测试体系
 
 | 测试文件 | 用例数 | 测试内容 |
 |----------|--------|----------|
@@ -809,7 +340,7 @@ pub struct TaiStorageStrategy {
 | `mupc-tai-replay` | 集成 | 6-27/7-04 回放 KPI 断言（不平衡 <20% 达标时长 ≥80% 等） |
 | 核间 V3 帧 | ~4 | `ControlCmdPayloadV3` 序列化/反序列化、版本检测（v1/v2/v3）、`send_tai_command` 帧组装 |
 
-### 15.14 依赖清单（实现前确认）
+### 2.14 依赖清单（实现前确认）
 
 1. 台区总表实时接口提供分相 Q（含符号）与分相 PF（data_rule 字段已确认）；
 2. PCS 通信接受分相 P/Q 设定值（已确认）；实时控制模块能转发分相 P/Q 到 PCS（**需与实时控制模块协议确认 V3 帧对接**）；
@@ -817,6 +348,472 @@ pub struct TaiStorageStrategy {
 4. 状态机时段参数初值（已用 6-27/7-04 data_rule 负荷曲线标定，P_dis_trig=30kW、T_清空 21:00/23:30）；
 5. 电池充/放电功率限值 60kW（已确认）；
 6. 通信协议细节：设定值下发瞬时生效或斜坡生效、超时/失败响应、时钟同步；现场核相流程（强制）。
+
+### 2.15 电压越限与三相不平衡补偿（原接口预留，已由台区储能实现）
+
+### 5.1 概述
+
+通过电池逆变器提供无功功率支撑，改善台区电压质量和三相不平衡度。当前为**接口预留**，完整的决策逻辑和实现后续补充。
+
+### 5.2 已预留接口
+
+`ControlCommand` 中已包含以下字段，供无功补偿策略使用：
+
+| 字段 | 类型 | 用途 | 范围 |
+|------|------|------|------|
+| `q_batt_set` | `Option<f64>` | 无功由实时控制模块闭环调节 | - |
+| `phase_compensation` | `Option<[f64; 3]>` | A/B/C 三相分相补偿系数 | 各相独立设置 |
+
+### 5.3 计划策略
+
+| 策略 | 触发条件 | 动作 |
+|------|----------|------|
+| 电压越限补偿 | 电压超出额定范围 ±7%（或 ±10%，按国标要求） | 电池吸收/发出无功 |
+| 三相不平衡补偿 | 三相电流不平衡度 > 15% | 分相无功补偿 |
+
+---
+
+## 3. AI 指令安全校验
+
+### 3.1 概述
+
+`AiCommandValidatorImpl` 作为 AI 引擎与执行层之间的**安全闸门**，对所有 AI 决策指令进行校验。校验不通过时自动降级至本地兜底模式。
+
+### 3.2 架构
+
+- **trait**: `AiCommandValidator`（定义于 `strategies.rs`）
+- **实现**: `AiCommandValidatorImpl`（定义于 `ai_validator.rs`）
+- **可插拔 AI 模型**: `AiModel` trait（定义于 `ai_validator.rs`）
+- **默认模型**: `MockAiModel`（模拟预测逻辑）
+
+### 3.3 接口定义
+
+```rust
+/// AI 指令校验器 Trait（可插拔）
+#[async_trait]
+pub trait AiCommandValidator: Send + Sync {
+    async fn validate(&self, cmd: &ControlCommand) -> ValidationResult;
+    fn name(&self) -> &str;
+}
+
+/// AI 模型 Trait（可插拔，可替换为真实预测模型）
+pub trait AiModel: Send + Sync {
+    fn predict(&self, input: &ModelInput) -> ModelOutput;
+}
+
+/// 模型输入
+pub struct ModelInput {
+    pub battery_soc: f64,     // 电池 SOC（0.0-1.0）
+    pub pv_power: f64,        // 光伏功率（kW）
+    pub load_power: f64,      // 负荷功率（kW）
+    pub grid_power: f64,      // 电网功率（kW）
+}
+
+/// 模型输出
+pub struct ModelOutput {
+    pub recommended_p_batt: f64,  // 推荐电池功率（kW）
+    pub confidence: f64,          // 置信度（0.0-1.0）
+}
+```
+
+### 3.4 校验规则
+
+```rust
+pub fn validate_sync(&self, cmd: &ControlCommand) -> ValidationResult {
+    // 1. 无模型时默认通过
+    if self.model.is_none() {
+        return ValidationResult::valid();
+    }
+
+    // 2. 只校验功率调节命令，开关命令直接通过
+    if cmd.cmd_type != CommandType::PowerRegulation {
+        return ValidationResult::valid();
+    }
+
+    // 3. 无 p_ref 时默认通过（双参数模式）
+    let p_ref = match cmd.p_ref {
+        Some(p) => p,
+        None => return ValidationResult::valid(),
+    };
+
+    // 4. 调用 AI 模型预测比较
+    let model_output = model.predict(&model_input);
+    let diff = (p_batt - model_output.recommended_p_batt).abs();
+    if diff > 10.0 && model_output.confidence < 0.7 {
+        return ValidationResult::invalid("...");
+    }
+
+    ValidationResult::valid()
+}
+```
+
+### 3.5 MockAiModel 模拟逻辑
+
+```rust
+impl AiModel for MockAiModel {
+    fn predict(&self, input: &ModelInput) -> ModelOutput {
+        let recommended_p_batt = if input.battery_soc > 0.8 {
+            (input.pv_power - input.load_power).max(0.0)   // SOC 高，优先放电
+        } else if input.battery_soc < 0.2 {
+            (input.pv_power - input.load_power).min(0.0)   // SOC 低，优先充电
+        } else {
+            0.0                                              // SOC 中等，待机
+        };
+        ModelOutput { recommended_p_batt, confidence: 0.5 }
+    }
+}
+```
+
+### 3.6 降级流程
+
+```
+AiCommandValidator.validate(cmd)
+  ├── 校验通过 → 指令继续下发
+  └── 校验不通过 →
+        ├── 记录告警日志
+        ├── 丢弃 AI 指令
+        ├── 切换至本地兜底模式
+        └── FallbackStrategy.evaluate(data) 生成兜底指令
+```
+
+### 3.7 测试覆盖
+
+| 测试用例 | 文件 | 验证点 |
+|----------|------|--------|
+| `test_mock_ai_model_predict_high_soc` | `ai_validator_test.rs` | SOC 高时推荐放电 |
+| `test_mock_ai_model_predict_low_soc` | `ai_validator_test.rs` | SOC 低时推荐充电 |
+| `test_mock_ai_model_predict_mid_soc` | `ai_validator_test.rs` | SOC 中等时推荐待机 |
+| `test_validator_without_model` | `ai_validator_test.rs` | 无模型时校验默认通过 |
+| `test_validator_with_model` | `ai_validator_test.rs` | 有模型时调用 predict 校验 |
+| `test_validator_switch_command_passthrough` | `ai_validator_test.rs` | 开关命令直接通过 |
+| `test_validator_name` | `ai_validator_test.rs` | 校验器名称返回正确 |
+| `test_validator_async_validate` | `ai_validator_test.rs` | 异步 validate 接口正常 |
+
+---
+
+## 4. AI 引擎集成
+
+### 4.1 概述
+
+`AiIntegrator` 负责管理 AI 模型生命周期，提供 AI 决策接口。位于 `ai_integration.rs`。
+
+### 4.2 结构体定义
+
+```rust
+pub struct AiIntegrator {
+    model_manager: Arc<RwLock<Option<ModelManager>>>,
+    status: Arc<RwLock<ModelStatus>>,
+}
+```
+
+### 4.3 关键方法
+
+| 方法 | 说明 | 异步 |
+|------|------|------|
+| `new()` | 创建 AI 集成器，初始状态为 Unloaded | 否 |
+| `initialize(config)` | 加载 AI 模型 | 是 |
+| `get_decision(state)` | 获取 AI 决策 | 是 |
+| `is_ready()` | 检查 AI 是否就绪 | 是 |
+| `status()` | 获取当前状态 | 是 |
+
+### 4.4 状态管理
+
+| AiIntegrator 状态 | 策略模式 | 说明 |
+|--------------------|----------|------|
+| `Unloaded` | Fallback / Basic | 模型未加载，使用兜底策略 |
+| `Loading` | Fallback | 模型加载中，暂用兜底策略 |
+| `Ready` | Intelligent | 模型就绪，AI 决策 + Validator 校验 |
+| `Error` | Fallback | 模型异常，自动降级 |
+
+### 4.5 数据集成
+
+```rust
+// strategy-engine 通过 AiIntegrator 集成 AI 引擎
+strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
+                                  ├── 决策接口 → ActionOutput (p_ref, k_droop)
+                                  └── 状态管理 → ModelStatus
+
+数据流：
+1. LSTM/TCN 时序预测（光伏出力/负荷）
+2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
+3. AiCommandValidator 校验 AI 指令安全性
+4. AI 指令分发：
+   - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
+5. 本地兜底策略独立执行（不经过 AI）：
+   - 台区储能治理(TaiStorageStrategy) → IntercoreClient.send_tai_command()（核间 V3 帧）→ 实时控制模块 → 台区储能 PCS（分相 P/Q）
+```
+
+---
+
+## 5. 策略模式切换
+
+### 5.1 模式定义
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StrategyType {
+    Basic,         // 基础模式 - 无自动控制
+    Intelligent,   // 智能模式 - AI 引擎决策
+    Fallback,      // 兜底模式 - 本地策略引擎
+}
+```
+
+### 5.2 切换触发器
+
+| 当前模式 | 切换条件 | 目标模式 |
+|----------|----------|----------|
+| Intelligent | AI 引擎心跳超时 / 状态异常 | Fallback |
+| Intelligent | AiValidator 校验不通过 | Fallback |
+| Fallback | AI 引擎恢复（status == Ready） | Intelligent |
+| Any | 运维人员手动切换 | Basic / Intelligent / Fallback |
+| Basic | 运维人员手动切换 | Intelligent / Fallback |
+
+### 5.3 核间通信信号
+
+策略模式通过 TCP 帧中的 `strategy_mode` 字段同步给实时控制模块：
+
+| 值 | 模式 | 说明 |
+|----|------|------|
+| 0 | 基础模式 | Basic |
+| 1 | 智能模式 | Intelligent |
+| 2 | 兜底模式 | Fallback |
+
+同时，`ai_ready` 字段（u8, 0/1）指示 AI 引擎可用状态。
+
+---
+
+## 6. 接口定义
+
+### 6.1 FallbackStrategy Trait（strategies.rs）
+
+```rust
+#[async_trait]
+pub trait FallbackStrategy: Send + Sync {
+    /// 评估数据并生成控制命令
+    async fn evaluate(&self, data: &DataPackage) -> Result<ControlCommand, MupcError>;
+
+    /// 获取策略类型
+    fn strategy_type(&self) -> StrategyType;
+
+    /// 获取策略名称
+    fn name(&self) -> &str;
+}
+```
+
+当前唯一兜底策略实现此 trait 的三个方法：
+- `evaluate()` — 根据遥测数据生成控制命令
+- `strategy_type()` — 均返回 `StrategyType::Fallback`
+- `name()` — 返回策略名称字符串
+
+### 6.2 ControlCommand 结构体
+
+```rust
+#[derive(Debug, Clone)]
+pub struct ControlCommand {
+    pub cmd_id: u16,                          // 命令 ID（4-台区储能治理）
+    pub cmd_type: CommandType,                // 命令类型
+    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，AI输出或本地策略设置
+    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，AI输出或本地策略设置
+    pub q_batt_set: Option<f64>,             // 无功由实时控制模块闭环调节
+    pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
+    pub start_stop: Option<bool>,            // 启停命令
+    pub priority: u8,                        // 优先级（0-3）
+    pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW) [A/B/C]，正=放电/注入，仅由台区储能治理策略设置
+    pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr) [A/B/C]，仅由台区储能治理策略设置
+}
+```
+
+> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置。设定值经核间 V3 帧下发到实时控制模块，由其转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。
+
+### 6.3 CommandType 枚举
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CommandType {
+    SwitchControl,      // 开关控制
+    PowerRegulation,    // 功率调节
+    ChargeDischarge,    // 充放电控制
+}
+```
+
+### 6.4 AiCommandValidator Trait
+
+```rust
+#[async_trait]
+pub trait AiCommandValidator: Send + Sync {
+    /// 校验 AI 命令
+    async fn validate(&self, cmd: &ControlCommand) -> ValidationResult;
+    /// 获取校验器名称
+    fn name(&self) -> &str;
+}
+```
+
+### 6.5 ValidationResult 结构体
+
+```rust
+#[derive(Debug, Clone)]
+pub struct ValidationResult {
+    pub valid: bool,                              // 是否通过
+    pub message: String,                          // 错误消息
+    pub suggested_command: Option<ControlCommand>,  // 建议命令
+}
+
+impl ValidationResult {
+    pub fn valid() -> Self;                       // 创建通过结果
+    pub fn invalid(message: impl Into<String>) -> Self;  // 创建失败结果
+}
+```
+
+### 6.6 AiCommand 结构体
+
+```rust
+#[derive(Debug, Clone)]
+pub struct AiCommand {
+    pub cmd_id: u16,           // 命令 ID
+    pub p_set: f64,            // 有功设定值 (kW)
+    pub q_set: f64,            // 无功设定值 (kVar)
+    pub priority: u8,          // 优先级
+    pub raw_command: String,   // 原始命令 JSON
+}
+```
+
+---
+
+## 7. 文件结构
+
+```
+mupc/crates/strategy-engine/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs                    # 模块导出，AI Engine re-export
+│   │
+│   ├── strategies.rs             # FallbackStrategy trait, ControlCommand,
+│   │                             # CommandType, AiCommandValidator trait,
+│   │                             # ValidationResult, StrategyType, AiCommand
+│   │
+│   ├── tai_storage.rs            # 台区储能治理策略实现（唯一兜底策略）
+│   │
+│   │  # 注：已废弃三策略文件（peak_shaving.rs / demand_control.rs / anti_reverse.rs
+│   │  # 及其测试文件）保留于 src/ 但不再编译（lib.rs 不再 mod 声明）
+│   │
+│   ├── ai_validator.rs           # AiCommandValidatorImpl 可插拔校验器
+│   │                             # AiModel trait, MockAiModel, ModelInput/Output
+│   │
+│   ├── ai_integration.rs         # AiIntegrator（AI 引擎集成）
+│   │
+│   ├── config.rs                 # TaiStorageConfig
+│   ├── errors.rs                 # StrategyError 枚举
+│   │
+│   ├── ai_validator_test.rs      # AI 校验器单元测试（8 tests）
+│   └── tai_storage_test.rs       # 台区储能治理策略单元测试（~15 tests）
+```
+
+### lib.rs 模块导出
+
+```rust
+pub mod strategies;
+pub mod tai_storage;          // 台区储能治理策略（唯一兜底策略）
+pub mod ai_validator;
+pub mod config;
+pub mod errors;
+pub mod ai_integration;       // AI 引擎集成
+
+pub use tai_storage::{TaiControllerState, TaiStorageStrategy, TaiState};
+pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput, MockAiModel};
+pub use config::TaiStorageConfig;
+pub use errors::StrategyError;
+pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
+pub use mupc_ai_engine::{ModelManager, FusedSystemState, ActionOutput, ModelStatus, RobustnessManager, AnomalyType};
+```
+
+---
+
+## 8. 错误处理
+
+### 8.1 StrategyError 枚举
+
+```rust
+#[derive(Error, Debug)]
+pub enum StrategyError {
+    #[error("策略执行失败: {0}")]
+    ExecutionFailed(String),
+
+    #[error("AI 模型错误: {0}")]
+    ModelError(String),
+
+    #[error("配置错误: {0}")]
+    ConfigError(String),
+}
+```
+
+### 8.2 错误使用场景
+
+| 错误类型 | 触发场景 | 处理方式 |
+|----------|----------|----------|
+| `ExecutionFailed` | 策略 evaluate() 内部计算异常 | 返回默认安全指令（p_batt=0） |
+| `ModelError` | AI 模型加载失败、预测异常 | 自动降级至兜底模式 |
+| `ConfigError` | 配置参数无效（如空时段列表） | 使用默认配置替代 |
+
+---
+
+## 9. 配置管理
+
+### 9.1 运行时配置热加载
+
+- 当前实现：所有配置通过 `Default` trait 提供默认值，构造时传入
+- 规划：支持配置文件热加载（修改无需重启）、运行时动态调整
+
+---
+
+## 10. 测试体系
+
+### 10.1 测试覆盖统计
+
+| 测试文件 | 测试用例数 | 测试内容 |
+|----------|-----------|----------|
+| `ai_validator_test.rs` | 8 | 模型预测（3）、无模型/有模型校验、开关命令、异步接口 |
+| `tai_storage_test.rs` | ~15 | 状态机切换（S1~S4 进入/退出/滞回）、积分收敛、容量仲裁、failsafe（详见 §2.13） |
+
+**总计：约 23 个单元测试**
+
+### 10.2 测试数据构造模式
+
+所有策略测试共用 `mupc_data_processing::telemetry::DataPackage` 作为输入，通过辅助函数构造：
+
+```rust
+fn create_test_data(timestamp: u64, battery_soc: f64, pv_power: f64, load_power: f64) -> DataPackage {
+    DataPackage {
+        electrical: ElectricalData { ... },
+        battery: BatteryData { soc: Some(battery_soc), ... },
+        device_status: DeviceStatus { pv_power: Some(pv_power), load_power: Some(load_power), ... },
+        timestamp,
+    }
+}
+```
+
+### 10.3 验证要求
+
+每次代码变更必须通过：
+
+- [ ] `cargo build --release` 编译成功
+- [ ] `cargo clippy` 无警告
+- [ ] `cargo test -p mupc-strategy-engine` 全部通过
+- [ ] `cargo fmt` 格式化通过
+
+---
+
+## 11. 演进路线
+
+| Phase | 内容 | 说明 | 状态 |
+|-------|------|------|------|
+| Phase 1 | 接口定义：`FallbackStrategy` trait 和 `AiCommandValidator` trait | 仅接口预留 | 已完成 |
+| Phase 3A | 兜底策略与 `AiCommandValidatorImpl` + `MockAiModel` | 台区储能治理策略实现 | 已完成（三策略已废弃） |
+| Phase 3C | AI 引擎集成：`AiIntegrator` 集成 LSTM/TCN + MADDPG/PPO | 替换 MockAiModel，真实 AI 决策 + 校验 | 已完成 |
+| Phase 2+ | 电压越限无功补偿 | 完整策略实现 | 规划中 |
+| Phase 2+ | 三相不平衡补偿 | 分相无功补偿 | 规划中 |
+| Phase 2+ | 运行时配置热加载 | 配置修改无需重启 | 规划中 |
+| Phase 2+ | 消息总线扩展（AMQP/MQTT） | 支持更多消费者 | 规划中 |
+| — | Q 控制 | 无功由实时控制模块闭环调节，ControlCommand 中 q_batt_set 已废弃 | 已关闭 |
 
 ---
 
@@ -868,3 +865,4 @@ tokio-test = "0.4"
 | v2.15 | 动作空间精简：AI 2 维动作（p_ref + k_droop），load_shedding/pv_limit 下沉至本地策略 |
 | v2.16 | 新增第 4 策略「台区储能治理」：扩展 DataPackage 分相字段、ControlCommand 分相设定、核间 V3 帧、带状态控制器、离线回放验证 |
 | v2.17 | 策略引擎精简为单一兜底策略「台区储能治理」；三策略（削峰填谷/需量控制/防逆流）废弃（代码保留不编译），pv_limit/load_shedding 从 ControlCommand 移除 |
+| v2.18 | 文档结构重构：台区储能治理策略提升为核心章节 §2，全文档章节重排为连续编号 |
