@@ -170,6 +170,7 @@ fn dataframe_to_datapackage(frame: &device_trait::DataFrame) -> mupc_data_proces
             reactive_power: Some(10.0),
             cos_phi: Some(0.98),
             frequency: Some(50.0),
+            phase: None,
         },
         battery: mupc_data_processing::BatteryData {
             soc: Some(75.0),

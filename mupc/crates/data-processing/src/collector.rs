@@ -58,6 +58,7 @@ impl DataCollectorImpl {
                 reactive_power: Some(10.0),
                 cos_phi: Some(0.98),
                 frequency: Some(50.0),
+                phase: None,
             },
             battery: BatteryData {
                 soc: Some(75.0),

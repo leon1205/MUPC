@@ -17,6 +17,7 @@ fn make_test_data(soc: f64, pv_power: f64, load_power: f64, active_power: f64) -
             reactive_power: None,
             cos_phi: None,
             frequency: Some(50.0),
+            phase: None,
         },
         battery: BatteryData {
             soc: Some(soc),

@@ -18,6 +18,21 @@ pub struct DataPackage {
     pub timestamp: u64,
 }
 
+/// 分相电气数据（台区总表）
+#[derive(Debug, Clone, Default)]
+pub struct PhaseElectricalData {
+    /// 分相电压 (V)
+    pub voltage: [Option<f64>; 3],
+    /// 分相电流 (A，带符号：正=受电方向，负=返送方向)
+    pub current: [Option<f64>; 3],
+    /// 分相有功 (kW，含符号：>0 受电 / <0 返送)
+    pub active_power: [Option<f64>; 3],
+    /// 分相无功 (kVAr，含符号)
+    pub reactive_power: [Option<f64>; 3],
+    /// 分相功率因数
+    pub cos_phi: [Option<f64>; 3],
+}
+
 /// 电气数据
 #[derive(Debug, Clone)]
 pub struct ElectricalData {
@@ -27,6 +42,22 @@ pub struct ElectricalData {
     pub reactive_power: Option<f64>, // 无功功率 (kVar)
     pub cos_phi: Option<f64>,        // 功率因数
     pub frequency: Option<f64>,      // 频率 (Hz)
+    /// 分相数据（台区总表），None = 不可用
+    pub phase: Option<PhaseElectricalData>,
+}
+
+impl Default for ElectricalData {
+    fn default() -> Self {
+        Self {
+            voltage: None,
+            current: None,
+            active_power: None,
+            reactive_power: None,
+            cos_phi: None,
+            frequency: None,
+            phase: None,
+        }
+    }
 }
 
 /// 电池数据
@@ -152,4 +183,22 @@ pub struct WaveformData {
     pub trigger_timestamp: u64,
     /// 持续时间 (ms)
     pub duration_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phase_electrical_data_default() {
+        let phase = PhaseElectricalData::default();
+        assert!(phase.voltage.iter().all(Option::is_none));
+        assert!(phase.active_power.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn test_electrical_data_phase_none_by_default() {
+        let e = ElectricalData::default();
+        assert!(e.phase.is_none());
+    }
 }

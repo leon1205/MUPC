@@ -17,6 +17,7 @@ mod anti_reverse_test {
                 reactive_power: Some(0.0),
                 cos_phi: None,
                 frequency: Some(50.0),
+                phase: None,
             },
             device_status: DeviceStatus {
                 inverter_status: InverterStatus::Running,

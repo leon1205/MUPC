@@ -206,6 +206,7 @@ mod tests {
                 reactive_power: None,
                 cos_phi: None,
                 frequency: Some(50.0),
+                phase: None,
             },
             battery: BatteryData {
                 soc: Some(soc),

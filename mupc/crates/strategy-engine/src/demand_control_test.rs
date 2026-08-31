@@ -22,6 +22,7 @@ fn create_test_data(
             reactive_power: Some(1.0),
             cos_phi: Some(0.95),
             frequency: Some(50.0),
+            phase: None,
         },
         battery: BatteryData {
             soc: Some(battery_soc),
