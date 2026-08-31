@@ -31,7 +31,7 @@ pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
     ValidationResult,
 };
-pub use tai_storage::{MeterData, TaiControllerState, TaiState};
+pub use tai_storage::{control, MeterData, TaiControllerState, TaiState};
 
 // AI Engine re-exports
 pub use mupc_ai_engine::{ModelManager, ModelStatus};
@@ -46,3 +46,5 @@ mod demand_control_test;
 mod peak_shaving_test;
 #[cfg(test)]
 mod south_command_sender_test;
+#[cfg(test)]
+mod tai_storage_test;
