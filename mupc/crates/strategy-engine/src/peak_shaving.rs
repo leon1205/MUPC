@@ -1,3 +1,7 @@
+//! ⚠️ 废弃（2026-08-31）：策略引擎已精简为单一兜底策略「台区储能治理」。
+//! 本文件不再编译（lib.rs 已移除 mod 声明），保留作历史追溯。
+//! 如需恢复编译，需同步恢复 config.rs 中的对应配置。
+
 use crate::config::PeakShavingConfig;
 use crate::strategies::{CommandType, ControlCommand, FallbackStrategy, StrategyType};
 use async_trait::async_trait;

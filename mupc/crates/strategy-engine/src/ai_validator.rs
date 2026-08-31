@@ -270,8 +270,6 @@ mod tests {
             phase_compensation: None,
             start_stop: None,
             priority: 1,
-            pv_limit: None,
-            load_shedding: None,
             phase_p_set: None,
             phase_q_set: None,
         };
@@ -296,8 +294,6 @@ mod tests {
             phase_compensation: None,
             start_stop: None,
             priority: 1,
-            pv_limit: None,
-            load_shedding: None,
             phase_p_set: None,
             phase_q_set: None,
         };
@@ -321,8 +317,6 @@ mod tests {
             phase_compensation: None,
             start_stop: Some(true),
             priority: 1,
-            pv_limit: None,
-            load_shedding: None,
             phase_p_set: None,
             phase_q_set: None,
         };
@@ -359,8 +353,6 @@ mod tests {
             phase_compensation: None,
             start_stop: None,
             priority: 1,
-            pv_limit: None,
-            load_shedding: None,
             phase_p_set: None,
             phase_q_set: None,
         };

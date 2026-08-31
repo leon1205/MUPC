@@ -407,8 +407,6 @@ impl TaiStorageStrategy {
             phase_compensation: None,
             start_stop: Some(true),
             priority: 3,
-            pv_limit: None,
-            load_shedding: None,
             phase_p_set: Some([0.0; 3]),
             phase_q_set: Some([0.0; 3]),
         };
@@ -439,8 +437,6 @@ impl TaiStorageStrategy {
             phase_compensation: None,
             start_stop: Some(true),
             priority: 3,
-            pv_limit: None,
-            load_shedding: None,
             phase_p_set: Some(p),
             phase_q_set: Some(q),
         };

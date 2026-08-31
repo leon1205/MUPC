@@ -3,11 +3,6 @@
 //! Phase 3C: 将 AI 优化引擎与策略引擎集成。
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
-use crate::anti_reverse::AntiReverseStrategy;
-use crate::config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
-use crate::demand_control::DemandControlStrategy;
-use crate::peak_shaving::PeakShavingStrategy;
-use crate::south_command_sender::SouthCommandDispatcher;
 use crate::strategies::FallbackStrategy;
 use crate::tai_storage::TaiStorageStrategy;
 use mupc_ai_engine::{
@@ -25,8 +20,6 @@ use tokio::sync::RwLock;
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
-    /// 南向命令分发器（用于分发 pv_limit 和 load_shedding）
-    south_dispatcher: Option<Arc<SouthCommandDispatcher>>,
     /// v2.7 核间通信客户端（用于发送双参数 p_ref + k_droop 到实时控制模块）
     intercore_client: Option<Arc<IntercoreClient>>,
     /// v2.6 双参数模式：最后有效的 p_ref（通信中断时使用）
@@ -46,7 +39,6 @@ impl AiIntegrator {
         Self {
             model_manager: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
-            south_dispatcher: None,
             intercore_client: None,
             last_valid_p_ref: RwLock::new(None),
             last_valid_k_droop: RwLock::new(None),
@@ -106,36 +98,13 @@ impl AiIntegrator {
         *self.latest_data.write().await = Some(data);
     }
 
-    /// 运行本地兜底策略（AI 失效时）：防逆流→pv_limit、需量控制→load_shedding
+    /// 运行本地兜底策略（AI 失效时）：台区储能治理（分相 P/Q 经核间下发）
     async fn run_fallback_strategies(&self) -> Result<(), AiEngineError> {
         let data = self.latest_data.read().await.clone();
         let Some(data) = data else {
             tracing::debug!("无遥测数据，跳过兜底策略");
             return Ok(());
         };
-
-        let anti_reverse = AntiReverseStrategy::new(AntiReverseConfig::default());
-        let demand = DemandControlStrategy::new(DemandControlConfig::default());
-        let _peak = PeakShavingStrategy::new(PeakShavingConfig::default());
-
-        let mut pv_limit = None;
-        let mut load_shedding = None;
-
-        if let Ok(cmd) = anti_reverse.evaluate(&data).await {
-            pv_limit = cmd.pv_limit;
-        }
-        if let Ok(cmd) = demand.evaluate(&data).await {
-            load_shedding = cmd.load_shedding;
-        }
-
-        if let Some(ref dispatcher) = self.south_dispatcher {
-            if let Some(pv) = pv_limit {
-                dispatcher.dispatch_pv_limit(pv, 1).await;
-            }
-            if let Some(ls) = load_shedding {
-                dispatcher.dispatch_load_shedding(ls, 1).await;
-            }
-        }
 
         // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块（best-effort，失败仅告警）
         if let Some(tai) = &self.tai_storage {
@@ -252,11 +221,6 @@ impl AiIntegrator {
         manager.as_ref().map(|m| m.mode_selector_arc())
     }
 
-    /// 设置南向命令分发器
-    pub fn set_south_dispatcher(&mut self, dispatcher: Arc<SouthCommandDispatcher>) {
-        self.south_dispatcher = Some(dispatcher);
-    }
-
     /// v2.7: 设置核间通信客户端（用于发送双参数到实时控制模块）
     pub fn set_intercore_client(&mut self, client: Arc<IntercoreClient>) {
         self.intercore_client = Some(client);
@@ -267,12 +231,10 @@ impl AiIntegrator {
         self.tai_storage = Some(strategy);
     }
 
-    /// 执行 AI 决策并分发南向命令
+    /// 执行 AI 决策并下发核间指令
     ///
-    /// 调用 full_decision_cycle() 获取 ActionOutput，然后：
-    /// - p_ref + k_droop → 通过 IntercoreClient 发送到实时控制模块（v2.7）
-    /// - pv_limit → 通过 SouthCommandDispatcher 发送到光伏逆变器
-    /// - load_shedding → 通过 SouthCommandDispatcher 发送到负荷控制装置
+    /// 调用 full_decision_cycle() 获取 ActionOutput，p_ref + k_droop →
+    /// 通过 IntercoreClient 发送到实时控制模块（v2.7）。
     pub async fn dispatch_ai_decision(&self) -> Result<(), AiEngineError> {
         // v2.9 新增：异常检测与应急策略
         {
@@ -352,37 +314,6 @@ impl AiIntegrator {
             tracing::debug!("Intercore client not set, skipping dual-param send");
         }
 
-        // 分发 pv_limit 到南向设备
-        if let Some(ref dispatcher) = self.south_dispatcher {
-            // 分发 pv_limit（限功率比例）
-            if action.pv_limit < 1.0 {
-                let result = dispatcher.dispatch_pv_limit(action.pv_limit, 1).await;
-                if !result.success {
-                    tracing::warn!(
-                        "pv_limit 分发失败: device={}, error={:?}",
-                        result.device_id,
-                        result.error_message
-                    );
-                }
-            }
-
-            // 分发 load_shedding（负荷切除功率）
-            if action.load_shedding > 0.0 {
-                let result = dispatcher
-                    .dispatch_load_shedding(action.load_shedding, 1)
-                    .await;
-                if !result.success {
-                    tracing::warn!(
-                        "load_shedding 分发失败: device={}, error={:?}",
-                        result.device_id,
-                        result.error_message
-                    );
-                }
-            }
-        } else {
-            tracing::debug!("南向分发器未设置，跳过 pv_limit/load_shedding 分发");
-        }
-
         Ok(())
     }
 
@@ -413,32 +344,6 @@ impl AiIntegrator {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to send emergency dual-param: {:?}", e);
-                }
-            }
-        }
-
-        // 分发 pv_limit 和 load_shedding
-        if let Some(ref dispatcher) = self.south_dispatcher {
-            if action.pv_limit < 1.0 {
-                let result = dispatcher.dispatch_pv_limit(action.pv_limit, 1).await;
-                if !result.success {
-                    tracing::warn!(
-                        "Emergency pv_limit 分发失败: device={}, error={:?}",
-                        result.device_id,
-                        result.error_message
-                    );
-                }
-            }
-            if action.load_shedding > 0.0 {
-                let result = dispatcher
-                    .dispatch_load_shedding(action.load_shedding, 1)
-                    .await;
-                if !result.success {
-                    tracing::warn!(
-                        "Emergency load_shedding 分发失败: device={}, error={:?}",
-                        result.device_id,
-                        result.error_message
-                    );
                 }
             }
         }

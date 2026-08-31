@@ -1,13 +1,11 @@
 //! MUPC 策略引擎模块
 //!
-//! Phase 3C: 集成 AI 优化引擎
+//! 精简为单一兜底策略：台区储能治理（AI 失效时经核间下发分相 P/Q）。
+//! 原三策略（削峰填谷/需量控制/防逆流）已废弃（文件保留于 src/ 但不再编译）。
 
 pub mod ai_validator;
-pub mod anti_reverse;
 pub mod config;
-pub mod demand_control;
 pub mod errors;
-pub mod peak_shaving;
 pub mod south_command_sender;
 pub mod strategies;
 pub mod tai_storage;
@@ -17,12 +15,8 @@ pub mod ai_integration;
 
 pub use ai_integration::{AiEngineStatusInfo, AiIntegrator, ModeInfo};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput, ModelOutput};
-pub use anti_reverse::AntiReverseStrategy;
 pub use config::TaiStorageConfig;
-pub use config::{AntiReverseConfig, DemandControlConfig, PeakShavingConfig};
-pub use demand_control::DemandControlStrategy;
 pub use errors::StrategyError;
-pub use peak_shaving::PeakShavingStrategy;
 pub use south_command_sender::{
     get_dispatcher, set_dispatcher, LoadSheddingCommand, MockSouthCommandSender, PvLimitCommand,
     SouthCommandDispatcher, SouthCommandSender, SouthCommandType, SouthSendResult,
@@ -38,12 +32,6 @@ pub use mupc_ai_engine::{ModelManager, ModelStatus};
 
 #[cfg(test)]
 mod ai_validator_test;
-#[cfg(test)]
-mod anti_reverse_test;
-#[cfg(test)]
-mod demand_control_test;
-#[cfg(test)]
-mod peak_shaving_test;
 #[cfg(test)]
 mod south_command_sender_test;
 #[cfg(test)]

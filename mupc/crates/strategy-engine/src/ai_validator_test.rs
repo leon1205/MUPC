@@ -91,8 +91,6 @@ fn test_validator_without_model() {
         phase_compensation: None,
         start_stop: None,
         priority: 1,
-        pv_limit: None,
-        load_shedding: None,
         phase_p_set: None,
         phase_q_set: None,
     };
@@ -115,8 +113,6 @@ fn test_validator_with_model() {
         phase_compensation: None,
         start_stop: None,
         priority: 1,
-        pv_limit: None,
-        load_shedding: None,
         phase_p_set: None,
         phase_q_set: None,
     };
@@ -138,8 +134,6 @@ fn test_validator_switch_command_passthrough() {
         phase_compensation: None,
         start_stop: Some(true),
         priority: 1,
-        pv_limit: None,
-        load_shedding: None,
         phase_p_set: None,
         phase_q_set: None,
     };
@@ -164,8 +158,6 @@ async fn test_validator_async_validate() {
         phase_compensation: None,
         start_stop: None,
         priority: 1,
-        pv_limit: None,
-        load_shedding: None,
         phase_p_set: None,
         phase_q_set: None,
     };

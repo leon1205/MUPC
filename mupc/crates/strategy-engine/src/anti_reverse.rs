@@ -1,3 +1,6 @@
+//! ⚠️ 废弃（2026-08-31）：策略引擎已精简为单一兜底策略「台区储能治理」。
+//! 本文件不再编译（lib.rs 已移除 mod 声明），保留作历史追溯。
+
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::config::AntiReverseConfig;
