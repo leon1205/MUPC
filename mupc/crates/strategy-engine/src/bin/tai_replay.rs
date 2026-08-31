@@ -3,6 +3,10 @@
 //! 读取 data_rule xlsx（sheet「总表」），按 60s 控制周期调用
 //! TaiStorageStrategy::evaluate_sync 逐周期回放，统计 KPI 并打印报告。
 //!
+//! **net 反馈模型（匹配运行时闭环）：** 台区总表测量的是净功率（储能输出
+//! 在测量环内）。回放以「基线 − 储能当前输出（上一周期指令）」作为表计
+//! 测量送入控制器，控制器下一周期输出经反馈后再影响测量，形成真实闭环。
+//!
 //! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1]
 
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
@@ -85,7 +89,11 @@ fn main() {
     // 回放统计
     let mut soc = soc_init;
     let mut last_ts: i64 = 0;
-    let mut last_cmd: Option<[f64; 3]> = None;
+    let mut last_p_set: Option<[f64; 3]> = None;
+    let mut last_q_set: Option<[f64; 3]> = None;
+    // net 反馈：最近一次控制指令的分相 P/Q 输出（初始为 0，尚未放电）
+    let mut last_p_out = [0.0; 3];
+    let mut last_q_out = [0.0; 3];
     let mut n_samples = 0usize;
     let mut n_control = 0usize;
     let mut reverse_base_secs = 0.0; // 无储能返送时长
@@ -100,6 +108,15 @@ fn main() {
     let mut reverse_ctrl_energy = 0.0; // 有储能返送能量 kwh
     let mut total_secs = 0.0; // 回放总时长（秒，各 KPI 占比的分母）
     let mut prev_ts: i64 = 0;
+    // 削峰诊断（评估 net 反馈下 S3 clamp 是否存在欠输送）：基线处于高峰
+    // （> p_dis_trig）时的净进口均值 + 储能放电总能量
+    let mut peak_net_sum = 0.0;
+    let mut peak_net_n = 0usize;
+    let mut discharge_energy = 0.0; // 储能放电总能量 kwh
+    let mut charge_energy = 0.0; // 储能充电总能量 kwh
+    let mut floor_secs = 0.0; // SOC 处于 10% 地板时长（诊断）
+    let mut import_peak_base = 0.0f64; // 基线受电峰值（削峰诊断）
+    let mut import_peak_ctrl = 0.0f64; // 控制后受电峰值（削峰诊断）
 
     for row in range.rows().skip(1) {
         let ts = match row.get(COL_TIME).and_then(cell_timestamp) {
@@ -130,20 +147,35 @@ fn main() {
             unbal_base_ok_secs += dt;
         }
 
+        // net 反馈模型：台区总表测量净功率 = 基线 − 储能当前输出（上一周期指令），
+        // 与运行时闭环一致（储能输出在测量环内）。电压/电流幅值/PF 取基线
+        // （简化，见计划文档说明），带符号电流方向以净分相有功符号承载。
+        let p_i_net = [
+            pi[0] - last_p_out[0],
+            pi[1] - last_p_out[1],
+            pi[2] - last_p_out[2],
+        ];
+        let q_i_net = [
+            qi[0] - last_q_out[0],
+            qi[1] - last_q_out[1],
+            qi[2] - last_q_out[2],
+        ];
+        let p_net_total = p_i_net.iter().sum();
+
         // 控制：按 60s 周期节流
-        let cmd = if last_ts == 0 || ts.saturating_sub(last_ts) as u64 >= cfg.control_period_s {
+        let (cmd_p, cmd_q) = if last_ts == 0 || ts.saturating_sub(last_ts) as u64 >= cfg.control_period_s {
             // 契约：分相电流须带符号（正=受电 / 负=返送），xlsx 仅给幅值，
-            // 以分相有功符号承载方向。
+            // 以净分相有功符号承载方向。
             let i_sign = [
-                pi[0].signum() * i_mag[0],
-                pi[1].signum() * i_mag[1],
-                pi[2].signum() * i_mag[2],
+                p_i_net[0].signum() * i_mag[0],
+                p_i_net[1].signum() * i_mag[1],
+                p_i_net[2].signum() * i_mag[2],
             ];
             let phase = PhaseElectricalData {
                 voltage: [Some(u[0]), Some(u[1]), Some(u[2])],
                 current: [Some(i_sign[0]), Some(i_sign[1]), Some(i_sign[2])],
-                active_power: [Some(pi[0]), Some(pi[1]), Some(pi[2])],
-                reactive_power: [Some(qi[0]), Some(qi[1]), Some(qi[2])],
+                active_power: [Some(p_i_net[0]), Some(p_i_net[1]), Some(p_i_net[2])],
+                reactive_power: [Some(q_i_net[0]), Some(q_i_net[1]), Some(q_i_net[2])],
                 cos_phi: [Some(pfi[0]), Some(pfi[1]), Some(pfi[2])],
             };
             let pkg = DataPackage {
@@ -151,8 +183,8 @@ fn main() {
                 electrical: ElectricalData {
                     voltage: Some(u[0]),
                     current: Some(i_mag[0]),
-                    active_power: Some(p_total),
-                    reactive_power: Some(qi.iter().sum()),
+                    active_power: Some(p_net_total),
+                    reactive_power: Some(q_i_net.iter().sum()),
                     cos_phi: Some(pfi[0]),
                     frequency: Some(50.0),
                     phase: Some(phase),
@@ -172,20 +204,39 @@ fn main() {
             let c = strategy.evaluate_sync(&pkg);
             last_ts = ts;
             n_control += 1;
-            c.phase_p_set
+            (c.phase_p_set, c.phase_q_set)
         } else {
-            last_cmd
+            (last_p_set, last_q_set)
         };
-        last_cmd = cmd;
+        last_p_set = cmd_p;
+        last_q_set = cmd_q;
+        // 储能当前输出 = 最新指令（供下一周期测量反馈，及 KPI/SOC 净效应）
+        last_p_out = cmd_p.unwrap_or([0.0; 3]);
+        last_q_out = cmd_q.unwrap_or([0.0; 3]);
 
         // 控制后净功率 = 基线 - 储能注入
-        let p_st = cmd.map(|c| c.iter().sum::<f64>()).unwrap_or(0.0);
+        let p_st = last_p_out.iter().sum::<f64>();
         let p_ctrl = p_total - p_st; // 储能放电 p_st>0 → 净进口下降
         if p_ctrl < 0.0 {
             reverse_ctrl_secs += dt;
             reverse_ctrl_peak = reverse_ctrl_peak.max(-p_ctrl);
             reverse_ctrl_energy += -p_ctrl * dt / 3600.0;
         }
+        // 削峰诊断：基线高峰窗口内的净进口均值（欠输送 → 均值偏高）
+        if p_total > cfg.p_dis_trig {
+            peak_net_sum += p_ctrl;
+            peak_net_n += 1;
+        }
+        if p_st > 0.0 {
+            discharge_energy += p_st * dt / 3600.0;
+        } else {
+            charge_energy += -p_st * dt / 3600.0;
+        }
+        if soc <= 0.1001 {
+            floor_secs += dt;
+        }
+        import_peak_base = import_peak_base.max(p_total);
+        import_peak_ctrl = import_peak_ctrl.max(p_ctrl);
 
         // 控制后不平衡：以基线不平衡近似（差模均衡后电流差异应下降，此处保守取基线）
         let unbal_ctrl = unbal_base;
@@ -232,4 +283,18 @@ fn main() {
         soc * 100.0
     );
     println!("控制后返送能量: {:.1} kWh", reverse_ctrl_energy);
+    if peak_net_n > 0 {
+        println!(
+            "削峰诊断(基线>{}kW 时段): 净进口均值 {:.1} kW / 放电 {:.1} kWh / 充电 {:.1} kWh / SOC地板占比 {:.1}%",
+            cfg.p_dis_trig,
+            peak_net_sum / peak_net_n as f64,
+            discharge_energy,
+            charge_energy,
+            pct(floor_secs)
+        );
+    }
+    println!(
+        "受电峰值(kW): 基线 {:.1} → 控制后 {:.1}",
+        import_peak_base, import_peak_ctrl
+    );
 }
