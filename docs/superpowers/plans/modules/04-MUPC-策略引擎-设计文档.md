@@ -179,6 +179,7 @@ Q_i = Q_i_补偿
 - **I_i 必须为带符号电流**（由分相有功 Pa 的符号或相角导出），不能用幅值——单相返送时幅值法方向相反、反向加重不平衡；
 - **Q 通道与 ΔP 通道协作**：Q 先把各相 PF 校正到 1（使 S→P），ΔP 再平衡各相净有功/电流，不重复作用；
 - **单相/两相返送（光伏随机接相）**：某相返送而总表仍净受电 → 不触发 S1，改由差模 P 拉向均值（零净能量、不耗电池）；总表净返送超阈值才叠加 S1 充电；
+- **S1 动态斜坡 boost（返送陡增，v2.20）**：S1 内按**滤波前原始净功**差分 `Δp = P_表[k] − P_表[k−1]`——① 返送陡增（`Δp < −s1_boost_rate_thr` 且仍返送 `P_表 < −s1_near_zero_thr`）→ 充电斜坡放大为 `slope × s1_boost_factor`（快速吸收）；② 受电快升（`Δp > +s1_cut_rate_thr`）→ 快速退出充电（`inc = +slope × factor` 向 0 回）。差分基准必须用滤波前原始净功：滑动窗会把陡增阻尼约 5 倍，滤波后差分使 boost 永不触发（实测踩坑，见 §2.12）。
 - **s 符号**（Q 积分方向）：s=±1 以表计/PCS 约定为准，发散则翻转；投运前用小幅 Q 阶跃 + 分相注流核相（强制）。
 
 ### 2.6 容量仲裁（每相、每周期）
@@ -187,7 +188,7 @@ Q_i = Q_i_补偿
 - 裁剪顺序（按优先级）：先减 **Q**（PF，软目标）→ 再减 **差模 P**（不平衡）→ 最后减 **共模 P**（返送/能量，S4 不可剪）；仅 SOC 保护可剪共模 P；
 - ΔP 裁剪后重归一化 ΣΔP=0（等比缩差模后均匀回补残差）；
 - SOC 保护：充电 ≥90% 共模 P 剪 0、放电 ≤10% 共模 P=0；88%/12% 线性降额；
-- 斜坡限速：P_cm 与 ΔP_i 每周期变化 ≤5kW。
+- 斜坡限速：P_cm 与 ΔP_i 每周期变化 ≤6kW（`slope=6.0`，2026-08-31 标定；S1 返送陡增时斜坡放大至 `slope×s1_boost_factor=18kW/周期`）。
 
 ### 2.7 数据接入（DataPackage 扩展）
 
@@ -282,7 +283,9 @@ pub struct TaiControllerState {
     pub q_active: [bool; 3],          // 死区滞回锁存
     pub d_p_active: bool,             // 差模死区锁存
     pub q_last: [f64; 3],             // 最近有效 Q（failsafe 用）
-    pub meter_buf: VecDeque<MeterData>, // 滑动滤波窗口（3~5 点）
+    pub meter_buf: VecDeque<MeterData>, // 滑动滤波窗口（window_size=5 点）
+    pub last_control_ts: u64,         // 上次控制时间戳（60s 节流）
+    pub prev_p: f64,                  // 上一周期原始净功（S1 动态斜坡差分基准，v2.20）
 }
 
 pub struct TaiStorageStrategy {
@@ -297,29 +300,33 @@ pub struct TaiStorageStrategy {
 
 ### 2.10 配置（TaiStorageConfig）
 
-| 参数 | 初始值 | 作用 |
+| 参数 | 值 | 作用 |
 |---|---|---|
 | `control_period_s` | 60 | 控制周期 |
-| `p_abs_trig` / `p_dis_trig` | 10 / 30 (kW) | S1 返送 / S3 高峰触发阈值 |
+| `p_abs_trig` / `p_dis_trig` | 2.0 / 30.0 (kW) | S1 返送 / S3 高峰触发阈值 |
 | `s1_exit` / `p_tgt_s1` / `p_tgt_s3` | 4 / 2 / 5 (kW) | S1 退出阈值 / 目标进口 |
-| `p_cap` / `slope` | 60 / 5 | 电池功率上限 / 斜坡限速 (kW/周期) |
-| `kp` / `k_diff` / `k_q` | 0.4 / 0.4 / 0.4 | 共模/差模/无功积分增益 |
+| `p_cap` / `slope` | 60 / 6.0 | 电池功率上限 / 斜坡限速 (kW/周期) |
+| `kp` / `k_diff` / `k_q` | 0.6 / 0.4 / 0.4 | 共模/差模/无功积分增益 |
 | `dp_max` / `q_i_max` | 40 / 30 | 差模上限 (kW/相) / 无功上限 (kVAr/相) |
 | `i_rated` / `s_rated` | 190 / 125 | 每相·中线电流限 (A) / 总视在限 (kVA) |
 | `soc_cap_day` / `soc_hys` | 0.70 / 0.03 | 分时 SOC 上限 / 滞回 |
-| `t_release` / `t_clear_start` / `t_clear_end` | 18:00 / 21:00 / 23:30 | 分时上限释放 / S4 清空时段 |
-| `stale_t` | 150 (s) | failsafe 数据超时 |
+| `t_release_secs` / `t_clear_start_secs` / `t_clear_end_secs` | 18:00 / 21:00 / 23:30 | 分时上限释放 / S4 清空时段 |
+| `s4_limit_margin_kw` | 0.0 | S4 清空限幅裕度（>0 时 P_强制≤P_表+裕度，防夜间过送；0=不限幅） |
+| `s3_margin_limit` | true | S3 放电裕度限幅（`p_st=min(p_st,(P_表−p_tgt_s3).max(0))`，防负荷回落过冲返送） |
+| `s1_boost_enabled` | true | S1 动态斜坡开关（返送陡增加速充电 / 受电快升快速退出） |
+| `s1_boost_factor` | 3.0 | S1 返送陡增斜坡放大倍数（×slope，单周期可达 18kW） |
+| `s1_boost_rate_thr` / `s1_cut_rate_thr` | 15 / 15 (kW/周期) | 返送陡增 / 受电快升变化率阈值 |
+| `s1_near_zero_thr` | 5.0 (kW) | 返送接近 0 判定（停用加速充电） |
+| `window_size` | 5 | 滑动滤波窗口（点数） |
 | `battery_capacity_kwh` | 120 | 电池容量 |
 
-初始值为占位，最终值在离线回放（§2.12）中标定（分时 SOC 上限扫 60/70/80%、P_abs_trig 扫 5/10/15/20、Kp 灵敏度）。
+初始值为占位，最终值在离线回放（§2.12）中标定（分时 SOC 上限扫 60/70/80%、P_abs_trig 扫 5/10/15/20、Kp 灵敏度）。**v2.20 已按 2026-08-31 标定同步**：`p_abs_trig=2.0`、`slope=6.0`、`kp=0.6`（S1 激进调参），新增 `s3_margin_limit`/`s4_limit_margin_kw`（S3/S4 防过送）与 `s1_boost_*`（动态斜坡）；原 `stale_t` 字段代码中不存在，已移除。
 
 ### 2.11 集成点（AiIntegrator）
 
-- `AiIntegrator` 持 `tai_storage: Option<Arc<TaiStorageStrategy>>` 字段；
+- `AiIntegrator` 新增字段 `tai_storage: Arc<Mutex<TaiStorageStrategy>>`；
 - `set_tai_storage_strategy()` 注入（startup 装配时创建并注入）；
-- `run_fallback_strategies()`：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（best-effort，未注入核间客户端则记录警告）；
-- `set_local_priority()` 由 startup 从 `ai_engine.local_priority` 初始化；Web API `/api/v1/strategy-mode` 可运行时热切换（本地优先：AI 旁路，控制以本地策略为准）；
-- 南向采集循环调用 `set_latest_data()` 写入最新遥测，供策略 evaluate 使用。
+- `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）。
 
 ### 2.12 离线回放验证
 
@@ -336,6 +343,14 @@ pub struct TaiStorageStrategy {
 **边界用例**：中午大返送+SOC 快满、S1 到分时上限后返送仍持续（无 S1↔S2 振荡）、晚峰负荷小（S4 晚反送）、返送+不平衡同时（仲裁顺序）、单相返送、21:00 S3→S4 交接、通信故障注入、数据缺口、SOC 误差 ±3%。
 
 **回放报告**：打印每日 KPI 表 + 参数灵敏度（扫分时 SOC 上限、P_abs_trig、Kp），供标定初始值。
+
+**标定结论（2026-08-31，net 闭环模型，SOC 初值 0.50）**：
+
+- **模型修正**：回放由 gross（开环）改为 **net 反馈模型**——储能输出反馈到表计测量（`p_i_net = p_i_base − last_p_out`），与运行时总表实测净功率一致；KPI/SOC 用生效间隔输出记账。
+- **S1 激进调参**（`p_abs_trig` 10→2.0、`slope` 5→6.0、`kp` 0.4→0.6）：7-04 返送时长 12.3%→9.4%、峰值 52.0→48.6kW、能量 30.1→22.9kWh；6-27 5.1%→4.0%、21.4→11.0kW、6.9→3.8kWh。受电峰值两日均不劣化，SOC 日终均清空至 10% 地板。
+- **S3 放电裕度限幅**（`s3_margin_limit=true`）：两日控制后返送均降至基线以下（6-27 5.1%<6.2%、7-04 12.3%<16.5%），SOC 地板占比降低（6-27 18%→0%），受电峰值与 OFF 档完全相同；限幅在 net 反馈下未出现破坏削峰的副作用。
+- **S1 动态斜坡 boost**：7-04 返送峰值 48.6→47.9kW（−0.7kW 边际改善）、能量 22.9→22.2kWh；6-27 无 ≥15kW/周期陡增、boost 不触发、KPI 不变。差分基准修正为**滤波前原始净功**（滤波后差分被滑动窗阻尼约 5 倍，boost 永不触发）。峰值压降本质受陡坡（≈39kW/min）超过 60s 控制周期能力所限，储能侧到顶，压真峰需光伏限功率联动。
+- **已知局限**：回放对控制后三相不平衡度/PF 用基线近似（无相角/电流重分布模型），差模 P 与分相 Q 通道效果未建模，待实机/带相角仿真验证。
 
 ### 2.13 测试体系
 
@@ -895,3 +910,4 @@ tokio-test = "0.4"
 | v2.17 | 策略引擎精简为单一兜底策略「台区储能治理」；三策略（削峰填谷/需量控制/防逆流）废弃（代码保留不编译），pv_limit/load_shedding 从 ControlCommand 移除 |
 | v2.18 | 文档结构重构：台区储能治理策略提升为核心章节 §2，全文档章节重排为连续编号 || v2.18 | 文档结构重构：台区储能治理策略提升为核心章节 §2，全文档章节重排为连续编号 |
 | v2.19 | 新增「本地策略优先」模式：YAML 配置 ai_engine.local_priority + Web API /api/v1/strategy-mode 热切换，AI 旁路运行，控制以本地台区储能策略为准 |
+| v2.20 | 台区储能策略标定同步：S1 动态斜坡 boost（返送陡增加速充电）、S1 激进调参（p_abs_trig=2.0/slope=6.0/kp=0.6）、S3 放电裕度限幅（s3_margin_limit）；回放改 net 闭环模型；配置表同步实际默认值 |
