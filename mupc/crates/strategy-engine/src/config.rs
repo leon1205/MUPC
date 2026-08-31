@@ -77,6 +77,8 @@ impl Default for AntiReverseConfig {
 }
 
 /// 台区储能治理策略配置
+///
+/// 注：soc 相关字段均为 0~1 小数，与 DataPackage.battery.soc（百分比）在边界处转换
 #[derive(Debug, Clone)]
 pub struct TaiStorageConfig {
     /// 控制周期 (s)
@@ -111,9 +113,9 @@ pub struct TaiStorageConfig {
     pub i_rated: f64,
     /// 总视在额定 (kVA)
     pub s_rated: f64,
-    /// 分时 SOC 上限（18:00 前）
+    /// 分时 SOC 上限（18:00 前，0~1 小数；DataPackage.battery.soc 为百分比，边界处需 /100 转换）
     pub soc_cap_day: f64,
-    /// SOC 滞回
+    /// SOC 滞回（0~1 小数）
     pub soc_hys: f64,
     /// 分时 SOC 上限释放时刻（当日秒）
     pub t_release_secs: f64,
