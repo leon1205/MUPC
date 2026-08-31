@@ -84,6 +84,10 @@ pub struct TaiStorageConfig {
     /// 控制周期 (s)
     pub control_period_s: u64,
     /// S1 返送吸收触发阈值 (kW)：P_表 < -p_abs_trig 进入 S1
+    /// 默认 2.0（2026-08-31 S1 激进调参标定，原 10.0）：捕获更小返送，
+    /// 组合 kp=0.6/slope=6.0 下 7-04 返送时长 12.3%→9.4%、峰值 52.0→48.6kW、
+    /// 能量 30.1→22.9kWh；6-27 5.1%→4.0%、21.4→11.0kW、6.9→3.8kWh。
+    /// 代价：S1 触发更频繁 → 更多电池循环。
     pub p_abs_trig: f64,
     /// S3 高峰放电触发阈值 (kW)：P_表 > p_dis_trig 进入 S3
     pub p_dis_trig: f64,
@@ -96,8 +100,15 @@ pub struct TaiStorageConfig {
     /// 电池功率上限 (kW)
     pub p_cap: f64,
     /// 斜坡限速 (kW/周期)
+    /// 默认 6.0（2026-08-31 S1 激进调参标定，原 5.0）：S1 充电更快达目标吸收功率，
+    /// 7-04 返送 12.3%→9.4%、峰值 52.0→48.6kW；6-27 5.1%→4.0%、峰值 21.4→11.0kW。
+    /// 注：标定曾试 slope=8 效果反而略差（6-27 峰值 16.6kW）且使 arbitrate 重归一
+    /// 遗留 0.9A 过限（test_arbitrate_recomputes_and_breaks 失败），故取 6.0 平衡。
+    /// 代价：斜坡更快 → 响应过冲风险略增。
     pub slope: f64,
     /// 共模 P 积分增益
+    /// 默认 0.6（2026-08-31 S1 激进调参标定，原 0.4）：共模响应更快，
+    /// 配合 slope=6 更有效压降返送。代价：增益更高 → 临界点振荡/超调风险略增。
     pub kp: f64,
     /// 差模 P 积分增益
     pub k_diff: f64,
@@ -140,14 +151,14 @@ impl Default for TaiStorageConfig {
     fn default() -> Self {
         Self {
             control_period_s: 60,
-            p_abs_trig: 10.0,
+            p_abs_trig: 2.0, // 2026-08-31 S1 激进调参标定（原 10.0）：更强返送吸收
             p_dis_trig: 30.0,
             s1_exit: 4.0,
-            p_tgt_s1: 2.0,
+            p_tgt_s1: 2.0, // 保持 +2 设计裕度（p_tgt_s1=0 在回放中效果更差且有临界点振荡风险）
             p_tgt_s3: 5.0,
             p_cap: 60.0,
-            slope: 5.0,
-            kp: 0.4,
+            slope: 6.0, // 2026-08-31 S1 激进调参标定（原 5.0；8.0 使 arbitrate 重归一过限 0.9A，弃）
+            kp: 0.6,    // 2026-08-31 S1 激进调参标定（原 0.4）
             k_diff: 0.4,
             k_q: 0.4,
             s_q_sign: 1.0,

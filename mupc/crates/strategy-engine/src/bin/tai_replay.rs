@@ -7,7 +7,7 @@
 //! 在测量环内）。回放以「基线 − 储能当前输出（上一周期指令）」作为表计
 //! 测量送入控制器，控制器下一周期输出经反馈后再影响测量，形成真实闭环。
 //!
-//! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1]
+//! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1] [p_abs_trig] [p_tgt_s1] [kp] [slope]
 
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDateTime;
@@ -75,6 +75,7 @@ fn main() {
 
     let mut cfg = TaiStorageConfig::default();
     // 可选参数覆盖：args[3]=soc_cap_day，args[4]=s4_limit_margin_kw，args[5]=s3_margin(0|1)
+    // 可选 S1 激进调参覆盖：args[6]=p_abs_trig，args[7]=p_tgt_s1，args[8]=kp，args[9]=slope
     if let Some(v) = args.get(3) {
         cfg.soc_cap_day = v.parse().unwrap_or(cfg.soc_cap_day);
     }
@@ -83,6 +84,18 @@ fn main() {
     }
     if let Some(v) = args.get(5) {
         cfg.s3_margin_limit = v == "1";
+    }
+    if let Some(v) = args.get(6) {
+        cfg.p_abs_trig = v.parse().unwrap_or(cfg.p_abs_trig);
+    }
+    if let Some(v) = args.get(7) {
+        cfg.p_tgt_s1 = v.parse().unwrap_or(cfg.p_tgt_s1);
+    }
+    if let Some(v) = args.get(8) {
+        cfg.kp = v.parse().unwrap_or(cfg.kp);
+    }
+    if let Some(v) = args.get(9) {
+        cfg.slope = v.parse().unwrap_or(cfg.slope);
     }
     let strategy = TaiStorageStrategy::new(cfg.clone());
 
