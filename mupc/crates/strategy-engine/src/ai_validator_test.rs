@@ -101,7 +101,7 @@ fn test_validator_without_model() {
 #[test]
 fn test_validator_with_model() {
     let model = Box::new(MockAiModel);
-    let mut validator = AiCommandValidatorImpl::with_model(model);
+    let validator = AiCommandValidatorImpl::with_model(model);
     // P2-12: 需要注入遥测数据，否则会降级通过
     validator.update_data(make_test_data(85.0, 50.0, 30.0, 0.0));
 

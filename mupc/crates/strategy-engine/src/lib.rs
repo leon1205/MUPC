@@ -6,7 +6,6 @@
 pub mod ai_validator;
 pub mod config;
 pub mod errors;
-pub mod south_command_sender;
 pub mod strategies;
 pub mod tai_storage;
 
@@ -17,10 +16,6 @@ pub use ai_integration::{AiEngineStatusInfo, AiIntegrator, ModeInfo};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput, ModelOutput};
 pub use config::TaiStorageConfig;
 pub use errors::StrategyError;
-pub use south_command_sender::{
-    get_dispatcher, set_dispatcher, LoadSheddingCommand, MockSouthCommandSender, PvLimitCommand,
-    SouthCommandDispatcher, SouthCommandSender, SouthCommandType, SouthSendResult,
-};
 pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
     ValidationResult,
@@ -32,7 +27,5 @@ pub use mupc_ai_engine::{ModelManager, ModelStatus};
 
 #[cfg(test)]
 mod ai_validator_test;
-#[cfg(test)]
-mod south_command_sender_test;
 #[cfg(test)]
 mod tai_storage_test;

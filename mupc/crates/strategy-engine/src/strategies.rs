@@ -66,6 +66,9 @@ pub trait AiCommandValidator: Send + Sync {
 
     /// 获取校验器名称
     fn name(&self) -> &str;
+
+    /// 注入最新遥测数据（供基于模型的校验器覆盖；默认空实现）
+    fn update_data(&self, _data: DataPackage) {}
 }
 
 /// 校验结果

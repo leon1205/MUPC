@@ -98,7 +98,18 @@ AiCommandValidator (可插拔 AI 模型)
 
 ### 1.6 性能与可靠性
 
-> 非功能性需求详见 [PRD §10](../specs/modules/04-MUPC-策略引擎-PRD.md)。本条记录设计层面的关键实现约束：策略决策延迟 < 100ms、单实例内存 < 10MB、模式切换 < 50ms。
+> 非功能性需求详见 [PRD §10](../specs/modules/04-MUPC-策略引擎-PRD.md)。本条记录设计层面的关键实现约束与**可验收量化标准**：
+
+| 指标 | 量化标准 | 验证方法 | 当前实现评估 |
+|------|----------|----------|----------|
+| 策略决策延迟 | < 100ms（收到数据 → 输出指令） | 基准测试：`dispatch_ai_decision` 单次调用耗时 | ✅ 1s 决策循环 + 台区储能 60s 节流，单次控制 <1ms |
+| 单实例内存 | < 10MB/策略实例 | `cargo bench` / 运行时 `mallinfo` | ✅ 纯计算无大对象，滑动窗 ≤5 点 |
+| 并发评估 | 兜底策略与 AI 校验独立运行、互不阻塞 | 审查调用链（dispatch 内异步、无长阻塞） | ✅ dispatch_ai_decision 异步，best-effort 下发 |
+| AI 失效检测 | < 1 个心跳周期（1s） | 心跳/状态码超时测试 | ⚠️ 依赖 AI 引擎心跳，策略侧 1s 轮询检测 |
+| 模式切换时间 | < 50ms | `switch_mode` 基准 | ⚠️ 未单独基准，需补充 |
+| 无单点故障 | 任一策略故障不影响其他 | 故障注入测试 | ✅ 兜底 best-effort，失败仅告警 |
+
+> **注**：`策略决策延迟`/`内存`/`模式切换时间` 三条为 PRD §10.1/§10.2 硬指标，验收时须以基准测试/运行时采样确认达标；其余为设计约束。
 
 ---
 
@@ -649,9 +660,8 @@ pub trait FallbackStrategy: Send + Sync {
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID（4-台区储能治理）
     pub cmd_type: CommandType,                // 命令类型
-    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，AI输出或本地策略设置
-    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)，AI输出或本地策略设置
-    pub q_batt_set: Option<f64>,             // 无功由实时控制模块闭环调节
+    pub p_batt_set: Option<f64>,             // 电池有功设定 (kW)，AI 指令校验与台区储能共模输出共用
+    #[deprecated] pub q_batt_set: Option<f64>, // 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数 [预留]
     pub start_stop: Option<bool>,            // 启停命令
     pub priority: u8,                        // 优先级（0-3）

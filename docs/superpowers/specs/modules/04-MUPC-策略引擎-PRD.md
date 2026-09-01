@@ -630,8 +630,7 @@ strategy-engine
 pub struct ControlCommand {
     pub cmd_id: u16,                          // 命令 ID
     pub cmd_type: CommandType,                // 命令类型
-    pub p_ref: Option<f64>,                  // 有功基准点 (kW)，双参数模式
-    pub k_droop: Option<f64>,                // 电压-有功下垂系数 (kW/V)
+    pub p_batt_set: Option<f64>,             // 电池有功设定 (kW)，AI 指令校验与台区储能共模输出共用
     #[deprecated] pub q_batt_set: Option<f64>, // 无功由实时控制模块闭环调节
     pub phase_compensation: Option<[f64; 3]>, // 分相补偿系数
     pub start_stop: Option<bool>,            // 启停命令
@@ -639,6 +638,8 @@ pub struct ControlCommand {
     pub phase_p_set: Option<[f64; 3]>,       // 台区储能分相有功设定 (kW)，仅由台区储能治理策略设置
     pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr)，仅由台区储能治理策略设置
 }
+
+> **说明**：AI 决策动作（`p_ref`/`k_droop`）经核间 `DualParamCommand` 下发，不写入 `ControlCommand`；`ControlCommand.p_batt_set` 供 AI 指令校验（AiCommandValidator）与台区储能策略共模输出使用。
 
 pub enum CommandType {
     SwitchControl,      // 开关控制

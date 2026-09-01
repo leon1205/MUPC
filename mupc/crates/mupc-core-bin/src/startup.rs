@@ -354,6 +354,13 @@ pub async fn initialize_all(
     // 本地策略优先模式（YAML 配置：ai_engine.local_priority；Web API 可运行时切换）
     ai_integrator.set_local_priority(config.ai_engine.local_priority).await;
 
+    // v2.23: 注入 AI 指令安全校验器（安全闸门，dispatch 前校验 AI 指令，不通过降级本地兜底）
+    ai_integrator
+        .set_validator(Arc::new(
+            mupc_strategy_engine::AiCommandValidatorImpl::new(),
+        ))
+        .await;
+
     ai_integrator.set_model_manager(ai_engine.clone()).await;
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);

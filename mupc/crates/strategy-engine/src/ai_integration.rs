@@ -3,7 +3,7 @@
 //! Phase 3C: 将 AI 优化引擎与策略引擎集成。
 //! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
 
-use crate::strategies::FallbackStrategy;
+use crate::strategies::{AiCommandValidator, CommandType, ControlCommand, FallbackStrategy};
 use crate::tai_storage::TaiStorageStrategy;
 use mupc_ai_engine::{
     AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource,
@@ -35,6 +35,8 @@ pub struct AiIntegrator {
     /// 本地策略优先模式（配置或 Web API 可切换）：AI 旁路运行（仍决策作参考，不下发），
     /// 控制以下发本地策略（台区储能治理）为准
     local_priority: RwLock<bool>,
+    /// AI 指令安全校验器（安全闸门）：dispatch 前校验 AI 指令，不通过降级本地兜底（PRD §1.2/§6）
+    validator: RwLock<Option<Arc<dyn AiCommandValidator>>>,
 }
 
 impl AiIntegrator {
@@ -49,6 +51,7 @@ impl AiIntegrator {
             latest_data: Arc::new(RwLock::new(None)),
             tai_storage: None,
             local_priority: RwLock::new(false),
+            validator: RwLock::new(None),
         }
     }
 
@@ -97,9 +100,17 @@ impl AiIntegrator {
         *self.fallback_active.read().await
     }
 
-    /// 设置最新遥测数据（南向采集循环调用，供兜底策略 evaluate）
+    /// 设置最新遥测数据（南向采集循环调用，供兜底策略 evaluate 与 AI 指令校验器）
     pub async fn set_latest_data(&self, data: DataPackage) {
+        if let Some(v) = self.validator.read().await.as_ref() {
+            v.update_data(data.clone());
+        }
         *self.latest_data.write().await = Some(data);
+    }
+
+    /// 注入 AI 指令安全校验器（安全闸门）
+    pub async fn set_validator(&self, validator: Arc<dyn AiCommandValidator>) {
+        *self.validator.write().await = Some(validator);
     }
 
     /// 运行本地兜底策略（AI 失效时）：台区储能治理（分相 P/Q 经核间下发）
@@ -312,6 +323,29 @@ impl AiIntegrator {
         // 正常决策成功，复位降级状态（此前异常触发的 fallback_active 不会自动复位）
         self.set_fallback_active(false).await;
 
+        // 安全校验：AiCommandValidator 安全闸门（PRD §1.2/§6、Design §3.1）——AI 指令与
+        // 模型推荐偏差过大且低置信度时拒绝，降级本地兜底（Design §3.6 降级流程）
+        if let Some(v) = self.validator.read().await.as_ref() {
+            let cmd = ControlCommand {
+                cmd_id: 0,
+                cmd_type: CommandType::PowerRegulation,
+                p_batt_set: Some(action.p_ref),
+                q_batt_set: None,
+                phase_compensation: None,
+                start_stop: None,
+                priority: 0,
+                phase_p_set: None,
+                phase_q_set: None,
+            };
+            let result = v.validate(&cmd).await;
+            if !result.valid {
+                tracing::warn!("AI 指令校验不通过，降级本地兜底: {}", result.message);
+                self.set_fallback_active(true).await;
+                self.run_fallback_strategies().await?;
+                return Ok(());
+            }
+        }
+
         // v2.7: 发送双参数到实时控制模块
         if let Some(ref client) = self.intercore_client {
             // strategy_mode：策略模式（基础/智能/兜底），此处为正常 AI 决策 = 智能
@@ -429,6 +463,69 @@ mod tests {
         // 注入后再次调用兜底流程不报错（无遥测数据时跳过）
         let result = tokio_test::block_on(integrator.run_fallback_strategies());
         assert!(result.is_ok(), "无遥测数据时兜底应正常返回 Ok");
+    }
+
+    #[tokio::test]
+    async fn test_validator_data_injection() {
+        // v2.23：校验器注入 + set_latest_data 联动（遥测注入到 validator，供基于模型的校验）
+        use async_trait::async_trait;
+        use crate::strategies::{AiCommandValidator, ControlCommand, ValidationResult};
+        use mupc_data_processing::telemetry::{
+            BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
+        };
+
+        struct CountingValidator {
+            data_updates: std::sync::atomic::AtomicU64,
+        }
+        #[async_trait]
+        impl AiCommandValidator for CountingValidator {
+            async fn validate(&self, _cmd: &ControlCommand) -> ValidationResult {
+                ValidationResult::valid()
+            }
+            fn name(&self) -> &str {
+                "counting"
+            }
+            fn update_data(&self, _data: DataPackage) {
+                self.data_updates
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        let pkg = DataPackage {
+            timestamp: 0,
+            electrical: ElectricalData {
+                voltage: None,
+                current: None,
+                active_power: Some(0.0),
+                reactive_power: None,
+                cos_phi: None,
+                frequency: None,
+                phase: None,
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: Some(50.0),
+                soh: None,
+                temperature: None,
+            },
+        };
+
+        let integrator = AiIntegrator::new();
+        let validator = Arc::new(CountingValidator {
+            data_updates: std::sync::atomic::AtomicU64::new(0),
+        });
+        integrator.set_validator(validator.clone()).await;
+        integrator.set_latest_data(pkg).await;
+        assert_eq!(
+            validator.data_updates.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "set_latest_data 应将遥测注入校验器"
+        );
     }
 
     impl AiIntegrator {

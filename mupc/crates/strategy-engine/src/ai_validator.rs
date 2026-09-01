@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use chrono;
 use mupc_data_processing::telemetry::DataPackage;
+use std::sync::RwLock;
 
 use super::strategies::{AiCommandValidator, CommandType, ControlCommand, ValidationResult};
 
@@ -63,56 +64,71 @@ impl AiModel for MockAiModel {
 /// AI 命令校验器实现
 pub struct AiCommandValidatorImpl {
     model: Option<Box<dyn AiModel>>,
-    /// 最新遥测数据（来自南向设备）
-    latest_data: Option<DataPackage>,
+    /// 最新遥测数据（来自南向设备，RwLock 支持 &self 注入）
+    latest_data: RwLock<Option<DataPackage>>,
     /// 数据接收时间戳
-    data_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    data_timestamp: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 impl AiCommandValidatorImpl {
     pub fn new() -> Self {
         Self {
             model: None,
-            latest_data: None,
-            data_timestamp: None,
+            latest_data: RwLock::new(None),
+            data_timestamp: RwLock::new(None),
         }
     }
 
     pub fn with_model(model: Box<dyn AiModel>) -> Self {
         Self {
             model: Some(model),
-            latest_data: None,
-            data_timestamp: None,
+            latest_data: RwLock::new(None),
+            data_timestamp: RwLock::new(None),
         }
     }
 
-    /// 更新遥测数据
-    pub fn update_data(&mut self, data: DataPackage) {
-        self.data_timestamp = Some(chrono::Utc::now());
-        self.latest_data = Some(data);
+    /// 更新遥测数据（trait 接口，&self 注入）
+    pub fn update_data(&self, data: DataPackage) {
+        if let Ok(mut ts) = self.data_timestamp.write() {
+            *ts = Some(chrono::Utc::now());
+        }
+        if let Ok(mut ld) = self.latest_data.write() {
+            *ld = Some(data);
+        }
     }
 
     /// 检查遥测数据是否过期（超过 5 秒）
     pub fn is_data_stale(&self) -> bool {
-        match self.data_timestamp {
-            Some(ts) => {
-                let age = chrono::Utc::now() - ts;
-                age > chrono::Duration::seconds(5)
-            }
-            None => true,
+        match self.data_timestamp.read() {
+            Ok(ts) => match *ts {
+                Some(ts) => {
+                    let age = chrono::Utc::now() - ts;
+                    age > chrono::Duration::seconds(5)
+                }
+                None => true,
+            },
+            Err(_) => true,
         }
     }
 
     /// 从遥测数据构建 AI 模型输入
     fn build_model_input(&self) -> ModelInput {
-        match &self.latest_data {
-            Some(data) => ModelInput {
-                battery_soc: data.battery.soc.unwrap_or(50.0) / 100.0,
-                pv_power: data.device_status.pv_power.unwrap_or(0.0),
-                load_power: data.device_status.load_power.unwrap_or(0.0),
-                grid_power: data.electrical.active_power.unwrap_or(0.0),
+        match self.latest_data.read() {
+            Ok(guard) => match guard.as_ref() {
+                Some(data) => ModelInput {
+                    battery_soc: data.battery.soc.unwrap_or(50.0) / 100.0,
+                    pv_power: data.device_status.pv_power.unwrap_or(0.0),
+                    load_power: data.device_status.load_power.unwrap_or(0.0),
+                    grid_power: data.electrical.active_power.unwrap_or(0.0),
+                },
+                None => ModelInput {
+                    battery_soc: 0.5,
+                    pv_power: 0.0,
+                    load_power: 0.0,
+                    grid_power: 0.0,
+                },
             },
-            None => ModelInput {
+            Err(_) => ModelInput {
                 battery_soc: 0.5,
                 pv_power: 0.0,
                 load_power: 0.0,
@@ -124,7 +140,12 @@ impl AiCommandValidatorImpl {
     /// 同步校验（用于测试）
     pub fn validate_sync(&self, cmd: &ControlCommand) -> ValidationResult {
         // 无遥测数据时降级通过（保守安全策略）
-        if self.latest_data.is_none() {
+        let has_data = self
+            .latest_data
+            .read()
+            .map(|d| d.is_some())
+            .unwrap_or(false);
+        if !has_data {
             return ValidationResult::degraded_pass("无遥测数据，降级通过");
         }
 
@@ -186,6 +207,10 @@ impl AiCommandValidator for AiCommandValidatorImpl {
 
     fn name(&self) -> &str {
         "AiCommandValidatorImpl"
+    }
+
+    fn update_data(&self, data: DataPackage) {
+        AiCommandValidatorImpl::update_data(self, data)
     }
 }
 
@@ -282,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_validator_with_data_and_model() {
-        let mut validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
+        let validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
         // 注入遥测数据
         validator.update_data(make_test_data(85.0, 50.0, 30.0, 0.0));
 
@@ -306,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_validator_switch_command_passthrough() {
-        let mut validator = AiCommandValidatorImpl::new();
+        let validator = AiCommandValidatorImpl::new();
         validator.update_data(make_test_data(50.0, 50.0, 30.0, 0.0));
 
         let cmd = ControlCommand {
@@ -332,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_is_data_stale_fresh_data() {
-        let mut validator = AiCommandValidatorImpl::new();
+        let validator = AiCommandValidatorImpl::new();
         validator.update_data(make_test_data(50.0, 30.0, 20.0, 0.0));
         // 刚更新的数据不应过期
         assert!(!validator.is_data_stale());
@@ -340,10 +365,11 @@ mod tests {
 
     #[test]
     fn test_degraded_pass_on_stale_data() {
-        let mut validator = AiCommandValidatorImpl::new();
+        let validator = AiCommandValidatorImpl::new();
         // 设置一个"过期"时间戳（模拟 >5s 前）
-        validator.data_timestamp = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
-        validator.latest_data = Some(make_test_data(50.0, 30.0, 20.0, 0.0));
+        *validator.data_timestamp.write().unwrap() =
+            Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+        *validator.latest_data.write().unwrap() = Some(make_test_data(50.0, 30.0, 20.0, 0.0));
 
         let cmd = ControlCommand {
             cmd_id: 1,
