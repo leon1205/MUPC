@@ -63,16 +63,10 @@ pub struct TaiStorageConfig {
     /// 稳态下 S3 目标即 p_st = P_表 - p_tgt_s3，故该钳位不影响目标跟踪，仅拦截积分过冲。
     /// 默认 true（2026-08-31 S3 专项回放：两日控制后返送均降至基线以下且 SOC 日终仍达 10% 地板）
     pub s3_margin_limit: bool,
-    /// S1 动态斜坡开关（返送陡增加速充电 / 受电快升快速退出）
-    pub s1_boost_enabled: bool,
-    /// S1 斜坡放大倍数（返送陡增时 slope×factor）
-    pub s1_boost_factor: f64,
-    /// S1 返送陡增变化率阈值 (kW/周期)：Δp < -thr 视为返送陡然变大
-    pub s1_boost_rate_thr: f64,
-    /// S1 受电快速上升变化率阈值 (kW/周期)：Δp > +thr 且充电未变时快速退出
-    pub s1_cut_rate_thr: f64,
-    /// S1 净进口接近 0 判定 (kW)：p > -near_zero 视为返送已吸收到接近 0，停止加速充电
-    pub s1_near_zero_thr: f64,
+    /// S1 前馈大步斜坡步长 (kW/周期)，默认 = p_cap（一周期到位）
+    /// v2.22：S1 共模改前馈吸收（替代 v2.20 动态斜坡 boost 与 v2.21 Δp_base 判别），
+    /// 大步斜坡向目标 move_toward，默认 p_cap=60 保证一周期从任意值到位。
+    pub s1_ff_step_kw: f64,
     /// 滑动滤波窗口（点数）
     pub window_size: u32,
     /// 电池容量 (kWh)
@@ -105,11 +99,7 @@ impl Default for TaiStorageConfig {
             t_clear_end_secs: 23.5 * 3600.0,   // 23:30
             s4_limit_margin_kw: 0.0,
             s3_margin_limit: true,
-            s1_boost_enabled: true,
-            s1_boost_factor: 3.0,
-            s1_boost_rate_thr: 15.0,
-            s1_cut_rate_thr: 15.0,
-            s1_near_zero_thr: 5.0,
+            s1_ff_step_kw: 60.0, // v2.22：S1 前馈大步斜坡，默认 = p_cap（一周期到位）
             window_size: 5,
             battery_capacity_kwh: 120.0,
         }

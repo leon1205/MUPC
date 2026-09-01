@@ -119,6 +119,11 @@ fn main() {
     let mut soc_min = f64::MAX;
     let mut soc_max = f64::MIN;
     let mut reverse_ctrl_energy = 0.0; // 有储能返送能量 kwh
+    let mut reverse_base_energy = 0.0; // 基线（无储能）返送能量 kwh
+    let mut max_charge_p = 0.0f64; // 储能最大充电功率 (kW)
+    let mut max_discharge_p = 0.0f64; // 储能最大放电功率 (kW)
+    let mut charge_secs = 0.0; // 储能充电时长 (s)
+    let mut discharge_secs = 0.0; // 储能放电时长 (s)
     let mut total_secs = 0.0; // 回放总时长（秒，各 KPI 占比的分母）
     let mut prev_ts: i64 = 0;
     // 削峰诊断（评估 net 反馈下 S3 clamp 是否存在欠输送）：基线处于高峰
@@ -155,6 +160,7 @@ fn main() {
         if p_total < 0.0 {
             reverse_base_secs += dt;
             reverse_base_peak = reverse_base_peak.max(-p_total);
+            reverse_base_energy += -p_total * dt / 3600.0;
         }
         if unbal_base < 20.0 {
             unbal_base_ok_secs += dt;
@@ -249,8 +255,12 @@ fn main() {
         }
         if p_st > 0.0 {
             discharge_energy += p_st * dt / 3600.0;
-        } else {
+            discharge_secs += dt;
+            max_discharge_p = max_discharge_p.max(p_st);
+        } else if p_st < 0.0 {
             charge_energy += -p_st * dt / 3600.0;
+            charge_secs += dt;
+            max_charge_p = max_charge_p.max(-p_st);
         }
         if soc <= 0.1001 {
             floor_secs += dt;
@@ -279,37 +289,81 @@ fn main() {
 
     let pct = |x: f64| x / total_secs * 100.0;
     println!("=== 台区储能治理策略回放报告 ===");
-    println!("数据源: {}", path);
-    println!("样本数: {}  控制周期: {}", n_samples, n_control);
+    println!("数据源: {}  样本数: {}  控制周期: {}", path, n_samples, n_control);
+    println!();
+    println!("── 返送时长 ──");
     println!(
-        "返送时长占比: 基线 {:.1}% → 控制后 {:.1}%",
+        "基线: {:.1}% ({:.0}min) → 控制后: {:.1}% ({:.0}min)",
         pct(reverse_base_secs),
-        pct(reverse_ctrl_secs)
+        reverse_base_secs / 60.0,
+        pct(reverse_ctrl_secs),
+        reverse_ctrl_secs / 60.0
     );
+    println!();
+    println!("── 返送幅值 ──");
+    let base_avg = if reverse_base_secs > 0.0 {
+        reverse_base_energy * 3600.0 / reverse_base_secs
+    } else {
+        0.0
+    };
+    let ctrl_avg = if reverse_ctrl_secs > 0.0 {
+        reverse_ctrl_energy * 3600.0 / reverse_ctrl_secs
+    } else {
+        0.0
+    };
     println!(
-        "返送峰值(kW): 基线 {:.1} → 控制后 {:.1}",
+        "峰值(kW):  基线 {:.1} → 控制后 {:.1}",
         reverse_base_peak, reverse_ctrl_peak
     );
     println!(
-        "不平衡<20% 达标占比: 基线 {:.1}% → 控制后 {:.1}%",
-        pct(unbal_base_ok_secs),
-        pct(unbal_ctrl_ok_secs)
+        "平均(kW):  基线 {:.1} → 控制后 {:.1}",
+        base_avg, ctrl_avg
     );
-    println!("基线分相 PF>0.95 占比: {:.1}%", pct(pf_good_secs));
+    println!();
+    println!("── 返送总量 ──");
     println!(
-        "SOC 范围: {:.1}% ~ {:.1}%  日终: {:.1}%",
+        "返送能量(kWh): 基线 {:.1} → 控制后 {:.1}（储能压降 {:.1} kWh）",
+        reverse_base_energy,
+        reverse_ctrl_energy,
+        (reverse_base_energy - reverse_ctrl_energy).max(0.0)
+    );
+    println!();
+    println!("── 储能运行记录 ──");
+    println!(
+        "充电: {:.1} kWh / {:.1}% 时长，最大 {:.1} kW",
+        charge_energy,
+        pct(charge_secs),
+        max_charge_p
+    );
+    println!(
+        "放电: {:.1} kWh / {:.1}% 时长，最大 {:.1} kW",
+        discharge_energy,
+        pct(discharge_secs),
+        max_discharge_p
+    );
+    println!(
+        "净充放: {:.1} kWh   SOC: {:.1}% ~ {:.1}%  日终: {:.1}%",
+        charge_energy - discharge_energy,
         soc_min * 100.0,
         soc_max * 100.0,
         soc * 100.0
     );
-    println!("控制后返送能量: {:.1} kWh", reverse_ctrl_energy);
+    println!();
+    println!("── 其他 ──");
+    println!(
+        "不平衡<20% 达标占比: 基线 {:.1}% → 控制后 {:.1}%（回放以基线近似）",
+        pct(unbal_base_ok_secs),
+        pct(unbal_ctrl_ok_secs)
+    );
+    println!(
+        "基线分相 PF>0.95 占比: {:.1}%（回放未建模 Q 补偿）",
+        pct(pf_good_secs)
+    );
     if peak_net_n > 0 {
         println!(
-            "削峰诊断(基线>{}kW 时段): 净进口均值 {:.1} kW / 放电 {:.1} kWh / 充电 {:.1} kWh / SOC地板占比 {:.1}%",
+            "削峰诊断(基线>{}kW 时段): 净进口均值 {:.1} kW / SOC地板占比 {:.1}%",
             cfg.p_dis_trig,
             peak_net_sum / peak_net_n as f64,
-            discharge_energy,
-            charge_energy,
             pct(floor_secs)
         );
     }

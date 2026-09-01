@@ -68,10 +68,6 @@ pub struct TaiControllerState {
     pub meter_buf: VecDeque<MeterData>,
     /// 上次控制周期时间戳（节流用）
     pub last_control_ts: u64,
-    /// 上一周期原始净功 meter.p（动态斜坡差分基准，滤波前）
-    pub prev_p: f64,
-    /// 上周期共模输出 p_st（S1 ②分支 Δp_out 判别基准，v2.21）
-    pub prev_p_st: f64,
 }
 
 impl Default for TaiControllerState {
@@ -86,8 +82,6 @@ impl Default for TaiControllerState {
             q_last: [0.0; 3],
             meter_buf: VecDeque::new(),
             last_control_ts: 0,
-            prev_p: 0.0,
-            prev_p_st: 0.0,
         }
     }
 }
@@ -262,12 +256,19 @@ pub fn control(
         p_force = p_force.min(p.max(0.0)); // 电压越限保护
     }
 
+    // v2.22 前馈：重构外部基线返送 = 当前净功 meter.p + 上周期储能输出 state.p_st
+    // （net 闭环下净功含储能自身效应）。S1 进出与目标均基于该基线——前馈下净功率被
+    // 拉到目标进口 +2，不再反映返送是否存在，故状态机改用基线判断。
+    let p_base_est = meter.p + state.p_st;
+
     state.st = if secs >= config.t_clear_start_secs && soc > 0.10 {
         TaiState::S4Clear
     } else {
         match state.st {
             TaiState::S1PvAbsorb => {
-                if p < config.s1_exit && soc < soc_cap {
+                // 保持 S1：基线返送仍存在（< s1_exit），或储能尚未回归 0（基线骤转受电后
+                // 需大步斜坡回 0 再退出，避免 S2 慢斜坡期间储能从电网取电）
+                if (p_base_est < config.s1_exit || state.p_st < -1.0) && soc < soc_cap {
                     TaiState::S1PvAbsorb
                 } else {
                     TaiState::S2Flat
@@ -281,7 +282,8 @@ pub fn control(
                 }
             }
             _ => {
-                if p < -config.p_abs_trig && soc < soc_cap - config.soc_hys {
+                // 基线返送超阈值 → 进入 S1（前馈下净功率恒 ≈+2，不能用净功判断）
+                if p_base_est < -config.p_abs_trig && soc < soc_cap - config.soc_hys {
                     TaiState::S1PvAbsorb
                 } else if p > config.p_dis_trig {
                     TaiState::S3Peak
@@ -310,38 +312,17 @@ pub fn control(
         }
     }
 
-    // 5. 共模 P（增量式积分 + 斜坡限速）
-    // 动态斜坡差分基准：每周期先算净功率变化率并刷新 prev_p（供 S1 动态斜坡）。
-    // 差分用【原始净功 meter.p】（滑动窗滤波前）：5 点窗会把返送陡增 ~5 倍阻尼
-    // （实测 7-04 滤波后 |Δp| 峰值仅 ≈10 kW/周期 < 15 阈值，S1 动态斜坡永不触发，
-    // 回放 KPI 与未加 boost 完全一致）；改用原始净功后 39 kW/min 陡增可即时测到
-    // （Δp ≈ -39 < -15），boost 才真正生效（2026-08-31 回放验证：7-04 返送峰值
-    // 48.6→47.9kW、能量 22.9→22.2kWh，时长 9.4→9.6%）。
-    let dp = meter.p - state.prev_p; // 变化率（负=返送增大，正=受电上升）
-    state.prev_p = meter.p;
-    // v2.21：重构外部基线变化率 Δp_base，区分净返送收窄是储能自激还是外部变化。
-    // 净功率变化 Δp = Δp_base − Δp_out（外部基线变化 − 储能输出变化），故
-    // Δp_base = Δp + Δp_out。储能自激（boost 充电加深）→ Δp_out 负向大、Δp_base≈0；
-    // 外部返送消失 → Δp_base 正向大。② 仅对外部突变快速退出，消除自激极限环。
-    let dp_out = state.p_st - state.prev_p_st; // 储能输出变化（p_st 更新前为上周期值）
-    state.prev_p_st = state.p_st;              // 记录本周期输出（供下周期差分）
-    let dp_base = dp + dp_out;                 // 重构外部基线变化
+    // 5. 共模 P
+    // S1 前馈吸收（v2.22）：net 闭环下净功含储能自身效应，重构外部基线
+    // P_基线 = 当前净功 meter.p + 上周期输出 state.p_st，直接按基线返送充电，
+    // 目标 P_st = P_基线 − P_目标进口，大步斜坡 s1_ff_step_kw 一周期到位。
+    // 替代 v2.20 动态斜坡 boost 与 v2.21 Δp_base 判别（反馈积分滞后一拍、自激极限环一并消除）。
     state.p_st = match state.st {
         TaiState::S1PvAbsorb => {
-            let mut inc = (config.kp * (p - config.p_tgt_s1)).clamp(-config.slope, config.slope);
-            if config.s1_boost_enabled {
-                // ① 返送陡然变大 → 加大充电斜坡（快速吸收），直至净进口接近 0
-                if dp < -config.s1_boost_rate_thr && p < -config.s1_near_zero_thr {
-                    inc = (config.kp * (p - config.p_tgt_s1))
-                        .clamp(-config.slope * config.s1_boost_factor, 0.0);
-                }
-                // ② 外部基线返送快速消失（Δp_base 大）→ 快速退出充电；
-                //    储能自激造成的收窄（Δp_base 小）不响应，走正常积分收敛（防极限环）
-                else if dp_base > config.s1_cut_rate_thr {
-                    inc = config.slope * config.s1_boost_factor;
-                }
-            }
-            (state.p_st + inc).clamp(-config.p_cap, 0.0)
+            // 前馈目标 = 基线返送 − 目标进口。clamp 上限 0：基线受电时停充；
+            // 下限 −p_cap。大步斜坡一周期到位，返送减小仍返送时 target 自动降载不停充。
+            let p_st_target = (p_base_est - config.p_tgt_s1).clamp(-config.p_cap, 0.0);
+            move_toward(state.p_st, p_st_target, config.s1_ff_step_kw)
         }
         TaiState::S2Flat => move_toward(state.p_st, 0.0, config.slope),
         TaiState::S3Peak => {

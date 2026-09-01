@@ -48,13 +48,12 @@ mod tai_storage_test {
     }
 
     #[test]
-    fn test_s1_boost_on_reverse_surge() {
-        let cfg = TaiStorageConfig::default(); // boost enabled, slope=6, factor=3
+    fn test_s1_feedforward_absorbs_to_target_import() {
+        // v2.22 前馈：返送骤增，一周期吸收到目标进口 +2（替代积分爬坡滞后）
+        let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();
         st.st = TaiState::S1PvAbsorb;
-        st.p_st = -6.0; // 已在充电
-        st.prev_p = -5.0;
-        // 返送陡增：p 从 -5 突降到 -50（Δ=-45 < -15），仍返送（p < -5）
+        // 净 −50（基线返送，储能尚未输出）
         let m = meter(
             -50.0,
             [-20.0, -15.0, -15.0],
@@ -63,85 +62,117 @@ mod tai_storage_test {
             [0.99; 3],
         );
         let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
-        // 加速充电：单周期减幅应 > 普通 slope(6)，接近 slope*factor(18)
-        let drop = -6.0 - st.p_st;
+        assert_eq!(st.st, TaiState::S1PvAbsorb);
+        // p_base_est = -50 + 0 = -50，target = -50 - 2 = -52，一周期到位
         assert!(
-            drop > cfg.slope + 1.0,
-            "返送陡增应加速充电，单周期降幅 {}（普通仅 {}）",
-            drop,
-            cfg.slope
+            (st.p_st + 52.0).abs() < 1.0,
+            "前馈应一周期吸收到基线-目标: {}",
+            st.p_st
         );
+        // 净功率 = 基线(-50) - 储能输出(-52) = +2 = 目标进口
+        let net = -50.0 - st.p_st;
         assert!(
-            drop <= cfg.slope * cfg.s1_boost_factor + 1e-9,
-            "不超过放大斜坡: {}",
-            drop
+            (net - cfg.p_tgt_s1).abs() < 1.0,
+            "净功率应到 +2: {}",
+            net
         );
     }
 
     #[test]
-    fn test_s1_rapid_exit_on_import_rise() {
+    fn test_s1_feedforward_reduces_charge_on_reverse_decline() {
+        // v2.22：返送减小仍返送（储能超吸收，净从电网取电超目标）→ 降载不停充，
+        // 把从电网取电压回 +2（12:01 场景；旧"停充"会让返送反弹回基线）。
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();
         st.st = TaiState::S1PvAbsorb;
-        st.p_st = -40.0; // 深度充电
-        st.prev_p = -15.0;
-        st.prev_p_st = -40.0; // v2.21：上周期同样深度充电（充电功率不变）→ 外部突变
-        // 外部受电快速上升：p 从 -15 突升到 +3（Δp=+18 > +15），仍在 S1（p < s1_exit=4）
-        let m = meter(3.0, [1.0, 1.0, 1.0], [0.0; 3], [220.0; 3], [0.99; 3]);
+        st.p_st = -60.0; // 深度充电（p_cap 上限）
+        // 基线返送降到 −53.7，储能 −60 超吸收 → 净 = +6.3（从电网取电 6.3）
+        let m = meter(
+            6.3,
+            [2.1, 2.1, 2.1],
+            [0.0; 3],
+            [220.0; 3],
+            [0.99; 3],
+        );
         let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
-        // 快速退出充电：单周期向 0 回，减幅 ≥ slope*factor
-        let rise = st.p_st - (-40.0); // 向 0 回 = 增大
+        // p_base_est = 6.3 + (-60) = -53.7 < s1_exit=4 → S1 保持
+        assert_eq!(st.st, TaiState::S1PvAbsorb, "基线仍返送，S1 应保持");
+        // target = -53.7 - 2 = -55.7：降载不停充，从电网取电压回 2
         assert!(
-            rise >= cfg.slope * cfg.s1_boost_factor * 0.9,
-            "外部突变应快速退出充电: 回幅 {}",
-            rise
+            (st.p_st + 55.7).abs() < 1.0,
+            "应降载到 -55.7 不停充: {}",
+            st.p_st
         );
-        assert!(st.p_st < 0.0, "仍在充电但应快速收敛: {}", st.p_st);
+        let net = -53.7 - st.p_st;
+        assert!(
+            (net - cfg.p_tgt_s1).abs() < 1.0,
+            "从电网取电应回到 +2: {}",
+            net
+        );
     }
 
     #[test]
-    fn test_s1_no_rapid_exit_on_self_excitation() {
-        // v2.21：储能自激判别——基线恒定返送 −50，boost 充电加深使下一周期净返送
-        // 收窄（Δp_base≈0，外部没变）→ 不应触发 ② 快速退出（否则自激极限环），
-        // 应继续充电吸收。Δp_base 判别 = Δp + Δp_out。
+    fn test_s1_feedforward_stops_on_import() {
+        // v2.22：基线骤转受电 → S1 保持并大步回 0（避免 S2 慢斜坡期间从电网取电）
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();
         st.st = TaiState::S1PvAbsorb;
-        // 周期1：净 −50（储能尚未输出），返送陡增 → boost 充电
+        st.p_st = -30.0; // 之前充电吸收返送
+        // 基线骤转受电 +20（净 = 20 - (-30) = 50）
+        let m = meter(
+            50.0,
+            [17.0, 17.0, 16.0],
+            [0.0; 3],
+            [220.0; 3],
+            [0.99; 3],
+        );
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
+        // 储能未回归（p_st=-30）→ S1 保持，大步斜坡回 0
+        assert_eq!(st.st, TaiState::S1PvAbsorb);
+        assert!(
+            st.p_st.abs() < 1.0,
+            "基线受电应大步停充回 0: {}",
+            st.p_st
+        );
+    }
+
+    #[test]
+    fn test_s1_feedforward_steady_reverse_no_oscillation() {
+        // v2.22：持续返送 → 前馈目标稳定，净功率恒 +2，无振荡（含储能自激场景：
+        // 储能加深充电使下周期净收窄，但重构基线不变 → 目标不变 → 无极限环）
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        st.st = TaiState::S1PvAbsorb;
+        // 周期1：净 −40（储能初始 0），基线返送 −40
         let m1 = meter(
-            -50.0,
-            [-20.0, -15.0, -15.0],
+            -40.0,
+            [-14.0, -13.0, -13.0],
             [0.0; 3],
             [220.0; 3],
             [0.99; 3],
         );
         let _ = control(&mut st, &cfg, &m1, 0.5, 3600 * 12);
         let p_st1 = st.p_st;
-        assert!(
-            p_st1 < -cfg.slope,
-            "周期1 返送陡增应 boost 加深充电: {}",
-            p_st1
-        );
-        // 周期2：基线仍 −50，但储能输出 p_st1 生效 → 净返送收窄为 −50 − p_st1
+        // 周期2：基线仍 −40，储能 p_st1 生效 → 净 = -40 - p_st1（接近 +2）
         let m2 = meter(
-            -50.0 - p_st1,
-            [-20.0, -15.0, -15.0],
+            -40.0 - p_st1,
+            [-14.0, -13.0, -13.0],
             [0.0; 3],
             [220.0; 3],
             [0.99; 3],
         );
         let _ = control(&mut st, &cfg, &m2, 0.5, 3600 * 12);
-        // 收窄是储能自激（Δp_base≈0），不应快速退出 → 应继续加深充电（普通斜坡）
+        // 目标不变（重构基线恒 −40）→ p_st 保持，无自激退出
         assert!(
-            st.p_st < p_st1,
-            "自激收窄不应快速退出，应继续充电: p_st {} → {}",
+            (st.p_st - p_st1).abs() < 1.0,
+            "持续返送目标稳定，p_st 不应振荡: {} → {}",
             p_st1, st.p_st
         );
-        let drop = p_st1 - st.p_st;
+        let net = -40.0 - st.p_st;
         assert!(
-            drop <= cfg.slope + 1e-9,
-            "普通收窄走正常积分（≤slope），非 boost 放大: {}",
-            drop
+            (net - cfg.p_tgt_s1).abs() < 2.0,
+            "净功率应稳定在 +2 附近: {}",
+            net
         );
     }
 
