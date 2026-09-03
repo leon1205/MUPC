@@ -139,6 +139,11 @@ AiCommandValidator (可插拔 AI 模型)
 | PCS 容量边界 | 每相/中线额定电流 190A，过载 1.1×长期（209A）/1.2×1min（228A）；总视在 125kVA |
 | 分时 SOC 上限 | 18:00 前 SOC ≤70%（可标定），之后释放至 90% |
 
+**SOC 系统约束**（全局硬约束，贯穿所有状态）：
+- **运行带**：10%~90%；接近 90%（≥88%）充电线性降额至 90% 归零，接近 10%（≤12%）放电线性降额至 10% 归零；
+- **分时上限**：18:00 前 SOC ≤70%（`soc_cap_day`），18:00 后释放至 90%（为晚峰放电留容量）；上限值用离线回放标定（扫 60/70/80%），平衡"白天消纳"与"晚间反送"；
+- **日终清空（硬约束）**：日终必须回到 10%，允许晚间反送（线损管理优先）。前提是**电网允许晚间反送**——若电网禁止，S4 无法完全执行，须与电网公司确认边界。
+
 ### 2.3 架构（融入策略引擎）
 
 ```
@@ -165,6 +170,8 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 | S2 平段 | 其他时间 | 三相平衡 + PF | 0 |
 | S3 高峰放电 | 任一时刻 `P_表 > P_dis_trig`（+30kW） | 放电供负荷 + 平衡 | 放电 |
 | S4 日终清空 | 临近日终且 SOC>10% | 强制放电到 10% | 强制放电（允许晚反送） |
+
+**S1 进出用「重构基线」判断**：S1 前馈吸收把净功率稳定拉到目标进口 +2kW，**净功率不再反映返送是否存在**。因此 S1 进出判断一律用**重构基线** `P_基线 = P_表净 + P_out[k−1]`（当前净功率 + 储能上周期输出，抵消储能自身出力效应）。S1 退出延迟到「P_基线 ≥ 退出阈值 **且** 储能已大步回 0」，防基线骤转受电时 S2 慢斜坡期间储能从电网取电。
 
 **切换规则**：
 - 触发带滞回（进入阈值 ≠ 退出阈值）；S1 退出在目标另一侧（进口 ≥+4kW 或 SOC 顶格），防"达目标即退→返送复现→重进"抖振；
@@ -215,7 +222,7 @@ Q_i = Q_i_补偿
 - **I_i 必须为带符号电流**（由分相有功 Pa 的符号或相角导出），不能用幅值——单相返送时幅值法方向相反、反向加重不平衡；
 - **Q 通道与 ΔP 通道协作**：Q 先把各相 PF 校正到 1（使 S→P），ΔP 再平衡各相净有功/电流，不重复作用；
 - **单相/两相返送（光伏随机接相）**：某相返送而总表仍净受电 → 不触发 S1，改由差模 P 拉向均值（零净能量、不耗电池）；总表净返送超阈值才叠加 S1 充电；
-- **S1 前馈吸收**：net 闭环下净功率变化混入储能自身效应，且反馈积分爬坡**滞后一拍**——返送陡坡那一拍储能跟不上，造成峰值。改为**前馈直接吸收基线返送**：重构基线 `P_表基线 = P_表净[k] + P_out[k−1]`（当前净功率 + 储能上周期输出），前馈目标 `P_st目标 = P_表基线 − P_目标进口`，clamp `[−P_cap, 0]`（基线受电时 → 0 停充），以**大步斜坡** `move_toward`（步长 `s1_ff_step_kw`，默认 = `p_cap`，一周期到位）逼近。该目标自动覆盖全部场景，无需条件分支：持续返送 → 净恒 +2 无振荡；返送减小仍返送（净超 +2 超调）→ target 自动降载、**不停充**，把从电网取电压回 +2；返送消失转受电 → clamp 0 停充；外部突变 → 大步斜坡一周期回 0。**移除 ① boost、② 快速退出分支，以及 `s1_boost_*` 配置与 `prev_p`/`prev_p_st` 状态**（被前馈/大步斜坡取代）。回放验证：7-04 峰值 47.9→32.5 kW（−32%）、返送时长 9.6%→5.6%、能量 22.2→8.5 kWh；6-27 峰值 11.0→10.4 kW、时长 4.0%→2.7%、能量 3.8→2.3 kWh；两日 SOC 日终清空至 10% 不变、受电峰值不劣化。
+- **S1 前馈吸收**：net 闭环下净功率混入储能自身效应，且反馈积分爬坡**滞后一拍**——返送陡坡那一拍储能跟不上，造成峰值。改为**前馈直接吸收基线返送**：重构基线 `P_表基线 = P_表净[k] + P_out[k−1]`（当前净功率 + 储能上周期输出），前馈目标 `P_st目标 = P_表基线 − P_目标进口`，clamp `[−P_cap, 0]`（基线受电时 → 0 停充），以**大步斜坡** `move_toward`（步长 `s1_ff_step_kw`，默认 = `p_cap`，一周期到位）逼近。该目标自动覆盖全部场景，无需条件分支：持续返送 → 净恒 +2 无振荡；返送减小仍返送（净超 +2 超调）→ target 自动降载、**不停充**，把从电网取电压回 +2；基线受电 → clamp 0 停充；基线骤转受电 → 大步斜坡一周期回 0。回放验证见 §2.12。
 - **s 符号**（Q 积分方向）：s=±1 以表计/PCS 约定为准，发散则翻转；投运前用小幅 Q 阶跃 + 分相注流核相（强制）。
 
 ### 2.6 容量仲裁（每相、每周期）
@@ -333,6 +340,109 @@ pub struct TaiStorageStrategy {
 - **控制周期节流**：`evaluate` 每周期被 `run_fallback_strategies` 调用；内部按 `timestamp` 判断距上次控制 ≥60s 才执行 `control()`，未到期则返回上次指令（避免 1s 决策循环与 60s 控制周期不匹配）；
 - 首次周期初值：`st=S2, p_st=0, q_pcs=d_p=0, q_active=d_p_active=false, q_last=0, meter_buf=空`。
 
+#### 2.9.1 单周期控制主流程伪代码（实现基准）
+
+**接口**：`control(meter_data, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last, meter_buf) → (P_A,Q_A, P_B,Q_B, P_C,Q_C, 更新后状态量)`（纯函数，见 §2.9）
+输入含三相总/分相 P、Q（含符号）、PF、视在、电流幅值、电压；输出为 PCS 分相 P/Q 设定（正=放电/注入）。soc 用 0~1 小数。
+**跨周期状态量**：`st`、`P_st`（共模出力）、`Q_pcs[3]`（无功积分）、`dP[3]`（差模积分）、`Q_active[3]`/`dP_active`（死区锁存）、`Q_last[3]`（最近有效 Q）、`meter_buf`（滑动滤波窗口）。
+**首周期初值**：st=S2、P_st=0、Q_pcs=dP=0、Q_active=dP_active=False、Q_last=0、meter_buf=空。
+
+```
+# ---------- 0 常量（值见 §2.10）----------
+P_abs_trig=2; P_dis_in=30                    # S1 返送 / S3 高峰触发阈值
+S1_exit=4                                    # S1 退出阈值（重构基线≥+4 且储能已回0）
+P_tgt={S1:+2, S3:+5}; P_cap=60; SLOPE=6      # 目标进口 / 电池功率 / 斜坡限速
+S1_FF_STEP=60; Kp_S3=0.6; S3_MARGIN_LIMIT=True  # S1 前馈大步斜坡 / S3 增益 / S3 裕度限幅
+K_diff=0.4; K_q=0.4                          # 差模/无功积分增益
+DP_max=40; Q_i_max=30                        # 差模上限 / 无功上限
+I_rated=190; S_rated=125                     # 电流 / 视在限
+SOC_cap_day=0.70; SOC_hys=0.03; T_release=18:00  # 分时SOC上限 / 滞回 / 释放时刻
+T_clr=[21:00, 23:30]; STALE_T=150            # S4 清空时段 / failsafe 超时
+
+def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last, meter_buf):
+    # 1 滤波与符号 --------------------------------------------------
+    P, Pi, Qi, PFi, Ui, Ii_mag = sliding_avg(meter_buf, meter, window_size)  # 低通
+    Ii = sign(Pi) * Ii_mag                              # 带符号电流（§2.5）
+    Imean = mean(Ii)
+    I_max = max(Ii_mag)
+    unbal = 0 if I_max < 1 else (1 - min(Ii_mag)/I_max)*100  # 电网公司口径；除零守卫
+
+    # 2 failsafe（§2.4）-----------------------------------------------
+    if stale(meter) or bad(meter):
+        P_st = move_toward(P_st, 0, SLOPE)              # 斜坡回归 0
+        return per_phase(P_st, Q_last), (st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last, meter_buf)
+
+    # 3 状态机（§2.4，滞回锁存；优先级 S4>S1>S3>S2）-------------------
+    # 重构基线：当前净功 + 上周期储能输出，抵消储能自身出力效应
+    P_基线 = P + P_st
+    SOC_cap = SOC_cap_day if t_now < T_release else 0.90
+    P_force = clamp((soc-0.10)*120 / max(hours_to(T_clr[1]), 0.1), 0, P_cap)
+    if max(Ui) > 235: P_force = min(P_force, max(P, 0))  # 电压越限保护：限夜间反送抬压
+    if t_now >= T_clr[0] and soc > 0.10:                  # 进入 S4（未到 10% 则继续，P_force 限幅兜底）
+        st = S4
+    elif st == S1:                                        # 持至基线返送消失且储能回 0，或 SOC 顶格
+        st = S1 if ((P_基线 < S1_exit or P_st < -1) and soc < SOC_cap) else S2
+    elif st == S3:                                        # 持至积分回零且进口≤目标（削峰完成）才退
+        st = S3 if (P_st > 0 or P > P_tgt[S3]) else S2
+    elif P_基线 < -P_abs_trig and soc < SOC_cap - SOC_hys:
+        st = S1
+    elif P > P_dis_in:
+        st = S3
+    else:
+        st = S2
+
+    # 4 分相 Q（§2.5.1，积分式 + 死区锁存）-------------------
+    Q = [0,0,0]
+    for i in 0..2:
+        if abs(PFi[i]) > 0.98: Q_active[i] = False       # 退出：PF 已好
+        elif abs(PFi[i]) < 0.95: Q_active[i] = True      # 进入：PF 差
+        if Q_active[i]:
+            Q_pcs[i] = clamp(Q_pcs[i] + s*K_q*Qi[i], -Q_i_max, Q_i_max)  # 积分归零表计无功
+            Q[i] = Q_pcs[i]
+        else:
+            Q_pcs[i] = move_toward(Q_pcs[i], 0, Q_i_max)  # 惰化：斜坡回归 0
+            Q[i] = Q_pcs[i]
+
+    # 5 共模 P（§2.5）----------------------------------------------
+    if   st==S1: P_st = move_toward(P_st, clamp(P_基线 - P_tgt[S1], -P_cap, 0), S1_FF_STEP)  # 前馈吸收
+    elif st==S2: P_st = move_toward(P_st, 0, SLOPE)      # 斜坡回归 0，防阶跃
+    elif st==S3:                                          # 放电补到进口≈+5kW
+        P_st = clamp(P_st + clamp(Kp_S3*(P - P_tgt[S3]), -SLOPE, SLOPE), 0, P_cap)
+        if S3_MARGIN_LIMIT: P_st = min(P_st, max(P - P_tgt[S3], 0))  # 放电不超当前负荷裕度
+    elif st==S4: P_st = move_toward(P_st, P_force, SLOPE)  # 斜坡逼近强制值
+    P_st = soc_protect(P_st, soc)                        # ≥88% 充电降额/≤12% 放电降额；90%/10% 钳位
+
+    # 6 差模 P（§2.5，积分式 + 死区锁存，零净能量）-----------
+    if unbal < 15: dP_active = False
+    elif unbal > 25: dP_active = True
+    for i in 0..2:
+        inc = K_diff * Ui[i] * (Ii[i] - Imean)
+        if dP_active and abs(inc) > max(0.5, 0.05*abs(Pi[i])):   # 增量死区
+            dP[i] = clamp(dP[i] + inc, -DP_max, DP_max)          # 积分：三相增量 Σ=0
+        else:
+            dP[i] = move_toward(dP[i], 0, DP_max)                # 惰化：斜坡回归 0
+
+    # 7 指令合成（§2.5）--------------------------------------------
+    Pcmd = [P_st/3 + dP[i] for i in 0..2]
+
+    # 8 容量仲裁/裁剪（§2.6）---------------------------------------
+    #   (a) ΔP 裁剪后重归一化 ΣΔP=0（否则 ΣP_i≠P_st，破电池 60kW 总量限）
+    #   (b) 裁剪顺序：①Q → ②差模P → ③共模P（S4 不可剪）
+    #   (c) 约束：每相/中线电流 ≤190A、总视在 ≤125kVA、总有功 ≤60kW
+    #   (d) SOC 保护：充电≥90% 共模P剪0、放电≤10% 共模P=0
+    Pcmd, Q = arbitrate(Pcmd, Q, st, P_st, I_rated, S_rated, P_cap, SLOPE)
+
+    Q_last = Q                                            # 更新最近有效 Q
+    return (Pcmd[0],Q[0], Pcmd[1],Q[1], Pcmd[2],Q[2]), (st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last, meter_buf)
+```
+
+**辅助函数语义**：
+- `sliding_avg(buf, meter, n)`：meter 推入窗口缓冲，返回 n 点均值（缓冲未满时直接取当前值）；
+- `sign(x)`=符号；`hours_to(t)`=距 t 时刻的小时数；`move_toward(x,t,s)`=x 每周期向 t 最多移动 s；`clamp(x,lo,hi)`=限幅；
+- `soc_protect(P_st,soc)`=降额/钳位：soc≥88% 充电线性降额至 90% 归零；soc≤12% 放电线性降额至 10% 归零；
+- `per_phase(P_st,Q)`=把共模 P_st 均分三相与 Q 合成分相指令元组（failsafe 用）；
+- `arbitrate(Pcmd,Q,st,P_st,...)`=§2.6：统一限 ΔP 斜坡 → 逐相电流 ≤190A / 中线 ≤190A / 总视在 ≤125kVA 钳位 → 按 ①Q ②差模P ③共模P 顺序裁剪 → **ΔP 重归一**（裁剪后若 `resid=ΣΔP≠0`，`dP[i] −= resid/3` 均匀回补）→ 共模 P 总量 ≤60kW。中线电流 `I_N=|Σ_i I_i∠θ_i|`（用 data_rule 相角列计算）≤190A。可选 PF 地板：若启用 `|PF_i|≥PF_floor`，差模 P 先让保 Q。
+
 ### 2.10 配置（TaiStorageConfig）
 
 | 参数 | 值 | 作用 |
@@ -352,7 +462,7 @@ pub struct TaiStorageStrategy {
 | `window_size` | 5 | 滑动滤波窗口（点数） |
 | `battery_capacity_kwh` | 120 | 电池容量 |
 
-初始值为占位，最终值在离线回放（§2.12）中标定（分时 SOC 上限扫 60/70/80%、P_abs_trig 扫 5/10/15/20、Kp 灵敏度）。当前标定值：`p_abs_trig=2.0`、`slope=6.0`、`kp=0.6`（S1 激进调参）、`s3_margin_limit=true`/`s4_limit_margin_kw=0.0`（S3/S4 防过送）；`s1_boost_*`（动态斜坡）已由 S1 前馈吸收取代，替换为 `s1_ff_step_kw=60`；原 `stale_t` 字段代码中不存在，已移除。
+初始值为占位，最终值在离线回放（§2.12）中标定（分时 SOC 上限扫 60/70/80%、P_abs_trig 扫 5/10/15/20、Kp 灵敏度）。当前标定值：`p_abs_trig=2.0`、`slope=6.0`、`kp=0.6`（S3 放电）、`s3_margin_limit=true`/`s4_limit_margin_kw=0.0`（S3/S4 防过送）、`s1_ff_step_kw=60`（S1 前馈大步斜坡）。
 
 #### 2.10.1 配置参数怎么用（结合数据）
 
@@ -436,13 +546,24 @@ pub struct TaiStorageStrategy {
 
 **回放报告**：打印每日 KPI 表 + 参数灵敏度（扫分时 SOC 上限、P_abs_trig、Kp），供标定初始值。
 
-**标定结论（net 闭环模型，SOC 初值 0.50）**：
+**net 反馈模型**：回放由 gross（开环）改为 **net 反馈模型**——储能输出反馈到表计测量（`p_i_net = p_i_base − last_p_out`），与运行时总表实测净功率一致；KPI/SOC 用生效间隔输出记账。S1 前馈的重构基线 `P_基线 = P_净 + P_out[k−1]` 正依赖该模型。
 
-- **模型修正**：回放由 gross（开环）改为 **net 反馈模型**——储能输出反馈到表计测量（`p_i_net = p_i_base − last_p_out`），与运行时总表实测净功率一致；KPI/SOC 用生效间隔输出记账。
-- **S1 激进调参**（`p_abs_trig` 10→2.0、`slope` 5→6.0、`kp` 0.4→0.6）：7-04 返送时长 12.3%→9.4%、峰值 52.0→48.6kW、能量 30.1→22.9kWh；6-27 5.1%→4.0%、21.4→11.0kW、6.9→3.8kWh。受电峰值两日均不劣化，SOC 日终均清空至 10% 地板。
-- **S3 放电裕度限幅**（`s3_margin_limit=true`）：两日控制后返送均降至基线以下（6-27 5.1%<6.2%、7-04 12.3%<16.5%），SOC 地板占比降低（6-27 18%→0%），受电峰值与 OFF 档完全相同；限幅在 net 反馈下未出现破坏削峰的副作用。
-- **S1 动态斜坡 boost**：7-04 返送峰值 48.6→47.9kW（−0.7kW 边际改善）、能量 22.9→22.2kWh；6-27 无 ≥15kW/周期陡增、boost 不触发、KPI 不变。差分基准修正为**滤波前原始净功**（滤波后差分被滑动窗阻尼约 5 倍，boost 永不触发）。峰值压降本质受陡坡（≈39kW/min）超过 60s 控制周期能力所限，储能侧到顶，压真峰需光伏限功率联动。
-- **已知局限**：回放对控制后三相不平衡度/PF 用基线近似（无相角/电流重分布模型），差模 P 与分相 Q 通道效果未建模，待实机/带相角仿真验证。
+**回放验证结果（net 闭环模型，SOC 初值 0.50）：**
+
+| 日 | 指标 | 基线（无储能） | 控制后（当前前馈） |
+|---|---|---|---|
+| 7-04 | 返送时长 | 16.5% | **5.6%** |
+| 7-04 | 返送峰值(kW) | 57.0 | **32.5** |
+| 7-04 | 返送能量(kWh) | 58.0 | **8.5** |
+| 7-04 | SOC 日终 | — | 10.0% |
+| 6-27 | 返送时长 | 6.2% | **2.7%** |
+| 6-27 | 返送峰值(kW) | 25.3 | **10.4** |
+| 6-27 | 返送能量(kWh) | 10.0 | **2.3** |
+| 6-27 | SOC 日终 | — | 10.2% |
+
+两日受电峰值不劣化（7-04 77.6 / 6-27 41.5 kW）；SOC 日终清空不变。前馈把 7-04 返送峰值压至 32.5kW（≈第一拍滞后极限）。峰值压降受陡坡（≈39kW/min）超过 60s 控制周期能力所限，储能侧到顶，压真峰需光伏限功率联动。
+
+**已知局限**：回放对控制后三相不平衡度/PF 用基线近似（无相角/电流重分布模型），差模 P 与分相 Q 通道效果未建模，待实机/带相角仿真验证。
 
 ### 2.13 测试体系
 
