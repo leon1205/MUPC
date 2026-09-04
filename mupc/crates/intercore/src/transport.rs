@@ -18,6 +18,8 @@ pub trait IntercoreTransport: Send + Sync {
     /// 连接状态
     async fn is_connected(&self) -> bool;
     async fn shutdown(&self) -> Result<(), MupcError>;
+    /// 实时模块上送的最近 SOC（%，含上送时刻）；无上送能力（如 Modbus 备选）或未收到返回 None
+    async fn latest_soc(&self) -> Option<(f64, std::time::Instant)>;
 }
 
 /// 构造 V2 ControlCmd 帧字节（TcpTransport 用）

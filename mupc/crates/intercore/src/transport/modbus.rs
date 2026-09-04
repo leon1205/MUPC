@@ -317,4 +317,9 @@ impl IntercoreTransport for ModbusRtuTransport {
         *self.connected.write().await = false;
         Ok(())
     }
+
+    // Modbus 备选通道不承载 SOC 上送（ADR-012：遥测/SOC 仍走 TCP），返回 None
+    async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
+        None
+    }
 }

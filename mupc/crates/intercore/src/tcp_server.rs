@@ -980,6 +980,11 @@ impl IntercoreClient {
         self.transport.is_connected().await
     }
 
+    /// 实时模块上送的最近 SOC（%，含上送时刻；N3，Tcp 通道有接收时有效）
+    pub async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
+        self.transport.latest_soc().await
+    }
+
     /// 获取传输描述（TCP 目标地址或通道名，如 modbus_rtu）
     pub fn remote_addr(&self) -> &str {
         &self.remote_addr

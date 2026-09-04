@@ -411,7 +411,10 @@ pub async fn initialize_all(
         Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
     } else {
         let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
-        Arc::new(mupc_intercore::IntercoreClient::new(remote_addr))
+        let transport = Arc::new(mupc_intercore::TcpTransport::new(remote_addr));
+        // N3: 启动回读接收（实时模块 DataUpload 上送 battery_soc → SOC 数据源）
+        transport.spawn_receive();
+        Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
     };
     coord.register_service("intercore", ServiceStatus::Running);
 

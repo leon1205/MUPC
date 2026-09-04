@@ -106,21 +106,32 @@ impl AiIntegrator {
         *self.fallback_active.read().await
     }
 
-    /// 设置最新遥测数据（南向采集循环调用，供兜底策略 evaluate 与 AI 指令校验器）
+    /// 设置最新遥测数据（南向/总表采集循环调用，供兜底策略 evaluate 与 AI 指令校验器）
     pub async fn set_latest_data(&self, data: DataPackage) {
         if let Some(v) = self.validator.read().await.as_ref() {
             v.update_data(data.clone());
         }
         // U-26 审查 P1-3: 字段级缺省保留——总表 pkg 的 battery(soc/soh/temperature) 为 None 时，
         // 沿用上一包的值，避免总表覆盖导致 SOC 恒默认（保护失效）。phase 等电气量始终取新总表。
-        let merged = {
+        let mut pkg = {
             let prev = self.latest_data.read().await;
             match prev.as_ref() {
                 Some(prev) => merge_battery_missing(prev, &data),
                 None => data,
             }
         };
-        *self.latest_data.write().await = Some(merged);
+        // N3: 仍缺 SOC（meter-on 模式总表 pkg 恒无 battery）时，从核间实时模块上送补
+        // （DataUpload.battery_soc，实时模块为储能 PCS/BMS 侧，SOC 真值所在）。
+        if pkg.battery.soc.is_none() {
+            if let Some(client) = &self.intercore_client {
+                if let Some((soc, ts)) = client.latest_soc().await {
+                    if ts.elapsed() <= Self::DATA_STALE_AFTER {
+                        pkg.battery.soc = Some(soc);
+                    }
+                }
+            }
+        }
+        *self.latest_data.write().await = Some(pkg);
         // U-26 审查 P1-1: 记录新鲜时刻（兜底策略据此判停）
         *self.last_data_ts.write().await = Some(std::time::Instant::now());
     }
