@@ -447,8 +447,8 @@ mod tests {
         assert_eq!(bytes[0], 0xAA);
         assert_eq!(bytes[1], 0x55);
 
-        // 验证帧类型为 HeartbeatReq
-        let frame_type_val = ((bytes[5] as u16) << 8) | (bytes[4] as u16);
+        // 验证帧类型为 HeartbeatReq（帧头字段大端：bytes[4]=高字节 0x00, bytes[5]=低字节 0x02）
+        let frame_type_val = ((bytes[4] as u16) << 8) | (bytes[5] as u16);
         assert_eq!(frame_type_val, 0x0002);
 
         // 验证数据部分（status + cpu_temp + memory_usage）

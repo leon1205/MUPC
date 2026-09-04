@@ -1159,6 +1159,8 @@ intercore:
 2. **端到端联调**：虚拟串口对（Windows com0com / Linux socat）→ Master ↔ Slave 参考 → 下发分相 P/Q 生效 + 心跳在线检测；
 3. **回归**：`transport: "tcp"` 下现有 AI/本地优先下发全跑通（TcpTransport 不改变协议）。
 
+**验证状态（2026-09-04）**：transport 抽象 + Tcp/Modbus 双实现 + Master/Slave + 配置已实现，`mupc-intercore` lib 22 测试全绿（含寄存器编解码 roundtrip、cmd_ctrl、心跳帧），`cargo check --workspace` 通过（上层调用方编译不变）。端到端 Modbus 联调（虚拟串口对下 Master↔Slave 下发生效）待具备串口环境（com0com/socat 或现场 RS485）执行；`transport: "tcp"` 回归不受影响。
+
 ### 11.10 依赖与风险确认（实现前）
 
 1. **寄存器映射表须与实时控制模块固件对齐**（地址/缩放/`cmd_valid` 触发/`exec_status` 语义）——本设计为基线，Slave 参考实现供联调；
