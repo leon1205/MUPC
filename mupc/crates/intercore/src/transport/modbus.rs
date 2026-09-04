@@ -44,7 +44,40 @@ fn fold_tm<T>(tag: &str, r: tokio_modbus::Result<T>) -> Result<T, MupcError> {
 
 /// 打开串口并 attach 到指定从站（每次请求独立连接，天然规避半双工总线残留帧）
 async fn open_ctx(s: &ModbusRtuSettings) -> Result<Context, MupcError> {
-    let stream = SerialStream::open(&tokio_serial::new(&s.serial_port, s.baud_rate)).map_err(|e| {
+    // 线格式参数映射（data_bits/stop_bits/parity 全部实际应用到 builder）
+    let data_bits = tokio_serial::DataBits::try_from(s.data_bits).map_err(|_| {
+        MupcError::new(
+            ErrorCode::ConfigError,
+            format!("data_bits {} 无效（支持 5/6/7/8）", s.data_bits),
+            "intercore",
+        )
+    })?;
+    let stop_bits = tokio_serial::StopBits::try_from(s.stop_bits).map_err(|_| {
+        MupcError::new(
+            ErrorCode::ConfigError,
+            format!("stop_bits {} 无效（支持 1/2）", s.stop_bits),
+            "intercore",
+        )
+    })?;
+    let parity = match s.parity.to_ascii_lowercase().as_str() {
+        "none" => tokio_serial::Parity::None,
+        "even" => tokio_serial::Parity::Even,
+        "odd" => tokio_serial::Parity::Odd,
+        _ => {
+            return Err(MupcError::new(
+                ErrorCode::ConfigError,
+                format!("parity {} 无效（none/even/odd）", s.parity),
+                "intercore",
+            ))
+        }
+    };
+    let stream = SerialStream::open(
+        &tokio_serial::new(&s.serial_port, s.baud_rate)
+            .data_bits(data_bits)
+            .stop_bits(stop_bits)
+            .parity(parity),
+    )
+    .map_err(|e| {
         MupcError::new(ErrorCode::ConnectionFailed, format!("open {}: {}", s.serial_port, e), "intercore")
     })?;
     // Modbus RTU 单从站有效地址 1..=247（0 为广播，主从应答式控制不适用）

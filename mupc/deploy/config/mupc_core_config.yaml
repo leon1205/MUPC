@@ -13,10 +13,20 @@ system:
   shutdown_timeout_sec: 30
 
 intercore:
-  host: "192.168.1.2"           # 实时核心 IP
+  transport: "tcp"              # "tcp" | "modbus_rtu"（部署二选一）
+  host: "192.168.1.2"           # 实时核心 IP（tcp 通道）
   port: 9100
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
+  modbus_rtu:                   # modbus_rtu 通道参数
+    serial_port: "/dev/ttyS1"
+    baud_rate: 9600
+    data_bits: 8
+    stop_bits: 1
+    parity: "none"              # none / even / odd
+    slave_addr: 1
+    response_timeout_ms: 200
+    heartbeat_poll_ms: 1000
 
 web_api:
   listen_addr: "0.0.0.0:8080"

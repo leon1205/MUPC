@@ -61,6 +61,59 @@ pub struct InterCoreConfig {
     /// 重连间隔（秒），默认 3
     #[serde(default = "default_reconnect_interval")]
     pub reconnect_interval_sec: u64,
+    /// 传输通道：tcp | modbus_rtu（部署二选一）
+    #[serde(default = "default_intercore_transport")]
+    pub transport: String,
+    /// Modbus RTU 通道参数（transport=modbus_rtu 时生效）
+    #[serde(default)]
+    pub modbus_rtu: ModbusRtuConfig,
+}
+
+/// Modbus RTU 核间传输配置（transport=modbus_rtu 时生效）
+///
+/// 注意：手动实现 `Default`（不走 derive），使 `#[serde(default)]` 缺省整段
+/// 配置时也落到下方默认函数，而非空/零值。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModbusRtuConfig {
+    /// 串口设备，默认 /dev/ttyS1
+    #[serde(default = "default_serial_port")]
+    pub serial_port: String,
+    /// 波特率，默认 9600
+    #[serde(default = "default_baud_rate")]
+    pub baud_rate: u32,
+    /// 数据位，默认 8
+    #[serde(default = "default_data_bits")]
+    pub data_bits: u8,
+    /// 停止位，默认 1
+    #[serde(default = "default_stop_bits")]
+    pub stop_bits: u8,
+    /// 校验位: none/even/odd，默认 none
+    #[serde(default = "default_parity")]
+    pub parity: String,
+    /// 从站地址（有效 1..=247），默认 1
+    #[serde(default = "default_slave_addr")]
+    pub slave_addr: u8,
+    /// 响应超时（毫秒），默认 200
+    #[serde(default = "default_response_timeout_ms")]
+    pub response_timeout_ms: u64,
+    /// 心跳轮询间隔（毫秒），默认 1000
+    #[serde(default = "default_heartbeat_poll_ms")]
+    pub heartbeat_poll_ms: u64,
+}
+
+impl Default for ModbusRtuConfig {
+    fn default() -> Self {
+        Self {
+            serial_port: default_serial_port(),
+            baud_rate: default_baud_rate(),
+            data_bits: default_data_bits(),
+            stop_bits: default_stop_bits(),
+            parity: default_parity(),
+            slave_addr: default_slave_addr(),
+            response_timeout_ms: default_response_timeout_ms(),
+            heartbeat_poll_ms: default_heartbeat_poll_ms(),
+        }
+    }
 }
 
 /// Web API 配置
@@ -149,6 +202,42 @@ fn default_heartbeat_interval() -> u64 {
 
 fn default_reconnect_interval() -> u64 {
     3
+}
+
+fn default_intercore_transport() -> String {
+    "tcp".to_string()
+}
+
+fn default_serial_port() -> String {
+    "/dev/ttyS1".to_string()
+}
+
+fn default_baud_rate() -> u32 {
+    9600
+}
+
+fn default_data_bits() -> u8 {
+    8
+}
+
+fn default_stop_bits() -> u8 {
+    1
+}
+
+fn default_parity() -> String {
+    "none".to_string()
+}
+
+fn default_slave_addr() -> u8 {
+    1
+}
+
+fn default_response_timeout_ms() -> u64 {
+    200
+}
+
+fn default_heartbeat_poll_ms() -> u64 {
+    1000
 }
 
 fn default_listen_addr() -> String {
@@ -248,6 +337,17 @@ plugins: {}
         assert_eq!(config.system.shutdown_timeout_sec, 30);
         assert_eq!(config.ai_engine.model_dir, PathBuf::from("/opt/mupc/models"));
         assert_eq!(config.intercore.heartbeat_interval_sec, 5);
+        // 未配置 intercore.transport 时默认 tcp
+        assert_eq!(config.intercore.transport, "tcp");
+        // 未配置 intercore.modbus_rtu 时默认参数
+        assert_eq!(config.intercore.modbus_rtu.serial_port, "/dev/ttyS1");
+        assert_eq!(config.intercore.modbus_rtu.baud_rate, 9600);
+        assert_eq!(config.intercore.modbus_rtu.data_bits, 8);
+        assert_eq!(config.intercore.modbus_rtu.stop_bits, 1);
+        assert_eq!(config.intercore.modbus_rtu.parity, "none");
+        assert_eq!(config.intercore.modbus_rtu.slave_addr, 1);
+        assert_eq!(config.intercore.modbus_rtu.response_timeout_ms, 200);
+        assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
         assert!(config.ai_engine.local_priority, "本地优先应为部署默认");
     }
 
@@ -268,6 +368,8 @@ plugins: {}
                 port: 9100,
                 heartbeat_interval_sec: 5,
                 reconnect_interval_sec: 3,
+                transport: "tcp".into(),
+                modbus_rtu: ModbusRtuConfig::default(),
             },
             web_api: WebApiConfig {
                 listen_addr: "0.0.0.0:8080".into(),
@@ -307,6 +409,8 @@ plugins: {}
                 port: 9100,
                 heartbeat_interval_sec: 5,
                 reconnect_interval_sec: 3,
+                transport: "tcp".into(),
+                modbus_rtu: ModbusRtuConfig::default(),
             },
             web_api: WebApiConfig {
                 listen_addr: "0.0.0.0:8080".into(),

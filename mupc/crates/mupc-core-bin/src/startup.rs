@@ -281,8 +281,28 @@ pub async fn initialize_all(
 
     // ── 4. 核间通信 ──
     tracing::info!("[04/14] 初始化核间通信...");
-    let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
-    let intercore = Arc::new(mupc_intercore::IntercoreClient::new(remote_addr));
+    // 传输通道由 intercore.transport 决定：tcp（默认）| modbus_rtu
+    let intercore: Arc<mupc_intercore::IntercoreClient> = if config.intercore.transport == "modbus_rtu" {
+        let mb = &config.intercore.modbus_rtu;
+        tracing::info!("intercore transport = modbus_rtu: {} @{}", mb.serial_port, mb.baud_rate);
+        Arc::new(mupc_intercore::IntercoreClient::with_transport(
+            Arc::new(mupc_intercore::ModbusRtuTransport::new(
+                mupc_intercore::ModbusRtuSettings {
+                    serial_port: mb.serial_port.clone(),
+                    baud_rate: mb.baud_rate,
+                    data_bits: mb.data_bits,
+                    stop_bits: mb.stop_bits,
+                    parity: mb.parity.clone(),
+                    slave_addr: mb.slave_addr,
+                    response_timeout_ms: mb.response_timeout_ms,
+                    heartbeat_poll_ms: mb.heartbeat_poll_ms,
+                },
+            )),
+        ))
+    } else {
+        let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
+        Arc::new(mupc_intercore::IntercoreClient::new(remote_addr))
+    };
     coord.register_service("intercore", ServiceStatus::Running);
 
     // ── 5. 插件加载器 ──
