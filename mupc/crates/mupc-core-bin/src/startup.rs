@@ -15,7 +15,7 @@ use mupc_core::service_coord_impl::ServiceCoordinatorImpl;
 use mupc_system_monitor::MetricCollector;
 use std::sync::Arc;
 
-use crate::core_config::CoreConfig;
+use crate::core_config::{CoreConfig, MasterMeterConfig, MeterRegBlock};
 
 /// 启动上下文：持有所有已初始化的子系统句柄
 ///
@@ -129,6 +129,105 @@ fn create_rs485_device(
             None
         }
     }
+}
+
+/// 台区总表设备（U-26：策略 phase 数据源）。handler=modbus，按配置读取分相量保持寄存器。
+fn create_master_meter_device(cfg: &MasterMeterConfig) -> Option<Arc<rs485_plugin::device::Rs485Device>> {
+    let config = rs485_plugin::config::Config {
+        port: cfg.serial_port.clone(),
+        baud_rate: cfg.baud_rate,
+        device_addr: cfg.slave_addr,
+        ..Default::default()
+    };
+    let handler = rs485_plugin::handlers::ProtocolHandlerRegistry::get("modbus", &config)?;
+    let device = rs485_plugin::device::Rs485Device::new(
+        "master_meter".to_string(),
+        "modbus".to_string(),
+        config,
+        handler,
+    );
+    match device.open() {
+        Ok(()) => Some(Arc::new(device)),
+        Err(e) => {
+            tracing::warn!("台区总表串口打开失败: {}", e);
+            None
+        }
+    }
+}
+
+/// 读三相量块（A/B/C 连续，每相 2 寄存器）
+fn read_meter_phases(
+    meter: &rs485_plugin::device::Rs485Device,
+    b: &MeterRegBlock,
+) -> Option<[f64; 3]> {
+    let r = meter.read_holding_registers(b.addr, 6).ok()?;
+    if r.len() < 6 {
+        return None;
+    }
+    Some([
+        mupc_data_processing::meter_regs::decode_regs(&r[0..2], b.format, b.scale),
+        mupc_data_processing::meter_regs::decode_regs(&r[2..4], b.format, b.scale),
+        mupc_data_processing::meter_regs::decode_regs(&r[4..6], b.format, b.scale),
+    ])
+}
+
+/// 读台区总表并组装含分相的 DataPackage（全部块读成功才更新；任一块失败返回 None → 沿用旧数据）
+fn read_master_meter(
+    meter: &rs485_plugin::device::Rs485Device,
+    cfg: &MasterMeterConfig,
+) -> Option<mupc_data_processing::DataPackage> {
+    let rm = &cfg.reg_map;
+    let p = read_meter_phases(meter, &rm.p)?;
+    let q = read_meter_phases(meter, &rm.q)?;
+    let pf = read_meter_phases(meter, &rm.pf)?;
+    let u = read_meter_phases(meter, &rm.u)?;
+    let i_mag = read_meter_phases(meter, &rm.i)?;
+    let p_total = match &rm.p_total {
+        Some(b) => {
+            let r = meter.read_holding_registers(b.addr, 2).ok()?;
+            if r.len() < 2 {
+                return None;
+            }
+            mupc_data_processing::meter_regs::decode_regs(&r[..2], b.format, b.scale)
+        }
+        None => p.iter().sum(),
+    };
+    // 电流方向由分相有功符号承载（表计电流多给幅值；策略差模判据需带符号电流）
+    let i = [
+        p[0].signum() * i_mag[0].abs(),
+        p[1].signum() * i_mag[1].abs(),
+        p[2].signum() * i_mag[2].abs(),
+    ];
+    let phase = mupc_data_processing::telemetry::PhaseElectricalData {
+        voltage: [Some(u[0]), Some(u[1]), Some(u[2])],
+        current: [Some(i[0]), Some(i[1]), Some(i[2])],
+        active_power: [Some(p[0]), Some(p[1]), Some(p[2])],
+        reactive_power: [Some(q[0]), Some(q[1]), Some(q[2])],
+        cos_phi: [Some(pf[0]), Some(pf[1]), Some(pf[2])],
+    };
+    Some(mupc_data_processing::DataPackage {
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        electrical: mupc_data_processing::ElectricalData {
+            voltage: Some(u[0]),
+            current: Some(i_mag[0].abs()),
+            active_power: Some(p_total),
+            reactive_power: Some(q.iter().sum()),
+            cos_phi: Some(pf[0]),
+            frequency: Some(50.0),
+            phase: Some(phase),
+        },
+        battery: mupc_data_processing::BatteryData {
+            soc: None,
+            soh: None,
+            temperature: None,
+        },
+        device_status: mupc_data_processing::DeviceStatus {
+            inverter_status: mupc_data_processing::InverterStatus::Running,
+            pv_power: None,
+            load_power: None,
+            ev_charger_power: None,
+        },
+    })
 }
 
 /// DataFrame → DataPackage（FIXME: 固定值代替 Modbus 寄存器映射，实际应解析 frame.data）
@@ -423,6 +522,29 @@ pub async fn initialize_all(
     }));
     coord.register_service("gateway", ServiceStatus::Running);
 
+    // U-26: 台区总表分相数据源（策略 phase 输入）。启用时总表 pkg 作为策略测量，
+    // 南向模拟数据不再 set_latest_data（避免覆盖含分相的总表数据）。
+    let meter_on = config.master_meter.enabled;
+    let master_meter = if meter_on {
+        create_master_meter_device(&config.master_meter)
+    } else {
+        None
+    };
+    if let Some(meter) = master_meter {
+        let ai_int_meter = ai_integrator.clone();
+        let cfg_m = config.master_meter.clone();
+        guard.0.push(tokio::spawn(async move {
+            let interval = std::time::Duration::from_millis(cfg_m.read_interval_ms);
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Some(pkg) = read_master_meter(&meter, &cfg_m) {
+                    ai_int_meter.set_latest_data(pkg).await;
+                    tracing::debug!("总表分相数据已注入策略");
+                }
+            }
+        }));
+    }
+
     // 南向数据采集循环（上行）：读取 → 转换 → 持久化 + 北向 gateway 上送
     if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
         let wb = write_buffer.clone();
@@ -430,6 +552,7 @@ pub async fn initialize_all(
         let rt_source = ai_engine.realtime_source();
         let ai_int = ai_integrator.clone();
         guard.0.push(tokio::spawn(async move {
+            let meter_on = meter_on; // 总表启用时策略测量由总表提供
             // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
             let mut ioa_seq = 0u32;
             loop {
@@ -440,8 +563,10 @@ pub async fn initialize_all(
                             let pkg = dataframe_to_datapackage(&frame);
                             // 注入实时数据到 AI 融合引擎（供 fuse 使用）
                             *rt_source.write().await = Some(datapackage_to_realtime_data(&pkg));
-                            // 注入遥测到 AiIntegrator（供本地兜底策略 evaluate）
-                            ai_int.set_latest_data(pkg.clone()).await;
+                            // 注入遥测到 AiIntegrator（总表启用时策略 phase 由总表提供，南向模拟不覆盖）
+                            if !meter_on {
+                                ai_int.set_latest_data(pkg.clone()).await;
+                            }
                             for point in datapackage_to_telemetry_points(&pkg, name) {
                                 if let Err(e) = wb.buffer_telemetry(point).await {
                                     tracing::debug!("遥测写入失败: {}", e);
