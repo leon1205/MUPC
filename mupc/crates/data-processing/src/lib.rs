@@ -8,6 +8,7 @@ pub mod database;
 pub mod errors;
 pub mod fault_recorder_impl;
 pub mod high_freq_telemetry;
+pub mod meter_regs;
 pub mod recorder;
 pub mod reporter;
 pub mod telemetry;
