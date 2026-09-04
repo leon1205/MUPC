@@ -29,6 +29,9 @@ ai_engine:
   config_file: "/opt/mupc/config/mupc_env_config.yaml"
   enable_npu: true               # 是否启用 RK3588 NPU
   inference_timeout_ms: 500
+  # 部署默认：本地策略优先（本地台区储能治理策略控制，AI 旁路参考不下发）
+  # 需 AI 智能控制时置 false 或经 Web API /api/v1/strategy-mode 运行时切换
+  local_priority: true
 
 plugins:
   search_paths:

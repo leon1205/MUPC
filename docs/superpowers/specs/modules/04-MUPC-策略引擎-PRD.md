@@ -18,22 +18,25 @@
 - 管理策略模式切换（AI 模式 / 本地兜底模式 / 基础模式）
 - 通过消息总线接收遥测数据，输出控制指令
 
-### 1.2 "AI 优先、本地兜底"机制
+### 1.2 策略模式（部署默认本地优先）
+
+**部署默认 = 本地优先模式**（`ai_engine.local_priority` 默认 true）：本地台区储能治理策略控制（分相 P/Q 经核间 V3 帧下发），AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考、**不下发核间指令**。需 AI 智能控制时置 `local_priority=false`（配置或 Web API 运行时切换）。
 
 ```
-AI 引擎正常运行:
+AI 控制模式（local_priority=false）下:
   AI 决策 → AiCommandValidator 安全校验 → 通过 → 指令下发
                                         → 不通过 → 降级至本地策略
 
-AI 引擎失效:
+AI 引擎失效（AI 控制模式下）:
   检测异常（心跳/状态码）→ 自动切换至本地策略引擎 → 发出告警
   → 本地策略接管控制 → AI 引擎恢复后自动切回 AI 模式
 ```
 
 | 模式 | 决策源 | 校验方式 | 适用场景 |
 |------|--------|----------|----------|
-| AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 默认运行模式 |
-| 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过 |
+| **本地优先模式** | 台区储能治理（AI 旁路参考，不下发） | 策略内置边界检查 | **部署默认**（`ai_engine.local_priority` 默认 true） |
+| AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 配置 `local_priority=false` / Web API 切换 |
+| 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过（AI 控制模式下） |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
 
 ### 1.3 目标平台
@@ -676,4 +679,5 @@ pub enum CommandType {
 | v1.0 | 初版，合并通信管理模块 PRD v1.3 + Phase3A 规格文档 v1.0 |
 | v1.1 | 更新：动作空间精简为 p_ref/k_droop 双参数，q_batt_set 标记 LEGACY，pv_limit/load_shedding 下沉南向 |
 | v1.2 | 策略引擎精简为单一兜底策略「台区储能治理」；三策略（削峰填谷/需量控制/防逆流）废弃（代码保留不编译），pv_limit/load_shedding 移除 |
+| v1.3 | 「本地优先」改为部署默认：ai_engine.local_priority 默认 true，开机即本地台区储能策略控制、AI 旁路；需 AI 控制经配置/Web API 切 false |
 

@@ -47,12 +47,12 @@ AI 引擎失效:
 
 | 模式 | 决策源 | 校验方式 | 适用场景 |
 |------|--------|----------|----------|
-| AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 默认运行模式 |
+| AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 配置 `local_priority=false` 或 Web API 切换（默认关闭） |
 | 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过 |
-| **本地优先模式** | **台区储能治理（AI 旁路参考，不下发）** | 策略内置边界检查 | 配置 `ai_engine.local_priority: true` 或 Web API `/api/v1/strategy-mode` 设置 |
+| **本地优先模式** | **台区储能治理（AI 旁路参考，不下发）** | 策略内置边界检查 | **部署默认**（`ai_engine.local_priority` 默认 true）；Web API `/api/v1/strategy-mode` 可切换 |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
 
-**本地优先模式**：可通过 YAML 配置（`ai_engine.local_priority: true`）或 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。
+**本地优先模式（部署默认）**：`ai_engine.local_priority` 默认 `true`（代码 serde 默认 + 部署配置显式声明），开机即生效；也可经 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。需 AI 智能控制时置 `local_priority=false`。
 
 ### 1.3 模块依赖关系
 
@@ -762,7 +762,7 @@ pub struct AiIntegrator {
 | `set_tai_storage_strategy()` | 注入台区储能治理策略 | 否 |
 | `set_local_priority()` / `is_local_priority()` | 设置/查询本地优先模式 | 是 |
 | `set_latest_data()` | 写入最新遥测（南向采集循环调用） | 是 |
-| `dispatch_ai_decision()` | 决策主循环：默认 AI 优先（失败降级本地）；本地优先模式直接走本地台区储能 | 是 |
+| `dispatch_ai_decision()` | 决策主循环：部署默认本地优先（直接走本地台区储能，AI 旁路）；`local_priority=false` 时 AI 决策（失败/校验不过降级本地） | 是 |
 | `is_ready()` / `status()` | 查询 AI 就绪/状态 | 是 |
 
 ### 4.4 状态管理
@@ -782,7 +782,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
                                   ├── 决策接口 → ActionOutput (p_ref, k_droop)
                                   └── 状态管理 → ModelStatus
 
-数据流（默认 AI 优先）：
+数据流（部署默认本地优先；AI 优先需 `local_priority=false`）：
 1. LSTM/TCN 时序预测（光伏出力/负荷）
 2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
 3. AiCommandValidator 校验 AI 指令安全性
@@ -816,13 +816,15 @@ pub enum StrategyType {
 
 | 当前模式 | 切换条件 | 目标模式 |
 |----------|----------|----------|
+| 本地优先 | **部署默认**（`ai_engine.local_priority=true` 启动） | 本地优先（AI 旁路，分相 P/Q 下发） |
 | Intelligent | AI 引擎心跳超时 / 状态异常 | Fallback |
 | Intelligent | AiValidator 校验不通过 | Fallback |
 | Fallback | AI 引擎恢复（status == Ready） | Intelligent |
 | Any | 运维人员手动切换 | Basic / Intelligent / Fallback |
 | Basic | 运维人员手动切换 | Intelligent / Fallback |
-| Any | YAML 配置 `ai_engine.local_priority: true` 启动 | 本地优先（AI 旁路） |
-| 本地优先 | Web API `PUT /api/v1/strategy-mode`（local_priority=false） | 恢复 AI 优先 |
+| 本地优先 | Web API `PUT /api/v1/strategy-mode`（local_priority=false）或配置 false 重启 | AI 智能（恢复 AI 控制） |
+
+> **注**：`Intelligent/Fallback` 间的自动切换仅发生在 AI 控制模式（`local_priority=false`）。部署默认本地优先模式下 AI 旁路运行，其决策结果不下发，故不触发上述自动降级/恢复路径。
 
 ### 5.3 核间通信信号
 
@@ -1125,3 +1127,4 @@ tokio-test = "0.4"
 | v2.20 | 台区储能策略标定同步：S1 动态斜坡 boost（返送陡增加速充电）、S1 激进调参（p_abs_trig=2.0/slope=6.0/kp=0.6）、S3 放电裕度限幅（s3_margin_limit）；回放改 net 闭环模型；配置表同步实际默认值 |
 | v2.21 | S1 ②分支外部基线变化判别：Δp_base=Δp+Δp_out 区分自激与外部返送消失，仅外部突变才快速退出；普通收窄走正常积分收敛到 +2kW 目标进口（消除 net 闭环自激极限环） |
 | v2.22 | S1 共模改前馈吸收：重构基线 P_表基线=P_表净+P_out[k−1]，目标 P_st=P_表基线−P_目标进口，大步斜坡 s1_ff_step_kw 一周期到位；替代 v2.20 boost 与 v2.21 Δp_base 判别（移除 s1_boost_* 配置与 prev_p/prev_p_st 状态），峰值压至第一拍滞后极限 |
+| v2.23 | 「本地优先」改为部署默认：ai_engine.local_priority 默认 true（代码 serde 默认 + 部署配置显式声明），开机即本地台区储能策略控制、AI 旁路；需 AI 控制经配置/Web API 切 false |
