@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use mupc_common::MupcError;
 
-// pub mod modbus; // Task 5 填充
+pub mod modbus;
 pub mod tcp;
 
 use crate::protocol::{FrameType as IntercoreFrameType, IntercoreFrame};
@@ -54,4 +54,5 @@ pub(crate) fn v3_control_frame_bytes(p: [f64; 3], q: [f64; 3], mode: &str) -> Re
     Ok(IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()?)
 }
 
+pub use modbus::{ModbusRtuSettings, ModbusRtuTransport};
 pub use tcp::TcpTransport;

@@ -15,5 +15,5 @@ pub use tcp_server::{
     CommandConfig, CommandQueue, ControlCmdPayload, ControlCmdPayloadV2, ControlCmdPayloadV3,
     DualParamCommand, IntercoreClient, IntercoreConfig, IntercoreServer,
 };
-pub use transport::{IntercoreTransport, TcpTransport};
+pub use transport::{IntercoreTransport, ModbusRtuSettings, ModbusRtuTransport, TcpTransport};
 pub use watchdog::Watchdog;
