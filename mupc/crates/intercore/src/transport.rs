@@ -33,7 +33,8 @@ pub(crate) fn v2_control_frame_bytes(cmd: &DualParamCommand) -> Result<Vec<u8>, 
     let bytes = payload.to_json().map_err(|e| {
         MupcError::new(mupc_common::ErrorCode::SerializeError, format!("serialize V2: {}", e), "intercore")
     })?;
-    Ok(IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()?)
+    // to_bytes() 已返回 Result<_, MupcError>，直接作为尾表达式
+    IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()
 }
 
 /// 构造 V3 分相帧字节
@@ -51,7 +52,8 @@ pub(crate) fn v3_control_frame_bytes(p: [f64; 3], q: [f64; 3], mode: &str) -> Re
     let bytes = payload.to_json().map_err(|e| {
         MupcError::new(mupc_common::ErrorCode::SerializeError, format!("serialize V3: {}", e), "intercore")
     })?;
-    Ok(IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()?)
+    // to_bytes() 已返回 Result<_, MupcError>，直接作为尾表达式
+    IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()
 }
 
 pub use modbus::{ModbusRtuSettings, ModbusRtuTransport};
