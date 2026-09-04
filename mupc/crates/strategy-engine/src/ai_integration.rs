@@ -30,6 +30,8 @@ pub struct AiIntegrator {
     fallback_active: RwLock<bool>,
     /// v3.1: 最新遥测数据（南向采集循环写入，供兜底策略 evaluate）
     latest_data: Arc<RwLock<Option<DataPackage>>>,
+    /// U-26 审查 P1-1: 最新遥测写入时刻（数据新鲜度守卫——冻结数据不驱动兜底控制）
+    last_data_ts: RwLock<Option<std::time::Instant>>,
     /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
     /// 本地策略优先模式（配置或 Web API 可切换）：AI 旁路运行（仍决策作参考，不下发），
@@ -40,6 +42,9 @@ pub struct AiIntegrator {
 }
 
 impl AiIntegrator {
+    /// U-26 审查 P1-1: 遥测数据新鲜度阈值——超过该时长未更新则停发兜底指令（冻结测量不驱动控制）
+    const DATA_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
     pub fn new() -> Self {
         Self {
             model_manager: Arc::new(RwLock::new(None)),
@@ -49,6 +54,7 @@ impl AiIntegrator {
             last_valid_k_droop: RwLock::new(None),
             fallback_active: RwLock::new(false),
             latest_data: Arc::new(RwLock::new(None)),
+            last_data_ts: RwLock::new(None),
             tai_storage: None,
             local_priority: RwLock::new(false),
             validator: RwLock::new(None),
@@ -105,7 +111,18 @@ impl AiIntegrator {
         if let Some(v) = self.validator.read().await.as_ref() {
             v.update_data(data.clone());
         }
-        *self.latest_data.write().await = Some(data);
+        // U-26 审查 P1-3: 字段级缺省保留——总表 pkg 的 battery(soc/soh/temperature) 为 None 时，
+        // 沿用上一包的值，避免总表覆盖导致 SOC 恒默认（保护失效）。phase 等电气量始终取新总表。
+        let merged = {
+            let prev = self.latest_data.read().await;
+            match prev.as_ref() {
+                Some(prev) => merge_battery_missing(prev, &data),
+                None => data,
+            }
+        };
+        *self.latest_data.write().await = Some(merged);
+        // U-26 审查 P1-1: 记录新鲜时刻（兜底策略据此判停）
+        *self.last_data_ts.write().await = Some(std::time::Instant::now());
     }
 
     /// 注入 AI 指令安全校验器（安全闸门）
@@ -115,6 +132,23 @@ impl AiIntegrator {
 
     /// 运行本地兜底策略（AI 失效时）：台区储能治理（分相 P/Q 经核间下发）
     async fn run_fallback_strategies(&self) -> Result<(), AiEngineError> {
+        // U-26 审查 P1-1: 数据新鲜度守卫——总表断连后遥测冻结，若继续用旧测量驱动控制会下发
+        // 陈旧指令（危险）；超过阈值未更新 → 告警并停发（返回 Ok，不 evaluate）。
+        match *self.last_data_ts.read().await {
+            None => {
+                tracing::debug!("无遥测数据，跳过兜底策略");
+                return Ok(());
+            }
+            Some(ts) if ts.elapsed() > Self::DATA_STALE_AFTER => {
+                tracing::warn!(
+                    "遥测数据超过 {}s 未更新（数据源可能断连），冻结数据不再驱动兜底控制（停发）",
+                    Self::DATA_STALE_AFTER.as_secs()
+                );
+                return Ok(());
+            }
+            Some(_) => {}
+        }
+
         let data = self.latest_data.read().await.clone();
         let Some(data) = data else {
             tracing::debug!("无遥测数据，跳过兜底策略");
@@ -423,6 +457,17 @@ impl Default for AiIntegrator {
     }
 }
 
+/// U-26 审查 P1-3: 电池字段缺省保留——新 pkg 的 battery soc/soh/temperature 为 None 时沿用
+/// 旧 pkg 值（总表 pkg 无电池测量，避免覆盖南向电池值后 SOC 恒默认导致保护失效）。
+/// 其余字段（电气/phase/设备状态）一律取新 pkg。
+fn merge_battery_missing(prev: &DataPackage, new: &DataPackage) -> DataPackage {
+    let mut merged = new.clone();
+    merged.battery.soc = new.battery.soc.or(prev.battery.soc);
+    merged.battery.soh = new.battery.soh.or(prev.battery.soh);
+    merged.battery.temperature = new.battery.temperature.or(prev.battery.temperature);
+    merged
+}
+
 /// AI 引擎状态信息（供 web-api 序列化）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiEngineStatusInfo {
@@ -463,6 +508,71 @@ mod tests {
         // 注入后再次调用兜底流程不报错（无遥测数据时跳过）
         let result = tokio_test::block_on(integrator.run_fallback_strategies());
         assert!(result.is_ok(), "无遥测数据时兜底应正常返回 Ok");
+    }
+
+    /// U-26 审查 P1-3: 总表 pkg battery=None 不得覆盖南向电池值（SOC/SOH/温度缺省保留），
+    /// 电气量（含 phase）取新总表。
+    #[tokio::test]
+    async fn test_latest_data_battery_retention_on_none() {
+        use mupc_data_processing::telemetry::{
+            BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
+            PhaseElectricalData,
+        };
+
+        let pkg_south = DataPackage {
+            timestamp: 1,
+            electrical: ElectricalData {
+                active_power: Some(10.0),
+                ..Default::default()
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: Some(20.0),
+                load_power: Some(30.0),
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: Some(60.0),
+                soh: Some(90.0),
+                temperature: Some(32.0),
+            },
+        };
+        let pkg_meter = DataPackage {
+            timestamp: 2,
+            electrical: ElectricalData {
+                active_power: Some(200.0),
+                phase: Some(PhaseElectricalData {
+                    active_power: [Some(50.0), Some(100.0), Some(50.0)],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: None,
+                soh: None,
+                temperature: None,
+            },
+        };
+
+        let i = AiIntegrator::new();
+        i.set_latest_data(pkg_south).await;
+        i.set_latest_data(pkg_meter).await;
+
+        let cur = i.latest_data.read().await;
+        let cur = cur.as_ref().expect("latest_data 应已写入");
+        // 电池字段沿用旧（南向）值，不因总表 None 变默认
+        assert_eq!(cur.battery.soc, Some(60.0), "SOC 应沿用南向值");
+        assert_eq!(cur.battery.soh, Some(90.0));
+        assert_eq!(cur.battery.temperature, Some(32.0));
+        // 电气量取新总表
+        assert_eq!(cur.electrical.active_power, Some(200.0));
+        assert!(cur.electrical.phase.is_some(), "phase 应取新总表");
     }
 
     #[tokio::test]

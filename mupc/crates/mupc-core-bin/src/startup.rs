@@ -171,7 +171,8 @@ fn read_meter_phases(
     ])
 }
 
-/// 读台区总表并组装含分相的 DataPackage（全部块读成功才更新；任一块失败返回 None → 沿用旧数据）
+/// 读台区总表并组装含分相的 DataPackage（分相块任一块读失败返回 None → 沿用旧数据；
+/// p_total 独立块失败仅降级聚合，不整周期失败）
 fn read_master_meter(
     meter: &rs485_plugin::device::Rs485Device,
     cfg: &MasterMeterConfig,
@@ -182,21 +183,30 @@ fn read_master_meter(
     let pf = read_meter_phases(meter, &rm.pf)?;
     let u = read_meter_phases(meter, &rm.u)?;
     let i_mag = read_meter_phases(meter, &rm.i)?;
+    // P2-1: p_total 独立块读失败/缺省时降级为分相有功和（best-effort，不整周期失败）。
+    // 权威口径：控制层 meter.p 恒用 Σphase.active_power；顶层 electrical.active_power 仅供遥测/展示。
     let p_total = match &rm.p_total {
-        Some(b) => {
-            let r = meter.read_holding_registers(b.addr, 2).ok()?;
-            if r.len() < 2 {
-                return None;
+        Some(b) => match meter.read_holding_registers(b.addr, 2) {
+            Ok(r) if r.len() >= 2 => {
+                mupc_data_processing::meter_regs::decode_regs(&r[..2], b.format, b.scale)
             }
-            mupc_data_processing::meter_regs::decode_regs(&r[..2], b.format, b.scale)
-        }
+            Ok(_) => {
+                tracing::warn!("总表 p_total 寄存器长度不足，降级为分相有功和");
+                p.iter().sum()
+            }
+            Err(e) => {
+                tracing::warn!("总表 p_total 读取失败（{}），降级为分相有功和", e);
+                p.iter().sum()
+            }
+        },
         None => p.iter().sum(),
     };
-    // 电流方向由分相有功符号承载（表计电流多给幅值；策略差模判据需带符号电流）
+    // 电流方向由分相有功符号承载（表计电流多给幅值；策略差模判据需带符号电流）。
+    // P2-3: p≈0（或=0）相方向取正（显式 >= 而非 signum——signum(0)=0 会丢幅值）
     let i = [
-        p[0].signum() * i_mag[0].abs(),
-        p[1].signum() * i_mag[1].abs(),
-        p[2].signum() * i_mag[2].abs(),
+        if p[0] >= 0.0 { i_mag[0].abs() } else { -i_mag[0].abs() },
+        if p[1] >= 0.0 { i_mag[1].abs() } else { -i_mag[1].abs() },
+        if p[2] >= 0.0 { i_mag[2].abs() } else { -i_mag[2].abs() },
     ];
     let phase = mupc_data_processing::telemetry::PhaseElectricalData {
         voltage: [Some(u[0]), Some(u[1]), Some(u[2])],
@@ -522,27 +532,36 @@ pub async fn initialize_all(
     }));
     coord.register_service("gateway", ServiceStatus::Running);
 
-    // U-26: 台区总表分相数据源（策略 phase 输入）。启用时总表 pkg 作为策略测量，
-    // 南向模拟数据不再 set_latest_data（避免覆盖含分相的总表数据）。
-    let meter_on = config.master_meter.enabled;
-    let master_meter = if meter_on {
+    // U-26: 台区总表分相数据源（策略 phase 输入）。启用且设备实际可用（串口 open 成功）时，
+    // 总表 pkg 作为策略测量，南向模拟数据不再 set_latest_data（避免覆盖含分相的总表数据）。
+    // P1-2: meter_on 取总表*实际可用性*而非仅 enabled 配置——enabled 但 open 失败时回退南向，
+    // 南向采集继续 set_latest_data 兜底测量（不因配置启用而丢失测量源）。
+    let master_meter = if config.master_meter.enabled {
         create_master_meter_device(&config.master_meter)
     } else {
         None
     };
-    if let Some(meter) = master_meter {
-        let ai_int_meter = ai_integrator.clone();
-        let cfg_m = config.master_meter.clone();
-        guard.0.push(tokio::spawn(async move {
-            let interval = std::time::Duration::from_millis(cfg_m.read_interval_ms);
-            loop {
-                tokio::time::sleep(interval).await;
-                if let Some(pkg) = read_master_meter(&meter, &cfg_m) {
-                    ai_int_meter.set_latest_data(pkg).await;
-                    tracing::debug!("总表分相数据已注入策略");
+    let meter_on = master_meter.is_some();
+    match master_meter {
+        Some(meter) => {
+            tracing::info!("台区总表在线：策略测量以总表分相数据为准");
+            let ai_int_meter = ai_integrator.clone();
+            let cfg_m = config.master_meter.clone();
+            guard.0.push(tokio::spawn(async move {
+                let interval = std::time::Duration::from_millis(cfg_m.read_interval_ms);
+                loop {
+                    tokio::time::sleep(interval).await;
+                    if let Some(pkg) = read_master_meter(&meter, &cfg_m) {
+                        ai_int_meter.set_latest_data(pkg).await;
+                        tracing::debug!("总表分相数据已注入策略");
+                    }
                 }
-            }
-        }));
+            }));
+        }
+        None if config.master_meter.enabled => {
+            tracing::warn!("台区总表不可用，策略测量回退南向");
+        }
+        None => {}
     }
 
     // 南向数据采集循环（上行）：读取 → 转换 → 持久化 + 北向 gateway 上送

@@ -420,6 +420,64 @@ impl CoreConfig {
         if self.web_api.listen_addr.is_empty() {
             return Err("web_api.listen_addr 不能为空".to_string());
         }
+        // P1-4/P2-2: 台区总表启用时校验现场前提（独立串口/从站）与寄存器映射有效性
+        if self.master_meter.enabled {
+            self.validate_master_meter()?;
+        }
+        Ok(())
+    }
+
+    /// P1-4/P2-2: 校验台区总表配置（enabled 时）：
+    /// serial_port 非空、slave_addr∈1..=247、与南向 RS485 默认串口分离（总线仲裁未实现）、
+    /// reg_map 各量地址非 0 且 6 寄存器区间互不重叠。
+    fn validate_master_meter(&self) -> Result<(), String> {
+        let mm = &self.master_meter;
+        if mm.serial_port.trim().is_empty() {
+            return Err("master_meter.serial_port 不能为空".to_string());
+        }
+        if !(1..=247).contains(&mm.slave_addr) {
+            return Err(format!(
+                "master_meter.slave_addr={} 须在 1..=247",
+                mm.slave_addr
+            ));
+        }
+        // 南向 RS485 串口当前不可配、默认 /dev/ttyUSB0；总表须独立串口或需总线仲裁（未实现）
+        if mm.serial_port == "/dev/ttyUSB0" {
+            return Err(
+                "master_meter.serial_port 与南向 RS485 默认串口 /dev/ttyUSB0 相同——台区总表须独立于南向 RS485 串口或需总线仲裁（未实现）"
+                    .to_string(),
+            );
+        }
+        Self::validate_reg_map(&mm.reg_map)
+    }
+
+    /// P2-2: 分相量块 p/q/pf/u/i 起始地址非 0 且三相连续 6 寄存器区间互不重叠。
+    fn validate_reg_map(reg_map: &MasterMeterRegMap) -> Result<(), String> {
+        let blocks: [(&str, &MeterRegBlock); 5] = [
+            ("p", &reg_map.p),
+            ("q", &reg_map.q),
+            ("pf", &reg_map.pf),
+            ("u", &reg_map.u),
+            ("i", &reg_map.i),
+        ];
+        for (name, b) in blocks.iter() {
+            if b.addr == 0 {
+                return Err(format!("master_meter.reg_map.{} addr 不能为 0", name));
+            }
+        }
+        for (i, (name_i, b_i)) in blocks.iter().enumerate() {
+            for (name_j, b_j) in blocks.iter().skip(i + 1) {
+                let a0 = b_i.addr as u32;
+                let b0 = b_j.addr as u32;
+                // 半开区间 [addr, addr+6)：三相各占 2 寄存器
+                if a0 < b0 + 6 && b0 < a0 + 6 {
+                    return Err(format!(
+                        "master_meter.reg_map.{} 与 {} 寄存器区间重叠（各量三相连续 6 寄存器不得交叠）",
+                        name_i, name_j
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -502,6 +560,7 @@ plugins: {}
                 search_paths: vec![PathBuf::from("/tmp/plugins")],
                 auto_load: vec!["rs485_plugin".into()],
             },
+            master_meter: MasterMeterConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -543,7 +602,117 @@ plugins: {}
                 search_paths: vec![],
                 auto_load: vec![],
             },
+            master_meter: MasterMeterConfig::default(),
         };
         assert!(config.validate().is_err());
+    }
+
+    /// P1-4: 总表启用但 serial_port 与南向默认 /dev/ttyUSB0 相同 → validate Err
+    #[test]
+    fn test_validate_master_meter_shared_serial_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyUSB0"
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("仲裁") || err.contains("独立"),
+            "期望提示串口冲突/总线仲裁，实际: {}",
+            err
+        );
+    }
+
+    /// P1-4: 总表启用但 slave_addr 越界 → validate Err
+    #[test]
+    fn test_validate_master_meter_slave_addr_range() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS2"
+  slave_addr: 0
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    /// P2-2: 总表 reg_map 各量地址重叠 → validate Err
+    #[test]
+    fn test_validate_master_meter_reg_overlap_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS2"
+  slave_addr: 3
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x100 }
+    pf: { addr: 0x110 }
+    u: { addr: 0x116 }
+    i: { addr: 0x11C }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("重叠"), "期望提示寄存器重叠，实际: {}", err);
+    }
+
+    /// P1-4 + P2-2: 独立串口 + 合法且不重叠 reg_map → validate Ok
+    #[test]
+    fn test_validate_master_meter_valid_ok() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS2"
+  slave_addr: 3
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x106 }
+    pf: { addr: 0x10C }
+    u: { addr: 0x112 }
+    i: { addr: 0x118 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok(), "合法总表配置应通过: {:?}", config.validate());
     }
 }
