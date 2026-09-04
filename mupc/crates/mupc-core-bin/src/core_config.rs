@@ -427,9 +427,9 @@ impl CoreConfig {
         Ok(())
     }
 
-    /// P1-4/P2-2: 校验台区总表配置（enabled 时）：
-    /// serial_port 非空、slave_addr∈1..=247、与南向 RS485 默认串口分离（总线仲裁未实现）、
-    /// reg_map 各量地址非 0 且 6 寄存器区间互不重叠。
+    /// P1-4/P2-2/N1/N2: 校验台区总表配置（enabled 时）：
+    /// serial_port 非空、slave_addr∈1..=247、采集周期须小于策略数据新鲜度阈值（5s）、
+    /// 与南向 RS485 默认串口分离（总线仲裁未实现）、reg_map 各量地址非 0 且区间互不重叠。
     fn validate_master_meter(&self) -> Result<(), String> {
         let mm = &self.master_meter;
         if mm.serial_port.trim().is_empty() {
@@ -439,6 +439,13 @@ impl CoreConfig {
             return Err(format!(
                 "master_meter.slave_addr={} 须在 1..=247",
                 mm.slave_addr
+            ));
+        }
+        // N1: AiIntegrator 数据新鲜度阈值为 5s——采集周期 ≥5s 会恒判 stale 导致兜底停发
+        if mm.read_interval_ms >= 5000 {
+            return Err(format!(
+                "master_meter.read_interval_ms={} 须 < 5000（AiIntegrator 数据新鲜度阈值 5s，采集须持续更新）",
+                mm.read_interval_ms
             ));
         }
         // 南向 RS485 串口当前不可配、默认 /dev/ttyUSB0；总表须独立串口或需总线仲裁（未实现）
@@ -451,29 +458,38 @@ impl CoreConfig {
         Self::validate_reg_map(&mm.reg_map)
     }
 
-    /// P2-2: 分相量块 p/q/pf/u/i 起始地址非 0 且三相连续 6 寄存器区间互不重叠。
+    /// P2-2/N2: 分相量块 p/q/pf/u/i 起始地址非 0 且三相连续 6 寄存器区间互不重叠；
+    /// 可选 p_total（单值 2 寄存器）同样校验且不与其它块重叠。
     fn validate_reg_map(reg_map: &MasterMeterRegMap) -> Result<(), String> {
-        let blocks: [(&str, &MeterRegBlock); 5] = [
-            ("p", &reg_map.p),
-            ("q", &reg_map.q),
-            ("pf", &reg_map.pf),
-            ("u", &reg_map.u),
-            ("i", &reg_map.i),
+        struct Block {
+            name: &'static str,
+            addr: u16,
+            width: u32, // 分相量三相连续 6 寄存器；p_total 单值 2
+        }
+        let mut blocks = vec![
+            Block { name: "p", addr: reg_map.p.addr, width: 6 },
+            Block { name: "q", addr: reg_map.q.addr, width: 6 },
+            Block { name: "pf", addr: reg_map.pf.addr, width: 6 },
+            Block { name: "u", addr: reg_map.u.addr, width: 6 },
+            Block { name: "i", addr: reg_map.i.addr, width: 6 },
         ];
-        for (name, b) in blocks.iter() {
+        if let Some(pt) = &reg_map.p_total {
+            blocks.push(Block { name: "p_total", addr: pt.addr, width: 2 });
+        }
+        for b in &blocks {
             if b.addr == 0 {
-                return Err(format!("master_meter.reg_map.{} addr 不能为 0", name));
+                return Err(format!("master_meter.reg_map.{} addr 不能为 0", b.name));
             }
         }
-        for (i, (name_i, b_i)) in blocks.iter().enumerate() {
-            for (name_j, b_j) in blocks.iter().skip(i + 1) {
-                let a0 = b_i.addr as u32;
-                let b0 = b_j.addr as u32;
-                // 半开区间 [addr, addr+6)：三相各占 2 寄存器
-                if a0 < b0 + 6 && b0 < a0 + 6 {
+        for (i, bi) in blocks.iter().enumerate() {
+            for bj in blocks.iter().skip(i + 1) {
+                let ai = bi.addr as u32;
+                let aj = bj.addr as u32;
+                // 半开区间 [addr, addr+width) 重叠判定
+                if ai < aj + bj.width && aj < ai + bi.width {
                     return Err(format!(
-                        "master_meter.reg_map.{} 与 {} 寄存器区间重叠（各量三相连续 6 寄存器不得交叠）",
-                        name_i, name_j
+                        "master_meter.reg_map.{} 与 {} 寄存器区间重叠（{}+{} 与 {}+{} 不得交叠）",
+                        bi.name, bj.name, bi.name, bi.width, bj.name, bj.width
                     ));
                 }
             }
@@ -714,5 +730,65 @@ master_meter:
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.validate().is_ok(), "合法总表配置应通过: {:?}", config.validate());
+    }
+
+    /// N1: 采集周期 >= 数据新鲜度阈值（5s）→ validate Err（兜底会恒判 stale 停发）
+    #[test]
+    fn test_validate_master_meter_read_interval_too_long() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS2"
+  slave_addr: 3
+  read_interval_ms: 5000
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("read_interval_ms"),
+            "期望提示采集周期与新鲜度阈值冲突，实际: {}",
+            err
+        );
+    }
+
+    /// N2: 可选 p_total 块与分相块重叠 → validate Err
+    #[test]
+    fn test_validate_master_meter_p_total_overlap_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS2"
+  slave_addr: 3
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x106 }
+    pf: { addr: 0x10C }
+    u: { addr: 0x112 }
+    i: { addr: 0x118 }
+    p_total: { addr: 0x100 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("重叠"), "期望提示 p_total 与 p 重叠，实际: {}", err);
     }
 }
