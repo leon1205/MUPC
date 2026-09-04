@@ -5,6 +5,7 @@
 pub mod heartbeat;
 pub mod protocol;
 pub mod tcp_server;
+pub mod transport;
 pub mod watchdog;
 pub mod modbus_rtu;
 
@@ -14,4 +15,5 @@ pub use tcp_server::{
     CommandConfig, CommandQueue, ControlCmdPayload, ControlCmdPayloadV2, ControlCmdPayloadV3,
     DualParamCommand, IntercoreClient, IntercoreConfig, IntercoreServer,
 };
+pub use transport::{IntercoreTransport, TcpTransport};
 pub use watchdog::Watchdog;
