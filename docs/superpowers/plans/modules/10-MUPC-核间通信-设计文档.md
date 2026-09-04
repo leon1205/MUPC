@@ -1002,6 +1002,10 @@ tokio-test = "0.4"              # Tokio 测试工具
 | ADR-006 | 序列号匹配策略 | ① u16 循环递增；② u32 递增；③ UUID | **u16 循环递增** | 与帧头长度匹配（2 字节），足够用于请求-应答匹配（65535 个并发指令远超出实际需求） |
 | ADR-007 | 心跳与看门狗分离设计 | ① 心跳管理器 + 看门狗两个独立组件；② 合并为一个组件 | **分离设计** | 心跳管理器负责连接状态跟踪和健康检测循环；看门狗独立负责超时判定和告警/复位逻辑；职责分离，便于单组件测试和替换 |
 | ADR-008 | CRC 算法选择 | ① MODBUS CRC16；② CRC32；③ Adler-32 | **MODBUS CRC16** | 2 字节校验满足帧传输错误检测需求；CRC16 计算开销低（每帧计算量小）；工业协议广泛采用 |
+| ADR-009 | 传输通道抽象层级（新增 Modbus RTU 备选） | ① intercore 内部 `IntercoreTransport` trait，IntercoreClient 作门面；② 上层双客户端（AiIntegrator 按配置选）；③ 独立 transport crate | **intercore 内部 trait（方案①）** | 改动集中在 intercore 内部，上层（AiIntegrator/strategy-engine/web-api）接口不变、零改动；最符合"通信选择"定位（对控制逻辑透明） |
+| ADR-010 | Modbus 寄存器数值编码 | ① int32 有符号缩放（2 寄存器/值）；② IEEE754 f64（4 寄存器/值） | **int32 缩放（方案①）** | 工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够；`k_droop` 用 0.001 缩放 |
+| ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16 |
+| ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载 |
 
 ### 10.2 待澄清问题
 
@@ -1011,6 +1015,159 @@ tokio-test = "0.4"              # Tokio 测试工具
 | 2 | StatusReport 和 DataUpload 的上送周期是否相同，是否需要差异化配置 | 低 | 待确认 |
 | 3 | 是否需要实现指令队列/缓存机制（连接断开时暂存指令） | 中 | 待确认 |
 | 4 | 是否需要支持多个实时控制模块同时连接（当前实现已支持 HashMap 存储多连接） | 中 | 待确认 |
+
+---
+
+## 11. 传输通道抽象与 Modbus RTU 备选链路
+
+### 11.1 背景与目标
+
+部分现场以太网（TCP/RJ45）布线不可行或距离受限，需在现有 TCP 核间链路之外，提供一条 **Modbus RTU（RS485）备选链路**。要求：
+
+- **通道可选择**：通过配置 `intercore.transport` 选择走以太网（`tcp`）或 Modbus RTU（`modbus_rtu`），部署时二选一，非运行时热备；
+- **上层透明**：控制指令下发（AI 双参数 / 台区储能分相 P/Q）、状态查询接口不变，策略引擎、Web API 零改动；
+- **Slave 参考实现**：本 repo 同时提供 Modbus RTU Slave 参考实现（模拟实时控制模块），便于无外部固件时本地联调验证寄存器映射。
+
+**数据面边界（ADR-012）**：Modbus 通道承载**控制下行 + 执行确认 + 心跳/健康状态上行**；**遥测上送（StatusReport/DataUpload）与 SafetyOverride 事件仍走 TCP 以太网链路**。依据：本系统遥测主数据流来自南向采集（非核间实时模块上送），RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全关键即时事件，Modbus 轮询模式无法保证及时性。走 `modbus_rtu` 时遥测/SafetyOverride 依赖 TCP 存在——若现场完全无以太网，须另行评估遥测路径（不在本次范围）。
+
+### 11.2 可行性评估
+
+| 维度 | 评估 | 结论 |
+|---|---|---|
+| 数据量 | 核间控制为秒级下发，单帧负载小（AI 双参数 2 个 f64；台区分相 6 个 f64） | ✅ 保持寄存器（16bit）足以承载 |
+| 实时性 | Modbus 写/读周期 10~100ms，核间控制周期 1s 级 | ✅ 满足 |
+| 带宽 | RS485 常用波特率 9600~115200，控制数据量小 | ✅ 充足 |
+| 校验 | Modbus RTU 自带 CRC16 | ✅ 帧校验完备 |
+| 基础设施 | rs485-plugin 已有 Modbus CRC16 / 寄存器读写实现可参考 | ✅ 无需从零写帧 |
+| 栈选型 | tokio-modbus 提供 async master + server（slave） | ✅ 与 tokio 栈契合 |
+| **主要风险** | ① 寄存器映射表为协议基线，须与**实时控制模块固件**确认（Slave 侧实现参考版供对齐）；② 串口物理层（RS485 接线/终端电阻/DE/RE 方向控制）需现场验证；③ 数据面边界（ADR-012）依赖 TCP 存在——无以太网现场遥测路径未覆盖 | ⚠️ 依赖外部对齐 |
+
+### 11.3 Transport 抽象（intercore 内部，上层零改动）
+
+`IntercoreClient` 由「TCP 客户端」重构为「传输门面」：内部持 `Arc<dyn IntercoreTransport>`，按配置选 Tcp 或 ModbusRtu。**上层接口（`send_dual_param`/`send_tai_command`/`is_connected`）签名不变**。
+
+```rust
+// intercore/src/transport.rs
+#[async_trait]
+pub trait IntercoreTransport: Send + Sync {
+    /// 下发 AI 双参数（p_ref/k_droop）
+    async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError>;
+    /// 下发台区储能分相 P/Q（核间 V3）
+    async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], mode: &str) -> Result<(), MupcError>;
+    /// 连接状态（心跳/看门狗检测用）
+    async fn is_connected(&self) -> bool;
+    async fn shutdown(&self) -> Result<(), MupcError>;
+}
+```
+
+- **TcpTransport**：现有 TCP 帧封装逻辑（`send_frame` + 持久 TcpStream + V1/V2/V3 JSON payload）原样迁移，协议不变；
+- **ModbusRtuTransport**：Master，不传帧字节，按 §11.4 寄存器映射写控制寄存器 + 轮询读状态；
+- `IntercoreClient` 保留 `connected`/`last_p_ref`/`last_k_droop` 门面状态，委托给 transport。
+
+### 11.4 Modbus 寄存器映射与编码
+
+实时控制模块（Slave）持有一块保持寄存器区，分三区：**控制区**（Master 写，FC16）、**执行确认区**（从站写、Master 读，FC03）、**状态/心跳区**（从站写、Master 读）。从站地址可配（默认 1）。
+
+| 分区 | 地址 | 内容 | 方向 | 编码 |
+|---|---|---|---|---|
+| 控制区 | **0x0000** | `cmd_ctrl` 命令控制字 | 写 | 低字节：bit0 `cmd_valid`（上升沿触发从站采样生效）、bit1-3 `strategy_mode`、bit4 `ai_ready`；**高字节：`cmd_seq`（Master 每次下发递增 u8，用于执行确认匹配）** |
+| 控制区 | **0x0001** | `protocol_version` | 写 | u16，Master 写期望协议版本（当前 1）；从站校验不符则拒采纳并置 `exec_status` 失败 |
+| 控制区 | **0x0010-0x0011** | `p_ref` | 写 | int32 有符号，0.01 kW/LSB |
+| 控制区 | **0x0012-0x0013** | `k_droop` | 写 | int32 有符号，0.001 kW/V·LSB |
+| 控制区 | **0x0020-0x0021** | `phase_p[A]` | 写 | int32，0.01 kW/LSB |
+| 控制区 | **0x0022-0x0023** | `phase_p[B]` | 写 | 同上 |
+| 控制区 | **0x0024-0x0025** | `phase_p[C]` | 写 | 同上 |
+| 控制区 | **0x0026-0x0027** | `phase_q[A]` | 写 | int32，0.01 kVAr/LSB |
+| 控制区 | **0x0028-0x0029** | `phase_q[B]` | 写 | 同上 |
+| 控制区 | **0x002A-0x002B** | `phase_q[C]` | 写 | 同上 |
+| 执行确认区 | **0x0030-0x0031** | `exec_seq` | 读 | int32，从站回写本次采纳的指令序号（对应 ControlRsp.seq_no） |
+| 执行确认区 | **0x0032** | `exec_status` | 读 | u16：0 空闲 / 1 执行中 / 2 执行成功 / 3 执行失败 / 4 超时（对应 ControlRsp.result） |
+| 执行确认区 | **0x0033** | `exec_error` | 读 | u16 错误码（对应 ControlRsp.error_msg，映射表从站实现） |
+| 状态区 | **0x0100** | `heartbeat_counter` | 读 | u16，实时模块周期递增（master 轮询判在线/超时） |
+| 状态区 | **0x0101** | `device_status` | 读 | u16 状态字（bit0 运行/bit1 故障…） |
+| 状态区 | **0x0102-0x0103** | `cpu_temp` | 读 | int32，0.01 ℃/LSB |
+| 状态区 | **0x0104-0x0105** | `memory_usage` | 读 | int32，0.01 %/LSB |
+
+**编码选择**：int32 缩放（2 寄存器/值）而非 IEEE754（4 寄存器/值）——工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够。`k_droop` 数量级小，用 0.001 缩放。
+
+**写生效 + 执行确认流程（对齐 PRD §3.1 ControlCmd/ControlRsp 语义）**：
+1. Master 递增 `cmd_seq`，FC16 写整块数据寄存器（含 0x0001 版本，首次）；
+2. 写 `cmd_ctrl`（低字节 `cmd_valid=1` + strategy_mode/ai_ready；**高字节 = 当前 `cmd_seq`**）→ 从站 `cmd_valid` 上升沿采样整块，防半写采纳；
+3. 从站校验版本/采纳 → 写 `exec_seq = cmd_seq` + `exec_status`（2 成功 / 3 失败 + `exec_error`）；
+4. Master 轮询读 0x0030-0x0033：`exec_seq == cmd_seq` 且 `exec_status==2` → 指令确认；`==3` → 失败（读错误码）；**超时（5s，对齐 PRD）→ 标记失败，可选重试最多 2 次**；
+5. Master 采样确认后清 `cmd_valid`。
+
+**心跳与离线判定**：Master 定时 FC03 读 `0x0100`，计数递增 → 实时模块在线；**连续 N 次（默认 3，对齐 PRD §4.2 丢失阈值）读失败或计数无变化 → 判离线**（替代 TCP 心跳帧/看门狗语义），恢复后判在线。
+
+### 11.5 Modbus RTU 栈选型与实现拆分
+
+选 **tokio-modbus**（async master + server），底层 tokio-serial（serialport，跨平台串口）。
+
+```
+intercore/
+├── transport.rs          # IntercoreTransport trait
+├── transport/tcp.rs      # TcpTransport（现有 TCP 逻辑迁移）
+├── transport/modbus.rs   # ModbusRtuTransport（Master）
+├── modbus_rtu.rs         # 寄存器映射表 + f64↔int32 编解码 + cmd_ctrl 触发
+└── bin/modbus_slave.rs   # Slave 参考实现（模拟实时控制模块）
+```
+
+### 11.6 Slave 参考实现（modbus_slave.rs）
+
+独立二进制，模拟实时控制模块：tokio-modbus server 绑定串口，暴露寄存器区；内部维护控制区副本，收到 `cmd_valid` 上升沿时——① 校验 `protocol_version`，② 采样整块数据寄存器更新"生效指令"，③ 回写 `exec_seq`/`exec_status`（模拟采纳执行结果，含可注入失败以测重试路径），④ 清 `cmd_valid`；周期递增心跳计数。用途：本地联调验证映射与执行确认（虚拟串口对），并作为实时模块固件的寄存器协议参照。
+
+### 11.7 配置结构（core_config.rs）
+
+```yaml
+intercore:
+  transport: "tcp"              # "tcp" | "modbus_rtu"（通道选择，默认 tcp = 现有行为）
+  host: "192.168.1.2"           # TCP 参数（transport=tcp 用）
+  port: 9100
+  heartbeat_interval_sec: 5
+  reconnect_interval_sec: 3
+  modbus_rtu:                   # Modbus RTU 参数（transport=modbus_rtu 用）
+    serial_port: "/dev/ttyS1"   # Linux 例；Windows 用 COM3
+    baud_rate: 9600
+    data_bits: 8
+    stop_bits: 1
+    parity: "none"
+    slave_addr: 1               # 实时控制模块从站地址
+    response_timeout_ms: 200
+    heartbeat_poll_ms: 1000
+```
+
+`InterCoreConfig` 新增 `transport: String`（默认 `"tcp"`）+ `modbus_rtu: ModbusRtuConfig`。startup 按 `transport` 构造 transport 实例注入 `IntercoreClient`。
+
+### 11.8 改动文件清单
+
+| 文件 | 改动 |
+|---|---|
+| intercore/src/transport.rs + transport/{tcp,modbus}.rs | IntercoreTransport trait + 两实现（新） |
+| intercore/src/modbus_rtu.rs | 寄存器表 + 编解码 + cmd_ctrl（新） |
+| intercore/src/bin/modbus_slave.rs | Slave 参考实现（新） |
+| intercore/src/tcp_server.rs | IntercoreClient 改持 `Arc<dyn IntercoreTransport>`，TCP 逻辑抽出为 TcpTransport |
+| intercore/Cargo.toml | + tokio-modbus / tokio-serial |
+| mupc-core-bin core_config.rs / startup.rs | 配置扩展 + 按 transport 构造 |
+| deploy/config/mupc_core_config.yaml | intercore 段加 transport/modbus_rtu |
+| intercore 测试 | 编解码 roundtrip / cmd_valid 触发 / 心跳在线 |
+
+**上层零改动**：AiIntegrator、strategy-engine、web-api 接口不变。
+
+### 11.9 验证方式
+
+1. **单元**：f64↔int32 编解码 roundtrip、cmd_ctrl 位操作、寄存器地址表；
+2. **端到端联调**：虚拟串口对（Windows com0com / Linux socat）→ Master ↔ Slave 参考 → 下发分相 P/Q 生效 + 心跳在线检测；
+3. **回归**：`transport: "tcp"` 下现有 AI/本地优先下发全跑通（TcpTransport 不改变协议）。
+
+### 11.10 依赖与风险确认（实现前）
+
+1. **寄存器映射表须与实时控制模块固件对齐**（地址/缩放/`cmd_valid` 触发/`exec_status` 语义）——本设计为基线，Slave 参考实现供联调；
+2. RS485 物理层：接线极性、终端电阻、DE/RE 方向控制（半双工）需现场核验；
+3. Modbus RTU 点对点（1 Master : 1 Slave），不支持现有 TCP 的多连接场景（§10.2 待澄清问题 4 仅适用 TCP）；
+4. **下发延迟预算**（对齐 PRD §7.1 ≤50ms）：一次下发 = 数据寄存器 FC16 + cmd_ctrl FC06 两帧，9600bps 下约 20~30ms，需以实测确认满足 50ms（波特率不足时提高，如 19200）；
+5. **遥测/SafetyOverride 依赖 TCP**（ADR-012 边界）：`transport=modbus_rtu` 时须保证 TCP 链路仍承载遥测与安全事件（否则另行评估，不在本次范围）；
+6. **配置热切偏离**（对齐 PRD §7.4）：`transport` 为部署配置二选一，需重启生效；Web UI 运行时切换不实现，记为此处对 PRD 可维护性需求的授权偏离；
+7. **日志脱敏**（对齐 PRD §7.3）：Modbus 寄存器写值（控制数值）不入日志，仅记录指令类型/结果/`cmd_seq`。
 
 ---
 
@@ -1027,3 +1184,4 @@ tokio-test = "0.4"              # Tokio 测试工具
 | 版本 | 主要变更 |
 |------|----------|
 | v1.0 | 从 PRD v1.0、技术设计 v1.1 和代码库 intercore 实现合并整理 |
+| v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |

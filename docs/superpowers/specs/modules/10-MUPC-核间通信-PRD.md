@@ -103,6 +103,30 @@
 | `0x0030` | DataUpload | 实时控制模块 → 通信管理模块 | 数据上送（周期遥测，含 q_realtime_margin） |
 | `0x0040` | SafetyOverride | 实时控制模块 → 通信管理模块 | 安全覆盖触发 |
 
+### 2.4 Modbus RTU 备选通道（架构调整）
+
+**需求描述：**
+在以太网（TCP Socket）核间链路之外，提供一条 **Modbus RTU（RS485）备选控制链路**，通过配置选择走以太网还是 Modbus RTU（部署时二选一，非运行时热备）。
+
+**数据面边界（ADR-012）**：Modbus 通道承载**控制下行 + 执行确认 + 心跳/健康状态上行**；**遥测上送（StatusReport/DataUpload）与 SafetyOverride 仍走 TCP 以太网链路**。
+
+**主从角色**：通信管理模块为 **Modbus Master**（主动写控制寄存器 FC16 / 读状态寄存器 FC03），实时控制模块为 **Slave**（暴露保持寄存器区）。
+
+**承载内容：**
+| 数据 | 说明 |
+|------|------|
+| 控制下行 | AI 双参数（p_ref/k_droop）或台区储能分相 P/Q（与 TCP 通道一致，一次一种） |
+| 协议/序号 | protocol_version 版本寄存器 + cmd_seq 指令序号 |
+| 执行确认 | exec_seq/exec_status/exec_error 寄存器（语义对齐 ControlRsp：成功/失败/超时） |
+| 心跳/状态 | heartbeat_counter/device_status/cpu_temp/memory_usage（master 轮询） |
+
+**验收标准：**
+- 配置 `intercore.transport` 可选择 `tcp` 或 `modbus_rtu`
+- 控制指令经 Modbus 下发有**执行确认**（读回 exec_seq/exec_status）
+- 指令确认超时 5 秒，超时标记失败、可选重试（对齐 §3.1）
+- 心跳改轮询读 heartbeat_counter，连续丢失判离线（对齐 §4.2 语义）
+- 寄存器映射表 / int32 缩放编码 / cmd_valid 触发为协议基线，须与实时控制模块固件对齐
+
 ---
 
 ## 3. 数据交换
@@ -524,6 +548,18 @@ Payload 格式（JSON 编码）：
 | IC-AC-05 | CRC16 校验错误时帧被丢弃并记录日志 | 单元测试 |
 | IC-AC-06 | 所有帧类型（8 种）编码解码正确 | 单元测试 |
 
+### 8.1b Modbus RTU 备选通道（v2.0）
+
+| 编号 | 验收项 | 验证方式 |
+|------|-------|---------|
+| IC-AC-33 | 配置 `intercore.transport` 可选择 `tcp` / `modbus_rtu` | 功能测试 |
+| IC-AC-34 | Modbus Master 经 FC16 写控制寄存器下发控制指令（AI 双参数 / 台区分相 P/Q） | 单元测试 |
+| IC-AC-35 | 控制指令执行确认：读回 `exec_seq`/`exec_status` 匹配 | 单元测试 |
+| IC-AC-36 | 指令确认超时 5s 标记失败，可选重试（最多 2 次） | 单元测试 |
+| IC-AC-37 | Modbus 心跳轮询：连续丢失判离线、恢复判在线 | 单元测试 |
+| IC-AC-38 | 寄存器 f64↔int32 缩放编解码 roundtrip | 单元测试 |
+| IC-AC-39 | Slave 参考实现与 Master 联调（虚拟串口对）下发生效 | 集成测试 |
+
 ### 8.2 指令下发
 
 | 编号 | 验收项 | 验证方式 |
@@ -637,3 +673,4 @@ strategy-engine ──→ intercore ──→ 实时控制模块
 | 版本 | 主要变更 |
 |------|----------|
 | v1.0 | 从主 PRD 提取核间通信需求，补充关键信号定义、帧格式详述、验收标准汇总 |
+| v2.0 | 新增 Modbus RTU 备选控制通道：配置 transport 选择 tcp/modbus_rtu，控制下行 + 执行确认 + 心跳轮询，遥测/SafetyOverride 仍走 TCP（ADR-012 数据面边界）；补 §2.4 需求与 IC-AC-33~39 验收 |
