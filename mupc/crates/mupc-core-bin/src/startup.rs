@@ -285,20 +285,21 @@ pub async fn initialize_all(
     let intercore: Arc<mupc_intercore::IntercoreClient> = if config.intercore.transport == "modbus_rtu" {
         let mb = &config.intercore.modbus_rtu;
         tracing::info!("intercore transport = modbus_rtu: {} @{}", mb.serial_port, mb.baud_rate);
-        Arc::new(mupc_intercore::IntercoreClient::with_transport(
-            Arc::new(mupc_intercore::ModbusRtuTransport::new(
-                mupc_intercore::ModbusRtuSettings {
-                    serial_port: mb.serial_port.clone(),
-                    baud_rate: mb.baud_rate,
-                    data_bits: mb.data_bits,
-                    stop_bits: mb.stop_bits,
-                    parity: mb.parity.clone(),
-                    slave_addr: mb.slave_addr,
-                    response_timeout_ms: mb.response_timeout_ms,
-                    heartbeat_poll_ms: mb.heartbeat_poll_ms,
-                },
-            )),
-        ))
+        let transport = Arc::new(mupc_intercore::ModbusRtuTransport::new(
+            mupc_intercore::ModbusRtuSettings {
+                serial_port: mb.serial_port.clone(),
+                baud_rate: mb.baud_rate,
+                data_bits: mb.data_bits,
+                stop_bits: mb.stop_bits,
+                parity: mb.parity.clone(),
+                slave_addr: mb.slave_addr,
+                response_timeout_ms: mb.response_timeout_ms,
+                heartbeat_poll_ms: mb.heartbeat_poll_ms,
+            },
+        ));
+        // Modbus 无主动心跳，后台轮询 REG_HEARTBEAT 判在线/离线
+        tokio::spawn(transport.clone().run_heartbeat_loop());
+        Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
     } else {
         let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
         Arc::new(mupc_intercore::IntercoreClient::new(remote_addr))
