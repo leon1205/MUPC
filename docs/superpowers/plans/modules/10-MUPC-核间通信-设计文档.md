@@ -1095,7 +1095,7 @@ pub trait IntercoreTransport: Send + Sync {
 2. 写 `cmd_ctrl`（低字节 `cmd_valid=1` + strategy_mode/ai_ready；**高字节 = 当前 `cmd_seq`**）→ 从站 `cmd_valid` 上升沿采样整块，防半写采纳；
 3. 从站校验版本/采纳 → 写 `exec_seq = cmd_seq` + `exec_status`（2 成功 / 3 失败 + `exec_error`）；
 4. Master 轮询读 0x0030-0x0033：`exec_seq == cmd_seq` 且 `exec_status==2` → 指令确认；`==3` → 失败（读错误码）；**超时（5s，对齐 PRD）→ 标记失败，可选重试最多 2 次**；
-5. Master 采样确认后清 `cmd_valid`。
+5. **从站采纳后自清 `cmd_valid`**（本实现约定：Master 不清 valid，每次新指令由从站自清后形成新的 0→1 上升沿）；Master 读到 `exec_seq` 匹配即完成本次下发确认，无需额外清位。
 
 **心跳与离线判定**：Master 定时 FC03 读 `0x0100`，计数递增 → 实时模块在线；**连续 N 次（默认 3，对齐 PRD §4.2 丢失阈值）读失败或计数无变化 → 判离线**（替代 TCP 心跳帧/看门狗语义），恢复后判在线。
 
@@ -1163,7 +1163,7 @@ intercore:
 
 ### 11.10 依赖与风险确认（实现前）
 
-1. **寄存器映射表须与实时控制模块固件对齐**（地址/缩放/`cmd_valid` 触发/`exec_status` 语义）——本设计为基线，Slave 参考实现供联调；
+1. **寄存器映射表须与实时控制模块固件对齐**（地址/缩放/`cmd_valid` 触发/`exec_status` 语义）。**关键契约（I-2）**：`cmd_valid` 的清除责任为**从站采纳后自清**（Master 不清、每次新指令由从站自清形成上升沿）——实时固件必须同样自清，否则自第 2 条指令起无上升沿、`issue()` 全部超时；Slave 参考实现已按此约定；
 2. RS485 物理层：接线极性、终端电阻、DE/RE 方向控制（半双工）需现场核验；
 3. Modbus RTU 点对点（1 Master : 1 Slave），不支持现有 TCP 的多连接场景（§10.2 待澄清问题 4 仅适用 TCP）；
 4. **下发延迟预算**（对齐 PRD §7.1 ≤50ms）：一次下发 = 数据寄存器 FC16 + cmd_ctrl FC06 两帧，9600bps 下约 20~30ms，需以实测确认满足 50ms（波特率不足时提高，如 19200）；
