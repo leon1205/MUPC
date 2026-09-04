@@ -50,3 +50,19 @@ plugins:
     - "rs485_plugin"
     - "hplc_plugin"
     - "mqtt_plugin"
+
+# 台区总表分相数据源（U-26：台区储能策略 phase 输入）
+# enabled: true 并填真实点表（reg_map 各量起始寄存器）后方启用；默认关
+master_meter:
+  enabled: false
+  serial_port: "/dev/ttyUSB0"
+  baud_rate: 9600
+  slave_addr: 3
+  read_interval_ms: 1000
+  reg_map:                 # 示例占位地址；三相连续，Int32/Float32 均 2 寄存器/相
+    p:  { addr: 0x0000, format: int32_scaled, scale: 0.01 }   # P_A/B/C
+    q:  { addr: 0x0006, format: int32_scaled, scale: 0.01 }   # Q_A/B/C
+    pf: { addr: 0x000C, format: int32_scaled, scale: 0.001 }  # PF_A/B/C
+    u:  { addr: 0x0012, format: float32 }                     # U_A/B/C
+    i:  { addr: 0x0018, format: int32_scaled, scale: 0.01 }   # I_A/B/C
+    p_total: { addr: 0x001E, format: int32_scaled, scale: 0.01 }

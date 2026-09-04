@@ -21,6 +21,9 @@ pub struct CoreConfig {
     pub ai_engine: AiEngineConfig,
     /// 插件配置
     pub plugins: PluginsConfig,
+    /// 台区总表分相数据源（U-26：台区储能策略 phase 输入）
+    #[serde(default)]
+    pub master_meter: MasterMeterConfig,
 }
 
 /// 系统级配置
@@ -160,6 +163,117 @@ pub struct PluginsConfig {
     /// 自动加载的插件名列表
     #[serde(default = "default_auto_load")]
     pub auto_load: Vec<String>,
+}
+
+/// 台区总表分相数据源配置（U-26）
+///
+/// 总表以 RS485 Modbus 保持寄存器暴露分相量；各量寄存器块定义见
+/// [`MasterMeterRegMap`]。寄存器地址为现场点表占位，默认值仅示例。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MasterMeterConfig {
+    /// 是否启用总表采集（默认关；启用须配真点表）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 串口设备，默认 /dev/ttyUSB0
+    #[serde(default = "default_meter_serial")]
+    pub serial_port: String,
+    /// 波特率
+    #[serde(default = "default_meter_baud")]
+    pub baud_rate: u32,
+    /// 总表从站地址
+    #[serde(default = "default_meter_slave")]
+    pub slave_addr: u8,
+    /// 采集周期（毫秒）
+    #[serde(default = "default_meter_interval")]
+    pub read_interval_ms: u64,
+    /// 分相量寄存器映射（各量三相连续，Int32/Float32 均 2 寄存器/相）
+    #[serde(default)]
+    pub reg_map: MasterMeterRegMap,
+}
+
+/// 分相量寄存器映射（各块起始地址；三相连续读 3×2 寄存器）
+#[derive(Debug, Clone, Deserialize)]
+pub struct MasterMeterRegMap {
+    #[serde(default)]
+    pub p: MeterRegBlock,
+    #[serde(default)]
+    pub q: MeterRegBlock,
+    #[serde(default)]
+    pub pf: MeterRegBlock,
+    #[serde(default)]
+    pub u: MeterRegBlock,
+    #[serde(default)]
+    pub i: MeterRegBlock,
+    /// 总有功（可选，None 时由分相聚合）
+    pub p_total: Option<MeterRegBlock>,
+}
+
+/// 单个量寄存器块定义
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeterRegBlock {
+    /// 起始寄存器地址（A 相）
+    pub addr: u16,
+    /// 数值格式（float32 / int32_scaled）
+    #[serde(default = "default_reg_format")]
+    pub format: mupc_data_processing::meter_regs::RegFormat,
+    /// int32 缩放因子（format=int32_scaled 用）
+    #[serde(default = "default_reg_scale")]
+    pub scale: f64,
+}
+
+fn default_meter_serial() -> String {
+    "/dev/ttyUSB0".to_string()
+}
+fn default_meter_baud() -> u32 {
+    9600
+}
+fn default_meter_slave() -> u8 {
+    3
+}
+fn default_meter_interval() -> u64 {
+    1000
+}
+fn default_reg_format() -> mupc_data_processing::meter_regs::RegFormat {
+    mupc_data_processing::meter_regs::RegFormat::Float32
+}
+fn default_reg_scale() -> f64 {
+    0.01
+}
+
+impl Default for MeterRegBlock {
+    fn default() -> Self {
+        Self {
+            addr: 0,
+            format: default_reg_format(),
+            scale: default_reg_scale(),
+        }
+    }
+}
+
+impl Default for MasterMeterRegMap {
+    fn default() -> Self {
+        Self {
+            p: MeterRegBlock::default(),
+            q: MeterRegBlock::default(),
+            pf: MeterRegBlock::default(),
+            u: MeterRegBlock::default(),
+            i: MeterRegBlock::default(),
+            p_total: None,
+        }
+    }
+}
+
+impl Default for MasterMeterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            serial_port: default_meter_serial(),
+            baud_rate: default_meter_baud(),
+            slave_addr: default_meter_slave(),
+            read_interval_ms: default_meter_interval(),
+            reg_map: MasterMeterRegMap::default(),
+        }
+    }
 }
 
 // ── 默认值函数 ──
