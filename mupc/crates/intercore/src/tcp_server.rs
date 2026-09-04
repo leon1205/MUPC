@@ -7,11 +7,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, RwLock};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
 use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType};
+use crate::transport::{IntercoreTransport, TcpTransport};
 
 /// 安全覆盖触发原因的默认值
 const SAFETY_OVERRIDE_REASON_UNKNOWN: &str = "unknown";
@@ -890,19 +891,18 @@ impl DualParamCommand {
     }
 }
 
-/// 核间通信客户端（用于主动发送双参数到实时控制模块）
+/// 核间通信客户端（传输门面）
 ///
 /// 与 IntercoreServer 不同，Client 主动连接到实时控制模块，
 /// 并发送 AI 引擎输出的 p_ref 和 k_droop 双参数。
+///
+/// 本类型为传输门面：不直接持有 TcpStream，而是委托给
+/// `Arc<dyn IntercoreTransport>`（默认 TcpTransport，Modbus RTU 等可注入）。
 pub struct IntercoreClient {
-    /// 目标地址（实时控制模块地址）
+    /// 底层传输通道（Tcp / Modbus RTU，可插拔）
+    transport: Arc<dyn IntercoreTransport>,
+    /// 传输描述（TCP 目标地址或通道名，供 remote_addr() 查询）
     remote_addr: String,
-    /// 指令发送配置
-    cmd_config: CommandConfig,
-    /// 连接状态
-    connected: RwLock<bool>,
-    /// 持久连接（复用 TcpStream，避免每次新建）
-    stream: Arc<Mutex<Option<TcpStream>>>,
     /// 最后发送的 p_ref（用于通信中断检测）
     last_p_ref: RwLock<Option<f64>>,
     /// 最后发送的 k_droop
@@ -910,58 +910,36 @@ pub struct IntercoreClient {
 }
 
 impl IntercoreClient {
-    /// 创建客户端
+    /// 创建默认 TCP 客户端（保持现有调用兼容）
     pub fn new(remote_addr: String) -> Self {
         Self {
+            transport: Arc::new(TcpTransport::new(remote_addr.clone())),
             remote_addr,
-            cmd_config: CommandConfig::default(),
-            connected: RwLock::new(false),
             last_p_ref: RwLock::new(None),
             last_k_droop: RwLock::new(None),
-            stream: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// 带配置创建客户端
-    pub fn with_config(remote_addr: String, cmd_config: CommandConfig) -> Self {
+    /// 带配置创建客户端（兼容签名；超时已由 TcpTransport 默认 5000ms 承载）
+    pub fn with_config(remote_addr: String, _cmd_config: CommandConfig) -> Self {
+        Self::new(remote_addr)
+    }
+
+    /// 注入自定义传输（Modbus RTU 等）
+    pub fn with_transport(transport: Arc<dyn IntercoreTransport>) -> Self {
         Self {
-            remote_addr,
-            cmd_config,
-            connected: RwLock::new(false),
+            transport,
+            remote_addr: "modbus_rtu".to_string(),
             last_p_ref: RwLock::new(None),
             last_k_droop: RwLock::new(None),
-            stream: Arc::new(Mutex::new(None)),
         }
     }
 
     /// 发送双参数到实时控制模块（v2.7）
     ///
-    /// 将 DualParamCommand 封装为 TCP v2.0 帧并发送
+    /// 委托给底层 transport（TcpTransport 封装为 TCP v2.0 帧）。
     pub async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError> {
-        // 创建 v2.0 Payload
-        let payload = ControlCmdPayloadV2 {
-            p_ref: Some(cmd.p_ref),
-            k_droop: Some(cmd.k_droop),
-            ai_ready: Some(cmd.ai_ready),
-            strategy_mode: Some(cmd.strategy_mode.clone()),
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
-            frame_version: Some(ControlCmdPayloadV2::FRAME_VERSION),
-        };
-
-        let payload_bytes = payload.to_json().map_err(|e| {
-            MupcError::new(
-                ErrorCode::SerializeError,
-                format!("Failed to serialize ControlCmdPayloadV2: {}", e),
-                "intercore",
-            )
-        })?;
-
-        // 创建 TCP 帧
-        let frame = IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, payload_bytes);
-        let frame_bytes = frame.to_bytes()?;
-
-        // 发送帧（复用持久连接，见 send_frame）
-        self.send_frame(&frame_bytes).await?;
+        self.transport.send_dual_param(cmd).await?;
 
         // 更新最后发送的参数
         *self.last_p_ref.write().await = Some(cmd.p_ref);
@@ -979,81 +957,15 @@ impl IntercoreClient {
     }
 
     /// 发送台区储能分相 P/Q 设定到实时控制模块（v3 分相模式）
+    ///
+    /// 委托给底层 transport（TcpTransport 封装为 TCP v3.0 分相帧）。
     pub async fn send_tai_command(
         &self,
         p: [f64; 3],
         q: [f64; 3],
         strategy_mode: &str,
     ) -> Result<(), MupcError> {
-        let payload = ControlCmdPayloadV3 {
-            frame_version: Some(ControlCmdPayloadV3::FRAME_VERSION),
-            p_ref: None,
-            k_droop: None,
-            phase_p_set: Some(p),
-            phase_q_set: Some(q),
-            ai_ready: Some(false), // 台区储能治理为兜底场景，AI 未就绪
-            strategy_mode: Some(strategy_mode.to_string()),
-            timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
-        };
-        let payload_bytes = payload.to_json().map_err(|e| {
-            MupcError::new(
-                ErrorCode::SerializeError,
-                format!("Failed to serialize ControlCmdPayloadV3: {}", e),
-                "intercore",
-            )
-        })?;
-        let frame = IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, payload_bytes);
-        let frame_bytes = frame.to_bytes()?;
-        self.send_frame(&frame_bytes).await
-    }
-
-    /// 发送 TCP 帧（获取或建立持久连接，带超时写入）
-    ///
-    /// 失败时重置连接，下次调用将重连。
-    async fn send_frame(&self, frame_bytes: &[u8]) -> Result<(), MupcError> {
-        let mut stream_guard = self.stream.lock().await;
-        if stream_guard.is_none() {
-            match TcpStream::connect(&self.remote_addr).await {
-                Ok(s) => *stream_guard = Some(s),
-                Err(e) => {
-                    return Err(MupcError::new(
-                        ErrorCode::ConnectionFailed,
-                        format!("Failed to connect to {}: {}", self.remote_addr, e),
-                        "intercore",
-                    ))
-                }
-            }
-        }
-        let stream = stream_guard.as_mut().ok_or_else(|| {
-            MupcError::new(ErrorCode::ConnectionFailed, "连接未建立", "intercore")
-        })?;
-        let write_result = timeout(
-            Duration::from_millis(self.cmd_config.timeout_ms),
-            stream.write_all(frame_bytes),
-        )
-        .await;
-        match write_result {
-            Ok(Ok(())) => {
-                *self.connected.write().await = true;
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                *stream_guard = None;
-                Err(MupcError::new(
-                    ErrorCode::SendFailed,
-                    format!("Send error: {}", e),
-                    "intercore",
-                ))
-            }
-            Err(_) => {
-                *stream_guard = None;
-                Err(MupcError::new(
-                    ErrorCode::IntercoreTimeout,
-                    format!("Send timed out after {}ms", self.cmd_config.timeout_ms),
-                    "intercore",
-                ))
-            }
-        }
+        self.transport.send_tai_command(p, q, strategy_mode).await
     }
 
     /// 获取最后发送的双参数（用于降级判断）
@@ -1065,10 +977,10 @@ impl IntercoreClient {
 
     /// 检查连接状态
     pub async fn is_connected(&self) -> bool {
-        *self.connected.read().await
+        self.transport.is_connected().await
     }
 
-    /// 获取远程地址
+    /// 获取传输描述（TCP 目标地址或通道名，如 modbus_rtu）
     pub fn remote_addr(&self) -> &str {
         &self.remote_addr
     }
