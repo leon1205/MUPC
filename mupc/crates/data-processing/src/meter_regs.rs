@@ -31,14 +31,20 @@ pub fn regs_to_i32_be(r: &[u16]) -> i32 {
     ((r[0] as i32) << 16) | (r[1] as i32)
 }
 
-/// 按格式解码一段寄存器（长度不足时返回 0.0）
+/// 按格式解码一段寄存器（长度不足返回 0.0；非有限值——NaN/±Inf——返回 0.0）
 pub fn decode_regs(r: &[u16], format: RegFormat, scale: f64) -> f64 {
     if r.len() < 2 {
         return 0.0;
     }
-    match format {
+    let v = match format {
         RegFormat::Float32 => regs_to_f32_be(r) as f64,
         RegFormat::Int32Scaled => regs_to_i32_be(r) as f64 * scale,
+    };
+    // U-26 审查 P2-3: 非有限守卫——表计坏值（NaN/Inf）按 0 处理，防 NaN 进入控制链
+    if v.is_finite() {
+        v
+    } else {
+        0.0
     }
 }
 
@@ -73,6 +79,23 @@ mod tests {
     fn test_short_regs_returns_zero() {
         assert_eq!(decode_regs(&[0x4248], RegFormat::Float32, 1.0), 0.0);
         assert_eq!(decode_regs(&[], RegFormat::Int32Scaled, 1.0), 0.0);
+    }
+
+    #[test]
+    fn test_non_finite_returns_zero() {
+        // U-26 审查 P2-3: NaN（0x7FC00000）与 ±Inf（0x7F800000 / 0xFF800000）坏值 → 0.0
+        assert_eq!(
+            decode_regs(&u16s(0x7FC0, 0x0000), RegFormat::Float32, 1.0),
+            0.0
+        );
+        assert_eq!(
+            decode_regs(&u16s(0x7F80, 0x0000), RegFormat::Float32, 1.0),
+            0.0
+        );
+        assert_eq!(
+            decode_regs(&u16s(0xFF80, 0x0000), RegFormat::Float32, 1.0),
+            0.0
+        );
     }
 
     #[test]
