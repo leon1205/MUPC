@@ -255,9 +255,9 @@ pub struct ElectricalData {
 }
 ```
 
-- 南向采集循环（或台区总表数据源）填充 `phase` 字段；
+- **台区总表数据源（U-26，投产必需）**：策略测量须来自台区总表分相数据。startup 装配「台区总表」RS485 Modbus 设备（`master_meter` 配置段：串口/从站地址/分相量寄存器映射 `reg_map`），按映射读保持寄存器 → 经 `mupc_data_processing::meter_regs` 解码（float32 / int32_scaled，Modbus 大端）→ 组装 `PhaseElectricalData`（电流方向由分相有功符号承载）→ `set_latest_data` 注入策略。`master_meter.enabled=true` 时总表 pkg 作为策略测量，南向模拟数据不再覆盖；
 - 分相数据缺失时：策略按 failsafe 处理（积分冻结、斜坡回归 0）；
-- `DataPackage` 构造处（`dataframe_to_datapackage` 等）同步更新，未填分相字段时 `phase=None`，不破坏现有调用方。
+- `DataPackage` 构造处（`dataframe_to_datapackage` 等）同步更新，未填分相字段时 `phase=None`，不破坏现有调用方。**投产前提**：填真实总表点表（`reg_map` 各量起始寄存器）+ U-27 现场 Q 相序核验（`s_q_sign`）。
 
 ### 2.8 执行路径（核间协议 V3）
 
