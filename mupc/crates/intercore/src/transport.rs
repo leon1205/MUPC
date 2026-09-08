@@ -22,7 +22,9 @@ pub trait IntercoreTransport: Send + Sync {
     async fn latest_soc(&self) -> Option<(f64, std::time::Instant)>;
     /// 停机原语：Modbus 写 REG_START_STOP=0（PCS 停机）；成功复位 started/mode 缓存。
     /// 实现**不**负责置/清 stopped_latched（联锁 latch 仅由 restore_interlock_latched 管理）。
-    /// Tcp 通道降级（no-op + 记录，无 PCS 500 语义）。
+    /// Tcp 通道降级（no-op + 记录，无 PCS 500 语义）。⚠️ 下行 latch gate（send/stop 的 500 语义）
+    /// 仅 Modbus 实现；TCP 仅表达 latch 状态、`send`/`stop` 是否抑制由上层（IntercoreClient/
+    /// 联锁流程）决定（M-4）。
     async fn stop(&self) -> Result<(), String>;
     /// 联锁锁存查询（transport 运行期兜底是否挡启动）
     async fn is_interlock_stopped(&self) -> bool;
@@ -30,8 +32,11 @@ pub trait IntercoreTransport: Send + Sync {
     async fn restore_interlock_latched(&self, latched: bool) -> Result<(), String>;
     /// 最新解码的 RUN_STATE(1013)（心跳维护，0=停/1=待机/2=充/3=放）；离线/mark_offline 后为 None
     fn last_run_state(&self) -> Option<u16>;
-    /// M1 保护跳闸人工授权重启（ack_m1 语义）：!stopped_latched 时复位 started，
-    /// 允许下次 send 经 ensure_started 重发 500=1；stopped_latched 时 Err（须先 release）
+    /// M1 保护跳闸/停机人工授权重启（ack_m1 语义，**单次**）：!stopped_latched 时复位 started
+    /// **并置 restart_authorized**（Modbus），放行下次 send 的 ensure_started 在 RUN_STATE=0
+    /// 停机稳态下重写 500=1 一次（S-4 停机守卫旁路）；授权经 S-4 消费分支或正常启动路径清除。
+    /// stopped_latched 时 Err（须先 release 清 latch）。⚠️ 语义挂起：PCS 停机后 run_state=0
+    /// 稳态下重启 = 人工授权后 S-4 放行一次；500 电平/边沿时序以厂方答复为准（§11.11 待确认）。
     async fn authorize_restart(&self) -> Result<(), String>;
 }
 

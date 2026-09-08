@@ -15,7 +15,7 @@ use crate::tcp_server::DualParamCommand;
 use crate::transport::IntercoreTransport;
 use async_trait::async_trait;
 use mupc_common::{ErrorCode, MupcError};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{timeout, Duration};
@@ -58,6 +58,11 @@ pub struct ModbusRtuTransport {
     /// **只由 restore_interlock_latched 置/清**；stop()/ensure_started 均不改（stop() 写 500=0 前
     /// 触发沿已 restore(true)，写失败时 latch 已挡启动）。锁存期间 send_* 入口与 ensure_started 拒写。
     stopped_latched: RwLock<bool>,
+    /// 人工授权重启位（I-1，**单次**）：`authorize_restart()`（ack_m1/release 后）置 true，放行
+    /// ensure_started 的 S-4 停机守卫（RUN_STATE=0 停机稳态下重写 500=1 一次）；由 S-4 消费分支
+    /// 或正常启动路径清 false（单次授权、经消费即弃）。仅 `!stopped_latched` 时可授权（latch 须先
+    /// release）。TCP 通道无 PCS 500 语义、无此字段。
+    restart_authorized: AtomicBool,
     /// 心跳维护的最新 RUN_STATE(1013) 解码值（0..=3；合法读数才更新）；mark_offline 清 None（B3，
     /// 防离线期 DO1/DO2 同亮）。供上层/DO 驱动同步读取。
     /// ⚠️ 用 std RwLock 而非 tokio RwLock：trait `last_run_state()` 为**同步** getter，需在异步
@@ -152,8 +157,17 @@ impl ModbusRtuTransport {
             mode: AtomicU8::new(0xFF),
             started: RwLock::new(false),
             stopped_latched: RwLock::new(false),
+            restart_authorized: AtomicBool::new(false),
             last_run_state: StdRwLock::new(None),
         }
+    }
+
+    /// 测试用：读取人工授权重启位（[`Self::restart_authorized`]）当前值。仅 `cfg(test)` 编译存在；
+    /// 无 IO 单测断言 `authorize_restart()` 的置位效果；S-4 消费/写 500=1 分支需总线 IO，
+    /// 由 Task8 E2E（pcs_slave 停机语义）覆盖。
+    #[cfg(test)]
+    pub(crate) async fn is_restart_authorized(&self) -> bool {
+        self.restart_authorized.load(Ordering::Relaxed)
     }
 
     /// 在线标记：任一读/写事务成功即视为链路在线
@@ -244,10 +258,17 @@ impl ModbusRtuTransport {
     /// ① `stopped_latched` 时直接 Err（联锁禁启，即使上层误发也不重启——底层兜底）；
     /// ② `started==true` 缓存命中 Ok（跳过总线往返）；
     /// ③ 否则 **S-4 前置读**：先 FC04 读 REG_RUN_STATE(1013) 校验 PCS 非停机（M1 守卫——
-    /// 堵住「离线窗口内保护跳闸 → 链路恢复自动重启跳闸机」路径）。读到 0（停机）→ Err 不自动
-    /// 启动、交上层（保护跳闸/人工停机的运维恢复走 ack_m1→authorize_restart）；非 0（待机/充/
-    /// 放电）或读数无效（乱码按非停机处理，避免阻塞正常启动）→ 写 500=1 并置 started=true。
+    /// 堵住「离线窗口内保护跳闸 → 链路恢复自动重启跳闸机」路径）。读到 0（停机）→ 若
+    /// `restart_authorized`（人工已经 ack_m1/authorize_restart 确认）→ **消费授权**（清位）并放行
+    /// 重写 500=1（I-1 单次旁路：停机稳态也能重启一次）；否则 Err 交上层（运维恢复走
+    /// authorize_restart）。非 0（待机/充/放电）或读数无效（乱码按非停机处理）→ 清授权并正常
+    /// 写 500=1 置 started=true（正常启动路径同样消费/清授权，防过期授权滞留）。
+    /// **I-2**：读后、写 500=1 前再查一次 `stopped_latched`——restore 不取 bus 锁，读与写间若触发
+    /// 沿介入置位则放弃启动（窗口有界：stop() 随 bus 序在本窗口之后才写 500=0，故此处复查即断）。
     /// 读写用 *_once 原语（不带 connected 副作用）：链路在线状态由入口级 write_reg/心跳维护。
+    ///
+    /// ⚠️ 语义挂起（§11.11 待确认）：PCS 停机后 run_state=0 稳态下重启 = 人工授权后 S-4 放行一次；
+    /// 500 电平/边沿时序最终以厂方答复为准，本实现按「写 500=1 触发启动」处理。
     async fn ensure_started(&self) -> Result<(), MupcError> {
         if *self.stopped_latched.read().await {
             return Err(MupcError::new(
@@ -261,11 +282,31 @@ impl ModbusRtuTransport {
         }
         // S-4：首个写启动前先读一次 RUN_STATE 校验非停机（M1 守卫升级）
         let words = self.read_input_once(REG_RUN_STATE, 1).await?;
-        if decode_run_state(words.first().copied().unwrap_or(u16::MAX)) == Some(0) {
-            tracing::warn!("M1 前置校验：RUN_STATE=0（停机/保护跳闸），不自动启动，交上层");
+        let run = decode_run_state(words.first().copied().unwrap_or(u16::MAX));
+        if run == Some(0) {
+            if !self.restart_authorized.load(Ordering::Relaxed) {
+                tracing::warn!("M1 前置校验：RUN_STATE=0（停机/保护跳闸），不自动启动，交上层");
+                return Err(MupcError::new(
+                    ErrorCode::SendFailed,
+                    "RUN_STATE=0 不允许自动启动（M1 守卫）",
+                    "intercore",
+                ));
+            }
+            // I-1：人工已确认（restart_authorized）→ 消费授权（单次）并放行重写 500=1。PCS 停机后
+            // run_state=0 稳态下重启 = 人工授权后 S-4 放行一次；500 电平/边沿时序以厂方答复为准
+            // （§11.11「启停 500 时序」待确认）。此处消费：即使随后写失败也不自动重试启动（须重授权）。
+            tracing::info!("M1 授权重启：RUN_STATE=0 且 restart_authorized，放行重发 500=1（单次）");
+        } else {
+            // 非 0（待机/充/放电）或读数无效（乱码按非停机处理）：正常启动路径，清授权
+            self.restart_authorized.store(false, Ordering::Relaxed);
+        }
+        // I-2：读后、写 500=1 前再查一次 latch——读与写间触发沿可能已置 stopped_latched（restore 不取
+        // bus 锁、可随时置位；stop() 随 bus 序在本序列之后才写 500=0）。此刻置位则放弃启动。
+        if *self.stopped_latched.read().await {
+            tracing::warn!("S-4 写前复查：联锁 latch 已在此窗口置位，放弃启动");
             return Err(MupcError::new(
                 ErrorCode::SendFailed,
-                "RUN_STATE=0 不允许自动启动（M1 守卫）",
+                "S-4 写前联锁 latch 置位，放弃启动",
                 "intercore",
             ));
         }
@@ -465,8 +506,10 @@ impl IntercoreTransport for ModbusRtuTransport {
     async fn stop(&self) -> Result<(), String> {
         let _bus_guard = self.bus.lock().await;
         if let Err(e) = self.do_stop().await {
+            // M-3：中性措辞——不预设调用方/不臆断 latch 必然已置位；只陈述写失败事实与后续动作
+            // （停机未确认即处于 stop_failed 态，交由联锁流程按 latch 状态周期重试/升级）。
             tracing::error!(
-                "interlock stop 失败（写 REG_START_STOP=0）：{}——latch 已挡启动，交由 interlock 周期重试",
+                "stop 写 REG_START_STOP=0 失败：{}——PCS 停机未确认（stop_failed），交由联锁流程周期重试",
                 e
             );
             return Err(e.to_string());
@@ -491,12 +534,18 @@ impl IntercoreTransport for ModbusRtuTransport {
     }
 
     async fn authorize_restart(&self) -> Result<(), String> {
-        // I-1/ack_m1：!latch 时复位 started=false（下个 send 经 ensure_started 重发 500=1，
-        // 并走 S-4 前置读校验）；latch 期间拒绝（须先 release 清 latch）
+        // I-1/ack_m1（人工授权重启，**单次**）：!stopped_latched 时复位 started=false **并置
+        // restart_authorized=true**——放行下个 send 的 ensure_started 在 RUN_STATE=0 停机稳态下
+        // 重发 500=1 一次（S-4 停机守卫旁路；否则停机态 500=0 后 run_state 恒 0——如 pcs_slave
+        // 建模——release/ack 后永远无法重启，与设计「人工确认后允许重发 500=1」矛盾）。
+        // 授权为单次：ensure_started 的 S-4 消费分支或正常启动路径清位。PCS 停机后 run_state=0
+        // 稳态下重启 = 人工授权后 S-4 放行一次；500 电平/边沿时序以厂方答复为准（§11.11 待确认）。
+        // stopped_latched 时 Err（须先 release 清 latch）。
         if *self.stopped_latched.read().await {
             return Err("interlock stopped：联锁锁存中，须先 release 才能重启".to_string());
         }
         *self.started.write().await = false;
+        self.restart_authorized.store(true, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -594,6 +643,28 @@ mod tests {
         *tr.started.write().await = true;
         assert!(tr.authorize_restart().await.is_err());
         assert!(*tr.started.read().await, "latch 期间 authorize 不得复位 started");
+    }
+
+    #[tokio::test]
+    async fn test_authorize_restart_grants_single_shot() {
+        // I-1 补丁（Task1 质量评审闭环）：authorize_restart 除复位 started 外，**置单次授权位
+        // restart_authorized**——放行 ensure_started 在 RUN_STATE=0 停机稳态（500=0 后 run_state
+        // 恒 0，如 pcs_slave 建模）下重写 500=1（S-4 守卫旁路，否则 release/ack 后永远无法重启）。
+        // 无 IO 单测仅断言授权位即可；ensure_started 的 S-4 消费/写 500=1 分支需总线 IO，
+        // 由 Task8 E2E（pcs_slave 停机语义）覆盖并注明。
+        let tr = ModbusRtuTransport::new(test_settings());
+        assert!(!tr.is_restart_authorized().await, "new() 初值：无授权");
+        // !latch authorize → 复位 started + 置单次授权位
+        *tr.started.write().await = true;
+        tr.authorize_restart().await.unwrap();
+        assert!(!*tr.started.read().await, "authorize 应复位 started");
+        assert!(
+            tr.is_restart_authorized().await,
+            "authorize 应置单次授权位（放行 S-4 停机守卫）"
+        );
+        // latch 期间 authorize 拒绝（须先 release；latch 下 S-4 首检即挡启，授权不被消费）
+        tr.restore_interlock_latched(true).await.unwrap();
+        assert!(tr.authorize_restart().await.is_err());
     }
 
     #[test]

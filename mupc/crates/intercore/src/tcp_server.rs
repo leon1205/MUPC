@@ -1005,7 +1005,9 @@ impl IntercoreClient {
         self.transport.last_run_state()
     }
 
-    /// M1 保护跳闸人工授权重启（!stopped_latched 时生效；latch 期间 Err 提示先 release）
+    /// M1 保护跳闸/停机人工授权重启（ack_m1 语义，**单次**）：!stopped_latched 时复位 started 并
+    /// 授权 transport 放行 RUN_STATE=0 停机稳态下重写 500=1（S-4 守卫旁路，Modbus）；latch 期间
+    /// Err 提示先 release。PCS 停机后 run_state=0 稳态下重启 = 人工授权后 S-4 放行一次（§11.11 待确认）。
     pub async fn authorize_restart(&self) -> Result<(), String> {
         self.transport.authorize_restart().await
     }

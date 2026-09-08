@@ -132,6 +132,8 @@ impl IntercoreTransport for TcpTransport {
 
     /// TCP 通道无 PCS 500 启停寄存器语义：stop 降级 no-op（仅记录，供仿真联锁流程表达）。
     /// 不设/清 stopped_latched（C-1 与 Modbus 一致：latch 只由 restore 管理）。
+    /// ⚠️ M-4：下行 latch gate（send/stop 的 500 语义）仅 Modbus 实现；TCP 仅表达 latch 状态、
+    /// send 是否抑制由上层（IntercoreClient/联锁流程）决定——本通道 send_* 不查 latch。
     async fn stop(&self) -> Result<(), String> {
         tracing::warn!("tcp 通道无 PCS 500 语义，stop 降级 no-op（仿真）");
         Ok(())
@@ -153,7 +155,8 @@ impl IntercoreTransport for TcpTransport {
     }
 
     async fn authorize_restart(&self) -> Result<(), String> {
-        // TCP 无 started 缓存概念；仅 !latch 才授权（联锁语义一致）
+        // TCP 无 started 缓存/S-4 概念：仅 !latch 才放行（联锁语义一致）。Modbus 侧 restart_
+        // authorized 单次旁路（S-4 停机守卫）为本通道专属语义，TCP 不表达。
         if *self.stopped_latched.read().await {
             return Err("interlock stopped：联锁锁存中，须先 release 才能重启".to_string());
         }
@@ -183,5 +186,22 @@ mod tests {
         let transport = TcpTransport::new("127.0.0.1:1".into());
         tokio_test::block_on(transport.handle_frame(&frame));
         assert!(tokio_test::block_on(transport.latest_soc()).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_latch_toggle_gates_authorize() {
+        // M-5：TCP 通道 latch 为内存表达（联锁流程/仿真语义；send 由上层抑制，M-4）。
+        // restore 置/清驱动 is_interlock_stopped；latch 期间 authorize_restart 拒绝、清后放行。
+        let tr = TcpTransport::new("127.0.0.1:1".into());
+        assert!(!tr.is_interlock_stopped().await);
+        assert!(tr.authorize_restart().await.is_ok(), "!latch 时 authorize 应放行");
+
+        tr.restore_interlock_latched(true).await.unwrap();
+        assert!(tr.is_interlock_stopped().await, "restore(true) 应置 latch");
+        assert!(tr.authorize_restart().await.is_err(), "latch 期间 authorize 应拒绝");
+
+        tr.restore_interlock_latched(false).await.unwrap();
+        assert!(!tr.is_interlock_stopped().await, "restore(false) 应清 latch");
+        assert!(tr.authorize_restart().await.is_ok(), "清 latch 后 authorize 应放行");
     }
 }
