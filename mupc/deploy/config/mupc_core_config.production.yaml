@@ -113,8 +113,29 @@ master_meter:
 #   stale_timeout_s: 5
 #   stations:
 #     # 关口/台区总表 = 策略 phase 真源（替代 master_meter 段；interval_ms 须 < 5000）
-#     - { id: grid_meter, role: meter_grid, port: "/dev/ttyS4", protocol: modbus, slave: 3, interval_ms: 1000 }
-#     # 以下站 S3a 采通用 telemetry（语义点表待厂方 → S3b）：BMS/空调/储能表/消防
+#     # ⚠️ meter_grid 的 regs 必填：块名是语义契约（mapper 按名查找，命名不同即整周期失败），
+#     #    相量块 p/q/pf/u/i 各须 count:6（3 相×2 寄存器，三相连续），p_total 可选 count:2。
+#     #    可照抄下方 master_meter.reg_map（float32 或 int32_scaled+scale 均可，格式随块）——
+#     #    但注意收敛后 master_meter 段会删除，届时此处 regs 是唯一参考，迁移前请先在此固化。
+#     #    ⚠️ 启用了无 regs（或 regs 缺 p/q/pf/u/i）的 meter_grid = 该站永久 offline，
+#     #    且 pv/load 南向兜底被关（grid_on 仅看是否配置了 grid 站），策略 phase 断供——务必配全再启用。
+#     #    【现场校准】下方 regs 为示例占位地址，去注释启用前须按总表厂方真实点表校准
+#     #    addr/format/scale/count（同 master_meter.reg_map 占位口径；串口/点表以厂方为准）。
+#     - id: grid_meter
+#       role: meter_grid
+#       port: "/dev/ttyS4"          # ⚠️ 须与 intercore.modbus_rtu 串口（PCS ttyS0）不同
+#       protocol: modbus
+#       slave: 3                    # 现场按总表实际填
+#       interval_ms: 1000           # 须 < 5000（策略 phase 周期约束）
+#       regs:                       # 示例占位地址；三相连续，Int32/Float32 均 2 寄存器/相
+#         - { name: p,       addr: 0x0000, format: int32_scaled, scale: 0.01, count: 6 }   # P_A/B/C
+#         - { name: q,       addr: 0x0006, format: int32_scaled, scale: 0.01, count: 6 }   # Q_A/B/C
+#         - { name: pf,      addr: 0x000C, format: int32_scaled, scale: 0.001, count: 6 }  # PF_A/B/C
+#         - { name: u,       addr: 0x0012, format: float32,       scale: 1.0,  count: 6 }  # U_A/B/C
+#         - { name: i,       addr: 0x0018, format: int32_scaled, scale: 0.01, count: 6 }   # I_A/B/C
+#         - { name: p_total, addr: 0x001E, format: int32_scaled, scale: 0.01, count: 2 }   # 可选：缺省降级 Σp
+#     # 以下站非 meter_grid：S3a 采通用 telemetry（regs 留空即可，不影响站在线），
+#     # 语义点表待厂方 → S3b 补全（battery 含 soc 块则填 battery.soc）。
 #     - { id: bms,         role: battery,    port: "/dev/ttyS2", protocol: modbus, slave: 1, interval_ms: 1000 }
 #     - { id: ac_unit,     role: hvac,       port: "/dev/ttyS3", protocol: modbus, slave: 1, interval_ms: 5000 }
 #     - { id: meter_batt,  role: meter_batt, port: "/dev/ttyS5", protocol: modbus, slave: 1, interval_ms: 1000 }
