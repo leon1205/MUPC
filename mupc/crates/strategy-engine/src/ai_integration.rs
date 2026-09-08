@@ -32,6 +32,11 @@ pub struct AiIntegrator {
     latest_data: Arc<RwLock<Option<DataPackage>>>,
     /// U-26 审查 P1-1: 最新遥测写入时刻（数据新鲜度守卫——冻结数据不驱动兜底控制）
     last_data_ts: RwLock<Option<std::time::Instant>>,
+    /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站（southd role=battery 经 on_battery_soc → set_battery_soc
+    /// 注入）SOC 源缓存——(soc, 注入时刻)。evaluate 前 SOC 源裁决：fresh → 优先覆盖 latest_data 的
+    /// battery.soc；否则（BMS 掉线/超期）回落核间 latest_soc。源 ts 放此处（BatteryData 无 ts、改
+    /// DataPackage 会破全仓 ~33 构造点）；soc 语义 0-100 百分数。
+    bms_soc: RwLock<Option<(f64, std::time::Instant)>>,
     /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
     /// 本地策略优先模式（配置或 Web API 可切换）：AI 旁路运行（仍决策作参考，不下发），
@@ -57,6 +62,7 @@ impl AiIntegrator {
             fallback_active: RwLock::new(false),
             latest_data: Arc::new(RwLock::new(None)),
             last_data_ts: RwLock::new(None),
+            bms_soc: RwLock::new(None),
             tai_storage: None,
             local_priority: RwLock::new(false),
             validator: RwLock::new(None),
@@ -138,6 +144,46 @@ impl AiIntegrator {
         *self.last_data_ts.write().await = Some(std::time::Instant::now());
     }
 
+    /// S3b-1b SOC 双源（04 §2.11.1）：注入 BMS 站（southd role=battery）SOC 优先源。
+    ///
+    /// southd 侧本轮采集刚成功即新鲜（超期判定在 evaluate 时用自身 Instant elapsed）；
+    /// soc 语义 0-100 百分数（mapper 按点表 scale 解码）。独立缓存不落 DataPackage——
+    /// evaluate 前裁决（apply_soc_source）据此覆盖/回落。
+    pub async fn set_battery_soc(&self, soc: f64) {
+        tracing::debug!(soc, "BMS 站 SOC 注入 AiIntegrator（SOC 双源，04 §2.11.1）");
+        *self.bms_soc.write().await = Some((soc, std::time::Instant::now()));
+    }
+
+    /// SOC 双源裁决（04 §2.11.1）：evaluate 前把 data.battery.soc 解析为确定源。
+    ///
+    /// BMS 站（southd on_battery_soc → set_battery_soc 注入）fresh（≤DATA_STALE_AFTER）→ 优先覆盖
+    /// （含覆盖既有南向/核间旧值）；否则（BMS 掉线/超期/无注入）回落核间 latest_soc（对称 N3：fresh
+    /// 才写）——BMS 不 fresh → 不强写 → data.battery.soc 为 None 时由这里主动补核间，回落不依赖
+    /// set_latest_data 时序。tai_storage.evaluate 以 data.battery.soc 为准（unwrap_or(50)）。
+    async fn apply_soc_source(&self, data: &mut DataPackage) {
+        let bms_fresh = {
+            let b = self.bms_soc.read().await;
+            match *b {
+                Some((soc, ts)) if ts.elapsed() <= Self::DATA_STALE_AFTER => Some(soc),
+                _ => None,
+            }
+        };
+        if let Some(soc) = bms_fresh {
+            data.battery.soc = Some(soc);
+            return;
+        }
+        // BMS 超期/无 → 回落核间（fresh 才写；与 set_latest_data 的 N3 补同语义）
+        if data.battery.soc.is_none() {
+            if let Some(client) = &self.intercore_client {
+                if let Some((soc, ts)) = client.latest_soc().await {
+                    if ts.elapsed() <= Self::DATA_STALE_AFTER {
+                        data.battery.soc = Some(soc);
+                    }
+                }
+            }
+        }
+    }
+
     /// 注入 AI 指令安全校验器（安全闸门）
     pub async fn set_validator(&self, validator: Arc<dyn AiCommandValidator>) {
         *self.validator.write().await = Some(validator);
@@ -163,10 +209,13 @@ impl AiIntegrator {
         }
 
         let data = self.latest_data.read().await.clone();
-        let Some(data) = data else {
+        let Some(mut data) = data else {
             tracing::debug!("无遥测数据，跳过兜底策略");
             return Ok(());
         };
+        // S3b-1b SOC 双源裁决（04 §2.11.1）：evaluate 前解析 battery.soc 为确定源——
+        // BMS 站 fresh 优先覆盖；否则回落核间 latest_soc。只改 battery 字段，不动 last_data_ts 闸门（C-2）。
+        self.apply_soc_source(&mut data).await;
 
         // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块（best-effort，失败仅告警）
         if let Some(tai) = &self.tai_storage {
@@ -586,6 +635,71 @@ mod tests {
         // 电气量取新总表
         assert_eq!(cur.electrical.active_power, Some(200.0));
         assert!(cur.electrical.phase.is_some(), "phase 应取新总表");
+    }
+
+    /// S3b-1b 测试 helper：构造 DataPackage，battery.soc 可参数化（None=总表/grid 语义无电池量；
+    /// Some=核间/南向已有 soc 值）。其余字段取最小默认。
+    fn create_test_pkg_with_soc(soc: Option<f64>) -> DataPackage {
+        use mupc_data_processing::telemetry::{
+            BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
+        };
+        DataPackage {
+            timestamp: 0,
+            electrical: ElectricalData::default(),
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc,
+                soh: None,
+                temperature: None,
+            },
+        }
+    }
+
+    /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站 soc 注入后 fresh → apply_soc_source 覆盖为 BMS 值。
+    #[tokio::test]
+    async fn bms_soc_overrides_when_fresh() {
+        let i = AiIntegrator::new();
+        // 无 intercore_client → 只测 BMS fresh 覆盖路径（回落分支不触发）
+        let mut pkg = create_test_pkg_with_soc(None);
+        i.set_battery_soc(65.5).await;
+        i.apply_soc_source(&mut pkg).await;
+        assert_eq!(pkg.battery.soc, Some(65.5), "BMS fresh 应覆盖 battery.soc");
+    }
+
+    /// S3b-1b SOC 双源：无 BMS 注入 → apply_soc_source 不误写（soc None 保持 None；已带核间值不被覆盖）。
+    #[tokio::test]
+    async fn no_bms_keeps_soc_unchanged() {
+        let i = AiIntegrator::new();
+        // 无 BMS → None 保持（回落由既有 N3/set_latest_data 承担；此测确认裁决不误写）
+        let mut pkg_none = create_test_pkg_with_soc(None);
+        i.apply_soc_source(&mut pkg_none).await;
+        assert_eq!(pkg_none.battery.soc, None);
+        // 已带核间/南向 soc 值 → 不被 BMS-absent 覆盖（回落分支无 client 不触发）
+        let mut pkg_have = create_test_pkg_with_soc(Some(42.0));
+        i.apply_soc_source(&mut pkg_have).await;
+        assert_eq!(pkg_have.battery.soc, Some(42.0), "BMS 无注入不得覆盖既有 soc");
+    }
+
+    /// S3b-1b SOC 双源：BMS 超期 → 不覆盖（回落核间；无 client 时 soc None 保持）。
+    #[tokio::test]
+    async fn bms_stale_falls_back() {
+        let i = AiIntegrator::new();
+        i.set_battery_soc(65.5).await;
+        // 回拨 bms_soc 的注入时刻到 DATA_STALE_AFTER 之前 → 超期 → 不覆盖
+        *i.bms_soc.write().await = Some((
+            65.5,
+            std::time::Instant::now()
+                - std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS + 100),
+        ));
+        let mut pkg = create_test_pkg_with_soc(None);
+        i.apply_soc_source(&mut pkg).await;
+        // 无 intercore_client → 回落核间分支不触发 → None 保持（有 client 的回落分支测在集成层）
+        assert_eq!(pkg.battery.soc, None, "BMS 超期不得覆盖；无核间 client 时回落不写");
     }
 
     #[tokio::test]
