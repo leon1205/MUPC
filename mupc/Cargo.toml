@@ -23,6 +23,7 @@ members = [
     "crates/storage",
     "crates/wireless",
     "crates/sim-bridge",
+    "crates/mupc-io",
 ]
 
 [workspace.package]
