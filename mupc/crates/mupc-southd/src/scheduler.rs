@@ -410,7 +410,7 @@ impl SouthScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RegBlockConf, RegFunc};
+    use crate::config::{DEFAULT_BAUD_RATE, RegBlockConf, RegFunc};
     use crate::port_runtime::MockBus;
     use mupc_data_processing::meter_regs::RegFormat;
 
@@ -445,7 +445,7 @@ mod tests {
             port: port.into(),
             protocol: "modbus".into(),
             slave,
-            baud_rate: 9600,
+            baud_rate: DEFAULT_BAUD_RATE,
             interval_ms,
             regs: vec![
                 blk("p", 0, 6),
@@ -465,7 +465,7 @@ mod tests {
             port: port.into(),
             protocol: "modbus".into(),
             slave,
-            baud_rate: 9600,
+            baud_rate: DEFAULT_BAUD_RATE,
             interval_ms,
             regs: vec![blk("temp", 100, 2)],
         }
@@ -697,7 +697,7 @@ mod tests {
             port: "ttyS1".into(),
             protocol: "modbus".into(),
             slave: 3,
-            baud_rate: 9600,
+            baud_rate: DEFAULT_BAUD_RATE,
             interval_ms: 1000,
             regs: vec![
                 RegBlockConf {
@@ -745,7 +745,7 @@ mod tests {
             port: "ttyS1".into(),
             protocol: "modbus".into(),
             slave: 3,
-            baud_rate: 9600,
+            baud_rate: DEFAULT_BAUD_RATE,
             interval_ms: 1000,
             regs: vec![
                 RegBlockConf {
@@ -804,7 +804,7 @@ mod tests {
             port: "ttyS1".into(),
             protocol: "modbus".into(),
             slave: 3,
-            baud_rate: 9600,
+            baud_rate: DEFAULT_BAUD_RATE,
             interval_ms: 1000,
             regs: vec![
                 RegBlockConf {

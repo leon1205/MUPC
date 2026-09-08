@@ -283,7 +283,7 @@ impl StationBus for MockBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Role, StationConf};
+    use crate::config::{DEFAULT_BAUD_RATE, Role, StationConf};
 
     fn conf(port: &str, protocol: &str) -> StationConf {
         StationConf {
@@ -292,7 +292,7 @@ mod tests {
             port: port.into(),
             protocol: protocol.into(),
             slave: 1,
-            baud_rate: 9600,
+            baud_rate: DEFAULT_BAUD_RATE,
             interval_ms: 1000,
             regs: Vec::new(),
         }
