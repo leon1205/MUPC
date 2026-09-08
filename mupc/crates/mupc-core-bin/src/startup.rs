@@ -356,8 +356,9 @@ fn datapackage_to_telemetry_points(
 /// S3 §10.3：southd 采集结果 sink（core-bin 装配侧实现，startup 是 core-bin 唯一装配者）。
 ///
 /// 分流语义（southd scheduler 已按 role 分流，单写方口径见 southd 模块头）：
-/// - grid → `AiIntegrator::set_latest_data`（策略 phase 唯一写方；与迁移期 legacy 总表
-///   task 经装配处二选一互斥，绝不并存第二写方）。
+/// - 含 meter_grid 站时，grid 遥测 → `AiIntegrator::set_latest_data`（策略 phase 唯一写方；
+///   与迁移期 legacy 总表 task 经装配处二选一互斥，绝不并存第二写方）。south_stations 仅配
+///   非 grid 站（B2）时本 sink 不触发 on_grid_package，AiIntegrator 由 pv/load 南向模拟兜底。
 /// - 非 grid 遥测点（is_event=false）→ WriteBuffer 落库（telemetry）。
 /// - offline/online 状态事件（is_event=true，metric=offline/online）→ storage.events 落库
 ///   + SSE system alert。
@@ -422,7 +423,10 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 if let Err(e) = self.events.insert(&ev).await {
                     tracing::warn!("南向站事件落库失败 {}: {}", ev.event_type, e);
                 }
-                let _ = self.sse.push_system_alert("warning", &ev.message);
+                // online 恢复是状态正常化，用 info 级；offline/其它状态异常才告警级，
+                // 避免站恢复上线时刷屏 warning。
+                let level = if metric == "online" { "info" } else { "warning" };
+                let _ = self.sse.push_system_alert(level, &ev.message);
             } else {
                 // 普通遥测点落库
                 let tp = mupc_storage::TelemetryPoint {
@@ -434,7 +438,8 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                     quality: 0,
                 };
                 if let Err(e) = self.write_buffer.buffer_telemetry(tp).await {
-                    tracing::debug!("南向遥测落库失败 {}: {}", station_id, e);
+                    // 与事件落库路径一致用 warn：遥测丢点影响持久性可观测，不宜静默降 debug
+                    tracing::warn!("南向遥测落库失败 {}: {}", station_id, e);
                 }
             }
         }
@@ -710,10 +715,14 @@ pub async fn initialize_all(
     // master_meter.enabled 与 south_stations.meter_grid 不同时出现）──
     //   A. config.master_meter.enabled → legacy 硬编码总表 task（迁移期旧路径；open 成功才视为
     //      grid 源在线——P1-2：enabled 但 open 失败回退 pv/load 南向模拟兜底）。
-    //   B. south_stations 含 meter_grid → southd scheduler（grid 单写方 = SouthSink →
-    //      AiIntegrator.set_latest_data；非 grid 站 telemetry/状态事件亦经 SouthSink 落库）。
-    //      grid 源配置存在即 grid_on=true：某站 offline 由 scheduler 出事件，pv/load 不兜底
-    //      set_latest_data（保持"grid 单写方"，真实数据新鲜度由 AiIntegrator 5s 闸门判断）。
+    //   B. south_stations.stations 非空（master 未 enabled 已由 A 拦截）→ southd scheduler：
+    //      非 grid 站 telemetry/状态事件经 SouthSink 落库 + SSE。
+    //      B1. 含 meter_grid → SouthSink.on_grid_package 单写 AiIntegrator（grid_on=true，
+    //          某站 offline 由 scheduler 出事件，pv/load 不兜底 set_latest_data——保持
+    //          "grid 单写方"，真实数据新鲜度由 AiIntegrator 5s 闸门判断）。
+    //      B2. 仅非 grid 站（无 meter_grid）→ southd 仍装配采 battery/hvac/fire telemetry/
+    //          状态事件（无 on_grid_package 调用），grid_on=false → pv/load 南向模拟继续
+    //          set_latest_data 兜底测量（无 grid 源时 AiIntegrator 不断供）。
     // grid_on = 策略 phase 源可用（决定下方 pv/load 南向模拟 task 是否 set_latest_data；
     // M-4 防双写方并存：grid 源在即南向模拟不覆盖；无 grid 源则南向模拟兜底测量）。
     let mut grid_on = false;
@@ -741,8 +750,15 @@ pub async fn initialize_all(
                 "台区总表不可用（enabled 但 open 失败），策略测量回退 pv/load 南向模拟"
             ),
         }
-    } else if config.south_stations.grid_station().is_some() {
-        // B. southd 路径（south_stations.stations 非空且含 meter_grid 才命中）
+    } else if !config.south_stations.stations.is_empty() {
+        // B. southd 路径（master 未 enabled 已由 A 拦截；stations 非空即装配——非 grid 站
+        //    battery/hvac/fire telemetry/状态事件也必须采集落库，不得因缺 grid 源整体不启）。
+        if config.south_stations.grid_station().is_none() {
+            tracing::warn!(
+                "south_stations 配置了 {} 个站但无 meter_grid：非 grid 站 telemetry 将采集，策略 phase 由南向模拟/无 grid 源兜底（S3b 语义点表前）",
+                config.south_stations.stations.len()
+            );
+        }
         let sink = Arc::new(SouthSink::new(
             ai_integrator.clone(),
             write_buffer.clone(),
@@ -780,18 +796,25 @@ pub async fn initialize_all(
         );
         let handles = scheduler.spawn();
         let handle_count = handles.len();
-        grid_on = true;
+        // grid_on 仅 grid 源配置存在才 true（B1）；B2（只非 grid 站）false → pv/load 兜底
+        grid_on = config.south_stations.grid_station().is_some();
         // 观测：句柄全部入 TaskGuard（Phase 6 优雅退出 abort）。口 task panic 静默停采该口
         // 的完整观测/重建 supervisor 留 TODO（Task 7 决议：装配期不引入，仅持有句柄不裸丢）。
         for h in handles {
             guard.0.push(h);
         }
         tracing::info!(
-            "southd 已装配：{} 站 / 配置 {} 口，open 成功 {} 口 → {} 条采集 task（grid 源单写 AiIntegrator，非 grid 遥测/事件经 SouthSink 落库）",
+            "southd 已装配：{} 站 / 去重配置 {} 口，open 成功 {}/{} 口（失败口站 offline 隔离、runner 以 bus=None 暂停采集）→ {} 条采集 task（{}）",
             station_count,
             cfg_ports,
             opened,
-            handle_count
+            cfg_ports,
+            handle_count,
+            if config.south_stations.grid_station().is_some() {
+                "grid 源单写 AiIntegrator，非 grid 遥测/事件经 SouthSink 落库"
+            } else {
+                "无 meter_grid：仅采非 grid telemetry/事件，策略 phase 由 pv/load 南向模拟兜底"
+            }
         );
     } else {
         tracing::info!(
