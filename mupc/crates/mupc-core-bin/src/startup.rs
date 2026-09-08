@@ -406,7 +406,7 @@ pub async fn initialize_all(
                 heartbeat_poll_ms: mb.heartbeat_poll_ms,
             },
         ));
-        // Modbus 无主动心跳，后台轮询 REG_HEARTBEAT 判在线/离线
+        // Modbus 无主动心跳，后台轮询读 PCS 3 区 REG_RUN_STATE(1013) 判在线/离线
         tokio::spawn(transport.clone().run_heartbeat_loop());
         Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
     } else {

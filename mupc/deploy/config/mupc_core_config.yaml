@@ -13,14 +13,14 @@ system:
   shutdown_timeout_sec: 30
 
 intercore:
-  transport: "tcp"              # "tcp" | "modbus_rtu"（部署二选一）
+  transport: "tcp"              # "tcp" | "modbus_rtu"（生产 PCS 主链路=modbus_rtu；tcp 仅供仿真/联调）
   host: "192.168.1.2"           # 实时核心 IP（tcp 通道）
   port: 9100
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
   modbus_rtu:                   # modbus_rtu 通道参数
     serial_port: "/dev/ttyS1"
-    baud_rate: 9600
+    baud_rate: 19200
     data_bits: 8
     stop_bits: 1
     parity: "none"              # none / even / odd

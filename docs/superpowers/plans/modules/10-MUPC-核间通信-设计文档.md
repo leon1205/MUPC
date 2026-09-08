@@ -1230,6 +1230,8 @@ intercore:
 
 **测试**：PCS int16 缩放/字节 swap 编解码 roundtrip、单相 clamp、模式切换缓存、写序列组装；端到端以真实 PCS RS485 联调。
 
+**验证状态（2026-09-04）**：pcs.rs 编解码 + `ModbusRtuTransport` PCS 驱动重构完成，`mupc-intercore` lib 31 测试全绿（含 PCS 编解码 roundtrip / SOC 3 区 1010 校验 / 心跳 REG_RUN_STATE(1013) 判定），`cargo check --workspace` 通过（上层调用方零改动）。端到端 PCS 实机 RS485 联调待 PCS 硬件（填点表 / 核相 / 并机基线）；PCS 契约待确认清单（模式热切换 / 启停 500 时序 / 4 区 502-503 / 符号约定）仍未获厂方答复。
+
 ---
 
 ## 附录 A：性能指标参考
