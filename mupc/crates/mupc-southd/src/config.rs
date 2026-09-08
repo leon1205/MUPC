@@ -103,7 +103,8 @@ impl SouthStationsConfig {
     /// 段内校验（跨段/互斥在 core-bin validate——Task 6）：id 唯一非空；
     /// meter_grid 至多一站（AiIntegrator 单写方约束，grid_station 取唯一）；
     /// port 非空；slave 1..=247；interval_ms>0；baud_rate 1..=4000000；
-    /// meter_grid interval_ms < DATA_FRESHNESS_MS；同口 baud 一致（见下）。
+    /// meter_grid/battery interval_ms < DATA_FRESHNESS_MS（BMS SOC fresh 窗口 5s）；
+    /// 同口 baud 一致（见下）。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: Vec<&str> = Vec::new();
         let mut grid_seen = false;
@@ -147,6 +148,12 @@ impl SouthStationsConfig {
             if s.role == Role::MeterGrid && s.interval_ms >= DATA_FRESHNESS_MS {
                 return Err(format!(
                     "south_stations: meter_grid 站 {} interval_ms 须 < {}ms",
+                    s.id, DATA_FRESHNESS_MS
+                ));
+            }
+            if s.role == Role::Battery && s.interval_ms >= DATA_FRESHNESS_MS {
+                return Err(format!(
+                    "south_stations: battery 站 {} interval_ms 须 < {}ms（BMS SOC 新鲜度窗口 5s，防源周期翻转）",
                     s.id, DATA_FRESHNESS_MS
                 ));
             }
@@ -384,6 +391,24 @@ south_stations:
                 w.south_stations.validate().is_ok(),
                 ok,
                 "meter_grid interval_ms={iv} 期望 ok={ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_battery_interval_boundary() {
+        // Battery 站与 meter_grid 对称：interval 须 < DATA_FRESHNESS_MS——battery 是 BMS SOC
+        // 真源，若采集间隔 > fresh 窗口 5s，BMS 每轮仅前 5s fresh、余下回落核间 → SOC 源周期
+        // 翻转、soc_protect 剪带震荡。4999(<5000) 合法，6000(>=5000) 拒绝。
+        for (iv, ok) in [(4999u64, true), (6000u64, false)] {
+            let yaml = format!(
+                "south_stations:\n  stations:\n    - {{ id: bat, role: battery, port: t1, slave: 1, interval_ms: {iv} }}"
+            );
+            let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
+            assert_eq!(
+                w.south_stations.validate().is_ok(),
+                ok,
+                "battery interval_ms={iv} 期望 ok={ok}"
             );
         }
     }

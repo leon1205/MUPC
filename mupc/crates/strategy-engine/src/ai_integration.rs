@@ -144,22 +144,25 @@ impl AiIntegrator {
         *self.last_data_ts.write().await = Some(std::time::Instant::now());
     }
 
-    /// S3b-1b SOC 双源（04 §2.11.1）：注入 BMS 站（southd role=battery）SOC 优先源。
-    ///
-    /// southd 侧本轮采集刚成功即新鲜（超期判定在 evaluate 时用自身 Instant elapsed）；
-    /// soc 语义 0-100 百分数（mapper 按点表 scale 解码）。独立缓存不落 DataPackage——
-    /// evaluate 前裁决（apply_soc_source）据此覆盖/回落。
+    /// 注入 BMS 站 SOC（southd battery 站 on_battery_soc 通道；0-100 百分数）。
+    /// SOC 驱动 soc_protect 保护带——非法值（NaN/越界）就地拒绝保留旧值，防点表 scale
+    /// 误配击穿充放电保护（soc_protect 在 tai_storage）。守卫是安全输入面设防。
     pub async fn set_battery_soc(&self, soc: f64) {
-        tracing::debug!(soc, "BMS 站 SOC 注入 AiIntegrator（SOC 双源，04 §2.11.1）");
+        if !soc.is_finite() || !(0.0..=100.0).contains(&soc) {
+            tracing::warn!(soc, "BMS SOC 非法（须 0-100 有限值），忽略保留旧值");
+            return;
+        }
         *self.bms_soc.write().await = Some((soc, std::time::Instant::now()));
+        tracing::debug!(soc, "BMS SOC 注入");
     }
 
     /// SOC 双源裁决（04 §2.11.1）：evaluate 前把 data.battery.soc 解析为确定源。
     ///
-    /// BMS 站（southd on_battery_soc → set_battery_soc 注入）fresh（≤DATA_STALE_AFTER）→ 优先覆盖
-    /// （含覆盖既有南向/核间旧值）；否则（BMS 掉线/超期/无注入）回落核间 latest_soc（对称 N3：fresh
-    /// 才写）——BMS 不 fresh → 不强写 → data.battery.soc 为 None 时由这里主动补核间，回落不依赖
-    /// set_latest_data 时序。tai_storage.evaluate 以 data.battery.soc 为准（unwrap_or(50)）。
+    /// BMS fresh（≤DATA_STALE_AFTER）→ 覆盖 data.battery.soc（含覆盖既有南向/核间旧值）；
+    /// 否则回落**仅当 data.battery.soc 为 None 时**触发核间 latest_soc 补写——data 已带保留 soc
+    /// （N3 早期写入被 U-26 merge 保留）时不重读核间，该保留值继续沿用（保留值比空好），由
+    /// set_latest_data 侧维护刷新；源超期置 None/过期标记与滞回随 S3b-1c 补。tai_storage.evaluate
+    /// 以 data.battery.soc 为准（unwrap_or(50)）。
     async fn apply_soc_source(&self, data: &mut DataPackage) {
         let bms_fresh = {
             let b = self.bms_soc.read().await;
@@ -172,7 +175,7 @@ impl AiIntegrator {
             data.battery.soc = Some(soc);
             return;
         }
-        // BMS 超期/无 → 回落核间（fresh 才写；与 set_latest_data 的 N3 补同语义）
+        // BMS 超期/无 → 回落核间：仅当 soc 为 None 时补写（data 已带保留值时不重读——保留值比空好）
         if data.battery.soc.is_none() {
             if let Some(client) = &self.intercore_client {
                 if let Some((soc, ts)) = client.latest_soc().await {
@@ -661,14 +664,25 @@ mod tests {
     }
 
     /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站 soc 注入后 fresh → apply_soc_source 覆盖为 BMS 值。
+    /// 关键安全排序：pkg 先带核间/南向值 Some(42.0)，BMS fresh 65.5 仍覆盖——BMS 优先于核间，
+    /// 防 soc_protect 剪带被更旧的核间值主导。
     #[tokio::test]
     async fn bms_soc_overrides_when_fresh() {
         let i = AiIntegrator::new();
         // 无 intercore_client → 只测 BMS fresh 覆盖路径（回落分支不触发）
-        let mut pkg = create_test_pkg_with_soc(None);
         i.set_battery_soc(65.5).await;
-        i.apply_soc_source(&mut pkg).await;
-        assert_eq!(pkg.battery.soc, Some(65.5), "BMS fresh 应覆盖 battery.soc");
+        // 场景 A：pkg 已带核间值 Some(42.0) → BMS fresh 覆盖（BMS 优先于核间，最关键排序）
+        let mut pkg_have = create_test_pkg_with_soc(Some(42.0));
+        i.apply_soc_source(&mut pkg_have).await;
+        assert_eq!(
+            pkg_have.battery.soc,
+            Some(65.5),
+            "BMS fresh 应覆盖既有核间 soc（BMS 优先于核间）"
+        );
+        // 场景 B：pkg 无 soc（None）→ 同覆盖为 BMS 值
+        let mut pkg_none = create_test_pkg_with_soc(None);
+        i.apply_soc_source(&mut pkg_none).await;
+        assert_eq!(pkg_none.battery.soc, Some(65.5), "BMS fresh 应写入 battery.soc");
     }
 
     /// S3b-1b SOC 双源：无 BMS 注入 → apply_soc_source 不误写（soc None 保持 None；已带核间值不被覆盖）。
