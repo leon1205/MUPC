@@ -61,6 +61,13 @@ pub struct StationPoll {
 /// 5 → 封顶 32×interval（1s interval → 32s 退避上限，防永久停采）。
 const MAX_BACKOFF_SHIFT: u32 = 5;
 
+/// M-11 退避额外延时：offline_count=1 → 1×interval；每多一次失败 ×2，封顶 32×interval。
+/// 独立纯函数便于直接单测封顶/边界（防永久停采，仍可探测恢复）。
+fn backoff_extra(interval_ms: u64, offline_count: u32) -> u64 {
+    let shift = offline_count.saturating_sub(1).min(MAX_BACKOFF_SHIFT);
+    interval_ms.saturating_mul(1u64 << shift)
+}
+
 /// 角色优先级（口调度预算 §10.2：grid/battery 关键量优先于 hvac/fire；慢站降频不拖累关键站 cadence）。
 fn role_priority(r: Role) -> u8 {
     match r {
@@ -162,6 +169,8 @@ impl SouthScheduler {
     /// 构造：buses 按 port 注入（真实场景只含成功 open 的口；Rs485PortBus::open 失败的口
     /// 不入 map——该口全站 offline，§10.7）。cfg 中出现的口都会建 runner；口不在 buses 中
     /// → runner.bus=None，其站每次 tick 走 offline 路径（首轮告警一次，窗口内防刷屏）。
+    /// 该站 poll 恒 false，offline_count 随轮累加 → M-11 退避同样生效随退避降频（与真失败站
+    /// 同策，§10.2：只告警/探测不刷流量——bus 缺失多因口硬件未接，慢探测亦无害）。
     pub fn new(
         cfg: SouthStationsConfig,
         buses: HashMap<String, Arc<dyn StationBus>>,
@@ -250,11 +259,10 @@ impl SouthScheduler {
             };
             let mut calc = runner.calc.lock().unwrap();
             for (idx, interval, oc) in stats {
-                let shift = oc.saturating_sub(1).min(MAX_BACKOFF_SHIFT);
-                let extra = interval.saturating_mul(1u64 << shift);
-                if extra > 0 {
-                    calc.delay_station(idx, now_ms, extra);
-                }
+                // 退避公式抽离为 backoff_extra（纯函数，封顶/边界见 tests 单测）。
+                // config::validate 已强校验 interval_ms>0 且此处 oc≥1 → extra 恒 > 0，
+                // 原 `if extra > 0` 守卫冗余已去（delay_station 不空转）。
+                calc.delay_station(idx, now_ms, backoff_extra(interval, oc));
             }
         }
     }
@@ -634,6 +642,47 @@ mod tests {
         assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
     }
 
+    /// 多轮退避（oc≥3，next_due 已推远）后恢复：probe 在退避到期点成功 → oc 归零、
+    /// online 事件 1、cadence 回到 interval 正常节奏。补 `station_recovers_after_failure`
+    /// （仅 oc=1，退避未推远，恢复与正常 cadence 无异）未覆盖的「持续失败退避 → 恢复 →
+    /// 归零 + 正常 cadence」模块头核心承诺。
+    #[tokio::test]
+    async fn station_recovers_after_extended_backoff() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![hvac_conf("hvac", "ttyS1", 3, 1000)], bus.clone(), sink.clone());
+        // 三轮失败：0 → oc=1 next_due 1000；1000 → oc=2 next_due 3000；3000 → oc=3 next_due 7000
+        sched.tick_once(0).await;
+        sched.tick_once(1000).await;
+        sched.tick_once(3000).await;
+        {
+            let st = sched.state.read().unwrap();
+            assert_eq!(st[0].offline_count, 3);
+        }
+        // 2000 被退避跳过验证（已由 offline_station_backs_off 覆盖，此处不重复）
+        // 恢复前基线：三轮失败尝试读（0/1000/3000）→ call_count 累积含失败尝试（MockBus
+        // 每次读都记账，与 offline_station_backs_off 断言口径一致）。以基线增量断言恢复后
+        // cadence：7000 恢复读 + 8000 正常到期读 = 2；若退避残留把 next_due 推过 8000，
+        // 则 8000 轮不读 → 增量仅 1，断言区分成立。
+        let baseline = bus.call_count(3, 100); // = 3（三轮失败尝试）
+        // 恢复：put 预置 → 7000 到期 probe 成功
+        bus.put(3, 100, f32_regs(23.5));
+        sched.tick_once(7000).await;
+        {
+            let st = sched.state.read().unwrap();
+            assert_eq!(st[0].offline_count, 0, "恢复后 oc 归零");
+            assert_eq!(sink.event_count("hvac", "online"), 1);
+        }
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        // 恢复后 cadence 正常：next_due=8000，8000 到期再采一次（不因退避残留再跳）
+        sched.tick_once(8000).await;
+        assert_eq!(
+            bus.call_count(3, 100) - baseline,
+            2,
+            "恢复后按 interval 正常 cadence（7000 恢复读 + 8000 正常到期）"
+        );
+    }
+
     /// 单站混合 FC03+FC04 块：按 func 分发读（Holding→read_holding、Input→read_input），
     /// telemetry 全量落库（两 metric），无 offline 事件。
     #[tokio::test]
@@ -827,6 +876,18 @@ mod tests {
         assert!(calc.due_round(1000).is_empty());
         // now=2000 到期
         assert_eq!(calc.due_round(2000).len(), 1);
+    }
+
+    /// backoff_extra：1→1×, 2→2×, 3→4×, 6→32×(封顶), u32::MAX→32×(saturating)
+    #[test]
+    fn backoff_extra_caps_at_max_shift() {
+        assert_eq!(backoff_extra(1000, 1), 1000);
+        assert_eq!(backoff_extra(1000, 2), 2000);
+        assert_eq!(backoff_extra(1000, 3), 4000);
+        assert_eq!(backoff_extra(1000, 5), 16000);
+        assert_eq!(backoff_extra(1000, 6), 32000, "oc=6 封顶 32×");
+        assert_eq!(backoff_extra(1000, u32::MAX), 32000, "极端 oc saturating 后封顶");
+        assert_eq!(backoff_extra(60000, 6), 1_920_000); // 60s×32
     }
 
     /// offline 事件 stale_timeout_s 窗口防刷屏：持续失败多轮只告警一次（offline_count 仍逐轮
