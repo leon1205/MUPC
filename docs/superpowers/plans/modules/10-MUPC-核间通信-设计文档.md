@@ -1319,7 +1319,7 @@ DI/DO 分配（联锁输入/状态输出，接线见 deploy.md）：DI1 急停(1
 **fail-safe 与失效策略**：GPIO 初始化失败或 DI 读失败一律按**触发（latch+告警）**处理，禁止按未触发继续运行；startup 增加 GPIO 自检步骤，**自检同步采样各联锁 DI——处于触发态则直接重新 latch**（DB 非重启禁启唯一依据，兜底触发→落库间的掉电/崩溃窗口，L-1）。**去抖按 DI 细分**（`debounce_count` 移入每 DI 配置），急停/水浸/消防默认 1 次采样即触发（近即时），普通 DI 保留去抖（poll_ms=100）。**投运前提（S-3）**：联锁软停经 Modbus 500=0 传达，急停/水浸/消防的**硬停机须 PCS 侧独立干接点急停回路兜底**（现场核对 PCS 是否自带硬急停端子），MUPC 软停为第一层；stop_failed 时 DO2/告警升级提示停机未确认。
 **消防双源语义（R-G）**：停机触发**仅以 DI3（干接点，高完整性主判）为准**；RS485 fire 站（02 §10 role=fire）作确认/校核、不独立触发停机；DI3 与 RS485 状态不一致（一触发一正常）产生「消防双源不一致」告警事件（融合规则 02 §10.4）。**跨源交互归属（I-2）**：southd 以 `fire_state: Arc<RwLock<…>>` 或事件流二选一（实现定）暴露消防站状态供 core-bin interlock 读取比对；不一致告警可做纯事件侧（两源各自成事件、事件消费者比对），不阻塞释放前置。
 
-**释放状态机**（默认须人工，`auto_release=false`）：清 latch 需 ① 全部触发源 DI 已回安全态且保持 ≥ `release_hold_secs`（前置校验）② Web API `POST /api/v1/interlock/release` 手动确认；`auto_release: true` 时 ① 满足即自动清（不推荐现场）。
+**释放状态机**（默认须人工，`auto_release=false`）：清 latch 需 ① 全部触发源 DI 已回安全态且保持 ≥ `release_hold_secs`（前置校验）② Web API `POST /api/v1/interlock/release` 手动确认；`auto_release: true` 时 ① 满足且 **停机已确认（非 `stop_failed`）** 即自动清（不推荐现场）。⚠️ `stop_failed`（停机确认超时，PCS 未真正停机）期间禁止自动解 latch——否则源复位即自动复位、联锁静默失效；仅人工 Web release（操作员明确放行）可容忍 stop_failed 态清 latch，且装配应对人工放行 stop_failed 补审计事件留痕。
 
 **DO 驱动语义**：
 - DO1 运行灯 = PCS `RUN_STATE(1013) ∈ {1,2,3}`（0 停 / 1 待机 / 2 充电 / 3 放电；非停机即上电）**且** 无联锁 latch（驱动数据源取 `last_run_state()`；`None` 链路未知 → 灯灭保守，首心跳前由 DO2=offline 语义覆盖，L-4；`mark_offline` 同步清 `last_run_state=None`，防离线期 DO1/DO2 同亮矛盾，B3）；
@@ -1405,3 +1405,4 @@ io:
 | v2.2 | PCS 真实协议 V1.3 取代 §11.4~11.6 假设点表：实时控制模块=两级式 PCS，`transport=modbus_rtu` 直连 PCS（RS485 19200 N-8-1，高 8/低 8 互换）；分相下行→PCS 模式2+单相 P/Q(±25 裁剪)，恒功率下行→模式0+1001/1002(k_droop 忽略)；SOC/心跳读 3 区 1010/1013 |
 | v2.3 | BECG-3568 现场接线契约（S1）：PCS 主链路默认节点 /dev/ttyS1→/dev/ttyS0，站级 485 全口分配表（RS485-1..6 ↔ ttyS0/S2-S6 ↔ 设备），DI/DO 编号与接线落 deploy.md 现场接线章 |
 | v2.4 | DI/DO 安全联锁（S2）：PCS 停机原语（500=0）+ stopped_latched 挡自动重启（双层：transport 兜底 + 上层抑制）；mupc-io GPIO 抽象（sysfs 先落地/gpiod 桩）；core-bin interlock 联锁控制器（急停/水浸/消防→pcs_stop，门禁仅事件；DB 持久化锁存 + Web release）；DO 运行/故障灯驱动；core_config io: 段 |
+| v2.5 | S2 实施细化（评审闭环）：release 语义补 `stop_failed` 门控（§12.3 释放状态机：auto 释放须停机已确认，stop_failed 期间仅人工 Web release 放行 + 审计事件）；intercore `authorize_restart` 单次授权旁路 S-4 停机守卫（restore(true)/S-4 消费即清位）；interlock 状态机去抖归装配（§12.3 debounce 入每 DI 采样层） |

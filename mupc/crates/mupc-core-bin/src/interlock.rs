@@ -172,9 +172,10 @@ impl StateMachine {
                 let held = now.saturating_sub(s.source_safe_since.unwrap_or(now))
                     >= self.release_hold_secs;
                 // 释放门槛：人工 web 确认（操作员明确放行，可容忍 stop_failed 态），或
-                // auto_release **且停机已确认**（!stop_failed）——stop() 从未确认（PCS 仍运行、
-                // run_state 未转 0）时禁止自动解 latch 清 stop_failed：否则联锁静默失效
-                // （源复位即自动复位，故障灯熄灭但 PCS 从未真正停机）。
+                // auto_release **且停机已确认**（!stop_failed）。stop_failed 由装配在停机确认
+                // **超时**后置位（stop_confirm_ms 内未转 0）；一旦置位即不再自动解 latch——
+                // 否则联锁静默失效（源复位即自动复位，故障灯熄灭但 PCS 从未真正停机）。
+                // 确认窗口内的自动释放由装配超时兜底（超时即置 stop_failed）。
                 let manual_ok = web_release_pending;
                 let auto_ok = self.auto_release && !s.stop_failed;
                 if held && (manual_ok || auto_ok) {
