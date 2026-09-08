@@ -493,7 +493,8 @@ impl CoreConfig {
                 mm.read_interval_ms
             ));
         }
-        // 南向 RS485 串口当前不可配、默认 /dev/ttyUSB0；总表须独立串口或需总线仲裁（未实现）
+        // 南向 RS485 默认 /dev/ttyUSB0（历史 USB-485/跨平台防御；BECG-3568 无 ttyUSB0，
+        // 总表默认已迁 /dev/ttyS4，本分支仅对显式写该值或 USB-485 平台生效，勿误删）
         if mm.serial_port == "/dev/ttyUSB0" {
             return Err(
                 "master_meter.serial_port 与南向 RS485 默认串口 /dev/ttyUSB0 相同——台区总表须独立于南向 RS485 串口或需总线仲裁（未实现）"
@@ -584,6 +585,8 @@ plugins: {}
         assert!(config.ai_engine.local_priority, "本地优先应为部署默认");
         // 未配置 master_meter 时默认参数（默认关，serial_port 落默认 /dev/ttyS4）
         assert_eq!(config.master_meter.serial_port, "/dev/ttyS4");
+        assert_eq!(config.master_meter.baud_rate, 9600);
+        assert_eq!(config.master_meter.slave_addr, 3);
     }
 
     #[test]
