@@ -248,6 +248,66 @@ async fn event_insert_and_query() {
 }
 
 #[tokio::test]
+async fn event_latest_by_type_returns_most_recent() {
+    let (_, svc) = setup().await;
+    let now = Utc::now();
+    let older = SystemEvent {
+        id: None,
+        timestamp: now - Duration::hours(1),
+        event_type: "interlock.triggered".into(),
+        source: "pcs".into(),
+        message: "older".into(),
+    };
+    let newer = SystemEvent {
+        id: None,
+        timestamp: now,
+        event_type: "interlock.triggered".into(),
+        source: "pcs".into(),
+        message: "newer".into(),
+    };
+    let cleared = SystemEvent {
+        id: None,
+        timestamp: now + Duration::minutes(1),
+        event_type: "interlock.cleared".into(),
+        source: "pcs".into(),
+        message: "cleared".into(),
+    };
+    svc.events.insert(&older).await.unwrap();
+    let id_newer = svc.events.insert(&newer).await.unwrap();
+    svc.events.insert(&cleared).await.unwrap();
+
+    // 同类型多条 → 取 timestamp 最大的一条
+    let latest = svc
+        .events
+        .latest_by_type("interlock.triggered")
+        .await
+        .unwrap()
+        .expect("应返回 triggered 最新一条");
+    assert_eq!(latest.id, Some(id_newer));
+    assert_eq!(latest.message, "newer");
+
+    // 不同事件类型互不干扰
+    let latest_cleared = svc
+        .events
+        .latest_by_type("interlock.cleared")
+        .await
+        .unwrap()
+        .expect("应返回 cleared 一条");
+    assert_eq!(latest_cleared.message, "cleared");
+}
+
+#[tokio::test]
+async fn event_latest_by_type_none_when_absent() {
+    let (_, svc) = setup().await;
+    let result = svc
+        .events
+        .latest_by_type("interlock.triggered")
+        .await
+        .unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
 async fn event_purge() {
     let (_, svc) = setup().await;
     let old = SystemEvent {

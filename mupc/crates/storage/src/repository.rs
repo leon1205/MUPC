@@ -67,6 +67,11 @@ pub trait EventRepository: Send + Sync {
         end: DateTime<Utc>,
     ) -> Result<Vec<SystemEvent>, StorageError>;
     async fn purge_older_than(&self, before: DateTime<Utc>) -> Result<usize, StorageError>;
+    /// 按事件类型取最新一条（timestamp 最大）；用于联锁 latch DB 读回
+    async fn latest_by_type(
+        &self,
+        event_type: &str,
+    ) -> Result<Option<SystemEvent>, StorageError>;
 }
 
 #[async_trait]
@@ -381,6 +386,24 @@ impl EventRepository for SqliteEventRepo {
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         Ok(result.rows_affected() as usize)
+    }
+
+    async fn latest_by_type(
+        &self,
+        event_type: &str,
+    ) -> Result<Option<SystemEvent>, StorageError> {
+        let row = sqlx::query_as::<_, EventRow>(
+            "SELECT id, timestamp, event_type, source, message
+             FROM events
+             WHERE event_type = ?
+             ORDER BY timestamp DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(event_type)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(row.map(|r| r.into()))
     }
 }
 
