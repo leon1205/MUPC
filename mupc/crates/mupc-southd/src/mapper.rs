@@ -219,12 +219,14 @@ pub fn telemetry_points(reads: &BlockReads) -> Vec<(String, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RegFunc;
     use mupc_data_processing::meter_regs::RegFormat;
 
     fn blk(name: &str) -> RegBlockConf {
         RegBlockConf {
             name: name.into(),
             addr: 0,
+            func: RegFunc::Holding,
             format: RegFormat::Float32,
             scale: 0.0,
             count: 6,

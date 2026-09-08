@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub const DEFAULT_POLL_MS: u64 = 1000;
 pub const DEFAULT_STALE_TIMEOUT_S: u64 = 5;
 pub const DEFAULT_INTERVAL_MS: u64 = 1000;
+pub const DEFAULT_BAUD_RATE: u32 = 9600;
 /// 策略 5s 数据新鲜度共享常量落点（M-6）：单一真源在 data-processing
 /// （`mupc_data_processing::DATA_FRESHNESS_MS`），此处别名引用避免双定义漂移。
 pub const DATA_FRESHNESS_MS: u64 = mupc_data_processing::DATA_FRESHNESS_MS;
@@ -39,10 +40,24 @@ pub struct StationConf {
     pub protocol: String,
     #[serde(default)]
     pub slave: u8,
+    /// 口波特率（同口各站必须一致——物理共享口波特率；缺省 9600）
+    #[serde(default = "default_baud_rate")]
+    pub baud_rate: u32,
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
     #[serde(default)]
     pub regs: Vec<RegBlockConf>,
+}
+
+/// 寄存器块读取功能码（YAML: `holding` / `input`）。默认 FC03 保持寄存器；
+/// FC04 输入寄存器供厂方点表用 input regs 的设备（解码同构，读回同格式）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegFunc {
+    /// 保持寄存器（FC0x03，默认）
+    Holding,
+    /// 输入寄存器（FC0x04）
+    Input,
 }
 
 /// 寄存器块配置（一段起始地址 + 数值格式 + 块长度）
@@ -50,6 +65,9 @@ pub struct StationConf {
 pub struct RegBlockConf {
     pub name: String,
     pub addr: u16,
+    /// 功能码（FC03 保持 / FC04 输入；缺省 FC03）
+    #[serde(default = "default_reg_func")]
+    pub func: RegFunc,
     /// **注意：RegFormat 无 Default**，故用 `#[serde(default = "default_reg_format")]`
     /// （serde(default) 需要 Default 实现，此处不可用）。
     #[serde(default = "default_reg_format")]
@@ -124,6 +142,21 @@ impl SouthStationsConfig {
                 ));
             }
         }
+        // 同口 baud 一致性：物理共享口波特率（Rs485Device 无动态切波特，同口只能一个波特率）。
+        // 同 port 的站 baud_rate 必须相同，否则 Err（startup 每口用首站 conf open，异 baud 会被静默忽略）。
+        let mut port_bauds: Vec<(&str, u32)> = Vec::new();
+        for s in &self.stations {
+            if let Some((_, prev_baud)) = port_bauds.iter().find(|(p, _)| *p == s.port.as_str()) {
+                if *prev_baud != s.baud_rate {
+                    return Err(format!(
+                        "south_stations: 站 {} port {} baud_rate={} 与同口其它站 {} 不一致（同口共享物理波特率，须统一）",
+                        s.id, s.port, s.baud_rate, prev_baud
+                    ));
+                }
+            } else {
+                port_bauds.push((s.port.as_str(), s.baud_rate));
+            }
+        }
         Ok(())
     }
 
@@ -152,6 +185,12 @@ fn default_reg_count() -> u16 {
 }
 fn default_reg_format() -> RegFormat {
     RegFormat::Float32
+}
+fn default_baud_rate() -> u32 {
+    DEFAULT_BAUD_RATE
+}
+fn default_reg_func() -> RegFunc {
+    RegFunc::Holding
 }
 
 #[cfg(test)]
@@ -406,5 +445,60 @@ south_stations:
         assert_eq!(blk.format, RegFormat::Float32);
         assert_eq!(blk.scale, 0.0);
         assert_eq!(blk.count, 2);
+    }
+
+    #[test]
+    fn default_baud_and_func_apply_when_omitted() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let st = &w.south_stations.stations[0];
+        assert_eq!(st.baud_rate, DEFAULT_BAUD_RATE);
+    }
+
+    #[test]
+    fn reg_block_func_parses_holding_input() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - id: a
+      role: battery
+      port: t1
+      slave: 1
+      regs:
+        - { name: soc, addr: 100, func: input }
+        - { name: temp, addr: 200 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let regs = &w.south_stations.stations[0].regs;
+        assert_eq!(regs[0].func, RegFunc::Input);
+        assert_eq!(regs[1].func, RegFunc::Holding); // 缺省 FC03
+    }
+
+    #[test]
+    fn validate_rejects_same_port_mixed_baud() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
+    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 19200 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_same_port_same_baud() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
+    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 9600 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_ok());
     }
 }

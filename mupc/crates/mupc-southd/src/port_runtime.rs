@@ -210,6 +210,7 @@ mod tests {
             port: port.into(),
             protocol: protocol.into(),
             slave: 1,
+            baud_rate: 9600,
             interval_ms: 1000,
             regs: Vec::new(),
         }

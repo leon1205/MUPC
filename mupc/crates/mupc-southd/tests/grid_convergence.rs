@@ -8,7 +8,7 @@
 //! 字面量差 ~1.19e-8 无法精确相等，故 pf 用 dyadic 值保精确断言，见 §10.9 决议）。
 
 use mupc_data_processing::meter_regs::RegFormat;
-use mupc_southd::config::{RegBlockConf, Role};
+use mupc_southd::config::{RegBlockConf, RegFunc, Role};
 use mupc_southd::mapper::{poll_to_result, PollResult};
 
 /// f32 → 大端 u16 寄存器对（高字在前；与 decode_regs 字节序一致）
@@ -24,7 +24,10 @@ fn phase_regs(a: f32, b: f32, c: f32) -> Vec<u16> {
 
 /// 一块配置 + 该块读成功结果
 fn block(name: &str, addr: u16, format: RegFormat, scale: f64, count: u16, regs: Vec<u16>) -> (RegBlockConf, Result<Vec<u16>, String>) {
-    (RegBlockConf { name: name.into(), addr, format, scale, count }, Ok(regs))
+    (
+        RegBlockConf { name: name.into(), addr, func: RegFunc::Holding, format, scale, count },
+        Ok(regs),
+    )
 }
 
 /// 全正相量 canned 输入（读成功后取 Data）

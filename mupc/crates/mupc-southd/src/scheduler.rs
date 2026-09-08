@@ -347,7 +347,7 @@ impl SouthScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RegBlockConf;
+    use crate::config::{RegBlockConf, RegFunc};
     use crate::port_runtime::MockBus;
     use mupc_data_processing::meter_regs::RegFormat;
 
@@ -357,6 +357,7 @@ mod tests {
         RegBlockConf {
             name: name.into(),
             addr,
+            func: RegFunc::Holding,
             format: RegFormat::Float32,
             scale: 0.0,
             count,
@@ -381,6 +382,7 @@ mod tests {
             port: port.into(),
             protocol: "modbus".into(),
             slave,
+            baud_rate: 9600,
             interval_ms,
             regs: vec![
                 blk("p", 0, 6),
@@ -400,6 +402,7 @@ mod tests {
             port: port.into(),
             protocol: "modbus".into(),
             slave,
+            baud_rate: 9600,
             interval_ms,
             regs: vec![blk("temp", 100, 2)],
         }
