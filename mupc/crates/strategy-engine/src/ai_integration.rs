@@ -34,8 +34,9 @@ pub struct AiIntegrator {
     last_data_ts: RwLock<Option<std::time::Instant>>,
     /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站（southd role=battery 经 on_battery_soc → set_battery_soc
     /// 注入）SOC 源缓存——(soc, 注入时刻)。evaluate 前 SOC 源裁决：fresh → 优先覆盖 latest_data 的
-    /// battery.soc；否则（BMS 掉线/超期）回落核间 latest_soc。源 ts 放此处（BatteryData 无 ts、改
-    /// DataPackage 会破全仓 ~33 构造点）；soc 语义 0-100 百分数。
+    /// battery.soc；否则回落**沿用 N3 保留的 soc 冻结值**（本层不置 None/刷新；真·实时回落——
+    /// 超期置 None/过期标记使 N3 每次重读核间——属 S3b-1c follow-up）。源 ts 放此处（BatteryData
+    /// 无 ts、改 DataPackage 会破全仓 ~33 构造点）；soc 语义 0-100 百分数。
     bms_soc: RwLock<Option<(f64, std::time::Instant)>>,
     /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
@@ -156,13 +157,14 @@ impl AiIntegrator {
         tracing::debug!(soc, "BMS SOC 注入");
     }
 
-    /// SOC 双源裁决（04 §2.11.1）：evaluate 前把 data.battery.soc 解析为确定源。
+    /// SOC 双源裁决（04 §2.11.1）：evaluate 前把 latest_data.battery.soc 解析为确定源。
+    /// BMS 站（southd on_battery_soc 通道写入）fresh → 优先覆盖。
+    /// 否则回落：**沿用 latest_data 已保留的 soc 值**（N3 在 set_latest_data 首次填充后经
+    /// merge_battery_missing 永久保留，本层不把 soc 置 None/刷新）——故 BMS 掉线后 evaluate
+    /// 用的是首次 N3 填充的冻结值，非实时核间 latest_soc。
     ///
-    /// BMS fresh（≤DATA_STALE_AFTER）→ 覆盖 data.battery.soc（含覆盖既有南向/核间旧值）；
-    /// 否则回落**仅当 data.battery.soc 为 None 时**触发核间 latest_soc 补写——data 已带保留 soc
-    /// （N3 早期写入被 U-26 merge 保留）时不重读核间，该保留值继续沿用（保留值比空好），由
-    /// set_latest_data 侧维护刷新；源超期置 None/过期标记与滞回随 S3b-1c 补。tai_storage.evaluate
-    /// 以 data.battery.soc 为准（unwrap_or(50)）。
+    /// ⚠️ S3b-1c follow-up（04 §2.11.1 R-C）：真·实时回落须改 merge 语义——BMS 源超期置
+    /// SOC=None/过期标记使 N3 每次可重读核间；本计划范围（基础裁决）未做，注释如实降调。
     async fn apply_soc_source(&self, data: &mut DataPackage) {
         let bms_fresh = {
             let b = self.bms_soc.read().await;
@@ -175,7 +177,10 @@ impl AiIntegrator {
             data.battery.soc = Some(soc);
             return;
         }
-        // BMS 超期/无 → 回落核间：仅当 soc 为 None 时补写（data 已带保留值时不重读——保留值比空好）
+        // BMS 超期/无 → 回落：data.battery.soc 为 None 时才补读核间 latest_soc。但 N3 在
+        // set_latest_data 首次填充后经 merge_battery_missing 永久保留（本层不置 None/刷新），故
+        // 此分支通常不触发——BMS 掉线后 evaluate 沿用 N3 首次填充的冻结值，非实时核间 latest_soc。
+        // 真·实时回落（源超期置 None/过期标记使 N3 每次重读）属 S3b-1c follow-up，注释如实降调。
         if data.battery.soc.is_none() {
             if let Some(client) = &self.intercore_client {
                 if let Some((soc, ts)) = client.latest_soc().await {
@@ -217,7 +222,8 @@ impl AiIntegrator {
             return Ok(());
         };
         // S3b-1b SOC 双源裁决（04 §2.11.1）：evaluate 前解析 battery.soc 为确定源——
-        // BMS 站 fresh 优先覆盖；否则回落核间 latest_soc。只改 battery 字段，不动 last_data_ts 闸门（C-2）。
+        // BMS 站 fresh 优先覆盖；否则回落沿用 latest_data 已保留 soc（冻结值，非实时核间，
+        // 详见 apply_soc_source）。只改 battery 字段，不动 last_data_ts 闸门（C-2）。
         self.apply_soc_source(&mut data).await;
 
         // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块（best-effort，失败仅告警）

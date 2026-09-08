@@ -102,12 +102,14 @@ impl Default for SouthStationsConfig {
 impl SouthStationsConfig {
     /// 段内校验（跨段/互斥在 core-bin validate——Task 6）：id 唯一非空；
     /// meter_grid 至多一站（AiIntegrator 单写方约束，grid_station 取唯一）；
+    /// battery 至多一站（BMS SOC 单源约束，AiIntegrator bms_soc 单槽——多站抢写最后写入者胜）；
     /// port 非空；slave 1..=247；interval_ms>0；baud_rate 1..=4000000；
     /// meter_grid/battery interval_ms < DATA_FRESHNESS_MS（BMS SOC fresh 窗口 5s）；
     /// 同口 baud 一致（见下）。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: Vec<&str> = Vec::new();
         let mut grid_seen = false;
+        let mut battery_seen = false;
         for s in &self.stations {
             if s.id.trim().is_empty() {
                 return Err("south_stations: station id 为空".into());
@@ -121,6 +123,15 @@ impl SouthStationsConfig {
                     return Err("south_stations: 至多一个 meter_grid 站（AiIntegrator 单写方约束）".into());
                 }
                 grid_seen = true;
+            }
+            if s.role == Role::Battery {
+                if battery_seen {
+                    return Err(
+                        "south_stations: 至多一个 battery 站（BMS SOC 单源约束，AiIntegrator bms_soc 单槽）"
+                            .into(),
+                    );
+                }
+                battery_seen = true;
             }
             if s.port.trim().is_empty() {
                 return Err(format!("south_stations: 站 {} port 为空", s.id));
@@ -340,6 +351,21 @@ south_stations:
         assert!(
             w.south_stations.validate().is_err(),
             "两个 meter_grid 站应被拒绝（AiIntegrator 单写方）"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_multiple_battery() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: b1, role: battery, port: t1, slave: 1, interval_ms: 1000 }
+    - { id: b2, role: battery, port: t2, slave: 2, interval_ms: 1000 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(
+            w.south_stations.validate().is_err(),
+            "两个 battery 站应被拒绝（BMS SOC 单源约束，AiIntegrator bms_soc 单槽）"
         );
     }
 
