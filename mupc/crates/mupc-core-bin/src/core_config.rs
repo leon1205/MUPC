@@ -24,6 +24,9 @@ pub struct CoreConfig {
     /// 台区总表分相数据源（U-26：台区储能策略 phase 输入）
     #[serde(default)]
     pub master_meter: MasterMeterConfig,
+    /// 策略引擎配置（v2.24：容量档位 YAML 路径）
+    #[serde(default)]
+    pub strategy: StrategyConfig,
 }
 
 /// 系统级配置
@@ -163,6 +166,23 @@ pub struct PluginsConfig {
     /// 自动加载的插件名列表
     #[serde(default = "default_auto_load")]
     pub auto_load: Vec<String>,
+}
+
+/// 策略引擎配置（v2.24 容量档位 §2.10.2）
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyConfig {
+    /// 台区储能档位 YAML 路径；空 = 默认档 pcs60_dual（唯一向后兼容分支）。
+    /// 换 PCS 规格只改此路径指向的档位 key / YAML 加档，不改代码。
+    #[serde(default)]
+    pub tai_config_file: String,
+}
+
+impl Default for StrategyConfig {
+    fn default() -> Self {
+        Self {
+            tai_config_file: String::new(),
+        }
+    }
 }
 
 /// 台区总表分相数据源配置（U-26）
@@ -444,6 +464,12 @@ impl CoreConfig {
                 ));
             }
         }
+        // v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
+        // q_i_max）与 intercore transport 驱动点表型号不自动联动——放行任一非
+        // 60kW 无中线档时须与驱动点表同批变更并在此核对（当前 60kW 档与
+        // modbus_rtu V1.3 驱动天然匹配；has_neutral=true 档已在档位加载侧拦截）。
+        // 注：档位 YAML 的实际加载/校验发生在 startup 装配（fail-fast），此处仅
+        // 保留位注释，不读文件、不加逻辑。
         // P1-4/P2-2: 台区总表启用时校验现场前提（独立串口/从站）与寄存器映射有效性
         if self.master_meter.enabled {
             self.validate_master_meter()?;
@@ -601,6 +627,7 @@ plugins: {}
                 auto_load: vec!["rs485_plugin".into()],
             },
             master_meter: MasterMeterConfig::default(),
+            strategy: StrategyConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -643,6 +670,7 @@ plugins: {}
                 auto_load: vec![],
             },
             master_meter: MasterMeterConfig::default(),
+            strategy: StrategyConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -872,5 +900,53 @@ master_meter:
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.contains("重叠"), "期望提示 p_total 与 p 重叠，实际: {}", err);
+    }
+
+    /// v2.24: strategy 段显式配置可解析；合法值 validate 通过
+    #[test]
+    fn test_core_config_strategy_tai_config_file() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+strategy:
+  tai_config_file: "/opt/mupc/config/tai_profiles.yaml"
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.strategy.tai_config_file,
+            "/opt/mupc/config/tai_profiles.yaml"
+        );
+        assert!(
+            config.validate().is_ok(),
+            "显式配置合法应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// v2.24: 未配 strategy 段 → 默认空（load 侧归一化为 None → 默认 60 档）
+    #[test]
+    fn test_core_config_strategy_default_empty() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.strategy.tai_config_file.is_empty());
     }
 }
