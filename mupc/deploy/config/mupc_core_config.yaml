@@ -131,6 +131,9 @@ master_meter:
 #         - { name: p_total, addr: 0x001E, format: int32_scaled, scale: 0.01, count: 2 }   # 可选：缺省降级 Σp
 #     # 以下站非 meter_grid：S3a 采通用 telemetry（regs 留空即可，不影响站在线），
 #     # 语义点表待厂方 → S3b 补全（battery 含 soc 块则填 battery.soc）。
+#     # battery 站配 soc 块（name: soc）后，SOC 经 on_battery_soc 独立通道推 AiIntegrator
+#     # （BMS 源优先，超期回落核间，04 §2.11.1）；遥测落库照旧。默认 battery 无 soc 块时
+#     # 本通道不触发，AiIntegrator 继续核间回落/默认值——厂方语义点表（S3b-2）配好后生效。
 #     - { id: bms,         role: battery,    port: "/dev/ttyS2", protocol: modbus, slave: 1, interval_ms: 1000 }
 #     - { id: ac_unit,     role: hvac,       port: "/dev/ttyS3", protocol: modbus, slave: 1, interval_ms: 5000 }
 #     - { id: meter_batt,  role: meter_batt, port: "/dev/ttyS5", protocol: modbus, slave: 1, interval_ms: 1000 }
