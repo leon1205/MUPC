@@ -7,14 +7,16 @@
 //! 在测量环内）。回放以「基线 − 储能当前输出（上一周期指令）」作为表计
 //! 测量送入控制器，控制器下一周期输出经反馈后再影响测量，形成真实闭环。
 //!
-//! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1] [p_abs_trig] [p_tgt_s1] [kp] [slope]
+//! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- [--config-file <档位YAML>] [--capacity-profile <key>] <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1] [p_abs_trig] [p_tgt_s1] [kp] [slope]
+//!        --config-file <档位YAML> 与 --capacity-profile <key> 可选；覆盖顺序 =
+//!        代码默认 → 档位派生(L1/L2) → tuning(L3) → 位置参数扫参（最外层）。
 
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDateTime;
 use mupc_data_processing::telemetry::{
     BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus, PhaseElectricalData,
 };
-use mupc_strategy_engine::{TaiStorageConfig, TaiStorageStrategy};
+use mupc_strategy_engine::{load_tai_storage_config, TaiStorageStrategy};
 use std::env;
 
 // xlsx「总表」列索引
@@ -57,9 +59,41 @@ fn cell_timestamp(d: &Data) -> Option<i64> {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let path = args.get(1).expect("用法: tai_replay <xlsx路径> [SOC初值]");
-    let soc_init: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.50);
+    // v2.24: --config-file <档位YAML> 与 --capacity-profile <key> 自参数剥离，
+    // 其余保持既有位置参数顺序（xlsx, SOC初值, soc_cap_day, s4_limit_margin_kw,
+    // s3_margin, p_abs_trig, p_tgt_s1, kp, slope）。覆盖顺序 = 代码默认 → 档位
+    // 派生(L1/L2) → tuning(L3) → 下方 CLI 位置参数（扫参可在任意档基础上叠加）。
+    let mut config_file: Option<String> = None;
+    let mut capacity_profile: Option<String> = None;
+    let mut pos: Vec<String> = Vec::new();
+    let raw: Vec<String> = env::args().collect();
+    let mut i = 1;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--config-file" => {
+                i += 1;
+                if let Some(v) = raw.get(i) {
+                    config_file = Some(v.clone());
+                }
+            }
+            "--capacity-profile" => {
+                i += 1;
+                if let Some(v) = raw.get(i) {
+                    capacity_profile = Some(v.clone());
+                }
+            }
+            s if s.starts_with("--") => {
+                eprintln!("未知选项: {s}");
+                std::process::exit(2);
+            }
+            _ => pos.push(raw[i].clone()),
+        }
+        i += 1;
+    }
+    let path = pos
+        .get(0)
+        .expect("用法: tai_replay [--config-file <档位YAML>] [--capacity-profile <key>] <xlsx路径> [SOC初值]");
+    let soc_init: f64 = pos.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.50);
     if soc_init != soc_init.clamp(0.10, 0.90) {
         eprintln!(
             "警告: SOC 初值超出 [0.10, 0.90]，已裁剪为 {}",
@@ -73,28 +107,34 @@ fn main() {
         .worksheet_range("总表")
         .expect("找不到「总表」sheet");
 
-    let mut cfg = TaiStorageConfig::default();
-    // 可选参数覆盖：args[3]=soc_cap_day，args[4]=s4_limit_margin_kw，args[5]=s3_margin(0|1)
-    // 可选 S1 激进调参覆盖：args[6]=p_abs_trig，args[7]=p_tgt_s1，args[8]=kp，args[9]=slope
-    if let Some(v) = args.get(3) {
+    // v2.24: 代码默认 → 档位派生(L1/L2) → tuning(L3) 由加载器完成；加载失败
+    // fail-fast（与运行时启动一致，不静默落默认档）。
+    let mut cfg = load_tai_storage_config(config_file.as_deref(), capacity_profile.as_deref())
+        .unwrap_or_else(|e| {
+            eprintln!("tai 档位加载失败: {e}");
+            std::process::exit(2);
+        });
+    // 可选位置参数扫参（最外层覆盖）：pos[2]=soc_cap_day, pos[3]=s4_limit_margin_kw,
+    // pos[4]=s3_margin(0|1), pos[5]=p_abs_trig, pos[6]=p_tgt_s1, pos[7]=kp, pos[8]=slope
+    if let Some(v) = pos.get(2) {
         cfg.soc_cap_day = v.parse().unwrap_or(cfg.soc_cap_day);
     }
-    if let Some(v) = args.get(4) {
+    if let Some(v) = pos.get(3) {
         cfg.s4_limit_margin_kw = v.parse().unwrap_or(cfg.s4_limit_margin_kw);
     }
-    if let Some(v) = args.get(5) {
+    if let Some(v) = pos.get(4) {
         cfg.s3_margin_limit = v == "1";
     }
-    if let Some(v) = args.get(6) {
+    if let Some(v) = pos.get(5) {
         cfg.p_abs_trig = v.parse().unwrap_or(cfg.p_abs_trig);
     }
-    if let Some(v) = args.get(7) {
+    if let Some(v) = pos.get(6) {
         cfg.p_tgt_s1 = v.parse().unwrap_or(cfg.p_tgt_s1);
     }
-    if let Some(v) = args.get(8) {
+    if let Some(v) = pos.get(7) {
         cfg.kp = v.parse().unwrap_or(cfg.kp);
     }
-    if let Some(v) = args.get(9) {
+    if let Some(v) = pos.get(8) {
         cfg.slope = v.parse().unwrap_or(cfg.slope);
     }
     let strategy = TaiStorageStrategy::new(cfg.clone());
