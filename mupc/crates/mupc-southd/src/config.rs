@@ -102,7 +102,8 @@ impl Default for SouthStationsConfig {
 impl SouthStationsConfig {
     /// 段内校验（跨段/互斥在 core-bin validate——Task 6）：id 唯一非空；
     /// meter_grid 至多一站（AiIntegrator 单写方约束，grid_station 取唯一）；
-    /// port 非空；slave 1..=247；interval_ms>0；meter_grid interval_ms < DATA_FRESHNESS_MS。
+    /// port 非空；slave 1..=247；interval_ms>0；baud_rate 1..=4000000；
+    /// meter_grid interval_ms < DATA_FRESHNESS_MS；同口 baud 一致（见下）。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: Vec<&str> = Vec::new();
         let mut grid_seen = false;
@@ -135,6 +136,14 @@ impl SouthStationsConfig {
                     s.id
                 ));
             }
+            // 口波特率下界/上界：0 会静默穿透同口一致性检查（整口皆 0 时放行），
+            // 到 open 才报错；>4_000_000 亦为异常值，一并在此拒。
+            if s.baud_rate == 0 || s.baud_rate > 4_000_000 {
+                return Err(format!(
+                    "south_stations: 站 {} baud_rate 越界: {}（须 1..=4000000）",
+                    s.id, s.baud_rate
+                ));
+            }
             if s.role == Role::MeterGrid && s.interval_ms >= DATA_FRESHNESS_MS {
                 return Err(format!(
                     "south_stations: meter_grid 站 {} interval_ms 须 < {}ms",
@@ -144,17 +153,20 @@ impl SouthStationsConfig {
         }
         // 同口 baud 一致性：物理共享口波特率（Rs485Device 无动态切波特，同口只能一个波特率）。
         // 同 port 的站 baud_rate 必须相同，否则 Err（startup 每口用首站 conf open，异 baud 会被静默忽略）。
-        let mut port_bauds: Vec<(&str, u32)> = Vec::new();
+        let mut port_bauds: Vec<(&str, &str, u32)> = Vec::new();
         for s in &self.stations {
-            if let Some((_, prev_baud)) = port_bauds.iter().find(|(p, _)| *p == s.port.as_str()) {
-                if *prev_baud != s.baud_rate {
+            if let Some((_, first_id, first_baud)) = port_bauds
+                .iter()
+                .find(|(p, _, _)| *p == s.port.as_str())
+            {
+                if *first_baud != s.baud_rate {
                     return Err(format!(
-                        "south_stations: 站 {} port {} baud_rate={} 与同口其它站 {} 不一致（同口共享物理波特率，须统一）",
-                        s.id, s.port, s.baud_rate, prev_baud
+                        "south_stations: 站 {} port {} baud_rate={} 与同口首站 {}（baud_rate={}）不一致——同口共享物理波特率，须统一",
+                        s.id, s.port, s.baud_rate, first_id, first_baud
                     ));
                 }
             } else {
-                port_bauds.push((s.port.as_str(), s.baud_rate));
+                port_bauds.push((s.port.as_str(), s.id.as_str(), s.baud_rate));
             }
         }
         Ok(())
@@ -500,5 +512,58 @@ south_stations:
 "#;
         let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_same_port_mixed_baud_3_station() {
+        // 第 3 站异 baud → 应被拒（同口物理共享波特率）
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
+    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 9600 }
+    - { id: c, role: fire,    port: t1, slave: 3, baud_rate: 19200 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_diff_ports_same_baud() {
+        // 不同口独立物理口，同 baud 无冲突 → Ok
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
+    - { id: b, role: hvac,    port: t2, slave: 2, baud_rate: 9600 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_baud_rate() {
+        // baud_rate=0 整口皆 0 时同口一致性检查放行，必须靠下界拦截
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 0 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_baud_same_port_all_zero() {
+        // 整口 3 站 baud_rate 全为 0：同口一致性检查放行，须被下界拦截
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 0 }
+    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 0 }
+    - { id: c, role: fire,    port: t1, slave: 3, baud_rate: 0 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_err());
     }
 }
