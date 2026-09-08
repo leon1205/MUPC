@@ -1,10 +1,16 @@
-//! ModbusRtuTransport：经 Modbus RTU 写控制寄存器（FC16）+ cmd_valid 触发 + 执行确认轮询
+//! ModbusRtuTransport：PCS 真实协议驱动（协议 V1.3，v2.2）
+//!
+//! 与实时控制模块（PCS）直连：FC06 逐写 4 区保持寄存器（模式字 1000 / 启停 500 /
+//! 恒功率 1001-1002 / 分相 1006-1011），FC04 读 3 区输入寄存器（SOC=1010 / 运行状态
+//! 1013）。数据 int16 *1kW，寄存器收发高 8/低 8 字节互换（见 [`crate::pcs`]）。
+//! 自 v2.2 移除假设表驱动：cmd_ctrl/exec 确认轮询、int32 假设点表（REG_* 0x0000 区）。
+//! 假设表编解码保留于 `modbus_rtu.rs`（Task 3 标注废弃）。
 //!
 //! tokio-modbus 0.13 的异步 RTU 客户端通过 `rtu::attach_slave(stream, Slave)` 构造
 //! `client::Context`（无 `connect_slave`/`SlaveAddr`，串口打开由调用方完成）。
 //! 其 `tokio_modbus::Result<T>` 为双层 Result：外层为传输/IO 错误、内层为协议异常，
 //! 本模块以 [`fold_tm`] 折叠为单一 `MupcError`。
-use crate::modbus_rtu::*;
+use crate::pcs::*;
 use crate::tcp_server::DualParamCommand;
 use crate::transport::IntercoreTransport;
 use async_trait::async_trait;
@@ -28,15 +34,21 @@ pub struct ModbusRtuSettings {
     pub slave_addr: u8,
     pub response_timeout_ms: u64,
     /// 心跳轮询周期：驱动 [`ModbusRtuTransport::run_heartbeat_loop`] 后台任务按此周期读
-    /// REG_HEARTBEAT 判在线/离线。本模块不自动启动该任务（Modbus 未实联验证），由装配方
-    /// 在构造 `Arc<Self>` 后 `tokio::spawn`；取 0 时该任务回退 1000ms。
+    /// 3 区 REG_RUN_STATE(1013) 判在线/离线。本模块不自动启动该任务（Modbus 未实联验证），
+    /// 由装配方在构造 `Arc<Self>` 后 `tokio::spawn`；取 0 时该任务回退 1000ms。
     pub heartbeat_poll_ms: u64,
 }
 
 pub struct ModbusRtuTransport {
     settings: ModbusRtuSettings,
     connected: RwLock<bool>,
-    cmd_seq: AtomicU8,
+    /// 已下发的有功模式字（0=恒功率 / 2=分相，u8 缓存）。初值 0xFF 哨兵：与任何合法
+    /// 模式不等，保证首条指令必写 REG_MODE（PCS 上电默认模式未知，不能省首次写）。
+    mode: AtomicU8,
+    /// 是否已下发运行指令（REG_START_STOP=1）。初值 false：首条指令必写启停。
+    started: RwLock<bool>,
+    /// 最近一次读到的 BMS SOC（%，含读取时刻；N3 来源，FCP04 读 3 区 1010）
+    soc: RwLock<Option<(f64, std::time::Instant)>>,
 }
 
 /// 折叠 tokio-modbus 双层 Result（外层传输/IO 错误 + 内层协议异常）→ `Result<_, MupcError>`
@@ -96,11 +108,26 @@ async fn open_ctx(s: &ModbusRtuSettings) -> Result<Context, MupcError> {
     Ok(rtu::attach_slave(stream, Slave::from(s.slave_addr)))
 }
 
+/// 解码 PCS 3 区 SOC 字 → 百分比（0..=100）；非有限或越界返回 None（视为无效读数）
+fn decode_soc(word: u16) -> Option<f64> {
+    let soc = from_pcs_reg(word);
+    if soc.is_finite() && (0.0..=100.0).contains(&soc) {
+        Some(soc)
+    } else {
+        None
+    }
+}
+
 impl ModbusRtuTransport {
     pub fn new(settings: ModbusRtuSettings) -> Self {
-        // cmd_seq 从 1 起而非 0：0 与从站 exec_seq 初始"空闲/未采纳"态（0）重合，
-        // seq=0 会导致首条指令与从站空闲态无法区分
-        Self { settings, connected: RwLock::new(false), cmd_seq: AtomicU8::new(1) }
+        Self {
+            settings,
+            connected: RwLock::new(false),
+            // 0xFF 哨兵：首条指令强制写模式字（PCS 上电默认模式未知）
+            mode: AtomicU8::new(0xFF),
+            started: RwLock::new(false),
+            soc: RwLock::new(None),
+        }
     }
 
     /// 在线标记：任一读/写事务成功即视为链路在线
@@ -114,8 +141,9 @@ impl ModbusRtuTransport {
         *self.connected.write().await = false;
     }
 
-    async fn write_regs(&self, addr: u16, regs: &[u16]) -> Result<(), MupcError> {
-        let result = self.write_regs_once(addr, regs).await;
+    /// FC06 写单寄存器（PCS 逐写：一次一寄存器，无批量写）。成功→在线，失败→离线。
+    async fn write_reg(&self, addr: u16, value: u16) -> Result<(), MupcError> {
+        let result = self.write_reg_once(addr, value).await;
         if result.is_ok() {
             self.mark_online().await;
         } else {
@@ -124,20 +152,21 @@ impl ModbusRtuTransport {
         result
     }
 
-    /// 写事务本体（不含 connected 状态更新，供 [`Self::write_regs`] 包装）
-    async fn write_regs_once(&self, addr: u16, regs: &[u16]) -> Result<(), MupcError> {
+    /// 写事务本体（不含 connected 状态副作用，供 [`Self::write_reg`] 包装）
+    async fn write_reg_once(&self, addr: u16, value: u16) -> Result<(), MupcError> {
         let mut ctx = open_ctx(&self.settings).await?;
         let r = timeout(
             Duration::from_millis(self.settings.response_timeout_ms),
-            ctx.write_multiple_registers(addr, regs),
+            ctx.write_single_register(addr, value),
         )
         .await
         .map_err(|_| MupcError::new(ErrorCode::IntercoreTimeout, "modbus write timeout", "intercore"))?;
-        fold_tm("write_multiple_registers", r)
+        fold_tm("write_single_register", r)
     }
 
-    async fn read_regs(&self, addr: u16, len: u16) -> Result<Vec<u16>, MupcError> {
-        let result = self.read_regs_once(addr, len).await;
+    /// FC04 读输入寄存器（PCS 3 区 SOC/运行状态）。成功→在线，失败→离线。
+    async fn read_input(&self, addr: u16, len: u16) -> Result<Vec<u16>, MupcError> {
+        let result = self.read_input_once(addr, len).await;
         if result.is_ok() {
             self.mark_online().await;
         } else {
@@ -146,33 +175,52 @@ impl ModbusRtuTransport {
         result
     }
 
-    /// 读事务本体（不含 connected 状态更新，供 [`Self::read_regs`] 包装）
-    async fn read_regs_once(&self, addr: u16, len: u16) -> Result<Vec<u16>, MupcError> {
+    /// 读事务本体（不含 connected 状态副作用，供 [`Self::read_input`] 包装）
+    async fn read_input_once(&self, addr: u16, len: u16) -> Result<Vec<u16>, MupcError> {
         let mut ctx = open_ctx(&self.settings).await?;
         let r = timeout(
             Duration::from_millis(self.settings.response_timeout_ms),
-            ctx.read_holding_registers(addr, len),
+            ctx.read_input_registers(addr, len),
         )
         .await
         .map_err(|_| MupcError::new(ErrorCode::IntercoreTimeout, "modbus read timeout", "intercore"))?;
-        fold_tm("read_holding_registers", r)
+        fold_tm("read_input_registers", r)
     }
 
-    fn next_seq(&self) -> u8 {
-        self.cmd_seq.fetch_add(1, Ordering::Relaxed)
+    /// 确保 PCS 处于指定有功模式：缓存模式与目标一致则跳过写（FC06 幂等、省总线往返）。
+    /// 模式字也经 `to_pcs_reg` 字节互换（协议全设备高 8/低 8 互换）；⚠️ 若实机模式/启停
+    /// 控制字不互换需在此调整——PCS 契约待确认项。
+    async fn ensure_mode(&self, mode: u16) -> Result<(), MupcError> {
+        let cur = self.mode.load(Ordering::Relaxed) as u16;
+        if cur != mode {
+            self.write_reg(REG_MODE, to_pcs_reg(mode as f64)).await?;
+            self.mode.store(mode as u8, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
-    /// 心跳探测：离线状态被查询时主动读一次 REG_HEARTBEAT 判定在/离线
-    async fn probe_heartbeat(&self) -> bool {
-        self.read_regs(REG_HEARTBEAT, 1).await.map(|_| true).unwrap_or(false)
+    /// 确保 PCS 已运行（REG_START_STOP=1）：已下发过运行则跳过（启停是边沿性设置，
+    /// 重复写 1 幂等但省一次总线往返）。下发失败不改缓存，下次调用重试。
+    async fn ensure_started(&self) -> Result<(), MupcError> {
+        if !*self.started.read().await {
+            self.write_reg(REG_START_STOP, to_pcs_reg(1.0)).await?;
+            *self.started.write().await = true;
+        }
+        Ok(())
     }
 
-    /// 后台心跳轮询：按 [`ModbusRtuSettings::heartbeat_poll_ms`] 周期读 REG_HEARTBEAT
-    /// 计数，据其递增与否判定链路在/离线（补偿 is_connected 仅在事务触发时才判线的被动性）。
+    /// 心跳探测：离线状态被查询时主动读一次 3 区 REG_RUN_STATE 判定在/离线
+    async fn probe_link(&self) -> bool {
+        self.read_input(REG_RUN_STATE, 1).await.map(|_| true).unwrap_or(false)
+    }
+
+    /// 后台心跳轮询：按 [`ModbusRtuSettings::heartbeat_poll_ms`] 周期读 3 区 REG_RUN_STATE
+    /// （FC04）判在线/离线（补偿 is_connected 仅在事务触发时才判线的被动性）。
     ///
-    /// 判定规则：读到且计数较上次变化（首读到视为变化）→ 在线 `connected=true`；
-    /// 连续 3 次读取失败或计数停滞（无变化）→ 离线 `connected=false`。心跳自身错误
-    /// 静默降级（`tracing::debug`），不 panic；从站恢复后下一次成功且变化的读数自动回在线。
+    /// 判定规则：读到即在线 `connected=true`、失败计数清零；连续 3 次读取失败 → 离线
+    /// `connected=false`。PCS 运行状态字合法值本就不必每拍变化，故不采用假设表时代
+    /// "计数停滞判离线"的判据。心跳自身错误静默降级（`tracing::debug`），不 panic；
+    /// 从站恢复后下一次成功读数自动回在线。
     ///
     /// 由装配方在构造 `Arc<Self>` 后调用 `tokio::spawn(arc.clone().run_heartbeat_loop())`
     /// 启动（本模块不自动 spawn——Modbus 未实联验证，避免无串口环境误跑后台任务）。
@@ -184,142 +232,131 @@ impl ModbusRtuTransport {
             self.settings.heartbeat_poll_ms
         };
         let mut ticker = tokio::time::interval(Duration::from_millis(poll_ms));
-        // 上次心跳计数；None=首拍（视为活跃）；坏连续计数达 BAD_LIMIT 判离线
-        let mut last: Option<u16> = None;
         let mut bad = 0u32;
         const BAD_LIMIT: u32 = 3;
         loop {
             ticker.tick().await;
-            // 用 read_regs_once（不含状态副作用）：在线/离线由本任务统一判定
-            match self.read_regs_once(REG_HEARTBEAT, 1).await {
-                Ok(v) => {
-                    let cur = v[0];
-                    let changed = match last {
-                        None => true,
-                        Some(p) => p != cur,
-                    };
-                    last = Some(cur);
-                    if changed {
-                        bad = 0;
-                        self.mark_online().await;
-                    } else {
-                        // 计数停滞：从站不再刷新心跳，连续 N 次判离线
-                        bad += 1;
-                        if bad >= BAD_LIMIT {
-                            self.mark_offline().await;
-                            tracing::debug!("modbus heartbeat stale after {bad} polls");
-                        }
-                    }
+            // 用 read_input_once（不含状态副作用）：在线/离线由本任务统一判定
+            match self.read_input_once(REG_RUN_STATE, 1).await {
+                Ok(_) => {
+                    bad = 0;
+                    self.mark_online().await;
                 }
                 Err(e) => {
                     bad += 1;
                     if bad >= BAD_LIMIT {
                         self.mark_offline().await;
-                        tracing::debug!("modbus heartbeat read error (silent): {e}");
+                        tracing::debug!("modbus run-state read error after {bad} polls (silent): {e}");
                     }
                 }
             }
-        }
-    }
-
-    /// 通用下发：写数据区 + cmd_valid 触发 + 轮询执行确认（对齐 5s 超时）
-    ///
-    /// connected 语义：读/写事务成功置 online、失败（串口打开/超时/协议异常）复位
-    /// offline，exec 确认 5s 超时保守复位；装配方亦可启动 [`Self::run_heartbeat_loop`]
-    /// 周期判定在/离线，离线时 is_connected() 还会主动探测一次 REG_HEARTBEAT。
-    async fn issue(
-        &self,
-        data_addr: u16,
-        data_regs: &[u16],
-        strategy_mode: u8,
-        ai_ready: bool,
-    ) -> Result<(), MupcError> {
-        let seq = self.next_seq();
-        self.write_regs(REG_PROTOCOL_VERSION, &[PROTOCOL_VERSION]).await?; // 版本（每次带，幂等）
-        self.write_regs(data_addr, data_regs).await?;
-        let ctrl = pack_cmd_ctrl(seq, strategy_mode, ai_ready, true);
-        self.write_regs(REG_CMD_CTRL, &[ctrl]).await?;
-        // 轮询 exec 确认：单次读回 REG_EXEC_SEQ..REG_EXEC_STATUS 共 3 寄存器
-        // （seq 高/低 + status），消除分两次读 seq/status 的窗口竞态；轮询内瞬时
-        // 读错误不中止命令（read_regs 已在该失败路径复位 connected），在 5s deadline
-        // 内继续重试，仅 deadline 到仍未确认才判 IntercoreTimeout 并保守复位 offline
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if tokio::time::Instant::now() > deadline {
-                self.mark_offline().await;
-                return Err(MupcError::new(
-                    ErrorCode::IntercoreTimeout,
-                    "指令确认超时 5s",
-                    "intercore",
-                ));
-            }
-            match self.read_regs(REG_EXEC_SEQ, 3).await {
-                Ok(st) => {
-                    let exec_seq = regs_to_i32(&st[..2]);
-                    if exec_seq == seq as i32 {
-                        match st[2] {
-                            EXEC_SUCCESS => return Ok(()),
-                            EXEC_FAILED => {
-                                return Err(MupcError::new(
-                                    ErrorCode::SendFailed,
-                                    "从站执行失败",
-                                    "intercore",
-                                ))
-                            }
-                            // EXEC_IDLE/EXEC_RUNNING/EXEC_TIMEOUT：未采纳或执行中，继续轮询
-                            _ => {}
-                        }
-                    }
-                }
-                Err(e) => {
-                    // 瞬时读错误：本轮跳过、deadline 内继续重试
-                    tracing::debug!("exec 确认轮询读失败，deadline 内继续重试: {e}");
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
 
 #[async_trait]
 impl IntercoreTransport for ModbusRtuTransport {
+    /// 台区储能分相 P/Q 下发（PCS 交流分相模式）：逐相 FC06 写 P(1006-1008)/Q(1009-1011)。
+    /// 首条指令前置写模式字（REG_MODE=2 分相）与启停（REG_START_STOP=1）。
+    /// mode 字符串不参与编码：PCS 无"基础/智能/兜底"三态，分相即恒功率曲线由 AiValidator
+    /// 校验后下发（上层 ai_integration 传 "fallback" 仅为语义占位，不映射）。
     async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], _mode: &str) -> Result<(), MupcError> {
-        let mut regs = Vec::with_capacity(12);
-        for &v in p.iter().chain(q.iter()) {
-            regs.extend_from_slice(&power_to_regs(v));
+        self.ensure_mode(MODE_PHASE_SPLIT).await?;
+        self.ensure_started().await?;
+        for (i, reg) in [REG_PHASE_P_A, REG_PHASE_P_A + 1, REG_PHASE_P_A + 2].iter().enumerate() {
+            self.write_reg(*reg, to_pcs_reg(clamp_phase(p[i]))).await?;
         }
-        // 3-bit strategy_mode 编码（0 基础 / 1 智能 / 2 兜底）为协议基线，最终映射待实时
-        // 固件确认（§11.4/§11.10）；台区储能分相下发当前固定 2=兜底(fallback)，上层 _mode
-        // 字符串未参与编码，不做实际映射函数（避免过度设计）
-        self.issue(REG_PHASE_P_A, &regs, 2, false).await
+        for (i, reg) in [REG_PHASE_Q_A, REG_PHASE_Q_A + 1, REG_PHASE_Q_A + 2].iter().enumerate() {
+            self.write_reg(*reg, to_pcs_reg(clamp_phase(q[i]))).await?;
+        }
+        Ok(())
     }
 
+    /// 双参数下发（PCS 交流恒功率模式）：写 REG_CONST_P_SET=p_ref / REG_CONST_Q_SET=0。
+    /// PCS 恒功率无下垂：k_droop 忽略（v2.2 语义偏离，AI 恒功率下发前须经 AiValidator
+    /// 范围校验）；cmd.ai_ready/strategy_mode 字段 PCS 点表无对应寄存器，不落盘。
     async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError> {
-        let mut regs = Vec::with_capacity(4);
-        regs.extend_from_slice(&power_to_regs(cmd.p_ref));
-        regs.extend_from_slice(&i32_to_regs(encode_scaled(cmd.k_droop, SCALE_K_DROOP)));
-        // 3-bit strategy_mode 编码（0 基础 / 1 智能 / 2 兜底）为协议基线，最终映射待实时
-        // 固件确认（§11.4/§11.10）；双参数下发当前固定 1=智能(intelligent)，cmd.strategy_mode
-        // 字符串未参与编码，不做实际映射函数（避免过度设计）
-        self.issue(REG_P_REF, &regs, 1, cmd.ai_ready).await
+        self.ensure_mode(MODE_CONST_POWER).await?;
+        self.ensure_started().await?;
+        self.write_reg(REG_CONST_P_SET, to_pcs_reg(cmd.p_ref)).await?;
+        self.write_reg(REG_CONST_Q_SET, to_pcs_reg(0.0)).await?;
+        Ok(())
     }
 
     async fn is_connected(&self) -> bool {
         // connected 由读/写事务成败驱动；离线状态下被查询时主动探测一次
-        // REG_HEARTBEAT，避免冷启动/断线后仅因尚无写操作而一直误报离线
+        // REG_RUN_STATE，避免冷启动/断线后仅因尚无写操作而一直误报离线
         if *self.connected.read().await {
             return true;
         }
-        self.probe_heartbeat().await
+        self.probe_link().await
     }
 
     async fn shutdown(&self) -> Result<(), MupcError> {
+        // 复位 connected 及模式/启停缓存：下次调用（如重连后）需重新初始化 PCS
         *self.connected.write().await = false;
+        *self.started.write().await = false;
+        self.mode.store(0xFF, Ordering::Relaxed);
+        *self.soc.write().await = None;
         Ok(())
     }
 
-    // Modbus 备选通道不承载 SOC 上送（ADR-012：遥测/SOC 仍走 TCP），返回 None
+    /// 实时读 3 区 REG_SOC(1010)（FC04）。读成功且 SOC∈[0,100] 则更新缓存并返回
+    /// （含读取时刻）；读失败或越界返回 None（保留旧缓存值，不因一次坏读数清空）。
     async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
-        None
+        match self.read_input(REG_SOC, 1).await {
+            Ok(r) if !r.is_empty() => {
+                let now = std::time::Instant::now();
+                if let Some(soc) = decode_soc(r[0]) {
+                    *self.soc.write().await = Some((soc, now));
+                    Some((soc, now))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_settings() -> ModbusRtuSettings {
+        ModbusRtuSettings {
+            serial_port: "/dev/ttyS1".to_string(),
+            baud_rate: 9600,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: "none".to_string(),
+            slave_addr: 1,
+            response_timeout_ms: 200,
+            heartbeat_poll_ms: 1000,
+        }
+    }
+
+    #[test]
+    fn test_initial_state() {
+        let t = ModbusRtuTransport::new(test_settings());
+        // 0xFF 哨兵：首条指令必写模式字；started=false 首条必写启停
+        assert_eq!(t.mode.load(Ordering::Relaxed), 0xFF);
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert!(!rt.block_on(async { *t.started.read().await }));
+        assert!(!rt.block_on(async { *t.connected.read().await }));
+        assert!(rt.block_on(async { t.soc.read().await.is_none() }));
+    }
+
+    #[test]
+    fn test_decode_soc_valid() {
+        // 66% → to_pcs_reg(66) 字节互换，回解须还原 66
+        assert_eq!(decode_soc(to_pcs_reg(66.0)), Some(66.0));
+    }
+
+    #[test]
+    fn test_decode_soc_rejects_out_of_range() {
+        // 负数与 >100 均视为无效读数
+        assert_eq!(decode_soc(to_pcs_reg(-1.0)), None);
+        assert_eq!(decode_soc(to_pcs_reg(101.0)), None);
     }
 }
