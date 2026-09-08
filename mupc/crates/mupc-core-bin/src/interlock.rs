@@ -397,6 +397,10 @@ pub struct InterlockController {
     runtime: Mutex<DiRuntime>,
     /// 构造期 GPIO 初始化失败待上报事件（run_loop 启动时 flush）
     pending_init_events: Mutex<Vec<(String, String)>>,
+    /// P2-1：fail-safe init 预置标记——`new()` 同步构造只能预置本地 `state.latched`；transport
+    /// `restore_latched(true)` 与 DB triggered（重启读回依据）是 async，延至 `run_loop` 首帧
+    /// `sync_failsafe_latch()` 补做（C-1 双 latch 兜底）。
+    failsafe_preset: Mutex<bool>,
 }
 
 impl InterlockController {
@@ -454,15 +458,25 @@ impl InterlockController {
 
         let ctl = Self::new_with_io(cfg, ins, outs, port, events, sse);
         if any_pcs_failed {
-            // 首 tick 前即呈现锁存（无人值守也无未联锁运行的窗口）
-            let mut st = ctl.state.write().unwrap();
-            st.latched = true;
-            st.stop_failed = true;
-            drop(st);
+            // 首 tick 前即呈现锁存（无人值守也无未联锁运行的窗口）；transport/DB 同步延至
+            // run_loop 首帧（new 为同步构造无法 await，见 `sync_failsafe_latch` P2-1）。
+            ctl.preset_failsafe();
             tracing::error!("存在 pcs_stop DI 初始化失败 —— 联锁已预置触发锁存（fail-safe）");
         }
         *ctl.pending_init_events.lock().unwrap() = pending;
         ctl
+    }
+
+    /// fail-safe 预置：本地立即 latch（dispatch 抑制即时生效）+ 置 `failsafe_preset` 标记
+    /// （run_loop 首帧据此补 transport restore(true) 与 DB triggered）。
+    fn preset_failsafe(&self) {
+        {
+            let mut st = self.state.write().unwrap();
+            st.latched = true;
+            st.stop_failed = true;
+            st.last_fault_lamp_reason = FaultReason::Interlock;
+        }
+        *self.failsafe_preset.lock().unwrap() = true;
     }
 
     /// 可测构造：外部直接注入 ins/outs/port/events/sse（不触碰 sysfs）。
@@ -505,6 +519,7 @@ impl InterlockController {
                 last_stop_attempt: None,
             }),
             pending_init_events: Mutex::new(Vec::new()),
+            failsafe_preset: Mutex::new(false),
         }
     }
 
@@ -517,9 +532,10 @@ impl InterlockController {
 
     // ── run_loop ──
 
-    /// 常驻轮询循环（poll_ms）。启动时 flush 构造期 GPIO 失败事件。
+    /// 常驻轮询循环（poll_ms）。启动时 flush 构造期 GPIO 失败事件 + 同步 fail-safe latch。
     pub async fn run_loop(self: Arc<Self>) {
         self.flush_init_events().await;
+        self.sync_failsafe_latch().await;
         let poll = Duration::from_millis(self.cfg.poll_ms.max(1));
         loop {
             let started = Instant::now();
@@ -537,6 +553,27 @@ impl InterlockController {
             self.record_event("interlock.gpio_init_failed", &src, &msg)
                 .await;
         }
+    }
+
+    /// P2-1：把 fail-safe init 预置（`new()`/`preset_failsafe`，同步只能设本地 `state.latched`）
+    /// 补同步到 transport `stopped_latched`（C-1 双 latch 的 transport 兜底，latch 期间 send 拒写）
+    /// 与 DB triggered 事件（重启 `restore_from_db` 读回锁存的依据）。单次幂等：跑一次即清标记。
+    async fn sync_failsafe_latch(&self) {
+        let preset = std::mem::take(&mut *self.failsafe_preset.lock().unwrap());
+        if !preset {
+            return;
+        }
+        if let Err(e) = self.port.restore_latched(true).await {
+            tracing::warn!(
+                "联锁 fail-safe latch 同步 transport 失败: {}（本地 latch 已生效，dispatch 抑制中）",
+                e
+            );
+        }
+        let msg = "联锁锁存：GPIO pcs_stop DI 初始化失败 fail-safe 预置（transport/DB 同步）";
+        self.record_event("interlock.triggered", "interlock", msg)
+            .await;
+        let _ = self.sse.push_interlock("triggered", msg);
+        tracing::warn!("{}", msg);
     }
 
     /// 单帧：读 DI → 去抖 → tick → DO → 事件/动作/停机维护。
@@ -1879,5 +1916,59 @@ mod runner_tests {
         assert!(!st1.run_lamp);
         assert!(st1.fault_lamp);
         assert!(st1.sources.iter().any(|s| s.name == "estop" && s.tripped));
+    }
+
+    /// P2-1：fail-safe init 预置（`new()` 同步构造只设本地 state.latched）后，`run_loop` 首帧
+    /// `sync_failsafe_latch()` 补 transport restore(true) + DB triggered（C-1 双 latch 的 transport
+    /// 兜底 / 重启 `restore_from_db` 读回依据）。同时确认 stub 恒触发不致重复 TriggerLatch 刷屏。
+    #[tokio::test]
+    async fn failsafe_preset_syncs_transport_and_db_on_loop_start() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.inner().lock().unwrap().run_state = Some(2); // PCS 在线运行
+        let events = Arc::new(FakeEventRepo::default());
+        let run = Arc::new(MockOut::new());
+        let fault = Arc::new(MockOut::new());
+        let inner = port.inner();
+        let sse = Arc::new(SsePushService::new(16));
+        let ctl = Arc::new(InterlockController::new_with_io(
+            cfg,
+            vec![Box::new(DiReadFailStub) as Box<dyn DigitalIn>], // pcs_stop DI init 失败 stub
+            vec![
+                Box::new(SharedOut(run.clone())),
+                Box::new(SharedOut(fault.clone())),
+            ],
+            Box::new(port),
+            events.clone(),
+            sse,
+        ));
+        // 模拟 new() 的 any_pcs_failed 分支：预置本地 latch + 标记（transport/DB 尚未同步）
+        ctl.preset_failsafe();
+        assert!(ctl.is_latched_now(), "fail-safe 预置应立即 latch（dispatch 抑制生效）");
+
+        // run_loop 首帧：sync 补 transport restore(true) + DB triggered（P2-1）
+        ctl.sync_failsafe_latch().await;
+        let calls = { inner.lock().unwrap().calls.clone() };
+        assert!(
+            calls.iter().any(|c| c == "restore_latched(true)"),
+            "fail-safe 应补 transport latch（C-1 兜底），实际 {:?}",
+            calls
+        );
+        assert!(
+            events.has("interlock.triggered"),
+            "fail-safe 应补 DB triggered（重启读回依据）"
+        );
+        assert!(ctl.is_latched_now(), "sync 后仍 latch");
+
+        // 幂等：第二次 sync（标记已清）不重复 restore/事件
+        let before = { inner.lock().unwrap().calls.len() };
+        let ev_before = events.count("interlock.triggered");
+        ctl.sync_failsafe_latch().await;
+        assert_eq!(
+            inner.lock().unwrap().calls.len(),
+            before,
+            "sync 幂等：不应重复 restore(true)"
+        );
+        assert_eq!(events.count("interlock.triggered"), ev_before, "sync 幂等：不应重复 DB 事件");
     }
 }
