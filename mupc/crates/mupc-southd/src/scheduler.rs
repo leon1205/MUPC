@@ -4,6 +4,11 @@
 //! 轮询（口单 poller 天然串行；Rs485PortBus 内另有 per-port async Mutex 双保险，Task 3）。
 //! 站失败（任一寄存器块读 Err / mapper 语义 Failed）→ 站级 offline 隔离，不阻断同口其它站。
 //!
+//! §10.2 M-11 口调度预算：当前实现 = 到期判定（`next_due`）+ 角色优先级排序（grid/battery
+//! 先于 hvac/fire，见 [`role_priority`]）；「offline 慢站指数退避降频」为 **S3b 增强项**（登记，
+//! 本模块未落地）——BECG 1:1 接线每口单站，offline 站每轮至多一次读超时已由 early-break
+//! 钳制，风险有界；同口多从站部署时再落地退避。
+//!
 //! 结果按 role 分发到 [`StationSink`]（core-bin 实现，Task 7；southd 不依赖
 //! strategy/ai-integration，只定义 trait 边界）：
 //! - `MeterGrid` → [`StationSink::on_grid_package`]（策略 phase 唯一写方，含分相）；

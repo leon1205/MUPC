@@ -723,7 +723,12 @@ impl CoreConfig {
     ///    纵深防御：Task 7 装配在 master_meter.enabled 时不启 scheduler，但配置期即报错防未来
     ///    master 模式也起 scheduler（部分站型）时落入双 master 无仲裁窗口）；
     /// ④ 迁移期排他 R-H：master_meter.enabled 与 south_stations 含 meter_grid 二选一
-    ///    （收敛后总表统一走 south_stations）。
+    ///    （收敛后总表统一走 south_stations）；
+    /// ⑤ 站内同节点别名端口互斥：两站 port_node 相同（同物理口）但原始 port 字符串不同
+    ///    （"ttyS4" vs "/dev/ttyS4"）→ Err。原因见 Rs485PortBus::normalize_port 双写法支持——
+    ///    startup seen_ports 与 scheduler runner 分组均按**原始串**去重/分口，别名拼写会让同物理口
+    ///    open 两次并分属两 runner → 同总线并发双 master 帧交错。原始串完全一致（node+raw 都同）
+    ///    的合法同口多从站不受影响。
     fn validate_south_stations(&self) -> Result<(), String> {
         // ① 段内校验（含 meter_grid interval_ms < DATA_FRESHNESS_MS 新鲜度边界）
         self.south_stations.validate()?;
@@ -734,6 +739,22 @@ impl CoreConfig {
                 "迁移期排他：master_meter.enabled 与 south_stations.meter_grid 二选一（收敛后总表统一走 south_stations）"
                     .into(),
             );
+        }
+        // ⑤ 站内同节点别名端口互斥：遍历已见 (节点名, 原始 port, id)，新站 node 与已见 node
+        // 相同但原始 raw 不同 → Err（同物理口别名双拼写）；node+raw 都同（合法同口多从站）→ 跳过。
+        let mut seen: Vec<(String, String, String)> = Vec::new();
+        for s in &ss.stations {
+            let node = port_node(&s.port).to_string();
+            if let Some((_prev_node, prev_raw, prev_id)) = seen
+                .iter()
+                .find(|(n, raw, _)| *n == node && *raw != s.port)
+            {
+                return Err(format!(
+                    "south_stations 站 {} port {} 与站 {} port {} 为同节点 {} 的别名端口——同物理口禁双拼写并站（统一写 /dev/ttyX 或 ttyX），否则该口被 open 两次 / 双 runner 并发双 master 帧交错",
+                    s.id, s.port, prev_id, prev_raw, node
+                ));
+            }
+            seen.push((node, s.port.clone(), s.id.clone()));
         }
         // ② transport=modbus_rtu（PCS 主链路 ttyS0）时站串口不得与其同总线；
         // ③ master_meter.enabled（迁移期总表 task 占用该口）时站串口不得与其同总线。
@@ -2009,6 +2030,72 @@ south_stations:
             err.contains("interval_ms") && err.contains("south_stations"),
             "meter_grid interval 过慢应段内拒绝并传播，实际: {}",
             err
+        );
+    }
+
+    /// S3a Fix1: 两站同物理口但别名拼写（hvac 写短名 "ttyS3"、battery 写全路径 "/dev/ttyS3"）
+    /// → validate Err（同节点别名端口禁并用——startup/scheduler 按原始串去重会令同口 open 两次）
+    #[test]
+    fn test_south_stations_same_port_alias_spelling_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: false
+south_stations:
+  stations:
+    - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
+    - { id: battery_1, role: battery, port: "/dev/ttyS3", slave: 1, interval_ms: 1000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("别名") || err.contains("同节点"),
+            "期望提示同节点别名端口互斥，实际: {}",
+            err
+        );
+        assert!(
+            err.contains("hvac_1") && err.contains("battery_1"),
+            "Err 消息应含两站 id，实际: {}",
+            err
+        );
+    }
+
+    /// S3a Fix1: 两站同物理口且原始串完全一致（hvac + battery 都写 "ttyS3"，slave 不同）
+    /// → Ok（合法同口多从站，startup seen_ports 按原始串去重判同、scheduler 同一 runner 串行）
+    #[test]
+    fn test_south_stations_same_port_same_spelling_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: false
+south_stations:
+  stations:
+    - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
+    - { id: battery_1, role: battery, port: "ttyS3", slave: 1, interval_ms: 1000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "同物理口同拼写（合法同口多从站）应通过: {:?}",
+            config.validate()
         );
     }
 }
