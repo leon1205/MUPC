@@ -16,8 +16,8 @@ pub mod ai_integration;
 pub use ai_integration::{AiEngineStatusInfo, AiIntegrator, ModeInfo};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, MockAiModel, ModelInput, ModelOutput};
 pub use config::TaiStorageConfig;
-pub use pcs_profile::load_tai_storage_config;
 pub use errors::StrategyError;
+pub use pcs_profile::load_tai_storage_config;
 pub use strategies::{
     AiCommandValidator, CommandType, ControlCommand, FallbackStrategy, StrategyType,
     ValidationResult,
@@ -30,6 +30,6 @@ pub use mupc_ai_engine::{ModelManager, ModelStatus};
 #[cfg(test)]
 mod ai_validator_test;
 #[cfg(test)]
-mod tai_storage_test;
-#[cfg(test)]
 mod pcs_profile_test;
+#[cfg(test)]
+mod tai_storage_test;

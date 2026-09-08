@@ -46,6 +46,8 @@ struct PcsProfile {
 }
 
 /// L3 控制标定覆盖（全 Option；None = 保持代码默认）
+///
+/// **新增 tuning 字段必须同步 apply_l3**（否则键被 deny_unknown_fields 合法接受却静默无效果，违背防呆）
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TuningOverrides {
@@ -85,10 +87,10 @@ pub fn load_tai_storage_config(
         return Ok(cfg); // ② 未配置 = 默认档
     };
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取档位文件 {path} 失败: {e}"))?; // ③
-    let f: TaiConfigFile = serde_yaml::from_str(&content)
-        .map_err(|e| format!("解析档位文件 {path} 失败: {e}"))?; // ③（含缺字段）
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("读取档位文件 {path} 失败: {e}"))?; // ③
+    let f: TaiConfigFile =
+        serde_yaml::from_str(&content).map_err(|e| format!("解析档位文件 {path} 失败: {e}"))?; // ③（含缺字段）
 
     // ④ 选档：CLI key 优先于文件顶行
     let key = profile_key
@@ -98,7 +100,10 @@ pub fn load_tai_storage_config(
     let p = f.pcs_profiles.get(key).ok_or_else(|| {
         let mut keys: Vec<&str> = f.pcs_profiles.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
-        format!("档位文件 {path}: 未知档位 key '{key}'；可用: [{}]", keys.join(", "))
+        format!(
+            "档位文件 {path}: 未知档位 key '{key}'；可用: [{}]",
+            keys.join(", ")
+        )
     })?;
 
     // ⑤ 中线档防呆：当前仲裁无中线判据
@@ -127,11 +132,16 @@ pub fn load_tai_storage_config(
         t.apply_l3(&mut cfg);
     }
 
-    validate(key, &p, &cfg)?; // ⑧
+    validate(path, key, p, &cfg)?; // ⑧
+    tracing::info!(
+        "tai 档位加载: key={key}, desc={}",
+        p.desc.as_deref().unwrap_or("-")
+    );
     Ok(cfg)
 }
 
 impl TuningOverrides {
+    /// **新增 tuning 字段必须同步 apply_l3**（否则键被 deny_unknown_fields 合法接受却静默无效果，违背防呆）
     fn apply_l3(&self, cfg: &mut TaiStorageConfig) {
         if let Some(v) = self.p_abs_trig {
             cfg.p_abs_trig = v;
@@ -199,41 +209,55 @@ impl TuningOverrides {
     }
 }
 
-/// 校验合并结果（§2.10.2 validate 规则）。p 供单相限上界，cfg 为合并后配置。
-fn validate(key: &str, p: &PcsProfile, cfg: &TaiStorageConfig) -> Result<(), String> {
+/// 校验合并结果（§2.10.2 validate 规则）。path 供错误定位；p 供单相限上界；cfg 为合并后配置。
+fn validate(path: &str, key: &str, p: &PcsProfile, cfg: &TaiStorageConfig) -> Result<(), String> {
     for (field, v) in [
         ("phase_p_limit_kw", p.phase_p_limit_kw),
         ("phase_q_limit_kvar", p.phase_q_limit_kvar),
         ("i_rated_a", p.i_rated_a),
         ("s_rated_kva", p.s_rated_kva),
     ] {
-        if v <= 0.0 {
-            return Err(format!("档位 {key}: {field}={v} 须 > 0"));
+        if !v.is_finite() || v <= 0.0 {
+            return Err(format!(
+                "档位文件 {path} 档位 {key}: {field}={v} 须为有限正数"
+            ));
         }
     }
-    if !(cfg.dp_max > 0.0 && cfg.dp_max <= p.phase_p_limit_kw) {
+    if !(cfg.dp_max.is_finite() && cfg.dp_max > 0.0 && cfg.dp_max <= p.phase_p_limit_kw) {
         return Err(format!(
-            "档位 {key}: dp_max={} 须满足 0 < dp_max ≤ phase_p_limit_kw={}",
+            "档位文件 {path} 档位 {key}: dp_max={} 须满足 0 < dp_max ≤ phase_p_limit_kw={}",
             cfg.dp_max, p.phase_p_limit_kw
         ));
     }
-    if !(cfg.q_i_max > 0.0 && cfg.q_i_max <= p.phase_q_limit_kvar) {
+    if !(cfg.q_i_max.is_finite() && cfg.q_i_max > 0.0 && cfg.q_i_max <= p.phase_q_limit_kvar) {
         return Err(format!(
-            "档位 {key}: q_i_max={} 须满足 0 < q_i_max ≤ phase_q_limit_kvar={}",
+            "档位文件 {path} 档位 {key}: q_i_max={} 须满足 0 < q_i_max ≤ phase_q_limit_kvar={}",
             cfg.q_i_max, p.phase_q_limit_kvar
         ));
     }
-    if cfg.p_cap <= 0.0 {
-        return Err(format!("档位 {key}: p_cap={} 须 > 0", cfg.p_cap));
+    if !(cfg.p_cap.is_finite() && cfg.p_cap > 0.0) {
+        return Err(format!(
+            "档位文件 {path} 档位 {key}: p_cap={} 须为有限正数",
+            cfg.p_cap
+        ));
     }
     if !(0.0..=1.0).contains(&cfg.soc_cap_day) {
-        return Err(format!("档位 {key}: soc_cap_day={} 须在 [0,1]", cfg.soc_cap_day));
+        return Err(format!(
+            "档位文件 {path} 档位 {key}: soc_cap_day={} 须在 [0,1]",
+            cfg.soc_cap_day
+        ));
     }
     if !(0.0..=1.0).contains(&cfg.soc_hys) {
-        return Err(format!("档位 {key}: soc_hys={} 须在 [0,1]", cfg.soc_hys));
+        return Err(format!(
+            "档位文件 {path} 档位 {key}: soc_hys={} 须在 [0,1]",
+            cfg.soc_hys
+        ));
     }
     if cfg.window_size < 1 {
-        return Err(format!("档位 {key}: window_size={} 须 ≥ 1", cfg.window_size));
+        return Err(format!(
+            "档位文件 {path} 档位 {key}: window_size={} 须 ≥ 1",
+            cfg.window_size
+        ));
     }
     Ok(())
 }
