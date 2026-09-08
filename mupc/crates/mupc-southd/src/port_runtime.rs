@@ -1,10 +1,11 @@
 //! 口级总线抽象：每 port 一个 master，请求级 slave 读（§10.2/§10.7）。
 //!
-//! 同口多从站不能各建 Rs485Device（各持 tx_lock 不互斥、double-open 冲突），故
+//! 同口多从站不能各建 Rs485Device（各持独立 tx_lock 互不排斥、double-open 冲突），故
 //! `scheduler`（Task 5）不直接持 Rs485Device，而是经 [`StationBus`] 读：
 //!
-//! - 真实实现 [`Rs485PortBus`]：每口一个 `Rs485Device`（open 一次），阻塞 libc IO
-//!   走 `spawn_blocking`；设备内部 tx_lock 串行化同口请求。
+//! - 真实实现 [`Rs485PortBus`]：每口一个 `Rs485Device`（open 一次），内带 per-port
+//!   async `bus_lock` 强制"口内串行"（读路径本身无 tx_lock 保证，见 [`Rs485PortBus`]）；
+//!   阻塞 libc IO 用 `spawn_blocking` 承载。
 //! - 测试实现 [`MockBus`]：脚本化串口（按 (slave,addr) 预置寄存器 / 注入超时），
 //!   供本模块单测与 Task 5 scheduler 集成测使用。
 
@@ -28,11 +29,11 @@ pub enum BusError {
 
 /// 口级总线：读保持寄存器（口内串行；调用方按站 slave 传参）。
 ///
-/// 真实 = [`Rs485PortBus`]（包单 `Rs485Device` + spawn_blocking）；
+/// 真实 = [`Rs485PortBus`]（包单 `Rs485Device` + per-port async Mutex + spawn_blocking）；
 /// 测试 = [`MockBus`]（脚本化串口）。scheduler 只依赖本 trait，纯逻辑可 mock 测。
 #[async_trait]
 pub trait StationBus: Send + Sync {
-    /// 读一段保持寄存器（FC03；多从站同口由设备 tx_lock 串行）。
+    /// 读一段保持寄存器（FC03；口内串行由实现方强制，真实实现经 per-port async Mutex）。
     async fn read_holding(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
 }
 
@@ -41,6 +42,10 @@ pub struct Rs485PortBus {
     device: std::sync::Arc<rs485_plugin::device::Rs485Device>,
     /// 归一后的串口节点（如 `/dev/ttyS4`）；日志/排障用。
     port: String,
+    /// per-port async Mutex：强制"口内串行"。读路径 send_frame→recv_frame 分两次短暂持
+    /// port_fd 锁、其间不持 tx_lock（tx_lock 仅 transaction/transaction_with_handler 持有），
+    /// 同口并发读会 A.send/B.send 交错污染；此锁使每次 `read_holding` 整体原子。
+    bus_lock: tokio::sync::Mutex<()>,
 }
 
 impl Rs485PortBus {
@@ -75,6 +80,7 @@ impl Rs485PortBus {
         Ok(Self {
             device: std::sync::Arc::new(device),
             port: normalize_port(&conf.port),
+            bus_lock: tokio::sync::Mutex::new(()),
         })
     }
 }
@@ -82,7 +88,11 @@ impl Rs485PortBus {
 #[async_trait]
 impl StationBus for Rs485PortBus {
     async fn read_holding(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError> {
-        // spawn_blocking 承载阻塞 libc 读；Rs485Device 内部 tx_lock 串行化同口请求。
+        // per-port async Mutex 强制口内串行：读路径（send_frame→recv_frame 分两次持
+        // port_fd 锁）不持 tx_lock，同口并发读会 send/recv 交错污染，故先整体拿
+        // bus_lock（tokio Mutex 专为持锁跨 await 设计，此处跨 spawn_blocking 的 await
+        // 安全）使每次读原子，再做阻塞 IO。`_g` 须为具名绑定：`let _ =` 会立刻释放锁。
+        let _g = self.bus_lock.lock().await;
         let dev = self.device.clone();
         let port = self.port.clone();
         tokio::task::spawn_blocking(move || {
@@ -275,15 +285,18 @@ mod tests {
 
     // ---------- Rs485PortBus::open（全部走 open 失败路径，不触碰真串口）----------
     //
+    // 故意用确定不存在的节点名（southd_ut_no_such_tty）：若误用真实存在的 ttyS4，
+    // Linux 真机/CI 会真 open + tcsetattr 配成 9600/8N1（污染宿主串口）。失败路径：
     // Windows：Rs485Device::open 恒 Err（"Windows 平台暂不支持串口打开"）；
-    // unix：port 归一为 /dev/xxx 不存在节点 → open Err。故 is_err 断言跨平台成立。
+    // unix：归一为 /dev/southd_ut_no_such_tty 不存在节点 → open Err。故 is_err 跨平台成立。
 
     #[tokio::test]
     async fn open_no_dev_prefix_normalizes_and_reports_raw_port() {
-        // conf.port = "ttyS4"（无 /dev 前缀）→ 归一 /dev/ttyS4 → open 失败
-        let r = Rs485PortBus::open(&conf("ttyS4", "modbus"));
+        // conf.port = "southd_ut_no_such_tty"（无 /dev 前缀）→ 归一后仍走
+        // /dev/xxx 打开失败路径（unix 节点不存在 / Windows 恒 Err），错误携带原始 port。
+        let r = Rs485PortBus::open(&conf("southd_ut_no_such_tty", "modbus"));
         assert!(
-            matches!(r, Err(BusError::Open(ref p, _)) if p == "ttyS4"),
+            matches!(r, Err(BusError::Open(ref p, _)) if p == "southd_ut_no_such_tty"),
             "open 失败且错误携带原始 port"
         );
     }
@@ -296,8 +309,9 @@ mod tests {
 
     #[tokio::test]
     async fn open_unsupported_protocol_errors_early() {
-        // 协议非 modbus（如 private）→ registry 无 handler → Open Err（不触设备 open）
-        let r = Rs485PortBus::open(&conf("ttyS4", "private"));
+        // 协议非 modbus（如 private）→ registry 无 handler → Open Err（不触设备 open）；
+        // port 亦用不存在节点名，防未来该 handler 被注册后误碰真串口。
+        let r = Rs485PortBus::open(&conf("southd_ut_no_such_tty", "private"));
         assert!(
             matches!(r, Err(BusError::Open(_, ref reason)) if reason.contains("private")),
             "无 handler 应报 Open Err"
@@ -306,8 +320,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_modbus_hits_device_open_error_path() {
-        // modbus handler 存在 → 进入 device.open() 失败路径（Windows 恒失败 / unix 无节点）
-        let r = Rs485PortBus::open(&conf("ttyS4", "modbus"));
+        // modbus handler 存在 → 进入 device.open() 失败路径（Windows 恒失败 / unix 不存在节点）
+        let r = Rs485PortBus::open(&conf("southd_ut_no_such_tty", "modbus"));
         assert!(r.is_err());
     }
 }
