@@ -119,7 +119,7 @@ AiCommandValidator (可插拔 AI 模型)
 
 ### 2.1 定位与目标
 
-台区配光伏 + 储能 + 三相四桥臂 PCS，当 AI 引擎失效（兜底模式）时，由本策略接管储能控制，实现三个治理目标（按优先级）：
+台区配光伏 + 储能 + 60kW 两级式 PCS（=实时控制模块，三相分相 PQ 独立、单相 ±25kW/kVAr），当 AI 引擎失效（兜底模式）时，由本策略接管储能控制，实现三个治理目标（按优先级）：
 
 1. **降低光伏返送**：缩短返送时长、压缩返送幅值（软目标，偶尔返送可接受）；
 2. **降低三相电流不平衡度**：目标 <20%（电网公司口径 `(1 − MIN(Ia,Ib,Ic)/MAX(Ia,Ib,Ic)) × 100%`，幅值式）；
@@ -131,12 +131,12 @@ AiCommandValidator (可插拔 AI 模型)
 
 | 项 | 取值 |
 |---|---|
-| PCS | 125kW，三相四桥臂，分相 PQ 独立可控 |
+| PCS | 60kW 两级式 PCS（实时控制模块，Modbus 协议 V1.3）：三相分相 PQ 独立可控 |
 | 电池 | 60kW / 120kWh，SOC 运行带 10%~90%，日终回到 10% |
 | 测量 | 台区总表（20s 延时），无本地实时测点；PCS/EMS 均无交采模块 |
 | 控制 | 分钟级（T=60s）下发分相 P/Q 设定值 |
 | 预测 | 纯实时，无光伏/负荷预测 |
-| PCS 容量边界 | 每相/中线额定电流 190A，过载 1.1×长期（209A）/1.2×1min（228A）；总视在 125kVA |
+| PCS 容量边界 | 单相额定 ±25 kW/kVAr（≈110A@230V 每相）；总视在额定 60kVA；三相独立桥臂、**无中线电流**概念；单相超限 PCS 静默 clamp（策略容量已按此限调参，见 §2.6/§2.10） |
 | 分时 SOC 上限 | 18:00 前 SOC ≤70%（可标定），之后释放至 90% |
 
 **SOC 系统约束**（全局硬约束，贯穿所有状态）：
@@ -204,7 +204,7 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 - **差模 P**（三相之间微调）：三相电流不平衡时，把充电/放电往电流大的相多分一点、电流小的相少分一点。三相之间倒来倒去，**总量不变、不额外耗电池**；
 - **分相 Q**（无功）：哪相功率因数低了，就发/收无功把它补回接近 1。
 
-所以每个周期最终下发的是**六个数字**：A/B/C 三相各自的有功设定 + 三相各自的无功设定（`phase_p_set` / `phase_q_set`），经核间 V3 帧给到台区储能 PCS。
+所以每个周期最终下发的是**六个数字**：A/B/C 三相各自的有功设定 + 三相各自的无功设定（`phase_p_set` / `phase_q_set`）。**下发路径（v2.2 PCS 架构）**：上层接口 `IntercoreClient::send_tai_command` 不变；生产通道（transport=modbus_rtu）PCS 即实时控制模块，ModbusRtuTransport 以 FC06 直写 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，正放负充）；文中「V3 帧下发」表述仅指 TCP 仿真通道（sim-bridge），参见 10 核间 §11.11。
 
 ### 2.5 控制律（三通道）
 
@@ -227,7 +227,7 @@ Q_i = Q_i_补偿
 
 ### 2.6 容量仲裁（每相、每周期）
 
-- 约束：每相/中线电流 ≤190A、总视在 ≤125kVA、总有功 ≤60kW（电池）；
+- 约束：单相合成 ≤25kW/相（PCS 分相 ±25 硬限，器件独立不可跨相补）、总视在 ≤60kVA、总有功 ≤60kW（电池）；（60kW 双级式 PCS 三相独立桥臂、无中线，不再按四桥臂单列每相/中线电流）
 - 裁剪顺序（按优先级）：先减 **Q**（PF，软目标）→ 再减 **差模 P**（不平衡）→ 最后减 **共模 P**（返送/能量，S4 不可剪）；仅 SOC 保护可剪共模 P；
 - ΔP 裁剪后重归一化 ΣΔP=0（等比缩差模后均匀回补残差）；
 - SOC 保护：充电 ≥90% 共模 P 剪 0、放电 ≤10% 共模 P=0；88%/12% 线性降额；
@@ -355,8 +355,8 @@ S1_exit=4                                    # S1 退出阈值（重构基线≥
 P_tgt={S1:+2, S3:+5}; P_cap=60; SLOPE=6      # 目标进口 / 电池功率 / 斜坡限速
 S1_FF_STEP=60; Kp_S3=0.6; S3_MARGIN_LIMIT=True  # S1 前馈大步斜坡 / S3 增益 / S3 裕度限幅
 K_diff=0.4; K_q=0.4                          # 差模/无功积分增益
-DP_max=40; Q_i_max=30                        # 差模上限 / 无功上限
-I_rated=190; S_rated=125                     # 电流 / 视在限
+DP_max=25; Q_i_max=25                        # 差模上限 / 无功上限（=PCS 单相 ±25 硬限）
+I_rated=110; S_rated=60                      # 单相电流(≈25kW/相) / 总视在限（60kW PCS）
 SOC_cap_day=0.70; SOC_hys=0.03; T_release=18:00  # 分时SOC上限 / 滞回 / 释放时刻
 T_clr=[21:00, 23:30]; STALE_T=150            # S4 清空时段 / failsafe 超时
 
@@ -429,7 +429,7 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
     # 8 容量仲裁/裁剪（§2.6）---------------------------------------
     #   (a) ΔP 裁剪后重归一化 ΣΔP=0（否则 ΣP_i≠P_st，破电池 60kW 总量限）
     #   (b) 裁剪顺序：①Q → ②差模P → ③共模P（S4 不可剪）
-    #   (c) 约束：每相/中线电流 ≤190A、总视在 ≤125kVA、总有功 ≤60kW
+    #   (c) 约束：单相合成 ≤25kW（PCS ±25/相硬限）、总视在 ≤60kVA、总有功 ≤60kW
     #   (d) SOC 保护：充电≥90% 共模P剪0、放电≤10% 共模P=0
     Pcmd, Q = arbitrate(Pcmd, Q, st, P_st, I_rated, S_rated, P_cap, SLOPE)
 
@@ -442,7 +442,7 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 - `sign(x)`=符号；`hours_to(t)`=距 t 时刻的小时数；`move_toward(x,t,s)`=x 每周期向 t 最多移动 s；`clamp(x,lo,hi)`=限幅；
 - `soc_protect(P_st,soc)`=降额/钳位：soc≥88% 充电线性降额至 90% 归零；soc≤12% 放电线性降额至 10% 归零；
 - `per_phase(P_st,Q)`=把共模 P_st 均分三相与 Q 合成分相指令元组（failsafe 用）；
-- `arbitrate(Pcmd,Q,st,P_st,...)`=§2.6：统一限 ΔP 斜坡 → 逐相电流 ≤190A / 中线 ≤190A / 总视在 ≤125kVA 钳位 → 按 ①Q ②差模P ③共模P 顺序裁剪 → **ΔP 重归一**（裁剪后若 `resid=ΣΔP≠0`，`dP[i] −= resid/3` 均匀回补）→ 共模 P 总量 ≤60kW。中线电流 `I_N=|Σ_i I_i∠θ_i|`（用 data_rule 相角列计算）≤190A。可选 PF 地板：若启用 `|PF_i|≥PF_floor`，差模 P 先让保 Q。
+- `arbitrate(Pcmd,Q,st,P_st,...)`=§2.6：统一限 ΔP 斜坡 → 单相合成 ≤25kW（≈110A@230V，PCS 单相 ±25 硬限）/ 总视在 ≤60kVA 钳位 → 按 ①Q ②差模P ③共模P 顺序裁剪 → **ΔP 重归一**（裁剪后若 `resid=ΣΔP≠0`，`dP[i] −= resid/3` 均匀回补）→ 共模 P 总量 ≤60kW。60kW 双级式 PCS 三相独立桥臂、**无中线电流**约束（原四桥臂 `I_N=|Σ_i I_i∠θ_i|` 中线判据已删）。可选 PF 地板：若启用 `|PF_i|≥PF_floor`，差模 P 先让保 Q。
 
 ### 2.10 配置（TaiStorageConfig）
 
@@ -453,8 +453,8 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 | `s1_exit` / `p_tgt_s1` / `p_tgt_s3` | 4 / 2 / 5 (kW) | S1 退出阈值 / 目标进口 |
 | `p_cap` / `slope` | 60 / 6.0 | 电池功率上限 / 斜坡限速 (kW/周期) |
 | `kp` / `k_diff` / `k_q` | 0.6 / 0.4 / 0.4 | 共模/差模/无功积分增益 |
-| `dp_max` / `q_i_max` | 40 / 30 | 差模上限 (kW/相) / 无功上限 (kVAr/相) |
-| `i_rated` / `s_rated` | 190 / 125 | 每相·中线电流限 (A) / 总视在限 (kVA) |
+| `dp_max` / `q_i_max` | 25 / 25 | 差模上限 (kW/相) / 无功上限 (kVAr/相)（=PCS 单相 ±25 硬限） |
+| `i_rated` / `s_rated` | 110 / 60 | 单相电流限 (A，≈25kW@230V) / 总视在限 (kVA，60kW PCS) |
 | `soc_cap_day` / `soc_hys` | 0.70 / 0.03 | 分时 SOC 上限 / 滞回 |
 | `t_release_secs` / `t_clear_start_secs` / `t_clear_end_secs` | 18:00 / 21:00 / 23:30 | 分时上限释放 / S4 清空时段 |
 | `s4_limit_margin_kw` | 0.0 | S4 清空限幅裕度（>0 时 P_强制≤P_表+裕度，防夜间过送；0=不限幅） |
@@ -491,8 +491,8 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 | `p_cap` | 60 kW | 储能最大充/放电功率（电池额定）。例：基线返送 57kW，储能最多充 60kW，净功率 = 57−60 = +3（受电） |
 | `s1_ff_step_kw` | 60 | **S1 前馈大步斜坡**：每周期最多改变 60kW，所以从任何值到目标一周期到位。例：11:59 储能从 −18 直接跳到 −52（一步吸收 50kW 返送），这是峰值压降的关键（47.9→32.5kW） |
 | `slope` | 6 kW/周期 | **S2/S3/S4 斜坡限速**：这些状态每周期最多变 6kW（平缓、防过调）。S1 不受此限（用大步斜坡） |
-| `dp_max` | 40 kW/相 | 差模 P 每相最多调 40kW（受 190A 电流限制折算） |
-| `q_i_max` | 30 kVAr/相 | 每相无功补偿最多 30kVAr |
+| `dp_max` | 25 kW/相 | 差模 P 每相最多调 25kW（=PCS 单相 ±25 硬限，超了 PCS 静默裁剪失感知） |
+| `q_i_max` | 25 kVAr/相 | 每相无功补偿最多 25kVAr（=PCS 单相 ±25 硬限） |
 
 **④ 积分增益（响应快慢）**
 
@@ -506,8 +506,8 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 
 | 参数 | 值 | 怎么用 |
 |---|---|---|
-| `i_rated` | 190 A | 每相/中线电流上限，超了仲裁裁剪（先减 Q → 再减差模 → 最后减共模） |
-| `s_rated` | 125 kVA | 总视在上限，超了等比缩小差模 |
+| `i_rated` | 110 A | 单相电流上限（≈25kW@230V，PCS 单相硬限折算），超了仲裁裁剪（先减 Q → 再减差模 → 最后减共模），把裁剪落在策略侧而非 PCS 静默 clamp |
+| `s_rated` | 60 kVA | 总视在额定（60kW 双级式 PCS），超了等比缩小差模 |
 | `soc_cap_day` | 0.70 | **18:00 前 SOC 上限 70%**：防止白天把电池充太满，导致晚上被迫大功率反送清空。例：7-04 SOC 峰值 61.8%（<70% 未触顶） |
 | `soc_hys` | 0.03 | SOC 滞回：进 S1 需 SOC < 70%−3%=67%，防临界点反复进出 |
 | `s3_margin_limit` | true | S3 放电不超当前负荷裕度：`p_st = min(p_st, P_表−p_tgt_s3)`，负荷快速回落时即时跟随，杜绝过冲返送 |
@@ -577,8 +577,8 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 ### 2.14 依赖清单（实现前确认）
 
 1. 台区总表实时接口提供分相 Q（含符号）与分相 PF（data_rule 字段已确认）；
-2. PCS 通信接受分相 P/Q 设定值（已确认）；实时控制模块能转发分相 P/Q 到 PCS（**需与实时控制模块协议确认 V3 帧对接**）；
-3. PCS 每相/中线电流限值、总视在额定（已确认：190A/125kVA）；
+2. PCS（=实时控制模块）通信接受分相 P/Q 设定值（已确认，Modbus 协议 V1.3：分相模式 2 + 4 区 1006-1011 逐寄存器 FC06 写）；生产通道由 ModbusRtuTransport 直写，**不依赖 V3 帧转发**（V3 帧仅 TCP 仿真通道使用）；
+3. PCS 容量限值（已确认按 **60kW 两级式 PCS**：单相 ±25kW/kVAr ≈ 110A@230V、总视在 60kVA；原 125kW/190A 四桥臂型号点表待厂方确认方可对接，见 10 核间 §11.11「范围与投运前提」）；
 4. 状态机时段参数初值（已用 6-27/7-04 data_rule 负荷曲线标定，P_dis_trig=30kW、T_清空 21:00/23:30）；
 5. 电池充/放电功率限值 60kW（已确认）；
 6. 通信协议细节：设定值下发瞬时生效或斜坡生效、超时/失败响应、时钟同步；现场核相流程（强制）。
@@ -881,7 +881,7 @@ pub struct ControlCommand {
 }
 ```
 
-> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置。设定值经核间 V3 帧下发到实时控制模块，由其转发至台区储能 PCS（三相四桥臂分相 PQ 独立可控）。
+> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置，单位 kW/kVAr、索引 A/B/C、**正放负充**。下发路径：**生产通道（transport=modbus_rtu）**——PCS 即实时控制模块，经 `IntercoreClient::send_tai_command` → ModbusRtuTransport FC06 逐写 PCS 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，见 10 核间 §11.11）；**TCP 仿真通道**才走 V3 帧（sim-bridge）。目标设备为 60kW 两级式 PCS，三相分相 PQ 独立可控、无中线。
 
 ### 6.3 CommandType 枚举
 
