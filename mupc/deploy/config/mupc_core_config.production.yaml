@@ -22,7 +22,7 @@ intercore:
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
   modbus_rtu:                   # modbus_rtu 通道参数（PCS 协议 V1.3 线格式）
-    serial_port: "/dev/ttyS1"   # ⚠️ 现场按实际 RS485 口修改
+    serial_port: "/dev/ttyS0"   # BECG COM1(ttyS0) ↔ PCS（§12.1）；⚠️ 现场按实际 RS485 口修改
     baud_rate: 19200
     data_bits: 8
     stop_bits: 1
@@ -67,7 +67,7 @@ strategy:
 #    相同会启动报错）。reg_map 各量为现场点表占位，投运前须填真点表。
 master_meter:
   enabled: true
-  serial_port: "/dev/ttyUSB0"    # ⚠️ 须与 intercore.modbus_rtu 串口不同
+  serial_port: "/dev/ttyS4"      # BECG COM4(ttyS4) ↔ 关口/台区总表；⚠️ 须与 intercore.modbus_rtu 串口不同
   baud_rate: 9600                # 现场按总表实际填
   slave_addr: 3                  # 现场按总表实际填
   read_interval_ms: 1000

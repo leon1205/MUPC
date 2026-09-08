@@ -19,7 +19,7 @@ intercore:
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
   modbus_rtu:                   # modbus_rtu 通道参数
-    serial_port: "/dev/ttyS1"
+    serial_port: "/dev/ttyS0"   # BECG COM1(ttyS0) ↔ PCS（§12.1；无 ttyS1）
     baud_rate: 19200
     data_bits: 8
     stop_bits: 1
@@ -63,7 +63,7 @@ strategy:
 # enabled: true 并填真实点表（reg_map 各量起始寄存器）后方启用；默认关
 master_meter:
   enabled: false
-  serial_port: "/dev/ttyUSB0"
+  serial_port: "/dev/ttyS4"     # BECG COM4(ttyS4) ↔ 关口/台区总表（§12.1）
   baud_rate: 9600
   slave_addr: 3
   read_interval_ms: 1000
