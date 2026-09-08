@@ -48,8 +48,8 @@ impl AiModel for MockAiModel {
             // SOC 高，优先放电
             (input.pv_power - input.load_power).max(0.0)
         } else if input.battery_soc < 0.2 {
-            // SOC 低，优先充电
-            (input.pv_power - input.load_power).min(0.0)
+            // SOC 低，优先充电：光伏富余（pv>load）时以负功率吸收；光不足不额外充
+            (input.load_power - input.pv_power).min(0.0)
         } else {
             0.0
         };

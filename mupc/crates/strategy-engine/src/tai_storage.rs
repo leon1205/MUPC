@@ -354,7 +354,7 @@ pub fn control(
     }
     for i in 0..3 {
         // 差模增量斜坡限速：大不平衡单周期跳变 ≤ slope（设计 §15.6 ΔP_i 每周期 ≤5kW），
-        // 避免一次积分跳满 dp_max（40kW/相，≈180A）造成过流
+        // 避免一次积分跳满 dp_max（25kW/相，≈110A@230V，PCS 单相 ±25 硬限）造成过流
         let inc = (config.k_diff * u[i] * (ii[i] - imean)).clamp(-config.slope, config.slope);
         if state.d_p_active && inc.abs() > 0.5f64.max(0.05 * pi[i].abs()) {
             state.d_p[i] = (state.d_p[i] + inc).clamp(-config.dp_max, config.dp_max);

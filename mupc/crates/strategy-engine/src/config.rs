@@ -42,9 +42,9 @@ pub struct TaiStorageConfig {
     pub dp_max: f64,
     /// 无功上限 (kVAr/相)
     pub q_i_max: f64,
-    /// 每相/中线电流额定 (A)
+    /// 单相电流额定 (A)：60kW 双级式 PCS 单相 ±25kW/相 ≈ 110A@230V
     pub i_rated: f64,
-    /// 总视在额定 (kVA)
+    /// 总视在额定 (kVA)：60kW 双级式 PCS（与 p_cap/电池额定一致）
     pub s_rated: f64,
     /// 分时 SOC 上限（18:00 前，0~1 小数；DataPackage.battery.soc 为百分比，边界处需 /100 转换）
     pub soc_cap_day: f64,
@@ -88,10 +88,10 @@ impl Default for TaiStorageConfig {
             k_diff: 0.4,
             k_q: 0.4,
             s_q_sign: 1.0,
-            dp_max: 40.0,
-            q_i_max: 30.0,
-            i_rated: 190.0,
-            s_rated: 125.0,
+            dp_max: 25.0, // PCS 单相差模有功上限 = ±25kW/相硬限（2026-09-08 60kW 基线调参）
+            q_i_max: 25.0, // PCS 单相无功上限 = ±25kVAr/相硬限
+            i_rated: 110.0, // PCS 单相电流限 ≈25kW/相@230V
+            s_rated: 60.0, // PCS 总视在额定（60kW 双级式）
             soc_cap_day: 0.70,
             soc_hys: 0.03,
             t_release_secs: 18.0 * 3600.0,     // 18:00
