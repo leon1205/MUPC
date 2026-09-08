@@ -985,6 +985,31 @@ impl IntercoreClient {
         self.transport.latest_soc().await
     }
 
+    /// 停机原语（委托底层 transport：Modbus 写 REG_START_STOP=0；Tcp 通道降级 no-op）
+    pub async fn stop(&self) -> Result<(), String> {
+        self.transport.stop().await
+    }
+
+    /// 联锁锁存查询（transport 运行期兜底是否挡启动）
+    pub async fn is_interlock_stopped(&self) -> bool {
+        self.transport.is_interlock_stopped().await
+    }
+
+    /// 置/清联锁 latch（触发沿 restore(true)；release/启动 DB 读回 restore(false)）
+    pub async fn restore_interlock_latched(&self, latched: bool) -> Result<(), String> {
+        self.transport.restore_interlock_latched(latched).await
+    }
+
+    /// 最新解码的 RUN_STATE(1013)（Modbus 心跳维护；离线为 None；Tcp 通道恒 None）
+    pub fn last_run_state(&self) -> Option<u16> {
+        self.transport.last_run_state()
+    }
+
+    /// M1 保护跳闸人工授权重启（!stopped_latched 时生效；latch 期间 Err 提示先 release）
+    pub async fn authorize_restart(&self) -> Result<(), String> {
+        self.transport.authorize_restart().await
+    }
+
     /// 获取传输描述（TCP 目标地址或通道名，如 modbus_rtu）
     pub fn remote_addr(&self) -> &str {
         &self.remote_addr

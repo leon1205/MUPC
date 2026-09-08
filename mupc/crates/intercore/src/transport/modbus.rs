@@ -16,7 +16,7 @@ use crate::transport::IntercoreTransport;
 use async_trait::async_trait;
 use mupc_common::{ErrorCode, MupcError};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_modbus::client::Context;
@@ -43,8 +43,9 @@ pub struct ModbusRtuTransport {
     settings: ModbusRtuSettings,
     connected: RwLock<bool>,
     /// RS485 半双工总线事务互斥（W3）。锁在**入口**获取（send_tai_command / send_dual_param
-    /// 整条"模式+启停+功率"序列、latest_soc / probe_link / 心跳每拍各一次读），保证并发
-    /// 指令不在物理线路上交错（模式切换与寄存器写须原子，避免两条控制序列互插）。
+    /// 整条"模式+启停+功率"序列、`stop()` 停机写、latest_soc / probe_link / 心跳每拍各一次读），
+    /// 保证并发指令不在物理线路上交错（模式切换与寄存器写须原子，避免两条控制序列互插；
+    /// interlock stop() 与在途下行序列串行）。
     /// 内部 helper（ensure_*/write_reg/read_input/_once 系）**不**获取本锁，由入口持有；
     /// 取锁入口须成对，防止嵌套死锁。
     bus: Mutex<()>,
@@ -53,6 +54,15 @@ pub struct ModbusRtuTransport {
     mode: AtomicU8,
     /// 是否已下发运行指令（REG_START_STOP=1）。初值 false：首条指令必写启停。
     started: RwLock<bool>,
+    /// 联锁锁存（transport 运行期挡启动兜底；C-1 双 latch 之一，与 storage/DB latch 语义同步）。
+    /// **只由 restore_interlock_latched 置/清**；stop()/ensure_started 均不改（stop() 写 500=0 前
+    /// 触发沿已 restore(true)，写失败时 latch 已挡启动）。锁存期间 send_* 入口与 ensure_started 拒写。
+    stopped_latched: RwLock<bool>,
+    /// 心跳维护的最新 RUN_STATE(1013) 解码值（0..=3；合法读数才更新）；mark_offline 清 None（B3，
+    /// 防离线期 DO1/DO2 同亮）。供上层/DO 驱动同步读取。
+    /// ⚠️ 用 std RwLock 而非 tokio RwLock：trait `last_run_state()` 为**同步** getter，需在异步
+    /// 上下文外安全读取；tokio RwLock 无同步读取（blocking_read 在异步执行上下文内会 panic）。
+    last_run_state: StdRwLock<Option<u16>>,
 }
 
 /// 折叠 tokio-modbus 双层 Result（外层传输/IO 错误 + 内层协议异常）→ `Result<_, MupcError>`
@@ -141,6 +151,8 @@ impl ModbusRtuTransport {
             // 0xFF 哨兵：首条指令强制写模式字（PCS 上电默认模式未知）
             mode: AtomicU8::new(0xFF),
             started: RwLock::new(false),
+            stopped_latched: RwLock::new(false),
+            last_run_state: StdRwLock::new(None),
         }
     }
 
@@ -158,6 +170,8 @@ impl ModbusRtuTransport {
         *self.connected.write().await = false;
         *self.started.write().await = false;
         self.mode.store(0xFF, Ordering::Relaxed);
+        // B3：离线清 last_run_state（None → DO1 灭），防离线期 DO1/DO2 同亮矛盾
+        *self.last_run_state.write().unwrap() = None;
     }
 
     /// FC06 写单寄存器（PCS 逐写：一次一寄存器，无批量写）。成功→在线，失败→离线。
@@ -226,13 +240,51 @@ impl ModbusRtuTransport {
         Ok(())
     }
 
-    /// 确保 PCS 已运行（REG_START_STOP=1）：已下发过运行则跳过（启停是边沿性设置，
-    /// 重复写 1 幂等但省一次总线往返）。下发失败不改缓存，下次调用重试。
+    /// 确保 PCS 已运行（REG_START_STOP=1）：
+    /// ① `stopped_latched` 时直接 Err（联锁禁启，即使上层误发也不重启——底层兜底）；
+    /// ② `started==true` 缓存命中 Ok（跳过总线往返）；
+    /// ③ 否则 **S-4 前置读**：先 FC04 读 REG_RUN_STATE(1013) 校验 PCS 非停机（M1 守卫——
+    /// 堵住「离线窗口内保护跳闸 → 链路恢复自动重启跳闸机」路径）。读到 0（停机）→ Err 不自动
+    /// 启动、交上层（保护跳闸/人工停机的运维恢复走 ack_m1→authorize_restart）；非 0（待机/充/
+    /// 放电）或读数无效（乱码按非停机处理，避免阻塞正常启动）→ 写 500=1 并置 started=true。
+    /// 读写用 *_once 原语（不带 connected 副作用）：链路在线状态由入口级 write_reg/心跳维护。
     async fn ensure_started(&self) -> Result<(), MupcError> {
-        if !*self.started.read().await {
-            self.write_reg(REG_START_STOP, to_pcs_reg(1.0)).await?;
-            *self.started.write().await = true;
+        if *self.stopped_latched.read().await {
+            return Err(MupcError::new(
+                ErrorCode::SendFailed,
+                "interlock stopped：联锁锁存禁止自动启动",
+                "intercore",
+            ));
         }
+        if *self.started.read().await {
+            return Ok(()); // 已下发运行缓存命中，跳过
+        }
+        // S-4：首个写启动前先读一次 RUN_STATE 校验非停机（M1 守卫升级）
+        let words = self.read_input_once(REG_RUN_STATE, 1).await?;
+        if decode_run_state(words.first().copied().unwrap_or(u16::MAX)) == Some(0) {
+            tracing::warn!("M1 前置校验：RUN_STATE=0（停机/保护跳闸），不自动启动，交上层");
+            return Err(MupcError::new(
+                ErrorCode::SendFailed,
+                "RUN_STATE=0 不允许自动启动（M1 守卫）",
+                "intercore",
+            ));
+        }
+        self.write_reg_once(REG_START_STOP, to_pcs_reg(1.0)).await?;
+        *self.started.write().await = true;
+        Ok(())
+    }
+
+    /// 停机写本体（写 REG_START_STOP=0；**不设/清 stopped_latched**——C-1：触发沿已经
+    /// restore_interlock_latched(true) 置 latch，本函数失败时 latch 仍挡启动）。成功复位
+    /// `started=false`（否则人工 release 后 ensure_started 见 started==true 跳过写 500=1 →
+    /// 释放后无法重启，静默失效）并复位 `mode` 0xFF 哨兵（否则 release 后 ensure_mode 见缓存==
+    /// 目标跳过 REG_MODE=1000 重写，可能在错误模式下直接写功率）。由持锁入口（trait `stop()`）
+    /// 调用，本函数**不**获取 bus 锁。写 500=0 在 latch 期间仍允许（仅挡 500=1 启动写，供
+    /// interlock 周期重试停机）。
+    async fn do_stop(&self) -> Result<(), MupcError> {
+        self.write_reg_once(REG_START_STOP, 0).await?;
+        *self.started.write().await = false;
+        self.mode.store(0xFF, Ordering::Relaxed);
         Ok(())
     }
 
@@ -277,12 +329,20 @@ impl ModbusRtuTransport {
                         Some(st) => {
                             bad = 0;
                             self.mark_online().await;
+                            // 维护 last_run_state：读到合法 0..=3 后更新（DO1 运行灯数据源；
+                            // 越界/坏读数按 M9a 判无效、不更新）。std RwLock 写不跨 await，安全。
+                            *self.last_run_state.write().unwrap() = Some(st);
                             // M1 停机观测：PCS 停机（1013=0）而 MUPC 此前已下发运行 →
                             // 远端停机（保护跳闸/人工）。保守策略：**不动 started 缓存、不自动
                             // 重发 500=1**（PCS 启停 500 电平/边沿语义待厂方确认，自动重启可能造成
                             // 保护跳闸-重启振荡）；仅告警一次供上层/运维感知，恢复由上层决策。
                             // PCS 未下发运行即停机属正常冷态，无需告警。
-                            if st == 0 && *self.started.read().await {
+                            // S-1 豁免：stopped_latched（自命令软停/联锁停机）时不告警——避免把
+                            // 联锁停机误报成异常跳闸。
+                            if st == 0
+                                && *self.started.read().await
+                                && !*self.stopped_latched.read().await
+                            {
                                 if !stopped_warned {
                                     stopped_warned = true;
                                     tracing::warn!(
@@ -326,6 +386,17 @@ impl IntercoreTransport for ModbusRtuTransport {
     /// ⚠️ 整条序列持有 [`Self::bus`]：模式切换 + 启停 + 6 寄存器写须原子，避免与并发的
     /// 恒功率下发/读事务在物理线路上互插（W3）。内部 ensure_*/write_reg 不取锁。
     async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], _mode: &str) -> Result<(), MupcError> {
+        // C-1 下行中止（R-B）：联锁 latch 期间整条下行（模式/启停/功率写）在**任何总线 IO 前**
+        // 拒绝——避免 stop_failed（PCS 仍运行）时后续周期按设定继续出力。检查置于 bus 锁前，
+        // latch 期间连锁都不取（省去等待在途写序列）。latch 检查不 open 串口（测试可离线验证）。
+        if *self.stopped_latched.read().await {
+            tracing::warn!("interlock stopped：拒绝下行（含启动/功率写）");
+            return Err(MupcError::new(
+                ErrorCode::SendFailed,
+                "interlock stopped：联锁锁存期间禁止下发",
+                "intercore",
+            ));
+        }
         let _bus_guard = self.bus.lock().await;
         self.ensure_mode(MODE_PHASE_SPLIT).await?;
         self.ensure_started().await?;
@@ -342,6 +413,15 @@ impl IntercoreTransport for ModbusRtuTransport {
     /// PCS 恒功率无下垂：k_droop 忽略（v2.2 语义偏离，AI 恒功率下发前须经 AiValidator
     /// 范围校验）；cmd.ai_ready/strategy_mode 字段 PCS 点表无对应寄存器，不落盘。
     async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError> {
+        // C-1 下行中止（R-B）：同 send_tai_command，latch 期间任何总线 IO 前拒发。
+        if *self.stopped_latched.read().await {
+            tracing::warn!("interlock stopped：拒绝下行（含启动/功率写）");
+            return Err(MupcError::new(
+                ErrorCode::SendFailed,
+                "interlock stopped：联锁锁存期间禁止下发",
+                "intercore",
+            ));
+        }
         let _bus_guard = self.bus.lock().await;
         self.ensure_mode(MODE_CONST_POWER).await?;
         self.ensure_started().await?;
@@ -376,6 +456,48 @@ impl IntercoreTransport for ModbusRtuTransport {
             Ok(r) if !r.is_empty() => decode_soc(r[0]).map(|soc| (soc, std::time::Instant::now())),
             _ => None,
         }
+    }
+
+    /// 停机原语：写 REG_START_STOP=0（PCS 停机）。持有 bus 锁与并发下行序列在物理线路上串行
+    /// （W3 半双工互斥）；成功后复位 started=false + mode=0xFF（release 后 ensure_mode/ensure_
+    /// started 强制重写 REG_MODE/500=1）。**不设/不清 stopped_latched**（C-1：置位由触发沿经
+    /// restore_interlock_latched(true) 完成；本函数失败时 latch 仍挡启动，交由 interlock 周期重试）。
+    async fn stop(&self) -> Result<(), String> {
+        let _bus_guard = self.bus.lock().await;
+        if let Err(e) = self.do_stop().await {
+            tracing::error!(
+                "interlock stop 失败（写 REG_START_STOP=0）：{}——latch 已挡启动，交由 interlock 周期重试",
+                e
+            );
+            return Err(e.to_string());
+        }
+        Ok(())
+    }
+
+    async fn is_interlock_stopped(&self) -> bool {
+        *self.stopped_latched.read().await
+    }
+
+    async fn restore_interlock_latched(&self, latched: bool) -> Result<(), String> {
+        // C-1：stopped_latched 仅由此置/清（运行时触发沿 restore(true)；release/启动 DB 读回
+        // restore(false)）。纯状态、不写设备——即使 stop() 写失败，latch 已挡启动。
+        *self.stopped_latched.write().await = latched;
+        Ok(())
+    }
+
+    fn last_run_state(&self) -> Option<u16> {
+        // std RwLock：同步 getter 供上层/DO 驱动在异步上下文外安全读取
+        *self.last_run_state.read().unwrap()
+    }
+
+    async fn authorize_restart(&self) -> Result<(), String> {
+        // I-1/ack_m1：!latch 时复位 started=false（下个 send 经 ensure_started 重发 500=1，
+        // 并走 S-4 前置读校验）；latch 期间拒绝（须先 release 清 latch）
+        if *self.stopped_latched.read().await {
+            return Err("interlock stopped：联锁锁存中，须先 release 才能重启".to_string());
+        }
+        *self.started.write().await = false;
+        Ok(())
     }
 }
 
@@ -429,6 +551,49 @@ mod tests {
         // 负数与 >100 均视为无效读数
         assert_eq!(decode_soc(to_pcs_reg(-1.0)), None);
         assert_eq!(decode_soc(to_pcs_reg(101.0)), None);
+    }
+
+    #[tokio::test]
+    async fn test_latched_rejects_send_without_io() {
+        // C-1 双 latch：restore(true) 置 transport latch → 下行入口（任何总线 IO 前）即拒发。
+        // 测试不 open 串口——Err 在 latch 检查处返回（断言错误消息含 interlock 以区别于
+        // open_ctx 失败），不触碰设备。
+        let tr = ModbusRtuTransport::new(test_settings());
+        tr.restore_interlock_latched(true).await.unwrap();
+        let e = tr.send_tai_command([0.0; 3], [0.0; 3], "fallback").await;
+        assert!(e.is_err(), "latch 期间应拒发（不发总线写）");
+        assert!(
+            e.unwrap_err().to_string().contains("interlock"),
+            "应为 latch 拦截（非 open_ctx 失败）"
+        );
+        assert!(tr.is_interlock_stopped().await);
+    }
+
+    #[tokio::test]
+    async fn test_restore_clear_toggles() {
+        // restore 是 stopped_latched 置/清唯一入口（C-1）：true 挡启 → false 恢复
+        let tr = ModbusRtuTransport::new(test_settings());
+        assert!(!tr.is_interlock_stopped().await);
+        tr.restore_interlock_latched(true).await.unwrap();
+        assert!(tr.is_interlock_stopped().await);
+        tr.restore_interlock_latched(false).await.unwrap();
+        assert!(!tr.is_interlock_stopped().await);
+    }
+
+    #[tokio::test]
+    async fn test_authorize_restart_gated() {
+        // I-1/ack_m1：!stopped_latched 时 authorize 复位 started（下个 send 经 ensure_started
+        // 重发 500=1）；stopped_latched 时拒绝（须先 release 清 latch）
+        let tr = ModbusRtuTransport::new(test_settings());
+        // !latch：复位 started
+        *tr.started.write().await = true;
+        tr.authorize_restart().await.unwrap();
+        assert!(!*tr.started.read().await, "authorize 应复位 started，允许下次 send 重发 500=1");
+        // latch：authorize 拒绝且不改 started
+        tr.restore_interlock_latched(true).await.unwrap();
+        *tr.started.write().await = true;
+        assert!(tr.authorize_restart().await.is_err());
+        assert!(*tr.started.read().await, "latch 期间 authorize 不得复位 started");
     }
 
     #[test]

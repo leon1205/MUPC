@@ -20,6 +20,19 @@ pub trait IntercoreTransport: Send + Sync {
     async fn shutdown(&self) -> Result<(), MupcError>;
     /// 实时模块上送的最近 SOC（%，含上送时刻）；无上送能力（如 Modbus 备选）或未收到返回 None
     async fn latest_soc(&self) -> Option<(f64, std::time::Instant)>;
+    /// 停机原语：Modbus 写 REG_START_STOP=0（PCS 停机）；成功复位 started/mode 缓存。
+    /// 实现**不**负责置/清 stopped_latched（联锁 latch 仅由 restore_interlock_latched 管理）。
+    /// Tcp 通道降级（no-op + 记录，无 PCS 500 语义）。
+    async fn stop(&self) -> Result<(), String>;
+    /// 联锁锁存查询（transport 运行期兜底是否挡启动）
+    async fn is_interlock_stopped(&self) -> bool;
+    /// 置/清联锁 latch（C-1 唯一入口：触发沿 restore(true)；release/DB 读回 restore(false)）
+    async fn restore_interlock_latched(&self, latched: bool) -> Result<(), String>;
+    /// 最新解码的 RUN_STATE(1013)（心跳维护，0=停/1=待机/2=充/3=放）；离线/mark_offline 后为 None
+    fn last_run_state(&self) -> Option<u16>;
+    /// M1 保护跳闸人工授权重启（ack_m1 语义）：!stopped_latched 时复位 started，
+    /// 允许下次 send 经 ensure_started 重发 500=1；stopped_latched 时 Err（须先 release）
+    async fn authorize_restart(&self) -> Result<(), String>;
 }
 
 /// 构造 V2 ControlCmd 帧字节（TcpTransport 用）

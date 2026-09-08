@@ -22,6 +22,9 @@ pub struct TcpTransport {
     stream: Arc<Mutex<Option<TcpStream>>>,
     /// 实时模块上送的最远 SOC（%，含上送时刻；N3）
     soc: RwLock<Option<(f64, Instant)>>,
+    /// 联锁锁存（内存 latch，供联锁流程/测试表达；TCP 无 PCS 500 语义，stop 降级 no-op，
+    /// 仅 latch 语义被 IntercoreClient 上层消费——仿真下仍挡启动与表达联锁状态）
+    stopped_latched: RwLock<bool>,
 }
 
 impl TcpTransport {
@@ -32,6 +35,7 @@ impl TcpTransport {
             connected: RwLock::new(false),
             stream: Arc::new(Mutex::new(None)),
             soc: RwLock::new(None),
+            stopped_latched: RwLock::new(false),
         }
     }
 
@@ -124,6 +128,36 @@ impl IntercoreTransport for TcpTransport {
 
     async fn latest_soc(&self) -> Option<(f64, Instant)> {
         *self.soc.read().await
+    }
+
+    /// TCP 通道无 PCS 500 启停寄存器语义：stop 降级 no-op（仅记录，供仿真联锁流程表达）。
+    /// 不设/清 stopped_latched（C-1 与 Modbus 一致：latch 只由 restore 管理）。
+    async fn stop(&self) -> Result<(), String> {
+        tracing::warn!("tcp 通道无 PCS 500 语义，stop 降级 no-op（仿真）");
+        Ok(())
+    }
+
+    async fn is_interlock_stopped(&self) -> bool {
+        *self.stopped_latched.read().await
+    }
+
+    async fn restore_interlock_latched(&self, latched: bool) -> Result<(), String> {
+        // 内存 latch（联锁流程/测试可表达；纯状态不涉及网络 IO）
+        *self.stopped_latched.write().await = latched;
+        Ok(())
+    }
+
+    fn last_run_state(&self) -> Option<u16> {
+        // TCP 通道无 REG_RUN_STATE(1013)；None（链路未知 → DO1 灭保守）
+        None
+    }
+
+    async fn authorize_restart(&self) -> Result<(), String> {
+        // TCP 无 started 缓存概念；仅 !latch 才授权（联锁语义一致）
+        if *self.stopped_latched.read().await {
+            return Err("interlock stopped：联锁锁存中，须先 release 才能重启".to_string());
+        }
+        Ok(())
     }
 }
 
