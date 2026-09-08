@@ -446,6 +446,8 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 
 ### 2.10 配置（TaiStorageConfig）
 
+> 下表为**当前档位 `pcs60_dual`（60kW 双级式）**默认值。L1 器件级（i_rated/s_rated）与 L2 策略上限（dp_max/q_i_max）现由 §2.10.2 容量档位机制按 `capacity_profile` 在启动时派生；L3 标定参数为代码默认（可被档位 `tuning` 覆盖）。
+
 | 参数 | 值 | 作用 |
 |---|---|---|
 | `control_period_s` | 60 | 控制周期 |
@@ -524,6 +526,115 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 | `battery_capacity_kwh` | 120 | 电池容量，用于 SOC 积分与 S4 `P_强制` 计算 |
 
 **参数之间的配合关系（直观）**：`p_abs_trig`(2) 决定"什么时候开始吸" → `p_tgt_s1`(2) 决定"吸到哪停" → `s1_ff_step_kw`(60) 决定"一周期能吸多快" → `p_cap`(60) 决定"最多吸多少"。白天这条链把返送吸掉；`p_dis_trig`(30) → `p_tgt_s3`(5) → `slope`(6) 这条链在晚峰放电削峰；`soc_cap_day`(0.70) 在中间平衡"白天吸多少"与"晚上放多少"。
+
+#### 2.10.2 容量档位配置（capacity_profile，v2.24）`[DESIGN_APPROVED: 2026-09-08]`
+
+> **目标**：策略参数不与某台 PCS 容量（如 60kW 双级式）绑定为单一硬编码默认——按**当前 PCS 档位**（60kW / 125kVA 等）在启动时动态派生整套硬件相关参数。换 PCS 规格**只改档位 key 或 YAML 加档，不改代码**。
+> **使用形态**：启动时档位选择（部署配置，与 transport 二选一同模式；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`intercore` clamp ±25、125kVA 点表）仍按 10 核间 §11.11 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
+> **档位放行与驱动能力耦合（M-1）**：策略档位（i_rated/s_rated/dp_max/q_i_max）与 PCS 驱动侧 clamp/点表**不自动联动**——放行任一无中线非 60kW 档时，须与 `transport` 驱动点表型号**同批变更**并做装配期一致性核对（部署模板注释显式警告；`CoreConfig::validate` 预留装配期校验位）。`has_neutral=true` 校验闸同时充当"驱动/仲裁能力就绪"门：解除需**仲裁恢复中线判据 + 10 核间驱动点表确认**双就绪，防止假参数进闭环。
+
+**参数分层（来源与覆盖规则）**
+
+| 层 | 参数 | 来源 | 换 PCS 规格行为 |
+|---|---|---|---|
+| **L1 PCS 器件级** | `phase_p_limit_kw` / `phase_q_limit_kvar`（单相 ±P/Q 限，用于派生积分钳）、`i_rated_a`、`s_rated_kva`、`has_neutral`（有无中线） | YAML 档位表 | 随档位整套替换；i_rated_a/s_rated_kva **不参与 tuning**（恒取 L1） |
+| **L2 策略上限派生** | `dp_max` / `q_i_max`（默认 = 对应单相限）；`i_rated`/`s_rated`（仲裁用，恒取 L1） | 档位合并派生；dp_max/q_i_max 可被 `tuning` 收紧 | 自动派生 |
+| **L3 控制标定** | 触发阈值/斜坡/增益/分时时段/soc 带/`p_cap`/`battery_capacity_kwh` 等 | 代码 `Default`（60kW 回放标定） | 跨档共享；单个字段可 `tuning` 覆盖 |
+
+> **`phase_p/q_limit` 语义（避免过度承诺）**：arbitrate（§2.6）的**单相器件硬限由 `i_rated × U` 电流钳 + `s_rated` 落实**，并不直接以 phase_p_limit clamp 单相合成值；`phase_p_limit_kw`/`phase_q_limit_kvar` 仅**派生积分钳 `dp_max`/`q_i_max`**。"消除静默裁剪盲区"应理解为：策略上限与器件单相限**对齐**，降低请求落在 PCS 静默 clamp 区间的概率（档位作者可经 tuning 收紧 dp_max 留差模裕度）。
+
+**档位 YAML**（路径由 core_config `strategy.tai_config_file` 指向；未配置 = 默认 60 档）
+
+```yaml
+capacity_profile: "pcs60_dual"      # 当前部署档位 key —— 换型号只改这一行
+pcs_profiles:
+  pcs60_dual:                       # 60kW 两级式 PCS（默认，协议 V1.3 已验证）
+    desc: "60kW 两级式 PCS，三相独立桥臂（无中线）"
+    has_neutral: false
+    phase_p_limit_kw: 25            # 单相有功硬限 ±25
+    phase_q_limit_kvar: 25          # 单相无功硬限 ±25
+    i_rated_a: 110                  # 单相电流限 ≈25kW@230V
+    s_rated_kva: 60                 # 总视在额定
+    # tuning:                       # 可选 L3 覆盖
+    #   p_abs_trig: 2.0
+  pcs125_kva:                       # 预留档：125kVA 型号（点表/形态待厂方确认）
+    desc: "125kVA PCS（预留；has_neutral=true 需仲裁扩展，值待厂方点表）"
+    has_neutral: true
+    phase_p_limit_kw: 41.7
+    phase_q_limit_kvar: 41.7
+    i_rated_a: 190
+    s_rated_kva: 125
+```
+
+**加载/合并**（新增 `strategy-engine/src/pcs_profile.rs`）：
+`load_tai_storage_config(file: Option<&str>, profile_key: Option<&str>) -> Result<TaiStorageConfig, String>`
+
+| 步 | 语义 |
+|---|---|
+| ① | `cfg = TaiStorageConfig::default()`（L3 标定基线 + L1/L2=60 档内联） |
+| ② | `file` 为 `None` 或 `trim()` 为空 → `Ok(cfg)`（**唯一向后兼容分支**） |
+| ③ | `Some(path)`：读 + 解析 `TaiConfigFile`；**读失败/损坏/缺字段 → `Err`**（fail-fast：档位加载失败 = 启动中止并告警，**绝不静默落默认档进闭环**——与「未知 key → Err」同一防呆原则） |
+| ④ | 选档 key = `profile_key`（CLI，优先）或 `capacity_profile`（文件顶行）；未知 key → `Err`（附可用键列表） |
+| ⑤ | `has_neutral == true` → `Err`（当前仲裁已删中线判据；解除条件 = 仲裁扩展 + 驱动点表确认双就绪，见顶部 M-1 注） |
+| ⑥ | 合并 L1/L2：`cfg.i_rated = p.i_rated_a`、`cfg.s_rated = p.s_rated_kva`；`cfg.dp_max = p.tuning.dp_max 或 p.phase_p_limit_kw`；`cfg.q_i_max = p.tuning.q_i_max 或 p.phase_q_limit_kvar` |
+| ⑦ | 应用 `tuning` 覆盖其余 L3 字段 |
+| ⑧ | `validate`（见下）→ 失败 `Err`（含档名与原因） |
+
+**数据结构**（仅薄结构 Deserialize，TaiStorageConfig 本体不引入 serde）：
+
+```rust
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]            // 未知键 → Err，防 YAML 拼错被静默忽略
+struct TaiConfigFile {
+    capacity_profile: String,            // 当前档 key（文件顶行）
+    #[serde(default)]
+    pcs_profiles: HashMap<String, PcsProfile>,
+}
+struct PcsProfile {
+    desc: Option<String>,
+    has_neutral: bool,
+    phase_p_limit_kw: f64,
+    phase_q_limit_kvar: f64,
+    i_rated_a: f64,
+    s_rated_kva: f64,
+    #[serde(default)] tuning: Option<TuningOverrides>,
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TuningOverrides {                 // 全 Option；None = 保持代码默认
+    dp_max: Option<f64>,  q_i_max: Option<f64>,        // L2 收紧（validate 须 ≤ 对应单相限）
+    p_abs_trig: Option<f64>, p_dis_trig: Option<f64>, s1_exit: Option<f64>,
+    p_tgt_s1: Option<f64>, p_tgt_s3: Option<f64>, p_cap: Option<f64>, slope: Option<f64>,
+    kp: Option<f64>, k_diff: Option<f64>, k_q: Option<f64>, s_q_sign: Option<f64>,
+    soc_cap_day: Option<f64>, soc_hys: Option<f64>,
+    t_release_secs: Option<f64>, t_clear_start_secs: Option<f64>, t_clear_end_secs: Option<f64>,
+    s4_limit_margin_kw: Option<f64>, s3_margin_limit: Option<bool>,
+    s1_ff_step_kw: Option<f64>, window_size: Option<u32>, battery_capacity_kwh: Option<f64>,
+}
+```
+
+**优先级（单行）**：`tuning > L1/L2 派生 > L3 代码 Default`。
+**validate 规则**：`i_rated_a`/`s_rated_kva`/`phase_p_limit_kw`/`phase_q_limit_kvar` > 0；`has_neutral` 合法；若 `tuning` 给出：`0 < dp_max ≤ phase_p_limit_kw`、`0 < q_i_max ≤ phase_q_limit_kvar`、`p_cap > 0`、`0 ≤ soc_cap_day ≤ 1`、`0 ≤ soc_hys ≤ 1`、`window_size ≥ 1`。
+**依赖**：仅新增 `serde_yaml = "0.9"`（serde 已有；与 mupc-core-bin 等已用版本一致）。
+
+**装配与回放**：
+- **core_config 新增 `strategy` 段**：
+  ```yaml
+  strategy:
+    tai_config_file: ""     # 台区储能档位 YAML 路径；空 = 默认档 pcs60_dual（唯一向后兼容分支）
+  ```
+  字段类型 `String`、serde 默认空；startup 归一化：`let path = config.strategy.tai_config_file.trim(); let opt = if path.is_empty() { None } else { Some(path) };`
+- **startup.rs**：`let tai_cfg = mupc_strategy_engine::load_tai_storage_config(opt, None).map_err(|e| MupcError::new(ErrorCode::ConfigError, format!("tai 档位加载失败: {e}"), "startup"))?;` 再 `TaiStorageStrategy::new(tai_cfg)`。**档位加载失败 = 启动中止（fail-fast）**，不静默落默认档。
+- **`tai_replay` bin**：`--config-file <path>` + 可选 `--capacity-profile <key>`（CLI 优先于文件顶行 key）；与既有位置参数扫参共存——**覆盖顺序 = 代码默认 → 档位派生(L1/L2) → tuning(L3) → CLI 位置参数**，使标定扫参可在任意档基础上叠加执行。
+- 部署模板（mupc_core_config.yaml 与 production 模板）并入 `strategy.tai_config_file` 示例；`pcs125_kva` 等非 60 档放行须与 `transport` 驱动点表型号同批变更并装配期核对（顶部 M-1 注）。
+
+**测试**（`pcs_profile_test.rs`）：
+- 样例 YAML 双档解析 → L1/L2 合并正确（i_rated/s_rated/dp_max/q_i_max 落值）；`tuning` L3 覆盖生效
+- 覆盖顺序：CLI key > 文件 `capacity_profile` > 默认；`file=None` 与**空串** → default（向后兼容）
+- `Some(path)` 文件不存在/损坏/缺字段 → Err（fail-fast）；未知 `capacity_profile` → Err（含可用键）
+- `has_neutral=true` → Err；`phase_p_limit<=0`/`i_rated_a<=0` → Err；tuning 越界（`dp_max > phase_p_limit_kw`）→ Err
+- `deny_unknown_fields`：档位/tuning 未知键 → Err（防拼错静默）
+- 现有 `default()` 系列测试零回归（default 仍 = 60 档，不依赖任何 YAML 文件）
 
 ### 2.11 集成点（AiIntegrator）
 
@@ -959,10 +1070,12 @@ mupc/crates/strategy-engine/
 │   │
 │   ├── ai_integration.rs         # AiIntegrator（AI 引擎集成）
 │   │
-│   ├── config.rs                 # TaiStorageConfig
+│   ├── config.rs                 # TaiStorageConfig（L3 标定默认 + 60 档内联）
+│   ├── pcs_profile.rs            # 容量档位：TaiConfigFile/PcsProfile/TuningOverrides + load_tai_storage_config（§2.10.2）
 │   ├── errors.rs                 # StrategyError 枚举
 │   │
 │   ├── ai_validator_test.rs      # AI 校验器单元测试（8 tests）
+│   ├── pcs_profile_test.rs       # 容量档位解析/合并/校验单元测试
 │   └── tai_storage_test.rs       # 台区储能治理策略单元测试（~15 tests）
 ```
 
@@ -973,12 +1086,14 @@ pub mod strategies;
 pub mod tai_storage;          // 台区储能治理策略（唯一兜底策略）
 pub mod ai_validator;
 pub mod config;
+pub mod pcs_profile;          // 容量档位解析/合并（§2.10.2）
 pub mod errors;
 pub mod ai_integration;       // AI 引擎集成
 
 pub use tai_storage::{TaiControllerState, TaiStorageStrategy, TaiState};
 pub use ai_validator::{AiCommandValidatorImpl, AiModel, ModelInput, ModelOutput, MockAiModel};
 pub use config::TaiStorageConfig;
+pub use pcs_profile::load_tai_storage_config;   // startup / tai_replay 装配入口
 pub use errors::StrategyError;
 pub use strategies::{FallbackStrategy, AiCommandValidator, StrategyType, ControlCommand, CommandType, ValidationResult};
 pub use mupc_ai_engine::{ModelManager, FusedSystemState, ActionOutput, ModelStatus, RobustnessManager, AnomalyType};
@@ -1089,6 +1204,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"             # §2.10.2 容量档位 YAML 解析（v2.24 新增）
 async-trait = "0.1"
 mupc-common = { path = "../common" }
 mupc-data-processing = { path = "../data-processing" }
@@ -1129,3 +1245,4 @@ tokio-test = "0.4"
 | v2.21 | S1 ②分支外部基线变化判别：Δp_base=Δp+Δp_out 区分自激与外部返送消失，仅外部突变才快速退出；普通收窄走正常积分收敛到 +2kW 目标进口（消除 net 闭环自激极限环） |
 | v2.22 | S1 共模改前馈吸收：重构基线 P_表基线=P_表净+P_out[k−1]，目标 P_st=P_表基线−P_目标进口，大步斜坡 s1_ff_step_kw 一周期到位；替代 v2.20 boost 与 v2.21 Δp_base 判别（移除 s1_boost_* 配置与 prev_p/prev_p_st 状态），峰值压至第一拍滞后极限 |
 | v2.23 | 「本地优先」改为部署默认：ai_engine.local_priority 默认 true（代码 serde 默认 + 部署配置显式声明），开机即本地台区储能策略控制、AI 旁路；需 AI 控制经配置/Web API 切 false |
+| v2.24 | 容量档位配置（capacity_profile，§2.10.2）：TaiStorageConfig 参数分层 L1/L2/L3，PCS 器件级参数改由 YAML 档位表按当前 PCS 型号（60kW/125kVA 等）启动时派生；换规格只改档位 key / YAML 加档，不改代码 |
