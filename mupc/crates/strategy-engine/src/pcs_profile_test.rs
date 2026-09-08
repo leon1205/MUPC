@@ -198,6 +198,76 @@ pcs_profiles:
       dp_max: 30
 "#;
 
+    const YAML_TUNING_Q_EXCEED: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "d"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      q_i_max: 30
+"#;
+
+    const YAML_TUNING_P_CAP_ZERO: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "d"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      p_cap: 0
+"#;
+
+    const YAML_TUNING_SOC_CAP_OUT: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "d"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      soc_cap_day: 1.5
+"#;
+
+    const YAML_TUNING_SOC_HYS_NEG: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "d"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      soc_hys: -0.1
+"#;
+
+    const YAML_TUNING_WINDOW_ZERO: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "d"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      window_size: 0
+"#;
+
     const YAML_UNKNOWN_PROFILE_FIELD: &str = r#"
 capacity_profile: "pcs60_dual"
 pcs_profiles:
@@ -226,10 +296,15 @@ pcs_profiles:
 
     const YAML_MALFORMED: &str = "capacity_profile: [unclosed\npcs_profiles: {";
 
-    /// 写临时档位 → 加载 → 尽力清理 → 返回结果（失败路径也清理）
+    /// 写临时档位 → 加载（带 CLI key）→ 尽力清理 → 返回结果（失败路径也清理，
+    /// 避免 unwrap_err panic 时漏删临时文件）
     fn load_tmp(content: &str) -> Result<TaiStorageConfig, String> {
+        load_tmp_with_key(content, None)
+    }
+
+    fn load_tmp_with_key(content: &str, key: Option<&str>) -> Result<TaiStorageConfig, String> {
         let path = write_tmp(content);
-        let r = load_tai_storage_config(Some(path.to_str().unwrap()), None);
+        let r = load_tai_storage_config(Some(path.to_str().unwrap()), key);
         let _ = std::fs::remove_file(&path);
         r
     }
@@ -240,6 +315,10 @@ pcs_profiles:
         let e = load_tai_storage_config(Some("/nonexistent/tai_profiles.yaml"), None)
             .unwrap_err();
         assert!(e.contains("读取档位文件"), "实际: {e}");
+        assert!(
+            e.contains("/nonexistent/tai_profiles.yaml"),
+            "read 阶段错误应含文件路径: {e}"
+        );
     }
 
     #[test]
@@ -259,13 +338,10 @@ pcs_profiles:
     #[test]
     fn test_unknown_cli_key_err_lists_keys() {
         // CLI key 未知 → 同 Err（用 YAML_3_PROFILE 覆盖顶行）
-        let path = write_tmp(YAML_3_PROFILE);
-        let e =
-            load_tai_storage_config(Some(path.to_str().unwrap()), Some("pcs200_kva")).unwrap_err();
-        let _ = std::fs::remove_file(&path);
+        let e = load_tmp_with_key(YAML_3_PROFILE, Some("pcs200_kva")).unwrap_err();
         assert!(e.contains("未知档位 key 'pcs200_kva'"), "实际: {e}");
         assert!(
-            e.contains("pcs60_dual") && e.contains("pcs125_kva"),
+            e.contains("pcs60_dual") && e.contains("pcs80_kva") && e.contains("pcs125_kva"),
             "应附全部可用键: {e}"
         );
     }
@@ -273,10 +349,7 @@ pcs_profiles:
     #[test]
     fn test_has_neutral_true_err() {
         // has_neutral=true → Err（当前仲裁无中线判据）
-        let path = write_tmp(YAML_3_PROFILE);
-        let e = load_tai_storage_config(Some(path.to_str().unwrap()), Some("pcs125_kva"))
-            .unwrap_err();
-        let _ = std::fs::remove_file(&path);
+        let e = load_tmp_with_key(YAML_3_PROFILE, Some("pcs125_kva")).unwrap_err();
         assert!(e.contains("has_neutral=true"), "实际: {e}");
     }
 
@@ -302,6 +375,46 @@ pcs_profiles:
         let e = load_tmp(YAML_TUNING_DP_EXCEED).unwrap_err();
         assert!(e.contains("dp_max"), "实际: {e}");
         assert!(e.contains("≤ phase_p_limit_kw=25"), "实际: {e}");
+    }
+
+    #[test]
+    fn test_tuning_q_i_max_exceed_phase_err() {
+        // tuning 越界：q_i_max=30 > phase_q_limit_kvar=25 → Err
+        let e = load_tmp(YAML_TUNING_Q_EXCEED).unwrap_err();
+        assert!(e.contains("q_i_max"), "实际: {e}");
+        assert!(e.contains("≤ phase_q_limit_kvar=25"), "实际: {e}");
+    }
+
+    #[test]
+    fn test_tuning_p_cap_zero_err() {
+        // tuning 非有限正数：p_cap=0 → Err
+        let e = load_tmp(YAML_TUNING_P_CAP_ZERO).unwrap_err();
+        assert!(e.contains("p_cap"), "实际: {e}");
+        assert!(e.contains("须为有限正数"), "实际: {e}");
+    }
+
+    #[test]
+    fn test_tuning_soc_cap_day_out_of_range_err() {
+        // tuning 越界：soc_cap_day=1.5 超出 [0,1] → Err
+        let e = load_tmp(YAML_TUNING_SOC_CAP_OUT).unwrap_err();
+        assert!(e.contains("soc_cap_day"), "实际: {e}");
+        assert!(e.contains("须在 [0,1]"), "实际: {e}");
+    }
+
+    #[test]
+    fn test_tuning_soc_hys_negative_err() {
+        // tuning 越界：soc_hys=-0.1 落在 [0,1] 外 → Err
+        let e = load_tmp(YAML_TUNING_SOC_HYS_NEG).unwrap_err();
+        assert!(e.contains("soc_hys"), "实际: {e}");
+        assert!(e.contains("须在 [0,1]"), "实际: {e}");
+    }
+
+    #[test]
+    fn test_tuning_window_size_zero_err() {
+        // tuning 非法：window_size=0 < 1 → Err
+        let e = load_tmp(YAML_TUNING_WINDOW_ZERO).unwrap_err();
+        assert!(e.contains("window_size"), "实际: {e}");
+        assert!(e.contains("须 ≥ 1"), "实际: {e}");
     }
 
     #[test]
