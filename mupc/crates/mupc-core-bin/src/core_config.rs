@@ -81,7 +81,7 @@ pub struct InterCoreConfig {
 /// 配置时也落到下方默认函数，而非空/零值。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModbusRtuConfig {
-    /// 串口设备，默认 /dev/ttyS1
+    /// 串口设备，默认 /dev/ttyS0（BECG-3568 板载 COM1 ↔ PCS，19200 N-8-1；无 ttyS1）
     #[serde(default = "default_serial_port")]
     pub serial_port: String,
     /// 波特率，默认 19200（PCS 线格式 V1.3：N-8-1 @19200）
@@ -186,7 +186,7 @@ pub struct MasterMeterConfig {
     /// 是否启用总表采集（默认关；启用须配真点表）
     #[serde(default)]
     pub enabled: bool,
-    /// 串口设备，默认 /dev/ttyUSB0
+    /// 串口设备，默认 /dev/ttyS4（BECG-3568 板载 COM4 ↔ 关口表/台区总表）
     #[serde(default = "default_meter_serial")]
     pub serial_port: String,
     /// 波特率
@@ -233,8 +233,9 @@ pub struct MeterRegBlock {
     pub scale: f64,
 }
 
+// BECG-3568 板载 RS485 COM4(ttyS4) ↔ 关口表/台区总表（核间 10 §12.1 / deploy §九）
 fn default_meter_serial() -> String {
-    "/dev/ttyUSB0".to_string()
+    "/dev/ttyS4".to_string()
 }
 fn default_meter_baud() -> u32 {
     9600
@@ -334,8 +335,9 @@ fn default_intercore_transport() -> String {
     "tcp".to_string()
 }
 
+// BECG-3568 板载隔离 RS485 COM1(ttyS0) ↔ PCS（核间 10 §12.1）；无 ttyS1
 fn default_serial_port() -> String {
-    "/dev/ttyS1".to_string()
+    "/dev/ttyS0".to_string()
 }
 
 fn default_baud_rate() -> u32 {
@@ -571,7 +573,7 @@ plugins: {}
         // 未配置 intercore.transport 时默认 tcp
         assert_eq!(config.intercore.transport, "tcp");
         // 未配置 intercore.modbus_rtu 时默认参数
-        assert_eq!(config.intercore.modbus_rtu.serial_port, "/dev/ttyS1");
+        assert_eq!(config.intercore.modbus_rtu.serial_port, "/dev/ttyS0");
         assert_eq!(config.intercore.modbus_rtu.baud_rate, 19200);
         assert_eq!(config.intercore.modbus_rtu.data_bits, 8);
         assert_eq!(config.intercore.modbus_rtu.stop_bits, 1);
@@ -580,6 +582,8 @@ plugins: {}
         assert_eq!(config.intercore.modbus_rtu.response_timeout_ms, 200);
         assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
         assert!(config.ai_engine.local_priority, "本地优先应为部署默认");
+        // 未配置 master_meter 时默认参数（默认关，serial_port 落默认 /dev/ttyS4）
+        assert_eq!(config.master_meter.serial_port, "/dev/ttyS4");
     }
 
     #[test]
