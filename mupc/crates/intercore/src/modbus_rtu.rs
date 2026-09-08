@@ -1,3 +1,6 @@
+//! ⚠️ 早期假设点表（自定义 cmd_ctrl/exec 确认、int32 缩放）——已被 PCS 真实协议（§11.11 /
+//! crate::pcs）取代。保留仅供旧路径仿真/历史参考；生产 transport=modbus_rtu 走 pcs.rs 驱动。
+//!
 //! 核间 Modbus RTU 寄存器映射与编解码
 //!
 //! 实时控制模块（Slave）暴露保持寄存器区，管理模块（Master）写控制区（FC16）、
