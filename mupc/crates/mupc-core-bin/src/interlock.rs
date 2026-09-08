@@ -7,8 +7,10 @@
 //!
 //! - pcs_stop 源（急停 Estop / 水浸 Flood / 消防 Fire）**有效沿** → 触发 latch
 //!   （返回 `Action::TriggerLatch`，装配负责 PCS 停机指令 + DB 持久化 restore）。
-//! - 释放（`auto_release=false`）须：触发源全部复位 && 保持 >= `release_hold_secs`
-//!   且外部 `request_release`（`web_release_pending`）；`auto_release=true` 则保持后自动释放。
+//! - 释放须：触发源全部复位 && 保持 >= `release_hold_secs`；`auto_release=false` 时还须外部
+//!   `request_release`（`web_release_pending`），`auto_release=true` 则保持后自动释放——
+//!   **但自动释放要求停机已确认（`!stop_failed`）**，stop() 未确认（PCS 仍运行）时只许人工
+//!   web release 放行，防联锁静默失效。
 //! - 门禁 Door 仅上报事件，不计入 pcs_stop 源集合（装配发事件，不参与 latch）。
 //! - DO1 运行灯 = run_state∈{1,2,3} 且 !latch；DO2 故障灯 = 持久条件
 //!   （latch || stop_failed || !pcs_online || M1 停机）。
@@ -62,7 +64,8 @@ pub enum Action {
 pub struct InterlockState {
     /// 是否处于联锁（禁启）锁存态
     pub latched: bool,
-    /// PCS 停机确认失败（由装配置位，本机随 latch 生命周期在 release 时清除）
+    /// PCS 停机确认失败（由装配置位；停机确认成功由装配清除——本机 auto 释放要求 !stop_failed，
+    /// 仅人工 web release 可放行 stop_failed 态；新触发沿复位重试）
     pub stop_failed: bool,
     /// 本拍仍处触发态的 pcs_stop 源位图（Estop=1 / Flood=2 / Fire=4）
     pub active_pcs_stop_sources: u32,
@@ -162,19 +165,25 @@ impl StateMachine {
             action = Action::TriggerLatch;
         } else if s.latched {
             if cur == 0 {
-                // 触发源全复位：记录安全起点；保持足够时长且（auto || 人工请求）→ 释放
+                // 触发源全复位：记录安全起点
                 if s.source_safe_since.is_none() {
                     s.source_safe_since = Some(now);
                 }
                 let held = now.saturating_sub(s.source_safe_since.unwrap_or(now))
                     >= self.release_hold_secs;
-                if held && (self.auto_release || web_release_pending) {
+                // 释放门槛：人工 web 确认（操作员明确放行，可容忍 stop_failed 态），或
+                // auto_release **且停机已确认**（!stop_failed）——stop() 从未确认（PCS 仍运行、
+                // run_state 未转 0）时禁止自动解 latch 清 stop_failed：否则联锁静默失效
+                // （源复位即自动复位，故障灯熄灭但 PCS 从未真正停机）。
+                let manual_ok = web_release_pending;
+                let auto_ok = self.auto_release && !s.stop_failed;
+                if held && (manual_ok || auto_ok) {
                     s.latched = false;
                     s.stop_failed = false;
                     s.source_safe_since = None;
                     action = Action::ReleaseLatch;
                 }
-                // else：维持 latch（等待 hold 到达 / 人工确认）
+                // else：维持 latch（等待 hold 到达 / 人工确认 / 停机确认）
             } else {
                 // 仍有触发源 active（含 latched 期间重新触发）→ 重置安全计时，保持 latch
                 s.source_safe_since = None;
@@ -272,6 +281,35 @@ mod tests {
         assert!(run_lamp);
         assert!(!fault_lamp);
         assert_eq!(s.last_fault_lamp_reason, FaultReason::None);
+    }
+
+    #[test]
+    fn test_auto_release_blocked_when_stop_unconfirmed() {
+        // Important（质量评审）：stop() 从未确认（stop_failed=true，PCS 仍运行）时，即使
+        // auto_release=true + 源复位 + hold 满，**也不得**自动解 latch 清 stop_failed——否则
+        // 联锁静默失效（故障灯熄、run 灯亮，但 PCS 从未真正停机）。仅人工 web release 可放行。
+        let mut m = StateMachine::new(true, 1);
+        let mut s = InterlockState::default();
+        let (run_ok, online) = pcs_ok();
+        let (a0, _, _) = m.tick(&mut s, &[(E, true)], false, run_ok, online, 0);
+        assert_eq!(a0, Action::TriggerLatch);
+        s.stop_failed = true; // 装配：停机确认超时（PCS 未转 0）
+
+        // t=1 源复位、t=3 hold=1 满 + auto → 仍维持 latch（禁止静默失效）
+        let (a1, _, _) = m.tick(&mut s, &[(E, false)], false, run_ok, online, 1);
+        assert_eq!(a1, Action::None);
+        let (a2, _, fault_lamp) = m.tick(&mut s, &[(E, false)], false, run_ok, online, 3);
+        assert_eq!(a2, Action::None);
+        assert!(s.latched);
+        assert!(s.stop_failed);
+        assert!(fault_lamp);
+
+        // 人工 web release 可放行 stop_failed 态（操作员明确确认）
+        let (a3, run_lamp, _) = m.tick(&mut s, &[(E, false)], true, run_ok, online, 3);
+        assert_eq!(a3, Action::ReleaseLatch);
+        assert!(!s.latched);
+        assert!(!s.stop_failed);
+        assert!(run_lamp);
     }
 
     #[test]
