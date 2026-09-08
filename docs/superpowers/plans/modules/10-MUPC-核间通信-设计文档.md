@@ -1006,6 +1006,7 @@ tokio-test = "0.4"              # Tokio 测试工具
 | ADR-010 | Modbus 寄存器数值编码 | ① int32 有符号缩放（2 寄存器/值）；② IEEE754 f64（4 寄存器/值） | **int32 缩放（方案①）** | 工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够；`k_droop` 用 0.001 缩放 |
 | ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16 |
 | ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载 |
+| ADR-013 | Modbus 通道真实协议 | ① 自定义假设点表（cmd_valid/exec 确认区，早期实现）；② **PCS 真实协议 V1.3**（FC06 写即生效、分相模式、int16 缩放+字节互换） | **PCS 真实协议（方案②，v2.2）** | 实时控制模块=两级式 PCS，经现场协议资料确认点表；假设表无法对接真实设备，PCS 为标准 Modbus 从站无自建确认区 |
 
 ### 10.2 待澄清问题
 
@@ -1065,6 +1066,8 @@ pub trait IntercoreTransport: Send + Sync {
 - `IntercoreClient` 保留 `connected`/`last_p_ref`/`last_k_droop` 门面状态，委托给 transport。
 
 ### 11.4 Modbus 寄存器映射与编码
+
+> ⚠️ **v2.2 注**：本节自定义假设点表（控制/执行确认/状态三区、`cmd_valid`/`exec_seq`/int32 缩放）**已被 §11.11 PCS 真实协议 V1.3 取代**——`transport=modbus_rtu` 实际对接两级式 PCS（FC06 写即生效，无自建确认区，int16 缩放 + 高 8/低 8 互换）。本节保留作通用 Modbus 传输框架参考（transport 抽象/读写/心跳轮询思想），点表以实现 §11.11 为准。
 
 实时控制模块（Slave）持有一块保持寄存器区，分三区：**控制区**（Master 写，FC16）、**执行确认区**（从站写、Master 读，FC03）、**状态/心跳区**（从站写、Master 读）。从站地址可配（默认 1）。
 
@@ -1173,6 +1176,42 @@ intercore:
 
 ---
 
+### 11.11 PCS 真实协议 V1.3（v2.2，取代 §11.4~11.6 假设点表）
+
+**架构确认（2026-09-04）**：实时控制模块 = **两级式 PCS 设备**（小脑集成于 PCS）。MUPC 作 EMS/主机（Modbus Master）经 RS485 直连 PCS（从站），`transport: "modbus_rtu"` 即此真实通道。**§11.4~11.6 的自定义假设点表（cmd_ctrl/exec 确认区）作废**——PCS 为标准 Modbus 从站，FC06 写响应即确认。依据：PCS 设备通讯协议 V1.3（`60kW 双级式PCS产品资料包/5.通讯协议/`）。
+
+**物理层**：RS485 Modbus，默认 **19200 N-8-1**，从站地址拨码（默认 1），EMS 接 A2/B2。**⚠️ 高 8 位/低 8 位互换**——寄存器 16bit 收发须字节交换。
+
+**点表映射**（地址列 = Modbus 寄存器地址；3 区 FC04 读、4 区 FC03 读/FC06 写单）：
+
+| PCS 点表 | 地址 | 类型/缩放 | 承载 |
+|---|---|---|---|
+| 4区 模块启停 | 500 | UInt16 0/1 | 启动序列 |
+| 4区 有功模式 | 1000 | UInt16 0恒功率/1恒流/**2分相**/5离网 | 通道模式 |
+| 4区 恒功率有功/无功 | 1001/1002 | Int16 *1kW(正放负充) | `send_dual_param` p_ref/q |
+| 4区 单A/B/C 有功 | 1006-1008 | Int16 *1kW ±25 | `send_tai_command` phase_p |
+| 4区 单A/B/C 无功 | 1009-1011 | Int16 *1kVar ±25 | `send_tai_command` phase_q |
+| 3区 BMS 系统 SOC | 1010 | UInt16 *1% | `latest_soc` |
+| 3区 模块运行状态 | 1013 | UInt16 0停机/1待机/2充电/3放电 | 心跳/在线判定 |
+| 3区 输出有功/无功分相 | 1029-1036 | Int16 *0.1 | 遥测（可选） |
+
+**下行执行序列**：
+- `send_tai_command`（台区储能分相）：若当前模式≠2 则先 `FC06 写 1000=2`；**每次分相 P/Q 单相 clamp ±25kW**（PCS 单相功率器件独立，不可跨相补）后逐个 `FC06` 写 1006-1011（协议只支持一次设一参）；启停（500=1）首次下发带
+- `send_dual_param`（AI 恒功率）：模式≠0 则写 `1000=0`；写 1001=p_ref、1002=q；**`k_droop` PCS 无下垂接口——忽略并记录局限**（AI 智能模式经 PCS 恒功率无下垂闭环；投产主链路为本地优先分相）
+- 模式状态缓存于 transport（AtomicU8），一致时每周期只写数据寄存器
+
+**上行/健康**：
+- `latest_soc`：FC04 读 3区1010（swap），成功存 `(soc, Instant)`；读失败返回 None（AiIntegrator 5s 新鲜度已判过期）
+- 心跳/在线：周期 FC04 读 3区1013（运行状态）成功即在线，连续失败判离线（替换假设表心跳计数器）；原 `modbus_slave` 假设表参考仅测旧路径，PCS 以实机联调为准
+
+**配置**：复用 `core_config ModbusRtuConfig`（serial_port/baud/slave_addr/超时），文档示例波特率改 **19200**；点表地址/字节序为代码常量映射（`addr_base` 可配供现场校准）。
+
+**容量对齐**：策略 `arbitrate`（i_rated 190A≈41.8kVA/相）高于 PCS 分相限（±25kW≈110A/相）——投产时按 PCS 容量调策略容量参数（投产项），PCS 侧 clamp 为硬限兜底。
+
+**测试**：PCS int16 缩放/字节 swap 编解码 roundtrip、单相 clamp、模式切换缓存、写序列组装；端到端以真实 PCS RS485 联调。
+
+---
+
 ## 附录 A：性能指标参考
 
 > 性能与可靠性指标详见 [PRD 第 7 章 非功能性需求](../specs/modules/10-MUPC-核间通信-PRD.md#7-非功能性需求)。
@@ -1188,3 +1227,4 @@ intercore:
 | v1.0 | 从 PRD v1.0、技术设计 v1.1 和代码库 intercore 实现合并整理 |
 | v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |
 | v2.1 | TCP 回读 SOC（N3，U-26 延伸）：TcpTransport 加回读接收循环（独立连接读实时模块 DataUpload 帧 → battery_soc），`IntercoreTransport.latest_soc()` 查询，AiIntegrator 在总表模式（battery 无 SOC）时以核间 SOC 注入；Modbus 备选不承载（None） |
+| v2.2 | PCS 真实协议 V1.3 取代 §11.4~11.6 假设点表：实时控制模块=两级式 PCS，`transport=modbus_rtu` 直连 PCS（RS485 19200 N-8-1，高 8/低 8 互换）；分相下行→PCS 模式2+单相 P/Q(±25 裁剪)，恒功率下行→模式0+1001/1002(k_droop 忽略)；SOC/心跳读 3 区 1010/1013 |
