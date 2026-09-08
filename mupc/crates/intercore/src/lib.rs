@@ -8,6 +8,7 @@ pub mod tcp_server;
 pub mod transport;
 pub mod watchdog;
 pub mod modbus_rtu;
+pub mod pcs;
 
 pub use heartbeat::HeartbeatManager;
 pub use protocol::{FrameHeader, FrameType as IntercoreFrameType, IntercoreFrame};
