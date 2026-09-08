@@ -1320,4 +1320,73 @@ io:
             err
         );
     }
+
+    /// S2 §12.4: io.enabled=false 时 di/do 含非法内容（bad action/gpio=0）仍放行——
+    /// disabled 整段跳过校验的行为契约（未启用联锁的部署不被误拦）
+    #[test]
+    fn test_io_disabled_bypasses_validation() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: false
+  di:
+    - { name: "急停", gpio: 0, action: "bogus" }
+  do:
+    - { name: "故障灯", gpio: 0 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.io.enabled);
+        assert!(
+            config.validate().is_ok(),
+            "enabled=false 应跳过 io 校验: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S2 §12.4: do 表专属拒绝路径——gpio=0 / name 空 / name 重复各 Err（与 di 路径对称）
+    #[test]
+    fn test_io_validate_do_rejections() {
+        let base = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  do:
+"#;
+        // gpio=0 → Err
+        let yaml = format!("{}\n    - {{ name: \"运行灯\", gpio: 0 }}\n", base);
+        let config: CoreConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("do") && err.contains("gpio"), "实际: {}", err);
+        // name 空 → Err
+        let yaml = format!("{}\n    - {{ name: \"\", gpio: 7 }}\n", base);
+        let config: CoreConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("do") && err.contains("name"), "实际: {}", err);
+        // name 重复 → Err
+        let yaml = format!(
+            "{}\n    - {{ name: \"运行灯\", gpio: 7 }}\n    - {{ name: \"运行灯\", gpio: 8 }}\n",
+            base
+        );
+        let config: CoreConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("重复") && err.contains("运行灯"), "实际: {}", err);
+    }
 }
