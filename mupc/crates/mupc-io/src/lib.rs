@@ -71,16 +71,22 @@ impl DigitalOut for SysfsOut {
 /// 测试 mock（内存电平）
 pub struct MockIn { level: std::sync::RwLock<bool> }
 impl MockIn {
-    pub fn new() -> Self { Self { level: std::sync::RwLock::new(false) } }
+    pub fn new() -> Self { Self::default() }
     pub fn set(&self, high: bool) { *self.level.write().unwrap() = high; }
+}
+impl Default for MockIn {
+    fn default() -> Self { Self { level: std::sync::RwLock::new(false) } }
 }
 impl DigitalIn for MockIn {
     fn read_level(&self) -> Result<bool, IoError> { Ok(*self.level.read().unwrap()) }
 }
 pub struct MockOut { level: std::sync::RwLock<bool> }
 impl MockOut {
-    pub fn new() -> Self { Self { level: std::sync::RwLock::new(false) } }
+    pub fn new() -> Self { Self::default() }
     pub fn get(&self) -> bool { *self.level.read().unwrap() }
+}
+impl Default for MockOut {
+    fn default() -> Self { Self { level: std::sync::RwLock::new(false) } }
 }
 impl DigitalOut for MockOut {
     fn set_level(&self, high: bool) -> Result<(), IoError> {
