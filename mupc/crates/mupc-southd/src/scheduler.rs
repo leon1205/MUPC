@@ -13,8 +13,9 @@
 //! strategy/ai-integration，只定义 trait 边界）：
 //! - `MeterGrid` → [`StationSink::on_grid_package`]（策略 phase 唯一写方，含分相）；
 //! - 一切非 grid 站 → [`StationSink::on_station_telemetry`]（telemetry 落库 + 状态事件）。
-//!   单写方口径：同一站数据绝不走两个通道（battery soc 经 telemetry 全量落库，暂不单独
-//!   推 pkg.battery.soc——SOC 融合留 S3b §2.11）。
+//!   单写方口径：同一用途数据只走一条通道——battery 站 soc 经 telemetry 全量落库（旁路
+//!   记录照旧），**同时**经 [`StationSink::on_battery_soc`] 独立通道推 AiIntegrator
+//!   （SOC 双源裁决，BMS 优先/掉线回落核间，04 §2.11.1；不替代 on_station_telemetry）。
 //!
 //! 观测契约：每口 task 由其采集循环常驻，任一口 task 内 panic 会**静默终止**该口采集
 //! （无自动重 spawn）。调用方必须持有并观测 [`SouthScheduler::spawn`] 返回的每个
@@ -49,6 +50,11 @@ pub trait StationSink: Send + Sync {
         role: Role,
         points: Vec<(String, f64, bool)>,
     );
+
+    /// battery 站（role=Battery）本轮 SOC（已由 mapper 解码进 pkg.battery.soc；本轮采集
+    /// 刚成功即新鲜）。独立通道——AiIntegrator SOC 双源裁决用（BMS 优先/掉线回落核间，04 §2.11.1）。
+    /// 不替代 on_station_telemetry（遥测全量落库照旧）；soc 值语义为 0-100 百分数。
+    async fn on_battery_soc(&self, station_id: &str, soc: f64);
 }
 
 /// 本轮应采的一站。`station_index` = 调度 state Vec 全局下标。
@@ -331,16 +337,20 @@ impl SouthScheduler {
                 if role == Role::MeterGrid {
                     self.sink.on_grid_package(pkg).await;
                 } else {
-                    // 非 grid（battery/hvac/fire/meter_batt）的 DataPackage 载荷本 S3a 不消费
-                    // ——pkg 在此仅用于 match 到 Data 分支确认站「活着」；battery SOC 融合留
-                    // S3b §2.11（模块头单写方口径）。`pkg` 被 grid 分支消费故无 unused 告警，
-                    // 此处不再引用。遥测值以 telemetry_points(&reads) 二次 decode 落库。
+                    // 非 grid（battery/hvac/fire/meter_batt）遥测全量落库（is_event=false）。
                     let pts: Vec<(String, f64, bool)> = mapper::telemetry_points(&reads)
                         .into_iter()
                         .map(|(m, v)| (m, v, false))
                         .collect();
                     if !pts.is_empty() {
                         self.sink.on_station_telemetry(&station_id, role, pts).await;
+                    }
+                    // SOC 双源通道（04 §2.11.1）：battery 站 pkg.battery.soc 由 mapper 解码；
+                    // 本轮采集成功即新鲜 → 独立推给 AiIntegrator（BMS 优先源）。telemetry 落库照旧。
+                    if role == Role::Battery {
+                        if let Some(soc) = pkg.battery.soc {
+                            self.sink.on_battery_soc(&station_id, soc).await;
+                        }
                     }
                 }
                 true
@@ -458,6 +468,21 @@ mod tests {
         }
     }
 
+    /// battery 站：soc 块（float32，slave 2，地址 100）——mapper Battery 分支 decode 进
+    /// pkg.battery.soc；telemetry 与独立 SOC 通道都用它。单测成功路径值 65.5（f32 精确）。
+    fn battery_conf() -> StationConf {
+        StationConf {
+            id: "bms".into(),
+            role: Role::Battery,
+            port: "ttyS2".into(),
+            protocol: "modbus".into(),
+            slave: 2,
+            baud_rate: DEFAULT_BAUD_RATE,
+            interval_ms: 1000,
+            regs: vec![blk("soc", 100, 2)],
+        }
+    }
+
     fn hvac_conf(id: &str, port: &str, slave: u8, interval_ms: u64) -> StationConf {
         StationConf {
             id: id.into(),
@@ -489,11 +514,13 @@ mod tests {
         bus.put(slave, 26, phase_regs(10.0, 11.0, 12.0));
     }
 
-    /// 假 Sink：记录 on_grid_package / on_station_telemetry（事件与普通遥测以 is_event 区分）。
+    /// 假 Sink：记录 on_grid_package / on_station_telemetry（事件与普通遥测以 is_event 区分）
+    /// 与 on_battery_soc（独立 SOC 通道）。
     #[derive(Default)]
     struct FakeSink {
         grid_pkgs: std::sync::Mutex<Vec<mupc_data_processing::DataPackage>>,
         msgs: std::sync::Mutex<Vec<(String, Role, Vec<(String, f64, bool)>)>>,
+        battery_socs: std::sync::Mutex<Vec<(String, f64)>>,
     }
 
     impl FakeSink {
@@ -512,6 +539,16 @@ mod tests {
                 .filter(|(id, _, pts)| id == station_id && pts.iter().any(|&(_, _, ev)| !ev))
                 .flat_map(|(_, _, pts)| pts.iter().filter(|&&(_, _, ev)| !ev).map(|(m, v, _)| (m.clone(), *v)).collect::<Vec<_>>())
                 .collect()
+        }
+        /// battery 站最近一次 on_battery_soc 推的 soc（无推送 → None）
+        fn soc_of(&self, station_id: &str) -> Option<f64> {
+            self.battery_socs
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(id, _)| id == station_id)
+                .map(|(_, v)| *v)
         }
         /// station 的状态事件计数（metric ∈ offline/online，is_event=true）
         fn event_count(&self, station_id: &str, metric: &str) -> usize {
@@ -541,6 +578,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((station_id.to_string(), role, points));
+        }
+        async fn on_battery_soc(&self, station_id: &str, soc: f64) {
+            self.battery_socs
+                .lock()
+                .unwrap()
+                .push((station_id.to_string(), soc));
         }
     }
 
@@ -835,6 +878,33 @@ mod tests {
         assert!(tel.iter().any(|(m, v)| m == "alarm_in" && *v == 0.5));
         assert!(tel.iter().any(|(m, v)| m == "status_in" && *v == 1.5));
         assert_eq!(sink.event_count("pure_in", "offline"), 0);
+    }
+
+    /// battery 站采集成功 → on_battery_soc 收到 mapper 解码的 soc（65.5，f32 精确）；
+    /// telemetry 落库照旧（soc 点仍进 telemetry，独立通道不替代落库）；无 offline 事件。
+    #[tokio::test]
+    async fn battery_station_soc_pushed_via_dedicated_channel() {
+        let bus = Arc::new(MockBus::new());
+        // battery 站 soc 块（float32）：两寄存器 65.5 → mapper decode 65.5
+        bus.put(2, 100, f32_regs(65.5));
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![battery_conf()], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+        assert_eq!(sink.soc_of("bms"), Some(65.5), "battery 站 soc 应经 on_battery_soc 推送");
+        assert_eq!(sink.event_count("bms", "offline"), 0);
+        // telemetry 落库照旧（soc 点仍进 telemetry）
+        assert!(sink.telemetry_of("bms").iter().any(|(m, _)| m == "soc"));
+    }
+
+    /// battery 站读失败（未预置 → 读 Err）→ offline 事件一次，不推 soc（沿用旧数据语义）。
+    #[tokio::test]
+    async fn battery_station_failure_no_soc_push() {
+        let bus = Arc::new(MockBus::new()); // 未预置 → 读 Err
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![battery_conf()], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+        assert_eq!(sink.event_count("bms", "offline"), 1);
+        assert!(sink.soc_of("bms").is_none(), "失败轮不推 soc");
     }
 
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。
