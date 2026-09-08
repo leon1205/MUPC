@@ -2,6 +2,7 @@
 
 pub mod ai;
 pub mod config;
+pub mod interlock;
 pub mod logs;
 pub mod mode;
 pub mod status;

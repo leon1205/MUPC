@@ -28,6 +28,8 @@ pub enum SseEventType {
     SystemAlert { level: String, message: String },
     /// 遥测数据更新事件
     TelemetryUpdate { telemetry_type: String },
+    /// 安全联锁事件（triggered/released/ack_m1）
+    Interlock { event: String, message: String },
 }
 
 /// SSE 事件消息
@@ -141,6 +143,26 @@ impl SsePushService {
         self.tx.send(event)
     }
 
+    /// 推送安全联锁事件
+    ///
+    /// `event` 取 triggered/released/ack_m1 等子事件标识，`message` 为人类可读描述。
+    pub fn push_interlock(
+        &self,
+        event: &str,
+        message: &str,
+    ) -> Result<usize, broadcast::error::SendError<SseEvent>> {
+        let event_msg = SseEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            event_type: SseEventType::Interlock {
+                event: event.to_string(),
+                message: message.to_string(),
+            },
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            payload: serde_json::json!({ "event": event, "message": message }),
+        };
+        self.tx.send(event_msg)
+    }
+
     /// 获取当前订阅者数量
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
@@ -198,6 +220,7 @@ pub async fn sse_handler(
                     SseEventType::PredictionUpdate { .. } => "predictions",
                     SseEventType::SystemAlert { .. } => "alert",
                     SseEventType::TelemetryUpdate { .. } => "telemetry",
+                    SseEventType::Interlock { .. } => "interlock",
                 };
                 let data = serde_json::to_string(&event.payload).unwrap_or_default();
                 Ok(Event::default().event(event_name).data(data))

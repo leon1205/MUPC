@@ -691,6 +691,8 @@ pub async fn initialize_all(
         ota_manager: ota_manager.clone(),
         online_updater,
         ab_test_manager,
+        // Task 7 装配真实联锁 controller 后改为 Some(arc)
+        interlock: None,
     });
 
     // 组装 Router 并启动 HTTP 服务
@@ -702,6 +704,7 @@ pub async fn initialize_all(
         .merge(mupc_web_api::routes::status::create_router())
         .merge(mupc_web_api::routes::config::create_router())
         .merge(mupc_web_api::routes::logs::create_router())
+        .merge(mupc_web_api::routes::interlock::create_router())
         .merge(mupc_web_api::ws::create_router())
         .merge(mupc_web_api::auth::create_router())
         .with_state(app_state.clone());

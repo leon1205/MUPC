@@ -6,6 +6,9 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
 use crate::audit::AuditLogger;
 use crate::auth::SessionManager;
 use crate::routes::ai::ab_test_manager::AbTestManager;
@@ -52,6 +55,8 @@ pub struct AppState {
     pub online_updater: Arc<RwLock<OnlineUpdater>>,
     /// A/B 测试管理器
     pub ab_test_manager: Arc<AbTestManager>,
+    /// 安全联锁控制器（core-bin Task 7 注入真实实现；未注入为 None，联锁端点返回 503 语义 JSON）
+    pub interlock: Option<Arc<dyn InterlockApi>>,
 }
 
 impl AppState {
@@ -85,6 +90,54 @@ impl AppState {
             ota_manager,
             online_updater,
             ab_test_manager: Arc::new(ab_test_manager),
+            interlock: None,
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 安全联锁 Web 面接口
+// ═══════════════════════════════════════════════════════════════
+//
+// trait 与状态类型定义在 web-api（供核心路由引用），真实 controller 由
+// core-bin 装配（Task 7）后以 `Arc<dyn InterlockApi>` 注入 AppState.interlock。
+
+/// 单个联锁触发源状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterlockSourceStatus {
+    /// 触发源标识（estop/flood/fire/door）
+    pub name: String,
+    /// 是否处于触发态（去抖后有效电平）
+    pub tripped: bool,
+}
+
+/// 安全联锁总体状态（Web 展示 / SSE 快照）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterlockStatus {
+    /// 联锁功能是否启用（controller 未注入时 false）
+    pub enabled: bool,
+    /// 是否已触发锁存（latch）
+    pub latched: bool,
+    /// PCS 停机是否失败/未确认
+    pub stop_failed: bool,
+    /// 各 pcs_stop 触发源状态
+    pub sources: Vec<InterlockSourceStatus>,
+    /// 故障灯（DO2）
+    pub fault_lamp: bool,
+    /// 运行灯（DO1）
+    pub run_lamp: bool,
+}
+
+/// 安全联锁后端接口
+///
+/// 由 core-bin 装配真实联锁 controller 实现并注入 `AppState.interlock`
+/// （Task 7）。web-api 仅消费此 trait（类型擦除 `Arc<dyn InterlockApi>`）。
+#[async_trait]
+pub trait InterlockApi: Send + Sync {
+    /// 查询联锁总体状态
+    async fn status(&self) -> InterlockStatus;
+    /// 人工释放联锁：触发源已复位且保持 >= release_hold_secs 才清 latch，否则 Err
+    async fn request_release(&self) -> Result<(), String>;
+    /// M1 保护跳闸/停机人工授权重启（仅 !latch 生效），否则 Err
+    async fn ack_m1(&self) -> Result<(), String>;
 }
