@@ -4,10 +4,10 @@
 //! 轮询（口单 poller 天然串行；Rs485PortBus 内另有 per-port async Mutex 双保险，Task 3）。
 //! 站失败（任一寄存器块读 Err / mapper 语义 Failed）→ 站级 offline 隔离，不阻断同口其它站。
 //!
-//! §10.2 M-11 口调度预算：当前实现 = 到期判定（`next_due`）+ 角色优先级排序（grid/battery
-//! 先于 hvac/fire，见 [`role_priority`]）；「offline 慢站指数退避降频」为 **S3b 增强项**（登记，
-//! 本模块未落地）——BECG 1:1 接线每口单站，offline 站每轮至多一次读超时已由 early-break
-//! 钳制，风险有界；同口多从站部署时再落地退避。
+//! §10.2 M-11 口调度预算：到期判定（`next_due`）+ 角色优先级排序（grid/battery 先于
+//! hvac/fire，见 [`role_priority`]）+ **offline 慢站指数退避降频**（poll 失败后
+//! [`DueCalc::delay_station`] 把 next_due 按 `interval << min(offline_count-1, 5)` 后移，
+//! 封顶 32×interval——失败站降频不拖累同口关键站 cadence；恢复即正常 cadence）。
 //!
 //! 结果按 role 分发到 [`StationSink`]（core-bin 实现，Task 7；southd 不依赖
 //! strategy/ai-integration，只定义 trait 边界）：
@@ -56,6 +56,10 @@ pub trait StationSink: Send + Sync {
 pub struct StationPoll {
     pub station_index: usize,
 }
+
+/// M-11 退避封顶：extra = interval << min(offline_count-1, MAX_BACKOFF_SHIFT)。
+/// 5 → 封顶 32×interval（1s interval → 32s 退避上限，防永久停采）。
+const MAX_BACKOFF_SHIFT: u32 = 5;
 
 /// 角色优先级（口调度预算 §10.2：grid/battery 关键量优先于 hvac/fire；慢站降频不拖累关键站 cadence）。
 fn role_priority(r: Role) -> u8 {
@@ -123,6 +127,17 @@ impl DueCalc {
                 station_index: self.entries[i].station_index,
             })
             .collect()
+    }
+
+    /// 退避：把站 next_due 后移到 `now_ms + extra_ms`（若现 next_due 已更晚则不动）。
+    /// scheduler 在站 poll 失败后调用（offline 慢站降频，§10.2 M-11）。
+    pub fn delay_station(&mut self, station_index: usize, now_ms: u64, extra_ms: u64) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.station_index == station_index) {
+            let target = now_ms.saturating_add(extra_ms);
+            if e.next_due < target {
+                e.next_due = target;
+            }
+        }
     }
 }
 
@@ -204,15 +219,43 @@ impl SouthScheduler {
         handles
     }
 
-    /// 跑一口的一个 tick（now_ms 驱动 due → 逐到期站 poll）。
+    /// 跑一口的一个 tick（now_ms 驱动 due → 逐到期站 poll → 失败站退避）。
     async fn run_port_round(&self, port_i: usize, now_ms: u64) {
         let runner = &self.runners[port_i];
         let due = runner.calc.lock().unwrap().due_round(now_ms);
         if due.is_empty() {
             return;
         }
+        let mut failed: Vec<usize> = Vec::new();
         for poll in due {
-            self.poll_station(poll.station_index, runner.bus.clone()).await;
+            let ok = self
+                .poll_station(poll.station_index, runner.bus.clone())
+                .await;
+            if !ok {
+                failed.push(poll.station_index);
+            }
+        }
+        // M-11：失败站退避（读 state 的 offline_count 已由 handle_failure +1）。
+        // 先一次锁 state 快取失败站 (interval_ms, offline_count)，勿持 state 锁跨 calc 锁。
+        if !failed.is_empty() {
+            let stats: Vec<(usize, u64, u32)> = {
+                let st = self.state.read().unwrap();
+                failed
+                    .iter()
+                    .map(|&i| {
+                        let s = &st[i];
+                        (i, s.conf.interval_ms, s.offline_count)
+                    })
+                    .collect()
+            };
+            let mut calc = runner.calc.lock().unwrap();
+            for (idx, interval, oc) in stats {
+                let shift = oc.saturating_sub(1).min(MAX_BACKOFF_SHIFT);
+                let extra = interval.saturating_mul(1u64 << shift);
+                if extra > 0 {
+                    calc.delay_station(idx, now_ms, extra);
+                }
+            }
         }
     }
 
@@ -221,7 +264,10 @@ impl SouthScheduler {
     /// 任一块读 Err（物理层）或 mapper `PollResult::Failed`（语义层）→ 站失败（offline 记账 +
     /// 事件；§10.7 对两层失败隔离语义一致——该站本轮无有效数据）。全块 Ok 且 mapper Data
     /// → 站成功（恢复事件 + 按 role 分发）。同口串行由口 task 单 poller 保证（本方法不并发）。
-    async fn poll_station(&self, station_index: usize, bus: Option<Arc<dyn StationBus>>) {
+    ///
+    /// 返回本轮是否成功（站数据可用）。false = 失败（offline 记账 + 事件已由内部处理；
+    /// 调用方据此退避该站，§10.2 M-11）。
+    async fn poll_station(&self, station_index: usize, bus: Option<Arc<dyn StationBus>>) -> bool {
         let (station_id, role, slave, regs) = {
             let st = self.state.read().unwrap();
             let s = &st[station_index];
@@ -263,12 +309,15 @@ impl SouthScheduler {
 
         if let Some(reason) = io_error {
             self.handle_failure(station_index, &reason).await;
-            return;
+            return false;
         }
 
         // 全块读 Ok → mapper 语义判定（PollResult::Failed = 语义层失败，同 offline 处理）。
         match mapper::poll_to_result(role, &reads) {
-            PollResult::Failed(msg) => self.handle_failure(station_index, &msg).await,
+            PollResult::Failed(msg) => {
+                self.handle_failure(station_index, &msg).await;
+                false
+            }
             PollResult::Data(pkg) => {
                 self.mark_success(station_index).await;
                 if role == Role::MeterGrid {
@@ -286,6 +335,7 @@ impl SouthScheduler {
                         self.sink.on_station_telemetry(&station_id, role, pts).await;
                     }
                 }
+                true
             }
         }
     }
@@ -764,7 +814,25 @@ mod tests {
         );
     }
 
-    /// offline 事件 stale_timeout_s 窗口防刷屏：持续失败多轮只告警一次（offline_count 仍逐轮累加）。
+    /// delay_station：把 next_due 后移 now+extra；现 next_due 更晚则不动。
+    #[test]
+    fn due_calc_delay_station_backs_off() {
+        let stations = vec![hvac_conf("hvac", "ttyS1", 3, 1000)];
+        let group: Vec<(usize, &StationConf)> = stations.iter().enumerate().collect();
+        let mut calc = DueCalc::from_group(&group);
+        assert_eq!(calc.due_round(0).len(), 1); // 首轮到期，next_due 推进到 1000
+        // 退避 extra=2000 → target=0+2000；现 next_due=1000 < 2000 → 后移到 2000
+        calc.delay_station(0, 0, 2000);
+        // now=1000 不再到期（next_due=2000）
+        assert!(calc.due_round(1000).is_empty());
+        // now=2000 到期
+        assert_eq!(calc.due_round(2000).len(), 1);
+    }
+
+    /// offline 事件 stale_timeout_s 窗口防刷屏：持续失败多轮只告警一次（offline_count 仍逐轮
+    /// 累加）。注意退避语义（§10.2 M-11）：失败轮 next_due 指数后移 → tick 0/1000 失败后
+    /// 下一到期点是 3000（2000 轮被退避跳过），故 4 个 tick 实际只采 3 次 → offline_count=3
+    /// （非 4）；事件去抖独立于退避，3600s 窗口内仍只 1 次 offline。
     #[tokio::test]
     async fn offline_event_throttled_by_stale_timeout() {
         let bus = Arc::new(MockBus::new()); // 未预置 → 每次读 Err
@@ -781,11 +849,38 @@ mod tests {
             sched.tick_once(now).await;
         }
         assert_eq!(sink.event_count("hvac", "offline"), 1, "窗口内防刷屏只应告警一次");
-        // offline_count 仍逐轮累加（调度态独立于事件去抖）
+        // offline_count 逐失败轮累加（0/1000/3000 三失败轮；2000 轮退避跳过未试，调度态独立于事件去抖）
         {
             let st = sched.state.read().unwrap();
-            assert_eq!(st[0].offline_count, 4);
+            assert_eq!(st[0].offline_count, 3);
         }
+    }
+
+    /// offline 慢站降频：持续失败站 poll 次数随退避减少，同口关键站（grid）cadence 不损。
+    #[tokio::test]
+    async fn offline_station_backs_off_reducing_poll_frequency() {
+        let bus = Arc::new(MockBus::new()); // 未预置 → 恒 Err
+        put_grid(&bus, 1); // grid 完整预置（成功路径，验证其 cadence 不因同口 hvac 退避受损）
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(
+            vec![
+                grid_conf("grid", "ttyS1", 1, 1000),
+                hvac_conf("hvac", "ttyS1", 3, 1000),
+            ],
+            bus.clone(),
+            sink.clone(),
+        );
+        // grid 正常每轮采；hvac 恒失败退避（offline_count=1 时 extra=1000）
+        sched.tick_once(0).await; // 两站到期；hvac 失败 oc=1 → extra=1000 → next_due=1000
+        sched.tick_once(1000).await; // hvac 到期再失败 oc=2 → extra=2000 → next_due=3000
+        sched.tick_once(2000).await; // hvac next_due=3000 未到期 → 不试
+        sched.tick_once(3000).await; // hvac 到期再失败 oc=3 → extra=4000 → next_due=7000
+        // grid：0/1000/2000/3000 全采（4 次）；hvac：0/1000/3000 失败试 3 次（2000 被退避跳过）
+        assert_eq!(bus.call_count(1, 0), 4, "grid 不应被 hvac 退避拖累");
+        assert_eq!(bus.call_count(3, 100), 3, "hvac 2000 轮应被退避跳过");
+        // 事件：stale_timeout_s=5（build 默认 cfg(stations,5)），3000-0=3s<5s → 一次 offline
+        assert_eq!(sink.event_count("hvac", "offline"), 1);
+        assert_eq!(sink.event_count("hvac", "online"), 0);
     }
 
     /// meter_grid 正常 → on_grid_package 收 pkg 且含分相（phase.is_some）与顶层量。
