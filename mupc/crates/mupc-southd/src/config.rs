@@ -81,10 +81,12 @@ impl Default for SouthStationsConfig {
 }
 
 impl SouthStationsConfig {
-    /// 段内校验（跨段/互斥在 core-bin validate——Task 6）：port 非空、slave 1..=247、
-    /// interval_ms>0、id 唯一非空、同 id 不重复 role；meter_grid interval_ms < DATA_FRESHNESS_MS。
+    /// 段内校验（跨段/互斥在 core-bin validate——Task 6）：id 唯一非空；
+    /// meter_grid 至多一站（AiIntegrator 单写方约束，grid_station 取唯一）；
+    /// port 非空；slave 1..=247；interval_ms>0；meter_grid interval_ms < DATA_FRESHNESS_MS。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: Vec<&str> = Vec::new();
+        let mut grid_seen = false;
         for s in &self.stations {
             if s.id.trim().is_empty() {
                 return Err("south_stations: station id 为空".into());
@@ -93,6 +95,12 @@ impl SouthStationsConfig {
                 return Err(format!("south_stations: 站 id 重复: {}", s.id));
             }
             ids.push(s.id.as_str());
+            if s.role == Role::MeterGrid {
+                if grid_seen {
+                    return Err("south_stations: 至多一个 meter_grid 站（AiIntegrator 单写方约束）".into());
+                }
+                grid_seen = true;
+            }
             if s.port.trim().is_empty() {
                 return Err(format!("south_stations: 站 {} port 为空", s.id));
             }
@@ -259,6 +267,73 @@ south_stations:
 "#;
         let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_multiple_meter_grid() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: mg1, role: meter_grid, port: t1, slave: 1, interval_ms: 1000 }
+    - { id: mg2, role: meter_grid, port: t2, slave: 2, interval_ms: 1000 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(
+            w.south_stations.validate().is_err(),
+            "两个 meter_grid 站应被拒绝（AiIntegrator 单写方）"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_id() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: "", role: battery, port: t1, slave: 1 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_port() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: "", slave: 1 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(w.south_stations.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_max_slave() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - { id: a, role: battery, port: t1, slave: 247 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        assert!(
+            w.south_stations.validate().is_ok(),
+            "slave=247 为合法上界，应通过"
+        );
+    }
+
+    #[test]
+    fn validate_meter_grid_interval_boundary() {
+        // 钉死 >= 边界语义：4999(<5000) 合法，5000(==DATA_FRESHNESS_MS) 拒绝
+        for (iv, ok) in [(4999u64, true), (5000u64, false)] {
+            let yaml = format!(
+                "south_stations:\n  stations:\n    - {{ id: mg, role: meter_grid, port: t1, slave: 1, interval_ms: {iv} }}"
+            );
+            let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
+            assert_eq!(
+                w.south_stations.validate().is_ok(),
+                ok,
+                "meter_grid interval_ms={iv} 期望 ok={ok}"
+            );
+        }
     }
 
     #[test]
