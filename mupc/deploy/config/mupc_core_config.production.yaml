@@ -112,6 +112,9 @@ master_meter:
 #   poll_ms: 1000
 #   stale_timeout_s: 5
 #   stations:
+#   # 每站可选字段：baud_rate（口波特率，同口多从站须一致；缺省 9600）、
+#   #   regs 每块可选 func: holding(FC03 默认) / input(FC04，厂方点表用输入寄存器时)。
+#   # ⚠️ 同口多从站 baud_rate 必须一致（物理共享口波特率）；改 baud 前确认从站与主机侧。
 #     # 关口/台区总表 = 策略 phase 真源（替代 master_meter 段；interval_ms 须 < 5000）
 #     # ⚠️ meter_grid 的 regs 必填：块名是语义契约（mapper 按名查找，命名不同即整周期失败），
 #     #    相量块 p/q/pf/u/i 各须 count:6（3 相×2 寄存器，三相连续），p_total 可选 count:2。
@@ -124,6 +127,7 @@ master_meter:
 #     - id: grid_meter
 #       role: meter_grid
 #       port: "/dev/ttyS4"          # ⚠️ 须与 intercore.modbus_rtu 串口（PCS ttyS0）不同
+#       baud_rate: 9600             # 现场按总表实际填（迁移继承 legacy；同口多从站须一致）
 #       protocol: modbus
 #       slave: 3                    # 现场按总表实际填
 #       interval_ms: 1000           # 须 < 5000（策略 phase 周期约束）
