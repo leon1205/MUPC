@@ -21,6 +21,21 @@
 //! 职责划分：本机 tick 直接更新 `InterlockState` 的源/安全记时字段，命令
 //! （Trigger/Release）返回给装配执行 transport/DB 动作——状态与动作分离，测试只断言
 //! `s` + `Action`。
+//!
+//! ── Runner / 装配层（Task 7）──
+//! 文件后半为 `InterlockController`：把纯逻辑接到真实世界。语义/取舍见其模块 doc 与
+//! 各方法注释（配置层 vs 状态机的差异、name→source 启发式、fail-safe 处理均记录在此）。
+
+use async_trait::async_trait;
+use mupc_intercore::IntercoreClient;
+use mupc_io::{DigitalIn, DigitalOut, IoError, SysfsIn, SysfsOut};
+use mupc_storage::{EventRepository, SystemEvent};
+use mupc_web_api::app_state::{InterlockApi, InterlockSourceStatus, InterlockStatus};
+use mupc_web_api::SsePushService;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+use crate::core_config::IoConfig;
 
 /// 数字输入触发源。门禁仅产生事件，不计入 pcs_stop 源集合。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,6 +229,769 @@ impl StateMachine {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Runner / 装配层 —— 安全联锁控制器（Task 7，S2）
+// ═══════════════════════════════════════════════════════════════════════════
+// 把上方纯逻辑状态机接到真实世界：DI(active_low + per-DI 去抖) → tick → Action →
+// InterlockPort(停机/锁存/重启授权) + DO(运行/故障灯) + DB 事件(events) + SSE。
+//
+// 设计取舍（记录依据/局限，供 spec/quality review 裁决）：
+// 1) name→source 启发式：io schema `DiConf` 只有 action 字段（pcs_stop/event），没有
+//    Estop/Flood/Fire 三源区分（Task4 schema 已双审，不新增字段）。controller 按 DI name
+//    含词启发式映射（见 `classify_source`），其它 pcs_stop 一律归 Estop——局限：仅能按
+//    通道命名约定区分水浸/消防，模板（§12.4 di1=急停/di2=水浸/di3=消防）天然满足。
+// 2) pcs_online := `port.last_run_state().is_some()`（Task1 无独立在线查询；有心跳值=在线）。
+// 3) DO 顺序约定：do_out[0]=运行灯、do_out[1]=故障灯（§12.4 模板即此序；配置无 role 字段）。
+// 4) request_release **同步执行**（前置校验 + 清 latch）：HTTP 操作员点按钮即时生效，比等
+//    runner 下一帧直觉；状态机的 web_release_pending 沿由纯逻辑单测覆盖，runner 不引入新沿
+//    （状态机 auto_release=false 路径与同步释放等价，且 stop_failed 人工放行有审计事件）。
+// 5) GPIO init 失败：不 panic、不静默、绝无「无 latch 运行」——单个 DI/DO 打开失败用
+//    fail-safe stub 占位（pcs_stop DI → 恒读失败 → 按触发处理；DO → no-op），且任一 pcs_stop
+//    DI 失败即把 InterlockState 预置 latched=true + stop_failed=true（视触发+停机未确认），
+//    启动记 gpio_init_failed 事件。局限：失败的 DI 恒触发 → 只能重启或修好硬件后 reboot 清。
+// 6) GPIO 读失败按触发处理（§12.3）；每个失败源首次记一次事件防刷屏（连续失败只报一次）。
+// 7) 停机确认：stop() Ok 后轮询 `last_run_state` 转 Some(0)（≤ stop_confirm_ms），超时/写失败
+//    → state.stop_failed=true + tracing::error + 事件；之后 ≥ stop_confirm_ms 退避重试直到转 0
+//    （延迟确认成功清除 stop_failed）。tcp 仿真通道 `last_run_state` 恒 None 无法确认 → 会置
+//    stop_failed（fail-safe 保守；仿真不用作生产联锁）。
+// 8) DB 读回：启动时 latest_by_type("interlock.triggered") 比 ("interlock.cleared")
+//    的 timestamp——最新 triggered 且无后续 cleared → restore latched（置 stop_failed=true
+//    表示停机未确认，post_stop_maintenance 会补发停机并确认）。
+//
+// 测试性取舍：GPIO 用 `Box<dyn DigitalIn/Out>` 注入（mupc_io::MockIn/Out 或本地 stub）；
+// transport 用薄 trait `InterlockPort`（Arc<IntercoreClient> 真机转发，测试注入 fake 记调用）；
+// DB/SSE 用真实 trait 对象 `Arc<dyn EventRepository>` / `Arc<SsePushService>`（测试注入内存 fake）。
+
+/// 触发动作映射（与 `DiConf.action` 对齐）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiAction {
+    /// pcs_stop：急停/水浸/消防（触发 latch）
+    PcsStop,
+    /// event：门禁等仅上报事件
+    Event,
+}
+
+fn action_of(s: &str) -> DiAction {
+    if s == "event" {
+        DiAction::Event
+    } else {
+        DiAction::PcsStop
+    }
+}
+
+/// name→source 启发式（取舍 1）。event → Door（仅事件）；pcs_stop 按 name 含词归类，
+/// 无法识别的一律归 Estop（急停语义最保守）。局限：依赖通道命名约定，见模块 doc。
+fn classify_source(name: &str, action: &str) -> InterlockSource {
+    if action == "event" {
+        return InterlockSource::Door;
+    }
+    let n = name.to_lowercase();
+    if n.contains("水浸") || n.contains("淹") || n.contains("flood") {
+        InterlockSource::Flood
+    } else if n.contains("消防") || n.contains("火警") || n.contains("烟") || n.contains("fire")
+    {
+        InterlockSource::Fire
+    } else {
+        InterlockSource::Estop
+    }
+}
+
+/// 源 → web 展示 token（estop/flood/fire/door）
+fn source_token(s: InterlockSource) -> &'static str {
+    match s {
+        InterlockSource::Estop => "estop",
+        InterlockSource::Flood => "flood",
+        InterlockSource::Fire => "fire",
+        InterlockSource::Door => "door",
+    }
+}
+
+/// 当前 epoch 秒（状态机 tick 的 now）
+fn now_secs() -> u64 {
+    chrono::Utc::now().timestamp().max(0) as u64
+}
+
+/// runner 依赖薄 trait（可测）：由装配方把 `Arc<IntercoreClient>` 适配进来。
+/// 真机实现见 `impl InterlockPort for Arc<IntercoreClient>`；测试注入 fake 记调用序列。
+#[async_trait]
+pub trait InterlockPort: Send + Sync {
+    /// PCS 停机（Modbus 写 REG_START_STOP=0；Tcp no-op）
+    async fn stop(&self) -> Result<(), String>;
+    /// 置/清联锁 latch（C-1 唯一入口；transport 运行期挡启动）
+    async fn restore_latched(&self, latched: bool) -> Result<(), String>;
+    /// 最新解码 RUN_STATE(1013)；离线 None
+    fn last_run_state(&self) -> Option<u16>;
+    /// M1 保护跳闸/停机人工授权重启（单次）；latch 期间 Err
+    async fn authorize_restart(&self) -> Result<(), String>;
+}
+
+#[async_trait]
+impl InterlockPort for Arc<IntercoreClient> {
+    async fn stop(&self) -> Result<(), String> {
+        (**self).stop().await
+    }
+    async fn restore_latched(&self, latched: bool) -> Result<(), String> {
+        (**self).restore_interlock_latched(latched).await
+    }
+    fn last_run_state(&self) -> Option<u16> {
+        (**self).last_run_state()
+    }
+    async fn authorize_restart(&self) -> Result<(), String> {
+        (**self).authorize_restart().await
+    }
+}
+
+/// fail-safe：DI GPIO 打开失败/运行时读失败用的占位——恒返回 Err → runner 恒按触发处理。
+/// 使「初始化失败」也绝不静默落入无 latch 运行。
+struct DiReadFailStub;
+impl DigitalIn for DiReadFailStub {
+    fn read_level(&self) -> Result<bool, IoError> {
+        Err(IoError::Io(
+            "interlock.di(fail-safe)".into(),
+            "DI GPIO 不可用，恒按触发处理".into(),
+        ))
+    }
+}
+
+/// fail-safe：DO GPIO 打开失败占位——no-op（灯不可点亮属降级，非安全链；构造时已记事件）。
+struct DoNoopStub;
+impl DigitalOut for DoNoopStub {
+    fn set_level(&self, _high: bool) -> Result<(), IoError> {
+        Ok(())
+    }
+}
+
+/// runner 帧内可变运行数据（跨 tick 保持；与共享 `InterlockState` 分离，避免与 web 读竞争）
+struct DiRuntime {
+    /// 各 DI 连续有效计数（per-DI 去抖，§12.3）
+    debounce: Vec<u32>,
+    /// 上拍门禁/event DI 生效态（沿判定：上拍低→本拍高 = 触发事件）
+    door_prev: Vec<bool>,
+    /// 该 DI 是否已报过「读失败」事件（防每帧刷屏）
+    read_fail_logged: Vec<bool>,
+    /// 上次停机尝试时刻（≥ stop_confirm_ms 退避重试）
+    last_stop_attempt: Option<Instant>,
+}
+
+/// 安全联锁控制器（runner + web 后端 API 实现）
+pub struct InterlockController {
+    cfg: IoConfig,
+    /// 共享联锁状态（runner 写 / web 读 / dispatch 抑制读）
+    state: Arc<RwLock<InterlockState>>,
+    /// 纯逻辑状态机（prev 边沿跨 tick；`request_release` 同步清 latch 时会重置以防旧沿残留）
+    sm: Mutex<StateMachine>,
+    /// 各 DI（与 cfg.di 对齐；含 fail-safe stub）
+    ins: Vec<Box<dyn DigitalIn>>,
+    /// 各 DO（与 cfg.do_out 对齐；含 no-op stub）
+    outs: Vec<Box<dyn DigitalOut>>,
+    /// PCS 停机/锁存/重启授权（真机 Arc<IntercoreClient>，测试 fake）
+    port: Box<dyn InterlockPort>,
+    /// 事件落库（DB；测试注入内存 fake）
+    events: Arc<dyn EventRepository>,
+    /// SSE 推送（联锁 major 事件）
+    sse: Arc<SsePushService>,
+    /// 帧内可变数据（去抖/门禁沿/退避）
+    runtime: Mutex<DiRuntime>,
+    /// 构造期 GPIO 初始化失败待上报事件（run_loop 启动时 flush）
+    pending_init_events: Mutex<Vec<(String, String)>>,
+}
+
+impl InterlockController {
+    /// 生产构造：逐个 sysfs 打开 DI/DO；任一 pcs_stop DI 打开失败 → fail-safe（取舍 5）。
+    pub fn new(
+        cfg: IoConfig,
+        port: Box<dyn InterlockPort>,
+        events: Arc<dyn EventRepository>,
+        sse: Arc<SsePushService>,
+    ) -> Self {
+        let mut ins: Vec<Box<dyn DigitalIn>> = Vec::with_capacity(cfg.di.len());
+        let mut outs: Vec<Box<dyn DigitalOut>> = Vec::with_capacity(cfg.do_out.len());
+        let mut pending: Vec<(String, String)> = Vec::new();
+        let mut any_pcs_failed = false;
+
+        for d in &cfg.di {
+            match SysfsIn::new(d.gpio) {
+                Ok(g) => ins.push(Box::new(g) as Box<dyn DigitalIn>),
+                Err(e) => {
+                    tracing::error!(
+                        "DI gpio{} ({}) sysfs 初始化失败: {} —— fail-safe：该源恒按触发处理",
+                        d.gpio,
+                        d.name,
+                        e
+                    );
+                    pending.push((
+                        d.name.clone(),
+                        format!("DI gpio{} ({}) sysfs 初始化失败: {}", d.gpio, d.name, e),
+                    ));
+                    if d.action == "pcs_stop" {
+                        any_pcs_failed = true;
+                    }
+                    ins.push(Box::new(DiReadFailStub) as Box<dyn DigitalIn>);
+                }
+            }
+        }
+        for do_ in &cfg.do_out {
+            match SysfsOut::new(do_.gpio) {
+                Ok(g) => outs.push(Box::new(g) as Box<dyn DigitalOut>),
+                Err(e) => {
+                    tracing::error!(
+                        "DO gpio{} ({}) sysfs 初始化失败: {} —— 该灯降级不可点亮",
+                        do_.gpio,
+                        do_.name,
+                        e
+                    );
+                    pending.push((
+                        do_.name.clone(),
+                        format!("DO gpio{} ({}) sysfs 初始化失败: {}", do_.gpio, do_.name, e),
+                    ));
+                    outs.push(Box::new(DoNoopStub) as Box<dyn DigitalOut>);
+                }
+            }
+        }
+
+        let ctl = Self::new_with_io(cfg, ins, outs, port, events, sse);
+        if any_pcs_failed {
+            // 首 tick 前即呈现锁存（无人值守也无未联锁运行的窗口）
+            let mut st = ctl.state.write().unwrap();
+            st.latched = true;
+            st.stop_failed = true;
+            drop(st);
+            tracing::error!("存在 pcs_stop DI 初始化失败 —— 联锁已预置触发锁存（fail-safe）");
+        }
+        *ctl.pending_init_events.lock().unwrap() = pending;
+        ctl
+    }
+
+    /// 可测构造：外部直接注入 ins/outs/port/events/sse（不触碰 sysfs）。
+    /// 仅供本模块测试与 `new` 内部使用。
+    fn new_with_io(
+        cfg: IoConfig,
+        ins: Vec<Box<dyn DigitalIn>>,
+        outs: Vec<Box<dyn DigitalOut>>,
+        port: Box<dyn InterlockPort>,
+        events: Arc<dyn EventRepository>,
+        sse: Arc<SsePushService>,
+    ) -> Self {
+        let n = cfg.di.len();
+        let do_n = cfg.do_out.len();
+        let auto_release = cfg.auto_release;
+        let release_hold_secs = cfg.release_hold_secs;
+        if do_n < 2 {
+            tracing::warn!(
+                "io.do_out 仅 {} 个 DO（<2）—— 依赖顺序 do_out[0]=运行灯/do_out[1]=故障灯；缺故障灯则安全信号降级",
+                do_n
+            );
+        }
+        tracing::info!(
+            "安全联锁控制器就绪：DI={} DO={} poll_ms={} auto_release={} release_hold_secs={} stop_confirm_ms={}",
+            n, do_n, cfg.poll_ms, cfg.auto_release, cfg.release_hold_secs, cfg.stop_confirm_ms
+        );
+        Self {
+            cfg,
+            state: Arc::new(RwLock::new(InterlockState::default())),
+            sm: Mutex::new(StateMachine::new(auto_release, release_hold_secs)),
+            ins,
+            outs,
+            port,
+            events,
+            sse,
+            runtime: Mutex::new(DiRuntime {
+                debounce: vec![0; n],
+                door_prev: vec![false; n],
+                read_fail_logged: vec![false; n],
+                last_stop_attempt: None,
+            }),
+            pending_init_events: Mutex::new(Vec::new()),
+        }
+    }
+
+    // ── web/dispatch 共享查询 ──
+
+    /// dispatch 前 latch 抑制查询（读共享 state，同步非阻塞）
+    pub fn is_latched_now(&self) -> bool {
+        self.state.read().unwrap().latched
+    }
+
+    // ── run_loop ──
+
+    /// 常驻轮询循环（poll_ms）。启动时 flush 构造期 GPIO 失败事件。
+    pub async fn run_loop(self: Arc<Self>) {
+        self.flush_init_events().await;
+        let poll = Duration::from_millis(self.cfg.poll_ms.max(1));
+        loop {
+            let started = Instant::now();
+            self.tick_frame().await;
+            let remain = poll.saturating_sub(started.elapsed());
+            if !remain.is_zero() {
+                tokio::time::sleep(remain).await;
+            }
+        }
+    }
+
+    async fn flush_init_events(&self) {
+        let evts = std::mem::take(&mut *self.pending_init_events.lock().unwrap());
+        for (src, msg) in evts {
+            self.record_event("interlock.gpio_init_failed", &src, &msg)
+                .await;
+        }
+    }
+
+    /// 单帧：读 DI → 去抖 → tick → DO → 事件/动作/停机维护。
+    /// 锁序：仅 sync 临界区持 std 锁（tick/去抖），跨 `.await` 一律不持锁。
+    async fn tick_frame(&self) {
+        let n = self.cfg.di.len();
+
+        // ── 1. 读 DI：raw 依 active_low 反相得有效态；读失败=触发（fail-safe，取舍 6）──
+        let mut active = Vec::with_capacity(n);
+        let mut read_fail = vec![false; n];
+        for (i, di) in self.cfg.di.iter().enumerate() {
+            let tr = match self.ins[i].read_level() {
+                Ok(high) => high != di.active_low,
+                Err(e) => {
+                    read_fail[i] = true;
+                    tracing::error!("DI {} 读失败: {}", di.name, e);
+                    true
+                }
+            };
+            active.push(tr);
+        }
+
+        // ── 2. per-DI 去抖 + 门禁沿/读失败事件采集（sync，勿持锁跨 await）──
+        let (tripped, trigger_names, door_events, fail_events) = {
+            let mut rt = self.runtime.lock().unwrap();
+            let mut tripped: Vec<(InterlockSource, bool)> = Vec::with_capacity(n);
+            let mut trigger_names: Vec<String> = Vec::new();
+            let mut door_events: Vec<String> = Vec::new();
+            let mut fail_events: Vec<(String, String)> = Vec::new();
+            for i in 0..n {
+                let di = &self.cfg.di[i];
+                if active[i] {
+                    rt.debounce[i] = rt.debounce[i].saturating_add(1);
+                } else {
+                    rt.debounce[i] = 0;
+                }
+                let tr = active[i] && rt.debounce[i] >= di.debounce;
+                if read_fail[i] && !rt.read_fail_logged[i] {
+                    rt.read_fail_logged[i] = true;
+                    fail_events.push((
+                        di.name.clone(),
+                        format!(
+                            "DI {} gpio{} 读失败，按触发处理（fail-safe）",
+                            di.name, di.gpio
+                        ),
+                    ));
+                }
+                if action_of(&di.action) == DiAction::Event {
+                    if tr && !rt.door_prev[i] {
+                        door_events.push(format!("通道 {} 触发", di.name));
+                    } else if !tr && rt.door_prev[i] {
+                        door_events.push(format!("通道 {} 复位", di.name));
+                    }
+                    rt.door_prev[i] = tr;
+                } else if tr {
+                    trigger_names.push(di.name.clone());
+                }
+                tripped.push((classify_source(&di.name, &di.action), tr));
+            }
+            (tripped, trigger_names, door_events, fail_events)
+        };
+
+        // ── 3. run_state / 在线（取舍 2：pcs_online = last_run_state().is_some()）──
+        let run_state = self.port.last_run_state();
+        let pcs_online = run_state.is_some();
+        let run_state_ok = matches!(run_state, Some(1..=3));
+
+        // ── 4. tick（纯 sync，持两锁短临界）──
+        let (action, run_lamp, fault_lamp) = {
+            let mut st = self.state.write().unwrap();
+            let mut m = self.sm.lock().unwrap();
+            m.tick(
+                &mut st,
+                &tripped,
+                false,
+                run_state_ok,
+                pcs_online,
+                now_secs(),
+            )
+        };
+
+        // ── 5. 写 DO（取舍 3：do_out[0]=运行灯 / [1]=故障灯）；DO 非安全链，写失败仅记录 ──
+        self.drive_lamps(run_lamp, fault_lamp);
+
+        // ── 6. 事件落库/SSE（async；此刻不持任何锁）──
+        for msg in door_events {
+            self.record_event("interlock.di", "interlock", &msg).await;
+        }
+        for (src, msg) in fail_events {
+            self.record_event("interlock.di_read_failed", &src, &msg)
+                .await;
+        }
+
+        // ── 7. Action 副作用 ──
+        match action {
+            Action::TriggerLatch => self.on_trigger(&trigger_names).await,
+            Action::ReleaseLatch => self.on_auto_release().await,
+            Action::None => {}
+        }
+
+        // ── 8. 停机维护：stop_failed 重试 + DB 读回 latch 时对仍在运行的 PCS 补发停机 ──
+        self.post_stop_maintenance().await;
+    }
+
+    /// 写运行/故障灯（目标逻辑电平 → active_high 换算物理电平）
+    fn drive_lamps(&self, run_lamp: bool, fault_lamp: bool) {
+        for (i, out) in self.outs.iter().enumerate() {
+            let lit = match i {
+                0 => Some(run_lamp),
+                1 => Some(fault_lamp),
+                _ => None,
+            };
+            let Some(lit) = lit else { continue };
+            let high = if self.cfg.do_out[i].active_high {
+                lit
+            } else {
+                !lit
+            };
+            if let Err(e) = out.set_level(high) {
+                tracing::error!(
+                    "DO {} gpio{} 写失败: {}（灯驱动降级）",
+                    self.cfg.do_out[i].name,
+                    self.cfg.do_out[i].gpio,
+                    e
+                );
+            }
+        }
+    }
+
+    /// 触发沿副作用：restore(true) → 停机+确认 → 事件/SSE。
+    /// 状态机已在 tick 中把 state.latched=true。
+    async fn on_trigger(&self, trigger_names: &[String]) {
+        if let Err(e) = self.port.restore_latched(true).await {
+            tracing::warn!(
+                "联锁锁存写 transport 失败: {}（本地 latch 仍生效，dispatch 由 runner 抑制）",
+                e
+            );
+        }
+        let summary = if trigger_names.is_empty() {
+            "interlock".to_string()
+        } else {
+            trigger_names.join(",")
+        };
+        let msg = format!("联锁触发（源：{}），下发 PCS 停机", summary);
+        self.record_event("interlock.triggered", &summary, &msg)
+            .await;
+        let _ = self.sse.push_interlock("triggered", &msg);
+        self.stop_and_confirm().await;
+    }
+
+    /// 状态机自动释放（auto_release && 停机已确认 && 源复位 && hold 满）：同步 transport latch。
+    async fn on_auto_release(&self) {
+        if let Err(e) = self.port.restore_latched(false).await {
+            tracing::warn!(
+                "联锁释放写 transport 失败: {}（本地已释放，需人工确认 transport 状态）",
+                e
+            );
+        }
+        let msg = "联锁自动释放（触发源已复位且保持期满，停机已确认）";
+        self.record_event("interlock.cleared", "interlock", msg)
+            .await;
+        let _ = self.sse.push_interlock("cleared", msg);
+    }
+
+    /// 停机 + 确认（取舍 7）。末尾重置退避计时，避免同一帧内触发+维护重复补发。
+    async fn stop_and_confirm(&self) {
+        let confirm_ms = self.cfg.stop_confirm_ms;
+        match self.port.stop().await {
+            Err(e) => self.mark_stop_failed(&format!("停机指令失败: {e}")).await,
+            Ok(()) => {
+                let deadline = Instant::now() + Duration::from_millis(confirm_ms);
+                let mut confirmed = self.port.last_run_state() == Some(0);
+                while !confirmed && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(self.cfg.poll_ms.clamp(1, 200))).await;
+                    if self.port.last_run_state() == Some(0) {
+                        confirmed = true;
+                    }
+                }
+                if confirmed {
+                    self.clear_stop_failed_once("PCS 停机已确认（RUN_STATE=0）")
+                        .await;
+                } else {
+                    self.mark_stop_failed(&format!(
+                        "停机确认超时(>={}ms) RUN_STATE 未转 0",
+                        confirm_ms
+                    ))
+                    .await;
+                }
+            }
+        }
+        self.runtime.lock().unwrap().last_stop_attempt = Some(Instant::now());
+    }
+
+    /// 置 stop_failed（幂等：仅在首次 false→true 记事件/SSE/error）
+    async fn mark_stop_failed(&self, reason: &str) {
+        let was_new = {
+            let mut st = self.state.write().unwrap();
+            let new = !st.stop_failed;
+            st.stop_failed = true;
+            new
+        };
+        if was_new {
+            tracing::error!("联锁：PCS 停机确认失败 —— {}", reason);
+            let msg = format!("PCS 停机失败/未确认：{reason}（自动释放被禁止，须人工确认放行）");
+            self.record_event("interlock.stop_failed", "interlock", &msg)
+                .await;
+            let _ = self.sse.push_interlock("stop_failed", &msg);
+        }
+    }
+
+    /// 停机延迟确认成功 → 清 stop_failed（幂等；成功后由状态机按其 auto 逻辑放行自动释放）
+    async fn clear_stop_failed_once(&self, reason: &str) {
+        let was_set = {
+            let mut st = self.state.write().unwrap();
+            let was = st.stop_failed;
+            st.stop_failed = false;
+            was
+        };
+        if was_set {
+            tracing::info!("联锁：{}", reason);
+            self.record_event("interlock.stopped", "interlock", reason)
+                .await;
+        }
+    }
+
+    /// 周期停机维护：latch 未确认停机时 ≥stop_confirm_ms 退避补发停机（含 DB 读回 latch）。
+    async fn post_stop_maintenance(&self) {
+        if !self.state.read().unwrap().latched {
+            return;
+        }
+        let run = self.port.last_run_state();
+        if run == Some(0) {
+            // PCS 已确认停机：若有残留 stop_failed（曾超时后来转 0）→ 清除
+            self.clear_stop_failed_once("PCS 已确认停机，清除此前停机失败标记")
+                .await;
+            return;
+        }
+        // 未确认（离线 None 或仍在 1|2|3）→ 距上次尝试 ≥ stop_confirm_ms 再补发
+        let due = {
+            let rt = self.runtime.lock().unwrap();
+            match rt.last_stop_attempt {
+                None => true,
+                Some(t) => t.elapsed() >= Duration::from_millis(self.cfg.stop_confirm_ms),
+            }
+        };
+        if due {
+            self.stop_and_confirm().await;
+        }
+    }
+
+    // ── DB 事件辅助 ──
+
+    async fn record_event(&self, event_type: &str, source: &str, message: &str) {
+        let ev = SystemEvent {
+            id: None,
+            timestamp: chrono::Utc::now(),
+            event_type: event_type.to_string(),
+            source: source.to_string(),
+            message: message.to_string(),
+        };
+        if let Err(e) = self.events.insert(&ev).await {
+            tracing::warn!("联锁事件落库失败 event_type={}: {}", event_type, e);
+        }
+    }
+
+    // ── Step 5: DB 读回（启动 restore）──
+
+    /// 启动时按 DB 最近 triggered/cleared 恢复 latch。
+    /// 最新 triggered 无后续 cleared → 恢复 latched（停机未确认态）+ restore_latched(true)。
+    /// 否则归一化 restore_latched(false)（transport 重启后 memory latch 清空）。
+    pub async fn restore_from_db(&self) {
+        let triggered = self
+            .events
+            .latest_by_type("interlock.triggered")
+            .await
+            .unwrap_or(None);
+        let cleared = self
+            .events
+            .latest_by_type("interlock.cleared")
+            .await
+            .unwrap_or(None);
+        let latched = match (&triggered, &cleared) {
+            (Some(t), Some(c)) => t.timestamp > c.timestamp,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if latched {
+            {
+                let mut st = self.state.write().unwrap();
+                st.latched = true;
+                st.stop_failed = true; // 崩溃恢复，停机未确认（fail-safe；后续补发停机并确认）
+                st.active_pcs_stop_sources = 0;
+                st.source_safe_since = None;
+                st.last_fault_lamp_reason = FaultReason::Interlock;
+            }
+            if let Err(e) = self.port.restore_latched(true).await {
+                tracing::error!("联锁 DB 读回恢复 latch：restore(true) 失败: {}", e);
+            }
+            let msg = "启动 DB 读回：检测到联锁触发且无后续释放，恢复锁存（fail-safe）";
+            tracing::warn!("{}", msg);
+            self.record_event("interlock.restored", "interlock", msg)
+                .await;
+        } else {
+            if let Err(e) = self.port.restore_latched(false).await {
+                tracing::warn!("联锁 DB 读回归一化：restore(false) 失败: {}", e);
+            }
+            tracing::info!("启动 DB 读回：无待恢复的联锁锁存");
+        }
+    }
+}
+
+// ── InterlockApi impl（Step 6）──
+
+impl InterlockController {
+    /// web 各触发源状态：按 cfg.di 顺序取 distinct source token，tripped = 该源任一通道实时触发。
+    fn status_sources(&self) -> Vec<InterlockSourceStatus> {
+        let mut out: Vec<(&'static str, bool)> = Vec::new();
+        for (i, di) in self.cfg.di.iter().enumerate() {
+            let tok = source_token(classify_source(&di.name, &di.action));
+            let tr = live_active_channel(&self.ins, i, di.active_low);
+            if let Some(entry) = out.iter_mut().find(|(t, _)| *t == tok) {
+                entry.1 |= tr;
+            } else {
+                out.push((tok, tr));
+            }
+        }
+        out.into_iter()
+            .map(|(name, tripped)| InterlockSourceStatus {
+                name: name.to_string(),
+                tripped,
+            })
+            .collect()
+    }
+
+    /// 手动释放（Step 6）：前置（全部 pcs_stop 源复位 + 保持期满）满足才清 latch；
+    /// **同步执行**（取舍 4）——transport 先释放成功再清本地，防状态分裂。stop_failed 放行记审计。
+    async fn do_request_release(&self) -> Result<(), String> {
+        let now = now_secs();
+        // 前置：当前状态快照
+        let latched = self.state.read().unwrap().latched;
+        if !latched {
+            return Ok(());
+        }
+        // 1) 任一 pcs_stop 源仍触发 → 拒绝
+        for (i, di) in self.cfg.di.iter().enumerate() {
+            if action_of(&di.action) == DiAction::PcsStop
+                && live_active_channel(&self.ins, i, di.active_low)
+            {
+                return Err(format!("触发源 {} 未复位，不能释放联锁", di.name));
+            }
+        }
+        // 2) 保持期满校验（release_hold_secs>0 时；source_safe_since 由 runner tick 维护）
+        if self.cfg.release_hold_secs > 0 {
+            let (since, latched_again) = {
+                let st = self.state.read().unwrap();
+                (st.source_safe_since, st.latched)
+            };
+            if !latched_again {
+                return Ok(());
+            }
+            match since {
+                None => return Err("触发源未完全复位，不能释放联锁".to_string()),
+                Some(t0) => {
+                    if now.saturating_sub(t0) < self.cfg.release_hold_secs {
+                        return Err("触发源复位保持时长不足，不能释放联锁".to_string());
+                    }
+                }
+            }
+        }
+        // 3) transport 先释放（成功才清本地，防状态分裂）
+        self.port
+            .restore_latched(false)
+            .await
+            .map_err(|e| format!("释放联锁失败: {}", e))?;
+        // 4) 清本地 + 审计（stop_failed 人工放行留痕）
+        let had_stop_failed = {
+            let mut st = self.state.write().unwrap();
+            let was = st.stop_failed;
+            st.latched = false;
+            st.stop_failed = false;
+            st.source_safe_since = None;
+            st.last_fault_lamp_reason = FaultReason::None;
+            was
+        };
+        // 5) 重置状态机边沿（防旧 prev 使下次同源触发不产生新沿）
+        *self.sm.lock().unwrap() =
+            StateMachine::new(self.cfg.auto_release, self.cfg.release_hold_secs);
+        let msg = if had_stop_failed {
+            "人工放行联锁（停机未确认 override，PCS 运行态须人工确认后重启）"
+        } else {
+            "人工释放联锁（触发源已复位且保持期满）"
+        };
+        self.record_event("interlock.cleared", "interlock", msg)
+            .await;
+        let _ = self.sse.push_interlock("cleared", msg);
+        Ok(())
+    }
+}
+
+/// 读第 i 个 DI 实时有效态（active_low 反相）；越界/读失败=触发（fail-safe）
+fn live_active_channel(ins: &[Box<dyn DigitalIn>], i: usize, active_low: bool) -> bool {
+    match ins.get(i) {
+        Some(g) => match g.read_level() {
+            Ok(high) => high != active_low,
+            Err(_) => true, // 读失败按触发（fail-safe）
+        },
+        None => true,
+    }
+}
+
+#[async_trait]
+impl InterlockApi for InterlockController {
+    async fn status(&self) -> InterlockStatus {
+        let (latched, stop_failed) = {
+            let st = self.state.read().unwrap();
+            (st.latched, st.stop_failed)
+        };
+        let run_state = self.port.last_run_state();
+        let pcs_online = run_state.is_some();
+        let run_state_ok = matches!(run_state, Some(1..=3));
+        let m1 = pcs_online && !run_state_ok && !latched;
+        let fault_lamp = latched || stop_failed || !pcs_online || m1;
+        let run_lamp = run_state_ok && !latched;
+        InterlockStatus {
+            enabled: true,
+            latched,
+            stop_failed,
+            sources: self.status_sources(),
+            fault_lamp,
+            run_lamp,
+        }
+    }
+
+    async fn request_release(&self) -> Result<(), String> {
+        self.do_request_release().await
+    }
+
+    async fn ack_m1(&self) -> Result<(), String> {
+        if self.state.read().unwrap().latched {
+            return Err("联锁锁存中，须先 release".to_string());
+        }
+        self.port
+            .authorize_restart()
+            .await
+            .map_err(|e| format!("M1 重启授权失败: {}", e))?;
+        self.record_event(
+            "interlock.ack_m1",
+            "interlock",
+            "M1 保护跳闸/停机人工授权重启",
+        )
+        .await;
+        let _ = self
+            .sse
+            .push_interlock("ack_m1", "M1 保护跳闸/停机人工授权重启");
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,8 +1009,7 @@ mod tests {
     fn test_trigger_edge_latches_and_lights_fault() {
         let mut m = StateMachine::new(false, 5);
         let mut s = InterlockState::default();
-        let (act, run_lamp, fault_lamp) =
-            m.tick(&mut s, &[(E, true)], false, true, true, 1000);
+        let (act, run_lamp, fault_lamp) = m.tick(&mut s, &[(E, true)], false, true, true, 1000);
 
         assert_eq!(act, Action::TriggerLatch);
         assert!(s.latched);
@@ -274,8 +1051,7 @@ mod tests {
         assert_eq!(s.source_safe_since, Some(1));
 
         // t=4 hold=3 满 + auto → 释放
-        let (a2, run_lamp, fault_lamp) =
-            m.tick(&mut s, &[(E, false)], false, run_ok, online, 4);
+        let (a2, run_lamp, fault_lamp) = m.tick(&mut s, &[(E, false)], false, run_ok, online, 4);
         assert_eq!(a2, Action::ReleaseLatch);
         assert!(!s.latched);
         assert!(s.source_safe_since.is_none());
@@ -327,8 +1103,7 @@ mod tests {
         assert_eq!(s.source_safe_since, Some(1));
 
         // t=3 hold=2 满，但 auto=false 且无 web 请求 → 维持 latch
-        let (a2, _, fault_lamp) =
-            m.tick(&mut s, &[(FLOOD, false)], false, run_ok, online, 3);
+        let (a2, _, fault_lamp) = m.tick(&mut s, &[(FLOOD, false)], false, run_ok, online, 3);
         assert_eq!(a2, Action::None);
         assert!(s.latched);
         assert!(fault_lamp);
@@ -357,8 +1132,7 @@ mod tests {
         let mut m = StateMachine::new(true, 0);
         let mut s = InterlockState::default();
         // pcs_online=true, run_state_ok=false, 未 latch
-        let (act, run_lamp, fault_lamp) =
-            m.tick(&mut s, &[], false, false, true, 1000);
+        let (act, run_lamp, fault_lamp) = m.tick(&mut s, &[], false, false, true, 1000);
 
         assert_eq!(act, Action::None);
         assert!(!run_lamp);
@@ -370,8 +1144,7 @@ mod tests {
     fn test_run_ok_and_not_latched_lights_run_only() {
         let mut m = StateMachine::new(true, 0);
         let mut s = InterlockState::default();
-        let (act, run_lamp, fault_lamp) =
-            m.tick(&mut s, &[], false, true, true, 1000);
+        let (act, run_lamp, fault_lamp) = m.tick(&mut s, &[], false, true, true, 1000);
 
         assert_eq!(act, Action::None);
         assert!(run_lamp);
@@ -405,8 +1178,7 @@ mod tests {
         let mut m = StateMachine::new(false, 5);
         let mut s = InterlockState::default();
         // 门禁 tripped 不计入 pcs_stop 源集合 → 不触发 latch
-        let (act, _, fault_lamp) =
-            m.tick(&mut s, &[(DOOR, true)], false, true, true, 1000);
+        let (act, _, fault_lamp) = m.tick(&mut s, &[(DOOR, true)], false, true, true, 1000);
 
         assert_eq!(act, Action::None);
         assert!(!s.latched);
@@ -434,5 +1206,521 @@ mod tests {
         assert_eq!(a3, Action::TriggerLatch);
         assert!(s.latched);
         assert!(fl);
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use mupc_io::{IoError, MockIn, MockOut};
+    use mupc_storage::StorageError;
+    use mupc_web_api::SsePushService;
+    use std::sync::{Arc, Mutex};
+
+    use crate::core_config::{DiConf, DoConf, IoConfig};
+
+    // ── 测试替身 ──
+
+    /// 可外部改电平的 DI（包 Arc<MockIn>）
+    struct SharedIn(Arc<MockIn>);
+    impl DigitalIn for SharedIn {
+        fn read_level(&self) -> Result<bool, IoError> {
+            self.0.read_level()
+        }
+    }
+    /// 可外部断言电平的 DO（包 Arc<MockOut>）
+    struct SharedOut(Arc<MockOut>);
+    impl DigitalOut for SharedOut {
+        fn set_level(&self, high: bool) -> Result<(), IoError> {
+            self.0.set_level(high)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakePortInner {
+        calls: Vec<String>,
+        run_state: Option<u16>,
+        stop_ok: bool,
+        stop_sets_zero: bool,
+    }
+
+    struct FakePort {
+        inner: Arc<Mutex<FakePortInner>>,
+    }
+    impl FakePort {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(FakePortInner::default())),
+            }
+        }
+        fn set_run_state(&self, s: Option<u16>) {
+            self.inner.lock().unwrap().run_state = s;
+        }
+        fn inner(&self) -> Arc<Mutex<FakePortInner>> {
+            self.inner.clone()
+        }
+    }
+
+    #[async_trait]
+    impl InterlockPort for FakePort {
+        async fn stop(&self) -> Result<(), String> {
+            let mut g = self.inner.lock().unwrap();
+            g.calls.push("stop".into());
+            if !g.stop_ok {
+                return Err("fake: stop 写失败".into());
+            }
+            if g.stop_sets_zero {
+                g.run_state = Some(0);
+            }
+            Ok(())
+        }
+        async fn restore_latched(&self, latched: bool) -> Result<(), String> {
+            self.inner
+                .lock()
+                .unwrap()
+                .calls
+                .push(format!("restore_latched({})", latched));
+            Ok(())
+        }
+        fn last_run_state(&self) -> Option<u16> {
+            self.inner.lock().unwrap().run_state
+        }
+        async fn authorize_restart(&self) -> Result<(), String> {
+            self.inner
+                .lock()
+                .unwrap()
+                .calls
+                .push("authorize_restart".into());
+            Ok(())
+        }
+    }
+
+    /// 内存 EventRepository（断言事件 + latest_by_type）
+    #[derive(Default)]
+    struct FakeEventRepo {
+        inner: Arc<Mutex<Vec<SystemEvent>>>,
+    }
+    impl FakeEventRepo {
+        fn has(&self, event_type: &str) -> bool {
+            self.inner
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.event_type == event_type)
+        }
+        fn count(&self, event_type: &str) -> usize {
+            self.inner
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.event_type == event_type)
+                .count()
+        }
+        fn msgs(&self, event_type: &str) -> Vec<String> {
+            self.inner
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.event_type == event_type)
+                .map(|e| e.message.clone())
+                .collect()
+        }
+    }
+    #[async_trait]
+    impl EventRepository for FakeEventRepo {
+        async fn insert(&self, event: &SystemEvent) -> Result<i64, StorageError> {
+            let mut g = self.inner.lock().unwrap();
+            g.push(event.clone());
+            Ok(g.len() as i64)
+        }
+        async fn query_range(
+            &self,
+            _start: DateTime<Utc>,
+            _end: DateTime<Utc>,
+        ) -> Result<Vec<SystemEvent>, StorageError> {
+            Ok(vec![])
+        }
+        async fn purge_older_than(&self, _before: DateTime<Utc>) -> Result<usize, StorageError> {
+            Ok(0)
+        }
+        async fn latest_by_type(
+            &self,
+            event_type: &str,
+        ) -> Result<Option<SystemEvent>, StorageError> {
+            let g = self.inner.lock().unwrap();
+            Ok(g.iter()
+                .filter(|e| e.event_type == event_type)
+                .max_by_key(|e| e.timestamp)
+                .cloned())
+        }
+    }
+
+    // ── 构造辅助 ──
+
+    fn io_cfg(auto_release: bool, stop_confirm_ms: u64) -> IoConfig {
+        IoConfig {
+            enabled: true,
+            poll_ms: 5,
+            auto_release,
+            release_hold_secs: 0,
+            stop_confirm_ms,
+            di: vec![DiConf {
+                name: "急停".into(),
+                gpio: 1,
+                active_low: false,
+                debounce: 1,
+                action: "pcs_stop".into(),
+            }],
+            do_out: vec![
+                DoConf {
+                    name: "运行灯".into(),
+                    gpio: 8,
+                    active_high: true,
+                },
+                DoConf {
+                    name: "故障灯".into(),
+                    gpio: 9,
+                    active_high: true,
+                },
+            ],
+        }
+    }
+
+    /// 建单 DI(急停,pcs_stop,active_high 触发)+DO(运行/故障) 控制器，返回句柄
+    #[allow(clippy::type_complexity)]
+    fn estop_board(
+        cfg: IoConfig,
+        port: FakePort,
+        events: Arc<FakeEventRepo>,
+    ) -> (
+        Arc<InterlockController>,
+        Arc<MockIn>,
+        Arc<MockOut>,
+        Arc<MockOut>,
+        Arc<Mutex<FakePortInner>>,
+    ) {
+        let pin = Arc::new(MockIn::new());
+        let run = Arc::new(MockOut::new());
+        let fault = Arc::new(MockOut::new());
+        let sse = Arc::new(SsePushService::new(16));
+        let inner = port.inner();
+        let ctl = Arc::new(InterlockController::new_with_io(
+            cfg,
+            vec![Box::new(SharedIn(pin.clone()))],
+            vec![
+                Box::new(SharedOut(run.clone())),
+                Box::new(SharedOut(fault.clone())),
+            ],
+            Box::new(port),
+            events,
+            sse,
+        ));
+        (ctl, pin, run, fault, inner)
+    }
+
+    // ── 测试 ──
+
+    /// review 关注：自动释放要求停机确认；停机确认成功 + 源复位 → 自动释放 + 灯恢复
+    #[tokio::test]
+    async fn trigger_then_auto_release_after_stop_confirmed() {
+        let cfg = io_cfg(true, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2)); // PCS 在线运行
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = true; // stop 后 run_state 转 0
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, run, fault, inner) = estop_board(cfg, port, events.clone());
+
+        // 帧1：DI 有效 → 触发 latch + 停机(确认成功)
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now(), "触发后应 latch");
+        assert!(!run.get(), "latch 时运行灯应灭");
+        assert!(fault.get(), "latch 时故障灯应亮");
+        assert!(events.has("interlock.triggered"));
+        let calls = { inner.lock().unwrap().calls.clone() };
+        let i_restore = calls
+            .iter()
+            .position(|c| c == "restore_latched(true)")
+            .expect("restore(true)");
+        let i_stop = calls.iter().position(|c| c == "stop").expect("stop");
+        assert!(
+            i_restore < i_stop,
+            "restore(true) 必须先于 stop，实际 {:?}",
+            calls
+        );
+
+        // 帧2：源复位（DI 无效）+ auto_release + 停机已确认 → 自动释放
+        pin.set(false);
+        ctl.tick_frame().await;
+        assert!(!ctl.is_latched_now(), "auto_release+确认后应释放");
+        let calls = { inner.lock().unwrap().calls.clone() };
+        assert!(
+            calls.iter().any(|c| c == "restore_latched(false)"),
+            "释放应 restore(false)"
+        );
+        assert!(events.has("interlock.cleared"));
+
+        // 释放后 PCS 处于 run_state=0（停机），非 {1,2,3} → 故障灯亮 M1Stopped（M1：在线但停机）
+        assert!(fault.get(), "在线但 PCS 停机（run_state=0）→ 故障灯(M1)");
+        assert!(!run.get(), "PCS 未在运行态，运行灯不应亮");
+
+        // 人工重启 PCS 回 run_state=2 → 灯恢复（运行灯亮、故障灯灭）
+        inner.lock().unwrap().run_state = Some(2);
+        ctl.tick_frame().await;
+        assert!(run.get(), "PCS 恢复运行且未 latch → 运行灯亮");
+        assert!(!fault.get(), "PCS 运行正常 → 故障灯灭");
+    }
+
+    /// stop() 写失败 → stop_failed；即使 auto_release=true 也不自动释放；人工放行出审计事件
+    #[tokio::test]
+    async fn stop_write_failure_blocks_auto_and_manual_release_audits_override() {
+        let cfg = io_cfg(true, 40);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = false; // stop 写失败
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, fault, inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now());
+        assert!(
+            ctl.state.read().unwrap().stop_failed,
+            "stop 写失败应置 stop_failed"
+        );
+        assert!(events.has("interlock.stop_failed"));
+        assert!(fault.get(), "stop_failed 应亮故障灯");
+
+        // 源复位：auto=true 但 stop_failed → 不自动释放
+        pin.set(false);
+        ctl.tick_frame().await;
+        assert!(
+            ctl.is_latched_now(),
+            "stop_failed 时禁止自动释放（防联锁静默失效）"
+        );
+        assert!(ctl.state.read().unwrap().stop_failed);
+
+        // 人工放行 → Ok + 审计（override）
+        let r = ctl.request_release().await;
+        assert!(r.is_ok(), "人工放行应成功: {:?}", r.err());
+        assert!(!ctl.is_latched_now());
+        let msgs = events.msgs("interlock.cleared");
+        assert!(
+            msgs.iter().any(|m| m.contains("override")),
+            "stop_failed 人工放行应留 override 审计，实际 {:?}",
+            msgs
+        );
+        let calls = { inner.lock().unwrap().calls.clone() };
+        assert!(calls.iter().any(|c| c == "restore_latched(false)"));
+    }
+
+    /// 停机确认超时（stop Ok 但 run_state 未转 0）→ stop_failed + 禁止自动释放
+    #[tokio::test]
+    async fn stop_confirm_timeout_sets_stop_failed_and_blocks_auto() {
+        let cfg = io_cfg(true, 30);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = false; // PCS 拒不转 0
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now());
+        assert!(
+            ctl.state.read().unwrap().stop_failed,
+            "确认超时应置 stop_failed"
+        );
+        assert!(events.has("interlock.stop_failed"));
+
+        pin.set(false);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now(), "stop_failed 时 auto 不放行");
+
+        // 人工放行
+        assert!(ctl.request_release().await.is_ok());
+        assert!(!ctl.is_latched_now());
+    }
+
+    /// request_release 前置：触发源未复位 → Err（不允许释放）
+    #[tokio::test]
+    async fn request_release_rejected_while_source_still_tripped() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = true;
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now());
+
+        // 源仍触发 → 拒绝
+        let err = ctl.request_release().await.expect_err("源未复位应 Err");
+        assert!(err.contains("未复位"), "实际: {}", err);
+        assert!(ctl.is_latched_now(), "拒绝时 latch 应保持");
+
+        // 源复位后 → 成功
+        pin.set(false);
+        assert!(ctl.request_release().await.is_ok());
+        assert!(!ctl.is_latched_now());
+    }
+
+    /// 门禁/event DI：只记事件，不参与 latch
+    #[tokio::test]
+    async fn door_event_only_never_latches() {
+        let mut cfg = io_cfg(false, 1000);
+        cfg.di = vec![DiConf {
+            name: "门禁".into(),
+            gpio: 3,
+            active_low: false,
+            debounce: 1,
+            action: "event".into(),
+        }];
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(!ctl.is_latched_now(), "门禁事件不应 latch");
+        assert_eq!(events.count("interlock.di"), 1, "触发沿应记一次");
+
+        pin.set(false);
+        ctl.tick_frame().await;
+        assert_eq!(events.count("interlock.di"), 2, "复位沿应再记一次");
+    }
+
+    /// GPIO 运行时读失败 → 按触发处理（fail-safe）+ 记一次读失败事件
+    #[tokio::test]
+    async fn di_read_failure_is_treated_as_trip_and_latches() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = true;
+        let events = Arc::new(FakeEventRepo::default());
+        let sse = Arc::new(SsePushService::new(16));
+        let ctl = Arc::new(InterlockController::new_with_io(
+            cfg,
+            vec![Box::new(DiReadFailStub)],
+            vec![],
+            Box::new(port),
+            events.clone(),
+            sse,
+        ));
+        ctl.tick_frame().await;
+        assert!(
+            ctl.is_latched_now(),
+            "DI 读失败应按触发处理（fail-safe latch）"
+        );
+        assert!(events.has("interlock.di_read_failed"));
+        // 读失败只记一次（防刷屏）
+        ctl.tick_frame().await;
+        assert_eq!(events.count("interlock.di_read_failed"), 1);
+    }
+
+    /// DB 读回：最新 triggered 无 cleared → restore latch + restore_latched(true) + restored 事件
+    #[tokio::test]
+    async fn db_readback_restores_latch_when_triggered_newer_than_cleared() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(0)); // PCS 已停
+        let events = Arc::new(FakeEventRepo::default());
+        // 预置：triggered（无 cleared）
+        events.inner.lock().unwrap().push(SystemEvent {
+            id: None,
+            timestamp: Utc::now() - chrono::Duration::seconds(60),
+            event_type: "interlock.triggered".into(),
+            source: "急停".into(),
+            message: "历史触发".into(),
+        });
+        let (ctl, _pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+        ctl.restore_from_db().await;
+        assert!(ctl.state.read().unwrap().latched, "DB 读回应恢复 latch");
+        assert!(
+            ctl.state.read().unwrap().stop_failed,
+            "恢复态停机未确认（fail-safe）"
+        );
+        let calls = { inner.lock().unwrap().calls.clone() };
+        assert!(calls.iter().any(|c| c == "restore_latched(true)"));
+        assert!(events.has("interlock.restored"));
+    }
+
+    /// DB 读回：cleared 最新 → 归一化不 latch + restore_latched(false)
+    #[tokio::test]
+    async fn db_readback_normalizes_cleared_latest() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        let events = Arc::new(FakeEventRepo::default());
+        events.inner.lock().unwrap().push(SystemEvent {
+            id: None,
+            timestamp: Utc::now() - chrono::Duration::seconds(120),
+            event_type: "interlock.triggered".into(),
+            source: "急停".into(),
+            message: "历史触发".into(),
+        });
+        events.inner.lock().unwrap().push(SystemEvent {
+            id: None,
+            timestamp: Utc::now() - chrono::Duration::seconds(60),
+            event_type: "interlock.cleared".into(),
+            source: "interlock".into(),
+            message: "历史释放".into(),
+        });
+        let (ctl, _pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+        ctl.restore_from_db().await;
+        assert!(!ctl.state.read().unwrap().latched);
+        let calls = { inner.lock().unwrap().calls.clone() };
+        assert!(calls.iter().any(|c| c == "restore_latched(false)"));
+    }
+
+    /// ack_m1：latch 时 Err；非 latch 时授权重启 + 事件
+    #[tokio::test]
+    async fn ack_m1_gated_by_latch() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        // 非 latch：授权
+        assert!(ctl.ack_m1().await.is_ok());
+        assert!(events.has("interlock.ack_m1"));
+
+        // latch：拒绝
+        pin.set(true);
+        ctl.tick_frame().await;
+        let err = ctl.ack_m1().await.expect_err("latch 时应 Err");
+        assert!(err.contains("release"), "实际: {}", err);
+    }
+
+    /// status()：暴露 sources / latch / 灯位
+    #[tokio::test]
+    async fn status_reflects_state_and_sources() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        let st0 = ctl.status().await;
+        assert!(st0.enabled);
+        assert!(!st0.latched);
+        assert!(st0.run_lamp, "在线运行且未 latch → 运行灯");
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        let st1 = ctl.status().await;
+        assert!(st1.latched);
+        assert!(!st1.run_lamp);
+        assert!(st1.fault_lamp);
+        assert!(st1.sources.iter().any(|s| s.name == "estop" && s.tripped));
     }
 }

@@ -16,6 +16,7 @@ npu = ["mupc-ai-engine/npu"]
 
 [dependencies]
 mupc-core = { path = "../core" }
+mupc-io = { path = "../mupc-io" }
 mupc-common = { path = "../common" }
 mupc-security = { path = "../security" }
 mupc_storage = { path = "../storage" }

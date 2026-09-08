@@ -49,9 +49,16 @@ impl StartupContext {
 /// IEC 104 命令处理器：转发主站控制命令到实时控制模块
 struct StrategyCommandHandler {
     intercore: Arc<mupc_intercore::IntercoreClient>,
+    /// 安全联锁控制器（io.enabled 时注入；latch 期间抑制主站下发，避免绕过联锁启停 PCS）
+    interlock: Option<Arc<crate::interlock::InterlockController>>,
 }
 
 impl StrategyCommandHandler {
+    /// 联锁锁存时是否抑制本次控制下发（读共享 state，同步）
+    fn interlock_blocks(&self) -> bool {
+        self.interlock.as_ref().is_some_and(|c| c.is_latched_now())
+    }
+
     fn name(&self) -> &str {
         "strategy-command-handler"
     }
@@ -70,6 +77,19 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
         match cmd.cmd_type {
             mupc_gateway::iec104::command::CommandType::PowerRegulation
             | mupc_gateway::iec104::command::CommandType::ChargeDischarge => {
+                // Task7：联锁锁存期间抑制主站功率/启停下发（双参下发路径同样挡，防绕过联锁启停）
+                if self.interlock_blocks() {
+                    tracing::warn!(
+                        "IEC104 命令被安全联锁抑制（latch 中）: cmd_id={}",
+                        cmd.cmd_id
+                    );
+                    return Ok(mupc_gateway::iec104::command::CommandResponse {
+                        cmd_id: cmd.cmd_id,
+                        success: false,
+                        message: "安全联锁锁存中，禁止下发".into(),
+                        timestamp: chrono::Utc::now().timestamp() as u64,
+                    });
+                }
                 // p_set → 下发到实时控制模块（DualParamCommand: p_ref + k_droop）
                 if let Some(p_set) = cmd.p_set {
                     let dual = mupc_intercore::DualParamCommand::new(
@@ -527,12 +547,47 @@ pub async fn initialize_all(
     // SSE 推送服务（提前创建，供 AI 决策循环推送决策事件）
     let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
 
+    // ── S2 §12.4 / Task7：安全联锁控制器（io.enabled 时装配）──
+    // 依赖：intercore(步骤 4) + storage(步骤 3) + sse_push 均已就绪。GPIO(sysfs) 打开失败由
+    // InterlockController::new 内部 fail-safe（预置 latch，绝不静默无 latch 运行）。disabled 时
+    // 不装配 → AppState.interlock=None（未启用部署行为不变）。
+    let interlock_ctl: Option<Arc<crate::interlock::InterlockController>> = if config.io.enabled {
+        let il = Arc::new(crate::interlock::InterlockController::new(
+            config.io.clone(),
+            Box::new(intercore.clone()), // Arc<IntercoreClient> → InterlockPort
+            storage.events.clone(),
+            sse_push.clone(),
+        ));
+        tracing::info!("安全联锁已启用（io.enabled=true），装配联锁控制器");
+        Some(il)
+    } else {
+        tracing::debug!("安全联锁未启用（io.enabled 缺省/false）");
+        None
+    };
+    // DB 读回 + 常驻轮询（首 dispatch 前恢复 latch；restore 后即由 run_loop 维护）
+    if let Some(il) = interlock_ctl.clone() {
+        il.restore_from_db().await;
+        guard.0.push(tokio::spawn(il.clone().run_loop()));
+    }
+    // web 后端注入用（Arc<dyn InterlockApi>）
+    let interlock_api: Option<Arc<dyn mupc_web_api::app_state::InterlockApi>> =
+        interlock_ctl.clone().map(|c| c as Arc<dyn mupc_web_api::app_state::InterlockApi>);
+
     // AI 决策循环：周期执行决策并分发到核间/南向（RL 决策 <1s）
+    // Task7：联锁 latch 期间抑制 dispatch（skip 本轮 warn；transport 层另有 stopped_latched 兜底）
     let decision_integrator = ai_integrator.clone();
     let decision_sse = sse_push.clone();
+    let decision_interlock = interlock_ctl.clone();
     guard.0.push(tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            if decision_interlock
+                .as_deref()
+                .is_some_and(|c| c.is_latched_now())
+            {
+                tracing::warn!("安全联锁锁存中：跳过本周期 AI/策略下发（dispatch 抑制）");
+                continue;
+            }
             if let Err(e) = decision_integrator.dispatch_ai_decision().await {
                 tracing::debug!("AI 决策周期失败: {}", e);
             } else {
@@ -552,6 +607,7 @@ pub async fn initialize_all(
     let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
     let cmd_handler = Arc::new(StrategyCommandHandler {
         intercore: intercore.clone(),
+        interlock: interlock_ctl.clone(),
     });
     let server_clone = iec104_server.clone();
     guard.0.push(tokio::spawn(async move {
@@ -691,8 +747,8 @@ pub async fn initialize_all(
         ota_manager: ota_manager.clone(),
         online_updater,
         ab_test_manager,
-        // Task 7 装配真实联锁 controller 后改为 Some(arc)
-        interlock: None,
+        // Task7：io.enabled 时注入真实联锁 controller；disabled → None（路由返回 503 语义）
+        interlock: interlock_api,
     });
 
     // 组装 Router 并启动 HTTP 服务
