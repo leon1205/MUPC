@@ -275,8 +275,20 @@ async fn event_latest_by_type_returns_most_recent() {
     svc.events.insert(&older).await.unwrap();
     let id_newer = svc.events.insert(&newer).await.unwrap();
     svc.events.insert(&cleared).await.unwrap();
+    // 诱饵：**后插入但 timestamp 更早**（id 更大、ts 介于 older/newer）——隔离「按 timestamp 排序」
+    // 与「按 id/插入序排序」语义：若实现退化为 ORDER BY id DESC 应返回此诱饵而非 newer。
+    svc.events
+        .insert(&SystemEvent {
+            id: None,
+            timestamp: now - Duration::minutes(30),
+            event_type: "interlock.triggered".into(),
+            source: "pcs".into(),
+            message: "bait".into(),
+        })
+        .await
+        .unwrap();
 
-    // 同类型多条 → 取 timestamp 最大的一条
+    // 同类型多条 → 取 timestamp 最大的一条（须为 newer，而非后插入的 bait）
     let latest = svc
         .events
         .latest_by_type("interlock.triggered")
