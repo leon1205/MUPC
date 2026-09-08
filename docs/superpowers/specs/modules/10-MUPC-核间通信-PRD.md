@@ -103,29 +103,34 @@
 | `0x0030` | DataUpload | 实时控制模块 → 通信管理模块 | 数据上送（周期遥测，含 q_realtime_margin） |
 | `0x0040` | SafetyOverride | 实时控制模块 → 通信管理模块 | 安全覆盖触发 |
 
-### 2.4 Modbus RTU 备选通道（架构调整）
+### 2.4 PCS 通道（RS485 Modbus RTU；生产主链路，v2.2 取代早期假设备选）
 
 **需求描述：**
-在以太网（TCP Socket）核间链路之外，提供一条 **Modbus RTU（RS485）备选控制链路**，通过配置选择走以太网还是 Modbus RTU（部署时二选一，非运行时热备）。
+实时控制模块 = **两级式 PCS 设备**（小脑集成于 PCS）。生产主链路以 **Modbus RTU（RS485）** 直连 PCS（部署配置 `transport=modbus_rtu`）下发控制、读取状态/SOC/健康——通信管理模块为 **Modbus Master**，PCS 为 **Slave**。早期「TCP Socket + 自定义实时控制模块」帧协议（本章其余 §2.1~§6.8）仅保留作**仿真/联调**链路（`transport=tcp`，sim-bridge 作 TCP 服务端）。部署时经 `intercore.transport` 二选一，非运行时热备。
 
-**数据面边界（ADR-012）**：Modbus 通道承载**控制下行 + 执行确认 + 心跳/健康状态上行**；**遥测上送（StatusReport/DataUpload）与 SafetyOverride 仍走 TCP 以太网链路**。
+**PCS 真实协议语义（对齐《两级式 PCS 设备通讯说明》V1.3）：**
+- **物理层**：RS485 Modbus，默认 **19200 N-8-1**；PCS 从站地址拨码（默认 1，EMS 接 A2/B2）；寄存器 16bit 收发 **高 8/低 8 位互换**（须字节交换）。
+- **写操作**：**FC06 逐寄存器写**（非 FC16 整块写）；**写响应即确认**——不设执行确认区。
+- **删除执行确认区语义**：无 `exec_seq/exec_status/exec_error/cmd_valid/cmd_seq/protocol_version` 寄存器（PCS 为标准 Modbus 从站，无自建确认区，原假设点表作废）。
+- **心跳/在线**：Master 轮询读 3 区 **1013**（模块运行状态 0停机/1待机/2充电/3放电），读成功即在线、连续失败判离线（对齐 §4.2 语义）。
+- **SOC**：读 3 区 **1010**（BMS 系统 SOC，*1%）。
+- **故障/健康（可选接入）**：3 区 1000-1004 模块详细告警位、1005 BMS 工作状态、1014 模块故障状态（区分运行停机 1013=0 与保护跳闸联读）。
 
-**主从角色**：通信管理模块为 **Modbus Master**（主动写控制寄存器 FC16 / 读状态寄存器 FC03），实时控制模块为 **Slave**（暴露保持寄存器区）。
+**下行两种模式（先写 4 区模式字，再逐寄存器写数据）：**
+| 模式 | 模式字(4区1000) | 写入寄存器 | 说明 |
+|------|--------------|-----------|------|
+| 恒功率（AI 双参数 p_ref/q） | **0** | 1001 恒功率有功 / 1002 恒功率无功（Int16，*1kW，正放负充） | **k_droop 无接口——忽略**；恒功率无下垂、电压支撑下降（语义偏离与安全兜底：AI 恒功率模式下发前须经 AiValidator 范围校验，投产以本地优先分相为主） |
+| 分相（台区储能单相 P/Q） | **2** | 1006-1008 单 A/B/C 有功 / 1009-1011 单 A/B/C 无功（Int16，单相 clamp ±25） | 模式≠2 时先写 1000=2；每次逐寄存器 FC06 写 |
+| 启停 | — | 500 模块启停（0停机/1运行） | 首次下发随带启动 |
 
-**承载内容：**
-| 数据 | 说明 |
-|------|------|
-| 控制下行 | AI 双参数（p_ref/k_droop）或台区储能分相 P/Q（与 TCP 通道一致，一次一种） |
-| 协议/序号 | protocol_version 版本寄存器 + cmd_seq 指令序号 |
-| 执行确认 | exec_seq/exec_status/exec_error 寄存器（语义对齐 ControlRsp：成功/失败/超时） |
-| 心跳/状态 | heartbeat_counter/device_status/cpu_temp/memory_usage（master 轮询） |
+**数据面边界（ADR-012，v2.2 架构修正）**：PCS（Modbus）通道承载**控制下行 + SOC + 心跳/健康上行**；**台区电气遥测真实源 = 台区总表 master_meter（U-26 独立 RS485）**，非 PCS 核间上送；原 SafetyOverride 概念**废弃**，由 **PCS 内部保护 + AiValidator/策略校验**承接；PCS 3 区 1029-1036 输出功率**仅可作健康/校验**，不并作策略遥测。`transport=tcp` 帧协议（StatusReport/DataUpload/SafetyOverride）仅仿真/联调用。
 
 **验收标准：**
-- 配置 `intercore.transport` 可选择 `tcp` 或 `modbus_rtu`
-- 控制指令经 Modbus 下发有**执行确认**（读回 exec_seq/exec_status）
-- 指令确认超时 5 秒，超时标记失败、可选重试（对齐 §3.1）
-- 心跳改轮询读 heartbeat_counter，连续丢失判离线（对齐 §4.2 语义）
-- 寄存器映射表 / int32 缩放编码 / cmd_valid 触发为协议基线，须与实时控制模块固件对齐
+- 配置 `intercore.transport` 可选择 `tcp`（仿真/联调）或 `modbus_rtu`（生产主链路）
+- 恒功率：FC06 写 1000=0 → 逐写 1001/1002；分相：FC06 写 1000=2 → 逐寄存器写 1006-1011（单相 clamp ±25）
+- 指令确认 = **PCS 写响应即确认**（无 exec 区读回）；写响应超时 5 秒标记失败、可选重试（对齐 §3.1）
+- 心跳/在线：轮询读 3 区 1013，连续丢失判离线；SOC 读 3 区 1010
+- 寄存器映射 / 字节互换 / 符号约定（正放负充）须与 PCS 固件 V1.3 点表对齐，现场核相后投运
 
 ---
 
@@ -548,17 +553,17 @@ Payload 格式（JSON 编码）：
 | IC-AC-05 | CRC16 校验错误时帧被丢弃并记录日志 | 单元测试 |
 | IC-AC-06 | 所有帧类型（8 种）编码解码正确 | 单元测试 |
 
-### 8.1b Modbus RTU 备选通道（v2.0）
+### 8.1b PCS 通道（v2.2，取代假设 Modbus 备选）
 
 | 编号 | 验收项 | 验证方式 |
 |------|-------|---------|
-| IC-AC-33 | 配置 `intercore.transport` 可选择 `tcp` / `modbus_rtu` | 功能测试 |
-| IC-AC-34 | Modbus Master 经 FC16 写控制寄存器下发控制指令（AI 双参数 / 台区分相 P/Q） | 单元测试 |
-| IC-AC-35 | 控制指令执行确认：读回 `exec_seq`/`exec_status` 匹配 | 单元测试 |
-| IC-AC-36 | 指令确认超时 5s 标记失败，可选重试（最多 2 次） | 单元测试 |
-| IC-AC-37 | Modbus 心跳轮询：连续丢失判离线、恢复判在线 | 单元测试 |
-| IC-AC-38 | 寄存器 f64↔int32 缩放编解码 roundtrip | 单元测试 |
-| IC-AC-39 | Slave 参考实现与 Master 联调（虚拟串口对）下发生效 | 集成测试 |
+| IC-AC-33 | 配置 `intercore.transport` 可选择 `modbus_rtu`（生产→PCS）/ `tcp`（仿真/联调） | 功能测试 |
+| IC-AC-34 | FC06 逐寄存器写下发控制：恒功率（1000=0 → 1001/1002）与分相（1000=2 → 1006-1011，单相 clamp ±25） | 单元测试 |
+| IC-AC-35 | 指令确认 = **PCS 写响应即确认**（无 exec 区读回）；读 3 区 1013 运行状态验证生效 | 单元测试 |
+| IC-AC-36 | 写指令超时 5s 标记失败，可选重试（最多 2 次） | 单元测试 |
+| IC-AC-37 | PCS 心跳轮询读 3 区 1013（运行状态）：连续丢失判离线、恢复判在线 | 单元测试 |
+| IC-AC-38 | PCS 寄存器 int16 缩放 + 高 8/低 8 字节互换编解码 roundtrip | 单元测试 |
+| IC-AC-39 | PCS 寄存器仿真 Slave 或实机 RS485 联调下发生效 | 集成测试 |
 
 ### 8.2 指令下发
 
@@ -674,3 +679,4 @@ strategy-engine ──→ intercore ──→ 实时控制模块
 |------|----------|
 | v1.0 | 从主 PRD 提取核间通信需求，补充关键信号定义、帧格式详述、验收标准汇总 |
 | v2.0 | 新增 Modbus RTU 备选控制通道：配置 transport 选择 tcp/modbus_rtu，控制下行 + 执行确认 + 心跳轮询，遥测/SafetyOverride 仍走 TCP（ADR-012 数据面边界）；补 §2.4 需求与 IC-AC-33~39 验收 |
+| v2.2 | §2.4/§8.1b 改写为 PCS 真实协议语义：实时控制模块=两级式 PCS，生产默认 modbus_rtu→PCS（RS485 19200 N-8-1、高 8/低 8 互换、FC06 逐写、写响应即确认、删 exec_seq/cmd_valid 执行确认区），tcp 仅仿真/联调；心跳读 3 区 1013、SOC 读 3 区 1010；遥测真实源=台区总表 master_meter（U-26），SafetyOverride 废弃由 PCS 内部保护 + AiValidator 承接 |
