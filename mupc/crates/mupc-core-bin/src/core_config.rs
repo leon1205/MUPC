@@ -27,6 +27,85 @@ pub struct CoreConfig {
     /// 策略引擎配置（v2.24：容量档位 YAML 路径）
     #[serde(default)]
     pub strategy: StrategyConfig,
+    /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled，未配置 io 段部署行为不变）
+    #[serde(default)]
+    pub io: IoConfig,
+}
+
+/// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled——未配置 io 段部署行为不变）
+///
+/// enabled=true 时按 DI 触发源（急停/水浸/消防 → pcs_stop；门禁 → event）驱动
+/// 安全联锁，DO 输出运行/故障灯。
+#[derive(Debug, Clone, Deserialize)]
+pub struct IoConfig {
+    /// 是否启用联锁控制器（配置 io 段即启用；缺省 false）
+    #[serde(default)]
+    pub enabled: bool,
+    /// DI 轮询周期 ms，默认 100
+    #[serde(default = "default_io_poll_ms")]
+    pub poll_ms: u64,
+    /// 触发源回安全态后是否自动清除联锁（true 不推荐，默认 false=须人工确认）
+    #[serde(default)]
+    pub auto_release: bool,
+    /// 触发源回安全态须保持时长 s（人工解除前置校验），默认 0
+    #[serde(default)]
+    pub release_hold_secs: u64,
+    /// 停机确认窗口 ms（停机指令 1013 须转 0；超时 → stop_failed + 周期重试），默认 5000
+    #[serde(default = "default_stop_confirm_ms")]
+    pub stop_confirm_ms: u64,
+    /// DI 输入表（pcs_stop：急停/水浸/消防；event：门禁）
+    #[serde(default)]
+    pub di: Vec<DiConf>,
+    /// DO 输出表（运行/故障灯）；YAML 键为 `do`（do 为 Rust 关键字 → 字段 do_out）
+    #[serde(default, rename = "do")]
+    pub do_out: Vec<DoConf>,
+}
+
+impl Default for IoConfig {
+    /// 缺省 disabled：enabled=false、di/do 空、poll/stop_confirm 落字段默认函数值
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_ms: default_io_poll_ms(),
+            auto_release: false,
+            release_hold_secs: 0,
+            stop_confirm_ms: default_stop_confirm_ms(),
+            di: Vec::new(),
+            do_out: Vec::new(),
+        }
+    }
+}
+
+/// DI 数字输入通道配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiConf {
+    /// 通道名（诊断/查重定位用，须非空且表内唯一）
+    #[serde(default)]
+    pub name: String,
+    /// GPIO 引脚号（必填，须 > 0）
+    pub gpio: u32,
+    /// 低电平有效（默认 true：常闭安全回路，断线/急停按下视为触发）
+    #[serde(default = "default_true")]
+    pub active_low: bool,
+    /// 消抖次数（默认 3，须 >= 1）
+    #[serde(default = "default_debounce")]
+    pub debounce: u32,
+    /// 触发动作：pcs_stop（急停/水浸/消防）| event（门禁）
+    #[serde(default)]
+    pub action: String,
+}
+
+/// DO 数字输出通道配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct DoConf {
+    /// 通道名（诊断/查重定位用，须非空且表内唯一）
+    #[serde(default)]
+    pub name: String,
+    /// GPIO 引脚号（必填，须 > 0）
+    pub gpio: u32,
+    /// 高电平有效（默认 true；false = 低电平点亮）
+    #[serde(default = "default_true")]
+    pub active_high: bool,
 }
 
 /// 系统级配置
@@ -368,6 +447,23 @@ fn default_heartbeat_poll_ms() -> u64 {
     1000
 }
 
+// S2 §12.4: io 段默认值
+fn default_io_poll_ms() -> u64 {
+    100
+}
+
+fn default_stop_confirm_ms() -> u64 {
+    5000
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_debounce() -> u32 {
+    3
+}
+
 fn default_listen_addr() -> String {
     "0.0.0.0:8080".to_string()
 }
@@ -469,6 +565,8 @@ impl CoreConfig {
         if self.master_meter.enabled {
             self.validate_master_meter()?;
         }
+        // S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置（disabled 整段跳过，不打扰未启用用户）
+        self.validate_io()?;
         Ok(())
     }
 
@@ -502,6 +600,83 @@ impl CoreConfig {
             );
         }
         Self::validate_reg_map(&mm.reg_map)
+    }
+
+    /// S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置：
+    /// poll_ms>0；各 DI/DO gpio>0、debounce>=1、action∈{pcs_stop,event}；
+    /// DI/DO 间 gpio 跨表唯一，di 内与 do 内 name 非空且唯一。
+    fn validate_io(&self) -> Result<(), String> {
+        let io = &self.io;
+        if !io.enabled {
+            return Ok(());
+        }
+        if io.poll_ms == 0 {
+            return Err("io.poll_ms 不能为 0（io.enabled 时）".to_string());
+        }
+        for (i, d) in io.di.iter().enumerate() {
+            if d.gpio == 0 {
+                return Err(format!("io.di[{}].name={:?} gpio 不能为 0", i, d.name));
+            }
+            if d.debounce < 1 {
+                return Err(format!(
+                    "io.di[{}].name={:?} debounce={} 须 >= 1",
+                    i, d.name, d.debounce
+                ));
+            }
+            if d.action != "pcs_stop" && d.action != "event" {
+                return Err(format!(
+                    "io.di[{}].name={:?} action={:?} 须为 pcs_stop 或 event",
+                    i, d.name, d.action
+                ));
+            }
+        }
+        for (i, d) in io.do_out.iter().enumerate() {
+            if d.gpio == 0 {
+                return Err(format!("io.do[{}].name={:?} gpio 不能为 0", i, d.name));
+            }
+        }
+        // DI/DO 间 gpio 跨表唯一（防止 DO 复用 DI 引脚 / 引脚冲突）
+        let mut gpios: std::collections::HashSet<u32> = Default::default();
+        let all_gpio = io
+            .di
+            .iter()
+            .map(|d| d.gpio)
+            .chain(io.do_out.iter().map(|d| d.gpio));
+        for gpio in all_gpio {
+            if !gpios.insert(gpio) {
+                return Err(format!(
+                    "io 段 DI/DO gpio={} 重复（di/do 表间须唯一）",
+                    gpio
+                ));
+            }
+        }
+        // di 内 name 非空且唯一
+        let mut di_names: std::collections::HashSet<&str> = Default::default();
+        for (i, d) in io.di.iter().enumerate() {
+            if d.name.is_empty() {
+                return Err(format!("io.di[{}] name 不能为空（io.enabled 时）", i));
+            }
+            if !di_names.insert(d.name.as_str()) {
+                return Err(format!(
+                    "io.di 内 name={:?} 重复（di 通道名须唯一）",
+                    d.name
+                ));
+            }
+        }
+        // do 内 name 非空且唯一
+        let mut do_names: std::collections::HashSet<&str> = Default::default();
+        for (i, d) in io.do_out.iter().enumerate() {
+            if d.name.is_empty() {
+                return Err(format!("io.do[{}] name 不能为空（io.enabled 时）", i));
+            }
+            if !do_names.insert(d.name.as_str()) {
+                return Err(format!(
+                    "io.do 内 name={:?} 重复（do 通道名须唯一）",
+                    d.name
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// P2-2/N2: 分相量块 p/q/pf/u/i 起始地址非 0 且三相连续 6 寄存器区间互不重叠；
@@ -628,6 +803,7 @@ plugins: {}
             },
             master_meter: MasterMeterConfig::default(),
             strategy: StrategyConfig::default(),
+            io: IoConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -671,6 +847,7 @@ plugins: {}
             },
             master_meter: MasterMeterConfig::default(),
             strategy: StrategyConfig::default(),
+            io: IoConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -948,5 +1125,199 @@ plugins: {}
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.strategy.tai_config_file.is_empty());
+    }
+
+    /// S2 §12.4: 未配置 io 段 → 缺省 disabled（enabled=false、di/do 空、poll/stop_confirm 落默认）
+    #[test]
+    fn test_io_disabled_default() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let io = &config.io;
+        assert!(!io.enabled);
+        assert!(io.di.is_empty());
+        assert!(io.do_out.is_empty());
+        assert_eq!(io.poll_ms, 100);
+        assert_eq!(io.stop_confirm_ms, 5000);
+        assert!(!io.auto_release);
+        assert_eq!(io.release_hold_secs, 0);
+        // disabled 时 validate 不拦截
+        assert!(config.validate().is_ok());
+    }
+
+    /// S2 §12.4: 合法 io 段（di 2×pcs_stop + 1×event、do 2）解析正确且 validate 通过
+    #[test]
+    fn test_io_validate_valid_ok() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  poll_ms: 200
+  di:
+    - { name: "急停", gpio: 1, action: "pcs_stop" }
+    - { name: "水浸", gpio: 2, action: "pcs_stop", active_low: false, debounce: 5 }
+    - { name: "门禁", gpio: 3, action: "event" }
+  do:
+    - { name: "运行灯", gpio: 8 }
+    - { name: "故障灯", gpio: 9, active_high: false }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let io = &config.io;
+        assert!(io.enabled);
+        assert_eq!(io.poll_ms, 200);
+        assert_eq!(io.di.len(), 3);
+        // di 缺省：active_low 默认 true、debounce 默认 3；显式覆盖生效
+        assert!(io.di[0].active_low);
+        assert_eq!(io.di[0].debounce, 3);
+        assert_eq!(io.di[0].action, "pcs_stop");
+        assert!(!io.di[1].active_low);
+        assert_eq!(io.di[1].debounce, 5);
+        assert_eq!(io.di[2].action, "event");
+        // YAML do 键 → do_out rename；active_high 默认 true
+        assert_eq!(io.do_out.len(), 2);
+        assert!(io.do_out[0].active_high);
+        assert!(!io.do_out[1].active_high);
+        // stop_confirm_ms / auto_release 缺省
+        assert_eq!(io.stop_confirm_ms, 5000);
+        assert!(!io.auto_release);
+        assert!(
+            config.validate().is_ok(),
+            "合法 io 配置应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S2 §12.4: action 非法 → validate Err（须为 pcs_stop/event）
+    #[test]
+    fn test_io_validate_bad_action_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  di:
+    - { name: "未知源", gpio: 1, action: "bogus" }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("action") && err.contains("bogus"),
+            "期望提示非法 action，实际: {}",
+            err
+        );
+    }
+
+    /// S2 §12.4: DI gpio=0 → validate Err（gpio 必填）
+    #[test]
+    fn test_io_validate_zero_gpio_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  di:
+    - { name: "急停", gpio: 0, action: "pcs_stop" }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("gpio"),
+            "期望提示 gpio 不能为 0，实际: {}",
+            err
+        );
+    }
+
+    /// S2 §12.4: di 与 do 间 gpio 重复 → validate Err（DI/DO 引脚跨表须唯一）
+    #[test]
+    fn test_io_validate_gpio_duplicate_di_do_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  di:
+    - { name: "急停", gpio: 3, action: "pcs_stop" }
+  do:
+    - { name: "运行灯", gpio: 3 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("重复") && err.contains("3"),
+            "期望提示 gpio 重复，实际: {}",
+            err
+        );
+    }
+
+    /// S2 §12.4: di 内 name 重复 → validate Err（DI 通道名须唯一）
+    #[test]
+    fn test_io_validate_duplicate_di_name_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  di:
+    - { name: "急停", gpio: 1, action: "pcs_stop" }
+    - { name: "急停", gpio: 2, action: "pcs_stop" }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("重复") && err.contains("急停"),
+            "期望提示 di name 重复，实际: {}",
+            err
+        );
     }
 }
