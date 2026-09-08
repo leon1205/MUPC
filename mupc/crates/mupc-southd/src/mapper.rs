@@ -293,9 +293,13 @@ mod tests {
         let phase = pkg.electrical.phase.expect("grid 应有分相数据");
         assert_eq!(phase.active_power, [Some(1.0), Some(2.0), Some(3.0)]);
         assert_eq!(phase.voltage, [Some(220.0), Some(221.0), Some(222.0)]);
+        assert_eq!(phase.current, [Some(10.0), Some(11.0), Some(12.0)]); // p>=0 → i_mag 幅值
+        assert_eq!(phase.reactive_power, [Some(0.5), Some(0.25), Some(0.125)]);
+        assert_eq!(phase.cos_phi, [Some(0.75), Some(0.8), Some(0.9)]);
         assert_eq!(pkg.electrical.voltage, Some(220.0));
         assert_eq!(pkg.electrical.current, Some(10.0));
         assert_eq!(pkg.electrical.active_power, Some(6.0)); // p_total=None → Σp
+        assert_eq!(pkg.electrical.reactive_power, Some(0.875)); // q.sum()=0.5+0.25+0.125
         assert_eq!(pkg.electrical.cos_phi, Some(0.75));
         assert_eq!(pkg.electrical.frequency, Some(50.0));
         assert!(pkg.timestamp > 0);
