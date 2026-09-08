@@ -10,6 +10,8 @@
 //! 用法: cargo run -p mupc-strategy-engine --bin tai_replay -- [--config-file <档位YAML>] [--capacity-profile <key>] <xlsx路径> [SOC初值0.0-1.0] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1] [p_abs_trig] [p_tgt_s1] [kp] [slope]
 //!        --config-file <档位YAML> 与 --capacity-profile <key> 可选；覆盖顺序 =
 //!        代码默认 → 档位派生(L1/L2) → tuning(L3) → 位置参数扫参（最外层）。
+//!        --capacity-profile 必须配合 --config-file 使用（无档位表时其 key 会被
+//!        加载器忽略而静默落默认档，工具已拒绝此用法并报错退出）。
 
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 use chrono::NaiveDateTime;
@@ -104,6 +106,12 @@ fn main() {
             _ => pos.push(raw[i].clone()),
         }
         i += 1;
+    }
+    // v2.24 guard：--capacity-profile 无 --config-file 时，加载器走 blank→default
+    // 分支会忽略 profile_key → 在默认档假设下静默出 KPI（本特性要杜绝），直接拒绝。
+    if capacity_profile.is_some() && config_file.is_none() {
+        eprintln!("错误: --capacity-profile 需要配合 --config-file <档位YAML> 使用（未指定档位表，将静默落默认档，已拒绝）");
+        print_usage_and_exit();
     }
     let path = pos.get(0).unwrap_or_else(|| {
         eprintln!("缺少 <xlsx路径> 参数");

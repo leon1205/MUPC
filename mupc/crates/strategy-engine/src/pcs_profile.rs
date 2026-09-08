@@ -84,7 +84,9 @@ pub fn load_tai_storage_config(
     let mut cfg = TaiStorageConfig::default();
     let path = file.map(str::trim).filter(|s| !s.is_empty());
     let Some(path) = path else {
-        return Ok(cfg); // ② 未配置 = 默认档
+        // ② 未配置 = 默认档（唯一向后兼容分支）。startup/tai_replay 亦按空→None
+        // 归一；此处 filter 兜底空白串，双保险。
+        return Ok(cfg);
     };
 
     let content =
@@ -130,6 +132,13 @@ pub fn load_tai_storage_config(
     // ⑦ tuning 覆盖其余 L3（dp_max/q_i_max 已在 ⑥ 处理，apply 跳过）
     if let Some(t) = &p.tuning {
         t.apply_l3(&mut cfg);
+    }
+
+    // L3 派生：s1_ff_step_kw 代码默认 = p_cap（config.rs 文档不变量：一周期到位）。
+    // tuning 仅覆盖 p_cap 而未给 s1_ff_step_kw 时自动跟随，避免 S1 前馈欠输；
+    // 显式给了 s1_ff_step_kw 则保留 tuning 值（apply_l3 已写 cfg）。
+    if p.tuning.as_ref().and_then(|t| t.s1_ff_step_kw).is_none() {
+        cfg.s1_ff_step_kw = cfg.p_cap;
     }
 
     validate(path, key, p, &cfg)?; // ⑧

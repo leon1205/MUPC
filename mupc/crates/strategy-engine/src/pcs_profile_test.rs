@@ -432,4 +432,53 @@ pcs_profiles:
         assert!(e.contains("解析档位文件"), "实际: {e}");
         assert!(e.contains("soc_cap_dayy"), "应提示未知键: {e}");
     }
+
+    const YAML_TUNING_P_CAP_FOLLOW: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "tuning p_cap=80 未给 s1_ff_step_kw"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      p_cap: 80
+"#;
+
+    const YAML_TUNING_P_CAP_EXPLICIT_S1FF: &str = r#"
+capacity_profile: "pcs60_dual"
+pcs_profiles:
+  pcs60_dual:
+    desc: "tuning p_cap=80 且显式 s1_ff_step_kw=70"
+    has_neutral: false
+    phase_p_limit_kw: 25
+    phase_q_limit_kvar: 25
+    i_rated_a: 110
+    s_rated_kva: 60
+    tuning:
+      p_cap: 80
+      s1_ff_step_kw: 70
+"#;
+
+    #[test]
+    fn test_s1_ff_step_follows_p_cap_when_not_tuned() {
+        // tuning 仅覆盖 p_cap → s1_ff_step_kw 自动跟随合并后 p_cap（文档不变量）
+        let path = write_tmp(YAML_TUNING_P_CAP_FOLLOW);
+        let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), None).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(cfg.p_cap, 80.0);
+        assert_eq!(cfg.s1_ff_step_kw, 80.0);
+    }
+
+    #[test]
+    fn test_s1_ff_step_explicit_tuning_wins() {
+        // tuning 显式给 s1_ff_step_kw → 保留 tuning 值（不跟随 p_cap）
+        let path = write_tmp(YAML_TUNING_P_CAP_EXPLICIT_S1FF);
+        let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), None).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(cfg.p_cap, 80.0);
+        assert_eq!(cfg.s1_ff_step_kw, 70.0);
+    }
 }
