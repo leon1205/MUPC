@@ -35,6 +35,8 @@ pub enum BusError {
 pub trait StationBus: Send + Sync {
     /// 读一段保持寄存器（FC03；口内串行由实现方强制，真实实现经 per-port async Mutex）。
     async fn read_holding(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
+    /// 读一段输入寄存器（FC04；与 FC03 解码同构，供厂方点表用 input regs 的设备）。
+    async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
 }
 
 /// 真机：每 port 单 `Rs485Device`。构造 open 失败 → Err（该口全站 offline，不阻断启动，§10.7）。
@@ -52,12 +54,14 @@ impl Rs485PortBus {
     /// 用站配置建 device 并 open。
     ///
     /// port 归一：不以 `/` 开头则补 `/dev/`（兼容 §10.3 两种写法：`ttyS4` / `/dev/ttyS4`）。
-    /// 串口参数用 rs485 `Config::default()`（9600/8N1/timeout1000/Crc16Modbus；厂方各口
-    /// 波特率差异由 S3b 再补覆盖字段）。device_addr = 该口首个站的 slave（仅作
-    /// handler/委托缺省；southd 读走 `*_from` 显式 slave，不受影响）。
+    /// 串口参数：baud_rate 透传 `conf.baud_rate`（per-station baud，同口一致性由段内
+    /// validate 保证，Task 1），余 8N1/timeout1000/Crc16Modbus 用 rs485 `Config::default()`。
+    /// device_addr = 该口首个站的 slave（仅作 handler/委托缺省；southd 读走 `*_from`
+    /// 显式 slave，不受影响）。
     pub fn open(conf: &crate::config::StationConf) -> Result<Self, BusError> {
         let c = rs485_plugin::config::Config {
             port: normalize_port(&conf.port),
+            baud_rate: conf.baud_rate, // per-station baud（同口一致性由段内 validate 保证）
             device_addr: conf.slave,
             ..rs485_plugin::config::Config::default()
         };
@@ -103,6 +107,21 @@ impl StationBus for Rs485PortBus {
         .await
         .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
     }
+
+    async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError> {
+        // 同 read_holding：per-port bus_lock 强制口内串行后再做阻塞 IO（FC04 input 寄存器，
+        // send_frame→recv_frame 分两次持 port_fd 锁，同上防同口并发交错污染）。
+        let _g = self.bus_lock.lock().await;
+        let dev = self.device.clone();
+        let port = self.port.clone();
+        tokio::task::spawn_blocking(move || {
+            tracing::debug!(port = %port, slave, addr, count, "southd 口读输入寄存器");
+            dev.read_input_registers_from(slave, addr, count)
+                .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })
+        })
+        .await
+        .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
+    }
 }
 
 /// 归一串口节点：`ttyS4` → `/dev/ttyS4`；已带 `/`（`/dev/ttyS1`）原样返回。
@@ -125,6 +144,13 @@ pub struct MockBus {
     fail_next: std::sync::Mutex<Vec<(u8, u16)>>,
     /// 已发生读调用清单（(slave, addr, count)，测试断言调度序/次数）。
     pub calls: std::sync::Mutex<Vec<(u8, u16, u16)>>,
+    /// input 读响应（FC04）：(slave, addr) → 寄存器。与 `responses`（FC03）独立键——同一
+    /// (slave,addr) 可同时有 holding/input 两套（Modbus FC03/FC04 是不同寄存器空间）。
+    input_responses: std::sync::Mutex<std::collections::HashMap<(u8, u16), Vec<u16>>>,
+    /// input 读失败队列（模拟超时），消费即清；多次调用排队逐次抛错。
+    input_fail_next: std::sync::Mutex<Vec<(u8, u16)>>,
+    /// FC04 读调用清单（(slave, addr, count)，测试断言）。
+    pub input_calls: std::sync::Mutex<Vec<(u8, u16, u16)>>,
 }
 
 impl MockBus {
@@ -133,6 +159,9 @@ impl MockBus {
             responses: std::sync::Mutex::new(std::collections::HashMap::new()),
             fail_next: std::sync::Mutex::new(Vec::new()),
             calls: std::sync::Mutex::new(Vec::new()),
+            input_responses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            input_fail_next: std::sync::Mutex::new(Vec::new()),
+            input_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
     /// 预置 (slave, addr) → 返回寄存器。
@@ -140,14 +169,34 @@ impl MockBus {
         self.responses.lock().unwrap().insert((slave, addr), regs);
     }
 
+    /// 预置 FC04 input 读响应。
+    pub fn put_input(&self, slave: u8, addr: u16, regs: Vec<u16>) {
+        self.input_responses.lock().unwrap().insert((slave, addr), regs);
+    }
+
     /// 下次该 (slave, addr) 读抛 Err（模拟超时/CRC）——多次调用排队逐次抛错。
     pub fn fail_once(&self, slave: u8, addr: u16) {
         self.fail_next.lock().unwrap().push((slave, addr));
     }
 
+    /// FC04 读失败一次（队列；消费即清）。
+    pub fn fail_input_once(&self, slave: u8, addr: u16) {
+        self.input_fail_next.lock().unwrap().push((slave, addr));
+    }
+
     /// 已发生读调用次数（按 slave+addr 计数）。
     pub fn call_count(&self, slave: u8, addr: u16) -> usize {
         self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&(s, a, _)| s == slave && a == addr)
+            .count()
+    }
+
+    /// FC04 读调用次数。
+    pub fn input_call_count(&self, slave: u8, addr: u16) -> usize {
+        self.input_calls
             .lock()
             .unwrap()
             .iter()
@@ -194,6 +243,39 @@ impl StationBus for MockBus {
                 addr,
                 count,
                 reason: "mock 未预置".into(),
+            })
+    }
+
+    async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError> {
+        self.input_calls.lock().unwrap().push((slave, addr, count));
+        // 与 read_holding 同构：先在同一 guard 内查 + 删（消费即清），guard 出块即释放。
+        let to_fail = {
+            let mut q = self.input_fail_next.lock().unwrap();
+            if let Some(pos) = q.iter().position(|&(s, a)| s == slave && a == addr) {
+                q.remove(pos);
+                true
+            } else {
+                false
+            }
+        };
+        if to_fail {
+            return Err(BusError::Read {
+                slave,
+                addr,
+                count,
+                reason: "mock 超时".into(),
+            });
+        }
+        self.input_responses
+            .lock()
+            .unwrap()
+            .get(&(slave, addr))
+            .cloned()
+            .ok_or_else(|| BusError::Read {
+                slave,
+                addr,
+                count,
+                reason: "mock input 未预置".into(),
             })
     }
 }
@@ -273,6 +355,30 @@ mod tests {
         let _ = bus.read_holding(1, 0x11, 2).await; // 不同键不计入
         assert_eq!(bus.call_count(1, 0x10), 2);
         assert_eq!(bus.calls.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mock_put_input_then_read_input_returns_preset() {
+        let bus = MockBus::new();
+        bus.put_input(2, 0x100, vec![9, 8]);
+        let r = bus.read_input(2, 0x100, 2).await.expect("input 读应返回预置");
+        assert_eq!(r, vec![9, 8]);
+        assert_eq!(bus.input_call_count(2, 0x100), 1);
+        // 与 holding 键独立：同 (slave,addr) 的 holding 未预置仍 Err
+        // （FC03/FC04 是不同寄存器空间，input 预置不影响 read_holding）。
+        assert!(bus.read_holding(2, 0x100, 2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_input_fail_once_consumes_then_recovers() {
+        let bus = MockBus::new();
+        bus.put_input(2, 0x100, vec![5]);
+        bus.fail_input_once(2, 0x100);
+        // 首次 input 读：命中 fail → 超时
+        assert!(bus.read_input(2, 0x100, 1).await.is_err());
+        // 二次 input 读：fail 已消费 → 恢复返回预置值
+        assert_eq!(bus.read_input(2, 0x100, 1).await.expect("恢复"), vec![5]);
+        assert_eq!(bus.input_call_count(2, 0x100), 2);
     }
 
     // ---------- normalize_port ----------
