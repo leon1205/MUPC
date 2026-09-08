@@ -264,7 +264,8 @@ impl ModbusRtuTransport {
     /// authorize_restart）。非 0（待机/充/放电）或读数无效（乱码按非停机处理）→ 清授权并正常
     /// 写 500=1 置 started=true（正常启动路径同样消费/清授权，防过期授权滞留）。
     /// **I-2**：读后、写 500=1 前再查一次 `stopped_latched`——restore 不取 bus 锁，读与写间若触发
-    /// 沿介入置位则放弃启动（窗口有界：stop() 随 bus 序在本窗口之后才写 500=0，故此处复查即断）。
+    /// 沿介入置位则放弃启动（窗口有界：复查 read-guard 释放后、500=1 写上位前，restore(true) 仍可
+    /// 介入——最坏产生「start 脉冲后 stop() 随 bus 序立即写 500=0」，末态仍停且 latch 挡启，可接受）。
     /// 读写用 *_once 原语（不带 connected 副作用）：链路在线状态由入口级 write_reg/心跳维护。
     ///
     /// ⚠️ 语义挂起（§11.11 待确认）：PCS 停机后 run_state=0 稳态下重启 = 人工授权后 S-4 放行一次；
@@ -292,10 +293,12 @@ impl ModbusRtuTransport {
                     "intercore",
                 ));
             }
-            // I-1：人工已确认（restart_authorized）→ 消费授权（单次）并放行重写 500=1。PCS 停机后
-            // run_state=0 稳态下重启 = 人工授权后 S-4 放行一次；500 电平/边沿时序以厂方答复为准
-            // （§11.11「启停 500 时序」待确认）。此处消费：即使随后写失败也不自动重试启动（须重授权）。
-            tracing::info!("M1 授权重启：RUN_STATE=0 且 restart_authorized，放行重发 500=1（单次）");
+            // I-1：人工已确认（restart_authorized）→ 在决策点**消费授权**（单次）并放行重写 500=1。
+            // PCS 停机后 run_state=0 稳态下重启 = 人工授权后 S-4 放行一次；500 电平/边沿时序以厂方
+            // 答复为准（§11.11「启停 500 时序」待确认）。决策点即清位：即使随后写失败/I-2 复查放弃，
+            // 授权已消耗（须重授权），杜绝过期授权在下次停机后凭陈旧位自动重启（M1 单次语义）。
+            self.restart_authorized.store(false, Ordering::Relaxed);
+            tracing::info!("M1 授权重启：RUN_STATE=0 且 restart_authorized，放行重发 500=1（单次，授权已消费）");
         } else {
             // 非 0（待机/充/放电）或读数无效（乱码按非停机处理）：正常启动路径，清授权
             self.restart_authorized.store(false, Ordering::Relaxed);
@@ -525,6 +528,12 @@ impl IntercoreTransport for ModbusRtuTransport {
         // C-1：stopped_latched 仅由此置/清（运行时触发沿 restore(true)；release/启动 DB 读回
         // restore(false)）。纯状态、不写设备——即使 stop() 写失败，latch 已挡启动。
         *self.stopped_latched.write().await = latched;
+        // Minor-2：新触发沿（restore(true) = 一次新的安全停机事件）作废任何**未消费**的人工重启
+        // 授权——授权后、send 消费前若发生新一次联锁触发+release，不允许凭「触发前」的陈旧授权
+        // 在 release 后自动重启（须经 ack_m1 重新授权，人工确认针对的是最新一次事件）。
+        if latched {
+            self.restart_authorized.store(false, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -662,8 +671,14 @@ mod tests {
             tr.is_restart_authorized().await,
             "authorize 应置单次授权位（放行 S-4 停机守卫）"
         );
-        // latch 期间 authorize 拒绝（须先 release；latch 下 S-4 首检即挡启，授权不被消费）
+        // 新触发沿 restore(true) 作废**未消费**的授权（Minor-2：新联锁事件须重新 ack，防「触发前」
+        // 陈旧授权在 release 后自动重启）——先清 latch 前验证作废发生在置 latch 的同时。
         tr.restore_interlock_latched(true).await.unwrap();
+        assert!(
+            !tr.is_restart_authorized().await,
+            "restore(true)（新触发沿）应作废未消费授权"
+        );
+        // latch 期间 authorize 拒绝（须先 release；latch 下 S-4 首检即挡启）
         assert!(tr.authorize_restart().await.is_err());
     }
 
