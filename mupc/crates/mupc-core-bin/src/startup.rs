@@ -727,6 +727,15 @@ pub async fn initialize_all(
     // M-4 防双写方并存：grid 源在即南向模拟不覆盖；无 grid 源则南向模拟兜底测量）。
     let mut grid_on = false;
     if config.master_meter.enabled {
+        // 迁移期：master_meter 启用时走 legacy 硬编码总表 task（grid 源）。若同时配置了
+        // south_stations 非 grid 站，scheduler 不装配（A 分支优先），这些站本 S3a 不被采集——
+        // 迁移期混合配置的已知边界（core_config 允许，装配不启），显式提示避免静默。
+        if !config.south_stations.stations.is_empty() {
+            tracing::warn!(
+                "迁移期 master_meter 启用：south_stations 配置的 {} 个非 grid 站暂不采集（scheduler 未装配；收敛后删除 master_meter 段并启用 south_stations）",
+                config.south_stations.stations.len()
+            );
+        }
         // A. 迁移期 legacy 总表 task（read_master_meter/read_meter_phases 语义沿用）
         let master_meter = create_master_meter_device(&config.master_meter);
         grid_on = master_meter.is_some();
