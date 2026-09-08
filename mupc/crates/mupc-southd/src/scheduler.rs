@@ -26,7 +26,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::config::{Role, SouthStationsConfig, StationConf};
+use crate::config::{RegFunc, Role, SouthStationsConfig, StationConf};
 use crate::mapper::{self, BlockReads, PollResult};
 use crate::port_runtime::StationBus;
 use crate::station::Station;
@@ -238,7 +238,12 @@ impl SouthScheduler {
         let mut io_error: Option<String> = None;
         if let Some(b) = &bus {
             for blk in &regs {
-                match b.read_holding(slave, blk.addr, blk.count).await {
+                // 按块 func 分发读方法：Holding → FC03 read_holding，Input → FC04 read_input
+                let res = match blk.func {
+                    RegFunc::Holding => b.read_holding(slave, blk.addr, blk.count).await,
+                    RegFunc::Input => b.read_input(slave, blk.addr, blk.count).await,
+                };
+                match res {
                     Ok(reg) => reads.push((blk.clone(), Ok(reg))),
                     Err(e) => {
                         // 站失败语义（§10.7）：任一块读失败 → 整站 offline，本轮无有效数据，
@@ -577,6 +582,51 @@ mod tests {
         sched.tick_once(1000).await; // 恢复（fail 已消费）
         assert_eq!(sink.event_count("hvac", "online"), 1);
         assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+    }
+
+    /// 单站混合 FC03+FC04 块：按 func 分发读（Holding→read_holding、Input→read_input），
+    /// telemetry 全量落库（两 metric），无 offline 事件。
+    #[tokio::test]
+    async fn station_mixed_holding_and_input_blocks() {
+        let bus = Arc::new(MockBus::new());
+        bus.put(3, 100, f32_regs(23.5)); // holding: temp
+        bus.put_input(3, 200, f32_regs(0.0)); // input: alarm_in（值 0.0）
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "mix".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: 9600,
+            interval_ms: 1000,
+            regs: vec![
+                RegBlockConf {
+                    name: "temp".into(),
+                    addr: 100,
+                    func: RegFunc::Holding,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+                RegBlockConf {
+                    name: "alarm_in".into(),
+                    addr: 200,
+                    func: RegFunc::Input,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+            ],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+        assert_eq!(bus.call_count(3, 100), 1, "holding 块应被 FC03 读");
+        assert_eq!(bus.input_call_count(3, 200), 1, "input 块应被 FC04 读");
+        let tel = sink.telemetry_of("mix");
+        assert!(tel.iter().any(|(m, _)| m == "temp"));
+        assert!(tel.iter().any(|(m, _)| m == "alarm_in"));
+        assert_eq!(sink.event_count("mix", "offline"), 0);
     }
 
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。
