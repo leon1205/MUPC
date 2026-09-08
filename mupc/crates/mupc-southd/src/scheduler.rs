@@ -907,6 +907,53 @@ mod tests {
         assert!(sink.soc_of("bms").is_none(), "失败轮不推 soc");
     }
 
+    /// 负面 gating：battery 站 regs **无 soc 块**（role Battery，但 mapper Battery 分支仅空占位
+    /// soc=None）→ 采集成功（无 offline 事件）但**不误推** on_battery_soc——`pkg.battery.soc`
+    /// 为 None 时 `if let` 不触发，核心保证（无 soc 数据不产生 soc 通道噪声）。
+    #[tokio::test]
+    async fn battery_station_without_soc_block_does_not_push() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        // 决议：内联构造 StationConf（不动 battery_conf 签名）——role Battery 但 regs 空（无 soc 块）
+        let st = StationConf {
+            id: "bms".into(),
+            role: Role::Battery,
+            port: "ttyS2".into(),
+            protocol: "modbus".into(),
+            slave: 2,
+            baud_rate: DEFAULT_BAUD_RATE,
+            interval_ms: 1000,
+            regs: vec![],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+        // 空 regs → 无块读、poll 成功（Data 占位、soc=None）：无 offline/online 状态事件
+        assert_eq!(sink.event_count("bms", "offline"), 0);
+        assert_eq!(sink.event_count("bms", "online"), 0);
+        // 关键断言：无 soc 块 → battery.soc None → 不误触 on_battery_soc
+        assert!(sink.soc_of("bms").is_none(), "无 soc 块不应误推 on_battery_soc");
+    }
+
+    /// 负面 gating：非 battery role（hvac）站正常采遥测 → 不触发 battery soc 分支（role
+    /// gating `role == Role::Battery` 保证只有 Battery 站才走 on_battery_soc，其它站零噪声）。
+    #[tokio::test]
+    async fn non_battery_role_never_triggers_soc_channel() {
+        let bus = Arc::new(MockBus::new());
+        bus.put(3, 100, f32_regs(23.5)); // hvac temp 块
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(
+            vec![hvac_conf("hvac", "ttyS1", 3, 1000)],
+            bus.clone(),
+            sink.clone(),
+        );
+        sched.tick_once(0).await;
+        // 正常采遥测（temp 点落库，无 offline 事件）——证明站本身健康
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        assert_eq!(sink.event_count("hvac", "offline"), 0);
+        // 关键断言：hvac（非 Battery）不走 on_battery_soc 通道
+        assert!(sink.soc_of("hvac").is_none(), "非 battery role 不应触发 soc 推送");
+    }
+
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。
     #[test]
     fn due_calc_respects_intervals_and_priority() {
