@@ -169,20 +169,12 @@ pub struct PluginsConfig {
 }
 
 /// 策略引擎配置（v2.24 容量档位 §2.10.2）
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct StrategyConfig {
     /// 台区储能档位 YAML 路径；空 = 默认档 pcs60_dual（唯一向后兼容分支）。
     /// 换 PCS 规格只改此路径指向的档位 key / YAML 加档，不改代码。
     #[serde(default)]
     pub tai_config_file: String,
-}
-
-impl Default for StrategyConfig {
-    fn default() -> Self {
-        Self {
-            tai_config_file: String::new(),
-        }
-    }
 }
 
 /// 台区总表分相数据源配置（U-26）
@@ -464,12 +456,13 @@ impl CoreConfig {
                 ));
             }
         }
-        // v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
+        // TODO(v2.24 M-1)：v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
         // q_i_max）与 intercore transport 驱动点表型号不自动联动——放行任一非
         // 60kW 无中线档时须与驱动点表同批变更并在此核对（当前 60kW 档与
         // modbus_rtu V1.3 驱动天然匹配；has_neutral=true 档已在档位加载侧拦截）。
         // 注：档位 YAML 的实际加载/校验发生在 startup 装配（fail-fast），此处仅
         // 保留位注释，不读文件、不加逻辑。
+        // 实际档位加载/校验在 startup.rs 装配（load_tai_storage_config）处执行（Task 5 落点）。
         // P1-4/P2-2: 台区总表启用时校验现场前提（独立串口/从站）与寄存器映射有效性
         if self.master_meter.enabled {
             self.validate_master_meter()?;
