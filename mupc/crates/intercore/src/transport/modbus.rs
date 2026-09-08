@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use mupc_common::{ErrorCode, MupcError};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
@@ -42,6 +42,12 @@ pub struct ModbusRtuSettings {
 pub struct ModbusRtuTransport {
     settings: ModbusRtuSettings,
     connected: RwLock<bool>,
+    /// RS485 半双工总线事务互斥（W3）。锁在**入口**获取（send_tai_command / send_dual_param
+    /// 整条"模式+启停+功率"序列、latest_soc / probe_link / 心跳每拍各一次读），保证并发
+    /// 指令不在物理线路上交错（模式切换与寄存器写须原子，避免两条控制序列互插）。
+    /// 内部 helper（ensure_*/write_reg/read_input/_once 系）**不**获取本锁，由入口持有；
+    /// 取锁入口须成对，防止嵌套死锁。
+    bus: Mutex<()>,
     /// 已下发的有功模式字（0=恒功率 / 2=分相，u8 缓存）。初值 0xFF 哨兵：与任何合法
     /// 模式不等，保证首条指令必写 REG_MODE（PCS 上电默认模式未知，不能省首次写）。
     mode: AtomicU8,
@@ -123,6 +129,7 @@ impl ModbusRtuTransport {
         Self {
             settings,
             connected: RwLock::new(false),
+            bus: Mutex::new(()),
             // 0xFF 哨兵：首条指令强制写模式字（PCS 上电默认模式未知）
             mode: AtomicU8::new(0xFF),
             started: RwLock::new(false),
@@ -135,13 +142,20 @@ impl ModbusRtuTransport {
         *self.connected.write().await = true;
     }
 
-    /// 离线复位：任一读/写事务失败（串口打开失败/超时/协议异常）即复位，
-    /// 避免断线后 is_connected 恒 true 的语义失真
+    /// 离线复位：任一读/写事务失败（串口打开失败/超时/协议异常）即复位，并**清空
+    /// 模式/启停/SOC 缓存**（W1）——断线期间 PCS 侧可能掉电/复位到默认模式，缓存
+    /// 不再可信；下次指令的 ensure_mode/ensure_started 看到 0xFF 哨兵/false 会强制
+    /// 重写 REG_MODE/REG_START_STOP，恢复 PCS 到预期状态。避免 is_connected 恒 true
+    /// 的语义失真与重连后缓存与实机不符。
     async fn mark_offline(&self) {
         *self.connected.write().await = false;
+        *self.started.write().await = false;
+        self.mode.store(0xFF, Ordering::Relaxed);
+        *self.soc.write().await = None;
     }
 
     /// FC06 写单寄存器（PCS 逐写：一次一寄存器，无批量写）。成功→在线，失败→离线。
+    /// 由持锁入口（send_*/ensure_* 链路，bus 锁已持有）调用，本函数**不**获取 bus 锁。
     async fn write_reg(&self, addr: u16, value: u16) -> Result<(), MupcError> {
         let result = self.write_reg_once(addr, value).await;
         if result.is_ok() {
@@ -165,6 +179,7 @@ impl ModbusRtuTransport {
     }
 
     /// FC04 读输入寄存器（PCS 3 区 SOC/运行状态）。成功→在线，失败→离线。
+    /// 由持锁入口（latest_soc/probe_link，bus 锁已持有）调用，本函数**不**获取 bus 锁。
     async fn read_input(&self, addr: u16, len: u16) -> Result<Vec<u16>, MupcError> {
         let result = self.read_input_once(addr, len).await;
         if result.is_ok() {
@@ -209,8 +224,10 @@ impl ModbusRtuTransport {
         Ok(())
     }
 
-    /// 心跳探测：离线状态被查询时主动读一次 3 区 REG_RUN_STATE 判定在/离线
+    /// 心跳探测：离线状态被查询时主动读一次 3 区 REG_RUN_STATE 判定在/离线。
+    /// 单次读事务持有 [`Self::bus`]，不与并发的下行写序列交错（W3）。
     async fn probe_link(&self) -> bool {
+        let _bus_guard = self.bus.lock().await;
         self.read_input(REG_RUN_STATE, 1).await.map(|_| true).unwrap_or(false)
     }
 
@@ -237,6 +254,8 @@ impl ModbusRtuTransport {
         loop {
             ticker.tick().await;
             // 用 read_input_once（不含状态副作用）：在线/离线由本任务统一判定
+            // 每拍单次读持有 bus 锁（W3），避免与下行写序列在物理线路上交错
+            let _bus_guard = self.bus.lock().await;
             match self.read_input_once(REG_RUN_STATE, 1).await {
                 Ok(_) => {
                     bad = 0;
@@ -260,7 +279,11 @@ impl IntercoreTransport for ModbusRtuTransport {
     /// 首条指令前置写模式字（REG_MODE=2 分相）与启停（REG_START_STOP=1）。
     /// mode 字符串不参与编码：PCS 无"基础/智能/兜底"三态，分相即恒功率曲线由 AiValidator
     /// 校验后下发（上层 ai_integration 传 "fallback" 仅为语义占位，不映射）。
+    ///
+    /// ⚠️ 整条序列持有 [`Self::bus`]：模式切换 + 启停 + 6 寄存器写须原子，避免与并发的
+    /// 恒功率下发/读事务在物理线路上互插（W3）。内部 ensure_*/write_reg 不取锁。
     async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], _mode: &str) -> Result<(), MupcError> {
+        let _bus_guard = self.bus.lock().await;
         self.ensure_mode(MODE_PHASE_SPLIT).await?;
         self.ensure_started().await?;
         for (i, reg) in [REG_PHASE_P_A, REG_PHASE_P_A + 1, REG_PHASE_P_A + 2].iter().enumerate() {
@@ -276,6 +299,7 @@ impl IntercoreTransport for ModbusRtuTransport {
     /// PCS 恒功率无下垂：k_droop 忽略（v2.2 语义偏离，AI 恒功率下发前须经 AiValidator
     /// 范围校验）；cmd.ai_ready/strategy_mode 字段 PCS 点表无对应寄存器，不落盘。
     async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError> {
+        let _bus_guard = self.bus.lock().await;
         self.ensure_mode(MODE_CONST_POWER).await?;
         self.ensure_started().await?;
         self.write_reg(REG_CONST_P_SET, to_pcs_reg(cmd.p_ref)).await?;
@@ -304,6 +328,7 @@ impl IntercoreTransport for ModbusRtuTransport {
     /// 实时读 3 区 REG_SOC(1010)（FC04）。读成功且 SOC∈[0,100] 则更新缓存并返回
     /// （含读取时刻）；读失败或越界返回 None（保留旧缓存值，不因一次坏读数清空）。
     async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
+        let _bus_guard = self.bus.lock().await;
         match self.read_input(REG_SOC, 1).await {
             Ok(r) if !r.is_empty() => {
                 let now = std::time::Instant::now();
@@ -358,5 +383,27 @@ mod tests {
         // 负数与 >100 均视为无效读数
         assert_eq!(decode_soc(to_pcs_reg(-1.0)), None);
         assert_eq!(decode_soc(to_pcs_reg(101.0)), None);
+    }
+
+    #[test]
+    fn test_mark_offline_resets_caches() {
+        // W1：离线复位须清模式/启停/SOC 缓存（0xFF 哨兵/false/None），
+        // 下次指令强制重写 REG_MODE/REG_START_STOP，避免缓存与实机不符
+        let t = ModbusRtuTransport::new(test_settings());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            // 模拟已缓存运行态（此前成功下发过）
+            t.mode.store(MODE_PHASE_SPLIT as u8, Ordering::Relaxed);
+            *t.started.write().await = true;
+            *t.connected.write().await = true;
+            *t.soc.write().await = Some((66.0, std::time::Instant::now()));
+
+            t.mark_offline().await;
+
+            assert_eq!(t.mode.load(Ordering::Relaxed), 0xFF);
+            assert!(!*t.started.read().await);
+            assert!(!*t.connected.read().await);
+            assert!(t.soc.read().await.is_none());
+        });
     }
 }

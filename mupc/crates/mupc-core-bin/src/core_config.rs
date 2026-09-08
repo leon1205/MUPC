@@ -81,7 +81,7 @@ pub struct ModbusRtuConfig {
     /// 串口设备，默认 /dev/ttyS1
     #[serde(default = "default_serial_port")]
     pub serial_port: String,
-    /// 波特率，默认 9600
+    /// 波特率，默认 19200（PCS 线格式 V1.3：N-8-1 @19200）
     #[serde(default = "default_baud_rate")]
     pub baud_rate: u32,
     /// 数据位，默认 8
@@ -327,7 +327,7 @@ fn default_serial_port() -> String {
 }
 
 fn default_baud_rate() -> u32 {
-    9600
+    19200
 }
 
 fn default_data_bits() -> u8 {
@@ -529,7 +529,7 @@ plugins: {}
         assert_eq!(config.intercore.transport, "tcp");
         // 未配置 intercore.modbus_rtu 时默认参数
         assert_eq!(config.intercore.modbus_rtu.serial_port, "/dev/ttyS1");
-        assert_eq!(config.intercore.modbus_rtu.baud_rate, 9600);
+        assert_eq!(config.intercore.modbus_rtu.baud_rate, 19200);
         assert_eq!(config.intercore.modbus_rtu.data_bits, 8);
         assert_eq!(config.intercore.modbus_rtu.stop_bits, 1);
         assert_eq!(config.intercore.modbus_rtu.parity, "none");
