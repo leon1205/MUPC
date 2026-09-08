@@ -390,31 +390,46 @@ pub async fn initialize_all(
 
     // ── 4. 核间通信 ──
     tracing::info!("[04/14] 初始化核间通信...");
-    // 传输通道由 intercore.transport 决定：tcp（默认）| modbus_rtu
-    let intercore: Arc<mupc_intercore::IntercoreClient> = if config.intercore.transport == "modbus_rtu" {
-        let mb = &config.intercore.modbus_rtu;
-        tracing::info!("intercore transport = modbus_rtu: {} @{}", mb.serial_port, mb.baud_rate);
-        let transport = Arc::new(mupc_intercore::ModbusRtuTransport::new(
-            mupc_intercore::ModbusRtuSettings {
-                serial_port: mb.serial_port.clone(),
-                baud_rate: mb.baud_rate,
-                data_bits: mb.data_bits,
-                stop_bits: mb.stop_bits,
-                parity: mb.parity.clone(),
-                slave_addr: mb.slave_addr,
-                response_timeout_ms: mb.response_timeout_ms,
-                heartbeat_poll_ms: mb.heartbeat_poll_ms,
-            },
-        ));
-        // Modbus 无主动心跳，后台轮询读 PCS 3 区 REG_RUN_STATE(1013) 判在线/离线
-        tokio::spawn(transport.clone().run_heartbeat_loop());
-        Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
-    } else {
-        let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
-        let transport = Arc::new(mupc_intercore::TcpTransport::new(remote_addr));
-        // N3: 启动回读接收（实时模块 DataUpload 上送 battery_soc → SOC 数据源）
-        transport.spawn_receive();
-        Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
+    // 传输通道由 intercore.transport 决定：modbus_rtu=生产主链路(PCS 真实协议)，
+    // tcp=仿真/联调（sim-bridge 作 TCP 服务端）。未知值启动即报错（M3），避免
+    // 配置手误静默落到仿真通道、生产 PCS 空转不被控。
+    let intercore: Arc<mupc_intercore::IntercoreClient> = match config.intercore.transport.as_str() {
+        "modbus_rtu" => {
+            let mb = &config.intercore.modbus_rtu;
+            tracing::info!("intercore transport = modbus_rtu: {} @{}", mb.serial_port, mb.baud_rate);
+            let transport = Arc::new(mupc_intercore::ModbusRtuTransport::new(
+                mupc_intercore::ModbusRtuSettings {
+                    serial_port: mb.serial_port.clone(),
+                    baud_rate: mb.baud_rate,
+                    data_bits: mb.data_bits,
+                    stop_bits: mb.stop_bits,
+                    parity: mb.parity.clone(),
+                    slave_addr: mb.slave_addr,
+                    response_timeout_ms: mb.response_timeout_ms,
+                    heartbeat_poll_ms: mb.heartbeat_poll_ms,
+                },
+            ));
+            // Modbus 无主动心跳：后台轮询读 PCS 3 区 REG_RUN_STATE(1013) 判在线/离线。
+            // 句柄入 guard（M8）：优雅退出时随其它后台任务一并 abort，而非只靠 runtime drop
+            guard.0.push(tokio::spawn(transport.clone().run_heartbeat_loop()));
+            Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
+        }
+        "tcp" => {
+            let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
+            let transport = Arc::new(mupc_intercore::TcpTransport::new(remote_addr));
+            // N3: 启动回读接收（实时模块 DataUpload 上送 battery_soc → SOC 数据源）
+            transport.spawn_receive();
+            Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
+        }
+        other => {
+            return Err(MupcError::new(
+                ErrorCode::ConfigError,
+                format!(
+                    "intercore.transport='{other}' 非法：仅支持 \"tcp\"（仿真/联调）或 \"modbus_rtu\"（生产 PCS 主链路）"
+                ),
+                "startup",
+            ));
+        }
     };
     coord.register_service("intercore", ServiceStatus::Running);
 

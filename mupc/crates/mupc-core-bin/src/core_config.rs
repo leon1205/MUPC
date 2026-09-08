@@ -420,6 +420,30 @@ impl CoreConfig {
         if self.web_api.listen_addr.is_empty() {
             return Err("web_api.listen_addr 不能为空".to_string());
         }
+        // M7/生产安全：transport=modbus_rtu（PCS 主链路）时，串口/从站/波特率须合法，
+        // 且在总表启用时不得复用同一串口（RS485 总线仲裁未实现）。非法值启动即报错，
+        // 避免运行时 open_ctx 才暴露。
+        if self.intercore.transport == "modbus_rtu" {
+            let mb = &self.intercore.modbus_rtu;
+            if mb.serial_port.trim().is_empty() {
+                return Err("intercore.modbus_rtu.serial_port 不能为空（transport=modbus_rtu）".to_string());
+            }
+            if !(1..=247).contains(&mb.slave_addr) {
+                return Err(format!(
+                    "intercore.modbus_rtu.slave_addr={} 须在 1..=247（transport=modbus_rtu）",
+                    mb.slave_addr
+                ));
+            }
+            if mb.baud_rate == 0 {
+                return Err("intercore.modbus_rtu.baud_rate 不能为 0（transport=modbus_rtu）".to_string());
+            }
+            if self.master_meter.enabled && self.master_meter.serial_port == mb.serial_port {
+                return Err(format!(
+                    "transport=modbus_rtu 时 master_meter.serial_port={} 不得与 intercore.modbus_rtu.serial_port 相同（RS485 总线仲裁未实现）",
+                    mb.serial_port
+                ));
+            }
+        }
         // P1-4/P2-2: 台区总表启用时校验现场前提（独立串口/从站）与寄存器映射有效性
         if self.master_meter.enabled {
             self.validate_master_meter()?;
@@ -646,6 +670,64 @@ master_meter:
         assert!(
             err.contains("仲裁") || err.contains("独立"),
             "期望提示串口冲突/总线仲裁，实际: {}",
+            err
+        );
+    }
+
+    /// M7: transport=modbus_rtu（PCS 生产链路）时 slave_addr 越界 → validate Err
+    #[test]
+    fn test_validate_modbus_rtu_slave_addr_range() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+  modbus_rtu:
+    slave_addr: 0
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("slave_addr"),
+            "期望提示从站地址越界（transport=modbus_rtu），实际: {}",
+            err
+        );
+    }
+
+    /// M7: transport=modbus_rtu 与总表同串口 → validate Err（RS485 总线仲裁未实现）
+    #[test]
+    fn test_validate_modbus_rtu_shared_serial_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+  modbus_rtu:
+    serial_port: "/dev/ttyS1"
+    slave_addr: 1
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS1"
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("不得与 intercore") || err.contains("仲裁"),
+            "期望提示与 intercore.modbus_rtu 串口冲突，实际: {}",
             err
         );
     }
