@@ -107,9 +107,15 @@ fn main() {
         }
         i += 1;
     }
-    // v2.24 guard：--capacity-profile 无 --config-file 时，加载器走 blank→default
+    // v2.24 guard：--capacity-profile 无有效 --config-file 时，加载器走 blank→default
     // 分支会忽略 profile_key → 在默认档假设下静默出 KPI（本特性要杜绝），直接拒绝。
-    if capacity_profile.is_some() && config_file.is_none() {
+    // 判定与加载器内部"空/空白 → None"归一保持一致（防 --config-file "" 绕过）。
+    let has_config_file = config_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if capacity_profile.is_some() && !has_config_file {
         eprintln!("错误: --capacity-profile 需要配合 --config-file <档位YAML> 使用（未指定档位表，将静默落默认档，已拒绝）");
         print_usage_and_exit();
     }
