@@ -1,0 +1,73 @@
+# MUPC 主控进程配置文件 —— 【生产模板】（PCS 真实协议主链路）
+# 用途：现场部署时复制为 /opt/mupc/config/mupc_core_config.yaml，并按现场实际
+#       填写串口/从站地址（EMS 接 PCS A2/B2，RS485 19200 N-8-1）。
+# 对照：仓库默认 mupc_core_config.yaml 的 intercore.transport=tcp 仅供仿真/联调
+#       （sim-bridge 作 TCP 服务端）；生产必须 transport=modbus_rtu 直连 PCS，
+#       否则 PCS 永不被控（空连 TCP 9100）。mupcd 通过 --config 指定此文件路径。
+
+version: "1.0"
+
+system:
+  log_level: "info"              # info / debug / warn / error
+  log_dir: "/opt/mupc/logs"
+  data_dir: "/opt/mupc/data"
+  plugin_dir: "/opt/mupc/lib/plugins"
+  cert_dir: "/opt/mupc/certs"
+  shutdown_timeout_sec: 30
+
+intercore:
+  transport: "modbus_rtu"       # 【生产】modbus_rtu → 两级式 PCS（实时控制模块）
+  host: "192.168.1.2"           # (tcp 仿真专用，modbus_rtu 下不使用)
+  port: 9100
+  heartbeat_interval_sec: 5
+  reconnect_interval_sec: 3
+  modbus_rtu:                   # modbus_rtu 通道参数（PCS 协议 V1.3 线格式）
+    serial_port: "/dev/ttyS1"   # ⚠️ 现场按实际 RS485 口修改
+    baud_rate: 19200
+    data_bits: 8
+    stop_bits: 1
+    parity: "none"              # none / even / odd
+    slave_addr: 1               # PCS 从站地址（拨码，默认 1）
+    response_timeout_ms: 200
+    heartbeat_poll_ms: 1000
+
+web_api:
+  listen_addr: "0.0.0.0:8080"
+  enable_https: false            # Phase 2+ 启用
+  # tls_cert: "/opt/mupc/certs/server.crt"
+  # tls_key: "/opt/mupc/certs/server.key"
+
+ai_engine:
+  model_dir: "/opt/mupc/models"
+  config_file: "/opt/mupc/config/mupc_env_config.yaml"
+  enable_npu: true               # 是否启用 RK3588 NPU
+  inference_timeout_ms: 500
+  # 部署默认：本地策略优先（本地台区储能治理策略控制，AI 旁路参考不下发）
+  # 需 AI 智能控制时置 false 或经 Web API /api/v1/strategy-mode 运行时切换
+  local_priority: true
+
+plugins:
+  search_paths:
+    - "/opt/mupc/lib/plugins"
+  auto_load:
+    - "rs485_plugin"
+    - "hplc_plugin"
+    - "mqtt_plugin"
+
+# 台区总表分相数据源（U-26：台区储能策略 phase 输入；投产遥测真源）
+# enabled: true 并填真实点表后方启用。
+# ⚠️ serial_port 必须与 intercore.modbus_rtu.serial_port 不同（RS485 总线仲裁未实现，
+#    相同会启动报错）。reg_map 各量为现场点表占位，投运前须填真点表。
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyUSB0"    # ⚠️ 须与 intercore.modbus_rtu 串口不同
+  baud_rate: 9600                # 现场按总表实际填
+  slave_addr: 3                  # 现场按总表实际填
+  read_interval_ms: 1000
+  reg_map:                 # 示例占位地址；三相连续，Int32/Float32 均 2 寄存器/相
+    p:  { addr: 0x0000, format: int32_scaled, scale: 0.01 }   # P_A/B/C
+    q:  { addr: 0x0006, format: int32_scaled, scale: 0.01 }   # Q_A/B/C
+    pf: { addr: 0x000C, format: int32_scaled, scale: 0.001 }  # PF_A/B/C
+    u:  { addr: 0x0012, format: float32 }                     # U_A/B/C
+    i:  { addr: 0x0018, format: int32_scaled, scale: 0.01 }   # I_A/B/C
+    p_total: { addr: 0x001E, format: int32_scaled, scale: 0.01 }

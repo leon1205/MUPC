@@ -664,6 +664,13 @@ pub enum WatchdogState {
 - 累积丢失心跳次数
 - 对端状态码、CPU 温度、内存使用率
 
+> **⚠️ PCS 形态说明（transport=modbus_rtu，v2.2+）**：上表对端 IP/CPU 温度/内存等字段
+> 源自 TCP 仿真通道的 StatusReport——**PCS 生产通道无此上送**（PCS 仅 RS485，无 TCP 状态帧）。
+> PCS 通道连接/健康由 `ModbusRtuTransport` 心跳轮询 3 区 1013 驱动（`connected` 标志 +
+> 停机观测 M1），经 `IntercoreClient::is_connected()` 对上层可见；**1013 运行状态/告警字到
+> Web UI / system-monitoring 状态展示的具体字段映射尚未设计**（M12，属 §11.11 健康可选
+> 接入的对外呈现，待 Web API 对接 PCS 健康项时补）。
+
 **对外查询接口：**
 
 | 方法 | 返回值 | 说明 |
@@ -959,6 +966,13 @@ mupc/crates/intercore/
     └── watchdog.rs             # 看门狗（Watchdog、WatchdogConfig、WatchdogState）
 ```
 
+> **⚠️ v2.2 文件结构变更**：上表为 §2-§9 TCP 仿真栈快照。§11 Modbus/PCS 驱动新增
+> `src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）+ `src/transport/modbus.rs`
+> （PCS 驱动）+ `src/transport/tcp.rs`（TcpTransport）+ `src/pcs.rs`（PCS 点表/编解码）；
+> 假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用；PCS 协议
+> 从站仿真为 `src/bin/pcs_slave.rs`。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP
+> server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。
+
 ### 9.2 文件职责说明
 
 | 文件 | 职责 | 关键导出 |
@@ -1007,6 +1021,12 @@ tokio-test = "0.4"              # Tokio 测试工具
 | ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16 |
 | ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载。**⚠️ v2.2 PCS 架构修正**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26）；SafetyOverride 概念废弃，由 PCS 内部保护 + AiValidator 承接；边界更新为 **Modbus 承载控制+SOC+健康，遥测转总表**（详见 ADR-013 / §11.11） |
 | ADR-013 | Modbus 通道真实协议 | ① 自定义假设点表（cmd_valid/exec 确认区，早期实现）；② **PCS 真实协议 V1.3**（FC06 写即生效、分相模式、int16 缩放+字节互换） | **PCS 真实协议（方案②，v2.2）** | 实时控制模块=两级式 PCS，经现场协议资料确认点表；假设表无法对接真实设备，PCS 为标准 Modbus 从站无自建确认区 |
+
+> **⚠️ ADR-010 修订注（2026-09-08，M11）**：ADR-010 的「int32 有符号缩放（2 寄存器/值，
+> 0.01kW）」编码结论适用于已作废的假设表（§11.4-11.6 / `modbus_rtu.rs` 旧路径仿真）。
+> **PCS 真实协议（ADR-013）下寄存器编码由设备协议 V1.3 固定为 int16 单寄存器 *1kW +
+> 高 8/低 8 字节互换**，非本系统可选——ADR-010 不再适用于 PCS 通道，读者勿据此误采
+> int32/0.01kW。ADR-011（tokio-modbus 栈选型）仍有效。
 
 ### 10.2 待澄清问题
 
@@ -1175,6 +1195,7 @@ intercore:
 5. ~~**遥测/SafetyOverride 依赖 TCP**（ADR-012 边界）：`transport=modbus_rtu` 时须保证 TCP 链路仍承载遥测与安全事件~~：**⚠️ v2.2 PCS 架构已取代本项**——PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26），SafetyOverride 概念废弃（由 PCS 内部保护 + AiValidator 承接）；Modbus 只承载 控制+SOC+健康，不再依赖 TCP 承载遥测/安全事件（原「无以太网现场遥测路径未覆盖」风险消解）；
 6. **配置热切偏离**（对齐 PRD §7.4）：`transport` 为部署配置二选一，需重启生效；Web UI 运行时切换不实现，记为此处对 PRD 可维护性需求的授权偏离；
 7. **日志脱敏**（对齐 PRD §7.3）：PCS 寄存器写值（控制数值）不入日志，仅记录指令类型/结果/寄存器地址（PCS 无 `cmd_seq`）。
+8. **写确认超时/重试授权偏离（2026-09-08 记，M4）**：PRD IC-AC-36「写响应超时 5s→失败→可选重试≤2」源于假设表时代的指令级确认语义（§11.4 已作废）。PCS 真实协议 FC06 单帧写响应由串口层 `response_timeout_ms=200` 兜底（帧级超时），**未实现指令级 5s 超时与显式重试**——以 1s 控制周期下周期重发整序列作隐式重试（FC06 幂等）。与 PRD 的量化差异记为授权偏离；实机若暴露单帧响应 >200ms 再上调帧级超时并评估显式重试。
 
 ---
 
@@ -1212,6 +1233,14 @@ intercore:
 - 心跳/在线：周期 FC04 读 3区1013（运行状态）成功即在线，连续失败判离线（替换假设表心跳计数器）；原 `modbus_slave` 假设表参考仅测旧路径，PCS 以实机联调为准
 - 故障字（**可选**健康接入，非实时必需）：读 3 区 1000-1004 模块详细告警位 + 1005 BMS 工作状态 + 1014 模块故障状态，**区分运行停机（1013=0 且无告警）与保护跳闸（1014=1 或告警字非 0）**联读；PCS 内部保护为第一道安全防线，MUPC 侧仅旁路观测/告警，不并作策略遥测
 
+**上电初始化/冷启动与模式缓存重同步（2026-09-08 补，M5；框架高危项 S001）**：
+- **冷启动时序**（transport 构造后、首个下行周期前）：① 装配方 spawn `run_heartbeat_loop`（startup.rs 已将其句柄入后台任务 guard）；② 心跳任务首拍 FC04 读 3 区 1013 判链路在/离线并建立 online 基线；③ SOC 由首个 `latest_soc`（FC04 读 1010）注入，AiIntegrator 自该时刻起算 5s 新鲜度；④ 首个下行指令前 transport 的 `mode=0xFF` 哨兵 + `started=false` 保证顺序 **先写 REG_MODE → 再 REG_START_STOP=1 → 后写功率**。冷启动无独立"初始判定"模块——在线基线、SOC 时间戳、模式/启停首写均落在心跳首拍与首个 send 序列，不依赖运行时周期之外的特殊分支。
+- **模式/启停缓存重同步缺口**：`mode`（AtomicU8）/`started`（RwLock）仅写侧缓存，**无 4 区 1000/500 回读校验**。链路断线 → W1 已令 `mark_offline` 清缓存（0xFF 哨兵/false）→ 下次指令强制重写，此路径已闭环。**链路在线但 PCS 被第三方（HMI/外部）切换模式/停机时缓存失步**：每周期 `ensure_mode` 仅当缓存≠目标才写，失步会致模式未重写而功率照写（PCS 按错误模式执行）。缓解：① 待厂方确认 4 区 1000 是否可 FC03 读回，可读则周期读回比对；② 不可读则 send 前无条件写模式字（额外 1 帧）——均列契约待确认项。
+
+**停机观测与状态字校验（M1/M9a，2026-09-08 代码落地）**：
+- 心跳每拍**解码 1013 值**（M9a）：仅 ∈0..3（0 停/1 待机/2 充电/3 放电）视为健康读数判在线；乱码/错位帧（可通过 Modbus CRC 的罕见坏帧）按坏读数计数，不判在线。
+- **停机观测（M1）**：心跳读到 1013=0（停机）且 transport 此前已下发启动（`started=true`）→ 判定远端停机（保护跳闸/人工停机），`tracing::warn` 告警一次（去抖）。**策略=保守不自动重启**：不动 `started` 缓存、不重发 500=1（PCS 启停 500 电平/边沿语义待厂方确认，自动重启可能造成保护跳闸-重启振荡）；恢复动作留给上层/运维决策。该观测打破「链路在、PCS 已停、MUPC 静默继续写功率」盲区（上一轮 W1 仅覆盖链路断线场景）。
+
 **配置**：复用 `core_config ModbusRtuConfig`（serial_port/baud/slave_addr/超时），§11.7 配置示例波特率已为 **19200**（PCS 默认）；点表地址/字节序为代码常量映射（`addr_base` 可配供现场校准）。
 
 **容量对齐**：策略 `arbitrate`（i_rated 190A≈41.8kVA/相）高于 PCS 分相限（±25kW≈110A/相）——投产时按 PCS 容量调策略容量参数（投产项），PCS 侧 clamp 为硬限兜底。
@@ -1228,9 +1257,15 @@ intercore:
 - **符号约定**：恒功率/分相正放负充的固件最终确认（正放负充为设计默认，须厂方背书）；
 - **1018 有功功率变化率联动**：PCS 内部变化率限值与 MUPC 策略 ramp 的协调，避免两侧限值叠加导致响应滞后或超调。
 
-**测试**：PCS int16 缩放/字节 swap 编解码 roundtrip、单相 clamp、模式切换缓存、写序列组装；端到端以真实 PCS RS485 联调。
+**测试**：PCS int16 缩放/字节 swap 编解码 roundtrip、单相 clamp、模式切换缓存、写序列组装；**软件端到端**（M10）：`src/bin/pcs_slave.rs`（PCS V1.3 协议从站仿真，按启停+有功方向推演 1013 运行状态、1010 SOC 恒 66%）经虚拟串口对（Linux socat / Windows com0com）与 `ModbusRtuTransport` 对打，验证寄存器映射/字节互换/写序列/心跳判定；**最终端到端以真实 PCS RS485 联调**（填点表 / 核相）。
 
 **验证状态（2026-09-04）**：pcs.rs 编解码 + `ModbusRtuTransport` PCS 驱动重构完成，`mupc-intercore` lib 31 测试全绿（含 PCS 编解码 roundtrip / SOC 3 区 1010 校验 / 心跳 REG_RUN_STATE(1013) 判定），`cargo check --workspace` 通过（上层调用方零改动）。端到端 PCS 实机 RS485 联调待 PCS 硬件（填点表 / 核相 / 并机基线）；PCS 契约待确认清单（模式热切换 / 启停 500 时序 / 4 区 502-503 / 符号约定）仍未获厂方答复。
+
+**验证状态补记（2026-09-08，code-reviewer W1-W3 + 项目级审查 Action 修复）**：
+- W1 离线清缓存 / W2 波特率默认 19200 / W3 总线事务互斥（`bus: Mutex<()>` 入口持锁）落地；`cargo check --workspace` 0 error，intercore lib 测试通过。
+- 项目级审查修复：M1 停机观测（1013=0 告警、不自动重启）、M9a 运行状态值校验（∈0..3）、M6 删只写不读的 soc 缓存、M3 startup transport 显式 match（未知值启动报错）、M8 心跳句柄入后台任务 guard、M7 config.validate 校验 modbus_rtu 配置合法性及与总表串口互斥。
+- 部署/测试配套：`mupc/deploy/config/mupc_core_config.production.yaml`（transport=modbus_rtu 生产模板，与仿真 tcp 默认配置分离）；`src/bin/pcs_slave.rs` PCS 协议从站仿真（见上测试）。
+- 文档补记：ADR-010 取代注（M11）、§11.10 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
 
 ---
 
