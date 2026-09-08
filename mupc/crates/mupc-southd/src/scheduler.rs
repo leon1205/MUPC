@@ -629,6 +629,115 @@ mod tests {
         assert_eq!(sink.event_count("mix", "offline"), 0);
     }
 
+    /// 混块站 input 块（FC04）读失败 → 整站 offline + 部分弃用（§10.7 两层失败隔离语义一致）：
+    /// 读序 holding temp(100) Ok → input alarm_in(200) Err → 已读 Ok 块整体弃用（无部分交付，
+    /// telemetry 空），且 early-break 不再读其后的第三块 temp2(300)。
+    #[tokio::test]
+    async fn mixed_blocks_input_failure_isolates_station_no_partial_delivery() {
+        let bus = Arc::new(MockBus::new());
+        bus.put(3, 100, f32_regs(23.5)); // holding: temp（首个块，会先读到）
+        bus.put_input(3, 200, f32_regs(1.0)); // input: alarm_in（第二块，命中失败）
+        bus.put(3, 300, f32_regs(45.0)); // holding: temp2（第三块，early-break 后不应被读）
+        bus.fail_input_once(3, 200); // input 块一次超时
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "mix".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: 9600,
+            interval_ms: 1000,
+            regs: vec![
+                RegBlockConf {
+                    name: "temp".into(),
+                    addr: 100,
+                    func: RegFunc::Holding,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+                RegBlockConf {
+                    name: "alarm_in".into(),
+                    addr: 200,
+                    func: RegFunc::Input,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+                RegBlockConf {
+                    name: "temp2".into(),
+                    addr: 300,
+                    func: RegFunc::Holding,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+            ],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+
+        // 读序：holding temp 先读到（FC03）→ input alarm_in 读 1 次即失败（FC04）
+        assert_eq!(bus.call_count(3, 100), 1, "holding 块应先被 FC03 读");
+        assert_eq!(bus.input_call_count(3, 200), 1, "input 块应被 FC04 读 1 次后失败");
+        // 任一块读失败 → 整站 offline（事件一次）；已读 Ok 块整体弃用——无部分交付
+        assert_eq!(sink.event_count("mix", "offline"), 1, "input 块失败应隔离整站");
+        assert!(
+            sink.telemetry_of("mix").is_empty(),
+            "holding 已读但不部分交付——本轮无 telemetry"
+        );
+        // early-break：input 块失败即 break → 其后的第三块 temp2(300) 不应被读
+        assert_eq!(bus.call_count(3, 300), 0, "early-break 应钳制读序，不再读后续块");
+    }
+
+    /// 纯 FC04 站（全 input 块、无 holding）：读走 read_input 可正常采集（telemetry 非事件）。
+    /// 与混块测互补：覆盖「站 regs 全部 input 块」的采集路径（无 holding 兜底）。
+    #[tokio::test]
+    async fn pure_input_blocks_station_collects_via_fc04() {
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(3, 200, f32_regs(0.5)); // input: alarm_in
+        bus.put_input(3, 202, f32_regs(1.5)); // input: status_in
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "pure_in".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: 9600,
+            interval_ms: 1000,
+            regs: vec![
+                RegBlockConf {
+                    name: "alarm_in".into(),
+                    addr: 200,
+                    func: RegFunc::Input,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+                RegBlockConf {
+                    name: "status_in".into(),
+                    addr: 202,
+                    func: RegFunc::Input,
+                    format: RegFormat::Float32,
+                    scale: 0.0,
+                    count: 2,
+                },
+            ],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+
+        assert_eq!(bus.input_call_count(3, 200), 1, "全 input 块站应走 FC04");
+        assert_eq!(bus.input_call_count(3, 202), 1);
+        assert_eq!(bus.call_count(3, 200), 0, "纯 input 块站不应发 FC03 holding 读");
+        let tel = sink.telemetry_of("pure_in");
+        assert!(tel.iter().any(|(m, v)| m == "alarm_in" && *v == 0.5));
+        assert!(tel.iter().any(|(m, v)| m == "status_in" && *v == 1.5));
+        assert_eq!(sink.event_count("pure_in", "offline"), 0);
+    }
+
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。
     #[test]
     fn due_calc_respects_intervals_and_priority() {
