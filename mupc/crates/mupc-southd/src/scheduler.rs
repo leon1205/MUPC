@@ -10,6 +10,10 @@
 //! - 一切非 grid 站 → [`StationSink::on_station_telemetry`]（telemetry 落库 + 状态事件）。
 //!   单写方口径：同一站数据绝不走两个通道（battery soc 经 telemetry 全量落库，暂不单独
 //!   推 pkg.battery.soc——SOC 融合留 S3b §2.11）。
+//!
+//! 观测契约：每口 task 由其采集循环常驻，任一口 task 内 panic 会**静默终止**该口采集
+//! （无自动重 spawn）。调用方必须持有并观测 [`SouthScheduler::spawn`] 返回的每个
+//! `JoinHandle`（详见其文档；core-bin Task 7 接线时落实）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -174,6 +178,10 @@ impl SouthScheduler {
 
     /// 启动：每口 spawn 一条采集 task（poll_ms tick 循环，自 now 起算 uptime 驱动 due），
     /// 直至返回的 JoinHandle 被 abort。口间并发；口内串行。
+    ///
+    /// 返回的每个 `JoinHandle` **调用方必须持有并观测**：task 内任何 panic 都会静默终止
+    /// 该口采集（无自动重 spawn）。观测方式：定期查 `is_finished()`，或 `await` 返回 `Err`
+    /// 时记 error / 重建该口 task。core-bin（Task 7）接线时落实实际观测与重建。
     pub fn spawn(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
         let poll_ms = self.cfg.poll_ms.max(1);
         let mut handles = Vec::with_capacity(self.runners.len());
@@ -228,8 +236,13 @@ impl SouthScheduler {
                 match b.read_holding(slave, blk.addr, blk.count).await {
                     Ok(reg) => reads.push((blk.clone(), Ok(reg))),
                     Err(e) => {
+                        // 站失败语义（§10.7）：任一块读失败 → 整站 offline，本轮无有效数据，
+                        // 不部分交付——已读 Ok 块随失败路径整体弃用（io_error 即返回，reads 丢弃）。
+                        // 首块错误即 break → 钳制同口 cadence 受损上界（不为该站耗尽本轮预算，
+                        // 尽快回到同口其它站）。故 `reads` 从不带 Err 条目进 mapper/telemetry_points
+                        // ——mapper 里跳过 Err 块的分支为「多块站扩展时部分交付」预留，与模块头
+                        // 「同站单写方、整站 offline 隔离」语义一致。
                         io_error = Some(format!("{} @ {:#06x} x{}", e, blk.addr, blk.count));
-                        reads.push((blk.clone(), Err(e.to_string())));
                         break;
                     }
                 }
@@ -251,6 +264,10 @@ impl SouthScheduler {
                 if role == Role::MeterGrid {
                     self.sink.on_grid_package(pkg).await;
                 } else {
+                    // 非 grid（battery/hvac/fire/meter_batt）的 DataPackage 载荷本 S3a 不消费
+                    // ——pkg 在此仅用于 match 到 Data 分支确认站「活着」；battery SOC 融合留
+                    // S3b §2.11（模块头单写方口径）。`pkg` 被 grid 分支消费故无 unused 告警，
+                    // 此处不再引用。遥测值以 telemetry_points(&reads) 二次 decode 落库。
                     let pts: Vec<(String, f64, bool)> = mapper::telemetry_points(&reads)
                         .into_iter()
                         .map(|(m, v)| (m, v, false))
@@ -269,7 +286,8 @@ impl SouthScheduler {
         let (emit, id, role) = {
             let mut st = self.state.write().unwrap();
             let s = &mut st[station_index];
-            s.offline_count += 1;
+            // saturating：防 u32 极端回绕归零误判恢复（漏 online 事件，§10.7 状态机不破）
+            s.offline_count = s.offline_count.saturating_add(1);
             let now = Utc::now();
             let emit = match s.last_offline_event {
                 None => true, // 首次失败立即记一次
