@@ -13,6 +13,7 @@ use mupc_common::{ErrorCode, MupcError};
 use mupc_core::service_coord::ServiceStatus;
 use mupc_core::service_coord_impl::ServiceCoordinatorImpl;
 use mupc_system_monitor::MetricCollector;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core_config::{CoreConfig, MasterMeterConfig, MeterRegBlock};
@@ -352,6 +353,94 @@ fn datapackage_to_telemetry_points(
         .collect()
 }
 
+/// S3 §10.3：southd 采集结果 sink（core-bin 装配侧实现，startup 是 core-bin 唯一装配者）。
+///
+/// 分流语义（southd scheduler 已按 role 分流，单写方口径见 southd 模块头）：
+/// - grid → `AiIntegrator::set_latest_data`（策略 phase 唯一写方；与迁移期 legacy 总表
+///   task 经装配处二选一互斥，绝不并存第二写方）。
+/// - 非 grid 遥测点（is_event=false）→ WriteBuffer 落库（telemetry）。
+/// - offline/online 状态事件（is_event=true，metric=offline/online）→ storage.events 落库
+///   + SSE system alert。
+struct SouthSink {
+    ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+    write_buffer: Arc<mupc_storage::WriteBuffer>,
+    events: Arc<dyn mupc_storage::EventRepository>,
+    sse: Arc<mupc_web_api::SsePushService>,
+}
+
+impl SouthSink {
+    fn new(
+        ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+        write_buffer: Arc<mupc_storage::WriteBuffer>,
+        events: Arc<dyn mupc_storage::EventRepository>,
+        sse: Arc<mupc_web_api::SsePushService>,
+    ) -> Self {
+        Self {
+            ai_integrator,
+            write_buffer,
+            events,
+            sse,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl mupc_southd::scheduler::StationSink for SouthSink {
+    async fn on_grid_package(&self, pkg: mupc_data_processing::DataPackage) {
+        self.ai_integrator.set_latest_data(pkg).await;
+    }
+
+    async fn on_station_telemetry(
+        &self,
+        station_id: &str,
+        role: mupc_southd::config::Role,
+        points: Vec<(String, f64, bool)>,
+    ) {
+        for (metric, value, is_event) in points {
+            if is_event {
+                // 状态事件（offline/online 由 scheduler handle_failure/mark_success 合成）：
+                // DB 落库 + SSE system alert。落库失败仅 warn 不 panic（interlock 同范式）。
+                let ev = mupc_storage::SystemEvent {
+                    id: None,
+                    timestamp: chrono::Utc::now(),
+                    // 形如 south_station.<站id>.offline / .online
+                    event_type: format!("south_station.{}.{}", station_id, metric),
+                    source: station_id.to_string(),
+                    message: format!(
+                        "站 {} role={:?} {}",
+                        station_id,
+                        role,
+                        if metric == "offline" {
+                            "离线（采集失败）"
+                        } else if metric == "online" {
+                            "恢复上线"
+                        } else {
+                            metric.as_str()
+                        }
+                    ),
+                };
+                if let Err(e) = self.events.insert(&ev).await {
+                    tracing::warn!("南向站事件落库失败 {}: {}", ev.event_type, e);
+                }
+                let _ = self.sse.push_system_alert("warning", &ev.message);
+            } else {
+                // 普通遥测点落库
+                let tp = mupc_storage::TelemetryPoint {
+                    id: None,
+                    device_id: station_id.to_string(),
+                    timestamp: chrono::Utc::now(),
+                    metric_name: metric,
+                    value,
+                    quality: 0,
+                };
+                if let Err(e) = self.write_buffer.buffer_telemetry(tp).await {
+                    tracing::debug!("南向遥测落库失败 {}: {}", station_id, e);
+                }
+            }
+        }
+    }
+}
+
 /// 按依赖顺序初始化所有子系统
 ///
 /// 14 步初始化流程，每步失败时级联清理已启动的服务。
@@ -617,36 +706,97 @@ pub async fn initialize_all(
     }));
     coord.register_service("gateway", ServiceStatus::Running);
 
-    // U-26: 台区总表分相数据源（策略 phase 输入）。启用且设备实际可用（串口 open 成功）时，
-    // 总表 pkg 作为策略测量，南向模拟数据不再 set_latest_data（避免覆盖含分相的总表数据）。
-    // P1-2: meter_on 取总表*实际可用性*而非仅 enabled 配置——enabled 但 open 失败时回退南向，
-    // 南向采集继续 set_latest_data 兜底测量（不因配置启用而丢失测量源）。
-    let master_meter = if config.master_meter.enabled {
-        create_master_meter_device(&config.master_meter)
-    } else {
-        None
-    };
-    let meter_on = master_meter.is_some();
-    match master_meter {
-        Some(meter) => {
-            tracing::info!("台区总表在线：策略测量以总表分相数据为准");
-            let ai_int_meter = ai_integrator.clone();
-            let cfg_m = config.master_meter.clone();
-            guard.0.push(tokio::spawn(async move {
-                let interval = std::time::Duration::from_millis(cfg_m.read_interval_ms);
-                loop {
-                    tokio::time::sleep(interval).await;
-                    if let Some(pkg) = read_master_meter(&meter, &cfg_m) {
-                        ai_int_meter.set_latest_data(pkg).await;
-                        tracing::debug!("总表分相数据已注入策略");
+    // ── S3 §10.3 / U-26：策略 phase 源装配（迁移期二选一；core_config validate R-H 已保证
+    // master_meter.enabled 与 south_stations.meter_grid 不同时出现）──
+    //   A. config.master_meter.enabled → legacy 硬编码总表 task（迁移期旧路径；open 成功才视为
+    //      grid 源在线——P1-2：enabled 但 open 失败回退 pv/load 南向模拟兜底）。
+    //   B. south_stations 含 meter_grid → southd scheduler（grid 单写方 = SouthSink →
+    //      AiIntegrator.set_latest_data；非 grid 站 telemetry/状态事件亦经 SouthSink 落库）。
+    //      grid 源配置存在即 grid_on=true：某站 offline 由 scheduler 出事件，pv/load 不兜底
+    //      set_latest_data（保持"grid 单写方"，真实数据新鲜度由 AiIntegrator 5s 闸门判断）。
+    // grid_on = 策略 phase 源可用（决定下方 pv/load 南向模拟 task 是否 set_latest_data；
+    // M-4 防双写方并存：grid 源在即南向模拟不覆盖；无 grid 源则南向模拟兜底测量）。
+    let mut grid_on = false;
+    if config.master_meter.enabled {
+        // A. 迁移期 legacy 总表 task（read_master_meter/read_meter_phases 语义沿用）
+        let master_meter = create_master_meter_device(&config.master_meter);
+        grid_on = master_meter.is_some();
+        match master_meter {
+            Some(meter) => {
+                tracing::info!("台区总表在线（迁移期 legacy 路径）：策略测量以总表分相数据为准");
+                let ai_int_meter = ai_integrator.clone();
+                let cfg_m = config.master_meter.clone();
+                guard.0.push(tokio::spawn(async move {
+                    let interval = std::time::Duration::from_millis(cfg_m.read_interval_ms);
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        if let Some(pkg) = read_master_meter(&meter, &cfg_m) {
+                            ai_int_meter.set_latest_data(pkg).await;
+                            tracing::debug!("总表分相数据已注入策略");
+                        }
                     }
+                }));
+            }
+            None => tracing::warn!(
+                "台区总表不可用（enabled 但 open 失败），策略测量回退 pv/load 南向模拟"
+            ),
+        }
+    } else if config.south_stations.grid_station().is_some() {
+        // B. southd 路径（south_stations.stations 非空且含 meter_grid 才命中）
+        let sink = Arc::new(SouthSink::new(
+            ai_integrator.clone(),
+            write_buffer.clone(),
+            storage.events.clone(),
+            sse_push.clone(),
+        ));
+        // 每口 open 一次 Rs485PortBus：按 port 去重。open 失败口不入 map → 该口全站走
+        // offline 事件隔离（§10.7 不阻断启动）。口单 poller、站级隔离由 scheduler 负责。
+        let mut buses: HashMap<String, Arc<dyn mupc_southd::port_runtime::StationBus>> =
+            HashMap::new();
+        let mut seen_ports: Vec<String> = Vec::new();
+        for st in &config.south_stations.stations {
+            if seen_ports.contains(&st.port) {
+                continue;
+            }
+            seen_ports.push(st.port.clone());
+            match mupc_southd::port_runtime::Rs485PortBus::open(st) {
+                Ok(bus) => {
+                    buses.insert(st.port.clone(), Arc::new(bus));
                 }
-            }));
+                Err(e) => tracing::warn!(
+                    "southd 口 {} 打开失败（该口站 offline 隔离，不阻断启动）: {}",
+                    st.port,
+                    e
+                ),
+            }
         }
-        None if config.master_meter.enabled => {
-            tracing::warn!("台区总表不可用，策略测量回退南向");
+        let opened = buses.len();
+        let cfg_ports = seen_ports.len();
+        let station_count = config.south_stations.stations.len();
+        let scheduler = mupc_southd::scheduler::SouthScheduler::new(
+            config.south_stations.clone(),
+            buses,
+            sink,
+        );
+        let handles = scheduler.spawn();
+        let handle_count = handles.len();
+        grid_on = true;
+        // 观测：句柄全部入 TaskGuard（Phase 6 优雅退出 abort）。口 task panic 静默停采该口
+        // 的完整观测/重建 supervisor 留 TODO（Task 7 决议：装配期不引入，仅持有句柄不裸丢）。
+        for h in handles {
+            guard.0.push(h);
         }
-        None => {}
+        tracing::info!(
+            "southd 已装配：{} 站 / 配置 {} 口，open 成功 {} 口 → {} 条采集 task（grid 源单写 AiIntegrator，非 grid 遥测/事件经 SouthSink 落库）",
+            station_count,
+            cfg_ports,
+            opened,
+            handle_count
+        );
+    } else {
+        tracing::info!(
+            "无 grid 策略源（master_meter 未启用且 south_stations 无 meter_grid），策略测量由 pv/load 南向模拟兜底"
+        );
     }
 
     // 南向数据采集循环（上行）：读取 → 转换 → 持久化 + 北向 gateway 上送
@@ -656,7 +806,7 @@ pub async fn initialize_all(
         let rt_source = ai_engine.realtime_source();
         let ai_int = ai_integrator.clone();
         guard.0.push(tokio::spawn(async move {
-            let meter_on = meter_on; // 总表启用时策略测量由总表提供
+            let grid_on = grid_on; // grid 策略源在时（legacy 总表/southd）由它提供，南向模拟不覆盖
             // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
             let mut ioa_seq = 0u32;
             loop {
@@ -667,8 +817,9 @@ pub async fn initialize_all(
                             let pkg = dataframe_to_datapackage(&frame);
                             // 注入实时数据到 AI 融合引擎（供 fuse 使用）
                             *rt_source.write().await = Some(datapackage_to_realtime_data(&pkg));
-                            // 注入遥测到 AiIntegrator（总表启用时策略 phase 由总表提供，南向模拟不覆盖）
-                            if !meter_on {
+                            // 注入遥测到 AiIntegrator（grid_on：legacy 总表/southd grid 策略源在，
+                            // 南向模拟不覆盖——M-4 防双写；无 grid 源时南向模拟兜底测量）
+                            if !grid_on {
                                 ai_int.set_latest_data(pkg.clone()).await;
                             }
                             for point in datapackage_to_telemetry_points(&pkg, name) {
