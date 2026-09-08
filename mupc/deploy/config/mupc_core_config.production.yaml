@@ -61,6 +61,26 @@ plugins:
 strategy:
   tai_config_file: ""
 
+# 数字 IO / 安全联锁（§12.4；BECG-3568 板载 DI/DO，GPIO 编号按规格书、现场校准）
+# 默认全注释关闭：未配置 io: 段部署行为不变（enabled=false 跳过联锁与校验）。
+# 启用 = 去掉下方注释并按板端实际 /sys/class/gpio 校准编号（deploy §九 9.2）。
+# ⚠️【生产】PCS 硬急停第二副接点兜底：MUPC 软停（500=0）仅为第一层（B1），
+#     PCS 侧须有按钮第二副接点直连的独立硬急停干接点回路，现场核对（deploy §九）。
+# io:
+#   enabled: true
+#   poll_ms: 100
+#   auto_release: false          # false = 须 Web 人工解除
+#   release_hold_secs: 5
+#   stop_confirm_ms: 5000        # ⚠️ 须 ≥ 2× intercore.modbus_rtu.heartbeat_poll_ms（停机确认依赖心跳报 1013）
+#   di:
+#     - { name: "急停",     gpio: 124, active_low: true,  debounce: 1, action: pcs_stop }   # NC 断线触发
+#     - { name: "水浸",     gpio: 125, active_low: false, debounce: 1, action: pcs_stop }
+#     - { name: "消防报警", gpio: 102, active_low: false, debounce: 1, action: pcs_stop }
+#     - { name: "门禁",     gpio: 103, active_low: false, debounce: 3, action: event }
+#   do:
+#     - { name: "运行灯", gpio: 97,  active_high: true }   # do_out[0]=运行灯、[1]=故障灯（控制器按索引）
+#     - { name: "故障灯", gpio: 107, active_high: true }
+
 # 台区总表分相数据源（U-26：台区储能策略 phase 输入；投产遥测真源）
 # enabled: true 并填真实点表后方启用。
 # ⚠️ serial_port 必须与 intercore.modbus_rtu.serial_port 不同（RS485 总线仲裁未实现，

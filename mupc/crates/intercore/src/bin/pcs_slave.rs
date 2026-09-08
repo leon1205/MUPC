@@ -137,3 +137,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S2 Task8 停机语义（纯函数、无 IO）：intercore 停机确认依赖心跳读 1013（run_state）转 0。
+    /// - 500=1 且无功率设定 → P_total=0 → 待机(1)（非停机，可被心跳判在线）
+    /// - 500=0 → run_state 必须回 0（PCS 已停，停机确认窗口等待 1013→0）
+    /// - 未写 500（缺省）→ 视为停机
+    #[test]
+    fn run_state_shutdown_semantics() {
+        let mut map = HashMap::new();
+        map.insert(REG_START_STOP, 1.0);
+        assert_eq!(PcsSlave::run_state(&map), 1.0, "500=1 且 P=0 应为待机(1)");
+        map.insert(REG_START_STOP, 0.0);
+        assert_eq!(PcsSlave::run_state(&map), 0.0, "500=0 应停机(run_state=0)");
+        let empty = HashMap::new();
+        assert_eq!(PcsSlave::run_state(&empty), 0.0, "未写 500 应视为停机(run_state=0)");
+    }
+
+    /// 有功方向推演：500=1 时 P>0 放电(3)、P<0 充电(2)；且停机优先级最高——
+    /// 即便带功率设定，500=0 仍强制回 0（不许带功率待机被误判在线）
+    #[test]
+    fn run_state_direction_and_stop_priority() {
+        let mut map = HashMap::new();
+        map.insert(REG_START_STOP, 1.0);
+        map.insert(REG_MODE, MODE_CONST_POWER as f64);
+        map.insert(REG_CONST_P_SET, 30.0);
+        assert_eq!(PcsSlave::run_state(&map), 3.0, "P>0 应为放电(3)");
+        map.insert(REG_CONST_P_SET, -30.0);
+        assert_eq!(PcsSlave::run_state(&map), 2.0, "P<0 应为充电(2)");
+        // 停机优先：带 30kW 放电设定仍须回 0
+        map.insert(REG_START_STOP, 0.0);
+        assert_eq!(PcsSlave::run_state(&map), 0.0, "500=0 优先级最高，带功率设定也须停机");
+    }
+}
