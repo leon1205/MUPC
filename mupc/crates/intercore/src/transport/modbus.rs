@@ -385,7 +385,7 @@ mod tests {
 
     fn test_settings() -> ModbusRtuSettings {
         ModbusRtuSettings {
-            serial_port: "/dev/ttyS1".to_string(),
+            serial_port: "/dev/ttyS0".to_string(), // BECG COM1 ↔ PCS（§12.1）
             baud_rate: 9600,
             data_bits: 8,
             stop_bits: 1,

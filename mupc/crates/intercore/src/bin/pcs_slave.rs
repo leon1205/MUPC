@@ -14,7 +14,7 @@
 //! `ModbusRtuTransport`（transport=modbus_rtu）做软件端到端联调（§11.11 测试缺口）。
 //!
 //! 用法：`pcs_slave <serial_port> [baud] [slave_addr]`
-//! 例：`cargo run -p mupc-intercore --bin pcs_slave -- /dev/ttyS1 19200 1`
+//! 例：`cargo run -p mupc-intercore --bin pcs_slave -- /dev/ttyS0 19200 1`
 use mupc_intercore::pcs::{
     from_pcs_reg, to_pcs_reg, MODE_CONST_POWER, MODE_PHASE_SPLIT, REG_CONST_P_SET, REG_CONST_Q_SET,
     REG_MODE, REG_PHASE_P_A, REG_PHASE_Q_A, REG_RUN_STATE, REG_SOC, REG_START_STOP,
