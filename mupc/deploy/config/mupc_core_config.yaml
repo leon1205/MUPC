@@ -92,3 +92,23 @@ master_meter:
     u:  { addr: 0x0012, format: float32 }                     # U_A/B/C
     i:  { addr: 0x0018, format: int32_scaled, scale: 0.01 }   # I_A/B/C
     p_total: { addr: 0x001E, format: int32_scaled, scale: 0.01 }
+
+# 站级南向统一调度（S3 §10.3 south_stations 段；mupc-southd 装配）
+# 收敛目标：master_meter 段最终删除，总表改走下方 meter_grid 站（策略 phase 真源，替代
+# read_master_meter 硬编码 task）。迁移期二选一（core_config validate R-H）：启用
+# south_stations.meter_grid 前须置 master_meter.enabled=false，否则启动校验报错。
+# 默认全注释关闭：未配置 south_stations 段行为不变（走 master_meter/pv-load 硬编码）。
+# 启用 = 去掉下方注释并按现场实际校准串口/从站；例中对齐 BECG §12.1 接线
+# （BMS ttyS2/空调 ttyS3/关口 ttyS4/储能表 ttyS5/消防 ttyS6）。
+# ⚠️ 各站串口不得与 intercore（PCS）及 master_meter 同口（RS485 总线仲裁未实现）。
+# south_stations:
+#   poll_ms: 1000
+#   stale_timeout_s: 5
+#   stations:
+#     # 关口/台区总表 = 策略 phase 真源（替代 master_meter 段；interval_ms 须 < 5000）
+#     - { id: grid_meter, role: meter_grid, port: "/dev/ttyS4", protocol: modbus, slave: 3, interval_ms: 1000 }
+#     # 以下站 S3a 采通用 telemetry（语义点表待厂方 → S3b）：BMS/空调/储能表/消防
+#     - { id: bms,         role: battery,    port: "/dev/ttyS2", protocol: modbus, slave: 1, interval_ms: 1000 }
+#     - { id: ac_unit,     role: hvac,       port: "/dev/ttyS3", protocol: modbus, slave: 1, interval_ms: 5000 }
+#     - { id: meter_batt,  role: meter_batt, port: "/dev/ttyS5", protocol: modbus, slave: 1, interval_ms: 1000 }
+#     - { id: fire_host,   role: fire,       port: "/dev/ttyS6", protocol: modbus, slave: 1, interval_ms: 1000 }
