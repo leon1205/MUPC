@@ -718,6 +718,10 @@ impl CoreConfig {
     ///    port 非空、slave 1..=247、interval_ms>0、meter_grid interval_ms < DATA_FRESHNESS_MS）失败传播；
     /// ② transport=="modbus_rtu"（PCS ttyS0 主链路）时任一 station.port 与 modbus_rtu.serial_port
     ///    同串口 → Err（RS485 总线仲裁未实现，禁双 master 共总线；串口节点名归一比较）；
+    /// ③ master_meter.enabled（迁移期总表 task 真实轮询占用该口）时任一 station.port 与
+    ///    master_meter.serial_port 同串口 → Err（master_meter 迁移期占口，同禁双 master 共总线；
+    ///    纵深防御：Task 7 装配在 master_meter.enabled 时不启 scheduler，但配置期即报错防未来
+    ///    master 模式也起 scheduler（部分站型）时落入双 master 无仲裁窗口）；
     /// ④ 迁移期排他 R-H：master_meter.enabled 与 south_stations 含 meter_grid 二选一
     ///    （收敛后总表统一走 south_stations）。
     fn validate_south_stations(&self) -> Result<(), String> {
@@ -731,16 +735,25 @@ impl CoreConfig {
                     .into(),
             );
         }
-        // ② transport=modbus_rtu（PCS 主链路）时，站串口不得与 PCS 主链路同总线
-        if self.intercore.transport == "modbus_rtu" {
-            let pcs_port = &self.intercore.modbus_rtu.serial_port;
-            for s in &ss.stations {
-                if port_node(&s.port) == port_node(pcs_port) {
-                    return Err(format!(
-                        "south_stations 站 {} port {} 与 intercore.modbus_rtu.serial_port {} 重复（PCS 主链路 RS485 总线仲裁未实现，禁双 master 共总线）",
-                        s.id, s.port, pcs_port
-                    ));
-                }
+        // ② transport=modbus_rtu（PCS 主链路 ttyS0）时站串口不得与其同总线；
+        // ③ master_meter.enabled（迁移期总表 task 占用该口）时站串口不得与其同总线。
+        // 两种互斥同遍历判（②PCS 主链路在 tcp 部署时不生效，③仅在 master_meter.enabled 时生效）。
+        for s in &ss.stations {
+            if self.intercore.transport == "modbus_rtu"
+                && port_node(&s.port) == port_node(&self.intercore.modbus_rtu.serial_port)
+            {
+                return Err(format!(
+                    "south_stations 站 {} port {} 与 intercore.modbus_rtu.serial_port {} 重复（PCS 主链路 RS485 总线仲裁未实现，禁双 master 共总线）",
+                    s.id, s.port, self.intercore.modbus_rtu.serial_port
+                ));
+            }
+            if self.master_meter.enabled
+                && port_node(&s.port) == port_node(&self.master_meter.serial_port)
+            {
+                return Err(format!(
+                    "south_stations 站 {} port {} 与 master_meter.serial_port {} 重复（master_meter 迁移期占用该口，禁双 master 共总线）",
+                    s.id, s.port, self.master_meter.serial_port
+                ));
             }
         }
         Ok(())
@@ -1750,6 +1763,95 @@ south_stations:
             "期望提示站与 PCS 主链路串口重复（全路径归一），实际: {}",
             err
         );
+    }
+
+    /// S3 §10.3 跨段 ③: master_meter.enabled + south_stations 非 grid 站（hvac）port 与
+    /// master_meter.serial_port 同节点（站写短名 "ttyS4"，归一后与 "/dev/ttyS4" 同）→ validate Err
+    /// （master_meter 迁移期占口，禁双 master 共总线）。role 用 hvac 避开 ④ R-H（enabled+meter_grid）。
+    #[test]
+    fn test_south_stations_port_conflicts_master_meter() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS4"
+  slave_addr: 3
+  read_interval_ms: 1000
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x106 }
+    pf: { addr: 0x10C }
+    u: { addr: 0x112 }
+    i: { addr: 0x118 }
+south_stations:
+  stations:
+    - { id: hvac_1, role: hvac, port: "ttyS4", slave: 3, interval_ms: 2000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("master_meter") && err.contains("重复"),
+            "期望提示站与 master_meter.serial_port 重复（短名归一），实际: {}",
+            err
+        );
+    }
+
+    /// S3 §10.3 跨段 ③: master_meter.enabled + hvac 站 port 为不同 ttyS（ttyS3）→ 合法 Ok
+    /// （master_meter 与 scheduler 站分占不同串口，无共总线冲突）
+    #[test]
+    fn test_south_stations_nonconflicting_with_master_meter_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS4"
+  slave_addr: 3
+  read_interval_ms: 1000
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x106 }
+    pf: { addr: 0x10C }
+    u: { addr: 0x112 }
+    i: { addr: 0x118 }
+south_stations:
+  stations:
+    - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "master_meter 与站分占不同串口应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// port_node 纯函数边界：空串 → ""；无斜杠短名 → 原样；全路径 → 末段节点名；
+    /// Windows COMx → 原样
+    #[test]
+    fn test_port_node_boundaries() {
+        assert_eq!(port_node(""), "");
+        assert_eq!(port_node("ttyS0"), "ttyS0");
+        assert_eq!(port_node("/dev/ttyS0"), "ttyS0");
+        assert_eq!(port_node("/dev/ttyUSB0"), "ttyUSB0");
+        assert_eq!(port_node("COM3"), "COM3");
     }
 
     /// S3 §10.3 跨段 ④（迁移期排他 R-H）: master_meter.enabled + south_stations 含 meter_grid
