@@ -33,6 +33,7 @@ mupc_wireless = { path = "../wireless" }
 plugin-loader = { path = "../plugin-loader" }
 device-trait = { path = "../device-trait" }
 rs485-plugin = { path = "../rs485-plugin" }
+mupc-southd = { path = "../mupc-southd" }
 
 tokio.workspace = true
 async-trait.workspace = true

@@ -9,8 +9,9 @@ use serde::Deserialize;
 pub const DEFAULT_POLL_MS: u64 = 1000;
 pub const DEFAULT_STALE_TIMEOUT_S: u64 = 5;
 pub const DEFAULT_INTERVAL_MS: u64 = 1000;
-/// 策略 5s 数据新鲜度共享常量落点（M-6）——若放 data-processing，此处引用；见 Task 6。
-pub const DATA_FRESHNESS_MS: u64 = 5000;
+/// 策略 5s 数据新鲜度共享常量落点（M-6）：单一真源在 data-processing
+/// （`mupc_data_processing::DATA_FRESHNESS_MS`），此处别名引用避免双定义漂移。
+pub const DATA_FRESHNESS_MS: u64 = mupc_data_processing::DATA_FRESHNESS_MS;
 
 /// 站类型角色（南向调度语义划分，YAML 用 snake_case）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

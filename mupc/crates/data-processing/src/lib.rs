@@ -54,4 +54,10 @@ pub use mupc_mqtt_bridge::topics::{
 };
 pub use mupc_mqtt_bridge::{LocalMqttClient, MqttBridge, MqttBridgeError, NorthMqttClient};
 
+// ── 共享常量 ───────────────────────────────────────────────────────────
+
+/// 策略数据新鲜度阈值 ms（§10.3 M-6）：AiIntegrator 5s 闸门、south_stations meter_grid
+/// interval_ms 边界、core_config 跨段校验统一引用，避免三处硬编码漂移。
+pub const DATA_FRESHNESS_MS: u64 = 5000;
+
 // No inline test modules — integration tests live in tests/

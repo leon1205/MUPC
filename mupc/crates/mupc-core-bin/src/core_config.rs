@@ -30,6 +30,10 @@ pub struct CoreConfig {
     /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled，未配置 io 段部署行为不变）
     #[serde(default)]
     pub io: IoConfig,
+    /// 站级南向统一调度配置（S3 §10.3 south_stations 段；缺省空——未配置站时
+    /// 南向采集走既有 master_meter/pv-load 硬编码，部署行为不变）
+    #[serde(default)]
+    pub south_stations: mupc_southd::config::SouthStationsConfig,
 }
 
 /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled——未配置 io 段部署行为不变）
@@ -536,7 +540,9 @@ impl CoreConfig {
         if self.intercore.transport == "modbus_rtu" {
             let mb = &self.intercore.modbus_rtu;
             if mb.serial_port.trim().is_empty() {
-                return Err("intercore.modbus_rtu.serial_port 不能为空（transport=modbus_rtu）".to_string());
+                return Err(
+                    "intercore.modbus_rtu.serial_port 不能为空（transport=modbus_rtu）".to_string(),
+                );
             }
             if !(1..=247).contains(&mb.slave_addr) {
                 return Err(format!(
@@ -545,7 +551,9 @@ impl CoreConfig {
                 ));
             }
             if mb.baud_rate == 0 {
-                return Err("intercore.modbus_rtu.baud_rate 不能为 0（transport=modbus_rtu）".to_string());
+                return Err(
+                    "intercore.modbus_rtu.baud_rate 不能为 0（transport=modbus_rtu）".to_string(),
+                );
             }
             if self.master_meter.enabled && self.master_meter.serial_port == mb.serial_port {
                 return Err(format!(
@@ -567,6 +575,11 @@ impl CoreConfig {
         }
         // S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置（disabled 整段跳过，不打扰未启用用户）
         self.validate_io()?;
+        // S3 §10.3: south_stations 段校验（段内 validate + 跨段：与 PCS 主链路串口互斥、
+        // master_meter 迁移期排他 R-H）。stations 空（未配置站）整段跳过——部署行为不变。
+        if !self.south_stations.stations.is_empty() {
+            self.validate_south_stations()?;
+        }
         Ok(())
     }
 
@@ -585,10 +598,12 @@ impl CoreConfig {
             ));
         }
         // N1: AiIntegrator 数据新鲜度阈值为 5s——采集周期 ≥5s 会恒判 stale 导致兜底停发
-        if mm.read_interval_ms >= 5000 {
+        // S3a Task 6: 阈值引用 data-processing 共享常量 DATA_FRESHNESS_MS（§10.3 M-6，单一真源）
+        if mm.read_interval_ms >= mupc_data_processing::DATA_FRESHNESS_MS {
             return Err(format!(
-                "master_meter.read_interval_ms={} 须 < 5000（AiIntegrator 数据新鲜度阈值 5s，采集须持续更新）",
-                mm.read_interval_ms
+                "master_meter.read_interval_ms={} 须 < {}（AiIntegrator 数据新鲜度阈值 5s，采集须持续更新）",
+                mm.read_interval_ms,
+                mupc_data_processing::DATA_FRESHNESS_MS
             ));
         }
         // 南向 RS485 默认 /dev/ttyUSB0（历史 USB-485/跨平台防御；BECG-3568 无 ttyUSB0，
@@ -698,6 +713,39 @@ impl CoreConfig {
         Ok(())
     }
 
+    /// S3 §10.3 跨段校验（south_stations.stations 非空时由 validate() 调用）：
+    /// ① south_stations.validate()（段内，mupc-southd 实现：id 唯一非空、meter_grid 至多一站、
+    ///    port 非空、slave 1..=247、interval_ms>0、meter_grid interval_ms < DATA_FRESHNESS_MS）失败传播；
+    /// ② transport=="modbus_rtu"（PCS ttyS0 主链路）时任一 station.port 与 modbus_rtu.serial_port
+    ///    同串口 → Err（RS485 总线仲裁未实现，禁双 master 共总线；串口节点名归一比较）；
+    /// ④ 迁移期排他 R-H：master_meter.enabled 与 south_stations 含 meter_grid 二选一
+    ///    （收敛后总表统一走 south_stations）。
+    fn validate_south_stations(&self) -> Result<(), String> {
+        // ① 段内校验（含 meter_grid interval_ms < DATA_FRESHNESS_MS 新鲜度边界）
+        self.south_stations.validate()?;
+        let ss = &self.south_stations;
+        // ④ R-H 迁移排他：master_meter.enabled 与 south_stations.meter_grid 二选一
+        if self.master_meter.enabled && ss.grid_station().is_some() {
+            return Err(
+                "迁移期排他：master_meter.enabled 与 south_stations.meter_grid 二选一（收敛后总表统一走 south_stations）"
+                    .into(),
+            );
+        }
+        // ② transport=modbus_rtu（PCS 主链路）时，站串口不得与 PCS 主链路同总线
+        if self.intercore.transport == "modbus_rtu" {
+            let pcs_port = &self.intercore.modbus_rtu.serial_port;
+            for s in &ss.stations {
+                if port_node(&s.port) == port_node(pcs_port) {
+                    return Err(format!(
+                        "south_stations 站 {} port {} 与 intercore.modbus_rtu.serial_port {} 重复（PCS 主链路 RS485 总线仲裁未实现，禁双 master 共总线）",
+                        s.id, s.port, pcs_port
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// P2-2/N2: 分相量块 p/q/pf/u/i 起始地址非 0 且三相连续 6 寄存器区间互不重叠；
     /// 可选 p_total（单值 2 寄存器）同样校验且不与其它块重叠。
     fn validate_reg_map(reg_map: &MasterMeterRegMap) -> Result<(), String> {
@@ -707,14 +755,38 @@ impl CoreConfig {
             width: u32, // 分相量三相连续 6 寄存器；p_total 单值 2
         }
         let mut blocks = vec![
-            Block { name: "p", addr: reg_map.p.addr, width: 6 },
-            Block { name: "q", addr: reg_map.q.addr, width: 6 },
-            Block { name: "pf", addr: reg_map.pf.addr, width: 6 },
-            Block { name: "u", addr: reg_map.u.addr, width: 6 },
-            Block { name: "i", addr: reg_map.i.addr, width: 6 },
+            Block {
+                name: "p",
+                addr: reg_map.p.addr,
+                width: 6,
+            },
+            Block {
+                name: "q",
+                addr: reg_map.q.addr,
+                width: 6,
+            },
+            Block {
+                name: "pf",
+                addr: reg_map.pf.addr,
+                width: 6,
+            },
+            Block {
+                name: "u",
+                addr: reg_map.u.addr,
+                width: 6,
+            },
+            Block {
+                name: "i",
+                addr: reg_map.i.addr,
+                width: 6,
+            },
         ];
         if let Some(pt) = &reg_map.p_total {
-            blocks.push(Block { name: "p_total", addr: pt.addr, width: 2 });
+            blocks.push(Block {
+                name: "p_total",
+                addr: pt.addr,
+                width: 2,
+            });
         }
         for b in &blocks {
             if b.addr == 0 {
@@ -736,6 +808,12 @@ impl CoreConfig {
         }
         Ok(())
     }
+}
+
+/// 串口节点名归一："/dev/ttyS0" 与 "ttyS0" 都取 "ttyS0"（跨段串口重复比较基准；
+/// BECG ttySx/COMx，站 port 可能写短名，modbus_rtu.serial_port 写全路径）。
+fn port_node(p: &str) -> &str {
+    p.rsplit('/').next().unwrap_or(p)
 }
 
 #[cfg(test)]
@@ -763,7 +841,10 @@ plugins: {}
         assert_eq!(config.web_api.listen_addr, "0.0.0.0:9000");
         // 默认值校验
         assert_eq!(config.system.shutdown_timeout_sec, 30);
-        assert_eq!(config.ai_engine.model_dir, PathBuf::from("/opt/mupc/models"));
+        assert_eq!(
+            config.ai_engine.model_dir,
+            PathBuf::from("/opt/mupc/models")
+        );
         assert_eq!(config.intercore.heartbeat_interval_sec, 5);
         // 未配置 intercore.transport 时默认 tcp
         assert_eq!(config.intercore.transport, "tcp");
@@ -823,6 +904,7 @@ plugins: {}
             master_meter: MasterMeterConfig::default(),
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
+            south_stations: mupc_southd::config::SouthStationsConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -867,6 +949,7 @@ plugins: {}
             master_meter: MasterMeterConfig::default(),
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
+            south_stations: mupc_southd::config::SouthStationsConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1035,7 +1118,11 @@ master_meter:
     i: { addr: 0x118 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.validate().is_ok(), "合法总表配置应通过: {:?}", config.validate());
+        assert!(
+            config.validate().is_ok(),
+            "合法总表配置应通过: {:?}",
+            config.validate()
+        );
     }
 
     /// N1: 采集周期 >= 数据新鲜度阈值（5s）→ validate Err（兜底会恒判 stale 停发）
@@ -1095,7 +1182,11 @@ master_meter:
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
-        assert!(err.contains("重叠"), "期望提示 p_total 与 p 重叠，实际: {}", err);
+        assert!(
+            err.contains("重叠"),
+            "期望提示 p_total 与 p 重叠，实际: {}",
+            err
+        );
     }
 
     /// v2.24: strategy 段显式配置可解析；合法值 validate 通过
@@ -1406,7 +1497,11 @@ io:
         );
         let config: CoreConfig = serde_yaml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
-        assert!(err.contains("重复") && err.contains("运行灯"), "实际: {}", err);
+        assert!(
+            err.contains("重复") && err.contains("运行灯"),
+            "实际: {}",
+            err
+        );
     }
 
     /// S2 Task7 Important: transport=modbus_rtu（PCS 主链路）时，stop_confirm_ms < 2×心跳 → Err
@@ -1554,6 +1649,264 @@ io:
             config.validate().is_ok(),
             "modbus_rtu 合法默认（stop_confirm_ms=5000 ≥ 2×1000）应通过: {:?}",
             config.validate()
+        );
+    }
+
+    /// S3 §10.3: south_stations 5 站（含 meter_grid）YAML 解析 + validate 合法
+    /// （transport=tcp 无 PCS 串口互斥；master_meter.disabled 不触发迁移排他）
+    #[test]
+    fn test_south_stations_valid_5_station_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: false
+south_stations:
+  poll_ms: 1000
+  stale_timeout_s: 5
+  stations:
+    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
+    - { id: meter_batt, role: meter_batt, port: /dev/ttyS1, slave: 2, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000 }
+    - { id: hvac_1, role: hvac, port: /dev/ttyS3, slave: 3, interval_ms: 2000 }
+    - { id: fire_1, role: fire, port: /dev/ttyS4, slave: 1, interval_ms: 2000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.south_stations.stations.len(), 5);
+        assert!(
+            config.validate().is_ok(),
+            "5 站 south_stations 应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S3 §10.3 跨段 ②: transport=modbus_rtu（PCS 主链路）时，站 port 与 modbus_rtu.serial_port
+    /// 同串口（站写短名 "ttyS0"，归一后与 "/dev/ttyS0" 同）→ validate Err（禁双 master 共总线）
+    #[test]
+    fn test_south_stations_shared_serial_with_pcs_short_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+  modbus_rtu:
+    serial_port: "/dev/ttyS0"
+    slave_addr: 1
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+south_stations:
+  stations:
+    - { id: battery_1, role: battery, port: "ttyS0", slave: 1, interval_ms: 1000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("重复") && err.contains("仲裁"),
+            "期望提示站与 PCS 主链路串口重复（总线仲裁未实现），实际: {}",
+            err
+        );
+    }
+
+    /// S3 §10.3 跨段 ②: 站 port 与 modbus_rtu.serial_port 均写全路径 "/dev/ttyS0"
+    /// → 节点名归一后仍重复 → Err
+    #[test]
+    fn test_south_stations_shared_serial_with_pcs_fullpath_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+  modbus_rtu:
+    serial_port: "/dev/ttyS0"
+    slave_addr: 1
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+south_stations:
+  stations:
+    - { id: battery_1, role: battery, port: "/dev/ttyS0", slave: 1, interval_ms: 1000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("重复") && err.contains("仲裁"),
+            "期望提示站与 PCS 主链路串口重复（全路径归一），实际: {}",
+            err
+        );
+    }
+
+    /// S3 §10.3 跨段 ④（迁移期排他 R-H）: master_meter.enabled + south_stations 含 meter_grid
+    /// → validate Err（收敛后总表统一走 south_stations）
+    #[test]
+    fn test_south_stations_meter_grid_exclusive_with_master_meter_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS4"
+  slave_addr: 3
+  read_interval_ms: 1000
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x106 }
+    pf: { addr: 0x10C }
+    u: { addr: 0x112 }
+    i: { addr: 0x118 }
+south_stations:
+  stations:
+    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("迁移期排他") && err.contains("二选一"),
+            "期望提示迁移期排他（master_meter 与 meter_grid 二选一），实际: {}",
+            err
+        );
+    }
+
+    /// S3 §10.3: 只配 master_meter（south_stations 空）→ 合法（既有总表路径不受影响）
+    #[test]
+    fn test_master_meter_only_without_south_stations_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: true
+  serial_port: "/dev/ttyS4"
+  slave_addr: 3
+  read_interval_ms: 1000
+  reg_map:
+    p: { addr: 0x100 }
+    q: { addr: 0x106 }
+    pf: { addr: 0x10C }
+    u: { addr: 0x112 }
+    i: { addr: 0x118 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.south_stations.stations.is_empty());
+        assert!(
+            config.validate().is_ok(),
+            "只配 master_meter（south_stations 空）应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S3 §10.3: 只配 south_stations meter_grid（master_meter.disabled）→ 合法（新迁移态）
+    #[test]
+    fn test_south_stations_grid_only_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: false
+south_stations:
+  stations:
+    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "只配 south_stations meter_grid（master_meter.disabled）应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S3 §10.3: yaml 无 south_stations 段 → serde(default) 空 → 合法（向后兼容）
+    #[test]
+    fn test_missing_south_stations_defaults_empty_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.south_stations.stations.is_empty());
+        assert_eq!(config.south_stations.poll_ms, 1000);
+        assert!(
+            config.validate().is_ok(),
+            "缺省 south_stations 应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S3 §10.3: meter_grid interval_ms=6000（>= DATA_FRESHNESS_MS）由段内 south_stations.validate()
+    /// 拒绝并传播 → core validate Err
+    #[test]
+    fn test_south_stations_meter_grid_slow_interval_propagated() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+master_meter:
+  enabled: false
+south_stations:
+  stations:
+    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 6000 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("interval_ms") && err.contains("south_stations"),
+            "meter_grid interval 过慢应段内拒绝并传播，实际: {}",
+            err
         );
     }
 }

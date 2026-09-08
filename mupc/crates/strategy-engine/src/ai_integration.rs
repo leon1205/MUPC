@@ -43,7 +43,9 @@ pub struct AiIntegrator {
 
 impl AiIntegrator {
     /// U-26 审查 P1-1: 遥测数据新鲜度阈值——超过该时长未更新则停发兜底指令（冻结测量不驱动控制）
-    const DATA_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+    /// S3a Task 6: 值引用 data-processing 共享常量 `DATA_FRESHNESS_MS`（§10.3 M-6，单一真源消除三处漂移）
+    const DATA_STALE_AFTER: std::time::Duration =
+        std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS);
 
     pub fn new() -> Self {
         Self {
