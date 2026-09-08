@@ -1,6 +1,11 @@
 #[cfg(test)]
 mod pcs_profile_test {
+    use crate::config::TaiStorageConfig;
     use crate::pcs_profile::load_tai_storage_config;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程级自增序号，避免 SystemTime 墙钟节拍粗时的临时文件命名碰撞。
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn test_file_none_returns_default() {
@@ -18,8 +23,6 @@ mod pcs_profile_test {
         assert_eq!(cfg.i_rated, 110.0);
         assert_eq!(cfg.s_rated, 60.0);
     }
-
-    use crate::config::TaiStorageConfig;
 
     /// 三档 fixture：pcs60_dual（顶行，无中线，无 tuning）、pcs80_kva（无中线，
     /// 供 CLI key 覆盖）、pcs125_kva（has_neutral=true → 应 Err，Task 3 用）。
@@ -69,16 +72,24 @@ pcs_profiles:
       s3_margin_limit: false
 "#;
 
+    /// 顶行选中合并 fixture：capacity_profile=pcs80_kva（无 CLI key → 取顶行 key 档位）。
+    const YAML_TOP_PCS80: &str = r#"
+capacity_profile: "pcs80_kva"
+pcs_profiles:
+  pcs80_kva:
+    desc: "80kVA 无中线（顶行选中合并路径，值区别于默认 60 档）"
+    has_neutral: false
+    phase_p_limit_kw: 26.7
+    phase_q_limit_kvar: 26.7
+    i_rated_a: 133
+    s_rated_kva: 80
+"#;
+
     /// 写临时档位 YAML，返回路径
     fn write_tmp(content: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "tai_cap_profile_{}_{}.yaml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("tai_cap_profile_{}_{}.yaml", std::process::id(), seq));
         std::fs::write(&path, content).unwrap();
         path
     }
@@ -88,15 +99,16 @@ pcs_profiles:
     }
 
     #[test]
-    fn test_dual_profile_merge_ok() {
-        // 顶行 key = pcs60_dual，无 tuning → L1/L2 落默认 60 档值
-        let path = write_tmp(YAML_3_PROFILE);
+    fn test_top_profile_key_selected_and_merged() {
+        // 顶行 capacity_profile=pcs80_kva 被选中合并（无 CLI key）→ 80 档值。
+        // 数值与代码默认(110/60/25/25)可区分，能抓住"有文件却落默认档"的回归。
+        let path = write_tmp(YAML_TOP_PCS80);
         let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), None).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(approx(cfg.i_rated, 110.0));
-        assert!(approx(cfg.s_rated, 60.0));
-        assert!(approx(cfg.dp_max, 25.0));
-        assert!(approx(cfg.q_i_max, 25.0));
+        assert!(approx(cfg.i_rated, 133.0), "i_rated={} expect 133", cfg.i_rated);
+        assert!(approx(cfg.s_rated, 80.0), "s_rated={} expect 80", cfg.s_rated);
+        assert!(approx(cfg.dp_max, 26.7), "dp_max={} expect 26.7", cfg.dp_max);
+        assert!(approx(cfg.q_i_max, 26.7), "q_i_max={} expect 26.7", cfg.q_i_max);
     }
 
     #[test]
@@ -106,10 +118,10 @@ pcs_profiles:
         let cfg =
             load_tai_storage_config(Some(path.to_str().unwrap()), Some("pcs80_kva")).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(approx(cfg.i_rated, 133.0));
-        assert!(approx(cfg.s_rated, 80.0));
-        assert!(approx(cfg.dp_max, 26.7));
-        assert!(approx(cfg.q_i_max, 26.7));
+        assert!(approx(cfg.i_rated, 133.0), "i_rated={} expect 133", cfg.i_rated);
+        assert!(approx(cfg.s_rated, 80.0), "s_rated={} expect 80", cfg.s_rated);
+        assert!(approx(cfg.dp_max, 26.7), "dp_max={} expect 26.7", cfg.dp_max);
+        assert!(approx(cfg.q_i_max, 26.7), "q_i_max={} expect 26.7", cfg.q_i_max);
     }
 
     #[test]
@@ -118,15 +130,15 @@ pcs_profiles:
         let path = write_tmp(YAML_TUNED);
         let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), None).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(approx(cfg.dp_max, 20.0));
-        assert!(approx(cfg.q_i_max, 18.0));
-        assert!(approx(cfg.p_abs_trig, 1.5));
-        assert!(approx(cfg.soc_cap_day, 0.8));
+        assert!(approx(cfg.dp_max, 20.0), "dp_max={} expect 20", cfg.dp_max);
+        assert!(approx(cfg.q_i_max, 18.0), "q_i_max={} expect 18", cfg.q_i_max);
+        assert!(approx(cfg.p_abs_trig, 1.5), "p_abs_trig={} expect 1.5", cfg.p_abs_trig);
+        assert!(approx(cfg.soc_cap_day, 0.8), "soc_cap_day={} expect 0.8", cfg.soc_cap_day);
         assert_eq!(cfg.window_size, 7);
         assert!(!cfg.s3_margin_limit);
         // L1 器件级不受 tuning 影响（恒取档位）
-        assert!(approx(cfg.i_rated, 110.0));
-        assert!(approx(cfg.s_rated, 60.0));
+        assert!(approx(cfg.i_rated, 110.0), "i_rated={} expect 110", cfg.i_rated);
+        assert!(approx(cfg.s_rated, 60.0), "s_rated={} expect 60", cfg.s_rated);
     }
 
     #[test]
