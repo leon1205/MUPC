@@ -15,6 +15,7 @@
 7. [文件结构](#7-文件结构)
 8. [配置格式](#8-配置格式)
 9. [技术决策记录](#9-技术决策记录)
+10. [站级多从站统一调度框架](#10-站级多从站统一调度框架)
 
 ---
 
@@ -1213,6 +1214,109 @@ tracing = { workspace = true }
 
 > 验收标准（功能验收、质量验收）详见 [02-MUPC-南向通信-PRD](../specs/modules/02-MUPC-南向通信-PRD.md) 第 7 章。
 
+## 10. 站级多从站统一调度框架（S3，BECG-3568）`[DESIGN_APPROVED: 2026-09-08]`
+
+> **目标平台**：BECG-3568（RK3568，后续 RK3588 接口一致），板载 **8 路隔离 RS485（每路独立 Modbus master）**。接线分配见 **核间 10 §12.1** 与 deploy/deploy.md §九（现场接线与配置核对）。
+
+### 10.1 背景与目标（Why）
+
+现南向采集是 **core-bin 逐个硬编码 task**（台区总表一个、南向 pv/load 一个），`DeviceRegistry`/`MessageBus` trait 存在但未接线；AiIntegrator 仅 `latest_data` 单输入。新增站级从站（BMS/空调/储能表/消防状态）若沿用硬编码会失控。目标：把「南向站级采集」收敛为**配置驱动的统一多端口多从站调度器**（新 crate `mupc-southd`），复用既有 rs485-plugin 串口/handler 与 meter_regs 解码；每口独立 master 并行、口内多从站串行轮询；站级故障隔离。
+
+**范围**：BMS(RS485-2/ttyS2)、空调(RS485-3/ttyS3)、关口表/台区总表(RS485-4/ttyS4)、储能表(RS485-5/ttyS5)、消防状态(RS485-6/ttyS6)。PCS(RS485-1/ttyS0) 走 intercore `modbus_rtu`（核间 10），**不在**本调度器内。**首版边界**：严格「采集 + meter_grid phase 输入 / battery SOC 输入 + 事件上送」，**不承载控制写侧**（空调只读遥测，温控/启停写指令与 pv/load 命令下发属未来负载管理，另设计）。**与 §9.2 重试条款关系**：§9.2 基于「单总线多设备」假设；本框架 BECG 每口独立 master，站超时隔离同口其它站，确定性错误不重试，语义见 §10.7。
+
+### 10.2 架构
+
+```
+mupc-southd（新 crate）
+├─ SouthScheduler         # 口级调度：每 port 一条采集 task
+│   ├─ PortRuntime        # 串口 fd + tx 锁 + 口状态（BECG 每口独立 master）
+│   │   └─ StationLoop    # 口内从站串行轮询（同口多从站），站超时→该站 offline
+│   └─ Station            # 配置驱动：port + protocol + slave + interval + regs + role
+├─ role 映射（Station→DataPackage）：meter_grid/meter_batt/battery/hvac/fire
+└─ 上送：telemetry 落库 + role 分发（grid_meter → AiIntegrator.latest_data）
+依赖复用：rs485-plugin 串口/ModbusRTU handler、data-processing meter_regs 解码、storage telemetry/events
+```
+
+- **线程承载**：rs485-plugin 串口为同步阻塞 fd，每口采集 task 内以 `spawn_blocking`/独立线程承载阻塞读写（避免多口阻塞占满 async worker）。
+- 每站独立 `port` → 不同口并行（BECG 隔离 485 各自 master）；同 `port` 多站 → 口内串行轮询（现有 Rs485Device 事务 tx 锁机制扩展，单请求 slave 参数化——当前 Rs485Device 固定 device_addr，框架内新增「请求级 slave 覆盖」）。**口调度预算**：站按 `interval_ms` 计算 next_due；同口慢从站超时阻塞轮询时，优先保 `role=meter_grid/battery` 的站（防超 5s stale），慢站按 offline 计并降频，不拖累关键站 cadence。
+- **故障隔离**：站级请求超时/CRC 错 → 标记该站 offline 并告警，跳过本轮；不牵连同口其它站；恢复后自动上线。
+
+### 10.3 stations 配置（core_config `south_stations:` 段）
+
+```yaml
+south_stations:
+  poll_ms: 1000            # 缺省轮询周期
+  stale_timeout_s: 5       # 上送数据过期阈值（对齐 AiIntegrator 5s）
+  stations:
+    - { id: grid_meter,    role: meter_grid, port: ttyS4, protocol: modbus, slave: 1, interval_ms: 1000, regs: <分相 p/q/pf/u/i 点表> }
+    - { id: meter_storage, role: meter_batt,  port: ttyS5, protocol: modbus, slave: 1, interval_ms: 1000, regs: <储能表点表> }
+    - { id: bms,           role: battery,     port: ttyS2, protocol: modbus, slave: 1, interval_ms: 1000, regs: <BMS 点表> }
+    - { id: ac_unit,       role: hvac,        port: ttyS3, protocol: modbus, slave: 1, interval_ms: 5000, regs: <空调点表> }
+    - { id: fire_host,     role: fire,        port: ttyS6, protocol: modbus, slave: 1, interval_ms: 1000, regs: <消防状态点表> }
+```
+
+- 点表 `regs`：配置化寄存器映射，复用 meter_regs `RegFormat`（float32/int32_scaled）解码。
+- **master_meter 收敛**：现有 `master_meter` 配置段与硬编码总表 task **收敛为 `role: meter_grid` 站**（行为回归等价，策略 phase 输入链路不变）；`master_meter.enabled/serial_port` 语义保留为 meter_grid 入口（兼容别名，实施后统一单写方 = southd mapper **唯一** `set_latest_data`，移除硬编码总表 task，避免双写 AiIntegrator）。**迁移期排他（R-H）**：`master_meter` 段与 `south_stations.meter_grid` 站**二选一启用**（validate 互斥，禁双 master 同总线）；收敛目标形态 = 删除 `master_meter` 段、总表统一走 `south_stations`（分批：先单写守卫断言 → 后移除 alias）。
+- **跨段校验（收敛后迁移）**：`south_stations.port` 与 `intercore.modbus_rtu.serial_port`（PCS ttyS0）**不得重复**（双 master 共总线禁止）；`meter_grid` 站 `interval_ms < 5000`（对齐策略数据新鲜度）；原 `master_meter` 段 `/dev/ttyUSB0` 特判随收敛移除（BECG 无 USB 概念），校验迁至 `south_stations` 段。
+- **新鲜度共享常量**：策略 5s 数据新鲜度与各站 `interval_ms` 边界统一引用共享常量 `data_freshness_ms`（避免三处硬编码漂移）。
+- **BMS 多包/多块（扩展点）**：真实 BMS 若多从站包或多寄存器块，以「同口多从站各包一站」或扩展 `Station.regs` 为多块聚合处理；SOC 聚合规则待厂方点表确认后落地（§10.10 待确认）。
+- **协议**：第一版按通用 Modbus RTU + 配置点表；BMS/空调/消防主机若厂家私有帧 → 追加 `ProtocolHandler` 实现（registry 已有扩展点），私有点表待厂方提供后落地。
+
+### 10.4 role → DataPackage 语义映射
+
+| role | 产出字段 | 去向 |
+|---|---|---|
+| meter_grid | `electrical.phase`（分相 p/q/pf/u/i，总表） | `AiIntegrator.latest_data`（策略 phase 源，语义不变）+ telemetry + IEC104 |
+| meter_batt | `electrical`（储能表总能/总无功） | telemetry + 展示/校核 |
+| battery | `battery.soc/soh/temperature` + 告警字 | telemetry + 事件 + SOC 融合（见 10.5） |
+| hvac | `device_status` 环境量/状态字 | telemetry + 事件 |
+| fire | `device_status` 消防状态字 | 事件（与 DI3 消防报警融合规则见下） |
+
+> **fire(RS485) 与 DI3 消防报警融合**：同一消防信号可能双源接入。规则：DI 干接点为**高完整性主判据**（触发即报，RS485 作确认/校核）；触发取 **OR**（任一源触发即触发）——OR 仅限 fire 状态/告警事件；**停机仍仅以 DI3 触发**（见核间 10 §12.3）；恢复需**双方复位**；`events` 以「消防+源」去重键防双报。详细联锁语义见核间 10 §12.3。
+
+### 10.5 与策略的接口（SOC 源融合）
+
+BMS 站在线时其 SOC **优先**于 intercore `latest_soc`（核间回读）注入策略 `TaiStorageStrategy`；BMS 掉线回落核间 SOC（可配优先级）。生效点：04 策略引擎 §2.11 AiIntegrator 数据注入（04 增补注）。本版仅采集 + SOC 输入，不做其它策略融合。
+
+**推包与新鲜度闸门（C-2）**：`set_latest_data` **仅由 `meter_grid`（phase 真源）更新触发**推进 AiIntegrator 控制闸门时间戳（`last_data_ts`）；其余 role（battery/hvac/fire/meter_batt）更新**不推进**闸门（只落库/事件 + 各自逐源时间戳）——避免总表掉线而 BMS 活性时，整体 5s 闸门被活性站掩盖、策略以陈旧 phase 驱动。phase/SOC 逐源过期标记同构（04 §2.11.1）。
+
+### 10.6 上行、事件与存储
+
+每站采集结果 DataPackage → storage `telemetry`（device_id 维度，已有）批量落库；role=fire/hvac 状态变化与告警字 → storage `events`/`faults` 落库 + SSE（复用 startup SSE 推送）；`DeviceRegistry`/`MessageBus` trait 本次接线（承载 device 注册与事件路由）。
+
+### 10.7 错误与故障隔离
+
+站超时/CRC/地址错 → 该站 offline 计数 + `events` 告警 + role 数据置 stale；同口其它站照常；恢复探测后自动上线。确定性错误（非法地址/数据）不重试。口 open 失败 → 该口全部站 offline，启动告警不阻断（PCS 主链路不在本模块）。
+
+### 10.8 文件结构与测试
+
+> **依赖形态**：`mupc-southd` 以**静态库**依赖 rs485-plugin 的复用 API（串口、`ProtocolHandler`/`ModbusRTU` handler、`meter_regs` 解码），避免与 cdylib 插件加载产生双实例；`Rs485Device` 增加请求级 slave 参数化（现 `encode_request` 用固定 `device_addr`，签名按口内多从站需要扩展）。
+> **方向控制确认（R-J，板端待核）**：现有 rs485-plugin DE/RE GPIO 源自外接 USB-485 适配器假设；BECG 板载隔离 485 若为自动方向收发器则无需 DE/RE（配置缺省关闭），若仍需方向控制须按板端实际 GPIO 提供；实现前以板端核对为准。
+
+- **`mupc-southd`**（新）：`config`（stations 反序列化+validate）、`station.rs`（模型/role）、`scheduler.rs`（口级 task + 口内轮询）、`port_runtime.rs`、`mapper.rs`（role→DataPackage）。
+- **core-bin**：移除硬编码总表/pv-load 采集 task 的 `set_latest_data` 段，改装配 southd；`south_stations` 配置段。
+- **device-trait/rs485-plugin**：`Rs485Device` 请求级 slave 覆盖（同口多从站需要）、`DeviceRegistry` 接线。
+- **strategy-engine**：SOC 源优先级小改（04 §2.11）。
+- 测试：调度器多站并发/同口串行、站超时隔离、role→DataPackage 映射、配置解析/校验、SOC 优先级切换、总表回归（phase 链路与既有策略测试零破坏）。
+
+### 10.10 架构审查修订（2026-09-08，dispatch_architect）`[DESIGN_APPROVED: 2026-09-08]`
+
+- **M-4** 单写方（southd mapper 唯一 set_latest_data）+ 跨段校验（south_stations.port ∩ {modbus_rtu.serial_port} 为空 + meter_grid interval<5s）→ 已并入 §10.3。
+- **M-6** 新鲜度共享常量 `data_freshness_ms` → §10.3。
+- **M-8** fire/DI3 融合（DI 高完整主判、触发 OR、恢复双复位、去重键）→ §10.4。
+- **M-10** BMS 多包/多块扩展点 → §10.3。
+- **M-11** 口调度预算（优先 meter_grid/battery、慢站降频）→ §10.2。
+- **L-4** southd 静态库依赖 + Rs485Device 请求级 slave 参数化 → §10.8。
+- **L-5** 空调只读遥测边界 → §10.1。
+- **L-6** 与 §9.2 单总线假设互注 → §10.1。
+- **二轮修订（2026-09-08，design-reviewer REJECTED → 修订）**：R-F deploy 章号 §九（头部注）；R-H master_meter 迁移期排他 + 收敛目标删除 alias（§10.3）；R-J BECG 485 方向控制板端待核（§10.8）；R-C SOC 双源落点 → 04 §2.11.1（§10.5 交叉）。
+
+### 10.9 验证状态
+
+设计按 writing-plans 分批实施；master_meter 收敛以总表回归测试（策略 phase 输入等价）为闸门。设备点表（BMS/空调/消防）待厂方提供后填配置。
+
+---
+
 ---
 
 ## 附录 A：术语表
@@ -1243,3 +1347,4 @@ tracing = { workspace = true }
 | 版本 | 主要变更 |
 |------|----------|
 | v1.0 | 初版：定义南向通信模块实现级设计（RS485/HPLC/插件系统） |
+| v1.1 | BECG-3568 站级多从站统一调度（S3，§10）：`mupc-southd` 调度器、`south_stations` 配置、role（meter_grid/meter_batt/battery/hvac/fire）映射、master_meter 收敛 meter_grid、口内多从站轮询与站级故障隔离、DeviceRegistry 接线、SOC 源融合接口（04 §2.11 注） |

@@ -343,3 +343,46 @@ sudo systemctl restart mupcd
 - [ ] intercore 实时核心 IP 已配置（如需要）
 - [ ] systemd 服务已安装：`systemctl status mupcd`
 - [ ] 启动日志显示"所有子系统就绪，进入主循环"
+
+## 九、BECG-3568 现场接线与配置核对（2026-09-08）
+
+> 设计依据：核间 10 §12（PCS 主链路接线契约与 DI/DO 安全联锁）、02 南向 §10（站级统一调度）。本平台 = BECG-3568 BOX（RK3568，后续 RK3588 接口一致）。
+
+### 9.1 RS485 接线分配（BECG 板载 8 路隔离 485，COM1-8 ↔ ttyS0/S2-S8，无 ttyS1）
+
+| RS485 口 | 端子/节点 | 设备 | config 字段（示例） |
+|---|---|---|---|
+| RS485-1 | COM1 / `ttyS0` | PCS 储能变流器（A2/B2） | `intercore.modbus_rtu.serial_port: /dev/ttyS0`（19200 N-8-1，从站拨码） |
+| RS485-2 | COM2 / `ttyS2` | BMS | `south_stations` 站 `port: ttyS2`（role=battery） |
+| RS485-3 | COM3 / `ttyS3` | 空调 | `south_stations` 站 `port: ttyS3`（role=hvac） |
+| RS485-4 | COM4 / `ttyS4` | 关口表 / 台区总表 | `south_stations` 站 grid_meter（迁移期别名：`master_meter.serial_port: /dev/ttyS4`；分相数据源，二者排他） |
+| RS485-5 | COM5 / `ttyS5` | 储能表（第二表计） | `south_stations` 站 `port: ttyS5`（role=meter_batt） |
+| RS485-6 | COM6 / `ttyS6` | 消防状态 | `south_stations` 站 `port: ttyS6`（role=fire） |
+
+- ⚠️ 历史默认 `/dev/ttyS1`（PCS）与 `/dev/ttyUSB0`（总表/南向）在 BECG 上**不存在**；本表为现场依据。
+- 每路 485 A+/B- 接设备对应 A/B 端子；`G-ISO` 隔离地就近接设备隔离地；屏蔽层单端接大地（FG）。
+
+### 9.2 DI / DO 接线（安全联锁与状态灯）
+
+| 端子 | 信号 | GPIO 编号 | 接法说明 |
+|---|---|---|---|
+| DI1 | 急停 | 124 | 干接点，**常闭 NC 断线触发**（active_low=true） |
+| DI2 | 水浸 | 125 | 干接点，有水闭合触发 |
+| DI3 | 消防报警 | 102 | 干接点，报警闭合触发 |
+| DI4 | 门禁 | 103 | 干接点，仅事件记录 |
+| DO1 | 运行灯 | 97 | 继电器常开，PCS 运行且无联锁 → 闭合 |
+| DO2 | 故障灯 | 107 | 继电器常开，联锁触发 / PCS 离线 → 闭合 |
+
+- 12V 隔离输出（COM 端子 1/2）供外部传感器/指示（核对负载电流 ≤2A）。
+- GPIO 编号以板端导出后实际 `/sys/class/gpio/gpioN` 校准，配置 `io:` 段按现场修正。
+
+### 9.3 现场配置核对清单
+
+- [ ] 生产模板 `intercore.modbus_rtu.serial_port` 已填现场口（PCS=ttyS0）
+- [ ] 总表源启用其一且不重复：`south_stations` 的 `meter_grid` 站 或 迁移期 `master_meter.enabled: true` + `serial_port=/dev/ttyS4`（二者排他；须与 PCS 口 ttyS0 不同）
+- [ ] `south_stations` 各站 port/type/slave 与上表一致、点表已填
+- [ ] `io:` 段 DI/DO gpio 编号已按板端校准；急停 action=pcs_stop、active_low=true
+- [ ] 启动日志：PCS 心跳正常（1013）、总表读数更新、无 `tai 档位加载失败`
+- [ ] 联锁自测：短接 DI1 急停 → PCS 停止且 DO2 故障灯亮；复位 + Web release → 允许重启
+- [ ] PCS 侧独立硬急停回路（按钮第二副接点直连 PCS 硬急停端子）已核对，MUPC 软停仅为第一层（B1）
+- [ ] GPIO sysfs 权限：`mupc` 用户可读写 `/sys/class/gpio`（udev 规则/组权限已配置，防缺失导致启动即联锁 lock，B2）

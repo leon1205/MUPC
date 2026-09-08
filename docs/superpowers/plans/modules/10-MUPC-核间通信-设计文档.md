@@ -14,6 +14,8 @@
 8. [接口定义](#8-接口定义)
 9. [文件结构](#9-文件结构)
 10. [技术决策记录](#10-技术决策记录)
+11. [传输通道抽象与 Modbus RTU 备选链路](#11-传输通道抽象与-modbus-rtu-备选链路)
+12. [BECG-3568 现场接线契约与安全联锁](#12-becg-3568-现场接线契约与安全联锁)
 
 ---
 
@@ -1151,7 +1153,7 @@ intercore:
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
   modbus_rtu:                   # PCS 通道参数（transport=modbus_rtu 用，生产）
-    serial_port: "/dev/ttyS1"   # Linux 例；Windows 用 COM3
+    serial_port: "/dev/ttyS0"   # PCS 主链路默认（§12.1）：BECG-3568 板载 COM1（无 ttyS1）；Linux 例，Windows 用 COM3
     baud_rate: 19200            # PCS 默认 19200 N-8-1
     data_bits: 8
     stop_bits: 1
@@ -1267,6 +1269,122 @@ intercore:
 - 部署/测试配套：`mupc/deploy/config/mupc_core_config.production.yaml`（transport=modbus_rtu 生产模板，与仿真 tcp 默认配置分离）；`src/bin/pcs_slave.rs` PCS 协议从站仿真（见上测试）。
 - 文档补记：ADR-010 取代注（M11）、§11.10 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
 
+## 12. BECG-3568 现场接线契约与安全联锁（v2.3/v2.4）`[DESIGN_APPROVED: 2026-09-08]`
+
+> **目标平台变更**：MUPC 运行硬件为 **BECG-3568 BOX**（瑞芯微 RK3568 四核 A55 @2.0GHz、NPU 1TOPS、板载 8 路隔离 RS485 / 16 路隔离 DI / 6 路继电器 DO / 2 路 CAN / 4 路 ADC / 4×千兆网口）；后续换 **RK3588 型号接口完全一致**（仅 NPU/OTA 侧按 3588 SDK 变化，见 05 AI 引擎与 OTA 模块）。
+> **板载串口节点**：COM1-8 ↔ `ttyS0` / `ttyS2` / `ttyS3` / `ttyS4` / `ttyS5` / `ttyS6` / `ttyS7` / `ttyS8`（**无 ttyS1**，A0→ttyS0、A2→ttyS2 … A8→ttyS8）；无「USB 转 485」概念（历史 `/dev/ttyUSB0` 假设在 BECG 上不成立）。
+> **DI/DO GPIO 编号**（按规格书 V1.1）：DI1=124 / DI2=125 / DI3=102 / DI4=103 / DI5=104 / DI6=66 / DI7=63 / DI8=64 / DI9=65 / DI10=88 / DI11=89 / DI12=90 / DI13=91 / DI14=148 / DI15=154 / DI16=23；DO1=97 / DO2=107 / DO3=19 / DO4=108 / DO5=109 / DO6=110。编号以板端导出后实际 `gpioN` 校准（配置化容忍 chip 偏移）。
+
+### 12.1 PCS 主链路物理接线契约（S1，v2.3）
+
+**PCS 主链路**：**RS485-1 / COM1 / `/dev/ttyS0` ↔ PCS A2/B2，19200 N-8-1**（V1.3 线格式）。`intercore.modbus_rtu.serial_port` 默认 `/dev/ttyS1 → /dev/ttyS0`（YAML 可覆盖，现场以接线为准）；实施须**同步更新 core_config 默认常量与单测断言**，并建议 validate 在 `transport=modbus_rtu` 时启动即探测串口存在性（fail-fast，不等首帧超时）。总表等站级 485 节点完整分配见 **02 南向 §10 统一调度** 与 **deploy/deploy.md 现场接线章**。
+
+台区储能现场接线总表（BECG-3568 作 MUPC/EMS 主控）：
+
+| RS485 口 | 端子/节点 | 设备 | 数据归属 |
+|---|---|---|---|
+| RS485-1 | COM1/`ttyS0` | PCS 储能变流器（A2/B2，19200 N-8-1） | 本模块 `modbus_rtu`（§11.11 V1.3） |
+| RS485-2 | COM2/`ttyS2` | BMS | 02 §10（role=battery，SOC 融合见 §12.6 交叉注） |
+| RS485-3 | COM3/`ttyS3` | 空调 | 02 §10（role=hvac，本版遥测） |
+| RS485-4 | COM4/`ttyS4` | 关口表/台区总表 | `master_meter` → 02 §10（role=meter_grid，策略 phase 源） |
+| RS485-5 | COM5/`ttyS5` | 储能表（第二表计） | 02 §10（role=meter_batt） |
+| RS485-6 | COM6/`ttyS6` | 消防状态 | 02 §10（role=fire） |
+
+DI/DO 分配（联锁输入/状态输出，接线见 deploy.md）：DI1 急停(124)、DI2 水浸(125)、DI3 消防报警(102)、DI4 门禁(103)、DO1 运行灯(97)、DO2 故障灯(107)。
+
+### 12.2 PCS 停机原语与联锁锁存（S2，v2.4）
+
+**背景（Why）**：V1.3 驱动**只有启动无停机原语**——每次 `send_tai_command`/`send_dual_param` 前置 `ensure_started` 自动写 `REG_START_STOP(500)=1`；M1 停机观测（1013=0）仅告警不动作；心跳恢复后下一次下发即自动重启。安全联锁（急停/水浸/消防报警）要求**可靠停机且禁止自动重启**，故须新增显式停机原语 + 锁存停机态，堵住「自动重启」路径。
+
+**双 latch 模型（C-1，安全关键）**：两个 latch 语义一致、必须同步：① transport `stopped_latched`（运行期挡启动兜底）② storage/interlock DB latch（持久化，Web/CLI/重启读回）。**介入时刻 = 联锁触发沿（DI 有效且去抖通过）即无条件置两个 latch——不依赖 `stop()` 写 500=0 成功**（写失败/链路离线期间 transport 兜底恒闭，恢复后亦不开洞）；`stop()` 仅负责「写 500=0 + 复位 `started`/`mode` 缓存」，**不设/不清 latch**。清/置唯一入口：`clear_interlock_latch()`（release 前置校验通过后）与 `restore_interlock_latched(bool)`——**运行时联锁触发沿由 interlock 以 `restore_interlock_latched(true)` 置 transport latch（运行时置位 / 启动 DB 读回两用）**，DB latch 同步置位；`stopped_latched` 不由 `stop()`/`ensure_started` 变更。§12.5 测试补：注入写失败 → stopped_latched 仍 true → `ensure_started`/`send_*` 拒绝 → 链路恢复重试成功且 release 后才可重启。
+
+**方案（How）**：
+1. **停机原语**：`ModbusRtuTransport` 新增 `stop()`——写 `REG_START_STOP(500)=0`（V1.3：停=0/启=1），**不设/不清 latch（置位由触发沿经 restore 完成，见上方 C-1）**，仅复位 `started=false`（否则人工 release 后 `ensure_started` 见 `started==true` 会跳过写 500=1 → 释放后无法重启，静默失效）**并复位 `mode` 缓存至 0xFF 哨兵**（否则 release 后 `ensure_mode` 见缓存==目标跳过 REG_MODE=1000 重写，可能在错误模式下直接写功率——自命令停机可低成本规避；测试加「stop → release → 首条 send 必含 REG_MODE 重写」断言，I-1）。直接写 500=0（不含先降功率的渐变序列；PCS 侧执行停机，深停机/渐变语义待厂方点表答复后如需再扩展）。**停机确认（R-I）**：stop() 后由 core-bin interlock 经 `last_run_state()` 周期读确认 1013 转 0（窗口 `stop_confirm_ms` 可配，默认 5000ms）；写失败/超时未确认 → latch 仍置位、状态升级「stop_failed（停机未确认）」，interlock **周期重试 `stop()`** 直至 1013=0 确认（与 confirmed stopped 区分，见 12.3）；**链路离线期暂停重试**（退避至 `stop_confirm_ms` 级，防反复 open 串口，L-3）。PCS 深停机/渐变停机时长待厂方（挂 §11.11 待确认清单「启停 500 时序」项）。
+2. **锁存挡启动（底层兜底）**：`ensure_started` 与所有写启动序列在 `stopped_latched == true` 时**拒绝写 500=1 并 warn**（即便上层误发也不重启）。**接口入 trait**：`IntercoreTransport` 增 `async fn stop()` / `async fn is_interlock_stopped() -> bool` / `fn last_run_state() -> Option<u16>`（1013 最新解码值，心跳循环维护、供上层与 DO 驱动消费）；`IntercoreClient` 门面转发。`transport=tcp`（仿真）stop 为降级 no-op+记录（无 PCS 启停概念）。**M1 自命令豁免**：心跳停机观测改为仅 `st==0 && started && !stopped_latched` 才告警——自命令停机（latch）静默，避免把软停误报成异常跳闸。
+**latch 期间整条下行中止**：`send_tai_command`/`send_dual_param`（ensure_mode→ensure_started→功率/模式写）在 latch 前置检查处直接返回错误、**不写任何寄存器**——避免 stop_failed（PCS 仍运行）时后续周期按设定继续出力（设计评审 2 轮 R-B）。**清 latch/恢复接口**：trait 增 `async fn clear_interlock_latch()`（Web release / 本地 CLI 旁路调用，随后 ensure_started 重新允许启动）与 `async fn restore_interlock_latched(bool)`（mupcd 启动 DB 读回在首个策略/下发行前调用，防启动窗口抢先写 500=1）（R-A）。
+3. **持久化**：联锁触发/latch 沿事件记录写 SQLite（storage `faults`/`events` 复用），mupcd 重启读回仍禁启（见 12.4）。
+4. **上层联动**：ai_integration / dispatch 决策前查 latch（锁存期间不产生新的启动/功率指令），transport 层再兜底——双层防重启。
+5. **链路恢复前置校验（M1 守卫升级）**：链路断线恢复后、首个写启动序列**前**须先以一次 1013 读校验 PCS 非停机（与 `started` 缓存一致）才允许 `ensure_started` 写 500=1；读到 1013=0 按 M1 处理（不重启、告警、交上层）——堵住「离线窗口内保护跳闸 → 链路恢复自动重启跳闸机」路径。
+6. **M1 保护跳闸态运维恢复（I-1）**：保护跳闸（非 latch、`!stopped_latched`）不置 latch；未确认前 MUPC 不自行补发启动（现状保证）。提供显式运维确认入口（如 `POST /api/v1/interlock/ack_m1`，或复用 release 语义授权重发 500=1）：人工确认后复位 `started` 并允许重发启动，避免恢复只能靠重启 mupcd。DO2 故障灯数据源 = **持久条件** `st==0 && started && !stopped_latched`（非一次性告警事件）。
+
+### 12.3 DI/DO 安全联锁控制器
+
+**组件边界**：
+- **GPIO 抽象层（新轻量 crate `mupc-io`）**：`DigitalIn`/`DigitalOut` trait（read/write/direction），实现①**sysfs**（`/sys/class/gpio` export+`gpioN/{value,direction}`，与 rs485-plugin DE/RE 先例一致，**先落地**）②libgpiod 桩（接口预留切换点，双实现）。IO 编号配置化。
+- **联锁控制器（core-bin 新模块 `interlock`，独立 ~100ms 轮询 task）**：DI 采样 → 去抖（每 DI 去抖计数）→ 状态沿检测 → 按 `action` 处置；DO 按状态驱动；释放状态机。
+
+**DI→动作映射**（action 配置化）：急停/水浸/消防报警（active_low 按现场可配，急停默认 NC 断线触发）触发 **pcs_stop**；门禁仅事件。
+
+**联锁触发动作（顺序，C-1）**：① 置 latch（transport `restore_interlock_latched(true)` + DB 持久化）→ ② 调 `client.stop()`（12.2）→ ③ `events` 落库 / SSE 告警 / DO2 故障灯亮。先置 latch 后 stop()，防 stop() 串口阻塞延迟 DB 落库（L-1 窗口）。
+**fail-safe 与失效策略**：GPIO 初始化失败或 DI 读失败一律按**触发（latch+告警）**处理，禁止按未触发继续运行；startup 增加 GPIO 自检步骤，**自检同步采样各联锁 DI——处于触发态则直接重新 latch**（DB 非重启禁启唯一依据，兜底触发→落库间的掉电/崩溃窗口，L-1）。**去抖按 DI 细分**（`debounce_count` 移入每 DI 配置），急停/水浸/消防默认 1 次采样即触发（近即时），普通 DI 保留去抖（poll_ms=100）。**投运前提（S-3）**：联锁软停经 Modbus 500=0 传达，急停/水浸/消防的**硬停机须 PCS 侧独立干接点急停回路兜底**（现场核对 PCS 是否自带硬急停端子），MUPC 软停为第一层；stop_failed 时 DO2/告警升级提示停机未确认。
+**消防双源语义（R-G）**：停机触发**仅以 DI3（干接点，高完整性主判）为准**；RS485 fire 站（02 §10 role=fire）作确认/校核、不独立触发停机；DI3 与 RS485 状态不一致（一触发一正常）产生「消防双源不一致」告警事件（融合规则 02 §10.4）。**跨源交互归属（I-2）**：southd 以 `fire_state: Arc<RwLock<…>>` 或事件流二选一（实现定）暴露消防站状态供 core-bin interlock 读取比对；不一致告警可做纯事件侧（两源各自成事件、事件消费者比对），不阻塞释放前置。
+
+**释放状态机**（默认须人工，`auto_release=false`）：清 latch 需 ① 全部触发源 DI 已回安全态且保持 ≥ `release_hold_secs`（前置校验）② Web API `POST /api/v1/interlock/release` 手动确认；`auto_release: true` 时 ① 满足即自动清（不推荐现场）。
+
+**DO 驱动语义**：
+- DO1 运行灯 = PCS `RUN_STATE(1013) ∈ {1,2,3}`（0 停 / 1 待机 / 2 充电 / 3 放电；非停机即上电）**且** 无联锁 latch（驱动数据源取 `last_run_state()`；`None` 链路未知 → 灯灭保守，首心跳前由 DO2=offline 语义覆盖，L-4；`mark_offline` 同步清 `last_run_state=None`，防离线期 DO1/DO2 同亮矛盾，B3）；
+- DO2 故障灯 = 联锁 latch 触发 **或** PCS transport offline / M1 停机观测告警。
+
+### 12.4 配置与持久化（core_config `io:` 段示例）
+
+```yaml
+io:
+  poll_ms: 100            # DI 轮询周期
+  auto_release: false     # false = 须 Web 人工解除；true = 触发源复位+保持时长后自动清
+  release_hold_secs: 5    # 触发源回安全态需保持时长（人工解除前置校验）
+  stop_confirm_ms: 5000   # 停机确认窗口（1013 须转 0）；超时 → stop_failed + interlock 周期重试 stop
+  di:
+    di1: { name: 急停,     gpio: 124, active_low: true,  debounce: 1, action: pcs_stop }  # NC 断线触发，近即时
+    di2: { name: 水浸,     gpio: 125, active_low: false, debounce: 1, action: pcs_stop }
+    di3: { name: 消防报警, gpio: 102, active_low: false, debounce: 1, action: pcs_stop }
+    di4: { name: 门禁,     gpio: 103, active_low: false, debounce: 3, action: event }     # 仅事件
+  do:
+    do1: { name: 运行灯, gpio: 97,  active_high: true }
+    do2: { name: 故障灯, gpio: 107, active_high: true }
+```
+
+持久化：联锁 latch 沿 `storage` 记录（`faults`/`events` 表，事件写库本轮接线；DB 行带 `cleared_at` 状态列）；**读回时机 = mupcd 启动、首个策略/下发行前**同步置入 transport（避免启动窗口内首个 send 抢先写 500=1）。Web API `GET /api/v1/interlock/status` + `POST /api/v1/interlock/release`（role 校验沿用占位 RBAC，08 模块）；**本地受控释放旁路**（mupcd CLI 子命令 + 本地日志审计）供现场无网/Web 不可达时人工恢复；RBAC 落地前 Web release 限内网访问并标注「占位 RBAC 仅开发期可用」为授权偏离。SSE 告警复用（startup SSE 推送）。
+
+### 12.5 文件结构与测试
+
+- **intercore**：`ModbusRtuTransport::stop` / `stopped_latched` / `ensure_started` 挡启动 / `is_interlock_stopped` / `clear_interlock_latch` / `restore_interlock_latched` / `last_run_state`（心跳维护 1013 最新值）；`stop()` 在 latch 期间**仍允许写 500=0**（仅挡 500=1 启动写，供 interlock 周期重试停机）；`pcs_slave.rs` 支持写 500=0 → RUN_STATE=0 停机仿真。
+- **`mupc-io`**（新）：`DigitalIn`/`DigitalOut` trait + sysfs impl + gpiod 桩 + mock。
+- **core-bin**：`interlock.rs`（采样/去抖/状态机/DO 驱动/事件）+ config `io:` 段解析与校验。
+- **storage**：faults/events 运行时写入接线（联锁事件）。
+- **web-api**：interlock status/release 两端点。
+- 测试：GPIO mock 读写、联锁状态机纯函数（触发/去抖/释放/auto_release）、`stop()` 写 500=0（slave 仿真对打）、config `io:` 解析与非法值校验、latch 持久化读回、上层下发抑制。
+
+### 12.6 验证状态
+
+- S1/S2 设计与实施按 writing-plans 分批（S1 平台落地 → S2 联锁）；PCS 契约待确认清单（启停 500 时序/符号）仍待厂方，停机原语以 500=0 为当前契约。
+- 交叉注：BMS 站（02 §10 role=battery）在线时其 SOC 优先于 `latest_soc`（intercore 回读）注入策略；见 **04 策略引擎 §2.11** SOC 源优先级补注。
+
+### 12.7 架构审查修订（2026-09-08，dispatch_architect）`[DESIGN_APPROVED: 2026-09-08]`
+
+**就地修订（已并入正文）**：
+
+| 编号 | 内容 | 落点 |
+|---|---|---|
+| S-1 | `stop()` 成功须复位 `started=false`（否则 release 后 ensure_started 跳过启动 → 释放无法重启）；M1 停机观测加 `!stopped_latched` 自命令豁免 | §12.2 第 1 条 / §12.2 第 2 条尾 |
+| S-2 | stop/is_interlock_stopped/last_run_state 入 `IntercoreTransport` trait（上层多态可调 + DO 数据源）；`tcp` 仿真 stop 降级 no-op | §12.2 第 2 条 |
+| S-3 | PCS 侧独立硬急停回路兜底为投运前提（软停第一层）；stop 后 ≤T 确认 1013 转 0，未确认升级 stop_failed 态 | §12.3 联锁触发动作补 |
+| S-4 | 链路恢复后首个写启动前先 1013 读校验（M1 守卫升级为 ensure_started 前置） | §12.2 第 5 条 |
+| M-1 | GPIO 初始化/DI 读失败一律按触发（fail-safe latch + 告警），startup GPIO 自检 | §12.3 |
+| M-2 | 去抖按 DI 细分（debounce_count 入每 DI），急停/消防 1 次采样即触发 | §12.3 |
+| M-3 | 本地受控释放旁路（CLI + 审计）供无网恢复；Web release 占位 RBAC 标注授权偏离 + 限内网 | §12.4 |
+| M-5 | 默认值变更同步 core_config 常量/单测；validate 启动探测串口 fail-fast | §12.1 |
+| M-7 | DO1 运行灯 = 1013 ∈ {1,2,3}（非停机即上电）且无 latch（修正 =1） | §12.3 DO 语义 |
+
+**跨模块采纳（落 02/04）**：M-4（south_stations 单写方 + 跨段「不与 modbus_rtu 共口」校验）、M-6（5s 新鲜度升共享常量）、M-8（fire 与 DI3 融合规则）、M-10（BMS 多包/多块扩展点）、M-11（口调度预算优先 meter_grid/battery）→ 02 §10；M-9（SOC 源切换滞回）→ 04 §2.11.1。**轻量项**：L-1 目录补 §11/§12（本节）、L-3 §11.7 示例串口改 ttyS0（下方实施修订）、L-2 deploy 章号与硬件行、L-4/L-5/L-6 → 02 §10 修订。
+
+**放行标准**：S/M 级全部采纳，L 顺手；仍待厂方/联调确认项（PCS 启停 500 时序与符号、BMS 多包/私有点表、空调协议、消防融合语义）留实施/联调阶段闭环，不阻塞设计门禁。
+
+**三轮修订（2026-09-08，design-reviewer 正式门禁 REJECTED → 修订）**：C-1 双 latch 模型（latch 介入不依赖 500=0 写成功、stop() 仅写与缓存复位、清/置唯一入口 clear/restore）→ §12.2；C-2 推包与新鲜度闸门（set_latest_data 闸门仅 meter_grid 推进）→ 02 §10.5/04 §2.11.1；I-1 M1 运维确认入口 + DO2 持久条件 → §12.2 bullet6；I-2 SOC 状态机测试清单 → 04 §2.11.1；B1/B2 → deploy §九 9.3；B3 → §12.3 DO；B4-B6 记为实施期项。
+
+**二轮修订（2026-09-08，design-reviewer REJECTED → 修订）**：R-A（`clear_interlock_latch()`/`restore_interlock_latched(bool)` 清/恢复接口与调用时序，§12.2）；R-B（latch 期间整条下行中止、不写任何寄存器，§12.2）；R-E（去抖 `debounce` 移入每 DI、`stop_confirm_ms` 入 io schema，§12.4）；R-G（消防停机仅以 DI3 为准、RS485 作确认/校核 + 双源不一致告警，§12.3）；R-D（§11.7 示例串口 ttyS0）；R-I（停机确认循环归属 interlock + 挂 §11.11 待确认）；R-C（SOC 双源落点）→ 04 §2.11.1；R-F/R-H（02 §10 deploy 章号与 master_meter 排他）；R-J（BECG 485 方向控制确认项）→ 02 §10.8。
+
+
+
 ---
 
 ## 附录 A：性能指标参考
@@ -1285,3 +1403,5 @@ intercore:
 | v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |
 | v2.1 | TCP 回读 SOC（N3，U-26 延伸）：TcpTransport 加回读接收循环（独立连接读实时模块 DataUpload 帧 → battery_soc），`IntercoreTransport.latest_soc()` 查询，AiIntegrator 在总表模式（battery 无 SOC）时以核间 SOC 注入；Modbus 备选不承载（None） |
 | v2.2 | PCS 真实协议 V1.3 取代 §11.4~11.6 假设点表：实时控制模块=两级式 PCS，`transport=modbus_rtu` 直连 PCS（RS485 19200 N-8-1，高 8/低 8 互换）；分相下行→PCS 模式2+单相 P/Q(±25 裁剪)，恒功率下行→模式0+1001/1002(k_droop 忽略)；SOC/心跳读 3 区 1010/1013 |
+| v2.3 | BECG-3568 现场接线契约（S1）：PCS 主链路默认节点 /dev/ttyS1→/dev/ttyS0，站级 485 全口分配表（RS485-1..6 ↔ ttyS0/S2-S6 ↔ 设备），DI/DO 编号与接线落 deploy.md 现场接线章 |
+| v2.4 | DI/DO 安全联锁（S2）：PCS 停机原语（500=0）+ stopped_latched 挡自动重启（双层：transport 兜底 + 上层抑制）；mupc-io GPIO 抽象（sysfs 先落地/gpiod 桩）；core-bin interlock 联锁控制器（急停/水浸/消防→pcs_stop，门禁仅事件；DB 持久化锁存 + Web release）；DO 运行/故障灯驱动；core_config io: 段 |

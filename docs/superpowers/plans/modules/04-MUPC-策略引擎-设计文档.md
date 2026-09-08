@@ -641,6 +641,13 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
 - `AiIntegrator` 新增字段 `tai_storage: Arc<Mutex<TaiStorageStrategy>>`；
 - `set_tai_storage_strategy()` 注入（startup 装配时创建并注入）；
 - `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）。
+#### 2.11.1 SOC 源优先级（BECG 站级 BMS，2026-09-08 增补）`[DESIGN_APPROVED: 2026-09-08]`
+
+> 02 南向 §10 统一调度接入 BMS 站后，SOC 源优先级：**BMS 站（role=battery）在线 → 其 SOC 优先；掉线回落 intercore `latest_soc`（核间回读）**；可配。AiIntegrator 数据注入（§2.11）在总表模式以核间 SOC 补 battery（N3），本增补将最高优先级让给 BMS 站。生效于实施 S3 后；S3 前维持 N3 现状。**源选择状态机（I-3 重述，可编码）**：切离当前源仅由 stale 触发（当前源超期 → 立即用备用源，差值不参与）；回切原源（BMS 恢复）需原源连续 N 拍有效**且**两源差值在滞回带（如 3%）内才回切，防保护降额阈值附近来回抖动；（SOC 88/90/12/10 线性带，§2.6）附近来回切换导致共模 P 抖；两源为同一电池组的不同计源，差异需现场校准（对齐 §2.12 回放 SOC ±3% 用例）。
+**落点与回落机制（设计评审 R-C）**：两源逐源时间戳在 southd mapper 维护、注入时携带源信息；**回落须修改 `set_latest_data` 的字段级保留语义**（现 `merge_battery_missing` 以 `.or()` 保留旧 SOC，BMS 曾写入则掉线后核间回落被永久压住、5s 整体新鲜度也识别不到 SOC 单源过期）——BMS 源超期即置 SOC=None/过期标记，使 N3 核间回落可触发；滞回判定放 AiIntegrator evaluate 侧（BMS 在线时仍周期读核间 SOC 维持两源差值样本）。交叉引用 02 §10.5。
+**phase 真源闸门（C-2）**：控制数据新鲜度闸门（`last_data_ts`）推进仅由 meter_grid（phase 真源）更新触发（02 §10.5）；phase 逐源过期标记与 SOC 同构（防活性 BMS 掩盖死总表 → 陈旧 phase 驱动）。
+**源选择状态机测试（I-2）**：状态驻留 evaluate 侧小结构；纯函数用例——stale 触发切离（差值不参与）、回切需原源连续 N 拍有效且两源 |Δ| 在滞回带内、SOC 降额带（88/90/12/10）邻域计数去抖不抖振、源持续新鲜但恒偏（校准/接错）时输出偏差告警不自动切离（B5）。
+
 
 ### 2.12 离线回放验证
 
