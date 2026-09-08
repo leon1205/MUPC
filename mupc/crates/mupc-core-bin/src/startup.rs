@@ -444,6 +444,13 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
             }
         }
     }
+
+    async fn on_battery_soc(&self, station_id: &str, soc: f64) {
+        // SOC 双源（04 §2.11.1）：battery 站（BMS）SOC 优先源 → AiIntegrator 双源裁决。
+        // soc 由 AiIntegrator.set_battery_soc 就地校验（NaN/0-100 守卫），此处透明转发。
+        tracing::debug!(station = %station_id, soc, "BMS 站 SOC 注入 AiIntegrator");
+        self.ai_integrator.set_battery_soc(soc).await;
+    }
 }
 
 /// 按依赖顺序初始化所有子系统
