@@ -29,6 +29,13 @@ const COL_QI: usize = 12; // Q_A/B/C = 12,13,14
 const COL_PFI: usize = 20; // PF_A/B/C = 20,21,22
 const COL_UNBAL: usize = 39; // 三相不平衡度（基线）
 
+const USAGE: &str = "用法: tai_replay [--config-file <档位YAML>] [--capacity-profile <key>] <xlsx路径> [SOC初值] [soc_cap_day] [s4_limit_margin_kw] [s3_margin 0|1] [p_abs_trig] [p_tgt_s1] [kp] [slope]";
+
+fn print_usage_and_exit() -> ! {
+    eprintln!("{USAGE}");
+    std::process::exit(2);
+}
+
 fn f(row: &[Data], i: usize) -> f64 {
     row.get(i).and_then(|d| d.get_float()).unwrap_or(0.0)
 }
@@ -72,27 +79,36 @@ fn main() {
         match raw[i].as_str() {
             "--config-file" => {
                 i += 1;
-                if let Some(v) = raw.get(i) {
-                    config_file = Some(v.clone());
+                match raw.get(i).map(String::as_str) {
+                    Some(v) if !v.starts_with("--") => config_file = Some(v.to_string()),
+                    _ => {
+                        eprintln!("--config-file 需要 <档位YAML> 参数（用法见下）");
+                        print_usage_and_exit();
+                    }
                 }
             }
             "--capacity-profile" => {
                 i += 1;
-                if let Some(v) = raw.get(i) {
-                    capacity_profile = Some(v.clone());
+                match raw.get(i).map(String::as_str) {
+                    Some(v) if !v.starts_with("--") => capacity_profile = Some(v.to_string()),
+                    _ => {
+                        eprintln!("--capacity-profile 需要 <key> 参数（用法见下）");
+                        print_usage_and_exit();
+                    }
                 }
             }
             s if s.starts_with("--") => {
                 eprintln!("未知选项: {s}");
-                std::process::exit(2);
+                print_usage_and_exit();
             }
             _ => pos.push(raw[i].clone()),
         }
         i += 1;
     }
-    let path = pos
-        .get(0)
-        .expect("用法: tai_replay [--config-file <档位YAML>] [--capacity-profile <key>] <xlsx路径> [SOC初值]");
+    let path = pos.get(0).unwrap_or_else(|| {
+        eprintln!("缺少 <xlsx路径> 参数");
+        print_usage_and_exit()
+    });
     let soc_init: f64 = pos.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.50);
     if soc_init != soc_init.clamp(0.10, 0.90) {
         eprintln!(
@@ -102,13 +118,10 @@ fn main() {
     }
     let soc_init = soc_init.clamp(0.10, 0.90);
 
-    let mut workbook: Xlsx<_> = open_workbook(path).expect("无法打开 xlsx");
-    let range = workbook
-        .worksheet_range("总表")
-        .expect("找不到「总表」sheet");
-
     // v2.24: 代码默认 → 档位派生(L1/L2) → tuning(L3) 由加载器完成；加载失败
-    // fail-fast（与运行时启动一致，不静默落默认档）。
+    // fail-fast（与运行时启动一致，不静默落默认档）。cfg 不依赖 workbook，
+    // 故提前到 open_workbook 之前：坏档位配置先 fail-fast，避免为 xlsx 读取
+    // 付出昂贵代价后才暴露、且被 xlsx panic 掩盖。
     let mut cfg = load_tai_storage_config(config_file.as_deref(), capacity_profile.as_deref())
         .unwrap_or_else(|e| {
             eprintln!("tai 档位加载失败: {e}");
@@ -117,7 +130,15 @@ fn main() {
     // 可选位置参数扫参（最外层覆盖）：pos[2]=soc_cap_day, pos[3]=s4_limit_margin_kw,
     // pos[4]=s3_margin(0|1), pos[5]=p_abs_trig, pos[6]=p_tgt_s1, pos[7]=kp, pos[8]=slope
     if let Some(v) = pos.get(2) {
-        cfg.soc_cap_day = v.parse().unwrap_or(cfg.soc_cap_day);
+        // sweep 的 soc_cap_day 绕过 loader validate 的 [0,1] 边界，仿 soc_init 提示并裁剪
+        let v: f64 = v.parse().unwrap_or(cfg.soc_cap_day);
+        if !(0.0..=1.0).contains(&v) {
+            eprintln!(
+                "警告: soc_cap_day={v} 超出 [0,1]，已裁剪为 {}",
+                v.clamp(0.0, 1.0)
+            );
+        }
+        cfg.soc_cap_day = v.clamp(0.0, 1.0);
     }
     if let Some(v) = pos.get(3) {
         cfg.s4_limit_margin_kw = v.parse().unwrap_or(cfg.s4_limit_margin_kw);
@@ -138,6 +159,11 @@ fn main() {
         cfg.slope = v.parse().unwrap_or(cfg.slope);
     }
     let strategy = TaiStorageStrategy::new(cfg.clone());
+
+    let mut workbook: Xlsx<_> = open_workbook(path).expect("无法打开 xlsx");
+    let range = workbook
+        .worksheet_range("总表")
+        .expect("找不到「总表」sheet");
 
     // 回放统计
     let mut soc = soc_init;
