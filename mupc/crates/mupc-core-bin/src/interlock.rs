@@ -250,10 +250,12 @@ impl StateMachine {
 //    DI 失败即把 InterlockState 预置 latched=true + stop_failed=true（视触发+停机未确认），
 //    启动记 gpio_init_failed 事件。局限：失败的 DI 恒触发 → 只能重启或修好硬件后 reboot 清。
 // 6) GPIO 读失败按触发处理（§12.3）；每个失败源首次记一次事件防刷屏（连续失败只报一次）。
-// 7) 停机确认：stop() Ok 后轮询 `last_run_state` 转 Some(0)（≤ stop_confirm_ms），超时/写失败
-//    → state.stop_failed=true + tracing::error + 事件；之后 ≥ stop_confirm_ms 退避重试直到转 0
-//    （延迟确认成功清除 stop_failed）。tcp 仿真通道 `last_run_state` 恒 None 无法确认 → 会置
-//    stop_failed（fail-safe 保守；仿真不用作生产联锁）。
+// 7) 停机确认（**逐帧非阻塞**，S2 Task7 Important 修复）：触发沿只发**一次** stop() 总线写并记录
+//    last_stop_attempt；不做内联自旋轮询（旧版自旋至 stop_confirm_ms 会整条阻塞 run_loop，期间
+//    DI/DO/门禁不采样）。确认/超时/重试全部由 `post_stop_maintenance` 每帧（poll_ms）检查：
+//    run 转 Some(0) → clear_stop_failed_once（延迟确认清除）；距上次尝试 ≥ stop_confirm_ms 且
+//    仍未确认 → 首次置 state.stop_failed（幂等，false→true 记一次事件）+ 重发单次 stop。tcp 仿真
+//    通道 `last_run_state` 恒 None 无法确认 → 会置 stop_failed（fail-safe 保守；仿真不用作生产联锁）。
 // 8) DB 读回：启动时 latest_by_type("interlock.triggered") 比 ("interlock.cleared")
 //    的 timestamp——最新 triggered 且无后续 cleared → restore latched（置 stop_failed=true
 //    表示停机未确认，post_stop_maintenance 会补发停机并确认）。
@@ -369,7 +371,8 @@ struct DiRuntime {
     door_prev: Vec<bool>,
     /// 该 DI 是否已报过「读失败」事件（防每帧刷屏）
     read_fail_logged: Vec<bool>,
-    /// 上次停机尝试时刻（≥ stop_confirm_ms 退避重试）
+    /// 上次停机写尝试时刻：post_stop_maintenance 据此逐帧判定——距上次 ≥ stop_confirm_ms 且未确认
+    /// → 超时置 stop_failed + 退避重发；None（如 DB 读回 latch 首帧，本进程未发过停机）→ 补发首停。
     last_stop_attempt: Option<Instant>,
 }
 
@@ -663,8 +666,10 @@ impl InterlockController {
         }
     }
 
-    /// 触发沿副作用：restore(true) → 停机+确认 → 事件/SSE。
+    /// 触发沿副作用：restore(true) → 事件/SSE → **单次**停机写（非阻塞，不等待确认）。
     /// 状态机已在 tick 中把 state.latched=true。
+    /// 确认/超时/重试由 `post_stop_maintenance` 逐帧完成（S2 Task7 Important：不在 run_loop 帧内
+    /// 自旋阻塞——latch+离线/PCS 不停时每帧仍须继续采样 DI/DO/门禁）。
     async fn on_trigger(&self, trigger_names: &[String]) {
         if let Err(e) = self.port.restore_latched(true).await {
             tracing::warn!(
@@ -681,7 +686,7 @@ impl InterlockController {
         self.record_event("interlock.triggered", &summary, &msg)
             .await;
         let _ = self.sse.push_interlock("triggered", &msg);
-        self.stop_and_confirm().await;
+        self.stop_once().await;
     }
 
     /// 状态机自动释放（auto_release && 停机已确认 && 源复位 && hold 满）：同步 transport latch。
@@ -698,31 +703,13 @@ impl InterlockController {
         let _ = self.sse.push_interlock("cleared", msg);
     }
 
-    /// 停机 + 确认（取舍 7）。末尾重置退避计时，避免同一帧内触发+维护重复补发。
-    async fn stop_and_confirm(&self) {
-        let confirm_ms = self.cfg.stop_confirm_ms;
-        match self.port.stop().await {
-            Err(e) => self.mark_stop_failed(&format!("停机指令失败: {e}")).await,
-            Ok(()) => {
-                let deadline = Instant::now() + Duration::from_millis(confirm_ms);
-                let mut confirmed = self.port.last_run_state() == Some(0);
-                while !confirmed && Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(self.cfg.poll_ms.clamp(1, 200))).await;
-                    if self.port.last_run_state() == Some(0) {
-                        confirmed = true;
-                    }
-                }
-                if confirmed {
-                    self.clear_stop_failed_once("PCS 停机已确认（RUN_STATE=0）")
-                        .await;
-                } else {
-                    self.mark_stop_failed(&format!(
-                        "停机确认超时(>={}ms) RUN_STATE 未转 0",
-                        confirm_ms
-                    ))
-                    .await;
-                }
-            }
+    /// 单次停机写（**非阻塞**：只发一次 `port.stop()` + 记录 last_stop_attempt，不轮询等待确认）。
+    /// 写失败即时 mark_stop_failed；写成功不在此确认——确认/超时/重试全交由 `post_stop_maintenance`
+    /// 每帧非阻塞完成（S2 Task7 Important：移除旧版内联自旋，避免 latch 未停时整条 run_loop 阻塞）。
+    /// on_trigger（触发沿首次停机）与 post_stop_maintenance（周期补发）共用本辅助。
+    async fn stop_once(&self) {
+        if let Err(e) = self.port.stop().await {
+            self.mark_stop_failed(&format!("停机指令失败: {e}")).await;
         }
         self.runtime.lock().unwrap().last_stop_attempt = Some(Instant::now());
     }
@@ -759,29 +746,57 @@ impl InterlockController {
         }
     }
 
-    /// 周期停机维护：latch 未确认停机时 ≥stop_confirm_ms 退避补发停机（含 DB 读回 latch）。
+    /// 周期停机维护——**唯一**的确认/超时/重试权威（S2 Task7 Important：全程非阻塞、无内联自旋，
+    /// 每帧只做快检查，绝不 await 长窗口）。
+    ///
+    /// 逐帧（tick_frame 末尾）在 latch 下做下列判断之一：
+    /// - `run == Some(0)` → 延迟确认成功 → clear_stop_failed_once（幂等，清曾超时的残留标记）。
+    /// - 曾发停机（Some）且距上次尝试 ≥ stop_confirm_ms 仍未确认 → **真超时**：mark_stop_failed
+    ///   （幂等，仅首次 false→true 记一次事件/SSE），随后重发单次停机写并刷新 last_stop_attempt。
+    /// - 无本进程停机尝试（None，如 DB 读回 latch 首帧）→ 仅补发首停（stop_failed 已由 restore
+    ///   置位），不据窗口误判超时。
+    /// - 窗口内（距上次尝试 < stop_confirm_ms）→ 不动（下帧再查）。
+    ///
+    /// 语义与原阻塞版等价但非阻塞：stop 写 Ok 但 PCS 未转 0 → 首个确认窗口结束时置 stop_failed
+    /// （一次事件）→ 之后每 ≥ stop_confirm_ms 重发直至 run 转 Some(0)（届时清除）。stop_failed 置位
+    /// 时机从「触发自旋后」变为「维护帧检查」，多 ≤1 帧(poll_ms)。
     async fn post_stop_maintenance(&self) {
         if !self.state.read().unwrap().latched {
             return;
         }
         let run = self.port.last_run_state();
         if run == Some(0) {
-            // PCS 已确认停机：若有残留 stop_failed（曾超时后来转 0）→ 清除
+            // PCS 已确认停机（延迟确认清除路径）：有残留 stop_failed（曾超时后来转 0）→ 清除
             self.clear_stop_failed_once("PCS 已确认停机，清除此前停机失败标记")
                 .await;
             return;
         }
-        // 未确认（离线 None 或仍在 1|2|3）→ 距上次尝试 ≥ stop_confirm_ms 再补发
-        let due = {
+        // 未确认（离线 None 或仍在 1|2|3）：判定是否越过确认窗口（或无本进程尝试需补发）
+        let (attempt_due, timed_out) = {
             let rt = self.runtime.lock().unwrap();
             match rt.last_stop_attempt {
-                None => true,
-                Some(t) => t.elapsed() >= Duration::from_millis(self.cfg.stop_confirm_ms),
+                // 无本进程停机尝试（如 DB 读回 latch 首帧，stop_failed 已由 restore 置位）→ 补发首停，
+                // 无超时可言（勿据"窗口已过"误判超时）
+                None => (true, false),
+                Some(t) => {
+                    let due = t.elapsed() >= Duration::from_millis(self.cfg.stop_confirm_ms);
+                    (due, due)
+                }
             }
         };
-        if due {
-            self.stop_and_confirm().await;
+        if attempt_due {
+            if timed_out {
+                // 真超时（曾发停机但窗口内未确认）→ 首次置 stop_failed（幂等：仅 false→true 记一次）
+                self.mark_stop_failed(&format!(
+                    "停机确认超时(>={}ms) RUN_STATE 未转 0",
+                    self.cfg.stop_confirm_ms
+                ))
+                .await;
+            }
+            // 重发单次停机写（写失败即时 mark_stop_failed；写成功只更新 last_stop_attempt）
+            self.stop_once().await;
         }
+        // 窗口内：不动，下帧再查
     }
 
     // ── DB 事件辅助 ──
@@ -1517,25 +1532,46 @@ mod runner_tests {
         assert!(calls.iter().any(|c| c == "restore_latched(false)"));
     }
 
-    /// 停机确认超时（stop Ok 但 run_state 未转 0）→ stop_failed + 禁止自动释放
+    /// 停机确认超时（stop Ok 但 run_state 未转 0）→ stop_failed + 禁止自动释放。
+    /// S2 Task7 Important 非阻塞语义：触发帧只发**一次**停机写（不自旋），stop_failed 由
+    /// `post_stop_maintenance` 在越过 stop_confirm_ms 窗口后的维护帧首次置位（多 ≤1 帧 poll_ms）。
     #[tokio::test]
     async fn stop_confirm_timeout_sets_stop_failed_and_blocks_auto() {
-        let cfg = io_cfg(true, 30);
+        let cfg = io_cfg(true, 100);
         let port = FakePort::new();
         port.set_run_state(Some(2));
         port.inner().lock().unwrap().stop_ok = true;
         port.inner().lock().unwrap().stop_sets_zero = false; // PCS 拒不转 0
         let events = Arc::new(FakeEventRepo::default());
-        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        let stop_calls = |inner: &Arc<Mutex<FakePortInner>>| {
+            inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| c.as_str() == "stop")
+                .count()
+        };
 
         pin.set(true);
         ctl.tick_frame().await;
         assert!(ctl.is_latched_now());
+        assert_eq!(stop_calls(&inner), 1, "触发帧只发一次停机写（无内联自旋）");
+        assert!(
+            !ctl.state.read().unwrap().stop_failed,
+            "窗口未过不应立即置 stop_failed"
+        );
+
+        // 越过 stop_confirm_ms 窗口 → 维护帧首次置 stop_failed
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ctl.tick_frame().await;
         assert!(
             ctl.state.read().unwrap().stop_failed,
             "确认超时应置 stop_failed"
         );
-        assert!(events.has("interlock.stop_failed"));
+        assert_eq!(events.count("interlock.stop_failed"), 1);
 
         pin.set(false);
         ctl.tick_frame().await;
@@ -1544,6 +1580,127 @@ mod runner_tests {
         // 人工放行
         assert!(ctl.request_release().await.is_ok());
         assert!(!ctl.is_latched_now());
+    }
+
+    /// S2 Task7（Important 2 ①③）：stop Ok 但 run 未转 0 → 触发帧不置位；窗口内不重复发不置位；
+    /// 越过窗口首次 mark（一次事件）；之后每 ≥ 窗口退避重发（写计数递增）但 mark 幂等事件不重复。
+    #[tokio::test]
+    async fn unconfirmed_stop_timeout_marks_once_and_backoffs_retry() {
+        let cfg = io_cfg(true, 100);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = false; // PCS 拒不转 0
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        let stop_calls = |inner: &Arc<Mutex<FakePortInner>>| {
+            inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| c.as_str() == "stop")
+                .count()
+        };
+
+        // 帧0：触发 → latch + 单次停机写；窗口未过 → 不置 stop_failed
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now());
+        assert_eq!(stop_calls(&inner), 1, "触发帧只发一次停机写");
+        assert!(
+            !ctl.state.read().unwrap().stop_failed,
+            "窗口内不应置 stop_failed"
+        );
+
+        // 窗口内再 tick（源仍触发）→ 不重发、不置位
+        ctl.tick_frame().await;
+        assert_eq!(stop_calls(&inner), 1, "确认窗口内不应重发 stop");
+        assert!(!ctl.state.read().unwrap().stop_failed);
+
+        // 越过窗口 → 首次置 stop_failed（一次事件）+ 重发一次
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ctl.tick_frame().await;
+        assert!(
+            ctl.state.read().unwrap().stop_failed,
+            "确认超时首次置 stop_failed"
+        );
+        assert_eq!(events.count("interlock.stop_failed"), 1, "超时事件只记一次");
+        assert_eq!(stop_calls(&inner), 2, "超时后补发一次停机");
+
+        // 越过下一窗口 → mark 幂等（事件不重复），但每窗口退避仍重发
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ctl.tick_frame().await;
+        assert!(ctl.state.read().unwrap().stop_failed);
+        assert_eq!(
+            events.count("interlock.stop_failed"),
+            1,
+            "mark 幂等事件不重复"
+        );
+        assert_eq!(stop_calls(&inner), 3, "每 ≥ 窗口退避重发一次停机");
+    }
+
+    /// S2 Task7（Important 2 ②延迟确认清除）：stop_failed 已置（曾超时）后 run 转 Some(0)
+    /// → post_stop_maintenance 清除 stop_failed（一次 stopped 事件）；源复位后自动释放放行。
+    #[tokio::test]
+    async fn delayed_confirm_clears_stop_failed_when_run_returns_zero() {
+        let cfg = io_cfg(true, 100);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = false;
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        // 越过窗口置 stop_failed
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        ctl.tick_frame().await;
+        assert!(ctl.state.read().unwrap().stop_failed);
+        assert_eq!(events.count("interlock.stop_failed"), 1);
+
+        // PCS 转 0（延迟确认）→ 清除
+        inner.lock().unwrap().run_state = Some(0);
+        ctl.tick_frame().await;
+        assert!(
+            !ctl.state.read().unwrap().stop_failed,
+            "run 转 Some(0) 应清除 stop_failed"
+        );
+        assert_eq!(
+            events.count("interlock.stopped"),
+            1,
+            "清除应记一次 stopped 事件"
+        );
+
+        // 源复位 + auto_release + !stop_failed → 自动释放
+        pin.set(false);
+        ctl.tick_frame().await;
+        assert!(!ctl.is_latched_now(), "确认清除后源复位可自动释放");
+    }
+
+    /// S2 Task7（Important 2 liveness ④）：latch + PCS 拒不转 0 时，单帧 tick_frame 不得内联自旋阻塞
+    /// （旧版 stop_and_confirm 会自旋满 stop_confirm_ms）。用超长窗口 + timeout 断言每帧即时返回。
+    #[tokio::test]
+    async fn latched_tick_frame_does_not_block_on_stop_confirmation() {
+        let cfg = io_cfg(true, 60_000); // 窗口 60s：若残留内联自旋必致 timeout Err
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = false; // 永不停
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        let res = tokio::time::timeout(Duration::from_millis(300), ctl.tick_frame()).await;
+        assert!(res.is_ok(), "触发帧不得内联自旋阻塞 run_loop");
+        assert!(ctl.is_latched_now());
+        // 连续快速多帧（latch 下每帧 post_stop_maintenance）都应即时返回，验证 run_loop liveness
+        for _ in 0..5 {
+            let res = tokio::time::timeout(Duration::from_millis(300), ctl.tick_frame()).await;
+            assert!(res.is_ok(), "维护帧不得阻塞（逐帧非阻塞确认）");
+        }
     }
 
     /// request_release 前置：触发源未复位 → Err（不允许释放）

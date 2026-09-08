@@ -676,6 +676,25 @@ impl CoreConfig {
                 ));
             }
         }
+        // S2 Task7 Important：transport=modbus_rtu（PCS 主链路）时 io.stop_confirm_ms 须 ≥ 2×心跳
+        // 轮询周期。原因：interlock 无主动读路径，last_run_state 由心跳缓存刷新（modbus.rs
+        // run_heartbeat_loop 按 heartbeat_poll_ms 周期更新）；若停机确认窗口 < 心跳周期，PCS 已停但
+        // 缓存要下个心跳才报 0 → 确认自旋/帧检查会误判超时置**假 stop_failed**。取 2× 给缓存刷新留
+        // 余量（含坏读/丢拍）。heartbeat_poll_ms=0 回退 1000ms（与 modbus.rs run_heartbeat_loop 的
+        // 退避常量一致）。io.enabled 已在上方早退保证非空。
+        if self.intercore.transport == "modbus_rtu" {
+            let hb = self.intercore.modbus_rtu.heartbeat_poll_ms;
+            let hb_effective = if hb == 0 { 1000 } else { hb };
+            if io.stop_confirm_ms < 2 * hb_effective {
+                return Err(format!(
+                    "io.stop_confirm_ms={} 须 >= 2×intercore.modbus_rtu.heartbeat_poll_ms={} \
+                     （heartbeat_poll_ms=0 回退 1000；transport=modbus_rtu）——停机确认窗口须覆盖≥2个心跳\
+                     周期，否则 PCS 已停而心跳缓存未刷新时误判停机超时（假 stop_failed）",
+                    io.stop_confirm_ms,
+                    2 * hb_effective
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1388,5 +1407,153 @@ io:
         let config: CoreConfig = serde_yaml::from_str(&yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.contains("重复") && err.contains("运行灯"), "实际: {}", err);
+    }
+
+    /// S2 Task7 Important: transport=modbus_rtu（PCS 主链路）时，stop_confirm_ms < 2×心跳 → Err
+    /// （停机确认窗口须覆盖≥2个心跳周期，防 PCS 已停但心跳缓存未刷新时误判超时/假 stop_failed）
+    #[test]
+    fn test_io_modbus_rtu_stop_confirm_too_small_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  stop_confirm_ms: 1000
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("stop_confirm_ms") && err.contains("heartbeat_poll_ms"),
+            "期望提示 stop_confirm_ms 与心跳窗口交叉校验，实际: {}",
+            err
+        );
+    }
+
+    /// S2 Task7 Important: 边界 stop_confirm_ms == 2×心跳 → 通过
+    #[test]
+    fn test_io_modbus_rtu_stop_confirm_boundary_ok() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  stop_confirm_ms: 2000
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "stop_confirm_ms==2×心跳 应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S2 Task7 Important: heartbeat_poll_ms=0 回退 1000ms（与 modbus.rs run_heartbeat_loop 一致）→
+    /// stop_confirm_ms=1500（< 2×1000）仍 Err
+    #[test]
+    fn test_io_modbus_rtu_heartbeat_zero_fallback_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+  modbus_rtu:
+    heartbeat_poll_ms: 0
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  stop_confirm_ms: 1500
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("heartbeat_poll_ms") && err.contains("回退"),
+            "期望按 heartbeat_poll_ms=0 回退 1000 判定，实际: {}",
+            err
+        );
+    }
+
+    /// S2 Task7 Important: transport=tcp 时不作交叉校验（stop_confirm_ms 小不误伤）
+    #[test]
+    fn test_io_tcp_does_not_cross_validate_stop_confirm() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  stop_confirm_ms: 100
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.validate().is_ok(),
+            "transport=tcp 不应做 modbus 心跳交叉校验: {:?}",
+            config.validate()
+        );
+    }
+
+    /// S2 Task7 Important: transport=modbus_rtu + io.enabled 且 stop_confirm_ms 走默认 5000 →
+    /// 默认配置（5000 ≥ 2×1000=2000）仍合法，不得误伤既有合法默认
+    #[test]
+    fn test_io_modbus_rtu_default_stop_confirm_legal() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+  transport: "modbus_rtu"
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+io:
+  enabled: true
+  poll_ms: 200
+  di:
+    - { name: "急停", gpio: 1, action: "pcs_stop" }
+  do:
+    - { name: "运行灯", gpio: 8 }
+    - { name: "故障灯", gpio: 9 }
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.io.stop_confirm_ms, 5000);
+        assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
+        assert!(
+            config.validate().is_ok(),
+            "modbus_rtu 合法默认（stop_confirm_ms=5000 ≥ 2×1000）应通过: {:?}",
+            config.validate()
+        );
     }
 }
