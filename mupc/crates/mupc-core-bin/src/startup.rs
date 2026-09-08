@@ -494,10 +494,21 @@ pub async fn initialize_all(
     let load_device = create_rs485_device("modbus", 0x02, "load_ctrl_001");
 
     // v2.16: 注入台区储能治理策略（AI 失效兜底，分相 P/Q 经核间下发）
+    // v2.24: 容量档位加载（strategy.tai_config_file → TaiStorageConfig）；档位
+    // 加载失败 = 启动中止（fail-fast），绝不静默落默认档进闭环。
+    let tai_cfg = {
+        let path = config.strategy.tai_config_file.trim();
+        let opt = if path.is_empty() { None } else { Some(path) };
+        mupc_strategy_engine::load_tai_storage_config(opt, None).map_err(|e| {
+            MupcError::new(
+                ErrorCode::ConfigError,
+                format!("tai 档位加载失败: {e}"),
+                "startup",
+            )
+        })?
+    };
     ai_integrator.set_tai_storage_strategy(Arc::new(
-        mupc_strategy_engine::TaiStorageStrategy::new(
-            mupc_strategy_engine::TaiStorageConfig::default(),
-        ),
+        mupc_strategy_engine::TaiStorageStrategy::new(tai_cfg),
     ));
     // 本地策略优先模式（YAML 配置：ai_engine.local_priority；Web API 可运行时切换）
     ai_integrator.set_local_priority(config.ai_engine.local_priority).await;

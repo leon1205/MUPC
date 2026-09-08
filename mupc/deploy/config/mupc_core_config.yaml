@@ -51,6 +51,14 @@ plugins:
     - "hplc_plugin"
     - "mqtt_plugin"
 
+# 策略引擎配置（v2.24 容量档位 §2.10.2）
+# tai_config_file 指向档位 YAML；空 = 默认档 pcs60_dual（60kW 双级式，唯一向后兼容分支）。
+# 换 PCS 规格：改档位 YAML 顶行 capacity_profile key 或直接换文件，不需改代码。
+strategy:
+  tai_config_file: ""
+  # ⚠️ 非 60kW 档（如 125kVA）放行须与 intercore transport 驱动点表型号同批变更
+  #    并装配期核对（§2.10.2 M-1）；has_neutral=true 档当前在档位加载侧被拦截。
+
 # 台区总表分相数据源（U-26：台区储能策略 phase 输入）
 # enabled: true 并填真实点表（reg_map 各量起始寄存器）后方启用；默认关
 master_meter:

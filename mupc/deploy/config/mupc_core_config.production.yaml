@@ -54,6 +54,13 @@ plugins:
     - "hplc_plugin"
     - "mqtt_plugin"
 
+# 策略引擎配置（v2.24 容量档位 §2.10.2）
+# 【生产】默认空 = pcs60_dual（60kW 双级式，与 modbus_rtu PCS V1.3 驱动点表匹配）；
+# 换 PCS 型号时须同时核对 intercore transport 驱动点表（§2.10.2 M-1），
+# 125kVA 等带中线档当前被档位加载校验拦截（待厂方点表 + 仲裁扩展）。
+strategy:
+  tai_config_file: ""
+
 # 台区总表分相数据源（U-26：台区储能策略 phase 输入；投产遥测真源）
 # enabled: true 并填真实点表后方启用。
 # ⚠️ serial_port 必须与 intercore.modbus_rtu.serial_port 不同（RS485 总线仲裁未实现，
