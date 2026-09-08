@@ -7,7 +7,9 @@ use crate::errors::Rs485Error;
 use crate::protocol::Frame;
 #[allow(unused_imports)]
 use device_trait::Parity;
-use device_trait::{DataFrame, Device, DeviceError, DeviceStatus, ProtocolHandler, SouthDevice};
+use device_trait::{
+    CrcMode, DataFrame, Device, DeviceError, DeviceStatus, ProtocolHandler, SouthDevice,
+};
 use parking_lot::Mutex;
 #[cfg(unix)]
 use std::mem::MaybeUninit;
@@ -51,6 +53,59 @@ pub struct Rs485Device {
 type RawFd = std::os::unix::io::RawFd;
 #[cfg(windows)]
 type RawFd = i32;
+
+/// 构建 Modbus 读寄存器请求帧（FC03/FC04 等读功能码通用）。
+///
+/// 帧格式：[slave, func, addr_hi, addr_lo, count_hi, count_lo, crc_lo, crc_hi]
+/// - `slave`: 显式从站地址（支持同口多从站：口内串行轮询各 slave）
+/// - `func`: 功能码（0x03 保持寄存器 / 0x04 输入寄存器）
+/// - `crc_mode`: 取自 `Config.crc_mode`，保证与原实现逐字节一致
+///
+/// 纯函数、无 IO，便于单元测试。
+fn build_read_frame(slave: u8, func: u8, addr: u16, count: u16, crc_mode: CrcMode) -> Vec<u8> {
+    let mut cmd = vec![
+        slave,
+        func,
+        (addr >> 8) as u8,
+        addr as u8,
+        (count >> 8) as u8,
+        count as u8,
+    ];
+    let crc = Frame::calculate_crc(slave, func, &cmd[2..], crc_mode);
+    cmd.push(crc as u8);
+    cmd.push((crc >> 8) as u8);
+    cmd
+}
+
+/// 解析 Modbus 读寄存器响应（FC03/FC04 通用）。
+///
+/// 响应格式：[slave, func, byte_count, reg(大端 2 字节)..., crc_lo, crc_hi]
+/// 本函数只做长度校验与寄存器拆解（大端 u16），不校验 CRC（与原实现逐行为一致）。
+/// 纯函数、无 IO，便于单元测试。
+fn parse_regs_response(response: &[u8]) -> Result<Vec<u16>, Rs485Error> {
+    if response.len() < 5 {
+        return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
+    }
+
+    let byte_count = response[2] as usize;
+    if response.len() < 3 + byte_count + 2 {
+        return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
+    }
+
+    let mut registers = Vec::new();
+    // 确保 byte_count 为偶数（每个寄存器 2 字节），并检查边界
+    let register_count = byte_count / 2;
+    for i in 0..register_count {
+        let idx = 3 + i * 2;
+        if idx + 1 >= response.len() {
+            return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
+        }
+        let value = ((response[idx] as u16) << 8) | (response[idx + 1] as u16);
+        registers.push(value);
+    }
+
+    Ok(registers)
+}
 
 impl Rs485Device {
     /// 创建新的 RS485 设备
@@ -471,53 +526,54 @@ impl Rs485Device {
         self.send_recv(&frame, recv_timeout_ms)
     }
 
-    /// 读取保持寄存器（Modbus 功能码 0x03）
+    /// 读取保持寄存器（Modbus 功能码 0x03），从站地址取 `config.device_addr`。
+    ///
+    /// # Arguments
+    /// - `addr`: 起始寄存器地址
+    /// - `count`: 寄存器数量
+    ///
+    /// # Returns
+    /// - `Ok(Vec<u16>)`: 寄存器值列表
     pub fn read_holding_registers(&self, addr: u16, count: u16) -> Result<Vec<u16>, Rs485Error> {
-        let func_code: u8 = 0x03;
-        let mut cmd = vec![
-            self.config.device_addr,
-            func_code,
-            (addr >> 8) as u8,
-            addr as u8,
-            (count >> 8) as u8,
-            count as u8,
-        ];
+        self.read_holding_registers_from(self.config.device_addr, addr, count)
+    }
 
-        // 添加 CRC
-        let crc = Frame::calculate_crc(
-            self.config.device_addr,
-            func_code,
-            &cmd[2..],
+    /// 读取保持寄存器（Modbus 0x03），显式从站地址（同口多从站，口内串行轮询）。
+    pub fn read_holding_registers_from(
+        &self,
+        slave: u8,
+        addr: u16,
+        count: u16,
+    ) -> Result<Vec<u16>, Rs485Error> {
+        self.read_regs(build_read_frame(
+            slave,
+            0x03,
+            addr,
+            count,
             self.config.crc_mode,
-        );
-        cmd.push(crc as u8);
-        cmd.push((crc >> 8) as u8);
+        ))
+    }
 
+    /// 读取输入寄存器（Modbus 0x04），显式从站地址（同口多从站，口内串行轮询）。
+    pub fn read_input_registers_from(
+        &self,
+        slave: u8,
+        addr: u16,
+        count: u16,
+    ) -> Result<Vec<u16>, Rs485Error> {
+        self.read_regs(build_read_frame(
+            slave,
+            0x04,
+            addr,
+            count,
+            self.config.crc_mode,
+        ))
+    }
+
+    /// 私有：发送读请求帧并解析响应寄存器。
+    fn read_regs(&self, cmd: Vec<u8>) -> Result<Vec<u16>, Rs485Error> {
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
-
-        // 解析响应
-        if response.len() < 5 {
-            return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
-        }
-
-        let byte_count = response[2] as usize;
-        if response.len() < 3 + byte_count + 2 {
-            return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
-        }
-
-        let mut registers = Vec::new();
-        // 确保 byte_count 为偶数（每个寄存器 2 字节），并检查边界
-        let register_count = byte_count / 2;
-        for i in 0..register_count {
-            let idx = 3 + i * 2;
-            if idx + 1 >= response.len() {
-                return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
-            }
-            let value = ((response[idx] as u16) << 8) | (response[idx + 1] as u16);
-            registers.push(value);
-        }
-
-        Ok(registers)
+        parse_regs_response(&response)
     }
 
     /// 写入单个寄存器（Modbus 功能码 0x06）
@@ -766,5 +822,92 @@ mod tests {
         config.re_gpio = Some(17); // Same as de_gpio
         assert!(config.validate().is_err());
         assert_eq!(config.validate().unwrap_err(), "DE 和 RE 引脚不能相同");
+    }
+
+    #[test]
+    fn test_build_read_frame_fc03_slave_param() {
+        // slave=2（非默认1）、FC03、addr=0x0100、count=2
+        let frame = build_read_frame(2, 0x03, 0x0100, 2, CrcMode::Crc16Modbus);
+        assert_eq!(frame[0], 2, "帧首字节应为显式 slave=2");
+        assert_eq!(frame[1], 0x03);
+        assert_eq!(&frame[2..6], &[0x01, 0x00, 0x00, 0x02]);
+        assert_eq!(frame.len(), 8);
+
+        // CRC 低位在前，符合同参 Frame::calculate_crc 结果
+        let crc = Frame::calculate_crc(2, 0x03, &frame[2..6], CrcMode::Crc16Modbus);
+        assert_eq!((frame[6] as u16) | ((frame[7] as u16) << 8), crc);
+
+        // 独立已知向量（参考实现 CRC16-Modbus 计算）：02 03 01 00 00 02 C5 C4
+        assert_eq!(frame, vec![0x02, 0x03, 0x01, 0x00, 0x00, 0x02, 0xC5, 0xC4]);
+    }
+
+    #[test]
+    fn test_build_read_frame_fc04_slave_param() {
+        // slave=0x2A、FC04、addr=0x0000、count=4
+        let frame = build_read_frame(0x2A, 0x04, 0x0000, 4, CrcMode::Crc16Modbus);
+        assert_eq!(frame[0], 0x2A);
+        assert_eq!(frame[1], 0x04);
+        assert_eq!(frame.len(), 8);
+        // 独立已知向量：2A 04 00 00 00 04 F7 D2
+        assert_eq!(frame, vec![0x2A, 0x04, 0x00, 0x00, 0x00, 0x04, 0xF7, 0xD2]);
+    }
+
+    #[test]
+    fn test_build_read_frame_differing_slave_first_byte() {
+        // 同一配置（device_addr=1）与显式 slave=2 的帧首必须不同 —— 同口多从站语义
+        let cfg_frame = build_read_frame(0x01, 0x03, 0x0100, 2, CrcMode::Crc16Modbus);
+        let explicit_frame = build_read_frame(0x02, 0x03, 0x0100, 2, CrcMode::Crc16Modbus);
+        assert_eq!(cfg_frame[0], 0x01);
+        assert_eq!(explicit_frame[0], 0x02);
+        assert_ne!(cfg_frame, explicit_frame);
+    }
+
+    #[test]
+    fn test_parse_regs_response_ok() {
+        // [slave, func, byte_count, reg1_hi, reg1_lo, reg2_hi, reg2_lo, crc_lo, crc_hi]
+        let response = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xC5, 0xC4];
+        let regs = parse_regs_response(&response).unwrap();
+        assert_eq!(regs, vec![0x0102, 0xFFFE]);
+    }
+
+    #[test]
+    fn test_parse_regs_response_too_short() {
+        assert!(parse_regs_response(&[]).is_err());
+        assert!(parse_regs_response(&[0x02, 0x03, 0x04, 0x01]).is_err());
+    }
+
+    #[test]
+    fn test_parse_regs_response_incomplete() {
+        // byte_count=4，但 len=6 < 3+4+2=9，应判不完整
+        let response = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF];
+        assert!(parse_regs_response(&response).is_err());
+    }
+
+    #[test]
+    fn test_read_holding_registers_delegates_config_device_addr() {
+        // 未打开串口：委托链（read_holding_registers -> *_from -> read_regs -> send_recv）
+        // 在触碰真实串口前即返回 NotConnected。证明原签名委托路径存活、零 IO、零破坏。
+        let device = create_test_device(); // config.device_addr = 0x01
+        let err = device.read_holding_registers(0x0100, 2).unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::NotConnected(_)),
+            "应返回 NotConnected（串口未打开），实际: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_read_from_methods_alive_no_io() {
+        // 新方法 read_holding_registers_from / read_input_registers_from 存在且走同一条
+        // send_recv 委托路径（未打开 -> NotConnected），串口未打开前无真实 IO。
+        let device = create_test_device();
+        let err1 = device
+            .read_holding_registers_from(2, 0x0100, 2)
+            .unwrap_err();
+        assert!(matches!(err1, Rs485Error::NotConnected(_)));
+        let err2 = device
+            .read_input_registers_from(0x2A, 0x0000, 4)
+            .unwrap_err();
+        assert!(matches!(err2, Rs485Error::NotConnected(_)));
     }
 }
