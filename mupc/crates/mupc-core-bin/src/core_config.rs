@@ -232,7 +232,9 @@ pub struct AiEngineConfig {
     /// 推理超时（毫秒），默认 500
     #[serde(default = "default_inference_timeout_ms")]
     pub inference_timeout_ms: u64,
-    /// 本地策略优先模式（默认 true = 部署默认本地台区储能治理策略优先，AI 旁路；false = AI 优先）
+    /// 本地策略优先开关（平台目标调整 2026-09-09：AI 引擎暂停，本地策略为唯一默认下发
+    /// 引擎）。AI 暂停期恒 true，观测空间维度重构前禁止置 false——false 分支代码保留为
+    /// 框架（ai_integration.rs dispatch_ai_decision），不参与生产。
     #[serde(default = "default_local_priority")]
     pub local_priority: bool,
 }

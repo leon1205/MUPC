@@ -41,7 +41,7 @@ ai_engine:
   inference_timeout_ms: 500
   # 部署默认：本地策略优先（本地台区储能治理策略控制，AI 旁路参考不下发）
   # 需 AI 智能控制时置 false 或经 Web API /api/v1/strategy-mode 运行时切换
-  local_priority: true
+  local_priority: true  # AI 暂停期恒 true（平台目标调整 2026-09-09，观测空间维度重构前禁止置 false）
 
 plugins:
   search_paths:
