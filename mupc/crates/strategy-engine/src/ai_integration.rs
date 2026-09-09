@@ -46,8 +46,8 @@ pub struct AiIntegrator {
     soc_stale_warned: std::sync::Mutex<Option<std::time::Instant>>,
     /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
-    /// 本地策略优先模式（配置或 Web API 可切换）：AI 旁路运行（仍决策作参考，不下发），
-    /// 控制以下发本地策略（台区储能治理）为准
+    /// 本地策略优先开关（生产唯一模式，AI 引擎暂停 2026-09-09）：true = dispatch 直达本地台区
+    /// 储能治理下发，AI 分支不可达。
     local_priority: RwLock<bool>,
     /// AI 指令安全校验器（安全闸门）：dispatch 前校验 AI 指令，不通过降级本地兜底（PRD §1.2/§6）
     validator: RwLock<Option<Arc<dyn AiCommandValidator>>>,
@@ -390,7 +390,8 @@ impl AiIntegrator {
         self.tai_storage = Some(strategy);
     }
 
-    /// 设置本地策略优先模式（true：本地台区储能策略优先，AI 旁路；false：AI 优先）
+    /// 设置本地策略优先模式（生产唯一模式，AI 引擎暂停 2026-09-09）：true = AI 停用期唯一模式，
+    /// dispatch 直达本地台区储能治理下发、AI 分支不可达；false = 保留框架的 AI 分支可回切。
     pub async fn set_local_priority(&self, enabled: bool) {
         *self.local_priority.write().await = enabled;
     }
@@ -415,8 +416,9 @@ impl AiIntegrator {
         // ===== AI 决策分支：暂停（平台目标调整 2026-09-09）=====
         // 此路径仅 local_priority=false 可达；AI 暂停期恒 true，故生产不可达。
         // 代码保留为框架（异常检测/应急/安全闸门/双参下发），观测空间数据维度
-        // 重构 + 模型恢复加载后再启用。模型未加载时下方 ModelNotLoaded Err 已兜底，
-        // 不会静默误下发。
+        // 重构 + 模型恢复加载后再启用。模型未加载时下方 ModelNotLoaded Err 已兜底，不会静默
+        // 误下发；异常检测路径靠 manager 为 None / get_current_state=None（观测停采）安全兜底，
+        // 绝不进入应急分支。
 
         // v2.9 新增：异常检测与应急策略
         {
