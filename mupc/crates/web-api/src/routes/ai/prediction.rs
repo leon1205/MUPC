@@ -68,11 +68,11 @@ pub async fn get_current_prediction(State(state): State<Arc<AppState>>) -> Json<
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "lstm_ready": info.lstm_ready,
         "engine_status": info.engine_status.to_string(),
-        "prediction": {
-            "pv_power_kw": 0.0,
-            "load_power_kw": 0.0,
-            "confidence": 0.85
-        }
+        "prediction": if info.lstm_ready {
+            serde_json::json!({ "pv_power_kw": 0.0, "load_power_kw": 0.0, "confidence": 0.0 })
+        } else {
+            serde_json::Value::Null
+        },
     }))
 }
 

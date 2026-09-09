@@ -67,8 +67,13 @@ fn validate_weight_value(value: f64) -> bool {
 }
 
 /// GET /api/v1/ai/weights
-pub async fn get_weights(State(state): State<Arc<AppState>>) -> Json<WeightsResponse> {
-    let _ = state.ai_integrator;
+pub async fn get_weights(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<WeightsResponse>, StatusCode> {
+    // AI 引擎未启用（暂停/模型未加载 2026-09-09）时权重无意义——回 503 而非静态默认值
+    if !state.ai_integrator.engine_status().await.ai_engine_enabled {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let defaults: Vec<WeightEntry> = VALID_WEIGHT_NAMES
         .iter()
         .map(|name| WeightEntry {
@@ -81,7 +86,7 @@ pub async fn get_weights(State(state): State<Arc<AppState>>) -> Json<WeightsResp
         })
         .collect();
 
-    Json(WeightsResponse { weights: defaults })
+    Ok(Json(WeightsResponse { weights: defaults }))
 }
 
 /// PUT /api/v1/ai/weights
@@ -89,6 +94,10 @@ pub async fn put_update_weights(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateWeightsRequest>,
 ) -> Result<Json<UpdateWeightsResponse>, StatusCode> {
+    // AI 引擎未启用（暂停 2026-09-09）时权重写入无生效对象——回 503，拒绝假成功
+    if !state.ai_integrator.engine_status().await.ai_engine_enabled {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     for change in &req.weights {
         if !validate_weight_name(&change.name) {
             return Err(StatusCode::BAD_REQUEST);
@@ -110,8 +119,6 @@ pub async fn put_update_weights(
             new_value: c.value,
         })
         .collect();
-
-    let _ = state.ai_integrator;
 
     Ok(Json(UpdateWeightsResponse {
         status: "ok".to_string(),

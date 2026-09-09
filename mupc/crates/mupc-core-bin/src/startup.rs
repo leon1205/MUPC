@@ -553,8 +553,9 @@ pub async fn initialize_all(
             if let Err(e) = decision_integrator.dispatch_ai_decision().await {
                 tracing::debug!("AI 决策周期失败: {}", e);
             } else {
-                // 推送 AI 决策事件（SSE 生产者）
-                let _ = decision_sse.push_ai_decision("AI 决策完成");
+                // 推送策略下发事件（SSE 生产者；AI 引擎已停用 2026-09-09，每拍实际为本地台区
+                // 储能治理 run_fallback_strategies 下发——沿用 AiDecision 通道，仅文案中性化）
+                let _ = decision_sse.push_ai_decision("策略下发完成");
             }
         }
     }));
