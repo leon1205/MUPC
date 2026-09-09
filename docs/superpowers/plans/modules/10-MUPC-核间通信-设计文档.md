@@ -221,7 +221,7 @@ Bytes:  0xAA 0x55 | 0x00 0x40 | 0x00 0x01 | 0x00 0x00 | (52 padding) | CRC16
 
 > **双参数模式**：帧格式从多指令类型简化为双参数（`p_ref` + `k_droop`），实现下垂控制。
 
-Payload 采用 JSON 编码（v2.0）：
+Payload 采用 JSON 编码：
 
 ```json
 {
@@ -241,7 +241,7 @@ Payload 采用 JSON 编码（v2.0）：
 | ai_ready | bool | AI 引擎就绪状态 |
 | strategy_mode | string | 当前策略模式上下文 |
 | timestamp_ms | u64 | UTC 时标（毫秒） |
-| frame_version | u8 | 帧版本号，v2.0 为 `2` |
+| frame_version | u8 | 帧版本号，当前帧协议为 `2` |
 
 > **注意**：`load_shedding` 和 `pv_limit` **不通过此帧发送**，而是通过 SouthCommandDispatcher 发送到南向设备（光伏逆变器、负荷控制装置），避免核间通信负载过大。
 
@@ -257,7 +257,7 @@ Payload 采用 JSON 编码：
 
 ```json
 {
-    "cmd_type": "P_batt_set",
+    "cmd_type": "p_ref",
     "seq_no": 42,
     "result": "success",
     "error_msg": "",
@@ -308,7 +308,7 @@ Payload 采用 JSON 编码：
 
 > DataUpload 在 StatusReport 基础上扩展，新增 `q_realtime_margin` 字段。
 
-Payload 采用 JSON 编码（v2.10）：
+Payload 采用 JSON 编码：
 
 ```json
 {
@@ -325,7 +325,7 @@ Payload 采用 JSON 编码（v2.10）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| frame_version | u8 | 帧版本号，v2.10 为 `1` |
+| frame_version | u8 | 帧版本号，当前帧协议为 `1` |
 | timestamp_ms | u64 | UTC 时标（毫秒） |
 | q_realtime_margin | f64 | 实时模块剩余无功容量比例 [0.0, 1.0]，0=无功打满，1=完全空闲 |
 | battery_soc | f64 | 电池荷电状态 (%) |
@@ -336,7 +336,7 @@ Payload 采用 JSON 编码（v2.10）：
 
 > 当实时控制模块检测到电压越限且无功耗尽时，临时覆盖 AI 有功指令的紧急事件帧。
 
-Payload 采用 JSON 编码（v2.10）：
+Payload 采用 JSON 编码：
 
 ```json
 {
@@ -355,7 +355,7 @@ Payload 采用 JSON 编码（v2.10）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| frame_version | u8 | 帧版本号，v2.10 为 `1` |
+| frame_version | u8 | 帧版本号，当前帧协议为 `1` |
 | timestamp_ms | u64 | UTC 时标（毫秒） |
 | trigger_reason | string | 触发原因 |
 | voltage_phase_a/b/c | f64 | 三相电压标幺值 |
@@ -666,12 +666,7 @@ pub enum WatchdogState {
 - 累积丢失心跳次数
 - 对端状态码、CPU 温度、内存使用率
 
-> **⚠️ PCS 形态说明（transport=modbus_rtu，v2.2+）**：上表对端 IP/CPU 温度/内存等字段
-> 源自 TCP 仿真通道的 StatusReport——**PCS 生产通道无此上送**（PCS 仅 RS485，无 TCP 状态帧）。
-> PCS 通道连接/健康由 `ModbusRtuTransport` 心跳轮询 3 区 1013 驱动（`connected` 标志 +
-> 停机观测 M1），经 `IntercoreClient::is_connected()` 对上层可见；**1013 运行状态/告警字到
-> Web UI / system-monitoring 状态展示的具体字段映射尚未设计**（M12，属 §11.11 健康可选
-> 接入的对外呈现，待 Web API 对接 PCS 健康项时补）。
+**PCS 形态说明（transport=modbus_rtu）**：上表对端 IP/CPU 温度/内存等字段源自 TCP 仿真通道的 StatusReport——**PCS 生产通道无此上送**（PCS 仅 RS485，无 TCP 状态帧）。PCS 通道连接/健康由 `ModbusRtuTransport` 心跳轮询 3 区 1013 驱动（`connected` 标志 + 停机观测 M1），经 `IntercoreClient::is_connected()` 对上层可见；**1013 运行状态/告警字到 Web UI / system-monitoring 状态展示的具体字段映射尚未设计**（M12，属 §11.11 健康可选接入的对外呈现，待 Web API 对接 PCS 健康项时补）。
 
 **对外查询接口：**
 
@@ -968,12 +963,7 @@ mupc/crates/intercore/
     └── watchdog.rs             # 看门狗（Watchdog、WatchdogConfig、WatchdogState）
 ```
 
-> **⚠️ v2.2 文件结构变更**：上表为 §2-§9 TCP 仿真栈快照。§11 Modbus/PCS 驱动新增
-> `src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）+ `src/transport/modbus.rs`
-> （PCS 驱动）+ `src/transport/tcp.rs`（TcpTransport）+ `src/pcs.rs`（PCS 点表/编解码）；
-> 假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用；PCS 协议
-> 从站仿真为 `src/bin/pcs_slave.rs`。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP
-> server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。
+**说明**：上表为 TCP 仿真栈文件结构（IntercoreServer）。Modbus/PCS 生产通道文件：`src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）、`src/transport/modbus.rs`（PCS 驱动）、`src/transport/tcp.rs`（TcpTransport）、`src/pcs.rs`（PCS 点表/编解码），PCS 协议从站仿真为 `src/bin/pcs_slave.rs`；历史假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。
 
 ### 9.2 文件职责说明
 
@@ -1021,10 +1011,10 @@ tokio-test = "0.4"              # Tokio 测试工具
 | ADR-009 | 传输通道抽象层级（新增 Modbus RTU 备选） | ① intercore 内部 `IntercoreTransport` trait，IntercoreClient 作门面；② 上层双客户端（AiIntegrator 按配置选）；③ 独立 transport crate | **intercore 内部 trait（方案①）** | 改动集中在 intercore 内部，上层（AiIntegrator/strategy-engine/web-api）接口不变、零改动；最符合"通信选择"定位（对控制逻辑透明） |
 | ADR-010 | Modbus 寄存器数值编码 | ① int32 有符号缩放（2 寄存器/值）；② IEEE754 f64（4 寄存器/值） | **int32 缩放（方案①）** | 工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够；`k_droop` 用 0.001 缩放 |
 | ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16 |
-| ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载。**⚠️ v2.2 PCS 架构修正**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26）；SafetyOverride 概念废弃，由 PCS 内部保护 + AiValidator 承接；边界更新为 **Modbus 承载控制+SOC+健康，遥测转总表**（详见 ADR-013 / §11.11） |
-| ADR-013 | Modbus 通道真实协议 | ① 自定义假设点表（cmd_valid/exec 确认区，早期实现）；② **PCS 真实协议 V1.3**（FC06 写即生效、分相模式、int16 缩放+字节互换） | **PCS 真实协议（方案②，v2.2）** | 实时控制模块=两级式 PCS，经现场协议资料确认点表；假设表无法对接真实设备，PCS 为标准 Modbus 从站无自建确认区 |
+| ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载。**PCS 架构修正**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26）；SafetyOverride 概念废弃，由 PCS 内部保护 + AiValidator 承接；边界更新为 **Modbus 承载控制+SOC+健康，遥测转总表**（详见 ADR-013 / §11.11） |
+| ADR-013 | Modbus 通道真实协议 | ① 自定义假设点表（cmd_valid/exec 确认区，早期实现）；② **PCS 真实协议 V1.3**（FC06 写即生效、分相模式、int16 缩放+字节互换） | **PCS 真实协议（方案②）** | 实时控制模块=两级式 PCS，经现场协议资料确认点表；假设表无法对接真实设备，PCS 为标准 Modbus 从站无自建确认区 |
 
-> **⚠️ ADR-010 修订注（2026-09-08，M11）**：ADR-010 的「int32 有符号缩放（2 寄存器/值，
+> **ADR-010 修订注**：ADR-010 的「int32 有符号缩放（2 寄存器/值，
 > 0.01kW）」编码结论适用于已作废的假设表（§11.4-11.6 / `modbus_rtu.rs` 旧路径仿真）。
 > **PCS 真实协议（ADR-013）下寄存器编码由设备协议 V1.3 固定为 int16 单寄存器 *1kW +
 > 高 8/低 8 字节互换**，非本系统可选——ADR-010 不再适用于 PCS 通道，读者勿据此误采
@@ -1053,7 +1043,7 @@ tokio-test = "0.4"              # Tokio 测试工具
 
 **数据面边界（ADR-012）**：Modbus 通道承载**控制下行 + 执行确认 + 心跳/健康状态上行**；**遥测上送（StatusReport/DataUpload）与 SafetyOverride 事件仍走 TCP 以太网链路**。依据：本系统遥测主数据流来自南向采集（非核间实时模块上送），RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全关键即时事件，Modbus 轮询模式无法保证及时性。走 `modbus_rtu` 时遥测/SafetyOverride 依赖 TCP 存在——若现场完全无以太网，须另行评估遥测路径（不在本次范围）。
 
-> **⚠️ v2.2 PCS 架构取代注**：上述 ADR-012 边界中「遥测/SafetyOverride 仍走 TCP」基于「自定义小脑实时模块 + TCP 上送」假设。**PCS 架构下（ADR-013 / §11.11）**：实时模块 = 两级式 PCS，**仅 RS485（Modbus 从站），无 TCP 上送**；台区电气遥测**真实源 = 台区总表 master_meter（U-26 独立 RS485）**，非 PCS 核间上送；原 SafetyOverride 概念**废弃**，由 **PCS 内部保护 + AiValidator/策略校验**承接；PCS 3 区 1029-1036 输出功率仅可作健康/校验，不并作策略遥测。故 ADR-012 数据面边界更新为：**Modbus 承载 控制 + SOC + 健康**，**遥测转总表**（不再依赖 TCP 承载遥测/安全事件，原「无以太网现场遥测路径未覆盖」风险消解）。`transport=tcp` 帧协议仅用于仿真/联调（sim-bridge 作 TCP 服务端）。
+> **PCS 架构说明**：上述 ADR-012 边界中「遥测/SafetyOverride 仍走 TCP」基于「自定义小脑实时模块 + TCP 上送」假设。**PCS 架构下（ADR-013 / §11.11）**：实时模块 = 两级式 PCS，**仅 RS485（Modbus 从站），无 TCP 上送**；台区电气遥测**真实源 = 台区总表 master_meter（U-26 独立 RS485）**，非 PCS 核间上送；原 SafetyOverride 概念**废弃**，由 **PCS 内部保护 + AiValidator/策略校验**承接；PCS 3 区 1029-1036 输出功率仅可作健康/校验，不并作策略遥测。故 ADR-012 数据面边界更新为：**Modbus 承载 控制 + SOC + 健康**，**遥测转总表**（不再依赖 TCP 承载遥测/安全事件，原「无以太网现场遥测路径未覆盖」风险消解）。`transport=tcp` 帧协议仅用于仿真/联调（sim-bridge 作 TCP 服务端）。
 
 ### 11.2 可行性评估
 
@@ -1065,7 +1055,7 @@ tokio-test = "0.4"              # Tokio 测试工具
 | 校验 | Modbus RTU 自带 CRC16 | ✅ 帧校验完备 |
 | 基础设施 | rs485-plugin 已有 Modbus CRC16 / 寄存器读写实现可参考 | ✅ 无需从零写帧 |
 | 栈选型 | tokio-modbus 提供 async master + server（slave） | ✅ 与 tokio 栈契合 |
-| **主要风险** | ① 点表须与 **PCS 固件 V1.3** 对齐（寄存器/字节互换/符号约定，§11.11 契约清单；假设表 Slave 参考仅仿真）；② 串口物理层（RS485 接线/终端电阻/DE/RE 方向控制）需现场验证；③ **v2.2 修正**：遥测源=台区总表 master_meter（U-26），不依赖 PCS/TCP（原 ADR-012"遥测走 TCP"在 PCS=实时模块架构下消解，见 §11.1/§11.11） | ⚠️ 依赖 PCS 固件确认 |
+| **主要风险** | ① 点表须与 **PCS 固件 V1.3** 对齐（寄存器/字节互换/符号约定，§11.11 契约清单；假设表 Slave 参考仅仿真）；② 串口物理层（RS485 接线/终端电阻/DE/RE 方向控制）需现场验证；③ 遥测源=台区总表 master_meter（U-26），不依赖 PCS/TCP（原 ADR-012"遥测走 TCP"在 PCS=实时模块架构下消解，见 §11.1/§11.11） | ⚠️ 依赖 PCS 固件确认 |
 
 ### 11.3 Transport 抽象（intercore 内部，上层零改动）
 
@@ -1091,7 +1081,7 @@ pub trait IntercoreTransport: Send + Sync {
 
 ### 11.4 Modbus 寄存器映射与编码
 
-> ⚠️ **v2.2 注**：本节自定义假设点表（控制/执行确认/状态三区、`cmd_valid`/`exec_seq`/int32 缩放）**已被 §11.11 PCS 真实协议 V1.3 取代**——`transport=modbus_rtu` 实际对接两级式 PCS（FC06 写即生效，无自建确认区，int16 缩放 + 高 8/低 8 互换）。本节保留作通用 Modbus 传输框架参考（transport 抽象/读写/心跳轮询思想），点表以实现 §11.11 为准。
+> **注**：本节自定义假设点表（控制/执行确认/状态三区、`cmd_valid`/`exec_seq`/int32 缩放）**已被 §11.11 PCS 真实协议 V1.3 取代**——`transport=modbus_rtu` 实际对接两级式 PCS（FC06 写即生效，无自建确认区，int16 缩放 + 高 8/低 8 互换）。本节保留作通用 Modbus 传输框架参考（transport 抽象/读写/心跳轮询思想），点表以实现 §11.11 为准。
 
 实时控制模块（Slave）持有一块保持寄存器区，分三区：**控制区**（Master 写，FC16）、**执行确认区**（从站写、Master 读，FC03）、**状态/心跳区**（从站写、Master 读）。从站地址可配（默认 1）。
 
@@ -1269,13 +1259,13 @@ intercore:
 - 部署/测试配套：`mupc/deploy/config/mupc_core_config.production.yaml`（transport=modbus_rtu 生产模板，与仿真 tcp 默认配置分离）；`src/bin/pcs_slave.rs` PCS 协议从站仿真（见上测试）。
 - 文档补记：ADR-010 取代注（M11）、§11.10 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
 
-## 12. BECG-3568 现场接线契约与安全联锁（v2.3/v2.4）`[DESIGN_APPROVED: 2026-09-08]`
+## 12. BECG-3568 现场接线契约与安全联锁
 
 > **目标平台变更**：MUPC 运行硬件为 **BECG-3568 BOX**（瑞芯微 RK3568 四核 A55 @2.0GHz、NPU 1TOPS、板载 8 路隔离 RS485 / 16 路隔离 DI / 6 路继电器 DO / 2 路 CAN / 4 路 ADC / 4×千兆网口）；后续换 **RK3588 型号接口完全一致**（仅 NPU/OTA 侧按 3588 SDK 变化，见 05 AI 引擎与 OTA 模块）。
 > **板载串口节点**：COM1-8 ↔ `ttyS0` / `ttyS2` / `ttyS3` / `ttyS4` / `ttyS5` / `ttyS6` / `ttyS7` / `ttyS8`（**无 ttyS1**，A0→ttyS0、A2→ttyS2 … A8→ttyS8）；无「USB 转 485」概念（历史 `/dev/ttyUSB0` 假设在 BECG 上不成立）。
 > **DI/DO GPIO 编号**（按规格书 V1.1）：DI1=124 / DI2=125 / DI3=102 / DI4=103 / DI5=104 / DI6=66 / DI7=63 / DI8=64 / DI9=65 / DI10=88 / DI11=89 / DI12=90 / DI13=91 / DI14=148 / DI15=154 / DI16=23；DO1=97 / DO2=107 / DO3=19 / DO4=108 / DO5=109 / DO6=110。编号以板端导出后实际 `gpioN` 校准（配置化容忍 chip 偏移）。
 
-### 12.1 PCS 主链路物理接线契约（S1，v2.3）
+### 12.1 PCS 主链路物理接线契约
 
 **PCS 主链路**：**RS485-1 / COM1 / `/dev/ttyS0` ↔ PCS A2/B2，19200 N-8-1**（V1.3 线格式）。`intercore.modbus_rtu.serial_port` 默认 `/dev/ttyS1 → /dev/ttyS0`（YAML 可覆盖，现场以接线为准）；实施须**同步更新 core_config 默认常量与单测断言**，并建议 validate 在 `transport=modbus_rtu` 时启动即探测串口存在性（fail-fast，不等首帧超时）。总表等站级 485 节点完整分配见 **02 南向 §10 统一调度** 与 **deploy/deploy.md 现场接线章**。
 
@@ -1292,7 +1282,7 @@ intercore:
 
 DI/DO 分配（联锁输入/状态输出，接线见 deploy.md）：DI1 急停(124)、DI2 水浸(125)、DI3 消防报警(102)、DI4 门禁(103)、DO1 运行灯(97)、DO2 故障灯(107)。
 
-### 12.2 PCS 停机原语与联锁锁存（S2，v2.4）
+### 12.2 PCS 停机原语与联锁锁存
 
 **背景（Why）**：V1.3 驱动**只有启动无停机原语**——每次 `send_tai_command`/`send_dual_param` 前置 `ensure_started` 自动写 `REG_START_STOP(500)=1`；M1 停机观测（1013=0）仅告警不动作；心跳恢复后下一次下发即自动重启。安全联锁（急停/水浸/消防报警）要求**可靠停机且禁止自动重启**，故须新增显式停机原语 + 锁存停机态，堵住「自动重启」路径。
 
@@ -1358,32 +1348,6 @@ io:
 
 - S1/S2 设计与实施按 writing-plans 分批（S1 平台落地 → S2 联锁）；PCS 契约待确认清单（启停 500 时序/符号）仍待厂方，停机原语以 500=0 为当前契约。
 - 交叉注：BMS 站（02 §10 role=battery）在线时其 SOC 优先于 `latest_soc`（intercore 回读）注入策略；见 **04 策略引擎 §2.11** SOC 源优先级补注。
-
-### 12.7 架构审查修订（2026-09-08，dispatch_architect）`[DESIGN_APPROVED: 2026-09-08]`
-
-**就地修订（已并入正文）**：
-
-| 编号 | 内容 | 落点 |
-|---|---|---|
-| S-1 | `stop()` 成功须复位 `started=false`（否则 release 后 ensure_started 跳过启动 → 释放无法重启）；M1 停机观测加 `!stopped_latched` 自命令豁免 | §12.2 第 1 条 / §12.2 第 2 条尾 |
-| S-2 | stop/is_interlock_stopped/last_run_state 入 `IntercoreTransport` trait（上层多态可调 + DO 数据源）；`tcp` 仿真 stop 降级 no-op | §12.2 第 2 条 |
-| S-3 | PCS 侧独立硬急停回路兜底为投运前提（软停第一层）；stop 后 ≤T 确认 1013 转 0，未确认升级 stop_failed 态 | §12.3 联锁触发动作补 |
-| S-4 | 链路恢复后首个写启动前先 1013 读校验（M1 守卫升级为 ensure_started 前置） | §12.2 第 5 条 |
-| M-1 | GPIO 初始化/DI 读失败一律按触发（fail-safe latch + 告警），startup GPIO 自检 | §12.3 |
-| M-2 | 去抖按 DI 细分（debounce_count 入每 DI），急停/消防 1 次采样即触发 | §12.3 |
-| M-3 | 本地受控释放旁路（CLI + 审计）供无网恢复；Web release 占位 RBAC 标注授权偏离 + 限内网 | §12.4 |
-| M-5 | 默认值变更同步 core_config 常量/单测；validate 启动探测串口 fail-fast | §12.1 |
-| M-7 | DO1 运行灯 = 1013 ∈ {1,2,3}（非停机即上电）且无 latch（修正 =1） | §12.3 DO 语义 |
-
-**跨模块采纳（落 02/04）**：M-4（south_stations 单写方 + 跨段「不与 modbus_rtu 共口」校验）、M-6（5s 新鲜度升共享常量）、M-8（fire 与 DI3 融合规则）、M-10（BMS 多包/多块扩展点）、M-11（口调度预算优先 meter_grid/battery）→ 02 §10；M-9（SOC 源切换滞回）→ 04 §2.11.1。**轻量项**：L-1 目录补 §11/§12（本节）、L-3 §11.7 示例串口改 ttyS0（下方实施修订）、L-2 deploy 章号与硬件行、L-4/L-5/L-6 → 02 §10 修订。
-
-**放行标准**：S/M 级全部采纳，L 顺手；仍待厂方/联调确认项（PCS 启停 500 时序与符号、BMS 多包/私有点表、空调协议、消防融合语义）留实施/联调阶段闭环，不阻塞设计门禁。
-
-**三轮修订（2026-09-08，design-reviewer 正式门禁 REJECTED → 修订）**：C-1 双 latch 模型（latch 介入不依赖 500=0 写成功、stop() 仅写与缓存复位、清/置唯一入口 clear/restore）→ §12.2；C-2 推包与新鲜度闸门（set_latest_data 闸门仅 meter_grid 推进）→ 02 §10.5/04 §2.11.1；I-1 M1 运维确认入口 + DO2 持久条件 → §12.2 bullet6；I-2 SOC 状态机测试清单 → 04 §2.11.1；B1/B2 → deploy §九 9.3；B3 → §12.3 DO；B4-B6 记为实施期项。
-
-**二轮修订（2026-09-08，design-reviewer REJECTED → 修订）**：R-A（`clear_interlock_latch()`/`restore_interlock_latched(bool)` 清/恢复接口与调用时序，§12.2）；R-B（latch 期间整条下行中止、不写任何寄存器，§12.2）；R-E（去抖 `debounce` 移入每 DI、`stop_confirm_ms` 入 io schema，§12.4）；R-G（消防停机仅以 DI3 为准、RS485 作确认/校核 + 双源不一致告警，§12.3）；R-D（§11.7 示例串口 ttyS0）；R-I（停机确认循环归属 interlock + 挂 §11.11 待确认）；R-C（SOC 双源落点）→ 04 §2.11.1；R-F/R-H（02 §10 deploy 章号与 master_meter 排他）；R-J（BECG 485 方向控制确认项）→ 02 §10.8。
-
-
 
 ---
 
