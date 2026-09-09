@@ -666,7 +666,7 @@ pub enum WatchdogState {
 - 累积丢失心跳次数
 - 对端状态码、CPU 温度、内存使用率
 
-**PCS 形态说明（transport=modbus_rtu）**：上表对端 IP/CPU 温度/内存等字段源自 TCP 仿真通道的 StatusReport——**PCS 生产通道无此上送**（PCS 仅 RS485，无 TCP 状态帧）。PCS 通道连接/健康由 `ModbusRtuTransport` 心跳轮询 3 区 1013 驱动（`connected` 标志 + 停机观测 M1），经 `IntercoreClient::is_connected()` 对上层可见；**1013 运行状态/告警字到 Web UI / system-monitoring 状态展示的具体字段映射尚未设计**（M12，属 §11.11 健康可选接入的对外呈现，待 Web API 对接 PCS 健康项时补）。
+**PCS 形态说明（transport=modbus_rtu）**：上表对端 IP/CPU 温度/内存等字段源自 TCP 仿真通道的 StatusReport——**PCS 生产通道无此上送**（PCS 仅 RS485，无 TCP 状态帧）。PCS 通道连接/健康由 `ModbusRtuTransport` 心跳轮询 3 区 1013 驱动（`connected` 标志 + 停机观测 M1），经 `IntercoreClient::is_connected()` 对上层可见；**1013 运行状态/告警字到 Web UI / system-monitoring 状态展示的具体字段映射尚未设计**（M12，属 §11.9 健康可选接入的对外呈现，待 Web API 对接 PCS 健康项时补）。
 
 **对外查询接口：**
 
@@ -1011,11 +1011,11 @@ tokio-test = "0.4"              # Tokio 测试工具
 | ADR-009 | 传输通道抽象层级（新增 Modbus RTU 备选） | ① intercore 内部 `IntercoreTransport` trait，IntercoreClient 作门面；② 上层双客户端（AiIntegrator 按配置选）；③ 独立 transport crate | **intercore 内部 trait（方案①）** | 改动集中在 intercore 内部，上层（AiIntegrator/strategy-engine/web-api）接口不变、零改动；最符合"通信选择"定位（对控制逻辑透明） |
 | ADR-010 | Modbus 寄存器数值编码 | ① int32 有符号缩放（2 寄存器/值）；② IEEE754 f64（4 寄存器/值） | **int32 缩放（方案①）** | 工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够；`k_droop` 用 0.001 缩放 |
 | ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16 |
-| ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载。**PCS 架构修正**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26）；SafetyOverride 概念废弃，由 PCS 内部保护 + AiValidator 承接；边界更新为 **Modbus 承载控制+SOC+健康，遥测转总表**（详见 ADR-013 / §11.11） |
+| ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载。**PCS 架构修正**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26）；SafetyOverride 概念废弃，由 PCS 内部保护 + AiValidator 承接；边界更新为 **Modbus 承载控制+SOC+健康，遥测转总表**（详见 ADR-013 / §11.9） |
 | ADR-013 | Modbus 通道真实协议 | ① 自定义假设点表（cmd_valid/exec 确认区，早期实现）；② **PCS 真实协议 V1.3**（FC06 写即生效、分相模式、int16 缩放+字节互换） | **PCS 真实协议（方案②）** | 实时控制模块=两级式 PCS，经现场协议资料确认点表；假设表无法对接真实设备，PCS 为标准 Modbus 从站无自建确认区 |
 
 > **ADR-010 修订注**：ADR-010 的「int32 有符号缩放（2 寄存器/值，
-> 0.01kW）」编码结论适用于已作废的假设表（§11.4-11.6 / `modbus_rtu.rs` 旧路径仿真）。
+> 0.01kW）」编码结论适用于已作废的假设表（附录 B 历史假设点表 / `modbus_rtu.rs` 旧路径仿真）。
 > **PCS 真实协议（ADR-013）下寄存器编码由设备协议 V1.3 固定为 int16 单寄存器 *1kW +
 > 高 8/低 8 字节互换**，非本系统可选——ADR-010 不再适用于 PCS 通道，读者勿据此误采
 > int32/0.01kW。ADR-011（tokio-modbus 栈选型）仍有效。
@@ -1033,6 +1033,8 @@ tokio-test = "0.4"              # Tokio 测试工具
 
 ## 11. 传输通道抽象与 Modbus RTU 备选链路
 
+> **注**：早期自定义 Modbus 假设点表与 Slave 从站参考实现已被 PCS 真实协议取代，降为文末「附录 B：历史 Modbus 假设点表（框架参考）」仅供框架参考；生产 Modbus 通道点表以 §11.9 PCS 真实协议 V1.3 为准。
+
 ### 11.1 背景与目标
 
 部分现场以太网（TCP/RJ45）布线不可行或距离受限，需在现有 TCP 核间链路之外，提供一条 **Modbus RTU（RS485）备选链路**。要求：
@@ -1043,7 +1045,7 @@ tokio-test = "0.4"              # Tokio 测试工具
 
 **数据面边界（ADR-012）**：Modbus 通道承载**控制下行 + 执行确认 + 心跳/健康状态上行**；**遥测上送（StatusReport/DataUpload）与 SafetyOverride 事件仍走 TCP 以太网链路**。依据：本系统遥测主数据流来自南向采集（非核间实时模块上送），RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全关键即时事件，Modbus 轮询模式无法保证及时性。走 `modbus_rtu` 时遥测/SafetyOverride 依赖 TCP 存在——若现场完全无以太网，须另行评估遥测路径（不在本次范围）。
 
-> **PCS 架构说明**：上述 ADR-012 边界中「遥测/SafetyOverride 仍走 TCP」基于「自定义小脑实时模块 + TCP 上送」假设。**PCS 架构下（ADR-013 / §11.11）**：实时模块 = 两级式 PCS，**仅 RS485（Modbus 从站），无 TCP 上送**；台区电气遥测**真实源 = 台区总表 master_meter（U-26 独立 RS485）**，非 PCS 核间上送；原 SafetyOverride 概念**废弃**，由 **PCS 内部保护 + AiValidator/策略校验**承接；PCS 3 区 1029-1036 输出功率仅可作健康/校验，不并作策略遥测。故 ADR-012 数据面边界更新为：**Modbus 承载 控制 + SOC + 健康**，**遥测转总表**（不再依赖 TCP 承载遥测/安全事件，原「无以太网现场遥测路径未覆盖」风险消解）。`transport=tcp` 帧协议仅用于仿真/联调（sim-bridge 作 TCP 服务端）。
+> **PCS 架构说明**：上述 ADR-012 边界中「遥测/SafetyOverride 仍走 TCP」基于「自定义小脑实时模块 + TCP 上送」假设。**PCS 架构下（ADR-013 / §11.9）**：实时模块 = 两级式 PCS，**仅 RS485（Modbus 从站），无 TCP 上送**；台区电气遥测**真实源 = 台区总表 master_meter（U-26 独立 RS485）**，非 PCS 核间上送；原 SafetyOverride 概念**废弃**，由 **PCS 内部保护 + AiValidator/策略校验**承接；PCS 3 区 1029-1036 输出功率仅可作健康/校验，不并作策略遥测。故 ADR-012 数据面边界更新为：**Modbus 承载 控制 + SOC + 健康**，**遥测转总表**（不再依赖 TCP 承载遥测/安全事件，原「无以太网现场遥测路径未覆盖」风险消解）。`transport=tcp` 帧协议仅用于仿真/联调（sim-bridge 作 TCP 服务端）。
 
 ### 11.2 可行性评估
 
@@ -1055,7 +1057,7 @@ tokio-test = "0.4"              # Tokio 测试工具
 | 校验 | Modbus RTU 自带 CRC16 | ✅ 帧校验完备 |
 | 基础设施 | rs485-plugin 已有 Modbus CRC16 / 寄存器读写实现可参考 | ✅ 无需从零写帧 |
 | 栈选型 | tokio-modbus 提供 async master + server（slave） | ✅ 与 tokio 栈契合 |
-| **主要风险** | ① 点表须与 **PCS 固件 V1.3** 对齐（寄存器/字节互换/符号约定，§11.11 契约清单；假设表 Slave 参考仅仿真）；② 串口物理层（RS485 接线/终端电阻/DE/RE 方向控制）需现场验证；③ 遥测源=台区总表 master_meter（U-26），不依赖 PCS/TCP（原 ADR-012"遥测走 TCP"在 PCS=实时模块架构下消解，见 §11.1/§11.11） | ⚠️ 依赖 PCS 固件确认 |
+| **主要风险** | ① 点表须与 **PCS 固件 V1.3** 对齐（寄存器/字节互换/符号约定，§11.9 契约清单；假设表 Slave 参考仅仿真）；② 串口物理层（RS485 接线/终端电阻/DE/RE 方向控制）需现场验证；③ 遥测源=台区总表 master_meter（U-26），不依赖 PCS/TCP（原 ADR-012"遥测走 TCP"在 PCS=实时模块架构下消解，见 §11.1/§11.9） | ⚠️ 依赖 PCS 固件确认 |
 
 ### 11.3 Transport 抽象（intercore 内部，上层零改动）
 
@@ -1076,47 +1078,10 @@ pub trait IntercoreTransport: Send + Sync {
 ```
 
 - **TcpTransport**：现有 TCP 帧封装逻辑（`send_frame` + 持久 TcpStream + V1/V2/V3 JSON payload）原样迁移，协议不变；
-- **ModbusRtuTransport**：Master，不传帧字节，按 §11.4 寄存器映射写控制寄存器 + 轮询读状态；
+- **ModbusRtuTransport**：Master，不传帧字节，按 §11.9 PCS 点表写控制寄存器 + 轮询读状态；
 - `IntercoreClient` 保留 `connected`/`last_p_ref`/`last_k_droop` 门面状态，委托给 transport。
 
-### 11.4 Modbus 寄存器映射与编码
-
-> **注**：本节自定义假设点表（控制/执行确认/状态三区、`cmd_valid`/`exec_seq`/int32 缩放）**已被 §11.11 PCS 真实协议 V1.3 取代**——`transport=modbus_rtu` 实际对接两级式 PCS（FC06 写即生效，无自建确认区，int16 缩放 + 高 8/低 8 互换）。本节保留作通用 Modbus 传输框架参考（transport 抽象/读写/心跳轮询思想），点表以实现 §11.11 为准。
-
-实时控制模块（Slave）持有一块保持寄存器区，分三区：**控制区**（Master 写，FC16）、**执行确认区**（从站写、Master 读，FC03）、**状态/心跳区**（从站写、Master 读）。从站地址可配（默认 1）。
-
-| 分区 | 地址 | 内容 | 方向 | 编码 |
-|---|---|---|---|---|
-| 控制区 | **0x0000** | `cmd_ctrl` 命令控制字 | 写 | 低字节：bit0 `cmd_valid`（上升沿触发从站采样生效）、bit1-3 `strategy_mode`、bit4 `ai_ready`；**高字节：`cmd_seq`（Master 每次下发递增 u8，用于执行确认匹配）** |
-| 控制区 | **0x0001** | `protocol_version` | 写 | u16，Master 写期望协议版本（当前 1）；从站校验不符则拒采纳并置 `exec_status` 失败 |
-| 控制区 | **0x0010-0x0011** | `p_ref` | 写 | int32 有符号，0.01 kW/LSB |
-| 控制区 | **0x0012-0x0013** | `k_droop` | 写 | int32 有符号，0.001 kW/V·LSB |
-| 控制区 | **0x0020-0x0021** | `phase_p[A]` | 写 | int32，0.01 kW/LSB |
-| 控制区 | **0x0022-0x0023** | `phase_p[B]` | 写 | 同上 |
-| 控制区 | **0x0024-0x0025** | `phase_p[C]` | 写 | 同上 |
-| 控制区 | **0x0026-0x0027** | `phase_q[A]` | 写 | int32，0.01 kVAr/LSB |
-| 控制区 | **0x0028-0x0029** | `phase_q[B]` | 写 | 同上 |
-| 控制区 | **0x002A-0x002B** | `phase_q[C]` | 写 | 同上 |
-| 执行确认区 | **0x0030-0x0031** | `exec_seq` | 读 | int32，从站回写本次采纳的指令序号（对应 ControlRsp.seq_no） |
-| 执行确认区 | **0x0032** | `exec_status` | 读 | u16：0 空闲 / 1 执行中 / 2 执行成功 / 3 执行失败 / 4 超时（对应 ControlRsp.result） |
-| 执行确认区 | **0x0033** | `exec_error` | 读 | u16 错误码（对应 ControlRsp.error_msg，映射表从站实现） |
-| 状态区 | **0x0100** | `heartbeat_counter` | 读 | u16，实时模块周期递增（master 轮询判在线/超时） |
-| 状态区 | **0x0101** | `device_status` | 读 | u16 状态字（bit0 运行/bit1 故障…） |
-| 状态区 | **0x0102-0x0103** | `cpu_temp` | 读 | int32，0.01 ℃/LSB |
-| 状态区 | **0x0104-0x0105** | `memory_usage` | 读 | int32，0.01 %/LSB |
-
-**编码选择**：int32 缩放（2 寄存器/值）而非 IEEE754（4 寄存器/值）——工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够。`k_droop` 数量级小，用 0.001 缩放。
-
-**写生效 + 执行确认流程（对齐 PRD §3.1 ControlCmd/ControlRsp 语义）**：
-1. Master 递增 `cmd_seq`，FC16 写整块数据寄存器（含 0x0001 版本，首次）；
-2. 写 `cmd_ctrl`（低字节 `cmd_valid=1` + strategy_mode/ai_ready；**高字节 = 当前 `cmd_seq`**）→ 从站 `cmd_valid` 上升沿采样整块，防半写采纳；
-3. 从站校验版本/采纳 → 写 `exec_seq = cmd_seq` + `exec_status`（2 成功 / 3 失败 + `exec_error`）；
-4. Master 轮询读 0x0030-0x0033：`exec_seq == cmd_seq` 且 `exec_status==2` → 指令确认；`==3` → 失败（读错误码）；**超时（5s，对齐 PRD）→ 标记失败，可选重试最多 2 次**；
-5. **从站采纳后自清 `cmd_valid`**（本实现约定：Master 不清 valid，每次新指令由从站自清后形成新的 0→1 上升沿）；Master 读到 `exec_seq` 匹配即完成本次下发确认，无需额外清位。
-
-**心跳与离线判定**：Master 定时 FC03 读 `0x0100`，计数递增 → 实时模块在线；**连续 N 次（默认 3，对齐 PRD §4.2 丢失阈值）读失败或计数无变化 → 判离线**（替代 TCP 心跳帧/看门狗语义），恢复后判在线。
-
-### 11.5 Modbus RTU 栈选型与实现拆分
+### 11.4 Modbus RTU 栈选型与实现拆分
 
 选 **tokio-modbus**（async master + server），底层 tokio-serial（serialport，跨平台串口）。
 
@@ -1124,16 +1089,14 @@ pub trait IntercoreTransport: Send + Sync {
 intercore/
 ├── transport.rs          # IntercoreTransport trait
 ├── transport/tcp.rs      # TcpTransport（现有 TCP 逻辑迁移）
-├── transport/modbus.rs   # ModbusRtuTransport（Master）
-├── modbus_rtu.rs         # 寄存器映射表 + f64↔int32 编解码 + cmd_ctrl 触发
-└── bin/modbus_slave.rs   # Slave 参考实现（模拟实时控制模块）
+├── transport/modbus.rs   # ModbusRtuTransport（Master，PCS 驱动）
+├── pcs.rs                # PCS 点表常量 + int16 编解码 + 字节 swap
+└── bin/pcs_slave.rs      # PCS V1.3 协议从站仿真（端到端对打）
 ```
 
-### 11.6 Slave 参考实现（modbus_slave.rs）
+> 历史假设表文件 `modbus_rtu.rs` / `bin/modbus_slave.rs` 已归档（见文末附录 B）。
 
-独立二进制，模拟实时控制模块：tokio-modbus server 绑定串口，暴露寄存器区；内部维护控制区副本，收到 `cmd_valid` 上升沿时——① 校验 `protocol_version`，② 采样整块数据寄存器更新"生效指令"，③ 回写 `exec_seq`/`exec_status`（模拟采纳执行结果，含可注入失败以测重试路径），④ 清 `cmd_valid`；周期递增心跳计数。用途：本地联调验证映射与执行确认（虚拟串口对），并作为实时模块固件的寄存器协议参照。
-
-### 11.7 配置结构（core_config.rs）
+### 11.5 配置结构（core_config.rs）
 
 ```yaml
 intercore:
@@ -1155,45 +1118,43 @@ intercore:
 
 `InterCoreConfig` 新增 `transport: String`（默认 `"tcp"`）+ `modbus_rtu: ModbusRtuConfig`。startup 按 `transport` 构造 transport 实例注入 `IntercoreClient`。
 
-### 11.8 改动文件清单
+### 11.6 改动文件清单
 
 | 文件 | 改动 |
 |---|---|
 | intercore/src/transport.rs + transport/{tcp,modbus}.rs | IntercoreTransport trait + 两实现（新） |
-| intercore/src/modbus_rtu.rs | 寄存器表 + 编解码 + cmd_ctrl（新） |
-| intercore/src/bin/modbus_slave.rs | Slave 参考实现（新） |
+| intercore/src/pcs.rs | PCS 点表常量 + int16 编解码 + 字节 swap（生产通道） |
+| intercore/src/bin/pcs_slave.rs | PCS V1.3 协议从站仿真（端到端对打） |
 | intercore/src/tcp_server.rs | IntercoreClient 改持 `Arc<dyn IntercoreTransport>`，TCP 逻辑抽出为 TcpTransport |
 | intercore/Cargo.toml | + tokio-modbus / tokio-serial |
 | mupc-core-bin core_config.rs / startup.rs | 配置扩展 + 按 transport 构造 |
 | deploy/config/mupc_core_config.yaml | intercore 段加 transport/modbus_rtu |
-| intercore 测试 | 编解码 roundtrip / cmd_valid 触发 / 心跳在线 |
+| intercore 测试 | PCS 编解码 roundtrip / 字节 swap / clamp / 写序列 / 心跳在线 |
 
 **上层零改动**：AiIntegrator、strategy-engine、web-api 接口不变。
 
-### 11.9 验证方式
+### 11.7 验证方式
 
 1. **单元**：f64↔int32 编解码 roundtrip、cmd_ctrl 位操作、寄存器地址表；
 2. **端到端联调**：虚拟串口对（Windows com0com / Linux socat）→ Master ↔ Slave 参考 → 下发分相 P/Q 生效 + 心跳在线检测；
 3. **回归**：`transport: "tcp"` 下现有 AI/本地优先下发全跑通（TcpTransport 不改变协议）。
 
-**验证状态（2026-09-04）**：transport 抽象 + Tcp/Modbus 双实现 + Master/Slave + 配置已实现，`mupc-intercore` lib 22 测试全绿（含寄存器编解码 roundtrip、cmd_ctrl、心跳帧），`cargo check --workspace` 通过（上层调用方编译不变）。端到端 Modbus 联调（虚拟串口对下 Master↔Slave 下发生效）待具备串口环境（com0com/socat 或现场 RS485）执行；`transport: "tcp"` 回归不受影响。
+**验证状态**：transport 抽象 + Tcp/Modbus 双实现 + Master/Slave + 配置已实现，`mupc-intercore` lib 22 测试全绿（含寄存器编解码 roundtrip、cmd_ctrl、心跳帧），`cargo check --workspace` 通过（上层调用方编译不变）。端到端 Modbus 联调（虚拟串口对下 Master↔Slave 下发生效）待具备串口环境（com0com/socat 或现场 RS485）执行；`transport: "tcp"` 回归不受影响。
 
-### 11.10 依赖与风险确认（实现前）
+### 11.8 依赖与风险确认（实现前）
 
-1. ~~**寄存器映射表须与实时控制模块固件对齐**（地址/缩放/`cmd_valid` 触发/`exec_status` 语义；关键契约 I-2：从站采纳后自清 `cmd_valid`，否则自第 2 条指令起无上升沿）~~：**⚠️ v2.2 本节假设点表契约已被 §11.11 PCS 真实协议 V1.3 取代**——PCS 为标准 Modbus 从站，FC06 写响应即确认，无 `cmd_valid`/`exec` 确认区；契约改为与 **PCS 固件/协议 V1.3 点表对齐**（高 8/低 8 互换、符号约定、模式切换时序），见 §11.11 及「待厂方确认清单」；
+1. **寄存器映射表契约以 PCS 固件/协议 V1.3 点表为准**：早期自定义假设点表契约（`cmd_valid`/exec 确认区）已被 §11.9 PCS 真实协议 V1.3 取代——PCS 为标准 Modbus 从站，FC06 写响应即确认，无 `cmd_valid`/`exec` 确认区；契约需与 **PCS 固件/协议 V1.3 点表对齐**（高 8/低 8 互换、符号约定、模式切换时序），见 §11.9 及「待厂方确认清单」；
 2. RS485 物理层：接线极性、终端电阻、DE/RE 方向控制（半双工）需现场核验；
 3. Modbus RTU 点对点（1 Master : 1 Slave），不支持现有 TCP 的多连接场景（§10.2 待澄清问题 4 仅适用 TCP）；
 4. **下发延迟预算**（对齐 PRD §7.1 ≤50ms）：PCS 一次分相下发 = 模式字 1000 + 最多 6 个数据寄存器（1006-1011）逐 FC06 写（每帧单寄存器），19200bps 下单帧往返约 2~4ms、7 帧串行约 15~30ms，需以实测确认满足 50ms（半双工 RS485 往返与从站响应超时计入）；
-5. ~~**遥测/SafetyOverride 依赖 TCP**（ADR-012 边界）：`transport=modbus_rtu` 时须保证 TCP 链路仍承载遥测与安全事件~~：**⚠️ v2.2 PCS 架构已取代本项**——PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26），SafetyOverride 概念废弃（由 PCS 内部保护 + AiValidator 承接）；Modbus 只承载 控制+SOC+健康，不再依赖 TCP 承载遥测/安全事件（原「无以太网现场遥测路径未覆盖」风险消解）；
+5. **遥测/SafetyOverride 不依赖 TCP（PCS 架构）**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26），SafetyOverride 概念废弃（由 PCS 内部保护 + AiValidator 承接）；Modbus 只承载 控制+SOC+健康，不再依赖 TCP 承载遥测/安全事件（原「无以太网现场遥测路径未覆盖」风险消解）；
 6. **配置热切偏离**（对齐 PRD §7.4）：`transport` 为部署配置二选一，需重启生效；Web UI 运行时切换不实现，记为此处对 PRD 可维护性需求的授权偏离；
 7. **日志脱敏**（对齐 PRD §7.3）：PCS 寄存器写值（控制数值）不入日志，仅记录指令类型/结果/寄存器地址（PCS 无 `cmd_seq`）。
-8. **写确认超时/重试授权偏离（2026-09-08 记，M4）**：PRD IC-AC-36「写响应超时 5s→失败→可选重试≤2」源于假设表时代的指令级确认语义（§11.4 已作废）。PCS 真实协议 FC06 单帧写响应由串口层 `response_timeout_ms=200` 兜底（帧级超时），**未实现指令级 5s 超时与显式重试**——以 1s 控制周期下周期重发整序列作隐式重试（FC06 幂等）。与 PRD 的量化差异记为授权偏离；实机若暴露单帧响应 >200ms 再上调帧级超时并评估显式重试。
+8. **写确认超时/重试授权偏离**：PRD IC-AC-36「写响应超时 5s→失败→可选重试≤2」源于假设表时代的指令级确认语义（附录 B 历史假设点表已作废）。PCS 真实协议 FC06 单帧写响应由串口层 `response_timeout_ms=200` 兜底（帧级超时），**未实现指令级 5s 超时与显式重试**——以 1s 控制周期下周期重发整序列作隐式重试（FC06 幂等）。与 PRD 的量化差异记为授权偏离；实机若暴露单帧响应 >200ms 再上调帧级超时并评估显式重试。
 
----
+### 11.9 PCS 真实协议 V1.3
 
-### 11.11 PCS 真实协议 V1.3（v2.2，取代 §11.4~11.6 假设点表）
-
-**架构确认（2026-09-04）**：实时控制模块 = **两级式 PCS 设备**（小脑集成于 PCS）。MUPC 作 EMS/主机（Modbus Master）经 RS485 直连 PCS（从站），`transport: "modbus_rtu"` 即此真实通道。**§11.4~11.6 的自定义假设点表（cmd_ctrl/exec 确认区）作废**——PCS 为标准 Modbus 从站，FC06 写响应即确认。依据：PCS 设备通讯协议 V1.3（`60kW 双级式PCS产品资料包/5.通讯协议/`）。
+**架构确认**：实时控制模块 = **两级式 PCS 设备**（小脑集成于 PCS）。MUPC 作 EMS/主机（Modbus Master）经 RS485 直连 PCS（从站），`transport: "modbus_rtu"` 即此真实通道。**早期自定义假设点表（cmd_ctrl/exec 确认区，见附录 B）作废**——PCS 为标准 Modbus 从站，FC06 写响应即确认。依据：PCS 设备通讯协议 V1.3（`60kW 双级式PCS产品资料包/5.通讯协议/`）。
 
 **`transport=tcp` 角色**：生产主链路默认 **`modbus_rtu` → PCS**（上述真实通道）；`tcp`（TCP 帧协议 + V1/V2/V3 JSON）仅供**仿真/联调**——sim-bridge 作 TCP 服务端。v2.1「TCP 回读 DataUpload SOC」路径标注**仿真专用**，**生产 SOC 一律读 PCS 3 区 1010**（读失败按 AiIntegrator 5s 新鲜度判过期），不依赖 TCP 回读。
 
@@ -1225,15 +1186,15 @@ intercore:
 - 心跳/在线：周期 FC04 读 3区1013（运行状态）成功即在线，连续失败判离线（替换假设表心跳计数器）；原 `modbus_slave` 假设表参考仅测旧路径，PCS 以实机联调为准
 - 故障字（**可选**健康接入，非实时必需）：读 3 区 1000-1004 模块详细告警位 + 1005 BMS 工作状态 + 1014 模块故障状态，**区分运行停机（1013=0 且无告警）与保护跳闸（1014=1 或告警字非 0）**联读；PCS 内部保护为第一道安全防线，MUPC 侧仅旁路观测/告警，不并作策略遥测
 
-**上电初始化/冷启动与模式缓存重同步（2026-09-08 补，M5；框架高危项 S001）**：
+**上电初始化/冷启动与模式缓存重同步**：
 - **冷启动时序**（transport 构造后、首个下行周期前）：① 装配方 spawn `run_heartbeat_loop`（startup.rs 已将其句柄入后台任务 guard）；② 心跳任务首拍 FC04 读 3 区 1013 判链路在/离线并建立 online 基线；③ SOC 由首个 `latest_soc`（FC04 读 1010）注入，AiIntegrator 自该时刻起算 5s 新鲜度；④ 首个下行指令前 transport 的 `mode=0xFF` 哨兵 + `started=false` 保证顺序 **先写 REG_MODE → 再 REG_START_STOP=1 → 后写功率**。冷启动无独立"初始判定"模块——在线基线、SOC 时间戳、模式/启停首写均落在心跳首拍与首个 send 序列，不依赖运行时周期之外的特殊分支。
 - **模式/启停缓存重同步缺口**：`mode`（AtomicU8）/`started`（RwLock）仅写侧缓存，**无 4 区 1000/500 回读校验**。链路断线 → W1 已令 `mark_offline` 清缓存（0xFF 哨兵/false）→ 下次指令强制重写，此路径已闭环。**链路在线但 PCS 被第三方（HMI/外部）切换模式/停机时缓存失步**：每周期 `ensure_mode` 仅当缓存≠目标才写，失步会致模式未重写而功率照写（PCS 按错误模式执行）。缓解：① 待厂方确认 4 区 1000 是否可 FC03 读回，可读则周期读回比对；② 不可读则 send 前无条件写模式字（额外 1 帧）——均列契约待确认项。
 
-**停机观测与状态字校验（M1/M9a，2026-09-08 代码落地）**：
+**停机观测与状态字校验**：
 - 心跳每拍**解码 1013 值**（M9a）：仅 ∈0..3（0 停/1 待机/2 充电/3 放电）视为健康读数判在线；乱码/错位帧（可通过 Modbus CRC 的罕见坏帧）按坏读数计数，不判在线。
 - **停机观测（M1）**：心跳读到 1013=0（停机）且 transport 此前已下发启动（`started=true`）→ 判定远端停机（保护跳闸/人工停机），`tracing::warn` 告警一次（去抖）。**策略=保守不自动重启**：不动 `started` 缓存、不重发 500=1（PCS 启停 500 电平/边沿语义待厂方确认，自动重启可能造成保护跳闸-重启振荡）；恢复动作留给上层/运维决策。该观测打破「链路在、PCS 已停、MUPC 静默继续写功率」盲区（上一轮 W1 仅覆盖链路断线场景）。
 
-**配置**：复用 `core_config ModbusRtuConfig`（serial_port/baud/slave_addr/超时），§11.7 配置示例波特率已为 **19200**（PCS 默认）；点表地址/字节序为代码常量映射（`addr_base` 可配供现场校准）。
+**配置**：复用 `core_config ModbusRtuConfig`（serial_port/baud/slave_addr/超时），§11.5 配置示例波特率已为 **19200**（PCS 默认）；点表地址/字节序为代码常量映射（`addr_base` 可配供现场校准）。
 
 **容量对齐**：策略 `arbitrate`（i_rated 190A≈41.8kVA/相）高于 PCS 分相限（±25kW≈110A/相）——投产时按 PCS 容量调策略容量参数（投产项），PCS 侧 clamp 为硬限兜底。
 
@@ -1251,13 +1212,13 @@ intercore:
 
 **测试**：PCS int16 缩放/字节 swap 编解码 roundtrip、单相 clamp、模式切换缓存、写序列组装；**软件端到端**（M10）：`src/bin/pcs_slave.rs`（PCS V1.3 协议从站仿真，按启停+有功方向推演 1013 运行状态、1010 SOC 恒 66%）经虚拟串口对（Linux socat / Windows com0com）与 `ModbusRtuTransport` 对打，验证寄存器映射/字节互换/写序列/心跳判定；**最终端到端以真实 PCS RS485 联调**（填点表 / 核相）。
 
-**验证状态（2026-09-04）**：pcs.rs 编解码 + `ModbusRtuTransport` PCS 驱动重构完成，`mupc-intercore` lib 31 测试全绿（含 PCS 编解码 roundtrip / SOC 3 区 1010 校验 / 心跳 REG_RUN_STATE(1013) 判定），`cargo check --workspace` 通过（上层调用方零改动）。端到端 PCS 实机 RS485 联调待 PCS 硬件（填点表 / 核相 / 并机基线）；PCS 契约待确认清单（模式热切换 / 启停 500 时序 / 4 区 502-503 / 符号约定）仍未获厂方答复。
+**验证状态**：pcs.rs 编解码 + `ModbusRtuTransport` PCS 驱动重构完成，`mupc-intercore` lib 31 测试全绿（含 PCS 编解码 roundtrip / SOC 3 区 1010 校验 / 心跳 REG_RUN_STATE(1013) 判定），`cargo check --workspace` 通过（上层调用方零改动）。端到端 PCS 实机 RS485 联调待 PCS 硬件（填点表 / 核相 / 并机基线）；PCS 契约待确认清单（模式热切换 / 启停 500 时序 / 4 区 502-503 / 符号约定）仍未获厂方答复。
 
-**验证状态补记（2026-09-08，code-reviewer W1-W3 + 项目级审查 Action 修复）**：
+**验证状态补记**：
 - W1 离线清缓存 / W2 波特率默认 19200 / W3 总线事务互斥（`bus: Mutex<()>` 入口持锁）落地；`cargo check --workspace` 0 error，intercore lib 测试通过。
 - 项目级审查修复：M1 停机观测（1013=0 告警、不自动重启）、M9a 运行状态值校验（∈0..3）、M6 删只写不读的 soc 缓存、M3 startup transport 显式 match（未知值启动报错）、M8 心跳句柄入后台任务 guard、M7 config.validate 校验 modbus_rtu 配置合法性及与总表串口互斥。
 - 部署/测试配套：`mupc/deploy/config/mupc_core_config.production.yaml`（transport=modbus_rtu 生产模板，与仿真 tcp 默认配置分离）；`src/bin/pcs_slave.rs` PCS 协议从站仿真（见上测试）。
-- 文档补记：ADR-010 取代注（M11）、§11.10 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
+- 文档补记：ADR-010 取代注（M11）、§11.8 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
 
 ## 12. BECG-3568 现场接线契约与安全联锁
 
@@ -1273,7 +1234,7 @@ intercore:
 
 | RS485 口 | 端子/节点 | 设备 | 数据归属 |
 |---|---|---|---|
-| RS485-1 | COM1/`ttyS0` | PCS 储能变流器（A2/B2，19200 N-8-1） | 本模块 `modbus_rtu`（§11.11 V1.3） |
+| RS485-1 | COM1/`ttyS0` | PCS 储能变流器（A2/B2，19200 N-8-1） | 本模块 `modbus_rtu`（§11.9 V1.3） |
 | RS485-2 | COM2/`ttyS2` | BMS | 02 §10（role=battery，SOC 融合见 §12.6 交叉注） |
 | RS485-3 | COM3/`ttyS3` | 空调 | 02 §10（role=hvac，本版遥测） |
 | RS485-4 | COM4/`ttyS4` | 关口表/台区总表 | `master_meter` → 02 §10（role=meter_grid，策略 phase 源） |
@@ -1289,7 +1250,7 @@ DI/DO 分配（联锁输入/状态输出，接线见 deploy.md）：DI1 急停(1
 **双 latch 模型（C-1，安全关键）**：两个 latch 语义一致、必须同步：① transport `stopped_latched`（运行期挡启动兜底）② storage/interlock DB latch（持久化，Web/CLI/重启读回）。**介入时刻 = 联锁触发沿（DI 有效且去抖通过）即无条件置两个 latch——不依赖 `stop()` 写 500=0 成功**（写失败/链路离线期间 transport 兜底恒闭，恢复后亦不开洞）；`stop()` 仅负责「写 500=0 + 复位 `started`/`mode` 缓存」，**不设/不清 latch**。清/置唯一入口：`clear_interlock_latch()`（release 前置校验通过后）与 `restore_interlock_latched(bool)`——**运行时联锁触发沿由 interlock 以 `restore_interlock_latched(true)` 置 transport latch（运行时置位 / 启动 DB 读回两用）**，DB latch 同步置位；`stopped_latched` 不由 `stop()`/`ensure_started` 变更。§12.5 测试补：注入写失败 → stopped_latched 仍 true → `ensure_started`/`send_*` 拒绝 → 链路恢复重试成功且 release 后才可重启。
 
 **方案（How）**：
-1. **停机原语**：`ModbusRtuTransport` 新增 `stop()`——写 `REG_START_STOP(500)=0`（V1.3：停=0/启=1），**不设/不清 latch（置位由触发沿经 restore 完成，见上方 C-1）**，仅复位 `started=false`（否则人工 release 后 `ensure_started` 见 `started==true` 会跳过写 500=1 → 释放后无法重启，静默失效）**并复位 `mode` 缓存至 0xFF 哨兵**（否则 release 后 `ensure_mode` 见缓存==目标跳过 REG_MODE=1000 重写，可能在错误模式下直接写功率——自命令停机可低成本规避；测试加「stop → release → 首条 send 必含 REG_MODE 重写」断言，I-1）。直接写 500=0（不含先降功率的渐变序列；PCS 侧执行停机，深停机/渐变语义待厂方点表答复后如需再扩展）。**停机确认（R-I）**：stop() 后由 core-bin interlock 经 `last_run_state()` 周期读确认 1013 转 0（窗口 `stop_confirm_ms` 可配，默认 5000ms）；写失败/超时未确认 → latch 仍置位、状态升级「stop_failed（停机未确认）」，interlock **周期重试 `stop()`** 直至 1013=0 确认（与 confirmed stopped 区分，见 12.3）；**链路离线期暂停重试**（退避至 `stop_confirm_ms` 级，防反复 open 串口，L-3）。PCS 深停机/渐变停机时长待厂方（挂 §11.11 待确认清单「启停 500 时序」项）。
+1. **停机原语**：`ModbusRtuTransport` 新增 `stop()`——写 `REG_START_STOP(500)=0`（V1.3：停=0/启=1），**不设/不清 latch（置位由触发沿经 restore 完成，见上方 C-1）**，仅复位 `started=false`（否则人工 release 后 `ensure_started` 见 `started==true` 会跳过写 500=1 → 释放后无法重启，静默失效）**并复位 `mode` 缓存至 0xFF 哨兵**（否则 release 后 `ensure_mode` 见缓存==目标跳过 REG_MODE=1000 重写，可能在错误模式下直接写功率——自命令停机可低成本规避；测试加「stop → release → 首条 send 必含 REG_MODE 重写」断言，I-1）。直接写 500=0（不含先降功率的渐变序列；PCS 侧执行停机，深停机/渐变语义待厂方点表答复后如需再扩展）。**停机确认（R-I）**：stop() 后由 core-bin interlock 经 `last_run_state()` 周期读确认 1013 转 0（窗口 `stop_confirm_ms` 可配，默认 5000ms）；写失败/超时未确认 → latch 仍置位、状态升级「stop_failed（停机未确认）」，interlock **周期重试 `stop()`** 直至 1013=0 确认（与 confirmed stopped 区分，见 12.3）；**链路离线期暂停重试**（退避至 `stop_confirm_ms` 级，防反复 open 串口，L-3）。PCS 深停机/渐变停机时长待厂方（挂 §11.9 待确认清单「启停 500 时序」项）。
 2. **锁存挡启动（底层兜底）**：`ensure_started` 与所有写启动序列在 `stopped_latched == true` 时**拒绝写 500=1 并 warn**（即便上层误发也不重启）。**接口入 trait**：`IntercoreTransport` 增 `async fn stop()` / `async fn is_interlock_stopped() -> bool` / `fn last_run_state() -> Option<u16>`（1013 最新解码值，心跳循环维护、供上层与 DO 驱动消费）；`IntercoreClient` 门面转发。`transport=tcp`（仿真）stop 为降级 no-op+记录（无 PCS 启停概念）。**M1 自命令豁免**：心跳停机观测改为仅 `st==0 && started && !stopped_latched` 才告警——自命令停机（latch）静默，避免把软停误报成异常跳闸。
 **latch 期间整条下行中止**：`send_tai_command`/`send_dual_param`（ensure_mode→ensure_started→功率/模式写）在 latch 前置检查处直接返回错误、**不写任何寄存器**——避免 stop_failed（PCS 仍运行）时后续周期按设定继续出力（设计评审 2 轮 R-B）。**清 latch/恢复接口**：trait 增 `async fn clear_interlock_latch()`（Web release / 本地 CLI 旁路调用，随后 ensure_started 重新允许启动）与 `async fn restore_interlock_latched(bool)`（mupcd 启动 DB 读回在首个策略/下发行前调用，防启动窗口抢先写 500=1）（R-A）。
 3. **持久化**：联锁触发/latch 沿事件记录写 SQLite（storage `faults`/`events` 复用），mupcd 重启读回仍禁启（见 12.4）。
@@ -1354,6 +1315,47 @@ io:
 ## 附录 A：性能指标参考
 
 > 性能与可靠性指标详见 [PRD 第 7 章 非功能性需求](../specs/modules/10-MUPC-核间通信-PRD.md#7-非功能性需求)。
+
+---
+
+## 附录 B：历史 Modbus 假设点表（框架参考）
+
+> **注**：早期自定义假设点表（控制/执行确认/状态三区、`cmd_valid`/`exec_seq`/int32 缩放）与 Slave 从站参考实现为早期 Modbus 备选假设，**已被 §11.9 PCS 真实协议 V1.3 取代**——`transport=modbus_rtu` 实际对接两级式 PCS（FC06 写即生效，无自建确认区，int16 缩放 + 高 8/低 8 互换）。本节保留作通用 Modbus 传输框架参考（transport 抽象/读写/心跳轮询思想），点表以实现 §11.9 为准。
+
+实时控制模块（Slave）持有一块保持寄存器区，分三区：**控制区**（Master 写，FC16）、**执行确认区**（从站写、Master 读，FC03）、**状态/心跳区**（从站写、Master 读）。从站地址可配（默认 1）。
+
+| 分区 | 地址 | 内容 | 方向 | 编码 |
+|---|---|---|---|---|
+| 控制区 | **0x0000** | `cmd_ctrl` 命令控制字 | 写 | 低字节：bit0 `cmd_valid`（上升沿触发从站采样生效）、bit1-3 `strategy_mode`、bit4 `ai_ready`；**高字节：`cmd_seq`（Master 每次下发递增 u8，用于执行确认匹配）** |
+| 控制区 | **0x0001** | `protocol_version` | 写 | u16，Master 写期望协议版本（当前 1）；从站校验不符则拒采纳并置 `exec_status` 失败 |
+| 控制区 | **0x0010-0x0011** | `p_ref` | 写 | int32 有符号，0.01 kW/LSB |
+| 控制区 | **0x0012-0x0013** | `k_droop` | 写 | int32 有符号，0.001 kW/V·LSB |
+| 控制区 | **0x0020-0x0021** | `phase_p[A]` | 写 | int32，0.01 kW/LSB |
+| 控制区 | **0x0022-0x0023** | `phase_p[B]` | 写 | 同上 |
+| 控制区 | **0x0024-0x0025** | `phase_p[C]` | 写 | 同上 |
+| 控制区 | **0x0026-0x0027** | `phase_q[A]` | 写 | int32，0.01 kVAr/LSB |
+| 控制区 | **0x0028-0x0029** | `phase_q[B]` | 写 | 同上 |
+| 控制区 | **0x002A-0x002B** | `phase_q[C]` | 写 | 同上 |
+| 执行确认区 | **0x0030-0x0031** | `exec_seq` | 读 | int32，从站回写本次采纳的指令序号（对应 ControlRsp.seq_no） |
+| 执行确认区 | **0x0032** | `exec_status` | 读 | u16：0 空闲 / 1 执行中 / 2 执行成功 / 3 执行失败 / 4 超时（对应 ControlRsp.result） |
+| 执行确认区 | **0x0033** | `exec_error` | 读 | u16 错误码（对应 ControlRsp.error_msg，映射表从站实现） |
+| 状态区 | **0x0100** | `heartbeat_counter` | 读 | u16，实时模块周期递增（master 轮询判在线/超时） |
+| 状态区 | **0x0101** | `device_status` | 读 | u16 状态字（bit0 运行/bit1 故障…） |
+| 状态区 | **0x0102-0x0103** | `cpu_temp` | 读 | int32，0.01 ℃/LSB |
+| 状态区 | **0x0104-0x0105** | `memory_usage` | 读 | int32，0.01 %/LSB |
+
+**编码选择**：int32 缩放（2 寄存器/值）而非 IEEE754（4 寄存器/值）——工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够。`k_droop` 数量级小，用 0.001 缩放。
+
+**写生效 + 执行确认流程（对齐 PRD §3.1 ControlCmd/ControlRsp 语义）**：
+1. Master 递增 `cmd_seq`，FC16 写整块数据寄存器（含 0x0001 版本，首次）；
+2. 写 `cmd_ctrl`（低字节 `cmd_valid=1` + strategy_mode/ai_ready；**高字节 = 当前 `cmd_seq`**）→ 从站 `cmd_valid` 上升沿采样整块，防半写采纳；
+3. 从站校验版本/采纳 → 写 `exec_seq = cmd_seq` + `exec_status`（2 成功 / 3 失败 + `exec_error`）；
+4. Master 轮询读 0x0030-0x0033：`exec_seq == cmd_seq` 且 `exec_status==2` → 指令确认；`==3` → 失败（读错误码）；**超时（5s，对齐 PRD）→ 标记失败，可选重试最多 2 次**；
+5. **从站采纳后自清 `cmd_valid`**（本实现约定：Master 不清 valid，每次新指令由从站自清后形成新的 0→1 上升沿）；Master 读到 `exec_seq` 匹配即完成本次下发确认，无需额外清位。
+
+**心跳与离线判定**：Master 定时 FC03 读 `0x0100`，计数递增 → 实时模块在线；**连续 N 次（默认 3，对齐 PRD §4.2 丢失阈值）读失败或计数无变化 → 判离线**（替代 TCP 心跳帧/看门狗语义），恢复后判在线。
+
+**Slave 参考实现（modbus_slave.rs）**：独立二进制，模拟实时控制模块：tokio-modbus server 绑定串口，暴露寄存器区；内部维护控制区副本，收到 `cmd_valid` 上升沿时——① 校验 `protocol_version`，② 采样整块数据寄存器更新"生效指令"，③ 回写 `exec_seq`/`exec_status`（模拟采纳执行结果，含可注入失败以测重试路径），④ 清 `cmd_valid`；周期递增心跳计数。用途：本地联调验证映射与执行确认（虚拟串口对），并作为实时模块固件的寄存器协议参照。
 
 ---
 

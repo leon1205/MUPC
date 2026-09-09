@@ -204,7 +204,7 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 - **差模 P**（三相之间微调）：三相电流不平衡时，把充电/放电往电流大的相多分一点、电流小的相少分一点。三相之间倒来倒去，**总量不变、不额外耗电池**；
 - **分相 Q**（无功）：哪相功率因数低了，就发/收无功把它补回接近 1。
 
-所以每个周期最终下发的是**六个数字**：A/B/C 三相各自的有功设定 + 三相各自的无功设定（`phase_p_set` / `phase_q_set`）。**下发路径（v2.2 PCS 架构）**：上层接口 `IntercoreClient::send_tai_command` 不变；生产通道（transport=modbus_rtu）PCS 即实时控制模块，ModbusRtuTransport 以 FC06 直写 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，正放负充）；文中「V3 帧下发」表述仅指 TCP 仿真通道（sim-bridge），参见 10 核间 §11.11。
+所以每个周期最终下发的是**六个数字**：A/B/C 三相各自的有功设定 + 三相各自的无功设定（`phase_p_set` / `phase_q_set`）。**下发路径（v2.2 PCS 架构）**：上层接口 `IntercoreClient::send_tai_command` 不变；生产通道（transport=modbus_rtu）PCS 即实时控制模块，ModbusRtuTransport 以 FC06 直写 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，正放负充）；文中「V3 帧下发」表述仅指 TCP 仿真通道（sim-bridge），参见 10 核间 §11.9。
 
 ### 2.5 控制律（三通道）
 
@@ -530,7 +530,7 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 #### 2.10.2 容量档位配置（capacity_profile，v2.24）`[DESIGN_APPROVED: 2026-09-08]`
 
 > **目标**：策略参数不与某台 PCS 容量（如 60kW 双级式）绑定为单一硬编码默认——按**当前 PCS 档位**（60kW / 125kVA 等）在启动时动态派生整套硬件相关参数。换 PCS 规格**只改档位 key 或 YAML 加档，不改代码**。
-> **使用形态**：启动时档位选择（部署配置，与 transport 二选一同模式；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`intercore` clamp ±25、125kVA 点表）仍按 10 核间 §11.11 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
+> **使用形态**：启动时档位选择（部署配置，与 transport 二选一同模式；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`intercore` clamp ±25、125kVA 点表）仍按 10 核间 §11.9 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
 > **档位放行与驱动能力耦合（M-1）**：策略档位（i_rated/s_rated/dp_max/q_i_max）与 PCS 驱动侧 clamp/点表**不自动联动**——放行任一无中线非 60kW 档时，须与 `transport` 驱动点表型号**同批变更**并做装配期一致性核对（部署模板注释显式警告；`CoreConfig::validate` 预留装配期校验位）。`has_neutral=true` 校验闸同时充当"驱动/仲裁能力就绪"门：解除需**仲裁恢复中线判据 + 10 核间驱动点表确认**双就绪，防止假参数进闭环。
 
 **参数分层（来源与覆盖规则）**
@@ -696,7 +696,7 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
 
 1. 台区总表实时接口提供分相 Q（含符号）与分相 PF（data_rule 字段已确认）；
 2. PCS（=实时控制模块）通信接受分相 P/Q 设定值（已确认，Modbus 协议 V1.3：分相模式 2 + 4 区 1006-1011 逐寄存器 FC06 写）；生产通道由 ModbusRtuTransport 直写，**不依赖 V3 帧转发**（V3 帧仅 TCP 仿真通道使用）；
-3. PCS 容量限值（已确认按 **60kW 两级式 PCS**：单相 ±25kW/kVAr ≈ 110A@230V、总视在 60kVA；原 125kW/190A 四桥臂型号点表待厂方确认方可对接，见 10 核间 §11.11「范围与投运前提」）；
+3. PCS 容量限值（已确认按 **60kW 两级式 PCS**：单相 ±25kW/kVAr ≈ 110A@230V、总视在 60kVA；原 125kW/190A 四桥臂型号点表待厂方确认方可对接，见 10 核间 §11.9「范围与投运前提」）；
 4. 状态机时段参数初值（已用 6-27/7-04 data_rule 负荷曲线标定，P_dis_trig=30kW、T_清空 21:00/23:30）；
 5. 电池充/放电功率限值 60kW（已确认）；
 6. 通信协议细节：设定值下发瞬时生效或斜坡生效、超时/失败响应、时钟同步；现场核相流程（强制）。
@@ -999,7 +999,7 @@ pub struct ControlCommand {
 }
 ```
 
-> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置，单位 kW/kVAr、索引 A/B/C、**正放负充**。下发路径：**生产通道（transport=modbus_rtu）**——PCS 即实时控制模块，经 `IntercoreClient::send_tai_command` → ModbusRtuTransport FC06 逐写 PCS 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，见 10 核间 §11.11）；**TCP 仿真通道**才走 V3 帧（sim-bridge）。目标设备为 60kW 两级式 PCS，三相分相 PQ 独立可控、无中线。
+> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置，单位 kW/kVAr、索引 A/B/C、**正放负充**。下发路径：**生产通道（transport=modbus_rtu）**——PCS 即实时控制模块，经 `IntercoreClient::send_tai_command` → ModbusRtuTransport FC06 逐写 PCS 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，见 10 核间 §11.9）；**TCP 仿真通道**才走 V3 帧（sim-bridge）。目标设备为 60kW 两级式 PCS，三相分相 PQ 独立可控、无中线。
 
 ### 6.3 CommandType 枚举
 

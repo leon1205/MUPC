@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, tokio-modbus（FC04 读输入寄存器 / FC06 写单寄存器）, tokio。
 
-**设计依据：** 10 核间设计文档 §11.11（v2.2）+ ADR-013；PCS 协议 V1.3 PDF（`60kW 双级式PCS产品资料包/5.通讯协议/`）。
+**设计依据：** 10 核间设计文档 §11.9（v2.2）+ ADR-013；PCS 协议 V1.3 PDF（`60kW 双级式PCS产品资料包/5.通讯协议/`）。
 
 **测试命令**（Windows Git-bash，cwd = `mupc/`，cargo 全路径 `/c/Users/Administrator/.cargo/bin/cargo.exe` + `--manifest-path /e/MUPC2/mupc/Cargo.toml`，前台勿后台）：
 ```bash
@@ -276,7 +276,7 @@ git commit -m "refactor: ModbusRtuTransport 重构为 PCS 真实协议驱动（F
 
 若 `modbus_rtu.rs`（假设 int32/cmd_ctrl 编解码）与 `bin/modbus_slave.rs`（假设表 slave）在新 transport 重构后不再被生产路径引用，则在其文件头加注：
 ```
-//! ⚠️ 早期假设点表（自定义 cmd_ctrl/exec 确认）——已被 PCS 真实协议（§11.11/pcs.rs）取代。
+//! ⚠️ 早期假设点表（自定义 cmd_ctrl/exec 确认）——已被 PCS 真实协议（§11.9/pcs.rs）取代。
 //! 保留仅供旧路径仿真/历史参考；生产 transport=modbus_rtu 走 pcs.rs 驱动。
 ```
 若 `lib.rs` 仍导出其类型但无生产引用，确认无 dead-code 门禁冲突（保留导出但注释说明即可）。
@@ -298,7 +298,7 @@ git commit -m "docs: PCS 重构后标注假设点表为旧路径/仿真专用"
 
 **Files:**
 - Modify: `mupc/deploy/config/mupc_core_config.yaml`（intercore 段注释已是 19200，核验）
-- Modify: `E:/MUPC2/docs/superpowers/plans/modules/10-MUPC-核间通信-设计文档.md`（§11.11 验证状态补记）
+- Modify: `E:/MUPC2/docs/superpowers/plans/modules/10-MUPC-核间通信-设计文档.md`（§11.9 验证状态补记）
 
 - [ ] **Step 1: 核验配置示例**
 
@@ -306,7 +306,7 @@ Read `mupc/deploy/config/mupc_core_config.yaml` intercore/modbus_rtu 段——`b
 
 - [ ] **Step 2: 文档验证状态**
 
-10 设计文档 §11.11 后补「验证状态（2026-09-04）」：pcs.rs 编解码单测 + ModbusRtuTransport 重构编译/单测通过；端到端 PCS 实机 RS485 联调待具备 PCS 硬件（填点表/核相后）。标注 PCS 契约待确认清单仍未厂方答复。
+10 设计文档 §11.9 后补「验证状态（2026-09-04）」：pcs.rs 编解码单测 + ModbusRtuTransport 重构编译/单测通过；端到端 PCS 实机 RS485 联调待具备 PCS 硬件（填点表/核相后）。标注 PCS 契约待确认清单仍未厂方答复。
 
 - [ ] **Step 3: workspace 回归**
 
@@ -323,7 +323,7 @@ git commit -m "docs: PCS 重构验证状态与配置核验（v2.2）"
 
 ## 自审记录
 
-- **Spec 覆盖（10 设计 §11.11 + ADR-013）**：点表/字节互换/编解码 → Task 1；分相/恒功率下行 + 单相 clamp + 模式/启停管理 → Task 2；SOC 3 区 1010 + 心跳 1013 → Task 2；k_droop 忽略 + AiValidator 兜底（代码注释）→ Task 2；旧假设表标注仿真 → Task 3；配置/文档 → Task 4。
+- **Spec 覆盖（10 设计 §11.9 + ADR-013）**：点表/字节互换/编解码 → Task 1；分相/恒功率下行 + 单相 clamp + 模式/启停管理 → Task 2；SOC 3 区 1010 + 心跳 1013 → Task 2；k_droop 忽略 + AiValidator 兜底（代码注释）→ Task 2；旧假设表标注仿真 → Task 3；配置/文档 → Task 4。
 - **占位符扫描**：无 TBD；关键代码完整。tokio-modbus FC04/FC06 方法名以实际源码为准（各 Task 注明先 Read）。
 - **类型一致性**：`to_pcs_reg`/`from_pcs_reg`/`clamp_phase` 在 Task 1 定义、Task 2 使用一致；`REG_*`/`MODE_*` 常量名贯穿。
-- **遗留（非本计划）**：PCS 契约待厂方确认清单（模式热切/启停时序/502-503 使能/符号核相）；125kVA 型号点表；多台并机——均在文档 §11.11 标注，不在本轮实现。
+- **遗留（非本计划）**：PCS 契约待厂方确认清单（模式热切/启停时序/502-503 使能/符号核相）；125kVA 型号点表；多台并机——均在文档 §11.9 标注，不在本轮实现。
