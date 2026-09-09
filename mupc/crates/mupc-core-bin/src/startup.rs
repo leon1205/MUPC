@@ -52,6 +52,9 @@ struct StrategyCommandHandler {
     intercore: Arc<mupc_intercore::IntercoreClient>,
     /// 安全联锁控制器（io.enabled 时注入；latch 期间抑制主站下发，避免绕过联锁启停 PCS）
     interlock: Option<Arc<crate::interlock::InterlockController>>,
+    /// 额定有功上限 (kW)：IEC104 主站外部指令 p_set clamp 用（审查 R1-A1，2026-09-09），
+    /// 来源台区储能容量档 p_cap（电池功率上限，YAML 真值）。
+    p_max_kw: f64,
 }
 
 impl StrategyCommandHandler {
@@ -93,6 +96,26 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
                 }
                 // p_set → 下发到实时控制模块（DualParamCommand: p_ref + k_droop）
                 if let Some(p_set) = cmd.p_set {
+                    // 外部指令防护（审查 R1-A1，2026-09-09）：p_set 有限性 + 额定限幅——外部主站
+                    // 指令不再无界直通 PCS 1001（原越界仅靠 i16 as 饱和截断静默失真）。
+                    let p_raw = p_set;
+                    if !p_raw.is_finite() {
+                        tracing::warn!("IEC104 p_set 非有限，拒绝下发: {}", p_raw);
+                        return Ok(mupc_gateway::iec104::command::CommandResponse {
+                            cmd_id: cmd.cmd_id,
+                            success: false,
+                            message: "p_set 非有限，拒绝下发".into(),
+                            timestamp: chrono::Utc::now().timestamp() as u64,
+                        });
+                    }
+                    let p_set = p_raw.clamp(-self.p_max_kw, self.p_max_kw);
+                    if (p_set - p_raw).abs() > 1e-6 {
+                        tracing::warn!(
+                            "IEC104 p_set 超出额定限幅，clamp 至 {}（原 {}）",
+                            p_set,
+                            p_raw
+                        );
+                    }
                     let dual = mupc_intercore::DualParamCommand::new(
                         p_set,
                         cmd.k_value.unwrap_or(0.0),
@@ -489,6 +512,9 @@ pub async fn initialize_all(
             )
         })?
     };
+    // 额定有功上限（审查 R1-A1，2026-09-09）：取台区储能容量档 p_cap（电池功率上限 kW，
+    // YAML 真值）——IEC104 主站 PowerRegulation/ChargeDischarge 外部指令 clamp 用。
+    let p_max_kw = tai_cfg.p_cap;
     ai_integrator.set_tai_storage_strategy(Arc::new(
         mupc_strategy_engine::TaiStorageStrategy::new(tai_cfg),
     ));
@@ -574,6 +600,7 @@ pub async fn initialize_all(
     let cmd_handler = Arc::new(StrategyCommandHandler {
         intercore: intercore.clone(),
         interlock: interlock_ctl.clone(),
+        p_max_kw,
     });
     let server_clone = iec104_server.clone();
     guard.0.push(tokio::spawn(async move {
