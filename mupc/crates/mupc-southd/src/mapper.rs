@@ -2,8 +2,8 @@
 //!
 //! 读操作由 scheduler 经 StationBus 完成，本模块为**纯转换**（无 IO，可单测）：
 //! 输入为「每站一次 poll 的原始寄存器读结果」（`BlockReads`），输出为 `PollResult`。
-//! role 语义：`meter_grid` 完整移植 core-bin startup.rs `read_master_meter`
-//! （196-261）的分相语义（同 canned 寄存器 → 同 DataPackage.phase，回归等价）；
+//! role 语义：`meter_grid` = 已删 legacy `read_master_meter` 等价语义（master_meter 段
+//! 收敛删除后唯一总表形态，S3b-1c；回归等价锚 = grid_convergence.rs canned 测）；
 //! `battery` 若含 soc 块填 `battery.soc`；其它 role 无语义点表（厂方待 S3b）→
 //! 返回最小 DataPackage 作"站活着"信号，真实遥测值由 scheduler 经
 //! [`telemetry_points`] 直接落库（不须经 DataPackage）。
@@ -35,7 +35,7 @@ pub enum PollResult {
 
 /// 解码相量块：6 寄存器（3 相×2reg，高字在前）→ `[f64; 3]`；不足 6 返回 None（该块失败）。
 ///
-/// 与 startup.rs `read_meter_phases` 逐寄存器对 decode 等价：多余寄存器忽略
+/// 逐寄存器对 decode（与已删 legacy `read_meter_phases` 等价）：多余寄存器忽略
 /// （取前 6），不足即整块失败。
 fn decode_phase_block(regs: &[u16], b: &RegBlockConf) -> Option<[f64; 3]> {
     if regs.len() < 6 {
@@ -85,7 +85,7 @@ fn empty_package() -> DataPackage {
     }
 }
 
-/// meter_grid 分相组包（与 startup.rs `read_master_meter` 逐字段等价）。
+/// meter_grid 分相组包（与已删 legacy `read_master_meter` 逐字段等价）。
 ///
 /// `p_total_raw` 为 `p_total` 独立块解码值（Option）：None 时降级为分相有功和
 /// （best-effort，不整周期失败）。电流方向由分相有功符号承载：p>=0 相为正幅值，
@@ -281,7 +281,7 @@ mod tests {
         }
     }
 
-    /// 回归锚 1：全正相量 → 分相/顶层各量逐字段（同 startup 196-260）
+    /// 回归锚 1：全正相量 → 分相/顶层各量逐字段（等价已删 legacy read_master_meter）
     #[test]
     fn meter_grid_phase_matches_legacy_semantics() {
         let pkg = build_grid_package(

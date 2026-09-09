@@ -1,6 +1,6 @@
 //! 收敛回归锚：master_meter → meter_grid（§10.9）。
-//! 总表回归 = S3a 收敛闸门——mapper meter_grid 输出与 legacy read_master_meter 语义等价。
-//! 若此后改动 legacy 语义须同步此锚（Task 4 mapper 单测锚 1 已逐字段等价 legacy）。
+//! 总表回归 = S3a 收敛闸门——mapper meter_grid 输出为总表收敛后唯一语义
+//! （master_meter 段已删，S3b-1c）。改动此语义须同步此锚（mapper 单测锚 1 已逐字段钉住输出）。
 //!
 //! 与 Task 4 mapper 内部单测的差别：此处经 **pub API**（poll_to_result）端到端构造，
 //! 输入经 f32 寄存器编码 → decode 回环，钉住「配置寄存器字节 → DataPackage 字段」全链。
@@ -58,7 +58,7 @@ fn meter_grid_phase_matches_legacy_semantics_canned() {
     assert_eq!(ph.reactive_power, [Some(0.5), Some(0.25), Some(0.125)]);
     assert_eq!(ph.cos_phi, [Some(0.75), Some(0.875), Some(0.9375)]);
     assert_eq!(ph.current, [Some(10.0), Some(11.0), Some(12.0)]); // p≥0 → +幅值
-    // 顶层量（与 legacy read_master_meter 逐字段一致）
+    // 顶层量（总表收敛后唯一语义——master_meter 已删，逐字段形状由此锚钉住）
     assert_eq!(pkg.electrical.active_power, Some(6.0)); // Σp（p_total 缺失降级）
     assert_eq!(pkg.electrical.reactive_power, Some(0.875)); // Σq=0.5+0.25+0.125
     assert_eq!(pkg.electrical.voltage, Some(220.0));

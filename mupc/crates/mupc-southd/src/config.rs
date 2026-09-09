@@ -190,7 +190,7 @@ impl SouthStationsConfig {
         Ok(())
     }
 
-    /// role=grid 站（策略 phase 真源；迁移期与 master_meter 互斥）。
+    /// role=grid 站（策略 phase 真源站；唯一 grid 形态——master_meter 段已删收敛，S3b-1c）。
     pub fn grid_station(&self) -> Option<&StationConf> {
         self.stations
             .iter()

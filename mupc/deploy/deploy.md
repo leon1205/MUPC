@@ -355,7 +355,7 @@ sudo systemctl restart mupcd
 | RS485-1 | COM1 / `ttyS0` | PCS 储能变流器（A2/B2） | `intercore.modbus_rtu.serial_port: /dev/ttyS0`（19200 N-8-1，从站拨码） |
 | RS485-2 | COM2 / `ttyS2` | BMS | `south_stations` 站 `port: ttyS2`（role=battery） |
 | RS485-3 | COM3 / `ttyS3` | 空调 | `south_stations` 站 `port: ttyS3`（role=hvac） |
-| RS485-4 | COM4 / `ttyS4` | 关口表 / 台区总表 | `south_stations` 站 grid_meter（迁移期别名：`master_meter.serial_port: /dev/ttyS4`；分相数据源，二者排他） |
+| RS485-4 | COM4 / `ttyS4` | 关口表 / 台区总表 | `south_stations` 站 `port: ttyS4`（role=meter_grid；总表唯一形态——master_meter 段已删收敛，S3b-1c） |
 | RS485-5 | COM5 / `ttyS5` | 储能表（第二表计） | `south_stations` 站 `port: ttyS5`（role=meter_batt） |
 | RS485-6 | COM6 / `ttyS6` | 消防状态 | `south_stations` 站 `port: ttyS6`（role=fire） |
 
@@ -379,7 +379,7 @@ sudo systemctl restart mupcd
 ### 9.3 现场配置核对清单
 
 - [ ] 生产模板 `intercore.modbus_rtu.serial_port` 已填现场口（PCS=ttyS0）
-- [ ] 总表源启用其一且不重复：`south_stations` 的 `meter_grid` 站 或 迁移期 `master_meter.enabled: true` + `serial_port=/dev/ttyS4`（二者排他；须与 PCS 口 ttyS0 不同）
+- [ ] 总表源启用唯一：`south_stations` 的 `meter_grid` 站 `port: ttyS4`（master_meter 段已删收敛，唯一总表源；须与 PCS 口 ttyS0 不同）
 - [ ] `south_stations` 各站 port/type/slave 与上表一致、点表已填
 - [ ] `io:` 段 DI/DO gpio 编号已按板端校准；急停 action=pcs_stop、active_low=true
 - [ ] 启动日志：PCS 心跳正常（1013）、总表读数更新、无 `tai 档位加载失败`
