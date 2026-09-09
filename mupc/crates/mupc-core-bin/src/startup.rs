@@ -489,11 +489,10 @@ pub async fn initialize_all(
     tracing::info!("[07/14] 初始化 AI 引擎...");
     let ai_config = mupc_ai_engine::AiEngineConfig::default();
     let ai_engine = mupc_ai_engine::ModelManager::new(ai_config);
-    // 加载 AI 模型 (LSTM + RL 场景模型)
-    // 模型文件缺失时降级运行（预测返回 0 向量，RL 决策返回错误）
-    if let Err(e) = ai_engine.load_models().await {
-        tracing::warn!("AI 模型加载失败，降级运行: {}", e);
-    }
+    // AI 引擎暂停（平台目标调整 2026-09-09）：不加载模型，ModelStatus 保持 Unloaded，
+    // 本地策略引擎为唯一下发引擎。观测空间数据维度重构后再接回（届时恢复 load_models
+    // + dispatch AI 分支 + rt_source 观测注入）。
+    // ModelManager 实例保留：engine_status / web 状态查询返回 unloaded（如实，不谎报）。
     let ai_engine = Arc::new(ai_engine);
     coord.register_service("ai_engine", ServiceStatus::Running);
 
