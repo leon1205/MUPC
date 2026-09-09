@@ -528,6 +528,37 @@ pub async fn initialize_all(
         ))
         .await;
 
+    // 审查 R1-A3（2026-09-09）：本地策略决策落库 decisions 表（web /decisions 审计回放）。
+    // 回调注入保持 strategy-engine 无 storage 依赖；同步闭包内 tokio::spawn 异步落库。
+    // phase_p/phase_q 为三相 [f64;3]（send_tai_command 下发语义，见 strategies.rs phase_p_set）。
+    {
+        let decision_store = storage.clone();
+        ai_integrator
+            .set_decision_sink(Arc::new(move |phase_p, phase_q| {
+                let store = decision_store.clone();
+                tokio::spawn(async move {
+                    // scene_type="local_tai"; action_json={phase_p_set,phase_q_set}; confidence=1.0;
+                    // model_version="local"; ts=now（AiDecisionRecord 实际字段，见 storage models.rs）
+                    let rec = mupc_storage::AiDecisionRecord {
+                        id: None,
+                        timestamp: chrono::Utc::now(),
+                        scene_type: "local_tai".to_string(),
+                        action_json: serde_json::json!({
+                            "phase_p_set": phase_p,
+                            "phase_q_set": phase_q,
+                        })
+                        .to_string(),
+                        confidence: 1.0,
+                        model_version: "local".to_string(),
+                    };
+                    if let Err(e) = store.decisions.insert(&rec).await {
+                        tracing::debug!("本地策略决策落库失败: {}", e);
+                    }
+                });
+            }))
+            .await;
+    }
+
     // AI 引擎暂停（平台目标调整 2026-09-09）：不注入 model_manager——set_model_manager 会把
     // AiIntegrator.status 置 Ready，模型未加载时会导致 engine_status 谎报已启用。当前
     // AiIntegrator.model_manager=None → engine_status 如实报 unloaded / ai_engine_enabled=false。

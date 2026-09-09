@@ -51,6 +51,10 @@ pub struct AiIntegrator {
     local_priority: RwLock<bool>,
     /// AI 指令安全校验器（安全闸门）：dispatch 前校验 AI 指令，不通过降级本地兜底（PRD §1.2/§6）
     validator: RwLock<Option<Arc<dyn AiCommandValidator>>>,
+    /// 审查 R1-A3 2026-09-09：本地策略每拍实际下发成功后触发（phase_p_set, phase_q_set 三相
+    /// [f64;3]），启动侧注入 storage 落库闭包；None=不落库。同步闭包内由 tokio::spawn 异步落库
+    /// （避免 async trait/依赖）。
+    decision_sink: RwLock<Option<Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>>>,
 }
 
 impl AiIntegrator {
@@ -76,6 +80,7 @@ impl AiIntegrator {
             tai_storage: None,
             local_priority: RwLock::new(false),
             validator: RwLock::new(None),
+            decision_sink: RwLock::new(None),
         }
     }
 
@@ -236,6 +241,13 @@ impl AiIntegrator {
         *self.validator.write().await = Some(validator);
     }
 
+    /// 注入本地策略决策落库回调（审查 R1-A3 2026-09-09）：本地兜底每拍实际下发成功后以
+    /// (phase_p_set, phase_q_set) 三相 [f64;3] 触发；None=不落库。同步闭包（落库异步由闭包内
+    /// tokio::spawn），避免 async trait/strategy-engine→storage 依赖。
+    pub async fn set_decision_sink(&self, sink: Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>) {
+        *self.decision_sink.write().await = Some(sink);
+    }
+
     /// 运行本地兜底策略（AI 失效时）：台区储能治理（分相 P/Q 经核间下发）
     async fn run_fallback_strategies(&self) -> Result<(), AiEngineError> {
         // U-26 审查 P1-1: 数据新鲜度守卫——总表断连后遥测冻结，若继续用旧测量驱动控制会下发
@@ -275,6 +287,11 @@ impl AiIntegrator {
                                 tracing::warn!("台区储能分相指令下发失败: {:?}", e);
                             } else {
                                 tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
+                                // 审查 R1-A3 2026-09-09：实际下发成功才落库（freshness 停发拍不
+                                // evaluate 不触发——语义正确）；None=启动侧未注入落库闭包。
+                                if let Some(sink) = self.decision_sink.read().await.as_ref() {
+                                    sink(p, q);
+                                }
                             }
                         } else {
                             tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
