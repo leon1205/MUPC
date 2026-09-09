@@ -692,6 +692,54 @@ pub async fn initialize_all(
         }
     }));
 
+    // ── 12-本地显示终端数据提供层（12-显示终端 设计 §4.2 装配点：策略引擎(第8步)+决策循环之后）──
+    // config.display.enabled 时：先起 DisplayDataProvider（1s 采集组帧，SOC 取 AiIntegrator 裁决
+    // 快照、三相/run_state 取 intercore），再起 LoopbackHttpPublisher（127.0.0.1 GET 最新帧）。
+    // 两 handle 都入 guard（优雅退出随其它后台任务 abort）；主进程不 spawn/不管理渲染子进程
+    // （渲染生命周期归 systemd，§4.2/§11）。disabled 不装配（warn）。
+    if config.display.enabled {
+        // §7.3 warn：非 modbus_rtu（tcp 仿真/联调）可看 SOC/通道，三相 1022-1032 将 NotRead
+        if config.intercore.transport != "modbus_rtu" {
+            tracing::warn!(
+                "display.enabled=true 但 intercore.transport={}（非 modbus_rtu）：仿真/联调可看 SOC/通道，三相 1022-1032 将 NotRead（12-显示终端 §7.3）",
+                config.intercore.transport
+            );
+        }
+        let latest: Arc<std::sync::Mutex<Option<mupc_display_proto::DisplayFrame>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let provider = crate::display_host::DisplayDataProvider::new(
+            ai_integrator.clone(),
+            intercore.clone(),
+            &config.display,
+            config.intercore.transport == "modbus_rtu",
+            latest.clone(),
+        );
+        guard.0.push(tokio::spawn(provider.run()));
+        let publisher = crate::display_host::LoopbackHttpPublisher::new(latest.clone());
+        match tokio::net::TcpListener::bind(&config.display.bind_addr).await {
+            Ok(listener) => {
+                tracing::info!(
+                    "本地显示终端数据通道已启动: http://{}{}（回环仅本机）",
+                    config.display.bind_addr,
+                    crate::display_host::LATEST_PATH
+                );
+                guard.0.push(tokio::spawn(publisher.serve(listener)));
+            }
+            Err(e) => {
+                // bind 失败不阻断 mupcd 启动（回环端口占用属本机配置问题，留 trace 排查）
+                tracing::error!(
+                    "display 回环绑定 {} 失败: {}——跳过发布端（确认 bind_addr 未被占用）",
+                    config.display.bind_addr,
+                    e
+                );
+            }
+        }
+    } else {
+        tracing::debug!(
+            "本地显示终端未启用（config.display.enabled=false），跳过 DisplayDataProvider/回环发布"
+        );
+    }
+
     // ── 9. IEC 104 网关 ──
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
     // 审查 R2-A2 (2026-09-09)：北向监听地址/端口读 config.gateway 段（缺省 0.0.0.0:2404，

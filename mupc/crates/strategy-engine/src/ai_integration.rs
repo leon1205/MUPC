@@ -60,6 +60,42 @@ pub struct AiIntegrator {
     /// 拍（1s）仍对相同指令重复 send_tai_command——空耗 RS485 带宽并放大在线/离线抖动窗口。
     /// std Mutex（非 tokio——纯同步值比对，无跨 await 持有）。
     last_sent_tai: std::sync::Mutex<Option<([f64; 3], [f64; 3])>>,
+    /// 12-本地显示终端 Dev-B3（设计 §4.3）：SOC 展示快照缓存——`(SocResolved, 解析时刻)`。
+    /// `resolve_soc_core`（控制 `apply_soc_source` 每 dispatch 拍 + 显示刷新）都会写；
+    /// `soc_display_snapshot` 读未过期（< `SOC_RESOLVE_CACHE_TTL`）直接返回，避免与 dispatch
+    /// 同 tick 双活读 REG_SOC（显示采集独立 1s task 不并发打总线）。控制与展示共用单一裁决入口。
+    soc_resolved_cache: RwLock<Option<(SocResolved, std::time::Instant)>>,
+}
+
+/// SOC 展示/裁决内部源枚举（设计 §4.3 `SocSourceKind`，三态）：
+/// `Bms`=优先源（BMS 站 fresh）；`PcsReg1010`=回落源（核间活读 REG_SOC fresh）；
+/// `None`=无 fresh 源。core-bin（DisplayDataProvider）映射到帧三态 `SocSource`：
+/// `Bms→Bms`、`PcsReg1010→PcsReg1010`、`None→Lost`（§3.3；双源皆失「失效」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocSourceKind {
+    /// BMS 站 SOC（优先源，fresh）。
+    Bms,
+    /// 核间活读 PCS REG1010 SOC（回落源，fresh）。
+    PcsReg1010,
+    /// 无 fresh 源（BMS 超期/无 且 核间超期/不可达）→ 帧映射 `SocSource::Lost`。
+    None,
+}
+
+/// SOC 双源裁决结果（控制与展示共用，设计 §4.3 `SocResolved`）。
+/// - `value_pct`：裁决后 SOC（0..100）。双源皆失时沿用冻结 existing（仅控制内部驱动 soc_protect）；
+///   展示侧据 `dual_lost=true` 或 `value_pct=None` 置帧 `soc=None` + `soc_source=Lost`（不把冻结旧值
+///   冒充实时上屏，PRD §6.2/F1.4）。
+/// - `source`：实际取值源（`SocSourceKind`，单源化，从不双读并列）。
+/// - `dual_lost`：= `is_dual_source_lost(...)`——BMS 与核间皆非 fresh 且 existing 非 None（冻结 SOC
+///   仍在驱动保护）的降级态；供节流 warn 与展示侧丢弃冻结值。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SocResolved {
+    /// 裁决后展示用 SOC（0..100；None = 无任何 fresh 源且无 existing）。
+    pub value_pct: Option<f64>,
+    /// 实际取值源标注（`SocSourceKind`）。
+    pub source: SocSourceKind,
+    /// 双源皆失降级态（沿用冻结值驱动保护）。
+    pub dual_lost: bool,
 }
 
 impl AiIntegrator {
@@ -69,6 +105,9 @@ impl AiIntegrator {
         std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS);
     /// S3b-1d：双源皆失沿用冻结 SOC 的节流告警间隔（防每 dispatch 周期刷屏）
     const SOC_STALE_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    /// 12-显示终端 §4.3：SOC 展示快照缓存 TTL（≈900ms < 1s 发布周期）——显示读缓存避免与
+    /// dispatch 同 tick 双活读 REG_SOC（控制每拍先 resolve 写缓存，显示下一 tick 优先读缓存）。
+    const SOC_RESOLVE_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(900);
 
     pub fn new() -> Self {
         Self {
@@ -87,6 +126,7 @@ impl AiIntegrator {
             validator: RwLock::new(None),
             decision_sink: RwLock::new(None),
             last_sent_tai: std::sync::Mutex::new(None),
+            soc_resolved_cache: RwLock::new(None),
         }
     }
 
@@ -186,28 +226,12 @@ impl AiIntegrator {
     /// 注意：evaluate 只改传入 clone 的 battery 字段，不写回 latest_data、不动 last_data_ts
     /// 闸门（C-2）。完整滞回状态机（回切连续 N 拍 + 3% 带）留后续（04 §2.11.1 I-3）。
     async fn apply_soc_source(&self, data: &mut DataPackage) {
-        // 先取值、出锁，再在需要时 await latest_soc（bms_soc read 锁不跨 await）。(f64, Instant)
-        // 两元素均 Copy → tuple Copy；Option<T: Copy> Copy → *guard 得值（无需 clone）。
-        let bms = *self.bms_soc.read().await;
-        // BMS 非 fresh（或无）→ 无条件读核间（活读；不 gate on data.battery.soc.is_none()）
-        let intercore = if bms.map_or(true, |(_, ts)| ts.elapsed() > Self::DATA_STALE_AFTER) {
-            if let Some(client) = &self.intercore_client {
-                client.latest_soc().await
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let now = std::time::Instant::now();
-        let resolved = resolve_soc_source(
-            bms,
-            intercore,
-            data.battery.soc,
-            now,
-            Self::DATA_STALE_AFTER,
-        );
-        if is_dual_source_lost(bms, intercore, data.battery.soc, now, Self::DATA_STALE_AFTER) {
+        // 收敛到 resolve_soc_core（12-设计 §4.3：控制与展示共用单一裁决入口，不双写逻辑）。
+        // resolve_soc_core 复用既有纯函数 resolve_soc_source / is_dual_source_lost，裁决语义与
+        // S3b-1d 实时回落完全一致：BMS fresh → Bms；BMS 非 fresh → 无条件活读核间 latest_soc
+        // fresh → PcsReg1010；双失 → 沿用冻结 existing（不置 None，避免落默认 50）。
+        let r = self.resolve_soc_core(data.battery.soc).await;
+        if r.dual_lost {
             // 双源皆失：resolve 沿用冻结 existing（非实时 SOC），soc_protect 剪带基于旧值。
             // 节流 warn（每 30s 一拍）让运维可见"控制正基于非实时 SOC"，避免全程静默降级。
             // 锁内仅判时 + 更新计时，guard 出块即释放；warn 在锁外发射（避免持锁发射期间
@@ -228,7 +252,7 @@ impl AiIntegrator {
             };
             if should_warn {
                 tracing::warn!(
-                    soc = ?resolved,
+                    soc = ?r.value_pct,
                     "SOC 双源皆失（BMS 超期 + 核间不可达/超期），沿用冻结值驱动保护——请检查 BMS 站与核间 SOC 通路"
                 );
             }
@@ -239,7 +263,75 @@ impl AiIntegrator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = None;
         }
-        data.battery.soc = resolved;
+        data.battery.soc = r.value_pct;
+    }
+
+    /// SOC 双源裁决收敛入口（12-显示终端设计 §4.3 `resolve_soc_core`）：控制与展示共用的
+    /// **唯一裁决点**——取 bms_soc、按需活读核间 latest_soc、复用既有纯函数
+    /// `resolve_soc_source` / `is_dual_source_lost` 得出 value/source/dual_lost（**不复制偏离
+    /// 裁决逻辑**），并写 `soc_resolved_cache`（供展示快照免同 tick 双活读 REG_SOC）。
+    async fn resolve_soc_core(&self, existing: Option<f64>) -> SocResolved {
+        // 先取值、出锁，再在需要时 await latest_soc（bms_soc read 锁不跨 await）。(f64, Instant)
+        // 两元素均 Copy → tuple Copy；Option<T: Copy> Copy → *guard 得值（无需 clone）。
+        let bms = *self.bms_soc.read().await;
+        // BMS 非 fresh（或无）→ 无条件读核间（活读；不 gate on existing.is_none()）
+        let intercore = if bms.map_or(true, |(_, ts)| ts.elapsed() > Self::DATA_STALE_AFTER) {
+            if let Some(client) = &self.intercore_client {
+                client.latest_soc().await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let now = std::time::Instant::now();
+        let value_pct = resolve_soc_source(bms, intercore, existing, now, Self::DATA_STALE_AFTER);
+        let bms_fresh = bms.map_or(false, |(_, ts)| {
+            now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER
+        });
+        let intercore_fresh = intercore.map_or(false, |(_, ts)| {
+            now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER
+        });
+        let source = if bms_fresh {
+            SocSourceKind::Bms
+        } else if intercore_fresh {
+            SocSourceKind::PcsReg1010
+        } else {
+            SocSourceKind::None
+        };
+        let dual_lost = is_dual_source_lost(bms, intercore, existing, now, Self::DATA_STALE_AFTER);
+        let resolved = SocResolved {
+            value_pct,
+            source,
+            dual_lost,
+        };
+        *self.soc_resolved_cache.write().await = Some((resolved, now));
+        resolved
+    }
+
+    /// SOC 展示快照（12-显示终端设计 §4.3，DisplayDataProvider 每 1s 采集调用）。**只读**——不写
+    /// 控制态、不改 latest_data / last_data_ts 闸门。优先返回 `soc_resolved_cache`（<900ms 未过期，
+    /// 避免与 dispatch 同 tick 双活读 REG_SOC）；缓存过期/未写 → 以 latest_data 既有 battery.soc 为
+    /// existing 调 `resolve_soc_core` 刷新。
+    ///
+    /// 展示侧口径（对 PRD §6.2/F1.4）：`value_pct=None 或 dual_lost=true` → 帧 `soc=None` +
+    /// `soc_source=Lost`（DisplayDataProvider 映射，冻结值仅在控制内部、**不送上屏**）。
+    pub async fn soc_display_snapshot(&self) -> SocResolved {
+        {
+            let cache = self.soc_resolved_cache.read().await;
+            if let Some((r, ts)) = *cache {
+                if ts.elapsed() < Self::SOC_RESOLVE_CACHE_TTL {
+                    return r;
+                }
+            }
+        }
+        let existing = self
+            .latest_data
+            .read()
+            .await
+            .as_ref()
+            .and_then(|d| d.battery.soc);
+        self.resolve_soc_core(existing).await
     }
 
     /// 注入 AI 指令安全校验器（安全闸门）
@@ -959,6 +1051,136 @@ mod tests {
         // 无 intercore_client → 活读分支返回 None → resolve(None, None, existing(None)) → None 保持
         // （有 client 时核间 fresh 接管的裁决已由 resolve_soc_source 纯函数测覆盖）
         assert_eq!(pkg.battery.soc, None, "BMS 超期不得覆盖；无核间 client 时回落不写");
+    }
+
+    // ── 12-显示终端 Dev-B3：SOC 展示快照（soc_display_snapshot / resolve_soc_core）──
+
+    /// 测试桩 transport（AiIntegrator 活读核间 latest_soc 用）。仅承载测试所需读接口；
+    /// 下行/联锁方法返回默认（provider 帧组装测试不需要真实 PCS 写）。
+    #[derive(Clone)]
+    struct StubIntercore {
+        soc: Option<(f64, std::time::Instant)>,
+        run: Option<u16>,
+        connected: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl mupc_intercore::IntercoreTransport for StubIntercore {
+        async fn send_dual_param(
+            &self,
+            _cmd: &mupc_intercore::DualParamCommand,
+        ) -> Result<(), mupc_common::MupcError> {
+            Ok(())
+        }
+        async fn send_tai_command(
+            &self,
+            _p: [f64; 3],
+            _q: [f64; 3],
+            _mode: &str,
+        ) -> Result<(), mupc_common::MupcError> {
+            Ok(())
+        }
+        async fn is_connected(&self) -> bool {
+            self.connected
+        }
+        async fn shutdown(&self) -> Result<(), mupc_common::MupcError> {
+            Ok(())
+        }
+        async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
+            self.soc
+        }
+        async fn stop(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn is_interlock_stopped(&self) -> bool {
+            false
+        }
+        async fn restore_interlock_latched(&self, _latched: bool) -> Result<(), String> {
+            Ok(())
+        }
+        fn last_run_state(&self) -> Option<u16> {
+            self.run
+        }
+        async fn authorize_restart(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn soc_snapshot_bms_fresh_returns_bms() {
+        // 无 client；BMS fresh → snapshot 返回 Bms 源（展示侧先读缓存、无则 resolve_soc_core）
+        let i = AiIntegrator::new();
+        i.set_battery_soc(65.5).await;
+        let r = i.soc_display_snapshot().await;
+        assert_eq!(r.value_pct, Some(65.5));
+        assert_eq!(r.source, SocSourceKind::Bms);
+        assert!(!r.dual_lost);
+    }
+
+    #[tokio::test]
+    async fn soc_snapshot_no_source_none_no_dual_lost() {
+        // 无 BMS、无 client、无 existing → 纯无 SOC 正常态：value None、source None（帧 Lost）、
+        // dual_lost false（existing None 非降级残留，不 warn）
+        let i = AiIntegrator::new();
+        let r = i.soc_display_snapshot().await;
+        assert_eq!(r.value_pct, None);
+        assert_eq!(r.source, SocSourceKind::None);
+        assert!(!r.dual_lost, "existing None = 纯无 SOC 正常态（启动早期）");
+    }
+
+    #[tokio::test]
+    async fn soc_snapshot_intercore_fallback_when_bms_stale() {
+        // 有 client：核间 latest_soc fresh 42.0；BMS 超期 → 无条件活读核间 → PcsReg1010 接管
+        let mut i = AiIntegrator::new();
+        i.set_intercore_client(Arc::new(mupc_intercore::IntercoreClient::with_transport(
+            Arc::new(StubIntercore {
+                soc: Some((42.0, std::time::Instant::now())),
+                run: Some(1),
+                connected: true,
+            }),
+        )));
+        i.set_battery_soc(65.5).await;
+        *i.bms_soc.write().await = Some((
+            65.5,
+            std::time::Instant::now()
+                - std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS + 100),
+        ));
+        let r = i.soc_display_snapshot().await;
+        assert_eq!(r.value_pct, Some(42.0), "BMS 超期 → 核间 fresh 接管（实时回落）");
+        assert_eq!(r.source, SocSourceKind::PcsReg1010);
+        assert!(!r.dual_lost);
+    }
+
+    #[tokio::test]
+    async fn soc_snapshot_dual_lost_flags_frozen_existing() {
+        // existing 冻结值（latest_data 保留旧 SOC 30.0）+ BMS 超期 + 无 client → 双源皆失：
+        // resolve 沿用冻结 existing（控制内部），dual_lost=true、source=None（帧映射 Lost）
+        let i = AiIntegrator::new();
+        i.set_latest_data(create_test_pkg_with_soc(Some(30.0))).await;
+        i.set_battery_soc(65.5).await;
+        *i.bms_soc.write().await = Some((
+            65.5,
+            std::time::Instant::now()
+                - std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS + 100),
+        ));
+        let r = i.soc_display_snapshot().await;
+        assert_eq!(r.value_pct, Some(30.0), "resolve 沿用冻结 existing（仅控制内部）");
+        assert!(r.dual_lost, "BMS 超期 + 核间无 fresh → 双源皆失降级态");
+        assert_eq!(r.source, SocSourceKind::None, "无 fresh 源 → 帧映射 Lost");
+    }
+
+    #[tokio::test]
+    async fn soc_snapshot_cache_serves_within_ttl() {
+        // 缓存 TTL（900ms）内 snapshot 直接返回已裁决值，不重活读核间（防同 tick 双活读 REG_SOC）
+        let i = AiIntegrator::new();
+        i.set_battery_soc(65.5).await;
+        let r1 = i.soc_display_snapshot().await;
+        assert_eq!(r1.value_pct, Some(65.5));
+        // 立刻把 BMS 回拨为超期（源不可达）——缓存 TTL 内仍应返回 r1（不重裁决、不活读）
+        *i.bms_soc.write().await =
+            Some((65.5, std::time::Instant::now() - std::time::Duration::from_secs(3600)));
+        let r2 = i.soc_display_snapshot().await;
+        assert_eq!(r2, r1, "缓存 TTL 内直接返回，不重裁决");
     }
 
     #[tokio::test]

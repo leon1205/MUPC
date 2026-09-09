@@ -12,6 +12,7 @@
 
 mod cli;
 mod core_config;
+mod display_host;
 mod interlock;
 mod signal_handler;
 mod startup;

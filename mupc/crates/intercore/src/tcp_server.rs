@@ -12,7 +12,7 @@ use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
 use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType};
-use crate::transport::{IntercoreTransport, TcpTransport};
+use crate::transport::{IntercoreTransport, TcpTransport, ThreePhaseRead};
 
 /// 安全覆盖触发原因的默认值
 const SAFETY_OVERRIDE_REASON_UNKNOWN: &str = "unknown";
@@ -1003,6 +1003,13 @@ impl IntercoreClient {
     /// 最新解码的 RUN_STATE(1013)（Modbus 心跳维护；离线为 None；Tcp 通道恒 None）
     pub fn last_run_state(&self) -> Option<u16> {
         self.transport.last_run_state()
+    }
+
+    /// 三相展示读数（PCS 3 区输入寄存器 1022-1032，FC04；12-显示终端 §4.1 转发）。Modbus 实现
+    /// 有效；Tcp/sim 无 PCS 3 区点表 → None（上层打 NotRead）。由 DisplayDataProvider 独立 1s
+    /// 采集任务调用，与心跳同走 bus 锁（半双工互斥），不进联锁抑制链。
+    pub async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
+        self.transport.read_three_phase().await
     }
 
     /// M1 保护跳闸/停机人工授权重启（ack_m1 语义，**单次**）：!stopped_latched 时复位 started 并

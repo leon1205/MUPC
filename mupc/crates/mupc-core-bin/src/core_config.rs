@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 use std::path::PathBuf;
+use mupc_display_proto::DisplayConfig;
 
 /// 主配置文件顶层结构
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +41,11 @@ pub struct CoreConfig {
     /// mupc_mqtt_bridge crate Default）
     #[serde(default)]
     pub mqtt_bridge: MqttBridgeConfig,
+    /// 本地显示终端发布侧配置（12-本地显示终端 设计 §7：mupcd 解析 yaml `display:` 段 →
+    /// `display-proto::DisplayConfig`（单一真源，非重复定义）；缺省 disabled——未配置 display
+    /// 段部署行为不变，不启屏）
+    #[serde(default)]
+    pub display: DisplayConfig,
 }
 
 /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled——未配置 io 段部署行为不变）
@@ -518,6 +524,39 @@ impl CoreConfig {
         if !self.south_stations.stations.is_empty() {
             self.validate_south_stations()?;
         }
+        // 12-本地显示终端 §7.3：display 段校验（enabled 时 bind_addr 强制仅回环 127.0.0.1；
+        // disabled 整段跳过——未启用用户不打扰）。非 modbus transport 的 warn 在 startup
+        // 装配处发射（main Phase 1 validate 早于 tracing 初始化，此处 warn 不可达）。
+        self.validate_display()?;
+        Ok(())
+    }
+
+    /// 12-本地显示终端 §7.3：display.enabled 时 bind_addr 强制仅回环（127.0.0.1）——
+    /// 本地数据通道禁止暴露到外网/北向网口；非回环地址启动即报错。disabled 整段跳过。
+    fn validate_display(&self) -> Result<(), String> {
+        let d = &self.display;
+        if !d.enabled {
+            return Ok(());
+        }
+        if d.bind_addr.trim().is_empty() {
+            return Err("display.bind_addr 不能为空（display.enabled 时）".to_string());
+        }
+        let ok_loopback = match d.bind_addr.parse::<std::net::SocketAddr>() {
+            Ok(sa) => sa.ip().is_loopback(),
+            // 非数字主机（如 "localhost:9810"）也同指回环——放行
+            Err(_) => d
+                .bind_addr
+                .split(':')
+                .next()
+                .map(|h| h.eq_ignore_ascii_case("localhost"))
+                .unwrap_or(false),
+        };
+        if !ok_loopback {
+            return Err(format!(
+                "display.bind_addr='{}' 非回环地址——本地显示终端数据通道强制仅 127.0.0.1（禁止暴露到外网接口，12-显示终端 §7.3）",
+                d.bind_addr
+            ));
+        }
         Ok(())
     }
 
@@ -786,6 +825,7 @@ mqtt_bridge:
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
             gateway: GatewayConfig::default(),
             mqtt_bridge: MqttBridgeConfig::default(),
+            display: DisplayConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -832,8 +872,95 @@ mqtt_bridge:
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
             gateway: GatewayConfig::default(),
             mqtt_bridge: MqttBridgeConfig::default(),
+            display: DisplayConfig::default(),
         };
         assert!(config.validate().is_err());
+    }
+
+    /// 12-显示终端 §7.3: display 段缺省 disabled（未配置 display 段部署行为不变，不启屏）
+    #[test]
+    fn test_display_disabled_by_default() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.display.enabled, "缺省 display 段 → disabled");
+        assert_eq!(config.display.bind_addr, "127.0.0.1:9810");
+        assert_eq!(config.display.publish_ms, 1000);
+        assert!(config.validate().is_ok());
+    }
+
+    /// 12-显示终端 §7.3: display.enabled=true 显式可解析（bind_addr 回环）→ validate 通过
+    #[test]
+    fn test_display_enabled_loopback_passes() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+display:
+  enabled: true
+  bind_addr: "127.0.0.1:9810"
+  publish_ms: 500
+  range:
+    current_max_a: 400
+    phase_power_max_kw: 100
+    total_power_max_kw: 300
+    pcs_total_rated_kw: 60
+    inconsistency_threshold_kw: 3.0
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.display.enabled);
+        assert_eq!(config.display.publish_ms, 500);
+        assert_eq!(config.display.range.current_max_a, 400.0);
+        assert_eq!(config.display.range.total_power_max_kw, 300.0);
+        assert!(
+            config.validate().is_ok(),
+            "回环 display 配置应通过: {:?}",
+            config.validate()
+        );
+    }
+
+    /// 12-显示终端 §7.3: display.enabled 时 bind_addr 非回环 → validate Err（强制仅 127.0.0.1）
+    #[test]
+    fn test_display_enabled_non_loopback_rejected() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+display:
+  enabled: true
+  bind_addr: "0.0.0.0:9810"
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("回环"),
+            "非回环 bind_addr 应报错（强制仅 127.0.0.1），实际: {}",
+            err
+        );
     }
 
     /// M7: transport=modbus_rtu（PCS 生产链路）时 slave_addr 越界 → validate Err
