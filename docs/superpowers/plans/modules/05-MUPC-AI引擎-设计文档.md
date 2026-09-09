@@ -48,9 +48,9 @@
    - 7.1 功能概述
    - 7.2 结构体
    - 7.3 full_decision_cycle() 完整流程
-   - 7.4 影子模型验证+渐进式切换（R1）
+   - 7.4 影子模型验证与渐进式切换
    - 7.5 自适应权重优化器
-8. [安全 RL 包装器](#8-安全-rl-包装器safety-rl-wrapper)（原 §5.16）
+8. [安全 RL 包装器](#8-安全-rl-包装器safety-rl-wrapper)
    - 物理模型前置过滤器，基于戴维南等效电路预测电压变化
    - 调用位置：full_decision_cycle() 中 RL 决策后、ActionValidator 前
 9. [与策略引擎集成设计](#9-与策略引擎集成设计)
@@ -2772,6 +2772,10 @@ pub struct ModelManager {
     reward_calculator: RewardCalculator,
     action_validator: ActionValidator,
     online_updater: Arc<RwLock<OnlineUpdater>>,
+    /// 安全在线微调编排器（影子模型验证 + 渐进式切换）
+    safe_updater: Arc<SafeOnlineUpdater>,
+    /// 安全 RL 包装器（物理模型前置过滤器）
+    safety_wrapper: Arc<SafetyRLWrapper>,
     status: Arc<RwLock<ModelStatus>>,
     mode_selector: Arc<ModeSelector>,
 }
@@ -2863,7 +2867,7 @@ impl ModelManager {
 }
 ```
 
-### 7.4 影子模型验证+渐进式切换（R1）
+### 7.4 影子模型验证与渐进式切换
 
 #### 7.4.1 组件关系
 
@@ -2877,7 +2881,6 @@ impl ModelManager {
         ▼              ▼              ▼
 ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
 │ SafeOnlineUpdater │ DiscountedRewardCalculator │ SmoothSceneTransition │
-│    (R1 新增)    │    (R2 新增)    │    (R3 新增)    │
 └───────┬────────┘ └───────┬────────┘ └───────┬────────┘
         │                  │                  │
         ▼                  ▼                  ▼
@@ -2944,7 +2947,7 @@ pub struct GradualSwitcher {
     state: RwLock<SwitchState>,
 }
 
-/// SafeOnlineUpdater（R1 核心，替换现有占位实现）
+/// SafeOnlineUpdater（在基础在线微调之上增加安全门槛与渐进式切换）
 pub struct SafeOnlineUpdater {
     config: OnlineUpdateConfig,
     shadow_model: ShadowModel,
@@ -3084,7 +3087,7 @@ impl AdaptiveWeightOptimizer {
         ((optimized_reward - original_reward) / original_reward).abs() < 0.05
     }
 
-    /// v3.1: 权重健康度检查 — 累计漂移监控
+    /// 权重健康度检查 — 累计漂移监控
     ///
     /// 当优化后的权重组合导致关键性能指标连续 N 个周期劣于基线时，
     /// 自动触发权重冻结，回退到基线权重。
@@ -3101,7 +3104,7 @@ impl AdaptiveWeightOptimizer {
     }
 }
 
-/// v3.1: 权重健康度状态
+/// 权重健康度状态
 pub enum WeightHealthStatus {
     Healthy,                              // 不劣于基线
     Degraded { consecutive: u32 },        // 连续 N 周期退化
@@ -3177,17 +3180,15 @@ impl ParetoWeightOptimizer {
 
 ## 8. 安全 RL 包装器（Safety RL Wrapper）
 
-> 原 §5.16，独立成章。安全包装器非奖励函数——它是物理模型前置过滤器，
-> 基于戴维南等效电路预测电压变化，在 RL 动作生效前拦截危险动作。
-> 调用位置: `full_decision_cycle()` 中 RL 决策后、ActionValidator 前。
+安全包装器非奖励函数——它是物理模型前置过滤器，
+基于戴维南等效电路预测电压变化，在 RL 动作生效前拦截危险动作。
+调用位置: `full_decision_cycle()` 中 RL 决策后、ActionValidator 前。
 
-> **来源**：`docs/TODO/安全RL包装器.md` + `docs/superpowers/specs/modules/05-MUPC-AI引擎-PRD.md §3.7`
-
-#### 8.1 需求描述
+### 8.1 需求描述
 
 **现存问题**：
 - ActionValidator 仅做静态数值校验（值域、变化率、调度约束），无法预测动作施加后电网的短时动态响应
-- RobustnessManager（v2.9 已实现）属被动防御，仅在异常已发生（电压<0.9p.u.）时才介入，存在滞后窗口
+- RobustnessManager 属被动防御，仅在异常已发生（电压<0.9p.u.）时才介入，存在滞后窗口
 - 合法的 `p_ref`（-30kW）在低电压工况下可致电压从 0.98 骤降至 0.92
 
 **设计目标**：在 RL 决策后、ActionValidator 前插入**物理模型前置过滤器**，基于戴维南等效电路预测电压变化，提前拒绝高风险动作。
@@ -3198,7 +3199,7 @@ impl ParetoWeightOptimizer {
 3. **可证明安全**：基于简化电路方程，非黑盒
 4. **与现有模块正交**：不修改 RL/ActionValidator/RewardCalculator
 
-#### 8.2 数据结构
+### 8.2 数据结构
 
 **核心结构体**：
 
@@ -3247,7 +3248,7 @@ pub struct SafetyRLWrapper {
     last_safe_action: Arc<RwLock<ActionOutput>>,
     bounds: SafetyBounds,
     stats: Arc<RwLock<SafetyStats>>,
-    // v2.17 新增：事件广播（用于 SSE 推送给 Web UI）
+    // 事件广播（用于 SSE 推送给 Web UI）
     event_sender: Option<SafetyEventSender>,
 }
 
@@ -3275,7 +3276,7 @@ pub struct SafetyViolation {
     pub latency_us: u64,
 }
 
-/// 安全包装器事件（v2.17 新增，broadcast 推送用）
+/// 安全包装器事件（broadcast 推送用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyWrapperEvent {
     pub timestamp: i64,
@@ -3391,7 +3392,7 @@ impl LinearSensitivityPredictor {
 }
 ```
 
-#### 8.3 核心算法：check_and_fallback 流程
+### 8.3 核心算法：check_and_fallback 流程
 
 ```rust
 impl SafetyRLWrapper {
@@ -3465,7 +3466,7 @@ impl SafetyRLWrapper {
             latency_us,
         };
         
-        // v2.17 修订（D-01/D-02 修复）：事件驱动架构
+        // 事件驱动架构
 // 使用 tokio::sync::broadcast 推送到全局事件总线
 // Web API SsePushService 订阅后通过 SSE 推送给 Web UI
         let event = SafetyWrapperEvent {
@@ -3500,7 +3501,7 @@ impl SafetyRLWrapper {
 }
 ```
 
-#### 8.4 ModelManager 集成
+### 8.4 ModelManager 集成
 
 **集成位置**：`full_decision_cycle` 第 6 步后、ActionValidator 前
 
@@ -3509,7 +3510,7 @@ impl SafetyRLWrapper {
 
 pub struct ModelManager {
     // ... 现有字段 ...
-    safety_wrapper: Arc<SafetyRLWrapper>,  // v2.17 新增
+    safety_wrapper: Arc<SafetyRLWrapper>,
 }
 
 // main.rs 中组装示例
@@ -3532,7 +3533,7 @@ impl ModelManager {
         // Step 6: RL 决策（已有）
         let rl_action = registry.decide(&input_vector, &action_space_config).await?;
         
-        // Step 6.5: v2.17 新增 SafetyRLWrapper 检查
+        // Step 6.5: SafetyRLWrapper 检查
         let (safe_action, check_result) = self.safety_wrapper.check_and_fallback(
             &fused_state,
             &rl_action,
@@ -3555,18 +3556,20 @@ impl ModelManager {
 }
 ```
 
-**与 RobustnessManager 协同顺序**（Q-W3=A 决策）：
+> 待人工（§8.4 集成代码与 §7.3 需统一，属契约修正）：现行代码与 §7.3 的 Step 7 均走 `validate_dual`，§8.4 片段仍用 `validate`。
+
+**与 RobustnessManager 协同顺序**：
 
 ```
 完整决策链：
 
 RLModel.decide() → 原始动作
    ↓
-[新] SafetyRLWrapper.check_and_fallback()    ← 事前预测（v2.17）
+[新] SafetyRLWrapper.check_and_fallback()    ← 事前预测
    ↓ (安全/回退后的动作)
-RobustnessManager.detect_and_respond()       ← 事中应急（v2.9 已有）
+RobustnessManager.detect_and_respond()       ← 事中应急
    ↓ (应急动作或原动作)
-ActionValidator.validate_dual()              ← 静态校验（v2.15 已有）
+ActionValidator.validate_dual()              ← 静态校验
    ↓
 strategy-engine
 ```
@@ -3576,12 +3579,12 @@ strategy-engine
 - RobustnessManager：**检测**当前异常（v_avg<0.9、>1.1、SOC 极值）则**应急**
 - ActionValidator：**校验**值域/变化率
 
-#### 8.5 配置结构
+### 8.5 配置结构
 
 **新增配置结构**（`crates/ai-engine/src/config.rs`）：
 
 ```rust
-/// v2.17 安全 RL 包装器配置
+/// 安全 RL 包装器配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SafetyWrapperConfig {
     pub line_impedance_r_ohm: f64,    // 默认 0.1
@@ -3627,7 +3630,7 @@ max_check_latency_ms = 5
 alert_rejection_rate = 0.20     # 拒绝率告警阈值
 ```
 
-#### 8.6 Web API 设计（SSE 推送为主，HTTP API 仅用于状态查询）
+### 8.6 Web API 设计（SSE 推送为主，HTTP API 仅用于状态查询）
 
 **架构变更**：
 - 实时违规通知通过 **SSE 推送**（基于 broadcast channel）
@@ -3745,7 +3748,7 @@ pub struct SafetyStatus {
 - 无需任何轮询代码
 ```
 
-#### 8.7 Web UI 设计
+### 8.7 Web UI 设计
 
 **页面**：`crates/web-api/src/static/ai-monitor.html`
 
@@ -3802,7 +3805,7 @@ setInterval(async () => {
   checkAlertThreshold(status.stats.rejection_rate_1h);
 }, 5000);
 
-// === 实时事件订阅（v2.17 新增，通过 SSE） ===
+// === 实时事件订阅（通过 SSE） ===
 // 监听 SafetyWrapperUpdate 事件，自动接收违规通知
 const eventSource = new EventSource('/api/v1/sse/safety_wrapper');
 eventSource.addEventListener('SafetyWrapperUpdate', (e) => {
@@ -3814,7 +3817,7 @@ eventSource.addEventListener('SafetyWrapperUpdate', (e) => {
 // Web UI 收到事件后更新本地状态，无需轮询 AI 引擎
 ```
 
-#### 8.8 错误处理
+### 8.8 错误处理
 
 | 场景 | 处理策略 |
 |------|----------|
@@ -3827,7 +3830,7 @@ eventSource.addEventListener('SafetyWrapperUpdate', (e) => {
 | Storage 持久化失败 | 记录 ERROR，不影响主流程 |
 | Web API 鉴权失败 | 返回 403 |
 
-#### 8.9 测试策略
+### 8.9 测试策略
 
 | 测试类型 | 测试项 | 验证方法 |
 |----------|--------|----------|
@@ -3876,7 +3879,7 @@ fn test_predict_inner_low_voltage_risk() {
 }
 ```
 
-#### 8.10 影响文件
+### 8.10 影响文件
 
 | 文件 | 变更类型 | 估算代码行数 |
 |------|----------|-------------|
@@ -3893,14 +3896,7 @@ fn test_predict_inner_low_voltage_risk() {
 | `main.rs` (bin) | 修改（依赖注入 broadcast channel）| +30 行 |
 | **合计** | — | **~880 行** |
 
-> **设计修订（D-01/D-02/D-03 修复）**：
-> 1. 事件流采用 `tokio::sync::broadcast`（AI 引擎 → Web API → SSE → Web UI），不依赖 HTTP 轮询
-> 2. AI 引擎 `event_sender: Option<SafetyEventSender>` 字段，main.rs 注入 Sender
-> 3. Web API 订阅 broadcast Receiver，转发到现有 `SsePushService`
-> 4. Web UI 用 `EventSource` 订阅 SSE 端点，零轮询开销
-> 5. storage 持久化作为审计通道（与 broadcast 并行，独立存在）
-
-#### 8.11 设计决策记录
+### 8.11 设计决策记录
 
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
