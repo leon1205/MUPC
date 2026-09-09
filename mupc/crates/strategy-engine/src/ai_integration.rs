@@ -199,20 +199,34 @@ impl AiIntegrator {
         if is_dual_source_lost(bms, intercore, data.battery.soc, now, Self::DATA_STALE_AFTER) {
             // 双源皆失：resolve 沿用冻结 existing（非实时 SOC），soc_protect 剪带基于旧值。
             // 节流 warn（每 30s 一拍）让运维可见"控制正基于非实时 SOC"，避免全程静默降级。
+            // 锁内仅判时 + 更新计时，guard 出块即释放；warn 在锁外发射（避免持锁发射期间
+            // panic → Mutex 中毒 → 每周期 .unwrap() 硬崩溃）。unwrap_or_else 容忍中毒恢复。
             let now_i = std::time::Instant::now();
-            let mut last = self.soc_stale_warned.lock().unwrap();
-            if last.map_or(true, |t| {
-                now_i.saturating_duration_since(t) > Self::SOC_STALE_WARN_INTERVAL
-            }) {
+            let should_warn = {
+                let mut w = self
+                    .soc_stale_warned
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let due = w.map_or(true, |t| {
+                    now_i.saturating_duration_since(t) > Self::SOC_STALE_WARN_INTERVAL
+                });
+                if due {
+                    *w = Some(now_i);
+                }
+                due
+            };
+            if should_warn {
                 tracing::warn!(
                     soc = ?resolved,
                     "SOC 双源皆失（BMS 超期 + 核间不可达/超期），沿用冻结值驱动保护——请检查 BMS 站与核间 SOC 通路"
                 );
-                *last = Some(now_i);
             }
         } else {
             // 任一源 fresh（或纯无 SOC 态）：降级态解除——复位节流计时（正常源接管后立即恢复可观测性）
-            *self.soc_stale_warned.lock().unwrap() = None;
+            *self
+                .soc_stale_warned
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
         }
         data.battery.soc = resolved;
     }
