@@ -662,6 +662,10 @@ pub async fn initialize_all(
     let decision_sse = sse_push.clone();
     let decision_interlock = interlock_ctl.clone();
     guard.0.push(tokio::spawn(async move {
+        // 遗留待办 A（2026-09-09）：latch 释放边沿检测——上一拍联锁锁存中、本拍已释放时，
+        // 需清 TaiStorage 节流缓存强制一拍重发（互锁抑制期 skip 后目标值未变也不会重发，PCS
+        // 会保持停机态停等）。was_latched 为循环局部状态，不跨 await 持有。
+        let mut was_latched = false;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             if decision_interlock
@@ -669,7 +673,14 @@ pub async fn initialize_all(
                 .is_some_and(|c| c.is_latched_now())
             {
                 tracing::warn!("安全联锁锁存中：跳过本周期 AI/策略下发（dispatch 抑制）");
+                was_latched = true;
                 continue;
+            }
+            if was_latched {
+                // 联锁释放边沿：清 TaiStorage 节流缓存，本拍重发当前控制目标（PCS 恢复控制）
+                tracing::info!("安全联锁解除：强制一拍重发当前控制目标");
+                decision_integrator.reset_last_sent_tai().await;
+                was_latched = false;
             }
             if let Err(e) = decision_integrator.dispatch_ai_decision().await {
                 tracing::debug!("AI 决策周期失败: {}", e);

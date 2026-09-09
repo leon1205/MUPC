@@ -312,6 +312,9 @@ impl AiIntegrator {
                                 return Ok(());
                             }
                             if let Err(e) = client.send_tai_command(p, q, "fallback").await {
+                                // 遗留待办 A（2026-09-09）：核间断线 send 失败 → 清 last_sent_tai 缓存，
+                                // 重连后目标值不变也会下一拍重发（否则缓存误导节流跳过，PCS 停等）。
+                                *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                 tracing::warn!("台区储能分相指令下发失败: {:?}", e);
                             } else {
                                 tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
@@ -447,6 +450,12 @@ impl AiIntegrator {
     /// 获取本地策略优先状态
     pub async fn is_local_priority(&self) -> bool {
         *self.local_priority.read().await
+    }
+
+    /// 强制下一拍重发（遗留待办 A，2026-09-09）：互锁 latch 释放/核间重连后由启动侧调用，
+    /// 清除 last_sent_tai——目标值不变也会在下一 dispatch 周期重发（否则 PCS 停等）。
+    pub async fn reset_last_sent_tai(&self) {
+        *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 执行决策并下发核间指令
