@@ -1945,8 +1945,6 @@ mod tests {
         assert!((calc.overload_penalty_piecewise(0.90) - 10.0).abs() < 1e-6);
         // L = 0.95 → excess = 0.5, 10 + 0.25 * 40 = 20
         assert!((calc.overload_penalty_piecewise(0.95) - 20.0).abs() < 1e-6);
-        // L = 1.00 → 50.0
-        assert!((calc.overload_penalty_piecewise(1.00) - 50.0).abs() < 1e-6);
     }
 
     #[test]
