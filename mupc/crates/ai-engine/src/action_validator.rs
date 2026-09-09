@@ -97,10 +97,8 @@ impl ActionValidator {
         let mut validated = action.clone();
         let mut violations = Vec::new();
 
-        let last = self.last_action.read().unwrap();
-
         // ACT-01: 有功变化率限制
-        if let Some(ref prev) = *last {
+        if let Some(ref prev) = *self.last_action.read().unwrap() {
             let delta = (action.p_ref - prev.p_ref).abs();
             if delta > self.config.p_batt_ramp_limit_kw {
                 let sign = if action.p_ref > prev.p_ref { 1.0 } else { -1.0 };
@@ -116,7 +114,7 @@ impl ActionValidator {
 
         // ACT-02: 无功变化率限制（v2.4 跳过，由实时控制模块管理）
         if !self.v2_4_mode {
-            if let Some(ref prev) = *last {
+            if let Some(ref prev) = *self.last_action.read().unwrap() {
                 let delta = (action.k_droop - prev.k_droop).abs();
                 if delta > self.config.q_batt_ramp_limit_kvar {
                     let sign = if action.k_droop > prev.k_droop {
@@ -222,7 +220,6 @@ impl ActionValidator {
     ) -> (ActionOutput, Vec<ViolationRecord>) {
         let mut validated = action.clone();
         let mut violations = Vec::new();
-        let last = self.last_action.read().unwrap();
 
         // ACT-DUAL-01: p_ref 值域约束
         let p_ref_min = -action_space_config.max_batt_discharge_power;
@@ -266,7 +263,7 @@ impl ActionValidator {
         }
 
         // ACT-DUAL-03: p_ref 变化率约束
-        if let Some(ref prev) = *last {
+        if let Some(ref prev) = *self.last_action.read().unwrap() {
             let delta = (action.p_ref - prev.p_ref).abs();
             if delta > self.config.p_batt_ramp_limit_kw {
                 let sign = if action.p_ref > prev.p_ref { 1.0 } else { -1.0 };
@@ -390,9 +387,11 @@ mod tests {
         let cfg = default_action_space_config();
         // 先设置历史值
         v.validate(&make_action(0.0, 0.0, 0.0, 1.0), None, false, &cfg);
-        // v2.4 模式：k_droop 变化不受限（由实时模块控制）
-        let (a, _violations) = v.validate(&make_action(100.0, 200.0, 0.0, 1.0), None, false, &cfg);
-        assert_eq!(a.k_droop, 200.0); // k_droop 未被 clamp
+        // v2.4 模式：k_droop 变化率不受限（ACT-02 由实时模块管理，跳过）
+        // P1-05 后：值域 clamp 仍按 ActionSpaceConfig.k_droop_max(=30) 生效（PRD [0,30]）
+        let (a, violations) = v.validate(&make_action(100.0, 200.0, 0.0, 1.0), None, false, &cfg);
+        assert_eq!(a.k_droop, 30.0); // 值域 clamp 至 k_droop_max=30
+        assert!(!violations.iter().any(|r| r.rule == "ACT-02")); // 变化率 clamp 被跳过
     }
 
     #[test]
