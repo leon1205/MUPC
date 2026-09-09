@@ -43,6 +43,13 @@ async fn switch_strategy_mode(
     State(state): State<Arc<AppState>>,
     Json(req): Json<StrategyModeSwitchRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // AI 引擎暂停（2026-09-09）：本地策略为唯一下发引擎，local_priority 不可切换——
+    // 置 false（AI 优先）无对象，置 true 又改变部署默认。暂停期一律拒绝写，GET 照常读当前值。
+    let info = state.ai_integrator.engine_status().await;
+    if !info.ai_engine_enabled {
+        tracing::warn!("AI 引擎暂停中，local_priority 不可切换（engine_status={}）", info.engine_status);
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     state
         .ai_integrator
         .set_local_priority(req.local_priority)

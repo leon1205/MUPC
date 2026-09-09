@@ -502,7 +502,10 @@ pub async fn initialize_all(
         ))
         .await;
 
-    ai_integrator.set_model_manager(ai_engine.clone()).await;
+    // AI 引擎暂停（平台目标调整 2026-09-09）：不注入 model_manager——set_model_manager 会把
+    // AiIntegrator.status 置 Ready，模型未加载时会导致 engine_status 谎报已启用。当前
+    // AiIntegrator.model_manager=None → engine_status 如实报 unloaded / ai_engine_enabled=false。
+    // 观测空间维度重构 + 恢复 load_models 后，在此恢复 set_model_manager 注入（届时 Ready 语义才正确）。
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
 

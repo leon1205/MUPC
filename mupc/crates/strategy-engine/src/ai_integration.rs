@@ -302,6 +302,9 @@ impl AiIntegrator {
     }
 
     /// 注入已创建的 ModelManager（启动编排器复用已加载的模型实例）
+    ///
+    /// ⚠️ 仅当 manager 已成功 load_models 后调用——本方法无条件将 status 置 Ready，
+    /// 模型未加载时调用会令 engine_status 谎报已启用（AI 暂停期勿注入，见 2026-09-09 调整）。
     pub async fn set_model_manager(&self, manager: Arc<ModelManager>) {
         *self.model_manager.write().await = Some(manager);
         *self.status.write().await = ModelStatus::Ready;
