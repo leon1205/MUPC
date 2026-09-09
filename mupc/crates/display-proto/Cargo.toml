@@ -1,0 +1,21 @@
+# 12-MUPC 本地显示终端 —— 跨进程数据通道契约单一真源（frame 协议类型 + DisplayConfig）
+#
+# 命名对齐：目录 crates/display-proto（无前缀，与 device-trait/plugin-loader 同风格），
+# lib target = mupc_display_proto（对齐设计 §5.1 表 `crates/display-proto`（`mupc_display_proto`））。
+# 依赖仅 serde/serde_json/thiserror（按设计 §5.1：不引入 serde_yaml / 重型服务依赖）。
+[package]
+name = "display-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "MUPC 本地显示终端跨进程帧协议类型 + DisplayConfig（12-MUPC 显示终端 Dev-B1）"
+
+[lib]
+name = "mupc_display_proto"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

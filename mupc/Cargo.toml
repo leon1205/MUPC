@@ -13,6 +13,7 @@ members = [
     "crates/iec61850-plugin",
     "crates/mqtt-plugin",
     "crates/device-trait",
+    "crates/display-proto",
     "crates/plugin-loader",
     "crates/rs485-plugin",
     "crates/mqtt-bridge",
