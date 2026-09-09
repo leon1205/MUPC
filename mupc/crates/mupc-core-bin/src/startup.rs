@@ -252,6 +252,11 @@ struct SouthSink {
     write_buffer: Arc<mupc_storage::WriteBuffer>,
     events: Arc<dyn mupc_storage::EventRepository>,
     sse: Arc<mupc_web_api::SsePushService>,
+    /// IEC104 服务器（审查 R2-A2：meter_grid 真值上送北向）。SouthSink 是 core-bin 类型，
+    /// mupc-southd 仅定义 StationSink trait——不引入 southd→gateway 反向依赖。
+    iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
+    /// grid 上送节流：meter_grid 最后广播时刻（1Hz 上界，见 broadcast_grid_iec104 注释）
+    grid_bcast_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl SouthSink {
@@ -260,12 +265,62 @@ impl SouthSink {
         write_buffer: Arc<mupc_storage::WriteBuffer>,
         events: Arc<dyn mupc_storage::EventRepository>,
         sse: Arc<mupc_web_api::SsePushService>,
+        iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
     ) -> Self {
         Self {
             ai_integrator,
             write_buffer,
             events,
             sse,
+            iec104,
+            grid_bcast_at: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 北向 IEC104 上送 meter_grid 遥测真值（审查 R2-A2，2026-09-09）。
+    ///
+    /// 上送量（固定 IOA 分配，**现场点表追认**）：1=active_power(kW)、2=reactive_power(kVAr)、
+    /// 3=voltage(V)、4=current(A)、5=cos_phi、6=frequency(Hz)。DataPackage.electrical
+    /// 字段逐个 `Option<f64>`，Some 才上送（meter_grid mapper 现全量填顶层量，防御保留）。
+    ///
+    /// 频率节流判断：southd scheduler 按站 interval_ms 排程，meter_grid 每轮 poll 成功即触发
+    /// on_grid_package 一次。config::validate 仅约束 meter_grid interval_ms>0 且 <5000
+    /// （DATA_FRESHNESS_MS），**未保证 >=1s**（现场可配如 500ms）→ 在此钳 1Hz 上界防
+    /// broadcast flood。生产样例 interval_ms=1000 每收即上送，不受节流影响。
+    async fn broadcast_grid_iec104(&self, pkg: &mupc_data_processing::DataPackage) {
+        let now = std::time::Instant::now();
+        let allowed = {
+            let mut last = self.grid_bcast_at.lock().unwrap();
+            match *last {
+                Some(t) if now.duration_since(t) < std::time::Duration::from_millis(1000) => false,
+                _ => {
+                    *last = Some(now);
+                    true
+                }
+            }
+        };
+        if !allowed {
+            return;
+        }
+        let el = &pkg.electrical;
+        // 固定 IOA 分配：1=有功(kW) 2=无功(kVAr) 3=电压(V) 4=电流(A) 5=功率因数 6=频率(Hz)
+        let points: [(&str, u32, Option<f64>); 6] = [
+            ("active_power", 1, el.active_power),
+            ("reactive_power", 2, el.reactive_power),
+            ("voltage", 3, el.voltage),
+            ("current", 4, el.current),
+            ("cos_phi", 5, el.cos_phi),
+            ("frequency", 6, el.frequency),
+        ];
+        for (name, ioa, val) in points {
+            if let Some(v) = val {
+                // 仿 pv/load 南向模拟上送循环：encode_telemetry_asdu(ioa, v as f32, cot=1)，
+                // 单点单 ASDU 各自 make_i_frame 广播（pv/load 同范式，I 帧序号由连接层维护）。
+                tracing::debug!(ioa, name, v, "IEC104 上送 meter_grid 真值");
+                let asdu = mupc_gateway::iec104::protocol::encode_telemetry_asdu(ioa, v as f32, 1);
+                let frame = mupc_gateway::iec104::Iec104Frame::make_i_frame(0, 0, &asdu);
+                self.iec104.broadcast_telemetry(frame).await;
+            }
         }
     }
 }
@@ -273,7 +328,12 @@ impl SouthSink {
 #[async_trait::async_trait]
 impl mupc_southd::scheduler::StationSink for SouthSink {
     async fn on_grid_package(&self, pkg: mupc_data_processing::DataPackage) {
-        self.ai_integrator.set_latest_data(pkg).await;
+        // 策略 phase 单写方（唯一 grid 源 south_stations.meter_grid，M-4 防双写方并存）。
+        self.ai_integrator.set_latest_data(pkg.clone()).await;
+        // 审查 R2-A2 (2026-09-09)：同包 meter_grid 真值上送 IEC104——调度主站不再只收
+        // pv/load 南向模拟固定假遥测。数据流接线在 startup 层（SouthSink 为 core-bin 内联
+        // 类型，见广播实现注释的依赖方向约束）。
+        self.broadcast_grid_iec104(&pkg).await;
     }
 
     async fn on_station_telemetry(
@@ -622,11 +682,18 @@ pub async fn initialize_all(
 
     // ── 9. IEC 104 网关 ──
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
+    // 审查 R2-A2 (2026-09-09)：北向监听地址/端口读 config.gateway 段（缺省 0.0.0.0:2404，
+    // 见 core_config.rs GatewayConfig::default——不再硬编码 2404）。
     let iec104_config = mupc_gateway::iec104::server::Iec104Config {
-        listen_addr: "0.0.0.0".to_string(),
-        listen_port: 2404,
+        listen_addr: config.gateway.listen_addr.clone(),
+        listen_port: config.gateway.listen_port,
         ..Default::default()
     };
+    tracing::info!(
+        "IEC 104 监听 {}:{}",
+        config.gateway.listen_addr,
+        config.gateway.listen_port
+    );
     let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
     let cmd_handler = Arc::new(StrategyCommandHandler {
         intercore: intercore.clone(),
@@ -665,6 +732,8 @@ pub async fn initialize_all(
             write_buffer.clone(),
             storage.events.clone(),
             sse_push.clone(),
+            // 审查 R2-A2：meter_grid 真值上送 IEC104 的接收句柄（已在步骤 9 创建）
+            iec104_server.clone(),
         ));
         // 每口 open 一次 Rs485PortBus：按 port 去重。open 失败口不入 map → 该口全站走
         // offline 事件隔离（§10.7 不阻断启动）。口单 poller、站级隔离由 scheduler 负责。
@@ -749,17 +818,23 @@ pub async fn initialize_all(
                                     tracing::debug!("遥测写入失败: {}", e);
                                 }
                             }
-                            // 北向上送：取有功功率作为示例（FIXME: 完整点表映射）
-                            if let Some(v) = pkg.electrical.active_power {
-                                ioa_seq = ioa_seq.wrapping_add(1);
-                                let asdu = mupc_gateway::iec104::protocol::encode_telemetry_asdu(
-                                    ioa_seq,
-                                    v as f32,
-                                    1,
-                                );
-                                let frame =
-                                    mupc_gateway::iec104::Iec104Frame::make_i_frame(0, 0, &asdu);
-                                g.broadcast_telemetry(frame).await;
+                            // 北向上送（仅无 grid 源兜底路径；审查 R2-A2）：grid_on 时 meter_grid
+                            // 真值已由 SouthSink 以固定 IOA 1..6 上送，此 pv/load 假遥测 ioa_seq
+                            // 亦自 1 递增 → 若仍上送会与真值 IOA 相撞（M-4 同款单写方语义，
+                            // grid 源在即南向模拟不覆盖北向）。取有功功率作为示例（FIXME: 完整点表映射）
+                            if !grid_on {
+                                if let Some(v) = pkg.electrical.active_power {
+                                    ioa_seq = ioa_seq.wrapping_add(1);
+                                    let asdu = mupc_gateway::iec104::protocol::encode_telemetry_asdu(
+                                        ioa_seq,
+                                        v as f32,
+                                        1,
+                                    );
+                                    let frame = mupc_gateway::iec104::Iec104Frame::make_i_frame(
+                                        0, 0, &asdu,
+                                    );
+                                    g.broadcast_telemetry(frame).await;
+                                }
                             }
                         }
                         Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),

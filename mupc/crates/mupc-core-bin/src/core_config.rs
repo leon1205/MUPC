@@ -31,6 +31,10 @@ pub struct CoreConfig {
     /// 策略 phase 由 pv/load 南向模拟兜底，部署行为不变。master_meter 段已删除收敛，S3b-1c）
     #[serde(default)]
     pub south_stations: mupc_southd::config::SouthStationsConfig,
+    /// IEC 104 网关配置（S2 §12.3 gateway 段；缺省 0.0.0.0:2404——未配置 gateway 段
+    /// 部署行为不变，仅端口不再硬编码 2404、可经 config 指定。审查 R2-A2）
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
 
 /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled——未配置 io 段部署行为不变）
@@ -259,6 +263,28 @@ pub struct StrategyConfig {
     pub tai_config_file: String,
 }
 
+/// IEC 104 网关配置（S2 §12.3 gateway 段；审查 R2-A2：北向监听地址/端口读 config，
+/// 不再于 startup 硬编码 2404）。手动实现 `Default`（不走 derive），使 `#[serde(default)]`
+/// 缺省整段配置时落到下方默认函数（0.0.0.0:2404，与历史硬编码一致）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayConfig {
+    /// IEC 104 监听地址，默认 0.0.0.0
+    #[serde(default = "default_gateway_addr")]
+    pub listen_addr: String,
+    /// IEC 104 监听端口，默认 2404
+    #[serde(default = "default_gateway_port")]
+    pub listen_port: u16,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: default_gateway_addr(),
+            listen_port: default_gateway_port(),
+        }
+    }
+}
+
 // ── 默认值函数 ──
 
 fn default_log_level() -> String {
@@ -361,6 +387,15 @@ fn default_listen_addr() -> String {
 
 fn default_enable_https() -> bool {
     false
+}
+
+// IEC 104 网关段（S2 §12.3 gateway）默认值
+fn default_gateway_addr() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_gateway_port() -> u16 {
+    2404
 }
 
 fn default_model_dir() -> PathBuf {
@@ -650,6 +685,9 @@ plugins: {}
         assert_eq!(config.intercore.modbus_rtu.response_timeout_ms, 200);
         assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
         assert!(config.ai_engine.local_priority, "本地优先应为部署默认");
+        // 未配置 gateway 段时缺省 0.0.0.0:2404（审查 R2-A2：端口读 config 且向后兼容）
+        assert_eq!(config.gateway.listen_addr, "0.0.0.0");
+        assert_eq!(config.gateway.listen_port, 2404);
     }
 
     #[test]
@@ -692,6 +730,7 @@ plugins: {}
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
+            gateway: GatewayConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -736,6 +775,7 @@ plugins: {}
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
+            gateway: GatewayConfig::default(),
         };
         assert!(config.validate().is_err());
     }
