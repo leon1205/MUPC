@@ -219,9 +219,9 @@ impl AiIntegrator {
             tracing::debug!("无遥测数据，跳过兜底策略");
             return Ok(());
         };
-        // S3b-1b SOC 双源裁决（04 §2.11.1）：evaluate 前解析 battery.soc 为确定源——
-        // BMS 站 fresh 优先覆盖；否则回落沿用 latest_data 已保留 soc（冻结值，非实时核间，
-        // 详见 apply_soc_source）。只改 battery 字段，不动 last_data_ts 闸门（C-2）。
+        // SOC 双源裁决（04 §2.11.1 R-C 实时回落，S3b-1d）：BMS 站 fresh → 优先覆盖；
+        // BMS 超期/无 → 无条件活读核间 latest_soc（每 dispatch 周期实时）；双源皆失保留原值。
+        // 只改 battery 字段，不动 last_data_ts 闸门（C-2）。详见 apply_soc_source。
         self.apply_soc_source(&mut data).await;
 
         // 台区储能治理策略：分相 P/Q 经核间下发实时控制模块（best-effort，失败仅告警）
