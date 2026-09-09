@@ -55,6 +55,11 @@ pub struct AiIntegrator {
     /// [f64;3]），启动侧注入 storage 落库闭包；None=不落库。同步闭包内由 tokio::spawn 异步落库
     /// （避免 async trait/依赖）。
     decision_sink: RwLock<Option<Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>>>,
+    /// 节流期空耗防护（审查 R1-B6，2026-09-09）：上次实际下发的分相 P/Q，值不变跳过重发。
+    /// TaiStorage evaluate 命中 60s 节流时返回缓存 cmd，而 run_fallback_strategies 每 dispatch
+    /// 拍（1s）仍对相同指令重复 send_tai_command——空耗 RS485 带宽并放大在线/离线抖动窗口。
+    /// std Mutex（非 tokio——纯同步值比对，无跨 await 持有）。
+    last_sent_tai: std::sync::Mutex<Option<([f64; 3], [f64; 3])>>,
 }
 
 impl AiIntegrator {
@@ -81,6 +86,7 @@ impl AiIntegrator {
             local_priority: RwLock::new(false),
             validator: RwLock::new(None),
             decision_sink: RwLock::new(None),
+            last_sent_tai: std::sync::Mutex::new(None),
         }
     }
 
@@ -283,6 +289,28 @@ impl AiIntegrator {
                 Ok(cmd) => match (cmd.phase_p_set, cmd.phase_q_set) {
                     (Some(p), Some(q)) => {
                         if let Some(ref client) = self.intercore_client {
+                            // 审查 R1-B6 2026-09-09：TaiStorage evaluate 命中 60s 节流（返回缓存
+                            // cmd）时分相值必与上拍相同——跳过重发，消除每 dispatch 拍对相同指令
+                            // 的 RS485 空耗与抖动窗口放大。值不变不 send、不触发 decision_sink。
+                            // 短锁块内完成比对+更新，guard 出块即释放——MutexGuard 非 Send，必须
+                            // 在块内结束（不跨 await 持有），否则破坏 run_fallback_strategies 经
+                            // tokio::spawn 驱动的 Send 约束。
+                            let is_same = {
+                                let mut last_sent = self
+                                    .last_sent_tai
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if *last_sent == Some((p, q)) {
+                                    true
+                                } else {
+                                    *last_sent = Some((p, q));
+                                    false
+                                }
+                            };
+                            if is_same {
+                                tracing::debug!("分相指令与上拍相同（节流期），跳过重发");
+                                return Ok(());
+                            }
                             if let Err(e) = client.send_tai_command(p, q, "fallback").await {
                                 tracing::warn!("台区储能分相指令下发失败: {:?}", e);
                             } else {
