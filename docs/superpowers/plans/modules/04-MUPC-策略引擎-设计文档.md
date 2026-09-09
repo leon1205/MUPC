@@ -921,7 +921,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 
 本地优先模式（`local_priority=true`）：
 - `dispatch_ai_decision` 开头判断 `local_priority`，为 true 时直接走本地台区储能治理策略（分相 P/Q 经核间下发）
-- AI 引擎仍加载、仍运行 `full_decision_cycle()`，但结果仅作旁路参考（debug 日志），**不下发核间指令**
+- AI 引擎已暂停（平台目标调整 2026-09-09 修正本句）：模型不加载、不再运行 `full_decision_cycle()` 旁路参考——`dispatch_ai_decision` 在 `local_priority=true` 下直达本地台区储能治理下发（上方 "AI 失效降级本地兜底" 表述现为默认路径）；AI 决策分支代码保留为框架，观测空间数据维度重构 + 模型恢复加载后启用
 - 通过 YAML 配置 `ai_engine.local_priority` 或 Web API `/api/v1/strategy-mode` 运行时切换
 ```
 
