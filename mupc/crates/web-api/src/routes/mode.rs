@@ -9,6 +9,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::audit::WebAuditEntry;
+use crate::routes::ai::auth::RequireRole;
 use crate::AppState;
 use mupc_ai_engine::mode_selector::{RunningMode, SwitchSource};
 
@@ -50,11 +52,36 @@ async fn get_mode(State(state): State<Arc<AppState>>) -> Json<ModeStatusResponse
     })
 }
 
+/// 模式切换写操作审计留痕，携带已验证 session 操作者身份（仿 interlock T8）。
+///
+/// 角色未分层（技术债 U-01）：`RequireRole::username()` 即已验证 session 用户名
+/// （当前仅 admin 可登，恒为 "admin"）；真实 RBAC 落库后此处为真实操作者。
+/// 审计写入失败仅告警，不阻断模式切换结果返回。
+async fn audit_mode_switch(state: &Arc<AppState>, operator: &str) {
+    let entry = WebAuditEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now(),
+        user: operator.to_string(),
+        role: "admin".to_string(),
+        action: "mode_switch".to_string(),
+        resource: "/api/v1/mode".to_string(),
+        method: "PUT".to_string(),
+        status_code: 200,
+        ip_address: "127.0.0.1".to_string(),
+        user_agent: String::new(),
+    };
+    if let Err(e) = state.audit_logger.log(entry).await {
+        tracing::warn!("模式切换审计留痕失败: {}", e);
+    }
+}
+
 /// PUT /api/v1/mode — 切换运行场景
 async fn switch_mode(
+    op: RequireRole,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwitchModeRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let operator = op.username().unwrap_or("admin(session)");
     let new_mode = mupc_ai_engine::parse_mode_name(&req.mode).ok_or(StatusCode::BAD_REQUEST)?;
 
     let previous = state.mode_selector.read().await.current();
@@ -66,7 +93,7 @@ async fn switch_mode(
         .switch(
             new_mode,
             SwitchSource::LocalWeb {
-                username: "operator".to_string(),
+                username: operator.to_string(),
             },
         )
         .await
@@ -76,12 +103,7 @@ async fn switch_mode(
         })?;
 
     let now = Utc::now().to_rfc3339();
-    state.audit_logger.log_action(
-        "operator",
-        "mode_switch",
-        &format!("{} -> {}", previous, new_mode),
-        "ok",
-    );
+    audit_mode_switch(&state, operator).await;
 
     // SSE 推送模式变更
     let _ = state.sse_push.push_mode_switch(previous, new_mode);
