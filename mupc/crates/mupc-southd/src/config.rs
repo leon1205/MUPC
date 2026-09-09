@@ -105,6 +105,7 @@ impl SouthStationsConfig {
     /// battery 至多一站（BMS SOC 单源约束，AiIntegrator bms_soc 单槽——多站抢写最后写入者胜）；
     /// port 非空；slave 1..=247；interval_ms>0；baud_rate 1..=4000000；
     /// meter_grid/battery interval_ms < DATA_FRESHNESS_MS（BMS SOC fresh 窗口 5s）；
+    /// meter_grid regs 完整性（缺相量块 p/q/pf/u/i、addr>0、区间不重叠、count≥6、块名唯一）；
     /// 同口 baud 一致（见下）。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: Vec<&str> = Vec::new();
@@ -181,6 +182,36 @@ impl SouthStationsConfig {
                             s.id, required
                         ));
                     }
+                }
+                // count 语义：相量块须 count>=6（3 相×2 寄存器三相连续，mapper decode_phase_block
+                // 硬性 ≥6）；p_total（可选）count>=2。count 配错（漏配→default 2，或 4）时
+                // name/addr/重叠都过、启动绿灯，但 scheduler 每轮只读 blk.count → 读回 <6 →
+                // decode None → meter_grid 永久 offline（phase 断供），只在运行期暴露；配置期须拦截。
+                for b in &s.regs {
+                    let is_phase = ["p", "q", "pf", "u", "i"].contains(&b.name.as_str());
+                    if is_phase && b.count < 6 {
+                        return Err(format!(
+                            "south_stations: meter_grid 站 {} 相量块 {} count={} 须 ≥ 6（3 相×2 寄存器）",
+                            s.id, b.name, b.count
+                        ));
+                    }
+                    if b.name == "p_total" && b.count < 2 {
+                        return Err(format!(
+                            "south_stations: meter_grid 站 {} p_total 块 count={} 须 ≥ 2",
+                            s.id, b.count
+                        ));
+                    }
+                }
+                // 块名唯一：mapper 按 name 取首块（`.find`），异 addr 同名不重叠时后者静默死配置。
+                let mut names: Vec<&str> = Vec::new();
+                for b in &s.regs {
+                    if names.contains(&b.name.as_str()) {
+                        return Err(format!(
+                            "south_stations: meter_grid 站 {} regs 块名重复: {}（mapper 按 name 取首块，后者静默失效）",
+                            s.id, b.name
+                        ));
+                    }
+                    names.push(&b.name);
                 }
                 // addr>0 + 区间不重叠（含 p_total；width 取块 count，至少 1）
                 let mut seen: Vec<(&str, u16, u32)> = Vec::new();
@@ -599,6 +630,56 @@ south_stations:
         assert!(
             w.south_stations.validate().is_ok(),
             "完整 meter_grid regs 应通过: {:?}",
+            w.south_stations.validate()
+        );
+    }
+
+    /// S3b-1c：相量块 p count:2（<6，count 语义错）→ Err 含 count（name/addr/重叠均过，
+    /// 仅 count 不够；mapper decode_phase_block 硬性 ≥6，漏配 default 2 → 读回 <6 → 永久 offline）
+    #[test]
+    fn validate_rejects_meter_grid_phase_block_count_lt_6() {
+        let regs = r#"        - { name: p, addr: 0x1000, format: float32, count: 2 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("count") && err.contains("p"),
+            "相量块 p count=2 应报 count 须 ≥6，实际: {err}"
+        );
+    }
+
+    /// S3b-1c：同块名重复（异 addr 不重叠也死配）→ Err 含"块名重复"（mapper `.find` 取首块，后者静默失效）
+    #[test]
+    fn validate_rejects_meter_grid_duplicate_block_name() {
+        let regs = r#"        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: p, addr: 0x1006, format: float32, count: 6 }
+        - { name: q, addr: 0x100C, format: float32, count: 6 }
+        - { name: pf, addr: 0x1012, format: float32, count: 6 }
+        - { name: u, addr: 0x1018, format: float32, count: 6 }
+        - { name: i, addr: 0x101E, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("块名重复") && err.contains("p"),
+            "两块同名 p 应报块名重复，实际: {err}"
+        );
+    }
+
+    /// S3b-1c：完整 p/q/pf/u/i（无 p_total，count 各 6）→ Ok——p_total 可选正向
+    #[test]
+    fn validate_accepts_meter_grid_without_p_total() {
+        let regs = r#"        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        assert!(
+            w.south_stations.validate().is_ok(),
+            "无 p_total 的完整 meter_grid regs 应通过（p_total 可选）: {:?}",
             w.south_stations.validate()
         );
     }
