@@ -16,7 +16,7 @@ use mupc_system_monitor::MetricCollector;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::core_config::{CoreConfig, MasterMeterConfig, MeterRegBlock};
+use crate::core_config::CoreConfig;
 
 /// 启动上下文：持有所有已初始化的子系统句柄
 ///
@@ -152,115 +152,6 @@ fn create_rs485_device(
     }
 }
 
-/// 台区总表设备（U-26：策略 phase 数据源）。handler=modbus，按配置读取分相量保持寄存器。
-fn create_master_meter_device(cfg: &MasterMeterConfig) -> Option<Arc<rs485_plugin::device::Rs485Device>> {
-    let config = rs485_plugin::config::Config {
-        port: cfg.serial_port.clone(),
-        baud_rate: cfg.baud_rate,
-        device_addr: cfg.slave_addr,
-        ..Default::default()
-    };
-    let handler = rs485_plugin::handlers::ProtocolHandlerRegistry::get("modbus", &config)?;
-    let device = rs485_plugin::device::Rs485Device::new(
-        "master_meter".to_string(),
-        "modbus".to_string(),
-        config,
-        handler,
-    );
-    match device.open() {
-        Ok(()) => Some(Arc::new(device)),
-        Err(e) => {
-            tracing::warn!("台区总表串口打开失败: {}", e);
-            None
-        }
-    }
-}
-
-/// 读三相量块（A/B/C 连续，每相 2 寄存器）
-fn read_meter_phases(
-    meter: &rs485_plugin::device::Rs485Device,
-    b: &MeterRegBlock,
-) -> Option<[f64; 3]> {
-    let r = meter.read_holding_registers(b.addr, 6).ok()?;
-    if r.len() < 6 {
-        return None;
-    }
-    Some([
-        mupc_data_processing::meter_regs::decode_regs(&r[0..2], b.format, b.scale),
-        mupc_data_processing::meter_regs::decode_regs(&r[2..4], b.format, b.scale),
-        mupc_data_processing::meter_regs::decode_regs(&r[4..6], b.format, b.scale),
-    ])
-}
-
-/// 读台区总表并组装含分相的 DataPackage（分相块任一块读失败返回 None → 沿用旧数据；
-/// p_total 独立块失败仅降级聚合，不整周期失败）
-fn read_master_meter(
-    meter: &rs485_plugin::device::Rs485Device,
-    cfg: &MasterMeterConfig,
-) -> Option<mupc_data_processing::DataPackage> {
-    let rm = &cfg.reg_map;
-    let p = read_meter_phases(meter, &rm.p)?;
-    let q = read_meter_phases(meter, &rm.q)?;
-    let pf = read_meter_phases(meter, &rm.pf)?;
-    let u = read_meter_phases(meter, &rm.u)?;
-    let i_mag = read_meter_phases(meter, &rm.i)?;
-    // P2-1: p_total 独立块读失败/缺省时降级为分相有功和（best-effort，不整周期失败）。
-    // 权威口径：控制层 meter.p 恒用 Σphase.active_power；顶层 electrical.active_power 仅供遥测/展示。
-    let p_total = match &rm.p_total {
-        Some(b) => match meter.read_holding_registers(b.addr, 2) {
-            Ok(r) if r.len() >= 2 => {
-                mupc_data_processing::meter_regs::decode_regs(&r[..2], b.format, b.scale)
-            }
-            Ok(_) => {
-                tracing::warn!("总表 p_total 寄存器长度不足，降级为分相有功和");
-                p.iter().sum()
-            }
-            Err(e) => {
-                tracing::warn!("总表 p_total 读取失败（{}），降级为分相有功和", e);
-                p.iter().sum()
-            }
-        },
-        None => p.iter().sum(),
-    };
-    // 电流方向由分相有功符号承载（表计电流多给幅值；策略差模判据需带符号电流）。
-    // P2-3: p≈0（或=0）相方向取正（显式 >= 而非 signum——signum(0)=0 会丢幅值）
-    let i = [
-        if p[0] >= 0.0 { i_mag[0].abs() } else { -i_mag[0].abs() },
-        if p[1] >= 0.0 { i_mag[1].abs() } else { -i_mag[1].abs() },
-        if p[2] >= 0.0 { i_mag[2].abs() } else { -i_mag[2].abs() },
-    ];
-    let phase = mupc_data_processing::telemetry::PhaseElectricalData {
-        voltage: [Some(u[0]), Some(u[1]), Some(u[2])],
-        current: [Some(i[0]), Some(i[1]), Some(i[2])],
-        active_power: [Some(p[0]), Some(p[1]), Some(p[2])],
-        reactive_power: [Some(q[0]), Some(q[1]), Some(q[2])],
-        cos_phi: [Some(pf[0]), Some(pf[1]), Some(pf[2])],
-    };
-    Some(mupc_data_processing::DataPackage {
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        electrical: mupc_data_processing::ElectricalData {
-            voltage: Some(u[0]),
-            current: Some(i_mag[0].abs()),
-            active_power: Some(p_total),
-            reactive_power: Some(q.iter().sum()),
-            cos_phi: Some(pf[0]),
-            frequency: Some(50.0),
-            phase: Some(phase),
-        },
-        battery: mupc_data_processing::BatteryData {
-            soc: None,
-            soh: None,
-            temperature: None,
-        },
-        device_status: mupc_data_processing::DeviceStatus {
-            inverter_status: mupc_data_processing::InverterStatus::Running,
-            pv_power: None,
-            load_power: None,
-            ev_charger_power: None,
-        },
-    })
-}
-
 /// DataFrame → DataPackage（FIXME: 固定值代替 Modbus 寄存器映射，实际应解析 frame.data）
 fn dataframe_to_datapackage(frame: &device_trait::DataFrame) -> mupc_data_processing::DataPackage {
     mupc_data_processing::DataPackage {
@@ -357,8 +248,8 @@ fn datapackage_to_telemetry_points(
 ///
 /// 分流语义（southd scheduler 已按 role 分流，单写方口径见 southd 模块头）：
 /// - 含 meter_grid 站时，grid 遥测 → `AiIntegrator::set_latest_data`（策略 phase 唯一写方；
-///   与迁移期 legacy 总表 task 经装配处二选一互斥，绝不并存第二写方）。south_stations 仅配
-///   非 grid 站（B2）时本 sink 不触发 on_grid_package，AiIntegrator 由 pv/load 南向模拟兜底。
+///   master_meter 段已删除收敛，south_stations.meter_grid 是唯一 grid 源，绝不并存第二写方）。
+///   仅配非 grid 站（B2）时本 sink 不触发 on_grid_package，AiIntegrator 由 pv/load 南向模拟兜底。
 /// - 非 grid 遥测点（is_event=false）→ WriteBuffer 落库（telemetry）。
 /// - offline/online 状态事件（is_event=true，metric=offline/online）→ storage.events 落库
 ///   + SSE system alert。
@@ -718,57 +609,19 @@ pub async fn initialize_all(
     }));
     coord.register_service("gateway", ServiceStatus::Running);
 
-    // ── S3 §10.3 / U-26：策略 phase 源装配（迁移期二选一；core_config validate R-H 已保证
-    // master_meter.enabled 与 south_stations.meter_grid 不同时出现）──
-    //   A. config.master_meter.enabled → legacy 硬编码总表 task（迁移期旧路径；open 成功才视为
-    //      grid 源在线——P1-2：enabled 但 open 失败回退 pv/load 南向模拟兜底）。
-    //   B. south_stations.stations 非空（master 未 enabled 已由 A 拦截）→ southd scheduler：
-    //      非 grid 站 telemetry/状态事件经 SouthSink 落库 + SSE。
-    //      B1. 含 meter_grid → SouthSink.on_grid_package 单写 AiIntegrator（grid_on=true，
-    //          某站 offline 由 scheduler 出事件，pv/load 不兜底 set_latest_data——保持
-    //          "grid 单写方"，真实数据新鲜度由 AiIntegrator 5s 闸门判断）。
-    //      B2. 仅非 grid 站（无 meter_grid）→ southd 仍装配采 battery/hvac/fire telemetry/
-    //          状态事件（无 on_grid_package 调用），grid_on=false → pv/load 南向模拟继续
-    //          set_latest_data 兜底测量（无 grid 源时 AiIntegrator 不断供）。
+    // ── S3 §10.3：策略 phase 源装配（master_meter 段已删除收敛，2026-09-09 S3b-1c）──
+    //   B. south_stations.stations 非空 → southd scheduler：grid 单写 AiIntegrator。
+    //      B1. 含 meter_grid → grid_on=true（SouthSink.on_grid_package 单写；offline 由事件 +
+    //          AiIntegrator 5s 闸门判断，pv/load 不兜底 set_latest_data——保持 "grid 单写方"）。
+    //      B2. 仅非 grid 站（无 meter_grid）→ grid_on=false → pv/load 南向模拟兜底测量（无 grid
+    //          源时 AiIntegrator 不断供）。
+    //   C. 无 stations → grid_on=false → pv/load 南向模拟兜底。
     // grid_on = 策略 phase 源可用（决定下方 pv/load 南向模拟 task 是否 set_latest_data；
     // M-4 防双写方并存：grid 源在即南向模拟不覆盖；无 grid 源则南向模拟兜底测量）。
     let mut grid_on = false;
-    if config.master_meter.enabled {
-        // 迁移期：master_meter 启用时走 legacy 硬编码总表 task（grid 源）。若同时配置了
-        // south_stations 非 grid 站，scheduler 不装配（A 分支优先），这些站本 S3a 不被采集——
-        // 迁移期混合配置的已知边界（core_config 允许，装配不启），显式提示避免静默。
-        if !config.south_stations.stations.is_empty() {
-            tracing::warn!(
-                "迁移期 master_meter 启用：south_stations 配置的 {} 个非 grid 站暂不采集（scheduler 未装配；收敛后删除 master_meter 段并启用 south_stations）",
-                config.south_stations.stations.len()
-            );
-        }
-        // A. 迁移期 legacy 总表 task（read_master_meter/read_meter_phases 语义沿用）
-        let master_meter = create_master_meter_device(&config.master_meter);
-        grid_on = master_meter.is_some();
-        match master_meter {
-            Some(meter) => {
-                tracing::info!("台区总表在线（迁移期 legacy 路径）：策略测量以总表分相数据为准");
-                let ai_int_meter = ai_integrator.clone();
-                let cfg_m = config.master_meter.clone();
-                guard.0.push(tokio::spawn(async move {
-                    let interval = std::time::Duration::from_millis(cfg_m.read_interval_ms);
-                    loop {
-                        tokio::time::sleep(interval).await;
-                        if let Some(pkg) = read_master_meter(&meter, &cfg_m) {
-                            ai_int_meter.set_latest_data(pkg).await;
-                            tracing::debug!("总表分相数据已注入策略");
-                        }
-                    }
-                }));
-            }
-            None => tracing::warn!(
-                "台区总表不可用（enabled 但 open 失败），策略测量回退 pv/load 南向模拟"
-            ),
-        }
-    } else if !config.south_stations.stations.is_empty() {
-        // B. southd 路径（master 未 enabled 已由 A 拦截；stations 非空即装配——非 grid 站
-        //    battery/hvac/fire telemetry/状态事件也必须采集落库，不得因缺 grid 源整体不启）。
+    if !config.south_stations.stations.is_empty() {
+        // B. southd 路径（stations 非空即装配——非 grid 站 battery/hvac/fire telemetry/状态
+        //    事件也必须采集落库，不得因缺 grid 源整体不启）。
         if config.south_stations.grid_station().is_none() {
             tracing::warn!(
                 "south_stations 配置了 {} 个站但无 meter_grid：非 grid 站 telemetry 将采集，策略 phase 由南向模拟/无 grid 源兜底（S3b 语义点表前）",
@@ -834,7 +687,7 @@ pub async fn initialize_all(
         );
     } else {
         tracing::info!(
-            "无 grid 策略源（master_meter 未启用且 south_stations 无 meter_grid），策略测量由 pv/load 南向模拟兜底"
+            "无 south_stations 站（无 meter_grid）：策略 phase 由 pv/load 南向模拟兜底"
         );
     }
 
@@ -845,7 +698,7 @@ pub async fn initialize_all(
         let rt_source = ai_engine.realtime_source();
         let ai_int = ai_integrator.clone();
         guard.0.push(tokio::spawn(async move {
-            let grid_on = grid_on; // grid 策略源在时（legacy 总表/southd）由它提供，南向模拟不覆盖
+            let grid_on = grid_on; // grid 策略源在时（southd 含 meter_grid）由它提供，南向模拟不覆盖
             // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
             let mut ioa_seq = 0u32;
             loop {
@@ -856,7 +709,7 @@ pub async fn initialize_all(
                             let pkg = dataframe_to_datapackage(&frame);
                             // 注入实时数据到 AI 融合引擎（供 fuse 使用）
                             *rt_source.write().await = Some(datapackage_to_realtime_data(&pkg));
-                            // 注入遥测到 AiIntegrator（grid_on：legacy 总表/southd grid 策略源在，
+                            // 注入遥测到 AiIntegrator（grid_on：southd meter_grid 策略源在，
                             // 南向模拟不覆盖——M-4 防双写；无 grid 源时南向模拟兜底测量）
                             if !grid_on {
                                 ai_int.set_latest_data(pkg.clone()).await;
