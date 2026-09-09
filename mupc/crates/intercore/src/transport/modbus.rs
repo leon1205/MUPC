@@ -12,7 +12,7 @@
 //! 本模块以 [`fold_tm`] 折叠为单一 `MupcError`。
 use crate::pcs::*;
 use crate::tcp_server::DualParamCommand;
-use crate::transport::IntercoreTransport;
+use crate::transport::{IntercoreTransport, ThreePhaseRead};
 use async_trait::async_trait;
 use mupc_common::{ErrorCode, MupcError};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -145,6 +145,54 @@ fn decode_run_state(word: u16) -> Option<u16> {
     } else {
         None
     }
+}
+
+/// 3 区 三相展示输入寄存器（显示采集，协议 V1.3 / 12-设计文档 §4.1 点表）：三相输出电流
+/// A/B/C = 1022-1024（Int16 ×0.1 A）、三相输出有功 A/B/C = 1029-1031（Int16 ×0.1 kW）、
+/// 设备总有功 = 1032（Int16 ×0.1 kW）。与 SOC(1010)/RUN_STATE(1013) 同 FC04 读 3 区。
+/// ⚠️ 依任务铁律本 block 仅改 transport 三文件：常量按 12-设计文档 §4.1 命名但落于本模块
+/// （pcs.rs 提公有 `REG_*` 增补留待后续块/上层需要时再做，此处消费方仅有本 read_three_phase）。
+const REG_I_A: u16 = 1022;
+const REG_P_A: u16 = 1029;
+const REG_P_TOTAL: u16 = 1032;
+/// 三相电流/有功统一量纲（0.1）
+const SCALE_3PH: f64 = 0.1;
+
+/// 解码一段三相输入字（1022-1024 电流 / 1029-1031 有功）为工程值数组：每字经
+/// [`from_pcs_reg`] 回解有符号 i16 → × [`SCALE_3PH`]。段长 < 3（空/不足，坏帧）→ None。
+fn decode_3phase_array(words: &[u16]) -> Option<[f64; 3]> {
+    if words.len() < 3 {
+        return None;
+    }
+    Some([
+        from_pcs_reg(words[0]) * SCALE_3PH,
+        from_pcs_reg(words[1]) * SCALE_3PH,
+        from_pcs_reg(words[2]) * SCALE_3PH,
+    ])
+}
+
+/// 组合两段 FC04 读结果（电流段 1022 起 3 字、有功+总段 1029 起 4 字）→ [`ThreePhaseRead`]。
+/// 纯函数（无 IO）便于单测。**点级独立降级**（12-设计文档 §3.4 F5.5）：单段失败只置该段
+/// `None`，成功段照常返回；两段皆空 → None（整体读失败）。
+fn compose_three_phase(i_words: Option<Vec<u16>>, p_words: Option<Vec<u16>>) -> Option<ThreePhaseRead> {
+    let i_phase = i_words.as_deref().and_then(decode_3phase_array);
+    // 有功+总段 4 字：前 3 相 + 第 4 字(1032) 设备总有功（段长 <4 时 p_total=None）
+    let p_phase = p_words.as_deref().and_then(decode_3phase_array);
+    let p_total = p_words.as_deref().and_then(|w| {
+        if w.len() < 4 {
+            None
+        } else {
+            Some(from_pcs_reg(w[3]) * SCALE_3PH)
+        }
+    });
+    if i_phase.is_none() && p_phase.is_none() && p_total.is_none() {
+        return None;
+    }
+    Some(ThreePhaseRead {
+        i_phase,
+        p_phase,
+        p_total,
+    })
 }
 
 impl ModbusRtuTransport {
@@ -506,6 +554,19 @@ impl IntercoreTransport for ModbusRtuTransport {
         }
     }
 
+    /// 三相展示读数：FC04 **两段连续读**——电流段 1022 起 3 字、有功+总段 1029 起 4 字
+    /// （12-设计文档 §4.1：1025-1028 为表中未命名寄存器，不赌整段 1022..=1032 是否实现，
+    /// 保守按点表连续子段两笔读）。持 [`Self::bus`] 锁与并发下行/心跳事务在物理线路上
+    /// 串行（W3）；成败副作用经 [`Self::read_input`] 维护在线/离线。
+    /// 返回已按 0.1 量纲缩放的工程值（A/kW，正放负充）；两段皆失败 → None。
+    async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
+        let _bus_guard = self.bus.lock().await;
+        let i_words = self.read_input(REG_I_A, 3).await.ok();
+        // 段长 = REG_P_TOTAL - REG_P_A + 1 = 4（读 1029..=1032 连续 4 字）
+        let p_words = self.read_input(REG_P_A, REG_P_TOTAL - REG_P_A + 1).await.ok();
+        compose_three_phase(i_words, p_words)
+    }
+
     /// 停机原语：写 REG_START_STOP=0（PCS 停机）。持有 bus 锁与并发下行序列在物理线路上串行
     /// （W3 半双工互斥）；成功后复位 started=false + mode=0xFF（release 后 ensure_mode/ensure_
     /// started 强制重写 REG_MODE/500=1）。**不设/不清 stopped_latched**（C-1：置位由触发沿经
@@ -706,5 +767,55 @@ mod tests {
             assert!(!*t.started.read().await);
             assert!(!*t.connected.read().await);
         });
+    }
+
+    #[test]
+    fn test_register_layout_three_phase() {
+        // 两段 FC04 布局自洽：电流段 1022 起 3 字（1022-1024）；有功+总段 1029 起 4 字
+        // （1029-1031 三相 + 1032 总有功），中间 1025-1028 未命名寄存器不赌整段读（§4.1）
+        assert_eq!(REG_P_TOTAL, REG_P_A + 3, "有功段长度 4 须覆盖 1032 总有功");
+        assert_eq!(REG_I_A + 2, 1024);
+        assert_eq!(REG_P_A, REG_I_A + 7);
+    }
+
+    #[test]
+    fn test_decode_3phase_array_scales_and_sign() {
+        // 原始 Int16 ×0.1 → 工程值；负值（充电方向）保留符号；段长 <3（坏帧/空）→ None
+        let words = [to_pcs_reg(220.0), to_pcs_reg(330.0), to_pcs_reg(-150.0)];
+        assert_eq!(decode_3phase_array(&words), Some([22.0, 33.0, -15.0]));
+        assert_eq!(decode_3phase_array(&[]), None, "空段应判无效");
+        assert_eq!(decode_3phase_array(&[to_pcs_reg(1.0)]), None, "不足 3 字应判无效");
+        assert_eq!(decode_3phase_array(&[to_pcs_reg(1.0), to_pcs_reg(2.0)]), None);
+    }
+
+    #[test]
+    fn test_compose_three_phase_full() {
+        // 电流段 3 字 + 有功/总段 4 字 → 全字段；第 4 字(1032) 映射设备总有功
+        let i_words = Some(vec![to_pcs_reg(220.0), to_pcs_reg(330.0), to_pcs_reg(-150.0)]);
+        let p_words = Some(vec![to_pcs_reg(1000.0), to_pcs_reg(2000.0), to_pcs_reg(-3000.0), to_pcs_reg(3610.0)]);
+        let r = compose_three_phase(i_words, p_words);
+        let r = r.expect("两段皆成功应返回 Some");
+        assert_eq!(r.i_phase, Some([22.0, 33.0, -15.0]));
+        assert_eq!(r.p_phase, Some([100.0, 200.0, -300.0]));
+        assert_eq!(r.p_total, Some(361.0));
+    }
+
+    #[test]
+    fn test_compose_three_phase_point_level_degradation() {
+        // F5.5 点级独立降级：电流段失败（None）时，有功+总段成功仍返回；两段皆失败 → None
+        let p_words = Some(vec![to_pcs_reg(1000.0), to_pcs_reg(2000.0), to_pcs_reg(3000.0), to_pcs_reg(6000.0)]);
+        let r = compose_three_phase(None, p_words.clone()).expect("有功段成功应返回 Some");
+        assert_eq!(r.i_phase, None, "电流段失败只清该段");
+        assert_eq!(r.p_phase, Some([100.0, 200.0, 300.0]));
+        assert_eq!(r.p_total, Some(600.0));
+
+        // 有功+总段不足 4 字 → p_total=None，但三相 p_phase 仍保留（4 字段中前 3 可用）
+        let short_p = Some(vec![to_pcs_reg(1000.0), to_pcs_reg(2000.0), to_pcs_reg(3000.0)]);
+        let r2 = compose_three_phase(Some(vec![to_pcs_reg(220.0), to_pcs_reg(220.0), to_pcs_reg(220.0)]), short_p)
+            .expect("两段均有读数应返回 Some");
+        assert_eq!(r2.p_phase, Some([100.0, 200.0, 300.0]));
+        assert_eq!(r2.p_total, None, "第 4 字缺失 → 总有功 None");
+
+        assert_eq!(compose_three_phase(None, None), None, "两段皆失败 → 整体 None");
     }
 }

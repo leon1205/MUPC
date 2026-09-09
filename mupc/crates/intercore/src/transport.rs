@@ -8,6 +8,25 @@ pub mod tcp;
 use crate::protocol::{FrameType as IntercoreFrameType, IntercoreFrame};
 use crate::tcp_server::{ControlCmdPayloadV2, ControlCmdPayloadV3, DualParamCommand};
 
+/// 三相展示读数（PCS 3 区输入寄存器 1022-1032 解码结果）。
+///
+/// intercore **自有类型**，与 display-proto 解耦（12-本地显示终端-设计文档 §4.1：intercore
+/// 不得依赖 display-proto，上层 DisplayDataProvider 再转 display 域类型/打 FieldFlag）。
+/// 字段已按 0.1 量纲缩放为工程值：电流 A / 有功 kW（原始 Int16 × 0.1，经 pcs.rs 字节互换
+/// 回解有符号 i16）。值域语义 **正=放电(输出)/负=充电**（协议 V1.3；极性追认前仅佐证，
+/// 12-设计文档 §11 待确认项 3）。
+/// 各字段 `Option`：`None` = 该段（电流段 / 有功+总段）读取失败或读数无效 → 上层据此打
+/// Offline/NotRead 角标；点级独立降级（§3.4 F5.5）由上层按字段消费。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThreePhaseRead {
+    /// 三相输出电流 [A, B, C]，单位 A
+    pub i_phase: Option<[f64; 3]>,
+    /// 三相输出有功 [A, B, C]，单位 kW（正放负充）
+    pub p_phase: Option<[f64; 3]>,
+    /// 设备总有功，单位 kW（正放负充）
+    pub p_total: Option<f64>,
+}
+
 /// 核间传输通道（上层经 IntercoreClient 门面调用，接口不随通道变化）
 #[async_trait]
 pub trait IntercoreTransport: Send + Sync {
@@ -38,6 +57,12 @@ pub trait IntercoreTransport: Send + Sync {
     /// stopped_latched 时 Err（须先 release 清 latch）。⚠️ 语义挂起：PCS 停机后 run_state=0
     /// 稳态下重启 = 人工授权后 S-4 放行一次；500 电平/边沿时序以厂方答复为准（§11.11 待确认）。
     async fn authorize_restart(&self) -> Result<(), String>;
+    /// 三相展示读数（PCS 3 区输入寄存器 1022-1032，FC04）。Modbus 实现有效；Tcp/sim 无
+    /// PCS 3 区点表 → 默认 None（上层打 NotRead）。由显示采集独立 1s 任务调用，与心跳
+    /// SOC 读同走 bus 锁（W3 半双工互斥），**不进联锁抑制链**（12-设计文档 §4.1）。
+    async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
+        None
+    }
 }
 
 /// 构造 V2 ControlCmd 帧字节（TcpTransport 用）

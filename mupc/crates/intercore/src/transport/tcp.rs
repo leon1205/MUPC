@@ -189,6 +189,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_three_phase_degrades_to_none() {
+        // TCP/sim 无 PCS 3 区点表：read_three_phase 走 trait 默认实现恒 None（上层打 NotRead，
+        // 12-设计文档 §4.1）。无 IO，纯降级断言。
+        let tr = TcpTransport::new("127.0.0.1:1".into());
+        assert!(tr.read_three_phase().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_latch_toggle_gates_authorize() {
         // M-5：TCP 通道 latch 为内存表达（联锁流程/仿真语义；send 由上层抑制，M-4）。
         // restore 置/清驱动 is_interlock_stopped；latch 期间 authorize_restart 拒绝、清后放行。
