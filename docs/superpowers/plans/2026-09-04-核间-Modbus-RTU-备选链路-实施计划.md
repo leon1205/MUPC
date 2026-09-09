@@ -1,5 +1,7 @@
 # 核间 Modbus RTU 备选链路 Implementation Plan
 
+> **⚠️ 已归档（2026-09-09，文档重构 10 模块）**：本计划基于 v2.0 自定义假设点表（旧 §11.4-§11.6），已被 PCS 真实协议 V1.3（设计文档 §11.9）取代——复选框未勾选项不再实施。设计文档引用编号已重排（假设点表降附录 B），本文件仅作历史留档。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为核间通信（IntercoreClient）新增可配置的 Modbus RTU 备选控制链路（控制下行 + 执行确认 + 心跳轮询），`transport` 配置选择 tcp / modbus_rtu，上层（AiIntegrator/strategy-engine）接口不变。
