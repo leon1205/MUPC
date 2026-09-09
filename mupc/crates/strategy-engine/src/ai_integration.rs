@@ -34,9 +34,10 @@ pub struct AiIntegrator {
     last_data_ts: RwLock<Option<std::time::Instant>>,
     /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站（southd role=battery 经 on_battery_soc → set_battery_soc
     /// 注入）SOC 源缓存——(soc, 注入时刻)。evaluate 前 SOC 源裁决：fresh → 优先覆盖 latest_data 的
-    /// battery.soc；否则回落**沿用 N3 保留的 soc 冻结值**（本层不置 None/刷新；真·实时回落——
-    /// 超期置 None/过期标记使 N3 每次重读核间——属 S3b-1c follow-up）。源 ts 放此处（BatteryData
-    /// 无 ts、改 DataPackage 会破全仓 ~33 构造点）；soc 语义 0-100 百分数。
+    /// battery.soc；否则回落**活读核间 latest_soc**（S3b-1d 实时回落已实现：BMS 非 fresh 即无条件
+    /// 读核间并裁决覆盖，BMS 掉线后下一 dispatch 周期即用实时核间值，不再沿用 N3 冻结值；双源皆失
+    /// 保留最近值不置 None）。源 ts 放此处（BatteryData 无 ts、改 DataPackage 会破全仓 ~33 构造点）；
+    /// soc 语义 0-100 百分数。
     bms_soc: RwLock<Option<(f64, std::time::Instant)>>,
     /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
@@ -157,39 +158,36 @@ impl AiIntegrator {
         tracing::debug!(soc, "BMS SOC 注入");
     }
 
-    /// SOC 双源裁决（04 §2.11.1）：evaluate 前把 latest_data.battery.soc 解析为确定源。
-    /// BMS 站（southd on_battery_soc 通道写入）fresh → 优先覆盖。
-    /// 否则回落：**沿用 latest_data 已保留的 soc 值**（N3 在 set_latest_data 首次填充后经
-    /// merge_battery_missing 永久保留，本层不把 soc 置 None/刷新）——故 BMS 掉线后 evaluate
-    /// 用的是首次 N3 填充的冻结值，非实时核间 latest_soc。
+    /// SOC 双源裁决（04 §2.11.1 R-C 实时回落，S3b-1d）：evaluate 前把 battery.soc 解析为
+    /// 确定源。BMS 站 fresh → 优先覆盖；BMS 超期/无 → **无条件活读核间 latest_soc**（生产
+    /// modbus 每次读 REG_SOC，非缓存；sim 缓存最近 DataUpload）——BMS 掉线后下一 dispatch
+    /// 周期即用实时核间值，不再沿用 N3 冻结值。核间也超期/不可达 → 保留 data 原值
+    /// （不置 None，避免双源皆失落默认 50）。
     ///
-    /// ⚠️ S3b-1c follow-up（04 §2.11.1 R-C）：真·实时回落须改 merge 语义——BMS 源超期置
-    /// SOC=None/过期标记使 N3 每次可重读核间；本计划范围（基础裁决）未做，注释如实降调。
+    /// 注意：evaluate 只改传入 clone 的 battery 字段，不写回 latest_data、不动 last_data_ts
+    /// 闸门（C-2）。完整滞回状态机（回切连续 N 拍 + 3% 带）留后续（04 §2.11.1 I-3）。
     async fn apply_soc_source(&self, data: &mut DataPackage) {
-        let bms_fresh = {
-            let b = self.bms_soc.read().await;
-            match *b {
-                Some((soc, ts)) if ts.elapsed() <= Self::DATA_STALE_AFTER => Some(soc),
-                _ => None,
-            }
-        };
-        if let Some(soc) = bms_fresh {
-            data.battery.soc = Some(soc);
-            return;
-        }
-        // BMS 超期/无 → 回落：data.battery.soc 为 None 时才补读核间 latest_soc。但 N3 在
-        // set_latest_data 首次填充后经 merge_battery_missing 永久保留（本层不置 None/刷新），故
-        // 此分支通常不触发——BMS 掉线后 evaluate 沿用 N3 首次填充的冻结值，非实时核间 latest_soc。
-        // 真·实时回落（源超期置 None/过期标记使 N3 每次重读）属 S3b-1c follow-up，注释如实降调。
-        if data.battery.soc.is_none() {
+        // 先取值、出锁，再在需要时 await latest_soc（bms_soc read 锁不跨 await）。(f64, Instant)
+        // 两元素均 Copy → tuple Copy；Option<T: Copy> Copy → *guard 得值（无需 clone）。
+        let bms = *self.bms_soc.read().await;
+        // BMS 非 fresh（或无）→ 无条件读核间（活读；不 gate on data.battery.soc.is_none()）
+        let intercore = if bms.map_or(true, |(_, ts)| ts.elapsed() > Self::DATA_STALE_AFTER) {
             if let Some(client) = &self.intercore_client {
-                if let Some((soc, ts)) = client.latest_soc().await {
-                    if ts.elapsed() <= Self::DATA_STALE_AFTER {
-                        data.battery.soc = Some(soc);
-                    }
-                }
+                client.latest_soc().await
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
+        let resolved = resolve_soc_source(
+            bms,
+            intercore,
+            data.battery.soc,
+            std::time::Instant::now(),
+            Self::DATA_STALE_AFTER,
+        );
+        data.battery.soc = resolved;
     }
 
     /// 注入 AI 指令安全校验器（安全闸门）
@@ -539,6 +537,31 @@ fn merge_battery_missing(prev: &DataPackage, new: &DataPackage) -> DataPackage {
     merged
 }
 
+/// SOC 双源裁决纯逻辑（可单测，S3b-1d）：BMS fresh → BMS 值；否则核间 soc fresh → 核间值；
+/// 否则保留 data 原值（不置 None——双源皆失时沿用最近值，避免落默认 50 的语义退化）。
+///
+/// fresh 判定：`now.duration_since(ts) <= stale_after`（ts 恒为过去/同时刻注入，saturating 防御
+/// 极端 now<ts 不 panic——若回拨则判 fresh，语义不劣化）。
+fn resolve_soc_source(
+    bms: Option<(f64, std::time::Instant)>,
+    intercore: Option<(f64, std::time::Instant)>,
+    existing: Option<f64>,
+    now: std::time::Instant,
+    stale_after: std::time::Duration,
+) -> Option<f64> {
+    if let Some((soc, ts)) = bms {
+        if now.saturating_duration_since(ts) <= stale_after {
+            return Some(soc);
+        }
+    }
+    if let Some((soc, ts)) = intercore {
+        if now.saturating_duration_since(ts) <= stale_after {
+            return Some(soc);
+        }
+    }
+    existing
+}
+
 /// AI 引擎状态信息（供 web-api 序列化）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiEngineStatusInfo {
@@ -669,13 +692,49 @@ mod tests {
         }
     }
 
+    /// resolve_soc_source 纯裁决（S3b-1d 实时回落）：BMS fresh 优先于核间；BMS stale → 核间
+    /// fresh 接管；双 stale → 保留 existing（不置 None，避免落默认 50）；无 BMS 无核间 → existing。
+    #[test]
+    fn resolve_soc_source_prefers_bms_then_intercore_then_existing() {
+        let now = std::time::Instant::now();
+        let fresh_ts = now - std::time::Duration::from_secs(1);
+        let stale_ts = now - std::time::Duration::from_secs(10);
+        let stale = std::time::Duration::from_secs(5);
+        // BMS fresh 优先于核间（双源皆 fresh 时 BMS 胜——安全排序，防 soc_protect 被更旧核间值主导）
+        assert_eq!(
+            resolve_soc_source(Some((65.5, fresh_ts)), Some((42.0, fresh_ts)), None, now, stale),
+            Some(65.5)
+        );
+        // BMS stale → 核间 fresh 接管（实时回落核心：BMS 掉线后活读核间生效）
+        assert_eq!(
+            resolve_soc_source(Some((65.5, stale_ts)), Some((42.0, fresh_ts)), None, now, stale),
+            Some(42.0)
+        );
+        // 双 stale → 保留 existing（不置 None）
+        assert_eq!(
+            resolve_soc_source(
+                Some((65.5, stale_ts)),
+                Some((42.0, stale_ts)),
+                Some(30.0),
+                now,
+                stale
+            ),
+            Some(30.0)
+        );
+        // 无 BMS 无核间 → existing（纯 None 情形 existing None → None 保持）
+        assert_eq!(
+            resolve_soc_source(None, None, Some(30.0), now, stale),
+            Some(30.0)
+        );
+    }
+
     /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站 soc 注入后 fresh → apply_soc_source 覆盖为 BMS 值。
     /// 关键安全排序：pkg 先带核间/南向值 Some(42.0)，BMS fresh 65.5 仍覆盖——BMS 优先于核间，
-    /// 防 soc_protect 剪带被更旧的核间值主导。
+    /// 防 soc_protect 剪带被更旧的核间值主导。BMS fresh → 短路不活读核间（S3b-1d）。
     #[tokio::test]
     async fn bms_soc_overrides_when_fresh() {
         let i = AiIntegrator::new();
-        // 无 intercore_client → 只测 BMS fresh 覆盖路径（回落分支不触发）
+        // 无 intercore_client；BMS fresh → apply_soc_source 短路不读核间（仅 BMS 覆盖路径）
         i.set_battery_soc(65.5).await;
         // 场景 A：pkg 已带核间值 Some(42.0) → BMS fresh 覆盖（BMS 优先于核间，最关键排序）
         let mut pkg_have = create_test_pkg_with_soc(Some(42.0));
@@ -691,26 +750,29 @@ mod tests {
         assert_eq!(pkg_none.battery.soc, Some(65.5), "BMS fresh 应写入 battery.soc");
     }
 
-    /// S3b-1b SOC 双源：无 BMS 注入 → apply_soc_source 不误写（soc None 保持 None；已带核间值不被覆盖）。
+    /// S3b-1b SOC 双源（S3b-1d）：无 BMS 注入 → apply_soc_source 不误写。无 client 时 BMS 非 fresh
+    /// 触发活读分支但返回 None → resolve 走 existing/None 保持（soc None 保持 None；已带核间/南向值
+    /// 不被覆盖）。
     #[tokio::test]
     async fn no_bms_keeps_soc_unchanged() {
         let i = AiIntegrator::new();
-        // 无 BMS → None 保持（回落由既有 N3/set_latest_data 承担；此测确认裁决不误写）
+        // 无 BMS（bms=None）→ 活读核间但无 client → intercore None → resolve existing(None) 保持
         let mut pkg_none = create_test_pkg_with_soc(None);
         i.apply_soc_source(&mut pkg_none).await;
         assert_eq!(pkg_none.battery.soc, None);
-        // 已带核间/南向 soc 值 → 不被 BMS-absent 覆盖（回落分支无 client 不触发）
+        // 已带核间/南向 soc 值 → 无 client 时不活读覆盖 → existing(Some(42.0)) 保持
         let mut pkg_have = create_test_pkg_with_soc(Some(42.0));
         i.apply_soc_source(&mut pkg_have).await;
         assert_eq!(pkg_have.battery.soc, Some(42.0), "BMS 无注入不得覆盖既有 soc");
     }
 
-    /// S3b-1b SOC 双源：BMS 超期 → 不覆盖（回落核间；无 client 时 soc None 保持）。
+    /// S3b-1b SOC 双源（S3b-1d）：BMS 超期 → 触发回落（无条件活读核间）；无 client 时活读返回
+    /// None → resolve existing 保持（None 保持 None）。
     #[tokio::test]
     async fn bms_stale_falls_back() {
         let i = AiIntegrator::new();
         i.set_battery_soc(65.5).await;
-        // 回拨 bms_soc 的注入时刻到 DATA_STALE_AFTER 之前 → 超期 → 不覆盖
+        // 回拨 bms_soc 的注入时刻到 DATA_STALE_AFTER 之前 → 超期 → 走回落分支
         *i.bms_soc.write().await = Some((
             65.5,
             std::time::Instant::now()
@@ -718,7 +780,8 @@ mod tests {
         ));
         let mut pkg = create_test_pkg_with_soc(None);
         i.apply_soc_source(&mut pkg).await;
-        // 无 intercore_client → 回落核间分支不触发 → None 保持（有 client 的回落分支测在集成层）
+        // 无 intercore_client → 活读分支返回 None → resolve(None, None, existing(None)) → None 保持
+        // （有 client 时核间 fresh 接管的裁决已由 resolve_soc_source 纯函数测覆盖）
         assert_eq!(pkg.battery.soc, None, "BMS 超期不得覆盖；无核间 client 时回落不写");
     }
 
