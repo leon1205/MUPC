@@ -4024,24 +4024,24 @@ mupc/crates/ai-engine/
 │   ├── lstm_model.rs             # LSTM 时序预测模型（LstmInput, LstmOutput, LstmModel + predict_with_vmd()）
 │   ├── rl_model.rs               # RL 决策模型（FusedSystemState, ActionOutput, RLModel）
 │   ├── reward_calculator.rs      # 奖励函数计算器（5 种场景奖励公式 + SceneWeights）
-│   ├── robustness_manager.rs     # 电压异常应急策略管理器（v2.9 新增）
-│   ├── adaptive_weight_optimizer.rs  # 自适应权重优化器（v2.11 新增）
-│   ├── pareto_optimizer.rs       # NSGA-II Pareto 多目标优化器（v2.11 新增）
-│   ├── performance_collector.rs  # 性能指标收集器（v2.11 新增）
-│   ├── load_covariates.rs        # 负荷协变量结构体（v2.11 新增）
-│   ├── weather_service.rs        # 气象数据服务 trait（v2.11 新增）
+│   ├── robustness_manager.rs     # 电压异常应急策略管理器（新增）
+│   ├── adaptive_weight_optimizer.rs  # 自适应权重优化器（新增）
+│   ├── pareto_optimizer.rs       # NSGA-II Pareto 多目标优化器（新增）
+│   ├── performance_collector.rs  # 性能指标收集器（新增）
+│   ├── load_covariates.rs        # 负荷协变量结构体（新增）
+│   ├── weather_service.rs        # 气象数据服务 trait（新增）
 │   ├── data_fusion.rs            # 多源数据融合引擎（DataSourceAdapter trait + 5 个实现）
-│   ├── action_validator.rs       # 动作约束校验器（4 条双参数校验规则 ACT-DUAL-01~04，v2.15）
+│   ├── action_validator.rs       # 动作约束校验器（4 条双参数校验规则 ACT-DUAL-01~04）
 │   ├── online_updater.rs         # 在线微调（DataPoint, OnlineUpdater, batch_size=32）
 │   ├── rknn_runtime.rs           # RKNN Runtime 推理器（RAII, spawn_blocking, NPU降级）
 │   ├── rknn_runtime_sys.rs       # RKNN Runtime C API FFI 绑定（unsafe extern \"C\"）
 │   ├── rknn_types.rs             # RKNN 类型定义（RknnInput, RknnOutput, as_f32）
-│   ├── safety_wrapper.rs         # 安全 RL 包装器（v2.17 新增，~380行）
-│   ├── reward_normalizer.rs      # 动态自适应归一化器（v2.13 新增）
+│   ├── safety_wrapper.rs         # 安全 RL 包装器（新增，~380行）
+│   ├── reward_normalizer.rs      # 动态自适应归一化器（新增）
 │   ├── error.rs                  # 错误类型枚举（AiEngineError, thiserror）
 │   └── config.rs                 # 配置结构（AiEngineConfig 及子配置 + SafetyWrapperConfig）
 │
-│   # ---- v3.0 预测增强管线新增文件 ----
+│   # ---- 预测增强管线新增文件 ----
 │   ├── vmd.rs                    # VMD 分解器（纯Rust，~300行）
 │   ├── prediction_pipeline.rs    # 预测增强管线编排器（~800行）
 │   ├── pipeline_config.rs        # 增强配置结构体（~400行）
@@ -4055,7 +4055,7 @@ mupc/crates/ai-engine/
     ├── rknn_runtime_tests.rs     # RKNN Runtime 集成测试
     └── online_updater_tests.rs   # 在线微调集成测试
 
-# ---- v3.0 MSSA 超参优化工具（纯 Python，不进入 RK3588 部署）----
+# ---- MSSA 超参优化工具（纯 Python，不进入 RK3588 部署；详见 §15，已迁移 MUPC-AI2）----
 tools/mssa_optimizer/
 ├── __init__.py                   # 包初始化 (~5 行)
 ├── mssa.py                      # MSSA 算法核心 (~300 行)
@@ -4084,16 +4084,16 @@ pub mod rknn_types;
 pub mod rl_model;
 pub mod data_fusion;
 pub mod reward_calculator;
-pub mod robustness_manager;     // v2.9 新增
-pub mod adaptive_weight_optimizer; // v2.11 新增
-pub mod pareto_optimizer;        // v2.11 新增
-pub mod performance_collector;    // v2.11 新增
-pub mod load_covariates;        // v2.11 新增
+pub mod robustness_manager;     // 新增
+pub mod adaptive_weight_optimizer; // 新增
+pub mod pareto_optimizer;        // 新增
+pub mod performance_collector;    // 新增
+pub mod load_covariates;        // 新增
 pub mod action_validator;
-pub mod safety_wrapper;          // v2.17 新增
-pub mod reward_normalizer;       // v2.13 新增
+pub mod safety_wrapper;          // 新增
+pub mod reward_normalizer;       // 新增
 
-// v3.0 预测增强管线新增
+// 预测增强管线新增
 pub mod vmd;                     // VMD 分解器
 pub mod prediction_pipeline;     // 预测增强管线编排器
 pub mod pipeline_config;         // 增强配置结构体
@@ -4114,18 +4114,18 @@ pub use model_manager::{ModelManager, ModelStatus};
 pub use lstm_model::{LstmInput, LstmModel, LstmOutput};
 pub use rl_model::{ActionOutput, FusedSystemState, RLModel, parse_action_output};
 pub use reward_calculator::RewardCalculator;
-pub use robustness_manager::{RobustnessManager, AnomalyType};  // v2.9 新增
-pub use adaptive_weight_optimizer::{AdaptiveWeightOptimizer, PerformanceCollector, PerformanceFeatures, WeightAdjustment, HistoricalPerformance};  // v2.11 新增
-pub use pareto_optimizer::{ParetoWeightOptimizer, ParetoSolution, WeightCandidate, OptimizationObjective};  // v2.11 新增
-pub use load_covariates::{LoadCovariates};  // v2.11 新增
+pub use robustness_manager::{RobustnessManager, AnomalyType};  // 新增
+pub use adaptive_weight_optimizer::{AdaptiveWeightOptimizer, PerformanceCollector, PerformanceFeatures, WeightAdjustment, HistoricalPerformance};  // 新增
+pub use pareto_optimizer::{ParetoWeightOptimizer, ParetoSolution, WeightCandidate, OptimizationObjective};  // 新增
+pub use load_covariates::{LoadCovariates};  // 新增
 pub use data_fusion::{DataFusionEngine, DataSourceAdapter, SourceType, FusedSystemState};
 pub use action_validator::{ActionValidator, ViolationRecord};
 pub use online_updater::{DataPoint, OnlineUpdater};
 pub use rknn_runtime::RknnRuntime;
-pub use safety_wrapper::{SafetyRLWrapper, SafetyPredictor, LinearSensitivityPredictor, SafetyBounds, SafetyStats, CheckResult};  // v2.17 新增
-pub use safety_wrapper::{SafetyWrapperEvent, SafetyEventType, SafetyViolation};  // v2.17 新增
+pub use safety_wrapper::{SafetyRLWrapper, SafetyPredictor, LinearSensitivityPredictor, SafetyBounds, SafetyStats, CheckResult};  // 新增
+pub use safety_wrapper::{SafetyWrapperEvent, SafetyEventType, SafetyViolation};  // 新增
 
-// v3.0 预测增强管线重新导出
+// 预测增强管线重新导出
 pub use vmd::{VmdDecomposer, VmdConfig, VmdResult};
 pub use prediction_pipeline::{PredictionPipeline, EnhancedForecastResult, EnhancementLevel, PipelineHealth};
 pub use pipeline_config::{VmdEnhancementConfig, AttentionConfig, BiLstmConfig, ErrorCorrectionConfig, FeatureSelectionConfig};
@@ -4156,11 +4156,11 @@ pub struct AiEngineConfig {
     pub reward_weights: SceneWeights,
     /// NPU 推理配置
     pub npu: NpuConfig,
-    /// v2.5 奖励阈值配置
+    /// 奖励阈值配置
     pub reward_thresholds: RewardThresholdConfig,
-    /// v2.17 安全 RL 包装器配置
+    /// 安全 RL 包装器配置
     pub safety_wrapper: SafetyWrapperConfig,
-    /// v3.0 预测增强配置（VMD + Attention + BiLSTM + 误差修正）
+    /// 预测增强配置（VMD + Attention + BiLSTM + 误差修正）
     #[serde(default)]
     pub prediction_enhancement: Option<PredictionEnhancementConfig>,
 }
@@ -4168,7 +4168,7 @@ pub struct AiEngineConfig {
 
 ### 11.2 预测增强配置
 
-`PredictionEnhancementConfig` 定义于 `pipeline_config.rs`，在 `mupc/config/mupc_env_config.yaml` 中通过 `prediction_enhancement` 段配置。缺失时所有增强功能禁用，系统运行于 v2.16 基线模式。
+`PredictionEnhancementConfig` 定义于 `pipeline_config.rs`，在 `mupc/config/mupc_env_config.yaml` 中通过 `prediction_enhancement` 段配置。缺失时所有增强功能禁用，系统运行于无增强基线模式。
 
 ```rust
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -4247,8 +4247,8 @@ pub struct FeatureSelectionConfig {
 
 ```yaml
 # ============================================================================
-# 预测增强配置（v3.0，2026-06-21）
-# 缺失时系统运行于 v2.16 基线模式（全部增强功能禁用）
+# 预测增强配置（2026-06-21）
+# 缺失时系统运行于无增强基线模式（全部增强功能禁用）
 # ============================================================================
 prediction_enhancement:
   vmd:
@@ -4300,9 +4300,9 @@ prediction_enhancement:
 ```toml
 [lstm]
 model_path = \"/etc/mupc/models/lstm.rknn\"
-input_window_secs = 21600     # 6 小时（v2.16: 3600 → 21600）
-output_horizon_secs = 22500   # 225 分钟 = 15 步 × 15 分钟（v2.16: 900 → 22500）
-step_seconds = 900            # 15 分钟步长（v2.16 新增）
+input_window_secs = 21600     # 6 小时
+output_horizon_secs = 22500   # 225 分钟 = 15 步 × 15 分钟
+step_seconds = 900            # 15 分钟步长
 quantization = \"INT8\"
 
 [rl]
@@ -4357,12 +4357,12 @@ enable_fallback_to_cpu = true
 | ActionConstraintConfig | p_batt_ramp_limit_kw, q_batt_ramp_limit_kvar, max_apparent_power_kva, pv_limit_min | 50.0, 30.0, 500.0, 0.1 |
 | SceneWeights | agricultural_irrigation[3], commercial_arbitrage[2], demand_control[2], virtual_power_plant[3], ultra_green[2] | 见上表默认值 |
 | NpuConfig | temperature_limit_c, throttle_factor, enable_fallback_to_cpu | 85.0, 0.5, true |
-| **RewardThresholdConfig（v2.5新增）** | voltage_deadband, q_margin_threshold, voltage_high_limit, soc_critical, voltage_penalty_high, voltage_penalty_low | 0.05, 0.10, 1.05, 0.10, 2.0, 1.0 |
+| **RewardThresholdConfig** | voltage_deadband, q_margin_threshold, voltage_high_limit, soc_critical, voltage_penalty_high, voltage_penalty_low | 0.05, 0.10, 1.05, 0.10, 2.0, 1.0 |
 
 **RewardThresholdConfig 结构定义：**
 
 ```rust
-/// v2.5 奖励阈值配置
+/// 奖励阈值配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RewardThresholdConfig {
     /// 电压死区（±5%），与现有设计一致
@@ -4450,7 +4450,7 @@ pub enum AiEngineError {
     #[error(\"奖励计算错误: {0}\")]
     RewardCalculationError(String),
 
-    // ---- v3.0 预测增强管线新增 ----
+    // ---- 预测增强管线新增 ----
     #[error(\"VMD 分解失败: {0}\")]
     VmdFailed(String),
 
@@ -4688,28 +4688,28 @@ pub struct DemandData {
 
 **决策：** N=30, p_d=0.2, p_s=0.1, 佳点集初始化, 13 维混合编码（离散索引+浮点+One-hot枚举）对应 10 维逻辑超参, epsilon=1e-4 收敛。
 
-**位置：** §15
+**位置：** MUPC-AI2 训练管线设计文档 §11（原 §15，已迁移）
 
 ### 14.17 ADR-017: MSSA 目标函数与缓存
 
 **决策：** 加权 MAPE = 0.5*MAPE_pv + 0.5*MAPE_load, 惩罚分 1e6, SHA256 指纹缓存跨运行持久化, training_data_fingerprint 自动失效。
 
-**位置：** §15
+**位置：** MUPC-AI2 训练管线设计文档 §11（原 §15，已迁移）
 
 ### 14.18 ADR-018: IPSO 降级路径
 
 **决策：** 配置 `algorithm: "IPSO"` 一键切换, JSON Schema 保持一致, 用于 MSSA 超时或不收敛时快速收敛。
 
-**位置：** §15
+**位置：** MUPC-AI2 训练管线设计文档 §11（原 §15，已迁移）
 
 ### 14.19 关键实现文件
 
 These are the most critical files that need to be created or significantly modified to implement this design:
 
 - `e:\MUPC2\mupc\crates\ai-engine\src\data_fusion.rs` (new: DataFusionEngine, DataSourceAdapter trait, 5 adapter implementations, FusedSystemState with to_input_vector())
-- `e:\MUPC2\mupc\crates\ai-engine\src\rl_model.rs` (refactor: replace SystemState with FusedSystemState, replace old 8-field ActionOutput with new 5-field ActionOutput, add parse_action_output, add 78-dim input support)
+- `e:\MUPC2\mupc\crates\ai-engine\src\rl_model.rs` (refactor: replace SystemState with FusedSystemState, use 2-dim ActionOutput (p_ref, k_droop), add parse_action_output dual-parameter parsing, add 78-dim input support)
 - `e:\MUPC2\mupc\crates\ai-engine\src\reward_calculator.rs` (new: RewardCalculator with 5 scene formulas, SceneWeights lookup)
-- `e:\MUPC2\mupc\crates\ai-engine\src\action_validator.rs` (new: ActionValidator with 5 constraint rules ACT-01~05, clamp logic, ViolationRecord)
+- `e:\MUPC2\mupc\crates\ai-engine\src\action_validator.rs` (new: ActionValidator with 4 dual-parameter constraint rules ACT-DUAL-01~04, clamp logic, ViolationRecord; load_shedding/pv_limit/confidence delegated to strategy-engine)
 - `e:\MUPC2\mupc\crates\ai-engine\src\model_manager.rs` (refactor: add full_decision_cycle(), wire in DataFusionEngine, RewardCalculator, ActionValidator)
 ## 15. MSSA 超参优化工具设计
 
@@ -4729,6 +4729,11 @@ These are the most critical files that need to be created or significantly modif
 | v2.7 | 双参数动作空间（p_ref + k_droop），时间尺度解耦 |
 | v2.8 | P-Q 协同度奖励替代电压硬惩罚，新增下垂系数平滑惩罚 |
 | v2.10 | 安全覆盖惩罚 + 影子模型验证/折扣累积奖励/场景平滑过渡 |
+| v2.11 | 自适应权重优化器（MetaRL + NSGA-II）+ 冲击负荷概率预测（D10 分位数） |
+| v2.13 | P-Q 协同 Sigmoid 平滑化 + Welford 奖励归一化（reward_normalizer） |
 | v2.14 | SafetyOverride 奖励重构 + FusedSystemState 扩展至 78 维 |
 | v2.15 | 动作空间精简 5→2 维，load_shedding/pv_limit 下沉策略引擎 |
+| v2.16 | LSTM 预测规格统一（15 分钟步长、窗口 6h、15 步分位数，D10） |
+| v2.17 | 安全 RL 包装器（物理模型事前预测拒绝 + 线路阻抗配置化，独立成章 §8） |
 | v3.0 | 合并预测增强分层混合架构（VMD+Attention+BiLSTM+误差修正+MSSA） |
+| v3.1 | 正文收敛整合（v2.16/v3.0/安全包装器统一描述；MinMax 观测归一化与 2 维动作反归一化修正） |
