@@ -206,7 +206,10 @@ async fn login(
         expires_at: session.expires_at.to_rfc3339(),
         user: LoginUser {
             username: session.username.clone(),
-            role: "operator".to_string(),
+            // 角色未分层（技术债 U-01）：`SessionManager::login` 仅认 username=="admin"，
+            // 此处硬编码 "admin" 以反映实际（不再是误导前端的 "operator"）。
+            // 真实 RBAC（users/session 落库、按角色授权）待 U-01 另行实现。
+            role: "admin".to_string(),
         },
     }))
 }

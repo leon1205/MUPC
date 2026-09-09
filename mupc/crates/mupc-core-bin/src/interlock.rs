@@ -978,9 +978,14 @@ impl InterlockController {
         } else {
             "人工释放联锁（触发源已复位且保持期满）"
         };
-        self.record_event("interlock.cleared", "interlock", msg)
+        // 操作者审计：本路径由 web release handler 经 InterlockApi::request_release 触发。
+        // 真实用户名受 trait 边界所限未随调用传入（web-api app_state.rs InterlockApi 签名，
+        // Task 8 不改该文件）；角色未分层 U-01 前仅 admin 可登，故以 session 占位如实标注，
+        // U-01/真实 RBAC 落库后改传真实操作者。
+        let msg = format!("{}（operator: admin(session)）", msg);
+        self.record_event("interlock.cleared", "interlock", &msg)
             .await;
-        let _ = self.sse.push_interlock("cleared", msg);
+        let _ = self.sse.push_interlock("cleared", &msg);
         Ok(())
     }
 }
@@ -1031,10 +1036,13 @@ impl InterlockApi for InterlockController {
             .authorize_restart()
             .await
             .map_err(|e| format!("M1 重启授权失败: {}", e))?;
+        // 操作者审计：ack_m1 由 web handler 经 InterlockApi::ack_m1 触发，真实用户名受 trait
+        // 边界所限未随调用传入（Task 8 不改 app_state.rs）；角色未分层 U-01 前仅 admin 可登，
+        // 故以 session 占位如实标注，U-01/真实 RBAC 落库后改传真实操作者。
         self.record_event(
             "interlock.ack_m1",
             "interlock",
-            "M1 保护跳闸/停机人工授权重启",
+            "M1 保护跳闸/停机人工授权重启（operator: admin(session)）",
         )
         .await;
         let _ = self
