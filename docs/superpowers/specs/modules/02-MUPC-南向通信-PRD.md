@@ -190,7 +190,7 @@ pub enum RegistryError {
 
 ### 2.7 南向控制指令分发（SouthCommandSender）
 
-> **来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
+**来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
 
 策略引擎输出的两类南向控制指令通过 `SouthCommandSender` trait 发送到对应设备：
 
