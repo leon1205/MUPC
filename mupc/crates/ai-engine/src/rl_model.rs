@@ -296,11 +296,11 @@ mod tests {
         // v3.0: 2 维 tanh 输入 → 反归一化到物理值
         let cfg = default_action_space_config();
         // p_norm=0.6 → p_ref=0.6*50=30kW (放电)
-        // k_norm=0.2 → k_droop=0.2*100+0=20
+        // k_norm=0.2 → k_droop=0.2*15+15=18（v2.15 后 k_droop 区间默认 [0,30]，非旧 [±100]）
         let raw = vec![0.6_f32, 0.2];
         let action = parse_action_output(&raw, &cfg).unwrap();
         assert!((action.p_ref - 30.0).abs() < 0.01, "p_ref should be 30kW");
-        assert!((action.k_droop - 20.0).abs() < 0.01, "k_droop should be 20");
+        assert!((action.k_droop - 18.0).abs() < 0.01, "k_droop should be 18");
         // v2.15 下沉字段为默认值
         assert_eq!(action.load_shedding, 0.0);
         assert_eq!(action.pv_limit, 1.0);
@@ -360,10 +360,12 @@ mod tests {
         let raw = vec![100.0_f32, 10.0, 0.8, 0.9];
         let cfg = default_action_space_config();
         let action = parse_action_output_legacy(&raw, &cfg).unwrap();
-        assert_eq!(action.p_batt_set, 100.0);
-        assert_eq!(action.load_shedding, 10.0);
-        assert_eq!(action.pv_limit, 0.8);
-        assert_eq!(action.confidence, 0.9);
+        // raw[0]=100 超出默认 ±50 → clamp 到 max_batt_discharge_power=50.0
+        assert!((action.p_batt_set - 50.0).abs() < 1e-9);
+        assert!((action.load_shedding - 10.0).abs() < 1e-9);
+        // f32 输入经 f64 提升存在表示误差（如 0.8_f32→0.800000011920929），用容差断言
+        assert!((action.pv_limit - 0.8).abs() < 1e-6);
+        assert!((action.confidence - 0.9).abs() < 1e-6);
     }
 }
 

@@ -187,10 +187,10 @@ impl ParetoWeightOptimizer {
             let mut next_front: Vec<WeightCandidate> = vec![];
             for p_candidate in &fronts[front_idx] {
                 // 找到这个候选在原始 population 中的索引
-                if let Some(p_pos) = population
-                    .iter()
-                    .position(|c| std::ptr::eq(c, p_candidate) as usize != 0 && c == p_candidate)
-                {
+                // NSGA-II bug 修复：front 成员是 population[p].clone()（首前沿 @181）副本，
+                // 与原始数组元素地址必然不同 → ptr::eq 恒 false → position 恒 None → 被支配
+                // 计数不递减 → 后续前沿永不构建（前沿丢失）。仅以值相等定位即可。
+                if let Some(p_pos) = population.iter().position(|c| c == p_candidate) {
                     for &dominated_idx in &dominated_solutions[p_pos] {
                         domination_count[dominated_idx] =
                             domination_count[dominated_idx].saturating_sub(1);
@@ -398,11 +398,12 @@ mod tests {
 
         let a = WeightCandidate {
             weights: vec![1.0],
-            objectives: vec![0.9, 0.3], // 更好的目标
+            // 最大化语义：a 两目标全优于 b（原 [0.9,0.3] 第二目标 0.3<0.7 并不支配）
+            objectives: vec![0.9, 0.7],
         };
         let b = WeightCandidate {
             weights: vec![2.0],
-            objectives: vec![0.5, 0.7],
+            objectives: vec![0.5, 0.3],
         };
 
         assert!(optimizer.dominates(&a, &b));
@@ -432,14 +433,14 @@ mod tests {
 
         let a = WeightCandidate {
             weights: vec![1.0],
-            objectives: vec![0.9, 0.7],
+            // 最大化语义：a 在 obj0 更好（0.9>0.5）、obj1 更差（0.3<0.7），互有胜负不构成支配
+            objectives: vec![0.9, 0.3],
         };
         let b = WeightCandidate {
             weights: vec![2.0],
-            objectives: vec![0.5, 0.3],
+            objectives: vec![0.5, 0.7],
         };
 
-        // a 在 obj0 更好，但在 obj1 更差，不构成支配
         assert!(!optimizer.dominates(&a, &b));
         assert!(!optimizer.dominates(&b, &a));
     }
@@ -452,20 +453,22 @@ mod tests {
         let population = vec![
             WeightCandidate {
                 weights: vec![1.0],
-                objectives: vec![0.9],
+                // 互异目标必存在支配（0.9>0.8>0.7）→ 修复 ptr::eq 后会分多层前沿。
+                // 改等值目标使三者互不支配，验证"单前沿"场景。
+                objectives: vec![0.5],
             },
             WeightCandidate {
                 weights: vec![2.0],
-                objectives: vec![0.8],
+                objectives: vec![0.5],
             },
             WeightCandidate {
                 weights: vec![3.0],
-                objectives: vec![0.7],
+                objectives: vec![0.5],
             },
         ];
 
         let fronts = optimizer.fast_non_dominated_sort(&population);
-        // 所有个体都在第一前沿（没有支配关系）
+        // 所有个体目标相等 → 无支配关系，全部在第一前沿
         assert_eq!(fronts.len(), 1);
         assert_eq!(fronts[0].len(), 3);
     }

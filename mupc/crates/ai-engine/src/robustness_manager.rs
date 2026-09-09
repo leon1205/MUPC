@@ -10,9 +10,9 @@ use crate::rl_model::ActionOutput;
 /// `FusedSystemState` 尚无通信时间戳字段，无法实现超时检测。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnomalyType {
-    /// 电压骤降（< 0.85 p.u.）
+    /// 电压骤降（< 0.90 p.u.，阈值见 RobustnessManager::new）
     VoltageSag,
-    /// 电压骤升（> 1.15 p.u.）
+    /// 电压骤升（> 1.10 p.u.，阈值见 RobustnessManager::new）
     VoltageSurge,
     /// 电池SOC极低（< 5%）
     BatterySocCritical,
@@ -45,8 +45,8 @@ impl RobustnessManager {
 
     /// 检测异常类型
     ///
-    /// 检测电压骤降（< 0.85 p.u.）、电压骤升（> 1.15 p.u.）、
-    /// 电池SOC极低（< 5%）、电池SOC过充（> 95%）
+    /// 检测电压骤降（< 0.90 p.u.）、电压骤升（> 1.10 p.u.）、
+    /// 电池SOC极低（< 10%）、电池SOC过充（> 95%）
     pub fn detect_anomaly(&self, state: &crate::data_fusion::FusedSystemState) -> Vec<AnomalyType> {
         let mut anomalies = Vec::new();
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
@@ -174,7 +174,9 @@ mod tests {
         let rm = RobustnessManager::new();
         let action = rm.voltage_surge_action();
         assert_eq!(action.p_ref, -50.0);
-        assert_eq!(action.k_droop, -30.0);
+        // k_droop 语义与 sag 对称同为 +30（反向下垂体现在 p_ref 充电视符号上，非系数取负）：
+        // v2.15 后 k_droop 动作区间默认 [0,30]，负值超出动作空间范围，故取正为设计意图。
+        assert_eq!(action.k_droop, 30.0);
         assert_eq!(action.pv_limit, 0.5);
     }
 
@@ -204,24 +206,38 @@ mod tests {
     #[test]
     fn test_boundary_voltage_sag_threshold() {
         let rm = RobustnessManager::new();
-        // 0.85 exactly - should NOT trigger sag (threshold is < 0.85)
-        let state = make_state(0.85, 0.5);
+        // 实际阈值 0.90（new() 取值），检测用严格小于：等于阈值不应触发
+        let state = make_state(0.90, 0.5);
         let anomalies = rm.detect_anomaly(&state);
         assert!(
             !anomalies.contains(&AnomalyType::VoltageSag),
-            "0.85 是阈值边界，不应触发"
+            "0.90 为阈值边界（< 才触发），不应触发"
+        );
+        // 略低于阈值（0.895 < 0.90）应触发 sag
+        let state = make_state(0.895, 0.5);
+        let anomalies = rm.detect_anomaly(&state);
+        assert!(
+            anomalies.contains(&AnomalyType::VoltageSag),
+            "0.895 低于阈值 0.90 应触发"
         );
     }
 
     #[test]
     fn test_boundary_voltage_surge_threshold() {
         let rm = RobustnessManager::new();
-        // 1.15 exactly - should NOT trigger surge (threshold is > 1.15)
-        let state = make_state(1.15, 0.5);
+        // 实际阈值 1.10（new() 取值），检测用严格大于：等于阈值不应触发
+        let state = make_state(1.10, 0.5);
         let anomalies = rm.detect_anomaly(&state);
         assert!(
             !anomalies.contains(&AnomalyType::VoltageSurge),
-            "1.15 是阈值边界，不应触发"
+            "1.10 为阈值边界（> 才触发），不应触发"
+        );
+        // 略高于阈值（1.105 > 1.10）应触发 surge
+        let state = make_state(1.105, 0.5);
+        let anomalies = rm.detect_anomaly(&state);
+        assert!(
+            anomalies.contains(&AnomalyType::VoltageSurge),
+            "1.105 高于阈值 1.10 应触发"
         );
     }
 

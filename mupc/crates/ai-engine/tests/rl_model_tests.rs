@@ -48,14 +48,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_action_output_5_fields() {
-        let raw = vec![100.0_f32, 50.0, 10.0, 0.8, 0.9];
+    fn test_parse_action_output_2_fields_with_defaults() {
+        // v2.15 后动作空间精简为 2 维（p_ref + k_droop），load_shedding/pv_limit 下沉策略引擎：
+        // parse_action_output 只消费前 2 个 tanh 归一化输入，多余字段被忽略并返回固定默认值。
+        // （原 5 字段断言为 v1.x 语义，已随动作空间演进过时）
+        let raw = vec![0.6_f32, 0.2, 10.0, 0.8, 0.9];
         let cfg = ActionSpaceConfig::default_config();
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert_eq!(action.p_ref, 100.0);
-        assert_eq!(action.k_droop, 50.0);
-        assert_eq!(action.load_shedding, 10.0);
-        assert_eq!(action.pv_limit, 0.8);
-        assert_eq!(action.confidence, 0.9);
+        assert!((action.p_ref - 30.0).abs() < 1e-4); // 0.6 * 50（max_batt_discharge_power）
+        assert!((action.k_droop - 18.0).abs() < 1e-4); // 0.2*15+15（默认区间 [0,30]）
+        assert_eq!(action.load_shedding, 0.0);
+        assert_eq!(action.pv_limit, 1.0);
+        assert_eq!(action.confidence, 0.5);
     }
 }

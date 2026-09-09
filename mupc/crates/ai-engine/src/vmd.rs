@@ -276,10 +276,13 @@ impl VmdDecomposer {
             let full_spectrum = half_to_full_spectrum(&u_hat[k_idx], n);
             let imf_complex = ifft(&full_spectrum);
             // L-01: 实信号 IFFT 虚部应接近零（共轭对称性保证）
+            // 容差说明：原判据 1e-10*(|re|+1e-15) 的绝对下限仅 1e-25，低于 rustfft 实测舍入噪声
+            // （~4.4e-15，在 re≈0 的频率点上触发误报）。放宽为 1e-8*|re|+1e-12：相对项容纳幅度
+            // 较大分量，绝对下限 1e-12 仍远高于 4.4e-15 噪声、远低于真实虚部残差量级。
             debug_assert!(
                 imf_complex
                     .iter()
-                    .all(|c| c.im.abs() < 1e-10 * (c.re.abs() + 1e-15)),
+                    .all(|c| c.im.abs() < 1e-8 * c.re.abs() + 1e-12),
                 "IFFT 虚部异常: K={}, max|im|={}",
                 k_idx,
                 imf_complex

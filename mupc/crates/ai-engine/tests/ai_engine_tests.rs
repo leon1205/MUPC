@@ -7,8 +7,9 @@ mod tests {
     #[test]
     fn test_ai_engine_config_default() {
         let lstm = LstmConfig::default();
-        assert_eq!(lstm.input_window_secs, 3600);
-        assert_eq!(lstm.output_horizon_secs, 900);
+        // v3.0 对齐训练管线：15 分钟步长 × 24 输入步 = 6 小时窗口；输出 15 步 × 15 分钟 = 225 分钟
+        assert_eq!(lstm.input_window_secs, 21_600);
+        assert_eq!(lstm.output_horizon_secs, 22_500);
 
         let rl = RlConfig::default();
         assert_eq!(rl.algorithm, RlAlgorithm::MADDPG);

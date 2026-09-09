@@ -258,7 +258,8 @@ mod tests {
 
     #[test]
     fn test_validate_empty_file() {
-        let path = std::path::PathBuf::from("/tmp/mupc_empty_model_test.rknn");
+        // 平台无关临时目录：Windows 无 /tmp，std::env::temp_dir() 双平台通用
+        let path = std::env::temp_dir().join("mupc_empty_model_test.rknn");
         std::fs::write(&path, b"").unwrap();
 
         let result = validate_rknn_model(&path, PredictionModelType::ErrorCorrection, None);
@@ -280,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_validate_valid_file() {
-        let path = std::path::PathBuf::from("/tmp/mupc_valid_model_test.rknn");
+        let path = std::env::temp_dir().join("mupc_valid_model_test.rknn");
         std::fs::write(&path, b"dummy rknn model content").unwrap();
 
         let result = validate_rknn_model(&path, PredictionModelType::LstmAttention, None);
@@ -296,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_validate_sha256_mismatch() {
-        let path = std::path::PathBuf::from("/tmp/mupc_sha256_test.rknn");
+        let path = std::env::temp_dir().join("mupc_sha256_test.rknn");
         std::fs::write(&path, b"test content").unwrap();
 
         // 随机期望值（不会匹配）

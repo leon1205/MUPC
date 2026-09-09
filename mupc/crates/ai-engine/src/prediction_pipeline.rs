@@ -1217,22 +1217,36 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_degradation_to_baseline() {
         let config = create_vmd_enabled_config();
-        // 不初始化 LSTM 模型 → VMD+Attention 和 Attention 路径均失败
+        // 单测无法加载真实 ONNX/RKNN Runtime，故不注入 LSTM 模型。
+        // 代码 Err 语义：execute_baseline 先校验 lstm 存在（缺模型即 "LSTM 模型未加载" Err，
+        // 属合理的配置错误检测），再检查历史长度——因此无模型时不可能走到"全零降级结果"。
         let model: Arc<RwLock<Option<LstmModel>>> = Arc::new(RwLock::new(None));
         let history: Arc<RwLock<VecDeque<HistorySample>>> =
             Arc::new(RwLock::new(VecDeque::with_capacity(24)));
 
         let pipeline = PredictionPipeline::new(config, model, history, 24, 1);
-
-        // 执行预测 → 预期降级到 Baseline
-        let result = pipeline.execute().await;
-        // 因历史缓冲不足，Baseline 也会返回全零向量
-        assert!(result.is_ok(), "降级后基线路径应返回 Ok");
-        let r = result.unwrap();
         assert_eq!(
-            r.enhancement_level,
+            pipeline.current_level(),
+            EnhancementLevel::VmdAttention,
+            "VMD 启用时初始等级应为 VmdAttention"
+        );
+
+        // 第 1 次：VmdAttention 执行失败 → 降级至 AttentionOnly，返回 Err
+        let result = pipeline.execute().await;
+        assert!(result.is_err(), "无 LSTM 模型时各层执行应返回 Err");
+        assert_eq!(
+            pipeline.current_level(),
+            EnhancementLevel::AttentionOnly,
+            "VmdAttention 失败后应降级至 AttentionOnly"
+        );
+
+        // 第 2 次：AttentionOnly → execute_baseline 缺模型 Err → 触底 Baseline
+        let result = pipeline.execute().await;
+        assert!(result.is_err(), "AttentionOnly 失败后仍应返回 Err");
+        assert_eq!(
+            pipeline.current_level(),
             EnhancementLevel::Baseline,
-            "多次降级后等级应为 Baseline"
+            "多次降级后内部等级应触底 Baseline"
         );
     }
 
