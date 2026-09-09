@@ -7,9 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# 国密实现 (gmsm) — 提供 SM2 加密/SM3 哈希/SM4 CBC
+# 国密实现 (gmsm 0.1.0)：SM2 加密 / SM3 / SM4-CBC 为真国密（framework-only 范围内保留的
+# 已实现部分）。SM2 签名 / SM4-GCM / HKDF / ECDH 未实现（平台目标调整 2026-09-09：国密只留
+# 框架不做实现），现由 ring（国际算法）兜底 —— 仅框架占位，不可作国密合规交付。
 gmsm = { version = "0.1.0", optional = true }
-# ring — 始终可用，作为 gmsm 不支持的功能（签名/GCM/HKDF）的兜底实现
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 x509-parser = "0.16"
@@ -29,6 +30,7 @@ tracing.workspace = true
 
 [features]
 default = ["real_gmsm"]
+# real_gmsm 语义 = 引用 gmsm 框架；国密合规实现延后，勿按 feature 名推断生产可用（framework-only，2026-09-09）
 real_gmsm = ["dep:gmsm"]
 fake_gmsm = []  # 仅使用 ring 实现（无 gmsm 依赖）
 

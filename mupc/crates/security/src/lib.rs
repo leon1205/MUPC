@@ -1,6 +1,11 @@
 //! MUPC Security Module - 国密 SM2/SM4 和 TLS 支持
 //!
 //! 提供国密算法实现和 TLS 加密通信能力
+//!
+//! # 状态（平台目标调整 2026-09-09）
+//! 本 crate 为 framework-only：SM3/SM4-CBC（真国密）保留；SM2 签名 / SM4-GCM / HKDF /
+//! ECDH / 安全启动（secure_boot）未实现，注释占位，勿新增实现推进。`real_gmsm` feature
+//! 表示引用 gmsm 框架，不代表国密合规生产可用。
 
 pub mod cert;
 mod errors;
@@ -34,6 +39,7 @@ pub use sm4::{
 pub use tls::{TlsClientConfig, TlsConnector};
 
 // Phase 2+ 重导出
+// 国密/安全启动 = framework-only，勿按 pub API 推断已实现
 pub use alarm::{AlertEvent, AlertManager, AlertSeverity, AlertSink, AlertType};
 pub use audit::{AuditEventType, AuditLogEntry, AuditLogger, AuditSeverity};
 pub use cert_mgr::{CertManager, CertMeta, CrlManager};

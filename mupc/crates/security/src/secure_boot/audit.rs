@@ -1,4 +1,6 @@
 //! 启动审计日志
+//!
+//! 安全启动：存根，仅框架（2026-09-09，不实现）。
 
 use crate::errors::SecurityError;
 use chrono::{DateTime, Utc};

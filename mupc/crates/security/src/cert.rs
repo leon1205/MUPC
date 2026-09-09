@@ -4,6 +4,8 @@
 //!
 //! # gmsm 0.1.0 能力说明
 //! gmsm 0.1.0 不提供 cert/x509 模块，证书功能通过独立实现提供。
+//!
+//! 证书管理：framework-only（国密证书合规延后）。
 
 use crate::errors::{GmError, Result};
 use std::fs;

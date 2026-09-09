@@ -6,6 +6,8 @@
 //! - 支持 SM2 加密/解密
 //! - 不支持签名/验签（gmsm 0.1.0 未提供签名 API）
 //! - 签名功能使用 fake_gmsm (ring) 路径
+//!
+//! SM2：加密/密钥/签名框架。签名走 ring（国际）兜底，非真国密 —— framework-only（2026-09-09）。
 
 use crate::errors::{GmError, Result};
 use base64::Engine;

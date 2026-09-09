@@ -4,6 +4,8 @@
 //!
 //! Phase 2+ 当前实现基于证书链的校验逻辑，
 //! 后续集成 GmSSL 动态库实现完整的 SM2/SM4 加密套件。
+//!
+//! TLS 为 rustls+ring（非国密），framework-only（2026-09-09）。
 
 use crate::cert::Sm2Cert;
 use crate::errors::SecurityError;

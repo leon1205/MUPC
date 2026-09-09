@@ -1,4 +1,6 @@
 //! 防回滚保护
+//!
+//! 安全启动：存根，仅框架（2026-09-09，不实现）。
 
 use crate::errors::SecurityError;
 

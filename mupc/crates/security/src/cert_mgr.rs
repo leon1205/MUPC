@@ -1,6 +1,8 @@
 //! 证书生命周期管理
 //!
 //! 管理 SM2 证书的申请、导入、更新、吊销全生命周期
+//!
+//! 证书管理：framework-only（国密证书合规延后）。
 
 use crate::cert::Sm2Cert;
 use crate::errors::SecurityError;

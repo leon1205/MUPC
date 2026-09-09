@@ -8,6 +8,8 @@
 //!
 //! # 安全警告
 //! IV 严禁重用！
+//!
+//! SM4：CBC 真国密保留；GCM 走 ring 兜底（framework-only，勿作合规交付）。
 
 use crate::errors::{GmError, Result};
 

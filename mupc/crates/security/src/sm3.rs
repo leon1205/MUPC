@@ -4,6 +4,8 @@
 //!
 //! 使用 RustCrypto `sm3` crate（真国密 SM3，支持二进制数据）。
 //! 不再依赖 gmsm 0.1.0 的 `sm3_byte`（其仅接受 &str，无法哈希二进制）。
+//!
+//! SM3：哈希/派生（真国密，保留）。
 
 use crate::errors::{GmError, Result};
 

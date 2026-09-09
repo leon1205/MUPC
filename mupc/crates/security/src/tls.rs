@@ -1,6 +1,8 @@
 //! TLS 连接器模块
 //!
 //! 提供基于 rustls 的 TLS 1.2+ 连接支持
+//!
+//! TLS 为 rustls+ring（非国密），framework-only（2026-09-09）。
 
 use crate::cert::CertStore;
 use crate::errors::Result;
