@@ -21,9 +21,6 @@ pub struct CoreConfig {
     pub ai_engine: AiEngineConfig,
     /// 插件配置
     pub plugins: PluginsConfig,
-    /// 台区总表分相数据源（U-26：台区储能策略 phase 输入）
-    #[serde(default)]
-    pub master_meter: MasterMeterConfig,
     /// 策略引擎配置（v2.24：容量档位 YAML 路径）
     #[serde(default)]
     pub strategy: StrategyConfig,
@@ -31,7 +28,7 @@ pub struct CoreConfig {
     #[serde(default)]
     pub io: IoConfig,
     /// 站级南向统一调度配置（S3 §10.3 south_stations 段；缺省空——未配置站时
-    /// 南向采集走既有 master_meter/pv-load 硬编码，部署行为不变）
+    /// 策略 phase 由 pv/load 南向模拟兜底，部署行为不变。master_meter 段已删除收敛，S3b-1c）
     #[serde(default)]
     pub south_stations: mupc_southd::config::SouthStationsConfig,
 }
@@ -260,118 +257,6 @@ pub struct StrategyConfig {
     pub tai_config_file: String,
 }
 
-/// 台区总表分相数据源配置（U-26）
-///
-/// 总表以 RS485 Modbus 保持寄存器暴露分相量；各量寄存器块定义见
-/// [`MasterMeterRegMap`]。寄存器地址为现场点表占位，默认值仅示例。
-#[derive(Debug, Clone, Deserialize)]
-pub struct MasterMeterConfig {
-    /// 是否启用总表采集（默认关；启用须配真点表）
-    #[serde(default)]
-    pub enabled: bool,
-    /// 串口设备，默认 /dev/ttyS4（BECG-3568 板载 COM4 ↔ 关口表/台区总表）
-    #[serde(default = "default_meter_serial")]
-    pub serial_port: String,
-    /// 波特率
-    #[serde(default = "default_meter_baud")]
-    pub baud_rate: u32,
-    /// 总表从站地址
-    #[serde(default = "default_meter_slave")]
-    pub slave_addr: u8,
-    /// 采集周期（毫秒）
-    #[serde(default = "default_meter_interval")]
-    pub read_interval_ms: u64,
-    /// 分相量寄存器映射（各量三相连续，Int32/Float32 均 2 寄存器/相）
-    #[serde(default)]
-    pub reg_map: MasterMeterRegMap,
-}
-
-/// 分相量寄存器映射（各块起始地址；三相连续读 3×2 寄存器）
-#[derive(Debug, Clone, Deserialize)]
-pub struct MasterMeterRegMap {
-    #[serde(default)]
-    pub p: MeterRegBlock,
-    #[serde(default)]
-    pub q: MeterRegBlock,
-    #[serde(default)]
-    pub pf: MeterRegBlock,
-    #[serde(default)]
-    pub u: MeterRegBlock,
-    #[serde(default)]
-    pub i: MeterRegBlock,
-    /// 总有功（可选，None 时由分相聚合）
-    pub p_total: Option<MeterRegBlock>,
-}
-
-/// 单个量寄存器块定义
-#[derive(Debug, Clone, Deserialize)]
-pub struct MeterRegBlock {
-    /// 起始寄存器地址（A 相）
-    pub addr: u16,
-    /// 数值格式（float32 / int32_scaled）
-    #[serde(default = "default_reg_format")]
-    pub format: mupc_data_processing::meter_regs::RegFormat,
-    /// int32 缩放因子（format=int32_scaled 用）
-    #[serde(default = "default_reg_scale")]
-    pub scale: f64,
-}
-
-// BECG-3568 板载 RS485 COM4(ttyS4) ↔ 关口表/台区总表（核间 10 §12.1 / deploy §九）
-fn default_meter_serial() -> String {
-    "/dev/ttyS4".to_string()
-}
-fn default_meter_baud() -> u32 {
-    9600
-}
-fn default_meter_slave() -> u8 {
-    3
-}
-fn default_meter_interval() -> u64 {
-    1000
-}
-fn default_reg_format() -> mupc_data_processing::meter_regs::RegFormat {
-    mupc_data_processing::meter_regs::RegFormat::Float32
-}
-fn default_reg_scale() -> f64 {
-    0.01
-}
-
-impl Default for MeterRegBlock {
-    fn default() -> Self {
-        Self {
-            addr: 0,
-            format: default_reg_format(),
-            scale: default_reg_scale(),
-        }
-    }
-}
-
-impl Default for MasterMeterRegMap {
-    fn default() -> Self {
-        Self {
-            p: MeterRegBlock::default(),
-            q: MeterRegBlock::default(),
-            pf: MeterRegBlock::default(),
-            u: MeterRegBlock::default(),
-            i: MeterRegBlock::default(),
-            p_total: None,
-        }
-    }
-}
-
-impl Default for MasterMeterConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            serial_port: default_meter_serial(),
-            baud_rate: default_meter_baud(),
-            slave_addr: default_meter_slave(),
-            read_interval_ms: default_meter_interval(),
-            reg_map: MasterMeterRegMap::default(),
-        }
-    }
-}
-
 // ── 默认值函数 ──
 
 fn default_log_level() -> String {
@@ -534,9 +419,8 @@ impl CoreConfig {
         if self.web_api.listen_addr.is_empty() {
             return Err("web_api.listen_addr 不能为空".to_string());
         }
-        // M7/生产安全：transport=modbus_rtu（PCS 主链路）时，串口/从站/波特率须合法，
-        // 且在总表启用时不得复用同一串口（RS485 总线仲裁未实现）。非法值启动即报错，
-        // 避免运行时 open_ctx 才暴露。
+        // M7/生产安全：transport=modbus_rtu（PCS 主链路）时，串口/从站/波特率须合法。
+        // 非法值启动即报错，避免运行时 open_ctx 才暴露。
         if self.intercore.transport == "modbus_rtu" {
             let mb = &self.intercore.modbus_rtu;
             if mb.serial_port.trim().is_empty() {
@@ -555,12 +439,6 @@ impl CoreConfig {
                     "intercore.modbus_rtu.baud_rate 不能为 0（transport=modbus_rtu）".to_string(),
                 );
             }
-            if self.master_meter.enabled && self.master_meter.serial_port == mb.serial_port {
-                return Err(format!(
-                    "transport=modbus_rtu 时 master_meter.serial_port={} 不得与 intercore.modbus_rtu.serial_port 相同（RS485 总线仲裁未实现）",
-                    mb.serial_port
-                ));
-            }
         }
         // TODO(v2.24 M-1)：v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
         // q_i_max）与 intercore transport 驱动点表型号不自动联动——放行任一非
@@ -569,52 +447,14 @@ impl CoreConfig {
         // 注：档位 YAML 的实际加载/校验发生在 startup 装配（fail-fast），此处仅
         // 保留位注释，不读文件、不加逻辑。
         // 实际档位加载/校验在 startup.rs 装配（load_tai_storage_config）处执行（Task 5 落点）。
-        // P1-4/P2-2: 台区总表启用时校验现场前提（独立串口/从站）与寄存器映射有效性
-        if self.master_meter.enabled {
-            self.validate_master_meter()?;
-        }
         // S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置（disabled 整段跳过，不打扰未启用用户）
         self.validate_io()?;
         // S3 §10.3: south_stations 段校验（段内 validate + 跨段：与 PCS 主链路串口互斥、
-        // master_meter 迁移期排他 R-H）。stations 空（未配置站）整段跳过——部署行为不变。
+        // 站内同节点别名互斥）。stations 空（未配置站）整段跳过——部署行为不变。
         if !self.south_stations.stations.is_empty() {
             self.validate_south_stations()?;
         }
         Ok(())
-    }
-
-    /// P1-4/P2-2/N1/N2: 校验台区总表配置（enabled 时）：
-    /// serial_port 非空、slave_addr∈1..=247、采集周期须小于策略数据新鲜度阈值（5s）、
-    /// 与南向 RS485 默认串口分离（总线仲裁未实现）、reg_map 各量地址非 0 且区间互不重叠。
-    fn validate_master_meter(&self) -> Result<(), String> {
-        let mm = &self.master_meter;
-        if mm.serial_port.trim().is_empty() {
-            return Err("master_meter.serial_port 不能为空".to_string());
-        }
-        if !(1..=247).contains(&mm.slave_addr) {
-            return Err(format!(
-                "master_meter.slave_addr={} 须在 1..=247",
-                mm.slave_addr
-            ));
-        }
-        // N1: AiIntegrator 数据新鲜度阈值为 5s——采集周期 ≥5s 会恒判 stale 导致兜底停发
-        // S3a Task 6: 阈值引用 data-processing 共享常量 DATA_FRESHNESS_MS（§10.3 M-6，单一真源）
-        if mm.read_interval_ms >= mupc_data_processing::DATA_FRESHNESS_MS {
-            return Err(format!(
-                "master_meter.read_interval_ms={} 须 < {}（AiIntegrator 数据新鲜度阈值 5s，采集须持续更新）",
-                mm.read_interval_ms,
-                mupc_data_processing::DATA_FRESHNESS_MS
-            ));
-        }
-        // 南向 RS485 默认 /dev/ttyUSB0（历史 USB-485/跨平台防御；BECG-3568 无 ttyUSB0，
-        // 总表默认已迁 /dev/ttyS4，本分支仅对显式写该值或 USB-485 平台生效，勿误删）
-        if mm.serial_port == "/dev/ttyUSB0" {
-            return Err(
-                "master_meter.serial_port 与南向 RS485 默认串口 /dev/ttyUSB0 相同——台区总表须独立于南向 RS485 串口或需总线仲裁（未实现）"
-                    .to_string(),
-            );
-        }
-        Self::validate_reg_map(&mm.reg_map)
     }
 
     /// S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置：
@@ -717,14 +557,9 @@ impl CoreConfig {
     /// ① south_stations.validate()（段内，mupc-southd 实现：id 唯一非空、meter_grid 至多一站、
     ///    port 非空、slave 1..=247、interval_ms>0、meter_grid interval_ms < DATA_FRESHNESS_MS）失败传播；
     /// ② transport=="modbus_rtu"（PCS ttyS0 主链路）时任一 station.port 与 modbus_rtu.serial_port
-    ///    同串口 → Err（RS485 总线仲裁未实现，禁双 master 共总线；串口节点名归一比较）；
-    /// ③ master_meter.enabled（迁移期总表 task 真实轮询占用该口）时任一 station.port 与
-    ///    master_meter.serial_port 同串口 → Err（master_meter 迁移期占口，同禁双 master 共总线；
-    ///    纵深防御：Task 7 装配在 master_meter.enabled 时不启 scheduler，但配置期即报错防未来
-    ///    master 模式也起 scheduler（部分站型）时落入双 master 无仲裁窗口）；
-    /// ④ 迁移期排他 R-H：master_meter.enabled 与 south_stations 含 meter_grid 二选一
-    ///    （收敛后总表统一走 south_stations）；
-    /// ⑤ 站内同节点别名端口互斥：两站 port_node 相同（同物理口）但原始 port 字符串不同
+    ///    同串口 → Err（RS485 总线仲裁未实现，禁双 master 共总线；串口节点名归一比较）。
+    ///    总表收敛 south_stations.meter_grid 后，master_meter 段删除（S3b-1c），无 legacy 占口可排他；
+    /// ③ 站内同节点别名端口互斥：两站 port_node 相同（同物理口）但原始 port 字符串不同
     ///    （"ttyS4" vs "/dev/ttyS4"）→ Err。原因见 Rs485PortBus::normalize_port 双写法支持——
     ///    startup seen_ports 与 scheduler runner 分组均按**原始串**去重/分口，别名拼写会让同物理口
     ///    open 两次并分属两 runner → 同总线并发双 master 帧交错。原始串完全一致（node+raw 都同）
@@ -733,14 +568,7 @@ impl CoreConfig {
         // ① 段内校验（含 meter_grid interval_ms < DATA_FRESHNESS_MS 新鲜度边界）
         self.south_stations.validate()?;
         let ss = &self.south_stations;
-        // ④ R-H 迁移排他：master_meter.enabled 与 south_stations.meter_grid 二选一
-        if self.master_meter.enabled && ss.grid_station().is_some() {
-            return Err(
-                "迁移期排他：master_meter.enabled 与 south_stations.meter_grid 二选一（收敛后总表统一走 south_stations）"
-                    .into(),
-            );
-        }
-        // ⑤ 站内同节点别名端口互斥：遍历已见 (节点名, 原始 port, id)，新站 node 与已见 node
+        // ③ 站内同节点别名端口互斥：遍历已见 (节点名, 原始 port, id)，新站 node 与已见 node
         // 相同但原始 raw 不同 → Err（同物理口别名双拼写）；node+raw 都同（合法同口多从站）→ 跳过。
         let mut seen: Vec<(String, String, String)> = Vec::new();
         for s in &ss.stations {
@@ -756,9 +584,7 @@ impl CoreConfig {
             }
             seen.push((node, s.port.clone(), s.id.clone()));
         }
-        // ② transport=modbus_rtu（PCS 主链路 ttyS0）时站串口不得与其同总线；
-        // ③ master_meter.enabled（迁移期总表 task 占用该口）时站串口不得与其同总线。
-        // 两种互斥同遍历判（②PCS 主链路在 tcp 部署时不生效，③仅在 master_meter.enabled 时生效）。
+        // ② transport=modbus_rtu（PCS 主链路 ttyS0）时站串口不得与其同总线（tcp 部署时不生效）。
         for s in &ss.stations {
             if self.intercore.transport == "modbus_rtu"
                 && port_node(&s.port) == port_node(&self.intercore.modbus_rtu.serial_port)
@@ -768,80 +594,10 @@ impl CoreConfig {
                     s.id, s.port, self.intercore.modbus_rtu.serial_port
                 ));
             }
-            if self.master_meter.enabled
-                && port_node(&s.port) == port_node(&self.master_meter.serial_port)
-            {
-                return Err(format!(
-                    "south_stations 站 {} port {} 与 master_meter.serial_port {} 重复（master_meter 迁移期占用该口，禁双 master 共总线）",
-                    s.id, s.port, self.master_meter.serial_port
-                ));
-            }
         }
         Ok(())
     }
 
-    /// P2-2/N2: 分相量块 p/q/pf/u/i 起始地址非 0 且三相连续 6 寄存器区间互不重叠；
-    /// 可选 p_total（单值 2 寄存器）同样校验且不与其它块重叠。
-    fn validate_reg_map(reg_map: &MasterMeterRegMap) -> Result<(), String> {
-        struct Block {
-            name: &'static str,
-            addr: u16,
-            width: u32, // 分相量三相连续 6 寄存器；p_total 单值 2
-        }
-        let mut blocks = vec![
-            Block {
-                name: "p",
-                addr: reg_map.p.addr,
-                width: 6,
-            },
-            Block {
-                name: "q",
-                addr: reg_map.q.addr,
-                width: 6,
-            },
-            Block {
-                name: "pf",
-                addr: reg_map.pf.addr,
-                width: 6,
-            },
-            Block {
-                name: "u",
-                addr: reg_map.u.addr,
-                width: 6,
-            },
-            Block {
-                name: "i",
-                addr: reg_map.i.addr,
-                width: 6,
-            },
-        ];
-        if let Some(pt) = &reg_map.p_total {
-            blocks.push(Block {
-                name: "p_total",
-                addr: pt.addr,
-                width: 2,
-            });
-        }
-        for b in &blocks {
-            if b.addr == 0 {
-                return Err(format!("master_meter.reg_map.{} addr 不能为 0", b.name));
-            }
-        }
-        for (i, bi) in blocks.iter().enumerate() {
-            for bj in blocks.iter().skip(i + 1) {
-                let ai = bi.addr as u32;
-                let aj = bj.addr as u32;
-                // 半开区间 [addr, addr+width) 重叠判定
-                if ai < aj + bj.width && aj < ai + bi.width {
-                    return Err(format!(
-                        "master_meter.reg_map.{} 与 {} 寄存器区间重叠（{}+{} 与 {}+{} 不得交叠）",
-                        bi.name, bj.name, bi.name, bi.width, bj.name, bj.width
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// 串口节点名归一："/dev/ttyS0" 与 "ttyS0" 都取 "ttyS0"（跨段串口重复比较基准；
@@ -892,10 +648,6 @@ plugins: {}
         assert_eq!(config.intercore.modbus_rtu.response_timeout_ms, 200);
         assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
         assert!(config.ai_engine.local_priority, "本地优先应为部署默认");
-        // 未配置 master_meter 时默认参数（默认关，serial_port 落默认 /dev/ttyS4）
-        assert_eq!(config.master_meter.serial_port, "/dev/ttyS4");
-        assert_eq!(config.master_meter.baud_rate, 9600);
-        assert_eq!(config.master_meter.slave_addr, 3);
     }
 
     #[test]
@@ -935,7 +687,6 @@ plugins: {}
                 search_paths: vec![PathBuf::from("/tmp/plugins")],
                 auto_load: vec!["rs485_plugin".into()],
             },
-            master_meter: MasterMeterConfig::default(),
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
@@ -980,39 +731,11 @@ plugins: {}
                 search_paths: vec![],
                 auto_load: vec![],
             },
-            master_meter: MasterMeterConfig::default(),
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
         };
         assert!(config.validate().is_err());
-    }
-
-    /// P1-4: 总表启用但 serial_port 与南向默认 /dev/ttyUSB0 相同 → validate Err
-    #[test]
-    fn test_validate_master_meter_shared_serial_rejected() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyUSB0"
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.contains("仲裁") || err.contains("独立"),
-            "期望提示串口冲突/总线仲裁，实际: {}",
-            err
-        );
     }
 
     /// M7: transport=modbus_rtu（PCS 生产链路）时 slave_addr 越界 → validate Err
@@ -1042,9 +765,10 @@ plugins: {}
         );
     }
 
-    /// M7: transport=modbus_rtu 与总表同串口 → validate Err（RS485 总线仲裁未实现）
+    /// M7: transport=modbus_rtu 时 serial_port 为空 → validate Err（master_meter 段删除后，
+    /// 保留纯 modbus_rtu 串口自校验覆盖；原与总表同串口跨判随 master_meter 收敛删除）
     #[test]
-    fn test_validate_modbus_rtu_shared_serial_rejected() {
+    fn test_validate_modbus_rtu_serial_empty_rejected() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -1054,171 +778,18 @@ intercore:
   port: 9100
   transport: "modbus_rtu"
   modbus_rtu:
-    serial_port: "/dev/ttyS1"
+    serial_port: ""
     slave_addr: 1
 web_api:
   listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS1"
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(
-            err.contains("不得与 intercore") || err.contains("仲裁"),
-            "期望提示与 intercore.modbus_rtu 串口冲突，实际: {}",
-            err
-        );
-    }
-
-    /// P1-4: 总表启用但 slave_addr 越界 → validate Err
-    #[test]
-    fn test_validate_master_meter_slave_addr_range() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS2"
-  slave_addr: 0
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.validate().is_err());
-    }
-
-    /// P2-2: 总表 reg_map 各量地址重叠 → validate Err
-    #[test]
-    fn test_validate_master_meter_reg_overlap_rejected() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS2"
-  slave_addr: 3
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x100 }
-    pf: { addr: 0x110 }
-    u: { addr: 0x116 }
-    i: { addr: 0x11C }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(err.contains("重叠"), "期望提示寄存器重叠，实际: {}", err);
-    }
-
-    /// P1-4 + P2-2: 独立串口 + 合法且不重叠 reg_map → validate Ok
-    #[test]
-    fn test_validate_master_meter_valid_ok() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS2"
-  slave_addr: 3
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x106 }
-    pf: { addr: 0x10C }
-    u: { addr: 0x112 }
-    i: { addr: 0x118 }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(
-            config.validate().is_ok(),
-            "合法总表配置应通过: {:?}",
-            config.validate()
-        );
-    }
-
-    /// N1: 采集周期 >= 数据新鲜度阈值（5s）→ validate Err（兜底会恒判 stale 停发）
-    #[test]
-    fn test_validate_master_meter_read_interval_too_long() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS2"
-  slave_addr: 3
-  read_interval_ms: 5000
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.contains("read_interval_ms"),
-            "期望提示采集周期与新鲜度阈值冲突，实际: {}",
-            err
-        );
-    }
-
-    /// N2: 可选 p_total 块与分相块重叠 → validate Err
-    #[test]
-    fn test_validate_master_meter_p_total_overlap_rejected() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS2"
-  slave_addr: 3
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x106 }
-    pf: { addr: 0x10C }
-    u: { addr: 0x112 }
-    i: { addr: 0x118 }
-    p_total: { addr: 0x100 }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.contains("重叠"),
-            "期望提示 p_total 与 p 重叠，实际: {}",
+            err.contains("serial_port"),
+            "期望提示 modbus_rtu.serial_port 不能为空，实际: {}",
             err
         );
     }
@@ -1687,7 +1258,7 @@ io:
     }
 
     /// S3 §10.3: south_stations 5 站（含 meter_grid）YAML 解析 + validate 合法
-    /// （transport=tcp 无 PCS 串口互斥；master_meter.disabled 不触发迁移排他）
+    /// （transport=tcp 无 PCS 串口互斥；south_stations 段内自校验通过）
     #[test]
     fn test_south_stations_valid_5_station_passes() {
         let yaml = r#"
@@ -1701,8 +1272,6 @@ web_api:
   listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
-master_meter:
-  enabled: false
 south_stations:
   poll_ms: 1000
   stale_timeout_s: 5
@@ -1786,84 +1355,6 @@ south_stations:
         );
     }
 
-    /// S3 §10.3 跨段 ③: master_meter.enabled + south_stations 非 grid 站（hvac）port 与
-    /// master_meter.serial_port 同节点（站写短名 "ttyS4"，归一后与 "/dev/ttyS4" 同）→ validate Err
-    /// （master_meter 迁移期占口，禁双 master 共总线）。role 用 hvac 避开 ④ R-H（enabled+meter_grid）。
-    #[test]
-    fn test_south_stations_port_conflicts_master_meter() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS4"
-  slave_addr: 3
-  read_interval_ms: 1000
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x106 }
-    pf: { addr: 0x10C }
-    u: { addr: 0x112 }
-    i: { addr: 0x118 }
-south_stations:
-  stations:
-    - { id: hvac_1, role: hvac, port: "ttyS4", slave: 3, interval_ms: 2000 }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.contains("master_meter") && err.contains("重复"),
-            "期望提示站与 master_meter.serial_port 重复（短名归一），实际: {}",
-            err
-        );
-    }
-
-    /// S3 §10.3 跨段 ③: master_meter.enabled + hvac 站 port 为不同 ttyS（ttyS3）→ 合法 Ok
-    /// （master_meter 与 scheduler 站分占不同串口，无共总线冲突）
-    #[test]
-    fn test_south_stations_nonconflicting_with_master_meter_passes() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS4"
-  slave_addr: 3
-  read_interval_ms: 1000
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x106 }
-    pf: { addr: 0x10C }
-    u: { addr: 0x112 }
-    i: { addr: 0x118 }
-south_stations:
-  stations:
-    - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(
-            config.validate().is_ok(),
-            "master_meter 与站分占不同串口应通过: {:?}",
-            config.validate()
-        );
-    }
-
     /// port_node 纯函数边界：空串 → ""；无斜杠短名 → 原样；全路径 → 末段节点名；
     /// Windows COMx → 原样
     #[test]
@@ -1875,81 +1366,7 @@ south_stations:
         assert_eq!(port_node("COM3"), "COM3");
     }
 
-    /// S3 §10.3 跨段 ④（迁移期排他 R-H）: master_meter.enabled + south_stations 含 meter_grid
-    /// → validate Err（收敛后总表统一走 south_stations）
-    #[test]
-    fn test_south_stations_meter_grid_exclusive_with_master_meter_rejected() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS4"
-  slave_addr: 3
-  read_interval_ms: 1000
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x106 }
-    pf: { addr: 0x10C }
-    u: { addr: 0x112 }
-    i: { addr: 0x118 }
-south_stations:
-  stations:
-    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.contains("迁移期排他") && err.contains("二选一"),
-            "期望提示迁移期排他（master_meter 与 meter_grid 二选一），实际: {}",
-            err
-        );
-    }
-
-    /// S3 §10.3: 只配 master_meter（south_stations 空）→ 合法（既有总表路径不受影响）
-    #[test]
-    fn test_master_meter_only_without_south_stations_passes() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
-ai_engine: {}
-plugins: {}
-master_meter:
-  enabled: true
-  serial_port: "/dev/ttyS4"
-  slave_addr: 3
-  read_interval_ms: 1000
-  reg_map:
-    p: { addr: 0x100 }
-    q: { addr: 0x106 }
-    pf: { addr: 0x10C }
-    u: { addr: 0x112 }
-    i: { addr: 0x118 }
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.south_stations.stations.is_empty());
-        assert!(
-            config.validate().is_ok(),
-            "只配 master_meter（south_stations 空）应通过: {:?}",
-            config.validate()
-        );
-    }
-
-    /// S3 §10.3: 只配 south_stations meter_grid（master_meter.disabled）→ 合法（新迁移态）
+    /// S3 §10.3: 只配 south_stations meter_grid（总表收敛后唯一 grid 形态）→ 合法
     #[test]
     fn test_south_stations_grid_only_passes() {
         let yaml = r#"
@@ -1963,8 +1380,6 @@ web_api:
   listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
-master_meter:
-  enabled: false
 south_stations:
   stations:
     - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
@@ -1973,7 +1388,7 @@ south_stations:
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
-            "只配 south_stations meter_grid（master_meter.disabled）应通过: {:?}",
+            "只配 south_stations meter_grid 应通过: {:?}",
             config.validate()
         );
     }
@@ -2018,8 +1433,6 @@ web_api:
   listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
-master_meter:
-  enabled: false
 south_stations:
   stations:
     - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 6000 }
@@ -2048,8 +1461,6 @@ web_api:
   listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
-master_meter:
-  enabled: false
 south_stations:
   stations:
     - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
@@ -2084,8 +1495,6 @@ web_api:
   listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
-master_meter:
-  enabled: false
 south_stations:
   stations:
     - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
