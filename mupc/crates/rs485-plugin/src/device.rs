@@ -163,6 +163,17 @@ impl Rs485Device {
                 return Err(e);
             }
 
+            // 清除非阻塞标志（P0-1 根因，2026-09-09 项目审查）：
+            // open 用 O_NONBLOCK 仅防 open 本身因载波等待阻塞；若保持非阻塞，则
+            // recv_frame 的 VMIN/VTIME 阻塞弱超时读不生效——read 无数据即返回 EAGAIN，
+            // 任何 Modbus 真从站请求-响应恒超时（南向真机采集失败根因）。
+            // configure_port 已置 CLOCAL|CREAD，read 回到阻塞语义后由 termios
+            // VMIN=0/VTIME 控制读超时。
+            let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if fl >= 0 {
+                let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK) };
+            }
+
             *self.port_fd.lock() = Some(fd);
             self.opened.store(true, Ordering::SeqCst);
             *self.status.lock() = DeviceStatus::Online;
