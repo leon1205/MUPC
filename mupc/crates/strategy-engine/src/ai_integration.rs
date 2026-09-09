@@ -402,25 +402,21 @@ impl AiIntegrator {
 
     /// 执行决策并下发核间指令
     ///
-    /// 默认：调用 full_decision_cycle() 获取 ActionOutput，p_ref + k_droop →
-    /// 通过 IntercoreClient 发送到实时控制模块（v2.7）。
-    /// 本地优先模式（local_priority）：AI 旁路运行（仍决策仅作参考，不下发），
-    /// 控制以下发本地台区储能治理策略（分相 P/Q）为准。
+    /// 默认 = 本地台区储能治理分相 P/Q 下发（生产唯一模式，AI 引擎暂停 2026-09-09）；
+    /// AI 决策分支暂停，观测空间维度重构 + 模型恢复加载后恢复。
     pub async fn dispatch_ai_decision(&self) -> Result<(), AiEngineError> {
-        // 本地策略优先模式：AI 旁路，控制以本地策略为准
+        // 本地策略优先 = 生产唯一模式（平台目标调整 2026-09-09：AI 引擎暂停）。
+        // AI 彻底停用：不再旁路决策（原 full_decision_cycle 参考块已删——模型不加载，
+        // 观测停采，无有效输入），每拍唯一动作 = 本地台区储能治理下发。
         if *self.local_priority.read().await {
-            if let Some(manager) = self.model_manager.read().await.as_ref() {
-                match manager.full_decision_cycle().await {
-                    Ok(a) => tracing::debug!(
-                        "本地优先模式：AI 旁路决策 p_ref={}, k_droop={}（仅参考，不下发）",
-                        a.p_ref,
-                        a.k_droop
-                    ),
-                    Err(e) => tracing::debug!("本地优先模式：AI 旁路决策失败（忽略）: {}", e),
-                }
-            }
             return self.run_fallback_strategies().await;
         }
+
+        // ===== AI 决策分支：暂停（平台目标调整 2026-09-09）=====
+        // 此路径仅 local_priority=false 可达；AI 暂停期恒 true，故生产不可达。
+        // 代码保留为框架（异常检测/应急/安全闸门/双参下发），观测空间数据维度
+        // 重构 + 模型恢复加载后再启用。模型未加载时下方 ModelNotLoaded Err 已兜底，
+        // 不会静默误下发。
 
         // v2.9 新增：异常检测与应急策略
         {
