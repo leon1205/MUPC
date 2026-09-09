@@ -35,6 +35,11 @@ pub struct CoreConfig {
     /// 部署行为不变，仅端口不再硬编码 2404、可经 config 指定。审查 R2-A2）
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// MQTT 桥接开关（审查 R2-B5 §mqtt_bridge 段；缺省双 false——未启用不 spawn，不再用
+    /// Default（mqtt.example.com:8883 + dummy 证书）无条件真连假域名。端点/证书细节仍走
+    /// mupc_mqtt_bridge crate Default）
+    #[serde(default)]
+    pub mqtt_bridge: MqttBridgeConfig,
 }
 
 /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled——未配置 io 段部署行为不变）
@@ -281,6 +286,28 @@ impl Default for GatewayConfig {
         Self {
             listen_addr: default_gateway_addr(),
             listen_port: default_gateway_port(),
+        }
+    }
+}
+
+/// MQTT 桥接配置（审查 R2-B5：north_enabled/local_enabled 缺省双 false——未启用不 spawn，
+/// 不再用 Default 真连 mqtt.example.com 假域名）。手动实现 `Default`（不走 derive），使
+/// `#[serde(default)]` 缺省整段配置时落到 false，与历史（无条件 spawn）行为变更对齐。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MqttBridgeConfig {
+    /// 北向 emqx 桥接是否启用（缺省 false）
+    #[serde(default)]
+    pub north_enabled: bool,
+    /// 本地 mosquitto 桥接是否启用（缺省 false）
+    #[serde(default)]
+    pub local_enabled: bool,
+}
+
+impl Default for MqttBridgeConfig {
+    fn default() -> Self {
+        Self {
+            north_enabled: false,
+            local_enabled: false,
         }
     }
 }
@@ -688,6 +715,33 @@ plugins: {}
         // 未配置 gateway 段时缺省 0.0.0.0:2404（审查 R2-A2：端口读 config 且向后兼容）
         assert_eq!(config.gateway.listen_addr, "0.0.0.0");
         assert_eq!(config.gateway.listen_port, 2404);
+        // 未配置 mqtt_bridge 段时缺省双 false（审查 R2-B5：不 spawn，不再真连假域名）
+        assert!(!config.mqtt_bridge.north_enabled);
+        assert!(!config.mqtt_bridge.local_enabled);
+    }
+
+    /// R2-B5: mqtt_bridge 段显式配置可解析（north/local_enabled 生效）
+    #[test]
+    fn test_mqtt_bridge_enabled_config() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {}
+plugins: {}
+mqtt_bridge:
+  north_enabled: true
+  local_enabled: false
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.mqtt_bridge.north_enabled);
+        assert!(!config.mqtt_bridge.local_enabled);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -731,6 +785,7 @@ plugins: {}
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
             gateway: GatewayConfig::default(),
+            mqtt_bridge: MqttBridgeConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -776,6 +831,7 @@ plugins: {}
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
             gateway: GatewayConfig::default(),
+            mqtt_bridge: MqttBridgeConfig::default(),
         };
         assert!(config.validate().is_err());
     }

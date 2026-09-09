@@ -427,8 +427,9 @@ pub async fn initialize_all(
     // TODO (Phase 2+): 加载 TLS 证书和 SM2/SM4 密钥
     // 当前: mupc-security 模块无 SecurityModule 类型
     tracing::info!("安全模块初始化 (stub): cert_dir={}", config.system.cert_dir.display());
-    // 占位：security 模块无 SecurityModule 实例，国密/TLS 未真正运行（Phase 2+）
-    coord.register_service("security", ServiceStatus::Running);
+    // 占位 stub：security 模块无 SecurityModule 实例，国密/TLS 未真正运行（Phase 2+）
+    // ——不谎报 Running（审查 R2-B5）
+    coord.register_service("security", ServiceStatus::Stopped);
 
     // ── 3. 持久化存储 ──
     tracing::info!("[03/14] 初始化持久化存储...");
@@ -989,37 +990,58 @@ pub async fn initialize_all(
 
     // ── 13. MQTT 桥接 ──
     tracing::info!("[13/14] 初始化 MQTT 桥接...");
-    let local_mqtt = mupc_mqtt_bridge::LocalMqttClient::new(
-        &mupc_mqtt_bridge::LocalMqttConfig::default(),
-    )
-    .map(Arc::new)
-    .inspect_err(|e| tracing::warn!("本地 MQTT 客户端初始化失败: {}", e))
-    .ok();
-    let north_mqtt = mupc_mqtt_bridge::NorthMqttClient::new(
-        &mupc_mqtt_bridge::NorthMqttConfig::default(),
-    )
-    .map(Arc::new)
-    .inspect_err(|e| tracing::warn!("北向 MQTT 客户端初始化失败: {}", e))
-    .ok();
-
-    // 启动 MQTT 事件循环（此前创建后立即 drop，从不运行）
-    if let Some(local) = local_mqtt {
-        guard.0.push(tokio::spawn(async move {
-            let _ = local.run().await;
-        }));
+    // 审查 R2-B5：由 config.mqtt_bridge.*_enabled 门控。缺省双 false——不再用 Default
+    // (mqtt.example.com:8883 + dummy 证书) 无条件构造并 spawn 假域名；启用走原连接逻辑。
+    let mut mqtt_spawned = false;
+    if config.mqtt_bridge.local_enabled {
+        if let Some(local) = mupc_mqtt_bridge::LocalMqttClient::new(
+            &mupc_mqtt_bridge::LocalMqttConfig::default(),
+        )
+        .map(Arc::new)
+        .inspect_err(|e| tracing::warn!("本地 MQTT 客户端初始化失败: {}", e))
+        .ok()
+        {
+            guard.0.push(tokio::spawn(async move {
+                let _ = local.run().await;
+            }));
+            mqtt_spawned = true;
+        }
+    } else {
+        tracing::debug!("本地 MQTT 未启用（config.mqtt_bridge.local_enabled=false），跳过");
     }
-    if let Some(north) = north_mqtt {
-        guard.0.push(tokio::spawn(async move {
-            let _ = north.run().await;
-        }));
+    if config.mqtt_bridge.north_enabled {
+        if let Some(north) = mupc_mqtt_bridge::NorthMqttClient::new(
+            &mupc_mqtt_bridge::NorthMqttConfig::default(),
+        )
+        .map(Arc::new)
+        .inspect_err(|e| tracing::warn!("北向 MQTT 客户端初始化失败: {}", e))
+        .ok()
+        {
+            guard.0.push(tokio::spawn(async move {
+                let _ = north.run().await;
+            }));
+            mqtt_spawned = true;
+        }
+    } else {
+        tracing::warn!(
+            "mqtt-bridge 北向未启用（config.mqtt_bridge.north_enabled=false），跳过——不再默认连 mqtt.example.com 假域名"
+        );
     }
-    coord.register_service("mqtt_bridge", ServiceStatus::Running);
+    coord.register_service(
+        "mqtt_bridge",
+        if mqtt_spawned {
+            ServiceStatus::Running
+        } else {
+            ServiceStatus::Stopped
+        },
+    );
 
     // ── 14. 近场无线 ──
     tracing::info!("[14/14] 初始化近场无线...");
     // TODO (Phase 2+): 实例化 NoOp 无线驱动
-    // 占位：无线驱动未实例化，ECDH/链路加密未真正运行（Phase 2+）
-    coord.register_service("wireless", ServiceStatus::Running);
+    // 占位 stub：无线驱动未实例化，ECDH/链路加密未真正运行（Phase 2+）
+    // ——不谎报 Running（审查 R2-B5）
+    coord.register_service("wireless", ServiceStatus::Stopped);
 
     tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 2);
 

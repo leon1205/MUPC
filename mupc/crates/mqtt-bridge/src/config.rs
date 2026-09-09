@@ -13,6 +13,9 @@ pub struct MqttConfig {
 /// 本地 mosquitto 配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LocalMqttConfig {
+    /// 是否启用本端桥接（审查 R2-B5：缺省 false——未启用不 spawn）
+    #[serde(default)]
+    pub enabled: bool,
     pub broker_addr: String,
     pub client_id: String,
     pub clean_session: bool,
@@ -23,6 +26,7 @@ pub struct LocalMqttConfig {
 impl Default for LocalMqttConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             broker_addr: "127.0.0.1:1883".to_string(),
             client_id: "mupc-local".to_string(),
             clean_session: true,
@@ -35,6 +39,9 @@ impl Default for LocalMqttConfig {
 /// 北向 emqx 配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NorthMqttConfig {
+    /// 是否启用北向桥接（审查 R2-B5：缺省 false——未启用不真连 mqtt.example.com 假域名）
+    #[serde(default)]
+    pub enabled: bool,
     pub broker_addr: String,
     pub client_id: String,
     pub keepalive_secs: u64,
@@ -45,6 +52,7 @@ pub struct NorthMqttConfig {
 impl Default for NorthMqttConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             broker_addr: "mqtt.example.com:8883".to_string(),
             client_id: "mupc-north".to_string(),
             keepalive_secs: 60,
