@@ -39,6 +39,11 @@ pub struct AiIntegrator {
     /// 保留最近值不置 None）。源 ts 放此处（BatteryData 无 ts、改 DataPackage 会破全仓 ~33 构造点）；
     /// soc 语义 0-100 百分数。
     bms_soc: RwLock<Option<(f64, std::time::Instant)>>,
+    /// S3b-1d 双源皆失降级态可观测：SOC 双源（BMS + 核间 REG_SOC）皆非 fresh、resolve 回落
+    /// existing 冻结值时，节流 warn（每 ~30s 一次防刷屏）告知运维"控制基于非实时 SOC"。
+    /// 正常源接管后（bms/intercore fresh）下一拍清 None，复位节流计时。
+    /// std Mutex（非 tokio——纯同步判时间差，无跨 await 持有）。
+    soc_stale_warned: std::sync::Mutex<Option<std::time::Instant>>,
     /// 台区储能治理策略（AI 失效兜底）
     tai_storage: Option<Arc<TaiStorageStrategy>>,
     /// 本地策略优先模式（配置或 Web API 可切换）：AI 旁路运行（仍决策作参考，不下发），
@@ -53,6 +58,8 @@ impl AiIntegrator {
     /// S3a Task 6: 值引用 data-processing 共享常量 `DATA_FRESHNESS_MS`（§10.3 M-6，单一真源消除三处漂移）
     const DATA_STALE_AFTER: std::time::Duration =
         std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS);
+    /// S3b-1d：双源皆失沿用冻结 SOC 的节流告警间隔（防每 dispatch 周期刷屏）
+    const SOC_STALE_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
     pub fn new() -> Self {
         Self {
@@ -65,6 +72,7 @@ impl AiIntegrator {
             latest_data: Arc::new(RwLock::new(None)),
             last_data_ts: RwLock::new(None),
             bms_soc: RwLock::new(None),
+            soc_stale_warned: std::sync::Mutex::new(None),
             tai_storage: None,
             local_priority: RwLock::new(false),
             validator: RwLock::new(None),
@@ -180,13 +188,32 @@ impl AiIntegrator {
         } else {
             None
         };
+        let now = std::time::Instant::now();
         let resolved = resolve_soc_source(
             bms,
             intercore,
             data.battery.soc,
-            std::time::Instant::now(),
+            now,
             Self::DATA_STALE_AFTER,
         );
+        if is_dual_source_lost(bms, intercore, data.battery.soc, now, Self::DATA_STALE_AFTER) {
+            // 双源皆失：resolve 沿用冻结 existing（非实时 SOC），soc_protect 剪带基于旧值。
+            // 节流 warn（每 30s 一拍）让运维可见"控制正基于非实时 SOC"，避免全程静默降级。
+            let now_i = std::time::Instant::now();
+            let mut last = self.soc_stale_warned.lock().unwrap();
+            if last.map_or(true, |t| {
+                now_i.saturating_duration_since(t) > Self::SOC_STALE_WARN_INTERVAL
+            }) {
+                tracing::warn!(
+                    soc = ?resolved,
+                    "SOC 双源皆失（BMS 超期 + 核间不可达/超期），沿用冻结值驱动保护——请检查 BMS 站与核间 SOC 通路"
+                );
+                *last = Some(now_i);
+            }
+        } else {
+            // 任一源 fresh（或纯无 SOC 态）：降级态解除——复位节流计时（正常源接管后立即恢复可观测性）
+            *self.soc_stale_warned.lock().unwrap() = None;
+        }
         data.battery.soc = resolved;
     }
 
@@ -562,6 +589,25 @@ fn resolve_soc_source(
     existing
 }
 
+/// 双源皆失降级态判定（纯逻辑，可单测，S3b-1d）：BMS 与核间均非 fresh（无/超期）时 resolve 将
+/// 回落 existing 冻结值；此时若 existing 非 None（有旧 SOC 在驱动保护）→ 降级态成立，应节流 warn。
+/// existing 为 None 是正常无 SOC 态（启动早期/纯无 SOC 场景），非降级残留，不 warn。
+fn is_dual_source_lost(
+    bms: Option<(f64, std::time::Instant)>,
+    intercore: Option<(f64, std::time::Instant)>,
+    existing: Option<f64>,
+    now: std::time::Instant,
+    stale_after: std::time::Duration,
+) -> bool {
+    if existing.is_none() {
+        return false;
+    }
+    let bms_fresh = bms.map_or(false, |(_, ts)| now.saturating_duration_since(ts) <= stale_after);
+    let intercore_fresh =
+        intercore.map_or(false, |(_, ts)| now.saturating_duration_since(ts) <= stale_after);
+    !bms_fresh && !intercore_fresh
+}
+
 /// AI 引擎状态信息（供 web-api 序列化）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiEngineStatusInfo {
@@ -726,6 +772,67 @@ mod tests {
             resolve_soc_source(None, None, Some(30.0), now, stale),
             Some(30.0)
         );
+    }
+
+    /// S3b-1d 双源皆失降级态判定：仅当 BMS 与核间皆非 fresh 且 existing 非 None（冻结 SOC 在驱动
+    /// 保护）时才判降级态（应 warn）。任一源 fresh → 非降级（有实时值）；existing None → 纯无 SOC
+    /// 正常态，不 warn。
+    #[test]
+    fn dual_source_lost_detects_frozen_soc_guarded() {
+        let now = std::time::Instant::now();
+        let fresh_ts = now - std::time::Duration::from_secs(1);
+        let stale_ts = now - std::time::Duration::from_secs(10);
+        let stale = std::time::Duration::from_secs(5);
+        // 双 fresh → 非降级（BMS 实时源在）
+        assert!(!is_dual_source_lost(
+            Some((65.5, fresh_ts)),
+            Some((42.0, fresh_ts)),
+            Some(30.0),
+            now,
+            stale
+        ));
+        // BMS fresh（核间无/超期）→ 非降级
+        assert!(!is_dual_source_lost(
+            Some((65.5, fresh_ts)),
+            None,
+            Some(30.0),
+            now,
+            stale
+        ));
+        // 核间 fresh（BMS 超期）→ 非降级（实时回落已接管）
+        assert!(!is_dual_source_lost(
+            Some((65.5, stale_ts)),
+            Some((42.0, fresh_ts)),
+            Some(30.0),
+            now,
+            stale
+        ));
+        // 双超期 + existing Some → 降级态（冻结 SOC 驱动保护，须 warn）
+        assert!(is_dual_source_lost(
+            Some((65.5, stale_ts)),
+            Some((42.0, stale_ts)),
+            Some(30.0),
+            now,
+            stale
+        ));
+        // 双源从未注入（None）+ existing Some → 降级态
+        assert!(is_dual_source_lost(
+            None,
+            None,
+            Some(30.0),
+            now,
+            stale
+        ));
+        // 双超期 + existing None → 纯无 SOC 正常态，不 warn
+        assert!(!is_dual_source_lost(
+            Some((65.5, stale_ts)),
+            Some((42.0, stale_ts)),
+            None,
+            now,
+            stale
+        ));
+        // 双源从未注入 + existing None → 纯无 SOC 正常态（启动早期）
+        assert!(!is_dual_source_lost(None, None, None, now, stale));
     }
 
     /// S3b-1b SOC 双源（04 §2.11.1）：BMS 站 soc 注入后 fresh → apply_soc_source 覆盖为 BMS 值。
