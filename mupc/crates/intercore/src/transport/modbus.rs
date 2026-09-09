@@ -185,7 +185,9 @@ impl ModbusRtuTransport {
         *self.started.write().await = false;
         self.mode.store(0xFF, Ordering::Relaxed);
         // B3：离线清 last_run_state（None → DO1 灭），防离线期 DO1/DO2 同亮矛盾
-        *self.last_run_state.write().unwrap() = None;
+        *self.last_run_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// FC06 写单寄存器（PCS 逐写：一次一寄存器，无批量写）。成功→在线，失败→离线。
@@ -375,7 +377,9 @@ impl ModbusRtuTransport {
                             self.mark_online().await;
                             // 维护 last_run_state：读到合法 0..=3 后更新（DO1 运行灯数据源；
                             // 越界/坏读数按 M9a 判无效、不更新）。std RwLock 写不跨 await，安全。
-                            *self.last_run_state.write().unwrap() = Some(st);
+                            *self.last_run_state
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(st);
                             // M1 停机观测：PCS 停机（1013=0）而 MUPC 此前已下发运行 →
                             // 远端停机（保护跳闸/人工）。保守策略：**不动 started 缓存、不自动
                             // 重发 500=1**（PCS 启停 500 电平/边沿语义待厂方确认，自动重启可能造成
@@ -539,7 +543,9 @@ impl IntercoreTransport for ModbusRtuTransport {
 
     fn last_run_state(&self) -> Option<u16> {
         // std RwLock：同步 getter 供上层/DO 驱动在异步上下文外安全读取
-        *self.last_run_state.read().unwrap()
+        *self.last_run_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     async fn authorize_restart(&self) -> Result<(), String> {
