@@ -54,7 +54,7 @@ AI 引擎失效:
 | **本地优先模式** | **台区储能治理（AI 旁路参考，不下发）** | 策略内置边界检查 | **部署默认**（`ai_engine.local_priority` 默认 true）；Web API `/api/v1/strategy-mode` 可切换 |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
 
-**本地优先模式（部署默认）**：`ai_engine.local_priority` 默认 `true`（代码 serde 默认 + 部署配置显式声明），开机即生效；也可经 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。需 AI 智能控制时置 `local_priority=false`。（2026-09-09 平台调整：现为默认策略；AI 恢复后回兜底位）
+**本地优先模式（部署默认）**：`ai_engine.local_priority` 默认 `true`（代码 serde 默认 + 部署配置显式声明），开机即生效；也可经 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。（2026-09-09 平台调整：AI 引擎暂停，模型不加载、决策循环仅本地策略——本句「仍加载/仍运行决策循环」为暂停前旧表述，保留以述原文）需 AI 智能控制时置 `local_priority=false`。（2026-09-09 平台调整：现为默认策略；AI 恢复后回兜底位）
 
 ### 1.3 模块依赖关系
 
