@@ -937,7 +937,7 @@ fn pad_or_truncate(vec: &[f64], target_len: usize) -> Vec<f64> {
     result
 }
 
-/// 验证输入向量无 NaN/Inf（PRD 9.5 安全要求）
+/// 验证输入向量无 NaN/Inf（PRD §10.5 安全要求）
 ///
 /// 在将输入向量传入 RKNN Runtime 之前调用，防止异常值导致 NPU 推理异常。
 /// 检测到 NaN 或 Inf 时返回错误并记录 ERROR 日志。
@@ -2625,7 +2625,7 @@ impl RknnRuntime {
 
     /// 加载模型（spawn_blocking 异步封装）
     ///
-    /// 加载前进行 SHA256 完整性校验（PRD 9.5 安全要求），校验失败拒绝加载并记录 ERROR。
+    /// 加载前进行 SHA256 完整性校验（PRD §10.5 安全要求），校验失败拒绝加载并记录 ERROR。
     /// SHA256 校验通过后调用 rknn_init 加载模型到 NPU。
     pub async fn load(&self) -> Result<(), AiEngineError>;
 
@@ -3193,7 +3193,7 @@ impl ParetoWeightOptimizer {
 
 **设计目标**：在 RL 决策后、ActionValidator 前插入**物理模型前置过滤器**，基于戴维南等效电路预测电压变化，提前拒绝高风险动作。
 
-**设计原则**（PRD §3.7.1）：
+**设计原则**（PRD §6.10）：
 1. **轻量化**：单次检查 < 5ms（远小于 120ms 总预算）
 2. **保守优先**：预测失败回退到上一有效动作
 3. **可证明安全**：基于简化电路方程，非黑盒
