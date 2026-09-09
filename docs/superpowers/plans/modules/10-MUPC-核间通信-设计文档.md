@@ -1370,7 +1370,7 @@ io:
 | v1.0 | 从 PRD v1.0、技术设计 v1.1 和代码库 intercore 实现合并整理 |
 | v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |
 | v2.1 | TCP 回读 SOC（N3，U-26 延伸）：TcpTransport 加回读接收循环（独立连接读实时模块 DataUpload 帧 → battery_soc），`IntercoreTransport.latest_soc()` 查询，AiIntegrator 在总表模式（battery 无 SOC）时以核间 SOC 注入；Modbus 备选不承载（None） |
-| v2.2 | PCS 真实协议 V1.3 取代 §11.4~11.6 假设点表：实时控制模块=两级式 PCS，`transport=modbus_rtu` 直连 PCS（RS485 19200 N-8-1，高 8/低 8 互换）；分相下行→PCS 模式2+单相 P/Q(±25 裁剪)，恒功率下行→模式0+1001/1002(k_droop 忽略)；SOC/心跳读 3 区 1010/1013 |
+| v2.2 | PCS 真实协议 V1.3 取代附录 B 历史假设点表（原 §11.4-11.6，PCS 节见 §11.9）：实时控制模块=两级式 PCS，`transport=modbus_rtu` 直连 PCS（RS485 19200 N-8-1，高 8/低 8 互换）；分相下行→PCS 模式2+单相 P/Q(±25 裁剪)，恒功率下行→模式0+1001/1002(k_droop 忽略)；SOC/心跳读 3 区 1010/1013 |
 | v2.3 | BECG-3568 现场接线契约（S1）：PCS 主链路默认节点 /dev/ttyS1→/dev/ttyS0，站级 485 全口分配表（RS485-1..6 ↔ ttyS0/S2-S6 ↔ 设备），DI/DO 编号与接线落 deploy.md 现场接线章 |
 | v2.4 | DI/DO 安全联锁（S2）：PCS 停机原语（500=0）+ stopped_latched 挡自动重启（双层：transport 兜底 + 上层抑制）；mupc-io GPIO 抽象（sysfs 先落地/gpiod 桩）；core-bin interlock 联锁控制器（急停/水浸/消防→pcs_stop，门禁仅事件；DB 持久化锁存 + Web release）；DO 运行/故障灯驱动；core_config io: 段 |
 | v2.5 | S2 实施细化（评审闭环）：release 语义补 `stop_failed` 门控（§12.3 释放状态机：auto 释放须停机已确认，stop_failed 期间仅人工 Web release 放行 + 审计事件）；intercore `authorize_restart` 单次授权旁路 S-4 停机守卫（restore(true)/S-4 消费即清位）；interlock 状态机去抖归装配（§12.3 debounce 入每 DI 采样层） |

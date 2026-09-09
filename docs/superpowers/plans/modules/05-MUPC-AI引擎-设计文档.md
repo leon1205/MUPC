@@ -335,7 +335,7 @@ pub struct LstmOutput {
 /// 概率负荷预测输出（D10 数据流）
 pub struct ProbabilisticLoadOutput {
     pub timestamp: i64,
-    pub quantiles: Vec<QuantilePrediction>,  // P10/P50/P90 × 15 步
+    pub quantiles: Vec<QuantilePrediction>,  // P10/P50/P90（当前单步）
     pub base_load: f32,
     pub shock_probability: f64,
     pub confidence: f64,   // 基于分位数间距，非预测序列方差
@@ -773,9 +773,9 @@ pub struct FusedSystemState {
     pub q_realtime_margin: f64,
 
     // ------- D2: 预测数据 (2 个向量字段) -------
-    /// 未来 15-30 分钟光伏预测 (kW)，默认 15 维
+    /// 未来 15 步 × 15 分钟（225 分钟前瞻）光伏预测 (kW)，默认 15 维
     pub pv_forecast_15min: Vec<f64>,
-    /// 未来 15-30 分钟负荷预测 (kW)，默认 15 维
+    /// 未来 15 步 × 15 分钟（225 分钟前瞻）负荷预测 (kW)，默认 15 维
     pub load_forecast_15min: Vec<f64>,
 
     // ------- D3: 电价 (3 RL + 2 aux = 5 字段) -------
@@ -1121,6 +1121,8 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 > **下沉说明：** load_shedding 下沉至 strategy-engine（需量控制策略独立执行），pv_limit 下沉至 strategy-engine（防逆流策略独立执行），confidence 保留在 ModelOutput 中（action_validator 内部校验使用）。AI 引擎仅通过核间通信下发 p_ref + k_droop 至实时控制模块。
 
 ### 4.6 ActionOutput 结构体
+
+> **注**：ActionOutput 结构体保留 load_shedding/pv_limit/confidence 三字段（兼容 legacy），但 parse_action_output 双参数解析恒输出 p_ref/k_droop 有效、其余置 0.0/1.0/0.5——AI 决策仅 2 维。
 
 ```rust
 /// 强化学习决策输出（2 维动作）
@@ -1508,6 +1510,8 @@ R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处�
          - w7 * R_smooth                        // 下垂系数平滑惩罚
          - w8 * R_safety_override               // 安全覆盖惩罚
 ```
+
+> **注**：现行代码 `calc_agri_v2_8`（reward_calculator.rs）在上式 w1~w8 主项基础上另叠加附加项（未在上式展开）：电压斜率用动态权重 `w6_dynamic`、过载/低 SOC 塑造奖励 `r_shaping`、SOC 均衡 `r_soc_balance`、冲击负荷预备度奖励 `calc_shock_readiness_reward`（对应 seasonal_load_management 的 w9 冲击预备度）与状态改善奖励 `calc_state_improvement_reward`。
 
 **P-Q 协同度奖励 R_PQ_coordination：**
 
@@ -1923,6 +1927,8 @@ fn reward_ultra_green(
 | VPP MODE-04 | 1.0 (辅助收益) | 2.0 (响应精度) | 1.0 (延迟惩罚) | - | - |
 | 极致绿色 MODE-05 | 1.0 (绿电消纳) | 1.0 (碳减排) | - | - | - |
 
+> **注**：上表 w1-w5 列仅为示意子集。代码 `SceneWeights`（`ai-engine/src/config.rs`）字段名与场景对应为 `seasonal_load_management:[f64;9]`（w1~w9，w9 冲击预备度，语义见 §5.3 权重表与 config.rs 注释）、`commercial_arbitrage`/`demand_control`/`virtual_power_plant`/`ultra_green` 各 3/2/3/2 维；`lookup()` 返回整组权重数组。
+
 权重映射查找逻辑：
 
 ```rust
@@ -1930,11 +1936,11 @@ impl SceneWeights {
     /// 根据运行场景返回对应的权重数组
     pub fn lookup(&self, mode: RunningMode) -> &[f64] {
         match mode {
-            RunningMode::SeasonalLoadManagement => &self.agricultural_irrigation[..3],
-            RunningMode::CommercialArbitrage => &self.commercial_arbitrage[..2],
-            RunningMode::DemandControl => &self.demand_control[..2],
-            RunningMode::VirtualPowerPlant => &self.virtual_power_plant[..3],
-            RunningMode::UltraGreen => &self.ultra_green[..2],
+            RunningMode::SeasonalLoadManagement => &self.seasonal_load_management,
+            RunningMode::CommercialArbitrage => &self.commercial_arbitrage,
+            RunningMode::DemandControl => &self.demand_control,
+            RunningMode::VirtualPowerPlant => &self.virtual_power_plant,
+            RunningMode::UltraGreen => &self.ultra_green,
         }
     }
 }
@@ -2054,6 +2060,8 @@ uncertainty()       (15 维，接通数据流)
 ```
 
 #### 5.10.4 详细设计
+
+> **设计目标/待实现**：本节描述的 15 步分位数结构（quantile_steps/StepQuantiles）当前未实现——现行 `ProbabilisticLoadOutput`（§2.4.3）为单步 P10/P50/P90 三值。厂方/训练管线多步预测需求落地时再行扩展。
 
 **LoadCovariates：**
 
@@ -4062,7 +4070,7 @@ tools/mssa_optimizer/
 ├── search_space.py               # 搜索空间定义与编码/解码 (~150 行)
 ├── objective.py                  # 目标函数（调用训练+评估）(~200 行)
 ├── config.py                     # 配置加载/校验 (~100 行)
-├── output.py                     # JSON 输出（对齐 PRD 7.4.2）(~80 行)
+├── output.py                     # JSON 输出（对齐 PRD §14.3.2 MSSA 搜索结果 JSON Schema）(~80 行)
 ├── mssa_cache.json               # 评估缓存（运行时自动生成，.gitignore 排除）
 ├── test_mssa.py                  # 单元测试 (~200 行)
 └── config/

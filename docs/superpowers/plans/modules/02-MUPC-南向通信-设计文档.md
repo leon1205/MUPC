@@ -309,8 +309,8 @@ pub struct LoadSheddingCommand {
 | 实现 | 文件 | 说明 |
 |------|------|------|
 | `MockSouthCommandSender` | `south_command_sender.rs` | 开发/测试用模拟实现 |
-| `Rs485SouthCommandSender` | Phase 2+ 实现 | 真实 RS485 通信 |
-| `HplcSouthCommandSender` | Phase 2+ 实现 | 真实 HPLC 通信 |
+| `Rs485SouthSender` | `south_command_sender.rs` | 真实 RS485 通信 |
+| `HplcSouthCommandSender` | 预留（未实现） | 真实 HPLC 通信 |
 
 **与核间通信的分工：**
 

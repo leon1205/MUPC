@@ -1046,7 +1046,7 @@ pub struct ActionOutput {
 | STATE-04 | Option 字段为 None 时，RL 决策器自动取其维度值 = 0.0 并跳过相关约束 | 集成测试 |
 | STATE-05 | 预测数据向量长度固定 15 维，超出/不足时自动裁剪/补零 | 单元测试 |
 | STATE-06 | FusedSystemState 新增 safety_override_active/reason/p_ref 字段 | P0 | PRD |
-| STATE-07 | to_input_vector() 返回 59 维向量（向后兼容）| P0 | PRD |
+| STATE-07 | to_input_vector() 返回 78 维向量 | P0 | PRD |
 | STATE-08 | q_realtime_margin 数据来源为核间 DataUpload 帧 | P0 | PRD |
 | OVERRIDE-01 | SafetyOverride 帧（0x0040）可正确解析 | P0 | PRD |
 | OVERRIDE-02 | FusedSystemState.safety_override_active 在收到帧后正确设置 | P0 | PRD |

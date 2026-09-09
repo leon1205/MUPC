@@ -679,4 +679,4 @@ strategy-engine ──→ intercore ──→ 实时控制模块
 |------|----------|
 | v1.0 | 从主 PRD 提取核间通信需求，补充关键信号定义、帧格式详述、验收标准汇总 |
 | v2.0 | 新增 Modbus RTU 备选控制通道：配置 transport 选择 tcp/modbus_rtu，控制下行 + 执行确认 + 心跳轮询，遥测/SafetyOverride 仍走 TCP（ADR-012 数据面边界）；补 §2.4 需求与 IC-AC-33~39 验收 |
-| v2.2 | §2.4/§8.1b 改写为 PCS 真实协议语义：实时控制模块=两级式 PCS，生产默认 modbus_rtu→PCS（RS485 19200 N-8-1、高 8/低 8 互换、FC06 逐写、写响应即确认、删 exec_seq/cmd_valid 执行确认区），tcp 仅仿真/联调；心跳读 3 区 1013、SOC 读 3 区 1010；遥测真实源=台区总表 master_meter（U-26），SafetyOverride 废弃由 PCS 内部保护 + AiValidator 承接 |
+| v2.2 | §2.4/§8.2 PCS 通道语义：实时控制模块=两级式 PCS，生产默认 modbus_rtu→PCS（RS485 19200 N-8-1、高 8/低 8 互换、FC06 逐写、写响应即确认、删 exec_seq/cmd_valid 执行确认区），tcp 仅仿真/联调；心跳读 3 区 1013、SOC 读 3 区 1010；遥测真实源=台区总表 master_meter（U-26），SafetyOverride 废弃由 PCS 内部保护 + AiValidator 承接 |
