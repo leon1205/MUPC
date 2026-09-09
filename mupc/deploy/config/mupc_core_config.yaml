@@ -77,64 +77,41 @@ strategy:
 #     - { name: "运行灯", gpio: 97,  active_high: true }   # do_out[0]=运行灯、[1]=故障灯（控制器按索引）
 #     - { name: "故障灯", gpio: 107, active_high: true }
 
-# 台区总表分相数据源（U-26：台区储能策略 phase 输入）
-# enabled: true 并填真实点表（reg_map 各量起始寄存器）后方启用；默认关
-master_meter:
-  enabled: false
-  serial_port: "/dev/ttyS4"     # BECG COM4(ttyS4) ↔ 关口/台区总表（§12.1）
-  baud_rate: 9600
-  slave_addr: 3
-  read_interval_ms: 1000
-  reg_map:                 # 示例占位地址；三相连续，Int32/Float32 均 2 寄存器/相
-    p:  { addr: 0x0000, format: int32_scaled, scale: 0.01 }   # P_A/B/C
-    q:  { addr: 0x0006, format: int32_scaled, scale: 0.01 }   # Q_A/B/C
-    pf: { addr: 0x000C, format: int32_scaled, scale: 0.001 }  # PF_A/B/C
-    u:  { addr: 0x0012, format: float32 }                     # U_A/B/C
-    i:  { addr: 0x0018, format: int32_scaled, scale: 0.01 }   # I_A/B/C
-    p_total: { addr: 0x001E, format: int32_scaled, scale: 0.01 }
-
 # 站级南向统一调度（S3 §10.3 south_stations 段；mupc-southd 装配）
-# 收敛目标：master_meter 段最终删除，总表改走下方 meter_grid 站（策略 phase 真源，替代
-# read_master_meter 硬编码 task）。迁移期二选一（core_config validate R-H）：启用
-# south_stations.meter_grid 前须置 master_meter.enabled=false，否则启动校验报错。
-# 默认全注释关闭：未配置 south_stations 段行为不变（走 master_meter/pv-load 硬编码）。
-# 启用 = 去掉下方注释并按现场实际校准串口/从站；例中对齐 BECG §12.1 接线
-# （BMS ttyS2/空调 ttyS3/关口 ttyS4/储能表 ttyS5/消防 ttyS6）。
-# ⚠️ 各站串口不得与 intercore（PCS）及 master_meter 同口（RS485 总线仲裁未实现）。
-# south_stations:
-#   poll_ms: 1000
-#   stale_timeout_s: 5
-#   stations:
-#   # 每站可选字段：baud_rate（口波特率，同口多从站须一致；缺省 9600）、
-#   #   regs 每块可选 func: holding(FC03 默认) / input(FC04，厂方点表用输入寄存器时)。
-#   # ⚠️ 同口多从站 baud_rate 必须一致（物理共享口波特率）；改 baud 前确认从站与主机侧。
-#     # 关口/台区总表 = 策略 phase 真源（替代 master_meter 段；interval_ms 须 < 5000）
-#     # ⚠️ meter_grid 的 regs 必填：块名是语义契约（mapper 按名查找，命名不同即整周期失败），
-#     #    相量块 p/q/pf/u/i 各须 count:6（3 相×2 寄存器，三相连续），p_total 可选 count:2。
-#     #    可照抄下方 master_meter.reg_map（float32 或 int32_scaled+scale 均可，格式随块）——
-#     #    但注意收敛后 master_meter 段会删除，届时此处 regs 是唯一参考，迁移前请先在此固化。
-#     #    ⚠️ 启用了无 regs（或 regs 缺 p/q/pf/u/i）的 meter_grid = 该站永久 offline，
-#     #    且 pv/load 南向兜底被关（grid_on 仅看是否配置了 grid 站），策略 phase 断供——务必配全再启用。
-#     - id: grid_meter
-#       role: meter_grid
-#       port: "/dev/ttyS4"
-#       baud_rate: 9600             # 迁移继承 master_meter legacy 段（同口多从站须一致）
-#       protocol: modbus
-#       slave: 3
-#       interval_ms: 1000           # 须 < 5000（策略 phase 周期约束）
-#       regs:                       # 示例占位地址；三相连续，Int32/Float32 均 2 寄存器/相
-#         - { name: p,       addr: 0x0000, format: int32_scaled, scale: 0.01, count: 6 }   # P_A/B/C
-#         - { name: q,       addr: 0x0006, format: int32_scaled, scale: 0.01, count: 6 }   # Q_A/B/C
-#         - { name: pf,      addr: 0x000C, format: int32_scaled, scale: 0.001, count: 6 }  # PF_A/B/C
-#         - { name: u,       addr: 0x0012, format: float32,       scale: 1.0,  count: 6 }  # U_A/B/C
-#         - { name: i,       addr: 0x0018, format: int32_scaled, scale: 0.01, count: 6 }   # I_A/B/C
-#         - { name: p_total, addr: 0x001E, format: int32_scaled, scale: 0.01, count: 2 }   # 可选：缺省降级 Σp
-#     # 以下站非 meter_grid：S3a 采通用 telemetry（regs 留空即可，不影响站在线），
-#     # 语义点表待厂方 → S3b 补全（battery 含 soc 块则填 battery.soc）。
-#     # battery 站配 soc 块（name: soc）后，SOC 经 on_battery_soc 独立通道推 AiIntegrator
-#     # （BMS 源优先，超期回落核间，04 §2.11.1）；遥测落库照旧。默认 battery 无 soc 块时
-#     # 本通道不触发，AiIntegrator 继续核间回落/默认值——厂方语义点表（S3b-2）配好后生效。
-#     - { id: bms,         role: battery,    port: "/dev/ttyS2", protocol: modbus, slave: 1, interval_ms: 1000 }
-#     - { id: ac_unit,     role: hvac,       port: "/dev/ttyS3", protocol: modbus, slave: 1, interval_ms: 5000 }
-#     - { id: meter_batt,  role: meter_batt, port: "/dev/ttyS5", protocol: modbus, slave: 1, interval_ms: 1000 }
-#     - { id: fire_host,   role: fire,       port: "/dev/ttyS6", protocol: modbus, slave: 1, interval_ms: 1000 }
+# 【收敛】总表 phase 真源唯一走下方 grid_meter 站——master_meter 段已删除（S3b-1c），
+# serde 不再解析该字段，配置了也不生效。meter_grid 的 regs 是语义契约且配置期校验
+# （mupc-southd SouthStationsConfig::validate，S3b-1c）：块名 mapper 按名查找，相量块
+# p/q/pf/u/i 各须存在且 count:6（3 相×2 寄存器三相连续）、addr>0、半开区间不重叠，
+# p_total 可选 count:2——缺失/addr=0/区间重叠的 meter_grid 启动校验即报错（防 typo 静默
+# 读到错寄存器喂策略 / phase 断供才离线发现）。
+# 其余站（bms/空调/储能表/消防）非 meter_grid：S3a 采通用 telemetry（regs 留空不影响在线），
+# 语义点表待厂方 → S3b-2 补全，暂保持注释。⚠️ 各站串口不得与 intercore（PCS 主链路）同口
+# （RS485 总线仲裁未实现）。
+south_stations:
+  poll_ms: 1000
+  stale_timeout_s: 5
+  stations:
+    # 关口/台区总表 = 策略 phase 真源（interval_ms 须 < 5000）。addr 为示例占位（0x1000 基址，
+    # 承已删 master_meter.reg_map 的相对布局 0x0006 步进），投运前须按总表厂方真实点表校准
+    # addr/format/scale/count——注意须 addr>0 且块间不重叠（0 起会拒启动）。
+    - id: grid_meter
+      role: meter_grid
+      port: "/dev/ttyS4"          # BECG COM4(ttyS4) ↔ 关口/台区总表（§12.1）；⚠️ 须与 intercore 串口不同
+      baud_rate: 9600             # 同口多从站须一致（物理共享口波特率）
+      protocol: modbus
+      slave: 3
+      interval_ms: 1000           # 须 < 5000（策略 phase 周期约束）
+      regs:                       # 三相连续，Int32/Float32 均 2 寄存器/相；count=块寄存器数
+        - { name: p,       addr: 0x1000, format: int32_scaled, scale: 0.01, count: 6 }   # P_A/B/C
+        - { name: q,       addr: 0x1006, format: int32_scaled, scale: 0.01, count: 6 }   # Q_A/B/C
+        - { name: pf,      addr: 0x100C, format: int32_scaled, scale: 0.001, count: 6 }  # PF_A/B/C
+        - { name: u,       addr: 0x1012, format: float32,       scale: 1.0,  count: 6 }  # U_A/B/C（float32 不乘 scale）
+        - { name: i,       addr: 0x1018, format: int32_scaled, scale: 0.01, count: 6 }   # I_A/B/C
+        - { name: p_total, addr: 0x101E, format: int32_scaled, scale: 0.01, count: 2 }   # 可选：缺省降级 Σp
+    # S3b-2 语义点表未到，以下站暂注释；启用前按现场校准串口/从站（对齐 BECG §12.1 接线）。
+    # battery 站配 soc 块（name: soc）后，SOC 经 on_battery_soc 独立通道推 AiIntegrator
+    # （BMS 源优先，超期回落核间，04 §2.11.1）——厂方语义点表（S3b-2）配好后生效。
+    # - { id: bms,         role: battery,    port: "/dev/ttyS2", protocol: modbus, slave: 1, interval_ms: 1000 }
+    # - { id: ac_unit,     role: hvac,       port: "/dev/ttyS3", protocol: modbus, slave: 1, interval_ms: 5000 }
+    # - { id: meter_batt,  role: meter_batt, port: "/dev/ttyS5", protocol: modbus, slave: 1, interval_ms: 1000 }
+    # - { id: fire_host,   role: fire,       port: "/dev/ttyS6", protocol: modbus, slave: 1, interval_ms: 1000 }
