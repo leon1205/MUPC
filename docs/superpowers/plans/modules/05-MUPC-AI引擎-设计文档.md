@@ -4,7 +4,7 @@
 ## 目录
 
 1. [模块架构](#1-模块架构)
-2. [LSTM 预测管线设计](#2-lstm-预测管线设计)（原 Ch2 + Ch14）
+2. [LSTM 预测管线设计](#2-lstm-预测管线设计)
    - 2.1 功能概述 & 分层增强架构
    - 2.2 预测规格 (7维输入, 24步, p10p50p90)
    - 2.3 核心技术选型 (VMD/Attention/7维/BiLSTM/误差修正)
@@ -26,7 +26,7 @@
    - 4.6 ActionOutput 结构体 & 解析
    - 4.7 RLModel 结构体
    - 4.8 ActionValidator 约束规则校验
-   - 4.9 场景切换平滑过渡（R3）
+   - 4.9 场景切换平滑过渡
 5. [奖励函数计算模块](#5-奖励函数计算模块)
    - 5.1 功能概述
    - 5.2 RewardCalculator 结构体
@@ -36,12 +36,12 @@
    - 5.6 SCENE-B3：虚拟电厂
    - 5.7 SCENE-B5：极致绿色
    - 5.8 SceneWeights 映射表
-   - 5.9 折扣累积奖励机制（R2）
+   - 5.9 折扣累积奖励机制
    - 5.10 冲击负荷概率预测
-   - 5.11 变压器过载分段惩罚（R-04）
-   - 5.12 电压斜率惩罚动态权重（R-05）
-   - 5.13 冲击负荷响应奖励（R-06）
-   - 5.14 P-Q 协同度阈值可配置化（R-07）
+   - 5.11 变压器过载分段惩罚
+   - 5.12 电压斜率惩罚动态权重
+   - 5.13 冲击负荷响应奖励
+   - 5.14 P-Q 协同度阈值可配置化
    - 5.15 奖励函数精细化改进
 6. [RKNN Runtime 设计](#6-rknn-runtime-设计)
 7. [ModelManager 统一调度设计](#7-modelmanager-统一调度设计)
@@ -86,7 +86,7 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 |  | 物联平台   |---订阅------>| (78维向量)     |             |               |
 |  | (电价)     |              |                |    +--------v----------+    |
 |  +------------+              |                |    | ActionValidator    |    |
-|  | gateway    |---事件------>|                |    | (5条约束校验)       |   |
+|  | gateway    |---事件------>|                |    | (4条约束校验)       |   |
 |  | (调度指令)  |              |                |    +--------+----------+    |
 |  +------------+              |                |             |               |
 |  | ModeSelector|---模式----->|                |    +--------v----------+    |
@@ -118,13 +118,13 @@ AI 优化引擎是 MUPC 通信管理模块的核心智能决策组件，对应 w
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| LSTM 预测模型 | `lstm_model.rs` | 光伏出力与负荷功率时序预测，输出 15~30 分钟预测向量 |
+| LSTM 预测模型 | `lstm_model.rs` | 光伏出力与负荷功率时序预测，输出 15 步×15 分钟（225 分钟）p10p50p90 预测向量（兼容 30/47 维 legacy 输出） |
 | 多源数据融合 | `data_fusion.rs` | 周期性（1Hz）从 5 个数据源采集数据，融合为 FusedSystemState |
 | 模式选择器 | `mode_selector.rs` | 5 种预设运行场景互斥选择，支持远程（IEC 104/61850）和本地（Web UI）切换 |
-| 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策，2 维动作空间输出（v2.15） |
+| 强化学习模型 | `rl_model.rs` | MADDPG/PPO 多目标决策，2 维动作空间输出 |
 | 奖励计算器 | `reward_calculator.rs` | 5 种场景奖励函数计算，驱动在线微调 |
-| 鲁棒性管理器 | `robustness_manager.rs` | 电压异常应急策略，检测并返回应急动作（v2.9 新增） |
-| 动作约束校验 | `action_validator.rs` | 4 条约束规则校验（ACT-DUAL-01~04），防止异常值危害设备（v2.15：load_shedding/pv_limit 下沉至策略引擎） |
+| 鲁棒性管理器 | `robustness_manager.rs` | 电压异常应急策略，检测并返回应急动作 |
+| 动作约束校验 | `action_validator.rs` | 4 条约束规则校验（ACT-DUAL-01~04），防止异常值危害设备（load_shedding/pv_limit 下沉至策略引擎） |
 | RKNN Runtime | `rknn_runtime.rs` | RK3588 NPU FFI 推理封装，异步安全 |
 | FFI 绑定 | `rknn_runtime_sys.rs` | librknnrt.so C API 声明 |
 | RKNN 类型 | `rknn_types.rs` | FFI 边界数据结构 |
@@ -204,22 +204,21 @@ full_decision_cycle():
 | 训练数据本地存储 | <= 1GB（最近 30 天） |
 | AI 引擎 MTBF | >= 1000 小时 |
 | AI 失效自动降级 | < 2s |
-| 权重优化推理延迟 | < 100ms（v2.11）|
-| 权重优化更新周期 | >= 1 小时（v2.11）|
-| 分位数预测延迟 | <= 1s（v2.11）|
-| 冲击负荷概率计算延迟 | <= 10ms（v2.11）|
-| P90 分位数误差 | < 15%（v2.11）|
+| 权重优化推理延迟 | < 100ms |
+| 权重优化更新周期 | >= 1 小时 |
+| 分位数预测延迟 | <= 1s |
+| 冲击负荷概率计算延迟 | <= 10ms |
+| P90 分位数误差 | < 15% |
 
 ## 2. LSTM 预测管线设计
 
-> 整合原第 2 章"LSTM 模型设计"与第 14 章"LSTM 预测增强管线设计"。
 > 覆盖：核心模型设计 + 接口定义 + VMD/Attention/BiLSTM/误差修正增强 + 性能预算 + 降级策略。
 
 ### 2.1 功能概述
 
 LSTM 时序预测管线负责预测未来 225 分钟（15 步 × 15 分钟）的光伏出力和负荷功率，为 RL 决策模型提供 D2 前瞻性输入和 D10 概率负荷预测。
 
-**分层增强架构**（对应论文吸收方案三轮路径）：
+**分层增强架构**：
 
 ```
 基线: LSTM (24步×7维) → 联合预测 (47维或(2,15,3))
@@ -228,7 +227,7 @@ LSTM 时序预测管线负责预测未来 225 分钟（15 步 × 15 分钟）的
  R3: + MSSA 超参自动优化 (离线 Python)
 ```
 
-| 维度 | v2.16 (基线) | v3.0 (R1 增强) | v3.0 R2 (最大) |
+| 维度 | 基线 | 增强 R1 | 最大增强 R2 |
 |------|:--:|:--:|:--:|
 | 模型架构 | 单向 LSTM | LSTM + AdditiveAttention | BiLSTM + Attention |
 | 信号预处理 | 无 | VMD (K=5 PV / K=6 Load) | VMD |
@@ -277,7 +276,7 @@ MUPC-AI2 训练管线在 ONNX 导出时将 AdditiveAttention (Bahdanau) 嵌入�
 | 5 | cos_hour | CPU 计算 `cos(2π × hour / 24)` |
 | 6 | yesterday_pv | 96 步前 pv_power (冷启动 fallback = 当前 PV) |
 
-`LstmConfig.input_features` 默认 7，设为 1 回退 v2.16 单变量模式。
+`LstmConfig.input_features` 默认 7，设为 1 时回退到单变量基线模式。
 
 #### 2.3.4 BiLSTM：双模型文件 + Go/No-Go 准入
 
@@ -300,7 +299,7 @@ No-Go 时自动回退单向 LSTM。
 #### 2.4.1 模型输入 — LstmInput
 
 ```rust
-/// LSTM 模型输入（v3.0: 展平 2D 数组）
+/// LSTM 模型输入（展平 2D 数组）
 ///
 /// 布局: row-major — [t0_f0, t0_f1, ..., t1_f0, ...]
 /// 长度 = input_window_steps × input_features (默认 24 × 7 = 168)
@@ -330,7 +329,7 @@ pub struct HistorySample {
 ```rust
 /// 点预测输出
 pub struct LstmOutput {
-    pub predictions: Vec<f32>,  // v3.0: 自动检测 90 或 47 维输出格式
+    pub predictions: Vec<f32>,  // 自动检测 90 或 47 维输出格式
 }
 
 /// 概率负荷预测输出（D10 数据流）
@@ -343,7 +342,7 @@ pub struct ProbabilisticLoadOutput {
 }
 ```
 
-> **confidence 字段说明**：`LstmOutput.confidence`（基于预测序列方差）已在 v2.16 删除。`ProbabilisticLoadOutput.confidence`（基于 P50/P90 分位数间距）保留，是有效的统计量。
+> **confidence 字段说明**：`LstmOutput.confidence`（方差型，基于预测序列方差）已删除。`ProbabilisticLoadOutput.confidence`（分位数间距型，基于 P50/P90 分位数间距）保留，是有效的统计量。
 
 #### 2.4.4 增强预测结果
 
@@ -369,7 +368,7 @@ pub struct LstmModel {
 impl LstmModel {
     pub fn new(config: LstmConfig) -> Result<Self, AiEngineError>;
     pub async fn load(&mut self) -> Result<(), AiEngineError>;
-    /// v3.0: 输入展平的 (T, K) 序列，单次 ONNX 联合推理
+    /// 输入展平的 (T, K) 序列，单次 ONNX 联合推理
     pub async fn predict(&self, input: &LstmInput) -> Result<LstmOutput, AiEngineError>;
     /// 分位数后处理（CPU，基于预测输出计算 P10/P50/P90）
     pub async fn predict_quantiles(&self, input: &LstmInput, covariates: &LoadCovariates) -> Result<ProbabilisticLoadOutput, AiEngineError>;
@@ -400,7 +399,7 @@ Level 0: FullVmdAttentionCorrection — VMD + (Bi)LSTM/Attention + 误差修正 
 Level 1A: BiLstmVmdAttention        — BiLSTM + VMD + Attention (无误差修正)
 Level 2: VmdAttention               — VMD + LSTM/Attention
 Level 3: AttentionOnly              — LSTM/Attention (无 VMD)
-Level 4: Baseline                   — 基线 LSTM (v2.16 等效)
+Level 4: Baseline                   — 基线 LSTM
 Level 5: (ModelManager 层) — 全零预测
 ```
 
@@ -417,7 +416,7 @@ pub struct PredictionPipeline {
     lstm_model: Arc<RwLock<Option<LstmModel>>>,
     lstm_history: Arc<RwLock<VecDeque<HistorySample>>>,
     input_size: usize,
-    input_features: usize,    // v3.0
+    input_features: usize,
     config: PredictionEnhancementConfig,
     health: RwLock<PipelineHealth>,
     error_correction_runtime: Option<RknnRuntime>,   // R2
@@ -525,7 +524,7 @@ let (pv_forecast, load_forecast, load_quantiles) = self
 
 ### 2.9 性能预算
 
-| 阶段 | 基线 (v2.16) | R1 (VMD+Attn) | R2 (+BiLSTM+EC) |
+| 阶段 | 基线 | R1 (VMD+Attn) | R2 (+BiLSTM+EC) |
 |------|:--:|:--:|:--:|
 | VMD 分解 (CPU) | — | ≤ 50ms | ≤ 50ms |
 | 主预测 NPU 推理 | ≤ 200ms | ≤ 250ms | ≤ 500ms |
@@ -746,7 +745,7 @@ pub struct DispatchAdapter {
 ### 3.5 FusedSystemState 结构体（34 字段，78 维输入向量）
 
 ```rust
-/// 融合系统状态（v2.14：10 大类，78 维输入向量）
+/// 融合系统状态（10 大类，78 维输入向量）
 #[derive(Debug, Clone)]
 pub struct FusedSystemState {
     // ------- D1: 实时数据 (9 个 RL 字段，q_realtime_margin 已移至 D7) -------
@@ -770,7 +769,7 @@ pub struct FusedSystemState {
     pub voltage_phase_b: f64,
     /// C 相电压标幺值 [0.8, 1.2]
     pub voltage_phase_c: f64,
-    /// 实时模块剩余无功容量比例 [0.0, 1.0]，0=打满，1=空闲（v2.5 新增）
+    /// 实时模块剩余无功容量比例 [0.0, 1.0]，0=打满，1=空闲
     pub q_realtime_margin: f64,
 
     // ------- D2: 预测数据 (2 个向量字段) -------
@@ -811,12 +810,12 @@ pub struct FusedSystemState {
     /// 调度主站下发的无功设定值 (kVar)，None 表示无调度指令
     pub dispatch_q_set: Option<f64>,
 
-    // ------- D7: 季节时段 (8 字段，v2.5 新增) -------
+    // ------- D8: 季节时段 (8 字段) -------
     /// 季节 one-hot 编码（6 维）：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留]
     pub season_encoding: [f64; 6],
     /// 时段 one-hot 编码（2 维）：[白天, 夜间]
     pub time_period_encoding: [f64; 2],
-    // ------- D9: 安全覆盖状态 (v2.10 新增，v2.14 扩展至 5 字段) -------
+    // ------- D9: 安全覆盖状态 (5 字段) -------
     /// 安全覆盖激活标志
     /// true = 实时控制模块正在覆盖 AI 有功指令
     pub safety_override_active: bool,
@@ -824,12 +823,12 @@ pub struct FusedSystemState {
     pub safety_override_reason: Option<String>,
     /// 安全覆盖强制放电功率 (kW)（仅在 active=true 时有效）
     pub safety_override_p_ref: Option<f64>,
-    /// 安全覆盖连续触发次数（v2.14 新增）
+    /// 安全覆盖连续触发次数
     pub safety_override_consecutive: u32,
-    /// 安全覆盖滑动窗口内覆盖比例（v2.14 新增，范围 [0.0, 1.0]）
+    /// 安全覆盖滑动窗口内覆盖比例（范围 [0.0, 1.0]）
     pub safety_override_ratio: f64,
 
-    // ------- D10: 概率负荷预测 (v2.11 新增，3 字段) -------
+    // ------- D10: 概率负荷预测 (3 字段) -------
     /// 分位数负荷预测（P10/P50/P90...），15 维向量
     pub load_forecast_quantiles: Vec<f64>,
     /// 冲击负荷发生概率 [0.0, 1.0]
@@ -841,11 +840,11 @@ pub struct FusedSystemState {
 
 ### 3.6 to_input_vector() -- 78 维序列化
 
-将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **78 维向量**（v2.14 从 76 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
+将 FusedSystemState 转换为 RL 模型输入时，各维度按定义顺序拼接为 **78 维向量**（由 76 维扩展）。Option 字段为 None 时填充 0.0。预测向量长度超过配置时裁剪，不足时补零。
 
 ```rust
 impl FusedSystemState {
-    /// 序列化为 78 维输入向量（v2.14，v2.15 修正 D1 重复）
+    /// 序列化为 78 维输入向量（D1 含 9 标量，q_realtime_margin 计入 D7）
     ///
     /// 布局（与 MUPC-AI2 训练管线 `observation.py:to_input_vector` 严格对齐）:
     ///   [0..8]   D1 实时数据 (9 标量，q_realtime_margin 已移至 D7)
@@ -855,17 +854,17 @@ impl FusedSystemState {
     ///   [42..44] D4 需量 (3 字段)
     ///   [45..46] D5 气象 (2 字段)
     ///   [47]     D6 dispatch_p_set (1 维，None 时填 0.0)
-    ///   [48]     D7 q_realtime_margin (1 维，v2.14 从 D1 移入)
+    ///   [48]     D7 q_realtime_margin (1 维，从 D1 移入)
     ///   [49..54] D8 season_encoding (6 维)
     ///   [55..56] D8 time_period_encoding (2 维)
-    ///   [57..60] D9 safety_override (4 维，v2.14 扩展 consecutive+ratio)
-    ///   [61..75] D10 load_forecast_quantiles (15 维，v2.11 新增)
-    ///   [76]     D10 shock_load_probability (1 维，v2.11 新增)
-    ///   [77]     D10 base_load (1 维，v2.11 新增)
+    ///   [57..60] D9 safety_override (4 维，含 consecutive+ratio)
+    ///   [61..75] D10 load_forecast_quantiles (15 维)
+    ///   [76]     D10 shock_load_probability (1 维)
+    ///   [77]     D10 base_load (1 维)
     pub fn to_input_vector(&self) -> Vec<f32> {
         let mut v = Vec::with_capacity(78);
 
-        // [0..8] D1: 9 标量（v2.15 修正：q_realtime_margin 已移至 D7，不在此处）
+        // [0..8] D1: 9 标量（q_realtime_margin 已移至 D7，不在此处）
         v.push(self.battery_soc as f32);
         v.push(self.pv_power as f32);
         v.push(self.load_power as f32);
@@ -901,27 +900,27 @@ impl FusedSystemState {
         // [47] D6: dispatch_p_set (None 时 0.0)
         v.push(self.dispatch_p_set.unwrap_or(0.0) as f32);
 
-        // [48] D7: q_realtime_margin（v2.14 从 D1 移入，v2.15 修正：仅出现一次）
+        // [48] D7: q_realtime_margin（从 D1 移入，仅出现一次）
         v.push(self.q_realtime_margin as f32);
 
         // [49..56] D8: season_encoding (6 维) + time_period_encoding (2 维)
         for &s in &self.season_encoding { v.push(s as f32); }
         for &t in &self.time_period_encoding { v.push(t as f32); }
 
-        // [57..60] D9: safety_override (4 维，v2.14 扩展)
+        // [57..60] D9: safety_override (4 维)
         v.push(if self.safety_override_active { 1.0 } else { 0.0 });
         v.push(self.safety_override_p_ref.unwrap_or(0.0) as f32);
         v.push(self.safety_override_consecutive as f32);
         v.push(self.safety_override_ratio as f32);
 
-        // [61..75] D10 load_forecast_quantiles: 15 维 (v2.11 新增)
+        // [61..75] D10 load_forecast_quantiles: 15 维
         let quantiles = pad_or_truncate(&self.load_forecast_quantiles, 15);
         v.extend(quantiles.iter().map(|&x| x as f32));
 
-        // [76] D10 shock_load_probability (v2.11 新增)
+        // [76] D10 shock_load_probability
         v.push(self.shock_load_probability as f32);
 
-        // [77] D10 base_load (v2.11 新增)
+        // [77] D10 base_load
         v.push(self.base_load as f32);
 
         debug_assert_eq!(v.len(), 78, "输入向量必须为 78 维");
@@ -1020,7 +1019,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 - 调节方式：查表法或 PID，不经过 AI
 - 执行器按下垂公式 `P_output = P_ref - k_droop × ΔV` 执行毫秒级暂态调节
 
-**上层（RL决策）**— v2.15 现行，2 维动作空间
+**上层（RL决策）**— 现行，2 维动作空间
 - `p_ref`（有功基准点，[-50.0, 50.0] kW）：AI 负责稳态全局优化，通过核间 TCP 下发
 - `k_droop`（电压-有功下垂系数，[0.0, 30.0] kW/V）：AI 设置暂态调节灵敏度，通过核间 TCP 下发
 - `load_shedding`（可中断负荷切除量）：下沉至 strategy-engine（需量控制策略独立执行）
@@ -1031,19 +1030,19 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 - P 是 s/min 级慢变量，Q 是 ms 级快变量，单一网络同时学习两个时间尺度任务收敛困难且易振荡
 - RL 专注于能量管理（光伏消纳、SOC平衡、过载预防），电压质量由底层保障
 - 部署时 Q 失控风险与 RL 解耦
-- v2.7 双参数模式（p_ref + k_droop）实现时间尺度解耦：AI 负责稳态，执行器负责暂态
+- 双参数模式（p_ref + k_droop）实现时间尺度解耦：AI 负责稳态，执行器负责暂态
 
 **动作空间对比：**
 
-| 维度 | v2.3（4维） | v2.4~v2.6（3维） | v2.7~v2.12（4维） | v2.13~v2.14（5维） | v2.15（2维） | 说明 |
+| 维度 | 历史 4维 | 历史 3维 | 历史 4维 | 历史 5维 | 现行 2维 | 说明 |
 |------|------------|-----------------|------------------|-------------------|-------------|------|
 | A1 | p_batt_set [-50,50]kW | p_batt_set [-50,50]kW | p_ref [-50,50]kW | p_ref [-50,50]kW | p_ref [-50,50]kW | 有功基准点（RL控制） |
-| A2 | q_batt_set | ~~Q替代~~ | k_droop [0,30]kW/V | k_droop [0,30]kW/V | k_droop [0,30]kW/V | 下垂系数（v2.7新增，实时模块闭环） |
-| A3 | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | —（下沉至策略引擎） | v2.15 起由需量控制策略独立执行 |
-| A4 | pv_limit [0,1] | pv_limit [0,1] | pv_limit [0,1] | pv_limit [0,1] | —（下沉至策略引擎） | v2.15 起由防逆流策略独立执行 |
-| A5 | - | - | - | confidence [0,1] | —（保留在 ModelOutput） | v2.15 起仅用于内部校验，非动作维度 |
+| A2 | q_batt_set | ~~Q替代~~ | k_droop [0,30]kW/V | k_droop [0,30]kW/V | k_droop [0,30]kW/V | 下垂系数（实时模块闭环） |
+| A3 | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | load_shedding [0,60]kW | —（下沉至策略引擎） | 由需量控制策略独立执行 |
+| A4 | pv_limit [0,1] | pv_limit [0,1] | pv_limit [0,1] | pv_limit [0,1] | —（下沉至策略引擎） | 由防逆流策略独立执行 |
+| A5 | - | - | - | confidence [0,1] | —（保留在 ModelOutput） | 仅用于内部校验，非动作维度 |
 
-> **注：** v2.4 起 Q 控制完全交给实时控制模块闭环调节。v2.15 起 AI 动作空间精简为 2 维（p_ref + k_droop），load_shedding 和 pv_limit 下沉至 strategy-engine 本地策略独立执行，confidence 保留在 ModelOutput 中供 action_validator 内部校验。表中 v2.3 的 q_batt_set 和 v2.4~v2.6 的 p_batt_set 为历史版本字段，现行代码中已不再使用。
+> **注：** Q 控制交由实时控制模块闭环调节（RL 不再输出 Q）。AI 动作空间精简为 2 维（p_ref + k_droop），load_shedding 和 pv_limit 下沉至 strategy-engine 本地策略独立执行，confidence 保留在 ModelOutput 中供 action_validator 内部校验。表中 q_batt_set、p_batt_set 为历史字段，现行代码中已不再使用。
 
 ### 4.3 算法选择
 
@@ -1084,12 +1083,12 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 | **D7-实时模块** | q_realtime_margin | f64 | [0.0, 1.0] | - | 实时模块剩余无功容量比例（0=打满，1=空闲） |
 | **D8-季节时段** | season_encoding | [f64; 6] | one-hot | - | 季节编码：[灌溉季, 炒茶季, 空调季, 常规季, 保留, 保留] |
 | | time_period_encoding | [f64; 2] | one-hot | - | 时段编码：[白天, 夜间] |
-| **D9-安全覆盖（v2.10新增，v2.14扩展）** | safety_override_active | bool | {0, 1} | - | 安全覆盖激活标志 |
+| **D9-安全覆盖** | safety_override_active | bool | {0, 1} | - | 安全覆盖激活标志 |
 | | safety_override_reason | Option\<String\> | - | - | 触发原因（voltage_violation/q_exhausted/emergency） |
 | | safety_override_p_ref | Option\<f64\> | [-50.0, 50.0] | kW | 强制放电功率 |
-| | safety_override_consecutive | u32 | [0, ∞) | - | 连续触发次数（v2.14 新增） |
-| | safety_override_ratio | f64 | [0.0, 1.0] | - | 滑动窗口内覆盖比例（v2.14 新增） |
-| **D10-概率负荷预测（v2.11新增）** | load_forecast_quantiles | Vec\<f64\> | 15 维 | kW | 分位数负荷预测（P10/P50/P90...） |
+| | safety_override_consecutive | u32 | [0, ∞) | - | 连续触发次数 |
+| | safety_override_ratio | f64 | [0.0, 1.0] | - | 滑动窗口内覆盖比例 |
+| **D10-概率负荷预测** | load_forecast_quantiles | Vec\<f64\> | 15 维 | kW | 分位数负荷预测（P10/P50/P90...） |
 | | shock_load_probability | f64 | [0.0, 1.0] | - | 冲击负荷发生概率 |
 | | base_load | f64 | [0.0, 1000.0] | kW | 基础负荷（50% 分位数） |
 
@@ -1097,7 +1096,7 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 > **注：** D9 新增 `safety_override_consecutive` 和 `safety_override_ratio` 字段（2 维），用于精细化 SafetyOverride 惩罚计算。D9 从 2 维扩展至 4 维，输入向量从 76 维扩展至 78 维。
 
-> **历史说明：** PRD v2.10/v2.11 中 59 维的描述不准确，实际应为 61 维（v2.10）和 76 维（v2.11）。
+> **历史说明：** 早期 PRD 的状态维度描述与本文有出入（59/61/76 维演进），以本文 78 维为准。
 
 **电压感知 P/Q 协同控制策略（双参数模式）：**
 
@@ -1124,10 +1123,10 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 ### 4.6 ActionOutput 结构体
 
 ```rust
-/// 强化学习决策输出（2 维动作，v2.15）
+/// 强化学习决策输出（2 维动作）
 ///
-/// v2.7 双参数模式：p_ref（有功基准）+ k_droop（电压-有功下垂系数）
-/// v2.15 精简：load_shedding/pv_limit 下沉至策略引擎，confidence 保留在 ModelOutput 中
+/// 双参数模式：p_ref（有功基准）+ k_droop（电压-有功下垂系数）
+/// load_shedding/pv_limit 已下沉至策略引擎，confidence 保留在 ModelOutput 中
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionOutput {
     /// A1: 有功功率基准点 (kW), [-50.0, 50.0], 负=充电, 正=放电
@@ -1140,7 +1139,7 @@ pub struct ActionOutput {
 ### 4.6.1 旧版 ActionOutput（legacy）
 
 ```rust
-/// 动作输出结构体（v1.x 单参数模式，legacy）
+/// 动作输出结构体（单参数模式，legacy）
 /// 仅用于兼容旧模式，正常情况下不使用
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionOutputLegacy {
@@ -1156,10 +1155,10 @@ pub struct ActionOutputLegacy {
 从 RKNN Runtime 推理输出的 f32 向量解析为 ActionOutput 结构体，并在解析阶段执行 clamp 限幅。动作空间从 5 维精简为 2 维（p_ref + k_droop）。
 
 ```rust
-/// 解析 RL 模型原始输出为 ActionOutput（双参数模式，v2.15）
+/// 解析 RL 模型原始输出为 ActionOutput（双参数模式）
 ///
 /// 输出格式: [p_ref, k_droop]（2 维）
-/// v2.15: load_shedding/pv_limit 下沉至策略引擎，不再作为 RL 动作维度
+/// load_shedding/pv_limit 下沉至策略引擎，不再作为 RL 动作维度
 pub fn parse_action_output(raw: &[f32], config: &ActionSpaceConfig) -> Option<ActionOutput> {
     if raw.len() < 2 {
         return None;
@@ -1193,8 +1192,8 @@ impl RLModel {
 
     /// 执行决策
     ///
-    /// 输入：78 维融合状态向量（v2.14）
-    /// 输出：2 维动作 (p_ref, k_droop)（v2.15）
+    /// 输入：78 维融合状态向量
+    /// 输出：2 维动作 (p_ref, k_droop)
     pub async fn decide(&self, input_vector: &[f32]) -> Result<ActionOutput, AiEngineError>;
 
     /// 获取模型类型
@@ -1213,16 +1212,16 @@ pub struct ActionValidator {
     config: ActionConstraintConfig,
     /// 上一周期的动作输出（用于变化率检测）
     previous_action: Arc<RwLock<Option<ActionOutput>>>,
-    /// v2.7 双参数模式：k_droop 范围（由实时控制模块提供）
+    /// 双参数模式：k_droop 范围（由实时控制模块提供）
     droop_range: RwLock<(f64, f64)>,
-    /// v2.7 双参数模式：启用 ACT-DUAL-01~05 校验
+    /// 双参数模式：启用 ACT-DUAL-01~04 校验
     dual_mode: bool,
 }
 ```
 
 **4 条双参数校验规则（ACT-DUAL-01 ~ ACT-DUAL-04）：**
 
-v2.15 起 load_shedding 和 pv_limit 不再由 AI 输出，其约束下沉至 strategy-engine（需量控制/防逆流策略内置边界检查）。confidence 保留在 ModelOutput 中用于内部校验。AI 引擎仅校验 p_ref 和 k_droop。
+load_shedding 和 pv_limit 不再由 AI 输出，其约束下沉至 strategy-engine（需量控制/防逆流策略内置边界检查）。confidence 保留在 ModelOutput 中用于内部校验。AI 引擎仅校验 p_ref 和 k_droop。
 
 | 规则 ID | 约束条件 | 校验逻辑 |
 |---------|----------|----------|
@@ -1231,12 +1230,11 @@ v2.15 起 load_shedding 和 pv_limit 不再由 AI 输出，其约束下沉至 st
 | ACT-DUAL-03 | p_ref 变化率 <= 50kW/步 | `abs(p_ref_new - p_ref_prev) <= config.p_batt_ramp_limit_kw` |
 | ACT-DUAL-04 | 调度约束 | `abs(p_ref) <= abs(dispatch_p_set)` (仅 dispatch_p_set 不为 None 时) |
 
-> **LEGACY（v2.4~v2.6）：** 旧版 `validate()` 方法使用已废弃字段 `p_batt_set`/`q_batt_set`。v2.7 起由 `validate_dual()` 完全替代。
-> **LEGACY（v2.7~v2.14）：** ACT-05(load_shedding)/ACT-06(pv_limit)/ACT-07(dispatch_p_set) 已随 v2.15 动作空间精简下沉至策略引擎。
+> **LEGACY：** 历史 `validate()` 单参数路径（`p_batt_set`/`q_batt_set`）与 ACT-05/06/07（load_shedding/pv_limit/dispatch_p_set）校验已随动作空间精简下沉至策略引擎，现行由 `validate_dual()` 承担双参数校验。
 
 ```rust
 impl ActionValidator {
-    /// v2.7 双参数模式校验（ACT-DUAL-01~05，现行版本）
+    /// 双参数模式校验（ACT-DUAL-01~04，现行版本）
     pub async fn validate_dual(
         &self,
         action: &ActionOutput,
@@ -1318,7 +1316,7 @@ impl ActionValidator {
             }
         }
 
-        // v2.15: load_shedding/pv_limit/confidence 已从 ActionOutput 移除
+        // load_shedding/pv_limit/confidence 已从 ActionOutput 移除
         // 其约束下沉至 strategy-engine（需量控制/防逆流策略内置边界检查）
 
         *self.previous_action.write().await = Some(validated.clone());
@@ -1348,7 +1346,7 @@ pub struct ViolationRecord {
 }
 ```
 
-### 4.9 场景切换平滑过渡（R3）
+### 4.9 场景切换平滑过渡
 
 #### 4.9.1 平滑过渡配置
 
@@ -1478,22 +1476,22 @@ impl RewardCalculator {
 
 **优化目标：** 最大化光伏消纳 + 防止变压器过载 + 电池寿命保护 + P-Q 协同优化 + 安全覆盖感知
 
-> **核心变更（安全覆盖惩罚）：**
+> **安全覆盖惩罚：**
 > - 新增 R_safety_override 惩罚项，当 safety_override_active=true 时触发
 > - AI 引擎感知被实时控制模块覆盖事件，学习避免触发覆盖的策略
 
-> **核心变更（RobustnessManager 集成）：**
+> **RobustnessManager 集成：**
 > - dispatch_ai_decision 前进行异常检测
 > - 存在异常时使用应急策略（不经过 RL 模型）
 
-> **核心变更（P-Q 协同度奖励）：**
+> **P-Q 协同度奖励：**
 > - 移除"电压硬惩罚"P_voltage_deviation，改为"行为奖励"R_PQ_coordination
 > - AI 仅控制 P（p_ref），但需感知 Q 裕度做最优决策
 > - 核心原则：Q 有裕度时"偷懒"省电池；Q 饱和时正确出手（低压放电/高压充电）
 > - 弃光场景差异化：高电压时检查 AI 动作方向而非简单置零
 > - 新增下垂系数平滑惩罚 R_smooth，防止 k_droop 极大化导致系统震荡
 
-> **分层架构原则（继续适用）：**
+> **分层架构原则：**
 > - AI 仅在实时模块无功耗尽时才对电压偏差负责（q_realtime_margin <= 10% + 越限连续 2 步）
 > - 实时模块有裕度时，电压问题由实时模块自行处理，AI 不因"旁观"被惩罚
 > - 自适应损耗系数 α(s) ∈ {1.0, 0.2, 3.0} 区分"常规调度"与"应急处置"的电池损耗价值差异
@@ -1504,14 +1502,16 @@ impl RewardCalculator {
 R_agri = w1 * R_pv_consumption          // 弃光奖励（含差异化电压处理）
          - α(s) * w2 * P_battery_degradation   // 自适应损耗系数
          - w3 * P_transformer_overload
-         + w4 * R_PQ_coordination              // P-Q 协同度奖励（v2.8 新增）
+         + w4 * R_PQ_coordination              // P-Q 协同度奖励
          - w5 * R_ramp
          - w6 * R_voltage_slope
-         - w7 * R_smooth                        // 下垂系数平滑惩罚（v2.8 新增）
-         - w8 * R_safety_override               // 安全覆盖惩罚（v2.10 新增）
+         - w7 * R_smooth                        // 下垂系数平滑惩罚
+         - w8 * R_safety_override               // 安全覆盖惩罚
 ```
 
 **P-Q 协同度奖励 R_PQ_coordination：**
+
+> **现行实现指引：** 代码中 `calc_pq_coordination()` / `calc_pq_coordination_static()` 已采用 5.15.2 的 Sigmoid 平滑加权实现；下方阶跃阈值逻辑为阈值版设计示意，现行实现以其为准。
 
 当 |V_deviation| > 5% 时，根据 Q 裕度和 AI 动作方向计算奖励：
 
@@ -1570,24 +1570,24 @@ R_pv_consumption       = 按差异化逻辑计算（见上）
                         = 0.2   // 电压支撑模式：q_realtime_margin <= 10% 且越限 >= 2 步
                         = 1.0   // 常规调度
 P_battery_degradation  = α(s) * (|P_batt| / BATTERY_CAPACITY_KWH)²   # C-rate² × α(s)
-P_transformer_overload = Quadratic(L_trafo, start=75%)                 # 见 4.5 节
+P_transformer_overload = Quadratic(L_trafo, start=75%)                 # 过载惩罚实现见 5.11 节
 R_PQ_coordination      = 按 Q 裕度和动作方向计算（见上）
 R_ramp                 = λ * |P_batt_t - P_batt_{t-1}| / BATTERY_CAPACITY_KWH
 R_voltage_slope        = |V_avg_t - V_avg_{t-1}|
 R_smooth               = -|Δk_droop| - λ * max(0, k_droop - K_MAX)
-R_safety_override      = 安全覆盖惩罚（v2.10 新增，见下）
+R_safety_override      = 安全覆盖惩罚（见下）
 
 其中 v_avg = (voltage_phase_a + voltage_phase_b + voltage_phase_c) / 3.0
 ```
 
 **安全覆盖惩罚 R_safety_override：**
 
-v2.14 采用分层计算策略，结合滑动窗口统计信息。v2.15 删除 `match reason` 分支（因 D9 无 reason_code 字段）：
+采用分层计算策略，结合滑动窗口统计信息。`match reason` 分支已删（因 D9 无 reason_code 字段）：
 
 ```rust
 if state.safety_override_active {
     if state.safety_override_consecutive < 10 {
-        // 样本不足：使用固定中等惩罚（v2.15：删除 reason 差异化）
+        // 样本不足：使用固定中等惩罚（无 reason 差异化）
         -3.33
     } else {
         // 样本充足：比例 + 连续次数惩罚，归一化至 [-1, 0]
@@ -1600,7 +1600,7 @@ if state.safety_override_active {
 }
 ```
 
-**修正说明：** D9 字段表已无 `safety_override_reason_code`（仅 4 维：active/p_ref/consecutive/ratio），样本不足时无 reason 数据可用，故删除 v2.13 引入的 reason 差异化惩罚分支。固定惩罚 -3.33 取原 voltage_violation 档位（最常见原因）。
+**修正说明：** D9 字段表已无 `safety_override_reason_code`（仅 4 维：active/p_ref/consecutive/ratio），样本不足时无 reason 数据可用，故删除 reason 差异化惩罚分支。固定惩罚 -3.33 取原 voltage_violation 档位（最常见原因）。
 
 **系数说明：**
 
@@ -1610,7 +1610,7 @@ if state.safety_override_active {
 | k_consecutive | 10.0 | 连续触发次数惩罚系数 |
 | min_sample_threshold | 10 | 最小样本阈值 |
 | norm_divisor | 15.0 | 归一化除数 |
-| cold_start_penalty | 3.33 | 样本不足时固定惩罚（v2.15 新增，替代原 reason 差异化） |
+| cold_start_penalty | 3.33 | 样本不足时固定惩罚（替代原 reason 差异化） |
 
 **互斥惩罚逻辑：**
 
@@ -1631,16 +1631,16 @@ let r_pq = if state.safety_override_active {
 | w1 | 1.0 | 光伏消纳奖励（含差异化电压处理） | [0.0, 3.0] |
 | w2 | 0.5 | 电池损耗惩罚（C-rate² × α(s)） | [0.0, 2.0] |
 | w3 | 2.0 | 变压器过载惩罚 | [0.0, 5.0] |
-| w4 | 1.0 | P-Q 协同度奖励权重（v2.8 新增） | [0.0, 5.0] |
+| w4 | 1.0 | P-Q 协同度奖励权重 | [0.0, 5.0] |
 | w5 | 0.5 | 功率变化率惩罚 | [0.0, 2.0] |
 | w6 | 0.5 | 电压变化斜率惩罚 | [0.0, 2.0] |
-| w7 | 0.5 | 下垂系数平滑惩罚权重（v2.8 新增） | [0.0, 2.0] |
-| w8 | 1.0 | 安全覆盖惩罚权重（v2.10 新增） | [0.0, 5.0] |
+| w7 | 0.5 | 下垂系数平滑惩罚权重 | [0.0, 2.0] |
+| w8 | 1.0 | 安全覆盖惩罚权重 | [0.0, 5.0] |
 
 **Rust 代码实现：**
 
 ```rust
-/// SCENE-01: 台区季节性负荷模式 v2.8
+/// SCENE-01: 台区季节性负荷模式
 fn calc_agri_v2_8(&self, state: &FusedSystemState, action: &ActionOutput, prev_k_droop: f64) -> f64 {
     let w = &self.weights.seasonal_load_management;
 
@@ -1669,7 +1669,7 @@ fn calc_agri_v2_8(&self, state: &FusedSystemState, action: &ActionOutput, prev_k
     // 4. 变压器过载
     let p_trafo = self.overload_penalty(state.transformer_load);
 
-    // 5. P-Q 协同度奖励（v2.8 新增，替代电压惩罚）
+    // 5. P-Q 协同度奖励（替代电压硬惩罚）
     let r_pq = self.calc_pq_coordination(state, action.p_ref);
 
     // 6. 变化率惩罚
@@ -1679,13 +1679,13 @@ fn calc_agri_v2_8(&self, state: &FusedSystemState, action: &ActionOutput, prev_k
     let prev_v = *self.last_voltage.read().unwrap();
     let r_voltage_slope = (v_avg - prev_v).abs();
 
-    // 8. 下垂系数平滑惩罚（v2.8 新增）
+    // 8. 下垂系数平滑惩罚
     let r_smooth = self.calc_smooth_penalty(action.k_droop, prev_k_droop);
 
     w[0] * r_pv - w[1] * p_batt_deg - w[2] * p_trafo + w[3] * r_pq - w[4] * r_ramp - w[5] * r_voltage_slope - w[6] * r_smooth
 }
 
-/// P-Q 协同度奖励（v2.8 新增）
+/// P-Q 协同度奖励
 fn calc_pq_coordination(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
     let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
     let dev = (v_avg - 1.0).abs();
@@ -1723,7 +1723,7 @@ fn calc_pq_coordination(&self, state: &FusedSystemState, p_ref: f64) -> f64 {
     0.0
 }
 
-/// 下垂系数平滑惩罚（v2.8 新增）
+/// 下垂系数平滑惩罚
 fn calc_smooth_penalty(&self, k_droop: f64, prev_k_droop: f64) -> f64 {
     const K_MAX: f64 = 30.0; // kW/V
     const LAMBDA: f64 = 10.0;
@@ -1758,7 +1758,7 @@ pub struct RewardCalculator {
     battery_capacity_kwh: f64,
     last_p_ref: RwLock<f64>,           // 上一周期 p_ref
     last_voltage: RwLock<f64>,          // 上一周期平均电压
-    last_k_droop: RwLock<f64>,          // 上一周期 k_droop（v2.8 新增）
+    last_k_droop: RwLock<f64>,          // 上一周期 k_droop
     voltage_violation_count: AtomicU32,
     q_margin_threshold: f64,
     voltage_high_limit: f64,
@@ -1778,7 +1778,7 @@ pub struct RewardCalculator {
 R_arbitrage = w1 * R_price_spread - w2 * P_battery_degradation
 
 R_price_spread         = (price_current - price_avg) * p_ref * conversion_factor
-P_battery_degradation  = β · (|p_ref| / E_battery_total)²   # C-rate² 应力模型（v2.15）
+P_battery_degradation  = β · (|p_ref| / E_battery_total)²   # C-rate² 应力模型
 ```
 
 **权重表：**
@@ -1796,7 +1796,7 @@ fn reward_commercial_arbitrage(
     let avg_price = (state.peak_price + state.valley_price) / 2.0;
     let spread = (state.current_electricity_price - avg_price) * action.p_ref * 0.001;
     let r_spread = spread * 100.0;
-    // C-rate² 应力模型（v2.15，对齐 MODE-01）
+    // C-rate² 应力模型（对齐 MODE-01）
     let c_rate = action.p_ref.abs() / BATTERY_CAPACITY_KWH;
     let p_deg = c_rate * c_rate * 100.0;
     w[0] * r_spread - w[1] * p_deg
@@ -1940,7 +1940,7 @@ impl SceneWeights {
 }
 ```
 
-### 5.9 折扣累积奖励机制（R2）
+### 5.9 折扣累积奖励机制
 
 #### 5.9.1 折扣累积奖励配置
 
@@ -2037,10 +2037,10 @@ pub fn calculate_discounted(&self, current_reward: f32) -> f32 {
 ```
 LstmModel
   ├─ predict()           （原有确定性预测）
-  ├─ predict_quantiles()  （v2.11 分位数预测，v2.16 重构为 15 步）
+  ├─ predict_quantiles()  （分位数预测，重构为 15 步）
   └─ erfc()               （正态分布 CDF 近似）
         ↓
-ProbabilisticLoadOutput (v2.16 重构)
+ProbabilisticLoadOutput (重构为 15 步结构)
   ├─ quantile_steps: Vec<StepQuantiles>  (15 步 × [P10, P50, P90])
   ├─ base_load (第 1 步 P50)
   ├─ shock_probability
@@ -2050,7 +2050,7 @@ ProbabilisticLoadOutput (v2.16 重构)
   ↓         ↓
 RewardCalculator  FusedSystemState (D10)
 calc_demand_with_   load_forecast_quantiles
-uncertainty()       (15 维，v2.16 接通数据流)
+uncertainty()       (15 维，接通数据流)
 ```
 
 #### 5.10.4 详细设计
@@ -2069,13 +2069,13 @@ pub struct LoadCovariates {
 **ProbabilisticLoadOutput：**
 
 ```rust
-/// 单分位数预测（v2.11，向后兼容保留）
+/// 单分位数预测（向后兼容保留）
 pub struct QuantilePrediction {
     pub quantile: f32,  // 分位数（0.0 ~ 1.0）
     pub value: f32,      // 预测值 (kW)
 }
 
-/// 单步分位数预测（v2.16 新增）
+/// 单步分位数预测
 pub struct StepQuantiles {
     pub step_index: usize,   // 步索引 0..14
     pub p10: f32,            // P10 分位数预测值
@@ -2083,10 +2083,10 @@ pub struct StepQuantiles {
     pub p90: f32,            // P90 分位数预测值
 }
 
-/// 概率负荷预测输出（v2.11 新增，v2.16 重构为 15 步结构）
+/// 概率负荷预测输出（重构为 15 步结构）
 pub struct ProbabilisticLoadOutput {
     pub timestamp: i64,
-    pub quantile_steps: Vec<StepQuantiles>,  // 15 个未来时间步（v2.16）
+    pub quantile_steps: Vec<StepQuantiles>,  // 15 个未来时间步
     pub base_load: f32,                       // 第 1 步 P50（向后兼容）
     pub shock_probability: f64,               // 冲击负荷概率
     pub confidence: f64,                      // 基于 P50/P90 间距
@@ -2135,7 +2135,6 @@ pub trait WeatherService: Send + Sync {
 **FusedSystemState 扩展：**
 
 ```rust
-// v2.11 新增字段
 pub load_forecast_quantiles: Vec<f64>,  // 分位数负荷预测
 pub shock_load_probability: f64,         // 冲击负荷概率
 pub base_load: f64,                     // 基础负荷（P50）
@@ -2184,7 +2183,7 @@ fn calc_demand_with_uncertainty(
 | PLF-04 | 风险奖励计算 | 风险惩罚正确应用 |
 | PLF-07 | FusedSystemState 存储 | 字段正确填充 |
 
-### 5.11 变压器过载分段惩罚（R-04）
+### 5.11 变压器过载分段惩罚
 
 #### 5.11.1 需求描述
 
@@ -2193,7 +2192,7 @@ fn calc_demand_with_uncertainty(
 #### 5.11.2 分段惩罚函数定义
 
 ```rust
-/// 变压器过载分段惩罚（v2.12 R-04）
+/// 变压器过载分段惩罚
 ///
 /// 分段逻辑：
 ///   L < 0.75:          0.0                    // 安全区
@@ -2227,7 +2226,7 @@ fn overload_penalty_piecewise(&self, load: f64) -> f64 {
 
 - `mupc/crates/ai-engine/src/reward_calculator.rs`
 
-### 5.12 电压斜率惩罚动态权重（R-05）
+### 5.12 电压斜率惩罚动态权重
 
 #### 5.12.1 需求描述
 
@@ -2236,7 +2235,7 @@ fn overload_penalty_piecewise(&self, load: f64) -> f64 {
 #### 5.12.2 动态权重公式
 
 ```rust
-/// 电压斜率惩罚动态权重（v2.12 R-05）
+/// 电压斜率惩罚动态权重
 ///
 /// w6(v) = base_w6 × (1.0 + k × |ΔV|)
 ///
@@ -2263,16 +2262,16 @@ fn dynamic_voltage_slope_weight(&self, delta_v: f64) -> f64 {
 
 - `mupc/crates/ai-engine/src/reward_calculator.rs`
 
-### 5.13 冲击负荷响应奖励（R-06）
+### 5.13 冲击负荷响应奖励
 
 #### 5.13.1 需求描述
 
-当前缺失冲击负荷响应奖励，需量控制鲁棒性不足。结合 v2.11 分位数预测，引入基于风险感知的冲击负荷响应奖励。
+当前缺失冲击负荷响应奖励，需量控制鲁棒性不足。结合分位数预测，引入基于风险感知的冲击负荷响应奖励。
 
 #### 5.13.2 冲击负荷响应奖励公式
 
 ```rust
-/// 冲击负荷响应奖励（v2.12 R-06）
+/// 冲击负荷响应奖励
 ///
 /// R_shock = w_shock × load_shedding / max_load_shedding
 ///           - λ × response_time / max_response_time
@@ -2315,7 +2314,7 @@ fn shock_response_reward(
 
 - `mupc/crates/ai-engine/src/reward_calculator.rs`
 
-### 5.14 P-Q 协同度阈值可配置化（R-07）
+### 5.14 P-Q 协同度阈值可配置化
 
 #### 5.14.1 需求描述
 
@@ -2324,7 +2323,7 @@ fn shock_response_reward(
 #### 5.14.2 配置结构
 
 ```rust
-/// P-Q 协同度阈值配置（v2.12 R-07）
+/// P-Q 协同度阈值配置
 #[derive(Debug, Clone)]
 pub struct PqCoordinationThresholds {
     /// Q 裕度阈值，低于此值视为"无功耗尽"
@@ -2370,14 +2369,14 @@ p_threshold_kw = 5.0         # P 阈值（kW）
 
 #### 5.15.1 功能概述
 
-v2.13 在 v2.12 基础上进一步精细化奖励函数设计，解决专家建议中的"精细化打磨"与"跨场景泛化"问题。
+进一步精细化奖励函数设计，解决专家建议中的"精细化打磨"与"跨场景泛化"问题。
 
 #### 5.15.2 P-Q协同Sigmoid平滑化
 
 **实现位置**：`reward_calculator.rs` - `calc_pq_coordination()` / `calc_pq_coordination_static()`
 
 ```rust
-// v2.13: Sigmoid平滑过渡
+// Sigmoid 平滑过渡
 let k = 50.0;
 let w_save = 1.0 / (1.0 + (-k * (q_margin - q_threshold)).exp());
 let w_support = 1.0 - w_save;
@@ -2509,13 +2508,15 @@ pub fn compute_online_loss(&self, task_loss: f32, new_logits: &[f32], offline_lo
 }
 ```
 
+> **跨批协调注：** 本节 PER/KL 在线微调强化与 §7.4 online_updater 相关设计存在重叠，两处一致性核对由后续批次统一处理。
+
 #### 5.15.7 策略混合替代权重混合
 
 **实现位置**：`mode_selector.rs` - `blend_actions()`
 
 ```rust
 /// 公式：a_blended = (1 - α) * a_old + α * a_new
-/// v2.15: 动作空间精简为 2 维（p_ref + k_droop）
+/// 动作空间精简为 2 维（p_ref + k_droop）
 pub fn blend_actions(&self, a_old: &ActionOutput, a_new: &ActionOutput, alpha: f64) -> ActionOutput {
     let one_minus_alpha = 1.0 - alpha;
     ActionOutput {
