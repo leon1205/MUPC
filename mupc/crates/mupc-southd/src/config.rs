@@ -188,6 +188,14 @@ impl SouthStationsConfig {
                 // name/addr/重叠都过、启动绿灯，但 scheduler 每轮只读 blk.count → 读回 <6 →
                 // decode None → meter_grid 永久 offline（phase 断供），只在运行期暴露；配置期须拦截。
                 for b in &s.regs {
+                    // int32_scaled 块须显式 scale>0：RegBlockConf.scale serde 默认 0.0，
+                    // 漏写会 raw×0 整块解 0（p/q/pf/i 全 0 静默喂策略，decode_regs 语义）。
+                    if b.format == RegFormat::Int32Scaled && b.scale == 0.0 {
+                        return Err(format!(
+                            "south_stations: meter_grid 站 {} 块 {} format=int32_scaled 须显式 scale>0（默认 0.0 会整块解 0）",
+                            s.id, b.name
+                        ));
+                    }
                     let is_phase = ["p", "q", "pf", "u", "i"].contains(&b.name.as_str());
                     if is_phase && b.count < 6 {
                         return Err(format!(
@@ -648,6 +656,23 @@ south_stations:
         assert!(
             err.contains("count") && err.contains("p"),
             "相量块 p count=2 应报 count 须 ≥6，实际: {err}"
+        );
+    }
+
+    /// S3b-1c：meter_grid int32_scaled 块 scale 漏写（serde 默认 0.0）→ Err 含 "scale"
+    /// （raw×0 整块解 0 静默喂策略——防静默失真；float32 块 scale 默认 0.0 不受影响）
+    #[test]
+    fn validate_rejects_meter_grid_int32_scaled_zero_scale() {
+        let regs = r#"        - { name: p, addr: 0x1000, format: int32_scaled, count: 6 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("scale") && err.contains("p"),
+            "p int32_scaled 漏写 scale 应报须 scale>0，实际: {err}"
         );
     }
 

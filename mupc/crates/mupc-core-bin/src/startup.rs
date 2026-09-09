@@ -686,8 +686,8 @@ pub async fn initialize_all(
             }
         );
     } else {
-        tracing::info!(
-            "无 south_stations 站（无 meter_grid）：策略 phase 由 pv/load 南向模拟兜底"
+        tracing::warn!(
+            "未装配 south_stations（无 grid 源）：策略 phase 由 pv/load 南向模拟兜底——若现场应有总表数据，请确认配置文件已收敛 south_stations.meter_grid（master_meter 段已删除，S3b-1c）"
         );
     }
 
