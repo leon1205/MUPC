@@ -168,6 +168,43 @@ impl SouthStationsConfig {
                     s.id, DATA_FRESHNESS_MS
                 ));
             }
+            // S3b-1c（承接已删 core_config validate_reg_map P2-2/N2）：meter_grid 是总表 phase
+            // 真源——regs 块须完整（相量块 p/q/pf/u/i 各须存在）、addr>0、半开区间不重叠，
+            // 防配置 typo（addr 重叠/addr=0）静默读到错寄存器喂策略。
+            if s.role == Role::MeterGrid {
+                // 相量块语义（mapper 按 name 找块，缺失/读失败 → Failed→offline 是运行期；
+                // 此处配置期拦截缺失与地址错误）。空 regs 亦落入缺 p 分支被拒。
+                for required in ["p", "q", "pf", "u", "i"] {
+                    if !s.regs.iter().any(|b| b.name == required) {
+                        return Err(format!(
+                            "south_stations: meter_grid 站 {} regs 缺相量块 {}（总表 phase 真源须 p/q/pf/u/i）",
+                            s.id, required
+                        ));
+                    }
+                }
+                // addr>0 + 区间不重叠（含 p_total；width 取块 count，至少 1）
+                let mut seen: Vec<(&str, u16, u32)> = Vec::new();
+                for b in &s.regs {
+                    if b.addr == 0 {
+                        return Err(format!(
+                            "south_stations: meter_grid 站 {} regs 块 {} addr 不能为 0",
+                            s.id, b.name
+                        ));
+                    }
+                    let width = (b.count as u32).max(1);
+                    for (name, addr, w) in &seen {
+                        let ai = b.addr as u32;
+                        let aj = *addr as u32;
+                        if ai < aj + w && aj < ai + width {
+                            return Err(format!(
+                                "south_stations: meter_grid 站 {} regs 块 {} 与 {} 寄存器区间重叠（{}@{:#x} 与 {}@{:#x}）",
+                                s.id, b.name, name, b.name, b.addr, name, addr
+                            ));
+                        }
+                    }
+                    seen.push((&b.name, b.addr, width));
+                }
+            }
         }
         // 同口 baud 一致性：物理共享口波特率（Rs485Device 无动态切波特，同口只能一个波特率）。
         // 同 port 的站 baud_rate 必须相同，否则 Err（startup 每口用首站 conf open，异 baud 会被静默忽略）。
@@ -245,12 +282,12 @@ south_stations:
       slave: 1
       interval_ms: 1000
       regs:
-        - { name: p, addr: 0, format: float32, count: 6 }
-        - { name: p_total, addr: 6, format: float32, count: 2 }
-        - { name: q, addr: 8, format: float32, count: 6 }
-        - { name: pf, addr: 14, format: float32, count: 6 }
-        - { name: u, addr: 20, format: float32, count: 6 }
-        - { name: i, addr: 26, format: float32, count: 6 }
+        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: p_total, addr: 0x1006, format: float32, count: 2 }
+        - { name: q, addr: 0x1008, format: float32, count: 6 }
+        - { name: pf, addr: 0x100E, format: float32, count: 6 }
+        - { name: u, addr: 0x1014, format: float32, count: 6 }
+        - { name: i, addr: 0x101A, format: float32, count: 6 }
     - id: meter_batt
       role: meter_batt
       port: /dev/ttyS1
@@ -407,10 +444,11 @@ south_stations:
 
     #[test]
     fn validate_meter_grid_interval_boundary() {
-        // 钉死 >= 边界语义：4999(<5000) 合法，5000(==DATA_FRESHNESS_MS) 拒绝
+        // 钉死 >= 边界语义：4999(<5000) 合法，5000(==DATA_FRESHNESS_MS) 拒绝。
+        // meter_grid 须配完整 regs（S3b-1c 校验），否则 4999 也会因缺相量块被拒——隔离 interval 语义。
         for (iv, ok) in [(4999u64, true), (5000u64, false)] {
             let yaml = format!(
-                "south_stations:\n  stations:\n    - {{ id: mg, role: meter_grid, port: t1, slave: 1, interval_ms: {iv} }}"
+                "south_stations:\n  stations:\n    - id: mg\n      role: meter_grid\n      port: t1\n      slave: 1\n      interval_ms: {iv}\n      regs:\n        - {{ name: p, addr: 0x1000, format: float32, count: 6 }}\n        - {{ name: q, addr: 0x1006, format: float32, count: 6 }}\n        - {{ name: pf, addr: 0x100C, format: float32, count: 6 }}\n        - {{ name: u, addr: 0x1012, format: float32, count: 6 }}\n        - {{ name: i, addr: 0x1018, format: float32, count: 6 }}"
             );
             let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
             assert_eq!(
@@ -473,6 +511,96 @@ south_stations:
 "#;
         let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
+    }
+
+    /// 完整 meter_grid regs（addr 非 0、半开区间不重叠、p_total 可选含）
+    fn meter_grid_full_regs_yaml() -> &'static str {
+        // 注意：与上面注释同口径——相量块 count 6，p_total count 2
+        r#"        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }
+        - { name: p_total, addr: 0x101E, format: float32, count: 2 }"#
+    }
+
+    /// 单 meter_grid 站 yaml（regs_body 为已缩进 8 空格的列表行，原样内插）
+    fn meter_grid_only_yaml(regs_body: &str) -> String {
+        "south_stations:\n  stations:\n    - id: mg\n      role: meter_grid\n      port: t1\n      slave: 1\n      interval_ms: 1000\n      regs:\n".to_string()
+            + regs_body
+    }
+
+    /// S3b-1c：meter_grid regs 缺相量块（这里缺 q）→ validate Err（总表 phase 真源须完整）
+    #[test]
+    fn validate_rejects_meter_grid_missing_phase_block() {
+        let regs = r#"        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("缺相量块 q"),
+            "缺 q 应报缺块（含 q 名），实际: {err}"
+        );
+    }
+
+    /// S3b-1c：空 regs 的 meter_grid 亦被拒（落入缺 p 分支；空 regs = 站永久 offline、phase 断供）
+    #[test]
+    fn validate_rejects_meter_grid_empty_regs() {
+        let regs = "";
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("缺相量块 p"),
+            "空 regs 应报缺 p 块，实际: {err}"
+        );
+    }
+
+    /// S3b-1c：meter_grid regs 某块 addr=0 → validate Err（承接 legacy validate_reg_map 拒 0）
+    #[test]
+    fn validate_rejects_meter_grid_zero_addr() {
+        let regs = r#"        - { name: p, addr: 0, format: float32, count: 6 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("addr 不能为 0") && err.contains("p"),
+            "p addr=0 应报 addr 不能为 0，实际: {err}"
+        );
+    }
+
+    /// S3b-1c：meter_grid regs 两块半开区间重叠 → validate Err
+    #[test]
+    fn validate_rejects_meter_grid_overlapping_regs() {
+        // q addr 0x1002 落入 p 块 [0x1000,0x1006) 区间内
+        let regs = r#"        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: q, addr: 0x1002, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }"#;
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(regs)).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("区间重叠") && err.contains("p") && err.contains("q"),
+            "p 与 q 区间重叠应报重叠（含两块名），实际: {err}"
+        );
+    }
+
+    /// S3b-1c：完整 p/q/pf/u/i + p_total（addr 非 0 不重叠）→ validate Ok
+    #[test]
+    fn validate_accepts_meter_grid_complete_regs() {
+        let w: Wrapper =
+            serde_yaml::from_str(&meter_grid_only_yaml(meter_grid_full_regs_yaml()))
+                .expect("解析失败");
+        assert!(
+            w.south_stations.validate().is_ok(),
+            "完整 meter_grid regs 应通过: {:?}",
+            w.south_stations.validate()
+        );
     }
 
     #[test]

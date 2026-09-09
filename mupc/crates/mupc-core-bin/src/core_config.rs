@@ -1276,7 +1276,17 @@ south_stations:
   poll_ms: 1000
   stale_timeout_s: 5
   stations:
-    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
+    - id: meter_grid
+      role: meter_grid
+      port: /dev/ttyS1
+      slave: 1
+      interval_ms: 1000
+      regs:                    # S3b-1c: meter_grid 须配完整相量块（p/q/pf/u/i），addr 非 0 不重叠
+        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }
     - { id: meter_batt, role: meter_batt, port: /dev/ttyS1, slave: 2, interval_ms: 1000 }
     - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000 }
     - { id: hvac_1, role: hvac, port: /dev/ttyS3, slave: 3, interval_ms: 2000 }
@@ -1382,7 +1392,17 @@ ai_engine: {}
 plugins: {}
 south_stations:
   stations:
-    - { id: meter_grid, role: meter_grid, port: /dev/ttyS1, slave: 1, interval_ms: 1000 }
+    - id: meter_grid
+      role: meter_grid
+      port: /dev/ttyS1
+      slave: 1
+      interval_ms: 1000
+      regs:                    # S3b-1c: meter_grid 须配完整相量块（p/q/pf/u/i），addr 非 0 不重叠
+        - { name: p, addr: 0x1000, format: float32, count: 6 }
+        - { name: q, addr: 0x1006, format: float32, count: 6 }
+        - { name: pf, addr: 0x100C, format: float32, count: 6 }
+        - { name: u, addr: 0x1012, format: float32, count: 6 }
+        - { name: i, addr: 0x1018, format: float32, count: 6 }
     - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
