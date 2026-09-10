@@ -1,15 +1,25 @@
-# 12-MUPC 本地显示终端（HDMI 屏运行状态展示）设计文档
+# 12-MUPC 本地显示终端（触摸式本地 HMI）设计文档
 
-> `[DESIGN_APPROVED: 2026-09-09, 设计评审员]`
+> ## 版本与评审状态
 >
-> `[DESIGN: PENDING REVIEW]` — 技术设计草稿（待评审）
+> | 版本 | 日期 | 状态 | 说明 |
+> |------|------|------|------|
+> | v1.0 | 2026-09-09 | `[DESIGN_APPROVED]` | **只读状态屏**设计（前提已被 PRD v2.0 推翻，仅作历史追溯，见文末「附录 A：v1.0 → v2.0 变更说明」） |
+> | **v2.0** | 2026-09-10 | **`[DESIGN: PENDING REVIEW]`（待评审）** | 触摸式本地 HMI：合并 08 模块的本地展示与操作，移除 `web-api` |
+> | **v2.0-r1** | 2026-09-10 | **`[DESIGN: PENDING REVIEW]`（待复审）** | 设计评审 **REQUEST_CHANGES** 整改（必改 4 项 + 次要 3 项 + UI 交叉 2 项）：上屏时延达标（§4.2.1）、yaml 保留式回写（§4.3.2.1）、恢复默认值 L2 确认（§6.2）、`block_on` 钉死为非阻塞状态机、Slint 许可证评估（§1.1.4）、「SM3→SHA-256」措辞订正、UI §10 三点对齐、回环地址口径字段化。**逐项处置见附录 A.4** |
+> | **v2.0-r2+（终审）** | 2026-09-10 | **`[DESIGN_APPROVED: 2026-09-10, 设计评审员]`** | 终审通过：三项必改均已落实、无新矛盾。① 弃 `lv_spinbox`（步进器 / IPv4 / 日期时间改 `lv_btn`+`lv_label`）并同置 `LV_USE_SPINBOX=0`/`LV_USE_TEXTAREA=0`/`LV_USE_KEYBOARD=0`（三者同置 0 成立，全文无残留，编译期红线自洽）；② bindgen 改 `allowlist.txt` 逐符号精确清单 + `allowlist_recursively` + CI 双向断言（禁 `lv_*` 通配，与"压缩 unsafe 面"一致）；③ 滚动条"纯指示、不可拖"有 **v9.5.0 源码依据**（`lv_obj.c::draw_scrollbar()` 仅 `DRAW_POST` 绘制；`lv_indev_scroll.c` 0 处 scrollbar；`LV_PART_SCROLLBAR` 为 `lv_part_t` 而无可移除 clickable），与 UI v2.1 同口径、8 px 与 48 px 规则不冲突。前轮已过部分（时延 / yaml 保留式回写 / 恢复默认值 L2 / 双通道 / 6 页 / 迁移表 / 复用清单）未被改坏。**编码前置门禁：R-20（LVGL 三平台编译 spike；Windows 开发机须装 LLVM/libclang 并设 `LIBCLANG_PATH`，未通过前不得进入编码）** |
+> | **v2.0-r2** | 2026-09-10 | **`[DESIGN: PENDING REVIEW]`（待评审）** | **GUI 框架由 Slint 切换为 LVGL（用户决策）**——Slint 闭源商用嵌入式交付**必须付费商业许可**（GPLv3/Royalty-free 2.0 均不可用，§1.1.4 / R-17），成本不可接受。本版**重做 GUI/渲染/输入/字体/构建章节**（§1.1、§1.2、§1.3、§1.6、§2、§5、§5.6、§8、§10、§11、§12、§13 D1/D2/D3/D15、§14），**保留并复核**双通道协议（§3）、6 页架构（§6）、出口迁移表（§7）、时延拆解（§4.2.1）、边界（§9）、审计与节点设计。**变更决策与原因见附录 A.5**；**控件策略发生反转**（禁内置控件/全自绘 → 采用 LVGL 内置控件 + 自定义主题，§5.6），**UI 文档对齐点同步变更通知见 §5.7** |
 >
-> - 版本：v1.0（草稿）
-> - 日期：2026-09-09
-> - 状态：待评审（`[PENDING REVIEW]`）
-> - 关联 PRD：[`12-MUPC-本地显示终端-PRD.md`](../specs/modules/12-MUPC-本地显示终端-PRD.md)（`[REVIEWED: PASS]`）
-> - 权威点表：协议 V1.3（EMS）3 区只读点表（FC04）
-> - 目标平台：BECG-3568（RK3568 / RK3588，aarch64 Linux），HDMI 1024x768；无浏览器前提
+> - 关联 PRD：[`12-MUPC-本地显示终端-PRD.md`](../specs/modules/12-MUPC-本地显示终端-PRD.md)（v2.0，`[REVIEWED: PASS]`，2026-09-10）——**本设计的上位权威**，冲突以 PRD 为准
+> - 权威点表：协议 V1.3（EMS）3 区只读点表（FC04）；`mupc/crates/intercore/src/pcs.rs`（`REG_SOC=1010` / `REG_RUN_STATE=1013` / `REG_I_A=1022` / `REG_P_A=1029`）
+> - 目标平台：BECG-3568（RK3568，aarch64 Linux，openEuler 22.03+ / Ubuntu 20.04+），HDMI 外接 8 寸 **1024×768 触摸屏**，**无浏览器 / 无显示服务器（无 X11 / Wayland）**
+> - 本期边界：**移除 `web-api` crate**；6 页信息架构（P1–P6）；写操作仅限「配置保存 / 联锁释放 / M1 授权」（PRD §0 B5）
+>
+> **⚠️ 本文档的四个诚实前提（不粉饰）**
+> 1. **v1.0 的手绘渲染层（`layout.rs` / `font.rs` / `Canvas` 绘制原语 / `OffscreenCanvas`）在本版被判废弃**，仅保留其 **fbdev 像素通道（`FbCanvas`，见 §1.1.1 与 §8.1）**、色板与字库子集资产。保留/废弃逐项见 §8。
+> 2. **本模块 v2.0 的净新增工作量主要集中在 `mupcd` 侧**（配置热生效子系统、日志服务、审计服务、控制接口、系统/告警采集），HMI 侧因改用成熟 GUI 框架反而收缩。工作量分布见 §12.4。
+> 3. **LVGL 是 C 库，Rust 集成必须自建 FFI 绑定层**——上游 `lvgl-rs`（`lv_binding_rust`）**最新版 0.6.2（2023-04）仍停留在 LVGL 8.3.5 且已停更**（LVGL 官方 issue #7298「Development of `lv_binding_rust` has stalled」），**LVGL v9 无任何维护中的安全绑定**。本设计选**自写绑定**（绑定 C 层 + 薄安全层），**绑定层是 v2.0-r2 新增的确定性工作量（约 1000–1800 行 Rust），不可默认其"免费"**。选型论证见 §1.1.1，风险见 R-19/R-20/R-21。
+> 4. **构建链从「纯 Rust 零 C 依赖」变为「Rust + LVGL C 源码」**：需要 C 编译器与 `bindgen`（**Windows 开发机需装 LLVM/libclang**）、aarch64 交叉 C 工具链（**项目已有**，见 `mupc/build.md`）。这是**可预估、可验证**的成本（§12.1），但**须在编码前跑通一次三平台（Windows 本机 / x86_64 Linux CI / aarch64 交叉）的 LVGL 编译 spike**（R-20）。
 
 ---
 
@@ -17,72 +27,219 @@
 
 1. [方案探索与技术选型](#1-方案探索与技术选型)
 2. [架构总览](#2-架构总览)
-3. [数据通道协议与接口定义](#3-数据通道协议与接口定义)
+3. [通道协议（读通道 + 控制通道）](#3-通道协议读通道--控制通道)
 4. [mupcd 侧改动](#4-mupcd-侧改动)
-5. [渲染进程设计](#5-渲染进程设计)
-6. [画布布局结构与 PRD 映射](#6-画布布局结构与-prd-映射)
-7. [配置项](#7-配置项)
-8. [边界与异常处理对照](#8-边界与异常处理对照)
-9. [非功能预算落实](#9-非功能预算落实)
-10. [测试策略](#10-测试策略)
-11. [交叉编译与部署](#11-交叉编译与部署)
-12. [技术决策记录（ADR）与选型理由](#12-技术决策记录adr-与选型理由)
-13. [开发前置风险 / 待验证项](#13-开发前置风险--待验证项)
+5. [HMI 进程设计](#5-hmi-进程设计)
+6. [6 页详细设计](#6-6-页详细设计)
+7. [web-api 移除方案与出口迁移表](#7-web-api-移除方案与出口迁移表)
+8. [复用 / 废弃清单（v1.0 资产去留）](#8-复用--废弃清单v10-资产去留)
+9. [边界与异常对照 PRD §5](#9-边界与异常对照-prd-5)
+10. [非功能预算落实](#10-非功能预算落实)
+11. [测试策略](#11-测试策略)
+12. [部署与交叉编译](#12-部署与交叉编译)
+13. [技术决策记录（ADR）](#13-技术决策记录adr)
+14. [待真机 / 待确认项](#14-待真机--待确认项)
 
 ---
 
 ## 1. 方案探索与技术选型
 
-> KISS 原则贯穿：只做「读展示 + 降级」，不做取数重判、不做交互、不建趋势、不引入浏览器内核。
+> KISS 校准：v1.0 的自绘路线在「固定网格 + 少量中文词 + 只读」前提下是 KISS 的；v2.0 需求变为**6 页 + 常驻导航 + 滚动列表 + 多选选项 + 数字步进 + 模态确认弹层 + Toast + 焦点管理 + 中文文本换行**，自绘路线的成本结构发生反转——**此时引入成熟 GUI 框架才是 KISS**。但框架必须满足「可交叉编译 / 无显示服务器 / 触摸 / 中文 / ≤256MB·≤40% 单核」五重约束。
+>
+> **⚠️ v2.0-r2 框架切换（用户决策）**：原 v2.0-r1 选定 **Slint**。经查证其**三许可模型**在「闭源商用嵌入式交付」下 **GPLv3 与 Royalty-free 2.0 均不可用，只剩付费商业许可**（§1.1.4 / R-17），成本不可接受 → **用户决策改用 LVGL**（C 库，**MIT**，嵌入式原生 fbdev/evdev/中文生态成熟、许可零成本）。**切换面**：§1.1、§1.2、§1.3、§1.6、§2、§4.3.4 措辞、§5、§5.6、§7.3、§8、§10、§11、§12、§13（D1/D2/D3/D15）、§14；**不变面**：§3 通道协议、§4 mupcd 侧、§6 六页功能与交互语义、§7.1 出口迁移表、§9 边界、§4.2.1 时延拆解、§4.3 配置、§4.5 审计。变更决策全文见**附录 A.5**。
 
-### 1.1 关键决策 A：跨进程数据通道
+### 1.1 关键决策 A：GUI 框架选型
 
-候选 3 条路线对比（面向 1 Hz 展示、渲染进程只读、mupcd 崩溃自愈、本机无浏览器）：
+候选路线（按引入面从小到大）：
 
-| 路线 | 实时性@1Hz | 耦合/安全 | 实现成本 | mupcd 崩溃时渲染进程行为 | 跨平台开发便利（Windows 本地 x86） |
-|------|-----------|----------|---------|------------------------|-------------------------------|
-| **A1 本地 HTTP（127.0.0.1 GET /latest，轮询 500ms，返回最新帧 JSON）** | 满足；轮询即拉最新帧，允许丢帧 | 只回环不暴露外网；无鉴权面（本地可信）；与 web-api 北向服务解耦 | 低：mupcd 侧一个极简路由，渲染侧一个极简 HTTP GET 客户端（各约 80 行，无 TLS） | 连接拒绝/超时 → 渲染端计数判通道断 → ≤3s 进 6.3 画面；恢复即下轮轮询回实时 | **优**：TCP 回环在 Windows/Linux 同语义，开发期可直接连测试桩 |
-| A2 Unix socket（SOCK_STREAM + JSON 行/长度帧） | 同 A1，真推送可更省轮询 | 本地文件权限；不占端口 | 中：需自管监听/重连/成帧；Windows 支持不佳 | EOF 即断，可靠 | **劣**：Windows 上 tokio `Unix*` 不可用，本地开发需抽象双通道，违背 KISS |
-| A3 共享内存 + 信号/eventfd | 最低延迟 | mmap 需同机 | 高：需 seqlock 防撕裂、字段级栅栏、崩溃检测自写 | 需时间戳心跳 + 锁方案，正确性成本高 | **劣**：Win/ARM 分配与验证都繁琐，1Hz 场景纯属过度设计 |
+| 路线 | 交互式控件/页面/导航 | 中文字形 | 交叉编译 | 无显示服务器 | 内存/CPU 适配 | 无真屏可测 | 成熟度/维护 | **许可证** |
+|------|----------------------|----------|----------|--------------|---------------|------------|-------------|-----------|
+| **L-1 LVGL v9（C 库 + Rust FFI 绑定，选定）** | ✅ **内置控件即够用**（`lv_btn`/`lv_label`/`lv_list`/`lv_table`/`lv_chart`/`lv_dropdown`/`lv_switch`/`lv_msgbox`/`lv_tabview`/`lv_buttonmatrix`/`lv_bar`/`lv_led`/`lv_checkbox`；**步进器 / IPv4 / 日期时间一律 `lv_btn` + `lv_label` 组合**，**弃 `lv_spinbox`**——PM 裁定，理由见 §5.6 F12 行），配 `lv_style` 主题即可落 UI 色板与尺寸；**不再自绘控件**（见 §5.6 反转） | ✅ `lv_font_conv` 离线生成 CJK 子集（size/bpp 可控）→ **无"限西文脚本"类限制**；断行/LVGL `LV_LABEL_LONG_WRAP` 原生 | ⚠️ 引入 **LVGL C 源码编译**（`cc` crate / CMake）→ 需 C 编译器（三平台均需），但**交叉工具链项目已有**（`mupc/build.md`） | ✅ **原生 `LV_USE_LINUX_FBDEV`**（fbdev 驱动在 LVGL 主干内）+ 我们可注册**自定义 `lv_display` flush_cb** 直写 fb；DRM 亦原生支持（备选） | ✅ LVGL 为嵌入式而生（**KB 级基座**）；脏区重绘（`lv_obj_invalidate`）；1024×768 单帧缓冲 ≈3 MB | ✅ **可注册"内存 display"离屏后端**（自定义 `lv_display` + flush_cb 写 `Vec<u8>`）→ 本机可断言像素 | ✅ **LVGL 9.5 主干活跃**（LVGL 官方维护，嵌入式业界事实标准，数月一版）；⚠️ **但 Rust 绑定侧不活跃**（见 §1.1.1） | ✅ **MIT**（可闭源商用、可静态链接、无 royalty、无归属展示义务） |
+| L-2 egui + eframe | ✅ 即时模式控件齐全，但布局需手写坐标/容器，无声明式 | ✅ 成熟（`FontDefinitions` + CJK TTF 子集，纯 Rust 栅格化） | ⚠️ 官方路径需 winit+GL → 目标需 EGL/GBM/X11 开发库；**无官方 framebuffer 后端** | ⚠️ 需自研 fb 后端（非官方路径） | ⚠️ 即时模式**全帧重绘**语义，1024×768 软光栅稳态 CPU 难守 ≤40%；需靠 `request_repaint` 节流 | ✅ `egui_kittest` / 直接跑 `Context` 断言 | ✅ 活跃 | ✅ `MIT OR Apache-2.0` |
+| L-3 GTK3/4 | ✅ 完整 | ✅（pango/fontconfig） | ❌ 巨型 C 依赖树 + pango + fontconfig + 交叉工具链 | ⚠️ 需 X/Wayland（GTK4 Broadway/无头受限） | ⚠️ 基座内存逼近/超出 256MB | ⚠️ 需 xvfb | ✅ | ⚠️ LGPL（静态链接需合规评估） |
+| L-4 Qt (Qt for Embedded) | ✅ 完整 | ✅ | ❌ 重量级 C++ 依赖 + qmake/cmake 编排 | ✅（linuxfb/eglfs） | ⚠️ 重 | ⚠️ | ✅ | ❌ 非 Rust + 商业授权 |
+| L-5 自研控件库（扩 v1.0 ab_glyph 手绘） | ❌ **全部自建**：滚动容器、多选 chip、步进器、模态弹层与焦点、Toast、页面路由、命中测试、中文断行 | ✅（已有 ab_glyph 与子集字库） | ✅ 纯 Rust | ✅（已有 fbdev） | ✅ 最省 | ⚠️ 命中测试/交互状态机难以离屏覆盖，需自建测试框架 | ❌ 无上游、无社区 | ✅ 自有 |
 
-**选型结论：A1 —— 本地 HTTP（TCP 回环 127.0.0.1）短轮询「最新帧快照」，轮询周期 500ms。**
-
-理由：
-1. **状态在服务端、轮询取快照**，天然满足「允许丢帧但只丢中间帧、总是拿到最新有效帧」（PRD 4.4.1），无需渲染端做重传/排序。
-2. 通道断 = 连接失败，判定简单可靠（PRD 4.4.2/6.3）；mupcd 重启后端口恢复，下轮自动回实时（4.3.3 ≤1s）。
-3. 500ms 轮询下，一帧发布后最坏 ~500ms 被取到（落入「推送周期」语义），取到后立即上屏 ≤ 数 ms，满足 F5.2「收到→上屏 ≤500ms」。
-4. CPU 友好：阻塞式 GET + 等待间隔 sleep，无忙等/自旋（PRD 4.1.3）；断连满载时开销≈一次连接失败/500ms，CPU 趋近 0（4.1.3 断时 ≤5%）。
-5. 开发/测试优势：Windows 本地与 Linux 目标同语义，渲染进程可对接任意 stub 服务端，利于「无真屏验证」。
-6. 不并入 web-api(8080)（避免把本地遥测暴露到北向网口、避免跟随 https/证书生命周期耦合）；在 mupcd 内独立起一个**仅 127.0.0.1** 的回环监听。
-
-> 备选（评审可议）：若团队偏好既有 SSE 通道，可把帧经 SSE 推送，但需补「last-frame 重放端点」处理重连丢帧，成本 > A1，故不推荐。
-
-### 1.2 关键决策 B：原生渲染栈（RK3568 Linux，1024x768，中文渲染）
-
-候选对比（依赖体积 / 交叉编译 / 中文资源 / CPU≤15% / 内存≤64MB / 崩溃自恢复 / 无真屏可测）：
-
-| 路线 | 依赖体积 | aarch64 交叉 | 中文渲染 | CPU/内存 | 无真屏验证 | 自绘代码量 |
-|------|---------|-------------|---------|---------|-----------|-----------|
-| **B1 纯 framebuffer 自绘（直写 /dev/fb0 或 DRM dumb-buffer）+ 纯 Rust 光栅化（ab_glyph）渲染少量中文，捆绑 CJK 子集字体** | 无 C 依赖，二进制极小 | **纯 Rust 一次编过**（无 C 需先交叉编 SDL） | 捆绑 OFL 子集 OTF；只渲染 ~60 个汉字 + ASCII 数字 | 极低（离屏 3MB + 字库 <1MB + 图集小）；自绘无运行时 GUI 栈 | 屏幕后端抽象成 `offscreen`（内存 Canvas→PNG），单测/CI 全平台确定 | 中（布局/字形绘制自写，但内容为固定网格 + 少量动态数字/中文词，量可控） |
-| B2 SDL2（KMSDRM/fbcon）+ SDL_ttf/FreeType | 中（SDL2+SDL_ttf+FreeType+fontconfig） | **重**：需先交叉编 SDL2 目标库或 vendor aarch64 .so；Dev(win) 还需 SDL2.dll | 任意 TTF 即可；捆绑 Noto/WQY | 低~中；软件渲染够用 | SDL dummy driver 离屏 + 存图 | 少（绘图原语现成） |
-| B3 GTK3 / Qt Embedded | 大 | 巨大依赖树 + fontconfig/pango | OK | GTK/Qt 常态基座内存可能顶到/超 64MB 红线 | 需 xvfb/Wayland | 少但引入面大 |
-| B4 仅 bundling 系统字库 + 已有 GUI | — | — | 依赖系统字库不确定性高（目标镜像未必带 CJK 字库） | — | — | — |
-
-**选型结论：B1 —— 纯 framebuffer 自绘 + ab_glyph（纯 Rust）光栅化捆绑 CJK 子集字体。**
+**选型结论：L-1 —— LVGL v9（C，MIT）+ 自写 Rust FFI 绑定层（§1.1.1）+ 自定义 `lv_display`/`lv_indev` 后端（§1.1.1.1 / §1.2）。**
 
 理由：
-1. 屏面内容天然「固定分区布局 + 少量动态数字 + 一组有限中文状态词」，无需通用 GUI 框架；自绘代码被约束在固定网格，量可控且完全确定，可离屏单测。
-2. 渲染进程零 C 依赖（ab_glyph 纯 Rust 读 TTF/OTF 并光栅化）→ 交叉编译 aarch64 无 C 工具链前置；二进制与内存都最小，CPU 预算（单帧自绘 + 每 500ms 一次全屏拷贝）轻松落在 ≤15%/≤64MB 内。
-3. 崩溃自恢复与主进程隔离与栈无关（进程级 systemd Restart）；B1 不依赖 X/Wayland/合成器，天然适配 headless + HDMI。
-4. 屏幕后端用 `Screen` trait 收敛（`fbdev` / `drm` / `offscreen`），**无真屏时以 `offscreen` 跑全链路**并出 PNG，真机只验证驱动层薄薄一段。
+1. **需求形态决定了"现成控件 + 声明式布局"是 KISS**。v2.0 的页面/弹层/列表/表格/选项式输入在 LVGL 里几乎一一对应（`lv_tabview`/`lv_list`/`lv_table`/`lv_msgbox`/`lv_dropdown`/`lv_switch` + 步进器用 `lv_btn`+`lv_label` 组合，见 §5.6），而自研路线的 L-5 需要重建整个 UI 框架（保守估计 3000–6000 行 + 一套交互状态机测试框架），**违背 KISS 且显著高于引入框架的成本**。
+2. **许可证是本次切换的唯一动因，且被彻底消除**：LVGL 为 **MIT**，闭源商用嵌入式交付**零成本、零义务、可静态链接**（§1.1.4）。这是 L-1 相对 L-2（egui，许可亦无成本）的**决定性优势**（不选 L-2 的理由见下）。
+3. **中文不再有框架级风险**：`lv_font_conv` 生成 CJK 子集是 LVGL 生态的标准做法（§1.1.2），**不存在 Slint"软渲染文本限西文脚本"的官方限制**（原 R-01 从"高"降为"低"）。
+4. **显示后端有官方 fbdev 驱动**，且**我们仍保留自研 flush_cb 的能力**（§1.1.1.1）——既可用官方 `LV_USE_LINUX_FBDEV`，也可复用 v1.0 已落地的 `FbCanvas`（fb0 mmap + 格式探测 + 逐行写）作为**自定义 display 后端**。这使**像素格式风险归零**（与 r1 的 P-1 论证同构，只是载体从 `LineBufferProvider` 换成 `flush_cb`）。
+5. **触摸仍由我们自己的 Rust evdev 栈掌控**：LVGL 允许注册**自定义 `lv_indev` + `read_cb`**（§1.2），因此 **v2.0-r1 §1.2/§5.3 的触摸设计（设备发现/多候选报错/校准/CLI 覆盖/缺失容错）逐条保留**，且**不引入 libevdev C 依赖**（LVGL 自带的 `lv_evdev` 驱动**依赖 libevdev**，本设计**不启用** `LV_USE_EVDEV`，见 §1.2）。
+6. **可测性达标**：LVGL 支持"内存 display"离屏后端（自定义 `lv_display`，`flush_cb` 写入 `Vec<u8>`，`lv_refr_now()` 强制渲染）→ 在开发机（Windows x86，无屏）即可对区域像素断言并**真实渲染中文字形**（§11.1）。
+7. **L-2（egui）不选**的理由：其官方嵌入式路径要求 winit+GL（引入 X11/EGL/GBM C 依赖且**仍无 fb 后端**），自研 fb 后端可行但**即时模式全帧重绘**与 PRD §4.1「稳态 CPU ≤40%、空闲让出 CPU、不得忙等」相冲；要压住必须自实现重绘节流与脏区（回到手写）。**egui 保留为 L-1 绑定工作量不可接受时的备选**（许可证无成本，代价是 CPU 预算需靠节流补偿）。
+8. L-3/L-4 因依赖体积、交叉成本、内存基座与许可证（LGPL/商业）出局；L-5 因工作量与可测性出局。
 
-> **中文字体资源落点（必须给定）**
-> - **来源**：采用开源 OFL 授权中文黑体，首选 **文泉驿微米黑（WenQuanYi Micro Hei）或 Noto Sans SC**（openEuler/Ubuntu apt 可装，RK 镜像一般也带）。全字库体积大（数 MB~10MB）。
-> - **处置**：用 `pyftsubset`（fonttools）按「必需码表 + ASCII + 状态词 + 数字符号」**离线子集化**为单个 `.otf`（预期 100KB~500KB），入库路径 `mupc/crates/local-display/fonts/`。
-> - **加载**：优先以 `include_bytes!` **编译进渲染进程二进制**（运行期零文件依赖、测试可复现、镜像无需额外字库文件）；渲染进程可用启动参数 `--font <path>` 覆盖为外部/系统字库（含 `/usr/share/fonts/...`），**不入 core 配置**（见 §7.2）。
-> - **需覆盖的字集（子集化码表，列出以便开发直接执行）**：`充 放 停 待 机 电 状 态 储 能 系 统 电 池 荷 运 行 三 相 有 功 功 率 电 流 总 量 源 离 线 未 取 数 据 异 常 过 期 失 效 方 向 不 一 致 初 始 化 中 与 主 进 程 断 开 时 间 数 值 低 高 警 示 区 域 本 地 台 区 关 于 B M S P C S 0-9 . - % A 斜杠 / 冒号 :`（精确列表开发期在 font.rs 顶部常量集中维护，避免漏字）。
+> **备选路线（评审可议）**：
+> - **若 §1.1.1 的绑定层工作量被判定不可接受** → 切 **L-2（egui + 自研 fbdev/evdev）**，此时 §3/§4/§6 的通道、页面与 mupcd 侧设计**完全不变**（框架只影响 §5 的 HMI 渲染层与 §8 的 `local-display` 模块清单）。
+> - **若 LVGL C 编译链路在真机/交叉环境受阻** → 见 R-20 的处置（放宽到 `bindgen` 预生成 + 提交生成物、或改用 L-2）。
+> 这是把框架风险局限在 HMI 进程内部的设计目标。
 
-> 备选（评审可议）：若评审更倾向少自绘、可接受 C 依赖与交叉成本，可退到 B2（SDL2）。本文按 B1 为推荐主方案展开，B2 仅作备选，不双线实现。
+#### 1.1.1 ⚠️ 关键决策 A2：LVGL 与 Rust 的集成方式（FFI 绑定选型）
+
+> **这是 v2.0-r2 的核心新增风险项**（R-19），也是与 r1 最大的结构性差异：r1 的 Slint 是**纯 Rust crate**，而 LVGL 是 **C 库**，Rust 侧**必须**有一层 FFI 绑定。
+
+**现状核查（诚实结论，2026-09-10）**：
+
+| 方案 | 版本/状态（核查事实） | 安全绑定 | LVGL 版本 | 维护 | 结论 |
+|------|----------------------|----------|-----------|------|------|
+| **B-1 上游 `lvgl-rs`（`lv_binding_rust`）** | crates.io 最新 **`lvgl` 0.6.2（2023-04-02）**；`lvgl-sys` 同步 0.6.2；GitHub `lvgl/lv_binding_rust` | ✅ 有（`lvgl-codegen` 生成的**全量**安全封装）+ `lvgl-sys`（bindgen 原始绑定） | **LVGL 8.3.5**（**非 v9**） | ❌ **已停滞**：LVGL 官方 issue **#7298**「Development of `lv_binding_rust` has stalled」；LVGL 明确**无法派员工维护**、**近期无 v9 升级计划**；社区提出的 `lvgl_rust_sys` 解耦方案尚未落地到该 crate | ❌ **不作为主选**：① 版本落后一个大版本（8.x 为 legacy 线，v9 为当前线，API 大幅变更）；② 项目停更，无人跟 LVGL 上游；③ 有未修的 build/lifetime/segfault 类 issue 报告 |
+| **B-2 v9 时代的**原始** sys 绑定 crate** | 存在两类：`lvgl_rust_sys`（fork，用 `cc` 编译 LVGL **v9.5.0**，已验证可交叉到 Xtensa/ESP32）与 **`lightvgl-sys` 9.5.3**（crates.io，bindgen 原始绑定，跟踪 LVGL 9.5.0/9.4/9.3，**显式支持交叉编译 env：`CROSS_COMPILE` / `BINDGEN_EXTRA_CLANG_ARGS` / `LIBCLANG_PATH`**，需 `DEP_LV_CONFIG_PATH` 指向 `lv_conf.h`） | ❌ 仅**原始 `unsafe` FFI**（无安全层） | **v9.5**（当前线） | ⚠️ 较新但**用户面窄、非官方**（无 LVGL 官方背书，维护者单一） | ⚠️ **可作为 sys 层的省力起点**（省去自写 `build.rs`/bindgen 配置与 `lv_conf.h` 接线），但**不可依赖其长期维护** |
+| **B-3 自写绑定（选定）**：vendor LVGL v9.5 源码 + 自写 `build.rs`（`cc` crate 编译 + `lv_conf.h`）+ `bindgen` 生成原始绑定（**精确 allowlist 逐符号限定**，见 §1.1.1.2）+ **自写薄安全层** | 我们自持：**LVGL 源码以 git submodule / vendor 目录 pin 到具体 tag**（如 `v9.5.0`），可随时升级 | ✅ **自写**（仅覆盖本项目实际用到的 API 子集） | **v9.5**（由我们 pin，可升级） | ✅ **我们自持**：无第三方维护风险；升级 = 换 tag + 重跑 binding 生成 + 修编译错（LVGL 官方提供 v8→v9 迁移指南） | ✅ **选定** |
+
+**选型结论：B-3 —— 自写绑定（自持 LVGL 源码 + `cc` 编译 + bindgen allowlist + 薄安全层）。**
+
+理由：
+1. **B-1 不可用**（LVGL 8.3.5 + 停更 + 与 v9 生态割裂，前述引用的 LVGL issue #7298 为官方定性）；**B-2 只能省掉"接线"，省不掉"安全层"**，且把 sys 层交给单一非官方维护者，与本项目「自持关键路径」的原则不符。
+2. **绑定面被需求本身限定得很小**。本项目实际需要绑定的 C API 是**有限且可枚举**的（约 20 个控件 + 样式/主题 + 字体注册 + display/indev 注册 + tick/timer + 事件回调），而非"整个 LVGL"。用 bindgen **逐符号枚举**（`allowlist_function` / `allowlist_type` / `allowlist_var` + `allowlist_recursively(true)`）**只生成所需符号**，可显著压缩生成物与 `unsafe` 面。**这里的 allowlist 必须是精确清单（禁止 `lv_*` 通配）**——通配 `lv_*` 等于**全量生成**，与本条的目标（压缩生成物/`unsafe` 面）自相矛盾（设计评审订正项，机制见下）。
+3. **绑定层是"机械但确定"的工作量，不是研究风险**。本设计给出**绑定层的工作量边界与验收口径**（§1.1.1.2），使 PM 可据此排期，而不是把它当作"未知"。
+4. **版本可控**：pin tag = 锁定 ABI；升级路径明确（LVGL 官方 v8→v9 迁移指南 + 我们自持的薄层是唯一需要跟改的地方）。
+
+##### 1.1.1.1 显示/输入后端接入：三条路径
+
+| 路径 | 做法 | 依赖 | 结论 |
+|------|------|------|------|
+| **P-1 自定义 `lv_display` + 自研 `flush_cb` 直写 fb0（选定，默认）** | `lv_display_create(w,h)` → `lv_display_set_buffers(buf1, buf2, size, LV_DISPLAY_RENDER_MODE_PARTIAL)` → `lv_display_set_flush_cb(cb)`，`cb` 内把 LVGL 渲染好的区域**做像素格式转换后写 `/dev/fb0`**（复用 v1.0 `FbCanvas` 的 mmap/格式探测/逐行写逻辑） | **仅 LVGL 本体**（无额外 C 库）；fb 由我们 mmap | **✅ 选定**。① **像素格式完全自控**（不依赖 LVGL fbdev 驱动对目标面板格式的支持）；② **与离屏测试后端共用同一条 flush 路径**（仅 sink 不同：`Vec<u8>` vs fb0）→ 测试与生产同源，可测性最好；③ **`FbCanvas` 资产被复用**（而非 r1 的"降级"） |
+| P-2 LVGL 官方 `LV_USE_LINUX_FBDEV` 驱动 | `lv_linux_fbdev_create()` + `lv_linux_fbdev_set_file(disp, "/dev/fb0")`（v9 主干内置；设备可用 `LV_LINUX_FBDEV_DEVICE` 覆盖） | LVGL 本体，**无额外 C 库** | ⚠️ **作为 P-1 的一行开关式备选**（若 P-1 的 flush 路径出现性能问题）。**不作为默认**：其像素格式/双缓冲策略由驱动决定，遇非常规面板格式时不如 P-1 可控；且与离屏后端不是同一条代码路径 |
+| P-3 LVGL 官方 `LV_USE_LINUX_DRM`（DRM/KMS） | `lv_linux_drm_create()` + `lv_linux_drm_set_file()` | LVGL 本体（可选 libdrm） | ⚠️ **不在本期自研/主用**。仅当真机 `/dev/fb0` 不可用时启用（R-03）；已知 v9 早期版本 DRM 路径有分辨率硬编码与 `lv_tick_set_cb` 缺失导致锁死的报告，启用前须核对所用 tag 的修复状态 |
+
+> **主循环与 tick 契约（P-1 必备）**：LVGL 需要 `lv_tick_set_cb()` 提供单调毫秒时基（由我们以 `Instant` 实现）；`lv_timer_handler()` 需被周期性调用，**其返回值即"距下次需要处理的时间"→ 直接作为我们 `poll()` 的超时上界**，天然满足「唯一阻塞点、无忙等」（§5.2 不变量 1）。
+
+###### 1.1.1.2 绑定层的范围、分层与工作量边界
+
+```
+crates/local-display/
+├── lvgl-sys/           # 原始绑定（bindgen 生成，unsafe）
+│   ├── build.rs        #   cc 编译 LVGL C 源码（含 lv_conf.h）+ bindgen(精确 allowlist)
+│   ├── allowlist.txt   #   【新】bindgen 精确 allowlist（逐符号枚举，禁 lv_* 通配，机制见下）
+│   ├── lv_conf.h       #   LVGL 配置（本设计给定初值，见下）
+│   └── src/lib.rs      #   bindgen 生成物（可提交以加速构建，见 R-20）
+└── src/lvgl/           # 薄安全层（自写，本项目唯一的 unsafe 边界收敛处）
+    ├── mod.rs
+    ├── obj.rs          #   Obj 包装（创建/父子/坐标/可见性/样式引用）
+    ├── widgets.rs      #   控件的类型化构造与属性 setter（§5.6 控件映射表）
+    ├── style.rs        #   Style/主题：色板、字号、圆角、内边距 → 落 UI §3.2/§3.5
+    ├── font.rs         #   字体注册（lv_font_conv 产物）+ 文本设置
+    ├── display.rs      #   lv_display 注册 + PARTIAL 双缓冲 + flush 桥
+    ├── indev.rs        #   lv_indev 注册 + read_cb 桥（接 Rust evdev）
+    └── event.rs        #   事件回调桥（C 回调 → Rust closure，含 user_data 生命周期管理）
+```
+
+**allowlist 的形态（精确、可审计，取代 `lv_*` 通配）**：`lvgl-sys/allowlist.txt` 逐行列出所需符号（`fn:lv_obj_create` / `type:lv_obj_t` / `var:lv_font_noto_sc_24`），`build.rs` 读该文件逐项调用 `allowlist_function` / `allowlist_type` / `allowlist_var`（`allowlist_recursively(true)` 以带上传递依赖类型）；**禁止任何 `lv_*` 通配**。双向约束（CI 断言，见 §12.1）：① `bindings.rs` 导出的符号集合 ⊆ `allowlist.txt`（多一个即失败）；② `allowlist.txt` 中每个符号在 `src/lvgl/**` + `ui/**` 中确有引用（无死符号）。**新增控件用点时必须同步补清单**——该纪律与下述 unsafe 边界纪律同等强制（薄层是唯一用点，故清单与薄层一一对应、可机械核对）。
+
+**`lv_conf.h` 关键项（本设计初值，编码前随 spike 复核）**：`LV_COLOR_DEPTH 32`、`LV_USE_LINUX_FBDEV 0`（走 P-1，不启用官方 fbdev 驱动）、`LV_USE_EVDEV 0`（**不引入 libevdev**，走自研 indev，§1.2）、`LV_USE_LINUX_DRM 0`、`LV_USE_SDL/GLFW/X11/WAYLAND 0`、`LV_USE_LOG 1`（转发到 Rust `tracing`）、`LV_MEM_SIZE`（按 §10 预算设定，建议 256 KB 起，实测后定稿）、`LV_USE_OS` 与线程策略（本设计**单线程**：UI 全部在事件循环线程内，见 §5.2）。
+
+**工作量边界（诚实标注，供 PM）**：薄安全层 **约 1000–1800 行 Rust**（控件 setter 占比最大，机械度高）；`build.rs` + `lv_conf.h` + allowlist 维护约 **150–300 行**。**不含** `lv_font_conv` 产物（C 文件，由工具生成）。该工作量已计入 §12.4 工作单元 A。
+
+**unsafe 边界纪律（编码约束）**：
+1. `unsafe` **只允许**出现在 `lvgl-sys` 生成物与 `src/lvgl/*` 薄层内部；**`lvgl-sys` 不得被 `pages`/`state`/`channel` 等模块直接引用**（CI 以源码扫描断言，§11.1 静态约束 ⑥）。
+2. 所有 `lv_*` 调用的**调用线程必须是事件循环线程**（LVGL 非线程安全）；薄层不提供任何跨线程 API。
+3. C 回调 → Rust 的 `user_data` 生命周期由 `event.rs` 统一管理（`Box::into_raw` / `from_raw` 配对，对象删除时 drop），**禁止**在回调内 `panic`（跨 FFI 展开为 UB；统一 `.catch_unwind` 或改为错误码返回）。
+
+#### 1.1.2 中文文本与字体资源（`lv_font_conv`）
+
+- **字库来源**：沿用 v1.0——开源 OFL 中文黑体（**文泉驿微米黑 / Noto Sans SC / 思源黑体**）经 `lv_font_conv`（Node CLI，亦可用官方 web 工具，推荐 CLI 以便 CI/离线复现）**离线子集化并编译为 C 数组**，入库产物置于 `crates/local-display/fonts/`：
+  ```
+  lv_font_conv --font NotoSansSC-Regular.otf --size 24 --bpp 4 --format lvgl \
+      --symbols "$(cat font_subset_charset.txt)" --no-compress \
+      -o fonts/lv_font_noto_sc_24.c
+  # 同法生成 32 / 48 / 64 / 96 px 各档（对应 UI §3.3 字号阶梯）
+  ```
+- **码表**：沿用并扩充 v1.0 的 `font_subset_charset.txt`（UI 设计 §3.6 的**全屏用字表**为真源）——覆盖 P1–P6 全部文案 + 对话框/Toast/WarnBanner/导航/空态/不可用态 + 数字/单位/符号。**扩充后的码表是唯一的子集输入**，漏字即屏上出现豆腐块，故 §11.1 加**码表覆盖率测试**（静态扫描源码中的中文字面量 → 断言全部落在码表内）。
+- **字号档位与体积预算**：共 5 档（24/32/48/64/96 px），4 bpp 抗锯齿。**体积按实际码表实测**（CJK 子集为 100–400 字量级时，单档约 **20–80 KB**），**总预算 ≤300 KB**（§10 磁盘预算内），构建后 `ls -l` 复核；超预算的处置：降到 2 bpp（无抗锯齿，UI V-4 需复核）或合并相近档位。
+- **中文断行**：LVGL `lv_label` 的 `LV_LABEL_LONG_WRAP` 原生支持按宽度换行；CJK 无空格断行由 LVGL 的字符级 wrap 处理。**日志长消息**仍需按 UI §3.4 的**软断点后处理**（在 Rust 侧对消息按字数插入软断点，不改数据）。
+- **字体应用**：`lv_font_noto_sc_NN` 通过 `lv_style_set_text_font()` 挂在主题样式上（§5.6），**页面不硬编码字体引用**（与"页面不硬编码色值"同口径）。
+
+#### 1.1.3 CJK 字形风险（原 R-01，**由"高"降为"低"**）
+
+- **r1 的风险来源**：Slint 官方文档明示其**软件渲染器**「Text rendering is limited to western scripts」，故需编码前 spike。
+- **LVGL 下的结论**：**该风险不存在**。LVGL 的文本渲染是「codepoint → `lv_font_t` 的 cmap 查字形 → 栅格化位图」，`lv_font_conv` 为 CJK 生成的位图字体是 LVGL 生态的**标准做法**（多年、大量中文产品在用），**没有"限西文脚本"一类限制**。
+- **降级后的残余风险（保留为 R-01）**：**位图字体的清晰度**（UI V-4 的"密笔画字"如「联锁」「遥测」在 24 px 下的可辨性）——这是**视觉标定问题**，不是可行性问题；处置：字号上调 / 提高 bpp / 加 1 px 描边（UI §11 V-4 已列）。
+- **验证方式（仍保留，但定位为"回归"而非"门禁"）**：离屏渲染一屏含「充电/放电/停机/待机/储能电池 SOC/联锁/审计」的界面 → 断言目标文本区域**与背景不同且字形连通区域数量 ≈ 字数**（§11.1），可在开发机（Windows）完成。
+
+#### 1.1.4 许可证合规（**LVGL = MIT，闭源商用嵌入式无成本**）
+
+**结论（须显式声明）**：
+
+1. **LVGL 采用 MIT 许可证**：**可闭源商用、可静态链接进闭源二进制、无 royalty、无源码公开义务、无归属展示义务**（MIT 仅要求保留版权与许可声明文本，做法：在 HMI 二进制随附的 `THIRD-PARTY-NOTICES` 或 P6「关于」页脚内放一行 `LVGL (MIT) — Copyright (c) LVGL Kft` 即可，**成本为零**）。
+2. **本模块交付因此无任何许可证成本或法务风险**——这正是切换的**唯一动因与达成结果**（附录 A.5）。
+3. **`lv_font_conv`**：为 LVGL 官方工具（MIT），仅构建期使用，不进入交付物。
+4. **字体文件许可**：**文泉驿微米黑（GPLv2 + 字体例外）** 或 **Noto Sans SC / 思源黑体（OFL-1.1）**——**选定 OFL-1.1 系（Noto Sans SC / 思源黑体）**，因其对"嵌入/再分发"无 copyleft 牵连，与闭源交付兼容；**`lv_font_conv` 产物为位图数据、不构成字体衍生作品的分发争议**，但仍应在 `THIRD-PARTY-NOTICES` 中列出字体名与许可。**注意**：若选文泉驿，其 GPLv2+字体例外需法务确认（**建议直接用 OFL 系，规避该议题**）。
+5. **Rust 侧依赖**：`cc` / `bindgen`（均为 MIT/Apache-2.0）——无风险。
+6. **原 D15/R-17（Slint 许可 ADR 与"编码前许可门禁"）随框架切换作废**（见 §13 与 §14）。
+
+### 1.2 关键决策 B：触摸输入栈
+
+| 路线 | 依赖 | 校准 | 结论 |
+|------|------|------|------|
+| **B-1 `/dev/input/eventX` + Rust `evdev` crate + **自定义 `lv_indev`**（选定）** | 纯 Rust（`evdev` crate，直接 ioctl/read）；**不引入 libevdev** | 读 `EVIOCGABS(ABS_X/ABS_Y)` 的 min/max 做线性映射；提供 CLI 覆盖与轴交换/反向 | **✅ 选定**：`lv_indev_create()` + `lv_indev_set_read_cb()` 把 Rust 读到的坐标喂给 LVGL；**设备发现/校准/容错全在 Rust 侧**（r1 设计逐条保留）；**绕开 LVGL `lv_evdev` 驱动的 libevdev C 依赖** |
+| B-2 LVGL 官方 `lv_evdev` 驱动（`LV_USE_EVDEV=1`） | ⚠️ **强制依赖 `libevdev` C 库**（LVGL 文档明确「always requires libevdev」）→ 交叉编译须为目标架构额外构建/提供 libevdev + 头文件 | 内建 `lv_evdev_set_calibration()` / `lv_evdev_set_swap_axes()` | ❌ **不选**：① 引入额外 C 依赖（libevdev），显著加重交叉与部署前置；② 设备发现/多候选报错/启动报错等**容错语义不在我们手里**（EDGE-13 要求"触摸失效不影响数据刷新"）；③ 已知 v9.1 起「手工 `lv_indev_create` 与 `lv_evdev_create` 混用会失效」的报告（LVGL issue #6721）——我们不去踩这个坑 |
+| B-3 `/dev/input/mice` 或读 tslib | — | — | ❌ 不适用（触摸屏为 evdev 绝对坐标设备，非 PS/2 鼠标） |
+
+**设计要点（与 r1 逐条等价，仅"事件投递终点"由 Slint 换成 LVGL `indev`）**：
+- **设备发现**：遍历 `/dev/input/event0..N`，用 `evdev` 打开并读能力位：优先 `EV_ABS` + `ABS_MT_POSITION_X/Y`（多点协议 B），退化 `ABS_X/ABS_Y`（单点）。命中多个候选时**报错退出并列出候选**（不静默取第一个，避免在柜面选错设备）。
+- **显式指定**：生产 unit 固定 `--touch-device /dev/mupc-touch`；部署侧以 udev 规则建稳定符号链接（见 §12.2）。
+- **校准**：`ABS_X/Y` 的 min/max → 线性映射到 `[0, width/height)`。`max<=min` 或 ioctl 失败 → **启动即报错**（不静默用默认值）。CLI 覆盖：`--touch-calib xmin,xmax,ymin,ymax`、`--touch-swap-xy`、`--touch-invert-x`、`--touch-invert-y`（真机现场适配，不写进 core 配置）。
+- **单点语义**：本期按单点触摸设计（PRD §1.4）；多点协议只取第一个触点（`ABS_MT_TRACKING_ID` 首个 slot）。
+- **投递给 LVGL（`indev.rs` 薄层）**：`lv_indev_create()` → `lv_indev_set_type(POINTER)` → `lv_indev_set_read_cb(cb, user_data)`，`cb` 内把 Rust 侧的 `(pressed, x, y)` 填入 `lv_indev_data_t`（`point`/`state`）。**读取时机**：以 `lv_indev_set_mode(LV_INDEV_MODE_EVENT)` + 事件到达后 `lv_indev_read(indev)` 主动投递（避免 LVGL 内部 30 ms 定时轮询带来的固定延迟）；`lv_conf.h` 的 `LV_USE_EVDEV` **置 0**。
+- **命中/z-order/弹层拦截**：由 **LVGL 控件树**负责（`lv_obj` 树 + `lv_layer_top()` 弹层），正确性远优于自研。
+- **时延预算**：`poll` 唤醒 ≤1 ms → `lv_indev_read` → LVGL 命中与脏区失效 → `lv_timer_handler` 重绘 ≤30 ms（局部）→ fb blit ≤5 ms ⇒ **按下反馈 ≤100 ms**（PRD TT-04）可达。**真机实测点**（§14 R-05）。
+- **误触与滑动**：控件尺寸/间距由**主题样式常量**强制（§5.6）；LVGL 的**滚动容器**（`lv_obj` + `LV_OBJ_FLAG_SCROLLABLE`）内，子对象的 `LV_EVENT_CLICKED` **仅在按下-抬起落在同一对象且未转化为滚动时触发**，满足 TT-11（需真机/离屏验证）；500 ms 防抖在 UI 层按钮回调内实现（记录上次触发时刻）。
+- **LVGL 单击判定可调**：LVGL 有 `LV_INDEV_DEF_SCROLL_LIMIT` / `LV_INDEV_DEF_SCROLL_THROW` 等常量（`lv_conf.h`）控制"拖动多远就不算点击"，**该项列入编码前标定**（离屏可先验，真机复核，R-10）。
+
+### 1.3 关键决策 C：显示后端
+
+| 路线 | 依赖/成本 | 结论 |
+|------|-----------|------|
+| **C-1 framebuffer `/dev/fb0`（选定，默认）** | 沿用 v1.0 已在 `canvas.rs::FbCanvas` 落地的 mmap + 像素格式探测逻辑，作为 **`flush_cb` 的像素 sink** | **✅ 默认**。与 §1.1.1.1 的 P-1（自定义 `lv_display` + `flush_cb`）直连；`mupc-display.service` 已含 `video` 组 |
+| C-2 DRM/KMS（`/dev/dri/card0`） | **不选（自研）**：本期改用 **LVGL 官方 `LV_USE_LINUX_DRM` 驱动（P-3）**，而非自研 dumb buffer + page flip | ⚠️ **不在本期启用**。仅当真机 `fb0` 不可用时作为 R-03 的处置（LVGL 原生支持，无需自研） |
+| C-3 X11 / Wayland | 目标镜像无显示服务器 | ❌（LVGL 侧对应 `LV_USE_X11`/`LV_USE_WAYLAND` 亦关闭） |
+
+> **格式兼容**：因走 P-1（我们自己的 `flush_cb`），`/dev/fb0` 的 `bits_per_pixel` / `red/green/blue` 位偏移由我们在 `FbCanvas` 内读取并做转换（v1.0 已有该逻辑），**与 LVGL 的像素格式支持无关**。LVGL 侧只需把 `LV_COLOR_DEPTH` 与我们要求的目标格式钉死（`lv_conf.h`），渲染结果一律经 `FbCanvas` 转换后落 fb。
+>
+> **离屏测试后端（`--backend offscreen`）**：同一套 P-1 代码，`flush_cb` 的 sink 由 `FbCanvas` 换成内存 `Vec<u8>`（并可导出 PNG 供人工核对）→ **生产/测试同一条渲染路径**，这是本模块可测性的支柱（§11.1/§11.2）。
+
+### 1.4 关键决策 D：应用架构与通道形态
+
+**进程拓扑保持 v1.0 的两进程分离**（数据与控制集中在 `mupcd`，HMI 只做渲染与输入）：
+
+- 理由 1（PRD 硬约束）：PRD §4.4 第 6 条「显示进程**任何情况下**不得直连核间 modbus / PCS 总线」；PRD §1.4「写操作经 mupcd 提供的受控接口完成」。**单进程（把取数/写入搬进 HMI）直接违反 PRD**。
+- 理由 2（可靠性）：PRD §4.3「显示进程崩溃/重启不得影响 mupcd」——同进程则 `panic` 即全灭。
+- 理由 3（复用）：v1.0 的 `DisplayDataProvider`（域值化/量程/一致性）与 `AiIntegrator::soc_display_snapshot` 已在 mupcd 侧正确落地，迁移成本为零。
+
+**通道形态：双监听（读 / 控制分离）**，这是对 PRD §4.4 第 4/5 条与 PL-8 的直接落地：
+
+| 通道 | 端点 | 语义 | 变化 |
+|------|------|------|------|
+| **读通道（展示）** | `127.0.0.1:9810`（`display.bind_addr`） | **仅 GET，无参数，无副作用**。承载全部实时展示量（F1–F8、F16 联锁状态、F7 告警） | v1.0 已有 `GET /v1/display/latest`；v2.0 **扩展帧内容**（不新增端点，保持客户端简单） |
+| **控制通道（受控接口）** | `127.0.0.1:9811`（`display.control_bind_addr`，新） | **读查询（带参、有限额）+ 写操作（校验/幂等/审计/回执）**：配置读写、日志查询、审计查询、联锁读/写 | **v2.0 新增**，独立监听 |
+
+- **为何两个监听而非一个监听的两种路径**：PL-8 要求「展示通道不承载下行写；写操作走独立受控接口」需**可被架构检查**。物理分离使「读通道的代码路径中不存在任何写能力」成为结构事实（不同模块、不同 handler 集合、不同句柄），而非依赖审查者逐行确认；同时控制侧故障/限流不影响展示实时性。
+- **为何不并回 `web-api` 的 8080**：PRD §3.7 PL-4/PL-5 要求取消对外 HTTP 面；两个监听**均硬绑 127.0.0.1**（`validate()` 强制回环，非回环即启动报错），对外不可达。
+- **为何不选 Unix socket / 共享内存**：见 v1.0 §1.1 论证（Windows 本地开发不可用 / 1Hz 场景过度设计），结论在 v2.0 不变——本机开发与 CI 必须能跑通全链路。
+
+### 1.5 关键决策 E：`web-api` 移除方式
+
+**结论：整 crate 删除（`crates/web-api` 从 workspace members 移除）**，其中**仍被复用的类型先行迁出**，然后删除。不保留「内部模块」形态——理由：PRD PL-4/PL-5 要求对外行为消失，而 `web-api` 的全部价值面（Axum 路由 + 会话 + SSE + 静态资源）都与「对外 HTTP」绑定；保留其 crate 只会保留一棵需要持续维护的死依赖树（`axum` / `tower-http` / `jsonwebtoken`）。
+
+**必须先迁出的三处耦合**（这是删除的真实阻碍，不是「删目录」那么简单）：
+
+| 被复用资产 | 现位置 | 新落点 | 影响 |
+|------------|--------|--------|------|
+| `InterlockApi` trait + `InterlockStatus` / `InterlockSourceStatus` | `web-api/src/app_state.rs`（被 `mupc-core-bin/src/interlock.rs` 实现） | **`display-proto::interlock`**（HMI 契约单一真源） | `interlock.rs` 改 `use`；同时把错误类型结构化（§4.6） |
+| `SsePushService` | `web-api/src/sse/`（被 `core-bin/src/startup.rs::SouthSink` 使用） | **mupcd 内 `AlertFeed`**（有界 ring，见 §4.7） | `SouthSink.sse` 字段替换为 `AlertFeed` 句柄 |
+| `AuditLogger` / `LogsHandler` / `SystemStatus` | `web-api/src/audit`、`routes/logs.rs`、`routes/status.rs` | **mupcd `ConsoleAuditService` / `LogService`**；`SystemStatus` **删除**（全为占位值） | 见 §4.5 / §4.4 |
+
+完整逐出口迁移归类与受影响文件清单见 **§7**。
+
+### 1.6 复用 / 废弃判定（摘要，**v2.0-r2 复核结论**）
+
+完整清单见 §8。**一句话结论**：
+- **复用（升级）**：`display-proto`（帧模型/配置/字段标志）、`local-display::channel`（回环 HTTP 客户端）、`local-display::state`（三态归一/新鲜度纯逻辑）、**`local-display::canvas::FbCanvas`（fb0 mmap + 格式转换 + 逐行写）——在 r1 中被"降级"，在 r2 中升为"`flush_cb` 的像素 sink"（**性质从"被迫自绘的遗留"变为"显示后端的确定组成部分"**，复用度更高）**、`local-display::config`（CLI 解析）、v1.0 的**色板常量**（迁入 LVGL 主题样式）与**字库子集码表**（`font_subset_charset.txt`，**码表复用、产物重建**为 `lv_font_conv` 的 C 字体，见 §1.1.2）；mupcd 侧 `DisplayDataProvider` / `LoopbackHttpPublisher` / `soc_display_snapshot` / `read_three_phase` 全部保留。
+- **废弃**：`local-display::layout`（1003 行固定网格自绘）、`local-display::font`（ab_glyph 光栅化与图集）、`local-display::run`（500 ms 定拍自绘主循环）、`Canvas` 的**绘制原语契约**与 `OffscreenCanvas` 的布局用途、`local-display/tests/full_chain.rs`（改为 **LVGL 离屏渲染 + 页面断言**）。
+- **复核要点（框架变更后逐项重判，见 §8.3）**：① `FbCanvas` 从"降级"回到"保留"；② `font.rs` 仍废弃（LVGL 接管文本），但其**码表资产**仍复用；③ 新增**自写绑定层**（不是复用项，是净新增，§1.1.1.2）；④ v1.0 没有任何"输入"资产（原只读屏无触摸），`touch.rs` 是**净新增**（r1/r2 相同）。
 
 ---
 
@@ -91,585 +248,1494 @@
 ### 2.1 进程拓扑
 
 ```
-┌────────────────────────────── 单机（BECG-3568, Linux） ──────────────────────────────┐
-│                                                                                       │
-│  进程 P0 = mupcd（主进程 / 大脑）                                                      │
-│  ┌─────────────────────────────────────────────────────────────────────────────┐     │
-│  │ 核间 modbus (RS485 ↔ PCS, FC04/FC06)                                        │     │
-│  │   ModbusRtuTransport·run_heartbeat_loop ──▶ 1013 RUN_STATE(心跳1s, 在线判定)   │     │
-│  │   dispatch 决策循环(1s) ── apply_soc_source ──▶ 1010 SOC(单源裁决: BMS优先/核间回落)   │     │
-│  │   DisplayDataProvider 采集循环(1s, display.enabled 时) ──▶ 1022/1023/1024     │     │
-│  │        (输出电流) + 1029/1030/1031(有功) + 1032(总有功) [单次或两段 FC04]       │     │
-│  └───────────────┬─────────────────────────────────────────────────────────────┘     │
-│                  │ 域值化(×0.1 量纲 / 量程校验 / 打 valid 标志 / 一致性比对 6.6)        │
-│  AiIntegrator  SOC 单源裁决值(唯一裁决点, 见 §4.3) ──────────┐                          │
-│  ┌───────────────▼────────────────────────────────────────┐ │                          │
-│  │  DisplayDataProvider（新组件, 归属 mupcd, core-bin 内） │ │                          │
-│  │  每 1s: 组 DisplayFrame → seq++ / ts → 更新 latest      │◀┘                          │
-│  └───────┬────────────────────────────────────────────────┘                           │
-│          │ 发布(内存 Mutex<latest> + 序列化)                                            │
-│  Loopback HTTP 服务（127.0.0.1:9810, GET /v1/display/latest → JSON 帧）              │
-└──────────┬──────────────────────────────────────────────────────────────────────┘     │
-           │ 跨进程数据通道（TCP 回环, 只读, 无下行写）                                    │
-┌──────────▼──────────────────────────────────────────────────────────────────────┐     │
-│  进程 P1 = mupc-local-display（独立渲染进程, systemd Restart=always ≤3s 自恢复）    │     │
-│    main ─▶ channel client(500ms 轮询) ─▶ 状态模型/新鲜度 ─▶ 布局绘制 ─▶ Screen.blit  │     │
-│    Screen = fbdev(/dev/fb0) | drm(/dev/dri/card0) | offscreen(测试)               │     │
-└──────────────────────────────────────┬───────────────────────────────────────────┘     │
-                                       │ HDMI
-                                  ┌────▼─────┐
-                                  │ 8寸屏 1024x768 │
-                                  └──────────┘
-└───────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────── 单机（BECG-3568, Linux, 无 X11/Wayland） ────────────────────────────┐
+│                                                                                                  │
+│  进程 P0 = mupcd（主进程 / 数据 + 控制后端）                                                       │
+│  ┌────────────────────────────────────────────────────────────────────────────────────────┐   │
+│  │ 既有：核间 modbus(FC04/FC06) · gateway(IEC104) · 策略引擎 · AI(停用) · storage · sys-monitor │   │
+│  └───────────┬────────────────────────────────────────────────────────────────────────────┘   │
+│              │                                                                                  │
+│  ┌───────────▼───────────────────── display_host（v1.0 已有，v2.0 扩展）──────────────────────┐  │
+│  │ DisplayDataProvider                                                                        │  │
+│  │  快拍 1 Hz：SOC 裁决快照 · run_state/三相(intercore) ────────────────────┐                  │  │
+│  │  慢拍 3 s：uptime/CPU 温度/内存(system-monitor) · IEC104 连接态(gateway)  ├→ 缓存(Arc<RwLock>)│  │
+│  │  快拍 0.5 s：告警(storage.events) · 联锁态(InterlockController) ─────────┘                  │  │
+│  │  组帧 v2（含 device / alarms / info / interlock）→ SharedLatest（变更即组帧）               │  │
+│  └───────────┬────────────────────────────────────────────────────────────────────────────┘  │
+│  ┌───────────▼───────────────── LoopbackHttpPublisher（读，仅 GET）──────────────────────────┐  │
+│  │ 127.0.0.1:9810  GET /v1/display/latest                                                     │  │
+│  └────────────────────────────────────────────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────────── ConsoleHost（新，控制，受控接口）───────────────────────────┐  │
+│  │ 127.0.0.1:9811                                                                             │  │
+│  │  ConfigService  ← CoreConfig 内存副本 + 原子落盘 + watch 热生效                             │  │
+│  │  LogService     ← tracing 层 ring(实时) + 日志文件区间扫描(历史, 限额)                       │  │
+│  │  ConsoleAuditService ← JSONL 追加 + 既有审计链双写（SHA-256） + 分页/筛选查询               │  │
+│  │  InterlockOps   ← InterlockController（结构化拒绝原因）                                     │  │
+│  │  管线：参数校验 → 幂等(request_id) → 审计(前置 fail-closed) → 执行 → 回执                    │  │
+│  └───────────┬────────────────────────────────────────────────────────────────────────────┘  │
+│              │                                                                                  │
+│  进程 P1 = mupc-local-display（HMI，独立进程，systemd Restart=always, RestartSec=1）              │
+│  ┌───────────▼────────────────────────────────────────────────────────────────────────────┐    │
+│  │ LVGL v9（C）+ 自写 Rust FFI 薄层（lvgl-sys / src/lvgl/*，§1.1.1.2）                        │    │
+│  │  event loop: poll(evdev_fd, lv_timer_handler 返回的剩余时间) ─ 三源合流                     │    │
+│  │   ① Rust evdev 触摸 ──→ 自定义 lv_indev.read_cb ──→ lv_indev_read()                       │    │
+│  │   ② 读通道轮询(500ms, GET /v1/display/latest) ──→ UiState ──→ lv_label/lv_bar setter        │    │
+│  │   ③ lv_timer_handler() / lv_tick_set_cb()（动画 / 超时回归 / 防抖）                          │    │
+│  │  lv_timer_handler() → LVGL 脏区重绘 → flush_cb → /dev/fb0（FbCanvas 格式转换 + 区域写）      │    │
+│  │  写操作 ──→ ConsoleClient(POST /v1/console/*) ──→ 结果回填 UiState + lv_msgbox/lv_toast     │    │
+│  └─────────────────────────────────────┬──────────────────────────────────────────────────┘    │
+│                                        │ HDMI                                                     │
+│                                   ┌────▼──────┐                                                   │
+│                                   │ 8 寸 1024×768 触摸屏 │                                          │
+│                                   └───────────┘                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-要点：
-- **数据只在 mupcd 内「读点表 → 域值化/裁决 → 推送」**；渲染进程只展示 + 降级，不直连 modbus、不判源、不下行（PRD 边界）。
-- 渲染进程可先于 mupcd 启动（显示「初始化中」），通道就绪 ≤1s 切实时；mupcd 崩溃 → 通道断开画面（6.3）；mupcd 恢复即回实时（4.3.3）。
-- 通道只承载「读展示 + 心跳/健康」；**无任何下行写**（4.4.4）。
+**边界要点（对应 PRD）**：
+- HMI 进程**只读展示通道 + 只写控制通道**；**无任何直连核间/南向/北向的代码路径**（PRD §4.4.6）。
+- 写操作**永不**经读通道（PRD §4.4.4 / PL-8）。
+- 两个监听均强制回环（`validate()` 拒绝非 127.0.0.1）。
+- HMI 可先于 mupcd 启动（显示「初始化中」占位）；mupcd 上线 ≤1 s 转实时（PRD §4.3）。
+- mupcd 不 spawn / 不管理 HMI 子进程（生命周期归 systemd，PRD §4.3.1 属系统集成侧）。
+
+### 2.2 crate 与模块拓扑
+
+| 载体 | 类型 | 职责 | v2.0 变化 |
+|------|------|------|-----------|
+| `crates/display-proto`（`mupc_display_proto`） | lib | **HMI 契约单一真源**：`frame`（读帧）/ `control`（写请求·回执·错误码）/ `interlock` / `log` / `audit` DTO + `DisplayConfig` | **扩展**（v1.0 仅 `frame`+`config`） |
+| `crates/local-display`（`mupc_local_display`） | lib + bin | HMI 进程：LVGL 页面/控件/主题、自写 FFI 薄层、`lv_display`/`lv_indev` 后端、Rust evdev 触摸、通道客户端、页面状态 | **重构**（渲染层换 LVGL + 新增自写绑定层 `lvgl-sys`/`src/lvgl/`；`channel`/`state`/`config`/`FbCanvas` 保留） |
+| `crates/local-display/lvgl-sys`（内部子 crate，`mupc-lvgl-sys`） | lib（`-sys`） | LVGL v9 C 源码的 `cc` 编译 + `bindgen` 原始绑定（§1.1.1.2） | **新增** |
+| `mupc/vendor/lvgl/`（或 git submodule） | C 源码 | LVGL v9.5 官方源码，**pin tag**（§12.1） | **新增** |
+| `crates/mupc-core-bin`（模块 `display_host`） | bin 内模块 | 读通道：采集/组帧/发布 | **扩展**（新增慢拍采集与段） |
+| `crates/mupc-core-bin`（模块 `console_host`，新） | bin 内模块 | 控制通道：Config / Log / Audit / InterlockOps / HTTP | **新增** |
+| `crates/web-api` | — | — | **删除**（§7） |
+
+> **不新建第三个 crate 的取舍**：`ConsoleHost` 放 `mupc-core-bin` 模块内（与 `display_host` 同构），避免为「一个进程内的两组 HTTP handler」再拆 crate（KISS）。
 
 ---
 
-## 3. 数据通道协议与接口定义
+## 3. 通道协议（读通道 + 控制通道）
 
-### 3.1 通道形态（定稿）
+> 契约类型全部定义在 `display-proto`，两侧 + 测试桩共享同一真源。所有 JSON 字段 `snake_case`；枚举 `snake_case` 字符串（`RunState` 例外，维持 v1.0 的判别数 u8 传输）。
+> **前向兼容**：新增段一律 `#[serde(default)]`；客户端对未知字段容忍（v1.0 已测）。
 
-- 传输：TCP 回环 `127.0.0.1:<port>`（默认 `9810`）。
-- 端点：`GET /v1/display/latest` → `200` + `Content-Type: application/json` + 最新帧 JSON（服务端每请求返回**当前最新帧**；未就绪则返回协议缺省帧或 `503`，渲染端视同无新帧重试）。
-- 方法/请求：单 GET，无鉴权（仅回环）、无查询参数、无请求体。
-- 内容：帧（见 §3.3）。Content-Length 定长返回；服务端不依赖保活（每次连接可关闭，渲染端每轮新建连接亦可）。
-- 语义：**丢中间帧允许**；每次取到即最新有效帧；渲染端以 `seq` 判单调与重排。
+### 3.1 读通道：`DisplayFrame` v2
 
-### 3.2 发布/订阅两端组件命名
-
-- mupcd 侧发布组件：**DisplayDataProvider**（采集+组帧+发布）＋ **LoopbackHttpPublisher**（回环 GET 服务）。
-- 渲染进程侧订阅客户端：**DisplayChannelClient**。
-
-### 3.3 帧数据模型（display-proto crate，跨进程契约）
-
-`crates/display-proto/src/lib.rs`：
+- 端点：`GET /v1/display/latest`（`127.0.0.1:9810`），无参数、无鉴权（仅回环）、`Connection: close`。
+- 语义：状态在服务端，**每请求返回当前最新帧**；允许丢中间帧（PRD §4.4.1）。
+- 发布节拍：**主拍 1 s** ∪ **慢拍段内容变更即组帧**（`Notify` 唤醒，合并窗口 ≥250 ms；见 §4.2.1）；`device` / `alarms` / `interlock` 段由**独立采集任务**写入缓存（**3 s / 0.5 s / 0.5 s**），组帧时读缓存（**帧路径零阻塞 I/O、零 DB 查询**）。
 
 ```rust
-/// 帧协议版本
-pub const PROTO_VERSION: u8 = 1;
-/// 渲染端判「数据过期」阈值（与 PRD F5.3: 当前时间−帧时间戳 >2s 判过期）
-pub const DEFAULT_STALE_MS: u64 = 2000;
+// crates/display-proto/src/frame.rs
+pub const PROTO_VERSION: u8 = 2;                 // v1 → v2（段扩展）
 
-/// 点级字段有效/降级标志（渲染端据 flag 决定显示数值或 "--"+ 对应角标）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FieldFlag {
-    Valid,                 // 正常展示
-    NotRead,               // "未取数"(点表/采集未覆盖, PRD 6.4)
-    Offline,               // "源离线"(PCS 离线/核间读失败, PRD 6.1)
-    RangeError,            // "数据异常"(域值化量程/有限性校验不过, PRD 6.5)
-}
-
-/// 单数值字段
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct Field {
-    pub v: Option<f64>,   // 工程值；flag!=Valid 时通常 None（或保留哨兵供调试）
-    pub flag: FieldFlag,
-}
-
-/// 运行状态（F2，主判据 REG1013）。枚举化保证值域 0..=3：
-/// **越界态在帧内不可达**——采集侧心跳已将 1013 越界读数按坏读数滤除（改判离线），渲染侧
-/// `Option<RunState>` match 穷尽 Stop/Standby/Charge/Discharge + None 即可
-/// （对 PRD §6.5「1013 越界→数据异常」的落地说明：run_state 不入 RangeError 分支，越界在数据侧收敛）。
-/// JSON 以判别数 u8 传输（serde_repr 派生或手写 u8 映射），如 "run_state": 2。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[repr(u8)]
-pub enum RunState { Stop = 0, Standby = 1, Charge = 2, Discharge = 3 }
-
-/// SOC 展示源标注（三态，对齐 UI 源标签）：Bms / PcsReg1010 / Lost(=双源皆失「失效」)。
-/// **不含「双源一致」态**——SOC 源裁决是「优先级+回落」的**单源化**（AiIntegrator
-/// `resolve_soc_source`：BMS fresh → BMS，否则活读核间 → PCSReg1010，双失 → Lost），任一时刻
-/// 实际取值源唯一，从不双读并列比对，故「一致」在控制面不可达/无判定输入。详见本节末
-/// 「对 PRD F1.2『双源一致』态的落地解释」。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SocSource { Bms, PcsReg1010, Lost }
-
-/// 一帧展示数据（每 1s 由 mupcd 域值化后发布）
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// 一帧展示数据（1 Hz 发布；子段各自带采集时刻与可用性）
 pub struct DisplayFrame {
-    pub version: u8,          // = PROTO_VERSION
-    pub seq: u64,             // 单调递增发布序号（重启清零；渲染端判连续/重排）
-    pub ts_ms: u64,           // 域值化时刻（Unix 毫秒；新鲜度判据 F5.3）
-    /// F1: 裁决后 SOC(%)
-    pub soc: Option<f64>,     // None ↔ soc_source=Lost（双源皆失/无 fresh 源）→ 屏显 "--"+"SOC 源失效"，禁沿用旧值
-    pub soc_source: SocSource, // 三态源标注；渲染据此画源胶囊（Lost → "SOC 源失效" 警示色）
-    pub soc_flag: FieldFlag,  // 所用源点级异常(如 PCS 源 RangeError)辅助
-    /// F2: 运行状态（1013 主判据；值域保证 0..=3，见 RunState）
-    pub run_state: Option<RunState>, // None = PCS 离线/心跳无有效态（PRD 6.1）
-    /// 核间 modbus 链路在线（心跳维护；PCS 离线整体提示 6.1）
+    pub version: u8,
+    pub seq: u64,
+    pub ts_ms: u64,                              // 组帧时刻（新鲜度判据，沿用 DEFAULT_STALE_MS=2000）
+
+    // ── F1–F5（v1.0 字段原样保留，语义不变）──
+    pub soc: Option<f64>,
+    pub soc_source: SocSource,                   // Bms / PcsReg1010 / Lost
+    pub soc_flag: FieldFlag,
+    pub run_state: Option<RunState>,
     pub pcs_online: bool,
-    /// F3: 三相有功(kW) + 设备总有功(kW)——已 ×0.1，渲染端不再换算
-    pub p_phase: [Field; 3],  // [A,B,C]
+    pub p_phase: [Field; 3],
     pub p_total: Field,
-    /// F4: 三相电流(A)——已 ×0.1
-    pub i_phase: [Field; 3],  // [A,B,C]
-    /// 6.6 佐证一致性: 1013(充/放) 与 Σp_phase 方向显著反向 → true（渲染端加"方向不一致"角标，主状态仍以 1013 展示）
+    pub i_phase: [Field; 3],
     pub inconsistency: bool,
+
+    // ── v2 新增分节（全部 serde(default)，旧客户端可容忍）──
+    #[serde(default)] pub device: DeviceSection,      // F6 装置整体状态
+    #[serde(default)] pub alarms: AlarmsSection,      // F7 告警列表
+    #[serde(default)] pub info: InfoSection,          // F8 版本与装置信息
+    #[serde(default)] pub interlock: InterlockSection,// F16 联锁状态
+}
+
+/// F6 装置整体状态（3 s 采集；端到端 ≤3.85 s，见 §4.2.1）
+#[derive(Default)]
+pub struct DeviceSection {
+    pub ts_ms: u64,
+    pub uptime_secs: Option<u64>,
+    pub cpu_temp_c: Option<f64>,
+    pub mem_used_pct: Option<f64>,
+    pub iec104: LinkState,          // 调度主站链路
+    pub intercore: LinkState,       // 核间链路
+    pub hmi_channel: LinkState,     // 跨进程数据通道（HMI 侧自判，见 §5.5；服务端给 Unknown）
+    pub control_source: ControlSource,
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum LinkState { Connected, Connecting, Disconnected, NotConfigured, Unknown }
+
+#[serde(rename_all = "snake_case")]
+pub enum ControlSource { LocalStrategy, AiDisabled /* 固定文案「AI 引擎已停用…」*/, Unknown }
+
+/// F7 告警（0.5 s 采集 + 变更即组帧；端到端 ≤1.35 s，见 §4.2.1；items ≤10，时间倒序）
+#[derive(Default)]
+pub struct AlarmsSection {
+    pub ts_ms: u64,
+    /// 源可用性（EDGE-09：false → 屏显「告警源不可用」，**不得**显「无告警」）
+    pub available: bool,
+    pub items: Vec<AlarmItem>,
+}
+pub struct AlarmItem { pub ts_ms: u64, pub level: AlarmLevel, pub message: String }
+#[serde(rename_all = "snake_case")]
+pub enum AlarmLevel { Error, Warn, Info }
+
+/// F8 版本与装置信息（页面加载一次性）
+#[derive(Default)]
+pub struct InfoSection {
+    pub firmware_version: String,
+    pub build_time: Option<String>,   // None → 屏显「未提供」（EDGE-16）
+    pub model: Option<String>,
+    pub serial: Option<String>,
+    /// 【新·PM 裁定，UI 附录 B U-1】服务监听口径：读/控制通道**仅回环 127.0.0.1**（安全红线）。
+    /// 恒为 `LoopbackOnly`，作为「对外不可达」的机器可读声明；UI 展示时**必须与
+    /// `mgmt_ipv4` 分列**，不得让现场据此认为 HMI 接口可从远端访问。
+    #[serde(default)] pub service_scope: ServiceScope,
+    /// 【新·PM 裁定】设备管理 IP：`getifaddrs` 取首个 UP 的**非回环** IPv4。
+    /// 语义是「该装置在管理网上的地址」，与 `service_scope`（本机服务只监听回环）是**两个不同概念**。
+    /// 不可得 → None → 屏显「未提供」（EDGE-16 同口径，不臆造）。
+    #[serde(default)] pub mgmt_ipv4: Option<String>,
+}
+
+/// 服务可达范围（当前恒为 LoopbackOnly；枚举化以便未来若开管理面时有显式声明点）
+#[derive(Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceScope { #[default] LoopbackOnly }
+
+/// F16 联锁状态（0.5 s 采集 + 变更即组帧；端到端 ≤1.35 s，见 §4.2.1）
+#[derive(Default)]
+pub struct InterlockSection {
+    pub ts_ms: u64,
+    /// 状态源可用性（IL-01.6：false → 显「联锁状态不可用」，**不得**显「未联锁」）
+    pub available: bool,
+    pub enabled: bool,
+    pub latched: bool,
+    pub stop_failed: bool,
+    pub sources: Vec<InterlockSourceItem>,  // {name, tripped}
+    /// ⚠️ 语义名优先，不绑 DO 号（PRD F16 与现有代码注释的 DO1/DO2 归属不一致，见 §6.4 备注）
+    pub fault_lamp: Option<bool>,           // None = 未知
+    pub run_lamp: Option<bool>,
+    /// UI 用于提示「须保持 N 秒」等释放前置条件
+    pub release_hold_secs: u64,
+}
+pub struct InterlockSourceItem { pub name: String, pub tripped: bool }
+```
+
+**JSON 兼容性说明**：v1 客户端（旧渲染进程）收到 v2 帧时因字段全部 `#[serde(default)]` 仍可反序列化（忽略新段）；v2 客户端收 v1 帧时新段取 `Default`（`available=false` → 屏显「不可用」，**恰好**符合 §9 降级语义，不会伪装成正常）。
+
+### 3.2 读通道端点清单
+
+| 端点 | 方法 | 参数 | 返回 | 用途 |
+|------|------|------|------|------|
+| `/v1/display/latest` | GET | — | `DisplayFrame` v2（200）/ 503 未就绪 / 404 | P1、P4（状态）、P6 的全部实时量 |
+
+> v2.0 读侧**只有这一个端点**——保持「小、快、无副作用、客户端简单」。日志/审计/配置查询均为**带参、有限额、可能昂贵**的受控读，归控制通道（§3.4）。
+
+### 3.3 控制通道：通用信封与管线
+
+- 端点：`127.0.0.1:9811`（`display.control_bind_addr`），全部为 `/v1/console/*`。
+- 方法约定：**查询用 GET（参数在 query）**，**写操作用 POST（JSON body）**。
+
+```rust
+// crates/display-proto/src/control.rs
+
+/// 写操作请求信封（所有 POST 共用）
+pub struct ControlRequest<T> {
+    /// 客户端生成的 UUID v4；服务端按 (op, request_id) 做幂等去重（防重放/防重复生效）
+    pub request_id: String,
+    /// 客户端签发时刻（Unix ms）；服务端拒绝 |now − issued_at| > 30_000 的请求（防重放窗口）
+    pub issued_at_ms: u64,
+    /// 操作名（与路径末段一致，服务端校验，防误路由）
+    pub op: String,
+    pub payload: T,
+}
+
+/// 回执（所有写操作共用）
+pub struct ControlResponse<T> {
+    pub request_id: String,
+    pub ok: bool,
+    pub code: ControlCode,
+    /// 人读消息；UI 直接展示（失败时即 EDGE-10/EDGE-12 要求的「具体原因」）
+    pub message: String,
+    /// 成功时的生效回执（新值 / 新状态），供 UI 立即刷新（不等下一帧）
+    pub applied: Option<T>,
+    /// 字段级校验错误（配置页逐字段标红用，CF-02 要求「具体错误」）
+    pub field_errors: Vec<FieldError>,
+    /// 审计记录 ID（成功与失败均返回；便于现场对拍）
+    pub audit_id: Option<String>,
+    /// 幂等命中标记：true 表示本条为重复请求，返回的是首次执行的原始结果
+    pub duplicate: bool,
+    pub at_ms: u64,
+}
+
+pub struct FieldError { pub field: String, pub reason: String }
+
+#[serde(rename_all = "snake_case")]
+pub enum ControlCode {
+    Ok,
+    /// 前置条件不满足（联锁触发源未复位 / 保持时间不足 / 处于 latch 态）→ 必须明示原因（EDGE-12）
+    RejectedPrecondition,
+    /// 参数校验失败（越界 / 非法枚举）→ 逐字段原因（EDGE-10）
+    RejectedValidation,
+    /// 执行/落盘/生效失败（EDGE-10：装置须保持原配置运行，不得半生效）
+    ApplyFailed,
+    /// 审计不可写（fail-closed，见下）
+    AuditUnavailable,
+    /// 后端不可用（联锁未启用 / 日志或审计源不可用）
+    Unavailable,
+    /// 同 request_id 请求仍在处理中
+    Busy,
+    Internal,
 }
 ```
 
-JSON 示例（开发直接按此造桩/对齐）：
+**控制管线（所有写操作共用，顺序固定）**：
 
-```json
-{
-  "version": 1,
-  "seq": 123,
-  "ts_ms": 1757_412_000_000,
-  "soc": 65.0,
-  "soc_source": "pcs_reg1010",
-  "soc_flag": "valid",
-  "run_state": 2,
-  "pcs_online": true,
-  "p_phase": [ {"v": 12.3,"flag":"valid"}, {"v": 11.8,"flag":"valid"}, {"v": 12.0,"flag":"valid"} ],
-  "p_total": {"v": 36.1, "flag": "valid"},
-  "i_phase": [ {"v": 22.5,"flag":"valid"}, {"v": 22.1,"flag":"valid"}, {"v": 22.3,"flag":"valid"} ],
-  "inconsistency": false
-}
+```
+1. 路由与方法校验（路径 →
+2. 信封解析：request_id 非空 / issued_at_ms 在 ±30 s 窗口内 → 否则 RejectedValidation
+3. 幂等查表：(op, request_id)
+     - 命中且已完成 → 返回首次的原始 ControlResponse（duplicate=true，ok 不变）※真幂等
+     - 命中且处理中 → Busy
+     - 未命中 → 占位后继续
+4. 参数校验（字段级） → 失败 RejectedValidation（含 field_errors）
+5. 审计占位写入（intent：op + 请求摘要 + operator=local-console）
+     - 失败 → AuditUnavailable 并终止（fail-closed，见下）
+6. 执行（配置落盘 / 联锁释放 / 授权）
+7. 结果审计（outcome：before/after/result/reason），返回 audit_id
+8. 回执（含 applied 新值）
 ```
 
-> **对 PRD F1.2「双源一致」态的落地解释（回应评审 F1.2）**
->
-> PRD F1.2 要求「SOC 源标注随帧同更新」。若照字面易误读为「需两路源（BMS / 核间 PCS）同时读到并
-> 比对外能显示一个『双源一致』角标」。**落地裁定：不引入该态**，理由如下：
->
-> - 控制侧 SOC 是**单源裁决**而非双读一致性——`AiIntegrator::apply_soc_source` 调用纯函数
->   `resolve_soc_source`（strategy-engine `ai_integration.rs`）按**「优先级+回落」**：BMS fresh →
->   采用 BMS；BMS 超期/无 → 无条件活读核间 `latest_soc`(REG1010) 采用核间值；仅当两路皆失
->   （`is_dual_source_lost`）才判 Lost。任一时刻写入 `battery.soc` 的**只有唯一一个源的值**，
->   从不两源并列、从不做「一致/不一致」比对。
-> - 因而「双源一致」在控制面**不可达、无判定输入、无展示意义**——帧 `soc_source` 若含「一致」
->   取值将永不可能产生，属死代码。
-> - 展示侧据此把源标注收敛为**三态 `Bms / PcsReg1010 / Lost`**，与帧 `SocSource` 枚举一一对应；
->   `Lost` 即「SOC 源失效」警示胶囊（PRD 6.2/F1.4 双源皆失降级）。UI 源标签区**不设「双源一致」胶囊**。
-> - F1.2「随帧同更新」由本帧 `soc_source` 逐帧携带满足：单源可用（BMS 或 PCS）时显示**正在用的源名**
->   源胶囊（§6.3 F1 行），与 §4.3 `soc_display_snapshot` 收敛出的唯一裁决源保持一致。
+**审计 fail-closed 裁决（设计裁决，需 PM 知悉）**：无登录（T-3）后，**审计是唯一的操作凭据**。因此「审计不可写 → 拒绝执行写操作并按 `AuditUnavailable` 明示」。
+- 立场：若允许「审计失败但操作生效」，则 T-3 的补偿模型（无身份把关 → 以审计兜底）在技术上失效。
+- 同时，审计写失败本身以 `tracing::error!` 落 journal 作为**第二凭据**（syslog 不受磁盘满以外因素影响）。
+- **需 PM 确认的边界**：若认为「联锁释放属恢复安全态的操作、其可用性优先于留痕」，则联锁释放/授权可改为 fail-open（仍尽力审计 + journal 双写），配置保存保持 fail-closed。**本设计默认全部 fail-closed**（更严格），改动仅一行分支。
 
-### 3.4 新鲜度/超时语义（渲染端规则，定稿）
+**二次确认的技术落点（T-3 落地）**：
 
-- 每帧带 `ts_ms`、逐字段 `flag`（PRD F5.4 的点级 valid 即 `FieldFlag`）。
-- **数据过期**：`now − ts_ms > stale_ms`（默认取 display-proto 常量 `DEFAULT_STALE_MS=2000`，渲染进程可用 `--stale-ms` 覆盖）→ 全局「数据过期」角标；数值保留最近有效帧展示但**不冒充实时**（PRD F5.3，冻结+打标）。
-- **点级独立降级**：单点读失败只置该字段 `flag`，不影响其余字段刷新（F5.5）。
-- **通道断（6.3）**：连续 `roundtrip 失败` 或 `无成功 GET > 3000ms` → 切「与主进程数据通道断开」整屏态（可保留最近帧暗化+冻结标）；通道恢复后下一次成功 GET ≤500ms 回实时。
-- **禁止**：源失效字段补 0 / 沿用陈旧值冒充实时 / 用功率符号自判充放（§8）。
+| 要求 | 落点 | 说明 |
+|------|------|------|
+| 「将执行的操作 + 影响范围 + 前后值摘要」 | **UI 层**（LVGL `lv_msgbox`/自定义弹层） | 前端固有；后端不重复实现确认流程 |
+| 默认焦点在「取消」 | **UI 层** | LVGL 弹层把「取消」置为 `lv_group` 的默认聚焦对象（`lv_group_focus_obj`） |
+| 防重放 | **后端**（`issued_at_ms` 30 s 窗口 + `request_id` 幂等表） | 30 s TTL 的有界 LRU（容量 256，足够现场操作） |
+| 防误触/防抖 | **UI 层**（500 ms 内按钮禁用） + **后端**（幂等兜底） | 双层 |
+| 审计留痕 | **后端**（ConsoleAuditService） | 成功与失败均写；operator 固定 `local-console` |
+| 「权限」 | **无**（T-3 无登录/会话/PIN/RBAC） | 不实现任何鉴权中间件，避免造出无用的"占位鉴权"（v1.0 `RequireRole` 占位实现随 web-api 一并删除，技术债 U-01 对本模块不再适用） |
 
-### 3.5 发布方（mupcd）时序
+### 3.4 控制通道端点清单
 
-`publish_ms`（默认 1000，标称 1Hz，可容抖 ±30%）触发一次采集+组帧。发布用 `Arc<Mutex<Option<DisplayFrame>>>` 存最新帧；HTTP 每请求 clone 该帧返回。**不在 HTTP 路径做任何 modbus 读**（采集在专用 task，避免并发总线抖动）。
+| 端点 | 方法 | 请求 | 返回 | 承接组件 |
+|------|------|------|------|----------|
+| `/v1/console/config` | GET | — | `ConfigView`（分组 + 字段元数据 + 当前值） | `ConfigService` |
+| `/v1/console/config/apply` | POST | `ConfigPatch { changes: Map<String,Value>, from: "edit"\|"reset_default" }` | `ConfigView`（新值） | `ConfigService` |
+| `/v1/console/logs` | GET | `levels`(多值) `targets`(多值) `range=1h\|24h\|custom` `from`/`to`(ms) `cursor`(可选) `limit`(≤200) | `LogPage { entries, next_cursor, has_more, range_too_large }` | `LogService` |
+| `/v1/console/logs/targets` | GET | — | `Vec<String>`（模块选项，≤50） | `LogService` |
+| `/v1/console/audit` | GET | `from`/`to`(ms) `ops`(多值) `page`(1-based) `page_size`(=20) | `AuditPage { entries, page, page_size, has_more, newest_ts_ms, available }` | `ConsoleAuditService` |
+| `/v1/console/audit/ops` | GET | — | `Vec<{op, label}>`（操作类型选项） | `ConsoleAuditService` |
+| `/v1/console/interlock/release` | POST | `InterlockOpPayload { observed_latched, observed_sources: Vec<String> }` | `InterlockOpAck { latched, stopped }` | `InterlockOps` |
+| `/v1/console/interlock/ack_m1` | POST | `InterlockOpPayload`（同上） | `InterlockOpAck` | `InterlockOps` |
+
+**`observed_*` 的作用**：UI 在弹层中展示的是「它看到的联锁态」。提交时携带该观测值，后端与服务端当前态比对——若已变化（例如触发源刚被复位或刚被触发），返回 `RejectedPrecondition` + 消息「联锁状态已变化，请刷新后重试」。这是**无并发控制场景下的乐观并发检查**，防止"基于过期画面执行破坏性操作"。
+
+**`ConfigView` 字段元数据（关键，决定 UI 无需硬编码）**：
+
+```rust
+pub struct ConfigView {
+    pub groups: Vec<ConfigGroup>,
+    pub revision: u64,
+    /// 【新·§4.3.2.1】最近一次落盘的写模式：
+    /// `TextPreserve` = 保留式编辑（正常路径，注释/未建模键未动）；
+    /// `FullRewrite`  = 无法定位目标键而整体序列化回写 → **既有注释已丢失**，UI 须 Toast 明示。
+    pub write_mode: WriteMode,
+}
+#[serde(rename_all = "snake_case")]
+pub enum WriteMode { TextPreserve, FullRewrite }
+pub struct ConfigGroup { pub id: String, pub label: String, pub fields: Vec<ConfigField> }
+pub struct ConfigField {
+    pub key: String,             // 稳定键，如 "system.log_level"
+    pub label: String,           // 中文标签
+    pub kind: ConfigKind,        // Ipv4 / U16{min,max,step} / U64{min,max,step} / Enum{options}
+    pub value: serde_json::Value,
+    pub default: serde_json::Value,
+    pub unit: Option<String>,
+    pub requires_reconnect: bool, // true → 弹层须提示「生效时链路将短暂中断」
+    pub editable: bool,          // false → UI 只读展示（步进器/选项均 disabled）。
+                                 // 用于 display.bind_addr / display.control_bind_addr：回环是安全红线（PL-4），
+                                 // 不可经屏修改（改了即自断通道或违反回环约束），只能展示（见 §6.2 / §6.6）。
+}
+pub enum ConfigKind { Ipv4, U16 { min: u16, max: u16, step: u16 }, U64 { min: u64, max: u64, step: u64 }, Enum { options: Vec<OptionItem> } }
+pub struct OptionItem { pub value: String, pub label: String }
+```
+
+> `kind` 直接驱动 LVGL 的控件选择（`Ipv4` → 四段**受约束步进**；`U16/U64` → 受约束步进器；此二者均为 **`lv_btn` + `lv_label` 组合**（`−` / 值 / `＋` 三件），**弃 `lv_spinbox`**（PM 裁定，理由见 §5.6 F12 行）；越界值在控件层不可达——`value == min` 时 `−` 置 `LV_STATE_DISABLED`，`value == max` 时 `＋` 同理（TT-03）；`Enum` → `lv_dropdown` / `lv_buttonmatrix`），**满足 F12「零键盘」**：后端字段表里不存在「自由文本」这一 kind，因此 UI **无处可放文本输入框**——把「零文本输入」变成类型系统层面的约束，而不是纪律要求。
+
+### 3.5 通道可靠性对照（PRD §4.4）
+
+| PRD §4.4 条款 | 落实 |
+|---------------|------|
+| 1 允许丢帧、不得静默损坏 | `seq` 单调 + JSON 定长体（`Content-Length`）；解析失败丢弃并计数（不崩溃）；帧内 `version` 校验 |
+| 2 断连 ≤3 s 感知 / 恢复 ≤1 s | 读通道连续失败 >3 s → `ChannelStatus::Down`（整屏降级）；恢复后首次成功 GET ≤500 ms 回实时（沿用 v1.0 `state.rs` 逻辑） |
+| 3 畸形帧防护 | 客户端对帧大小设上限（64 KB）、`serde` 失败丢弃、`version` 不匹配告警；`SharedLatest` 服务端 `Mutex` 毒化不 panic（v1.0 已有 `unwrap_or_else(into_inner)` 范式） |
+| 4 展示通道单向 | 读 handler 仅实现 `GET /v1/display/latest`，其余方法与路径 404/405；**代码路径中无任何 `POST` 处理**（架构检查项 PL-08） |
+| 5 写操作独立受控接口 | 独立监听 9811 + 独立模块 `console_host`；校验/幂等/审计/失败原因回传齐备（§3.3） |
+| 6 禁止直连 | HMI 进程依赖图中**不存在** `mupc-intercore` / `mupc-southd` / `mupc-gateway`（在 §11.4 以依赖断言测试固化） |
 
 ---
 
 ## 4. mupcd 侧改动
 
-### 4.1 intercore：扩展读 1022–1031（+1032）
+### 4.1 数据源落实（PRD §6.2 T-5 五项逐项结论）
 
-**pcs.rs 增补常量**：
+这是 PRD 明确留给设计阶段的**待确认清单**，逐项给出定位与结论。**含两项"现状即不可用"的诚实发现（T-5 #3 与 #4 的严重程度高于 PRD 描述）**。
 
-```rust
-pub const REG_I_A:    u16 = 1022; // 3区 输出电流 A相 *0.1A (Int16)
-pub const REG_P_A:    u16 = 1029; // 3区 输出有功 A相 *0.1kW (Int16)
-pub const REG_P_TOTAL:u16 = 1032; // 3区 设备总有功 *0.1kW (Int16)
-pub const SCALE_3PH:  f64 = 0.1;  // 电流/有功统一 0.1 量纲
+| # | PRD 待确认项 | 核对结论（代码事实） | 设计落点 | 风险 |
+|---|--------------|----------------------|----------|------|
+| **1** | **IEC 104 连接状态真源** | 现状 `web-api::StatusHandler` 硬编码 `"unknown"`（占位）。真实状态在 `mupc_gateway::iec104::connection::Connection::state`（`Disconnected/Connecting/WaitingStartDt/Connected/Stopped`），但 `Iec104Server` **对外只暴露 `connection_count()`**，无状态查询 | **gateway crate 新增** `Iec104Server::link_state() -> LinkState`：聚合内部连接表（任一连 `Connected` → `Connected`；有连接但均未 `Connected` → `Connecting`；已启动且无连接 → `Disconnected`；未配置/未启动 → `NotConfigured`）。改动**局限在 `gateway/src/iec104/server.rs`**（+1 方法与枚举），不触碰协议逻辑 | 低 |
+| **2** | **intercore 连接状态真源** | ✅ **已可得**：`IntercoreClient::is_connected()` 已被 `display_host` 使用 | 直接复用，写 `DeviceSection.intercore` | 无 |
+| **3** | **告警汇聚点** | ⚠️ **诚实结论：PRD 假设的 `AlertManager` 不可用。** `mupc_security::alarm::AlertManager` 在全仓库**没有任何实例化点**（仅 `security/src/lib.rs` re-export）；其 `AlertType` 全为安全类（证书/隧道/合规/安全启动），**不含运行类告警**；且无任何模块向其 `raise()`。**它是死代码。** 真实运行告警的现有载体是 `mupc_storage::EventRepository` 的 `SystemEvent`（`core-bin/src/startup.rs` 已在写：`south_station.<id>.offline/online` 等） | **本期以 `storage.events`（SystemEvent）为 F7 唯一真源**：mupcd 新增 **0.5 s** 采集任务查最近 10 条（倒序）写入缓存，并在内容变化时立即唤醒组帧（F7.3 ≤2 s 的前提，见 §4.2.1）；查询失败 → `alarms.available=false` → 屏显「告警源不可用」（EDGE-09 精确落地）。**可选增强（不在本期承诺）**：新增 mupcd 内 `AlertFeed`（有界 ring + `tracing` WARN/ERROR 层 + 南向事件双写）以覆盖"未落库也上屏" | **中**（需 PM 知悉：原 08 的告警源是空壳；本模块上屏的告警仅是"已落库的系统事件"） |
+| **4** | **配置真实落点与生效链路** | ⚠️ **诚实结论：现状不存在任何可用的配置读写链路。** `web-api::routes::config::AppConfig` 是**进程内内存值**（`Arc<RwLock<>>`，启动时构造 `Default`），**既未落盘、也未被任何模块消费**；真实参数在 `mupc_core_config.yaml` → `CoreConfig`，在 `startup.rs` 启动时读取一次并分发，**全仓无热重载机制**（`grep reload/watch` 在 core-bin 无命中） | **新建 `ConfigService` 子系统**，详见 §4.3（本模块**最大**的净新增工作） | **高** |
+| **5** | **编译时间戳** | 现状 `web-api::StatusHandler` 的 `build_time` 与 `firmware_version` **取同一常量** `env!("CARGO_PKG_VERSION")`（占位） | `mupc-core-bin/build.rs` 发出 `cargo:rustc-env=BUILD_TIMESTAMP=<RFC3339>`（取 `SOURCE_DATE_EPOCH` 优先，保证可复现构建），代码用 `option_env!("BUILD_TIMESTAMP")`；`InfoSection.build_time: Option<String>`，取不到即 `None` → 「未提供」 | 低 |
+
+**新增项（PRD §6.2 未列但设计必须给）**：
+
+| 需求项 | 真源 | 结论 |
+|--------|------|------|
+| F6 uptime | `MetricsStore` 启动时刻 或 `std::time::Instant`（需跨模块统一：以 `mupcd` 进程启动时刻为准） | 可得 |
+| F6 CPU 温度 | `mupc_system_monitor::collectors::TemperatureCollector`（`TemperatureMetrics.cpu_temp_c`） | 可得；需确认 `MetricsStore` 已启动（`startup.rs` 步骤 12 已在跑） |
+| F6 内存使用率 | `MemoryCollector`（`MemoryMetrics`） | 可得 |
+| F6 跨进程数据通道状态 | **HMI 侧自判**（`ChannelStatus`），mupcd 侧给 `Unknown` | 见 §5.5 |
+| F6 当前控制源 | `AiIntegrator::engine_status()` / `is_local_priority()`；AI 停用期 → 固定语义 `LocalStrategy` | 可得（v1.0 §4.3 已用） |
+| **F8 型号 / 序列号** | Linux：`/proc/device-tree/model`（型号）；序列号**无可靠真源** | **序列号显「未提供」**（EDGE-16，不臆造）；型号取 device-tree，取不到亦「未提供」 |
+| **服务监听口径 + 设备管理 IP**（PM 裁定，UI 附录 B U-1） | `ServiceScope::LoopbackOnly` 为常量，与 `display.bind_addr` / `control_bind_addr` 的**回环硬校验同源**（§4.9）；`mgmt_ipv4` 取 `getifaddrs` 首个 UP 的**非回环** IPv4 | 可得；两字段语义分离，展示口径见 §6.6（P6 分两行）与 §6.2（回环地址只读） |
+| F16–F18 联锁 | `core-bin/src/interlock.rs::InterlockController`（已实现 `InterlockApi`） | 可得，需错误类型结构化（§4.6） |
+| PL-1/PL-2 审计 | `mupc_security::audit::AuditLogger`（JSONL + 哈希链，**现网为 SHA-256 实现**——`security/src/audit.rs` 注释自陈「当前使用 SHA-256 替代 SM3，Phase 2+ 替换为国密 SM3」；本设计按事实表述，不称 SM3） | 可得；需新增本机控制台条目 schema（§4.5） |
+| F10 日志 | `common::logging` `RollingFileAppender`（DAILY）→ `/var/log/mupc/mupc.log`（JSON 行：`timestamp`/`level`/`target`/`fields.message`） | 可得；**必须重构筛选路径**（选项式 + 限额，去掉关键字；见 §4.4） |
+
+### 4.2 读通道扩展：`DisplayDataProvider` 慢拍采集
+
+在 v1.0 的 `display_host.rs` 之上新增三个**独立 tokio 任务**（互不阻塞、各自失败各自降级），写入共享缓存；**并在缓存内容发生变化时主动唤醒组帧任务**——后者是 F7.3 / F16.5「≤2 s 上屏」的达成机制（评审必改 #1）：
+
+```
+DisplayDataProvider（主拍 publish_ms=1 s，已有逻辑；新增「内容变更即组帧」唤醒路径）
+  └ 组帧时读缓存（不阻塞、不做 I/O）：
+      device_cache:  Arc<RwLock<DeviceSection>>   ← 慢拍任务 A（3 s）
+      alarms_cache:  Arc<RwLock<AlarmsSection>>   ← 慢拍任务 B（0.5 s）
+      interlock_cache: Arc<RwLock<InterlockSection>> ← 慢拍任务 C（0.5 s）
+      info:           Arc<OnceLock<InfoSection>>  ← 启动时一次性
+  组帧触发源 = ① 主拍 tick（1 s 心跳） ∪ ② 慢拍任务写缓存后的变更通知（Notify）
 ```
 
-**ModbusRtuTransport 增加读取（读函数 + 复用既有 read_input/bus 锁体系）**：
+| 任务 | 节拍 | 数据来源 | 失败降级 |
+|------|------|----------|----------|
+| A 装置状态 | **3 s**（`device_poll_ms`） | `system-monitor`（温度/内存）+ 进程 uptime + `Iec104Server::link_state()` + `IntercoreClient::is_connected()` + `AiIntegrator`（控制源） | 单字段 `None` → UI 显「未知」；**不得**显为「正常」（F6.5） |
+| B 告警 | **0.5 s**（`alarm_poll_ms`） | `storage.events` 最近 10 条（倒序） | 查询失败 → `available=false` |
+| C 联锁 | **0.5 s**（`interlock_poll_ms`） | `InterlockController::status()` | 未注入（`io.enabled=false`）→ `available=true, enabled=false`；调用失败 → `available=false` |
 
-```rust
-/// FC04 读 3 相电流(1022 起 3 字) 与 3 相有功+总有功(1029 起 4 字)。
-/// 两段连续读（1025-1028 为表中未命名寄存器，不赌整段 1022..=1032 是否实现，
-/// 保守按点表连续子段两笔读）。成功/失败副作用经 read_input 维护在线/离线。
-pub async fn read_three_phase(&self) -> Option<PcsThreePhaseRaw> { ... }
-/// 返回已解码原始 i16 读数（未乘量纲），域值化在上层 DisplayDataProvider 完成
+**为何告警 / 联锁取 0.5 s 而非 2 s（原 v2.0 的缺陷）**：节拍**直接进入端到端时延链条**（§4.2.1）。原 2 s 节拍叠加 1 s 组帧与 500 ms 轮询后最坏达 **3.0–3.5 s 上屏**，**不满足 F7.3 / F16.5 的 ≤2 s**（初审正确指出）。取 ≤1 s 的上限只留极小余量，故设计取 **0.5 s**；其成本为一次本地 `SQLite LIMIT 10` 查询与一次**纯读**的 `status()` 调用，可忽略。
+
+**为何装置状态取 3 s 而非 5 s**：F6.3 的 ≤5 s 是**端到端上屏**口径；5 s 采样 + 0.25 s 组帧 + 0.5 s 轮询 + 0.1 s 渲染 = **5.85 s 已越界**（初审同风险提示）。3 s 采样使最坏 **3.85 s** 达标并留 1.15 s 余量。
+
+> **为何联锁采集不直接复用 `io.poll_ms`（默认 100 ms）**：`InterlockController` 内部已有 DI 轮询；本任务只做**状态读取**（`status()` 为纯读），取 `interlock_poll_ms`（默认 500 ms）即可满足 F16.5「变化 ≤2 s 上屏」，无需以 100 ms 直连轮询放大 CPU。
+
+**「内容变更即组帧」的约束（不得破坏既有不变量）**：
+
+1. **帧路径仍零阻塞 I/O**：变更判据在**慢拍任务侧**完成（新段与缓存旧值序列化后比较，不等才算变更），组帧任务只读内存缓存——§2.1「帧路径零阻塞 I/O、零 DB 查询」不变。
+2. **合并窗口 `min_publish_interval_ms ≥ 250 ms`**：突发多次变更合并为一次发布 ⇒ 发布率上界 = `max(1 Hz 主拍, 4 Hz 突发)`，慢源抖动不会打爆读通道，也不违背 D6「帧率不被慢源拖累」的初衷。
+3. `seq` 单调、`ts_ms` 仍取**组帧时刻**、`DEFAULT_STALE_MS=2000` 语义均不变（帧更密只会让"过期"判定更保守）。
+4. 慢拍任务全部失败时退化为「1 Hz 主拍 + 各段 `available=false`」，与 v1.0 行为一致。
+
+#### 4.2.1 上屏时延追踪（F6.3 / F7.3 / F16.5 —— 端到端拆解）
+
+链路固定四段：**采样 → 组帧（含发布）→ HMI 轮询取帧 → 渲染上屏**。
+
+| 指标（验收 ID） | ① 采样 | ② 组帧 | ③ HMI 轮询 | ④ 渲染 | **最坏合计** | 目标 | 余量 |
+|-----------------|--------|--------|------------|--------|--------------|------|------|
+| **F7.3 新增告警 ≤2 s**（ST-16） | ≤0.5 s（`alarm_poll_ms`） | ≤0.25 s（变更即组帧，受合并窗口约束） | ≤0.5 s（`--poll-ms` 默认 500） | ≤0.1 s（§10 重绘预算） | **≤1.35 s** | ≤2 s | **0.65 s** |
+| **F16.5 联锁变化 ≤2 s**（IL-01 / IL-02） | ≤0.5 s（`interlock_poll_ms`） | ≤0.25 s | ≤0.5 s | ≤0.1 s | **≤1.35 s** | ≤2 s | **0.65 s** |
+| **F6.3 装置状态刷新 ≤5 s** | ≤3.0 s（`device_poll_ms`） | ≤0.25 s | ≤0.5 s | ≤0.1 s | **≤3.85 s** | ≤5 s | **1.15 s** |
+
+**落地约束（下列任一项被改动即视为破坏上屏时延达标，须同步更新本表并在评审中复算）**：
+
+1. `alarm_poll_ms ≤ 1000`、`interlock_poll_ms ≤ 1000`（设计取 500）；
+2. `device_poll_ms ≤ 4000`（设计取 3000）；
+3. HMI 读帧轮询 `--poll-ms ≤ 500`（默认 500，HMI 侧 CLI 硬校验，见 §5.5）；
+4. **慢拍段必须走「变更即组帧」**——若退化为纯 1 Hz 主拍，F7.3 / F16.5 最坏变为 `0.5 + 1.0 + 0.5 + 0.1 = 2.1 s`，**超出 ≤2 s**（这正是初审判定的失败算式，须在实现与回归中钉死）；
+5. `mupcd` 侧 `CoreConfig::validate()` 对 1/2/`min_publish_interval_ms` 做**硬校验**（§4.9），非法配置**启动即报错**，不留"性能调优空间"的解释余地。
+
+**验证**：`display_host` 单测以**假时钟**推进（不 `sleep`）断言「缓存写入 → 发布」的唤醒时延与发布率上界（≤4 Hz）；集成测试（§11.1 双通道集成）断言注入一条告警后 ≤1.5 s 内新帧含该条；真机以时间戳探针复核（§14 R-05）。
+
+### 4.3 配置写入的真实落点与生效链路（T-5 #4 —— 本模块最大净新增项）
+
+#### 4.3.1 现状与结论
+
+| 事实 | 影响 |
+|------|------|
+| `web-api::AppConfig` 是内存占位、**未被任何模块消费** | 原 Web 配置页即使"保存成功"也**从未生效**；新设计不得复用它 |
+| 真实参数在 `mupc_core_config.yaml` → `CoreConfig`（`core_config.rs`），启动时读取一次 | 需要**新的可写真源 + 生效分发机制** |
+| 全仓无 `reload` / `watch` / 热重载机制 | 需要**逐模块接线**，这是主要工作量 |
+
+#### 4.3.2 `ConfigService` 设计
+
+```
+真源文件：--config 指定的 yaml（生产 /opt/mupc/config/mupc_core_config.yaml，须可写）
+内存副本：Arc<RwLock<CoreConfig>>（进程内唯一权威读源）
+字段元数据：ConfigFieldMeta 静态表（key / label / kind / 范围 / 单位 / requires_reconnect /
+            editable / **yaml_path**（保留式编辑的定位依据，见 §4.3.2.1）），
+            与 CoreConfig 字段一一映射（编译期由单测保证无遗漏、无多余）
+
+写流程（POST /v1/console/config/apply）：
+ ① 字段级校验：key 存在 + editable 检查 + 值域（kind 硬约束）+ 语义校验（复用 CoreConfig::validate() 的思路，逐字段化）
+ ② 生成新文本：**保留式编辑**（§4.3.2.1，正常路径）→ 写后自检（可解析 + 仅目标键变化）
+ ③ 原子落盘：写 mupc_core_config.yaml.tmp → fsync → 备份 mupc_core_config.yaml.bak → rename
+ ④ 进程内生效：按 ApplyMode 分发表逐项 dispatch（见下表）
+ ⑤ 更新内存副本 + revision++
+ ⑥ 审计（before/after 逐字段 + write_mode）+ 回执（新 ConfigView，含 write_mode）
+任一步失败 → 回滚内存副本、保留 .bak 不动、返回结构化失败原因
+（EDGE-10：装置保持原配置运行，**不得半生效**）
+（EDGE-23：若 §4.3.2.1 回退到整体回写，回执与审计均带 write_mode=full_rewrite，UI 须明示）
 ```
 
-- **为何不并入 SOC/心跳读**：SOC(1010)/心跳(1013) 是控制链路每拍活读，频率与存在性受 dispatch/联锁影响；显示采集需**独立于联锁抑制**持续 1Hz 采样，故由 DisplayDataProvider 自己的 1s task 发起（与心跳同走 `bus` 锁串行，半双工无交错——沿用 W3 互斥，单笔约 ≤30ms@19200）。
-- **周期/整合**：不与心跳 SOC 读合并（职责/时序耦合会引入"联锁抑制期间显示冻结"与"心跳改动影响控制"两类回归）；仅**共享** transport 层 `read_input` 的锁与在/离线副作用。
+#### 4.3.2.1 yaml 回写语义（评审必改 #2 —— 保留式编辑）
 
-**`IntercoreTransport` trait 扩展**（默认实现返回 None，避免污染既有 Tcp/sim 路径）：
+背景：`CoreConfig` 现**仅** `derive(Deserialize)`。若把整棵结构序列化回写，会**丢注释**并**丢未建模键**（含现场 legacy `web_api:` 段），与 §7.3「现场既有 yaml 仍可正常加载、不强制运维立即改文件」的兼容性主张**直接冲突**（未知键被静默抹掉，与"被忽略"是两回事）。本设计明确选型如下，不留二义。
+
+| 项 | 设计 |
+|----|------|
+| **回写方式** | **保留式编辑（text-preserving edit）——选定**：以原始 yaml **文本**为基础，仅替换目标键所在的**标量行**（由 `ConfigFieldMeta.yaml_path` 定位，如 `intercore.port` → 缩进两空格 + `port: <旧值>` 一行），其余字节**逐字不变**（注释、空行、键顺序、未建模键、legacy `web_api:` 段全部原样保留） |
+| **可行性前提** | 本期 F9 全部可写字段均为**标量叶子**（ipv4 字符串 / `u16` / `u64` / 枚举字面量），**无列表、无嵌套对象、无多行标量** ⇒ 行级替换语义完备、无歧义。此前提是选型的**硬条件**：若未来新增列表 / 嵌套字段，须先扩展编辑算法或退回回退路径（写入 §14 增量项） |
+| **写后自检（落盘前）** | 替换后的完整文本必须同时满足：① 能被 `serde_yaml` 解析为 `CoreConfig`；② 解析结果与内存副本逐字段比对，**只有目标键变化**。任一不满足 → 本次编辑失败，`.tmp` 丢弃、**不落盘**，返回 `ApplyFailed` |
+| **回退路径（显式接受降级）** | 仅当保留式编辑**无法定位**（键缺行 / 结构异常 / 值非标量）时，回退为**整体序列化回写**（依赖 `CoreConfig: Serialize`）。此时**注释与未建模键会丢失**，且**必须显式**：回执 `ConfigView` 带 `write_mode`、审计记 `write_mode = full_rewrite`、UI 以 Toast 明示「配置文件已整体重写，原有注释不再保留」。**禁止静默回退**（静默回退 = 现场注释在某次保存后无声消失，属不可接受的隐性数据损失） |
+| **`Serialize` 的边界** | `CoreConfig` 增加 `#[derive(Serialize)]`，**仅为回退路径与往返单测服务**；**不新增** `deny_unknown_fields`（保持未知字段容忍，否则现场 legacy yaml 将直接启动失败） |
+| **与运维说明的接口** | 部署文档 `deploy/deploy.md` 增补一条固定口径：**正常保存采用保留式编辑，文件注释与未识别键不会被改写；仅当出现 `full_rewrite` 提示时才发生整体重写**——把"注释会不会丢"从不确定预期变为明确契约 |
+
+**往返（round-trip）单测（落点 §11.1 `console_host` 层）**：
+
+1. **保留式路径（主用例）**：输入「含注释 + 含 legacy `web_api:` 段 + 含未建模键」的现场样例 yaml，改 1 个键 → 断言除该标量行外**逐行字节级完全一致**；并断言解析后仅目标键变化。
+2. **多键批量**：同一次 `changes` 含 N 个键 → 恰有 N 行被替换，其余不变。
+3. **回退路径（把降级行为钉死在测试里）**：构造不可定位样例 → 断言回退到整体回写、`write_mode = full_rewrite`、且注释确实丢失（**降级不是"写在文档里的可能"，而是有测试断言的确定行为**）。
+4. **序列化值等价往返**：`CoreConfig` → `serde_yaml` → `CoreConfig` 逐字段相等（防 `skip_serializing_if` / `default` 不对称导致字段静默丢失）。
+5. **键一致性**：`ConfigFieldMeta.key` ↔ `yaml_path` ↔ `CoreConfig` 字段三者一一对应（并入 §11.3 元数据一致性测试）。
+
+#### 4.3.3 ApplyMode 分发表（决定「自动生效」的达成度）
+
+| F9 配置项 | 现网真实 key | 生效方式 | 时效 | 副作用 |
+|-----------|--------------|----------|------|--------|
+| 日志级别 | `system.log_level` | `tracing_subscriber::reload` handle（`tracing_subscriber` 已具备 reload 能力，需在 logging 初始化处保留 handle） | ≤1 s | 无 |
+| 遥测上报周期 | 上送任务节拍（`startup.rs` 上送路径） | `tokio::sync::watch` → 任务每拍读新值 | ≤1 s | 无 |
+| 核间本地端口 / 对端端口 | `intercore.port` / `intercore.host` | `watch` → intercore 任务**主动断开并重建连接** | ≤5 s | **链路瞬断**（须 `requires_reconnect=true`，弹层明示） |
+| 核间心跳/重连间隔 | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | `watch` → 心跳循环读新值 | 下一拍 | 无 |
+| IEC 104 心跳间隔 | `gateway.*`（新增字段） | `watch` → gateway 心跳任务读新值 | 下一拍 | 无 |
+| IEC 104 监听地址/端口 | `gateway.listen_addr` | `stop()` → `start()` 重绑定 | ≤5 s | **调度通道瞬断**（`requires_reconnect=true`，高风险须明示） |
+| **「对端 IP 地址」（PRD F9 第 1 行）** | ⚠️ **无对应配置项** | — | — | **见 §4.3.4** |
+
+#### 4.3.4 两个必须让 PM 拍板的口径问题（诚实标注）
+
+1. **PRD F9 的「IEC 104 对端 IP 地址」在现网配置结构中不存在。** `mupc_gateway::Iec104Server` 是**服务端**（`bind` 后监听，接受调度主站连接），配置只有 `listen_addr`；没有"对端 IP"这一概念（对端 IP 由 TCP 连接决定，且可能多个）。该配置项来自原 08 的 Web 表单，与现网结构不符。
+   - **处置建议**：将该项替换为 **`gateway.listen_addr`（本机监听地址/端口）**，并在设计中提供映射；**或**由 PM 确认「对端 IP」指白名单（允许连接的调度主站 IP，需在 gateway 侧新增白名单能力——属新功能，不在本期）。
+   - **设计默认**：按 `gateway.listen_addr` 落地，PRD 措辞回写事项提交 PM（§14 R-08）。
+2. **「配置自动生效，无需重启」的达成度边界**：`log_level` / 各类周期参数可做到即时；**连接类参数（监听地址、核间端点）"生效"必然伴随一次链路重建**（≤5 s 内完成，但期间通道瞬断）。这满足 CF-04「≤5 s 内新参数在运行行为中可见」，但**不是无感的**——须在二次确认弹层明确写出「生效瞬间通信将短暂中断」。**该提示文案是 PRD F14.3「影响范围」的实质内容，不可省略。**
+
+#### 4.3.5 工作量与降级方案（诚实）
+
+- 本项是**独立子系统的净新增**（配置写 + 原子落盘 + 元数据表 + 多模块 `watch` 接线 + 校验 + 审计 + 测试），是全模块**最大的工作量单元**（见 §13.4 工作量表，标记为 **L**）。
+- **若工期不足的降级方案（须 PM 裁决，因它偏离 CF-04）**：本期仅支持 **HotApply 子集**（`system.log_level` / 遥测周期 / 心跳类），连接类参数**只落盘 + 提示「需重启 mupcd 生效」**。此方案必须回写 PRD（CF-04 降级）并获 PM 同意，**不得静默实施**。
+
+### 4.4 日志服务（F10）
+
+**现状问题**：`web-api::LogsHandler::get_logs` 每次请求**逐行读取全部日志文件**并做**内存关键字过滤**，无索引、无上限；随日志增长必然劣化，且其「关键字过滤」正是 PRD T-1 明确砍掉的能力。
+
+**设计（`LogService`）**：
+
+| 能力 | 实现 | 约束 |
+|------|------|------|
+| **实时推送 ≤2 s** | 自定义 `tracing_subscriber` **Layer**：把已格式化条目（`seq` 单调、`ts_ms`、`level`、`target`、`message`）推入**有界 ring**（`VecDeque`，容量 **2000**，`Mutex`） | ring 只能含**当前级别可见**的条目（受 `log_level` 过滤）；内存上界固定（满足 PRD §4.1.4「内存不得单调增长」） |
+| 增量拉取 | `GET /v1/console/logs?cursor=<seq>&limit=`：返回 `seq > cursor` 的条目；HMI 每 500 ms 拉一次 → 延迟 ≤1 s（优于 PRD 要求的 2 s） | 无需长轮询/WebSocket（KISS） |
+| 等级筛选 | `levels` 多值（选项式） | — |
+| 模块筛选 | `targets` 多值；选项列表来自 ring + 最近日志文件采样（去重排序，≤50 项） | LG-03「选项列表，无文本输入框」 |
+| 时间范围 | 预设 `1h` / `24h` / `custom(from,to)`；`custom` 的起止由 UI 用**日期+时间选项式步进**给出 | LG-04 |
+| 历史分页 | 文件扫描（复用 `LogsHandler` 的文件定位/解析逻辑，去掉 `keyword`） | **限额**：单次请求最多扫描 **5 个日志文件**且总行数上限 **50 000**；超限 → `range_too_large=true`（EDGE-15，UI 提示缩小范围），**不执行全库检索** |
+| ~~关键字搜索~~ | **不做**（T-1） | — |
+| ~~导出~~ | **不做**（T-2，无任何入口） | — |
+
+> **迁移落点**：`web-api::routes::logs::{LogsHandler, LogQuery, LogEntry}` 的解析逻辑迁入 `mupcd/src/console_host/log_service.rs`；`LogQuery` 去掉 `keyword`，加 `cursor` / 多值筛选；`export_logs()` **删除**。
+
+### 4.5 审计服务（PL-1 / PL-2）
 
 ```rust
+// crates/display-proto/src/audit.rs
+pub struct ConsoleAuditEntry {
+    pub id: String,            // uuid
+    pub ts_ms: u64,
+    pub operator: String,      // 固定 "local-console"（T-3：无登录）
+    pub op: ConsoleOp,         // 枚举，选项式筛选的维度
+    pub target: String,        // 如 "system.log_level" / "interlock.release"
+    pub before: Option<serde_json::Value>,
+    pub after: Option<serde_json::Value>,
+    pub result: AuditResult,   // Ok / Failed
+    pub reason: Option<String>,// 失败原因（成功为 None）
+    pub request_id: String,    // 与写请求信封对应（现场对拍用）
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleOp { ConfigApply, ConfigResetDefault, InterlockRelease, InterlockAckM1 }
+```
+
+**存储与查询**：
+
+| 项 | 设计 |
+|----|------|
+| 落点 | `{system.log_dir}/audit/console-audit-YYYY-MM-DD.jsonl`（append-only；与既有 security 审计分文件，避免 schema 冲突） |
+| **双写** | 同时调用 `mupc_security::audit::AuditLogger::log(GenericOperation, ...)` 写一条摘要进**既有哈希链审计**，保持「统一合规凭据」不被本次改造破坏 |
+| 查询 | 按日期定位文件（**不扫全库**）→ 解析 → 按 `from/to/ops` 过滤 → 倒序 → 分页 20 → 返回 `has_more` 与 `newest_ts_ms`（F19.8） |
+| 不可用 | 目录不可读/解析失败 → 结构化错误 → UI 显「审计记录不可用」（EDGE-17），**不得**显「无审计记录」 |
+| 不可删改 | 无删除/清空接口；文件以 append 打开；PL-02 的「仅追加、不可删改」由接口面 + 文件模式共同保证 |
+| 字段口径（PL-1） | 原 `WebAuditEntry` 的 `user / role / ip_address / user_agent` **全部去除**（无登录、无网络面，这些字段失去语义）；新增 `request_id` 作为可追溯标识。**这是 PRD §6.2 要求的「字段口径须在设计阶段定稿」的定稿** |
+
+### 4.6 联锁控制接口（F16–F18）
+
+**迁移**：`InterlockApi` / `InterlockStatus` / `InterlockSourceStatus` 从 `web-api::app_state` 迁至 `display-proto::interlock`。
+
+**改造：错误结构化**（PRD EDGE-12 / IL-02 / IL-03 要求「明示具体拒绝原因」，现状 `Result<(), String>` 只够打日志，不够驱动 UI）：
+
+```rust
+#[serde(rename_all = "snake_case")]
+pub enum InterlockReject {
+    SourcesNotReset { remaining: Vec<String> },        // 触发源未复位（列出具体源）
+    HoldNotElapsed { need_secs: u64, remaining_secs: u64 },
+    Latched,                                            // 处于 latch 态（ack_m1 前置）
+    StopPending,                                        // 停机未确认（stop_failed）
+    NotEnabled,                                         // io.enabled=false
+    Busy,
+    Internal(String),
+}
+impl InterlockReject { pub fn user_message(&self) -> String { /* 中文用户可读文案，UI 直接展示 */ } }
+
 #[async_trait]
-pub trait IntercoreTransport: Send + Sync {
-    // ...既有方法...
-    /// 三相展示读数（Modbus 实现有效；Tcp/sim 无 PCS 3 区点表，返回 None → 上层打 NotRead）
-    async fn read_three_phase(&self) -> Option<PcsThreePhaseRaw> { None }
-}
-```
-`IntercoreClient` 加转发方法 `pub async fn read_three_phase(&self) -> Option<PcsThreePhaseRaw>`。
-
-### 4.2 数据汇聚组件：独立 DisplayDataProvider（不塞进 AiIntegrator）
-
-归属 `mupc-core-bin/src/display_host.rs`（新模块，bin 内）；持：
-- `Arc<AiIntegrator>`（取裁决后 SOC 快照，见 §4.3）
-- `Arc<IntercoreClient>`（读三相、查 `last_run_state()`、`is_connected()`）
-- `display_proto::config::DisplayConfig`（发布周期/回环端口/量程；定义真源见 §7.1）
-
-**采集循环（1s）伪码**：
-
-```
-loop { tick(1s)
-  snap   = ai_integrator.soc_display_snapshot().await          // SOC 唯一裁决入口
-  run    = client.last_run_state()                              // 1013（心跳维护, 离线 None）
-  online = client.is_connected().await                          // 核间链路
-  three  = client.read_three_phase().await                      // 1022..1032
-  pcs_online = online && run.is_some()                          // 简化：有在线链路且心跳出过状态
-  frame  = build_frame(snap, run, three, now_ms)                // 域值化+量程+打flag+一致性6.6(见§4.4)
-  latest.store(frame)
+pub trait InterlockApi: Send + Sync {
+    async fn status(&self) -> InterlockView;                        // View 含 available/enabled
+    async fn request_release(&self) -> Result<(), InterlockReject>;
+    async fn ack_m1(&self) -> Result<(), InterlockReject>;
 }
 ```
 
-**启动装配点**：`startup.rs` 在「策略引擎(第8步) + 决策循环 spawn」之后、`register_service` 列表内新增一步，条件 `config.display.enabled`：
-- 先 `tokio::spawn(DisplayDataProvider::run(...))` 采集发布；
-- 再 `tokio::spawn(LoopbackHttpPublisher::serve(bind))` 回环 HTTP；
-- 两个句柄都 push 进现有 `guard.0`（随优雅退出一并 abort）。
-- 主进程**不 spawn/不管理渲染子进程**（渲染生命周期归 systemd，见 §11；4.3.1 归属系统集成侧）。
+**改动影响面（诚实标注）**：`crates/mupc-core-bin/src/interlock.rs`（约 1300 行）需改造其 trait 实现与错误构造路径（含既有单测）；这是**回归风险中等**的改动点，建议独立提交 + 单测覆盖全部 reject 分支（§11.3）。
 
-### 4.3 AiIntegrator：SOC 唯一裁决点收敛 + 展示快照（不在渲染端重判）
+**`DO1/DO2` 命名冲突（须真机核对）**：PRD F16 写「指示灯 DO1 / DO2（故障灯 / 运行灯）」，而现有 `web-api::InterlockStatus` 注释为 `fault_lamp: 故障灯（DO2）` / `run_lamp: 运行灯（DO1）`——**两者对 DO 号的归属相反**。设计以**语义名**（`fault_lamp` / `run_lamp`）为准，DO 号映射由 `io.do` 配置表决定（部署侧配置即真源），UI 只显示语义与灯态。**此不一致提交真机/厂方核对（§14 R-09）。**
 
-为避免「控制每拍 apply_soc_source 判一次、显示又判一次」的分叉，把裁决收敛到**一个私有入口**，控制与展示共用：
+### 4.7 告警源（`AlertFeed` 的可选性）
+
+- **本期承诺**：F7 由 `storage.events` 提供（§4.1 #3）。
+- **`SsePushService` 的处置**：其唯一现有用途是 `SouthSink` 在写 `SystemEvent` 后推一条 SSE 事件给 Web 客户端。随 `web-api` 删除，将其替换为 mupcd 内 **`AlertFeed`**：
+  - 最小形态（本期）：一个 `tokio::sync::broadcast`（容量 64）或 `Mutex<VecDeque<AlarmItem>>`（容量 100），`SouthSink` 写入系统事件时同时投递。
+  - 本期**不**作为 F7 真源（避免双源），仅作为「未落库也能上屏」的**可选增强**留给后续。
+  - 若评审认为 F7 必须覆盖「未落库的即时告警」，则把 `AlertFeed` 提升为 F7 的一路源并与 `storage.events` 合并（`available = 任一可用`）。**这是待 PM/评审裁决的一个范围点（§14 R-07）。**
+
+### 4.8 编译时间戳（T-5 #5）
+
+`crates/mupc-core-bin/build.rs`（新增）：
 
 ```rust
-/// AiIntegrator 内新增结构
-pub struct SocResolved {
-    pub value_pct: Option<f64>, // 裁决后展示用 SOC(0..100)
-    pub source: SocSourceKind,  // 内部源枚举 { Bms, PcsReg1010, None }（None=无 fresh 源）；映射到帧三态 SocSource：Some→同名，None→Lost（见 §3.3）
-    pub dual_lost: bool,        // = is_dual_source_lost(...)：双源皆失(沿用冻结/纯无SOC)
-}
-async fn resolve_soc_core(&self, data_soc: Option<f64>) -> SocResolved {
-    // BMS cache + (BMS stale? 活读 client.latest_soc() : None) + existing=data_soc
-    // 统一调用既有纯函数 resolve_soc_source / is_dual_source_lost（不改裁决逻辑）
-    // 返回 value/source/dual_lost，并写 self.soc_resolved_cache（RwLock, TTL≈900ms）
-}
-```
-
-- `apply_soc_source(&mut data)` **重构**：`let r = self.resolve_soc_core(data.battery.soc).await; data.battery.soc = r.value_pct;` + 沿用双源皆失节流 warn。控制语义不变（保留冻结值驱动 soc_protect）。
-- 新增公开方法（供 DisplayDataProvider）：
-  ```rust
-  pub async fn soc_display_snapshot(&self) -> SocResolved;
-  ```
-  内部：读 `soc_resolved_cache`，若未过期(<900ms)直接返回（避免与 dispatch 同 tick 双活读 REG_SOC）；否则调 `resolve_soc_core` 刷新。
-- **展示规则**（对 PRD §6.2/F1.4 落定口径）：`value_pct=None 或 dual_lost=true` → 帧 `soc=None, soc_source=Lost` → 渲染端 `--` +「SOC 源失效」（警示色，语义对齐 `SocSource::Lost`），**沿用冻结值仅在控制侧内部，不送上屏**（杜绝把旧值冒充实时）。
-
-### 4.4 域值化与 6.6 一致性（mupcd 职责，渲染端不重算）
-
-| 量 | 域值化（mupcd 内） | 量程/有效校验（越界 → flag=RangeError） |
-|----|--------------------|-----------------------------------------|
-| 三相电流 | `raw_i16 * 0.1` → A | 有限且 `|v| ≤ display.range.current_max_a(默认 300)`；decode 失败/未取到 → Offline；transport 不支持 → NotRead |
-| 三相有功 | `raw_i16 * 0.1` → kW | 有限且 `|v| ≤ display.range.phase_power_max_kw(默认 100)` |
-| 总有功 | `raw_i16 * 0.1` → kW | 有限且 `|v| ≤ display.range.total_power_max_kw(默认 300)` |
-| SOC | 来自 AiIntegrator 裁决 | 非有限/越 0..100 由 resolve 天然规避 |
-| run_state | 心跳 last_run_state | 0..=3（枚举化 `RunState`，值域语义保证；越界读数由采集侧心跳按坏读数滤除改判离线，**不入帧**，无 RangeError 分支——PRD §6.5） |
-
-- **6.6 一致性**：当 `run_state∈{2(充),3(放)}` 且 `Σp_phase` 与预期方向显著反向（**追认前不按功率符号定充放，仅作佐证**）且 `|Σp| > display.range.inconsistency_threshold_kw(默认 3.0, =额定 60kW 的 5%)` → `inconsistency=true`；其余为 false。渲染端主状态仍以 `run_state` 呈现，另加角标。
-
----
-
-## 5. 渲染进程设计
-
-### 5.1 crate 划分与权衡
-
-新增 **两个** workspace crate（权衡：不过度拆分，也不让渲染进程反向依赖重型服务 crate）：
-
-| crate | 类型 | 依赖 | 职责 |
-|-------|------|------|------|
-| `crates/display-proto`（`mupc_display_proto`） | lib | serde/serde_json | 帧协议类型（§3.3）**+ DisplayConfig（§7.1）**；跨进程两侧 + 测试桩共享的契约单一真源。 |
-| `crates/local-display`（`mupc_local_display`） | **lib + bin** | display-proto、ab_glyph、serde_json、serde（自身 CLI 配置 derive）；（可选 png 仅 dev/feature） | 渲染进程本体。lib 暴露可测模块（canvas/layout/font/channel/screen 逻辑），bin = 可执行 `mupc-local-display`。**依赖仅 display-proto 所需**——不引入 serde_yaml、不读 `mupc_core_config.yaml`（§7.2）。 |
-
-> 渲染进程**不建议直接放核心仓库已有 crate**：它必须保持「零依赖核心业务、可在无串口/无 NPU/无策略堆栈的最小环境独立构建与测试」，独立 crate 同时满足进程隔离与构建解耦。
-> mupcd 侧（DisplayDataProvider / LoopbackHttpPublisher）不加新 crate，放 `mupc-core-bin` 模块即可（避免第三个 crate 的维护面）。
-
-### 5.2 模块划分
-
-```
-crates/local-display/src/
-├── lib.rs      // pub mod 汇总；对外暴露 render_frame() 等纯函数供测试
-├── main.rs     // bin 入口：读 CLI 参数/默认配置 → 初始化 Screen → 主循环
-├── config.rs   // 渲染侧 CLI 参数子集（channel url、interval、stale_ms、backend/fbdev、width/height、font），默认值取 display-proto 常量，不读 core yaml
-├── channel.rs  // DisplayChannelClient：阻塞 GET 最新帧（TCP回环，无 TLS）
-├── state.rs    // DisplayState：最近帧 + 新鲜度/过期/通道态派生（纯逻辑，可单测）
-├── canvas.rs   // PixelBuffer(1024x768x4)；set/rect/text-ready 绘图原语；to_png(dev)
-├── font.rs     // 捆绑 CJK 子集 .otf (include_bytes!) → ab_glyph → 启动栅格化图集
-├── layout.rs   // 固定网格布局 + 语义色板 + 各 PRD F1..F5 区域绘制（读 state 画帧）
-├── screen.rs   // trait Screen{ blit(&[u8]); } + FbdevScreen/DrmScreen/OffscreenScreen
-└── run.rs      // 主循环编排（fetch→render→blit→sleep），节拍/自恢复/统计
-```
-
-### 5.3 主循环（阻塞同步单线程，节拍 500ms）
-
-```
-loop {
-  now = Instant::now()
-  frame = channel.fetch_latest()            // 阻塞 GET, 2s 超时；失败记一次
-  state.update(frame / last_ok / now)       // 更新 seq/ts、过期、通道态
-  if state.should_redraw() {                // 有变化 或 阈值态翻转 或 强制2Hz
-      canvas = layout.render(&state)        // 离屏整帧(≤30ms 预算)
-      screen.blit(canvas)                   // fbdev/drm 提交 / offscreen 记录
-  }
-  sleep_until(next_500ms_tick)              // 无忙等(PRD 4.1.3)
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    // SOURCE_DATE_EPOCH 优先 → 交叉编译可复现；否则取当前时间
+    let ts = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .flatten()
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    println!("cargo:rustc-env=BUILD_TIMESTAMP={ts}");
 }
 ```
-- **通道态派生**（state 纯逻辑单测）：
-  - `DataFresh`（最新帧 ts 距今 ≤ stale_ms）；
-  - `DataStale`（> stale_ms 打「数据过期」角标，保留数值）；
-  - `ChannelDown`（无成功 GET ≥ 3000ms → 6.3 整屏态）；
-  - `ChannelInit`（尚未首次成功 GET → 「初始化中」占位，PRD 4.3.4）；
-  - mupcd 恢复 → 首次成功 GET 即回实时（≤500ms）。
-- **崩溃自恢复（本进程内 + 系统级双保险）**：
-  - 本进程：任何 panic 由 `main` 捕获级外层兜底打印后退出码非 0 → 交给系统级重启（不吞 panic、不自循环空转）。
-  - 系统级：systemd `mupc-display.service` `Restart=always, RestartSec=1`（≤3s 拉起，见 §11）。**渲染进程不写 PCS/核间/主进程**，崩溃不影响 mupcd（进程隔离，PRD 4.3.2）。
 
-### 5.4 字体渲染（font.rs）
+消费：`InfoSection.build_time = option_env!("BUILD_TIMESTAMP").map(str::to_string)`；`firmware_version = env!("CARGO_PKG_VERSION")`。取不到 → `None` → UI「未提供」。
 
-- 数据：`include_bytes!("../fonts/NotoSansSC-subset.otf")`（或 fallback 到启动参数 `--font` 指定的外部文件/系统字库，见 §7.2）。
-- 启动一次用 `ab_glyph` 把所需字形栅格化进 `GlyphAtlas`（含字号多档：标题/大数值/正文/角标），后续绘制查图集 blit，避免每帧 TTF 解析。
-- ASCII 数字/符号（`0-9 . - % / : kW A B C`）与中文字形同源子集化。
+### 4.9 启动装配与 mupcd 配置段
 
----
-
-## 6. 画布布局结构与 PRD 映射
-
-### 6.1 布局原则（对应 PRD 4.2）
-
-- 1024x768 一屏放全，无滚动/分页/交互层；字段位置固定（改值不改布局）；状态「文字 + 语义色 + 图标」三重冗余。
-- 静态装饰做防烧屏低影响处理（如非数值区整体周期性 ±几像素微移或反色节拍），**核心数值区不抖动**（4.2.4）。
-
-### 6.2 分区网格（与 UI §4.3/§5.3 唯一对齐，UI 为视觉权威；单位 px）
-
-```
-+------------------------------------------------------------------------------------------+
-| (16..1008 x 16..72) 页眉条: "MUPC · 台区储能装置运行状态"     [时钟] [●实时 · 通道已连接] |
-+----------------------------------------+------------------------------------------------+
-| SOC 主区 (16..496 x 88..420)           | PCS 运行状态主区 (528..1008 x 88..420)          |
-|   "储能电池 SOC"  [源标签 BMS/PCS/失效] |   "PCS 运行状态"  [REG1013]                     |
-|   148px 大数字 65 % + 0-100 分段量程条  |   大字 充电/放电/待机/停机 + 语义色图标+卡描边   |
-|   (0-15红 / 15-85青 / 85-100橙)        |   佐证行: 方向一致 ΣP +12.5 kW(不一致→品红角标)  |
-+----------------------------------------+------------------------------------------------+
-| 三相功率与电流区 (16..1008 x 444..752)：四卡横排 A/B/C/总（每卡内上 P 下 I；总卡无电流行）   |
-|   A 卡 (32..260)   B 卡 (276..504)   C 卡 (520..748)   总卡 1032 (764..992)             |
-+------------------------------------------------------------------------------------------+
-```
-
-- **弃早期「P 横带 / I 横带」两行分离表述**：三相 P 与 I **同卡**（卡内上「有功功率」行、下「电流」
-  行），A/B/C/总四卡横排——与 UI §4.3 定案唯一对齐。
-- 坐标/字号基准取自 UI（A/B/C/总 卡 228 宽、16 间隙、卡区 Y 508..736，P 值 64px / I 值 44px），
-  开发期在 `layout.rs` 顶部常量微调、允许 ±10% 视觉对齐，**分区与三态语义不变**。
-- 页眉文案统一为 UI 版「台区储能装置运行状态」；各字段右下/右上角标语固定（就地读屏便于远程
-  复述，PRD §2）。
-
-### 6.3 PRD F1–F5 → 绘制/数据映射表
-
-| PRD | 数据（帧字段） | 绘制 | 降级显示 |
-|-----|---------------|------|----------|
-| F1 SOC | `soc`/`soc_source`/`soc_flag` | 大字号 % + 0-100 分段量程条；`≤15%` 红段 / `≥85%` 橙段警示——15/85 为**展示警示档**（PRD F1.3，仅驱动 UI 断点/描边），与安全配置 soc_min/soc_max 0.10/0.90（**控制硬限**，驱动 soc_protect）作用域不同、不冲突 | `soc=None`（双源皆失/源失效 6.2）→ `soc_source=Lost` → 数值 `--` +「SOC 源失效」警示色 |
-| F2 运行状态 | `run_state`/`inconsistency` | 文字(停/待/充/放)+语义色+图标：充=绿、放=蓝、停机=灰、待机=黄（色板可微调但四态可区分）；主判据恒为 run_state，**不**以功率符号判充放 | `run_state=None`(离线)→「PCS 离线」灰；1013 越界**不入帧**（采集侧滤除改判离线；渲染 match 穷尽 Stop/Standby/Charge/Discharge+None） |
-| F3 三相有功 | `p_phase`/`p_total`（已 ×0.1 kW） | 三相+总计，1 位小数，按 F2 方向着色 | 各相 `flag=Offline/NotRead/RangeError` → 该相 `--`+对应角标，禁显 0.0 |
-| F4 三相电流 | `i_phase`（已 ×0.1 A） | 三相，1 位小数 | 同上 |
-| F5 刷新/新鲜度 | 帧 `ts_ms`/`seq`/逐字段 `flag` | 数值变动即上屏；点级独立降级 | 全局过期角标；通道断 → 6.3 整屏态；恢复 ≤1s 回实时 |
-
----
-
-## 7. 配置项
-
-> 评审修订定稿：DisplayConfig 归属 display-proto（单一真源），渲染进程不读 core 配置（详见下）。
-
-### 7.1 字段定义单一真源：display-proto crate
-
-`DisplayConfig`（发布周期 / 回环端点 / 域值化量程）**结构定义放 display-proto**：
-`crates/display-proto/src/config.rs`（lib 内 pub 导出）。理由：mupcd（core-bin）与渲染进程
-（local-display）都依赖该结构形态，放 display-proto 单一真源——既避免 core-bin 反向依赖/维护
-重型配置 crate，也避免 `mupc_core_config.yaml` 的 display 段结构在两侧各写一遍。
+`startup.rs` 步骤 10 整块（原 Web API 装配，约 90 行）**替换**为：
 
 ```rust
-// crates/display-proto/src/config.rs（示意；字段与 yaml display: 段一一对应）
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct DisplayConfig {
-    pub enabled: bool,            // true = mupcd 起 DisplayDataProvider + 回环发布
-    pub bind_addr: String,        // 回环端点（默认 DEFAULT_BIND "127.0.0.1:9810"）
-    pub publish_ms: u64,          // mupcd 采集/组帧/发布周期（默认 1000）
-    pub range: DisplayRange,      // 域值化量程（mupcd 消费；PRD §6.5 越界判 RangeError）
-}
+// ── 10. 本地 HMI 后端（读通道 + 控制通道）──
+tracing::info!("[10/14] 初始化本地 HMI 后端...");
+if config.display.enabled {
+    // 10.1 读通道（v1.0 已有）
+    let latest: SharedLatest = Arc::new(Mutex::new(None));
+    tokio::spawn(DisplayDataProvider::new(ai_integrator.clone(), intercore.clone(),
+                 &config.display, modbus, latest.clone(),
+                 /* 新增：*/ device_sampler, alarm_sampler, interlock_sampler).run());
+    let l1 = TcpListener::bind(&config.display.bind_addr).await?;   // 强制回环（validate）
+    tokio::spawn(LoopbackHttpPublisher::new(latest).serve(l1));
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DisplayRange {
-    pub current_max_a: f64,               // 默认 300
-    pub phase_power_max_kw: f64,          // 默认 100
-    pub total_power_max_kw: f64,          // 默认 300
-    pub pcs_total_rated_kw: f64,          // 默认 60（6.6 一致性阈值基准）
-    pub inconsistency_threshold_kw: f64,  // 默认 3.0 = 60kW*5%（PRD F2 验收3）
+    // 10.2 控制通道（新）
+    let console = ConsoleHost::new(ConsoleDeps {
+        config_path: cli.config.clone(),
+        core_config: core_config_arc.clone(),
+        log_dir: config.system.log_dir.clone(),
+        audit: console_audit.clone(),
+        interlock: interlock_ctl.clone(),
+        apply_registry: apply_registry.clone(),   // watch 发送端集合
+    });
+    let l2 = TcpListener::bind(&config.display.control_bind_addr).await?;
+    tokio::spawn(console.serve(l2));
+    coord.register_service("hmi_backend", ServiceStatus::Running);
+} else {
+    tracing::info!("display.enabled=false：本地 HMI 后端未启动（部署行为不变）");
 }
-// 共享默认常量（DEFAULT_BIND / DEFAULT_CHANNEL_URL / DEFAULT_STALE_MS=2000 / DEFAULT_PUBLISH_MS=1000）随 proto 提供。
 ```
 
-### 7.2 谁解析、谁消费（配置契约）
-
-| 载体 | 解析方 | 消费方 | 承载字段 |
-|------|--------|--------|---------|
-| `mupc_core_config.yaml` 的 `display:` 段 | **mupcd（core-bin）**——`core_config.rs` 顶层 `CoreConfig` 追加 `#[serde(default)] pub display: display_proto::config::DisplayConfig`（反序列化为 display-proto 结构，**非重复定义**；`validate()` 校验） | mupcd 的 DisplayDataProvider / LoopbackHttpPublisher | `enabled` / `bind_addr` / `publish_ms` / `range`（域值化量程） |
-| 渲染进程启动参数（CLI） | **mupc-local-display**（`main.rs` 解析；默认值取 display-proto 常量） | 渲染进程自身 | `--channel <url>`、`--interval 500`、`--stale-ms 2000`、`--backend fbdev\|drm\|offscreen`、`--fbdev-path`、`--width/--height`、`--font <path 或空=捆绑子集>` |
-
-**渲染进程不读 `mupc_core_config.yaml`**（KISS）：渲染端零核心配置依赖——不引入 serde_yaml、
-不与 mupcd 的 `validate()`/量程逻辑耦合。其渲染参数（分辨率/字体路径/刷新/通道）一律经
-**启动参数**或**通道帧/共享常量**给定。通道端点一致性：proto 默认 `DEFAULT_CHANNEL_URL`
-与 mupcd 默认 `bind_addr` 同指一回环端点；生产 unit 显式传 `--channel` 与 core yaml `bind_addr`
-对齐（部署清单一条，见 §11）。
-
-### 7.3 mupcd 侧 yaml 段（已移除原 render/driver/font 渲染子段——渲染不再读 core 配置）
+`mupc_core_config.yaml` 新增/扩展：
 
 ```yaml
-display:                      # 本地显示终端发布侧（默认整段缺省 = disabled，行为不变）
-  enabled: false              # true = mupcd 起 DisplayDataProvider + 回环发布
-  bind_addr: "127.0.0.1:9810" # 数据通道回环端点（仅本机）
-  publish_ms: 1000            # mupcd 采集/组帧/发布周期(≥1Hz 标称)
-  range:                      # 域值化量程(PRD §6.5 越界判 RangeError；§8 追认前宽口径)
-    current_max_a: 300
-    phase_power_max_kw: 100
-    total_power_max_kw: 300
-    pcs_total_rated_kw: 60    # 6.6 一致性阈值基准
-    inconsistency_threshold_kw: 3.0   # = 60kW*5%（PRD F2 验收3）
+display:
+  enabled: true                    # 启用本地 HMI 后端（读 + 控制）
+  bind_addr: "127.0.0.1:9810"      # 读通道（v1.0 已有）
+  control_bind_addr: "127.0.0.1:9811"   # 【新】控制通道；validate 强制回环
+  publish_ms: 1000
+  min_publish_interval_ms: 250     # 【新】「变更即组帧」合并窗口（§4.2.1 约束 5）
+  # 【新】慢拍节拍（上界为**时延达标红线**，非性能调优项，见 §4.2.1）
+  device_poll_ms: 3000             # F6.3 ≤5 s：3.0+0.25+0.5+0.1 = 3.85 s
+  alarm_poll_ms: 500               # F7.3 ≤2 s：0.5+0.25+0.5+0.1 = 1.35 s
+  interlock_poll_ms: 500           # F16.5 ≤2 s：同上
+  alarm_page_size: 10              # F7 最多展示条数
+  log:                             # 【新】日志服务限额（EDGE-15）
+    max_files: 5
+    max_lines: 50000
+    live_ring: 2000
+  range: { ... }                   # v1.0 已有（域值化量程）
 ```
 
-`core_config.rs::validate()` 增加：`display.enabled && (transport != "modbus_rtu")` 时 warn 但不阻止（仿真可看 SOC/通道，三相将 NotRead）；`bind_addr` 非回环报错（强制仅 127.0.0.1）。
+`CoreConfig::validate()` 新增：
+- `display.bind_addr` / `display.control_bind_addr` **必须是回环**（非回环 → `Err`，强制满足 PL-4 与 PM 裁定「仅回环 127.0.0.1」）；
+- 两地址**不得相同**；
+- `publish_ms >= 100`、`live_ring >= 100`；
+- **时延红线（§4.2.1 约束 1/2/5，越界即启动报错，不解释为"调优空间"）**：
+  - `alarm_poll_ms <= 1000`、`interlock_poll_ms <= 1000`（F7.3 / F16.5 端到端 ≤2 s 的前提）；
+  - `device_poll_ms <= 4000`（F6.3 端到端 ≤5 s 的前提）；
+  - `100 <= min_publish_interval_ms <= publish_ms`（合并窗口下界防抖动打爆通道，上界防退化为纯主拍）。
+
+**删除**：`CoreConfig.web_api` 字段 + `WebApiConfig` + 其 `validate()` 校验 + 默认值函数 + 单测样例中的 `web_api:` 段（约 20 处）。
 
 ---
 
-## 8. 边界与异常处理对照（PRD §5/§6 全量落点）
+## 5. HMI 进程设计
 
-| # | 场景 | 数据侧(mupcd DisplayDataProvider) | 渲染端展示 |
-|---|------|----------------------------------|-----------|
-| 6.1 | PCS 离线（核间读失败） | `pcs_online=false`；三相各 `flag=Offline`、`run_state=None`；SOC 若有另一源(BMS) 则帧带 BMS 裁决值 | 状态区「PCS 离线」；F3/F4 各相 `--`+「源离线」；F1 有 BMS 则显示 BMS 值并标源 |
-| 6.2 | SOC 双源皆失 | `soc_source=Lost, soc=None`（冻结值只在控制内部） | SOC 区 `--`+「SOC 源失效」警示色；不补 0、不沿用旧值 |
-| 6.3 | 通道断（mupcd/IPC 异常） | 回环端口消失 | 渲染端 ≤3s 切「与主进程数据通道断开」态（可留最近帧暗化+冻结标）；恢复 ≤1s 回实时 |
-| 6.4 | 点表未覆盖/未接入(1022-1032 未采集) | transport 不支持/未读 → 三相 `flag=NotRead` | `--`+「未取数」 |
-| 6.5 | 域异常(越界/非有限) | 量程校验 → `flag=RangeError` | `--`+「数据异常」，不插值 |
-| 6.6 | 1013 与功率方向显著相反 | `inconsistency=true` | 主状态仍 1013，另加「方向不一致」角标 |
-| 6.7 | 渲染进程自身异常/启动失败 | 不阻塞主进程（进程隔离） | 黑屏/占位；systemd Restart ≤3s 拉起 |
+### 5.1 crate 与模块划分
 
-> 「不造假值」总原则落点：所有数值展示仅当对应 `flag==Valid`；`--` 永不显示为 `0.0`；角标文案集中定义在 `layout.rs`（与 font.rs 码表同步）。
-> **对 PRD §6.5「1013 越界→数据异常」的落地说明**：越界只发生在采集侧（心跳读到 0..=3 之外按坏读数
-> 滤除、改判离线），故帧内 `run_state` 值域语义保证合法、**RangeError 不可达**；渲染侧对 `RunState`
-> 枚举 match 穷尽四态 + `None`，不存在「枚举外值→数据异常」分支（与 F3/F4 数值字段的 6.5 RangeError 不同）。
+```
+crates/local-display/
+├── lvgl-sys/                # 【新】LVGL v9 C 源码的原始绑定（§1.1.1.2）
+│   ├── build.rs             #   cc 编译 vendor/lvgl 源码 + bindgen(精确 allowlist) 生成绑定
+│   ├── allowlist.txt        #   【新】bindgen 精确 allowlist（逐符号枚举，禁 lv_* 通配，§1.1.1.2 / §12.1）
+│   ├── lv_conf.h            #   LVGL 配置（色深/fbdev-off/evdev-off/内存/日志转发，见 §1.1.1.2）
+│   └── src/lib.rs           #   bindgen 生成物（含 include! 或提交的生成文件）
+├── src/
+│   ├── lib.rs               # pub mod 汇总（保留可测模块出口）
+│   ├── main.rs              # 【重写】bin 入口：CLI → LVGL init → display/indev 注册 → 事件循环 → 优雅退出
+│   ├── lvgl/                # 【新】薄安全层（唯一允许 unsafe 的 Rust 侧除 lvgl-sys 外之处）
+│   │   ├── mod.rs           #   lv_init / lv_deinit / lv_tick_set_cb 封装
+│   │   ├── obj.rs           #   Obj 包装（创建/父子/坐标/可见/样式）
+│   │   ├── widgets.rs       #   控件构造与 setter（§5.6 控件映射表）
+│   │   ├── style.rs         #   主题样式：色板/字号/圆角/内边距（落 UI §3.2/§3.5）
+│   │   ├── font.rs          #   lv_font_conv 产物注册与文本设置
+│   │   ├── display.rs       #   lv_display 注册 + PARTIAL 双缓冲 + flush 桥（§1.1.1.1 P-1）
+│   │   ├── indev.rs         #   lv_indev 注册 + read_cb 桥（接 Rust evdev）
+│   │   └── event.rs         #   C 回调 → Rust closure 的桥（user_data 生命周期 + 不 panic 纪律）
+│   ├── timing.rs            # 【新】事件循环骨架：poll 多路复用 + lv_timer_handler 驱动（§5.2）
+│   ├── touch.rs             # 【新】evdev 设备发现 / 绝对坐标读取 / 校准 / 事件翻译（§1.2，纯 Rust）
+│   ├── screen.rs            # 【新】flush_cb 的像素 sink：/dev/fb0（复用 canvas.rs 的 FbCanvas）
+│   │                        #   + 内存 sink（--backend offscreen，导出 PNG）
+│   ├── ui/                  # 【新】页面与控件装配（Rust 代码，调用 src/lvgl 薄层）
+│   │   ├── mod.rs           #   页面路由（lv_tabview 或自建 6 页容器 + 导航栏）
+│   │   ├── theme.rs         #   主题常量（色板/尺寸/字号，单一真源 → lv_style）
+│   │   ├── components.rs    #   StatusChip / LedIndicator / Stepper / MultiSelectChips /
+│   │   │                    #   ConfirmDialog / Toast / EmptyState / UnavailableState（薄层之上的组合）
+│   │   └── pages/           #   p1_status.rs / p2_config.rs / p3_logs.rs /
+│   │                        #   p4_interlock.rs / p5_audit.rs / p6_system.rs
+│   ├── fonts/               # lv_font_conv 产物（lv_font_noto_sc_{24,32,48,64,96}.c）+ 码表
+│   │                        #   （含 lv_font_conv 的生成命令脚本 gen_fonts.sh，确保可复现）
+│   ├── channel.rs           # 【保留+扩展】回环 HTTP 客户端（GET 帧，500 ms）
+│   ├── console.rs           # 【新】控制通道客户端（POST/GET /v1/console/*，含信封构造与幂等重试）
+│   ├── state.rs             # 【保留+扩展】三态归一/新鲜度/通道态 + 新段视图 + 页面状态机
+│   ├── config.rs            # 【保留+扩展】CLI 参数（+ --control-channel / --touch-* / --rotate）
+│   ├── canvas.rs            # 【保留】FbCanvas（fb0 打开/格式探测/区域写）→ 升为 flush_cb 的 sink（§8.3）
+│   │                        #   绘制原语契约与 OffscreenCanvas 布局用途废弃
+│   ├── font.rs              # 【废弃】ab_glyph 光栅化（码表资产迁至 fonts/，渲染交给 LVGL）
+│   ├── layout.rs            # 【废弃】固定网格自绘
+│   └── run.rs               # 【废弃】旧 500 ms 定拍自绘循环 → 新事件循环（见 timing.rs）
+└── tests/
+    ├── ui_offscreen.rs      # 【重写】LVGL 内存 display 离屏渲染：页面非空 + 中文文案区域 + 降级态断言
+    ├── interaction.rs       # 【新】触摸事件注入（直投 indev）→ 命中/防抖/超时回归/草稿保留/长按
+    └── channel_chain.rs     # 【新】stub 服务端（读帧 + 控制回执）→ 全链路
+```
+
+> **UI 组件策略（**v2.0-r2 反转**，吸收 UI 设计 §10 待对齐 ①）**：**采用 LVGL 内置控件 + 自定义主题**（**不再**全自绘、**不再**禁用内置控件）。理由：① LVGL 内置控件**本就为嵌入式小屏设计**，`lv_style`/`lv_theme` 的样式覆盖能力覆盖 UI 需要的全部维度（色/字号/圆角/内边距/描边/状态色），逐项可控；② 全部自绘等于**放弃 LVGL 最核心的价值**（控件/滚动/焦点/弹层/命中测试），把工作量推回 L-5 自研路线，**违背 KISS 且与切换动因不符**；③ 与 r1 的"Slint 内置 `ComboBox` 弹出层不可控"不同，LVGL 的下拉/弹层/列表样式**均可通过 `lv_style` 与自定义主题覆盖**。
+> **保留的约束**：**控件外观必须来自 `ui/theme.rs` 的单一真源**（页面内**不得硬编码裸色值/裸尺寸**），且**不得使用 LVGL 默认主题（`LV_USE_THEME_DEFAULT`）的配色作为最终外观**——默认主题仅作控件行为基线，外观一律由我们的 `lv_style` 覆盖（CI 静态断言，§11.1 约束 ④′）。
+>
+> `display-proto` 保持**唯一跨进程契约 crate**，不引入 LVGL/FFI 依赖（契约层零 UI 依赖，测试桩可在任意环境编译）。crate 名称保留 `display-proto` 以避免跨 3 个 crate 的改名 churn；**可选**（评审可议）改名为 `hmi-proto`。
+
+### 5.2 LVGL 集成与事件循环
+
+```rust
+// src/main.rs + src/timing.rs（骨架，标注关键 API 与不变量）
+fn main() -> Result<()> {
+    let cli  = Config::parse(std::env::args())?;         // 保留 v1.0 config.rs（扩展）
+    let fb   = FbCanvas::open(&cli.fbdev_path, cli.width, cli.height)?;  // 复用 canvas.rs（保留）
+    let touch = TouchDevice::open(&cli.touch)?;          // 新：Rust evdev 发现/校验/校准
+
+    lvgl::init();                                        // lv_init()
+    lvgl::set_tick_cb(Instant::now());                   // lv_tick_set_cb(→Instant 单调 ms)
+    let disp = lvgl::display::create(cli.width, cli.height);   // lv_display_create
+    lvgl::display::set_buffers_partial(disp, /* buf1/buf2 尺寸按 §10 预算 */);
+    lvgl::display::set_flush_cb(disp, |area, px_map| screen::blit(&fb, area, px_map)); // P-1：fbsink
+    let indev = lvgl::indev::create_event_driven(&touch);      // lv_indev_create + read_cb + MODE_EVENT
+
+    let mut app = ui::App::new(disp, indev, channel, console, cli)?;  // 建 6 页控件树 + 主题
+
+    // ── 事件循环：poll 多路复用（evdev fd）；超时取 LVGL 的下次处理时刻；无忙等（PRD §4.1.1）──
+    loop {
+        let lv_next = lvgl::timer_handler();             // lv_timer_handler() → 距下次处理 ms（重绘/动画/定时器）
+        let timeout = min(lv_next, app.next_deadline()); // ∪ 通道 500ms 轮询截止
+        poll(&touch.fd, timeout)?;                       // 唯一阻塞点；空闲即让出 CPU
+        touch.pump()?;                                   // 读 evdev 事件 → 更新 (pressed,x,y) 快照
+        lvgl::indev::read(indev);                        // lv_indev_read() → LVGL 命中/派发（LV_EVENT_*）
+        app.on_lv_events();                              // 从事件队列取 UI 动作 → 业务（切页/提交/防抖）
+        app.tick(Instant::now())?;                       // 拉帧 → 更新 state → 刷新受影响的 lv_obj
+        lvgl::timer_handler();                           // 再次驱动：把本拍的 lv_obj 变更立刻落到脏区重绘
+    }
+}
+```
+
+**架构说明（与 r1 的对应关系）**：
+- r1 的「自定义 `slint::Platform`（`MinimalSoftwareWindow` + 自研 event loop）」在 LVGL 下**不再需要**——LVGL 本身**不是**应用框架，它只提供**渲染与控件**，**没有**自己的事件循环/平台抽象。因此**我们的事件循环从"实现框架的 Platform trait"变为"驱动 LVGL 的 `lv_timer_handler`"**：这是**简化**（少一层框架契约），不是等价替换。
+- r1 的「`LineBufferProvider` 逐行写 fb」→ r2 的「`lv_display` 的 `flush_cb` 按**脏区矩形**写 fb」。**粒度反而更粗更省**（LVGL 以 `lv_area_t` 为单位失效/重绘，不需要整行扫描；且 LVGL 内部对脏区做并集合并）。
+- r1 的「Slint 定时器 + `draw_if_needed`」→ r2 的「`lv_timer_handler()`（LVGL 自有定时器/动画/重绘调度）」，其**返回值即下次需要处理的时间**，直接作为 `poll` 超时。
+
+**不变量（编码约束，须在 review 中检查）**：
+1. 事件循环**唯一**阻塞点是 `poll`（超时 = `min(lv_timer_handler 返回值, 通道截止, ≤500 ms)`），**不得**出现 `loop {}` 自旋或 `sleep` 与 `poll` 混用的忙等（PRD §4.1.1 / NF-02）。**特别注意**：LVGL 的 `lv_timer_handler()` **必须被周期性调用**（否则动画/滚动/超时回归停摆）——这与"不许忙等"不冲突，因为其返回值为毫秒级间隔，`poll` 会**阻塞那么久**；**禁止**写成无超时的紧循环。
+2. **LVGL 渲染只在 `lv_timer_handler()` 内发生**（LVGL 自己决定何时重绘脏区）；**不得**在循环里手动调用 `lv_refr_now()`（那是测试专用强制渲染，生产用会退化为全帧重绘，CPU 预算失控）。
+3. 任何阻塞 I/O（通道 GET/POST）**不得**在 `flush_cb` / `read_cb` / LVGL 事件回调内执行（回调内只做像素搬运或状态快照）。通道 I/O 在 `app.tick()` 内以**非阻塞 + 超时**方式完成（`O_NONBLOCK` 状态机，见 §5.5）。
+4. **所有 LVGL 调用必须在事件循环线程内**（LVGL 非线程安全，`lv_conf.h` 不开多线程）；**禁止**跨线程触碰 `lv_obj`。
+5. 回调内**不得** `panic`（跨 FFI 展开为 UB）；Rust 侧回调统一以错误码/日志返回，异常状态经 `app` 状态机在循环内处理。
+
+### 5.3 触摸输入（`touch.rs`）
+
+| 环节 | 设计 |
+|------|------|
+| 发现 | 扫描 `/dev/input/event*` → `evdev::Device::open` → 检查 `supported_events()` 含 `EV_ABS`，且 `absolute_axes()` 含 `ABS_X/Y` 或 `ABS_MT_POSITION_X/Y` |
+| 多候选 | **报错退出并列出全部候选**（附设备名），不猜 |
+| 显式指定 | `--touch-device /dev/mupc-touch`（生产固定；udev 规则见 §12.2） |
+| 校准 | `EVIOCGABS(ABS_X/ABS_Y)` → `(raw − min) / (max − min) × screen`；`max ≤ min` 或 ioctl 失败 → **启动报错** |
+| 覆盖 | `--touch-calib xmin,xmax,ymin,ymax` / `--touch-swap-xy` / `--touch-invert-x` / `--touch-invert-y` |
+| 单点 | 取首个活动 slot（`ABS_MT_TRACKING_ID ≥ 0`）；若为单点设备则用 `ABS_X/Y` + `BTN_TOUCH` |
+| 事件翻译 → LVGL | 读到 `EV_KEY/BTN_TOUCH`（或 MT slot 的 `ABS_MT_TRACKING_ID`）与 `ABS_*` 坐标后，写入 Rust 侧 `(pressed, x, y)` 快照；`src/lvgl/indev.rs` 的 `read_cb` 把它填进 `lv_indev_data_t`（`point`/`state`）→ **LVGL 负责命中/z-order/弹层拦截/滚动判定/`LV_EVENT_CLICKED` 派发** |
+| 读取时机 | `lv_indev_set_mode(indev, LV_INDEV_MODE_EVENT)` + 事件到达后 `lv_indev_read(indev)` **主动投递**（避免 LVGL 默认 30 ms 轮询带来的固定延迟）；`lv_conf.h` 的 `LV_USE_EVDEV` **置 0**（不引入 libevdev，见 §1.2） |
+| 缺失/异常 | 触摸设备打开失败 → **进程仍运行**（只读展示照常），启动日志 `warn` + 屏幕上角标「触摸不可用」（EDGE-13；PRD 明确「触摸失效不得影响数据刷新」） |
+
+### 5.4 页面与状态模型
+
+- **页面路由**：LVGL 侧用**6 个页面容器（`lv_obj`）+ `lv_tabview`（`LV_TAB_POS_NONE` 隐藏内置标签栏）**或自建 `page_index` + `lv_obj_add_flag(..., LV_OBJ_FLAG_HIDDEN)` 切换。顶部/底部导航栏常驻（6 个 `lv_btn`），任意页到任意页 **1 次触摸**（满足 F11.2 的 ≤2 次，且**没有 AI 类入口**、**无置灰占位**）。
+  - **取舍**：`lv_tabview` 自带页面生命周期与切换管理（**更 KISS，默认选它**）；自建 `page_index` 则在"切页时不想重建控件树"的场合更可控。**编码期二选一，但必须在 §11.1 的离屏测试中固化"6 页均可直达且可回"的行为**。
+- **子页返回**：固定位置返回控件（同一应用内位置一致，F11.3）。
+- **当前页选中态**：导航项 `selected` 视觉 + 文字（F11.4）。
+- **状态模型**（`state.rs`，保留 v1.0 纯逻辑并扩展）：
+
+```rust
+pub struct UiState {
+    pub frame: Option<DisplayFrame>,   pub last_ok_at: Option<Instant>,
+    pub channel: ChannelStatus,        // Init / Live / Stale / Down（保留 v1.0 语义）
+    // v1.0 派生视图（保留）：soc / run_state / 三相 NumView（Valid | Missing(reason)）
+    // v2 新增派生：
+    pub device: DeviceView, pub alarms: AlarmView, pub info: InfoView, pub interlock: InterlockView,
+    pub logs: LogPageState, pub audit: AuditPageState, pub config: ConfigPageState,
+    pub toast: Option<Toast>,          // 3 s 自动消失（F9.5）
+    pub confirm: Option<ConfirmDialog>,// 模态；打开期间暂停超时回归（F15.4）
+    pub dirty: bool,                   // 配置页有未保存修改（F15.2 / EDGE-11）
+}
+```
+
+- **三态归一的复用**：v1.0 `state.rs` 中「`FieldFlag` → `NumView{Valid(v) | Missing(reason)}`」的映射、`Freshness`、`ChannelStatus`、`ScreenMode` 逻辑**逐条保留**，扩展用于新段（`LinkState` → `LedView{state, text}`；`LinkState::Unknown`/`NotConfigured` → 「未知」/「未配置」，**绝不映射为「正常」**，F6.5）。
+
+### 5.5 通道客户端（读 + 控制）
+
+| 组件 | 设计 |
+|------|------|
+| `channel.rs`（保留+扩展） | 回环 HTTP 客户端：GET `/v1/display/latest`，单次请求超时 2 s，节拍 `--poll-ms`（默认 **500 ms**）。**设计期钉死为非阻塞状态机**（评审必改 #4①）：`TcpStream::set_nonblocking(true)` + `connect → write → read` 三阶段状态机，由 `app.tick()` **每拍推进一次**，超时以 `Instant` 截止时刻强制（到期即 abort、计一次通道失败）。**禁止 `block_on`、禁止在 `tick` 内同步等待**——这是 §5.2 不变量 3（非阻塞）的唯一实现形态，**不再留"编码时择一"的余地**（原表述与不变量 3 冲突，已消除）。约束：单次轮询耗时上界 2 s 且不影响触摸响应（事件循环 `poll` 超时仍 ≤ 500 ms，见 §5.2 不变量 1）。 |
+| `console.rs`（新） | 控制通道客户端：`request_id`（uuid）生成、`issued_at_ms`、`op` 校验；GET 查询 + POST 写；**与 `channel.rs` 同构的非阻塞状态机**（同样禁止 `block_on`，由 `tick` 推进），单次超时 5 s；**幂等重试**：同 `request_id` 重试安全（服务端返回首次结果，`duplicate=true`）。结果填入 `UiState` + `Toast`。 |
+| `hmi_channel` 段 | `DeviceSection.hmi_channel` 由 HMI **本地覆盖**为自身 `ChannelStatus`（服务端给 `Unknown`）——避免"由服务端报告客户端自己的连接状态"这一语义倒置。 |
+
+> **`--poll-ms` 的硬上界（F7.3 / F16.5 红线）**：HMI 侧 CLI 校验 `--poll-ms ∈ [100, 500]`，`> 500` **直接报错退出**（错误信息指向 §4.2.1 时延拆解）。理由：该值直接进入 F7.3 / F16.5 的端到端算式，放开即可能**静默破坏 ≤2 s 验收**。
+
+### 5.6 交互规范落实（PRD §3.6 / §4.2 / UI 设计 §2.5 / §7.3 / §10）
+
+| PRD 条款 | 落实 |
+|----------|------|
+| TT-08 控件 ≥48×48 px；关键操作 ≥64×64 px；间距 ≥16 px；危险控件间距 ≥48 px | `ui/theme.rs` 定义 `Dimens::TOUCH_MIN = 48` / `TOUCH_CRITICAL = 64` / `GAP_MIN = 16` / `GAP_DANGER = 48`，经 `lv_obj_set_size()` / `lv_obj_set_style_pad_*()` 施加；**所有**可点控件显式引用这些常量（review 检查项：`ui/**` 内不得出现裸数值尺寸） |
+| NF-04 字号 ≥64 / ≥32 / ≥24 px | `ui/theme.rs` 的 `Fonts::{DISPLAY, PROCESS, LABEL}` → `lv_style_set_text_font(style, &lv_font_noto_sc_{64,32,24})`（`lv_font_conv` 产物，§1.1.2）；0.5–1.5 m 读距 |
+| TT-09 二次确认，默认焦点「取消」 | `ConfirmDialog` 组件（`lv_msgbox` 或 `lv_layer_top()` 上的自定义模态容器）：标题=操作，正文=影响范围（**含 `requires_reconnect` 提示**），明细=前后值列表；**LVGL 输入组** `lv_group` 把「取消」设为默认聚焦对象（`lv_group_focus_obj`） |
+| TT-10 500 ms 防重 | 按钮回调内 `last_fire_at` 判定（Rust 侧）；同时以 `lv_obj_add_state(btn, LV_STATE_DISABLED)` 给出禁用视觉反馈 |
+| TT-11 滑动不误触发点击 | 依赖 **LVGL 滚动容器语义**：子对象的 `LV_EVENT_CLICKED` 仅在按下-抬起落在同一对象且**未转化为滚动**时派发；阈值由 `lv_conf.h` 的 `LV_INDEV_DEF_SCROLL_LIMIT`（像素）控制。**列为真机/离屏验证项（§14 R-10）**，标定值须固化进 `lv_conf.h` |
+| TT-12 60 s 超时回归主状态页 | Rust 侧在事件循环维护 `idle_deadline`（`--idle-timeout-secs`，默认 60）；触摸事件重置；**若 `dirty=true` 则不强制切页**，改为显示顶部提示条「有未保存修改」（不得静默丢弃）；确认弹层打开时不计时（TT-13） |
+| F12 零键盘 | **编译期结构性保证（比静态扫描更强）**：`lv_conf.h` 置 `LV_USE_TEXTAREA = 0`、`LV_USE_KEYBOARD = 0`、**`LV_USE_SPINBOX = 0`**。**三项必须同时为 0，其中"弃 `lv_spinbox`"是另两项能成立的前提**——`lv_spinbox` 以 `lv_textarea` 为基类，其头文件带编译期守卫（v9.5.0 `src/widgets/spinbox/lv_spinbox.h`：`#if LV_USE_TEXTAREA == 0` → `#error "lv_spinbox: lv_ta is required. Enable it in lv_conf.h (LV_USE_TEXTAREA  1) "`），故 **`LV_USE_SPINBOX=1` + `LV_USE_TEXTAREA=0` 是 C 编译期直接报错**。**步进器 / IPv4 / 日期时间因此改用 `lv_btn` + `lv_label` 组合**（§5.7 映射表；UI 文档 §5.3 #6/#8 同口径）——**弃用后，本项达成的结论"构建产物中根本不存在文本输入控件"成立**。辅以 §11.4 静态约束 ①（`ui/**` 不得引用 `lv_textarea` / `lv_keyboard` / `lv_spinbox` 符号）防回退 |
+| F14 语义三重冗余 | `StatusChip` / `LedIndicator` 组件强制 `text + color + icon` 三通道（组件构造函数签名层面强制，不做纯色块）；`lv_led` 只用其"灯"语义，`.text` 必须并列设置 |
+| F5.3 / 防烧屏（NF-05） | 静态装饰周期性微移仅作用于**非数值区**；核心数值区不动（沿用 v1.0 原则）；实现为 `lv_timer` 驱动的 `lv_obj_set_pos` 微移，**不得**用 `lv_anim` 循环动画（§5.6 动效纪律） |
+| **控件策略（⚠️ v2.0-r2 反转）**（UI §10 待对齐 ①） | **采用 LVGL 内置控件 + 自定义主题**（**取代** r1 的"禁 `std-widgets`、控件全自绘"）：`lv_btn`/`lv_label`/`lv_list`/`lv_table`/`lv_bar`/`lv_led`/`lv_dropdown`/`lv_switch`/`lv_msgbox`/`lv_buttonmatrix`/`lv_checkbox`/`lv_tabview` 直接使用；外观一律由 `ui/theme.rs` 的 `lv_style_t` 覆盖。**`lv_spinbox` 不在列（PM 裁定弃用）**：步进器 / IPv4 / 日期时间一律 **`lv_btn` + `lv_label` 组合**（F12 行）。**保留的硬约束**：① 页面内**不得硬编码裸色值/裸尺寸**（必须经 `theme.rs`）；② **不得把 LVGL 默认主题配色当作最终外观**（`LV_USE_THEME_DEFAULT` 仅提供控件行为基线，色彩/字号/圆角/描边全量覆盖）。**静态断言**：CI 扫描 `ui/**` 不得出现 `lv_color_hex` / `lv_color_make` 之类的裸色值调用（§11.4 ④′） |
+| **滚动与滚动指示**（UI §10 待对齐 ② / U-3 / V-7 → **PM 已裁定并消解**，⚠️ **r2 表述订正**） | **内容滚动保留交互**：滚动容器（`lv_obj` + `LV_OBJ_FLAG_SCROLLABLE`）支持**内容拖拽 + 惯性（`LV_INDEV_DEF_SCROLL_THROW`）**，`lv_obj_set_scroll_dir(obj, LV_DIR_VER)` 结构性禁止横滚。**滚动条严格为"纯指示、不可拖"**（PM 裁定；原 r2 "滑块默认可拖"为**误述，已订正**）。理由：8 px 触区若可点即违反 UI §2.1「≥48 px 触摸目标」硬规则；UI 文档 v2.1 §5.3 #16 / §6.1 / §6.4 / §7.4 / §10-2 已同口径（"经 pin 实现为显式不可交互"）。**v9.5.0 源码核实与两手显式实现见下方「§5.6-A 滚动条」** |
+| **长按保持 1.0 s**（UI §10 待对齐 ③ / §7.3 L2，⚠️ **实现变更**） | **改用 LVGL 内建长按事件**：确认按钮 `lv_obj_set_long_press_time(btn, 1000)`，回调监听 `LV_EVENT_LONG_PRESSED`（提交）与 `LV_EVENT_PRESSED` / `LV_EVENT_RELEASED`（进度条 `lv_bar` 开始/复位；`LV_EVENT_PRESS_LOST` 亦须复位）。**中途松手即取消并复位**（LVGL 不派发 `LONG_PRESSED` 即为自然取消）。**比 r1 的手工 `animate` 计时更简单、且由框架保证边界语义**。**须先离屏验证**（§11.1 交互层，虚拟时钟推进，不真等 1 s）再上真机（§14 R-10） |
+| **确认强度分级**（吸收 UI §2.5 / §7.3） | L0 无确认（浏览/筛选/切页）/ **L1 双步确认**（默认焦点「取消」）/ **L2 双步确认 + 长按 1.0 s**（危险色 `#FF6B6B`）/ **L2+ 追加 `WarnBanner`**（任一字段 `requires_reconnect`）。落点为 `ConfirmDialog` 的 `level` 参数，**调用方必须显式传入（无默认值，防漏配）**；各页映射见 §6.2（保存 = L1 或 L2+、恢复默认值 = L2）与 §6.4（释放 / M1 授权 = L2） |
+| **动效纪律**（新增，LVGL 特有） | 仅允许 `lv_anim` 用于**状态切换**（如弹层淡入，≤200 ms）；**禁止**循环/装饰性动画（CPU 与"空闲让出 CPU"约束，PRD §4.1.1）；进度条类动效由 `lv_bar` 值驱动而非 `lv_anim` |
+| **服务地址展示口径**（PM 裁定，UI 附录 B U-1） | 「本机服务地址（仅回环）」与「设备管理 IP」**必须分列展示、不得混为一谈**；前者只读（`ConfigField.editable=false`，回环是安全红线，见 §3.4 / §6.2），后者缺失显「未提供」（§6.6）。UI 不得呈现任何"可从远端访问本机接口"的暗示 |
+
+#### §5.6-A 滚动条：LVGL v9.5 行为核实 + 显式实现为"纯指示、不可拖"（上表「滚动与滚动指示」行的展开）
+
+> **核实方法**：直接读 **LVGL `v9.5.0`** 源码（非文档推断、不假设框架默认），文件与行号为该 tag 的实际内容。
+
+| 核实点 | 源码事实 | 推论 |
+|--------|----------|------|
+| 滚动条是否绘制 | `src/core/lv_obj.c:781` `static void draw_scrollbar(lv_obj_t * obj, lv_layer_t * layer);`，唯一调用点在该文件 `LV_EVENT_DRAW_POST` 分支（`:756`）；`src/core/lv_obj_draw.c` 全文无滚动条逻辑 | 滚动条是**纯绘制部件** |
+| 按下滚动条会发生什么 | `src/indev/lv_indev_scroll.c:267` `lv_indev_find_scroll_obj()`：滚动目标**只来自 `indev->pointer.act_obj`**（`:280`，即被按下的 `lv_obj`）及其祖先链；**该文件全文 0 处 `scrollbar` 引用**（同法核对 v8 亦为 0） | **不存在**"滚动条命中测试 / 抓 thumb / 点轨道跳转"；按在滚动条区域 = 按在容器上 = **普通内容拖拽**（thumb 随内容比例移动，非抓取） |
+| 能否"移除滚动条的 clickable 标志" | `LV_PART_SCROLLBAR` 是**样式部件枚举**（`src/core/lv_obj_style.h:62`，`lv_part_t = 0x010000`），**不是 `lv_obj`**；`LV_OBJ_FLAG_CLICKABLE` 定义在 `src/core/lv_obj.h:50` 的**对象**标志位上 | 滚动条**没有**可加/可去的 `LV_OBJ_FLAG_CLICKABLE`——**"移除滚动条 clickable 标志"在本框架下无对应 API**（该说法仅适用于自建对象，见方案 B） |
+| 相关 API | `lv_obj_set_scrollbar_mode()`（`src/core/lv_obj_scroll.c:62`）、`lv_obj_get_scrollbar_mode()`（`:98`）、绘制区 `lv_obj_get_scrollbar_area()`（`:465`）、滚动位置 `lv_obj_get_scroll_y/top/bottom()`（`:128/134/140`） | 官方 API 只提供**模式与样式**，不提供交互开关 |
+
+**结论（钉死）**：**LVGL v9.5 的滚动条不可点击、不可拖动，是既成行为；"默认可拖"是误述**（PM 裁定的"纯指示、不可拖"与框架行为**一致**，无需对抗框架）。
+
+**显式实现（两手，取其一；默认 A）**：
+
+- **(A) 原生 `LV_PART_SCROLLBAR` + 不引入交互 + 测试钉死（默认）**：`lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_AUTO)`（内容高于视口才出现）、`lv_obj_set_style_width(obj, 8, LV_PART_SCROLLBAR)`（轨道 `#141F33`、thumb `#3B4A6B`、`LV_STATE_SCROLLED` → `#4EA6FF`，色值取自 `theme.rs`）；**不注册任何滚动条相关事件回调、不实现任何"拖 thumb / 点轨道"逻辑**（框架亦无处可挂）；并以 §11.1 交互用例**断言**：在滚动条区域（x ∈ [右缘−8, 右缘]）注入"按下→移动→抬起"→ `lv_obj_get_scroll_y()` 的变化量与**同等手势落在内容区**完全一致（语义 = 内容拖拽）且**无跳变**（证明不存在 thumb 抓取）。**可靠性来源**：源码事实 + 回归用例双锁；若上游换 tag 改变了行为，用例会失败（不会静默退化）。
+- **(B) 自绘指示（结构性保险，不依赖框架内部实现；若评审认为 A "依赖默认行为"则改此路）**：`lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF)` 关闭原生条；另建 **8 px 宽的子 `lv_obj`** 作指示，`lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE)` + `lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE)` 使其 **hit-transparent**（此处的 `LV_OBJ_FLAG_CLICKABLE` 确实存在——因为它**是我们的 `lv_obj`**，见上表第 3 行；`lv_obj_remove_flag` 见 `lv_obj.h:209`）；位置与长度在 `LV_EVENT_SCROLL` 回调内由 `lv_obj_get_scroll_y()` / `lv_obj_get_scroll_top()` / `lv_obj_get_scroll_bottom()` 计算。此分支下"不可交互"由**我们自己的对象标志**保证，与框架内部实现解耦。
+
+**触摸目标口径（与 UI §2.1 的一并对齐）**：滚动条**自始不是触摸目标**（8 px 仅为其视觉宽度），触摸目标是整个滚动容器（≥ 视口尺寸）——UI §2.1「≥48 px」硬规则的适用对象是"可点控件"，故 **U-3 的冲突结构性消解**；现场 V-7 仅复核**指示清晰度**，不含"是否可拖"。
+
+**须 pin 复核（R-21）**：以上结论基于 **`v9.5.0`**（pin tag 见 §12.1）；**更换 tag 须重核 `src/core/lv_obj.c` 与 `src/indev/lv_indev_scroll.c` 两文件**——若上游新增滚动条拖拽，则改走方案 B。
+
+### 5.7 UI 设计文档对齐变更通知（**待 UI 侧同步，本设计不得单独修改 UI 文档**）
+
+> 框架由 Slint 改为 LVGL，导致 **UI 设计文档 §10「与技术设计的可映射性」整节及其 3 点"待对齐"** 的**载体**失效（其结论"可由 `.slint` 表达"不再适用）。**本设计给出 LVGL 侧的等价映射表**，供 UI 文档下一版（v2.1）重写 §10 时对齐。**功能语义与视觉规格（色板/尺寸/字号/文案/确认分级）一律不变**，变的只是"用什么框架能力实现"。
+
+| UI 文档 §10 原条目 | **LVGL 侧等价映射（r2）** |
+|--------------------|---------------------------|
+| `global Palette / Dimens / Fonts` | `ui/theme.rs` 的 `lv_style_t` 集合 + `const` 常量（**仍是单一真源**；页面不硬编码） |
+| 6 页 + 常驻导航（`page-index`） | `lv_tabview`（隐藏内置标签栏）或 6 个 `lv_obj` 容器 + `LV_OBJ_FLAG_HIDDEN` 切换；导航栏 = 6 个 `lv_btn` |
+| 整页纵向滚动（`Flickable`，不横滚） | 滚动容器 `lv_obj` + `LV_OBJ_FLAG_SCROLLABLE`；`lv_obj_set_scroll_dir(obj, LV_DIR_VER)` 即**结构性禁止横滚** |
+| 长列表（`ListView` 可视行裁剪） | `lv_list` 或 `lv_table`（LVGL 不自带虚拟滚动裁剪；**长列表须自行做"窗口化"**：只保留可视行数 ×1.5 的 `lv_obj`，滚动时复用）。**这是 LVGL 侧相对 Slint 的一个净新增工作量**，见 §12.4 工作单元 B 与 R-22 |
+| 分段控件 / 多选 Chip（不用内置 `ComboBox`） | `lv_checkbox`（多选）/ `lv_buttonmatrix`（分段，v9.5 规范名；`lv_btnmatrix` 为 `lv_api_map_v8.h` 的兼容别名）/**允许** `lv_dropdown`（LVGL 的下拉弹出层样式可经 `lv_style` + `LV_PART_*` 覆盖，r1 的"内置弹层不可控"顾虑在 LVGL 下不成立） |
+| 步进器 / IPv4 / 日期时间 | **`lv_btn` + `lv_label` 组合（`−` / 值 / `＋` 三件；PM 裁定弃 `lv_spinbox`，见 §5.6 F12 行）**：值区为**纯 `lv_label`**（不挂 `LV_OBJ_FLAG_CLICKABLE`），`−`/`＋` 为 `lv_btn`（`−` 在 `value==min`、`＋` 在 `value==max` 时置 `LV_STATE_DISABLED` 给类型+控件双层越界约束）；IPv4 四段 = 4 个该组合（每段 0–255）；日期时间 = 5 个该组合（**不用 `lv_roller` 备选**，与 UI §5.3 #8 一致） |
+| 确认对话框（`PopupWindow` + 遮罩 + 默认焦点 + `animate` 长按） | `lv_msgbox` 或 `lv_layer_top()` 上的模态容器（`lv_obj_add_flag(..., LV_OBJ_FLAG_CLICKABLE)` 拦截穿透）；遮罩用 `lv_obj_set_style_bg_opa`；长按改用 **`LV_EVENT_LONG_PRESSED` + `lv_obj_set_long_press_time(1000)`**（§5.6） |
+| Toast（`Timer 3s`） | `lv_msgbox`/自定义浮层 + `lv_timer_create(..., 3000, ...)`（或 Rust 侧 `idle_deadline` 语义） |
+| 状态胶囊 / 指示灯（签名强制 `text`） | `StatusChip`/`LedIndicator` 组合件（`lv_obj` + `lv_label` + `lv_led`），构造函数强制三通道（§5.6 F14 行） |
+| 脏区渲染 / 低 CPU（`draw_if_needed(render_by_line)`） | LVGL 内建脏区失效（`lv_obj_invalidate`）+ `lv_timer_handler()` 按需重绘；`lv_display` 用 `LV_DISPLAY_RENDER_MODE_PARTIAL` + 双缓冲（§1.1.1.1） |
+| 动效（仅 `animate 200ms`） | `lv_anim`（仅状态切换，≤200 ms；禁循环动画，§5.6 动效纪律行） |
+| 零文本输入（`.slint` 不含 `LineEdit`） | **`lv_conf.h` 置 `LV_USE_TEXTAREA=0` / `LV_USE_KEYBOARD=0` / `LV_USE_SPINBOX=0`**（三者必须同时为 0；弃 `lv_spinbox` 是前提，步进器改 `lv_btn`+`lv_label` 组合，§5.6 F12 行）→ 编译期不存在任何文本输入控件，强于源码扫描 |
+| 导航 ≤2 次触摸的可测性（离屏事件注入） | 离屏测试直投 `lv_indev`（`lv_indev_read`）→ 断言当前页（§11.1 交互层） |
+| **§10-1 禁内置 `std-widgets` 皮肤** | **反转**：采用 LVGL 内置控件 + `ui/theme.rs` 自定义主题（§5.6 控件策略行，理由见 §5.1 注） |
+| **§10-2 滚动条"纯指示不响应触摸"** | **结论维持不变**（r2 早期误述为"改为可拖"，**本版订正**）：**内容滚动手势保留**（拖拽 + 惯性），**滚动条严格纯指示、不可拖**。**经 pin 实现/核实**——§5.6 已给 **v9.5.0 源码依据**（滚动条为纯绘制部件，输入侧无命中测试；`LV_PART_SCROLLBAR` 非 `lv_obj`，无部件级 clickable）与**两手实现**（A：原生部件 + 不引入交互 + 交互用例钉死；B：自绘 hit-transparent 指示）。**UI 文档 v2.1 已同步**（其 §5.1 #16 / §5.3 `ScrollBar` 行 / §6.1 / §7.4 / §10-2 均写"经 pin 实现为显式不可交互"），本设计与之一致；**8 px 与 UI §2.1 的 48 px 不冲突**（滚动条非触摸目标，容器才是） |
+| **§10-3 长按 1.0 s 需 `animate` + `TouchArea.pressed`** | **变更**：改用 LVGL 内建 `LV_EVENT_LONG_PRESSED` + `lv_obj_set_long_press_time(1000)`（§5.6 长按行） |
+
+**UI 侧需回应/同步的三点**（本设计已给默认值，UI 可覆盖）：① 控件策略反转（"全自绘"→"内置控件 + 自定义主题"）是否影响 UI §5.2 的"状态 × 色值矩阵"表述（矩阵本身不变，只是由 `lv_style` 施加）；② **滚动条口径已由 PM 裁定为"纯指示、不可拖"，本设计按此落实并给出 v9.5.0 源码依据与两手实现（§5.6），无需 UI 再确认**；UI 文档 v2.1 对应条目已同步为"经 pin 实现为显式不可交互"，与本设计结论**一致**（若 UI 侧后续措辞有调整，以"不可拖"这一结论为准，实现分支按 §5.6 的 A/B 取一）；③ UI §11 的真机验证项 V-4/V-5/V-7 在 LVGL 下的判据不变（**V-7 收敛为"仅验指示清晰度"，不含"是否可拖"**），但 V-5（列表滚动 ≥30 fps）**在 LVGL 下需关注"窗口化列表"的实现方式**（R-22）。
 
 ---
 
-## 9. 非功能预算落实
+## 6. 6 页详细设计
 
-| NFR(PRD §4) | 预算 | 设计落实 |
-|--------------|------|----------|
-| 视觉刷新 ≥1Hz；单帧 ≤30ms | 1024x768 | 渲染节拍 500ms(2Hz)；离屏整帧自绘 + 单次 blit 应 ≪30ms（真机首测校准，见 §13）；启动后 `--metrics` 打印平均 draw ms |
-| 渲染 CPU ≤15% 单核均值(1s窗) | 上限 | 同步阻塞轮询 + sleep，无忙等；只在需要时重绘；字符走图集 blit，无每帧 TTF 解析 |
-| 常驻内存 ≤64MB | 上限 | 离屏 1024x768x4≈3MB + 图集/子集字库(≤~1MB) + 无 GUI 栈；释放每帧中间产物；预估 ≪32MB |
-| 通道断满载 CPU ≤5% | 上限 | 断连 = 每次 GET 连接失败(ms 级) + sleep，其余空闲 |
-| 崩溃 ≤3s 自恢复 | 3s | systemd Restart=always + RestartSec=1（进程隔离，不影响 mupcd） |
-| 渲染进程异常不得影响 mupcd | — | 独立进程 + 独立 crate，只经回环 GET 单向读 |
+> 每页给出：PRD 功能映射 → 数据来源 → 交互流程 → 写操作 → 降级。所有页面**无文本输入控件**。
+
+### 6.1 P1 主状态页（默认页 / 超时回归目标页）
+
+| PRD | 内容 | 数据来源 | 交互 |
+|-----|------|----------|------|
+| F1 SOC | 大字号 %（≥64 px）+ 源胶囊（`BMS` / `PCS(REG1010)` / `SOC 源失效`）+ 0–100 量程条（15 %/85 % 警示档） | 帧 `soc`/`soc_source`/`soc_flag` | 只读 |
+| F2 PCS 状态 | 四态文字+语义色+图标；「方向不一致」角标 | 帧 `run_state`/`inconsistency`（主判据 REG1013） | 只读 |
+| F3/F4 三相 P/I | 四卡横排（A/B/C/总，上 P 下 I），1 位小数 | 帧 `p_phase`/`p_total`/`i_phase` | 只读 |
+| F5 刷新/新鲜度 | 「数据过期」角标（>2 s）；通道断整屏降级 | 帧 `ts_ms`/`seq` + `ChannelStatus` | 只读 |
+| F6 装置状态 | 状态卡网格：版本、编译时间、uptime、CPU 温度、内存、IEC104 / 核间 / 通道、控制源 | 帧 `device` + `info` | 只读 |
+| F7 告警 | 最多 10 条，倒序，级别色+文字；空态/源不可用分别显式 | 帧 `alarms` | 只读 |
+
+- 布局（1024×768，**主读数区不横滚**，整页为 LVGL 纵向滚动容器（`lv_obj` + `LV_OBJ_FLAG_SCROLLABLE` + `lv_obj_set_scroll_dir(LV_DIR_VER)`），PRD T-6/B8）：页眉（时钟 + 通道状态）→ SOC 卡 | PCS 卡 → 三相四卡 → 装置状态网格 → 告警列表。
+- 布局固定分区、字段位置稳定（值变化不改布局，PRD §4.2.4）。
+- 无写操作。
+
+### 6.2 P2 配置页（F9，含写操作）
+
+| 环节 | 设计 |
+|------|------|
+| 进入 | 触摸导航「配置」→ `GET /v1/console/config` → 按 `groups` 渲染分组（IEC 104 / 核间 / 遥测与日志），组内字段纵向排列 |
+| 控件生成 | 由 `ConfigField.kind` 驱动：`Ipv4` → 四段数字步进（每段 0–255）；`U16/U64{min,max,step}` → 受约束步进器 —— **此二者均为 `lv_btn` + `lv_label` 组合（`−` / 值 / `＋`），弃 `lv_spinbox`（§5.6 F12 行）**，`−` 在 `value==min` / `＋` 在 `value==max` 时 `LV_STATE_DISABLED`，**越界值在控件层不可达**（TT-03）；`Enum{options}` → 选项列表（`lv_dropdown` / `lv_buttonmatrix`） |
+| **只读字段**（`editable=false`） | 本地 HMI 自身的服务地址（`display.bind_addr` / `display.control_bind_addr`）**只读展示**：控件 `disabled` + 附「仅本机回环，不可修改」说明行。理由：回环是 PL-4 安全红线，经屏可改即等于把"只回环"变成可撤销的约定（§3.4 / §4.9）；字段仍出现在列表中以**可见性**换取现场可核查性 |
+| 监听地址字段口径（PM 裁定，吸收 UI 附录 B U-1） | `gateway.listen_addr` 的标签为「**本机监听地址（IEC 104）**」，**不得**表述为「对端 IP / 远程主站地址」；`Ipv4` 步进的语义是**本机绑定地址**。同页若出现回环服务地址，须按「本机服务地址（仅回环 127.0.0.1）」独立成行标注，与设备管理 IP 区分（§6.6） |
+| 即时校验 | 值变更即本地校验（步进器天然受限）；后端二次校验（`RejectedValidation` + `field_errors` → 字段红框 + 具体原因，红色边框 + 文字） |
+| 保存 | `保存` 按钮 → **按 UI §2.5 分级确认**：无字段 `requires_reconnect` → **L1**（双步：模态弹层列出「字段：旧值 → 新值」，默认焦点「取消」）；任一字段 `requires_reconnect=true` → **L2+**（危险色 + **长按保持 1.0 s** + 必出 `WarnBanner`「生效瞬间通信将短暂中断（≤5 s）」及「涉及：<字段名>」）→ 确认完成后 `POST /v1/console/config/apply`（`from: "edit"`） |
+| 保存中 | 按钮 `disabled` + 文案「保存中…」（禁重复触发，F9.6） |
+| 成功 | `Toast`（3 s 自动消失）+ 用回执 `applied` 刷新本地值（不等下一帧） |
+| 失败 | `Toast`（错误色）+ **保留用户已输入值** + 明示原因（EDGE-10：校验失败 / 落盘失败 / 落盘成功但生效失败须区分） |
+| **恢复默认值**（评审必改 #3 —— F14.3 / T-3 确认落点） | 独立控件，与「保存」间距 ≥48 px（CF-07）。**属"生效性写"→ 必须走二次确认（L2），不得只有间距保护**：`ConfirmDialog(level = L2)` 危险变体；标题「恢复默认值」；**「影响范围」段必出**（「全部运行参数将恢复为默认值并立即生效」）；明细段列出「字段：当前值 → 默认值」（取自 `ConfigField.default`，超 8 行内部滚动）；若恢复值涉及 `requires_reconnect` 字段则追加 `WarnBanner`；**确认按钮须长按保持 1.0 s**（中途松手即取消并复位），**默认焦点「取消」**。确认完成 → `POST /v1/console/config/apply`，携带 `ConfigPatch{ changes: <全字段默认值>, from: "reset_default" }` |
+| **UI ↔ 后端 确认-审计链路（T-3 闭环）** | **UI 侧**：长按 / 双步确认**完成前不发出任何请求**（未确认 = 无网络动作）；确认完成 → `console.rs` 生成 `request_id`(uuid) + `issued_at_ms` → POST。**后端侧**：`ConfigService` 走 §3.3 固定管线（字段校验 → 幂等占位 → **审计 intent 前置写入，fail-closed** → 执行 → 结果审计），回执带 `audit_id`；审计条目 `op = ConfigApply \| ConfigResetDefault`、`target` = 逐字段键、`before` / `after`、`result` / `reason`、`write_mode`（§4.3.2.1）。**「确认」与「审计」是两条独立证据链**：确认防误操作、审计做留痕，缺一不可（D7 / D8）；失败时 UI 保留已输入值并就地展示 `message` |
+| 未保存草稿 | `dirty=true` → 顶部提示条；超时回归不强制切页（F15.2/EDGE-11） |
+
+### 6.3 P3 日志页（F10，只读 + 选项式筛选）
+
+| 环节 | 设计 |
+|------|------|
+| 实时通道状态 | 顶部：「实时日志已连接」（绿）/「实时日志已断开，正在重连…」（红）。断开由控制通道请求失败判定（连续 2 次失败），恢复后 ≤1 s 回绿（LG-07 的重连 ≤5 s 由客户端 500 ms 重试节拍天然满足） |
+| **筛选控件常驻页面**（关键设计） | 三行常驻 chip 组：① 级别多选（ERROR/WARN/INFO/DEBUG）② 模块多选（选项来自 `/logs/targets`）③ 时间范围（最近 1 h / 24 h / 自定义起止） —— **常驻而非抽屉**，使「3 维度各 1 次触摸 = 3 次」满足 LG-05「≤3 次触摸」；自定义起止展开后为日期+时间步进（LG-04） |
+| 列表 | 斑马纹、行高 ≥40 px（LG-06）、级别色块+文字；每行「时间 级别 模块 消息」 |
+| 滚动 | LVGL 滚动容器（`LV_OBJ_FLAG_SCROLLABLE`）+ **窗口化列表**（只保留可视行 ×1.5 的 `lv_obj`，§5.7 / R-22）+ 滚动加载（`cursor` 增量）；手动上滚 → **停止自动滚动** + 显示「回到最新」按钮（F10 实时推送规范 2） |
+| 实时追加 | 每 500 ms 拉 `cursor` 增量（延迟 ≤1 s，优于 LG-01 的 2 s）；重连期间**不清空**已展示内容（F10 规范 3） |
+| 空态 | 「当前筛选条件下无日志」（EDGE-08） |
+| 超限 | `range_too_large=true` → 提示「检索范围超限，请缩小时间范围」（EDGE-15） |
+| 明确不做 | 关键字搜索（T-1）、导出（T-2）、任何文本输入（LG-10） |
+
+### 6.4 P4 安全 / 联锁页（F16–F18，含写操作）
+
+| PRD | 内容 | 数据来源 | 交互 |
+|-----|------|----------|------|
+| F16 状态 | 总态「已联锁 / 未联锁」（文字+色+图标）；触发源明细列表（含数量）；latch 态（已保持/未保持）；停机失败标志；DO1/DO2 灯（灯+文字，未知显「未知」）；空态「当前无联锁触发源」 | 帧 `interlock`（2 s） | 只读 |
+| F17 释放 | 按钮 ≥64×64 px → **L2 强确认**（UI §2.5 / §7.3）：危险色弹层 + 影响范围段（当前触发源与 latch 态）+ 明细列表 + **确认按钮长按保持 1.0 s**（中途松手取消）+ **默认焦点「取消」** → `POST /v1/console/interlock/release`（带 `observed_latched` / `observed_sources`） | 控制通道 | 写 |
+| F18 M1 授权 | 按钮 ≥64×64 px；**latch 态下 `disabled` 并就地明示「处于 latch 态，须先释放联锁」**（F18.4，不得静默失败）→ **L2 强确认**（同 F17 规格）→ `POST .../ack_m1` | 控制通道 | 写 |
+| 失败 | `RejectedPrecondition` → 弹层内就地显示 `message`（如「触发源未复位：estop, door」「保持时间不足，还需 12 s」） | — | — |
+| 成功 | ≤2 s 内联锁态更新（F17.6/IL-02）：**优先**由回执 `applied` **立即**刷新（不等下一帧）；退路为下一帧（慢拍 C 0.5 s + 变更即组帧，最坏 ≤1.35 s，§4.2.1）；`Toast` 成功 |
+| 不可用 | `interlock.available=false` → 整区显「联锁状态不可用」，**不得**显「未联锁」（IL-01.6/EDGE-12） |
+
+> **DO 命名备注**：页面上只显示语义（「故障灯」/「运行灯」）与灯态，不显示 DO1/DO2 编号（避免 PRD 与代码注释不一致导致的现场误读，§4.6 备注 / §14 R-09）。
+
+### 6.5 P5 审计页（F19，只读）
+
+| 环节 | 设计 |
+|------|------|
+| 顶部 | 最近一条审计时间戳（F19.8，判断审计链路是否持续写入） |
+| 筛选（常驻） | 时间范围（1 h / 24 h / 自定义起止，选项式步进）+ 操作类型多选（选项来自 `/audit/ops`） |
+| 列表 | 每页 20 条，时间倒序，滚动加载；每条：时间 / 操作者（`local-console`）/ 操作类型 / 前后值摘要 / 结果（成功/失败）/ 失败原因 |
+| 只读 | 无编辑/删除/清空入口（PL-02 的界面体现）；无导出（T-2 同口径） |
+| 空态 / 不可用 | 空态「当前筛选条件下无审计记录」；`available=false` → 「审计记录不可用」（EDGE-17，二者严格区分） |
+
+### 6.6 P6 系统 / 关于页（F8，只读）
+
+| 字段 | 来源 | 缺失时 |
+|------|------|--------|
+| 固件版本号 | `env!("CARGO_PKG_VERSION")` | 不适用 |
+| 编译时间 | `option_env!("BUILD_TIMESTAMP")` | 「未提供」 |
+| 装置型号 | `/proc/device-tree/model` | 「未提供」 |
+| 序列号 | **无可靠真源** | 「未提供」（不臆造，EDGE-16/F8.4） |
+| **本机服务地址（仅回环）** | `InfoSection.service_scope = LoopbackOnly`（常量）+ 读/控制通道端点 `127.0.0.1:9810` / `127.0.0.1:9811` | 恒有值（非「未提供」） |
+| **设备管理 IP** | `InfoSection.mgmt_ipv4`（`getifaddrs` 首个 UP 非回环 IPv4） | 「未提供」 |
+
+- 「字段名 + 值」列表形式；不随数据刷新跳动（一次性读取，F8.3）。
+- **服务地址展示口径（PM 裁定，UI 附录 B U-1）**：上两行**必须分列、字段名不可互换**——
+  「本机服务地址（仅回环）」表示**服务只监听 127.0.0.1，对外不可达**；
+  「设备管理 IP」表示**该装置在管理网上的地址**。
+  页面不得出现任何"可从远端访问本机 HMI 接口"的暗示（例如把管理 IP 与服务端口并列成"访问地址"）。此口径同时约束 §6.2 的监听地址字段。
+- 无写操作。
 
 ---
 
-## 10. 测试策略
+## 7. web-api 移除方案与出口迁移表
 
-### 10.1 无真屏环境验证路径（核心）
+### 7.1 出口迁移逐条表（PRD §3.7 的 16 行 → 技术落点）
 
-- **屏幕后端抽象**：`screen.rs` 的 `offscreen` 后端把每帧渲染写入内存 Canvas → 可选导出 PNG（dev feature）。渲染进程 `--backend offscreen --channel http://127.0.0.1:<stub>/v1/display/latest` 即可在 **Windows x86 / Linux CI 无屏**全链路跑通。
-- **数据源 stub**：以 `display-proto` 构造固定帧的小 HTTP 桩（测试辅助 bin 或测试内 tokio 起服），对渲染进程注入 6.1–6.7 各态帧。
+| # | 原 web-api 出口 | PRD 处置 | **技术落点** | 承接组件 | 工作量 |
+|---|------------------|----------|--------------|----------|--------|
+| 1 | `GET /api/v1/interlock/status` | 迁移（P4/F16） | 读帧 `interlock` 段（0.5 s 节拍 + 变更即组帧，端到端 ≤1.35 s，§4.2.1） | `DisplayDataProvider` + 任务 C | S |
+| 2 | `POST /api/v1/interlock/release` | 迁移（P4/F17） | `POST /v1/console/interlock/release` | `InterlockOps` + `ConsoleAuditService` | M |
+| 3 | `POST /api/v1/interlock/ack_m1` | 迁移（P4/F18） | `POST /v1/console/interlock/ack_m1` | 同上 | M |
+| 4 | `GET /api/v1/status` | 迁移（F6/F7/F8） | 读帧 `device`/`alarms`/`info` 段 | `DisplayDataProvider` + 任务 A/B + build.rs | **M**（四字段由占位转真值，含 gateway `link_state` 新增） |
+| 5 | `GET/PUT /api/v1/config` | 迁移（P2/F9） | `GET /v1/console/config` + `POST /v1/console/config/apply`（+ reset） | `ConfigService`（**新建子系统**） | **L** |
+| 6 | `GET /api/v1/logs` | 迁移（P3/F10） | `GET /v1/console/logs`（选项式 + cursor + 限额；**去掉 keyword/export**） | `LogService`（迁移 `LogsHandler`） | M |
+| 7 | `GET /ws/logs` | 迁移（F10 实时） | `GET /v1/console/logs?cursor=`（500 ms 增量拉取，≤1 s） | `LogService` live ring | M |
+| 8 | `GET /api/v1/strategy-mode` | 迁移（只读） | 读帧 `device.control_source` | `AiIntegrator::engine_status()` | S |
+| 9 | `PUT /api/v1/strategy-mode` | **暂停** | 无端点（后端已 503 拒绝；代码随 crate 删除） | — | S（删除） |
+| 10 | `GET/PUT /api/v1/mode`、`/mode/list` | **暂停** | 无端点 | — | S（删除） |
+| 11 | `GET /api/v1/ai/*` | **暂停** | 无端点 | — | S（删除） |
+| 12 | `PUT /api/ai/weights`、`GET /api/ai/audit` | **暂停**；但「写操作审计留痕与查询」作为通用能力保留 | **审计查询迁移** → `GET /v1/console/audit` + `/v1/console/audit/ops`；AI 干预类端点删除 | `ConsoleAuditService` | M |
+| 13 | `/api/ai/models`、`/api/ai/abtest/*`、`/api/ai/rollback` | **暂停** | 无端点 | — | S（删除） |
+| 14 | `/api/auth/*`（login/logout/password） | **取消**（T-3 无登录） | 全删（含 `AuthHandler` / `SessionManager` / `RequireRole`） | — | S（删除） |
+| 15 | `GET /api/v1/ai/stream`（SSE，真路由名） | **迁移（能力级）**；其 AI/场景事件随 §3.8 暂停 | 实时刷新能力由**读帧 1 Hz + 日志 cursor 轮询**独立满足，**不复用该端点** | 读通道 + `LogService` | S |
+| 16 | 静态 Web 资源 | **取消**（本就未挂载） | 删除孤立 `static/*.html` | — | S（删除） |
 
-### 10.2 分层
+**归类统计（与 PRD §3.7「迁移 10 / 暂停 4 / 取消 2」对齐）**：
 
-| 层 | 用例 | 断言 |
+| 归类 | 条目 | 小计 |
+|------|------|------|
+| **迁移** | #1 #2 #3 #4 #5 #6 #7 #8 + #12（审计查询能力）+ #15（实时推送能力级） | **10** |
+| **暂停** | #9 #10 #11 #13（#12 的 AI 干预部分并入 #11/#13；#15 的 AI 事件部分并入暂停） | **4** |
+| **取消** | #14（登录面）+ #16（静态资源） | **2** |
+
+> 与 PRD 表一致；本表的增量信息是**每一行的具体技术落点与工作量**，其中 **#5（配置）与 #4（状态真值化）**是净新增工作的重心。
+
+### 7.2 `web-api` crate 处置
+
+**处置：整 crate 删除。**
+
+删除顺序（**必须按此序，否则编译中断**）：
+
+```
+Step 1  迁出类型：InterlockApi/InterlockStatus/InterlockSourceStatus → display-proto::interlock（含结构化错误改造）
+                 同时改造 mupc-core-bin/src/interlock.rs 的 impl 与 use
+Step 2  新建 mupcd 承接组件：ConfigService / LogService / ConsoleAuditService / InterlockOps / ConsoleHost / AlertFeed
+Step 3  替换 startup.rs 步骤 10 整块（AppState 装配 + Router + 监听 + register_service）
+        替换 SouthSink.sse 字段 → AlertFeed
+Step 4  删除 CoreConfig.web_api 字段 + WebApiConfig + validate 校验 + 默认值函数 + 单测样例
+Step 5  删除 crates/web-api 目录 + workspace members 条目 + core-bin Cargo.toml 的 mupc-web-api / axum 依赖
+Step 6  清理残余：yaml 段、部署文档、注释性引用（无害但应清）
+```
+
+### 7.3 受影响代码改动清单（逐文件）
+
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `mupc/Cargo.toml` | 删 member `crates/web-api`；清理 `[workspace.dependencies]` 中仅 web-api 使用的 `axum` / `tower-http` / `jsonwebtoken`（须先确认无其它使用者） | — |
+| `mupc/crates/web-api/**`（32 个 .rs + static） | **整目录删除** | 含其全部单测 |
+| `mupc/crates/mupc-core-bin/Cargo.toml` | 删 `mupc-web-api`、`axum`（core-bin 直接用 axum 仅为止 Router 装配）；**LVGL 相关依赖不在此时 crate**（HMI 才需要） | — |
+| `mupc/crates/mupc-core-bin/src/core_config.rs` | 删 `web_api` 字段 / `WebApiConfig` / `default_listen_addr` / `default_enable_https` / `validate()` 该校验 / 约 20 处单测 yaml 样例中的 `web_api:` 段；**新增** `display` 段新字段的 validate | 改动面大但机械 |
+| `mupc/crates/mupc-core-bin/src/startup.rs` | 步骤 10 整块替换（约 −90 行 / +约 60 行）；`SouthSink.sse` → `alert_feed`；`register_service("web_api")` → `("hmi_backend")`；`ota_manager` 的创建失去唯一消费者（见下） | 关键路径 |
+| `mupc/crates/mupc-core-bin/src/interlock.rs`（约 1300 行） | `use` 改指 `display-proto::interlock`；`request_release`/`ack_m1` 返回 `Result<(), InterlockReject>`；错误构造改造；既有单测同步 | **中风险回归点** |
+| `mupc/crates/mupc-core-bin/src/display_host.rs` | 扩展：慢拍任务 A/B/C + 缓存 + 帧组装的四个新段；`LoopbackHttpPublisher` 保持 | 核心复用面 |
+| `mupc/crates/mupc-core-bin/src/console_host/**`（新） | `mod.rs` / `config_service.rs` / `log_service.rs` / `audit_service.rs` / `interlock_ops.rs` / `http.rs` / `error.rs` | 新增 |
+| `mupc/crates/mupc-core-bin/build.rs`（新） | `BUILD_TIMESTAMP` | 新增 |
+| `mupc/crates/mupc-core-bin/src/main.rs` | 装配顺序/步骤编号 10–14 → 调整 | 小 |
+| `mupc/crates/display-proto/src/**` | `frame.rs` 扩段 + `PROTO_VERSION=2`；新增 `control.rs` / `interlock.rs` / `log.rs` / `audit.rs`；`config.rs` 扩字段 | 契约核心 |
+| `mupc/crates/local-display/**` | 见 §5.1 模块树（渲染层换 **LVGL**；`font.rs`/`layout.rs`/`run.rs` 废弃；**新增** `lvgl-sys/`、`src/lvgl/**`、`timing.rs`、`ui/**`、`fonts/`（`lv_font_conv` 产物）；`canvas.rs` **保留**） | HMI 核心 |
+| `mupc/vendor/lvgl/**`（**新**） | LVGL v9.5 官方源码，**pin tag**（git submodule 或 vendor 目录，§12.1）；`lv_conf.h` 由我们提供 | 新增（C 依赖） |
+| `mupc/Cargo.toml`（workspace） | `members` 增 `crates/local-display/lvgl-sys`；`[workspace.dependencies]` 增 `cc` / `bindgen`（**build-dependencies 语义**，见 §12.1） | 新增 |
+| `mupc/build.md` / `mupc/deploy/scripts/build-for-rk3588.sh` | 增补 **C 工具链前置**（aarch64 gcc 已有）+ `LIBCLANG_PATH`/`BINDGEN_EXTRA_CLANG_ARGS` 说明 + `--hmi` 子模式（§12.1） | 构建 |
+| `mupc/crates/gateway/src/iec104/server.rs` | 新增 `link_state()` + 状态枚举 | T-5 #1 |
+| `mupc/crates/ai-engine/src/model_manager.rs` | 注释中「供 bin crate / web-api SSE 推送使用」→ 改述（纯注释） | 无害 |
+| `mupc/crates/strategy-engine/src/ai_integration.rs` | 注释中「web-api 的服务门面」→ 改述（纯注释） | 无害 |
+| `mupc/crates/security/src/audit.rs` | 单测中的 `"web-api"` 字面量 → 通用串（纯测试数据） | 无害 |
+| `mupc/deploy/config/mupc_core_config.yaml` 与 `.production.yaml` | 删 `web_api:` 段；加 `display:` 的 `enabled/control_bind_addr/*_poll_ms/log:` | 部署 |
+| `mupc/deploy/config/mupc_core_config.production.yaml` | 同上 + 开启 `display.enabled: true` | 部署 |
+| `mupc/deploy/systemd/mupc-display.service` | 改 `ExecStart` 参数（+ `--control-channel` / `--touch-device` / `--font`）；内存上限按 v2.0 预算调整 | 部署 |
+| `mupc/deploy/systemd/mupcd.service` | 若启用 `ProtectSystem=strict`，须加 `ReadWritePaths=/opt/mupc/config`（**配置热写前提**，须核对现有 unit） | 部署 |
+| `mupc/deploy/deploy.md` / `deploy/scripts/*.sh` | 8080 相关描述/检查清理；HMI 构建打包 | 部署文档 |
+
+**未决/附带影响（诚实标注）**：
+- `ota_manager` 在 `startup.rs` 中**唯一消费者是 web-api 的 AppState**。删除后该实例失去用途；OTA 属 §3.8 暂停项。建议：**保留 `ota_update` 服务注册与实例（不删除能力），但不启动任何服务面**；或在后续 OTA 需求中重新接线。**不要**因此连带删除 `mupc-ota-update` crate。
+- `mode_selector` / `ab_test_manager` / `online_updater` / `storage` 均非 web-api 专有（`storage` 有独立用途；其余属 AI 暂停项）。
+- **配置文件向后兼容（v2.0 修订：不止"能加载"，还要"不被抹掉"）**：`CoreConfig` 未设 `deny_unknown_fields`，故**现场既有的带 `web_api:` 段的 yaml 仍可正常加载**（未知字段被忽略），不强制运维立即改文件。**进一步地**：配置**回写**必须同样不破坏现场文件——本设计采用**保留式编辑**，保存时注释、未建模键与 legacy `web_api:` 段**逐字保留**；仅在不可定位时显式回退整体回写并声明丢失（见 **§4.3.2.1 / D16 / EDGE-23**）。这两点合起来才是完整的兼容性主张：**"能读"且"写了不丢"**。
+
+---
+
+## 8. 复用 / 废弃清单（v1.0 资产去留）
+
+### 8.1 明确复用（保留 / 小改）
+
+| 资产 | 位置 | 处置 | 理由 |
+|------|------|------|------|
+| 帧字段标志与语义 | `display-proto::frame::{FieldFlag, Field, RunState, SocSource}` | **原样保留** | 与 PRD「不造假值」语义强绑定，已单测覆盖（含越界拒绝与 JSON 往返） |
+| `DisplayFrame` | `display-proto::frame` | **扩展为 v2**（新增 4 段 + `PROTO_VERSION=2`），旧字段不动 | 向后兼容（`serde(default)`），HMI 侧改动可控 |
+| `DisplayConfig` / `DisplayRange` | `display-proto::config` | **扩展**（+ `control_bind_addr` / `min_publish_interval_ms` / 慢拍节拍（3 s / 0.5 s / 0.5 s）/ `log` 限额） | 单一真源不变 |
+| 域值化 / 量程 / 一致性 | `core-bin::display_host::DisplayDataProvider` | **保留**（`scalar_field` / `phase_fields` / `check_inconsistency` 原样） | 与 PRD EDGE-05/06 逐条对齐，已单测 |
+| 1 Hz 采集与发布循环 | `display_host::{sample_once, build_frame}` | **保留并扩段** | 核心复用 |
+| 读通道 HTTP 发布 | `display_host::LoopbackHttpPublisher`（含头读超时、毒化不 panic、序列化失败 500） | **原样保留** | v1.0 已过评审；仅新增第二监听 |
+| SOC 裁决快照 | `strategy-engine::AiIntegrator::{soc_display_snapshot, resolve_soc_core}` | **原样保留（不改）** | 唯一裁决入口，控制/展示不分叉 |
+| 三相读 | `intercore::read_three_phase` / `last_run_state` / `is_connected` | **原样保留（不改）** | 点表读取与在线副作用已落地 |
+| 回环 HTTP 客户端 | `local-display::channel::DisplayChannelClient`（裸 tokio + 手写 HTTP，无 reqwest） | **保留并泛化**为通用客户端（GET + POST），供控制通道复用 | 依赖面最小、可 mock |
+| 三态归一 / 新鲜度 / 通道态 | `local-display::state::{NumView, Freshness, ChannelStatus, ScreenMode, SocView, LiveDot}` | **保留**（纯逻辑，可单测）并扩展新段视图 | v1.0 已过评审；是「不造假值」在前端的落点 |
+| fbdev 像素后端 | `local-display::canvas::FbCanvas`（`/dev/fb0` mmap + bpp/位偏移格式探测 + 区域写） | **保留（**r2 复核：由"降级"回到"保留"**）**：作为 `lv_display` 的 `flush_cb` **像素 sink**（§1.1.1.1 P-1）；仅其**绘制原语契约**与 `OffscreenCanvas` 布局用途废弃 | 规避 LVGL 官方 fbdev 驱动对像素格式的约束（与 r1 规避 Slint 格式限制同一思路）；真机像素格式处理逻辑已写且已过评审 |
+| CLI 解析 | `local-display::config`（手写解析 + 校验 + 平台可用性判定） | **保留并扩展**（+ `--control-channel` / `--touch-*` / `--idle-timeout-secs`） | 依赖面最小、有单测 |
+| 字库**码表**与子集化流程 | `font_subset_charset.txt`（v1.0 码表）+ UI §3.6 用字表 | **码表复用并扩充**；**产物重建**为 `lv_font_conv` 的 C 字体数组（§1.1.2）——**v1.0 的 `pyftsubset` OTF 产物不再使用** | 不赌目标镜像带 CJK 字库；LVGL 需要编译期 C 字体而非运行时 OTF |
+| 语义色板 | `local-display::layout` 内 `#0B1220 / #141F33 / #28A745 / #FFC107 / #DC3545 / #17A2B8 / #9AA0A6 …`（`layout.rs` 顶部 `const`） | **迁入** `ui/theme.rs` 的 `const` + `lv_style_t`（页面不得硬编码，§5.6） | 与 PRD §3.1/§3.3 与 UI §3.2 色值一一对应 |
+| 联锁 controller | `core-bin::interlock::InterlockController` | **保留**（实现迁出的 trait + 错误结构化） | 已实现 DI 去抖/latch/停机确认/DO 灯 |
+| 安全审计底座 | `mupc_security::audit::AuditLogger`（JSONL + **SHA-256** 哈希链；SM3 替换为 Phase 2+ 遗留项） | **复用**为审计双写的一端 | 不破坏既有合规凭据 |
+| 事件存储 | `mupc_storage::EventRepository`（`SystemEvent`） | **复用**为 F7 告警真源 | 已有写入路径 |
+| 系统指标 | `mupc_system_monitor::{TemperatureCollector, MemoryCollector}` | **复用**为 F6 数据源 | 已在 `startup.rs` 运行 |
+| 部署 unit 骨架 | `deploy/systemd/mupc-display.service` | **保留并改内容**（组、参数、内存上限） | 部署脚本引用不变 |
+
+### 8.2 明确废弃（删除）
+
+| 资产 | 位置 | 规模 | 废弃理由 |
+|------|------|------|----------|
+| 固定网格自绘布局 | `local-display/src/layout.rs` | 1003 行 | 被 LVGL 页面/控件树取代；只有色板常量被迁出保留 |
+| ab_glyph 文本光栅化与图集 | `local-display/src/font.rs` | 439 行 | 文本渲染交给 LVGL（**码表资产**迁至 `fonts/`，渲染与图集全部废弃） |
+| 定拍自绘主循环 | `local-display/src/run.rs` | 426 行 | 被「evdev + `lv_timer_handler` + 通道」事件循环取代（`timing.rs`） |
+| 离屏画布与绘制原语 | `local-display/src/canvas.rs` 的 `Canvas` trait / 绘制原语 / `OffscreenCanvas` 布局用途 | 部分 | 绘制由 LVGL 负责；离屏测试改用 LVGL 内存 display；**`FbCanvas` 本体保留**（§8.1） |
+| v1.0 端到端测试 | `local-display/tests/full_chain.rs` | 405 行 | 断言基于自绘像素网格；改为 LVGL 离屏 + 页面状态断言 |
+| **v1.0 `pyftsubset` 的 OTF 子集产物** | `local-display/fonts/*.otf` | — | **r2 复核结论**：LVGL 需编译期 C 字体（`lv_font_conv`），OTF 产物不再被使用；**码表资产保留**（§8.1） |
+| `web-api` crate | `crates/web-api/**` | 32 文件 | PRD B4/PL-4/PL-5（§7.2） |
+| v1.0 UI 设计文档 | `docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md` | — | v1.0 版（「只读状态屏」）已废弃；**该文件 v2.0 已于并行线完成**（6 页 IA + 控件集 + 强确认分级）。⚠️ **其 §10「与技术设计（Slint）的可映射性」整节及其 3 点"待对齐"的载体随框架切换失效**——本设计在 **§5.7** 给出 LVGL 侧等价映射表与变更通知，**须 UI 文档下一版（v2.1）同步重写 §10**；附录 B U-1 的 PM 裁定（回环口径 → §3.1 / §6.2 / §6.6 / EDGE-24）**不随框架变更，仍有效** |
+
+### 8.3 复用清单复核结论（**框架变更后的逐项重判，任务要求项**）
+
+| 复核项 | r1 判定 | **r2 复核结论** | 依据 |
+|--------|---------|------------------|------|
+| `canvas.rs::FbCanvas` | "降级为像素后端" | ✅ **升为"保留"**——它是 `flush_cb` 的 **sink**，是显示后端 P-1 的**确定组成部分**（复用度高于 r1） | §1.1.1.1 / §1.3 |
+| `canvas.rs` 的 `Canvas` trait / 绘制原语 / `OffscreenCanvas` | 废弃 | ✅ **仍废弃**（绘制归 LVGL；离屏归 LVGL 内存 display） | §1.1.1.1 |
+| `layout.rs`（固定网格自绘） | 废弃 | ✅ **仍废弃**（LVGL 控件树取代）；**色板常量迁出保留** | §8.1 |
+| `font.rs`（ab_glyph 光栅化） | 废弃 | ✅ **仍废弃**（LVGL 接管文本）；**但码表资产保留、OTF 产物废弃**（与 r1 不同，r1 认为 OTF 产物可复用） | §1.1.2 / §8.1 |
+| `run.rs`（500 ms 定拍自绘主循环） | 废弃 | ✅ **仍废弃**（新事件循环）；**但驱动对象由 Slint 定时器换成 `lv_timer_handler`** | §5.2 |
+| `channel.rs` / `state.rs` / `config.rs` | 保留 | ✅ **仍保留**（与框架无关，纯 Rust） | §8.1 |
+| `full_chain.rs` | 废弃重写 | ✅ **仍废弃重写**（断言方式由 Slint 离屏改为 LVGL 内存 display 离屏） | §11.1 |
+| **v1.0 有无"输入/触摸"资产可复用？** | （未列） | ❌ **无**。v1.0 是只读屏、无触摸栈 → `touch.rs` 为**净新增**（r1/r2 相同） | §1.2 |
+| **v1.0 有无"中文断行/软断点"资产？** | （未列） | ⚠️ **部分**：日志长消息的软断点后处理逻辑（若有）可复用；LVGL `LV_LABEL_LONG_WRAP` 已覆盖一般换行 | §1.1.2 |
+
+> **代码规模净变化（v2.0-r2 估算，供 PM 参考）**：废弃约 **2400 行**（`local-display` 的 layout/font/run/canvas 原语 + OTF 产物引用 + full_chain 测试）；新增 HMI 侧约 **2500–4300 行**（`lvgl-sys` build+bindgen 约 150–300 行、`src/lvgl/**` 薄安全层 **1000–1800 行**、`ui/**` 6 页 + 组件 + 主题 **800–1500 行**、`timing.rs`/`touch.rs`/`screen.rs`/`console.rs` **500–700 行**）+ `lv_font_conv` 生成的 C 字体（工具产物，不计人力）；mupcd 侧净新增约 **2000–3000 行**（console_host 四服务 + 配置元数据表 + 采集任务 + 测试）。**净增约 2100–4900 行**——**较 r1（1500–3000 行）上浮，主要差异就是自写 FFI 绑定层的 1000–1800 行**（§1.1.1.2 已明示）。
+
+---
+
+## 9. 边界与异常对照 PRD §5
+
+| PRD ID | 场景 | 数据侧（mupcd） | HMI 侧展示 | 落地位置 |
+|--------|------|------------------|------------|----------|
+| EDGE-01 | PCS 离线 | 帧 `pcs_online=false`、`run_state=None`、三相 `Offline`；SOC 有 BMS 源则给 BMS 值 | F2「PCS 离线」；F3/F4 各相 `--`+「源离线」；F1 显示 BMS 值并标源 | 已有（v1.0） |
+| EDGE-02 | SOC 双源皆失 | `soc=None`/`Lost`（冻结值不上屏） | `--` + 「SOC 源失效」警示色 | 已有（v1.0） |
+| EDGE-03 | 通道断 | 回环端口消失 | ≤3 s 切「与主进程数据通道断开」；可保留最近帧暗化+冻结标；恢复 ≤1 s | `state.rs`（v1.0） |
+| EDGE-04 | 点表未覆盖 | transport 不支持 → `NotRead` | `--` + 「未取数」 | 已有 |
+| EDGE-05 | 数值域异常 | 量程/有限性校验 → `RangeError` | `--` + 「数据异常」 | 已有 |
+| EDGE-06 | 1013 与功率方向相反 | `inconsistency=true` | 主状态仍 1013 + 「方向不一致」角标 | 已有 |
+| EDGE-07 | HMI 进程异常 | 不阻塞 mupcd | 黑屏/占位；systemd `Restart=always` ≤3 s | unit 已有 |
+| EDGE-08 | 日志为空/筛选无结果 | — | 「当前筛选条件下无日志」（`has_more=false` 且 `entries` 空） | `LogService` + P3 |
+| EDGE-09 | 告警源不可用 | `alarms.available=false` | 「告警源不可用」，**不得**显「无告警」 | 任务 B |
+| EDGE-10 | 配置写入失败 | 校验/落盘/生效分阶段错误；**回滚保证不半生效** | 明示原因 + **保留用户已输入值** + 装置保持原配置 | `ConfigService` + P2 |
+| EDGE-11 | 保存被超时回归/切页打断 | — | `dirty` 时**不强制切页**，顶部提示「有未保存修改」 | P2 + 超时逻辑 |
+| EDGE-12 | 联锁释放/M1 授权被拒 | `InterlockReject` 结构化拒绝原因 | 弹层就地显示具体原因（含剩余保持秒数/未复位源名） | `InterlockOps` + P4 |
+| EDGE-13 | 触摸无效/设备异常 | — | 数据刷新与其他显示**不受影响**；上角标「触摸不可用」 | `touch.rs` 容错 |
+| EDGE-14 | 触摸抖动/重复点击 | `request_id` 幂等表（30 s 窗口） | 500 ms 防抖（按钮 `disabled`） | UI + `ConsoleHost` |
+| EDGE-15 | 检索范围超限 | `max_files` / `max_lines` 超限即拒 | 「检索范围超限，请缩小时间范围」 | `LogService` + P3 |
+| EDGE-16 | 型号/序列号缺失 | 字段 `None` | 「未提供」 | `InfoSection` + P6 |
+| EDGE-17 | 审计源不可用 | 结构化错误 + `available=false` | 「审计记录不可用」，**不得**显「无审计记录」 | `ConsoleAuditService` + P5 |
+
+**补充边界（设计新增，PRD 未列但必须处理）**：
+
+| ID | 场景 | 处理 |
 |----|------|------|
-| display-proto | serde 往返 / 字段默认 / 版本 | JSON 解码=编码；未知字段容忍 |
-| intercore | `read_three_phase` 解码 1022-1032（字节互换/i16×0.1）、坏读数/越界判 Offline/RangeError | 向量断言 |
-| AiIntegrator(SOC) | `resolve_soc_core`/`soc_display_snapshot`：BMS fresh→BMS、BMS stale→活读核间→PCS、双失→dual_lost、缓存 TTL | 复用既有纯函数测试风格 |
-| DisplayDataProvider(host) | 用 stub `Arc<dyn IntercoreTransport>` + 真实 AiIntegrator：各源在/离线/量程外 → 帧 flag 正确；`inconsistency` 判定 | 帧字段断言 |
-| 渲染进程(offscreen) | 对 6.1–6.7 帧渲染：各区域非空像素出现/更新、`--`/角标与语义色落区正确；**帧到→上屏耗时 <30ms**（离屏计时断言） | 区域像素直方图 + 计时 |
-| 崩溃恢复 | 进程被 kill → 外层 watchdog/systemd 拉起（目标环境 shell 脚本断言重启时间 ≤3s） | 集成(需真机/CI 容器) |
-| 真机(标记需硬件) | `/dev/fb0` 映射 HDMI、fb 像素格式(bpp/order)、DRM 主平面、19200 波特两段读通过 | 人工/脚本 |
-
-### 10.3 冒烟回归
-- `cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin --exclude device-trait`（新增 crate 默认纳入）。
-- 渲染进程用 `offscreen` 跑 `--smoke` 一键自检（组一帧 → 出 PNG → 打印时序）并入构建脚本。
+| EDGE-18 | **写操作审计不可写** | fail-closed：拒绝执行 + `AuditUnavailable` + `tracing::error!` 落 journal（§3.3 裁决） |
+| EDGE-19 | **提交时联锁态已变化** | `observed_*` 乐观并发检查 → `RejectedPrecondition`「联锁状态已变化，请刷新后重试」 |
+| EDGE-20 | **控制通道可达但读通道断** | 允许（两通道独立）：配置/联锁仍可操作，实时数据沿用冻结帧并打标；顶栏同时显示两种状态 |
+| EDGE-21 | **HMI 与 mupcd 的 `display` 配置不一致**（端口/节拍不符） | HMI 侧显式报「数据通道不可达」（不静默重试到天荒地老）；部署核对项写入 `local-display.md` |
+| EDGE-22 | **配置保存后生效失败（落盘成功、模块拒绝）** | 恢复内存副本 + `.bak` 不删 → 返回 `ApplyFailed` + 明示「已回滚，装置维持原配置」；审计记失败 |
+| EDGE-23 | **配置文件被整体重写（保留式编辑不可定位）** | 回退整体序列化回写：回执 `ConfigView.write_mode = full_rewrite` + 审计记同名字段 + UI **Toast 明示**「配置文件已整体重写，原有注释不再保留」。**禁止静默**（§4.3.2.1 / D16）；正常路径 `write_mode = text_preserve` 时 UI 不提示（避免噪音） |
+| EDGE-24 | **把回环服务地址当成可远端访问的地址**（现场误判） | 结构性防错：读/控制通道地址 `editable=false`（P2 只读 + 说明行），P6 将「本机服务地址（仅回环）」与「设备管理 IP」**分两行**展示，任何页面不出现可推导出"远程可达"的呈现（PM 裁定，§6.2 / §6.6） |
 
 ---
 
-## 11. 交叉编译与部署
+## 10. 非功能预算落实
 
-### 11.1 构建（渲染进程为纯 Rust）
+> PRD §4.1 已**重新定档**为交互式 HMI（内存 ≤256 MB / 稳态 CPU ≤40 % 单核 / 瞬时 ≤60 % / 断连态 ≤10 % / 磁盘 ≤100 MB）。本设计的**目标值低于上限**，为 1024×768 软渲染留余量，并在真机实测后回写。
 
-- 无需 CMake/RKNN/字体 C 依赖；仅需目标 aarch64 链接器：
-  ```bash
-  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-  cargo build -p mupc-local-display --release --target aarch64-unknown-linux-gnu
-  ```
-- 落点（本期**不实现**，仅标注）：
-  - `deploy/scripts/build-for-rk3588.sh` 增加 `--display` 子模式或在该脚本产出清单追加 `mupc-local-display` 与 `display-proto`；
-  - 或新增 `deploy/scripts/build-display.sh`。
-- display-proto 为库，随 host（mupcd）与渲染进程各自编译引用。
+| 指标（PRD §4.1） | 上限 | 设计目标 | 落实手段 | 验证 |
+|------------------|------|----------|----------|------|
+| 常驻内存 | ≤256 MB | **≤96 MB** | LVGL 基座为 KB 级 + **PARTIAL 模式双绘制缓冲**（建议 2 × 1/10 屏 ≈ 2 × 314 KB = 628 KB，按 `lv_conf.h` 定稿）+ fb 由内核 mmap 持有；`LV_MEM_SIZE` 按需（建议 256 KB 起实测）；CJK 位图字体为**只读 C 常量**（不占堆）；日志 ring 定容（2000 条） | 真机 `ps`/`smaps` + 长稳 |
+| 稳态 CPU（1 s 窗） | ≤40 % 单核 | **≤10 %** | LVGL 脏区失效 + `lv_timer_handler` 按需重绘；帧到达 1 Hz 主拍（慢拍变更时 ≤4 Hz 突发，合并窗口限幅）→ 每帧仅 SOC/数值区域标记脏；`poll` 阻塞无忙等（超时由 `lv_timer_handler` 返回值给出） | 真机 `pidstat` |
+| 瞬时 CPU（页切换/列表刷新） | ≤60 % 单核 | ≤45 % | 页切换为一次性全帧重绘（≤300 ms 预算内）；列表滚动按可视行重绘（**窗口化列表**，§5.7 / R-22） | 真机 + 离屏计时 |
+| 断连态 CPU | ≤10 % 单核 | **≤5 %** | 断连时每 500 ms 一次连接失败（毫秒级）+ `poll` 阻塞 | 真机（拔网/停 mupcd） |
+| 磁盘（可执行 + 资源） | ≤100 MB | ≤40 MB | LVGL 静态库（Release，关无用模块）+ **5 档 CJK 位图字体合计 ≤300 KB**（§1.1.2）+ 单个 HMI 二进制。**较 r1 的 ≤30 MB 上调**：LVGL C 代码静态链接进二进制；实测定稿 | 构建产物 `ls -l` |
+| 无忙等 / 空闲让出 CPU（§4.1.1 / NF-02） | — | 强制 | 唯一阻塞点为 `poll(min(lv_timer_handler 返回, 通道截止, ≤500 ms))`；禁止自旋；**禁止生产路径调用 `lv_refr_now()`**（§5.2 不变量 1/2） | 代码审查 + 真机空载 CPU |
+| 内存不单调增长（§4.1.4 / NF-03） | — | 强制 | 日志列表：ring 定容 + **窗口化列表固定控件数**（不随数据增长）+ 分页；审计分页 20；告警固定 ≤10 | 长稳（≥24 h） |
+| 触摸反馈 ≤100 ms（P95 ≤200 ms，TT-04） | — | 目标 | evdev（Rust）→ `lv_indev_read` → 命中/脏区 → `flush_cb` → fb 的时延预算见 §1.2；**须真机实测** | 真机计时探针 |
+| 页切换 ≤300 ms（TT-05） | — | 目标 | 全帧重绘预算（离屏可先测，真机复核） | 离屏 + 真机 |
+| 滚动 ≥30 fps（TT-06） | — | 目标 | **LVGL 滚动 + 窗口化列表**；**若真机不达标** → 降低可视行数 / 降滚动帧率（`LV_DEF_REFR_PERIOD`） / 关闭惯性动画 | **真机实测（§14 R-05 / R-22）** |
+| **告警上屏 ≤2 s**（F7.3 / ST-16） | — | **≤1.35 s** | 慢拍 B 0.5 s + 变更即组帧 ≤0.25 s + HMI 轮询 0.5 s + 渲染 0.1 s（拆解与落地约束见 **§4.2.1**） | 假时钟单测 + 集成测试（注入告警断言 ≤1.5 s 到帧）+ 真机探针 |
+| **联锁变化上屏 ≤2 s**（F16.5 / IL-01） | — | **≤1.35 s** | 同上（慢拍 C 0.5 s） | 同上 |
+| **装置状态刷新 ≤5 s**（F6.3） | — | **≤3.85 s** | 慢拍 A 3 s + 组帧 ≤0.25 s + 轮询 0.5 s + 渲染 0.1 s（§4.2.1） | 同上 |
+| 配置写入送达率 ≥99.99 %（§4.3） | — | 目标 | 落盘 `fsync` + `.bak` + 回滚；失败即明示 | 单测 + 真机 |
+| 界面可用性 ≥99.9 %（NF-08） | — | — | 进程隔离 + systemd 自恢复 | 长稳 |
 
-### 11.2 部署（systemd，渲染进程自恢复）
+**预算口径说明（与 PRD 一致）**：本预算基于「选项式触摸 + 只读文本渲染」，**不含虚拟键盘 / IME 栈 / 可编辑文本框**（T-1 裁定）。设计上由 §3.4 的 `ConfigKind` 类型约束 + §5.6 的 **`lv_conf.h` 编译期禁用 `LV_USE_TEXTAREA=0` / `LV_USE_KEYBOARD=0` / `LV_USE_SPINBOX=0`** 共同保证该前提**在构建产物层面**不被破坏（强于 r1 的源码扫描）。**注**：三项**必须同时为 0**——`lv_spinbox` 以 `lv_textarea` 为基类、其头文件带 `#error` 守卫，**启用 spinbox 就不可能关掉 textarea**（§5.6 F12 行）；步进器 / IPv4 / 日期时间一律 `lv_btn`+`lv_label` 组合，故"不含可编辑文本框"这一预算口径**成立**。
 
-新 unit `deploy/systemd/mupc-display.service`（本期仅给出模板方向，不提交落地文件）：
+---
 
-```ini
-[Unit]
-Description=MUPC 本地显示终端渲染进程
-After=multi-user.target          # 不强依赖 mupcd（先行可显示"初始化中"）
+## 11. 测试策略
 
-[Service]
-Type=simple
-User=mupc
-Group=mupc
-SupplementaryGroups=dialout video render   # fb/dri 访问；按真机组名校准
-ExecStart=/opt/mupc/bin/mupc-local-display \
-    --channel http://127.0.0.1:9810/v1/display/latest \
-    --backend fbdev --fbdev-path /dev/fb0 --width 1024 --height 768
-Restart=always
-RestartSec=1                      # ≤3s 自恢复(PRD 4.3.1)
-# 允许访问帧缓冲/DRM（按真机加固策略放宽 /dev/fb0 /dev/dri）
-# DeviceAllow=char-framebuffer rw   # systemd 语法按目标版本，部署期核对
-StandardOutput=journal
-StandardError=journal
+### 11.1 分层与可测性边界
 
-[Install]
-WantedBy=multi-user.target
+| 层 | 用例 | 断言方式 | 可运行环境 |
+|----|------|----------|------------|
+| `display-proto` | 帧 v2 往返（含新段缺省）、控制信封/回执/错误码、`InterlockReject::user_message` 文案、旧帧兼容（v1 帧 → v2 类型）、未知字段容忍 | 纯单测 | 全平台（含 Windows） |
+| `display_host` | 慢拍任务 A/B/C 的降级（源失败 → `available=false`/字段 `None`）、四段组装、缓存读不阻塞 | stub（`IntercoreTransport` 桩 + 假 storage/gateway 句柄） | 全平台 |
+| `console_host` | **ConfigService**：字段元数据表与 `CoreConfig` 字段一一对应（防漏项/多项）、越界拒绝、原子落盘、`.bak` 保留、生效失败回滚、`revision` 递增；**LogService**：限额拒绝（EDGE-15）、cursor 增量、选项列表去重、ring 定容不增长；**ConsoleAuditService**：追加、查询筛选、分页、倒序、`newest_ts_ms`、不可用降级；**幂等**：同 `request_id` 重放返回首次结果、30 s 窗口外拒绝、`Busy`；**yaml 保留式编辑（§4.3.2.1）**：改 1 键后其余**逐行字节级不变**（注释 / 未建模键 / legacy `web_api:` 段原样保留）、多键批量替换行数精确、**不可定位时显式回退 `full_rewrite` 且注释确实丢失**、`CoreConfig` 序列化值等价往返、`key ↔ yaml_path ↔ 字段` 一致性 | 单测 + 临时目录 + 假时钟 | 全平台 |
+| **HMI 离屏渲染** | 6 页渲染到**内存 display**（自定义 `lv_display`，`flush_cb` 写 `Vec<u8>`）：非空断言 + 关键区域语义色断言 + 降级态断言（`--`/角标/空态/「不可用」文案）+ **中文文案区域非背景断言（R-01 的固化回归）**；并导出 PNG 供人工核对 | LVGL 内存 display + `lv_refr_now()`（**仅测试**）+ 区域采样/像素直方图 | 全平台，**但 Windows 需先通过 R-20 的构建 spike** ← **本模块最强的可测性支点** |
+| **HMI 交互** | **直投 `lv_indev`**（构造 `lv_indev_data_t` 或经 `indev.rs` 的测试注入口）模拟按下/移动/抬起：导航 ≤2 次触摸到任一页、防抖（500 ms 内二次点击只生效一次）、超时回归 + 草稿保留、确认弹层默认焦点、滑动不误触发点击、**长按 1.0 s**（驱动 `lv_timer_handler` 并以**假 tick 回调**推进虚拟时间，不真等：未满 1.0 s 松手 → 不派发 `LV_EVENT_LONG_PRESSED` 且进度复位；满 1.0 s → 派发）、**只读字段（`editable=false`）不可被改动**、**滚动条不可交互**（在滚动条区域 x ∈ [右缘−8, 右缘] 注入"按下→移动→抬起" → 断言 `lv_obj_get_scroll_y()` 的变化量与**同等手势落在内容区完全一致**且**无 thumb 跳变**，§5.6） | LVGL indev 注入 + 假 tick + `UiState` 断言 | 全平台（同上受 R-20 约束） |
+| **双通道集成** | stub 服务端（读帧 + 控制回执）→ HMI 全链路：数据上屏、写操作下发与回执展示、失败 Toast、通道断/恢复 | tokio stub + 离屏渲染 | 全平台 |
+| 静态约束（**架构检查自动化**） | ① `ui/**` 与 `src/**` **不得**引用 `lv_textarea` / `lv_keyboard` / **`lv_spinbox`** 符号（F12 零键盘；**编译期已由 `lv_conf.h` 三者置 0 保证**，本项防回退）；② `local-display` 依赖图**不得**含 `mupc-intercore`/`mupc-southd`/`mupc-gateway`（§4.4.6 禁直连）；③ 读通道 handler 集合**不得**含 POST 路径（PL-08）；④ **（r2 反转）**`ui/**` **不得**出现裸色值/裸尺寸（`lv_color_hex`/`lv_color_make`/字面量尺寸），必须经 `theme.rs`（§5.6 控件策略行）；⑤ `lvgl-sys` **不得**被 `ui`/`state`/`channel`/`console` 直接 `use`（unsafe 边界收敛，§1.1.1.2 纪律 1）；⑥ `ui/**` **不得**调用 `lv_refr_now`（仅测试可用，§5.2 不变量 2）。**另**：`bindgen` 绑定面断言（`bindings.rs` 导出符号 ⊆ `allowlist.txt`，且清单符号均有实际引用）——见 §12.1，同样进 CI | 源码扫描测试 / `cargo tree` 断言 | CI |
+| **时延拆解回归**（F6.3 / F7.3 / F16.5） | 断言 §4.2.1 的落地约束全部成立：`alarm_poll_ms ≤1000`、`interlock_poll_ms ≤1000`、`device_poll_ms ≤4000`、`min_publish_interval_ms ∈ [100, publish_ms]`；并断言**慢拍写缓存后被唤醒组帧**（假时钟下「写入 → 发布」间隔 < 合并窗口上限），防退化回纯 1 Hz 主拍（该退化会使 F7.3/F16.5 变为 2.1 s，超差） | `display_host` 单测（假时钟）+ 配置校验单测 | 全平台 |
+| **码表覆盖率**（新增，§1.1.2） | 静态扫描 `ui/**` + `state.rs` 中的中文字面量 → 断言**全部字符落在 `font_subset_charset.txt` 内**（防漏字出豆腐块） | 源码扫描单测 | 全平台 |
+| 真机（标记需硬件） | `/dev/fb0` 映射与像素格式、evdev 触摸设备与校准、时延（TT-04/05/06）、资源实测（§10）、长稳 | 脚本 + 人工 | BECG-3568 |
+
+### 11.2 本机 vs 真机边界（诚实）
+
+| 可在开发机（Windows x86 / Linux CI）完成 | **必须真机** |
+|-------------------------------------------|--------------|
+| 全部契约/服务层单测；**6 页 LVGL 离屏渲染（含中文字形 R-01）**；交互注入；双通道集成；静态架构断言；`--backend offscreen` 端到端。**⚠️ 前提**：Windows 开发机须先通过 **R-20**（LVGL C 源码经 `cc` 在 MSVC 下编译 + `bindgen` 可用 = **需装 LLVM/libclang 并设 `LIBCLANG_PATH`**）；若 Windows 侧不通过，则**离屏测试改在 Linux CI 或 WSL 容器跑**（能力不损失，只是开发机体验下降） | `FbCanvas` 真写 `/dev/fb0`（像素格式/字节序/分辨率）；evdev 触摸设备发现/协议/校准；HDMI 分辨率协商；时延与 CPU/内存实测；交叉编译产物运行；systemd 权限（video/input 组） |
+
+### 11.3 特殊测试要求
+
+- **`interlock.rs` 改造回归**：`InterlockReject` 的**每个变体**须有对应用例（触发源未复位/保持不足/latch 态/停机未确认/未启用），因为这是 EDGE-12「不得静默失败」的直接落点。
+- **配置元数据一致性测试**：以反射式清单（手写 `const KEYS: &[(&str, ...)]`）与 `CoreConfig` 字段逐项比对，**防止「UI 能改一个不存在的键」这类静默失效**（这是原 `web-api::AppConfig` 的实际失败模式）。
+- **审计不可用演练**：目录置只读 → 断言写操作被拒（fail-closed）且返回 `AuditUnavailable`（EDGE-18）。
+
+### 11.4 冒烟与回归
+
+- `cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin --exclude device-trait`（沿用项目既有冒烟口径；`web-api` 用例随 crate 删除）。
+- HMI：`--backend offscreen --channel <stub> --control-channel <stub> --smoke` 一键自检（渲染 6 页 → 导出 PNG → 打印时序）。
+- CI 中固化 §11.1 的**六条**静态约束（**零键盘——禁 `lv_textarea` / `lv_keyboard` / `lv_spinbox` 符号**；步进器一律 `lv_btn`+`lv_label` 组合 / 禁直连 / 读通道无 POST / 禁裸色值尺寸 / `lvgl-sys` 不被业务模块直接引用 / `ui/**` 禁 `lv_refr_now`），外加 §12.1 的 **bindgen allowlist 双向断言**。
+
+---
+
+## 12. 部署与交叉编译
+
+### 12.1 构建（⚠️ **v2.0-r2：从"纯 Rust 零 C 依赖"变为"Rust + LVGL C 源码"**）
+
+**LVGL C 源码的引入方式（选定）**：
+
+| 方式 | 做法 | 结论 |
+|------|------|------|
+| **S-1 git submodule（选定）** | `mupc/vendor/lvgl/` 为 submodule，**pin 到具体 tag（如 `v9.5.0`）**；`lvgl-sys/build.rs` 用 **`cc` crate** 编译其源文件（`src/**` 递归）+ 把我们的 `lv_conf.h` 放到 `include` 路径 | ✅ **选定**：版本可审计（submodule commit 即锁定）、`cc` 原生支持交叉（`CC_aarch64_unknown_linux_gnu` 环境变量/`CARGO_TARGET_*_LINKER` 由 cargo 传递）、与 Cargo 构建一体化（`cargo build -p mupc-local-display` 一条命令搞定） |
+| S-2 vendor 源码直接入库 | 把 LVGL 源码复制进仓库 | ⚠️ 仓库膨胀、升级需人工 diff；**仅在 S-1 不可用（离线环境）时采用** |
+| S-3 系统预装 liblvgl + `pkg-config` | 目标 rootfs 预装 LVGL 共享库 | ❌ 排除：目标镜像白名单与"随二进制自足"原则冲突（见 r1 对 linuxkms 的同款论证），且版本不受我们控制 |
+
+**`lvgl-sys/build.rs` 的关键动作**（编码直接照做）：
+1. `cc::Build::new()` + `.files(lvgl 源文件清单)` + `.include("vendor/lvgl")` + `.include("lvgl-sys/include")` + **`.define("LV_CONF_INCLUDE_SIMPLE", None)`** → 产出静态库并入链接。
+2. **`bindgen` 在 `build.rs` 中运行（精确 allowlist，禁用通配）**：读取 `lvgl-sys/allowlist.txt`（逐行 `fn:<符号>` / `type:<符号>` / `var:<符号>`），逐项调用 `allowlist_function` / `allowlist_type` / `allowlist_var` + `allowlist_recursively(true)`（带上传递依赖类型），再以 `clang_arg` 传 `--target=aarch64-linux-gnu`（交叉时）与 LVGL include 路径 → 生成 `bindings.rs`。**禁止 `allowlist_function("lv_*")` 一类通配**——通配等于**全量生成**，与 §1.1.1.2 理由 2「只生成所需符号、压缩 `unsafe` 面」自相矛盾（设计评审订正项）。**CI 双向断言**：① `bindings.rs` 导出的符号集合 ⊆ `allowlist.txt`（多一个即失败）；② `allowlist.txt` 中每个符号在 `src/lvgl/**` + `ui/**` 中确有引用（无死符号）。**新增控件用点时必须同步补清单**（与 §1.1.1.2 的 unsafe 边界纪律同等强制）。
+3. **`println!("cargo:rerun-if-changed=...")`** 覆盖 LVGL 源与 `lv_conf.h`。
+4. **可选加速（R-20 决策项）**：把 bindgen 生成物**提交入库**，`build.rs` 用 feature `prebuilt-bindings` 直接 `include!`，从而**免除终端用户的 libclang 前置**（代价是升级 LVGL 时须重生成）。
+
+**三平台构建前置（诚实清单）**：
+
+| 平台 | Rust 侧 | **C 侧（新增）** |
+|------|---------|------------------|
+| **aarch64 交叉（生产）** | `rustup target add aarch64-unknown-linux-gnu`；`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc` | `gcc-aarch64-linux-gnu`（**项目已在 `mupc/build.md` / `build-for-rk3588.sh` 中要求，本项无新增前置**）+ `bindgen` 所需的 **libclang**（**在宿主 x86_64 上运行，与目标架构无关**）+ `CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc` |
+| **x86_64 Linux CI** | 常规 | `build-essential`（gcc）+ `libclang-dev`（装 `bindgen` 依赖） |
+| **Windows 开发机（离屏测试）** | 常规 | **MSVC 或 MinGW 的 C 编译器** + **必须安装 LLVM 并设 `LIBCLANG_PATH=<LLVM>/bin`**（否则 `bindgen` 报 `Unable to find libclang`）；若 `stdarg.h` 找不到，再加 `BINDGEN_EXTRA_CLANG_ARGS="-isystem <clang-resource-dir>/include"`。**LVGL 本体可编译**（其 Linux 专用驱动已被 `lv_conf.h` 全关，只编核心 + 我们的内存 display） |
+
+```bash
+# 生产（aarch64 交叉）
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+export LIBCLANG_PATH=/usr/lib/llvm-17/lib           # 宿主侧，供 bindgen
+cargo build -p mupc-local-display --release --target aarch64-unknown-linux-gnu
+
+# 本机离屏冒烟（x86_64 Linux / WSL）
+cargo test -p local-display --features offscreen
 ```
 
-- mupcd 主进程**不拉起/不拥有**渲染子进程（4.3.1 归属系统集成侧）；渲染进程上电可先显示「初始化中」，通道就绪 ≤1s 切实时（4.3.4）。
-- 部署文件（字库已在二进制内）：安装产物 `/opt/mupc/bin/mupc-local-display` + systemd unit（上表 CLI 参数）；
-  **渲染进程不装/不读 `mupc_core_config.yaml`**。该 yaml 的 `display:` 段（enabled）仅属 mupcd 侧发布配置；
-  生产 unit 的 `--channel` 需与 `display.bind_addr` 对齐（一条部署核对项）。
+- **mupcd**：构建方式不变（移除 `web-api` 后依赖树更小；`axum` 不再需要）。
+- 脚本：`deploy/scripts/build-for-rk3588.sh` 增加 `--hmi` 子模式（设好上述 env 后产出 `mupc-local-display`），或新增 `build-hmi.sh`。
+- **CI 影响（诚实）**：`cargo test --workspace` **现在会触发 LVGL C 编译**（数十秒到数分钟，取决于机器）→ 建议 CI 加缓存（`target/` 目录）与"`lvgl-sys` 未变更则跳过"的 `rerun-if-changed` 精确化。
+
+### 12.2 权限与 udev
+
+- `mupc-display.service`：`SupplementaryGroups=dialout video input`（`input` 为新增，用于 `/dev/input/eventX`）。
+- 稳定设备名：建议 udev 规则建符号链接（避免 `eventN` 漂移）：
+  ```
+  # /etc/udev/rules.d/99-mupc-touch.rules（示例，须按真机 vendor/product 填写）
+  SUBSYSTEM=="input", ATTRS{name}=="<触摸屏名>", SYMLINK+="mupc-touch"
+  ```
+  生产 unit `--touch-device /dev/mupc-touch`。
+- `mupcd.service`：若启用 `ProtectSystem=strict`，须加 `ReadWritePaths=/opt/mupc/config`（配置热写前提）。**注意**：mupcd 的 unit 我未在本次阅读中逐行核对，实施前须确认（§14 R-11）。
+- HMI 只需**读** `/dev/fb0`（写像素）与 `/dev/input/eventX`；不需要其它写权限（`ReadWritePaths` 仅日志目录）。
+
+### 12.3 字体与后端
+
+- **字体**：`lv_font_conv` 生成的 C 数组（`fonts/lv_font_noto_sc_*.c`）随 `local-display` 一起编译链接 → **镜像零字库文件依赖**（与 r1 的"编译期嵌入 OTF"效果等价，机制不同）。`fonts/gen_fonts.sh` 固化生成命令与码表路径，**确保可复现**（升级文案即重跑）。
+- **后端**：默认 **P-1（自定义 `lv_display` + `flush_cb` → `FbCanvas` → `/dev/fb0`）**；`--backend drm` 保持"未实现即明确报错"（**不自研 DRM**）。若真机 `fb0` 不可用 → 见 §14 R-03 的处置（**改用 LVGL 官方 `LV_USE_LINUX_DRM`**，无需自研、无需第三方 crate，较 r1 的 linuxkms 方案更简单）。
+- **`--backend offscreen`**：`flush_cb` 的 sink 换成内存缓冲并可选导出 PNG（测试/CI 用，§11.1）。
+
+### 12.4 工作量分布（供 PM 排期）
+
+| 工作单元 | 规模 | 说明 |
+|----------|:----:|------|
+| **A. LVGL 构建接入 + 自写 FFI 绑定层**（`lvgl-sys` build/`lv_conf.h`/**`allowlist.txt` 精确清单**/bindgen + `src/lvgl/**` 薄安全层） | **XL**（**r2 新增，最大的 HMI 侧不确定项**） | §1.1.1.2：绑定层 1000–1800 行 + build/flags/allowlist 清单维护 150–300 行（**逐符号枚举，禁 `lv_*` 通配**；双向 CI 断言见 §12.1）；**含三平台编译 spike（R-20）**。**这是相对 r1 的净新增工作量** |
+| **B. 6 页 UI 装配 + 组件库 + 主题**（`ui/**`） | **L** | 采用 LVGL 内置控件（较 r1 的自绘控件**省**），但**长列表窗口化需自建**（R-22） |
+| C. 显示/输入后端（`display.rs`/`indev.rs`/`touch.rs`/`screen.rs`/`timing.rs`） | **M** | `touch.rs` 与 r1 同（Rust evdev）；`flush_cb` 复用 `FbCanvas`；事件循环因 LVGL **更简单**（无需实现框架 Platform） |
+| D. `lv_font_conv` 字体链（生成脚本 + 5 档 + 码表 + 覆盖率测试） | S | 工具驱动，确定性高 |
+| E. `display-proto` v2 契约 + 控制信封 | M | 契约先行，两侧共用 |
+| F. mupcd `display_host` 四段采集 | M | 复用既有 provider |
+| G. **`ConfigService`（配置写 + 生效链路 + 保留式 yaml 编辑）** | **XL** | 本模块**最大**净新增项（§4.3）；**保留式编辑与回退路径的往返测试并入本项工时**（§4.3.2.1） |
+| H. `LogService`（ring + 限额扫描） | M | 迁移 + 重构筛选 |
+| I. `ConsoleAuditService`（schema + 双写 + 查询） | M | — |
+| J. 联锁控制 + 错误结构化（含 `interlock.rs` 回归） | M | 中风险回归点 |
+| K. **`web-api` 移除与出口迁移** | M | 机械但触面广（§7.3 清单） |
+| L. 测试（离屏渲染/交互/双通道/服务层/静态断言/码表覆盖） | **L** | 与实现同步 |
+
+> **相对 r1 的工期影响（诚实）**：HMI 侧 **+约 1000–2000 行**（绑定层），但 **−自绘控件工作量**（改用内置控件）。**净影响取决于绑定层落地是否顺利**——这正是 R-20 spike 要在编码前回答的问题。
 
 ---
 
-## 12. 技术决策记录(ADR)与选型理由
+## 13. 技术决策记录（ADR）
 
-| 决策 | 结论 | 理由（KISS/现实） |
-|------|------|------------------|
-| D1 数据通道 | 本地 HTTP 回环 `127.0.0.1` GET 最新帧，轮询 500ms | 状态在服务端取快照→允许丢帧只取最新；断连=连接失败判定最简；TCP 回环 Windows/Linux 同语义便于无真屏测试；不并入 web-api 避免北向暴露与生命周期耦合 |
-| D2 渲染栈 | 纯 framebuffer 自绘 + ab_glyph(纯 Rust) + 捆绑 CJK 子集字体 | 内容=固定网格+有限中文词，无需 GUI 栈；零 C 依赖交叉一次过；内存/CPU 最省；offscreen 后端支撑无屏验证 |
-| D2b 字体资源 | 捆绑 OFL 子集 OTF（include_bytes 进二进制）；预留外部/系统字库覆盖 | 不赌目标镜像带 CJK 字库（B4 不可靠）；可复现、镜像无额外文件 |
-| D3 crate 策略 | 新增 display-proto(lib) + local-display(lib+bin)；DisplayDataProvider 放 mupcd(core-bin 模块) | 渲染进程保持零核心依赖、可独立构建测试；协议单一真源供桩复用；不过度拆 crate |
-| D4 SOC 数据源 | 收敛到 AiIntegrator 单一裁决入口（resolve_soc_core），控制与展示共用；渲染端不判源 | PRD「不各自重判」；避免控制/显示分叉读 REG_SOC |
-| D5 三相读取 | DisplayDataProvider 独立 1s 采集（两段 FC04 连续读），不并入心跳 | 与联锁抑制/心跳职责解耦；共享 bus 锁互斥即可 |
-
----
-
-## 13. 开发前置风险 / 待验证项
-
-> 以下为真机/厂方侧无法在设计期敲定、需**开发阶段首验或厂方追认**的项；均不阻塞 F1–F5 核心数值展示编码（对应项已按 PRD 降级口径落地）。
-
-1. **（真机）`/dev/fb0` 是否映射到 HDMI 输出及其像素格式/位深/字节序**；否则需 DRM(`/dev/dri/card0`) dumb-buffer 主平面后端（已留 `driver=drm` 切换）。→ 驱动层真机首验。
-2. **（真机）1025–1028（1022–1032 间未命名寄存器）是否可整段 FC04 读**；设计默认两段连续读规避，单段读可行性首验后可按需合并省一帧总线往返。
-3. **（厂方追认）1022–1024/1029–1031 读回极性与设定侧一致（正=放/负=充）**；追认前 F3/F4 方向一律取 F2(1013) 状态机，功率正负仅佐证（PRD §8）。不阻塞。
-4. **（真机）RS485 总线吞吐余量**：心跳(1013)1s + dispatch 活读(1010)1s + 显示两段读 1s + 下发写，@19200 波特是否仍有 <1s 决策余量；若紧可在 provider 合并读。
-5. **（已定案）SOC 警示档与安全档分域共存**：展示警示色档取 **15%/85%**（PRD F1.3，仅驱动 UI 量程条断点/描边/数值色）；安全配置 soc_min/soc_max **0.10/0.90** 为控制硬限（驱动 soc_protect）。二者用途不同、不冲突——一句区分见 §6.3 F1 行。
-6. **（真机）HDMI 分辨率协商**：若面板非 1024x768 原生需 fb/drm 缩放或改渲染 CLI `--width/--height`（默认 1024x768，见 §7.2）。
-7. **（部署）渲染进程访问 /dev/fb0、/dev/dri 的用户/组权限与加固策略**（真机校准后定 unit 的 DeviceAllow/SupplementaryGroups）。
-8. **字库**：文泉驿微米黑/Noto Sans SC 子集化产物入库（fonttools subset）；若目标镜像无 pyftsubset 需在 host 生成后提交 .otf（开发环境前置，非运行依赖）。
+| 决策 | 结论 | 理由 |
+|------|------|------|
+| **D1 GUI 框架**（⚠️ **v2.0-r2 变更，取代 r1 的 Slint 决策**） | **LVGL v9（C，MIT）+ 自写 Rust FFI 绑定层**；**采用 LVGL 内置控件 + `ui/theme.rs` 自定义主题**（**反转** r1 的"禁内置、全自绘"） | **切换动因**：Slint 在闭源商用嵌入式下**只剩付费商业许可**（原 D15），成本不可接受 → 改用 **MIT 的 LVGL**（许可零成本，§1.1.4）。**技术理由**：① 6 页交互式 HMI 下"现成控件 + 自定义主题"才是 KISS（自绘路线 = L-5 = 重建框架）；② 内置控件**本就为嵌入式小屏设计**，`lv_style`/`lv_theme` 可逐项覆盖（r1 的"内置弹层不可控"顾虑在 LVGL 下不成立，§5.1 注）；③ 中文由 `lv_font_conv` 标准方案解决，无框架级限制；④ fbdev/evdev 生态成熟且有官方驱动（我们仍走自控的 flush_cb/indev）。**代价（诚实）**：引入 C 编译链 + 自写绑定层（D17/R-19/R-20）。备选 egui（L-2，`MIT OR Apache-2.0`） |
+| **D2 显示后端** | framebuffer `/dev/fb0`（默认）：**自定义 `lv_display` + `flush_cb`** → `FbCanvas`（P-1）；官方 `LV_USE_LINUX_FBDEV` 为一行开关备选；`LV_USE_LINUX_DRM` 仅在 fb0 不可用时启用 | 复用 v1.0 已落地的 fb 后端与像素格式处理（**像素格式风险归零**）；离屏与生产**共用同一条 flush 路径**（可测性）；不自研 DRM（LVGL 原生有） |
+| **D3 触摸栈** | `/dev/input/eventX` + **Rust `evdev` crate** + **自定义 `lv_indev`（`read_cb`）** | 保留 r1 的全部触摸设计（发现/多候选报错/校准/CLI 覆盖/缺失容错）；**不启用 `LV_USE_EVDEV`** ⇒ **不引入 libevdev C 依赖**（LVGL 官方 evdev 驱动强制依赖它） |
+| **D4 进程拓扑** | **保持两进程**（mupcd = 数据+控制；HMI = 渲染+输入） | PRD §1.4/§4.4.6 硬约束（禁直连总线）；§4.3.2 进程隔离；复用 v1.0 已评审的 provider |
+| **D5 通道形态** | **双监听**：9810 读（仅 GET）/ 9811 控制（受控接口），均强制回环 | PL-8「展示通道不承载下行写」需**结构性**可验证；故障与限流隔离；不并入已移除的 8080 |
+| **D6 读侧数据面** | 保留**单一读端点**，`DisplayFrame` 扩 v2 段；慢拍数据走缓存，帧路径零 I/O | 客户端最简、失败面最少；避免帧率被慢源拖累 |
+| **D7 控制面** | 统一信封（`request_id` + `issued_at_ms`）+ 幂等表 + 结构化错误码 + **审计 fail-closed** | T-3「无登录 → 审计 + 二次确认」的技术补偿；`request_id` 同时满足防重放与防重复生效（EDGE-14） |
+| **D8 二次确认** | **UI 层**（LVGL 模态弹层 + `lv_group` 默认聚焦取消），并按 UI §2.5 **分级**：L1 双步 / **L2 双步 + 长按 1.0 s**（**LVGL `LV_EVENT_LONG_PRESSED` + `lv_obj_set_long_press_time(1000)`**）/ L2+ 追加 `WarnBanner`；**恢复默认值、联锁释放、M1 授权、含连接类字段的保存均归 L2（或 L2+）**，由 `ConfirmDialog` 的 `level` **显式传入**（§5.6）；后端只做幂等与审计 | 确认是界面语义，后端重复实现会造出第二套状态机（KISS）；不加 `confirm_hash`（`request_id` 已足够）。**分级吸收自 UI 设计**（评审必改 #3）。**实现载体 r2 变更**：LVGL 内建长按事件比 r1 的手工 `animate` 计时更简单、边界语义由框架保证 |
+| **D9 零键盘** | 由 `ConfigKind` **类型约束** + **`lv_conf.h` 编译期置 `LV_USE_TEXTAREA=0` / `LV_USE_KEYBOARD=0` / `LV_USE_SPINBOX=0`** + 静态扫描（禁 `lv_textarea` / `lv_keyboard` / `lv_spinbox` 符号）三重保证；**步进器 / IPv4 / 日期时间 = `lv_btn` + `lv_label` 组合**（控件清单里**不含 spinbox**） | 把「不做文本输入」从纪律要求变为**类型/构建产物/测试**三层约束（r2 的编译期禁用比 r1 的源码扫描**更强**），防未来回退。**PM 裁定弃 `lv_spinbox`（评审订正）**：其以 `lv_textarea` 为基类，`LV_USE_SPINBOX=1` + `LV_USE_TEXTAREA=0` 会 **C 编译期报错**（v9.5.0 `lv_spinbox.h` 的 `#error` 守卫），**弃用后"构建产物中根本不存在文本输入控件"这一结论才成立**（§5.6 F12 行） |
+| **D10 配置生效** | `CoreConfig` 内存副本 + 原子落盘 + 逐项 `watch` 热生效；连接类参数**明示瞬断** | CF-04「自动生效无需重启」；对连接类参数的不可感知性诚实告知（§4.3.4） |
+| **D11 告警源** | 本期用 `storage.events`（`AlertManager` 实证为死代码） | 唯一现有真源；`AlertFeed` 列为可选增强（§4.7），需评审裁决是否纳入本期 |
+| **D12 审计双写** | 新 JSONL schema（结构化前后值）+ 既有哈希链（**SHA-256**，非 SM3）摘要 | 结构化字段为 F19 所需；既有链接续保证统一合规凭据。**措辞订正**：`security/src/audit.rs` 自陈现网以 SHA-256 替代 SM3（评审必改 #4③），设计不得称其为 SM3 |
+| **D13 web-api 处置** | **整 crate 删除**，先迁出三处耦合类型 | 见 §7.2；保留 crate 的「内部模块」形态只会保留死依赖树 |
+| **D14 crate 命名** | `display-proto` 名称保留（可选改名 `hmi-proto`，不在本期） | 改名跨 3 crate 的 churn 不带来功能收益 |
+| ~~**D15 Slint 许可证**~~ | **❌ 已作废**（v2.0-r2：GUI 框架改为 LVGL） | r1 的结论（Slint 三许可下闭源嵌入式只剩付费商业许可）**经复核成立**，但**已不再适用**——该成本正是本次切换的动因（附录 A.5）。**原 R-17 随之作废**（见 §14）。**保留该条仅为可追溯**，不构成现行决策 |
+| **D15′ LVGL 许可证（现行）** | **LVGL = MIT：可闭源商用、可静态链接、无 royalty、无源码公开义务；仅在产物中保留版权/许可声明文本（`THIRD-PARTY-NOTICES` 一行）** | §1.1.4。**零成本、零法务风险**，是切换的核心达成结果。**字体**选 OFL-1.1 系（Noto Sans SC / 思源黑体）以规避文泉驿的 GPLv2+字体例外议题 |
+| **D17 LVGL 与 Rust 的集成方式**（**r2 新增**） | **自写绑定**：vendor LVGL v9.5 源码（pin tag）+ `cc` 编译 + `bindgen`（**精确 allowlist**：`lvgl-sys/allowlist.txt` 逐符号枚举，**禁 `lv_*` 通配**——通配即全量生成、与压缩 `unsafe` 面的目标矛盾；双向 CI 断言见 §12.1）+ 自写薄安全层（`src/lvgl/**`） | **不用 `lvgl-rs`**：其最新 0.6.2（2023-04）停留在 **LVGL 8.3.5** 且**官方定性为停滞**（LVGL issue #7298），与 v9 生态割裂；**不用第三方 v9 sys crate**（`lvgl_rust_sys`/`lightvgl-sys`）：只省接线、省不掉安全层，且把关键路径交给单一非官方维护者。自写使**版本可控、绑定面可枚举、升级路径明确**（§1.1.1）。**代价**：1000–1800 行机械工作量（§1.1.1.2 / R-19） |
+| **D16 配置文件回写语义**（评审必改 #2） | **保留式编辑（文本行级替换目标标量键）为主；仅当不可定位时显式回退整体序列化回写，并在回执/审计/UI 三处声明"注释与未建模键丢失"** | `CoreConfig` 仅 `Deserialize` + 整树回写会丢注释与现场 legacy `web_api:` 段，与 §7.3 兼容性主张冲突。本期 F9 可写字段**全为标量叶子**（无列表/无嵌套），行级替换语义完备无歧义；`Serialize` 仅为回退路径与往返单测（§4.3.2.1） |
 
 ---
 
-*（End of Design v1.0）*
+## 14. 待真机 / 待确认项
+
+> 分类：**【开发机可先验】**（SPIKE）、**【真机】**、**【PM/评审裁决】**、**【厂方追认】**。诚实标注：以下项中 **R-03 / R-05 / R-07 / R-08 / R-12 / R-19 / R-20 / R-22** 对本设计的成立性或范围有实质影响。
+>
+> **⚠️ v2.0-r2 的编码前门禁变更**：r1 的两道门禁（R-01 CJK 字形、R-17 Slint 许可）**均已消解**——R-01 降级为"低"（LVGL 中文是标准做法，§1.1.3）；R-17 **作废**（改用 MIT 的 LVGL）。**新的编码前门禁是 R-20（LVGL 三平台编译 spike）与 R-19（绑定层工作量确认）**。
+
+| ID | 项 | 类型 | 影响 | 处置 / 时间点 |
+|----|----|------|------|---------------|
+| **R-01** | **CJK 位图字体的清晰度**（⚠️ **r2 降级**：原"Slint 软渲染能否渲染 CJK"的可行性风险在 LVGL 下**不存在**，`lv_font_conv` 是 LVGL 生态标准做法） | **真机/视觉标定** | **低**（原为高） | 残余项即 UI V-4（24 px 下密笔画字可辨性）：字号上调 / 提高 bpp / 加 1 px 描边。**离屏回归仍保留**（§11.1），但不再是编码前门禁 |
+| ~~**R-02**~~ | ~~Slint 最小 feature 组合可用性~~ | — | — | **作废**（LVGL 无此概念）。**等价的新风险是 R-20**（LVGL C 编译链在三个环境可用） |
+| **R-03** | 真机 `/dev/fb0` 是否映射 HDMI 输出、像素格式/位深/字节序；HDMI 是否 1024×768 原生 | **真机** | 高：决定显示后端 | 若 `fb0` 不可用：**改用 LVGL 官方 `LV_USE_LINUX_DRM`（P-3）**——**比 r1 的 linuxkms 方案更简单**（LVGL 原生支持），且仍需核对所选 tag 的 DRM 路径修复状态（v9 早期有分辨率硬编码与 `lv_tick_set_cb` 缺失报告）。v1.0 已留此判断（`--backend drm` 明确报错） |
+| **R-04** | 触摸设备节点/协议：`/dev/input/eventX` 编号是否稳定、`ABS_X/Y` 的 min/max、是否 MT 协议 B、内核上报速率 | **真机** | 中：影响触摸可用性 | 真机首验 + udev 符号链接（§12.2）。**r2 不变**（触摸栈仍为 Rust evdev） |
+| **R-05** | **时延与资源实测**：触摸反馈 ≤100 ms、页切换 ≤300 ms、**滚动 ≥30 fps**、稳态 CPU/内存 | **真机** | 中–高：滚动帧率是**软渲染最可疑项**（LVGL 亦然） | 真机探测；不达标时的降级手段：降低可视行数（窗口化）、调 `LV_DEF_REFR_PERIOD`、关闭惯性动画、缩小绘制缓冲 |
+| **R-06** | aarch64 交叉编译产物运行（**LVGL 静态库 + 位图字体 + `--backend offscreen`** 在目标机跑通） | **真机/CI 容器** | 中 | 构建流水线先跑；**与 R-20 同批** |
+| **R-07** | **F7 告警源口径**：本期是否仅用 `storage.events`（已落库事件），还是必须新增 `AlertFeed` 覆盖「未落库即时告警」 | **PM/评审裁决** | 中：决定 F7 覆盖面与工作量 | 若要求覆盖，则 `AlertFeed` 进本期（§4.7），工作量 +M |
+| **R-08** | **PRD F9 配置项与现网配置结构不一致**：「IEC 104 对端 IP 地址」在现网（服务端模型）无对应项；其余项与 `CoreConfig` 的映射须逐项确认；CF-04「自动生效」对连接类参数**必然伴随链路瞬断**，是否接受 | **PM 裁决** | 中：决定 F9 的字段集与验收口径 | 建议：以 `gateway.listen_addr` 替换「对端 IP」；确认「瞬断 ≤5 s」计入 CF-04 达成 |
+| **R-09** | **DO1/DO2 与故障灯/运行灯的归属**：PRD F16 与现有代码注释相反 | **厂方/真机核对** | 低：UI 只显语义名已规避 | 真机点灯核对；UI 不显示 DO 编号 |
+| **R-10** | **LVGL 交互语义三连**（⚠️ 载体变更，原为 Slint 交互原语）：① 滚动容器内「滑动不误触发点击」（TT-11）——阈值 `LV_INDEV_DEF_SCROLL_LIMIT`；② **L2 长按保持 1.0 s**（`LV_EVENT_LONG_PRESSED` + `lv_obj_set_long_press_time(1000)`）；③ ~~滚动条"默认可拖"与 UI §10-2 的冲突~~ → **已核实并消解**：LVGL v9.5 的滚动条是纯绘制部件（`lv_obj.c::draw_scrollbar()`，仅 `LV_EVENT_DRAW_POST`），输入侧无命中测试（`lv_indev_scroll.c::lv_indev_find_scroll_obj()` 只取 `indev->pointer.act_obj`），**不存在"默认可拖"**（§5.6 引源码）；PM 已裁定"纯指示、不可拖"，本设计按 §5.6 的 A 方案落实并以交互用例钉死 | **SPIKE（离屏可先验）+ 真机** | 低：① 的阈值与时延待标定；③ **已消解**（源码核实 + PM 裁定） | **编码前**用离屏事件注入验证 ①②（§11.1 交互层已列用例）；③ 无需 UI 再确认，仅需在实现中**不改写交互**并由 §11.1 用例断言（滚动手势仍走内容拖拽）；再上真机手感复核（V-2 / V-7） |
+| **R-11** | `mupcd.service` 的沙箱配置是否允许写 `/opt/mupc/config`（配置热写前提）；Production 是否启用 `ProtectSystem=strict` | **真机/部署核对** | 中：决定 CF-04 能否成立 | 部署前核对 unit，必要时加 `ReadWritePaths` |
+| **R-12** | **配置热生效的模块改造范围**：`intercore` / `gateway` 的 `watch` 接线改造量（重连、重绑定） | **设计深化 + 实现** | **高**：D 项工作量的主要不确定性 | 编码前对 intercore/gateway 各做一次改动面评估；工期紧张时启用 §4.3.5 降级方案（须 PM 同意） |
+| **R-13** | `Iec104Server` 内部连接表能否安全聚合出 `link_state()`（并发/锁语义） | **实现细节** | 低 | 编码时确认；改动限于 `server.rs` |
+| **R-14** | 1022–1032 实读（单段 vs 两段）、读回极性符号语义（正=放/负=充） | **真机 + 厂方追认** | 低（F3/F4 数值展示不阻塞） | 沿用 v1.0：追认前方向一律取 F2 状态机 |
+| **R-15** | 交叉编译时间戳可复现（`SOURCE_DATE_EPOCH` 是否有值） | 部署 | 低 | 构建脚本显式传入 |
+| **R-16** | `ota_manager` 失去 web-api 消费者后的归属（保留实例不启动服务面 / 或随 OTA 需求重新接线） | PM/架构 | 低 | §7.3 备注 |
+| ~~**R-17**~~ | ~~Slint 许可证（编码前门禁）~~ | — | — | **❌ 作废**（v2.0-r2：框架改为 **MIT 的 LVGL**，许可零成本/LVGL 侧已消解，§1.1.4 / D15′）。**保留以便追溯**：r1 的查证结论（Slint 三许可下闭源嵌入式只剩付费路径）成立，正是本次切换的动因（附录 A.5） |
+| **R-18** | **`CoreConfig` 可写字段新增列表 / 嵌套类型时的回写语义**：保留式行级编辑的前提是"全部可写字段为标量叶子"（§4.3.2.1） | 增量项（本期无） | 低（本期） | 新增此类字段时须扩展编辑算法或接受 `full_rewrite` 回退，并同步 §4.3.2.1 与 §11.1 用例 |
+| **R-19** | **自写 LVGL FFI 绑定层的工作量能否接受**：薄安全层 1000–1800 行 + build/bindgen 150–300 行；**须覆盖本项目实际用到的 ~20 控件 + display/indev/style/font/event** | **设计深化 + 工作量裁决（编码前）** | **高**：决定 L-1 路线是否经济；也决定 HMI 侧工期 | **编码前**先出"控件 × 所需 API"清单（§5.6 控件映射表 + §12.4 工作单元 A），按清单估算并**做一次最小闭环 spike**（1 个 `lv_btn` + 1 个 `lv_label` + 内存 display + indev 注入，跑通渲染与点击）。**若被判定不可接受 → 切 L-2（egui，§1.1 备选）**，切换面限于 HMI 渲染层 |
+| **R-20** | **LVGL C 编译链在三个环境的可用性**（**编码前门禁**）：① aarch64 交叉（`cc` + `CC_aarch64_unknown_linux_gnu` + 宿主 `libclang`）；② x86_64 Linux CI；③ **Windows 开发机**（`cc` 用 MSVC/MinGW + `bindgen` **必须 libclang**：装 LLVM 并设 `LIBCLANG_PATH`，必要时 `BINDGEN_EXTRA_CLANG_ARGS`） | **SPIKE（开发机 + 交叉环境）** | **高**：决定"本机能否离屏测试"与"交叉能否产出" | **编码前第一件事**：三环境各跑通一次 `cargo build -p local-display`（含 LVGL C 编译 + bindgen）。**失败处置**：Windows 不通过 → 离屏测试改在 Linux CI/WSL（能力不损失）；交叉不通过 → 改 `lightvgl-sys`（B-2）或转 L-2。**可选加速**：提交 bindgen 生成物（feature `prebuilt-bindings`）以消除终端用户的 libclang 前置 |
+| **R-21** | **LVGL 版本 pin 与升级策略**：pin 的 tag（拟 `v9.5.0`）在所选 API 上的**行为与文档一致性**（如 P-1 的 `flush_cb` 契约、`lv_timer_handler` 返回语义、`PARTIAL` 双缓冲尺寸约束）；**另含 §5.6 的滚动条不可交互结论**（基于 `v9.5.0` 的 `src/core/lv_obj.c` 与 `src/indev/lv_indev_scroll.c` 源码）；未来升级（v9.x→v9.y）的改动面 | **实现期 + 长期维护** | 中：升级成本与 API 稳定性 | pin tag 后**先做 P-1 最小闭环**验证契约；升级时以"重跑 bindgen + 修 `src/lvgl/**` 编译错"为固定流程（薄层是唯一跟改面，D17 的收益即在此）；**换 tag 须重核 §5.6 引用的两个源码文件是否仍无滚动条输入逻辑**（若上游新增滚动条拖拽，须显式关闭或改走 §5.6 的 B 方案） |
+| **R-22** | **长列表窗口化（LVGL 无内建虚拟滚动）**：日志/审计长列表的"可视行 ×1.5 复用"实现方式与滚动 ≥30 fps 的关系（§5.7） | **实现 + 真机** | 中：直接影响 TT-06 与 §10 内存/CPU 预算 | 编码期与 §5.7 的列表实现同步；真机复核滚动帧率（与 R-05 合并）；不达标 → 降低可视行数 / 降帧率 |
+
+---
+
+## 附录 A：v1.0 → v2.0 变更说明
+
+### A.1 变更动因
+
+PRD v2.0（2026-09-10，`[REVIEWED: PASS]`）推翻了 v1.0 的**三项前提**：
+
+1. 设备屏**有触摸**（原「只读渲染」）→ 需要交互式 GUI 栈（GUI 框架选型成为本版最大技术决策）；
+2. 原 08 的操作类功能**由本地屏承载**（配置/日志/联锁/审计）→ 需要**双向通道 + 控制接口 + 审计**；
+3. **移除 `web-api`**（取消 Web 访问机制）→ 需要出口迁移与 crate 移除方案。
+
+### A.2 v1.0 逐项处置
+
+| v1.0 内容 | v2.0 处置 |
+|-----------|-----------|
+| 数据通道（回环 HTTP 短轮询，仅读） | **保留为「读通道」**，端点与轮询语义不变；新增「控制通道」（独立监听 9811） |
+| 帧模型（`FieldFlag`/`RunState`/`SocSource`/`DisplayFrame`） | **保留并扩展为 v2**（新增 device/alarms/info/interlock 段，`PROTO_VERSION=2`，向后兼容） |
+| 渲染栈 B1（framebuffer 自绘 + ab_glyph + 捆绑 CJK 子集） | **推翻**：渲染层改用 **LVGL v9**（**v2.0-r2 由 Slint 切换而来**，附录 A.5）。**保留**：**fb0 像素后端（`FbCanvas`，升为 flush_cb 的 sink）**、色板常量、**字库子集码表方案**（产物改为 `lv_font_conv` 的 C 字体）、离屏可测范式 |
+| 布局（固定网格，无滚动无交互） | **推翻**：改为 6 页声明式布局 + 整页纵向滚动（PRD T-6）；主读数区仍不横滚 |
+| `DisplayConfig`（单一真源，mupcd 解析） | **保留并扩展**（+ `control_bind_addr` / 慢拍节拍 / 日志限额） |
+| `DisplayDataProvider`（1 Hz 采集/组帧/发布） | **保留并扩展**（新增 A/B/C 慢拍任务与缓存） |
+| `AiIntegrator::soc_display_snapshot` / `resolve_soc_core` | **原样保留**（唯一 SOC 裁决入口，控制/显示不分叉） |
+| `intercore::read_three_phase` | **原样保留** |
+| 非功能预算（≤64 MB / ≤15 % 单核） | **重定档**（PRD §4.1：≤256 MB / ≤40 % / 瞬时 ≤60 % / 断连 ≤10 %）；本设计目标值低于上限（§10） |
+| 边界（EDGE-01~07，不造假值） | **全部保留**；新增 EDGE-08~22（含本设计补充的 18–22） |
+| 部署（systemd unit / 交叉编译） | **保留骨架并改内容**（新 CLI 参数、`input` 组、内存上限） |
+| 技术风险与待验证项（fb0/DRM、1022-1032、交叉编译） | **保留**（R-03 / R-14 / R-06），并新增 GUI 框架与交互相关的 **R-19/R-20/R-21/R-22**（v2.0-r2）+ R-05/R-07/R-08/R-10（r1 已有） |
+
+### A.3 本次（v2.0）相对 v1.0 的净新增章节
+
+架构总览（双进程 + 双通道拓扑，§2）、通道协议（控制信封/错误码/端点表，§3）、数据源落实（T-5 五项结论，§4.1）、配置生效链路（§4.3）、日志/审计服务（§4.4/§4.5）、联锁接口改造（§4.6）、HMI 进程设计（**LVGL 集成/FFI 绑定/触摸/状态机/交互规范**，§5）、6 页详细设计（§6）、web-api 移除方案与出口迁移表（§7）、复用/废弃清单（§8）、边界扩展（§9 EDGE-18~24）、测试策略（§11）、工作量分布（§12.4）、ADR（§13）、待真机/待确认清单（§14）。
+
+### A.4 评审整改（v2.0 → v2.0-r1，2026-09-10，设计评审 REQUEST_CHANGES 后的修订）
+
+| 评审意见 | 处置落点 |
+|----------|----------|
+| ①【严重】慢拍 2 s + 1 s 组帧 + 500 ms 轮询致告警/联锁最坏 3~3.5 s，不满足 F7.3/F16.5 ≤2 s；F6.3 ≤5 s 同风险；原末注「2 s 节拍足够」不成立 | 慢拍改为 A 3 s / B 0.5 s / C 0.5 s + **新增「变更即组帧」唤醒机制**；新增 **§4.2.1 上屏时延追踪**（三段端到端拆解 + 5 条落地约束 + 防退化说明）；修正 §4.2 末注；§4.9 `validate()` 加时延红线硬校验；§10 补三条追踪行；§11.1 加时延回归用例 |
+| ②【缺落点】yaml 回写语义未定义（整树回写丢注释/丢未建模键），与 §7.3 legacy 兼容主张冲突 | 新增 **§4.3.2.1 yaml 回写语义**（**保留式编辑**选定 + 显式回退与三处声明 + `Serialize` 边界 + 运维说明）；`ConfigView.write_mode` 字段；EDGE-23；§7.3 兼容性主张补齐；新增 **D16**；§11.1 加 5 项往返单测；R-18 |
+| ③【缺落点】「恢复默认值」无二次确认落点 | §6.2 该行重写为 **L2 强确认**（危险色 + **长按 1.0 s** + 影响范围/明细 + 默认焦点取消）；新增「UI ↔ 后端 确认-审计链路」行；§5.6 新增确认强度分级行；D8 扩充；§6.4 释放/授权同步为 L2 |
+| ④① `block_on` 与不变量 3 冲突 | §5.5 钉死为**非阻塞状态机**，删除"编码时择一"，并加 `--poll-ms ≤ 500` 硬校验 |
+| ④② Slint 许可证未评估 | 新增 **§1.1.4 许可证合规**（三许可逐条判定 → 闭源嵌入式须商业许可）、**D15**、**R-17**（编码前门禁）；§1.1 选型表补注 |
+| ④③「SM3 哈希链」实为 SHA-256 | §4.1 / §4.5 / §8.1 / D12 / §2.1 图示逐处订正为「既有哈希链（SHA-256 实现）」 |
+| UI 线 §10 三点待对齐 | §5.6 新增「Slint 组件策略（禁 `std-widgets`）/ 滚动指示（无 `TouchArea` 穿透）/ 长按 1.0 s」三行 + §5.1 组件策略说明 + §11.4 静态约束 ④⑤ + §11.1 长按用例 + R-10 扩充 |
+| UI 附录 B U-1 PM 裁定（仅回环 + 地址口径分列） | §3.1 `InfoSection` 新增 `service_scope` / `mgmt_ipv4` + `ServiceScope`；§3.4 `ConfigField.editable`；§4.1 新增数据源行；§6.2 只读字段与标签口径两行；§6.6 分列两行 + 注；EDGE-24；§5.6 服务地址展示口径行 |
+
+### A.5 GUI 框架变更决策：Slint → LVGL（v2.0-r1 → v2.0-r2，**用户决策**）
+
+#### A.5.1 动因（为什么必须换）
+
+| 事项 | 事实 | 影响 |
+|------|------|------|
+| **Slint 的许可结构** | 三许可模型：`GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0` | — |
+| GPLv3 | copyleft：分发即须**整体开源** | ❌ MUPC 为**闭源商用装置**，会污染整个交付物（含 mupcd 全部业务逻辑） |
+| Royalty-free 2.0 | 条款**明确排除嵌入式**场景，且须 `AboutSlint` 归属展示 | ❌ BECG-3568 屏是「随装置预装、非通用计算机」的嵌入式场景，**正落在排除范围** |
+| 商业许可（Software-3.0） | 闭源可用、覆盖嵌入式，但**付费**（按台 royalty 或买断） | ⚠️ **唯一可用路径 = 新增交付成本**（r1 已作为 R-17 门禁上报） |
+| **用户裁定** | **不接受该成本 → 改用 LVGL** | **本版（r2）的全部变更由此而来** |
+
+#### A.5.2 为什么选 LVGL（候选对比，§1.1）
+
+- **LVGL（选定）**：**MIT**（闭源商用零成本）、嵌入式事实标准、内置控件齐全、**原生 fbdev/DRM/evdev 生态**、`lv_font_conv` 中文方案成熟、**有离屏（内存 display）测试能力**、主干活跃（9.5 线）。
+- **egui（备选 L-2）**：许可亦无成本，但官方嵌入式路径需 winit+GL（引入 X11/EGL C 依赖）且**无 fb 后端**；**即时模式全帧重绘**与 PRD「稳态 ≤40%、空闲让出 CPU」冲突，需自实现重绘节流。**保留为 L-1 绑定工作量不可接受时的退路**。
+- **GTK / Qt 出局**（依赖体积、交叉成本、内存基座、许可/非 Rust）。
+
+#### A.5.3 切换带来的**新增成本**（诚实，不粉饰）
+
+| 项 | 说明 |
+|----|------|
+| **① Rust FFI 绑定层（最大代价）** | LVGL 是 **C 库**。核查结论：上游 `lvgl-rs`（`lv_binding_rust`）最新 **0.6.2（2023-04）仍停在 LVGL 8.3.5 且官方定性停滞**（LVGL issue #7298），**LVGL v9 无任何维护中的安全绑定**。→ 本设计选**自写绑定**：`cc` 编译 LVGL + `bindgen`（**精确 allowlist**：`allowlist.txt` 逐符号枚举，禁 `lv_*` 通配，§1.1.1.2 / §12.1）+ **薄安全层 1000–1800 行**（D17 / R-19）。**这是相对 r1 的净新增工作量** |
+| **② C 编译链成为前置** | 三平台均需 C 编译器；**Windows 开发机另需 LLVM/libclang**（`bindgen`）。交叉编译侧**无新增前置**（aarch64 gcc 项目已有）。→ **编码前门禁 R-20**（§12.1） |
+| **③ 长列表需窗口化** | LVGL 无内建虚拟滚动（Slint 有 `ListView`）→ 日志/审计长列表须自建"可视行复用"（§5.7 / R-22） |
+| **④ 控件策略反转** | 由"禁内置控件、全自绘"改为"**用内置控件 + 自定义主题**"（§5.6）。**净效果是减少工作量**（自绘控件不再需要），但**UI 文档 §10 须同步重写**（§5.7 已给等价映射表） |
+
+#### A.5.4 切换带来的**风险消除**（同样诚实）
+
+| 原风险（r1） | r2 状态 |
+|--------------|---------|
+| **R-17 Slint 许可成本**（编码前门禁，高） | ✅ **消除**：MIT，零成本、零法务风险（§1.1.4 / D15′） |
+| **R-01 Slint 软渲染 CJK 字形**（编码前门禁，高） | ✅ **降为低**：`lv_font_conv` 是 LVGL 标准做法，无"限西文脚本"类限制（§1.1.3）；残余仅"位图字体清晰度"（视觉标定，UI V-4） |
+| **R-02 Slint 最小 feature 组合可用性** | ✅ **作废**（无此概念）；等价关注点转为 R-20（C 编译链） |
+| 显示后端像素格式风险 | ✅ **归零**（与 r1 同思路）：走 **P-1 自定义 `flush_cb`** → `FbCanvas` 自控格式（§1.1.1.1） |
+| 触摸栈需 C 依赖（libinput 等） | ✅ **仍无**：用 **Rust evdev + 自定义 `lv_indev`**，**不启用 `LV_USE_EVDEV`** ⇒ 不引入 libevdev（§1.2） |
+
+#### A.5.5 不变面（切换未影响的部分）
+
+**§3 通道协议（读 9810 / 控制 9811、信封、幂等、错误码）、§4 mupcd 侧全部（数据源落实、慢拍采集、§4.2.1 时延拆解、§4.3 配置服务、§4.4 日志、§4.5 审计、§4.6 联锁、§4.8 时间戳、§4.9 装配）、§6 六页功能与交互语义、§7.1 出口迁移表（10/4/2）、§9 边界（EDGE-01~24）、§10 的时延类指标、§11.3 特殊测试要求、§13 的 D4–D14/D16** —— **逐条不变**。框架只影响 **HMI 进程内的渲染/输入/字体/构建**。
+
+#### A.5.6 r2 变更清单（本章之外，逐处）
+
+| 章节 | 变更 |
+|------|------|
+| 版本头 / 诚实前提 | v2.0-r2；前提 3/4 由"Slint CJK + 许可双门禁"改为"**自写 FFI 绑定层 + C 编译链**" |
+| §1.1 | 候选表 A-1..A-5 → **L-1..L-5**（LVGL/egui/GTK/Qt/自研）；结论改 LVGL；新增 **§1.1.1 FFI 绑定选型**（B-1 lvgl-rs vs B-2 v9 sys crate vs **B-3 自写**）+ **§1.1.1.1 后端路径 P-1/P-2/P-3** + **§1.1.1.2 绑定层范围/工作量/unsafe 纪律** |
+| §1.1.2 | 字体链 `pyftsubset`+OTF → **`lv_font_conv`+C 字体**（5 档，≤300 KB） |
+| §1.1.3 | CJK 风险：**高 → 低**（可行性→清晰度） |
+| §1.1.4 | Slint 三许可判定 → **LVGL MIT 合规结论**（+ 字体 OFL 选型） |
+| §1.2 | 触摸栈保留 Rust evdev，**新增自定义 `lv_indev` 投递**；明确**不用 `lv_evdev`**（避免 libevdev） |
+| §1.3 | 显示后端 → P-1（`flush_cb`）为主、官方 fbdev 为备；DRM 交由 LVGL 原生 |
+| §1.6 / §8 | 复用清单**复核**：`FbCanvas` 由"降级"回到"**保留**"；OTF 产物改判**废弃**、码表保留；**新增 §8.3 复核结论表** |
+| §2 | 拓扑图与 crate 表（增 `lvgl-sys`、`vendor/lvgl`） |
+| §3.3 / §3.4 | Slint 措辞 → LVGL（弹层/`lv_group`/控件生成） |
+| §5.1 | 模块树重写（`lvgl-sys/`、`src/lvgl/**`、`timing.rs`、`ui/**`、`fonts/`）；**组件策略反转说明** |
+| §5.2 | 「Slint 自定义 Platform」→ **「LVGL 集成 + 事件循环（`lv_timer_handler` 驱动）」** + 5 条不变量 |
+| §5.3 | 触摸表新增"事件翻译 → LVGL"与"读取时机（MODE_EVENT）"两行 |
+| §5.4 | 页面路由 → `lv_tabview` / 容器切换 |
+| §5.6 | 交互规范表**逐行重写**（含控件策略反转、滚动交互变更、长按用 LVGL 事件、动效纪律） |
+| **§5.7（新）** | **UI 文档 §10 对齐变更通知**（等价映射表 + 3 点待 UI 回应） |
+| §6.1 / §6.3 | `Flickable` → LVGL 滚动容器 / 窗口化列表 |
+| §7.3 | 逐文件改动清单（`lvgl-sys`/`vendor/lvgl`/workspace/构建脚本） |
+| §10 | 预算：内存 ≤128→**≤96 MB**、磁盘 ≤30→**≤40 MB**（LVGL 静态链接进二进制）；行内手段措辞全面改 |
+| §11.1 / §11.2 / §11.4 | 离屏渲染/交互注入改 LVGL 机制；**静态约束 6 条重写**；新增码表覆盖率用例；本机/真机边界加 **R-20 前置** |
+| §12.1 | **构建章节重写**（LVGL 引入方式 S-1/S-2/S-3、`build.rs` 动作、**三平台 C 侧前置表**） |
+| §12.3 / §12.4 | 字体/后端改述；工作量表 **A 项改 XL（绑定层）**、B 项含窗口化 |
+| §13 | **D1/D2/D3 重写**；**D15 作废 + D15′（LVGL MIT）+ D17（绑定方式）**；D8/D9 载体改述 |
+| §14 | R-01 降级、R-02 作废、**R-17 作废**；R-03/R-06/R-10 处置改述；**新增 R-19/R-20/R-21/R-22**；门禁改为 **R-20** |
+| 附录 A.2/A.3 | 渲染栈与净新增章节措辞 |
+
+### A.6 二次整改（v2.0-r2 → 本次修订，按 PM 裁定落实；**不加评审标记，待复审**）
+
+| # | 评审结论 | 处置落点 |
+|---|----------|----------|
+| 1 | 【严重】**`lv_spinbox` 与 `LV_USE_TEXTAREA=0` 编译冲突**：`lv_spinbox` 以 `lv_textarea` 为基类，`LV_USE_SPINBOX=1` + `LV_USE_TEXTAREA=0` 会 C 编译报错（`lv_spinbox.h` 的 `#error "lv_spinbox: lv_ta is required..."`）。**PM 裁定：弃 `lv_spinbox`**，步进器 / IPv4 / 日期时间改 **`lv_btn` + `lv_label` 组合** | §1.1 L-1 行 / §1.1 理由 1 / §3.4 注 / §5.6 控件策略行 + **F12 行重写**（三置 0 必须同时成立，并引 v9.5.0 `lv_spinbox.h` 守卫为据，明示「构建产物中根本不存在文本输入控件」在弃用后**成立**）/ **§5.7 步进器映射行 + 零文本输入行** / §6.2 控件生成行 / **§10 预算口径说明** / §11.1 静态约束 ①（禁符号加 `lv_spinbox`）+ 交互用例 / **§11.4 CI 约束清单** / §12.4 工作单元 A / **D9**（并补控件清单为 btn+label） |
+| 2 | 【次要】**bindgen allowlist 自相矛盾**：§12.1 的 `allowlist_function("lv_*")` 实为全量生成，与 §1.1.1.2「allowlist 只生成所需符号、压缩 `unsafe` 面」冲突 | §12.1 build.rs 动作 2 改为**精确 allowlist**（`lvgl-sys/allowlist.txt` 逐符号枚举 `fn:/type:/var:` + `allowlist_recursively(true)`；**禁 `lv_*` 通配**；CI **双向断言**：导出 ⊆ 清单、清单无死符号）；§1.1.1.2 理由 2 + **新增「allowlist 的形态」段** + 目录树加 `allowlist.txt`；§5.1 目录树同步；B-3 行 / D17 / A.5.3 ① 措辞一致 |
+| 3 | 【次要】**滚动条行为**：§5.6 "LVGL 滑块默认可拖" 与 UI「纯指示不可拖」冲突，且 8 px 触区违反 UI §2.1 的 48 px 硬规则。**PM 裁定：严格纯指示、不可拖** | §5.6 滚动行**重写**：**v9.5.0 源码核实**（`lv_obj.c::draw_scrollbar()` 仅 `LV_EVENT_DRAW_POST` 绘制；`lv_indev_scroll.c::lv_indev_find_scroll_obj()` 只取 `indev->pointer.act_obj`，该文件 0 处 `scrollbar`；`LV_PART_SCROLLBAR` 是 `lv_part_t` 部件枚举而**非** `lv_obj`，故**不存在**可移除的"滚动条 clickable 标志"）→ **LVGL 不存在滚动条拖拽/命中测试，"默认可拖"为误述，已订正**；给出**两手显式实现**（A：原生部件 + 不引入交互 + 交互用例断言；B：自绘 hit-transparent 指示，清 `LV_OBJ_FLAG_CLICKABLE`）；**48 px 不冲突**（滚动条非触摸目标）；**换 tag 须重核**（R-21）。§5.7 §10-2 行与"三点"② → **已裁定并消解**；§11.1 交互层加"滚动条不可交互"用例；**R-10 ③**、**R-21** 同步 |
+
+> **本次修订的依据边界（诚实）**：滚动条结论基于 **LVGL `v9.5.0`** 的源码文件 `src/core/lv_obj.c`、`src/indev/lv_indev_scroll.c`、`src/core/lv_obj_style.h`、`src/core/lv_obj.h`、`src/core/lv_obj_scroll.c`（逐行核实，非文档推断）；pin 后若上游行为变化，须按 R-21 重核并改走 §5.6 的 B 方案。**本轮只改本设计文档**，未改代码/其它文档；UI 文档 v2.1 已先行同步同口径。
+
+---
+
+*（End of Design v2.0-r2 — 待评审；r1 评审整改见附录 A.4，Slint→LVGL 变更决策见附录 A.5，二次整改见附录 A.6）*
