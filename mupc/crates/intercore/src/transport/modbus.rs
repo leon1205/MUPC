@@ -557,13 +557,26 @@ impl IntercoreTransport for ModbusRtuTransport {
     /// 三相展示读数：FC04 **两段连续读**——电流段 1022 起 3 字、有功+总段 1029 起 4 字
     /// （12-设计文档 §4.1：1025-1028 为表中未命名寄存器，不赌整段 1022..=1032 是否实现，
     /// 保守按点表连续子段两笔读）。持 [`Self::bus`] 锁与并发下行/心跳事务在物理线路上
-    /// 串行（W3）；成败副作用经 [`Self::read_input`] 维护在线/离线。
+    /// 串行（W3）。
+    ///
+    /// **无在线态副作用（W1 评审整改）**：本读走 [`Self::read_input_once`]（事务本体），
+    /// **不**经 [`Self::read_input`]——后者失败会 `mark_offline`（清 `last_run_state` 灭 DO1、
+    /// 复位 `started`/`mode` 哨兵），而本特性新增的 1Hz×2 展示读在 RS485 上任一瞬时报文错误
+    /// 即触发该复位 → 下一拍心跳又 `mark_online`，形成「离线→在线」抖动（DO1 闪断 + 控制侧
+    /// 模式/启停寄存器被反复重写）；真机若对 1022-1032 回非法数据地址异常（PRD §6.4 点表未
+    /// 覆盖场景），更会长期误显「PCS 离线」，而该场景期望的是该字段 `NotRead`（PCS 实际在线）。
+    /// 链路在/离线仍由心跳（REG_RUN_STATE）与控制事务维护，与展示读无关；本读失败仅返回
+    /// `None`（该字段降级，Offline/NotRead 由上层按 transport 类型打标），不影响心跳维护的
+    /// 在线判定与缓存。读成功同样不 `mark_online`（不在线态一致性上做单向断言）。
     /// 返回已按 0.1 量纲缩放的工程值（A/kW，正放负充）；两段皆失败 → None。
     async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
         let _bus_guard = self.bus.lock().await;
-        let i_words = self.read_input(REG_I_A, 3).await.ok();
+        let i_words = self.read_input_once(REG_I_A, 3).await.ok();
         // 段长 = REG_P_TOTAL - REG_P_A + 1 = 4（读 1029..=1032 连续 4 字）
-        let p_words = self.read_input(REG_P_A, REG_P_TOTAL - REG_P_A + 1).await.ok();
+        let p_words = self
+            .read_input_once(REG_P_A, REG_P_TOTAL - REG_P_A + 1)
+            .await
+            .ok();
         compose_three_phase(i_words, p_words)
     }
 

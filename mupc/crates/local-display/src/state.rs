@@ -156,6 +156,8 @@ pub struct DisplayState {
     first_attempt_ms: Option<u64>,
     /// 连续失败计数（诊断/日志；本身不直接驱动通道态——驱动靠 last_ok 时间）。
     fail_streak: u32,
+    /// 乱序（回退）丢弃计数（W3：设计 §3.3「渲染端判连续/重排」——丢旧帧不做展示回退）。
+    reorder_dropped: u64,
     /// 过期阈值（设计：默认取 display-proto `DEFAULT_STALE_MS=2000`，可 `--stale-ms` 覆盖）。
     stale_ms: u64,
 }
@@ -173,6 +175,7 @@ impl DisplayState {
             last_ok_ms: None,
             first_attempt_ms: None,
             fail_streak: 0,
+            reorder_dropped: 0,
             stale_ms: mupc_display_proto::DEFAULT_STALE_MS,
         }
     }
@@ -186,10 +189,21 @@ impl DisplayState {
     }
 
     /// 记录一次拉帧成功（更新最新帧 + 成功时刻）。
+    ///
+    /// **乱序保护（W3，设计 §3.3「渲染端判连续/重排」）**：`seq` 与 `ts_ms` **双双**回退
+    /// （即确定更旧的帧）时丢弃，不做展示回退——但通道仍记成功（链路是通的）。用双条件而非
+    /// 仅比 `seq`：mupcd 重启后 `seq` 清零（设计 §3.3），此时 `ts_ms` 更新，须接受新发布序号
+    /// 周期的帧；仅比 `seq` 会让屏面冻结至 `seq` 追平旧值（最坏数十小时）。
     pub fn record_success(&mut self, frame: DisplayFrame, now_ms: u64) {
         self.first_attempt_ms.get_or_insert(now_ms);
         self.last_ok_ms = Some(now_ms);
         self.fail_streak = 0;
+        if let Some(prev) = &self.frame {
+            if frame.seq < prev.seq && frame.ts_ms <= prev.ts_ms {
+                self.reorder_dropped = self.reorder_dropped.saturating_add(1);
+                return; // 旧帧/乱序：保留较新帧，不把屏面回退到旧值
+            }
+        }
         self.frame = Some(frame);
     }
 
@@ -217,6 +231,11 @@ impl DisplayState {
 
     pub fn fail_streak(&self) -> u32 {
         self.fail_streak
+    }
+
+    /// 乱序（seq+ts 双双回退）被丢弃的帧数（诊断用；W3）。
+    pub fn reorder_dropped(&self) -> u64 {
+        self.reorder_dropped
     }
 
     /// 通道态派生（纯逻辑）。`now_ms` 为注入时钟。
@@ -424,6 +443,32 @@ mod tests {
         assert_eq!(st.freshness(2000), Freshness::Fresh);
         // now - ts = 2500 > 2000
         assert_eq!(st.freshness(1000 + 2500), Freshness::Stale);
+    }
+
+    /// W3：旧帧（seq 与 ts 双双回退）丢弃——屏面不回退到旧值，但通道仍记成功。
+    #[test]
+    fn out_of_order_older_frame_is_dropped_but_channel_ok() {
+        let mut st = DisplayState::new();
+        st.record_success(frame(10, 10_000), 10_000);
+        // 乱序旧帧：seq 9 + ts 更旧 → 丢弃
+        st.record_success(frame(9, 9_000), 10_100);
+        assert_eq!(st.frame().unwrap().seq, 10, "更旧的帧不得覆盖较新帧");
+        assert_eq!(st.reorder_dropped(), 1);
+        assert_eq!(st.fail_streak(), 0, "通道是通的，仍记成功");
+        assert_eq!(st.last_ok_ms(), Some(10_100));
+        // 同 seq 重取（轮询同一帧）→ 幂等接受，不计乱序
+        st.record_success(frame(10, 10_000), 10_200);
+        assert_eq!(st.reorder_dropped(), 1);
+    }
+
+    /// W3：mupcd 重启 → seq 清零但 ts 更新 → 必须接受（否则屏面冻结到 seq 追平旧值）。
+    #[test]
+    fn seq_restart_with_newer_ts_is_accepted() {
+        let mut st = DisplayState::new();
+        st.record_success(frame(86_400, 10_000), 10_000);
+        st.record_success(frame(0, 10_100), 10_100); // seq 回退但 ts 更新 = 新发布周期
+        assert_eq!(st.frame().unwrap().seq, 0);
+        assert_eq!(st.reorder_dropped(), 0, "重启清零不得被当作乱序丢弃");
     }
 
     #[test]

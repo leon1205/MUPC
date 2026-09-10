@@ -27,6 +27,9 @@ pub type SharedLatest = Arc<Mutex<Option<DisplayFrame>>>;
 /// 最新帧端点路径（设计 §3.1，与 `display-proto` `DEFAULT_CHANNEL_URL` 尾部一致）。
 pub const LATEST_PATH: &str = "/v1/display/latest";
 
+/// 回环 publisher 单连接请求头读超时（O3：连接后不发数据的对端不得长期占用 task）。
+pub const HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// 采集+组帧+发布组件（设计 §4.2 DisplayDataProvider）。
 pub struct DisplayDataProvider {
     /// AiIntegrator（SOC 唯一裁决入口，只读快照，不参与控制态）。
@@ -81,7 +84,8 @@ impl DisplayDataProvider {
         let mut frame = self.build_frame(now_ms).await;
         frame.seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
-        let mut g = self.latest.lock().unwrap();
+        // O2：毒化不 panic——仓库既有风格取回内部值（采集路径不得因一次 panic 永久失效）。
+        let mut g = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         *g = Some(frame.clone());
         frame
     }
@@ -238,18 +242,13 @@ impl LoopbackHttpPublisher {
     /// 读到 `\r\n\r\n`（头结束）再应答：避免收到缓冲残留未读数据时 close 触发 Windows RST，
     /// 保证客户端得到干净的 FIN/EOF。
     async fn handle(mut stream: TcpStream, latest: SharedLatest) -> std::io::Result<()> {
-        // 逐字节收至请求头结束（GET 无 body；最多 4096 防异常长头）
-        let mut head = Vec::with_capacity(128);
-        let mut b = [0u8; 1];
-        loop {
-            if stream.read(&mut b).await? == 0 {
-                break;
-            }
-            head.push(b[0]);
-            if head.ends_with(b"\r\n\r\n") || head.len() > 4096 {
-                break;
-            }
-        }
+        // O3：整段请求头读取套**总时限**（非每字节各自计时）——慢速滴字节的对端同样无法长期
+        // 占用本 task（每连接独立 task，accept 无并发上限，此超时是最廉价的兜底）。
+        let head = match tokio::time::timeout(HEAD_READ_TIMEOUT, Self::read_head(&mut stream)).await {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Ok(()), // 超时：直接关闭连接（渲染端本就有 2s GET 超时）
+        };
         let head_owned = String::from_utf8_lossy(&head);
         let mut parts = head_owned.split_whitespace();
         let method = parts.next().unwrap_or("");
@@ -260,10 +259,17 @@ impl LoopbackHttpPublisher {
         };
 
         // 短锁 clone 后出锁再序列化（HTTP 路径不持锁做序列化/IO；设计 §3.5 不在 HTTP 读 modbus）
-        let frame = latest.lock().unwrap().clone();
+        let frame = latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (status, body) = if method == "GET" && path == LATEST_PATH {
             match frame {
-                Some(f) => ("200 OK", serde_json::to_vec(&f).unwrap_or_default()),
+                // O4：序列化失败明确 500 + 空体（原实现 200 + 空体，对端会当成功帧却解不出）。
+                Some(f) => match serde_json::to_vec(&f) {
+                    Ok(b) => ("200 OK", b),
+                    Err(e) => {
+                        tracing::warn!("display 帧序列化失败: {e}（应答 500，不计为成功帧）");
+                        ("500 Internal Server Error", Vec::new())
+                    }
+                },
                 // 未就绪 → 503，渲染端视同无新帧重试（§3.1）
                 None => ("503 Service Unavailable", Vec::new()),
             }
@@ -280,6 +286,23 @@ impl LoopbackHttpPublisher {
         }
         stream.flush().await?;
         Ok(())
+    }
+
+    /// 逐字节收至请求头结束（GET 无 body；最多 4096 字节防异常长头）。EOF → 返回已收内容。
+    /// 由 [`Self::handle`] 套总时限（[`HEAD_READ_TIMEOUT`]）调用（O3）。
+    async fn read_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        let mut head = Vec::with_capacity(128);
+        let mut b = [0u8; 1];
+        loop {
+            if stream.read(&mut b).await? == 0 {
+                break;
+            }
+            head.push(b[0]);
+            if head.ends_with(b"\r\n\r\n") || head.len() > 4096 {
+                break;
+            }
+        }
+        Ok(head)
     }
 }
 

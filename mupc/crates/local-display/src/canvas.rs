@@ -217,6 +217,10 @@ impl Canvas for OffscreenCanvas {
         }
     }
     fn blit_pixels(&mut self, x: i32, y: i32, width: u32, height: u32, src: &[Color]) {
+        // O5：`src` 短于声明尺寸 → 直接返回（否则下方切片越界 panic）。
+        if src.len() < (width as usize).saturating_mul(height as usize) {
+            return;
+        }
         let r = Rect::new(x, y, x + width as i32, y + height as i32);
         if let Some(clip) = r.clipped_to(self.w, self.h) {
             let src_w = width as usize;
@@ -245,15 +249,41 @@ pub mod fbdev {
     //!
     //! ## ⚠️ 部署首验必读（本机 Windows 无法编译/运行该块，以下为待验证项）
     //!
-    //! 1. **映射长度**：本实现按 `w*h*4` 请求 mmap，**未**用 `FBIOGET_FSCREENINFO`
-    //!    校验 `smem_len`。若屏实际显存小于请求值，mmap 可能成功但越界写会 SIGBUS。
-    //!    部署首验须确认 `/dev/fb0` 显存 ≥ 1024*768*4（3MiB）；不足则须加 `ioctl`
-    //!    取 `smem_len` 并据此裁剪/报错（属 §13 前置项 1 的一部分）。
+    //! 1. **映射长度**：O3 评审整改后已用 `FBIOGET_FSCREENINFO` 校验 `smem_len` ≥ 请求长度
+    //!    （`w*h*4`），不足**直接报错**、不 mmap/不越界写（原实现只按请求长度 mmap，显存不足时
+    //!    mmap 成功但越界写会 SIGBUS）。仍属 §13 前置项 1：真机须确认 `/dev/fb0` 显存 ≥ 3MiB。
     //! 2. **像素格式**：假定 32bpp `XRGB8888` 且行跨距 = `w*4`。实机若为 16bpp 或
     //!    跨距含 padding，颜色/花屏会异常，需按 `fb_var_screeninfo` 校准。
     //! 3. 建议部署脚本以 `--backend offscreen` 先跑通全链路，再切实屏定位驱动层问题。
 
     use super::*;
+
+    /// `FBIOGET_FSCREENINFO`（`<linux/fb.h>`：0x46 是 'F'，该族 ioctl 为**未编码**常量，
+    /// 各架构同值）。libc 未提供该常量与 `fb_fix_screeninfo` 绑定，故本地声明。
+    const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+
+    /// `struct fb_fix_screeninfo`（`<linux/fb.h>` 内核 ABI 逐字段对齐；`c_ulong` 保 32/64 位
+    /// 布局一致）。本实现只消费 `smem_len`，其余字段仅供 ioctl 写满结构体。
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)] // 内核 ABI 结构体：仅 smem_len 被消费，其余字段为布局占位
+    struct FbFixScreenInfo {
+        id: [libc::c_char; 16],
+        smem_start: libc::c_ulong,
+        smem_len: u32,
+        type_: u32,
+        type_aux: u32,
+        visual: u32,
+        xpanstep: u16,
+        ypanstep: u16,
+        ywrapstep: u16,
+        line_length: u32,
+        mmio_start: libc::c_ulong,
+        mmio_len: u32,
+        accel: u32,
+        capabilities: u16,
+        reserved: [u16; 2],
+    }
 
     pub struct FbCanvas {
         w: u32,
@@ -286,6 +316,24 @@ pub mod fbdev {
                     let _ = unsafe { libc::close(fd) };
                     crate::Error::Backend("fb size overflow".into())
                 })?;
+            // O3：mmap 前校验显存实际长度（`smem_len`）≥ 请求长度——不足即报错，
+            // 杜绝「mmap 成功但越界写 SIGBUS」。（ioctl 只填结构体，不触碰显存。）
+            let mut fix: FbFixScreenInfo = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix as *mut FbFixScreenInfo) };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(crate::Error::Backend(format!(
+                    "FBIOGET_FSCREENINFO {path} failed: {e}——无法校验显存长度，拒绝映射"
+                )));
+            }
+            let smem_len = fix.smem_len as usize;
+            if smem_len < len {
+                unsafe { libc::close(fd) };
+                return Err(crate::Error::Backend(format!(
+                    "{path} 显存 {smem_len} 字节 < 需要 {len} 字节（{w}x{h} 32bpp）——拒绝越界映射"
+                )));
+            }
             let map = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -361,6 +409,10 @@ pub mod fbdev {
             fill_rect_default(self, r, c);
         }
         fn blit_pixels(&mut self, x: i32, y: i32, width: u32, height: u32, src: &[Color]) {
+            // O5：裸指针按声明尺寸读 `src`——过短即越界读；此处长度校验兜底（不越界写显存）。
+            if src.len() < (width as usize).saturating_mul(height as usize) {
+                return;
+            }
             let r = Rect::new(x, y, x + width as i32, y + height as i32);
             if let Some(clip) = r.clipped_to(self.w, self.h) {
                 let base = self.map as *mut Color;

@@ -17,6 +17,14 @@ use mupc_display_proto::DisplayFrame;
 /// 单次 GET 超时（设计 §5.3：失败记一次，由上层按「连续失败 / 无成功 >3s」判通道断）。
 pub const GET_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 响应头读取上限（64 KiB）。
+pub const MAX_HEAD_BYTES: usize = 64 * 1024;
+
+/// 响应体读取上限（W2：与头对齐 64 KiB）。标称帧 JSON 约数百字节，余量充分；
+/// 超限即 `Err`（计入失败），杜绝畸形/异常对端用巨额 `Content-Length` 触发内存失控
+/// （PRD 4.4.3：渲染端不得因通道对端行为异常而崩溃或内存失控）。
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
 /// 已解析的回环通道端点（`http://host:port/path`；host 为字面量，用于直连）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelEndpoint {
@@ -143,7 +151,7 @@ impl DisplayChannelClient {
                 if head_buf.ends_with(b"\r\n\r\n") {
                     break;
                 }
-                if head_buf.len() > 64 * 1024 {
+                if head_buf.len() > MAX_HEAD_BYTES {
                     return Err(io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "response header too large",
@@ -172,15 +180,33 @@ impl DisplayChannelClient {
             let mut body = Vec::new();
             match content_length {
                 Some(n) => {
+                    // W2：先校验上限再预分配——畸形对端宣称巨额长度时直接拒绝（不 resize）。
+                    if n > MAX_BODY_BYTES {
+                        return Err(Error::BodyTooLarge(op_addr.clone(), n));
+                    }
                     body.resize(n, 0);
                     stream.read_exact(&mut body).await.map_err(io)?;
                 }
                 None => {
-                    stream.read_to_end(&mut body).await.map_err(io)?;
+                    // 无 Content-Length → 读到 EOF，但同样按上限封顶（防无限流撑爆内存）。
+                    let mut limited = (&mut stream).take(MAX_BODY_BYTES as u64 + 1);
+                    limited.read_to_end(&mut body).await.map_err(io)?;
+                    if body.len() > MAX_BODY_BYTES {
+                        return Err(Error::BodyTooLarge(op_addr.clone(), body.len()));
+                    }
                 }
             }
             let frame: DisplayFrame = serde_json::from_slice(&body)
                 .map_err(|e| Error::Json(op_addr.clone(), e))?;
+            // W3：版本一致性校验（设计 §3.3/PRD 4.4.1）——不符即明确错误（计入失败），
+            // 绝不静默按旧语义展示。
+            if frame.version != mupc_display_proto::PROTO_VERSION {
+                return Err(Error::ProtoVersion(
+                    op_addr.clone(),
+                    frame.version,
+                    mupc_display_proto::PROTO_VERSION,
+                ));
+            }
             Ok(frame)
         };
         tokio::time::timeout(self.timeout, op)
@@ -347,6 +373,77 @@ mod tests {
         let c = DisplayChannelClient::with_timeout(&url, Duration::from_millis(300)).unwrap();
         let err = c.fetch_latest().await.unwrap_err();
         assert!(matches!(err, Error::Timeout(_)), "got {err:?}");
+    }
+
+    // ---- W2/W3：响应体上限 + 帧版本一致性 ----
+
+    /// 起一个「自定义原始响应」桩：对任意 GET 回 `resp` 原文（可造畸形 Content-Length/版本）。
+    async fn spawn_raw_stub(resp: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/display/latest", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut one = [0u8; 1];
+                let mut req = Vec::new();
+                loop {
+                    if sock.read_exact(&mut one).await.is_err() {
+                        return;
+                    }
+                    req.push(one[0]);
+                    if req.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        url
+    }
+
+    /// W2：`Content-Length` 超上限 → 明确 Err（BodyTooLarge），不做巨额预分配。
+    #[tokio::test]
+    async fn fetch_latest_rejects_oversized_content_length() {
+        let huge = MAX_BODY_BYTES + 1;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {huge}\r\nConnection: close\r\n\r\n"
+        );
+        let url = spawn_raw_stub(resp).await;
+        let c = DisplayChannelClient::with_timeout(&url, Duration::from_secs(3)).unwrap();
+        let err = c.fetch_latest().await.unwrap_err();
+        assert!(
+            matches!(err, Error::BodyTooLarge(_, n) if n == huge),
+            "超限 Content-Length 应 Err(BodyTooLarge)，实际: {err:?}"
+        );
+    }
+
+    /// W2：无 `Content-Length` 时读到 EOF 亦按上限封顶（防无限流）。
+    #[tokio::test]
+    async fn fetch_latest_rejects_oversized_chunked_body() {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            "x".repeat(MAX_BODY_BYTES + 10)
+        );
+        let url = spawn_raw_stub(resp).await;
+        let c = DisplayChannelClient::with_timeout(&url, Duration::from_secs(5)).unwrap();
+        let err = c.fetch_latest().await.unwrap_err();
+        assert!(
+            matches!(err, Error::BodyTooLarge(_, _)),
+            "无长度头的超长体应封顶拒绝，实际: {err:?}"
+        );
+    }
+
+    /// W3：帧 `version` 与 `PROTO_VERSION` 不符 → Err(ProtoVersion)（不静默按旧语义展示）。
+    #[tokio::test]
+    async fn fetch_latest_rejects_proto_version_mismatch() {
+        let body = sample_frame_json().replace("\"version\":1", "\"version\":99");
+        let url = spawn_stub(body).await;
+        let c = DisplayChannelClient::with_timeout(&url, Duration::from_secs(3)).unwrap();
+        let err = c.fetch_latest().await.unwrap_err();
+        assert!(
+            matches!(err, Error::ProtoVersion(_, 99, _)),
+            "版本不符应 Err(ProtoVersion)，实际: {err:?}"
+        );
     }
 
     // ---- 通道错误 → 上层通道态（通道断）语义闭环 ----

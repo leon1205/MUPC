@@ -533,31 +533,57 @@ impl CoreConfig {
 
     /// 12-本地显示终端 §7.3：display.enabled 时 bind_addr 强制仅回环（127.0.0.1）——
     /// 本地数据通道禁止暴露到外网/北向网口；非回环地址启动即报错。disabled 整段跳过。
+    ///
+    /// 回环判定按 **host 部分**归一（O6 评审整改）：`"127.0.0.1"`（缺端口）、`"127.0.0.1:9810"`、
+    /// `"localhost:9810"`、`"[::1]:9810"` 均识别为回环；缺端口单独报「缺少端口」，不再误报
+    /// 「非回环」这类误导性错误（原实现把 `"127.0.0.1"` 判成非回环）。
     fn validate_display(&self) -> Result<(), String> {
         let d = &self.display;
         if !d.enabled {
             return Ok(());
         }
-        if d.bind_addr.trim().is_empty() {
+        let addr = d.bind_addr.trim();
+        if addr.is_empty() {
             return Err("display.bind_addr 不能为空（display.enabled 时）".to_string());
         }
-        let ok_loopback = match d.bind_addr.parse::<std::net::SocketAddr>() {
-            Ok(sa) => sa.ip().is_loopback(),
-            // 非数字主机（如 "localhost:9810"）也同指回环——放行
-            Err(_) => d
-                .bind_addr
-                .split(':')
-                .next()
-                .map(|h| h.eq_ignore_ascii_case("localhost"))
-                .unwrap_or(false),
+        // host/port 拆分（用最后一个 ':'；IPv6 字面量按方括号剥离）。SocketAddr 能直接解析的
+        // （含带端口的 IPv6）走快路径，语义与 std 一致。
+        let host_port = match addr.parse::<std::net::SocketAddr>() {
+            Ok(sa) => (sa.ip().to_string(), Some(sa.port().to_string())),
+            Err(_) => match addr.rsplit_once(':') {
+                Some((h, p)) if !h.is_empty() => (
+                    h.trim_start_matches('[').trim_end_matches(']').to_string(),
+                    Some(p.to_string()),
+                ),
+                _ => (
+                    addr.trim_start_matches('[').trim_end_matches(']').to_string(),
+                    None,
+                ),
+            },
         };
+        let (host, port) = host_port;
+        let ok_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false);
         if !ok_loopback {
             return Err(format!(
                 "display.bind_addr='{}' 非回环地址——本地显示终端数据通道强制仅 127.0.0.1（禁止暴露到外网接口，12-显示终端 §7.3）",
                 d.bind_addr
             ));
         }
-        Ok(())
+        match port {
+            None => Err(format!(
+                "display.bind_addr='{}' 缺少端口——须为 host:port（如 127.0.0.1:9810；仅回环地址）",
+                d.bind_addr
+            )),
+            Some(p) if p.parse::<u16>().map(|n| n > 0).unwrap_or(false) => Ok(()),
+            Some(_) => Err(format!(
+                "display.bind_addr='{}' 端口非法——须为 1..=65535 的数字端口",
+                d.bind_addr
+            )),
+        }
     }
 
     /// S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置：
@@ -934,6 +960,53 @@ display:
             "回环 display 配置应通过: {:?}",
             config.validate()
         );
+    }
+
+    /// 12-显示终端 §7.3（O6 整改）：回环 host 的各种写法都识别为回环，缺端口单独报「缺少端口」，
+    /// 不得再误报「非回环」。
+    #[test]
+    fn test_display_loopback_host_forms_and_missing_port() {
+        let with_addr = |addr: &str| {
+            format!(
+                r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {{}}
+plugins: {{}}
+display:
+  enabled: true
+  bind_addr: "{addr}"
+"#
+            )
+        };
+        // 回环各写法 → 通过
+        for ok in ["127.0.0.1:9810", "localhost:9810", "[::1]:9810"] {
+            let config: CoreConfig = serde_yaml::from_str(&with_addr(ok)).unwrap();
+            assert!(
+                config.validate().is_ok(),
+                "{ok} 应判回环通过，实际: {:?}",
+                config.validate()
+            );
+        }
+        // 缺端口（原实现误报「非回环」）→ 明确报「缺少端口」
+        for missing in ["127.0.0.1", "localhost"] {
+            let config: CoreConfig = serde_yaml::from_str(&with_addr(missing)).unwrap();
+            let err = config.validate().unwrap_err();
+            assert!(
+                err.contains("缺少端口"),
+                "{missing} 应报缺少端口而非非回环，实际: {err}"
+            );
+            assert!(!err.contains("非回环"), "{missing} 不应误报非回环: {err}");
+        }
+        // 端口非法 → 报端口非法
+        let config: CoreConfig = serde_yaml::from_str(&with_addr("127.0.0.1:abc")).unwrap();
+        assert!(config.validate().unwrap_err().contains("端口非法"));
     }
 
     /// 12-显示终端 §7.3: display.enabled 时 bind_addr 非回环 → validate Err（强制仅 127.0.0.1）

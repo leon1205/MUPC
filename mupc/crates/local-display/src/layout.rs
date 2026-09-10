@@ -13,7 +13,7 @@ use mupc_display_proto::{RunState, SocSource};
 use crate::canvas::{Canvas, Color, Rect};
 use crate::font::TextKit;
 use crate::state::{
-    dash_badge, live_dot_for, soc_band, Freshness, NumView, ScreenMode, SocBand, SocView,
+    dash_badge, live_dot_for, soc_band, Freshness, LiveDot, NumView, ScreenMode, SocBand, SocView,
     UiSnapshot,
 };
 
@@ -400,12 +400,18 @@ fn draw_pcs(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
             canvas.fill_rect(&Rect::new(x0 + w - 1, sub_y as i32, x0 + w, sub_y as i32 + 30), PINK);
             tk.draw_top(canvas, label, cx - w as f32 / 2.0, sub_y + 2.0, 22.0, PINK);
         } else {
-            let p_text = match snap.p_total.value() {
+            // W5：与 6.6 判据（`display_host::check_inconsistency`）**同源**——均取三相有功之和
+            // Σp_phase（1029-1031），而非 REG1032 `p_total`（原实现在 1032 ≠ Σ 时屏上数值与
+            // 判据输入不一致）。任一相缺数/降级即无佐证输入 → 「佐证不可用」，**不**正向断言
+            // 「方向一致」（原实现缺相时仍显「方向一致」，属无据陈述）。
+            let sum = sum_phase_power(&snap.p_phase);
+            let p_text = match sum {
                 Some(v) => format!("方向一致  ΣP = {:.1} kW", v),
-                None => "方向一致".to_string(),
+                None => "佐证不可用（三相数据不全）".to_string(),
             };
             let w = tk.measure(&p_text, 22.0);
-            tk.draw_top(canvas, &p_text, cx - w / 2.0, sub_y + 4.0, 22.0, TEXT_SUB);
+            let color = if sum.is_some() { TEXT_SUB } else { TEXT_WEAK };
+            tk.draw_top(canvas, &p_text, cx - w / 2.0, sub_y + 4.0, 22.0, color);
         }
     }
 
@@ -418,6 +424,28 @@ fn draw_pcs(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
 // ---------------------------------------------------------------------------
 // 三相四卡（UI §5.3）
 // ---------------------------------------------------------------------------
+
+/// 卡头状态点半径（UI §5.3：12px 直径 → r=6）。
+pub const LIVE_DOT_R: i32 = 6;
+
+/// 卡头状态点圆心（绘制与测试共用，防坐标漂移）：卡头行右侧、竖直与「A 相」标题行对齐；
+/// 总卡（i==3）让位于卡头右侧的「1032」出处标注，左移 52px（UI §5.3/§6.4）。
+pub fn phase_card_dot_center(card: &Rect, i: usize) -> (i32, i32) {
+    const RIGHT_OFFSET: i32 = 16;
+    const TOTAL_CARD_SHIFT: i32 = 52; // 避让「1032」出处标注
+    let off = if i == 3 { RIGHT_OFFSET + TOTAL_CARD_SHIFT } else { RIGHT_OFFSET };
+    (card.x1 - off - LIVE_DOT_R, card.y0 + 20)
+}
+
+/// 画卡头新鲜度状态点（UI §5.3/§6.4 三态语法，不依赖颜色单一信道）：
+/// ●实心青=本字段有效且帧新鲜 / ○空心灰(`#3B4A6B`)=停更·未取数 / ●琥珀=帧过期（值保留）。
+fn draw_live_dot(canvas: &mut dyn Canvas, cx: i32, cy: i32, dot: LiveDot) {
+    match dot {
+        LiveDot::Live => fill_disc(canvas, cx, cy, LIVE_DOT_R, SOC_CYAN),
+        LiveDot::Paused => fill_disc_outline(canvas, cx, cy, LIVE_DOT_R, CAP_BORDER),
+        LiveDot::Expired => fill_disc(canvas, cx, cy, LIVE_DOT_R, AMBER),
+    }
+}
 
 fn draw_panel(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
     // 面板标题行
@@ -450,7 +478,10 @@ fn draw_panel(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
         // 数值：0..3 = A/B/C 相取 p_phase[i]；第 4 张「总」卡取 p_total
         // （p_phase 仅 3 元素——曾在此越界 panic，测试 `render_frame_is_1024x768` 覆盖）。
         let pv: &NumView = if i < 3 { &snap.p_phase[i] } else { &snap.p_total };
-        let dot = live_dot_for(pv, snap.fresh);
+        // 卡头新鲜度状态点（UI §5.3：●实时青 / ○空心灰停更 / 过期转琥珀）——按本卡有功字段推导。
+        let (dot_cx, dot_cy) = phase_card_dot_center(card, i);
+        draw_live_dot(canvas, dot_cx, dot_cy, live_dot_for(pv, snap.fresh));
+
         let arrow_kind: Option<bool> = if i < 3 {
             if arrow_up {
                 Some(true)
@@ -474,7 +505,6 @@ fn draw_panel(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
             PH_P_LABEL_TOP,
             PH_P_VALUE_TOP,
             PH_P_FONT,
-            dot,
             arrow_kind,
         );
         if let Some(iv) = iv {
@@ -488,7 +518,6 @@ fn draw_panel(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
                 PH_I_LABEL_TOP,
                 PH_I_VALUE_TOP,
                 PH_I_FONT,
-                dot,
                 None,
             );
         }
@@ -500,6 +529,8 @@ fn draw_panel(canvas: &mut dyn Canvas, tk: &TextKit, snap: &UiSnapshot) {
 }
 
 /// 卡内一行「标签 + 主值 + 单位(+可选方向箭头)」。降级 → `--` + 角标。
+/// 注：卡头新鲜度状态点在 [`draw_panel`] 按卡绘制（每卡一次），不随 P/I 行重复——故本函数
+/// 不再收 `LiveDot` 形参（W4 评审判定原形参为死参数）。
 #[allow(clippy::too_many_arguments)]
 fn draw_card_value(
     canvas: &mut dyn Canvas,
@@ -511,7 +542,6 @@ fn draw_card_value(
     label_top: i32,
     value_top: i32,
     value_font: f32,
-    _dot: crate::state::LiveDot,
     arrow_up: Option<bool>,
 ) {
     let m = 14i32;
@@ -563,6 +593,18 @@ fn draw_card_value(
 // ---------------------------------------------------------------------------
 // 几何图标原语（三重冗余中的图标信道；纯几何，不依赖字形）
 // ---------------------------------------------------------------------------
+
+/// Σ 三相有功（kW）：**仅三相全为有效值**时可求；任一相降级（`--`）→ `None`。
+///
+/// W5：与 mupcd 侧 6.6 判据 `display_host::check_inconsistency` 的输入**同源**（均为
+/// Σp_phase = 1029–1031），保证屏上「ΣP」数值与判据输入一致；无可靠 Σ 时不返回估读值。
+pub fn sum_phase_power(p: &[NumView; 3]) -> Option<f64> {
+    let mut sum = 0.0;
+    for nv in p.iter() {
+        sum += nv.value()?;
+    }
+    Some(sum)
+}
 
 fn fill_disc(canvas: &mut dyn Canvas, cx: i32, cy: i32, r: i32, color: Color) {
     for y in (cy - r)..=(cy + r) {
@@ -834,6 +876,78 @@ mod tests {
         assert!(
             !cv.has_non_background(&band(&phase_cards()[3]), CARD),
             "总卡不应绘制电流行（设备总有功卡无 I）"
+        );
+    }
+
+    /// W4：四卡卡头右侧 12px 新鲜度状态点（UI §5.3）——实时=实心青；过期=琥珀；字段降级=空心灰。
+    #[test]
+    fn phase_card_header_live_dot_states() {
+        // 实时：每张卡卡头点应为实心青 ●
+        let cv = draw(&snap_live());
+        for (i, card) in phase_cards().iter().enumerate() {
+            let (cx, cy) = phase_card_dot_center(card, i);
+            let dot = Rect::new(cx - LIVE_DOT_R - 1, cy - LIVE_DOT_R - 1, cx + LIVE_DOT_R + 1, cy + LIVE_DOT_R + 1);
+            assert!(
+                cv.count_color(&dot, SOC_CYAN) > 0,
+                "第 {i} 卡卡头应有实心青实时状态点"
+            );
+        }
+
+        // 过期（值保留）：状态点转琥珀
+        let mut s = snap_live();
+        s.fresh = Freshness::Stale;
+        let cv = draw(&s);
+        let (cx, cy) = phase_card_dot_center(&phase_cards()[0], 0);
+        let dot = Rect::new(cx - LIVE_DOT_R - 1, cy - LIVE_DOT_R - 1, cx + LIVE_DOT_R + 1, cy + LIVE_DOT_R + 1);
+        assert!(cv.count_color(&dot, AMBER) > 0, "过期帧卡头点应转琥珀");
+
+        // 字段降级：该卡状态点转空心灰 `#3B4A6B`（停更），且不得再出现实心青
+        let mut s = snap_live();
+        s.p_phase[1] = NumView::Dash(FieldFlag::Offline);
+        let cv = draw(&s);
+        let (cx, cy) = phase_card_dot_center(&phase_cards()[1], 1);
+        let dot = Rect::new(cx - LIVE_DOT_R - 1, cy - LIVE_DOT_R - 1, cx + LIVE_DOT_R + 1, cy + LIVE_DOT_R + 1);
+        assert!(cv.count_color(&dot, CAP_BORDER) > 0, "降级卡状态点应为空心灰");
+        assert_eq!(cv.count_color(&dot, SOC_CYAN), 0, "降级卡不得再现实心青点");
+    }
+
+    /// W5：佐证行 ΣP 与 6.6 判据同源（三相和，非 REG1032）；任一相缺数 → 「佐证不可用」，
+    /// 不得正向断言「方向一致」。
+    #[test]
+    fn evidence_line_uses_phase_sum_and_degrades_when_incomplete() {
+        // 三相全有效 → ΣP 可求（Σ=36.9 ≠ p_total 36.1，说明不再用 1032）
+        let mut s = snap_live();
+        s.p_total = NumView::Value(999.0); // p_total 被篡改也不应影响佐证行
+        assert_eq!(sum_phase_power(&s.p_phase), Some(12.3 + 12.3 + 12.3));
+        assert_eq!(sum_phase_power(&s.p_phase).map(|v| (v * 10.0).round()), Some(369.0));
+
+        // 任一相缺数 → None（无佐证输入）
+        s.p_phase[1] = NumView::Dash(FieldFlag::NotRead);
+        assert_eq!(sum_phase_power(&s.p_phase), None);
+    }
+
+    /// W5（像素级）：缺相时佐证行落在 PCS 佐证带，用弱文本色（「佐证不可用」），
+    /// 不再是「方向一致」的正向断言色；且该带内不得出现 TEXT_SUB（原断言文案色）。
+    #[test]
+    fn evidence_line_pixel_color_reflects_missing_phase() {
+        let band = Rect::new(PCS_X0, PCS_SUB_TOP, PCS_X1, PCS_SUB_TOP + 32);
+
+        // 完整三相：正常文案色 TEXT_SUB
+        let cv = draw(&snap_live());
+        assert!(cv.count_color(&band, TEXT_SUB) > 0, "完整三相应有正常佐证文案");
+
+        // 缺一相：转为「佐证不可用」，弱色；不得有恢复成 TEXT_SUB 的同带文案
+        let mut s = snap_live();
+        s.p_phase[2] = NumView::Dash(FieldFlag::Offline);
+        let cv = draw(&s);
+        assert!(
+            cv.count_color(&band, TEXT_WEAK) > 0,
+            "缺相应画「佐证不可用」（弱色）"
+        );
+        assert_eq!(
+            cv.count_color(&band, TEXT_SUB),
+            0,
+            "缺相不得再正向断言「方向一致」"
         );
     }
 

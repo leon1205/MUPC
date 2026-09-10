@@ -352,8 +352,9 @@ mod tests {
         let data = [0xAA, 0x55, 0x00, 0x08, 0x00, 0x01, 0x00, 0x01];
         let crc = IntercoreFrame::calculate_crc16(&data);
 
-        // CRC16 应该是一个有效的 16 位值
-        assert!(crc != 0x0000 || true); // CRC 可能为 0，这是有效的
+        // 说明：CRC 是对 16 位值域的纯函数，可能为 0x0000（合法值，非错误）——故此处不做
+        // 「非零」断言（旧 `assert!(crc != 0x0000 || true)` 为恒真式，clippy 报逻辑缺陷，已删）。
+        // 有效断言由下方「同数据 → 同 CRC」与 `test_crc16_different_data`（异数据 → 异 CRC）承担。
 
         // 相同数据应该产生相同的 CRC
         let crc2 = IntercoreFrame::calculate_crc16(&data);

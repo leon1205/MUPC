@@ -35,6 +35,16 @@ pub enum Error {
     #[error("channel body decode error from `{0}`: {1}")]
     Json(String, serde_json::Error),
 
+    /// 响应体超过上限（W2：`Content-Length` 无上限会致巨额预分配 → 内存失控；
+    /// PRD 4.4.3 要求对不可信/畸形对端行为有防护）。计一次失败，不崩溃。
+    #[error("channel body too large from `{0}`: {1} bytes > limit")]
+    BodyTooLarge(String, usize),
+
+    /// 帧协议版本与渲染端预期不一致（W3：`PROTO_VERSION` 只发不校 → 跨版本静默按旧语义展示；
+    /// PRD 4.4.1 要求版本一致性手段）。计一次失败并告警。
+    #[error("channel protocol version mismatch from `{0}`: got {1}, expected {2}")]
+    ProtoVersion(String, u8, u8),
+
     /// 后端设备（framebuffer /dev/fb0）打开失败。
     #[error("backend open error: {0}")]
     Backend(String),
