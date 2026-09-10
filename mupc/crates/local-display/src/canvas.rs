@@ -293,8 +293,28 @@ pub mod fbdev {
         len: usize,
     }
 
-    // mmap 区指针在多线程只经 &mut self 使用；标记 Send/Sync 以便 run 循环持有。
+    // SAFETY（手写 Send/Sync 的理由）：`FbCanvas` 只持有 `fd`（内核 fd，进程内跨线程
+    // 使用本身合法）与 `map`（`/dev/fb0` 的 mmap 裸指针）；裸指针不是 `Send`/`Sync`，
+    // 故编译器无法自动推导，需在此给出人证。据实说明当前实现的并发契约：
+    // - 所有对 `map` 的读写都发生在 `&mut self` 方法（`set_px`/`clear`/`blit_pixels`）
+    //   或 `&self` 方法（`pixel`）内；`map` 为私有字段，结构体内无 `UnsafeCell` 等
+    //   内部可变性出口，也不存在 `&mut self` 之外改写 `map` 的路径。因此 Rust 借用规则
+    //   已天然串行化「本进程内」的全部访问：`&mut` 独占 ⇒ 同一时刻至多一个线程在写，
+    //   `&FbCanvas` 跨线程只可能调用只读的 `pixel`（多个只读借用可共存）。
+    // - `fd` 仅在 `Drop` 中关闭一次（`open` 的错误分支各自 close 后即 return，不会交给
+    //   `Drop`），故跨线程移动 `FbCanvas`（Send）只是移动所有权，不产生重复释放。
+    // - 实际调用形态佐证（非保证来源，仅说明当前用法）：`local-display` 以
+    //   `current_thread` 运行时在单个任务内以 `&mut Renderer<FbCanvas>` 独占驱动主循环。
+    // - ⚠️ 残留风险（如实标注，且不在 Rust 模型内）：`map` 指向内核/显示控制器共享的
+    //   物理显存，Rust 的借用规则无法约束**外部写者**。若同机 fbcon console 或其他
+    //   进程同时在写 `/dev/fb0`，则其写入与本进程的非原子读写构成理论数据竞争（本进程
+    //   无法用锁串行化外部写者）。当前部署假设「渲染进程独占 fb0、fbcon 未占用该 fb」，
+    //   属真机首验项（设计 §13 前置项 1）。
     unsafe impl Send for FbCanvas {}
+    // SAFETY：`Sync` 仅额外允许 `&FbCanvas` 跨线程共享，而 `&FbCanvas` 可达的唯一方法是
+    // `pixel`——它只做与 4 字节对齐的 `u32` 只读（无写入、无内部缓存、无 `&mut` 混用），
+    // 故共享引用并发读满足 `Sync` 契约；写侧必须取 `&mut self`，与 `&self` 互斥。
+    // 外部写者（fbcon/其他进程）的残留风险同上一条所述。
     unsafe impl Sync for FbCanvas {}
 
     impl FbCanvas {
@@ -302,6 +322,12 @@ pub mod fbdev {
         pub fn open(path: &str, w: u32, h: u32) -> crate::Result<Self> {
             let cpath = std::ffi::CString::new(path)
                 .map_err(|_| crate::Error::Backend("fb path contains NUL".into()))?;
+            // SAFETY: `cpath` 是本作用域内仍存活的 `CString`，`as_ptr()` 给出以 NUL 结尾、
+            // 指向有效可读内存的 C 字符串，且在整个调用期间不会被移动或释放（借用自局部的
+            // 不可变绑定）。`O_RDWR` 不含 `O_CREAT`，故 open 的变参列表无需第三个 mode 实参
+            // （传了反而是未定义行为）。返回值是 fd 整数，下一行立即判 `< 0`；失败时无任何
+            // 需要回收的资源（不产生半初始化对象）。后置条件：`fd >= 0` 时为一个尚未归还的
+            // 有效 fd，其所有权由本函数后续路径唯一持有（成功则交给 FbCanvas，失败则 close）。
             let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR) };
             if fd < 0 {
                 return Err(crate::Error::Backend(format!(
@@ -313,15 +339,39 @@ pub mod fbdev {
                 .checked_mul(h as usize)
                 .and_then(|n| n.checked_mul(4))
                 .ok_or_else(|| {
+                    // SAFETY: `fd` 由上方 open 成功返回（此处 `fd >= 0` 已判），且此分支尚未
+                    // 构造 `FbCanvas`——即该 fd 目前无其他所有者；本处是它唯一一次 close，
+                    // 关闭后不再被使用（`?` 立即把错误向上传播，函数返回）。故无 double-close、
+                    // 无 use-after-close。`close` 的返回值（EINTR/EIO）在此忽略，因为无论如何
+                    // 都必须放弃该 fd（无重试语义）。
                     let _ = unsafe { libc::close(fd) };
                     crate::Error::Backend("fb size overflow".into())
                 })?;
             // O3：mmap 前校验显存实际长度（`smem_len`）≥ 请求长度——不足即报错，
             // 杜绝「mmap 成功但越界写 SIGBUS」。（ioctl 只填结构体，不触碰显存。）
+            // SAFETY: `FbFixScreenInfo` 是 `#[repr(C)]` 纯整数结构体（`c_char`/`u32`/`u16`/
+            // `c_ulong` 及其数组），这些类型的**任意位模式**都是合法值（无引用、无函数指针、
+            // 无 `NonNull`/`bool`/枚举等对位模式有前提的字段），故全零初始化不会构造出无效值；
+            // 内部可能存在的 padding 字节同样对整数类型无有效性约束。零初始化是必要的，因为
+            // ioctl 只保证写入内核侧结构体长度内的字段（本实现只消费 `smem_len`，其余字段
+            // 若为垃圾值也仅是占位，但仍以零值避免 trace 时出现未初始化内存）。
             let mut fix: FbFixScreenInfo = unsafe { std::mem::zeroed() };
+            // SAFETY: 1) `fd` 为上方 open 成功返回的 O_RDWR fd（有效）；2) `FBIOGET_FSCREENINFO`
+            //    （0x4602，`linux/fb.h` 中该族为**未编码**常量，各架构同值）是「取回」型请求，
+            //    语义为内核把 `struct fb_fix_screeninfo` 拷贝**写入**第三个参数指向的结构体，
+            //    不读入其中的旧内容（因此无需预先填充）；
+            // 3) 第三个实参是栈上存活的 `fix` 的可变借用转裸指针，调用期间有效、对齐（`c_ulong`
+            //    决定 8 字节对齐）、独占（`fix` 无其他并发引用）；
+            // 4) 结构体字段顺序与宽度逐字段对应内核 `linux/fb.h` 的 `struct fb_fix_screeninfo`
+            //    （`c_ulong` 保证 32/64 位布局一致），故内核按内核布局写入的字节数不超过
+            //    `size_of::<FbFixScreenInfo>()`，不会越过 `fix` 所在栈帧 → 无缓冲区溢出。
+            //    此「布局一致」是**人证而非机器校验**（libc 未绑定该结构体，无编译期断言）：
+            //    若内核头文件改版，需重新比对（属设计 §13 前置项 1 真机首验范畴）。
             let rc = unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix as *mut FbFixScreenInfo) };
             if rc < 0 {
                 let e = std::io::Error::last_os_error();
+                // SAFETY: `fd` 有效，且此错误分支是它唯一的所有者/唯一一次 close，之后立即
+                // return，不再使用该 fd（无 double-close / use-after-close）。
                 unsafe { libc::close(fd) };
                 return Err(crate::Error::Backend(format!(
                     "FBIOGET_FSCREENINFO {path} failed: {e}——无法校验显存长度，拒绝映射"
@@ -329,11 +379,26 @@ pub mod fbdev {
             }
             let smem_len = fix.smem_len as usize;
             if smem_len < len {
+                // SAFETY: `fd` 有效且在此分支仍为唯一所有者；close 是该 fd 唯一一次关闭，
+                // 随后立即 return（未映射任何内存，无需 munmap）。
                 unsafe { libc::close(fd) };
                 return Err(crate::Error::Backend(format!(
                     "{path} 显存 {smem_len} 字节 < 需要 {len} 字节（{w}x{h} 32bpp）——拒绝越界映射"
                 )));
             }
+            // SAFETY（前置条件均由上文建立）：
+            // - `len` = w*h*4 经 `checked_mul` 防溢出，且已校验 `len <= fix.smem_len`
+            //   （内核自报的该 fb 显存字节数）→ 请求的映射区间落在设备显存之内，杜绝
+            //   「mmap 成功但写入越界 → SIGBUS」；
+            // - `fd` 有效且以 O_RDWR 打开，与 `PROT_READ | PROT_WRITE` 权限匹配；
+            //   `MAP_SHARED` 使写入对显示控制器可见（本用例必需，非 MAP_PRIVATE）；
+            // - `offset = 0` 满足 mmap 的页对齐要求；`addr = NULL` 表示交由内核选址
+            //   （未带 MAP_FIXED），不会覆盖/顶掉既有映射；
+            // - 对齐：`len` 与 `map` 不必页对齐（内核按页处理并返回页对齐地址），因此
+            //   本调用无「结构体/缓冲区对齐」类前提。
+            // 后置条件：返回值已判 != `MAP_FAILED`（失败即 close + 返回，不构造 FbCanvas）；
+            // 成功时 `map` 是恰好 `len` 字节的可读写映射首地址，由 `Drop` 以同一 `len`
+            // 做 munmap 保证配对释放。
             let map = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -346,10 +411,18 @@ pub mod fbdev {
             };
             if map == libc::MAP_FAILED {
                 let e = std::io::Error::last_os_error();
+                // SAFETY: `fd` 有效且为唯一所有者；mmap 已失败（无映射需 undo），close 是
+                // 该 fd 唯一一次关闭，随后立即 return。
                 unsafe { libc::close(fd) };
                 return Err(crate::Error::Backend(format!("mmap {path} failed: {e}")));
             }
             // 清零显存（首帧前避免残影）。
+            // SAFETY: `map` 已确认 != `MAP_FAILED`，是上一步刚建立的、长度恰为 `len` 字节的
+            // 可读写映射首地址（非空、页对齐）；写入长度就是 `len`，恰好等于映射长度 →
+            // 完全在映射内、不越界。目标元素类型为 `u8`，无对齐要求（页对齐地址更满足）。
+            // 写入值 0 对 `u8` 无有效性约束；按 32bpp 解读即透明黑，与后续 `clear` 的
+            // 「全 0/全 c」语义一致。`len` 是局部不可变绑定，映射存续期间不会变化；写入后
+            // `map`/`len` 原值成组移入 `FbCanvas`，两者配对的映射关系保持不变。
             unsafe { std::ptr::write_bytes(map as *mut u8, 0, len) };
             Ok(Self {
                 w,
@@ -363,6 +436,16 @@ pub mod fbdev {
 
     impl Drop for FbCanvas {
         fn drop(&mut self) {
+            // SAFETY: 逆序释放 `open()` 建立的资源，每个资源只释放一次、释放后不再访问
+            // （`Drop` 之后对象即销毁）：
+            // - `map`：仅在 `open` 成功路径被赋值（`MAP_FAILED` 在该路径被拦截并提前 return），
+            //   故「非 null」等价于「确实是有效映射首地址」；`self.len` 正是当初 mmap 的长度，
+            //   munmap 的长度与映射严格一致（长度不符是 UB，此处不存在该风险）。注：本处
+            //   不判 `MAP_FAILED`（其值为 -1 非 null）——该值从未写入 `self.map`，故无需判。
+            // - `fd`：`fd >= 0` 是 `open` 成功的判据，且失败路径已各自 close 并 return，
+            //   绝不会留下 `fd >= 0` 的已关闭 fd 交给 `Drop` → 无 double-close；close 之后
+            //   不再使用该 fd。忽略 close 返回值：析构无法重试，且进程生命周期内 fd 归还
+            //   失败无补救手段（进程退出时由内核回收）。
             unsafe {
                 if !self.map.is_null() {
                     libc::munmap(self.map as *mut libc::c_void, self.len);
@@ -386,6 +469,17 @@ pub mod fbdev {
                 return;
             }
             let idx = y as usize * self.w as usize + x as usize;
+            // SAFETY（映射内不变量，全类方法共享）：
+            // - 界内：上方边界检查保证 0 <= x < w、0 <= y < h，故 idx = y*w + x <= w*h - 1，
+            //   即 idx < len/4（`len = w*h*4` 与这里的 w/h 同一来源，且已在 `open` 中校验
+            //   `len <= smem_len`）→ `add(idx)` 落在映射内、且未越过「末尾后一格」的越界红线；
+            // - 对齐：`Color = u32` 对齐 4 字节，`self.map` 来自 mmap（页对齐，严格大于 4），
+            //   故字节偏移 idx*4 恒为 4 的倍数，满足 `*mut Color` 的对齐要求；
+            // - 独占总有性：`&mut self` 保证写期间不存在其他 Rust 侧对同一映射的访问（写与
+            //   `&self` 只读互斥）；`map`/`len`/`w`/`h` 均为私有字段，只在 `open` 中成组赋值，
+            //   此后无任何 setter → 「len 与 w*h*4 一致」这一前提在整个生命周期成立。若未来
+            //   新增能改 w/h 的方法，必须同步维护该不变量，否则本注释失效。
+            // - 索引溢出：w、h 为 u32，乘积在 64 位 usize 下不会回绕（本二进制为 LP64）。
             unsafe {
                 *(self.map as *mut Color).add(idx) = c;
             }
@@ -395,9 +489,25 @@ pub mod fbdev {
                 return None;
             }
             let idx = y as usize * self.w as usize + x as usize;
+            // SAFETY：与 `set_px` 完全相同的映射内不变量——界内检查 ⇒ idx < len/4，
+            // mmap 页对齐地址 + `Color` 对齐 4 ⇒ 读址对齐。此处是只读（`&self`），可与多个
+            // 只读借用共存；Rust 侧的写路径必须取 `&mut self`，与本次只读互斥，故不存在
+            // 「Rust 内并发读写同一元素」。
+            // ⚠️ 残留风险（如实标注）：该读为非原子的普通 `u32` 读。若内核 fbcon console 或
+            // 其他进程并发写 `/dev/fb0`，则与外部写者构成 Rust 模型外的数据竞争（本进程无法
+            // 加锁串行化外部写者）；当前部署假设渲染进程独占 fb0（见 `Send`/`Sync` 注释与
+            // 设计 §13 前置项 1）。读取值仅用于字形反锯齿的背景混合，即便偶发撕裂也只是
+            // 单帧像素观感问题，不会造成内存安全问题。
             unsafe { Some(*(self.map as *const Color).add(idx)) }
         }
         fn clear(&mut self, c: Color) {
+            // SAFETY：循环下标 i ∈ [0, w*h)，即映射内 Color 元素的合法索引集合本身
+            // （元素数 = len/4 = w*h，由与 `set_px` 同一不变量保证：`len = w*h*4`、
+            // `len <= smem_len`、map 页对齐 ⇒ 每次 `*p.add(i)` 的写入地址均在映射内
+            // 且 4 字节对齐）；`&mut self` 独占写，循环期间无 Rust 侧别名。
+            // 注：本方法只填 `w*h` 个像素，不触碰 `smem_len` 中可能多出的余量（行跨距
+            // padding 等），故即使实机跨距 > w*4 也不会越界写——但像素会错位（属设计 §13
+            // 前置项 1 的像素格式/跨距真机首验项，非内存安全问题）。
             unsafe {
                 let p = self.map as *mut Color;
                 for i in 0..(self.w as usize * self.h as usize) {
@@ -421,6 +531,26 @@ pub mod fbdev {
                     let sx = (clip.x0 - x) as usize;
                     let n = (clip.x1 - clip.x0) as usize;
                     let dst = (yy as usize * self.w as usize + clip.x0 as usize) as isize;
+                    // SAFETY（读 `src` 侧）：
+                    // - 上方已校验 `src.len() >= width * height`（`saturating_mul` 防溢出；
+                    //   不满足即提前 return，不进入本块），故 `src` 至少有 width*height 个元素；
+                    // - `sy = yy - y`，其中 yy ∈ clip ⊆ [y, y+height) ⇒ sy ∈ [0, height)；
+                    //   `sx = clip.x0 - x` 且 clip.x0 ≥ x ⇒ sx ∈ [0, width)；因 clip.x1 ≤ x+width
+                    //   ⇒ n ≤ width - sx。因此最大读索引 = sy*width + sx + (n-1) ≤
+                    //   (height-1)*width + width - 1 = height*width - 1 < src.len() ⇒
+                    //   `src.as_ptr().add(...)` 与 `*s.add(k)` 全部落在该切片的分配内、
+                    //   最远仅到「末尾前一个元素」（未越过 `add` 允许的一格越界红线）；
+                    // - 对齐：`src: &[Color]` 本身按 4 字节对齐，偏移均以元素为单位 ⇒ 对齐保持。
+                    // SAFETY（写 `base` 侧）：`dst` 与 `dst + k`（k < n）— 由 `clipped_to`
+                    //   保证 yy ∈ [0, h)、clip.x0 + n = clip.x1 ≤ w ⇒ 最大写索引 ≤ w*h - 1，
+                    //   与 `set_px` 同一映射长度不变量（idx < len/4，地址 4 字节对齐）；
+                    //   `offset` 的 isize 偏移量远小于 isize::MAX（w*h ≤ u32::MAX 量级）；
+                    // - 无别名：`&mut self` 保证映射在写期间无 Rust 侧别名；`src` 也不可能
+                    //   与 `self.map` 指向同一内存——`FbCanvas` 的公开 API 从未暴露指向该映射
+                    //   的 `&[Color]`（`pixel` 只按值返回），且 `map` 为私有裸指针，安全代码
+                    //   无法据此构造切片（若未来源码新增此类出口，本前提即需重新评估）。
+                    // - 读范围恰好用满 `src` 时（`src.len() == width*height`）最大读索引仍为
+                    //   len-1，不会读到切片末尾之外。
                     unsafe {
                         let s = src.as_ptr().add(sy * width as usize + sx);
                         for k in 0..n {
