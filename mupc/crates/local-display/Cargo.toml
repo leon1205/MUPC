@@ -1,0 +1,47 @@
+# 12-MUPC 本地显示终端 —— 渲染端库（局部第 4 块 Dev-B4）
+#
+# 命名对齐：目录 crates/local-display（与 display-proto/rs485-plugin 同风格），
+# lib target = mupc_local_display（对齐设计 §5.1 表 `crates/local-display`（`mupc_local_display`））。
+#
+# 职责（对齐 `[DESIGN_APPROVED]` 设计 §5.2/§5.4/§6）：
+#   - channel：DisplayChannelClient（127.0.0.1 回环 GET /v1/display/latest，500ms 轮询）
+#   - state：DisplayState + 三态归一纯逻辑（新鲜度/通道态/NumView）
+#   - canvas：Canvas trait + OffscreenCanvas（默认，内存 Vec<u32>，离屏单测）+ Linux FbCanvas(/dev/fb0 mmap)
+#   - font：ab_glyph 加载（外部路径 / 可选 bundled-font include_bytes）+ 缺失回退「内置 ASCII + 无字形盒」
+#   - layout：固定网格四卡布局渲染（UI §4/§5/§6 坐标与色板）
+# 依赖刻意保持最小（设计 §5.1）：仅 display-proto 所需 —— 不引入 serde_yaml / HTTP 服务栈。
+# 通道 GET 用裸 tokio TcpStream + HTTP/1.1 手写最小请求（无 reqwest/ureq 重依赖，可 mock 单测）。
+#
+# [features]
+#   bundled-font：编译期 include_bytes! 捆绑 CJK 子集 OTF。仓库不随代码提交字库文件，
+#                 启用前须按 font.rs 顶部「子集化命令」生成 ../fonts/NotoSansSC-subset.otf，
+#                 否则该 feature 下编译失败（file not found）——属预期（设计 §13 前置项 8）。
+[package]
+name = "local-display"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "MUPC 本地显示终端渲染端库：通道客户端/三态归一/离屏+帧缓冲画布/ab_glyph 文本/四卡布局（12-MUPC Dev-B4）"
+
+[lib]
+name = "mupc_local_display"
+
+[features]
+default = []
+# 启用后编译期 include_bytes!("../fonts/NotoSansSC-subset.otf")（设计 §5.4 捆绑子集）。
+# 字库文件未入库（前置项 8），默认关闭；真机部署/需复现测试时由开发放字库后开启。
+bundled-font = []
+
+[dependencies]
+display-proto = { path = "../display-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+ab_glyph = "0.2"
+thiserror = { workspace = true }
+
+# /dev/fb0 mmap 仅在 Linux 需要（Windows 本机不编译该 cfg 块——设计 §B1：Linux 目标纯 Rust）。
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
