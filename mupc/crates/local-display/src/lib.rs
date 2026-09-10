@@ -11,6 +11,8 @@
 //! | [`canvas`] | `Canvas` trait + `OffscreenCanvas`（默认，内存缓冲可离屏断言）+ `fbdev::FbCanvas`（Linux `/dev/fb0` mmap，`cfg(unix)` 隔离） | §B1/§5.2/§6 |
 //! | [`font`] | ab_glyph 光栅化 + 可插拔字库（外部路径 / `bundled-font` feature）+ 缺字库容错回退 | §5.4/§9/§13 前置项 8 |
 //! | [`layout`] | 1024x768 固定网格：页眉 / SOC 主区 / PCS 状态区 / 三相四卡（A/B/C/总，上P下I） | §6.2/§6.3 + UI §4/§5 |
+//! | [`config`] | 渲染侧 CLI 参数（`--channel/--interval/--stale-ms/--backend/--fbdev-path/--width/--height/--font`）+ 校验 | §7.2 |
+//! | [`run`] | 主循环编排：`Renderer`（注入时钟，可测）+ `run_loop`（500ms 定拍、1Hz 整流、无忙等） | §5.3/§9 |
 //! | [`error`] | 渲染端统一错误类型（通道/后端/字体） | — |
 //!
 //! ## 无屏可测性（设计 §10「离屏渲染测试」）
@@ -19,16 +21,20 @@
 //! 因此布局/三态/字体容错均可在**无 HDMI、无 framebuffer** 的机器上确定性断言。真机差异只剩
 //! `fbdev::FbCanvas` 的设备打开与像素格式（设计 §13 前置项 1，部署阶段验证）。
 //!
-//! ## 范围说明（本 crate 当前为 **lib 部分**）
+//! ## 进程层（bin）
 //!
-//! 设计 §5.2 的 `config.rs`（CLI 参数）、`run.rs`（主循环编排）、`main.rs`（bin 入口）属**进程层**，
-//! 由后续块实现；本库只暴露可测的纯逻辑与后端，不解析 `mupc_core_config.yaml`（§7.2 零核心依赖）。
+//! `main.rs` 为可执行入口 `mupc-local-display`（设计 §5.1：本 crate = lib + bin）：CLI →
+//! 选后端（`offscreen` / Linux `fbdev` / `drm` 未实现明确报错）→ 起主循环 → 优雅退出；
+//! panic 由外层兜底捕获后非零退出，交给 systemd `Restart=always`（§5.3/§9）。不解析
+//! `mupc_core_config.yaml`（§7.2 零核心依赖）。
 
 pub mod canvas;
 pub mod channel;
+pub mod config;
 pub mod error;
 pub mod font;
 pub mod layout;
+pub mod run;
 pub mod state;
 
 pub use crate::canvas::{Canvas, Color, OffscreenCanvas, Rect, blend_over, hex, rgb};

@@ -9,6 +9,9 @@
 #   - canvas：Canvas trait + OffscreenCanvas（默认，内存 Vec<u32>，离屏单测）+ Linux FbCanvas(/dev/fb0 mmap)
 #   - font：ab_glyph 加载（外部路径 / 可选 bundled-font include_bytes）+ 缺失回退「内置 ASCII + 无字形盒」
 #   - layout：固定网格四卡布局渲染（UI §4/§5/§6 坐标与色板）
+#   - config：渲染进程 CLI 参数解析 + 校验（设计 §7.2；手写解析，不引 clap）
+#   - run：主循环编排（Renderer 注入时钟可测 + run_loop 定拍/整流，设计 §5.3）
+#   - main（bin mupc-local-display）：CLI → 选后端 → 主循环 → 优雅退出（设计 §5.1/§9）
 # 依赖刻意保持最小（设计 §5.1）：仅 display-proto 所需 —— 不引入 serde_yaml / HTTP 服务栈。
 # 通道 GET 用裸 tokio TcpStream + HTTP/1.1 手写最小请求（无 reqwest/ureq 重依赖，可 mock 单测）。
 #
@@ -27,6 +30,12 @@ description = "MUPC 本地显示终端渲染端库：通道客户端/三态归�
 
 [lib]
 name = "mupc_local_display"
+
+# 进程层入口（设计 §5.1：local-display = lib + bin；bin 名对齐部署产物
+# /opt/mupc/bin/mupc-local-display，设计 §11.2）。
+[[bin]]
+name = "mupc-local-display"
+path = "src/main.rs"
 
 [features]
 default = []

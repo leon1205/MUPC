@@ -1,0 +1,61 @@
+# 12-本地显示终端：渲染进程 unit（设计 §11.2，[DESIGN_APPROVED]）
+#
+# 安装：
+#   sudo cp mupc-display.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now mupc-display
+#
+# 前置（详见 deploy/local-display.md）：
+#   1) 产物落点 /opt/mupc/bin/mupc-local-display（aarch64 交叉编译）；
+#   2) 需访问 /dev/fb0（video 组）或 /dev/dri（render 组）——按真机组名校准；
+#   3) 字库：随二进制捆绑子集（bundled-font feature）或用 --font 指向系统字库；
+#   4) --channel 必须与 mupcd 配置 display.bind_addr 对齐（默认同为 127.0.0.1:9810）。
+#
+# 自恢复语义（PRD 4.3.1 / 设计 §5.3、§9）：Restart=always + RestartSec=1 → 崩溃后 ≤3s 拉起；
+# 渲染进程崩溃不影响 mupcd（进程隔离，只经回环 GET 单向读，无任何下行写）。
+# 启动顺序：不强依赖 mupcd —— 先启动时屏显「正在连接数据通道…」，mupcd 就绪后 ≤1s 回实时。
+
+[Unit]
+Description=MUPC 本地显示终端渲染进程（HDMI 运行状态展示）
+Documentation=file:///opt/mupc/config/mupc-display.service
+# 不 Require/After mupcd：渲染进程可先起（显示「初始化中」），mupcd 上线后自动切实时。
+After=multi-user.target
+
+[Service]
+Type=simple
+User=mupc
+Group=mupc
+# fbdev 需 /dev/fb0（video）；DRM 需 /dev/dri（render）；按真机实际组名保留所需项。
+SupplementaryGroups=dialout video render
+
+ExecStart=/opt/mupc/bin/mupc-local-display \
+    --channel http://127.0.0.1:9810/v1/display/latest \
+    --backend fbdev --fbdev-path /dev/fb0 \
+    --width 1024 --height 768 \
+    --interval 500 --stale-ms 2000
+
+# 崩溃/异常退出即拉起，≤3s 回到画面（PRD 4.3.1；与 mupcd 的 on-failure 策略不同，显示需 always）。
+Restart=always
+RestartSec=1
+# 防抖仅在「短时间内反复失败」时生效（避免秒级崩溃风暴刷日志）
+StartLimitInterval=30
+StartLimitBurst=10
+
+# 安全加固（渲染进程不需要任何写权限，除设备本身）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/mupc/logs
+ReadOnlyPaths=/opt/mupc/bin /opt/mupc/config
+
+# 资源限制（设计 §9：常驻内存 ≤64MB、CPU ≤15% 单核；此处给宽裕上限防失控）
+MemoryMax=128M
+LimitNOFILE=1024
+
+# 日志（落 journal，含退出统计行/拉帧失败计数，便于诊断）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mupc-display
+
+[Install]
+WantedBy=multi-user.target
