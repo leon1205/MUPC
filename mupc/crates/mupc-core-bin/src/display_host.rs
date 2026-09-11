@@ -155,6 +155,14 @@ impl DisplayDataProvider {
             p_total,
             i_phase,
             inconsistency,
+            // v2 契约新增四段：真实采集由工作单元 F（mupcd `display_host` 四段慢拍采集）接线。
+            // 当前显式置 `Default` = 「不可用」语义（`available=false`）→ 屏显「不可用」，
+            // **不得**显「无告警」/补 0（PRD EDGE-09 / F1.4 / §9 边界）。
+            // 刻意**不**用 `..Default::default()`：契约将来再加字段时应继续编译报错、必须显式处置。
+            device: Default::default(),
+            alarms: Default::default(),
+            info: Default::default(),
+            interlock: Default::default(),
         }
     }
 
