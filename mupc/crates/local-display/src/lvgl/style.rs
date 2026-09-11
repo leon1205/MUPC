@@ -90,7 +90,10 @@ impl Color {
     }
 
     /// 转 C 侧结构（内存序 `B, G, R` —— `LV_COLOR_DEPTH 32` 的 XRGB8888）。
-    fn to_sys(self) -> sys::lv_color_t {
+    ///
+    /// `pub(crate)`：`widgets.rs` 里直接吃 `lv_color_t` 的 C 接口（`lv_led_set_color`）
+    /// 需要它 —— 让"内存序"这条知识仍只在本文件里一份。
+    pub(crate) fn to_sys(self) -> sys::lv_color_t {
         sys::lv_color_t {
             blue: self.b,
             green: self.g,
@@ -137,6 +140,11 @@ impl Part {
     pub const SCROLLBAR: Self = Self(sys::LV_PART_SCROLLBAR as u32);
     /// 指示器部件（`lv_bar` / `lv_switch` 的"已选"段）。
     pub const INDICATOR: Self = Self(sys::LV_PART_INDICATOR as u32);
+    /// 旋钮部件（`lv_switch` 的滑块）。取值须与 C 端 `LV_PART_KNOB` 一致（`0x030000`）。
+    pub const KNOB: Self = Self(sys::LV_PART_KNOB as u32);
+    /// 选中项部件（`lv_dropdown` 的当前选项 / `lv_buttonmatrix` 的选中段）。
+    /// 取值须与 C 端 `LV_PART_SELECTED` 一致（`0x040000`）。
+    pub const SELECTED: Self = Self(sys::LV_PART_SELECTED as u32);
     /// 子项部件（`lv_buttonmatrix` 的段）。
     pub const ITEMS: Self = Self(sys::LV_PART_ITEMS as u32);
     /// 通配（仅用于 [`super::obj::Obj::remove_style`] 一类"匹配全部"的场合）。
@@ -344,6 +352,18 @@ impl Style {
         }
         // SAFETY: 同上。
         unsafe { sys::lv_style_set_bg_opa(&mut *self.raw, opa.raw()) };
+    }
+
+    /// 宽度（像素；UI §5.6-A 的滚动条 8 px 宽度即挂 [`Part::SCROLLBAR`] 用本 setter 设）。
+    ///
+    /// 对应 `lv_style_set_width`。对对象本身而言，本属性参与**布局趟**的尺寸解算：
+    /// 挂在 `MAIN` 上会决定对象宽度（不再取内容宽度），挂在 `SCROLLBAR` 上决定滚动条厚度。
+    pub fn set_width(&mut self, width: i32) {
+        if !self.is_live() {
+            return;
+        }
+        // SAFETY: `self.raw` 已 `lv_style_init` 且世代未变（LVGL 堆存活）。
+        unsafe { sys::lv_style_set_width(&mut *self.raw, width) };
     }
 
     /// 圆角（UI §3.5：卡片 8 / 控件 6 / 胶囊用极大值）。

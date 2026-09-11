@@ -73,6 +73,69 @@ use super::event::{self, CallbackHandle, Event, EventCode};
 use super::style::{Style, StyleSelector};
 use super::LvglError;
 
+/// **测试专用**：`from_raw` 挂探针的累计次数（观察"单例句柄是否每调用一次就挂一条"）。
+///
+/// 生产构建不可见。用途见 `tests_a3.rs` 的「会话级单例不得无界增长」断言：
+/// [`Obj::screen`] / [`super::widgets::layer_top`] 这类**会话级单例**若每次调用都走
+/// `from_raw`，就会对**同一个底层对象**反复挂 DELETE 探针 + `Ctx` Box（只在对象删除时
+/// 回收）⇒ 每次弹层 / 每帧调用都会无界累积。本计数器让"复用探针"可被**确定性**断言。
+#[cfg(test)]
+pub(crate) static PROBE_MOUNTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// 会话级单例（`lv_screen_active` / `lv_layer_top`）的**探针种子**容器。
+///
+/// # 为什么需要它（防无界增长）
+///
+/// 单例在一个世代内是**同一底层对象**，却可能被每帧 / 每次弹层取用。若每次都
+/// [`Obj::from_raw`]，就会对同一对象反复挂 DELETE 探针 + `Ctx` Box（只在对象删除时回收）
+/// ⇒ **无界累积**。本容器让每个单例**每世代只挂一条探针**：调用方从种子
+/// [`Obj::share_borrowed`] 出借用句柄（复用同一 `alive` / `styles`，不新增探针）。
+///
+/// 失效重建的两条路径经 [`Obj::is_alive`] 检出：① 对象被删（`alive` 置假）；② 世代变化。
+///
+/// # 为什么走 `Default` 初始化
+///
+/// `thread_local!` 的初始化式为 `RefCell::new(None)` 会被 clippy 要求升为 `const {...}`，
+/// 而 `RefCell::new` 的 const 稳定化（Rust 1.83）高于本项目声明的本机下限（1.75）；
+/// `Default` 初始化与 `event.rs` 的 `CbState::default()` 同法，且不抬高 MSRV。
+#[derive(Default)]
+pub(crate) struct SingletonSeed(RefCell<Option<Obj>>);
+
+impl SingletonSeed {
+    /// 取一个共享探针的**非拥有**句柄；种子与"当前单例"不一致时重建。
+    ///
+    /// `current_raw` **每次**调用（都是 O(1) 的取指针访问器），其返回值同时用于：
+    /// ① 判空（NULL ⇒ 未就绪，归为 [`LvglError::NotInitialized`]）；
+    /// ② **识别单例身份变化** —— 如 `lv_display_set_default` 切换默认屏后
+    ///    `lv_screen_active()` 会指向另一个（仍存活的）屏幕，此时旧种子虽 `is_alive` 也已过期。
+    ///
+    /// 重建判据：`raw != 当前指针` 或 `!is_alive()`（对象被删 / 世代变化）。指向同一对象时
+    /// 复用现有探针 —— 这正是"每世代至多一条探针"的来源（不随调用次数增长）。
+    pub(crate) fn get_or_refresh(
+        &self,
+        current_raw: impl FnOnce() -> *mut sys::lv_obj_t,
+    ) -> Result<Obj, LvglError> {
+        let raw_now = current_raw();
+        if raw_now.is_null() {
+            return Err(LvglError::NotInitialized);
+        }
+        let mut slot = self.0.borrow_mut();
+        if !slot.as_ref().is_some_and(|o| o.is_alive() && o.raw == raw_now) {
+            *slot = Some(Obj::adopt_borrowed(raw_now)?);
+        }
+        Ok(slot
+            .as_ref()
+            .expect("上方刚确保已填充")
+            .share_borrowed())
+    }
+}
+
+thread_local! {
+    /// [`Obj::screen`] 的探针种子（每世代至多一条探针）。
+    static SCREEN_SEED: SingletonSeed = SingletonSeed::default();
+}
+
 /// 对象标志（`LV_OBJ_FLAG_*` 的镜像）。
 ///
 /// 只列本模块**直接用到**的可见性标志，以及设计 §5.6 控件映射表明确点名、A3 一定会用的
@@ -133,16 +196,26 @@ impl Obj {
     /// 需要已 `init()` 且已有一个 display 作为默认屏（[`super::display::Display::create`]
     /// 会设为默认）；否则返回 [`LvglError::NotInitialized`]（无默认 display 时 `lv_screen_active()`
     /// 返回 NULL，此处也按此归类）。
+    ///
+    /// # 会话级单例：探针只挂一次（防无界增长）
+    ///
+    /// 屏幕在一个世代内是**同一对象**，但本方法可能被每帧 / 每次弹层调用。若每次都
+    /// [`Obj::from_raw`]，就会对同一对象反复挂 DELETE 探针 + `Ctx` Box（只在对象删除时
+    /// 回收）⇒ 无界累积。故本层按**世代 + 存活**缓存一个"探针种子"，每次返回的都是
+    /// 共享同一 `alive` / `styles` 的借用句柄（[`Obj::share_borrowed`]），**不**新增探针。
+    ///
+    /// 缓存失效重建的**三条**路径：① 屏被删除（含 `lv_deinit` / display 删除）⇒ 种子的
+    /// `alive` 置假；② 世代变化 ⇒ 种子的世代判据失配；③ **默认屏被切换**（另一 display
+    /// 成为默认，`lv_screen_active()` 指向另一个仍存活的屏）⇒ 当前指针与种子不一致。
+    /// 三者都经 [`SingletonSeed::get_or_refresh`] 检出 ⇒ 重建，绝不返回过期屏。
     pub fn screen() -> Result<Self, LvglError> {
         if !super::is_initialized() {
             return Err(LvglError::NotInitialized);
         }
-        // SAFETY: 已 `init()`；`lv_screen_active()` 返回默认屏（可能为 NULL，下方判空）。
-        let raw = unsafe { sys::lv_screen_active() };
-        if raw.is_null() {
-            return Err(LvglError::NotInitialized);
-        }
-        Ok(Self::from_raw(raw, false))
+        SCREEN_SEED.with(|seed| {
+            // SAFETY: 已 `init()`；`lv_screen_active()` 返回默认屏（可能为 NULL，容器判空）。
+            seed.get_or_refresh(|| unsafe { sys::lv_screen_active() })
+        })
     }
 
     /// 在 `parent` 下建一个基础对象（**拥有**句柄：`Drop` / [`Obj::delete`] 删除它）。
@@ -161,8 +234,46 @@ impl Obj {
         Ok(Self::from_raw(raw, true))
     }
 
+    /// 薄层内部（`widgets.rs`）：把 `lv_*_create` **刚返回**的裸指针收成**拥有**句柄。
+    ///
+    /// 与 [`Obj::create`] 的分工：那条路走 `lv_obj_create`（基类），这条走各控件的
+    /// `lv_<widget>_create`（子类，带控件行为/绘制）——两者对象模型相同（都是
+    /// `lv_obj_t*`），故收尾完全一致：判空 + 挂存活探针 + 交给 `Drop` 删除。
+    /// `what` 只用于错误文案（指出是哪个控件创建失败）。
+    ///
+    /// **前提（`pub(crate)` 的信任边界）**：调用方仅限 `src/lvgl/**` 内部，且 `raw` 必为
+    /// `lv_*_create` **刚返回**的裸指针 ⇒ 只需"已初始化 + 判空"，**不**额外验指针有效性
+    /// （刚建的对象不可能已被删除）；跨模块的任意裸指针不得喂进来。
+    pub(crate) fn adopt_created(
+        raw: *mut sys::lv_obj_t,
+        what: &'static str,
+    ) -> Result<Self, LvglError> {
+        if !super::is_initialized() {
+            return Err(LvglError::NotInitialized);
+        }
+        if raw.is_null() {
+            return Err(LvglError::OutOfMemory(what));
+        }
+        Ok(Self::from_raw(raw, true))
+    }
+
+    /// 薄层内部（`widgets.rs`）：把 LVGL **自己拥有**的既有对象（`lv_layer_top()`、
+    /// `lv_tabview_get_content()` 这类"取一个已存在的子对象"）包成**非拥有**句柄 ——
+    /// `Drop` 不删除它（与 [`Obj::screen`] 同口径）。
+    pub(crate) fn adopt_borrowed(raw: *mut sys::lv_obj_t) -> Result<Self, LvglError> {
+        if !super::is_initialized() {
+            return Err(LvglError::NotInitialized);
+        }
+        if raw.is_null() {
+            return Err(LvglError::NotInitialized);
+        }
+        Ok(Self::from_raw(raw, false))
+    }
+
     /// 包一个刚取得的裸指针，并挂上"删除即置位"的存活探测回调。
     fn from_raw(raw: *mut sys::lv_obj_t, owns: bool) -> Self {
+        #[cfg(test)]
+        PROBE_MOUNTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let alive = Rc::new(Cell::new(true));
         let alive_w = alive.clone();
         let styles: Rc<RefCell<Vec<Rc<Style>>>> = Rc::new(RefCell::new(Vec::new()));
@@ -195,6 +306,25 @@ impl Obj {
     /// **对外不暴露** —— 页面代码一律走本类型的安全方法，不得触碰裸指针）。
     pub(crate) fn raw(&self) -> *mut sys::lv_obj_t {
         self.raw
+    }
+
+    /// 以 `self` 为**探针种子**再给一个**非拥有**借用句柄：复用同一 `raw` / 世代 /
+    /// `alive` 标志 / 样式共享表，**不**重复挂 DELETE 探针、**不**新增 `Ctx`。
+    ///
+    /// 仅两条**会话级单例**路径使用（[`Obj::screen`] 与 [`super::widgets::layer_top`]）：
+    /// 它们可能被高频调用，而底层对象在一个世代内是同一个 ⇒ 每调用一次就 `from_raw`
+    /// 会让探针无界累积（只在对象删除时回收）。句柄间共享 `alive` / `styles` 与
+    /// [`Obj::stale_generation_handle`] 同法，符合既有所有权不变量（不新增机制）。
+    ///
+    /// `pub(crate)` 而非 `pub`：这是"探针种子"的内部复用点，不构成新的对外所有权语义。
+    pub(crate) fn share_borrowed(&self) -> Self {
+        Self {
+            raw: self.raw,
+            owns: false,
+            generation: self.generation,
+            alive: self.alive.clone(),
+            styles: self.styles.clone(),
+        }
     }
 
     /// 底层对象是否仍存活（**删除标志为真** 且 LVGL 已初始化 **且** 世代未变）。

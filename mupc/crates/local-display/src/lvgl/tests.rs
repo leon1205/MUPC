@@ -399,4 +399,9 @@ fn lvgl_core_bridge_chain() {
     // `cargo test` 默认多线程跑测试函数 —— A2 的用例因此**不另起 `#[test]`**，
     // 而是由本函数在同一线程内继续驱动（沿用 A1 的串行化做法）。
     super::tests_a2::obj_style_font_chain();
+
+    // ── A3「控件」场景（`tests_a3.rs`）────────────────────────────────────
+    // 同理由本函数在同一线程内继续驱动（A2 的场景 ⑰/⑲ 末尾已 `deinit`，
+    // `widgets_chain` 自带 `init`/`deinit` 配对）。
+    super::tests_a3::widgets_chain();
 }

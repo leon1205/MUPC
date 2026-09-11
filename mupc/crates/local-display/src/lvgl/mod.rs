@@ -24,7 +24,8 @@
 //! - **A2「薄安全层·对象与样式」**：[`obj`]（`Obj` 包装，把 [`event::on`] /
 //!   [`event::CallbackHandle::detach`] 的 `unsafe` 前置条件收进所有权不变量）、
 //!   [`style`]（样式机制 + 类型化 setter，**不含** UI 规格值）、[`font`]（10 档位图字体取用）；
-//! - **A3（未做）**：`widgets.rs`（控件构造与 setter，设计 §5.6 控件映射表）。
+//! - **A3「薄安全层·控件」**：[`widgets`]（控件构造与 setter，设计 §5.6 控件映射表；
+//!   含滚动容器、长按入口、输入组焦点）。
 //!
 //! `unsafe` 始终只在本目录内（设计 §1.1.1.2 纪律 1）。
 
@@ -34,11 +35,14 @@ pub mod font;
 pub mod indev;
 pub mod obj;
 pub mod style;
+pub mod widgets;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_a2;
+#[cfg(test)]
+mod tests_a3;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;

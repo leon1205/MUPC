@@ -100,6 +100,7 @@ fn:lv_style_init
 fn:lv_style_reset
 fn:lv_style_set_bg_color
 fn:lv_style_set_bg_opa
+fn:lv_style_set_width
 fn:lv_style_set_radius
 fn:lv_style_set_pad_top
 fn:lv_style_set_pad_bottom
@@ -122,6 +123,88 @@ fn:lv_label_set_text
 fn:lv_label_set_long_mode
 type:lv_label_t
 type:lv_label_long_mode_t
+
+# ── 控件（A3 widgets.rs：设计 §5.6 控件映射表）────────────────────
+# 按钮 / 文本 / 列表 / 表格 / 条 / 灯 / 下拉 / 开关 / 复选 / 键矩阵 / 弹层 / 页签。
+# 步进器 / IPv4 / 日期时间一律 `lv_button` + `lv_label` 组合（禁文本输入，见 lv_conf.h）。
+fn:lv_button_create
+fn:lv_list_create
+fn:lv_list_add_text
+fn:lv_table_create
+fn:lv_table_set_cell_value
+fn:lv_table_get_cell_value
+fn:lv_table_set_row_count
+fn:lv_table_set_column_count
+fn:lv_table_get_row_count
+fn:lv_table_get_column_count
+fn:lv_table_set_column_width
+fn:lv_bar_create
+fn:lv_bar_set_range
+fn:lv_bar_set_value
+fn:lv_bar_set_start_value
+fn:lv_bar_set_mode
+fn:lv_bar_get_value
+fn:lv_led_create
+fn:lv_led_set_color
+fn:lv_led_set_brightness
+fn:lv_led_get_brightness
+fn:lv_led_on
+fn:lv_led_off
+fn:lv_led_toggle
+fn:lv_dropdown_create
+fn:lv_dropdown_set_options
+fn:lv_dropdown_set_selected
+fn:lv_dropdown_get_selected
+fn:lv_dropdown_set_dir
+fn:lv_dropdown_set_text
+fn:lv_switch_create
+fn:lv_checkbox_create
+fn:lv_checkbox_set_text
+fn:lv_buttonmatrix_create
+fn:lv_buttonmatrix_set_map
+fn:lv_buttonmatrix_set_selected_button
+fn:lv_buttonmatrix_get_selected_button
+fn:lv_buttonmatrix_get_button_text
+fn:lv_buttonmatrix_set_one_checked
+fn:lv_tabview_create
+fn:lv_tabview_add_tab
+fn:lv_tabview_get_content
+fn:lv_tabview_get_tab_bar
+fn:lv_tabview_set_tab_bar_position
+fn:lv_tabview_set_tab_bar_size
+fn:lv_msgbox_create
+fn:lv_msgbox_add_title
+fn:lv_msgbox_add_text
+fn:lv_msgbox_add_footer_button
+fn:lv_msgbox_get_content
+fn:lv_msgbox_close
+fn:lv_layer_top
+fn:lv_label_get_text
+type:lv_dir_t
+type:lv_scrollbar_mode_t
+type:lv_bar_mode_t
+type:lv_anim_enable_t
+
+# ── 通用对象 / 输入组（A3：状态位、滚动容器、TT-09 默认焦点、长按）──
+fn:lv_obj_add_state
+fn:lv_obj_remove_state
+fn:lv_obj_has_state
+fn:lv_obj_set_scroll_dir
+fn:lv_obj_get_scroll_dir
+fn:lv_obj_set_scrollbar_mode
+fn:lv_obj_get_scrollbar_mode
+fn:lv_group_create
+fn:lv_group_delete
+fn:lv_group_add_obj
+fn:lv_group_remove_obj
+# `lv_group_remove_obj(obj)` 只吃对象指针（按对象自查其所在组）；`Group::remove` 要保证
+# "只从本组移除"，故先经 `lv_obj_get_group(obj)` 校验归属，再决定是否调用。
+fn:lv_obj_get_group
+fn:lv_group_focus_obj
+# 长按阈值的 v9 归属是 **indev**（逐对象的 `lv_obj_set_long_press_time` 是 v8 API，
+# v9.5.0 不存在 —— 薄层 indev.rs 的 `set_long_press_time` 文档已记该差异）。
+fn:lv_indev_set_long_press_time
+type:lv_group_t
 
 # ── 字体 ─────────────────────────────────────────────────────────
 type:lv_font_t
@@ -157,6 +240,17 @@ var:lv_font_noto_sc_148
 # 【A2 复核（2026-09-11）】新增 24 fn（obj/style）+ 5 type + 9 var（10 档字体）后重跑
 # 同一断言仍然全绿：越界/缺失/死符号三个集合均为空 —— 新增 5 个 type 全是**直接声明**
 # （非递归带出），故本分节保持 21 条不变。
+#
+# 【A3 复核（2026-09-11）】新增 68 fn / 6 type（0 var；控件 / 状态 / 滚动 / 输入组）后重跑：
+# 唯一越界是 `_lv_group_t` —— `type:lv_group_t` 是**直接声明**，其结构体本体
+# `_lv_group_t` 由 `allowlist_recursively(true)` **必然**带出（组内对象链表 / 焦点指针 /
+# 回调字段），按本分节口径登记在此。其余 5 个新 type（lv_dir_t / lv_scrollbar_mode_t /
+# lv_bar_mode_t / lv_anim_enable_t / lv_group_t）均为直接声明，已写在上面的用点分节内。
+# 全量：135 fn / 54 type / 11 var = 200 条。
+# 【A3 质量复审（2026-09-11）】+2 fn（`lv_style_set_width` —— §5.6-A 滚动条 8 px 宽度；
+# `lv_obj_get_group` —— `Group::remove` 先校验归属再移除）；无新增 type/var
+# （`LV_PART_KNOB` / `LV_PART_SELECTED` 是已登记的 `lv_part_t` enum 成员，随 type 带出，
+# 按本清单口径不单独登记）。全量：137 fn / 54 type / 11 var = 202 条。
 # 其中 `lv_font_glyph_dsc_t__bindgen_ty_1` 是 bindgen 为匿名 `union` 生成的具名条目：
 # 一致性测试已补 `pub union` / `pub enum` 解析分支（此前它既不在清单也不被断言）。
 #
@@ -170,6 +264,7 @@ type:_lv_draw_buf_t
 type:_lv_event_dsc_t
 type:_lv_event_t
 type:_lv_font_t
+type:_lv_group_t
 type:_lv_indev_t
 type:_lv_label_t
 type:_lv_obj_t

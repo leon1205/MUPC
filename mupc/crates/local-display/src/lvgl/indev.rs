@@ -112,6 +112,27 @@ impl Indev {
         }
     }
 
+    /// 设长按判定阈值（毫秒）—— 达到该时长后 LVGL 派发 [`super::event::EventCode::LONG_PRESSED`]。
+    ///
+    /// # ⚠️ 与设计 §5.6 的 API 差异（**已在 v9.5.0 源码核实**）
+    ///
+    /// 设计 §5.6 / §5.7 写的是 `lv_obj_set_long_press_time(btn, 1000)`（**逐对象**）——
+    /// 那是 **LVGL v8 的 API**；**v9.5.0 不存在该符号**（全树 grep 仅命中
+    /// `src/indev/lv_indev.h` 的 `lv_indev_set_long_press_time`）。v9 把长按阈值收敛在
+    /// **indev** 上（`lv_indev_private.h` 的 `long_press_time`，`src/indev/lv_indev.c`
+    /// 的按下列判定），因此本层把入口放在 [`Indev`]（**每个 indev 一个阈值**，本机
+    /// 只有一块触摸屏 ⇒ 与"确认按钮长按 1.0 s"的意图等价；阈值本身由 `ui/theme.rs`
+    /// 的单一真源传入，本层**不写死** 1000）。
+    ///
+    /// 已 [`super::deinit`] 或处于上一世代时是 **no-op**（防 UB）。
+    pub fn set_long_press_time(&self, ms: u16) {
+        if !self.is_live() {
+            return;
+        }
+        // SAFETY: `self.raw` 存活（世代未变且 LVGL 仍初始化）；单线程调用。
+        unsafe { sys::lv_indev_set_long_press_time(self.raw, ms) };
+    }
+
     /// 主动投递一次：`lv_indev_read()` → LVGL 命中 / z-order / 滚动判定 / `LV_EVENT_*` 派发。
     ///
     /// 事件循环在 `poll()` 返回后、读到 evdev 事件时调用（设计 §5.2 骨架）。
