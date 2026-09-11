@@ -1,0 +1,34 @@
+# lvgl-sys —— LVGL v9.5.0 C 源码的原始（unsafe）绑定
+#
+# 对齐设计 §1.1.1.2 / §5.1 / §12.1：
+#   - LVGL 源码通过 git submodule 固定到 tag v9.5.0（mupc/vendor/lvgl）
+#   - build.rs 用 `cc` 递归编译 src/**（排除第三方 src/libs/**），并把本目录的
+#     lv_conf.h 放到 include 路径（LV_CONF_INCLUDE_SIMPLE）
+#   - bindgen 按 allowlist.txt 逐符号生成绑定（禁 lv_* 通配），产物 OUT_DIR/bindings.rs
+#
+# 本 crate 只允许被 `local-display` 的 src/lvgl/ 薄安全层引用（unsafe 边界纪律，#1）。
+[package]
+name = "lvgl-sys"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Raw (unsafe) bindgen bindings for LVGL v9.5.0 C sources vendored at mupc/vendor/lvgl"
+links = "lvgl"
+build = "build.rs"
+
+[lib]
+name = "lvgl_sys"
+path = "src/lib.rs"
+
+[features]
+default = []
+# S-3 用点：启用后 example 改用 lv_font_noto_sc_32（需先跑 fonts/gen_fonts.sh）
+noto-font = []
+
+[build-dependencies]
+cc = "1"
+bindgen = { version = "0.72", default-features = false, features = ["runtime"] }
+
+[[example]]
+name = "spike_offscreen"
+path = "examples/spike_offscreen.rs"

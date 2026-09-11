@@ -46,3 +46,12 @@ vendor/rknn/librknnrt.so.sha256
 # Build system artifacts
 build/
 build-*/
+
+# 12-MUPC 本地显示终端：字库源与 lv_font_conv 生成物
+#   不入库（OFL 字库可公开下载、生成物是构建产物，入库会平白膨胀仓库）；
+#   构建前先跑 mupc/crates/local-display/fonts/gen_fonts.sh。
+#   入库项：gen_fonts.sh / extract_charset.py / font_subset_charset.txt / NotoSansSC-LICENSE.txt
+mupc/crates/local-display/fonts/*.otf
+mupc/crates/local-display/fonts/*.ttf
+mupc/crates/local-display/fonts/*.ttc
+mupc/crates/local-display/fonts/lv_font_noto_sc_*.c

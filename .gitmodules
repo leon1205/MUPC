@@ -1,0 +1,5 @@
+[submodule "mupc/vendor/lvgl"]
+	path = mupc/vendor/lvgl
+	url = https://github.com/lvgl/lvgl.git
+	shallow = true
+	branch = v9.5.0

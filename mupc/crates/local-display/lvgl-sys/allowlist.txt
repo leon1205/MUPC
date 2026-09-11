@@ -1,0 +1,56 @@
+# lvgl-sys bindgen 精确 allowlist（设计 §1.1.1.2 / §12.1）
+#
+# 逐行一项，格式：`fn:<符号>` / `type:<符号>` / `var:<符号>`，`#` 起注释。
+# 【强制纪律】禁止 `lv_*` 一类通配 —— 通配等于全量生成，与"压缩生成物 / unsafe 面"自相矛盾。
+# 【双向校验】scripts/check_allowlist.py：
+#   ① bindings.rs 导出符号集合 ⊆ 本清单
+#   ② 本清单每个符号在 src/ 与 examples/ 中确有引用（无死符号）
+#
+# 本轮（spike）只覆盖 S-2 离屏 proof + S-3 字体用例所需的最小符号集；
+# 正式编码期新增控件用点时必须同步补清单（纪律与 unsafe 边界同级）。
+
+# ── init / tick / timer ──────────────────────────────────────────
+fn:lv_init
+fn:lv_tick_set_cb
+fn:lv_timer_handler
+type:lv_tick_get_cb_t
+
+# ── display 注册（P-1：自研 lv_display + PARTIAL 双缓冲 + flush_cb）──
+fn:lv_display_create
+fn:lv_display_set_buffers
+fn:lv_display_set_flush_cb
+fn:lv_display_set_default
+fn:lv_display_flush_ready
+fn:lv_refr_now
+fn:lv_screen_active
+type:lv_display_t
+type:lv_display_render_mode_t
+type:lv_display_flush_cb_t
+
+# ── 基础对象 ─────────────────────────────────────────────────────
+fn:lv_obj_create
+fn:lv_obj_center
+fn:lv_obj_get_coords
+fn:lv_obj_set_size
+fn:lv_obj_set_style_bg_color
+fn:lv_obj_set_style_bg_opa
+fn:lv_obj_set_style_text_color
+fn:lv_obj_set_style_text_font
+type:lv_obj_t
+type:lv_area_t
+type:lv_color_t
+type:lv_opa_t
+type:lv_style_selector_t
+
+# ── label（唯一文本渲染控件；textarea/keyboard/spinbox 编译期关闭）──
+fn:lv_label_create
+fn:lv_label_set_text
+fn:lv_label_set_long_mode
+type:lv_label_t
+type:lv_label_long_mode_t
+
+# ── 字体 ─────────────────────────────────────────────────────────
+type:lv_font_t
+var:lv_font_montserrat_14
+# S-3：lv_font_conv 生成的 CJK 子集（声明见 lvgl-sys/fonts.h，产物在 ../fonts/）
+var:lv_font_noto_sc_32

@@ -15,6 +15,7 @@ members = [
     "crates/device-trait",
     "crates/display-proto",
     "crates/local-display",
+    "crates/local-display/lvgl-sys",
     "crates/plugin-loader",
     "crates/rs485-plugin",
     "crates/mqtt-bridge",
