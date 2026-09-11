@@ -38,16 +38,38 @@ pub mod layout;
 // 只有本目录可以引用 `lvgl-sys`（设计 §1.1.1.2 unsafe 边界纪律 1）。
 pub mod lvgl;
 pub mod run;
+// 工作单元 C（v2.0）：显示/输入后端 + 事件循环骨架。
+// screen = flush_cb 的像素 sink（fb0 复用 canvas.rs::FbCanvas / 内存 sink）；
+// touch = evdev 触摸栈（纯逻辑全平台可测，evdev 部分 cfg(linux)）；
+// timing = 事件循环骨架（注入时钟，可离屏测节拍/停止/超时不忙等）。
+pub mod screen;
 pub mod state;
+pub mod timing;
+pub mod touch;
 
 pub use crate::canvas::{Canvas, Color, OffscreenCanvas, Rect, blend_over, hex, rgb};
 pub use crate::channel::{ChannelEndpoint, DisplayChannelClient, GET_TIMEOUT};
 pub use crate::error::{Error, Result};
 pub use crate::font::TextKit;
 pub use crate::layout::{render, render_frame};
+pub use crate::screen::{Blitter, MemorySink, PixelSink};
 pub use crate::state::{
     ChannelStatus, DisplayState, Freshness, LiveDot, NumView, ScreenMode, SocView, UiSnapshot,
     CHANNEL_DOWN_MS,
+};
+pub use crate::timing::{
+    apply_zero_timeout_clamp, compute_timeout_ms, poll_wait_target, remaining_ms,
+    timeout_ms_to_c_int, wait_with_retry, Clock, Host, IdleTimer, LoopConfig, LoopStats,
+    LvglTicker, PollFailure, PollOutcome, PollWait, Poller, RawPollResult, Stop, SystemClock,
+    Ticker, MAX_POLL_TIMEOUT_MS, POLL_FAIL_ABORT_AFTER, POLL_FAIL_FALLBACK_AFTER,
+    ZERO_CLAMP_LADDER_MS, ZERO_TIMEOUT_BURST_LIMIT,
+};
+/// 生产 `Poller`（Linux `poll(2)`；工作单元 C 评审 C-① 整改）。
+#[cfg(target_os = "linux")]
+pub use crate::timing::FdPoller;
+pub use crate::touch::{
+    AbsAxis, CalibBounds, Calibration, Candidate, DeviceCaps, RawEvent, RawState, TouchConfig,
+    TouchError, TouchOverrides, TouchSource,
 };
 
 /// 默认分辨率（设计 §6.1：8 寸屏 1024x768）。

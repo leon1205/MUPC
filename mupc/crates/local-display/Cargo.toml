@@ -11,6 +11,9 @@
 #   - layout：固定网格四卡布局渲染（UI §4/§5/§6 坐标与色板）
 #   - config：渲染进程 CLI 参数解析 + 校验（设计 §7.2；手写解析，不引 clap）
 #   - run：主循环编排（Renderer 注入时钟可测 + run_loop 定拍/整流，设计 §5.3）
+#   - 【v2.0 工作单元 C】timing：事件循环骨架（poll 唯一阻塞点 + lv_timer_handler 驱动，§5.2）
+#   - 【v2.0 工作单元 C】touch：evdev 触摸栈（纯逻辑全平台可测；evdev 部分 cfg(linux)，§1.2）
+#   - 【v2.0 工作单元 C】screen：flush_cb 的像素 sink（fb0 复用 FbCanvas / 内存 sink，§1.1.1.1）
 #   - main（bin mupc-local-display）：CLI → 选后端 → 主循环 → 优雅退出（设计 §5.1/§9）
 # 依赖刻意保持最小（设计 §5.1）：仅 display-proto 所需 —— 不引入 serde_yaml / HTTP 服务栈。
 # 通道 GET 用裸 tokio TcpStream + HTTP/1.1 手写最小请求（无 reqwest/ureq 重依赖，可 mock 单测）。
@@ -61,6 +64,10 @@ tokio = { workspace = true }
 ab_glyph = "0.2"
 thiserror = { workspace = true }
 
-# /dev/fb0 mmap 仅在 Linux 需要（Windows 本机不编译该 cfg 块——设计 §B1：Linux 目标纯 Rust）。
+# /dev/fb0 mmap 与 evdev 读取仅在 Linux 需要（Windows 本机不编译这两个 cfg 块
+# ——设计 §B1/§11.2：evdev 发现与校准属真机项，其**判定逻辑**（touch.rs 上半）全平台可测）。
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# 触摸栈（设计 §1.2 关键决策 B-1 **选定**）：直接 ioctl/read，不引入 libevdev
+# （`lv_conf.h` 的 `LV_USE_EVDEV = 0`）。仅在 Linux target 编译。
+evdev = "0.13"

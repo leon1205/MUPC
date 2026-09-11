@@ -8,6 +8,23 @@
 //! - FbCanvas（仅 `target_os = "linux"`，`/dev/fb0` mmap）：Windows 本机不编译该 cfg 块；
 //!   真机像素格式(bpp/order)/DRM 后端属设计 §13 前置项 1，实现按「32bpp XRGB 映射」，
 //!   首验不符时切 `--fbdev-path` 或补 DRM dumb-buffer。
+//!
+//! # 具名豁免：`FbCanvas` 的 `unsafe` 与 §1.1.1.2 纪律 1（评审 C-⑤ 留痕）
+//!
+//! 设计 §1.1.1.2 纪律 1 规定「`unsafe` 只允许出现在 `lvgl-sys` 与 `src/lvgl/*`」。本模块的
+//! [`fbdev::FbCanvas`] **是 v1.0 既有资产**，按设计 §8.3 **保留**，v2.0 升为 `flush_cb` 的
+//! 像素 sink（`screen.rs` 里为它实现了 `PixelSink`），**不引用 `lvgl_sys`**。其 `unsafe`
+//! （libc `open`/`ioctl`/`mmap`/`munmap`）**不涉及任何 LVGL 绑定**，与纪律 1 的立意
+//! （「绑定层的 unsafe 只用点」）不冲突。**该豁免将补记进设计文档**（设计侧由主控统一修订，
+//! 本文件只做代码侧留痕）。
+//!
+//! ## 刻意不实现 `Send`/`Sync`（同评审 C-⑤）
+//!
+//! `FbCanvas` 含 mmap 裸指针 ⇒ 自动 `!Send`/`!Sync`，**本模块刻意不再手写 `unsafe impl`**：
+//! fb 映射一旦被跨线程写，就与 LVGL 的单线程约束（设计 §5.2 不变量 4）叠加成不可审计的数据
+//! 竞争。当前唯一调用点是 `main.rs` 在 `current_thread` 运行时内以 `&mut Renderer<FbCanvas>`
+//! 独占驱动（无 `spawn`、无 `Send` 约束），故**编译期锁死单线程**是最低成本的正确选择；
+//! 将来若真要跨线程，必须先给出显式的所有权/同步设计，而不是靠一行 `unsafe impl` 放开。
 
 /// 颜色 = `0x00RRGGBB`（不透明）。
 pub type Color = u32;
@@ -293,29 +310,13 @@ pub mod fbdev {
         len: usize,
     }
 
-    // SAFETY（手写 Send/Sync 的理由）：`FbCanvas` 只持有 `fd`（内核 fd，进程内跨线程
-    // 使用本身合法）与 `map`（`/dev/fb0` 的 mmap 裸指针）；裸指针不是 `Send`/`Sync`，
-    // 故编译器无法自动推导，需在此给出人证。据实说明当前实现的并发契约：
-    // - 所有对 `map` 的读写都发生在 `&mut self` 方法（`set_px`/`clear`/`blit_pixels`）
-    //   或 `&self` 方法（`pixel`）内；`map` 为私有字段，结构体内无 `UnsafeCell` 等
-    //   内部可变性出口，也不存在 `&mut self` 之外改写 `map` 的路径。因此 Rust 借用规则
-    //   已天然串行化「本进程内」的全部访问：`&mut` 独占 ⇒ 同一时刻至多一个线程在写，
-    //   `&FbCanvas` 跨线程只可能调用只读的 `pixel`（多个只读借用可共存）。
-    // - `fd` 仅在 `Drop` 中关闭一次（`open` 的错误分支各自 close 后即 return，不会交给
-    //   `Drop`），故跨线程移动 `FbCanvas`（Send）只是移动所有权，不产生重复释放。
-    // - 实际调用形态佐证（非保证来源，仅说明当前用法）：`local-display` 以
-    //   `current_thread` 运行时在单个任务内以 `&mut Renderer<FbCanvas>` 独占驱动主循环。
-    // - ⚠️ 残留风险（如实标注，且不在 Rust 模型内）：`map` 指向内核/显示控制器共享的
-    //   物理显存，Rust 的借用规则无法约束**外部写者**。若同机 fbcon console 或其他
-    //   进程同时在写 `/dev/fb0`，则其写入与本进程的非原子读写构成理论数据竞争（本进程
-    //   无法用锁串行化外部写者）。当前部署假设「渲染进程独占 fb0、fbcon 未占用该 fb」，
-    //   属真机首验项（设计 §13 前置项 1）。
-    unsafe impl Send for FbCanvas {}
-    // SAFETY：`Sync` 仅额外允许 `&FbCanvas` 跨线程共享，而 `&FbCanvas` 可达的唯一方法是
-    // `pixel`——它只做与 4 字节对齐的 `u32` 只读（无写入、无内部缓存、无 `&mut` 混用），
-    // 故共享引用并发读满足 `Sync` 契约；写侧必须取 `&mut self`，与 `&self` 互斥。
-    // 外部写者（fbcon/其他进程）的残留风险同上一条所述。
-    unsafe impl Sync for FbCanvas {}
+    // ⚠️ 刻意**不**实现 `Send`/`Sync`（评审 C-⑤ 裁定删除原手写 `unsafe impl`）：
+    // `FbCanvas` 含 mmap 裸指针 ⇒ 自动 `!Send`/`!Sync`。理由与取舍见本模块文件头的
+    // 「刻意不实现 Send/Sync」小节：编译期锁死单线程，防止 fb 映射被跨线程写而与
+    // LVGL 单线程约束（设计 §5.2 不变量 4）叠加成不可审计的数据竞争。
+    // 另需注意（Rust 模型之外的残留风险，属真机首验项，设计 §13 前置项 1）：`map` 指向
+    // 内核/显示控制器共享的物理显存，若同机 fbcon/其他进程并发写 /dev/fb0，本进程无法用
+    // 锁串行化外部写者；当前部署假设「渲染进程独占 fb0、fbcon 未占用该 fb」。
 
     impl FbCanvas {
         /// 打开帧缓冲设备并按 `w×h×4`（32bpp）mmap。返回前会清零整个显存。
@@ -495,8 +496,8 @@ pub mod fbdev {
             // 「Rust 内并发读写同一元素」。
             // ⚠️ 残留风险（如实标注）：该读为非原子的普通 `u32` 读。若内核 fbcon console 或
             // 其他进程并发写 `/dev/fb0`，则与外部写者构成 Rust 模型外的数据竞争（本进程无法
-            // 加锁串行化外部写者）；当前部署假设渲染进程独占 fb0（见 `Send`/`Sync` 注释与
-            // 设计 §13 前置项 1）。读取值仅用于字形反锯齿的背景混合，即便偶发撕裂也只是
+            // 加锁串行化外部写者）；当前部署假设渲染进程独占 fb0（见文件头「刻意不实现
+            // Send/Sync」小节与设计 §13 前置项 1）。读取值仅用于字形反锯齿的背景混合，即便偶发撕裂也只是
             // 单帧像素观感问题，不会造成内存安全问题。
             unsafe { Some(*(self.map as *const Color).add(idx)) }
         }
