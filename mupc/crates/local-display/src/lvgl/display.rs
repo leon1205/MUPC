@@ -54,6 +54,17 @@ pub struct Area {
 }
 
 impl Area {
+    /// **空区域**（0×0）：`x2 < x1` 且 `y2 < y1` ⇒ [`Area::width`] / [`Area::height`] 均为 0。
+    ///
+    /// 作为"句柄已失效"的失败返回值（见 [`super::obj::Obj::coords`]）—— 注意**不是**
+    /// `Default`（全零的 `lv_area_t` 是 1×1，会与 [`super::obj::Obj::size`] 的 `(0, 0)` 打架）。
+    pub(crate) const EMPTY: Self = Self {
+        x1: 0,
+        y1: 0,
+        x2: -1,
+        y2: -1,
+    };
+
     /// 区域宽度（像素）。
     pub fn width(&self) -> u32 {
         (self.x2 - self.x1 + 1).max(0) as u32
@@ -69,8 +80,8 @@ impl Area {
         self.width() as usize * self.height() as usize * BYTES_PER_PIXEL
     }
 
-    /// 从 C 侧 `lv_area_t` 读取（薄层内部用）。
-    fn read(a: &sys::lv_area_t) -> Self {
+    /// 从 C 侧 `lv_area_t` 读取（薄层内部用：flush 桥、`obj.rs` 的 `Obj::coords`）。
+    pub(crate) fn read(a: &sys::lv_area_t) -> Self {
         Self {
             x1: a.x1,
             y1: a.y1,

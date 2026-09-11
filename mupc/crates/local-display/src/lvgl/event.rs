@@ -155,6 +155,8 @@ impl Drop for ReentryGuard {
 
 /// 回收一个 `Ctx`：回调执行期间（`depth > 0`）**延迟**，否则立即 `from_raw`。
 ///
+/// **幂等**：同一 `p` 在同一延迟窗口内被请求多次也只入 `pending` 一次（见下）。
+///
 /// # Safety
 ///
 /// `p` 必须来自 [`on`] 的 `Box::into_raw`，且此前未被回收。
@@ -162,7 +164,18 @@ unsafe fn reclaim(p: *mut Ctx) {
     let deferred = CB_STATE.with(|s| {
         let mut st = s.borrow_mut();
         if st.depth > 0 {
-            st.pending.push(p);
+            // ── **幂等去重**（不变量，不再依赖事件项的注册顺序）────────────────
+            // 同一个 `Ctx` 可能被**两条路径**在同一延迟窗口内各请求回收一次：以
+            // `ON(DELETE)` 注册、并在该回调内 `detach()` 自身的闭包为例：
+            //   (a) DELETE 分支末尾的 `reclaim(p)`（本文件 trampoline）；
+            //   (b) `CallbackHandle::detach()` 内部的 `reclaim(p)`（本文件）。
+            // 两者都落在 `depth > 0` 的同一窗口 ⇒ 不去重则同一个 `p` 入 `pending` 两次，
+            // 深度归零时 `Box::from_raw` 两次 = **double free**。
+            // 去重后，"恰好释放一次"由本函数自身保证 —— 不必再靠"存活探针最先注册 ⇒
+            // DELETE 时宿主已失效 ⇒ detach 变 no-op"这条**顺序依赖**的脆弱巧合兜底。
+            if !st.pending.contains(&p) {
+                st.pending.push(p);
+            }
             true
         } else {
             false

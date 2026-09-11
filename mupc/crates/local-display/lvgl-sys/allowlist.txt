@@ -83,6 +83,39 @@ type:lv_color_t
 type:lv_opa_t
 type:lv_style_selector_t
 
+# ── 基础对象 · A2（obj.rs：父子/坐标/可见性/样式挂载/存活判定）──────
+fn:lv_obj_get_width
+fn:lv_obj_get_height
+fn:lv_obj_add_flag
+fn:lv_obj_remove_flag
+fn:lv_obj_has_flag
+fn:lv_obj_set_parent
+fn:lv_obj_get_child_count
+fn:lv_obj_add_style
+fn:lv_obj_remove_style
+type:lv_obj_flag_t
+
+# ── 样式（A2 style.rs：机制层，UI 规格值在 ui/theme.rs）───────────
+fn:lv_style_init
+fn:lv_style_reset
+fn:lv_style_set_bg_color
+fn:lv_style_set_bg_opa
+fn:lv_style_set_radius
+fn:lv_style_set_pad_top
+fn:lv_style_set_pad_bottom
+fn:lv_style_set_pad_left
+fn:lv_style_set_pad_right
+fn:lv_style_set_border_width
+fn:lv_style_set_border_color
+fn:lv_style_set_border_opa
+fn:lv_style_set_border_side
+fn:lv_style_set_text_color
+fn:lv_style_set_text_font
+type:lv_style_t
+type:lv_part_t
+type:lv_state_t
+type:lv_border_side_t
+
 # ── label（唯一文本渲染控件；textarea/keyboard/spinbox 编译期关闭）──
 fn:lv_label_create
 fn:lv_label_set_text
@@ -93,8 +126,19 @@ type:lv_label_long_mode_t
 # ── 字体 ─────────────────────────────────────────────────────────
 type:lv_font_t
 var:lv_font_montserrat_14
-# S-3：lv_font_conv 生成的 CJK 子集（声明见 lvgl-sys/fonts.h，产物在 ../fonts/）
+# S-3 / A2：lv_font_conv 生成的 CJK 子集（声明见 lvgl-sys/fonts.h，产物在 ../fonts/）。
+# 10 档（UI §3.3 阶梯）由 A2 的 src/lvgl/font.rs `Font::of(档位)` 逐档取用；
+# 32 档另被 examples/spike_offscreen.rs（S-3 字形判别）引用。
+var:lv_font_noto_sc_24
+var:lv_font_noto_sc_26
+var:lv_font_noto_sc_28
 var:lv_font_noto_sc_32
+var:lv_font_noto_sc_48
+var:lv_font_noto_sc_56
+var:lv_font_noto_sc_64
+var:lv_font_noto_sc_96
+var:lv_font_noto_sc_112
+var:lv_font_noto_sc_148
 
 # ══ bindgen 递归带出的传递依赖 type（`allowlist_recursively(true)` 闭包）══
 #
@@ -110,6 +154,9 @@ var:lv_font_noto_sc_32
 # 实测（2026-09-11，LVGL v9.5）：显式登记这 21 个 type 后，`bindings.rs` 仍为
 # 1095 行 / 45 fn · 2 static · 43 type · 109 const，闭包集合变为空 —— 说明显式
 # `allowlist_type()` 不会二次带出新符号，无反馈循环。
+# 【A2 复核（2026-09-11）】新增 24 fn（obj/style）+ 5 type + 9 var（10 档字体）后重跑
+# 同一断言仍然全绿：越界/缺失/死符号三个集合均为空 —— 新增 5 个 type 全是**直接声明**
+# （非递归带出），故本分节保持 21 条不变。
 # 其中 `lv_font_glyph_dsc_t__bindgen_ty_1` 是 bindgen 为匿名 `union` 生成的具名条目：
 # 一致性测试已补 `pub union` / `pub enum` 解析分支（此前它既不在清单也不被断言）。
 #

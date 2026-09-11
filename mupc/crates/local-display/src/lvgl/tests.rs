@@ -16,6 +16,7 @@
 //! # 覆盖（设计 §11.1）
 //!
 //! ① init → display → PARTIAL 双缓冲 → flush 全链，且内存 sink 里出现非背景像素；
+//! （场景 ⑩–⑲ 属工作单元 **A2**，见 `tests_a2.rs` —— 仍由本函数在同线程内顺序驱动）
 //! ② 回调桥的 `user_data` 在对象删除时**恰好 drop 一次**（不泄漏、不 double free）；
 //! ③ 回调内 panic 被拦在桥内、不跨 FFI 展开（跨 FFI 展开 = UB）；
 //! ④ indev 的 read_cb 桥喂入坐标快照 → 由 LVGL 完成命中并派发 `LV_EVENT_CLICKED`；
@@ -41,7 +42,7 @@ const SCREEN_BG: [u8; 3] = [0x18, 0x10, 0x10];
 const CARD_BG: [u8; 3] = [0x3D, 0x2B, 0x22];
 const BTN_BG: [u8; 3] = [0x00, 0x00, 0xFF];
 
-fn lv_color(c: [u8; 3]) -> sys::lv_color_t {
+pub(super) fn lv_color(c: [u8; 3]) -> sys::lv_color_t {
     sys::lv_color_t {
         blue: c[0],
         green: c[1],
@@ -50,20 +51,22 @@ fn lv_color(c: [u8; 3]) -> sys::lv_color_t {
 }
 
 /// 不透明纯色底色（`selector = 0` = `LV_PART_MAIN | LV_STATE_DEFAULT`）。
-unsafe fn set_bg(obj: *mut sys::lv_obj_t, c: [u8; 3]) {
+pub(super) unsafe fn set_bg(obj: *mut sys::lv_obj_t, c: [u8; 3]) {
     sys::lv_obj_set_style_bg_color(obj, lv_color(c), 0);
     sys::lv_obj_set_style_bg_opa(obj, 255, 0);
 }
 
 /// 容差内统计某底色的像素数（LVGL 纯色填充应当精确，容差只为免于取整噪音）。
-fn count_color(sink: &[u8], c: [u8; 3]) -> usize {
+///
+/// `pub(super)`：A2 的 `tests_a2.rs` 复用（同一条离屏断言口径，避免两套判据漂移）。
+pub(super) fn count_color(sink: &[u8], c: [u8; 3]) -> usize {
     sink.chunks_exact(BYTES_PER_PIXEL)
         .filter(|px| (0..3).all(|i| (px[i] as i32 - c[i] as i32).abs() <= 4))
         .count()
 }
 
 /// 在对象删除时自增计数的探针：用来**观测**闭包捕获物是否真的被 drop。
-struct DropSpy(Rc<Cell<u32>>);
+pub(super) struct DropSpy(pub(super) Rc<Cell<u32>>);
 
 impl Drop for DropSpy {
     fn drop(&mut self) {
@@ -390,4 +393,10 @@ fn lvgl_core_bridge_chain() {
         "旧世代句柄的 Drop 不得再回收（世代失配 ⇒ no-op；否则 double free）"
     );
     super::deinit();
+
+    // ── A2「对象与样式」场景 ⑩–⑲（`tests_a2.rs`）────────────────────────
+    // **同一个 `#[test]` 内顺序执行**：LVGL 非线程安全（`LV_USE_OS = LV_OS_NONE`），
+    // `cargo test` 默认多线程跑测试函数 —— A2 的用例因此**不另起 `#[test]`**，
+    // 而是由本函数在同一线程内继续驱动（沿用 A1 的串行化做法）。
+    super::tests_a2::obj_style_font_chain();
 }

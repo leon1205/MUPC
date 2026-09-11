@@ -42,6 +42,13 @@ default = []
 # 启用后编译期 include_bytes!("../fonts/NotoSansSC-subset.otf")（设计 §5.4 捆绑子集）。
 # 字库文件未入库（前置项 8），默认关闭；真机部署/需复现测试时由开发放字库后开启。
 bundled-font = []
+# 【LVGL 链路】转发到 lvgl-sys 的 `noto-font`：启用后 `lvgl::font::Font::of(档位)`
+# 取到 `lv_font_conv` 生成的 CJK 位图字体（10 档，设计 §1.1.2）。
+# ⚠️ 前置：先跑 `fonts/gen_fonts.sh` 生成 `fonts/lv_font_noto_sc_*.c`（产物不入库）；
+#    产物缺失时 lvgl-sys 的 build.rs 给出可读的编译期报错（不退化为链接错误）。
+# 未启用（默认）时 `Font::of(..)` 一律返回 `None`（降级路径），`Font::fallback()`
+# 始终可用 —— 见 src/lvgl/font.rs 模块文档。
+noto-font = ["lvgl-sys/noto-font"]
 
 [dependencies]
 display-proto = { path = "../display-proto" }

@@ -14,20 +14,31 @@
 //!    宿主被 LVGL 删除时 drop）：不泄漏、不 double free。回调执行期间到达的回收请求
 //!    走 `event.rs` 的**延迟回收**（见该模块文档）。
 //! 6. 句柄与底层对象的对应关系用**世代令牌**（[`generation`]）刻画：`init → deinit →
-//!    init` 之后，上一世代残留的 [`display::Display`] / [`indev::Indev`] 句柄的底层对象
-//!    已被 `lv_deinit()` 释放，句柄据世代失配而**拒绝**再操作（防 double free / 悬垂调用）。
+//!    init` 之后，上一世代残留的 [`display::Display`] / [`indev::Indev`] / [`obj::Obj`] /
+//!    [`style::Style`] 句柄的底层对象（或堆）已被 `lv_deinit()` 释放，句柄据世代失配而
+//!    **拒绝**再操作（防 double free / 悬垂调用）。
 //!
-//! # 本轮范围（A1「核心桥」）
+//! # 模块与工作单元
 //!
-//! `mod.rs` / [`event`] / [`display`] / [`indev`] 四个模块。
-//! `obj.rs` / `style.rs` / `font.rs` / `widgets.rs` 留给 A2/A3（届时 `unsafe` 仍在同一目录内）。
+//! - **A1「核心桥」**：`mod.rs` / [`event`] / [`display`] / [`indev`]；
+//! - **A2「薄安全层·对象与样式」**：[`obj`]（`Obj` 包装，把 [`event::on`] /
+//!   [`event::CallbackHandle::detach`] 的 `unsafe` 前置条件收进所有权不变量）、
+//!   [`style`]（样式机制 + 类型化 setter，**不含** UI 规格值）、[`font`]（10 档位图字体取用）；
+//! - **A3（未做）**：`widgets.rs`（控件构造与 setter，设计 §5.6 控件映射表）。
+//!
+//! `unsafe` 始终只在本目录内（设计 §1.1.1.2 纪律 1）。
 
 pub mod display;
 pub mod event;
+pub mod font;
 pub mod indev;
+pub mod obj;
+pub mod style;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_a2;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;

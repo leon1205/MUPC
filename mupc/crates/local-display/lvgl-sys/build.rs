@@ -11,6 +11,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// 需要 `lv_font_conv` 产物的 10 档字号（UI 设计 §3.3 阶梯 / 设计 §1.1.2）。
+const FONT_SIZES: [u16; 10] = [24, 26, 28, 32, 48, 56, 64, 96, 112, 148];
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // crates/local-display/lvgl-sys -> 仓库根/mupc/vendor/lvgl
@@ -61,21 +64,40 @@ fn main() {
     }
     build.compile("lvgl");
 
-    // 字体产物（S-3）：crates/local-display/fonts/*.c，存在即编进来
+    // 字体产物（S-3 / 工作单元 A2）：crates/local-display/fonts/*.c，存在即编进来
     let fonts_dir = manifest_dir.join("..").join("fonts");
-    if fonts_dir.is_dir() {
-        println!("cargo:rerun-if-changed={}", fonts_dir.display());
-        let fonts: Vec<PathBuf> = collect_ext(&fonts_dir, "c");
-        if !fonts.is_empty() {
-            let mut fb = cc::Build::new();
-            fb.files(&fonts)
-                .include(&lvgl_root)
-                .include(&manifest_dir)
-                .define("LV_CONF_INCLUDE_SIMPLE", None)
-                .warnings(false)
-                .flag_if_supported("-w");
-            fb.compile("lvgl_fonts");
-        }
+    println!("cargo:rerun-if-changed={}", fonts_dir.display());
+    let fonts: Vec<PathBuf> = if fonts_dir.is_dir() {
+        collect_ext(&fonts_dir, "c")
+    } else {
+        Vec::new()
+    };
+    // `noto-font` 启用时逐一核对 10 档产物（设计 §1.1.2：缺产物必须给出**可读的编译期报错**，
+    // 不得退化为晦涩的 file not found / 链接期 undefined symbol）。
+    if env::var_os("CARGO_FEATURE_NOTO_FONT").is_some() {
+        let missing: Vec<String> = FONT_SIZES
+            .iter()
+            .filter(|px| !fonts_dir.join(format!("lv_font_noto_sc_{px}.c")).is_file())
+            .map(|px| format!("lv_font_noto_sc_{px}.c"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "lvgl-sys 的 `noto-font` feature 已启用，但 crates/local-display/fonts/ 下缺少字库产物：\n    \
+             {missing:?}\n\
+             请先生成（字库源 *.otf 与生成物 *.c 均不入库，见仓库 .gitignore）：\n    \
+             cd crates/local-display/fonts && ./gen_fonts.sh\n\
+             或只跑所需档位：\n    ./gen_fonts.sh 24 26 28 32 48 56 64 96 112 148"
+        );
+    }
+    if !fonts.is_empty() {
+        let mut fb = cc::Build::new();
+        fb.files(&fonts)
+            .include(&lvgl_root)
+            .include(&manifest_dir)
+            .define("LV_CONF_INCLUDE_SIMPLE", None)
+            .warnings(false)
+            .flag_if_supported("-w");
+        fb.compile("lvgl_fonts");
     }
 
     // ── 2/4. bindgen：精确 allowlist → OUT_DIR/bindings.rs ───────────
