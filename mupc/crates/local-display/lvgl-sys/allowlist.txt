@@ -2,15 +2,19 @@
 #
 # 逐行一项，格式：`fn:<符号>` / `type:<符号>` / `var:<符号>`，`#` 起注释。
 # 【强制纪律】禁止 `lv_*` 一类通配 —— 通配等于全量生成，与"压缩生成物 / unsafe 面"自相矛盾。
-# 【双向校验】scripts/check_allowlist.py：
-#   ① bindings.rs 导出符号集合 ⊆ 本清单
-#   ② 本清单每个符号在 src/ 与 examples/ 中确有引用（无死符号）
+# 【双向校验】mupc/crates/local-display/lvgl-sys/tests/allowlist_consistency.rs：
+#   ① bindings.rs 导出符号集合 ⊆ 本清单 —— 对 `fn` / `var` / **`type` 均为硬断言**
+#      （薄层 `src/lvgl/**` 落地后，`type` 已由"仅存在性校验"升为硬断言，设计 §1.1.1.2）；
+#   ② 本清单每个 `fn` / `var` 在 src/ 与 examples/ 中确有引用（无死符号）。
+#      `type` 不参与死符号检查：其中多数是 bindgen 递归带出的传递依赖（见文末分节）。
 #
-# 本轮（spike）只覆盖 S-2 离屏 proof + S-3 字体用例所需的最小符号集；
-# 正式编码期新增控件用点时必须同步补清单（纪律与 unsafe 边界同级）。
+# ① + ② 在 `type` 上合起来即**集合相等**（多一个、少一个都失败）—— 因此
+# "新增 type 静默通过"的漏洞被彻底堵死。新增控件用点时必须同步补清单
+# （纪律与 unsafe 边界同级）。
 
 # ── init / tick / timer ──────────────────────────────────────────
 fn:lv_init
+fn:lv_deinit
 fn:lv_tick_set_cb
 fn:lv_timer_handler
 type:lv_tick_get_cb_t
@@ -21,16 +25,53 @@ fn:lv_display_set_buffers
 fn:lv_display_set_flush_cb
 fn:lv_display_set_default
 fn:lv_display_flush_ready
+fn:lv_display_delete
+fn:lv_display_set_user_data
+fn:lv_display_get_user_data
+fn:lv_display_add_event_cb
+fn:lv_display_remove_event_cb_with_user_data
 fn:lv_refr_now
 fn:lv_screen_active
 type:lv_display_t
 type:lv_display_render_mode_t
 type:lv_display_flush_cb_t
 
+# ── 事件桥（薄层 event.rs：C 回调 → Rust 闭包 + user_data 生命周期）──
+fn:lv_obj_add_event_cb
+fn:lv_obj_remove_event_cb_with_user_data
+fn:lv_obj_send_event
+fn:lv_event_get_code
+fn:lv_event_get_user_data
+type:lv_event_t
+type:lv_event_cb_t
+type:lv_event_code_t
+
+# ── indev 注册（自研 read_cb 桥，LV_USE_EVDEV=0：不引入 libevdev）──
+fn:lv_indev_create
+fn:lv_indev_delete
+fn:lv_indev_set_type
+fn:lv_indev_set_read_cb
+fn:lv_indev_set_mode
+fn:lv_indev_set_display
+fn:lv_indev_set_user_data
+fn:lv_indev_get_user_data
+fn:lv_indev_read
+fn:lv_indev_add_event_cb
+fn:lv_indev_remove_event_cb_with_user_data
+type:lv_indev_t
+type:lv_indev_data_t
+type:lv_indev_type_t
+type:lv_indev_read_cb_t
+type:lv_indev_mode_t
+type:lv_indev_state_t
+type:lv_point_t
+
 # ── 基础对象 ─────────────────────────────────────────────────────
 fn:lv_obj_create
+fn:lv_obj_delete
 fn:lv_obj_center
 fn:lv_obj_get_coords
+fn:lv_obj_set_pos
 fn:lv_obj_set_size
 fn:lv_obj_set_style_bg_color
 fn:lv_obj_set_style_bg_opa
@@ -54,3 +95,44 @@ type:lv_font_t
 var:lv_font_montserrat_14
 # S-3：lv_font_conv 生成的 CJK 子集（声明见 lvgl-sys/fonts.h，产物在 ../fonts/）
 var:lv_font_noto_sc_32
+
+# ══ bindgen 递归带出的传递依赖 type（`allowlist_recursively(true)` 闭包）══
+#
+# 以下 type **不是**薄层直接声明的，而是上面各 `fn:` / `type:` 条目在 bindgen
+# `allowlist_recursively(true)` 下**必然**带出的传递依赖闭包（如 `lv_obj_t` 的
+# 结构体本体 `_lv_obj_t`、`lv_display_t` 的 `_lv_display_t`）。
+#
+# 为什么显式登记：断言① 对 `type` 已是**硬断言**（导出 ⊆ 清单）。不登记则无法与
+# "递归必然带出"共存；登记后该区间变成**集合相等**——闭包若因 LVGL/bindgen 升级
+# 而多出或减少一个 type，测试即失败并要求人工确认（这正是设计 §1.1.1.2 要堵的
+# "新增 type 静默通过"）。
+#
+# 实测（2026-09-11，LVGL v9.5）：显式登记这 21 个 type 后，`bindings.rs` 仍为
+# 1095 行 / 45 fn · 2 static · 43 type · 109 const，闭包集合变为空 —— 说明显式
+# `allowlist_type()` 不会二次带出新符号，无反馈循环。
+# 其中 `lv_font_glyph_dsc_t__bindgen_ty_1` 是 bindgen 为匿名 `union` 生成的具名条目：
+# 一致性测试已补 `pub union` / `pub enum` 解析分支（此前它既不在清单也不被断言）。
+#
+# ⚠️ 本分节由 `tests/allowlist_consistency.rs` 的"越界/缺失"断言机械核对；
+# 新增直接声明的 type 请写在上面对应用点分节内，不要混进这里。
+type:__BindgenBitfieldUnit
+type:_lv_cache_entry_t
+type:_lv_display_t
+type:_lv_draw_buf_handlers_t
+type:_lv_draw_buf_t
+type:_lv_event_dsc_t
+type:_lv_event_t
+type:_lv_font_t
+type:_lv_indev_t
+type:_lv_label_t
+type:_lv_obj_t
+type:lv_cache_entry_t
+type:lv_draw_buf_handlers_t
+type:lv_draw_buf_t
+type:lv_event_dsc_t
+type:lv_font_glyph_dsc_t
+type:lv_font_glyph_dsc_t__bindgen_ty_1
+type:lv_font_glyph_format_t
+type:lv_image_header_t
+type:lv_indev_gesture_type_t
+type:lv_result_t

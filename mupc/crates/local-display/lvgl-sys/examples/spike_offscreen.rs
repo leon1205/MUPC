@@ -316,8 +316,8 @@ fn text_region_stats(sink: &[u8], a: lv_area_t) -> (i32, i32, usize, usize) {
     let region = Region {
         x1: a.x1.max(0) as usize,
         y1: a.y1.max(0) as usize,
-        x2: (a.x2.min(W - 1)).max(0) as usize,
-        y2: (a.y2.min(H - 1)).max(0) as usize,
+        x2: a.x2.clamp(0, W - 1) as usize,
+        y2: a.y2.clamp(0, H - 1) as usize,
     };
     let ink = count_non_bg_in(sink, &region, CARD_BG);
     let blobs = count_blobs(sink, region, 0, CARD_BG);
@@ -347,8 +347,8 @@ fn count_non_bg_in(sink: &[u8], region: &Region, bg: [u8; 4]) -> u32 {
 fn dump_art(sink: &[u8], a: lv_area_t) {
     let x1 = a.x1.max(0) as usize;
     let y1 = a.y1.max(0) as usize;
-    let x2 = a.x2.min(W - 1).max(0) as usize;
-    let y2 = a.y2.min(H - 1).max(0) as usize;
+    let x2 = a.x2.clamp(0, W - 1) as usize;
+    let y2 = a.y2.clamp(0, H - 1) as usize;
     let step = 2usize; // 2x2 降采样
     println!("── 文本区 ASCII 预览（# = 有墨，. = 卡片底色）──");
     let mut y = y1;

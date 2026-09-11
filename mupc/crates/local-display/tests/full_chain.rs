@@ -43,8 +43,12 @@ const PH_SEQ: &str = "__SEQ__";
 
 /// 正常帧（值全有效、SOC 65%、充电中）——字面量 JSON，与设计 §3.3 线上格式逐字对齐
 /// （**不**用 display-proto 序列化，避免「同源同错」掩盖契约偏差）。
+///
+/// 注：`version` 必须等于 `PROTO_VERSION`（v2），且**故意省略** v2 新增四段
+/// （`device`/`alarms`/`info`/`interlock`）—— 这正是设计 §3.1 要求的分节缺省路径
+/// （`#[serde(default)]` → `Default` → 渲染端显式降级，不伪装正常）。
 fn live_frame_template() -> String {
-    r#"{"version":1,"seq":__SEQ__,"ts_ms":__TS__,"soc":65.0,"soc_source":"pcs_reg1010",
+    r#"{"version":2,"seq":__SEQ__,"ts_ms":__TS__,"soc":65.0,"soc_source":"pcs_reg1010",
         "soc_flag":"valid","run_state":2,"pcs_online":true,
         "p_phase":[{"v":12.3,"flag":"valid"},{"v":11.8,"flag":"valid"},{"v":12.0,"flag":"valid"}],
         "p_total":{"v":36.1,"flag":"valid"},
@@ -55,7 +59,7 @@ fn live_frame_template() -> String {
 
 /// 字段缺失帧：三相功率/电流 `not_read`（设计 §6.4 点表未覆盖）→ 各卡应显 `--` + 「未取数」。
 fn not_read_frame_template() -> String {
-    r#"{"version":1,"seq":__SEQ__,"ts_ms":__TS__,"soc":50.0,"soc_source":"bms",
+    r#"{"version":2,"seq":__SEQ__,"ts_ms":__TS__,"soc":50.0,"soc_source":"bms",
         "soc_flag":"valid","run_state":1,"pcs_online":false,
         "p_phase":[{"v":null,"flag":"not_read"},{"v":null,"flag":"not_read"},{"v":null,"flag":"not_read"}],
         "p_total":{"v":null,"flag":"not_read"},
@@ -66,7 +70,7 @@ fn not_read_frame_template() -> String {
 
 /// SOC 双源皆失帧（设计 §6.2）：`soc=null` + `soc_source=lost` → `--` + 「SOC 源失效」。
 fn soc_lost_frame_template() -> String {
-    r#"{"version":1,"seq":__SEQ__,"ts_ms":__TS__,"soc":null,"soc_source":"lost",
+    r#"{"version":2,"seq":__SEQ__,"ts_ms":__TS__,"soc":null,"soc_source":"lost",
         "soc_flag":"offline","run_state":null,"pcs_online":false,
         "p_phase":[{"v":null,"flag":"offline"},{"v":null,"flag":"offline"},{"v":null,"flag":"offline"}],
         "p_total":{"v":null,"flag":"offline"},

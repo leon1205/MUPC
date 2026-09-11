@@ -291,7 +291,8 @@ mod tests {
     }
 
     fn sample_frame_json() -> String {
-        r#"{"version":1,"seq":7,"ts_ms":1700000000000,"soc":65.0,"soc_source":"pcs_reg1010",
+        // v2 契约：`version` 必须等于 `PROTO_VERSION`（=2），否则帧被拒（设计 §3.5 条 1）。
+        r#"{"version":2,"seq":7,"ts_ms":1700000000000,"soc":65.0,"soc_source":"pcs_reg1010",
             "soc_flag":"valid","run_state":2,"pcs_online":true,
             "p_phase":[{"v":12.3,"flag":"valid"},{"v":11.8,"flag":"valid"},{"v":12.0,"flag":"valid"}],
             "p_total":{"v":36.1,"flag":"valid"},
@@ -436,7 +437,7 @@ mod tests {
     /// W3：帧 `version` 与 `PROTO_VERSION` 不符 → Err(ProtoVersion)（不静默按旧语义展示）。
     #[tokio::test]
     async fn fetch_latest_rejects_proto_version_mismatch() {
-        let body = sample_frame_json().replace("\"version\":1", "\"version\":99");
+        let body = sample_frame_json().replace("\"version\":2", "\"version\":99");
         let url = spawn_stub(body).await;
         let c = DisplayChannelClient::with_timeout(&url, Duration::from_secs(3)).unwrap();
         let err = c.fetch_latest().await.unwrap_err();

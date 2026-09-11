@@ -348,6 +348,12 @@ mod tests {
             p_total: Field { v: Some(36.1), flag: FieldFlag::Valid },
             i_phase: [Field { v: Some(22.5), flag: FieldFlag::Valid }; 3],
             inconsistency: false,
+            // v2 契约新增的四段：本测试桩只关心 v1 字段，四段一律取契约缺省
+            // （`DeviceSection` 等均 `#[serde(default)]` + `Default`，语义 = 「未提供」）。
+            device: Default::default(),
+            alarms: Default::default(),
+            info: Default::default(),
+            interlock: Default::default(),
         }
     }
 

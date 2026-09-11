@@ -34,6 +34,9 @@ pub mod config;
 pub mod error;
 pub mod font;
 pub mod layout;
+// LVGL 薄安全层（12-MUPC v2.0 工作单元 A1）：唯一允许 `unsafe` 的 Rust 侧位置之一。
+// 只有本目录可以引用 `lvgl-sys`（设计 §1.1.1.2 unsafe 边界纪律 1）。
+pub mod lvgl;
 pub mod run;
 pub mod state;
 

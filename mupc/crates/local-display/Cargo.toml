@@ -45,6 +45,9 @@ bundled-font = []
 
 [dependencies]
 display-proto = { path = "../display-proto" }
+# LVGL v9 C 源码的原始（unsafe）绑定。**只允许**被 `src/lvgl/**` 薄安全层引用
+# （设计 §1.1.1.2 unsafe 边界纪律 1：`pages`/`state`/`channel` 等模块不得直接 use）。
+lvgl-sys = { path = "lvgl-sys" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
