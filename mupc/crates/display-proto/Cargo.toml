@@ -2,7 +2,10 @@
 #
 # 命名对齐：目录 crates/display-proto（无前缀，与 device-trait/plugin-loader 同风格），
 # lib target = mupc_display_proto（对齐设计 §5.1 表 `crates/display-proto`（`mupc_display_proto`））。
-# 依赖仅 serde/serde_json/thiserror（按设计 §5.1：不引入 serde_yaml / 重型服务依赖）。
+# 依赖仅 serde/serde_json/thiserror + async-trait（按设计 §5.1：不引入 serde_yaml / 重型服务依赖）。
+# async-trait = workspace 级已有依赖（core / data-processing / device-trait 同源）；它是过程宏、
+# **非 UI 依赖**，用于落设计 §4.6 明文的 `InterlockApi`（trait 的 async 方法在 dyn 下必须装箱），
+# 不违反「契约层零 UI 依赖」。
 [package]
 name = "display-proto"
 version.workspace = true
@@ -19,3 +22,4 @@ name = "mupc_display_proto"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
