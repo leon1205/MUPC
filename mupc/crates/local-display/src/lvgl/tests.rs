@@ -411,4 +411,8 @@ fn lvgl_core_bridge_chain() {
     // B1 验收项 ②③④（组件创建 + 主题样式施加 + 三通道读回 + 不可用态区分）的
     // 唯一落点，不接则那些覆盖永不执行。
     crate::ui::tests::ui_chain();
+
+    // ── B2a「两页」场景（`ui/tests.rs::pages_chain`）─────────────────────
+    // **PM 预先授权**的一行挂钩（与上一行的 `ui_chain` 同款）；B2a 只加这一行。
+    crate::ui::tests::pages_chain();
 }

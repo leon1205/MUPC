@@ -9,12 +9,13 @@
 //! | `pages` | 6 页布局（`p1_status` … `p6_system`） | **B2** |
 //! | 页面路由 / 底部导航 | 6 页容器 + `NavTab`（`lv_tabview` 隐藏标签栏，或自建容器显隐） | **B2** |
 //!
-//! ## 本轮的边界（B1）
+//! ## 本轮的边界（B1 + B2a）
 //!
-//! 本模块目前**只有** `theme` 与 `components` 两个子模块 —— 即工作单元 B1 的交付范围。
-//! 页面路由、导航栏与 6 个页面（`pages/**`）属 **B2**，由 B2 在本文件追加
-//! `pub mod pages;` 与 `App` 装配（设计 §5.2 的 `ui::App::new(disp, indev, channel, console, cli)`）。
-//! 这里**不预置**任何空壳，避免给 B2 留下"半成品页面"。
+//! `theme` / `components` 是 **B1** 的交付；`pages` 是 **B2** 的交付，其中 **B2a** 落了
+//! `p1_status`（P1 主状态页）与 `p6_system`（P6 系统 / 关于页）两页；P2–P5 属 B2b/B2c。
+//!
+//! **页面路由与底部导航的装配不做**（B2c）：本文件只导出 `pages`，不在此建页面容器、
+//! 不装配 `lv_tabview` / 导航栏（`UiState` 扩展与控制通道接线属 B3）。
 //!
 //! ## 两条贯穿整个 `ui/**` 的硬约束（设计 §11.4 静态约束，`ui/tests.rs` 有扫描用例）
 //!
@@ -22,6 +23,7 @@
 //! 2. **不得引用文本输入控件符号**，也不得直连底层绑定（一律经 `crate::lvgl` 薄安全层）。
 
 pub mod components;
+pub mod pages;
 pub mod theme;
 
 // `pub(crate)`：LVGL 侧唯一的 `#[test]`（`src/lvgl/tests.rs::lvgl_core_bridge_chain`）

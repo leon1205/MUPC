@@ -111,11 +111,22 @@ pub enum SocBand {
     High,
 }
 
+/// SOC 展示档**下限**阈值（%）：`≤` 此值 → [`SocBand::Low`]（PRD F1.3；UI §6.1 量程条 0–15 % 红段）。
+///
+/// **单一真源**（B2a 规格评审 Minor ⑤）：P1 的量程条分段几何（`ui/pages/p1_status.rs`）曾另抄一份
+/// `SOC_LOW_PCT = 15`，与本文件 `soc_band` 的阈值字面量构成**双份真源**。阈值统一收在此处，
+/// 两处共用 —— 改阈值只改这里。
+pub const SOC_LOW_PCT: i32 = 15;
+/// SOC 展示档**上限**阈值（%）：`≥` 此值 → [`SocBand::High`]（PRD F1.3；UI §6.1 量程条 85–100 % 橙段）。
+pub const SOC_HIGH_PCT: i32 = 85;
+
 /// SOC 值 → 展示档。SOC 值超出 0..100 亦 clamp 到端点档（生产方已域值化，此处兜底）。
+///
+/// 阈值取自 [`SOC_LOW_PCT`] / [`SOC_HIGH_PCT`]（单一真源，见其文档）。
 pub fn soc_band(v: f64) -> SocBand {
-    if v <= 15.0 {
+    if v <= SOC_LOW_PCT as f64 {
         SocBand::Low
-    } else if v >= 85.0 {
+    } else if v >= SOC_HIGH_PCT as f64 {
         SocBand::High
     } else {
         SocBand::Mid

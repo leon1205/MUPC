@@ -24,7 +24,7 @@
 //! | ⑤ | `ConfirmDialog` 的 `level` 无默认值 | [`confirm_level_has_no_default`] |
 //! | ⑥ | `ui/**` 静态约束（禁裸色值 / 文本输入控件 / 直连绑定 / `refr`） | [`ui_static_constraints`] |
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -430,39 +430,334 @@ fn ui_static_constraints() {
     );
 }
 
-/// 码表走查（设计 §11.1「码表覆盖率」）：组件上屏文案的每个字符都必须落在
-/// UI §3.6 全屏用字表 / `fonts/font_subset_charset.txt` 内，否则屏上是豆腐块。
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥′ 码表覆盖率（**B2a 规格评审 ③ 重写**：基线 = 生成字体的实际 cmap，待查集合 = 扫源码）
+//
+// 旧实现的**构造性漏判**（评审实测）：以手写常量 `ALL_TEXTS` 为待查集合、以
+// `fonts/font_subset_charset.txt` 为基线 ⇒ ① 手写清单只含"已替代后的串"，源码里新写的
+// 上屏字不会进清单；② 该 `.txt` 自身缺字（实测缺 `天`），且它列的 `U+2715(✕)` /
+// `U+275A(❚)` 已被 `lv_font_conv` **丢弃**（`--symbols` 里有、生成的 cmap 里没有）。
+// 因此"没抓到缺字"是构造使然 —— 现在两条腿都换掉。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 生产 `ui/**` 源文件清单（**不含 `ui/tests.rs`**）。
 ///
-/// **非致命**：字库资产不入库（设计 §1.1.2），字表文件缺失时**跳过并打印说明**，
-/// 不让"没跑过 `gen_fonts.sh` 的机器"编译/测试失败。
+/// 剔除口径：`tests.rs` 的字面量是**断言 / 诊断文案**（`assert_eq!` 的期望值、`eprintln!`
+/// 的跳过说明、构造帧用的示例告警文案…），永不进 `lv_label`，且含大量 `format!` / 路径串，
+/// 纳入会大面积误报。**这是唯一的整文件剔除**，其余 6 个文件全查。
+const UI_PROD_SOURCES: [(&str, &str); 6] = [
+    ("ui/mod.rs", include_str!("mod.rs")),
+    ("ui/theme.rs", include_str!("theme.rs")),
+    ("ui/components.rs", include_str!("components.rs")),
+    ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
+    ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
+    ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
+];
+
+/// **非屏显出口**白名单：紧跟这些 token 的字符串字面量**不会**被画到屏上（逐条列出，
+/// 不靠正则猜）。除此之外**一律**当上屏候选查（宁可多查）：
+///
+/// - `InvalidArgument(` —— `LvglError` 的错误消息（原型 `LvglError::InvalidArgument("…")`），
+///   只在 `Err` 里流转；薄层没有任何"把 `LvglError` 画上屏"的路径 ⇒ 从不屏显；
+/// - `debug_struct(` / `.field(` —— `std::fmt::Debug` 实现的字段名（供日志 / 断言阅读）；
+/// - `env!(` / `option_env!(` —— 环境变量**键名**（屏上取到的是它的**值**，键名不屏显）。
+///
+/// 另有两类"不是字面量文本"的排除（写在 [`ui_source_chars`] 里）：
+/// ① `format!` 模板的 `{…}` 占位符内容（`"{d} 日"` 里 `d` 不是字形，值才是）；
+/// ② `#[cfg(test)]` 区（各文件的测试模块都在文件末尾，且**断言形态**后若不符即响亮失败）。
+const NON_DISPLAY_SINKS: [&str; 5] = [
+    "InvalidArgument(",
+    "debug_struct(",
+    ".field(",
+    "env!(",
+    "option_env!(",
+];
+
+/// **已登记**的字库缺口：扫源码确实用到、但生成字体的 cmap 里**没有**的字形。
+///
+/// **现为空**：B2a 收尾时实测 `format_uptime` 的 `天`（唯一缺字）不在 cmap 内，已按
+/// `ui/pages/mod.rs` 偏差登记 **D5** 改为在 cmap 内的同义词 `日`（`1 日` = 1 天）
+/// ⇒ 源码层不再有缺字。**本清单必须与实测缺字集合相等**（新增缺字 ⇒ 红；字库补齐后
+/// 条目未删 ⇒ 也红 —— **有意**如此：防止登记腐化）。
+const KNOWN_MISSING: [(char, &str); 0] = [];
+
+/// 从 `lv_font_noto_sc_*.c` 解析**实际支持的码点集合**。
+///
+/// **本版本 `lv_font_conv` 生成物的确切形态**（2026-09-11 对 10 个字号逐一实测，
+/// 不是猜的）：
+///
+/// ```c
+/// static const uint16_t unicode_list_0[] = { 0x0, 0x1, 0x5, /* …升序… */ };
+/// static const lv_font_fmt_txt_cmap_t cmaps[] = { {
+///     .range_start = 32, .range_length = 40633, .glyph_id_start = 1,
+///     .unicode_list = unicode_list_0, .glyph_id_ofs_list = NULL,
+///     .list_length = 324, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY } };
+/// ```
+///
+/// ⇒ **码点 = `.range_start + unicode_list_0[i]`**（数组存的是相对偏移，**不是**码点本身；
+/// 直接当码点用会漏掉几乎全部 CJK）。形态与解析前提不符时**响亮失败** —— 否则"解析不到"
+/// 会伪装成"全部覆盖"（正是要修的那类缺陷）。
+fn font_cmap_from_c(src: &str, name: &str) -> std::collections::BTreeSet<char> {
+    let lists = src.matches("static const uint16_t unicode_list_0[]").count();
+    let ranges = src.matches(".range_start =").count();
+    assert!(
+        lists == 1 && ranges == 1,
+        "{name}：`lv_font_conv` 输出形态已变（unicode_list_0 × {lists}、range_start × {ranges}）\
+         —— 本解析器只认「单 cmap + 单 unicode_list」形态，请据此更新（不得静默跳过）"
+    );
+    assert!(
+        src.contains("LV_FONT_FMT_TXT_CMAP_SPARSE_TINY"),
+        "{name}：cmap 类型不是 SPARSE_TINY（`unicode_list` 的偏移语义随之不同），请复核解析"
+    );
+    let start = src.find("static const uint16_t unicode_list_0[]").expect("已断言存在");
+    let body_open = start + src[start..].find('{').expect("数组体");
+    let body = &src[body_open + 1..];
+    let body = &body[..body.find("};").expect("数组结束")];
+    let rs_at = src.find(".range_start =").expect("已断言存在");
+    let rs: u32 = src[rs_at + ".range_start =".len()..]
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("range_start 应是十进制整数");
+    let mut set = std::collections::BTreeSet::new();
+    let b = body.as_bytes();
+    let mut i = 0usize;
+    while i + 1 < b.len() {
+        if b[i] == b'0' && b[i + 1] == b'x' {
+            let mut j = i + 2;
+            while j < b.len() && b[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if let Ok(v) = u32::from_str_radix(&body[i + 2..j], 16) {
+                if let Some(ch) = char::from_u32(rs + v) {
+                    set.insert(ch);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    assert!(!set.is_empty(), "{name}：unicode_list 解析出 0 个码点 —— 解析器与生成物脱节");
+    set
+}
+
+/// 剥掉 `format!` 模板里的 `{…}` 占位符（其内容是**表达式**，屏上出现的是它的**值**）。
+fn strip_format_placeholders(lit: &str) -> String {
+    let mut out = String::with_capacity(lit.len());
+    let mut depth = 0u32;
+    for ch in lit.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// 扫一段 `ui/**` 源码，取出**会取字形的字符**、出处字面量与**行号**（1 起）。
+///
+/// 口径（逐条）：剥注释；取 `"…"` 字符串字面量与 `'x'` / `'\u{…}'` 字符字面量
+/// （**生命周期 `'a` 不是字面量**，按普通字符跳过）；`\u{XXXX}` 转义**解码成真字符**
+/// （否则"用转义写的上屏字"会漏判）；忽略 [`NON_DISPLAY_SINKS`] 之后的字面量；
+/// 剥 `{…}` 占位符；掐掉 `#[cfg(test)]` 区。空白字符不计。
+/// **行号**让缺字报错能点名「文件:行 ← 文案」，而不是只报一个裸字形（B2a 收尾订正）。
+fn ui_source_chars(src: &str, name: &str) -> Vec<(char, String, usize)> {
+    let src = match src.find("#[cfg(test)]") {
+        Some(i) => {
+            assert!(
+                src[i..].contains("mod tests"),
+                "{name}：`#[cfg(test)]` 之后不是 `mod tests` —— 本扫描「截断到首个 \
+                 #[cfg(test)]」的前提不成立，请改扫描工具（不得静默放过）"
+            );
+            &src[..i]
+        }
+        None => src,
+    };
+    let bytes = src.as_bytes();
+    let mut out: Vec<(char, String, usize)> = Vec::new();
+    // 字节偏移 → 1 起的行号（报错点名用）。
+    let line_at = |byte: usize| 1 + src[..byte].matches('\n').count();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b'"' => {
+                let open = i;
+                i += 1;
+                let mut lit = String::new();
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        // `\u{XXXX}` → 真字形；其余转义（`\n` / 引号…）不是上屏字符。
+                        if bytes.get(i + 1) == Some(&b'u') && bytes.get(i + 2) == Some(&b'{') {
+                            if let Some(close) = src[i + 3..].find('}') {
+                                if let Ok(v) = u32::from_str_radix(&src[i + 3..i + 3 + close], 16) {
+                                    if let Some(ch) = char::from_u32(v) {
+                                        lit.push(ch);
+                                    }
+                                }
+                                i = i + 3 + close + 1;
+                                continue;
+                            }
+                        }
+                        lit.push(' ');
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    let ch = src[i..].chars().next().expect("源文件是合法 UTF-8");
+                    lit.push(ch);
+                    i += ch.len_utf8();
+                }
+                let prefix = src[..open].trim_end();
+                if !NON_DISPLAY_SINKS.iter().any(|s| prefix.ends_with(s)) {
+                    let shown = strip_format_placeholders(&lit);
+                    for ch in shown.chars() {
+                        if !ch.is_whitespace() {
+                            out.push((ch, lit.clone(), line_at(open)));
+                        }
+                    }
+                }
+            }
+            b'\'' => {
+                let line = line_at(i);
+                let rest = &src[i + 1..];
+                if rest.starts_with("\\u{") {
+                    if let Some(close) = rest.find('}') {
+                        if let Ok(v) = u32::from_str_radix(&rest[3..close], 16) {
+                            if let Some(ch) = char::from_u32(v) {
+                                if !ch.is_whitespace() {
+                                    out.push((ch, format!("'{ch}'"), line));
+                                }
+                            }
+                        }
+                        i += 1 + close + 1;
+                        continue;
+                    }
+                }
+                // 字符字面量 `'x'`；否则是生命周期（`'a` / `'static`）⇒ 按普通字符跳过。
+                let mut it = rest.chars();
+                if let (Some(ch), Some('\'')) = (it.next(), it.next()) {
+                    if !ch.is_whitespace() && ch != '\\' {
+                        out.push((ch, format!("'{ch}'"), line));
+                        i += 1 + ch.len_utf8() + 1;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                let ch = src[i..].chars().next().expect("源文件是合法 UTF-8");
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// 码表覆盖率（设计 §11.1「码表覆盖率」）—— **基线 = 生成字体的实际 cmap**
+/// （`fonts/lv_font_noto_sc_*.c` 的 `unicode_list`），**待查集合 = 扫 `ui/**` 源码字面量**。
+///
+/// **非致命**：字库资产不入库（设计 §1.1.2），`fonts/` 下没有字体生成物时**跳过并打印说明**，
+/// 不让"没跑过 `gen_fonts.sh` 的机器"编译/测试失败（沿用既有做法）。
 #[test]
-fn texts_are_covered_by_charset() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fonts")
-        .join("font_subset_charset.txt");
-    let Ok(charset) = std::fs::read_to_string(&path) else {
+fn ui_texts_covered_by_font_cmap() {
+    let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&fonts_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("lv_font_noto_sc_") && n.ends_with(".c"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if files.is_empty() {
         eprintln!(
-            "跳过码表走查：{} 不存在（字库资产不入库，见设计 §1.1.2）。\
+            "跳过码表走查：{} 下无 `lv_font_noto_sc_*.c`（字库资产不入库，见设计 §1.1.2）。\
              跑过 fonts/gen_fonts.sh 的机器上本用例会真正比对。",
-            path.display()
+            fonts_dir.display()
         );
         return;
-    };
-    let set: std::collections::HashSet<char> = charset.chars().collect();
-    let mut missing: Vec<(String, char)> = Vec::new();
-    for t in ALL_TEXTS {
+    }
+    files.sort();
+    // 各字号取**交集**：任一字号缺该字形，该档就是豆腐块。
+    let mut cmap: Option<std::collections::BTreeSet<char>> = None;
+    for f in &files {
+        let name = f.file_name().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(f).expect("读字体生成物");
+        let one = font_cmap_from_c(&src, &name);
+        cmap = Some(match cmap {
+            None => one,
+            Some(prev) => prev.intersection(&one).copied().collect(),
+        });
+    }
+    let cmap = cmap.expect("至少一个字体文件");
+
+    // 待查集合：扫源码字面量（非 ASCII + 需字形的符号一视同仁）。
+    let mut missing: Vec<(char, String, &str, usize)> = Vec::new();
+    let mut scanned: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
+    for (name, src) in UI_PROD_SOURCES {
+        for (ch, lit, line) in ui_source_chars(src, name) {
+            scanned.insert(ch);
+            if !cmap.contains(&ch) {
+                missing.push((ch, lit, name, line));
+            }
+        }
+    }
+
+    // 清册（`ALL_TEXTS`）**不是基线**，但必须与源码不脱节：其每个字都得在扫到的字里。
+    for t in ALL_TEXTS.iter().chain(crate::ui::pages::ALL_TEXTS.iter()) {
         for ch in t.chars() {
             if ch.is_whitespace() {
                 continue;
             }
-            if !set.contains(&ch) {
-                missing.push(((*t).to_string(), ch));
-            }
+            assert!(
+                scanned.contains(&ch),
+                "清册条目 `{t}` 的字 `{ch}` 未出现在任何 `ui/**` 源码字面量里 —— \
+                 清册与源码脱节（清册已不是覆盖率基线，见本条文档）"
+            );
         }
     }
-    assert!(
-        missing.is_empty(),
-        "组件文案存在不在 UI §3.6 用字表内的字符（会出豆腐块）：{missing:?}"
+
+    // 与登记缺口**集合相等**（多一个 = 真缺字；少一个 = 字库已补齐、登记该删）。
+    let mut found: Vec<char> = missing.iter().map(|(c, _, _, _)| *c).collect();
+    found.sort_unstable();
+    found.dedup();
+    let mut known: Vec<char> = KNOWN_MISSING.iter().map(|(c, _)| *c).collect();
+    known.sort_unstable();
+    // 缺字出处**逐条点名**：`文件:行 ← 文案`（只报裸字形无法定位，是 B2a 收尾订正的内容）。
+    let detail = missing
+        .iter()
+        .map(|(c, lit, name, line)| format!("U+{:04X} `{c}` @ {name}:{line} ← 字面量 `{lit}`", *c as u32))
+        .collect::<Vec<_>>()
+        .join("\n          ");
+    assert_eq!(
+        found.iter().map(|c| *c as u32).collect::<Vec<_>>(),
+        known.iter().map(|c| *c as u32).collect::<Vec<_>>(),
+        "生成字体的 cmap 里缺了源码用到的字形；实际缺字 = {found:?}，已登记缺口 = {known:?}\n\
+         未登记的缺字会出豆腐块，必须补进 §3.6 / charset 并重跑 gen_fonts.sh；\
+         若字库已补齐，请同步删除 `KNOWN_MISSING` / D5 的对应条目。\n\
+         逐条缺字出处（文件:行 ← 文案）：\n          {detail}"
     );
 }
 
@@ -998,4 +1293,629 @@ pub(crate) fn ui_chain() {
     drop(screen);
     drop(disp);
     lvgl::deinit();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑦ B2a：P1 / P6 两页离屏链路（由 `src/lvgl/tests.rs` 的唯一 `#[test]` 串行调起）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// UI §6.1 的 P1 **主行卡高契约值**（`484×320`）。
+///
+/// 刻意把**契约值**（而非实现常量）钉在用例里：若实现回退成"按内容倒推卡高"（曾经是 294），
+/// 本用例即变红 —— 这正是 B2a 规格评审 ② 要防的回归。
+const MAIN_CARD_H_CONTRACT: i32 = 320;
+
+/// 建一帧**全正常**的 v2 帧（各段齐备）—— 离屏用例的注入源。
+///
+/// 用例**自己造帧**（而不是去连 mupcd）：这正是"页面只吃注入参数"的可测性收益
+/// （设计 §11.1「HMI 离屏渲染」是本模块最强的可测性支点）。
+fn frame_healthy() -> mupc_display_proto::DisplayFrame {
+    use mupc_display_proto::*;
+    DisplayFrame {
+        version: PROTO_VERSION,
+        seq: 7,
+        ts_ms: 1_789_047_727_000,
+        soc: Some(62.0),
+        soc_source: SocSource::Bms,
+        soc_flag: FieldFlag::Valid,
+        run_state: Some(RunState::Charge),
+        pcs_online: true,
+        p_phase: [
+            Field { v: Some(12.5), flag: FieldFlag::Valid },
+            Field { v: Some(12.1), flag: FieldFlag::Valid },
+            Field { v: Some(12.3), flag: FieldFlag::Valid },
+        ],
+        p_total: Field { v: Some(36.9), flag: FieldFlag::Valid },
+        i_phase: [
+            Field { v: Some(45.6), flag: FieldFlag::Valid },
+            Field { v: Some(45.2), flag: FieldFlag::Valid },
+            Field { v: Some(45.4), flag: FieldFlag::Valid },
+        ],
+        inconsistency: false,
+        device: DeviceSection {
+            ts_ms: 1_789_047_727_000,
+            uptime_secs: Some(90_000),
+            cpu_temp_c: Some(48.4),
+            mem_used_pct: Some(31.2),
+            iec104: LinkState::Connected,
+            intercore: LinkState::Connecting,
+            hmi_channel: LinkState::Unknown,
+            control_source: ControlSource::LocalStrategy,
+        },
+        alarms: AlarmsSection {
+            ts_ms: 1_789_047_727_000,
+            available: true,
+            items: vec![
+                AlarmItem {
+                    ts_ms: 1_789_047_727_000,
+                    level: AlarmLevel::Warn,
+                    message: "核间链路抖动".to_string(),
+                },
+                AlarmItem {
+                    ts_ms: 1_789_047_000_000,
+                    level: AlarmLevel::Error,
+                    message: "直流侧过压".to_string(),
+                },
+            ],
+        },
+        info: InfoSection {
+            firmware_version: "0.1.0".to_string(),
+            build_time: None,
+            model: Some("BECG-3568".to_string()),
+            serial: None,
+            service_scope: ServiceScope::LoopbackOnly,
+            mgmt_ipv4: Some("192.168.3.118".to_string()),
+        },
+        interlock: InterlockSection::default(),
+    }
+}
+
+/// 把一帧"打残"：三相各带不同降级标志 / 总卡未取数 / 告警源不可用 / 管理 IP 缺失。
+fn frame_degraded() -> mupc_display_proto::DisplayFrame {
+    use mupc_display_proto::*;
+    let mut f = frame_healthy();
+    f.p_phase[0] = Field { v: None, flag: FieldFlag::Offline };
+    f.p_phase[1] = Field { v: None, flag: FieldFlag::NotRead };
+    f.p_phase[2] = Field { v: None, flag: FieldFlag::RangeError };
+    f.p_total = Field { v: None, flag: FieldFlag::NotRead };
+    f.i_phase = [Field { v: None, flag: FieldFlag::Offline }; 3];
+    f.alarms.available = false;
+    f.alarms.items.clear();
+    f.info.mgmt_ipv4 = None;
+    f.info.firmware_version = String::new();
+    f.device.uptime_secs = None;
+    f.device.hmi_channel = LinkState::Disconnected;
+    f
+}
+
+/// B2a 两页的全部场景（**必须**由 `src/lvgl/tests.rs` 在同一线程内顺序调起）。
+///
+/// 本链路**真的渲染**（内存 display + flush sink 逐行拷贝），故覆盖「装配 → 布局 → 像素」
+/// 全链（验收项 ①）；文本 / 颜色 / 可见性读回覆盖验收项 ②③④⑤。
+pub(crate) fn pages_chain() {
+    use crate::state::{ChannelStatus, Freshness};
+    use crate::ui::pages::{self, p1_status, p6_system, PageInput};
+    use mupc_display_proto::{Field, FieldFlag, RunState, SocSource};
+
+    lvgl::init().expect("lvgl::init (pages)");
+    const W: u32 = Dimens::SCREEN_W as u32;
+    const H: u32 = Dimens::SCREEN_H as u32;
+    const BPP: usize = crate::lvgl::display::BYTES_PER_PIXEL;
+    let sink = Rc::new(RefCell::new(vec![0u8; (W * H) as usize * BPP]));
+    let mut disp = Display::create(W, H).expect("Display::create (pages)");
+    {
+        let s = sink.clone();
+        disp.set_flush_cb(move |area: Area, px: &[u8]| {
+            let mut b = s.borrow_mut();
+            let row_bytes = area.width() as usize * BPP;
+            for row in 0..area.height() as usize {
+                let dy = area.y1 as usize + row;
+                let dx = area.x1 as usize;
+                let off = (dy * W as usize + dx) * BPP;
+                let src = &px[row * row_bytes..(row + 1) * row_bytes];
+                b[off..off + row_bytes].copy_from_slice(src);
+            }
+        });
+    }
+    let screen = Obj::screen().expect("Obj::screen (pages)");
+
+    // 页容器：模拟 B2c 的摆放（内容区左上角 = (SIDE_PAD, HEADER_H)）。
+    let host = Obj::create(&screen).expect("page host");
+    host.set_pos(Dimens::SIDE_PAD, Dimens::HEADER_H);
+    host.set_size(Dimens::CONTENT_W, Dimens::CONTENT_H);
+    host.add_style(&theme::transparent(), StyleSelector::main());
+
+    // ═══ P1 主状态页 ═══════════════════════════════════════════════════════
+    {
+        let p1 = p1_status::P1StatusPage::new(&host).expect("P1StatusPage::new");
+
+        // ── ① 装配契约：页根尺寸 / 位置，内容首卡 y，且真的画出了像素 ──
+        disp.refr_now_for_test();
+        assert_eq!(
+            p1.obj().size(),
+            (Dimens::CONTENT_W, Dimens::CONTENT_H),
+            "页根 = 内容区视口 992×624（B2c 的装配契约）"
+        );
+        let root_c = p1.obj().coords();
+        assert_eq!(
+            (root_c.x1, root_c.y1),
+            (Dimens::SIDE_PAD, Dimens::HEADER_H),
+            "页根由调用方摆放"
+        );
+        let soc_c = p1.soc_card().coords();
+        assert_eq!(
+            (soc_c.x1, soc_c.y1),
+            (
+                Dimens::SIDE_PAD,
+                Dimens::HEADER_H
+                    + Dimens::CONTENT_PAD_TOP
+                    + Dimens::STATUS_CHIP_H
+                    + Dimens::GAP_GROUP
+            ),
+            "SOC 卡落在「上内边距 + 通道条 + 同组缝」之后"
+        );
+        // ── ② 主行卡高 = UI §6.1 的契约 320（B2a 规格评审：此前按内容倒推得 294，
+        //    把三相 / 装置 / 告警各区块整体上移 ~26 px）──
+        // 两列主卡（SOC / PCS）在实现里共用同一个卡高常量，故 SOC 卡这一条即覆盖两卡。
+        assert_eq!(
+            p1.soc_card().size().1,
+            MAIN_CARD_H_CONTRACT,
+            "主行卡高 = UI §6.1 契约 320（此前 294 ⇒ 后续区块整体上移）"
+        );
+        // 后续区块位置：三相行 y = 内容顶 + 主卡高 + 同组缝（各数都由 theme 常量 + 契约 320 给出）。
+        let phase_y = Dimens::HEADER_H
+            + Dimens::CONTENT_PAD_TOP
+            + Dimens::STATUS_CHIP_H
+            + Dimens::GAP_GROUP
+            + MAIN_CARD_H_CONTRACT
+            + Dimens::GAP_GROUP;
+        assert_eq!(
+            p1.phase_card_obj(0).expect("A 相卡").coords().y1,
+            phase_y,
+            "三相行紧随 320 高的主卡之后（评审 ② 的「后续区块位置正确」）"
+        );
+        assert!(p1.alarm_card().is_alive(), "告警卡已建");
+        let painted = sink.borrow().iter().filter(|b| **b != 0).count();
+        assert!(painted > 10_000, "渲染后 sink 中应有成片非背景像素（实际 {painted}）");
+
+        // ── 骨架无帧（Init）：全降级，且**不得**出现 0 ──
+        assert_eq!(p1.soc_text().as_deref(), Some(pages::PLACEHOLDER), "无帧 ⇒ 占位符");
+        assert_eq!(
+            p1.channel_text().as_deref(),
+            Some(p1_status::TEXT_CHANNEL_CONNECTING),
+            "无帧 ⇒ 「正在连接数据通道」"
+        );
+        assert_eq!(p1.alarm_view(), p1_status::AlarmView::Unavailable, "无帧 ⇒ 告警不可用");
+
+        // ── ② 正常帧 ──
+        let f = frame_healthy();
+        p1.render(&PageInput::live(&f));
+        assert_eq!(p1.channel_text(), None, "通道正常 ⇒ 无通道条");
+        assert!(!p1.stale_visible(), "帧新鲜 ⇒ 无「数据过期」标");
+        assert_eq!(p1.soc_text().as_deref(), Some("62"), "SOC 整数位（PRD F1.1）");
+        assert_eq!(p1.soc_color(), Palette::SOC_OK, "62 % 落在 15–85 ⇒ 青色");
+        assert!(p1.soc_marker_visible() && !p1.soc_gray_visible(), "正常态有刻线、不灰化");
+        assert_eq!(p1.soc_source_text().as_deref(), Some("BMS"), "F1.2 源标注");
+        assert_eq!(p1.soc_source_skin(), Some(ChipSkin::NEUTRAL));
+        assert_eq!(p1.pcs_state_text().as_deref(), Some("充电"), "F2 主判据 REG 1013");
+        assert_eq!(p1.pcs_icon_text().as_deref(), Some("▼"));
+        assert_eq!(p1.pcs_color(), Palette::OK, "充电 = 绿");
+        assert!(!p1.inconsistent_visible(), "方向一致 ⇒ 无「方向不一致」角标");
+        assert_eq!(p1.sigma_text().as_deref(), Some("ΣP +36.9 kW"), "佐证行 ΣP");
+        assert_eq!(p1.phase_p_text(0).as_deref(), Some("12.5"), "F3 三相 P（1 位小数）");
+        assert_eq!(p1.phase_i_text(0).as_deref(), Some("45.6"), "F4 三相 I");
+        assert_eq!(p1.phase_arrow(0).as_deref(), Some("▼"), "方向取自 F2 状态机");
+        assert_eq!(p1.phase_reason(0), None, "正常相无降级角标");
+        assert_eq!(p1.phase_dot_color(0), Palette::SOC_OK, "● 实时（UI §8.2）");
+        assert_eq!(p1.phase_p_text(3).as_deref(), Some("36.9"), "总卡 = 设备总有功 REG 1032");
+        assert_eq!(p1.phase_i_text(3).as_deref(), Some("–"), "总卡无电流行 ⇒ 占位符");
+        assert_eq!(p1.device_card_count(), 8, "装置状态网格 8 卡（UI §6.1）");
+        assert_eq!(p1.device_text(0).as_deref(), Some("0.1.0"), "固件版本");
+        assert_eq!(p1.device_text(1).as_deref(), Some(pages::MISSING), "编译时间缺失 ⇒ 未提供");
+        assert_eq!(p1.device_text(2).as_deref(), Some("1 日 01:00:00"), "运行时长（`日` 在 cmap 内）");
+        assert_eq!(p1.device_text(3).as_deref(), Some("48 C"), "CPU 温度（℃ 不在字符集 ⇒ C）");
+        assert_eq!(p1.device_text(4).as_deref(), Some("31 %"), "内存使用率");
+        assert_eq!(p1.device_text(5).as_deref(), Some("已连接"), "IEC 104 链路（灯 + 文字双通道）");
+        assert_eq!(p1.device_text(6).as_deref(), Some("连接中"), "核间链路");
+        assert_eq!(p1.device_text(7).as_deref(), Some("本地策略引擎"), "当前控制源");
+        assert_eq!(p1.alarm_view(), p1_status::AlarmView::Rows);
+        assert_eq!(p1.alarm_row_message(0).as_deref(), Some("核间链路抖动"));
+        assert_eq!(
+            p1.alarm_row_time(0).as_deref(),
+            Some("2026/09/10 13:42:07"),
+            "时间（UTC，/ 分隔；`-` 不在字体子集内）"
+        );
+        assert_eq!(p1.alarm_row_message(1).as_deref(), Some("直流侧过压"));
+        assert_eq!(p1.alarm_row_message(2), None, "第 3 行无数据 ⇒ 隐藏");
+        drop(p1);
+
+        // ═══ ③ 逐字段降级（**显占位符而不是 0**）══════════════════════════
+        let p1 = p1_status::P1StatusPage::new(&host).expect("P1StatusPage::new (degraded)");
+        let bad = frame_degraded();
+        p1.render(&PageInput::live(&bad));
+        assert_eq!(p1.phase_p_text(0).as_deref(), Some(pages::PLACEHOLDER), "A 相离线 ⇒ 占位符");
+        assert_eq!(p1.phase_reason(0).as_deref(), Some("源离线"), "降级原因（EDGE-01）");
+        assert_eq!(p1.phase_reason(1).as_deref(), Some("未取数"), "未取数（EDGE-04）");
+        assert_eq!(p1.phase_reason(2).as_deref(), Some("数据异常"), "数据异常（EDGE-05）");
+        assert_eq!(p1.phase_dot_color(0), Palette::BORDER_CTRL, "降级 ⇒ 停更点");
+        assert_eq!(p1.phase_arrow(0), None, "无有效值 ⇒ 不画方向箭头");
+        for i in 0..4 {
+            let t = p1.phase_p_text(i).expect("有文本");
+            assert_ne!(t, "0.0", "**严禁补 0**（PRD F3.4）");
+            assert_ne!(t, "0", "**严禁补 0**（PRD F3.4）");
+        }
+        assert_eq!(p1.device_text(2).as_deref(), Some("未取数"), "uptime 不可得 ⇒ 未取数");
+        assert_eq!(p1.device_text(0).as_deref(), Some(pages::MISSING), "空版本串 ⇒ 未提供");
+        // ⚠️ P1 的装置网格取 UI §6.1 的 **8 项**（固件版本 / 编译时间 / 运行时长 / CPU 温度 /
+        // 内存使用率 / 调度主站连接 / 核间连接 / 当前控制源）—— **不含「数据通道」**：
+        // 通道状态归页眉（B2c/B3），P1 只在通道条上体现断连（设计 §6.1 的布局行）。
+        // 「数据通道」一行在 P6 的运行信息卡（见下方 P6 用例）。
+        assert_eq!(p1.device_text(5).as_deref(), Some("已连接"), "调度主站连接");
+        assert_eq!(p1.device_text(7).as_deref(), Some("本地策略引擎"), "控制源不随其它字段降级");
+        assert_eq!(p1.alarm_view(), p1_status::AlarmView::Unavailable);
+        assert_eq!(
+            p1.alarm_unavailable_title().as_deref(),
+            Some("告警源不可用"),
+            "EDGE-09：源不可用 ≠ 无告警"
+        );
+        assert_ne!(
+            p1.alarm_unavailable_title().as_deref(),
+            Some(p1_status::TEXT_ALARM_EMPTY)
+        );
+        drop(p1);
+
+        // ═══ ④ SOC 三源标注 × 三档区间色 ═══════════════════════════════════
+        let p1 = p1_status::P1StatusPage::new(&host).expect("P1StatusPage::new (soc)");
+        let mut f2 = frame_healthy();
+        f2.soc_source = SocSource::PcsReg1010;
+        p1.render(&PageInput::live(&f2));
+        assert_eq!(p1.soc_source_text().as_deref(), Some(p1_status::TEXT_SOC_SRC_PCS));
+        f2.soc = None;
+        f2.soc_source = SocSource::Lost;
+        p1.render(&PageInput::live(&f2));
+        assert_eq!(p1.soc_source_text().as_deref(), Some("SOC 源失效"), "EDGE-02 双源皆失");
+        assert_eq!(p1.soc_source_skin(), Some(ChipSkin::FAILURE), "源失效 = 红胶囊");
+        assert_eq!(p1.soc_text().as_deref(), Some(pages::PLACEHOLDER));
+        assert_eq!(p1.soc_color(), Palette::PLACEHOLDER);
+        assert!(p1.soc_gray_visible() && !p1.soc_marker_visible(), "量程条灰化");
+        for (v, expect, what) in [
+            (10.0, Palette::DANGER, "≤15 % ⇒ 红"),
+            (50.0, Palette::SOC_OK, "中段 ⇒ 青"),
+            (90.0, Palette::SOC_HIGH, "≥85 % ⇒ 橙"),
+        ] {
+            let mut fx = frame_healthy();
+            fx.soc = Some(v);
+            p1.render(&PageInput::live(&fx));
+            assert_eq!(p1.soc_color(), expect, "{what}（PRD F1.3）");
+        }
+        drop(p1);
+
+        // ═══ ⑤ PCS 四态：文字 + 语义色 + 图标 ═══════════════════════════════
+        let p1 = p1_status::P1StatusPage::new(&host).expect("P1StatusPage::new (pcs)");
+        for (rs, text, color, icon) in [
+            (RunState::Stop, "停机", Palette::STOPPED, "■"),
+            (RunState::Standby, "待机", Palette::STANDBY, "○"),
+            (RunState::Charge, "充电", Palette::OK, "▼"),
+            (RunState::Discharge, "放电", Palette::INFO, "▲"),
+        ] {
+            let mut fx = frame_healthy();
+            fx.run_state = Some(rs);
+            p1.render(&PageInput::live(&fx));
+            assert_eq!(p1.pcs_state_text().as_deref(), Some(text), "F2.1 四态之一");
+            assert_eq!(p1.pcs_color(), color, "F2.1 语义色（{text}）");
+            assert_eq!(p1.pcs_icon_text().as_deref(), Some(icon), "F2.1 图标（{text}）");
+            let want_arrow = match rs {
+                RunState::Charge | RunState::Discharge => Some(icon),
+                _ => None,
+            };
+            assert_eq!(p1.phase_arrow(0).as_deref(), want_arrow, "方向随 F2；停 / 待不画（{text}）");
+        }
+        // 离线（EDGE-01）与无帧
+        let mut fx = frame_healthy();
+        fx.pcs_online = false;
+        fx.run_state = None;
+        p1.render(&PageInput::live(&fx));
+        assert_eq!(p1.pcs_state_text().as_deref(), Some(p1_status::TEXT_PCS_OFFLINE));
+        assert_eq!(p1.pcs_color(), Palette::STOPPED, "离线 = 灰（不得用语义色冒充）");
+        assert_eq!(p1.pcs_icon_text().as_deref(), Some("?"));
+        // 方向不一致角标（EDGE-06；唯一专属色）
+        let mut fx = frame_healthy();
+        fx.inconsistency = true;
+        p1.render(&PageInput::live(&fx));
+        assert!(p1.inconsistent_visible(), "EDGE-06 角标");
+        assert_eq!(p1.pcs_state_text().as_deref(), Some("充电"), "角标**不覆盖**主判据 1013");
+        drop(p1);
+
+        // ═══ ⑥ 通道断 / 过期（F5.3 / EDGE-03）══════════════════════════════
+        let p1 = p1_status::P1StatusPage::new(&host).expect("P1StatusPage::new (channel)");
+        let f = frame_healthy();
+        p1.render(&PageInput::down(Some(&f)));
+        assert_eq!(
+            p1.channel_text().as_deref(),
+            Some(p1_status::TEXT_CHANNEL_DOWN),
+            "EDGE-03：>3 s 无成功 ⇒ 断连条"
+        );
+        p1.render(&PageInput::new(
+            Some(&f),
+            ChannelStatus::Connected,
+            Freshness::Stale,
+        ));
+        assert!(p1.stale_visible(), "F5.3：>2 s ⇒ 「数据过期」标（保留数值）");
+        assert_eq!(p1.soc_text().as_deref(), Some("62"), "过期仍保留最近有效值");
+        assert_eq!(p1.phase_dot_color(0), Palette::STALE, "过期 ⇒ 琥珀点");
+        // 帧加载点字段仍降级（点级独立降级 —— PRD F5.5）
+        let mut fx = frame_healthy();
+        fx.p_phase[1] = Field { v: None, flag: FieldFlag::NotRead };
+        p1.render(&PageInput::live(&fx));
+        assert_eq!(p1.phase_p_text(0).as_deref(), Some("12.5"), "B 相失败不影响 A 相");
+        assert_eq!(p1.phase_reason(1).as_deref(), Some("未取数"));
+
+        // ── ①【评审 ①】某相 **P 有效但 I 单独缺失**：状态点与降级角标必须反映
+        //    「该相 P 与 I 的整体可用性」，不得仍显「实时」且无角标（PRD F5.5 各字段独立降级）──
+        let mut fi = frame_healthy();
+        fi.i_phase[0] = Field { v: None, flag: FieldFlag::Offline };
+        p1.render(&PageInput::live(&fi));
+        assert_eq!(p1.phase_p_text(0).as_deref(), Some("12.5"), "P 有效 ⇒ 照常显示数值");
+        assert_eq!(
+            p1.phase_i_text(0).as_deref(),
+            Some(pages::PLACEHOLDER),
+            "I 缺失 ⇒ 占位符（**严禁补 0**）"
+        );
+        assert_eq!(
+            p1.phase_reason(0).as_deref(),
+            Some("源离线"),
+            "I 单独缺失也必须有降级角标（评审 ①：此前只看 P，角标不出现）"
+        );
+        assert_ne!(
+            p1.phase_dot_color(0),
+            Palette::SOC_OK,
+            "「实时」点必须消失（评审 ①）"
+        );
+        assert_eq!(p1.phase_dot_color(0), Palette::BORDER_CTRL, "降级 ⇒ 停更点");
+        // 同帧的 B / C 相与总卡不受影响（点级独立降级；总卡无电流行是**构造**，不是缺失）。
+        assert_eq!(p1.phase_p_text(1).as_deref(), Some("12.1"), "B 相不受影响");
+        assert_eq!(p1.phase_reason(1), None, "B 相仍实时");
+        assert_eq!(p1.phase_dot_color(1), Palette::SOC_OK);
+        assert_eq!(p1.phase_reason(3), None, "总卡不因「无电流行」被误判为降级");
+        assert_eq!(p1.phase_dot_color(3), Palette::SOC_OK);
+        drop(p1);
+    }
+
+    // ═══ P6 系统 / 关于页 ══════════════════════════════════════════════════
+    {
+        let p6 = p6_system::P6SystemPage::new(&host).expect("P6SystemPage::new");
+        disp.refr_now_for_test();
+        assert_eq!(p6.info_row_count(), 4, "装置信息 4 行（UI §6.6）");
+        assert_eq!(p6.run_row_count(), 7, "运行信息 7 行（UI §6.6）");
+        assert_eq!(p6.about_row_count(), 3, "关于本屏 3 行（含服务地址 / 管理 IP 两行）");
+
+        let f = frame_healthy();
+        p6.render(&PageInput::live(&f));
+        assert_eq!(p6.info_label(0).as_deref(), Some(p6_system::TEXT_MODEL));
+        assert_eq!(p6.info_value(0).as_deref(), Some("BECG-3568"), "装置型号（F8.1）");
+        assert_eq!(p6.info_value(1).as_deref(), Some(pages::MISSING), "序列号无可靠真源 ⇒ 未提供");
+        assert_eq!(p6.info_value(2).as_deref(), Some("0.1.0"), "固件版本");
+        assert_eq!(p6.info_value(3).as_deref(), Some(pages::MISSING), "编译时间缺失 ⇒ 未提供");
+        assert_eq!(p6.run_value(0).as_deref(), Some("1 日 01:00:00"), "系统运行时长");
+        assert_eq!(p6.run_value(1).as_deref(), Some("48 C"), "CPU 温度");
+        assert_eq!(p6.run_value(2).as_deref(), Some("31 %"), "内存使用率");
+        assert_eq!(p6.run_value(3).as_deref(), Some("已连接"), "调度主站连接（灯 + 文字）");
+        assert_eq!(p6.run_value(4).as_deref(), Some("连接中"), "核间连接");
+        assert_eq!(p6.run_value(6).as_deref(), Some("本地策略引擎"), "当前控制源");
+        assert_eq!(
+            p6.local_version().as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "本地屏版本 = 本 crate 编译版本"
+        );
+
+        // ── ⑤ 服务地址口径：两行**分列**、后者缺失显「未提供」（PM 裁定 / EDGE-24）──
+        assert_ne!(
+            p6.service_label(),
+            p6.mgmt_label(),
+            "「本机服务地址」与「设备管理 IP」必须是两行、行名不同"
+        );
+        assert_eq!(p6.service_label().as_deref(), Some(p6_system::TEXT_SERVICE_ADDR));
+        assert_eq!(p6.mgmt_label().as_deref(), Some(p6_system::TEXT_MGMT_IP));
+        let svc = p6.service_address().expect("服务地址恒有值");
+        assert!(svc.contains("127.0.0.1"), "服务地址 = 回环端点（实际 {svc}）");
+        assert_ne!(svc, pages::MISSING, "服务地址不适用「未提供」");
+        assert_eq!(p6.mgmt_ipv4().as_deref(), Some("192.168.3.118"), "设备管理 IP");
+        assert!(
+            !svc.contains("192.168.3.118"),
+            "不得把管理 IP 与服务端口并列成「访问地址」（EDGE-24）"
+        );
+        assert!(p6_system::service_scope_text().contains("仅回环"), "口径来自契约枚举");
+        assert_eq!(p6.note_text().as_deref(), Some(p6_system::TEXT_NO_REMOTE), "说明行");
+        drop(p6);
+
+        // 缺失帧 ⇒ 管理 IP「未提供」，而**服务地址仍有值**（两行不联动 —— 分列的实质）
+        let p6 = p6_system::P6SystemPage::new(&host).expect("P6SystemPage::new (degraded)");
+        let bad = frame_degraded();
+        p6.render(&PageInput::live(&bad));
+        assert_eq!(p6.mgmt_ipv4().as_deref(), Some(pages::MISSING), "EDGE-16");
+        assert!(
+            p6.service_address().is_some_and(|s| s.contains("127.0.0.1")),
+            "服务地址仍如实显示（恒有值）"
+        );
+        assert_eq!(p6.run_value(5).as_deref(), Some("断开"), "数据通道");
+        drop(p6);
+    }
+
+    drop(host);
+    drop(screen);
+    drop(disp);
+    lvgl::deinit();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥′ 页面层静态约束 + 码表覆盖率（`ui/pages/**` **不在** `ui_static_constraints`
+//     的扫描范围内 —— 该用例只扫 `ui/mod.rs` / `theme.rs` / `components.rs`，
+//     此处为三个新文件补一条**独立**用例，不改动既有用例）
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn pages_static_constraints() {
+    let sources: [(&str, &str); 3] = [
+        ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
+        ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
+        ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
+    ];
+    let forbidden = [
+        // ④′ 裸色值调用（色值必须经 `theme` + 类型化通道）
+        concat!("lv_color", "_hex"),
+        concat!("lv_color", "_make"),
+        // ① 零文本输入（F12 红线）
+        concat!("lv_", "text", "area"),
+        concat!("lv_", "key", "board"),
+        concat!("lv_", "spin", "box"),
+        // ⑥ 只有测试可用强制渲染
+        concat!("lv_refr", "_now"),
+        // ⑤ 不安全边界收敛（`ui` 不得直连底层绑定）
+        concat!("lvgl", "_sys"),
+        // 页面不得出现 `Color::hex` / `Color::rgb` 裸构造（必须走 theme 命名常量）
+        "Color::hex(",
+        "Color::rgb(",
+    ];
+    for (name, src) in sources {
+        let lower = strip_comments_and_literals(src).to_ascii_lowercase();
+        for needle in forbidden {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // 额外：页面不得出现 `unsafe`（薄层是唯一允许处）
+        assert!(
+            !strip_comments_and_literals(src).contains("unsafe"),
+            "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥″ **裸尺寸**静态约束（设计 §11.4 ④：`ui/**` 不得出现「字面量尺寸」）
+//
+// 此前两条静态用例（[`ui_static_constraints`] / [`pages_static_constraints`]）只查裸色值、
+// 零键盘、直连绑定、`lv_refr_now`、`unsafe` —— **都没查裸尺寸**（B2a 规格评审 ④）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **几何 setter** 清单：其参数是"尺寸 / 位置 / 边距"，一律须经 `theme`（或由 theme 推导的
+/// 页级 `const`），**不得**写裸数字字面量。
+///
+/// **刻意不含**非几何 setter：`set_value` / `set_range` / `set_style_index` / `set_progress` /
+/// `set_brightness` / `set_selected` 等的实参是**语义量 / 索引 / 百分比**（如 `set_range(0, 100)`
+/// 是进度量程、`set_style_index(.., 0)` 是样式下标），不是设计栅格值，纳入会大面积误报。
+const GEOMETRY_SETTERS: [&str; 11] = [
+    "set_size",
+    "set_pos",
+    "set_width",
+    "set_radius",
+    "set_border_width",
+    "set_column_width",
+    "set_pad_all",
+    "set_pad_top",
+    "set_pad_bottom",
+    "set_pad_left",
+    "set_pad_right",
+];
+
+/// **允许的例外：`0`，且仅此一个**（`ui/**` 实测的全部裸数字实参都是它）。语义有二：
+///
+/// - `set_pos(0, y)` / `set_pos(x, 0)` —— 该轴**无偏移**（左对齐 / 上对齐），是"无值"的零点，
+///   不是设计栅格值；
+/// - `set_pad_*（0)` —— **零内边距**（`theme::transparent()` / `card_head_bar()` /
+///   `warn_banner()` / `dialog_panel()` / `toast()` / `ChipSkin::style()` 都显式要求"内边距一律
+///   为 0"，位置改由调用方 `set_pos` 给出）。
+///
+/// 除 `0` 外**任何**裸数字（含负号、小数、如 `set_size(100, 50)`）都判违规。
+const ALLOWED_BARE_GEOMETRY_LITERAL: &str = "0";
+
+/// 取 `(` 之后到配对 `)` 的实参文本（含嵌套括号）。
+fn balanced_args(src: &str, open_paren: usize) -> &str {
+    let b = src.as_bytes();
+    let mut depth = 1i32;
+    let mut i = open_paren + 1;
+    while i < b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &src[open_paren + 1..i];
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    &src[open_paren + 1..]
+}
+
+/// 顶层逗号切分（忽略括号 / 方括号 / 花括号内的逗号）。
+fn split_top_level_args(args: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&args[start..]);
+    parts
+}
+
+/// ⑥″ 裸尺寸：`ui/**` 的几何 setter 不得出现裸数字字面量（例外仅 `0`，见
+/// [`ALLOWED_BARE_GEOMETRY_LITERAL`]）。
+///
+/// 扫描面无字面量（先剥注释与字符串 / 字符字面量）⇒ 不会被文案里的数字误伤；
+/// 也不扫 `ui/tests.rs`（测试构造控件时用裸数字是**故意**的）。
+#[test]
+fn ui_layout_setters_use_theme_constants() {
+    for (name, src) in UI_PROD_SOURCES {
+        let code = strip_comments_and_literals(src);
+        let lines: Vec<&str> = code.lines().collect();
+        for setter in GEOMETRY_SETTERS {
+            let mut from = 0usize;
+            while let Some(rel) = code[from..].find(setter) {
+                let at = from + rel;
+                from = at + setter.len();
+                // 必须是"独立调用"：前一个字符不是标识符 / `.` 之外的成员访问也可（`o.set_pos`）
+                let before = code[..at].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                // 后一个非空白字符必须是 `(`
+                let rest = &code[at + setter.len()..];
+                let pad = rest.len() - rest.trim_start().len();
+                let Some(open_rel) = rest.find('(') else { continue };
+                if !rest[..open_rel].trim().is_empty() {
+                    continue;
+                }
+                let open = at + setter.len() + pad + open_rel;
+                let args = balanced_args(&code, open);
+                for arg in split_top_level_args(args) {
+                    let a = arg.trim();
+                    let is_bare_number = !a.is_empty()
+                        && matches!(a.chars().next(), Some(c) if c.is_ascii_digit() || c == '-' || c == '+')
+                        && a.parse::<f64>().is_ok();
+                    if is_bare_number && a != ALLOWED_BARE_GEOMETRY_LITERAL {
+                        let line = code[..at].matches('\n').count() + 1;
+                        panic!(
+                            "{name} 第 {line} 行：`{setter}` 出现裸尺寸字面量 `{a}` \
+                             （行内容：{}）—— 设计 §11.4 ④ 要求尺寸一律经 `theme` 常量；\
+                             只允许例外 `0`（无偏移 / 零内边距，见 [`ALLOWED_BARE_GEOMETRY_LITERAL`] 文档）",
+                            lines.get(line - 1).copied().unwrap_or("").trim()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
