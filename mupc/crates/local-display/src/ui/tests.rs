@@ -474,7 +474,10 @@ const UI_PROD_SOURCES: [(&str, &str); 7] = [
 ///
 /// 另有两类"不是字面量文本"的排除（写在 [`ui_source_chars`] 里）：
 /// ① `format!` 模板的 `{…}` 占位符内容（`"{d} 日"` 里 `d` 不是字形，值才是）；
-/// ② `#[cfg(test)]` 区（各文件的测试模块都在文件末尾，且**断言形态**后若不符即响亮失败）。
+/// ② **测试模块区**（`#[cfg(test)]` + 紧随的 `mod tests`，各文件都在文件末尾）—— 判据是
+/// "属性**之后紧跟**测试模块"而非"出现过该 token"，故注释里的 token 与生产区的
+/// `#[cfg(test)] pub fn …` 测试访问器**都在扫描面内**（见 [`truncate_before_test_module`]）；
+/// 形态若不符即响亮失败。
 const NON_DISPLAY_SINKS: [&str; 5] = [
     "InvalidArgument(",
     "debug_struct(",
@@ -568,25 +571,66 @@ fn strip_format_placeholders(lit: &str) -> String {
     out
 }
 
+/// 掐掉**测试模块**（`#[cfg(test)]` + 其后紧跟的 `mod tests` 项）**及其后**的全部内容，
+/// 只留**生产区**（[`ui_source_chars`] 的扫描面）。
+///
+/// **判据（B3 订正）**：截断点 = **第一个"`#[cfg(test)]` 之后（跳过空白与可见性修饰）就是
+/// `mod tests`"的属性项**，而**不是**"文件里首个 `#[cfg(test)]`"。旧判据（首个出现处 +
+/// "其后某处含 `mod tests`"守卫）有两个真实反例：
+///
+/// ① 生产区**本来就有** `#[cfg(test)] pub fn …` 形态的**仅测试可见访问器**
+///    （`controls.rs` 的 `matrix()` / `segment()` / `column()` / `fallback_index()`）；
+/// ② **注释里写出这个 token 串**同样命中（`controls.rs` 头部与上述访问器的文档注释都有）。
+///
+/// ⇒ 旧判据会把截断点提到生产区中部甚至**文件头**（注释反例），其后的生产字面量**全部漏扫**
+/// —— 网看似还在、实则漏了一大片（实测：头部注释里出现该串 ⇒
+/// `ui_texts_covered_by_font_cmap` 误报「清册条目 `年` 未出现」）。本判据对注释里的 token
+/// **免疫**（注释里该串之后跟的是注释文字，不是 `mod tests`）。
+///
+/// ⇒ **生产文件里的 `#[cfg(test)] pub fn …` 测试访问器仍在扫描面内**（截断点在其之后），
+/// **这是有意的**：它们是生产文件的一部分，其字面量同样是上屏候选。
+///
+/// 形态已变（文件**有** `#[cfg(test)]` 却**无**其后紧跟 `mod tests` 的项：测试模块被改名 /
+/// 中间插入了别的项 / 可见性修饰不在下方已列形态内）⇒ **响亮 assert 失败**，不静默放过；
+/// 纯生产文件（全文件无 `#[cfg(test)]`，如 `theme.rs`）⇒ 扫描**整个文件**（原行为）。
+fn truncate_before_test_module<'a>(src: &'a str, name: &str) -> &'a str {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut any_attr = false;
+    for (i, _) in src.match_indices(ATTR) {
+        any_attr = true;
+        let tail = src[i + ATTR.len()..].trim_start();
+        // 允许**可见性修饰**：`ui/mod.rs` 的测试模块写作 `pub(crate) mod tests;`
+        // （LVGL 侧唯一 `#[test]` 需在同一线程调起它），故不能只认裸 `mod tests`。
+        let tail = ["pub(crate)", "pub(super)", "pub(self)", "pub"]
+            .iter()
+            .find_map(|p| tail.strip_prefix(*p))
+            .map(str::trim_start)
+            .unwrap_or(tail);
+        if tail.starts_with("mod tests") {
+            return &src[..i];
+        }
+    }
+    assert!(
+        !any_attr,
+        "{name}：本文件有 `#[cfg(test)]` 但**无**其后紧跟 `mod tests` 的项 —— 本扫描\
+         「截断到测试模块之前」的前提不成立（测试模块形态已变：改名 / 与属性之间插入了别的项 / \
+         可见性修饰不在 `pub` `pub(crate)` `pub(super)` `pub(self)` 之内），\
+         请改本扫描工具（不得静默放过）"
+    );
+    src
+}
+
 /// 扫一段 `ui/**` 源码，取出**会取字形的字符**、出处字面量与**行号**（1 起）。
 ///
 /// 口径（逐条）：剥注释；取 `"…"` 字符串字面量与 `'x'` / `'\u{…}'` 字符字面量
 /// （**生命周期 `'a` 不是字面量**，按普通字符跳过）；`\u{XXXX}` 转义**解码成真字符**
 /// （否则"用转义写的上屏字"会漏判）；忽略 [`NON_DISPLAY_SINKS`] 之后的字面量；
-/// 剥 `{…}` 占位符；掐掉 `#[cfg(test)]` 区。空白字符不计。
+/// 剥 `{…}` 占位符；**掐掉测试模块（`#[cfg(test)]\nmod tests`）及其后**（见
+/// [`truncate_before_test_module`] —— 生产文件里的 `#[cfg(test)] pub fn …` **测试访问器
+/// 仍在扫描面内**，这是有意的）。空白字符不计。
 /// **行号**让缺字报错能点名「文件:行 ← 文案」，而不是只报一个裸字形（B2a 收尾订正）。
 fn ui_source_chars(src: &str, name: &str) -> Vec<(char, String, usize)> {
-    let src = match src.find("#[cfg(test)]") {
-        Some(i) => {
-            assert!(
-                src[i..].contains("mod tests"),
-                "{name}：`#[cfg(test)]` 之后不是 `mod tests` —— 本扫描「截断到首个 \
-                 #[cfg(test)]」的前提不成立，请改扫描工具（不得静默放过）"
-            );
-            &src[..i]
-        }
-        None => src,
-    };
+    let src = truncate_before_test_module(src, name);
     let bytes = src.as_bytes();
     let mut out: Vec<(char, String, usize)> = Vec::new();
     // 字节偏移 → 1 起的行号（报错点名用）。
@@ -1638,8 +1682,9 @@ pub(crate) fn ui_chain() {
     {
         use crate::ui::controls::{
             DateTimeStepper, DateTimeValue, Ipv4Stepper, SegmentedControl, DAY_MAX, DAY_MIN,
-            DATETIME_TOTAL_H, DATETIME_TOTAL_W, HOUR_MAX, IPV4_TOTAL_H, IPV4_TOTAL_W, MINUTE_MAX,
-            MONTH_MAX, MONTH_MIN, SEGMENT_H, SEGMENT_MIN_W, YEAR_MAX, YEAR_MIN,
+            DATETIME_HEADERS, DATETIME_TOTAL_H, DATETIME_TOTAL_W, HOUR_MAX, IPV4_TOTAL_H,
+            IPV4_TOTAL_W, MINUTE_MAX, MONTH_MAX, MONTH_MIN, SEGMENT_H, SEGMENT_MIN_W, YEAR_MAX,
+            YEAR_MIN,
         };
 
         // ═══ SegmentedControl ═══════════════════════════════════════════════
@@ -1786,6 +1831,45 @@ pub(crate) fn ui_chain() {
             ),
             "整控件宽超内容区必须 Err"
         );
+
+        // ── ⑦.0c **I1** 回调内自替换 `set_on_change`：不得 panic、回调体必须跑完 ────────
+        // 复刻评审探针 **P4**：旧实现在调用用户回调期间持着槽的 `try_borrow_mut`，用户回调里
+        // 再调 `set_on_change` ⇒ 其中的 `borrow_mut()` panic；该 panic 被 `src/lvgl/event.rs`
+        // 的 `catch_unwind` 拦下 ⇒ **回调体后半段不执行且用例仍全绿**（静默丢通知 + 半执行）。
+        // 修法（方案 B「取出转发」）见 `controls.rs` 的 `fire_index` 上方语义说明。
+        // 改什么会红：把 `fire_*` / `replace_*` 改回"调用期持借用 + `borrow_mut`"⇒ panic 被
+        // 桥吞掉 ⇒ 下面 `body_completed` 仍为 false ⇒ 本断言变红（**已实测**，见交付报告）。
+        let seg = Rc::new(seg); // 回调内需要再次拿到 `&SegmentedControl`（自替换）
+        let body_completed = Rc::new(Cell::new(false));
+        let replaced_ran = Rc::new(Cell::new(false));
+        {
+            let weak = Rc::downgrade(&seg);
+            let done = Rc::clone(&body_completed);
+            let ran = Rc::clone(&replaced_ran);
+            seg.set_on_change(move |_i| {
+                if let Some(s) = weak.upgrade() {
+                    let ran = Rc::clone(&ran);
+                    // **回调内自替换**：旧实现此处 panic（槽正被可变借用持有）。
+                    s.set_on_change(move |_j| ran.set(true));
+                }
+                done.set(true); // 回调体末尾哨兵
+            });
+        }
+        seg.send_event(EventCode::VALUE_CHANGED);
+        assert!(
+            body_completed.get(),
+            "回调体内自替换 set_on_change 必须**不 panic**且回调体跑完（旧实现 panic 被 \
+             event.rs 的 catch_unwind 吞掉 ⇒ 本哨兵仍为 false）"
+        );
+        assert!(
+            !replaced_ran.get(),
+            "替换语义：本次通知仍由旧回调执行，新回调自**下一次**通知起生效"
+        );
+        seg.send_event(EventCode::VALUE_CHANGED);
+        assert!(
+            replaced_ran.get(),
+            "下一次通知必须由**替换后**的新回调执行（否则新回调根本没接上）"
+        );
         drop(seg);
 
         // ═══ Ipv4Stepper ════════════════════════════════════════════════════
@@ -1865,10 +1949,12 @@ pub(crate) fn ui_chain() {
         // ═══ DateTimeStepper ════════════════════════════════════════════════
         let want = DateTimeValue::from_parts(2026, 5, 20, 13, 42);
         let dt = DateTimeStepper::new(&screen, want).expect("DateTimeStepper");
+        // **I3**：列头顺序取自生产侧**真源** [`DATETIME_HEADERS`]，不再硬编码一份（此前此处
+        // 写死 `["年","月","日","时","分"]`，正是 `controls.rs` 注释声称"已避免"的第二真源）。
         assert_eq!(
             dt.column_headers(),
-            ["年", "月", "日", "时", "分"],
-            "列头 5 个、逐字（§5.1 #8）"
+            DATETIME_HEADERS.map(String::from),
+            "列头 5 个、逐字、顺序 == DATETIME_HEADERS 真源（§5.1 #8）"
         );
         assert_eq!(dt.value(), want, "五分量往返");
         disp.refr_now_for_test();
@@ -2581,6 +2667,185 @@ fn controls_static_constraints() {
                 "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
             );
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁗ **常量定义式**静态约束（I2：`const` 定义式里的裸数字缺口）
+//
+// ⑥″（[`ui_layout_setters_use_theme_constants`]）只扫**调用实参**（`set_size(..)` /
+// `decor(..)`），**扫不到** `const` **定义式**里的裸数字 —— B2b-1 代码质量评审探针 **P7**
+// 实测：把 `pub const SEGMENT_H: i32 = Dimens::CHIP_H;` 改成 `pub const SEGMENT_H: i32 = 48;`，
+// ⑥″ 与全部 171 条用例**全绿**（代数恒真式 + 无定义式扫描 ⇒ 这个缺口当时没有任何网）。
+// 本用例补上这条网。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **常量定义式**扫描面（**刻意不含 `ui/theme.rs`** —— 它是这些数字的**根真源**，设计栅格值
+/// 本来就该在那里以字面量出现；本网要抓的是"**派生**常量直接抄数字"）。
+///
+/// 与 ⑥″ 各自列清单而不复用 [`UI_PROD_SOURCES`]：后者含 `theme.rs`（必须豁免）。
+const CONST_I32_SCAN_SOURCES: [(&str, &str); 6] = [
+    ("ui/mod.rs", include_str!("mod.rs")),
+    ("ui/components.rs", include_str!("components.rs")),
+    ("ui/controls.rs", include_str!("controls.rs")),
+    ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
+    ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
+    ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
+];
+
+/// **允许的裸整数常量值：只有 `0`**（逐条说明理由，不靠"看着没风险"）。
+///
+/// `0` 是"**无偏移 / 顶行零点**"的单位元，**不是**设计栅格值 —— 本批唯一命中项是
+/// `controls.rs` 的 `DATETIME_HEADER_Y = 0`（列头行贴容器顶部）。与 ⑥″ 的
+/// [`ALLOWED_BARE_GEOMETRY_LITERAL`]（`set_pos(0, y)` 的 `0`）**同口径**。
+///
+/// **为什么放行不构成风险**：把某条"真尺寸"误写成 `0`（`const W: i32 = 0;` 当宽用）逃不过
+/// 别的网 —— 离屏 `size()` 断言会立刻变红；而"该写 `0` 却写了非 `0`"由本用例的
+/// **非零即违规**规则直接拦下。**宁可先严格**：将来若确需放行别的值，必须在此逐条加并写明理由。
+const ALLOWED_BARE_CONST_I32: [&str; 1] = ["0"];
+
+/// **已登记放行的裸整数常量**（`(文件, 常量名, 理由)`）——**逐条登记，不作正则豁免**。
+///
+/// 唯一一条：`ui/pages/p1_status.rs` 的 `MAIN_CARD_H = 320` —— 它是 UI §6.1 的**契约给定值**
+/// （主行卡 `484×320`），B2a 代码质量评审 **M5** 已在 `p1_status.rs` 模块文档里登记为
+/// "**唯一的例外**"；该文件**本批禁改** ⇒ 此处只登记、不动手。
+///
+/// **登记不得腐化**：本用例断言"每条登记**确实仍命中**一个违规点"；若将来该常量迁入 `theme`
+/// 或改为派生式，本用例会**变红**并提示删除该条（与 `KNOWN_MISSING` 的"防登记腐化"同法）。
+const REGISTERED_BARE_CONST_I32: [(&str, &str, &str); 1] = [(
+    "ui/pages/p1_status.rs",
+    "MAIN_CARD_H",
+    "UI §6.1 契约值 484×320（B2a 代码质量评审 M5 已登记的唯一例外；本批禁改 pages/**）",
+)];
+
+/// 从**单行**源码解析 `const <NAME>: i32 = <整数>;`（整条初始化式就是一个裸十进制整数）。
+///
+/// 返回 `(常量名, 字面量文本)`；不符即 `None`。**刻意只认 `i32` 且只认单行**：
+/// - 类型非 `i32`（`usize` / `i64` / `u32`…）**不查** —— 本项目里它们装的是**语义量**
+///   （`IPV4_OCTETS = 4` / `STEP = 1`），不是设计栅格值；
+/// - 初始化式跨行 / 含 `Dimens::` / 含算术 / 含 `as` ⇒ 自然不是裸整数，不命中。
+///
+/// 手写而不引正则：本 crate 无 `regex` 依赖，且判据够简单（不为它造一套解析器）。
+fn bare_i32_const(line: &str) -> Option<(&str, &str)> {
+    let l = line.trim();
+    // 可见性前缀（`pub` / `pub(crate)` / `pub(super)`）整条剥掉。
+    let l = l
+        .strip_prefix("pub(crate)")
+        .or_else(|| l.strip_prefix("pub(super)"))
+        .or_else(|| l.strip_prefix("pub"))
+        .unwrap_or(l)
+        .trim_start();
+    let rest = l.strip_prefix("const ")?;
+    let (name, rest) = rest.split_once(':')?;
+    let name = name.trim();
+    let rest = rest.trim_start().strip_prefix("i32")?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim();
+    let init = rest.strip_suffix(';')?.trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let digits = init.strip_prefix('-').unwrap_or(init);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((name, init))
+}
+
+/// ⑥⁗ **常量定义式**：`ui/**` 生产源码里 `const <NAME>: i32 = <整数>;` 一律违规
+/// （例外 = [`ALLOWED_BARE_CONST_I32`] + [`REGISTERED_BARE_CONST_I32`]，见各自文档）。
+///
+/// **定位（如实，与 ⑥″ 同级）**：这是一条**减速带** —— 拦"定义式里直接写死一个数字"，
+/// 不追求形式化保证（数值仍可经 `Dimens` 间接传递；那由 `theme.rs` 的单一真源 +
+/// `controls.rs::tests::sizes_are_derived_from_theme_constants` 的**字面量锚定**共同负责）。
+#[test]
+fn ui_const_i32_definitions_derive_from_theme() {
+    // ① 探测器**正 / 负对照**（防"解析器写坏 ⇒ 恒返回 None ⇒ 构造性全绿"，这正是本项目
+    //    两轮评审反复点名的"看着在把关、实则没把住"）。
+    assert_eq!(
+        bare_i32_const("pub const SEGMENT_H: i32 = 48;"),
+        Some(("SEGMENT_H", "48")),
+        "正对照：裸整数定义式必须被抓到（P7 的变异形态）"
+    );
+    assert_eq!(
+        bare_i32_const("const DATETIME_HEADER_Y: i32 = 0;"),
+        Some(("DATETIME_HEADER_Y", "0")),
+        "正对照：`0` 也先被抓到，再由 ALLOWED_BARE_CONST_I32 放行"
+    );
+    assert_eq!(
+        bare_i32_const("pub const SEGMENT_H: i32 = Dimens::CHIP_H;"),
+        None,
+        "负对照：派生式不得误报"
+    );
+    assert_eq!(
+        bare_i32_const(
+            "pub const IPV4_SEG_W: i32 = Dimens::STEPPER_BTN_W * 2 + Dimens::IPV4_VALUE_W;"
+        ),
+        None,
+        "负对照：算术式不得误报"
+    );
+    assert_eq!(
+        bare_i32_const("const IPV4_OCTETS: usize = 4;"),
+        None,
+        "负对照：非 i32 不查（语义量，不是栅格值）"
+    );
+    assert_eq!(bare_i32_const("const STEP: i64 = 1;"), None, "负对照：非 i32 不查");
+
+    // ② **扫描面自证**：清单必须真的含 `controls.rs`（若 `include_str!` 指错文件 / 文件被
+    //    清空，下面的逐行循环会构造性全绿）。
+    assert!(
+        CONST_I32_SCAN_SOURCES.iter().any(|(n, _)| *n == "ui/controls.rs"),
+        "扫描面必须覆盖 ui/controls.rs（否则本用例对 B2b-1 无意义）"
+    );
+    let controls_src = CONST_I32_SCAN_SOURCES
+        .iter()
+        .find(|(n, _)| *n == "ui/controls.rs")
+        .map(|(_, s)| *s)
+        .unwrap_or("");
+    for must in ["SEGMENT_H", "DATETIME_VALUE_W", "IPV4_TOTAL_W"] {
+        assert!(
+            controls_src.contains(must),
+            "ui/controls.rs 的扫描面未含 `{must}` —— include_str! 指错文件 / 内容不符预期"
+        );
+    }
+
+    // ③ 逐行扫描（先剥注释与字符串 / 字符字面量 ⇒ 文档里解释性的 `const .. = 48` 不误伤）。
+    let mut registered_hit = [false; REGISTERED_BARE_CONST_I32.len()];
+    for (name, src) in CONST_I32_SCAN_SOURCES {
+        let code = strip_comments_and_literals(src);
+        for (idx, line) in code.lines().enumerate() {
+            let Some((cname, value)) = bare_i32_const(line) else {
+                continue;
+            };
+            if ALLOWED_BARE_CONST_I32.contains(&value) {
+                continue;
+            }
+            if let Some(pos) = REGISTERED_BARE_CONST_I32
+                .iter()
+                .position(|(f, n, _)| *f == name && *n == cname)
+            {
+                registered_hit[pos] = true;
+                continue;
+            }
+            panic!(
+                "{name}:{} —— `const {cname}: i32 = {value};` 的初始化式是**裸整数**\
+                 （设计 §11.4 ④：屏上尺寸一律经 `theme` 常量推导 / 由 theme 分项算出）。\n\
+                 行内容：{}\n\
+                 若这是「零点 / 单位元」，请加入 `ALLOWED_BARE_CONST_I32` 并写明理由；\
+                 若是文档给定的**契约值**，请登记 `REGISTERED_BARE_CONST_I32`（附出处）；\
+                 否则请改为由 `theme` 常量推导。",
+                idx + 1,
+                line.trim()
+            );
+        }
+    }
+
+    // ④ 登记不得腐化（放在**全部扫描之后** —— 登记条目所在文件在清单里靠后）：
+    for (hit, (f, n, why)) in registered_hit.iter().zip(REGISTERED_BARE_CONST_I32.iter()) {
+        assert!(
+            *hit,
+            "登记条目 `{f}` / `{n}`（{why}）已**失效** —— 源码里已不再有该裸整数定义式，\
+             请从 `REGISTERED_BARE_CONST_I32` 删除它"
+        );
     }
 }
 

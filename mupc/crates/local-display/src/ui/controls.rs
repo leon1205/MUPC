@@ -31,8 +31,8 @@
 //! | # | 偏差（现状 ≠ 契约） | 原因 | 计划收口单元 |
 //! |---|----------------------|------|--------------|
 //! | CD1 | **IPv4 四段总宽 = 792**（`4 × (64 + 64 + 64) + 3 × 8`），UI §5.1 #7 正文写 **856** | **文档自身矛盾**：856 **无法**由其同一行的分项算出（该行的分项按自身口径 = 792）。按 theme 分项常量推导为准（`Dimens::STEPPER_BTN_W × 2 + Dimens::IPV4_VALUE_W`），**不硬编码 856 或 792** | 无（**有意与 theme 分项一致**；建议 UI §5.1 #7 回改 856 → 792） |
-//! | CD2 | IPv4 汇总标签宽 = **184**（`CONTENT_W − 792 − GAP_MIN`）⇒ 整件 **992 = 内容区有效宽**，UI §6.1 行型 B 写「控件独占次行 (x36–x988)，用 `Ipv4Stepper` 856×64」 | 856 − 792 = 64 px **放不下** `192.168.1.10`（12 字符）；§6.1 要求控件独占次行（有效宽 992）⇒ 取"四段 + 缝 + 汇总 = 内容区宽" | **B2b-2**（P2 装配时若 PM 要求 x36 起排，需重定汇总标签的位置口径） |
-//! | CD3 | **`Dimens::DATETIME_COL_W`（112）在本文件不使用**：日期时间列宽取 **192**（`64 + 64 + 64`），值区宽取 **64**（内容区均分推导） | 112 **不可用**（两重）：① 若作**列宽** ⇒ 列宽下限 = `−`64 + 值 48(TOUCH_MIN) + `+`64 = **176 > 112**（触摸硬约束）；② 若作**值区宽** ⇒ 五列 = `5 × (64+112+64) + 4×8` = **1232**，既超内容区 992、也超屏幕 1024。⇒ 按「内容区有效宽均分五列」推导值区宽 | 建议 UI §5.1 #8 与本文件同法回改（112 → 64，592 → 992） |
+//! | CD2 | IPv4 汇总标签宽 = **184**（`CONTENT_W − 792 − GAP_MIN`）⇒ 整件 **992 = 内容区有效宽**（出处 = UI **§3.5**「内容区左右安全边 16 px（x16–1008），有效宽 **992 px**」）；UI §6.1 行型 B 另行要求「控件独占次行 (x36–x988)，用 `Ipv4Stepper` 856×64」（该处 x36–x988 自身 = 952，与 §3.5 的 992 是**两套口径**，此前误把 992 记成 §6.1） | 856 − 792 = 64 px **放不下** `192.168.1.10`（12 字符）；§6.1 要求控件独占次行 ⇒ 取"四段 + 缝 + 汇总 = 内容区宽（992）" | **B2b-2**（P2 装配时若 PM 要求 x36 起排，需重定汇总标签的位置口径） |
+//! | CD3 | **`Dimens::DATETIME_COL_W`（112）在本文件不使用**：日期时间列宽取 **192**（`64 + 64 + 64`），值区宽取 **64**（内容区均分推导） | 112 **不可用**（两重）：① 若作**列宽** ⇒ 列宽下限 = `−`64 + 值 48(TOUCH_MIN) + `+`64 = **176 > 112**（触摸硬约束）；② 若作**值区宽** ⇒ 五列 = `5 × (64+112+64) + 4×8` = **1232**，既超内容区 992、也超屏幕 1024。⇒ 按「内容区有效宽均分五列」推导值区宽 | 建议 UI §5.1 #8 与本文件同法回改（112 → 64，592 → 992）。**收口单元**：`src/ui/theme.rs` 的 `Dimens::DATETIME_COL_W`（112，生产侧已零使用）与 `src/ui/components.rs:464–465` 的过时引用仍宣称它是"日期时间五列步进的列宽"，须在后续**字体 / 文档收口批**（B2c 之后）统一修正 —— 本批**禁改**这两个文件，故此处只登记、不动手 |
 //! | CD4 | DateTimeStepper 总高 = **106**（分量标签行 26 + 缝 16 + 步进 64），UI §5.1 #8 写 **64** | §5.1 #8 只给了 `64` 高，**未提及分量标签行**（该表全文无「列头」字样）。分量标签（本文件称「列头」）的必要性来自**另两处**：① §6.3 P3 日志页线框 `Y700 （仅「自定义」时展开）起始 [年][月][日][时][分]` —— 五个分量列各带分量标注；② §3.6 全屏用字表 P3「筛选」行收录 `年` `月` `日` `时` `分` 五字 ⇒ **由这两处推断**出"五列各有一行分量标签"，高度必然 > 64。标签行高度取 [`TextSlot::Label`]（26 px，§3.3 控件文字档） | **B2b-2**：P3 的「自定义」展开区（UI 写 Y700 起、64 px）随之增高，装配时按 106 预留 |
 //! | CD5 | ~~分段控件的「选中」与「禁用」两条样式挂上但当前不参与绘制~~ **（已在本次提交 `fix(display): 薄层补 buttonmatrix 控制位接口` 修复 ⇒ 四态全部生效）** | **原根因**（v9.5.0 源码事实）：`lv_buttonmatrix` 的每段 `CHECKED` / `DISABLED` 状态由 `ctrl_bits[i]`（`LV_BUTTONMATRIX_CTRL_CHECKED` / `_DISABLED`）驱动（`lv_buttonmatrix.c` 绘制趟 `btn_state` 只由 ctrl 位与 `btn_id_sel` 组装），而**当时薄层 `ButtonMatrix` 未暴露** `lv_buttonmatrix_set_button_ctrl(_all)`；`set_one_checked(true)` 只置"互斥"标志（其内部 `make_one_button_checked` 只在按钮**已** CHECKED 时才保留），故 CHECKABLE 无法置位 ⇒ 用户点选只改变 `btn_id_sel`（PRESSED 高亮可见），CHECKED 从不产生 | **修复方式 / 验证**：薄层补 `set_ctrl_all` / `set_ctrl` / `clear_ctrl_all` / `has_ctrl` 四个薄封装（`src/lvgl/widgets.rs`），本控件改为构造期 `set_ctrl_all(CTRL_CHECKABLE)` + 初始段 `set_ctrl(start, CTRL_CHECKED)`，[`SegmentedControl::set_selected`] 改为"全清 CHECKED → 单段置位"，[`SegmentedControl::set_disabled`] 同步 `CTRL_DISABLED` 位；**回归锁**在 `ui/tests.rs::ui_chain` —— 以 `has_ctrl` 读回断言"每段 CHECKABLE / 恰一段 CHECKED / 切换后旧段已清"（注释掉 `set_ctrl_all(CTRL_CHECKABLE)` 那一行，该用例即变红，已实测） |
 //! | CD6 | 列头 / 汇总标签的**文本对齐**靠"窄标签 + [`theme::center_offset`] 定位"实现；IPv4 汇总标签在其 184 px 盒内**左对齐** | 薄层**没有**文本对齐通道（`lv_obj_set_style_text_align` 未封装，见 `components.rs` 模块文档「布局手法」） | 若 PM 要求汇总标签居中 / 右对齐：薄层补 `set_text_align` 后调整 |
@@ -66,7 +66,10 @@
 //!   局部变量 —— 否则构造器返回时即被 `Drop`，LVGL 级联删除其整棵子树（表现为"界面空白
 //!   但无报错"，B1 出过此类 UAF 级缺陷）；
 //! - **回调纪律**：回调内**不 panic**（无 `unwrap` / 无越界索引 / 无 `panic!`）、不做阻塞
-//!   I/O、不删除自身宿主；共享态一律 `try_borrow*`（拿不到即跳过）；
+//!   I/O、不删除自身宿主；**触发用户回调期间不持有任何 `RefCell` 借用**（回调先被"取出 →
+//!   调用 → 槽仍为空才放回"，见 `fire_index` 上方的语义说明）⇒ 回调内**可安全再次
+//!   `set_on_change`** 自替换（**本次通知仍由旧回调执行完毕，新回调自下一次通知起生效**）；
+//!   其余共享态一律 `try_borrow*`（拿不到即跳过，**不 panic**）；
 //! - **不提供跨线程 API**：三个类型都含 LVGL 句柄（自动 `!Send` / `!Sync`），全部调用必须
 //!   在事件循环线程内（设计 §5.2 不变量 4）。
 
@@ -75,7 +78,7 @@ use std::rc::{Rc, Weak};
 
 use crate::lvgl::event::EventCode;
 use crate::lvgl::obj::{Obj, ObjFlag};
-use crate::lvgl::style::{Color, Part, State, StyleSelector};
+use crate::lvgl::style::{Color, Part, State, Style, StyleSelector};
 use crate::lvgl::widgets::{
     self, ButtonMatrix, Label, LongMode, CTRL_CHECKABLE, CTRL_CHECKED, CTRL_DISABLED,
 };
@@ -101,19 +104,33 @@ type DateTimeCallback = Rc<RefCell<Option<Box<dyn FnMut(DateTimeValue)>>>>;
 //    逐字核对**：U+5E74 / U+6708 / U+65E5 / U+65F6 / U+5206 均在 324 码位基线内）
 // ═══════════════════════════════════════════════════════════════════════════
 
+// M5 可见性：五个单字列头**只**被本文件的 [`DATETIME_HEADERS`] / [`ALL_TEXTS`] 引用
+// （`ui/tests.rs` 引用的是聚合后的两份），故降为**私有**（本文件及其测试子模块可见即可，
+// 不再占 crate 公共 API）。
+//
+// 注：此处曾有一条"注释刻意不写 `#[cfg(test)]` 完整字面形式"的告警。其根因是当时
+// `ui/tests.rs::ui_source_chars` 取"**首个** `#[cfg(test)]`"为截断点，而本文件生产区本就
+// 有 `#[cfg(test)] pub fn …` 测试访问器 —— 该串一旦出现在更靠前处，截断点即被提前，其后的
+// 列头中文（`年/月/日/时/分`）全部漏扫（已实测踩过一次）。
+// 该判据**已加固**为"首个其后紧跟 `mod tests` 的 `#[cfg(test)]`"
+// （`ui/tests.rs::truncate_before_test_module`，双向探针实测），故告警不再成立；
+// 本段文字保留，只为留下"当初为什么会有它"的痕迹。
 /// 列头「年」（UI §5.1 #8 五列之一）。
-pub const TEXT_YEAR: &str = "年";
+const TEXT_YEAR: &str = "年";
 /// 列头「月」（UI §5.1 #8）。
-pub const TEXT_MONTH: &str = "月";
+const TEXT_MONTH: &str = "月";
 /// 列头「日」（UI §5.1 #8）。
-pub const TEXT_DAY: &str = "日";
+const TEXT_DAY: &str = "日";
 /// 列头「时」（UI §5.1 #8）。
-pub const TEXT_HOUR: &str = "时";
+const TEXT_HOUR: &str = "时";
 /// 列头「分」（UI §5.1 #8）。
-pub const TEXT_MINUTE: &str = "分";
+const TEXT_MINUTE: &str = "分";
 
 /// 日期时间的**列头顺序真源**（年 → 月 → 日 → 时 → 分）—— 构造、[`DateTimeStepper::column_headers`]
 /// 与离屏用例**共用同一份**，避免"列头顺序"出现第二个真源。
+///
+/// **谁在用（M5）**：保留 `pub` —— `ui/tests.rs::ui_chain` 的 `DateTimeStepper` 段
+/// **直接引用本表**核对列头顺序（不再是硬编码的第二真源，见 I3）。
 pub const DATETIME_HEADERS: [&str; 5] = [
     TEXT_YEAR,
     TEXT_MONTH,
@@ -127,36 +144,48 @@ const IPV4_SEP: char = '.';
 
 /// 本文件上屏的全部固定文案（供 `ui/tests.rs` 的**码表覆盖率**走查 —— UI §3.6 是全屏用字
 /// 表，漏字即"豆腐块"，设计 §11.1 有同款测试）。
+///
+/// **谁在用（M5）**：保留 `pub` —— `ui/tests.rs::ui_texts_covered_by_font_cmap` 把它链入
+/// 待查集合（`.chain(crate::ui::controls::ALL_TEXTS.iter())`）。
 pub const ALL_TEXTS: &[&str] = &[TEXT_YEAR, TEXT_MONTH, TEXT_DAY, TEXT_HOUR, TEXT_MINUTE];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. 取值区间（**分量封闭** —— UI §5.3 三行；值域出处逐条注明）
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// IPv4 单段下界（协议事实：八位组 0）。
-pub const OCTET_MIN: i64 = 0;
-/// IPv4 单段上界（协议事实：八位组 255）。
-pub const OCTET_MAX: i64 = 255;
+// M5 可见性（取证口径 = `grep "\b<NAME>\b" src/`，不凭感觉）：
+// - **保留 `pub`**（`ui/tests.rs` 直接引用，作离屏用例的输入）：`YEAR_MIN` / `YEAR_MAX` /
+//   `MONTH_MIN` / `MONTH_MAX` / `DAY_MIN` / `DAY_MAX` / `HOUR_MAX` / `MINUTE_MAX`
+//   （见 `ui/tests.rs` 的 `use crate::ui::controls::{..}` 与 `dt.column(..).set_value(..)`）；
+// - **降为私有**（本文件外零引用）：`OCTET_MIN` / `OCTET_MAX` / `HOUR_MIN` / `MINUTE_MIN`。
+
+/// IPv4 单段下界（协议事实：八位组 0）。**私有**（M5：仅本文件用）。
+const OCTET_MIN: i64 = 0;
+/// IPv4 单段上界（协议事实：八位组 255）。**私有**（M5：仅本文件用）。
+const OCTET_MAX: i64 = 255;
 
 /// 年份下界（UI §5.3 `DateTimeStepper` 行 / 本单元规格「年 1970–2100」）。
+///
+/// **谁在用（M5）**：`ui/tests.rs` 的 `DateTimeStepper` 段（越界夹取 / 端点禁用断言）。
 pub const YEAR_MIN: i64 = 1970;
-/// 年份上界（同上）。
+/// 年份上界（同上）。**谁在用（M5）**：`ui/tests.rs`。
 pub const YEAR_MAX: i64 = 2100;
-/// 月份下界（UI §5.3）。
+/// 月份下界（UI §5.3）。**谁在用（M5）**：`ui/tests.rs`。
 pub const MONTH_MIN: i64 = 1;
-/// 月份上界（UI §5.3）。
+/// 月份上界（UI §5.3）。**谁在用（M5）**：`ui/tests.rs`。
 pub const MONTH_MAX: i64 = 12;
-/// 日下界（UI §5.3；**分量封闭** = 1–31，不做日历校验）。
+/// 日下界（UI §5.3；**分量封闭** = 1–31，不做日历校验）。**谁在用（M5）**：`ui/tests.rs`。
 pub const DAY_MIN: i64 = 1;
 /// 日上界（UI §5.3；**2 月 31 日由上层拒绝**，见 [`DateTimeValue`] 的类型文档）。
+/// **谁在用（M5）**：`ui/tests.rs`。
 pub const DAY_MAX: i64 = 31;
-/// 小时下界（UI §5.3）。
-pub const HOUR_MIN: i64 = 0;
-/// 小时上界（UI §5.3）。
+/// 小时下界（UI §5.3）。**私有**（M5：仅本文件用）。
+const HOUR_MIN: i64 = 0;
+/// 小时上界（UI §5.3）。**谁在用（M5）**：`ui/tests.rs`。
 pub const HOUR_MAX: i64 = 23;
-/// 分钟下界（UI §5.3）。
-pub const MINUTE_MIN: i64 = 0;
-/// 分钟上界（UI §5.3）。
+/// 分钟下界（UI §5.3）。**私有**（M5：仅本文件用）。
+const MINUTE_MIN: i64 = 0;
+/// 分钟上界（UI §5.3）。**谁在用（M5）**：`ui/tests.rs`。
 pub const MINUTE_MAX: i64 = 59;
 
 /// 步进器的步长（各分量均为 1 —— 语义值，不是设计栅格值，故不走 `theme`）。
@@ -200,30 +229,86 @@ fn clamp_index(selected: usize, count: usize) -> usize {
     }
 }
 
-/// 静默触发"选中下标"回调（拿不到借用即跳过，**不 panic**）。
+// ── 回调槽的**重入安全**取用（I1）─────────────────────────────────────────────
+//
+// `components.rs`（B1）的取舍是"触发时持 `try_borrow_mut`、拿不到即跳过"，对**只读**
+// 通知足够；但本文件三个控件的 `set_on_change` 是**公开 API**，用户回调内**再次调用它**
+// （自替换）是合法用法 —— 旧实现下 `fire_*` 在调用用户回调期间持有可变借用，
+// `set_on_change` 里的 `borrow_mut()` **必然 panic**（评审探针 P4 实测：panic 于旧
+// `controls.rs:518`）；该 panic 被 `src/lvgl/event.rs` 的 `catch_unwind` 拦下 ⇒
+// **回调体半途而废且用例全绿**（静默丢通知 + 静默半执行）。
+//
+// **采用方案 B「取出转发」**：触发时先把回调**从槽里取出**（槽置 `None`、借用当场释放），
+// 再在**不持有任何借用**的状态下调用它，最后"槽仍为空才放回"。
+//
+// **语义（契约）**：回调内自替换 ⇒ **本次通知仍由旧回调执行完毕，新回调自下一次通知起生效**。
+// 由此保证：回调内再调 `set_on_change` 时，那里的 `try_borrow_mut` 必然成功（无人持借用）。
+//
+// **不选方案 A（旁路暂存 + "下一拍"生效）的理由**：A 需要额外的"待替换槽 + 拍点应用"机制，
+// 而"下一拍"在本层没有明确定义（控件不自有事件循环，未必再有下一次事件）；B 把语义收敛在
+// **当前这次触发**内，改动仅限本文件、三个槽的类型不变。
+
+/// 从槽里**取出**回调并把槽置空（借用在本函数返回前已释放 ⇒ 调用期不持借用）。
+///
+/// 拿不到借用（未来若出现其它长借用路径）⇒ `None`，**不 panic**（静默跳过本次通知）。
+fn take_cb<T: ?Sized>(slot: &Rc<RefCell<Option<Box<T>>>>) -> Option<Box<T>> {
+    match slot.try_borrow_mut() {
+        Ok(mut s) => s.take(),
+        Err(_) => None,
+    }
+}
+
+/// **放回**回调：**仅当槽仍为空**（回调内没有自替换）时放回；否则丢弃旧回调
+/// （新回调自下一次通知起生效，见上方语义说明）。
+fn put_back_cb<T: ?Sized>(slot: &Rc<RefCell<Option<Box<T>>>>, f: Box<T>) {
+    if let Ok(mut s) = slot.try_borrow_mut() {
+        if s.is_none() {
+            *s = Some(f);
+        }
+    }
+}
+
+/// 静默触发"选中下标"回调（**调用期间不持借用** ⇒ 回调内可安全自替换，**不 panic**）。
 fn fire_index(slot: &IndexCallback, v: usize) {
-    if let Ok(mut s) = slot.try_borrow_mut() {
-        if let Some(f) = s.as_mut() {
-            f(v);
-        }
-    }
+    let Some(mut f) = take_cb(slot) else { return };
+    f(v);
+    put_back_cb(slot, f);
 }
 
-/// 静默触发"四段 IPv4"回调。
+/// 静默触发"四段 IPv4"回调（同上）。
 fn fire_octets(slot: &OctetsCallback, v: [u8; 4]) {
+    let Some(mut f) = take_cb(slot) else { return };
+    f(v);
+    put_back_cb(slot, f);
+}
+
+/// 静默触发"日期时间"回调（同上）。
+fn fire_datetime(slot: &DateTimeCallback, v: DateTimeValue) {
+    let Some(mut f) = take_cb(slot) else { return };
+    f(v);
+    put_back_cb(slot, f);
+}
+
+/// 槽替换（**重入安全**）：`fire_*` 在调用用户回调期间不持有槽借用，故"回调内自替换"
+/// 时本函数必然拿到借用；万一拿不到（未来新增别的长借用路径）⇒ **不替换、不 panic**
+/// （旧回调继续，下一次通知仍是旧回调 —— 与 `fire_*` 同口径的"拿不到即跳过"）。
+fn replace_index(slot: &IndexCallback, f: Box<dyn FnMut(usize)>) {
     if let Ok(mut s) = slot.try_borrow_mut() {
-        if let Some(f) = s.as_mut() {
-            f(v);
-        }
+        *s = Some(f);
     }
 }
 
-/// 静默触发"日期时间"回调。
-fn fire_datetime(slot: &DateTimeCallback, v: DateTimeValue) {
+/// 槽替换（"四段 IPv4"；语义同 [`replace_index`]）。
+fn replace_octets(slot: &OctetsCallback, f: Box<dyn FnMut([u8; 4])>) {
     if let Ok(mut s) = slot.try_borrow_mut() {
-        if let Some(f) = s.as_mut() {
-            f(v);
-        }
+        *s = Some(f);
+    }
+}
+
+/// 槽替换（"日期时间"；语义同 [`replace_index`]）。
+fn replace_datetime(slot: &DateTimeCallback, f: Box<dyn FnMut(DateTimeValue)>) {
+    if let Ok(mut s) = slot.try_borrow_mut() {
+        *s = Some(f);
     }
 }
 
@@ -261,22 +346,35 @@ fn text_label(parent: &Obj, text: &str, slot: TextSlot, color: Color) -> Result<
 ///
 /// 取 [`Dimens::CHIP_H`]（= 48，与 [`Dimens::TOUCH_MIN`] **数值相同但语义不同**）：分段控件
 /// 与多选 Chip 同视觉族（同底 / 同描边 / 同圆角 / 同高），两者并排时不得差高度。
+///
+/// **谁在用（M5）**：`ui/tests.rs` 的 `SegmentedControl` 段（`seg.size()` 断高 48）。
 pub const SEGMENT_H: i32 = Dimens::CHIP_H;
 
 /// 单段最小宽（UI §5.1 #4「段宽均分，最小 96」）。
+///
+/// **谁在用（M5）**：`ui/tests.rs`（构造宽度 `4 * SEGMENT_MIN_W` / 参数非法的边界用例）。
 pub const SEGMENT_MIN_W: i32 = Dimens::CHIP_MIN_W;
 
 /// 分段控件**四态**的样式选择器真源（UI §5.2 `SegmentedControl` 行逐行抄录）。
 ///
-/// 顺序与 §5.2 表的列序一致：**正常 / 按下 / 选中 / 禁用**。构造器按本表施加样式、离屏 /
-/// 纯逻辑用例按本表核对 —— 薄层没有"某选择器下挂了哪些样式"的读回 API，故"确已挂上"的
-/// 断言只能以本列表为据（与 `ButtonStyles::entries` 同法）。
+/// 顺序与 §5.2 表的列序一致：**正常 / 按下 / 选中 / 禁用**。构造器按本表施加样式
+/// （`styles` 数组与本表**结构性等长**，见 M1 处的类型标注）。
+///
+/// **哪张网核什么（如实，I4 订正）**：
+/// - **本表**由**本文件内的**测试用例 `segmented_style_states_match_ui_spec` 逐项核对
+///   （"§5.2 四态齐备 + 部件必须是 `ITEMS` 而非 `MAIN`"）。薄层没有"某选择器下挂了哪些
+///   样式"的读回 API，故"选择器真源对不对"只能以本表自身为据（与 `ButtonStyles::entries`
+///   同法）。
+/// - **`ui/tests.rs` 不引用本表**：它核的是 **LVGL 侧控制位**（`ButtonMatrix::has_ctrl`：
+///   每段 CHECKABLE / 恰一段 CHECKED / 切换后旧段已清 / 禁用段 DISABLED），即 §5.2 的
+///   「选中」「禁用」两态**能否真的产生**（CD5 的回归锁）。
 ///
 /// 「选中」（`ITEMS × CHECKED`）与「禁用」（`ITEMS × DISABLED`）两条**确已生效**：
 /// 构造期 `set_ctrl_all(CTRL_CHECKABLE)`、切换时"全清 + 单段置 CHECKED"、禁用时
 /// `set_ctrl_all(CTRL_DISABLED)`（原 CD5 缺陷的根因与修复见模块文档偏差表）。
-/// 本表是四态（§5.2 完整矩阵）的单一真源，`ui/tests.rs` 以它核对选择器。
-pub const ITEM_STATES: [(Part, State); 4] = [
+/// **私有**（M5 取证：本文件外零引用 —— `ui/tests.rs` 核的是 LVGL 控制位而不引用本表，
+/// 见上文"哪张网核什么"）。
+const ITEM_STATES: [(Part, State); 4] = [
     (Part::ITEMS, State::DEFAULT),
     (Part::ITEMS, State::PRESSED),
     (Part::ITEMS, State::CHECKED),
@@ -357,7 +455,11 @@ impl SegmentedControl {
         // 地图整体替换（`ButtonMatrix` 自己锚住这份 `CString` 串与指针数组，不悬垂）。
         bm.set_map(options);
         // §5.2 `SegmentedControl` 行的四态（逐条取 theme；"选中/禁用"两条的现状见 CD5）。
-        let styles = [
+        //
+        // 类型标注把数组长度**结构性**绑到 [`ITEM_STATES`].len()（M1）：此前两边仅靠
+        // `zip` 配对，长度是**非结构性**绑定 —— `styles` 加第 5 项会静默不挂样式而用例全绿。
+        // 改什么会红：本数组增 / 删一项，或 [`ITEM_STATES`] 改长度 ⇒ 编译期长度不符（E0308）。
+        let styles: [Rc<Style>; ITEM_STATES.len()] = [
             theme::control_surface(),
             theme::control_pressed(),
             theme::control_selected(),
@@ -511,11 +613,15 @@ impl SegmentedControl {
     ///
     /// **重复点同一段也会回调**（载荷不变）—— 键矩阵的 `VALUE_CHANGED` 语义是"本次按下的
     /// 键"，不是"选中项发生了变化"；调用方按幂等处理（写草稿值 + 置脏标记）。
+    ///
+    /// **可在回调内自替换**（重入安全，I1）：触发用户回调期间实现**不持有**槽借用（回调先被
+    /// 取出、调用、再放回，见 `fire_index` 上方语义说明），故本方法在"回调体内再调它"时
+    /// **不 panic**；语义为**新回调自下一次通知起生效**（本次通知仍由旧回调执行完毕）。
     pub fn set_on_change<F>(&self, f: F)
     where
         F: FnMut(usize) + 'static,
     {
-        *self.on_change.borrow_mut() = Some(Box::new(f));
+        replace_index(&self.on_change, Box::new(f));
     }
 }
 
@@ -546,19 +652,30 @@ impl std::fmt::Debug for SegmentedControl {
 const IPV4_OCTETS: usize = 4;
 
 /// 单个 IPv4 段的宽 = `−` + 值区 + `＋`（UI §5.1 #7 的分项）。
-pub const IPV4_SEG_W: i32 = Dimens::STEPPER_BTN_W * 2 + Dimens::IPV4_VALUE_W;
+///
+/// **私有**（M5：本文件外零引用，仅用于推导 [`IPV4_SEGMENTS_W`] 与本文件用例）。
+const IPV4_SEG_W: i32 = Dimens::STEPPER_BTN_W * 2 + Dimens::IPV4_VALUE_W;
 
 /// 四段的总宽（UI §5.1 #7 的分项之和；文档该行正文写的 **856** 与自身分项不符 —— 见 CD1）。
-pub const IPV4_SEGMENTS_W: i32 =
+///
+/// **私有**（M5：本文件外零引用）。
+const IPV4_SEGMENTS_W: i32 =
     IPV4_OCTETS as i32 * IPV4_SEG_W + (IPV4_OCTETS as i32 - 1) * Dimens::IPV4_GAP;
 
 /// 汇总标签宽 = **内容区余量**（`CONTENT_W − 四段 − 缝`）—— 见 CD2。
-pub const IPV4_SUMMARY_W: i32 = Dimens::CONTENT_W - IPV4_SEGMENTS_W - Dimens::GAP_MIN;
+///
+/// **私有**（M5：本文件外零引用）。
+const IPV4_SUMMARY_W: i32 = Dimens::CONTENT_W - IPV4_SEGMENTS_W - Dimens::GAP_MIN;
 
-/// 整件宽 = 四段 + 缝 + 汇总 = [`Dimens::CONTENT_W`]（UI §6.1 行型 B「控件独占次行」）。
+/// 整件宽 = 四段 + 缝 + 汇总 = [`Dimens::CONTENT_W`] = **992**（内容区有效宽，UI **§3.5**；
+/// UI §6.1 行型 B 另行要求「控件独占次行」）。
+///
+/// **谁在用（M5）**：`ui/tests.rs` 的 `Ipv4Stepper` 段（`ipv4.obj().size()`）。
 pub const IPV4_TOTAL_W: i32 = IPV4_SEGMENTS_W + Dimens::GAP_MIN + IPV4_SUMMARY_W;
 
 /// 整件高（UI §5.1 #7「…×64」）。
+///
+/// **谁在用（M5）**：`ui/tests.rs` 的 `Ipv4Stepper` 段（`ipv4.obj().size()`）。
 pub const IPV4_TOTAL_H: i32 = Dimens::STEPPER_H;
 
 // 静态不变量（**编译期**校验）：汇总标签必须真的分到正宽 —— 否则 [`IPV4_SUMMARY_W`] 的推导
@@ -724,11 +841,14 @@ impl Ipv4Stepper {
     ///
     /// ⚠️ **离屏用例无法驱动本回调**：`Stepper` 的 `−` / `＋` 闭包挂在它的**子按钮**上，
     /// 薄层只能向本对象派发事件（向父链冒泡，不下行）—— 见模块文档「薄层缺能力」5。
+    ///
+    /// **可在回调内自替换**（重入安全，I1）：语义同 [`SegmentedControl::set_on_change`]
+    /// （新回调自下一次通知起生效）。
     pub fn set_on_change<F>(&self, f: F)
     where
         F: FnMut([u8; 4]) + 'static,
     {
-        *self.on_change.borrow_mut() = Some(Box::new(f));
+        replace_octets(&self.on_change, Box::new(f));
     }
 }
 
@@ -753,20 +873,28 @@ impl std::fmt::Debug for Ipv4Stepper {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 列数（年 / 月 / 日 / 时 / 分 —— UI §5.1 #8）。
-const DATETIME_COLS: i32 = 5;
+///
+/// **由 [`DATETIME_HEADERS`] 推导**（而不是写裸 `5`）：本文件新增的静态扫描（I2，
+/// `ui/tests.rs::ui_const_i32_definitions_derive_from_theme`）判"`const <N>: i32 = <整数>;`
+/// 即违规"，且列数与列头**本该同源** ⇒ 两处天然等长。
+const DATETIME_COLS: i32 = DATETIME_HEADERS.len() as i32;
 
 /// 日期时间列的**值区宽**：内容区有效宽内**均分五列**后剩下的部分。
 ///
 /// 推导：`CONTENT_W − 4 × DATETIME_GAP（列间缝）− 5 × 2 × STEPPER_BTN_W（每列两侧按钮）`
 /// 再除以 5 ⇒ **64**。取均分（而不是 UI §5.1 #8 正文的列宽 112）的原因见 **CD3**：
 /// 112 既当不了列宽（列宽下限 176），也当不了值区宽（五列 1232 装不下）。
-pub const DATETIME_VALUE_W: i32 = (Dimens::CONTENT_W
+///
+/// **私有**（M5：本文件外零引用）。
+const DATETIME_VALUE_W: i32 = (Dimens::CONTENT_W
     - (DATETIME_COLS - 1) * Dimens::DATETIME_GAP
     - DATETIME_COLS * 2 * Dimens::STEPPER_BTN_W)
     / DATETIME_COLS;
 
 /// 单列（一个 [`Stepper`]）的宽。
-pub const DATETIME_COL_STEPPER_W: i32 = Dimens::STEPPER_BTN_W * 2 + DATETIME_VALUE_W;
+///
+/// **私有**（M5：本文件外零引用）。
+const DATETIME_COL_STEPPER_W: i32 = Dimens::STEPPER_BTN_W * 2 + DATETIME_VALUE_W;
 
 // 静态不变量（**编译期**校验）—— 把 CD3 的算术钉死，防有人照抄 §5.1 #8 正文的 112：
 //
@@ -780,22 +908,31 @@ const _: () = assert!(2 * Dimens::STEPPER_BTN_W + Dimens::TOUCH_MIN > Dimens::DA
 
 /// 列头标签的**盒宽**（= 一个字的宽 —— [`TextSlot::Label`]；薄层没有文本对齐通道，见 CD6，
 /// 故用"单字盒 + 居中定位"表达列头的居中）。
-pub const DATETIME_HEADER_W: i32 = TextSlot::Label.px() as i32;
+///
+/// **私有**（M5：本文件外零引用）。
+const DATETIME_HEADER_W: i32 = TextSlot::Label.px() as i32;
 
-/// 列头行高。
-pub const DATETIME_HEADER_H: i32 = TextSlot::Label.px() as i32;
+/// 列头行高。**私有**（M5：本文件外零引用）。
+const DATETIME_HEADER_H: i32 = TextSlot::Label.px() as i32;
 
-/// 列头行 y（列表顶部）。
-pub const DATETIME_HEADER_Y: i32 = 0;
+/// 列头行 y（列表顶部）。`0` = "贴容器顶端"的**零点**（无偏移，非设计栅格值）。
+///
+/// **私有**（M5：本文件外零引用；`0` 是本批静态扫描唯一放行的裸整数，见
+/// `ui/tests.rs::ui_const_i32_definitions_derive_from_theme` 的 `ALLOWED_BARE_CONST_I32`）。
+const DATETIME_HEADER_Y: i32 = 0;
 
-/// 步进行 y（= 列头行 + 同组呼吸缝）。
-pub const DATETIME_STEPPER_Y: i32 = DATETIME_HEADER_Y + DATETIME_HEADER_H + Dimens::GAP_MIN;
+/// 步进行 y（= 列头行 + 同组呼吸缝）。**私有**（M5：本文件外零引用）。
+const DATETIME_STEPPER_Y: i32 = DATETIME_HEADER_Y + DATETIME_HEADER_H + Dimens::GAP_MIN;
 
-/// 整件宽（= 五列 + 四条缝 = [`Dimens::CONTENT_W`]）。
+/// 整件宽（= 五列 + 四条缝 = [`Dimens::CONTENT_W`] = **992**；CD3）。
+///
+/// **谁在用（M5）**：`ui/tests.rs` 的 `DateTimeStepper` 段（`dt.obj().size()`）。
 pub const DATETIME_TOTAL_W: i32 =
     DATETIME_COLS * DATETIME_COL_STEPPER_W + (DATETIME_COLS - 1) * Dimens::DATETIME_GAP;
 
-/// 整件高（= 列头行 + 缝 + 步进高；UI §5.1 #8 正文写 64，未计入列头 —— 见 CD4）。
+/// 整件高（= 列头行 + 缝 + 步进高 = **106**；UI §5.1 #8 正文写 64，未计入列头 —— 见 CD4）。
+///
+/// **谁在用（M5）**：`ui/tests.rs` 的 `DateTimeStepper` 段（`dt.obj().size()`）。
 pub const DATETIME_TOTAL_H: i32 = DATETIME_STEPPER_Y + Dimens::STEPPER_H;
 
 /// 一个日期时间分量的组合。
@@ -1026,11 +1163,14 @@ impl DateTimeStepper {
     /// 注册变更回调（任一分量变值后触发一次，载荷 = 全值）。
     ///
     /// ⚠️ 离屏用例无法驱动本回调 —— 见 [`Ipv4Stepper::set_on_change`] 的同款说明。
+    ///
+    /// **可在回调内自替换**（重入安全，I1）：语义同 [`SegmentedControl::set_on_change`]
+    /// （新回调自下一次通知起生效）。
     pub fn set_on_change<F>(&self, f: F)
     where
         F: FnMut(DateTimeValue) + 'static,
     {
-        *self.on_change.borrow_mut() = Some(Box::new(f));
+        replace_datetime(&self.on_change, Box::new(f));
     }
 }
 
@@ -1171,30 +1311,103 @@ mod tests {
         assert_eq!(ITEM_STATES.len(), 4, "四态齐备");
     }
 
-    /// 尺寸推导：**必须由 theme 常量算出**（防"硬编码文档里的 856 / 592"）。
+    /// 屏上几何常量的**规格值锚定**（I2 收口；名字沿用，含义已按实现订正）。
     ///
-    /// 敏感性：把某个尺寸改成字面量（如 `856`）⇒ 对应断言立刻变红。
+    /// **为什么改**：本用例此前是**代数恒真式** —— 如 `assert_eq!(IPV4_TOTAL_H, Dimens::STEPPER_H)`，
+    /// 其左侧的**定义式就是**右侧 ⇒ 把常量改成任何数字都不变红（评审探针 P7：`SEGMENT_H` 改成
+    /// 字面量 `48`，171 条用例**全绿**）。现改为**锚定规格字面量**（数字的契约出处逐条注明）：
+    /// ① `theme` 档位漂移（如 `Dimens::CHIP_H` 变 40）⇒ 红；② 本文件常量的推导式被改口径
+    /// （如 `IPV4_SUMMARY_W` 少减一条缝）⇒ 红。
+    ///
+    /// **本用例不负责的变异**（如实，不得留未经实测的敏感性声明）：把定义式**换成数值相同的
+    /// 裸字面量**（`SEGMENT_H = 48`）⇒ 本用例**仍绿** —— 那一类由**另一张网**兜住：
+    /// `ui/tests.rs::ui_const_i32_definitions_derive_from_theme`（静态扫描
+    /// `const <NAME>: i32 = <整数>;`，探针：把任一常量改成裸整数 ⇒ 点名 `文件:行`）。
+    ///
+    /// 与本实现**有意**偏差的条款标 `CDn`（见模块文档偏差表）；锚定的字面量一律取
+    /// **本实现实际采用的值**。
     #[test]
     fn sizes_are_derived_from_theme_constants() {
-        assert_eq!(
-            SEGMENT_H, Dimens::CHIP_H,
-            "分段控件高取 Chip 高（§5.1 #4 高 48）"
-        );
-        assert_eq!(SEGMENT_MIN_W, Dimens::CHIP_MIN_W, "单段最小宽取 Chip 最小宽 96");
+        // ── SegmentedControl（UI §5.1 #4：高 48、段宽均分、最小 96）──
+        assert_eq!(SEGMENT_H, 48, "§5.1 #4「高 48」");
+        assert_eq!(SEGMENT_MIN_W, 96, "§5.1 #4「段宽均分，最小 96」");
 
-        // IPv4：四段 = 4 × (64 + 64 + 64) + 3 × 8 = 792；文档正文的 856 **算不出来**（CD1）。
-        assert_eq!(IPV4_SEG_W, 192, "单段 = STEPPER_BTN_W × 2 + IPV4_VALUE_W");
-        assert_eq!(IPV4_SEGMENTS_W, 792, "四段总宽（**不是**文档正文的 856）");
-        assert_eq!(IPV4_TOTAL_W, Dimens::CONTENT_W, "整件铺满内容区有效宽（CD2）");
-        assert_eq!(IPV4_TOTAL_H, Dimens::STEPPER_H);
+        // ── Ipv4Stepper（UI §5.1 #7 的分项：`[−][值 64][＋]`、缝 8）──
+        assert_eq!(IPV4_SEG_W, 192, "§5.1 #7 单段 = 64 + 64 + 64");
+        assert_eq!(IPV4_SEGMENTS_W, 792, "§5.1 #7 四段 = 4×192 + 3×8（文档正文 856 ⇒ CD1）");
+        assert_eq!(IPV4_SUMMARY_W, 184, "CD2：汇总标签 = 内容区余量 992 − 792 − 8");
+        assert_eq!(IPV4_TOTAL_W, 992, "CD1/CD2：整件 = 内容区有效宽（§3.5「有效宽 992」）");
+        assert_eq!(IPV4_TOTAL_H, 64, "§5.1 #7「…×64」");
+        // 同源性恒等（定义式展开即成立，**不构成回归锁**，仅记录设计口径）：
+        assert_eq!(IPV4_TOTAL_W, Dimens::CONTENT_W, "口径：整件宽 == 内容区有效宽（CD2）");
         // （"汇总标签分到正宽"是**编译期**不变量，见 `IPV4_SUMMARY_W` 下方的 `const _` 断言。）
 
-        // DateTime：五列 = 5 × (64 + 64 + 64) + 4 × 8 = 992（**不是**文档的 592，CD3/CD4）。
-        assert_eq!(DATETIME_VALUE_W, 64, "值区宽 = 内容区均分五列的结果");
-        assert_eq!(DATETIME_COL_STEPPER_W, 192, "单列 = STEPPER_BTN_W × 2 + 值区宽");
-        assert_eq!(DATETIME_TOTAL_W, Dimens::CONTENT_W, "五列铺满内容区有效宽");
-        assert_eq!(DATETIME_TOTAL_H, DATETIME_HEADER_H + Dimens::GAP_MIN + Dimens::STEPPER_H);
+        // ── DateTimeStepper（UI §5.1 #8；CD3/CD4）──
+        assert_eq!(DATETIME_VALUE_W, 64, "CD3：值区宽 = 内容区均分五列（文档 112 两重不成立）");
+        assert_eq!(DATETIME_COL_STEPPER_W, 192, "单列 = 64 + 64 + 64");
+        assert_eq!(DATETIME_TOTAL_W, 992, "CD3：五列铺满内容区有效宽");
+        assert_eq!(DATETIME_TOTAL_H, 106, "CD4：列头 26 + 缝 16 + 步进 64（§5.1 #8 只写 64）");
+        // 列头行 / 步进行（§3.3 控件文字档 Label = 26 px）
+        assert_eq!(DATETIME_HEADER_W, 26, "§3.3 Label 档 26 px（单字盒）");
+        assert_eq!(DATETIME_HEADER_H, 26, "§3.3 Label 档 26 px");
+        assert_eq!(DATETIME_HEADER_Y, 0, "列头行贴容器顶部（零点）");
+        assert_eq!(DATETIME_STEPPER_Y, 42, "列头行 26 + 组内缝 16");
         // （"值区宽 ≥ TOUCH_MIN"与"112 当列宽不可行"同为**编译期**不变量，见下方的 `const _` 断言。）
+    }
+
+    /// **I1**：回调内自替换 `set_on_change` ⇒ **不 panic**、**回调体执行完毕**、替换后**新回调
+    /// 自下一次通知起生效**。
+    ///
+    /// 纯逻辑（不触碰 LVGL）：本用例直接驱动生产代码里的槽取用助手
+    /// [`replace_index`] / [`fire_index`]（三者 `set_on_change` 的公共实现）。
+    ///
+    /// **敏感性（实测）**：把 `fire_index` / `take_cb` + `replace_index` 改回"触发期间持
+    /// `try_borrow_mut`、`set_on_change` 里 `borrow_mut()`"的旧写法 ⇒ 回调体里的
+    /// `replace_index` 在**已借用**的槽上 `borrow_mut()` ⇒ `BorrowMutError` panic ⇒
+    /// 本用例 FAILED（`body_completed` 断言根本到不了；panic 即失败）。
+    #[test]
+    fn callback_may_replace_its_own_slot_without_panic() {
+        let slot: IndexCallback = Rc::new(RefCell::new(None));
+        let body_completed = Rc::new(Cell::new(false));
+        let replaced_received: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+
+        {
+            let slot_in_cb = Rc::clone(&slot);
+            let done = Rc::clone(&body_completed);
+            let seen = Rc::clone(&replaced_received);
+            replace_index(
+                &slot,
+                Box::new(move |v: usize| {
+                    // **回调内自替换**（旧实现：此处 panic，被 event.rs 的 catch_unwind 吞掉）
+                    let seen2 = Rc::clone(&seen);
+                    replace_index(
+                        &slot_in_cb,
+                        Box::new(move |v2: usize| seen2.set(Some(v2))),
+                    );
+                    assert_eq!(v, 7, "本次通知的载荷 = 触发时传的值");
+                    done.set(true); // 回调体**末尾**哨兵
+                }),
+            );
+        }
+
+        fire_index(&slot, 7);
+        assert!(
+            body_completed.get(),
+            "回调体内自替换 set_on_change 后，回调体必须**执行完毕**（旧实现 panic 于 borrow_mut \
+             ⇒ 被 catch_unwind 吞掉 ⇒ 本哨兵为 false）"
+        );
+        assert_eq!(
+            replaced_received.get(),
+            None,
+            "替换语义：本次通知仍由**旧**回调执行，新回调自下一次通知起生效"
+        );
+
+        fire_index(&slot, 7);
+        assert_eq!(
+            replaced_received.get(),
+            Some(7),
+            "下一次通知必须由**替换后**的新回调执行"
+        );
     }
 
     /// 列头文案 = UI §5.1 #8 的五个字（**逐字**，且都在字体 cmap 内）。
