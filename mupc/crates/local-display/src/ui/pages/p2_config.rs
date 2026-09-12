@@ -32,7 +32,7 @@
 //! | # | 偏差（现状 ≠ 契约） | 原因 | 计划收口单元 |
 //! |---|----------------------|------|--------------|
 //! | PD1 | `gateway.listen_addr` 标签取 **`本机监听地址 · IEC 104`**（PM 裁定串为「本机监听地址（IEC 104）」） | **缺字**：全角括号 `（`/`）`（U+FF08/FF09）不在生成字体 cmap 内 ⇒ 照抄即豆腐块。取 cmap 内的 `·`（U+00B7）作分隔，语义不变（**仍是"本机监听地址"，不是"对端 IP"**） | 字库收口批（扩 §3.6 字符集并重跑 `gen_fonts.sh`）后逐字改回 PM 原串 |
-//! | PD2 | `display.bind_addr` / `display.control_bind_addr` 标签取 **`本机监听地址 · 仅本机`**（PM 裁定串为「本机服务地址（仅回环 127.0.0.1）」） | 同上：`服`(U+670D) / `务`(U+52A1) / `环`(U+73AF) / 全角括号**均不在 cmap 内** ⇒ 只能改述。字面量与 P6 的 `TEXT_SERVICE_ADDR` **同源共用**（同一实体：本机回环绑定 —— 不另造第二份真源） | 同 PD1 |
+//! | PD2 | `display.bind_addr` / `display.control_bind_addr` 标签取 **`本机地址 · 仅本机`**（设计 §6.2「只读字段」行 / §6.6 的 PM 裁定串为「本机服务地址（仅回环 127.0.0.1）」） | **缺字**：`服`(U+670D) / `务`(U+52A1) / `环`(U+73AF) 与全角括号 / `，` **均不在 cmap 内** ⇒ 无法逐字落地；改述保留两条语义（**本机** + **仅本机可达**）。**为何不与 IEC 104 行同前缀**：设计 §6.2 PM 裁定行 + UI §6.6 / **U-1 / EDGE-24** 要求「监听地址（网关）与回环服务地址**必须可区分、不得互换**」—— 若两行都取「本机监听地址 · …」（这正是改前形态，与 [`TEXT_LISTEN_ADDR`] 共享前缀），现场无法据文字区分"网关监听"与"仅本机回环"，裁定落空 ⇒ 本串**不含「监听」二字**。**为何不再与 P6 的 `TEXT_SERVICE_ADDR` 共用**：P6 那行是**整体服务口径**（读 9810 / 控制 9811 两通道的服务地址），P2 这两行是**本机绑定地址**（网关以外、仅本机可达）—— 同串会让"服务地址"与"绑定地址"两个口径在屏上不可分；改成独立字面量后两页各自可演进（P6 若要回改设计原文，不必牵动 P2） | 同 PD1（扩 §3.6 后**逐字改回设计原文**，届时两处一并回改） |
 //! | PD3 | 只读说明行取 **`仅本机访问 · 不可修改`**（设计写「仅本机回环，不可修改」） | 同上：`环`(U+73AF) 与全角逗号 `，`(U+FF0C) **不在 cmap 内** | 同 PD1 |
 //! | PD4 | **卡内左右内边距 = 17**（描边 1 + `Dimens::GAP_MIN` 16），UI §6.2 写 **20** | 与 P6 同口径（`theme::card()` 的既有内边距 + 描边）；且 `theme` 无 20 px 档，**不为凑 3 px 引入裸数值**。后果：字段名 x=33（UI 写 36）、行型 A 控件右缘 x=991（UI 写 988），**整体 3 px** | 与 UI §6.2 一并复核（若 PM 要求逐像素，须先在 `theme` 增档） |
 //! | PD5 | **行型 B 高 = 122**（上缝 16 + 字段名 26 + 缝 16 + 控件 64），UI §6.2 写 **120** | `theme` 无 2 px 档（同 `pages/mod.rs` 的 **D3** 同款理由） | 同 D3（随 theme 缺口上收一并处理） |
@@ -41,8 +41,10 @@
 //! | PD8 | 「保存中…」取 **`保存中...`**（三个 ASCII `.`，U+002E） | `…`(U+2026) **不在 cmap 内**；`.` 在（且 `components.rs` 的 `DOTS` 截断同款） | 同 PD1 |
 //! | PD9 | `WriteMode::FullRewrite` 的 Toast 取 **`配置已保存 · 原有文字已不存在`**（设计 §4.3.2.1 写「配置文件已整体重写，原有注释不再保留」） | **缺字**：`整`(U+6574) / `写`(U+5199) / `注`(U+6CE8) / `留`(U+7559) / `再`(U+518D) 均不在 cmap 内 ⇒ 无法逐字照抄。改写串保留两条语义：**已保存** + **原有文字（注释）已不存在** | 同 PD1 |
 //! | PD10 | **`WriteMode::FullRewrite` 的 Toast 由 `set_config` 统一触发**（`show_result` 成功路径不再叠加"保存成功"Toast —— UI §7.2「同一时刻仅 1 条」，**取信息量更大的那条**） | `ConfigView.write_mode` 的契约语义即「最近一次落盘写模式，`FullRewrite` 时 UI 须明示」（EDGE-23）⇒ 任何携带该值的视图都该明示，故收在唯一入口 | 无（有意） |
-//! | PD11 | 「任一字段 `requires_reconnect` ⇒ L2+」按**字面**落地：判定用**视图内全部字段**（不限于本次改动）；`defaults_patch()` 覆盖**全部 `editable` 字段**（含已等于默认值者）；「涉及：」列表 = 全部 `requires_reconnect` 字段 | 设计 §6.2 保存行原文为「**无字段** `requires_reconnect` → L1；**任一字段** `requires_reconnect=true` → L2+」（与"本次改动"不同口径）；`ConfigPatch` 契约文档原文为「**全字段默认值**即『恢复默认值』的载荷」 | 无（**按字面**；若 PM 裁定改为"仅本次改动"，改 [`save_level`] / [`defaults_patch_of`] 两处即可） |
-//! | PD12 | **只读字段不进 `defaults_patch()`** | `ConfigField::validate_value()`（契约）对 `editable=false` **一律拒绝**（"只读，不可修改"）⇒ 把只读字段放进 `changes` 会让**整个**恢复请求被后端二次校验打回（PL-4 的红线字段本就不可写） | 无（**有意**；与 PD11 的"全字段"口径差集即只读字段） |
+//! | PD11 | 保存 / 恢复默认值的分级与「涉及：」列表一律按**本次改动**判定：`save_level` / `reset_level` / `reconnect_field_labels` 收**本次补丁的键集合**（保存 = `draft_patch(..).changes`；恢复默认值 = `defaults_patch_of(..).changes`），键集合判定由 [`reconnect_in`] 承担（**不再**看"视图内全部字段"） | 设计 §6.2 流程 3 的示例是「`端口：2404 → 2405`」+「**涉及：端口**」，而同视图内还有 `监听地址`（设计 §4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ 只有"本次改动"口径能让该示例成立；§2.5 两行都写「**含**连接类字段的配置保存」（"含" = 本次含）；§7.3 明细段标题是「**将修改的字段**」；§2.6 铁律「降级可见、**绝不造假**」—— 只改日志级别却弹「生效瞬间通信将短暂中断」属**谎报副作用**。**生产影响**：真实字段表含 `gateway.listen_addr` / 核间端口（§4.3.3）⇒ 视图口径下 **L1 永不可达、`WarnBanner` 恒亮**，§2.5 的 L1 与 L2 两行同时报废 | 无（**已按"本次改动"落地**；若 PM 另裁，只需改 [`reconnect_in`] 一处） |
+//! | PD12 | **只读字段不进 `defaults_patch()`** | `ConfigField::validate_value()`（契约）对 `editable=false` **一律拒绝**（"只读，不可修改"）⇒ 把只读字段放进 `changes` 会让**整个**恢复请求被后端二次校验打回（PL-4 的红线字段本就不可写） | 无（**有意**；恢复默认值的"本次改动"= 全部 `editable` 字段 —— 与视图口径的差集正是只读字段，见 [`reconnect_in`] 的等价性论证） |
+//! | PD13 | 注入侧 `group.label` / `field.label` 与 `Enum` 选项**统一过 [`display_safe`]**（出口 = [`group_label_text`] / [`field_label_text`]） | 改前三条**同类数据两条路径**不一致（`Enum` 选项过了、`group.label` / `field.label` 没过）：后端标签含 cmap 外 ASCII（`-` / 小写）即豆腐块。**残余风险（如实登记，不粉饰）**：`display_safe` **只改写 ASCII**（`-`/`_`→`–`、小写→大写同族、其余→`?`），**非 ASCII（中文）字符一律原样透传** ⇒ 后端 `label` 里的**缺字中文（如 `环` / `服务` / `（`）它挡不住**，真机照样豆腐块。**真正的防线**：后端字段表（`ConfigFieldMeta`）的 `label` 必须约束在 **UI §3.6 用字表**内 —— 属**联调 / 后端**责任（见 UI §3.6 与设计 §6.2）；本页的 [`LABEL_OVERRIDES`] 只是**例外覆盖**机制（只为 PM 裁定键而设），**不是**通用护栏 | **B2c 之后**的「字体码表 + 文案统一收口批」：扩 §3.6 字符集 ⇒ `display_safe` 的"改写面"随 cmap 扩大而收窄，缺字中文风险随之下降（**不会归零** —— 字库永远落后于任意后端文案，后端约束才是根治） |
+//! | PD14 | **行型 B 的 `Ipv4Stepper` 横向跨到卡外缘**：实测跨度 **x16–1007**（= [`Dimens::CONTENT_W`] **992 px**，与卡**外缘**齐宽），UI §6.2 写「控件独占次行 **(x36–x988)**」（卡**内**，有效 952 px）—— 行型 A 的内边距偏差已登记 **PD4**，行型 B 这条本次补登记 | **实算根因**：卡内可用宽 [`INNER_W`] = 992 − 2 × **17**（描边 1 + 内边距 16）= **958**，而 `Ipv4Stepper` 整件宽 = [`Dimens::CONTENT_W`] = **992**（`ui/controls.rs` **CD2**：四段 792 + 缝 8 + 汇总 **184**；汇总宽 = "内容区余量"，为容纳 `192.168.1.10` 12 字符）⇒ 控件比卡内宽 **34 px = 两侧各 17 px**。若从卡内容区原点起排（屏幕 x33）则右端 x1024 越出卡外缘（x1007）**17 px** 并被父对象裁剪（`ui/controls.rs` CD2 同款事实）⇒ 取 `ROW_B_CTRL_X = −CARD_INSET`（`−17`）把控件**左端内缩到卡外缘**，实测跨度 x16–1007 = 恰与卡外缘齐宽，**代价 = 吃掉卡左右各 17 px 内边距**（行型 A 控件右缘落在卡内右缘 —— 实测闭区间右缘 x990，即 PD4 记的 x991 排他右缘；两版式的口径**不一致**） | **与 CD2 同批收口**：先由 PM 定 `Ipv4Stepper` 整件宽 —— UI 自身三口径互相矛盾（§5.1 #7 写 **856**、§6.2 写 **952**、实测落地 **992**）；若裁「控件必须在卡内 (x36–x988)」⇒ 需把汇总标签 **184 → 144**（`192.168.1.10` 放不下，须另行设计）或改行型 B 版式（如汇总挪到第二行） |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -63,7 +65,7 @@
 //!   必须在事件循环线程内（设计 §5.2 不变量 4）。
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -79,7 +81,6 @@ use crate::lvgl::widgets::{self, Label, LongMode, ScrollContainer, TextButton};
 use crate::lvgl::LvglError;
 use crate::ui::components::{ConfirmDetail, ConfirmDialog, ConfirmSpec, Stepper, Toast, ToastTone};
 use crate::ui::controls::{Ipv4Stepper, SegmentedControl};
-use crate::ui::pages::p6_system::TEXT_SERVICE_ADDR;
 use crate::ui::pages::{
     decor, display_safe, label, layout_box, set_style_index, set_visible, text_label,
 };
@@ -88,7 +89,7 @@ use crate::ui::theme::{self, ConfirmLevel, Dimens, Palette, TextSlot};
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 上屏文案（UI §3.6 P2 行；**落笔前逐字在 `fonts/lv_font_cmap.txt` 核对**）
 //
-// 与契约串的偏差逐条登记在文件头 `PD1~PD9`（缺字改写 / 缺字号改写），此处只放**成品串**。
+// 与契约串的偏差逐条登记在文件头 `PD1~PD14`（缺字改写 / 缺字号改写 / 口径与尺寸），此处只放**成品串**。
 // 码表覆盖率走查见 `ui/tests.rs::ui_texts_covered_by_font_cmap`（基线 = 生成字体的实际 cmap，
 // 待查集合 = 扫 `ui/**` 源码字面量）。
 // ═══════════════════════════════════════════════════════════════════════════
@@ -108,11 +109,21 @@ pub const TEXT_READONLY_NOTE: &str = "仅本机访问 · 不可修改";
 /// **不得**表述为「对端 IP / 远程主站地址」—— 现网 `mupc_gateway::Iec104Server` 是**服务端**
 /// （`bind` 后监听、接受调度主站连接），不存在"对端 IP"概念（设计 §4.3.4 / R-08）。
 pub const TEXT_LISTEN_ADDR: &str = "本机监听地址 · IEC 104";
-/// 回环服务地址字段的标签（`display.bind_addr` / `display.control_bind_addr`；⚠️ 见 **PD2**）。
+/// 回环绑定地址字段的标签（`display.bind_addr` / `display.control_bind_addr`；⚠️ 见 **PD2**）。
 ///
-/// **与 P6 的 [`TEXT_SERVICE_ADDR`] 同源共用**：两者是**同一实体**（本机回环绑定），
-/// 不另造第二份真源。**与 [`TEXT_LISTEN_ADDR`] 分列**（本机回环服务地址 ≠ IEC 104 监听地址）。
-pub const TEXT_LOOPBACK_ADDR: &str = TEXT_SERVICE_ADDR;
+/// **独立字面量 —— 不**与 P6 的 `TEXT_SERVICE_ADDR` 共用，理由两条：
+///
+/// 1. **口径不同**：P6 那行是**整体服务口径**（读 9810 / 控制 9811 两通道的"本机服务地址"），
+///    本页这两行是**本机绑定地址**（网关以外、仅本机可达）—— 同串会让两个口径在屏上不可分；
+/// 2. **必须与 IEC 104 行可区分**：设计 §6.2 的 PM 裁定行 + UI §6.6 / **U-1 / EDGE-24** 要求
+///    「监听地址（网关）与回环服务地址**必须可区分、不得互换**」。P6 的串是「本机监听地址 · 仅本机」
+///    ⇒ 与 [`TEXT_LISTEN_ADDR`]（「本机监听地址 · IEC 104」）**共享前缀**，两行只能靠后缀分辨；
+///    本串取 **`本机地址`**（**不出现「监听」二字**），两行前缀即不同。
+///
+/// **字面量出处**：设计 §6.2 只读字段行 / §6.6 的 PM 裁定串「本机服务地址（仅回环 127.0.0.1）」；
+/// 因 `服`(U+670D) / `务`(U+52A1) / `环`(U+73AF) 与全角括号**不在生成字体 cmap 内**（逐字核对见
+/// `fonts/lv_font_cmap.txt`）⇒ 无法逐字落地，改述保留「**本机** + **仅本机可达**」两条语义。
+pub const TEXT_LOOPBACK_ADDR: &str = "本机地址 · 仅本机";
 /// 保存确认弹层标题（UI §6.2 流程 3）。
 pub const TEXT_DIALOG_TITLE_SAVE: &str = "确认保存运行参数";
 /// 保存确认的「影响范围」段（UI §6.2 流程 3；全角逗号 ⇒ `·`）。
@@ -241,17 +252,31 @@ pub fn iter_fields(view: &ConfigView) -> impl Iterator<Item = &ConfigField> {
     view.groups.iter().flat_map(|g| g.fields.iter())
 }
 
+/// 分组名的**上屏文本**（契约 `ConfigGroup.label` 的自由文本 → 安全改写）。
+///
+/// 与 [`field_label_text`] / `Enum` 选项**同一处理**：契约标签不在 `ui/**` 字面量走查面内
+/// （它们来自后端 / 运行时帧），直上屏时含 ASCII `-` / 小写即豆腐块 ⇒ 一律过 [`display_safe`]
+/// （**同类数据同一处理**，见 **PD13**；其**非 ASCII 缺字挡不住**的残余风险同样见 PD13）。
+pub fn group_label_text(group: &ConfigGroup) -> String {
+    display_safe(&group.label)
+}
+
 /// 字段的**上屏标签**（设计 §6.2「监听地址字段口径」PM 裁定行 + UI 附录 B U-1）。
 ///
 /// **契约的 `label` 是默认路径**（元数据驱动 UI）；仅当键命中**PM 裁定表**
 /// （[`LABEL_OVERRIDES`]）时改用它 —— 目的是让"不得表述为『对端 IP / 远程主站地址』"这条
 /// 裁定在**屏上**成立（后端标签漂移时页仍不违规）。
+///
+/// 两条路径**最后都过 [`display_safe`]**（与 `Enum` 选项 / [`group_label_text`] 同口径）：
+/// 注入标签是自由文本，含 cmap 外 ASCII（`-` / 小写）时真机是豆腐块（**PD13**）。
+/// `LABEL_OVERRIDES` 的覆盖串本身逐字在 cmap 内 ⇒ 改写对它们是**恒等**。
 pub fn field_label_text(field: &ConfigField) -> String {
-    LABEL_OVERRIDES
+    let raw = LABEL_OVERRIDES
         .iter()
         .find(|(key, _)| *key == field.key)
         .map(|(_, label)| (*label).to_string())
-        .unwrap_or_else(|| field.label.clone())
+        .unwrap_or_else(|| field.label.clone());
+    display_safe(&raw)
 }
 
 /// 配置字段的**机器键**（**不上屏** —— 只用于与 `ConfigField.key` 比对）。
@@ -369,17 +394,61 @@ pub fn defaults_patch_of(view: &ConfigView) -> ConfigPatch {
     }
 }
 
-/// 视图内是否存在 `requires_reconnect` 字段（配置写入是否会瞬断链路的判据）。
+/// 视图内**是否存在** `requires_reconnect` 字段 —— **视图口径**，**仅测试对照用**。
+///
+/// ⚠️ **按 PD11 明令禁止生产分级使用它**：视图里"存在"瞬断字段 ≠ 本次改动会瞬断链路。
+/// 真实字段表含 `gateway.listen_addr` / 核间端口（设计 §4.3.3）⇒ 视图口径下 **L1 永不可达**、
+/// `WarnBanner` 恒亮（"降级可见、绝不造假"被违反）。生产路径一律用按键集合的 [`reconnect_in`]。
+///
+/// 以 `#[cfg(test)]` 收口 ⇒ **结构上不可能**被生产代码调用（防止口径回流）；它在测试里的
+/// 唯一用途是把"视图口径"与"改动口径"的**差集**写成断言。
+#[cfg(test)]
 pub fn has_reconnect_field(view: &ConfigView) -> bool {
     iter_fields(view).any(|f| f.requires_reconnect)
 }
 
-/// 保存的确认强度（设计 §6.2 保存行 / UI §2.5）：
-/// **无字段** `requires_reconnect` → [`ConfirmLevel::L1`]（单击生效）；
-/// **任一字段** `requires_reconnect=true` → [`ConfirmLevel::L2Plus`]（危险色 + 长按 1.0 s +
-/// **必出 `WarnBanner`**）。
-pub fn save_level(view: &ConfigView) -> ConfirmLevel {
-    if has_reconnect_field(view) {
+/// **本次改动**是否触及任何 `requires_reconnect` 字段 —— **唯一的分级判据**（PD11）。
+///
+/// `changed` = **本次补丁的键集合**：
+/// - 保存：`draft_patch(view, current).changes.keys()`（只含**值与视图不同**的字段）；
+/// - 恢复默认值：`defaults_patch_of(view).changes.keys()`（= 全部 `editable` 字段，PD12 排除只读）。
+///
+/// # 为什么不能用"视图内全部字段"（三条，逐条对应设计）
+///
+/// 1. 设计 §6.2 流程 3 的示例是「`端口：2404 → 2405`」+「**涉及：端口**」—— 同视图内还有
+///    `监听地址`（§4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ **只有**本次改动口径
+///    能让该示例成立；
+/// 2. §2.5 两行都写「**含**连接类字段的配置保存」（"含" = **本次**含），§7.3 明细段标题是
+///    「**将修改的字段**」；
+/// 3. §2.6 铁律「降级可见、**绝不造假**」—— 只改日志级别却弹「生效瞬间通信将短暂中断」是
+///    **谎报副作用**。
+///
+/// # 恢复默认值路径的等价性论证（**改动口径才正确**在何处）
+///
+/// 当且仅当**所有** `requires_reconnect` 字段都 `editable == true` 时，"视图口径" ≡ "改动口径"
+/// —— 因为 [`defaults_patch_of`] 覆盖**全部** `editable` 字段。一旦存在**只读的**瞬断字段
+/// （例如 `display.bind_addr` 被后端标成 `requires_reconnect=true`：设计 §6.2 明列它是只读的
+/// 安全红线字段），**视图口径会把它列进「涉及：」并把分级抬到 L2+，而它既不会进补丁、也不会
+/// 经屏生效** ⇒ 视图口径在此**必然错**（谎报一个改不动的字段会瞬断链路）。改动口径取的是
+/// `defaults_patch_of` 的键集合，只读字段天然被 PD12 排除在外 ⇒ 不会列出它。
+pub fn reconnect_in<'a, I>(view: &ConfigView, changed: I) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let keys: BTreeSet<&str> = changed.into_iter().collect();
+    iter_fields(view).any(|f| f.requires_reconnect && keys.contains(f.key.as_str()))
+}
+
+/// 保存的确认强度（设计 §6.2 保存行 / UI §2.5）：**本次改动**不含瞬断字段 ⇒
+/// [`ConfirmLevel::L1`]（单击生效）；**含**任一 `requires_reconnect` 字段 ⇒
+/// [`ConfirmLevel::L2Plus`]（危险色 + 长按 1.0 s + **必出 `WarnBanner`**）。
+///
+/// `changed` 的口径见 [`reconnect_in`]（PD11：**不是**"视图内全部字段"）。
+pub fn save_level<'a, I>(view: &ConfigView, changed: I) -> ConfirmLevel
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    if reconnect_in(view, changed) {
         ConfirmLevel::L2Plus
     } else {
         ConfirmLevel::L1
@@ -387,19 +456,28 @@ pub fn save_level(view: &ConfigView) -> ConfirmLevel {
 }
 
 /// 恢复默认值的确认强度（设计 §6.2 恢复默认值行）：**最低 L2**（生效性写、不得只有间距保护）；
-/// 涉及 `requires_reconnect` 字段时升为 [`ConfirmLevel::L2Plus`]（追加 `WarnBanner`）。
-pub fn reset_level(view: &ConfigView) -> ConfirmLevel {
-    if has_reconnect_field(view) {
+/// **本次改动**触及 `requires_reconnect` 字段时升为 [`ConfirmLevel::L2Plus`]（追加 `WarnBanner`）。
+pub fn reset_level<'a, I>(view: &ConfigView, changed: I) -> ConfirmLevel
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    if reconnect_in(view, changed) {
         ConfirmLevel::L2Plus
     } else {
         ConfirmLevel::L2
     }
 }
 
-/// L2+ 的「涉及：<字段名列表>」—— 全部 `requires_reconnect` 字段的上屏标签（UI §2.5）。
-pub fn reconnect_field_labels(view: &ConfigView) -> Vec<String> {
+/// L2+ 的「涉及：<字段名列表>」—— **本次改动中** `requires_reconnect` 字段的上屏标签（UI §2.5）。
+///
+/// 键集合口径同 [`reconnect_in`]（PD11）：既只列**改动的**，也只列**真瞬断的**。
+pub fn reconnect_field_labels<'a, I>(view: &ConfigView, changed: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let keys: BTreeSet<&str> = changed.into_iter().collect();
     iter_fields(view)
-        .filter(|f| f.requires_reconnect)
+        .filter(|f| f.requires_reconnect && keys.contains(f.key.as_str()))
         .map(field_label_text)
         .collect()
 }
@@ -929,7 +1007,7 @@ fn build_card(
     bar.set_pos(0, 0);
     let label = text_label(
         &obj,
-        &group.label,
+        &group_label_text(group),
         TextSlot::SectionTitle,
         Palette::TEXT_PRIMARY,
     )?;
@@ -1588,21 +1666,28 @@ fn open_dialog(core: &Rc<Core>, kind: DialogKind) -> Result<(), LvglError> {
             if !is_dirty(&view, &current) {
                 return Ok(());
             }
+            // **本次改动**的键集合 = 草稿补丁的键（PD11：分级与「涉及：」一律按它判定，
+            // **不是**"视图内全部字段"）。迭代器在本分支内即时消费，不逃逸出 `changed`。
+            let changed = draft_patch(&view, &current);
             (
                 TEXT_DIALOG_TITLE_SAVE,
                 TEXT_IMPACT_SAVE,
-                save_level(&view),
+                save_level(&view, changed.changes.keys().map(String::as_str)),
                 save_details(&view, &current),
-                reconnect_field_labels(&view),
+                reconnect_field_labels(&view, changed.changes.keys().map(String::as_str)),
             )
         }
-        DialogKind::Reset => (
-            TEXT_RESET_DEFAULT,
-            TEXT_IMPACT_RESET,
-            reset_level(&view),
-            reset_details(&view, &current),
-            reconnect_field_labels(&view),
-        ),
+        DialogKind::Reset => {
+            // 恢复默认值的"本次改动" = 恢复补丁的键（全部 `editable` 字段；只读字段被 PD12 排除）。
+            let patch = defaults_patch_of(&view);
+            (
+                TEXT_RESET_DEFAULT,
+                TEXT_IMPACT_RESET,
+                reset_level(&view, patch.changes.keys().map(String::as_str)),
+                reset_details(&view, &current),
+                reconnect_field_labels(&view, patch.changes.keys().map(String::as_str)),
+            )
+        }
     };
 
     let details: Vec<ConfirmDetail> = details_src
@@ -1754,6 +1839,20 @@ mod tests {
         }
     }
 
+    /// 把某字段标成 `requires_reconnect`（造"瞬断字段"用；找不到键即响亮失败）。
+    fn mark_reconnect(v: &mut ConfigView, key: &str) {
+        let mut hit = false;
+        for g in &mut v.groups {
+            for f in &mut g.fields {
+                if f.key == key {
+                    f.requires_reconnect = true;
+                    hit = true;
+                }
+            }
+        }
+        assert!(hit, "视图里没有键 `{key}` —— 用例的构造前提不成立");
+    }
+
     /// 草稿只含**被改动**的字段；改动前后的脏判定对称。
     ///
     /// 敏感性：把 [`draft_patch`] 的 `*now != f.value` 改成无条件插入 ⇒ 第 1、4 条变红；
@@ -1807,28 +1906,124 @@ mod tests {
         );
     }
 
-    /// 分级：**任一**字段 `requires_reconnect` ⇒ 保存 L2+；否则 L1。
+    /// 分级：**本次改动触及**瞬断字段 ⇒ L2+；否则 L1（口径见 PD11）。
     ///
-    /// 敏感性：把 [`save_level`] 的 `has_reconnect_field` 判据改成"看第一个字段"⇒ 第 2 条变红
+    /// 敏感性：把 [`save_level`] 的键集合判定改成"看第一个字段"⇒ 第 4 条变红
     /// （本视图里瞬断字段排在最后）。
     #[test]
     fn save_level_follows_requires_reconnect() {
         let mut v = view();
-        assert_eq!(save_level(&v), ConfirmLevel::L1, "无瞬断字段 ⇒ L1");
-        let last = v.groups.last_mut().expect("组");
-        let f = last.fields.first_mut().expect("字段");
-        f.requires_reconnect = true;
+        assert_eq!(save_level(&v, ["gateway.port"]), ConfirmLevel::L1, "无瞬断字段 ⇒ L1");
+        mark_reconnect(&mut v, "telemetry.interval");
         assert_eq!(
-            save_level(&v),
+            save_level(&v, ["telemetry.interval"]),
             ConfirmLevel::L2Plus,
-            "任一字段 requires_reconnect ⇒ L2+"
+            "本次改动触及 requires_reconnect 字段 ⇒ L2+"
         );
         assert_eq!(
-            reconnect_field_labels(&v),
-            vec!["遥测上报周期".to_string()],
-            "「涉及：」= 瞬断字段的上屏名"
+            save_level(&v, ["gateway.port"]),
+            ConfirmLevel::L1,
+            "只改**非**瞬断字段 ⇒ 仍 L1"
         );
-        assert_eq!(reset_level(&v), ConfirmLevel::L2Plus, "涉及瞬断 ⇒ 恢复默认值升 L2+");
+        assert_eq!(
+            reconnect_field_labels(&v, ["telemetry.interval"]),
+            vec!["遥测上报周期".to_string()],
+            "「涉及：」= 本次触及的瞬断字段的上屏名"
+        );
+        assert_eq!(
+            reset_level(&v, ["telemetry.interval"]),
+            ConfirmLevel::L2Plus,
+            "涉及瞬断 ⇒ 恢复默认值升 L2+"
+        );
+    }
+
+    /// **PD11 区分锁（本条 = "视图口径"与"改动口径"的分界线）**：
+    /// 视图含瞬断字段、但本次**未改动**它 ⇒ 保存必须 **L1**、且「涉及：」为空。
+    ///
+    /// 敏感性（**探针 ① 实测**）：把 [`save_level`] / [`reconnect_field_labels`] 改回"视图口径"
+    /// （用 [`has_reconnect_field`]、无视键集合）⇒ 本条第 1、2 条立刻变红。
+    #[test]
+    fn save_level_scopes_to_changed_keys_not_view() {
+        let mut v = view();
+        mark_reconnect(&mut v, "gateway.port"); // 视图里**存在**瞬断字段
+
+        // 本次只改**非**瞬断字段 ⇒ L1（视图口径会误报 L2+，并谎报"通信将中断"）。
+        assert_eq!(
+            save_level(&v, ["telemetry.interval"]),
+            ConfirmLevel::L1,
+            "视图含瞬断字段但本次未触及 ⇒ **L1**"
+        );
+        assert!(
+            reconnect_field_labels(&v, ["telemetry.interval"]).is_empty(),
+            "「涉及：」不得列出本次没改的字段"
+        );
+
+        // 本次改的**就是**瞬断字段 ⇒ L2+，且「涉及：」含它。
+        assert_eq!(save_level(&v, ["gateway.port"]), ConfirmLevel::L2Plus);
+        assert_eq!(
+            reconnect_field_labels(&v, ["gateway.port"]),
+            vec!["端口".to_string()]
+        );
+
+        // 混合改动：只列**既改了又瞬断**的那一个。
+        assert_eq!(
+            reconnect_field_labels(&v, ["telemetry.interval", "gateway.port"]),
+            vec!["端口".to_string()]
+        );
+
+        // 两个口径的差集 = "视图里有、本次没改" —— 视图口径**看得见**它（不是"看不见"）：
+        assert!(
+            has_reconnect_field(&v),
+            "视图口径仍看得见该瞬断字段 —— 两口径的差别在「是否本次改动」，不在可见性"
+        );
+    }
+
+    /// **PD11 恢复默认值**：全 `editable` 瞬断字段 ⇒ 改动口径 ≡ 视图口径（两个口径一致）；
+    /// **只读**瞬断字段 ⇒ 改动口径**不列**它（视图口径会谎报 L2+）。
+    ///
+    /// 敏感性（**探针 ① 的姊妹条**）：把 [`reset_level`] 的键集合判定换成 [`has_reconnect_field`]
+    /// ⇒ 第 2 段第 3 条（`L2`）变红（会读到 L2+）。
+    #[test]
+    fn reset_level_scopes_to_reset_patch_keys() {
+        // 场景 A：**可编辑**的瞬断字段 —— 两个口径**一致**（都升 L2+）。
+        let mut a = view();
+        mark_reconnect(&mut a, "gateway.port");
+        let keys_a: Vec<String> = defaults_patch_of(&a).changes.keys().cloned().collect();
+        assert!(
+            keys_a.iter().any(|k| k == "gateway.port"),
+            "恢复补丁覆盖全部 editable 字段"
+        );
+        assert_eq!(
+            reset_level(&a, keys_a.iter().map(String::as_str)),
+            ConfirmLevel::L2Plus
+        );
+        assert_eq!(
+            reconnect_field_labels(&a, keys_a.iter().map(String::as_str)),
+            vec!["端口".to_string()]
+        );
+
+        // 场景 B：**只读**的瞬断字段（`display.bind_addr`，editable = false）——
+        // 视图口径看得见它（谎报），改动口径**不列**（PD12 只读不进补丁 ⇒ 也改不动）。
+        let mut b = view();
+        mark_reconnect(&mut b, "display.bind_addr");
+        assert!(
+            has_reconnect_field(&b),
+            "视图口径看得见这个只读瞬断字段 —— 正是它会让视图口径误报"
+        );
+        let keys_b: Vec<String> = defaults_patch_of(&b).changes.keys().cloned().collect();
+        assert!(
+            !keys_b.iter().any(|k| k == "display.bind_addr"),
+            "只读字段不进恢复补丁（PD12）"
+        );
+        assert_eq!(
+            reset_level(&b, keys_b.iter().map(String::as_str)),
+            ConfirmLevel::L2,
+            "**改不动**的瞬断字段不得把分级抬到 L2+（视图口径在此必错）"
+        );
+        assert!(
+            reconnect_field_labels(&b, keys_b.iter().map(String::as_str)).is_empty(),
+            "「涉及：」不得列出改不动的字段"
+        );
     }
 
     /// 恢复默认值**最低 L2**（生效性写，不得只靠间距保护）。
@@ -1837,8 +2032,9 @@ mod tests {
     #[test]
     fn reset_level_is_at_least_l2() {
         let v = view();
-        assert_eq!(reset_level(&v), ConfirmLevel::L2);
-        assert_ne!(reset_level(&v), ConfirmLevel::L1);
+        let keys: Vec<String> = defaults_patch_of(&v).changes.keys().cloned().collect();
+        assert_eq!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L2);
+        assert_ne!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L1);
     }
 
     /// 字段标签口径（**PM 裁定**，设计 §6.2 / UI 附录 B U-1）：
@@ -1856,10 +2052,77 @@ mod tests {
         assert!(field_label_text(listen).contains("监听"), "口径 = 本机监听地址");
         let bind = iter_fields(&v).find(|f| f.key == "display.bind_addr").expect("字段");
         assert_eq!(field_label_text(bind), TEXT_LOOPBACK_ADDR);
-        assert_ne!(field_label_text(bind), TEXT_LISTEN_ADDR, "回环服务地址与 IEC 104 监听地址**分列**");
+        assert_ne!(field_label_text(bind), TEXT_LISTEN_ADDR, "回环绑定地址与 IEC 104 监听地址**分列**");
         let port = iter_fields(&v).find(|f| f.key == "gateway.port").expect("字段");
         assert_eq!(field_label_text(port), "端口", "非裁定键**透传**契约标签");
     }
+
+    /// **PD2 / PD14（③）**：回环绑定地址标签必须与 IEC 104 行**明显可区分**，
+    /// 且**不**与 P6 的服务地址标签共用（口径不同）。
+    ///
+    /// 敏感性（**探针 ③ 实测**）：把 `TEXT_LOOPBACK_ADDR` 改回 `TEXT_SERVICE_ADDR`
+    /// （= 「本机监听地址 · 仅本机」）⇒ 第 1、2 条立刻变红；改回 `TEXT_LISTEN_ADDR` ⇒ 第 3 条变红。
+    /// 字面量的**逐字 cmap 齐备**由 `ui/tests.rs::ui_texts_covered_by_font_cmap` 把关
+    /// （它是 `ui/**` 生产字面量，本页写死任何 cmap 外字符都会在那里变红）。
+    #[test]
+    fn loopback_label_is_distinct_from_iec104_and_p6() {
+        use crate::ui::pages::p6_system::TEXT_SERVICE_ADDR;
+        // ① 不得与 P6 的「本机服务地址」串共用（口径不同：P6 = 整体服务口径）。
+        assert_ne!(
+            TEXT_LOOPBACK_ADDR, TEXT_SERVICE_ADDR,
+            "P2 本机绑定地址 ≠ P6 本机服务地址 —— 不得共用同一字面量"
+        );
+        // ② 不得与 IEC 104 行**共享「本机监听地址」前缀**（U-1 / EDGE-24：两行必须可区分、
+        //    不得互换）—— P6 的串正是共享前缀的负例。
+        assert!(
+            TEXT_SERVICE_ADDR.starts_with("本机监听地址"),
+            "负例自证：P6 的串确实共享「本机监听地址」前缀（否则本条的区分判据就落空）"
+        );
+        assert!(
+            !TEXT_LOOPBACK_ADDR.contains("监听"),
+            "本串不得含「监听」二字 —— 否则与 IEC 104 行（{TEXT_LISTEN_ADDR}）同前缀"
+        );
+        assert_ne!(TEXT_LOOPBACK_ADDR, TEXT_LISTEN_ADDR);
+        // ③ 两条语义必须保留：**本机** + **仅本机可达**。
+        assert!(TEXT_LOOPBACK_ADDR.contains("本机"));
+        assert!(TEXT_LOOPBACK_ADDR.contains("仅本机"), "「仅本机可达」是 PL-4 回环红线的屏上表达");
+    }
+
+    /// **PD13（②）**：注入侧 `group.label` / `field.label` 与 `Enum` 选项**同一处理**
+    /// （一律过 [`display_safe`]）—— 后端标签含 cmap 外 ASCII（`-` / 小写）时真机不落豆腐块。
+    ///
+    /// 敏感性（**探针 ② 实测**）：把 [`group_label_text`] / [`field_label_text`] 里的
+    /// `display_safe` 去掉 ⇒ 本条变红。
+    ///
+    /// ⚠️ **本用例只证明 ASCII 改写**：`display_safe` **不处理非 ASCII**（中文缺字如 `环` / `服务`
+    /// 照样透传）—— 该残余风险见 **PD13** 登记表（真正的防线在后端把 `label` 约束在 UI §3.6 内）。
+    #[test]
+    fn injected_labels_go_through_display_safe() {
+        // 自证改写**真的发生**（否则下面两条"改写后"的断言无意义）。
+        assert_eq!(display_safe("core-bin"), "CORE\u{2013}BIN");
+
+        // 分组名（自由文本）。
+        let g = ConfigGroup {
+            id: "g".into(),
+            label: "core-bin 参数".into(),
+            fields: vec![],
+        };
+        assert_eq!(group_label_text(&g), "CORE\u{2013}BIN 参数");
+
+        // 字段名：**非**裁定键 ⇒ 透传契约标签 + 安全改写。
+        let f = field("x.y", "a-b", ConfigKind::Ipv4, Value::from("127.0.0.1"));
+        assert_eq!(field_label_text(&f), "A\u{2013}B");
+
+        // 裁定键：覆盖串本身逐字在 cmap 内 ⇒ 改写对它是**恒等**（覆盖语义不被 `display_safe` 破坏）。
+        let l = field(
+            "gateway.listen_addr",
+            "对端 IP 地址",
+            ConfigKind::Ipv4,
+            Value::from("127.0.0.1"),
+        );
+        assert_eq!(field_label_text(&l), TEXT_LISTEN_ADDR);
+    }
+
 
     /// 值格式化：整数带单位 / 枚举取**选项标签** / IPv4 原样 / 枚举未命中不臆造。
     ///

@@ -3291,7 +3291,8 @@ pub(crate) fn pages_chain() {
 
         // ── ⑤′ 恢复默认值的**最低分级**：无瞬断字段 ⇒ **恰好 L2**（不是 L1、也不升 L2+）──
         // 敏感性：把 `reset_level` 的 `else` 分支改成 `L1` ⇒ 本条立刻变红；
-        // 把 `has_reconnect_field` 判据放宽 ⇒ 会读到 L2+ 而变红。
+        // 把键集合判定（`reconnect_in`）换成"视图口径" ⇒ 本视图无瞬断字段，不受影响；
+        // 真正锁住口径的是 ⑧(a) 与 `p2_config.rs::save_level_scopes_to_changed_keys_not_view`。
         p2.reset_button()
             .button()
             .obj()
@@ -3378,9 +3379,15 @@ pub(crate) fn pages_chain() {
             "tick 里执行延迟关闭"
         );
 
-        // ── ⑧ 瞬断字段 ⇒ L2+ + WarnBanner（UI §2.5）──────────────────────────
-        let vr = p2_view(true);
+        // ── ⑧ 分级与「涉及：」按**本次改动**判定（PD11）+ 瞬断字段 ⇒ L2+ / WarnBanner（UI §2.5）
+        //
+        // 敏感性（**探针 ① 的页级姊妹网**）：把 `save_level` / `reconnect_field_labels` 改回
+        // "视图口径"（`has_reconnect_field`）⇒ 下面 (a) 的 **L1 / 无 WarnBanner** 两条立刻变红。
+        let vr = p2_view(true); // `gateway.listen_addr` = 瞬断字段（视图里**存在**它）
         p2.set_config(&vr).expect("set_config (reconnect)");
+
+        // (a) 本次只改**非**瞬断字段（端口）⇒ **L1**：视图里有瞬断字段也不得升级/弹警示
+        //     —— 否则只改一个端口却弹「生效瞬间通信将短暂中断」= 谎报副作用（§2.6）。
         assert!(p2.set_field_value("gateway.port", &Value::from(2406)));
         p2.save_button()
             .button()
@@ -3388,8 +3395,30 @@ pub(crate) fn pages_chain() {
             .send_event(EventCode::CLICKED);
         assert_eq!(
             p2.with_dialog(|d| d.level()),
+            Some(crate::ui::theme::ConfirmLevel::L1),
+            "视图含瞬断字段、但**本次没改它** ⇒ L1（PD11）"
+        );
+        assert!(
+            p2.with_dialog(|d| !d.has_warn_banner()).unwrap_or(false),
+            "未触及瞬断字段 ⇒ 不得出现 WarnBanner（不得谎报副作用）"
+        );
+        assert!(
+            p2.with_dialog(|d| !d.has_progress()).unwrap_or(false),
+            "L1：无长按进度条"
+        );
+        // 关掉它，让下一拍的「保存」能开新弹层。
+        p2.set_config(&vr).expect("set_config（关掉上一弹层）");
+
+        // (b) 本次改的**就是**瞬断字段（监听地址）⇒ L2+ + WarnBanner + 「涉及：」
+        assert!(p2.set_field_value("gateway.listen_addr", &Value::from("10.0.0.1")));
+        p2.save_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert_eq!(
+            p2.with_dialog(|d| d.level()),
             Some(crate::ui::theme::ConfirmLevel::L2Plus),
-            "任一字段 requires_reconnect ⇒ **L2+**"
+            "本次改动**含** requires_reconnect 字段 ⇒ **L2+**"
         );
         assert!(
             p2.with_dialog(|d| d.has_warn_banner()).unwrap_or(false),
@@ -3401,7 +3430,7 @@ pub(crate) fn pages_chain() {
                 .map(|w| w.has_fields_line())
                 .unwrap_or(false))
                 .unwrap_or(false),
-            "WarnBanner 第二行「涉及：<字段名列表>」"
+            "WarnBanner 第二行「涉及：<字段名列表>」（= `reconnect_field_labels` 的输出）"
         );
         assert!(
             p2.with_dialog(|d| d.has_progress()).unwrap_or(false),
@@ -3424,8 +3453,8 @@ pub(crate) fn pages_chain() {
             let last = g.last().expect("末条");
             assert_eq!(last.1, crate::ui::theme::ConfirmLevel::L2Plus);
             assert_eq!(
-                last.0.changes.get("gateway.port"),
-                Some(&Value::from(2406))
+                last.0.changes.get("gateway.listen_addr"),
+                Some(&Value::from("10.0.0.1"))
             );
         }
 
@@ -3708,6 +3737,34 @@ fn p2_static_constraints() {
             list.iter().any(|(n, _)| *n == "ui/pages/p2_config.rs"),
             "`{label}` 未含 `ui/pages/p2_config.rs` —— 该网的**扫描面**已把 P2 漏掉\
              （先修清单：新文件必须纳入，否则静态网对新代码是空的）"
+        );
+    }
+
+    // ⑤ **`config_key(` 的计数自证**（B2b-2 规格评审 ⑤）：`NON_DISPLAY_SINKS` 里的
+    //    `config_key(` 是**后缀匹配**——紧跟它的字面量会被**豁免**出"上屏候选"走查。
+    //    该豁免在本页**正当**（配置字段的**机器键**确不上屏：`gateway.listen_addr` 里的小写
+    //    ASCII 在生成字体里没有字形），但它同时是一条**可能被误用的后门**：谁把**上屏串**
+    //    写成 `config_key("…")`，那条串就**静默逃过**码表网。
+    //    ⇒ 把"恰好 3 处"钉死（= `LABEL_OVERRIDES` 的三个键）。新增/删除键 ⇒ 本条**响亮失败**，
+    //    强制下一个改动者停下来复核"它真的是机器键吗"。
+    //
+    //    口径：在生产区（掐掉测试模块）里数 `config_key("` —— **带引号**，故 `const fn config_key(`
+    //    的定义式**不计入**（定义是"实现"，3 处调用才是"标注点"）。注释里若出现同一 token
+    //    也会计入 ⇒ 那是有意的：宁可响亮失败也不要静默豁免。
+    {
+        let (name, src) = ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs"));
+        let prod = truncate_before_test_module(src, name);
+        assert_eq!(
+            prod.matches("config_key(\"").count(),
+            3,
+            "{name}：`config_key(\"…\")` 必须**恰为 3 处**（`LABEL_OVERRIDES` 的三个机器键）。\
+             计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是机器键**\
+             （键不上屏才可豁免；**上屏文案**放进 `config_key(..)` 会从码表网里消失）"
+        );
+        assert_eq!(
+            crate::ui::pages::p2_config::LABEL_OVERRIDES.len(),
+            3,
+            "覆盖表条目数必须与上面的计数一致（两处一起改才自洽）"
         );
     }
 
