@@ -166,6 +166,10 @@ fn:lv_buttonmatrix_set_selected_button
 fn:lv_buttonmatrix_get_selected_button
 fn:lv_buttonmatrix_get_button_text
 fn:lv_buttonmatrix_set_one_checked
+fn:lv_buttonmatrix_set_button_ctrl
+fn:lv_buttonmatrix_set_button_ctrl_all
+fn:lv_buttonmatrix_clear_button_ctrl_all
+fn:lv_buttonmatrix_has_button_ctrl
 fn:lv_tabview_create
 fn:lv_tabview_add_tab
 fn:lv_tabview_get_content
@@ -184,6 +188,8 @@ type:lv_dir_t
 type:lv_scrollbar_mode_t
 type:lv_bar_mode_t
 type:lv_anim_enable_t
+# `lv_buttonmatrix_set_button_ctrl*` / `_has_button_ctrl` 的形参类型，由 bindgen 递归带出。
+type:lv_buttonmatrix_ctrl_t
 
 # ── 通用对象 / 输入组（A3：状态位、滚动容器、TT-09 默认焦点、长按）──
 fn:lv_obj_add_state

@@ -1651,6 +1651,27 @@ pub(crate) fn ui_chain() {
         // 故**必须**同时断 LVGL 侧原值（raw_selected），这条才是敏感的。
         assert_eq!(seg.selected(), 0, "构造给 0 ⇒ 选中 0");
         assert_eq!(seg.raw_selected(), Some(0), "**LVGL 侧**确实是第 0 段（不是回退值）");
+        // ── ⑦.0 控制位读回（**CD5 的回归锁**：分段控件"选中态"是否真的会产生）────────
+        // 读回通道 = `ButtonMatrix::has_ctrl`（LVGL 侧真值，**不是** Rust 侧缓存/回退值）。
+        use crate::lvgl::widgets::{CTRL_CHECKABLE, CTRL_CHECKED, CTRL_DISABLED};
+        let bm = seg.matrix();
+        // 缺陷本体：v9.5.0 的 toggle **要求**该段 CHECKABLE，否则点击永不产生 CHECKED。
+        // 改什么会让本条变红：删掉构造期的 `set_ctrl_all(CTRL_CHECKABLE)` ⇒ 四段全 false。
+        for i in 0..4 {
+            assert!(
+                bm.has_ctrl(i, CTRL_CHECKABLE),
+                "第 {i} 段必须 CHECKABLE（删掉 set_ctrl_all(CTRL_CHECKABLE) 即红）"
+            );
+        }
+        // **互斥性**（单选语义的核心）：恰有一段 CHECKED、其余全 false。
+        // 改什么会让本条变红：构造期漏 `set_ctrl(start, CTRL_CHECKED)` ⇒ 第 0 段 false。
+        assert!(
+            bm.has_ctrl(0, CTRL_CHECKED),
+            "初始选中段必须带 CHECKED 控制位（否则 §5.2 的选中样式永不绘制）"
+        );
+        for i in 1..4 {
+            assert!(!bm.has_ctrl(i, CTRL_CHECKED), "第 {i} 段不得 CHECKED（单选互斥）");
+        }
         // 段文本逐条核对：写错地图 / 少一段 / 顺序颠倒 ⇒ 红。
         for (i, want) in ["ERROR", "WARN", "INFO", "DEBUG"].iter().enumerate() {
             assert_eq!(seg.option(i).as_deref(), Some(*want), "第 {i} 段文本");
@@ -1664,9 +1685,22 @@ pub(crate) fn ui_chain() {
             Some(2),
             "set_selected 必须真的落到 LVGL（只改 Rust 侧缓存即红）"
         );
+        // 切换后：新选中带位 **且旧选中必须已清** —— 只看新选中会漏掉"两个都亮"的缺陷
+        // （这正是"全清 + 单段置位"要防的形态）。改什么会让本条变红：`set_selected` 里
+        // 去掉 `clear_ctrl_all(CTRL_CHECKED)` ⇒ 第 0 段仍为 true。
+        assert!(bm.has_ctrl(2, CTRL_CHECKED), "set_selected(2) ⇒ 第 2 段带 CHECKED");
+        assert!(
+            !bm.has_ctrl(0, CTRL_CHECKED),
+            "旧选中段（0）的 CHECKED 必须被清除 —— 否则界面上两段同时高亮"
+        );
         seg.set_selected(99);
         assert_eq!(seg.selected(), 3, "越界下标**夹取**到最后一 段（不得 panic）");
         assert_eq!(seg.raw_selected(), Some(3), "夹取后的值同样落到 LVGL");
+        // 越界路径的**状态自洽**：夹到第 3 段带位、第 2 段已清、全局恰有一段亮。
+        assert!(bm.has_ctrl(3, CTRL_CHECKED), "越界夹到第 3 段 ⇒ 该段 CHECKED");
+        assert!(!bm.has_ctrl(2, CTRL_CHECKED), "越界切换后第 2 段必须已清");
+        let checked_count = (0..4).filter(|&i| bm.has_ctrl(i, CTRL_CHECKED)).count();
+        assert_eq!(checked_count, 1, "任意时刻**恰有一段** CHECKED（单选不变量）");
         disp.refr_now_for_test();
         assert_eq!(seg.size(), (seg_w, SEGMENT_H), "分段控件 = 调用方给定宽 × 高 48（§5.1 #4）");
 
@@ -1674,8 +1708,12 @@ pub(crate) fn ui_chain() {
         assert!(!seg.is_disabled(), "默认可用");
         seg.set_disabled(true);
         assert!(seg.is_disabled(), "set_disabled(true) ⇒ LV_STATE_DISABLED 置位");
+        // 逐段 DISABLED 控制位（§5.2「禁用 字 `#5A6780`」的**触发源**）。
+        // 改什么会让本条变红：`set_disabled` 里去掉 `set_ctrl_all(CTRL_DISABLED)`。
+        assert!(bm.has_ctrl(0, CTRL_DISABLED), "禁用 ⇒ 每段带 DISABLED 控制位");
         seg.set_disabled(false);
         assert!(!seg.is_disabled(), "恢复后状态位清掉");
+        assert!(!bm.has_ctrl(0, CTRL_DISABLED), "恢复 ⇒ DISABLED 控制位被清除");
 
         // `on_change` 接线：派发 `VALUE_CHANGED`（键矩阵类处理器在按下时派发的正是它）⇒
         // 回调查到的应当是**当前**下标。初值取 usize::MAX：回调若压根没接上，断言即红。

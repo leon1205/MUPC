@@ -853,6 +853,30 @@ struct MapStorage {
 /// 语义由 `tests_a3.rs` 的行为断言钉死（未选中 ⇒ `None`）。
 const BUTTONMATRIX_BUTTON_NONE: u32 = 0xFFFF;
 
+/// `LV_BUTTONMATRIX_CTRL_DISABLED` 的取值（v9.5.0 头文件
+/// `src/widgets/buttonmatrix/lv_buttonmatrix.h:54`）。
+///
+/// 本文件用**局部 `const`** 而不取 bindgen 常量（`sys::LV_BUTTONMATRIX_CTRL_*`）：
+/// 这些枚举成员经 `const:` 登记会膨胀清单，且 `buttonmatrix_ctrl_t` 的**类型**已经
+/// 进了 allowlist（`type:lv_buttonmatrix_ctrl_t`），数值语义由本文件的 `const` 单一
+/// 真源表达 —— 与 [`BUTTONMATRIX_BUTTON_NONE`] 同法（出处行号即防漂移的锚）。
+pub const CTRL_DISABLED: u32 = 0x0040;
+
+/// `LV_BUTTONMATRIX_CTRL_CHECKABLE` 的取值（`lv_buttonmatrix.h:55`）。
+///
+/// **语义**：置位后点击该段才会 toggle `CHECKED`（v9.5.0 `lv_buttonmatrix.c`
+/// `LV_EVENT_RELEASED` 的 toggle **以此为前置条件**）—— 不置位则 `CHECKED` 永不出现，
+/// `LV_STATE_CHECKED` 样式永不绘制。局部 `const` 的理由见 [`CTRL_DISABLED`]。
+pub const CTRL_CHECKABLE: u32 = 0x0080;
+
+/// `LV_BUTTONMATRIX_CTRL_CHECKED` 的取值（`lv_buttonmatrix.h:56`）。
+///
+/// **语义**：该段当前处于选中态 ⇒ 绘制时叠加 `LV_STATE_CHECKED`。
+/// ⚠️ `lv_buttonmatrix_set_selected_button()` **不**写这一位（它只写内部的
+/// `btn_id_sel`），故"初始高亮"必须由调用方显式置位。局部 `const` 的理由见
+/// [`CTRL_DISABLED`]。
+pub const CTRL_CHECKED: u32 = 0x0100;
+
 impl ButtonMatrix {
     /// 在 `parent` 下创建（地图由 [`ButtonMatrix::set_map`] 设定）。
     pub fn create(parent: &Obj) -> Result<Self, LvglError> {
@@ -934,6 +958,64 @@ impl ButtonMatrix {
         }
         // SAFETY: 刚校验存活。
         unsafe { sys::lv_buttonmatrix_set_one_checked(self.obj.raw(), one_checked) };
+    }
+
+    /// 全段设置控制位（如 [`CTRL_CHECKABLE`]；`ctrl` 是位或，可一次给多位）。
+    pub fn set_ctrl_all(&self, ctrl: u32) {
+        if !self.is_alive() {
+            return;
+        }
+        // SAFETY: 刚校验存活；`ctrl` 是 `lv_buttonmatrix_ctrl_t` 的位或（同宽 u32）。
+        unsafe {
+            sys::lv_buttonmatrix_set_button_ctrl_all(
+                self.obj.raw(),
+                ctrl as sys::lv_buttonmatrix_ctrl_t,
+            )
+        };
+    }
+
+    /// 单段设置控制位（`index` 越界时 LVGL 侧忽略；`ctrl` 为位或，**不**清除既有位）。
+    pub fn set_ctrl(&self, index: u32, ctrl: u32) {
+        if !self.is_alive() {
+            return;
+        }
+        // SAFETY: 刚校验存活；`ctrl` 是 `lv_buttonmatrix_ctrl_t` 的位或（同宽 u32）。
+        unsafe {
+            sys::lv_buttonmatrix_set_button_ctrl(
+                self.obj.raw(),
+                index,
+                ctrl as sys::lv_buttonmatrix_ctrl_t,
+            )
+        };
+    }
+
+    /// 全段清除控制位（如 [`CTRL_CHECKED`] —— 单选切换前先整体清零）。
+    pub fn clear_ctrl_all(&self, ctrl: u32) {
+        if !self.is_alive() {
+            return;
+        }
+        // SAFETY: 刚校验存活；`ctrl` 是 `lv_buttonmatrix_ctrl_t` 的位或（同宽 u32）。
+        unsafe {
+            sys::lv_buttonmatrix_clear_button_ctrl_all(
+                self.obj.raw(),
+                ctrl as sys::lv_buttonmatrix_ctrl_t,
+            )
+        };
+    }
+
+    /// 单段是否含有某控制位（读回；离屏断言用。句柄失效 / 越界 ⇒ 安全缺省 `false`）。
+    pub fn has_ctrl(&self, index: u32, ctrl: u32) -> bool {
+        if !self.is_alive() {
+            return false;
+        }
+        // SAFETY: 刚校验存活；`ctrl` 是 `lv_buttonmatrix_ctrl_t` 的位或（同宽 u32）。
+        unsafe {
+            sys::lv_buttonmatrix_has_button_ctrl(
+                self.obj.raw(),
+                index,
+                ctrl as sys::lv_buttonmatrix_ctrl_t,
+            )
+        }
     }
 
     /// 显式删除（等价于 `drop`）。

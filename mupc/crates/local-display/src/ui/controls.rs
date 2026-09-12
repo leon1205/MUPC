@@ -34,12 +34,14 @@
 //! | CD2 | IPv4 汇总标签宽 = **184**（`CONTENT_W − 792 − GAP_MIN`）⇒ 整件 **992 = 内容区有效宽**，UI §6.1 行型 B 写「控件独占次行 (x36–x988)，用 `Ipv4Stepper` 856×64」 | 856 − 792 = 64 px **放不下** `192.168.1.10`（12 字符）；§6.1 要求控件独占次行（有效宽 992）⇒ 取"四段 + 缝 + 汇总 = 内容区宽" | **B2b-2**（P2 装配时若 PM 要求 x36 起排，需重定汇总标签的位置口径） |
 //! | CD3 | **`Dimens::DATETIME_COL_W`（112）在本文件不使用**：日期时间列宽取 **192**（`64 + 64 + 64`），值区宽取 **64**（内容区均分推导） | 112 **不可用**（两重）：① 若作**列宽** ⇒ 列宽下限 = `−`64 + 值 48(TOUCH_MIN) + `+`64 = **176 > 112**（触摸硬约束）；② 若作**值区宽** ⇒ 五列 = `5 × (64+112+64) + 4×8` = **1232**，既超内容区 992、也超屏幕 1024。⇒ 按「内容区有效宽均分五列」推导值区宽 | 建议 UI §5.1 #8 与本文件同法回改（112 → 64，592 → 992） |
 //! | CD4 | DateTimeStepper 总高 = **106**（列头 26 + 缝 16 + 步进 64），UI §5.1 #8 写 **64** | 表内 64 **未计入列头**，而同表的文字要求「每列需有列头标签（年 / 月 / 日 / 时 / 分）」⇒ 高度必然 > 64。列头高度取 [`TextSlot::Label`]（26 px，§3.3 控件文字档） | **B2b-2**：P3 的「自定义」展开区（UI 写 Y700 起、64 px）随之增高，装配时按 106 预留 |
-//! | CD5 | **分段控件的「选中」与「禁用」两条样式挂上但当前不参与绘制** | **v9.5.0 源码事实**：`lv_buttonmatrix` 的每段 `CHECKED` / `DISABLED` 状态都由 `ctrl_bits[i]`（`LV_BUTTONMATRIX_CTRL_CHECKED` / `_DISABLED`）驱动（`lv_buttonmatrix.c` 绘制趟 `btn_state` 只由 ctrl 位与 `btn_id_sel` 组装），而**薄层 `ButtonMatrix` 未暴露** `lv_buttonmatrix_set_button_ctrl(_all)`；`set_one_checked(true)` 只置"互斥"标志（其内部 `make_one_button_checked` 只在按钮**已** CHECKED 时才保留），故 CHECKABLE 无法置位 ⇒ 用户点选只改变 `btn_id_sel`（PRESSED 高亮可见），CHECKED 从不产生 | **A 系列后续**：薄层补一个 `ButtonMatrix::set_button_ctrl_all` 薄封装（一行 FFI），本文件的四态样式即刻全部生效（本文件已按 §5.2 四态挂齐，无需再改） |
+//! | CD5 | ~~分段控件的「选中」与「禁用」两条样式挂上但当前不参与绘制~~ **（已在本次提交 `fix(display): 薄层补 buttonmatrix 控制位接口` 修复 ⇒ 四态全部生效）** | **原根因**（v9.5.0 源码事实）：`lv_buttonmatrix` 的每段 `CHECKED` / `DISABLED` 状态由 `ctrl_bits[i]`（`LV_BUTTONMATRIX_CTRL_CHECKED` / `_DISABLED`）驱动（`lv_buttonmatrix.c` 绘制趟 `btn_state` 只由 ctrl 位与 `btn_id_sel` 组装），而**当时薄层 `ButtonMatrix` 未暴露** `lv_buttonmatrix_set_button_ctrl(_all)`；`set_one_checked(true)` 只置"互斥"标志（其内部 `make_one_button_checked` 只在按钮**已** CHECKED 时才保留），故 CHECKABLE 无法置位 ⇒ 用户点选只改变 `btn_id_sel`（PRESSED 高亮可见），CHECKED 从不产生 | **修复方式 / 验证**：薄层补 `set_ctrl_all` / `set_ctrl` / `clear_ctrl_all` / `has_ctrl` 四个薄封装（`src/lvgl/widgets.rs`），本控件改为构造期 `set_ctrl_all(CTRL_CHECKABLE)` + 初始段 `set_ctrl(start, CTRL_CHECKED)`，[`SegmentedControl::set_selected`] 改为"全清 CHECKED → 单段置位"，[`SegmentedControl::set_disabled`] 同步 `CTRL_DISABLED` 位；**回归锁**在 `ui/tests.rs::ui_chain` —— 以 `has_ctrl` 读回断言"每段 CHECKABLE / 恰一段 CHECKED / 切换后旧段已清"（注释掉 `set_ctrl_all(CTRL_CHECKABLE)` 那一行，该用例即变红，已实测） |
 //! | CD6 | 列头 / 汇总标签的**文本对齐**靠"窄标签 + [`theme::center_offset`] 定位"实现；IPv4 汇总标签在其 184 px 盒内**左对齐** | 薄层**没有**文本对齐通道（`lv_obj_set_style_text_align` 未封装，见 `components.rs` 模块文档「布局手法」） | 若 PM 要求汇总标签居中 / 右对齐：薄层补 `set_text_align` 后调整 |
 //!
 //! ## 薄层缺能力（如实标注，**未**在本单元处理）
 //!
-//! 1. **每段 ctrl 位不可置位** ⇒ CD5（分段控件的选中态视觉不可达）；
+//! 1. ~~**每段 ctrl 位不可置位** ⇒ CD5（分段控件的选中态视觉不可达）~~ **已消除**：
+//!    `ButtonMatrix` 现有 `set_ctrl_all` / `set_ctrl` / `clear_ctrl_all` / `has_ctrl`
+//!    （CD5 修复）；
 //! 2. **没有 `child(i)` 遍历口**（`Obj` 只有 `child_count()`）⇒ 离屏用例**无法逐对象统计
 //!    "可点对象数"**，只能断 `child_count()` 链路（本次用例的做法，见 `ui/tests.rs`）；
 //! 3. **没有样式读回 API** ⇒ "某样式确已挂上"只能以**选择器真源**（[`ITEM_STATES`]）为据
@@ -73,7 +75,9 @@ use std::rc::{Rc, Weak};
 use crate::lvgl::event::EventCode;
 use crate::lvgl::obj::{Obj, ObjFlag};
 use crate::lvgl::style::{Color, Part, State, StyleSelector};
-use crate::lvgl::widgets::{self, ButtonMatrix, Label, LongMode};
+use crate::lvgl::widgets::{
+    self, ButtonMatrix, Label, LongMode, CTRL_CHECKABLE, CTRL_CHECKED, CTRL_DISABLED,
+};
 use crate::lvgl::LvglError;
 use crate::ui::components::Stepper;
 use crate::ui::theme::{self, Dimens, Palette, TextSlot};
@@ -267,9 +271,10 @@ pub const SEGMENT_MIN_W: i32 = Dimens::CHIP_MIN_W;
 /// 纯逻辑用例按本表核对 —— 薄层没有"某选择器下挂了哪些样式"的读回 API，故"确已挂上"的
 /// 断言只能以本列表为据（与 `ButtonStyles::entries` 同法）。
 ///
-/// ⚠️ 其中「选中」（`ITEMS × CHECKED`）与「禁用」（`ITEMS × DISABLED`）两条在 v9.5.0 下
-/// **当前不参与绘制** —— 根因与收口见模块文档偏差 **CD5**。本表仍如实登记四态（§5.2 的
-/// 完整矩阵），薄层补上 ctrl 位入口后即全部生效。
+/// 「选中」（`ITEMS × CHECKED`）与「禁用」（`ITEMS × DISABLED`）两条**确已生效**：
+/// 构造期 `set_ctrl_all(CTRL_CHECKABLE)`、切换时"全清 + 单段置 CHECKED"、禁用时
+/// `set_ctrl_all(CTRL_DISABLED)`（原 CD5 缺陷的根因与修复见模块文档偏差表）。
+/// 本表是四态（§5.2 完整矩阵）的单一真源，`ui/tests.rs` 以它核对选择器。
 pub const ITEM_STATES: [(Part, State); 4] = [
     (Part::ITEMS, State::DEFAULT),
     (Part::ITEMS, State::PRESSED),
@@ -355,9 +360,16 @@ impl SegmentedControl {
         }
         // 单选互斥（UI §5.1 #4 / §5.3）。
         bm.set_one_checked(true);
+        // **每段 CHECKABLE**（UI §5.3 原话）—— v9.5.0 的 toggle 前置条件：不置此位，
+        // 点击**永不**产生 `CHECKED` ⇒ `LV_STATE_CHECKED`（"选中"态）永不绘制。
+        bm.set_ctrl_all(CTRL_CHECKABLE);
 
         let start = clamp_index(selected, count);
         bm.set_selected(start as u32);
+        // 初始高亮：`set_selected_button` 只写 `btn_id_sel`、**不**置 `CHECKED` ctrl 位，
+        // 故必须显式补上（先整体清零再单段置位 ⇒ 恒"恰有一段"选中）。
+        bm.clear_ctrl_all(CTRL_CHECKED);
+        bm.set_ctrl(start as u32, CTRL_CHECKED);
 
         let current = Cell::new(start);
         let on_change: IndexCallback = Rc::new(RefCell::new(None));
@@ -396,6 +408,14 @@ impl SegmentedControl {
         self.bm.obj()
     }
 
+    /// 底层键矩阵（**仅测试**）—— 给 `ui/tests.rs` 一个 `has_ctrl` 读回口，
+    /// 用 LVGL 侧真值断言"每段 CHECKABLE / 恰一段 CHECKED"（CD5 的回归锁）。
+    /// **不进生产 API**：`#[cfg(test)]` 编译期即不可见（生产侧改控制位只能经本类型的方法）。
+    #[cfg(test)]
+    pub fn matrix(&self) -> &ButtonMatrix {
+        &self.bm
+    }
+
     /// 选项数（= 段数）。
     pub fn count(&self) -> usize {
         self.count
@@ -421,6 +441,10 @@ impl SegmentedControl {
     pub fn set_selected(&self, index: usize) {
         let i = clamp_index(index, self.count);
         self.bm.set_selected(i as u32);
+        // 同步 `CHECKED` ctrl 位（"选中态样式"的**唯一**触发源）：先全清再单段置位，
+        // 否则旧选中段会保持高亮 ⇒ 界面上出现"两个都亮"。
+        self.bm.clear_ctrl_all(CTRL_CHECKED);
+        self.bm.set_ctrl(i as u32, CTRL_CHECKED);
         self.current.set(i);
     }
 
@@ -438,9 +462,17 @@ impl SegmentedControl {
     /// 置 `LV_STATE_DISABLED` 于键矩阵本体：v9.5.0 的输入路径以该状态位判定"该对象是否
     /// 可交互"（`src/indev/lv_indev.c`：`is_enabled = !lv_obj_has_state(indev_obj_act,
     /// LV_STATE_DISABLED)`）⇒ 禁用后**不再产生** `VALUE_CHANGED`（结构性，不靠回调自觉）。
-    /// ⚠️ 每段的**字色**（§5.2「禁用 字 `#5A6780`」）当前不变灰 —— 见 CD5。
+    /// 另逐段设 / 清 `CTRL_DISABLED` ctrl 位（`0x0040`）—— 每段的**字色 / 底色**变灰由
+    /// 该位经 `ITEMS × DISABLED` 样式表达（§5.2「禁用 字 `#5A6780`」；原 CD5 已修复）。
     pub fn set_disabled(&self, disabled: bool) {
         widgets::set_state(self.bm.obj(), State::DISABLED, disabled);
+        // 逐段 `DISABLED` ctrl 位：v9.5.0 绘制趟的 `btn_state` 由 ctrl 位组装，
+        // 故每段字色 / 底色要变灰必须置此位（对象级 `LV_STATE_DISABLED` 只管"可否交互"）。
+        if disabled {
+            self.bm.set_ctrl_all(CTRL_DISABLED);
+        } else {
+            self.bm.clear_ctrl_all(CTRL_DISABLED);
+        }
     }
 
     /// 是否禁用（读自 LVGL 的状态位，是**单一真源**）。
@@ -640,6 +672,10 @@ impl Ipv4Stepper {
     /// ⚠️ **不要在业务里用它改值**：`Stepper::set_value` 按设计**不**触发 `on_change`，
     /// 故经此路径改段值**不会**刷新汇总标签（[`Ipv4Stepper::text`]）——生产路径请用
     /// [`Ipv4Stepper::set_octets`]（它同时更新四段与汇总）。
+    ///
+    /// **`#[cfg(test)]`**：本访问器**只**给离屏用例 / 诊断用 —— 生产代码若经它改值会静默
+    /// 绕过汇总同步（上文即该陷阱），故**编译期**就不给生产侧这条路径。
+    #[cfg(test)]
     pub fn segment(&self, index: usize) -> Option<&Stepper> {
         self.segments.get(index).map(|s| &**s)
     }
@@ -938,6 +974,8 @@ impl DateTimeStepper {
     ///
     /// ⚠️ 与 [`Ipv4Stepper::segment`] 同款提醒：经此路径改列值**不会**触发 `on_change`
     /// （`Stepper::set_value` 按设计不回调）——生产路径请用 [`DateTimeStepper::set_value`]。
+    /// 同 [`Ipv4Stepper::segment`]：**`#[cfg(test)]`**（生产侧不得经它改值）。
+    #[cfg(test)]
     pub fn column(&self, index: usize) -> Option<&Stepper> {
         self.columns.get(index).map(|c| &**c)
     }
