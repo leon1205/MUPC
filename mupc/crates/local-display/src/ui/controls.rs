@@ -291,11 +291,23 @@ fn put_back_cb<T: ?Sized>(slot: &Rc<RefCell<Option<Box<T>>>>, f: Box<T>) {
 /// 本次通知仍由旧回调执行完毕、新回调自下一次通知起生效"这条语义**不变**（自替换已把
 /// 新回调写进槽 ⇒ 槽非空 ⇒ 守卫丢弃手里的旧回调）。
 ///
-/// **panic 的诊断（不静默掩盖）**：`Drop` 里检测 `std::thread::panicking()`；为真即说明
-/// 用户回调**在展开中**（其内部状态可能已不一致 —— 回调纪律要求回调内不 panic），向
-/// stderr 留一条诊断。**放回仍照做**（否则就是上面那个"永久空置"的缺陷）。写 stderr 用
+/// **panic 的诊断（不静默掩盖，且**不得误判**）**：`Drop` 里的判据是**本帧**（本次触发）
+/// 的 `completed` 标志 —— 调用方在 `f(v)` **正常返回**之后才置 `true`；`Drop` 时它仍为
+/// `false` ⇒ 本次触发途中确实发生了展开（不是"线程上别处的展开"波及），向 stderr 留一条
+/// 诊断。**放回仍照做**（否则就是上面那个"永久空置"的缺陷）。写 stderr 用
 /// `let _ = writeln!(..)` 而**非** `eprintln!`：后者在写失败时**自身 panic**，展开路径上
 /// 二次 panic = `abort`。
+///
+/// ⚠️ **为什么不用 `std::thread::panicking()`（Minor 3 订正）**：它是**线程级**状态 ——
+/// 若本回调**正常返回**、而此刻线程上**别处**正在展开（例如本控件恰好从某个展开中的 `Drop`
+/// 里被触发），旧判据会误打"回调 panic"诊断（**文案失实**，把排查引向错误方向）。
+/// 本帧一置位就与文案严格同义：**只有 `f(v)` 没跑完才报**。
+///
+/// **反复 panic 的形态（如实登记，Minor 4）**：持续 panic 的回调会在**每次**通知时各输出
+/// 一条 stderr 诊断（守卫**每帧新建**、每帧判一次，且本层**有意不设**"只报一次"上限 ——
+/// 静默吞掉后续诊断会把"回调一直在 panic"这件事故意藏起来）。**事件不丢是本设计的契约**
+/// （槽照样放回、后续通知照常到达）⇒ 现场若见诊断刷屏，属**预期**而非缺陷；要止住它，应由
+/// **回调自己**改为不 panic（回调纪律本就要求回调内不 panic）。
 ///
 /// **不用 `catch_unwind` 的理由**：`catch_unwind` 会把"用户回调 panic"这件事**从调用方
 /// （`src/lvgl/event.rs` 的事件桥）**手里夺走 —— 桥上是唯一的"跨 FFI 展开"拦截点与唯一的
@@ -309,14 +321,19 @@ struct PutBack<'a, T: ?Sized> {
     slot: &'a Rc<RefCell<Option<Box<T>>>>,
     /// 托管中的回调；`Drop` 里 `take()` 走（保证只放回一次）。
     cb: Option<Box<T>>,
+    /// **本帧**是否"回调已正常返回"：调用方在 `f(v)` 返回后置 `true`。
+    ///
+    /// `false` 初值是**故意的** —— `Drop` 里看到 `false` 就等价于"本次触发途中有展开"
+    /// （覆盖"`f(v)` 内 panic"与"`f(v)` 之前就展开"两种情形，后者在本层的调用点不可达）。
+    completed: bool,
 }
 
 impl<T: ?Sized> Drop for PutBack<'_, T> {
     fn drop(&mut self) {
         if let Some(f) = self.cb.take() {
-            if std::thread::panicking() {
-                // 诊断：用户回调 panic ⇒ 槽已由本守卫放回（后续通知仍会到达），但该回调的
-                // 内部状态可能已不一致。**不静默**。
+            if !self.completed {
+                // 诊断：本次触发途中发生了展开（回调没能正常返回）⇒ 槽已由本守卫放回
+                // （后续通知仍会到达），但该回调的内部状态可能已不一致。**不静默**。
                 //
                 // 这是 **stderr 诊断、不是屏上文案** ⇒ 文案不受 `ui_texts_covered_by_font_cmap`
                 // 的字形齐备约束（该网把 `ui/**` 生产源码的字符串字面量都当上屏候选）。
@@ -343,28 +360,43 @@ impl<T: ?Sized> Drop for PutBack<'_, T> {
 /// 下一次通知仍会到达（见 [`PutBack`] 文档）。
 fn fire_index(slot: &IndexCallback, v: usize) {
     let Some(f) = take_cb(slot) else { return };
-    let mut guard = PutBack { slot, cb: Some(f) };
+    let mut guard = PutBack {
+        slot,
+        cb: Some(f),
+        completed: false, // **本帧**判据（Minor 3）：`f(v)` 正常返回后才置位
+    };
     if let Some(f) = guard.cb.as_mut() {
         f(v);
     }
+    guard.completed = true;
 }
 
 /// 静默触发"四段 IPv4"回调（同上）。
 fn fire_octets(slot: &OctetsCallback, v: [u8; 4]) {
     let Some(f) = take_cb(slot) else { return };
-    let mut guard = PutBack { slot, cb: Some(f) };
+    let mut guard = PutBack {
+        slot,
+        cb: Some(f),
+        completed: false,
+    };
     if let Some(f) = guard.cb.as_mut() {
         f(v);
     }
+    guard.completed = true;
 }
 
 /// 静默触发"日期时间"回调（同上）。
 fn fire_datetime(slot: &DateTimeCallback, v: DateTimeValue) {
     let Some(f) = take_cb(slot) else { return };
-    let mut guard = PutBack { slot, cb: Some(f) };
+    let mut guard = PutBack {
+        slot,
+        cb: Some(f),
+        completed: false,
+    };
     if let Some(f) = guard.cb.as_mut() {
         f(v);
     }
+    guard.completed = true;
 }
 
 /// 槽替换（**重入安全**）：`fire_*` 在调用用户回调期间不持有槽借用，故"回调内自替换"
