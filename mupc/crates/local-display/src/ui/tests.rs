@@ -771,13 +771,15 @@ fn ui_static_constraints() {
 ///
 /// B2b-1 起纳入 `ui/controls.rs`（此前只有 6 个文件）：三个输入控件同样要过**码表覆盖率**
 /// 与**裸尺寸**两张网 —— 新控件里的中文列头（`年/月/日/时/分`）正是码表走查的对象。
-const UI_PROD_SOURCES: [(&str, &str); 7] = [
+/// B2b-2 起再纳入 `ui/pages/p2_config.rs`（P2 配置页：中文分组 / 字段 / 屏文最多的一页）。
+const UI_PROD_SOURCES: [(&str, &str); 8] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/theme.rs", include_str!("theme.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
+    ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
 
@@ -801,13 +803,20 @@ const UI_PROD_SOURCES: [(&str, &str); 7] = [
 /// "属性**之后紧跟**测试模块"而非"出现过该 token"，故注释里的 token 与生产区的
 /// `#[cfg(test)] pub fn …` 测试访问器**都在扫描面内**（见 [`truncate_before_test_module`]）；
 /// 形态若不符即响亮失败。
-const NON_DISPLAY_SINKS: [&str; 6] = [
+///
+/// **B2b-2 新增一条 `config_key(`**：`ui/pages/p2_config.rs` 的**标签口径覆盖表**必须逐条写出
+/// 配置字段的**机器键**（`gateway.listen_addr` 一类），而键是**小写 ASCII 且从不上屏**
+/// （`g`/`a`/`t`/`e`/… 在生成字体里没有字形）。经该常量函数标注即声明"此字面量不进 `lv_label`"
+/// ——与 `InvalidArgument(` / `env!(` **同一条**非屏显口径（**不改变任何上屏文案**，
+/// 只是把"键不上屏"这一事实写在调用点）。
+const NON_DISPLAY_SINKS: [&str; 7] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
     "stderr(),",
     "env!(",
     "option_env!(",
+    "config_key(",
 ];
 
 /// **已登记**的字库缺口：扫源码确实用到、但生成字体的 cmap 里**没有**的字形。
@@ -1276,6 +1285,7 @@ fn ui_texts_covered_by_font_cmap() {
         .iter()
         .chain(crate::ui::pages::ALL_TEXTS.iter())
         .chain(crate::ui::controls::ALL_TEXTS.iter())
+        .chain(crate::ui::pages::p2_config::ALL_TEXTS.iter())
     {
         assert!(
             literals.iter().any(|l| l.contains(t)),
@@ -3006,6 +3016,578 @@ pub(crate) fn pages_chain() {
         drop(p6);
     }
 
+    // ═══ P2 配置页（B2b-2：控制通道驱动 + 写操作 + 固定操作条）═══════════════════
+    //
+    // 本段的每条断言都标了「改什么会让本条变红」——**均为实测**（见 B2b-2 报告的三条探针）。
+    {
+        use crate::lvgl::event::EventCode;
+        use crate::ui::pages::p2_config::{self, P2ConfigPage};
+        use mupc_display_proto::{
+            ConfigField, ConfigGroup, ConfigKind, ConfigPatch, ConfigView, ControlCode,
+            ControlResponse, FieldError, OptionItem, PatchSource, WriteMode,
+        };
+        use serde_json::Value;
+
+        // 合成字段（默认全部可编辑 / 不瞬断，用例只覆写关心的那几项）。
+        #[allow(clippy::too_many_arguments)]
+        fn fld(
+            key: &str,
+            label: &str,
+            kind: ConfigKind,
+            value: Value,
+            unit: Option<&str>,
+            reconnect: bool,
+            editable: bool,
+        ) -> ConfigField {
+            ConfigField {
+                key: key.into(),
+                label: label.into(),
+                kind,
+                default: value.clone(),
+                value,
+                unit: unit.map(str::to_string),
+                requires_reconnect: reconnect,
+                editable,
+            }
+        }
+
+        /// 合成视图：**3 组**，含 `Ipv4` + `U16` + `U64` + `Enum` + 一个 `editable=false` 字段。
+        /// `reconnect` = 是否把「监听地址」标成瞬断字段（决定 L1 / L2+）。
+        fn p2_view(reconnect: bool) -> ConfigView {
+            let u16k = ConfigKind::U16 {
+                min: 1,
+                max: 65535,
+                step: 1,
+            };
+            // 「遥测上报周期」的**契约默认值（60）与当前值（1）不同** —— 这样
+            // `defaults_patch()` 的"取 default 而不是当前值"才有可断言的差别。
+            let mut period = fld(
+                "telemetry.period",
+                "遥测上报周期",
+                ConfigKind::U64 {
+                    min: 1,
+                    max: 300,
+                    step: 1,
+                },
+                Value::from(1u64),
+                Some("秒"),
+                false,
+                true,
+            );
+            period.default = Value::from(60u64);
+            ConfigView {
+                groups: vec![
+                    ConfigGroup {
+                        id: "iec104".into(),
+                        label: "IEC 104 连接参数".into(),
+                        fields: vec![
+                            // 注入的 label 是**旧口径**「对端 IP 地址」——页须按 PM 裁定改写。
+                            // 敏感性：把 `field_label_text` 的覆盖分支去掉（直接返回
+                            // `field.label`）⇒ 下面 ③ 的标签断言会读到「对端 IP 地址」而变红。
+                            fld(
+                                "gateway.listen_addr",
+                                "对端 IP 地址",
+                                ConfigKind::Ipv4,
+                                Value::from("127.0.0.1"),
+                                None,
+                                reconnect,
+                                true,
+                            ),
+                            fld(
+                                "gateway.port",
+                                "端口",
+                                u16k.clone(),
+                                Value::from(2404),
+                                None,
+                                false,
+                                true,
+                            ),
+                        ],
+                    },
+                    ConfigGroup {
+                        id: "intercore".into(),
+                        label: "核间通信参数".into(),
+                        fields: vec![fld(
+                            "intercore.port",
+                            "本地端口",
+                            u16k.clone(),
+                            Value::from(2500),
+                            None,
+                            false,
+                            true,
+                        )],
+                    },
+                    ConfigGroup {
+                        id: "telemetry".into(),
+                        label: "遥测与日志".into(),
+                        fields: vec![
+                            period,
+                            fld(
+                                "system.log_level",
+                                "日志级别",
+                                ConfigKind::Enum {
+                                    options: vec![
+                                        OptionItem {
+                                            value: "error".into(),
+                                            label: "ERROR".into(),
+                                        },
+                                        OptionItem {
+                                            value: "info".into(),
+                                            label: "INFO".into(),
+                                        },
+                                    ],
+                                },
+                                Value::from("info"),
+                                None,
+                                false,
+                                true,
+                            ),
+                            // 只读字段（PL-4 回环红线）：控件 disabled + 说明行。
+                            fld(
+                                "display.bind_addr",
+                                "本机服务地址（仅回环）",
+                                ConfigKind::Ipv4,
+                                Value::from("127.0.0.1"),
+                                None,
+                                false,
+                                false,
+                            ),
+                        ],
+                    },
+                ],
+                revision: 7,
+                write_mode: WriteMode::TextPreserve,
+            }
+        }
+
+        // ── ① 骨架 + 固定操作条（UI §6.2 线框 `Y624`）────────────────────────
+        let p2 = P2ConfigPage::new(&host).expect("P2ConfigPage::new");
+        disp.refr_now_for_test();
+        assert_eq!(
+            p2.obj().size(),
+            (Dimens::CONTENT_W, Dimens::CONTENT_H),
+            "页根 = 内容区整幅 992×624（**不是**滚动容器 —— 见 pages/mod.rs 契约 1′）"
+        );
+        assert_eq!(
+            p2.scroll_obj().size(),
+            (Dimens::CONTENT_W, 552),
+            "滚动视口 = 624 − 操作条 72 = **552**（UI §6.2 线框「552 px 视口」）"
+        );
+        let root_c = p2.obj().coords();
+        let bar_c = p2.action_bar_obj().coords();
+        assert_eq!(
+            (bar_c.x1, bar_c.y1),
+            (root_c.x1, root_c.y1 + 552),
+            "固定操作条贴在页根底缘（不随滚动）"
+        );
+        assert_eq!(
+            p2.action_bar_obj().size().1,
+            72,
+            "操作条高 72（UI §6.2 线框 y624–696）"
+        );
+
+        // ── ② 未注入配置 ⇒ **不可用**（不是"空"）────────────────────────────
+        assert_eq!(p2.group_count(), 0, "无配置 ⇒ 无分组卡");
+        assert!(!p2.is_available());
+        assert!(p2.fail_visible() && !p2.note_visible(), "降级 ⇒ 原因行替换说明行");
+        assert_eq!(
+            p2.fail_text().as_deref(),
+            Some(p2_config::TEXT_CONFIG_UNAVAILABLE),
+            "降级标题（**不得**写成「无配置」）"
+        );
+        assert!(p2.save_disabled() && p2.reset_disabled(), "不可用 ⇒ 两个按钮皆禁用");
+
+        // ── ③ 注入视图 ⇒ 分组 / 字段 / 值文本 ────────────────────────────────
+        let v = p2_view(false);
+        p2.set_config(&v).expect("set_config");
+        assert!(p2.is_available() && !p2.fail_visible());
+        assert!(p2.note_visible(), "正常态显说明行（与失败行同槽互斥）");
+        assert_eq!(p2.note_text().as_deref(), Some(p2_config::TEXT_PAGE_NOTE));
+        assert_eq!(p2.group_count(), 3, "3 个分组卡");
+        assert_eq!(p2.group_label(0).as_deref(), Some("IEC 104 连接参数"));
+        assert_eq!(p2.group_label(2).as_deref(), Some("遥测与日志"));
+        assert_eq!((p2.field_count(0), p2.field_count(1), p2.field_count(2)), (2, 1, 3));
+        // 字段标签：PM 裁定键**改写**；其余键**透传**契约标签（元数据驱动）。
+        assert_eq!(
+            p2.field_label(0, 0).as_deref(),
+            Some(p2_config::TEXT_LISTEN_ADDR),
+            "gateway.listen_addr 必须是「本机监听地址 · IEC 104」（**不是**对端 IP）"
+        );
+        assert_ne!(
+            p2.field_label(0, 0).as_deref(),
+            Some("对端 IP 地址"),
+            "注入的旧口径标签必须被 page 口径覆盖"
+        );
+        assert_eq!(p2.field_label(0, 1).as_deref(), Some("端口"));
+        // 值文本（三类控件的读回口径）。
+        assert_eq!(
+            p2.field_value_text("gateway.listen_addr").as_deref(),
+            Some("127.0.0.1"),
+            "Ipv4Stepper 汇总标签"
+        );
+        assert_eq!(p2.field_value_text("gateway.port").as_deref(), Some("2404"));
+        assert_eq!(
+            p2.field_value_text("system.log_level").as_deref(),
+            Some("INFO"),
+            "Enum 段控件显**选项标签**（不是机器值 info）"
+        );
+        assert_eq!(
+            p2.field_status_text("gateway.port").as_deref(),
+            Some("1 – 65535"),
+            "行型 A 的约束提示（UI §6.2）"
+        );
+        assert_eq!(
+            p2.field_status_text("telemetry.period").as_deref(),
+            Some("1 – 300 秒"),
+            "带单位的约束提示"
+        );
+
+        // ── ④ 只读字段：控件 disabled **且**说明行在（设计 §6.2 只读字段行）────
+        assert_eq!(p2.field_disabled("display.bind_addr"), Some(true), "只读 ⇒ 控件禁用");
+        assert_eq!(p2.field_disabled("gateway.port"), Some(false), "可编辑 ⇒ 不禁用");
+        assert_eq!(
+            p2.field_note_text("display.bind_addr").as_deref(),
+            Some(p2_config::TEXT_READONLY_NOTE),
+            "只读字段必须带说明行（**可见性换现场可核查性**）"
+        );
+        assert_eq!(p2.field_note_visible("display.bind_addr"), Some(true));
+        assert_eq!(p2.field_note_text("gateway.port"), None, "可编辑字段无说明行");
+        assert_eq!(
+            p2.field_label(2, 2).as_deref(),
+            Some(p2_config::TEXT_LOOPBACK_ADDR),
+            "回环绑定字段用回环标签（与 IEC 104 监听地址**分列**）"
+        );
+
+        // ── ⑤ 草稿 / 脏标记 / 放弃修改 ──────────────────────────────────────
+        assert!(!p2.is_dirty(), "刚注入 ⇒ 不脏");
+        assert!(p2.save_disabled(), "无改动 ⇒ 保存置灰");
+        assert!(p2.set_field_value("gateway.port", &Value::from(2405)));
+        assert!(p2.is_dirty(), "改了一个字段 ⇒ 脏");
+        assert_eq!(p2.field_value_text("gateway.port").as_deref(), Some("2405"));
+        let d = p2.draft();
+        assert_eq!(d.from, PatchSource::Edit);
+        assert_eq!(d.changes.len(), 1, "草稿只含被改的字段");
+        assert_eq!(d.changes.get("gateway.port"), Some(&Value::from(2405)));
+        assert!(!p2.save_disabled(), "有改动 ⇒ 保存可用");
+        p2.discard_draft();
+        assert!(!p2.is_dirty(), "放弃修改 ⇒ 不脏");
+        assert_eq!(
+            p2.field_value_text("gateway.port").as_deref(),
+            Some("2404"),
+            "放弃修改 ⇒ 值回退到注入值"
+        );
+        let dp = p2.defaults_patch();
+        assert_eq!(dp.from, PatchSource::ResetDefault);
+        assert!(dp.changes.contains_key("gateway.port"));
+        assert!(
+            !dp.changes.contains_key("display.bind_addr"),
+            "只读字段不得进恢复默认值补丁（后端二次校验会拒绝整单）"
+        );
+        assert_eq!(
+            p2.defaults_patch().changes.get("telemetry.period"),
+            Some(&Value::from(60u64)),
+            "取的是契约 default（60）而不是当前值（1）"
+        );
+
+        // ── ⑤′ 恢复默认值的**最低分级**：无瞬断字段 ⇒ **恰好 L2**（不是 L1、也不升 L2+）──
+        // 敏感性：把 `reset_level` 的 `else` 分支改成 `L1` ⇒ 本条立刻变红；
+        // 把 `has_reconnect_field` 判据放宽 ⇒ 会读到 L2+ 而变红。
+        p2.reset_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert_eq!(
+            p2.with_dialog(|d| d.level()),
+            Some(crate::ui::theme::ConfirmLevel::L2),
+            "恢复默认值**必须走 L2**（生效性写，不得只靠间距保护）"
+        );
+        assert!(
+            p2.with_dialog(|d| !d.has_warn_banner()).unwrap_or(false),
+            "无瞬断字段 ⇒ L2 不强制 WarnBanner"
+        );
+        // 关掉它（模拟"新视图到达"这一拍），让下一拍的「保存」能开新弹层。
+        p2.set_config(&v).expect("set_config（关掉上一弹层）");
+
+        // ── ⑥ 保存：**未确认不发任何意图**（设计 §6.2 末行）───────────────────
+        // 「改什么会让本条变红」：把 `save.on_clicked` 的回调从 `open_dialog(..)` 改成直接
+        // `fire_submit(..)`（绕开弹层）⇒ 「未确认时 on_submit 未被调用」那条立刻变红
+        // （探针 P2 实测）。
+        let got: Rc<RefCell<Vec<(ConfigPatch, crate::ui::theme::ConfirmLevel)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        {
+            let got = Rc::clone(&got);
+            p2.set_on_submit(move |patch, level| got.borrow_mut().push((patch, level)));
+        }
+        assert!(p2.set_field_value("gateway.port", &Value::from(2405)));
+        // 点「保存」= 向保存按钮派发 CLICKED（与真实 indev 同一条派发路径）。
+        p2.save_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert!(
+            got.borrow().is_empty(),
+            "**未确认 ⇒ 不发出任何提交意图**（未确认 = 无网络动作）"
+        );
+        assert_eq!(
+            p2.with_dialog(|d| d.level()),
+            Some(crate::ui::theme::ConfirmLevel::L1),
+            "无 requires_reconnect ⇒ L1"
+        );
+        assert_eq!(
+            p2.with_dialog(|d| d.title().text()).flatten().as_deref(),
+            Some(p2_config::TEXT_DIALOG_TITLE_SAVE)
+        );
+        assert!(
+            p2.with_dialog(|d| d.default_focus_is_cancel()).unwrap_or(false),
+            "TT-09：默认焦点「取消」"
+        );
+        assert!(
+            p2.with_dialog(|d| !d.has_warn_banner() && !d.has_progress()).unwrap_or(false),
+            "L1：无 WarnBanner、无长按进度"
+        );
+        // L1 = 单击生效。
+        p2.with_dialog(|d| {
+            d.confirm_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED)
+        });
+        assert_eq!(got.borrow().len(), 1, "确认完成 ⇒ 恰好发一次意图");
+        {
+            let g = got.borrow();
+            assert_eq!(g[0].1, crate::ui::theme::ConfirmLevel::L1);
+            assert_eq!(g[0].0.from, PatchSource::Edit);
+            assert_eq!(g[0].0.changes.len(), 1);
+            assert_eq!(g[0].0.changes.get("gateway.port"), Some(&Value::from(2405)));
+        }
+
+        // ── ⑦ 取消：**延迟关闭**（不得在 LVGL 事件回调内删弹层）───────────────
+        p2.with_dialog(|d| {
+            d.cancel_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED)
+        });
+        assert!(
+            p2.with_dialog(|d| d.is_alive()).unwrap_or(false),
+            "取消回调内不得删弹层（`ConfirmDialog::close` 的要求）"
+        );
+        p2.tick(std::time::Instant::now());
+        assert!(
+            p2.with_dialog(|d| d.is_alive()).is_none(),
+            "tick 里执行延迟关闭"
+        );
+
+        // ── ⑧ 瞬断字段 ⇒ L2+ + WarnBanner（UI §2.5）──────────────────────────
+        let vr = p2_view(true);
+        p2.set_config(&vr).expect("set_config (reconnect)");
+        assert!(p2.set_field_value("gateway.port", &Value::from(2406)));
+        p2.save_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert_eq!(
+            p2.with_dialog(|d| d.level()),
+            Some(crate::ui::theme::ConfirmLevel::L2Plus),
+            "任一字段 requires_reconnect ⇒ **L2+**"
+        );
+        assert!(
+            p2.with_dialog(|d| d.has_warn_banner()).unwrap_or(false),
+            "L2+：WarnBanner 强制出现"
+        );
+        assert!(
+            p2.with_dialog(|d| d
+                .warn_banner()
+                .map(|w| w.has_fields_line())
+                .unwrap_or(false))
+                .unwrap_or(false),
+            "WarnBanner 第二行「涉及：<字段名列表>」"
+        );
+        assert!(
+            p2.with_dialog(|d| d.has_progress()).unwrap_or(false),
+            "L2+：长按进度条就位（1.0 s 保持）"
+        );
+        let n_before = got.borrow().len();
+        p2.with_dialog(|d| {
+            d.confirm_button()
+                .button()
+                .obj()
+                .send_event(EventCode::LONG_PRESSED)
+        });
+        assert_eq!(
+            got.borrow().len(),
+            n_before + 1,
+            "L2+：长按满 1.0 s ⇒ 恰好发一次意图"
+        );
+        {
+            let g = got.borrow();
+            let last = g.last().expect("末条");
+            assert_eq!(last.1, crate::ui::theme::ConfirmLevel::L2Plus);
+            assert_eq!(
+                last.0.changes.get("gateway.port"),
+                Some(&Value::from(2406))
+            );
+        }
+
+        // ── ⑨ 恢复默认值：**独立危险按钮** + L2 + 间距 ≥ 48 px ────────────────
+        //
+        // 前置：上一拍的弹层**仍在**（设计如此 —— 确认后弹层保持到回执到达，`show_result`
+        // 才关它；这样"提交中"期间弹层不会被误关）。这里用一次视图注入把它关掉，模拟
+        // "回执已到 / 视图已刷新"这一拍 —— 于是下一次点击才会**开新弹层**。
+        p2.set_config(&vr)
+            .expect("set_config（重置前一拍：关掉上一弹层）");
+        assert!(
+            p2.with_dialog(|d| d.is_alive()).is_none(),
+            "注入新视图 ⇒ 关闭旧弹层"
+        );
+        assert!(p2.set_field_value("gateway.port", &Value::from(2406)));
+        disp.refr_now_for_test();
+        let save_c = p2.save_button().button().obj().coords();
+        let reset_c = p2.reset_button().button().obj().coords();
+        // 间距按**闭区间**口径算：`coords()` 的 `x2` 是最后一个像素列 ⇒ 真实缝隙 = x1 − x2 − 1。
+        assert!(
+            save_c.x1 - reset_c.x2 > Dimens::GAP_DANGER,
+            "「恢复默认值」与「保存」的缝隙必须 ≥ 48 px（实测 {} px；UI §6.2 流程 8 / CF-07）",
+            save_c.x1 - reset_c.x2 - 1
+        );
+        assert!(
+            reset_c.x1 < save_c.x1,
+            "「恢复默认值」在左、「保存」在右（UI §6.2 线框）"
+        );
+        p2.reset_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert_eq!(
+            p2.with_dialog(|d| d.level()),
+            Some(crate::ui::theme::ConfirmLevel::L2Plus),
+            "恢复默认值**必须走 L2 起**（涉及瞬断字段 ⇒ L2+）—— 不得只有间距保护"
+        );
+        let n_before = got.borrow().len();
+        p2.with_dialog(|d| {
+            d.confirm_button()
+                .button()
+                .obj()
+                .send_event(EventCode::LONG_PRESSED)
+        });
+        assert_eq!(got.borrow().len(), n_before + 1);
+        {
+            let g = got.borrow();
+            let last = g.last().expect("末条");
+            assert_eq!(
+                last.0.from,
+                PatchSource::ResetDefault,
+                "恢复默认值的补丁来源 = ResetDefault"
+            );
+            assert!(
+                last.0.changes.len() >= 4,
+                "恢复默认值覆盖全部可编辑字段（实测 {}）",
+                last.0.changes.len()
+            );
+            assert!(!last.0.changes.contains_key("display.bind_addr"));
+        }
+
+        // ── ⑩ 提交中（F9.6）──────────────────────────────────────────────────
+        p2.set_submitting(true);
+        assert_eq!(
+            p2.save_text().as_deref(),
+            Some(p2_config::TEXT_SAVING),
+            "保存中文案"
+        );
+        assert!(p2.save_disabled() && p2.reset_disabled(), "提交中禁重复触发");
+        p2.set_submitting(false);
+
+        // ── ⑪ 失败回执：**保留已输入值** + 逐字段标红 + 具体原因 + 保存置灰 ────
+        assert!(p2.set_field_value("gateway.port", &Value::from(2500)));
+        let fail = ControlResponse::rejected(
+            "rid-1",
+            ControlCode::RejectedValidation,
+            "字段 `gateway.port` 越界，允许区间 [1, 65535]",
+            vec![FieldError {
+                field: "gateway.port".into(),
+                reason: "越界，允许区间 [1, 65535]".into(),
+            }],
+            Some("audit-1".into()),
+            1_000,
+        );
+        p2.show_result(&fail).expect("show_result (fail)");
+        assert_eq!(
+            p2.field_error_visible("gateway.port"),
+            Some(true),
+            "该字段行须显形错误通道（红字 + 红竖条）"
+        );
+        assert!(
+            p2.field_status_text("gateway.port")
+                .unwrap_or_default()
+                .contains("越界"),
+            "**具体**原因必须上屏（CF-02：不得泛化提示）"
+        );
+        assert_eq!(
+            p2.field_value_text("gateway.port").as_deref(),
+            Some("2500"),
+            "EDGE-10：失败必须保留用户已输入值"
+        );
+        assert!(p2.save_disabled(), "有字段错误 ⇒ 保存置灰");
+        assert!(p2.fail_visible(), "失败原因就地显示（页顶提示行）");
+        assert_eq!(
+            p2.toast_tone(),
+            Some(components::ToastTone::Failure),
+            "失败 Toast（红条）"
+        );
+        // 审计不可写（EDGE-18）：固定文案 + fail-closed。
+        let audit = ControlResponse::audit_unavailable("rid-2", 1_001);
+        p2.show_result(&audit).expect("show_result (audit)");
+        assert_eq!(
+            p2.toast_text().as_deref(),
+            Some(p2_config::TEXT_AUDIT_UNAVAILABLE),
+            "EDGE-18：审计不可写 ⇒ **Toast 必须显「操作未执行」**（fail-closed；`code` 一改即红）"
+        );
+        assert_eq!(
+            p2.fail_text().as_deref(),
+            Some(p2_config::TEXT_AUDIT_UNAVAILABLE),
+            "页顶原因行与 Toast 同口径"
+        );
+
+        // ── ⑫ 成功回执：用 `applied` 立即刷新（不等下一帧）+ Toast ──────────────
+        let mut applied = p2_view(false);
+        applied.revision = 8;
+        p2.show_result(&ControlResponse::ok(
+            "rid-3",
+            Some(applied.clone()),
+            Some("audit-2".into()),
+            1_002,
+        ))
+        .expect("show_result (ok)");
+        assert_eq!(
+            p2.field_value_text("gateway.port").as_deref(),
+            Some("2404"),
+            "成功 ⇒ 用回执 `applied` 刷新本地值"
+        );
+        assert!(!p2.is_dirty(), "刷新后回到不脏");
+        assert_eq!(p2.toast_tone(), Some(components::ToastTone::Success));
+        assert_eq!(p2.toast_text().as_deref(), Some(p2_config::TEXT_TOAST_OK));
+        assert_eq!(p2.field_error_visible("gateway.port"), Some(false), "成功清错误");
+
+        // ── ⑬ WriteMode::FullRewrite ⇒ Toast 明示（EDGE-23）──────────────────
+        applied.write_mode = WriteMode::FullRewrite;
+        p2.set_config(&applied).expect("set_config (full rewrite)");
+        assert_eq!(
+            p2.toast_tone(),
+            Some(components::ToastTone::Warning),
+            "整体回写 ⇒ 警示色（不是成功色）"
+        );
+        assert_eq!(
+            p2.toast_text().as_deref(),
+            Some(p2_config::TEXT_TOAST_FULL_REWRITE),
+            "EDGE-23：必须明示原有文字（注释）已不存在"
+        );
+        // Toast 过期由 tick 关闭（3 s，UI §7.2）。
+        p2.tick(std::time::Instant::now() + theme::Timing::toast() * 2);
+        assert_eq!(p2.toast_text(), None, "过期后 tick 关掉 Toast");
+
+        drop(p2);
+    }
+
     drop(host);
     drop(screen);
     drop(disp);
@@ -3097,6 +3679,81 @@ fn controls_static_constraints() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁽⁵⁾′ **P2 配置页**静态约束（`ui/pages/p2_config.rs`，B2b-2）
+//
+// 既有的 [`pages_static_constraints`] 的扫描面写死为 B2a 的三个文件（**本批不改既有用例的
+// 扫描面**）⇒ 按 `controls_static_constraints` 的先例**追加**一条独立用例。
+// 本文件的**裸尺寸**与**码表**两条网另由 [`UI_PROD_SOURCES`] 的扩展覆盖
+// （[`ui_layout_setters_use_theme_constants`] / [`ui_texts_covered_by_font_cmap`]）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// P2 配置页的静态约束 + **扫描面自证**。
+///
+/// **零文本输入红线**（UI §2.4 / §5.3「界面不存在任何可编辑文本区」）在这里逐 token 断言：
+/// 删掉/绕过任一控件而改用 `lv_textarea` / `lv_spinbox` / `lv_keyboard` ⇒ 本条变红。
+///
+/// **敏感性（探针 P3 的姊妹网）**：往 `p2_config.rs` 的生产区插入 `lv_textarea_create(..)`
+/// ⇒ 本条立刻点名文件并失败（码表网管不到这一条 —— 它只管字形）。
+#[test]
+fn p2_static_constraints() {
+    // ⓪ **扫描面自证**（探针 P1）：`UI_PROD_SOURCES`（码表覆盖率 + 裸尺寸）与
+    //    `CONST_I32_SCAN_SOURCES`（常量定义式）**必须真的含本文件** —— 把本文件从任一张网的
+    //    清单里删掉，那两张网会**静默失去对 P2 的覆盖**（"网看着还在、实则漏了一片"，
+    //    正是本项目反复点名的失效形态）。本条把这件事变成**响亮失败**。
+    for (list, label) in [
+        (UI_PROD_SOURCES.as_slice(), "UI_PROD_SOURCES"),
+        (CONST_I32_SCAN_SOURCES.as_slice(), "CONST_I32_SCAN_SOURCES"),
+    ] {
+        assert!(
+            list.iter().any(|(n, _)| *n == "ui/pages/p2_config.rs"),
+            "`{label}` 未含 `ui/pages/p2_config.rs` —— 该网的**扫描面**已把 P2 漏掉\
+             （先修清单：新文件必须纳入，否则静态网对新代码是空的）"
+        );
+    }
+
+    let sources: [(&str, &str); 1] = [("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs"))];
+    for (name, src) in sources {
+        let code = strip_comments_and_literals(src, name);
+        let lower = code.to_ascii_lowercase();
+        // ① 零文本输入（F12 红线）/ 裸色值 / `lv_refr_now` / 直连绑定（共用清单）。
+        for needle in FORBIDDEN_UI_SYMBOLS {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // ② 色值只准出现在 `theme.rs`（命名常量）。
+        for needle in ["Color::hex(", "Color::rgb("] {
+            assert!(
+                !lower.contains(&needle.to_ascii_lowercase()),
+                "{name} 不得出现 `{needle}`（必须经 theme 的命名常量）"
+            );
+        }
+        // ③ `unsafe` 只准出现在 `src/lvgl/**`。
+        assert!(
+            !code.contains("unsafe"),
+            "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+        );
+        // ④ **自证本扫描真的覆盖到了 P2 配置页**（若 `include_str!` 指错文件 / 文件被清空，
+        //    上面三条会**构造性全绿** —— "看着在把关、实则没把住"的典型形态）。
+        for must in [
+            "P2ConfigPage",
+            "set_config",
+            "set_unavailable",
+            "show_result",
+            "Ipv4Stepper",
+            "SegmentedControl",
+            "ConfirmDialog",
+        ] {
+            assert!(
+                code.contains(must),
+                "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ⑥⁗ **常量定义式**静态约束（I2：`const` 定义式里的裸数字缺口）
 //
 // ⑥″（[`ui_layout_setters_use_theme_constants`]）只扫**调用实参**（`set_size(..)` /
@@ -3110,12 +3767,13 @@ fn controls_static_constraints() {
 /// 本来就该在那里以字面量出现；本网要抓的是"**派生**常量直接抄数字"）。
 ///
 /// 与 ⑥″ 各自列清单而不复用 [`UI_PROD_SOURCES`]：后者含 `theme.rs`（必须豁免）。
-const CONST_I32_SCAN_SOURCES: [(&str, &str); 6] = [
+const CONST_I32_SCAN_SOURCES: [(&str, &str); 7] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
+    ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
 

@@ -8,7 +8,8 @@
 //! | 文件 | 页 | 状态 |
 //! |------|----|------|
 //! | [`p1_status`] | P1 主状态页（默认页 / 超时回归目标页） | **B2a** |
-//! | `p2_config` / `p3_logs` / `p4_interlock` / `p5_audit` | 配置 / 日志 / 安全联锁 / 审计 | B2b / B2c |
+//! | [`p2_config`] | P2 配置页（控制通道驱动，含写操作） | **B2b-2** |
+//! | `p3_logs` / `p4_interlock` / `p5_audit` | 日志 / 安全联锁 / 审计 | B2b / B2c |
 //! | [`p6_system`] | P6 系统 / 关于页 | **B2a** |
 //!
 //! **本轮不做**：页面路由与底部导航装配（B2c）、`console.rs` / `main.rs` 改写与 `state.rs`
@@ -28,6 +29,33 @@
 //! 4. **数值一律经 `theme`**：页内不出现裸色值 / 裸字号 / 裸触摸尺寸。页**专属的栅格常量**
 //!    （卡高 / 列宽等 `theme` 未收录者，出处为 UI §6.1）集中在本模块与各页文件顶部的 `const`
 //!    块，且**逐条由 theme 常量推导**（见各常量注释）。
+//!
+//! ## 补充（**B2b-2**）：两类页的驱动方式与页根形态（**不改上面契约 1 / 2 的语义**）
+//!
+//! 上面的契约 1（"页面根是一支滚动容器"）与契约 2（"外部把帧 + 通道态 + 新鲜度打成
+//! [`PageInput`] 注入"）是**为帧驱动页（P1 / P6）写的**，两者**原样保留**。
+//! B2b-2 起的写操作页与之分属两类，逐条如下：
+//!
+//! - **契约 1′（页根形态，P2 不适用契约 1）**：UI §6.2 的线框在内容视口**底部**画了
+//!   `Y624 ┌ 固定操作条（不随滚动）┐` ⇒ P2 的页根**不是**滚动容器，而是**普通容器**
+//!   （`CONTENT_W × CONTENT_H`，自身 `(0,0)`），其内再分两层：上为**滚动视口**
+//!   （`CONTENT_W × (CONTENT_H − 操作条高)`，`lv_obj` + `SCROLLABLE` +
+//!   `scroll_dir = VER` + `scrollbar_mode = AUTO`，语义与契约 1 的根容器**逐条相同**，
+//!   只是高度更矮）、下为**固定操作条**（`CONTENT_W × 72`，不随滚动）。
+//!   `page_root()`（"页根自身即滚动容器"）的语义**未改**，P1 / P6 照旧；P2 自建视口
+//!   （见 `p2_config::P2ConfigPage::new`）。
+//! - **契约 2′（数据入口，P2 不适用契约 2）**：P2 的数据**不来自 1 Hz 显示帧**，而来自
+//!   **控制通道**（`GET /v1/console/config`，另 9811 端口，设计 §3.4）。其注入入口是
+//!   `p2_config::P2ConfigPage` 的 [`set_config`](p2_config::P2ConfigPage::set_config) /
+//!   [`set_unavailable`](p2_config::P2ConfigPage::set_unavailable) /
+//!   [`set_submitting`](p2_config::P2ConfigPage::set_submitting) /
+//!   [`show_result`](p2_config::P2ConfigPage::show_result)，降级态**只由注入值驱动**
+//!   （不读时钟、不自行发请求）。**P2 也不生成 `request_id`**：设计 §6.2 末行要求
+//!   **确认完成前不发任何请求**；确认完成后本页经
+//!   [`set_on_submit`](p2_config::P2ConfigPage::set_on_submit) 把 `ConfigPatch` 交回外部，
+//!   `request_id`(uuid) + `issued_at_ms` 由 B3 的 `console.rs` 生成。
+//! - **同类页面预告**：P4（安全联锁）、P5（审计）同样由控制通道驱动，将复用契约 2′；
+//!   P4 的固定操作条复用契约 1′（UI §6.4 线框 `Y624 ┌ 固定操作条 ──┐`）。
 //!
 //! ## ⚠️ 已知偏差登记（B2a 规格评审后；**集中、显式** —— 屏文 / 尺寸与契约不一致处
 //! 一律在此列明，不得"悄悄地"不一致）
@@ -68,6 +96,7 @@ use crate::state::{ChannelStatus, Freshness};
 use crate::ui::theme::{self, Dimens, Palette};
 
 pub mod p1_status;
+pub mod p2_config;
 pub mod p6_system;
 
 // ═══════════════════════════════════════════════════════════════════════════
