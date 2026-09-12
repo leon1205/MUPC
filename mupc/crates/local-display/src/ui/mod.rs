@@ -5,17 +5,23 @@
 //! | 模块 | 职责 | 工作单元 |
 //! |------|------|----------|
 //! | [`theme`] | 界面外观的**单一真源**：色板 / 尺寸 / 字号 / 圆角 / 描边 / 状态色 → `lv_style` | **B1** |
-//! | [`components`] | 薄层之上的**组合控件**（8 件 + `WarnBanner` + TT-10 防重） | **B1** |
+//! | [`components`] | 薄层之上的**展示 / 确认型**组合控件（8 件 + `WarnBanner` + TT-10 防重） | **B1** |
+//! | [`controls`] | 薄层之上的**输入型**组合控件（`SegmentedControl` / `Ipv4Stepper` / `DateTimeStepper`） | **B2b-1** |
 //! | `pages` | 6 页布局（`p1_status` … `p6_system`） | **B2** |
 //! | 页面路由 / 底部导航 | 6 页容器 + `NavTab`（`lv_tabview` 隐藏标签栏，或自建容器显隐） | **B2** |
 //!
-//! ## 本轮的边界（B1 + B2a）
+//! ## 本轮的边界（B1 + B2a + B2b-1）
 //!
 //! `theme` / `components` 是 **B1** 的交付；`pages` 是 **B2** 的交付，其中 **B2a** 落了
-//! `p1_status`（P1 主状态页）与 `p6_system`（P6 系统 / 关于页）两页；P2–P5 属 B2b/B2c。
+//! `p1_status`（P1 主状态页）与 `p6_system`（P6 系统 / 关于页）两页；**B2b-1** 补了
+//! [`controls`] 的三个输入型控件（P2 参数 / P3·P5 时间范围要用），P2–P5 页面属 B2b-2/B2c。
 //!
 //! **页面路由与底部导航的装配不做**（B2c）：本文件只导出 `pages`，不在此建页面容器、
 //! 不装配 `lv_tabview` / 导航栏（`UiState` 扩展与控制通道接线属 B3）。
+//!
+//! `controls` 与 `components` **分列**的口径（职责边界）：`components` 只反映既有数据、
+//! 不产生新数据（输出 = 视觉状态 + 无载通知）；`controls` 是**草稿值的生产者**（输出 =
+//! 带载荷的 `set_on_change`）。两者的契约轴不同，故不混装 —— 详见 [`controls`] 模块文档。
 //!
 //! ## 两条贯穿整个 `ui/**` 的硬约束（设计 §11.4 静态约束，`ui/tests.rs` 有扫描用例）
 //!
@@ -23,6 +29,7 @@
 //! 2. **不得引用文本输入控件符号**，也不得直连底层绑定（一律经 `crate::lvgl` 薄安全层）。
 
 pub mod components;
+pub mod controls;
 pub mod pages;
 pub mod theme;
 

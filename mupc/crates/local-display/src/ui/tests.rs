@@ -450,11 +450,15 @@ fn ui_static_constraints() {
 ///
 /// 剔除口径：`tests.rs` 的字面量是**断言 / 诊断文案**（`assert_eq!` 的期望值、`eprintln!`
 /// 的跳过说明、构造帧用的示例告警文案…），永不进 `lv_label`，且含大量 `format!` / 路径串，
-/// 纳入会大面积误报。**这是唯一的整文件剔除**，其余 6 个文件全查。
-const UI_PROD_SOURCES: [(&str, &str); 6] = [
+/// 纳入会大面积误报。**这是唯一的整文件剔除**，其余 7 个文件全查。
+///
+/// B2b-1 起纳入 `ui/controls.rs`（此前只有 6 个文件）：三个输入控件同样要过**码表覆盖率**
+/// 与**裸尺寸**两张网 —— 新控件里的中文列头（`年/月/日/时/分`）正是码表走查的对象。
+const UI_PROD_SOURCES: [(&str, &str); 7] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/theme.rs", include_str!("theme.rs")),
     ("ui/components.rs", include_str!("components.rs")),
+    ("ui/controls.rs", include_str!("controls.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
@@ -836,7 +840,11 @@ fn ui_texts_covered_by_font_cmap() {
     // （`TEXT_DEVICE_TOTAL_POWER` 那种）仍能通过这一条。本检查管的是"清册 ↔ 源码字面量
     // **串**是否一致"（改了源码文案却忘了改清册 ⇒ 红），**不**管"常量是否真的被引用"
     //（那是 `dead_code` 与该常量读者 / 评审的活）。
-    for t in ALL_TEXTS.iter().chain(crate::ui::pages::ALL_TEXTS.iter()) {
+    for t in ALL_TEXTS
+        .iter()
+        .chain(crate::ui::pages::ALL_TEXTS.iter())
+        .chain(crate::ui::controls::ALL_TEXTS.iter())
+    {
         assert!(
             literals.iter().any(|l| l.contains(t)),
             "清册条目 `{t}` 未**逐字**出现在任何 `ui/**` 源码字面量里 —— \
@@ -1626,6 +1634,243 @@ pub(crate) fn ui_chain() {
         drop(empty);
     }
 
+    // ── ⑦ B2b-1：三个**输入型**控件（SegmentedControl / Ipv4Stepper / DateTimeStepper）──
+    {
+        use crate::ui::controls::{
+            DateTimeStepper, DateTimeValue, Ipv4Stepper, SegmentedControl, DAY_MAX, DAY_MIN,
+            DATETIME_TOTAL_H, DATETIME_TOTAL_W, HOUR_MAX, IPV4_TOTAL_H, IPV4_TOTAL_W, MINUTE_MAX,
+            MONTH_MAX, MONTH_MIN, SEGMENT_H, SEGMENT_MIN_W, YEAR_MAX, YEAR_MIN,
+        };
+
+        // ═══ SegmentedControl ═══════════════════════════════════════════════
+        let seg_w = 4 * SEGMENT_MIN_W;
+        let seg = SegmentedControl::new(&screen, &["ERROR", "WARN", "INFO", "DEBUG"], seg_w, 0)
+            .expect("SegmentedControl");
+        assert_eq!(seg.count(), 4, "段数 = 选项数");
+        // 若实现漏了构造期的 `bm.set_selected(start)`，"回退值"会让 selected() 仍是 0 ——
+        // 故**必须**同时断 LVGL 侧原值（raw_selected），这条才是敏感的。
+        assert_eq!(seg.selected(), 0, "构造给 0 ⇒ 选中 0");
+        assert_eq!(seg.raw_selected(), Some(0), "**LVGL 侧**确实是第 0 段（不是回退值）");
+        // 段文本逐条核对：写错地图 / 少一段 / 顺序颠倒 ⇒ 红。
+        for (i, want) in ["ERROR", "WARN", "INFO", "DEBUG"].iter().enumerate() {
+            assert_eq!(seg.option(i).as_deref(), Some(*want), "第 {i} 段文本");
+        }
+        assert_eq!(seg.option(4), None, "越界选项 ⇒ None（不得 panic）");
+
+        seg.set_selected(2);
+        assert_eq!(seg.selected(), 2, "程序化设选中可读回");
+        assert_eq!(
+            seg.raw_selected(),
+            Some(2),
+            "set_selected 必须真的落到 LVGL（只改 Rust 侧缓存即红）"
+        );
+        seg.set_selected(99);
+        assert_eq!(seg.selected(), 3, "越界下标**夹取**到最后一 段（不得 panic）");
+        assert_eq!(seg.raw_selected(), Some(3), "夹取后的值同样落到 LVGL");
+        disp.refr_now_for_test();
+        assert_eq!(seg.size(), (seg_w, SEGMENT_H), "分段控件 = 调用方给定宽 × 高 48（§5.1 #4）");
+
+        // 禁用：读回口径是 **LVGL 的状态位**（输入路径据此拒发事件，见 `lv_indev.c`）
+        assert!(!seg.is_disabled(), "默认可用");
+        seg.set_disabled(true);
+        assert!(seg.is_disabled(), "set_disabled(true) ⇒ LV_STATE_DISABLED 置位");
+        seg.set_disabled(false);
+        assert!(!seg.is_disabled(), "恢复后状态位清掉");
+
+        // `on_change` 接线：派发 `VALUE_CHANGED`（键矩阵类处理器在按下时派发的正是它）⇒
+        // 回调查到的应当是**当前**下标。初值取 usize::MAX：回调若压根没接上，断言即红。
+        let hits = Rc::new(Cell::new(usize::MAX));
+        {
+            let h = hits.clone();
+            seg.set_on_change(move |i| h.set(i));
+        }
+        seg.send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(hits.get(), 3, "回调载荷 = 当前选中段（接线断了则仍是 usize::MAX）");
+        seg.set_selected(1);
+        seg.send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(
+            hits.get(),
+            1,
+            "回调读的是**实时**下标（改成构造期缓存值 / 常量即红）"
+        );
+
+        // 参数非法**响亮失败**（不静默修正）
+        assert!(
+            matches!(
+                SegmentedControl::new(&screen, &["a", "b"], SEGMENT_MIN_W, 0),
+                Err(LvglError::InvalidArgument(_))
+            ),
+            "整控件宽 < 段数 × 96 必须 Err（不得静默压缩段宽）"
+        );
+        assert!(
+            matches!(
+                SegmentedControl::new(&screen, &[], seg_w, 0),
+                Err(LvglError::InvalidArgument(_))
+            ),
+            "空选项必须 Err"
+        );
+        assert!(
+            matches!(
+                SegmentedControl::new(&screen, &["a"], Dimens::CONTENT_W + SEGMENT_MIN_W, 0),
+                Err(LvglError::InvalidArgument(_))
+            ),
+            "整控件宽超内容区必须 Err"
+        );
+        drop(seg);
+
+        // ═══ Ipv4Stepper ════════════════════════════════════════════════════
+        let ipv4 = Ipv4Stepper::new(&screen, [192, 168, 1, 10]).expect("Ipv4Stepper");
+        assert_eq!(ipv4.octets(), [192, 168, 1, 10], "四段值往返（读自四个 Stepper）");
+        assert_eq!(ipv4.text().as_deref(), Some("192.168.1.10"), "汇总标签文本");
+        disp.refr_now_for_test();
+        assert_eq!(
+            ipv4.obj().size(),
+            (IPV4_TOTAL_W, IPV4_TOTAL_H),
+            "整件 = 四段 792 + 缝 + 汇总 = 992 × 64（`IPV4_TOTAL_W == CONTENT_W`；CD1/CD2）"
+        );
+        // ── 子树存活断链（**所有权纪律**的探针）──
+        // 行容器应有 5 个子对象（4 段 + 1 汇总）、每段应有 3 个（`−` / 值区 / `＋`）。
+        // 任何**拥有型句柄被构造器 Drop** ⇒ LVGL 级联删除它 ⇒ child_count 立刻变小；
+        // 值区句柄若被 Drop，`display()` 同时变 `None`（本文件的 `_value_box` 同款缺陷）。
+        assert_eq!(ipv4.obj().child_count(), 5, "4 段 + 1 汇总标签都必须挂在行容器上");
+        for i in 0..4 {
+            let s = ipv4.segment(i).expect("段");
+            assert_eq!(s.obj().child_count(), 3, "第 {i} 段 = − / 值区 / ＋ 三件");
+            assert!(
+                s.display().is_some(),
+                "第 {i} 段值区文本可读回（为 None ⇒ 值区子树已被级联删除）"
+            );
+        }
+        assert!(ipv4.segment(4).is_none(), "越界段 ⇒ None（不得 panic）");
+        assert_eq!(ipv4.segment(0).expect("段 0").display().as_deref(), Some("192"));
+        assert_eq!(ipv4.segment(3).expect("段 3").display().as_deref(), Some("10"));
+
+        // ── 段内封闭 0–255 + **跨段不进位** + 越界夹取 ──
+        let s0 = ipv4.segment(0).expect("段 0");
+        s0.set_value(255);
+        assert_eq!(s0.value(), 255);
+        assert!(s0.plus_disabled(), "value == 255（段上界）⇒ ＋ 禁用（TT-03）");
+        assert!(!s0.minus_disabled(), "上界处 − 仍可用");
+        assert_eq!(ipv4.octets()[0], 255, "`octets()` 读的确实是 LVGL 真值");
+        assert_eq!(
+            ipv4.octets()[1],
+            168,
+            "**跨段不进位**：第 0 段到顶不得改动第 1 段（UI §5.3）"
+        );
+        s0.set_value(9999);
+        assert_eq!(s0.value(), 255, "越界输入被夹取（不得写进 9999 / 不得 panic）");
+        s0.set_value(0);
+        assert!(s0.minus_disabled(), "value == 0（段下界）⇒ − 禁用");
+        assert!(!s0.plus_disabled(), "下界处 ＋ 仍可用");
+
+        // 程序化设四段：值 + 汇总文本都要同步（汇总漏更新 ⇒ 红）
+        ipv4.set_octets([10, 0, 0, 1]);
+        assert_eq!(ipv4.octets(), [10, 0, 0, 1], "set_octets 落到四个段上");
+        assert_eq!(ipv4.text().as_deref(), Some("10.0.0.1"), "汇总文本随 set_octets 同步");
+        assert_eq!(
+            ipv4.segment(1).expect("段 1").display().as_deref(),
+            Some("0"),
+            "第 1 段文本随 set_octets 同步"
+        );
+
+        // 整件禁用 ⇒ 逐段两端都禁用；恢复后按当前值重算
+        ipv4.set_disabled(true);
+        let s1 = ipv4.segment(1).expect("段 1");
+        assert!(
+            s1.minus_disabled() && s1.plus_disabled(),
+            "整件禁用 ⇒ 该段两端都禁用（转发到 Stepper::set_disabled）"
+        );
+        ipv4.set_disabled(false);
+        let s_off_bound = ipv4.segment(0).expect("段 0"); // 值 10：非任何一端的边界
+        assert!(
+            !s_off_bound.minus_disabled() && !s_off_bound.plus_disabled(),
+            "恢复后按当前值重算：值 10 在 0–255 中间 ⇒ 两端都可用（若仍禁用 ⇒ 恢复没生效）"
+        );
+        assert!(
+            ipv4.segment(1).expect("段 1").minus_disabled(),
+            "同一次恢复里，值为 0 的那一段仍应 − 禁用（按值逐个重算，**不是**一刀切清掉）"
+        );
+        drop(ipv4);
+
+        // ═══ DateTimeStepper ════════════════════════════════════════════════
+        let want = DateTimeValue::from_parts(2026, 5, 20, 13, 42);
+        let dt = DateTimeStepper::new(&screen, want).expect("DateTimeStepper");
+        assert_eq!(
+            dt.column_headers(),
+            ["年", "月", "日", "时", "分"],
+            "列头 5 个、逐字（§5.1 #8）"
+        );
+        assert_eq!(dt.value(), want, "五分量往返");
+        disp.refr_now_for_test();
+        assert_eq!(
+            dt.obj().size(),
+            (DATETIME_TOTAL_W, DATETIME_TOTAL_H),
+            "五列铺满内容区有效宽 × 106（列头 26 + 缝 16 + 步进 64；CD3/CD4）"
+        );
+        assert_eq!(
+            dt.obj().child_count(),
+            10,
+            "5 个列头 + 5 列步进；任一拥有型句柄被 Drop ⇒ 立刻小于 10"
+        );
+        assert_eq!(dt.column(0).expect("年列").display().as_deref(), Some("2026"));
+        assert_eq!(dt.column(4).expect("分列").display().as_deref(), Some("42"));
+        assert!(dt.column(5).is_none(), "越界列 ⇒ None（不得 panic）");
+
+        // ── 分量封闭 + **跨分量不进位**（UI §5.3：进借位在应用侧）──
+        let month = dt.column(1).expect("月列");
+        month.set_value(MONTH_MAX);
+        assert_eq!(dt.value().month, 12, "月列可到 12");
+        assert!(month.plus_disabled(), "月到 12 ⇒ ＋ 禁用（分量封闭）");
+        month.set_value(MONTH_MAX + 1);
+        assert_eq!(dt.value().month, 12, "越上界被夹 ⇒ 停在 12");
+        assert_eq!(
+            dt.value().year,
+            2026,
+            "**跨分量不进位**：月到顶不得推高年（进位归应用侧）"
+        );
+        let day = dt.column(2).expect("日列");
+        day.set_value(DAY_MAX);
+        assert_eq!(dt.value().day, 31, "日列可到 31");
+        assert!(day.plus_disabled(), "日到 31 ⇒ ＋ 禁用");
+        let hour = dt.column(3).expect("时列");
+        hour.set_value(HOUR_MAX);
+        assert!(hour.plus_disabled(), "时到 23 ⇒ ＋ 禁用");
+        hour.set_value(HOUR_MAX - 1);
+        assert!(!hour.plus_disabled(), "时 = 22 ⇒ ＋ 可用（禁用只在界上）");
+        let minute = dt.column(4).expect("分列");
+        minute.set_value(MINUTE_MAX);
+        assert!(minute.plus_disabled(), "分到 59 ⇒ ＋ 禁用");
+        let year = dt.column(0).expect("年列");
+        year.set_value(YEAR_MAX);
+        assert!(year.plus_disabled(), "年到 2100（上界）⇒ ＋ 禁用");
+        year.set_value(YEAR_MIN);
+        assert!(year.minus_disabled(), "年到 1970（下界）⇒ − 禁用");
+
+        // `set_value` 逐分量夹取（结构体字面量可越界 —— 公开字段，故必须由 set_value 收口）
+        dt.set_value(DateTimeValue {
+            year: 3000,
+            month: 0,
+            day: 0,
+            hour: 99,
+            minute: 99,
+        });
+        assert_eq!(
+            dt.value(),
+            DateTimeValue::from_parts(YEAR_MAX, MONTH_MIN, DAY_MIN, HOUR_MAX, MINUTE_MAX),
+            "越界分量逐个夹到封闭区间（不得 panic / 不得写进 3000）"
+        );
+
+        // 整件禁用 ⇒ 逐列两端都禁用
+        dt.set_disabled(true);
+        assert!(
+            year.minus_disabled() && year.plus_disabled(),
+            "整件禁用 ⇒ 该列两端都禁用"
+        );
+        dt.set_disabled(false);
+        assert!(year.plus_disabled(), "恢复后按当前值（2100）重算 ⇒ ＋ 仍禁用");
+        drop(dt);
+    }
+
     // 释放顺序：先控件树，再 display，最后 deinit（与 A1/A2/A3 同口径）。
     drop(screen);
     drop(disp);
@@ -2220,6 +2465,52 @@ fn pages_static_constraints() {
             !strip_comments_and_literals(src).contains("unsafe"),
             "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁽⁵⁾ **输入控件层**静态约束（`ui/controls.rs`，B2b-1）
+//
+// 既有的 [`ui_static_constraints`] 只扫 `ui/mod.rs` / `theme.rs` / `components.rs`；
+// [`pages_static_constraints`] 只扫 `ui/pages/**`。B2b-1 新增的 `ui/controls.rs` 同样属
+// `ui/**`，故按 B2a 的先例**追加**一条独立用例（**不改动**既有用例的扫描面）。
+// `ui/controls.rs` 的**裸尺寸**与**码表**两条网另由 [`UI_PROD_SOURCES`] 的扩展覆盖
+// （[`ui_layout_setters_use_theme_constants`] / [`ui_texts_covered_by_font_cmap`]）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn controls_static_constraints() {
+    let sources: [(&str, &str); 1] = [("ui/controls.rs", include_str!("controls.rs"))];
+    for (name, src) in sources {
+        let code = strip_comments_and_literals(src);
+        let lower = code.to_ascii_lowercase();
+        // ① 零文本输入（F12 红线）/ 裸色值 / `lv_refr_now` / 直连绑定（共用清单）
+        for needle in FORBIDDEN_UI_SYMBOLS {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // ② 色值只准出现在 `theme.rs`（命名常量）
+        for needle in ["Color::hex(", "Color::rgb("] {
+            assert!(
+                !lower.contains(&needle.to_ascii_lowercase()),
+                "{name} 不得出现 `{needle}`（必须经 theme 的命名常量）"
+            );
+        }
+        // ③ `unsafe` 只准出现在 `src/lvgl/**`
+        assert!(
+            !code.contains("unsafe"),
+            "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+        );
+        // ④ **自证本扫描真的覆盖到了输入控件**（若 `include_str!` 指错文件 / 文件被清空，
+        //    上面三条会**构造性全绿** —— 这正是"看着在把关、实则没把住"的典型形态）。
+        for must in ["SegmentedControl", "Ipv4Stepper", "DateTimeStepper", "set_one_checked"] {
+            assert!(
+                code.contains(must),
+                "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
+            );
+        }
     }
 }
 
