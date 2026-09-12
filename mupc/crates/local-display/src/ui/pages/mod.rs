@@ -37,10 +37,12 @@
 //! | D1 | P1 页内**纵向坐标整体比 UI §6.1 的绝对坐标低约 40 px**（内容首卡在页内 y56 = 绝对 y120，UI 写 y80） | 页内仍保留「通道条」（通道断 / 未首连 / 数据过期）占去 32 + 16 px；UI §6.1 把这三种态画在页眉 / 整屏层 | **B2c**：外壳装配时移除页内通道条（与"通道断整屏降级"重复），页内 y 随之对齐 §6.1 |
 //! | D2 | SOC 量程条**铺满卡内容宽**（424 px），UI §6.1 写 `(x58,y348,458,368) 360×20`（左右各缩进 58/42） | 设计还要求量程条下有 `0`/`100` 刻度，实际排布取"三段等比铺满 + 刻度两端对齐"；薄层无渐变通道，三段用并列色块表达（见 `p1_status` 文件头） | **B2c**（若 PM 要求逐像素对齐 §6.1） |
 //! | D3 | 相卡实算高 **234**（内容 200 + 上下面 34），UI §6.1 写「各 236×236」 | §1.1.2 字号 / §3.5 栅格无 2 px 档，未为凑 2 px 引入裸数值 | B2c（随 theme 缺口上收一并处理） |
-//! | D4 | 字体 **cmap 缺 U+2715(✕) / U+275A(❚)**；`font_subset_charset.txt` **缺** `-` `(` `)` `服务` `环` `管理` `为` `是` `℃` `°` `天` | 字库资产（`gen_fonts.sh` + `extract_charset.py`）本轮按 PM 裁定**不动**（避免反复重生成） | **B2c 之后**：六页文案齐备时一次性扩 §3.6 / charset 并重跑 `gen_fonts.sh`；随后把被改写的屏文**改回契约原文**（现存变体：PCS 待机图标取 `○`、占位符 `--`→`–`、`℃`→`C`、`本机服务地址（仅回环）`→`本机监听地址 · 仅本机`、`设备管理 IP`→`装置 IP 地址`、控制源长句取 `·` 变体） |
+//! | D4 | 字体 **cmap 缺 U+2715(✕) / U+275A(❚)**；`font_subset_charset.txt` **缺** `-` `(` `)` **`，`（全角逗号 U+FF0C）** `服务` `环` `管理` `为` `是` `℃` `°` `天` | 字库资产（`gen_fonts.sh` + `extract_charset.py`）本轮按 PM 裁定**不动**（避免反复重生成）。**注**：控制源原串 `AI 引擎已停用，本地策略引擎为默认下发源` 的**两个**原因各占一半 —— 全角逗号 `，`（本行）与 `为`（同在本表）；二者都不在 cmap 内 ⇒ 取 `·` 变体（见 [`TEXT_AI_DISABLED`]） | **B2c 之后**：六页文案齐备时一次性扩 §3.6 / charset 并重跑 `gen_fonts.sh`；随后把被改写的屏文**改回契约原文**（现存变体：PCS 待机图标取 `○`、占位符 `--`→`–`、`℃`→`C`、`本机服务地址（仅回环）`→`本机监听地址 · 仅本机`、`设备管理 IP`→`装置 IP 地址`、控制源长句取 `·` 变体） |
 //! | D5 | `format_uptime` 的「N **天** HH:MM:SS」→ 现「N **日** HH:MM:SS」：`天`(U+5929) **不在 cmap 内**（`font_subset_charset.txt` 未收该字），真机上是豆腐块；改取**在 cmap 内**且同义的 `日`(U+65E5)（`1 日` = 1 天） | 字库资产本轮按 PM 裁定**不动**（见 D4）；用**在 cmap 内的等价词**改写屏文，语义不变 | **B2c 之后**（同 D4 一次性扩 §3.6 / charset 并重跑 `gen_fonts.sh`）**改回 `天`**。在此之前 `ui/tests.rs::ui_texts_covered_by_font_cmap` 的 `KNOWN_MISSING` 已**清空**（源码不再含缺字，自证见 B2a 收尾报告） |
 //! | D6 | 告警时间取 **UTC**（`YYYY/MM/DD HH:MM:SS`），不随真机本地时区 | 页面不读时钟 / 不做时区决策（时区归渲染端 run/bin 层） | **B3**：本地时文本由状态层注入 |
 //! | D7 | PCS **状态词槽位**的文案改为 **2 字**（`PCS` 语义由卡头 `PCS 运行状态` + 图标承担）：契约 `PCS 离线` → 现 `离线`；`状态未知` → 现 `未知` | **PM 裁定（B2a 收尾）**：状态词槽位只放 2 字（`停机`/`待机`/`充电`/`放电`/`离线`），与 UI 线框只画 2 字态的视觉节奏、及 UI §3.3「L1-大 = PCS 状态词 112 px」一致；`状态未知` 同取 2 字 `未知`。原 `PCS 离线`(实测 **458.1 px**) / `状态未知`(**448.0 px**) 在 112 px 档下远超词区 `484 − 2×17 − 72 − 16 = **362 px**`，`DOTS` 必截成「PCS 离…」——根因是 **UI §6.1 自身过约束**（其线框只画 2 字） | **UI §6.1 回改**：把「PCS 离线」明确为**状态词槽位 2 字 + PCS 由卡头 / 图标表达**，或按其线框订正 |
+//! | D8 | P1 装置状态网格取 UI §6.1 的 **8 项**，**不含「数据通道」**（该行只在 P6 运行信息卡）；P1 的通道状态由页内通道条 + 页眉承担 | 设计 §6.1 的 P1 布局行没有「数据通道」格；「数据通道」归 P6 §6.6 的运行信息卡（**此前该口径只写在 `ui/tests.rs` 的用例注释里、未进本登记表** —— B2a 代码质量评审 M5 补齐） | 无（**有意与 UI 一致**） |
+//! | D9 | **契约直上屏字符串经 [`display_safe`] 改写**：`-`/`_` → `–`、小写 → 大写同族（`1.0.0-rc1` → `1.0.0–RC1`）、其余未知 ASCII → `?`（如 `T`/`Z`） | 这些字符串来自 `display-proto`（**契约冻结，本轮不得改**）或运行时帧；ASCII 子集里 `-` `(` `)` `T` `Z` 及多数小写**没有字形**，直上屏即豆腐块（C1 同类缺陷，B2a 代码质量评审 ③）。替换保证"上屏字符 ⊆ cmap"，**非 ASCII 契约词原样透传**（由 `contract_strings_emit_only_cmap_glyphs` 逐字核对） | **根治 = 扩 §3.6 字符集**（把 `-` `(` `)` 与 `T`/`Z` 等纳入子集并重跑 `gen_fonts.sh`），**B2c 之后**与 D4/D5 一次性处理；随后可撤掉 `display_safe` 的 ASCII 改写（保留"⊆ cmap"断言）。**自由文本**（告警 `message`、`model`/`serial` 之外的通道名）不在本轮口径内 —— 待 B3 定"注入侧约束 or 显示侧过滤" |
 //!
 //! 本轮**已修**因而不在此列：主行卡高 294 → **320**（评审 ②）、相卡降级语义只看 P（评审 ①）、
 //! 码表走查的构造性漏判（评审 ③）、裸尺寸静态约束缺失（评审 ④）、SOC 阈值双份真源（评审 ⑤）。
@@ -56,14 +58,14 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use mupc_display_proto::DisplayFrame;
+use mupc_display_proto::{ControlSource, DisplayFrame, LinkState};
 
 use crate::lvgl::obj::Obj;
 use crate::lvgl::style::{Color, Style, StyleSelector};
 use crate::lvgl::widgets::{Label, ScrollContainer};
 use crate::lvgl::LvglError;
 use crate::state::{ChannelStatus, Freshness};
-use crate::ui::theme::{self, Dimens};
+use crate::ui::theme::{self, Dimens, Palette};
 
 pub mod p1_status;
 pub mod p6_system;
@@ -314,7 +316,131 @@ pub fn format_uptime(secs: u64) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 4′. 数值 → 文本（**唯一出口**；负号口径 = U+2212）
+//
+// **C1（安全相关）**：此前各页直接用 `format!("{v:.1}")` / `format!("{v:.0}")`，负值产出
+// **ASCII `-`（U+002D）**；而生成字体的 cmap **没有该字形**（`unicode_list_0` 由 `0xb` 直跳
+// `0xe`，即 U+002B(+) 有、U+002D(−) 无）⇒ P 反向（光伏倒送）时负号是**豆腐块**，负值看着
+// 像正值；同一文件里 ΣP 又手写 `\u{2212}`，**口径自相矛盾**。
+//
+// ⇒ 所有"数值 → 文本"一律经本节三个 helper（**负号恒为 `\u{2212}`**），页面不得再出现
+// `format!("{v:.N}")` 直排。**运行时产出**的字符集由
+// `ui/tests.rs::runtime_formatters_emit_only_cmap_glyphs` **构造性**校验（含负值输入）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 1 位小数；负号一律 `\u{2212}`（U+2212，cmap 内有该字形；ASCII `-` 没有）。
+///
+/// 用 `is_sign_negative()`（而非 `< 0.0`）⇒ `-0.0` 也走负号分支，不会漏成 `-0.0`。
+pub fn fmt_signed_1dp(v: f64) -> String {
+    if v.is_sign_negative() {
+        format!("\u{2212}{:.1}", -v)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// 0 位小数（整数）；负号口径同 [`fmt_signed_1dp`]。
+pub fn fmt_int0(v: f64) -> String {
+    if v.is_sign_negative() {
+        format!("\u{2212}{:.0}", -v)
+    } else {
+        format!("{v:.0}")
+    }
+}
+
+/// ΣP 佐证文本（`ΣP +36.9 kW` / `ΣP −36.9 kW`）—— 前缀与单位取自
+/// [`p1_status::TEXT_SIGMA_PREFIX`] / [`p1_status::TEXT_KW`]，**不另抄一份字面量**。
+///
+/// 非负值带显式 `+`（"倒送"与"正放"一眼可辨）；负值带 `\u{2212}`。
+pub fn fmt_sigma_kw(v: f64) -> String {
+    let mag = fmt_signed_1dp(v);
+    let signed = if v.is_sign_negative() {
+        mag
+    } else {
+        format!("+{mag}")
+    };
+    format!(
+        "{} {} {}",
+        p1_status::TEXT_SIGMA_PREFIX,
+        signed,
+        p1_status::TEXT_KW
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4″. 契约字符串 → 上屏文本的**安全显示侧处理**
+//
+// **C1 残留（B2a 代码质量评审 ③）**：`InfoSection` 的 `firmware_version` / `build_time` /
+// `model` / `serial` / `mgmt_ipv4` 与各 `*::display_name()`（`LinkState` / `RunState` …）是
+// **契约字符串直上屏**：字面量不在 `ui/**`（在 `display-proto` 与运行时帧里）⇒ 既有的
+// 「源码字面量走查」看不到它们，「运行时格式化器检查」也覆盖不到（它们不是 `format!("{v:.1}")`
+// 那一类数值出口）。后果与 C1 同类：版本号含 `-`（`1.0.0-rc1`）或型号含 `-`（`BECG-3568`）时，
+// ASCII `-`（U+002D）在生成字体里**没有字形** ⇒ 真机上是豆腐块。
+//
+// **处置（PM 裁定口径：不改契约 —— `display-proto` 冻结）**：在**显示侧**做安全替换，
+// 保证"上屏字符 ⊆ cmap"，并把残余替换登记为偏差 **D9**（见下表 / 收口项）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 上屏安全的 **ASCII 字母表** = 生成字体 cmap 里**实际存在**的可打印 ASCII 子集
+/// （从入库基线 `fonts/lv_font_cmap.txt` 实测导出，2026-09-11 对 10 档逐一核对）。
+///
+/// ⚠️ **这不是"第二份真源"**：`ui/tests.rs::contract_strings_emit_only_cmap_glyphs` 断言
+/// 本串**每个字符都在入库基线 cmap 内**（码表变 ⇒ 本串不做数即红）。
+pub const ASCII_DISPLAY_ALPHABET: &str = " !%+./0123456789:?ABCDEFGIMNOPRSUWhks";
+
+/// 契约字符串 → 上屏文本：**保证输出字符全部在生成字体 cmap 内**（真机不出豆腐块）。
+///
+/// 逐字规则（**永不丢语义关键字符**：替换是"同族等价"，不是删除）：
+///
+/// | 输入 | 输出 | 理由 |
+/// |------|------|------|
+/// | 非 ASCII（中文契约词 / 全角） | 原样 | 语义载体，替换即失真；其字形由 `contract_strings_emit_only_cmap_glyphs` 逐字核对（`LinkState` / `RunState` 各变体） |
+/// | 在 [`ASCII_DISPLAY_ALPHABET`] 内 | 原样 | 已有字形 |
+/// | `-`(U+002D) / `_`(U+005F) | `–`(U+2013) | 版本号 / ISO 时间戳的**分隔符**；取同族短破折（cmap 内，与 [`PLACEHOLDER`] 同款字形） |
+/// | 其余 ASCII | 先试**大写同族**（`rc1` → `RC1`，仍可读），仍不在表内则 `?` | 小写字母在 cmap 里几乎全缺、大写多数在；`?` 是"有字形但信息有限"的**最后兜底** |
+///
+/// **不**处理自由文本（告警 `message` / 通道名），它们不是契约枚举、内容不可预判
+/// —— 该口径见 `pages/mod.rs` 顶部登记表收口项。
+pub fn display_safe(text: &str) -> String {
+    text.chars().map(display_safe_char).collect()
+}
+
+/// [`display_safe`] 的单字符规则（拆出便于逐条阅读 / 单测）。
+///
+/// ⚠️ **写法约束（有意为之）**：本函数是 `ui/**` 生产源码，会被
+/// `ui/tests.rs::ui_texts_covered_by_font_cmap` 的字面量走查**逐字**检查 ⇒ 这里
+/// **不得**出现 `'-'` / `"_"` 这类"缺字形字符"的**字符 / 字符串字面量**（会被判成
+/// "源码用了 cmap 外的字"）。因此判据写成**码位数值**（`0x2D` / `0x5F`），替换目标
+/// 则取 cmap 内的 `\u{2013}` / `?`。
+fn display_safe_char(c: char) -> char {
+    // 非 ASCII：原样（中文契约词由测试逐字核对，不在此改写字义）。
+    if !c.is_ascii() {
+        return c;
+    }
+    if ASCII_DISPLAY_ALPHABET.contains(c) {
+        return c;
+    }
+    // U+002D 连字符 / U+005F 下划线 → U+2013 短破折（分隔语义不变）。
+    if c as u32 == 0x2D || c as u32 == 0x5F {
+        return '\u{2013}';
+    }
+    // 其余 ASCII：大写同族能上屏就用大写（`rc1` → `RC1`）。
+    let up = c.to_ascii_uppercase();
+    if up != c && ASCII_DISPLAY_ALPHABET.contains(up) {
+        return up;
+    }
+    // 最后兜底：`?`（cmap 内，有字形）。
+    '?'
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 5. 上屏固定文案（码表覆盖率走查的输入；UI §3.6 用字表是全屏真源）
+//
+// **码表基线的读取顺序（I3，B2a 代码质量评审 ②）**：① 有 `fonts/lv_font_noto_sc_*.c` ⇒
+// 用其**实际 cmap** 并断言与**入库清单** `fonts/lv_font_cmap.txt` 一致（漂移检测）；
+// ② 无 `.c`（干净 clone / CI 常态）⇒ 用**入库清单**（**不再跳过** —— 此前依赖
+// `cfg!(feature = "noto-font")`，而 CI 未启用该 feature ⇒ 两条最强的网在 CI 上恒被跳过）；
+// ③ 两者皆缺（仓库损坏）⇒ 才跳过。见 `ui/tests.rs::load_font_cmap`。
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 本模块（两页 + 共享层）上屏的**全部固定文案**（**人的清册，不是覆盖率的基线**）。
@@ -358,7 +484,6 @@ pub const ALL_TEXTS: &[&str] = &[
     p1_status::TEXT_PHASE_C,
     p1_status::TEXT_PHASE_TOTAL,
     p1_status::TEXT_ACTIVE_POWER,
-    p1_status::TEXT_DEVICE_TOTAL_POWER,
     p1_status::TEXT_CURRENT,
     // P1 装置状态区
     p1_status::TEXT_DEVICE_TITLE,
@@ -371,7 +496,9 @@ pub const ALL_TEXTS: &[&str] = &[
     p1_status::TEXT_LINK_INTERCORE,
     p1_status::TEXT_CONTROL_SOURCE,
     p1_status::TEXT_PERCENT,
-    p1_status::TEXT_AI_DISABLED,
+    // 两页共享（M3 上收；`p1_status::TEXT_AI_DISABLED` = `p6_system::TEXT_AI_DISABLED`
+    // = 本模块的这一条，**同一份字面量**）
+    TEXT_AI_DISABLED,
     // P1 告警区
     p1_status::TEXT_ALARM_TITLE,
     p1_status::TEXT_ALARM_TIME,
@@ -400,8 +527,58 @@ pub const ALL_TEXTS: &[&str] = &[
     p6_system::TEXT_SERVICE_ADDR,
     p6_system::TEXT_MGMT_IP,
     p6_system::TEXT_NO_REMOTE,
-    p6_system::TEXT_AI_DISABLED,
 ];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. 两页共享的小工具（B2a 代码质量评审 **M3**：此前 P1 / P6 **逐字重复 ~50 行**）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 控制源固定文案的字符集内变体（⚠️ 偏差 2：原串 `AI 引擎已停用，本地策略引擎为默认下发源`
+/// 含**全角逗号 `，` 与 `为`** —— 两者都不在 §3.6 字符集 / 生成字体 cmap 内 ⇒ 取 `·` 分隔
+/// 并改述为「默认下发」。语义（AI 停用、本地策略引擎为默认下发源）不变）。
+///
+/// **两页共享**（M3）：`p1_status::TEXT_AI_DISABLED` / `p6_system::TEXT_AI_DISABLED` 都是
+/// 本常量的转出别名，**只有这一份字面量**。
+pub const TEXT_AI_DISABLED: &str = "AI 引擎已停用 · 本地策略引擎默认下发";
+
+/// 指示灯五态顺序（与 `LedIndicator` 数组一一对应；`Unknown` 兜底在末位）。
+///
+/// **两页共享**（M3：此前 P1 / P6 各抄一份完全相同的数组）。
+pub(crate) const LED_STATES: [LinkState; 5] = [
+    LinkState::Connected,
+    LinkState::Connecting,
+    LinkState::Disconnected,
+    LinkState::NotConfigured,
+    LinkState::Unknown,
+];
+
+/// 链路态 → 灯色（PRD §3.1 指定色；`Unknown` 取"未配置"灰，**绝不落入"正常"绿** —— F6.5）。
+pub(crate) fn link_color(state: LinkState) -> Color {
+    match state {
+        LinkState::Connected => Palette::LINK_OK,
+        LinkState::Connecting => Palette::LINK_PENDING,
+        LinkState::Disconnected => Palette::LINK_DOWN,
+        LinkState::NotConfigured | LinkState::Unknown => Palette::LINK_UNCONFIGURED,
+    }
+}
+
+/// 链路态 → 几何字形（F14 的"图标"通道）。
+pub(crate) fn link_icon(state: LinkState) -> &'static str {
+    match state {
+        LinkState::Connected | LinkState::Connecting => "●",
+        LinkState::Disconnected => "!",
+        LinkState::NotConfigured | LinkState::Unknown => "○",
+    }
+}
+
+/// 控制源 → 上屏文案（`AiDisabled` 取在 cmap 内的 [`TEXT_AI_DISABLED`] 变体）。
+pub(crate) fn control_source_text(src: ControlSource) -> &'static str {
+    match src {
+        ControlSource::LocalStrategy => ControlSource::LocalStrategy.display_name(),
+        ControlSource::AiDisabled => TEXT_AI_DISABLED,
+        ControlSource::Unknown => ControlSource::Unknown.display_name(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

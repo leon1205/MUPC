@@ -380,6 +380,25 @@ fn strip_comments_and_literals(src: &str) -> String {
     out
 }
 
+/// `ui/**` 静态约束的**共用**禁用符号清单（**M6**：此前 [`ui_static_constraints`] 与
+/// [`pages_static_constraints`] 逐字重复这 7 条）。
+///
+/// 符号名一律由 `concat!` **拼接**构造 —— 这样本文件（同属 `ui/**`）不会被同一条规则误伤，
+/// 与 `src/lvgl/tests_a3.rs` 的既有做法一致。
+const FORBIDDEN_UI_SYMBOLS: [&str; 7] = [
+    // ④′ 裸色值调用（色值必须经 `theme` + 类型化通道）
+    concat!("lv_color", "_hex"),
+    concat!("lv_color", "_make"),
+    // ① 零文本输入（F12 红线）
+    concat!("lv_", "text", "area"),
+    concat!("lv_", "key", "board"),
+    concat!("lv_", "spin", "box"),
+    // ⑥ 只有测试可用强制渲染
+    concat!("lv_refr", "_now"),
+    // ⑤ 不安全边界收敛（`ui` 不得直连底层绑定）
+    concat!("lvgl", "_sys"),
+];
+
 #[test]
 fn ui_static_constraints() {
     let sources: [(&str, &str); 3] = [
@@ -387,25 +406,12 @@ fn ui_static_constraints() {
         ("ui/theme.rs", include_str!("theme.rs")),
         ("ui/components.rs", include_str!("components.rs")),
     ];
-    let forbidden = [
-        // ④′ 裸色值调用（色值必须经 `theme` + 类型化通道）
-        concat!("lv_color", "_hex"),
-        concat!("lv_color", "_make"),
-        // ① 零文本输入（F12 红线）
-        concat!("lv_", "text", "area"),
-        concat!("lv_", "key", "board"),
-        concat!("lv_", "spin", "box"),
-        // ⑥ 只有测试可用强制渲染
-        concat!("lv_refr", "_now"),
-        // ⑤ 不安全边界收敛（`ui` 不得直连底层绑定）
-        concat!("lvgl", "_sys"),
-    ];
     for (name, src) in sources {
         // 先剥注释与字符串/字符字面量再匹配：否则"文档注释里解释**为什么**不用
         // `lv_spinbox`"会被误判为违规（与 `src/lvgl/tests_a3.rs` / `lvgl-sys/tests/
         // allowlist_consistency.rs` 的既有做法一致）。
         let lower = strip_comments_and_literals(src).to_ascii_lowercase();
-        for needle in forbidden {
+        for needle in FORBIDDEN_UI_SYMBOLS {
             assert!(
                 !lower.contains(needle),
                 "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
@@ -672,14 +678,65 @@ fn ui_source_chars(src: &str, name: &str) -> Vec<(char, String, usize)> {
     out
 }
 
-/// 码表覆盖率（设计 §11.1「码表覆盖率」）—— **基线 = 生成字体的实际 cmap**
-/// （`fonts/lv_font_noto_sc_*.c` 的 `unicode_list`），**待查集合 = 扫 `ui/**` 源码字面量**。
+/// **入库的码表基线清单**（`fonts/` 下；每行一个 `U+XXXX`，`#` 开头为说明行）。
 ///
-/// **非致命**：字库资产不入库（设计 §1.1.2），`fonts/` 下没有字体生成物时**跳过并打印说明**，
-/// 不让"没跑过 `gen_fonts.sh` 的机器"编译/测试失败（沿用既有做法）。
-#[test]
-fn ui_texts_covered_by_font_cmap() {
+/// 它是**派生清单而非字体产物**：由 `fonts/gen_fonts.sh` 在生成 `.c` 的同时产出，
+/// 体积极小，**允许且必须入库**（`.gitignore` 有显式反选）。作用是让码表检查在
+/// **没有 `.c` 产物**（干净 clone / CI，见下）时**仍有权威基线**。
+const CMAP_MANIFEST: &str = "lv_font_cmap.txt";
+
+/// 解析入库清单（每行 `U+XXXX`；大小写均可）。格式不符 / 解不出码位 ⇒ **响亮失败**
+/// （"解析不到"绝不允许伪装成"全部覆盖"）。
+fn parse_cmap_manifest(src: &str, name: &str) -> std::collections::BTreeSet<char> {
+    let mut set = std::collections::BTreeSet::new();
+    for (i, raw) in src.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let hex = line.strip_prefix("U+").unwrap_or_else(|| {
+            panic!("{name}:{}：`{line}` 不是 `U+XXXX` 形态 —— 清单格式已变，请同步解析器", i + 1)
+        });
+        let v = u32::from_str_radix(hex, 16)
+            .unwrap_or_else(|_| panic!("{name}:{}：`{line}` 不是合法码位", i + 1));
+        let ch = char::from_u32(v)
+            .unwrap_or_else(|| panic!("{name}:{}：U+{v:04X} 不是合法字符", i + 1));
+        set.insert(ch);
+    }
+    assert!(
+        !set.is_empty(),
+        "{name}：清单解析出 0 个码位 —— 文件损坏或与解析器脱节（**不得**当作已覆盖）"
+    );
+    set
+}
+
+/// 码点集合 → `U+XXXX` 逐字列表（诊断用）。
+fn cps(set: &std::collections::BTreeSet<char>) -> Vec<String> {
+    set.iter().map(|c| format!("U+{:04X}", *c as u32)).collect()
+}
+
+/// 取码表基线（**I3**：两张最强的网 —— [`ui_texts_covered_by_font_cmap`] 与
+/// [`runtime_formatters_emit_only_cmap_glyphs`] —— 都依赖它）。**读取顺序（PM 裁定）**：
+///
+/// ① **`fonts/lv_font_noto_sc_*.c` 存在**（跑过 `gen_fonts.sh` 的机器）⇒ 用其**实际 cmap**
+///    ＝各档 **交集**（见下），并**断言与入库清单 [`CMAP_MANIFEST`] 一致**（**漂移检测**：
+///    不一致即失败，提示重跑 `gen_fonts.sh`）；
+/// ② **无 `.c`**（干净 clone / CI 的常态 —— 产物不入库）⇒ 用**入库清单**，**不再跳过**；
+/// ③ **两者皆缺**（= 仓库损坏：入库清单都没了）⇒ 打印说明后跳过。
+///
+/// ⚠️ 本版本**不再看 `cfg!(feature = "noto-font")`**（I3 的根因）：此前把它当"能否跳过"的
+/// 判据，而 CI 是 `cargo test --workspace`（`.github/workflows/build-ubuntu.yml`，**未启用该
+/// feature**）⇒ 两张网在 CI 上恒走"静默跳过"（"没抓到缺字"其实是"压根没查"）。
+///
+/// **交集 vs 并集（10 档）**：取**交集**。理由：a) 走查的语义是"该字符在**任何**字号档下
+/// 上屏都得出字形"，只有交集能**保证**这一点；并集会让"只在部分档存在"的字符蒙混过关
+/// （真机某档即豆腐块 = 漏）。b) 交集可能"误报"（某字只在小档用到、且该档有它），但
+/// **误报可消解**（把字补进全部档 / 登记缺字），漏报在屏上是静默的豆腐块。
+/// c) 实测 2026-09-11：10 档 cmap **完全相同**（各 324 码位，并集 − 交集 = 0）⇒ 当前
+/// 两种取法**结果一致**，选交集只是把"未来某档掉字"这件事**钉在红灯上**。
+fn load_font_cmap() -> Option<std::collections::BTreeSet<char>> {
     let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+    let manifest_path = fonts_dir.join(CMAP_MANIFEST);
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&fonts_dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok().map(|e| e.path()))
@@ -692,15 +749,20 @@ fn ui_texts_covered_by_font_cmap() {
         })
         .unwrap_or_default();
     if files.is_empty() {
+        // ② / ③：无字体产物（干净 clone / CI 的常态）。
+        if let Ok(src) = std::fs::read_to_string(&manifest_path) {
+            return Some(parse_cmap_manifest(&src, CMAP_MANIFEST));
+        }
         eprintln!(
-            "跳过码表走查：{} 下无 `lv_font_noto_sc_*.c`（字库资产不入库，见设计 §1.1.2）。\
-             跑过 fonts/gen_fonts.sh 的机器上本用例会真正比对。",
+            "跳过码表走查：{} 下**既无** `lv_font_noto_sc_*.c`（字体产物不入库，见设计 §1.1.2）\
+             **也无**入库清单 `{CMAP_MANIFEST}` —— 这属**仓库损坏**（清单是入库派生项，见 \
+             `fonts/gen_fonts.sh` 顶部注释）；请先从版本库恢复该清单（或跑 `fonts/gen_fonts.sh`：\
+             需 node/python 与字库源）。**只在本情形**允许跳过。",
             fonts_dir.display()
         );
-        return;
+        return None;
     }
     files.sort();
-    // 各字号取**交集**：任一字号缺该字形，该档就是豆腐块。
     let mut cmap: Option<std::collections::BTreeSet<char>> = None;
     for f in &files {
         let name = f.file_name().unwrap().to_string_lossy().to_string();
@@ -712,31 +774,74 @@ fn ui_texts_covered_by_font_cmap() {
         });
     }
     let cmap = cmap.expect("至少一个字体文件");
+    // ① **漂移检测**：生成物的实际 cmap 必须与入库清单**集合相等**。
+    let src = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        panic!(
+            "找到字体产物（`lv_font_noto_sc_*.c`）却读不到入库清单 `{}`（{e}）—— 仓库损坏：\
+             清单是**入库项**，请 `fonts/gen_fonts.sh` 重新生成并连同清单一起入库。",
+            manifest_path.display()
+        )
+    });
+    let manifest = parse_cmap_manifest(&src, CMAP_MANIFEST);
+    if cmap != manifest {
+        let only_products: std::collections::BTreeSet<char> =
+            cmap.difference(&manifest).copied().collect();
+        let only_manifest: std::collections::BTreeSet<char> =
+            manifest.difference(&cmap).copied().collect();
+        panic!(
+            "**码表漂移**：`fonts/lv_font_noto_sc_*.c` 的实际 cmap 与入库清单 `{CMAP_MANIFEST}` \
+             不一致。\n  仅生成物有（清单该补，共 {} 个）：{:?}\n  仅清单有（生成物已无，共 {} 个）：{:?}\n\
+             请重跑 `fonts/gen_fonts.sh` 让二者同步（脚本会顺带重写 `{CMAP_MANIFEST}`），\
+             并把新的清单一并入库。",
+            only_products.len(),
+            cps(&only_products),
+            only_manifest.len(),
+            cps(&only_manifest),
+        );
+    }
+    Some(cmap)
+}
+
+/// 码表覆盖率（设计 §11.1「码表覆盖率」）—— **基线 = 生成字体的实际 cmap**
+/// （`fonts/lv_font_noto_sc_*.c` 的 `unicode_list`，无产物时 = 入库清单 [`CMAP_MANIFEST`]），
+/// **待查集合 = 扫 `ui/**` 源码字面量**。
+///
+/// **只有 `.c` 与入库清单都缺失**（仓库损坏）才跳过 —— 见 [`load_font_cmap`]。
+#[test]
+fn ui_texts_covered_by_font_cmap() {
+    let Some(cmap) = load_font_cmap() else {
+        return;
+    };
 
     // 待查集合：扫源码字面量（非 ASCII + 需字形的符号一视同仁）。
     let mut missing: Vec<(char, String, &str, usize)> = Vec::new();
-    let mut scanned: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
+    // 扫到的**字面量原文**（供清册做**逐字**核对；M4：此前只断"每个字都出现过"，
+    // 一条只含单个通用字的清册条目（如 `%`）能从**任何**含该字的字面量里"借光"通过 ——
+    // 弱于"该串确实在源码里"）。
+    let mut literals: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (name, src) in UI_PROD_SOURCES {
         for (ch, lit, line) in ui_source_chars(src, name) {
-            scanned.insert(ch);
+            literals.insert(lit.clone());
             if !cmap.contains(&ch) {
                 missing.push((ch, lit, name, line));
             }
         }
     }
 
-    // 清册（`ALL_TEXTS`）**不是基线**，但必须与源码不脱节：其每个字都得在扫到的字里。
+    // 清册（`ALL_TEXTS`）**不是基线**，但必须与源码不脱节：**每个条目都得整串出现在某个
+    // `ui/**` 源码字面量里**（M4：只断"每个字都出现过"太弱 —— 例如 `%` 能从**任何**含 `%`
+    // 的字面量里"借光"通过 —— 见 `literals` 的注释）。
+    //
+    // ⚠️ **诚实标注本检查的边界**：常量条目**自身的声明**就是一个字面量 ⇒ "声明了但没人用"
+    // （`TEXT_DEVICE_TOTAL_POWER` 那种）仍能通过这一条。本检查管的是"清册 ↔ 源码字面量
+    // **串**是否一致"（改了源码文案却忘了改清册 ⇒ 红），**不**管"常量是否真的被引用"
+    //（那是 `dead_code` 与该常量读者 / 评审的活）。
     for t in ALL_TEXTS.iter().chain(crate::ui::pages::ALL_TEXTS.iter()) {
-        for ch in t.chars() {
-            if ch.is_whitespace() {
-                continue;
-            }
-            assert!(
-                scanned.contains(&ch),
-                "清册条目 `{t}` 的字 `{ch}` 未出现在任何 `ui/**` 源码字面量里 —— \
-                 清册与源码脱节（清册已不是覆盖率基线，见本条文档）"
-            );
-        }
+        assert!(
+            literals.iter().any(|l| l.contains(t)),
+            "清册条目 `{t}` 未**逐字**出现在任何 `ui/**` 源码字面量里 —— \
+             清册与源码脱节（清册已不是覆盖率基线，见本条文档）"
+        );
     }
 
     // 与登记缺口**集合相等**（多一个 = 真缺字；少一个 = 字库已补齐、登记该删）。
@@ -759,6 +864,238 @@ fn ui_texts_covered_by_font_cmap() {
          若字库已补齐，请同步删除 `KNOWN_MISSING` / D5 的对应条目。\n\
          逐条缺字出处（文件:行 ← 文案）：\n          {detail}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥‴ **运行时格式化器**的字符集检查（**C1 的根因封堵**）
+//
+// 上面两条（`ui_static_constraints` / `ui_texts_covered_by_font_cmap`）都只扫**源码字面量**
+// ⇒ `format!` 的**运行时输出**永远查不到。C1 就是这么漏的：`format!("{v:.1}")` 在**源码里是
+// 干净的**（模板 `"{v:.1}"` 只有 `{v:.1}` 占位符，剥掉后**空**），而负值实际产出 **ASCII `-`**
+// （U+002D，生成字体 cmap **没有**该字形 —— `unicode_list_0` 由 `0xb` 直跳 `0xe`）
+// ⇒ P 反向时负号是**豆腐块**、负值看着像正值（安全相关）。
+//
+// 本节让**每个数值 / 时间格式化器**吃一组**代表性输入**（含负值 / 极值 / 小数 / 时间），
+// 断言其**产出的每一个字符**都落在生成字体 cmap 内。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// ⑥‴ 运行时格式化器的产出字符**必须全部落在生成字体 cmap 内**。
+///
+/// **覆盖的格式化器**（`ui/pages` 里全部"数值 / 时间 → 文本"出口）：
+///
+/// | 格式化器 | 语义 | 输入集 |
+/// |----------|------|--------|
+/// | [`pages::fmt_signed_1dp`] | 1 位小数（三相 P/I、总卡、ΣP 幅值） | 见 [`RUNTIME_FMT_NUM_INPUTS`] |
+/// | [`pages::fmt_int0`] | 整数（SOC / CPU 温度 / 内存率） | 同上 |
+/// | [`pages::fmt_sigma_kw`] | `ΣP ±x.x kW`（**含 `+` / `−` 前缀**） | 同上 |
+/// | [`pages::format_epoch_ms_utc`] | 告警时间 `YYYY/MM/DD HH:MM:SS` | 见 [`RUNTIME_FMT_MS_INPUTS`] |
+/// | [`pages::format_uptime`] | 运行时长 `N 日 HH:MM:SS` | 见 [`RUNTIME_FMT_SECS_INPUTS`] |
+///
+/// **输入集**必须含**负值**（`-1.0` / `-123.4` / `-0.0`）、**极值**（`f64::MIN` / `f64::MAX` /
+/// `u64::MAX`）、**小数**（`0.05` / `12.5` / `999.9`）与**时间**（纪元原点 / UI §6.5 的示例时刻 /
+/// 闰日 / 亚秒截断）—— **这正是能抓住 C1 的那类输入**：把 [`pages::fmt_signed_1dp`] 的负号
+/// 改回 ASCII `-`，本用例立刻变红（自证见 B2a 代码质量评审收尾报告）。
+#[test]
+fn runtime_formatters_emit_only_cmap_glyphs() {
+    use crate::ui::pages;
+
+    /// 数值类输入（**必须含负值与极值**）。
+    const RUNTIME_FMT_NUM_INPUTS: [f64; 12] = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        12.5,
+        -123.4,
+        0.05,
+        -0.05,
+        999.9,
+        -999.9,
+        f64::MIN,
+        f64::MAX,
+    ];
+    /// 毫秒时间戳输入（纪元原点 / UI §6.5 示例 / 闰日 / 亚秒 / 上界）。
+    const RUNTIME_FMT_MS_INPUTS: [u64; 5] = [
+        0,
+        1_789_047_727_999,
+        1_709_210_096_000,
+        946_684_800_000,
+        u64::MAX,
+    ];
+    /// 秒数（运行时长）输入。
+    const RUNTIME_FMT_SECS_INPUTS: [u64; 5] = [0, 59, 86_400, 2 * 86_400 + 23 * 3600 + 59 * 60 + 59, u64::MAX];
+
+    let Some(cmap) = load_font_cmap() else {
+        return;
+    };
+
+    let mut cases: Vec<(String, String)> = Vec::new();
+    for v in RUNTIME_FMT_NUM_INPUTS {
+        cases.push((format!("fmt_signed_1dp({v})"), pages::fmt_signed_1dp(v)));
+        cases.push((format!("fmt_int0({v})"), pages::fmt_int0(v)));
+        cases.push((format!("fmt_sigma_kw({v})"), pages::fmt_sigma_kw(v)));
+    }
+    for ms in RUNTIME_FMT_MS_INPUTS {
+        cases.push((format!("format_epoch_ms_utc({ms})"), pages::format_epoch_ms_utc(ms)));
+    }
+    for s in RUNTIME_FMT_SECS_INPUTS {
+        cases.push((format!("format_uptime({s})"), pages::format_uptime(s)));
+    }
+    // 占位符是**上屏**的固定字形（`--` 会出豆腐块 —— 见 `PLACEHOLDER` 文档）。
+    cases.push(("PLACEHOLDER".to_string(), pages::PLACEHOLDER.to_string()));
+
+    // 先自证"输入集真的含负值"（否则本用例会退化成"只查了正数"而静默失效）。
+    assert!(
+        cases.iter().any(|(what, _)| what.contains("(-1)")),
+        "输入集必须含负值（否则抓不到 C1 那类缺陷）"
+    );
+
+    for (what, text) in cases {
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            assert!(
+                cmap.contains(&ch),
+                "**运行时**格式化器 `{what}` 产出的字符 U+{:04X} `{ch}` **不在生成字体的 cmap 内**\
+                 （真机上是豆腐块）—— 产出文本 = `{text}`。\
+                 数值格式化必须经 `ui/pages` 的唯一出口（负号恒 `\\u{{2212}}`，ASCII `-` 无字形）。",
+                ch as u32
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁗ **契约字符串直上屏**的字符集检查（**C1 残留**，B2a 代码质量评审 ③）
+//
+// 前两条网都够不到**契约字符串**：它们的字面量在 `display-proto`（`LinkState::display_name()`
+// 等）或**运行时的帧**里（`InfoSection.firmware_version` / `build_time` / `model` / `serial` /
+// `mgmt_ipv4`）—— 既不在 `ui/**` 源码里、也不是 `format!("{v:.1}")` 那类数值出口。
+// 后果与 C1 同类：版本号含 `-`（`1.0.0-rc1`）或型号含 `-`（`BECG-3568`）时，ASCII `-`
+// （U+002D）在生成字体里**没有字形** ⇒ 真机上是豆腐块。**契约冻结（`display-proto` 不得改）**
+// ⇒ 收口在**显示侧**：[`pages::display_safe`]（登记为偏差 **D9**）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// ⑥⁗ **契约直上屏字符串**经 [`pages::display_safe`] 后，每个字符必须在 cmap 内。
+///
+/// 覆盖三类：
+///
+/// 1. **帧内自由串**（`InfoSection` 的 `firmware_version` / `build_time` / `model` / `serial` /
+///    `mgmt_ipv4`）—— **代表性取值必须含带 `-` 的版本号**（`1.0.0-rc1`）与含 `/` 的时间戳
+///    （UI 的告警时间口径），以及 ISO 8601 的 `T`/`Z` 变体（最坏情形）；
+/// 2. **PG 面板的服务地址**（`127.0.0.1:9810 / 127.0.0.1:9811`）；
+/// 3. **契约枚举的 `display_name()`**（[`LinkState`] / [`RunState`] / [`ServiceScope`]）——
+///    这些**不经改写**直上屏（无 cmap 外字符，故原样透传），逐字核对。
+///
+/// 另断言 [`pages::ASCII_DISPLAY_ALPHABET`]（`display_safe` 的"安全表"）**每个字符都在基线
+/// cmap 内** —— 这样它就不是"第二份真源"（码表变 ⇒ 本条红）。
+#[test]
+fn contract_strings_emit_only_cmap_glyphs() {
+    use crate::ui::pages;
+    use mupc_display_proto::{LinkState, RunState};
+
+    let Some(cmap) = load_font_cmap() else {
+        return;
+    };
+
+    // 安全字母表 ⊆ 基线 cmap（`display_safe` 的替换目标必须真有字形）。
+    for ch in pages::ASCII_DISPLAY_ALPHABET.chars() {
+        assert!(
+            cmap.contains(&ch),
+            "`ASCII_DISPLAY_ALPHABET` 含 cmap 外字符 U+{:04X} `{ch}` —— 该表已与基线脱节",
+            ch as u32
+        );
+    }
+
+    // 代表性契约取值（**必须含带 `-` 的版本号**）。
+    const CONTRACT_VALUES: [(&str, &str); 8] = [
+        ("firmware_version", "0.1.0"),
+        ("firmware_version", "1.0.0-rc1"),
+        ("build_time", "2026/09/10 13:42:07"),
+        ("build_time", "2026-09-10T13:42:07Z"),
+        ("model", "BECG-3568"),
+        ("serial", "SN-2026-0001"),
+        ("mgmt_ipv4", "192.168.3.118"),
+        ("service_addr", "127.0.0.1:9810 / 127.0.0.1:9811"),
+    ];
+    // 自证：取值里**确实**有 cmap 外字符（否则本条会退化成"只查了本来就干净的串"）。
+    assert!(
+        CONTRACT_VALUES
+            .iter()
+            .any(|(_, raw)| raw.chars().any(|c| !cmap.contains(&c))),
+        "代表性取值必须含 cmap 外字符（否则本用例结构上抓不到 ③ 那类缺陷）"
+    );
+    for (what, raw) in CONTRACT_VALUES {
+        let shown = pages::display_safe(raw);
+        for ch in shown.chars() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            assert!(
+                cmap.contains(&ch),
+                "契约字符串 `{what}` **上屏后**仍含 cmap 外字符 U+{:04X} `{ch}`\
+                 （原文 `{raw}` → 上屏 `{shown}`）—— 真机上是豆腐块。\
+                 契约串必须经 `ui/pages::display_safe` 再上屏（见 D9）。",
+                ch as u32
+            );
+        }
+    }
+    // 改写**真的发生**（回归锚点：去掉 `display_safe` 的 ASCII 改写即红）。
+    assert_eq!(
+        pages::display_safe("1.0.0-rc1"),
+        "1.0.0\u{2013}RC1",
+        "带 `-` 的版本号必须改写（`-` → U+2013；小写 → 大写同族）"
+    );
+    assert_ne!(
+        pages::display_safe("BECG-3568"),
+        "BECG-3568",
+        "型号里的 `-` 必须改写（cmap 无 U+002D 字形）"
+    );
+
+    // 契约枚举 `display_name()`：**不经改写**直上屏 ⇒ 逐字必须在 cmap 内。
+    let links = [
+        LinkState::Connected,
+        LinkState::Connecting,
+        LinkState::Disconnected,
+        LinkState::NotConfigured,
+        LinkState::Unknown,
+    ];
+    for st in links {
+        let t = st.display_name();
+        for ch in t.chars() {
+            assert!(
+                cmap.contains(&ch),
+                "`LinkState::{st:?}.display_name()` = `{t}` 含 cmap 外字符 U+{:04X} `{ch}`",
+                ch as u32
+            );
+        }
+    }
+    let runs = [
+        RunState::Stop,
+        RunState::Standby,
+        RunState::Charge,
+        RunState::Discharge,
+    ];
+    for rs in runs {
+        let t = rs.display_name();
+        for ch in t.chars() {
+            assert!(
+                cmap.contains(&ch),
+                "`RunState::{rs:?}.display_name()` = `{t}` 含 cmap 外字符 U+{:04X} `{ch}`",
+                ch as u32
+            );
+        }
+    }
+    // ⚠️ **有意不在此列**的契约 `display_name()`（页面**不用它上屏**、另取 cmap 内的
+    //    页面常量）—— 逐条登记理由，避免"漏查"与"该查的没查"混淆：
+    //    · `SocSource::PcsReg1010` = `PCS(REG1010)`：`(`/`)` 无字形 ⇒ 页面取 `TEXT_SOC_SRC_PCS`；
+    //    · `ControlSource::AiDisabled`：含全角 `，` 与 `为`（均无字形）⇒ 页面取 `TEXT_AI_DISABLED`；
+    //    · `ServiceScope::LoopbackOnly` = `仅回环 127.0.0.1`：**`环`(U+73AF) 不在 cmap 内**
+    //      （`font_subset_charset.txt` 未收，实测生成字体亦无）⇒ 页面取 `TEXT_SERVICE_ADDR`
+    //      = `本机监听地址 · 仅本机`，`service_scope_text()` 仅供评审核对口径、**不直上屏**。
+    //    （本用例第一版把 `ServiceScope` 也列了进来 ⇒ 立刻红并点名 `U+73AF 环` —— 这说明
+    //     本网**确实**敏感；此处改为如实登记"为何不列"。）
 }
 
 /// 组件固定文案的**形状**断言（与文档的逐字偏差在 `components.rs` 里已注明）。
@@ -1527,6 +1864,97 @@ pub(crate) fn pages_chain() {
         );
         assert_eq!(p1.alarm_row_message(1).as_deref(), Some("直流侧过压"));
         assert_eq!(p1.alarm_row_message(2), None, "第 3 行无数据 ⇒ 隐藏");
+
+        // ── ⑥ 卡内元素 `coords()` 断言（**B2a 代码质量评审「补断言」**）─────────────
+        // 此前"320 重排后不重叠 / 不越界"是评审员**手算**得出的（`pages_chain` 只断 `soc_card`
+        // 的 y / 高与 A 相卡 y1），卡内元素**零 `coords()` 断言** ⇒ 这里把"贴底排布"钉住。
+        disp.refr_now_for_test();
+        // ① SOC 量程条**贴底**：底缘不越卡内容区底缘，且与底缘的距离 ≤ 2×GAP_MIN（= 其下
+        //    "缝 4 + 刻度行"的量级 ⇒ 是"贴底"而非"漂浮"）。
+        let card_c = p1.soc_card().coords();
+        let bar_c = p1.soc_bar_obj().coords();
+        let inner_bottom = card_c.y2 - (Stroke::THIN + Dimens::GAP_MIN);
+        assert!(
+            bar_c.y2 <= inner_bottom,
+            "SOC 量程条底缘 {} 不得越过卡内容区底缘 {inner_bottom}",
+            bar_c.y2
+        );
+        assert!(
+            inner_bottom - bar_c.y2 <= 2 * Dimens::GAP_MIN,
+            "SOC 量程条应贴底（其下只剩 缝 + 刻度行），实测间隙 {}",
+            inner_bottom - bar_c.y2
+        );
+        // ② 刻度行在量程条之下、**卡外缘之内**（M1：行高 = px + 2 ⇒ 可低出内容区底缘 2 px，
+        //    但距卡外缘仍有余量）。
+        let scale_c = p1.soc_scale_obj().coords();
+        assert!(
+            scale_c.y1 >= bar_c.y2 && scale_c.y2 < card_c.y2,
+            "刻度行必须在量程条下方、卡外缘之内（bar.y2 {} / scale.y1..y2 {}..{} / card.y2 {}）",
+            bar_c.y2,
+            scale_c.y1,
+            scale_c.y2,
+            card_c.y2
+        );
+        // ③ **I1 的 `coords()` 版** —— 分两层：
+        //    (a) **结构上敏感**的**槽宽**断言（B2a 代码质量评审 ①）：数值 label 的显式宽度
+        //        必须**恰为** `PHASE_P_SLOT_W` ⇒ 去掉 `p_value.set_size(..)` 即变红。
+        //        ⚠️ 为什么**必须**断宽度：无显式宽度时 LVGL label 按文本自增，而 `coords()`
+        //        此时返回的是**陈旧的 obj 盒**（评审实测 32 px）而非绘出的文本外延 ⇒ 只断
+        //        "数值右缘 < 单位左缘"**结构上不可能**抓到"文本越槽"（评审把 `set_size` +
+        //        `LongMode::DOTS` 注释掉后，旧断言仍全绿）。`coords()` 是**闭区间**：
+        //        `Area::width() = x2 - x1 + 1`。
+        //    (b) **语义**断言（保留）：数值槽不压单位 / 箭头、不越相卡右缘。
+        let mut fl = frame_healthy();
+        fl.p_phase[0] = Field { v: Some(123.4), flag: FieldFlag::Valid };
+        fl.p_phase[1] = Field { v: Some(-123.4), flag: FieldFlag::Valid };
+        p1.render(&PageInput::live(&fl));
+        disp.refr_now_for_test();
+        let pc_c = p1.phase_card_obj(0).expect("A 相卡").coords();
+        let pv_c = p1.phase_p_obj(0).expect("A 相 P 值").coords();
+        let unit_c = p1.phase_unit_obj(0).expect("A 相 kW").coords();
+        let arrow_c = p1.phase_arrow_obj(0).expect("A 相箭头").coords();
+        assert_eq!(
+            pv_c.width() as i32,
+            p1_status::PHASE_P_SLOT_W,
+            "P 数值槽必须有**显式宽度约束**（`set_size(PHASE_P_SLOT_W, ..)`）：实测宽 {} ≠ \
+             槽宽 {} —— 去掉 `set_size` 会让数值按文本自增、压住 `kW` / 箭头",
+            pv_c.width(),
+            p1_status::PHASE_P_SLOT_W
+        );
+        let pi_c = p1.phase_i_obj(0).expect("A 相 I 值").coords();
+        assert_eq!(
+            pi_c.width() as i32,
+            p1_status::PHASE_I_SLOT_W,
+            "I 数值槽同样必须有显式宽度约束（同 I1）"
+        );
+        assert!(
+            pv_c.x2 < unit_c.x1 && pv_c.x2 < arrow_c.x1,
+            "超长数值必须**截断在槽内**，不得压住单位（x1 = {}）或箭头（x1 = {}）；实测数值右缘 {}",
+            unit_c.x1,
+            arrow_c.x1,
+            pv_c.x2
+        );
+        assert!(
+            pv_c.x2 <= pc_c.x2,
+            "数值槽右缘 {} 不得越出相卡右缘 {}",
+            pv_c.x2,
+            pc_c.x2
+        );
+        assert_eq!(
+            p1.phase_p_text(0).as_deref(),
+            Some("123.4"),
+            "`DOTS` 只影响**绘制**，文本属性仍完整（截断不是丢数据）"
+        );
+        // **C1 的页面级回归锁**：负值必须用 U+2212（cmap 内有字形），**不得**是 ASCII `-`。
+        assert_eq!(
+            p1.phase_p_text(1).as_deref(),
+            Some("\u{2212}123.4"),
+            "P 反向（负值）必须显 U+2212 —— 用 ASCII `-` 在真机上是豆腐块、负值看着像正值"
+        );
+        assert!(
+            !p1.phase_p_text(1).unwrap().contains('-'),
+            "页面输出里**不得**再出现 ASCII `-`（C1）"
+        );
         drop(p1);
 
         // ═══ ③ 逐字段降级（**显占位符而不是 0**）══════════════════════════
@@ -1692,7 +2120,17 @@ pub(crate) fn pages_chain() {
         let f = frame_healthy();
         p6.render(&PageInput::live(&f));
         assert_eq!(p6.info_label(0).as_deref(), Some(p6_system::TEXT_MODEL));
-        assert_eq!(p6.info_value(0).as_deref(), Some("BECG-3568"), "装置型号（F8.1）");
+        // **D9**：契约串 `BECG-3568` 的 `-` 在 cmap 里没字形 ⇒ 上屏前经 `display_safe`
+        // 改写为 U+2013（真机不出豆腐块）。帧内仍保留契约原值（`frame_healthy` 未改）。
+        assert_eq!(
+            p6.info_value(0).as_deref(),
+            Some("BECG\u{2013}3568"),
+            "装置型号（F8.1；`-` 经 display_safe 改写，见 D9）"
+        );
+        assert!(
+            !p6.info_value(0).unwrap().contains('-'),
+            "上屏文本里**不得**出现 cmap 外的 ASCII `-`（D9）"
+        );
         assert_eq!(p6.info_value(1).as_deref(), Some(pages::MISSING), "序列号无可靠真源 ⇒ 未提供");
         assert_eq!(p6.info_value(2).as_deref(), Some("0.1.0"), "固件版本");
         assert_eq!(p6.info_value(3).as_deref(), Some(pages::MISSING), "编译时间缺失 ⇒ 未提供");
@@ -1760,27 +2198,20 @@ fn pages_static_constraints() {
         ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
         ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
     ];
-    let forbidden = [
-        // ④′ 裸色值调用（色值必须经 `theme` + 类型化通道）
-        concat!("lv_color", "_hex"),
-        concat!("lv_color", "_make"),
-        // ① 零文本输入（F12 红线）
-        concat!("lv_", "text", "area"),
-        concat!("lv_", "key", "board"),
-        concat!("lv_", "spin", "box"),
-        // ⑥ 只有测试可用强制渲染
-        concat!("lv_refr", "_now"),
-        // ⑤ 不安全边界收敛（`ui` 不得直连底层绑定）
-        concat!("lvgl", "_sys"),
-        // 页面不得出现 `Color::hex` / `Color::rgb` 裸构造（必须走 theme 命名常量）
-        "Color::hex(",
-        "Color::rgb(",
-    ];
+    // 共用清单（[`FORBIDDEN_UI_SYMBOLS`]，M6）+ 页面专属的裸色值构造两条。
+    let forbidden = FORBIDDEN_UI_SYMBOLS;
     for (name, src) in sources {
         let lower = strip_comments_and_literals(src).to_ascii_lowercase();
         for needle in forbidden {
             assert!(
                 !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // 页面不得出现 `Color::hex` / `Color::rgb` 裸构造（必须走 theme 命名常量）
+        for needle in ["Color::hex(", "Color::rgb("] {
+            assert!(
+                !lower.contains(&needle.to_ascii_lowercase()),
                 "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
             );
         }
@@ -1818,6 +2249,19 @@ const GEOMETRY_SETTERS: [&str; 11] = [
     "set_pad_left",
     "set_pad_right",
 ];
+
+/// **带 `w`/`h` 实参的页面级几何 helper**（及其「宽 / 高」在实参表中的下标）—— **I2**。
+///
+/// **为什么需要它**（评审实测的**已证实绕过路径**）：只扫 `set_*` 是**不保证**的 —— 把
+/// `p1_status.rs` 的 `decor(&root, 484, 320, ..)` 改成裸数字后，仅扫 setter 的版本**仍然全绿**
+/// （helper 的实参不在扫描面内），而改 `set_pos(0, 8)` 会红并点名行号。⇒ 把页面里**直接出现**
+/// 的几何 helper 调用点一并纳入。
+///
+/// ⚠️ **价值定位（如实，不得夸张）**：这是一条**减速带** —— 它能拦住"**直接实参**写死数字"，
+/// **不是形式化保证**：经局部变量 / `const` / 函数间**间接传递**的裸值仍可绕过（静态文本扫描
+/// 的固有限度）。`text_label(..)` **不在此表**：它的形参表是 `(parent, text, slot, color)`，
+/// **没有 `w`/`h` 实参**可查。
+const GEOMETRY_HELPERS: [(&str, &[usize]); 2] = [("decor", &[1, 2]), ("layout_box", &[1, 2])];
 
 /// **允许的例外：`0`，且仅此一个**（`ui/**` 实测的全部裸数字实参都是它）。语义有二：
 ///
@@ -1871,51 +2315,95 @@ fn split_top_level_args(args: &str) -> Vec<&str> {
     parts
 }
 
-/// ⑥″ 裸尺寸：`ui/**` 的几何 setter 不得出现裸数字字面量（例外仅 `0`，见
+/// ⑥″ 裸尺寸：`ui/**` 的**几何 setter**（[`GEOMETRY_SETTERS`]）与**几何 helper 调用点**
+/// （[`GEOMETRY_HELPERS`]）不得出现裸数字字面量（例外仅 `0`，见
 /// [`ALLOWED_BARE_GEOMETRY_LITERAL`]）。
 ///
 /// 扫描面无字面量（先剥注释与字符串 / 字符字面量）⇒ 不会被文案里的数字误伤；
 /// 也不扫 `ui/tests.rs`（测试构造控件时用裸数字是**故意**的）。
+///
+/// ⚠️ **诚实定位**：本用例是**减速带**，不是形式化保证（局部变量 / 间接传递仍可绕过）——
+/// 见 [`GEOMETRY_HELPERS`] 的文档。
 #[test]
 fn ui_layout_setters_use_theme_constants() {
+    /// 裸数字判定（`-12` / `484` / `1.5` 是；`MAIN_CARD_W`、`A - B`、`x as i32` 不是）。
+    fn bare_number(a: &str) -> bool {
+        !a.is_empty()
+            && matches!(a.chars().next(), Some(c) if c.is_ascii_digit() || c == '-' || c == '+')
+            && a.parse::<f64>().is_ok()
+    }
+
     for (name, src) in UI_PROD_SOURCES {
         let code = strip_comments_and_literals(src);
         let lines: Vec<&str> = code.lines().collect();
+        let report = |what: &str, a: &str, at: usize| {
+            let line = code[..at].matches('\n').count() + 1;
+            panic!(
+                "{name} 第 {line} 行：{what} 出现裸尺寸字面量 `{a}` \
+                 （行内容：{}）—— 设计 §11.4 ④ 要求尺寸一律经 `theme` 常量；\
+                 只允许例外 `0`（无偏移 / 零内边距，见 [`ALLOWED_BARE_GEOMETRY_LITERAL`] 文档）",
+                lines.get(line - 1).copied().unwrap_or("").trim()
+            );
+        };
+        // ── ① 几何 setter（`o.set_size(..)` 一类）──
         for setter in GEOMETRY_SETTERS {
             let mut from = 0usize;
             while let Some(rel) = code[from..].find(setter) {
                 let at = from + rel;
                 from = at + setter.len();
-                // 必须是"独立调用"：前一个字符不是标识符 / `.` 之外的成员访问也可（`o.set_pos`）
+                // 必须是"独立调用"：前一个字符不是标识符 / `_`（`o.set_pos` 的 `.` 可）
                 let before = code[..at].chars().next_back();
                 if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     continue;
                 }
-                // 后一个非空白字符必须是 `(`
-                let rest = &code[at + setter.len()..];
-                let pad = rest.len() - rest.trim_start().len();
-                let Some(open_rel) = rest.find('(') else { continue };
-                if !rest[..open_rel].trim().is_empty() {
+                let Some((_open, args)) = call_args(&code, at, setter.len()) else {
+                    continue;
+                };
+                for arg in split_top_level_args(&args) {
+                    let a = arg.trim();
+                    if bare_number(a) && a != ALLOWED_BARE_GEOMETRY_LITERAL {
+                        report(&format!("`{setter}`"), a, at);
+                    }
+                }
+            }
+        }
+        // ── ② 几何 helper 调用点（`decor(&root, 484, 320, ..)` 一类；**I2**）──
+        for (helper, arg_idxs) in GEOMETRY_HELPERS {
+            let mut from = 0usize;
+            while let Some(rel) = code[from..].find(helper) {
+                let at = from + rel;
+                from = at + helper.len();
+                let before = code[..at].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     continue;
                 }
-                let open = at + setter.len() + pad + open_rel;
-                let args = balanced_args(&code, open);
-                for arg in split_top_level_args(args) {
+                let Some((_open, args)) = call_args(&code, at, helper.len()) else {
+                    continue;
+                };
+                let parts = split_top_level_args(&args);
+                for &idx in arg_idxs {
+                    let Some(arg) = parts.get(idx) else { continue };
                     let a = arg.trim();
-                    let is_bare_number = !a.is_empty()
-                        && matches!(a.chars().next(), Some(c) if c.is_ascii_digit() || c == '-' || c == '+')
-                        && a.parse::<f64>().is_ok();
-                    if is_bare_number && a != ALLOWED_BARE_GEOMETRY_LITERAL {
-                        let line = code[..at].matches('\n').count() + 1;
-                        panic!(
-                            "{name} 第 {line} 行：`{setter}` 出现裸尺寸字面量 `{a}` \
-                             （行内容：{}）—— 设计 §11.4 ④ 要求尺寸一律经 `theme` 常量；\
-                             只允许例外 `0`（无偏移 / 零内边距，见 [`ALLOWED_BARE_GEOMETRY_LITERAL`] 文档）",
-                            lines.get(line - 1).copied().unwrap_or("").trim()
-                        );
+                    if bare_number(a) && a != ALLOWED_BARE_GEOMETRY_LITERAL {
+                        report(&format!("`{helper}` 的第 {} 个实参（w/h）", idx + 1), a, at);
                     }
                 }
             }
         }
     }
+}
+
+/// 从 `name` 之后取该次**独立调用**的括号内实参文本；不是"名字后紧跟 `(`"则 `None`。
+///
+/// 返回 `(开括号偏移, 实参文本)`。名字后到 `(` 之间只允许空白（挡住 import 列表、
+/// 文档引用等非调用出现）。
+fn call_args(code: &str, at: usize, name_len: usize) -> Option<(usize, String)> {
+    let rest = &code[at + name_len..];
+    let pad = rest.len() - rest.trim_start().len();
+    let open_rel = rest.find('(')?;
+    if !rest[..open_rel].trim().is_empty() {
+        return None;
+    }
+    let open = at + name_len + pad + open_rel;
+    Some((open, balanced_args(code, open).to_string()))
 }

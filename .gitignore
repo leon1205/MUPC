@@ -51,7 +51,12 @@ build-*/
 #   不入库（OFL 字库可公开下载、生成物是构建产物，入库会平白膨胀仓库）；
 #   构建前先跑 mupc/crates/local-display/fonts/gen_fonts.sh。
 #   入库项：gen_fonts.sh / extract_charset.py / font_subset_charset.txt / NotoSansSC-LICENSE.txt
+#           / lv_font_cmap.txt（**派生清单而非字体产物**：每行一个 U+XXXX，
+#             由 gen_fonts.sh 随字体生成并更新；它让码表检查在**没有 .c 产物**的
+#             干净 clone / CI 上仍有权威基线 —— 见 ui/tests.rs::load_font_cmap，I3）
 mupc/crates/local-display/fonts/*.otf
 mupc/crates/local-display/fonts/*.ttf
 mupc/crates/local-display/fonts/*.ttc
 mupc/crates/local-display/fonts/lv_font_noto_sc_*.c
+# 显式反选：确保上面的通配（或将来放宽的通配）**不会**把入库清单扫进去。
+!mupc/crates/local-display/fonts/lv_font_cmap.txt

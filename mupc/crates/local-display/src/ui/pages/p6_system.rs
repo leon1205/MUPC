@@ -29,16 +29,17 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use mupc_display_proto::{ControlSource, LinkState, ServiceScope, DEFAULT_BIND, DEFAULT_CONTROL_BIND};
+use mupc_display_proto::{LinkState, ServiceScope, DEFAULT_BIND, DEFAULT_CONTROL_BIND};
 
 use crate::lvgl::obj::Obj;
-use crate::lvgl::style::{Color, Style};
+use crate::lvgl::style::Style;
 use crate::lvgl::widgets::{Label, LongMode, ScrollContainer};
 use crate::lvgl::LvglError;
 use crate::ui::components::LedIndicator;
 use crate::ui::pages::{
-    format_uptime, label, page_root, sections, set_style_index, set_visible, text_label, PageInput,
-    MISSING, PLACEHOLDER,
+    control_source_text, decor, display_safe, fmt_int0, format_uptime, label, link_color,
+    link_icon, page_root, sections, set_style_index, set_visible, text_label, PageInput,
+    LED_STATES, MISSING, PLACEHOLDER,
 };
 use crate::ui::theme::{self, Dimens, Palette, TextSlot};
 
@@ -95,8 +96,11 @@ pub const TEXT_SERVICE_ADDR: &str = "本机监听地址 · 仅本机";
 pub const TEXT_MGMT_IP: &str = "装置 IP 地址";
 /// 说明行（UI §6.6）。
 pub const TEXT_NO_REMOTE: &str = "本屏不提供远程访问与文件导出";
-/// 控制源固定文案的字符集内变体（原串含全角逗号与 `为`，均不在字符集内）。
-pub const TEXT_AI_DISABLED: &str = "AI 引擎已停用 · 本地策略引擎默认下发";
+/// 控制源固定文案的字符集内变体（原串含**全角逗号 `，`** 与 `为`，均不在字符集内）。
+///
+/// **M3**：字面量的唯一定义已上收到 [`crate::ui::pages::TEXT_AI_DISABLED`]（与 P1 共用），
+/// 这里只是**转出别名**。
+pub const TEXT_AI_DISABLED: &str = crate::ui::pages::TEXT_AI_DISABLED;
 /// 百分比单位。
 pub const TEXT_PERCENT: &str = "%";
 /// 温度单位（⚠️ `℃`/`°` 都不在字符集内 ⇒ 取 `C`）。
@@ -146,14 +150,8 @@ const RUN_CARD_Y: i32 = INFO_CARD_Y + INFO_CARD_H + Dimens::GAP_SECTION;
 /// 关于本屏卡 y。
 const ABOUT_CARD_Y: i32 = RUN_CARD_Y + RUN_CARD_H + Dimens::GAP_SECTION;
 
-/// 指示灯五态顺序（`Unknown` 兜底在末位）。
-const LED_STATES: [LinkState; 5] = [
-    LinkState::Connected,
-    LinkState::Connecting,
-    LinkState::Disconnected,
-    LinkState::NotConfigured,
-    LinkState::Unknown,
-];
+// `LED_STATES` / `link_color` / `link_icon` / `control_source_text` 已上收
+// `ui/pages/mod.rs`（**M3**：此前 P1 / P6 逐字重复约 50 行）。此处经 `use` 引入。
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. 子结构
@@ -165,7 +163,8 @@ struct SysRow {
     name: Label,
     value: Rc<Label>,
     value_style: Cell<usize>,
-    leds: Option<[Rc<LedIndicator>; 5]>,
+    /// 连接类行的逐态指示灯（长度 = [`LED_STATES`]，**`Vec` 而非定长数组** —— 见 M2 注释）。
+    leds: Option<Vec<Rc<LedIndicator>>>,
 }
 
 impl SysRow {
@@ -188,7 +187,9 @@ impl SysRow {
             y + theme::center_offset(ROW_H, TextSlot::CardValue.px() as i32),
         );
         let leds = if link {
-            let mut arr = Vec::with_capacity(LED_STATES.len());
+            // **M2**：与 P1 同款 —— 去掉生产路径上的 `try_into().expect("固定 5 态")`
+            // （`[_; 5]` 与 `LED_STATES` 长度各自独立，改一处即 panic 掉整页）。
+            let mut arr: Vec<Rc<LedIndicator>> = Vec::with_capacity(LED_STATES.len());
             for st in LED_STATES {
                 let led = Rc::new(LedIndicator::new(
                     parent,
@@ -202,7 +203,6 @@ impl SysRow {
                 set_visible(led.obj(), false);
                 arr.push(led);
             }
-            let arr: [Rc<LedIndicator>; 5] = arr.try_into().expect("固定 5 态");
             set_visible(value.obj(), false);
             Some(arr)
         } else {
@@ -290,7 +290,7 @@ impl P6SystemPage {
         ];
 
         // ── 装置信息卡（4 行）──
-        let info_card = crate::ui::pages::decor(&root, Dimens::CONTENT_W, INFO_CARD_H, &theme::card())?;
+        let info_card = decor(&root, Dimens::CONTENT_W, INFO_CARD_H, &theme::card())?;
         info_card.set_pos(0, INFO_CARD_Y);
         let info_head = text_label(
             &info_card,
@@ -313,7 +313,7 @@ impl P6SystemPage {
         }
 
         // ── 运行信息卡（7 行；3/4/5 行为连接类）──
-        let run_card = crate::ui::pages::decor(&root, Dimens::CONTENT_W, RUN_CARD_H, &theme::card())?;
+        let run_card = decor(&root, Dimens::CONTENT_W, RUN_CARD_H, &theme::card())?;
         run_card.set_pos(0, RUN_CARD_Y);
         let run_head = text_label(
             &run_card,
@@ -346,7 +346,7 @@ impl P6SystemPage {
 
         // ── 关于本屏卡（3 行 + 说明行）──
         let about_card =
-            crate::ui::pages::decor(&root, Dimens::CONTENT_W, ABOUT_CARD_H, &theme::card())?;
+            decor(&root, Dimens::CONTENT_W, ABOUT_CARD_H, &theme::card())?;
         about_card.set_pos(0, ABOUT_CARD_Y);
         let about_head = text_label(
             &about_card,
@@ -400,19 +400,28 @@ impl P6SystemPage {
         let (device, _alarms, info) = sections(input);
 
         // 装置信息（F8.3：一次性读取，不随刷新跳动）。
-        self.info[0].set_text(non_empty_opt(&info.model), &self.value_styles);
-        self.info[1].set_text(non_empty_opt(&info.serial), &self.value_styles);
-        self.info[2].set_text(non_empty(&info.firmware_version), &self.value_styles);
-        self.info[3].set_text(info.build_time.as_deref(), &self.value_styles);
+        // 契约字符串**直上屏** ⇒ 一律过 [`display_safe`]（保证字符 ⊆ cmap；见 D9）：
+        // 实测型号 `BECG-3568` 的 `-`、版本 `1.0.0-rc1` 的 `-`/`rc`、ISO 时间戳的 `T`/`Z`
+        // 在生成字体里都**没有字形**，直上屏即豆腐块。
+        let model = non_empty_opt(&info.model).map(display_safe);
+        let serial = non_empty_opt(&info.serial).map(display_safe);
+        let firmware = non_empty(&info.firmware_version).map(display_safe);
+        let build_time = non_empty_opt(&info.build_time).map(display_safe);
+        self.info[0].set_text(model.as_deref(), &self.value_styles);
+        self.info[1].set_text(serial.as_deref(), &self.value_styles);
+        self.info[2].set_text(firmware.as_deref(), &self.value_styles);
+        self.info[3].set_text(build_time.as_deref(), &self.value_styles);
 
         // 运行信息（与 P1 同源；刷新 ≤5 s 由慢拍 A 的 3 s 节拍保证 —— 设计 §4.2.1）。
         self.run[0].set_text(device.uptime_secs.map(format_uptime).as_deref(), &self.value_styles);
+        // **C1**：数值一律经 `fmt_int0`（负号恒 U+2212）—— 此前 `format!("{v:.0}")` 会在
+        // 温度为负时产出 ASCII `-`（字体 cmap 无该字形 ⇒ 豆腐块）。
         self.run[1].set_text(
-            device.cpu_temp_c.map(|v| format!("{v:.0} {TEXT_CELSIUS}")).as_deref(),
+            device.cpu_temp_c.map(|v| format!("{} {TEXT_CELSIUS}", fmt_int0(v))).as_deref(),
             &self.value_styles,
         );
         self.run[2].set_text(
-            device.mem_used_pct.map(|v| format!("{v:.0} {TEXT_PERCENT}")).as_deref(),
+            device.mem_used_pct.map(|v| format!("{} {TEXT_PERCENT}", fmt_int0(v))).as_deref(),
             &self.value_styles,
         );
         self.run[3].set_link(device.iec104);
@@ -427,7 +436,10 @@ impl P6SystemPage {
         let service_addr = loopback_service_text();
         self.about[1].set_text(Some(&service_addr), &self.value_styles);
         // ⚠️ 与上一行**分列**：这一行是"装置在管理网上的地址"，缺失即「未提供」（EDGE-16）。
-        self.about[2].set_text(device_mgmt_ip(&info.mgmt_ipv4), &self.value_styles);
+        // 契约字符串直上屏 ⇒ 过 [`display_safe`]（同 D9；IPv4 点分十进制本就在 cmap 内，
+        // 此处是"口径一致"的防御，不改变现有取值）。
+        let mgmt_ip = device_mgmt_ip(&info.mgmt_ipv4).map(display_safe);
+        self.about[2].set_text(mgmt_ip.as_deref(), &self.value_styles);
     }
 
     // ── 只读断言口径 ─────────────────────────────────────────────────────
@@ -543,35 +555,6 @@ fn non_empty(v: &str) -> Option<&str> {
 /// `Option<String>` 版本的 [`non_empty`]。
 fn non_empty_opt(v: &Option<String>) -> Option<&str> {
     v.as_deref().filter(|s| !s.is_empty())
-}
-
-/// 链路态 → 灯色（`Unknown` 取"未配置"灰，**绝不落入"正常"绿** —— F6.5）。
-fn link_color(state: LinkState) -> Color {
-    match state {
-        LinkState::Connected => Palette::LINK_OK,
-        LinkState::Connecting => Palette::LINK_PENDING,
-        LinkState::Disconnected => Palette::LINK_DOWN,
-        LinkState::NotConfigured | LinkState::Unknown => Palette::LINK_UNCONFIGURED,
-    }
-}
-
-/// 链路态 → 几何字形（F14 的"图标"通道）。
-fn link_icon(state: LinkState) -> &'static str {
-    match state {
-        LinkState::Connected | LinkState::Connecting => "●",
-        LinkState::Disconnected => "!",
-        LinkState::NotConfigured | LinkState::Unknown => "○",
-    }
-}
-
-/// 控制源文案（F6 备注的固定文案；⚠️ `AiDisabled` 取字符集内变体，与原串的差异是
-/// 全角逗号不在字体子集内）。
-fn control_source_text(src: ControlSource) -> &'static str {
-    match src {
-        ControlSource::LocalStrategy => ControlSource::LocalStrategy.display_name(),
-        ControlSource::AiDisabled => TEXT_AI_DISABLED,
-        ControlSource::Unknown => ControlSource::Unknown.display_name(),
-    }
 }
 
 /// 服务监听口径文字（`ServiceScope` 的展示名 —— "仅回环 127.0.0.1"）。

@@ -28,10 +28,14 @@
 //! - `alarms.available = false` ⇒ `UnavailableState`「告警源不可用」；**空列表**才是
 //!   `EmptyState`「近 24 小时无告警」—— 二者**语义不同、不得互替**（EDGE-09 / UI §8.3）。
 //!
-//! ## 栅格常量（**全部由 theme 推导**）
+//! ## 栅格常量（**除 1 个契约值外，全部由 theme 推导**）
 //!
 //! `theme.rs` 未收录"页级"栅格（卡高 / 列宽 / 段位移等），而 B2a 不得改 B1 的交付物 ⇒
-//! 本文件顶部集中定义，**每个数都由 theme 常量算出**（无裸数值），推导写在注释里。
+//! 本文件顶部集中定义，**每个数都由 theme 常量算出**，推导写在注释里。
+//!
+//! ⚠️ **唯一的例外**：[`MAIN_CARD_H`] = `320` —— 它是 UI §6.1 的**契约给定值**
+//! （`484×320`），**不是**从内容反推、也不是 theme 档位能表达的（B2a 代码质量评审 **M5**：
+//! 此前文件头笼统写"无裸数值"，与该值不符 ⇒ 此处**如实标注**，不再声称"零裸数值"）。
 //!
 //! ## 帧内文案与字体子集的冲突（**三处偏差，逐条标注**）
 //!
@@ -44,9 +48,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use mupc_display_proto::{
-    AlarmLevel, ControlSource, FieldFlag, LinkState, RunState, SocSource,
-};
+use mupc_display_proto::{AlarmLevel, FieldFlag, RunState, SocSource};
 
 use crate::lvgl::obj::Obj;
 use crate::lvgl::style::{Color, Style};
@@ -57,8 +59,10 @@ use crate::ui::components::{
     EmptyState, LedIndicator, StatusChip, UnavailableKind, UnavailableState,
 };
 use crate::ui::pages::{
-    decor, format_epoch_ms_utc, format_uptime, label, layout_box, page_root, sections,
-    set_style_index, set_visible, show_only, text_label, PageInput, MISSING, NOT_READ, PLACEHOLDER,
+    control_source_text, decor, display_safe, fmt_int0, fmt_sigma_kw, fmt_signed_1dp,
+    format_epoch_ms_utc, format_uptime, label, layout_box, link_color, link_icon, page_root,
+    sections, set_style_index, set_visible, show_only, text_label, PageInput, LED_STATES, MISSING,
+    NOT_READ, PLACEHOLDER,
 };
 use crate::ui::theme::{self, ChipSkin, Dimens, Palette, TextSlot};
 
@@ -121,8 +125,6 @@ pub const TEXT_PHASE_C: &str = "C 相";
 pub const TEXT_PHASE_TOTAL: &str = "总有功";
 /// 相卡字段名（有功）。
 pub const TEXT_ACTIVE_POWER: &str = "有功功率";
-/// 总卡字段名。
-pub const TEXT_DEVICE_TOTAL_POWER: &str = "设备总有功";
 /// 相卡字段名（电流）。
 pub const TEXT_CURRENT: &str = "电流";
 
@@ -147,9 +149,12 @@ pub const TEXT_CONTROL_SOURCE: &str = "当前控制源";
 /// 百分比单位（内存使用率）。
 pub const TEXT_PERCENT: &str = "%";
 /// 控制源固定文案的字符集内变体（⚠️ 偏差 2：原串 `AI 引擎已停用，本地策略引擎为默认下发源`
-/// 含**全角逗号**与 **`为`** —— 两者都不在 §3.6 字符集 / 字体子集内 ⇒ 取 `·` 分隔并改述为
-/// 「默认下发」。语义（AI 停用、本地策略引擎为默认下发源）不变）。
-pub const TEXT_AI_DISABLED: &str = "AI 引擎已停用 · 本地策略引擎默认下发";
+/// 含**全角逗号 `，`** 与 **`为`** —— 两者都不在 §3.6 字符集 / 生成字体 cmap 内 ⇒ 取 `·`
+/// 分隔并改述为「默认下发」。语义（AI 停用、本地策略引擎为默认下发源）不变）。
+///
+/// **M3**：字面量的唯一定义已上收到 [`crate::ui::pages::TEXT_AI_DISABLED`]（与 P6 共用），
+/// 这里只是**转出别名**（保持两页各自的公开常量名不变）。
+pub const TEXT_AI_DISABLED: &str = crate::ui::pages::TEXT_AI_DISABLED;
 
 /// 告警区标题（F7）。
 pub const TEXT_ALARM_TITLE: &str = "最近告警";
@@ -197,6 +202,12 @@ const TIGHT_GAP: i32 = Dimens::SCROLLBAR_MARGIN;
 const MAIN_CARD_H: i32 = 320;
 /// 主行卡**内容区**高 = 卡高 − 上下（描边 1 + 内边距 16）= 320 − 34 = **286**。
 /// 卡内各件在此高度内排布（顶行贴顶、尾行**贴底**，中缝吸收余量）。
+///
+/// ⚠️ **行高 ≠ 字号**（B2a 代码质量评审 **M1**）：生成字体的实测**行高**是 `px + 2..+ 7`
+/// （24→26 / 32→35 / 148→154），故下面各 `*_Y` 常量按 **px** 排布时，**尾行会伸出内容区下缘
+/// 2..7 px**（不是注释里曾写的"恰好抵到 286"）。**实测无裁切、无重叠**：伸出量仍落在
+/// 卡内下内边距（[`CARD_INSET`] = 17）之内 —— 距卡**外缘**仍有余量（≥12 px）。
+/// 本轮**只订正注释**，不改布局（改布局会破坏 UI §6.1 的档位契约）。
 const MAIN_CARD_BODY_H: i32 = MAIN_CARD_H - 2 * CARD_INSET;
 /// SOC 数值行 y。
 const SOC_VALUE_Y: i32 = STRIP_H + Dimens::GAP_GROUP;
@@ -205,7 +216,10 @@ const SOC_VALUE_SLOT_W: i32 = 2 * TextSlot::SocValue.px() as i32;
 /// SOC 源胶囊宽。
 const SOC_CHIP_W: i32 = 2 * Dimens::CHIP_MIN_W;
 /// 量程条 y —— **贴底**排布：其下依次为刻度行（缝 [`TIGHT_GAP`]）与卡内下边距，
-/// 即 `[量程条 20] + 4 + [刻度 24]` 恰好抵到内容区底缘（= 286）。
+/// 即按**字号**预留 `[量程条 20] + 4 + [刻度 24]` = 内容区底缘（= 286）。
+///
+/// ⚠️ 刻度行的**实际行高**是 26（= 24 + 2，见 [`MAIN_CARD_BODY_H`] 的实测定标）⇒ 其底缘落在
+/// 内容区下缘**之下 2 px**（内容区 286 → 288），距卡**外缘**仍余 15 px，**不裁切、不重叠**。
 const SOC_BAR_Y: i32 =
     MAIN_CARD_BODY_H - SOC_BAR_H - TIGHT_GAP - TextSlot::Body.px() as i32;
 /// 量程条当前值竖刻线宽（UI §6.1「4 px 高亮」）。
@@ -257,9 +271,16 @@ const PHASE_BODY_H: i32 = PHASE_I_Y + TextSlot::PhaseCurrent.px() as i32;
 /// 相卡高。
 const PHASE_CARD_H: i32 = PHASE_BODY_H + 2 * CARD_INSET;
 /// P 数值槽宽（2 × 64 = 128）。
-const PHASE_P_SLOT_W: i32 = 2 * TextSlot::PhasePower.px() as i32;
+///
+/// **`pub(crate)`**：`ui/tests.rs::pages_chain` 用它做**结构上敏感**的断言
+/// （`p_value.coords().width() == PHASE_P_SLOT_W` —— 去掉 `set_size` 即红；B2a
+/// 代码质量评审 ①：此前只断"数值右缘 < 单位左缘"，而无显式宽度时 `coords()` 返回的是
+/// **陈旧的 obj 盒**而非绘出的文本外延，该断言结构上不可能抓到"文本越槽"）。
+pub(crate) const PHASE_P_SLOT_W: i32 = 2 * TextSlot::PhasePower.px() as i32;
 /// I 数值槽宽（2 × 48 = 96）。
-const PHASE_I_SLOT_W: i32 = 2 * TextSlot::PhaseCurrent.px() as i32;
+///
+/// **`pub(crate)`**：理由同 [`PHASE_P_SLOT_W`]。
+pub(crate) const PHASE_I_SLOT_W: i32 = 2 * TextSlot::PhaseCurrent.px() as i32;
 /// 相卡方向箭头 x（= P 数值槽宽 + 跨区缝 24）。
 const PHASE_ARROW_X: i32 = PHASE_P_SLOT_W + Dimens::GAP_SECTION;
 /// 方向箭头字号（UI §6.1「箭头 28 px」）。
@@ -348,7 +369,8 @@ struct DeviceCard {
     /// 卡片根（存活锚点）。
     _obj: Obj,
     value: Rc<Label>,
-    leds: Option<[Rc<LedIndicator>; 5]>,
+    /// 连接类卡的逐态指示灯（长度 = [`LED_STATES`]，**`Vec` 而非定长数组** —— 见 M2 注释）。
+    leds: Option<Vec<Rc<LedIndicator>>>,
 }
 
 /// 告警行。
@@ -387,6 +409,9 @@ pub struct P1StatusPage {
     _soc_segments: [Obj; 3],
     soc_gray: Obj,
     soc_marker: Obj,
+    /// 量程条左刻度（`0`）—— 「贴底排布」的 `coords()` 断言读回用（B2a 代码质量评审：卡内
+    /// 元素此前**零 `coords()` 断言**，排布正确性全靠手算）。
+    soc_scale: Obj,
     // ── PCS 卡 ──
     /// PCS 卡根（**存活锚点**：卡被 `drop` 会级联删掉卡内全部子对象 —— 见 `_keep` 注）。
     _pcs_card: Obj,
@@ -608,7 +633,7 @@ impl P1StatusPage {
         scale_low.set_pos(0, SOC_SCALE_Y);
         let scale_high = text_label(&soc_card, TEXT_SOC_SCALE_HIGH, TextSlot::Weak, Palette::TEXT_WEAK)?;
         scale_high.set_pos(MAIN_CARD_INNER_W - SOC_SCALE_LABEL_W, SOC_SCALE_Y);
-        keep.push(scale_low.into_obj());
+        let soc_scale = scale_low.into_obj();
         keep.push(scale_high.into_obj());
 
         // ── PCS 卡 ──
@@ -717,6 +742,14 @@ impl P1StatusPage {
             p_label.set_pos(0, PHASE_P_LABEL_Y);
             let p_value = Rc::new(label(&card, TextSlot::PhasePower, Palette::PLACEHOLDER)?);
             p_value.set_text(PLACEHOLDER);
+            // **I1**：显式宽度 + `DOTS` —— 此前数值 label **无 `set_size`、无长模式**，LVGL 按
+            // 文本自身宽度自增；`PHASE_P_SLOT_W`（128）只是"按 3 位数字声明"的邻居起点，
+            // 并非约束。实测 64 px 档：数字 `adv_w` 35.5 / `.` 17.8 ⇒ `12.5` = 124.3（勉强）、
+            // **`123.4` = 159.8 越槽**，会压住 x = [`PHASE_P_SLOT_W`] 的 `kW` 与
+            // x = [`PHASE_ARROW_X`] 的方向箭头（相卡内容宽仅 [`PHASE_INNER_W`] = 202）。
+            // 现在超长数值**在槽内截断**（`123.4` → `1…`），不压邻居；字号档位不变（UI §3.3 契约）。
+            p_value.set_size(PHASE_P_SLOT_W, TextSlot::PhasePower.px() as i32);
+            p_value.set_long_mode(LongMode::DOTS);
             p_value.set_pos(0, PHASE_P_Y);
             let p_unit = text_label(&card, TEXT_KW, TextSlot::Body, Palette::TEXT_SECOND)?;
             p_unit.set_pos(
@@ -741,6 +774,9 @@ impl P1StatusPage {
             i_label.set_pos(0, PHASE_I_LABEL_Y);
             let i_value = Rc::new(label(&card, TextSlot::PhaseCurrent, Palette::PLACEHOLDER)?);
             i_value.set_text(PLACEHOLDER);
+            // 同 **I1**：I 值槽宽 [`PHASE_I_SLOT_W`]（96）为显式约束 + `DOTS` 截断。
+            i_value.set_size(PHASE_I_SLOT_W, TextSlot::PhaseCurrent.px() as i32);
+            i_value.set_long_mode(LongMode::DOTS);
             i_value.set_pos(0, PHASE_I_Y);
             let i_unit = text_label(&card, TEXT_A, TextSlot::Body, Palette::TEXT_SECOND)?;
             i_unit.set_pos(
@@ -815,7 +851,11 @@ impl P1StatusPage {
             // 连接类卡片（调度主站 / 核间）：五态各一个 `LedIndicator`，只显示其一
             // （`Led` 的色是**控件字段**、无 `set_color` ⇒ 逐态预建，见 B2a 报告）。
             let leds = if matches!(i, 5 | 6) {
-                let mut arr = Vec::with_capacity(LED_STATES.len());
+                // **M2**：此前是 `Vec -> [_; 5]` 的 `try_into().expect("固定 5 态")` —— 该
+                // `expect` 在**生产装配路径**上，且 `[_; 5]` 与 [`LED_STATES`] 的长度**各自
+                // 独立**（改一个不改另一个 ⇒ 运行时 panic 掉整个页面）。改用 `Vec` 承载：
+                // 长度天然与 `LED_STATES` 一致，`show_only` 也按实际长度工作 ⇒ **无 panic 点**。
+                let mut arr: Vec<Rc<LedIndicator>> = Vec::with_capacity(LED_STATES.len());
                 for st in LED_STATES {
                     let led = Rc::new(LedIndicator::new(
                         &card,
@@ -829,7 +869,6 @@ impl P1StatusPage {
                     set_visible(led.obj(), false);
                     arr.push(led);
                 }
-                let arr: [Rc<LedIndicator>; 5] = arr.try_into().expect("固定 5 态");
                 set_visible(value.obj(), false);
                 Some(arr)
             } else {
@@ -925,6 +964,7 @@ impl P1StatusPage {
             _soc_segments: [seg_low, seg_mid, seg_high],
             soc_gray,
             soc_marker,
+            soc_scale,
             _pcs_card: pcs_card,
             pcs_icon,
             pcs_icon_style: Cell::new(usize::MAX),
@@ -1021,7 +1061,7 @@ impl P1StatusPage {
         };
         self.soc_value.set_text(
             &value
-                .map(|v| format!("{v:.0}"))
+                .map(fmt_int0)
                 .unwrap_or_else(|| PLACEHOLDER.to_string()),
         );
         set_style_index(
@@ -1121,9 +1161,10 @@ impl P1StatusPage {
         let sigma = frame
             .map(|f| NumView::from_field(&f.p_total))
             .unwrap_or(NumView::Dash(FieldFlag::NotRead));
+        // **C1**：数值部分走唯一出口 [`fmt_sigma_kw`]（负号恒 U+2212）—— 此前这里手写
+        // `\u{2212}` 而三相卡走 `format!("{v:.1}")`（ASCII `-`），**同一页两套口径**。
         let sigma_text = match sigma.value() {
-            Some(v) if v >= 0.0 => format!("{TEXT_SIGMA_PREFIX} +{v:.1} {TEXT_KW}"),
-            Some(v) => format!("{TEXT_SIGMA_PREFIX} \u{2212}{:.1} {TEXT_KW}", -v),
+            Some(v) => fmt_sigma_kw(v),
             None => format!("{TEXT_SIGMA_PREFIX} {PLACEHOLDER}"),
         };
         self.pcs_sigma.set_text(&sigma_text);
@@ -1224,19 +1265,20 @@ impl P1StatusPage {
         // - `info` 段（版本 / 编译时间）是"该字段根本没有" ⇒ **「未提供」**（EDGE-16）；
         // - `device` 段（uptime / 温度 / 内存）是"这一拍没采到" ⇒ **「未取数」**。
         let texts: [String; 8] = [
-            non_empty(&info.firmware_version).unwrap_or_else(|| MISSING.to_string()),
-            info.build_time.clone().unwrap_or_else(|| MISSING.to_string()),
+            // 契约字符串**直上屏** ⇒ 过 [`display_safe`]（保证字符 ⊆ cmap；见 D9）。
+            display_safe(&non_empty(&info.firmware_version).unwrap_or_else(|| MISSING.to_string())),
+            display_safe(info.build_time.as_deref().unwrap_or(MISSING)),
             device
                 .uptime_secs
                 .map(format_uptime)
                 .unwrap_or_else(|| NOT_READ.to_string()),
             device
                 .cpu_temp_c
-                .map(|v| format!("{v:.0} C"))
+                .map(|v| format!("{} C", fmt_int0(v)))
                 .unwrap_or_else(|| NOT_READ.to_string()),
             device
                 .mem_used_pct
-                .map(|v| format!("{v:.0} {TEXT_PERCENT}"))
+                .map(|v| format!("{} {TEXT_PERCENT}", fmt_int0(v)))
                 .unwrap_or_else(|| NOT_READ.to_string()),
             String::new(), // 连接类：由指示灯承担
             String::new(),
@@ -1503,54 +1545,57 @@ impl P1StatusPage {
     pub fn alarm_card(&self) -> &Obj {
         &self.alarm_card
     }
+
+    // ── 卡内元素 `coords()` 读回（**B2a 代码质量评审「补断言」**：此前"320 重排后不重叠 /
+    //    不越界"是评审员**手算**得出的，卡内元素**零 `coords()` 断言**）───────────────
+
+    /// SOC 量程条（三段中的首段）对象。
+    pub fn soc_bar_obj(&self) -> &Obj {
+        &self._soc_segments[0]
+    }
+
+    /// 量程条左刻度（`0`）对象。
+    pub fn soc_scale_obj(&self) -> &Obj {
+        &self.soc_scale
+    }
+
+    /// PCS 佐证行（「方向一致」文本）对象。
+    pub fn pcs_consistent_obj(&self) -> &Obj {
+        &self.pcs_consistent
+    }
+
+    /// 第 `i` 张相卡的 P 数值对象（**I1** 越界断言用）。
+    pub fn phase_p_obj(&self, i: usize) -> Option<&Obj> {
+        self.phases.get(i).map(|c| c.p_value.obj())
+    }
+
+    /// 第 `i` 张相卡的 P 单位（`kW`）对象。
+    pub fn phase_unit_obj(&self, i: usize) -> Option<&Obj> {
+        self.phases.get(i).map(|c| c._p_unit.obj())
+    }
+
+    /// 第 `i` 张相卡的方向箭头对象。
+    pub fn phase_arrow_obj(&self, i: usize) -> Option<&Obj> {
+        self.phases.get(i).map(|c| c.arrow.obj())
+    }
+
+    /// 第 `i` 张相卡的 I 数值对象。
+    pub fn phase_i_obj(&self, i: usize) -> Option<&Obj> {
+        self.phases.get(i).map(|c| c.i_value.obj())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 5. 小工具
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 指示灯五态顺序（与 `LedIndicator` 数组一一对应；`Unknown` 兜底在末位）。
-const LED_STATES: [LinkState; 5] = [
-    LinkState::Connected,
-    LinkState::Connecting,
-    LinkState::Disconnected,
-    LinkState::NotConfigured,
-    LinkState::Unknown,
-];
-
-/// 链路态 → 灯色（PRD §3.1 指定色；`Unknown` 取"未配置"灰，**绝不落入"正常"绿**，
-/// F6.5）。
-fn link_color(state: LinkState) -> Color {
-    match state {
-        LinkState::Connected => Palette::LINK_OK,
-        LinkState::Connecting => Palette::LINK_PENDING,
-        LinkState::Disconnected => Palette::LINK_DOWN,
-        LinkState::NotConfigured | LinkState::Unknown => Palette::LINK_UNCONFIGURED,
-    }
-}
-
-/// 链路态 → 几何字形（F14 的"图标"通道）。
-fn link_icon(state: LinkState) -> &'static str {
-    match state {
-        LinkState::Connected | LinkState::Connecting => "●",
-        LinkState::Disconnected => "!",
-        LinkState::NotConfigured | LinkState::Unknown => "○",
-    }
-}
-
-/// 控制源文案（F6 备注的固定文案；⚠️ `AiDisabled` 取字符集内变体，见文件头偏差 2）。
-fn control_source_text(src: ControlSource) -> &'static str {
-    match src {
-        ControlSource::LocalStrategy => ControlSource::LocalStrategy.display_name(),
-        ControlSource::AiDisabled => TEXT_AI_DISABLED,
-        ControlSource::Unknown => ControlSource::Unknown.display_name(),
-    }
-}
-
 /// `NumView` → 显示字面（`Value` → 1 位小数；`Dash` → 占位符，**严禁补 0**）。
+///
+/// 负号口径见 [`crate::ui::pages::fmt_signed_1dp`]（**恒 U+2212**，C1）。此函数是 `NumView`
+/// 这一层的薄封装，数值部分仍走那一个唯一出口。
 fn num_text(nv: &NumView) -> String {
     match nv.value() {
-        Some(v) => format!("{v:.1}"),
+        Some(v) => fmt_signed_1dp(v),
         None => PLACEHOLDER.to_string(),
     }
 }
