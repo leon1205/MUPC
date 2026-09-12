@@ -245,6 +245,24 @@ impl Display {
         }
     }
 
+    /// **测试专用**：强制渲染一趟（`lv_refr_now`），使 `set_size` / `set_pos` 之后的
+    /// `coords` 立即落定 —— 否则 [`Obj::size`](super::obj::Obj::size) 读到上一趟的值。
+    ///
+    /// ⚠️ **生产路径禁用**（设计 §5.2 不变量 2：渲染只发生在 `lv_timer_handler` 内；
+    /// 生产调 `lv_refr_now` 会退化为全帧重绘、CPU 预算失控）。故本入口**只在
+    /// `cfg(test)` 下存在** —— 生产构建里根本没有它。
+    ///
+    /// 已 [`super::deinit`] 或处于上一世代时是 **no-op**（[`Self::is_live`] 守卫）：
+    /// 那时 display 已随 `lv_deinit()` 销毁，`self.raw` 悬垂（防 UB）。
+    #[cfg(test)]
+    pub fn refr_now_for_test(&self) {
+        if !self.is_live() {
+            return;
+        }
+        // SAFETY: `self.raw` 存活（`is_live()` 已校验：LVGL 已初始化且世代一致）。
+        unsafe { sys::lv_refr_now(self.raw) };
+    }
+
     /// 原始 display 指针（薄层内部：`indev.rs` 绑屏、`tests.rs` 强制渲染）。
     pub(crate) fn raw(&self) -> *mut sys::lv_display_t {
         self.raw

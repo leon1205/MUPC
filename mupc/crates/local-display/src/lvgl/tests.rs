@@ -404,4 +404,11 @@ fn lvgl_core_bridge_chain() {
     // 同理由本函数在同一线程内继续驱动（A2 的场景 ⑰/⑲ 末尾已 `deinit`，
     // `widgets_chain` 自带 `init`/`deinit` 配对）。
     super::tests_a3::widgets_chain();
+
+    // ── B1「界面层」场景（`ui/tests.rs::ui_chain`）───────────────────────
+    // 同理由本函数在同一线程内继续驱动（`widgets_chain` 末尾已 `deinit`，
+    // `ui_chain` 自带 `init`/`deinit` 配对）。**PM 授权的挂钩**：`ui_chain` 是
+    // B1 验收项 ②③④（组件创建 + 主题样式施加 + 三通道读回 + 不可用态区分）的
+    // 唯一落点，不接则那些覆盖永不执行。
+    crate::ui::tests::ui_chain();
 }

@@ -46,6 +46,9 @@ pub mod screen;
 pub mod state;
 pub mod timing;
 pub mod touch;
+// 工作单元 B1（v2.0）：界面层（`ui/theme.rs` 外观单一真源 + `ui/components.rs` 组合控件）。
+// 页面路由与 6 页属 B2；`ui/**` 仅经 `crate::lvgl` 薄安全层访问 LVGL（设计 §5.1 / §11.4）。
+pub mod ui;
 
 pub use crate::canvas::{Canvas, Color, OffscreenCanvas, Rect, blend_over, hex, rgb};
 pub use crate::channel::{ChannelEndpoint, DisplayChannelClient, GET_TIMEOUT};

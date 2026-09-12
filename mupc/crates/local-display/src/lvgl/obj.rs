@@ -544,6 +544,34 @@ impl Obj {
     {
         self.on(EventCode::CLICKED, f)
     }
+
+    /// 向本对象**派发**一个事件（`lv_obj_send_event`）—— [`Obj::on`] 的对偶入口。
+    ///
+    /// # 用途
+    ///
+    /// 让 `ui/**` 在**离屏链路**里驱动交互状态机：不接 `indev` 也能把
+    /// `PRESSED` / `RELEASED` / `PRESS_LOST` / `LONG_PRESSED` / `CLICKED` 送到对象上，
+    /// 于是"松手取消""长按提交""点击防重"这些**只由状态机承载**的分支可被回归覆盖
+    /// （此前 `ui` 层只有 `on`、没有派发口 ⇒ 那些分支从未被驱动过）。
+    ///
+    /// # 语义
+    ///
+    /// 与真实操作走**同一条** LVGL 派发路径：先送本对象的事件项（[`super::event`] 桥 →
+    /// Rust 闭包，过滤器照常生效），再按 LVGL 的冒泡规则传给父链。`param` 传 `NULL`
+    /// （LVGL 允许；本层闭包不读它 —— [`Event`] 只携带事件码）。
+    ///
+    /// **注意**：这是"直接派发"，不经过 `indev` 的命中/滚动/禁用判定 —— 已 `DISABLED` 的
+    /// 对象照样能收到事件（正因如此，它才能用来验证回调**自身**的防重逻辑）。
+    ///
+    /// 句柄已失效时 no-op。
+    pub fn send_event(&self, code: EventCode) {
+        if !self.is_alive() {
+            return;
+        }
+        // SAFETY: 刚校验存活（删除标志 + 已初始化 + 世代）⇒ `self.raw` 指向活对象；
+        // `lv_obj_send_event` 只读取该对象及其事件项，`param = NULL` 是 C 侧允许的取值。
+        unsafe { sys::lv_obj_send_event(self.raw, code.raw(), std::ptr::null_mut()) };
+    }
 }
 
 #[cfg(test)]
