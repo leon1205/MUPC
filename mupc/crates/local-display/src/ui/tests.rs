@@ -1685,9 +1685,11 @@ pub(crate) fn ui_chain() {
             Some(2),
             "set_selected 必须真的落到 LVGL（只改 Rust 侧缓存即红）"
         );
-        // 切换后：新选中带位 **且旧选中必须已清** —— 只看新选中会漏掉"两个都亮"的缺陷
-        // （这正是"全清 + 单段置位"要防的形态）。改什么会让本条变红：`set_selected` 里
-        // 去掉 `clear_ctrl_all(CTRL_CHECKED)` ⇒ 第 0 段仍为 true。
+        // 切换后：新选中带位 **且旧选中必须已清** —— 只看新选中会漏掉"两个都亮"的缺陷。
+        // 本条的实际回归锁是构造期的 `set_one_checked(true)`，**不是** `set_selected` 自己清位：
+        // LVGL 在 `one_check` 路径里自动清位（`lv_buttonmatrix.c:165–167`），故去掉
+        // `set_selected` 里的 `clear_ctrl_all(CTRL_CHECKED)` ⇒ 本条**仍绿**（已实测；该行已删）。
+        // 已实测：注释掉 `set_one_checked(true)` ⇒ 本条变红。
         assert!(bm.has_ctrl(2, CTRL_CHECKED), "set_selected(2) ⇒ 第 2 段带 CHECKED");
         assert!(
             !bm.has_ctrl(0, CTRL_CHECKED),
@@ -1731,6 +1733,36 @@ pub(crate) fn ui_chain() {
             1,
             "回调读的是**实时**下标（改成构造期缓存值 / 常量即红）"
         );
+
+        // ── ⑦.0b 回退值（`current`）必须由**事件回调写回共享 Cell** ──────────────
+        // 序列复刻真机路径 ①②③：点选段 2 → LVGL 更新 `btn_id_sel` 并派发
+        // `VALUE_CHANGED` → 之后 `PRESS_LOST` 把 `btn_id_sel` 复位为 NONE。
+        // 这里不经真实触摸：用 `matrix().set_selected` 直接驱动 LVGL 的 `btn_id_sel`
+        // （就是 `lv_buttonmatrix_set_selected_button`），再派发 `VALUE_CHANGED`。
+        seg.set_selected(0); // current = 0、btn_id_sel = 0（点选前的状态）
+        seg.matrix().set_selected(2); // 模拟"用户点选了段 2"（绕过本类型的 clamp）
+        seg.send_event(EventCode::VALUE_CHANGED); // 触发回调 ⇒ 应把 2 写回共享 Cell
+        // 改什么会让本条变红：`current` 退回裸 `Cell<usize>` 且回调里写 `current.clone()`
+        // （`Cell` 的 clone 是**值拷贝** ⇒ 死写副本）—— 此时 `fallback_index()` 仍为 0。
+        assert_eq!(
+            seg.fallback_index(),
+            2,
+            "事件回调必须把选中下标写回共享 Cell（死写 ⇒ 仍为 0）"
+        );
+
+        // 模拟 `PRESS_LOST`：LVGL 把 `btn_id_sel` 复位为 `BUTTONMATRIX_BUTTON_NONE`（0xFFFF）。
+        // 只用 `matrix().set_selected`（本类型的 `set_selected` 会把 0xFFFF 夹成 count−1）。
+        seg.matrix().set_selected(0xFFFF);
+        assert_eq!(seg.raw_selected(), None, "前提：LVGL 已报无选中");
+        // 改什么会让本条变红：同 a)（死写 ⇒ current 仍为构造值 0，回退到点选前的旧下标）。
+        assert_eq!(
+            seg.selected(),
+            2,
+            "无选中时的回退值必须是用户最后选中的段（死写 ⇒ 退回构造值 0）"
+        );
+        // 该步（`matrix().set_selected`）只动 LVGL，不得反过来改本类型的回退值。
+        assert_eq!(seg.fallback_index(), 2, "回退值不因 LVGL 报无选中而改变");
+        seg.set_selected(0); // 复位，避免影响后续断言的状态基线
 
         // 参数非法**响亮失败**（不静默修正）
         assert!(

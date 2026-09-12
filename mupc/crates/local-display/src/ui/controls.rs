@@ -33,9 +33,10 @@
 //! | CD1 | **IPv4 四段总宽 = 792**（`4 × (64 + 64 + 64) + 3 × 8`），UI §5.1 #7 正文写 **856** | **文档自身矛盾**：856 **无法**由其同一行的分项算出（该行的分项按自身口径 = 792）。按 theme 分项常量推导为准（`Dimens::STEPPER_BTN_W × 2 + Dimens::IPV4_VALUE_W`），**不硬编码 856 或 792** | 无（**有意与 theme 分项一致**；建议 UI §5.1 #7 回改 856 → 792） |
 //! | CD2 | IPv4 汇总标签宽 = **184**（`CONTENT_W − 792 − GAP_MIN`）⇒ 整件 **992 = 内容区有效宽**，UI §6.1 行型 B 写「控件独占次行 (x36–x988)，用 `Ipv4Stepper` 856×64」 | 856 − 792 = 64 px **放不下** `192.168.1.10`（12 字符）；§6.1 要求控件独占次行（有效宽 992）⇒ 取"四段 + 缝 + 汇总 = 内容区宽" | **B2b-2**（P2 装配时若 PM 要求 x36 起排，需重定汇总标签的位置口径） |
 //! | CD3 | **`Dimens::DATETIME_COL_W`（112）在本文件不使用**：日期时间列宽取 **192**（`64 + 64 + 64`），值区宽取 **64**（内容区均分推导） | 112 **不可用**（两重）：① 若作**列宽** ⇒ 列宽下限 = `−`64 + 值 48(TOUCH_MIN) + `+`64 = **176 > 112**（触摸硬约束）；② 若作**值区宽** ⇒ 五列 = `5 × (64+112+64) + 4×8` = **1232**，既超内容区 992、也超屏幕 1024。⇒ 按「内容区有效宽均分五列」推导值区宽 | 建议 UI §5.1 #8 与本文件同法回改（112 → 64，592 → 992） |
-//! | CD4 | DateTimeStepper 总高 = **106**（列头 26 + 缝 16 + 步进 64），UI §5.1 #8 写 **64** | 表内 64 **未计入列头**，而同表的文字要求「每列需有列头标签（年 / 月 / 日 / 时 / 分）」⇒ 高度必然 > 64。列头高度取 [`TextSlot::Label`]（26 px，§3.3 控件文字档） | **B2b-2**：P3 的「自定义」展开区（UI 写 Y700 起、64 px）随之增高，装配时按 106 预留 |
+//! | CD4 | DateTimeStepper 总高 = **106**（分量标签行 26 + 缝 16 + 步进 64），UI §5.1 #8 写 **64** | §5.1 #8 只给了 `64` 高，**未提及分量标签行**（该表全文无「列头」字样）。分量标签（本文件称「列头」）的必要性来自**另两处**：① §6.3 P3 日志页线框 `Y700 （仅「自定义」时展开）起始 [年][月][日][时][分]` —— 五个分量列各带分量标注；② §3.6 全屏用字表 P3「筛选」行收录 `年` `月` `日` `时` `分` 五字 ⇒ **由这两处推断**出"五列各有一行分量标签"，高度必然 > 64。标签行高度取 [`TextSlot::Label`]（26 px，§3.3 控件文字档） | **B2b-2**：P3 的「自定义」展开区（UI 写 Y700 起、64 px）随之增高，装配时按 106 预留 |
 //! | CD5 | ~~分段控件的「选中」与「禁用」两条样式挂上但当前不参与绘制~~ **（已在本次提交 `fix(display): 薄层补 buttonmatrix 控制位接口` 修复 ⇒ 四态全部生效）** | **原根因**（v9.5.0 源码事实）：`lv_buttonmatrix` 的每段 `CHECKED` / `DISABLED` 状态由 `ctrl_bits[i]`（`LV_BUTTONMATRIX_CTRL_CHECKED` / `_DISABLED`）驱动（`lv_buttonmatrix.c` 绘制趟 `btn_state` 只由 ctrl 位与 `btn_id_sel` 组装），而**当时薄层 `ButtonMatrix` 未暴露** `lv_buttonmatrix_set_button_ctrl(_all)`；`set_one_checked(true)` 只置"互斥"标志（其内部 `make_one_button_checked` 只在按钮**已** CHECKED 时才保留），故 CHECKABLE 无法置位 ⇒ 用户点选只改变 `btn_id_sel`（PRESSED 高亮可见），CHECKED 从不产生 | **修复方式 / 验证**：薄层补 `set_ctrl_all` / `set_ctrl` / `clear_ctrl_all` / `has_ctrl` 四个薄封装（`src/lvgl/widgets.rs`），本控件改为构造期 `set_ctrl_all(CTRL_CHECKABLE)` + 初始段 `set_ctrl(start, CTRL_CHECKED)`，[`SegmentedControl::set_selected`] 改为"全清 CHECKED → 单段置位"，[`SegmentedControl::set_disabled`] 同步 `CTRL_DISABLED` 位；**回归锁**在 `ui/tests.rs::ui_chain` —— 以 `has_ctrl` 读回断言"每段 CHECKABLE / 恰一段 CHECKED / 切换后旧段已清"（注释掉 `set_ctrl_all(CTRL_CHECKABLE)` 那一行，该用例即变红，已实测） |
 //! | CD6 | 列头 / 汇总标签的**文本对齐**靠"窄标签 + [`theme::center_offset`] 定位"实现；IPv4 汇总标签在其 184 px 盒内**左对齐** | 薄层**没有**文本对齐通道（`lv_obj_set_style_text_align` 未封装，见 `components.rs` 模块文档「布局手法」） | 若 PM 要求汇总标签居中 / 右对齐：薄层补 `set_text_align` 后调整 |
+//! | CD7 | **段间缝取 8 px**：IPv4 四段缝取 [`Dimens::IPV4_GAP`]、日期时间列间缝取 [`Dimens::DATETIME_GAP`]（`theme.rs` 两者均为 **8**），与 UI §5.1 #7 / #8 尺寸式里的 `3×8` / `4×8` 一致 | **两处文档硬冲突**：§2.1「触摸优先」把「相邻可点控件间距 **≥ 16 px**（通用）」列为硬约束，而 §5.1 #7 / #8 取 8 px ⇒ **相邻两个可点按钮（上一段的 `+` 与下一段的 `−`）只隔 8 px**。**两难（实算）**：① IPv4 改 16 ⇒ `4×192 + 3×16 = 816`，**仍在内容区 992 以内**（可行）；② 日期时间改 16 ⇒ `5×192 + 4×16 = 1024`，**超出内容区 992**，且即便贴屏左缘也无左右安全边（§3.5 内容区 x16–x1008）⇒ 必须同时缩小值区宽（`(992 − 4×16 − 5×2×64) / 5 = 57`；`57 ≥ TOUCH_MIN 48` 勉强合法，但该值区还要容纳四位年份 `2026`，余量极小且 `DATETIME_VALUE_W` 的均分口径要一并改） | **归属：PM 裁定**（改 §5.1 的 8 px 还是改 §2.1 的 ≥16 px）。本文件**按 §5.1 逐条数字实现、取 8 px**，未自行改 16 |
 //!
 //! ## 薄层缺能力（如实标注，**未**在本单元处理）
 //!
@@ -296,9 +297,16 @@ pub struct SegmentedControl {
     bm: Rc<ButtonMatrix>,
     /// 段数（= 选项数；构造后不变）。
     count: usize,
-    /// 最近一次确认的选中下标 —— **仅**作 LVGL 报"无选中"（`LV_BUTTONMATRIX_BUTTON_NONE`）
-    /// 时的回退值，见 [`SegmentedControl::selected`]。
-    current: Cell<usize>,
+    /// 最近一次确认的选中下标 —— 构造期初始化为入参 `selected`，**此后每次
+    /// `VALUE_CHANGED` 由事件回调写回**（[`SegmentedControl::set_selected`] 亦写）。用途有
+    /// 二：① 作为 LVGL 报"无选中"（`LV_BUTTONMATRIX_BUTTON_NONE`，如按下后划出再抬起的
+    /// `PRESS_LOST`）时的**回退值**，见 [`SegmentedControl::selected`]；② 保证该情形下读回
+    /// 的是**用户最后一次的选择**，而不是点选前的旧值。
+    ///
+    /// **必须是 `Rc<Cell<_>>`（共享），不得退回裸 `Cell` + `.clone()`**：`Cell` 的 `clone`
+    /// 是**值拷贝**（得到独立的新 Cell），回调写的是副本 ⇒ 死写、本字段永停构造值 ——
+    /// 与 B1 `Stepper` 的 `current: Rc<Cell<i64>>` 同口径。
+    current: Rc<Cell<usize>>,
     /// 选中变更回调（`VALUE_CHANGED` 时触发，载荷 = 当前选中下标）。
     on_change: IndexCallback,
 }
@@ -371,7 +379,7 @@ impl SegmentedControl {
         bm.clear_ctrl_all(CTRL_CHECKED);
         bm.set_ctrl(start as u32, CTRL_CHECKED);
 
-        let current = Cell::new(start);
+        let current = Rc::new(Cell::new(start));
         let on_change: IndexCallback = Rc::new(RefCell::new(None));
 
         // ── 事件：`LV_EVENT_VALUE_CHANGED` 由键矩阵类处理器在**按下**时派发
@@ -384,7 +392,10 @@ impl SegmentedControl {
         //    环 ⇒ 句柄永不落地、控件永不删除。
         {
             let weak = Rc::downgrade(&bm);
-            let cur = current.clone();
+            // **必须共享同一 Cell**（`Rc::clone` = 加引用计数）：`Cell::clone` 是**值拷贝**，
+            // 拿到的是独立副本 ⇒ 下面 `cur.set(idx)` 写进副本 = **死写**，`self.current`
+            // 永停构造值，`selected()` 的回退分支会退回用户点选前的旧下标。
+            let cur = Rc::clone(&current);
             let cb = on_change.clone();
             bm.on(EventCode::VALUE_CHANGED, move |_e| {
                 let Some(b) = weak.upgrade() else { return };
@@ -416,6 +427,13 @@ impl SegmentedControl {
         &self.bm
     }
 
+    /// **仅测试**：`current`（`selected()` 的回退值）的当前内容 —— 用于断言
+    /// "事件回调确实把选中下标写回了共享 Cell"。
+    #[cfg(test)]
+    pub fn fallback_index(&self) -> usize {
+        self.current.get()
+    }
+
     /// 选项数（= 段数）。
     pub fn count(&self) -> usize {
         self.count
@@ -441,9 +459,18 @@ impl SegmentedControl {
     pub fn set_selected(&self, index: usize) {
         let i = clamp_index(index, self.count);
         self.bm.set_selected(i as u32);
-        // 同步 `CHECKED` ctrl 位（"选中态样式"的**唯一**触发源）：先全清再单段置位，
-        // 否则旧选中段会保持高亮 ⇒ 界面上出现"两个都亮"。
-        self.bm.clear_ctrl_all(CTRL_CHECKED);
+        // 同步 `CHECKED` ctrl 位（"选中态样式"的**唯一**触发源）。
+        //
+        // **故意不在此重复清位**：互斥由 LVGL 的 `one_check` 路径保证 ——
+        // `lv_buttonmatrix_set_button_ctrl()` 在 `one_check` 为真且 ctrl 含 `CHECKED` 时
+        // **先** `clear_button_ctrl_all(CHECKED)` 再置位
+        // （`vendor/lvgl/src/widgets/buttonmatrix/lv_buttonmatrix.c:165–167`），
+        // 故此处再写一行 `clear_ctrl_all(CTRL_CHECKED)` 是**冗余**的（已实测：去掉它
+        // `ui_chain` 仍全绿）。
+        //
+        // 后果（有意保留）：互斥这条不变量**只能**由构造期的 `set_one_checked(true)` 成立
+        // ⇒ `ui/tests.rs` 的"旧段已清"断言因此成为 `set_one_checked(true)` 的**回归锁**
+        // （已实测：注释掉 `set_one_checked(true)` ⇒ 该断言变红）。
         self.bm.set_ctrl(i as u32, CTRL_CHECKED);
         self.current.set(i);
     }
@@ -592,6 +619,7 @@ impl Ipv4Stepper {
             .map_err(|_| LvglError::InvalidArgument("Ipv4Stepper: 段数与 IPV4_OCTETS 不符"))?;
 
         for (i, seg) in segments.iter().enumerate() {
+            // 段间缝 8 px 与 §2.1 的 ≥16 px 冲突，见文件头 CD7（待 PM 裁定）。
             seg.set_pos(i as i32 * (IPV4_SEG_W + Dimens::IPV4_GAP), 0);
         }
 
@@ -884,6 +912,7 @@ impl DateTimeStepper {
 
         // 逐个摆位（列 x 由常量推导，不写裸坐标）。
         for (i, (col, head)) in columns.iter().zip(headers.iter()).enumerate() {
+            // 列间缝 8 px 与 §2.1 的 ≥16 px 冲突，见文件头 CD7（待 PM 裁定）。
             let x = i as i32 * (DATETIME_COL_STEPPER_W + Dimens::DATETIME_GAP);
             col.set_pos(x, DATETIME_STEPPER_Y);
             head.set_pos(
