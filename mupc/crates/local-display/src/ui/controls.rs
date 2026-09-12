@@ -36,7 +36,7 @@
 //! | CD4 | DateTimeStepper 总高 = **106**（分量标签行 26 + 缝 16 + 步进 64），UI §5.1 #8 写 **64** | §5.1 #8 只给了 `64` 高，**未提及分量标签行**（该表全文无「列头」字样）。分量标签（本文件称「列头」）的必要性来自**另两处**：① §6.3 P3 日志页线框 `Y700 （仅「自定义」时展开）起始 [年][月][日][时][分]` —— 五个分量列各带分量标注；② §3.6 全屏用字表 P3「筛选」行收录 `年` `月` `日` `时` `分` 五字 ⇒ **由这两处推断**出"五列各有一行分量标签"，高度必然 > 64。标签行高度取 [`TextSlot::Label`]（26 px，§3.3 控件文字档） | **B2b-2**：P3 的「自定义」展开区（UI 写 Y700 起、64 px）随之增高，装配时按 106 预留 |
 //! | CD5 | ~~分段控件的「选中」与「禁用」两条样式挂上但当前不参与绘制~~ **（已在本次提交 `fix(display): 薄层补 buttonmatrix 控制位接口` 修复 ⇒ 四态全部生效）** | **原根因**（v9.5.0 源码事实）：`lv_buttonmatrix` 的每段 `CHECKED` / `DISABLED` 状态由 `ctrl_bits[i]`（`LV_BUTTONMATRIX_CTRL_CHECKED` / `_DISABLED`）驱动（`lv_buttonmatrix.c` 绘制趟 `btn_state` 只由 ctrl 位与 `btn_id_sel` 组装），而**当时薄层 `ButtonMatrix` 未暴露** `lv_buttonmatrix_set_button_ctrl(_all)`；`set_one_checked(true)` 只置"互斥"标志（其内部 `make_one_button_checked` 只在按钮**已** CHECKED 时才保留），故 CHECKABLE 无法置位 ⇒ 用户点选只改变 `btn_id_sel`（PRESSED 高亮可见），CHECKED 从不产生 | **修复方式 / 验证**：薄层补 `set_ctrl_all` / `set_ctrl` / `clear_ctrl_all` / `has_ctrl` 四个薄封装（`src/lvgl/widgets.rs`），本控件改为构造期 `set_ctrl_all(CTRL_CHECKABLE)` + 初始段 `set_ctrl(start, CTRL_CHECKED)`，[`SegmentedControl::set_selected`] 改为"全清 CHECKED → 单段置位"，[`SegmentedControl::set_disabled`] 同步 `CTRL_DISABLED` 位；**回归锁**在 `ui/tests.rs::ui_chain` —— 以 `has_ctrl` 读回断言"每段 CHECKABLE / 恰一段 CHECKED / 切换后旧段已清"（注释掉 `set_ctrl_all(CTRL_CHECKABLE)` 那一行，该用例即变红，已实测） |
 //! | CD6 | 列头 / 汇总标签的**文本对齐**靠"窄标签 + [`theme::center_offset`] 定位"实现；IPv4 汇总标签在其 184 px 盒内**左对齐** | 薄层**没有**文本对齐通道（`lv_obj_set_style_text_align` 未封装，见 `components.rs` 模块文档「布局手法」） | 若 PM 要求汇总标签居中 / 右对齐：薄层补 `set_text_align` 后调整 |
-//! | CD7 | **段间缝取 8 px**：IPv4 四段缝取 [`Dimens::IPV4_GAP`]、日期时间列间缝取 [`Dimens::DATETIME_GAP`]（`theme.rs` 两者均为 **8**），与 UI §5.1 #7 / #8 尺寸式里的 `3×8` / `4×8` 一致 | **两处文档硬冲突**：§2.1「触摸优先」把「相邻可点控件间距 **≥ 16 px**（通用）」列为硬约束，而 §5.1 #7 / #8 取 8 px ⇒ **相邻两个可点按钮（上一段的 `+` 与下一段的 `−`）只隔 8 px**。**两难（实算）**：① IPv4 改 16 ⇒ `4×192 + 3×16 = 816`，**仍在内容区 992 以内**（可行）；② 日期时间改 16 ⇒ `5×192 + 4×16 = 1024`，**超出内容区 992**，且即便贴屏左缘也无左右安全边（§3.5 内容区 x16–x1008）⇒ 必须同时缩小值区宽（`(992 − 4×16 − 5×2×64) / 5 = 57`；`57 ≥ TOUCH_MIN 48` 勉强合法，但该值区还要容纳四位年份 `2026`，余量极小且 `DATETIME_VALUE_W` 的均分口径要一并改） | **归属：PM 裁定**（改 §5.1 的 8 px 还是改 §2.1 的 ≥16 px）。本文件**按 §5.1 逐条数字实现、取 8 px**，未自行改 16 |
+//! | CD7 | **段间缝取 8 px**：IPv4 四段缝取 [`Dimens::IPV4_GAP`]、日期时间列间缝取 [`Dimens::DATETIME_GAP`]（`theme.rs` 两者均为 **8**），与 UI §5.1 #7 / #8 尺寸式里的 `3×8` / `4×8` 一致 | **两处文档曾经硬冲突**：§2.1「触摸优先」把「相邻可点控件间距 **≥ 16 px**（通用）」列为硬约束，而 §5.1 #7 / #8 取 8 px ⇒ **相邻两个可点按钮（上一段的 `+` 与下一段的 `−`）只隔 8 px**。**两难（实算）**：① IPv4 改 16 ⇒ `4×192 + 3×16 = 816`，**仍在内容区 992 以内**（可行）；② 日期时间改 16 ⇒ `5×192 + 4×16 = 1024`，**超出内容区 992**，且即便贴屏左缘也无左右安全边（§3.5 内容区 x16–x1008）⇒ 必须同时缩小值区宽（`(992 − 4×16 − 5×2×64) / 5 = 57`；`57 ≥ TOUCH_MIN 48` 勉强合法，但该值区还要容纳四位年份 `2026`，余量极小） | ✅ **PM 已裁定（2026-09-13）：保持 8 px**。§2.1 的「≥16 px」**口径修订为"不同控件 / 行之间"**，复合控件内部的分段不适用（落点：UI 文档 §2.1 补注 + 附录 B **U-9**）。理由：日期时间改 16 px 须把值区压到 57 px 而该区要放四位年份，余量过小；且 P2 的写操作一律过 **L2 强确认弹层**（列出旧值 → 新值），段间误触在提交前即可被看见。本文件**按 §5.1 逐条数字实现、取 8 px** —— 与裁定一致，**无需改实现** |
 //!
 //! ## 薄层缺能力（如实标注，**未**在本单元处理）
 //!
@@ -846,7 +846,8 @@ impl Ipv4Stepper {
             .map_err(|_| LvglError::InvalidArgument("Ipv4Stepper: 段数与 IPV4_OCTETS 不符"))?;
 
         for (i, seg) in segments.iter().enumerate() {
-            // 段间缝 8 px 与 §2.1 的 ≥16 px 冲突，见文件头 CD7（待 PM 裁定）。
+            // 段间缝 8 px 与 §2.1 的 ≥16 px 冲突，见文件头 CD7（**PM 已裁定保持 8 px**，
+            // §2.1 口径修订为"不同控件 / 行之间"，复合控件内部的分段不适用）。
             seg.set_pos(i as i32 * (IPV4_SEG_W + Dimens::IPV4_GAP), 0);
         }
 
@@ -1159,7 +1160,8 @@ impl DateTimeStepper {
 
         // 逐个摆位（列 x 由常量推导，不写裸坐标）。
         for (i, (col, head)) in columns.iter().zip(headers.iter()).enumerate() {
-            // 列间缝 8 px 与 §2.1 的 ≥16 px 冲突，见文件头 CD7（待 PM 裁定）。
+            // 列间缝 8 px 与 §2.1 的 ≥16 px 冲突，见文件头 CD7（**PM 已裁定保持 8 px**；
+            // 日期时间改 16 px 须把值区压到 57 px，而该区要放四位年份 `2026`，余量过小）。
             let x = i as i32 * (DATETIME_COL_STEPPER_W + Dimens::DATETIME_GAP);
             col.set_pos(x, DATETIME_STEPPER_Y);
             head.set_pos(
