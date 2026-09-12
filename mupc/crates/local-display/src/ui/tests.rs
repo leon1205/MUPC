@@ -332,12 +332,57 @@ fn debounce_window_is_500ms() {
 ///
 /// 符号名一律由 `concat!` **拼接**构造 —— 这样本文件（同属 `ui/**`）不会被同一条规则误伤，
 /// 与 `src/lvgl/tests_a3.rs` 的既有做法一致。
-/// 剥离注释与字符串/字符字面量，供静态约束扫描使用。
+/// [`strip_comments_and_literals`] 的**行数自证**：输出与输入的 `\n` 计数必须**完全一致**。
 ///
-/// 只做"扫描前预处理"，不求完备的 Rust 词法：块注释、行注释、`"…"`、`'…'`
-/// （含转义）一律置空。近似之处：生命周期 `'a` 会被当作字符字面量吞掉——对本扫描
-/// 无影响（关切的符号均在标识符/调用位置）。
-fn strip_comments_and_literals(src: &str) -> String {
+/// 抽成自由函数是为了让"自证"本身**能被探针直接驱动**（把剥离器改回吞行版本 ⇒ 本函数
+/// 报错），而不是把判据埋在一个大函数的末尾。
+fn assert_line_count_kept(name: &str, src: &str, out: &str) {
+    let before = src.matches('\n').count();
+    let after = out.matches('\n').count();
+    assert_eq!(
+        after, before,
+        "{name}：剥离注释 / 字面量后**行数变了**（{before} → {after}）—— 剥离器把源码吞了。\n\
+         本函数的契约是「只把注释与字面量**内容**换成空格、**换行一律原样保留**」⇒ 行数必须\n\
+         **完全一致**（不设阈值：任何差异都说明有整行源码对下游若干张静态网**不可见**，\n\
+         它们会静默失明 —— 评审实测：旧实现下 `theme.rs` 1214 行只剩 551 行可见、\n\
+         `controls.rs` 第 629 行插入的真裸整数**点不到名**）。\n\
+         请修 [`strip_comments_and_literals`]（多半是某个撇号被判成字符字面量后一路吞到\n\
+         下一个撇号，成对吞行）。"
+    );
+}
+
+/// Rust **字符字面量**的最大**字符数**（含两侧引号）：`'\u{10FFFF}'`
+/// = `'` + `\u{` + 6 个十六进制位 + `}` + `'` = **12**。
+///
+/// 这是**由文法给出的硬界**（不是"看着差不多"的经验阈值）：[`strip_comments_and_literals`]
+/// 的**自证 ②** 用它判定"被判成字面量的撇号其实是生命周期"—— 超界即报错并点名文件 / 行号 /
+/// 被吞内容（旧实现的吞行形态长数千字符）。
+const MAX_CHAR_LITERAL_LEN: usize = 12;
+
+/// 剥离注释与字符串 / 字符字面量，供静态约束扫描使用。
+///
+/// 只做"扫描前预处理"，不求完备的 Rust 词法：
+///
+/// - **注释**（`//` / `/* … */`）、**字符串字面量**（`"…"`）、**字符字面量**（`'x'` /
+///   `'\n'` / `'\u{4E2D}'`）一律置空（内容换成空格）；
+/// - **两条"响亮自证"**（本函数**自己**报错，不靠下游用例才发现"网瞎了"）：
+///   **① 行数恒等** —— 换行一律原样保留（含块注释里、多行字符串里、`\` 行续接处）
+///   ⇒ 输出与输入的 `\n` 计数**必须完全一致**，由 [`assert_line_count_kept`] 断言；
+///   **② 字符字面量长度 ≤ [`MAX_CHAR_LITERAL_LEN`]** —— 因为 ① 单独**抓不到**"撇号吞行"
+///   （吞掉的内容里换行也被保留 ⇒ 行数照样相等、内容却已不见）；而"`'` 与闭引号之间的
+///   跨度"有**文法硬界** 12 ⇒ 超界即坐实"被判成字面量的是生命周期撇号"；
+/// - **撇号 `'` 只有构成合法字符字面量时才按字面量消费**（[`is_char_literal`] 判据）：
+///   `'\…'`（转义式，闭引号紧邻）与 `'x'`（单字符 + 紧跟 `'`）是字面量；其余 ——
+///   `'static` / `'a` / `'_` / `'x`（后面不是 `'`）/ 落单的 `'` —— 一律**是生命周期**，
+///   按**普通字符**跳过：既不进入"字面量"状态，**也不吞行**。
+///
+///   ⚠️ **旧实现（B1 引入）的实测危害**：它对**任何** `'` 都按"字符字面量"处理 ⇒ 遇到
+///   `&'static str` / `&'a str` 这类生命周期就一路吞到**下一个撇号**（成对吞行）⇒ 被吞过的
+///   源码对**全部**静态网不可见（实测行丢失：`theme.rs` 1214→551、`components.rs`
+///   2039→1231、`pages/p1_status.rs` −482、`pages/p6_system.rs` −164、`pages/mod.rs` −34、
+///   `ui/controls.rs` 约 −43）。后果是**诊断行号错位**（报 926 而实际在第 954 行）与
+///   **新网可被静默绕过**（`controls.rs:629` 插一个真裸整数 `= 48` 完全不可见）。
+fn strip_comments_and_literals(src: &str, name: &str) -> String {
     let cs: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
@@ -352,16 +397,25 @@ fn strip_comments_and_literals(src: &str) -> String {
         if c == '/' && i + 1 < cs.len() && cs[i + 1] == '*' {
             i += 2;
             while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                if cs[i] == '\n' {
+                    out.push('\n'); // 注释内容置空，但**不吞行**
+                }
                 i += 1;
             }
             i = (i + 2).min(cs.len());
             continue;
         }
-        if c == '"' || c == '\'' {
+        if c == '"' || (c == '\'' && is_char_literal(&cs, i)) {
             let quote = c;
+            let open = i;
             i += 1;
             while i < cs.len() {
                 if cs[i] == '\\' {
+                    // **行续接**（`\` + 换行）在字符串里是合法的（内容被续接）—— 但**行还在**，
+                    // 故这里也必须补一个换行，否则"行数恒等"的自证会误报。
+                    if cs.get(i + 1) == Some(&'\n') {
+                        out.push('\n');
+                    }
                     i += 2;
                     continue;
                 }
@@ -369,7 +423,30 @@ fn strip_comments_and_literals(src: &str) -> String {
                     i += 1;
                     break;
                 }
+                if cs[i] == '\n' {
+                    out.push('\n'); // 字面量内容置空，但**不吞行**
+                }
                 i += 1;
+            }
+            // ── **自证 ②**：撇号若真是字符字面量，其长度**必然** ≤ [`MAX_CHAR_LITERAL_LEN`] ──
+            // "行数恒等"（自证 ①）**catch 不到撇号吞行**：本实现把字面量里的换行也保留
+            // （那是行号准确的前提）⇒ 即便某个撇号一路吞到下一个撇号，行数照样相等、源码
+            // 内容却已大片不可见。故这里再钉一条**由 Rust 文法给出的硬界**：`'` 与它的闭
+            // 引号之间最多 `'\u{10FFFF}'` 共 11 个字符 ⇒ 整枚字面量的跨度 ≤ 12。超界即
+            // 说明"被判成字面量的其实是生命周期撇号"（B1 旧实现的缺陷形态），**响亮报错**。
+            if quote == '\'' {
+                assert!(
+                    i - open <= MAX_CHAR_LITERAL_LEN,
+                    "{name}:{} —— 撇号被判成**字符字面量**后吞掉了 {} 个字符：\n  {}\n\
+                     合法字符字面量最长 {} 个字符（`'\\u{{10FFFF}}'`，含两侧引号）⇒ 超界说明\
+                     被判成字面量的其实是**生命周期撇号**（`'static` / `'a` / `'_`），必须按\
+                     普通字符跳过（见 [`is_char_literal`]）。**被吞掉的源码对下游全部静态网\
+                     不可见**（旧实现实测：theme.rs 1214 行只剩 551 行可见）。",
+                    1 + cs[..open].iter().filter(|&&c| c == '\n').count(),
+                    i - open,
+                    cs[open..i].iter().collect::<String>().escape_debug(),
+                    MAX_CHAR_LITERAL_LEN
+                );
             }
             out.push(' ');
             continue;
@@ -377,7 +454,41 @@ fn strip_comments_and_literals(src: &str) -> String {
         out.push(c);
         i += 1;
     }
+    assert_line_count_kept(name, src, &out);
     out
+}
+
+/// 判定 `cs[i]`（=`'`）是否**开启一个字符字面量**（而不是生命周期撇号）。
+///
+/// **只认"闭引号紧邻"的两种形态**：
+///
+/// - `'` + `\` + 转义体 + `'`：转义体长度有限 —— `\u{…}` 取到 `}` 为止，其余
+///   （`\n` / `\'` / `\\` / `\x41`）记 1 个字符；随后**紧邻**必须是 `'`；
+/// - `'` + 一个「非 `'`、非 `\`」字符 + `'`：如 `'x'` / `'_'` / `'0'`。
+///
+/// 其余**一律判非**（按普通字符跳过，**不吞行**）：`'static` / `'a` / `'_` / `'x`（后面不是
+/// 引号）/ 落单的 `'` / 空的 `''`。
+fn is_char_literal(cs: &[char], i: usize) -> bool {
+    debug_assert_eq!(cs.get(i), Some(&'\''));
+    let Some(&c1) = cs.get(i + 1) else {
+        return false; // 落单的 `'`（文件末尾）
+    };
+    if c1 == '\\' {
+        // 转义体：`\u{…}` 整体跳过；其余转义（`\n` / `\'` / `\\` / `\x41`）跳过 1 个字符。
+        let after = if cs.get(i + 2) == Some(&'u') && cs.get(i + 3) == Some(&'{') {
+            match cs[i + 4..].iter().position(|&c| c == '}') {
+                Some(p) => i + 4 + p + 1,
+                None => return false, // 未闭合的 `\u{…}` ⇒ 不按字面量消费
+            }
+        } else {
+            i + 3
+        };
+        return cs.get(after) == Some(&'\'');
+    }
+    if c1 == '\'' {
+        return false; // `''` 不是合法字符字面量（空字符）
+    }
+    cs.get(i + 2) == Some(&'\'')
 }
 
 /// `ui/**` 静态约束的**共用**禁用符号清单（**M6**：此前 [`ui_static_constraints`] 与
@@ -410,7 +521,7 @@ fn ui_static_constraints() {
         // 先剥注释与字符串/字符字面量再匹配：否则"文档注释里解释**为什么**不用
         // `lv_spinbox`"会被误判为违规（与 `src/lvgl/tests_a3.rs` / `lvgl-sys/tests/
         // allowlist_consistency.rs` 的既有做法一致）。
-        let lower = strip_comments_and_literals(src).to_ascii_lowercase();
+        let lower = strip_comments_and_literals(src, name).to_ascii_lowercase();
         for needle in FORBIDDEN_UI_SYMBOLS {
             assert!(
                 !lower.contains(needle),
@@ -421,7 +532,7 @@ fn ui_static_constraints() {
 
     // 色值构造只允许出现在 `theme.rs`（页面 / 组合控件不得内联裸色值）
     let comp = include_str!("components.rs");
-    let comp = strip_comments_and_literals(comp);
+    let comp = strip_comments_and_literals(comp, "ui/components.rs");
     for ctor in ["Color::hex(", "Color::rgb("] {
         assert!(
             !comp.contains(ctor),
@@ -470,7 +581,13 @@ const UI_PROD_SOURCES: [(&str, &str); 7] = [
 /// - `InvalidArgument(` —— `LvglError` 的错误消息（原型 `LvglError::InvalidArgument("…")`），
 ///   只在 `Err` 里流转；薄层没有任何"把 `LvglError` 画上屏"的路径 ⇒ 从不屏显；
 /// - `debug_struct(` / `.field(` —— `std::fmt::Debug` 实现的字段名（供日志 / 断言阅读）；
-/// - `env!(` / `option_env!(` —— 环境变量**键名**（屏上取到的是它的**值**，键名不屏显）。
+/// - `env!(` / `option_env!(` —— 环境变量**键名**（屏上取到的是它的**值**，键名不屏显）；
+/// - `stderr(),` —— 标准错误诊断（原型 `writeln!(std::io::stderr(), "…")`）。**为何它是
+///   非屏显出口**：stderr 的内容从不进 LVGL 部件，**结构上不可能**成为上屏文案；若不登记，
+///   诊断文案会被本网按"上屏候选"逐字要求字形齐备，逼得实现者用 `!` / `.` 之类去凑一份
+///   仅 cmap 内的生硬措辞 —— 那是对**判据**的迁就，不是对**屏显**的保证。
+///   其它诊断形态（`eprintln!(` / `eprint!(` 等）当前未用到，**用到时各自登记一条**
+///   （本清单是**后缀匹配**，且**逐条列出、不靠正则猜**）。
 ///
 /// 另有两类"不是字面量文本"的排除（写在 [`ui_source_chars`] 里）：
 /// ① `format!` 模板的 `{…}` 占位符内容（`"{d} 日"` 里 `d` 不是字形，值才是）；
@@ -478,10 +595,11 @@ const UI_PROD_SOURCES: [(&str, &str); 7] = [
 /// "属性**之后紧跟**测试模块"而非"出现过该 token"，故注释里的 token 与生产区的
 /// `#[cfg(test)] pub fn …` 测试访问器**都在扫描面内**（见 [`truncate_before_test_module`]）；
 /// 形态若不符即响亮失败。
-const NON_DISPLAY_SINKS: [&str; 5] = [
+const NON_DISPLAY_SINKS: [&str; 6] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
+    "stderr(),",
     "env!(",
     "option_env!(",
 ];
@@ -591,8 +709,8 @@ fn strip_format_placeholders(lit: &str) -> String {
 /// **这是有意的**：它们是生产文件的一部分，其字面量同样是上屏候选。
 ///
 /// 形态已变（文件**有** `#[cfg(test)]` 却**无**其后紧跟 `mod tests` 的项：测试模块被改名 /
-/// 中间插入了别的项 / 可见性修饰不在下方已列形态内）⇒ **响亮 assert 失败**，不静默放过；
-/// 纯生产文件（全文件无 `#[cfg(test)]`，如 `theme.rs`）⇒ 扫描**整个文件**（原行为）。
+/// 与属性之间**夹了注释或其他属性** / 可见性修饰不在下方已列形态内）⇒ **响亮 assert 失败**，
+/// 不静默放过；纯生产文件（全文件无 `#[cfg(test)]`，如 `theme.rs`）⇒ 扫描**整个文件**（原行为）。
 fn truncate_before_test_module<'a>(src: &'a str, name: &str) -> &'a str {
     const ATTR: &str = "#[cfg(test)]";
     let mut any_attr = false;
@@ -601,11 +719,24 @@ fn truncate_before_test_module<'a>(src: &'a str, name: &str) -> &'a str {
         let tail = src[i + ATTR.len()..].trim_start();
         // 允许**可见性修饰**：`ui/mod.rs` 的测试模块写作 `pub(crate) mod tests;`
         // （LVGL 侧唯一 `#[test]` 需在同一线程调起它），故不能只认裸 `mod tests`。
+        //
+        // 形态清单（**本单元补齐 `pub(in …)`**）：`pub` / `pub(crate)` / `pub(super)` /
+        // `pub(self)` / `pub(in <路径>)`。前四者剥前缀即可；`pub(in …)` 剥掉 `pub` 后余下
+        // `(in <路径>) …`，再取到匹配的 `)` 之后。
         let tail = ["pub(crate)", "pub(super)", "pub(self)", "pub"]
             .iter()
             .find_map(|p| tail.strip_prefix(*p))
             .map(str::trim_start)
             .unwrap_or(tail);
+        let tail = match tail.strip_prefix("(in").map(str::trim_start) {
+            Some(rest) => match rest.find(')') {
+                // 形态合法 ⇒ 跳到闭括号之后；不合法 ⇒ **保持原样**（下面 starts_with 不成立，
+                // 落到响亮 assert，而不是静默误截断）。
+                Some(close) => rest[close + 1..].trim_start(),
+                None => tail,
+            },
+            None => tail,
+        };
         if tail.starts_with("mod tests") {
             return &src[..i];
         }
@@ -613,11 +744,62 @@ fn truncate_before_test_module<'a>(src: &'a str, name: &str) -> &'a str {
     assert!(
         !any_attr,
         "{name}：本文件有 `#[cfg(test)]` 但**无**其后紧跟 `mod tests` 的项 —— 本扫描\
-         「截断到测试模块之前」的前提不成立（测试模块形态已变：改名 / 与属性之间插入了别的项 / \
-         可见性修饰不在 `pub` `pub(crate)` `pub(super)` `pub(self)` 之内），\
+         「截断到测试模块之前」的前提不成立。成因（逐条自查）：① 测试模块已**改名**；\
+         ② `#[cfg(test)]` 与 `mod tests` **之间夹了注释**；③ 二者之间**夹了其他属性**\
+         （如 `#[allow(...)]`）；④ 可见性修饰不在 `pub` `pub(crate)` `pub(super)` \
+         `pub(self)` `pub(in …)` 之内（形态清单见本函数体内注释）。\
          请改本扫描工具（不得静默放过）"
     );
     src
+}
+
+/// **M6′**：[`truncate_before_test_module`] 的**形态清单**自证 ——
+/// ① 五种可见性修饰（含本单元补的 `pub(in …)`）都必须被接受；
+/// ② 生产区里的 `#[cfg(test)] pub fn …` 访问器**不得**成为截断点；
+/// ③ `#[cfg(test)]` 与 `mod tests` 之间夹注释 ⇒ **响亮失败**（不静默误截断）。
+///
+/// 纯逻辑（不触碰 LVGL）。**敏感性**：把可见性清单退回只认 `pub` / `pub(crate)` ⇒
+/// `pub(in crate::ui)` 那一轮变红；把"最末 assert"删掉 ⇒ ③ 变红（静默放过）。
+#[test]
+fn truncate_before_test_module_forms_are_accepted_or_loud() {
+    let keep = "const PROBE: i32 = 1;\n";
+    for vis in [
+        "",
+        "pub ",
+        "pub(crate) ",
+        "pub(super) ",
+        "pub(self) ",
+        "pub(in crate::ui) ",
+    ] {
+        let src = format!("{keep}#[cfg(test)]\n{vis}mod tests {{\n}}\n");
+        assert_eq!(
+            truncate_before_test_module(&src, "probe.rs"),
+            keep,
+            "可见性 `{vis}` 的测试模块必须被识别（截断点在其之前）"
+        );
+    }
+    // ② 访问器在前、测试模块在后 ⇒ 截断点必须是**后者**（访问器留在扫描面内）。
+    let src = format!(
+        "{keep}#[cfg(test)]\npub fn accessor() {{}}\n#[cfg(test)]\nmod tests {{\n}}\n"
+    );
+    let kept = truncate_before_test_module(&src, "probe.rs");
+    assert!(
+        kept.contains("pub fn accessor() {}"),
+        "`#[cfg(test)] pub fn …` 访问器**必须留在扫描面内**（它**不是**截断点）：{kept:?}"
+    );
+    assert!(
+        !kept.contains("mod tests"),
+        "截断点必须是**其后紧跟 `mod tests`** 的那个 `#[cfg(test)]`（测试模块不得留在扫描面内）"
+    );
+    // ③ 形态不符 ⇒ 响亮失败（严禁"截断点悄悄前移 / 文件整段漏扫"）。
+    let broken = format!("{keep}#[cfg(test)]\n// 注释夹在属性与 `mod tests` 之间\nmod tests {{}}\n");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        truncate_before_test_module(&broken, "probe.rs")
+    }));
+    assert!(
+        r.is_err(),
+        "`#[cfg(test)]` 与 `mod tests` 之间夹注释 ⇒ 必须**响亮失败**（旧行为是静默漏扫）"
+    );
 }
 
 /// 扫一段 `ui/**` 源码，取出**会取字形的字符**、出处字面量与**行号**（1 起）。
@@ -1836,7 +2018,8 @@ pub(crate) fn ui_chain() {
         // 复刻评审探针 **P4**：旧实现在调用用户回调期间持着槽的 `try_borrow_mut`，用户回调里
         // 再调 `set_on_change` ⇒ 其中的 `borrow_mut()` panic；该 panic 被 `src/lvgl/event.rs`
         // 的 `catch_unwind` 拦下 ⇒ **回调体后半段不执行且用例仍全绿**（静默丢通知 + 半执行）。
-        // 修法（方案 B「取出转发」）见 `controls.rs` 的 `fire_index` 上方语义说明。
+        // 修法（「取出 → 转发 → 槽仍为空才放回」，放回走 `PutBack` 守卫）见 `controls.rs`
+        // 的 `fire_index` 上方语义说明。
         // 改什么会红：把 `fire_*` / `replace_*` 改回"调用期持借用 + `borrow_mut`"⇒ panic 被
         // 桥吞掉 ⇒ 下面 `body_completed` 仍为 false ⇒ 本断言变红（**已实测**，见交付报告）。
         let seg = Rc::new(seg); // 回调内需要再次拿到 `&SegmentedControl`（自替换）
@@ -1871,6 +2054,43 @@ pub(crate) fn ui_chain() {
             "下一次通知必须由**替换后**的新回调执行（否则新回调根本没接上）"
         );
         drop(seg);
+
+        // ── ⑦.0d **I1′** 用户回调 panic ⇒ 槽**不得永久空置**（后续事件仍必须到达）──────
+        // 缺陷本体（本单元评审实测）：旧写法 `take_cb → f(v) → put_back_cb` 里，用户回调
+        // panic ⇒ 展开**跳过**"放回" ⇒ 槽永久 `None` ⇒ 此后**所有**通知静默丢失。
+        // `event.rs` 的桥只报"本次事件作废"（`catch_unwind` 在桥），**看不见**槽已被抽空；
+        // 评审探针实测（SegmentedControl + `send_event` ×3）：`hits_after_three_events = 1`。
+        // 修法 = `controls.rs` 的 `PutBack` 守卫（`Drop` 里放回，见其文档）。
+        // 改什么会红：把 `fire_index` 改回"`f(v)` 之后手动放回"⇒ 计数停在 1（**已实测**）。
+        {
+            let seg = SegmentedControl::new(&screen, &["A", "B"], 2 * SEGMENT_MIN_W, 0)
+                .expect("SegmentedControl（panic 回归）");
+            let hits = Rc::new(Cell::new(0usize));
+            let panics_left = Rc::new(Cell::new(1usize));
+            {
+                let hits = Rc::clone(&hits);
+                let panics_left = Rc::clone(&panics_left);
+                seg.set_on_change(move |_i| {
+                    hits.set(hits.get() + 1);
+                    if panics_left.get() > 0 {
+                        panics_left.set(panics_left.get() - 1);
+                        // 用户回调**故意** panic（由 event.rs 桥的 catch_unwind 拦下，
+                        // **不会**跨 C 帧展开；测试自身因此不红）。
+                        panic!("E2E 回归：用户回调故意 panic（回归后不得再出现）");
+                    }
+                });
+            }
+            seg.send_event(EventCode::VALUE_CHANGED);
+            assert_eq!(hits.get(), 1, "第一次事件到达回调（panic 发生在回调体内）");
+            seg.send_event(EventCode::VALUE_CHANGED);
+            seg.send_event(EventCode::VALUE_CHANGED);
+            assert_eq!(
+                hits.get(),
+                3,
+                "**panic 之后的每次事件仍必须到达**（旧写法：槽永久空置 ⇒ take_cb 恒 None \
+                 ⇒ 计数停在 1，且无任何报错；评审实测 hits_after_three_events=1）"
+            );
+        }
 
         // ═══ Ipv4Stepper ════════════════════════════════════════════════════
         let ipv4 = Ipv4Stepper::new(&screen, [192, 168, 1, 10]).expect("Ipv4Stepper");
@@ -2602,7 +2822,7 @@ fn pages_static_constraints() {
     // 共用清单（[`FORBIDDEN_UI_SYMBOLS`]，M6）+ 页面专属的裸色值构造两条。
     let forbidden = FORBIDDEN_UI_SYMBOLS;
     for (name, src) in sources {
-        let lower = strip_comments_and_literals(src).to_ascii_lowercase();
+        let lower = strip_comments_and_literals(src, name).to_ascii_lowercase();
         for needle in forbidden {
             assert!(
                 !lower.contains(needle),
@@ -2618,7 +2838,7 @@ fn pages_static_constraints() {
         }
         // 额外：页面不得出现 `unsafe`（薄层是唯一允许处）
         assert!(
-            !strip_comments_and_literals(src).contains("unsafe"),
+            !strip_comments_and_literals(src, name).contains("unsafe"),
             "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
         );
     }
@@ -2638,7 +2858,7 @@ fn pages_static_constraints() {
 fn controls_static_constraints() {
     let sources: [(&str, &str); 1] = [("ui/controls.rs", include_str!("controls.rs"))];
     for (name, src) in sources {
-        let code = strip_comments_and_literals(src);
+        let code = strip_comments_and_literals(src, name);
         let lower = code.to_ascii_lowercase();
         // ① 零文本输入（F12 红线）/ 裸色值 / `lv_refr_now` / 直连绑定（共用清单）
         for needle in FORBIDDEN_UI_SYMBOLS {
@@ -2717,6 +2937,37 @@ const REGISTERED_BARE_CONST_I32: [(&str, &str, &str); 1] = [(
     "MAIN_CARD_H",
     "UI §6.1 契约值 484×320（B2a 代码质量评审 M5 已登记的唯一例外；本批禁改 pages/**）",
 )];
+
+// ── ⚠️ **已知边界**（评审实测的 11 种绕过形态）：**这是边界，不是覆盖** ──────────────
+//
+// 本网（⑥⁗）只认"**单行** + **`const`** + **类型恰为 `i32`** + **初始化式就是一个十进制裸
+// 整数**"这一形态。下列 11 种写法**当前都查不到**（逐条是评审实测、不是推测）：
+//
+// | # | 形态 | 例 | 为何漏 |
+// |---|------|----|--------|
+// | 1 | 初始化式**跨行** | `const W: i32 =\n    48;` | [`bare_i32_const`] 逐行解析，跨行 ⇒ 两边都不成形 |
+// | 2 | 括号包裹 | `const W: i32 = (48);` | 初始化式非"纯十进制"（含 `(` `)`） |
+// | 3 | 加零 / 算式 | `const W: i32 = 48 + 0;` | 含算术 ⇒ 与派生式同形，放行（否则大面积误报） |
+// | 4 | 十六进制 | `const W: i32 = 0x30;` | 只认十进制数字 |
+// | 5 | 带后缀 | `const W: i32 = 48i32;` | 初始化式含后缀字符 |
+// | 6 | 前导零（八进制字面量） | `const W: i32 = 048;` | 数字串通过，**但值**是 40（八进制）⇒ 见下"为何不扩" |
+// | 7 | `static` 而非 `const` | `static W: i32 = 48;` | 只认 `const ` 前缀 |
+// | 8 | `pub(in …)` 可见性 | `pub(in crate::ui) const W: i32 = 48;` | 只剥 `pub` / `pub(crate)` / `pub(super)` |
+// | 9 | 类型 `u32` | `const W: u32 = 48;` | 只认 `i32` |
+// | 10 | 类型 `usize` | `const W: usize = 48;` | 同上 |
+// | 11 | 类型 `f64` | `const W: f64 = 48.0;` | 同上 |
+//
+// **为何当前不扩（如实，不粉饰）**：本网是**减速带**（见用例文档的"定位"），不是形式化保证；
+// 上面 11 条里 1–5、7–11 都是"**把裸值写得更绕一点**"——扩它们要把判据变成一个小型表达式
+// 解析器（`KISS` 原则：不为一条减速带造解析器），而**收益很低**：真正的兜底另有两处 ——
+// `theme.rs` 的单一真源 + [`sizes_are_derived_from_theme_constants`]（`controls.rs` 内）的
+// **契约字面量锚定**，以及 `ui_layout_setters_use_theme_constants`（⑥″，扫**调用实参**）与
+// 离屏 `size()` 断言。第 6 条（`048`）更特殊：它**是**十进制数字串、会被本网抓到，但
+// 抓到时若有人"按字面理解"改成 `48` 反而是**改错方向**（`048` 的真值是 40）—— 这属于
+// 另一类问题（可读性），不靠扩本网解决。
+//
+// **本表的存在意义**：把"网没覆盖什么"写在网旁边，避免下一位读者把"用例全绿"误读成
+// "裸整数已绝迹"。**发现新形态请补进本表**，不要默默放行。
 
 /// 从**单行**源码解析 `const <NAME>: i32 = <整数>;`（整条初始化式就是一个裸十进制整数）。
 ///
@@ -2811,7 +3062,7 @@ fn ui_const_i32_definitions_derive_from_theme() {
     // ③ 逐行扫描（先剥注释与字符串 / 字符字面量 ⇒ 文档里解释性的 `const .. = 48` 不误伤）。
     let mut registered_hit = [false; REGISTERED_BARE_CONST_I32.len()];
     for (name, src) in CONST_I32_SCAN_SOURCES {
-        let code = strip_comments_and_literals(src);
+        let code = strip_comments_and_literals(src, name);
         for (idx, line) in code.lines().enumerate() {
             let Some((cname, value)) = bare_i32_const(line) else {
                 continue;
@@ -2960,7 +3211,7 @@ fn ui_layout_setters_use_theme_constants() {
     }
 
     for (name, src) in UI_PROD_SOURCES {
-        let code = strip_comments_and_literals(src);
+        let code = strip_comments_and_literals(src, name);
         let lines: Vec<&str> = code.lines().collect();
         let report = |what: &str, a: &str, at: usize| {
             let line = code[..at].matches('\n').count() + 1;

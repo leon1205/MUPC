@@ -30,7 +30,7 @@
 //!
 //! | # | 偏差（现状 ≠ 契约） | 原因 | 计划收口单元 |
 //! |---|----------------------|------|--------------|
-//! | CD1 | **IPv4 四段总宽 = 792**（`4 × (64 + 64 + 64) + 3 × 8`），UI §5.1 #7 正文写 **856** | **文档自身矛盾**：856 **无法**由其同一行的分项算出（该行的分项按自身口径 = 792）。按 theme 分项常量推导为准（`Dimens::STEPPER_BTN_W × 2 + Dimens::IPV4_VALUE_W`），**不硬编码 856 或 792** | 无（**有意与 theme 分项一致**；建议 UI §5.1 #7 回改 856 → 792） |
+//! | CD1 | **IPv4 四段总宽 = 792**（`4 × (64 + 64 + 64) + 3 × 8`），UI §5.1 #7 正文写 **856** | **文档自身矛盾**：856 **无法**由其同一行的分项算出（该行的分项按自身口径 = 792）。按 theme 分项常量推导为准（`Dimens::STEPPER_BTN_W × 2 + Dimens::IPV4_VALUE_W`），**不硬编码 856 或 792**。**"不硬编码"与测试里的字面量断言不矛盾**：生产实现**不写死数字**（由 `theme` 分项推出），而 `ui/tests.rs::sizes_are_derived_from_theme_constants` 以**契约字面量**（`792` / `992`）作**锚定断言** —— 前者管"实现别抄数字"，后者管"规格值被钉死、漂移即红"，二者是互补的两件事 | 无（**有意与 theme 分项一致**；建议 UI §5.1 #7 回改 856 → 792） |
 //! | CD2 | IPv4 汇总标签宽 = **184**（`CONTENT_W − 792 − GAP_MIN`）⇒ 整件 **992 = 内容区有效宽**（出处 = UI **§3.5**「内容区左右安全边 16 px（x16–1008），有效宽 **992 px**」）；UI §6.1 行型 B 另行要求「控件独占次行 (x36–x988)，用 `Ipv4Stepper` 856×64」（该处 x36–x988 自身 = 952，与 §3.5 的 992 是**两套口径**，此前误把 992 记成 §6.1） | 856 − 792 = 64 px **放不下** `192.168.1.10`（12 字符）；§6.1 要求控件独占次行 ⇒ 取"四段 + 缝 + 汇总 = 内容区宽（992）" | **B2b-2**（P2 装配时若 PM 要求 x36 起排，需重定汇总标签的位置口径） |
 //! | CD3 | **`Dimens::DATETIME_COL_W`（112）在本文件不使用**：日期时间列宽取 **192**（`64 + 64 + 64`），值区宽取 **64**（内容区均分推导） | 112 **不可用**（两重）：① 若作**列宽** ⇒ 列宽下限 = `−`64 + 值 48(TOUCH_MIN) + `+`64 = **176 > 112**（触摸硬约束）；② 若作**值区宽** ⇒ 五列 = `5 × (64+112+64) + 4×8` = **1232**，既超内容区 992、也超屏幕 1024。⇒ 按「内容区有效宽均分五列」推导值区宽 | 建议 UI §5.1 #8 与本文件同法回改（112 → 64，592 → 992）。**收口单元**：`src/ui/theme.rs` 的 `Dimens::DATETIME_COL_W`（112，生产侧已零使用）与 `src/ui/components.rs:464–465` 的过时引用仍宣称它是"日期时间五列步进的列宽"，须在后续**字体 / 文档收口批**（B2c 之后）统一修正 —— 本批**禁改**这两个文件，故此处只登记、不动手 |
 //! | CD4 | DateTimeStepper 总高 = **106**（分量标签行 26 + 缝 16 + 步进 64），UI §5.1 #8 写 **64** | §5.1 #8 只给了 `64` 高，**未提及分量标签行**（该表全文无「列头」字样）。分量标签（本文件称「列头」）的必要性来自**另两处**：① §6.3 P3 日志页线框 `Y700 （仅「自定义」时展开）起始 [年][月][日][时][分]` —— 五个分量列各带分量标注；② §3.6 全屏用字表 P3「筛选」行收录 `年` `月` `日` `时` `分` 五字 ⇒ **由这两处推断**出"五列各有一行分量标签"，高度必然 > 64。标签行高度取 [`TextSlot::Label`]（26 px，§3.3 控件文字档） | **B2b-2**：P3 的「自定义」展开区（UI 写 Y700 起、64 px）随之增高，装配时按 106 预留 |
@@ -70,6 +70,9 @@
 //!   调用 → 槽仍为空才放回"，见 `fire_index` 上方的语义说明）⇒ 回调内**可安全再次
 //!   `set_on_change`** 自替换（**本次通知仍由旧回调执行完毕，新回调自下一次通知起生效**）；
 //!   其余共享态一律 `try_borrow*`（拿不到即跳过，**不 panic**）；
+//! - **本层自己"绝不 panic"**，且**不假设用户回调守规矩**：「放回」走 [`PutBack`] 守卫的
+//!   `Drop` ⇒ 用户回调 panic 时"放回"**照样执行**（槽不会永久空置、下次通知仍到达），并向
+//!   stderr 留诊断（不静默掩盖）；跨 FFI 的展开仍由 `src/lvgl/event.rs` 的事件桥唯一拦截；
 //! - **不提供跨线程 API**：三个类型都含 LVGL 句柄（自动 `!Send` / `!Sync`），全部调用必须
 //!   在事件循环线程内（设计 §5.2 不变量 4）。
 
@@ -238,14 +241,18 @@ fn clamp_index(selected: usize, count: usize) -> usize {
 // `controls.rs:518`）；该 panic 被 `src/lvgl/event.rs` 的 `catch_unwind` 拦下 ⇒
 // **回调体半途而废且用例全绿**（静默丢通知 + 静默半执行）。
 //
-// **采用方案 B「取出转发」**：触发时先把回调**从槽里取出**（槽置 `None`、借用当场释放），
-// 再在**不持有任何借用**的状态下调用它，最后"槽仍为空才放回"。
+// **采用「取出 → 转发 → 槽仍为空才放回」**：触发时先把回调**从槽里取出**（槽置 `None`、
+// 借用当场释放），再在**不持有任何借用**的状态下调用它，最后"槽仍为空才放回"。
 //
 // **语义（契约）**：回调内自替换 ⇒ **本次通知仍由旧回调执行完毕，新回调自下一次通知起生效**。
 // 由此保证：回调内再调 `set_on_change` 时，那里的 `try_borrow_mut` 必然成功（无人持借用）。
 //
-// **不选方案 A（旁路暂存 + "下一拍"生效）的理由**：A 需要额外的"待替换槽 + 拍点应用"机制，
-// 而"下一拍"在本层没有明确定义（控件不自有事件循环，未必再有下一次事件）；B 把语义收敛在
+// **"放回"必须走 `Drop` 守卫**（[`PutBack`]，本单元修的 Important）：写成
+// `take_cb → f(v) → put_back_cb` 时，用户回调 panic ⇒ 展开**跳过**最后一句 ⇒ 槽**永久
+// 空置**、此后通知全静默丢失。放进 `Drop` 即"正常返回与展开两条路径都放回"。
+//
+// **不选「旁路暂存 + 下一拍生效」**：那需要额外的"待替换槽 + 拍点应用"机制，而"下一拍"
+// 在本层没有明确定义（控件不自有事件循环，未必再有下一次事件）；现方案把语义收敛在
 // **当前这次触发**内，改动仅限本文件、三个槽的类型不变。
 
 /// 从槽里**取出**回调并把槽置空（借用在本函数返回前已释放 ⇒ 调用期不持借用）。
@@ -260,6 +267,9 @@ fn take_cb<T: ?Sized>(slot: &Rc<RefCell<Option<Box<T>>>>) -> Option<Box<T>> {
 
 /// **放回**回调：**仅当槽仍为空**（回调内没有自替换）时放回；否则丢弃旧回调
 /// （新回调自下一次通知起生效，见上方语义说明）。
+///
+/// **不 panic**：拿不到借用（`try_borrow_mut` 失败）即**不放回**。该分支在 `Drop` 里
+/// 也必须是"不 panic"的（展开路径上再 panic = 双重 panic ⇒ abort）。
 fn put_back_cb<T: ?Sized>(slot: &Rc<RefCell<Option<Box<T>>>>, f: Box<T>) {
     if let Ok(mut s) = slot.try_borrow_mut() {
         if s.is_none() {
@@ -268,25 +278,93 @@ fn put_back_cb<T: ?Sized>(slot: &Rc<RefCell<Option<Box<T>>>>, f: Box<T>) {
     }
 }
 
+/// **放回守卫**（I1′）：把 `take_cb` 取出的回调临时托管在自己身上，**作用域结束时**
+/// （正常返回**与 panic 展开两条路径**）执行"槽仍为空才放回"。
+///
+/// **为什么必须是 `Drop` 而不是"调用后手动放回"**（本单元修的第二处 Important）：
+/// 触发写法若是 `take_cb → f(v) → put_back_cb`，"放回"就在 `f(v)` **之后**；用户回调
+/// `f(v)` **panic** 时栈展开会**跳过**那一句 ⇒ 槽**永久留在 `None`** ⇒ 该控件**此后
+/// 所有通知静默丢失**、且无任何报错（`catch_unwind` 在更外层的
+/// `src/lvgl/event.rs` 事件桥，看不到这个后果）。放进 `Drop` 即"展开路径也一定执行"。
+///
+/// **与语义（契约）的关系**：`Drop` 里仍是"**槽仍为空才放回**"，故"回调内自替换 ⇒
+/// 本次通知仍由旧回调执行完毕、新回调自下一次通知起生效"这条语义**不变**（自替换已把
+/// 新回调写进槽 ⇒ 槽非空 ⇒ 守卫丢弃手里的旧回调）。
+///
+/// **panic 的诊断（不静默掩盖）**：`Drop` 里检测 `std::thread::panicking()`；为真即说明
+/// 用户回调**在展开中**（其内部状态可能已不一致 —— 回调纪律要求回调内不 panic），向
+/// stderr 留一条诊断。**放回仍照做**（否则就是上面那个"永久空置"的缺陷）。写 stderr 用
+/// `let _ = writeln!(..)` 而**非** `eprintln!`：后者在写失败时**自身 panic**，展开路径上
+/// 二次 panic = `abort`。
+///
+/// **不用 `catch_unwind` 的理由**：`catch_unwind` 会把"用户回调 panic"这件事**从调用方
+/// （`src/lvgl/event.rs` 的事件桥）**手里夺走 —— 桥上是唯一的"跨 FFI 展开"拦截点与唯一的
+/// 诊断出处（桥的 `eprintln!` 已在做），本层再包一层只会让"这一次事件作废"这件事在本层
+/// 被静默吸收。守卫方案**不碰 panic 的传播路径**，桥的行为完全不变。
+///
+/// **不使用 `core::mem::forget`**：守卫在末尾自然 `Drop`（无需手动结束），`forget` 反而会
+/// 把回调**泄漏**掉。
+struct PutBack<'a, T: ?Sized> {
+    /// 回调取出前所在的槽（放回目标）。
+    slot: &'a Rc<RefCell<Option<Box<T>>>>,
+    /// 托管中的回调；`Drop` 里 `take()` 走（保证只放回一次）。
+    cb: Option<Box<T>>,
+}
+
+impl<T: ?Sized> Drop for PutBack<'_, T> {
+    fn drop(&mut self) {
+        if let Some(f) = self.cb.take() {
+            if std::thread::panicking() {
+                // 诊断：用户回调 panic ⇒ 槽已由本守卫放回（后续通知仍会到达），但该回调的
+                // 内部状态可能已不一致。**不静默**。
+                //
+                // 这是 **stderr 诊断、不是屏上文案** ⇒ 文案不受 `ui_texts_covered_by_font_cmap`
+                // 的字形齐备约束（该网把 `ui/**` 生产源码的字符串字面量都当上屏候选）。
+                // 分类依据是 `ui/tests.rs::NON_DISPLAY_SINKS` 里的 `stderr(),` 条目（**后缀匹配**）
+                // —— 故本处字面量被显式登记为**非屏显出口**，而不是靠"只用 cmap 内的字"去迁就
+                // 判据（那样是把诊断文案写残，换不来任何屏显保证）。
+                //
+                // 用 `writeln!` 而**非** `eprintln!`：后者写失败时会**自身 panic**，
+                // 而这里是展开路径 ⇒ 二次 panic = `abort`。
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "控件回调 panic 已被拦下：槽已放回，后续通知不受影响（该回调的内部状态可能已不一致）。"
+                );
+            }
+            put_back_cb(self.slot, f);
+        }
+    }
+}
+
 /// 静默触发"选中下标"回调（**调用期间不持借用** ⇒ 回调内可安全自替换，**不 panic**）。
+///
+/// 放回由 [`PutBack`] 守卫在作用域结束时执行 ⇒ **用户回调 panic 时槽照样放回**，
+/// 下一次通知仍会到达（见 [`PutBack`] 文档）。
 fn fire_index(slot: &IndexCallback, v: usize) {
-    let Some(mut f) = take_cb(slot) else { return };
-    f(v);
-    put_back_cb(slot, f);
+    let Some(f) = take_cb(slot) else { return };
+    let mut guard = PutBack { slot, cb: Some(f) };
+    if let Some(f) = guard.cb.as_mut() {
+        f(v);
+    }
 }
 
 /// 静默触发"四段 IPv4"回调（同上）。
 fn fire_octets(slot: &OctetsCallback, v: [u8; 4]) {
-    let Some(mut f) = take_cb(slot) else { return };
-    f(v);
-    put_back_cb(slot, f);
+    let Some(f) = take_cb(slot) else { return };
+    let mut guard = PutBack { slot, cb: Some(f) };
+    if let Some(f) = guard.cb.as_mut() {
+        f(v);
+    }
 }
 
 /// 静默触发"日期时间"回调（同上）。
 fn fire_datetime(slot: &DateTimeCallback, v: DateTimeValue) {
-    let Some(mut f) = take_cb(slot) else { return };
-    f(v);
-    put_back_cb(slot, f);
+    let Some(f) = take_cb(slot) else { return };
+    let mut guard = PutBack { slot, cb: Some(f) };
+    if let Some(f) = guard.cb.as_mut() {
+        f(v);
+    }
 }
 
 /// 槽替换（**重入安全**）：`fire_*` 在调用用户回调期间不持有槽借用，故"回调内自替换"
@@ -1407,6 +1485,66 @@ mod tests {
             replaced_received.get(),
             Some(7),
             "下一次通知必须由**替换后**的新回调执行"
+        );
+    }
+
+    /// **I1′**：用户回调 panic ⇒ **槽不得永久空置** ⇒ **下一次通知仍必须到达**。
+    ///
+    /// 纯逻辑（不触碰 LVGL）：直接驱动生产代码里的槽取用助手 [`replace_index`] /
+    /// [`fire_index`]（三者 `set_on_change` 的公共实现）。
+    ///
+    /// **本用例覆盖的缺陷（本单元评审实测）**：触发写法若是
+    /// `take_cb → f(v) → put_back_cb`，用户回调 panic 时展开会**跳过**放回 ⇒ 槽永久留在
+    /// `None` ⇒ **此后所有通知静默丢失且无报错**（`catch_unwind` 在更外层的
+    /// `src/lvgl/event.rs` 事件桥，看不见这个后果）。评审探针实测旧写法：
+    /// `calls_after_first=1` / `calls_after_second=1`（第二次根本没到达）/ 槽 `None`。
+    ///
+    /// **敏感性（探针实测）**：把 [`fire_index`] 改回
+    /// `let Some(mut f) = take_cb(slot) else { return }; f(v); put_back_cb(slot, f);`
+    /// （即"放回"在 `f(v)` 之后、不在 `Drop` 里）⇒ 第一次 panic 跳过放回 ⇒ 第二次
+    /// `take_cb` 返回 `None` ⇒ 计数停在 1 ⇒ 本用例 FAILED，且 panic 文案点名
+    /// "第二次通知"。还原后全绿。
+    #[test]
+    fn panicking_callback_does_not_strand_the_slot() {
+        let slot: IndexCallback = Rc::new(RefCell::new(None));
+        // 通知到达次数（第二次断言的核心）。
+        let calls = Rc::new(Cell::new(0usize));
+        // 还剩几次"故意 panic"（第一次触发时消耗掉）。
+        let panics_left = Rc::new(Cell::new(1usize));
+
+        {
+            let calls = Rc::clone(&calls);
+            let panics_left = Rc::clone(&panics_left);
+            replace_index(
+                &slot,
+                Box::new(move |_v: usize| {
+                    calls.set(calls.get() + 1);
+                    if panics_left.get() > 0 {
+                        panics_left.set(panics_left.get() - 1);
+                        // 用户回调**故意** panic（模拟"回调纪律被破坏"）。
+                        panic!("回归用例：用户回调故意 panic（须由外层 catch_unwind 拦下）");
+                    }
+                }),
+            );
+        }
+
+        // ── 第一次触发：回调 panic ⇒ 测试自身必须不红（故用 catch_unwind 包住）──
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fire_index(&slot, 1)));
+        assert!(first.is_err(), "前提：第一次触发确实把 panic 抛出来了");
+        assert_eq!(calls.get(), 1, "第一次通知到达了回调（panic 发生在回调体内）");
+        assert!(
+            slot.borrow().is_some(),
+            "**panic 之后槽必须已被放回**（旧写法：展开跳过放回 ⇒ 槽为 None）"
+        );
+
+        // ── 关键断言：第二次通知仍必须到达（这正是缺陷的后果面）──
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fire_index(&slot, 2)));
+        assert!(second.is_ok(), "第二次触发不得再 panic（本次回调不再 panic）");
+        assert_eq!(
+            calls.get(),
+            2,
+            "**panic 之后下一次通知仍必须到达**（旧写法：槽永久空置 ⇒ take_cb 返回 None ⇒ \
+             计数停在 1，且**没有任何报错**）"
         );
     }
 
