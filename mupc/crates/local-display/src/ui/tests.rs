@@ -6923,6 +6923,7 @@ pub(crate) fn pages_chain() {
             drop(p3c);
             drop(p5c);
         }
+
     }
 
     drop(host);
