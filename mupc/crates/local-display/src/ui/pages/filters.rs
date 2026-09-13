@@ -13,16 +13,30 @@
 //!
 //! ## 给 P3（B2c-2）的复用接口（**照此接线即可**）
 //!
-//! ```ignore
+//! ⚠️ **本块是 `no_run` 而非 `ignore`**（B2c-1 规格评审 ⑥ 的裁定）：`ignore` **不等于**撒谎，
+//! 但读者会以为"可编译、只是被跳过" —— 实际它连编译都不做 ⇒ 与 `pub` API 漂移**无人发现**。
+//! 改成 `no_run`（**编译但不在 doc test 中执行**，因为真跑要 LVGL 初始化）后，本块由编译器
+//! 逐条验证签名与调用式；原先引用的两个**不存在**的标识符（调用方父对象 `scroll` 与
+//! `P3_RANGE_ROW_Y`）改由 `#` 隐藏的**最小脚手架**给出（示意值，非规格值）。
+//!
+//! ```no_run
+//! # use mupc_local_display::lvgl::obj::Obj;
+//! # use mupc_local_display::ui::pages::filters;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let scroll = Obj::screen()?;      // P3 的页根滚动容器（示意：真实调用方由 P3 传入）
+//! # const P3_RANGE_ROW_Y: i32 = 300;  // P3 自己的栅格 y（示意值，非规格值）
 //! // ① 构造（P3 的筛选区 y 由 P3 自己排在「级别 / 模块」两行之后）。唯一构造入口是 build()：
 //! let filter = filters::build(&scroll, filters::TimeRangeChange::default())?;
 //! filter.obj().set_pos(0, P3_RANGE_ROW_Y);
 //! // ② 注册变化回调：**只报意图**，不发请求（request_id 由 B3 生成）
-//! filter.set_on_change(move |c| { /* c.range / c.start / c.end → 组装日志查询交给 B3 */ });
+//! filter.set_on_change(move |c| { let _ = (c.range, c.start, c.end); });
 //! // ③ 档位变化会**当场**改本件体高（自定义展开 48 → 284）⇒ 回调里必须重摆"本件之后"的
 //! //    区块：`y = P3_RANGE_ROW_Y + filters::body_h(c.range)`（**用纯函数，不要读 size()** ——
 //! //    事件回调内读到的 coords 还是旧的，理由见 `body_h` 文档）。
+//! let _y_after = P3_RANGE_ROW_Y + filters::body_h(filter.change().range);
 //! // ④ 空态 / 超限（EDGE-08 / EDGE-15）/「回到最新」等**属 P3 页面**，不在本件内。
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! **P3 与 P5 的差异只有「时间范围的语义落点」**：本件产出的 [`LogRange`] 三档是**与契约

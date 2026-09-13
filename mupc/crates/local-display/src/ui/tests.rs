@@ -824,10 +824,12 @@ const UI_PROD_SOURCES: [(&str, &str); 11] = [
 /// 塞进 `source_key(..)` 从而静默逃过码表网 —— 与 `config_key(` 同一条自证纪律）。
 ///
 /// **B2c-1 新增一条 `audit_key(`**：同款机制、同款理由 —— `ui/pages/p5_audit.rs` 的
-/// **审计 `target` 键映射表**必须写出**机器键**（`gateway.port` / `system.log_level` /
-/// `telemetry.interval` / `gateway.listen_addr`），而键是**小写 ASCII 且从不上屏**
-/// （上屏的是中文标签，未登记键**整个不显标签**，见该文件的 **AU9**）。该文件里
-/// `audit_key("…")` 的**计数由 `p5_static_constraints` 钉死为恰 4 处**。
+/// **审计 `target` 键映射表**必须写出**机器键**（4 个配置字段键：`gateway.port` /
+/// `system.log_level` / `telemetry.interval` / `gateway.listen_addr`；2 个联锁键：
+/// `interlock.release` / `interlock.ack_m1`），而键是**小写 ASCII 且从不上屏**
+/// （已登记键上屏的是中文标签；**未登记键**上屏的是 `display_safe` **归一后**的形态，
+/// 也不是原始小写键，见该文件的 **AU9**）。该文件里 `audit_key("…")` 的**计数由
+/// `p5_static_constraints` 钉死为恰 6 处**。
 ///
 /// ⚠️ **边界（B2b-3 代码质量整改 M7，如实登记）**：本清单是**后缀匹配**（`prefix.ends_with(s)`），
 /// 且上面的计数**只数 `p4_interlock.rs` / `p5_audit.rs` 各自一个文件**。⇒ 两点已知面：
@@ -4997,6 +4999,21 @@ pub(crate) fn pages_chain() {
             (4, 48),
             "左缘 4 px 色条通高（§6.5：底 #14231F + 左缘 4 px #35D0C4）"
         );
+        // **页面确实挂了 audit 这一档样式**（评审 ② 的整改：原 `audit_banner_hue_is_exclusive`
+        // 只比 `Palette` 常量 ⇒ 把 `audit_banner_style()` 改成 `WARN_BG` 照样全绿）。
+        // 薄层**没有**"已挂样式读回"通道 ⇒ 读页面记录的**应用标记**（见 `immutable_bg` 文档）。
+        assert_eq!(
+            p5.immutable_skin(),
+            p5_audit::BannerSkin::Audit,
+            "说明条必须应用 **audit** 那一档底色（改成 WARN_BG ⇒ 本行变红）
+             —— 实际色值 {:?}",
+            p5.immutable_bg()
+        );
+        assert_ne!(
+            p5.immutable_skin(),
+            p5_audit::BannerSkin::Warn,
+            "不得与警示条同档（§6.5「合规凭据」专属色）"
+        );
 
         // ── ② 共享「时间范围」件（P3 / P5 共用；UI §6.5 筛选区「同 P3」）───────────
         assert_eq!(
@@ -5163,9 +5180,179 @@ pub(crate) fn pages_chain() {
         );
         assert_eq!(
             p5.row_summary(1).as_deref(),
-            Some("开 → –"),
-            "bool ⇒ 开/关；`None` ⇒ 占位符（**绝不补 0**，AU12 / C1 前车之鉴）"
+            Some("联锁释放: 开 → –"),
+            "`interlock.release` 是**契约点名**的已知键 ⇒ 中文标签（评审 ③ 整改；原实现下这里是裸 `开 → –`）\
+             + bool ⇒ 开/关；`None` ⇒ 占位符（**绝不补 0**，AU12 / C1 前车之鉴）"
         );
+        // ── ⑤′ **时间倒序由本页保证**（§6.5；**乱序注入 ⇒ 屏上仍倒序**）──────────────────
+        // 「改什么会让本条变红」：删掉 `Core::apply_page` 里的 `row_order(..)`（改用注入序）
+        // ⇒ 下面第 1 / 2 行立刻红。
+        {
+            let t_new = audit_entry(
+                "id-s1",
+                1_789_047_700_000,
+                ConsoleOp::ConfigApply,
+                AuditResult::Ok,
+                "gateway.port",
+                None,
+                None,
+                None,
+            );
+            let t_mid = audit_entry(
+                "id-s2",
+                1_789_047_000_000,
+                ConsoleOp::ConfigApply,
+                AuditResult::Ok,
+                "gateway.port",
+                None,
+                None,
+                None,
+            );
+            let t_old = audit_entry(
+                "id-s3",
+                1_789_000_000_000,
+                ConsoleOp::ConfigApply,
+                AuditResult::Ok,
+                "gateway.port",
+                None,
+                None,
+                None,
+            );
+            // **故意乱序**注入（中 / 新 / 旧）。
+            p5.set_page(&audit_page(
+                vec![t_mid.clone(), t_new.clone(), t_old.clone()],
+                true,
+                false,
+                Some(1_789_047_700_000),
+            ));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p5.row_time(0).as_deref(),
+                Some("2026/09/10 13:41:40"),
+                "第 0 行必须是**最新**一条（时间倒序，§6.5）"
+            );
+            assert_eq!(
+                p5.row_time(2).as_deref(),
+                Some("2026/09/10 00:26:40"),
+                "末行必须是最旧一条"
+            );
+            // 操作类型列也必须按**同一行序**刷新（两处共用 `row_order`；用注入标签区分"错位"）。
+            p5.set_ops(&[OpOption {
+                op: ConsoleOp::ConfigApply,
+                label: "debug".into(),
+            }]);
+            assert_eq!(
+                p5.row_op(0).as_deref(),
+                Some("DEBUG"),
+                "标签刷新必须跟着同一行序走（否则第 0 行的操作类型会错位）"
+            );
+            p5.set_ops(&p5_audit::canonical_ops());
+        }
+
+        // ── ⑤″ **未登记 `target` 键在屏上仍可辨认**（评审 ③）──────────────────────────
+        // 「改什么会让本条变红」：把 `summary_text` 的未登记分支改回"只留值对"（原实现）
+        // ⇒ 第 2 条（starts_with）立刻红（屏上就没有字段标识了）。
+        {
+            let unknown = audit_entry(
+                "id-u1",
+                1_789_047_500_000,
+                ConsoleOp::ConfigApply,
+                AuditResult::Ok,
+                "interlock.flood",
+                Some(serde_json::json!(1)),
+                Some(serde_json::json!(2)),
+                None,
+            );
+            p5.set_page(&audit_page(vec![unknown], true, false, Some(1)));
+            disp.refr_now_for_test();
+            let shown = p5.row_summary(0).expect("值对文案");
+            assert!(
+                shown.starts_with("IN?ER"),
+                "未登记键 ⇒ 屏上仍有**可辨认**的机器键前缀（实际：{shown}）"
+            );
+            assert!(shown.contains("1 → 2"), "值对不得被键挤掉（实际：{shown}）");
+            // **不臆造**：不得出现任何已登记键的中文标签。
+            for (_, label) in p5_audit::TARGET_LABELS
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .chain(
+                    p5_audit::INTERLOCK_TARGETS
+                        .iter()
+                        .map(|(k, op)| (*k, op.label())),
+                )
+            {
+                assert!(
+                    !shown.contains(label),
+                    "未登记键**不得**借用中文标签 `{label}`（实际：{shown}）"
+                );
+            }
+            // 契约点名的两个联锁键 ⇒ 带**中文**标签（**不再**是裸值对）。
+            let release = audit_entry(
+                "id-u2",
+                1_789_047_500_000,
+                ConsoleOp::InterlockRelease,
+                AuditResult::Ok,
+                "interlock.release",
+                Some(serde_json::json!(true)),
+                None,
+                None,
+            );
+            p5.set_page(&audit_page(vec![release], true, false, Some(1)));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p5.row_summary(0).as_deref(),
+                Some(format!("{}: 开 → –", ConsoleOp::InterlockRelease.label()).as_str()),
+                "`interlock.release` 是**已知键**（契约点名）⇒ 中文标签 + 值对"
+            );
+        }
+
+        // ── ⑤‴ **时间 / 操作者两列的定长等宽**（§6.5「时间 24 px 等宽」）────────────────
+        // 「改什么会让本条变红」：时间戳格式不再定长（例如把 `format_epoch_ms_utc` 的补零去掉）
+        // ⇒ 第 1 条（字符数）立刻红；数字字形宽度不等（换掉等宽数字字体）⇒ 第 2 条红；
+        // 把列宽改小到装不下定长文本 ⇒ 第 3 / 4 条红。
+        {
+            let t0 = p5.row_time(0).expect("时间列");
+            let t1 = "2026/01/02 03:04:05";
+            assert_eq!(
+                t0.chars().count(),
+                t1.chars().count(),
+                "时间戳必须**定长**（等宽的前提；实际 `{t0}` vs `{t1}`）"
+            );
+            if let (Some(w0), Some(w1)) = (measured_text_px(&t0, 24), measured_text_px(t1, 24)) {
+                assert_eq!(
+                    w0, w1,
+                    "不同时刻的时间戳像素宽必须**相等**（等宽数字；`{t0}` vs `{t1}`）"
+                );
+                assert!(
+                    w0 <= p5_audit::ROW_TIME_W,
+                    "定长时间戳 {w0} px 必须放得进时间列 {} px",
+                    p5_audit::ROW_TIME_W
+                );
+            }
+            let op = p5.row_operator(0).expect("操作者列");
+            assert_eq!(
+                op,
+                p5_audit::TEXT_OPERATOR_LOCAL,
+                "操作者列是**定长**的 §3.6 中文名（未知名才需 DOTS 截断）"
+            );
+            if let Some(wop) = measured_text_px(&op, 24) {
+                assert!(
+                    wop <= p5_audit::ROW_OP_W,
+                    "操作者名 {wop} px 必须放得进操作者列 {} px",
+                    p5_audit::ROW_OP_W
+                );
+            }
+        }
+
+        // 复原第 ⑤ 段的三条页（本段上面的 ⑤′/⑤″ 改了注入内容），供后续行内容 / 几何断言使用。
+        p5.set_page(&audit_page(
+            vec![e_ok.clone(), e_fail.clone(), e_port.clone()],
+            true,
+            true,
+            Some(1_789_047_727_000),
+        ));
+        disp.refr_now_for_test();
+
         // 失败行有原因；成功行**无**（§6.5：`原因：…`（仅失败行））
         assert!(p5.row_reason_visible(1), "失败行必须显原因（EDGE-12 同族：不得静默）");
         assert!(p5.row_reason(1)
@@ -5199,9 +5386,35 @@ pub(crate) fn pages_chain() {
             p5.note_text().as_deref(),
             Some("本地屏不支持审计导出 · 无文件与下载通道")
         );
-        // 表头（§6.5 线框 Y300：5 列）
+        // 表头（§6.5 线框 Y300：5 列）—— ⚠️ **只断"容器存活 / 高 36"是不够的**（B2c-1 的
+        // 阻断级缺陷：5 列名 + 4 竖线 + 底线当时是 `new()` 的**局部句柄** ⇒ 返回即 `Drop`
+        // ⇒ LVGL **级联删除整棵子树** ⇒ 表头整块空白，而容器仍存活、高仍是 36）。
+        // 故这里**读 LVGL 的实际子件数**并**逐列读回文案**：
         assert!(p5.head_obj().is_alive());
         assert_eq!(p5.head_obj().size().1, 36);
+        assert_eq!(
+            p5.head_child_count(),
+            p5_audit::HEAD_CHILD_COUNT,
+            "表头**实际子件数**必须 = 5 列名 + 4 竖分隔线 + 1 底线（局部句柄被 `Drop` ⇒ 级联删子树 ⇒ 本例从 10 掉到 0）"
+        );
+        for (i, want) in [
+            p5_audit::TEXT_HEAD_TIME,
+            p5_audit::TEXT_HEAD_OPERATOR,
+            p5_audit::TEXT_HEAD_OP,
+            p5_audit::TEXT_HEAD_VALUE,
+            p5_audit::TEXT_HEAD_RESULT,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                p5.head_col_text(i).as_deref(),
+                Some(*want),
+                "第 {i} 列表头文案必须在屏上可读回（§6.5 线框：时间│操作者│操作类型│前后值│结果）"
+            );
+        }
+        assert_eq!(p5.head_divs_alive(), 4, "4 条竖分隔线全部存活");
+        assert!(p5.head_rule_alive(), "表头底线存活");
         // ── **只读约束**（UI §6.5「只读约束」行 / PL-02）：运行期读 LVGL 标志 ─────────
         // 「改什么会让本条变红」：给行加任何可点子对象（按钮 / 可点容器 / 长按菜单入口）
         // ⇒ `clickable_parts` > 0 ⇒ 本条立刻红。
@@ -5357,6 +5570,58 @@ pub(crate) fn pages_chain() {
             p5.row_op(0).as_deref(),
             Some(ConsoleOp::ConfigApply.label())
         );
+
+        // ── ⑫ **行池容量**（**AU8**）：注入契约规定的每页条数必须成功且不 OOM ─────────────
+        // 实测（AU8）：20 / 22 条成功，**24 条即 `lv_realloc` 失败 + 挂死** ⇒ `ROW_MAX` 收敛到
+        // 20（纯逻辑上界另有 `p5_audit::tests::row_pool_capacity_is_measured`，那条改坏时
+        // **当场红**，不会把测试跑挂 —— 本段只在**合法上界内**验证真实渲染路径）。
+        {
+            let page_full: Vec<_> = (0..AUDIT_PAGE_SIZE)
+                .map(|i| {
+                    audit_entry(
+                        &format!("id-full-{i}"),
+                        1_700_000_000_000 + i as u64,
+                        ConsoleOp::ConfigApply,
+                        AuditResult::Ok,
+                        "gateway.port",
+                        Some(serde_json::json!(i)),
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            p5.set_page(&audit_page(page_full, true, true, Some(1)));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p5.visible_rows(),
+                AUDIT_PAGE_SIZE,
+                "注入契约规定的每页条数（{AUDIT_PAGE_SIZE}）⇒ 整页可见（不 OOM）"
+            );
+            assert_eq!(p5.rows_alive(), AUDIT_PAGE_SIZE, "行对象全部存活（非「有行但空白」）");
+            // 超过上界 ⇒ **只渲染上界条**（有界，不增长；`apply_page` 是"整体替换窗口"语义）。
+            let over: Vec<_> = (0..AUDIT_PAGE_SIZE * 3)
+                .map(|i| {
+                    audit_entry(
+                        &format!("id-over-{i}"),
+                        1_800_000_000_000 + i as u64,
+                        ConsoleOp::ConfigApply,
+                        AuditResult::Ok,
+                        "telemetry.interval",
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            p5.set_page(&audit_page(over, true, false, Some(1)));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p5.row_pool_len(),
+                AUDIT_PAGE_SIZE,
+                "行池**有界**：注入 3 页也只建一页（AU8；原 100 的承诺会 OOM 挂死）"
+            );
+            assert_eq!(p5.visible_rows(), AUDIT_PAGE_SIZE);
+        }
 
         // 渲染后确有像素（装配 → 布局 → 像素全链）。
         let painted5 = sink.borrow().iter().filter(|b| **b != 0).count();
@@ -5713,22 +5978,31 @@ fn p5_static_constraints() {
     // ⑤ **`audit_key(` 的计数自证**：`NON_DISPLAY_SINKS` 里的 `audit_key(` 是**后缀匹配** ——
     //    紧跟它的字面量会被**豁免**出"上屏候选"走查。该豁免在 P5 **正当**（审计 `target` 的
     //    **机器键**确不上屏：`gateway.port` 里的小写 ASCII 在生成字体里没有字形，上屏的是中文
-    //    标签），但它同时是一条**可能被误用的后门**：谁把**上屏串**写成 `audit_key("…")`，那条串
-    //    就**静默逃过**码表网。⇒ 把"恰好 4 处"钉死（= `TARGET_LABELS` 的四个键）。
+    //    标签 —— 未登记键上屏的是 `display_safe` **归一后**的形态，**不是**原始小写键），
+    //    但它同时是一条**可能被误用的后门**：谁把**上屏串**写成 `audit_key("…")`，那条串
+    //    就**静默逃过**码表网。⇒ 把"恰好 6 处"钉死（= `TARGET_LABELS` 4 个配置字段键
+    //    + `INTERLOCK_TARGETS` 2 个联锁键）。
     {
         let (name, src) = ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs"));
         let prod = truncate_before_test_module(src, name);
         assert_eq!(
             prod.matches("audit_key(\"").count(),
-            4,
-            "{name}：`audit_key(\"…\")` 必须**恰为 4 处**（`TARGET_LABELS` 的四个机器键）。\
-             计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是机器键**\
-             （键不上屏才可豁免；**上屏文案**放进 `audit_key(..)` 会从码表网里消失）"
+            6,
+            "{name}：`audit_key(\"…\")` 必须**恰为 6 处**（`TARGET_LABELS` 的 4 个配置字段键 \
+             + `INTERLOCK_TARGETS` 的 2 个联锁键 —— 契约点名：`interlock.release` / \
+             `interlock.ack_m1`）。计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它\
+             **确实是机器键**（键不上屏才可豁免；**上屏文案**放进 `audit_key(..)` 会从码表网里消失）"
+        );
+        assert_eq!(
+            crate::ui::pages::p5_audit::TARGET_LABELS.len()
+                + crate::ui::pages::p5_audit::INTERLOCK_TARGETS.len(),
+            6,
+            "两张映射表的条目数之和必须与上面的计数一致（三处一起改才自洽）"
         );
         assert_eq!(
             crate::ui::pages::p5_audit::TARGET_LABELS.len(),
             4,
-            "映射表条目数必须与上面的计数一致（两处一起改才自洽）"
+            "配置字段键表仍是 4 条（联锁键不并进本表：标签转出契约 `label()`，见 AU9）"
         );
     }
 
@@ -5801,6 +6075,10 @@ fn p5_static_constraints() {
             "UnavailableState",
             "WarnBanner",
             "TARGET_LABELS",
+            "INTERLOCK_TARGETS",
+            "HEAD_CHILD_COUNT",
+            "BannerSkin",
+            "row_order",
             "free_text_safe",
             "list_clickable_count",
         ] {
@@ -5872,7 +6150,7 @@ fn p5_runtime_texts_emit_only_cmap_glyphs() {
         cases.push((format!("value_text({v})"), value_text(&v)));
     }
     cases.push(("side_text(None)".into(), side_text(None)));
-    // 值对：已知键 / 未知键 / 两侧缺 / 超长。
+    // 值对：已知键 / 未登记键（降级显示机器键 ⇒ 也须逐字过 cmap）/ 两侧缺 / 超长。
     for (b, a, t) in [
         (
             Some(serde_json::json!(2404)),
@@ -5884,6 +6162,22 @@ fn p5_runtime_texts_emit_only_cmap_glyphs() {
             Some(serde_json::json!(true)),
             None,
             "interlock.release",
+        ),
+        (
+            Some(serde_json::json!(true)),
+            None,
+            "interlock.ack_m1",
+        ),
+        // **未登记键**（评审 ③ 整改）：`display_safe(键)` 的产物必须逐字在 cmap 内。
+        (
+            Some(serde_json::json!(1)),
+            Some(serde_json::json!(2)),
+            "interlock.flood",
+        ),
+        (
+            None,
+            None,
+            "display.publish_ms",
         ),
         (
             Some(serde_json::json!("a".repeat(80))),
