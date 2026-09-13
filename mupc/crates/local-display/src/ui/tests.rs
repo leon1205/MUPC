@@ -818,6 +818,14 @@ const UI_PROD_SOURCES: [(&str, &str); 9] = [
 /// 且从不上屏**（上屏的是中文名 `急停` / `门禁`，未登记名经 `display_safe` 归一）。
 /// 该文件里 `source_key("…")` 的**计数由 `p4_static_constraints` 钉死为恰 2 处**（防把**上屏串**
 /// 塞进 `source_key(..)` 从而静默逃过码表网 —— 与 `config_key(` 同一条自证纪律）。
+///
+/// ⚠️ **边界（B2b-3 代码质量整改 M7，如实登记）**：本清单是**后缀匹配**（`prefix.ends_with(s)`），
+/// 且上面的计数**只数 `p4_interlock.rs` 一个文件**。⇒ 两点已知面：
+/// ① 任何**以 `source_key(` 结尾的标识符**（如 `my_source_key("…")`）同样被豁免 —— 豁免面比
+///    "调用本页那个常量函数"更宽；
+/// ② 别的文件里写 `source_key("上屏串")` **不受**那两处计数约束（`config_key(` 同款边界）。
+/// 本批**不修**（收紧需把后缀匹配改成"精确调用点集合"，属另一批的结构变更）；此处**登记**以免
+/// 后人把这两条当成"已被网住"。
 const NON_DISPLAY_SINKS: [&str; 8] = [
     "InvalidArgument(",
     "debug_struct(",
@@ -1255,6 +1263,57 @@ fn load_font_cmap() -> Option<std::collections::BTreeSet<char>> {
         );
     }
     Some(cmap)
+}
+
+/// 用**生产字体**（`fonts/lv_font_noto_sc_{px}.c` 的 `adv_w` 表）实测一段文本的**单行自然宽**
+/// （px）。`None` = 字体产物缺失（干净 clone 常态 ⇒ 跳过，与 [`load_font_cmap`] 同一口径）。
+///
+/// **为何必须读生成物、而不是在用例里 `size()` 量标签**：`noto-font` feature 默认**未启用**
+/// （`local-display/Cargo.toml`）⇒ 离屏用例里的标签走**降级字体**（无 CJK 字形）⇒ 量出来的宽度
+/// **不是真机宽度**（本仓库实测：同一串「审计服务连接超时，操作未执行：请检查审计服务后重试」
+/// 在降级字体下 ≈250 px，在生产 24 px 档 ≈600 px）。判"长文本放得下"只能读**真机的字形宽度表**
+/// —— 与 [`ui_texts_covered_by_font_cmap`] 读同一份产物。
+///
+/// 口径：`adv_w` 单位为 **1/16 px**，逐字求和、**不计 kerning**（⇒ 结果是**上界**，偏保守）；
+/// cmap 外 / 缺字按整字宽兜底（同样是上界）。
+fn measured_text_px(text: &str, px: u32) -> Option<i32> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fonts")
+        .join(format!("lv_font_noto_sc_{px}.c"));
+    let src = std::fs::read_to_string(path).ok()?;
+    // `glyph_dsc` 的 `adv_w` 按 **glyph id 顺序**出现（id 0 = reserved）。
+    let adv: Vec<u64> = src
+        .split(".adv_w = ")
+        .skip(1)
+        .map(|s| {
+            s.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("0")
+                .parse::<u64>()
+                .unwrap_or(0)
+        })
+        .collect();
+    // `unicode_list_0[i]` = 码位 − `range_start`(32)，其 glyph id = `glyph_id_start`(1) + i。
+    let head = "unicode_list_0[] = {";
+    let start = src.find(head)? + head.len();
+    let end = src[start..].find("};")? + start;
+    let mut map: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (i, tok) in src[start..end].split(',').enumerate() {
+        let tok = tok.trim();
+        if let Some(hex) = tok.strip_prefix("0x") {
+            if let Ok(v) = u32::from_str_radix(hex, 16) {
+                map.insert(v + 32, i + 1);
+            }
+        }
+    }
+    let mut w16: u64 = 0;
+    for ch in text.chars() {
+        w16 += match map.get(&(ch as u32)).and_then(|g| adv.get(*g)) {
+            Some(a) => *a,
+            None => u64::from(px) * 16, // cmap 外 / 缺字 ⇒ 整字宽兜底（上界）
+        };
+    }
+    Some((w16 / 16) as i32)
 }
 
 /// 码表覆盖率（设计 §11.1「码表覆盖率」）—— **基线 = 生成字体的实际 cmap**
@@ -4140,8 +4199,15 @@ pub(crate) fn pages_chain() {
 
         // ── ④ **fail-closed 回归锁**（`available = false`）───────────────────────
         // UI §8.3 联锁专行：不可用 ⇒ 两按钮 disabled + 就地原因 + **不得显示「未联锁」**。
-        // 「改什么会让本条变红」：把 `state_view` 改成 `if s.latched {..} else if !available` 或
-        // 把 `!available` 分支回落成 `Unlatched`（fail-open）⇒ 第 2 / 3 条立刻变红。
+        // 「改什么会让本条变红」：把 `state_view` 的 `!available` 分支**删掉**、或把它回落成
+        // `Unlatched`（fail-open）⇒ 本段断言立刻变红。
+        //
+        // ⚠️ **订正（B2b-3 代码质量整改 ④）**：此处原先写「把 `state_view` 改成
+        // `if s.latched {..} else if !available` ⇒ 第 2/3 条**立刻变红**」—— **实测该变异下本段
+        // 全绿**（只有离线单测 `p4_interlock.rs::unavailable_state_never_falls_back_to_unlatched`
+        // 变红）：本段此前只注入 `available = false && latched = false` 这一组合，而它在两种写法下
+        // **同判** `Unavailable`（先判 `latched` 也进不去）。漏掉的自由度是
+        // **`available = false && latched = true`** ⇒ 已在 ④′ 补段钉死。
         p4.set_section(&il(false, true, false));
         assert_eq!(
             p4.state_text().as_deref(),
@@ -4202,6 +4268,44 @@ pub(crate) fn pages_chain() {
         assert!(
             !p4.take_refresh_request(),
             "纯展示降级不置刷新标志"
+        );
+
+        // ── ④′ **漏掉的自由度**：`available = false` **且** `latched = true` ───────────
+        // （B2b-3 代码质量整改 ④：④ 段只测了 `latched = false`，而 `state_view` 若被改成
+        //  先判 `latched`，`latched = false` 的组合在两种写法下**同判** `Unavailable`
+        //  ⇒ 该变异能从 ④ 段下溜过去。本段补上 `latched = true` 这一组合，把它钉死。）
+        //
+        // **可测性论证**：缺帧 / 状态源不可用时，`latched` 这一比特**本身不可信**（可能只是
+        // 结构体缺省 `false`，也可能残留上一拍的真值）⇒ 它**不得**参与判定；屏上**只能**出现
+        // 「联锁状态不可用」。
+        // 「改什么会让本条变红」：把 `state_view` 改成 `if s.latched {..} else if !s.available`
+        // （或任何先认 `latched` 的写法）⇒ 本段第 1 / 2 条立刻变红（实测，见整改报告探针输出）。
+        p4.set_section(&il(false, true, true));
+        assert_eq!(
+            p4.state_view(),
+            p4_interlock::StateView::Unavailable,
+            "`available = false && latched = true` ⇒ **仍不可用**（`latched` 不可信）"
+        );
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "屏上**只能**是「联锁状态不可用」—— **绝不**因 `latched = true` 显示「已联锁」"
+        );
+        assert_ne!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_LATCHED),
+            "**不可用 ≠ 已联锁**（fail-closed 的另一半：不得把「无法获知」报成「已联锁」）"
+        );
+        assert_ne!(p4.state_icon_text().as_deref(), Some(p4_interlock::ICON_STATE_LATCHED));
+        assert_ne!(
+            p4.latch_chip_text().as_deref(),
+            Some(p4_interlock::TEXT_LATCH_HELD),
+            "latch 胶囊**不得**因 `latched = true` 显示「已保持」（§8.3）"
+        );
+        assert!(p4.release_disabled() && p4.restart_disabled(), "两按钮仍 disabled");
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE)
         );
 
         // ── ⑤ 触发源 2 项（含数量 / 行形态 / 色通道 / 机器名→中文）────────────────
@@ -4272,6 +4376,66 @@ pub(crate) fn pages_chain() {
             p4.source_unavailable_obj().size().1,
             p4_interlock::UNAVAILABLE_H,
             "不可用态实测高必须 = 页内推导的 UNAVAILABLE_H"
+        );
+
+        // ── ⑤′ **源数超出行池上限**（5 源）⇒ 差额必须**可见**（B2b-3 代码质量整改 ②）──────
+        // 评审实测（5 源）：`title = 触发源 · 5`、`rows_visible = 4`、`row4 = None`、**屏上零提示**
+        // —— 与 UI §6.4（`：599`）「**全部源一次性列出，不折叠**」的明文冲突（且 IL9 的"钉死"是
+        // 单向的：后端 `source_token()` 加变体只会让 `source_token()` 编译失败，**不会**让
+        // `SOURCE_ROW_POOL` 报错 ⇒ 无网兜住）。本段把「差额可见」钉死。
+        // 「改什么会让本条变红」：把 `sources_overflow_note` 改成恒返回空串（= 去掉提示）
+        // ⇒ 下面第 ③ 条立刻变红（实测，见整改报告探针输出）。
+        let mut five = il(true, true, false);
+        five.sources = vec![
+            InterlockSourceItem {
+                name: "estop".into(),
+                tripped: true,
+            },
+            InterlockSourceItem {
+                name: "flood".into(),
+                tripped: true,
+            },
+            InterlockSourceItem {
+                name: "fire".into(),
+                tripped: false,
+            },
+            InterlockSourceItem {
+                name: "door".into(),
+                tripped: true,
+            },
+            InterlockSourceItem {
+                name: "spare".into(),
+                tripped: false,
+            },
+        ];
+        p4.set_section(&five);
+        // ① 行池上限**没有被悄悄扩容**（本处置是"可见提示"，不是"多铺一行"）。
+        assert_eq!(
+            p4.source_rows_visible(),
+            4,
+            "行池恒 4（IL9 上限不动）；第 5 条**不铺行**"
+        );
+        assert_eq!(p4.source_row_tripped(4), None, "第 5 行不存在（`None` = 隐藏 / 未建）");
+        // ② 卡头仍报**真实**总数（数量 ≠ 行数）。
+        assert!(
+            p4.sources_title_text()
+                .as_deref()
+                .is_some_and(|t| t.starts_with("触发源 · 5")),
+            "卡头报真实总数 5（实际 {:?}）",
+            p4.sources_title_text()
+        );
+        // ③ **差额在屏上可见**（补偿；`还`/`有`/`条` 与数字逐字在 cmap 内）。
+        assert_eq!(
+            p4.sources_title_text().as_deref(),
+            Some("触发源 · 5 · 还有 1 条"),
+            "超限 ⇒ 卡头**可见地**说出差额（不得静默；UI §6.4「全部源一次性列出」的补偿）"
+        );
+        // ④ 未超限时**不得**多出提示（卡头逐字不变）—— 下一段（⑥）正好以 `two` 起手。
+        p4.set_section(&two);
+        assert_eq!(
+            p4.sources_title_text().as_deref(),
+            Some("触发源 · 2"),
+            "未超限 ⇒ 卡头逐字不变（提示只在超出时出现）"
         );
 
         // ── ⑥ latch 态 ⇒ **只**禁用 M1 + **按钮正上方**就地原因（IL-03，不得静默失败）──
@@ -4409,15 +4573,95 @@ pub(crate) fn pages_chain() {
         );
         assert!(p4.reason_left_visible());
         assert_eq!(p4.toast_tone(), Some(ToastTone::Failure));
+        // **① 无遮挡通道**（B2b-3 代码质量整改 ①）：评审 `PROBE-OCCL` 实测弹层面板底 ≈ y607、
+        // 就地原因带在 y600–624 ⇒ 原因带**顶部约 7 px 被面板压住**，而拒绝时弹层**恰不关**
+        // ⇒「就地可见」在最需要时**被削弱**。⇒ 同一份**具体原因**必须同时进 `Toast`
+        // （`layer_top`，且**弹层之后创建** ⇒ 同图层内绘在其上，结构上无遮挡）。
+        // 「改什么会让本条变红」：把失败分支的 `show_toast(.., &text)` 改回
+        // `TEXT_TOAST_FAIL`（通用「操作失败」）⇒ 下面断言立刻变红（实测，见整改报告探针输出）。
         assert_eq!(
             p4.toast_text().as_deref(),
-            Some(p4_interlock::TEXT_TOAST_FAIL)
+            Some("触发源未复位 · 急停/门禁"),
+            "失败 Toast 必须携带**同一份具体原因**（无遮挡通道；IL23 ①）"
+        );
+        assert_ne!(
+            p4.toast_text().as_deref(),
+            Some(p4_interlock::TEXT_TOAST_FAIL),
+            "**不得**只剩通用「操作失败」——那正是 ① 要修的形态"
+        );
+        assert_eq!(
+            p4.toast_text().as_deref(),
+            p4.reason_left_text().as_deref(),
+            "两条通道（Toast / 就地红字）**同一份原因**，不两说"
+        );
+        // **③ 两槽共存时的宽度**（IL23 ②的**残余**面）：此刻 `two` 是 latch 态 ⇒ 右槽在显
+        // （M1 专属原因）⇒ 左槽**必须收回 352 px**（否则两槽重叠，违 IL5）；长 `message` 在这
+        // 一组合下仍是 `DOTS` 省略号（**如实登记**：此时唯一不截断的通道只有 Toast，且它自身
+        // 文本槽 400 px 亦有上限）。
+        disp.refr_now_for_test();
+        assert_eq!(
+            p4.reason_left_width(),
+            352,
+            "右槽在显 ⇒ 左槽收回 352 px（IL5 两槽不重叠；长 message 在此组合下仍截断 = IL23 残余）"
         );
         assert!(
             p4.take_refresh_request(),
             "RejectedPrecondition ⇒ 置「请求一次状态刷新」标志（IL12 / EDGE-19 的刷新语义）"
         );
         assert!(!p4.take_refresh_request(), "取走即清（只刷一次）");
+
+        // ⑧⁺ **长 `message` 的不截断通道**（B2b-3 代码质量整改 ③ / IL23 ②）───────────────
+        // 契约 `control.rs` 的 `message` 字段文档明写它是「失败时即 EDGE-10 / EDGE-12 要求的
+        // **具体原因**」—— 而最需要具体时（长文本）恰恰被 352 px 槽的 `DOTS` 削掉。
+        // **处置**：右槽不显时左槽**加宽到整幅 992 px**（`REASON_LEFT_FULL_W`）。
+        // 本段用**实测文本自然宽**证明「确实放得下」，而不是只看槽宽数字。
+        p4.set_section(&il(true, true, false)); // 非 latch ⇒ 右槽不显 ⇒ 左槽可独占整条
+        disp.refr_now_for_test();
+        assert_eq!(
+            p4.reason_left_width(),
+            Dimens::CONTENT_W,
+            "右槽不显 ⇒ 左槽独占整条原因带（992 px；IL23 ②）—— \
+             「改什么会让本条变红」：把 `refresh_actions` 的 `REASON_LEFT_FULL_W` 改回 `REASON_LEFT_W`"
+        );
+        // **实测文本自然宽**（口径见 [`measured_text_px`]）：**用生产字体**的字形宽度表量，
+        // 而不是量离屏标签 —— `noto-font` 默认未启用，离屏标签走降级字体（无 CJK 字形），
+        // 量出来只有真机的 ~2/5。字体产物缺失（干净 clone）⇒ 跳过（与码表网同一口径）。
+        let long_msg = "审计服务连接超时，操作未执行：请检查审计服务后重试";
+        if let Some(natural) = measured_text_px(long_msg, TextSlot::Body.px()) {
+            assert!(
+                natural > 352,
+                "长文案自然宽必须 **> 352 px**（否则本段证明不了「352 槽会截断它」；实测 {natural} px）"
+            );
+            assert!(
+                natural <= p4.reason_left_width(),
+                "长文案自然宽 {natural} px 必须 ≤ 加宽后的左槽 {} px ⇒ **单行不截断**",
+                p4.reason_left_width()
+            );
+        }
+        let long_rejected: ControlResponse<InterlockOpAck> = ControlResponse::rejected(
+            "req-long",
+            ControlCode::RejectedPrecondition,
+            long_msg,
+            Vec::new(),
+            Some("audit-long".into()),
+            1_789_047_727_000,
+        );
+        p4.show_result(&long_rejected).expect("show_result(长 message)");
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some(long_msg),
+            "长 message 就地**原样**上屏（无 ASCII 需改写 ⇒ `display_safe` 恒等）"
+        );
+        assert_eq!(
+            p4.toast_text().as_deref(),
+            Some(long_msg),
+            "同一份长原因也在 Toast（无遮挡通道）里 —— 两条通道都给全"
+        );
+        assert_eq!(
+            p4.reason_left_width(),
+            Dimens::CONTENT_W,
+            "长 message 期间左槽保持整幅（渲染期只改尺寸，不新建对象）"
+        );
 
         // ⑧′ 结构化拒绝（直连 `InterlockApi` 路径）⇒ 逐变体具体文案（含**源名**）。
         p4.show_reject(&InterlockReject::SourcesNotReset {
@@ -4462,6 +4706,50 @@ pub(crate) fn pages_chain() {
             p4.reason_left_text().as_deref(),
             Some("保持时间不足 · 还需 0 秒"),
             "到 0 **不自作主张**放行（是否可操作仍由后端判定）"
+        );
+
+        // ⑧″′ **陈旧倒计时必须被新帧清掉**（B2b-3 代码质量整改 M3 / IL28）──────────────
+        // 评审 `PROBE-CD3`：倒计时归零后**跨帧常驻**「还需 0 秒」，且左槽优先级**高于**
+        // `last_reject` ⇒ 会把新到的结构化拒绝原因**顶掉**（屏上是过期的倒计时，不是新原因）。
+        // 判据 = 「新帧的**展示相关**字段变了」（`p4_interlock::section_display_eq`，忽略 `ts_ms`）。
+        // 「改什么会让本条变红」：把 `Core::apply_section` 里的 `clear_countdown()` 调用删掉
+        // ⇒ 下面「真·变帧后倒计时归零」那条立刻变红（实测，见整改报告探针输出）。
+        // 先落一帧 S 作为「当前帧」，再重新武装倒计时（前面的 ⑧″ 已把它推到 0）。
+        let mut s_frame = il(true, true, false);
+        s_frame.sources = two.sources.clone();
+        p4.set_section(&s_frame);
+        p4.show_reject(&InterlockReject::HoldNotElapsed {
+            need_secs: 30,
+            remaining_secs: 5,
+        });
+        assert_eq!(p4.countdown_secs(), Some(5), "重新武装倒计时");
+        // ① **仅 `ts_ms` 变** ⇒ 不清（否则 1 Hz 心跳每秒杀它，IL14 形同虚设）。
+        let mut same = s_frame.clone();
+        same.ts_ms = 123_456;
+        p4.set_section(&same);
+        assert_eq!(
+            p4.countdown_secs(),
+            Some(5),
+            "**仅 `ts_ms` 变**的帧 ⇒ 不清倒计时（帧内容相同 = 没有新事实）"
+        );
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some("保持时间不足 · 还需 5 秒")
+        );
+        // ② 真·变帧（`latched` 翻转）⇒ 旧基准失效 ⇒ 倒计时必须消失，让位给新原因。
+        let mut flipped = s_frame.clone();
+        flipped.latched = true;
+        p4.set_section(&flipped);
+        assert_eq!(
+            p4.countdown_secs(),
+            None,
+            "展示态变了 ⇒ 陈旧倒计时必须被清（IL28：否则它会顶掉新原因）"
+        );
+        assert!(
+            !p4.reason_left_visible(),
+            "清掉后左槽落回「无原因」⇒ **隐藏**（不再常驻过期文案）—— \
+             **可见性**才是 `PROBE-CD3` 的判据：隐藏标签的文本缓冲区仍留着旧串，\
+             `reason_left_text()` 单独**不能**当「屏上有没有」的判据"
         );
 
         // ⑧‴ EDGE-19：提交时状态已变化（结构化路径的固定文案 + 刷新标志）。

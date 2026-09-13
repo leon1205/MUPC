@@ -34,12 +34,12 @@
 //! | IL6 | **触发源名映射**：`estop`→`急停`、`door`→`门禁`（UI §3.6 P4「触发源」行）；**其余机器名（含 `flood` / `fire`）取 [`display_safe`] 归一化后的机器名**（小写→大写同族、cmap 外 ASCII→`?`），**不伪造中文名**。残余（如实）：非 ASCII 名（后端直接给中文）**原样透传** ⇒ 含缺字时真机仍是豆腐块，**防线在后端字段命名 / 字库**（与 `p2_config.rs` **PD13** 同口径） | `flood` / `fire` 的候选中文（水浸 / 消防）里 **`水`(U+6C34) / `浸`(U+6D78) / `防`(U+9632) / `火`(U+706B) 逐字实测均不在 cmap 内**，且 §3.6 用字表本身**只列** 急停 / 门禁（不臆造表外中文名）。**不静默**：映射表与未知名的处置**逐条可测**（见本文件单测），且屏上保留可辨认的原文 | 同 IL1（扩字表后可补 `flood` / `fire` 的中文名）；机器名全集真源 = `mupc-core-bin/src/interlock.rs::source_token()` |
 //! | IL7 | 状态三灯卡在 `available = false` 时**不**用 [`UnavailableState`] 组件，改为**卡内同源灰度**：图标 = [`UnavailableKind::Interlock`]`.icon()`（`?`）、文案 = 同 kind 的 `.title()`（「联锁状态不可用」）、色 = 同 kind 的 `.accent()`（`#8C98AC`） | [`UnavailableState`] 的固定尺寸是 **992 宽 × 164 高**（`components.rs` 内按 `Dimens::CONTENT_W` 排布），放不进 **236×108** 的灯卡，而 `components.rs` **本批禁改**。取「**同源取值**」（图标 / 文案 / 颜色三通道**全部读自** `UnavailableKind::Interlock`，非另抄）⇒ 与 `UnavailableState` 语义一致、无第二份真源（单测断言两处取值相等） | `components.rs` 收口批：给 `UnavailableState` 增「紧凑 / 自适应宽」形态后改用组件 |
 //! | IL8 | 触发源卡在 `available = false` 时用**真** [`UnavailableState`]（`kind = Interlock`），其 `reason` 槽取**空串** | 帧内 `available = false` **不带原因字段**（契约无该槽）⇒ **不臆造**原因文案；`UnavailableState` 的标题已由 `kind` 给定（「联锁状态不可用」） | 若将来帧给出 `available` 的原因，直接注入（本页该槽已是参数化入口） |
-//! | IL9 | 触发源**行池 = 4**（`SOURCE_ROW_POOL`）；帧内源数 > 4（契约 `sources: Vec<_>` **未设上限**）⇒ **卡头数量仍显真实 N**、行只铺 4 条 | 后端 distinct token 全集恰为 4：`estop` / `flood` / `fire` / `door`（`mupc-core-bin/src/interlock.rs::source_token()`）；行池固定 ⇒ `new()` 一次性建齐、`render()` **不可失败**（同 P1 的 `alarm_rows` 池口径）且 1 Hz **零对象 churn**。「数量 ≠ 行数」这一差异在屏上**可见**（不静默） | 无（**有意**）；若后端 token 集合扩张，须同步扩 `SOURCE_ROW_POOL` 并在 §3.6 补中文名 |
+//! | IL9 | 触发源**行池 = 4**（`SOURCE_ROW_POOL`）；帧内源数 > 4（契约 `sources: Vec<_>` **未设上限**）⇒ **卡头数量仍显真实 N**、行只铺 4 条；**且卡头补一行可见提示 ` · 还有 N−4 条`**（[`sources_overflow_note`]，B2b-3 代码质量整改 ②） | **上限取值的理由**：后端 distinct token 全集恰为 4 —— `estop` / `flood` / `fire` / `door`（`mupc-core-bin/src/interlock.rs::source_token()`）；行池固定 ⇒ `new()` 一次性建齐、`render()` **不可失败**（同 P1 的 `alarm_rows` 池口径）且 1 Hz **零对象 churn**。**补偿**：UI §6.4（`：599`）明写「**全部源一次性列出，不折叠**」⇒ 超限必须**可见**（不得静默）—— 本行的差额外显即该补偿（该提示词 `还`/`有`/`条` 逐字在 cmap 内）。⚠️ **IL9 的"钉死"是单向的**：`source_token()` 加变体只会让 `source_token()` 的 `match` **编译失败**，**不会**让 `SOURCE_ROW_POOL` 报错 ⇒ 该提示是**唯一的运行期网** | 无（**有意**）；若后端 token 集合扩张到 > 4，**先**同步扩 `SOURCE_ROW_POOL`（在 §3.6 补中文名），提示自动收敛为空串 |
 //! | IL10 | 弹层明细取 [`ConfirmDialog`] 的**三段式** `字段 旧值 → 新值`（组件本批禁改，**无** `字段：值` 形态）⇒ §6.4 要求的三项信息按「**当前 → 操作后目标态**」表达；本次操作**不改动**的项取 `新值 = 旧值`（**如实**表达「不变」，不编造目标值） | `ConfirmDialog` 的明细行**恒**渲染四槽（字段 / 旧值 / 箭头 / 新值，颜色亦固定），没有「单值行」口。三段式是本批唯一可行形态；语义仍**具体**（非泛化措辞，满足 §7.3「影响范围 / 明细必须具体」） | `components.rs` 收口批：明细行支持「单值」形态后逐字回契约 |
-//! | IL11 | **弹层内**就地红字（UI §6.4 拒绝原因表的「弹层内就地显示」）**不可达** ⇒ 取 `p2_config.rs` **PD7 同款口径**：原因落**页内就地原因带**（红字 24 px `#FF6B6B`），**弹层不自动关闭**（原因常驻可读，用户可「取消」关闭后重试） | 同上：`ConfirmDialog` 的「影响范围」与明细在**构造期固定**，**没有**可变错误文案口；且关闭弹层不得在 LVGL 事件回调内做 | `components.rs` 补 `set_error()` 后改回弹层内 |
-//! | IL12 | **控制通道线上路径**：失败时的**具体原因**由 `ControlResponse.message` 承担 —— 契约 `display-proto/src/control.rs` 该字段文档原文：「**人读消息；UI 直接展示（失败时即 EDGE-10 / EDGE-12 要求的「具体原因」）**」⇒ [`P4InterlockPage::show_result`] 就地上屏 `display_safe(message.trim())`（**不吞**，EDGE-12）；空串时退到 §3.6 全局行的「操作失败」（**不造假原因**）。`RejectedPrecondition` **另**置「请求一次状态刷新」标志（[`P4InterlockPage::take_refresh_request`]）—— 被拒即说明屏上观测可能过期，该标志对**各类**前置条件**都正确**，且与文案**解耦**（改了文案也不影响刷新语义）。EDGE-19 的**固定**文案「联锁状态已变化 · 请刷新后重试」由 [`P4InterlockPage::show_conflict`] 承担，它是**显式入口**：需 B3 在**能判定**「提交时状态已变化」时调用。**当前契约无法自动达成该判定** —— `ControlCode::RejectedPrecondition` 把「状态已变化」与「触发源未复位 / 保持时间不足 / latch / StopPending」**糊在同一个码**里，回执**无**结构化 `InterlockReject` 字段；且 `InterlockReject` 的 **7 个变体里没有「冲突」变体** ⇒ 「B3 自行解析出 `InterlockReject`」对该场景**不可实现**（**契约级缺口**，属 F/G/H/I/J/K 与契约所有者的责任）。⇒ 本页**不假设**该固定文案会被自动触发：它在屏上出现**当且仅当**外部显式调用了 `show_conflict()` | 契约冻结（`display-proto` 不得改）；不做「按消息串猜语义」的脆弱解析（猜错即**谎报原因**，与 §2.6「绝不造假」冲突） | 若 `display-proto` 在控制回执中增 `reject: Option<InterlockReject>`（或为 EDGE-19 单列一个 `ControlCode` 变体），则 [`P4InterlockPage::show_result`] 直接分派（单一分派点），固定文案即可自动可达 |
+//! | IL11 | **弹层内**就地红字（UI §6.4 拒绝原因表的「弹层内就地显示」）**不可达** ⇒ 取 `p2_config.rs` **PD7 同款口径**：原因落**页内就地原因带**（红字 24 px `#FF6B6B`），**弹层不自动关闭**（原因常驻可读，用户可「取消」关闭后重试）。⚠️ **本行论证的减损与补正（B2b-3 代码质量整改 ①）**：评审 `PROBE-OCCL` 实测弹层面板底 ≈ y607、就地原因带在 y600–624 ⇒ 原因带**顶部约 7 px 被弹层压住**，而拒绝时弹层**恰恰不关** ⇒「就地可见」在最需要时**被削弱**。补正 = **IL23** ①（同一份原因**同时**走 `layer_top` 的 Toast，无遮挡） | 同上：`ConfirmDialog` 的「影响范围」与明细在**构造期固定**，**没有**可变错误文案口；且关闭弹层不得在 LVGL 事件回调内做 | `components.rs` 补 `set_error()` 后改回弹层内（届时 IL23 ① 的 Toast 通道应**保留** —— 它是遮挡无关的那条） |
+//! | IL12 | **控制通道线上路径**：失败时的**具体原因**由 `ControlResponse.message` 承担 —— 契约 `display-proto/src/control.rs` 该字段文档原文：「**人读消息；UI 直接展示（失败时即 EDGE-10 / EDGE-12 要求的「具体原因」）**」⇒ [`P4InterlockPage::show_result`] 就地上屏 `display_safe(message.trim())`（**不吞**，EDGE-12）；空串时退到 §3.6 全局行的「操作失败」（**不造假原因**）。`RejectedPrecondition` **另**置「请求一次状态刷新」标志（[`P4InterlockPage::take_refresh_request`]）—— 被拒即说明屏上观测可能过期，该标志对**各类**前置条件**都正确**，且与文案**解耦**（改了文案也不影响刷新语义）。EDGE-19 的**固定**文案「联锁状态已变化 · 请刷新后重试」由 [`P4InterlockPage::show_conflict`] 承担，它是**显式入口**：需 B3 在**能判定**「提交时状态已变化」时调用。**当前契约无法自动达成该判定** —— `ControlCode::RejectedPrecondition` 把「状态已变化」与「触发源未复位 / 保持时间不足 / latch / StopPending」**糊在同一个码**里，回执**无**结构化 `InterlockReject` 字段；且 `InterlockReject` 的 **7 个变体里没有「冲突」变体** ⇒ 「B3 自行解析出 `InterlockReject`」对该场景**不可实现**（**契约级缺口**，属 F/G/H/I/J/K 与契约所有者的责任）。⇒ 本页**不假设**该固定文案会被自动触发：它在屏上出现**当且仅当**外部显式调用了 `show_conflict()`。⚠️ **M9**：置位点 2 处（`show_conflict` / `show_result` 的 `RejectedPrecondition` 分支）、**生产读取 0 处**（`console.rs` 尚不存在）⇒ `take_refresh_request` 是**前向 API**：**B3 必须消费它**（每拍先取、`true` 即补发一次 `GET`），否则「自动刷新」的语义**落空** | 契约冻结（`display-proto` 不得改）；不做「按消息串猜语义」的脆弱解析（猜错即**谎报原因**，与 §2.6「绝不造假」冲突） | 若 `display-proto` 在控制回执中增 `reject: Option<InterlockReject>`（或为 EDGE-19 单列一个 `ControlCode` 变体），则 [`P4InterlockPage::show_result`] 直接分派（单一分派点），固定文案即可自动可达 |
 //! | IL13 | 回执 → 展示态的映射（**单一映射点** `Core::apply_ack`）：`latched := ack.latched`、`stop_failed := !ack.stopped`（`InterlockOpAck.stopped` 的契约语义是「操作后停机**确认**态」）；`available` / `enabled` / `sources` / 两灯**不变**（回执不带，等下一帧，最坏 ≤1.35 s） | §6.4「成功」行要求「用回执 `applied` **立即**刷新，不等下一帧」（F17.6 / IL-02）⇒ 回执能覆盖的两项立即刷；其余字段回执确无载体（契约冻结）⇒ 不臆造、由下一帧补。**契约未显式声明** `stopped` 与 `stop_failed` 互补 ⇒ 若后端语义有出入，只改 `Core::apply_ack` 一处 | 契约若明示互补关系，此处改为显式字段 |
-//! | IL14 | **保持时间倒计时**（UI §6.4「保持时间不足」行：按钮旁显剩余秒数）**已实现**，时钟由 [`P4InterlockPage::tick`] 注入：收到 `HoldNotElapsed { remaining_secs }` 时记剩余秒数并置「待取基准」标志，**首个 `tick`** 取基准 `Instant`，其后每拍按已过秒数递减（`saturating_sub`，不 panic）；**页面不读 `Instant::now()`**（`Toast::new` 的既有行为除外，同 `p2_config.rs` **PD20**）。倒计时到 `0` 只显示「还需 0 秒」，**不**自作主张放行（是否可操作仍由后端前置判定） | 帧内只有 `release_hold_secs`（**须保持**的时长），**没有**「已保持多久 / 何时复位」⇒ 无法从帧推出绝对剩余时间；唯一可得的绝对量是后端拒绝里的 `remaining_secs` ⇒ 以「拒绝后的首拍」为基准推进是**唯一**不臆造的做法 | 若帧增「源复位时刻 / 已保持秒数」，改为帧驱动（届时删掉基准捕获） |
+//! | IL14 | **保持时间倒计时**（UI §6.4「保持时间不足」行：按钮旁显剩余秒数）**已实现**，时钟由 [`P4InterlockPage::tick`] 注入：收到 `HoldNotElapsed { remaining_secs }` 时记剩余秒数并置「待取基准」标志，**首个 `tick`** 取基准 `Instant`，其后每拍按已过秒数递减（`saturating_sub`，不 panic）；**页面不读 `Instant::now()`**（`Toast::new` 的既有行为除外，同 `p2_config.rs` **PD20**）。倒计时到 `0` 只显示「还需 0 秒」，**不**自作主张放行（是否可操作仍由后端前置判定）；**跨帧存续与否见 IL27**（新帧改变展示态即清，`ts_ms` 不计） | 帧内只有 `release_hold_secs`（**须保持**的时长），**没有**「已保持多久 / 何时复位」⇒ 无法从帧推出绝对剩余时间；唯一可得的绝对量是后端拒绝里的 `remaining_secs` ⇒ 以「拒绝后的首拍」为基准推进是**唯一**不臆造的做法 | 若帧增「源复位时刻 / 已保持秒数」，改为帧驱动（届时删掉基准捕获） |
 //! | IL15 | 提交中（[`P4InterlockPage::set_submitting`]）两按钮 `disabled` 且**无按钮级就地原因** | UI §6.4 未定义「提交中」态的就地文案（§3.6 亦无该行）⇒ 只置灰、**不造文案**；防重由 `ConfirmDialog` 自身的 `Debounce`（500 ms，TT-10）与按钮禁用共同承担 | 无（**有意**） |
 //! | IL16 | `observed_sources` 取帧内**全部**源名（含未触发），口径与后端 `status_sources()`（列**全部** distinct token）一致 | 只取 `tripped` 的集合会把「某源**复位**」与「源本来就没有」的区分度降低；全量名列表是更严的并发检查（EDGE-19「状态已变化」的判据） | 无（**有意**） |
 //! | IL17 | 注入侧 / 契约侧的**自由文本**（源名、拒绝原因、回执 `message`）上屏前一律过 [`display_safe`] | 这些字面量**不在** `ui/**` 的源码字面量走查面内（来自 `display-proto` 或运行时帧），直上屏含 cmap 外 ASCII（小写 / `-`）即豆腐块（同 `pages/mod.rs` **D9** 与 `p2_config.rs` **PD13**）；`display_safe` 只改写 ASCII，**非 ASCII 缺字挡不住**（残余见 IL6 / PD13） | 同 D9（扩字符集后改写面自然收窄） |
@@ -48,6 +48,12 @@
 //! | IL20 | `SOURCE_ROW_POOL` / `INNER_W` / `CARD_HEAD_H` / `CARD_INSET` 与 `p2_config.rs` / `p6_system.rs` **同式重复**（各页各持一份） | **不动**（KISS + 两文件本批**禁改**）：三者都是 `theme` 常量的**一格推导**，上收需要一个新共享模块（结构变更，超出本批范围，与 `p2_config.rs` 的 PD19 同一处置） | **B2c 之后**统一上收 `ui/pages/mod.rs`；在此之前**任一处改 `theme` 派生式必须三处同改** |
 //! | IL21 | [`P4InterlockPage::show_audit_unavailable`]（EDGE-18）**除 Toast 外另落就地红字**（操作条上方同一文案） | EDGE-18 只要求 Toast ⇒ 这是**超出规格的 additive 行为**，**保留**：① 与 **IL11** 同款取向（Toast 会过期，而 fail-closed 的「操作**未执行**」这一结论须常驻可读 —— 现场看到灰按钮时能立刻知道原因）；② **零新增**：落点（就地原因带）与文案（转出 `TEXT_AUDIT_UNAVAILABLE`）都是既有件，未新建对象、未添第二份字面量 ⇒ 无屏上冗余（Toast 与红字同文案、位置不同） | 无（**有意**）；若 PM 裁定 Toast 足够，删去 [`P4InterlockPage::show_audit_unavailable`] 里的 `set_plain_reason` 一行即可（其单测断言同步收） |
 //! | IL22 | latch 的 `StatusChip` **增了图标通道**（`●` / `○` / `?` 三态，见 [`latch_chip_icon`]） | UI §5.3 对胶囊只要求 **text + color** 两通道 ⇒ 这是**超出规格的 additive 行为**，**保留**：① `StatusChip::new(parent, w, icon, text, skin)` 的**签名强制**要求 icon 实参（`components.rs` 本批**禁改**，无「省略图标」的口）；② 契约未指定字形 ⇒ 取与灯类同族的三态（实心 / 空心 / 问号），不可用态取 `?`、**不**复用 `✓` / `⚠`（与 §8.3「不得复用」一致）；③ 有单测锁住三态互异与不可用态的字形（`p4_interlock.rs::tests::latch_chip_never_says_unheld_when_unavailable`） | 若 `StatusChip` 补「无图标」构造口，可改为 text + color 两通道（须同步改 §5.3 走查与上述单测） |
+//! | IL23 | **失败态「具体原因」的双通道上屏**（B2b-3 代码质量整改 ①③）：① 回执 `message` **同时**送进 `Toast`（失败 Toast 的文案由 §3.6 全局行的通用「操作失败」**改为该具体原因**；`message` 为空时**仍**退到「操作失败」）；② 就地原因**左槽**的宽度在**右槽不显**时由 352 px 加宽到整幅 **992 px**（[`REASON_LEFT_FULL_W`]），右槽在显时收回 352（IL5 不重叠） | **①的根因（评审 `PROBE-OCCL` 实测）**：弹层面板底 ≈ y607、就地原因带在 y600–624 ⇒ 原因带**顶部约 7 px 被面板压住**，而 EDGE-12 要求「拒绝时弹层不自动关闭 + 具体原因**就地可见**」—— 恰在最需要它时被遮。`Toast` 在 `layer_top`、且**弹层之后创建**（同图层内后建者绘在上）⇒ 是**无遮挡**通道。**①的代价（如实登记）**：失败 Toast 的**通用**文案被具体原因**取代**（§3.6 全局行仍保留该串，作空 `message` 的兜底 + 就地原因带的兜底）。**③**：`message` 是**自由文本**，长文本在 352 px 槽内被 `LongMode::DOTS` 截成省略号。**实测口径**（按 `fonts/lv_font_noto_sc_24.c` 的 `adv_w` 求和 = 自然宽上界，不计 kerning；由 `ui/tests.rs::measured_text_px` 在用例里复算）：24 px 档**每汉字 ≈ 24 px** ⇒ 352 px 只容 ≈14 字、992 px 容 ≈41 字；例：25 字自由文本「审计服务连接超时，操作未执行：请检查审计服务后重试」= **600 px**（352 槽必截断，992 槽整行放下）。 | **残余（如实）**：① Toast 文本槽仅 **400 px**（≈16 字）且同样 `DOTS` ⇒ **超长文本在 Toast 里也会截断**；② 两槽同时在显（latch 态）时左槽仍 352 px ⇒ **> ≈14 字的 `message` 在屏上仍是省略号**（完整文本此时**无**不截断通道 —— `message` 是自由文本，其长度不受本页控制）。**根治**需 §3.6 给「长原因」的落点（或 `ConfirmDialog` 补 `set_error()`） |
+//! | IL24 | **成功文案取 §6.4 成功行（=`§3.6` 全局 Toast 行）而非 §3.6 P4 行**：实现上屏「`已释放联锁`」/「`已授权重启`」（[`TEXT_TOAST_RELEASED`] / [`TEXT_TOAST_ACKED`]），**未**取 §3.6 P4 行的「`联锁释放成功`」/「`授权成功`」 | 两处出处：UI 设计文档 §3.6 **P4 行**（`：257`，P4 页用字表）写「联锁释放成功 / 授权成功」；同节 **全局对话框 / Toast 行**（`：265`）与 **§6.4「成功」行**（`：613`）写「已释放联锁 / 已授权重启」。**取舍**：本页这两个串落在 **Toast** 上，而 Toast **是全局件** ⇒ 其文案由**全局 Toast 行**规范（§6.4 亦逐字给出同一对），§3.6 P4 行给的是「P4 页**用字**集合」，未区分落点。**该分歧此前未登记**（B2b-3 代码质量整改 M4 补登） | 若 PM 裁定 P4 行走字优先，改 [`OpKind::toast_ok`] 两处字面量即可（`ui/tests.rs` 的成功 Toast 断言同步改） |
+//! | IL25 | 弹层**打开失败**时**屏上无提示**，只写 stderr（且**已节流**：第 1 次 + 其后每 [`OPEN_FAIL_LOG_EVERY`] 次一次，见 [`Core::note_open_failure`]）—— B2b-3 代码质量整改 M6 | **不加屏上提示是有意的**：该路径的触发条件就是「LVGL 建不出对象」（内存池耗尽一类），而**任何**屏上提示（`Toast` / 标签）都**要求先建对象** ⇒ 在同一失效域内**不可靠**；写 stderr 是唯一不会二次失败的通道。**节流**：不节流则用户每点一次「人工释放联锁」都灌一行（无界日志） | 若将来有「复用既有标签」的诊断槽，可把失败计数上屏（须有 §3.6 文案） |
+//! | IL26 | 触发源**机器名 → 中文名**的匹配是 **ASCII 大小写不敏感**（`eq_ignore_ascii_case`，见 [`source_label`]）—— B2b-3 代码质量整改 M2 | 契约 `source_token()` 恒产小写 token，但帧 / 拒绝里的 `name` 是**自由文本**：写成 `ESTOP` / `Door` 时精确匹配落空 ⇒ 屏上落成机器名（大写字形勉强可读），而本页**明明知道**它就是「急停 / 门禁」。**只对 ASCII 生效** ⇒ 中文名（如后端直接给「急停」）不受影响。**残余（如实）**：**分隔符变体**不在映射表内 —— `e_stop` / `e-stop` 长度或字符不同 ⇒ 仍落 `display_safe`（`_` → 短破折 `–`、小写 → 大写同族），屏上呈 `E–STOP`。本页**不猜**（不在 IL6 的「只增不改」映射表里加变体） | 无；若后端**确定**只发小写 token，可退化为精确匹配（须同步改单测）；若需覆盖 `_`/`-` 变体，须在 [`SOURCE_LABELS`] 逐条增行（并重跑 `source_key(` 的计数自证） |
+//! | IL27 | **新帧改变展示态时清掉陈旧倒计时**（[`Core::apply_section`] 经 [`section_display_eq`] 判定）—— B2b-3 代码质量整改 M3 | 评审 `PROBE-CD3`：倒计时到 0 后跨帧常驻「还需 0 秒」，且左槽优先级高于 `last_reject` ⇒ 会**顶掉**新到的结构化拒绝原因。**为何按"展示相关字段变化"而不是"每帧清"**：`InterlockSection::ts_ms` **每帧都变**，若纳入比较则 1 Hz 心跳每秒清一次 ⇒ IL14 的倒计时活不过 1 s（判据**忽略 `ts_ms`**，帧内容相同则不清）。**为何不清按钮可用性**：按钮是否可操作**恒由后端态判定**（本页从不本地预判，IL18）⇒ 清理只影响文案通道 | 若帧增「源复位时刻 / 已保持秒数」，倒计时改为帧驱动（届时本处置整体删除，见 IL14） |
+//! | IL28 | 意图回调槽的**注册**（`set_on_release` / `set_on_ack_m1`）与**触发**（`fire_release` / `fire_ack_m1`）**两侧统一**用 `try_borrow_mut`（重入时**静默跳过**）—— B2b-3 代码质量整改 M5 | 此前注册侧用 `borrow_mut`：在**槽被借用期间**（= 正在 `fire_*` 里调用户回调）再注册会 **panic**，而该 panic 出自 LVGL 事件回调、被事件桥 `catch_unwind` **静默吞掉**（屏上无任何迹象）—— 与本页「回调绝不 panic」的纪律相悖。**重入语义**：静默跳过本次注册（旧回调保留），**不 panic、不上屏** | 无（**有意**）；若需可观测，可在跳过处 `debug` 级日志（本批不引入） |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -69,9 +75,12 @@
 //!   ⇒ 死写，本项目踩过），回调只持 `Weak<Core>`（避免 `Rc` 环令句柄永不落地）；
 //! - **不提供跨线程 API**：本页所有类型都含 LVGL 句柄（自动 `!Send` / `!Sync`），全部调用
 //!   必须在事件循环线程内（设计 §5.2 不变量 4）；
-//! - **渲染期不加对象**：源行 / 三卡 / 状态件 / 弹层 / Toast 一律**预建或在事件外建**，
-//!   `render`（1 Hz）**只改文本 / 颜色 / 可见性 / 尺寸**，不新建也不删除对象
-//!   （§7.5 脏区与动效纪律）。
+//! - **渲染期不加对象（一处例外，如实登记）**：源行 / 三卡 / 状态件 / 弹层 / Toast 一律
+//!   **预建或在事件外建**，`render`（1 Hz）**只改文本 / 颜色 / 可见性 / 尺寸**，不新建也不删除
+//!   对象（§7.5 脏区与动效纪律）。**例外**：`SourceRow::apply` 在**上屏名变化**时会**重建**
+//!   该行的两支 `LedIndicator`（`2` 个对象）—— 根因是 `LedIndicator`（`components.rs`，本批
+//!   禁改）**没有 `set_text` 口**，上屏名只能建时给；该路径**逐条可测**（见 `SourceRow::build`
+//!   的结构体注），其余帧（名不变）零创建。**不是**"模块级零创建"这一强命题。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -152,6 +161,15 @@ pub const TEXT_SRC_DOOR: &str = "门禁";
 pub(crate) const TEXT_NAME_SEP: &str = "/";
 /// 子句分隔符（cmap 内 `·`；替代缺字的全角标点，见 **IL1**）。
 pub(crate) const TEXT_CLAUSE_SEP: &str = " · ";
+/// 触发源**超出行池上限**时的可见提示词（` · 还有 N 条`）—— **[`SOURCE_ROW_POOL`] 上限的补偿**。
+///
+/// **存在理由（IL9）**：行池恒 4 行（后端 distinct token 全集 `estop`/`flood`/`fire`/`door`），
+/// 帧内源数 > 4 时只铺 4 行；若不在屏上说出差额，「卡头数量 ≠ 行数」这件事就**静默消失**，
+/// 与 UI §6.4（`：599`）「**全部源一次性列出，不折叠**」的明文要求冲突。
+/// `还`(U+8FD8) / `有`(U+6709) / `条`(U+6761) **逐字实测在** `fonts/lv_font_cmap.txt` 内。
+pub(crate) const TEXT_OVERFLOW_MORE: &str = "还有";
+/// 触发源超出提示的量词（见 [`TEXT_OVERFLOW_MORE`]）。
+pub(crate) const TEXT_OVERFLOW_UNIT: &str = "条";
 /// 状态三卡卡头之一：停机失败（UI §6.4 线框）。
 pub const TEXT_CARD_STOP: &str = "停机失败";
 /// 状态三卡卡头之二：故障灯。
@@ -256,6 +274,8 @@ pub const ALL_TEXTS: &[&str] = &[
     TEXT_SRC_DOOR,
     TEXT_NAME_SEP,
     TEXT_CLAUSE_SEP,
+    TEXT_OVERFLOW_MORE,
+    TEXT_OVERFLOW_UNIT,
     TEXT_CARD_STOP,
     TEXT_CARD_FAULT_LAMP,
     TEXT_CARD_RUN_LAMP,
@@ -419,6 +439,11 @@ const OP_NOTE_W: i32 = Dimens::CONTENT_W - OP_NOTE_X;
 const OP_NOTE_Y: i32 = theme::center_offset(ACTION_BAR_H, TextSlot::Body.px() as i32);
 /// 就地原因**左槽**宽（到右槽起点减同组缝 —— 两槽可同显且不重叠，见 **IL5**）。
 const REASON_LEFT_W: i32 = OP_BTN2_X - Dimens::GAP_MIN;
+/// 就地原因**左槽**在**右槽不显**时的宽度（加宽到整幅）—— 见 **IL23** ③：右槽空着时
+/// 左槽独占整条原因带，长 `message` 因此**单行不截断**（352 px → 992 px；24 px 档按生成字体
+/// 的 `adv_w` 实测**每个汉字约 24 px** ⇒ 352 px 只容 ≈14 字、992 px 容 ≈41 字；右槽在显时
+/// 仍 352 px，是该处置的**残余**）。
+const REASON_LEFT_FULL_W: i32 = Dimens::CONTENT_W;
 /// 就地原因**右槽** x（**恰在 `M1 授权重启` 按钮正上方**，UI §6.4 拒绝原因表）。
 const REASON_RIGHT_X: i32 = OP_BTN2_X;
 /// 就地原因**右槽**宽（= 按钮宽）。
@@ -615,9 +640,15 @@ pub const SOURCE_LABELS: [(&str, &str); 2] = [
 ///   cmap 外 ASCII → `?`）—— **不伪造**中文名、**不出豆腐块**；
 /// - **非 ASCII**（后端直接给了中文名）⇒ `display_safe` **原样透传** ⇒ 含缺字时仍是豆腐块
 ///   （残余风险，防线在后端字段命名 / 字库，与 `p2_config.rs` 的 PD13 同口径）。
+///
+/// ⚠️ **匹配是 ASCII 大小写不敏感的**（**IL26**）：契约 `source_token()` 产出的是**小写** token，
+/// 但帧 / 拒绝路径的 `name` 是**自由文本**；写成 `ESTOP` / `E_stop` 时若按精确匹配落空，屏上会
+/// 出现 `ESTOP`（大写同族，勉强可读）甚至 `E–STOP`（`_` 被 `display_safe` 改写成短破折）——
+/// 而这里**明明知道**它就是「急停」。故用 `eq_ignore_ascii_case`（**只对 ASCII** 生效，
+/// 中文名不受影响）。
 pub fn source_label(name: &str) -> String {
     for (key, label) in SOURCE_LABELS {
-        if name == key {
+        if name.eq_ignore_ascii_case(key) {
             return (*label).to_string();
         }
     }
@@ -636,6 +667,23 @@ pub const fn source_status_text(tripped: bool) -> &'static str {
 /// 触发源卡卡头（含数量，IL-01.2：`触发源 · N` —— 全角括号缺字，见 **IL1**）。
 pub fn sources_title(count: usize) -> String {
     format!("{TEXT_SOURCES_TITLE}{TEXT_CLAUSE_SEP}{count}")
+}
+
+/// 触发源**超出 [`SOURCE_ROW_POOL`] 上限**时的卡头提示（` · 还有 N 条`；未超出 ⇒ 空串）。
+///
+/// **这是 `IL9` 上限取值的补偿**：行池固定 4 行是为了「`new()` 一次性建齐 + `render()`
+/// 不可失败 + 1 Hz 零对象 churn」（同 P1 `alarm_rows` 池口径），但 UI §6.4（`：599`）明写
+/// 「**全部源一次性列出，不折叠**」⇒ 超限必须**可见**（不得静默）。**不改行池上限**
+/// （版式取向，且 IL9 已登记），补偿就是这一行卡头提示。
+///
+/// **命中面**：未超出时返回空串 ⇒ 卡头与既有文案**逐字不变**（`触发源 · N`）。
+pub fn sources_overflow_note(count: usize) -> String {
+    let hidden = count.saturating_sub(SOURCE_ROW_POOL);
+    if hidden == 0 {
+        String::new()
+    } else {
+        format!("{TEXT_CLAUSE_SEP}{TEXT_OVERFLOW_MORE} {hidden} {TEXT_OVERFLOW_UNIT}")
+    }
 }
 
 /// 两个操作按钮的可用性 + **就地表原因**（UI §6.4「操作与拒绝原因」表逐行）。
@@ -860,6 +908,22 @@ pub(crate) fn dialog_details(s: &InterlockSection, op: OpKind) -> Vec<DetailRow>
             },
         ],
     }
+}
+
+/// 两段联锁状态的**展示相关等价**（**忽略 `ts_ms`**）—— 陈旧倒计时的清理判据（**IL27**）。
+///
+/// **为何必须忽略 `ts_ms`**：它是帧内采集时刻，**每帧都变**；若纳入比较，1 Hz 的正常心跳会让
+/// 「内容没变」被误判成「新帧」⇒ 每秒清一次倒计时 ⇒ IL14 的「还需 N 秒」在屏上活不过 1 s。
+/// 其余字段全部参与（任一变化都可能使「保持时间」的基准失效）。
+pub fn section_display_eq(a: &InterlockSection, b: &InterlockSection) -> bool {
+    a.available == b.available
+        && a.enabled == b.enabled
+        && a.latched == b.latched
+        && a.stop_failed == b.stop_failed
+        && a.sources == b.sources
+        && a.fault_lamp == b.fault_lamp
+        && a.run_lamp == b.run_lamp
+        && a.release_hold_secs == b.release_hold_secs
 }
 
 /// 就地原因带的档位（样式表下标即 [`ReasonSlot::index`]）。
@@ -1174,6 +1238,8 @@ struct Core {
     on_release: IntentSlot,
     /// 「M1 授权重启」意图回调。
     on_ack_m1: IntentSlot,
+    /// 弹层打开**失败**的累计次数（**节流用**，见 **IL25**：不节流则每次点击都写 stderr）。
+    open_fail_logs: Cell<u32>,
 }
 
 impl Core {
@@ -1181,7 +1247,17 @@ impl Core {
 
     /// 注入一帧的联锁段（`None` ⇒ 契约缺省 = **不可用**）。
     fn apply_section(&self, s: &InterlockSection) {
+        // ⓪ **陈旧倒计时清理（M3 / IL27）**：新帧**改变了展示相关字段** ⇒ 之前那条
+        // 「保持时间不足 · 还需 N 秒」的基准已失效（源已复位 / latch 已变），必须清掉 ——
+        // 否则左槽会**跨帧常驻**旧倒计时，且它的优先级高于 `last_reject`（会顶掉新原因）。
+        //
+        // ⚠️ 判据**忽略 `ts_ms`**：它每帧都变（帧内时间戳），若纳入比较则 1 Hz 心跳**每秒**
+        // 都会清掉倒计时，IL14 的倒计时将形同虚设。**内容相同的帧（含仅 `ts_ms` 变）不清**。
+        let changed = !section_display_eq(&self.section.borrow(), s);
         *self.section.borrow_mut() = s.clone();
+        if changed {
+            self.clear_countdown();
+        }
         if s.available {
             self.ever_available.set(true);
         }
@@ -1224,7 +1300,18 @@ impl Core {
         } else {
             0
         };
-        self.source_title.set_text(&sources_title(s.sources.len()));
+        // 卡头 = `触发源 · N`；**超出**行池上限时**可见地**补差额（IL9 的补偿，② ——
+        // `available = false` 时不铺行，也就无「超出」可言）。**不改行池上限**（版式取向）。
+        let title = if s.available {
+            format!(
+                "{}{}",
+                sources_title(s.sources.len()),
+                sources_overflow_note(s.sources.len())
+            )
+        } else {
+            sources_title(s.sources.len())
+        };
+        self.source_title.set_text(&title);
         for (i, row) in self.source_rows.iter().enumerate() {
             match s.sources.get(i).filter(|_| i < shown_rows) {
                 Some(item) => {
@@ -1284,6 +1371,24 @@ impl Core {
         self.release.set_disabled(st.release_disabled);
         self.restart.set_disabled(st.restart_disabled);
 
+        // 右槽先算：**M1 专属**阻塞（全局阻塞时不重复显示；`op_state` 已把全局原因并入其取值）。
+        let right = if self.section.borrow().available && self.section.borrow().enabled {
+            st.restart_reason.map(str::to_string)
+        } else {
+            None
+        };
+        // **左槽宽度随右槽是否在显自适应**（**IL23** ③）：右槽空着时左槽独占整条原因带
+        // （992 px），长 `message` 因此**单行不截断**；右槽在显时收回 352 px（两槽不重叠，
+        // IL5）。只改 `set_size`，**不新建 / 不删除对象**（渲染期纪律）。
+        self.reason_left.set_size(
+            if right.is_some() {
+                REASON_LEFT_W
+            } else {
+                REASON_LEFT_FULL_W
+            },
+            TextSlot::Body.px() as i32,
+        );
+
         // 左槽优先级：全局（不可用 / 未启用）> 一次性文案 > 倒计时 > EDGE-19 > 结构化拒绝。
         let left: Option<(String, ReasonSlot)> = if !self.section.borrow().available {
             Some((TEXT_STATE_UNAVAILABLE.to_string(), ReasonSlot::Gray))
@@ -1316,12 +1421,6 @@ impl Core {
             None => set_visible(self.reason_left.obj(), false),
         }
 
-        // 右槽：**M1 专属**阻塞（全局阻塞时不重复显示；`op_state` 已把全局原因并入其取值）。
-        let right = if self.section.borrow().available && self.section.borrow().enabled {
-            st.restart_reason.map(str::to_string)
-        } else {
-            None
-        };
         match right {
             Some(t) => {
                 self.reason_right.set_text(&t);
@@ -1356,10 +1455,25 @@ impl Core {
         *self.last_reject.borrow_mut() = None;
         *self.plain_reason.borrow_mut() = None;
         self.conflict.set(false);
+        self.clear_countdown();
+        self.refresh_actions();
+    }
+
+    /// 只清**倒计时**槽（**IL14 / IL27**：新帧改变了展示态 ⇒ 旧基准失效）。
+    fn clear_countdown(&self) {
         self.countdown_on.set(false);
         self.countdown_base.set(None);
         self.countdown_left.set(0);
-        self.refresh_actions();
+    }
+
+    /// 弹层打开失败的诊断：**节流**（**IL25**）—— 第 1 次必写，其后每
+    /// [`OPEN_FAIL_LOG_EVERY`] 次写一行（不节流则每次点击都往 stderr 灌一行）。
+    fn note_open_failure(&self, op: &str, e: &LvglError) {
+        let n = self.open_fail_logs.get().saturating_add(1);
+        self.open_fail_logs.set(n);
+        if n == 1 || n % OPEN_FAIL_LOG_EVERY == 0 {
+            report_open_failure(op, e);
+        }
     }
 
     /// 置一次性就地文案（回执 `message` / 审计不可写这类非结构化原因）。
@@ -1481,7 +1595,12 @@ fn open_dialog(core: &Rc<Core>, op: OpKind) -> Result<(), LvglError> {
     Ok(())
 }
 
+/// 弹层打开失败的 stderr 诊断**节流窗口**（**IL25**：第 1 次 + 其后每 N 次各写一行）。
+const OPEN_FAIL_LOG_EVERY: u32 = 64;
+
 /// 开弹层失败只写 stderr（**绝不 panic**、**绝不上屏** —— 上屏文案必须逐字在 cmap 内）。
+///
+/// **调用点已节流**（[`Core::note_open_failure`]，**IL25**）：本函数自身不做判断。
 fn report_open_failure(op: &str, e: &LvglError) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr(), "P4 安全联锁页：打开确认弹层失败（{op}）：{e}");
@@ -1765,6 +1884,7 @@ impl P4InterlockPage {
             toast: RefCell::new(None),
             on_release: RefCell::new(None),
             on_ack_m1: RefCell::new(None),
+            open_fail_logs: Cell::new(0),
         });
 
         // 按钮：只**开弹层**（确认完成前不发任何请求）。
@@ -1773,7 +1893,7 @@ impl P4InterlockPage {
             core.release.on_clicked(move |_| {
                 let Some(c) = w.upgrade() else { return };
                 if let Err(e) = open_dialog(&c, OpKind::Release) {
-                    report_open_failure(TEXT_RELEASE, &e);
+                    c.note_open_failure(TEXT_RELEASE, &e);
                 }
             });
         }
@@ -1782,7 +1902,7 @@ impl P4InterlockPage {
             core.restart.on_clicked(move |_| {
                 let Some(c) = w.upgrade() else { return };
                 if let Err(e) = open_dialog(&c, OpKind::AckM1) {
-                    report_open_failure(TEXT_ACK_M1, &e);
+                    c.note_open_failure(TEXT_ACK_M1, &e);
                 }
             });
         }
@@ -1850,15 +1970,24 @@ impl P4InterlockPage {
     where
         F: FnMut(InterlockOpPayload) + 'static,
     {
-        *self.core.on_release.borrow_mut() = Some(Box::new(f));
+        // **重入语义（M5 / IL28）**：槽正被借用（= 正在 `fire_release` 里调用户回调）时
+        // **静默跳过**本次注册 —— 与 `fire_*` 侧的 `try_borrow_mut` **同一纪律**。
+        // 用 `borrow_mut` 会在重入时 panic，而 panic 出事件回调虽被事件桥 `catch_unwind`
+        // 兜住，却是**静默吞掉**（屏上无任何迹象）⇒ 与本页「回调绝不 panic」的纪律相悖。
+        if let Ok(mut slot) = self.core.on_release.try_borrow_mut() {
+            *slot = Some(Box::new(f));
+        }
     }
 
-    /// 注册「M1 授权重启」意图回调（语义同 [`P4InterlockPage::set_on_release`]）。
+    /// 注册「M1 授权重启」意图回调（语义同 [`P4InterlockPage::set_on_release`]，含**重入时
+    /// 静默跳过**的同一处置）。
     pub fn set_on_ack_m1<F>(&self, f: F)
     where
         F: FnMut(InterlockOpPayload) + 'static,
     {
-        *self.core.on_ack_m1.borrow_mut() = Some(Box::new(f));
+        if let Ok(mut slot) = self.core.on_ack_m1.try_borrow_mut() {
+            *slot = Some(Box::new(f));
+        }
     }
 
     /// 提交中（外部发出请求后置 `true`；回执到达后由 [`P4InterlockPage::show_result`] 复位）。
@@ -1966,8 +2095,11 @@ impl P4InterlockPage {
             msg
         };
         self.core.set_plain_reason(&text, ReasonSlot::Red);
-        self.core
-            .show_toast(ToastTone::Failure, ICON_FAIL, TEXT_TOAST_FAIL)?;
+        // **Toast 携带同一份「具体原因」**（① / **IL23**）：就地原因带会被弹层面板压住
+        // （实测弹层底 ≈ y607 压掉原因带顶部），而 Toast 在 `layer_top`、弹层**之后**创建
+        // ⇒ 同图层里绘在弹层之上，是**无遮挡**的那条通道。空 `message` 时 `text` 已是
+        // §3.6 全局行的「操作失败」⇒ 与既有兜底同口径。
+        self.core.show_toast(ToastTone::Failure, ICON_FAIL, &text)?;
         if resp.code == ControlCode::RejectedPrecondition {
             self.core.refresh_requested.set(true);
         }
@@ -2235,9 +2367,19 @@ impl P4InterlockPage {
             .then(|| self.core.countdown_left.get())
     }
 
-    /// 是否曾注入过**有效**帧（断言口径）。
-    pub fn ever_available(&self) -> bool {
+    /// **仅测试**：是否曾注入过**有效**帧（`available` 曾为 true）—— 断言口径，**不参与任何
+    /// 判据**（M1：与 `with_dialog` 同一纪律，`#[cfg(test)]` 门控）。
+    #[cfg(test)]
+    pub(crate) fn ever_available(&self) -> bool {
         self.core.ever_available.get()
+    }
+
+    /// **仅测试**：就地原因**左槽**当前宽度（加宽策略的断言口径，见 **IL23** ③）。
+    ///
+    /// 装配后须有一次布局（离屏用例先 `refr_now_for_test()`）才是当前值。
+    #[cfg(test)]
+    pub(crate) fn reason_left_width(&self) -> i32 {
+        self.core.reason_left.size().0
     }
 
     /// **仅测试**：以闭包访问当前弹层（`RefCell` 借用不外泄）。
@@ -2470,6 +2612,15 @@ mod tests {
         // ① 已登记的两条（UI §3.6 P4「触发源」行逐字）。
         assert_eq!(source_label("estop"), TEXT_SRC_ESTOP);
         assert_eq!(source_label("door"), TEXT_SRC_DOOR);
+        // ①′ **ASCII 大小写不敏感**（M2 / IL26）：`ESTOP` / `Door` 也是「急停 / 门禁」，
+        // 不得因大小写之差落成「`E–sTOP`」这类机器名上屏（`_` 还会被 `display_safe` 改写成
+        // 短破折）。敏感性：把 `eq_ignore_ascii_case` 改回 `==` ⇒ 本条两条立刻变红。
+        assert_eq!(source_label("ESTOP"), TEXT_SRC_ESTOP, "大写机器名仍须映射（M2/IL26）");
+        assert_eq!(source_label("Door"), TEXT_SRC_DOOR, "混合大小写仍须映射（M2/IL26）");
+        // ①″ 残余（如实）：**分隔符变体**（`e_stop` / `e-stop`）**不在**映射表内 —— 大小写
+        // 不敏感只管大小写，`_` 仍会落成 `E–STOP`（`_` → 短破折）。本页**不**猜。
+        assert_eq!(source_label("e_stop"), display_safe("e_stop"));
+        assert_ne!(source_label("e_stop"), TEXT_SRC_ESTOP);
         // ② 未登记名 ⇒ **原样保留可辨认的机器名**（经 `display_safe`），**不伪造中文名**。
         for raw in ["flood", "fire", "unknown_src", "di3"] {
             let shown = source_label(raw);
@@ -2619,6 +2770,72 @@ mod tests {
         assert!(sources_title(11).contains("11"));
     }
 
+    /// 触发源**超出行池上限**的可见提示（B2b-3 代码质量整改 ②；IL9 的补偿）。
+    ///
+    /// 敏感性：把 `sources_overflow_note` 改成恒返回空串（= 去掉提示）⇒ 本条后两条立刻变红。
+    #[test]
+    fn sources_overflow_is_visibly_stated() {
+        // 未超出 ⇒ **无提示**（卡头逐字不变，`触发源 · N`）。
+        for n in 0..=SOURCE_ROW_POOL {
+            assert_eq!(
+                sources_overflow_note(n),
+                "",
+                "{n} 源未超上限 ⇒ 不得多出提示（卡头逐字 = `触发源 · N`）"
+            );
+        }
+        // 超出 ⇒ **可见地**说出差额（UI §6.4 `：599`「全部源一次性列出，不折叠」的补偿）。
+        assert_eq!(
+            sources_overflow_note(SOURCE_ROW_POOL + 1),
+            " · 还有 1 条",
+            "5 源 ⇒ 第 5 条必须**在屏上**被说出来（不得静默）"
+        );
+        assert!(sources_overflow_note(SOURCE_ROW_POOL + 3).contains('3'), "7 源 ⇒ 差额 3");
+        // 提示词与数字都在 cmap 内（`还`/`有`/`条` 逐字实测在 `fonts/lv_font_cmap.txt`）——
+        // 逐字核对由 `runtime_texts_are_cmap_safe`（产出串 ⊆ 安全字母表）+ 码表网承担。
+        // 行池上限**未被改动**（本处置是补偿，不是扩容）。
+        assert_eq!(SOURCE_ROW_POOL, 4, "上限不动（IL9）：补偿 = 可见提示");
+    }
+
+    /// 陈旧倒计时的清理判据（B2b-3 代码质量整改 M3；IL27）。
+    ///
+    /// 敏感性：把 [`section_display_eq`] 改成恒 `true`（= 永不清）或恒 `false`（= 每帧清）
+    /// ⇒ 本条前两条立刻变红。
+    #[test]
+    fn section_display_eq_ignores_only_ts_ms() {
+        let mut a = sect(true, true, true);
+        a.ts_ms = 1_000;
+        let mut b = a.clone();
+        b.ts_ms = 2_000;
+        assert!(
+            section_display_eq(&a, &b),
+            "**仅 `ts_ms` 变** ⇒ 视作同一帧（否则 1 Hz 心跳每秒清掉倒计时，IL14 形同虚设）"
+        );
+        // 任一**展示相关**字段变 ⇒ 不等于（这些变化都可能使倒计时基准失效）。
+        for mut c in [
+            sect(false, true, true),
+            sect(true, false, true),
+            sect(true, true, false),
+        ] {
+            c.ts_ms = 1_000;
+            assert!(!section_display_eq(&a, &c), "展示相关字段变了 ⇒ 必须判为「新帧」");
+        }
+        let mut sf = a.clone();
+        sf.stop_failed = true;
+        assert!(!section_display_eq(&a, &sf));
+        let mut src = a.clone();
+        src.sources = vec![mupc_display_proto::InterlockSourceItem {
+            name: "estop".into(),
+            tripped: true,
+        }];
+        assert!(!section_display_eq(&a, &src));
+        let mut lamp = a.clone();
+        lamp.fault_lamp = Some(true);
+        assert!(!section_display_eq(&a, &lamp));
+        let mut hold = a.clone();
+        hold.release_hold_secs = 30;
+        assert!(!section_display_eq(&a, &hold));
+    }
+
     // ── ⑨ 弹层明细（UI §6.4 强确认弹层段的「明细列出…」三项）──
     //
     // 敏感性：把 `dialog_details` 的任一行删掉 / 字段名写错 ⇒ 本条变红。
@@ -2664,6 +2881,9 @@ mod tests {
         let samples: Vec<String> = vec![
             sources_title(0),
             sources_title(3),
+            sources_overflow_note(0),
+            sources_overflow_note(SOURCE_ROW_POOL + 1),
+            sources_overflow_note(SOURCE_ROW_POOL + 12),
             hold_text(0),
             hold_text(12),
             source_label("estop"),
