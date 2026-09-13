@@ -9,7 +9,8 @@
 //! |------|----|------|
 //! | [`p1_status`] | P1 主状态页（默认页 / 超时回归目标页） | **B2a** |
 //! | [`p2_config`] | P2 配置页（控制通道驱动，含写操作） | **B2b-2** |
-//! | `p3_logs` / `p4_interlock` / `p5_audit` | 日志 / 安全联锁 / 审计 | B2b / B2c |
+//! | [`p4_interlock`] | P4 安全 / 联锁页（**帧驱动展示 + 控制通道意图**，含写操作） | **B2b-3** |
+//! | `p3_logs` / `p5_audit` | 日志 / 审计 | B2b / B2c |
 //! | [`p6_system`] | P6 系统 / 关于页 | **B2a** |
 //!
 //! **本轮不做**：页面路由与底部导航装配（B2c）、`console.rs` / `main.rs` 改写与 `state.rs`
@@ -54,8 +55,20 @@
 //!   **确认完成前不发任何请求**；确认完成后本页经
 //!   [`set_on_submit`](p2_config::P2ConfigPage::set_on_submit) 把 `ConfigPatch` 交回外部，
 //!   `request_id`(uuid) + `issued_at_ms` 由 B3 的 `console.rs` 生成。
-//! - **同类页面预告**：P4（安全联锁）、P5（审计）同样由控制通道驱动，将复用契约 2′；
-//!   P4 的固定操作条复用契约 1′（UI §6.4 线框 `Y624 ┌ 固定操作条 ──┐`）。
+//! - **同类页面预告**：P5（审计）将由控制通道驱动，复用契约 2′。
+//! - **B2b-3 补充（P4 = 两类驱动**混用**，两类契约各取一半）**：
+//!   - **读路径走契约 2（[`PageInput`] 帧驱动）**：`InterlockSection` 是 1 Hz 显示帧的
+//!     「慢拍 C（0.5 s）」分段（设计 §3.1）⇒ 展示态从 `input.frame.interlock` 取；`frame = None`
+//!     ⇒ 契约缺省（`available = false`）⇒ 显「联锁状态不可用」，**绝不可**回落「未联锁」
+//!     （IL-01.6 / UI §8.3 专行）。
+//!   - **写路径走契约 2′（控制通道意图）**：**不发请求、不生成 `request_id`**；确认完成后经
+//!     [`set_on_release`](p4_interlock::P4InterlockPage::set_on_release) /
+//!     [`set_on_ack_m1`](p4_interlock::P4InterlockPage::set_on_ack_m1) 把
+//!     `InterlockOpPayload`（UI **观测到**的 latch + 源名，EDGE-19 的乐观并发检查）交回外部；
+//!     回执经 [`show_result`](p4_interlock::P4InterlockPage::show_result) 灌回。
+//!   - **页根形态复用契约 1′**（UI §6.4 线框 `Y624 ┌ 固定操作条 ──┐`）；与 P2 的唯一差别：
+//!     P4 在滚动视口与固定操作条之间多一条 **24 px 就地原因带**（UI §6.4 拒绝原因表 +
+//!     §8.3 都要求「按钮正上方 24 px 就地原因」）⇒ 视口 528 而非 552，见该文件的偏差 **IL4**。
 //!
 //! ## ⚠️ 已知偏差登记（B2a 规格评审后；**集中、显式** —— 屏文 / 尺寸与契约不一致处
 //! 一律在此列明，不得"悄悄地"不一致）
@@ -97,6 +110,7 @@ use crate::ui::theme::{self, Dimens, Palette};
 
 pub mod p1_status;
 pub mod p2_config;
+pub mod p4_interlock;
 pub mod p6_system;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -556,6 +570,63 @@ pub const ALL_TEXTS: &[&str] = &[
     p6_system::TEXT_SERVICE_ADDR,
     p6_system::TEXT_MGMT_IP,
     p6_system::TEXT_NO_REMOTE,
+    // P4 安全 / 联锁页（B2b-3）
+    p4_interlock::TEXT_CARD_STATE,
+    p4_interlock::TEXT_STATE_LATCHED,
+    p4_interlock::TEXT_STATE_UNLATCHED,
+    p4_interlock::TEXT_STATE_UNAVAILABLE,
+    p4_interlock::ICON_STATE_LATCHED,
+    p4_interlock::ICON_STATE_UNLATCHED,
+    p4_interlock::ICON_STATE_UNAVAILABLE,
+    p4_interlock::ICON_FILLED,
+    p4_interlock::ICON_HOLLOW,
+    p4_interlock::TEXT_LATCH_HELD,
+    p4_interlock::TEXT_LATCH_UNHELD,
+    p4_interlock::TEXT_SOURCES_TITLE,
+    p4_interlock::TEXT_SOURCES_EMPTY,
+    p4_interlock::TEXT_SRC_TRIPPED,
+    p4_interlock::TEXT_SRC_UNTRIPPED,
+    p4_interlock::TEXT_SRC_ESTOP,
+    p4_interlock::TEXT_SRC_DOOR,
+    p4_interlock::TEXT_NAME_SEP,
+    p4_interlock::TEXT_CLAUSE_SEP,
+    p4_interlock::TEXT_CARD_STOP,
+    p4_interlock::TEXT_CARD_FAULT_LAMP,
+    p4_interlock::TEXT_CARD_RUN_LAMP,
+    p4_interlock::TEXT_STOP_OK,
+    p4_interlock::TEXT_STOP_FAIL,
+    p4_interlock::TEXT_LAMP_ON,
+    p4_interlock::TEXT_LAMP_OFF,
+    p4_interlock::TEXT_LAMP_UNKNOWN,
+    p4_interlock::TEXT_RELEASE,
+    p4_interlock::TEXT_ACK_M1,
+    p4_interlock::TEXT_AUDIT_NOTE,
+    p4_interlock::TEXT_REASON_LATCHED,
+    p4_interlock::TEXT_NOT_ENABLED,
+    p4_interlock::TEXT_STOP_PENDING,
+    p4_interlock::TEXT_CONFLICT,
+    p4_interlock::TEXT_REJECT_SOURCES,
+    p4_interlock::TEXT_REJECT_HOLD,
+    p4_interlock::TEXT_HOLD_MORE,
+    p4_interlock::TEXT_SECONDS,
+    p4_interlock::TEXT_HOLD_NEED,
+    p4_interlock::TEXT_STOP_PENDING_TRAIL,
+    p4_interlock::TEXT_INTERNAL,
+    p4_interlock::TEXT_OP_BUSY,
+    p4_interlock::TEXT_DIALOG_TITLE_RELEASE,
+    p4_interlock::TEXT_DIALOG_TITLE_ACK_M1,
+    p4_interlock::TEXT_IMPACT_RELEASE,
+    p4_interlock::TEXT_IMPACT_ACK_M1,
+    p4_interlock::TEXT_DETAIL_SOURCES,
+    p4_interlock::TEXT_DETAIL_LATCH,
+    p4_interlock::TEXT_DETAIL_STOP,
+    p4_interlock::TEXT_NONE,
+    p4_interlock::TEXT_TOAST_RELEASED,
+    p4_interlock::TEXT_TOAST_ACKED,
+    p4_interlock::TEXT_TOAST_FAIL,
+    p4_interlock::TEXT_AUDIT_UNAVAILABLE,
+    p4_interlock::ICON_OK,
+    p4_interlock::ICON_FAIL,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════

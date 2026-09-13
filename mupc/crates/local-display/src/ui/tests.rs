@@ -772,7 +772,9 @@ fn ui_static_constraints() {
 /// B2b-1 起纳入 `ui/controls.rs`（此前只有 6 个文件）：三个输入控件同样要过**码表覆盖率**
 /// 与**裸尺寸**两张网 —— 新控件里的中文列头（`年/月/日/时/分`）正是码表走查的对象。
 /// B2b-2 起再纳入 `ui/pages/p2_config.rs`（P2 配置页：中文分组 / 字段 / 屏文最多的一页）。
-const UI_PROD_SOURCES: [(&str, &str); 8] = [
+/// B2b-3 起再纳入 `ui/pages/p4_interlock.rs`（P4 安全联锁页：三态总态词 / 触发源 / 灯卡 /
+/// 就地原因 / 弹层屏文）。
+const UI_PROD_SOURCES: [(&str, &str); 9] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/theme.rs", include_str!("theme.rs")),
     ("ui/components.rs", include_str!("components.rs")),
@@ -780,6 +782,7 @@ const UI_PROD_SOURCES: [(&str, &str); 8] = [
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
+    ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
 
@@ -809,7 +812,13 @@ const UI_PROD_SOURCES: [(&str, &str); 8] = [
 /// （`g`/`a`/`t`/`e`/… 在生成字体里没有字形）。经该常量函数标注即声明"此字面量不进 `lv_label`"
 /// ——与 `InvalidArgument(` / `env!(` **同一条**非屏显口径（**不改变任何上屏文案**，
 /// 只是把"键不上屏"这一事实写在调用点）。
-const NON_DISPLAY_SINKS: [&str; 7] = [
+///
+/// **B2b-3 新增一条 `source_key(`**：同款机制、同款理由 —— `ui/pages/p4_interlock.rs` 的
+/// **触发源名映射表**必须写出**机器名 token**（`estop` / `door`），而 token 是**小写 ASCII
+/// 且从不上屏**（上屏的是中文名 `急停` / `门禁`，未登记名经 `display_safe` 归一）。
+/// 该文件里 `source_key("…")` 的**计数由 `p4_static_constraints` 钉死为恰 2 处**（防把**上屏串**
+/// 塞进 `source_key(..)` 从而静默逃过码表网 —— 与 `config_key(` 同一条自证纪律）。
+const NON_DISPLAY_SINKS: [&str; 8] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
@@ -817,6 +826,7 @@ const NON_DISPLAY_SINKS: [&str; 7] = [
     "env!(",
     "option_env!(",
     "config_key(",
+    "source_key(",
 ];
 
 /// **已登记**的字库缺口：扫源码确实用到、但生成字体的 cmap 里**没有**的字形。
@@ -3954,6 +3964,630 @@ pub(crate) fn pages_chain() {
         drop(p2);
     }
 
+    // ═══ P4 安全 / 联锁页（B2b-3；F16–F18，含写操作）═══════════════════════════
+    //
+    // 覆盖：装配契约（契约 1′）／三态总态（含 **fail-closed** 回归锁）／latch 胶囊／按钮矩阵／
+    // 触发源行／三卡（含 `None` ⇒ 未知）／就地原因带（含**倒计时**）／弹层与**意图**载荷／
+    // 失败路径（弹层不自动关闭 + 冲突文案 + 审计不可写）。
+    {
+        use crate::ui::pages::p4_interlock;
+        use mupc_display_proto::{
+            ControlCode, ControlResponse, InterlockOpAck, InterlockReject, InterlockSourceItem,
+        };
+
+        /// 造联锁段（默认全 false = 契约缺省 = **不可用**）。
+        fn il(available: bool, enabled: bool, latched: bool) -> mupc_display_proto::InterlockSection {
+            mupc_display_proto::InterlockSection {
+                available,
+                enabled,
+                latched,
+                ..Default::default()
+            }
+        }
+
+        // ── ① 装配契约（**契约 1′**：页根容器 + 固定操作条；线框 `Y624`）───────────
+        let p4 = p4_interlock::P4InterlockPage::new(&host).expect("P4InterlockPage::new");
+        disp.refr_now_for_test();
+        assert_eq!(
+            p4.obj().size(),
+            (Dimens::CONTENT_W, Dimens::CONTENT_H),
+            "页根 = 内容区整幅 992×624（**不是**滚动容器 —— 见 pages/mod.rs 契约 1′）"
+        );
+        assert_eq!(
+            p4.scroll_obj().size(),
+            (Dimens::CONTENT_W, 528),
+            "滚动视口 = 624 − 操作条 72 − **就地原因带 24** = 528（⚠️ UI 线框写 552 —— \
+             见 p4_interlock.rs 的 **IL4**：线框的 72 px 操作条里放不下「按钮上方 24 px 就地原因」）"
+        );
+        let root_c = p4.obj().coords();
+        let bar_c = p4.action_bar_obj().coords();
+        assert_eq!(
+            (bar_c.x1, bar_c.y1),
+            (root_c.x1, root_c.y1 + 552),
+            "固定操作条贴在页根底缘（不随滚动；绝对 y624 —— UI §6.4 线框逐像素一致）"
+        );
+        assert_eq!(p4.action_bar_obj().size().1, 72, "操作条高 72（UI 线框 y624–696）");
+        // 两个危险按钮：320×64、间距 ≥48（UI §6.4 固定操作条行逐字）。
+        let rel_c = p4.release_button().button().obj().coords();
+        let rst_c = p4.restart_button().button().obj().coords();
+        assert_eq!(
+            (rel_c.x1, rel_c.y1),
+            (root_c.x1, root_c.y1 + 556),
+            "「人工释放联锁」左对齐、在操作条内垂直居中（绝对 y628；线框 630，−2 见 **IL3**）"
+        );
+        assert_eq!(
+            p4.release_button().button().obj().size(),
+            (320, 64),
+            "危险按钮 320×64（UI §6.4：320×64；设计 F17-1 ≥64×64）"
+        );
+        assert_eq!(rst_c.y1, rel_c.y1, "两危险按钮同排");
+        assert!(
+            rst_c.x1 - rel_c.x2 - 1 == Dimens::GAP_DANGER,
+            "两危险按钮间距必须 = 48 px（UI §6.4「两者间距 48 px」；实测 {} px）",
+            rst_c.x1 - rel_c.x2 - 1
+        );
+        assert_eq!(
+            rel_c.x1 - root_c.x1,
+            0,
+            "左按钮贴内容区左缘（页内 x0 = 绝对 x16 —— UI 线框 (16,630,336,694)）"
+        );
+        assert_eq!(
+            p4.audit_note_text().as_deref(),
+            Some(p4_interlock::TEXT_AUDIT_NOTE),
+            "右端弱注「操作将记入审计」（UI §6.4 固定操作条行）"
+        );
+        // 三张状态卡的卡头（UI §6.4 线框：停机失败 / 故障灯 / 运行灯）。
+        for (i, head) in [
+            p4_interlock::TEXT_CARD_STOP,
+            p4_interlock::TEXT_CARD_FAULT_LAMP,
+            p4_interlock::TEXT_CARD_RUN_LAMP,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(p4.lamp_head_text(i).as_deref(), Some(*head));
+        }
+
+        // 两张主卡的尺寸锚点（总态卡 `174` 见 **IL3**；触发源卡在 2 源时 `202`）。
+        // **这两条同时是"存活锚点"回归锁**：`Core::state_card` 曾是 `new()` 的局部变量 ⇒ 返回时
+        // 被 `Drop`、总态卡**整棵子树级联删除**（屏幕上一块空白、控制台无任何报错）；本用例的
+        // 「骨架态 ⇒ 联锁状态不可用」断言（读卡内标签的文本）当场抓出了它（B2b-3 实测）。
+        assert_eq!(
+            p4.state_card_obj().size().1,
+            174,
+            "联锁总态卡高（UI 线框 180，−6 见 **IL3**）"
+        );
+        assert!(p4.state_card_obj().is_alive(), "总态卡必须存活（否则卡内全部子件被级联删除）");
+        assert!(p4.source_card_obj().is_alive(), "触发源卡必须存活");
+
+        // ── ② 骨架态 = **无帧** ⇒ 不可用（**绝不**「未联锁」）─────────────────────
+        // 「改什么会让本条变红」：把 `new()` 末尾的 `apply_section(default)` 去掉（或把
+        // `state_view` 的 `!available` 分支删掉）⇒ 下面「联锁状态不可用」那条立刻变红。
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "无帧 ⇒ 契约缺省 = 不可用"
+        );
+        assert!(!p4.ever_available(), "尚未注入过有效帧");
+
+        // ── ③ 正常态（available = true / latched = false / 无触发源）──────────────
+        let normal = il(true, true, false);
+        p4.set_section(&normal);
+        disp.refr_now_for_test();
+        assert_eq!(
+            p4.state_view(),
+            p4_interlock::StateView::Unlatched,
+            "确知未联锁"
+        );
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNLATCHED),
+            "总态词「未联锁」（UI §3.6 P4「总态」行）"
+        );
+        assert_eq!(
+            p4.state_color(),
+            Palette::OK,
+            "未联锁 = 绿 #2FDB8A（UI §6.4 区块规格）"
+        );
+        assert_eq!(p4.state_icon_text().as_deref(), Some("✓"));
+        assert_eq!(
+            p4.latch_chip_text().as_deref(),
+            Some(p4_interlock::TEXT_LATCH_UNHELD),
+            "available = true 时才可显「未保持」"
+        );
+        assert_eq!(p4.latch_chip_color(), Palette::TEXT_SECOND, "未保持胶囊字色 #A6B6D6");
+        assert_eq!(p4.latch_chip_visible_count(), 1, "三态胶囊互斥：恒有且仅有 1 个在显");
+        assert!(
+            p4.source_empty_visible() && !p4.source_unavailable_visible(),
+            "无触发源 ⇒ **空态**（不是不可用态）"
+        );
+        assert_eq!(
+            p4.source_empty_text().as_deref(),
+            Some(p4_interlock::TEXT_SOURCES_EMPTY),
+            "空态文案「当前无联锁触发源」（IL-01.2）"
+        );
+        assert_eq!(
+            p4.sources_title_text().as_deref(),
+            Some("触发源 · 0"),
+            "卡头含数量（UI §6.4：卡头 28 px 含数量）"
+        );
+        assert!(
+            !p4.release_disabled() && !p4.restart_disabled(),
+            "正常态两按钮皆可用"
+        );
+        assert!(
+            !p4.reason_left_visible() && !p4.reason_right_visible(),
+            "正常态无就地原因"
+        );
+        assert_eq!(p4.stop_card_text().as_deref(), Some(p4_interlock::TEXT_STOP_OK));
+        // `fault_lamp = None` / `run_lamp = None` ⇒ **「未知」**（**绝不**臆造「灯灭」！）
+        // 「改什么会让本条变红」：把 `tri_view(None)` 改成 `TriView::Off` ⇒ 两条立刻变红。
+        assert_eq!(
+            p4.fault_lamp_text().as_deref(),
+            Some(p4_interlock::TEXT_LAMP_UNKNOWN),
+            "灯态未知 ⇒ 「未知」（契约 Option<bool> 的三态语义，F16-4）"
+        );
+        assert_ne!(
+            p4.fault_lamp_text().as_deref(),
+            Some(p4_interlock::TEXT_LAMP_OFF),
+            "**不得**把 None 臆造成「灯灭」"
+        );
+        assert_eq!(
+            p4.run_lamp_text().as_deref(),
+            Some(p4_interlock::TEXT_LAMP_UNKNOWN)
+        );
+
+        // ── ④ **fail-closed 回归锁**（`available = false`）───────────────────────
+        // UI §8.3 联锁专行：不可用 ⇒ 两按钮 disabled + 就地原因 + **不得显示「未联锁」**。
+        // 「改什么会让本条变红」：把 `state_view` 改成 `if s.latched {..} else if !available` 或
+        // 把 `!available` 分支回落成 `Unlatched`（fail-open）⇒ 第 2 / 3 条立刻变红。
+        p4.set_section(&il(false, true, false));
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "状态源不可用 ⇒ 「联锁状态不可用」（F16.6 / IL-01）"
+        );
+        assert_ne!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNLATCHED),
+            "**不可用 ≠ 未联锁**：无法获知 ≠ 确知安全（fail-closed）"
+        );
+        assert_eq!(p4.state_color(), Palette::STOPPED, "灰 #8C98AC");
+        assert_eq!(
+            p4.state_icon_text().as_deref(),
+            Some("?"),
+            "问号 / 断链语义 —— **不得**复用 ✓ 与 ⚠（§8.3 明文）"
+        );
+        assert_eq!(
+            p4.latch_chip_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "latch 胶囊一并转灰"
+        );
+        assert_ne!(
+            p4.latch_chip_text().as_deref(),
+            Some(p4_interlock::TEXT_LATCH_UNHELD),
+            "**不得**显示「未保持」"
+        );
+        assert_eq!(p4.latch_chip_color(), Palette::PLACEHOLDER, "灰底灰字 #96A2BC");
+        assert!(p4.release_disabled() && p4.restart_disabled(), "两按钮均 disabled（fail-closed）");
+        assert!(p4.reason_left_visible(), "就地原因可见");
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "就地原因 = 「联锁状态不可用」（按钮上方 24 px 就地表述）"
+        );
+        assert!(
+            !p4.source_empty_visible() && p4.source_unavailable_visible(),
+            "触发源卡同步转**不可用态**（**不得**显「无触发源」—— 空态 vs 不可用态语义不同）"
+        );
+        assert_eq!(
+            p4.source_unavailable_title().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE)
+        );
+        assert_ne!(
+            p4.source_empty_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "空态文案与不可用态文案必须**各自独立**（§8.3「不得互替」）"
+        );
+        // 三灯卡**同步灰化**：不得显「灯灭 / 正常」这类**确知**结论。
+        for i in 0..3 {
+            assert_eq!(
+                p4.lamp_value_text(i).as_deref(),
+                Some("? 联锁状态不可用"),
+                "第 {i} 张卡 unavailable=false 时转灰（**不臆造**灯态 / 停机结论）"
+            );
+        }
+        assert_ne!(p4.stop_card_text().as_deref(), Some(p4_interlock::TEXT_STOP_OK));
+        assert!(
+            !p4.take_refresh_request(),
+            "纯展示降级不置刷新标志"
+        );
+
+        // ── ⑤ 触发源 2 项（含数量 / 行形态 / 色通道 / 机器名→中文）────────────────
+        let mut two = il(true, true, true);
+        two.enabled = true;
+        two.sources = vec![
+            InterlockSourceItem {
+                name: "estop".into(),
+                tripped: true,
+            },
+            InterlockSourceItem {
+                name: "door".into(),
+                tripped: false,
+            },
+        ];
+        two.stop_failed = false;
+        p4.set_section(&two);
+        assert_eq!(
+            p4.sources_title_text().as_deref(),
+            Some("触发源 · 2"),
+            "卡头含数量（IL-01.2）；`（2）` 的全角括号缺字 ⇒ 取 `· 2`（IL1）"
+        );
+        assert_eq!(p4.source_rows_visible(), 2, "全部源一次性列出，不折叠");
+        assert!(
+            !p4.source_empty_visible() && !p4.source_unavailable_visible(),
+            "有源 ⇒ 既非空态也非不可用态"
+        );
+        assert_eq!(
+            p4.source_row_name(0).as_deref(),
+            Some(p4_interlock::TEXT_SRC_ESTOP),
+            "机器名 `estop` → 中文名「急停」（UI §3.6 P4 触发源行）"
+        );
+        assert_eq!(
+            p4.source_row_status(0).as_deref(),
+            Some(p4_interlock::TEXT_SRC_TRIPPED)
+        );
+        assert_eq!(p4.source_row_tripped(0), Some(true), "已触发 ⇒ 实心形态");
+        assert_eq!(
+            p4.source_row_color(0),
+            Some(Palette::LINK_DOWN),
+            "已触发 = #DC3545 实心（UI §6.4 触发源卡行）"
+        );
+        assert_eq!(
+            p4.source_row_name(1).as_deref(),
+            Some(p4_interlock::TEXT_SRC_DOOR)
+        );
+        assert_eq!(
+            p4.source_row_status(1).as_deref(),
+            Some(p4_interlock::TEXT_SRC_UNTRIPPED)
+        );
+        assert_eq!(p4.source_row_tripped(1), Some(false), "未触发 ⇒ 空心形态");
+        assert_eq!(
+            p4.source_row_color(1),
+            Some(Palette::LINK_UNCONFIGURED),
+            "未触发 = #5F6368 空心"
+        );
+        // 卡高随源数自适应：2 行 ⇒ 卡头 44 + 空态高 124 + 上下内边距 34 = 202（UI 写 200，**IL3**）。
+        disp.refr_now_for_test(); // 几何读回须先布局（`Obj::size()` 读的是 `coords`）
+        assert_eq!(p4.source_card_height(), 202, "触发源卡高（UI 线框 200，+2 见 IL3）");
+        // **漂移锁**：页内推导的两个卡体高常量必须与**组件实测高**一致
+        //（`EMPTY_H` / `UNAVAILABLE_H` 是按组件构件算式推导的 —— 组件改版式 ⇒ 本条变红）。
+        assert_eq!(
+            p4.source_empty_obj().size().1,
+            p4_interlock::EMPTY_H,
+            "空态实测高必须 = 页内推导的 EMPTY_H（构造期读 `size()` 恒为 0，故不能读组件，见 EMPTY_H 注）"
+        );
+        assert_eq!(
+            p4.source_unavailable_obj().size().1,
+            p4_interlock::UNAVAILABLE_H,
+            "不可用态实测高必须 = 页内推导的 UNAVAILABLE_H"
+        );
+
+        // ── ⑥ latch 态 ⇒ **只**禁用 M1 + **按钮正上方**就地原因（IL-03，不得静默失败）──
+        p4.set_section(&two); // latched = true
+        assert!(
+            !p4.release_disabled(),
+            "释放是安全正向操作 ⇒ 不因 latch 置灰（**IL18**：否则 EDGE-12 的具体原因路径不可达）"
+        );
+        assert!(p4.restart_disabled(), "latch 态 ⇒ M1 授权重启 disabled");
+        assert!(
+            p4.reason_right_visible(),
+            "M1 按钮**正上方** 24 px 就地原因必须可见（IL-03）"
+        );
+        assert_eq!(
+            p4.reason_right_text().as_deref(),
+            Some(p4_interlock::TEXT_REASON_LATCHED),
+            "原因文案「处于自锁态 · 须先释放联锁」（`，` 缺字 ⇒ `·`，IL1）"
+        );
+        disp.refr_now_for_test();
+        let rst_x = p4.restart_button().button().obj().coords().x1;
+        assert!(rst_x > root_c.x1, "M1 按钮在右（与左按钮间距 48）");
+        // `stop_failed = true` ⇒ M1 追加禁用 + 「停机未确认」（§3.6 P4「操作」行）。
+        let mut sf = il(true, true, false);
+        sf.stop_failed = true;
+        p4.set_section(&sf);
+        assert!(p4.restart_disabled());
+        assert_eq!(
+            p4.reason_right_text().as_deref(),
+            Some(p4_interlock::TEXT_STOP_PENDING),
+            "停机未确认 ⇒ 就地原因（契约 InterlockReject::StopPending 的本地预判口径）"
+        );
+        assert!(!p4.release_disabled());
+
+        // ── ⑦ 未确认 ⇒ **不发任何意图**；确认（L2：长按满 1.0 s）⇒ 交出观测载荷 ──────
+        // 「改什么会让本条变红」：把按钮回调里的 `open_dialog(..)` 换成直接 `fire_release(..)`
+        // （绕开弹层）⇒ 「未确认时无意图」那条立刻变红（与 P2 的探针 P2 同款）。
+        let got_rel: Rc<RefCell<Vec<mupc_display_proto::InterlockOpPayload>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let got_m1: Rc<RefCell<Vec<mupc_display_proto::InterlockOpPayload>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        {
+            let g = Rc::clone(&got_rel);
+            p4.set_on_release(move |p| g.borrow_mut().push(p));
+        }
+        {
+            let g = Rc::clone(&got_m1);
+            p4.set_on_ack_m1(move |p| g.borrow_mut().push(p));
+        }
+        p4.set_section(&two); // 重新回到 latch 态（源 = estop 已触发 / door 未触发）
+        p4.release_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert!(
+            got_rel.borrow().is_empty(),
+            "**未确认 ⇒ 不发出任何意图**（未确认 = 无网络动作）"
+        );
+        assert!(
+            p4.with_dialog(|d| d.level())
+                .map(|l| l == crate::ui::theme::ConfirmLevel::L2)
+                .unwrap_or(false),
+            "联锁释放 = **L2**（危险色 + 长按 1.0 s，UI §2.5 / §7.3）"
+        );
+        assert_eq!(
+            p4.with_dialog(|d| d.title().text()).flatten().as_deref(),
+            Some(p4_interlock::TEXT_DIALOG_TITLE_RELEASE)
+        );
+        assert!(
+            p4.with_dialog(|d| d.default_focus_is_cancel()).unwrap_or(false),
+            "TT-09：默认焦点「取消」"
+        );
+        assert!(
+            p4.with_dialog(|d| d.has_progress()).unwrap_or(false),
+            "L2：长按进度条就位（1.0 s 保持）"
+        );
+        assert!(
+            p4.with_dialog(|d| !d.has_warn_banner()).unwrap_or(false),
+            "本页无瞬断字段 ⇒ L2 不强制 WarnBanner（**不是** L2+）"
+        );
+        assert_eq!(
+            p4.with_dialog(|d| d.impact().text()).flatten().as_deref(),
+            Some(p4_interlock::TEXT_IMPACT_RELEASE),
+            "L2 **必须**出现「影响范围」段且为**具体副作用**（§7.3）"
+        );
+        // 长按满 1.0 s ⇒ 恰好一次意图，载荷 = **UI 观测态**（机器名 + latch 比特）。
+        p4.with_dialog(|d| {
+            d.confirm_button()
+                .button()
+                .obj()
+                .send_event(EventCode::LONG_PRESSED)
+        });
+        assert_eq!(got_rel.borrow().len(), 1, "确认完成 ⇒ 恰好发一次意图");
+        {
+            let g = got_rel.borrow();
+            assert!(g[0].observed_latched, "观测到的 latch 态");
+            assert_eq!(
+                g[0].observed_sources,
+                vec!["estop".to_string(), "door".to_string()],
+                "载荷是**机器名**（后端按 token 比对，IL16）—— 不是中文标签"
+            );
+        }
+        assert!(got_m1.borrow().is_empty(), "不得误触 M1 授权槽");
+
+        // ── ⑧ 失败回执（RejectedPrecondition）⇒ 就地原因 + **弹层不自动关闭** ────────
+        // 「改什么会让本条变红」：在 `show_result` 的失败分支加 `close_dialog()` ⇒ 「弹层仍在」
+        // 那条变红；把 `set_plain_reason` 的调用删掉 ⇒ 就地原因那条变红。
+        let rejected: ControlResponse<InterlockOpAck> = ControlResponse::rejected(
+            "req-1",
+            ControlCode::RejectedPrecondition,
+            "触发源未复位 · 急停/门禁",
+            Vec::new(),
+            Some("audit-1".into()),
+            1_789_047_727_000,
+        );
+        p4.show_result(&rejected).expect("show_result(失败)");
+        assert!(
+            p4.with_dialog(|d| d.is_alive()).unwrap_or(false),
+            "失败 ⇒ **弹层不自动关闭**（原因常驻可读，IL11）"
+        );
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some("触发源未复位 · 急停/门禁"),
+            "就地红字显示**具体**原因（EDGE-12：不得静默失败）"
+        );
+        assert!(p4.reason_left_visible());
+        assert_eq!(p4.toast_tone(), Some(ToastTone::Failure));
+        assert_eq!(
+            p4.toast_text().as_deref(),
+            Some(p4_interlock::TEXT_TOAST_FAIL)
+        );
+        assert!(
+            p4.take_refresh_request(),
+            "RejectedPrecondition ⇒ 置「请求一次状态刷新」标志（IL12 / EDGE-19 的刷新语义）"
+        );
+        assert!(!p4.take_refresh_request(), "取走即清（只刷一次）");
+
+        // ⑧′ 结构化拒绝（直连 `InterlockApi` 路径）⇒ 逐变体具体文案（含**源名**）。
+        p4.show_reject(&InterlockReject::SourcesNotReset {
+            remaining: vec!["estop".into(), "flood".into()],
+        });
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some("触发源未复位 · 急停/F?OOD"),
+            "未登记名 `flood` 走 display_safe（**不伪造**中文名、不出豆腐块；IL6）"
+        );
+        assert_eq!(
+            p4.last_reject(),
+            Some(InterlockReject::SourcesNotReset {
+                remaining: vec!["estop".into(), "flood".into()]
+            })
+        );
+
+        // ⑧″ **保持时间倒计时**（IL14）：`tick(now)` 注入时钟推进，页面不读 `Instant::now()`。
+        // 「改什么会让本条变红」：把 `tick` 里的倒计时分支删掉 ⇒ 后面两条「9 秒」变红。
+        let t0 = Instant::now();
+        p4.show_reject(&InterlockReject::HoldNotElapsed {
+            need_secs: 30,
+            remaining_secs: 12,
+        });
+        assert_eq!(p4.countdown_secs(), Some(12), "拒绝里的剩余秒数是**唯一**绝对量（IL14）");
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some("保持时间不足 · 还需 12 秒"),
+            "按钮旁倒计时（UI §6.4「保持时间不足」行；琥珀 #FFB020）"
+        );
+        p4.tick(t0); // 首个 tick 取基准
+        assert_eq!(p4.countdown_secs(), Some(12), "基准拍不递减");
+        p4.tick(t0 + Duration::from_secs(3));
+        assert_eq!(p4.countdown_secs(), Some(9), "按已过秒数递减");
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some("保持时间不足 · 还需 9 秒")
+        );
+        p4.tick(t0 + Duration::from_secs(99));
+        assert_eq!(p4.countdown_secs(), Some(0), "下溢钳到 0（saturating，不 panic）");
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some("保持时间不足 · 还需 0 秒"),
+            "到 0 **不自作主张**放行（是否可操作仍由后端判定）"
+        );
+
+        // ⑧‴ EDGE-19：提交时状态已变化（结构化路径的固定文案 + 刷新标志）。
+        p4.show_conflict();
+        assert!(p4.conflict_visible());
+        assert_eq!(
+            p4.reason_left_text().as_deref(),
+            Some(p4_interlock::TEXT_CONFLICT),
+            "「联锁状态已变化 · 请刷新后重试」（EDGE-19）"
+        );
+        assert!(p4.take_refresh_request(), "EDGE-19 ⇒ 自动触发一次状态刷新（取标志）");
+
+        // ⑧⁗ EDGE-18：审计不可写（fail-closed ⇒ 操作未执行）。
+        p4.show_audit_unavailable().expect("show_audit_unavailable");
+        assert_eq!(
+            p4.toast_text().as_deref(),
+            Some(p4_interlock::TEXT_AUDIT_UNAVAILABLE),
+            "Toast「审计不可用 · 操作未执行」（§8.3 EDGE-18）"
+        );
+        assert_eq!(p4.toast_tone(), Some(ToastTone::Failure));
+
+        // ── ⑨ 取消 ⇒ **延迟关闭**（不得在 LVGL 事件回调内删弹层）──────────────────
+        p4.with_dialog(|d| {
+            d.cancel_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED)
+        });
+        assert!(
+            p4.with_dialog(|d| d.is_alive()).unwrap_or(false),
+            "取消回调内不得删弹层（`ConfirmDialog::close` 的要求）"
+        );
+        p4.tick(Instant::now());
+        assert!(
+            p4.with_dialog(|d| d.is_alive()).is_none(),
+            "tick 里执行延迟关闭（用户可关闭后重试）"
+        );
+
+        // ── ⑩ 成功回执 ⇒ 用 `applied` **立即**刷新（不等下一帧）+ Toast 成功 ─────────
+        // 「改什么会让本条变红」：把 `show_result` 成功分支里的 `apply_ack` 删掉 ⇒ 总态词
+        // 仍停在「已联锁」⇒ 本条变红（F17.6 / IL-02「≤2 s 内更新」的立即路径）。
+        let mut latched_view = il(true, true, true);
+        latched_view.sources = two.sources.clone();
+        p4.set_section(&latched_view);
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_LATCHED)
+        );
+        let ok_resp: ControlResponse<InterlockOpAck> = ControlResponse::ok(
+            "req-2",
+            Some(InterlockOpAck {
+                latched: false,
+                stopped: true,
+            }),
+            Some("audit-2".into()),
+            1_789_047_727_000,
+        );
+        p4.show_result(&ok_resp).expect("show_result(成功)");
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNLATCHED),
+            "回执 `applied.latched = false` ⇒ **立即**刷成「未联锁」（不等下一帧）"
+        );
+        assert!(
+            !p4.restart_disabled(),
+            "latch 已清 ⇒ M1 授权重启立即解除禁用（同一回执立即刷新）"
+        );
+        assert_eq!(
+            p4.toast_text().as_deref(),
+            Some(p4_interlock::TEXT_TOAST_RELEASED),
+            "Toast「已释放联锁」（UI §3.6 全局行）"
+        );
+        assert_eq!(p4.toast_tone(), Some(ToastTone::Success));
+        assert!(!p4.reason_left_visible(), "成功后清旧原因");
+
+        // ── ⑪ M1 授权重启：意图走**独立回调**（载荷同样带观测源名）────────────────
+        p4.restart_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert_eq!(
+            p4.with_dialog(|d| d.title().text()).flatten().as_deref(),
+            Some(p4_interlock::TEXT_DIALOG_TITLE_ACK_M1)
+        );
+        assert_eq!(
+            p4.with_dialog(|d| d.impact().text()).flatten().as_deref(),
+            Some(p4_interlock::TEXT_IMPACT_ACK_M1)
+        );
+        assert!(got_m1.borrow().is_empty(), "未确认仍无意图");
+        p4.with_dialog(|d| {
+            d.confirm_button()
+                .button()
+                .obj()
+                .send_event(EventCode::LONG_PRESSED)
+        });
+        assert_eq!(got_m1.borrow().len(), 1, "M1 授权确认 ⇒ 恰好一次意图");
+        {
+            let g = got_m1.borrow();
+            assert_eq!(g[0].observed_sources.len(), 2);
+            assert!(!g[0].observed_latched, "上一步成功后 latch 已清 ⇒ 观测为 false");
+        }
+        assert_eq!(got_rel.borrow().len(), 1, "释放槽不得被 M1 的确认触发");
+
+        // ── ⑫ 提交中 ⇒ 两按钮 disabled（IL15：无就地文案 —— §3.6 无该行）─────────────
+        p4.set_submitting(true);
+        assert!(p4.release_disabled() && p4.restart_disabled());
+        p4.set_submitting(false);
+        assert!(!p4.release_disabled());
+
+        // ── ⑬ 帧驱动路径：`render(&PageInput)` 走 `frame.interlock`（本页的**读路径**）──
+        // 「改什么会让本条变红」：把 `render` 里 `input.frame` 的分支写错（如恒取
+        // `InterlockSection::default()`）⇒ 下面两条立刻变红。
+        let mut f = frame_healthy();
+        f.interlock = il(true, true, false);
+        p4.render(&PageInput::live(&f));
+        assert!(
+            p4.ever_available(),
+            "有效帧经 `render` 注入 ⇒ `available` 被读到"
+        );
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNLATCHED)
+        );
+        // `frame = None` ⇒ 该段取契约缺省 ⇒ **不可用**（不得沿用上一帧的「未联锁」）。
+        p4.render(&PageInput::init());
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
+            "无帧 ⇒ 不可用（**不**沿用上一帧的「未联锁」—— 缺帧 ≠ 确知未联锁）"
+        );
+        assert!(p4.release_disabled() && p4.restart_disabled());
+        // 渲染后确有像素（装配 → 布局 → 像素全链）。
+        let painted4 = sink.borrow().iter().filter(|b| **b != 0).count();
+        assert!(painted4 > 10_000, "P4 渲染后 sink 中应有成片非背景像素（实际 {painted4}）");
+
+        drop(p4);
+    }
+
     drop(host);
     drop(screen);
     drop(disp);
@@ -4148,6 +4782,112 @@ fn p2_static_constraints() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁽⁵⁾″ **P4 安全 / 联锁页**静态约束（`ui/pages/p4_interlock.rs`，B2b-3）
+//
+// 既有的 [`pages_static_constraints`] 的扫描面写死为 B2a 的三个文件、[`p2_static_constraints`]
+// 写死为 P2（**本批不改既有用例的扫描面**）⇒ 按前两条的先例**追加**一条独立用例。
+// 本文件的**裸尺寸**与**码表**两条网另由 [`UI_PROD_SOURCES`] 的扩展覆盖
+// （[`ui_layout_setters_use_theme_constants`] / [`ui_texts_covered_by_font_cmap`]）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// P4 安全 / 联锁页的静态约束 + **扫描面自证** + **`source_key(` 计数自证**。
+///
+/// **零文本输入红线**（UI §2.4 / §5.3「界面不存在任何可编辑文本区」）在这里逐 token 断言：
+/// 删掉/绕过任一控件而改用 `lv_textarea` / `lv_spinbox` / `lv_keyboard` ⇒ 本条变红。
+///
+/// **敏感性（探针 P3 的姊妹网）**：往 `p4_interlock.rs` 的生产区插入 `lv_textarea_create(..)`
+/// ⇒ 本条立刻点名文件并失败（码表网管不到这一条 —— 它只管字形）。
+#[test]
+fn p4_static_constraints() {
+    // ⓪ **扫描面自证（探针 P1）**：`UI_PROD_SOURCES`（码表覆盖率 + 裸尺寸）与
+    //    `CONST_I32_SCAN_SOURCES`（常量定义式）**必须真的含本文件** —— 把本文件从任一张网的
+    //    清单里删掉，那两张网会**静默失去对 P4 的覆盖**（"网看着还在、实则漏了一片"，
+    //    正是本项目反复点名的失效形态）。本条把这件事变成**响亮失败**。
+    for (list, label) in [
+        (UI_PROD_SOURCES.as_slice(), "UI_PROD_SOURCES"),
+        (CONST_I32_SCAN_SOURCES.as_slice(), "CONST_I32_SCAN_SOURCES"),
+    ] {
+        assert!(
+            list.iter().any(|(n, _)| *n == "ui/pages/p4_interlock.rs"),
+            "`{label}` 未含 `ui/pages/p4_interlock.rs` —— 该网的**扫描面**已把 P4 漏掉\
+             （先修清单：新文件必须纳入，否则静态网对新代码是空的）"
+        );
+    }
+
+    // ⑤ **`source_key(` 的计数自证**：`NON_DISPLAY_SINKS` 里的 `source_key(` 是**后缀匹配** ——
+    //    紧跟它的字面量会被**豁免**出"上屏候选"走查。该豁免在 P4 **正当**（触发源**机器名**
+    //    确不上屏：`estop` 里的小写 ASCII 在生成字体里没有字形，上屏的是中文名），但它同时是
+    //    一条**可能被误用的后门**：谁把**上屏串**写成 `source_key("…")`，那条串就**静默逃过**
+    //    码表网。⇒ 把"恰好 2 处"钉死（= `SOURCE_LABELS` 的两个 token）。
+    {
+        let (name, src) = (
+            "ui/pages/p4_interlock.rs",
+            include_str!("pages/p4_interlock.rs"),
+        );
+        let prod = truncate_before_test_module(src, name);
+        assert_eq!(
+            prod.matches("source_key(\"").count(),
+            2,
+            "{name}：`source_key(\"…\")` 必须**恰为 2 处**（`SOURCE_LABELS` 的两个机器名 token）。\
+             计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是机器名**\
+             （机器名不上屏才可豁免；**上屏文案**放进 `source_key(..)` 会从码表网里消失）"
+        );
+        assert_eq!(
+            crate::ui::pages::p4_interlock::SOURCE_LABELS.len(),
+            2,
+            "映射表条目数必须与上面的计数一致（两处一起改才自洽）"
+        );
+    }
+
+    let sources: [(&str, &str); 1] = [(
+        "ui/pages/p4_interlock.rs",
+        include_str!("pages/p4_interlock.rs"),
+    )];
+    for (name, src) in sources {
+        let code = strip_comments_and_literals(src, name);
+        let lower = code.to_ascii_lowercase();
+        // ① 零文本输入（F12 红线）/ 裸色值 / `lv_refr_now` / 直连绑定（共用清单）。
+        for needle in FORBIDDEN_UI_SYMBOLS {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // ② 色值只准出现在 `theme.rs`（命名常量）。
+        for needle in ["Color::hex(", "Color::rgb("] {
+            assert!(
+                !lower.contains(&needle.to_ascii_lowercase()),
+                "{name} 不得出现 `{needle}`（必须经 theme 的命名常量）"
+            );
+        }
+        // ③ `unsafe` 只准出现在 `src/lvgl/**`。
+        assert!(
+            !code.contains("unsafe"),
+            "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+        );
+        // ④ **自证本扫描真的覆盖到了 P4 联锁页**（若 `include_str!` 指错文件 / 文件被清空，
+        //    上面三条会**构造性全绿** —— "看着在把关、实则没把住"的典型形态）。
+        for must in [
+            "P4InterlockPage",
+            "InterlockOpPayload",
+            "set_on_release",
+            "set_on_ack_m1",
+            "show_result",
+            "show_reject",
+            "ConfirmDialog",
+            "UnavailableKind",
+            "LedIndicator",
+            "StatusChip",
+        ] {
+            assert!(
+                code.contains(must),
+                "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ⑥⁗ **常量定义式**静态约束（I2：`const` 定义式里的裸数字缺口）
 //
 // ⑥″（[`ui_layout_setters_use_theme_constants`]）只扫**调用实参**（`set_size(..)` /
@@ -4161,13 +4901,14 @@ fn p2_static_constraints() {
 /// 本来就该在那里以字面量出现；本网要抓的是"**派生**常量直接抄数字"）。
 ///
 /// 与 ⑥″ 各自列清单而不复用 [`UI_PROD_SOURCES`]：后者含 `theme.rs`（必须豁免）。
-const CONST_I32_SCAN_SOURCES: [(&str, &str); 7] = [
+const CONST_I32_SCAN_SOURCES: [(&str, &str); 8] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
+    ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
 
