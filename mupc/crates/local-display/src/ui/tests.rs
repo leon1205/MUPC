@@ -3524,6 +3524,7 @@ pub(crate) fn pages_chain() {
             "保存中文案"
         );
         assert!(p2.save_disabled() && p2.reset_disabled(), "提交中禁重复触发");
+        assert!(p2.is_submitting(), "提交态读回口径（F9.6）");
         p2.set_submitting(false);
 
         // ── ⑪ 失败回执：**保留已输入值** + 逐字段标红 + 具体原因 + 保存置灰 ────
@@ -3613,6 +3614,230 @@ pub(crate) fn pages_chain() {
         // Toast 过期由 tick 关闭（3 s，UI §7.2）。
         p2.tick(std::time::Instant::now() + theme::Timing::toast() * 2);
         assert_eq!(p2.toast_text(), None, "过期后 tick 关掉 Toast");
+
+        // ── ⑭ **注入非法值 ⇒ 降级可见 + 不可提交**（C1 的页级回归锁）──────────────
+        //
+        // 评审探针实测的旧形态：注入 `system.log_level = "trace"`（不在 options 内）⇒ 控件把它
+        // 静默改写成 `options[0]`、页面**未经任何用户操作**即 `is_dirty()==true`、保存按钮可用
+        // ⇒ 一次点击就把屏上从未展示过的值写进装置。
+        //
+        // 敏感性（**探针实测**）：把 `Core::after_field_edit` 里的 `touched` 记账去掉、
+        // `Core::is_dirty` 改回"与注入值不等即脏"⇒ 下面每组的 `!is_dirty()` /
+        // `draft().changes.is_empty()` / `save_disabled()` 三条立刻变红。
+        {
+            let n_before = got.borrow().len();
+
+            // (a) `Enum` 注入值不在选项内。
+            let mut bad_enum = p2_view(false);
+            for g in &mut bad_enum.groups {
+                for f in &mut g.fields {
+                    if f.key == "system.log_level" {
+                        f.value = Value::from("trace"); // 不在 [error, info] 内
+                    }
+                }
+            }
+            p2.set_config(&bad_enum).expect("set_config (非法 Enum 注入值)");
+            assert_eq!(
+                p2.field_error_visible("system.log_level"),
+                Some(true),
+                "非法注入值 ⇒ 该行**错误态**（红竖条 + 红字；不再是静默改写）"
+            );
+            assert_eq!(
+                p2.field_disabled("system.log_level"),
+                Some(true),
+                "非法注入值 ⇒ 控件 `disabled`（不可交互）"
+            );
+            assert_eq!(
+                p2.field_status_text("system.log_level").as_deref(),
+                Some(p2_config::TEXT_INVALID_VALUE),
+                "就地说明该值是无效的（不假装它是 ERROR）"
+            );
+            assert_eq!(p2.field_status_visible("system.log_level"), Some(true));
+            assert!(!p2.is_dirty(), "**注入本身永不置脏**（关键的一半）");
+            assert!(p2.draft().changes.is_empty(), "非法键不进草稿");
+            assert!(
+                !p2.defaults_patch().changes.contains_key("system.log_level"),
+                "非法键不进「恢复默认值」补丁"
+            );
+            assert!(p2.save_disabled(), "无可提交内容 ⇒ 保存不可用");
+            // 直接派发 CLICKED（旁路 GUI 的禁用判定）—— 意图侧**也**必须拦住（双保险）。
+            p2.save_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED);
+            assert!(
+                p2.with_dialog(|d| d.is_alive()).is_none(),
+                "不得开出保存弹层"
+            );
+            assert_eq!(
+                got.borrow().len(),
+                n_before,
+                "**一次点击不产生任何提交意图**（非法值不可经屏写进装置）"
+            );
+            // 降级只作用于该字段：同视图的合法字段照常可编辑、可提交。
+            assert!(p2.set_field_value("gateway.port", &Value::from(2407)));
+            assert!(p2.is_dirty());
+            let d = p2.draft();
+            assert_eq!(d.changes.len(), 1, "草稿只含**用户真改过**的合法字段");
+            assert!(
+                !d.changes.contains_key("system.log_level"),
+                "草稿里不得出现非法键"
+            );
+            p2.discard_draft();
+            assert!(!p2.is_dirty());
+            assert_eq!(
+                p2.field_error_visible("system.log_level"),
+                Some(true),
+                "「放弃修改」**不**清除非法态（它是注入的固有状态，不是草稿）"
+            );
+
+            // (b) `U16` 注入值类型错配（字符串 `"abc"`）—— 旧形态会显示 `min` 并置脏。
+            let mut bad_u16 = p2_view(false);
+            for g in &mut bad_u16.groups {
+                for f in &mut g.fields {
+                    if f.key == "gateway.port" {
+                        f.value = Value::from("abc");
+                    }
+                }
+            }
+            p2.set_config(&bad_u16).expect("set_config (非法 U16 注入值)");
+            assert_eq!(p2.field_error_visible("gateway.port"), Some(true));
+            assert_eq!(p2.field_disabled("gateway.port"), Some(true));
+            assert!(!p2.is_dirty(), "类型错配不得置脏");
+            assert!(p2.draft().changes.is_empty());
+            assert!(p2.save_disabled());
+            p2.save_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED);
+            assert_eq!(got.borrow().len(), n_before, "同样不产生意图");
+
+            // (c) **正向对照**：注入**合法**值 ⇒ 一切照常（防把正常路径也判成非法）。
+            let ok = p2_view(false);
+            p2.set_config(&ok).expect("set_config (合法值)");
+            assert_eq!(p2.field_error_visible("gateway.port"), Some(false));
+            assert_eq!(p2.field_disabled("gateway.port"), Some(false), "合法 ⇒ 可编辑");
+            assert_eq!(p2.field_disabled("display.bind_addr"), Some(true), "只读仍禁用");
+            assert!(!p2.is_dirty(), "注入 ⇒ 不脏");
+            assert!(p2.draft().changes.is_empty());
+            assert!(p2.save_disabled(), "无改动 ⇒ 保存置灰");
+            assert!(p2.set_field_value("gateway.port", &Value::from(2408)));
+            assert!(p2.is_dirty(), "合法字段被改 ⇒ 脏");
+            p2.discard_draft();
+
+            // (d) **合法但控件表示不了**的值（`U64::MAX` 超出 `Stepper` 的 `i64` 值域）——
+            //     该值**合法**（`invalid` 集合挡不住它），控件渲染的是 `i64::MAX`（≠ 注入值），
+            //     拦住"注入即置脏"的**只有** touched 门（C1 第 3 条）。见 PD21(ii)。
+            //
+            //     敏感性（**探针实测**）：把 [`p2_config::DraftScope::admits`] 的
+            //     `touched.contains(key)` 去掉 ⇒ 本组 `!is_dirty()` / `draft().changes.is_empty()`
+            //     / `save_disabled()` 三条立刻变红。
+            let mut wide = p2_view(false);
+            for g in &mut wide.groups {
+                for f in &mut g.fields {
+                    if f.key == "telemetry.period" {
+                        f.kind = ConfigKind::U64 {
+                            min: 0,
+                            max: u64::MAX,
+                            step: 1,
+                        };
+                        f.value = Value::from(u64::MAX);
+                        f.default = Value::from(u64::MAX);
+                    }
+                }
+            }
+            p2.set_config(&wide).expect("set_config (合法但超出控件值域)");
+            assert_eq!(
+                p2.field_error_visible("telemetry.period"),
+                Some(false),
+                "**合法值**不是错误态（invalid 挡不住它）"
+            );
+            assert_eq!(p2.field_disabled("telemetry.period"), Some(false));
+            assert!(
+                p2.field_value_text("telemetry.period").as_deref() != Some("18446744073709551615"),
+                "自证：控件确实**表示不了**该值（渲染成 i64 侧的值）"
+            );
+            assert!(!p2.is_dirty(), "**用户没碰过 ⇒ 不脏**（哪怕控件值与注入值不同）");
+            assert!(p2.draft().changes.is_empty());
+            assert!(p2.save_disabled());
+            p2.discard_draft();
+        }
+
+        // ── ⑮ **单个字段的合法元数据不得让整页拒绝渲染**（I1 / PD15 / PD16）──────────
+        //
+        // 旧形态两处整页 `Err`：① `U16{step:0}`（契约 `control.rs:528` 写 `if *step != 0`
+        // ⇒ **显式容忍**，而 `Stepper::new` 只收正步长）；② `Enum` 选项 ≥ 10（`10 × 96 = 960 >
+        // INNER_W 958`）。两条都必须降为**字段级**（其它字段照常）。
+        {
+            // ① 步长 0 ⇒ 折为 1，页面照常、该字段仍可编辑。
+            let mut z = p2_view(false);
+            for g in &mut z.groups {
+                for f in &mut g.fields {
+                    if f.key == "intercore.port" {
+                        f.kind = ConfigKind::U16 {
+                            min: 1,
+                            max: 65535,
+                            step: 0,
+                        };
+                    }
+                }
+            }
+            p2.set_config(&z)
+                .expect("`step == 0` 契约合法 ⇒ 页面必须成功渲染（不得整页 Err）");
+            assert!(p2.is_available());
+            assert_eq!(p2.group_count(), 3, "其余分组照常（不是白屏）");
+            assert_eq!(
+                p2.field_disabled("intercore.port"),
+                Some(false),
+                "该字段仍可编辑（步长视为 1）"
+            );
+            assert!(p2.set_field_value("intercore.port", &Value::from(2600)));
+            assert!(p2.is_dirty(), "步长折算后照样能改 ⇒ 进草稿");
+            p2.discard_draft();
+
+            // ② 10 个选项 ⇒ 窗口截断（不整页 Err），且**窗口必含当前值**（`v9` = 最后一个）。
+            let mut many = p2_view(false);
+            for g in &mut many.groups {
+                for f in &mut g.fields {
+                    if f.key == "system.log_level" {
+                        f.kind = ConfigKind::Enum {
+                            // 标签取 `N0..N9`：`N` 在 `ASCII_DISPLAY_ALPHABET` 内 ⇒
+                            // `display_safe` 对它是**恒等**（用 `L` 会被兜底成 `?`，
+                            // 断言就会读到 `?9` 而看不出窗口对不对）。
+                            options: (0..10)
+                                .map(|i| OptionItem {
+                                    value: format!("v{i}"),
+                                    label: format!("N{i}"),
+                                })
+                                .collect(),
+                        };
+                        f.value = Value::from("v9");
+                    }
+                }
+            }
+            p2.set_config(&many)
+                .expect("10 个选项 ⇒ 字段级降级，不得整页 Err");
+            assert!(p2.is_available());
+            assert_eq!(p2.group_count(), 3, "其余分组照常");
+            assert_eq!(
+                p2.field_value_text("system.log_level").as_deref(),
+                Some("N9"),
+                "窗口必须**含当前值**（否则会把合法值静默改写成 N0）"
+            );
+            assert_eq!(
+                p2.field_status_text("system.log_level").as_deref(),
+                Some("仅显示 9 段"),
+                "截断必须**上屏**说明（被隐藏的项数可见）"
+            );
+            assert_eq!(
+                p2.field_error_visible("system.log_level"),
+                Some(false),
+                "合法值 ⇒ 不是错误态"
+            );
+            assert!(p2.set_field_value("gateway.port", &Value::from(2409)));
+            assert!(p2.is_dirty(), "其它字段仍可正常渲染与编辑");
+            p2.discard_draft();
+        }
 
         drop(p2);
     }

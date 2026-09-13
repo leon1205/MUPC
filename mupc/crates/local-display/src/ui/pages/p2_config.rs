@@ -41,10 +41,17 @@
 //! | PD8 | 「保存中…」取 **`保存中...`**（三个 ASCII `.`，U+002E） | `…`(U+2026) **不在 cmap 内**；`.` 在（且 `components.rs` 的 `DOTS` 截断同款） | 同 PD1 |
 //! | PD9 | `WriteMode::FullRewrite` 的 Toast 取 **`配置已保存 · 原有文字已不存在`**（设计 §4.3.2.1 写「配置文件已整体重写，原有注释不再保留」） | **缺字**：`整`(U+6574) / `写`(U+5199) / `注`(U+6CE8) / `留`(U+7559) / `再`(U+518D) 均不在 cmap 内 ⇒ 无法逐字照抄。改写串保留两条语义：**已保存** + **原有文字（注释）已不存在** | 同 PD1 |
 //! | PD10 | **`WriteMode::FullRewrite` 的 Toast 由 `set_config` 统一触发**（`show_result` 成功路径不再叠加"保存成功"Toast —— UI §7.2「同一时刻仅 1 条」，**取信息量更大的那条**） | `ConfigView.write_mode` 的契约语义即「最近一次落盘写模式，`FullRewrite` 时 UI 须明示」（EDGE-23）⇒ 任何携带该值的视图都该明示，故收在唯一入口 | 无（有意） |
-//! | PD11 | 保存 / 恢复默认值的分级与「涉及：」列表一律按**本次改动**判定：`save_level` / `reset_level` / `reconnect_field_labels` 收**本次补丁的键集合**（保存 = `draft_patch(..).changes`；恢复默认值 = `defaults_patch_of(..).changes`），键集合判定由 [`reconnect_in`] 承担（**不再**看"视图内全部字段"） | 设计 §6.2 流程 3 的示例是「`端口：2404 → 2405`」+「**涉及：端口**」，而同视图内还有 `监听地址`（设计 §4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ 只有"本次改动"口径能让该示例成立；§2.5 两行都写「**含**连接类字段的配置保存」（"含" = 本次含）；§7.3 明细段标题是「**将修改的字段**」；§2.6 铁律「降级可见、**绝不造假**」—— 只改日志级别却弹「生效瞬间通信将短暂中断」属**谎报副作用**。**生产影响**：真实字段表含 `gateway.listen_addr` / 核间端口（§4.3.3）⇒ 视图口径下 **L1 永不可达、`WarnBanner` 恒亮**，§2.5 的 L1 与 L2 两行同时报废 | 无（**已按"本次改动"落地**；若 PM 另裁，只需改 [`reconnect_in`] 一处） |
+//! | PD11 | 保存 / 恢复默认值的分级与「涉及：」列表一律按**本次改动**判定：`save_level` / `reset_level` / [`reconnect_field_labels`] 收**本次补丁的键集合**（保存 = `draft_patch(..).changes`；恢复默认值 = `defaults_patch_of(..).changes`），键集合判定由 [`reconnect_in`] 承担（**不再**看"视图内全部字段"） | **⚠️ 文档内冲突（如实逐列四处原文，不择利引用）** —— 出处文件 = `docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md`（行号为逐行核对结果）：<br/>① **`L2` 行 `:99`** 写「联锁释放、M1 授权、**含连接类字段的配置保存**、恢复默认值」——「含」可读作"**本次**含"（改动口径），措辞本身**不排除**视图口径（歧义行）；<br/>② **`L2+` 行 `:100`** 写「**任一字段** `requires_reconnect == true` 的配置保存」——**视图口径**（"任一字段"= 视图里存在，不限定本次改动）；<br/>③ **§6.2 交互流程 3 `:511`（明细示例）+ `:512`（WarnBanner 插入判据）**：`:511` 的示例是「`端口：2404 → 2405`」+（`:512`）「**涉及：端口**」，而同视图内还有 `监听地址`（§4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ **只有改动口径**能让该示例成立；但**同一段**的 `:512` 判据原文是「**若任一字段** `requires_reconnect == true` → 插入 `WarnBanner`」= **视图口径** ⇒ **该段自身即自相矛盾**（示例与判据不能同时满足）；<br/>④ **§7.3 `WarnBanner` 行 `:701`** 写「见 §2.5；**当任一字段** `requires_reconnect` **或含连接类字段时**强制出现」——亦为**视图口径**（"或含"把 ① 的歧义行一并读成视图口径）。<br/>⇒ **三处原文（②、③的 `:512`、④）支持视图口径、一处（①，措辞歧义）不排除视图口径、仅 ③的 `:511` 示例支持改动口径**。**为何仍选改动口径**：(a) ③ 的示例是**可执行验收**——示例不成立则实现无法同时满足 §2.5 与 §6.2；(b) §2.6 铁律「降级可见、**绝不造假**」——只改日志级别却弹「生效瞬间通信将短暂中断」是**谎报副作用**；(c) **L1 可达性**——真实字段表含 `gateway.listen_addr` / 核间端口（§4.3.3）⇒ 视图口径下 **L1 永不可达、`WarnBanner` 恒亮**，§2.5 的 L1 与 L2 两行同时报废。<br/>**⛳ 文档内冲突，待 PM 裁定；[`reconnect_in`] 是单一切换点 —— 若裁定视图口径，只需改它一处** | 无（**已按"本次改动"落地**；若 PM 另裁，只需改 [`reconnect_in`] 一处） |
 //! | PD12 | **只读字段不进 `defaults_patch()`** | `ConfigField::validate_value()`（契约）对 `editable=false` **一律拒绝**（"只读，不可修改"）⇒ 把只读字段放进 `changes` 会让**整个**恢复请求被后端二次校验打回（PL-4 的红线字段本就不可写） | 无（**有意**；恢复默认值的"本次改动"= 全部 `editable` 字段 —— 与视图口径的差集正是只读字段，见 [`reconnect_in`] 的等价性论证） |
 //! | PD13 | 注入侧 `group.label` / `field.label` 与 `Enum` 选项**统一过 [`display_safe`]**（出口 = [`group_label_text`] / [`field_label_text`]） | 改前三条**同类数据两条路径**不一致（`Enum` 选项过了、`group.label` / `field.label` 没过）：后端标签含 cmap 外 ASCII（`-` / 小写）即豆腐块。**残余风险（如实登记，不粉饰）**：`display_safe` **只改写 ASCII**（`-`/`_`→`–`、小写→大写同族、其余→`?`），**非 ASCII（中文）字符一律原样透传** ⇒ 后端 `label` 里的**缺字中文（如 `环` / `服务` / `（`）它挡不住**，真机照样豆腐块。**真正的防线**：后端字段表（`ConfigFieldMeta`）的 `label` 必须约束在 **UI §3.6 用字表**内 —— 属**联调 / 后端**责任（见 UI §3.6 与设计 §6.2）；本页的 [`LABEL_OVERRIDES`] 只是**例外覆盖**机制（只为 PM 裁定键而设），**不是**通用护栏 | **B2c 之后**的「字体码表 + 文案统一收口批」：扩 §3.6 字符集 ⇒ `display_safe` 的"改写面"随 cmap 扩大而收窄，缺字中文风险随之下降（**不会归零** —— 字库永远落后于任意后端文案，后端约束才是根治） |
 //! | PD14 | **行型 B 的 `Ipv4Stepper` 横向跨到卡外缘**：实测跨度 **x16–1007**（= [`Dimens::CONTENT_W`] **992 px**，与卡**外缘**齐宽），UI §6.2 写「控件独占次行 **(x36–x988)**」（卡**内**，有效 952 px）—— 行型 A 的内边距偏差已登记 **PD4**，行型 B 这条本次补登记 | **实算根因**：卡内可用宽 [`INNER_W`] = 992 − 2 × **17**（描边 1 + 内边距 16）= **958**，而 `Ipv4Stepper` 整件宽 = [`Dimens::CONTENT_W`] = **992**（`ui/controls.rs` **CD2**：四段 792 + 缝 8 + 汇总 **184**；汇总宽 = "内容区余量"，为容纳 `192.168.1.10` 12 字符）⇒ 控件比卡内宽 **34 px = 两侧各 17 px**。若从卡内容区原点起排（屏幕 x33）则右端 x1024 越出卡外缘（x1007）**17 px** 并被父对象裁剪（`ui/controls.rs` CD2 同款事实）⇒ 取 `ROW_B_CTRL_X = −CARD_INSET`（`−17`）把控件**左端内缩到卡外缘**，实测跨度 x16–1007 = 恰与卡外缘齐宽，**代价 = 吃掉卡左右各 17 px 内边距**（行型 A 控件右缘落在卡内右缘 —— 实测闭区间右缘 x990，即 PD4 记的 x991 排他右缘；两版式的口径**不一致**） | **与 CD2 同批收口**：先由 PM 定 `Ipv4Stepper` 整件宽 —— UI 自身三口径互相矛盾（§5.1 #7 写 **856**、§6.2 写 **952**、实测落地 **992**）；若裁「控件必须在卡内 (x36–x988)」⇒ 需把汇总标签 **184 → 144**（`192.168.1.10` 放不下，须另行设计）或改行型 B 版式（如汇总挪到第二行） |
+//! | PD15 | `U16` / `U64` 元数据的 `step == 0` 在页内**折算为 1** 后再建 [`Stepper`]（**不**报错、**不**整页 `Err`） | 契约 [`ConfigKind::validate_value`]（`mupc/crates/display-proto/src/control.rs:528` / `:538`）写 `if *step != 0 && …` ⇒ **显式把 `step == 0` 当合法**（语义 = "不校验步长"）；而 `Stepper::new`（`ui/components.rs`，本批**禁改**）只接受正步长 ⇒ 旧实现返回 `Err` 让**整页**拒绝渲染（一个合法字段白屏全页）。折为 1 是**契约语义的忠实映射**："不校验步长" ⇒ 任何整数值都合法 ⇒ 步长 1 是最细粒度、可达**全部**合法值 | 无（**有意**）；若将来 `Stepper` 支持 `step == 0`（= 无步进约束）可直接回改 |
+//! | PD16 | `Enum` 元数据的**字段级降级**（一律**不** `Err`）：可容段数上限 [`ENUM_MAX_SEGMENTS`] = `INNER_W / SEGMENT_MIN_W` = **9**（`9 × 96 = 864 ≤ 958`；`10 × 96 = 960 > 958`）⇒ ① 选项 **> 9** ⇒ 只渲染一个 **9 段窗口**，窗口**必含当前值所在选项**（否则合法值会被挤到窗外 ⇒ 静默改写），该行约束槽上屏「仅显示 9 项」；② 选项 **= 0** ⇒ 渲染**单段 [`PLACEHOLDER`] 占位**的禁用行（`SegmentedControl::new` 拒绝空选项）。两条都保证**其它字段仍可正常渲染与编辑** | 旧实现在 `enum_width(..)` 里对超宽返回 `Err(LvglError::InvalidArgument)` ⇒ **整页**拒绝渲染；而 `ConfigKind::Enum { options }` 的长度**契约上无上限**（`display-proto` 冻结、不得改契约）。**为何选"截断"而非"换控件 / 换版式"**：本页可用的等价控件只有 [`SegmentedControl`]（`lv_dropdown` 的展开列表在离屏**不可断言**且 §5.1 未选它）⇒ 换控件等价于改 `ui/controls.rs`（本批禁改）；换版式（分两排）需新增栅格档、§5.1 #4 未定义多排形态 ⇒ **截断是本批唯一不越界的降级**，且"被隐藏项数"**上屏**（不静默） | 无（**有意**）；若 PM 要求"全选项可达"，须先在 `ui/controls.rs` 增多排 / 可滚动分段控件 |
+//! | PD17 | 注入新视图时**保留用户草稿**（I4 取 **(b)**）：`set_config` 先用旧 `touched` 集合采集「键 → 当前控件值」，重建卡片后**只把新元数据认可的**（`kind.validate_value(..).is_ok()`）草稿值写回对应控件并保留其 `touched` 标记；键在新视图里消失 / 新元数据不认可 ⇒ 丢弃该键的草稿（控件显示注入值） | **为何选 (b) 而非 (a)"脏则拒绝覆盖"**：(a) 会把**权威刷新路径**（保存成功回执的 `applied` ⇒ [`show_result`](P2ConfigPage::show_result) ⇒ `set_config`）一起挡掉 —— 该路径被调用时页面**必然是脏的**（用户先改、才可能保存成功），拒绝即等于"保存成功后界面不刷新"，属自伤；为它开例外（`show_result` 先清脏）等价于 (b) 再加一条早清路径，反而更绕。(b) 与 EDGE-10「失败保留用户已输入值」**同一取向**，且**永不阻塞**服务端权威视图落屏。**残余（如实登记）**：草稿值被新元数据丢弃时**无 Toast 提示**（场景 = 联调期后端改了字段元数据而页面正持草稿） | 无（**有意**）；若 PM 要求显式提示，收口在 B2c 之后的文案批 |
+//! | PD18 | `ControlResponse::duplicate`（契约**强制字段**：`display-proto/src/control.rs:328`，注释明写用途 = "幂等命中提示"）在**本页零读取** ⇒ **漏覆盖**（不是"有意忽略"） | UI §3.6 的 P2 用字表**没有**"幂等命中 / 重复请求"这一行的文案 ⇒ 本页无字可上屏；也不能凭一比特**造**一句文案（**绝不造假**） | **§3.6 需补一行文案** ⇒ 收口于 **B2c 之后**的「字体码表 + 文案统一收口批」（与 PD1 / PD13 同批）；届时在 [`show_result`](P2ConfigPage::show_result) 里读 `resp.duplicate` 并弹提示 |
+//! | PD19 | `CARD_INSET` / `CARD_HEAD_H` / `INNER_W` 三个常量与 `ui/pages/p6_system.rs` **逐字重复**（两页各持一份同式定义） | **不动**（KISS + `p6_system.rs` 本批**禁改**）：三条都是 `theme` 常量的**一格推导**，上收需要一个新共享模块（结构变更，超出本批整改范围） | **B2c 之后**统一上收 `ui/pages/mod.rs`（P1/P2/P6 共用一份）；在此之前**任一处改 `theme` 派生式必须三处同改** |
+//! | PD20 | **组件 / 接线缺口（本批不改代码）**：`Toast::new(..)`（`ui/components.rs`）内部取 `Instant::now()`，而本页时钟是**注入**的（`tick(now)`）⇒ Toast 过期时刻与本页业务时钟**不同源**（离屏确定性用例因此不能完全控制 Toast 生命周期） | `components.rs` 本批**禁改** ⇒ 只登记。**⚠️ 订正评审假设**：`components.rs` **已有** `Toast::new_at(..)` ⇒ 缺口**不在组件侧**，而在"本页何时拿到 `now`" —— `set_config` / `show_result` 的签名里**没有** `now`（本页纪律：不读时钟） | **B3 接线时 reconcile**：由 B3 在事件循环里把 `tick` 的 `now` 缓存进 `Cell` 供 `show_toast` 使用，再改用 `Toast::new_at(now, ..)`；**收口前** Toast 的过期语义由注入时刻驱动，两者在真实事件循环里同源（无实际偏差） |
+//! | PD21 | **控件值域比契约窄时的屏上回显（C1 的残余，如实登记）** —— 两种子形态：**(i) 注入值非法** ⇒ 该行进错误态 + 控件 `disabled` + **不进草稿**，但**控件本体仍渲染一个"最小可表示值"**（`Enum` ⇒ `options[0]`；`U16`/`U64` ⇒ `min`；`Ipv4` ⇒ `0.0.0.0`）；**(ii) 注入值合法但控件表示不了**（如 `U64::MAX` 超出 `Stepper` 的 `i64` 值域 ⇒ 控件渲染 `i64::MAX`）⇒ 该行**不进错误态**（值确实合法），但同样**不置脏、不进草稿**（拦它的是 [`DraftScope::touched`]，**不是** `invalid`） | 三类控件的取值域**没有"无值"这一档**（`SegmentedControl::new` 拒绝空选项、`Stepper::new` 必须有 `value` 且是 `i64`、`Ipv4Stepper` 四段恒有值），且 `ui/controls.rs` / `ui/components.rs` 本批**禁改**。旧形态的缺陷是"**静默**改写 + 保存可用"（一次点击即可写入屏上从未展示的值，C1）；现形态把 (i) 变为**可见**（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）+ **不可交互**，把 (ii) 变为**不可提交**（不进 `draft` / `is_dirty` / `defaults_patch`）⇒ 风险由"可写入装置"降为"屏上显示一个**不会被写回**的近似值" | 无（**有意**）；根治需给三类控件增"无值 / 非法值 / 超宽值"专用形态（`ui/controls.rs` 收口批）：(i) 改显 [`PLACEHOLDER`]、(ii) 由控件侧支持全 `u64` 值域 |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -82,28 +89,47 @@ use crate::lvgl::LvglError;
 use crate::ui::components::{ConfirmDetail, ConfirmDialog, ConfirmSpec, Stepper, Toast, ToastTone};
 use crate::ui::controls::{Ipv4Stepper, SegmentedControl};
 use crate::ui::pages::{
-    decor, display_safe, label, layout_box, set_style_index, set_visible, text_label,
+    decor, display_safe, label, layout_box, set_style_index, set_visible, text_label, PLACEHOLDER,
 };
 use crate::ui::theme::{self, ConfirmLevel, Dimens, Palette, TextSlot};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 上屏文案（UI §3.6 P2 行；**落笔前逐字在 `fonts/lv_font_cmap.txt` 核对**）
 //
-// 与契约串的偏差逐条登记在文件头 `PD1~PD14`（缺字改写 / 缺字号改写 / 口径与尺寸），此处只放**成品串**。
+// 与契约串的偏差逐条登记在文件头 `PD1~PD21`（缺字改写 / 缺字号改写 / 口径 / 尺寸 / 降级），此处只放**成品串**。
 // 码表覆盖率走查见 `ui/tests.rs::ui_texts_covered_by_font_cmap`（基线 = 生成字体的实际 cmap，
 // 待查集合 = 扫 `ui/**` 源码字面量）。
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 保存按钮（UI §3.6 P2「控件 / 状态」行）。
-pub const TEXT_SAVE: &str = "保存";
+pub(crate) const TEXT_SAVE: &str = "保存";
 /// 保存中按钮（UI §3.6；⚠️ `…` 不在 cmap 内 —— 取三个 ASCII `.`，见 **PD8**）。
 pub const TEXT_SAVING: &str = "保存中...";
 /// 恢复默认值按钮 + 其确认弹层标题（UI §3.6 P2 / §6.2 流程 8）。
-pub const TEXT_RESET_DEFAULT: &str = "恢复默认值";
+pub(crate) const TEXT_RESET_DEFAULT: &str = "恢复默认值";
 /// 页顶说明行（UI §6.2 线框 `Y80`；全角逗号 `，` 不在 cmap 内 ⇒ 取 `·`）。
 pub const TEXT_PAGE_NOTE: &str = "修改保存后立即生效 · 无需重启装置";
 /// 只读字段的说明行（设计 §6.2「只读字段」行；⚠️ 见 **PD3**）。
 pub const TEXT_READONLY_NOTE: &str = "仅本机访问 · 不可修改";
+/// **注入值不合法**时该字段行的就地原因（C1；⚠️ 见 **PD21**）。
+///
+/// 为何**不**回显契约 [`ConfigField::validate_value`] 给出的具体原因：那是**运行期**自由文本
+/// （形如 ``` `trace` 不在允许选项内 ```），含反引号与 `允`（U+5141，**不在生成字体 cmap 内**）
+/// ⇒ 真机出豆腐块。契约原因**另有出口**：保存失败回执的 `field_errors`（[`P2ConfigPage::show_result`]
+/// 经 [`Core::apply_field_errors`] 上屏，见 CF-02）—— 那条路径的原因由**后端**二次校验产生，
+/// 与"注入期元数据自相矛盾"是两回事。
+pub(crate) const TEXT_INVALID_VALUE: &str = "取值无效 · 不可修改";
+/// `Enum` 选项数超出可容段数时该行的说明（UI §6.2 行型 A 的约束槽；⚠️ 见 **PD16**）。
+///
+/// 载荷 = **可显示段数**（`9`）。**不静默**是硬要求：截断这一降级必须让现场看见（否则与
+/// "选项本来就这么几个"不可分）。
+///
+/// ⚠️ **用字偏差（并入 PD16）**：不用「项」—— U+9879 **不在生成字体 cmap 内**（实测缺字，
+/// `ui_texts_covered_by_font_cmap` 会点名）⇒ 取 cmap 内的 `段`（本控件即"分段控件"，
+/// `SegmentedControl`）。语义不变（"只显示得了 9 段"）。
+pub(crate) fn text_enum_truncated(shown: usize) -> String {
+    format!("仅显示 {shown} 段")
+}
 /// `gateway.listen_addr` 的标签（**PM 裁定**，设计 §6.2 / UI 附录 B U-1；⚠️ 见 **PD1**）。
 ///
 /// **不得**表述为「对端 IP / 远程主站地址」—— 现网 `mupc_gateway::Iec104Server` 是**服务端**
@@ -127,13 +153,13 @@ pub const TEXT_LOOPBACK_ADDR: &str = "本机地址 · 仅本机";
 /// 保存确认弹层标题（UI §6.2 流程 3）。
 pub const TEXT_DIALOG_TITLE_SAVE: &str = "确认保存运行参数";
 /// 保存确认的「影响范围」段（UI §6.2 流程 3；全角逗号 ⇒ `·`）。
-pub const TEXT_IMPACT_SAVE: &str = "修改将立即生效 · 无需重启装置";
+pub(crate) const TEXT_IMPACT_SAVE: &str = "修改将立即生效 · 无需重启装置";
 /// 恢复默认值确认的「影响范围」段（设计 §6.2 恢复默认值行；`为` 不在 cmap 内 ⇒ 去之，语义不变）。
-pub const TEXT_IMPACT_RESET: &str = "全部运行参数将恢复默认值并立即生效";
+pub(crate) const TEXT_IMPACT_RESET: &str = "全部运行参数将恢复默认值并立即生效";
 /// 保存成功 Toast（UI §3.6 全局；全角逗号 ⇒ `·`）。
 pub const TEXT_TOAST_OK: &str = "保存成功 · 已生效";
 /// 保存失败 Toast（UI §3.6 P2「保存失败」）。
-pub const TEXT_TOAST_FAIL: &str = "保存失败";
+pub(crate) const TEXT_TOAST_FAIL: &str = "保存失败";
 /// `full_rewrite` 警示 Toast（EDGE-23 / 设计 §4.3.2.1；⚠️ 见 **PD9**）。
 pub const TEXT_TOAST_FULL_REWRITE: &str = "配置已保存 · 原有文字已不存在";
 /// 审计不可写 Toast（UI §8.3 `审计不可写（EDGE-18）`；fail-closed，**操作未执行**）。
@@ -142,13 +168,13 @@ pub const TEXT_AUDIT_UNAVAILABLE: &str = "审计不可用 · 操作未执行";
 /// 见 [`show_unavailable`] 的说明）。
 pub const TEXT_CONFIG_UNAVAILABLE: &str = "配置不可用";
 /// 取值范围分隔符（UI §6.2 行型 A 的「`1 – 65535`」；`–` U+2013 在 cmap 内）。
-pub const TEXT_RANGE_SEP: &str = " – ";
+pub(crate) const TEXT_RANGE_SEP: &str = " – ";
 /// Toast 图标：成功（UI §3.6 声明符号集内的 `✓` U+2713）。
-pub const ICON_OK: &str = "✓";
+pub(crate) const ICON_OK: &str = "✓";
 /// Toast 图标：失败（UI 用 `✕`，但 U+2715 **不在 cmap 内** ⇒ 取 `!`）。
-pub const ICON_FAIL: &str = "!";
+pub(crate) const ICON_FAIL: &str = "!";
 /// Toast 图标：警示（`⚠` U+26A0，在 cmap 内；与 `WarnBanner` 同款）。
-pub const ICON_WARN: &str = "⚠";
+pub(crate) const ICON_WARN: &str = "⚠";
 
 /// 本页上屏的**全部固定文案**（供 `ui/tests.rs::ui_texts_covered_by_font_cmap` 做"清册 ↔ 源码
 /// 字面量"一致性走查 —— 清册**不是**覆盖率基线，见该用例文档）。
@@ -158,6 +184,7 @@ pub const ALL_TEXTS: &[&str] = &[
     TEXT_RESET_DEFAULT,
     TEXT_PAGE_NOTE,
     TEXT_READONLY_NOTE,
+    TEXT_INVALID_VALUE,
     TEXT_LISTEN_ADDR,
     TEXT_LOOPBACK_ADDR,
     TEXT_DIALOG_TITLE_SAVE,
@@ -229,6 +256,12 @@ const NOTE_Y: i32 = Dimens::CONTENT_PAD_TOP;
 const FIRST_CARD_Y: i32 = NOTE_Y + NOTE_H;
 /// 单个 `Stepper` 整件宽（`−` + 值区 + `＋`；UI §5.1 #6）。
 const STEPPER_TOTAL_W: i32 = Dimens::STEPPER_BTN_W * 2 + Dimens::STEPPER_VALUE_W;
+/// `Enum` **可容段数上限**（UI §5.1 #4「段宽均分，最小 96」⇒ 卡内容区里最多几段）。
+///
+/// 实算 `INNER_W / SEGMENT_MIN_W = 958 / 96 = 9`（`9 × 96 = 864 ≤ 958`；`10 × 96 = 960 > 958`
+/// —— **10 段正是评审实测触发"整页 `Err`"的那一档**）。超出上限的选项走 **PD16** 的窗口截断
+/// （**字段级降级，不得整页 `Err`**）。
+const ENUM_MAX_SEGMENTS: usize = (INNER_W / crate::ui::controls::SEGMENT_MIN_W) as usize;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. 纯逻辑（**不触碰 LVGL** ⇒ 可独立单测；页内逻辑一律经这里，保证可离线复现）
@@ -236,7 +269,7 @@ const STEPPER_TOTAL_W: i32 = Dimens::STEPPER_BTN_W * 2 + Dimens::STEPPER_VALUE_W
 
 /// 一个字段的**变更明细**（弹层「将修改的字段」段的原始材料，见 `ConfirmDetail`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangeDetail {
+pub(crate) struct ChangeDetail {
     /// 稳定字段键（审计 `target`）。
     pub key: String,
     /// 上屏字段名（[`field_label_text`] 的结果）。
@@ -248,7 +281,7 @@ pub struct ChangeDetail {
 }
 
 /// 遍历视图内全部字段（组序 × 组内序）—— 唯一的口径，避免各处再写嵌套循环。
-pub fn iter_fields(view: &ConfigView) -> impl Iterator<Item = &ConfigField> {
+pub(crate) fn iter_fields(view: &ConfigView) -> impl Iterator<Item = &ConfigField> {
     view.groups.iter().flat_map(|g| g.fields.iter())
 }
 
@@ -257,7 +290,7 @@ pub fn iter_fields(view: &ConfigView) -> impl Iterator<Item = &ConfigField> {
 /// 与 [`field_label_text`] / `Enum` 选项**同一处理**：契约标签不在 `ui/**` 字面量走查面内
 /// （它们来自后端 / 运行时帧），直上屏时含 ASCII `-` / 小写即豆腐块 ⇒ 一律过 [`display_safe`]
 /// （**同类数据同一处理**，见 **PD13**；其**非 ASCII 缺字挡不住**的残余风险同样见 PD13）。
-pub fn group_label_text(group: &ConfigGroup) -> String {
+pub(crate) fn group_label_text(group: &ConfigGroup) -> String {
     display_safe(&group.label)
 }
 
@@ -270,7 +303,7 @@ pub fn group_label_text(group: &ConfigGroup) -> String {
 /// 两条路径**最后都过 [`display_safe`]**（与 `Enum` 选项 / [`group_label_text`] 同口径）：
 /// 注入标签是自由文本，含 cmap 外 ASCII（`-` / 小写）时真机是豆腐块（**PD13**）。
 /// `LABEL_OVERRIDES` 的覆盖串本身逐字在 cmap 内 ⇒ 改写对它们是**恒等**。
-pub fn field_label_text(field: &ConfigField) -> String {
+pub(crate) fn field_label_text(field: &ConfigField) -> String {
     let raw = LABEL_OVERRIDES
         .iter()
         .find(|(key, _)| *key == field.key)
@@ -305,13 +338,31 @@ pub const LABEL_OVERRIDES: [(&str, &str); 3] = [
     (config_key("display.control_bind_addr"), TEXT_LOOPBACK_ADDR),
 ];
 
-/// 值 → 上屏文本（弹层明细与断言口径的唯一出口）。
+/// 值 → 上屏文本（弹层明细与断言口径的**唯一**出口）。
 ///
-/// - `Ipv4`：字符串原样（点分十进制全在 cmap 内）；
+/// **合法值**（`kind.validate_value(value).is_ok()`）⇒ 按 kind 格式化；**否则** ⇒ [`PLACEHOLDER`]。
+///
+/// **为何"非法即占位"**（**C1**）：旧实现在整数分支用 `int_of(value).unwrap_or_default()` ⇒ 类型错配
+/// 被兜底成 **`0`**，而 `0` **本身是合法配置值** ⇒ "值不合法"被**伪装**成"值为 0"（屏上无法分辨，
+/// 违反"降级可见、绝不造假"）。占位符 `–` 的语义（PRD F1.4 / F3.4 / F4.3「显 `--`，**严禁补 0**」）
+/// 正是为这一类情形而设。
+///
+/// **出口统一过 [`display_safe`]**（**I3**）：本函数的产物**直进** `ConfirmDialog` 的
+/// `before` / `after`（`components.rs` 用 `text_label` 上屏，**不经** `display_safe`）⇒ 小写机器值
+/// （如 `trace` 的 `t`/`r`/`a`/`c`/`e`）在真机是豆腐块。合法值里可能出现的字符（数字、`.`、`%`、`·`、
+/// 选项标签的中文）**都在** [`ASCII_DISPLAY_ALPHABET`](crate::ui::pages::ASCII_DISPLAY_ALPHABET)
+/// 或 cmap 内 ⇒ `display_safe` 对合法路径是**恒等**（由
+/// `format_value_is_identity_safe_for_legal_values` 逐例锁住）。
+///
+/// - `Ipv4`：点分十进制；
 /// - `U16`/`U64`：十进制整数 + 可选单位（单位由契约给，如 `秒`）；
-/// - `Enum`：命中选项 → **选项标签**；未命中 → 原值（不静默改写成"未知值"）。
-pub fn format_value(kind: &ConfigKind, value: &Value, unit: Option<&str>) -> String {
-    match kind {
+/// - `Enum`：命中选项 → **选项标签**；未命中 ⇒ [`PLACEHOLDER`]（**不**回显机器值）。
+pub(crate) fn format_value(kind: &ConfigKind, value: &Value, unit: Option<&str>) -> String {
+    // 合法性先判：三类 kind 的"无法格式化"**统一**收敛到占位符（不合情况各写各的兜底）。
+    if kind.validate_value(value).is_err() {
+        return PLACEHOLDER.to_string();
+    }
+    let raw = match kind {
         ConfigKind::Ipv4 => value.as_str().unwrap_or_default().to_string(),
         ConfigKind::U16 { .. } | ConfigKind::U64 { .. } => {
             let n = int_of(value).unwrap_or_default();
@@ -320,22 +371,21 @@ pub fn format_value(kind: &ConfigKind, value: &Value, unit: Option<&str>) -> Str
                 None => n.to_string(),
             }
         }
-        ConfigKind::Enum { options } => {
-            let raw = value.as_str().unwrap_or_default();
-            options
-                .iter()
-                .find(|o| o.value == raw)
-                .map(|o| o.label.clone())
-                .unwrap_or_else(|| raw.to_string())
-        }
-    }
+        // 已过校验 ⇒ `find` 必命中；兜底仍取占位符（**不**回显机器值）。
+        ConfigKind::Enum { options } => options
+            .iter()
+            .find(|o| o.value == value.as_str().unwrap_or_default())
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| PLACEHOLDER.to_string()),
+    };
+    display_safe(&raw)
 }
 
 /// 约束提示（UI §6.2 行型 A「字段名下方 24 px `text_weak` 显示约束『1 – 65535』」）。
 ///
 /// `Ipv4` / `Enum` 返回 `None`：UI §6.2 的行型 B 与 Enum 行**不画**约束提示
 /// （四段 0–255 与选项本身已由控件表达）。
-pub fn range_hint(kind: &ConfigKind, unit: Option<&str>) -> Option<String> {
+pub(crate) fn range_hint(kind: &ConfigKind, unit: Option<&str>) -> Option<String> {
     let (lo, hi) = match kind {
         ConfigKind::U16 { min, max, .. } => (u64::from(*min), u64::from(*max)),
         ConfigKind::U64 { min, max, .. } => (*min, *max),
@@ -349,18 +399,56 @@ pub fn range_hint(kind: &ConfigKind, unit: Option<&str>) -> Option<String> {
 }
 
 /// 注入视图 → **当前值**快照（`key → value`）。
-pub fn initial_values(view: &ConfigView) -> BTreeMap<String, Value> {
+///
+/// **`#[cfg(test)]`**（**M5 取证**：本文件外零引用，生产侧也不需要"视图 → 快照"这一步 ——
+/// 生产读的是**控件**，见 [`Core::current_values`]）⇒ 编译期即不进入产物。
+#[cfg(test)]
+pub(crate) fn initial_values(view: &ConfigView) -> BTreeMap<String, Value> {
     iter_fields(view)
         .map(|f| (f.key.clone(), f.value.clone()))
         .collect()
 }
 
-/// 草稿补丁：**只含值与视图不同**的字段（`from = Edit`）。
+/// 草稿的**门控集合**（**C1**）：只有「用户经控件真的改过」**且**「注入值合法」的键才参与
+/// `draft()` / `is_dirty()` / 明细列表的差异计算。
+///
+/// 两个集合各自的职责（**缺一不可**）：
+///
+/// - [`touched`](Self::touched) —— **注入本身永不置脏**。注入的非法值会被控件渲染成"最小可表示值"
+///   （`Enum` ⇒ `options[0]`、`U16`/`U64` ⇒ `min`，见 **PD21**）；若按"值与视图不同即脏"判定，
+///   页面**未经过任何用户操作**就已经是脏的、保存按钮**可用** ⇒ 一次点击即把屏上**从未展示过**的
+///   值写进装置（评审实测的 C1）；
+/// - [`invalid`](Self::invalid) —— 注入值**不合法**（`kind.validate_value` 拒绝）⇒ 该行错误态 +
+///   控件 `disabled` + **该键不进任何补丁**（既不进草稿，也不进"恢复默认值"）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DraftScope {
+    /// 用户经控件改动过的键（**注入永不入内**）。
+    pub(crate) touched: BTreeSet<String>,
+    /// 注入值不合法（`kind.validate_value` 拒绝）的键。
+    pub(crate) invalid: BTreeSet<String>,
+}
+
+impl DraftScope {
+    /// 该键是否可参与差异计算（**两个门**：用户改过 **且** 注入值合法）。
+    pub(crate) fn admits(&self, key: &str) -> bool {
+        self.touched.contains(key) && !self.invalid.contains(key)
+    }
+}
+
+/// 草稿补丁：**只含用户真改过**（[`DraftScope::touched`]）、**值合法**（非 `invalid`）**且与视图不同**
+/// 的字段（`from = Edit`）。
 ///
 /// "不同"由 `serde_json::Value` 的相等判定（整数一律 `PosInt`，故 `2404` 与 `2404u64` 相等）。
-pub fn draft_patch(view: &ConfigView, current: &BTreeMap<String, Value>) -> ConfigPatch {
+pub(crate) fn draft_patch(
+    view: &ConfigView,
+    current: &BTreeMap<String, Value>,
+    scope: &DraftScope,
+) -> ConfigPatch {
     let mut changes = JsonMap::new();
     for f in iter_fields(view) {
+        if !scope.admits(&f.key) {
+            continue;
+        }
         let Some(now) = current.get(&f.key) else {
             continue;
         };
@@ -374,18 +462,25 @@ pub fn draft_patch(view: &ConfigView, current: &BTreeMap<String, Value>) -> Conf
     }
 }
 
-/// 是否有未保存修改（= 草稿非空）。
-pub fn is_dirty(view: &ConfigView, current: &BTreeMap<String, Value>) -> bool {
-    !draft_patch(view, current).changes.is_empty()
+/// 是否有未保存修改（= 草稿非空）。口径见 [`DraftScope`]（**注入永不置脏**）。
+pub(crate) fn is_dirty(
+    view: &ConfigView,
+    current: &BTreeMap<String, Value>,
+    scope: &DraftScope,
+) -> bool {
+    !draft_patch(view, current, scope).changes.is_empty()
 }
 
-/// 恢复默认值补丁：**全部 `editable` 字段** → 其 `default`（`from = ResetDefault`）。
+/// 恢复默认值补丁：**全部 `editable` 且注入值合法**的字段 → 其 `default`（`from = ResetDefault`）。
 ///
 /// **只读字段一律不进 `changes`**（见 **PD12**）：契约 [`ConfigField::validate_value`] 对
 /// `editable=false` **一律拒绝**，混进去会让整个恢复请求被后端二次校验打回。
-pub fn defaults_patch_of(view: &ConfigView) -> ConfigPatch {
+///
+/// **注入值非法的字段同样不进**（**C1**）：它的元数据与当前值已自相矛盾（该行错误态 + 控件 `disabled`），
+/// 替它写 `default` 属"屏上不可核查的写入"—— 与"降级可见、绝不造假"冲突。
+pub(crate) fn defaults_patch_of(view: &ConfigView, invalid: &BTreeSet<String>) -> ConfigPatch {
     let mut changes = JsonMap::new();
-    for f in iter_fields(view).filter(|f| f.editable) {
+    for f in iter_fields(view).filter(|f| f.editable && !invalid.contains(&f.key)) {
         changes.insert(f.key.clone(), f.default.clone());
     }
     ConfigPatch {
@@ -403,7 +498,7 @@ pub fn defaults_patch_of(view: &ConfigView) -> ConfigPatch {
 /// 以 `#[cfg(test)]` 收口 ⇒ **结构上不可能**被生产代码调用（防止口径回流）；它在测试里的
 /// 唯一用途是把"视图口径"与"改动口径"的**差集**写成断言。
 #[cfg(test)]
-pub fn has_reconnect_field(view: &ConfigView) -> bool {
+pub(crate) fn has_reconnect_field(view: &ConfigView) -> bool {
     iter_fields(view).any(|f| f.requires_reconnect)
 }
 
@@ -431,7 +526,7 @@ pub fn has_reconnect_field(view: &ConfigView) -> bool {
 /// 安全红线字段），**视图口径会把它列进「涉及：」并把分级抬到 L2+，而它既不会进补丁、也不会
 /// 经屏生效** ⇒ 视图口径在此**必然错**（谎报一个改不动的字段会瞬断链路）。改动口径取的是
 /// `defaults_patch_of` 的键集合，只读字段天然被 PD12 排除在外 ⇒ 不会列出它。
-pub fn reconnect_in<'a, I>(view: &ConfigView, changed: I) -> bool
+pub(crate) fn reconnect_in<'a, I>(view: &ConfigView, changed: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -444,7 +539,7 @@ where
 /// [`ConfirmLevel::L2Plus`]（危险色 + 长按 1.0 s + **必出 `WarnBanner`**）。
 ///
 /// `changed` 的口径见 [`reconnect_in`]（PD11：**不是**"视图内全部字段"）。
-pub fn save_level<'a, I>(view: &ConfigView, changed: I) -> ConfirmLevel
+pub(crate) fn save_level<'a, I>(view: &ConfigView, changed: I) -> ConfirmLevel
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -457,7 +552,7 @@ where
 
 /// 恢复默认值的确认强度（设计 §6.2 恢复默认值行）：**最低 L2**（生效性写、不得只有间距保护）；
 /// **本次改动**触及 `requires_reconnect` 字段时升为 [`ConfirmLevel::L2Plus`]（追加 `WarnBanner`）。
-pub fn reset_level<'a, I>(view: &ConfigView, changed: I) -> ConfirmLevel
+pub(crate) fn reset_level<'a, I>(view: &ConfigView, changed: I) -> ConfirmLevel
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -471,7 +566,7 @@ where
 /// L2+ 的「涉及：<字段名列表>」—— **本次改动中** `requires_reconnect` 字段的上屏标签（UI §2.5）。
 ///
 /// 键集合口径同 [`reconnect_in`]（PD11）：既只列**改动的**，也只列**真瞬断的**。
-pub fn reconnect_field_labels<'a, I>(view: &ConfigView, changed: I) -> Vec<String>
+pub(crate) fn reconnect_field_labels<'a, I>(view: &ConfigView, changed: I) -> Vec<String>
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -483,9 +578,18 @@ where
 }
 
 /// 保存路径的变更明细（逐字段「旧值 → 新值」，UI §7.3 明细列表）。
-pub fn save_details(view: &ConfigView, current: &BTreeMap<String, Value>) -> Vec<ChangeDetail> {
+pub(crate) fn save_details(
+    view: &ConfigView,
+    current: &BTreeMap<String, Value>,
+    scope: &DraftScope,
+) -> Vec<ChangeDetail> {
     let mut out = Vec::new();
     for f in iter_fields(view) {
+        // 口径与 [`draft_patch`] **逐条一致**（否则"明细列了、补丁没写"= 谎报）：用户没改过的、
+        // 注入值非法的，都不进明细。
+        if !scope.admits(&f.key) {
+            continue;
+        }
         let Some(now) = current.get(&f.key) else {
             continue;
         };
@@ -502,10 +606,17 @@ pub fn save_details(view: &ConfigView, current: &BTreeMap<String, Value>) -> Vec
     out
 }
 
-/// 恢复默认值路径的变更明细（「字段：当前值 → 默认值」；范围与 [`defaults_patch_of`] 一致）。
-pub fn reset_details(view: &ConfigView, current: &BTreeMap<String, Value>) -> Vec<ChangeDetail> {
+/// 恢复默认值路径的变更明细（「字段：当前值 → 默认值」；范围与 [`defaults_patch_of`] **逐条一致**）。
+///
+/// **注入值非法的字段不进明细**（**C1**）：它们的 `default` 不会进 [`defaults_patch_of`] 的
+/// `changes` ⇒ 列在弹层里就是**谎报**（"要改"而实际不改）。
+pub(crate) fn reset_details(
+    view: &ConfigView,
+    current: &BTreeMap<String, Value>,
+    invalid: &BTreeSet<String>,
+) -> Vec<ChangeDetail> {
     let mut out = Vec::new();
-    for f in iter_fields(view).filter(|f| f.editable) {
+    for f in iter_fields(view).filter(|f| f.editable && !invalid.contains(&f.key)) {
         let Some(now) = current.get(&f.key) else {
             continue;
         };
@@ -520,7 +631,7 @@ pub fn reset_details(view: &ConfigView, current: &BTreeMap<String, Value>) -> Ve
 }
 
 /// 配置不可用时的提示文本（`reason` 为空则只显标题）。
-pub fn unavailable_text(reason: &str) -> String {
+pub(crate) fn unavailable_text(reason: &str) -> String {
     let r = display_safe(reason.trim());
     if r.is_empty() {
         TEXT_CONFIG_UNAVAILABLE.to_string()
@@ -596,7 +707,18 @@ enum FieldControl {
     Int(Rc<Stepper>),
     /// `Enum` → 分段控件（UI §5.1 #4；**不用 `lv_dropdown`** —— §5.1 未选它，且其展开列表
     /// 在离屏不可断言）。
-    Enum(Rc<SegmentedControl>),
+    ///
+    /// `start` / `shown` = 本控件渲染的是**选项窗口** `[start, start + shown)`（**PD16**：选项数
+    /// 超出 [`ENUM_MAX_SEGMENTS`] 时只渲染一个**含当前值**的窗口，而不是整页 `Err`）。
+    /// `shown == 0` = **空选项的占位行**（单段 [`PLACEHOLDER`] + 恒禁用）—— 见 `enum_view`。
+    Enum {
+        /// 分段控件句柄。
+        ctrl: Rc<SegmentedControl>,
+        /// 窗口在**契约选项表**里的起始下标（段下标 = 契约下标 − `start`）。
+        start: usize,
+        /// 窗口段数（**可寻址**的段数；`0` = 占位行）。
+        shown: usize,
+    },
 }
 
 impl FieldControl {
@@ -605,11 +727,11 @@ impl FieldControl {
         match self {
             Self::Ipv4(s) => Value::from(ipv4_text(s.octets())),
             Self::Int(s) => Value::from(s.value()),
-            Self::Enum(s) => {
-                let idx = s.raw_selected().unwrap_or_else(|| s.selected());
+            Self::Enum { ctrl, start, .. } => {
+                let idx = ctrl.raw_selected().unwrap_or_else(|| ctrl.selected());
                 let raw = match kind {
                     ConfigKind::Enum { options } => options
-                        .get(idx)
+                        .get(start + idx)
                         .map(|o| o.value.clone())
                         .unwrap_or_default(),
                     _ => String::new(),
@@ -621,11 +743,26 @@ impl FieldControl {
 
     /// 编程式设值（**不触发 `on_change`** —— `Stepper` / `Ipv4Stepper` / `SegmentedControl`
     /// 的 `set_*` 都是这个语义，故调用方必须自己做变更后的簿记）。
+    ///
+    /// **窗口外的值不动控件**（宁可保持原值，也**不**静默改写成另一个值 —— "绝不造假"）：
+    /// 生产路径不会走到（[`Core::discard`] 回退的是 [`FieldRow::initial`]，而窗口正是按注入值
+    /// 选出来的；[`Core::rebind_scope`] 亦按同一口径设值）。
     fn set(&self, kind: &ConfigKind, v: &Value) {
         match self {
             Self::Ipv4(s) => s.set_octets(octets_of_value(kind, v)),
             Self::Int(s) => s.set_value(int_of(v).unwrap_or_default()),
-            Self::Enum(s) => s.set_selected(enum_index(kind, v)),
+            Self::Enum {
+                ctrl,
+                start,
+                shown,
+            } => {
+                if let Some(local) = enum_index(kind, v)
+                    .checked_sub(*start)
+                    .filter(|l| *l < *shown)
+                {
+                    ctrl.set_selected(local);
+                }
+            }
         }
     }
 
@@ -634,7 +771,7 @@ impl FieldControl {
         match self {
             Self::Ipv4(s) => s.set_disabled(on),
             Self::Int(s) => s.set_disabled(on),
-            Self::Enum(s) => s.set_disabled(on),
+            Self::Enum { ctrl, .. } => ctrl.set_disabled(on),
         }
     }
 
@@ -650,7 +787,7 @@ impl FieldControl {
         match self {
             Self::Ipv4(s) => s.segment(0).map(Stepper::is_disabled).unwrap_or(false),
             Self::Int(s) => s.is_disabled(),
-            Self::Enum(s) => s.is_disabled(),
+            Self::Enum { ctrl, .. } => ctrl.is_disabled(),
         }
     }
 
@@ -659,9 +796,11 @@ impl FieldControl {
         match self {
             Self::Ipv4(s) => s.text(),
             Self::Int(s) => s.display(),
-            Self::Enum(s) => {
-                let idx = s.raw_selected().unwrap_or_else(|| s.selected());
-                s.option(idx)
+            // ⚠️ `option(i)` 的 `i` 是**控件内**的按钮下标（`lv_buttonmatrix_get_button_text`），
+            // **不是**契约选项表下标 ⇒ 这里**不得**再加窗口偏移 `start`。
+            Self::Enum { ctrl, .. } => {
+                let idx = ctrl.raw_selected().unwrap_or_else(|| ctrl.selected());
+                ctrl.option(idx)
             }
         }
     }
@@ -769,6 +908,11 @@ struct Core {
     view: RefCell<Option<ConfigView>>,
     /// 后端二次校验的**逐字段**原因（`key → reason`；CF-02）。
     errors: RefCell<BTreeMap<String, String>>,
+    /// **用户经控件改动过**的键集合（**C1**：注入本身永不置脏 —— 见 [`DraftScope`]）。
+    touched: RefCell<BTreeSet<String>>,
+    /// **注入值不合法**（`kind.validate_value` 拒绝）的键集合（**C1**：该行进错误态 + 控件
+    /// `disabled` + 该键不进任何补丁）。
+    invalid: RefCell<BTreeSet<String>>,
     /// 提交中（F9.6：保存按钮 `disabled` + 文案「保存中...」）。
     submitting: Cell<bool>,
     /// 配置是否可用（控制通道注入成功）。
@@ -802,24 +946,90 @@ enum DialogKind {
 
 impl Core {
     /// 逐字段原因写入 + 行内刷新。
+    ///
+    /// **注入期**的不合法字段（[`Core::invalid`]）不被后端 `field_errors` 覆盖：它是**更低一层**
+    /// 的判据（注入值连自己的元数据都不满足）⇒ 该行**恒**显 [`TEXT_INVALID_VALUE`]（C1 / PD21）。
     fn apply_field_errors(&self, errs: &[FieldError]) {
         let map: BTreeMap<String, String> = errs
             .iter()
             .map(|e| (e.field.clone(), display_safe(&e.reason)))
             .collect();
+        let invalid = self.invalid.borrow();
         for card in self.cards.borrow().iter() {
             for row in &card.rows {
-                row.refresh_error(map.get(&row.key).map(String::as_str));
+                let reason = map
+                    .get(&row.key)
+                    .map(String::as_str)
+                    .or_else(|| invalid.contains(&row.key).then_some(TEXT_INVALID_VALUE));
+                row.refresh_error(reason);
             }
         }
         *self.errors.borrow_mut() = map;
     }
 
-    /// 用户改了某个字段（控件回调入口）：清该字段的错误、撤下上一次失败提示、刷新按钮态。
+    /// 用户改了某个字段（控件回调入口）：**记入 `touched`**（C1 的"用户真改过"）、清该字段的错误、
+    /// 撤下上一次失败提示、刷新按钮态。
     fn after_field_edit(&self, key: &str) {
+        self.touched.borrow_mut().insert(key.to_string());
         self.errors.borrow_mut().remove(key);
         self.show_note();
         self.refresh_actions();
+    }
+
+    /// 草稿门控的**只读快照**（两个 `RefCell` 的借用不外泄）。
+    fn scope(&self) -> DraftScope {
+        DraftScope {
+            touched: self.touched.borrow().clone(),
+            invalid: self.invalid.borrow().clone(),
+        }
+    }
+
+    /// **用户已改过**的键 → 其当前控件值（**I4 取 (b)**：注入新视图时据此保活草稿）。
+    ///
+    /// 只取 `touched` 且**当前值合法**的键：非法值写回新控件只会再造一个"最小可表示值"假象。
+    fn draft_values(&self) -> BTreeMap<String, Value> {
+        if self.touched.borrow().is_empty() {
+            return BTreeMap::new();
+        }
+        let cur = self.current_values();
+        self.touched
+            .borrow()
+            .iter()
+            .filter_map(|k| cur.get(k).map(|v| (k.clone(), v.clone())))
+            .collect()
+    }
+
+    /// 清空草稿标记（**服务端回执为权威**时调用 —— 见 [`P2ConfigPage::show_result`] 成功路径）。
+    fn clear_draft(&self) {
+        self.touched.borrow_mut().clear();
+    }
+
+    /// 建卡失败时回滚 [`Core::clear_draft`]（草稿标记按原样恢复）。
+    fn restore_touched(&self, carried: &BTreeMap<String, Value>) {
+        *self.touched.borrow_mut() = carried.keys().cloned().collect();
+    }
+
+    /// 新视图落屏后**重建草稿门控**（**I4 (b)**）：对**新元数据认可**的旧草稿值写回控件并保留
+    /// `touched`；不认可 / 键已消失 ⇒ 丢弃该键的草稿（控件保持注入值）—— **不**静默改写。
+    fn rebind_scope(&self, carried: &BTreeMap<String, Value>) {
+        let invalid = self.invalid.borrow();
+        let mut touched = BTreeSet::new();
+        for card in self.cards.borrow().iter() {
+            for row in &card.rows {
+                if invalid.contains(&row.key) {
+                    continue;
+                }
+                let Some(v) = carried.get(&row.key) else {
+                    continue;
+                };
+                if row.kind.validate_value(v).is_err() {
+                    continue;
+                }
+                row.control.set(&row.kind, v);
+                touched.insert(row.key.clone());
+            }
+        }
+        *self.touched.borrow_mut() = touched;
     }
 
     /// 全部字段的**当前值**快照（读自控件）。
@@ -833,10 +1043,10 @@ impl Core {
         m
     }
 
-    /// 草稿补丁（只含被改动的字段）。
+    /// 草稿补丁（只含**用户真改过**且**值合法**的字段；C1）。
     fn draft(&self) -> ConfigPatch {
         match self.view.borrow().as_ref() {
-            Some(v) => draft_patch(v, &self.current_values()),
+            Some(v) => draft_patch(v, &self.current_values(), &self.scope()),
             None => ConfigPatch {
                 changes: JsonMap::new(),
                 from: PatchSource::Edit,
@@ -844,10 +1054,10 @@ impl Core {
         }
     }
 
-    /// 恢复默认值补丁。
+    /// 恢复默认值补丁（排除只读字段与**注入值非法**的字段；PD12 / C1）。
     fn defaults_patch(&self) -> ConfigPatch {
         match self.view.borrow().as_ref() {
-            Some(v) => defaults_patch_of(v),
+            Some(v) => defaults_patch_of(v, &self.invalid.borrow()),
             None => ConfigPatch {
                 changes: JsonMap::new(),
                 from: PatchSource::ResetDefault,
@@ -855,22 +1065,27 @@ impl Core {
         }
     }
 
-    /// 是否有未保存修改。
+    /// 是否有未保存修改（口径见 [`DraftScope`]：**注入永不置脏**）。
     fn is_dirty(&self) -> bool {
         match self.view.borrow().as_ref() {
-            Some(v) => is_dirty(v, &self.current_values()),
+            Some(v) => is_dirty(v, &self.current_values(), &self.scope()),
             None => false,
         }
     }
 
-    /// 放弃修改：全部字段回退到注入值，清掉错误与失败提示。
+    /// 放弃修改：全部字段回退到注入值，**清空草稿标记**，清掉错误与失败提示。
+    ///
+    /// **注入值非法的行保持错误态**（C1 / PD21）：它不因"放弃修改"而变成合法 —— 那是它的**固有**
+    /// 状态，不是草稿。
     fn discard(&self) {
+        let invalid = self.invalid.borrow();
         for card in self.cards.borrow().iter() {
             for row in &card.rows {
                 row.control.set(&row.kind, &row.initial);
-                row.refresh_error(None);
+                row.refresh_error(invalid.contains(&row.key).then_some(TEXT_INVALID_VALUE));
             }
         }
+        self.touched.borrow_mut().clear();
         self.errors.borrow_mut().clear();
         self.show_note();
         self.refresh_actions();
@@ -950,7 +1165,13 @@ impl Core {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 按视图建全部分组卡（**先建后换**：任一环节失败 ⇒ 返回 `Err` 且旧视图原样保留）。
-fn build_cards(core: &Rc<Core>, view: &ConfigView) -> Result<Vec<GroupCard>, LvglError> {
+///
+/// 返回 `(卡片, 注入值非法的键集合)` —— 非法集**在建卡时一次算出**（与各行看到的判据同源，
+/// 见 [`build_row`] 的 `invalid` 参数），供 [`Core::invalid`] 与草稿门控使用（**C1**）。
+fn build_cards(
+    core: &Rc<Core>,
+    view: &ConfigView,
+) -> Result<(Vec<GroupCard>, BTreeSet<String>), LvglError> {
     let label_styles = [
         theme::text(TextSlot::Label, Palette::TEXT_PRIMARY),
         theme::text(TextSlot::Label, Palette::DANGER),
@@ -960,6 +1181,13 @@ fn build_cards(core: &Rc<Core>, view: &ConfigView) -> Result<Vec<GroupCard>, Lvg
         theme::text(TextSlot::Body, Palette::DANGER),
     ];
 
+    // **注入即校验**（C1 第 1 条）：逐字段用契约自带的 `ConfigKind::validate_value` 预校验。
+    //
+    // 为何取 `f.kind.validate_value(..)` 而**不是** `f.validate_value(..)`（[`ConfigField`] 上那个）：
+    // 后者把 `editable == false` 也当拒绝（"只读，不可修改"）⇒ 只读字段会被误判成"值非法"，
+    // 而只读是**改不动**、不是**值不合法**（本页对只读的既有处置是"控件 disabled + 说明行"，
+    // 见设计 §6.2 / PL-4）。这是**值域**校验，不是**可写性**校验。
+    let mut invalid: BTreeSet<String> = BTreeSet::new();
     let mut cards: Vec<GroupCard> = Vec::with_capacity(view.groups.len());
     let mut y = FIRST_CARD_Y;
     for g in &view.groups {
@@ -969,10 +1197,11 @@ fn build_cards(core: &Rc<Core>, view: &ConfigView) -> Result<Vec<GroupCard>, Lvg
             y,
             &label_styles,
             &status_styles,
+            &mut invalid,
         )?);
         y += card_height(g) + CARD_GAP;
     }
-    Ok(cards)
+    Ok((cards, invalid))
 }
 
 /// 分组卡高（卡头 + 各行 + 行间分隔线 + 上下内边距）。
@@ -993,6 +1222,7 @@ fn build_card(
     y: i32,
     label_styles: &[Rc<Style>; 2],
     status_styles: &[Rc<Style>; 2],
+    invalid: &mut BTreeSet<String>,
 ) -> Result<GroupCard, LvglError> {
     let obj = decor(&core.scroll, Dimens::CONTENT_W, card_height(group), &theme::card())?;
     obj.set_pos(0, y);
@@ -1020,7 +1250,15 @@ fn build_card(
     let mut rows = Vec::with_capacity(group.fields.len());
     let mut ry = CARD_HEAD_H;
     for (i, f) in group.fields.iter().enumerate() {
-        rows.push(build_row(core, &obj, f, ry, label_styles, status_styles)?);
+        rows.push(build_row(
+            core,
+            &obj,
+            f,
+            ry,
+            label_styles,
+            status_styles,
+            invalid,
+        )?);
         ry += row_height(&f.kind);
         // 行间 1 px 分隔（UI §6.2「最后一行不画」）。
         if i + 1 < group.fields.len() {
@@ -1045,6 +1283,10 @@ fn build_card(
 }
 
 /// 建一个字段行（两种版式由 `kind` 决定）。
+///
+/// **注入即校验**（**C1**）：`f.value` 不满足自身 `kind` 的值域 ⇒ `bad = true` ⇒ 该行
+/// **错误态 + 控件 `disabled` + 该键记入 `invalid`**（→ 不进草稿 / 不进恢复默认值补丁）。
+/// 判据只有一个（[`ConfigKind::validate_value`]），**不在下游再写第二套**。
 fn build_row(
     core: &Rc<Core>,
     card: &Obj,
@@ -1052,9 +1294,14 @@ fn build_row(
     y: i32,
     label_styles: &[Rc<Style>; 2],
     status_styles: &[Rc<Style>; 2],
+    invalid: &mut BTreeSet<String>,
 ) -> Result<FieldRow, LvglError> {
     let ipv4 = matches!(f.kind, ConfigKind::Ipv4);
-    let hint = range_hint(&f.kind, f.unit.as_deref());
+    let bad = f.kind.validate_value(&f.value).is_err();
+    if bad {
+        invalid.insert(f.key.clone());
+    }
+    let mut hint = range_hint(&f.kind, f.unit.as_deref());
 
     // 字段名。
     let name_l = text_label(card, &field_label_text(f), TextSlot::Label, Palette::TEXT_PRIMARY)?;
@@ -1117,16 +1364,35 @@ fn build_row(
             FieldControl::Int(s)
         }
         ConfigKind::Enum { options } => {
-            let labels: Vec<String> = options.iter().map(|o| display_safe(&o.label)).collect();
+            // **PD16**：选项超宽 ⇒ 只渲染一个**含当前值**的 9 段窗口（**不**整页 `Err`）；
+            // 空选项 ⇒ 单段占位。两者都由 `enum_view` 决定，宽度恒 ≤ `INNER_W`。
+            let view = enum_view(options, enum_index(&f.kind, &f.value));
+            let labels: Vec<String> = view
+                .options
+                .iter()
+                .map(|o| display_safe(&o.label))
+                .collect();
             let refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-            let width = enum_width(options.len())?;
-            let idx = enum_index(&f.kind, &f.value);
-            let s = Rc::new(SegmentedControl::new(card, &refs, width, idx)?);
-            s.obj().set_pos(INNER_W - width, y + ROW_A_CTRL_Y);
-            FieldControl::Enum(s)
+            let s = Rc::new(SegmentedControl::new(
+                card,
+                &refs,
+                enum_width(view.options.len()),
+                view.selected,
+            )?);
+            s.obj().set_pos(INNER_W - enum_width(view.options.len()), y + ROW_A_CTRL_Y);
+            if let Some(hidden) = view.hidden_note {
+                // 截断这一降级必须**上屏**（不得与"选项本来就这么几个"不可分）。
+                hint = Some(hidden);
+            }
+            FieldControl::Enum {
+                ctrl: s,
+                start: view.start,
+                shown: view.shown,
+            }
         }
     };
-    if !f.editable {
+    // 只读 ⇒ 禁用（PL-4）；**注入值非法 ⇒ 同样禁用**（C1：不可交互 + 不进草稿）。
+    if !f.editable || bad {
         control.set_disabled(true);
     }
 
@@ -1148,8 +1414,8 @@ fn build_row(
                 let cb = on_edit.clone();
                 s.set_on_change(move |_v| cb());
             }
-            FieldControl::Enum(s) => {
-                s.set_on_change(move |_i| on_edit());
+            FieldControl::Enum { ctrl, .. } => {
+                ctrl.set_on_change(move |_i| on_edit());
             }
         }
     }
@@ -1169,38 +1435,119 @@ fn build_row(
         control,
         hint,
     };
-    row.refresh_error(None);
+    // 注入值非法 ⇒ 该行**就地**（错误态）说明；否则常态（约束提示 / 只读说明 / 空）。
+    row.refresh_error(bad.then_some(TEXT_INVALID_VALUE));
     Ok(row)
 }
 
+/// `Enum` 的**待渲染窗口**（**PD16**：把"选项多到装不下"从**整页 `Err`** 降为**字段级降级**）。
+struct EnumView {
+    /// 窗口内的选项（`SegmentedControl` 的段文案源）。
+    options: Vec<mupc_display_proto::OptionItem>,
+    /// 窗口在**契约选项表**里的起始下标。
+    start: usize,
+    /// 窗口段数（可寻址的段数；`0` = 空选项的占位行）。
+    shown: usize,
+    /// 初始选中段（**窗口内**下标）。
+    selected: usize,
+    /// 截断说明（上屏到约束槽；`None` = 未截断）。
+    hidden_note: Option<String>,
+}
+
+/// 由契约选项表 + 当前值下标算出待渲染窗口。
+///
+/// 三条分支：
+///
+/// 1. **装得下**（`count ≤ `[`ENUM_MAX_SEGMENTS`]）⇒ 全量渲染，`start = 0`；
+/// 2. **装不下** ⇒ 取一个**含当前值**的 `ENUM_MAX_SEGMENTS` 段窗口（`start = selected + 1 − n`，
+///    再夹到 `[0, count − n]`）—— 窗口**必须含当前值**，否则合法值会被挤到窗外、`enum_index`
+///    读回 `0` ⇒ **静默改写**成 `options[0]`（正是 C1 要根除的形态）；窗口位置随值滑动，
+///    并在约束槽上屏「仅显示 N 项」；
+/// 3. **空选项** ⇒ 单段占位（[`PLACEHOLDER`]，`shown = 0`）：`SegmentedControl::new` 拒绝空选项，
+///    而契约允许 `options` 为空（该情形下 `validate_value` 必拒任何值 ⇒ 本行一定同时是 C1 的
+///    "注入值非法"行：错误态 + 禁用 + 不进草稿）。
+fn enum_view(options: &[mupc_display_proto::OptionItem], selected: usize) -> EnumView {
+    if options.is_empty() {
+        return EnumView {
+            options: vec![mupc_display_proto::OptionItem {
+                value: String::new(),
+                label: PLACEHOLDER.to_string(),
+            }],
+            start: 0,
+            shown: 0,
+            selected: 0,
+            hidden_note: None,
+        };
+    }
+    let count = options.len();
+    if count <= ENUM_MAX_SEGMENTS {
+        return EnumView {
+            options: options.to_vec(),
+            start: 0,
+            shown: count,
+            selected: clamp_index(selected, count),
+            hidden_note: None,
+        };
+    }
+    let n = ENUM_MAX_SEGMENTS;
+    let sel = clamp_index(selected, count);
+    let start = (sel + 1).saturating_sub(n).min(count - n);
+    EnumView {
+        options: options[start..start + n].to_vec(),
+        start,
+        shown: n,
+        selected: sel - start,
+        hidden_note: Some(text_enum_truncated(n)),
+    }
+}
+
+/// 下标夹到 `[0, count − 1]`（`count == 0` ⇒ `0`）。
+fn clamp_index(i: usize, count: usize) -> usize {
+    if count == 0 {
+        0
+    } else {
+        i.min(count - 1)
+    }
+}
+
 /// `U16`/`U64` → `(min, max, step)` 的 `i64` 形式（`u64` 超 `i64` 时收敛到 `i64::MAX`）。
+///
+/// **`step == 0` 折为 1**（**PD15**）：契约 [`ConfigKind::validate_value`] 写
+/// `if *step != 0 && …` ⇒ **显式把 `step == 0` 当合法**（语义 = "不校验步长"）；而
+/// [`Stepper::new`] 只接受正步长 ⇒ 照搬 0 会返回 `Err` 让**整页**拒绝渲染。折为 1 = 契约语义的
+/// **忠实映射**（"不校验步长" ⇒ 任何整数值都合法 ⇒ 步长 1 可达**全部**合法值）。
 fn int_bounds(kind: &ConfigKind) -> (i64, i64, i64) {
     match kind {
-        ConfigKind::U16 { min, max, step } => {
-            (i64::from(*min), i64::from(*max), i64::from(*step))
-        }
+        ConfigKind::U16 { min, max, step } => (
+            i64::from(*min),
+            i64::from(*max),
+            int_step(i64::from(*step)),
+        ),
         ConfigKind::U64 { min, max, step } => (
             i64::try_from(*min).unwrap_or(i64::MAX),
             i64::try_from(*max).unwrap_or(i64::MAX),
-            i64::try_from(*step).unwrap_or(1),
+            int_step(i64::try_from(*step).unwrap_or(1)),
         ),
         _ => (0, 0, 1),
     }
 }
 
-/// 分段控件宽（每段 ≥ [`ui::controls::SEGMENT_MIN_W`]；装不进卡内容区则**响亮失败**）。
-fn enum_width(count: usize) -> Result<i32, LvglError> {
-    let n = i32::try_from(count)
-        .map_err(|_| LvglError::InvalidArgument("P2: Enum 选项过多"))?;
-    let w = n
-        .checked_mul(crate::ui::controls::SEGMENT_MIN_W)
-        .ok_or(LvglError::InvalidArgument("P2: Enum 宽溢出"))?;
-    if w > INNER_W {
-        return Err(LvglError::InvalidArgument(
-            "P2: Enum 选项数超出卡内容区宽度",
-        ));
+/// 契约步长 → `Stepper` 步长（`0` 折为 `1`，其余非正数同样折为 `1`；见 [`int_bounds`] 的 PD15）。
+fn int_step(step: i64) -> i64 {
+    if step > 0 {
+        step
+    } else {
+        1
     }
-    Ok(w)
+}
+
+/// 分段控件宽（`count × `[`ui::controls::SEGMENT_MIN_W`]）。
+///
+/// **不可失败**（**PD16**）：调用点只传 [`enum_view`] 给出的 `1..=`[`ENUM_MAX_SEGMENTS`] 段，
+/// 故 `count × 96 ≤ 864 ≤` [`INNER_W`]；旧实现对超宽返回 `Err` ⇒ **整页**白屏（评审 I1 实测）。
+fn enum_width(count: usize) -> i32 {
+    // 段数上界由 ENUM_MAX_SEGMENTS 保证 ⇒ 乘法不可能溢出 i32（不为一个恒真上界写分支）。
+    (count as i32) * crate::ui::controls::SEGMENT_MIN_W
 }
 
 /// `Value` → 四段（`Ipv4` 设值用；不可解析取 `0.0.0.0`）。
@@ -1293,6 +1640,8 @@ impl P2ConfigPage {
             cards: RefCell::new(Vec::new()),
             view: RefCell::new(None),
             errors: RefCell::new(BTreeMap::new()),
+            touched: RefCell::new(BTreeSet::new()),
+            invalid: RefCell::new(BTreeSet::new()),
             submitting: Cell::new(false),
             available: Cell::new(false),
             pending_close: Cell::new(false),
@@ -1360,14 +1709,33 @@ impl P2ConfigPage {
     /// 注入配置视图（`GET /v1/console/config` 的结果 / 成功回执的 `applied`）。
     ///
     /// `WriteMode::FullRewrite` ⇒ Toast 明示「原有文字不再存在」（EDGE-23，见 **PD9/PD10**）。
-    /// **先建后换**：建卡失败 ⇒ 返回 `Err` 且**旧视图原样保留**（不留半成品界面）。
+    ///
+    /// **逐字段注入即校验**（**C1**）：`f.value` 不满足自身 `kind` 的值域 ⇒ 该行进错误态 +
+    /// 控件 `disabled` + 该键**不进任何补丁**（不置脏、不进草稿、不进恢复默认值）。
+    ///
+    /// **草稿保活**（**I4 取 (b)**，见 **PD17**）：重建卡片时，**用户已改过**（`touched`）且新元数据
+    /// **认可**的值会写回新控件并保留脏标记；键已消失 / 新元数据不认可 ⇒ 丢弃该键的草稿。
+    ///
+    /// **先建后换**：**建卡失败** ⇒ 返回 `Err` 且**旧视图原样保留**（不留半成品界面），草稿标记亦
+    /// 原样保留。
+    ///
+    /// ⚠️ **订正（M3）**：本段承诺的"原样保留"**只覆盖建卡失败**。建卡**成功之后**仍有一步可能
+    /// `Err` —— `FullRewrite` 的警示 Toast（`show_toast` 需向 `layer_top()` 建对象）。此时
+    /// `cards` / `view` / `available` **已经提交**（视图已换、仅提示缺失）⇒ **不**满足"原样保留"。
+    /// 之所以不为此重排顺序：Toast 失败是**显示层**失败（`layer_top` 不可用），重排（先弹 Toast
+    /// 再换卡）会把"建卡失败"这一**更严重**的失败变得无法回滚；而静默吞掉 `Err` 与"绝不造假"冲突
+    /// ⇒ 保留上抛、如实登记。
     pub fn set_config(&self, view: &ConfigView) -> Result<(), LvglError> {
         self.core.close_dialog();
-        let cards = build_cards(&self.core, view)?;
+        // I4 (b)：先采集旧草稿（键 → 当前控件值），再建新卡 —— 建卡失败时这些**不做任何改动**。
+        let carried = self.core.draft_values();
+        let (cards, invalid) = build_cards(&self.core, view)?;
         *self.core.cards.borrow_mut() = cards;
         *self.core.view.borrow_mut() = Some(view.clone());
+        *self.core.invalid.borrow_mut() = invalid;
         self.core.errors.borrow_mut().clear();
         self.core.available.set(true);
+        self.core.rebind_scope(&carried);
         self.core.show_note();
         self.core.refresh_actions();
         if view.write_mode == WriteMode::FullRewrite {
@@ -1388,6 +1756,8 @@ impl P2ConfigPage {
         self.core.cards.borrow_mut().clear();
         *self.core.view.borrow_mut() = None;
         self.core.errors.borrow_mut().clear();
+        self.core.touched.borrow_mut().clear();
+        self.core.invalid.borrow_mut().clear();
         self.core.available.set(false);
         self.core.show_fail(&unavailable_text(reason));
         self.core.refresh_actions();
@@ -1404,6 +1774,8 @@ impl P2ConfigPage {
     /// - **成功**：用 `applied` 立即刷新本地值（不等下一帧）+ Toast；
     /// - **失败**：Toast + **保留用户已输入值**（EDGE-10）+ 逐字段标红并显示**具体**原因
     ///   （CF-02）+ 保存按钮置灰；`AuditUnavailable` 走 UI §8.3 的固定文案（EDGE-18）。
+    ///
+    /// ⚠️ **`duplicate`（幂等命中）本页未读取** —— 见 **PD18**（UI §3.6 无对应文案 ⇒ 漏覆盖）。
     pub fn show_result(&self, resp: &ControlResponse<ConfigView>) -> Result<(), LvglError> {
         self.core.close_dialog();
         if resp.ok {
@@ -1412,7 +1784,15 @@ impl P2ConfigPage {
                 .as_ref()
                 .is_some_and(|v| v.write_mode == WriteMode::FullRewrite);
             if let Some(applied) = resp.applied.clone() {
-                self.set_config(&applied)?;
+                // **回执为权威**：写操作已被装置接受 ⇒ 草稿标记作废（否则会把"已被接受的编辑"
+                // 当成待提交草稿继续挂着 = 界面上多出一个不存在的差异）。
+                // `set_config` 真正落屏后再清 —— 建卡失败时**回滚**（草稿标记原样保留）。
+                let carried = self.core.draft_values();
+                self.core.clear_draft();
+                if let Err(e) = self.set_config(&applied) {
+                    self.core.restore_touched(&carried);
+                    return Err(e);
+                }
             }
             // `full_rewrite` 的信息量更大（数据损失提示），此时 `set_config` 已弹警示 Toast
             // —— 不再叠加"保存成功"（UI §7.2：同一时刻仅 1 条）。见 PD10。
@@ -1487,8 +1867,12 @@ impl P2ConfigPage {
         self.core.available.get()
     }
 
-    /// 是否提交中。
-    pub fn is_submitting(&self) -> bool {
+    /// 是否提交中（**M5 取证**：本文件外零引用 ⇒ 与 [`P2ConfigPage::with_dialog`] /
+    /// [`P2ConfigPage::field_disabled`] **同款**收成测试期读回口径）。
+    ///
+    /// ⚠️ B3 若要在生产侧读它，**去掉 `#[cfg(test)]` 即可**（本方法本身不依赖测试设施）。
+    #[cfg(test)]
+    pub(crate) fn is_submitting(&self) -> bool {
         self.core.submitting.get()
     }
 
@@ -1549,7 +1933,10 @@ impl P2ConfigPage {
     }
 
     /// 某字段状态槽是否可见（约束提示或错误原因）。
-    pub fn field_status_visible(&self, key: &str) -> Option<bool> {
+    ///
+    /// **M5 取证**：本文件外零引用 ⇒ 收成测试期读回口径（同 [`P2ConfigPage::field_disabled`]）。
+    #[cfg(test)]
+    pub(crate) fn field_status_visible(&self, key: &str) -> Option<bool> {
         self.core
             .with_row(key, |r| !r.status.obj().is_hidden())
     }
@@ -1659,32 +2046,36 @@ fn open_dialog(core: &Rc<Core>, kind: DialogKind) -> Result<(), LvglError> {
         return Ok(());
     };
     let current = core.current_values();
+    // 草稿门控快照（C1）：用户改过 / 注入值非法 —— 两个分支共用同一份口径。
+    let scope = core.scope();
+    let invalid = core.invalid.borrow().clone();
 
     let (title, impact, level, details_src, warn_src) = match kind {
         DialogKind::Save => {
             // 无改动不弹（「保存」是"提交草稿"，不是"重放"）。
-            if !is_dirty(&view, &current) {
+            if !is_dirty(&view, &current, &scope) {
                 return Ok(());
             }
             // **本次改动**的键集合 = 草稿补丁的键（PD11：分级与「涉及：」一律按它判定，
             // **不是**"视图内全部字段"）。迭代器在本分支内即时消费，不逃逸出 `changed`。
-            let changed = draft_patch(&view, &current);
+            let changed = draft_patch(&view, &current, &scope);
             (
                 TEXT_DIALOG_TITLE_SAVE,
                 TEXT_IMPACT_SAVE,
                 save_level(&view, changed.changes.keys().map(String::as_str)),
-                save_details(&view, &current),
+                save_details(&view, &current, &scope),
                 reconnect_field_labels(&view, changed.changes.keys().map(String::as_str)),
             )
         }
         DialogKind::Reset => {
-            // 恢复默认值的"本次改动" = 恢复补丁的键（全部 `editable` 字段；只读字段被 PD12 排除）。
-            let patch = defaults_patch_of(&view);
+            // 恢复默认值的"本次改动" = 恢复补丁的键（全部 `editable` 字段；只读字段被 PD12 排除，
+            // 注入值非法的字段被 C1 排除）。
+            let patch = defaults_patch_of(&view, &invalid);
             (
                 TEXT_RESET_DEFAULT,
                 TEXT_IMPACT_RESET,
                 reset_level(&view, patch.changes.keys().map(String::as_str)),
-                reset_details(&view, &current),
+                reset_details(&view, &current, &invalid),
                 reconnect_field_labels(&view, patch.changes.keys().map(String::as_str)),
             )
         }
@@ -1853,7 +2244,15 @@ mod tests {
         assert!(hit, "视图里没有键 `{key}` —— 用例的构造前提不成立");
     }
 
-    /// 草稿只含**被改动**的字段；改动前后的脏判定对称。
+    /// 造一个"用户改过这些键"的门控（C1）。
+    fn touched(keys: &[&str]) -> DraftScope {
+        DraftScope {
+            touched: keys.iter().map(|k| (*k).to_string()).collect(),
+            invalid: BTreeSet::new(),
+        }
+    }
+
+    /// 草稿只含**用户真改过**的字段；改动前后的脏判定对称。
     ///
     /// 敏感性：把 [`draft_patch`] 的 `*now != f.value` 改成无条件插入 ⇒ 第 1、4 条变红；
     /// 改成恒 `false` ⇒ 第 2、3 条变红。
@@ -1863,21 +2262,92 @@ mod tests {
         let mut cur = initial_values(&v);
 
         // 未改动 ⇒ 空补丁、不脏。
-        assert!(draft_patch(&v, &cur).changes.is_empty());
-        assert!(!is_dirty(&v, &cur));
+        assert!(draft_patch(&v, &cur, &touched(&[])).changes.is_empty());
+        assert!(!is_dirty(&v, &cur, &touched(&[])));
 
         // 改一个 ⇒ 只含该字段。
         cur.insert("gateway.port".into(), Value::from(2405));
-        let p = draft_patch(&v, &cur);
+        let p = draft_patch(&v, &cur, &touched(&["gateway.port"]));
         assert_eq!(p.from, PatchSource::Edit);
         assert_eq!(p.changes.len(), 1);
         assert_eq!(p.changes.get("gateway.port"), Some(&Value::from(2405)));
-        assert!(is_dirty(&v, &cur));
+        assert!(is_dirty(&v, &cur, &touched(&["gateway.port"])));
 
         // 改回 ⇒ 又不脏（**值相等判定**，不是"碰过就脏"）。
         cur.insert("gateway.port".into(), Value::from(2404));
-        assert!(!is_dirty(&v, &cur));
-        assert!(draft_patch(&v, &cur).changes.is_empty());
+        assert!(!is_dirty(&v, &cur, &touched(&["gateway.port"])));
+        assert!(draft_patch(&v, &cur, &touched(&["gateway.port"]))
+            .changes
+            .is_empty());
+    }
+
+    /// **C1 的纯逻辑回归锁**（touched 门控 + invalid 排除）—— 本条就是"注入非法值"在**无 LVGL**
+    /// 层面的等价形态：控件的值（`cur`）与视图值不同，但**用户一次都没碰过**。
+    ///
+    /// 敏感性（**探针实测**）：把 [`DraftScope::admits`] 里 `self.touched.contains(key)` 去掉
+    /// （回到"与注入值不等即脏"）⇒ 本条前 4 条断言立刻变红。
+    #[test]
+    fn draft_is_gated_by_touched_and_not_by_value_difference() {
+        let v = view();
+        let mut cur = initial_values(&v);
+        // 模拟"控件把非法注入值渲染成 options[0]"：`system.log_level` 的注入值是 `info`（合法），
+        // 这里直接把它换成**另一个合法选项** `error` —— 等价于"控件显示值与视图值不同"。
+        cur.insert("system.log_level".into(), Value::from("error"));
+
+        // ① **没碰过** ⇒ 不脏、草稿为空（**注入/渲染差异永不置脏**）。
+        assert!(!is_dirty(&v, &cur, &touched(&[])), "值有差异 ≠ 用户改过");
+        assert!(draft_patch(&v, &cur, &touched(&[])).changes.is_empty());
+        assert!(save_details(&v, &cur, &touched(&[])).is_empty(), "明细也不得凭空冒出一行");
+
+        // ② **碰过** ⇒ 才进草稿（且只进这一个键）。
+        let p = draft_patch(&v, &cur, &touched(&["system.log_level"]));
+        assert_eq!(p.changes.len(), 1);
+        assert_eq!(p.changes.get("system.log_level"), Some(&Value::from("error")));
+
+        // ③ **注入值非法** ⇒ 即便 `touched` 里**有**它（异常路径 / 竞态），也**不得**进草稿。
+        let scoped = DraftScope {
+            touched: ["system.log_level"].iter().map(|k| (*k).to_string()).collect(),
+            invalid: ["system.log_level"].iter().map(|k| (*k).to_string()).collect(),
+        };
+        assert!(!scoped.admits("system.log_level"), "invalid 是**否决**票");
+        assert!(
+            draft_patch(&v, &cur, &scoped).changes.is_empty(),
+            "注入值非法的键不得进草稿（否则会把屏上不可核查的值写进装置）"
+        );
+        assert!(!is_dirty(&v, &cur, &scoped));
+    }
+
+    /// **C1 / PD12 共用的排除口径**：注入值非法的键不进"恢复默认值"补丁，**也不进**其明细
+    /// （明细与补丁必须逐条一致，否则弹层列了、实际没写 = 谎报）。
+    ///
+    /// 敏感性：把 [`defaults_patch_of`] 的 `!invalid.contains(..)` 去掉 ⇒ 第 1 条变红；
+    /// 把 [`reset_details`] 的同一过滤去掉 ⇒ 第 2 条变红。
+    #[test]
+    fn invalid_keys_are_excluded_from_defaults_and_details() {
+        let v = view();
+        let cur = initial_values(&v);
+        let invalid: BTreeSet<String> = ["system.log_level"].iter().map(|k| (*k).to_string()).collect();
+
+        let p = defaults_patch_of(&v, &invalid);
+        assert!(
+            !p.changes.contains_key("system.log_level"),
+            "注入值非法的字段不得进恢复默认值补丁"
+        );
+        assert!(p.changes.contains_key("gateway.port"), "其余可编辑字段照旧");
+
+        let d = reset_details(&v, &cur, &invalid);
+        assert!(
+            d.iter().all(|x| x.key != "system.log_level"),
+            "明细不得列出**不会写**的字段（逐条一致）"
+        );
+        assert_eq!(
+            d.len(),
+            iter_fields(&v).filter(|f| f.editable).count() - 1,
+            "其余可编辑字段照旧全列"
+        );
+        // 空 invalid ⇒ 与旧口径一致（回退对照）。
+        let full = defaults_patch_of(&v, &BTreeSet::new());
+        assert!(full.changes.contains_key("system.log_level"));
     }
 
     /// 恢复默认值补丁：**覆盖全部 `editable` 字段** + `from = ResetDefault` +
@@ -1888,7 +2358,7 @@ mod tests {
     #[test]
     fn defaults_patch_covers_all_editable_fields() {
         let v = view();
-        let p = defaults_patch_of(&v);
+        let p = defaults_patch_of(&v, &BTreeSet::new());
         assert_eq!(p.from, PatchSource::ResetDefault);
         let editable: Vec<&str> = iter_fields(&v).filter(|f| f.editable).map(|f| f.key.as_str()).collect();
         assert_eq!(p.changes.len(), editable.len(), "覆盖全部可编辑字段");
@@ -1988,7 +2458,11 @@ mod tests {
         // 场景 A：**可编辑**的瞬断字段 —— 两个口径**一致**（都升 L2+）。
         let mut a = view();
         mark_reconnect(&mut a, "gateway.port");
-        let keys_a: Vec<String> = defaults_patch_of(&a).changes.keys().cloned().collect();
+        let keys_a: Vec<String> = defaults_patch_of(&a, &BTreeSet::new())
+            .changes
+            .keys()
+            .cloned()
+            .collect();
         assert!(
             keys_a.iter().any(|k| k == "gateway.port"),
             "恢复补丁覆盖全部 editable 字段"
@@ -2010,7 +2484,11 @@ mod tests {
             has_reconnect_field(&b),
             "视图口径看得见这个只读瞬断字段 —— 正是它会让视图口径误报"
         );
-        let keys_b: Vec<String> = defaults_patch_of(&b).changes.keys().cloned().collect();
+        let keys_b: Vec<String> = defaults_patch_of(&b, &BTreeSet::new())
+            .changes
+            .keys()
+            .cloned()
+            .collect();
         assert!(
             !keys_b.iter().any(|k| k == "display.bind_addr"),
             "只读字段不进恢复补丁（PD12）"
@@ -2032,7 +2510,11 @@ mod tests {
     #[test]
     fn reset_level_is_at_least_l2() {
         let v = view();
-        let keys: Vec<String> = defaults_patch_of(&v).changes.keys().cloned().collect();
+        let keys: Vec<String> = defaults_patch_of(&v, &BTreeSet::new())
+            .changes
+            .keys()
+            .cloned()
+            .collect();
         assert_eq!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L2);
         assert_ne!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L1);
     }
@@ -2124,9 +2606,13 @@ mod tests {
     }
 
 
-    /// 值格式化：整数带单位 / 枚举取**选项标签** / IPv4 原样 / 枚举未命中不臆造。
+    /// 值格式化：整数带单位 / 枚举取**选项标签** / IPv4 原样。
     ///
-    /// 敏感性：把 `Enum` 分支改成返回 `raw` ⇒ 第 3 条变红；去掉单位拼接 ⇒ 第 2 条变红。
+    /// **非法值一律 [`PLACEHOLDER`]**（**C1**）：整数类型错配**不得**兜底成 `0`（`0` 是**合法**
+    /// 配置值 ⇒ 兜底会把"值不合法"伪装成"值为 0"）；枚举未命中**不得**回显机器值。
+    ///
+    /// 敏感性：把 [`format_value`] 开头的 `validate_value` 判据去掉（回到 `unwrap_or_default`）
+    /// ⇒ 第 4、5、6 条变红（会读到 `0` / 空串 / `trace`）。
     #[test]
     fn format_value_shapes() {
         let u16k = ConfigKind::U16 {
@@ -2147,7 +2633,166 @@ mod tests {
             }],
         };
         assert_eq!(format_value(&ek, &Value::from("info"), None), "信息");
-        assert_eq!(format_value(&ek, &Value::from("trace"), None), "trace");
+
+        // ① 枚举未命中（`trace` 不在选项内）⇒ 占位符，**不**回显机器值。
+        assert_eq!(format_value(&ek, &Value::from("trace"), None), PLACEHOLDER);
+        assert_ne!(format_value(&ek, &Value::from("trace"), None), "trace");
+        // ② 类型错配（`U16` 收到字符串）⇒ 占位符，**不**兜底成 `0`（`0` 是合法值！）。
+        assert_eq!(format_value(&u16k, &Value::from("abc"), None), PLACEHOLDER);
+        assert_ne!(format_value(&u16k, &Value::from("abc"), None), "0");
+        // ③ 越界（合法类型、非法值域）⇒ 同样是占位符。
+        assert_eq!(format_value(&u16k, &Value::from(65535), None), PLACEHOLDER);
+        // ④ `Ipv4` 类型错配 ⇒ 占位符（旧实现回显空串）。
+        assert_eq!(format_value(&ConfigKind::Ipv4, &Value::from(7), None), PLACEHOLDER);
+    }
+
+    /// **I3**：`format_value` 的出口过了 [`display_safe`] —— 且对**合法值恒等**。
+    ///
+    /// 两件事一起锁：
+    ///
+    /// ① **改写确实挂在出口上**：给一个 `Enum` 选项标签含 cmap 外 ASCII（小写 / `-`）的样例，
+    ///    断言产物是**改写后**的（`display_safe` 在 `format_value` 内部）；
+    /// ② **对合法路径恒等**（否则"统一过 `display_safe`"会把屏上合法值改花）：逐类合法值
+    ///    （IPv4 点分十进制 / 整数 + `秒` / 选项标签）过 [`display_safe`] **逐字不变**。
+    ///
+    /// 敏感性：把 `format_value` 末尾的 `display_safe(&raw)` 去掉 ⇒ 第 1、2 条变红
+    /// （产物会是原样的小写 `rc1` / `core-x`）。
+    #[test]
+    fn format_value_is_identity_safe_for_legal_values() {
+        // ① 改写确实发生（自证：`display_safe` 对这个串**非恒等**）。
+        //
+        // 样例取「小写 + ASCII 连字符」：`a`→`A`（大写同族**有**字形）、`-`→`–`（U+2013）。
+        // **不取 `x`**：`X` 恰**不在** [`crate::ui::pages::ASCII_DISPLAY_ALPHABET`] 内
+        // ⇒ `display_safe` 会把它兜底成 `?`（可读性差，且与本条要证明的事无关）。
+        let raw = "a-b";
+        assert_ne!(display_safe(raw), raw, "自证：该串会被 display_safe 改写");
+        assert_eq!(display_safe(raw), "A\u{2013}B");
+
+        // ② 合法值经 display_safe **逐字不变**（这是"过一遍不改花合法值"的断言）。
+        let legal = [
+            "127.0.0.1",   // IPv4 点分十进制
+            "0.0.0.0",
+            "30",          // 无单位整数
+            "30 秒",       // 带单位（空格 + cmap 内的 `秒`）
+            "1 – 300 秒",  // 约束提示口径（`–` U+2013）
+            "ERROR",       // 大写选项标签
+            "INFO",
+            "信息",
+            "100%",        // `%` 在 ASCII_DISPLAY_ALPHABET 内
+            "本机监听地址 · IEC 104", // `·` U+00B7
+        ];
+        for s in legal {
+            assert_eq!(display_safe(s), s, "合法路径上 display_safe 必须恒等：`{s}`");
+        }
+        // ③ 端到端：三类合法值经 `format_value` 后与"手写期望串"逐字相等（= 未被改花）。
+        let u16k = ConfigKind::U16 {
+            min: 1,
+            max: 300,
+            step: 1,
+        };
+        assert_eq!(format_value(&u16k, &Value::from(30), Some("秒")), "30 秒");
+        assert_eq!(
+            format_value(&ConfigKind::Ipv4, &Value::from("192.168.1.10"), None),
+            "192.168.1.10"
+        );
+        let ek = ConfigKind::Enum {
+            options: vec![OptionItem {
+                value: "info".into(),
+                label: "INFO".into(),
+            }],
+        };
+        assert_eq!(format_value(&ek, &Value::from("info"), None), "INFO");
+        // ④ 出口**确实**挂着 display_safe：选项标签含小写 / `-` 时产物被改写。
+        let lk = ConfigKind::Enum {
+            options: vec![OptionItem {
+                value: "a-b".into(),
+                label: raw.into(),
+            }],
+        };
+        assert_eq!(
+            format_value(&lk, &Value::from("a-b"), None),
+            display_safe(raw),
+            "出口 = display_safe（同一条路径）"
+        );
+        assert_eq!(format_value(&lk, &Value::from("a-b"), None), "A\u{2013}B");
+    }
+
+    /// **I1 / PD15**：`step == 0`（契约**合法**：`validate_value` 写 `if *step != 0`）折为 **1**，
+    /// **不得**原样传给 `Stepper`（会 `Err` 让整页白屏）。
+    ///
+    /// 敏感性：把 [`int_step`] 的 `if step > 0` 去掉（原样返回）⇒ 第 1、3 条变红。
+    #[test]
+    fn int_bounds_folds_zero_step_to_one() {
+        let z16 = ConfigKind::U16 {
+            min: 1,
+            max: 65535,
+            step: 0,
+        };
+        assert_eq!(int_bounds(&z16), (1, 65535, 1), "step==0 ⇒ 1（不是 0、也不报错）");
+        let z64 = ConfigKind::U64 {
+            min: 0,
+            max: 100,
+            step: 0,
+        };
+        assert_eq!(int_bounds(&z64), (0, 100, 1));
+        // 非零步长原样保留（不得顺手改成 1）。
+        let s5 = ConfigKind::U16 {
+            min: 1,
+            max: 65535,
+            step: 5,
+        };
+        assert_eq!(int_bounds(&s5), (1, 65535, 5));
+    }
+
+    /// **I1 / PD16**：`Enum` 窗口 —— 装得下 ⇒ 全量；装不下 ⇒ **含当前值**的 9 段窗口；
+    /// 空选项 ⇒ 单段占位（`shown = 0`）。
+    ///
+    /// 敏感性：把 [`enum_view`] 的窗口起点写成固定 `0` ⇒ 第 2 条（`value = 9` 时窗口须含它）
+    /// 变红 —— 那正是"合法值被挤到窗外 ⇒ 静默改写"的形态。
+    #[test]
+    fn enum_view_windows_keep_selected_option_visible() {
+        let opts = |n: usize| -> Vec<OptionItem> {
+            (0..n)
+                .map(|i| OptionItem {
+                    value: format!("v{i}"),
+                    label: format!("L{i}"),
+                })
+                .collect()
+        };
+
+        // ① 装得下 ⇒ 全量、起点 0、选中即下标。
+        let k = ConfigKind::Enum { options: opts(9) };
+        if let ConfigKind::Enum { options } = &k {
+            let v = enum_view(options, 3);
+            assert_eq!((v.start, v.shown, v.selected), (0, 9, 3));
+            assert_eq!(v.options.len(), 9);
+            assert!(v.hidden_note.is_none(), "未截断 ⇒ 不弹说明");
+        }
+
+        // ② 装不下（10 段 = 评审实测触发"整页 Err"的那一档）⇒ 9 段窗口，**必含当前值**。
+        let k10 = ConfigKind::Enum { options: opts(10) };
+        if let ConfigKind::Enum { options } = &k10 {
+            let last = enum_view(options, 9); // 当前值在最后一个
+            assert_eq!(last.shown, ENUM_MAX_SEGMENTS);
+            assert!(last.start + last.shown > 9, "窗口必须覆盖下标 9");
+            assert_eq!(last.start + last.selected, 9, "窗口内选中段映射回契约下标 9");
+            assert!(last.hidden_note.is_some(), "截断必须**上屏**说明（不静默）");
+
+            let first = enum_view(options, 0);
+            assert_eq!((first.start, first.selected), (0, 0));
+
+            let mid = enum_view(options, 5);
+            assert_eq!(mid.start + mid.selected, 5);
+        }
+
+        // ③ 空选项 ⇒ 单段占位（`SegmentedControl` 拒绝空列表 ⇒ 不能真建 0 段）。
+        let k0 = ConfigKind::Enum { options: vec![] };
+        if let ConfigKind::Enum { options } = &k0 {
+            let v = enum_view(options, 0);
+            assert_eq!(v.options.len(), 1);
+            assert_eq!(v.options[0].label, PLACEHOLDER);
+            assert_eq!((v.start, v.shown, v.selected), (0, 0, 0));
+        }
     }
 
     /// 约束提示：整数类给「min – max [单位]」，`Ipv4` / `Enum` 不画（UI §6.2 两版式）。
@@ -2188,7 +2833,7 @@ mod tests {
         assert_eq!(unavailable_text("ab-cd"), "配置不可用 · AB\u{2013}CD");
     }
 
-    /// 变更明细：保存路径只列**真变化**的字段；恢复路径列**全部可编辑**字段。
+    /// 变更明细：保存路径只列**本次改动**的字段；恢复路径列**全部可编辑**字段。
     ///
     /// 敏感性：把 `save_details` 的 `*now == f.value` 判断删掉 ⇒ 第 1 条变红；
     /// 把 `reset_details` 的 `filter(|f| f.editable)` 删掉 ⇒ 第 2 条变红。
@@ -2196,21 +2841,47 @@ mod tests {
     fn change_details_shapes() {
         let v = view();
         let mut cur = initial_values(&v);
-        assert!(save_details(&v, &cur).is_empty(), "无改动 ⇒ 明细为空");
+        assert!(save_details(&v, &cur, &touched(&[])).is_empty(), "无改动 ⇒ 明细为空");
         cur.insert("gateway.port".into(), Value::from(2405));
-        let d = save_details(&v, &cur);
+        let d = save_details(&v, &cur, &touched(&["gateway.port"]));
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].label, "端口");
         assert_eq!(d[0].before, "2404");
         assert_eq!(d[0].after, "2405");
 
-        let r = reset_details(&v, &cur);
+        let r = reset_details(&v, &cur, &BTreeSet::new());
         let editable = iter_fields(&v).filter(|f| f.editable).count();
         assert_eq!(r.len(), editable, "恢复默认值列出全部可编辑字段");
         assert!(
             r.iter().all(|d| d.key != "display.bind_addr"),
             "只读字段不进明细"
         );
+    }
+
+    /// **弹层明细的"无法格式化"口径**（C1 的第 2 条）：`before` 侧回显的是**注入值**，它若不合法
+    /// （如 `U16` 收到字符串）⇒ 明细里必须是 [`PLACEHOLDER`] 而**不是** `0`。
+    ///
+    /// 敏感性：把 [`format_value`] 的 `validate_value` 判据去掉（回到 `int_of(..).unwrap_or_default()`）
+    /// ⇒ 第 1 条变红（读到 `"0"` —— 而 `0` 是**合法**配置值，等于把错误伪装成合法值）。
+    #[test]
+    fn change_details_never_disguise_bad_values_as_zero() {
+        let mut v = view();
+        // 造一个"注入值类型错配"的字段（`U16` 收到字符串），并让它**看起来**被用户改动过
+        // —— 明细的 `before` 取自注入值，与 touched 无关，这里直接调 `reset_details` 更直白。
+        for g in &mut v.groups {
+            for f in &mut g.fields {
+                if f.key == "intercore.port" {
+                    f.value = Value::from("abc");
+                    f.default = Value::from("abc");
+                }
+            }
+        }
+        let cur = initial_values(&v);
+        let d = reset_details(&v, &cur, &BTreeSet::new());
+        let row = d.iter().find(|x| x.key == "intercore.port").expect("明细含该字段");
+        assert_eq!(row.before, PLACEHOLDER, "无法格式化 ⇒ 占位符");
+        assert_ne!(row.before, "0", "**不得**把类型错配伪装成合法值 0");
+        assert_eq!(row.after, PLACEHOLDER, "默认值同样不可格式化 ⇒ 占位符");
     }
 
     /// 整数边界：`u64` 超 `i64` 不 panic（收敛到 `i64::MAX`）。
