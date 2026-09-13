@@ -737,9 +737,198 @@ pub(crate) fn control_source_text(src: ControlSource) -> &'static str {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 6′. 页面层共用的栅格常量（M3：此前 `filters.rs` / `p5_audit.rs` **各抄一份**）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 两个块的**紧缝**（`theme` 无 8 px 档 ⇒ 取 `GAP_MIN / 2` 的推导值）。
+///
+/// `pub(crate)`：`filters.rs`（时间范围件首行与自定义块之间）与 `p5_audit.rs`
+/// （最近审计条 / 说明条 / 超限条 / 表头之间的缝）**共用同一份** —— 两处各写一遍
+/// `Dimens::GAP_MIN / 2` 是"同一口径的第二份真源"（B2c-1 代码质量评审 **M3**）。
+pub(crate) const TIGHT_GAP: i32 = Dimens::GAP_MIN / 2;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6″. 回调槽的**重入安全**取用（B2c-1 代码质量评审 ③）
+//
+// 与 `ui/controls.rs`（I1 / I1′）**同一惯用法**，此处的三个槽（`filters::RangeSlot`、
+// `p5_audit::QuerySlot` ×2）**类型不完全相同**（`Box<dyn FnMut(常量各异的载荷)>`），
+// 故按 `T: ?Sized` 泛化后上收到本模块 —— 页面层不再各写一份"取出 → 调用 → 放回"。
+//
+// **为什么必须这么做（本单元修的 Important ③）**：原实现在调用用户回调期间**持有**
+// `try_borrow_mut` 的可变借用 ⇒ 回调内再调 `set_on_change` 时那里的 `try_borrow_mut`
+// **必然失败** ⇒ 新回调被**静默丢弃**、旧回调继续生效（且无任何报错）；而 `filters.rs`
+// 当时的文档却写着"新回调自下一次通知起生效（与 `ui/controls.rs` 同款）"—— **不实**
+// （`ui/controls.rs` 用的是本文件这一套 take/put-back，不是持借用直调）。
+//
+// **语义（契约）**：回调内自替换 ⇒ **本次通知仍由旧回调执行完毕，新回调自下一次通知起
+// 生效**。触发时先把回调**从槽里取出**（槽置 `None`、借用当场释放），再在**不持有任何
+// 借用**的状态下调用它，最后"槽仍为空才放回"。
+//
+// **"放回"必须走 `Drop` 守卫**（[`PutBack`]）：写成 `take → f(v) → put_back` 时，用户回调
+// panic ⇒ 展开**跳过**最后一句 ⇒ 槽**永久空置**、此后通知全静默丢失。放进 `Drop` 即
+// "正常返回与展开两条路径都放回"。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ⚠️ **本块的可见性是"封死"的一部分**（B2c-1 收口 ①）：`take_cb` / `put_back_cb` /
+// `PutBack` **只在本私有模块内可见** —— 它们**不再**是页面层可调用的 API。
+// 对外（`filters.rs` / `p5_audit.rs` / 同 crate 其它模块）只经由下面的
+// [`CbSlot::set`] / [`CbSlot::fire`] 两个动作使用回调槽。
+//
+// **为什么必须收进私有模块（而不是只去掉 `pub(crate)`）**：Rust 的私有可见性对
+// **子模块**开放 —— 若把 `take_cb` 直接写在 `pages/mod.rs` 里、仅去掉 `pub(crate)`，
+// 那么 `pages::filters` / `pages::p5_audit`（`pages` 的子模块）**仍然看得见**它 ⇒
+// 调用点照旧能写出"自己 take、自己 fire"的旧写法，"封死"就只是口头约定。
+// 放进同文件的私有 `mod sealed` 后，`pages::filters` **不是** `sealed` 的后代 ⇒
+// 连名字都解析不到 ⇒ **类型层面**写不出来。
+mod sealed {
+    use std::cell::RefCell;
+
+    /// 槽的承载类型（抽别名避免 `type_complexity` 告警；与 `ui/controls.rs` 同款）。
+    type Slot<A> = RefCell<Option<Box<dyn FnMut(A)>>>;
+
+    /// 从槽里**取出**回调并把槽置空（借用在本函数返回前已释放 ⇒ 调用期不持借用）。
+    ///
+    /// 拿不到借用（未来若出现其它长借用路径）⇒ `None`，**不 panic**（静默跳过本次通知）。
+    fn take_cb<T: ?Sized>(slot: &RefCell<Option<Box<T>>>) -> Option<Box<T>> {
+        match slot.try_borrow_mut() {
+            Ok(mut s) => s.take(),
+            Err(_) => None,
+        }
+    }
+
+    /// **放回**回调：**仅当槽仍为空**（回调内没有自替换）时放回；否则丢弃旧回调
+    /// （新回调自下一次通知起生效，见上方语义说明）。
+    ///
+    /// **不 panic**：拿不到借用即**不放回**（`Drop` 路径上再 panic = 双重 panic ⇒ abort）。
+    fn put_back_cb<T: ?Sized>(slot: &RefCell<Option<Box<T>>>, f: Box<T>) {
+        if let Ok(mut s) = slot.try_borrow_mut() {
+            if s.is_none() {
+                *s = Some(f);
+            }
+        }
+    }
+
+    /// **放回守卫**：把 [`take_cb`] 取出的回调临时托管在自己身上，**作用域结束时**（正常返回
+    /// **与 panic 展开两条路径**）执行"槽仍为空才放回"。
+    ///
+    /// `completed` 的判据与诊断口径与 `ui/controls.rs::PutBack` **逐条一致**：调用方在
+    /// `f(v)` **正常返回**之后才置 `true`；`Drop` 时它仍为 `false` ⇒ 本次触发途中确实发生了
+    /// 展开 ⇒ 向 stderr 留一条诊断（**放回仍照做**，否则就是"槽永久空置"的缺陷）。
+    /// 写 stderr 用 `let _ = writeln!(..)` 而非 `eprintln!`：后者写失败时**自身 panic**，
+    /// 展开路径上二次 panic = abort。
+    /// ⚠️ **刻意无 `pub`**（= 仅 `sealed` 内可见）：写成 `pub(super)` 会让
+    /// `pages::filters` / `pages::p5_audit`（`pages` 的后代）重新看得见它 ⇒ 封死失效。
+    struct PutBack<'a, T: ?Sized> {
+        /// 回调取出前所在的槽（放回目标）。
+        slot: &'a RefCell<Option<Box<T>>>,
+        /// 托管中的回调；`Drop` 里 `take()` 走（保证只放回一次）。
+        cb: Option<Box<T>>,
+        /// **本帧**是否"回调已正常返回"（初值 `false` 是故意的，见上方说明）。
+        completed: bool,
+    }
+
+    impl<'a, T: ?Sized> PutBack<'a, T> {
+        /// 取出并托管槽里的回调（槽当场置空 ⇒ 调用期不持借用）。
+        fn take(slot: &'a RefCell<Option<Box<T>>>) -> Self {
+            Self {
+                slot,
+                cb: take_cb(slot),
+                completed: false,
+            }
+        }
+
+        /// 调用托管中的回调（**不持有任何借用**；槽里没有回调则什么都不做）。
+        fn fire<V>(&mut self, v: V)
+        where
+            T: FnMut(V),
+        {
+            if let Some(f) = self.cb.as_mut() {
+                f(v);
+            }
+            self.completed = true;
+        }
+    }
+
+    impl<T: ?Sized> Drop for PutBack<'_, T> {
+        fn drop(&mut self) {
+            if !self.completed {
+                use std::io::Write;
+                // ⚠️ 诊断文案**写成单行字符串字面量**（不用 `\` 续行）：`ui/tests.rs` 的
+                // `strip_comments_and_literals` 把"非原始字符串里出现裸换行"一律判成**扫描器
+                // 失真**并响亮失败（它不认 `\`+换行这种续行写法）—— 续行会让该文件的静态网
+                // 全部失明。保持单行即可（与 `p5_audit.rs` 的 stderr 诊断同口径）。
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "回调槽：本次通知的回调**未正常返回**（panic 展开）—— 通知被截断；槽已放回，后续通知不受影响（该回调的内部状态可能已不一致）。"
+                );
+            }
+            if let Some(f) = self.cb.take() {
+                put_back_cb(self.slot, f);
+            }
+        }
+    }
+
+    /// **回调槽**（页面层唯一的用户回调容器；B2c-1 收口 ①）。
+    ///
+    /// **只暴露 [`CbSlot::set`] / [`CbSlot::fire`] 两个动作**：承载槽的字段是**私有**的
+    /// （且本类型所在的 `sealed` 模块对 `pages::filters` / `pages::p5_audit` 不可达）⇒
+    /// 调用点**在类型层面无法**写出"调用用户回调期间持着 `try_borrow_mut` 借用"的旧写法。
+    /// 那正是本单元修的 Important ③：持借用直调 ⇒ 回调内 `set_on_change` 的
+    /// `try_borrow_mut` **必然失败** ⇒ 新回调被**静默丢弃**、旧回调继续生效、无任何报错。
+    ///
+    /// **语义（契约，与 `ui/controls.rs` 同款）**：回调内自替换 ⇒ 本次通知仍由**旧**回调
+    /// 执行完毕，新回调自**下一次**通知起生效。
+    ///
+    /// **绝不 panic**：拿不到槽的借用 ⇒ 本次通知**静默跳过**；用户回调 panic ⇒
+    /// [`PutBack`] 的 `Drop` 守卫仍把槽放回（否则槽永久空置 ⇒ 此后所有通知静默丢失）。
+    ///
+    /// **探针（收口 ①）**：把调用点改回旧的"持借用直调"写法 ⇒ **编译不过**
+    /// （`CbSlot` 没有 `try_borrow_mut`、私有字段也拿不到）；把 [`CbSlot::fire`] 的函数体
+    /// 换回"持借用直调" ⇒ `pages_chain` 的**真件**自替换用例当场变红。
+    pub struct CbSlot<A> {
+        /// **私有**（见类型文档：这是"调用点写不出旧写法"的机制本体）。
+        slot: Slot<A>,
+    }
+
+    impl<A> CbSlot<A> {
+        /// 建一个空槽。
+        pub const fn new() -> Self {
+            Self {
+                slot: RefCell::new(None),
+            }
+        }
+
+        /// 注册回调（**覆盖**旧回调；不触发）。
+        ///
+        /// 拿不到借用时**静默不注册**而**不是** panic：事件回调内的 panic 会被事件桥
+        /// `catch_unwind` 吞掉（屏上无任何迹象 —— 那才是更难查的失效）。
+        pub fn set<F>(&self, f: F)
+        where
+            F: FnMut(A) + 'static,
+        {
+            if let Ok(mut s) = self.slot.try_borrow_mut() {
+                *s = Some(Box::new(f));
+            }
+        }
+
+        /// 触发：**取出 → 调用 → （槽仍为空才）放回**，调用期**不持任何借用**。
+        pub fn fire(&self, v: A) {
+            let mut guard: PutBack<'_, dyn FnMut(A)> = PutBack::take(&self.slot);
+            guard.fire(v);
+        }
+    }
+}
+
+/// 对外只导出 [`sealed::CbSlot`]（`take_cb` / `put_back_cb` / `PutBack` 留在私有模块内，
+/// **不可**从 `pages::filters` / `pages::p5_audit` 触达 —— 见 `mod sealed` 的说明）。
+pub(crate) use sealed::CbSlot;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `RefCell` 只在测试里用（生产侧的回调槽走 `sealed::CbSlot`，其内部借用不外露）。
+    use std::cell::RefCell;
 
     // ── 时间戳格式化（纯逻辑；不触碰 LVGL ⇒ 可独立 `#[test]`）──
 
@@ -773,5 +962,82 @@ mod tests {
     fn placeholder_is_not_ascii_hyphens() {
         assert_ne!(PLACEHOLDER, "--", "ASCII 连字符不在字体子集内");
         assert_eq!(PLACEHOLDER, "\u{2013}", "取 §3.6 字符集内的 U+2013");
+    }
+
+    // ── 回调槽（[`CbSlot`]；B2c-1 代码质量评审 ③ / 收口 ①；**纯逻辑**，不触碰 LVGL）──
+
+    /// 测试用槽：`Rc<CbSlot<i32>>`（回调内需要**再拿到槽**以自替换 ⇒ 外面套一层 `Rc`；
+    /// 回调只持 `Weak` ⇒ **不构成 `Rc` 环**）。
+    ///
+    /// **与生产侧同型**：`filters::RangeSlot` / `p5_audit::QuerySlot` **就是**
+    /// [`CbSlot`]`<载荷>` ⇒ 本节的网直接罩住那两个调用点用的类型（收口 ①：此前本节复刻的是
+    /// 裸 `RefCell` 的**机制桩**，调用点把 `CbSlot` 换回裸槽时本节照样全绿）。
+    type Slot = Rc<CbSlot<i32>>;
+
+    /// **回调内自替换 ⇒ 本次由旧回调跑完、新回调自下一次生效**。
+    ///
+    /// **改什么会让本条变红**：把 [`CbSlot::fire`] 换回"触发时持 `try_borrow_mut` 直调"
+    /// （原实现）—— 回调内 [`CbSlot::set`] 的 `try_borrow_mut` 失败 ⇒ 新回调**被静默丢弃**
+    /// ⇒ 第二次 `fire` 仍是"旧回调" ⇒ 第 2 组断言拿到 `["旧", "旧"]` 而不是 `["旧", "新"]`。
+    /// **这正是被修的缺陷**（`filters.rs` 当时还写着"新回调自下一次通知起生效"）。
+    #[test]
+    fn callback_slot_self_replacement_takes_effect_next_time() {
+        let slot: Slot = Rc::new(CbSlot::new());
+        let log: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let weak = Rc::downgrade(&slot);
+            let log = Rc::clone(&log);
+            slot.set(move |_v: i32| {
+                log.borrow_mut().push("旧");
+                // 回调内**自替换**：此刻不得持有任何借用（否则本次 `try_borrow_mut` 失败）。
+                if let Some(s) = weak.upgrade() {
+                    let log = Rc::clone(&log);
+                    s.set(move |_v: i32| log.borrow_mut().push("新"));
+                }
+            });
+        }
+        slot.fire(1);
+        assert_eq!(*log.borrow(), vec!["旧"], "本次通知由**旧**回调执行完毕");
+        slot.fire(2);
+        assert_eq!(
+            *log.borrow(),
+            vec!["旧", "新"],
+            "新回调必须**自下一次通知起生效**（若为持借用直调 ⇒ 这里仍是 `旧`）"
+        );
+        slot.fire(3);
+        assert_eq!(*log.borrow(), vec!["旧", "新", "新"], "此后恒为新回调");
+    }
+
+    /// **回调 panic ⇒ 槽仍被放回**（`Drop` 守卫；此后通知照常到达）。
+    ///
+    /// **改什么会让本条变红**：把 `sealed::PutBack` 的 `Drop` 换成"调用后手动 `put_back`"
+    /// —— panic 展开会跳过那一句 ⇒ 槽**永久空置** ⇒ 第 2 次 `fire` 静默无事 ⇒ 断言拿到
+    /// `["前"]`（而不是 `["前", "前"]`）。
+    #[test]
+    fn callback_slot_put_back_survives_panic() {
+        let slot: Slot = Rc::new(CbSlot::new());
+        let log: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+        let n: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+        {
+            let log = Rc::clone(&log);
+            let n = Rc::clone(&n);
+            slot.set(move |_v: i32| {
+                let k = n.get();
+                n.set(k + 1);
+                log.borrow_mut().push("前");
+                if k == 0 {
+                    panic!("第一次就炸（守卫仍需把槽放回）");
+                }
+            });
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| slot.fire(1)));
+        assert_eq!(*log.borrow(), vec!["前"], "第一次调用确实展开了");
+        // 槽已被守卫放回 ⇒ 第二次调用仍然到达（本帧不 panic）。
+        slot.fire(2);
+        assert_eq!(
+            *log.borrow(),
+            vec!["前", "前"],
+            "panic 后槽**不得**永久空置（后续通知必须照常到达）"
+        );
     }
 }

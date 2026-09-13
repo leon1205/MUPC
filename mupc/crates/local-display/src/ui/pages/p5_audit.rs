@@ -36,10 +36,10 @@
 //! | AU2 | 结果胶囊图标：`● 成功` 的 `●` 在 cmap 内（§3.6 符号集），失败串 UI 写 `✕ 失败` 而 `✕`(U+2715) / `✗`(U+2717) **实测不在** cmap 内 ⇒ 取 `×`(U+00D7，§3.6 声明的符号集内、几何等价) | 同 AU1（字库缺口）；与 `p4_interlock.rs` 的 **IL2** 同款处置（「停机失败」亦取 `×`） | 同 AU1 |
 //! | AU3 | 操作类型标签取**契约** `ConsoleOp::label()`（`配置保存` / `恢复默认值` / `联锁释放` / **`M1 授权`**），**未**取 §3.6 P5 行的 `M1 授权重启`（差 2 字） | 契约 `ConsoleOp::label()` 是**唯一机器可读的真源**（`/audit/ops` 的 `label` 亦由它生成）；§3.6 P5 行给的是"该页用字集合"。**不**在 UI 层另造一份映射（那会得到"后端标签与屏上标签各一份"的第二真源） | 若 PM 裁定 §3.6 P5 行走字优先：改 `display-proto` 的 `ConsoleOp::label()`（**一处**），UI 自动跟随 |
 //! | AU4 | **不可篡改说明条的锁形取 `■`**（U+25A0） | UI §3.6 在"非中文字形"清单里**明写**「`🔒`（**以几何锁形替代**）」—— 即设计本身要求用几何形状替代 emoji；cmap 内可用的几何字形只有 `● ○ ■ ▲ ▼ ⚠ ✓ ×` ⇒ 取 `■`（实心块，与 `UnavailableKind` 的 `?`、空态的 `○` **不同族**） | 无（**按 §3.6 原文**）；若 PM 要求更"锁"的语义，需扩字表 |
-//! | AU5 | **EDGE-15（检索范围超限）在 P5 侧生产不可达** —— `AuditPage` **没有** `range_too_large` 字段（对照：`LogPage` 有，见 `display-proto/src/log.rs`），而 §8.3 的 EDGE-15 行明写适用「P3 / **P5**」 | **契约缺口**（`display-proto` 本批冻结、不得改）。**本页不造字段**，而是把 **UI 落点**备齐：`WarnBanner` 常驻构建、由 [`P5AuditPage::set_range_too_large`] 显式注入驱动并**逐条可测**。⚠️ **残余（如实）**：B3 **无法**从当前 `AuditPage` 推出该标志 ⇒ 生产路径上该 banner **永不可达** | 契约侧给 `AuditPage` 增 `range_too_large: bool`（与 `LogPage` 同口径：**必需**字段、缺失即 `Err`）；届时 [`P5AuditPage::set_page`] 直接读该字段（**单一分派点**），[`P5AuditPage::set_range_too_large`] 退化为测试入口 |
+//! | AU5 | **EDGE-15（检索范围超限）在 P5 侧生产不可达** —— `AuditPage` **没有** `range_too_large` 字段（对照：`LogPage` 有，见 `display-proto/src/log.rs`），而 §8.3 的 EDGE-15 行明写适用「P3 / **P5**」 | **契约缺口**（`display-proto` 本批冻结、不得改）。**本页不造字段**，而是把 **UI 落点**备齐：`WarnBanner` **懒惰构建**（首个 [`P5AuditPage::set_range_too_large`]`(true)` 才建 —— 代码质量评审 **M5**：既然生产不可达，就不该让每页常驻背着一份"永不显形"的构件）、由显式注入驱动并**逐条可测**。⚠️ **残余（如实）**：B3 **无法**从当前 `AuditPage` 推出该标志 ⇒ 生产路径上该 banner **永不可达** | 契约侧给 `AuditPage` 增 `range_too_large: bool`（与 `LogPage` 同口径：**必需**字段、缺失即 `Err`）；届时 [`P5AuditPage::set_page`] 直接读该字段（**单一分派点**），[`P5AuditPage::set_range_too_large`] 退化为测试入口 |
 //! | AU6 | **「滚动加载」的触发点在本层不可得** ⇒ 本页提供 [`P5AuditPage::request_next_page`] 作为**触发入口**（由外壳在"列表滚到底"时调用），本页据最近一次注入的 `AuditPage.page` / `has_more` 组装 `page + 1` 的 [`AuditQuery`] 交回外部 | 薄层的 `EventCode` **未镜像** `LV_EVENT_SCROLL`（镜像的事件码实为 `PRESSED` / `PRESS_LOST` / `RELEASED` / `CLICKED` / `LONG_PRESSED` / `LONG_PRESSED_REPEAT` / `VALUE_CHANGED` / `READY` / `CANCEL` / `DELETE` —— **含** `PRESS_LOST` 与 `LONG_PRESSED_REPEAT`，**不含** `SCROLL`），而 `src/lvgl/**` 本批**禁改** ⇒ "检测滚到底"在本单元**结构性不可实现**。故：**意图**由本页组装（含去重所需的 `page`）、**触发与节流**由 B3 承担（与任务书"滚动加载的触发与去重由 B3 负责"一致） | B3 接线时：在滚动容器上挂 `LV_EVENT_SCROLL`（需先在 `src/lvgl/event.rs` 镜像该事件码）后调 `request_next_page()`；或由 B3 自行节流后调用 |
 //! | AU7 | **操作类型 chip 组占 2 行（块高 112 px），不是设计线框的一行（64 px）** ⇒ 其下方（表头 / 列表）整体下移 48 px | **根因（结构性，非取舍）**：5 个选项里最长的 `恢复默认值` 在 26 px 档实测 **130 px**，选中态再拼 `✓ ` 前缀（**153.6 px**，UI §5.2 要求）⇒ 单 chip 至少 **192 px**（= 153.6 + 按钮内边距 2×16）；5 × 192 + 4 × 16 = **1024 > 992** ⇒ **单行装不下**（即使把标签列挪到上一行，5 项一行仍需 1024 px）。故取 `columns = 4` 的两行网格（换行能力见 §5.3） | 无（**结构性**）；若 PM 要求单行：需缩短选项文案（改契约 `label()`）或缩小 chip 内边距（`theme.rs`） |
-//! | AU8 | 行池上限 **20**（= [`AUDIT_PAGE_SIZE`]，**恰为一页**）：注入超过 20 条时**只渲染前 20 条**（按时间倒序取最新的一页） | **实测结论（B2c-1 整改）**：`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE` = **256 KB**，且离屏链里各页共用**同一个 LVGL 堆**（`ui/tests.rs::pages_chain` 串行建 / 拆六页，但堆是同一个）。此前 `ROW_MAX = 100` 的承诺**不可兑现**：逐档实测（在 `pages_chain` 的 P5 段一次性注入 N 条）**N=20 成功、N=22 成功、N=24 即 `lv_realloc: couldn't reallocate memory` + `lv_array_resize` 断言 ⇒ 挂死**（24 复现两次；顺序注入 20→22→24→**26 挂死**）⇒ 实测可容纳上界仅约 **22–24 行**，原值 100 只要注入 ≥26 条就会挂死。收敛到 **20**（= 设计规定的每页条数，§6.5「每页 20 条」）后：① 契约承诺的一页必然渲染得出；② 距实测挂死点（24）留 **≥16%** 余量（对可复现的 22 亦留 ~9%）。**与"20 条/页 + 滚动加载"的关系**：本页把 `entries` 视为**外部（B3）组装好的单页窗口** —— 分页 / 累积 / 窗口化在 B3；本页只渲染被喂进来的那一页，**不**自行累加（`apply_page` 是"整体替换窗口"语义，不是 append） | B3 定窗口策略后若需多页共存，须先扩 `LV_MEM_SIZE`（`lv_conf.h`）或改"整屏平移 + 只补新行"的窗口化（UI §10 的长列表口径）；届时本常量随实测重新标定并同步 `row_pool_capacity_is_measured` 断言 |
+//! | AU8 | 行池上限 **20**（= [`AUDIT_PAGE_SIZE`]，**恰为一页**）：注入超过 20 条时**只渲染前 20 条**（按时间倒序取最新的一页）；**两页共存**时每页只保证 [`COEXIST_ROWS_PER_PAGE`]（= 4）行 | **测量前提（必须与数字一起读）**：`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE` = **256 KB**，且离屏链里各页共用**同一个 LVGL 堆**。**① 单页独活**（`pages_chain` 串行建 / 拆六页，逐个 `drop`；此前 `ROW_MAX = 100` 的承诺即在此情形下被证伪）：逐档实测 **N=20 成功、N=22 成功、N=24 即 `lv_realloc: couldn't reallocate memory` + `lv_array_resize` 断言 ⇒ 挂死**（24 复现两次；顺序注入 20→22→24→**26 挂死**）⇒ 单页上界 ≈ **22–24 行** ⇒ 记 [`MEASURED_ROW_CAPACITY`]=22，`ROW_MAX` 收敛到 20（= §6.5 每页条数，对挂死点留 ≥16% 余量）。**② 两页共存**（B2c-1 整改实测 2026-09-13；P3 尚未实现 ⇒ 用两个 P5 实例作代理）：两个**空**页成功；**2 页 × 4 行 / × 5 行成功、2 页 × 6 行即 OOM 挂死**；**单页满行(20) + 第二个空页也 OOM** ⇒ 空页本身 ≈ **12 行**的开销、两页共存的**总**行数上界 ≈ [`MEASURED_COEXIST_TOTAL_ROWS`]=10。**结论（如实）**：256 KB 下**两页各满行（20）不可能**；把 `ROW_MAX` 收敛到"共存可容纳值"（≈5）**也买不到共存**（留给页开销的位置为 0、无任何余量，且等于**连带砍掉单页契约**）⇒ `ROW_MAX` **保持 20**，共存预算另立 [`COEXIST_ROWS_PER_PAGE`]=4（`COEXIST_ROWS_PER_PAGE < ROW_MAX` 由编译期断言钉死）。**与"20 条/页 + 滚动加载"的关系**：本页把 `entries` 视为**外部（B3）组装好的单页窗口** —— 分页 / 累积 / 窗口化在 B3；本页只渲染被喂进来的那一页，**不**自行累加（`apply_page` 是"整体替换窗口"语义，不是 append）。**同一 `Drop` 内建 / 拆 `P5AuditPage` 不泄漏**（实测连拆 30 个空页后仍能建满行页） | **B2c-2（P3 日志页，同样有行池）落地前必须二选一**：① 扩 `LV_MEM_SIZE`（`lv_conf.h`）并**重测两页共存预算**；② 由外壳**串行化页面生命周期**（离开即 `drop` —— 即 `pages_chain` 现模拟的形态）。届时 [`MEASURED_COEXIST_TOTAL_ROWS`] / [`COEXIST_ROWS_PER_PAGE`] 随新实测重新标定，`row_pool_capacity_is_measured` 与 `pages_chain` 的共存预算用例同步更新 |
 //! | AU9 | **机器键 / 自由文本的上屏处置**（本单元最高风险项，逐条列在下方「§6 处置表」）：`operator`（`local-console` → `本地控制台`，未知名走 [`free_text_safe`]）、`target`（**已知键映射中文名；未登记键显示经 `display_safe` 归一后的机器键**，见下方"键的处置"）、`before`/`after`（`Value` → 文本，逐类型处置）、`reason`（自由文本 → [`free_text_safe`]） | 三者都**不在** `ui/**` 的源码字面量走查面内（来自 `display-proto` 或运行时），直上屏含 cmap 外 ASCII（小写 / `-`）即**豆腐块**（同 `pages/mod.rs` **D9** / `p4_interlock.rs` **IL6**）。`display_safe` **只改写 ASCII，非 ASCII 缺字挡不住**（残余） | 同 D9（扩字符集后改写面自然收窄）；`target` 的键全集真源 = mupcd 配置服务（见 [`TARGET_LABELS`] 的"只增不改"口径） |
 //!
 //! **`target` 键的处置（AU9 的整改细则；B2c-1 规格评审 ③，**不得静默隐藏信息**）**：
@@ -48,8 +48,8 @@
 //! |----|------|------|
 //! | `gateway.port` / `system.log_level` / `telemetry.interval` / `gateway.listen_addr` | 中文标签（[`TARGET_LABELS`]） | §3.6 P2「字段」行；§6.5 行内容示例 |
 //! | `interlock.release` / `interlock.ack_m1` | 中文标签 = `ConsoleOp::label()`（**转出契约**：[`INTERLOCK_TARGETS`]） | 契约点名（`display-proto/src/audit.rs` 的 `ConsoleOp` 文档与 `target` 字段注释；设计 §4.5）；两键与两个联锁 `ConsoleOp` **一一对应** ⇒ 标签由 `label()` 转出（**不在 UI 层另抄一份**，与 **AU3** 同口径） |
-//! | **未登记键** | **`display_safe(键)` + `: ` + 值对**（如 `interlock.flood` → `IN?ER?O...: 1 → 2`） | **不得整块不显标签**：原实现只留值对 ⇒ 操作者**无从知道被改的是哪一项**（评审 ③ 的后果）。改走本仓既有的**降级**口径（`p4_interlock.rs` **IL6**：源名未知名走 `display_safe`）—— 保留可辨认的机器键、**不臆造**中文名、经 `display_safe` 保证不出豆腐块。键前缀另有长度上界 [`UNKNOWN_TARGET_MAX_CHARS`]（10）：**保证值对不被长的机器键挤掉**（否则只是把"隐藏字段名"换成"隐藏改动内容"）。**残余（如实）**：`display_safe` 只改写 ASCII，且大写可达集有限 ⇒ 产物形如 `IN?ER?O...`（`t`/`l`/`c`/`y` 一类落 `?`），**可辨认但不美观**；空键（`""`）不显标签（无标识可显，非隐藏） |
-//! | AU10 | 审计行**不画斑马纹**（UI §5.2 的 `ListItem` 斑马纹只落在 P3 日志行） | §6.5 的行规格只要求「行高 60 px（两行结构）+ 左缘 3 px `#35D0C4` 竖条（**每条都有**）」，**未**要求斑马纹；P1 告警卡同样未用（`p1_status.rs` 零引用）。取"规范明写者做、未写者不做" | 若 PM 要求视觉分栏：在 `Row::new` 加一条 `theme::surface_alt()` 底（1 处，不影响语义） |
+//! | **未登记键** | **`display_safe(键)` 的保尾截断 + `: ` + 值对**（如 `interlock.flood` → `...OO?: 1 → 2`、`interlock.force` → `...R??: 1 → 2`） | **不得整块不显标签**：原实现只留值对 ⇒ 操作者**无从知道被改的是哪一项**（评审 ③ 的后果）。改走本仓既有的**降级**口径（`p4_interlock.rs` **IL6**：源名未知名走 `display_safe`）—— 保留可辨认的机器键、**不臆造**中文名、经 `display_safe` 保证不出豆腐块。**评审 ④ 整改**：键前缀**保留尾部**（区分位在尾部：`flood` / `force`）、长度由 [`unknown_key_label`] 按**值对实长**分配（上限 [`UNKNOWN_TARGET_MAX_CHARS`]=6、下限 [`UNKNOWN_TARGET_MIN_CHARS`]=5）—— 原先**保头**截断（上界 10）使 `flood` / `force` 屏上**完全相同**，且现实值对 `2404 → 2405` 的后值被挤掉。**残余（如实）**：`display_safe` 只改写 ASCII，且大写可达集有限 ⇒ 产物形如 `...OO?`（`t`/`l`/`c`/`y` 一类落 `?`），**可辨认但不美观**；仅**尾部归一形态相同**的两个键（如 `a.b` / `c.b`）仍会撞形；空键（`""`）不显标签（无标识可显，非隐藏） |
+//! | AU10 | 审计行**不画斑马纹**（现状） | **依据（B2c-1 收口 ④ 改写 —— 原理由「§5.2 的斑马纹只落在 P3」不实）**：UI §6.5 的行规格只写「行高 60 px（两行结构）+ 左缘 3 px `#35D0C4` 竖条（**每条都有**）」，其线框亦**未**画斑马纹 ⇒ 本页不做。**但两处口径有张力（如实登记，不是"规范已裁定"）**：§5.2 的 `ListItem` 一行写「斑马纹：偶 `#141F33` / 奇 `#1B2942`」而**未按页面限定**；§5.1 #10 又明写 `ListItem` 用于「日志 / 审计 / 告警 / 触发源」并给出「高 60（审计）」⇒ 同一份设计文档可读成"审计行**也要**斑马纹"。旁证：P1 告警卡同样未用（`p1_status.rs` 对 `SURFACE_ALT` **零引用**） | **请 PM 裁定视觉导则是否统一**（本层**不自行**改实现）：① 若统一为"所有 `ListItem` 都斑马纹" ⇒ 在 `Row::new` 加一条 `theme::surface_alt()` 底（1 处，不影响语义），并同步 §6.5 线框；② 若统一为"仅 P3 日志行" ⇒ 请在 §5.2 的 `ListItem` 行**标注适用页**（当前未限定） |
 //! | AU11 | 列表底部**常驻一行说明**「`本地屏不支持审计导出` · `无文件与下载通道`」（24 px `text_weak`） | §6.5 的「只读约束」行只写"**无**导出按钮 / 图标或手势"，**没有**画说明行；而 §3.6 **P5 列表行**的用字表里**有**「`无导出`」二字 ⇒ 设计**预留了**该落点。取 P3 §6.3「不支持导出」节的**同款呈现**（说明行常驻可见，避免现场反复尝试），文案随之改成"审计"版 | 无（**有意**）；若 PM 裁定 P5 不显该行，删两个常量与一行 `set_visible` 即可 |
 //! | AU12 | `before` / `after` 的**布尔值**取 `开` / `关`；**数组 / 对象**取 `N 条` / `N 字段` | `真`(U+771F) / `假`(U+5047) / `是`(U+662F) / `否`(U+5426) / `项`(U+9879) / `个`(U+4E2A) **逐字实测均不在** cmap 内（已知缺口族，见 `pages/mod.rs` **D4**）；`开` / `关` / `条` / `字` / `段` 均在 cmap 内。**不伪造**：bool 是"开 / 关"这一层语义，数组 / 对象只报**规模**（不把 `[1,2]` 渲染成一串 `?`） | 同 AU1（扩字表后可改成 `真/假`、`N 项`） |
 //! | AU13 | 「不可篡改说明条」的样式（底 `Palette::AUDIT_BG` + 左缘 4 px `Palette::SOC_OK`）由**本页**用 `theme` 的**命名常量**组合（`Style::new()` + `set_bg_color(Palette::AUDIT_BG)`），**不是** `theme.rs` 里的现成样式 | `theme.rs` 只提供了两个**色常量**（`Palette::AUDIT_BG` 已按 §6.5 收录），**没有**对应的样式函数；而 `ui/theme.rs` 本批**禁改**。故按"色值只准来自 `theme`（命名常量）"的纪律组合 —— **零裸色值**（`Color::hex` 在本文件零出现，静态网逐条断言）。**并附"应用标记"**（[`Core::immutable_bg`]）：薄层没有"已挂样式读回"通道 ⇒ 页面把**送给 `set_bg_color` 的那个色值**记下来，供 `pages_chain` 断言"页面确实挂了 audit 这一档"（把底色改成 `WARN_BG` 时该断言**真的变红** —— 见 [`P5AuditPage::immutable_skin`]） | `theme.rs` 收口批：上收 `theme::audit_banner()`（本页改为一行调用） |
@@ -97,7 +97,7 @@ use crate::ui::pages::filters::{self, TimeRangeChange, TimeRangeFilter};
 use crate::ui::pages::p2_config;
 use crate::ui::pages::{
     decor, display_safe, format_epoch_ms_utc, label, layout_box, page_root, set_visible, show_only,
-    text_label, PLACEHOLDER,
+    text_label, CbSlot, PLACEHOLDER, TIGHT_GAP,
 };
 use crate::ui::theme::{self, ChipSkin, Dimens, Palette, Stroke, TextSlot};
 
@@ -109,33 +109,33 @@ use crate::ui::theme::{self, ChipSkin, Dimens, Palette, Stroke, TextSlot};
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 最近审计条前缀（UI §3.6 P5「头部」行的 `最近一条审计`；`：`→`:` 见 **AU1**）。
-pub const TEXT_NEWEST_PREFIX: &str = "最近一条审计: ";
+pub(crate) const TEXT_NEWEST_PREFIX: &str = "最近一条审计: ";
 /// 不可篡改说明条文案（§3.6 P5「头部」行；`，`→` · ` 见 **AU1**）。
-pub const TEXT_IMMUTABLE: &str = "审计记录仅追加 · 不可修改或删除";
+pub(crate) const TEXT_IMMUTABLE: &str = "审计记录仅追加 · 不可修改或删除";
 /// 不可篡改说明条的几何锁形（§3.6 明写「以几何锁形替代」；取 `■` 见 **AU4**）。
-pub const TEXT_LOCK_ICON: &str = "■";
+pub(crate) const TEXT_LOCK_ICON: &str = "■";
 /// 操作类型筛选的维度名（§3.6 P5「筛选」行）。
-pub const TEXT_OPS_LABEL: &str = "操作类型";
+pub(crate) const TEXT_OPS_LABEL: &str = "操作类型";
 /// 操作类型 chip 组首位的快捷复位项（§6.5 线框 `[全部]`；语义见 §6.3「`全部` chip 为快捷复位」）。
-pub const TEXT_OPS_ALL: &str = "全部";
+pub(crate) const TEXT_OPS_ALL: &str = "全部";
 /// 表头列名之一（§3.6 P5「列表」行）。
-pub const TEXT_HEAD_TIME: &str = "时间";
+pub(crate) const TEXT_HEAD_TIME: &str = "时间";
 /// 表头列名之二。
-pub const TEXT_HEAD_OPERATOR: &str = "操作者";
+pub(crate) const TEXT_HEAD_OPERATOR: &str = "操作者";
 /// 表头列名之三（= 筛选维度名，**同一串** ⇒ 转出，不另抄字面量）。
-pub const TEXT_HEAD_OP: &str = TEXT_OPS_LABEL;
+pub(crate) const TEXT_HEAD_OP: &str = TEXT_OPS_LABEL;
 /// 表头列名之四。
-pub const TEXT_HEAD_VALUE: &str = "前后值";
+pub(crate) const TEXT_HEAD_VALUE: &str = "前后值";
 /// 表头列名之五。
-pub const TEXT_HEAD_RESULT: &str = "结果";
+pub(crate) const TEXT_HEAD_RESULT: &str = "结果";
 /// 操作者：契约 `CONSOLE_OPERATOR`（`local-console`）的上屏中文名（§3.6 P5「列表」行）。
-pub const TEXT_OPERATOR_LOCAL: &str = "本地控制台";
+pub(crate) const TEXT_OPERATOR_LOCAL: &str = "本地控制台";
 /// 结果胶囊：成功（`●` 在 cmap 内）。
-pub const TEXT_RESULT_OK: &str = "● 成功";
+pub(crate) const TEXT_RESULT_OK: &str = "● 成功";
 /// 结果胶囊：失败（`✕` 缺字 ⇒ `×`，见 **AU2**）。
-pub const TEXT_RESULT_FAIL: &str = "× 失败";
+pub(crate) const TEXT_RESULT_FAIL: &str = "× 失败";
 /// 失败原因前缀（`：`→`:` 见 **AU1**）。
-pub const TEXT_REASON_PREFIX: &str = "原因: ";
+pub(crate) const TEXT_REASON_PREFIX: &str = "原因: ";
 /// 值对分隔（UI §6.5 行内容示例 `2404 → 2405` 的箭头）。
 pub(crate) const TEXT_PAIR_ARROW: &str = " → ";
 /// 标签与值之间的分隔（ASCII `:`，与 §6.5 示例的 `：` 同义，见 **AU1**）。
@@ -153,32 +153,33 @@ pub(crate) const TEXT_UNIT_FIELDS: &str = "字段";
 /// 值文本：超长截断标记（`…` 不在 cmap 内 ⇒ 取 ASCII `.`）。
 pub(crate) const TEXT_ELLIPSIS: &str = "...";
 /// 底部状态行：还有下一页（§3.6 P5「列表」行）。
-pub const TEXT_FOOTER_LOADING: &str = "加载中";
+pub(crate) const TEXT_FOOTER_LOADING: &str = "加载中";
 /// 底部状态行：已到末页。
-pub const TEXT_FOOTER_ALL: &str = "已加载全部";
+pub(crate) const TEXT_FOOTER_ALL: &str = "已加载全部";
 /// 只读说明行前半（§3.6 P5「列表」行的 `无导出`；呈现方式见 **AU11**）。
-pub const TEXT_EXPORT_NOTE: &str = "本地屏不支持审计导出";
+pub(crate) const TEXT_EXPORT_NOTE: &str = "本地屏不支持审计导出";
 /// 只读说明行后半（§3.6 P3「列表 / 状态」行的同款说明）。
-pub const TEXT_EXPORT_NOTE2: &str = "无文件与下载通道";
+pub(crate) const TEXT_EXPORT_NOTE2: &str = "无文件与下载通道";
 /// 空态文案（§8.3 EDGE-08 行逐字）。
-pub const TEXT_EMPTY: &str = "当前筛选条件下无审计记录";
+pub(crate) const TEXT_EMPTY: &str = "当前筛选条件下无审计记录";
 /// 超限提示（§8.3 EDGE-15 行逐字 + `，`→` · ` 见 **AU1**；契约缺口见 **AU5**）。
-pub const TEXT_RANGE_TOO_LARGE: &str = "检索范围超限 · 请缩小时间范围";
+pub(crate) const TEXT_RANGE_TOO_LARGE: &str = "检索范围超限 · 请缩小时间范围";
 /// 审计库不可用态文案（§8.3 EDGE-17 行逐字）—— 与 [`UnavailableKind::Audit`]`.title()`
 /// **逐字相等**（同源，由单测钉住；此处只为清册 / 断言可见）。
-pub const TEXT_UNAVAILABLE: &str = "审计记录不可用";
+pub(crate) const TEXT_UNAVAILABLE: &str = "审计记录不可用";
 /// 已知 `target` 键 → 上屏标签之一：端口（§3.6 P2「字段」行；§6.5 行内容示例即 `端口: 2404 → 2405`）。
-pub const TEXT_FIELD_PORT: &str = "端口";
+pub(crate) const TEXT_FIELD_PORT: &str = "端口";
 /// 已知 `target` 键 → 上屏标签之二：日志级别（同上）。
-pub const TEXT_FIELD_LOG_LEVEL: &str = "日志级别";
+pub(crate) const TEXT_FIELD_LOG_LEVEL: &str = "日志级别";
 /// 已知 `target` 键 → 上屏标签之三：遥测上报周期（同上）。
-pub const TEXT_FIELD_TELEMETRY: &str = "遥测上报周期";
+pub(crate) const TEXT_FIELD_TELEMETRY: &str = "遥测上报周期";
 /// 空态图标（几何空心圆，§3.6 符号集内；与不可用态的 `?` **不同族**）。
 pub(crate) const TEXT_EMPTY_ICON: &str = "○";
 
 /// 本页上屏的**全部固定文案**（供 `ui/pages/mod.rs` 的 `ALL_TEXTS` 清册与
 /// `ui/tests.rs::ui_texts_covered_by_font_cmap` 的「清册 ↔ 源码字面量」一致性走查）。
-pub const ALL_TEXTS: &[&str] = &[
+#[cfg(test)]
+pub(crate) const ALL_TEXTS: &[&str] = &[
     TEXT_NEWEST_PREFIX,
     TEXT_IMMUTABLE,
     TEXT_LOCK_ICON,
@@ -219,9 +220,6 @@ pub const ALL_TEXTS: &[&str] = &[
 //
 // 页内坐标 = UI 绝对坐标 − 72（页根贴在 `(SIDE_PAD, HEADER_H)`，契约 1）。
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// 两个块的紧缝（`theme` 无 8 px 档 ⇒ 取 `GAP_MIN / 2`，与 P1 `SOC_BAR_H` 同款口径）。
-pub(crate) const TIGHT_GAP: i32 = Dimens::GAP_MIN / 2;
 
 // ── 头部三条（UI §6.5 线框 `Y80` / `Y116` / `Y172`）──────────────────────────
 /// 最近审计条高（UI 线框 `Y80–116` = 36 px = 正文 24 + 上下各 6）。
@@ -311,35 +309,116 @@ const ROW_REASON_X: i32 = ROW_RIGHT - ROW_REASON_W;
 /// `pub(crate)`：`ui/tests.rs::p5_summary_limit_fits_its_column` 用**生产字体的 `adv_w`** 实测
 /// 「[`SUMMARY_MAX_CHARS`] 个汉字」与「§6.5 示例 `端口: 2404 → 2405`」都不越出本列（几何锁）。
 pub(crate) const ROW_SUMMARY_W: i32 = ROW_REASON_X - Dimens::GAP_MIN - ROW_SUMMARY_X;
-/// 行池上限（见 **AU8**）：**恰一页**（`= AUDIT_PAGE_SIZE = 20`）。
+/// 行池上限（见 **AU8**；**单页独活**口径）：**恰一页**（`= AUDIT_PAGE_SIZE = 20`）。
 ///
-/// **不是"随手取 20"**：`LV_MEM_SIZE` = 256 KB，行池逐档实测 —— 一次性注入 **20 / 22 条成功，
-/// 24 条即 `lv_realloc` 失败 + `lv_array_resize` 断言挂死**（24 复现两次；顺序注入
-/// 20→22→24 通过、**26 挂死**）⇒ 实测可容纳上界 ≈ **22–24 行**。取 20（= §6.5 规定的每页条数）
-/// 既保证"契约承诺的一页必然渲染得出"，又对挂死点（24）留 ≥16% 余量。
+/// **不是"随手取 20"**：`LV_MEM_SIZE` = 256 KB，**单页独活**（`pages_chain` 串行建 / 拆六页）
+/// 逐档实测 —— 一次性注入 **20 / 22 条成功，24 条即 `lv_realloc` 失败 + `lv_array_resize`
+/// 断言挂死**（24 复现两次；顺序注入 20→22→24 通过、**26 挂死**）⇒ 单页可容纳上界 ≈ **22–24
+/// 行**。取 20（= §6.5 规定的每页条数）既保证"契约承诺的一页必然渲染得出"，又对挂死点（24）
+/// 留 ≥16% 余量。
+///
+/// ⚠️ **测量前提（B2c-1 整改如实标注）**：上面这条**只在"单页独活"时成立**。两页**共存**时
+/// （B2c-2 的 P3 日志页同样有行池）空页本身 ≈ 12 行的开销 ⇒ 两页共存的**总**行数上界只有
+/// ≈ [`MEASURED_COEXIST_TOTAL_ROWS`] = 10 行（实测 2 页 × 5 行成功、2 页 × 6 行 OOM 挂死）
+/// ⇒ 见 [`COEXIST_ROWS_PER_PAGE`]。**把本值收敛到"共存下可容纳的值"并不能买到共存**
+/// （那会让每页只剩 5 行、且距挂死点 0% 余量），故本值**保持 20**、共存预算另立常量。
+///
 /// **改什么会让本条变红**：把本值改回 100（或任何 > [`MEASURED_ROW_CAPACITY`] 的值）——
 /// `row_pool_capacity_is_measured` 是**纯逻辑**断言，当场红且**不会**把测试跑挂。
 pub(crate) const ROW_MAX: usize = AUDIT_PAGE_SIZE;
 
-/// 行池**实测可容纳上界**（`pages_chain` 离屏链一次性注入的逐档实测：22 成功 / 24 挂死；
-/// 见 **AU8** 的测量记录）。它是 [`ROW_MAX`] 的**上界约束**（纯逻辑断言，不触碰 LVGL）。
+/// 行池**实测可容纳上界**（**单页独活**；`pages_chain` 离屏链一次性注入的逐档实测：
+/// 22 成功 / 24 挂死；见 **AU8** 的测量记录）。它是 [`ROW_MAX`] 的**上界约束**
+/// （纯逻辑断言，不触碰 LVGL）。
 ///
 /// `pub`（不是 `pub(crate)`）：它是**测量结论**、也是 `ui/tests.rs` 与 `p5_audit` 单测共同的
 /// 判据常量；且若只在本 crate 的测试里用，非测试构建会报 `dead_code` —— 让它进公开面即可
 /// 如实暴露"这台屏能装多少行"这一事实。
-pub const MEASURED_ROW_CAPACITY: usize = 22;
+pub(crate) const MEASURED_ROW_CAPACITY: usize = 22;
+
+/// **两页共存**时**每页**可安全容纳的行数（见 **AU8**）。
+///
+/// **测量前提（必须与数字一起读）**：`LV_MEM_SIZE` = **256 KB**、`pages_chain` 同一 LVGL 堆、
+/// **两页 P5 同时存活**（P3 尚未实现 ⇒ 用两个 P5 实例作代理）。实测（2026-09-13）：
+/// **2 页 × 5 行成功、2 页 × 6 行即 `lv_realloc` 失败 + `lv_array_resize` 断言挂死**；
+/// 两个**空**页成功；**单页满行(20) + 一个空页即 OOM**。
+/// 取 **4**（= 8 行 / 两页）对实测挂死点（每页 6）留 ≥33% 余量 ⇒ 共存预算用例用它。
+///
+/// ⚠️ **它不是"新的一页容量"**：共存时每页只保证 4 行，而 [`ROW_MAX`]=20 的**单页**契约
+/// **不变**（`COEXIST_ROWS_PER_PAGE < ROW_MAX` 由编译期断言钉死 —— 把"两页都满行不可能"
+/// 这件事写在类型层，而不是留在注释里）。
+pub(crate) const COEXIST_ROWS_PER_PAGE: usize = 4;
+
+/// **两页共存**实测的**总行数上界**（两页共用同一个 LVGL 堆；见 **AU8** 与
+/// [`COEXIST_ROWS_PER_PAGE`] 的测量前提）。
+pub(crate) const MEASURED_COEXIST_TOTAL_ROWS: usize = 10;
 
 /// **编译期自证**（**AU8**）：行池上限**不超实测可容纳上界**，且**至少装得下一页**。
 ///
 /// 写成编译期断言（而不是运行期 `assert!`）有两点理由：① 它**不可能被跳过**（任何构建都查）；
 /// ② 它**不会**把测试跑挂 —— 真去注入那么多条会触发 `lv_realloc` 失败 + `lv_array_resize`
 /// 断言 ⇒ **挂死**（不是"红"）。
+///
+/// ## ⚠️ 这条网失效时的**失败模式是"挂死"而不是"变红"**（B2c-1 收口 ⑦）
+///
+/// **为什么不能改写成"先探测可分配上界、不够则显式失败"**（收口 ⑦ 的另一条路）：探测需要
+/// 堆内省，而 `lv_mem_monitor` / 任何 `lv_mem_*` **都不在** `lvgl-sys/allowlist.txt` 内
+/// （`LV_MEM_SIZE` 只是 `lv_conf.h` 里的编译期定容，运行期**没有**读数通道）；且 OOM 发生在
+/// LVGL **内部**为行对象分配时（`lv_realloc` 失败 ⇒ C 侧 `lv_array_resize` 断言），
+/// Rust 侧拿不到"待分配字节数"⇒ 探测公式只能是猜的。故取"**编译期钉死预算 + 注释给出
+/// 安全复现 / 诊断指引**"，而不是编一条**自身也可能静默失准**的运行时探测。
+///
+/// **安全复现 / 诊断指引**（改 [`ROW_MAX`] / [`COEXIST_ROWS_PER_PAGE`] / 页构造成本之前**必读**）：
+/// 1. **一律加 `timeout`**：`timeout 300 cargo test -p local-display -j 2`（本仓的验证口径）。
+///    挂死点**不会**自己退出 —— 它是 C 侧断言 + 反复 `lv_realloc` 重试，进程活着但无进展；
+///    无 `timeout` 时表现为"测试卡住"，很容易被误读成"跑得慢"。
+/// 2. **挂死的典型输出**（stderr，可能只有前几行）：`lv_realloc: couldn't reallocate memory`
+///    随后是 `lv_array_resize` 的断言 —— 见到它即确认是**堆预算**问题，不是逻辑错。
+/// 3. **二分定位**：把注入行数**减半**重试（20 → 10 → 5）；`pages_chain` 的 ⑫/⑮ 段有逐档
+///    注入的现成写法，改一处数字即可。测得的新上界要**同步** [`MEASURED_ROW_CAPACITY`] /
+///    [`MEASURED_COEXIST_TOTAL_ROWS`]（并保留余量，见 AU8 的测量记录）。
+/// 4. **前提**：全链共用**同一个** `LVGL` 堆（`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE` = 256 KB），
+///    且 `pages_chain` 串行建 / 拆各页 ⇒ 上界随"同时存活的页数"和"每页构件数"变化。
 const _: () = assert!(ROW_MAX <= MEASURED_ROW_CAPACITY);
 const _: () = assert!(ROW_MAX >= AUDIT_PAGE_SIZE);
+/// **编译期自证**：共存预算 ≤ 实测共存上界的一半（两页），且**严格小于**单页上限
+/// （= "两页各满行在 256 KB 下不可能"这一测量结论的机器可查形式）。
+/// 失败模式同为**挂死**（见上方 [`ROW_MAX`] 的收口 ⑦ 指引）。
+const _: () = assert!(2 * COEXIST_ROWS_PER_PAGE <= MEASURED_COEXIST_TOTAL_ROWS);
+const _: () = assert!(COEXIST_ROWS_PER_PAGE < ROW_MAX);
 
-/// 表头**子件数**（5 列名 + 4 条竖分隔线 + 1 条底线）—— `pages_chain` 用它做**实际子件数**
-/// 回归锁（读 LVGL 的 `child_count()`）。
-pub const HEAD_CHILD_COUNT: usize = 5 + 4 + 1;
+/// 表头**列名表**（§6.5 线框逐格标注 `时间 │ 操作者 │ 操作类型 │ 前后值 │ 结果`，
+/// **顺序 = 线框从左到右**）。
+///
+/// **M1（B2c-1 代码质量评审）**：表头子件数、列数、分隔线数、逐列 x **全部由本表推导**
+/// —— 此前 `HEAD_CHILD_COUNT = 5 + 4 + 1` 与 `head_col_at: [(i32, &str); 5]` 是**两处独立
+/// 字面量**：增删一列时改了表头却忘改常量，网就**静默失准**（常量仍自洽、屏上已多/少一件）。
+///
+/// **改什么会让本条的推导变红**：往本表加一项而 [`HEAD_COL_X`] 不跟着加 ⇒ **编译期**
+/// 报数组长度不符；两张表都加了 ⇒ [`HEAD_CHILD_COUNT`] **自动**跟随（无第二处字面量）。
+pub(crate) const HEAD_COLS: [&str; 5] = [
+    TEXT_HEAD_TIME,
+    TEXT_HEAD_OPERATOR,
+    TEXT_HEAD_OP,
+    TEXT_HEAD_VALUE,
+    TEXT_HEAD_RESULT,
+];
+/// 表头**列数**（由 [`HEAD_COLS`] 的**表长**推导 ⇒ 增删列时自动跟随）。
+pub(crate) const HEAD_COL_COUNT: usize = HEAD_COLS.len();
+/// 表头**竖分隔线数**（列间分隔 = 列数 − 1）。
+const HEAD_DIV_COUNT: usize = HEAD_COL_COUNT - 1;
+/// 表头**子件数**（[`HEAD_COLS`] 的列名 + 列间竖分隔线（列数 − 1） + 1 条底线）
+/// —— `pages_chain` 用它做**实际子件数**回归锁（读 LVGL 的 `child_count()`）。
+#[cfg(test)]
+pub(crate) const HEAD_CHILD_COUNT: usize = HEAD_COL_COUNT + HEAD_DIV_COUNT + 1;
+/// 表头**逐列 x**（与 [`HEAD_COLS`] **一一对应**，长度由编译器钉死）。
+const HEAD_COL_X: [i32; HEAD_COL_COUNT] = [
+    ROW_X0,
+    ROW_OP_X,
+    HEAD_COL_OP_TYPE_X,
+    HEAD_COL_VALUE_X,
+    ROW_RESULT_X,
+];
 /// 表头「操作类型」列 x。
 const HEAD_COL_OP_TYPE_X: i32 = ROW_OP_X + ROW_OP_W + Dimens::GAP_MIN;
 /// 表头「前后值」列 x。
@@ -372,22 +451,43 @@ const RADIUS_CTRL: i32 = theme::Radius::CTRL;
 /// §6.5 的行内容示例 `端口: 2404 → 2405` 实测 **201.3 px / 16 字**，必须**整条放得下**
 /// （它是本页唯一的文案范本）；取得更小会把契约示例本身截断。
 /// 超出即截断并加 [`TEXT_ELLIPSIS`]。
-pub const SUMMARY_MAX_CHARS: usize = 18;
+pub(crate) const SUMMARY_MAX_CHARS: usize = 18;
 
-/// **未登记 `target` 键**上屏前缀的**长度上界**（**AU9**）。
+/// **未登记 `target` 键**上屏前缀的**长度上界**（**AU9**；B2c-1 代码质量评审 ④ 整改）。
 ///
-/// 键是"辨认用"、值对是"操作内容" ⇒ 必须**先给值对留够位置**，否则长的机器键会把值对整段挤掉
-/// （那就从"隐藏字段名"变成"隐藏改动内容"，仍是静默丢信息）。取 10：最小的值对（`1 → 2`，5 字）
-/// 加上分隔 `: `（2 字）后为 17 ≤ [`SUMMARY_MAX_CHARS`]（18）⇒ **值对必定存活**；超出上界的键
-/// 走 [`clip`] 截断带 `...`（`interlock.flood` → `IN?ER?O...`）。
-pub const UNKNOWN_TARGET_MAX_CHARS: usize = 10;
+/// 键是"辨认用"、值对是"操作内容" ⇒ **先给值对留够位置**，否则长的机器键会把值对整段挤掉
+/// （那就从"隐藏字段名"变成"隐藏改动内容"，仍是静默丢信息）。
+///
+/// **整改（评审 ④）**：原值 10 且走 [`clip`]（**保留头部**）⇒ `interlock.flood` 与
+/// `interlock.force` 的归一形态前 7 字**逐字相同**（都是 `IN?ER?O`）⇒ 屏上**同为**
+/// `IN?ER?O...: 2404 → 2405` 的截断体，**无法区分**；且现实值对 `2404 → 2405`（11 字）的
+/// **后值被挤掉**。现改为：
+/// - **保留尾部**（`.ood` / `.rce` 的归一形态末 3 字）：`...OO?` / `...R??` ⇒ **尾部不同
+///   即可区分**；
+/// - 上界收到 6（`...` + 3 字），把省下的 4 字让给值对；
+/// - [`unknown_key_label`] 再按**值对实长**动态收窄（下限 [`UNKNOWN_TARGET_MIN_CHARS`]）
+///   ⇒ 现实值对 `2404 → 2405` **完整存活**。
+pub(crate) const UNKNOWN_TARGET_MAX_CHARS: usize = 6;
+
+/// 未登记键前缀的**长度下界**（`...` + 2 字尾部）—— [`unknown_key_label`] 的收窄下限。
+///
+/// 2 字尾部是"可区分"的**实测下限**：`interlock.flood` → `...O?`、`interlock.force` →
+/// `...??`（[`UNKNOWN_TARGET_MAX_CHARS`] 的 6 字形态是 `...OO?` / `...R??`）。
+pub(crate) const UNKNOWN_TARGET_MIN_CHARS: usize = 5;
+
+/// **编译期自证**：长度预算 `[MIN, MAX]` **真是一个区间**（`MIN < MAX`）。
+///
+/// 写成编译期断言（而不是用例里的运行期 `assert!`）：① 任何构建都查、**不可能被跳过**；
+/// ② clippy 的 `assertions_on_constants` 不会对 `const _` 形态告警（B2c-1 收口 ②）。
+/// 把关能力**不减**：把 `MIN` 改到 ≥ `MAX`（收窄区间写反）⇒ **编译失败**。
+const _: () = assert!(UNKNOWN_TARGET_MIN_CHARS < UNKNOWN_TARGET_MAX_CHARS);
 
 /// 列表区当前形态（**三态互斥**；§8.3 EDGE-17 / EDGE-08 的**结构性区分**）。
 ///
 /// ⚠️ **`Unavailable` 与 `Empty` 是两个不同的态**，语义**不得互替**：
 /// 「无审计记录」= **确实没有**（空态），「审计记录不可用」= **无法获知**（EDGE-17）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListView {
+pub(crate) enum ListView {
     /// 有审计行（时间倒序）。
     Rows,
     /// 空态：**确实没有**（当前筛选条件下）。
@@ -400,7 +500,8 @@ pub enum ListView {
 ///
 /// `!available` **优先**：此时 `entries` 这一向量**本身不可信**（可能只是缺省空值），
 /// 故一律落 [`ListView::Unavailable`]（§8.3 EDGE-17：「**不得**显『无审计记录』」）。
-pub fn list_view(page: &AuditPage) -> ListView {
+#[cfg(test)]
+pub(crate) fn list_view(page: &AuditPage) -> ListView {
     list_view_of(page.available, page.entries.len())
 }
 
@@ -409,7 +510,7 @@ pub fn list_view(page: &AuditPage) -> ListView {
 /// §8.3 禁止的语义互替；B2c-1 的探针 P2 实测：只在其中一处制造互替，另一处**照旧全绿**）。
 ///
 /// `rows` = **实际在屏的行数**（页内核传"已渲染条数"，契约侧传 `entries.len()`）。
-pub const fn list_view_of(available: bool, rows: usize) -> ListView {
+pub(crate) const fn list_view_of(available: bool, rows: usize) -> ListView {
     if !available {
         ListView::Unavailable
     } else if rows == 0 {
@@ -429,7 +530,7 @@ pub const fn list_view_of(available: bool, rows: usize) -> ListView {
 ///
 /// **单一真源**：[`Core::apply_page`] 与 [`Core::refresh_op_labels`] **共用本函数**
 /// （两处各自排一遍会出现"行按序渲染、标签按注入序刷新"的错位）。
-pub fn row_order(entries: &[ConsoleAuditEntry]) -> Vec<usize> {
+pub(crate) fn row_order(entries: &[ConsoleAuditEntry]) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..entries.len()).collect();
     idx.sort_by(|a, b| entries[*b].ts_ms.cmp(&entries[*a].ts_ms));
     idx
@@ -439,7 +540,7 @@ pub fn row_order(entries: &[ConsoleAuditEntry]) -> Vec<usize> {
 ///
 /// **改什么会让本条变红**：把 `None` 分支写成 `format_epoch_ms_utc(0)`（即"1970/01/01"这种
 /// **编造**的时间）—— `newest_never_fabricates_time` 用例立刻红。
-pub fn newest_text(newest_ts_ms: Option<u64>) -> String {
+pub(crate) fn newest_text(newest_ts_ms: Option<u64>) -> String {
     match newest_ts_ms {
         Some(ms) => format!("{TEXT_NEWEST_PREFIX}{}", format_epoch_ms_utc(ms)),
         None => format!("{TEXT_NEWEST_PREFIX}{PLACEHOLDER}"),
@@ -447,7 +548,7 @@ pub fn newest_text(newest_ts_ms: Option<u64>) -> String {
 }
 
 /// `result` → 胶囊文案（§3.6 P5 列表行的 `● 成功` / `× 失败`）。
-pub const fn result_text(r: AuditResult) -> &'static str {
+pub(crate) const fn result_text(r: AuditResult) -> &'static str {
     match r {
         AuditResult::Ok => TEXT_RESULT_OK,
         AuditResult::Failed => TEXT_RESULT_FAIL,
@@ -456,7 +557,7 @@ pub const fn result_text(r: AuditResult) -> &'static str {
 
 /// `result` → 胶囊皮肤（`theme::ChipSkin` 的 `SUCCESS` / `FAILURE` —— 该二者**本就是**
 /// 按 §6.5 的 `● 成功` / `✕ 失败` 收录的，故不存在第二份色值真源）。
-pub const fn result_skin(r: AuditResult) -> ChipSkin {
+pub(crate) const fn result_skin(r: AuditResult) -> ChipSkin {
     match r {
         AuditResult::Ok => ChipSkin::SUCCESS,
         AuditResult::Failed => ChipSkin::FAILURE,
@@ -494,7 +595,7 @@ fn fold_fullwidth_punct(c: char) -> char {
 /// 见其文档），而全角标点是**非 ASCII** ⇒ 直上屏即豆腐块。P2 / P4 的自由文本路径（PD13 / IL17）
 /// 只过 `display_safe`；本页**多折叠 6 个常用全角标点**（见 **AU15**：这是**有意**比 P4 更严的
 /// 一步，因为它落在**行内**、且 §8.3 要求失败原因「**就地可见**」）。
-pub fn free_text_safe(text: &str) -> String {
+pub(crate) fn free_text_safe(text: &str) -> String {
     let folded: String = text.chars().map(fold_fullwidth_punct).collect();
     display_safe(&folded)
 }
@@ -507,7 +608,7 @@ pub fn free_text_safe(text: &str) -> String {
 /// - 未知名 ⇒ [`free_text_safe`]（小写 → 大写同族、全角标点折叠、cmap 外 ASCII → `?`），
 ///   **不伪造**中文名；
 /// - 非 ASCII 且**缺字形**（后端直接给中文但用了 cmap 外的字）⇒ 仍是豆腐块（残余，见 **AU9**）。
-pub fn operator_text(operator: &str) -> String {
+pub(crate) fn operator_text(operator: &str) -> String {
     if operator.eq_ignore_ascii_case(CONSOLE_OPERATOR) {
         TEXT_OPERATOR_LOCAL.to_string()
     } else {
@@ -538,7 +639,7 @@ const fn audit_key(key: &'static str) -> &'static str {
 ///
 /// ⚠️ **键全集的真源在 mupcd 的配置服务**（本仓当前只有上述 4 个键有字面量证据）⇒ 表**只增不改**：
 /// 新增键必须同时在 §3.6 找到对应中文标签；**猜错键名 = 谎报字段名**，故宁可不显标签（见 **AU9**）。
-pub const TARGET_LABELS: [(&str, &str); 4] = [
+pub(crate) const TARGET_LABELS: [(&str, &str); 4] = [
     (audit_key("gateway.port"), TEXT_FIELD_PORT),
     (audit_key("system.log_level"), TEXT_FIELD_LOG_LEVEL),
     (audit_key("telemetry.interval"), TEXT_FIELD_TELEMETRY),
@@ -557,7 +658,7 @@ pub const TARGET_LABELS: [(&str, &str); 4] = [
 /// ⇒ 抄一份 = 本项目明令避免的"**第二份真源**"（**AU3** 的同一条理由）。故只登记**键 → op**
 /// 的对应，标签在 [`target_label`] 里**转出**。`audit_key(..)` 计数随之从 4 变 6
 /// （`ui/tests.rs::p5_static_constraints` 同步钉住，防上屏串混入豁免）。
-pub const INTERLOCK_TARGETS: [(&str, ConsoleOp); 2] = [
+pub(crate) const INTERLOCK_TARGETS: [(&str, ConsoleOp); 2] = [
     (audit_key("interlock.release"), ConsoleOp::InterlockRelease),
     (audit_key("interlock.ack_m1"), ConsoleOp::InterlockAckM1),
 ];
@@ -567,7 +668,7 @@ pub const INTERLOCK_TARGETS: [(&str, ConsoleOp); 2] = [
 /// 判定顺序：① [`TARGET_LABELS`]（配置字段键，中文标签是**唯一真源**）；②
 /// [`INTERLOCK_TARGETS`]（联锁键，标签转出 `ConsoleOp::label()`）；③ 都不命中 ⇒ `None`
 /// （调用方 [`summary_text`] 走"降级显示机器键"的路径，**不静默隐藏**，见 **AU9**）。
-pub fn target_label(target: &str) -> Option<&'static str> {
+pub(crate) fn target_label(target: &str) -> Option<&'static str> {
     if let Some((_, v)) = TARGET_LABELS.iter().find(|(k, _)| *k == target) {
         return Some(v);
     }
@@ -588,7 +689,7 @@ pub fn target_label(target: &str) -> Option<&'static str> {
 /// | 数组 | `N 条` | 只报**规模**：`[1,2]` 的 `[` `,` `]` 都不在 cmap 内，逐字渲染会得到一串 `?`（比"只报规模"更糟） |
 /// | 对象 | `N 字段` | 同上 |
 /// | `null` | 占位符 `–` | 「本字段存在但值为空」（与 `None` 同口径，**绝不补 0**） |
-pub fn value_text(v: &Value) -> String {
+pub(crate) fn value_text(v: &Value) -> String {
     match v {
         Value::Null => PLACEHOLDER.to_string(),
         Value::Bool(true) => TEXT_VALUE_ON.to_string(),
@@ -615,7 +716,7 @@ pub fn value_text(v: &Value) -> String {
 /// 旧实现把类型错配 `unwrap_or_default()` 兜底成 `0`，而 `0` 本身是合法配置值 ⇒
 /// "不合法"被**伪装**成"值为 0"）。**改什么会让本条变红**：把 `None` 分支写成
 /// `"0".to_string()` 或 `String::new()` —— `none_is_placeholder_never_zero` 立刻红。
-pub fn side_text(v: Option<&Value>) -> String {
+pub(crate) fn side_text(v: Option<&Value>) -> String {
     match v {
         Some(x) => value_text(x),
         None => PLACEHOLDER.to_string(),
@@ -623,33 +724,90 @@ pub fn side_text(v: Option<&Value>) -> String {
 }
 
 /// 按**字符数**截断（超出 ⇒ 末三字符换成 [`TEXT_ELLIPSIS`]，**不 panic**）。
-pub fn clip(text: &str, max_chars: usize) -> String {
+pub(crate) fn clip(text: &str, max_chars: usize) -> String {
     let n = text.chars().count();
     if n <= max_chars {
         return text.to_string();
     }
-    let keep = max_chars.saturating_sub(TEXT_ELLIPSIS.chars().count());
+    let ell = TEXT_ELLIPSIS.chars().count();
+    // ⚠️ **M2（B2c-1 代码质量评审）**：`max_chars < 3` 时**放不下**省略标记 ⇒ 原先的
+    // `keep = max − 3 = 0` 会产出 `...`（**3 字 > 上限**，与"按上限截断"的契约相悖）。
+    // 放不下省略标记时改为**纯尾截**（无标记），保证"产物长度恒 ≤ 上限"。
+    if max_chars <= ell {
+        return text.chars().take(max_chars).collect();
+    }
+    let keep = max_chars - ell;
     let head: String = text.chars().take(keep).collect();
     format!("{head}{TEXT_ELLIPSIS}")
+}
+
+/// 按**字符数**截断、**保留尾部**（超出 ⇒ 首部换成 [`TEXT_ELLIPSIS`]，**不 panic**）。
+///
+/// 与 [`clip`] 互补：`clip` 保**前缀**（如值对——"前值"最重要），本函数保**后缀**。
+/// 用途见 [`unknown_key_label`]：机器键的**区分位在尾部**（`…ood` / `…rce`），保头会把
+/// 不同的键截成同一个产物。
+///
+/// 同样遵守"产物长度恒 ≤ 上限"（`max_chars < 3` 时改为纯尾截、无标记）。
+pub(crate) fn clip_tail(text: &str, max_chars: usize) -> String {
+    let n = text.chars().count();
+    if n <= max_chars {
+        return text.to_string();
+    }
+    let ell = TEXT_ELLIPSIS.chars().count();
+    if max_chars <= ell {
+        return text.chars().skip(n - max_chars).collect();
+    }
+    let keep = max_chars - ell;
+    let tail: String = text.chars().skip(n - keep).collect();
+    format!("{TEXT_ELLIPSIS}{tail}")
+}
+
+/// **未登记 `target` 键**的上屏前缀（`display_safe` 归一 + [`clip_tail`] **保尾**截断）。
+///
+/// `pair_len` = 同一行的**值对实长**（字符数）—— 键的长度**只在值对拿完之后**才分配
+/// （见 [`unknown_key_budget`]），即"操作内容优先于辨认标签"。
+///
+/// **改什么会让本条变红**：把 [`clip_tail`] 换回 [`clip`]（保头）⇒
+/// `interlock.flood` 与 `interlock.force` 的产物**再次相同**，
+/// `unknown_target_key_is_shown_not_hidden` 的第 ③ 组断言立刻红。
+pub(crate) fn unknown_key_label(target: &str, pair_len: usize) -> String {
+    clip_tail(&display_safe(target), unknown_key_budget(pair_len))
+}
+
+/// [`unknown_key_label`] 的长度预算（**纯函数**，拆出便于单测）。
+///
+/// `budget = clamp(SUMMARY_MAX_CHARS − pair_len − len(": "), MIN, MAX)` ——
+/// **值对优先**：值对越短，键能拿到的位置越多（上限 6）；值对越长，键越短（下限 5）。
+///
+/// ⚠️ **如实限定（评审 ④ ②）**：`值对完整存活`的**充分条件是 `pair_len + 2 + MIN ≤
+/// SUMMARY_MAX_CHARS`**（即 ≤ 11 字）；更长的值对**会被截断**（那是"值对本身超长"的既有
+/// 口径 —— 键已退到下限，不再侵占）。**残余**：仅**尾部归一形态相同**的两个未登记键
+/// （如 `a.b` / `c.b`）仍会撞形 —— 保尾截断的固有边界，如实登记在 **AU9**。
+pub(crate) fn unknown_key_budget(pair_len: usize) -> usize {
+    SUMMARY_MAX_CHARS
+        .saturating_sub(pair_len + TEXT_LABEL_SEP.chars().count())
+        .clamp(UNKNOWN_TARGET_MIN_CHARS, UNKNOWN_TARGET_MAX_CHARS)
 }
 
 /// 行 2 的**前后值摘要**（UI §6.5 行内容：「前后值摘要 24 px `text_second`（如 `端口: 2404 → 2405`）」）。
 ///
 /// 形态：`[<标签>: ]<前值> → <后值>` ——
 /// - **已知键**（[`TARGET_LABELS`] / [`INTERLOCK_TARGETS`]）⇒ 中文标签（与 §6.5 示例同形）；
-/// - **未登记键** ⇒ **降级为 `display_safe(键)`**（保留可辨认的机器键，如 `interlock.flood`
-///   → `IN?ER?O...`）—— **不得整块不显标签**：那会让操作者**无从知道被改的是哪一项**
-///   （**AU9** 的整改细则）。降级口径与 `p4_interlock.rs` **IL6**（源名未知名）一致：
-///   **不臆造**中文名、经 `display_safe` 保证不出豆腐块；键前缀另有长度上界
-///   [`UNKNOWN_TARGET_MAX_CHARS`]（**保证值对不被键挤掉**）；
+/// - **未登记键** ⇒ **降级为 `display_safe(键)` 的保尾截断**（如 `interlock.flood`
+///   → `...OO?`、`interlock.force` → `...R??`）—— **不得整块不显标签**：那会让操作者
+///   **无从知道被改的是哪一项**（**AU9** 的整改细则）。降级口径与 `p4_interlock.rs`
+///   **IL6**（源名未知名）一致：**不臆造**中文名、经 `display_safe` 保证不出豆腐块；
+///   键前缀长度由 [`unknown_key_label`] 按**值对实长**动态分配（**值对优先**，见
+///   [`UNKNOWN_TARGET_MAX_CHARS`] / 评审 ④）；
 /// - **空键**（`""`）⇒ 不显标签（无标识可显，**不是**隐藏信息）；
 /// - 两侧都经 [`side_text`]（`None` ⇒ `–`）与 [`clip`]（超长截断）。
-pub fn summary_text(before: Option<&Value>, after: Option<&Value>, target: &str) -> String {
+pub(crate) fn summary_text(before: Option<&Value>, after: Option<&Value>, target: &str) -> String {
     let pair = format!("{}{TEXT_PAIR_ARROW}{}", side_text(before), side_text(after));
     let label = match target_label(target) {
         Some(label) => label.to_string(),
         None if target.is_empty() => return clip(&pair, SUMMARY_MAX_CHARS),
-        None => clip(&display_safe(target), UNKNOWN_TARGET_MAX_CHARS),
+        // 未登记键：**保尾**截断，长度按值对实长动态分配（见 [`unknown_key_label`]）。
+        None => unknown_key_label(target, pair.chars().count()),
     };
     clip(&format!("{label}{TEXT_LABEL_SEP}{pair}"), SUMMARY_MAX_CHARS)
 }
@@ -659,7 +817,7 @@ pub fn summary_text(before: Option<&Value>, after: Option<&Value>, target: &str)
 /// **`result` 是入参而不是调用方的自觉**：成功行**结构性**取不到原因文案
 /// （§6.5 行内容：「`原因：…`（**仅失败行**）」）—— 即使契约给了矛盾的
 /// `result = ok` + `reason = Some(..)`，屏上也不会出现原因（"绝不造假"的同一取向）。
-pub fn reason_text(result: AuditResult, reason: Option<&str>) -> Option<String> {
+pub(crate) fn reason_text(result: AuditResult, reason: Option<&str>) -> Option<String> {
     if result != AuditResult::Failed {
         return None;
     }
@@ -671,7 +829,7 @@ pub fn reason_text(result: AuditResult, reason: Option<&str>) -> Option<String> 
 }
 
 /// 底部状态行文案（§3.6 P5「列表」行的 `加载中` / `已加载全部`；无行 ⇒ `None`）。
-pub const fn footer_text(has_more: bool, rows: usize) -> Option<&'static str> {
+pub(crate) const fn footer_text(has_more: bool, rows: usize) -> Option<&'static str> {
     if rows == 0 {
         return None;
     }
@@ -720,7 +878,7 @@ impl Default for AuditQuery {
 ///
 /// - `H1` / `H24` ⇒ `from_ms` / `to_ms` 一律 `None`（相对窗口由服务端算，UI 不读时钟）；
 /// - `Custom` ⇒ 两侧都由 [`filters::datetime_to_epoch_ms`] 折算（**确定、可测**，见 **FR2**）。
-pub fn audit_query(change: &TimeRangeChange, ops: &[ConsoleOp], page: u32) -> AuditQuery {
+pub(crate) fn audit_query(change: &TimeRangeChange, ops: &[ConsoleOp], page: u32) -> AuditQuery {
     let (from_ms, to_ms) = match change.range {
         LogRange::H1 | LogRange::H24 => (None, None),
         LogRange::Custom => (
@@ -746,7 +904,7 @@ pub fn audit_query(change: &TimeRangeChange, ops: &[ConsoleOp], page: u32) -> Au
 /// 3. 只发生**取消**（无新增）⇒ 原样返回。
 ///
 /// `prev` = 上一次**归一化后**的选择（用于识别"本次新增了哪个"）。
-pub fn normalize_ops_selection(prev: &[usize], selected: &[usize]) -> Vec<usize> {
+pub(crate) fn normalize_ops_selection(prev: &[usize], selected: &[usize]) -> Vec<usize> {
     let added: Vec<usize> = selected
         .iter()
         .copied()
@@ -770,7 +928,7 @@ pub fn normalize_ops_selection(prev: &[usize], selected: &[usize]) -> Vec<usize>
 /// 勾选下标 → 操作类型集合（下标 `0` = 「全部」，**不产 `ConsoleOp`**）。
 ///
 /// 越界下标 / 已不在注入列表内的下标一律**丢弃**（不 panic）—— 与"选项集合由注入决定"一致。
-pub fn selected_ops(selected: &[usize], opts: &[OpOption]) -> Vec<ConsoleOp> {
+pub(crate) fn selected_ops(selected: &[usize], opts: &[OpOption]) -> Vec<ConsoleOp> {
     let mut out: Vec<ConsoleOp> = selected
         .iter()
         .filter_map(|i| i.checked_sub(1).and_then(|k| opts.get(k)))
@@ -781,7 +939,7 @@ pub fn selected_ops(selected: &[usize], opts: &[OpOption]) -> Vec<ConsoleOp> {
 }
 
 /// 操作类型 chip 组的**上屏选项**：`[全部] + 各注入标签`（各自经 [`display_safe`]）。
-pub fn op_options(opts: &[OpOption]) -> Vec<String> {
+pub(crate) fn op_options(opts: &[OpOption]) -> Vec<String> {
     let mut out = Vec::with_capacity(opts.len() + 1);
     out.push(TEXT_OPS_ALL.to_string());
     out.extend(opts.iter().map(|o| display_safe(&o.label)));
@@ -793,12 +951,12 @@ pub fn op_options(opts: &[OpOption]) -> Vec<String> {
 /// **为什么缺省可用**：`display-proto` 的 `impl From<ConsoleOp> for OpOption` 就是用
 /// `ConsoleOp::label()` 生成推荐的 `label` ⇒ 缺省与"服务端按契约返回"**逐字一致**；
 /// 服务端若给了不同的 label，[`P5AuditPage::set_ops`] 会以注入为准并重建 chip 组。
-pub fn canonical_ops() -> Vec<OpOption> {
+pub(crate) fn canonical_ops() -> Vec<OpOption> {
     ConsoleOp::ALL.iter().copied().map(OpOption::from).collect()
 }
 
 /// 某个操作类型的上屏标签：**优先用注入的 label**（服务端真源），否则回退契约 `ConsoleOp::label()`。
-pub fn op_label_of(op: ConsoleOp, opts: &[OpOption]) -> String {
+pub(crate) fn op_label_of(op: ConsoleOp, opts: &[OpOption]) -> String {
     opts.iter()
         .find(|o| o.op == op)
         .map(|o| display_safe(&o.label))
@@ -822,6 +980,7 @@ struct Row {
     /// 行容器（**拥有型**：`Drop` 即级联删除整行）。
     obj: Obj,
     /// 左缘 3 px 竖条（`#35D0C4`）。
+    #[allow(dead_code)]
     bar: Obj,
     /// 行 1：时间戳（`text_second`）。
     time: Label,
@@ -936,11 +1095,13 @@ impl Row {
     }
 
     /// 当前在显的结果胶囊下标（`0` = 成功 / `1` = 失败）。
+    #[cfg(test)]
     fn result_index(&self) -> Option<usize> {
         self.results.iter().position(|c| !c.obj().is_hidden())
     }
 
     /// 本行可点子对象计数（只读回归锁：**必须恒 `0`**）。
+    #[cfg(test)]
     fn clickable_parts(&self) -> usize {
         let mut parts: Vec<&Obj> = vec![&self.obj, &self.bar, self.time.obj(), self.operator.obj()];
         parts.extend(self.results.iter().map(|c| c.obj()));
@@ -958,10 +1119,24 @@ impl Row {
 // 5. 页面内核
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 意图回调槽（与 `p4_interlock.rs::IntentSlot` 同型：`FnMut` + `Box`）。
-type QuerySlot = RefCell<Option<Box<dyn FnMut(AuditQuery)>>>;
+/// 意图回调槽（[`CbSlot`]；与 `p4_interlock.rs::IntentSlot` **同语义**）。
+///
+/// **不是**裸 `RefCell<Option<Box<dyn FnMut(..)>>>`（收口 ①）：裸槽把内部借用**外露**给
+/// 调用点 ⇒ 能写出"持 `try_borrow_mut` 借用直调用户回调"的旧写法（本单元修的 ③：回调内
+/// 自替换被静默丢弃）。[`CbSlot`] 只给 `set` / `fire`，承载字段私有 ⇒ 旧写法**编译不过**。
+type QuerySlot = CbSlot<AuditQuery>;
 
 /// 页内核（全部 LVGL 句柄 + 共享态）。
+///
+/// ## ⚠️ 收口 ③：公共面收窄后为何下面（以及 `Row`）出现 `#[allow(dead_code)]`
+///
+/// 本单元（B2c-1 收口 ③ / **M4**）把断言口收进 `#[cfg(test)]`（`row_bar_size` /
+/// `head_divs_alive` / `immutable_bg` 一类）⇒ 若干**拥有型字段**在**非测试构建**里唯一的
+/// 读者就是那些被 cfg 掉的断言口，rustc 判它们"从未被读"。**但字段必须留在生产构建里**
+/// （`Drop` 即级联删除子树 —— 见模块头的所有权纪律），故**逐个字段**就近加
+/// `#[allow(dead_code)]`。**这不是放宽判据**：只抑制"字段未被读"这一条 lint，不改变所有权
+/// 语义与运行期行为。（`Cell` 形态的 `immutable_bg` 是"应用标记"，其唯一读者是色相断言的
+/// 页面侧那一半。）
 struct Core {
     /// 页根（= 纵向滚动容器；契约 1）。
     root: ScrollContainer,
@@ -977,6 +1152,7 @@ struct Core {
     /// ⇒ 把 [`audit_banner_style`] 的底色改成 `WARN_BG`，本标记**跟着变**，
     /// `pages_chain` 的 `immutable_skin() == BannerSkin::Audit` 立刻红。**如实标注**：
     /// 它不是从 LVGL 读回的"对象实际底色"，是"我挂了哪一档"的可读回记录。
+    #[allow(dead_code)]
     immutable_bg: Cell<Color>,
     /// 说明条左缘 4 px 色条。
     immutable_bar: Obj,
@@ -1000,8 +1176,10 @@ struct Core {
     /// 注入的选项表（缺省 = [`canonical_ops`]）。
     ops_opts: RefCell<Vec<OpOption>>,
     // ── 超限提示（**AU5**）──
-    /// `WarnBanner`（常驻构建、按需显隐）。
-    warn: Rc<WarnBanner>,
+    /// `WarnBanner`（**懒惰构建**：首个 [`P5AuditPage::set_range_too_large`]`(true)` 才建 ——
+    /// 见 **AU5** / **M5**：EDGE-15 在当前契约下**生产不可达**（`AuditPage` 无该字段），
+    /// 常驻构建等于让每一页都背着一份"永不显形"的构件）。
+    warn: RefCell<Option<Rc<WarnBanner>>>,
     /// 超限标志（唯一来源是 [`P5AuditPage::set_range_too_large`]，见 **AU5**）。
     range_too_large: Cell<bool>,
     // ── 表头 ──
@@ -1010,10 +1188,13 @@ struct Core {
     /// 表头 **5 个列名标签**（**拥有型句柄，必须锚定在这里** —— 见模块头的所有权纪律。
     /// 它们若是 `new()` 的局部变量，返回时即 `Drop` ⇒ `lv_obj_delete` **级联删除整棵子树**
     /// ⇒ 表头在屏上整块空白，而容器仍存活、尺寸仍 36 ⇒ "网看着在、实则没把住"）。
+    #[allow(dead_code)]
     head_cols: Vec<Label>,
     /// 表头 **4 条竖分隔线**（同上：拥有型 `Obj`，必须锚定）。
+    #[allow(dead_code)]
     head_divs: Vec<Obj>,
     /// 表头 **底线**（同上）。
+    #[allow(dead_code)]
     head_rule: Obj,
     // ── 列表 ──
     /// 列表容器（行 + 底部状态行 + 说明行 + 空 / 不可用态）。
@@ -1068,7 +1249,11 @@ impl Core {
         let filter_h = self.filter.body_h();
         let y_ops = y_range + filter_h + Dimens::GAP_MIN;
         let y_after_ops = y_ops + OPS_BLOCK_H;
-        let warn_on = self.range_too_large.get();
+        // **超限条是懒惰构建的**（M5）：没建出来时即使 `range_too_large` 为真也**不占位**
+        // （否则表头 / 列表会被一条不存在的 banner 顶下去，屏上留下一段空白）。
+        // 克隆 `Rc` 后**立刻放掉借用**（本函数会在事件回调内被调用 ⇒ 不得跨调用持借用）。
+        let warn: Option<Rc<WarnBanner>> = self.warn.borrow().clone();
+        let warn_on = self.range_too_large.get() && warn.is_some();
         let y_head = if warn_on {
             y_after_ops + Dimens::BANNER_H + TIGHT_GAP
         } else {
@@ -1096,8 +1281,10 @@ impl Core {
             y_ops + theme::center_offset(Dimens::CHIP_H, TextSlot::Label.px() as i32),
         );
         self.ops_box.set_pos(filters::CTRL_X, y_ops);
-        self.warn.obj().set_pos(0, y_after_ops);
-        set_visible(self.warn.obj(), warn_on);
+        if let Some(w) = warn.as_ref() {
+            w.obj().set_pos(0, y_after_ops);
+            set_visible(w.obj(), warn_on);
+        }
         self.head.set_pos(0, y_head);
         self.list_box.set_pos(0, y_list);
 
@@ -1153,16 +1340,21 @@ impl Core {
         self.available.set(page.available);
         self.has_more.set(page.has_more);
         let want = page.entries.len().min(ROW_MAX);
-        self.shown.set(want);
-        // 行池**只增**（避免每页重建对象）；随后按 `want` 显隐。
+        // 行池**按需分配**（评审 ② 的确认）：**只按本次 `entries` 条数建**（上限 [`ROW_MAX`]），
+        // **不是**一次建满 [`ROW_MAX`] —— 少于 20 条的注入只付它自己的堆开销。
+        // 池**只增不减**（避免每页重建对象 churn）。
         {
             let mut rows = self.rows.borrow_mut();
             while rows.len() < want {
                 match Row::new(&self.list_box, rows.len()) {
                     Ok(r) => rows.push(r),
-                    Err(_) => break, // 建不出即停（**不 panic**）：显隐按实际条数走
+                    Err(_) => break, // 建不出即停（**不 panic**）
                 }
             }
+            // ⚠️ **`shown` 以"实际建出 / 池内现有"的条数为准**：此前先写 `want` 再建行，
+            // 建不出时 `shown` 仍留在 `want` ⇒ 布局按"有 want 行"摆底部状态行 / 说明行
+            // （它们会被推到屏外），而实际只有更少的行 —— 静默的形态不一致。
+            self.shown.set(rows.len().min(want));
         }
         // **时间倒序由本页保证**（§6.5；见 [`row_order`]）—— 注入乱序也按 `ts_ms` 降序上屏。
         let order = row_order(&page.entries);
@@ -1211,9 +1403,16 @@ impl Core {
                 for i in self.ops_sel.borrow().iter().copied() {
                     chips.set_selected(i, true);
                 }
-                if let Some(me) = self.me.borrow().upgrade() {
-                    chips.set_on_change(move |sel| me.on_ops_changed(sel));
-                }
+                // ⚠️ **回调只持 `Weak<Core>`**（**C1**）：chip 组的回调槽由 `Core.ops` 持有
+                // （`Core → ops → chips.on_change`）⇒ 闭包若捕获 `Rc<Core>` 就构成**强引用环**
+                // ⇒ `drop(P5AuditPage)` **不释放任何 LVGL 对象**（整棵树连 `root` 一起永久留在
+                // 宿主上），二次构造即 `OutOfMemory`。照 `p2_config.rs` / `p4_interlock.rs` 的
+                // 同款处置：捕获 `Weak`，回调内 `upgrade()`（自引用弱化，是本页**唯一**的环）。
+                let w = self.me.borrow().clone();
+                chips.set_on_change(move |sel| {
+                    let Some(me) = w.upgrade() else { return };
+                    me.on_ops_changed(sel);
+                });
                 *self.ops.borrow_mut() = Some(chips);
             }
             Err(e) => {
@@ -1255,6 +1454,13 @@ impl Core {
     }
 
     /// 发「筛选变化」意图（**去重**：与上一次**已发出**的查询相同则不发）。
+    ///
+    /// 回调经 [`CbSlot::fire`]（take/put-back）触发：**调用期不持借用** ⇒ 回调内再
+    /// [`P5AuditPage::set_on_query`] 时 `try_borrow_mut` 必然成功、新回调自**下一次**通知
+    /// 起生效（本单元 ③ 的整改点：原实现持借用直调 ⇒ 自替换被**静默丢弃**）。
+    ///
+    /// ⚠️ **本函数刻意不自行 take/put-back**（收口 ①）：`self.on_query` 是 [`CbSlot`]，
+    /// 内部借用不外露 ⇒ 此处**写不出**旧写法（只有 `set` / `fire` 两个动作）。
     fn fire_query(&self) {
         let q = self.current_query(1);
         let same = self.last_query.borrow().as_ref() == Some(&q);
@@ -1262,14 +1468,12 @@ impl Core {
             return; // 「未变化时不发意图」——离屏用例逐条锁住
         }
         *self.last_query.borrow_mut() = Some(q.clone());
-        if let Ok(mut s) = self.on_query.try_borrow_mut() {
-            if let Some(f) = s.as_mut() {
-                f(q);
-            }
-        }
+        self.on_query.fire(q);
     }
 
     /// 发「加载更多」意图（`has_more = false` ⇒ **不发**；页号 = 当前页 + 1）。
+    ///
+    /// 回调触发口径同 [`Core::fire_query`]（[`CbSlot::fire`] 的 take/put-back，调用期不持借用）。
     fn fire_load_more(&self) {
         if !self.has_more.get() {
             return;
@@ -1281,15 +1485,35 @@ impl Core {
             .map(|p| p.page)
             .unwrap_or(1);
         let q = self.current_query(cur.saturating_add(1));
-        if let Ok(mut s) = self.on_load_more.try_borrow_mut() {
-            if let Some(f) = s.as_mut() {
-                f(q);
+        self.on_load_more.fire(q);
+    }
+
+    /// **懒惰构建**超限提示条（幂等；见 **AU5** / **M5**）。
+    ///
+    /// 返回"现在是否已有该构件"。建不出 ⇒ 只写 stderr（**不 panic**、不上屏 —— 与
+    /// `p4_interlock.rs` **IL25** 同口径），且**不占布局位**（见 [`Core::layout`]）。
+    #[cfg(test)]
+    fn ensure_warn(&self) -> bool {
+        if self.warn.borrow().is_some() {
+            return true;
+        }
+        match WarnBanner::new(&self.root, Dimens::CONTENT_W, TEXT_RANGE_TOO_LARGE, &[]) {
+            Ok(b) => {
+                let b = Rc::new(b);
+                b.set_hidden(true); // 建出来先隐（显隐由 `range_too_large` 决定）
+                *self.warn.borrow_mut() = Some(b);
+                true
+            }
+            Err(e) => {
+                report_warn_build_failure(&e);
+                false
             }
         }
     }
 
     /// 重建不可用态（原因文案在构造期固定 ⇒ 原因变化时换一个组件实例）。
     fn set_unavailable_reason(&self, reason: &str) {
+
         if *self.unav_reason.borrow() == reason {
             return;
         }
@@ -1323,10 +1547,18 @@ fn report_unavailable_rebuild_failure(e: &LvglError) {
     let _ = writeln!(std::io::stderr(), "P5 审计页：不可用态重建失败：{e}");
 }
 
+/// 超限提示条构建失败的 stderr 诊断（**懒惰构建**的失败路径；同上，不上屏）。
+#[cfg(test)]
+fn report_warn_build_failure(e: &LvglError) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "P5 审计页：超限提示条构建失败：{e}");
+}
+
 /// 说明条**样式族**（[`P5AuditPage::immutable_skin`] 的取值）—— 由**实际写入样式的底色**
 /// 判定，不是"本文件自称用了哪一档"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BannerSkin {
+#[cfg(test)]
+pub(crate) enum BannerSkin {
     /// 审计专属底（`Palette::AUDIT_BG`，§6.5 的"合规凭据"色）。
     Audit,
     /// 警示条底（`Palette::WARN_BG`）。
@@ -1342,7 +1574,8 @@ pub enum BannerSkin {
 }
 
 /// 底色 → 样式族（**唯一判据**；纯函数、可独立单测）。
-pub fn banner_skin_of(bg: Color) -> BannerSkin {
+#[cfg(test)]
+pub(crate) fn banner_skin_of(bg: Color) -> BannerSkin {
     if bg == Palette::AUDIT_BG {
         BannerSkin::Audit
     } else if bg == Palette::WARN_BG {
@@ -1358,27 +1591,37 @@ pub fn banner_skin_of(bg: Color) -> BannerSkin {
     }
 }
 
-/// 不可篡改说明条的样式 + **应用标记**（**AU13**：`theme.rs` 无现成样式，用**命名常量**组合，
-/// 零裸色值）。
+/// 不可篡改说明条的**底色**（**唯一色值真源**；**AU13** / B2c-1 代码质量评审 ⑥）。
 ///
-/// 色值对齐 UI §6.5：底 `#14231F`（`Palette::AUDIT_BG`）；左缘 4 px `#35D0C4`
+/// **同一个值**既送 [`audit_banner_style`] 的 `set_bg_color(..)`，又作**应用标记**
+/// [`Core::immutable_bg`]（[`audit_banner_bg`] 是本常量的唯一读口）。
+const BANNER_BG: Color = Palette::AUDIT_BG;
+
+/// 说明条的**应用标记**（= [`BANNER_BG`]，**同一常量**；色值在本文件只出现一次）。
+pub(crate) fn audit_banner_bg() -> Color {
+    BANNER_BG
+}
+
+/// 不可篡改说明条的样式（**AU13**：`theme.rs` 无现成样式，用**命名常量**组合，零裸色值）。
+///
+/// 色值对齐 UI §6.5：底 `#14231F`（[`BANNER_BG`]）；左缘 4 px `#35D0C4`
 /// （`Dimens::ACCENT_BAR` + `Palette::SOC_OK`，由 `immutable_bar` 子对象承担）。
 /// **无描边、零内边距**（与 `theme::warn_banner` / `theme::card_head_bar` 同口径：
 /// 位置由调用方 `set_pos` 显式给出）。
 ///
-/// **返回值里的 `Color` 是"应用标记"**：它与 `set_bg_color(..)` 收到的是**同一个表达式**
-/// ⇒ 页面把它存进 [`Core::immutable_bg`]，`pages_chain` 断言其样式族是 [`BannerSkin::Audit`]。
-/// **改什么会让那条断言变红**：把下面的 `Palette::AUDIT_BG` 换成 `Palette::WARN_BG`
-/// （薄层**没有**"已挂样式读回"通道，故用这个记录而不是读对象底色 —— 如实标注）。
-fn audit_banner_style() -> (Color, Rc<Style>) {
-    let bg = Palette::AUDIT_BG;
+/// ⚠️ **薄层没有"已挂样式读回"通道**（`Obj` 读不回 `bg_color`，`lvgl-sys` 的 allowlist 里
+/// 也没有 `lv_obj_get_style_*`）⇒ 光靠本函数的入参**无法证明**"页面确实用了这一档"。
+/// 故把**真正的一读**放在渲染侧：`pages_chain` 直接读**像素**（`sink` 中说明条内的取样点
+/// 必须等于 `Palette::AUDIT_BG` 的 BGR 分量）—— 那是**样式被真的施加**之后的结果；
+/// 应用标记只作第二道（记录"我打算用哪一档"），两者**同时**断言。
+fn audit_banner_style() -> Rc<Style> {
     let mut s = Style::new();
-    s.set_bg_color(bg);
+    s.set_bg_color(BANNER_BG);
     s.set_bg_opa(Opa::COVER);
     s.set_radius(RADIUS_CTRL);
     s.set_border_width(Stroke::NONE);
     s.set_pad_all(0);
-    (bg, Rc::new(s))
+    Rc::new(s)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1413,9 +1656,10 @@ impl P5AuditPage {
         newest.set_long_mode(LongMode::DOTS);
 
         // 不可篡改说明条：底 `Palette::AUDIT_BG` + 左缘 4 px `Palette::SOC_OK`（**AU13**）。
-        // `immutable_bg` 是**应用标记**（与 `set_bg_color` 收到的是同一个色值）。
-        let (immutable_bg, immutable_style) = audit_banner_style();
-        let immutable = decor(&root, Dimens::CONTENT_W, IMMUTABLE_H, &immutable_style)?;
+        // `immutable_bg` 是**应用标记**（与 `set_bg_color` 收到的是**同一个常量** [`BANNER_BG`]）；
+        // "页面确实用了这一档"另由 `pages_chain` 的**像素读回**独立锁住（评审 ⑥）。
+        let immutable_bg = audit_banner_bg();
+        let immutable = decor(&root, Dimens::CONTENT_W, IMMUTABLE_H, &audit_banner_style())?;
         let immutable_bar = decor(
             &immutable,
             IMMUTABLE_BAR_W,
@@ -1449,13 +1693,9 @@ impl P5AuditPage {
         let ops_box = layout_box(&root, OPS_CHIP_W * OPS_COLS as i32, OPS_BLOCK_H)?;
 
         // ── ③ 超限提示条（EDGE-15 的 UI 落点；契约缺口见 **AU5**）──
-        let warn = Rc::new(WarnBanner::new(
-            &root,
-            Dimens::CONTENT_W,
-            TEXT_RANGE_TOO_LARGE,
-            &[],
-        )?);
-        warn.set_hidden(true);
+        // **懒惰构建（M5）**：此处**不建**。EDGE-15 在 P5 侧生产不可达（`AuditPage` 无
+        // `range_too_large` 字段 ⇒ B3 无从推出该标志），常驻构建等于每页都背一份"永不显形"
+        // 的构件；改由 [`Core::ensure_warn`] 在首个 `set_range_too_large(true)` 时建。
 
         // ── ④ 表头（5 列名 + 4 条竖分隔线 + 底线）──
         //
@@ -1466,28 +1706,19 @@ impl P5AuditPage {
         // 实则没把住"的形态）。回归锁见 `ui/tests.rs::pages_chain` 的 `head_child_count()` +
         // 逐列文案读回。
         let head = layout_box(&root, Dimens::CONTENT_W, TABLE_HEAD_H)?;
-        let head_col_at: [(i32, &str); 5] = [
-            (ROW_X0, TEXT_HEAD_TIME),
-            (ROW_OP_X, TEXT_HEAD_OPERATOR),
-            (HEAD_COL_OP_TYPE_X, TEXT_HEAD_OP),
-            (HEAD_COL_VALUE_X, TEXT_HEAD_VALUE),
-            (ROW_RESULT_X, TEXT_HEAD_RESULT),
-        ];
-        let mut head_cols: Vec<Label> = Vec::with_capacity(head_col_at.len());
-        for (x, t) in head_col_at {
+        // 列名与逐列 x **由 [`HEAD_COLS`] / [`HEAD_COL_X`] 一一对应**（M1：单一真源，
+        // 两处长度由编译器钉死；子件数 [`HEAD_CHILD_COUNT`] 自动跟随）。
+        let mut head_cols: Vec<Label> = Vec::with_capacity(HEAD_COL_COUNT);
+        for (t, x) in HEAD_COLS.iter().zip(HEAD_COL_X) {
             let l = text_label(&head, t, TextSlot::Body, Palette::TEXT_WEAK)?;
             l.set_size(Dimens::CHIP_MIN_W, TextSlot::Body.px() as i32);
             l.set_long_mode(LongMode::DOTS);
             l.set_pos(x, theme::center_offset(TABLE_HEAD_H, TextSlot::Body.px() as i32));
             head_cols.push(l);
         }
-        let mut head_divs: Vec<Obj> = Vec::with_capacity(4);
-        for x in [
-            ROW_OP_X,
-            HEAD_COL_OP_TYPE_X,
-            HEAD_COL_VALUE_X,
-            ROW_RESULT_X,
-        ] {
+        // 竖分隔线 = **列间**分隔（列数 − 1 条），x 取"右邻列的列首 x"（同一张 [`HEAD_COL_X`]）。
+        let mut head_divs: Vec<Obj> = Vec::with_capacity(HEAD_DIV_COUNT);
+        for x in HEAD_COL_X.iter().skip(1) {
             let d = decor(
                 &head,
                 HEAD_DIV_W,
@@ -1542,7 +1773,7 @@ impl P5AuditPage {
             ops_texts: RefCell::new(Vec::new()),
             ops_sel: RefCell::new(vec![0]),
             ops_opts: RefCell::new(canonical_ops()),
-            warn,
+            warn: RefCell::new(None),
             range_too_large: Cell::new(false),
             head,
             head_cols,
@@ -1560,8 +1791,8 @@ impl P5AuditPage {
             last_page: RefCell::new(None),
             has_more: Cell::new(false),
             last_query: RefCell::new(None),
-            on_query: RefCell::new(None),
-            on_load_more: RefCell::new(None),
+            on_query: CbSlot::new(),
+            on_load_more: CbSlot::new(),
             me: RefCell::new(Weak::new()),
         });
         *core.me.borrow_mut() = Rc::downgrade(&core);
@@ -1595,27 +1826,38 @@ impl P5AuditPage {
     }
 
     /// 最近审计条文案（**读回口**）。
-    pub fn newest_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn newest_text(&self) -> Option<String> {
         self.core.newest.text()
     }
 
+    /// 最近审计条**对象**（装配断言 / 存活探针口径；**仅测试可见**）。
+    #[cfg(test)]
+    pub(crate) fn newest_obj(&self) -> &Obj {
+        self.core.newest.obj()
+    }
+
     /// 不可篡改说明条的底（装配 / **存活锚点**：它被误删会让色条与文案一起消失）。
-    pub fn immutable_obj(&self) -> &Obj {
+    #[cfg(test)]
+    pub(crate) fn immutable_obj(&self) -> &Obj {
         &self.core.immutable
     }
 
     /// 不可篡改说明条文案。
-    pub fn immutable_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn immutable_text(&self) -> Option<String> {
         self.core.immutable_text.text()
     }
 
     /// 不可篡改说明条图标字形。
-    pub fn immutable_icon(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn immutable_icon(&self) -> Option<String> {
         self.core.immutable_icon.text()
     }
 
     /// 不可篡改说明条的左缘色条对象（**每条装配断言的锚点**）。
-    pub fn immutable_bar_obj(&self) -> &Obj {
+    #[cfg(test)]
+    pub(crate) fn immutable_bar_obj(&self) -> &Obj {
         &self.core.immutable_bar
     }
 
@@ -1623,7 +1865,8 @@ impl P5AuditPage {
     ///
     /// **如实标注**：它不是从 LVGL 读回的对象底色（薄层无该通道），而是页面送给样式构造器的
     /// 那个色值 —— 与 `set_bg_color(..)` 收到的是同一个表达式。
-    pub fn immutable_bg(&self) -> Color {
+    #[cfg(test)]
+    pub(crate) fn immutable_bg(&self) -> Color {
         self.core.immutable_bg.get()
     }
 
@@ -1631,7 +1874,8 @@ impl P5AuditPage {
     ///
     /// **改什么会让本条变红**：把 [`audit_banner_style`] 的底色换成 `Palette::WARN_BG`
     /// ⇒ 本值变成 [`BannerSkin::Warn`] ⇒ `ui/tests.rs::pages_chain` 的断言立刻红。
-    pub fn immutable_skin(&self) -> BannerSkin {
+    #[cfg(test)]
+    pub(crate) fn immutable_skin(&self) -> BannerSkin {
         banner_skin_of(self.core.immutable_bg.get())
     }
 
@@ -1640,18 +1884,21 @@ impl P5AuditPage {
     /// **这条网捕什么**：表头子件是 `new()` 的局部变量时，函数返回即 `Drop`
     /// （= `lv_obj_delete`）⇒ 级联删除整棵子树 ⇒ 本值从 10 **掉到 0**，屏上表头整块空白。
     /// 只断言"容器存活 / 容器高 36"**抓不到**它（容器本身还在）。
-    pub fn head_child_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn head_child_count(&self) -> usize {
         self.core.head.child_count() as usize
     }
 
     /// 第 `i` 列表头文案（越界 ⇒ `None`）—— 与 [`Self::head_child_count`] 一读一写两路锁住
     /// "表头真的在屏上且内容正确"。
-    pub fn head_col_text(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn head_col_text(&self, i: usize) -> Option<String> {
         self.core.head_cols.get(i).and_then(|l| l.text())
     }
 
     /// 存活的表头竖分隔线数（锚定回归锁；恒 4）。
-    pub fn head_divs_alive(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn head_divs_alive(&self) -> usize {
         self.core
             .head_divs
             .iter()
@@ -1660,7 +1907,8 @@ impl P5AuditPage {
     }
 
     /// 表头底线是否存活（锚定回归锁）。
-    pub fn head_rule_alive(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn head_rule_alive(&self) -> bool {
         self.core.head_rule.is_alive()
     }
 
@@ -1670,22 +1918,26 @@ impl P5AuditPage {
     }
 
     /// 操作类型维度名标签。
-    pub fn ops_label_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn ops_label_text(&self) -> Option<String> {
         self.core.ops_label.text()
     }
 
     /// 操作类型 chip 组容器。
-    pub fn ops_obj(&self) -> &Obj {
+    #[cfg(test)]
+    pub(crate) fn ops_obj(&self) -> &Obj {
         &self.core.ops_box
     }
 
     /// chip 数（`0` = 尚未建 / 建失败）。
-    pub fn ops_chip_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn ops_chip_count(&self) -> usize {
         self.core.ops.borrow().as_ref().map(|c| c.len()).unwrap_or(0)
     }
 
     /// 第 `i` 个 chip 的**当前显示文本**（含选中前缀 `✓ `）。
-    pub fn ops_chip_display(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn ops_chip_display(&self, i: usize) -> Option<String> {
         self.core
             .ops
             .borrow()
@@ -1694,42 +1946,56 @@ impl P5AuditPage {
     }
 
     /// 当前勾选集合（归一化后）。
-    pub fn ops_selected(&self) -> Vec<usize> {
+    #[cfg(test)]
+    pub(crate) fn ops_selected(&self) -> Vec<usize> {
         self.core.ops_sel.borrow().clone()
     }
 
     /// 注入的选项表（读回）。
-    pub fn ops_options(&self) -> Vec<OpOption> {
+    #[cfg(test)]
+    pub(crate) fn ops_options(&self) -> Vec<OpOption> {
         self.core.ops_opts.borrow().clone()
     }
 
     /// 超限提示条是否在显（EDGE-15；**AU5**）。
-    pub fn warn_visible(&self) -> bool {
-        !self.core.warn.obj().is_hidden()
+    ///
+    /// **懒惰构建（M5）**：尚未建出 ⇒ 恒 `false`（不是"没显"，是"还没有这个构件"）。
+    #[cfg(test)]
+    pub(crate) fn warn_visible(&self) -> bool {
+        self.core
+            .warn
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| !w.obj().is_hidden())
     }
 
-    /// 超限提示条文案。
-    pub fn warn_text(&self) -> Option<String> {
-        self.core.warn.text()
+    /// 超限提示条文案（未懒惰建出 ⇒ `None`）。
+    #[cfg(test)]
+    pub(crate) fn warn_text(&self) -> Option<String> {
+        self.core.warn.borrow().as_ref().and_then(|w| w.text())
     }
 
     /// 表头容器（装配断言口径）。
-    pub fn head_obj(&self) -> &Obj {
+    #[cfg(test)]
+    pub(crate) fn head_obj(&self) -> &Obj {
         &self.core.head
     }
 
     /// 列表容器（装配断言口径）。
-    pub fn list_obj(&self) -> &Obj {
+    #[cfg(test)]
+    pub(crate) fn list_obj(&self) -> &Obj {
         &self.core.list_box
     }
 
     /// 已建行对象数（＝行池长度；可见性见 [`Self::visible_rows`]）。
-    pub fn row_pool_len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn row_pool_len(&self) -> usize {
         self.core.rows.borrow().len()
     }
 
     /// 当前可见行数（读 LVGL 的隐藏标志）。
-    pub fn visible_rows(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn visible_rows(&self) -> usize {
         self.core
             .rows
             .borrow()
@@ -1741,7 +2007,8 @@ impl P5AuditPage {
     /// 存活的**行对象**数（行池里 `is_alive()` 为真的个数 —— **所有权锚定回归锁**：
     /// 行句柄若退化成 `new()` 的局部变量，返回时即被 `Drop` ⇒ 行整棵子树被级联删除，
     /// 本条立刻小于池长，且屏上"有行但空白"）。
-    pub fn rows_alive(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn rows_alive(&self) -> usize {
         self.core
             .rows
             .borrow()
@@ -1751,12 +2018,14 @@ impl P5AuditPage {
     }
 
     /// 第 `i` 行**容器**的尺寸（布局断言口径）。
-    pub fn row_size(&self, i: usize) -> Option<(i32, i32)> {
+    #[cfg(test)]
+    pub(crate) fn row_size(&self, i: usize) -> Option<(i32, i32)> {
         self.core.rows.borrow().get(i).map(|r| r.obj.size())
     }
 
     /// 第 `i` 行**容器**的位置（布局断言口径）。
-    pub fn row_pos(&self, i: usize) -> Option<(i32, i32)> {
+    #[cfg(test)]
+    pub(crate) fn row_pos(&self, i: usize) -> Option<(i32, i32)> {
         let c = self.core.rows.borrow().get(i).map(|r| r.obj.coords())?;
         Some((c.x1, c.y1))
     }
@@ -1765,17 +2034,20 @@ impl P5AuditPage {
     ///
     /// ⚠️ 只能返回**值**（尺寸 / 坐标），不能返回 `&Obj`：`RefCell` 的借用守卫不能逃逸出函数
     /// （`Obj` 的句柄本身是 `Copy` 语义的借用 + 内部 `Rc`，但**列在 `RefCell` 里**就受此约束）。
-    pub fn row_bar_size(&self, i: usize) -> Option<(i32, i32)> {
+    #[cfg(test)]
+    pub(crate) fn row_bar_size(&self, i: usize) -> Option<(i32, i32)> {
         self.core.rows.borrow().get(i).map(|r| r.bar.size())
     }
 
     /// 第 `i` 行时间列文本。
-    pub fn row_time(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn row_time(&self, i: usize) -> Option<String> {
         self.core.rows.borrow().get(i).and_then(|r| r.time.text())
     }
 
     /// 第 `i` 行操作者列文本。
-    pub fn row_operator(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn row_operator(&self, i: usize) -> Option<String> {
         self.core
             .rows
             .borrow()
@@ -1784,7 +2056,8 @@ impl P5AuditPage {
     }
 
     /// 第 `i` 行**结果胶囊**的文本（读在显的那一支）。
-    pub fn row_result(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn row_result(&self, i: usize) -> Option<String> {
         let rows = self.core.rows.borrow();
         let r = rows.get(i)?;
         let k = r.result_index()?;
@@ -1792,7 +2065,8 @@ impl P5AuditPage {
     }
 
     /// 第 `i` 行结果胶囊的**色通道**（三重冗余的颜色通道；读在显的那一支的皮肤）。
-    pub fn row_result_accent(&self, i: usize) -> Option<Color> {
+    #[cfg(test)]
+    pub(crate) fn row_result_accent(&self, i: usize) -> Option<Color> {
         let rows = self.core.rows.borrow();
         let r = rows.get(i)?;
         let k = r.result_index()?;
@@ -1800,12 +2074,14 @@ impl P5AuditPage {
     }
 
     /// 第 `i` 行操作类型文本。
-    pub fn row_op(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn row_op(&self, i: usize) -> Option<String> {
         self.core.rows.borrow().get(i).and_then(|r| r.op.text())
     }
 
     /// 第 `i` 行前后值摘要。
-    pub fn row_summary(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn row_summary(&self, i: usize) -> Option<String> {
         self.core
             .rows
             .borrow()
@@ -1814,12 +2090,14 @@ impl P5AuditPage {
     }
 
     /// 第 `i` 行失败原因文本（**即使隐藏也返回其内容**；可见性见 [`Self::row_reason_visible`]）。
-    pub fn row_reason(&self, i: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn row_reason(&self, i: usize) -> Option<String> {
         self.core.rows.borrow().get(i).and_then(|r| r.reason.text())
     }
 
     /// 第 `i` 行失败原因列是否可见（**仅失败行可见**）。
-    pub fn row_reason_visible(&self, i: usize) -> bool {
+    #[cfg(test)]
+    pub(crate) fn row_reason_visible(&self, i: usize) -> bool {
         self.core
             .rows
             .borrow()
@@ -1832,7 +2110,8 @@ impl P5AuditPage {
     ///
     /// 读的是 LVGL 的 `LV_OBJ_FLAG_CLICKABLE` 真值（不是"本文件没写按钮"的自述）——
     /// 一旦有人在行里加按钮 / 让行本体可点（长按菜单一类入口），本条立刻 > 0。
-    pub fn list_clickable_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn list_clickable_count(&self) -> usize {
         self.core
             .rows
             .borrow()
@@ -1842,47 +2121,56 @@ impl P5AuditPage {
     }
 
     /// 列表区三态（`Rows` / `Empty` / `Unavailable`）。
-    pub fn list_view(&self) -> ListView {
+    #[cfg(test)]
+    pub(crate) fn list_view(&self) -> ListView {
         self.core.view()
     }
 
     /// 空态是否在显（EDGE-08）。
-    pub fn empty_visible(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn empty_visible(&self) -> bool {
         !self.core.empty.obj().is_hidden()
     }
 
     /// 空态文案。
-    pub fn empty_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn empty_text(&self) -> Option<String> {
         self.core.empty.text()
     }
 
     /// 不可用态是否在显（EDGE-17）。
-    pub fn unavailable_visible(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn unavailable_visible(&self) -> bool {
         !self.core.unavailable.borrow().obj().is_hidden()
     }
 
     /// 不可用态标题（**由 `UnavailableKind::Audit` 决定**，不是调用方给的）。
-    pub fn unavailable_title(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn unavailable_title(&self) -> Option<String> {
         self.core.unavailable.borrow().title()
     }
 
     /// 不可用态场景。
-    pub fn unavailable_kind(&self) -> UnavailableKind {
+    #[cfg(test)]
+    pub(crate) fn unavailable_kind(&self) -> UnavailableKind {
         self.core.unavailable.borrow().kind()
     }
 
     /// 底部状态行文本（`加载中` / `已加载全部`）。
-    pub fn footer_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn footer_text(&self) -> Option<String> {
         self.core.footer.text()
     }
 
     /// 底部状态行是否在显。
-    pub fn footer_visible(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn footer_visible(&self) -> bool {
         !self.core.footer.obj().is_hidden()
     }
 
     /// 只读说明行文本（**AU11**）。
-    pub fn note_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn note_text(&self) -> Option<String> {
         self.core.note.text()
     }
 
@@ -1929,7 +2217,14 @@ impl P5AuditPage {
     /// **超限（EDGE-15）显式注入入口**（**AU5**：契约 `AuditPage` 无该字段）。
     ///
     /// `true` ⇒ 列表区上方出现 `WarnBanner`「检索范围超限 · 请缩小时间范围」。
-    pub fn set_range_too_large(&self, on: bool) {
+    ///
+    /// **懒惰构建（M5）**：`WarnBanner` 在**首次** `set_range_too_large(true)` 时才建
+    /// （此前不占任何内存、不占布局位）；建失败 ⇒ 该次调用**不显**（只留 stderr 诊断）。
+    #[cfg(test)]
+    pub(crate) fn set_range_too_large(&self, on: bool) {
+        if on {
+            self.core.ensure_warn();
+        }
         self.core.range_too_large.set(on);
         self.core.layout();
     }
@@ -1945,9 +2240,7 @@ impl P5AuditPage {
     where
         F: FnMut(AuditQuery) + 'static,
     {
-        if let Ok(mut s) = self.core.on_query.try_borrow_mut() {
-            *s = Some(Box::new(f));
-        }
+        self.core.on_query.set(f);
     }
 
     /// 注册「加载更多」意图回调（载荷 = [`AuditQuery`]，`page` = 当前页 + 1）。
@@ -1955,9 +2248,7 @@ impl P5AuditPage {
     where
         F: FnMut(AuditQuery) + 'static,
     {
-        if let Ok(mut s) = self.core.on_load_more.try_borrow_mut() {
-            *s = Some(Box::new(f));
-        }
+        self.core.on_load_more.set(f);
     }
 
     /// **「加载更多」的触发入口**（见 **AU6**：滚动事件在本层不可得）。
@@ -1966,11 +2257,6 @@ impl P5AuditPage {
     /// （最后一页不再空转）。本页据**最近一次注入**的 `AuditPage.page` 组装 `page + 1`。
     pub fn request_next_page(&self) {
         self.core.fire_load_more();
-    }
-
-    /// 最近一次**已发出**的筛选意图（离屏断言口径）。
-    pub fn last_query(&self) -> Option<AuditQuery> {
-        self.core.last_query.borrow().clone()
     }
 }
 
@@ -2197,22 +2483,23 @@ mod tests {
     fn unknown_target_key_is_shown_not_hidden() {
         let before = Some(Value::from(1));
         let after = Some(Value::from(2));
-        // ① 未登记键：标签位仍有**可辨认的机器键**（`display_safe` 归一），**不是**空白；
-        //    且值对**必须存活**（键有长度上界，不许把值对挤掉）。
+        let pair_len = "1 → 2".chars().count();
+        // ① 未登记键：标签位仍有**可辨认的机器键**（`display_safe` 归一的**保尾**截断），
+        //    **不是**空白；且值对**必须存活**（键有长度上界，不许把值对挤掉）。
         let s = summary_text(before.as_ref(), after.as_ref(), "interlock.flood");
-        let want_key = clip(&display_safe("interlock.flood"), UNKNOWN_TARGET_MAX_CHARS);
+        let want_key = unknown_key_label("interlock.flood", pair_len);
         assert_eq!(
             s,
             format!("{want_key}: 1 → 2"),
-            "未登记键 ⇒ display_safe(键) + 值对（**不整块不显**）"
+            "未登记键 ⇒ display_safe(键) 的保尾截断 + 值对（**不整块不显**）"
         );
         assert!(
             s.contains("1 → 2"),
             "值对**不得**被长的机器键挤掉（实际：{s}）"
         );
         assert!(
-            s.contains("IN?ER"),
-            "必须能辨认出是哪一项（实际：{s}）"
+            s.starts_with(TEXT_ELLIPSIS),
+            "键超长 ⇒ 保**尾**截断（带省略标记）（实际：{s}）"
         );
         // ② **不臆造**中文标签：产物里不得出现任何**已登记**的中文标签。
         for (_, label) in TARGET_LABELS
@@ -2225,7 +2512,7 @@ mod tests {
                 "未登记键**不得**借用已知键的中文标签 `{label}`（实际：{s}）"
             );
         }
-        // ③ `display_safe` 保证不出豆腐块（字符全部在安全字母表内）。
+        // ③ `display_safe` 保证不出豆腐块（字符全部在 ASCII 内）。
         for ch in display_safe("interlock.flood").chars() {
             assert!(
                 ch.is_ascii(),
@@ -2239,6 +2526,91 @@ mod tests {
         );
         // ⑤ 空键：**无标识可显** ⇒ 只留值对（不是"隐藏信息"）。
         assert_eq!(summary_text(before.as_ref(), after.as_ref(), ""), "1 → 2");
+    }
+
+    /// **不同未登记键 ⇒ 屏上产物必须不同**（B2c-1 代码质量评审 ④ 的补网）。
+    ///
+    /// **改什么会让本条变红**：把 [`unknown_key_label`] 的 [`clip_tail`] 换回 [`clip`]
+    /// （**保头**）—— 原实现下 `interlock.flood` 与 `interlock.force` 前 7 字逐字相同
+    /// （`IN?ER?O`）⇒ 两条屏上文案**完全相同**（`IN?ER?O...: 2404 → 2405` 的截断体），
+    /// 第 1 组断言立刻红。这正是被修的缺陷（操作者无法分辨被改的是哪一项）。
+    #[test]
+    fn unknown_target_keys_are_distinguishable() {
+        let before = Some(Value::from(2404));
+        let after = Some(Value::from(2405));
+        let a = summary_text(before.as_ref(), after.as_ref(), "interlock.flood");
+        let b = summary_text(before.as_ref(), after.as_ref(), "interlock.force");
+        let c = summary_text(before.as_ref(), after.as_ref(), "display.publish_ms");
+        assert_ne!(a, b, "`interlock.flood` 与 `interlock.force` 必须可区分");
+        assert_ne!(a, c, "`interlock.flood` 与 `display.publish_ms` 必须可区分");
+        assert_ne!(b, c);
+        // 现实值对 `2404 → 2405`（11 字）**完整存活**（键已按值对实长让位到下限）。
+        for s in [&a, &b, &c] {
+            assert!(
+                s.contains("2404 → 2405"),
+                "现实值对必须完整存活（键按值对实长让位；实际：{s}）"
+            );
+        }
+        // 产物长度恒 ≤ 摘要上限（保尾截断同样不得越界）。
+        for s in [&a, &b, &c] {
+            assert!(s.chars().count() <= SUMMARY_MAX_CHARS);
+        }
+    }
+
+    /// 未登记键的长度预算：**值对优先**、夹在 `[MIN, MAX]` 内。
+    #[test]
+    fn unknown_key_budget_prefers_the_value_pair() {
+        // 短值对 ⇒ 键拿满上限。
+        assert_eq!(unknown_key_budget(1), UNKNOWN_TARGET_MAX_CHARS);
+        // 现实值对 `2404 → 2405`（11 字）⇒ 键退到下限，值对恰好占满剩余（18 − 5 − 2 = 11）。
+        assert_eq!(unknown_key_budget(11), UNKNOWN_TARGET_MIN_CHARS);
+        assert_eq!(
+            UNKNOWN_TARGET_MIN_CHARS + TEXT_LABEL_SEP.chars().count() + 11,
+            SUMMARY_MAX_CHARS,
+            "下限 + 分隔 + 现实值对 恰为摘要上限（值对完整存活）"
+        );
+        assert_eq!(UNKNOWN_TARGET_MIN_CHARS, TEXT_ELLIPSIS.chars().count() + 2, "`...` + 2 字尾部");
+        // 极长值对：键**不再**往里挤（停在 MIN），值对自身走既有截断口径。
+        assert_eq!(unknown_key_budget(10_000), UNKNOWN_TARGET_MIN_CHARS);
+        // `MIN < MAX` 由**常量区**的 `const _: () = assert!(..)`（`UNKNOWN_TARGET_MIN_CHARS`
+        // 上方）钉死 —— 本用例不再重复一条运行期 `assert!`（收口 ②：它会被 clippy 判
+        // `assertions_on_constants`；编译期形态的**把关能力更强**且零告警）。
+    }
+
+    /// `clip` / `clip_tail` 的**边界**：产物长度**恒 ≤ 上限**（**M2**：原 `clip(t, n<3)`
+    /// 会返回比上限**更长**的 `...`，与"按上限截断"的契约相悖）。
+    #[test]
+    fn clip_never_exceeds_its_limit() {
+        let long = "一二三四五六七八九十";
+        for n in 0..=(long.chars().count() + 2) {
+            let h = clip(long, n);
+            assert!(
+                h.chars().count() <= n,
+                "clip(_, {n}) 产物 {} 字 > 上限（实际：{h}）",
+                h.chars().count()
+            );
+            let t = clip_tail(long, n);
+            assert!(
+                t.chars().count() <= n,
+                "clip_tail(_, {n}) 产物 {} 字 > 上限（实际：{t}）",
+                t.chars().count()
+            );
+        }
+        // `n < 3`（放不下省略标记）⇒ **纯截断、无标记**，绝不返回 `...`。
+        assert_eq!(clip(long, 0), "");
+        assert_eq!(clip(long, 1), "一");
+        assert_eq!(clip(long, 2), "一二");
+        assert_eq!(clip_tail(long, 0), "");
+        assert_eq!(clip_tail(long, 2), "九十", "**保尾**（与 clip 的保头相反）");
+        // 不超长 ⇒ 原样（不无故截断）；保尾截断的形态自证。
+        assert_eq!(clip(long, 10), long);
+        assert_eq!(clip_tail(long, 10), long);
+        // 4 字上限 = `...` + **1** 字（省略标记占 3）。
+        assert_eq!(clip("一二三四五", 4), format!("一{TEXT_ELLIPSIS}"));
+        assert_eq!(clip_tail("一二三四五", 4), format!("{TEXT_ELLIPSIS}五"));
+        assert_eq!(clip_tail("一二三四五六七八", 6), format!("{TEXT_ELLIPSIS}六七八"));
+        // 多字节按**字符**截断（不切半个汉字）。
+        assert!(clip_tail(long, 4).is_char_boundary(clip_tail(long, 4).len()));
     }
 
     /// **行序 = 时间倒序**（§6.5；`row_order` 是 `apply_page` / `refresh_op_labels` 的共用真源）。
@@ -2279,9 +2651,23 @@ mod tests {
     fn row_pool_capacity_is_measured() {
         assert_eq!(
             MEASURED_ROW_CAPACITY, 22,
-            "实测上界：22 成功 / 24 挂死（AU8；改此值前必须重跑 pages_chain 的逐档注入测量）"
+            "单页独活的实测上界：22 成功 / 24 挂死（AU8；改此值前必须重跑 pages_chain 的逐档注入测量）"
         );
         assert_eq!(ROW_MAX, AUDIT_PAGE_SIZE, "上限恰一页（AU8）");
+        // ── 共存预算（B2c-1 整改 ②）────────────────────────────────────────────
+        assert_eq!(
+            MEASURED_COEXIST_TOTAL_ROWS, 10,
+            "两页共存的实测总行数上界：2 页 × 5 行成功 / 2 页 × 6 行 OOM 挂死 \
+             （前提：LV_MEM_SIZE=256KB、两页同时存活；见 AU8 —— 改此值前必须重跑测量）"
+        );
+        assert_eq!(COEXIST_ROWS_PER_PAGE, 4, "共存时每页 4 行（对挂死点 6 留 ≥33% 余量）");
+        // 下面两条**上界关系**由常量区的 `const _: () = assert!(..)` 给出（见 `COEXIST_ROWS_PER_PAGE`
+        // 附近的四条编译期断言）：
+        //   · `2 * COEXIST_ROWS_PER_PAGE <= MEASURED_COEXIST_TOTAL_ROWS`（预算不超实测总上界）；
+        //   · `COEXIST_ROWS_PER_PAGE < ROW_MAX`（**如实钉住"两页各满行不可能"** —— 这不是
+        //     "取舍"，是 256 KB 堆下的测量结论，AU8 的 ②）。
+        // 本用例不再重复运行期 `assert!`（收口 ②：`assertions_on_constants` 告警；
+        // 编译期形态**任何构建都查、不可能被跳过**，把关能力不减）。
     }
 
     /// 说明条**样式族判定**（[`banner_skin_of`]）—— 色相断言的"页面确实用了它"那一半的判据。
@@ -2301,8 +2687,13 @@ mod tests {
     /// 运行期由 `ui/tests.rs::pages_chain` 读 LVGL 的 `child_count()` 钉死。
     #[test]
     fn head_child_count_matches_spec() {
-        assert_eq!(HEAD_CHILD_COUNT, 10);
-        assert_eq!(HEAD_CHILD_COUNT, 5 + 4 + 1);
+        assert_eq!(HEAD_CHILD_COUNT, 10, "§6.5 线框的 5 列名 + 4 竖线 + 1 底线");
+        assert_eq!(HEAD_COL_COUNT, 5, "§6.5 线框 5 列");
+        assert_eq!(HEAD_DIV_COUNT, HEAD_COL_COUNT - 1, "竖线 = 列间分隔");
+        // **M1 的机制自证**：子件数**由表长推导**（不是第二处字面量）—— 三者的关系恒成立，
+        // 增删列时只需动 `HEAD_COLS` / `HEAD_COL_X`（两者长度由编译器钉死）。
+        assert_eq!(HEAD_CHILD_COUNT, HEAD_COLS.len() + HEAD_DIV_COUNT + 1);
+        assert_eq!(HEAD_COL_X.len(), HEAD_COLS.len(), "逐列 x 与列名一一对应");
     }
 
     /// `None`（前后值缺失）**绝不**变成 `0` / 空串 —— 占位符 `–`。
@@ -2444,13 +2835,15 @@ mod tests {
             rendered.contains(ConsoleOp::InterlockRelease.label()),
             "已登记键必须带上屏（实际：{rendered}）"
         );
-        // 未登记键：上屏的是 `display_safe` **归一后**的形态（不是原字面量，也不是空白）。
+        // 未登记键：上屏的是 `display_safe` **归一 + 保尾截断**的形态（不是原字面量、不是空白）。
         let raw = "interlock.flood";
+        // 本行的值对（两侧都缺）—— `summary_text` 内部按它的实长给键分配预算。
+        let pair = format!("{PLACEHOLDER}{TEXT_PAIR_ARROW}{PLACEHOLDER}");
         let shown = summary_text(e.before.as_ref(), e.after.as_ref(), raw);
         assert!(!shown.contains(raw), "原始小写机器键不上屏（实际：{shown}）");
         assert!(
-            shown.starts_with(&clip(&display_safe(raw), UNKNOWN_TARGET_MAX_CHARS)),
-            "未登记键上屏的是 display_safe 归一形态（实际：{shown}）"
+            shown.starts_with(&unknown_key_label(raw, pair.chars().count())),
+            "未登记键上屏的是 display_safe 归一的**保尾**形态（实际：{shown}）"
         );
     }
 

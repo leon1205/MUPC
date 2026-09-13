@@ -52,7 +52,7 @@
 //! | FR2 | `DateTimeStepper` 的**跨分量组合合法性不由本件校验**（`2 月 31 日` 一类被接受，折成 `3 月 3 日`） | `ui/controls.rs` 的类型文档**明写**「组合合法性（上层负责）」；上层要"拒绝并给出原因"必须有一句**在 cmap 内的**错误文案，而 §3.6 的 P3/P5 用字表**没有**这一句 ⇒ 本件**不造**文案（与 P2 `PD*` / P4 `IL1` 的"缺字不硬造"同口径）。转换是**确定且可测**的（[`datetime_to_epoch_ms`] 单测逐例钉死），用户改一次步进器即可修正 | 若 PM 要求拦截：需先在 §3.6 补一句错误文案（如「起始时间无效」），再在 [`TimeRangeChange`] 的出口加校验 |
 //! | FR3 | 三档**复用** `display-proto::log::LogRange`（`1h` / `24h` / `custom`），**不另造**本页自有类型 | 语义**逐条相同**（「最近 1 小时 / 最近 24 小时 / 自定义起止」三档，见 UI §6.3 ③ 与 §6.5 筛选区），且 P3 / P5 都用这**同一组**档位名；另造一个枚举会得到"同一屏上两个三档类型、序列化口径可能漂移"的**第二份真源**。`LogRange` 本身是**纯选项类型**（不含日志条目字段），跨页复用不引入耦合 | 无（**有意**）；若 PM 裁定审计不得引用 log 契约的类型，则在 `display-proto` 增一个中性的 `TimeRange` 并由两处共用（**不在 UI 层各造一份**） |
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use mupc_display_proto::LogRange;
@@ -61,7 +61,7 @@ use crate::lvgl::obj::Obj;
 use crate::lvgl::widgets::{Label, LongMode};
 use crate::lvgl::LvglError;
 use crate::ui::controls::{DateTimeStepper, DateTimeValue, SegmentedControl, DATETIME_TOTAL_H};
-use crate::ui::pages::{layout_box, set_visible, text_label};
+use crate::ui::pages::{layout_box, set_visible, text_label, CbSlot, TIGHT_GAP};
 use crate::ui::theme::{self, Dimens, Palette, TextSlot};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -69,20 +69,21 @@ use crate::ui::theme::{self, Dimens, Palette, TextSlot};
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 维度名（P3 §6.3 ③ / P5 §6.5 筛选区）。
-pub const TEXT_RANGE_LABEL: &str = "时间范围";
+pub(crate) const TEXT_RANGE_LABEL: &str = "时间范围";
 /// 档位一（UI §6.3 ③ / §6.5）。
-pub const TEXT_RANGE_H1: &str = "最近 1 小时";
+pub(crate) const TEXT_RANGE_H1: &str = "最近 1 小时";
 /// 档位二。
-pub const TEXT_RANGE_H24: &str = "最近 24 小时";
+pub(crate) const TEXT_RANGE_H24: &str = "最近 24 小时";
 /// 档位三（选中后展开两个 `DateTimeStepper`）。
-pub const TEXT_RANGE_CUSTOM: &str = "自定义";
+pub(crate) const TEXT_RANGE_CUSTOM: &str = "自定义";
 /// 自定义起（UI §3.6 P3「筛选」行）。
-pub const TEXT_START: &str = "起始时间";
+pub(crate) const TEXT_START: &str = "起始时间";
 /// 自定义止（同上）。
-pub const TEXT_END: &str = "结束时间";
+pub(crate) const TEXT_END: &str = "结束时间";
 
 /// 本件的**全部固定文案**（供 `ui/pages/mod.rs` 的 `ALL_TEXTS` 清册）。
-pub const ALL_TEXTS: &[&str] = &[
+#[cfg(test)]
+pub(crate) const ALL_TEXTS: &[&str] = &[
     TEXT_RANGE_LABEL,
     TEXT_RANGE_H1,
     TEXT_RANGE_H24,
@@ -96,10 +97,10 @@ pub const ALL_TEXTS: &[&str] = &[
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 三档的**槽位序**（下标 = `SegmentedControl` 的段序；唯一真源）。
-pub const RANGE_ORDER: [LogRange; 3] = [LogRange::H1, LogRange::H24, LogRange::Custom];
+pub(crate) const RANGE_ORDER: [LogRange; 3] = [LogRange::H1, LogRange::H24, LogRange::Custom];
 
 /// 档位 → 段下标。
-pub const fn range_index(r: LogRange) -> usize {
+pub(crate) const fn range_index(r: LogRange) -> usize {
     match r {
         LogRange::H1 => 0,
         LogRange::H24 => 1,
@@ -108,7 +109,7 @@ pub const fn range_index(r: LogRange) -> usize {
 }
 
 /// 段下标 → 档位（越界夹取到第 0 档；与 `SegmentedControl` 的"越界即夹取"同口径，**不 panic**）。
-pub const fn range_at(index: usize) -> LogRange {
+pub(crate) const fn range_at(index: usize) -> LogRange {
     if index >= RANGE_ORDER.len() {
         return RANGE_ORDER[0];
     }
@@ -116,7 +117,7 @@ pub const fn range_at(index: usize) -> LogRange {
 }
 
 /// 档位 → 段文案（UI §3.6 P3/P5「筛选」行逐字）。
-pub const fn range_text(r: LogRange) -> &'static str {
+pub(crate) const fn range_text(r: LogRange) -> &'static str {
     match r {
         LogRange::H1 => TEXT_RANGE_H1,
         LogRange::H24 => TEXT_RANGE_H24,
@@ -131,15 +132,13 @@ pub const fn range_text(r: LogRange) -> &'static str {
 ///
 /// `pub`：**同页其它筛选维度（如 P5 的「操作类型」行）必须与它同列**（同一页里两个维度名
 /// 左对齐不同会立刻看出来）；也是 P3 复用时的对齐基准。
-pub const LABEL_W: i32 = TextSlot::Label.px() as i32 * 4;
+pub(crate) const LABEL_W: i32 = TextSlot::Label.px() as i32 * 4;
 /// 首行（标签 + 分段控件）高 = `SegmentedControl` 的规格高（UI §5.1 #4「高 48」）。
 const SEG_ROW_H: i32 = Dimens::CHIP_H;
 /// 控件列 x（标签列 + 同组缝）。`pub` 的理由同 [`LABEL_W`]。
-pub const CTRL_X: i32 = LABEL_W + Dimens::GAP_MIN;
+pub(crate) const CTRL_X: i32 = LABEL_W + Dimens::GAP_MIN;
 /// 分段控件宽（到内容区右缘；3 段均分 ⇒ 每段 ≈290 px ≥ 最小 96，UI §5.1 #4）。
 const SEG_W: i32 = Dimens::CONTENT_W - CTRL_X;
-/// 两个块的紧缝（`theme` 无 8 px 档 ⇒ 取 `GAP_MIN / 2`，与 P1 `SOC_BAR_H` 同款口径）。
-const TIGHT_GAP: i32 = Dimens::GAP_MIN / 2;
 /// 自定义块（两行 `DateTimeStepper`）上缘 y。
 const CUSTOM_TOP: i32 = SEG_ROW_H + TIGHT_GAP;
 /// 自定义块高 = 起始行 + 同组缝 + 结束行。
@@ -185,7 +184,7 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// 该行为**确定且逐例可测**（见本文件单测与 **FR2**）。
 ///
 /// 年下界 1970（`controls::YEAR_MIN`）⇒ 结果恒 ≥ 0，无需负值分支。
-pub fn datetime_to_epoch_ms(v: DateTimeValue) -> u64 {
+pub(crate) fn datetime_to_epoch_ms(v: DateTimeValue) -> u64 {
     let days = days_from_civil(i64::from(v.year), i64::from(v.month), i64::from(v.day));
     let secs = days * 86_400 + i64::from(v.hour) * 3600 + i64::from(v.minute) * 60;
     if secs <= 0 {
@@ -195,9 +194,9 @@ pub fn datetime_to_epoch_ms(v: DateTimeValue) -> u64 {
 }
 
 /// 自定义区间的**可表示下界**（`1970/01/01 00:00`）—— 见 **FR1**。
-pub const CUSTOM_FROM_MIN: DateTimeValue = DateTimeValue::from_parts(1970, 1, 1, 0, 0);
+pub(crate) const CUSTOM_FROM_MIN: DateTimeValue = DateTimeValue::from_parts(1970, 1, 1, 0, 0);
 /// 自定义区间的**可表示上界**（`2100/12/31 23:59`）—— 见 **FR1**。
-pub const CUSTOM_TO_MAX: DateTimeValue = DateTimeValue::from_parts(2100, 12, 31, 23, 59);
+pub(crate) const CUSTOM_TO_MAX: DateTimeValue = DateTimeValue::from_parts(2100, 12, 31, 23, 59);
 
 /// 一次「时间范围」变化的**载荷**（经 [`TimeRangeFilter::set_on_change`] 交回外部）。
 ///
@@ -229,8 +228,13 @@ impl Default for TimeRangeChange {
 // 3. 共享件本体
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 变更回调槽（与 `p4_interlock.rs::IntentSlot` 同型；抽别名避免 `type_complexity` 告警）。
-type RangeSlot = RefCell<Option<Box<dyn FnMut(TimeRangeChange)>>>;
+/// 变更回调槽（[`CbSlot`]；与 `p4_interlock.rs::IntentSlot` **同语义**）。
+///
+/// **为什么不是 `RefCell<Option<Box<dyn FnMut(..)>>>`**（B2c-1 收口 ①）：裸槽会**暴露**内部
+/// 借用 ⇒ 调用点能写出"持 `try_borrow_mut` 借用直调用户回调"的旧写法（本单元修的 ③：
+/// 回调内自替换被静默丢弃）。[`CbSlot`] 只给 `set` / `fire` 两个动作、承载字段私有 ⇒
+/// 那种写法**编译不过**（见 `ui/pages/mod.rs::sealed`）。
+type RangeSlot = CbSlot<TimeRangeChange>;
 
 /// 时间范围筛选件（UI §6.3 ③ / §6.5）。
 ///
@@ -239,22 +243,35 @@ type RangeSlot = RefCell<Option<Box<dyn FnMut(TimeRangeChange)>>>;
 ///
 /// **所有权纪律**：所有拥有型 LVGL 句柄都存进字段（本项目出过 UAF 级缺陷：局部句柄随返回被
 /// `Drop` ⇒ 级联删除子树 ⇒ "界面空白但无报错"）。
+///
+/// ## ⚠️ 收口 ③：公共面收窄后为何下面出现 `#[allow(dead_code)]`
+///
+/// 本单元（B2c-1 收口 ③ / **M4**）把断言口收进 `#[cfg(test)]`、把纯逻辑项降为
+/// `pub(crate)`。副作用：若干**拥有型字段**在**非测试构建**里唯一的读者就是那些被 cfg 掉的
+/// 断言口 ⇒ rustc 判它们"从未被读"。**但字段本身必须留在生产构建里**（`Drop` 即级联删除
+/// 子树 —— 见上一段），故**逐个字段**就近加 `#[allow(dead_code)]`。**这不是放宽判据**：
+/// 它只抑制"字段未被读"这一条 lint，不改变所有权语义与运行期行为；一旦 P3（B2c-2）复用
+/// 本件时开始读它们，这些 allow 应当**删掉**。
 pub struct TimeRangeFilter {
     /// 本件根容器（高 = [`body_h`]）。
     root: Obj,
     /// 标签列容器（标签的父对象，**仅为保持子树存活**）。
+    #[allow(dead_code)]
     label_box: Obj,
     /// 维度名标签（`时间范围`）。
+    #[allow(dead_code)]
     title: Label,
     /// 档位分段控件（**唯一可点控件之一**）。
     seg: Rc<SegmentedControl>,
     /// 自定义块容器（仅 `Custom` 时可见）。
     custom_box: Obj,
     /// 起始行标签（`起始时间`）。
+    #[allow(dead_code)]
     start_label: Label,
     /// 起始步进器（5 列：年 / 月 / 日 / 时 / 分）。
     start: Rc<DateTimeStepper>,
     /// 结束行标签（`结束时间`）。
+    #[allow(dead_code)]
     end_label: Label,
     /// 结束步进器（5 列）。
     end: Rc<DateTimeStepper>,
@@ -265,7 +282,7 @@ pub struct TimeRangeFilter {
     start_v: Rc<Cell<DateTimeValue>>,
     /// 结束值（同 [`TimeRangeFilter::start_v`]）。
     end_v: Rc<Cell<DateTimeValue>>,
-    /// 用户变更回调（**只报意图、不发请求**）。
+    /// 用户变更回调（**只报意图、不发请求**；[`CbSlot`] —— 内部借用不外露）。
     on_change: RangeSlot,
 }
 
@@ -343,7 +360,7 @@ impl TimeRangeFilter {
             end,
             start_v,
             end_v,
-            on_change: RefCell::new(None),
+            on_change: CbSlot::new(),
         };
         // 初值即"最新已知态"：初始化**不触发**回调（与 `SegmentedControl::set_selected`
         // 的"程序化设值不回调"同口径 —— 意图只由**用户操作**产生）。
@@ -367,13 +384,18 @@ impl TimeRangeFilter {
         }
     }
 
-    /// 触发用户回调（**绝不 panic**；重入时静默跳过，与 `p4_interlock.rs` 的 **IL28** 同口径）。
+    /// 触发用户回调（**绝不 panic**）。
+    ///
+    /// **重入安全（B2c-1 代码质量评审 ③）**：委托给 [`CbSlot::fire`]（"取出 → 调用 →
+    /// 槽仍为空才放回"，调用期**不持任何借用**）—— 回调内再调
+    /// [`TimeRangeFilter::set_on_change`] 时那里的 `try_borrow_mut` **必然成功**，
+    /// 新回调自**下一次**通知起生效。**本次仍由旧回调执行完毕**。
+    ///
+    /// ⚠️ **本函数刻意只做转发**（收口 ①）：真身在 [`CbSlot::fire`]，槽的内部借用**不外露**
+    /// ⇒ 这里**写不出**"持借用直调"的旧写法（`self.on_change` 上没有 `try_borrow_mut`，
+    /// 其承载字段也私有）。
     fn fire(&self, c: TimeRangeChange) {
-        if let Ok(mut s) = self.on_change.try_borrow_mut() {
-            if let Some(f) = s.as_mut() {
-                f(c);
-            }
-        }
+        self.on_change.fire(c);
     }
 
     /// **接线**（只在 [`build`] 内调用一次）：段控件 / 两个步进器 → 本件回调。
@@ -415,18 +437,15 @@ impl TimeRangeFilter {
         &self.root
     }
 
-    /// 标签列容器（装配断言口径）。
-    pub fn label_obj(&self) -> &Obj {
-        &self.label_box
-    }
-
     /// 维度名文案（装配断言口径）。
-    pub fn title_text(&self) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn title_text(&self) -> Option<String> {
         self.title.text()
     }
 
     /// 起始 / 结束行标签文案（`0` = 起始，`1` = 结束；越界 `None`）。
-    pub fn name_text(&self, index: usize) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn name_text(&self, index: usize) -> Option<String> {
         match index {
             0 => self.start_label.text(),
             1 => self.end_label.text(),
@@ -435,17 +454,14 @@ impl TimeRangeFilter {
     }
 
     /// 分段控件本体（装配 / 断言口径；**改档位请用 [`TimeRangeFilter::set_range`]**）。
-    pub fn seg(&self) -> &SegmentedControl {
+    #[cfg(test)]
+    pub(crate) fn seg(&self) -> &SegmentedControl {
         &self.seg
     }
 
-    /// 自定义块容器（装配断言口径）。
-    pub fn custom_obj(&self) -> &Obj {
-        &self.custom_box
-    }
-
     /// 起始 / 结束步进器（`0` = 起始，`1` = 结束；越界 `None`）。
-    pub fn stepper(&self, index: usize) -> Option<&DateTimeStepper> {
+    #[cfg(test)]
+    pub(crate) fn stepper(&self, index: usize) -> Option<&DateTimeStepper> {
         match index {
             0 => Some(&self.start),
             1 => Some(&self.end),
@@ -454,7 +470,7 @@ impl TimeRangeFilter {
     }
 
     /// 当前档位（读自**段控件的实测选中位**，不另存副本 —— 与本仓"单一真源"口径一致）。
-    pub fn range(&self) -> LogRange {
+    pub(crate) fn range(&self) -> LogRange {
         range_at(self.seg.selected())
     }
 
@@ -474,12 +490,13 @@ impl TimeRangeFilter {
     }
 
     /// 当前档位对应的体高（= [`body_h`]`(`[`TimeRangeFilter::range`]`)`）。
-    pub fn body_h(&self) -> i32 {
+    pub(crate) fn body_h(&self) -> i32 {
         body_h(self.range())
     }
 
     /// 自定义块是否在显（读回 LVGL 的隐藏标志，**不另存副本**）。
-    pub fn custom_visible(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn custom_visible(&self) -> bool {
         !self.custom_box.is_hidden()
     }
 
@@ -491,7 +508,7 @@ impl TimeRangeFilter {
     }
 
     /// **程序化**置起止（**不触发**回调）。
-    pub fn set_bounds(&self, start: DateTimeValue, end: DateTimeValue) {
+    pub(crate) fn set_bounds(&self, start: DateTimeValue, end: DateTimeValue) {
         self.start_v.set(start);
         self.end_v.set(end);
         self.start.set_value(start);
@@ -506,16 +523,19 @@ impl TimeRangeFilter {
 
     /// 注册用户变更回调。
     ///
-    /// ⚠️ **可在回调体内自替换** —— 注册侧走 `try_borrow_mut`（在回调期间再注册不得 panic，
-    /// 该 panic 会被事件桥 `catch_unwind` 静默吞掉，屏上无任何迹象）。语义为"新回调自下一次
-    /// 通知起生效"（与 `ui/controls.rs` 的 `set_on_change` 同款）。
+    /// **可在回调体内自替换**（本单元 ③ 的整改点）：[`TimeRangeFilter::fire`] 经
+    /// [`CbSlot::fire`] 走 take/put-back —— 调用用户回调期间**不持有任何借用** ⇒ 这里的
+    /// `try_borrow_mut` **必然成功**。语义（契约，与 `ui/controls.rs::set_on_change` 同款）：
+    /// 回调内自替换 ⇒ **本次通知仍由旧回调执行完毕，新回调自下一次通知起生效**。
+    ///
+    /// ⚠️ 注册侧走 [`CbSlot::set`] 的 `try_borrow_mut` 而**不是** `borrow_mut`：拿不到借用
+    /// （未来若出现其它长借用路径）时**静默不注册**而不是 panic（事件回调内的 panic 会被
+    /// 事件桥 `catch_unwind` 吞掉，屏上无任何迹象 —— 那才是更难查的失效）。
     pub fn set_on_change<F>(&self, f: F)
     where
         F: FnMut(TimeRangeChange) + 'static,
     {
-        if let Ok(mut s) = self.on_change.try_borrow_mut() {
-            *s = Some(Box::new(f));
-        }
+        self.on_change.set(f);
     }
 }
 

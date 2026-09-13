@@ -1278,23 +1278,20 @@ fn load_font_cmap() -> Option<std::collections::BTreeSet<char>> {
     Some(cmap)
 }
 
-/// 用**生产字体**（`fonts/lv_font_noto_sc_{px}.c` 的 `adv_w` 表）实测一段文本的**单行自然宽**
-/// （px）。`None` = 字体产物缺失（干净 clone 常态 ⇒ 跳过，与 [`load_font_cmap`] 同一口径）。
+/// **入库的宽度基线清单**（`fonts/lv_font_metrics.txt`；与 [`CMAP_MANIFEST`] 同一次生成、
+/// 同一份"派生项入库、产物不入库"约定，见 `fonts/gen_fonts.sh` 顶部注释）。
+const METRICS_MANIFEST: &str = "lv_font_metrics.txt";
+
+/// 从**生产字体产物** `fonts/lv_font_noto_sc_{px}.c` 取 `adv_w` 表（码位 → 1/16 px）。
+/// `None` = 该档产物不存在（干净 clone / CI 常态）。
 ///
-/// **为何必须读生成物、而不是在用例里 `size()` 量标签**：`noto-font` feature 默认**未启用**
-/// （`local-display/Cargo.toml`）⇒ 离屏用例里的标签走**降级字体**（无 CJK 字形）⇒ 量出来的宽度
-/// **不是真机宽度**（本仓库实测：同一串「审计服务连接超时，操作未执行：请检查审计服务后重试」
-/// 在降级字体下 ≈250 px，在生产 24 px 档 ≈600 px）。判"长文本放得下"只能读**真机的字形宽度表**
-/// —— 与 [`ui_texts_covered_by_font_cmap`] 读同一份产物。
-///
-/// 口径：`adv_w` 单位为 **1/16 px**，逐字求和、**不计 kerning**（⇒ 结果是**上界**，偏保守）；
-/// cmap 外 / 缺字按整字宽兜底（同样是上界）。
-fn measured_text_px(text: &str, px: u32) -> Option<i32> {
+/// 口径：`glyph_dsc` 的 `adv_w` 按 **glyph id 顺序**出现；`unicode_list_0[i]` = 码位 −
+/// `range_start`(32)，其 glyph id = 1 + i。
+fn adv_w_from_c(px: u32) -> Option<std::collections::BTreeMap<u32, u64>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fonts")
         .join(format!("lv_font_noto_sc_{px}.c"));
     let src = std::fs::read_to_string(path).ok()?;
-    // `glyph_dsc` 的 `adv_w` 按 **glyph id 顺序**出现（id 0 = reserved）。
     let adv: Vec<u64> = src
         .split(".adv_w = ")
         .skip(1)
@@ -1306,27 +1303,225 @@ fn measured_text_px(text: &str, px: u32) -> Option<i32> {
                 .unwrap_or(0)
         })
         .collect();
-    // `unicode_list_0[i]` = 码位 − `range_start`(32)，其 glyph id = `glyph_id_start`(1) + i。
     let head = "unicode_list_0[] = {";
     let start = src.find(head)? + head.len();
     let end = src[start..].find("};")? + start;
-    let mut map: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    let mut map = std::collections::BTreeMap::new();
     for (i, tok) in src[start..end].split(',').enumerate() {
         let tok = tok.trim();
         if let Some(hex) = tok.strip_prefix("0x") {
             if let Ok(v) = u32::from_str_radix(hex, 16) {
-                map.insert(v + 32, i + 1);
+                if let Some(a) = adv.get(i + 1) {
+                    map.insert(v + 32, *a);
+                }
             }
         }
     }
+    Some(map)
+}
+
+/// **基线文件头的「档位自证」行**（`# 本基线档位：24 26 …`）—— 档位清单的**唯一真源**。
+///
+/// 由 `fonts/gen_fonts.sh` 写出（B2c-1 收口 ⑥）：此前档位清单**第二份真源**硬编码在用例里
+/// （`[24u32, 26, …]`），基线头只自证"档位数" ⇒ 新增一档时两处**都可能**不更新，而
+/// "畸形值静默变 0 ⇒ `w <= 列宽` 恒真"的失效模式没有任何网。见 [`metrics_tiers`]。
+const METRICS_TIERS_PREFIX: &str = "# 本基线档位：";
+
+/// **基线文件头的「档位数自证」行**（`# 本基线档位数：10`）—— 与档位表**互相钉住**。
+const METRICS_TIER_COUNT_PREFIX: &str = "# 本基线档位数：";
+
+/// 从**入库宽度基线**的文件头解析**档位清单**（[`METRICS_TIERS_PREFIX`]）。
+///
+/// **响亮失败（B2c-1 收口 ⑥）**：自证行缺失 / 空表 / 非数字 / 重复档号，或与
+/// [`METRICS_TIER_COUNT_PREFIX`] 自证的档位数不符 ⇒ 一律 `panic`。**不得**静默返回空表
+/// （空表会让"档位清单"这张网失去意义且无人察觉）。
+fn metrics_tiers(src: &str) -> Vec<u32> {
+    let line = src
+        .lines()
+        .find(|l| l.trim_start().starts_with(METRICS_TIERS_PREFIX))
+        .unwrap_or_else(|| {
+            panic!(
+                "{METRICS_MANIFEST} 缺少档位自证行 `{METRICS_TIERS_PREFIX}…`（它是档位清单的\
+                 **唯一真源**：删掉它 ⇒ 本网**响亮失败**，而不是静默退化）"
+            )
+        });
+    let tiers: Vec<u32> = line
+        .trim_start()
+        .trim_start_matches(METRICS_TIERS_PREFIX)
+        .split_whitespace()
+        .map(|t| {
+            t.parse::<u32>().unwrap_or_else(|_| {
+                panic!("{METRICS_MANIFEST} 的档位自证行里有**非数字**档号：`{t}`（行 = `{line}`）")
+            })
+        })
+        .collect();
+    assert!(
+        !tiers.is_empty(),
+        "{METRICS_MANIFEST} 的档位自证行为**空表**（`{line}`）—— 空表会让宽度网失去意义"
+    );
+    let uniq: std::collections::BTreeSet<u32> = tiers.iter().copied().collect();
+    assert_eq!(
+        uniq.len(),
+        tiers.len(),
+        "{METRICS_MANIFEST} 的档位自证行有**重复档号**：{tiers:?}"
+    );
+    let count_line = src
+        .lines()
+        .find(|l| l.trim_start().starts_with(METRICS_TIER_COUNT_PREFIX))
+        .unwrap_or_else(|| {
+            panic!(
+                "{METRICS_MANIFEST} 缺少档位数自证行 `{METRICS_TIER_COUNT_PREFIX}…`\
+                 （两行都是基线头的一部分，必须同步）"
+            )
+        });
+    let n: usize = count_line
+        .trim_start()
+        .trim_start_matches(METRICS_TIER_COUNT_PREFIX)
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| {
+            panic!("{METRICS_MANIFEST} 的档位数自证行不是数字：`{count_line}`")
+        });
+    assert_eq!(
+        n,
+        tiers.len(),
+        "{METRICS_MANIFEST}：档位数自证 `{n}` ≠ 档位表长度 `{}`（两行均由 gen_fonts.sh 写出，\
+         改一处忘另一处 ⇒ 本网响亮失败）",
+        tiers.len()
+    );
+    tiers
+}
+
+/// 从**入库宽度基线** `fonts/lv_font_metrics.txt` 取某档的 `adv_w` 表（码位 → 1/16 px）。
+/// `None` = **基线文件缺失**（仓库损坏；那时 [`adv_w_map`] 会带指引地 `panic`）。
+///
+/// 对齐口径：基线每行 `<px> <v1> <v2> … <vN>` 的 N 个值与 [`CMAP_MANIFEST`] 的码位
+/// **按升序一一对应**（两者由 `fonts/gen_fonts.sh` **同一次运行**写出）。
+///
+/// **响亮失败（B2c-1 收口 ⑥ —— 原实现用 `?` / `unwrap_or(0)` 静默吞畸形行）**：
+/// - `px` **不在**基线的档位自证表（[`metrics_tiers`]）内 ⇒ `panic`（而不是返回 `None`：
+///   返回 `None` 会让 [`adv_w_map`] 误报"仓库损坏"，真实原因是"档位清单与字体阶梯脱节"）；
+/// - 数据行首 token 非 `<px>`、或任一 adv_w 非数字 ⇒ `panic`（此前 `unwrap_or(0)` 会把
+///   畸形值**静默变成 0** —— 而 `w <= 列宽` 对 0 恒真 ⇒ **宽度网静默失效**，最难查的一类）；
+/// - 自证表里有该档却**没有数据行** ⇒ `panic`（基线与自证表脱节）。
+fn adv_w_from_baseline(px: u32) -> Option<std::collections::BTreeMap<u32, u64>> {
+    let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+    let manifest_src = std::fs::read_to_string(fonts_dir.join(CMAP_MANIFEST)).ok()?;
+    let cps: Vec<u32> = manifest_src
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            u32::from_str_radix(
+                l.strip_prefix("U+").unwrap_or_else(|| {
+                    panic!("{CMAP_MANIFEST}：`{l}` 不是 `U+XXXX` 形态（与码表解析器脱节）")
+                }),
+                16,
+            )
+            .unwrap_or_else(|_| panic!("{CMAP_MANIFEST}：`{l}` 不是合法码位"))
+        })
+        .collect();
+    let metrics_src = std::fs::read_to_string(fonts_dir.join(METRICS_MANIFEST)).ok()?;
+    // ① 档位自证（唯一真源）+ 询问方必须在表内。
+    let tiers = metrics_tiers(&metrics_src);
+    assert!(
+        tiers.contains(&px),
+        "{METRICS_MANIFEST} 的档位自证表里**没有 `{px}` 档**，但本档被宽度断言问到 ⇒ \
+         **基线档位与代码的字体阶梯脱节**（新增档位后忘了重跑 `fonts/gen_fonts.sh`）；\
+         基线现有档位 = {tiers:?}"
+    );
+    // ② 定位数据行（畸形的首 token **响亮失败**，不再走 `?` 静默返回 `None`）。
+    for line in metrics_src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let Some(head) = it.next() else { continue };
+        let got_px: u32 = head.parse().unwrap_or_else(|_| {
+            panic!(
+                "{METRICS_MANIFEST}：数据行的首 token `{head}` 不是合法 `<px>` 档号（畸形行 \
+                 —— 原实现用 `?` 静默跳过，见 B2c-1 收口 ⑥；行 = `{line}`）"
+            )
+        });
+        if got_px != px {
+            continue;
+        }
+        let vals: Vec<u64> = it
+            .map(|v| {
+                v.parse::<u64>().unwrap_or_else(|_| {
+                    panic!(
+                        "{METRICS_MANIFEST} 的 `{px}` 档里有**非数字 adv_w**：`{v}` —— 原实现用 \
+                         `unwrap_or(0)` 把它静默吞成 0，而 `w <= 列宽` 对 0 **恒真** ⇒ 宽度网\
+                         **静默失效**（B2c-1 收口 ⑥）"
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            vals.len(),
+            cps.len(),
+            "{METRICS_MANIFEST} 的 `{px}` 档有 {} 个 adv_w，但 {CMAP_MANIFEST} 有 {} 个码位 \
+             —— 两份入库清单**不是同一次生成**（请重跑 fonts/gen_fonts.sh 并一起提交）",
+            vals.len(),
+            cps.len()
+        );
+        return Some(cps.iter().copied().zip(vals).collect());
+    }
+    panic!(
+        "{METRICS_MANIFEST} 的档位自证表里有 `{px}`，但**没有它的数据行** —— 自证表与数据\
+         脱节（请重跑 fonts/gen_fonts.sh）"
+    );
+}
+
+/// 某档字号的 `adv_w` 表（**读取顺序 = [`load_font_cmap`] 同款**）：
+///
+/// ① 有 `.c` 产物（跑过 `gen_fonts.sh` 的机器）⇒ 用它；**若入库基线也在，则逐值交叉校验**
+///    （漂移即**响亮失败**，提示重跑 `fonts/gen_fonts.sh`）；
+/// ② 无 `.c`（干净 clone / CI 常态）⇒ 用**入库基线** `fonts/lv_font_metrics.txt`（**不再跳过**）；
+/// ③ 两者皆缺（仓库损坏 / 该档未入库）⇒ **响亮失败** —— 宽度类断言**不得**静默空转
+///    （B2c-1 代码质量评审 ⑤：此前"读不到就 `return`" ⇒ 宽度网在 CI 上**整段跳过**且照绿）。
+fn adv_w_map(px: u32) -> std::collections::BTreeMap<u32, u64> {
+    let from_c = adv_w_from_c(px);
+    let from_base = adv_w_from_baseline(px);
+    if let (Some(c), Some(b)) = (&from_c, &from_base) {
+        assert_eq!(
+            c, b,
+            "**宽度基线漂移**：`fonts/lv_font_noto_sc_{px}.c` 的 adv_w 与入库基线 \
+             `{METRICS_MANIFEST}` 不一致 —— 请重跑 `fonts/gen_fonts.sh` 并提交新的基线"
+        );
+    }
+    from_c.or(from_base).unwrap_or_else(|| {
+        panic!(
+            "既无字体产物 `fonts/lv_font_noto_sc_{px}.c`（产物不入库，干净 clone / CI 常态），\
+             入库基线 `{METRICS_MANIFEST}` 里也没有 `{px}` 档 —— 宽度类断言**无法执行**。\
+             请跑 `fonts/gen_fonts.sh` 重生成产物与基线（本检查**故意不静默跳过**：\
+             「没量到」不等于「没问题」，见 B2c-1 代码质量评审 ⑤）"
+        )
+    })
+}
+
+/// 用**生产字体**（`.c` 的 `adv_w` 表，或 CI 上的**入库基线**）实测一段文本的**单行自然宽**
+/// （px）。**缺基线即 `panic`**（见 [`adv_w_map`]）—— 调用方不再需要处理 `None`。
+///
+/// **为何必须读生成物 / 基线、而不是在用例里 `size()` 量标签**：`noto-font` feature 默认
+/// **未启用**（`local-display/Cargo.toml`）⇒ 离屏用例里的标签走**降级字体**（无 CJK 字形）
+/// ⇒ 量出来的宽度**不是真机宽度**（本仓库实测：同一串「审计服务连接超时，操作未执行：请检查
+/// 审计服务后重试」在降级字体下 ≈250 px，在生产 24 px 档 ≈600 px）。判"长文本放得下"只能读
+/// **真机的字形宽度表** —— 与 [`ui_texts_covered_by_font_cmap`] 的码表口径同源。
+///
+/// 口径：`adv_w` 单位为 **1/16 px**，逐字求和、**不计 kerning**（⇒ 结果是**上界**，偏保守）；
+/// cmap 外 / 缺字按整字宽兜底（同样是上界）。
+fn measured_text_px(text: &str, px: u32) -> i32 {
+    let map = adv_w_map(px);
     let mut w16: u64 = 0;
     for ch in text.chars() {
-        w16 += match map.get(&(ch as u32)).and_then(|g| adv.get(*g)) {
+        w16 += match map.get(&(ch as u32)) {
             Some(a) => *a,
             None => u64::from(px) * 16, // cmap 外 / 缺字 ⇒ 整字宽兜底（上界）
         };
     }
-    Some((w16 / 16) as i32)
+    (w16 / 16) as i32
 }
 
 /// 码表覆盖率（设计 §11.1「码表覆盖率」）—— **基线 = 生成字体的实际 cmap**
@@ -4638,11 +4833,13 @@ pub(crate) fn pages_chain() {
             "右槽不显 ⇒ 左槽独占整条原因带（992 px；IL23 ②）—— \
              「改什么会让本条变红」：把 `refresh_actions` 的 `REASON_LEFT_FULL_W` 改回 `REASON_LEFT_W`"
         );
-        // **实测文本自然宽**（口径见 [`measured_text_px`]）：**用生产字体**的字形宽度表量，
-        // 而不是量离屏标签 —— `noto-font` 默认未启用，离屏标签走降级字体（无 CJK 字形），
-        // 量出来只有真机的 ~2/5。字体产物缺失（干净 clone）⇒ 跳过（与码表网同一口径）。
+        // **实测文本自然宽**（口径见 [`measured_text_px`]）：**用生产字体**的字形宽度表量
+        // （无 `.c` 的干净 clone / CI 上走**入库基线** `fonts/lv_font_metrics.txt`；两者皆缺
+        // ⇒ **响亮失败**，不再静默跳过 —— B2c-1 代码质量评审 ⑤），而不是量离屏标签：
+        // `noto-font` 默认未启用，离屏标签走降级字体（无 CJK 字形），量出来只有真机的 ~2/5。
         let long_msg = "审计服务连接超时，操作未执行：请检查审计服务后重试";
-        if let Some(natural) = measured_text_px(long_msg, TextSlot::Body.px()) {
+        {
+            let natural = measured_text_px(long_msg, TextSlot::Body.px());
             assert!(
                 natural > 352,
                 "长文案自然宽必须 **> 352 px**（否则本段证明不了「352 槽会截断它」；实测 {natural} px）"
@@ -5014,6 +5211,33 @@ pub(crate) fn pages_chain() {
             p5_audit::BannerSkin::Warn,
             "不得与警示条同档（§6.5「合规凭据」专属色）"
         );
+        // **像素读回（评审 ⑥ 的整改）**：上面那条读的是页面**自己记的**应用标记（"我打算用
+        // 哪一档"），单看它**证明不了**样式真的被挂上去了（把 `set_bg_color(..)` 的实参换成
+        // 别的色值、标记不动 ⇒ 原断言照绿）。故在这里直接读**渲染结果**：说明条内的取样点
+        // 必须是 `Palette::AUDIT_BG`（内存序 `B,G,R`，见 `lvgl::tests::lv_color`）。
+        // 「改什么会让本条变红」：把 `audit_banner_style()` 里的 `set_bg_color(BANNER_BG)`
+        // 换成任何别的色值 ⇒ 下面 `assert_eq!` 立刻红（**这是唯一从"实际施加"派生的判据**）。
+        {
+            let c = p5.immutable_obj().coords();
+            let (px, py) = (c.x1 + 700, c.y1 + 24); // 条内右侧空白处（文案列之外、圆角之内）
+            assert!(
+                px < c.x2 && py < c.y2,
+                "取样点必须落在说明条内（coords = {c:?}）"
+            );
+            let off = (py as usize * W as usize + px as usize) * BPP;
+            let got = [sink.borrow()[off], sink.borrow()[off + 1], sink.borrow()[off + 2]];
+            let want = [Palette::AUDIT_BG.b, Palette::AUDIT_BG.g, Palette::AUDIT_BG.r];
+            assert_eq!(
+                got, want,
+                "说明条**实际渲染**的底色必须是 §6.5 的 #14231F（B,G,R = {want:?}）；\
+                 实际 = {got:?}（`set_bg_color` 被改 ⇒ 本行红）"
+            );
+            assert_ne!(
+                got,
+                [Palette::WARN_BG.b, Palette::WARN_BG.g, Palette::WARN_BG.r],
+                "不得渲染成警示条底色"
+            );
+        }
 
         // ── ② 共享「时间范围」件（P3 / P5 共用；UI §6.5 筛选区「同 P3」）───────────
         assert_eq!(
@@ -5187,11 +5411,15 @@ pub(crate) fn pages_chain() {
         // ── ⑤′ **时间倒序由本页保证**（§6.5；**乱序注入 ⇒ 屏上仍倒序**）──────────────────
         // 「改什么会让本条变红」：删掉 `Core::apply_page` 里的 `row_order(..)`（改用注入序）
         // ⇒ 下面第 1 / 2 行立刻红。
+        //
+        // ⚠️ **三条记录必须用不同的 `ConsoleOp`**（B2c-1 代码质量评审 ⑦）：三条**同为**
+        // `ConfigApply` 时，"行序"与"标签刷新序"的错位**不可观测**（第 0 行不管取哪一条记录，
+        // 操作类型都一样）⇒ 把 `refresh_op_labels` 改成注入序也**照样全绿**（原断言的缺陷）。
         {
             let t_new = audit_entry(
                 "id-s1",
                 1_789_047_700_000,
-                ConsoleOp::ConfigApply,
+                ConsoleOp::InterlockRelease, // ← 最新一条：与另两条**不同**
                 AuditResult::Ok,
                 "gateway.port",
                 None,
@@ -5211,7 +5439,7 @@ pub(crate) fn pages_chain() {
             let t_old = audit_entry(
                 "id-s3",
                 1_789_000_000_000,
-                ConsoleOp::ConfigApply,
+                ConsoleOp::InterlockAckM1, // ← 最旧一条：与另两条**不同**
                 AuditResult::Ok,
                 "gateway.port",
                 None,
@@ -5236,22 +5464,37 @@ pub(crate) fn pages_chain() {
                 Some("2026/09/10 00:26:40"),
                 "末行必须是最旧一条"
             );
-            // 操作类型列也必须按**同一行序**刷新（两处共用 `row_order`；用注入标签区分"错位"）。
-            p5.set_ops(&[OpOption {
-                op: ConsoleOp::ConfigApply,
-                label: "debug".into(),
-            }]);
+            // 操作类型列也必须按**同一行序**刷新（[`row_order`] 是两处的共用真源）：
+            // 给三个 op 各注入一个**互不相同**的哨兵标签 ⇒ 任何错位都能被下面三条抓住。
+            p5.set_ops(&[
+                OpOption {
+                    op: ConsoleOp::ConfigApply,
+                    label: "A1".into(),
+                },
+                OpOption {
+                    op: ConsoleOp::InterlockRelease,
+                    label: "B1".into(),
+                },
+                OpOption {
+                    op: ConsoleOp::InterlockAckM1,
+                    label: "C1".into(),
+                },
+            ]);
             assert_eq!(
                 p5.row_op(0).as_deref(),
-                Some("DEBUG"),
-                "标签刷新必须跟着同一行序走（否则第 0 行的操作类型会错位）"
+                Some("B1"),
+                "第 0 行 = 最新一条（InterlockRelease）⇒ 标签刷新**必须**跟着同一行序走\
+                 （改成注入序 ⇒ 第 0 行取到 t_mid 的 `A1`，本例立刻红）"
             );
+            assert_eq!(p5.row_op(1).as_deref(), Some("A1"), "第 1 行 = 中间那条");
+            assert_eq!(p5.row_op(2).as_deref(), Some("C1"), "第 2 行 = 最旧那条");
             p5.set_ops(&p5_audit::canonical_ops());
         }
 
-        // ── ⑤″ **未登记 `target` 键在屏上仍可辨认**（评审 ③）──────────────────────────
+        // ── ⑤″ **未登记 `target` 键在屏上仍可辨认 + 不同键可区分**（评审 ③④）────────────
         // 「改什么会让本条变红」：把 `summary_text` 的未登记分支改回"只留值对"（原实现）
-        // ⇒ 第 2 条（starts_with）立刻红（屏上就没有字段标识了）。
+        // ⇒ 第 2 条（starts_with）立刻红（屏上就没有字段标识了）；把键的截断改回**保头**
+        // ⇒ 第 3 条（flood ≠ force）立刻红（原实现下两者屏上完全相同）。
         {
             let unknown = audit_entry(
                 "id-u1",
@@ -5267,10 +5510,33 @@ pub(crate) fn pages_chain() {
             disp.refr_now_for_test();
             let shown = p5.row_summary(0).expect("值对文案");
             assert!(
-                shown.starts_with("IN?ER"),
-                "未登记键 ⇒ 屏上仍有**可辨认**的机器键前缀（实际：{shown}）"
+                shown.starts_with(p5_audit::TEXT_ELLIPSIS),
+                "未登记键 ⇒ 屏上仍有**可辨认**的机器键（**保尾**截断，实际：{shown}）"
+            );
+            assert!(
+                !shown.contains("interlock.flood"),
+                "原始小写机器键不上屏（实际：{shown}）"
             );
             assert!(shown.contains("1 → 2"), "值对不得被键挤掉（实际：{shown}）");
+            // **不同未登记键 ⇒ 屏上产物必须不同**（评审 ④ 的补网；原实现下两者相同）。
+            let unknown2 = audit_entry(
+                "id-u3",
+                1_789_047_500_000,
+                ConsoleOp::ConfigApply,
+                AuditResult::Ok,
+                "interlock.force",
+                Some(serde_json::json!(1)),
+                Some(serde_json::json!(2)),
+                None,
+            );
+            p5.set_page(&audit_page(vec![unknown2], true, false, Some(1)));
+            disp.refr_now_for_test();
+            let shown2 = p5.row_summary(0).expect("值对文案");
+            assert_ne!(
+                shown, shown2,
+                "`interlock.flood` 与 `interlock.force` 在屏上**必须可区分**\
+                 （保头截断会让两者同形（实际：{shown} vs {shown2}））"
+            );
             // **不臆造**：不得出现任何已登记键的中文标签。
             for (_, label) in p5_audit::TARGET_LABELS
                 .iter()
@@ -5281,10 +5547,12 @@ pub(crate) fn pages_chain() {
                         .map(|(k, op)| (*k, op.label())),
                 )
             {
-                assert!(
-                    !shown.contains(label),
-                    "未登记键**不得**借用中文标签 `{label}`（实际：{shown}）"
-                );
+                for s in [&shown, &shown2] {
+                    assert!(
+                        !s.contains(label),
+                        "未登记键**不得**借用中文标签 `{label}`（实际：{s}）"
+                    );
+                }
             }
             // 契约点名的两个联锁键 ⇒ 带**中文**标签（**不再**是裸值对）。
             let release = audit_entry(
@@ -5318,7 +5586,8 @@ pub(crate) fn pages_chain() {
                 t1.chars().count(),
                 "时间戳必须**定长**（等宽的前提；实际 `{t0}` vs `{t1}`）"
             );
-            if let (Some(w0), Some(w1)) = (measured_text_px(&t0, 24), measured_text_px(t1, 24)) {
+            {
+                let (w0, w1) = (measured_text_px(&t0, 24), measured_text_px(t1, 24));
                 assert_eq!(
                     w0, w1,
                     "不同时刻的时间戳像素宽必须**相等**（等宽数字；`{t0}` vs `{t1}`）"
@@ -5335,7 +5604,8 @@ pub(crate) fn pages_chain() {
                 p5_audit::TEXT_OPERATOR_LOCAL,
                 "操作者列是**定长**的 §3.6 中文名（未知名才需 DOTS 截断）"
             );
-            if let Some(wop) = measured_text_px(&op, 24) {
+            {
+                let wop = measured_text_px(&op, 24);
                 assert!(
                     wop <= p5_audit::ROW_OP_W,
                     "操作者名 {wop} px 必须放得进操作者列 {} px",
@@ -5627,8 +5897,166 @@ pub(crate) fn pages_chain() {
         let painted5 = sink.borrow().iter().filter(|b| **b != 0).count();
         assert!(painted5 > 10_000, "P5 渲染后 sink 中应有成片非背景像素（实际 {painted5}）");
 
-        drop(p5);
+        // ── ⑬ **`drop(P5AuditPage)` 必须释放整页**（**C1**：`Rc<Core>` 强引用环的回归网）─────
+        // 「改什么会让本条变红」：把 chip 回调槽里的 `Weak<Core>` 改回 `Rc<Core>` ——
+        // 环 = `Core → ops → chips.on_change → Rc<Core>` ⇒ `drop` **不释放任何对象**（整棵树
+        // 连 `root` 一起永久留在宿主上）⇒ 下面第 1 条断言（`!is_alive()`）**当场红**。
+        // **为什么用存活探针而不是"再建一页"**：环存在时"再建一页"会先在 LVGL 里
+        // `lv_realloc` 失败 + `lv_array_resize` 断言 ⇒ **挂死**（不是红）；而 `is_alive()` 是
+        // LVGL 的 DELETE 事件**确定性**置位的标志 ⇒ 立刻、无分配地拿到判定。
+        // 探针句柄是**非拥有**的共享句柄（`share_borrowed`：同 `alive`、不重复挂回调）。
+        {
+            let probes = [
+                ("root（页根滚动容器）", p5.obj().share_borrowed()),
+                ("最近审计条", p5.newest_obj().share_borrowed()),
+                ("不可篡改说明条", p5.immutable_obj().share_borrowed()),
+                ("共享时间范围件", p5.filter().obj().share_borrowed()),
+                ("操作类型 chip 组容器", p5.ops_obj().share_borrowed()),
+                ("表头", p5.head_obj().share_borrowed()),
+                ("列表容器", p5.list_obj().share_borrowed()),
+            ];
+            for (what, o) in &probes {
+                assert!(o.is_alive(), "探针建立时 `{what}` 必须存活");
+            }
+            drop(p5);
+            for (what, o) in &probes {
+                assert!(
+                    !o.is_alive(),
+                    "`drop(P5AuditPage)` 之后 `{what}` 必须已被级联删除 —— 仍存活 ⇒ 存在 \
+                     `Rc` 强引用环（整页泄漏；C1）"
+                );
+            }
+        }
+
+        // ── ⑭ **连续建 / 拆 P5 页（满行）必须全部成功**（**C1** 的生产路径回归网）──────────
+        // 此时宿主上**没有**其它页（`p5` 已在 ⑬ 拆掉）⇒ 每轮都是"单页满行"，与 AU8 的
+        // 单页测量前提一致。**环存在时**：第 1 轮 `drop` 泄漏整页 ⇒ 第 2 轮 `new` 即
+        // `OutOfMemory`（⑬ 的探针会先一步变红，故本条不会跑到挂死点）。
+        for round in 0..3 {
+            let p = p5_audit::P5AuditPage::new(&host).expect("第 N 轮建 P5 页（环存在时这里 OOM）");
+            let full: Vec<_> = (0..AUDIT_PAGE_SIZE)
+                .map(|i| {
+                    audit_entry(
+                        &format!("id-churn-{round}-{i}"),
+                        1_700_000_000_000 + i as u64,
+                        ConsoleOp::ConfigApply,
+                        AuditResult::Ok,
+                        "gateway.port",
+                        Some(serde_json::json!(i)),
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            p.set_page(&audit_page(full, true, true, Some(1)));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p.visible_rows(),
+                AUDIT_PAGE_SIZE,
+                "第 {round} 轮：满行（{AUDIT_PAGE_SIZE} 条）必须建成"
+            );
+            assert_eq!(p.rows_alive(), AUDIT_PAGE_SIZE, "第 {round} 轮：行对象全部存活");
+            drop(p);
+        }
+
+        // ── ⑮ **两页共存预算**（B2c-1 代码质量评审 ②；P3 未实现 ⇒ 用两个 P5 实例作代理）──
+        // **为什么不是"两页各满行"**：实测（AU8 的 ②，2026-09-13）在 256 KB 堆下
+        // 2 页 × 5 行尚可、**2 页 × 6 行即 OOM 挂死**，且"单页满行(20) + 第二个空页"也 OOM
+        // ⇒ 两页各满行**不可能**（空页本身 ≈ 12 行的开销）。故共存网按实测预算
+        // `COEXIST_ROWS_PER_PAGE`（= 4，对挂死点 6 留 ≥33% 余量）断言"两页**都能建成**"。
+        // 「改什么会让本条变红」：把该常量抬到 6+ ⇒ 本段 OOM（挂死）；把页构造成本推高
+        // （多建构件）⇒ 4 行也可能建不出 ⇒ 本段红。
+        {
+            let a = p5_audit::P5AuditPage::new(&host).expect("共存 A：建页");
+            let b = p5_audit::P5AuditPage::new(&host).expect("共存 B：建页");
+            let mk = |tag: &str| -> Vec<mupc_display_proto::ConsoleAuditEntry> {
+                (0..p5_audit::COEXIST_ROWS_PER_PAGE)
+                    .map(|i| {
+                        audit_entry(
+                            &format!("id-{tag}-{i}"),
+                            1_700_000_000_000 + i as u64,
+                            ConsoleOp::ConfigApply,
+                            AuditResult::Ok,
+                            "gateway.port",
+                            Some(serde_json::json!(i)),
+                            None,
+                            None,
+                        )
+                    })
+                    .collect()
+            };
+            a.set_page(&audit_page(mk("ca"), true, true, Some(1)));
+            b.set_page(&audit_page(mk("cb"), true, true, Some(1)));
+            disp.refr_now_for_test();
+            for (what, p) in [("A", &a), ("B", &b)] {
+                assert_eq!(
+                    p.visible_rows(),
+                    p5_audit::COEXIST_ROWS_PER_PAGE,
+                    "共存页 {what}：{} 行必须整页可见（不 OOM）",
+                    p5_audit::COEXIST_ROWS_PER_PAGE
+                );
+                assert_eq!(
+                    p.rows_alive(),
+                    p5_audit::COEXIST_ROWS_PER_PAGE,
+                    "共存页 {what}：行对象全部存活"
+                );
+                assert_eq!(p.list_view(), p5_audit::ListView::Rows);
+            }
+            drop(a);
+            drop(b);
+        }
+
+        // ── ⑯ **真件**：共享时间范围件「回调内自替换」全链（B2c-1 收口 ①）──────────────
+        // **为什么另起一段真件**（不能只靠 `ui/pages/mod.rs::tests` 的机制用例）：机制用例
+        // 是"机制桩"（自己 `take`、自己 `fire`）—— 调用点把槽换回"持 `try_borrow_mut` 借用
+        // 直调"时它**照样全绿**（上一轮 ① 的探针就是因此没红）。本段用**真件 + 真事件**：
+        // `SegmentedControl::VALUE_CHANGED` → `TimeRangeFilter::wire` 的闭包 →
+        // `TimeRangeFilter::fire` → `CbSlot::fire` → 用户回调，**整条调用点**都在网内。
+        // 「改什么会让本条变红」（**已实测**，见交付报告探针 ①B）：把 `CbSlot::fire` 换回
+        // "调用期持 `try_borrow_mut` 直调" ⇒ 回调内 `set_on_change`（→ `CbSlot::set`）的
+        // `try_borrow_mut` 失败 ⇒ 新回调**被静默丢弃** ⇒ **第 2 条断言**拿到
+        // `["旧","旧尾","旧","旧尾"]`（不是 `["旧","旧尾","新"]`）。
+        // 第 1 条断言是**另一条**失效模式的哨兵：若将来把 `CbSlot::set` 里的 `try_borrow_mut`
+        // 换成 `borrow_mut`，自替换处会 panic 并被 `event.rs` 的 `catch_unwind` 吞掉 ⇒ 回调体
+        // 半途截断 ⇒ 缺 `旧尾`。两条断言各管一种，**都不**是恒真式（①B 实测第 1 条仍绿、
+        // 第 2 条红 —— 与上面的分工一致）。
+        {
+            let f = filters::build(&host, filters::TimeRangeChange::default())
+                .expect("建共享时间范围件（真件自替换回归）");
+            let log: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+            {
+                let weak = Rc::downgrade(&f);
+                let log = Rc::clone(&log);
+                f.set_on_change(move |_c: filters::TimeRangeChange| {
+                    log.borrow_mut().push("旧");
+                    // 回调内**自替换**：此刻槽不得被任何借用持有。
+                    if let Some(g) = weak.upgrade() {
+                        let log = Rc::clone(&log);
+                        g.set_on_change(move |_c: filters::TimeRangeChange| {
+                            log.borrow_mut().push("新")
+                        });
+                    }
+                    // 哨兵：回调体必须**跑完**（`borrow_mut` 变体会在此处 panic 并被事件桥吞掉）。
+                    log.borrow_mut().push("旧尾");
+                });
+            }
+            f.seg().send_event(EventCode::VALUE_CHANGED);
+            assert_eq!(
+                *log.borrow(),
+                vec!["旧", "旧尾"],
+                "本次通知必须由**旧**回调执行到**末尾**（缺 `旧尾` ⇒ 自替换处 panic 被 \
+                 `event.rs` 的 catch_unwind 吞掉 = 回调半执行且无任何报错）"
+            );
+            f.seg().send_event(EventCode::VALUE_CHANGED);
+            assert_eq!(
+                *log.borrow(),
+                vec!["旧", "旧尾", "新"],
+                "新回调必须**自下一次通知起生效**（持借用直调 ⇒ 新回调被静默丢弃 ⇒ 这里仍是 `旧`）"
+            );
+            drop(f);
+        }
     }
+
 
     drop(host);
     drop(screen);
@@ -6265,10 +6693,9 @@ fn p5_runtime_texts_emit_only_cmap_glyphs() {
 #[test]
 fn p5_summary_limit_fits_its_column() {
     use crate::ui::pages::p5_audit::{ROW_SUMMARY_W, SUMMARY_MAX_CHARS};
-    // 真字体产物缺失（干净 clone / CI 无 `lv_font_noto_sc_*.c`）⇒ 跳过（与 `load_font_cmap` 同口径）。
-    let Some(cjk_w) = measured_text_px(&"汉".repeat(SUMMARY_MAX_CHARS), 24) else {
-        return;
-    };
+    // 无 `.c` 的干净 clone / CI ⇒ 走**入库基线** `fonts/lv_font_metrics.txt`；两者皆缺 ⇒
+    // **响亮失败**（不再静默跳过 —— 否则本网在 CI 上恒空转，见 B2c-1 代码质量评审 ⑤）。
+    let cjk_w = measured_text_px(&"汉".repeat(SUMMARY_MAX_CHARS), 24);
     assert!(
         cjk_w <= ROW_SUMMARY_W,
         "截断上限 {SUMMARY_MAX_CHARS} 个汉字实测 {cjk_w} px > 值对列宽 {ROW_SUMMARY_W} px \
@@ -6276,7 +6703,7 @@ fn p5_summary_limit_fits_its_column() {
     );
     // §6.5 的行内容示例必须**整条**放得下（它是本页唯一的文案范本，且不得被截断）。
     let example = "端口: 2404 → 2405";
-    let ex_w = measured_text_px(example, 24).expect("示例宽度");
+    let ex_w = measured_text_px(example, 24);
     assert!(
         ex_w <= ROW_SUMMARY_W,
         "§6.5 示例 `{example}` 实测 {ex_w} px > 值对列宽 {ROW_SUMMARY_W} px"
@@ -6285,6 +6712,77 @@ fn p5_summary_limit_fits_its_column() {
         example.chars().count() <= SUMMARY_MAX_CHARS,
         "示例长度 {} 字必须 ≤ 截断上限 {SUMMARY_MAX_CHARS}（否则示例本身会被截断）",
         example.chars().count()
+    );
+}
+
+/// **入库宽度基线本身不是摆设**（B2c-1 代码质量评审 ⑤ 的配套网）。
+///
+/// 宽度类断言在**没有 `.c`** 的干净 clone / CI 上完全依赖 `fonts/lv_font_metrics.txt`
+/// ⇒ 若该文件缺失、错位或退化成全 0，"宽度网"会以**另一种方式**空转（值全为 0 ⇒ 所有
+/// `w <= 列宽` 恒真）。本用例把那三种情形都钉死。
+///
+/// **改什么会让本条变红**：删掉基线文件（第 1 条）；把某档的值改成 0 / 删掉几个值
+/// （第 2 / 3 条）；把两档的值写成同一份（第 4 条 —— 字号不同、adv_w 必然不同）。
+#[test]
+fn font_metrics_baseline_is_present_and_meaningful() {
+    let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+    let src = std::fs::read_to_string(fonts_dir.join(METRICS_MANIFEST)).unwrap_or_else(|e| {
+        panic!(
+            "读不到入库宽度基线 `{}`（{e}）—— 它是**入库项**（与 `{}` 同一次生成），\
+             干净 clone / CI 的宽度断言全靠它；请跑 `fonts/gen_fonts.sh` 恢复",
+            fonts_dir.join(METRICS_MANIFEST).display(),
+            CMAP_MANIFEST
+        )
+    });
+    let cps = std::fs::read_to_string(fonts_dir.join(CMAP_MANIFEST))
+        .map(|s| parse_cmap_manifest(&s, CMAP_MANIFEST))
+        .expect("读入库码表清单");
+    // ① 档位清单 = **基线头自证**（[`metrics_tiers`]，单一真源；**不再**在用例里写第二份
+    //    10 档清单 —— B2c-1 收口 ⑥）。自证行缺失 / 空表 / 非数字 / 重复 / 与档位数自证不符
+    //    ⇒ `metrics_tiers` 内部当场 `panic`（**响亮失败**）。
+    let tiers = metrics_tiers(&src);
+    // ①′ 交叉核对 = **代码侧的字体阶梯**（`FontSize::ALL`，即真正编译进来的 10 档）：
+    //     这才是"基线是否覆盖了全部字号"的判据（比硬编码 10 个数字强 —— 扩档位时只改
+    //     `fonts/gen_fonts.sh` 的 `SIZES` 而忘重跑 ⇒ 这里**红**）。
+    let ladder: std::collections::BTreeSet<u32> =
+        FontSize::ALL.iter().map(|f| f.px()).collect();
+    assert_eq!(
+        tiers.iter().copied().collect::<std::collections::BTreeSet<u32>>(),
+        ladder,
+        "基线档位自证表必须与字体阶梯 `FontSize::ALL` **逐个相等**（{METRICS_MANIFEST}）"
+    );
+    assert!(
+        tiers.windows(2).all(|w| w[0] < w[1]),
+        "基线档位自证表必须是**升序去重**形态（gen_fonts.sh 按 `sorted(sizes)` 写出）：{tiers:?}"
+    );
+    // ② 每档都必须能取到，且**每个值都 > 0**（0 = "没有这个字形"，会让宽度断言恒真）。
+    for px in tiers {
+        let map = adv_w_from_baseline(px)
+            .unwrap_or_else(|| panic!("入库基线里缺 `{px}` 档（{METRICS_MANIFEST}）"));
+        assert_eq!(
+            map.len(),
+            cps.len(),
+            "`{px}` 档的值数必须等于 {CMAP_MANIFEST} 的码位数"
+        );
+        assert!(
+            map.values().all(|v| *v > 0),
+            "`{px}` 档存在 0 值的 adv_w ⇒ 该字形的宽度断言会恒真（基线退化）"
+        );
+        // ②′ 抽查"汉字必须比 ASCII 宽"（`时` U+65F6 在码表内；`汉` **不在** —— 它只在用例里
+        //    当"典型汉字宽度"的探针，缺字时走整字宽兜底，不得拿来查基线）。
+        let uniq: std::collections::BTreeSet<u64> = map.values().copied().collect();
+        assert!(uniq.len() > 3, "`{px}` 档的 adv_w 几乎全同 ⇒ 基线不像真实字形表");
+        let cjk = map[&('时' as u32)];
+        let ascii = map[&('1' as u32)];
+        assert!(cjk > ascii, "汉字 `时` 的步进宽必须大于数字 `1`（{cjk} vs {ascii}）");
+    }
+    // ③ 不同档的字号**必须**给出不同的宽度（否则说明值是按档复制的）。
+    let a = adv_w_from_baseline(24).expect("24 档");
+    let b = adv_w_from_baseline(48).expect("48 档");
+    assert_ne!(a, b, "24 档与 48 档的 adv_w 表不得相同（字号不同 ⇒ 步进宽不同）");
+    assert!(
+        b[&('时' as u32)] > a[&('时' as u32)],
+        "48 档汉字步进宽必须大于 24 档"
     );
 }
 
