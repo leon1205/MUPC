@@ -12,7 +12,7 @@
 //! | [`p4_interlock`] | P4 安全 / 联锁页（**帧驱动展示 + 控制通道意图**，含写操作） | **B2b-3** |
 //! | [`p5_audit`] | P5 审计页（**控制通道驱动，只读**；F19） | **B2c-1** |
 //! | [`filters`] | **共享**「时间范围筛选」件（P3 / P5 共用；`LogRange` 三档 + 自定义起止） | **B2c-1** |
-//! | `p3_logs` | P3 日志页（复用 [`filters`] 的时间范围件） | B2c-2 |
+//! | [`p3_logs`] | P3 日志页（**控制通道驱动，只读**；复用 [`filters`] 的时间范围件） | **B2c-2** |
 //! | [`p6_system`] | P6 系统 / 关于页 | **B2a** |
 //!
 //! **本轮不做**：页面路由与底部导航装配（B2c）、`console.rs` / `main.rs` 改写与 `state.rs`
@@ -83,6 +83,20 @@
 //!   - **两处结构性发现（已逐条登记）**：`AuditPage` **没有** `range_too_large` 字段
 //!     （EDGE-15 在 P5 侧生产不可达，见 **AU5**）；薄层 `EventCode` **未镜像**
 //!     `LV_EVENT_SCROLL` ⇒「滚动加载」的触发点在本层不可得（见 **AU6**）。
+//! - **B2c-2 补充（P3 日志页）**：与 P5 **同型**（契约 1 的页根 + 契约 2′ 的控制通道注入 +
+//!   只读 + 筛选意图回调），差异逐条：
+//!   - **超限条是常驻构件**（P3 的契约 `LogPage.range_too_large` 是**必需字段** ⇒ 该态
+//!     生产可达，与 P5 的 **AU5** 相反）；
+//!   - **无「源不可用」态**（§6.3 明写：日志通道断由**通道条**表达）⇒ 页内**不建**
+//!     `UnavailableState`，列表区只有「行 / 空态」两态；
+//!   - **模块筛选是换行 chip 网格**（§6.3 ② / §2.7 禁横滚）——维度名独占一行、网格铺满
+//!     内容宽（见 `p3_logs.rs` **LG3**）；
+//!   - **增量拉取**以 [`p3_logs::P3LogsPage::request_increment`] 为触发入口（B3 的 500 ms
+//!     节拍），意图载荷 `cursor` = **已见最大 `seq`**（不是 `next_cursor`，见该文件文档）；
+//!   - **具名薄层缺口（R2）**：`EventCode` 无 `LV_EVENT_SCROLL`、`allowlist.txt` 无任何
+//!     滚动位置读 / 写 API（`lv_obj_get_scroll_y` / `lv_obj_scroll_to_y` 皆无）⇒
+//!     §6.3 的「手动上滚 ⇒ 停止自动滚动 + 浮现"回到最新"」在本层**结构性不可实现**；
+//!     本页只做恒显按钮 + 点击意图，缺口逐条列在 `p3_logs.rs` 的 **R2**。
 //!
 //! ## ⚠️ 已知偏差登记（B2a 规格评审后；**集中、显式** —— 屏文 / 尺寸与契约不一致处
 //! 一律在此列明，不得"悄悄地"不一致）
@@ -125,6 +139,7 @@ use crate::ui::theme::{self, Dimens, Palette};
 pub mod filters;
 pub mod p1_status;
 pub mod p2_config;
+pub mod p3_logs;
 pub mod p4_interlock;
 pub mod p5_audit;
 pub mod p6_system;
@@ -684,6 +699,32 @@ pub const ALL_TEXTS: &[&str] = &[
     p5_audit::TEXT_FIELD_LOG_LEVEL,
     p5_audit::TEXT_FIELD_TELEMETRY,
     p5_audit::TEXT_EMPTY_ICON,
+    // P3 日志页（B2c-2）
+    p3_logs::TEXT_CHANNEL_OK,
+    p3_logs::TEXT_CHANNEL_DOWN,
+    p3_logs::TEXT_LEVEL_LABEL,
+    p3_logs::TEXT_MODULE_LABEL,
+    p3_logs::TEXT_ALL,
+    p3_logs::TEXT_LEVEL_ERROR,
+    p3_logs::TEXT_LEVEL_WARN,
+    p3_logs::TEXT_LEVEL_INFO,
+    p3_logs::TEXT_LEVEL_DEBUG,
+    p3_logs::TEXT_HEAD_TIME,
+    p3_logs::TEXT_HEAD_LEVEL,
+    p3_logs::TEXT_HEAD_MODULE,
+    p3_logs::TEXT_HEAD_MESSAGE,
+    p3_logs::TEXT_EMPTY,
+    p3_logs::TEXT_EMPTY_ICON,
+    p3_logs::TEXT_RANGE_TOO_LARGE,
+    p3_logs::TEXT_NO_EXPORT,
+    p3_logs::TEXT_NO_EXPORT2,
+    p3_logs::TEXT_CLAUSE_SEP,
+    p3_logs::TEXT_FOOTER_LOADING,
+    p3_logs::TEXT_FOOTER_ALL,
+    p3_logs::TEXT_BACK_TO_LATEST,
+    p3_logs::TEXT_MODULE_INTERCORE,
+    p3_logs::TEXT_MODULE_GATEWAY,
+    p3_logs::TEXT_MODULE_AUDIT,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════

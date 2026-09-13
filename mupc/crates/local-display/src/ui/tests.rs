@@ -776,7 +776,9 @@ fn ui_static_constraints() {
 /// 就地原因 / 弹层屏文）。
 /// B2c-1 起再纳入 `ui/pages/filters.rs`（共享时间范围筛选件：三档文案 + 起止名）与
 /// `ui/pages/p5_audit.rs`（P5 审计页：头部三条 / 表头 / 行内容 / 底部状态行）。
-const UI_PROD_SOURCES: [(&str, &str); 11] = [
+/// B2c-2 起再纳入 `ui/pages/p3_logs.rs`（P3 日志页：通道条 / 筛选区 / 表头 / 行内容 /
+/// 状态行 / 说明行 / 「回到最新」按钮）。
+const UI_PROD_SOURCES: [(&str, &str); 12] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/theme.rs", include_str!("theme.rs")),
     ("ui/components.rs", include_str!("components.rs")),
@@ -785,6 +787,7 @@ const UI_PROD_SOURCES: [(&str, &str); 11] = [
     ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
+    ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs")),
     ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
     ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
@@ -838,7 +841,12 @@ const UI_PROD_SOURCES: [(&str, &str); 11] = [
 /// ② 别的文件里写 `source_key("上屏串")` / `audit_key("上屏串")` **不受**计数约束。
 /// 本批**不修**（收紧需把后缀匹配改成"精确调用点集合"，属另一批的结构变更）；此处**登记**以免
 /// 后人把这两条当成"已被网住"。
-const NON_DISPLAY_SINKS: [&str; 9] = [
+/// **B2c-2 新增一条 `module_key(`**：同款机制、同款理由 —— `ui/pages/p3_logs.rs` 的
+/// **日志模块名映射表**必须写出**机器名 token**（`intercore` / `gateway` / `audit`），而
+/// token 是**小写 ASCII 且从不上屏**（上屏的是中文名 `核间` / `主站` / `审计`，未登记名经
+/// `display_safe` 归一）。该文件里 `module_key("…")` 的计数由 `p3_static_constraints`
+/// 钉死为恰 3 处。
+const NON_DISPLAY_SINKS: [&str; 10] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
@@ -848,6 +856,7 @@ const NON_DISPLAY_SINKS: [&str; 9] = [
     "config_key(",
     "source_key(",
     "audit_key(",
+    "module_key(",
 ];
 
 /// **已登记**的字库缺口：扫源码确实用到、但生成字体的 cmap 里**没有**的字形。
@@ -1565,6 +1574,7 @@ fn ui_texts_covered_by_font_cmap() {
         .chain(crate::ui::pages::p2_config::ALL_TEXTS.iter())
         .chain(crate::ui::pages::filters::ALL_TEXTS.iter())
         .chain(crate::ui::pages::p5_audit::ALL_TEXTS.iter())
+        .chain(crate::ui::pages::p3_logs::ALL_TEXTS.iter())
     {
         assert!(
             literals.iter().any(|l| l.contains(t)),
@@ -6057,6 +6067,668 @@ pub(crate) fn pages_chain() {
         }
     }
 
+    // ═══ P3 日志页（B2c-2；F10，**只读** + 选项式筛选 + 共享时间范围件）══════════════
+    //
+    // 覆盖：装配契约（契约 1：页根即滚动容器）／通道条两态 + **重连不清内容**（LG-07）／
+    // 筛选区三行（级别 4 chip / **模块换行网格** / 共享时间范围件）／**只读约束**（运行期读
+    // LVGL 标志）／两态（行 / 空态，EDGE-08）／超限条（EDGE-15，契约字段 ⇒ **可达**）／
+    // 意图回调（筛选变化**去重** + 增量拉取 + 「回到最新」）／行序（新行在顶部）／斑马纹 /
+    // 级别色块 / 行高 / 列宽 / 所有权锚定 / `Rc` 环泄漏探针（C1）。
+    {
+        use crate::lvgl::widgets::{Dir, ScrollMode};
+        use crate::ui::pages::{filters, p3_logs};
+        use mupc_display_proto::{LogEntry, LogLevel, LogPage, LogRange};
+
+        /// 造一条日志（`ts_ms` 随 `seq` 递增）。
+        fn log_entry(seq: u64, level: LogLevel, target: &str, message: &str) -> LogEntry {
+            LogEntry {
+                seq,
+                ts_ms: 1_789_047_727_000 + seq,
+                level,
+                target: target.into(),
+                message: message.into(),
+            }
+        }
+
+        /// 造一页日志。
+        fn log_page(
+            entries: Vec<LogEntry>,
+            has_more: bool,
+            range_too_large: bool,
+        ) -> LogPage {
+            LogPage {
+                entries,
+                next_cursor: None,
+                has_more,
+                range_too_large,
+            }
+        }
+
+        let p3 = p3_logs::P3LogsPage::new(&host).expect("P3LogsPage::new");
+        disp.refr_now_for_test();
+
+        // ── ① 装配契约（**契约 1**：页根即滚动容器；§6.3 线框无底部操作条）─────────────
+        assert_eq!(
+            p3.obj().size(),
+            (Dimens::CONTENT_W, Dimens::CONTENT_H),
+            "页根 = 内容区视口 992×624"
+        );
+        let root_c = p3.obj().coords();
+        assert_eq!(
+            (root_c.x1, root_c.y1),
+            (Dimens::SIDE_PAD, Dimens::HEADER_H),
+            "页根由调用方摆放"
+        );
+        assert_eq!(
+            crate::lvgl::widgets::scroll_dir(p3.obj()),
+            Dir::VER,
+            "**仅纵向**滚动（§2.7 / §7.4：全页禁横滚）"
+        );
+        assert_eq!(
+            crate::lvgl::widgets::scrollbar_mode(p3.obj()),
+            ScrollMode::AUTO,
+            "滚动条纯指示、仅滚动时显现"
+        );
+
+        // ── ② 通道条（两态；缺省 = **断开**，fail-closed，见 LG8）─────────────────────
+        assert!(!p3.channel_connected(), "未注入通道态 ⇒ 按未连接（不臆造「已连接」）");
+        assert_eq!(
+            p3.channel_text().as_deref(),
+            Some(p3_logs::TEXT_CHANNEL_DOWN),
+            "骨架态显断开文案（LG8）"
+        );
+        assert!(p3.channel_down_visible());
+        assert_eq!(
+            p3.channel_dot_colors(),
+            (Palette::LINK_OK, Palette::LINK_DOWN),
+            "灯色：已连接 #28A745 / 断开 #DC3545（PRD §3.1）"
+        );
+        p3.set_channel(true);
+        disp.refr_now_for_test();
+        assert_eq!(
+            p3.channel_text().as_deref(),
+            Some(p3_logs::TEXT_CHANNEL_OK),
+            "已连接文案（§3.6 P3 通道条行逐字）"
+        );
+        assert!(!p3.channel_down_visible(), "两态互斥（各自独立对象）");
+
+        // ── ③ 筛选区（三行：级别 / 模块 / 时间范围；**常驻**、无「应用」按钮）──────────
+        assert_eq!(
+            p3.level_label_text().as_deref(),
+            Some(p3_logs::TEXT_LEVEL_LABEL)
+        );
+        assert_eq!(p3.level_chip_count(), 4, "① 级别 = 4 项（§6.3）");
+        assert_eq!(p3.level_chip_columns(), 4, "四项一排（不换行、不横滚）");
+        assert_eq!(
+            p3.level_chip_display(0).as_deref(),
+            Some(p3_logs::TEXT_LEVEL_ERROR),
+            "未选中 ⇒ 无 `✓` 前缀（§5.2）"
+        );
+        assert_eq!(
+            p3.level_chip_display(3).as_deref(),
+            Some(p3_logs::TEXT_LEVEL_DEBUG)
+        );
+        assert!(p3.level_selected().is_empty(), "缺省全不选 = 不按级别筛");
+        assert_eq!(
+            p3.module_label_text().as_deref(),
+            Some(p3_logs::TEXT_MODULE_LABEL)
+        );
+        assert_eq!(p3.module_chip_count(), 1, "未注入 targets ⇒ 仅「全部」");
+        assert_eq!(
+            p3.module_chip_display(0).as_deref(),
+            Some(format!("{}全部", "✓").as_str()),
+            "② 模块首位固定「全部」且**缺省勾选**（§6.3 ②）"
+        );
+        assert_eq!(p3.module_selected(), vec![0], "缺省 = 不按模块筛");
+        assert_eq!(p3.module_grid_rows(), 1, "仅 1 项 ⇒ 1 行（§6.3：仅 1 行时高 48 px）");
+        assert_eq!(
+            p3.module_grid_size(),
+            (Dimens::CONTENT_W, Dimens::CHIP_H),
+            "网格**铺满内容宽 992**（LG3；右缘与表头 / 列表对齐）"
+        );
+        // 共享时间范围件（③）—— 接口与 P5 完全一致（P3 复用 `filters.rs`）。
+        assert_eq!(
+            p3.filter().obj().size().1,
+            filters::body_h(LogRange::H1),
+            "③ 时间范围缺省 = 最近 1 小时档（48 px）"
+        );
+        assert_eq!(p3.filter().seg().count(), 3, "三档（§5.1 #4）");
+
+        // ── ④ 表头（4 列名 + 3 条竖分隔线 + 底线；所有权锚定）─────────────────────────
+        assert!(p3.head_obj().is_alive());
+        assert_eq!(p3.head_obj().size().1, 36, "表头 36 px（§6.3）");
+        assert_eq!(
+            p3.head_child_count(),
+            8,
+            "表头**实际子件数** = 4 列名 + 3 竖分隔线 + 1 底线（局部句柄被 `Drop` ⇒ 级联删子树 ⇒ 本条掉到 0）"
+        );
+        for (i, want) in [
+            p3_logs::TEXT_HEAD_TIME,
+            p3_logs::TEXT_HEAD_LEVEL,
+            p3_logs::TEXT_HEAD_MODULE,
+            p3_logs::TEXT_HEAD_MESSAGE,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                p3.head_col_text(i).as_deref(),
+                Some(*want),
+                "第 {i} 列表头文案必须在屏上可读回（§6.3 线框：时间│级别│模块│消息）"
+            );
+        }
+        assert_eq!(p3.head_divs_alive(), 3, "3 条竖分隔线全部存活");
+        assert!(p3.head_rule_alive(), "表头底线存活");
+
+        // ── ⑤ 空态（EDGE-08；骨架态 = 无注入）：**不得显「加载中」或空白** ─────────────
+        assert_eq!(p3.list_view(), p3_logs::ListView::Empty);
+        assert!(p3.empty_visible());
+        assert_eq!(
+            p3.empty_text().as_deref(),
+            Some(p3_logs::TEXT_EMPTY),
+            "EDGE-08：「当前筛选条件下无日志」"
+        );
+        assert_ne!(
+            p3.empty_text().as_deref(),
+            Some(p3_logs::TEXT_FOOTER_LOADING),
+            "**不得**把空态显示成「加载中」（EDGE-08 明写「不得显未加载」；本行是探针 P2 的网）"
+        );
+        assert!(!p3.footer_visible(), "无行时不显状态行");
+        assert!(
+            p3.note_visible(),
+            "「本地屏不支持日志导出 · 无文件与下载通道」**常驻**（§6.3「不支持导出」节）"
+        );
+        assert!(
+            p3.note_y_in_list() >= p3.empty_h(),
+            "空态下说明行必须在**空态之下**（y = {} ≥ 空态高 {} —— 否则说明行压在空态图标 / 文案上）",
+            p3.note_y_in_list(),
+            p3.empty_h()
+        );
+        assert_eq!(
+            p3.note_text().as_deref(),
+            Some(
+                format!(
+                    "{}{}{}",
+                    p3_logs::TEXT_NO_EXPORT,
+                    p3_logs::TEXT_CLAUSE_SEP,
+                    p3_logs::TEXT_NO_EXPORT2
+                )
+                .as_str()
+            )
+        );
+        assert!(!p3.warn_visible(), "超限条缺省不显（契约字段 = false）");
+        assert!(!p3.back_visible(), "空态下无「最新」可回 ⇒ 按钮隐");
+
+        // ── ⑥ 意图：增量拉取在**未见过任何条目**时不发（首屏归 `set_on_query`）─────────
+        let inc = Rc::new(RefCell::new(Vec::new()));
+        {
+            let s = Rc::clone(&inc);
+            p3.set_on_increment(move |q| s.borrow_mut().push(q));
+        }
+        p3.request_increment();
+        assert_eq!(inc.borrow().len(), 0, "无游标（last_seq = 0）⇒ 不发增量意图");
+
+        // ── ⑦ 注入 3 条（**乱序**注入 ⇒ 屏上按 `seq` 降序 = 新行在顶部）────────────────
+        let entries = vec![
+            log_entry(101, LogLevel::Error, "mupc_intercore", "核间心跳超时"),
+            log_entry(103, LogLevel::Info, "hplc", "module=offline"),
+            log_entry(102, LogLevel::Warn, "audit", "审计写入重试"),
+        ];
+        p3.set_page(&log_page(entries.clone(), true, false));
+        disp.refr_now_for_test();
+        assert_eq!(p3.list_view(), p3_logs::ListView::Rows);
+        assert_eq!(p3.visible_rows(), 3, "三条注入 ⇒ 三行在显");
+        assert_eq!(p3.rows_alive(), 3, "行对象**存活**（拥有型句柄的锚定回归锁）");
+        assert!(!p3.empty_visible() && !p3.warn_visible());
+        // **新行插入顶部**：`seq` 最大者（103）在第 0 行，最小者（101）在末行。
+        assert_eq!(
+            p3.row_time(0).as_deref(),
+            Some(
+                crate::ui::pages::format_epoch_ms_utc(1_789_047_727_103).as_str()
+            ),
+            "第 0 行 = `seq` 最大的那条（§6.3 实时追加：新行插入顶部）"
+        );
+        assert_eq!(
+            p3.row_time(2).as_deref(),
+            Some(
+                crate::ui::pages::format_epoch_ms_utc(1_789_047_727_101).as_str()
+            ),
+            "末行 = 最旧的一条"
+        );
+        assert_eq!(p3.row_level(0).as_deref(), Some(p3_logs::TEXT_LEVEL_INFO));
+        assert_eq!(p3.row_level(1).as_deref(), Some(p3_logs::TEXT_LEVEL_WARN));
+        assert_eq!(p3.row_level(2).as_deref(), Some(p3_logs::TEXT_LEVEL_ERROR));
+        assert_eq!(
+            p3.row_level_color(1),
+            Some(Palette::LOG_WARN),
+            "级别色块颜色 = PRD 指定色（#FFC107）"
+        );
+        assert_eq!(p3.row_level_color(2), Some(Palette::LOG_ERROR));
+        assert_eq!(
+            p3.row_module(0).as_deref(),
+            Some("hP?C"),
+            "未登记模块名经 display_safe 归一（LG4：chip 预算 2 字，行预算 5 字）"
+        );
+        assert_eq!(
+            p3.row_module(1).as_deref(),
+            Some(p3_logs::TEXT_MODULE_AUDIT),
+            "已知模块名 ⇒ 中文标签"
+        );
+        assert_eq!(
+            p3.row_module(2).as_deref(),
+            Some(p3_logs::TEXT_MODULE_INTERCORE),
+            "契约示例的 `mupc_` 前缀形态同样命中（归一表）"
+        );
+        assert_eq!(
+            p3.row_message(0).as_deref(),
+            Some("MODU?E?OFF?INE"),
+            "消息经 free_text_safe（小写 → 大写同族；`l` 与 `=` 无字形 ⇒ `?` —— D9 的残余，\
+             由 `p3_runtime_texts_emit_only_cmap_glyphs` 保证不出豆腐块）"
+        );
+        assert_eq!(p3.row_message(2).as_deref(), Some("核间心跳超时"));
+        // 行几何：行高 44（§6.3 / LG-06）、级别色块 88×28、四列不重叠。
+        assert_eq!(p3.row_size(0), Some((Dimens::CONTENT_W, Dimens::ROW_LOG_H)));
+        assert_eq!(
+            p3.row_pos(1).map(|(_, y)| y - p3.row_pos(0).unwrap().1),
+            Some(Dimens::ROW_LOG_H),
+            "行距 = 行高 44（窗口化按定高摆放）"
+        );
+        assert_eq!(
+            p3.row_level_block_size(0),
+            Some((p3_logs::ROW_LEVEL_W, 28)),
+            "级别色块 88×28（§6.3 行规格）"
+        );
+        // 斑马纹（§6.3：偶行 #141F33 / 奇行 #1B2942）。
+        assert_eq!(p3.row_stripe(0), Some(Palette::SURFACE), "偶行 #141F33");
+        assert_eq!(p3.row_stripe(1), Some(Palette::SURFACE_ALT), "奇行 #1B2942");
+        assert_eq!(p3.row_stripe(2), Some(Palette::SURFACE));
+        // 底部状态行（§3.6 P3 列表/状态行；LG7 的落点）。
+        assert_eq!(
+            p3.footer_text().as_deref(),
+            Some(p3_logs::TEXT_FOOTER_LOADING),
+            "has_more = true ⇒ 加载中"
+        );
+        assert!(p3.footer_visible());
+        p3.set_page(&log_page(entries.clone(), false, false));
+        assert_eq!(
+            p3.footer_text().as_deref(),
+            Some(p3_logs::TEXT_FOOTER_ALL),
+            "has_more = false ⇒ 已加载全部"
+        );
+        // 「回到最新」按钮（**恒显**；R2 的可实现部分）。
+        assert!(p3.back_visible());
+        assert!(p3.back_clickable(), "按钮必须**可点**（正向控制）");
+        assert_eq!(p3.back_size(), (92, 92), "92×92（§6.3）");
+        assert_eq!(
+            p3.back_text().as_deref(),
+            Some(p3_logs::TEXT_BACK_TO_LATEST)
+        );
+
+        // ── ⑧ **只读约束**（§6.3「不支持导出」节 / PRD T-2）：运行期读 LVGL 标志 ─────────
+        // 「改什么会让本条变红」：给行加任何可点子对象（按钮 / 可点容器 / 长按菜单入口）
+        // ⇒ `clickable_parts` > 0 ⇒ 本条立刻红。
+        assert_eq!(
+            p3.rows_clickable_parts(),
+            0,
+            "列表行**不得**存在任何可点对象（无编辑 / 删除 / 清空 / 导出入口）"
+        );
+        assert_eq!(p3_logs::P3LogsPage::WRITE_ENTRIES.len(), 0);
+
+        // ── ⑨ 通道断（**LG-07：重连期间不清空已展示内容**）───────────────────────────
+        p3.set_channel(false);
+        disp.refr_now_for_test();
+        assert_eq!(
+            p3.visible_rows(),
+            3,
+            "LG-07：通道断**不得**清空已展示内容（只改通道条）"
+        );
+        assert_eq!(p3.rows_alive(), 3);
+        assert_eq!(
+            p3.channel_text().as_deref(),
+            Some(p3_logs::TEXT_CHANNEL_DOWN)
+        );
+        p3.set_channel(true);
+
+        // ── ⑩ **模块换行网格**（§6.3 ② / §2.7：不横滚、全项可达）──────────────────────
+        // 注入 20 个模块（含已知 / 未登记 / 契约示例形态）⇒ 21 个 chip（含「全部」）。
+        let targets: Vec<String> = (0..20)
+            .map(|i| match i {
+                0 => "mupc_intercore".to_string(),
+                1 => "mupc_gateway".to_string(),
+                2 => "audit".to_string(),
+                _ => format!("mod_{i}"),
+            })
+            .collect();
+        p3.set_targets(&targets);
+        disp.refr_now_for_test();
+        assert_eq!(p3.injected_targets().len(), 20);
+        assert_eq!(p3.module_chip_count(), 21, "「全部」+ 20 项");
+        assert_eq!(p3.module_chip_columns(), 8, "8 项/行（§6.3 ② 的保守核算）");
+        assert_eq!(
+            p3.module_grid_rows(),
+            (21 + 7) / 8,
+            "21 项 ⇒ 3 行（**多行**而非横滚）"
+        );
+        assert!(
+            p3.module_grid_rows() >= 2,
+            "≥20 个模块必须**换行**（若行数为 1，说明退化成横滚 / 截断）"
+        );
+        assert!(
+            p3.module_grid_rows() <= 7,
+            "行数不得超过 §6.3 ② 的 7 行上限"
+        );
+        let (gw, _gh) = p3.module_grid_size();
+        assert!(
+            gw <= Dimens::CONTENT_W,
+            "网格宽 {gw} ≤ 内容宽 {} ⇒ **不横滚**（全部模块可达）",
+            Dimens::CONTENT_W
+        );
+        assert_eq!(p3.module_chip_display(1).as_deref(), Some("核间"));
+        assert_eq!(
+            p3.module_chip_display(2).as_deref(),
+            Some("主站"),
+            "已知键取中文标签"
+        );
+        assert_eq!(p3.module_chip_display(3).as_deref(), Some("审计"));
+        // 未登记键：chip 上只剩 2 字（LG4），且不含豆腐块（逐字查 cmap 的网见
+        // `p3_runtime_texts_emit_only_cmap_glyphs`）。
+        let chip4 = p3.module_chip_display(4).expect("未登记模块 chip");
+        assert_eq!(chip4.chars().count(), p3_logs::MODULE_CHIP_MAX_CHARS);
+        // 选项文案清册（读回）：首位恒「全部」、逐项不超预算、数量与注入一致。
+        let opts = p3.module_option_texts();
+        assert_eq!(opts.len(), 21);
+        assert_eq!(opts[0], p3_logs::TEXT_ALL);
+        for o in &opts {
+            assert!(
+                o.chars().count() <= p3_logs::MODULE_CHIP_MAX_CHARS,
+                "chip 文案 `{o}` 超预算（LG4）"
+            );
+        }
+
+        // ── ⑪ 意图回调：筛选变化（**变化才发、未变化不发**）────────────────────────────
+        let fires = Rc::new(RefCell::new(Vec::new()));
+        {
+            let f = Rc::clone(&fires);
+            p3.set_on_query(move |q| f.borrow_mut().push(q));
+        }
+        // 级别：勾选 ERROR（走页面侧分派路径 —— chip 的点击事件由 `components.rs` 承担，
+        // 离屏链拿不到 chip 的 `Obj`，见 `dispatch_level_selection` 的文档）。
+        p3.dispatch_level_selection(vec![0]);
+        assert_eq!(fires.borrow().len(), 1, "筛选变化 ⇒ **恰发一次**意图");
+        {
+            let q = &fires.borrow()[0];
+            assert_eq!(q.levels, vec![LogLevel::Error]);
+            assert_eq!(q.cursor, None, "筛选变化 ⇒ 全新查询（无游标）");
+            assert_eq!(q.range, LogRange::H1);
+            assert_eq!(q.limit, p3_logs::ROW_MAX, "limit = 本页行池上界（LG6）");
+        }
+        // **未变化时不发意图**：再派发同一选择 ⇒ 不重发。
+        // 「改什么会让本条变红」：去掉 `Core::fire_query` 里的去重判断 ⇒ 本条立刻红。
+        p3.dispatch_level_selection(vec![0]);
+        assert_eq!(
+            fires.borrow().len(),
+            1,
+            "同一筛选条件**不重复**发意图（去重）"
+        );
+        // 模块：「全部 + 具体项」归一化（点具体项 ⇒ 让出「全部」）。
+        p3.dispatch_module_selection(vec![0, 2]);
+        assert_eq!(fires.borrow().len(), 2);
+        assert_eq!(p3.module_selected(), vec![2], "归一化：让出「全部」");
+        {
+            let q = &fires.borrow()[1];
+            assert_eq!(
+                q.targets,
+                vec!["mupc_gateway".to_string()],
+                "查询携带**机器键**（下标 2 − 1 = targets[1]）"
+            );
+            assert_eq!(q.levels, vec![LogLevel::Error], "级别筛选沿用当前态");
+        }
+        // 「全部」快捷复位（1 次触摸清空该维度）。
+        p3.dispatch_module_selection(vec![0, 2]);
+        assert_eq!(p3.module_selected(), vec![0]);
+        assert_eq!(fires.borrow().len(), 3);
+        assert!(fires.borrow()[2].targets.is_empty(), "「全部」⇒ 不按模块筛");
+        // 时间范围：档位变化（共享件的事件路径 —— 与 P5 同一入口）。
+        p3.filter().seg().set_selected(1);
+        p3.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(fires.borrow().len(), 4);
+        assert_eq!(fires.borrow()[3].range, LogRange::H24);
+        // 「自定义」⇒ 展开步进器 + 意图携带起止（**页面不读时钟** ⇒ 起止为可表示全区间）。
+        p3.filter().seg().set_selected(2);
+        p3.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        disp.refr_now_for_test();
+        assert_eq!(fires.borrow().len(), 5);
+        assert_eq!(fires.borrow()[4].range, LogRange::Custom);
+        assert!(fires.borrow()[4].from_ms.is_some() && fires.borrow()[4].to_ms.is_some());
+        assert!(p3.filter().custom_visible(), "「自定义」档必须展开步进器");
+        assert_eq!(
+            p3.filter().obj().size().1,
+            filters::body_h(LogRange::Custom),
+            "展开后体高 48 → 284（其下区块由 layout() 重摆）"
+        );
+        // 回到「最近 1 小时」（复原）。
+        p3.filter().seg().set_selected(0);
+        p3.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(fires.borrow().len(), 6);
+
+        // ── ⑫ 增量拉取（设计 §4.4：`cursor` = **已见最大 `seq`**）──────────────────────
+        p3.set_page(&log_page(entries.clone(), true, false));
+        assert_eq!(p3.last_seq(), 103, "游标 = 注入窗口的最大 `seq`");
+        p3.request_increment();
+        assert_eq!(inc.borrow().len(), 1, "有游标 ⇒ 发一次增量意图");
+        {
+            let q = &inc.borrow()[0];
+            assert_eq!(q.cursor, Some(103), "游标不是 `next_cursor`（契约语义不同）");
+            assert_eq!(q.range, LogRange::H1, "增量沿用当前筛选");
+            assert_eq!(q.levels, vec![LogLevel::Error], "级别筛选沿用当前态");
+            assert_eq!(q.limit, p3_logs::ROW_MAX);
+        }
+        // 筛选变化后游标**清零**（新窗口整体替换 ⇒ 旧游标无意义）。
+        p3.dispatch_level_selection(vec![]);
+        assert_eq!(p3.last_seq(), 0, "筛选变化 ⇒ 游标清零");
+        p3.request_increment();
+        assert_eq!(inc.borrow().len(), 1, "游标清零后不再发增量（等新窗口注入）");
+
+        // ── ⑬ 「回到最新」（**R2** 的可实现部分：点击 ⇒ 意图 + 复位 auto_follow）────────
+        let backs = Rc::new(RefCell::new(0usize));
+        {
+            let b = Rc::clone(&backs);
+            p3.set_on_back_to_latest(move || *b.borrow_mut() += 1);
+        }
+        p3.set_auto_follow(false);
+        assert!(!p3.auto_follow());
+        p3.back_obj().send_event(EventCode::CLICKED);
+        assert_eq!(*backs.borrow(), 1, "点击 ⇒ **恰一次**意图");
+        assert!(p3.auto_follow(), "点击后复位自动跟随（B3 注入态的读回口径）");
+        // ⚠️ **R2 的能力缺口（如实标注）**：薄层无 `LV_EVENT_SCROLL`、也无任何滚动位置
+        // 读 / 写 API ⇒ 本层读不到"用户是否手动上滚"、也**无法**程序化回顶。
+        // 本段**不**断言"回到顶部"（做不到，断言它只会是恒真式）。
+
+        // ── ⑭ 超限（EDGE-15）：契约字段 ⇒ **生产可达**（与 P5 的 AU5 相反）─────────────
+        p3.set_page(&log_page(entries.clone(), false, true));
+        disp.refr_now_for_test();
+        assert!(p3.warn_visible(), "`range_too_large = true` ⇒ 列表区上方出现 WarnBanner");
+        assert_eq!(
+            p3.warn_text().as_deref(),
+            Some(p3_logs::TEXT_RANGE_TOO_LARGE)
+        );
+        assert_eq!(p3.visible_rows(), 3, "超限**不隐藏**已返回的条目（契约：`entries` 不代表完整结果）");
+        p3.set_page(&log_page(entries.clone(), false, false));
+        assert!(!p3.warn_visible(), "标志复位 ⇒ 条隐（**常驻构件**，只改可见性）");
+
+        // ── ⑮ 空态（EDGE-08）：`entries` 空 + `range_too_large = false` ────────────────
+        p3.set_page(&log_page(Vec::new(), false, false));
+        disp.refr_now_for_test();
+        assert_eq!(p3.list_view(), p3_logs::ListView::Empty);
+        assert!(p3.empty_visible() && !p3.warn_visible());
+        assert_eq!(
+            p3.empty_text().as_deref(),
+            Some(p3_logs::TEXT_EMPTY),
+            "EDGE-08 逐字"
+        );
+        assert_eq!(p3.visible_rows(), 0, "空态不显行");
+        assert!(!p3.back_visible(), "空态无「最新」可回 ⇒ 按钮隐");
+
+        // ── ⑯ **行池预算**（**LG6** / **R3**）：注入契约上限的条数也只渲染行池上界 ────────
+        // 实测（见 `p3_logs::MEASURED_ROW_CAPACITY`）：单页独活时 P3 可容 **44 行**（48 挂死）；
+        // `ROW_MAX` = 20 是对挂死点留 >50% 余量的保守值（纯逻辑断言另见
+        // `p3_logs::tests::row_pool_capacity_is_measured`，那条改坏时**当场红**、不会挂死）。
+        {
+            let full: Vec<LogEntry> = (0..p3_logs::ROW_MAX)
+                .map(|i| {
+                    log_entry(
+                        1_700_000_000_000 + i as u64,
+                        LogLevel::Debug,
+                        "gateway",
+                        "x",
+                    )
+                })
+                .collect();
+            p3.set_page(&log_page(full, true, false));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p3.visible_rows(),
+                p3_logs::ROW_MAX,
+                "注入行池上界（{}）⇒ 整页可见（不 OOM）",
+                p3_logs::ROW_MAX
+            );
+            assert_eq!(p3.rows_alive(), p3_logs::ROW_MAX, "行对象全部存活");
+            // 超过上界 ⇒ **只渲染上界条**（有界，不增长；`set_page` 是"整体替换窗口"语义）。
+            let over: Vec<LogEntry> = (0..p3_logs::ROW_MAX * 3)
+                .map(|i| {
+                    log_entry(
+                        1_800_000_000_000 + i as u64,
+                        LogLevel::Info,
+                        "hplc",
+                        "y",
+                    )
+                })
+                .collect();
+            p3.set_page(&log_page(over, false, false));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p3.row_pool_len(),
+                p3_logs::ROW_MAX,
+                "行池**有界**：注入 3 倍也只建一页（LG6）"
+            );
+            assert_eq!(p3.visible_rows(), p3_logs::ROW_MAX);
+        }
+
+        // 渲染后确有像素（装配 → 布局 → 像素全链）。
+        let painted3 = sink.borrow().iter().filter(|b| **b != 0).count();
+        assert!(
+            painted3 > 10_000,
+            "P3 渲染后 sink 中应有成片非背景像素（实际 {painted3}）"
+        );
+
+        // ── ⑰ **`drop(P3LogsPage)` 必须释放整页**（**C1**：`Rc<Core>` 强引用环的回归网）────
+        // 「改什么会让本条变红」：把模块 chip 回调槽里的 `Weak<Core>` 改回 `Rc<Core>` ——
+        // 环 = `Core → modules → chips.on_change → Rc<Core>` ⇒ `drop` **不释放任何对象** ⇒
+        // 下面第 2 组断言（`!is_alive()`）**当场红**（且第 3 段的 churn 会 OOM 挂死）。
+        {
+            let probes = [
+                ("root（页根滚动容器）", p3.obj().share_borrowed()),
+                ("通道条（已连接文案）", p3.channel_ok_obj().share_borrowed()),
+                ("级别 chip 组容器", p3.level_box_obj().share_borrowed()),
+                ("模块 chip 组容器", p3.module_box_obj().share_borrowed()),
+                ("共享时间范围件", p3.filter().obj().share_borrowed()),
+                ("超限提示条", p3.warn_obj().share_borrowed()),
+                ("表头", p3.head_obj().share_borrowed()),
+                ("列表容器", p3.list_obj().share_borrowed()),
+                ("「回到最新」按钮", p3.back_obj().share_borrowed()),
+            ];
+            for (what, o) in &probes {
+                assert!(o.is_alive(), "探针建立时 `{what}` 必须存活");
+            }
+            drop(p3);
+            for (what, o) in &probes {
+                assert!(
+                    !o.is_alive(),
+                    "`drop(P3LogsPage)` 之后 `{what}` 必须已被级联删除 —— 仍存活 ⇒ 存在 \
+                     `Rc` 强引用环（整页泄漏；C1）"
+                );
+            }
+        }
+
+        // ── ⑱ **连续建 / 拆 P3 页（满行）必须全部成功**（C1 的生产路径回归网）────────────
+        for round in 0..3 {
+            let p = p3_logs::P3LogsPage::new(&host).expect("第 N 轮建 P3 页（环存在时这里 OOM）");
+            let full: Vec<LogEntry> = (0..p3_logs::ROW_MAX)
+                .map(|i| {
+                    log_entry(1_700_000_000_000 + i as u64, LogLevel::Info, "audit", "z")
+                })
+                .collect();
+            p.set_page(&log_page(full, true, false));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p.visible_rows(),
+                p3_logs::ROW_MAX,
+                "第 {round} 轮：满行（{} 条）必须建成",
+                p3_logs::ROW_MAX
+            );
+            assert_eq!(p.rows_alive(), p3_logs::ROW_MAX, "第 {round} 轮：行对象全部存活");
+            drop(p);
+        }
+
+        // ── ⑲ **P3 + P5 两页共存预算**（**R3**；B2c-1 的 AU8 教训：256 KB 堆里"第二个满行页
+        //        即 OOM 挂死"）──────────────────────────────────────────────────────────
+        // 实测口径：**一个 P5（`p5_audit::COEXIST_ROWS_PER_PAGE` 行）+ 一个 P3
+        // （`p3_logs::COEXIST_ROWS_PER_PAGE` 行）** 同时存活 —— 两个列表页的**行构造成本不同**
+        // （P5 每行 ≈ 10 个对象：行 + 竖条 + 5 文字 + 2 个胶囊（各 2 对象）；P3 每行 = 6 个对象：
+        // 行 + 色块 + 4 文字）⇒ 共存预算**分别标定**，P3 不沿用 AU8 的 4（实测见交付报告）。
+        // 「改什么会让本条变红」：把 `p3_logs::COEXIST_ROWS_PER_PAGE` 抬到超过共存堆预算 ⇒
+        // 本段 OOM（**挂死**，不是红）；把页构造成本推高（多建构件）⇒ 同样行数也可能建不出。
+        {
+            use crate::ui::pages::p5_audit;
+            use mupc_display_proto::{AuditPage, AuditResult, ConsoleAuditEntry, ConsoleOp};
+
+            let p3c = p3_logs::P3LogsPage::new(&host).expect("共存：建 P3 页");
+            let p5c = p5_audit::P5AuditPage::new(&host).expect("共存：建 P5 页");
+            let p3_full: Vec<LogEntry> = (0..p3_logs::COEXIST_ROWS_PER_PAGE)
+                .map(|i| log_entry(1_700_000_000_000 + i as u64, LogLevel::Info, "audit", "c"))
+                .collect();
+            p3c.set_page(&log_page(p3_full, true, false));
+            let p5_full: Vec<ConsoleAuditEntry> = (0..p5_audit::COEXIST_ROWS_PER_PAGE)
+                .map(|i| ConsoleAuditEntry {
+                    id: format!("ca-{i}"),
+                    ts_ms: 1_700_000_000_000 + i as u64,
+                    operator: mupc_display_proto::CONSOLE_OPERATOR.into(),
+                    op: ConsoleOp::ConfigApply,
+                    target: "gateway.port".into(),
+                    before: None,
+                    after: None,
+                    result: AuditResult::Ok,
+                    reason: None,
+                    request_id: "rid-c".into(),
+                })
+                .collect();
+            p5c.set_page(&AuditPage {
+                entries: p5_full,
+                page: 1,
+                page_size: mupc_display_proto::AUDIT_PAGE_SIZE as u32,
+                has_more: false,
+                newest_ts_ms: Some(1),
+                available: true,
+            });
+            disp.refr_now_for_test();
+            assert_eq!(
+                p3c.visible_rows(),
+                p3_logs::COEXIST_ROWS_PER_PAGE,
+                "共存：P3 页 {} 行必须整页可见（不 OOM）",
+                p3_logs::COEXIST_ROWS_PER_PAGE
+            );
+            assert_eq!(p3c.rows_alive(), p3_logs::COEXIST_ROWS_PER_PAGE);
+            assert_eq!(
+                p5c.visible_rows(),
+                p5_audit::COEXIST_ROWS_PER_PAGE,
+                "共存：P5 页 {} 行必须整页可见（不 OOM）",
+                p5_audit::COEXIST_ROWS_PER_PAGE
+            );
+            assert_eq!(p5c.rows_alive(), p5_audit::COEXIST_ROWS_PER_PAGE);
+            drop(p3c);
+            drop(p5c);
+        }
+    }
 
     drop(host);
     drop(screen);
@@ -6537,6 +7209,349 @@ fn p5_static_constraints() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁽⁵⁾⁗ **P3 日志页**的静态约束（`ui/pages/p3_logs.rs`，B2c-2）
+//
+// 既有的四条静态用例的扫描面都写死（**本批不改既有用例的扫描面**）⇒ 按前四条的先例
+// **追加**独立用例。新文件的**裸尺寸**与**码表**两条网另由 [`UI_PROD_SOURCES`] /
+// [`CONST_I32_SCAN_SOURCES`] 的扩展覆盖。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// P3 日志页的静态约束 + **扫描面自证** + **`module_key(` 计数自证** + **只读约束**。
+///
+/// **零文本输入红线**（UI §2.4 / §5.3）：删掉 / 绕过任一控件而改用 `lv_textarea` /
+/// `lv_spinbox` / `lv_keyboard` ⇒ 本条变红（共用清单 [`FORBIDDEN_UI_SYMBOLS`]）。
+///
+/// **只读红线**（UI §6.3「不支持导出」节 / PRD T-2）：本页**不构造**确认弹层 / Toast /
+/// 删改对象，也不出现"导出 / 删除 / 清空"类的**代码标识符**。
+/// ⚠️ **本条的边界（如实）**：它扫的是**代码文本**（剥掉注释与字面量）；**运行期**的可点
+/// 对象由 `pages_chain` 的 `rows_clickable_parts() == 0` 管，**上屏文案**里的"导出"说明由
+/// `p3_logs.rs::tests` 管。三条合起来才是本页的只读网。
+#[test]
+fn p3_static_constraints() {
+    // ⓪ **扫描面自证**：两张清单必须真的含本文件 —— 把文件从任一张网的清单里删掉，那张网会
+    //    **静默失去覆盖**（"网看着还在、实则漏了一片"）。本条让它响亮失败。
+    for (list, label) in [
+        (UI_PROD_SOURCES.as_slice(), "UI_PROD_SOURCES"),
+        (CONST_I32_SCAN_SOURCES.as_slice(), "CONST_I32_SCAN_SOURCES"),
+    ] {
+        assert!(
+            list.iter().any(|(n, _)| *n == "ui/pages/p3_logs.rs"),
+            "`{label}` 未含 `ui/pages/p3_logs.rs` —— 该网的**扫描面**漏了新文件\
+             （先修清单：新文件必须纳入，否则静态网对新代码是空的）"
+        );
+    }
+    // 码表覆盖率网还必须挂上本文件的 `ALL_TEXTS`（清册 ↔ 源码字面量一致性）。
+    for t in crate::ui::pages::p3_logs::ALL_TEXTS {
+        assert!(!t.is_empty(), "清册条目不得为空串");
+    }
+
+    // ⑤ **`module_key(` 的计数自证**：`NON_DISPLAY_SINKS` 里的 `module_key(` 是**后缀匹配** ——
+    //    紧跟它的字面量会被**豁免**出"上屏候选"走查。该豁免在本页**正当**（日志模块的
+    //    **机器名**确不上屏：`intercore` 里的小写 ASCII 在生成字体里没有字形，上屏的是中文名
+    //    `核间` / `主站` / `审计`，未登记名经 `display_safe` 归一），但它同时是一条**可能被
+    //    误用的后门**：谁把**上屏串**写成 `module_key("…")`，那条串就**静默逃过**码表网。
+    //    ⇒ 把"恰好 3 处"钉死（= `MODULE_LABELS` 的三个机器名 token）。
+    {
+        let (name, src) = (
+            "ui/pages/p3_logs.rs",
+            include_str!("pages/p3_logs.rs"),
+        );
+        let prod = truncate_before_test_module(src, name);
+        assert_eq!(
+            prod.matches("module_key(\"").count(),
+            5,
+            "{name}：`module_key(\"…\")` 必须**恰为 5 处**（`MODULE_LABELS` 的五个机器名 token）。\
+             计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是机器名**\
+             （机器名不上屏才可豁免；**上屏文案**放进 `module_key(..)` 会从码表网里消失）"
+        );
+        assert_eq!(
+            crate::ui::pages::p3_logs::MODULE_LABELS.len(),
+            5,
+            "映射表条目数必须与上面的计数一致（两处一起改才自洽）"
+        );
+    }
+
+    let sources: [(&str, &str); 1] = [(
+        "ui/pages/p3_logs.rs",
+        include_str!("pages/p3_logs.rs"),
+    )];
+    for (name, src) in sources {
+        let code = strip_comments_and_literals(src, name);
+        let lower = code.to_ascii_lowercase();
+        // ① 零文本输入（F12 红线）/ 裸色值 / `lv_refr_now` / 直连绑定（共用清单）。
+        for needle in FORBIDDEN_UI_SYMBOLS {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // ② 色值只准出现在 `theme.rs`（命名常量）。
+        for needle in ["Color::hex(", "Color::rgb("] {
+            assert!(
+                !lower.contains(&needle.to_ascii_lowercase()),
+                "{name} 不得出现 `{needle}`（必须经 theme 的命名常量）"
+            );
+        }
+        // ③ `unsafe` 只准出现在 `src/lvgl/**`。
+        assert!(
+            !code.contains("unsafe"),
+            "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+        );
+        // ④ 控件策略：一律经 `crate::lvgl` 薄层与既有组合控件，**不得**直造原生 widget。
+        for needle in ["lv_button", "lv_list", "lv_msgbox", "lv_obj_delete"] {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得直造原生控件 `{needle}`（§5.3：控件策略 = 内置控件 + 主题）"
+            );
+        }
+        // ⑤′ **只读约束（P3 专属）**：不得构造写操作 / 弹层 / 结果提示入口。
+        //    ⚠️ `TextButton` **不在**禁用列（「回到最新」是**只读交互**、不是写操作 —— 见 R2），
+        //    这正是本条与 `p5_static_constraints` 的唯一差别。
+        for needle in [
+            "ConfirmDialog",   // 确认弹层（写操作的前置）
+            "Toast",           // 操作结果提示（写操作的反馈）
+            "Obj::delete",     // 删对象（唯一合法的删除是 `Drop` 级联）
+            "export",          // 导出入口的代码标识符（T-2：**不存在**任何导出入口）
+            "delete_all",      // 清空入口
+        ] {
+            assert!(
+                !code.contains(needle),
+                "{name} 不得出现 `{needle}` —— 本页是**只读页**（UI §6.3「不支持导出」节 / \
+                 PRD T-2：无导出 / 编辑 / 删除 / 清空入口）"
+            );
+        }
+        // ⑥ **LG5**：消息列必须是"换行"（§6.3 / §7.4 逐字）—— 薄层读不回 `LongMode`
+        //    （无 getter）⇒ 此处做**源码级**锁定（残余见 LG5）。
+        assert!(
+            code.contains("LongMode::WRAP"),
+            "{name} 未含 `LongMode::WRAP` —— 消息列的「换行」口径失效（见 LG5）"
+        );
+        // 自证扫描面真的覆盖到了 P3 日志页（`include_str!` 指错文件 / 文件被清空时，
+        // 上面几条会**构造性全绿** —— "看着在把关、实则没把住"的典型形态）。
+        for must in [
+            "P3LogsPage",
+            "set_page",
+            "set_targets",
+            "set_channel",
+            "set_on_query",
+            "set_on_increment",
+            "request_increment",
+            "set_on_back_to_latest",
+            "LogQuery",
+            "MODULE_LABELS",
+            "free_text_safe",
+            "MultiSelectChips",
+            "EmptyState",
+            "WarnBanner",
+            "rows_clickable_parts",
+            "WRITE_ENTRIES",
+        ] {
+            assert!(
+                code.contains(must),
+                "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥‴″ **P3 的运行时文本**：级别文字 / 模块名 / 消息 —— 逐字查 cmap
+//
+// 与 [`p5_runtime_texts_emit_only_cmap_glyphs`] 同口径：这些出口的输入来自契约 / 运行时
+// （`LogEntry` 的 `target` / `message` / `level`），**不在**源码字面量走查面内 ⇒ 只有本用例
+// 能管住它们（**R1** 的第二道网）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **P3 运行时文本的字符集检查**（C1 残留族：契约字符串直上屏）。
+///
+/// **改什么会让本条变红**：
+/// - 把 [`crate::ui::pages::p3_logs::level_text`] 改成直接返回 `display_name()`（`Trace` 的
+///   `T`(U+0054) 不在 cmap 内 ⇒ 豆腐块）；
+/// - 把 [`crate::ui::pages::p3_logs::module_label`] 改成直接返回原始机器名（小写 ASCII 缺字形）；
+/// - 把消息列改回原串（不经 `free_text_safe`）而消息里带全角标点。
+#[test]
+fn p3_runtime_texts_emit_only_cmap_glyphs() {
+    use crate::ui::pages::p3_logs::{
+        level_color, level_options, level_text, module_label, module_options, row_order,
+        selected_levels, selected_targets,
+    };
+    use mupc_display_proto::{LogEntry, LogLevel};
+
+    let Some(cmap) = load_font_cmap() else {
+        return;
+    };
+
+    let mut cases: Vec<(String, String)> = Vec::new();
+    // 级别文字（含 `Trace` 的归一形态）。
+    for l in [
+        LogLevel::Error,
+        LogLevel::Warn,
+        LogLevel::Info,
+        LogLevel::Debug,
+        LogLevel::Trace,
+    ] {
+        cases.push((format!("level_text({l:?})"), level_text(l)));
+    }
+    cases.push(("level_options()".into(), level_options().join(" ")));
+    // 模块名：已知键（中文）/ 未登记键（归一形态）/ 契约示例的 `mupc_` 前缀形态。
+    for t in [
+        "mupc_intercore",
+        "mupc_gateway",
+        "intercore",
+        "audit",
+        "hplc",
+        "meter_grid",
+        "core-bin",
+        "ota",
+        "",
+    ] {
+        cases.push((format!("module_label({t})"), module_label(t)));
+    }
+    cases.push((
+        "module_options(契约示例)".into(),
+        module_options(&[
+            "mupc_intercore".to_string(),
+            "hplc".to_string(),
+            "meter_grid".to_string(),
+        ])
+        .join(" "),
+    ));
+    // 自由文本（消息列）：全角标点 + 小写 ASCII + 中文。
+    cases.push((
+        "free_text_safe(消息)".into(),
+        crate::ui::pages::p5_audit::free_text_safe("核间心跳超时，正在重连；模块=audit"),
+    ));
+    // 时间列（行的时间戳出口）。
+    cases.push((
+        "format_epoch_ms_utc".into(),
+        crate::ui::pages::format_epoch_ms_utc(1_789_047_727_000),
+    ));
+    // 颜色是数值通道（无文本），但级别色的**可读性**由 `p3_logs` 的单测锁住。
+    let _ = level_color(LogLevel::Trace);
+    // 查询组装与行序不产文本，但它们的输入面（级别 / 模块）已在上方覆盖。
+    let q = crate::ui::pages::p3_logs::log_query(
+        &crate::ui::pages::filters::TimeRangeChange::default(),
+        &selected_levels(&[0, 1, 2, 3]),
+        &selected_targets(&[0, 1], &["hplc".to_string()]),
+        None,
+    );
+    cases.push((
+        "filters::range_text(query.range)".into(),
+        crate::ui::pages::filters::range_text(q.range).to_string(),
+    ));
+    let es = vec![LogEntry {
+        seq: 1,
+        ts_ms: 0,
+        level: LogLevel::Info,
+        target: "gateway".into(),
+        message: "x".into(),
+    }];
+    let _ = row_order(&es);
+
+    for (what, text) in cases {
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            assert!(
+                cmap.contains(&ch),
+                "**运行时**出口 `{what}` 产出的字符 U+{:04X} `{ch}` **不在生成字体的 cmap 内**\
+                 （真机上是豆腐块）—— 产出文本 = `{text}`。\
+                 级别文字必须经 `p3_logs::level_text`（display_safe）；模块名必须经 \
+                 `p3_logs::module_label`（已知键取中文 / 未登记键走 display_safe）；\
+                 消息必须经 `p5_audit::free_text_safe`；新增上屏文案前先查 \
+                 `fonts/lv_font_cmap.txt`。",
+                ch as u32
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥‴‴ **P3 的版式预算**：时间列 / 模块列 / 级别色块 / 模块 chip —— 用生产字体的 `adv_w` 实测
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **P3 的列宽预算**（用**生产字体的 `adv_w`** 实测；口径同 [`measured_text_px`]）。
+///
+/// **改什么会让本条变红**：
+/// - 把 [`crate::ui::pages::p3_logs::ROW_TIME_W`] 改回 §6.3 的 160（时间戳 236.4 px 装不下
+///   ⇒ DOTS 截断 —— 见 **LG2**）；
+/// - 把 [`crate::ui::pages::p3_logs::ROW_MODULE_MAX_CHARS`] 调大（模块列被截断）；
+/// - 把 [`crate::ui::pages::p3_logs::MODULE_CHIP_MAX_CHARS`] 调到 3（`✓ + 3 汉字` = 101.6 px
+///   > chip 内区 78 px ⇒ 选中态折行 —— 见 **LG4**）；
+/// - 把级别色块改窄到放不下 `DEBUG`（实测 86.9 px）。
+#[test]
+fn p3_column_budgets_fit_measured_text() {
+    use crate::ui::pages::p3_logs::{
+        LEVEL_CHIP_W, MODULE_CHIP_MAX_CHARS, MODULE_CHIP_W, ROW_LEVEL_W, ROW_MODULE_MAX_CHARS,
+        ROW_MODULE_W, ROW_TIME_W,
+    };
+
+    // ① 时间列：定长时间戳必须**整条**放得下；且 §6.3 的 160 确实装不下（偏差 LG2 的证据）。
+    let ts = "2026/09/10 13:42:07";
+    let ts_w = measured_text_px(ts, 24);
+    assert!(
+        ts_w <= ROW_TIME_W,
+        "时间戳 `{ts}` 实测 {ts_w} px > 时间列宽 {ROW_TIME_W} px"
+    );
+    assert!(
+        ts_w > 160,
+        "时间戳实测 {ts_w} px —— 若 ≤ 160 则 LG2 的列宽偏差**不再成立**，请复核 §6.3 的 160"
+    );
+
+    // ② 模块列：`ROW_MODULE_MAX_CHARS` 个汉字放得下。
+    let m_w = measured_text_px(&"汉".repeat(ROW_MODULE_MAX_CHARS), 24);
+    assert!(
+        m_w <= ROW_MODULE_W,
+        "{ROW_MODULE_MAX_CHARS} 个汉字实测 {m_w} px > 模块列宽 {ROW_MODULE_W} px"
+    );
+
+    // ③ 模块 chip：**选中态**（`✓ ` 前缀 + 预算字数）必须放得进 chip 内区。
+    let sel_w = measured_text_px(&format!("✓ {}", "汉".repeat(MODULE_CHIP_MAX_CHARS)), 26);
+    let chip_inner = MODULE_CHIP_W - 2 * Dimens::GAP_MIN;
+    assert!(
+        sel_w <= chip_inner,
+        "选中态 `✓ + {MODULE_CHIP_MAX_CHARS} 汉字` 实测 {sel_w} px > chip 内区 {chip_inner} px \
+         （LG4 的预算被突破 ⇒ 选中态 chip 会折行 / 裁切）"
+    );
+    let over_w = measured_text_px(&format!("✓ {}", "汉".repeat(MODULE_CHIP_MAX_CHARS + 1)), 26);
+    assert!(
+        over_w > chip_inner,
+        "多一字（{} 汉字）实测 {over_w} px —— 若它也 ≤ {chip_inner} px，则\
+         MODULE_CHIP_MAX_CHARS 可以调大（当前预算偏保守）",
+        MODULE_CHIP_MAX_CHARS + 1
+    );
+    assert!(
+        std::hint::black_box(MODULE_CHIP_W) >= std::hint::black_box(Dimens::CHIP_MIN_W),
+        "chip 不得低于最小宽 96"
+    );
+
+    // ④ 级别色块：最长的级别文字（`DEBUG`）放得下。
+    let lv_w = measured_text_px("DEBUG", 24);
+    assert!(
+        lv_w <= ROW_LEVEL_W,
+        "`DEBUG` 实测 {lv_w} px > 级别色块宽 {ROW_LEVEL_W} px"
+    );
+    // ⑤ 级别 chip：`✓ ` + 最长选项（选中态）放得进 chip 内区。
+    let lvl_sel = measured_text_px("✓ DEBUG", 26);
+    let lvl_inner = LEVEL_CHIP_W - 2 * Dimens::GAP_MIN;
+    assert!(
+        lvl_sel <= lvl_inner,
+        "选中态 `✓ DEBUG` 实测 {lvl_sel} px > 级别 chip 内区 {lvl_inner} px"
+    );
+    // ⑥ 「回到最新」按钮：`回到最新` 在 WRAP 下折成 2 行 2 字（按钮 92×92）。
+    let word_w = measured_text_px("回到", 26);
+    let two_line_h = 2 * TextSlot::Label.px() as i32;
+    let back_inner_w = 92 - 2 * Dimens::GAP_MIN;
+    let back_inner_h = 92 - 2 * Dimens::GAP_MIN;
+    assert!(
+        word_w <= back_inner_w && two_line_h <= back_inner_h,
+        "「回到最新」两行折行实测 {word_w}×{two_line_h} px 放不进 92×92 按钮的内区 \
+         {back_inner_w}×{back_inner_h} px"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ⑥‴′ **P5 的运行时文本**：值对 / 原因 / 操作者 / 最近审计条 —— 逐字查 cmap
 //
 // 与 [`runtime_formatters_emit_only_cmap_glyphs`] 同口径，但对象是 **P5 新增的运行时出口**
@@ -6800,7 +7815,7 @@ fn font_metrics_baseline_is_present_and_meaningful() {
 /// 本来就该在那里以字面量出现；本网要抓的是"**派生**常量直接抄数字"）。
 ///
 /// 与 ⑥″ 各自列清单而不复用 [`UI_PROD_SOURCES`]：后者含 `theme.rs`（必须豁免）。
-const CONST_I32_SCAN_SOURCES: [(&str, &str); 10] = [
+const CONST_I32_SCAN_SOURCES: [(&str, &str); 11] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
@@ -6808,6 +7823,7 @@ const CONST_I32_SCAN_SOURCES: [(&str, &str); 10] = [
     ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
+    ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs")),
     ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
     ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
