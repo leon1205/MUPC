@@ -42,16 +42,19 @@
 //! | PD9 | `WriteMode::FullRewrite` 的 Toast 取 **`配置已保存 · 原有文字已不存在`**（设计 §4.3.2.1 写「配置文件已整体重写，原有注释不再保留」） | **缺字**：`整`(U+6574) / `写`(U+5199) / `注`(U+6CE8) / `留`(U+7559) / `再`(U+518D) 均不在 cmap 内 ⇒ 无法逐字照抄。改写串保留两条语义：**已保存** + **原有文字（注释）已不存在** | 同 PD1 |
 //! | PD10 | **`WriteMode::FullRewrite` 的 Toast 由 `set_config` 统一触发**（`show_result` 成功路径不再叠加"保存成功"Toast —— UI §7.2「同一时刻仅 1 条」，**取信息量更大的那条**） | `ConfigView.write_mode` 的契约语义即「最近一次落盘写模式，`FullRewrite` 时 UI 须明示」（EDGE-23）⇒ 任何携带该值的视图都该明示，故收在唯一入口 | 无（有意） |
 //! | PD11 | 保存 / 恢复默认值的分级与「涉及：」列表一律按**本次改动**判定：`save_level` / `reset_level` / [`reconnect_field_labels`] 收**本次补丁的键集合**（保存 = `draft_patch(..).changes`；恢复默认值 = `defaults_patch_of(..).changes`），键集合判定由 [`reconnect_in`] 承担（**不再**看"视图内全部字段"） | **⚠️ 文档内冲突（如实逐列四处原文，不择利引用）** —— 出处文件 = `docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md`（行号为逐行核对结果）：<br/>① **`L2` 行 `:99`** 写「联锁释放、M1 授权、**含连接类字段的配置保存**、恢复默认值」——「含」可读作"**本次**含"（改动口径），措辞本身**不排除**视图口径（歧义行）；<br/>② **`L2+` 行 `:100`** 写「**任一字段** `requires_reconnect == true` 的配置保存」——**视图口径**（"任一字段"= 视图里存在，不限定本次改动）；<br/>③ **§6.2 交互流程 3 `:511`（明细示例）+ `:512`（WarnBanner 插入判据）**：`:511` 的示例是「`端口：2404 → 2405`」+（`:512`）「**涉及：端口**」，而同视图内还有 `监听地址`（§4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ **只有改动口径**能让该示例成立；但**同一段**的 `:512` 判据原文是「**若任一字段** `requires_reconnect == true` → 插入 `WarnBanner`」= **视图口径** ⇒ **该段自身即自相矛盾**（示例与判据不能同时满足）；<br/>④ **§7.3 `WarnBanner` 行 `:701`** 写「见 §2.5；**当任一字段** `requires_reconnect` **或含连接类字段时**强制出现」——亦为**视图口径**（"或含"把 ① 的歧义行一并读成视图口径）。<br/>⇒ **三处原文（②、③的 `:512`、④）支持视图口径、一处（①，措辞歧义）不排除视图口径、仅 ③的 `:511` 示例支持改动口径**。**为何仍选改动口径**：(a) ③ 的示例是**可执行验收**——示例不成立则实现无法同时满足 §2.5 与 §6.2；(b) §2.6 铁律「降级可见、**绝不造假**」——只改日志级别却弹「生效瞬间通信将短暂中断」是**谎报副作用**；(c) **L1 可达性**——真实字段表含 `gateway.listen_addr` / 核间端口（§4.3.3）⇒ 视图口径下 **L1 永不可达、`WarnBanner` 恒亮**，§2.5 的 L1 与 L2 两行同时报废。<br/>**⛳ 文档内冲突，待 PM 裁定；[`reconnect_in`] 是单一切换点 —— 若裁定视图口径，只需改它一处** | 无（**已按"本次改动"落地**；若 PM 另裁，只需改 [`reconnect_in`] 一处） |
-//! | PD12 | **只读字段不进 `defaults_patch()`** | `ConfigField::validate_value()`（契约）对 `editable=false` **一律拒绝**（"只读，不可修改"）⇒ 把只读字段放进 `changes` 会让**整个**恢复请求被后端二次校验打回（PL-4 的红线字段本就不可写） | 无（**有意**；恢复默认值的"本次改动"= 全部 `editable` 字段 —— 与视图口径的差集正是只读字段，见 [`reconnect_in`] 的等价性论证） |
+//! | PD12 | **只读字段不进 `defaults_patch()`** | `ConfigField::validate_value()`（契约）对 `editable=false` **一律拒绝**（"只读，不可修改"）⇒ 把只读字段放进 `changes` 会让**整个**恢复请求被后端二次校验打回（PL-4 的红线字段本就不可写） | 无（**有意**；恢复默认值的"本次改动"= 全部 `editable` **且 `default` 合法**的字段（判据 = [`resettable`]，`default` 非法者见 **PD22**）—— 与视图口径的差集正是只读字段，见 [`reconnect_in`] 的等价性论证） |
 //! | PD13 | 注入侧 `group.label` / `field.label` 与 `Enum` 选项**统一过 [`display_safe`]**（出口 = [`group_label_text`] / [`field_label_text`]） | 改前三条**同类数据两条路径**不一致（`Enum` 选项过了、`group.label` / `field.label` 没过）：后端标签含 cmap 外 ASCII（`-` / 小写）即豆腐块。**残余风险（如实登记，不粉饰）**：`display_safe` **只改写 ASCII**（`-`/`_`→`–`、小写→大写同族、其余→`?`），**非 ASCII（中文）字符一律原样透传** ⇒ 后端 `label` 里的**缺字中文（如 `环` / `服务` / `（`）它挡不住**，真机照样豆腐块。**真正的防线**：后端字段表（`ConfigFieldMeta`）的 `label` 必须约束在 **UI §3.6 用字表**内 —— 属**联调 / 后端**责任（见 UI §3.6 与设计 §6.2）；本页的 [`LABEL_OVERRIDES`] 只是**例外覆盖**机制（只为 PM 裁定键而设），**不是**通用护栏 | **B2c 之后**的「字体码表 + 文案统一收口批」：扩 §3.6 字符集 ⇒ `display_safe` 的"改写面"随 cmap 扩大而收窄，缺字中文风险随之下降（**不会归零** —— 字库永远落后于任意后端文案，后端约束才是根治） |
 //! | PD14 | **行型 B 的 `Ipv4Stepper` 横向跨到卡外缘**：实测跨度 **x16–1007**（= [`Dimens::CONTENT_W`] **992 px**，与卡**外缘**齐宽），UI §6.2 写「控件独占次行 **(x36–x988)**」（卡**内**，有效 952 px）—— 行型 A 的内边距偏差已登记 **PD4**，行型 B 这条本次补登记 | **实算根因**：卡内可用宽 [`INNER_W`] = 992 − 2 × **17**（描边 1 + 内边距 16）= **958**，而 `Ipv4Stepper` 整件宽 = [`Dimens::CONTENT_W`] = **992**（`ui/controls.rs` **CD2**：四段 792 + 缝 8 + 汇总 **184**；汇总宽 = "内容区余量"，为容纳 `192.168.1.10` 12 字符）⇒ 控件比卡内宽 **34 px = 两侧各 17 px**。若从卡内容区原点起排（屏幕 x33）则右端 x1024 越出卡外缘（x1007）**17 px** 并被父对象裁剪（`ui/controls.rs` CD2 同款事实）⇒ 取 `ROW_B_CTRL_X = −CARD_INSET`（`−17`）把控件**左端内缩到卡外缘**，实测跨度 x16–1007 = 恰与卡外缘齐宽，**代价 = 吃掉卡左右各 17 px 内边距**（行型 A 控件右缘落在卡内右缘 —— 实测闭区间右缘 x990，即 PD4 记的 x991 排他右缘；两版式的口径**不一致**） | **与 CD2 同批收口**：先由 PM 定 `Ipv4Stepper` 整件宽 —— UI 自身三口径互相矛盾（§5.1 #7 写 **856**、§6.2 写 **952**、实测落地 **992**）；若裁「控件必须在卡内 (x36–x988)」⇒ 需把汇总标签 **184 → 144**（`192.168.1.10` 放不下，须另行设计）或改行型 B 版式（如汇总挪到第二行） |
-//! | PD15 | `U16` / `U64` 元数据的 `step == 0` 在页内**折算为 1** 后再建 [`Stepper`]（**不**报错、**不**整页 `Err`） | 契约 [`ConfigKind::validate_value`]（`mupc/crates/display-proto/src/control.rs:528` / `:538`）写 `if *step != 0 && …` ⇒ **显式把 `step == 0` 当合法**（语义 = "不校验步长"）；而 `Stepper::new`（`ui/components.rs`，本批**禁改**）只接受正步长 ⇒ 旧实现返回 `Err` 让**整页**拒绝渲染（一个合法字段白屏全页）。折为 1 是**契约语义的忠实映射**："不校验步长" ⇒ 任何整数值都合法 ⇒ 步长 1 是最细粒度、可达**全部**合法值 | 无（**有意**）；若将来 `Stepper` 支持 `step == 0`（= 无步进约束）可直接回改 |
-//! | PD16 | `Enum` 元数据的**字段级降级**（一律**不** `Err`）：可容段数上限 [`ENUM_MAX_SEGMENTS`] = `INNER_W / SEGMENT_MIN_W` = **9**（`9 × 96 = 864 ≤ 958`；`10 × 96 = 960 > 958`）⇒ ① 选项 **> 9** ⇒ 只渲染一个 **9 段窗口**，窗口**必含当前值所在选项**（否则合法值会被挤到窗外 ⇒ 静默改写），该行约束槽上屏「仅显示 9 项」；② 选项 **= 0** ⇒ 渲染**单段 [`PLACEHOLDER`] 占位**的禁用行（`SegmentedControl::new` 拒绝空选项）。两条都保证**其它字段仍可正常渲染与编辑** | 旧实现在 `enum_width(..)` 里对超宽返回 `Err(LvglError::InvalidArgument)` ⇒ **整页**拒绝渲染；而 `ConfigKind::Enum { options }` 的长度**契约上无上限**（`display-proto` 冻结、不得改契约）。**为何选"截断"而非"换控件 / 换版式"**：本页可用的等价控件只有 [`SegmentedControl`]（`lv_dropdown` 的展开列表在离屏**不可断言**且 §5.1 未选它）⇒ 换控件等价于改 `ui/controls.rs`（本批禁改）；换版式（分两排）需新增栅格档、§5.1 #4 未定义多排形态 ⇒ **截断是本批唯一不越界的降级**，且"被隐藏项数"**上屏**（不静默） | 无（**有意**）；若 PM 要求"全选项可达"，须先在 `ui/controls.rs` 增多排 / 可滚动分段控件 |
+//! | PD15 | `U16` / `U64` 元数据的步长在页内**折算为 1** 后再建 [`Stepper`]（**不**报错、**不**整页 `Err`）—— 两种子形态：**① `step == 0`**（契约**合法**）；**② `step > i64::MAX`**（**B6 本轮补登记**，与 ① **同族但方向相反**） | **①** 契约 [`ConfigKind::validate_value`]（`mupc/crates/display-proto/src/control.rs:528` / `:538`）写 `if *step != 0 && …` ⇒ **显式把 `step == 0` 当合法**（语义 = "不校验步长"）；而 `Stepper::new`（`ui/components.rs`，本批**禁改**）只接受正步长 ⇒ 旧实现返回 `Err` 让**整页**拒绝渲染（一个合法字段白屏全页）。折为 1 是**契约语义的忠实映射**："不校验步长" ⇒ 任何整数值都合法 ⇒ 步长 1 是最细粒度、可达**全部**合法值。<br/>**② `step > i64::MAX`**（`int_bounds` 的 `i64::try_from(*step).unwrap_or(1)`，约 `:1529`）⇒ 同样折为 1，但方向**相反**：契约此时是**收紧**（只有 `(n − min) % step == 0` 的值合法，而 `step` 极大 ⇒ `[min, max]` 内实际只剩 `min` 一个合法值），折为 1 却是**放开** ⇒ 控件可达**超出契约合法集**的中间值（现场步进后提交会被后端二次校验打回 = **可见失败**，不是静默写入非法值）。**已核实**：折为 1 **不会排除任何原本合法的取值**（可达集是合法集的**超集**，只多不少）；可达范围的**上界**受 `min` / `max` 的 `i64` 饱和限制（同 PD21(ii) 族，与本次步长折算无关） | 无（**有意**）；① 若将来 `Stepper` 支持 `step == 0`（= 无步进约束）可直接回改；② 的根治 = 页内按契约 `step` 做行内校验（须先解决 PD21 的"控件值域窄于契约"族） |
+//! | PD16 | `Enum` 元数据的**字段级降级**（一律**不** `Err`）：可容段数上限 [`ENUM_MAX_SEGMENTS`] = `INNER_W / SEGMENT_MIN_W` = **9**（`9 × 96 = 864 ≤ 958`；`10 × 96 = 960 > 958`）⇒ ① 选项 **> 9** ⇒ 只渲染一个 **9 段窗口**，窗口**必含当前值所在选项**（否则合法值会被挤到窗外 ⇒ 静默改写），该行约束槽上屏「仅显示 9 段」；② 选项 **= 0** ⇒ 渲染**单段 [`PLACEHOLDER`] 占位**的禁用行（`SegmentedControl::new` 拒绝空选项）。两条都保证**其它字段仍可正常渲染与编辑**。<br/>⚠️ **用字订正（B1）**：设计 / 本页初稿写的是「仅显示 **9 项**」，但 `项`（U+9879）**不在生成字体 cmap 内**（逐字核对 `fonts/lv_font_cmap.txt`）⇒ 实现取 cmap 内的 `段`（[`text_enum_truncated`]）⇒ **本行与代码现在一律写「段」**（上屏文案的**实现事实**），语义不变（本控件即"分段控件"） | 旧实现在 `enum_width(..)` 里对超宽返回 `Err(LvglError::InvalidArgument)` ⇒ **整页**拒绝渲染；而 `ConfigKind::Enum { options }` 的长度**契约上无上限**（`display-proto` 冻结、不得改契约）。**为何选"截断"而非"换控件 / 换版式"**：本页可用的等价控件只有 [`SegmentedControl`]（`lv_dropdown` 的展开列表在离屏**不可断言**且 §5.1 未选它）⇒ 换控件等价于改 `ui/controls.rs`（本批禁改）；换版式（分两排）需新增栅格档、§5.1 #4 未定义多排形态 ⇒ **截断是本批唯一不越界的降级**，且"被隐藏段数"**上屏**（不静默） | 无（**有意**）；若 PM 要求"全选项可达"，须先在 `ui/controls.rs` 增多排 / 可滚动分段控件 |
 //! | PD17 | 注入新视图时**保留用户草稿**（I4 取 **(b)**）：`set_config` 先用旧 `touched` 集合采集「键 → 当前控件值」，重建卡片后**只把新元数据认可的**（`kind.validate_value(..).is_ok()`）草稿值写回对应控件并保留其 `touched` 标记；键在新视图里消失 / 新元数据不认可 ⇒ 丢弃该键的草稿（控件显示注入值） | **为何选 (b) 而非 (a)"脏则拒绝覆盖"**：(a) 会把**权威刷新路径**（保存成功回执的 `applied` ⇒ [`show_result`](P2ConfigPage::show_result) ⇒ `set_config`）一起挡掉 —— 该路径被调用时页面**必然是脏的**（用户先改、才可能保存成功），拒绝即等于"保存成功后界面不刷新"，属自伤；为它开例外（`show_result` 先清脏）等价于 (b) 再加一条早清路径，反而更绕。(b) 与 EDGE-10「失败保留用户已输入值」**同一取向**，且**永不阻塞**服务端权威视图落屏。**残余（如实登记）**：草稿值被新元数据丢弃时**无 Toast 提示**（场景 = 联调期后端改了字段元数据而页面正持草稿） | 无（**有意**）；若 PM 要求显式提示，收口在 B2c 之后的文案批 |
 //! | PD18 | `ControlResponse::duplicate`（契约**强制字段**：`display-proto/src/control.rs:328`，注释明写用途 = "幂等命中提示"）在**本页零读取** ⇒ **漏覆盖**（不是"有意忽略"） | UI §3.6 的 P2 用字表**没有**"幂等命中 / 重复请求"这一行的文案 ⇒ 本页无字可上屏；也不能凭一比特**造**一句文案（**绝不造假**） | **§3.6 需补一行文案** ⇒ 收口于 **B2c 之后**的「字体码表 + 文案统一收口批」（与 PD1 / PD13 同批）；届时在 [`show_result`](P2ConfigPage::show_result) 里读 `resp.duplicate` 并弹提示 |
 //! | PD19 | `CARD_INSET` / `CARD_HEAD_H` / `INNER_W` 三个常量与 `ui/pages/p6_system.rs` **逐字重复**（两页各持一份同式定义） | **不动**（KISS + `p6_system.rs` 本批**禁改**）：三条都是 `theme` 常量的**一格推导**，上收需要一个新共享模块（结构变更，超出本批整改范围） | **B2c 之后**统一上收 `ui/pages/mod.rs`（P1/P2/P6 共用一份）；在此之前**任一处改 `theme` 派生式必须三处同改** |
 //! | PD20 | **组件 / 接线缺口（本批不改代码）**：`Toast::new(..)`（`ui/components.rs`）内部取 `Instant::now()`，而本页时钟是**注入**的（`tick(now)`）⇒ Toast 过期时刻与本页业务时钟**不同源**（离屏确定性用例因此不能完全控制 Toast 生命周期） | `components.rs` 本批**禁改** ⇒ 只登记。**⚠️ 订正评审假设**：`components.rs` **已有** `Toast::new_at(..)` ⇒ 缺口**不在组件侧**，而在"本页何时拿到 `now`" —— `set_config` / `show_result` 的签名里**没有** `now`（本页纪律：不读时钟） | **B3 接线时 reconcile**：由 B3 在事件循环里把 `tick` 的 `now` 缓存进 `Cell` 供 `show_toast` 使用，再改用 `Toast::new_at(now, ..)`；**收口前** Toast 的过期语义由注入时刻驱动，两者在真实事件循环里同源（无实际偏差） |
-//! | PD21 | **控件值域比契约窄时的屏上回显（C1 的残余，如实登记）** —— 两种子形态：**(i) 注入值非法** ⇒ 该行进错误态 + 控件 `disabled` + **不进草稿**，但**控件本体仍渲染一个"最小可表示值"**（`Enum` ⇒ `options[0]`；`U16`/`U64` ⇒ `min`；`Ipv4` ⇒ `0.0.0.0`）；**(ii) 注入值合法但控件表示不了**（如 `U64::MAX` 超出 `Stepper` 的 `i64` 值域 ⇒ 控件渲染 `i64::MAX`）⇒ 该行**不进错误态**（值确实合法），但同样**不置脏、不进草稿**（拦它的是 [`DraftScope::touched`]，**不是** `invalid`） | 三类控件的取值域**没有"无值"这一档**（`SegmentedControl::new` 拒绝空选项、`Stepper::new` 必须有 `value` 且是 `i64`、`Ipv4Stepper` 四段恒有值），且 `ui/controls.rs` / `ui/components.rs` 本批**禁改**。旧形态的缺陷是"**静默**改写 + 保存可用"（一次点击即可写入屏上从未展示的值，C1）；现形态把 (i) 变为**可见**（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）+ **不可交互**，把 (ii) 变为**不可提交**（不进 `draft` / `is_dirty` / `defaults_patch`）⇒ 风险由"可写入装置"降为"屏上显示一个**不会被写回**的近似值" | 无（**有意**）；根治需给三类控件增"无值 / 非法值 / 超宽值"专用形态（`ui/controls.rs` 收口批）：(i) 改显 [`PLACEHOLDER`]、(ii) 由控件侧支持全 `u64` 值域 |
+//! | PD21 | **控件值域比契约窄时的屏上回显（C1 的残余，如实登记）** —— 两种子形态：**(i) 注入值非法** ⇒ 该行进错误态 + 控件 `disabled` + **不进草稿**，但**控件本体仍渲染一个"最小可表示值"**（`Enum` ⇒ `options[0]`；`U16`/`U64` ⇒ `min`；`Ipv4` ⇒ `0.0.0.0`）；**(ii) 注入值合法但控件表示不了**（如 `U64::MAX` 超出 `Stepper` 的 `i64` 值域 ⇒ 控件渲染 `i64::MAX`）⇒ 该行**不进错误态**（值确实合法），但同样**不置脏、不进草稿**（拦它的是 [`DraftScope::touched`]，**不是** `invalid`）。**⚠️ 限定（B5 补登记）：(ii) 的"不可提交"仅对"未触碰"成立** —— 一旦用户触碰该字段（`Stepper` 的 `i64` 值域内 `±` 可达 `i64::MAX` 附近），`is_dirty = true`、该**近似值**（`9223372036854775807`，**不是**注入的 `u64::MAX`）**可被提交** | 三类控件的取值域**没有"无值"这一档**（`SegmentedControl::new` 拒绝空选项、`Stepper::new` 必须有 `value` 且是 `i64`、`Ipv4Stepper` 四段恒有值），且 `ui/controls.rs` / `ui/components.rs` 本批**禁改**。旧形态的缺陷是"**静默**改写 + 保存可用"（一次点击即可写入屏上从未展示的值，C1）；现形态把 (i) 变为**可见**（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）+ **不可交互**，把 (ii) 变为**不可提交**（不进 `draft` / `is_dirty` / `defaults_patch`）⇒ 风险由"可写入装置"降为"屏上显示一个**不会被写回**的近似值"（**(ii) 仅在未触碰时成立**，见上）。该风险属"**控件值域窄于契约值域**"的既有取向（本页不为此增"隐藏原值"的影子态 —— 影子态一旦与控件漂移，就是新一类静默失实） | 无（**有意**）；根治需给三类控件增"无值 / 非法值 / 超宽值"专用形态（`ui/controls.rs` 收口批）：(i) 改显 [`PLACEHOLDER`]、(ii) 由控件侧支持全 `u64` 值域 |
+//!
+//! | PD22 | **"当前值非法 **且** `default` 自身也非法"的键在本页无修复路径**（**B3 的残余**，如实登记）：B3 已让 [`defaults_patch_of`] 纳入全部「`editable` 且 `default` 合法」的键 ⇒ "当前值非法但 `default` 合法"的字段**可经「恢复默认值」修好**；但若某键的 `default` **自身**也过不了 [`ConfigKind::validate_value`]（后端字段表自相矛盾：连"可写值"都不合法），则该键**既不能编辑**（控件 `disabled`）、**也不能进恢复补丁**（混入会被后端打回**整单**）⇒ **页内无任何修复路径**（该字段永久不可改，除非重启进程或后端改值） | `default` 不合法时把它写进补丁，会让**整个**恢复请求被后端二次校验打回（不能为一个键牺牲其余键的可恢复性）。本页的既有披露：注入值非法时该行仍**如实**标红（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）—— **非法这件事本身是可见的**，不可见的是"`default` 也非法"（UI §3.6 无对应文案，本页**不**为其造文案） | **后端字段表缺陷，需后端修正**（`default` 必须落在自身 `kind` 的值域内）；字库/文案收口批**不**解决此项 |
+//! | PD23 | **恢复默认值弹层的「当前值」在"注入值非法"行取的是控件近似值**（B3 把该键纳入补丁后**仍然如此**，如实登记）：[`reset_details`] 的 `before` 与行内回显**同源**（读控件，见 [`Core::current_values`]）⇒ 注入值非法时控件显的是**最小可表示值**（PD21(i)：`Enum` ⇒ `options[0]`、`U16`/`U64` ⇒ `min`、`Ipv4` ⇒ `0.0.0.0`），**不是**装置真值。**极端情形**：`default` 恰等于该近似值（如 `U16{min: 1}` 且 `default = 1`）⇒ 明细显示「`1 → 1`」，**看似空操作、实际是真修复**（真值 → `1`） | ①「当前值」的**唯一真源是控件**（与 [`save_details`] 同口径）—— 弹层与行内回显**同源**，屏内不自相矛盾；②该行已用红字 [`TEXT_INVALID_VALUE`] 披露"取值无效"，操作者可判读；③根治在 **PD21 的收口批**（`ui/controls.rs` 给三类控件增"无值档"），届时 `before` 可直显 [`PLACEHOLDER`]（PRD F1.4「显 `--`，严禁补 0」）。**本页不粉饰**：这是**近似值**，对"只看弹层"的操作者构成误读风险 | 无（**有意**，**未**自行扩大改动）；**⚠️ 待 PM / 主控裁定**：若要求本批即改显 [`PLACEHOLDER`]，只需让 [`reset_details`] 在"注入值非法"时改取 `f.value` 作 `before`（≈ 3 行：非法值经 [`format_value`] 自动落 [`PLACEHOLDER`]） |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -96,7 +99,7 @@ use crate::ui::theme::{self, ConfirmLevel, Dimens, Palette, TextSlot};
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 上屏文案（UI §3.6 P2 行；**落笔前逐字在 `fonts/lv_font_cmap.txt` 核对**）
 //
-// 与契约串的偏差逐条登记在文件头 `PD1~PD21`（缺字改写 / 缺字号改写 / 口径 / 尺寸 / 降级），此处只放**成品串**。
+// 与契约串的偏差逐条登记在文件头 `PD1~PD23`（缺字改写 / 缺字号改写 / 口径 / 尺寸 / 降级），此处只放**成品串**。
 // 码表覆盖率走查见 `ui/tests.rs::ui_texts_covered_by_font_cmap`（基线 = 生成字体的实际 cmap，
 // 待查集合 = 扫 `ui/**` 源码字面量）。
 // ═══════════════════════════════════════════════════════════════════════════
@@ -419,7 +422,9 @@ pub(crate) fn initial_values(view: &ConfigView) -> BTreeMap<String, Value> {
 ///   页面**未经过任何用户操作**就已经是脏的、保存按钮**可用** ⇒ 一次点击即把屏上**从未展示过**的
 ///   值写进装置（评审实测的 C1）；
 /// - [`invalid`](Self::invalid) —— 注入值**不合法**（`kind.validate_value` 拒绝）⇒ 该行错误态 +
-///   控件 `disabled` + **该键不进任何补丁**（既不进草稿，也不进"恢复默认值"）。
+///   控件 `disabled` + **该键不进草稿**（屏上控件值是"最小可表示值"，写它 = 把屏上从未展示过的
+///   值写进装置）。⚠️ **它不再排除"恢复默认值"**（**B3**）：那种键恰恰需要修复路径，而 `default`
+///   通常就是唯一可用的合法值 —— 排除判据见 [`resettable`]（PD22）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DraftScope {
     /// 用户经控件改动过的键（**注入永不入内**）。
@@ -471,16 +476,37 @@ pub(crate) fn is_dirty(
     !draft_patch(view, current, scope).changes.is_empty()
 }
 
-/// 恢复默认值补丁：**全部 `editable` 且注入值合法**的字段 → 其 `default`（`from = ResetDefault`）。
+/// 恢复默认值的**纳入判据**（[`defaults_patch_of`] 与 [`reset_details`] **共用一份** ——
+/// 两者必须逐条一致，否则"弹层列了、实际没写"就是**谎报**；见 [`reset_details`] 的文档）。
+///
+/// 两条都是**硬约束**（违反其一，后端二次校验会打回**整单**）：
+///
+/// 1. `editable == true` —— 契约 [`ConfigField::validate_value`] 对只读字段**一律拒绝**
+///    （"只读，不可修改"，见 **PD12**）；
+/// 2. `default` **自身**通过 [`ConfigKind::validate_value`] —— `default` 不合法说明后端字段表
+///    自相矛盾，混入同样会被打回（见 **PD22**：这类键**页内无修复路径**，如实登记 + 上屏披露）。
+///
+/// ⚠️ 判据是 **`default` 是否合法**，**不是**"当前注入值是否合法"（**B3 收口**）：当前值非法
+/// **恰恰**说明该键需要一条修复路径，而 `default` 往往正是**唯一可用的合法值**；旧口径按
+/// "当前值非法"排除，与该行控件 `disabled`（PD21(i)）叠加后 ⇒ 该字段**页内永久不可改**
+/// （除非重启进程或后端改值）—— 这才是真正的"不可修复"，故本轮改判据。
+pub(crate) fn resettable(f: &ConfigField) -> bool {
+    f.editable && f.kind.validate_value(&f.default).is_ok()
+}
+
+/// 恢复默认值补丁：**全部满足 [`resettable`]（`editable` 且 `default` 合法）** 的字段 →
+/// 其 `default`（`from = ResetDefault`）。
 ///
 /// **只读字段一律不进 `changes`**（见 **PD12**）：契约 [`ConfigField::validate_value`] 对
 /// `editable=false` **一律拒绝**，混进去会让整个恢复请求被后端二次校验打回。
 ///
-/// **注入值非法的字段同样不进**（**C1**）：它的元数据与当前值已自相矛盾（该行错误态 + 控件 `disabled`），
-/// 替它写 `default` 属"屏上不可核查的写入"—— 与"降级可见、绝不造假"冲突。
-pub(crate) fn defaults_patch_of(view: &ConfigView, invalid: &BTreeSet<String>) -> ConfigPatch {
+/// **`default` 自身非法的字段同样不进**（见 **PD22**）：代价是该键页内无修复路径，但把它混进
+/// 补丁会让**其余全部字段**的恢复一起被打回 —— 两害相权取其轻（且本页对该键**如实**披露非法态）。
+///
+/// **注入值非法的字段照常纳入**（**B3**）：`default` 是修复它唯一可用的合法值（判据见 [`resettable`]）。
+pub(crate) fn defaults_patch_of(view: &ConfigView) -> ConfigPatch {
     let mut changes = JsonMap::new();
-    for f in iter_fields(view).filter(|f| f.editable && !invalid.contains(&f.key)) {
+    for f in iter_fields(view).filter(|f| resettable(f)) {
         changes.insert(f.key.clone(), f.default.clone());
     }
     ConfigPatch {
@@ -506,22 +532,26 @@ pub(crate) fn has_reconnect_field(view: &ConfigView) -> bool {
 ///
 /// `changed` = **本次补丁的键集合**：
 /// - 保存：`draft_patch(view, current).changes.keys()`（只含**值与视图不同**的字段）；
-/// - 恢复默认值：`defaults_patch_of(view).changes.keys()`（= 全部 `editable` 字段，PD12 排除只读）。
+/// - 恢复默认值：`defaults_patch_of(view).changes.keys()`（= 满足 [`resettable`] 的字段：
+///   `editable` 且 `default` 合法 —— PD12 排除只读、PD22 排除 `default` 非法者）。
 ///
 /// # 为什么不能用"视图内全部字段"（三条，逐条对应设计）
 ///
 /// 1. 设计 §6.2 流程 3 的示例是「`端口：2404 → 2405`」+「**涉及：端口**」—— 同视图内还有
 ///    `监听地址`（§4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ **只有**本次改动口径
 ///    能让该示例成立；
-/// 2. §2.5 两行都写「**含**连接类字段的配置保存」（"含" = **本次**含），§7.3 明细段标题是
-///    「**将修改的字段**」；
+/// 2. §2.5 的 **`L2` 行**（`12-MUPC-本地显示终端-UI设计文档.md:99`）写「**含**连接类字段的
+///    配置保存」——「含」读作**本次**含（该行措辞**不排除**视图口径，是歧义行）；同处的
+///    **`L2+` 行**（`:100`）写的是「**任一字段** `requires_reconnect == true`」（**视图口径**）
+///    —— **两行措辞并不相同**，不得概括为"两行都写"（逐列原文见 **PD11 ①/②**）；
+///    §7.3 的明细段标题是「**将修改的字段**」；
 /// 3. §2.6 铁律「降级可见、**绝不造假**」—— 只改日志级别却弹「生效瞬间通信将短暂中断」是
 ///    **谎报副作用**。
 ///
 /// # 恢复默认值路径的等价性论证（**改动口径才正确**在何处）
 ///
-/// 当且仅当**所有** `requires_reconnect` 字段都 `editable == true` 时，"视图口径" ≡ "改动口径"
-/// —— 因为 [`defaults_patch_of`] 覆盖**全部** `editable` 字段。一旦存在**只读的**瞬断字段
+/// 当且仅当**所有** `requires_reconnect` 字段都满足 [`resettable`]（`editable` 且 `default` 合法）
+/// 时，"视图口径" ≡ "改动口径" —— 因为 [`defaults_patch_of`] 覆盖**全部**这类字段。一旦存在**只读的**瞬断字段
 /// （例如 `display.bind_addr` 被后端标成 `requires_reconnect=true`：设计 §6.2 明列它是只读的
 /// 安全红线字段），**视图口径会把它列进「涉及：」并把分级抬到 L2+，而它既不会进补丁、也不会
 /// 经屏生效** ⇒ 视图口径在此**必然错**（谎报一个改不动的字段会瞬断链路）。改动口径取的是
@@ -606,17 +636,19 @@ pub(crate) fn save_details(
     out
 }
 
-/// 恢复默认值路径的变更明细（「字段：当前值 → 默认值」；范围与 [`defaults_patch_of`] **逐条一致**）。
+/// 恢复默认值路径的变更明细（「字段：当前值 → 默认值」；范围与 [`defaults_patch_of`] **逐条一致**
+/// —— 同一个 [`resettable`]，不得各写一套：列了不写 = **谎报**，写了不列 = 操作者看不到将改什么）。
 ///
-/// **注入值非法的字段不进明细**（**C1**）：它们的 `default` 不会进 [`defaults_patch_of`] 的
-/// `changes` ⇒ 列在弹层里就是**谎报**（"要改"而实际不改）。
+/// ⚠️ **「当前值」取自控件**（`current` = [`Core::current_values`]，与 [`save_details`] 同口径）：
+/// 注入值非法时控件回显的是**最小可表示值**（PD21(i)）而**非**装置真值 ⇒ 明细的「当前值」是
+/// **近似值**（极端情形下 `default` 恰等于该近似值 ⇒ 显示「`1 → 1`」）。**如实登记于 PD23**，
+/// 不粉饰；根治在 PD21 的控件收口批。
 pub(crate) fn reset_details(
     view: &ConfigView,
     current: &BTreeMap<String, Value>,
-    invalid: &BTreeSet<String>,
 ) -> Vec<ChangeDetail> {
     let mut out = Vec::new();
-    for f in iter_fields(view).filter(|f| f.editable && !invalid.contains(&f.key)) {
+    for f in iter_fields(view).filter(|f| resettable(f)) {
         let Some(now) = current.get(&f.key) else {
             continue;
         };
@@ -911,7 +943,7 @@ struct Core {
     /// **用户经控件改动过**的键集合（**C1**：注入本身永不置脏 —— 见 [`DraftScope`]）。
     touched: RefCell<BTreeSet<String>>,
     /// **注入值不合法**（`kind.validate_value` 拒绝）的键集合（**C1**：该行进错误态 + 控件
-    /// `disabled` + 该键不进任何补丁）。
+    /// `disabled` + 该键**不进草稿**；**不**排除"恢复默认值" —— 见 [`DraftScope`] / B3）。
     invalid: RefCell<BTreeSet<String>>,
     /// 提交中（F9.6：保存按钮 `disabled` + 文案「保存中...」）。
     submitting: Cell<bool>,
@@ -1054,10 +1086,13 @@ impl Core {
         }
     }
 
-    /// 恢复默认值补丁（排除只读字段与**注入值非法**的字段；PD12 / C1）。
+    /// 恢复默认值补丁（纳入判据见 [`resettable`]：`editable` 且 `default` 合法 —— PD12 / PD22）。
+    ///
+    /// **不按"注入值非法"排除**（**B3**）：那正是最需要一条修复路径的键，而 `default` 通常就是
+    /// 它唯一可用的合法值。
     fn defaults_patch(&self) -> ConfigPatch {
         match self.view.borrow().as_ref() {
-            Some(v) => defaults_patch_of(v, &self.invalid.borrow()),
+            Some(v) => defaults_patch_of(v),
             None => ConfigPatch {
                 changes: JsonMap::new(),
                 from: PatchSource::ResetDefault,
@@ -1285,7 +1320,8 @@ fn build_card(
 /// 建一个字段行（两种版式由 `kind` 决定）。
 ///
 /// **注入即校验**（**C1**）：`f.value` 不满足自身 `kind` 的值域 ⇒ `bad = true` ⇒ 该行
-/// **错误态 + 控件 `disabled` + 该键记入 `invalid`**（→ 不进草稿 / 不进恢复默认值补丁）。
+/// **错误态 + 控件 `disabled` + 该键记入 `invalid`**（→ **不进草稿**；恢复默认值**照常纳入**，
+/// 见 [`resettable`] / B3）。
 /// 判据只有一个（[`ConfigKind::validate_value`]），**不在下游再写第二套**。
 fn build_row(
     core: &Rc<Core>,
@@ -1462,7 +1498,7 @@ struct EnumView {
 /// 2. **装不下** ⇒ 取一个**含当前值**的 `ENUM_MAX_SEGMENTS` 段窗口（`start = selected + 1 − n`，
 ///    再夹到 `[0, count − n]`）—— 窗口**必须含当前值**，否则合法值会被挤到窗外、`enum_index`
 ///    读回 `0` ⇒ **静默改写**成 `options[0]`（正是 C1 要根除的形态）；窗口位置随值滑动，
-///    并在约束槽上屏「仅显示 N 项」；
+///    并在约束槽上屏「仅显示 N 段」（**B1**：初稿的「N 项」因 `项` 缺字改为 `段`，见 PD16）；
 /// 3. **空选项** ⇒ 单段占位（[`PLACEHOLDER`]，`shown = 0`）：`SegmentedControl::new` 拒绝空选项，
 ///    而契约允许 `options` 为空（该情形下 `validate_value` 必拒任何值 ⇒ 本行一定同时是 C1 的
 ///    "注入值非法"行：错误态 + 禁用 + 不进草稿）。
@@ -1512,10 +1548,15 @@ fn clamp_index(i: usize, count: usize) -> usize {
 
 /// `U16`/`U64` → `(min, max, step)` 的 `i64` 形式（`u64` 超 `i64` 时收敛到 `i64::MAX`）。
 ///
-/// **`step == 0` 折为 1**（**PD15**）：契约 [`ConfigKind::validate_value`] 写
+/// **`step == 0` 折为 1**（**PD15 ①**）：契约 [`ConfigKind::validate_value`] 写
 /// `if *step != 0 && …` ⇒ **显式把 `step == 0` 当合法**（语义 = "不校验步长"）；而
 /// [`Stepper::new`] 只接受正步长 ⇒ 照搬 0 会返回 `Err` 让**整页**拒绝渲染。折为 1 = 契约语义的
 /// **忠实映射**（"不校验步长" ⇒ 任何整数值都合法 ⇒ 步长 1 可达**全部**合法值）。
+///
+/// **`step > i64::MAX` 同样折为 1**（**PD15 ②**，B6 补登记）：`i64::try_from` 失败 ⇒ `unwrap_or(1)`
+/// —— 与 ① **同族但方向相反**（契约此时**收紧**到"`(n − min) % step == 0`"，折 1 却**放开**）。
+/// 已核实**不会排除任何原本合法的取值**（可达集 ⊇ 合法集）；后果仅是现场可步进到会被后端
+/// 二次校验打回的中间值（**可见失败**，非静默写入）。
 fn int_bounds(kind: &ConfigKind) -> (i64, i64, i64) {
     match kind {
         ConfigKind::U16 { min, max, step } => (
@@ -1526,6 +1567,9 @@ fn int_bounds(kind: &ConfigKind) -> (i64, i64, i64) {
         ConfigKind::U64 { min, max, step } => (
             i64::try_from(*min).unwrap_or(i64::MAX),
             i64::try_from(*max).unwrap_or(i64::MAX),
+            // `step > i64::MAX` ⇒ 静默折为 1（**PD15 ②**，与 `step == 0` 同族、方向相反）：
+            // 可达集只**变大**（不会排除任何原本合法的取值），但**放开**了契约的步长约束。
+            // 不在此返回 `Err` —— 那会让一个**合法**元数据把整页打成白屏（旧形态，I1）。
             int_step(i64::try_from(*step).unwrap_or(1)),
         ),
         _ => (0, 0, 1),
@@ -1711,7 +1755,8 @@ impl P2ConfigPage {
     /// `WriteMode::FullRewrite` ⇒ Toast 明示「原有文字不再存在」（EDGE-23，见 **PD9/PD10**）。
     ///
     /// **逐字段注入即校验**（**C1**）：`f.value` 不满足自身 `kind` 的值域 ⇒ 该行进错误态 +
-    /// 控件 `disabled` + 该键**不进任何补丁**（不置脏、不进草稿、不进恢复默认值）。
+    /// 控件 `disabled` + 该键**不进草稿**（不置脏）；**「恢复默认值」仍会纳入它**（**B3** ——
+    /// `default` 是修复该键唯一可用的合法值，纳入判据见 [`resettable`]）。
     ///
     /// **草稿保活**（**I4 取 (b)**，见 **PD17**）：重建卡片时，**用户已改过**（`touched`）且新元数据
     /// **认可**的值会写回新控件并保留脏标记；键已消失 / 新元数据不认可 ⇒ 丢弃该键的草稿。
@@ -2046,9 +2091,9 @@ fn open_dialog(core: &Rc<Core>, kind: DialogKind) -> Result<(), LvglError> {
         return Ok(());
     };
     let current = core.current_values();
-    // 草稿门控快照（C1）：用户改过 / 注入值非法 —— 两个分支共用同一份口径。
+    // 草稿门控快照（C1）：用户改过 / 注入值非法 —— 保存分支按它判定（恢复分支的判据是
+    // [`resettable`]，与注入值是否非法**无关**，见 B3）。
     let scope = core.scope();
-    let invalid = core.invalid.borrow().clone();
 
     let (title, impact, level, details_src, warn_src) = match kind {
         DialogKind::Save => {
@@ -2068,14 +2113,15 @@ fn open_dialog(core: &Rc<Core>, kind: DialogKind) -> Result<(), LvglError> {
             )
         }
         DialogKind::Reset => {
-            // 恢复默认值的"本次改动" = 恢复补丁的键（全部 `editable` 字段；只读字段被 PD12 排除，
-            // 注入值非法的字段被 C1 排除）。
-            let patch = defaults_patch_of(&view, &invalid);
+            // 恢复默认值的"本次改动" = 恢复补丁的键（判据 = `editable` 且 `default` 合法，见
+            // [`resettable`]：只读字段被 PD12 排除、`default` 非法者被 PD22 排除；
+            // **注入值非法的字段照常纳入** —— B3）。
+            let patch = defaults_patch_of(&view);
             (
                 TEXT_RESET_DEFAULT,
                 TEXT_IMPACT_RESET,
                 reset_level(&view, patch.changes.keys().map(String::as_str)),
-                reset_details(&view, &current, &invalid),
+                reset_details(&view, &current),
                 reconnect_field_labels(&view, patch.changes.keys().map(String::as_str)),
             )
         }
@@ -2317,48 +2363,86 @@ mod tests {
         assert!(!is_dirty(&v, &cur, &scoped));
     }
 
-    /// **C1 / PD12 共用的排除口径**：注入值非法的键不进"恢复默认值"补丁，**也不进**其明细
-    /// （明细与补丁必须逐条一致，否则弹层列了、实际没写 = 谎报）。
+    /// **B3 回归锁**（本轮收口，替代旧的"按注入值非法排除"口径）：恢复默认值的纳入判据 =
+    /// [`resettable`]（`editable` **且 `default` 合法**）——
     ///
-    /// 敏感性：把 [`defaults_patch_of`] 的 `!invalid.contains(..)` 去掉 ⇒ 第 1 条变红；
-    /// 把 [`reset_details`] 的同一过滤去掉 ⇒ 第 2 条变红。
+    /// ① "当前值非法、`default` 合法"的键**必须纳入**（`default` 正是修复它的**唯一**合法值）；
+    /// ② 只读字段仍**不纳入**（PD12 不得回退）；③ `default` 自身非法的键**不纳入**（PD22）；
+    /// ④ 明细与补丁**逐条一致**（同一个 [`resettable`]）。
+    ///
+    /// 敏感性（**探针实测**）：把 [`resettable`] 改回"按 `invalid` 排除**当前非法值**"（旧口径，
+    /// 即 `f.editable && !invalid.contains(&f.key)`）⇒ **第 ① 条立刻变红**（`None != Some("info")`）。
     #[test]
-    fn invalid_keys_are_excluded_from_defaults_and_details() {
-        let v = view();
+    fn reset_patch_includes_invalid_current_values_with_legal_defaults() {
+        // ① 当前值非法（`trace` 不在选项内）、`default` 合法（`info`）。
+        let mut v = view();
+        for g in &mut v.groups {
+            for f in &mut g.fields {
+                if f.key == "system.log_level" {
+                    f.value = Value::from("trace");
+                    f.default = Value::from("info");
+                }
+            }
+        }
         let cur = initial_values(&v);
-        let invalid: BTreeSet<String> = ["system.log_level"].iter().map(|k| (*k).to_string()).collect();
-
-        let p = defaults_patch_of(&v, &invalid);
-        assert!(
-            !p.changes.contains_key("system.log_level"),
-            "注入值非法的字段不得进恢复默认值补丁"
+        let p = defaults_patch_of(&v);
+        assert_eq!(
+            p.changes.get("system.log_level"),
+            Some(&Value::from("info")),
+            "当前值非法**不得**排除「恢复默认值」—— default 是修复它的唯一合法值（B3）"
         );
         assert!(p.changes.contains_key("gateway.port"), "其余可编辑字段照旧");
 
-        let d = reset_details(&v, &cur, &invalid);
+        // ② 只读字段（PD12）仍不纳入 —— 该键的 default 是合法的 `127.0.0.1`。
         assert!(
-            d.iter().all(|x| x.key != "system.log_level"),
-            "明细不得列出**不会写**的字段（逐条一致）"
+            !p.changes.contains_key("display.bind_addr"),
+            "只读字段不得进补丁（后端二次校验会拒绝整单）"
+        );
+
+        // ③ `default` **自身**非法（`99999 > u16::MAX`）⇒ 不纳入（PD22：该键页内无修复路径，
+        //    但把它混进补丁会让**整单**被打回）。
+        let mut bad = view();
+        for g in &mut bad.groups {
+            for f in &mut g.fields {
+                if f.key == "intercore.port" {
+                    f.default = Value::from(99999u64);
+                }
+            }
+        }
+        let pb = defaults_patch_of(&bad);
+        assert!(
+            !pb.changes.contains_key("intercore.port"),
+            "default 自身不合法的键不得混入（否则整单被后端打回）"
+        );
+        assert!(pb.changes.contains_key("gateway.port"), "其余照常");
+
+        // ④ 明细与补丁逐条一致（同一个判据）。
+        let d = reset_details(&v, &cur);
+        assert!(
+            d.iter().any(|x| x.key == "system.log_level"),
+            "明细必须列出**会写**的字段（列了不写 / 写了不列都是谎报）"
         );
         assert_eq!(
             d.len(),
-            iter_fields(&v).filter(|f| f.editable).count() - 1,
-            "其余可编辑字段照旧全列"
+            iter_fields(&v).filter(|f| resettable(f)).count(),
+            "逐条一致"
         );
-        // 空 invalid ⇒ 与旧口径一致（回退对照）。
-        let full = defaults_patch_of(&v, &BTreeSet::new());
-        assert!(full.changes.contains_key("system.log_level"));
+        let db = reset_details(&bad, &initial_values(&bad));
+        assert!(
+            db.iter().all(|x| x.key != "intercore.port"),
+            "明细不得列出**不会写**的键"
+        );
     }
 
-    /// 恢复默认值补丁：**覆盖全部 `editable` 字段** + `from = ResetDefault` +
+    /// 恢复默认值补丁：**覆盖全部满足 [`resettable`] 的字段** + `from = ResetDefault` +
     /// **只读字段不得混入**（契约 `validate_value` 会拒绝整单，见 PD12）。
     ///
-    /// 敏感性：把 `filter(|f| f.editable)` 去掉 ⇒ 第 3 条变红；把 `f.default` 写成 `f.value`
-    /// ⇒ 第 2 条变红（`telemetry.interval` 的当前值 1 ≠ 默认值 60）。
+    /// 敏感性：把 `filter(|f| resettable(f))` 的 `f.editable` 去掉 ⇒ 第 3 条变红；
+    /// 把 `f.default` 写成 `f.value` ⇒ 第 2 条变红（`telemetry.interval` 的当前值 1 ≠ 默认值 60）。
     #[test]
     fn defaults_patch_covers_all_editable_fields() {
         let v = view();
-        let p = defaults_patch_of(&v, &BTreeSet::new());
+        let p = defaults_patch_of(&v);
         assert_eq!(p.from, PatchSource::ResetDefault);
         let editable: Vec<&str> = iter_fields(&v).filter(|f| f.editable).map(|f| f.key.as_str()).collect();
         assert_eq!(p.changes.len(), editable.len(), "覆盖全部可编辑字段");
@@ -2458,11 +2542,7 @@ mod tests {
         // 场景 A：**可编辑**的瞬断字段 —— 两个口径**一致**（都升 L2+）。
         let mut a = view();
         mark_reconnect(&mut a, "gateway.port");
-        let keys_a: Vec<String> = defaults_patch_of(&a, &BTreeSet::new())
-            .changes
-            .keys()
-            .cloned()
-            .collect();
+        let keys_a: Vec<String> = defaults_patch_of(&a).changes.keys().cloned().collect();
         assert!(
             keys_a.iter().any(|k| k == "gateway.port"),
             "恢复补丁覆盖全部 editable 字段"
@@ -2484,11 +2564,7 @@ mod tests {
             has_reconnect_field(&b),
             "视图口径看得见这个只读瞬断字段 —— 正是它会让视图口径误报"
         );
-        let keys_b: Vec<String> = defaults_patch_of(&b, &BTreeSet::new())
-            .changes
-            .keys()
-            .cloned()
-            .collect();
+        let keys_b: Vec<String> = defaults_patch_of(&b).changes.keys().cloned().collect();
         assert!(
             !keys_b.iter().any(|k| k == "display.bind_addr"),
             "只读字段不进恢复补丁（PD12）"
@@ -2510,11 +2586,7 @@ mod tests {
     #[test]
     fn reset_level_is_at_least_l2() {
         let v = view();
-        let keys: Vec<String> = defaults_patch_of(&v, &BTreeSet::new())
-            .changes
-            .keys()
-            .cloned()
-            .collect();
+        let keys: Vec<String> = defaults_patch_of(&v).changes.keys().cloned().collect();
         assert_eq!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L2);
         assert_ne!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L1);
     }
@@ -2836,7 +2908,7 @@ mod tests {
     /// 变更明细：保存路径只列**本次改动**的字段；恢复路径列**全部可编辑**字段。
     ///
     /// 敏感性：把 `save_details` 的 `*now == f.value` 判断删掉 ⇒ 第 1 条变红；
-    /// 把 `reset_details` 的 `filter(|f| f.editable)` 删掉 ⇒ 第 2 条变红。
+    /// 把 `reset_details` 的 `filter(|f| resettable(f))` 的 `editable` 去掉 ⇒ 第 2 条变红。
     #[test]
     fn change_details_shapes() {
         let v = view();
@@ -2849,9 +2921,9 @@ mod tests {
         assert_eq!(d[0].before, "2404");
         assert_eq!(d[0].after, "2405");
 
-        let r = reset_details(&v, &cur, &BTreeSet::new());
+        let r = reset_details(&v, &cur);
         let editable = iter_fields(&v).filter(|f| f.editable).count();
-        assert_eq!(r.len(), editable, "恢复默认值列出全部可编辑字段");
+        assert_eq!(r.len(), editable, "恢复默认值列出全部可编辑字段（此处 default 全合法）");
         assert!(
             r.iter().all(|d| d.key != "display.bind_addr"),
             "只读字段不进明细"
@@ -2863,28 +2935,30 @@ mod tests {
     ///
     /// 敏感性：把 [`format_value`] 的 `validate_value` 判据去掉（回到 `int_of(..).unwrap_or_default()`）
     /// ⇒ 第 1 条变红（读到 `"0"` —— 而 `0` 是**合法**配置值，等于把错误伪装成合法值）。
+    ///
+    /// ⚠️ 构造前提（**B3 之后**）：该键的 `default` 必须**合法**（否则它不被 [`resettable`] 纳入，
+    /// 明细里根本没有它 —— 那是 **PD22** 的场景，不是本条要锁的格式化口径）。
     #[test]
     fn change_details_never_disguise_bad_values_as_zero() {
         let mut v = view();
-        // 造一个"注入值类型错配"的字段（`U16` 收到字符串），并让它**看起来**被用户改动过
-        // —— 明细的 `before` 取自注入值，与 touched 无关，这里直接调 `reset_details` 更直白。
+        // 造一个"注入值类型错配"的字段（`U16` 收到字符串）；`default` 保持合法（2500）。
         for g in &mut v.groups {
             for f in &mut g.fields {
                 if f.key == "intercore.port" {
                     f.value = Value::from("abc");
-                    f.default = Value::from("abc");
                 }
             }
         }
         let cur = initial_values(&v);
-        let d = reset_details(&v, &cur, &BTreeSet::new());
+        let d = reset_details(&v, &cur);
         let row = d.iter().find(|x| x.key == "intercore.port").expect("明细含该字段");
         assert_eq!(row.before, PLACEHOLDER, "无法格式化 ⇒ 占位符");
         assert_ne!(row.before, "0", "**不得**把类型错配伪装成合法值 0");
-        assert_eq!(row.after, PLACEHOLDER, "默认值同样不可格式化 ⇒ 占位符");
+        assert_eq!(row.after, "2500", "`after` 取合法的 default（不是占位符）");
     }
 
-    /// 整数边界：`u64` 超 `i64` 不 panic（收敛到 `i64::MAX`）。
+    /// 整数边界：`u64` 超 `i64` 不 panic（收敛到 `i64::MAX`）；**`step > i64::MAX` 折为 1**
+    /// （**PD15 ② / B6**：与 `step == 0` 同族的**反向**形态，见 [`int_bounds`] 的文档）。
     #[test]
     fn int_bounds_saturates() {
         let k = ConfigKind::U64 {
@@ -2899,5 +2973,24 @@ mod tests {
             step: 5,
         };
         assert_eq!(int_bounds(&u), (1, 65535, 5));
+        // `step > i64::MAX`：`i64::try_from` 失败 ⇒ 折为 1（**不**返回 `Err` ⇒ 不整页白屏）。
+        let huge = ConfigKind::U64 {
+            min: 10,
+            max: 100,
+            step: u64::MAX,
+        };
+        assert_eq!(
+            int_bounds(&huge),
+            (10, 100, 1),
+            "`step > i64::MAX` 折为 1（放开：可达集只变大，不排除任何原本合法的取值）"
+        );
+        assert!(
+            huge.validate_value(&Value::from(10u64)).is_ok(),
+            "契约侧该值合法（`(10−10) % step == 0`）"
+        );
+        assert!(
+            huge.validate_value(&Value::from(11u64)).is_err(),
+            "自证：契约的 step 约束**收紧**（折为 1 后控件却能步进到 11 ⇒ 放开；见 PD15 ②）"
+        );
     }
 }

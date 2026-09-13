@@ -3655,10 +3655,32 @@ pub(crate) fn pages_chain() {
             assert_eq!(p2.field_status_visible("system.log_level"), Some(true));
             assert!(!p2.is_dirty(), "**注入本身永不置脏**（关键的一半）");
             assert!(p2.draft().changes.is_empty(), "非法键不进草稿");
-            assert!(
-                !p2.defaults_patch().changes.contains_key("system.log_level"),
-                "非法键不进「恢复默认值」补丁"
+            // **B3**：非法注入值**不得**把该键排除出「恢复默认值」—— `default`（`info`，合法）正是
+            // 修复该字段**唯一可用**的合法值。旧口径下"控件 `disabled`（上一条）+ 恢复补丁排除"
+            // 叠加 ⇒ 该字段**页内无任何修复路径**（复审实测 `P-R2①/②/③`）。页级回归锁见 ⑯。
+            assert_eq!(
+                p2.defaults_patch().changes.get("system.log_level"),
+                Some(&Value::from("info")),
+                "非法注入值仍必须可经「恢复默认值」修好（B3）"
             );
+            // **B4 页级回归锁**：`invalid` 门的页级独占性 —— 即便把该字段**旁路改成脏**
+            // （`set_field_value` 走 `after_field_edit` ⇒ 记入 `touched`，等价于绕过 `disabled`
+            // 的 rogue touch），它的键也必须被 `invalid` 门**挡在草稿之外**（否则一次点击即可
+            // 把屏上不可核查的近似值写进装置 —— C1 的另一半）。
+            //
+            // 敏感性（**探针实测**）：把 `DraftScope::admits` 的 `!self.invalid.contains(key)`
+            // 去掉 ⇒ 下面三条立刻变红，且下一拍「保存」会开出弹层。
+            assert!(p2.set_field_value("system.log_level", &Value::from("error")));
+            assert!(
+                p2.draft().changes.is_empty(),
+                "旁路改脏后，非法键仍不得进草稿（`invalid` 是否决票）"
+            );
+            assert!(
+                !p2.is_dirty(),
+                "非法键不得产生脏标记（`touched` 里的那条不算数）"
+            );
+            assert!(p2.save_disabled(), "⇒ 保存仍不可用");
+            p2.discard_draft();
             assert!(p2.save_disabled(), "无可提交内容 ⇒ 保存不可用");
             // 直接派发 CLICKED（旁路 GUI 的禁用判定）—— 意图侧**也**必须拦住（双保险）。
             p2.save_button()
@@ -3827,7 +3849,7 @@ pub(crate) fn pages_chain() {
             assert_eq!(
                 p2.field_status_text("system.log_level").as_deref(),
                 Some("仅显示 9 段"),
-                "截断必须**上屏**说明（被隐藏的项数可见）"
+                "截断必须**上屏**说明（被隐藏的段数可见；B1：用 `段` 而非缺字的 `项`）"
             );
             assert_eq!(
                 p2.field_error_visible("system.log_level"),
@@ -3836,6 +3858,96 @@ pub(crate) fn pages_chain() {
             );
             assert!(p2.set_field_value("gateway.port", &Value::from(2409)));
             assert!(p2.is_dirty(), "其它字段仍可正常渲染与编辑");
+            p2.discard_draft();
+        }
+
+        // ── ⑯ **B3 页级回归锁**：非法注入值必须**能**经「恢复默认值」修好（页内修复路径）──
+        //
+        // 旧形态（复审实测 `P-R2①/②/③`）：非法值的键被排除在恢复补丁之外，叠加该行控件
+        // `disabled` ⇒ **页内无任何修复路径**（该字段永久不可改，除非重启进程或后端改值），
+        // 且弹层文案「全部运行参数将恢复默认值并立即生效」与实际少写一个键**不符**（对操作者失实）。
+        //
+        // 敏感性（**探针实测**）：把 `p2_config::resettable` 改回"按 `invalid` 排除**当前非法值**"
+        // （旧口径）⇒ 下面 ① 与 ③ 两条立刻变红。
+        {
+            let mut fixme = p2_view(false);
+            for g in &mut fixme.groups {
+                for f in &mut g.fields {
+                    if f.key == "system.log_level" {
+                        f.value = Value::from("trace"); // 当前值非法（不在选项内）
+                        f.default = Value::from("info"); // default 合法 ⇒ 唯一可用的修复值
+                    }
+                }
+            }
+            p2.set_config(&fixme)
+                .expect("set_config（非法注入值 + 合法 default）");
+            assert_eq!(p2.field_error_visible("system.log_level"), Some(true));
+            assert_eq!(
+                p2.field_disabled("system.log_level"),
+                Some(true),
+                "前提：该行控件确实被禁用 ⇒「恢复默认值」是**唯一**剩下的修复路径"
+            );
+            // ① 补丁口径：`default` 合法 ⇒ 必须纳入（值 = default）。
+            assert_eq!(
+                p2.defaults_patch().changes.get("system.log_level"),
+                Some(&Value::from("info")),
+                "非法注入值不得被排除出「恢复默认值」补丁（B3）"
+            );
+            // ② 只读字段仍不进（PD12 不得回退）。
+            assert!(
+                !p2.defaults_patch()
+                    .changes
+                    .contains_key("display.bind_addr"),
+                "只读字段仍不得进补丁（PD12 不得回退）"
+            );
+            // ③ 经弹层确认后**实际提交**的补丁同样含它（明细与补丁逐条一致）。
+            let n0 = got.borrow().len();
+            p2.reset_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED);
+            assert_eq!(
+                p2.with_dialog(|d| d.level()),
+                Some(crate::ui::theme::ConfirmLevel::L2),
+                "无瞬断字段 ⇒ 恢复默认值走 L2（长按 1.0 s）"
+            );
+            p2.with_dialog(|d| {
+                d.confirm_button()
+                    .button()
+                    .obj()
+                    .send_event(EventCode::LONG_PRESSED)
+            });
+            assert_eq!(got.borrow().len(), n0 + 1, "确认完成 ⇒ 恰好发一次意图");
+            {
+                let g = got.borrow();
+                let last = g.last().expect("末条");
+                assert_eq!(last.0.from, PatchSource::ResetDefault);
+                assert_eq!(
+                    last.0.changes.get("system.log_level"),
+                    Some(&Value::from("info")),
+                    "**实际提交**的恢复补丁必须含该键（否则该字段页内永久不可改）"
+                );
+            }
+            // ④ `default` **自身非法** ⇒ **不**纳入（PD22：混入会让整单被后端二次校验打回）；
+            //    其余字段照常可恢复。
+            let mut bad_def = p2_view(false);
+            for g in &mut bad_def.groups {
+                for f in &mut g.fields {
+                    if f.key == "intercore.port" {
+                        f.default = Value::from(99999u64); // 超出 u16::MAX（65535）
+                    }
+                }
+            }
+            p2.set_config(&bad_def)
+                .expect("set_config（default 自身非法）");
+            assert!(
+                !p2.defaults_patch().changes.contains_key("intercore.port"),
+                "default 不合法的键不得混入（PD22；否则整单被后端打回）"
+            );
+            assert!(
+                p2.defaults_patch().changes.contains_key("gateway.port"),
+                "其余可恢复字段照常"
+            );
             p2.discard_draft();
         }
 
