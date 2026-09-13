@@ -70,7 +70,7 @@
 //! ⇒ 「手动上滚 ⇒ 停止自动滚动 + 浮现按钮」在本层**结构性不可实现**。本页只做出**可实现
 //! 的部分**，并**不假装**做了感知：
 //! - **恒显**「回到最新」按钮（92×92，UI §6.3；不可感知"上滚"⇒ 不做"浮现"）。落点 =
-//!   **列表区右上角**（内容坐标系；浮动件语义 ⇒ 与首 2 行的消息列尾部**重叠**）；
+//!   **列表区之下的专属带**（`y = 列表区底 + 缝`，右对齐；见 [`BACK_BAND_H`] / **LG11**）；
 //! - 点击 ⇒ 触发 [`P3LogsPage::set_on_back_to_latest`] 的意图（**供未来接上滚动能力**）并把
 //!   内部 `auto_follow` 标志复位为 `true`（[`P3LogsPage::set_auto_follow`] 是 B3 的注入入口）；
 //! - **具名能力缺口（给后续单元）**：① 在 `src/lvgl/event.rs` 镜像 `LV_EVENT_SCROLL`；
@@ -78,6 +78,13 @@
 //!   `lv_obj_scroll_to_y`（**回顶**也做不到 —— 本页点击后只能报意图）；③ 补"视口级浮动"
 //!   能力（或由外壳把按钮放在页根之外）——本页的按钮是**页内子对象**（页根即滚动容器
 //!   ⇒ 按钮随内容滚动，用户滚到旧日志时它**不在视口内**，这正是"浮现"做不到的原因）。
+//!
+//! **B2c-2 规格评审整改 ②（原实现的真实缺陷）**：此前按钮是"列表区**右上角**的页内子对象"，
+//! 屏坐标 **(916,380)-(1007,471)**，而第 0/1 行占 y372-416 / y416-460 ⇒ 按钮**压住第 0、1 行
+//! 消息列尾部 92 px**（第 2 行顶部 11 px）；且 `theme::control_surface()` 的底
+//! `Palette::SURFACE_HIGH` **不透明** ⇒ 是**实遮正文**（不是叠印）。又因按钮是**恒显**而非
+//! §6.3 的"浮现"⇒ 遮挡是**长期**的。现改为**独占一条带**（见 **LG11**），
+//! 任何一行都不与按钮矩形相交（几何实测：`ui/tests.rs` 的 `pages_chain`）。
 //!
 //! ### R3 —— 内存预算（行池按需分配 + 共存实测）
 //!
@@ -90,14 +97,21 @@
 //!
 //! | # | 偏差（现状 ≠ 契约） | 原因 | 计划收口单元 |
 //! |---|----------------------|------|--------------|
-//! | LG1 | 全角标点一律改写：`实时日志已断开，正在重连…` → `实时日志已断开 · 正在重连...`；`检索范围超限，请缩小时间范围` → `检索范围超限 · 请缩小时间范围` | `，`(U+FF0C) / `…`(U+2026) **实测不在生成字体 cmap 内** ⇒ 取 cmap 内的 `·`(U+00B7) 与 ASCII `...`（与 `p5_audit.rs` **AU1** / `TEXT_ELLIPSIS` 同款处置） | **B2c 之后**的「字体码表 + 文案统一收口批」：扩 §3.6 字符集后**逐字改回契约原文** |
-//! | LG2 | 时间列宽 **248**（`CONTENT_W / 4`），§6.3 写 **160** | **实测**：`2026/09/10 13:42:07` 在 24 px 档为 **236.4 px**（`ui/tests.rs::measured_text_px`）⇒ 160 px 下必被 `LongMode::DOTS` 截成 `2026/09/10 13:4...`（日志页的时间**不完整**）。取 P5 的同一列宽（`CONTENT_W / 4`），两列表页对齐。**未**采用"缩短为 `HH:MM:SS`"（会丢日期，与"能定位时刻"冲突） | 无（**实测驱动的结构性取舍**）；若 PM 要求 160：需先定"时间只显 `HH:MM:SS`"或缩字号 |
+//! | LG1 | 全角标点一律改写：`实时日志已断开，正在重连…` → `实时日志已断开 · 正在重连...`；`检索范围超限，请缩小时间范围` → `检索范围超限 · 请缩小时间范围` | `，`(U+FF0C) / `…`(U+2026) **实测不在生成字体 cmap 内** ⇒ 取 cmap 内的 `·`(U+00B7) 与 ASCII `...`（与 `p5_audit.rs` **AU1** / `TEXT_ELLIPSIS` 同款处置）。**根因（B2c-2 规格评审补登，如实）**：这两个字符**既不在生成字体 cmap、也不在 `fonts/font_subset_charset.txt`**，而 **§3.6 的字符串里却含它们** ⇒ **字符集的派生与 §3.6 不一致** —— 属 `fonts/` 生成链（子集字符表）的问题，**不是本页的问题**；本单元**不改 `fonts/`**（产地不在本单元授权范围） | **B2c 之后**的「字体/文档收口批」：先修 `fonts/font_subset_charset.txt`（补 `，`/`…` 并重跑 `gen_fonts.sh`），再**逐字改回契约原文** |
+//! | LG2 | 时间列宽 **248**（`CONTENT_W / 4`），§6.3 写 **160** | **实测（B2c-2 规格评审 ⑥ 订正）**：`2026/09/10 13:42:07` 在 24 px 档为 **224.0 px**（用**入库基线** `fonts/lv_font_metrics.txt` 独立复算；`ui/tests.rs::measured_text_px` 同源）⇒ 160 px 下必被 `LongMode::DOTS` 截成 `2026/09/10 13:4...`（日志页的时间**不完整**）；160 px 只够 `HH:MM:SS`（实测 **93.25 px**）。**B2c-2 原稿写的 236.4 px 是不实数字，已订正**。取 P5 的同一列宽（`CONTENT_W / 4`），两列表页对齐。**未**采用"缩短为 `HH:MM:SS`"（会丢日期，与"能定位时刻"冲突） | 无（**实测驱动的结构性取舍**）；**§6.3 的 160 是规格缺口**：待 PM 改（或明写时间只显 `HH:MM:SS` / 另定字号） |
 //! | LG3 | 「模块」维度名**独占一行**（高 `TextSlot::SectionTitle.px()` = 28），chip 网格在其下**铺满内容宽 992**；§6.3 线框把维度名画在网格左上角、chip 从下一行右侧起排（网格可用宽 872） | **§6.3 自身过约束**：其容量核算算式是 `9×96 + 8×16 = 992`（按**整幅内容宽**），而线框把 chip 右移了一个标签列 ⇒ 8 项/行需 880 px > 872（越界 8 px），7 列时 ≤51 项需 **8 行**（超出"最多 7 行"）。取"标签独占一行 + 网格 992"后：8 列 × 110 px + 7×16 = **992**（右缘与表头 / 列表**对齐**）、≤51 项 = **7 行**（432 px ≤ 448） | 无（**结构性**）；若 PM 要求贴线框：需同时放宽"最多 7 行"或"chip 最小宽 96" |
-//! | LG4 | 模块 chip 上**未登记模块名只保留 2 字**（**保尾** `clip_tail`） | 版式约束的必然结果：8 项/行 ⇒ chip 宽 110、内区 78 px；§5.2 要求选中态加 `✓` 前缀（实测 `✓ ` = 23.6 px）⇒ 余 54.4 px = **2 个汉字**（`✓ + 2 汉字` = 75.6 ≤ 78，**实测见 `p3_module_chip_label_fits_its_cell`**）。对照：P5 的未登记键有 5–6 字，但其 chip 是 192 px 两行网格 | 同 LG1（扩字表 / 缩 `✓` 占位后可放宽） |
-//! | LG5 | 行消息列用 `LongMode::WRAP`（§6.3 / §7.4 逐字"换行"），但**行高恒 44 px**（§6.3，LG-06 ≥40）⇒ **第二行起被行容器裁切、无可见提示** | **规格内部冲突（如实登记，不自行裁定）**：§6.3/§7.4 要"换行"，§6.3 又钉死行高 44、行池按 `i × 44` 窗口化 ⇒ 单行 44 px 装不下 48 px 的两行。**替代方案（未采纳）**：`LongMode::DOTS`（有可见 `...` 截断标记，但违反"换行"字面）。**请 PM 裁定**：① 维持"换行"（接受裁切）；② 改 `DOTS`（可见截断）；③ 改行高（结构变更，需同步窗口化算式） | 待 PM 裁定 |
+//! | LG4 | 模块名截断：**chip** ≤2 字原样 / 超出 ⇒ `...` + 尾 1 字；**行** ≤5 字原样 / 超出 ⇒ `...` + 尾 4 字（**B2c-2 整改 ⑤**：原为 chip「保尾 2 字且**无省略标记**」、行「`...` + 尾 **2** 字」） | 版式约束的必然结果：8 项/行 ⇒ chip 宽 110、内区 `110−2×16−2×1` = **76 px**；选中态再减 `✓`(U+2713) 的 **17.75 px** ⇒ 可用 **58.25 px** = **2 个汉字**（52 px）。`2 汉字 + "..."` = 73.75 px **> 58.25 px**（实测）⇒ chip 上**放不下"2 字 + 标记"**；chip 宽被 §6.3 ② 的 `8 × 110 + 7 × 16 = 992`（零余量）+「最多 7 行」钉死 ⇒ **取舍：可见标记优先于多留 1 字**（§2.6「降级可见、绝不造假」）。行侧尾保留 2→4 字（实测 `...` + 4 汉字 = 116.06 ≤ 140；+5 汉字 = 140.0625 > 140）。对照：P5 的未登记键有 5–6 字，但其 chip 是 192 px 两行网格 | 同 LG1（扩字表 / 缩 `✓` 占位 / 放开 7 行上限后可放宽）；**撞形残余见 LG12** |
+//! | LG5 | 行消息列用 **`LongMode::DOTS`**（可见截断 + `...`），**不是** §7.4 字面的"换行"（**B2c-2 整改 ③**：原实现取 `WRAP` 以"忠实字面"，评审判定不成立） | **规格内部冲突的取舍（§7.4「换行」 vs §6.3「行高恒 44」）**：§6.3 把行高钉死 44 px 且行池按 `i × 44` 窗口化 ⇒ 单行 44 px 装不下 48 px 的两行；`WRAP` 下 LVGL 只把文字裁到 `txt_clip.y2`（`vendor/lvgl/src/widgets/label/lv_label.c`：`LONG_MODE_CLIP/WRAP: /*Do nothing*/`）⇒ **第二行静默消失、无任何标记**，与 §2.6「降级可见、**绝不造假**」及同一行模块列的「超长加 `...`」口径相悖。取 `DOTS`：截断**可见**（LVGL 把尾部换成 `.`×3，`.` 在 cmap 内）。**残余**：违反 §7.4 的"换行"字面 | 待 PM 裁定：① 维持 `DOTS`（**现状**）；② 改行高（结构变更，需同步窗口化算式与行池容量实测）；③ 改 `WRAP` + 行高 ≥48（需重标定 `MEASURED_ROW_CAPACITY`） |
 //! | LG6 | **行池上限 = 20**，低于契约 `LOG_PAGE_LIMIT_MAX = 200` | **实测**（见 [`MEASURED_ROW_CAPACITY`]）：256 KB 的 LVGL 堆（`lv_conf.h` 的 `LV_MEM_SIZE`）装不下 200 行（单页上界 ≈ 44）⇒ 超过上界时**只渲染最新 20 条**（按 `seq` 降序取前 20），**其余不渲染**。**不静默**：[`LogQuery::limit`] 把本页的行池上界**告知 B3**（请求侧据此不超量）；该有界行为与 `p5_audit.rs` **AU8** 同口径 | 扩 `LV_MEM_SIZE` 或由外壳串行化页面生命周期后重标定（与 AU8 同批） |
 //! | LG7 | 「加载中」/「已加载全部」落在**列表底部状态行**（§6.3 线框未画该行） | §3.6 **P3 列表/状态行**的用字表里有这两个词 ⇒ 设计**预留了落点**；取 `p5_audit.rs` 的同款呈现（底部状态行，仅有行时可见） | 无（**有意**）；若 PM 裁定不显，删两个常量与一处 `set_visible` 即可 |
 //! | LG8 | 骨架态（B3 尚未注入通道态）显「**实时日志已断开 · 正在重连...**」（fail-closed） | §3.6 P3 只给了**两条**通道条文案（已连接 / 断开），未给第三条"未知"；**不臆造**新文案。与 `p4_interlock.rs` 的 fail-closed 口径一致（不臆造"已连接"）：**未确认即按未连接**显示；B3 首次注入前不应让本页可见 | 若 PM 要求第三条"等待中"文案：需先在 §3.6 补字 |
+//! | LG9 | 新增**第三条列表区形态**「不完整」（`entries = [] ∧ range_too_large = true`）与**自造文案** [`TEXT_INCOMPLETE`]` = 范围超限 · 未执行检索`（**§3.6 无此句**） | **B2c-2 整改 ①**：原实现只看行数 ⇒ `entries = [] ∧ range_too_large = true` **同时**显空态「当前筛选条件下无日志」与超限条 —— 而契约字段的语义是"**本次未执行全库检索、`entries` 不代表完整结果**" ⇒ 把"无法获知"**冒充**成"确实没有"（违 §8.3 / §2.6；评审探针 `PROBE-EDGE08-15` 实测两态同显）。现**超限优先**：`range_too_large = true` ⇒ 空态**不可见**，改显中性文案（只说"未执行检索"这个**已知**事实） | 无（**结构性**）；若 PM/§3.6 给了 EDGE-15 下"结果不完整"的**指定文案**：换成契约串并删本条 |
+//! | LG10 | 通道断（`connected = false`）时**不**把列表区切成"不可知"态 —— 若此时 `entries = []`，仍显空态「当前筛选条件下无日志」 | **判断与处置（B2c-2 整改 ①-4，如实）**：**不改**。① §6.3 明写"本页**无源不可用态**，日志通道断在**通道条**表达"；② 通道条是**恒可见**的（缺省即 fail-closed 显断开，见 **LG8**）⇒ 操作者同时看到"已断开"与"无日志"两件事，**不存在**把"无法获知"冒充成"确实没有"的**单一**表述失误；③ 列表区表达的是**最近一次已完成查询**的结果，与"当前是否在线"是两个维度（§6.3 有意把它们分给两个构件）。**残余（如实）**：若通道断在"一次成功查询返回 0 条"之后，屏上会同时出现"已断开"与"无日志" —— 该组合**为真**（那次查询确实返回 0），故不属互替 | 无（**有意**）；若 PM 要求"通道断 ⇒ 列表区也降级"：需先改 §6.3（把"无源不可用态"从本页删掉的那句话） |
+//! | LG11 | 「回到最新」按钮：**§6.3 写"右下浮现"，实现为"右下恒显 + 页内专属带"**（**B2c-2 整改 ②**：原实现为"**右上**恒显 + 叠在首 2 行上、**实遮正文**"） | **薄层能力缺口**（见 **R2**）：无 `LV_EVENT_SCROLL`、无滚动位置读 / 写 API ⇒ "浮现"结构性不可实现；"浮动件"也不可实现（页根即滚动容器 ⇒ 任何页内浮动件都会随内容滚走 / 压住内容）。⇒ 取**可判定的安全形态**：按钮独占列表区之下的**一条带**（`y = 列表区底 + GAP_MIN`，右对齐）—— **任何行都与按钮矩形不相交**（几何实测见 `ui/tests.rs` 的 `pages_chain`），代价是页更长、且滚到旧日志时按钮不在视口内 | 需薄层补 ①`LV_EVENT_SCROLL` ②`lv_obj_get_scroll_y` / `lv_obj_scroll_to_y` ③"视口级浮动"能力；届时改回"右下浮现" |
+//! | LG12 | 未登记长模块名的**撞形残余**：`mupc_gateway::iec104` 与 `mupc_data_processing::iec104` 在 **chip**（`...` + 尾 1 字 → `...4`）与**行**（`...` + 尾 4 字 → `...C104`）上**仍同形** | **可见化补偿 + 如实登记（B2c-2 整改 ⑤）**：这两个键**头（`mupc_`）尾（`::iec104`）都相同**，区分位在**中段** ⇒ **任何**"保头 / 保尾 / 头尾混保"的字符预算（≤ 5 字）都取不到中段；chip 的字符预算被像素钉死（见 **LG4**：放不下"2 字 + 标记"），行预算上限 5 字（原样）也够不到中段。⇒ 补偿 = **可见省略标记**（`...`，让"不完整"这件事**可见**）+ 行尾保留从 2 字提到 **4 字**（覆盖面更广）。**残余**：上例仍同形。根治需：扩 chip 宽（须先放开 §6.3 ②「最多 7 行」）、或允许横滚（§2.7 禁）、或由后端提供**短别名** | 待 PM 裁定（后端短别名 / 放开 7 行 / 允许换行显示全名） |
+//! | LG13 | 增量语义：**"是否已有游标"与"是否允许增量"解耦**（**B2c-2 整改 ⑦**）—— 无游标（含**空窗口**）时 `request_increment()` 发 `cursor = None` 的意图（= 重新拉首页） | **原缺陷**：`fire_increment` 以 `last_seq == 0` 直接返回，而 `fire_query` 只清零游标、**无唤醒路径** ⇒ 空结果之后「实时追加 ≤1 s」**永久停摆**（原有用例还把它反向锁住，本批已改为正向断言）。**与 B3 的接口约定（如实）**：B3 负责 **500 ms 节拍**与**节流** —— `cursor = None` 的增量意图应被当作**刷新**（可降频 / 可去重），`cursor = Some(..)` 的才是真增量拉取。**残余**：本页**不**自持窗口、不做节流（窗口累积在 B3，同契约 6′） | 无（**结构性**：本页不发请求、不读时钟）；节流策略由 B3 定 |
+//! | LG14 | 消息列 long mode 的**锁**是"**行为级 + 源码锚定**"，不是"读回回口" | 薄层**没有** `LongMode` 读回口（`lvgl-sys/allowlist.txt` 只有 `fn:lv_label_set_long_mode`，**无** `getter`；本单元**不得**改 `lvgl-sys/**`）⇒ 无法给出"返回消息列当前 `LongMode`"的只读回口。**做法**：① **行为级**——长消息在 `DOTS` 下被 LVGL 把尾部换成 `.`×3，`Label::text()`（读 `lv_label_get_text` 的**同一缓冲区**）会读回带 `...` 的截断串 ⇒ 断言"长消息读回串以 `...` 结尾且短于原文"（`ui/tests.rs` 的 `pages_chain`）；② **源码锚定**——`p3_static_constraints` 锚定 `message.set_long_mode(LongMode::DOTS);` 这一行，并同时钉住 `LongMode::WRAP` 在**本文件代码里恰 1 处**（只允许「回到最新」按钮的 `92×92` 折行）⇒ 把消息列改回 `WRAP` 会让计数变 2 ⇒ **红**（原缺陷：WRAP 断言被 `back.label()` 的 WRAP 满足 ⇒ 无区分度） | 薄层补 `lv_label_get_long_mode` 后改成真读回口 |
+//! | LG15 | 机器名前 / 自由文本的**非 ASCII 残余**：`display_safe` **只改写 ASCII**、[`free_text_safe`] 只多折叠**六个常用全角标点** ⇒ `target` / `message` 若含 **cmap 外的汉字 / 全角字**，真机上是**豆腐块** | **R1 的残余（B2c-2 规格评审补登 —— 此前只在模块文档正文提过，未进本表）**：本页**不臆造**中文名、**不静默隐藏**，但**无从**列举后端可能给的全部字符 ⇒ 防线在**后端字段命名**与**字库**。与 `p5_audit.rs` **AU15** / `pages/mod.rs` **D9** 同族 | 同 LG1（扩字表）；或由后端保证 `target` 只用已登记键 |
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -111,7 +125,7 @@ use crate::lvgl::widgets::{Label, LongMode, ScrollContainer, TextButton};
 use crate::lvgl::LvglError;
 use crate::ui::components::{EmptyState, MultiSelectChips, WarnBanner};
 use crate::ui::pages::filters::{self, TimeRangeChange, TimeRangeFilter};
-use crate::ui::pages::p5_audit::{clip_tail, free_text_safe};
+use crate::ui::pages::p5_audit::{free_text_safe, TEXT_ELLIPSIS};
 use crate::ui::pages::{
     decor, display_safe, format_epoch_ms_utc, label, layout_box, page_root, set_style_index,
     set_visible, show_only, text_label, CbSlot, TIGHT_GAP,
@@ -154,6 +168,16 @@ pub(crate) const TEXT_EMPTY: &str = "当前筛选条件下无日志";
 pub(crate) const TEXT_EMPTY_ICON: &str = "○";
 /// 超限提示（§8.3 EDGE-15 行逐字 + `，`→` · ` 见 **LG1**）。
 pub(crate) const TEXT_RANGE_TOO_LARGE: &str = "检索范围超限 · 请缩小时间范围";
+/// 超限下的列表区中性文案（**自造串，§3.6 无此句** —— 见 **LG9**）。
+///
+/// **为什么必须有一句**：`range_too_large = true ∧ entries = []` 时不能说
+/// [`TEXT_EMPTY`]（那是"确实没有"，而此刻是"无法获知"）；但列表区若**完全空白**，
+/// 操作者同样可能读成"没有日志"。故给一句**中性、不断言结果**的话：只说"未执行检索"
+/// 这个**已知事实**，不说"有没有日志"这个**未知事实**。
+///
+/// 用字逐字在 `fonts/lv_font_cmap.txt` 内（`范围超限 · 未执行检索`，不含 `完`/`整`/`次`/`库`
+/// 等缺字）——由 `ui/tests.rs::ui_texts_covered_by_font_cmap` 的逐字走查钉住。
+pub(crate) const TEXT_INCOMPLETE: &str = "范围超限 · 未执行检索";
 /// 只读说明行前半（§3.6 P3「列表 / 状态」行的 `本地屏不支持日志导出`）。
 pub(crate) const TEXT_NO_EXPORT: &str = "本地屏不支持日志导出";
 /// 只读说明行后半（§3.6 P3 同行的 `无文件与下载通道`）。
@@ -197,6 +221,7 @@ pub(crate) const ALL_TEXTS: &[&str] = &[
     TEXT_EMPTY,
     TEXT_EMPTY_ICON,
     TEXT_RANGE_TOO_LARGE,
+    TEXT_INCOMPLETE,
     TEXT_NO_EXPORT,
     TEXT_NO_EXPORT2,
     TEXT_CLAUSE_SEP,
@@ -257,15 +282,18 @@ const FOOTER_H: i32 = TABLE_HEAD_H;
 const NOTE_H: i32 = TABLE_HEAD_H;
 /// 空态高（与 `components.rs::EmptyState` 的构件算式**逐项一致**：图标 64 + 缝 + 文字行）。
 const EMPTY_H: i32 = Dimens::ICON_LG + Dimens::GAP_MIN + TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN;
+/// 不完整态（**LG9**）占位高 —— 取 [`EMPTY_H`]：单行中性文案垂直居中于同一块面积，
+/// 空态 / 不完整态切换时**其下的说明行不跳动**（避免"态切换 = 版面抖动"）。
+const INCOMPLETE_H: i32 = EMPTY_H;
 
 // ── 行规格（UI §6.3「每行」）────────────────────────────────────────────────
 /// 行高 44（§6.3；LG-06 ≥40 —— 直接取 `theme` 的 `ROW_LOG_H`）。
 /// 行左缘到时间列 x（无左竖条：本页用**斑马纹**区分行，§6.3 只给斑马纹）。
 const ROW_TIME_X: i32 = 0;
-/// 时间列宽（**LG2**：§6.3 写 160，实测时间戳 236.4 px ⇒ 取 P5 的同一列宽 `CONTENT_W / 4`）。
+/// 时间列宽（**LG2**：§6.3 写 160，实测时间戳 **224.0 px** ⇒ 取 P5 的同一列宽 `CONTENT_W / 4`）。
 ///
-/// `pub(crate)`：`ui/tests.rs::p3_time_column_fits_a_timestamp` 用**生产字体的 `adv_w`**
-/// 实测"定长时间戳放得进本列"这条几何锁。
+/// `pub(crate)`：`ui/tests.rs::p3_column_budgets_fit_measured_text` 用**生产字体的 `adv_w`**
+/// 实测"定长时间戳放得进本列"这条几何锁（**并钉住 224.0 这个订正后的值**）。
 pub(crate) const ROW_TIME_W: i32 = Dimens::CONTENT_W / 4;
 /// 级别色块 x。
 const ROW_LEVEL_X: i32 = ROW_TIME_W + Dimens::GAP_MIN;
@@ -287,17 +315,47 @@ const ROW_MSG_W: i32 = Dimens::CONTENT_W - ROW_MSG_X;
 const ROW_TEXT_Y: i32 = theme::center_offset(Dimens::ROW_LOG_H, TextSlot::Body.px() as i32);
 /// 级别色块内文字的 y（28 px 块内居中）。
 const ROW_LEVEL_TEXT_Y: i32 = theme::center_offset(ROW_LEVEL_H, TextSlot::Body.px() as i32);
-/// 模块列**字符预算**（**LG4**：140 px ÷ 24 px 档汉字 ≈ 5 字；由
-/// `ui/tests.rs::p3_module_row_label_fits_its_column` 用生产字体的 `adv_w` 钉住）。
+/// 模块列**原样显示**的字符预算（**LG4**：140 px ÷ 24 px 档汉字 ≈ 5.8 → **5 字**；
+/// 由 `ui/tests.rs::p3_column_budgets_fit_measured_text` 用生产字体的 `adv_w` 钉住）。
+///
+/// ⚠️ 同上：**它不是"截断后的字数"** —— 超出时产物是
+/// `"..." + 尾 `[`ROW_MODULE_TAIL_CHARS`]` 字`（见 [`clip_row_label`]）。上限之所以是 5：
+/// 6 个汉字 = 144 px > 140 px 列宽（原样上屏会破线）。
 pub(crate) const ROW_MODULE_MAX_CHARS: usize = 5;
-/// 模块 chip **字符预算**（**LG4**：chip 内区 78 px 减 `✓ ` 前缀后 ≈ 2 个汉字；
-/// 由 `ui/tests.rs::p3_module_chip_label_fits_its_cell` 用生产字体的 `adv_w` 钉住）。
+/// 模块**行**超出预算时保留的**尾部**字数（**LG4 / LG12**：`"..." + 尾 4 字`）。
+///
+/// **B2c-2 规格评审整改 ⑤：尾 2 字 → 尾 4 字**（实测 `"..." + 4 汉字` = 116.06 px ≤ 140 px；
+/// `"..." + 5 汉字` = 140.0625 px > 140 px ⇒ 4 是列宽允许的最大尾保留数）。
+/// **由 `ui/tests.rs::p3_column_budgets_fit_measured_text` 的 ②′ 实测钉住。**
+pub(crate) const ROW_MODULE_TAIL_CHARS: usize = 4;
+/// 模块 chip **原样显示**的字符预算（**LG4**：chip 内区 `110 − 2×16 − 2×1` = 76 px，
+/// 选中态再减 `✓`(U+2713) 的 17.75 px ⇒ 可用 58.25 px = **2 个汉字**（52 px）；由
+/// `ui/tests.rs::p3_column_budgets_fit_measured_text` 用生产字体的 `adv_w` 钉住）。
+///
+/// ⚠️ **它不是"截断后的字数"**：超出本预算时走 [`clip_chip_label`] ⇒ 产物是
+/// `"..." + 尾 `[`MODULE_CHIP_TAIL_CHARS`]` 字`（可见省略标记，见 **LG4 / LG12**）。
+/// **为什么不是"2 字 + 标记"**：`2 汉字 + "..."` = 73.75 px > 58.25 px（实测）⇒ 会顶出
+/// chip 内区；chip 的 **8 列 × 110 px** 由 §6.3 ②「最多 7 行」的容量核算钉死
+/// （`8 × 110 + 7 × 16 = 992 = 内容宽`，**零余量**）⇒ 无法再加宽。
+/// **取舍**：可读性（**截断必须可见**，§2.6「降级可见、绝不造假」）优先于多留一个字。
 pub(crate) const MODULE_CHIP_MAX_CHARS: usize = 2;
+/// chip 超出预算时保留的**尾部**字数（= [`MODULE_CHIP_MAX_CHARS`] − 1）。
+///
+/// **由 `ui/tests.rs::p3_column_budgets_fit_measured_text` 的 ③′ 用生产字体实测钉住**
+/// （`✓` + `"..."` + 1 汉字 = 65.5 px ≤ 76 px；`✓` + `"..."` + 2 汉字 = 91.55 px > 76 px）。
+const MODULE_CHIP_TAIL_CHARS: usize = 1;
 
-/// 「回到最新」按钮边长（§6.3 的 `92×92`；= `CHIP_MIN_W − SCROLLBAR_MARGIN`，见 **R2**）。
+/// 「回到最新」按钮边长（§6.3 的 `92×92`；= `CHIP_MIN_W − SCROLLBAR_MARGIN`，见 **LG11**）。
 const BACK_W: i32 = Dimens::CHIP_MIN_W - Dimens::SCROLLBAR_MARGIN;
 /// 「回到最新」按钮 x（贴内容区右缘）。
 const BACK_X: i32 = Dimens::CONTENT_W - BACK_W;
+/// 「回到最新」**专属带**高（= 按钮边长 + 与上方列表区之间的呼吸缝）。
+///
+/// **B2c-2 规格评审整改 ②**：按钮此前是"页内子对象 + 与行重叠"（屏坐标 (916,380)-(1007,471)
+/// 压住第 0/1 行消息列尾部 92 px；`theme::control_surface()` 底 `SURFACE_HIGH` **不透明**
+/// ⇒ **实遮正文**）。⇒ 改为**独占一条带**：带内只有按钮，任何行都不与按钮矩形相交
+/// （几何实测见 `ui/tests.rs` 的 `pages_chain`）。见 **LG11 / R2**。
+const BACK_BAND_H: i32 = BACK_W + Dimens::GAP_MIN;
 
 /// 编译期自证：常量与 UI §6.3 的字面契约值一致。
 const _: () = assert!(CHANNEL_H == 36);
@@ -322,6 +380,16 @@ const _: () = assert!(ROW_MODULE_X + ROW_MODULE_W < ROW_MSG_X);
 const _: () = assert!(ROW_MSG_X + ROW_MSG_W == Dimens::CONTENT_W);
 /// 编译期自证：行内单行 24 px 文字放得进 44 px 行高。
 const _: () = assert!(ROW_TEXT_Y + TextSlot::Body.px() as i32 <= Dimens::ROW_LOG_H);
+// ⚠️ **此处原有的两条编译期断言已删（B2c-2 验证整改 M1）—— 它们都是恒真式**：
+//
+// - `BACK_BAND_H` 的**定义**即 `BACK_W + Dimens::GAP_MIN` ⇒ `assert!(BACK_BAND_H >= BACK_W)`
+//   **恒真**，属"看着在把关、实则空转"（本项目已多次抓到该缺陷类）。**按定义成立者无需断言**。
+//   真正要防的是"**布局没用这个常量**"（常量退化成装饰）—— 见 `Core::relayout` 里
+//   `BACK_BAND_H` 的实际用法（同批验证整改 M2）。
+// - `INCOMPLETE_H` 的定义即 `= EMPTY_H`（见其声明处）⇒ `assert!(INCOMPLETE_H == EMPTY_H)`
+//   亦恒真。二者"同高"由**定义**保证，比断言更强。
+//
+// 本注释保留痕迹，**防止有人再把这两条断言加回来**。（用 `//` 而非 `///`：它不再注释任何项。）
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. 纯逻辑（**不触碰 LVGL** ⇒ 可独立单测；页内一切判据都经这里）
@@ -447,9 +515,8 @@ pub(crate) fn target_label(target: &str) -> Option<&'static str> {
 /// 机器键 → 上屏标签（**唯一出口**）：已知键取中文名；未登记键取 [`display_safe`] 的归一形态
 /// （**不臆造**中文名、**不静默隐藏** —— `mupc_intercore` 一类仍是可辨认的归一串）。
 ///
-/// ⚠️ **本函数不截断**（截断由两个落点各自按预算做：行用 [`clip_tail`]`(.., `
-/// [`ROW_MODULE_MAX_CHARS`]`)`、chip 用 [`clip_tail`]`(.., `[`MODULE_CHIP_MAX_CHARS`]`)`）
-/// —— 两处可用宽度不同（140 / 78 px），共用一份预算会在宽处浪费、在窄处溢出。
+/// ⚠️ **本函数不截断**（截断由两个落点各自的**唯一出口**做：[`clip_row_label`] / [`clip_chip_label`]）
+/// —— 两处可用宽度不同（140 / 76 px），共用一份预算会在宽处浪费、在窄处溢出。
 pub(crate) fn module_label(target: &str) -> String {
     match target_label(target) {
         Some(label) => label.to_string(),
@@ -457,15 +524,44 @@ pub(crate) fn module_label(target: &str) -> String {
     }
 }
 
+/// 模块名的**通用截断**（`原样预算 keep` / `尾保留 tail`）：原样显示的字数 ≤ `keep` 时不截；
+/// 超出 ⇒ `"..." + 尾 `tail` 字`（**恒带可见省略标记** —— §2.6「降级可见、绝不造假」）。
+///
+/// **为什么不复用 `p5_audit::clip_tail`**：`clip_tail(text, max)` 的判据是"字符总数 ≤ `max`
+/// 则原样" —— 于是 `max` **同时**承担"原样上限"与"截断产物的长度上限"两个角色。本页两处
+/// 落点的**原样上限**（凭字宽定：chip 2 字 / 行 5 字）都**小于**"截断产物"的长度（标记本身
+/// 要 3 个字宽）⇒ 用 `clip_tail` 会让"刚好 3 字的 chip 名"原样上屏并**顶出 chip 内区**
+/// （实测 `汉汉汉` = 78 px > 58.25 px 可用）。故两个预算**分开**给（本函数），且由
+/// `ui/tests.rs::p3_column_budgets_fit_measured_text` 用生产字体的 `adv_w` **两条都实测**。
+///
+/// `keep` = 0 时恒截断；`tail` 为 0 时只留标记（本页两处都 ≥1）。
+fn clip_marked(text: &str, keep: usize, tail: usize) -> String {
+    let n = text.chars().count();
+    if n <= keep {
+        return text.to_string();
+    }
+    let keep = tail.min(n);
+    let kept: String = text.chars().skip(n - keep).collect();
+    format!("{TEXT_ELLIPSIS}{kept}")
+}
+
+/// 模块 chip 上屏文案（**唯一出口**）：≤ [`MODULE_CHIP_MAX_CHARS`] 字原样；
+/// 超出 ⇒ `"..." + 尾 `[`MODULE_CHIP_TAIL_CHARS`]` 字`（可见省略标记；**LG4 / LG12**）。
+pub(crate) fn clip_chip_label(label: &str) -> String {
+    clip_marked(label, MODULE_CHIP_MAX_CHARS, MODULE_CHIP_TAIL_CHARS)
+}
+
+/// 模块**行**上屏文案（**唯一出口**）：≤ [`ROW_MODULE_MAX_CHARS`] 字原样；
+/// 超出 ⇒ `"..." + 尾 `[`ROW_MODULE_TAIL_CHARS`]` 字`（可见省略标记；**LG4 / LG12**）。
+pub(crate) fn clip_row_label(label: &str) -> String {
+    clip_marked(label, ROW_MODULE_MAX_CHARS, ROW_MODULE_TAIL_CHARS)
+}
+
 /// 模块 chip 的选项文案（**首位固定「全部」**；§6.3 ②）。
 pub(crate) fn module_options(targets: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(targets.len() + 1);
     out.push(TEXT_ALL.to_string());
-    out.extend(
-        targets
-            .iter()
-            .map(|t| clip_tail(&module_label(t), MODULE_CHIP_MAX_CHARS)),
-    );
+    out.extend(targets.iter().map(|t| clip_chip_label(&module_label(t))));
     out
 }
 
@@ -591,25 +687,41 @@ pub(crate) fn row_order(entries: &[LogEntry]) -> Vec<usize> {
     idx
 }
 
-/// 列表区形态（**两态互斥**；§8.3 把「确实没有」与「无法获知」严格区分）。
+/// 列表区形态（**三态互斥**；§8.3 把「确实没有」与「无法获知」严格区分）。
 ///
 /// ⚠️ **本页没有「源不可用」态**（§6.3 明写：本页无源不可用态，日志通道断在**通道条**表达）
-/// ⇒ 形态只有 [`ListView::Rows`] 与 [`ListView::Empty`] 两种。**不得**把 `UnavailableState`
-/// 搬进本页（那会与通道条重复表达同一件事）。
+/// ⇒ **不得**把 `UnavailableState` 搬进本页（那会与通道条重复表达同一件事）。
+///
+/// **三态的关系（B2c-2 规格评审整改 ①；`PROBE-EDGE08-15` 的现场）**：
+/// - `entries = [] ∧ range_too_large = false` ⇒ [`ListView::Empty`]：**确实没有**；
+/// - `entries = [] ∧ range_too_large = true` ⇒ [`ListView::Incomplete`]：**无法获知**
+///   —— 服务端明示"**本次未执行全库检索**、`entries` 不代表完整结果"，此刻若说「确实没有」
+///   就是把"无法获知"**冒充**成"确实没有"（§8.3「语义不同的态必须可区分、不得互替」+
+///   §2.6「降级可见、绝不造假」）。⇒ **超限优先**：`range_too_large = true` 时**不显空态**；
+/// - 有行 ⇒ [`ListView::Rows`]（**超限不隐藏已返回的条目** —— 契约字段的语义就是
+///   "结果不完整"而不是"结果为空"）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ListView {
     /// 有日志行（`seq` 降序）。
     Rows,
     /// 空态：**确实没有**（当前筛选条件下）。
     Empty,
+    /// 不完整态：**无法获知**（超限 ⇒ 本次未执行全库检索）。见 **LG9**。
+    Incomplete,
 }
 
-/// 行数 → 列表区形态（**唯一判据**；页内核与单测共用，避免两处各写一遍）。
-pub(crate) const fn list_view_of(rows: usize) -> ListView {
-    if rows == 0 {
-        ListView::Empty
-    } else {
+/// 行数 × 超限标志 → 列表区形态（**唯一判据**；页内核与单测共用，避免两处各写一遍）。
+///
+/// **改什么会让本条变红**：把判据写回"只看行数"（`range_too_large` 被忽略）⇒
+/// `entries = [] ∧ range_too_large = true` 会同时给出空态与超限条 ⇒
+/// `pages_chain` 的「空态 × 超限互斥」组（`ui/tests.rs`）当场红。
+pub(crate) const fn list_view_of(rows: usize, range_too_large: bool) -> ListView {
+    if rows > 0 {
         ListView::Rows
+    } else if range_too_large {
+        ListView::Incomplete
+    } else {
+        ListView::Empty
     }
 }
 
@@ -694,7 +806,7 @@ struct Row {
     time: Label,
     /// 模块列（24 px `text_weak`）。
     module: Label,
-    /// 消息列（24 px `text_primary`；`WRAP`，见 **LG5**）。
+    /// 消息列（24 px `text_primary`；`DOTS` = 可见截断 + 省略号，见 **LG5**）。
     message: Label,
     /// 级别样式的当前槽位（[`set_style_index`] 的去重依据；初值 `usize::MAX` = 尚未挂过）。
     level_style: Cell<usize>,
@@ -758,10 +870,18 @@ impl Row {
         module.set_long_mode(LongMode::DOTS);
         module.set_pos(ROW_MODULE_X, ROW_TEXT_Y);
 
-        // 消息列：`WRAP`（§6.3 / §7.4 的"换行"）—— 残余见 **LG5**（行高恒 44 ⇒ 第二行被裁切）。
+        // 消息列：`DOTS`（**可见截断 + 省略号**，§2.6「降级可见、绝不造假」）—— 见 **LG5**：
+        // §7.4 字面要"换行"，但 §6.3 把行高钉死 44 px（且行池按 `i × 44` 窗口化）⇒ 两行装不下，
+        // `WRAP` 下 LVGL 只把文字裁到 `txt_clip.y2`、**第二行静默消失且无任何标记**
+        // （`vendor/lvgl/src/widgets/label/lv_label.c` 的 `LONG_MODE_CLIP/WRAP: /*Do nothing*/`）。
+        // 本页取 **`DOTS`**：截断**可见**（LVGL 把尾部换成 `.` × 3，`.` 在 cmap 内），
+        // 与同一行模块列「超长加 `...`」的口径一致。
+        // 「改什么会让本条变红」：把 `DOTS` 改回 `WRAP` ⇒ 长消息的读回文本不再以 `...` 结尾
+        // （`pages_chain` 的「长消息可见截断」组当场红）；源码级另由 `p3_static_constraints`
+        // 锚定消息列这一行（**LG14**）。
         let message = text_label(&obj, "", TextSlot::Body, Palette::TEXT_PRIMARY)?;
         message.set_size(ROW_MSG_W, TextSlot::Body.px() as i32);
-        message.set_long_mode(LongMode::WRAP);
+        message.set_long_mode(LongMode::DOTS);
         message.set_pos(ROW_MSG_X, ROW_TEXT_Y);
 
         Ok(Self {
@@ -788,10 +908,8 @@ impl Row {
         );
         self.level_color.set(level_color(e.level));
         self.level_text.set_text(&level_text(e.level));
-        self.module.set_text(&clip_tail(
-            &module_label(&e.target),
-            ROW_MODULE_MAX_CHARS,
-        ));
+        self.module
+            .set_text(&clip_row_label(&module_label(&e.target)));
         self.message.set_text(&free_text_safe(&e.message));
     }
 
@@ -890,6 +1008,8 @@ struct Core {
     shown: Cell<usize>,
     /// 空态（EDGE-08；**本页无不可用态** —— §6.3）。
     empty: Rc<EmptyState>,
+    /// 超限下的**中性文案**（**LG9**：零行 + 超限时替空态出场，**不谎称"无日志"**）。
+    incomplete: Label,
     /// 底部状态行（`加载中` / `已加载全部`）。
     footer: Label,
     /// 只读说明行（**常驻**，§6.3「不支持导出」节）。
@@ -905,6 +1025,14 @@ struct Core {
     // ── ⑥ 注入态 ──
     /// 最近一次注入的 `has_more`。
     has_more: Cell<bool>,
+    /// **增量路径是否已激活**（**LG13**；与"是否已有游标"`last_seq` **解耦**）。
+    ///
+    /// `true` = B3 已把本页拉起来过（有过一次筛选意图）；此后 500 ms 节拍的
+    /// [`P3LogsPage::request_increment`]**一律**要能推进 —— 即使窗口为空（`last_seq == 0`）
+    /// 也要发一次"重新拉首页"的意图（`cursor = None`），否则**空结果之后增量永久停摆**。
+    /// **B3 首次进页前**（本页尚未收到任何筛选意图）⇒ `false` ⇒ 增量不发（首屏归 B3 的
+    /// `set_on_query`），与 B2c-2 原行为一致。
+    increment_active: Cell<bool>,
     /// 已见最大 `seq`（**增量游标**；见 [`Core::fire_increment`]）。
     last_seq: Cell<u64>,
     /// 最近一次**已发出**的筛选意图（**去重**：相同条件不重复发）。
@@ -988,11 +1116,18 @@ impl Core {
             }
         }
         let view = self.view();
+        // 空态 / 不完整态**互斥**（**LG9**）：`range_too_large = true` ⇒ 不给空态
+        //   （那是把"无法获知"冒充成"确实没有"），改给中性文案「范围超限 · 未执行检索」。
         set_visible(self.empty.obj(), view == ListView::Empty);
-        let list_h = match view {
-            ListView::Rows => shown as i32 * Dimens::ROW_LOG_H + FOOTER_H + NOTE_H,
-            ListView::Empty => EMPTY_H + NOTE_H,
+        set_visible(self.incomplete.obj(), view == ListView::Incomplete);
+        let zero_h = match view {
+            ListView::Rows => 0,
+            ListView::Empty => EMPTY_H,
+            ListView::Incomplete => INCOMPLETE_H,
         };
+        let list_h = shown as i32 * Dimens::ROW_LOG_H
+            + if view == ListView::Rows { FOOTER_H } else { zero_h }
+            + NOTE_H;
         self.list_box.set_size(Dimens::CONTENT_W, list_h);
         // 底部状态行（无行时不显；**LG7**）/ 只读说明行（**常驻**）。
         match footer_text(self.has_more.get(), shown) {
@@ -1007,25 +1142,39 @@ impl Core {
             }
             None => set_visible(self.footer.obj(), false),
         }
-        // 说明行的 y **按形态**给：有行 ⇒ 行区 + 状态行之后；空态 ⇒ **空态之下**（否则说明行
-        // 会压在空态图标 / 文案上 —— 空态只占 `EMPTY_H`，而 `shown = 0` 时"行区 + 状态行"只有
-        // 36 px）。
-        let note_y = match view {
-            ListView::Rows => shown as i32 * Dimens::ROW_LOG_H + FOOTER_H,
-            ListView::Empty => EMPTY_H,
-        };
+        // 说明行的 y **按形态**给：有行 ⇒ 行区 + 状态行之后；空态 / 不完整态 ⇒ **其下**
+        // （否则说明行会压在空态图标 / 文案上 —— 零行区只有 `EMPTY_H` / `INCOMPLETE_H`，
+        // 而 `shown = 0` 时"行区 + 状态行"只有 36 px）。
+        let note_y = shown as i32 * Dimens::ROW_LOG_H
+            + match view {
+                ListView::Rows => FOOTER_H,
+                ListView::Empty => EMPTY_H,
+                ListView::Incomplete => INCOMPLETE_H,
+            };
         self.note
             .set_pos(0, note_y + theme::center_offset(NOTE_H, TextSlot::Body.px() as i32));
         self.empty.set_pos(0, 0);
-        // ⑥ 「回到最新」（**恒显**；空态时无"最新"可回 ⇒ 隐 —— 见 **R2**）。
+        // 中性文案垂直居中于 `INCOMPLETE_H` 块（水平居中由 `center()` 的**对齐**语义承担，
+        // 布局重算时自动跟随 —— 同 `components.rs::EmptyState` 的做法）。
+        self.incomplete.center();
+        // ⑥ 「回到最新」（**恒显**；零行时不显 —— 无"最新"可回，见 **LG11 / R2**）。
+        //
+        // **B2c-2 规格评审整改 ②**：按钮放在**列表区之下的专属带**里（y = 列表区底 + 缝），
+        // 而**不是**叠在行上 —— 任何一行的矩形都不与按钮矩形相交
+        // （几何实测见 `ui/tests.rs` 的 `pages_chain`）。
         self.back.set_size(BACK_W, BACK_W);
-        self.back.set_pos(BACK_X, y_list + TIGHT_GAP);
+        // 专属带占 `BACK_BAND_H`（= 按钮边长 + 与列表区的缝）；按钮贴**带底**，
+        // 故其 y = 带顶 + (带高 − 按钮高)。**显式用该常量**而不是手写 `+ GAP_MIN`
+        // —— 否则常量会退化成"只在注释里存在"的装饰（B2c-2 验证整改 M2）。
+        let band_top = y_list + list_h;
+        self.back
+            .set_pos(BACK_X, band_top + (BACK_BAND_H - BACK_W));
         set_visible(&self.back, view == ListView::Rows);
     }
 
-    /// 当前列表区形态。
+    /// 当前列表区形态（**超限优先**：`range_too_large` 时不得给空态，见 [`list_view_of`]）。
     fn view(&self) -> ListView {
-        list_view_of(self.shown.get())
+        list_view_of(self.shown.get(), self.range_too_large.get())
     }
 
     // ── 注入（外部 → 屏）───────────────────────────────────────────────────
@@ -1156,6 +1305,7 @@ impl Core {
         }
         *self.last_query.borrow_mut() = Some(q.clone());
         self.last_seq.set(0);
+        self.increment_active.set(true);
         self.on_query.fire(q);
     }
 
@@ -1166,14 +1316,30 @@ impl Core {
     /// `next_cursor` 会在"没有更多历史页"时把游标清零、退化成重复拉取；`max(seq)` 单调且安全
     /// （服务端按 `seq > cursor` 去重）。
     ///
-    /// **未见过任何条目（`last_seq == 0`）不发**：此时"增量"没有起点，首屏查询归
-    /// [`P3LogsPage::set_on_query`]（B3 进页 / 筛选变化时发）。
+    /// **B2c-2 规格评审整改 ⑦（LG13）—— "是否已有游标"与"是否允许增量"解耦**：
+    /// 原实现以"游标是否为 0"决定发不发 ⇒ `fire_query` 把游标清零后**没有任何唤醒路径**
+    /// ⇒ 空窗口（`entries = []`，`last_seq` 恒 0）之后增量**永久停摆**（`≤1 s` 实时追加失效）。
+    /// 现在改看 [`Core::increment_active`]：
+    /// - **已激活**（B3 已发过筛选意图）⇒ 一律发一次意图：
+    ///   - 有游标（`last_seq > 0`）⇒ `cursor = Some(max_seq)`（不变）；
+    ///   - **无游标** ⇒ `cursor = None`（= **重新拉首页**，这是空窗口下唯一有意义的"继续"）；
+    /// - **未激活**（B3 进页前的骨架态）⇒ 不发（首屏归 [`P3LogsPage::set_on_query`]）。
+    ///
+    /// ⚠️ **与 B3 的接口约定（如实登记，见 LG13）**：B3 负责 500 ms 节拍与**节流**。若 B3
+    /// 把本意图原样 1:1 转发，则在"窗口长期为空"期间会每 500 ms 发一次首页查询 ⇒ 约定：
+    /// `cursor = None` 的增量意图应当被 B3 当作**刷新**（可降频 / 可去重），而
+    /// `cursor = Some(..)` 的才是真正的增量拉取。
     fn fire_increment(&self) {
-        let cursor = self.last_seq.get();
-        if cursor == 0 {
+        if !self.increment_active.get() {
             return;
         }
-        self.on_increment.fire(self.current_query(Some(cursor)));
+        let cursor = self.last_seq.get();
+        let q = if cursor > 0 {
+            self.current_query(Some(cursor))
+        } else {
+            self.current_query(None)
+        };
+        self.on_increment.fire(q);
     }
 
     /// 「回到最新」：复位自动跟随标志 + 报意图（见 **R2** 的能力边界）。
@@ -1212,18 +1378,34 @@ pub(crate) const ROW_MAX: usize = 20;
 
 /// 行池**实测可容纳上界**（**单页独活**；离屏链一次性注入的逐档实测：**44 成功 / 48 挂死**）。
 ///
-/// **测量前提（必须与数字一起读）**：`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE` = **256 KB**，
-/// 且离屏链里各页共用**同一个** LVGL 堆；P3 的行比 P5 的行**更省**（P5 每行 ≈ 10 个对象：
-/// 行 + 竖条 + 5 文字 + 2 个胶囊（各 2 对象）；P3 每行 = 行 + 色块 + 4 文字 = 6 个对象）
-/// ⇒ P5 的单页上界是 22–24（见 `p5_audit.rs::MEASURED_ROW_CAPACITY`）、P3 是 44（**约 2 倍**）。
+/// **测量前提（必须与数字一起读）**：
+/// - `lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE` = **256 KB**，且离屏链里各页共用**同一个** LVGL 堆；
+/// - **消息取 1–2 字**（B2c-2 规格评审补记）：消息列是**一个** `lv_label`、尺寸恒 `468×24`
+///   （`WRAP` 时代亦然、现为 `DOTS`），长消息只是同一标签内的**文本**（不新增对象）⇒
+///   堆占用与消息字数**无关**、不呈非线性 —— 故该前提对数字**无影响**，仅在此写明以免误读；
+/// - P3 的行比 P5 的行**更省**（P5 每行 ≈ 10 个对象：行 + 竖条 + 5 文字 + 2 个胶囊（各 2 对象）；
+///   P3 每行 = 行 + 色块 + 4 文字 = 6 个对象）⇒ P5 的单页上界是 22–24
+///   （见 `p5_audit.rs::MEASURED_ROW_CAPACITY`）、P3 是 44（**约 2 倍**）。
 pub(crate) const MEASURED_ROW_CAPACITY: usize = 44;
 
 /// **P3 + P5 两页共存**时 **P3 侧**可安全容纳的行数（**R3** 的共存预算）。
 ///
-/// **测量前提**：256 KB 堆、`pages_chain` 同堆、**一个 P5（`p5_audit::COEXIST_ROWS_PER_PAGE`
-/// = 4 行）+ 本页**同时存活。实测（2026-09-13）：
-/// - **P3 = 17 行成功、18 行 `lv_realloc` 失败 + C 侧断言 ⇒ 挂死**；
-/// - 取 **12**（对挂死点 18 留 ≥33% 余量，与 AU8 对 P5 侧 4/6 的余量口径一致）。
+/// **测量前提（B2c-2 规格评审 四 补强；必须与数字一起读）**：
+/// - 256 KB 堆、`pages_chain` 同堆；
+/// - **P5 侧只有 4 行**（`p5_audit::COEXIST_ROWS_PER_PAGE` = 4）——⚠️ **不是 P5 满行**
+///   （P5 满行 = `p5_audit::ROW_MAX` = 20 行）。**这是本数字的适用边界**；
+/// - 消息取 1–2 字（与 [`MEASURED_ROW_CAPACITY`] 同前提；对堆占用无影响）。
+///
+/// 实测（2026-09-13；`timeout` 保护下逐档）：**P3 = 17 行成功、18 行 `lv_realloc` 失败 +
+/// C 侧断言 ⇒ 挂死**；取 **12**（对挂死点 18 留 ≥33% 余量，与 AU8 对 P5 侧 4/6 的余量口径
+/// 一致）。
+///
+/// ⚠️ **如实登记「P5 满行」的情形（本节数字**不**覆盖它）**：由 `p5_audit.rs::AU8` 的实测
+/// **②**（"**单页满行(20) + 第二个空页** 也 OOM"、"2 页 × 5 行成功 / × 6 行挂死"）可**推出**：
+/// **P5 满行（20）时连 P3 的空页都装不下** ⇒ **"P5 满行 + P3 12 行"必然 OOM**，本节 12 行的
+/// 结论**只在 P5 非满行时成立**。（**未**在本单元重测该组合：真去注入会**挂死**而不是变红，
+/// 代价与风险都高；这里给的是**由既有实测推导**的结论，标注为"推导"而非"实测"。）
+/// ⇒ **给 B3 / 外壳的约束**：两页**不得同时满行**——离页即 `drop`（串行化）或限制同屏行数。
 ///
 /// ⚠️ **它不是"新的一页容量"**：[`ROW_MAX`] = 20 的**单页**契约不变
 /// （`COEXIST_ROWS_PER_PAGE < ROW_MAX` 由编译期断言钉死）；它只说明"**两页同时满行在
@@ -1340,6 +1522,10 @@ impl P3LogsPage {
         // ── ⑤ 列表区（行池 + 空态 + 状态行 + **常驻**说明行）──
         let list_box = layout_box(&root, Dimens::CONTENT_W, EMPTY_H + NOTE_H)?;
         let empty = Rc::new(EmptyState::new(&list_box, TEXT_EMPTY_ICON, TEXT_EMPTY)?);
+        // 超限下的中性文案（**LG9**）：与空态**互斥**，由 `layout()` 按形态显隐。
+        let incomplete =
+            text_label(&list_box, TEXT_INCOMPLETE, TextSlot::Body, Palette::TEXT_SECOND)?;
+        set_visible(incomplete.obj(), false);
         let footer = label(&list_box, TextSlot::Body, Palette::TEXT_WEAK)?;
         footer.set_size(Dimens::CONTENT_W, TextSlot::Body.px() as i32);
         footer.set_long_mode(LongMode::DOTS);
@@ -1404,6 +1590,7 @@ impl P3LogsPage {
             rows: RefCell::new(Vec::new()),
             shown: Cell::new(0),
             empty,
+            incomplete,
             footer,
             note,
             back,
@@ -1411,6 +1598,7 @@ impl P3LogsPage {
             level_styles,
             stripe_styles,
             has_more: Cell::new(false),
+            increment_active: Cell::new(false),
             last_seq: Cell::new(0),
             last_query: RefCell::new(None),
             on_query: CbSlot::new(),
@@ -1796,6 +1984,24 @@ impl P3LogsPage {
         self.core.empty.text()
     }
 
+    /// **不完整态**（超限下的中性文案）是否在显（**LG9**）。
+    #[cfg(test)]
+    pub(crate) fn incomplete_visible(&self) -> bool {
+        !self.core.incomplete.obj().is_hidden()
+    }
+
+    /// 不完整态文案。
+    #[cfg(test)]
+    pub(crate) fn incomplete_text(&self) -> Option<String> {
+        self.core.incomplete.text()
+    }
+
+    /// 增量路径是否已激活（**LG13** 的读回口径）。
+    #[cfg(test)]
+    pub(crate) fn increment_active(&self) -> bool {
+        self.core.increment_active.get()
+    }
+
     /// 底部状态行文本（`加载中` / `已加载全部`）。
     #[cfg(test)]
     pub(crate) fn footer_text(&self) -> Option<String> {
@@ -1930,8 +2136,11 @@ impl P3LogsPage {
 
     /// **「增量拉取」的触发入口**（B3 的 **500 ms** 节拍调用，设计 §4.4）。
     ///
-    /// 尚无任何已注入条目（`last_seq == 0`）⇒ **不发**（首屏查询归
-    /// [`P3LogsPage::set_on_query`]）。
+    /// **B2c-2 规格评审整改 ⑦（LG13）**：
+    /// - **本页尚未被拉起**（B3 还没发过任何筛选意图）⇒ **不发**（首屏查询归
+    ///   [`P3LogsPage::set_on_query`]）；
+    /// - **已拉起**：有游标 ⇒ `cursor = Some(已见最大 seq)`；**无游标（含空窗口）
+    ///   ⇒ `cursor = None`（重新拉首页）** —— 空结果之后增量**不得停摆**。
     pub fn request_increment(&self) {
         self.core.fire_increment();
     }
@@ -2115,10 +2324,12 @@ mod tests {
             .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
     }
 
-    /// 模块 chip：**首位固定「全部」**、未登记 / 超长项按 [`MODULE_CHIP_MAX_CHARS`] **保尾**截断。
+    /// 模块 chip：**首位固定「全部」**、未登记 / 超长项按 [`clip_chip_label`] 截断
+    /// （**超出即带可见省略标记**）。
     ///
     /// **改什么会让本条变红**：把 `module_options` 的首项换成别的（§6.3 ② 的快捷复位失效）；
-    /// 或去掉截断（110 px 的 chip 会被 LVGL 折行 / 裁切成不可辨认）。
+    /// 或去掉截断（110 px 的 chip 会被 LVGL 折行 / 裁切成不可辨认）；或退回"纯保尾、无标记"
+    /// 的旧方案（`opts[2]` 不再以 `...` 开头 ⇒ 第 3 组断言红 —— 见 **LG4 / LG12**）。
     #[test]
     fn module_chip_options_start_with_all_and_are_bounded() {
         let targets: Vec<String> = vec![
@@ -2130,17 +2341,48 @@ mod tests {
         assert_eq!(opts.len(), targets.len() + 1);
         assert_eq!(opts[0], TEXT_ALL);
         for o in &opts {
+            // 上界 = 原样预算（超出才截断）+ 标记 3 字（截断产物恒为 `...` + 尾
+            // [`MODULE_CHIP_TAIL_CHARS`] 字）—— **两者一起**才构成完整判据。
             assert!(
-                o.chars().count() <= MODULE_CHIP_MAX_CHARS,
+                o.chars().count() <= MODULE_CHIP_MAX_CHARS + TEXT_ELLIPSIS.chars().count(),
                 "chip 文案不得超预算（实际 `{o}`）"
             );
             assert!(!o.is_empty());
         }
         assert_eq!(opts[1], TEXT_MODULE_INTERCORE, "已知键取中文（2 字，恰在预算内）");
-        // 未登记 / 超长项：**保尾**（区分位在尾部）。
-        assert_eq!(opts[2], clip_tail(&module_label("hplc"), MODULE_CHIP_MAX_CHARS));
+        // 未登记 / 超长项：**可见省略标记 + 保尾**（区分位在尾部；标记让"不完整"可见）。
+        assert_eq!(module_label("hplc"), "hP?C", "归一形态 4 字（> 预算 2）");
+        assert_eq!(opts[2], format!("{TEXT_ELLIPSIS}C"));
         assert!(module_label("meter_grid").chars().count() > MODULE_CHIP_MAX_CHARS);
         assert_ne!(opts[3], module_label("meter_grid"));
+        assert!(
+            opts[3].starts_with(TEXT_ELLIPSIS),
+            "超长项的产物**必须**带可见省略标记（LG4；退回纯保尾 ⇒ 本条红）"
+        );
+    }
+
+    /// [`clip_marked`] 的两个落点（chip / 行）：**原样预算内不截、超出恒带标记 + 保尾**。
+    ///
+    /// **改什么会让本条变红**：把 `keep` 与 `tail` 合并成一个参数（退化成 `clip_tail`）⇒
+    /// 第 ② 组（"刚好 3 字的 chip 名"仍被截断并带标记）当场红；把标记去掉 ⇒ 第 ③ 组红。
+    #[test]
+    fn marked_truncation_always_shows_the_marker() {
+        // ① 预算内 ⇒ **逐字原样**（不许无谓加标记）。
+        assert_eq!(clip_chip_label("核间"), "核间");
+        assert_eq!(clip_row_label("主站"), "主站");
+        // ② 超出 ⇒ `...` + 尾 1 字（chip）/ 尾 4 字（行）——**恰超 1 字也走截断**（不是"≤4 字原样"）。
+        assert_eq!(clip_chip_label("汉汉汉"), format!("{TEXT_ELLIPSIS}汉"));
+        assert_eq!(
+            clip_chip_label(&module_label("mupc_gateway::iec104")),
+            format!("{TEXT_ELLIPSIS}4")
+        );
+        assert_eq!(
+            clip_row_label(&module_label("mupc_gateway::iec104")),
+            format!("{TEXT_ELLIPSIS}C104")
+        );
+        // ③ 超出 ⇒ 恒带标记（可读性：内容不完整必须**可见**）。
+        assert!(clip_chip_label("汉汉汉").starts_with(TEXT_ELLIPSIS));
+        assert!(clip_row_label("meter_grid").starts_with(TEXT_ELLIPSIS));
     }
 
     /// 「全部」的快捷复位归一化（三条规则，与 `p5_audit.rs` 的 `normalize_ops_selection` 同语义）。
@@ -2243,9 +2485,14 @@ mod tests {
     /// 列表区两态：0 行 ⇒ 空态；≥1 行 ⇒ 行态（**本页无「不可用」态**，§6.3）。
     #[test]
     fn list_view_has_only_rows_and_empty() {
-        assert_eq!(list_view_of(0), ListView::Empty);
-        assert_eq!(list_view_of(1), ListView::Rows);
-        assert_eq!(list_view_of(ROW_MAX), ListView::Rows);
+        assert_eq!(list_view_of(0, false), ListView::Empty);
+        assert_eq!(list_view_of(1, false), ListView::Rows);
+        assert_eq!(list_view_of(ROW_MAX, false), ListView::Rows);
+        // **LG9：超限优先** —— 零行 + 超限 ⇒ 不完整态（**不得**给空态）；有行 + 超限 ⇒ 仍是行态
+        //（超限不隐藏已返回的条目）。
+        assert_eq!(list_view_of(0, true), ListView::Incomplete);
+        assert_eq!(list_view_of(1, true), ListView::Rows);
+        assert_ne!(list_view_of(0, true), ListView::Empty);
     }
 
     /// 底部状态行：无行 ⇒ `None`；有行 ⇒ 按 `has_more` 二选一（**LG7** 的落点）。

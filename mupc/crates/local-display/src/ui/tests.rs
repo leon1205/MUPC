@@ -6266,7 +6266,12 @@ pub(crate) fn pages_chain() {
             p3.set_on_increment(move |q| s.borrow_mut().push(q));
         }
         p3.request_increment();
-        assert_eq!(inc.borrow().len(), 0, "无游标（last_seq = 0）⇒ 不发增量意图");
+        assert_eq!(
+            inc.borrow().len(),
+            0,
+            "**B3 尚未把本页拉起**（还没发过任何筛选意图）⇒ 不发增量（首屏归 set_on_query；LG13）"
+        );
+        assert!(!p3.increment_active(), "骨架态：增量路径未激活（LG13）");
 
         // ── ⑦ 注入 3 条（**乱序**注入 ⇒ 屏上按 `seq` 降序 = 新行在顶部）────────────────
         let entries = vec![
@@ -6430,18 +6435,55 @@ pub(crate) fn pages_chain() {
             "已知键取中文标签"
         );
         assert_eq!(p3.module_chip_display(3).as_deref(), Some("审计"));
-        // 未登记键：chip 上只剩 2 字（LG4），且不含豆腐块（逐字查 cmap 的网见
-        // `p3_runtime_texts_emit_only_cmap_glyphs`）。
+        // 未登记键（`mod_3` ⇒ 归一 `MOD?3`，4 字）：chip 上 = **`...` + 尾 1 字**（LG4）
+        // —— **超出即带可见省略标记**（B2c-2 规格评审整改 ⑤：原方案"保尾 2 字、**无标记**"）。
         let chip4 = p3.module_chip_display(4).expect("未登记模块 chip");
-        assert_eq!(chip4.chars().count(), p3_logs::MODULE_CHIP_MAX_CHARS);
-        // 选项文案清册（读回）：首位恒「全部」、逐项不超预算、数量与注入一致。
+        let norm4 = p3_logs::module_label("mod_3");
+        assert_eq!(
+            chip4,
+            format!("...{}", norm4.chars().next_back().unwrap()),
+            "超预算 ⇒ `...` + 尾 1 字（归一形态 `{norm4}` 的末字）"
+        );
+        assert!(
+            chip4.starts_with("..."),
+            "超预算的 chip 文案**必须**带可见省略标记（LG4；退回纯保尾 ⇒ 本条红）"
+        );
+        assert_eq!(chip4.chars().count(), 4, "产物 = `...`（3 字）+ 尾 1 字（LG4）");
+        // 选项文案清册（读回）：首位恒「全部」、逐项不超预算（**原样预算 + 标记**）、数量与注入一致。
         let opts = p3.module_option_texts();
         assert_eq!(opts.len(), 21);
         assert_eq!(opts[0], p3_logs::TEXT_ALL);
         for o in &opts {
             assert!(
-                o.chars().count() <= p3_logs::MODULE_CHIP_MAX_CHARS,
+                o.chars().count()
+                    <= p3_logs::MODULE_CHIP_MAX_CHARS + "...".chars().count(),
                 "chip 文案 `{o}` 超预算（LG4）"
+            );
+            // 逐项自证：**超预算的项一律以标记开头**（"不完整"必须可见）。
+            assert!(
+                o.chars().count() <= p3_logs::MODULE_CHIP_MAX_CHARS || o.starts_with("..."),
+                "chip 文案 `{o}` 超预算却**无可见标记**（LG4 / §2.6）"
+            );
+        }
+        // **区分度（LG12）**：两个"尾巴不同"的长机器名 ⇒ chip 产物**必须不同**（可见化补偿的
+        // 最低要求）；而"头尾都同、只差中段"的两个名字**仍会同形** —— 该残余由
+        // `p3_logs::tests::marked_truncation_always_shows_the_marker` 与 LG12 明写，不在本链断言。
+        {
+            let a = p3_logs::clip_chip_label(&p3_logs::module_label("mupc_gateway::iec104"));
+            let b = p3_logs::clip_chip_label(&p3_logs::module_label("mupc_gateway::rs485"));
+            assert_ne!(a, b, "尾字不同的两个长名 ⇒ chip 产物必须可区分");
+            let ra = p3_logs::clip_row_label(&p3_logs::module_label("mupc_gateway::iec104"));
+            let rb = p3_logs::clip_row_label(&p3_logs::module_label("mupc_gateway::rs485"));
+            assert_ne!(ra, rb, "尾字不同的两个长名 ⇒ 行产物必须可区分");
+            // 已知残余（**LG12**，如实锁定）：头尾都相同、只差中段 ⇒ 仍同形。
+            let ca = p3_logs::clip_chip_label(&p3_logs::module_label(
+                "mupc_data_processing::iec104",
+            ));
+            assert_eq!(
+                a, ca,
+                "**已登记的撞形残余（LG12）**：`mupc_gateway::iec104` 与 \
+                 `mupc_data_processing::iec104` 头（`mupc_`）尾（`::iec104`）都相同 ⇒ 字符预算内\
+                 取不到中段。**若本条变红**（两者已可区分）⇒ 说明撞形被根治，请同步更新 LG12"
             );
         }
 
@@ -6523,11 +6565,39 @@ pub(crate) fn pages_chain() {
             assert_eq!(q.levels, vec![LogLevel::Error], "级别筛选沿用当前态");
             assert_eq!(q.limit, p3_logs::ROW_MAX);
         }
-        // 筛选变化后游标**清零**（新窗口整体替换 ⇒ 旧游标无意义）。
+        // 筛选变化后游标**清零**（新窗口整体替换 ⇒ 旧游标无意义），但**增量路径不得停摆**
+        // （**B2c-2 规格评审整改 ⑦ / LG13**）。
+        //
+        // 「改什么会让本条变红」：把 `fire_increment` 的判据写回 `last_seq == 0 ⇒ return`
+        // （原实现）⇒ 下面的 `inc.borrow().len()` 不会增长 ⇒ **当场红**（原有用例正是把这个
+        // 停摆反向锁死了，本批已改为正向断言）。
         p3.dispatch_level_selection(vec![]);
         assert_eq!(p3.last_seq(), 0, "筛选变化 ⇒ 游标清零");
+        assert!(p3.increment_active(), "筛选意图已发出 ⇒ 增量路径激活（LG13）");
         p3.request_increment();
-        assert_eq!(inc.borrow().len(), 1, "游标清零后不再发增量（等新窗口注入）");
+        assert_eq!(
+            inc.borrow().len(),
+            2,
+            "游标清零后增量**仍要能推进**（空窗口下「继续」= 重新拉首页）"
+        );
+        {
+            let q = &inc.borrow()[1];
+            assert_eq!(q.cursor, None, "无游标 ⇒ `cursor = None`（重新拉首页，不是停摆）");
+            assert_eq!(q.range, LogRange::H1, "沿用当前筛选档位");
+            assert!(q.levels.is_empty(), "沿用当前级别筛选（已全部取消）");
+            assert_eq!(q.limit, p3_logs::ROW_MAX);
+        }
+        // 再次触发：窗口仍空（B3 还没回灌新窗口）⇒ 仍以 `None` 继续推进（**每次都推进**，
+        // 不再出现"空窗口之后永久沉默"）。
+        p3.request_increment();
+        assert_eq!(inc.borrow().len(), 3);
+        assert_eq!(inc.borrow()[2].cursor, None, "窗口仍空 ⇒ 仍为 None（直到注入新窗口）");
+        // 注入新窗口 ⇒ 游标回到 `max(seq)`，增量恢复"真增量"形态（`Some(..)`）。
+        p3.set_page(&log_page(entries.clone(), true, false));
+        assert_eq!(p3.last_seq(), 103);
+        p3.request_increment();
+        assert_eq!(inc.borrow().len(), 4);
+        assert_eq!(inc.borrow()[3].cursor, Some(103), "有游标 ⇒ 回到 max(seq) 增量语义");
 
         // ── ⑬ 「回到最新」（**R2** 的可实现部分：点击 ⇒ 意图 + 复位 auto_follow）────────
         let backs = Rc::new(RefCell::new(0usize));
@@ -6568,6 +6638,131 @@ pub(crate) fn pages_chain() {
         );
         assert_eq!(p3.visible_rows(), 0, "空态不显行");
         assert!(!p3.back_visible(), "空态无「最新」可回 ⇒ 按钮隐");
+        assert!(
+            !p3.incomplete_visible(),
+            "**正向对照**：`range_too_large = false` 的空窗口 ⇒ **不得**显「不完整」态\
+             （否则正常空态会被误判成超限）"
+        );
+
+        // ── ⑮′ **空态 × 超限互斥**（B2c-2 规格评审整改 ①；评审探针 `PROBE-EDGE08-15` 的现场）
+        //
+        // 原缺陷：`entries = [] ∧ range_too_large = true` ⇒ 空态「当前筛选条件下无日志」与
+        // 超限条**同时**在显 —— 而 `range_too_large = true` 的语义是"**本次未执行全库检索、
+        // `entries` 不代表完整结果**" ⇒ 说"确实没有"就是把"无法获知"冒充成"确实没有"
+        // （违 §8.3「语义不同的态必须可区分、不得互替」+ §2.6「降级可见、绝不造假」）。
+        //
+        // 「改什么会让本条变红」：把 `list_view_of` 写回"只看行数"（忽略 `range_too_large`）
+        // ⇒ 下面第 ① 组断言（空态**不可见**）当场红。
+        {
+            // ① 零行 + 超限 ⇒ **不完整态**：超限条在显、空态**不可见**、中性文案在显。
+            p3.set_page(&log_page(Vec::new(), false, true));
+            disp.refr_now_for_test();
+            assert!(p3.warn_visible(), "超限 ⇒ 超限提示条必须在显");
+            assert!(
+                !p3.empty_visible(),
+                "**超限优先**：零行 + 超限时**不得**显空态「当前筛选条件下无日志」\
+                 （那是把「无法获知」冒充成「确实没有」—— §8.3 / §2.6）"
+            );
+            assert!(p3.incomplete_visible(), "改显中性文案（LG9）");
+            assert_eq!(p3.list_view(), p3_logs::ListView::Incomplete);
+            assert_eq!(
+                p3.incomplete_text().as_deref(),
+                Some(p3_logs::TEXT_INCOMPLETE)
+            );
+            assert_ne!(
+                p3.incomplete_text().as_deref(),
+                Some(p3_logs::TEXT_EMPTY),
+                "中性文案**不得**复用「无日志」那句（语义互替）"
+            );
+            assert_eq!(p3.visible_rows(), 0);
+            // ② **正向对照**：同一 `entries = []`，只把标志复位 ⇒ 空态回来、不完整态下去。
+            p3.set_page(&log_page(Vec::new(), false, false));
+            disp.refr_now_for_test();
+            assert_eq!(p3.list_view(), p3_logs::ListView::Empty);
+            assert!(p3.empty_visible() && !p3.warn_visible() && !p3.incomplete_visible());
+            // ③ 有行 + 超限 ⇒ **行态**（超限不隐藏已返回的条目；也不给不完整态）。
+            p3.set_page(&log_page(entries.clone(), false, true));
+            disp.refr_now_for_test();
+            assert_eq!(p3.list_view(), p3_logs::ListView::Rows);
+            assert_eq!(p3.visible_rows(), 3);
+            assert!(!p3.incomplete_visible());
+        }
+
+        // ── ⑮″ **长消息的截断必须可见**（B2c-2 规格评审整改 ③④ / **LG5 / LG14**）──────────
+        //
+        // 消息列 = `LongMode::DOTS`（行高恒 44 px 下 `WRAP` 会**静默裁掉第二行**）。
+        // `DOTS` 由 LVGL 把**溢出的尾部换成 `.`×3**，交换进 `label->text` 的**同一缓冲区**
+        // ⇒ `Label::text()`（`lv_label_get_text`）能读回"被截断"这一**可见后果**。
+        //
+        // 「改什么会让本条变红」：把消息列改回 `WRAP` ⇒ 读回串是**完整原文**、不以 `...` 结尾
+        // ⇒ 第 ① 组断言当场红（这正是原静态锁做不到的"区分度"）。
+        {
+            let long_msg = "abcdefghijklmnopqrstuvwxyz0123456789".repeat(3); // 108 字
+            let one = vec![log_entry(1, LogLevel::Info, "audit", &long_msg)];
+            p3.set_page(&log_page(one, false, false));
+            disp.refr_now_for_test();
+            let shown = p3.row_message(0).expect("长消息行");
+            assert!(
+                shown.ends_with("..."),
+                "长消息必须**可见地**被截断（`DOTS` 把尾部换成 `...`）；实际读回 = `{shown}`\
+                 （若为完整原文 ⇒ 消息列多半被改回了 `WRAP`，见 LG5）"
+            );
+            assert!(
+                shown.len() < 108,
+                "截断后的读回串必须**短于**原文（实际 {} 字）",
+                shown.len()
+            );
+            // 短消息（放得下一行）⇒ **不**加省略号（不得无谓截断）。
+            let short = vec![log_entry(2, LogLevel::Info, "audit", "核间心跳超时")];
+            p3.set_page(&log_page(short, false, false));
+            disp.refr_now_for_test();
+            assert_eq!(
+                p3.row_message(0).as_deref(),
+                Some("核间心跳超时"),
+                "短消息逐字原样（无 `...`）"
+            );
+        }
+
+        // ── ⑮‴ 「回到最新」按钮**不得与任何一行相交**（整改 ② / **LG11**）──────────────────
+        //
+        // 评审实测：原实现按钮屏坐标 (916,380)-(1007,471)，而第 0/1 行占 y372-416 / y416-460
+        // ⇒ 压住消息列尾部 92 px（且底 `SURFACE_HIGH` **不透明** ⇒ 实遮正文）。
+        // 现按钮独占列表区之下的**一条带** ⇒ 与**每一行**的矩形都不相交。
+        //
+        // 「改什么会让本条变红」：把按钮的 y 改回 `y_list + TIGHT_GAP`（叠在行上）⇒ 第 ① 组
+        // 断言当场红。
+        {
+            let full: Vec<LogEntry> = (0..p3_logs::ROW_MAX)
+                .map(|i| log_entry(1_900_000_000_000 + i as u64, LogLevel::Info, "audit", "m"))
+                .collect();
+            p3.set_page(&log_page(full, false, false));
+            disp.refr_now_for_test();
+            let b = p3.back_obj().coords();
+            assert!(p3.back_visible(), "有行 ⇒ 按钮在显（恒显口径，LG11）");
+            assert!(b.x2 > b.x1 && b.y2 > b.y1, "按钮矩形非退化：{b:?}");
+            assert_eq!(p3.visible_rows(), p3_logs::ROW_MAX);
+            for i in 0..p3.visible_rows() {
+                let (x, y) = p3.row_pos(i).expect("行坐标");
+                let (w, h) = p3.row_size(i).expect("行尺寸");
+                let (rx2, ry2) = (x + w, y + h);
+                let disjoint = b.x2 <= x || rx2 <= b.x1 || b.y2 <= y || ry2 <= b.y1;
+                assert!(
+                    disjoint,
+                    "第 {i} 行矩形 ({x},{y})-({rx2},{ry2}) 与「回到最新」按钮矩形 \
+                     ({},{})-({},{}) **相交** —— 按钮实遮日志正文（不透明底），见 LG11",
+                    b.x1, b.y1, b.x2, b.y2
+                );
+            }
+            // 按钮**整体**在最后一行之下（带语义的结构性自证：不是"碰巧不相交"）。
+            let last_bottom = p3.row_pos(p3.visible_rows() - 1).expect("末行").1
+                + p3.row_size(p3.visible_rows() - 1).expect("末行尺寸").1;
+            assert!(
+                b.y1 >= last_bottom,
+                "按钮的 y1 = {} 必须 ≥ 末行底 {}（专属带在列表区之下）",
+                b.y1,
+                last_bottom
+            );
+        }
 
         // ── ⑯ **行池预算**（**LG6** / **R3**）：注入契约上限的条数也只渲染行池上界 ────────
         // 实测（见 `p3_logs::MEASURED_ROW_CAPACITY`）：单页独活时 P3 可容 **44 行**（48 挂死）；
@@ -7320,11 +7515,33 @@ fn p3_static_constraints() {
                  PRD T-2：无导出 / 编辑 / 删除 / 清空入口）"
             );
         }
-        // ⑥ **LG5**：消息列必须是"换行"（§6.3 / §7.4 逐字）—— 薄层读不回 `LongMode`
-        //    （无 getter）⇒ 此处做**源码级**锁定（残余见 LG5）。
+        // ⑥ **LG5 / LG14（B2c-2 规格评审整改 ③④）**：消息列必须是 **`DOTS`**（可见截断 +
+        //    省略号），且**本文件生产区**的 `LongMode::WRAP` **恰 1 处**（只允许「回到最新」
+        //    按钮的 `92×92` 折行）。
+        //
+        //    **旧写法（无区分度，已删）**：只断 `code.contains("LongMode::WRAP")` —— 该串
+        //    被**同一文件里 `back.label()` 的 WRAP** 满足 ⇒ 把消息列改回 `WRAP` 时**仍然绿**
+        //    （评审探针 ⑤ 实测）。现改为**两条一起**：
+        //    ① **锚定消息列那一行**（`message.set_long_mode(LongMode::DOTS);` 必须逐字在）；
+        //    ② **计数**——`LongMode::WRAP` 恰 1 处（把消息列改回 `WRAP` ⇒ 变 2 ⇒ 红）。
+        //    ⚠️ **边界（LG14）**：薄层**无** `LongMode` 读回口（allowlist 只有 setter）⇒ 这是
+        //    源码级锁；**行为级**的锁另见 `pages_chain` 的
+        //    「长消息截断必须可见」段（读 LVGL 缓冲区里被换成 `...` 的文本）。
         assert!(
-            code.contains("LongMode::WRAP"),
-            "{name} 未含 `LongMode::WRAP` —— 消息列的「换行」口径失效（见 LG5）"
+            code.contains("message.set_long_mode(LongMode::DOTS);"),
+            "{name} 未含 `message.set_long_mode(LongMode::DOTS);` —— 消息列必须是 **DOTS**\
+             （§6.3 行高恒 44 下 `WRAP` 会**静默裁掉第二行**、无标记，违 §2.6；见 LG5）"
+        );
+        assert!(
+            !code.contains("message.set_long_mode(LongMode::WRAP);"),
+            "{name} 仍把消息列设成 `WRAP` —— 静默裁切（无可见标记），见 LG5"
+        );
+        assert_eq!(
+            code.matches("LongMode::WRAP").count(),
+            1,
+            "{name}：**代码里** `LongMode::WRAP` 必须**恰 1 处**（只有「回到最新」按钮的 92×92 \
+             折行）。计数 > 1 ⇒ 多半有人把消息列改回了 `WRAP`（旧断言正是被它蒙混过关的）。\
+             注：判据用**剥掉注释 / 字面量**后的 `code` —— 否则 LG14 里写的 token 串会把它数成 2"
         );
         // 自证扫描面真的覆盖到了 P3 日志页（`include_str!` 指错文件 / 文件被清空时，
         // 上面几条会**构造性全绿** —— "看着在把关、实则没把住"的典型形态）。
@@ -7474,22 +7691,27 @@ fn p3_runtime_texts_emit_only_cmap_glyphs() {
 /// **P3 的列宽预算**（用**生产字体的 `adv_w`** 实测；口径同 [`measured_text_px`]）。
 ///
 /// **改什么会让本条变红**：
-/// - 把 [`crate::ui::pages::p3_logs::ROW_TIME_W`] 改回 §6.3 的 160（时间戳 236.4 px 装不下
+/// - 把 [`crate::ui::pages::p3_logs::ROW_TIME_W`] 改回 §6.3 的 160（时间戳 **224.0 px** 装不下
 ///   ⇒ DOTS 截断 —— 见 **LG2**）；
 /// - 把 [`crate::ui::pages::p3_logs::ROW_MODULE_MAX_CHARS`] 调大（模块列被截断）；
-/// - 把 [`crate::ui::pages::p3_logs::MODULE_CHIP_MAX_CHARS`] 调到 3（`✓ + 3 汉字` = 101.6 px
-///   > chip 内区 78 px ⇒ 选中态折行 —— 见 **LG4**）；
+/// - 把 [`crate::ui::pages::p3_logs::MODULE_CHIP_MAX_CHARS`] 调到 3（`✓` + 3 汉字 = 95.75 px
+///   > chip 内区 76 px ⇒ 选中态折行 —— 见 **LG4**）；
 /// - 把级别色块改窄到放不下 `DEBUG`（实测 86.9 px）。
 #[test]
 fn p3_column_budgets_fit_measured_text() {
     use crate::ui::pages::p3_logs::{
-        LEVEL_CHIP_W, MODULE_CHIP_MAX_CHARS, MODULE_CHIP_W, ROW_LEVEL_W, ROW_MODULE_MAX_CHARS,
-        ROW_MODULE_W, ROW_TIME_W,
+        clip_chip_label, clip_row_label, module_label, LEVEL_CHIP_W, MODULE_CHIP_MAX_CHARS,
+        MODULE_CHIP_W, ROW_LEVEL_W, ROW_MODULE_MAX_CHARS, ROW_MODULE_TAIL_CHARS, ROW_MODULE_W,
+        ROW_TIME_W,
     };
 
     // ① 时间列：定长时间戳必须**整条**放得下；且 §6.3 的 160 确实装不下（偏差 LG2 的证据）。
+    //   ⚠️ **B2c-2 规格评审整改 ⑥**：原稿写"236.4 px"，与入库基线 `lv_font_metrics.txt` 复算的
+    //   **224.0 px** 不符（差 12.4 px）。本用例用的是 `measured_text_px`（同一份基线的同一口径）
+    //   ⇒ 下面的断言值就是**订正后**的 224.0。
     let ts = "2026/09/10 13:42:07";
     let ts_w = measured_text_px(ts, 24);
+    assert_eq!(ts_w, 224, "订正后的实测值（LG2；原稿 236.4 是不实数字）");
     assert!(
         ts_w <= ROW_TIME_W,
         "时间戳 `{ts}` 实测 {ts_w} px > 时间列宽 {ROW_TIME_W} px"
@@ -7498,28 +7720,82 @@ fn p3_column_budgets_fit_measured_text() {
         ts_w > 160,
         "时间戳实测 {ts_w} px —— 若 ≤ 160 则 LG2 的列宽偏差**不再成立**，请复核 §6.3 的 160"
     );
+    // 160 px 只够 `HH:MM:SS`（§6.3 未定义时间格式，这是"160 是规格缺口"的证据）。
+    let hms_w = measured_text_px("13:42:07", 24);
+    assert_eq!(hms_w, 93, "`HH:MM:SS` 实测 93.25 px（订正后口径；LG2）");
+    assert!(hms_w <= 160, "`HH:MM:SS` 装得进 §6.3 的 160");
 
-    // ② 模块列：`ROW_MODULE_MAX_CHARS` 个汉字放得下。
+    // ② 模块列：`ROW_MODULE_MAX_CHARS` 个汉字**原样**放得下（未超出时的上界）。
     let m_w = measured_text_px(&"汉".repeat(ROW_MODULE_MAX_CHARS), 24);
     assert!(
         m_w <= ROW_MODULE_W,
         "{ROW_MODULE_MAX_CHARS} 个汉字实测 {m_w} px > 模块列宽 {ROW_MODULE_W} px"
     );
+    // ②′ **截断产物**（`...` + 尾 `ROW_MODULE_TAIL_CHARS` 字 = 4 汉字）也放得下；再多一个字就破线。
+    let row_tail = format!("...{}", "汉".repeat(ROW_MODULE_TAIL_CHARS));
+    let row_tail_w = measured_text_px(&row_tail, 24);
+    assert!(
+        row_tail_w <= ROW_MODULE_W,
+        "行截断产物 `{row_tail}` 实测 {row_tail_w} px > 模块列宽 {ROW_MODULE_W} px（LG4）"
+    );
+    // ⚠️ 边界：`...` + 5 汉字 = **140.0625 px**（真值，按 `adv_w` 的 1/16 px 逐字求和），
+    //   而 `measured_text_px` 截断到整数后报 **140** = `ROW_MODULE_W`（恰好触边）。
+    //   ⇒ 判据写 `>=`（"到边 / 越界"），并在此写明真值 > 140 的事实。
+    let row_over = format!("...{}", "汉".repeat(ROW_MODULE_TAIL_CHARS + 1));
+    let row_over_w = measured_text_px(&row_over, 24);
+    assert!(
+        row_over_w >= ROW_MODULE_W,
+        "尾保留再多一字（`{row_over}`）实测 {row_over_w} px —— 若 < {ROW_MODULE_W} px 则可调大\
+         ROW_MODULE_TAIL_CHARS（当前偏保守）"
+    );
+    assert_eq!(
+        row_tail_w + 24,
+        row_over_w,
+        "每多一个汉字恰 +24 px（`adv_w` 口径自证：乘积取整未吞掉真实差）"
+    );
 
-    // ③ 模块 chip：**选中态**（`✓ ` 前缀 + 预算字数）必须放得进 chip 内区。
-    let sel_w = measured_text_px(&format!("✓ {}", "汉".repeat(MODULE_CHIP_MAX_CHARS)), 26);
-    let chip_inner = MODULE_CHIP_W - 2 * Dimens::GAP_MIN;
+    // ③ 模块 chip：**两条都要过** —— ①原样预算（选中态）②截断产物（选中态）。
+    //   ⚠️ 选中前缀是 `chip_text()` 的 `"✓" + label`（**无空格**，`components.rs`），
+    //   预算按**真内区** `MODULE_CHIP_W − 2×GAP_MIN − 2×描边(1 px)` 算。
+    let chip_inner = MODULE_CHIP_W - 2 * Dimens::GAP_MIN - 2 * Stroke::THIN;
+    let sel_w = measured_text_px(&format!("✓{}", "汉".repeat(MODULE_CHIP_MAX_CHARS)), 26);
     assert!(
         sel_w <= chip_inner,
         "选中态 `✓ + {MODULE_CHIP_MAX_CHARS} 汉字` 实测 {sel_w} px > chip 内区 {chip_inner} px \
          （LG4 的预算被突破 ⇒ 选中态 chip 会折行 / 裁切）"
     );
-    let over_w = measured_text_px(&format!("✓ {}", "汉".repeat(MODULE_CHIP_MAX_CHARS + 1)), 26);
+    let over_w = measured_text_px(&format!("✓{}", "汉".repeat(MODULE_CHIP_MAX_CHARS + 1)), 26);
     assert!(
         over_w > chip_inner,
         "多一字（{} 汉字）实测 {over_w} px —— 若它也 ≤ {chip_inner} px，则\
          MODULE_CHIP_MAX_CHARS 可以调大（当前预算偏保守）",
         MODULE_CHIP_MAX_CHARS + 1
+    );
+    // ③′ 截断产物（`...` + 尾 1 字）必须放得下 —— 且**"2 字 + 标记"必须放不下**（这才是
+    //    "chip 上放不下 2 字 + 可见标记"这条取舍（LG4）的**实测证据**）。
+    let chip_tail = format!("✓{}", clip_chip_label(&"汉".repeat(4)));
+    let chip_tail_w = measured_text_px(&chip_tail, 26);
+    assert!(
+        chip_tail_w <= chip_inner,
+        "chip 截断产物 `{chip_tail}` 实测 {chip_tail_w} px > chip 内区 {chip_inner} px（LG4）"
+    );
+    let two_plus_marker = measured_text_px(&format!("✓{}汉汉", "..."), 26);
+    assert!(
+        two_plus_marker > chip_inner,
+        "「2 汉字 + `...`」实测 {two_plus_marker} px —— 若 ≤ {chip_inner} px，则 chip 上\
+         **放得下**「2 字 + 标记」，LG4 的取舍（标记优先于多留 1 字）应改为「标记 + 2 字」"
+    );
+    // ③″ 截断策略自证：产物**含可见标记**、且两个"尾字不同"的长名**可区分**（LG12 的补偿）。
+    assert!(clip_chip_label(&module_label("mupc_gateway::iec104")).starts_with("..."));
+    assert_ne!(
+        clip_chip_label(&module_label("mupc_gateway::iec104")),
+        clip_chip_label(&module_label("mupc_gateway::rs485")),
+        "尾字不同的两个长名 ⇒ chip 产物必须可区分（LG12）"
+    );
+    assert_ne!(
+        clip_row_label(&module_label("mupc_gateway::iec104")),
+        clip_row_label(&module_label("mupc_gateway::rs485")),
+        "尾字不同的两个长名 ⇒ 行产物必须可区分（LG12）"
     );
     assert!(
         std::hint::black_box(MODULE_CHIP_W) >= std::hint::black_box(Dimens::CHIP_MIN_W),

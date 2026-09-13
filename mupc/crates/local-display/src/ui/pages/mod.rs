@@ -716,6 +716,8 @@ pub const ALL_TEXTS: &[&str] = &[
     p3_logs::TEXT_EMPTY,
     p3_logs::TEXT_EMPTY_ICON,
     p3_logs::TEXT_RANGE_TOO_LARGE,
+    // 超限下的中性文案（**LG9**：自造串 —— §3.6 无此句）
+    p3_logs::TEXT_INCOMPLETE,
     p3_logs::TEXT_NO_EXPORT,
     p3_logs::TEXT_NO_EXPORT2,
     p3_logs::TEXT_CLAUSE_SEP,
