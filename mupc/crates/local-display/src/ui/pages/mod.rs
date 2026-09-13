@@ -10,7 +10,9 @@
 //! | [`p1_status`] | P1 主状态页（默认页 / 超时回归目标页） | **B2a** |
 //! | [`p2_config`] | P2 配置页（控制通道驱动，含写操作） | **B2b-2** |
 //! | [`p4_interlock`] | P4 安全 / 联锁页（**帧驱动展示 + 控制通道意图**，含写操作） | **B2b-3** |
-//! | `p3_logs` / `p5_audit` | 日志 / 审计 | B2b / B2c |
+//! | [`p5_audit`] | P5 审计页（**控制通道驱动，只读**；F19） | **B2c-1** |
+//! | [`filters`] | **共享**「时间范围筛选」件（P3 / P5 共用；`LogRange` 三档 + 自定义起止） | **B2c-1** |
+//! | `p3_logs` | P3 日志页（复用 [`filters`] 的时间范围件） | B2c-2 |
 //! | [`p6_system`] | P6 系统 / 关于页 | **B2a** |
 //!
 //! **本轮不做**：页面路由与底部导航装配（B2c）、`console.rs` / `main.rs` 改写与 `state.rs`
@@ -69,6 +71,18 @@
 //!   - **页根形态复用契约 1′**（UI §6.4 线框 `Y624 ┌ 固定操作条 ──┐`）；与 P2 的唯一差别：
 //!     P4 在滚动视口与固定操作条之间多一条 **24 px 就地原因带**（UI §6.4 拒绝原因表 +
 //!     §8.3 都要求「按钮正上方 24 px 就地原因」）⇒ 视口 528 而非 552，见该文件的偏差 **IL4**。
+//! - **B2c-1 补充（P5 审计页 + 共享「时间范围」件）**：
+//!   - **P5 = 纯契约 1（页根即滚动容器）+ 契约 2′（控制通道注入）**：UI §6.5 线框**没有**底部
+//!     固定操作条 ⇒ 走 [`page_root`]；数据经 `set_page` / `set_ops` / `set_unavailable` 注入，
+//!     **只读**（零写操作），筛选变化与「加载更多」只经意图回调
+//!     （[`p5_audit::P5AuditPage::set_on_query`] / [`set_on_load_more`](p5_audit::P5AuditPage::set_on_load_more)）
+//!     交回外部。
+//!   - **共享件落点 = [`filters`]**：P3（B2c-2）与本页共用「时间范围」三档 + 自定义起止；
+//!     P3 的接法写在 `filters.rs` 的模块文档里（含"档位变化后必须用 `filters::body_h` 重摆
+//!     后续区块"这一条 —— 事件回调内读 `size()` 会拿到旧值）。
+//!   - **两处结构性发现（已逐条登记）**：`AuditPage` **没有** `range_too_large` 字段
+//!     （EDGE-15 在 P5 侧生产不可达，见 **AU5**）；薄层 `EventCode` **未镜像**
+//!     `LV_EVENT_SCROLL` ⇒「滚动加载」的触发点在本层不可得（见 **AU6**）。
 //!
 //! ## ⚠️ 已知偏差登记（B2a 规格评审后；**集中、显式** —— 屏文 / 尺寸与契约不一致处
 //! 一律在此列明，不得"悄悄地"不一致）
@@ -108,9 +122,11 @@ use crate::lvgl::LvglError;
 use crate::state::{ChannelStatus, Freshness};
 use crate::ui::theme::{self, Dimens, Palette};
 
+pub mod filters;
 pub mod p1_status;
 pub mod p2_config;
 pub mod p4_interlock;
+pub mod p5_audit;
 pub mod p6_system;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -627,6 +643,47 @@ pub const ALL_TEXTS: &[&str] = &[
     p4_interlock::TEXT_AUDIT_UNAVAILABLE,
     p4_interlock::ICON_OK,
     p4_interlock::ICON_FAIL,
+    // 共享「时间范围」筛选件（B2c-1；P3 / P5 共用）
+    filters::TEXT_RANGE_LABEL,
+    filters::TEXT_RANGE_H1,
+    filters::TEXT_RANGE_H24,
+    filters::TEXT_RANGE_CUSTOM,
+    filters::TEXT_START,
+    filters::TEXT_END,
+    // P5 审计页（B2c-1）
+    p5_audit::TEXT_NEWEST_PREFIX,
+    p5_audit::TEXT_IMMUTABLE,
+    p5_audit::TEXT_LOCK_ICON,
+    p5_audit::TEXT_OPS_LABEL,
+    p5_audit::TEXT_OPS_ALL,
+    p5_audit::TEXT_HEAD_TIME,
+    p5_audit::TEXT_HEAD_OPERATOR,
+    p5_audit::TEXT_HEAD_OP,
+    p5_audit::TEXT_HEAD_VALUE,
+    p5_audit::TEXT_HEAD_RESULT,
+    p5_audit::TEXT_OPERATOR_LOCAL,
+    p5_audit::TEXT_RESULT_OK,
+    p5_audit::TEXT_RESULT_FAIL,
+    p5_audit::TEXT_REASON_PREFIX,
+    p5_audit::TEXT_PAIR_ARROW,
+    p5_audit::TEXT_LABEL_SEP,
+    p5_audit::TEXT_CLAUSE_SEP,
+    p5_audit::TEXT_VALUE_ON,
+    p5_audit::TEXT_VALUE_OFF,
+    p5_audit::TEXT_UNIT_ITEMS,
+    p5_audit::TEXT_UNIT_FIELDS,
+    p5_audit::TEXT_ELLIPSIS,
+    p5_audit::TEXT_FOOTER_LOADING,
+    p5_audit::TEXT_FOOTER_ALL,
+    p5_audit::TEXT_EXPORT_NOTE,
+    p5_audit::TEXT_EXPORT_NOTE2,
+    p5_audit::TEXT_EMPTY,
+    p5_audit::TEXT_RANGE_TOO_LARGE,
+    p5_audit::TEXT_UNAVAILABLE,
+    p5_audit::TEXT_FIELD_PORT,
+    p5_audit::TEXT_FIELD_LOG_LEVEL,
+    p5_audit::TEXT_FIELD_TELEMETRY,
+    p5_audit::TEXT_EMPTY_ICON,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════

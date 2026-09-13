@@ -774,15 +774,19 @@ fn ui_static_constraints() {
 /// B2b-2 起再纳入 `ui/pages/p2_config.rs`（P2 配置页：中文分组 / 字段 / 屏文最多的一页）。
 /// B2b-3 起再纳入 `ui/pages/p4_interlock.rs`（P4 安全联锁页：三态总态词 / 触发源 / 灯卡 /
 /// 就地原因 / 弹层屏文）。
-const UI_PROD_SOURCES: [(&str, &str); 9] = [
+/// B2c-1 起再纳入 `ui/pages/filters.rs`（共享时间范围筛选件：三档文案 + 起止名）与
+/// `ui/pages/p5_audit.rs`（P5 审计页：头部三条 / 表头 / 行内容 / 底部状态行）。
+const UI_PROD_SOURCES: [(&str, &str); 11] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/theme.rs", include_str!("theme.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
+    ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
+    ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
 
@@ -819,14 +823,20 @@ const UI_PROD_SOURCES: [(&str, &str); 9] = [
 /// 该文件里 `source_key("…")` 的**计数由 `p4_static_constraints` 钉死为恰 2 处**（防把**上屏串**
 /// 塞进 `source_key(..)` 从而静默逃过码表网 —— 与 `config_key(` 同一条自证纪律）。
 ///
+/// **B2c-1 新增一条 `audit_key(`**：同款机制、同款理由 —— `ui/pages/p5_audit.rs` 的
+/// **审计 `target` 键映射表**必须写出**机器键**（`gateway.port` / `system.log_level` /
+/// `telemetry.interval` / `gateway.listen_addr`），而键是**小写 ASCII 且从不上屏**
+/// （上屏的是中文标签，未登记键**整个不显标签**，见该文件的 **AU9**）。该文件里
+/// `audit_key("…")` 的**计数由 `p5_static_constraints` 钉死为恰 4 处**。
+///
 /// ⚠️ **边界（B2b-3 代码质量整改 M7，如实登记）**：本清单是**后缀匹配**（`prefix.ends_with(s)`），
-/// 且上面的计数**只数 `p4_interlock.rs` 一个文件**。⇒ 两点已知面：
-/// ① 任何**以 `source_key(` 结尾的标识符**（如 `my_source_key("…")`）同样被豁免 —— 豁免面比
-///    "调用本页那个常量函数"更宽；
-/// ② 别的文件里写 `source_key("上屏串")` **不受**那两处计数约束（`config_key(` 同款边界）。
+/// 且上面的计数**只数 `p4_interlock.rs` / `p5_audit.rs` 各自一个文件**。⇒ 两点已知面：
+/// ① 任何**以这些后缀结尾的标识符**（如 `my_source_key("…")`）同样被豁免 —— 豁免面比
+///    "调用该页那个常量函数"更宽；
+/// ② 别的文件里写 `source_key("上屏串")` / `audit_key("上屏串")` **不受**计数约束。
 /// 本批**不修**（收紧需把后缀匹配改成"精确调用点集合"，属另一批的结构变更）；此处**登记**以免
 /// 后人把这两条当成"已被网住"。
-const NON_DISPLAY_SINKS: [&str; 8] = [
+const NON_DISPLAY_SINKS: [&str; 9] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
@@ -835,6 +845,7 @@ const NON_DISPLAY_SINKS: [&str; 8] = [
     "option_env!(",
     "config_key(",
     "source_key(",
+    "audit_key(",
 ];
 
 /// **已登记**的字库缺口：扫源码确实用到、但生成字体的 cmap 里**没有**的字形。
@@ -1355,6 +1366,8 @@ fn ui_texts_covered_by_font_cmap() {
         .chain(crate::ui::pages::ALL_TEXTS.iter())
         .chain(crate::ui::controls::ALL_TEXTS.iter())
         .chain(crate::ui::pages::p2_config::ALL_TEXTS.iter())
+        .chain(crate::ui::pages::filters::ALL_TEXTS.iter())
+        .chain(crate::ui::pages::p5_audit::ALL_TEXTS.iter())
     {
         assert!(
             literals.iter().any(|l| l.contains(t)),
@@ -4888,6 +4901,470 @@ pub(crate) fn pages_chain() {
         drop(p4);
     }
 
+    // ═══ P5 审计页（B2c-1；F19，**只读** + 共享时间范围筛选件）═══════════════════
+    //
+    // 覆盖：装配契约（契约 1：页根即滚动容器）／共享件（三档 + 自定义展开）／操作类型 chip 组
+    // （含「全部」复位语义）／**只读约束**（运行期读 LVGL 标志）／三态（行 / 空态 / 不可用，
+    // EDGE-08 vs EDGE-17 **不得互替**）／超限条（EDGE-15，**AU5** 的显式注入入口）／
+    // 意图回调（筛选变化**去重** + 加载更多）／选项以注入为准（重建 chip 组）。
+    {
+        use crate::lvgl::widgets::Dir;
+        use crate::ui::pages::{filters, p5_audit};
+        use mupc_display_proto::{
+            AuditPage, AuditResult, ConsoleAuditEntry, ConsoleOp, LogRange, OpOption,
+            AUDIT_PAGE_SIZE,
+        };
+
+        /// 造一条审计记录（`before` / `after` / `reason` 由调用方给）。
+        #[allow(clippy::too_many_arguments)]
+        fn audit_entry(
+            id: &str,
+            ts_ms: u64,
+            op: ConsoleOp,
+            result: AuditResult,
+            target: &str,
+            before: Option<serde_json::Value>,
+            after: Option<serde_json::Value>,
+            reason: Option<&str>,
+        ) -> ConsoleAuditEntry {
+            ConsoleAuditEntry {
+                id: id.into(),
+                ts_ms,
+                operator: mupc_display_proto::CONSOLE_OPERATOR.into(),
+                op,
+                target: target.into(),
+                before,
+                after,
+                result,
+                reason: reason.map(str::to_string),
+                request_id: "rid-1".into(),
+            }
+        }
+
+        /// 造一页审计结果。
+        fn audit_page(
+            entries: Vec<ConsoleAuditEntry>,
+            available: bool,
+            has_more: bool,
+            newest_ts_ms: Option<u64>,
+        ) -> AuditPage {
+            AuditPage {
+                entries,
+                page: 1,
+                page_size: AUDIT_PAGE_SIZE as u32,
+                has_more,
+                newest_ts_ms,
+                available,
+            }
+        }
+
+        let p5 = p5_audit::P5AuditPage::new(&host).expect("P5AuditPage::new");
+        disp.refr_now_for_test();
+
+        // ── ① 装配契约（**契约 1**：页根即滚动容器；§6.5 线框无底部操作条）──────────
+        assert_eq!(
+            p5.obj().size(),
+            (Dimens::CONTENT_W, Dimens::CONTENT_H),
+            "页根 = 内容区视口 992×624（B2c 的装配契约）"
+        );
+        assert_eq!(
+            crate::lvgl::widgets::scroll_dir(p5.obj()),
+            Dir::VER,
+            "页根是**纵向**滚动容器（结构性禁横滚，§2.7 / §7.4）"
+        );
+        let root_c = p5.obj().coords();
+        // 头部三条：最近审计条 36 / 不可篡改说明条 48（**紧邻**，§6.5 线框 Y80/Y116）。
+        assert_eq!(
+            p5.immutable_obj().coords().y1,
+            root_c.y1 + Dimens::CONTENT_PAD_TOP + 36,
+            "说明条紧接最近审计条（页内 y44 = 绝对 y116）"
+        );
+        assert_eq!(p5.immutable_obj().size().1, 48, "说明条高 48（§6.5）");
+        assert_eq!(
+            p5.immutable_text().as_deref(),
+            Some(p5_audit::TEXT_IMMUTABLE),
+            "「审计记录仅追加 · 不可修改或删除」（全角逗号改写见 AU1）"
+        );
+        assert_eq!(
+            p5.immutable_icon().as_deref(),
+            Some(p5_audit::TEXT_LOCK_ICON),
+            "锁形取几何块 ■（§3.6 明写『以几何锁形替代』）"
+        );
+        assert!(p5.immutable_obj().is_alive(), "说明条必须存活（含色条与文案子树）");
+        assert!(p5.immutable_bar_obj().is_alive());
+        assert_eq!(
+            p5.immutable_bar_obj().size(),
+            (4, 48),
+            "左缘 4 px 色条通高（§6.5：底 #14231F + 左缘 4 px #35D0C4）"
+        );
+
+        // ── ② 共享「时间范围」件（P3 / P5 共用；UI §6.5 筛选区「同 P3」）───────────
+        assert_eq!(
+            p5.filter().obj().size().1,
+            filters::body_h(LogRange::H1),
+            "缺省 = 最近 1 小时档 ⇒ 不展开自定义块（体高 48）"
+        );
+        assert_eq!(
+            p5.filter().title_text().as_deref(),
+            Some(filters::TEXT_RANGE_LABEL)
+        );
+        assert_eq!(p5.filter().seg().count(), 3, "三档分段控件（§5.1 #4）");
+        for (i, t) in [
+            filters::TEXT_RANGE_H1,
+            filters::TEXT_RANGE_H24,
+            filters::TEXT_RANGE_CUSTOM,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(p5.filter().seg().option(i).as_deref(), Some(*t));
+        }
+        assert!(
+            !p5.filter().custom_visible(),
+            "非「自定义」档**不得**展开 DateTimeStepper（UI §6.3 ③ / LG-04）"
+        );
+        assert_eq!(
+            p5.filter().name_text(0).as_deref(),
+            Some(filters::TEXT_START)
+        );
+        assert_eq!(p5.filter().name_text(1).as_deref(), Some(filters::TEXT_END));
+        assert_eq!(
+            p5.filter().stepper(0).map(|s| s.column_headers().len()),
+            Some(5),
+            "起始 = 5 列步进器（年/月/日/时/分）"
+        );
+
+        // ── ③ 操作类型 chip 组（`[全部] + ConsoleOp::ALL`；§6.5 线框）───────────────
+        assert_eq!(
+            p5.ops_label_text().as_deref(),
+            Some(p5_audit::TEXT_OPS_LABEL)
+        );
+        assert_eq!(
+            p5.ops_chip_count(),
+            ConsoleOp::ALL.len() + 1,
+            "「全部」固定首位 + 4 类操作（UI §6.5 线框：全部/配置保存/恢复默认值/联锁释放/M1 授权）"
+        );
+        // 缺省勾选 = 「全部」（= 不按操作类型筛）⇒ 该 chip 带选中前缀 `✓`（UI §5.2）。
+        assert_eq!(
+            p5.ops_chip_display(0).as_deref(),
+            Some(format!("{TEXT_CHECK_PREFIX}{}", p5_audit::TEXT_OPS_ALL).as_str())
+        );
+        for (i, op) in ConsoleOp::ALL.iter().enumerate() {
+            assert_eq!(
+                p5.ops_chip_display(i + 1).as_deref(),
+                Some(op.label()),
+                "选项文案 = 契约 label()（AU3）"
+            );
+        }
+        assert_eq!(p5.ops_selected(), vec![0], "缺省仅「全部」勾选");
+
+        // ── ④ 骨架态 = 无注入 ⇒ **不可用**（EDGE-17），**绝不**显「无审计记录」────────
+        // 「改什么会让本条变红」：把 `Core::view` 的 `!available` 分支删掉（或让它先看
+        // `shown == 0`）⇒ 下面「不可用」两条立刻变红（这正是 §8.3 禁止的语义互替）。
+        assert_eq!(p5.list_view(), p5_audit::ListView::Unavailable);
+        assert!(p5.unavailable_visible() && !p5.empty_visible());
+        assert_eq!(
+            p5.unavailable_title().as_deref(),
+            Some(p5_audit::TEXT_UNAVAILABLE),
+            "EDGE-17：「审计记录不可用」"
+        );
+        assert_eq!(p5.unavailable_kind(), UnavailableKind::Audit);
+        assert_ne!(
+            p5.empty_text().as_deref(),
+            Some(p5_audit::TEXT_UNAVAILABLE),
+            "空态与不可用态文案**不得相同**"
+        );
+        // 最近审计条：无记录 ⇒ 占位符（**不编造时间**）
+        let newest0 = p5.newest_text().expect("最近审计条");
+        assert!(newest0.contains(crate::ui::pages::PLACEHOLDER));
+        assert!(!newest0.contains("1970") && !newest0.contains("20"));
+
+        // ── ⑤ 正常页：1 成功 + 1 失败（带原因）+ 1 带 before/after ──────────────────
+        let e_ok = audit_entry(
+            "id-1",
+            1_789_047_727_000,
+            ConsoleOp::ConfigApply,
+            AuditResult::Ok,
+            "system.log_level",
+            Some(serde_json::json!("info")),
+            Some(serde_json::json!("debug")),
+            None,
+        );
+        let e_fail = audit_entry(
+            "id-2",
+            1_789_047_062_000,
+            ConsoleOp::InterlockRelease,
+            AuditResult::Failed,
+            "interlock.release",
+            Some(serde_json::json!(true)),
+            None,
+            Some("触发源未复位：estop"),
+        );
+        let e_port = audit_entry(
+            "id-3",
+            1_789_000_000_000,
+            ConsoleOp::ConfigApply,
+            AuditResult::Ok,
+            "gateway.port",
+            Some(serde_json::json!(2404)),
+            Some(serde_json::json!(2405)),
+            None,
+        );
+        p5.set_page(&audit_page(
+            vec![e_ok.clone(), e_fail.clone(), e_port.clone()],
+            true,
+            true,
+            Some(1_789_047_727_000),
+        ));
+        disp.refr_now_for_test();
+        assert_eq!(p5.list_view(), p5_audit::ListView::Rows);
+        assert_eq!(p5.visible_rows(), 3, "三条注入 ⇒ 三行在显");
+        assert_eq!(p5.rows_alive(), 3, "行对象**存活**（拥有型句柄的锚定回归锁）");
+        assert!(!p5.empty_visible() && !p5.unavailable_visible(), "有行时不显空/不可用态");
+        assert_eq!(
+            p5.newest_text().as_deref(),
+            Some("最近一条审计: 2026/09/10 13:42:07"),
+            "F19.8：最近一条审计时间戳"
+        );
+        // 行 1：时间 / 操作者 / 结果胶囊
+        assert_eq!(p5.row_time(0).as_deref(), Some("2026/09/10 13:42:07"));
+        assert_eq!(
+            p5.row_operator(0).as_deref(),
+            Some(p5_audit::TEXT_OPERATOR_LOCAL),
+            "操作者 = 本地控制台（§3.6 P5 列表行；机器名 local-console 不上屏）"
+        );
+        assert_eq!(p5.row_result(0).as_deref(), Some(p5_audit::TEXT_RESULT_OK));
+        assert_eq!(
+            p5.row_result_accent(0),
+            Some(Palette::OK),
+            "成功胶囊的色通道（§3.6：`● 成功` 绿）"
+        );
+        assert_eq!(p5.row_result(1).as_deref(), Some(p5_audit::TEXT_RESULT_FAIL));
+        assert_eq!(
+            p5.row_result_accent(1),
+            Some(Palette::DANGER),
+            "失败胶囊的色通道（`✕ 失败` 红）"
+        );
+        // 行 2：操作类型（契约 label）+ 前后值摘要
+        assert_eq!(
+            p5.row_op(0).as_deref(),
+            Some(ConsoleOp::ConfigApply.label()),
+            "操作类型用 ConsoleOp::label()"
+        );
+        assert_eq!(
+            p5.row_summary(2).as_deref(),
+            Some("端口: 2404 → 2405"),
+            "§6.5 行内容示例（已知键带中文标签；全角冒号改写见 AU1）"
+        );
+        assert_eq!(
+            p5.row_summary(0).as_deref(),
+            Some("日志级别: INFO → DEBUG"),
+            "字符串值经 display_safe（小写机器值 → 大写同族）"
+        );
+        assert_eq!(
+            p5.row_summary(1).as_deref(),
+            Some("开 → –"),
+            "bool ⇒ 开/关；`None` ⇒ 占位符（**绝不补 0**，AU12 / C1 前车之鉴）"
+        );
+        // 失败行有原因；成功行**无**（§6.5：`原因：…`（仅失败行））
+        assert!(p5.row_reason_visible(1), "失败行必须显原因（EDGE-12 同族：不得静默）");
+        assert!(p5.row_reason(1)
+            .expect("原因文案")
+            .starts_with(p5_audit::TEXT_REASON_PREFIX));
+        assert!(
+            !p5.row_reason_visible(0) && !p5.row_reason_visible(2),
+            "成功行**不得**显原因列"
+        );
+        // 行几何（§6.5：行高 60；左缘 3 px 竖条**每条都有**）
+        assert_eq!(
+            p5.row_size(0),
+            Some((Dimens::CONTENT_W, Dimens::ROW_AUDIT_H)),
+            "行 992×60"
+        );
+        assert_eq!(
+            p5.row_bar_size(0),
+            Some((3, Dimens::ROW_AUDIT_H)),
+            "左缘 3 px 竖条（每条都有）"
+        );
+        assert_eq!(p5.row_pos(1).map(|(_, y)| y - p5.row_pos(0).unwrap().1), Some(60));
+        // 底部状态行（§3.6 P5 列表行：`加载中` / `已加载全部`）
+        assert_eq!(
+            p5.footer_text().as_deref(),
+            Some(p5_audit::TEXT_FOOTER_LOADING),
+            "has_more = true ⇒ 加载中"
+        );
+        assert!(p5.footer_visible());
+        // 只读说明行（AU11）
+        assert_eq!(
+            p5.note_text().as_deref(),
+            Some("本地屏不支持审计导出 · 无文件与下载通道")
+        );
+        // 表头（§6.5 线框 Y300：5 列）
+        assert!(p5.head_obj().is_alive());
+        assert_eq!(p5.head_obj().size().1, 36);
+        // ── **只读约束**（UI §6.5「只读约束」行 / PL-02）：运行期读 LVGL 标志 ─────────
+        // 「改什么会让本条变红」：给行加任何可点子对象（按钮 / 可点容器 / 长按菜单入口）
+        // ⇒ `clickable_parts` > 0 ⇒ 本条立刻红。
+        assert_eq!(
+            p5.list_clickable_count(),
+            0,
+            "列表区**不得**存在任何可点对象（无编辑 / 删除 / 清空 / 导出入口）"
+        );
+        assert_eq!(p5_audit::P5AuditPage::WRITE_ENTRIES.len(), 0);
+
+        // ── ⑥ 意图回调：筛选变化（**变化才发、未变化不发**）────────────────────────
+        let fires = Rc::new(RefCell::new(Vec::new()));
+        {
+            let f = Rc::clone(&fires);
+            p5.set_on_query(move |q| f.borrow_mut().push(q));
+        }
+        // 模拟"用户点了第 2 段（最近 24 小时）"：键矩阵的 `btn_id_sel` 已指向它，再派发
+        // `VALUE_CHANGED`（= 键矩阵类处理器在按下时派发的正是它）。
+        p5.filter().seg().set_selected(1);
+        p5.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(fires.borrow().len(), 1, "筛选变化 ⇒ **恰发一次**意图");
+        {
+            let q = &fires.borrow()[0];
+            assert_eq!(q.range, LogRange::H24);
+            assert_eq!(q.page, 1, "筛选变化恒为第 1 页");
+            assert_eq!(q.from_ms, None);
+            assert_eq!(q.to_ms, None, "相对窗口由服务端按档位算（UI 不读时钟）");
+            assert!(q.ops.is_empty(), "仅「全部」⇒ 不按操作类型筛");
+        }
+        // **未变化时不发意图**：重复点同一段（键矩阵照发 `VALUE_CHANGED`）⇒ 不得重发。
+        // 「改什么会让本条变红」：去掉 `Core::fire_query` 里的去重判断 ⇒ 本条立刻红。
+        p5.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(fires.borrow().len(), 1, "同一筛选条件**不重复**发意图（去重）");
+        // 切到「自定义」⇒ 展开两个步进器 + 意图携带起止（**页面不读时钟**，故起止为
+        // 可表示全区间；见 filters.rs **FR1**）。
+        p5.filter().seg().set_selected(2);
+        p5.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        disp.refr_now_for_test();
+        assert_eq!(fires.borrow().len(), 2);
+        {
+            let q = &fires.borrow()[1];
+            assert_eq!(q.range, LogRange::Custom);
+            assert_eq!(q.from_ms, Some(0), "缺省起始 = 纪元原点（可表示下界）");
+            assert!(q.to_ms.is_some() && q.to_ms.unwrap() > q.from_ms.unwrap());
+            assert_eq!(q.page, 1);
+        }
+        assert!(p5.filter().custom_visible(), "「自定义」档必须展开步进器");
+        assert_eq!(
+            p5.filter().obj().size().1,
+            filters::body_h(LogRange::Custom),
+            "展开后体高 48 → 284（其下区块由 layout() 重摆）"
+        );
+        assert_eq!(p5.filter().stepper(0).map(|s| s.column_headers().len()), Some(5));
+        assert_eq!(p5.filter().stepper(1).map(|s| s.column_headers().len()), Some(5));
+        // 回到「最近 1 小时」（复原，避免影响后续断言）。
+        p5.filter().seg().set_selected(0);
+        p5.filter().seg().send_event(EventCode::VALUE_CHANGED);
+        assert_eq!(fires.borrow().len(), 3);
+        assert!(!p5.filter().custom_visible(), "切回其他档 ⇒ 收起自定义块");
+
+        // ── ⑦ 「加载更多」（**AU6**：滚动事件在本层不可得 ⇒ 显式触发入口）───────────
+        let more = Rc::new(RefCell::new(Vec::new()));
+        {
+            let m = Rc::clone(&more);
+            p5.set_on_load_more(move |q| m.borrow_mut().push(q));
+        }
+        p5.request_next_page();
+        assert_eq!(more.borrow().len(), 1);
+        assert_eq!(
+            more.borrow()[0].page,
+            2,
+            "page = 最近一次注入的 AuditPage.page + 1"
+        );
+        assert_eq!(more.borrow()[0].range, LogRange::H1);
+        // `has_more = false` ⇒ **不发**（最后一页不再空转）。
+        p5.set_page(&audit_page(vec![e_port.clone()], true, false, Some(1)));
+        p5.request_next_page();
+        assert_eq!(more.borrow().len(), 1, "无更多 ⇒ 不发意图");
+        assert_eq!(
+            p5.footer_text().as_deref(),
+            Some(p5_audit::TEXT_FOOTER_ALL),
+            "has_more = false ⇒ 已加载全部"
+        );
+
+        // ── ⑧ 空态（EDGE-08）：`entries` 空 + `available = true` ────────────────────
+        p5.set_page(&audit_page(vec![], true, false, None));
+        disp.refr_now_for_test();
+        assert_eq!(p5.list_view(), p5_audit::ListView::Empty);
+        assert!(p5.empty_visible() && !p5.unavailable_visible());
+        assert_eq!(
+            p5.empty_text().as_deref(),
+            Some(p5_audit::TEXT_EMPTY),
+            "EDGE-08：「当前筛选条件下无审计记录」"
+        );
+        assert_ne!(
+            p5.empty_text().as_deref(),
+            Some(p5_audit::TEXT_UNAVAILABLE),
+            "**不得**把空态显示成不可用（语义不同，§8.3 两行专行）"
+        );
+        assert!(!p5.footer_visible(), "无行时**不显**状态行");
+
+        // ── ⑨ 不可用（EDGE-17）：`available = false`（即使有 entries 也不显行）────────
+        p5.set_page(&audit_page(vec![e_ok.clone()], false, false, None));
+        disp.refr_now_for_test();
+        assert_eq!(p5.list_view(), p5_audit::ListView::Unavailable);
+        assert!(p5.unavailable_visible() && !p5.empty_visible());
+        assert_eq!(p5.visible_rows(), 0, "不可用时**不得**显行（entries 不可信）");
+        assert_ne!(
+            p5.unavailable_title().as_deref(),
+            Some(p5_audit::TEXT_EMPTY),
+            "**不得**把不可用显示成「无审计记录」"
+        );
+        // 显式入口（整条控制通道读失败时 B3 用它）：原因经 `free_text_safe`（含全角标点折叠）。
+        p5.set_unavailable("审计目录不可读：permission denied");
+        assert!(p5.unavailable_visible());
+        assert_eq!(
+            p5.unavailable_title().as_deref(),
+            Some(p5_audit::TEXT_UNAVAILABLE)
+        );
+
+        // ── ⑩ 超限（EDGE-15）：**AU5** —— 契约无该字段 ⇒ 显式注入入口 ────────────────
+        assert!(!p5.warn_visible(), "缺省不显（`AuditPage` 推不出该标志 —— 见 AU5）");
+        p5.set_range_too_large(true);
+        disp.refr_now_for_test();
+        assert!(p5.warn_visible(), "注入 true ⇒ 列表区上方出现 WarnBanner");
+        assert_eq!(
+            p5.warn_text().as_deref(),
+            Some(p5_audit::TEXT_RANGE_TOO_LARGE)
+        );
+        p5.set_range_too_large(false);
+        assert!(!p5.warn_visible());
+
+        // ── ⑪ 选项以注入为准（重建 chip 组 + 刷新已上屏的操作类型列）────────────────
+        assert_eq!(p5.ops_options().len(), ConsoleOp::ALL.len());
+        p5.set_page(&audit_page(vec![e_ok.clone()], true, false, Some(1)));
+        let injected = vec![OpOption {
+            op: ConsoleOp::ConfigApply,
+            label: "debug".into(),
+        }];
+        p5.set_ops(&injected);
+        assert_eq!(p5.ops_options().len(), 1, "选项集合以注入为准");
+        assert_eq!(p5.ops_chip_count(), 2, "「全部」+ 1 项");
+        assert_eq!(p5.ops_chip_display(1).as_deref(), Some("DEBUG"));
+        assert_eq!(
+            p5.row_op(0).as_deref(),
+            Some("DEBUG"),
+            "已上屏行的操作类型列随注入标签刷新（同一出口）"
+        );
+        // 复原（避免影响后续单元）。
+        p5.set_ops(&p5_audit::canonical_ops());
+        assert_eq!(p5.ops_chip_count(), ConsoleOp::ALL.len() + 1);
+        assert_eq!(
+            p5.row_op(0).as_deref(),
+            Some(ConsoleOp::ConfigApply.label())
+        );
+
+        // 渲染后确有像素（装配 → 布局 → 像素全链）。
+        let painted5 = sink.borrow().iter().filter(|b| **b != 0).count();
+        assert!(painted5 > 10_000, "P5 渲染后 sink 中应有成片非背景像素（实际 {painted5}）");
+
+        drop(p5);
+    }
+
     drop(host);
     drop(screen);
     drop(disp);
@@ -5188,6 +5665,336 @@ fn p4_static_constraints() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁽⁵⁾‴ **P5 审计页 + 共享筛选件**的静态约束（`ui/pages/p5_audit.rs` / `ui/pages/filters.rs`，
+//         B2c-1）
+//
+// 既有的 [`pages_static_constraints`]（B2a 三文件）/ [`p2_static_constraints`]（P2）/
+// [`p4_static_constraints`]（P4）的扫描面都写死（**本批不改既有用例的扫描面**）⇒ 按前三条的
+// 先例**追加**独立用例。两个新文件的**裸尺寸**与**码表**两条网另由 [`UI_PROD_SOURCES`] /
+// [`CONST_I32_SCAN_SOURCES`] 的扩展覆盖。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// P5 审计页 + 共享筛选件的静态约束 + **扫描面自证** + **`audit_key(` 计数自证** +
+/// **只读约束（写入口结构性不存在）**。
+///
+/// **零文本输入红线**（UI §2.4 / §5.3）：删掉 / 绕过任一控件而改用 `lv_textarea` /
+/// `lv_spinbox` / `lv_keyboard` ⇒ 本条变红（共用清单 [`FORBIDDEN_UI_SYMBOLS`]）。
+///
+/// **只读红线**（UI §6.5「只读约束」行 / PL-02）：本页**不构造**任何按钮 / 弹层 / Toast，
+/// 也不出现"删除 / 清空 / 导出"类的**代码标识符** ⇒ 现场无法在屏上找到写入口。
+/// ⚠️ **本条的边界（如实）**：它扫的是**代码文本**（剥掉注释与字面量），拦的是"有人加了
+/// 按钮 / 删改 API"；**上屏文案**里的写操作词由 `p5_audit.rs::tests::write_entries_is_empty`
+/// 管，**运行期**的可点对象数由 `pages_chain` 的 `list_clickable_count() == 0` 管。
+/// 三条合起来才构成本页的只读网（任一条单独都不充分）。
+#[test]
+fn p5_static_constraints() {
+    // ⓪ **扫描面自证（探针 P1）**：三张清单必须真的含两个新文件 —— 把文件从任一张网的清单里
+    //    删掉，那张网会**静默失去覆盖**（"网看着还在、实则漏了一片"）。本条让它响亮失败。
+    for (list, label) in [
+        (UI_PROD_SOURCES.as_slice(), "UI_PROD_SOURCES"),
+        (CONST_I32_SCAN_SOURCES.as_slice(), "CONST_I32_SCAN_SOURCES"),
+    ] {
+        for f in ["ui/pages/p5_audit.rs", "ui/pages/filters.rs"] {
+            assert!(
+                list.iter().any(|(n, _)| *n == f),
+                "`{label}` 未含 `{f}` —— 该网的**扫描面**漏了新文件\
+                 （先修清单：新文件必须纳入，否则静态网对新代码是空的）"
+            );
+        }
+    }
+    // 码表覆盖率网还必须挂上两个新文件的 `ALL_TEXTS`（清册 ↔ 源码字面量一致性）。
+    for t in crate::ui::pages::filters::ALL_TEXTS
+        .iter()
+        .chain(crate::ui::pages::p5_audit::ALL_TEXTS.iter())
+    {
+        assert!(!t.is_empty(), "清册条目不得为空串");
+    }
+
+    // ⑤ **`audit_key(` 的计数自证**：`NON_DISPLAY_SINKS` 里的 `audit_key(` 是**后缀匹配** ——
+    //    紧跟它的字面量会被**豁免**出"上屏候选"走查。该豁免在 P5 **正当**（审计 `target` 的
+    //    **机器键**确不上屏：`gateway.port` 里的小写 ASCII 在生成字体里没有字形，上屏的是中文
+    //    标签），但它同时是一条**可能被误用的后门**：谁把**上屏串**写成 `audit_key("…")`，那条串
+    //    就**静默逃过**码表网。⇒ 把"恰好 4 处"钉死（= `TARGET_LABELS` 的四个键）。
+    {
+        let (name, src) = ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs"));
+        let prod = truncate_before_test_module(src, name);
+        assert_eq!(
+            prod.matches("audit_key(\"").count(),
+            4,
+            "{name}：`audit_key(\"…\")` 必须**恰为 4 处**（`TARGET_LABELS` 的四个机器键）。\
+             计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是机器键**\
+             （键不上屏才可豁免；**上屏文案**放进 `audit_key(..)` 会从码表网里消失）"
+        );
+        assert_eq!(
+            crate::ui::pages::p5_audit::TARGET_LABELS.len(),
+            4,
+            "映射表条目数必须与上面的计数一致（两处一起改才自洽）"
+        );
+    }
+
+    let sources: [(&str, &str); 2] = [
+        ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
+        ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
+    ];
+    for (name, src) in sources {
+        let code = strip_comments_and_literals(src, name);
+        let lower = code.to_ascii_lowercase();
+        // ① 零文本输入（F12 红线）/ 裸色值 / `lv_refr_now` / 直连绑定（共用清单）。
+        for needle in FORBIDDEN_UI_SYMBOLS {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+            );
+        }
+        // ② 色值只准出现在 `theme.rs`（命名常量）。
+        for needle in ["Color::hex(", "Color::rgb("] {
+            assert!(
+                !lower.contains(&needle.to_ascii_lowercase()),
+                "{name} 不得出现 `{needle}`（必须经 theme 的命名常量）"
+            );
+        }
+        // ③ `unsafe` 只准出现在 `src/lvgl/**`。
+        assert!(
+            !code.contains("unsafe"),
+            "{name} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+        );
+        // ④ 控件策略：一律经 `crate::lvgl` 薄层与既有组合控件，**不得**直造原生 widget。
+        for needle in ["lv_button", "lv_list", "lv_msgbox", "lv_obj_delete"] {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得直造原生控件 `{needle}`（§5.3：控件策略 = 内置控件 + 主题，\
+                 且 `ui/**` 只经薄层安全层）"
+            );
+        }
+    }
+
+    // ⑤′ **只读约束（P5 专属）**：页面**不得**构造任何写操作入口。
+    {
+        let (name, src) = ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs"));
+        let code = strip_comments_and_literals(src, name);
+        for needle in [
+            "TextButton",      // 按钮（唯一可点控件的构造点在筛选区的组合控件内部）
+            "ConfirmDialog",   // 确认弹层（写操作的前置）
+            "Toast",           // 操作结果提示（写操作的反馈）
+            "ButtonMatrix",    // 键矩阵（分段控件内部件 —— 本页不得直造）
+            "Obj::delete",     // 删对象（唯一合法的删除是 `Drop` 级联）
+        ] {
+            assert!(
+                !code.contains(needle),
+                "{name} 不得出现 `{needle}` —— 本页是**只读页**（UI §6.5「只读约束」行 / PL-02：\
+                 无编辑 / 删除 / 清空 / 导出入口）"
+            );
+        }
+        // 自证扫描面真的覆盖到了 P5 审计页（`include_str!` 指错文件 / 文件被清空时，
+        // 上面几条会**构造性全绿** —— "看着在把关、实则没把住"的典型形态）。
+        for must in [
+            "P5AuditPage",
+            "set_page",
+            "set_ops",
+            "set_unavailable",
+            "set_range_too_large",
+            "set_on_query",
+            "set_on_load_more",
+            "AuditQuery",
+            "MultiSelectChips",
+            "EmptyState",
+            "UnavailableState",
+            "WarnBanner",
+            "TARGET_LABELS",
+            "free_text_safe",
+            "list_clickable_count",
+        ] {
+            assert!(
+                code.contains(must),
+                "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
+            );
+        }
+    }
+    // ⑤″ **共享件**（`filters.rs`）的扫描面自证：P3 / P5 共用的接口必须**在位**
+    //（删掉 `build` / `body_h` 会让 P3 复用无从下手；删掉 `set_on_change` 会让两页都收不到意图）。
+    {
+        let (name, src) = ("ui/pages/filters.rs", include_str!("pages/filters.rs"));
+        let code = strip_comments_and_literals(src, name);
+        for must in [
+            "TimeRangeFilter",
+            "TimeRangeChange",
+            "pub fn build",
+            "pub const fn body_h",
+            "set_on_change",
+            "datetime_to_epoch_ms",
+            "RANGE_ORDER",
+            "LogRange",
+        ] {
+            assert!(code.contains(must), "{name} 未包含 `{must}`（共享件接口缺失）");
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥‴′ **P5 的运行时文本**：值对 / 原因 / 操作者 / 最近审计条 —— 逐字查 cmap
+//
+// 与 [`runtime_formatters_emit_only_cmap_glyphs`] 同口径，但对象是 **P5 新增的运行时出口**
+// （它们的主要输入来自契约 / 运行时，**不在**源码字面量走查面内 ⇒ 只有本用例能管住它们）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **P5 运行时文本的字符集检查**（C1 残留族：契约字符串直上屏）。
+///
+/// **改什么会让本条变红**：
+/// - 把 `p5_audit::free_text_safe` 改回纯 `display_safe`（全角冒号不再折叠）；
+/// - 把 `value_text` 的 `None` 分支改成 `"0"`（`0` 在 cmap 内 ⇒ **不会**变红：那条由
+///   `none_is_placeholder_never_zero` 管，本条只管字形）；
+/// - 把 `TARGET_LABELS` 的某个中文标签改成含缺字的词（如 `水浸`）。
+#[test]
+fn p5_runtime_texts_emit_only_cmap_glyphs() {
+    use crate::ui::pages::p5_audit::{
+        free_text_safe, newest_text, operator_text, reason_text, result_text, side_text,
+        summary_text, value_text, AuditQuery, SUMMARY_MAX_CHARS,
+    };
+    use mupc_display_proto::{AuditResult, ConsoleOp, CONSOLE_OPERATOR};
+
+    let Some(cmap) = load_font_cmap() else {
+        return;
+    };
+
+    let mut cases: Vec<(String, String)> = Vec::new();
+    // 值文本：覆盖每种 JSON 形态（含负值 / 复合 / 超长）。
+    for v in [
+        serde_json::json!(null),
+        serde_json::json!(true),
+        serde_json::json!(false),
+        serde_json::json!(2404),
+        serde_json::json!(-1.5),
+        serde_json::json!("debug"),
+        serde_json::json!("127.0.0.1"),
+        serde_json::json!([1, 2, 3]),
+        serde_json::json!({"a": 1, "b": 2}),
+    ] {
+        cases.push((format!("value_text({v})"), value_text(&v)));
+    }
+    cases.push(("side_text(None)".into(), side_text(None)));
+    // 值对：已知键 / 未知键 / 两侧缺 / 超长。
+    for (b, a, t) in [
+        (
+            Some(serde_json::json!(2404)),
+            Some(serde_json::json!(2405)),
+            "gateway.port",
+        ),
+        (None, None, "gateway.port"),
+        (
+            Some(serde_json::json!(true)),
+            None,
+            "interlock.release",
+        ),
+        (
+            Some(serde_json::json!("a".repeat(80))),
+            Some(serde_json::json!([1])),
+            "system.log_level",
+        ),
+    ] {
+        cases.push((
+            format!("summary_text({b:?}, {a:?}, {t})"),
+            summary_text(b.as_ref(), a.as_ref(), t),
+        ));
+    }
+    // 原因 / 操作者 / 最近审计条 / 结果胶囊。
+    for r in [None, Some("触发源未复位：estop、door"), Some("  ")] {
+        cases.push((
+            format!("reason_text({r:?})"),
+            reason_text(AuditResult::Failed, r).unwrap_or_default(),
+        ));
+    }
+    cases.push((
+        "reason_text(ok, Some(..))".into(),
+        reason_text(AuditResult::Ok, Some("不该出现")).unwrap_or_default(),
+    ));
+    for o in [CONSOLE_OPERATOR, "hmi", "本地控制台"] {
+        cases.push((format!("operator_text({o})"), operator_text(o)));
+    }
+    for ms in [None, Some(0), Some(1_789_047_727_999)] {
+        cases.push((format!("newest_text({ms:?})"), newest_text(ms)));
+    }
+    for r in [AuditResult::Ok, AuditResult::Failed] {
+        cases.push((format!("result_text({r:?})"), result_text(r).to_string()));
+    }
+    // 全角标点折叠（**AU15**）：六个源字符逐一进输入。
+    cases.push((
+        "free_text_safe(全角标点)".into(),
+        free_text_safe("a，b；c（d）e：f、g"),
+    ));
+    // 截断上限处的产物（最长可能文本）。
+    cases.push((
+        format!("summary_text(超长, SUMMARY_MAX_CHARS={SUMMARY_MAX_CHARS})"),
+        summary_text(
+            Some(&serde_json::json!("x".repeat(50))),
+            Some(&serde_json::json!("y".repeat(50))),
+            "system.log_level",
+        ),
+    ));
+    // 查询意图本身不含文本，但其 `Default` 的档位文案会经 filters 上屏 ⇒ 一并查。
+    let q = AuditQuery::default();
+    cases.push((
+        "query_default.range".into(),
+        crate::ui::pages::filters::range_text(q.range).to_string(),
+    ));
+    cases.push((
+        "ConsoleOp::label()".into(),
+        ConsoleOp::ALL
+            .iter()
+            .map(|o| o.label())
+            .collect::<Vec<_>>()
+            .join(" "),
+    ));
+
+    for (what, text) in cases {
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            assert!(
+                cmap.contains(&ch),
+                "**运行时**出口 `{what}` 产出的字符 U+{:04X} `{ch}` **不在生成字体的 cmap 内**\
+                 （真机上是豆腐块）—— 产出文本 = `{text}`。\
+                 自由文本必须经 `p5_audit::free_text_safe`（`display_safe` + 全角标点折叠）；\
+                 数值必须经 `ui/pages` 的唯一出口；新增上屏文案前先查 `fonts/lv_font_cmap.txt`。",
+                ch as u32
+            );
+        }
+    }
+}
+
+/// **值对截断上限的几何依据**：`SUMMARY_MAX_CHARS` 个汉字与 §6.5 的示例都必须放得进
+/// [`crate::ui::pages::p5_audit::SUMMARY_MAX_CHARS`] 对应的列宽（用**生产字体的 `adv_w`**
+/// 实测，口径同 [`measured_text_px`]）。
+///
+/// **改什么会让本条变红**：把 `SUMMARY_MAX_CHARS` 调大（超过列宽）⇒ 上屏即被 `LongMode::DOTS`
+/// 截成省略号，"截断上限"名存实亡；把 `ROW_SUMMARY_W` 调小到装不下契约示例 ⇒ 第二条红。
+#[test]
+fn p5_summary_limit_fits_its_column() {
+    use crate::ui::pages::p5_audit::{ROW_SUMMARY_W, SUMMARY_MAX_CHARS};
+    // 真字体产物缺失（干净 clone / CI 无 `lv_font_noto_sc_*.c`）⇒ 跳过（与 `load_font_cmap` 同口径）。
+    let Some(cjk_w) = measured_text_px(&"汉".repeat(SUMMARY_MAX_CHARS), 24) else {
+        return;
+    };
+    assert!(
+        cjk_w <= ROW_SUMMARY_W,
+        "截断上限 {SUMMARY_MAX_CHARS} 个汉字实测 {cjk_w} px > 值对列宽 {ROW_SUMMARY_W} px \
+         —— 上屏会被 DOTS 截断，上限形同虚设"
+    );
+    // §6.5 的行内容示例必须**整条**放得下（它是本页唯一的文案范本，且不得被截断）。
+    let example = "端口: 2404 → 2405";
+    let ex_w = measured_text_px(example, 24).expect("示例宽度");
+    assert!(
+        ex_w <= ROW_SUMMARY_W,
+        "§6.5 示例 `{example}` 实测 {ex_w} px > 值对列宽 {ROW_SUMMARY_W} px"
+    );
+    assert!(
+        example.chars().count() <= SUMMARY_MAX_CHARS,
+        "示例长度 {} 字必须 ≤ 截断上限 {SUMMARY_MAX_CHARS}（否则示例本身会被截断）",
+        example.chars().count()
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ⑥⁗ **常量定义式**静态约束（I2：`const` 定义式里的裸数字缺口）
 //
 // ⑥″（[`ui_layout_setters_use_theme_constants`]）只扫**调用实参**（`set_size(..)` /
@@ -5201,14 +6008,16 @@ fn p4_static_constraints() {
 /// 本来就该在那里以字面量出现；本网要抓的是"**派生**常量直接抄数字"）。
 ///
 /// 与 ⑥″ 各自列清单而不复用 [`UI_PROD_SOURCES`]：后者含 `theme.rs`（必须豁免）。
-const CONST_I32_SCAN_SOURCES: [(&str, &str); 8] = [
+const CONST_I32_SCAN_SOURCES: [(&str, &str); 10] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
+    ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
+    ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
 
