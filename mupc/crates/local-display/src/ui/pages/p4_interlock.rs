@@ -28,8 +28,8 @@
 //! |---|----------------------|------|--------------|
 //! | IL1 | **全角标点一律改写**：`，`(U+FF0C) / `：`(U+FF1A) / `、`(U+3001) / `（`(U+FF08) / `）`(U+FF09) **实测均不在生成字体 cmap 内** ⇒ 一律取 cmap 内的 `·`(U+00B7) 或 `/`(U+002F)。受影响串逐条：`处于自锁态，须先释放联锁`→`处于自锁态 · 须先释放联锁`；`触发源未复位：急停、门禁`→`触发源未复位 · 急停/门禁`；`将清除联锁自锁状态，装置可恢复运行`→`将清除联锁自锁状态 · 装置可恢复运行`；`将下发 M1 停机复位，装置可重新启动`→`将下发 M1 停机复位 · 装置可重新启动`；`联锁状态已变化，请刷新后重试`→`联锁状态已变化 · 请刷新后重试`；`审计不可用，操作未执行`→沿用 P2 的 `审计不可用 · 操作未执行`；`触发源（N）`→`触发源 · N`（与 P2 **PD1** 的 `本机监听地址 · IEC 104` 同一处置）；`保持时间不足，还需 N 秒`→`保持时间不足 · 还需 N 秒`；`上一操作正在处理中，请稍候`→`操作进行中`（`理`/`稍`/`候` 三字**均缺** ⇒ 取最短的**在 cmap 内**等价表述）；`内部错误：X`→`内部故障 · X`（`错`/`误` 二字**均缺**，`故`/`障` 在内） | 字库资产（`gen_fonts.sh` + `extract_charset.py`）本轮按 PM 裁定**不动**（见 `pages/mod.rs` 的 **D4** 同一口径） | **B2c 之后**的「字体码表 + 文案统一收口批」：扩 §3.6 字符集后**逐字改回契约原文** |
 //! | IL2 | **`✗`(U+2717) / `✕`(U+2715) 实测不在 cmap 内** ⇒ 「停机失败」的图标通道取 `×`(U+00D7，**§3.6 声明的符号集内**、几何等价)；Toast 失败图标沿用 P2 的 `!`（**转出**，不另抄字面量） | 同 IL1（字库缺口）；`✓`(U+2713) 在 cmap 内 ⇒ 「正常」用 `✓`，与 `×` 成一组 | 同 IL1 |
-//! | IL3 | **栅格偏差（root cause = `theme` 无 2 / 6 px 档，与 `pages/mod.rs` **D3**、`p2_config.rs` **PD5** 同族）**：联锁总态卡外缘高 **174**（UI 写 180，−6）；触发源卡高 **202**（UI 写 200，+2）；状态三卡高 **106**（UI 写 108，−2）；三卡行页内 y **414**（UI 绝对 492 − 72 = 420，−6，由前两项累积）；操作条内按钮 y **4**（绝对 628，线框 630，−2，与 P2 同款）；「操作将记入审计」y **24**（绝对 648，线框 652，−4）；页内容总高 **514**（UI 写 528） | `theme` 无 2 / 6 px 档，**不为凑像素引入裸规格值**（`ui/tests.rs` 的两张静态网也明令禁止） | 与 D3 / PD5 / PD19 / IL20 同批：`theme` 缺口上收时一并处理 |
-//! | IL4 | **在滚动视口与固定操作条之间增设 24 px「就地原因带」**（页内 y528–552）⇒ 滚动视口高 **528**（UI 线框写 552）、固定操作条仍 **72** 且其上下缘与线框逐像素一致（页内 552–624 = 绝对 624–696） | UI §6.4「操作与拒绝原因」表与 §8.3 联锁专行**均要求**「按钮正上方 24 px 就地显示原因」（EDGE-12 / IL-03 硬要求），而线框 `(0,624,1024,696)` 的 72 px 操作条里按钮已占 64 px（y630–694）**没有**这 24 px 的位置 ⇒ 两个要求在**同一矩形内不可同时满足**。取后者（原因行是安全相关硬要求，线框是常态示例），并把线框的「内容 528 / 视口 552」读作「内容 528 + 原因带 24 = 视口 552」的另一种切分 | 无（**有意**）；若 PM 要求逐像素回线框，需先在 UI §6.4 删去「按钮正上方 24 px 就地原因」或改线框矩形 |
+//! | IL3 | **栅格偏差（root cause = `theme` 缺 2 px 档，与 `pages/mod.rs` **D3**、`p2_config.rs` **PD5** 同族）**：联锁总态卡外缘高 **174**（UI 写 180，−6）；触发源卡高 **202**（UI 写 200，+2）；状态三卡高 **106**（UI 写 108，−2）；三卡行页内 y **414**（UI 绝对 492 − 72 = 420，−6，由前两项累积）；操作条内按钮 y **4**（绝对 628，线框 630，−2，与 P2 同款）；「操作将记入审计」y **24**（绝对 648，线框 652，−4）；页内容总高 **514**（UI 写 528） | `theme` **缺 2 px 档**（6 px 档**不缺** —— `Dimens::INTERLOCK_BAR = 6` 存在，本页 `STATE_BAR_LEFT_W` 正在用它），**不为凑像素引入裸规格值**（`ui/tests.rs` 的两张静态网也明令禁止） | 与 D3 / PD5 / PD19 / IL20 同批：`theme` 缺口上收时一并处理 |
+//! | IL4 | **在滚动视口与固定操作条之间增设 24 px「就地原因带」**，落在**视口末 24 px**（页内 y528–552 = 绝对 y600–624）；滚动视口高 **528**（UI 线框写 552）、固定操作条仍 **72** 且其上下缘与线框逐像素一致（页内 552–624 = 绝对 624–696） | UI §6.4「操作与拒绝原因」表与 §8.3 联锁专行**均要求**「按钮正上方 24 px 就地显示原因」（EDGE-12 / IL-03 硬要求）。**二者可行**：把该行放在**视口最后 24 px** 即可 —— 线框 `(0,624,1024,696)` 的 72 px 操作条里按钮占 64 px（y630–694），本就**不需要**为原因行腾位置（原因行在按钮**之上**、操作条**之外**；实现正是如此，故操作条与线框逐像素一致）。线框只是**未画**这一行（常态示例），并非与之冲突；本页把线框的「内容 528 / 视口 552」读作「**视口 528 + 原因带 24 = 552**」的另一种切分 | 无（**有意**）；若 PM 要求逐像素回线框，只需在 UI §6.4 / 线框补画该 24 px 行（**不必**删去「按钮正上方 24 px 就地原因」） |
 //! | IL5 | 就地原因带为**双槽**：左槽 x0 / 宽 352（放**全局**与**人工释放联锁**相关原因，含「联锁状态不可用」这一**覆盖两按钮**的全局声明）、右槽 x368 / 宽 320（**恰在 `M1 授权重启` 按钮正上方**，放 M1 专属阻塞原因）。两槽**可同时出现**且不重叠 | §8.3 对「联锁状态不可用」只给**一句**全局表述（未要求逐按钮重复）⇒ 落左槽；§6.4 对「M1 处于 latch 态」明写「**按钮正上方**」⇒ 独占右槽。左槽宽 = 右槽起点 − 同组缝（352），本页全部左槽文案实测 ≤ 348 px ⇒ 不越界 | 无（**有意**） |
 //! | IL6 | **触发源名映射**：`estop`→`急停`、`door`→`门禁`（UI §3.6 P4「触发源」行）；**其余机器名（含 `flood` / `fire`）取 [`display_safe`] 归一化后的机器名**（小写→大写同族、cmap 外 ASCII→`?`），**不伪造中文名**。残余（如实）：非 ASCII 名（后端直接给中文）**原样透传** ⇒ 含缺字时真机仍是豆腐块，**防线在后端字段命名 / 字库**（与 `p2_config.rs` **PD13** 同口径） | `flood` / `fire` 的候选中文（水浸 / 消防）里 **`水`(U+6C34) / `浸`(U+6D78) / `防`(U+9632) / `火`(U+706B) 逐字实测均不在 cmap 内**，且 §3.6 用字表本身**只列** 急停 / 门禁（不臆造表外中文名）。**不静默**：映射表与未知名的处置**逐条可测**（见本文件单测），且屏上保留可辨认的原文 | 同 IL1（扩字表后可补 `flood` / `fire` 的中文名）；机器名全集真源 = `mupc-core-bin/src/interlock.rs::source_token()` |
 //! | IL7 | 状态三灯卡在 `available = false` 时**不**用 [`UnavailableState`] 组件，改为**卡内同源灰度**：图标 = [`UnavailableKind::Interlock`]`.icon()`（`?`）、文案 = 同 kind 的 `.title()`（「联锁状态不可用」）、色 = 同 kind 的 `.accent()`（`#8C98AC`） | [`UnavailableState`] 的固定尺寸是 **992 宽 × 164 高**（`components.rs` 内按 `Dimens::CONTENT_W` 排布），放不进 **236×108** 的灯卡，而 `components.rs` **本批禁改**。取「**同源取值**」（图标 / 文案 / 颜色三通道**全部读自** `UnavailableKind::Interlock`，非另抄）⇒ 与 `UnavailableState` 语义一致、无第二份真源（单测断言两处取值相等） | `components.rs` 收口批：给 `UnavailableState` 增「紧凑 / 自适应宽」形态后改用组件 |
@@ -37,7 +37,7 @@
 //! | IL9 | 触发源**行池 = 4**（`SOURCE_ROW_POOL`）；帧内源数 > 4（契约 `sources: Vec<_>` **未设上限**）⇒ **卡头数量仍显真实 N**、行只铺 4 条 | 后端 distinct token 全集恰为 4：`estop` / `flood` / `fire` / `door`（`mupc-core-bin/src/interlock.rs::source_token()`）；行池固定 ⇒ `new()` 一次性建齐、`render()` **不可失败**（同 P1 的 `alarm_rows` 池口径）且 1 Hz **零对象 churn**。「数量 ≠ 行数」这一差异在屏上**可见**（不静默） | 无（**有意**）；若后端 token 集合扩张，须同步扩 `SOURCE_ROW_POOL` 并在 §3.6 补中文名 |
 //! | IL10 | 弹层明细取 [`ConfirmDialog`] 的**三段式** `字段 旧值 → 新值`（组件本批禁改，**无** `字段：值` 形态）⇒ §6.4 要求的三项信息按「**当前 → 操作后目标态**」表达；本次操作**不改动**的项取 `新值 = 旧值`（**如实**表达「不变」，不编造目标值） | `ConfirmDialog` 的明细行**恒**渲染四槽（字段 / 旧值 / 箭头 / 新值，颜色亦固定），没有「单值行」口。三段式是本批唯一可行形态；语义仍**具体**（非泛化措辞，满足 §7.3「影响范围 / 明细必须具体」） | `components.rs` 收口批：明细行支持「单值」形态后逐字回契约 |
 //! | IL11 | **弹层内**就地红字（UI §6.4 拒绝原因表的「弹层内就地显示」）**不可达** ⇒ 取 `p2_config.rs` **PD7 同款口径**：原因落**页内就地原因带**（红字 24 px `#FF6B6B`），**弹层不自动关闭**（原因常驻可读，用户可「取消」关闭后重试） | 同上：`ConfirmDialog` 的「影响范围」与明细在**构造期固定**，**没有**可变错误文案口；且关闭弹层不得在 LVGL 事件回调内做 | `components.rs` 补 `set_error()` 后改回弹层内 |
-//! | IL12 | 控制通道的 `RejectedPrecondition`（契约 `ControlCode`）**无法区分**「提交时状态已变化（EDGE-19）」与「触发源未复位 / 保持时间不足 / latch」（`ControlResponse` 只带 `code` + 自由文本 `message`，**无**结构化 `InterlockReject` 字段）⇒ 一律（1）就地上屏 `display_safe(message)`（**不吞**，EDGE-12）、（2）置「请求一次状态刷新」标志（[`P4InterlockPage::take_refresh_request`] —— 对两类情形都正确：被拒即说明屏上观测可能过期）。EDGE-19 的**固定**文案由 [`P4InterlockPage::show_conflict`] 承担（B3 在**结构化**路径 —— 直连 `InterlockApi` 或自行解析出 `InterlockReject` 时调用） | 契约冻结（`display-proto` 不得改）；不做「按消息串猜语义」的脆弱解析（猜错即**谎报原因**，与 §2.6「绝不造假」冲突） | 若 `display-proto` 在控制回执中增 `reject: Option<InterlockReject>`，则 [`P4InterlockPage::show_result`] 直接分派（单一分派点） |
+//! | IL12 | **控制通道线上路径**：失败时的**具体原因**由 `ControlResponse.message` 承担 —— 契约 `display-proto/src/control.rs` 该字段文档原文：「**人读消息；UI 直接展示（失败时即 EDGE-10 / EDGE-12 要求的「具体原因」）**」⇒ [`P4InterlockPage::show_result`] 就地上屏 `display_safe(message.trim())`（**不吞**，EDGE-12）；空串时退到 §3.6 全局行的「操作失败」（**不造假原因**）。`RejectedPrecondition` **另**置「请求一次状态刷新」标志（[`P4InterlockPage::take_refresh_request`]）—— 被拒即说明屏上观测可能过期，该标志对**各类**前置条件**都正确**，且与文案**解耦**（改了文案也不影响刷新语义）。EDGE-19 的**固定**文案「联锁状态已变化 · 请刷新后重试」由 [`P4InterlockPage::show_conflict`] 承担，它是**显式入口**：需 B3 在**能判定**「提交时状态已变化」时调用。**当前契约无法自动达成该判定** —— `ControlCode::RejectedPrecondition` 把「状态已变化」与「触发源未复位 / 保持时间不足 / latch / StopPending」**糊在同一个码**里，回执**无**结构化 `InterlockReject` 字段；且 `InterlockReject` 的 **7 个变体里没有「冲突」变体** ⇒ 「B3 自行解析出 `InterlockReject`」对该场景**不可实现**（**契约级缺口**，属 F/G/H/I/J/K 与契约所有者的责任）。⇒ 本页**不假设**该固定文案会被自动触发：它在屏上出现**当且仅当**外部显式调用了 `show_conflict()` | 契约冻结（`display-proto` 不得改）；不做「按消息串猜语义」的脆弱解析（猜错即**谎报原因**，与 §2.6「绝不造假」冲突） | 若 `display-proto` 在控制回执中增 `reject: Option<InterlockReject>`（或为 EDGE-19 单列一个 `ControlCode` 变体），则 [`P4InterlockPage::show_result`] 直接分派（单一分派点），固定文案即可自动可达 |
 //! | IL13 | 回执 → 展示态的映射（**单一映射点** `Core::apply_ack`）：`latched := ack.latched`、`stop_failed := !ack.stopped`（`InterlockOpAck.stopped` 的契约语义是「操作后停机**确认**态」）；`available` / `enabled` / `sources` / 两灯**不变**（回执不带，等下一帧，最坏 ≤1.35 s） | §6.4「成功」行要求「用回执 `applied` **立即**刷新，不等下一帧」（F17.6 / IL-02）⇒ 回执能覆盖的两项立即刷；其余字段回执确无载体（契约冻结）⇒ 不臆造、由下一帧补。**契约未显式声明** `stopped` 与 `stop_failed` 互补 ⇒ 若后端语义有出入，只改 `Core::apply_ack` 一处 | 契约若明示互补关系，此处改为显式字段 |
 //! | IL14 | **保持时间倒计时**（UI §6.4「保持时间不足」行：按钮旁显剩余秒数）**已实现**，时钟由 [`P4InterlockPage::tick`] 注入：收到 `HoldNotElapsed { remaining_secs }` 时记剩余秒数并置「待取基准」标志，**首个 `tick`** 取基准 `Instant`，其后每拍按已过秒数递减（`saturating_sub`，不 panic）；**页面不读 `Instant::now()`**（`Toast::new` 的既有行为除外，同 `p2_config.rs` **PD20**）。倒计时到 `0` 只显示「还需 0 秒」，**不**自作主张放行（是否可操作仍由后端前置判定） | 帧内只有 `release_hold_secs`（**须保持**的时长），**没有**「已保持多久 / 何时复位」⇒ 无法从帧推出绝对剩余时间；唯一可得的绝对量是后端拒绝里的 `remaining_secs` ⇒ 以「拒绝后的首拍」为基准推进是**唯一**不臆造的做法 | 若帧增「源复位时刻 / 已保持秒数」，改为帧驱动（届时删掉基准捕获） |
 //! | IL15 | 提交中（[`P4InterlockPage::set_submitting`]）两按钮 `disabled` 且**无按钮级就地原因** | UI §6.4 未定义「提交中」态的就地文案（§3.6 亦无该行）⇒ 只置灰、**不造文案**；防重由 `ConfirmDialog` 自身的 `Debounce`（500 ms，TT-10）与按钮禁用共同承担 | 无（**有意**） |
@@ -46,6 +46,8 @@
 //! | IL18 | `人工释放联锁` 在 `available && enabled` 时**恒可用**（除提交中）：**不**按「触发源未复位 / 保持时间不足 / 未处于 latch」等在本地预判置灰 | ① 释放是**安全正向**操作（清 latch），本地预判置灰会挡住该路径；② §6.4 的 EDGE-12 恰恰要求「把**具体**拒绝原因告诉现场」—— 本地预判会**替代**后端的结构化原因（现场只看到灰按钮、看不到「哪个源没复位」）⇒ 与「不得静默失败」相悖 | 无（**有意**） |
 //! | IL19 | `ControlResponse::duplicate`（幂等命中）**本页零读取** ⇒ **漏覆盖**（与 `p2_config.rs` **PD18** 同族） | UI §3.6 的 P4 用字表与全局 Toast 行**都没有**「幂等命中 / 重复请求」的文案 ⇒ 无字可上屏；也不能凭一比特**造**一句文案（**绝不造假**） | **§3.6 需补一行文案** ⇒ 收口于 B2c 之后的「字体码表 + 文案统一收口批」（与 IL1 同批）；届时在 [`P4InterlockPage::show_result`] 里读 `resp.duplicate` 并弹提示 |
 //! | IL20 | `SOURCE_ROW_POOL` / `INNER_W` / `CARD_HEAD_H` / `CARD_INSET` 与 `p2_config.rs` / `p6_system.rs` **同式重复**（各页各持一份） | **不动**（KISS + 两文件本批**禁改**）：三者都是 `theme` 常量的**一格推导**，上收需要一个新共享模块（结构变更，超出本批范围，与 `p2_config.rs` 的 PD19 同一处置） | **B2c 之后**统一上收 `ui/pages/mod.rs`；在此之前**任一处改 `theme` 派生式必须三处同改** |
+//! | IL21 | [`P4InterlockPage::show_audit_unavailable`]（EDGE-18）**除 Toast 外另落就地红字**（操作条上方同一文案） | EDGE-18 只要求 Toast ⇒ 这是**超出规格的 additive 行为**，**保留**：① 与 **IL11** 同款取向（Toast 会过期，而 fail-closed 的「操作**未执行**」这一结论须常驻可读 —— 现场看到灰按钮时能立刻知道原因）；② **零新增**：落点（就地原因带）与文案（转出 `TEXT_AUDIT_UNAVAILABLE`）都是既有件，未新建对象、未添第二份字面量 ⇒ 无屏上冗余（Toast 与红字同文案、位置不同） | 无（**有意**）；若 PM 裁定 Toast 足够，删去 [`P4InterlockPage::show_audit_unavailable`] 里的 `set_plain_reason` 一行即可（其单测断言同步收） |
+//! | IL22 | latch 的 `StatusChip` **增了图标通道**（`●` / `○` / `?` 三态，见 [`latch_chip_icon`]） | UI §5.3 对胶囊只要求 **text + color** 两通道 ⇒ 这是**超出规格的 additive 行为**，**保留**：① `StatusChip::new(parent, w, icon, text, skin)` 的**签名强制**要求 icon 实参（`components.rs` 本批**禁改**，无「省略图标」的口）；② 契约未指定字形 ⇒ 取与灯类同族的三态（实心 / 空心 / 问号），不可用态取 `?`、**不**复用 `✓` / `⚠`（与 §8.3「不得复用」一致）；③ 有单测锁住三态互异与不可用态的字形（`p4_interlock.rs::tests::latch_chip_never_says_unheld_when_unavailable`） | 若 `StatusChip` 补「无图标」构造口，可改为 text + color 两通道（须同步改 §5.3 走查与上述单测） |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -98,7 +100,7 @@ use crate::ui::theme::{self, ChipSkin, ConfirmLevel, Dimens, Palette, TextSlot};
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 上屏文案（UI §3.6 P4 行 + 全局 Toast 行；**落笔前逐字在 `fonts/lv_font_cmap.txt` 核对**）
 //
-// 与契约串的偏差逐条登记在文件头 `IL1~IL20`（缺字改写 / 口径 / 尺寸 / 降级），此处只放成品串。
+// 与契约串的偏差逐条登记在文件头 `IL1~IL22`（缺字改写 / 口径 / 尺寸 / 降级），此处只放成品串。
 // 码表覆盖率走查见 `ui/tests.rs::ui_texts_covered_by_font_cmap`（基线 = 生成字体的实际 cmap，
 // 待查集合 = 扫 `ui/**` 源码字面量）。
 // ═══════════════════════════════════════════════════════════════════════════
@@ -177,7 +179,11 @@ pub const TEXT_AUDIT_NOTE: &str = "操作将记入审计";
 pub const TEXT_REASON_LATCHED: &str = "处于自锁态 · 须先释放联锁";
 /// 就地原因：联锁未启用（§6.4 拒绝原因表）。
 pub const TEXT_NOT_ENABLED: &str = "联锁未启用";
-/// 就地原因：停机未确认（§3.6 P4「操作」行；`RejectedPrecondition[StopPending]` 的本地预判口径）。
+/// 就地原因：停机未确认（§3.6 P4「操作」行）。
+///
+/// ⚠️ **只**由后端结构化拒绝 `InterlockReject::StopPending` 经 [`reject_text`] 产出
+/// （`停机未确认 · 暂不可授权重启`）—— 页面**不**按帧内 `stop_failed` 本地预判（B2b-3 评审整改 ①；
+/// 理由见 [`op_state`] 与 **IL18**：预判会挡掉后端的具体原因）。
 pub const TEXT_STOP_PENDING: &str = "停机未确认";
 /// 就地原因：提交时状态已变化（EDGE-19；`，`→`·` 见 **IL1**）。
 pub const TEXT_CONFLICT: &str = "联锁状态已变化 · 请刷新后重试";
@@ -638,11 +644,15 @@ pub fn sources_title(count: usize) -> String {
 /// 1. `!available` ⇒ 两按钮 `disabled` +「联锁状态不可用」（§8.3 专行，fail-closed）；
 /// 2. `!enabled` ⇒ 两按钮 `disabled` +「联锁未启用」；
 /// 3. `submitting` ⇒ 两按钮 `disabled`（无就地文案，见 **IL15**）；
-/// 4. `M1 授权重启` 追加：`latched` ⇒「处于自锁态 · 须先释放联锁」（IL-03）；`stop_failed` ⇒
-///    「停机未确认」（§3.6 P4「操作」行 + 契约 `InterlockReject::StopPending` 的本地预判口径）。
+/// 4. `M1 授权重启` 追加：`latched` ⇒「处于自锁态 · 须先释放联锁」（IL-03；§6.4 明列）。
 ///
-/// **`人工释放联锁` 不因「源未复位 / 保持不足 / 非 latch」置灰** —— 那些前置条件由后端判定并
-/// 回**具体**原因（EDGE-12「不得静默失败」），本地预判会挡住这条路径（见 **IL18**）。
+/// **两按钮都不因「后端才会判定的前置条件」在本地预判置灰**（B2b-3 评审整改 ①；取向见 **IL18**）：
+/// - `人工释放联锁`：不因「源未复位 / 保持不足 / 非 latch」置灰；
+/// - `M1 授权重启`：**不因 `stop_failed` 置灰**。§6.4「操作与拒绝原因」表与 §9 F18 **只**要求
+///   **latch 态**置灰 M1，**没有** `stop_failed` 这一行；本地预判「停机未确认」会**替代**后端回的
+///   `RejectedPrecondition[StopPending]` 的**具体**原因（现场只看到灰按钮、看不到为什么）⇒ 与
+///   **IL18** 对 `release` 的取向是同一条道理（EDGE-12「不得静默失败」）。放开后后端必回
+///   `StopPending`，其具体原因（`停机未确认 · 暂不可授权重启`，见 [`reject_text`]）随之可达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpState {
     /// 释放按钮是否禁用。
@@ -669,10 +679,10 @@ pub fn op_state(s: &InterlockSection, submitting: bool) -> OpState {
     let busy = global.is_none() && submitting;
     let release_disabled = global.is_some() || busy;
     // ④：M1 专属阻塞（仅在无全局阻塞时才有意义 —— 全局原因优先级更高）。
+    // **只有 latch 态**（§6.4 拒绝原因表 / IL-03）；`stop_failed` **不**参与 ——
+    // 它是后端 `StopPending` 的判据，本地预判会替代后端的具体原因（见上文与 **IL18**）。
     let restart_local: Option<&'static str> = if s.latched {
         Some(TEXT_REASON_LATCHED)
-    } else if s.stop_failed {
-        Some(TEXT_STOP_PENDING)
     } else {
         None
     };
@@ -2371,7 +2381,8 @@ mod tests {
     // ── ④ 按钮可用性矩阵（UI §6.4「操作与拒绝原因」表逐行）──
     //
     // 敏感性：把 `op_state` 里 `!available` 的分支去掉 ⇒ 「两按钮均 disabled」两条变红；
-    // 把 `stop_failed` 的 M1 分支去掉 ⇒ `stop_failed ⇒ restart_disabled` 那条变红。
+    // 给 `M1 授权重启` **加回** `stop_failed` 的本地预判 ⇒「`stop_failed` 不置灰 M1」那条变红
+    //（B2b-3 评审整改 ① 的回归锁，探针实测输出见整改报告）。
     #[test]
     fn button_matrix_follows_reject_table() {
         // 正常（未联锁、无停机失败）⇒ 两按钮皆可用、无就地原因。
@@ -2399,13 +2410,21 @@ mod tests {
         assert!(la.restart_disabled);
         assert_eq!(la.restart_reason, Some(TEXT_REASON_LATCHED));
 
-        // 停机未确认（`stop_failed`）⇒ 只 M1 禁用 +「停机未确认」（§3.6 P4「操作」行）。
+        // `stop_failed` **不**参与按钮可用性（B2b-3 评审整改 ①）：§6.4 拒绝原因表 / §9 F18
+        // **只**要求 latch 态置灰 M1，**没有** `stop_failed` 这一行；本地预判「停机未确认」会替代
+        // 后端 `RejectedPrecondition[StopPending]` 的**具体**原因（现场只看到灰按钮）⇒
+        // 两按钮均可用、**无就地原因**，让后端的具体原因可达（与 IL18 对 `release` 同一取向）。
         let mut sf = sect(true, true, false);
         sf.stop_failed = true;
         let sf = op_state(&sf, false);
         assert!(!sf.release_disabled);
-        assert!(sf.restart_disabled);
-        assert_eq!(sf.restart_reason, Some(TEXT_STOP_PENDING));
+        assert!(!sf.restart_disabled, "`stop_failed` 不得本地预判置灰 M1（评审整改 ①）");
+        assert_eq!(
+            sf.restart_reason, None,
+            "`stop_failed` 不得产出本地原因（评审整改 ①）"
+        );
+        // 但 `stop_failed` 的**屏显**照旧（整改 ① 只移除「按钮级本地预判」，不动状态卡）。
+        assert_eq!(stop_view(true), (TEXT_STOP_FAIL, 1));
 
         // 提交中 ⇒ 两按钮 disabled，且**无**就地文案（IL15：不得造 §3.6 没有的文案）。
         let busy = op_state(&sect(true, true, false), true);

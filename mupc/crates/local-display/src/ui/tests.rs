@@ -3997,7 +3997,8 @@ pub(crate) fn pages_chain() {
             p4.scroll_obj().size(),
             (Dimens::CONTENT_W, 528),
             "滚动视口 = 624 − 操作条 72 − **就地原因带 24** = 528（⚠️ UI 线框写 552 —— \
-             见 p4_interlock.rs 的 **IL4**：线框的 72 px 操作条里放不下「按钮上方 24 px 就地原因」）"
+             见 p4_interlock.rs 的 **IL4**：原因带落在**视口末 24 px**（绝对 y600–624），\
+             线框只是**未画**该行；固定操作条仍与线框逐像素一致）"
         );
         let root_c = p4.obj().coords();
         let bar_c = p4.action_bar_obj().coords();
@@ -4292,15 +4293,26 @@ pub(crate) fn pages_chain() {
         disp.refr_now_for_test();
         let rst_x = p4.restart_button().button().obj().coords().x1;
         assert!(rst_x > root_c.x1, "M1 按钮在右（与左按钮间距 48）");
-        // `stop_failed = true` ⇒ M1 追加禁用 + 「停机未确认」（§3.6 P4「操作」行）。
+        // `stop_failed = true` ⇒ **两按钮仍可用、无就地原因**（B2b-3 评审整改 ①）。
+        // §6.4「操作与拒绝原因」表 / §9 F18 **只**要求 latch 态置灰 M1；若在此本地预判
+        // 「停机未确认」，后端 `RejectedPrecondition[StopPending]` 的**具体**原因就永远到不了屏
+        // （现场只看到灰按钮、看不到为什么）⇒ 与同页 **IL18** 对 `release` 的取向自相矛盾。
+        // 放开后前端按钮可用 ⇒ 后端必回 `StopPending` ⇒ 该具体原因可达（EDGE-12）。
         let mut sf = il(true, true, false);
         sf.stop_failed = true;
         p4.set_section(&sf);
-        assert!(p4.restart_disabled());
         assert_eq!(
-            p4.reason_right_text().as_deref(),
-            Some(p4_interlock::TEXT_STOP_PENDING),
-            "停机未确认 ⇒ 就地原因（契约 InterlockReject::StopPending 的本地预判口径）"
+            p4.stop_card_text().as_deref(),
+            Some(p4_interlock::TEXT_STOP_FAIL),
+            "停机失败照旧由**状态卡**表达（整改 ① 只移除**按钮级本地预判**，不动屏显）"
+        );
+        assert!(
+            !p4.restart_disabled(),
+            "`stop_failed` 不得本地预判置灰 M1（评审整改 ①）"
+        );
+        assert!(
+            !p4.reason_right_visible(),
+            "`stop_failed` 不得产出本地就地原因（评审整改 ①）"
         );
         assert!(!p4.release_disabled());
 
