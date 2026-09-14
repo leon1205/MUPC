@@ -8,7 +8,7 @@
 //! | [`components`] | 薄层之上的**展示 / 确认型**组合控件（8 件 + `WarnBanner` + TT-10 防重） | **B1** |
 //! | [`controls`] | 薄层之上的**输入型**组合控件（`SegmentedControl` / `Ipv4Stepper` / `DateTimeStepper`） | **B2b-1** |
 //! | `pages` | 6 页布局（`p1_status` … `p6_system`） | **B2** |
-//! | 页面路由 / 底部导航 | 6 页容器 + `NavTab`（`lv_tabview` 隐藏标签栏，或自建容器显隐） | **B2** |
+//! | [`shell`] | 应用外壳：页眉 + 底部导航（6 `NavTab`）+ 页面路由 + 超时回归 + 未保存提示条 | **B2c-3** |
 //!
 //! ## 本轮的边界（B1 + B2a + B2b-1）
 //!
@@ -18,6 +18,14 @@
 //!
 //! **页面路由与底部导航的装配不做**（B2c）：本文件只导出 `pages`，不在此建页面容器、
 //! 不装配 `lv_tabview` / 导航栏（`UiState` 扩展与控制通道接线属 B3）。
+//!
+//! > **B2c-3 补充（上文那句已被取代，保留以备追溯）**：页面路由 / 底部导航 / 页眉 /
+//! > 超时回归 / 未保存提示条的装配**已在** [`shell`]（`ui/shell.rs`，工作单元 **B2c-3**）。
+//! > 实现取 §5.3 的**后者**（6 个页面容器 + `HIDDEN` 显隐），**不用** `lv_tabview`
+//! > —— 因为外壳要"一次建 6 页、常驻不销毁"，而 `lv_tabview` 的页生命周期归它自己管。
+//! > **`UiState` 扩展 / 控制通道接线 / 触摸设备初始化仍属 B3**；[`shell`] 只留**注入位**
+//! > （见 `Shell` 的 `p1()` … `p6()` / `set_channel` / `set_touch_available` /
+//! > `set_idle_timeout` / `set_modal_open` / `overlay_layer`）。
 //!
 //! `controls` 与 `components` **分列**的口径（职责边界）：`components` 只反映既有数据、
 //! 不产生新数据（输出 = 视觉状态 + 无载通知）；`controls` 是**草稿值的生产者**（输出 =
@@ -31,6 +39,8 @@
 pub mod components;
 pub mod controls;
 pub mod pages;
+// 应用外壳（开发单元 B2c-3）：页眉 / 底部导航 / 页面路由 / 超时回归 / 未保存修改提示条。
+pub mod shell;
 pub mod theme;
 
 // `pub(crate)`：LVGL 侧唯一的 `#[test]`（`src/lvgl/tests.rs::lvgl_core_bridge_chain`）

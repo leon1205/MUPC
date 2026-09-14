@@ -778,11 +778,14 @@ fn ui_static_constraints() {
 /// `ui/pages/p5_audit.rs`（P5 审计页：头部三条 / 表头 / 行内容 / 底部状态行）。
 /// B2c-2 起再纳入 `ui/pages/p3_logs.rs`（P3 日志页：通道条 / 筛选区 / 表头 / 行内容 /
 /// 状态行 / 说明行 / 「回到最新」按钮）。
-const UI_PROD_SOURCES: [(&str, &str); 12] = [
+/// B2c-3 起再纳入 `ui/shell.rs`（应用外壳：页眉返回键 / 页标题 / 通道胶囊 / 触摸角标 /
+/// 倒计时胶囊 / 未保存提示条 / 6 个导航页签）。
+const UI_PROD_SOURCES: [(&str, &str); 13] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/theme.rs", include_str!("theme.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
+    ("ui/shell.rs", include_str!("shell.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
@@ -7097,12 +7100,436 @@ pub(crate) fn pages_chain() {
             );
         }
 
+        // ── ⑦ **应用外壳**（B2c-3）────────────────────────────────────────────
+        //
+        // **挂钩方式（不改 `src/lvgl/**`）**：外壳链路 [`shell_chain`] 是 `pub(crate) fn`
+        // 而非独立 `#[test]`（LVGL 非线程安全），由本函数在**同一 LVGL 会话内**顺序调起
+        // —— 与 `ui_chain` / `pages_chain` 的既有做法同款。此处调用时上一批 6 页**已析构**，
+        // 故外壳与它自己的 6 页是在"空堆"上装配的（这正是 R4 的严苛口径）。
+        shell_chain(&mut disp, &screen);
     }
 
     drop(host);
     drop(screen);
     drop(disp);
     lvgl::deinit();
+}
+
+/// 外壳链路用的**最小 P2 配置视图**（只含一个可编辑字段 —— 足以驱动"脏 ⇒ 提示条"）。
+///
+/// **为什么另写一份而不复用 `pages_chain` 的内联件**：那份是**块内**定义的（作用域到不了本函数），
+/// 且本链路只需要"一个能改脏的可编辑字段"，与页级用例的字段覆盖目标不同。
+fn shell_p2_view() -> mupc_display_proto::ConfigView {
+    use mupc_display_proto::{ConfigField, ConfigGroup, ConfigKind, ConfigView, WriteMode};
+    use serde_json::Value;
+
+    ConfigView {
+        groups: vec![ConfigGroup {
+            id: "iec104".into(),
+            label: "IEC 104 连接参数".into(),
+            fields: vec![ConfigField {
+                key: "gateway.port".into(),
+                label: "端口".into(),
+                kind: ConfigKind::U16 {
+                    min: 1,
+                    max: 65535,
+                    step: 1,
+                },
+                default: Value::from(2404),
+                value: Value::from(2404),
+                unit: None,
+                requires_reconnect: false,
+                editable: true,
+            }],
+        }],
+        revision: 7,
+        write_mode: WriteMode::TextPreserve,
+    }
+}
+
+/// **应用外壳**（B2c-3）全部离屏用例。
+///
+/// **前提**：`lvgl::init()` 已由 [`pages_chain`] 调过（本函数**不**再 init/deinit），且
+/// `disp` 是同一会话的内存 display（写 `sink` 的那一个）。
+///
+/// ## 覆盖（任务书 §六.2 逐条）
+///
+/// | # | 断言 | 段 |
+/// |---|------|----|
+/// | ① | 外壳 + 六页装配成功（**R4 第一道门**）；任一时刻只显一页 | ① |
+/// | ② | 点第 3 个页签 ⇒ 显 P3；返回键 ⇒ 显 P1；6 个页签逐一点通 | ② |
+/// | ③ | 返回按钮**仅 P2–P6 显示**；标题随页变化 | ② |
+/// | ④ | 超时：50 s ⇒ 胶囊 + 文案；60 s ⇒ 切 P1；`PRESSED` ⇒ 计时重置 | ④ |
+/// | ⑤ | P2 脏 ⇒ 无胶囊 + 提示条 + 「放弃修改」可点（点击清脏） | ⑤ |
+/// | ⑥ | **建 / 拆外壳 ≥2 次**（R1：环 / 泄漏） | ⑥ |
+pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
+    use crate::state::ChannelStatus;
+    use crate::ui::shell::{self, NavPage, Shell, COUNTDOWN_WINDOW_SECS};
+
+    // 外壳的宿主（模拟 `main.rs` 的 `Obj::screen()` 直挂）。
+    let home = Obj::create(screen).expect("shell host");
+    home.set_size(Dimens::SCREEN_W, Dimens::SCREEN_H);
+    home.set_pos(0, 0);
+
+    let base = Instant::now();
+    let at = |secs: u64| base + Duration::from_secs(secs);
+    const CLOCK: &str = "13:42:07";
+
+    // ═══ ① 装配 + 「任一时刻只显一页」+ 页眉常态 ═══════════════════════════════
+    {
+        // **R4 第一道门**：外壳（页眉 + 6 页签 + 提示条 + 胶囊 + 3 个通道胶囊）**与**
+        // 它自己的 6 页同时驻留 1 MB 的 LVGL 定容池。OOM ⇒ 本行 `expect` 即失败。
+        // **R4 对象预算护栏**（实测 2026-09-15：外壳 + 6 页 = **727** 个 LVGL 对象，成功）。
+        // LVGL 的堆是**定容池**（`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE = 1 MB`）⇒ "能建出来"
+        // 不是可推定的性质（早期 256 KB 时建到第 4 页即 `lv_realloc` 失败）。本护栏把
+        // **对象数量**钉住：往任一处加构件把总量推过 [`SHELL_OBJECT_BUDGET`]，这里会先变红
+        // 并给出准确数字，而不是等到某台机器上 OOM 挂死。
+        //
+        // **改什么会让本条变红**：给 6 页 / 外壳任一处加出 >73 个常驻对象。
+        const SHELL_OBJECT_BUDGET: usize = 800;
+        let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        let sh = Shell::new(&home).expect("外壳 + 6 页装配（LVGL_MEM 1 MB）");
+        let mounted =
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst) - before;
+        assert!(
+            mounted <= SHELL_OBJECT_BUDGET,
+            "外壳 + 6 页创建了 {mounted} 个 LVGL 对象（预算 {SHELL_OBJECT_BUDGET}）—— \
+             超过预算即逼近 1 MB 定容池的上限（先减构件，再谈抬预算）"
+        );
+        // 尺寸读回须等一次布局趟（`Obj::size` 是"布局趟落定后的实际值"）。
+        disp.refr_now_for_test();
+
+        assert_eq!(
+            sh.obj().size(),
+            (Dimens::SCREEN_W, Dimens::SCREEN_H),
+            "外壳根 = 全屏 1024×768"
+        );
+        assert_eq!(
+            sh.header_obj().size(),
+            (Dimens::SCREEN_W, Dimens::HEADER_H),
+            "页眉 = 1024×72（UI §4.1）"
+        );
+        assert_eq!(
+            sh.nav_obj().size(),
+            (Dimens::SCREEN_W, Dimens::NAV_H),
+            "底部导航 = 1024×72（UI §3.5）"
+        );
+        assert_eq!(
+            sh.banner_obj().size(),
+            (Dimens::CONTENT_W, Dimens::TOUCH_MIN),
+            "未保存提示条 = 992×48（UI §4.3）"
+        );
+        // **任一时刻只显一页**：六页全建（存活、非空壳），但可见的**恰一个**。
+        for p in NavPage::ALL {
+            assert!(sh.page_obj(p).is_alive(), "{p:?} 页根须存活");
+            assert!(sh.page_obj(p).child_count() > 0, "{p:?} 页须非空壳");
+        }
+        assert_eq!(
+            sh.visible_pages(),
+            vec![NavPage::Main],
+            "初始只显 P1（默认页 / 超时回归目标页）"
+        );
+        assert_eq!(sh.current(), NavPage::Main);
+        // 页眉常态：P1 无返回键、标题为契约原文；时钟已由 tick 注入；通道胶囊 = 已连接。
+        assert!(!sh.back_visible(), "P1 不显示返回键（UI §4.1）");
+        assert_eq!(sh.title_text().as_deref(), Some("台区储能装置运行状态"));
+        sh.tick(at(0), CLOCK);
+        assert_eq!(sh.clock_text().as_deref(), Some(CLOCK));
+        assert_eq!(sh.channel_text().as_deref(), Some(shell::TEXT_CHANNEL_OK));
+        assert!(!sh.touch_badge_visible(), "触摸可用 ⇒ 无角标");
+        assert!(!sh.countdown_visible(), "t=0 ⇒ 无倒计时胶囊");
+        assert!(!sh.banner_visible(), "P2 不脏 ⇒ 无提示条");
+        assert!(
+            sh.tab_bar_visible(NavPage::Main).unwrap(),
+            "P1 页签选中条必须亮（装配即摆好初始页）"
+        );
+        assert!(
+            !sh.tab_bar_visible(NavPage::Config).unwrap(),
+            "未选中页签不得亮选中条"
+        );
+        for p in NavPage::ALL {
+            assert_eq!(sh.tab_text(p).as_deref(), Some(p.nav_label()));
+            assert_eq!(sh.tab_icon_text(p).as_deref(), Some(p.nav_icon()));
+        }
+        assert!(
+            sh.tab_divider(NavPage::Main).is_none(),
+            "第 1 项无左缘竖分隔线（UI §4.2）"
+        );
+        assert!(
+            sh.tab_divider(NavPage::Config).is_some(),
+            "第 2–6 项各有左缘竖分隔线"
+        );
+
+        // ═══ ② 路由：1 次触摸到任意页 + 返回键 ═════════════════════════════════
+        // **改什么会让本条变红**：把 `Core::select` 里的 `i == idx` 写成恒真（六页同显 ⇒
+        // `visible_pages()` 长度变 6）；把页签回调里的 `NavPage::from_index(i)` 删掉（点页签
+        // 不再切页 ⇒ `cur` 不变）。把返回键的回调改成 `select(page, ..)`（返回不到 P1）。
+        for p in NavPage::ALL {
+            sh.tab(p).expect("页签").send_event(EventCode::CLICKED);
+            assert_eq!(sh.current(), p, "点 {p:?} 页签 ⇒ 1 次触摸直达");
+            assert_eq!(sh.visible_pages(), vec![p], "{p:?} 显示时其余五页必须隐藏");
+            assert!(sh.tab_bar_visible(p).unwrap(), "{p:?} 选中条亮");
+            assert_eq!(sh.title_text().as_deref(), Some(p.title()), "标题随页变化");
+            assert_eq!(
+                sh.back_visible(),
+                p.shows_back(),
+                "{p:?} 的返回键可见性（仅 P2–P6）"
+            );
+        }
+        // 点第 3 个页签 ⇒ 显 P3（任务书逐条点名的那一条）。
+        sh.tab(NavPage::Logs).expect("页签").send_event(EventCode::CLICKED);
+        assert_eq!(sh.current(), NavPage::Logs);
+        assert_eq!(sh.visible_pages(), vec![NavPage::Logs]);
+        // 返回 ⇒ P1。
+        sh.back_button().send_event(EventCode::CLICKED);
+        assert_eq!(sh.current(), NavPage::Main, "返回键 ⇒ 切 P1（UI §4.3）");
+        assert_eq!(sh.visible_pages(), vec![NavPage::Main]);
+        // 页签选中态**双通道**：底色（`set_checked` ⇒ `LV_STATE_CHECKED`）+ 顶部 4 px 条。
+        assert!(
+            sh.tab(NavPage::Main).expect("页签").is_checked(),
+            "选中页签的 `LV_STATE_CHECKED` 必须置位（底色通道）"
+        );
+        assert!(
+            !sh.tab(NavPage::Config).expect("页签").is_checked(),
+            "未选中页签不得置 CHECKED"
+        );
+        // **双通道**的另一半：文字 / 图标**色**（应用标记读回）。
+        // **改什么会让本条变红**：把 `build_tab` 里 `text_colors` / `icon_colors` 的两档对调。
+        assert_eq!(
+            sh.tab_text_color(NavPage::Main),
+            Some(Palette::TEXT_PRIMARY),
+            "选中页签文字 = `text_primary`（UI §4.2）"
+        );
+        assert_eq!(
+            sh.tab_text_color(NavPage::Config),
+            Some(Palette::TEXT_SECOND),
+            "未选中页签文字 = `text_second`（UI §4.2）"
+        );
+        assert_eq!(
+            sh.tab_icon_color(NavPage::Main),
+            Some(Palette::INFO),
+            "选中页签图标 = `#4EA6FF`（UI §4.2）"
+        );
+        assert_eq!(
+            sh.tab_icon_color(NavPage::Config),
+            Some(Palette::TEXT_WEAK),
+            "未选中页签图标 = `#6E7FA0`（UI §4.2）"
+        );
+
+        // **切页通知**（B3 用它感知"当前页变了"）：仅在页**真正变化**时触发。
+        // **改什么会让本条变红**：把 `Core::select` 的 `changed && notify` 改成 `notify`
+        // （重复切同一页也通知）⇒ 第 2 条断言拿到 3 个元素。
+        let seen: Rc<RefCell<Vec<NavPage>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let seen = Rc::clone(&seen);
+            sh.set_on_page_change(move |p| seen.borrow_mut().push(p));
+        }
+        sh.show(NavPage::Audit);
+        sh.show(NavPage::Audit); // 同页重复切 ⇒ **不**再通知
+        sh.show(NavPage::System);
+        assert_eq!(
+            *seen.borrow(),
+            vec![NavPage::Audit, NavPage::System],
+            "切页通知只在页真正变化时触发一次"
+        );
+        sh.show(NavPage::Main);
+
+        // 六页同屏渲染一次（真实渲染链路：切页 → 失效 → flush）。
+        disp.refr_now_for_test();
+
+        // ═══ ④ 超时回归（**注入时钟** ⇒ 逐拍可断言）═══════════════════════════
+        // 先切到 P4（非 P1，才有"回归"可言），并重置活动时刻 = base。
+        sh.tab(NavPage::Interlock).expect("页签").send_event(EventCode::CLICKED);
+        sh.tick(at(0), CLOCK); // 消费上述按压 ⇒ last_activity = base
+        assert_eq!(sh.current(), NavPage::Interlock);
+        // t=49：还剩 11 s ⇒ 无胶囊。
+        sh.tick(at(49), CLOCK);
+        assert!(
+            !sh.countdown_visible(),
+            "超时前 11 s 不得出现胶囊（窗口 = {COUNTDOWN_WINDOW_SECS} s）"
+        );
+        // t=50：还剩 10 s ⇒ 胶囊出现且文案逐字正确。
+        // **改什么会让本条变红**：把 `shows_countdown` 的窗口从 10 改小（如 5）⇒ 这里不显；
+        // 把 `countdown_text` 的措辞改掉 ⇒ 文案断言红。
+        sh.tick(at(50), CLOCK);
+        assert!(sh.countdown_visible(), "超时前 10 s 出现倒计时胶囊（UI §4.3）");
+        assert_eq!(
+            sh.countdown_text_value().as_deref(),
+            Some("10 秒后返回主状态页"),
+            "胶囊文案 = `N 秒后返回主状态页`（UI §3.6 超时行）"
+        );
+        // **SH3**：胶囊占位时通道胶囊让位（页眉放不下五者，见 shell.rs 偏差表）。
+        assert_eq!(
+            sh.channel_text(),
+            None,
+            "倒计时胶囊出现 ⇒ 通道胶囊让位（SH3）"
+        );
+        // t=55.5：向上取整 ⇒ 仍显示 5 秒（若改向下取整会显示 4 ⇒ 红）。
+        sh.tick(at(55) + Duration::from_millis(500), CLOCK);
+        assert_eq!(sh.countdown_text_value().as_deref(), Some("5 秒后返回主状态页"));
+        // 中途派发 `PRESSED`（**全屏输入对象**）⇒ 计时重置 ⇒ 胶囊消失。
+        // **改什么会让本条变红**：把 `Core::tick` 里的 `pending_activity.replace(false)` 删掉、
+        // 或把 `Shell::wire` 的根 `PRESSED` 挂钩删掉 ⇒ 这里胶囊仍在、且 t=60 会切页。
+        sh.obj().send_event(EventCode::PRESSED);
+        sh.tick(at(55) + Duration::from_millis(500), CLOCK);
+        assert!(
+            !sh.countdown_visible(),
+            "任意触摸 ⇒ 计时重置 ⇒ 胶囊即刻消失（UI §4.3）"
+        );
+        assert_eq!(sh.current(), NavPage::Interlock, "重置后仍停在原页");
+        // t=60（自原点起算）：**若上一步的重置没生效，这里就已经切回 P1 了** —— 先钉住"没切"。
+        sh.tick(at(60), CLOCK);
+        assert_eq!(
+            sh.current(),
+            NavPage::Interlock,
+            "重置后时钟须从**重置那一刻**重新起算（60 s 未到）"
+        );
+        // 从重置时刻（t≈55.5）再推进 60 s ⇒ 切 P1 + 胶囊消失 + 计时重新起算。
+        // **改什么会让本条变红**：把 `should_return_home` 的返回值反过来、或把 `select(Main)`
+        // 那一句删掉 ⇒ 这里仍停在 P4。
+        sh.tick(at(115) + Duration::from_millis(500), CLOCK);
+        assert_eq!(sh.current(), NavPage::Main, "到 0 s 自动切 P1（UI §4.3）");
+        assert!(!sh.countdown_visible(), "切页后胶囊消失");
+        assert_eq!(
+            sh.visible_pages(),
+            vec![NavPage::Main],
+            "超时回归落在 P1 且只显 P1"
+        );
+        // 回归后计时从**满时长**重算（不是"又立刻超时"）。
+        sh.tick(at(116) + Duration::from_millis(500), CLOCK);
+        assert_eq!(sh.current(), NavPage::Main, "回归后计时已重置，不得连续切页");
+
+        // ═══ ④′ 触摸不可用角标（EDGE-13）+ 通道断（EDGE-20 的"两状态同显"）══════
+        sh.set_touch_available(false);
+        assert!(sh.touch_badge_visible(), "EDGE-13：触摸不可用角标常驻");
+        assert_eq!(sh.touch_badge_text().as_deref(), Some(shell::TEXT_TOUCH_UNAVAILABLE));
+        assert!(
+            sh.channel_text().is_some(),
+            "角标与通道胶囊**可同显**（二者槽位不相交，见 shell.rs 的栅格自洽用例）"
+        );
+        sh.set_touch_available(true);
+        assert!(!sh.touch_badge_visible());
+        // EDGE-20：读通道断 ⇒ 页眉出现红通道胶囊，且**时钟仍在**（"两种状态同显"）。
+        sh.set_channel(ChannelStatus::Down);
+        assert_eq!(
+            sh.channel_text().as_deref(),
+            Some(crate::ui::pages::p1_status::TEXT_CHANNEL_DOWN),
+            "EDGE-20：页眉红通道胶囊"
+        );
+        assert_eq!(sh.clock_text().as_deref(), Some(CLOCK), "时钟不受通道态影响");
+        sh.set_channel(ChannelStatus::Connected);
+        assert_eq!(sh.channel_text().as_deref(), Some(shell::TEXT_CHANNEL_OK));
+
+        // ═══ ⑤ 未保存修改提示条（EDGE-11）═════════════════════════════════════
+        sh.show(NavPage::Config);
+        // 先注入一份最小配置（`Shell::new` 只建页，不喂数据 —— 数据接线属 B3）。
+        sh.p2()
+            .set_config(&shell_p2_view())
+            .expect("P2 set_config（外壳链路）");
+        sh.tick(at(117), CLOCK);
+        assert!(!sh.banner_visible(), "未编辑 ⇒ 无提示条");
+        // 程序化改一个可编辑字段（走与控件回调**同一条簿记**：脏标记 / 清错 / 刷按钮）。
+        let hit = sh
+            .p2()
+            .set_field_value("gateway.port", &serde_json::Value::from(2405));
+        assert!(hit, "P2 必须含 `gateway.port` 字段");
+        assert!(sh.p2().is_dirty(), "改字段 ⇒ `is_dirty()` 为真");
+        sh.tick(at(117), CLOCK);
+        assert!(sh.banner_visible(), "P2 脏 ⇒ 提示条常驻（EDGE-11）");
+        assert_eq!(sh.banner_text().as_deref(), Some(shell::TEXT_DIRTY_BANNER));
+        assert_eq!(sh.banner_icon_text().as_deref(), Some(shell::ICON_WARN));
+        assert_eq!(
+            sh.discard_button().text().as_deref(),
+            Some(shell::TEXT_DISCARD)
+        );
+        // **脏态与计时互斥**：推进到原超时点，**不得**出现胶囊、**不得**切页。
+        // **改什么会让本条变红**：把 `Core::tick` 的 `paused` 判据里 `p2.is_dirty()` 删掉 ⇒
+        // 这里胶囊出现（甚至切回 P1）⇒ 两条断言同时红。
+        sh.tick(at(200), CLOCK);
+        assert!(
+            !sh.countdown_visible(),
+            "P2 脏 ⇒ **不倒计时**（UI §4.3 / EDGE-11）"
+        );
+        assert_eq!(sh.current(), NavPage::Config, "P2 脏 ⇒ **不强制切页**");
+        // 「放弃修改」⇒ 调 `discard_draft()` ⇒ 脏态清除 + 提示条收起。
+        sh.discard_button().send_event(EventCode::CLICKED);
+        assert!(!sh.p2().is_dirty(), "放弃修改 ⇒ 草稿丢弃（脏态清）");
+        assert!(!sh.banner_visible(), "脏态清 ⇒ 提示条即刻收起");
+        // 恢复计时：从放弃那一刻**重新起算满时长**（此刻已不再暂停）。
+        sh.tick(at(201), CLOCK);
+        assert!(!sh.countdown_visible(), "恢复计时 ⇒ 从满时长起算，无胶囊");
+        assert_eq!(sh.current(), NavPage::Config);
+
+        // ═══ ⑤′ 确认弹层打开 ⇒ 暂停计时且不显示倒计时（UI §4.3）════════════════
+        // **SH2**：页侧拿不到"弹层是否打开"（`with_dialog` 是 `#[cfg(test)]`）⇒ 经注入位驱动。
+        sh.set_modal_open(true);
+        sh.tick(at(300), CLOCK);
+        assert!(
+            !sh.countdown_visible(),
+            "弹层打开 ⇒ 暂停计时且不显示倒计时（TT-13）"
+        );
+        assert_eq!(sh.current(), NavPage::Config, "弹层打开 ⇒ 不强制切页");
+        sh.set_modal_open(false);
+        sh.tick(at(301), CLOCK);
+        assert_eq!(sh.current(), NavPage::Config, "弹层关闭 ⇒ 恢复计时（从满时长）");
+
+        // ═══ ③ 顶层层挂点（EDGE-03；本单元只留挂点，**不实现**降级层）═══════════
+        let layer = sh.overlay_layer().expect("顶层浮层可用");
+        assert!(layer.is_alive(), "EDGE-03 挂点必须返回可用的顶层浮层");
+    }
+
+    // ═══ ⑥ 建 / 拆外壳 ≥2 次（R1：`Rc` 环 / 泄漏）══════════════════════════════
+    //
+    // **改什么会让本条变红**：把 `Shell::wire` 里的 `Rc::downgrade(&self.core)` 改成
+    // `Rc::clone`（回调持强引用）⇒ 环 = `Core → 控件 → 回调 → Rc<Core>` ⇒ `drop(shell)`
+    // **不释放任何对象** ⇒ 本节第 2 轮起 `Shell::new` 在 1 MB 定容池上 **OOM 挂死**（不是红）；
+    // 把 `Shell::new` 里某个拥有型句柄改成局部变量（如 `let capsule = layout_box(..)` 不存字段）
+    // ⇒ 该子树随返回被删除 ⇒ 断言"装配后须存活"当场红。
+    for round in 0..3 {
+        let sh = Shell::new(&home).unwrap_or_else(|e| panic!("第 {round} 轮建外壳失败：{e:?}"));
+        // 探针：装配后**此刻**这些子树必须真的在树上（局部变量写法在这里就红）。
+        let probes = [
+            ("页眉", sh.header_obj().share_borrowed()),
+            ("内容区", sh.content_obj().share_borrowed()),
+            ("页根宿主", sh.page_host_obj().share_borrowed()),
+            ("底部导航", sh.nav_obj().share_borrowed()),
+            ("提示条", sh.banner_obj().share_borrowed()),
+            ("返回键", sh.back_button().share_borrowed()),
+            ("取消修改键", sh.discard_button().share_borrowed()),
+        ];
+        for (what, o) in &probes {
+            assert!(o.is_alive(), "第 {round} 轮：探针建立时 `{what}` 必须存活");
+        }
+        let pages = [
+            sh.page_obj(NavPage::Main).share_borrowed(),
+            sh.page_obj(NavPage::Config).share_borrowed(),
+            sh.page_obj(NavPage::Logs).share_borrowed(),
+            sh.page_obj(NavPage::Interlock).share_borrowed(),
+            sh.page_obj(NavPage::Audit).share_borrowed(),
+            sh.page_obj(NavPage::System).share_borrowed(),
+        ];
+        disp.refr_now_for_test();
+        drop(sh);
+        for (what, o) in &probes {
+            assert!(
+                !o.is_alive(),
+                "第 {round} 轮：`drop(Shell)` 之后 `{what}` 必须已被级联删除 —— 仍存活 ⇒ \
+                 存在 `Rc` 强引用环（整壳泄漏）"
+            );
+        }
+        for (i, o) in pages.iter().enumerate() {
+            assert!(
+                !o.is_alive(),
+                "第 {round} 轮：`drop(Shell)` 之后第 {i} 页必须已被级联删除（壳持页 = 单向）"
+            );
+        }
+        assert!(
+            home.is_alive(),
+            "第 {round} 轮：外壳析构后宿主须仍存活（壳不得持有宿主）"
+        );
+    }
+
+    drop(home);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -7187,6 +7614,70 @@ fn controls_static_constraints() {
             );
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ⑥⁽⁵⁾″ **应用外壳**静态约束（`ui/shell.rs`，B2c-3）
+//
+// 既有的四条静态用例的扫描面各写死自己的文件（**本批不改它们**）⇒ 按
+// `controls_static_constraints` 的先例**追加**一条独立用例。外壳的**裸尺寸**与**码表**两条网
+// 另由 [`UI_PROD_SOURCES`] 的扩展覆盖（[`ui_layout_setters_use_theme_constants`] /
+// [`ui_texts_covered_by_font_cmap`]），**常量定义式**一条由 [`CONST_I32_SCAN_SOURCES`] 覆盖。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 外壳的静态约束 + **扫描面自证**（对应任务书探针 **P1**）。
+///
+/// **改什么会让本条变红**：把 `ui/shell.rs` 从 [`UI_PROD_SOURCES`] / [`CONST_I32_SCAN_SOURCES`]
+/// 任一张清单里删掉 ⇒ ⓪ 段响亮失败（那两张网会**静默失去**对外壳的覆盖）；在 `shell.rs` 里写
+/// `lv_textarea_create` / `Color::hex(..)` / `unsafe` ⇒ ① ② ③ 段点名文件与 token。
+#[test]
+fn shell_static_constraints() {
+    const SHELL: &str = "ui/shell.rs";
+    // ⓪ 扫描面自证：两张清单**必须真的含本文件**（与 `p2_static_constraints` 同法）。
+    assert!(
+        UI_PROD_SOURCES.iter().any(|(n, _)| *n == SHELL),
+        "{SHELL} 必须在 UI_PROD_SOURCES 内（码表覆盖率 + 裸尺寸两条网覆盖它）"
+    );
+    assert!(
+        CONST_I32_SCAN_SOURCES.iter().any(|(n, _)| *n == SHELL),
+        "{SHELL} 必须在 CONST_I32_SCAN_SOURCES 内（常量定义式一条网覆盖它）"
+    );
+
+    let src = include_str!("shell.rs");
+    let code = strip_comments_and_literals(src, SHELL);
+    let lower = code.to_ascii_lowercase();
+    // ① 零文本输入 / 裸色值调用 / 强制渲染 / 直连绑定（共用清单）
+    for needle in FORBIDDEN_UI_SYMBOLS {
+        assert!(
+            !lower.contains(needle),
+            "{SHELL} 不得出现 `{needle}`（设计 §11.1/§11.4 静态约束）"
+        );
+    }
+    // ② 色值只准出现在 `theme.rs`（命名常量）
+    for needle in ["Color::hex(", "Color::rgb("] {
+        assert!(
+            !lower.contains(&needle.to_ascii_lowercase()),
+            "{SHELL} 不得出现 `{needle}`（必须经 theme 的命名常量）"
+        );
+    }
+    // ③ `unsafe` 只准出现在 `src/lvgl/**`
+    assert!(
+        !code.contains("unsafe"),
+        "{SHELL} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
+    );
+    // ④ 自证扫描面未指错文件（`include_str!` 指到别的文件 ⇒ 上面三条构造性全绿）。
+    for must in ["NavPage", "Shell", "COUNTDOWN_WINDOW_SECS", "set_on_page_change"] {
+        assert!(
+            code.contains(must),
+            "{SHELL} 未包含 `{must}` —— 扫描面与预期不符（先修用例再谈实现）"
+        );
+    }
+    // ⑤ **回调槽纪律**（R1）：外壳不得手写 `RefCell<Option<Box<dyn FnMut(..)>>>` 形状的裸槽
+    //    —— 一律走 `pages::CbSlot`（它自带"取出 → 调用 → 放回"与 panic 守卫）。
+    assert!(
+        code.contains("CbSlot"),
+        "{SHELL} 的切页通知槽必须走 `pages::CbSlot`（不得手写 take / put-back）"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8265,10 +8756,11 @@ fn font_metrics_baseline_is_present_and_meaningful() {
 /// 本来就该在那里以字面量出现；本网要抓的是"**派生**常量直接抄数字"）。
 ///
 /// 与 ⑥″ 各自列清单而不复用 [`UI_PROD_SOURCES`]：后者含 `theme.rs`（必须豁免）。
-const CONST_I32_SCAN_SOURCES: [(&str, &str); 11] = [
+const CONST_I32_SCAN_SOURCES: [(&str, &str); 12] = [
     ("ui/mod.rs", include_str!("mod.rs")),
     ("ui/components.rs", include_str!("components.rs")),
     ("ui/controls.rs", include_str!("controls.rs")),
+    ("ui/shell.rs", include_str!("shell.rs")),
     ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
     ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),

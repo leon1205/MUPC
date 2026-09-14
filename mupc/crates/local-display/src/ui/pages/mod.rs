@@ -97,6 +97,18 @@
 //!     滚动位置读 / 写 API（`lv_obj_get_scroll_y` / `lv_obj_scroll_to_y` 皆无）⇒
 //!     §6.3 的「手动上滚 ⇒ 停止自动滚动 + 浮现"回到最新"」在本层**结构性不可实现**；
 //!     本页只做恒显按钮 + 点击意图，缺口逐条列在 `p3_logs.rs` 的 **R2**。
+//! - **B2c-3 补充（应用外壳装配，`ui/shell.rs`）**：
+//!   - **页根摆放**：外壳把每个页根放在 `(Dimens::SIDE_PAD, Dimens::HEADER_H)`（相对外壳根），
+//!     与契约 1 / 1′ 的「尺寸 `CONTENT_W × CONTENT_H`、自身 `(0,0)`、摆放由调用方负责」逐条一致；
+//!     6 页**一次全部建好**、靠 `HIDDEN` 显隐切换（§5.3 的自建容器路线，**不用** `lv_tabview`
+//!     —— 外壳要"一次建 6 页、常驻不销毁"，而 `lv_tabview` 的页生命周期归它自己管）。
+//!   - **数据入口仍是契约 2 / 2′**：外壳**不替页做数据决策**，只把页句柄交出去
+//!     （`Shell::p1()` … `Shell::p6()`）⇒ 真实数据源接线属 **B3**。
+//!   - **两条新增的外壳级注入**（页侧无生产可见查询口，见 `shell.rs` 偏差 **SH2**）：
+//!     「是否有确认弹层打开」（暂停空闲计时）与「触摸设备是否可用」（EDGE-13 角标）；
+//!     P2 的「未保存修改」**不**经注入 —— 外壳每拍读生产可见的
+//!     [`p2_config::P2ConfigPage::is_dirty`]，提示条的「放弃修改」直接调
+//!     [`p2_config::P2ConfigPage::discard_draft`]。
 //!
 //! ## ⚠️ 已知偏差登记（B2a 规格评审后；**集中、显式** —— 屏文 / 尺寸与契约不一致处
 //! 一律在此列明，不得"悄悄地"不一致）
@@ -727,6 +739,13 @@ pub const ALL_TEXTS: &[&str] = &[
     p3_logs::TEXT_MODULE_INTERCORE,
     p3_logs::TEXT_MODULE_GATEWAY,
     p3_logs::TEXT_MODULE_AUDIT,
+    // 应用外壳（B2c-3）：页眉返回键 / 未保存提示条 / 通道胶囊 / 触摸不可用角标。
+    crate::ui::shell::TEXT_BACK,
+    crate::ui::shell::TEXT_DIRTY_BANNER,
+    crate::ui::shell::TEXT_DISCARD,
+    crate::ui::shell::ICON_WARN,
+    crate::ui::shell::TEXT_CHANNEL_OK,
+    crate::ui::shell::TEXT_TOUCH_UNAVAILABLE,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
