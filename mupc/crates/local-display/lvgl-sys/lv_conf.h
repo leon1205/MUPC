@@ -27,8 +27,17 @@
 #define LV_USE_STDLIB_STRING    LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_SPRINTF   LV_STDLIB_BUILTIN
 
-/* 设计 §1.1.1.2 / §10：256 KB 起，实测后定稿。 */
-#define LV_MEM_SIZE (256 * 1024U)
+/* 设计 §1.1.1.2 / §10。
+ *
+ * ⚠️ **本值由实测决定，不是拍脑袋**：外壳（B2c-3）要求**同时持有 6 页**，而
+ * 256 KB 实测只够 **P1+P6+P2 三页**（建第 4 页 P4 即 `lv_realloc` 失败）。
+ * 见 `src/ui/tests.rs::pages_chain` 的「6 页共存」用例（该不变量已上锁）。
+ *
+ * 该池**只装 LVGL 对象树 / 样式 / 定时器**；绘制缓冲（双缓冲约 6 MB）由
+ * `src/lvgl/display.rs` 用 `std::alloc::alloc_zeroed` 从**系统堆**分配，
+ * **不与本池竞争** ⇒ 调大本值只增加 BSS，不牺牲任何功能。
+ * RK3588 上 1 MB 可忽略。（预算与实测区间见设计 §10 / §14） */
+#define LV_MEM_SIZE (1024 * 1024U)
 #define LV_MEM_POOL_EXPAND_SIZE 0
 
 /*====================

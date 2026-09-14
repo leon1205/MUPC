@@ -6924,6 +6924,179 @@ pub(crate) fn pages_chain() {
             drop(p5c);
         }
 
+        // ── ⑥′ **6 页共存**（外壳 B2c-3 的硬前提，**不变量回归锁**）──────────────
+        //
+        // 外壳要「同时持有 6 页、靠显隐切换」。这**不是**可推定的性质：LVGL 对象树
+        // 分配自定容池 `LV_MEM_SIZE`，早期 256 KB 时**建到第 4 页即 `lv_realloc`
+        // 失败**（本用例当时红过）。故只要有人把 `lvgl-sys/lv_conf.h` 的
+        // `LV_MEM_SIZE` 调回去、或给某页加出大量常驻对象，这里就会红。
+        //
+        // 断言刻意写成「**建完就验内容**」而不是"构造没报错"——构造成功只说明分配
+        // 没失败，不说明该页真拿到了数据（本项目出过"局部句柄被 drop ⇒ 屏上空白、
+        // 而测试全绿"的缺陷类）。
+        //
+        // ⚠️ 构建顺序**不要改**：按 P1→P6→P2→P4→P5→P3 复现"第 4 页失败"的原始序列。
+        {
+            use crate::ui::pages::p3_logs::P3LogsPage;
+            use crate::ui::pages::p4_interlock::P4InterlockPage;
+            use crate::ui::pages::p5_audit::P5AuditPage;
+            use crate::ui::pages::p6_system::P6SystemPage;
+            use crate::ui::pages::{p1_status::P1StatusPage, p2_config::P2ConfigPage};
+            use mupc_display_proto::{
+                AuditPage, AuditResult, ConfigField, ConfigGroup, ConfigKind, ConfigView,
+                ConsoleAuditEntry, ConsoleOp, InterlockSection, InterlockSourceItem, WriteMode,
+            };
+            use serde_json::Value;
+
+            let p1 = P1StatusPage::new(&host).expect("6 页共存：建 P1");
+            p1.render(&PageInput::live(&frame_healthy()));
+            assert!(
+                p1.obj().is_alive() && p1.obj().child_count() > 0,
+                "P1 须存活且非空壳"
+            );
+
+            let p6 = P6SystemPage::new(&host).expect("6 页共存：建 P6");
+            p6.render(&PageInput::live(&frame_healthy()));
+            assert!(
+                p6.obj().is_alive() && p6.obj().child_count() > 0,
+                "P6 须存活且非空壳"
+            );
+
+            let p2 = P2ConfigPage::new(&host).expect("R1: P2");
+            p2.set_config(&ConfigView {
+                groups: vec![
+                    ConfigGroup {
+                        id: "iec104".into(),
+                        label: "IEC 104 连接参数".into(),
+                        fields: vec![
+                            ConfigField {
+                                key: "gateway.listen_addr".into(),
+                                label: "本机监听地址".into(),
+                                kind: ConfigKind::Ipv4,
+                                default: Value::from("127.0.0.1"),
+                                value: Value::from("127.0.0.1"),
+                                unit: None,
+                                requires_reconnect: false,
+                                editable: false,
+                            },
+                            ConfigField {
+                                key: "gateway.port".into(),
+                                label: "端口".into(),
+                                kind: ConfigKind::U16 {
+                                    min: 1,
+                                    max: 65535,
+                                    step: 1,
+                                },
+                                default: Value::from(2404),
+                                value: Value::from(2404),
+                                unit: None,
+                                requires_reconnect: false,
+                                editable: true,
+                            },
+                        ],
+                    },
+                    ConfigGroup {
+                        id: "system".into(),
+                        label: "遥测与日志".into(),
+                        fields: vec![ConfigField {
+                            key: "system.log_level".into(),
+                            label: "日志级别".into(),
+                            kind: ConfigKind::Enum {
+                                options: vec![],
+                            },
+                            default: Value::from("info"),
+                            value: Value::from("info"),
+                            unit: None,
+                            requires_reconnect: false,
+                            editable: true,
+                        }],
+                    },
+                ],
+                revision: 7,
+                write_mode: WriteMode::TextPreserve,
+            })
+            .expect("6 页共存：P2 set_config");
+            assert!(
+                p2.obj().is_alive() && p2.obj().child_count() > 0,
+                "P2 须存活且非空壳"
+            );
+
+            let p4 = P4InterlockPage::new(&host).expect("6 页共存：建 P4");
+            p4.set_section(&InterlockSection {
+                ts_ms: 1_789_047_727_000,
+                available: true,
+                enabled: true,
+                latched: true,
+                stop_failed: false,
+                sources: vec![
+                    InterlockSourceItem {
+                        name: "estop".into(),
+                        tripped: true,
+                    },
+                    InterlockSourceItem {
+                        name: "door".into(),
+                        tripped: false,
+                    },
+                ],
+                fault_lamp: Some(true),
+                run_lamp: Some(false),
+                release_hold_secs: 3,
+            });
+            assert!(
+                p4.obj().is_alive() && p4.obj().child_count() > 0,
+                "P4 须存活且非空壳"
+            );
+
+            let p5 = P5AuditPage::new(&host).expect("6 页共存：建 P5");
+            let p5_full: Vec<ConsoleAuditEntry> = (0..20)
+                .map(|i| ConsoleAuditEntry {
+                    id: format!("ca-{i}"),
+                    ts_ms: 1_700_000_000_000 + i as u64,
+                    operator: mupc_display_proto::CONSOLE_OPERATOR.into(),
+                    op: ConsoleOp::ConfigApply,
+                    target: "gateway.port".into(),
+                    before: None,
+                    after: None,
+                    result: AuditResult::Ok,
+                    reason: None,
+                    request_id: "rid-r1".into(),
+                })
+                .collect();
+            p5.set_page(&AuditPage {
+                entries: p5_full,
+                page: 1,
+                page_size: mupc_display_proto::AUDIT_PAGE_SIZE as u32,
+                has_more: false,
+                newest_ts_ms: Some(1),
+                available: true,
+            });
+            assert_eq!(p5.visible_rows(), 20, "P5 须真的渲染出 20 行");
+            assert_eq!(p5.rows_alive(), 20);
+
+            let p3 = P3LogsPage::new(&host).expect("6 页共存：建 P3");
+            let p3_full: Vec<LogEntry> = (0..20)
+                .map(|i| log_entry(1_700_000_000_000 + i as u64, LogLevel::Info, "audit", "c"))
+                .collect();
+            p3.set_page(&log_page(p3_full, true, false));
+            assert_eq!(p3.visible_rows(), 20, "P3 须真的渲染出 20 行");
+            assert_eq!(p3.rows_alive(), 20);
+
+            // 六页同屏渲染一次（外壳切页前的最坏情形）
+            disp.refr_now_for_test();
+
+            // 六页全部析构：确认互不持有、且宿主不被级联删除
+            drop(p1);
+            drop(p6);
+            drop(p2);
+            drop(p4);
+            drop(p5);
+            drop(p3);
+            assert!(
+                host.is_alive(),
+                "6 页析构后 host 须仍存活（页不得持有宿主，否则级联删除）"
+            );
+        }
+
     }
 
     drop(host);
