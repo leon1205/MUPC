@@ -591,6 +591,11 @@ pub enum ControlCode {
 | `/v1/console/interlock/release` | POST | `InterlockOpPayload { observed_latched, observed_sources: Vec<String> }` | `InterlockOpAck { latched, stopped }` | `InterlockOps` |
 | `/v1/console/interlock/ack_m1` | POST | `InterlockOpPayload`（同上） | `InterlockOpAck` | `InterlockOps` |
 
+> **多值 query 的线上约定（2026-09-15 补）**：`levels` / `targets` / `ops` 一律用**重复键**编码（如 `levels=error&levels=warn`），不用逗号拼接。`ConsoleClient`（`src/console.rs`）按此发送，`mupcd` 侧须按同口径解码。
+>
+> **GET 失败的错误通道（2026-09-15 补）**：§3.3 的 `ControlResponse` 信封**只用于 POST 写操作**；**GET 查询返回裸 DTO**（本表"返回"列即其类型），失败时**不走信封**，由 **HTTP 状态码**表达（`ConsoleClient` 落为 `Error::HttpStatus`：非 2xx 即算通道失败，**不**把错误体当数据解析）。⇒ `mupcd` 侧 GET 的错误响应**必须给非 2xx**，不得用 `200` + 错误体。
+> **单条日志消息长度上限（2026-09-15 补）**：`LogPage` 的 `LogEntry.message` 在 `display-proto` 中**未设上限**，而 `ConsoleClient` 的响应体上限按「`LOG_PAGE_LIMIT_MAX`（200）× 单条 ≤ 1 KiB」推算 ⇒ **`mupcd` 的日志服务必须限制单条消息长度 ≤ 1 KiB**（超出即截断并在条目上标注），否则两侧上限须一起上调。
+
 **`observed_*` 的作用**：UI 在弹层中展示的是「它看到的联锁态」。提交时携带该观测值，后端与服务端当前态比对——若已变化（例如触发源刚被复位或刚被触发），返回 `RejectedPrecondition` + 消息「联锁状态已变化，请刷新后重试」。这是**无并发控制场景下的乐观并发检查**，防止"基于过期画面执行破坏性操作"。
 
 **`ConfigView` 字段元数据（关键，决定 UI 无需硬编码）**：
