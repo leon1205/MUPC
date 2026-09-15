@@ -41,7 +41,7 @@
 //! | PD8 | 「保存中…」取 **`保存中...`**（三个 ASCII `.`，U+002E） | `…`(U+2026) **不在 cmap 内**；`.` 在（且 `components.rs` 的 `DOTS` 截断同款） | 同 PD1 |
 //! | PD9 | `WriteMode::FullRewrite` 的 Toast 取 **`配置已保存 · 原有文字已不存在`**（设计 §4.3.2.1 写「配置文件已整体重写，原有注释不再保留」） | **缺字**：`整`(U+6574) / `写`(U+5199) / `注`(U+6CE8) / `留`(U+7559) / `再`(U+518D) 均不在 cmap 内 ⇒ 无法逐字照抄。改写串保留两条语义：**已保存** + **原有文字（注释）已不存在** | 同 PD1 |
 //! | PD10 | **`WriteMode::FullRewrite` 的 Toast 由 `set_config` 统一触发**（`show_result` 成功路径不再叠加"保存成功"Toast —— UI §7.2「同一时刻仅 1 条」，**取信息量更大的那条**） | `ConfigView.write_mode` 的契约语义即「最近一次落盘写模式，`FullRewrite` 时 UI 须明示」（EDGE-23）⇒ 任何携带该值的视图都该明示，故收在唯一入口 | 无（有意） |
-//! | PD11 | 保存 / 恢复默认值的分级与「涉及：」列表一律按**本次改动**判定：`save_level` / `reset_level` / [`reconnect_field_labels`] 收**本次补丁的键集合**（保存 = `draft_patch(..).changes`；恢复默认值 = `defaults_patch_of(..).changes`），键集合判定由 [`reconnect_in`] 承担（**不再**看"视图内全部字段"） | **⚠️ 文档内冲突（如实逐列四处原文，不择利引用）** —— 出处文件 = `docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md`（行号为逐行核对结果）：<br/>① **`L2` 行 `:99`** 写「联锁释放、M1 授权、**含连接类字段的配置保存**、恢复默认值」——「含」可读作"**本次**含"（改动口径），措辞本身**不排除**视图口径（歧义行）；<br/>② **`L2+` 行 `:100`** 写「**任一字段** `requires_reconnect == true` 的配置保存」——**视图口径**（"任一字段"= 视图里存在，不限定本次改动）；<br/>③ **§6.2 交互流程 3 `:511`（明细示例）+ `:512`（WarnBanner 插入判据）**：`:511` 的示例是「`端口：2404 → 2405`」+（`:512`）「**涉及：端口**」，而同视图内还有 `监听地址`（§4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ **只有改动口径**能让该示例成立；但**同一段**的 `:512` 判据原文是「**若任一字段** `requires_reconnect == true` → 插入 `WarnBanner`」= **视图口径** ⇒ **该段自身即自相矛盾**（示例与判据不能同时满足）；<br/>④ **§7.3 `WarnBanner` 行 `:701`** 写「见 §2.5；**当任一字段** `requires_reconnect` **或含连接类字段时**强制出现」——亦为**视图口径**（"或含"把 ① 的歧义行一并读成视图口径）。<br/>⇒ **三处原文（②、③的 `:512`、④）支持视图口径、一处（①，措辞歧义）不排除视图口径、仅 ③的 `:511` 示例支持改动口径**。**为何仍选改动口径**：(a) ③ 的示例是**可执行验收**——示例不成立则实现无法同时满足 §2.5 与 §6.2；(b) §2.6 铁律「降级可见、**绝不造假**」——只改日志级别却弹「生效瞬间通信将短暂中断」是**谎报副作用**；(c) **L1 可达性**——真实字段表含 `gateway.listen_addr` / 核间端口（§4.3.3）⇒ 视图口径下 **L1 永不可达、`WarnBanner` 恒亮**，§2.5 的 L1 与 L2 两行同时报废。<br/>**⛳ 文档内冲突，待 PM 裁定；[`reconnect_in`] 是单一切换点 —— 若裁定视图口径，只需改它一处** | 无（**已按"本次改动"落地**；若 PM 另裁，只需改 [`reconnect_in`] 一处） |
+//! | PD11 | 保存 / 恢复默认值的分级与「涉及：」列表一律按**本次改动**判定：`save_level` / `reset_level` / [`reconnect_field_labels`] 收**本次补丁的键集合**（保存 = `draft_patch(..).changes`；恢复默认值 = `defaults_patch_of(..).changes`），键集合判定由 [`reconnect_in`] 承担（**不再**看"视图内全部字段"） | **⚠️ 文档内冲突（如实逐列四处原文，不择利引用）** —— 出处文件 = `docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md`（行号为逐行核对结果）：<br/>① **`L2` 行 `:99`** 写「联锁释放、M1 授权、**含连接类字段的配置保存**、恢复默认值」——「含」可读作"**本次**含"（改动口径），措辞本身**不排除**视图口径（歧义行）；<br/>② **`L2+` 行 `:100`** 写「**任一字段** `requires_reconnect == true` 的配置保存」——**视图口径**（"任一字段"= 视图里存在，不限定本次改动）；<br/>③ **§6.2 交互流程 3 `:511`（明细示例）+ `:512`（WarnBanner 插入判据）**：`:511` 的示例是「`端口：2404 → 2405`」+（`:512`）「**涉及：端口**」，而同视图内还有 `监听地址`（§4.3.3 明列 `requires_reconnect=true`）却不进「涉及：」⇒ **只有改动口径**能让该示例成立；但**同一段**的 `:512` 判据原文是「**若任一字段** `requires_reconnect == true` → 插入 `WarnBanner`」= **视图口径** ⇒ **该段自身即自相矛盾**（示例与判据不能同时满足）；<br/>④ **§7.3 `WarnBanner` 行 `:701`** 写「见 §2.5；**当任一字段** `requires_reconnect` **或含连接类字段时**强制出现」——亦为**视图口径**（"或含"把 ① 的歧义行一并读成视图口径）。<br/>⇒ **三处原文（②、③的 `:512`、④）支持视图口径、一处（①，措辞歧义）不排除视图口径、仅 ③的 `:511` 示例支持改动口径**。**为何仍选改动口径**：(a) ③ 的示例是**可执行验收**——示例不成立则实现无法同时满足 §2.5 与 §6.2；(b) §2.6 铁律「降级可见、**绝不造假**」——只改日志级别却弹「生效瞬间通信将短暂中断」是**谎报副作用**；(c) **L1 可达性**——真实字段表含 `gateway.listen_addr` / 核间端口（§4.3.3）⇒ 视图口径下 **L1 永不可达、`WarnBanner` 恒亮**，§2.5 的 L1 与 L2 两行同时报废。<br/>**⛳ 文档内冲突，待 PM 裁定；[`reconnect_in`] 是单一切换点 —— 若裁定视图口径，只需改它一处** | 无（**已按"本次改动"落地**；若 PM 另裁，只需改 [`reconnect_in`] 一处） **✅ PM 已裁定（2026-09-15）**：口径 = **本次改动**（理由：L1 可达性 + §2.6 不谎报副作用）；UI §2.5 / §6.2 / §7.3 三处措辞已由「任一字段」改为「**本次改动涉及**任一字段」，见 UI 附录 **A.7** |
 //! | PD12 | **只读字段不进 `defaults_patch()`** | `ConfigField::validate_value()`（契约）对 `editable=false` **一律拒绝**（"只读，不可修改"）⇒ 把只读字段放进 `changes` 会让**整个**恢复请求被后端二次校验打回（PL-4 的红线字段本就不可写） | 无（**有意**；恢复默认值的"本次改动"= 全部 `editable` **且 `default` 合法**的字段（判据 = [`resettable`]，`default` 非法者见 **PD22**）—— 与视图口径的差集正是只读字段，见 [`reconnect_in`] 的等价性论证） |
 //! | PD13 | 注入侧 `group.label` / `field.label` 与 `Enum` 选项**统一过 [`display_safe`]**（出口 = [`group_label_text`] / [`field_label_text`]） | 改前三条**同类数据两条路径**不一致（`Enum` 选项过了、`group.label` / `field.label` 没过）：后端标签含 cmap 外 ASCII（`-` / 小写）即豆腐块。**残余风险（如实登记，不粉饰）**：`display_safe` **只改写 ASCII**（`-`/`_`→`–`、小写→大写同族、其余→`?`），**非 ASCII（中文）字符一律原样透传** ⇒ 后端 `label` 里的**缺字中文（如 `环` / `服务` / `（`）它挡不住**，真机照样豆腐块。**真正的防线**：后端字段表（`ConfigFieldMeta`）的 `label` 必须约束在 **UI §3.6 用字表**内 —— 属**联调 / 后端**责任（见 UI §3.6 与设计 §6.2）；本页的 [`LABEL_OVERRIDES`] 只是**例外覆盖**机制（只为 PM 裁定键而设），**不是**通用护栏 | **B2c 之后**的「字体码表 + 文案统一收口批」：扩 §3.6 字符集 ⇒ `display_safe` 的"改写面"随 cmap 扩大而收窄，缺字中文风险随之下降（**不会归零** —— 字库永远落后于任意后端文案，后端约束才是根治） |
 //! | PD14 | **行型 B 的 `Ipv4Stepper` 横向跨到卡外缘**：实测跨度 **x16–1007**（= [`Dimens::CONTENT_W`] **992 px**，与卡**外缘**齐宽），UI §6.2 写「控件独占次行 **(x36–x988)**」（卡**内**，有效 952 px）—— 行型 A 的内边距偏差已登记 **PD4**，行型 B 这条本次补登记 | **实算根因**：卡内可用宽 [`INNER_W`] = 992 − 2 × **17**（描边 1 + 内边距 16）= **958**，而 `Ipv4Stepper` 整件宽 = [`Dimens::CONTENT_W`] = **992**（`ui/controls.rs` **CD2**：四段 792 + 缝 8 + 汇总 **184**；汇总宽 = "内容区余量"，为容纳 `192.168.1.10` 12 字符）⇒ 控件比卡内宽 **34 px = 两侧各 17 px**。若从卡内容区原点起排（屏幕 x33）则右端 x1024 越出卡外缘（x1007）**17 px** 并被父对象裁剪（`ui/controls.rs` CD2 同款事实）⇒ 取 `ROW_B_CTRL_X = −CARD_INSET`（`−17`）把控件**左端内缩到卡外缘**，实测跨度 x16–1007 = 恰与卡外缘齐宽，**代价 = 吃掉卡左右各 17 px 内边距**（行型 A 控件右缘落在卡内右缘 —— 实测闭区间右缘 x990，即 PD4 记的 x991 排他右缘；两版式的口径**不一致**） | **与 CD2 同批收口**：先由 PM 定 `Ipv4Stepper` 整件宽 —— UI 自身三口径互相矛盾（§5.1 #7 写 **856**、§6.2 写 **952**、实测落地 **992**）；若裁「控件必须在卡内 (x36–x988)」⇒ 需把汇总标签 **184 → 144**（`192.168.1.10` 放不下，须另行设计）或改行型 B 版式（如汇总挪到第二行） |
@@ -54,7 +54,7 @@
 //! | PD21 | **控件值域比契约窄时的屏上回显（C1 的残余，如实登记）** —— 两种子形态：**(i) 注入值非法** ⇒ 该行进错误态 + 控件 `disabled` + **不进草稿**，但**控件本体仍渲染一个"最小可表示值"**（`Enum` ⇒ `options[0]`；`U16`/`U64` ⇒ `min`；`Ipv4` ⇒ `0.0.0.0`）；**(ii) 注入值合法但控件表示不了**（如 `U64::MAX` 超出 `Stepper` 的 `i64` 值域 ⇒ 控件渲染 `i64::MAX`）⇒ 该行**不进错误态**（值确实合法），但同样**不置脏、不进草稿**（拦它的是 [`DraftScope::touched`]，**不是** `invalid`）。**⚠️ 限定（B5 补登记）：(ii) 的"不可提交"仅对"未触碰"成立** —— 一旦用户触碰该字段（`Stepper` 的 `i64` 值域内 `±` 可达 `i64::MAX` 附近），`is_dirty = true`、该**近似值**（`9223372036854775807`，**不是**注入的 `u64::MAX`）**可被提交** | 三类控件的取值域**没有"无值"这一档**（`SegmentedControl::new` 拒绝空选项、`Stepper::new` 必须有 `value` 且是 `i64`、`Ipv4Stepper` 四段恒有值），且 `ui/controls.rs` / `ui/components.rs` 本批**禁改**。旧形态的缺陷是"**静默**改写 + 保存可用"（一次点击即可写入屏上从未展示的值，C1）；现形态把 (i) 变为**可见**（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）+ **不可交互**，把 (ii) 变为**不可提交**（不进 `draft` / `is_dirty` / `defaults_patch`）⇒ 风险由"可写入装置"降为"屏上显示一个**不会被写回**的近似值"（**(ii) 仅在未触碰时成立**，见上）。该风险属"**控件值域窄于契约值域**"的既有取向（本页不为此增"隐藏原值"的影子态 —— 影子态一旦与控件漂移，就是新一类静默失实） | 无（**有意**）；根治需给三类控件增"无值 / 非法值 / 超宽值"专用形态（`ui/controls.rs` 收口批）：(i) 改显 [`PLACEHOLDER`]、(ii) 由控件侧支持全 `u64` 值域 |
 //!
 //! | PD22 | **"当前值非法 **且** `default` 自身也非法"的键在本页无修复路径**（**B3 的残余**，如实登记）：B3 已让 [`defaults_patch_of`] 纳入全部「`editable` 且 `default` 合法」的键 ⇒ "当前值非法但 `default` 合法"的字段**可经「恢复默认值」修好**；但若某键的 `default` **自身**也过不了 [`ConfigKind::validate_value`]（后端字段表自相矛盾：连"可写值"都不合法），则该键**既不能编辑**（控件 `disabled`）、**也不能进恢复补丁**（混入会被后端打回**整单**）⇒ **页内无任何修复路径**（该字段永久不可改，除非重启进程或后端改值） | `default` 不合法时把它写进补丁，会让**整个**恢复请求被后端二次校验打回（不能为一个键牺牲其余键的可恢复性）。本页的既有披露：注入值非法时该行仍**如实**标红（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）—— **非法这件事本身是可见的**，不可见的是"`default` 也非法"（UI §3.6 无对应文案，本页**不**为其造文案） | **后端字段表缺陷，需后端修正**（`default` 必须落在自身 `kind` 的值域内）；字库/文案收口批**不**解决此项 |
-//! | PD23 | **恢复默认值弹层的「当前值」在"注入值非法"行取的是控件近似值**（B3 把该键纳入补丁后**仍然如此**，如实登记）：[`reset_details`] 的 `before` 与行内回显**同源**（读控件，见 [`Core::current_values`]）⇒ 注入值非法时控件显的是**最小可表示值**（PD21(i)：`Enum` ⇒ `options[0]`、`U16`/`U64` ⇒ `min`、`Ipv4` ⇒ `0.0.0.0`），**不是**装置真值。**极端情形**：`default` 恰等于该近似值（如 `U16{min: 1}` 且 `default = 1`）⇒ 明细显示「`1 → 1`」，**看似空操作、实际是真修复**（真值 → `1`） | ①「当前值」的**唯一真源是控件**（与 [`save_details`] 同口径）—— 弹层与行内回显**同源**，屏内不自相矛盾；②该行已用红字 [`TEXT_INVALID_VALUE`] 披露"取值无效"，操作者可判读；③根治在 **PD21 的收口批**（`ui/controls.rs` 给三类控件增"无值档"），届时 `before` 可直显 [`PLACEHOLDER`]（PRD F1.4「显 `--`，严禁补 0」）。**本页不粉饰**：这是**近似值**，对"只看弹层"的操作者构成误读风险 | 无（**有意**，**未**自行扩大改动）；**⚠️ 待 PM / 主控裁定**：若要求本批即改显 [`PLACEHOLDER`]，只需让 [`reset_details`] 在"注入值非法"时改取 `f.value` 作 `before`（≈ 3 行：非法值经 [`format_value`] 自动落 [`PLACEHOLDER`]） |
+//! | PD23 | **恢复默认值弹层的「当前值」在"注入值非法"行取的是控件近似值**（B3 把该键纳入补丁后**仍然如此**，如实登记）：[`reset_details`] 的 `before` 与行内回显**同源**（读控件，见 [`Core::current_values`]）⇒ 注入值非法时控件显的是**最小可表示值**（PD21(i)：`Enum` ⇒ `options[0]`、`U16`/`U64` ⇒ `min`、`Ipv4` ⇒ `0.0.0.0`），**不是**装置真值。**极端情形**：`default` 恰等于该近似值（如 `U16{min: 1}` 且 `default = 1`）⇒ 明细显示「`1 → 1`」，**看似空操作、实际是真修复**（真值 → `1`） | ①「当前值」的**唯一真源是控件**（与 [`save_details`] 同口径）—— 弹层与行内回显**同源**，屏内不自相矛盾；②该行已用红字 [`TEXT_INVALID_VALUE`] 披露"取值无效"，操作者可判读；③根治在 **PD21 的收口批**（`ui/controls.rs` 给三类控件增"无值档"），届时 `before` 可直显 [`PLACEHOLDER`]（PRD F1.4「显 `--`，严禁补 0」）。**本页不粉饰**：这是**近似值**，对"只看弹层"的操作者构成误读风险 | 无（**有意**，**未**自行扩大改动）；**⚠️ 待 PM / 主控裁定**：若要求本批即改显 [`PLACEHOLDER`]，只需让 [`reset_details`] 在"注入值非法"时改取 `f.value` 作 `before`（≈ 3 行：非法值经 [`format_value`] 自动落 [`PLACEHOLDER`]） **✅ PM 已裁定并已修复（2026-09-15）**：`before` 改取**装置真值** `&f.value`（与 [`save_details`] 同口径），`current` 参数随之删除；非法真值经 [`format_value`] 落 [`PLACEHOLDER`]。回归用例 `reset_details_before_is_device_truth_not_control_echo`（探针实测：把来源换成 `default` ⇒ 红 `"1"` vs `"–"`）。**未**采纳「补丁跳过真值已等于默认值的键」：它能让「将修改的字段」只列真变更，但引入两个新风险 ① 帧值滞后窗口内会**静默少复位**一个字段 ② 全部字段都已在默认值时弹层出现**零行明细**而无对应空态 ⇒ 如实登记为残余（见 UI 附录 A.7）。另：`reset_details` 原先在 `current` 缺键时 `continue`（明细不列）而补丁照写 ⇒ 那正是本节要禁的「写了不列」，现已一并消除 |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -639,23 +639,24 @@ pub(crate) fn save_details(
 /// 恢复默认值路径的变更明细（「字段：当前值 → 默认值」；范围与 [`defaults_patch_of`] **逐条一致**
 /// —— 同一个 [`resettable`]，不得各写一套：列了不写 = **谎报**，写了不列 = 操作者看不到将改什么）。
 ///
-/// ⚠️ **「当前值」取自控件**（`current` = [`Core::current_values`]，与 [`save_details`] 同口径）：
-/// 注入值非法时控件回显的是**最小可表示值**（PD21(i)）而**非**装置真值 ⇒ 明细的「当前值」是
-/// **近似值**（极端情形下 `default` 恰等于该近似值 ⇒ 显示「`1 → 1`」）。**如实登记于 PD23**，
-/// 不粉饰；根治在 PD21 的控件收口批。
-pub(crate) fn reset_details(
-    view: &ConfigView,
-    current: &BTreeMap<String, Value>,
-) -> Vec<ChangeDetail> {
+/// **「当前值」取装置真值 [`ConfigField::value`]**（PM 裁定 2026-09-15，见 **PD23**）—— 与
+/// [`save_details`] 的 `before` **同口径**（那里一直是 `&f.value`）。先前此处取的是**控件回显值**
+/// （`Core::current_values`）⇒ 注入值非法时控件显的是**最小可表示值**（PD21(i)：`Enum` ⇒ `options[0]`、
+/// `U16` ⇒ `min` …）而**非**装置真值，于是真值越界 `99999`、默认值恰为 `1` 时，明细显示
+/// 「`1 → 1`」—— **一次真修复看起来像空操作**。
+///
+/// 改取真值后：非法值经 [`format_value`] 自动落 [`PLACEHOLDER`]（PRD F1.4「显 `--`，严禁补 0」）
+/// ⇒ 显示「`–` → `1`」，**真值**与"确实会改变"两件事同时成立。
+///
+/// 顺带消掉一处**潜在谎报**：旧实现在 `current` 缺该键时 `continue`（明细不列），而
+/// [`defaults_patch_of`] 照写该键 ⇒ 那正是本节要禁的"写了不列"。现在明细**不依赖控件状态**。
+pub(crate) fn reset_details(view: &ConfigView) -> Vec<ChangeDetail> {
     let mut out = Vec::new();
     for f in iter_fields(view).filter(|f| resettable(f)) {
-        let Some(now) = current.get(&f.key) else {
-            continue;
-        };
         out.push(ChangeDetail {
             key: f.key.clone(),
             label: field_label_text(f),
-            before: format_value(&f.kind, now, f.unit.as_deref()),
+            before: format_value(&f.kind, &f.value, f.unit.as_deref()),
             after: format_value(&f.kind, &f.default, f.unit.as_deref()),
         });
     }
@@ -2121,7 +2122,7 @@ fn open_dialog(core: &Rc<Core>, kind: DialogKind) -> Result<(), LvglError> {
                 TEXT_RESET_DEFAULT,
                 TEXT_IMPACT_RESET,
                 reset_level(&view, patch.changes.keys().map(String::as_str)),
-                reset_details(&view, &current),
+                reset_details(&view),
                 reconnect_field_labels(&view, patch.changes.keys().map(String::as_str)),
             )
         }
@@ -2384,7 +2385,6 @@ mod tests {
                 }
             }
         }
-        let cur = initial_values(&v);
         let p = defaults_patch_of(&v);
         assert_eq!(
             p.changes.get("system.log_level"),
@@ -2417,7 +2417,7 @@ mod tests {
         assert!(pb.changes.contains_key("gateway.port"), "其余照常");
 
         // ④ 明细与补丁逐条一致（同一个判据）。
-        let d = reset_details(&v, &cur);
+        let d = reset_details(&v);
         assert!(
             d.iter().any(|x| x.key == "system.log_level"),
             "明细必须列出**会写**的字段（列了不写 / 写了不列都是谎报）"
@@ -2427,7 +2427,7 @@ mod tests {
             iter_fields(&v).filter(|f| resettable(f)).count(),
             "逐条一致"
         );
-        let db = reset_details(&bad, &initial_values(&bad));
+        let db = reset_details(&bad);
         assert!(
             db.iter().all(|x| x.key != "intercore.port"),
             "明细不得列出**不会写**的键"
@@ -2921,7 +2921,7 @@ mod tests {
         assert_eq!(d[0].before, "2404");
         assert_eq!(d[0].after, "2405");
 
-        let r = reset_details(&v, &cur);
+        let r = reset_details(&v);
         let editable = iter_fields(&v).filter(|f| f.editable).count();
         assert_eq!(r.len(), editable, "恢复默认值列出全部可编辑字段（此处 default 全合法）");
         assert!(
@@ -2949,12 +2949,60 @@ mod tests {
                 }
             }
         }
-        let cur = initial_values(&v);
-        let d = reset_details(&v, &cur);
+        let d = reset_details(&v);
         let row = d.iter().find(|x| x.key == "intercore.port").expect("明细含该字段");
         assert_eq!(row.before, PLACEHOLDER, "无法格式化 ⇒ 占位符");
         assert_ne!(row.before, "0", "**不得**把类型错配伪装成合法值 0");
         assert_eq!(row.after, "2500", "`after` 取合法的 default（不是占位符）");
+    }
+
+    /// **恢复默认值明细的「当前值」取装置真值，不取控件回显的近似值**（PM 裁定 2026-09-15，**PD23**）。
+    ///
+    /// 真值越界（`U16` 放不下 `99999`）+ 该键 `default` 恰为 `1`（正是控件在"注入值非法"下回显的
+    /// 最小可表示值）⇒ 旧实现（`before` 取控件值）显示「`1 → 1`」：**一次真修复看起来像空操作**。
+    ///
+    /// 敏感性：把 `reset_details` 的 `before` 实参由 `&f.value` 换成任何**控件口径**来源
+    /// （如重新引入 `current` 参数并取 `current[&f.key]`）⇒ 第 ① 条变红（读到 `"1"`）、
+    /// 第 ② 条变红（读到控件回显值而非真值）。
+    #[test]
+    fn reset_details_before_is_device_truth_not_control_echo() {
+        let mut v = view();
+        for g in &mut v.groups {
+            for f in &mut g.fields {
+                match f.key.as_str() {
+                    // ① 真值越界、而默认值恰等于"控件会在非法值下回显的最小可表示值"。
+                    "intercore.port" => {
+                        f.value = Value::from(99999u64);
+                        f.default = Value::from(1u64);
+                    }
+                    // ② 真值合法但 ≠ 默认值 —— 用来区分"真值"与"控件回显值"。
+                    "gateway.port" => {
+                        f.value = Value::from(2404u64);
+                        f.default = Value::from(1234u64);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let d = reset_details(&v);
+
+        let a = d
+            .iter()
+            .find(|x| x.key == "intercore.port")
+            .expect("明细含该字段");
+        assert_eq!(
+            a.before, PLACEHOLDER,
+            "非法**真值** ⇒ 占位符（PRD F1.4「显 `--`」）；不得回显控件近似值 `1` —— \
+             那会让一次真修复看起来像空操作"
+        );
+        assert_eq!(a.after, "1", "`after` 取合法的 default");
+
+        let b = d
+            .iter()
+            .find(|x| x.key == "gateway.port")
+            .expect("明细含该字段");
+        assert_eq!(b.before, "2404", "「当前值」必须是装置真值");
+        assert_eq!(b.after, "1234");
     }
 
     /// 整数边界：`u64` 超 `i64` 不 panic（收敛到 `i64::MAX`）；**`step > i64::MAX` 折为 1**
