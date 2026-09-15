@@ -2096,6 +2096,14 @@ impl P3LogsPage {
     /// 选项集合**以注入为准**（服务端真源）：文案与当前不一致时才重建 chip 组（避免无谓 churn）。
     /// 重建在**注入路径**（非渲染路径）发生；当前勾选按**下标**恢复（越界 no-op）——
     /// 选项变化本身**不**触发查询意图（用户没操作筛选）。
+    ///
+    /// 🚫 **调用方约束（B3 必须遵守，2026-09-15 代码质量评审补登记）**：本方法会
+    /// **删除在屏 chip 对象并重建**（`rebuild_modules` 里 `drop(...take())`）。而 chip 的
+    /// `on_query` 回调是在**该 chip 自身的点击回调帧内**被调用的 ⇒ **禁止**在 `on_query`
+    /// （或任何 LVGL 事件回调）里回灌 `set_targets` —— 那会在事件派发过程中删除**正在派发
+    /// 的对象**，是 UAF 级的用法错误（LVGL 侧表现为崩溃或静默错状态）。
+    /// 「新查询 ⇒ 新模块列表」这类需求必须**先落 `UiState`、在帧驱动路径**（`app.tick` /
+    /// `Shell::tick` 之后）再注入。
     pub fn set_targets(&self, targets: &[String]) {
         *self.core.targets.borrow_mut() = targets.to_vec();
         let texts = module_options(targets);

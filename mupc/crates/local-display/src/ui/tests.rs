@@ -418,6 +418,23 @@ const MAX_CHAR_LITERAL_LEN: usize = 12;
 /// 违规"（可消解：改注释措辞）；**结构上不会漏检**（不会把真代码藏起来）。**不实现嵌套**的
 /// 理由：`ui/**` 当前零嵌套块注释（实测），而嵌套扫描要引入深度计数与又一条"未闭合即失败"
 /// 判据 —— 收益低、改动面更大。**若有人在 `ui/**` 写嵌套块注释 ⇒ 先补本判据再写**。
+///
+/// ## 已知边界（**曾误报，已修**）：**CRLF 行尾** ⇒ ③b 把正常源码判成"跨行字符串"
+///
+/// 本仓库 `core.autocrlf = true`（git 检出时把 LF 落成 `\r\n`）⇒ **Windows 全新克隆 /
+/// 重新检出后的工作区全是 CRLF**。原实现在转义分支里只认 `` `\` `` **紧跟** `\n`，而
+/// CRLF 下 `` `\` `` 后面是 `\r` ⇒ 行续接判据落空、控制流掉进 ③b 的"裸换行"判据
+/// ⇒ **合法源码被响亮误报**。2026-09-15 实测：仅仅把 `ui/shell.rs` 的换行风格由 LF 改成
+/// CRLF（**内容一字未改**），`shell_static_constraints` / `ui_layout_setters_use_theme_constants` /
+/// `ui_const_i32_definitions_derive_from_theme` **三处同时变红**，报
+/// `ui/shell.rs:1635 —— 非原始字符串在闭合前跨了行`。
+///
+/// **修法**：两个转义分支统一走 [`line_continuation`]（认 `\r\n` 并把它一并推进掉）；
+/// 回归用例 [`scanner_accepts_crlf_line_continuation`]（**含反向探针**：真·裸换行仍须响亮失败）。
+///
+/// **教训（写给下一条判据）**：③ 系列的前提是"合法 Rust 源码里不存在未闭合字面量"，
+/// 而**换行风格也在这个前提内** —— 任何依赖"两字符紧邻"的判据都要先问一句
+/// **"CRLF 下还紧邻吗？"**（这是本网首条、也是唯一一条**误报**形态；其余边界一律偏漏检方向）。
 fn strip_comments_and_literals(src: &str, name: &str) -> String {
     let cs: Vec<char> = src.chars().collect();
     let line_of = |at: usize| 1 + cs[..at.min(cs.len())].iter().filter(|&&c| c == '\n').count();
@@ -477,10 +494,16 @@ fn strip_comments_and_literals(src: &str, name: &str) -> String {
                 } else if cs[i] == '\\' {
                     // **行续接**（`\` + 换行）在字符串里合法（内容被续接）—— 但**行还在**，
                     // 故这里也必须补一个换行，否则"行数恒等"的自证会误报。
-                    if cs.get(i + 1) == Some(&'\n') {
+                    //
+                    // ⚠️ 形参经 [`line_continuation`] 一并认 **CRLF**：本仓库
+                    // `core.autocrlf=true` ⇒ Windows 全新克隆时每个行尾都是 `\r\n`，若此处
+                    // 只认 `\n`，`\` 之后紧跟的 `\r` 会让本分支落空、控制流掉进 ③b 的裸换行
+                    // 判据 ⇒ **正常源码被误报为"跨行字符串"**（见函数文档"已知边界：CRLF"）。
+                    let (kept_nl, skip) = line_continuation(&cs, i);
+                    if kept_nl {
                         out.push('\n');
                     }
-                    i += 2;
+                    i += skip;
                     continue;
                 } else if cs[i] == '"' {
                     i += 1;
@@ -517,11 +540,13 @@ fn strip_comments_and_literals(src: &str, name: &str) -> String {
             while i < cs.len() {
                 if cs[i] == '\\' {
                     // **行续接**（`\` + 换行）在字符串里是合法的（内容被续接）—— 但**行还在**，
-                    // 故这里也必须补一个换行，否则"行数恒等"的自证会误报。
-                    if cs.get(i + 1) == Some(&'\n') {
+                    // 故这里也必须补一个换行，否则"行数恒等"的自证会误报。CRLF 形态同
+                    // [`line_continuation`]。
+                    let (kept_nl, skip) = line_continuation(&cs, i);
+                    if kept_nl {
                         out.push('\n');
                     }
-                    i += 2;
+                    i += skip;
                     continue;
                 }
                 if cs[i] == quote {
@@ -632,6 +657,26 @@ fn literal_prefix(cs: &[char], i: usize) -> Option<LiteralPrefix> {
             })
         }
         _ => None,
+    }
+}
+
+/// `cs[i]`（=`\`）是否开启**行续接**，并给出该推进的字符数（**含反斜杠本身**）。
+///
+/// 返回 `(是否吃到换行, 推进字符数)`：`` `\` `` + `\n` ⇒ `(true, 2)`；
+/// `` `\` `` + `\r\n` ⇒ `(true, 3)`；其余（转义普通字符）⇒ `(false, 2)`。
+///
+/// **两个调用点共用本判据**：字符串字面量与字符字面量里的转义分支。
+/// **为什么必须认 `\r\n`**：见 [`strip_comments_and_literals`] 的
+/// "已知边界（曾误报，已修）：CRLF 行尾" —— 本仓库 `core.autocrlf = true`，
+/// 只认 `\n` 会把正常源码误报成"跨行字符串"。
+///
+/// 返回**推进字符数**而不是"有没有换行"，是为了让 `\r` 被一并消费掉：
+/// 若只推进 2，`\r` 会被当成普通字符留在原地，行数守恒的账目就对不上了。
+fn line_continuation(cs: &[char], i: usize) -> (bool, usize) {
+    match (cs.get(i + 1), cs.get(i + 2)) {
+        (Some(&'\r'), Some(&'\n')) => (true, 3),
+        (Some(&'\n'), _) => (true, 2),
+        _ => (false, 2),
     }
 }
 
@@ -1057,6 +1102,47 @@ fn truncate_before_test_module_forms_are_accepted_or_loud() {
     assert!(
         r.is_err(),
         "`#[cfg(test)]` 与 `mod tests` 之间夹注释 ⇒ 必须**响亮失败**（旧行为是静默漏扫）"
+    );
+}
+
+/// **CRLF 行尾**回归（见 [`strip_comments_and_literals`] 的"已知边界：CRLF 行尾"）。
+///
+/// 判据：`` `\` `` 行续接在 **CRLF 源码**里必须被正常吃掉，**不得**触发 ③b 的
+/// "跨行字符串"误报。
+///
+/// **改什么会让本条变红**：把 [`line_continuation`] 的 `(Some(&'\r'), Some(&'\n'))` 分支
+/// 删掉（退回"只认 `\n`"）⇒ 第一段直接 panic（**已实测**：`shell_static_constraints`
+/// 三网红于同一形态）。
+///
+/// ⚠️ **反向探针的已知限度（2026-09-15 代码质量评审实测，如实登记）**：它只证明
+/// "③b 被改成**什么都不做**时会红"。若有人把 ③b 的 `unclosed(..)` 换成"**补一个换行**"
+/// （一种看起来更"宽容"的改法），本反向断言会**假绿** —— 多推的那个换行会触发
+/// [`assert_line_count_kept`] 的行数自证，把缺口**掩饰**成绿。故本条**不能**单独当作
+/// "③b 仍然有效"的证明；③b 的正面覆盖来自它在真实源码上的运行（`ui/**` 一旦出现
+/// 真·跨行字符串，三张静态网即红）。**要改 ③b 的失败分支，先读本段。**
+#[test]
+fn scanner_accepts_crlf_line_continuation() {
+    // 源码本身仍是 LF；被测的 CRLF 由**字面转义**给出 ⇒ 不依赖检出时的换行风格。
+    let crlf_src = "fn f() {\r\n    let s = \"a\\\r\nb\";\r\n    const SENTINEL: i32 = 48;\r\n}\r\n";
+    let out = strip_comments_and_literals(crlf_src, "crlf-probe.rs");
+    assert!(
+        out.contains("SENTINEL"),
+        "CRLF 下剥离不得吞掉后续源码（哨兵须可见）：{out:?}"
+    );
+    assert_eq!(
+        out.matches('\n').count(),
+        crlf_src.matches('\n').count(),
+        "行数须守恒 —— `\\r` 必须随 `\\n` 一并被推进掉，否则账目对不上"
+    );
+
+    // ── 反向探针：真的**裸换行**仍须响亮失败（证明修 CRLF 没把 ③b 一起废掉）──
+    let bare_nl = "fn f() {\n    let s = \"a\nb\";\n}\n";
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        strip_comments_and_literals(bare_nl, "bare-nl-probe.rs")
+    }));
+    assert!(
+        r.is_err(),
+        "非原始串里的**裸换行**必须仍然响亮失败（③b 未被削弱）"
     );
 }
 
@@ -1685,6 +1771,15 @@ fn runtime_formatters_emit_only_cmap_glyphs() {
     }
     // 占位符是**上屏**的固定字形（`--` 会出豆腐块 —— 见 `PLACEHOLDER` 文档）。
     cases.push(("PLACEHOLDER".to_string(), pages::PLACEHOLDER.to_string()));
+    // 外壳（B2c-3）的倒计时文案：静态模板已被 `ui_texts_covered_by_font_cmap` 覆盖，
+    // 但**运行时的秒数数字**只有经本用例才真正走一遍码表（10 s 窗口内全部取值）。
+    // 2026-09-15 代码质量评审建议补：此前 `countdown_text` 的**数字字形**无直接网。
+    for s in 0..=crate::ui::shell::COUNTDOWN_WINDOW_SECS {
+        cases.push((
+            format!("shell::countdown_text({s})"),
+            crate::ui::shell::countdown_text(s),
+        ));
+    }
 
     // 先自证"输入集真的含负值"（否则本用例会退化成"只查了正数"而静默失效）。
     assert!(
@@ -7164,12 +7259,19 @@ fn shell_p2_view() -> mupc_display_proto::ConfigView {
 /// | ⑥ | **建 / 拆外壳 ≥2 次**（R1：环 / 泄漏） | ⑥ |
 pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
     use crate::state::ChannelStatus;
-    use crate::ui::shell::{self, NavPage, Shell, COUNTDOWN_WINDOW_SECS};
+    use crate::ui::shell::{self, NavPage, Shell, TabState, COUNTDOWN_WINDOW_SECS};
 
     // 外壳的宿主（模拟 `main.rs` 的 `Obj::screen()` 直挂）。
+    //
+    // ⚠️ **必须显式清内边距**：裸 `Obj` 会吃到 LVGL 默认主题的 `card` 样式
+    // （`pad_all` ≈ 20 px），那样宿主就不再是"屏"的忠实替身 —— 三区会被宿主的
+    // 内边距顶偏，且**掩盖**外壳自己是否清干净了边距（生产路径的屏自带 `pad_all = 0`）。
+    // 加上 `transparent()`（`pad_all(0)` + `radius NONE`）后，本宿主与 `Obj::screen()`
+    // 在几何上等价 ⇒ 下面⑦的**绝对坐标**断言才对生产路径有约束力。
     let home = Obj::create(screen).expect("shell host");
     home.set_size(Dimens::SCREEN_W, Dimens::SCREEN_H);
     home.set_pos(0, 0);
+    home.add_style(&theme::transparent(), StyleSelector::main());
 
     let base = Instant::now();
     let at = |secs: u64| base + Duration::from_secs(secs);
@@ -7219,6 +7321,92 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             (Dimens::CONTENT_W, Dimens::TOUCH_MIN),
             "未保存提示条 = 992×48（UI §4.3）"
         );
+        // **⑦ 三区绝对坐标**（SH14 收口 —— 此前只断尺寸，`root` 的内边距缺陷**无网**）。
+        //
+        // 判据取**屏内绝对坐标**：宿主已与 `Obj::screen()` 几何等价（见上方 `home` 注释），
+        // 故这里的期望值就是生产路径上的实际落点（LVGL 闭区间，`x2 = x1 + w - 1`）。
+        // **改什么会让本条变红**：① 去掉 `theme::screen_bg()` 的 `set_pad_all(0)`
+        // ⇒ 三区整体 +(20,20)（2026-09-15 实测：header `(20,20)-(1043,91)`，右缘出屏 20 px、
+        // nav 底 `787` 出屏 20 px）；② 摘掉宿主的 `transparent()` ⇒ 再 +(22,22)。
+        assert_eq!(
+            home.coords(),
+            Area {
+                x1: 0,
+                y1: 0,
+                x2: Dimens::SCREEN_W - 1,
+                y2: Dimens::SCREEN_H - 1
+            },
+            "宿主须与屏几何等价 —— 这是本组绝对坐标断言的前提"
+        );
+        let (hx1, hy1, hx2, hy2) = {
+            let c = sh.header_obj().coords();
+            (c.x1, c.y1, c.x2, c.y2)
+        };
+        assert_eq!(
+            (hx1, hy1, hx2, hy2),
+            (0, 0, Dimens::SCREEN_W - 1, Dimens::HEADER_H - 1),
+            "页眉须自屏原点起算且右侧不出屏（UI §4.1；见 SH14）"
+        );
+        let (nx1, ny1, nx2, ny2) = {
+            let c = sh.nav_obj().coords();
+            (c.x1, c.y1, c.x2, c.y2)
+        };
+        assert_eq!(
+            (nx1, ny1, nx2, ny2),
+            (
+                0,
+                Dimens::SCREEN_H - Dimens::NAV_H,
+                Dimens::SCREEN_W - 1,
+                Dimens::SCREEN_H - 1
+            ),
+            "底部导航须贴屏底且不越界（UI §3.5；见 SH14）"
+        );
+        let (px1, py1) = {
+            let c = sh.page_host_obj().coords();
+            (c.x1, c.y1)
+        };
+        assert_eq!(
+            (px1, py1),
+            (Dimens::SIDE_PAD, Dimens::HEADER_H),
+            "页根宿主落点 = (SIDE_PAD, HEADER_H)（pages 契约 1 的调用方一侧）"
+        );
+        // ── ⑦′ 其余两区 + 页根宿主的**四边**（2026-09-15 代码质量评审补网：此前
+        // `content` 与 `banner` **零**绝对坐标断言、`page_host` 只断了左上两点 ——
+        // 于是把 `banner.set_pos(SIDE_PAD, CONTENT_Y)` 改成 `(0, CONTENT_Y)`、或把
+        // `content` 的高度写错，全套用例都不会响）──
+        let ct = sh.content_obj().coords();
+        assert_eq!(
+            (ct.x1, ct.y1, ct.x2, ct.y2),
+            (
+                0,
+                Dimens::HEADER_H,
+                Dimens::SCREEN_W - 1,
+                Dimens::HEADER_H + Dimens::CONTENT_H - 1
+            ),
+            "内容区必须从页眉下缘铺到导航上缘、左右贴屏（UI §4.1）"
+        );
+        let ph = sh.page_host_obj().coords();
+        assert_eq!(
+            (ph.x1, ph.y1, ph.x2, ph.y2),
+            (
+                Dimens::SIDE_PAD,
+                Dimens::HEADER_H,
+                Dimens::SIDE_PAD + Dimens::CONTENT_W - 1,
+                Dimens::HEADER_H + Dimens::CONTENT_H - 1
+            ),
+            "页根宿主 = 内容区有效框（SIDE_PAD 起、CONTENT_W 宽，四边都要对）"
+        );
+        let bn = sh.banner_obj().coords();
+        assert_eq!(
+            (bn.x1, bn.y1, bn.x2, bn.y2),
+            (
+                Dimens::SIDE_PAD,
+                Dimens::HEADER_H,
+                Dimens::SIDE_PAD + Dimens::CONTENT_W - 1,
+                Dimens::HEADER_H + Dimens::TOUCH_MIN - 1
+            ),
+            "未保存提示条须与内容区同宽、且自内容区上缘起（UI §4.3；h48 = TOUCH_MIN）"
+        );
         // **任一时刻只显一页**：六页全建（存活、非空壳），但可见的**恰一个**。
         for p in NavPage::ALL {
             assert!(sh.page_obj(p).is_alive(), "{p:?} 页根须存活");
@@ -7236,6 +7424,21 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         sh.tick(at(0), CLOCK);
         assert_eq!(sh.clock_text().as_deref(), Some(CLOCK));
         assert_eq!(sh.channel_text().as_deref(), Some(shell::TEXT_CHANNEL_OK));
+        // **② 通道胶囊在页眉右端**（落到**对象**上的那一半断言；常量层那一半在
+        // `shell.rs::tests::header_slots_are_disjoint_and_inside_canvas`）。
+        //
+        // **判据是"与常量精确相等"，不是"落在右半区"**：早先写成 `>= SCREEN_W/2`，
+        // 有 **80 px 盲窗** —— 把调用点写成 512（与触摸角标重叠 64 px、离契约位 80 px）
+        // 时**纯逻辑网与本条同时保持绿**（2026-09-15 代码质量评审探针 P5 实测 290 全绿）。
+        // 精确相等之所以稳定：宿主已与屏几何等价、`root` 已清内边距 ⇒ 对象的屏内左缘
+        // 恰等于 `HEADER_CHIP_X`。
+        // **改什么会让本条变红**：把 `Shell::new` 里 `chip.set_pos(HEADER_CHIP_X, ..)` 的
+        // 实参换成 412（中段）**或 512**（半区边界内）⇒ 两条都红。
+        assert_eq!(
+            sh.channel_chip_x(),
+            Some(shell::HEADER_CHIP_X),
+            "通道胶囊（§4.1「右端」）的屏内左缘必须**恰等于** HEADER_CHIP_X"
+        );
         assert!(!sh.touch_badge_visible(), "触摸可用 ⇒ 无角标");
         assert!(!sh.countdown_visible(), "t=0 ⇒ 无倒计时胶囊");
         assert!(!sh.banner_visible(), "P2 不脏 ⇒ 无提示条");
@@ -7315,6 +7518,59 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             Some(Palette::TEXT_WEAK),
             "未选中页签图标 = `#6E7FA0`（UI §4.2）"
         );
+
+        // **① 选中 / 按下态的「底色」通道**（应用标记读回；**B2c-3 规格评审 ①** 补的回归锁）。
+        //
+        // 背景：原文只有**文字 / 图标色**有回归锁，**底色**（§4.2「选中 底 `surface_alt`」/
+        // 「按下 底 `#2E4066`」）被评审探针 ⑦⑧ 改掉后**全绿** ⇒ 该回归锁是补上的。
+        //
+        // 口径：`tab_bg(.., TabState)` 读的是**应用标记**（建样式时记下的、送进
+        // `Style::set_bg_color(..)` 的那个值；唯一真源 = `shell::NAV_BG_*`），不是从 LVGL
+        // 读回的实际底色（薄层无该通道）—— 如实标注见 `shell.rs::Shell::tab_bg`。
+        //
+        // **改什么会让本条变红**：① 把 `shell::NAV_BG_SELECTED` 的 `Palette::SURFACE_ALT`
+        // 换成**另一个** `Palette` 常量（如 `SURFACE_HIGH`）⇒ 第 1 条红；② 把
+        // `shell::NAV_BG_PRESSED` 换掉 ⇒ 第 2 条红；③ 把 `NAV_BG_DEFAULT` 从 `Transparent`
+        // 改成任何实心底 ⇒ 第 3 条红；④ 三档写成同一个色（"全都一样"的蒙混形态）⇒ 第 4 条红。
+        assert_eq!(
+            sh.tab_bg(NavPage::Main, TabState::Selected),
+            Some(shell::TabBg::Solid(Palette::SURFACE_ALT)),
+            "选中页签底色 = `surface_alt`（UI §4.2「选中：底 `#1B2942`」）"
+        );
+        assert_eq!(
+            sh.tab_bg(NavPage::Main, TabState::Pressed),
+            Some(shell::TabBg::Solid(Palette::SURFACE_PRESS)),
+            "按下页签底色 = `surface_press`（UI §4.2「按下 底 `#2E4066`」/ §5.2 `NavTab` 行）"
+        );
+        assert_eq!(
+            sh.tab_bg(NavPage::Config, TabState::Default),
+            Some(shell::TabBg::Transparent),
+            "未选中页签底色 = **透明**（UI §4.2「未选中：底色透明」）"
+        );
+        // **互斥**（防"三档一个色"从"选中态有底色"的断言下蒙混过关）：未选中档必须**不等于**
+        // 选中档；且六项逐项一致（不是只有第 1 项被特殊对待）。
+        assert_ne!(
+            sh.tab_bg(NavPage::Config, TabState::Default),
+            sh.tab_bg(NavPage::Main, TabState::Selected),
+            "未选中档底色不得等于选中档（否则'选中态底色'这一通道等于不存在）"
+        );
+        for p in NavPage::ALL {
+            assert_eq!(
+                sh.tab_bg(p, TabState::Selected),
+                Some(shell::TabBg::Solid(Palette::SURFACE_ALT)),
+                "{p:?} 的选中档底色必须同为 `surface_alt`（六项同一套皮肤）"
+            );
+            assert_eq!(
+                sh.tab_bg(p, TabState::Pressed),
+                Some(shell::TabBg::Solid(Palette::SURFACE_PRESS)),
+                "{p:?} 的按下档底色必须同为 `surface_press`"
+            );
+            assert_eq!(
+                sh.tab_bg(p, TabState::Default),
+                Some(shell::TabBg::Transparent),
+                "{p:?} 的未选中档底色必须为透明"
+            );
+        }
 
         // **切页通知**（B3 用它感知"当前页变了"）：仅在页**真正变化**时触发。
         // **改什么会让本条变红**：把 `Core::select` 的 `changed && notify` 改成 `notify`
@@ -7398,6 +7654,56 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // 回归后计时从**满时长**重算（不是"又立刻超时"）。
         sh.tick(at(116) + Duration::from_millis(500), CLOCK);
         assert_eq!(sh.current(), NavPage::Main, "回归后计时已重置，不得连续切页");
+
+        // ═══ ④″ **计时重置的真实覆盖边界**（评审 ④ 探针；对应偏差 **SH5**）═══════════
+        //
+        // 产品里的触摸走 `lv_indev`：它把 `PRESSED` 投给**命中的最深可点对象**
+        // （`vendor/lvgl/src/indev/lv_indev.c:618::lv_indev_search_obj`），而 `lv_obj` 构造时
+        // **默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），且页眉（0,0,1024,72）/
+        // 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满**画布 ⇒ **外壳根永远不是
+        // 那个对象**；LVGL 又**默认不上冒**（`lv_obj_event.c:434::event_is_bubbled` 要求**链上
+        // 每层**自带 `LV_OBJ_FLAG_EVENT_BUBBLE`，而 `ObjFlag` 未镜像该标志）⇒ **页内按压不会
+        // 重置计时**。本节把这条边界**锁住**：合成投递给外壳根 ⇒ 重置；投递给页内容器 ⇒ 不重置。
+        //
+        // **本节是"现状锁定"（SH5 的登记锚点）**：薄层补齐 `ObjFlag::EVENT_BUBBLE`（且外壳
+        // 递归置位整棵子树）或 `Indev::on(..)` 之后，下面三条 `assert!(..visible())` 应**改写为
+        // "页内按压**也**重置"**，而不是静默删除 —— 删掉它等于把 §4.3「任何触摸事件重置」的
+        // 缺口重新藏起来（这正是评审 ④ 点名的问题）。
+        {
+            for (i, (what, o)) in [
+                ("页眉容器", sh.header_obj()),
+                ("内容区容器", sh.content_obj()),
+                ("P1 页根", sh.page_obj(NavPage::Main)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // 每轮独立时间基（互不干扰，且不越过 0 s 的强制切页点）。
+                let t = 1000 * (i as u64 + 1);
+                sh.show(NavPage::Interlock);
+                sh.note_activity();
+                sh.tick(at(t), CLOCK); // 消费 ⇒ last_activity = t
+                sh.tick(at(t + 50), CLOCK);
+                assert!(
+                    sh.countdown_visible(),
+                    "{what}：前置条件不成立（t+50 ⇒ 剩 10 s，胶囊应在）"
+                );
+                o.send_event(EventCode::PRESSED);
+                sh.tick(at(t + 50) + Duration::from_millis(500), CLOCK);
+                assert!(
+                    sh.countdown_visible(),
+                    "{what} 上的按压**不会**重置计时（SH5：LVGL 默认不上冒 + 外壳根不在 \
+                     `lv_indev_search_obj` 的命中链上）。**若本条变红** ⇒ 薄层已补上 \
+                     `EVENT_BUBBLE` / `Indev::on` 且外壳已接上：请把本条**改写**为\
+                     「页内按压**也**重置」并同步 SH5，**不要**直接删掉"
+                );
+            }
+            // 收尾：复位到 P1 且**无胶囊**（后续 ④′ 依赖"角标可见"，而角标在胶囊占位时让位）。
+            sh.show(NavPage::Main);
+            sh.note_activity();
+            sh.tick(at(5000), CLOCK);
+            assert!(!sh.countdown_visible(), "收尾：活动后回到满时长，无胶囊");
+        }
 
         // ═══ ④′ 触摸不可用角标（EDGE-13）+ 通道断（EDGE-20 的"两状态同显"）══════
         sh.set_touch_available(false);

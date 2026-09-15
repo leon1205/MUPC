@@ -9,11 +9,18 @@
 //!
 //! ```text
 //! root（1024×768，CLICKABLE —— 「全屏输入对象」，PRESSED ⇒ 重置空闲计时）
-//! ├── header (0,0,1024,72)     返回 64×64（仅 P2–P6）/ 标题 32 / 通道胶囊 / 触摸角标 / 倒计时胶囊 / 时钟 26
+//! ├── header (0,0,1024,72)     返回 64×64（仅 P2–P6）/ 标题 32 / …… / 触摸角标 / 通道胶囊 / 时钟 26
+//! │                           （**页眉右端组**自左向右：触摸角标 → 通道胶囊 → 时钟，见 **SH7**）
+//! │                           倒计时胶囊出现时占**时钟左侧**、通道胶囊与角标让位（**SH3**）
 //! ├── content (0,72,1024,624)  6 个页根容器（**任一时刻只显一个**）
 //! ├── banner (16,72,1008,120)  未保存修改提示条（h48，仅 P2 `dirty` 时可见）
 //! └── nav (0,696,1024,768)     6 个 `NavTab`（170×72）
 //! ```
+//!
+//! ⚠️ 上述坐标**能成立的前提**：`root` 必须**清掉父主题内边距**（`theme::screen_bg()` 带
+//! `set_pad_all(0)`），且宿主自身的 `pad_all` 为 0 —— 生产路径 `Obj::screen()` 满足。
+//! 否则三区按内边距相对定位、整体内缩并右下出屏。该缺陷**确曾发生**（`screen_bg()` 漏了
+//! `pad_all(0)`），**已修并上锁**（绝对坐标断言 + 双向破坏性探针），见偏差表 **SH14**。
 //!
 //! **弹层 / Toast 不在本文件**：P2 / P4 的 `ConfirmDialog` 与各页 `Toast` 都挂在
 //! `lv_layer_top()`（见 `pages/p2_config.rs::show_dialog`），本层只提供
@@ -31,14 +38,18 @@
 //! |---|----------------------|------|------|
 //! | SH1 | 导航页签**图标**用几何字形占位（`● ■ ▼ ⚠ ✓ ○`），非语义图标 | 生成字体 cmap 里的几何字形**只有 13 个**（U+2013/2190/2192/2212/2264/2265/25A0/25B2/25BC/25CB/25CF/26A0/2713，实测见 `fonts/lv_font_cmap.txt`），画不出「配置 / 日志 / 审计」这类专属图标；语义由 26 px **文字通道**承担（F14 的"文字 + 颜色"两通道齐备） | 字库扩充批（同 **D4/D5**）：§3.6 补图标清单 + 重跑 `gen_fonts.sh` |
 //! | SH2 | 「弹层打开」在**生产侧**拿不到：P2 / P4 的 `with_dialog` 是 `#[cfg(test)]` ⇒ 本层用 [`Shell::set_modal_open`] **注入** | 页面侧没有生产可见的"弹层是否打开"查询口；B3 的 `UiState.confirm: Option<ConfirmDialog>` 本就是权威真源（技术设计 §5.4），由它注入即可 | **B3**：`app.tick` 内 `shell.set_modal_open(state.confirm.is_some())` |
-//! | SH3 | **倒计时胶囊出现时，通道胶囊与触摸角标让位（隐藏）** | 页眉五者同时上屏的最小总宽 **> 1024 px**（算式：返回 64 + 标题 380 + 缝 16 + 通道胶囊 280 + 缝 16 + 倒计时胶囊 264 + 缝 16 + 时钟 120 + 右留白 16 = **1172 px**；即便去掉返回键仍超 1108 px）——UI §4.1 的"右端时钟 + 通道胶囊"与 §4.3 的"时钟左侧倒计时胶囊"在 1024 px 上**不可共存**。倒计时只出现在回归前 ≤10 s 且最紧急 ⇒ 由它优先占据右端 | 若 PM 裁定必须四者同显：需缩小胶囊 / 时钟（<24 px 违反 §3.3 下限）或改页眉分区，属**重新设计** |
-//! | SH4 | 「放弃修改」按钮触区高 **48**（UI §4.3 写「64 高触区」） | 同一行又写提示条 **h48** ⇒ 48 高的条里放不下 64 高的按钮（子对象被父内容区裁切）。48 = `Dimens::TOUCH_MIN`，且 §2.1 的「关键操作 64×64」清单（保存 / 恢复默认值 / 联锁释放 / M1 授权 / 导航项 / **返回**）**不含**它 | 同 SH3（若 PM 改条高为 64，两者同时改） |
-//! | SH5 | 「**任何**触摸事件重置计时」在本层只能覆盖**外壳自身**的按压：外壳根（全屏）+ 返回键 + 6 个页签 + 放弃修改键。**页面内部控件**上的按压**不会**重置 | `LV_OBJ_FLAG_EVENT_BUBBLE` **未**在 `crate::lvgl::obj::ObjFlag` 镜像（只有 HIDDEN / CLICKABLE / CHECKABLE / SCROLLABLE 四个）⇒ 页内控件（页根本身默认 `CLICKABLE`）吃掉 `PRESSED` 后**不上冒**；`crate::lvgl::indev::Indev` 也**未**暴露 `lv_indev_add_event_cb`（该符号**在** `lvgl-sys/allowlist.txt` 里，只是薄层没封装）⇒ `ui/**` 拿不到"任意按压"的全局钩子。**具名能力需求（二选一）**：① 把 `LV_OBJ_FLAG_EVENT_BUBBLE` 纳入 `ObjFlag`（外壳即可给页根批量置位）；② 给 `Indev` 加 `on(EventCode, F)`（`lv_indev_add_event_cb` 直投，`src/indev/lv_indev.c:997` 的 `send_event(LV_EVENT_PRESSED, indev_act)` 是**每次按压**都发） | **薄层（`src/lvgl/**`）**；本单元已在 `pages_chain` 里对"外壳根 / 页签 / 返回键"三条路径**逐条断言**重置 |
-//! | SH6 | 倒计时胶囊的**出现判据取 ≤10 s**（§4.3 表「超时前 10 s」），故文案从 `10 秒后返回主状态页` 起数；§4.3 表内的示例文案写的是 `12 秒后返回主状态页` | **§4.3 自相矛盾**（判据 10 s vs 示例 12 s）。取**判据**（行为规格），文案按实际剩余秒数渲染 | 无（**有意**取行为规格）；若 PM 裁定 12 s，改 [`COUNTDOWN_WINDOW_SECS`] 一处即可 |
-//! | SH7 | EDGE-20 的"页眉**左侧** `与主进程数据通道断开`（红）+ 右侧正常时钟"落成「**标题右侧**的红通道胶囊 + 右端时钟**同时可见**」 | §4.1 把"通道状态胶囊"定位在**页眉右端**（与时钟同区），§8.3 EDGE-20 却写"左侧" —— 二者对同一元素给出不同位置。本层取 §4.1 的**位置**（右端），并在此登记取 §8.3 的**语义**（红 = 读通道断 + 时钟仍正常 ⇒ "两种状态同显"，正是 EDGE-20 的判据）。**EDGE-20 的完整语义**（"控制通道**可达** vs 读通道**断**"这一二元区分）需要**两个**独立通道信号，本层只有一个 `ChannelStatus` 输入 ⇒ 归 **B3** | **B3**：`set_channel` 之外再注入"控制通道态"，届时红胶囊文案/位置按 §8.3 重排 |
+//! | SH3 | **倒计时胶囊出现时，通道胶囊与触摸角标让位（隐藏）** | 页眉五者同时上屏的最小总宽 **> 1024 px**（算式：返回 64 + 标题 376 + 缝 16 + 通道胶囊 280 + 缝 16 + 倒计时胶囊 264 + 缝 16 + 时钟 120 + 右安全边 16 = **1168 px**，缺口 **144 px**；即便去掉返回键仍超 1104 px）——UI §4.1 的"右端时钟 + 通道胶囊"与 §4.3 的"时钟左侧倒计时胶囊"**在 1024 px 上不可共存**。倒计时只出现在回归前 ≤10 s 且最紧急 ⇒ 由它优先占据右端。**归属：PM 裁定**（规格层面的不可共存，非本层实现缺陷；评审已独立复算一致，且内在宽度估算 ≈1104 亦 > 1024） | **PM 裁定**。三个候选：① **让位**（现状，倒计时独占右端，本层已实现）；② **页眉改两行**（§3.5 的 `header_h=72` 要改 ⇒ 三区高度 72+624+72 的等式、全部页面的 y 坐标连锁，属**重新设计**）；③ **缩短文案**（如 `10 秒后返回主状态页` → `10 秒返回`，省 5×24=120 px **仍差 24 px** ⇒ 至少要砍 ≥6 个 24 px 字形才排得下，且须同步改 §3.6 用字表与 §4.3 文案契约）。本层**不自行改版式** |
+//! | SH4 | 「放弃修改」按钮触区高 **48**（UI §4.3 同一条里又写「**64 高触区**」）—— **规格自身矛盾**（评审 ⑤ 已裁定：取 48 正确，实现不改） | **矛盾**：§4.3 的同一表格行同时给"提示条 h 48"与"按钮 64 高触区"，64 高的按钮放不进 48 高的条（子对象被父对象裁切）。**取 48**，理由：① 48 = `Dimens::TOUCH_MIN`（§2.1 的最小触摸目标**下限**，满足）；② §2.1 的「关键操作 **64×64**」点名清单（保存 / 恢复默认值 / 联锁释放 / M1 授权 / 导航项 / **返回**）**不含**它 ⇒ 无 64 的硬要求；③ 取 64 会让提示条与按钮互相矛盾（只能改条高，而那又违反同一行的 h48） | 同 SH3（若 PM 裁定条高改 64，两者同时改） |
+//! | SH5 | 「**任何**触摸事件重置计时」（§4.3）在本层**只覆盖 3 个控件**：返回键 / 6 个页签 / 「放弃修改」键（**按下即重置**）。**不会**重置的按压：页内任意控件（卡片 / 按钮 / 列表行 / chip …）、页内空白处、页眉空白区、导航条页签之外的空隙。**修整说明（评审 ④）**：原文自称覆盖"外壳根（**全屏**）"，**不成立** —— 已删；现有用例里 `sh.obj().send_event(PRESSED)` 是**合成投递**（不经 `lv_indev`），它锁的只是"根的挂钩**在**且能置位 `pending_activity`"，**不等于**产品里页内按压会重置 | 三件事（**② 探针已逐条实测**，见 §验证）：① `crate::lvgl::obj::ObjFlag` **无** `LV_OBJ_FLAG_EVENT_BUBBLE`（只有 HIDDEN / CLICKABLE / CHECKABLE / SCROLLABLE），而 LVGL **默认不上冒**：`lv_obj_event.c:434::event_is_bubbled` 要求**当前目标自带该标志**、`event_send_core` **逐级**检查 ⇒ 事件要到达外壳根，**链上每一层**都得带标志；② `lv_obj` 构造时**默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），而页眉（0,0,1024,72）/ 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满** 1024×768，`lv_indev.c:618::lv_indev_search_obj` 取"命中的**最深**可点对象" ⇒ **真实触摸永远落在某个后代对象上，外壳根收不到 `PRESSED`**；③ `crate::lvgl::indev::Indev` **未**暴露 `lv_indev_add_event_cb`（该符号**在** `lvgl-sys/allowlist.txt` 里，只是薄层没封装）⇒ `ui/**` 拿不到"任意按压"的全局钩子 | **薄层（`src/lvgl/**`）**，两种**具名**能力需求（二选一）：① `ObjFlag` 补 `EVENT_BUBBLE` —— **注意**：只给页根置位**不够**，须由外壳在装配后**递归**遍历页眉 / 内容区 / 6 页 / 导航条**整棵子树**置位（链上缺一层即断）；② 给 `Indev` 加 `on(EventCode, F)`（`lv_indev_add_event_cb` 直投；`lv_indev.c:997` 的 `send_event(LV_EVENT_PRESSED, indev_act)` 是**每次按压**都发）—— **推荐**：一处挂钩覆盖全屏，且不必触碰 `pages/**`。**两者任一补齐后**，§4.3 的"任何触摸事件重置"才**完全**成立；届时应把 `shell_chain` 的"页内按压**不**重置"那条断言（**现状锁定**，见下）改写成"页内按压**也**重置"，**不得**只是删掉 |
+//! | SH6 | 倒计时胶囊的**出现判据取 ≤10 s**（§4.3 表「超时前 10 s」），故文案从 `10 秒后返回主状态页` 起数；§4.3 表内的示例文案写的是 `12 秒后返回主状态页` —— **规格自身矛盾**（评审 ⑤ 已裁定：取 10 s 正确，实现不改） | **§4.3 自相矛盾**（判据 10 s vs 示例 12 s）。**取判据 10 s**，为什么：① 判据是**行为规格**（"超时前 N 秒出现"，可被 PRD F15 与计时器逐拍核验），而 `12 秒后返回主状态页` 只是表格里的一句**示例文案**（同格的判据已写死 10 s，示例与之冲突 ⇒ 示例才是笔误的一方）；② 取 12 s 会出现"判据说 10 s 显、文案从 12 s 起数"的**自相矛盾**，或需要把判据一并改 12 s（改动行为规格，超出本层权限）。文案按**实际剩余秒数**渲染（`countdown_text`） | 无（**有意**取行为规格）；若 PM 裁定 12 s，改 [`COUNTDOWN_WINDOW_SECS`] 一处即可 |
+//! | SH7 | **页眉通道胶囊的位置**：EDGE-20 的"页眉**左侧** `与主进程数据通道断开`（红）+ 右侧正常时钟"落成「**页眉右端组**内的红通道胶囊 + 右端时钟**同时可见**」（`HEADER_CHIP_X`：胶囊紧跟时钟、角标在胶囊左侧，三件等缝相连、整组贴右安全边）。**位置取 §4.1（右端），§8.3 的「左侧」不采**；**§8.3 的语义（红断开 + 时钟正常"两状态同显"）完整满足** —— 红胶囊与时钟同屏可见 | §4.1 与 §8.3 对**同一元素**给出不同横坐标（§4.1「右端：时钟 `+` 通道状态胶囊」/ §8.3「左侧」）。取 §4.1 的三条理由：① §4.1 是**版式权威**（页眉各件的矩形与"右端"归属都在它的表里），§8.3 是**异常态语义字典**（管"该显哪种状态"，不管坐标）；② §4.3 把倒计时胶囊钉在"页眉右端（**时钟左侧**）" ⇒ 时钟必须留在右端；若把胶囊改挂左端，同一元素会**按状态跳位**，且左端已被返回键（x 12–76）与标题（P1 标题 x16 起、宽 [`HEADER_TITLE_W_P1`]）占满，移过去还要压标题；③ 采纳 (a)「移到右端」而非 (b)「断开态移左端」正是为了**位置恒定的状态件**（F14 一致性）。**EDGE-20 的完整语义**（"控制通道**可达** vs 读通道**断**"的二元区分）需要**两个**独立通道信号，本层只有一个 `ChannelStatus` 输入 ⇒ 归 **B3** | **B3**：`set_channel` 之外再注入"控制通道态"；若 PM 裁定必须落在"左侧"，需同时裁定标题区收缩 + 胶囊换位（属**重新设计**，本层不自行改）。回归锁见 `shell.rs::tests::header_slots_are_disjoint_and_inside_canvas` 的"右端组右锚定 + 左缘在右半区"两条 |
 //! | SH8 | **整屏降级（EDGE-03：压暗 20 % + 中央文案 + 恢复倒计时 + 冻结角标）未实现**，只留挂点 [`Shell::overlay_layer`] | 属 **B3**（需要通道客户端与恢复倒计时状态机）—— 任务书明确"不做" | **B3** |
 //! | SH9 | 页内通道条（P1 的「与主进程数据通道断开」行）与页眉通道胶囊**重复表达**同一事实 | `pages/mod.rs` 的 **D1** 已登记"外壳装配时移除页内通道条"，但本单元**禁改 `ui/pages/**`**（硬约束 5）⇒ 重复仍在 | **B2c 收口 / 后续批**（需 PM 授权改 `p1_status.rs`） |
 //! | SH10 | 导航 6 项各取 `Dimens::NAV_ITEM_W` = **170**，共 1020 px < 1024（右端余 **4 px** 无页签） | `Dimens::NAV_ITEM_W`（UI §5.1 #1 取整）是 theme 的**单一真源**，本层不得写 170.7；UI §4.2 写"每项宽 1024/6 ≈ 170.7" | 无（**有意**用 theme 常量；4 px 余量不构成可用触摸区） |
+//! | SH11 | **导航页签的图标 / 文字 y 与 §4.2 不符**：§4.2 给「图标 28 px（y 706–734）」⇒ **项内 y 10**、「文字 26 px（y 736–766）」⇒ **项内 y 40**；本层取 [`NAV_ICON_Y`] = **8**、[`NAV_TEXT_Y`] = **44**（图标高 2 px、文字低 4 px） | **不是居中推导**（如实核实）：块高 = 28+缝+26 = 62（含 8 px 缝），真居中应得 5/41；§4.2 的 10/40 自身也不居中（块 10–70、上 10 下 2）。本层取"**半个呼吸缝**"档：图标上沿 = `Dimens::GAP_MIN/2` = 8，图标下沿与文字上沿之间同样 8 ⇒ **等间距**取向，且**全部由 theme 常量派生**（`Dimens::GAP_MIN` / `Dimens::ICON_SM`），零裸值。§4.2 的 10/40 在 theme 里**没有**对应命名常量，而 `ui/theme.rs` 本批**禁改** ⇒ 本层不能写 10/40 | **theme.rs 收口批**：上收 `Dimens::NAV_ICON_Y` / `Dimens::NAV_TEXT_Y`（或 §4.2 逐像素值），本层改为一行引用 |
+//! | SH12 | **§4.3「超时回归…不改变页面滚动位置以外的状态（P1 始终从顶部开始）」未实现**（**能力缺口**） | 薄层 `src/lvgl/**` **没有**"滚到指定位置"的封装：`Obj` 只暴露 `set/get_scroll_dir` 与 `set/get_scrollbar_mode`，`lvgl-sys/allowlist.txt` 里**也**没有 `lv_obj_scroll_to_y`（`lv_obj_scroll_to_y` / `lv_obj_scroll_to` / `lv_obj_scroll_by` 均未放行）⇒ `ui/**` **做不到**"把 P1 滚回顶部"。**影响**：超时从 P2–P6 回归 P1 时，P1 页内**保留上次的滚动位置**（用户上次在 P1 滚到中段 ⇒ 回归后仍在中段，与 §4.3 的"始终从顶部开始"不符）。**等效替代**（不需新 API，但**未采纳**）：回归时销毁并重建 P1 页根 —— 代价是 P1 的全部注入态（告警列表 / 遥测值 / 滚动条）与回调槽一并丢弃后要由 B3 重灌，且重建/拆除会走 `pages/**`（本批**禁改**），收益不成比例 | **薄层（`src/lvgl/**`）**：具名需求 = 新增 `Obj::scroll_to_y(y)`（或 `scroll_to(x, y)`）一行封装 + `allowlist.txt` 放行 `lv_obj_scroll_to_y`；外壳则在 `Core::select` 切回 P1 时调用一次。**当前无回归锁**（做不到 ⇒ 无法断言），故只登记不锁 |
+//! | SH13 | §4.1 线框图里"页眉与内容区之间 **y72** 那条横线"**未实现**（`header_bg` / `content` 均无描边） | **判定为示意线，非必做项**：① §4.1 的**表格**（版式权威）对 HDR 只写"常驻。左：… 中/右：…"、对 CONTENT 只写"整页纵向滚动（LVGL 滚动容器），左右安全边 16 px"，**均无分隔线项**；② §3.2 的 `divider` 用途表列的是"卡片描边、行分隔、滚动条轨道"，**不含**页眉分界；③ 同一张线框图还画了外框与 y768 底边（画布边界，显然不是 UI 元素）⇒ 该图是**读图辅助**。**影响**：无（页眉 `Palette::SURFACE` 与内容区 `Palette::BG` 本身有底色差，分界可见） | 无（若 PM 裁定必做：`ui/theme.rs` 加 `theme::header_rule()` 并在 `header` 上加下描边 —— 属 **theme.rs 收口批**） |
+//! | SH14 | **【本批已修】三区绝对坐标曾整体内缩 20 px**：`root` 用的 `theme::screen_bg()` 原本**没有** `set_pad_all(0)`，而 LVGL 默认主题给**每个** `lv_obj` 挂 `card` 样式（`vendor/lvgl/src/themes/default/lv_theme_default.c:262` 给 `styles.card` 设 `pad_all = PAD_DEF`，`:794` 把它挂到每个 `lv_obj`；1024×768 屏实测 = `LV_DPX_CALC(130, 24)` = **20 px**）⇒ `header` / `content` / `nav` 的 `set_pos` 是**内边距相对**值，整层右下出屏。**2026-09-15 实测（生产等价宿主）**：`header` 落 **(20,20)-(1043,91)**（右缘出屏 20 px）、`nav` 底 **787**（出屏 20 px）、`page_host` 落 (36,92) 而非契约的 (16,72) ⇒ **6 页全部偏移**。**修法**：`theme.rs::screen_bg()` 补 `set_pad_all(0)` + `set_radius(Radius::NONE)`（与 `theme::transparent()` / `dialog_mask()` 同款；该函数**仅**本文件 `Shell::new` 一处使用，改动不外溢）；测试宿主同步改为「屏的忠实替身」（挂 `theme::transparent()` —— 生产屏自带 `pad_all = 0`），并在 `shell_chain` 补 **⑦ 三区绝对坐标**断言。**两条破坏性探针**（证明有网）：摘 `screen_bg` 的 `pad_all` ⇒ red `(20,20,1043,91)`；摘宿主的 `transparent()` ⇒ red `(22,22,1045,93)` | 原判「本批不改、另立单元」**已撤销**：该缺陷使 B2c-3 在契约的**绝对坐标**上不合规，而修法只碰 shell 自己用的那个样式函数。**同类陷阱**：`ui/**` 静态扫描只管裸色值/文本输入控件，管不到「沿用父主题内边距」；`pages::layout_box` / `components.rs::layout_box` / `dialog_mask` 早有防护，唯独 `screen_bg` 漏了 ⇒ 日后新增「挂对象上的样式构造函数」**必须**一并清 `pad_all` / `radius` |
 //!
 //! ## 不变量（编码约束，逐条对应技术设计 §5.2）
 //!
@@ -94,28 +105,41 @@ const HEADER_CLOCK_X: i32 = Dimens::SCREEN_W - Dimens::SIDE_PAD - HEADER_CLOCK_W
 const HEADER_CLOCK_Y: i32 = theme::center_offset(Dimens::HEADER_H, TextSlot::Label.px() as i32);
 /// 页眉：通道胶囊宽（`与主进程数据通道断开` 10 字 × 24 + 图标位 32 + 右留白 16 = 288 ⇒ 取 280+）。
 const HEADER_CHIP_W: i32 = Dimens::BTN_MAIN_W + Dimens::TOUCH_CRITICAL + Dimens::GAP_MIN;
-/// 页眉：通道胶囊 x（标题区右侧、页眉中段）。
-const HEADER_CHIP_X: i32 = Dimens::CONTENT_W * 2 / 5 + Dimens::GAP_GROUP;
+/// 页眉：通道胶囊 x —— **页眉右端组的最左成员，紧跟时钟**（UI §4.1「右端：时钟 26 px 等宽
+/// + 通道状态胶囊 h 32」；**SH7** 登记了同一元素在 §8.3 EDGE-20 里被写成「左侧」的冲突）。
+///
+/// 右端组 = `… 触摸角标 → 通道胶囊 → 时钟 →|右安全边`，相邻件之间恒一个呼吸缝：
+/// `HEADER_CHIP_X + HEADER_CHIP_W + GAP_GROUP == HEADER_CLOCK_X`。
+/// `shell.rs` 的 [`tests::header_slots_are_disjoint_and_inside_canvas`] **逐条断言**这条锚定链。
+///
+/// **`pub` 是必需的**：`ui/tests.rs::shell_chain` 要拿它做**精确相等**断言
+/// （`shell::channel_chip_x() == Some(HEADER_CHIP_X)`）。早先那条断言写成"左缘落在右半区"
+/// （`>= SCREEN_W/2`），**有 80 px 盲窗**：把 `Shell::new` 的调用点写成 512（与触摸角标重叠
+/// 64 px、离契约位 80 px）时**纯逻辑网与对象网同时保持绿**（2026-09-15 代码质量评审探针 P5
+/// 实测）。**教训**：凡"落在某半区 / 在某范围"的判据都要问一句"窗口里还有多少错值能通过"。
+pub const HEADER_CHIP_X: i32 = HEADER_CLOCK_X - Dimens::GAP_GROUP - HEADER_CHIP_W;
 /// 页眉：胶囊类元素 y（72 − 32 后居中 → 20）。
 const HEADER_CHIP_Y: i32 = theme::center_offset(Dimens::HEADER_H, Dimens::STATUS_CHIP_H);
 /// 页眉：触摸不可用角标宽（`触摸不可用` 5 字 × 24 + 右留白）。
 const HEADER_BADGE_W: i32 = Dimens::BTN_MIN_W + Dimens::TOUCH_MIN;
-/// 页眉：触摸不可用角标 x（通道胶囊右侧一个呼吸缝）。
-const HEADER_BADGE_X: i32 = HEADER_CHIP_X + HEADER_CHIP_W + Dimens::GAP_GROUP;
+/// 页眉：触摸不可用角标 x（**通道胶囊左侧**一个呼吸缝 —— 角标属 §7.5 的「页眉右端」，
+/// 与通道胶囊 / 时钟同处右端组；见 [`HEADER_CHIP_X`] 与 **SH7**）。
+const HEADER_BADGE_X: i32 = HEADER_CHIP_X - Dimens::GAP_GROUP - HEADER_BADGE_W;
 /// 页眉：触摸不可用角标 y（72 − 24 后居中 → 24）。
 const HEADER_BADGE_Y: i32 = theme::center_offset(Dimens::HEADER_H, TextSlot::Body.px() as i32);
 /// 页眉：倒计时胶囊宽（`10 秒后返回主状态页` 11 字形 × 24 + 两侧留白 = 264）。
 const HEADER_CAPSULE_W: i32 = Dimens::BTN_MAIN_W + Dimens::TOUCH_CRITICAL;
 /// 页眉：倒计时胶囊 x（UI §4.3「时钟左侧」）。
 const HEADER_CAPSULE_X: i32 = HEADER_CLOCK_X - Dimens::GAP_GROUP - HEADER_CAPSULE_W;
-/// 页眉：P2–P6 标题宽（到通道胶囊左侧一个呼吸缝为止）。
-const HEADER_TITLE_W: i32 = HEADER_CHIP_X - HEADER_TITLE_X_PAGED - Dimens::GAP_GROUP;
+/// 页眉：P2–P6 标题宽（到**页眉右端组最左成员**（触摸角标）左侧一个呼吸缝为止）。
+const HEADER_TITLE_W: i32 = HEADER_BADGE_X - HEADER_TITLE_X_PAGED - Dimens::GAP_GROUP;
 /// 页眉：P1 标题宽（无返回键，故比 P2–P6 多出返回键与两缝的宽度）。
-const HEADER_TITLE_W_P1: i32 = HEADER_CHIP_X - HEADER_TITLE_X - Dimens::GAP_GROUP;
+const HEADER_TITLE_W_P1: i32 = HEADER_BADGE_X - HEADER_TITLE_X - Dimens::GAP_GROUP;
 
-/// 导航：图标 y（项内上沿；UI §4.2「图标 28 px，y 706–734」⇒ 项内 y 10，此处取 theme 的 8 px 档）。
+/// 导航：图标 y（项内上沿；UI §4.2「图标 28 px，y 706–734」⇒ 项内 y 10，**本层取 8** ——
+/// 见偏差 **SH11**：8 = 半个呼吸缝，与规格的 10 差 2 px）。
 const NAV_ICON_Y: i32 = Dimens::GAP_MIN / 2;
-/// 导航：文字 y（图标下沿 + 半个呼吸缝）。
+/// 导航：文字 y（图标下沿 + 半个呼吸缝 ⇒ 44；UI §4.2 给的是 40 —— 见偏差 **SH11**）。
 const NAV_TEXT_Y: i32 = NAV_ICON_Y + Dimens::ICON_SM + Dimens::GAP_MIN / 2;
 /// 导航：相邻项竖分隔线宽（UI §4.2「1 px `#2A3B57`」）。
 const NAV_DIVIDER_W: i32 = Stroke::THIN;
@@ -368,6 +392,73 @@ impl HeaderChannel {
 // 6. 外壳内部类型
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// 导航页签**某一档底色的应用标记**（**① 回归锁的读回值**）。
+///
+/// 薄层**没有**"已挂样式读回"通道（`Style` 一旦 `Rc` 共享即冻结，且 `Obj` 不暴露
+/// `lv_obj_get_style_*`）⇒ 本层把**送进 `Style::set_bg_color(..)` 的那个值**记下来。
+/// 记法与 `pages/p5_audit.rs::immutable_bg`（**AU13**）同款：**唯一真源常量**
+/// （[`NAV_BG_DEFAULT`] / [`NAV_BG_SELECTED`] / [`NAV_BG_PRESSED`]）同时喂样式与标记 ⇒
+/// 改底色常量（哪怕只改成另一个 `Palette` 档）标记**必然随之变**，用例当场红。
+///
+/// **如实标注**：它不是从 LVGL 读回的对象实际底色，是"本层挂了哪一档"的可读回记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBg {
+    /// 透明底（未选中：露出导航条的 `Palette::SURFACE`）。
+    Transparent,
+    /// 命名色常量的实心底（色值一律来自 `theme::Palette`，本层零裸色值）。
+    Solid(Color),
+}
+
+/// 导航页签的**三档视觉态**（**下标 = [`NavTab::bg_marks`] 的槽位**，也是挂样式时的顺序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabState {
+    /// 未选中（LVGL `DEFAULT` 态）：底**透明**（UI §4.2「未选中：底色透明」）。
+    Default,
+    /// 选中（`LV_STATE_CHECKED`）：底 `surface_alt`（UI §4.2「选中：底 `#1B2942`」）。
+    Selected,
+    /// 按下（`LV_STATE_PRESSED`）：底 `#2E4066`（UI §4.2「按下 底 `#2E4066`」/ §5.2 `NavTab` 行）。
+    Pressed,
+}
+
+impl TabState {
+    /// 三档（**数组下标 = 样式槽位**）。
+    pub const ALL: [TabState; 3] = [TabState::Default, TabState::Selected, TabState::Pressed];
+
+    /// 槽位下标（`bg_styles` / `bg_marks` 的口径）。
+    pub const fn slot(self) -> usize {
+        match self {
+            TabState::Default => 0,
+            TabState::Selected => 1,
+            TabState::Pressed => 2,
+        }
+    }
+
+    /// 本档底色的**唯一真源常量**（[`NAV_BG_DEFAULT`] / [`NAV_BG_SELECTED`] /
+    /// [`NAV_BG_PRESSED`]）。
+    pub const fn bg(self) -> TabBg {
+        match self {
+            TabState::Default => NAV_BG_DEFAULT,
+            TabState::Selected => NAV_BG_SELECTED,
+            TabState::Pressed => NAV_BG_PRESSED,
+        }
+    }
+}
+
+/// 导航项**未选中**档底色的唯一真源（透明 —— 露出导航条底色，UI §4.2）。
+///
+/// **改什么会让本条变红**：把它改成 `TabBg::Solid(..)` ⇒ `shell_chain` 的
+/// 「未选中页签 == 透明」与「未选中 ≠ 选中那一档」两条同时红。
+const NAV_BG_DEFAULT: TabBg = TabBg::Transparent;
+/// 导航项**选中**档底色的唯一真源（UI §4.2「选中：底 `#1B2942`」= `Palette::SURFACE_ALT`）。
+///
+/// **改什么会让本条变红**：把 `Palette::SURFACE_ALT` 换成**另一个** `Palette` 常量
+/// （如 `Palette::SURFACE_HIGH`）⇒ `shell_chain` 的
+/// `tab_bg(.., TabState::Selected) == Some(TabBg::Solid(Palette::SURFACE_ALT))` 当场红
+/// —— 这正是 ① 评审探针（底色无回归锁）的封堵点。
+const NAV_BG_SELECTED: TabBg = TabBg::Solid(Palette::SURFACE_ALT);
+/// 导航项**按下**档底色的唯一真源（UI §4.2 / §5.2：底 `#2E4066` = `Palette::SURFACE_PRESS`）。
+const NAV_BG_PRESSED: TabBg = TabBg::Solid(Palette::SURFACE_PRESS);
+
 /// 一个底部导航页签（UI §4.2 / §5.1 #1）。
 ///
 /// **句柄全部存进结构体**（R1）：页签是"拥有型 LVGL 句柄"的密集处 —— 顶部选中条 / 分隔线 /
@@ -400,6 +491,12 @@ struct NavTab {
     icon_idx: Cell<usize>,
     /// 当前挂着的文案样式下标。
     text_idx: Cell<usize>,
+    /// 三档**底色**的应用标记（下标 = [`TabState::slot`]）—— **① 底色回归锁的读回值**。
+    ///
+    /// 底色样式是**状态选择器**（`DEFAULT` / `CHECKED` / `PRESSED` 三条）一次性挂上的，
+    /// 运行期不再切换 ⇒ 标记按**槽位**记录（不是"当前生效档"，与 [`NavTab::text_colors`]
+    /// 的 `text_idx` 口径不同，见 [`Shell::tab_bg`] 的文档）。
+    bg_marks: [TabBg; 3],
 }
 
 /// 外壳的全部拥有型状态 + LVGL 句柄。
@@ -592,9 +689,9 @@ impl Shell {
         nav.set_pos(0, Dimens::HEADER_H + Dimens::CONTENT_H);
         nav.add_style(&nav_bg(), StyleSelector::main());
         let item_styles = [
-            nav_item_default(),
-            nav_item_selected(),
-            nav_item_pressed(),
+            nav_item_skin(NAV_BG_DEFAULT),
+            nav_item_skin(NAV_BG_SELECTED),
+            nav_item_skin(NAV_BG_PRESSED),
         ];
         let mut tabs = Vec::with_capacity(NavPage::ALL.len());
         for page in NavPage::ALL {
@@ -917,6 +1014,27 @@ impl Shell {
         out
     }
 
+    /// 页眉通道胶囊（**当前可见**那一件）的**屏内绝对左缘 x**（离屏断言口径）；
+    /// 三件全隐藏时 `None`。
+    ///
+    /// **为什么要有它**（② 评审的"落到对象上"的那一半）：`shell.rs` 内
+    /// [`tests::header_slots_are_disjoint_and_inside_canvas`] 断言的是**常量层**
+    /// （`HEADER_CHIP_X` 与时钟的锚定链），抓不到"调用点把 `set_pos` 的实参换掉"；
+    /// 本读口取 [`Obj::coords`]（**布局趟落定后**的实际屏内坐标）。
+    ///
+    /// ⚠️ **必须与 [`HEADER_CHIP_X`] 做精确相等断言**，不要写成"落在右半区"之类的区间判据：
+    /// 区间判据有 **80 px 盲窗**（实测把调用点写成 512 时全绿 —— 见 [`HEADER_CHIP_X`] 的说明）。
+    /// ⚠️ `coords` 须等一次布局趟（生产 = 每拍 `timer_handler()`；测试 = 强制渲染）。
+    pub fn channel_chip_x(&self) -> Option<i32> {
+        let mut out = None;
+        for chip in &self.core.chips {
+            if !chip.obj().is_hidden() {
+                out = Some(chip.obj().coords().x1);
+            }
+        }
+        out
+    }
+
     /// 未保存提示条是否可见。
     pub fn banner_visible(&self) -> bool {
         !self.core.banner.is_hidden()
@@ -986,6 +1104,18 @@ impl Shell {
     pub fn tab_icon_color(&self, page: NavPage) -> Option<Color> {
         let t = self.core.tabs.get(page.index())?;
         t.icon_colors.get(t.icon_idx.get()).copied()
+    }
+
+    /// 第 `i` 个页签在**指定档**（[`TabState`]）的**底色应用标记**（**① 的读回口**）。
+    ///
+    /// 与 [`Shell::tab_text_color`] 的差别（**有意**）：文字 / 图标色是"**当前生效**"档
+    /// （运行期经 `set_style_index` 在 0/1 两档间切换），而底色是**状态选择器**（`DEFAULT` /
+    /// `CHECKED` / `PRESSED`）一次挂齐、由 LVGL 按状态自选 ⇒ 这里按**槽位**读，问的是
+    /// "这一档挂的是哪个底色"。口径 = [`NavTab::bg_marks`]（**应用标记**：记的是送进
+    /// `set_bg_color(..)` 的那个值，不是从 LVGL 读回的实际底色 —— 薄层无该通道）。
+    pub fn tab_bg(&self, page: NavPage, state: TabState) -> Option<TabBg> {
+        let t = self.core.tabs.get(page.index())?;
+        t.bg_marks.get(state.slot()).copied()
     }
 
     /// 第 `i` 个页签的图标字形。
@@ -1092,7 +1222,11 @@ impl Core {
 // 7. 样式与零件构造（色值 / 尺寸**一律**取 `theme` 命名常量；零裸值）
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 页眉底：与页面底色同档（`Palette::SURFACE`），下方 1 px 分隔线由 `nav` 一侧表达。
+/// 页眉底：`Palette::SURFACE`、直角、无描边。
+///
+/// ⚠️ 原文档曾写"下方 1 px 分隔线由 `nav` 一侧表达" —— **不实**：`nav_bg()` 是
+/// `Stroke::NONE` 且无上描边，页眉与内容区之间**没有**分隔线（见 **SH13**：§3.5 里那条线
+/// 属示意图，规格未给出线宽/色值/归属）。2026-09-15 代码质量评审点出该矛盾后删去。
 fn header_bg() -> Rc<Style> {
     let mut s = Style::new();
     s.set_bg_color(Palette::SURFACE);
@@ -1140,47 +1274,61 @@ fn banner_skin() -> Rc<Style> {
     Rc::new(s)
 }
 
-/// 导航项：**默认态**（透明底 —— 露出导航条的 `#141F33`）。
-fn nav_item_default() -> Rc<Style> {
-    let mut s = Style::new();
-    s.set_bg_opa(Opa::TRANSPARENT);
-    s.set_border_width(Stroke::NONE);
-    s.set_radius(Radius::NONE);
-    s.set_pad_all(0);
-    Rc::new(s)
+/// 导航项的一档"皮肤"：**底色样式** + 它的**应用标记**（两者**同源** —— 由同一个
+/// [`TabBg`] 派生，见 [`Shell::tab_bg`] 的回归锁说明）。
+struct NavSkin {
+    /// 挂到页签按钮上的状态选择器样式。
+    style: Rc<Style>,
+    /// 该档底色的应用标记（= 送进 `set_bg_color(..)` 的那个值）。
+    bg: TabBg,
 }
 
-/// 导航项：**选中态**（UI §4.2：底 `surface_alt`）。
-fn nav_item_selected() -> Rc<Style> {
+/// 建一档导航项样式（**底色由 [`TabBg`] 唯一决定** ⇒ 样式与标记不可能各说各话）。
+///
+/// **改什么会让本条变红**：把 [`NAV_BG_SELECTED`] 的 `Palette::SURFACE_ALT` 换成别的
+/// `Palette` 常量 ⇒ 本函数拿到的是新 `TabBg` ⇒ 挂上屏的底色与 `shell_chain` 读回的标记
+/// **一起变** ⇒ 断言红。
+fn nav_item_skin(bg: TabBg) -> NavSkin {
     let mut s = Style::new();
-    s.set_bg_color(Palette::SURFACE_ALT);
-    s.set_bg_opa(Opa::COVER);
+    match bg {
+        // 未选中：透明底（露出导航条的 `Palette::SURFACE`，UI §4.2）。
+        TabBg::Transparent => s.set_bg_opa(Opa::TRANSPARENT),
+        // 选中 `surface_alt` / 按下 `#2E4066`（UI §4.2 / §5.2）。
+        TabBg::Solid(c) => {
+            s.set_bg_color(c);
+            s.set_bg_opa(Opa::COVER);
+        }
+    }
     s.set_border_width(Stroke::NONE);
     s.set_radius(Radius::NONE);
     s.set_pad_all(0);
-    Rc::new(s)
-}
-
-/// 导航项：**按下态**（UI §4.2 / §5.2：底 `#2E4066`，反馈 ≤100 ms）。
-fn nav_item_pressed() -> Rc<Style> {
-    let mut s = Style::new();
-    s.set_bg_color(Palette::SURFACE_PRESS);
-    s.set_bg_opa(Opa::COVER);
-    s.set_border_width(Stroke::NONE);
-    s.set_radius(Radius::NONE);
-    s.set_pad_all(0);
-    Rc::new(s)
+    NavSkin {
+        style: Rc::new(s),
+        bg,
+    }
 }
 
 /// 建一个导航页签（按钮 + 顶部选中条 + 左缘竖分隔 + 图标 + 文案）。
-fn build_tab(parent: &Obj, page: NavPage, item_styles: &[Rc<Style>; 3]) -> Result<NavTab, LvglError> {
+fn build_tab(parent: &Obj, page: NavPage, item_skins: &[NavSkin; 3]) -> Result<NavTab, LvglError> {
     let btn = TextButton::create(parent, "")?;
     btn.set_size(Dimens::NAV_ITEM_W, Dimens::NAV_ITEM_H);
     btn.set_pos(Dimens::NAV_ITEM_W * page.index() as i32, 0);
     btn.set_checkable(true);
-    btn.add_style(&item_styles[0], StyleSelector::state_of(State::DEFAULT));
-    btn.add_style(&item_styles[1], StyleSelector::state_of(State::CHECKED));
-    btn.add_style(&item_styles[2], StyleSelector::state_of(State::PRESSED));
+    // 三档底色：一次挂齐（LVGL 按状态自选），运行期不再切换 ⇒ 标记按槽位随样式同批记下。
+    for st in TabState::ALL {
+        let skin = &item_skins[st.slot()];
+        let sel = match st {
+            TabState::Default => StyleSelector::state_of(State::DEFAULT),
+            TabState::Selected => StyleSelector::state_of(State::CHECKED),
+            TabState::Pressed => StyleSelector::state_of(State::PRESSED),
+        };
+        btn.add_style(&skin.style, sel);
+    }
+    let bg_marks = [
+        item_skins[TabState::Default.slot()].bg,
+        item_skins[TabState::Selected.slot()].bg,
+        item_skins[TabState::Pressed.slot()].bg,
+    ];
 
     // 顶部 4 px 选中条（UI §4.2；默认隐藏，选中时由 `Core::select` 点亮）。
     let bar = decor(
@@ -1242,6 +1390,7 @@ fn build_tab(parent: &Obj, page: NavPage, item_styles: &[Rc<Style>; 3]) -> Resul
         text_colors,
         icon_idx: Cell::new(usize::MAX),
         text_idx: Cell::new(usize::MAX),
+        bg_marks,
     })
 }
 
@@ -1431,8 +1580,13 @@ mod tests {
 
     /// 页眉各槽位**不重叠**、且都在画布内（SH3 的让位规则是它们的**行为**面）。
     ///
-    /// **改什么会让本条变红**：把 [`HEADER_CHIP_X`] 调大到与倒计时胶囊相交（如 `X = 600`）、
-    /// 或把 [`HEADER_TITLE_W_P1`] 的推导改成"不减呼吸缝"（P1 标题右缘压到通道胶囊上）。
+    /// **右端组右锚定**（② 的回归锁）：`触摸角标 → 通道胶囊 → 时钟 →|右安全边` 三件以
+    /// [`Dimens::GAP_GROUP`] 等缝相连、整组贴右安全边 ⇒ **通道胶囊不再落在页眉中段**。
+    ///
+    /// **改什么会让本条变红**：把 [`HEADER_CHIP_X`] 改回页眉中段（如
+    /// `Dimens::CONTENT_W * 2 / 5 + Dimens::GAP_GROUP` = 412）⇒ 「胶囊左缘在右半区」与
+    /// 「胶囊 + 缝 == 时钟左缘」**两条同时红**；把 [`HEADER_TITLE_W_P1`] 的推导改成
+    /// "不减呼吸缝"⇒ 标题右缘压到右端组上，相交断言红。
     #[test]
     fn header_slots_are_disjoint_and_inside_canvas() {
         let p1_title = (HEADER_TITLE_X, HEADER_TITLE_X + HEADER_TITLE_W_P1);
@@ -1445,25 +1599,94 @@ mod tests {
         // 返回键独占 x 12–76（UI §4.1）。
         assert_eq!(HEADER_BACK_X, 12);
         assert_eq!(HEADER_BACK_X + Dimens::TOUCH_CRITICAL, 76);
-        // 标题与通道胶囊不相交（P1 与 P2–P6 两条）。
-        assert!(p1_title.1 <= chip.0, "P1 标题不得压到通道胶囊");
-        assert!(paged_title.1 <= chip.0, "分页标题不得压到通道胶囊");
-        assert!(paged_title.0 > HEADER_BACK_X + Dimens::TOUCH_CRITICAL, "标题须在返回键右侧");
-        // 通道胶囊与触摸角标不相交（二者可**同显**）。
-        assert!(chip.1 + Dimens::GAP_GROUP <= badge.0, "通道胶囊与触摸角标之间留呼吸缝");
-        // 触摸角标与时钟不相交。
-        assert!(badge.1 <= clock.0, "触摸角标不得压到时钟");
-        // 画布内。
-        assert!(clock.1 <= Dimens::SCREEN_W - Dimens::SIDE_PAD);
-        // 倒计时胶囊**必然**与通道胶囊 / 触摸角标相交 ⇒ SH3 的让位是必需的，不是可选的。
+        // ── **右端组**（UI §4.1「右端：时钟 + 通道状态胶囊」；§7.5 的角标也在右端）──
+        // ① 通道胶囊**左缘落在右半区**（"右端"的可判定判据：中段布局 412 < 512 会被抓）。
+        assert!(
+            chip.0 >= Dimens::SCREEN_W / 2,
+            "通道胶囊必须落在页眉**右半区**（右端组），实得 x={}",
+            chip.0
+        );
+        // ② 胶囊**紧跟时钟**（中间只隔一个呼吸缝）—— 右锚定链的第一环。
+        assert_eq!(
+            chip.1 + Dimens::GAP_GROUP,
+            clock.0,
+            "通道胶囊右缘 + 一个呼吸缝 == 时钟左缘（§4.1「右端」；改回中段 ⇒ 红）"
+        );
+        // ③ 触摸角标**紧跟胶囊**（同在右端组，§7.5）。
+        assert_eq!(
+            badge.1 + Dimens::GAP_GROUP,
+            chip.0,
+            "触摸角标右缘 + 一个呼吸缝 == 通道胶囊左缘（右端组等缝相连）"
+        );
+        // ④ 整组贴右安全边（时钟右缘 + 安全边 == 画布宽）。
+        assert_eq!(clock.1 + Dimens::SIDE_PAD, Dimens::SCREEN_W);
+        // ── 互斥（Title vs 右端组）──
+        assert!(p1_title.1 <= badge.0, "P1 标题不得压到右端组最左成员（触摸角标）");
+        assert!(paged_title.1 <= badge.0, "分页标题不得压到右端组最左成员");
+        assert!(
+            paged_title.0 > HEADER_BACK_X + Dimens::TOUCH_CRITICAL,
+            "标题须在返回键右侧"
+        );
+        // 倒计时胶囊**必然**与通道胶囊相交 ⇒ SH3 的让位是必需的，不是可选的。
         assert!(
             capsule.0 < chip.1,
             "倒计时胶囊与通道胶囊相交 ⇒ SH3 让位规则必需（若二者不再相交，SH3 应被删除）"
         );
+        // SH3 的根判据是**内在宽度和**（与位置无关；② 改版式后仍然成立）：
+        // 返回 64 + 标题（P1 实测需 320）+ 缝 + 通道胶囊 280 + 缝 + 倒计时胶囊 264 + 缝 + 时钟 120
+        // + 右安全边 16 > 1024 ⇒ 五者**不可能**同时上屏（见 SH3 的算式）。
+        let min_total = Dimens::TOUCH_CRITICAL
+            + HEADER_TITLE_W_P1
+            + Dimens::GAP_GROUP
+            + HEADER_CHIP_W
+            + Dimens::GAP_GROUP
+            + HEADER_CAPSULE_W
+            + Dimens::GAP_GROUP
+            + HEADER_CLOCK_W
+            + Dimens::SIDE_PAD;
         assert!(
-            capsule.0 < badge.1 && badge.0 < capsule.1,
-            "倒计时胶囊与触摸角标相交 ⇒ SH3 让位规则必需（同上，防登记腐化）"
+            min_total > Dimens::SCREEN_W,
+            "页眉五者的内在宽度和 {min_total} 必须 > 画布宽 {} ⇒ SH3 让位必需（防登记腐化：\
+             若某天排得下五者，SH3 与让位逻辑应被删除）",
+            Dimens::SCREEN_W
         );
+    }
+
+    /// 导航三档底色的**唯一真源**与**互斥性**（**①** 的纯逻辑那一半；LVGL 侧读回见
+    /// `ui/tests.rs::shell_chain`）。
+    ///
+    /// **改什么会让本条变红**：把 [`NAV_BG_SELECTED`] / [`NAV_BG_PRESSED`] 换成同一个值
+    /// （三档同色 —— "全都一样"的蒙混形态）⇒ 互斥断言红；把选中档换成 `Palette::SURFACE`
+    /// （画布/导航条同色 ⇒ 选中态在导航条上看不出来）⇒ 真源断言红。
+    #[test]
+    fn nav_item_bg_marks_are_distinct_and_from_theme() {
+        assert_eq!(
+            NAV_BG_DEFAULT,
+            TabBg::Transparent,
+            "未选中档必须是**透明**底（UI §4.2「未选中：底色透明」）"
+        );
+        assert_eq!(
+            NAV_BG_SELECTED,
+            TabBg::Solid(Palette::SURFACE_ALT),
+            "选中档必须是 `surface_alt`（UI §4.2「选中：底 `#1B2942`」）"
+        );
+        assert_eq!(
+            NAV_BG_PRESSED,
+            TabBg::Solid(Palette::SURFACE_PRESS),
+            "按下档必须是 `surface_press`（UI §4.2「按下 底 `#2E4066`」）"
+        );
+        // 互斥：任何两档都不得同值（防"三档一个色"蒙过"选中态有底色"的断言）。
+        for a in TabState::ALL {
+            for b in TabState::ALL {
+                if a != b {
+                    assert_ne!(a.bg(), b.bg(), "{a:?} 与 {b:?} 的底色不得同值");
+                }
+            }
+        }
+        // 槽位表自洽（`TabState::ALL` 的位次 == `slot()`）。
+        for (i, st) in TabState::ALL.into_iter().enumerate() {
+            assert_eq!(st.slot(), i, "{st:?} 的槽位必须是它在 ALL 里的位次");
+        }
     }
 
     /// 导航 6 项铺满可视宽且不越界（`NAV_ITEM_W` 是 theme 的单一真源，见 SH10）。

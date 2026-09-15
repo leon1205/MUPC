@@ -571,11 +571,20 @@ pub fn apply_all(obj: &Obj, styles: &[(&Rc<Style>, StyleSelector)]) {
 }
 
 /// 页面底色（UI §3.1）。
+///
+/// ⚠️ **必须同时清掉内边距与圆角**：LVGL 默认主题给**每个** `lv_obj` 挂 `card` 样式
+/// （`lv_theme_default.c`：`pad_all = PAD_DEF` ≈ 20 px、`radius = RADIUS_DEF`）。本样式
+/// 只覆盖底色 / 描边，若不清边距，挂上它的对象**仍带着 20 px 内边距**，其子对象的
+/// `set_pos` 又会按内边距相对定位 ⇒ 整层布局内缩 20 px、右下越出屏幕
+/// （2026-09-15 实测：外壳三区被推到 `(42,42)`、右缘 1065 > 屏宽 1024）。
+/// 用法同 [`transparent`]（见 `pages::layout_box` 的同类注释）。
 pub fn screen_bg() -> Rc<Style> {
     let mut s = Style::new();
     s.set_bg_color(Palette::BG);
     s.set_bg_opa(Opa::COVER);
     s.set_border_width(Stroke::NONE);
+    s.set_pad_all(0);
+    s.set_radius(Radius::NONE);
     Rc::new(s)
 }
 

@@ -26,6 +26,27 @@
 //!   必须在事件循环线程内（设计 §5.2 不变量 4）。
 //! - **回调内不删除自身对象**：`ConfirmDialog` 的按钮回调只**发通知**，弹层由调用方在自己的
 //!   tick 里 [`ConfirmDialog::close`]。
+//! - **已知欠账（如实登记，未修）：通知路径跨用户回调持有借用** —— `fire_unit` / `fire_value`
+//!   以及 [`MultiSelectChips`] 的内联通知路径，都在**调用用户回调期间**持着该槽的
+//!   `try_borrow_mut()` 守卫；而各件的 `set_on_*` 实现是 `*self.slot.borrow_mut() = …`
+//!   ⇒ 用户回调里若**自替换**（在回调内再调 `set_on_change` / `set_on_confirm` 等），
+//!   `borrow_mut()` 会撞上外层正在持有的可变借用 ⇒ **RefCell 双重可变借用 panic**；该 panic
+//!   从用户回调里抛出、被 `src/lvgl/event.rs` 事件桥的 `catch_unwind` 拦下 ⇒
+//!   **本次事件作废、回调体在自替换处被截断，其后的用户逻辑全部不执行**。
+//!   ⚠️ **不是**"回调正常跑完、替换被静默忽略" —— 2026-09-15 复核实测订正了先前的错误措辞
+//!   （当时的登记把机制写成"`try_borrow_mut` 拿不到借用 ⇒ 静默丢弃"，与代码相反）。
+//!   涉及 [`Stepper`]（`Stepper::set_on_change`）、[`MultiSelectChips`]（`set_on_change`）、
+//!   [`ConfirmDialog`]（`set_on_confirm` / `set_on_cancel`）—— **不止一件**（先前只登记了
+//!   `MultiSelectChips`，范围被低估；2026-09-15 复核一并订正）。
+//!
+//!   本单元 B2b-1 已在 `controls.rs` 的 `SegmentedControl` 上修过**同一类**缺陷：那里的
+//!   `fire_index` 改为"取出 → 转发 → **槽仍为空才放回**"，并把"放回"放进 `PutBack` 守卫的
+//!   `Drop`（正常返回与展开两条路径都放回，且向 stderr 留诊断、不静默）。本文件的三处同型，
+//!   应同构改造。
+//!
+//!   **当前不可达**：`ui/**` 内没有任何调用方在这些回调里自替换（P3 的 `on_modules_changed`
+//!   只改状态）⇒ 无现场。**B3 若要在这些回调内自替换 ⇒ 先按 `controls.rs` 的口径改造本件。**
+//!   （2026-09-15 代码质量评审发现；同批复核订正机制与范围。）
 //!
 //! ## 布局手法（薄层定位能力有限，如实标注）
 //!
@@ -874,6 +895,11 @@ impl MultiSelectChips {
                     .collect();
                 // 先放掉对 `chips` 的借用，再回调 —— 回调里若调 `selected()` 也要借它。
                 drop(v);
+                // ⚠️ **此处跨用户回调持有 `cb` 的借用守卫**：本件的 `set_on_change` 实现是
+                // `*slot.borrow_mut() = …` ⇒ 回调里自替换会撞上这个守卫、**双重可变借用 panic**，
+                // 该 panic 被 `src/lvgl/event.rs` 的 `catch_unwind` 拦下 ⇒ 本次事件作废且
+                // 回调体被截断（详见模块头"已知欠账"；正确范式见 `controls.rs::fire_index` 的
+                // `PutBack` 守卫）。
                 if let Ok(mut s) = cb.try_borrow_mut() {
                     if let Some(f) = s.as_mut() {
                         f(sel);
