@@ -7,7 +7,8 @@
 //! | 模块 | 职责 | 设计出处 |
 //! |------|------|----------|
 //! | [`channel`] | `DisplayChannelClient`：TCP 回环 `GET /v1/display/latest` 拉最新帧（无 TLS） | §3.1/§5.3 |
-//! | [`state`] | `DisplayState` + `UiSnapshot`：三态归一（正常 / `--`+角标 / 掉线）+ 新鲜度/通道态派生（纯逻辑） | §3.4/§5.3 |
+//! | [`state`] | `DisplayState` + `UiSnapshot`：三态归一（正常 / `--`+角标 / 掉线）+ 新鲜度/通道态派生（纯逻辑）；v2 扩展 `ControlState`（控制通道态 / Toast 生命周期 / `confirm` / `hmi_channel` 本地覆盖） | §3.4/§5.3 + §5.4/§5.5 |
+//! | [`console`] | `ConsoleClient`：控制通道 `/v1/console/*` 的非阻塞状态机（`tick` 推进、单次 5 s、幂等重试复用同一 `request_id`） | §5.5 + §3.3/§3.4 |
 //! | [`canvas`] | `Canvas` trait + `OffscreenCanvas`（默认，内存缓冲可离屏断言）+ `fbdev::FbCanvas`（Linux `/dev/fb0` mmap，`cfg(unix)` 隔离） | §B1/§5.2/§6 |
 //! | [`font`] | ab_glyph 光栅化 + 可插拔字库（外部路径 / `bundled-font` feature）+ 缺字库容错回退 | §5.4/§9/§13 前置项 8 |
 //! | [`layout`] | 1024x768 固定网格：页眉 / SOC 主区 / PCS 状态区 / 三相四卡（A/B/C/总，上P下I） | §6.2/§6.3 + UI §4/§5 |
@@ -31,6 +32,8 @@
 pub mod canvas;
 pub mod channel;
 pub mod config;
+// 控制通道客户端（开发单元 B3-1）：`/v1/console/*` 的非阻塞状态机 + 幂等重试（设计 §5.5）。
+pub mod console;
 pub mod error;
 pub mod font;
 pub mod layout;

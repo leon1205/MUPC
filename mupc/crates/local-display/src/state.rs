@@ -7,8 +7,31 @@
 //!   （禁 0/陈旧值，PRD 不造假值）。SOC 双源皆失 → `SocView::Lost`（禁沿用旧值）。
 //!
 //! 本文件不含任何绘图/IO——`UiSnapshot` 为渲染层（layout）唯一消费的归一化视图。
+//!
+//! ## ⚠️ B3-1 偏差登记（设计 §5.4 的 `UiState` 草图 vs 页面实际接口）
+//!
+//! §5.4 的 `UiState` 是**示意草图，早于六页实现**。对账后**不照抄**，逐条如下：
+//!
+//! | # | 草图 | 现状（本文件 / 页面实际契约） | 原因 |
+//! |---|------|-------------------------------|------|
+//! | S-1 | 单体 `UiState { frame, channel, soc, … }` | 帧派生部分**已**由 v1.0 [`DisplayState`] + [`UiSnapshot`] 承担（逐条保留，未动）；v2 控制侧另立 [`ControlState`] | 草图把两代模型画成一个结构；合并会把已交付、已被六页消费的契约重写一遍（双份真源风险） |
+//! | S-2 | `dirty: bool` | **不持有**：`dirty` 的真源在**页面** —— `P2ConfigPage::is_dirty()`，`Shell::tick` 每拍直读它（`shell.rs:918` 的空闲计时暂停、`shell.rs:1213` 的 EDGE-11 提示条；偏差 **SH2**）。本层曾加过一个 `dirty` 镜像字段 + `set_dirty`（B3-1 初版），**因全无消费者、且构成同一事实的第二份真源，已删除**（B3-1 规格评审阻塞 1） | `ui/**` 与 `shell.rs` 对 `set_dirty` / `dirty()` **零调用**；只写不读的镜像就是本项目明令禁止的死代码。草图 `dirty: bool` 的语义已由页面承担 |
+//! | S-3 | `toast: Option<Toast>` | `Toast` 是**LVGL 句柄**（`ui/components.rs`，靠 `layer_top()` 建对象）⇒ 纯逻辑层持 [`ToastRecord`]（文本 + 截止时刻）；句柄仍归页面（`p2_config` 的 `toast` 字段） | 本文件**零 LVGL**（v1.0 起即是纯逻辑）；把句柄搬进来会让状态层依赖图形栈 |
+//! | S-4 | `confirm: Option<ConfirmDialog>` | [`ControlState::confirm`] = `Option<ConsoleEndpoint>`（`is_some()` 即「弹层打开」） | 同上（句柄归页面）；`Shell::set_modal_open(state.confirm().is_some())` 是已登记契约，谓词语义一致 |
+//! | S-5 | （未提）累计失败计数 | **不记**：累计数归 `crate::console::ConsoleClient::fail_streak()`；本层只记**失败时刻** `last_transport_failure_ms` | 同一事实不记两份（否则两个计数会漂移） |
+//! | S-6 | `ControlCode → 上屏文案` | `Ok` → `None`（**成功文案按操作由页面给定**：P2「保存成功 · 已生效」/ P4「已释放联锁」…）；失败码见 [`control_code_text`] | 草图给不出"这一条成功是什么操作"；由本层硬给一份成功串 = 与页面 `show_result` **双份真源** |
+//! | S-7 | 文案出处 | **全部转出 `ui/**` 既有字面量**（本文件不新增任何上屏字面量）；EDGE-18 取页面已落地的「审计不可用 · 操作未执行」 | 码表覆盖率的静态网只扫 `ui/**`（`ui/tests.rs::ui_texts_covered_by_font_cmap`）⇒ 在本文件自造新串，**豆腐块网照不到**。§8.3 原文的全角逗号 `，` 不在 cmap 内，页面已改写为 `·`（见 `p2_config` 的 PD 登记） |
 
-use mupc_display_proto::{DisplayFrame, Field, FieldFlag, RunState, SocSource};
+use mupc_display_proto::{
+    ConsoleEndpoint, ControlCode, ControlResponse, DisplayFrame, Field, FieldFlag, LinkState,
+    RunState, SocSource,
+};
+
+// 控制回执 / 传输失败的**上屏文案**：全部**转出** `ui/**` 的既有字面量（本文件不新增任何
+// 上屏字面量 —— 码表覆盖率的基线在 `ui/tests.rs`，只扫 `ui/**`；若在此自造新串，既有的
+// 豆腐块静态网**照不到**它）。逐个出处见 [`control_code_text`] / [`TRANSPORT_FAIL_TEXT`]。
+use crate::ui::pages::p2_config::TEXT_AUDIT_UNAVAILABLE;
+use crate::ui::pages::p4_interlock::{TEXT_INTERNAL, TEXT_OP_BUSY, TEXT_TOAST_FAIL};
 
 /// 通道断判定阈值：无成功 GET 超过该时长 → 切「与主进程数据通道断开」整屏态（UI §7.5 / PRD 6.3）。
 pub const CHANNEL_DOWN_MS: u64 = 3000;
@@ -340,6 +363,319 @@ pub struct UiSnapshot {
     pub clock_text: String,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.0 / B3-1：`hmi_channel` 本地覆盖（设计 §5.4 / §5.5）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 屏侧自身通道态 → `DeviceSection.hmi_channel` 的展示态。
+///
+/// 设计 §5.4 / §5.5：`DeviceSection.hmi_channel` 由 **HMI 本地覆盖**为自身 [`ChannelStatus`]
+/// （服务端给 `Unknown` —— 它无从知道客户端自己的连通性）。语义要点：
+/// **`Init` 不得映射为「已连接」**（尚未首成功 ⇒ 「连接中」），**`Down` 不得映射为「正常」**
+/// （与 F6.5「`Unknown`/`NotConfigured` 绝不落入正常」同一取向）。
+pub fn hmi_link_state(status: ChannelStatus) -> LinkState {
+    match status {
+        ChannelStatus::Init => LinkState::Connecting,
+        ChannelStatus::Connected => LinkState::Connected,
+        ChannelStatus::Down => LinkState::Disconnected,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.0 / B3-1：控制通道侧状态（`ControlState`）
+//
+// **为什么不是设计 §5.4 草图的单体 `UiState`**（偏差登记，见本文件末尾「B3-1 偏差」表）：
+// 草图里的 `frame` / `channel` / SOC / 三相 `NumView` **已经**由 v1.0 的 [`DisplayState`] +
+// [`UiSnapshot`] 承担（逐条保留，未动）；`toast` / `confirm` 在草图中写作**LVGL 句柄**
+// （`Option<Toast>` / `Option<ConfirmDialog>`），而本文件是**纯逻辑、零 LVGL** —— 句柄归页面
+// 持有（`p2_config` 的 `toast` 字段、各页的 `ConfirmDialog`）。故 v2 新增的控制侧状态单独成
+// 一个容器，**不**把帧派生视图搬第二遍（避免双份真源）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Toast 存活时长（**3 s 自动消失**，F9.5 / 设计 §5.4）。
+pub const TOAST_TTL_MS: u64 = 3_000;
+
+/// 控制通道**传输层**失败的上屏兜底文案。
+///
+/// 既有串里没有「请求超时 / 连接失败 / 响应异常」一类专串（UI §3.6 用字表逐字核对），
+/// 故取全局 Toast 行的「操作失败」—— **不臆造新串**。具体分类仍由
+/// `crate::console::ConsoleError` 承载（诊断 / 日志用），上屏不区分细分原因。
+pub const TRANSPORT_FAIL_TEXT: &str = TEXT_TOAST_FAIL;
+
+/// [`ControlCode`] → 上屏兜底文案（**只在服务端 `message` 为空时使用**）。
+///
+/// - `Ok` → `None`：**成功文案按操作而异**（P2「保存成功 · 已生效」/ P4「已释放联锁」…），
+///   由**页面**在 `show_result` 里给定（页面是真源，本层不另存一份 ⇒ 免双份真源）；
+/// - `AuditUnavailable` → EDGE-18 固定串（**不取 `message`**，见 [`LastControlResult::toast_text`]）；
+/// - `Busy` / `Internal` → 有**语义精确**的既有串，直接用；
+/// - 其余拒绝类（前置条件 / 校验 / 生效失败 / 后端不可用）→ 「操作失败」；
+///   **具体原因在 `message` 里**（EDGE-10 / EDGE-12 要求明示原因），本兜底不冒充原因。
+pub fn control_code_text(code: ControlCode) -> Option<&'static str> {
+    match code {
+        ControlCode::Ok => None,
+        ControlCode::RejectedPrecondition
+        | ControlCode::RejectedValidation
+        | ControlCode::ApplyFailed
+        | ControlCode::Unavailable => Some(TEXT_TOAST_FAIL),
+        ControlCode::AuditUnavailable => Some(TEXT_AUDIT_UNAVAILABLE),
+        ControlCode::Busy => Some(TEXT_OP_BUSY),
+        ControlCode::Internal => Some(TEXT_INTERNAL),
+    }
+}
+
+/// 在途控制请求（`None` = 无在飞请求）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InflightRequest {
+    /// 目标端点（决定成功文案 / 回执形状）。
+    pub endpoint: ConsoleEndpoint,
+    /// 信封 `request_id`（查询端点无信封 ⇒ `None`）。
+    pub request_id: Option<String>,
+}
+
+impl InflightRequest {
+    /// 信封 `op`（查询端点 ⇒ `None`）。
+    pub fn op(&self) -> Option<&'static str> {
+        self.endpoint.op_name()
+    }
+}
+
+/// 最近一次控制回执的**摘要**（原始 DTO 归调用方 / 页面；本层只留总线上屏与诊断要用的字段）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastControlResult {
+    /// 回执 `request_id`。
+    pub request_id: String,
+    /// 是否成功（**真值判据**）。
+    pub ok: bool,
+    /// 结构化错误码。
+    pub code: ControlCode,
+    /// 服务端人读消息（失败时即 EDGE-10 / EDGE-12 的「具体原因」）。
+    pub message: String,
+    /// 审计记录 ID（成功与失败均返回）。
+    pub audit_id: Option<String>,
+    /// **幂等命中标记**：`true` 表示本条是重复请求的**首次原始结果**（**不是错误**）。
+    pub duplicate: bool,
+    /// 服务端回执时刻（Unix ms）。
+    pub at_ms: u64,
+}
+
+impl LastControlResult {
+    /// 由回执 DTO 取摘要（**原样搬运 `duplicate`**，不得当成错误或丢弃）。
+    pub fn from_response<T>(resp: &ControlResponse<T>) -> Self {
+        Self {
+            request_id: resp.request_id.clone(),
+            ok: resp.ok,
+            code: resp.code,
+            message: resp.message.clone(),
+            audit_id: resp.audit_id.clone(),
+            duplicate: resp.duplicate,
+            at_ms: resp.at_ms,
+        }
+    }
+
+    /// 上屏文案（**唯一规则**；`None` = 本层不弹 Toast）：
+    ///
+    /// 1. `AuditUnavailable` → **EDGE-18 固定串**「审计不可用 · 操作未执行」（fail-closed；
+    ///    **不取** `message` —— 该行的判据原文就是这条固定 Toast，见 UI §8.3）；
+    /// 2. `Ok` → `None`（成功文案按操作由**页面**给定）；
+    /// 3. 其余 → 服务端 `message`（EDGE-10 / EDGE-12 的「具体原因」）经
+    ///    [`crate::ui::pages::display_safe`] 过滤（**ASCII 大写化 / `-`→`–` 等逐字符改写**），
+    ///    `message` 为空才回落 [`control_code_text`]。
+    ///
+    /// ⚠️ **口径订正（B3-1 评审重要 5）**：此处**曾**声称过滤后"字符 ⊆ cmap"，**该保证不成立** ——
+    /// [`display_safe`] 对**非 ASCII 原样透传**，其自身文档亦写明「**不**处理自由文本」
+    /// （`ui/pages/mod.rs`）⇒ **服务端 `message` 里的 cmap 外汉字仍会出豆腐块**。
+    /// 这是 `p2_config` / `p4_interlock` 的**既有共有局限**（本单元不修），但**不得**留着
+    /// 不实的保证声明。
+    pub fn toast_text(&self) -> Option<String> {
+        if self.code == ControlCode::AuditUnavailable {
+            return Some(TEXT_AUDIT_UNAVAILABLE.to_string());
+        }
+        if self.code == ControlCode::Ok {
+            return None;
+        }
+        let msg = self.message.trim();
+        if msg.is_empty() {
+            return control_code_text(self.code).map(str::to_string);
+        }
+        Some(crate::ui::pages::display_safe(msg))
+    }
+}
+
+/// 一条 Toast 的**纯逻辑**记录（3 s 生命周期；LVGL 侧的 `Toast` 句柄归页面持有）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastRecord {
+    text: String,
+    until_ms: u64,
+}
+
+impl ToastRecord {
+    /// 以 `now_ms` 为起点建一条（存活 [`TOAST_TTL_MS`]）。
+    pub fn new(text: impl Into<String>, now_ms: u64) -> Self {
+        Self {
+            text: text.into(),
+            until_ms: now_ms.saturating_add(TOAST_TTL_MS),
+        }
+    }
+
+    /// 文案（cmap 保证的**实际边界**见 [`LastControlResult::toast_text`] 的口径订正）。
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// 过期时刻（Unix ms）。
+    pub fn until_ms(&self) -> u64 {
+        self.until_ms
+    }
+
+    /// 是否已到期（`now ≥ until`）。
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        now_ms >= self.until_ms
+    }
+}
+
+/// 控制通道 + 外壳层所需的状态（B3-1）。
+///
+/// **不含**：帧派生视图（归 [`DisplayState`] / [`UiSnapshot`]）、LVGL 句柄（归页面）、
+/// 传输层累计失败计数（归 `crate::console::ConsoleClient::fail_streak()` —— 同一事实不记两份）。
+#[derive(Debug, Default)]
+pub struct ControlState {
+    inflight: Option<InflightRequest>,
+    last: Option<LastControlResult>,
+    /// 最近一次**传输层**失败的注入时刻（`None` = 从未失败）；用于「刚失败过」提示与诊断。
+    last_transport_failure_ms: Option<u64>,
+    toast: Option<ToastRecord>,
+    /// 模态确认弹层（`Some` = 打开）：`Shell::set_modal_open(state.confirm().is_some())`
+    /// 是已登记契约（`ui/shell.rs` 偏差 **SH2**）。
+    ///
+    /// **本层不持有「配置页有未保存修改」的镜像**：该事实的真源是
+    /// `P2ConfigPage::is_dirty()`，`Shell::tick` 每拍直读（见偏差表 **S-2**）。
+    confirm: Option<ConsoleEndpoint>,
+}
+
+impl ControlState {
+    /// 空状态。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // ── 在途 ──────────────────────────────────────────────────────────────
+
+    /// 记一条在途请求（由接线层在 `ConsoleClient::begin_*` 成功后调用）。
+    pub fn begin(&mut self, endpoint: ConsoleEndpoint, request_id: Option<&str>) {
+        self.inflight = Some(InflightRequest {
+            endpoint,
+            request_id: request_id.map(str::to_string),
+        });
+    }
+
+    /// 在途请求（`None` = 无在飞）。
+    pub fn inflight(&self) -> Option<&InflightRequest> {
+        self.inflight.as_ref()
+    }
+
+    /// 是否有在途请求。
+    pub fn is_busy(&self) -> bool {
+        self.inflight.is_some()
+    }
+
+    // ── 结果 ──────────────────────────────────────────────────────────────
+
+    /// 记一次回执（**清在途** + 存摘要 + 按需弹 Toast）。
+    ///
+    /// `duplicate=true` **原样保留**且**不**影响 Toast 规则（幂等命中是成功路径的一种）。
+    pub fn record_response<T>(&mut self, resp: &ControlResponse<T>, now_ms: u64) {
+        let summary = LastControlResult::from_response(resp);
+        if let Some(text) = summary.toast_text() {
+            self.push_toast(text, now_ms);
+        }
+        self.last = Some(summary);
+        self.inflight = None;
+    }
+
+    /// 记一次**传输层失败**（超时 / 连接失败 / 非 200 / 解码失败）。
+    ///
+    /// 清在途、记失败时刻、弹兜底 Toast（[`TRANSPORT_FAIL_TEXT`]）。**累计次数**不在此记
+    /// —— 那是 `ConsoleClient::fail_streak()` 的活（同一事实不记两份）。
+    pub fn record_transport_failure(&mut self, now_ms: u64) {
+        self.inflight = None;
+        self.last_transport_failure_ms = Some(now_ms);
+        self.push_toast(TRANSPORT_FAIL_TEXT, now_ms);
+    }
+
+    /// 最近一次回执摘要。
+    pub fn last(&self) -> Option<&LastControlResult> {
+        self.last.as_ref()
+    }
+
+    /// 最近一次传输层失败的注入时刻。
+    pub fn last_transport_failure_ms(&self) -> Option<u64> {
+        self.last_transport_failure_ms
+    }
+
+    // ── Toast ─────────────────────────────────────────────────────────────
+
+    /// 弹一条 Toast（同一时刻仅 1 条：新的覆盖旧的，UI §7.2）。
+    pub fn push_toast(&mut self, text: impl Into<String>, now_ms: u64) {
+        self.toast = Some(ToastRecord::new(text, now_ms));
+    }
+
+    /// 当前 Toast。
+    pub fn toast(&self) -> Option<&ToastRecord> {
+        self.toast.as_ref()
+    }
+
+    /// 当前 Toast 文案。
+    pub fn toast_text(&self) -> Option<&str> {
+        self.toast.as_ref().map(ToastRecord::text)
+    }
+
+    /// 是否已到期（调用方据此决定是否清理；返回 `false` 表示没有 Toast）。
+    pub fn toast_expired(&self, now_ms: u64) -> bool {
+        self.toast.as_ref().is_some_and(|t| t.is_expired(now_ms))
+    }
+
+    /// 每拍调用：到期即清（**3 s 自动消失**）。返回本次是否清掉了。
+    pub fn expire_toast(&mut self, now_ms: u64) -> bool {
+        if self.toast_expired(now_ms) {
+            self.toast = None;
+            return true;
+        }
+        false
+    }
+
+    // ── 外壳层 ────────────────────────────────────────────────────────────
+
+    /// 模态确认弹层（`Some` = 打开）。
+    pub fn confirm(&self) -> Option<ConsoleEndpoint> {
+        self.confirm
+    }
+
+    /// 设置 / 清除模态弹层标记（接线层在**打开 / 关闭页面弹层的同一处**调用）。
+    pub fn set_confirm(&mut self, endpoint: Option<ConsoleEndpoint>) {
+        self.confirm = endpoint;
+    }
+
+    /// 是否有模态弹层打开（= `Shell::set_modal_open(..)` 的取值）。
+    pub fn confirm_open(&self) -> bool {
+        self.confirm.is_some()
+    }
+}
+
+impl DisplayState {
+    /// **本地覆盖** `DeviceSection.hmi_channel`（设计 §5.4 / §5.5）。
+    ///
+    /// 由接线层在**每拍渲染前**调用：值按**当前**通道态（`channel_status(now_ms)`）重算并写入
+    /// 最近帧 —— 因此通道转 `Down` 后即刻变「断开」，**不会**跟着冻帧停在「已连接」
+    /// （若改在 `record_success` 里写死，就会随冻帧一起变旧 —— 那正是「由服务端报告客户端
+    /// 自己的连接状态」这类语义倒置的另一副面孔）。无帧时是 no-op（尚无内容可覆盖）。
+    pub fn apply_hmi_channel(&mut self, now_ms: u64) {
+        let state = hmi_link_state(self.channel_status(now_ms));
+        if let Some(f) = self.frame.as_mut() {
+            f.device.hmi_channel = state;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +835,254 @@ mod tests {
         // 帧保留（冻结展示用），通道断但不清数值
         assert_eq!(st.frame().unwrap().seq, 5);
         assert_eq!(st.screen_mode(1010 + CHANNEL_DOWN_MS), ScreenMode::ChannelDown);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // B3-1：`hmi_channel` 本地覆盖
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 三态映射：**`Init` 不得映射为「已连接」**，`Down` 不得映射为「已连接 / 未配置」。
+    #[test]
+    fn hmi_link_state_never_falls_into_connected() {
+        assert_eq!(hmi_link_state(ChannelStatus::Init), LinkState::Connecting);
+        assert_eq!(hmi_link_state(ChannelStatus::Connected), LinkState::Connected);
+        assert_eq!(hmi_link_state(ChannelStatus::Down), LinkState::Disconnected);
+        assert_ne!(hmi_link_state(ChannelStatus::Init), LinkState::Connected);
+        assert_ne!(hmi_link_state(ChannelStatus::Down), LinkState::Connected);
+        // 展示词与 UI §3.6 用字表一致（「连接中」/「已连接」/「断开」）
+        assert_eq!(LinkState::Connecting.display_name(), "连接中");
+        assert_eq!(LinkState::Connected.display_name(), "已连接");
+        assert_eq!(LinkState::Disconnected.display_name(), "断开");
+    }
+
+    /// **本地覆盖按「当前通道态」重算，不跟着冻帧变旧**。
+    ///
+    /// **改什么会让本条变红**：把覆盖挪进 `record_success`（写死成收到帧那一刻的状态）⇒
+    /// 第三条断言拿到 `Connected`（冻帧值）而不是 `Disconnected`。
+    #[test]
+    fn apply_hmi_channel_follows_current_status_not_the_frozen_frame() {
+        let mut st = DisplayState::new();
+        st.apply_hmi_channel(0); // 尚无帧 ⇒ no-op（不得 panic）
+        assert!(st.frame().is_none());
+
+        st.record_success(frame(1, 1_000), 1_000);
+        st.apply_hmi_channel(1_000);
+        assert_eq!(
+            st.frame().unwrap().device.hmi_channel,
+            LinkState::Connected,
+            "通道通 ⇒ 覆盖为「已连接」"
+        );
+
+        // 超过 3 s 无成功 ⇒ 通道 Down；冻帧仍是老帧，但覆盖值必须变「断开」
+        st.apply_hmi_channel(1_000 + CHANNEL_DOWN_MS);
+        assert_eq!(
+            st.frame().unwrap().device.hmi_channel,
+            LinkState::Disconnected,
+            "通道已断，`hmi_channel` 不得停在冻帧里的「已连接」"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // B3-1：回执 → 上屏文案
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// **本层不新增任何上屏字面量**：每个出口都必须与 `ui/**` 的既有字面量**逐字相等**。
+    ///
+    /// **改什么会让本条变红**：把任一支改成新造串（如 `ControlCode::Busy => Some("请求处理中")`）
+    /// ⇒ 对应断言红（那条串不在 `ui/**` 里，码表静态网扫不到它 = 真机会出豆腐块）。
+    #[test]
+    fn control_texts_are_aliases_of_existing_ui_literals() {
+        assert_eq!(
+            control_code_text(ControlCode::AuditUnavailable),
+            Some(crate::ui::pages::p2_config::TEXT_AUDIT_UNAVAILABLE)
+        );
+        assert_eq!(
+            control_code_text(ControlCode::Busy),
+            Some(crate::ui::pages::p4_interlock::TEXT_OP_BUSY)
+        );
+        assert_eq!(
+            control_code_text(ControlCode::Internal),
+            Some(crate::ui::pages::p4_interlock::TEXT_INTERNAL)
+        );
+        for code in [
+            ControlCode::RejectedPrecondition,
+            ControlCode::RejectedValidation,
+            ControlCode::ApplyFailed,
+            ControlCode::Unavailable,
+        ] {
+            assert_eq!(
+                control_code_text(code),
+                Some(crate::ui::pages::p4_interlock::TEXT_TOAST_FAIL),
+                "{code:?} 的兜底文案必须取自 UI 既有串"
+            );
+        }
+        assert_eq!(
+            control_code_text(ControlCode::Ok),
+            None,
+            "成功文案按操作由**页面**给定（页面是真源，本层不另存一份）"
+        );
+        assert_eq!(
+            TRANSPORT_FAIL_TEXT,
+            crate::ui::pages::p4_interlock::TEXT_TOAST_FAIL
+        );
+    }
+
+    /// EDGE-18：审计不可写 → **固定串**「审计不可用 · 操作未执行」（**不取**服务端 `message`）。
+    #[test]
+    fn audit_unavailable_maps_to_the_edge18_fixed_string() {
+        let resp: ControlResponse<serde_json::Value> = ControlResponse::audit_unavailable("rid-1", 42);
+        let last = LastControlResult::from_response(&resp);
+        let text = last.toast_text().expect("EDGE-18 必须给出上屏文案");
+        assert_eq!(text, "审计不可用 · 操作未执行");
+        assert!(text.contains("审计不可用") && text.contains("操作未执行"));
+        assert_eq!(
+            text,
+            crate::ui::pages::p2_config::TEXT_AUDIT_UNAVAILABLE,
+            "必须与 UI §8.3 / P2 / P4 页用**同一串**（不另抄）"
+        );
+        assert!(
+            !text.contains("审计不可写"),
+            "取的是 UI 落地串（§8.3 原文的全角逗号不在 cmap 内 ⇒ 页面已改写为 `·`）"
+        );
+    }
+
+    /// 其余失败：**服务端 `message` 优先**（EDGE-10 / EDGE-12 的「具体原因」），
+    /// 且进屏前经 `display_safe`（ASCII 大写化 / `-`→`–`；**非 ASCII 原样透传** ——
+    /// 自由文本的 cmap 保证不在本层，见 [`LastControlResult::toast_text`]）；`message` 为空才回落兜底串。
+    #[test]
+    fn server_message_wins_and_is_display_safe() {
+        // message 含 ASCII `-`（无字形）⇒ 必须被改写成 U+2013
+        let resp: ControlResponse<serde_json::Value> = ControlResponse::rejected(
+            "rid-2",
+            ControlCode::RejectedValidation,
+            "字段 intercore-port 越界",
+            vec![],
+            Some("aud-2".into()),
+            7,
+        );
+        let last = LastControlResult::from_response(&resp);
+        let text = last.toast_text().expect("失败必须给出文案");
+        assert!(text.contains("越界"), "具体原因须保留：{text}");
+        assert!(
+            !text.contains('-'),
+            "上屏不得出现 ASCII 连字符（真机无字形）：{text}"
+        );
+        assert!(text.contains('\u{2013}'), "应改写为 U+2013：{text}");
+
+        // message 为空 ⇒ 回落按码兜底
+        let empty: ControlResponse<serde_json::Value> = ControlResponse::rejected(
+            "rid-3",
+            ControlCode::Busy,
+            "   ",
+            vec![],
+            None,
+            8,
+        );
+        assert_eq!(
+            LastControlResult::from_response(&empty).toast_text().as_deref(),
+            Some(crate::ui::pages::p4_interlock::TEXT_OP_BUSY)
+        );
+    }
+
+    /// `duplicate=true` **原样保留**，且**不**被当成错误（成功路径照走）。
+    #[test]
+    fn duplicate_flag_is_preserved_and_is_not_an_error() {
+        let mut resp: ControlResponse<serde_json::Value> =
+            ControlResponse::ok("rid-4", Some(serde_json::json!({"latched": false})), Some("aud-4".into()), 9);
+        resp.mark_duplicate();
+        let mut st = ControlState::new();
+        st.begin(ConsoleEndpoint::InterlockRelease, Some("rid-4"));
+        st.record_response(&resp, 100);
+        let last = st.last().expect("最近回执");
+        assert!(last.duplicate, "幂等命中标记不得丢");
+        assert!(last.ok && last.code == ControlCode::Ok);
+        assert_eq!(last.audit_id.as_deref(), Some("aud-4"));
+        assert!(!st.is_busy(), "回执到达 ⇒ 清在途");
+        assert_eq!(st.toast_text(), None, "成功文案由页面给定 ⇒ 本层不弹 Toast");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // B3-1：Toast 生命周期（3 s）
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// **3 s 自动消失**（边界：`now == until` 即到期）。
+    ///
+    /// **改什么会让本条变红**：把 [`TOAST_TTL_MS`] 改成非 3 s，或把 `is_expired` 的 `>=`
+    /// 改成 `>` ⇒ 边界断言红。
+    #[test]
+    fn toast_expires_after_exactly_three_seconds() {
+        assert_eq!(TOAST_TTL_MS, 3_000, "F9.5 / 设计 §5.4：3 s");
+        let mut st = ControlState::new();
+        st.push_toast("x", 1_000);
+        let t = st.toast().expect("刚刚弹的");
+        assert_eq!(t.until_ms(), 4_000);
+        assert!(!st.toast_expired(3_999), "3 s 未到 ⇒ 仍在");
+        assert!(st.toast_expired(4_000), "到点即到期（闭区间）");
+        assert!(!st.expire_toast(3_999));
+        assert!(st.toast().is_some());
+        assert!(st.expire_toast(4_000));
+        assert!(st.toast().is_none(), "到期必须清掉（不得残留）");
+        assert!(!st.expire_toast(9_999), "已清 ⇒ 再清是 no-op");
+        // 新 Toast 覆盖旧的（UI §7.2「同一时刻仅 1 条」）
+        st.push_toast("a", 10_000);
+        st.push_toast("b", 10_500);
+        assert_eq!(st.toast_text(), Some("b"));
+        assert_eq!(st.toast().map(ToastRecord::until_ms), Some(13_500));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // B3-1：传输失败 / 在途 / 外壳层标志
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn transport_failure_clears_inflight_and_toasts_the_fallback() {
+        let mut st = ControlState::new();
+        st.begin(ConsoleEndpoint::ConfigApply, Some("rid-5"));
+        assert!(st.is_busy());
+        assert_eq!(st.inflight().and_then(InflightRequest::op), Some("apply"));
+        st.record_transport_failure(500);
+        assert!(!st.is_busy(), "超时 / 连接失败 ⇒ 在途必须当场作废");
+        assert_eq!(st.last_transport_failure_ms(), Some(500));
+        assert_eq!(
+            st.toast_text(),
+            Some(TRANSPORT_FAIL_TEXT),
+            "传输失败必须给出上屏兜底文案（不静默）"
+        );
+        assert!(st.toast().is_some_and(|t| t.until_ms() == 500 + TOAST_TTL_MS));
+    }
+
+    /// 在途请求记的是**查询端点也无 `op`**（GET 无信封）；写端点记 `op` 与 `request_id`。
+    #[test]
+    fn inflight_records_op_and_request_id() {
+        let mut st = ControlState::new();
+        assert!(!st.is_busy() && st.inflight().is_none());
+        st.begin(ConsoleEndpoint::Audit, None);
+        let inf = st.inflight().expect("在途");
+        assert_eq!(inf.op(), None, "查询端点无信封 op");
+        assert_eq!(inf.request_id, None);
+        st.begin(ConsoleEndpoint::InterlockAckM1, Some("rid-6"));
+        assert_eq!(st.inflight().and_then(InflightRequest::op), Some("ack_m1"));
+        assert_eq!(
+            st.inflight().and_then(|i| i.request_id.as_deref()),
+            Some("rid-6")
+        );
+    }
+
+    /// `confirm` 的 `is_some()` 即 `Shell::set_modal_open(..)` 的取值
+    /// （`ui/shell.rs` 偏差 **SH2** 的已登记契约）。
+    ///
+    /// ※ 本用例原为 `confirm_and_dirty_flags_feed_the_shell_contract`，同批断言了一个
+    /// `dirty` 镜像字段。该字段**无任何消费者**（`ui/**` + `shell.rs` 零调用，真源是
+    /// `P2ConfigPage::is_dirty()`）⇒ 按 B3-1 规格评审阻塞 1 **删除字段与其断言**；
+    /// 用例随之改名、只保留 `confirm` 契约（该断言的保护力未减）。
+    #[test]
+    fn confirm_flag_feeds_the_shell_contract() {
+        let mut st = ControlState::new();
+        assert!(!st.confirm_open() && st.confirm().is_none());
+        st.set_confirm(Some(ConsoleEndpoint::InterlockRelease));
+        assert!(st.confirm_open(), "弹层打开 ⇒ 空闲计时暂停（TT-12 / TT-13）");
+        assert_eq!(st.confirm(), Some(ConsoleEndpoint::InterlockRelease));
+        st.set_confirm(None);
+        assert!(!st.confirm_open());
     }
 }

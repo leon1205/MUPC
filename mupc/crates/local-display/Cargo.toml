@@ -63,6 +63,10 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 ab_glyph = "0.2"
 thiserror = { workspace = true }
+# 控制通道的 `request_id` = **UUID v4**（幂等键兼防重放凭据，设计 §3.3/§5.5）。
+# 工作区已有 `uuid`（根 Cargo.toml，features = ["v4","serde"]）—— 本单元唯一新增的依赖行；
+# **不得**用计数器 / 时间戳自制"伪 uuid"：弱 id 会把两次不同操作误判为同一请求（静默丢操作）。
+uuid = { workspace = true }
 
 # /dev/fb0 mmap 与 evdev 读取仅在 Linux 需要（Windows 本机不编译这两个 cfg 块
 # ——设计 §B1/§11.2：evdev 发现与校准属真机项，其**判定逻辑**（touch.rs 上半）全平台可测）。
