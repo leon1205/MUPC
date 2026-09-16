@@ -37,6 +37,15 @@ web_api:
   # tls_cert: "/opt/mupc/certs/server.crt"
   # tls_key: "/opt/mupc/certs/server.key"
 
+# IEC 104 北向网关监听（S2 §12.3 gateway 段；缺省 0.0.0.0:2404，与历史硬编码一致）
+# ⚠️ 本段**必须存在**：保留式编辑只做"行级替换"，段缺失会让该段字段的首次写入整体回写
+#    （WriteMode=FullRewrite）⇒ 本文件全部注释丢失（详见 yaml_edit.rs 模块头的边界登记）。
+# 【生产】投产口径：listen_addr 填调度主站可达的本机网口（如 "192.168.3.10"），
+#   端口按主站约定（默认 2404）。改此二键 requires_reconnect=true ⇒ 屏上 L2+ 强确认。
+gateway:
+  listen_addr: "0.0.0.0"        # 缺省 0.0.0.0（全网口）；投产**建议**按现场网口收紧
+  listen_port: 2404             # IEC 60870-5-104 标准端口（按调度主站约定）
+
 ai_engine:
   model_dir: "/opt/mupc/models"
   config_file: "/opt/mupc/config/mupc_env_config.yaml"

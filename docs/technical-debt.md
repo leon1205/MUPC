@@ -279,6 +279,23 @@
 
 ---
 
+### 6.8 G-2 整改登记（12-本地显示终端 配置写路径，2026-09-16）
+
+> 来源：12-本地显示终端工作单元 G-2 代码评审（`REQUEST_CHANGES`）的 3 阻塞 + 2 重要 + 6 建议整改。
+> 阻塞项**已修**（见 `mupc/crates/mupc-core-bin/src/{idempotency,config_service,console_host}.rs`
+> 的对应用例与注释）；本表只登记**本轮不修**的残余与跨模块项。
+
+| # | 类别 | 严重程度 | 问题 | 依据/处置 |
+|---|------|----------|------|-----------|
+| U-30 | 既有测试失败 | **P2** | `mupc-data-processing` 的 `waveform::trigger::tests::test_cooldown` **确定性失败**（评审已复核为**既有**失败，且**不在** CLAUDE.md「已知测试失败」表内）：`crates/data-processing/src/waveform/trigger.rs:481` 断言 `left: None / right: OverVoltage`（冷却窗口判定未触发） | **只登记不修**（不在本单元授权范围）。复现：`cargo test -p mupc-data-processing -j 2 --lib -- waveform::trigger::tests::test_cooldown` |
+| U-31 | 保留式编辑能力边界 | **P1** | `yaml_edit` **不支持"段/键缺失时追加标量行"**：`locate_scalar` 找不到段/键即 `Err` ⇒ 部署 yaml **缺某段**时，该段字段的**首次**写入必然落到整体回写（`WriteMode::FullRewrite`）⇒ **该文件全部注释与未建模段丢失**。评审阻塞 3 的实证：`deploy/config/*.yaml` 原先**都没有 `gateway:` 段**，而"设 IEC-104 监听地址"是**投运必做动作**（L2+ 强确认） | **缓解（已做）**：① 两份 deploy yaml 补 `gateway:` 段；② 以**真实配置文件**为输入的往返用例 `config_service::tests::deploy_configs_support_preserve_edit_for_every_editable_field`，逐 `editable` 键断言"可定位 + 除目标行外逐字节不变 + 注释行数守恒"。**根治**（支持建段/追加）登记为后续单元或 PM 裁定：建段须定插入位置、缩进风格、行尾风格，并与"段内已有同名键"的判重语义对齐 |
+| U-32 | 写入侧崩溃窗口（残余） | **P2** | `atomic_write` 的「`rename(真源→.bak)` → `rename(.tmp→真源)`」两步之间存在"真源不存在"窗口；此刻掉电/被 kill ⇒ **恢复前的那次启动**读不到配置 | **已补**：启动期加载 `config_service::load_config_with_backup_recovery`（真源缺失而 `.bak` 在 ⇒ 恢复并 `eprintln!` 响亮记录），单测 `startup_load_recovers_the_source_from_backup_after_a_crash_window`。**残余**：恢复是**事后**的（窗口内这次启动仍失败）；彻底消除需改写序（先 `rename(tmp→path)` 再复制 `.bak`），那会放松 `.bak` 与真源的对应关系 ⇒ 登记为后续/PM 裁定 |
+| U-33 | 落盘健壮性（未实现） | **P2** | ① `rename` 后**目录 fsync 未做**（掉电理论上可能丢 rename）；② `.tmp` 由 `File::create` 创建 ⇒ **权限取 umask**（典型 0644），现场 0600 的真源会被写成 0644 | **如实登记、本单元不实现**：两项都**只对 `cfg(unix)` 有意义**（Windows 的 `sync_all` 对目录句柄不可用、`set_permissions` 只表达只读位），而本单元验证环境是 Windows ⇒ 写了也**给不出可红回归**。落点已在 `config_service.rs::atomic_write` 的文档注释里写明（③ 之后 / ① 与 ② 之间） |
+| U-34 | 跨模块缺口（渲染层） | **P1** | **屏面在反向陈述**：`local-display/src/ui/pages/p2_config.rs:114`（常驻说明）与 `:159`（`TEXT_IMPACT_SAVE`）都写「修改保存后立即生效 · **无需重启装置**」，而 **7 个可写字段里有 6 个**事实上需重启；且成功分支（`:1845-1848`）**丢弃**后端 `message`（只用固定「保存成功 · 已生效」）⇒ 后端（回执 `message` / 审计 `reason` / `tracing::warn!`）三处都说真话，**用户在受理端看不到**。设计 §4.3.5 明写该降级须 **PM 同意并回写 PRD（CF-04 降级）**，不得静默实施 | **本单元只登记不改**（`local-display/**` 不在授权范围）。**PM 裁定项**：最小改法 = ① 两处文案改为"连接类参数保存后**需重启 mupcd** 生效（日志级别立即生效）"；② 成功分支把 `resp.message` 并入 Toast 文案（`full_rewrite` 已有单条 Toast 的 PD10 口径可循） |
+| U-35 | 测试覆盖（未做） | **P2** | **真实磁盘故障注入用例缺失**：`atomic_write` 的 ENOSPC / 权限拒绝 / 备份 rename 失败等路径未覆盖（现有真实失败注入只有"审计目录不可建"，属 `console_audit` 侧） | 登记。可行落点：注入一个"只读目录"或"真源路径是目录"的真实失败形态（跨平台），断言 `.tmp` 不残留、`.bak` 不动、真源内容不变（EDGE-10） |
+
+---
+
 ## 7. 技术债统计
 
 | 类别 | 数量 | 已修复 | 待修复 | 状态 |
@@ -297,7 +314,8 @@
 | 流程改进教训 (第二轮 2026-08-14) | 3 | 0 | 3 | 🟡 待落地 |
 | 台区储能投运前置项 (2026-08-31) | 3 | 0 | 3 | 🔵 投运前必办（U-26/U-27/U-28） |
 | 跨模块缺陷 (2026-09-16) | 1 | 0 | 1 | 🟡 待排期（U-29） |
-| **总计** | **51** | **35** | **16** | |
+| G-2 整改登记 (2026-09-16) | 6 | 0 | 6 | 🟡 待排期/PM 裁定（U-30 ~ U-35） |
+| **总计** | **57** | **35** | **22** | |
 
 ---
 
@@ -371,5 +389,5 @@
 
 **记录人**: 项目经理
 **记录日期**: 2026-05-27
-**最后更新**: 2026-08-31
-**版本**: v3.5
+**最后更新**: 2026-09-16
+**版本**: v3.6

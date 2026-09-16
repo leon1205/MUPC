@@ -11,16 +11,22 @@
 //! Phase 6: 优雅退出 (LIFO 逆序停止, 30s 超时保护)
 
 mod cli;
+mod config_service;
+mod console_audit;
 mod console_host;
 mod core_config;
 mod display_host;
+mod hot_apply;
+mod idempotency;
 mod interlock;
 mod signal_handler;
 mod startup;
+#[cfg(test)]
+mod testutil;
+mod yaml_edit;
 
 use clap::Parser;
 use cli::Cli;
-use core_config::CoreConfig;
 use mupc_core::service_coord_impl::ServiceCoordinatorImpl;
 use std::process;
 use tracing_subscriber::layer::SubscriberExt;
@@ -44,9 +50,15 @@ async fn main() {
         process::exit(1);
     }
 
-    // ── Phase 1: 配置加载 ──
-    let config = match CoreConfig::load(&cli.config) {
-        Ok(c) => c,
+    // ── Phase 1: 配置加载（含 `.bak` 兜底恢复；评审建议 6.4）──
+    // `atomic_write` 的「rename(真源 → .bak) → rename(.tmp → 真源)」之间存在"真源不存在"的
+    // 窗口；此刻掉电/被 kill ⇒ 下次启动无真源可读。`load_config_with_backup_recovery` 在
+    // 真源读不出来而 `<config>.bak` 在时用它恢复（见 config_service.rs 的窗口登记）。
+    // 恢复是**重要事件**，必须响亮：本处 tracing 尚未初始化（Phase 2 才建），故用 `eprintln!`
+    // （systemd/journald 会收进日志）。
+    let (config, recovered_from) = match config_service::load_config_with_backup_recovery(&cli.config)
+    {
+        Ok(v) => v,
         Err(e) => {
             eprintln!(
                 "FATAL: 配置文件加载失败 ({}): {}",
@@ -56,6 +68,13 @@ async fn main() {
             process::exit(1);
         }
     };
+    if let Some(bak) = &recovered_from {
+        eprintln!(
+            "WARN: 真源 {} 不可读，已用备份 {} 恢复（上次落盘的崩溃窗口；请核对配置内容）",
+            cli.config.display(),
+            bak.display()
+        );
+    }
 
     if let Err(e) = config.validate() {
         eprintln!("FATAL: 配置校验失败: {}", e);
@@ -91,8 +110,16 @@ async fn main() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
+    // 12-显示终端 §4.3.3「日志级别 | `tracing_subscriber::reload` handle」：filter 走
+    // **reload 层**，句柄留在这里并传下去 ⇒ 屏上改 `system.log_level` 时由
+    // `hot_apply.rs` 调 `handle.reload(..)` **当场换掉过滤规则**（≤1 s，无需重启）。
+    // 不用 reload 层的话，`EnvFilter` 一旦 `.init()` 就再也改不动——屏上改日志级别会变成
+    // "写进文件了、装置还是按老级别打"，即静默失实。
+    let (filter_layer, log_reload) =
+        tracing_subscriber::reload::Layer::new(env_filter);
+
     if let Err(e) = tracing_subscriber::registry()
-        .with(env_filter)
+        .with(filter_layer)
         .with(
             tracing_subscriber::fmt::layer()
                 .json()
@@ -124,7 +151,15 @@ async fn main() {
     // 而装配期的 A 已过期，属静默漂移。上面两项（`log_level` / `shutdown_timeout_sec`）已先取出。
     let core_config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
 
-    let ctx = match startup::initialize_all(&core_config, &coord, process_started_at).await {
+    let ctx = match startup::initialize_all(
+        &core_config,
+        &coord,
+        process_started_at,
+        &cli.config,
+        Some(log_reload),
+    )
+    .await
+    {
         Ok(ctx) => ctx,
         Err(e) => {
             tracing::error!(error = %e, "子系统初始化失败，开始级联清理...");

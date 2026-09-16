@@ -3,12 +3,25 @@
 //! 定义 mupcd 守护进程的完整配置结构，包括系统参数、
 //! 核间通信、Web API、AI 引擎和插件配置。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use mupc_display_proto::DisplayConfig;
 
 /// 主配置文件顶层结构
-#[derive(Debug, Clone, Deserialize)]
+///
+/// ⚠️ `Serialize` 的**唯一用途**是设计 §4.3.2.1 的**回退路径**（保留式编辑无法定位目标键时的
+/// 整体序列化回写）与**往返单测**；它**不是**正常保存路径（正常路径是文本行级替换，见
+/// `yaml_edit.rs`）。**不得**据此推断"配置回写 = 序列化整棵树"——那会丢注释与未建模键。
+///
+/// 未新增 `deny_unknown_fields`（设计 §4.3.2.1「`Serialize` 的边界」）：现场 yaml 里仍有
+/// **本结构未建模**的段/键（运维手写的 `legacy_top:` 一类）必须继续可加载，否则升级即启动失败。
+///
+/// ⚠️ **更正（评审重要 5）**：`web_api:` **不是**"未建模"段——本结构有
+/// [`WebApiConfig`] 字段 `pub web_api`（见下）。故在**整体回写**（保留式编辑不可定位时的
+/// 回退路径）下，它会被 `serde_yaml` **重新序列化**：**内容不丢**，但**格式被重排**
+/// （缩进转 2 空格、键序按结构体字段序、段内注释消失）。真正的"未建模"是
+/// `CoreConfig` 里**没有对应字段**的段（那种段在整体回写时才会**整段消失**）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CoreConfig {
     /// 配置版本号（用于兼容性校验）
     pub version: String,
@@ -52,7 +65,7 @@ pub struct CoreConfig {
 ///
 /// enabled=true 时按 DI 触发源（急停/水浸/消防 → pcs_stop；门禁 → event）驱动
 /// 安全联锁，DO 输出运行/故障灯。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IoConfig {
     /// 是否启用联锁控制器（配置 io 段即启用；缺省 false）
     #[serde(default)]
@@ -93,7 +106,7 @@ impl Default for IoConfig {
 }
 
 /// DI 数字输入通道配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiConf {
     /// 通道名（诊断/查重定位用，须非空且表内唯一）
     #[serde(default)]
@@ -112,7 +125,7 @@ pub struct DiConf {
 }
 
 /// DO 数字输出通道配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DoConf {
     /// 通道名（诊断/查重定位用，须非空且表内唯一）
     #[serde(default)]
@@ -125,7 +138,7 @@ pub struct DoConf {
 }
 
 /// 系统级配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SystemConfig {
     /// 日志级别: "info" / "debug" / "warn" / "error"
     #[serde(default = "default_log_level")]
@@ -148,7 +161,7 @@ pub struct SystemConfig {
 }
 
 /// 核间通信配置（与实时核心 TCP 连接）
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InterCoreConfig {
     /// 实时核心 IP 地址
     #[serde(default = "default_intercore_host")]
@@ -174,7 +187,7 @@ pub struct InterCoreConfig {
 ///
 /// 注意：手动实现 `Default`（不走 derive），使 `#[serde(default)]` 缺省整段
 /// 配置时也落到下方默认函数，而非空/零值。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModbusRtuConfig {
     /// 串口设备，默认 /dev/ttyS0（BECG-3568 板载 COM1 ↔ PCS，19200 N-8-1；无 ttyS1）
     #[serde(default = "default_serial_port")]
@@ -218,7 +231,7 @@ impl Default for ModbusRtuConfig {
 }
 
 /// Web API 配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebApiConfig {
     /// 监听地址，如 "0.0.0.0:8080"
     #[serde(default = "default_listen_addr")]
@@ -233,7 +246,7 @@ pub struct WebApiConfig {
 }
 
 /// AI 引擎配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AiEngineConfig {
     /// 模型文件目录
     #[serde(default = "default_model_dir")]
@@ -255,7 +268,7 @@ pub struct AiEngineConfig {
 }
 
 /// 插件配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PluginsConfig {
     /// 插件搜索路径
     #[serde(default = "default_plugin_search_paths")]
@@ -266,7 +279,7 @@ pub struct PluginsConfig {
 }
 
 /// 策略引擎配置（v2.24 容量档位 §2.10.2）
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct StrategyConfig {
     /// 台区储能档位 YAML 路径；空 = 默认档 pcs60_dual（唯一向后兼容分支）。
     /// 换 PCS 规格只改此路径指向的档位 key / YAML 加档，不改代码。
@@ -277,7 +290,7 @@ pub struct StrategyConfig {
 /// IEC 104 网关配置（S2 §12.3 gateway 段；审查 R2-A2：北向监听地址/端口读 config，
 /// 不再于 startup 硬编码 2404）。手动实现 `Default`（不走 derive），使 `#[serde(default)]`
 /// 缺省整段配置时落到下方默认函数（0.0.0.0:2404，与历史硬编码一致）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GatewayConfig {
     /// IEC 104 监听地址，默认 0.0.0.0
     #[serde(default = "default_gateway_addr")]
@@ -299,7 +312,7 @@ impl Default for GatewayConfig {
 /// MQTT 桥接配置（审查 R2-B5：north_enabled/local_enabled 缺省双 false——未启用不 spawn，
 /// 不再用 Default 真连 mqtt.example.com 假域名）。手动实现 `Default`（不走 derive），使
 /// `#[serde(default)]` 缺省整段配置时落到 false，与历史（无条件 spawn）行为变更对齐。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MqttBridgeConfig {
     /// 北向 emqx 桥接是否启用（缺省 false）
     #[serde(default)]

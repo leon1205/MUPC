@@ -420,10 +420,54 @@ pub(crate) fn console_config_source(
     crate::console_host::ConfigSource::Ready(core_config.clone())
 }
 
+/// 控制台**写路径**装配（G-2）：审计 sink 打开失败 ⇒ **整体 `Unavailable`**（fail-closed）。
+///
+/// **为什么抽成独立函数**（评审建议 6.1「`startup.rs` 该分支补一条单测」）：这是
+/// **fail-closed 的唯一裁决点**，而 `initialize_all` 要跑完 DB/网络/串口才能走到这里 ⇒
+/// 单测无法触达那条分支。抽出来后，`console_apply_source_fails_closed_when_audit_is_unusable`
+/// 用**真实失败**（审计目录的父路径是普通文件）驱动它。
+///
+/// 口径：审计是 T-3 无登录后的**唯一操作凭据**（设计 §3.3）⇒ 宁可写路径整体不可用，
+/// **也不**给一个"没有审计的写路径"。
+pub(crate) fn console_apply_source(
+    audit_dir: &std::path::Path,
+    config_path: &std::path::Path,
+    core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
+    log_reload: Option<crate::hot_apply::LogReloadHandle>,
+) -> crate::console_host::ApplySource {
+    match crate::console_audit::FileAuditSink::open(audit_dir) {
+        Ok(sink) => crate::console_host::ApplySource::Ready(std::sync::Arc::new(
+            crate::config_service::ConfigService::new(
+                config_path.to_path_buf(),
+                core_config.clone(),
+                std::sync::Arc::new(sink),
+                crate::hot_apply::HotApply::new(log_reload),
+            ),
+        )),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "控制台审计不可用 ⇒ 配置写路径整体不可用（fail-closed：写操作将被拒并回 AuditUnavailable）"
+            );
+            crate::console_host::ApplySource::Unavailable(
+                "审计子系统不可用（fail-closed：审计是唯一操作凭据）",
+            )
+        }
+    }
+}
+
 pub async fn initialize_all(
     core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
     coord: &ServiceCoordinatorImpl,
     process_started_at: std::time::Instant,
+    // ── G-2 新增两个入参（都是**数据**，不是全局单例：装配点与单测能注入不同的值）──────
+    //
+    // `config_path`：真源 yaml（`--config`）。**必须**是真源文件的真实路径——保留式编辑
+    // 要读**原文本**才能保住现场注释（设计 §4.3.2.1）；传一个别的路径会静默改错文件。
+    config_path: &std::path::Path,
+    // `log_reload`：`tracing` 的 reload 句柄（`main.rs` 在 Phase 2 建）。`None` ⇒ 日志级别
+    // **无法**热生效 ⇒ `hot_apply` 如实报"需重启"（**不谎报**生效）。
+    log_reload: Option<crate::hot_apply::LogReloadHandle>,
 ) -> Result<StartupContext, MupcError> {
     // 装配期读一份**快照**（装配是一次性动作，各子系统的构造参数取自启动瞬间的配置）。
     // 内存副本本身（`core_config`）由控制通道宿主持续持有：G-2 写入后它才是权威读源，
@@ -794,8 +838,19 @@ pub async fn initialize_all(
         // 之类的**深拷贝**：那样能编译、能过其余用例，却会让 G-2 的写入在屏上**静默失效**
         // （装配写 A、控制通道读 B）。该不变式由单测
         // `console_host::tests::console_config_source_is_arc_identical_to_assembly_handle` 钉死。
+        // 10.2' 配置写路径（G-2）。**审计先建**：建不起来 ⇒ 写路径整体 `Unavailable`
+        // （fail-closed：宁可写路径整体不可用，也不给一个"没有审计的写路径"——
+        // 设计 §3.3：T-3 无登录后审计是唯一操作凭据）。
+        // 装配走 [`console_apply_source`]（fail-closed 的唯一裁决点，独立成函数 ⇒ 可单测）。
+        let apply = console_apply_source(
+            &config.system.log_dir.join("audit"),
+            config_path,
+            core_config,
+            log_reload,
+        );
         let console = crate::console_host::ConsoleHost::new(crate::console_host::ConsoleDeps {
             config: console_config_source(core_config),
+            apply,
         });
         match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
             Ok(listener) => {
@@ -1204,4 +1259,69 @@ pub async fn initialize_all(
         fault_recorder,
         background_tasks: bg_tasks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 写路径装配的最小可解析 yaml（只需 `CoreConfig` 里**没有 `#[serde(default)]`** 的段）。
+    const MIN_YAML: &str = r#"
+version: "1.0"
+system: {}
+intercore: {}
+web_api:
+  tls_cert: null
+  tls_key: null
+ai_engine: {}
+plugins: {}
+"#;
+
+    fn core_handle() -> std::sync::Arc<tokio::sync::RwLock<CoreConfig>> {
+        let cfg: CoreConfig = serde_yaml::from_str(MIN_YAML).expect("min yaml 必须可解析");
+        std::sync::Arc::new(tokio::sync::RwLock::new(cfg))
+    }
+
+    /// **建议 6.1 的网**：审计 sink 建不起来 ⇒ 写路径必须整体 `Unavailable`（fail-closed），
+    /// 而**不是**降级成"没有审计的写路径"。
+    ///
+    /// 注入方式是**真实失败**（审计目录的父路径是一个普通文件 ⇒ `create_dir_all` 必失败），
+    /// 不用 mock —— 要证的是**真实装配代码**的裁决，而不是测试桩自己的行为。
+    ///
+    /// **改什么会让本条变红**：把 `console_apply_source` 的错误分支改成
+    /// `ApplySource::Ready(..)`（或改成 `expect`/`unwrap` 让它 panic）⇒ 第 1、2 条断言红。
+    #[test]
+    fn console_apply_source_fails_closed_when_audit_is_unusable() {
+        let t = crate::testutil::TempDir::new("apply-assembly");
+        let blocker = t.write("blocker", "i am a file, not a dir");
+        let bad_audit_dir = blocker.join("audit"); // 父是文件 ⇒ 建不出审计目录
+        let core = core_handle();
+        let src = console_apply_source(
+            &bad_audit_dir,
+            &t.join("mupc_core_config.yaml"),
+            &core,
+            None,
+        );
+        match src {
+            crate::console_host::ApplySource::Unavailable(reason) => {
+                assert!(reason.contains("审计"), "原因须点明审计不可用: {reason}");
+                assert!(reason.contains("fail-closed"), "原因须点明 fail-closed 口径: {reason}");
+            }
+            crate::console_host::ApplySource::Ready(_) => {
+                panic!("审计建不起来 ⇒ 不得给出「没有审计的写路径」（fail-closed 被绕过）")
+            }
+        }
+
+        // 正对照：审计目录可用 ⇒ 装配成 `Ready`（证明上面那条是"审计不可用"而非"函数恒失败"）
+        let ok = console_apply_source(
+            &t.join("audit"),
+            &t.join("mupc_core_config.yaml"),
+            &core,
+            None,
+        );
+        assert!(
+            matches!(ok, crate::console_host::ApplySource::Ready(_)),
+            "审计目录可建 ⇒ 写路径必须 Ready"
+        );
+    }
 }

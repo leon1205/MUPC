@@ -4,7 +4,7 @@
 //! 与每站寄存器块。校验仅限段内（跨段/互斥在 core-bin validate——Task 6）。
 
 use mupc_data_processing::meter_regs::RegFormat;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_POLL_MS: u64 = 1000;
 pub const DEFAULT_STALE_TIMEOUT_S: u64 = 5;
@@ -15,7 +15,7 @@ pub const DEFAULT_BAUD_RATE: u32 = 9600;
 pub const DATA_FRESHNESS_MS: u64 = mupc_data_processing::DATA_FRESHNESS_MS;
 
 /// 站类型角色（南向调度语义划分，YAML 用 snake_case）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     /// 并网点主表（策略 phase 真源）
@@ -31,7 +31,7 @@ pub enum Role {
 }
 
 /// 单站配置（role + 端口 + 从站地址 + 采集间隔 + 寄存器块）
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StationConf {
     pub id: String,
     pub role: Role,
@@ -51,7 +51,7 @@ pub struct StationConf {
 
 /// 寄存器块读取功能码（YAML: `holding` / `input`）。默认 FC03 保持寄存器；
 /// FC04 输入寄存器供厂方点表用 input regs 的设备（解码同构，读回同格式）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegFunc {
     /// 保持寄存器（FC0x03，默认）
@@ -61,7 +61,7 @@ pub enum RegFunc {
 }
 
 /// 寄存器块配置（一段起始地址 + 数值格式 + 块长度）
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegBlockConf {
     pub name: String,
     pub addr: u16,
@@ -79,7 +79,7 @@ pub struct RegBlockConf {
 }
 
 /// 顶层配置段：轮询周期、数据过期门限与站表
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SouthStationsConfig {
     #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,

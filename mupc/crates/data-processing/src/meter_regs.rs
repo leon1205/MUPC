@@ -4,10 +4,14 @@
 //! 按 Modbus 惯例**高字在前（大端）**。本模块提供纯函数解码，供采集装配层
 //! （mupc-core-bin）把总表寄存器快照转成 `PhaseElectricalData`（U-26）。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 寄存器数值格式（YAML 序列化为字符串：`float32` / `int32_scaled`）
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+///
+/// `Serialize` 为 12-本地显示终端 §4.3.2.1 的配置整体回写（回退路径）所需：本类型是
+/// `south_stations.stations[].regs[].format` 的承载，而 `CoreConfig: Serialize` 要求
+/// 全链可序列化（该回退路径与往返单测是唯一的消费方，不影响解析语义）。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegFormat {
     /// IEEE754 f32，占 2 寄存器，大端

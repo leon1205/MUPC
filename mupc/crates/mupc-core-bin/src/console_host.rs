@@ -1,8 +1,9 @@
-//! 控制通道宿主（`127.0.0.1:9811`）——开发单元 **G-1：控制通道宿主 + 配置读路径**。
+//! 控制通道宿主（`127.0.0.1:9811`）——开发单元 **G-1：控制通道宿主 + 配置读路径**
+//! ＋ **G-2：配置写路径（`POST /v1/console/config/apply`）**。
 //!
 //! 对应设计（`docs/superpowers/plans/modules/12-MUPC-本地显示终端-设计文档.md`）：
-//! - §3.3 控制通道：通用信封与管线（**本单元只实现读**）；
-//! - §3.4 控制通道端点清单（8 条；本单元落 1 条：`GET /v1/console/config`）；
+//! - §3.3 控制通道：通用信封与管线（**G-1 落读、G-2 落写全 8 步**）；
+//! - §3.4 控制通道端点清单（8 条；已落 2 条：`GET /v1/console/config` + `POST /v1/console/config/apply`）；
 //! - §3.4 补注（2026-09-15）：**GET 返回裸 DTO、POST 走 `ControlResponse` 信封**；
 //!   **GET 失败一律非 2xx**（渲染端 `console.rs` 落 `Error::HttpStatus`，不解析错误体）；
 //!   **未实现的路由不得"假装成功"**（本模块对已登记但未实现的端点回 **501**，未知路径 **404**，
@@ -10,15 +11,41 @@
 //! - §4.3.2 `ConfigFieldMeta` 静态表 / §4.3.3 ApplyMode 分发表（字段集与 `requires_reconnect` 的真源）；
 //! - §4.9 启动装配（10.2 控制通道，与读通道 9810 **并存不冲突**：不同端口、不同 listener）。
 //!
+//! ## G-2（配置写）在本文件的落点
+//!
+//! - [`ApplySource`]：写路径的装配状态（`Ready(ConfigService)` / `Unavailable(原因)`）；
+//! - [`post_config_apply`]：POST handler（**POST 的所有结局都回 HTTP 200 + 信封**，见下）；
+//! - [`ConfigFieldMeta::set`] / [`set_field`]：字段表的**写侧**（读侧是 `current`）——
+//!   读写共用一张表 ⇒ 不存在"屏上能改的键"与"装置里能写的键"两张清单。
+//!
 //! ## 本单元的范围与**未做**的部分（如实登记）
 //!
-//! - **只做读**：`GET /v1/console/config`。其余 7 条端点（`config/apply` / `logs` / `logs/targets`
-//!   / `audit` / `audit/ops` / `interlock/release` / `interlock/ack_m1`）**已登记路由但返回 501**——
-//!   它们各自的 `LogService` / `ConsoleAuditService` / `InterlockOps` / 写管线属后续单元（G-2…）。
-//!   路由**不隐藏**：屏上对未实现端点的请求会得到明确的 501（渲染端 → `HttpStatus(501)` 失败提示），
-//!   而不是被静默当成"服务不可用"或"空数据"。
-//! - **不做写入**：`ConfigService` 的落盘 / 原子替换 / 幂等 / 审计全在 G-2；本单元**不读也不写 yaml**，
-//!   视图的唯一数据源是 **`CoreConfig` 内存副本**（设计 D10：内存副本 + 原子落盘）。
+//! - 其余 6 条端点（`logs` / `logs/targets` / `audit` / `audit/ops` / `interlock/release` /
+//!   `interlock/ack_m1`）**已登记路由但返回 501**——它们各自的 `LogService` /
+//!   `ConsoleAuditService` / `InterlockOps` 属后续单元。路由**不隐藏**：屏上对未实现端点的请求
+//!   会得到明确的 501（渲染端 → `HttpStatus(501)` 失败提示），而不是被静默当成"服务不可用"
+//!   或"空数据"。
+//! - **写路径的"生效"只到位一部分**（⚠️ 计数口径，评审重要 5 已更正）：字段表 `FIELDS` 共
+//!   **9** 键，其中 `editable=true` 的**可写字段 7 个**；这 7 个里 **1 个真热生效**
+//!   （`system.log_level`，`tracing_subscriber::reload`），**其余 6 个**（`intercore.*` 4 +
+//!   `gateway.*` 2）本轮**未接线**（逐条原因见 `hot_apply.rs` 表）⇒ 回执 / 审计 / 日志
+//!   **如实**声明"需重启"。
+//!   ⚠️ **跨模块缺口（评审重要 4，本单元只登记、不改渲染层）**：渲染端屏面文案当前是
+//!   **反向陈述**（`local-display/src/ui/pages/p2_config.rs:114` 常驻说明与 `:159`
+//!   `TEXT_IMPACT_SAVE` 都写「修改保存后立即生效 · **无需重启装置**」），且成功分支
+//!   **丢弃**后端 `message`（只用固定「保存成功 · 已生效」）⇒ **用户在受理端看不到**
+//!   这条如实结论。后端（回执 `message` / 审计 `reason` / `tracing::warn!`）**三处都在说真话**，
+//!   但**屏上在说谎**。处置 = **PM 裁定项**（设计 §4.3.5 明写该降级须 PM 同意并回写 PRD，
+//!   CF-04 降级），最小改法见本单元交付报告。
+//!
+//! ## POST 的错误通道（**与 GET 不同**，这是本单元拍的口径）
+//!
+//! §3.4 补注只规定了 **GET** 失败走 HTTP 状态码。**POST 的失败必须走信封**：
+//! 渲染端 `console.rs::parse` 对写端点**只**解 `ControlResponse`，**非 200 一律收口为
+//! `HttpStatus`**（→ 屏上只剩一句通用"操作失败"，**丢掉具体原因**，而 EDGE-10 / CF-02
+//! 要求"具体原因"）。故本 handler 对**一切**写请求（含信封本身解析失败、写路径未装配）
+//! 都回 **HTTP 200 + 一个 `ok=false` 的信封** —— 与 `501` 的分工是：
+//! **"端点没实现"用 501（结构性事实），"实现但这次没做成"用信封**。
 //!
 //! ## `requires_reconnect` 的**唯一真源**
 //!
@@ -54,18 +81,21 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use mupc_display_proto::{
-    ConfigField, ConfigGroup, ConfigKind, ConfigView, ConsoleEndpoint, OptionItem, WriteMode,
+    ConfigField, ConfigGroup, ConfigKind, ConfigPatch, ConfigView, ConsoleEndpoint, ControlCode,
+    ControlRequest, ControlResponse, FieldError, OptionItem, WriteMode,
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
+use crate::config_service::{now_ms, ConfigService};
 use crate::core_config::CoreConfig;
 
 // ═══════════════════════════════════════════════════════════════
@@ -86,11 +116,32 @@ pub enum ConfigSource {
     Unavailable(&'static str),
 }
 
-/// 宿主依赖（设计 §4.9 `ConsoleDeps` 的最小可用子集；其余字段随 G-2… 引入）。
+/// **写路径**的装配状态（设计 §4.3.2 的 `ConfigService`；G-2 引入）。
+///
+/// 与 [`ConfigSource`] 同款"显式不可用态"的理由：写路径缺件（真源路径没传 / 审计建不起来）
+/// 时**必须**有一个能回 `Unavailable` 的态，而**不是**"降级成一个没有审计的写路径"——
+/// 后者正是 fail-closed 要防的事（设计 §3.3：审计是唯一操作凭据）。
+#[derive(Clone)]
+#[allow(dead_code)] // `Unavailable` 由单测构造（诚实性网）；生产装配两种态都可能出现
+pub enum ApplySource {
+    /// 写路径就绪。
+    Ready(Arc<ConfigService>),
+    /// 写路径不可用（原因串**如实**进回执 `message` 与日志）。**一切写请求都会被拒**。
+    ///
+    /// 回执 `code` 取 [`ControlCode::AuditUnavailable`]（评审建议 6.1 的口径统一）：装配侧
+    /// 产生本态的唯一成因是"审计 sink 建不起来"（`startup::console_apply_source`）⇒ 让屏上
+    /// 落到 EDGE-18 的固定文案，而不是通用"操作失败"。
+    Unavailable(&'static str),
+}
+
+/// 宿主依赖（设计 §4.9 `ConsoleDeps` 的可落子集；其余字段（`log_dir` / `interlock` /
+/// `apply_registry`）随后续单元引入）。
 #[derive(Clone)]
 pub struct ConsoleDeps {
-    /// 配置读源（本单元**唯一**依赖）。
+    /// 配置读源。
     pub config: ConfigSource,
+    /// 配置写源（G-2）。
+    pub apply: ApplySource,
 }
 
 /// 控制通道宿主：持有路由表与依赖，`serve()` 消费一个**已绑定**的 listener。
@@ -135,6 +186,11 @@ impl ConsoleHost {
                     router.route(path, get(get_config))
                 }
                 mupc_display_proto::ConsoleMethod::Get => router.route(path, get(not_implemented)),
+                mupc_display_proto::ConsoleMethod::Post
+                    if ep == ConsoleEndpoint::ConfigApply =>
+                {
+                    router.route(path, axum::routing::post(post_config_apply))
+                }
                 mupc_display_proto::ConsoleMethod::Post => {
                     router.route(path, axum::routing::post(not_implemented))
                 }
@@ -142,6 +198,7 @@ impl ConsoleHost {
         }
         router.with_state(HostState {
             config: self.deps.config.clone(),
+            apply: self.deps.apply.clone(),
         })
     }
 
@@ -168,10 +225,11 @@ impl ConsoleHost {
             ));
         }
         tracing::info!(
-            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；GET {} 已实现，其余端点 501）",
+            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；已实现 GET {} 与 POST {}，其余 6 条端点 501）",
             addr,
             ConsoleEndpoint::Config.path(),
-            ConsoleEndpoint::Config.path()
+            ConsoleEndpoint::Config.path(),
+            ConsoleEndpoint::ConfigApply.path()
         );
         axum::serve(listener, self.router()).await
     }
@@ -181,6 +239,7 @@ impl ConsoleHost {
 #[derive(Clone)]
 struct HostState {
     config: ConfigSource,
+    apply: ApplySource,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -191,11 +250,19 @@ struct HostState {
 ///
 /// 失败路径：配置源不可用 ⇒ **503**（非 2xx，渲染端落 `Error::HttpStatus`），
 /// **绝不**回 `200` + 空视图冒充成功。
+///
+/// `revision` / `write_mode` 取自**写服务**（G-2 起不再是常量）：写路径未装配时回落
+/// `(0, TextPreserve)`——即 G-1 的语义"本进程尚无成功写入"（那是当时**唯一不臆造**的取值，
+/// 现在仍是不臆造的那一个）。
 async fn get_config(State(st): State<HostState>) -> Response {
     match &st.config {
         ConfigSource::Ready(cfg) => {
             let guard = cfg.read().await;
-            Json(config_view(&guard)).into_response()
+            let view = match &st.apply {
+                ApplySource::Ready(svc) => svc.view(&guard),
+                ApplySource::Unavailable(_) => config_view(&guard, REVISION_INITIAL, WriteMode::TextPreserve),
+            };
+            Json(view).into_response()
         }
         ConfigSource::Unavailable(reason) => {
             tracing::error!(reason, "控制通道配置源不可用，GET /v1/console/config 回 503");
@@ -206,6 +273,73 @@ async fn get_config(State(st): State<HostState>) -> Response {
                 .into_response()
         }
     }
+}
+
+/// `POST /v1/console/config/apply` → **`ControlResponse<ConfigView>` 信封**（§3.4 / §3.3 管线）。
+///
+/// # 为什么不用 `Json<ControlRequest<ConfigPatch>>` 提取器
+///
+/// axum 的 `Json` 提取失败会回 **422/400 + 它自己的错误体** ⇒ 渲染端落 `HttpStatus`（**丢掉
+/// 具体原因**，见模块头"POST 的错误通道"）。故收 [`Bytes`] **自己解**，把"body 不是合法
+/// JSON / 不是完整信封"也变成一条**可读的信封回执**（`RejectedValidation` + `message`）。
+///
+/// # 结局与 HTTP 状态码的对应（只有两种）
+///
+/// | 结局 | HTTP | body |
+/// |------|------|------|
+/// | 管线跑完（成功 / 一切业务拒绝 / Busy / 审计不可用） | **200** | `ControlResponse`（`ok` 由 `code` 决定） |
+/// | body 不是合法信封（含 JSON 语法错、缺字段、`op` 是别的端点） | **200** | `ControlResponse{code: RejectedValidation, ok: false}` + message |
+///
+/// **没有第三种**：写路径未装配也回 200 + `Unavailable` 信封（渲染端才有"具体原因"可显示）。
+async fn post_config_apply(State(st): State<HostState>, body: Bytes) -> Response {
+    let now = now_ms();
+    let ApplySource::Ready(svc) = &st.apply else {
+        let reason = match &st.apply {
+            ApplySource::Unavailable(r) => *r,
+            ApplySource::Ready(_) => unreachable!(),
+        };
+        // **口径统一为 `AuditUnavailable`**（评审建议 6.1）：装配侧**唯一**的 `Unavailable`
+        // 成因就是"审计 sink 建不起来"（`startup::console_apply_source` 的 Err 分支）⇒
+        // 它**本来就是**审计不可用。修复前这里回 `ControlCode::Unavailable`，而屏上 EDGE-18
+        // 的**固定文案**「审计不可用，操作未执行」只绑 `AuditUnavailable`
+        // （`p2_config.rs:1854`）⇒ 同一件事在两侧各叫一个名字，屏上落到通用"操作失败"，
+        // 现场看到的原因反而比事实**更模糊**。统一后：屏上直接落到既有固定文案，
+        // 无需为 `Unavailable` 再加一条文案（二选一，取"少改一端 + 语义更准"的那个）。
+        tracing::error!(reason, "控制通道写路径未装配（审计不可用），apply 回 AuditUnavailable 信封");
+        return Json(ControlResponse::<ConfigView>::rejected(
+            "",
+            ControlCode::AuditUnavailable,
+            format!("本机配置写路径不可用：{reason}"),
+            Vec::new(),
+            None,
+            now,
+        ))
+        .into_response();
+    };
+
+    // 信封解析（管线第 2 步的"能不能解出来"部分；语义校验在 `ConfigService::apply` 里）
+    let req: ControlRequest<ConfigPatch> = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            // 解析失败时 `request_id` **不可知** ⇒ 回空串（契约要求回显；回空串比编一个 uuid
+            // 诚实：渲染端 `console.rs::parse` 只对**有在途**的请求比对 id，本响应是它自己那次的
+            // 结局，不会被误判成"错位回执"）。
+            return Json(ControlResponse::<ConfigView>::rejected(
+                "",
+                ControlCode::RejectedValidation,
+                format!("请求体不是合法的控制信封（JSON 解析失败）：{e}"),
+                vec![FieldError {
+                    field: "request".to_string(),
+                    reason: e.to_string(),
+                }],
+                None,
+                now,
+            ))
+            .into_response();
+        }
+    };
+
+    Json(svc.apply(&req).await).into_response()
 }
 
 /// 已登记但本单元未实现的端点 ⇒ **501 Not Implemented**。
@@ -266,14 +400,18 @@ pub struct ConfigFieldMeta {
     pub requires_reconnect: bool,
     /// `false` → 屏上只读（回环安全红线 PL-4）。
     pub editable: bool,
-    /// yaml 定位路径（§4.3.2.1）。本单元（只读）不消费，但由单测 `yaml_path_matches_key` 钉死，
-    /// 供 G-2 的保留式编辑直接取用——**不得**在 G-2 另起一套路径串。
-    #[allow(dead_code)]
+    /// yaml 定位路径（§4.3.2.1）。G-2 的保留式编辑**直接取用**——**不得**另起一套路径串。
     pub yaml_path: &'static str,
     /// 默认值（「恢复默认值」明细取此处）。
     pub default: fn() -> Value,
     /// 当前值提取（从 `CoreConfig` **内存副本**取；不读 yaml）。
     pub current: fn(&CoreConfig) -> Value,
+    /// **写侧**（G-2）：把校验过的值写进 `CoreConfig` 的副本。
+    ///
+    /// 与 `current` 同表 ⇒ "屏上能读的键"、"屏上能改的键"、"装置里能写的键"**只有一份清单**。
+    /// 只读字段（`editable=false`）的实现**恒 Err**（第二道防线：即便调用方漏了 `editable`
+    /// 判定，也写不进去）。
+    pub set: fn(&mut CoreConfig, &Value) -> Result<(), String>,
 }
 
 impl ConfigFieldMeta {
@@ -290,6 +428,67 @@ impl ConfigFieldMeta {
             editable: self.editable,
         }
     }
+}
+
+/// 按稳定键取字段元数据（`None` = 该键不在本机字段表内 ⇒ 写路径**必须拒**）。
+pub fn field_meta(key: &str) -> Option<&'static ConfigFieldMeta> {
+    FIELDS.iter().find(|m| m.key == key)
+}
+
+/// 把校验过的值写进配置副本（写路径的唯一入口）。
+///
+/// 只读字段拒绝：这是**第二道**防线（第一道是 [`ConfigFieldMeta::editable`] 在管线第 4 步的
+/// 判定）。两道都要在：前者是"UI 控件 disabled"的后端对称面，后者防"将来新增调用路径忘了判"。
+pub fn set_field(cfg: &mut CoreConfig, key: &str, value: &Value) -> Result<(), String> {
+    let meta = field_meta(key).ok_or_else(|| format!("未知字段 `{key}`"))?;
+    if !meta.editable {
+        return Err(format!("字段 `{key}` 为只读，不可修改"));
+    }
+    (meta.set)(cfg, value)
+}
+
+// ── 写侧实现（逐字段；只读字段恒 Err）────────────────────────────────────────────
+
+/// 写只读字段（恒 Err 的占位实现；`display.*` 用）。
+fn set_read_only(_c: &mut CoreConfig, _v: &Value) -> Result<(), String> {
+    Err("只读字段（回环安全红线 PL-4）不可修改".to_string())
+}
+
+fn set_gateway_listen_addr(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    c.gateway.listen_addr = v.as_str().ok_or("应为字符串")?.to_string();
+    Ok(())
+}
+
+fn set_gateway_listen_port(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    let n = v.as_u64().ok_or("应为非负整数")?;
+    c.gateway.listen_port = u16::try_from(n).map_err(|_| format!("{n} 超出端口范围"))?;
+    Ok(())
+}
+
+fn set_intercore_host(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    c.intercore.host = v.as_str().ok_or("应为字符串")?.to_string();
+    Ok(())
+}
+
+fn set_intercore_port(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    let n = v.as_u64().ok_or("应为非负整数")?;
+    c.intercore.port = u16::try_from(n).map_err(|_| format!("{n} 超出端口范围"))?;
+    Ok(())
+}
+
+fn set_intercore_heartbeat(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    c.intercore.heartbeat_interval_sec = v.as_u64().ok_or("应为非负整数")?;
+    Ok(())
+}
+
+fn set_intercore_reconnect(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    c.intercore.reconnect_interval_sec = v.as_u64().ok_or("应为非负整数")?;
+    Ok(())
+}
+
+fn set_log_level(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
+    c.system.log_level = v.as_str().ok_or("应为字符串")?.to_string();
+    Ok(())
 }
 
 /// 字段表。**唯一真源**：设计 §4.3.3（行 783–791）+ UI §6.2（行 506–514）。
@@ -309,6 +508,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "gateway.listen_addr",
         default: || json!(def().gateway.listen_addr),
         current: |c| json!(c.gateway.listen_addr),
+        set: set_gateway_listen_addr,
     },
     ConfigFieldMeta {
         group: GROUP_IEC104,
@@ -325,6 +525,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "gateway.listen_port",
         default: || json!(def().gateway.listen_port),
         current: |c| json!(c.gateway.listen_port),
+        set: set_gateway_listen_port,
     },
     // ── 核间通信参数（UI §6.2 行 511–512）──────────────────────────────────
     // 设计 §4.3.3 行 787：「核间本地端口 / 对端端口 intercore.port / intercore.host …
@@ -340,6 +541,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "intercore.host",
         default: || json!(def().intercore.host),
         current: |c| json!(c.intercore.host),
+        set: set_intercore_host,
     },
     ConfigFieldMeta {
         group: GROUP_INTERCORE,
@@ -356,6 +558,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "intercore.port",
         default: || json!(def().intercore.port),
         current: |c| json!(c.intercore.port),
+        set: set_intercore_port,
     },
     // 设计 §4.3.3 行 788：「核间心跳/重连间隔 … 时效=下一拍，副作用=无」⇒ **不**要求重连提示
     ConfigFieldMeta {
@@ -373,6 +576,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "intercore.heartbeat_interval_sec",
         default: || json!(def().intercore.heartbeat_interval_sec),
         current: |c| json!(c.intercore.heartbeat_interval_sec),
+        set: set_intercore_heartbeat,
     },
     ConfigFieldMeta {
         group: GROUP_INTERCORE,
@@ -389,6 +593,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "intercore.reconnect_interval_sec",
         default: || json!(def().intercore.reconnect_interval_sec),
         current: |c| json!(c.intercore.reconnect_interval_sec),
+        set: set_intercore_reconnect,
     },
     // ── 遥测与日志（UI §6.2 行 513–514）────────────────────────────────────
     // 设计 §4.3.3 行 785：「日志级别 system.log_level … 时效 ≤1 s，副作用 无」⇒ 不要求重连提示
@@ -422,6 +627,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "system.log_level",
         default: || json!(def().system.log_level),
         current: |c| json!(c.system.log_level),
+        set: set_log_level,
     },
     // ── 本机地址（**只读**；设计 §3.4 行 624–626 / §6.2 行 1232 / §4.9）──────
     //
@@ -438,6 +644,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "display.bind_addr",
         default: || json!(loopback_host_of(&def().display.bind_addr)),
         current: |c| json!(loopback_host_of(&c.display.bind_addr)),
+        set: set_read_only,
     },
     ConfigFieldMeta {
         group: GROUP_LOCAL_ADDR,
@@ -450,6 +657,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         yaml_path: "display.control_bind_addr",
         default: || json!(loopback_host_of(&def().display.control_bind_addr)),
         current: |c| json!(loopback_host_of(&c.display.control_bind_addr)),
+        set: set_read_only,
     },
 ];
 
@@ -474,19 +682,22 @@ pub const PENDING_NO_CARRIER: [&str; 3] = [
     "telemetry.report_interval_sec",
 ];
 
-/// `ConfigView.revision` 的初值：**本进程尚无任何成功写入**（写路径属 G-2）。
+/// `ConfigView.revision` 的初值：**本进程尚无任何成功写入**。
 ///
 /// 契约语义是「每次成功写入递增」（`display-proto/src/control.rs:412`）——没有任何写入时取 0
-/// 是其**唯一不臆造**的取值。G-2 接管后此常量应删除。
+/// 是其**唯一不臆造**的取值。G-2 起由 [`crate::config_service::ConfigService::revision`]
+/// 提供真值；本常量只剩"写路径未装配"时的取值（语义仍是"没有过写入"，不臆造）。
 pub const REVISION_INITIAL: u64 = 0;
 
 /// 由 `CoreConfig` **内存副本**生成视图（设计 §4.3.2：内存副本是"进程内唯一权威读源"）。
 ///
-/// `write_mode` 取 `TextPreserve`：契约该字段的语义是「**最近一次落盘**的写模式」
-/// （`display-proto/src/control.rs:412-413`），而本进程**尚无落盘** ⇒ 取正常路径值。
-/// 这是**契约粗糙处**（`WriteMode` 不是 `Option`，无法表达"还没有过写入"），已登记为待裁定项；
-/// 取 `TextPreserve` 的**风险**仅为"渲染端不弹 `full_rewrite` Toast"——而它本来也不该弹。
-pub fn config_view(cfg: &CoreConfig) -> ConfigView {
+/// `revision` / `write_mode` 由**调用方注入真值**（G-2 起 = `ConfigService` 的状态）——
+/// 不再是常量：契约语义分别是「每次成功写入递增」与「**最近一次落盘**的写模式」
+/// （`display-proto/src/control.rs:405-413`）。写路径未装配时传
+/// `(REVISION_INITIAL, TextPreserve)`（= "本进程尚无写入"，当时与现在的**唯一不臆造**取值）。
+///
+/// 契约粗糙处（登记）：`WriteMode` 不是 `Option`，无法表达"还没有过写入"。
+pub fn config_view(cfg: &CoreConfig, revision: u64, write_mode: WriteMode) -> ConfigView {
     let groups = GROUPS
         .iter()
         .map(|(id, label)| ConfigGroup {
@@ -501,8 +712,8 @@ pub fn config_view(cfg: &CoreConfig) -> ConfigView {
         .collect();
     ConfigView {
         groups,
-        revision: REVISION_INITIAL,
-        write_mode: WriteMode::TextPreserve,
+        revision,
+        write_mode,
     }
 }
 
@@ -592,10 +803,21 @@ mod tests {
     // ── 测试脚手架 ──────────────────────────────────────────────────────────
 
     /// 起一个绑定在随机回环端口上的宿主，返回 (地址, JoinHandle)。
+    ///
+    /// **写路径 `Unavailable`**（G-1 的读路径用例不需要写服务）。写路径用例走
+    /// [`spawn_host_with_apply`]。
     async fn spawn_host(config: ConfigSource) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_host_with_apply(config, ApplySource::Unavailable("测试未装配写路径")).await
+    }
+
+    /// 同上，但注入写路径（G-2 用例）。
+    async fn spawn_host_with_apply(
+        config: ConfigSource,
+        apply: ApplySource,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let host = ConsoleHost::new(ConsoleDeps { config });
+        let host = ConsoleHost::new(ConsoleDeps { config, apply });
         let h = tokio::spawn(async move {
             let _ = host.serve(listener).await;
         });
@@ -749,6 +971,7 @@ mod tests {
         let assembly = Arc::new(RwLock::new(test_config()));
         let host = ConsoleHost::new(ConsoleDeps {
             config: crate::startup::console_config_source(&assembly),
+            apply: ApplySource::Unavailable("本用例只验读源同一性"),
         });
         let got = match host.config_source() {
             ConfigSource::Ready(a) => a.clone(),
@@ -788,29 +1011,50 @@ mod tests {
 
     // ── ② 诚实性网 ─────────────────────────────────────────────────────────
 
-    /// ① 未实现的 POST 路由 ⇒ **非 2xx**（不得假成功）。
+    /// ① **写路径未装配**的 `config/apply` ⇒ **HTTP 200 + `AuditUnavailable` 信封**
+    /// （G-2 起该端点**已实现**，故不再是 501；但**也绝不能假成功**）。
+    ///
+    /// 这条用例取代 G-1 的 `unimplemented_write_endpoint_returns_non_2xx_not_fake_success`
+    /// （那条断言的 501 是"G-1 阶段未实现"的事实，G-2 落地后**该事实已改变**）——
+    /// **保留其精神**：未装配也**不得**回 `ok=true`、不得回空 `ConfigView` 冒充处理结果。
+    ///
+    /// ⚠️ **口径变更（评审建议 6.1，断言由 `Unavailable` 改为 `AuditUnavailable`，是收紧/对齐
+    /// 而非放松）**：装配侧该态的唯一成因 = 审计 sink 建不起来 ⇒ 回 `AuditUnavailable` 让屏上
+    /// 落到 EDGE-18 的既有固定文案（理由见 handler 内注释）。`ok=false` / `applied=None` /
+    /// `audit_id=None` 三条**原样不动**。
     #[tokio::test]
-    async fn unimplemented_write_endpoint_returns_non_2xx_not_fake_success() {
+    async fn apply_without_a_write_path_is_a_rejection_not_a_fake_success() {
         let (addr, h) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
-        // 完整合法的信封体：即使请求本身合法，未实现也不得回 200
-        let body = r#"{"request_id":"0f7a3e10-1111-4222-8333-444455556666","issued_at_ms":1,
-            "op":"apply","payload":{"changes":{},"from":"edit"}}"#;
-        let (status, resp) = http(addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(body)).await;
-        assert_eq!(status, 501, "未实现端点须 501，实际 {status}: {resp}");
-        assert!(
-            serde_json::from_str::<mupc_display_proto::ControlResponse<ConfigView>>(&resp).is_err(),
-            "未实现端点**不得**回一个 ControlResponse 信封冒充处理结果: {resp}"
+        let issued = now_ms();
+        let body = format!(
+            r#"{{"request_id":"0f7a3e10-1111-4222-8333-444455556666","issued_at_ms":{issued},
+            "op":"apply","payload":{{"changes":{{"intercore.port":2405}},"from":"edit"}}}}"#
         );
+        let (status, resp) = http(addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(&body)).await;
+        assert_eq!(status, 200, "写端点的结局**一律**走信封（非 2xx 会让渲染端丢掉具体原因）");
+        let r: mupc_display_proto::ControlResponse<ConfigView> =
+            serde_json::from_str(&resp).expect("必须是可解析的信封（渲染端同款路径）");
+        assert!(!r.ok, "未装配写路径 ⇒ 不得 ok=true");
+        assert_eq!(
+            r.code,
+            ControlCode::AuditUnavailable,
+            "口径统一（评审建议 6.1）：装配侧 Unavailable 的唯一成因=审计不可用 ⇒ 屏上须落到 EDGE-18 固定文案"
+        );
+        assert!(r.applied.is_none(), "不得回一个空 ConfigView 冒充处理结果");
+        assert!(r.message.contains("写路径不可用"), "原因须可读: {}", r.message);
+        assert!(r.audit_id.is_none());
         h.abort();
     }
 
-    /// ①' 其余 7 条端点：**逐条**非 2xx，且**逐条**不能回 404（404 = 路由没登记 = 屏上无法区分
-    /// "服务没实现"与"服务根本没这个端点"）。
+    /// ①' 其余 **6** 条端点（G-2 起 `config/apply` 已实现）：**逐条** 501，且**逐条**不能回 404
+    /// （404 = 路由没登记 = 屏上无法区分"服务没实现"与"服务根本没这个端点"）。
     #[tokio::test]
     async fn every_registered_but_unimplemented_endpoint_is_honest_per_endpoint() {
         let (addr, h) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
+        let mut checked = 0;
         for ep in ConsoleEndpoint::ALL {
-            if ep == ConsoleEndpoint::Config {
+            // 已实现的两条（G-1 读 / G-2 写）不在"未实现"清单内
+            if matches!(ep, ConsoleEndpoint::Config | ConsoleEndpoint::ConfigApply) {
                 continue;
             }
             let method = match ep.method() {
@@ -822,7 +1066,9 @@ mod tests {
             assert_ne!(status, 404, "`{}` 已登记，不得回 404（{resp}）", ep.path());
             assert!(!(200..300).contains(&status), "`{}` 未实现却回 {status}", ep.path());
             assert_eq!(status, 501, "`{}` 未实现须 501，实际 {status}", ep.path());
+            checked += 1;
         }
+        assert_eq!(checked, 6, "未实现端点应为 6 条（8 条契约端点 − 2 条已实现）");
         h.abort();
     }
 
@@ -849,6 +1095,7 @@ mod tests {
     async fn non_loopback_listener_is_refused() {
         let host = ConsoleHost::new(ConsoleDeps {
             config: ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+            apply: ApplySource::Unavailable("本用例只验回环裁决"),
         });
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -992,8 +1239,8 @@ mod tests {
         b.intercore.reconnect_interval_sec = 3;
         b.gateway.listen_addr = "127.0.0.1".to_string();
         b.gateway.listen_port = 1;
-        let va = config_view(&a);
-        let vb = config_view(&b);
+        let va = config_view(&a, 0, WriteMode::TextPreserve);
+        let vb = config_view(&b, 0, WriteMode::TextPreserve);
         let mut changed = 0;
         for m in FIELDS {
             let fa = field(&va, m.key);
@@ -1129,6 +1376,265 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // G-2：写路径（`POST /v1/console/config/apply`）**端到端**（渲染端同款线协议）
+    // ═══════════════════════════════════════════════════════════════════════
+
+    use crate::config_service::ConfigService;
+    use crate::console_audit::{AuditIntent, ConsoleAuditSink};
+    use crate::testutil::TempDir;
+    use mupc_display_proto::ConsoleAuditEntry;
+
+    /// 端到端样例 yaml：含必需段（`CoreConfig` 无 serde 默认的那几段）+ 注释 + 未建模键。
+    const WRITE_YAML: &str = r#"# 现场 yaml（注释必须保留）
+version: "0.1.0"
+system:
+  log_level: info        # 现场调过
+intercore:
+  host: 10.0.0.7
+  port: 9100   # PCS 端口
+web_api:
+  tls_cert: null
+  tls_key: null
+ai_engine: {}
+plugins: {}
+gateway:
+  listen_addr: 0.0.0.0
+  listen_port: 2404
+  future_key: keep-me
+"#;
+
+    /// 恒失败的审计（fail-closed 的端到端注入点）。
+    struct BrokenSink;
+
+    impl ConsoleAuditSink for BrokenSink {
+        fn record_intent(&self, _i: &AuditIntent) -> Result<(), String> {
+            Err("注入失败：审计目录不可写".to_string())
+        }
+        fn record_outcome(&self, _e: &ConsoleAuditEntry) -> Result<(), String> {
+            Err("注入失败：审计文件不可写".to_string())
+        }
+    }
+
+    /// 写路径端到端宿主（真实 `FileAuditSink` + 真实 `ConfigService` + 真实 axum）。
+    struct WriteHost {
+        _dir: TempDir,
+        yaml_path: std::path::PathBuf,
+        core: Arc<RwLock<CoreConfig>>,
+        addr: SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+        svc: Arc<ConfigService>,
+    }
+
+    impl WriteHost {
+        fn disk(&self) -> String {
+            std::fs::read_to_string(&self.yaml_path).unwrap()
+        }
+    }
+
+    impl Drop for WriteHost {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /// 装配写宿主。`yaml = None` ⇒ 用 [`WRITE_YAML`]；`sink = None` ⇒ 真实文件审计。
+    async fn spawn_write_host(
+        tag: &str,
+        yaml: Option<&str>,
+        sink: Option<Arc<dyn ConsoleAuditSink>>,
+    ) -> WriteHost {
+        let dir = TempDir::new(tag);
+        let text = yaml.unwrap_or(WRITE_YAML);
+        let yaml_path = dir.write("mupc_core_config.yaml", text);
+        // 内存副本 **由同一份文本解析**（与生产一致：启动期读的同一文件）
+        let cfg: CoreConfig = serde_yaml::from_str(text).expect("写用例样例 yaml 必须可解析");
+        let core = Arc::new(RwLock::new(cfg));
+        let audit: Arc<dyn ConsoleAuditSink> =
+            sink.unwrap_or_else(|| Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).unwrap()));
+        let svc = Arc::new(ConfigService::new(
+            yaml_path.clone(),
+            core.clone(),
+            audit,
+            crate::hot_apply::HotApply::new(None),
+        ));
+        let (addr, task) = spawn_host_with_apply(
+            crate::startup::console_config_source(&core),
+            ApplySource::Ready(svc.clone()),
+        )
+        .await;
+        WriteHost {
+            _dir: dir,
+            yaml_path,
+            core,
+            addr,
+            task,
+            svc,
+        }
+    }
+
+    /// 发一次写请求（渲染端 `ConsoleClient::begin_write` 同款线格式：POST + JSON body + `op=apply`）。
+    async fn post_apply(
+        addr: SocketAddr,
+        request_id: &str,
+        changes: serde_json::Value,
+        op: &str,
+    ) -> (u16, ControlResponse<ConfigView>) {
+        let body = serde_json::json!({
+            "request_id": request_id,
+            "issued_at_ms": now_ms(),
+            "op": op,
+            "payload": {"changes": changes, "from": "edit"},
+        })
+        .to_string();
+        let (status, resp) =
+            http(addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(&body)).await;
+        let parsed = serde_json::from_str::<ControlResponse<ConfigView>>(&resp)
+            .unwrap_or_else(|e| panic!("回执必须是合法信封（渲染端同款路径）: {e}\n{resp}"));
+        (status, parsed)
+    }
+
+    /// 正常保存端到端：**线协议**（200 + 信封）→ 落盘 → `GET` 立刻反映新值 + `revision=1`。
+    #[tokio::test]
+    async fn post_apply_over_the_wire_persists_and_get_shows_the_new_value() {
+        let w = spawn_write_host("apply-e2e", None, None).await;
+        let before = w.disk();
+        let (status, resp) = post_apply(
+            w.addr,
+            "0f7a3e10-1111-4222-8333-444455556666",
+            json!({"intercore.port": 2405}),
+            "apply",
+        )
+        .await;
+        assert_eq!(status, 200, "写端点回执一律走信封（HTTP 200）");
+        assert!(resp.ok, "{resp:?}");
+        let applied = resp.applied.expect("成功必须带新视图");
+        assert_eq!(field(&applied, "intercore.port").value, json!(2405));
+        assert_eq!(applied.revision, 1);
+        assert_eq!(applied.write_mode, WriteMode::TextPreserve, "正常路径 = 保留式编辑");
+        assert!(resp.audit_id.is_some(), "成功回执带审计号（现场对拍）");
+
+        // 文件：只改目标行，注释与未建模键逐字保留
+        assert_eq!(w.disk(), before.replace("port: 9100", "port: 2405"));
+        assert!(w.disk().contains("future_key: keep-me"));
+
+        // GET 立刻反映（**同一份内存副本**）：这是 UI「保存后不等下一帧就刷新」的依据
+        let view = view_from(w.addr).await;
+        assert_eq!(field(&view, "intercore.port").value, json!(2405));
+        assert_eq!(view.revision, 1, "GET 的 revision 必须来自写服务（不是常量 0）");
+    }
+
+    /// 幂等端到端：同一个 `request_id` 再发一次（渲染端超时重试的真实形态）⇒ `duplicate=true`，
+    /// 且**文件不再被写一遍**。
+    #[tokio::test]
+    async fn post_apply_duplicate_over_the_wire_is_flagged_and_not_re_executed() {
+        let w = spawn_write_host("apply-dup", None, None).await;
+        let (_, first) = post_apply(w.addr, "rid-dup", json!({"intercore.port": 2405}), "apply").await;
+        let text = w.disk();
+        let (status, second) =
+            post_apply(w.addr, "rid-dup", json!({"intercore.port": 2405}), "apply").await;
+        assert_eq!(status, 200);
+        assert!(second.duplicate, "重复请求必须带 duplicate=true（幂等命中标记）");
+        assert_eq!(second.code, first.code);
+        assert_eq!(second.audit_id, first.audit_id, "复用首次审计记录");
+        assert_eq!(w.disk(), text, "不得被第二次请求再写一遍");
+        assert_eq!(w.svc.revision(), 1, "只真正保存了一次");
+    }
+
+    /// 校验失败端到端：`field_errors` 逐字段到达屏上（CF-02），且**无副作用**。
+    #[tokio::test]
+    async fn post_apply_rejected_validation_carries_field_errors_to_the_screen() {
+        let w = spawn_write_host("apply-inv", None, None).await;
+        let before = w.disk();
+        let (status, resp) = post_apply(
+            w.addr,
+            "rid-inv",
+            json!({"intercore.port": 0, "system.log_level": "debug"}),
+            "apply",
+        )
+        .await;
+        assert_eq!(status, 200, "业务拒绝也走 200 + 信封（渲染端才有「具体原因」可显示）");
+        assert!(!resp.ok);
+        assert_eq!(resp.code, ControlCode::RejectedValidation);
+        assert_eq!(resp.field_errors.len(), 1, "逐字段标红的数据源");
+        assert_eq!(resp.field_errors[0].field, "intercore.port");
+        assert!(resp.field_errors[0].reason.contains("越界"));
+        assert!(resp.applied.is_none());
+        assert_eq!(w.disk(), before, "拒绝 ⇒ 文件一个字节都不动");
+        assert_eq!(view_from(w.addr).await.revision, 0);
+    }
+
+    /// body 不是合法信封 ⇒ **仍然是 HTTP 200 + 可读信封**（不得回 422 让渲染端丢原因）。
+    #[tokio::test]
+    async fn malformed_body_still_gets_a_readable_receipt() {
+        let w = spawn_write_host("apply-bad-body", None, None).await;
+        for bad in ["", "not json at all", r#"{"request_id":"r1"}"#] {
+            let (status, body) =
+                http(w.addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(bad)).await;
+            assert_eq!(status, 200, "畸形 body 也不得回非 2xx（`{bad}`）");
+            let r: ControlResponse<ConfigView> = serde_json::from_str(&body)
+                .unwrap_or_else(|e| panic!("必须是可解析信封（`{bad}`）: {e}\n{body}"));
+            assert!(!r.ok && r.code == ControlCode::RejectedValidation, "`{bad}` → {r:?}");
+            assert!(!r.message.is_empty(), "必须给得出具体原因");
+        }
+    }
+
+    /// 审计不可写 ⇒ **fail-closed 端到端**：`AuditUnavailable` + 值未变（渲染端 EDGE-18 的固定文案）。
+    #[tokio::test]
+    async fn audit_unavailable_is_fail_closed_over_the_wire() {
+        let w = spawn_write_host("apply-nofailclosed", None, Some(Arc::new(BrokenSink))).await;
+        let before = w.disk();
+        let (status, resp) =
+            post_apply(w.addr, "rid-audit", json!({"intercore.port": 2405}), "apply").await;
+        assert_eq!(status, 200);
+        assert!(!resp.ok && resp.code == ControlCode::AuditUnavailable);
+        assert!(resp.applied.is_none(), "操作未生效");
+        assert!(resp.audit_id.is_none(), "不得编造审计号");
+        assert_eq!(w.disk(), before);
+        assert_eq!(w.core.read().await.intercore.port, 9100, "内存副本不得变");
+        assert_eq!(view_from(w.addr).await.revision, 0);
+    }
+
+    /// 不可定位 ⇒ 整体回写，`write_mode=full_rewrite` **在回执里可见**（EDGE-23 的 UI Toast 判据）。
+    #[tokio::test]
+    async fn full_rewrite_fallback_is_declared_in_the_receipt() {
+        // 样例里**没有** `gateway:` 段 ⇒ 改 gateway.listen_port 无法定位
+        let yaml = "# 注释会丢\nversion: \"0.1.0\"\nsystem:\n  log_level: info\n\
+                    intercore:\n  host: 10.0.0.7\n  port: 9100\n\
+                    web_api:\n  tls_cert: null\n  tls_key: null\n\
+                    ai_engine: {}\nplugins: {}\n";
+        let w = spawn_write_host("apply-fallback", Some(yaml), None).await;
+        let (_, resp) =
+            post_apply(w.addr, "rid-fb", json!({"gateway.listen_port": 2405}), "apply").await;
+        assert!(resp.ok, "{resp:?}");
+        let applied = resp.applied.unwrap();
+        assert_eq!(applied.write_mode, WriteMode::FullRewrite, "回执必须显式声明整体重写");
+        assert!(resp.message.contains("整体重写"), "文案须明示");
+        assert!(w.disk().contains("listen_port: 2405"), "值确实落盘");
+        // 后续 GET 也带着这个模式（UI 在任何视图上都该明示）
+        assert_eq!(view_from(w.addr).await.write_mode, WriteMode::FullRewrite);
+    }
+
+    /// **写服务与装配共用同一份内存副本**（G-1 那条 `Arc::ptr_eq` 网在写侧的对称面）：
+    /// 若写服务拿到的是**深拷贝**，则"写 A、GET 读 B"——保存后屏上仍是旧值（静默失实效）。
+    #[tokio::test]
+    async fn write_service_shares_the_assembly_arc() {
+        let w = spawn_write_host("apply-samearc", None, None).await;
+        // 写服务持有的是哪一份？（`ConsoleDeps.config` 给的又是哪一份？——两者必须**同一地址**）
+        let from_write = w.svc.core().clone();
+        let from_read = match crate::startup::console_config_source(&w.core) {
+            ConfigSource::Ready(a) => a,
+            ConfigSource::Unavailable(r) => panic!("装配后不得 Unavailable（{r}）"),
+        };
+        assert!(
+            Arc::ptr_eq(&from_write, &from_read),
+            "写服务与读路径必须共用同一份 `Arc<RwLock<CoreConfig>>`（否则保存后屏上仍是旧值）"
+        );
+        // 负对照：深拷贝出的新 Arc **不会** ptr_eq（否则上面那条断言没有鉴别力）
+        let drifted = Arc::new(RwLock::new(w.core.read().await.clone()));
+        assert!(!Arc::ptr_eq(&from_write, &drifted), "负对照失效");
     }
 
     /// 路由表**不得**漏登记契约端点（`ConsoleEndpoint::ALL` 是唯一真源）。

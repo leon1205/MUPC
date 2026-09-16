@@ -51,3 +51,6 @@ serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 chrono.workspace = true
 parking_lot.workspace = true
+# 审计条目 ID（设计 §4.5 `ConsoleAuditEntry.id` = uuid）。**不是新依赖**：
+# `uuid` 已在 workspace 依赖表内（渲染端 `console.rs` 的 `request_id` 用它）。
+uuid.workspace = true
