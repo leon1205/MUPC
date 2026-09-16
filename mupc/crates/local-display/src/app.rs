@@ -53,13 +53,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use mupc_display_proto::{ConfigPatch, ConsoleEndpoint, InterlockOpPayload};
 
 use crate::channel::{next_poll_at, poll_due, DisplayChannelClient, Progress};
-use crate::config::CliConfig;
+use crate::config::{CliConfig, Rotate};
 use crate::console::{ConsoleClient, ConsoleClock, ConsoleResult};
 use crate::control_route::{
     audit_query_string, log_query_string, p3_connected, route, ControlIntent, RawPayload,
     RouteDecision,
 };
-use crate::lvgl::display::Display;
+use crate::lvgl::display::{Display, Rotation};
 use crate::lvgl::indev::Indev;
 use crate::lvgl::obj::Obj;
 use crate::screen::{Blitter, MemorySink, PixelSink};
@@ -97,6 +97,26 @@ pub fn clock_text(epoch_ms: u64) -> String {
         Some((_, t)) => t.to_string(),
         // `format_epoch_ms_utc` 恒含一个空格 ⇒ 不可达；兜底给空串而非 panic。
         None => String::new(),
+    }
+}
+
+/// CLI 的 [`Rotate`] → 薄层的 [`Rotation`]（**B4a**）。
+///
+/// # 为什么是"两个枚举 + 一处映射"（而不是让 `config.rs` 直接用 `lvgl::display::Rotation`）
+///
+/// unsafe 边界纪律（`lvgl/mod.rs` 纪律 1）：`config.rs` 位于 `lvgl/**` **之外**，不得触碰
+/// `lvgl_sys`。而 [`Rotation`] 的 `to_sys()` 要写 C 侧枚举常量 ⇒ 它必须留在 `lvgl/**` 内。
+/// 两边各有一个枚举、由本函数做**唯一**一次映射，于是"CLI 取值集合"与"LVGL 取值集合"的
+/// 耦合点收敛到一处；两边的 `match` 都是**穷尽匹配**，任一侧增删取值都在这里**编译期**暴露。
+///
+/// **改什么会让本条变红**：把任一分支映射成别的角度（`rotation_of(Deg90) == Rotation::Deg180`）
+/// ⇒ `app::tests::cli_rotate_maps_to_the_thin_layer_rotation` 逐值断言即红。
+pub fn rotation_of(r: Rotate) -> Rotation {
+    match r {
+        Rotate::Deg0 => Rotation::Deg0,
+        Rotate::Deg90 => Rotation::Deg90,
+        Rotate::Deg180 => Rotation::Deg180,
+        Rotate::Deg270 => Rotation::Deg270,
     }
 }
 
@@ -158,6 +178,12 @@ pub struct SmokeReport {
     pub dropped: u64,
     /// 导出结果（路径, 字节数）；未导出 ⇒ `None`。
     pub export: Option<(PathBuf, u64)>,
+    /// **LVGL 定容池余量快照**（B4a；设计 §10 / §14 风险 **R-24** 的量化口）。
+    ///
+    /// ⚠️ 读的是 `LV_MEM_SIZE` 那一块 **1 MiB 定容池**（对象树 / 样式 / 定时器 / 事件项），
+    /// **不含**绘制缓冲 —— 后者由 `display::AlignedBuf` 走**系统堆**（见
+    /// [`crate::lvgl::MemStats`] 的边界说明）。真机（fbdev）同样可读，判据一致。
+    pub mem: crate::lvgl::MemStats,
 }
 
 impl SmokeReport {
@@ -571,6 +597,15 @@ impl App {
         crate::lvgl::init().map_err(|e| StartupError::Lvgl(e.to_string()))?;
         let mut display = Display::create(cfg.width, cfg.height)
             .map_err(|e| StartupError::Lvgl(e.to_string()))?;
+        // 屏旋转（B4a）：在此施加 **CLI 解析出来的**旋转（薄层能力自 B4a 具备）。
+        // 必须在建**任何**对象之前落定 —— `update_resolution()` 会把 screen / 各图层的矩形
+        // 换成互换后的逻辑宽高，晚于外壳装配则已建控件仍按旧版式定位。
+        // 绘制缓冲**不必重建**：`lv_display_set_buffers` 用的是**未旋转**的原始尺寸。
+        // ⚠️ **接线保留、但 CLI 侧已不放行非 0**（B4a 整改「重要 2」）：`CliConfig::parse`
+        // 对非 0 硬错误 ⇒ 生产上 `cfg.rotate` 恒为 `Deg0`、本行恒施加 `Rotation::Deg0`。
+        // 之所以不把这条链路删掉：**sink 侧像素旋转实现后摘除那道 guard 即可**（无需重建）。
+        // 只换逻辑分辨率、像素面不动 = **主动画错版式**，这正是 CLI 侧 fail-fast 的理由。
+        display.set_rotation(rotation_of(cfg.rotate));
         // flush 桥：LVGL 渲染好的脏区 → Blitter → sink。回调内**只搬像素**
         // （不阻塞、不做通道 I/O、不调 LVGL —— §5.2 不变量 3）。
         //
@@ -1555,6 +1590,9 @@ impl App {
 
         // flush 计数在此处（**全部泵都结束后**）取：`dropped > 0` = 走查期间有像素该画而没画上。
         let (blits, dropped) = self.flush_stats();
+        // 定容池余量同样在**全部泵结束后**取：此时六页控件树 + 走查期间建的临时对象
+        // 都还在（峰值最有代表性）。⚠️ 不含绘制缓冲（见 `SmokeReport::mem` 的边界说明）。
+        let mem = crate::lvgl::mem_monitor();
         Ok(SmokeReport {
             pages: pages_out,
             walk_ms,
@@ -1565,6 +1603,7 @@ impl App {
             blits,
             dropped,
             export,
+            mem,
         })
     }
 
@@ -1685,6 +1724,8 @@ mod tests {
             blits: 100,
             dropped: 0,
             export: None,
+            // B4a：定容池快照只承载"读数"，不参与本组判定口的判据 ⇒ 取默认（全 0）。
+            mem: crate::lvgl::MemStats::default(),
         };
         assert!(!base.all_pages_non_empty(), "空页必须判失败");
         let all_ok = SmokeReport {
@@ -1727,6 +1768,63 @@ mod tests {
             !unwired.flush_observed(),
             "blits == 0 必须判失败：自检走查必然产生搬运，否则说明读口没接上"
         );
+    }
+
+    /// **B4a**：`--rotate` 的 CLI 取值 → 薄层旋转枚举的映射（**唯一**耦合点）。
+    ///
+    /// **改什么会让本条变红**：把 `rotation_of` 的任一分支写错（如 `Deg90 => Rotation::Deg180`）
+    /// 或把 `Rotate`/`Rotation` 的语义弄反 ⇒ 逐值相等断言即红。
+    ///
+    /// ⚠️ 本用例**不触碰 LVGL**（纯枚举映射），故可以安全地作为独立 `#[test]` 并行执行。
+    #[test]
+    fn cli_rotate_maps_to_the_thin_layer_rotation() {
+        for (cli, thin) in [
+            (Rotate::Deg0, Rotation::Deg0),
+            (Rotate::Deg90, Rotation::Deg90),
+            (Rotate::Deg180, Rotation::Deg180),
+            (Rotate::Deg270, Rotation::Deg270),
+        ] {
+            assert_eq!(rotation_of(cli), thin, "{cli:?} 须映射为 {thin:?}");
+            // 轴互换口径两边必须一致（`app.rs` 用 `Rotate::swaps_axes` 决定版式相关的分支，
+            // 而物理互换由 `Rotation` 承担 —— 两者口径漂移 = 逻辑分辨率与版式解算打架）。
+            assert_eq!(
+                cli.swaps_axes(),
+                thin.swaps_axes(),
+                "{cli:?} / {thin:?} 的「是否互换宽高」口径必须一致"
+            );
+        }
+        assert_eq!(rotation_of(CliConfig::default().rotate), Rotation::Deg0);
+    }
+
+    /// **B4a**：定容池余量的判定口 [`crate::lvgl::MemStats::has_headroom`] **能失败**。
+    ///
+    /// `--smoke` 的判定口若写成恒真就只是"打印"（本项目明令禁止的伪门禁）⇒ 这里逐条钉死
+    /// 它判假的两个方向。
+    #[test]
+    fn mem_headroom_verdict_can_fail() {
+        use crate::lvgl::MemStats;
+        let ok = MemStats {
+            total_size: 1024 * 1024,
+            max_used: 1024 * 1024 / 2,
+            ..MemStats::default()
+        };
+        assert!(ok.has_headroom(), "半池峰值 ⇒ 有余量");
+        // ① 峰值打满池：再建一个对象就可能分配失败 ⇒ 必须判失败。
+        let full = MemStats {
+            max_used: 1024 * 1024,
+            ..ok
+        };
+        assert!(!full.has_headroom(), "峰值打满 1 MiB 池必须判失败");
+        // ② 池还没读数（未 init / 读口没接上）⇒ `total_size == 0`，必须判失败
+        //    （否则"什么都没读到"会被当成"余量充足"）。
+        let unread = MemStats::default();
+        assert!(!unread.has_headroom(), "全 0 快照（读口没接上）必须判失败");
+        // ③ 阈值边界：95 % 是开区间上界。
+        let just_over = MemStats {
+            max_used: 1024 * 1024 * 951 / 1000,
+            ..ok
+        };
+        assert!(!just_over.has_headroom(), "峰值 > 95 % 即判失败（给新增对象留 5 %）");
     }
 
 

@@ -139,4 +139,15 @@ impl Font {
     pub(crate) fn raw(self) -> *const sys::lv_font_t {
         self.raw
     }
+
+    /// 由 LVGL 交回的字体指针收成句柄（薄层内部：`obj.rs` 的**样式读回**用）。
+    ///
+    /// 与 [`Font::of`] / [`Font::fallback`] 的分工：那两条是"**按档位取**我们已知的字体"，
+    /// 这条是"**读回**对象上实际生效的那个字体指针"（`lv_obj_get_style_text_font` 的复刻）。
+    ///
+    /// `raw` 必须**非空**，且指向 LVGL 拥有的静态字体数据（生命周期 = 进程）——
+    /// `lv_obj_get_style_prop(obj, part, LV_STYLE_TEXT_FONT)` 返回的正是这种指针。
+    pub(crate) fn from_raw(raw: *const sys::lv_font_t) -> Self {
+        Self { raw }
+    }
 }

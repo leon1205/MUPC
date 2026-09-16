@@ -70,7 +70,8 @@ use lvgl_sys as sys;
 
 use super::display::Area;
 use super::event::{self, CallbackHandle, Event, EventCode};
-use super::style::{Style, StyleSelector};
+use super::font::Font;
+use super::style::{Color, Opa, Part, Style, StyleSelector};
 use super::LvglError;
 
 /// **测试专用**：`from_raw` 挂探针的累计次数（观察"单例句柄是否每调用一次就挂一条"）。
@@ -175,6 +176,21 @@ impl ObjFlag {
     pub const CHECKABLE: Self = Self(sys::LV_OBJ_FLAG_CHECKABLE as u32);
     /// 可滚动。
     pub const SCROLLABLE: Self = Self(sys::LV_OBJ_FLAG_SCROLLABLE as u32);
+    /// **事件沿父链上冒**（`LV_OBJ_FLAG_EVENT_BUBBLE`；B4a 新增，仅镜像枚举值）。
+    ///
+    /// # 为什么现在补它（`ui/shell.rs` 偏差 **SH5** 的**前提**）
+    ///
+    /// LVGL **默认不上冒**：`vendor/lvgl/src/core/lv_obj_event.c` 的 `event_is_bubbled` 要求
+    /// **当前目标自带本标志**，`event_send_core` **逐级**检查 ⇒ 事件要到达外壳根，
+    /// **链上每一层**都得带它（只给根置位不够）。此前本枚举没有这个变体 ⇒ `ui/**` 连
+    /// "让子树冒泡"这件事都**写不出来**。
+    ///
+    /// ⚠️ **B4a 有意只补枚举 + 单测**：SH5 的完整语义（外壳装配后**递归**给页眉 / 内容区 /
+    /// 6 页 / 导航条整棵子树置位，并把 `shell_chain` 里"页内按压**不**重置"那条现状断言
+    /// 改写成"也重置")属 **B4b**，本单元**不改 `ui/**` 的行为**。
+    /// 另一条候选路（给 [`super::indev::Indev`] 加 `on(EventCode, F)`，一处挂钩覆盖全屏）
+    /// 见 `mod.rs` 的 G2 登记——二选一由 B4b 定夺。
+    pub const EVENT_BUBBLE: Self = Self(sys::LV_OBJ_FLAG_EVENT_BUBBLE as u32);
 
     /// 原始 C 取值。
     pub const fn raw(self) -> u32 {
@@ -486,6 +502,161 @@ impl Obj {
         }
         // SAFETY: 刚校验存活。
         unsafe { sys::lv_obj_get_child_count(self.raw) }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // G1「样式读回」（B4a）—— 补齐 `mod.rs` 「薄层能力缺口登记」的 G1
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // # 为什么走 `lv_obj_get_style_prop` 而不是 `lv_obj_get_style_bg_opa` 等三个 getter
+    //
+    // LVGL v9 的三个 `lv_obj_get_style_*`（`src/core/lv_obj_style_gen.h`）都是**头文件里的
+    // `static inline`** —— bindgen 的 `allowlist_function` 对它们**不生效**（只有
+    // `wrap_static_fns` 才会为其生成 wrapper，本仓不启用：那会把生成物换成一批
+    // `__bindgen_wrapped_*` 符号，与"压缩生成物 / 精确 allowlist"的目标相悖）。
+    //
+    // 本仓对"只在头文件 inline 里存在的能力"**早有先例与口径**：
+    // [`super::style::Style::set_pad_all`] 对 `lv_style_set_pad_all` 的处理就是
+    // 「按其**同一实现**，用真正导出的原语展开」。这里照同一条口径办：三个 getter 的
+    // inline 实现**逐字**都是
+    // `lv_style_value_t v = lv_obj_get_style_prop(obj, part, LV_STYLE_<PROP>);`
+    // 再取 `v.num` / `v.color` / `v.ptr` —— 本模块复刻的正是这三行。
+    //
+    // 读的都是 **`LV_PART_MAIN`**（UI 的主题样式一律挂 `StyleSelector::main()`，见
+    // `ui/theme.rs::text` 与 `ui/pages/mod.rs::label`）——与调用点的挂载选择器**同源**。
+
+    /// 读一个样式属性（薄层内部：三个读回口与滚动无关，只是共同底座）。
+    ///
+    /// 返回 `None` = 句柄已失效（不外传裸值，避免调用方拿到"看起来像 0"的假值）。
+    fn style_prop_raw(&self, prop: sys::lv_style_prop_t) -> Option<sys::lv_style_value_t> {
+        if !self.is_alive() {
+            return None;
+        }
+        // SAFETY: 刚校验存活 ⇒ `self.raw` 指向活对象；`prop` 只取自 `sys::LV_STYLE_*`
+        // （与 C 侧 `enum _lv_style_id_t` 同源），`part` 取自 `Part::MAIN`（同为 C 侧枚举）。
+        Some(unsafe {
+            sys::lv_obj_get_style_prop(
+                self.raw,
+                Part::MAIN.raw() as sys::lv_part_t,
+                prop,
+            )
+        })
+    }
+
+    /// 背景不透明度**实际生效值**（`lv_obj_get_style_bg_opa` 的等价读回）。
+    ///
+    /// 读不到（句柄失效）时返回 [`Opa::TRANSPARENT`] —— 与 C 侧 `bg_opa` 的默认值同口径。
+    ///
+    /// ⚠️ **能力边界（B4a 整改「建议 3.2」，如实标注）**：`0`（[`Opa::TRANSPARENT`]）
+    /// **同时是失效回落值**和**一个合法的实读值**（对象真的把 `bg_opa` 设为 0 %）
+    /// ⇒ **两者在本读回口下不可区分**（都返回 `Opa::TRANSPARENT`）。
+    ///
+    /// 这是**有意**的取舍（二选一的**取①**，另一条路是改成 `Option<Opa>`）：①
+    /// 三个读回口（本方法 / [`Obj::text_color`] / [`Obj::text_font`]）中**只有**本方法是
+    /// "值域含回落值"的；`text_font` 天然有 `None`（指针型的失效哨），而 `Color` 的
+    /// 黑色 `(0,0,0)` 同样是合法色。② 若改成 `Option<Opa>`，则**每个调用点**都要面对
+    /// `None` 分支 —— 而本读回的**唯一消费者**是 `ui/tests.rs::shell_chain` 的 EDGE-03
+    /// 断言（遮罩档位 20 %，**永不为 0**）⇒ 为一条"结构性不可能触发"的分支付全部
+    /// 调用点的复杂度不划算。③ 真需要区分时，先查 [`Obj::is_alive`]（句柄自带的、
+    /// **无歧义**的失效判据）再读本口 —— 这是本层推荐的用法。
+    ///
+    /// **回归锁**：`lvgl/tests_b4.rs` 的 G1 段钉死"活对象真 0 % 与失效句柄读到**同一个**
+    /// `Opa::TRANSPARENT`" —— 谁把回落值换成别的哨（如 `Opa::COVER`）即红。
+    ///
+    /// 用途（B4a 的最小消费者）：`ui/tests.rs::shell_chain` 的 EDGE-03 整屏降级断言，
+    /// 把"遮罩档位"由**常量相等**升级为**对象实际值相等** ⇒ "20 % 被偷换成 62 %"这类
+    /// **抓不到用错常量**的残余就此可判（原先只有 `shell::OVERLAY_MASK_OPACITY` 这个
+    /// 可断言的单点，绕开它直接写死别的档位仍抓不到）。
+    pub fn bg_opa(&self) -> Opa {
+        // SAFETY: `.num` 是 C 侧 `union lv_style_value_t` 的数值成员；`LV_STYLE_BG_OPA`
+        // 这类数值型属性的值**正是**由该成员承载（同 inline 实现取 `v.num`）。
+        self.style_prop_raw(sys::LV_STYLE_BG_OPA as sys::lv_style_prop_t)
+            .map(|v| Opa::new(unsafe { v.num } as u8))
+            .unwrap_or(Opa::TRANSPARENT)
+    }
+
+    /// 文字色**实际生效值**（`lv_obj_get_style_text_color` 的等价读回）。
+    ///
+    /// 读不到（句柄失效）时返回黑色 —— 与 C 侧 `text_color` 的默认值 `0x000000` 同口径。
+    pub fn text_color(&self) -> Color {
+        // SAFETY: `.color` 是 C 侧 `union lv_style_value_t` 的颜色成员；`LV_STYLE_TEXT_COLOR`
+        // 的值**正是**由该成员承载（同 inline 实现取 `v.color`）。
+        self.style_prop_raw(sys::LV_STYLE_TEXT_COLOR as sys::lv_style_prop_t)
+            .map(|v| {
+                let c = unsafe { v.color };
+                Color::rgb(c.red, c.green, c.blue)
+            })
+            .unwrap_or(Color::rgb(0, 0, 0))
+    }
+
+    /// 文字字体**实际生效值**（`lv_obj_get_style_text_font` 的等价读回）。
+    ///
+    /// 返回 `None` = 句柄已失效、或 C 侧交回的字体指针为 NULL。
+    ///
+    /// ⚠️ **能力边界（如实标注；B4a 整改「建议 3.1」按**实测**订正）**：本 crate 默认构建
+    /// **不启用 `noto-font`**（`fonts/*.c` 产物不入库，见 `lvgl/font.rs` 模块文档）⇒
+    /// [`super::font::Font::of`] 一律返回 `None`、`ui/theme.rs::font_of` 全体回落到
+    /// [`super::font::Font::fallback`]（同一个 montserrat_14 指针）⇒ **各字号槽读回来的
+    /// 指针相同**。
+    ///
+    /// **原写"此时只证『字体被设过』"已按实测收窄为**：此时**连"设过"也证不了** ——
+    /// LVGL 默认主题给裸 `lv_obj` 挂的 `LV_FONT_DEFAULT` **也正是** `lv_font_montserrat_14`
+    /// ⇒ "样式里根本没设字体"与"设了 `font_of(槽)`"**读回同值**（探针实测：把
+    /// `ui/pages/mod.rs::label` 的字体撤掉，`shell_chain` 的字体断言**仍绿**）。
+    /// **启用 `noto-font` 的构建下**（各槽拿到不同指针）才具备"换错槽 / 漏设字体即红"的判别力。
+    pub fn text_font(&self) -> Option<Font> {
+        // SAFETY: `.ptr` 是 C 侧 `union lv_style_value_t` 的指针成员；`LV_STYLE_TEXT_FONT`
+        // 的值**正是**由该成员承载（同 inline 实现取 `v.ptr`）。该指针指向 LVGL 拥有的
+        // 静态字体数据（生命周期 = 进程）⇒ 收成 [`Font`] 句柄不承担释放义务。
+        let p: *const sys::lv_font_t = self
+            .style_prop_raw(sys::LV_STYLE_TEXT_FONT as sys::lv_style_prop_t)
+            .map(|v| unsafe { v.ptr } as *const sys::lv_font_t)
+            .unwrap_or(std::ptr::null());
+        if p.is_null() {
+            None
+        } else {
+            Some(Font::from_raw(p))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // G3「滚动位置」（B4a）—— 补齐 `mod.rs` 「薄层能力缺口登记」的 G3
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 纵向滚到 `y`（像素；`0` = 顶部）。**无动画**（`LV_ANIM_OFF`）。
+    ///
+    /// # 用途
+    ///
+    /// `ui/shell.rs` 偏差 **SH12**：UI §4.3 要求"超时回归…**P1 始终从顶部开始**"，
+    /// 而本层此前**没有**"滚到指定位置"的封装 ⇒ 结构上做不到（回归后 P1 保留上次滚动位置）。
+    /// 补上后由外壳在切回 P1 时调用一次（属 **B4b** 的外壳改动，本单元只补能力 + 单测）。
+    /// 同一能力也是 P5「加载更多」的触发源前提。
+    ///
+    /// **无动画**是有意的：外壳的调用点是"页面切换"这一拍，滚动动画会让"切页即从顶部"
+    /// 变成"切页后一小段时间才到顶部"（且动画期间 `SCROLLED` 状态会点亮滚动条）。
+    ///
+    /// 句柄失效、或对象不可滚动时 no-op（LVGL 侧对不可滚对象本就是空操作）。
+    pub fn scroll_to_y(&self, y: i32) {
+        if !self.is_alive() {
+            return;
+        }
+        // `LV_ANIM_OFF` 是 C 侧的 `#define LV_ANIM_OFF false`（宏，**不入绑定**）；
+        // `lv_anim_enable_t` 在绑定里正是 `bool`，故直接写 `false` 与 C 侧取值逐位相同
+        // （对照 `vendor/lvgl/src/misc/lv_anim.h`）。
+        // SAFETY: 刚校验存活；`anim = false`（= `LV_ANIM_OFF`）是 C 侧合法取值。
+        unsafe { sys::lv_obj_scroll_to_y(self.raw, y, false) };
+    }
+
+    /// 当前纵向滚动位置（像素；**只有发生滚动后才非 0**）。
+    ///
+    /// 语义与 C 侧一致：内容**未超出**视口时为 `0`（负值表示 overscroll 回弹量，
+    /// 本层不消费该情形）。句柄失效时为 `0`。
+    pub fn scroll_y(&self) -> i32 {
+        if !self.is_alive() {
+            return 0;
+        }
+        // SAFETY: 刚校验存活。
+        unsafe { sys::lv_obj_get_scroll_y(self.raw) }
     }
 
     /// 挂一个样式（**共享所有权**：本层会克隆一份 `Rc` 并持住它）。

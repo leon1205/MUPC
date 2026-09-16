@@ -128,6 +128,10 @@ fn run_process(cfg: CliConfig) -> ExitCode {
         "[mupc-local-display] {}",
         config::control_channel_notice(&cfg.control_channel)
     );
+    // `--rotate` 非 0：**已在解析期硬错误**（B4a 整改「重要 2」）⇒ 本处**没有任何告警可打**
+    // —— 能走到这里的 `cfg.rotate` 恒为 `Deg0`。原先那条 `rotate_pixel_gap_warning`
+    // 启动告警随之**整体删除**（硬错误后它不可达 = 死代码），其语义由两处承担：
+    // ① 解析期错误文案（点名"像素级旋转（sink 侧）尚未实现"）；② `--help` 的 `--rotate` 行。
     // 数据通道 URL 前置校验（解析失败 = 用法错误 ⇒ 退出码 2；不静默回退默认端点）。
     if let Err(e) = DisplayChannelClient::try_new(&cfg.channel) {
         eprintln!("[mupc-local-display] 数据通道 URL 非法：{e}");
@@ -245,14 +249,34 @@ fn run_smoke(app: &mut App, cfg: &CliConfig, stats: &LoopStats) -> ExitCode {
         // 页名用 P1..P6（ASCII，CI 可直接 grep；中文页名见 NavPage::title）。
         println!("[smoke] page=P{} active_px={px}", page.index() + 1);
     }
+    // **LVGL 定容池余量**（B4a；设计 §10 / §14 R-24 的量化口）。
+    // ⚠️ 读的是 `LV_MEM_SIZE`（1 MiB）那一块**定容池** —— 装的是对象树 / 样式属性表 /
+    // 定时器 / 事件项；**不含绘制缓冲**（后者走系统堆，见 `lvgl::MemStats`）。
+    // 真机（fbdev）同样可读 ⇒ 与离屏自检判据一致。
+    println!(
+        "[smoke] mem_total={} mem_free={} mem_free_cnt={} mem_free_biggest={} mem_used_cnt={} \
+         mem_max_used={} mem_used_pct={} mem_frag_pct={} mem_headroom={}",
+        report.mem.total_size,
+        report.mem.free_size,
+        report.mem.free_cnt,
+        report.mem.free_biggest_size,
+        report.mem.used_cnt,
+        report.mem.max_used,
+        report.mem.used_pct,
+        report.mem.frag_pct,
+        if report.mem.has_headroom() { "ok" } else { "tight" },
+    );
     match &report.export {
         Some((path, bytes)) => {
             println!("[smoke] export={} bytes={bytes}", path.display());
         }
         None => println!("[smoke] export=none（未指定 --smoke-out）"),
     }
-    // 四条判定口**互相独立**，任一不成立即 FAIL（结论行点名是哪一条，便于 CI 判读）。
+    // 五条判定口**互相独立**，任一不成立即 FAIL（结论行点名是哪一条，便于 CI 判读）。
     // `FAIL_NO_FLUSH` 是 `dropped == 0` 的对偶哨：抓"计数根本没接线"（否则恒 0 看着完美）。
+    // `FAIL_MEM_TIGHT`（B4a 新增）把设计 §10 / §14 **R-24**「1 MB 定容池余量未量化」变成
+    // 可判：峰值打满 95 % 即失败（**未读到**池 —— `total_size == 0` —— 同样失败，
+    // 否则"什么都没读到"会被当成"余量充足"）。
     let verdict = if !report.all_pages_non_empty() {
         "FAIL_EMPTY_PAGE"
     } else if !report.throttle_effective() {
@@ -261,6 +285,8 @@ fn run_smoke(app: &mut App, cfg: &CliConfig, stats: &LoopStats) -> ExitCode {
         "FAIL_NO_FLUSH"
     } else if !report.no_dropped_frames() {
         "FAIL_DROPPED_FRAME"
+    } else if !report.mem.has_headroom() {
+        "FAIL_MEM_TIGHT"
     } else {
         "OK"
     };

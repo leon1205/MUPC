@@ -34,7 +34,7 @@ use crate::lvgl::font::FontSize;
 use crate::lvgl::obj::Obj;
 // `Part` / `State` / `ScrollContainer` 不在此处 import：下游用例一律走
 // `crate::lvgl::style::…` / `crate::lvgl::widgets::…` 全限定路径引用，短名反而无人使用。
-use crate::lvgl::style::{Color, StyleSelector};
+use crate::lvgl::style::{Color, Opa, StyleSelector};
 use crate::lvgl::{self, LvglError};
 use crate::ui::components::{
     self, ConfirmDetail, ConfirmDialog, ConfirmSpec, Debounce, EmptyState, LedIndicator,
@@ -7167,9 +7167,13 @@ pub(crate) fn pages_chain() {
         p3.back_obj().send_event(EventCode::CLICKED);
         assert_eq!(*backs.borrow(), 1, "点击 ⇒ **恰一次**意图");
         assert!(p3.auto_follow(), "点击后复位自动跟随（B3 注入态的读回口径）");
-        // ⚠️ **R2 的能力缺口（如实标注）**：薄层无 `LV_EVENT_SCROLL`、也无任何滚动位置
-        // 读 / 写 API ⇒ 本层读不到"用户是否手动上滚"、也**无法**程序化回顶。
-        // 本段**不**断言"回到顶部"（做不到，断言它只会是恒真式）。
+        // ⚠️ **R2 的能力缺口（B4a 订正后如实标注）**：剩余缺口**只有输入侧** ——
+        // 薄层**未镜像** `LV_EVENT_SCROLL` ⇒ 本层读不到"用户是否手动上滚"。
+        // **已不是**"无任何滚动位置读 / 写 API"：`Obj::scroll_to_y` / `Obj::scroll_y`
+        // 自 B4a 起已封装（`lvgl/mod.rs` 的 **G3**）⇒ 程序化回顶**已可做**
+        // （薄层侧回归锁见 `lvgl/tests_b4.rs`；**外壳**切回 P1 时是否真调，属 **B4b**）。
+        // 本段**不**断言"回到顶部"：那是**外壳行为**、不在本段（页面层）的断言范围，
+        // 在此断言只会是恒真式。
 
         // ── ⑭ 超限（EDGE-15）：契约字段 ⇒ **生产可达**（与 P5 的 AU5 相反）─────────────
         p3.set_page(&log_page(entries.clone(), false, true));
@@ -8152,11 +8156,14 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），且页眉（0,0,1024,72）/
         // 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满**画布 ⇒ **外壳根永远不是
         // 那个对象**；LVGL 又**默认不上冒**（`lv_obj_event.c:434::event_is_bubbled` 要求**链上
-        // 每层**自带 `LV_OBJ_FLAG_EVENT_BUBBLE`，而 `ObjFlag` 未镜像该标志）⇒ **页内按压不会
-        // 重置计时**。本节把这条边界**锁住**：合成投递给外壳根 ⇒ 重置；投递给页内容器 ⇒ 不重置。
+        // 每层**自带 `LV_OBJ_FLAG_EVENT_BUBBLE`；**【B4a 订正】** 该**枚举**现已镜像
+        // （`ObjFlag::EVENT_BUBBLE`，见 `lvgl/mod.rs` 的 **G2**；原文写"`ObjFlag` 未镜像该标志"
+        // **已过期**），但**行为未实施** —— `ui/**` 尚未递归给子树置位）⇒ **页内按压仍不会
+        // 重置计时**（结论不变）。本节把这条边界**锁住**：合成投递给外壳根 ⇒ 重置；
+        // 投递给页内容器 ⇒ 不重置。
         //
-        // **本节是"现状锁定"（SH5 的登记锚点）**：薄层补齐 `ObjFlag::EVENT_BUBBLE`（且外壳
-        // 递归置位整棵子树）或 `Indev::on(..)` 之后，下面三条 `assert!(..visible())` 应**改写为
+        // **本节是"现状锁定"（SH5 的登记锚点）**：**外壳**递归置位整棵子树（枚举那一半 B4a 已备）
+        // 或改走 `Indev::on(..)` 之后，下面三条 `assert!(..visible())` 应**改写为
         // "页内按压**也**重置"**，而不是静默删除 —— 删掉它等于把 §4.3「任何触摸事件重置」的
         // 缺口重新藏起来（这正是评审 ④ 点名的问题）。
         {
@@ -8183,8 +8190,9 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
                 assert!(
                     sh.countdown_visible(),
                     "{what} 上的按压**不会**重置计时（SH5：LVGL 默认不上冒 + 外壳根不在 \
-                     `lv_indev_search_obj` 的命中链上）。**若本条变红** ⇒ 薄层已补上 \
-                     `EVENT_BUBBLE` / `Indev::on` 且外壳已接上：请把本条**改写**为\
+                     `lv_indev_search_obj` 的命中链上；`EVENT_BUBBLE` **枚举** B4a 已备、\
+                     **行为**未实施）。**若本条变红** ⇒ 外壳已递归置位子树（或改走 \
+                     `Indev::on`）：请把本条**改写**为\
                      「页内按压**也**重置」并同步 SH5，**不要**直接删掉"
                 );
             }
@@ -8483,11 +8491,17 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
 
         // ── **对象级字号档断言**（B3-2b-1 规格评审 **重要 1+2**）────────────────────────
         //
-        // **为什么需要它**：薄层**没有**字号 / 字色读回（`bg_opa` / `text_font` / `text_color`
-        // 三个 getter 都缺，见 `src/lvgl/mod.rs` 的「薄层能力缺口登记」）⇒ 评审把中央大字由
-        // `TextSlot::PhasePower`(64 px) + `Palette::STALE` 换成 `TextSlot::Body` + `Palette::DANGER`
-        // 时**全套用例全绿**（屏上字变小变红，无网）。根因是"建标签"与"设尺寸"两处**各写各的
-        // 常量** ⇒ 只改一处不影响另一处。
+        // **为什么需要它**（历史动因，**B4a 之前**）：当时薄层**没有**字号 / 字色读回
+        // （`bg_opa` / `text_font` / `text_color` 三个 getter 都缺，见 `src/lvgl/mod.rs`
+        // 的「薄层能力缺口登记」）⇒ 评审把中央大字由 `TextSlot::PhasePower`(64 px) +
+        // `Palette::STALE` 换成 `TextSlot::Body` + `Palette::DANGER` 时**全套用例全绿**
+        // （屏上字变小变红，无网）。根因是"建标签"与"设尺寸"两处**各写各的常量**
+        // ⇒ 只改一处不影响另一处。
+        //
+        // **【B4a 订正】** 三个 getter **已补齐**（`Obj::bg_opa` / `text_color` / `text_font`）
+        // ⇒ 字色从此**有真读回口**（见下方 §B4a 补网）；而本节的**尺寸**口径仍**照旧需要**
+        // —— 它是**独立于**样式读回的第二条路（"字号滑档而 `set_size` 没跟"这类退化，
+        // 只有"对象实高 == 槽档高"这条能抓）。
         //
         // **收口**：`shell.rs` 把两处收敛成同一个绑定（`OVERLAY_TITLE_SLOT` /
         // `OVERLAY_ELAPSED_SLOT`），`set_size` 与"建标签"同源；而 `Obj::size()` **可读**
@@ -8515,13 +8529,18 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             "两行的字号槽必须不同（64 ≠ 24）：同高即「两处写反 / 写成同一个槽」，两行分不出主次"
         );
 
-        // ── **遮罩不透明度档位**（重要 1+2 的第 3 步；对象层读不回 `bg_opa`）─────────────
+        // ── **遮罩不透明度档位**（重要 1+2 的第 3 步）──────────────────────────────────
         //
-        // 薄层无 `lv_obj_get_style_bg_opa` ⇒ "遮罩实际用了哪一档"在对象层**不可判**
-        // （评审实测：把 20 % 偷换成 62 % 的全屏遮罩，335 全绿）。收口 = 把档位提成
-        // **单一真源** `shell::OVERLAY_MASK_OPACITY`，遮罩只许经它建 ⇒ 断言该常量本身。
-        // ⚠️ **残余（如实登记）**：绕过该常量、直接在 `overlay_mask()` 的样式上写死别的档位，
-        // 用例仍抓不到（根因 = 缺 `bg_opa` 读回，补读回属「薄层收口批」）。
+        // 收口 = 把档位提成**单一真源** `shell::OVERLAY_MASK_OPACITY`，遮罩只许经它建
+        // ⇒ 先断言该常量本身（"对象**实际生效值**"那一层见下方 §B4a 补网）。
+        //
+        // **【B4a 订正】** 原文续写「薄层无 `lv_obj_get_style_bg_opa` ⇒ "遮罩实际用了哪一档"
+        // 在对象层**不可判**（评审实测：把 20 % 偷换成 62 %，335 全绿）…**残余**：绕过该常量
+        // 直接写死别的档位，用例仍抓不到（补读回属「薄层收口批」）」—— **已过期**，
+        // 且与**正下方**新增的 `sh.overlay_obj().bg_opa()` 断言**自相矛盾**。
+        // 事实：薄层**已补** `Obj::bg_opa`（`lvgl/mod.rs` 的 **G1**），那条断言读的就是
+        // **LVGL 实际生效值** ⇒"绕开常量写死 62 %"**当场红**。
+        // 于是上面这两条"常量相等"退居**第一道网**（钉住"单点真源"本身，保证换档只改一处）。
         assert_eq!(
             shell::OVERLAY_MASK_OPACITY,
             Opacity::DEGRADE_PERCENT,
@@ -8531,6 +8550,80 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             shell::OVERLAY_MASK_OPACITY,
             Opacity::MASK_PERCENT,
             "整屏降级遮罩**不得**取模态遮罩那一档（62 %）：EDGE-20 要求底层仍可读 ⇒ 二者必须分档"
+        );
+
+        // ── ═══ **B4a 补网：样式读回**（把上面两条"常量相等"升级为"对象实际值相等"）═══ ──
+        //
+        // **为什么必须补**：上面那两条只证明"**常量**是 20 而非 62" —— 若有人**绕过**
+        // `shell::OVERLAY_MASK_OPACITY`、直接在 `overlay_mask()` 的样式上写死别的档位
+        // （或把 `Opacity::DEGRADE_PERCENT` 本身改掉而没人同步），**B4a 之前**对象层读不回
+        // ⇒ 全部用例仍绿（B3-2b-1 评审与 `shell.rs` 的登记都点名过这条残余）。
+        //
+        // B4a 补齐薄层的 `Obj::bg_opa` / `text_color` / `text_font`（三个
+        // `lv_obj_get_style_*` 的等价读回，见 `src/lvgl/obj.rs`）后，这三件**在对象上可读**，
+        // 于是改为断言 **LVGL 实际生效值**。
+        //
+        // **改什么会让下面每条变红**（探针实测见 B4a 交付报告）：
+        // ① 把遮罩档位由 20 % 换成 62 %（含绕过常量直接写死）⇒ `bg_opa()` 读回 158 ≠ 51；
+        // ② 把 `OVERLAY_TITLE_COLOR` 由 `Palette::STALE`(`#FFB020`) 换成 `Palette::DANGER` ⇒ 字色读回不等；
+        // ③ **【B4a 整改「建议 3.1」按实测订正】** 原文写「把大字标签的样式换成不带字体的那条
+        //    ⇒ `text_font()` 变 `None`（或不再是 `font_of(槽)`）」—— **两个分支都不成立**。
+        //    实测（探针：把 `pages::label` 的 `theme::text(slot, color)` 换成一条**只设字色、
+        //    不设字体**的样式，其余原样）：`shell_chain` **仍绿** ⇒ `text_font()` 既**没**变
+        //    `None`、也**仍** `== font_of(槽)`。**原因**：LVGL 默认主题给每个 `lv_obj` 挂
+        //    `LV_FONT_DEFAULT`（= `lv_font_montserrat_14`），而默认构建下
+        //    `theme::font_of(槽)` 对**所有**槽都回落 [`Font::fallback`] = **同一个**
+        //    `lv_font_montserrat_14` 指针 ⇒ "样式里没设字体"与"设了槽的字体"**读回同值**。
+        //    ∴ ③ 在当前构建下**不是**一条能红的判据（见下方字体断言处的如实标注）。
+        assert_eq!(
+            sh.overlay_obj().bg_opa(),
+            Opa::percent(Opacity::DEGRADE_PERCENT),
+            "整屏降级遮罩**实际生效的** `bg_opa` 必须 == 20 %（= `Opa::percent(20)` = 51/255）\
+             —— 绕开 `shell::OVERLAY_MASK_OPACITY` 直接写死 62 % 在这里红"
+        );
+        assert_eq!(
+            sh.overlay_obj().bg_opa().raw(),
+            51,
+            "遮罩 `bg_opa` 的**原始 C 取值**必须 == 51（`Opa::percent(20)` 的算式在这条上被钉死）"
+        );
+        assert_ne!(
+            sh.overlay_obj().bg_opa(),
+            Opa::percent(Opacity::MASK_PERCENT),
+            "遮罩**实读**值不得等于模态那一档（62 % = 158）—— 与上面 `!= 62` 的常量断言同向，\
+             但这条查的是 **LVGL 真正渲染用的那个值**"
+        );
+        assert_eq!(
+            sh.overlay_title_obj().text_color(),
+            shell::OVERLAY_TITLE_COLOR,
+            "中央大字的**实际字色**必须 == `OVERLAY_TITLE_COLOR`（UI §8.3 `#FFB020`）\
+             —— 由 STALE 换成 DANGER 红即在此红（原先「色在对象层不可判」的残余）"
+        );
+        assert_ne!(
+            sh.overlay_title_obj().text_color(),
+            Palette::DANGER,
+            "中央大字**不得**用 DANGER 红（EDGE-03 原文给的是 `#FFB020` 琥珀）"
+        );
+        assert_eq!(
+            sh.overlay_elapsed_obj().text_color(),
+            shell::OVERLAY_ELAPSED_COLOR,
+            "时长行的**实际字色**必须 == `OVERLAY_ELAPSED_COLOR`"
+        );
+        assert_eq!(
+            sh.overlay_title_obj().text_font(),
+            Some(theme::font_of(shell::OVERLAY_TITLE_SLOT)),
+            "中央大字的**实际字体指针**必须 == `font_of(OVERLAY_TITLE_SLOT)`\
+             —— ⚠️ **判别力受构建配置限制（B4a 整改「建议 3.1」按实测订正）**：\
+             默认构建（未启用 `noto-font`）下各槽位都降级到**同一个** fallback 指针，\
+             而 LVGL 默认主题给裸 `lv_obj` 挂的 `LV_FONT_DEFAULT` 也是那**同一个**\
+             `lv_font_montserrat_14` ⇒ 本条此时**连「字体被设过」都证不了**\
+             （探针实测：把标签样式换成不带字体的那条，本条**仍绿**）。\
+             只有启用 `noto-font` 构建（各槽拿到不同指针）后，本条才有\
+             「换错槽 / 漏设字体即红」的判别力（边界见 `Obj::text_font` 的说明）"
+        );
+        assert_eq!(
+            sh.overlay_elapsed_obj().text_font(),
+            Some(theme::font_of(shell::OVERLAY_ELAPSED_SLOT)),
+            "时长行的**实际字体指针**必须 == `font_of(OVERLAY_ELAPSED_SLOT)`（边界同上一行）"
         );
 
         // ── **只在整秒变化时改文本**（每拍刷 LVGL 文本 = 红线行为 + 使"秒级"无从验证）──

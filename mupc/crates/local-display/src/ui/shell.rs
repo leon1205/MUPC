@@ -85,7 +85,7 @@
 //! | SH2 | 【**✅ 已实施（2026-09-16，B3-2c）**】「弹层打开」的**生产可见真源**：P2 / P4 各新增 `dialog_open()`（`P2ConfigPage::dialog_open` / `P4InterlockPage::dialog_open`），`app.tick` 每拍喂 [`Shell::set_modal_open`] `= p2.dialog_open() \|\| p4.dialog_open()`；本层的注入位（`set_modal_open`）保留不变 | 此前页面侧**没有**生产可见的"弹层是否打开"查询口（`with_dialog` 是 `#[cfg(test)]`）⇒ 接线层只能恒喂 `false`，契约名存实亡。**"由 `UiState.confirm` 注入"的做法已被 B3-2c 取代**：弹层生命周期（建 / 关，且关闭延迟到下一拍）全归页面，`ControlState::confirm` 结构上拿不到生产者 ⇒ 真源改在页面（见 `state.rs` 偏差 **S-4**；`ControlState::{confirm, set_confirm, confirm_open}` 保留但**零生产调用者**） | **✅ 已实施（B3-2c）**：`ui/tests.rs::shell_chain` 的 ⑤″（P2）/ ⑤″·P4 用**真实点击路径**各验一次"查询口为真 + 另一页为假 + 弹层打开期间不倒计时 / 不切页" |
 //! | SH3 | **倒计时胶囊出现时，通道胶囊与触摸角标让位（隐藏）** | 页眉五者同时上屏的最小总宽 **> 1024 px**（算式：返回 64 + 标题 376 + 缝 16 + 通道胶囊 280 + 缝 16 + 倒计时胶囊 264 + 缝 16 + 时钟 120 + 右安全边 16 = **1168 px**，缺口 **144 px**；即便去掉返回键仍超 1104 px）——UI §4.1 的"右端时钟 + 通道胶囊"与 §4.3 的"时钟左侧倒计时胶囊"**在 1024 px 上不可共存**。倒计时只出现在回归前 ≤10 s 且最紧急 ⇒ 由它优先占据右端。**归属：PM 裁定**（规格层面的不可共存，非本层实现缺陷；评审已独立复算一致，且内在宽度估算 ≈1104 亦 > 1024） | **PM 裁定**。三个候选：① **让位**（现状，倒计时独占右端，本层已实现）；② **页眉改两行**（§3.5 的 `header_h=72` 要改 ⇒ 三区高度 72+624+72 的等式、全部页面的 y 坐标连锁，属**重新设计**）；③ **缩短文案**（如 `10 秒后返回主状态页` → `10 秒返回`，省 5×24=120 px **仍差 24 px** ⇒ 至少要砍 ≥6 个 24 px 字形才排得下，且须同步改 §3.6 用字表与 §4.3 文案契约）。本层**不自行改版式** **✅ PM 已裁定（2026-09-15）**：维持「**倒计时占槽、通道胶囊与触摸角标让位**」——倒计时胶囊与通道胶囊**本就抢同一个槽位**（都锚在时钟左侧），让位窗口仅**超时前 10 s**、窗口结束即自动回 P1（通道态在 P1 完整重现）。UI §4.1 已补「页眉右端组坐标链 + 让位优先级（倒计时 > 通道态 > 触摸角标）」注，见 UI 附录 **A.7** |
 //! | SH4 | 「放弃修改」按钮触区高 **48**（UI §4.3 同一条里又写「**64 高触区**」）—— **规格自身矛盾**（评审 ⑤ 已裁定：取 48 正确，实现不改） | **矛盾**：§4.3 的同一表格行同时给"提示条 h 48"与"按钮 64 高触区"，64 高的按钮放不进 48 高的条（子对象被父对象裁切）。**取 48**，理由：① 48 = `Dimens::TOUCH_MIN`（§2.1 的最小触摸目标**下限**，满足）；② §2.1 的「关键操作 **64×64**」点名清单（保存 / 恢复默认值 / 联锁释放 / M1 授权 / 导航项 / **返回**）**不含**它 ⇒ 无 64 的硬要求；③ 取 64 会让提示条与按钮互相矛盾（只能改条高，而那又违反同一行的 h48） | 同 SH3（若 PM 裁定条高改 64，两者同时改） |
-//! | SH5 | 「**任何**触摸事件重置计时」（§4.3）在本层**只覆盖 3 个控件**：返回键 / 6 个页签 / 「放弃修改」键（**按下即重置**）。**不会**重置的按压：页内任意控件（卡片 / 按钮 / 列表行 / chip …）、页内空白处、页眉空白区、导航条页签之外的空隙。**修整说明（评审 ④）**：原文自称覆盖"外壳根（**全屏**）"，**不成立** —— 已删；现有用例里 `sh.obj().send_event(PRESSED)` 是**合成投递**（不经 `lv_indev`），它锁的只是"根的挂钩**在**且能置位 `pending_activity`"，**不等于**产品里页内按压会重置 | 三件事（**② 探针已逐条实测**，见 §验证）：① `crate::lvgl::obj::ObjFlag` **无** `LV_OBJ_FLAG_EVENT_BUBBLE`（只有 HIDDEN / CLICKABLE / CHECKABLE / SCROLLABLE），而 LVGL **默认不上冒**：`lv_obj_event.c:434::event_is_bubbled` 要求**当前目标自带该标志**、`event_send_core` **逐级**检查 ⇒ 事件要到达外壳根，**链上每一层**都得带标志；② `lv_obj` 构造时**默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），而页眉（0,0,1024,72）/ 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满** 1024×768，`lv_indev.c:618::lv_indev_search_obj` 取"命中的**最深**可点对象" ⇒ **真实触摸永远落在某个后代对象上，外壳根收不到 `PRESSED`**；③ `crate::lvgl::indev::Indev` **未**暴露 `lv_indev_add_event_cb`（该符号**在** `lvgl-sys/allowlist.txt` 里，只是薄层没封装）⇒ `ui/**` 拿不到"任意按压"的全局钩子 | **薄层（`src/lvgl/**`）**，两种**具名**能力需求（二选一）：① `ObjFlag` 补 `EVENT_BUBBLE` —— **注意**：只给页根置位**不够**，须由外壳在装配后**递归**遍历页眉 / 内容区 / 6 页 / 导航条**整棵子树**置位（链上缺一层即断）；② 给 `Indev` 加 `on(EventCode, F)`（`lv_indev_add_event_cb` 直投；`lv_indev.c:997` 的 `send_event(LV_EVENT_PRESSED, indev_act)` 是**每次按压**都发）—— **推荐**：一处挂钩覆盖全屏，且不必触碰 `pages/**`。**两者任一补齐后**，§4.3 的"任何触摸事件重置"才**完全**成立；届时应把 `shell_chain` 的"页内按压**不**重置"那条断言（**现状锁定**，见下）改写成"页内按压**也**重置"，**不得**只是删掉 |
+//! | SH5 | 「**任何**触摸事件重置计时」（§4.3）在本层**只覆盖 3 个控件**：返回键 / 6 个页签 / 「放弃修改」键（**按下即重置**）。**不会**重置的按压：页内任意控件（卡片 / 按钮 / 列表行 / chip …）、页内空白处、页眉空白区、导航条页签之外的空隙。**修整说明（评审 ④）**：原文自称覆盖"外壳根（**全屏**）"，**不成立** —— 已删；现有用例里 `sh.obj().send_event(PRESSED)` 是**合成投递**（不经 `lv_indev`），它锁的只是"根的挂钩**在**且能置位 `pending_activity`"，**不等于**产品里页内按压会重置 | 三件事（**② 探针已逐条实测**，见 §验证）：① **【B4a 订正】** `crate::lvgl::obj::ObjFlag` **已补** `LV_OBJ_FLAG_EVENT_BUBBLE`（`lvgl/mod.rs` 的 **G2**；原写"**无**该标志（只有 HIDDEN / CLICKABLE / CHECKABLE / SCROLLABLE）"**已过期**）。⚠️ 但"**枚举已具备**"≠"**行为已实施**" —— `ui/**` **尚未**在装配后递归给整棵子树置位、SH5 的行为口径**仍归 B4b**（`ui/**` 的"页内按压不重置"现状断言**照样成立**，不得提前改写）。**仍然为真的限制**：LVGL **默认不上冒**：`lv_obj_event.c:434::event_is_bubbled` 要求**当前目标自带该标志**、`event_send_core` **逐级**检查 ⇒ 事件要到达外壳根，**链上每一层**都得带标志；② `lv_obj` 构造时**默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），而页眉（0,0,1024,72）/ 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满** 1024×768，`lv_indev.c:618::lv_indev_search_obj` 取"命中的**最深**可点对象" ⇒ **真实触摸永远落在某个后代对象上，外壳根收不到 `PRESSED`**；③ `crate::lvgl::indev::Indev` **未**暴露 `lv_indev_add_event_cb`（该符号**在** `lvgl-sys/allowlist.txt` 里，只是薄层没封装）⇒ `ui/**` 拿不到"任意按压"的全局钩子 | **薄层（`src/lvgl/**`）**，两种**具名**能力需求（二选一）：① `ObjFlag` 补 `EVENT_BUBBLE` —— **注意**：只给页根置位**不够**，须由外壳在装配后**递归**遍历页眉 / 内容区 / 6 页 / 导航条**整棵子树**置位（链上缺一层即断）；② 给 `Indev` 加 `on(EventCode, F)`（`lv_indev_add_event_cb` 直投；`lv_indev.c:997` 的 `send_event(LV_EVENT_PRESSED, indev_act)` 是**每次按压**都发）—— **推荐**：一处挂钩覆盖全屏，且不必触碰 `pages/**`。**两者任一补齐后**，§4.3 的"任何触摸事件重置"才**完全**成立；届时应把 `shell_chain` 的"页内按压**不**重置"那条断言（**现状锁定**，见下）改写成"页内按压**也**重置"，**不得**只是删掉 |
 //! | SH6 | 倒计时胶囊的**出现判据取 ≤10 s**（§4.3 表「超时前 10 s」），故文案从 `10 秒后返回主状态页` 起数；§4.3 表内的示例文案写的是 `12 秒后返回主状态页` —— **规格自身矛盾**（评审 ⑤ 已裁定：取 10 s 正确，实现不改） | **§4.3 自相矛盾**（判据 10 s vs 示例 12 s）。**取判据 10 s**，为什么：① 判据是**行为规格**（"超时前 N 秒出现"，可被 PRD F15 与计时器逐拍核验），而 `12 秒后返回主状态页` 只是表格里的一句**示例文案**（同格的判据已写死 10 s，示例与之冲突 ⇒ 示例才是笔误的一方）；② 取 12 s 会出现"判据说 10 s 显、文案从 12 s 起数"的**自相矛盾**，或需要把判据一并改 12 s（改动行为规格，超出本层权限）。文案按**实际剩余秒数**渲染（`countdown_text`） | 无（**有意**取行为规格）；若 PM 裁定 12 s，改 [`COUNTDOWN_WINDOW_SECS`] 一处即可 |
 //! | SH7 | **页眉通道胶囊的位置**：EDGE-20 的"页眉**左侧** `与主进程数据通道断开`（红）+ 右侧正常时钟"落成「**页眉右端组**内的红通道胶囊 + 右端时钟**同时可见**」（`HEADER_CHIP_X`：胶囊紧跟时钟、角标在胶囊左侧，三件等缝相连、整组贴右安全边）。**位置取 §4.1（右端），§8.3 的「左侧」不采**；**§8.3 的语义（红断开 + 时钟正常"两状态同显"）完整满足** —— 红胶囊与时钟同屏可见 | §4.1 与 §8.3 对**同一元素**给出不同横坐标（§4.1「右端：时钟 `+` 通道状态胶囊」/ §8.3「左侧」）。取 §4.1 的三条理由：① §4.1 是**版式权威**（页眉各件的矩形与"右端"归属都在它的表里），§8.3 是**异常态语义字典**（管"该显哪种状态"，不管坐标）；② §4.3 把倒计时胶囊钉在"页眉右端（**时钟左侧**）" ⇒ 时钟必须留在右端；若把胶囊改挂左端，同一元素会**按状态跳位**，且左端已被返回键（x 12–76）与标题（P1 标题 x16 起、宽 [`HEADER_TITLE_W_P1`]）占满，移过去还要压标题；③ 采纳 (a)「移到右端」而非 (b)「断开态移左端」正是为了**位置恒定的状态件**（F14 一致性）。**EDGE-20 的完整语义**（"控制通道**可达** vs 读通道**断**"的二元区分）需要**两个**独立通道信号，本层只有一个 `ChannelStatus` 输入 ⇒ 归 **B3** | **B3**：`set_channel` 之外再注入"控制通道态"；若 PM 裁定必须落在"左侧"，需同时裁定标题区收缩 + 胶囊换位（属**重新设计**，本层不自行改）。回归锁见 `shell.rs::tests::header_slots_are_disjoint_and_inside_canvas` 的"右端组右锚定 + 左缘在右半区"两条 |
 //! | SH8 | **【✅ 已实现，残余 = SH15 / SH16 / SH17】整屏降级（EDGE-03）：压暗 20 % + 中央 64 px 文案 + 秒级时长**已落成（"每区块 `冻结` 角标"的**实际缺口**见 **SH16**；"秒级倒计时"改"已断开时长"见 **SH15**；`--idle-timeout-secs 0` 语义搬迁见 **SH17**） | 曾属 **B3**（需通道客户端 + 恢复状态机）—— B3-2b-1 已交付 | **✅ 已实现（2026-09-15，B3-2b-1）**：整屏层落成 `Core::overlay`（`root` 的末子 ⇒ 最上层）+ [`Core::apply_overlay`]（每拍唯一落点），四条实现裁定见模块头「EDGE-03 整屏降级」。**B3-2b-1 规格符合性评审整改（建议 4）**：原"只留挂点 `Shell::overlay_layer()`"里的**挂点已删**（它与 `widgets::layer_top()` 等价、只多包一层 `Result`，且**无生产消费者** —— P2/P4 弹层与 Toast 直接调 `widgets::layer_top()`）⇒ 本行不再是"挂点"条目，而是"EDGE-03 已实现"的登记 |
@@ -97,7 +97,7 @@
 //! | SH9 | 页内通道条（P1 的「与主进程数据通道断开」行）与页眉通道胶囊**重复表达**同一事实 | `pages/mod.rs` 的 **D1** 已登记"外壳装配时移除页内通道条"，但本单元**禁改 `ui/pages/**`**（硬约束 5）⇒ 重复仍在 | **B2c 收口 / 后续批**（需 PM 授权改 `p1_status.rs`） |
 //! | SH10 | 导航 6 项各取 `Dimens::NAV_ITEM_W` = **170**，共 1020 px < 1024（右端余 **4 px** 无页签） | `Dimens::NAV_ITEM_W`（UI §5.1 #1 取整）是 theme 的**单一真源**，本层不得写 170.7；UI §4.2 写"每项宽 1024/6 ≈ 170.7" | 无（**有意**用 theme 常量；4 px 余量不构成可用触摸区） |
 //! | SH11 | **导航页签的图标 / 文字 y 与 §4.2 不符**：§4.2 给「图标 28 px（y 706–734）」⇒ **项内 y 10**、「文字 26 px（y 736–766）」⇒ **项内 y 40**；本层取 [`NAV_ICON_Y`] = **8**、[`NAV_TEXT_Y`] = **44**（图标高 2 px、文字低 4 px） | **不是居中推导**（如实核实）：块高 = 28+缝+26 = 62（含 8 px 缝），真居中应得 5/41；§4.2 的 10/40 自身也不居中（块 10–70、上 10 下 2）。本层取"**半个呼吸缝**"档：图标上沿 = `Dimens::GAP_MIN/2` = 8，图标下沿与文字上沿之间同样 8 ⇒ **等间距**取向，且**全部由 theme 常量派生**（`Dimens::GAP_MIN` / `Dimens::ICON_SM`），零裸值。§4.2 的 10/40 在 theme 里**没有**对应命名常量，而 `ui/theme.rs` 本批**禁改** ⇒ 本层不能写 10/40 | **theme.rs 收口批**：上收 `Dimens::NAV_ICON_Y` / `Dimens::NAV_TEXT_Y`（或 §4.2 逐像素值），本层改为一行引用 **✅ PM 已裁定（2026-09-15）**：UI §4.2 的 y 值已由「图标 706–734 / 文字 736–766」（与**自述的** 28 / 26 px 不符，且 30 px 文字槽未按 26 px 居中）订正为**相对口径**：图标 **y 8**（绝对 704–731）、文字 **y 44**（绝对 740–765），与实现一致，见 UI 附录 **A.7** |
-//! | SH12 | **§4.3「超时回归…不改变页面滚动位置以外的状态（P1 始终从顶部开始）」未实现**（**能力缺口**） | 薄层 `src/lvgl/**` **没有**"滚到指定位置"的封装：`Obj` 只暴露 `set/get_scroll_dir` 与 `set/get_scrollbar_mode`，`lvgl-sys/allowlist.txt` 里**也**没有 `lv_obj_scroll_to_y`（`lv_obj_scroll_to_y` / `lv_obj_scroll_to` / `lv_obj_scroll_by` 均未放行）⇒ `ui/**` **做不到**"把 P1 滚回顶部"。**影响**：超时从 P2–P6 回归 P1 时，P1 页内**保留上次的滚动位置**（用户上次在 P1 滚到中段 ⇒ 回归后仍在中段，与 §4.3 的"始终从顶部开始"不符）。**等效替代**（不需新 API，但**未采纳**）：回归时销毁并重建 P1 页根 —— 代价是 P1 的全部注入态（告警列表 / 遥测值 / 滚动条）与回调槽一并丢弃后要由 B3 重灌，且重建/拆除会走 `pages/**`（本批**禁改**），收益不成比例 | **薄层（`src/lvgl/**`）**：具名需求 = 新增 `Obj::scroll_to_y(y)`（或 `scroll_to(x, y)`）一行封装 + `allowlist.txt` 放行 `lv_obj_scroll_to_y`；外壳则在 `Core::select` 切回 P1 时调用一次。**当前无回归锁**（做不到 ⇒ 无法断言），故只登记不锁 **✅ PM 已裁定（2026-09-15）**：判定为**具名能力缺口**（薄层无 `lv_obj_scroll_to_y`），UI §4.3 已加注；补该能力归「薄层收口批」，届时本条改为可断言，见 UI 附录 **A.7** |
+//! | SH12 | **§4.3「超时回归…不改变页面滚动位置以外的状态（P1 始终从顶部开始）」未实现**（**B4a 订正**：不再是"**能力缺口**"，而是"**能力已具备、外壳未接线**"） | **【B4a 订正】** 薄层 `src/lvgl/**` **已补**"滚到指定位置"的封装：[`crate::lvgl::obj::Obj::scroll_to_y`] 与读回 [`crate::lvgl::obj::Obj::scroll_y`]，`lvgl-sys/allowlist.txt` **已放行** `lv_obj_scroll_to_y` / `lv_obj_get_scroll_y`（`lvgl/mod.rs` 的 **G3**；原写"薄层**没有**该封装、allowlist **也**没有该符号 ⇒ `ui/**` **做不到**"**已过期**）。**归因改为**：`ui/**`（外壳）**未接线** —— 切回 P1 时**还没有**调用 `scroll_to_y(0)`，归 **B4b**。**影响（仍为真）**：超时从 P2–P6 回归 P1 时，P1 页内**保留上次的滚动位置**（用户上次在 P1 滚到中段 ⇒ 回归后仍在中段，与 §4.3 的"始终从顶部开始"不符）。**仍然为真的限制**：`crate::lvgl::event::EventCode` **未镜像** `LV_EVENT_SCROLL`（只镜像了 PRESSED/RELEASED/…/CANCEL/DELETE 共 11 个）⇒ "用户**手动**上滚"这一**输入侧**信号在 `ui/**` 仍拿不到（与"程序化回顶"是两回事，后者已可做）。**等效替代**（不需新 API，但**未采纳**）：回归时销毁并重建 P1 页根 —— 代价是 P1 的全部注入态（告警列表 / 遥测值 / 滚动条）与回调槽一并丢弃后要由 B3 重灌，且重建/拆除会走 `pages/**`（本批**禁改**），收益不成比例 | **✅ 能力已补（B4a，`G3`）；行为归 B4b**：外壳在 `Core::select` 切回 P1 时调一次 [`crate::lvgl::obj::Obj::scroll_to_y`]`(0)`。**回归锁**：薄层单测（`lvgl/tests_b4.rs`）锁"写进去读得回来"；**外壳侧的"切回 P1 即回顶"仍无锁**（未接线 ⇒ 断言不了，属 B4b 补） |
 //! | SH13 | §4.1 线框图里"页眉与内容区之间 **y72** 那条横线"**未实现**（`header_bg` / `content` 均无描边） | **判定为示意线，非必做项**：① §4.1 的**表格**（版式权威）对 HDR 只写"常驻。左：… 中/右：…"、对 CONTENT 只写"整页纵向滚动（LVGL 滚动容器），左右安全边 16 px"，**均无分隔线项**；② §3.2 的 `divider` 用途表列的是"卡片描边、行分隔、滚动条轨道"，**不含**页眉分界；③ 同一张线框图还画了外框与 y768 底边（画布边界，显然不是 UI 元素）⇒ 该图是**读图辅助**。**影响**：无（页眉 `Palette::SURFACE` 与内容区 `Palette::BG` 本身有底色差，分界可见） | 无（若 PM 裁定必做：`ui/theme.rs` 加 `theme::header_rule()` 并在 `header` 上加下描边 —— 属 **theme.rs 收口批**） **✅ PM 已裁定（2026-09-15）**：判定为**示意图、非必做**（§4.1 未规定该线的线宽 / 色值 / 归属），UI §4.1 已加注，见 UI 附录 **A.7** |
 //! | SH14 | **【本批已修】三区绝对坐标曾整体内缩 20 px**：`root` 用的 `theme::screen_bg()` 原本**没有** `set_pad_all(0)`，而 LVGL 默认主题给**每个** `lv_obj` 挂 `card` 样式（`vendor/lvgl/src/themes/default/lv_theme_default.c:262` 给 `styles.card` 设 `pad_all = PAD_DEF`，`:794` 把它挂到每个 `lv_obj`；1024×768 屏实测 = `LV_DPX_CALC(130, 24)` = **20 px**）⇒ `header` / `content` / `nav` 的 `set_pos` 是**内边距相对**值，整层右下出屏。**2026-09-15 实测（生产等价宿主）**：`header` 落 **(20,20)-(1043,91)**（右缘出屏 20 px）、`nav` 底 **787**（出屏 20 px）、`page_host` 落 (36,92) 而非契约的 (16,72) ⇒ **6 页全部偏移**。**修法**：`theme.rs::screen_bg()` 补 `set_pad_all(0)` + `set_radius(Radius::NONE)`（与 `theme::transparent()` / `dialog_mask()` 同款；该函数**仅**本文件 `Shell::new` 一处使用，改动不外溢）；测试宿主同步改为「屏的忠实替身」（挂 `theme::transparent()` —— 生产屏自带 `pad_all = 0`），并在 `shell_chain` 补 **⑦ 三区绝对坐标**断言。**两条破坏性探针**（证明有网）：摘 `screen_bg` 的 `pad_all` ⇒ red `(20,20,1043,91)`；摘宿主的 `transparent()` ⇒ red `(22,22,1045,93)` | 原判「本批不改、另立单元」**已撤销**：该缺陷使 B2c-3 在契约的**绝对坐标**上不合规，而修法只碰 shell 自己用的那个样式函数。**同类陷阱**：`ui/**` 静态扫描只管裸色值/文本输入控件，管不到「沿用父主题内边距」；`pages::layout_box` / `components.rs::layout_box` / `dialog_mask` 早有防护，唯独 `screen_bg` 漏了 ⇒ 日后新增「挂对象上的样式构造函数」**必须**一并清 `pad_all` / `radius` |
 //!
@@ -237,27 +237,54 @@ const OVERLAY_ELAPSED_SUFFIX: &str = " 秒";
 // "设尺寸"写 `overlay_title_w()`（它**自己内部**又写了一遍 `TextSlot::PhasePower`），
 // 两处**各写各的常量** ⇒ 把其中一处换成别的槽时另一处不受影响，于是"用错常量"只表现为
 // **字号与对象尺寸不一致**（屏上肉眼可见的字变小 / 色变红），而**全套用例全绿**
-// （薄层无 `text_font` / `text_color` / `bg_opa` 读回，见 `src/lvgl/mod.rs` 的
+// （当时薄层无 `text_font` / `text_color` / `bg_opa` 读回，见 `src/lvgl/mod.rs` 的
 // 「薄层能力缺口登记」）。
 //
 // **收口口径**：把两处**收敛成同一个表达式** —— 标签构造与 `set_size` 都读这里的常量，
 // 而 `OVERLAY_BLOCK_H` / `OVERLAY_ELAPSED_Y` / `overlay_*_w()` 也**全部**由它们派生
 // ⇒ "换槽"只可能改这一个地方，改完 `shell_chain` 的对象级尺寸断言**必红**（实测见交付报告）。
 //
+// **登记订正（B4a，2026-09-16）**：上面那句「薄层无 `text_font` / `text_color` / `bg_opa`
+// 读回」**已过期** —— 薄层现已补齐三个读回（`src/lvgl/obj.rs` 的 `Obj::text_font` /
+// `text_color` / `bg_opa`），`shell_chain` 的 EDGE-03 段**同时**锁：对象实际**尺寸**
+// （尺寸读回，B3-2b-1 起）+ 实际**字体 / 字色 / 背景不透明度**（B4a 起）。
+// 残余只剩一条：**默认构建（未启用 `noto-font`）下各槽位都降级到同一个 fallback 字体**，
+// 故"换错槽"的**字体**断言要在启用 `noto-font` 的构建下才有判别力（见 `Obj::text_font` 的边界说明）；
+// 而**字色**与**字号档（对象尺寸）**两项在任何构建下都有网。
+//
+// **B4a 整改「建议 3.1」按实测收窄该残余**：默认构建下该字体断言的判别力是 **0**（连
+// "字体**被设过**"都证不了）—— 因为 LVGL 默认主题给裸 `lv_obj` 挂的 `LV_FONT_DEFAULT`
+// 也是那**同一个** `lv_font_montserrat_14`（探针实测：把标签样式换成不带字体的那条，
+// 该断言**仍绿**）。∴ 现阶段真正在防退化的只有**尺寸档**与**字色**两条；
+// **字体**那条要等 `noto-font` 构建（各槽拿到不同指针）才成网。
+//
 // **改什么会让本条变红**：把 [`OVERLAY_TITLE_SLOT`] 换成 `TextSlot::Body`（或
 // [`OVERLAY_ELAPSED_SLOT`] 换成 `TextSlot::PhasePower`）⇒ 对象尺寸随槽同变 ⇒
-// `ui/tests.rs::shell_chain` 的"大字对象高 == `PhasePower.px()`"当场红。
+// `ui/tests.rs::shell_chain` 的"大字对象高 == `PhasePower.px()`"当场红；
+// 把 [`OVERLAY_TITLE_COLOR`] 换成 `Palette::DANGER` ⇒ 新增的**字色读回**断言当场红。
 /// 中央大字的**字号槽**（UI §8.3 EDGE-03 原文「中央 **64 px**」= `TextSlot::PhasePower`）。
-const OVERLAY_TITLE_SLOT: TextSlot = TextSlot::PhasePower;
+///
+/// **`pub(crate)`（B4a）**：`ui/tests.rs::shell_chain` 要拿它做**对象级读回**断言
+/// （`overlay_title_obj().text_font() == theme::font_of(OVERLAY_TITLE_SLOT)`）。
+pub(crate) const OVERLAY_TITLE_SLOT: TextSlot = TextSlot::PhasePower;
 /// 中央大字的**字色**（UI §8.3 EDGE-03 原文 `#FFB020` = `Palette::STALE`）。
 ///
-/// ⚠️ **本值在对象层读不回来**（薄层无 `text_color` getter）⇒ 换色**抓不到**，
-/// 属已登记的残余；换成 [`OVERLAY_TITLE_SLOT`] 那种"尺寸可断言"的档才有网。
-const OVERLAY_TITLE_COLOR: Color = Palette::STALE;
+/// **`pub(crate)`（B4a）**：同 [`OVERLAY_TITLE_SLOT`] —— 供 `shell_chain` 逐色读回。
+///
+/// ⚠️ **登记订正（B4a，2026-09-16）**：本条原写「**本值在对象层读不回来**（薄层无
+/// `text_color` getter）⇒ 换色**抓不到**」—— 该陈述**已过期**。薄层现已补
+/// [`Obj::text_color`]（`lv_obj_get_style_text_color` 的等价读回，见 `src/lvgl/obj.rs`），
+/// `ui/tests.rs::shell_chain` 的 EDGE-03 段已把"把 `#FFB020` 换成 `DANGER` 红"补成**可判**
+/// （探针实测见 B4a 交付报告 ⇒ **已可判**）。
+pub(crate) const OVERLAY_TITLE_COLOR: Color = Palette::STALE;
 /// 时长行的**字号槽**（UI §8.3 EDGE-03 原文「下方 **24 px**」= `TextSlot::Body`）。
-const OVERLAY_ELAPSED_SLOT: TextSlot = TextSlot::Body;
-/// 时长行的**字色**（同 [`OVERLAY_TITLE_COLOR`] 的残余说明：色在对象层不可判）。
-const OVERLAY_ELAPSED_COLOR: Color = Palette::STANDBY;
+///
+/// **`pub(crate)`（B4a）**：同 [`OVERLAY_TITLE_SLOT`]。
+pub(crate) const OVERLAY_ELAPSED_SLOT: TextSlot = TextSlot::Body;
+/// 时长行的**字色**（登记订正同 [`OVERLAY_TITLE_COLOR`]：色**已可判**，不再是残余）。
+///
+/// **`pub(crate)`（B4a）**。
+pub(crate) const OVERLAY_ELAPSED_COLOR: Color = Palette::STANDBY;
 
 /// 中央大字宽（逐字宽 = 字号；薄层无文本度量接口，与 `discard_w()` / `tab_text_w()` 同口径）。
 fn overlay_title_w() -> i32 {
@@ -290,18 +317,21 @@ const OVERLAY_ELAPSED_Y: i32 =
 
 /// 整屏降级遮罩的不透明度档位（**单一真源**）—— UI §8.3 EDGE-03「整屏遮罩压暗 **20 %**」。
 ///
-/// **为什么要有这个常量**（B3-2b-1 规格评审 **重要 1+2**）：薄层**没有样式读回**
+/// **为什么要有这个常量**（B3-2b-1 规格评审 **重要 1+2**）：**B4a 之前**薄层**没有样式读回**
 /// （无 `lv_obj_get_style_bg_opa` ⇒ 遮罩对象上读不回实际 `bg_opa`，见 `src/lvgl/mod.rs`
 /// 的「薄层能力缺口登记」）⇒ 把 [`overlay_mask`] 里写的档位偷换成
 /// [`Opacity::MASK_PERCENT`]（62 %，模态遮罩那一档）时，**全套用例全绿**（评审实测）。
 /// 把档位提成常量后，"用了哪一档"至少是**可判定的单点**：`shell_chain` 断言
 /// 本常量 == [`Opacity::DEGRADE_PERCENT`] 且 != [`Opacity::MASK_PERCENT`]。
 ///
-/// **残余（如实登记）**：若有人**绕过本常量**、直接在 [`overlay_mask`] 的样式上写死别的
-/// 档位，用例仍抓不到 —— 根因是薄层缺 `bg_opa` 读回（补读回属「薄层收口批」）。
+/// **残余已消除（B4a，2026-09-16）** —— 原写「若有人**绕过本常量**、直接在 [`overlay_mask`]
+/// 的样式上写死别的档位，用例仍抓不到，根因是薄层缺 `bg_opa` 读回」。薄层现已补
+/// [`Obj::bg_opa`]（`lv_obj_get_style_bg_opa` 的等价读回，见 `src/lvgl/obj.rs`），
+/// `ui/tests.rs::shell_chain` 的 EDGE-03 段改为**读回遮罩对象的实际 `bg_opa`** ⇒
+/// "绕开本常量写死 62 %"同样**当场红**（该残余**已可判**；探针实测见 B4a 交付报告）。
 ///
 /// **改什么会让本条变红**：把 `Opacity::DEGRADE_PERCENT` 换成 `Opacity::MASK_PERCENT`
-/// ⇒ `shell_chain` 的两条档位断言（== 20 / != 62）同时红。
+/// ⇒ `shell_chain` 的档位断言（常量与**读回值**两条）同时红。
 pub const OVERLAY_MASK_OPACITY: u8 = Opacity::DEGRADE_PERCENT;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -549,8 +579,9 @@ impl HeaderChannel {
 
 /// 导航页签**某一档底色的应用标记**（**① 回归锁的读回值**）。
 ///
-/// 薄层**没有**"已挂样式读回"通道（`Style` 一旦 `Rc` 共享即冻结，且 `Obj` 不暴露
-/// `lv_obj_get_style_*`）⇒ 本层把**送进 `Style::set_bg_color(..)` 的那个值**记下来。
+/// 薄层**没有 `bg_color` 读回**（`Style` 一旦 `Rc` 共享即冻结；B4a 虽补齐了 `bg_opa` /
+/// `text_color` / `text_font` 三个读回，但**不含 `bg_color`**）⇒ 本层把
+/// **送进 `Style::set_bg_color(..)` 的那个值**记下来。
 /// 记法与 `pages/p5_audit.rs::immutable_bg`（**AU13**）同款：**唯一真源常量**
 /// （[`NAV_BG_DEFAULT`] / [`NAV_BG_SELECTED`] / [`NAV_BG_PRESSED`]）同时喂样式与标记 ⇒
 /// 改底色常量（哪怕只改成另一个 `Palette` 档）标记**必然随之变**，用例当场红。
@@ -636,7 +667,9 @@ struct NavTab {
     text_styles: [Rc<Style>; 2],
     /// 图标两档**色值**（与 `icon_styles` 逐项对应）。
     ///
-    /// **应用标记**（与 `p5_audit.rs` 的 `immutable_skin` 同法）：薄层没有"已挂样式读回"通道
+    /// **应用标记**（与 `p5_audit.rs` 的 `immutable_skin` 同法）：薄层**没有**"某选择器下
+    /// 挂了哪些样式"的读回通道（B4a 补齐的 `bg_opa` / `text_color` / `text_font` 是**按
+    /// `Part::MAIN` 取单个解算值**，给不出"选中态 / 未选中态各挂了什么"）
     /// ⇒ 本层把**送进 `theme::text(..)` 的那个色值**记下来，供离屏断言核对"选中态第二通道
     /// 真的换了色"。把 `icon_styles` 的两个色值对调 ⇒ [`Shell::tab_icon_color`] 随之变化 ⇒ 用例红。
     icon_colors: [Color; 2],
@@ -728,7 +761,12 @@ struct Core {
     touch_available: Cell<bool>,
     /// 页眉通道态。
     channel: Cell<HeaderChannel>,
-    /// 倒计时胶囊当前是否可见（**应用标记**：薄层没有"已挂样式读回"通道 ⇒ 记下本层送出的状态）。
+    /// 倒计时胶囊当前是否可见（**本层状态缓存**，非读回口）。
+    ///
+    /// **用途**：[`Core::apply_header_channel`] 据它决定页眉右端三件的**让位**（**SH3**）——
+    /// 该决策要读"胶囊在不在"，而 `Cell` 比逐拍查对象 `HIDDEN` 更省事、且本值本来就由
+    /// [`Core::tick`] 每拍算出。**对外的读回口是 [`Shell::countdown_visible`]**（直接查
+    /// 对象 `is_hidden()`，**不是**读本字段）—— 两者口径同源，不会漂移。
     capsule_on: Cell<bool>,
     /// 未保存提示条当前是否可见（同上）。
     banner_on: Cell<bool>,
@@ -964,7 +1002,8 @@ impl Shell {
     fn wire(&self) {
         let weak = Rc::downgrade(&self.core);
         // ①**全屏输入对象**：任何落在"非控件"区域的按压都命中外壳根（UI §4.3「计时重置」）。
-        //    页内控件上的按压不会上冒（**SH5**：`ObjFlag` 未镜像 `EVENT_BUBBLE`）。
+        //    页内控件上的按压不会上冒（**SH5**：LVGL 默认不上冒；`ObjFlag::EVENT_BUBBLE`
+        //    **枚举** B4a 已补，但"递归给子树置位"这一**行为**归 B4b —— 见 `mod.rs` 的 G2）。
         self.core.root.on(EventCode::PRESSED, {
             let weak = weak.clone();
             move |_e| {
@@ -1299,11 +1338,19 @@ impl Shell {
 
     /// 整屏降级中央 64 px 大字的**对象**（**对象级尺寸断言口径** —— 重要 1+2）。
     ///
-    /// **读回口存在的理由**：薄层**没有**字号读回（无 `lv_obj_get_style_text_font`）⇒
-    /// "建标签时用了哪个字号槽"在对象层不可直接问；但 `Obj::size()` **是**可读的，而
-    /// 本层的 `set_size(.., <槽>.px())` 与"建标签的那个槽"**同源**（见 [`OVERLAY_TITLE_SLOT`]）
-    /// ⇒ 断言 `size().1 == 槽档高` 即可抓住"换错槽"。⚠️ 这**不是**"字体读回"，
-    /// 是"尺寸这个可读可见量由同一绑定派生"（残余：字色 / 真实字体仍不可判）。
+    /// **读回口存在的理由**：`Obj::size()` **可读**，而本层的 `set_size(.., <槽>.px())` 与
+    /// "建标签的那个槽"**同源**（见 [`OVERLAY_TITLE_SLOT`]）⇒ 断言 `size().1 == 槽档高`
+    /// 即可抓住"换错槽"—— 这是**尺寸口径**的网，与"字体读回"是两条独立的路。
+    ///
+    /// **【B4a 订正】** 原文写「残余：字色 / 真实字体仍不可判」**已过期**：薄层现已补
+    /// [`crate::lvgl::obj::Obj::text_color`] 与 [`crate::lvgl::obj::Obj::text_font`]
+    /// （`lvgl/mod.rs` 的 **G1**），`ui/tests.rs::shell_chain` 的 EDGE-03 段对**字色**
+    /// 断言对象实读值（换色即红）。
+    ///
+    /// ⚠️ **仍然为真的限制（保留）**：**字体**那一条的判别力受**构建配置**限制 ——
+    /// 默认构建**未**启用 `noto-font` feature ⇒ 各字号槽都降级到**同一个 fallback 字体指针**
+    /// ⇒ `text_font()` 此时只证"设过字体"、**证不了"换对 / 换错槽"**；只有启用 `noto-font`
+    /// 构建后，各槽拿到不同指针，才有"换槽即红"的判别力。
     pub fn overlay_title_obj(&self) -> &Obj {
         self.core.overlay_title.obj()
     }
@@ -1593,7 +1640,14 @@ fn capsule_skin() -> Rc<Style> {
 /// 底层必须仍然可读（EDGE-20）⇒ 20 %。
 ///
 /// **档位只许经 [`OVERLAY_MASK_OPACITY`] 取用**（重要 1+2 的单点收口）—— 不在此处内联
-/// `Opacity::*` 常量：那样"换档"会绕过唯一真源，而对象层又读不回 `bg_opa`（见该常量的残余说明）。
+/// `Opacity::*` 常量：那样"换档"会绕过唯一真源，且**常量侧的语义**（"本层打算用哪一档"）
+/// 就散了。
+///
+/// **【B4a 订正】** 原文续写「而对象层又读不回 `bg_opa`」**已过期**：薄层现已补
+/// [`crate::lvgl::obj::Obj::bg_opa`]（`lvgl/mod.rs` 的 **G1**），`ui/tests.rs::shell_chain`
+/// 的 EDGE-03 段**直接读回遮罩对象的实际 `bg_opa`** ⇒ 内联别的档位**当场红**。
+/// 本条"只许经常量取用"的理由因此不再是"抓不到"，而是**单点真源**本身的价值
+/// （换档只改一处）。
 fn overlay_mask() -> Rc<Style> {
     let mut s = Style::new();
     s.set_bg_color(Palette::BG);

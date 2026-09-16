@@ -93,9 +93,12 @@
 //!     内容宽（见 `p3_logs.rs` **LG3**）；
 //!   - **增量拉取**以 [`p3_logs::P3LogsPage::request_increment`] 为触发入口（B3 的 500 ms
 //!     节拍），意图载荷 `cursor` = **已见最大 `seq`**（不是 `next_cursor`，见该文件文档）；
-//!   - **具名薄层缺口（R2）**：`EventCode` 无 `LV_EVENT_SCROLL`、`allowlist.txt` 无任何
-//!     滚动位置读 / 写 API（`lv_obj_get_scroll_y` / `lv_obj_scroll_to_y` 皆无）⇒
-//!     §6.3 的「手动上滚 ⇒ 停止自动滚动 + 浮现"回到最新"」在本层**结构性不可实现**；
+//!   - **具名薄层缺口（R2，B4a 已收窄）**：`EventCode` **未镜像** `LV_EVENT_SCROLL` ⇒
+//!     §6.3 的「手动上滚 ⇒ 停止自动滚动 + 浮现"回到最新"」在本层**结构性不可实现**。
+//!     **【B4a 订正】** 原文续写「`allowlist.txt` 无任何滚动位置读 / 写 API
+//!     （`lv_obj_get_scroll_y` / `lv_obj_scroll_to_y` 皆无）」—— **已过期**：两个符号均已放行
+//!     且已在薄层封装（`Obj::scroll_to_y` / `Obj::scroll_y`，`lvgl/mod.rs` 的 **G3**）
+//!     ⇒ 剩余缺口**只有输入侧事件**；
 //!     本页只做恒显按钮 + 点击意图，缺口逐条列在 `p3_logs.rs` 的 **R2**。
 //! - **B2c-3 补充（应用外壳装配，`ui/shell.rs`）**：
 //!   - **页根摆放**：外壳把每个页根放在 `(Dimens::SIDE_PAD, Dimens::HEADER_H)`（相对外壳根），

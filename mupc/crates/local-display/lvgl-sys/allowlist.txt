@@ -212,6 +212,47 @@ fn:lv_group_focus_obj
 fn:lv_indev_set_long_press_time
 type:lv_group_t
 
+# ── B4a「薄层能力补齐」───────────────
+#
+# 【G1 样式读回】三个 `lv_obj_get_style_bg_opa` / `_text_font` / `_text_color` 在 LVGL v9
+# 是**头文件里的 `static inline`**（`src/core/lv_obj_style_gen.h`）⇒ **不入绑定**
+# （`allowlist_function` 对 static inline 无效，bindgen 只在 `wrap_static_fns` 下才发 wrapper；
+# 本仓不启用该选项）。按本仓**既有先例**（`src/lvgl/style.rs::Style::set_pad_all` 对
+# `lv_style_set_pad_all` 的处理）——用**真正导出的**泛型原语复刻同一条 inline 实现：
+# `lv_obj_get_style_prop(obj, part, prop)` + 属性枚举成员（`LV_STYLE_*`）。
+# `lv_style_value_t` 是 C 侧三成员 `union`（`num` / `ptr` / `color`）。
+fn:lv_obj_get_style_prop
+type:lv_style_value_t
+# `lv_style_prop_t` = `typedef uint8_t`（属性号类型）。**直接声明**：薄层要按名写它的 cast
+# （`sys::LV_STYLE_BG_OPA as sys::lv_style_prop_t`），不是纯递归带出。
+type:lv_style_prop_t
+# `LV_STYLE_BG_OPA` / `LV_STYLE_TEXT_FONT` / `LV_STYLE_TEXT_COLOR` 三个属性号定义在
+# `enum _lv_style_id_t` 里 ⇒ 显式登记该 enum，使其成员随 type 一并生成
+# （enum 成员是 `const:`，不参与本清单的双向断言；登记 enum **type** 本身是硬要求）。
+type:_lv_style_id_t
+
+# 【G3 滚动位置】SH12「超时回归 P1 始终从顶部」与 P5「加载更多」触发源的前提。
+fn:lv_obj_scroll_to_y
+fn:lv_obj_get_scroll_y
+
+# 【rotation 屏旋转】`--rotate` 的施加与读回。
+# `lv_display_set_rotation` = 施加口；`lv_display_get_rotation` = **纯读回口**：
+# 它**只**为"可断言"而存在（薄层 `Display::rotation()`，薄层单测
+# `lvgl/tests_b4.rs` 断言"设进去的 == 读回来的"），**没有任何生产消费者**
+# —— `ui/**` 与 `app.rs` 都不经它取角度（版式所需的"是否互换轴"由 `Rotate::swaps_axes`
+# 在 CLI 枚举上判，不走 LVGL 读回）。⚠️ **不要**因为它"看起来没人用"而删：
+# 删掉即失去"`set_rotation` 真的落到了 disp 上"的唯一可判口
+# （静态工具把本清单里无 Rust 调用点的符号报成"未用"是**误报**：本清单登记的是
+# **绑定层导出面**，供薄层按需封装，与 Rust 侧调用点数量无关）。
+fn:lv_display_set_rotation
+fn:lv_display_get_rotation
+type:lv_display_rotation_t
+
+# 【mem_monitor 定容池余量】设计 §10 / §14 R-24「1 MB 定容池余量未量化」的量化口
+# （`--smoke` 输出）。读的是 `LV_MEM_SIZE` 那一块池（对象树/样式/定时器），**不含**绘制缓冲。
+fn:lv_mem_monitor
+type:lv_mem_monitor_t
+
 # ── 字体 ─────────────────────────────────────────────────────────
 type:lv_font_t
 var:lv_font_montserrat_14
@@ -259,6 +300,15 @@ var:lv_font_noto_sc_148
 # 按本清单口径不单独登记）。全量：137 fn / 54 type / 11 var = 202 条。
 # 其中 `lv_font_glyph_dsc_t__bindgen_ty_1` 是 bindgen 为匿名 `union` 生成的具名条目：
 # 一致性测试已补 `pub union` / `pub enum` 解析分支（此前它既不在清单也不被断言）。
+#
+# 【B4a 复核（2026-09-16）】+6 fn / +5 type（0 var；样式读回 / 滚动位置 / 屏旋转 / 定容池
+# 余量，逐条理由见上面的用点分节）。重跑双向断言：越界 / 缺失 / 死符号三个集合**均为空**，
+# 生成物 `bindings.rs` 由 1582 行 → **1763 行**、`const` 217 → **353**（新增的 136 个
+# `const` 是 `enum _lv_style_id_t` 的成员，随已登记的 **type** 一并生成 —— `const:` 按本清单
+# 口径**不单独登记、也不被断言**，只作"LVGL/bindgen 版本变动"的观察哨）。
+# ⚠️ **计数订正**：上一段"全量：137 fn / 54 type / 11 var = 202 条"在本批**开工前已过期**
+# —— 实测 B4a 改动前的清单为 **141 fn / 55 type / 11 var = 207 条**（A3 之后的单元也加过条目，
+# 未在此处同步）。B4a 之后的全量为 **147 fn / 60 type / 11 var = 218 条**。
 #
 # ⚠️ 本分节由 `tests/allowlist_consistency.rs` 的"越界/缺失"断言机械核对；
 # 新增直接声明的 type 请写在上面对应用点分节内，不要混进这里。

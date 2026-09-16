@@ -405,6 +405,15 @@ fn lvgl_core_bridge_chain() {
     // `widgets_chain` 自带 `init`/`deinit` 配对）。
     super::tests_a3::widgets_chain();
 
+    // ── B4a「薄层能力补齐」场景（`tests_b4.rs`）──────────────────────────
+    // 同理由本函数在同一线程内继续驱动（`widgets_chain` 末尾已 `deinit`，
+    // `thin_capabilities_chain` 自带 `init`/`deinit` 配对）。
+    // 覆盖：G1 样式读回 / G2 `EVENT_BUBBLE` / G3 滚动位置 / 屏旋转 / 定容池余量。
+    //
+    // **为什么排在 `ui/**` 的两条链之前**：本链与 A1/A2/A3 一样是**薄层**用例，同组排列；
+    // 且 `ui/**` 的断言论的是"上层把薄层的值用对了没"，薄层自身先验一遍更易定位。
+    super::tests_b4::thin_capabilities_chain();
+
     // ── B1「界面层」场景（`ui/tests.rs::ui_chain`）───────────────────────
     // 同理由本函数在同一线程内继续驱动（`widgets_chain` 末尾已 `deinit`，
     // `ui_chain` 自带 `init`/`deinit` 配对）。**PM 授权的挂钩**：`ui_chain` 是

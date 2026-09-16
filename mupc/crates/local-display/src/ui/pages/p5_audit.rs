@@ -1147,7 +1147,8 @@ struct Core {
     immutable: Obj,
     /// 说明条**实际写入样式的底色**（**应用标记**，见 **AU13** / 色相断言的"页面确实用了它"那一半）。
     ///
-    /// ⚠️ **薄层没有"已挂样式读回"通道**（`Obj` 读不回 `bg_color`）⇒ 本条记录的是
+    /// ⚠️ **薄层没有 `bg_color` 读回**（`Obj` 读不回 `bg_color`；B4a 补齐的 `bg_opa` /
+    /// `text_color` / `text_font` **不含它**，见 [`audit_banner_style`] 的说明）⇒ 本条记录的是
     /// **送给样式构造器的那个色值**（与 `set_bg_color(..)` 收到的是**同一个表达式**）
     /// ⇒ 把 [`audit_banner_style`] 的底色改成 `WARN_BG`，本标记**跟着变**，
     /// `pages_chain` 的 `immutable_skin() == BannerSkin::Audit` 立刻红。**如实标注**：
@@ -1609,8 +1610,10 @@ pub(crate) fn audit_banner_bg() -> Color {
 /// **无描边、零内边距**（与 `theme::warn_banner` / `theme::card_head_bar` 同口径：
 /// 位置由调用方 `set_pos` 显式给出）。
 ///
-/// ⚠️ **薄层没有"已挂样式读回"通道**（`Obj` 读不回 `bg_color`，`lvgl-sys` 的 allowlist 里
-/// 也没有 `lv_obj_get_style_*`）⇒ 光靠本函数的入参**无法证明**"页面确实用了这一档"。
+/// ⚠️ **薄层没有 `bg_color` 读回**（**B4a 补齐的三个读回 `bg_opa` / `text_color` /
+/// `text_font` 不含它**；`lv_obj_get_style_*` 那族 C 侧 `static inline` 仍不入绑定
+/// —— 薄层是经 `lv_obj_get_style_prop` + `LV_STYLE_*` 复刻的，见 `src/lvgl/obj.rs`）
+/// ⇒ 光靠本函数的入参**无法证明**"页面确实用了这一档"。
 /// 故把**真正的一读**放在渲染侧：`pages_chain` 直接读**像素**（`sink` 中说明条内的取样点
 /// 必须等于 `Palette::AUDIT_BG` 的 BGR 分量）—— 那是**样式被真的施加**之后的结果；
 /// 应用标记只作第二道（记录"我打算用哪一档"），两者**同时**断言。

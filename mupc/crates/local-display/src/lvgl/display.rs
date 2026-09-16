@@ -91,6 +91,56 @@ impl Area {
     }
 }
 
+/// 屏旋转（`lv_display_rotation_t` 的镜像；B4a 新增）。
+///
+/// 与 `config::Rotate`（CLI 层）**分开定义**：`config.rs` 是 lib 里 `lvgl/**` **之外**的模块，
+/// 按 unsafe 边界纪律（`mod.rs` 纪律 1）不得引用 `lvgl_sys` ⇒ 两边各有一个枚举，由
+/// `app.rs` 做一次显式转换。这样"CLI 取值集合"与"LVGL 取值集合"的耦合点收在**一处**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum Rotation {
+    /// 不旋转。
+    #[default]
+    Deg0,
+    /// 顺时针 90°（**逻辑宽高互换**：`hor_res ↔ ver_res`）。
+    Deg90,
+    /// 180°。
+    Deg180,
+    /// 顺时针 270°（同样互换宽高）。
+    Deg270,
+}
+
+impl Rotation {
+    /// 转 C 侧枚举（`lv_display_rotation_t`，成员顺序与 [`Rotation`] 逐一对应）。
+    pub(crate) const fn to_sys(self) -> sys::lv_display_rotation_t {
+        match self {
+            Rotation::Deg0 => sys::LV_DISPLAY_ROTATION_0,
+            Rotation::Deg90 => sys::LV_DISPLAY_ROTATION_90,
+            Rotation::Deg180 => sys::LV_DISPLAY_ROTATION_180,
+            Rotation::Deg270 => sys::LV_DISPLAY_ROTATION_270,
+        }
+    }
+
+    /// 由 C 侧枚举值还原（读回用；未知取值按 [`Rotation::Deg0`] 收敛 —— 不会出现，
+    /// 因为写入端只走 [`Rotation::to_sys`]，此处只是防御性全匹配）。
+    pub(crate) fn from_sys(v: sys::lv_display_rotation_t) -> Self {
+        // `lv_display_rotation_t` 在绑定里是 `c_uint`（enum），逐值比对。
+        if v == sys::LV_DISPLAY_ROTATION_90 {
+            Rotation::Deg90
+        } else if v == sys::LV_DISPLAY_ROTATION_180 {
+            Rotation::Deg180
+        } else if v == sys::LV_DISPLAY_ROTATION_270 {
+            Rotation::Deg270
+        } else {
+            Rotation::Deg0
+        }
+    }
+
+    /// 是否互换逻辑宽高（90°/270°）。
+    pub const fn swaps_axes(self) -> bool {
+        matches!(self, Rotation::Deg90 | Rotation::Deg270)
+    }
+}
+
 /// LVGL 绘制缓冲：地址按 [`BUF_ALIGN`] 对齐、零初始化、随 [`Display`] 存活。
 ///
 /// 为什么不用 `Vec<u8>`：`Vec<u8>` 只保证 1 字节对齐，而 LVGL 会对缓冲起始地址做对齐
@@ -261,6 +311,48 @@ impl Display {
         }
         // SAFETY: `self.raw` 存活（`is_live()` 已校验：LVGL 已初始化且世代一致）。
         unsafe { sys::lv_refr_now(self.raw) };
+    }
+
+    /// 施加屏旋转（`lv_display_set_rotation`；B4a 新增）。
+    ///
+    /// # 语义（**只换逻辑分辨率**，像素级旋转是驱动的事）
+    ///
+    /// LVGL v9 的 `lv_display_set_rotation` 只做两件事：写 `disp->rotation` +
+    /// `update_resolution()`（把 screen / `top_layer` / `sys_layer` / `bottom_layer` 的
+    /// 矩形换成**互换后**的逻辑宽高）。**像素的物理旋转由驱动负责**——
+    /// 官方 fbdev 驱动在 `flush_cb` 里调 `lv_display_rotate_area` + `lv_draw_sw_rotate`
+    /// 后写进 fb（`vendor/lvgl/src/drivers/display/fb/lv_linux_fbdev.c`）。
+    ///
+    /// ⚠️ **本单元的接线边界（如实标注）**：本层只把旋转交给 LVGL（逻辑分辨率互换），
+    /// **未**实现 sink 侧的像素旋转（`screen::Blitter` / `Canvas` 不做 `sw_rotate`）。
+    /// `--rotate 90|270` 时逻辑布局已互换，但写进像素面的仍是未物理旋转的那一份 ⇒
+    /// `main.rs` 启动期对非 0 取值**响亮告警**（不静默）。
+    /// 绘制缓冲**不受影响**：`lv_display_set_buffers` 用的是
+    /// `lv_display_get_original_horizontal_resolution`（**未旋转**的原始尺寸），
+    /// 故在 `create` 之后调本方法不必重建缓冲。
+    ///
+    /// 句柄已失效时 no-op。
+    pub fn set_rotation(&self, rotation: Rotation) {
+        if !self.is_live() {
+            return;
+        }
+        // SAFETY: 刚校验存活（已初始化且世代一致）⇒ `self.raw` 未被 `lv_deinit` 释放。
+        unsafe { sys::lv_display_set_rotation(self.raw, rotation.to_sys()) };
+    }
+
+    /// 当前旋转（读回；未设置过 ⇒ [`Rotation::Deg0`]）。
+    ///
+    /// 存在的理由：`set_rotation` 在离屏链路上**没有别的可观测口**（逻辑分辨率要另引
+    /// `lv_display_get_horizontal_resolution`），补上读回它才**可断言**
+    /// ——"调用点被删/写错"当场红（见 `tests_b4.rs`）。
+    /// 句柄已失效时返回 [`Rotation::Deg0`]。
+    pub fn rotation(&self) -> Rotation {
+        if !self.is_live() {
+            return Rotation::Deg0;
+        }
+        // SAFETY: 刚校验存活 ⇒ `self.raw` 指向活 display；传 NULL 时 C 侧会用默认屏，
+        // 此处传的是本句柄自己的指针。
+        Rotation::from_sys(unsafe { sys::lv_display_get_rotation(self.raw) })
     }
 
     /// 原始 display 指针（薄层内部：`indev.rs` 绑屏、`tests.rs` 强制渲染）。

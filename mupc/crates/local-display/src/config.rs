@@ -9,8 +9,11 @@
 //!   默认值全部取自 display-proto 共享常量或本文件常量。
 //! - 参数在此**一次性校验**（含数值范围、后端平台可用性、校准量程合法性），非法即明确报错退出
 //!   （不静默降级、不静默取默认值 —— 设计 §1.2 校准行）。
-//! - **未实现的能力 = 响亮失败**：`--rotate` 非 0 取值直接报错退出（见 [`Rotate`]），
-//!   不允许「解析了但无人消费」的静默 no-op。
+//! - **未实现的能力 = 响亮失败，绝不静默 no-op**：
+//!   `--rotate` **非 0 取值仍启动即硬错误**（B4a 整改「重要 2」恢复的口径；越界取值同）：
+//!   薄层 `Display::set_rotation` **已具备**，但 **sink 侧像素旋转未实现** ⇒ 非 0 取值只换
+//!   逻辑分辨率、写进像素面的仍是未旋转的那一份，即**主动画错版式**（比静默 no-op 更坏）
+//!   ⇒ 解析期即拒绝，错误文案点名"像素级旋转尚未实现"。见 [`Rotate`] 的状态说明。
 //! - 手写参数解析（不引 clap）：选项少、无常量、可确定性单测，依赖面保持最小。
 //!
 //! ⚠️ 本文件仅**解析**，不构造后端/字库/触摸设备——后端的平台可用性错误在 **bin 层**
@@ -47,11 +50,34 @@ pub const MAX_IDLE_TIMEOUT_SECS: u64 = 3600;
 
 /// 屏幕旋转（设计 §5.1「`+ --rotate`」；UI 设计 §3.5 栅格）。
 ///
-/// ⚠️ **本轮未实现 —— 响亮失败，不做静默 no-op**（工作单元 C 评审 C-③ 整改）。
-/// 真正施加旋转需要薄层 `lv_display_set_rotation(disp, deg)`（或在 flush 时按角度变换像素），
-/// 而当前 `src/lvgl/display.rs` **未暴露该通道**、`lvgl-sys/allowlist.txt` 亦无该符号
-/// （属薄层能力缺口，见待办）。因此 [`CliConfig::parse`] 对**非 0** 取值**启动即报错退出**
-/// （错误文本指明缺口与处置），只有 `--rotate 0`（默认）可用；薄层补齐后由工作单元 B 接线。
+/// # 状态（**B4a 整改「重要 2」，2026-09-16：非 0 仍硬错误**）
+///
+/// **现口径**：**只有 `0` 被放行**；`90|180|270` 在 `CliConfig::parse` 里**启动即硬错误**
+/// （exit 2，错误文案点名"像素级旋转（sink 侧）尚未实现"）；**越界取值**（`45` / `x` / 空串）
+/// 另有一层：`Rotate::parse` 返回 `None` ⇒ 拒于"取值须为 0|90|180|270"。
+///
+/// **沿革（读起来要连着看）**：
+/// 1. **原口径（工作单元 C 评审 C-③）**：非 0 硬错误 —— 当时薄层未暴露旋转通道、
+///    `allowlist.txt` 也无 `lv_display_set_rotation` ⇒"解析了但无人消费"的静默 no-op
+///    必须响亮拒绝。
+/// 2. **B4a 一度改为"四档全放行 + 启动告警"**：薄层已补
+///    [`crate::lvgl::display::Display::set_rotation`]（+ 读回
+///    [`crate::lvgl::display::Display::rotation`]），由 `app.rs` 在 `Display` 建立后施加。
+/// 3. **本口径（B4a 整改，主控采纳评审意见）**：**退回硬错误**。评审实测
+///    `--rotate 90 --smoke` ⇒ `result=OK` / exit 0，而 P4 的 `active_px` 由 **524189**
+///    变为 **406880** ⇒ **像素面确已画错**、而自检五道门禁**一道都抓不到**。
+///    ①"逻辑分辨率互换 + 像素不旋转"**不是 no-op**，而是**主动画错版式**，比静默 no-op 更坏；
+///    ② 与第 1 条同一拓扑下的处置自相一致（"重启循环"论据在两处都成立或不成立，不能只在这处失效）；
+///    ③ 配置类错误 fail-fast 在 journal 里**可见、可诊断**。
+///
+/// ⚠️ **能力边界（如实标注，不夸大）**：`lv_display_set_rotation` 只做**逻辑分辨率互换**
+/// （`lv_display.c`：写 `disp->rotation` + `update_resolution()`）；**像素的物理旋转由驱动/
+/// sink 负责**（官方 fbdev 驱动在 flush 里 `lv_display_rotate_area` + `lv_draw_sw_rotate`
+/// 后写 fb）。本项目 `screen::Blitter` **未**实现该变换。
+///
+/// **本类型的四个取值与其薄层接线全部保留**（`Rotate` / `lvgl::display::Rotation` /
+/// `Display::set_rotation` / `Display::rotation` / `app::rotation_of`）——
+/// **sink 侧像素旋转实现后摘除本 guard 即可**，无需重建链路。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rotate {
     /// 不旋转（默认）。
@@ -187,8 +213,11 @@ pub struct CliConfig {
     pub touch_device: Option<PathBuf>,
     /// 触摸校准与轴变换覆盖（`--touch-calib/--touch-swap-xy/--touch-invert-{x,y}`，设计 §1.2）。
     pub touch: TouchOverrides,
-    /// 屏幕旋转（**恒为** [`Rotate::Deg0`]：非 0 取值在解析期即报错退出，见 [`Rotate`] 文档）。
-    /// 薄层补齐 `lv_display_set_rotation` 后，由工作单元 B 放开校验并接线。
+    /// 屏幕旋转（B4a 整改后：**只有 `0` 可解析通过**；非 0 与越界取值都在解析期硬错误 ⇒
+    /// 本字段**在解析成功的路径上恒为 [`Rotate::Deg0`]**）。
+    ///
+    /// 薄层旋转通道（[`crate::lvgl::display::Display::set_rotation`]）与 `app.rs::rotation_of`
+    /// 的接线**保留** —— sink 侧像素旋转实现后摘除 [`CliConfig::parse`] 里那道 guard 即可。
     pub rotate: Rotate,
     /// 空闲回归秒数（TT-12；默认 60，`0` = 禁用）。
     pub idle_timeout_secs: u64,
@@ -363,17 +392,26 @@ impl CliConfig {
                 "--touch-invert-y" => cfg.touch.invert_y = parse_switch(flag, &inline)?,
                 "--rotate" => {
                     let v = take(flag)?;
+                    // **越界值仍须响亮报错**（评审 C-③ 的口径不变）：只放行 0|90|180|270，
+                    // 其余（含 `45` / `x` / 空串）照旧启动即退出，不静默取默认值。
                     let r = Rotate::parse(&v).ok_or_else(|| {
                         ConfigError::Invalid(flag.into(), v.clone(), "取值须为 0|90|180|270".into())
                     })?;
-                    // 响亮失败（评审 C-③）：非 0 旋转**未实现**（薄层缺 `lv_display_set_rotation`），
-                    // 必须启动即报错 —— 绝不解析后静默忽略（那是本项目最忌讳的「静默 no-op」）。
+                    // **B4a 整改（重要 2）：非 0 取值退回「启动即硬错误」。**
+                    // 评审实测：`--rotate 90 --smoke` 曾 `result=OK` / exit 0，而 P4 的
+                    // `active_px` 由 524189 变 406880 ⇒ **像素面确已画错**、自检门禁完全抓不到。
+                    // 理由：①「逻辑分辨率互换 + 像素不旋转」不是 no-op，而是**主动画错版式**，
+                    // 比静默 no-op 更坏；② 与 B4a 之前同一拓扑下的处置（也是硬错误）自相一致；
+                    // ③ 配置类错误 fail-fast 在 journal 里可见、可诊断。
+                    // 薄层能力（`Rotation` / `Display::set_rotation` / `rotation()`）与
+                    // `app.rs::rotation_of` 的全部接线**保留不动** —— 待 sink 侧像素旋转落地后，
+                    // 摘除本 guard 即可（见 [`Rotate`] 的状态说明）。
                     if r != Rotate::Deg0 {
                         return Err(ConfigError::Invalid(
                             flag.into(),
                             v,
-                            "屏幕旋转暂未实现（需薄层 `lv_display_set_rotation` 能力，见待办）；\
-                             请去掉 --rotate 或改用 --rotate 0"
+                            "像素级旋转（sink 侧）尚未实现：非 0 取值会主动画错版式，故启动即拒绝；\
+                             待 sink 侧实现像素旋转后摘除本 guard"
                                 .into(),
                         ));
                     }
@@ -503,8 +541,10 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
   --fbdev-path <PATH>      framebuffer 设备，默认 {fbdev}
   --width <PX>             渲染宽度，{min_d}..={max_d}，默认 {w}
   --height <PX>            渲染高度，{min_d}..={max_d}，默认 {h}
-  --rotate <DEG>           [暂未实现] 仅接受 0（90|180|270 会启动即报错退出）
-                           ⚠️ 施加旋转待薄层 lv_display_set_rotation 补齐（不做静默忽略）
+  --rotate <DEG>           默认 0。**当前只有 0 可用**：非 0（90/180/270）与越界取值
+                           一律启动即报错退出（退出码 2）
+                           ⚠️ 原因：薄层旋转通道已具备，但 sink 侧**像素级旋转未实现**
+                           ⇒ 非 0 只换逻辑分辨率、像素面仍按未旋转那份画（主动画错版式）
   --font <PATH>            [v2.0 已废弃：字库在构建期由 lv_font_conv 产物绑定
                            （--features noto-font，见 fonts/gen_fonts.sh），
                            本参数被忽略；启动时会打印响亮告警]
@@ -573,6 +613,15 @@ pub fn font_ignored_warning(path: &std::path::Path) -> String {
         path.display()
     )
 }
+
+// ── `rotate_pixel_gap_warning`（B4a 引入、B4a 整改「重要 2」**删除**）────────────
+//
+// 它曾是 `--rotate` 非 0 时的启动期"能力边界告警"（理由与 [`font_ignored_warning`] 同款：
+// systemd `Restart=always` ⇒ 硬错误会造成重启循环）。B4a 整改把非 0 退回**解析期硬错误**
+// 后，进程**永远到不了"带着非 0 旋转启动"**这一步 ⇒ 该告警**不再有可达调用点**。
+// 保留它 = 死代码 + 一条恒为 `None` 的分支（本项目明令禁止）⇒ **连同 `main.rs` 的调用点
+// 一并删除**；同一事实现由两处**可见**承担：① 解析期错误文案（点名"像素级旋转（sink 侧）
+// 尚未实现"）；② `--help` 的 `--rotate` 行。能力边界本身记在 [`Rotate`] 的文档里。
 
 /// `--control-channel` 的启动期**生效回显**（B3-2b-2：该参数已接线）。
 ///
@@ -827,47 +876,116 @@ mod tests {
         assert!(c.touch.swap_xy);
         assert!(c.touch.invert_x);
         assert!(!c.touch.invert_y, "--touch-invert-y=false 须显式关闭");
-        assert_eq!(c.rotate, Rotate::Deg0, "非 0 旋转暂未实现 ⇒ 仅 0 可解析通过");
+        assert_eq!(c.rotate, Rotate::Deg0);
         assert_eq!(c.idle_timeout_secs, 0, "0 = 禁用空闲回归");
     }
 
-    /// 评审 C-③：非 0 `--rotate` **响亮失败**（本轮不实现旋转，也不静默忽略 = 静默 no-op）。
+    /// **B4a 整改「重要 2」**：`--rotate 90|180|270`（含大小写 / `deg` 前缀 / 空白变体）
+    /// **一律启动即硬错误**；`--rotate 0` 正常通过。
+    ///
+    /// **为什么退回硬错误**：评审实测 `--rotate 90 --smoke` 曾 `result=OK` / exit 0，
+    /// 而 P4 的 `active_px` 由 `524189` 变 `406880` ⇒ **像素面确已画错**、自检门禁**完全抓不到**。
+    /// "逻辑分辨率互换 + 像素不旋转"**不是 no-op**，是**主动画错版式** ⇒ 必须 fail-fast。
+    ///
+    /// **改什么会让本条变红**：把解析期的非 0 guard 摘掉（下面任一 `unwrap_err` 即红）。
     #[test]
-    fn non_zero_rotate_fails_loudly_until_implemented() {
-        for v in ["90", "180", "270", "deg90", "DEG270"] {
-            let e = CliConfig::parse(&args(&["--rotate", v])).unwrap_err();
-            match e {
-                ConfigError::Invalid(f, val, why) => {
-                    assert_eq!(f, "--rotate");
-                    assert_eq!(val, v);
-                    assert!(why.contains("未实现"), "须说明「未实现」：{why}");
-                    assert!(
-                        why.contains("lv_display_set_rotation"),
-                        "须指向薄层能力缺口：{why}"
-                    );
-                    assert!(why.contains("--rotate 0"), "须给出处置手段：{why}");
-                }
-                other => panic!("--rotate {v} 应响亮失败，实得 {other:?}"),
-            }
-        }
-        // 显式 0 / deg0 仍可用（等价默认）
+    fn non_zero_rotate_is_rejected_at_parse_after_b4a_rework() {
         assert_eq!(
-            CliConfig::parse(&args(&["--rotate", "0"])).unwrap().rotate,
+            CliConfig::parse(&args(&["--rotate", "0"]))
+                .expect("--rotate 0（默认值）必须放行")
+                .rotate,
             Rotate::Deg0
         );
         assert_eq!(
             CliConfig::parse(&args(&["--rotate=deg0"])).unwrap().rotate,
             Rotate::Deg0
         );
-        assert_eq!(CliConfig::default().rotate, Rotate::Deg0);
+        assert_eq!(
+            CliConfig::default().rotate,
+            Rotate::Deg0,
+            "默认仍是不旋转"
+        );
+        for v in ["90", "180", "270", "deg90", "DEG270", " 90 "] {
+            assert!(
+                CliConfig::parse(&args(&["--rotate", v])).is_err(),
+                "--rotate {v} 应被拒绝（sink 侧像素旋转未实现）"
+            );
+        }
     }
 
-    /// `--help` 须**如实**标注 `--rotate` 当前状态（未实现，不是「可选可用」）。
+    /// **B4a 整改「重要 2」的文案口径**：非 0 的拒绝必须**点名"像素级旋转"**且**说明是 sink 侧**
+    /// —— 现场排障要能从 journal 一行看出"该参数不是拼错了、而是功能没做完"。
+    ///
+    /// **改什么会让本条变红**：把 guard 去掉（`unwrap_err` 变 `Ok` ⇒ panic），
+    /// 或把错误文案换成泛泛的"非法取值"（下面的 `contains` 即红）。
     #[test]
-    fn help_text_marks_rotate_as_unimplemented() {
+    fn non_zero_rotate_error_names_the_pixel_rotation_gap() {
+        for v in ["90", "180", "270"] {
+            match CliConfig::parse(&args(&["--rotate", v])).unwrap_err() {
+                ConfigError::Invalid(f, val, why) => {
+                    assert_eq!(f, "--rotate");
+                    assert_eq!(val, v);
+                    assert!(
+                        why.contains("像素级旋转"),
+                        "--rotate {v} 的错误文案须点名「像素级旋转」：{why}"
+                    );
+                    assert!(
+                        why.contains("sink"),
+                        "--rotate {v} 的错误文案须指明是 **sink 侧**未实现（而非参数写错）：{why}"
+                    );
+                    assert!(
+                        why.contains("尚未实现") || why.contains("未实现"),
+                        "--rotate {v} 的错误文案须说明「未实现」：{why}"
+                    );
+                }
+                other => panic!("--rotate {v} 应响亮失败，实得 {other:?}"),
+            }
+        }
+    }
+
+    /// **越界取值仍须响亮报错**（量程自工作单元 C 评审 C-③ 起未变 —— 只是"四档里三个"
+    /// 也从放行退回拒绝，见上一条）。
+    ///
+    /// **改什么会让本条变红**：把 `Rotate::parse` 的兜底写成"未知值取 `Deg0`"（静默取默认）。
+    #[test]
+    fn out_of_range_rotate_still_fails_loudly() {
+        for v in ["45", "x", "", "-90", "360"] {
+            let e = CliConfig::parse(&args(&["--rotate", v])).unwrap_err();
+            match e {
+                ConfigError::Invalid(f, val, why) => {
+                    assert_eq!(f, "--rotate");
+                    assert_eq!(val, v);
+                    assert!(
+                        why.contains("0|90|180|270"),
+                        "须点名合法取值集合：{why}"
+                    );
+                }
+                other => panic!("--rotate {v:?} 应响亮失败，实得 {other:?}"),
+            }
+        }
+    }
+
+    /// `--help` 须**如实**标注 `--rotate` 当前状态：**只有 0 可用**；非 0 会被拒绝，
+    /// 且**原因**（sink 侧像素旋转未实现）必须写在 help 里。
+    ///
+    /// **改什么会让本条变红**：help 行回退成"0|90|180|270 已放行"（与解析行为矛盾 ——
+    /// 这正是 B4a 整改前的骗人 help），或抹掉"像素级旋转未实现"的原因标注。
+    #[test]
+    fn help_text_states_rotate_capability_and_its_gap() {
         let h = help_text();
         assert!(h.contains("--rotate"), "帮助仍须列该参数（防部署脚本踩空）");
-        assert!(h.contains("未实现"), "帮助须如实标注未实现：\n{h}");
+        assert!(
+            h.contains("像素级旋转") && h.contains("未实现"),
+            "help 须保留「sink 侧像素级旋转未实现」的原因标注（不得把半成品写成完全可用）：\n{h}"
+        );
+        assert!(
+            h.contains("启动即报错退出"),
+            "help 须如实写「非 0 启动即报错退出」（与解析行为一致）：\n{h}"
+        );
+        assert!(
+            !h.contains("0|90|180|270（默认 0）"),
+            "旧的「0|90|180|270（默认 0）」（读起来像四档都放行）与解析行为矛盾：\n{h}"
+        );
     }
 
     #[test]
