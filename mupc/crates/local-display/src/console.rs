@@ -1379,12 +1379,18 @@ mod tests {
     /// 真缺陷可能漏判）。
     const NEVER_BLOCK_BUDGET: Duration = Duration::from_secs(1);
 
-    /// 推进到结束（预算内未完成即失败）。**不含 sleep**：`yield_now` 让连接线程有机会跑。
+    /// 推进到结束（预算内未完成即失败）。
+    ///
+    /// ⚠️ **让出必须"混合"**（B3-2a 质量整改同步，`channel.rs` 同款先例）：纯 `yield_now()` 只把
+    /// 本线程放回**同优先级**就绪队尾 —— Windows 上（`SwitchToThread`）可能**整趟都不切到连接
+    /// 工作线程** ⇒ socket 迟迟不交回 ⇒ 本函数的**挂起护栏**在重载机器上偶发误红（主控实测过一次、
+    /// 整改者也复现过一次）。故每 8 拍插一次 `sleep(1ms)`：给出真正的调度机会，同时保持整体推进够快。
     fn drive<T: DeserializeOwned>(
         c: &mut ConsoleClient,
         budget: Duration,
     ) -> ConsoleResult<ConsoleOutcome<T>> {
         let t0 = Instant::now();
+        let mut spins: u32 = 0;
         loop {
             match c.tick::<T>(Instant::now()) {
                 Progress::Done(r) => return r,
@@ -1395,16 +1401,27 @@ mod tests {
                 "预算 {budget:?} 内未完成（当前阶段 {}）",
                 c.phase_name()
             );
-            std::thread::yield_now();
+            let_worker_run(&mut spins);
         }
     }
 
-    /// 推进到谓词成立（同上，不 sleep）。
+    /// 推进到谓词成立（同上）。
     fn drive_until(c: &mut ConsoleClient, pred: impl Fn(&ConsoleClient) -> bool, budget: Duration) {
         let t0 = Instant::now();
+        let mut spins: u32 = 0;
         while !pred(c) {
             let _ = c.tick::<serde_json::Value>(Instant::now());
             assert!(t0.elapsed() < budget, "预算 {budget:?} 内未到达目标阶段");
+            let_worker_run(&mut spins);
+        }
+    }
+
+    /// 每 8 拍让出一次**真调度**（见 [`drive`] 的说明）。抽出来只为两处共用同一节奏。
+    fn let_worker_run(spins: &mut u32) {
+        *spins = spins.wrapping_add(1);
+        if *spins % 8 == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        } else {
             std::thread::yield_now();
         }
     }
@@ -1730,13 +1747,21 @@ mod tests {
         assert!(matches!(err, ConsoleError::Json(_, _)), "got {err:?}");
     }
 
+    /// **确定性**写法：连 `127.0.0.1:0` ⇒ `connect` 被**当场**拒绝（Windows
+    /// `WSAEADDRNOTAVAIL`、Linux `EADDRNOTAVAIL`/`ECONNREFUSED`），**不依赖**"拒绝在多快内
+    /// 回包"。
+    ///
+    /// # 为什么改（B3-2a 规格评审 建议 6）
+    /// 旧写法是「bind 一个临时端口再 drop」（[`leaked_port`]）⇒ 断言依赖 OS 在**秒级内**回
+    /// RST，而连接线程的预算是**客户端截止**、线程启动又**晚于**截止起点（`clock().start`）
+    /// ⇒ 一旦 `connect` 真耗满预算，`tick` 会**先按截止收口**，断言拿到的是 `Timeout` 而非
+    /// `Connect` —— 结构性脆弱（评审 75 次未复现，但属"应修"）。端口 0 无此依赖，也**不与
+    /// 其它用例抢端口**（那些用 [`leaked_port`] 的用例保持原样）。
+    /// 同 crate 的 `channel.rs::connection_refused_is_connect_error` 已是此写法（那边有长注释）。
     #[test]
     fn connection_refused_is_a_connect_error() {
-        // bind-then-drop ⇒ 该端口确定无监听（与 channel.rs 同法：各平台都得到 ECONNREFUSED）。
-        let port = leaked_port();
-        let mut c =
-            ConsoleClient::with_timeout(&format!("http://127.0.0.1:{port}"), Duration::from_secs(5))
-                .expect("client");
+        let mut c = ConsoleClient::with_timeout("http://127.0.0.1:0", Duration::from_secs(5))
+            .expect("client");
         c.begin_write("apply", &serde_json::json!({}), clock())
             .expect("begin");
         let err = drive_to_done(&mut c, HANG_GUARD).expect_err("err");
