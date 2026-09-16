@@ -27,6 +27,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() {
+    // ── 进程启动零点（12-显示终端 F6 `device.uptime_secs` 的唯一真源口径）──
+    // 设计 §4.1 明写 uptime「以 **mupcd 进程启动时刻**为准」⇒ 零点必须在**进程入口最顶部**取，
+    // 并**传下去**（`initialize_all` → `SystemDeviceSource::new`）。若改在装配点取（`initialize_all`
+    // 跑完 DB/intercore/gateway/AI/security 之后才构造），屏上 uptime 会系统性偏小。
+    let process_started_at = std::time::Instant::now();
+
     // ── Phase 0: CLI 解析 ──
     let cli = Cli::parse();
 
@@ -106,7 +112,7 @@ async fn main() {
     // ── Phase 3: 子系统初始化 ──
     let mut coord = ServiceCoordinatorImpl::new();
 
-    let ctx = match startup::initialize_all(&config, &coord).await {
+    let ctx = match startup::initialize_all(&config, &coord, process_started_at).await {
         Ok(ctx) => ctx,
         Err(e) => {
             tracing::error!(error = %e, "子系统初始化失败，开始级联清理...");

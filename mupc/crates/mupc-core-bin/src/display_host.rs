@@ -1,24 +1,60 @@
 //! 本地显示终端数据提供层（mupcd 侧，12-本地显示终端 设计 §4.2/§5，core-bin 内模块）。
 //!
 //! 组件（命名对齐设计 §3.2）：
-//! - [`DisplayDataProvider`]：采集 + 组帧 + 发布。每 `publish_ms`（默认 1s，`display-proto`
-//!   `DEFAULT_PUBLISH_MS`）组一帧 [`DisplayFrame`]——SOC 取 AiIntegrator 裁决快照（§4.3 唯一
-//!   裁决入口）、run_state/pcs_online/三相取 intercore（`read_three_phase`/`last_run_state`/
-//!   `is_connected`），原子写入共享 `latest`（`Arc<Mutex<Option<DisplayFrame>>>`，§3.5）。
+//! - [`DisplayDataProvider`]：采样 + 组帧 + 发布。
+//!   - **主拍** `publish_ms`（默认 1 s，`display-proto` `DEFAULT_PUBLISH_MS`）：读**内存缓存**
+//!     组一帧 [`DisplayFrame`]——SOC 取 AiIntegrator 裁决快照（§4.3 唯一裁决入口）、
+//!     run_state/pcs_online/三相取 intercore（`read_three_phase`/`last_run_state`/
+//!     `is_connected`），原子写入共享 `latest`（`Arc<Mutex<Option<DisplayFrame>>>`，§3.5）。
+//!   - **慢拍四段**（§4.2，独立任务、互不阻塞、各自失败各自降级）：`device`（3 s）/
+//!     `alarms`（0.5 s）/ `interlock`（0.5 s）写入 [`SlowCaches`]，`info` 启动时一次性；
+//!     **内容变化**即 `Notify` 唤醒主拍提前组帧（合并窗口 `min_publish_interval_ms`）。
+//!   - **帧路径零阻塞 I/O、零 DB 查询**（设计 §2.1 不变量 / D6）：`build_frame` 只读缓存，
+//!     绝不 await 慢源——慢源抖动不拖累帧率，慢源全挂也只退化为「1 Hz 主拍 + 各段不可用」。
 //! - [`LoopbackHttpPublisher`]：127.0.0.1 回环 HTTP 短轮询端点 `GET /v1/display/latest`
 //!   （§3.1/§5 决策 A1），返回最新帧 JSON；未就绪返回 503（渲染端视同无新帧重试）。
 //!
 //! 「不造假值」总原则（§8）：所有数值展示仅当对应 [`FieldFlag`] == `Valid`；源不可得一律显式
 //! 打标（`Offline`=PCS 离线/核间读失败 / `NotRead`=transport 不支持 / `RangeError`=量程越界），
 //! 值置 `None`——不补 0、不沿用陈旧值冒充实时。SOC 双源皆失时冻结值仅在控制内部、不送上屏。
+//!
+//! 四段慢拍的**「不可用」与「无」语义分离**（EDGE-09 / IL-01.6 / EDGE-16）：
+//! - `alarms.available == false` ⇒ 屏显「告警源不可用」，**不是**「无告警」；
+//! - `interlock.available == false` ⇒ 屏显「联锁状态不可用」，**不是**「未联锁」
+//!   （`latched` 此刻同为 `false`，但渲染端的判据只能是 `available`）；
+//! - 各段字段 `None` / `LinkState::Unknown` ⇒ 屏显「未知」/「未提供」，不臆造。
+//!
+//! # 已知真源缺口（本单元**如实登记**，未臆造补齐）
+//! - `device.iec104`：`Iec104Server` 只暴露 `connection_count()`
+//!   （`crates/gateway/src/iec104/server.rs:288`），无链路状态查询 ⇒ 恒 `Unknown`
+//!   （F6.5 允许「未知」，**不得**显为「正常」）。
+//! - `info.serial`：无可靠真源 ⇒ 恒 `None`（「未提供」，EDGE-16 / 设计 §4.1 F8 行）。
+//! - `info.mgmt_ipv4`：设计指定 `getifaddrs`；core-bin 无 `libc` 依赖（workspace 亦未声明
+//!   `nix`）且本仓库安全清单要求「无新增 `unsafe` 块」⇒ 改用纯 std 的 UDP 选路求本机对外
+//!   IPv4（语义与限度见 [`primary_ipv4`] 文档）。
+//! - `interlock` 的「调用失败 → `available=false`」在现有 `InterlockApi::status()`
+//!   （返回非 `Result`，无错误通道）下**不可达**；`available=false` 仍可达（首采未到 /
+//!   未接线），三种「非已启用」语义的区分见 [`InterlockWiring`]。
+//! - `alarms` 的「最近 10 条（倒序）」**只做到窗口内的最近 10 条**：存储侧
+//!   `EventRepository` **没有**「最近 N 条」API（只有 `query_range(start, end)`，且
+//!   `crates/storage/src/repository.rs:362-380` 的 SQL 内硬编码 `LIMIT 10000`），故本层取
+//!   [`ALARM_LOOKBACK_MS`]（= **7 天**）窗口内的最近 `alarm_page_size` 条。
+//!   **后果（如实登记）**：库静默满一周后，窗口内无行 ⇒ 告警区显**空**，而真实语义是
+//!   「窗口取不到」而非「无告警」（`available` 仍为 `true` = 真源可用、真 0 条）。这正是
+//!   「最近 10 条」的**有界化落地**，不是等价实现；根因在存储层缺少「最近 N 条」入口。
+//! - `alarms.level`：设计/PRD 均**未定义** `event_type` → 级别的映射，本单元给出**显式、
+//!   可审**的规则表（见 [`alarm_level_of`]），兜底 `Warn`（契约 `AlarmLevel` 无「未知」态）。
 
 use mupc_display_proto::{
-    DisplayConfig, DisplayFrame, DisplayRange, Field, FieldFlag, RunState, SocSource,
-    PROTO_VERSION,
+    AlarmItem, AlarmLevel, AlarmsSection, ControlSource, DeviceSection, DisplayConfig, DisplayFrame,
+    DisplayRange, Field, FieldFlag, InfoSection, InterlockSection, InterlockSourceItem, LinkState,
+    RunState, ServiceScope, SocSource, PROTO_VERSION,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 
 /// 帧共享存储：provider 每 tick 原子更新；publisher 每请求 clone 返回。
 /// 设计 §3.5：HTTP 路径不做任何 modbus 读（采集在专用 1s task，避免并发总线抖动）。
@@ -29,6 +65,571 @@ pub const LATEST_PATH: &str = "/v1/display/latest";
 
 /// 回环 publisher 单连接请求头读超时（O3：连接后不发数据的对端不得长期占用 task）。
 pub const HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// F7 告警回溯窗口（ms，**7 天**）。
+///
+/// 契约与设计只说「最近 10 条（倒序）」，但现有存储侧入口 `EventRepository::query_range`
+/// 强制时间区间，且 `events` 表只有 `(event_type, timestamp)` 复合索引、SQL 内硬编码
+/// `LIMIT 10000`（`crates/storage/src/repository.rs:362-380`）——**没有**可取「最近 N 条」的
+/// API（`latest_by_type` 只按**具体类型**取单条，不是「最近 N 条」）。为免每 0.5 s 把上万行
+/// 事件物化成 `Vec`，本单元取「该窗口内最近 `alarm_page_size` 条」：窗口外的旧事件不上屏。
+///
+/// 这是对「最近 10 条」的**有界化落地**（**非**等价实现）⇒ 已在本模块文档头的
+/// 「已知真源缺口」表中**逐条登记**（含「静默满一周后告警区显空」的后果），见本文件顶部
+/// `//! - alarms 的「最近 10 条（倒序）」…` 一段。
+pub const ALARM_LOOKBACK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// 慢拍段缓存：采样任务写、组帧任务读（设计 §4.2 的 `*_cache`）。
+///
+/// 三把 `std::sync::RwLock` 只做短临界区的整段替换/克隆——组帧路径**不持锁做 I/O**。
+#[derive(Clone, Default)]
+pub struct SlowCaches {
+    device: Arc<RwLock<DeviceSection>>,
+    alarms: Arc<RwLock<AlarmsSection>>,
+    interlock: Arc<RwLock<InterlockSection>>,
+}
+
+/// 读缓存（毒化不 panic，同 `latest` 的 O2 口径）。
+fn read_cache<T: Clone>(lock: &RwLock<T>) -> T {
+    lock.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+// ── 「内容变化」判据（设计 §4.2「变更即组帧」；**排除 `ts_ms`**）──
+//
+// 段采集时刻每拍必变；若把 `ts_ms` 算作内容，慢拍将退化为**恒定 4 Hz** 唤醒组帧
+// （发布率上界虽不破，但「合并突发」的语义已失效，且平白抬高 HMI 轮询负载）。
+// 故只比较**展示内容**。以下三个函数与各段字段一一对应，字段增删由 `content_change_predicates_*`
+// 用例逐字段钉死（漏字段即变红）。
+
+/// 装置段内容变化（不含 `ts_ms`）。
+fn device_changed(a: &DeviceSection, b: &DeviceSection) -> bool {
+    a.uptime_secs != b.uptime_secs
+        || a.cpu_temp_c != b.cpu_temp_c
+        || a.mem_used_pct != b.mem_used_pct
+        || a.iec104 != b.iec104
+        || a.intercore != b.intercore
+        || a.hmi_channel != b.hmi_channel
+        || a.control_source != b.control_source
+}
+
+/// 告警段内容变化（不含 `ts_ms`）。
+fn alarms_changed(a: &AlarmsSection, b: &AlarmsSection) -> bool {
+    a.available != b.available || a.items != b.items
+}
+
+/// 联锁段内容变化（不含 `ts_ms`）。
+fn interlock_changed(a: &InterlockSection, b: &InterlockSection) -> bool {
+    a.available != b.available
+        || a.enabled != b.enabled
+        || a.latched != b.latched
+        || a.stop_failed != b.stop_failed
+        || a.sources != b.sources
+        || a.fault_lamp != b.fault_lamp
+        || a.run_lamp != b.run_lamp
+        || a.release_hold_secs != b.release_hold_secs
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 慢拍源（三路可注入 seam：生产实现 + 测试桩；设计 §4.2 表 A/B/C 行）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// F6 装置状态源（慢拍 3 s）。字段级不可得 ⇒ 各字段自带 `None` / `Unknown`，**不是**整段失败。
+#[async_trait::async_trait]
+pub trait DeviceSource: Send + Sync {
+    /// 采一次装置状态（`ts_ms` 由实现填采集时刻）。
+    async fn read_device(&self) -> DeviceSection;
+}
+
+/// F7 告警源（慢拍 0.5 s）。
+///
+/// `Err(原因)` ⇒ `alarms.available=false`（屏显「告警源不可用」），**不是**「无告警」（EDGE-09）。
+#[async_trait::async_trait]
+pub trait AlarmSource: Send + Sync {
+    /// 取按时间**倒序**的最近若干条（实现自行截断到 `alarm_page_size`）。
+    async fn read_alarms(&self) -> Result<Vec<AlarmItem>, String>;
+}
+
+/// F16 联锁状态源（慢拍 0.5 s）。
+///
+/// `Err(原因)` ⇒ `interlock.available=false`（屏显「联锁状态不可用」），**不是**「未联锁」
+/// （IL-01.6：二者语义不同、不得互替）。
+#[async_trait::async_trait]
+pub trait InterlockSource: Send + Sync {
+    /// 读一次联锁段（`ts_ms` 由实现填采集时刻）。
+    async fn read_interlock(&self) -> Result<InterlockSection, String>;
+}
+
+/// 联锁段的接线形态（设计 §4.2 表 C 行的三种「非已启用」语义，**不得互替**）。
+#[derive(Clone)]
+pub enum InterlockWiring {
+    /// `io.enabled=false`：联锁功能**未启用**——这是**已知状态**（不是"源坏了"也不是"未联锁"），
+    /// 段为 `available=true, enabled=false` ⇒ 屏显「联锁功能未启用」（设计 §4.2 表 C 行）。
+    Disabled,
+    /// 未接线（本单元默认）：缓存保持 `Default` ⇒ `available=false` ⇒ 屏显「联锁状态不可用」。
+    Unwired,
+    /// 已接线（`io.enabled=true`）：按 `interlock_poll_ms` 采集。
+    Wired(Arc<dyn InterlockSource>),
+}
+
+/// 由装配点参数决定联锁接线形态（**纯函数**，可单测；三分支语义见 [`InterlockWiring`]）。
+///
+/// ⚠️ **三分支互斥且不可互替**——尤其 `(None, true)`：
+/// - `(Some(api), true)` ⇒ [`InterlockWiring::Wired`]（正常接线，按 `interlock_poll_ms` 采集）；
+/// - `(None, true)` ⇒ [`InterlockWiring::Unwired`]（`io.enabled=true` 却拿不到控制器 ⇒ 屏显
+///   「**联锁状态不可用**」）。**不得**归到 `Disabled`——那会把"该有却没有"（装配失败 / 被跳过）
+///   **谎报**成"本来就没开"（`Disabled` 的屏文「联锁功能未启用」是一条**正面事实**）；
+/// - `io.enabled=false` ⇒ [`InterlockWiring::Disabled`]（**已知状态**「功能未启用」，
+///   `available=true / enabled=false`），既不是「不可用」也不是「未联锁」。
+pub fn interlock_wiring_for(
+    api: Option<Arc<dyn mupc_web_api::app_state::InterlockApi>>,
+    io_enabled: bool,
+    release_hold_secs: u64,
+) -> InterlockWiring {
+    match (api, io_enabled) {
+        (Some(api), true) => InterlockWiring::Wired(Arc::new(InterlockApiSource::new(
+            api,
+            release_hold_secs,
+        ))),
+        (None, true) => InterlockWiring::Unwired,
+        (_, false) => InterlockWiring::Disabled,
+    }
+}
+
+/// 生产装置状态源：进程 uptime + intercore 链路 + 控制源 + 本机温度/内存。
+pub struct SystemDeviceSource {
+    /// uptime 零点——**由调用方注入**，取 `main()` 进程入口最顶部的 `Instant::now()`。
+    ///
+    /// 设计 §4.1 明写 uptime「以 **`mupcd` 进程启动时刻**为准」。若在本结构体的**构造时刻**
+    /// 取零点，则零点落在 `initialize_all` 完成 DB / intercore / gateway / AI / security 全部
+    /// 装配**之后**（约数百 ms~数 s）⇒ 屏上 uptime **系统性偏小**。故零点上移到进程入口，
+    /// 由调用方传入；构造签名保留**显式零点形参**，测试可注入人工零点，不依赖真实进程起点。
+    started_at: Instant,
+    intercore: Arc<mupc_intercore::IntercoreClient>,
+    ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+}
+
+impl SystemDeviceSource {
+    /// `started_at` = 进程启动零点（生产取 `main()` 最顶部的 `Instant::now()`，见字段注释）。
+    pub fn new(
+        intercore: Arc<mupc_intercore::IntercoreClient>,
+        ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+        started_at: Instant,
+    ) -> Self {
+        Self {
+            started_at,
+            intercore,
+            ai_integrator,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DeviceSource for SystemDeviceSource {
+    async fn read_device(&self) -> DeviceSection {
+        // 核间链路：有心跳连接即 Connected，否则 Disconnected（**不**写 Unknown——本项真源存在）
+        let intercore = if self.intercore.is_connected().await {
+            LinkState::Connected
+        } else {
+            LinkState::Disconnected
+        };
+        DeviceSection {
+            ts_ms: now_ms(),
+            uptime_secs: Some(self.started_at.elapsed().as_secs()),
+            cpu_temp_c: read_cpu_temp_c(),
+            mem_used_pct: read_mem_used_pct().await,
+            // 真源缺口：Iec104Server 无链路状态查询（见顶部「已知真源缺口」表的 `device.iec104`
+            // 条）⇒ 如实 Unknown（「未知」，不得显为「正常」）
+            iec104: LinkState::Unknown,
+            intercore,
+            // 契约硬要求：本通道状态由 **HMI 本地覆盖**（设计 §5.5）；服务端**必须**给 Unknown，
+            // 否则就是"由服务端报告客户端自己的连接状态"这一语义倒置。
+            hmi_channel: LinkState::Unknown,
+            control_source: self.control_source().await,
+        }
+    }
+}
+
+impl SystemDeviceSource {
+    /// 当前控制源（设计 §4.1「F6 当前控制源」行）：
+    /// 本地优先已置位 ⇒ [`ControlSource::LocalStrategy`]（AI 停用期的生产唯一态）；
+    /// 否则 AI 引擎未加载 ⇒ [`ControlSource::AiDisabled`]（固定文案）；两者皆不成立 ⇒ `Unknown`
+    /// （**不臆造**下发源）。
+    async fn control_source(&self) -> ControlSource {
+        if self.ai_integrator.is_local_priority().await {
+            ControlSource::LocalStrategy
+        } else if !self.ai_integrator.engine_status().await.ai_engine_enabled {
+            ControlSource::AiDisabled
+        } else {
+            ControlSource::Unknown
+        }
+    }
+}
+
+/// CPU 温度（℃）——**仅 Linux 真读**。
+///
+/// 直读 `/sys/class/thermal/thermal_zone0/temp`（与 `mupc_system_monitor` 的 `read_cpu_temp`
+/// 同源），**不**经 `TemperatureCollector`：后者在 Linux 读失败时回退 **45.0**、在非 Linux
+/// 目标返回硬编码常量（`crates/system-monitor/src/collectors.rs:279-300`），采信它即把假值送
+/// 上屏。读不到 ⇒ `None` ⇒ 屏显「未知」（F6.5：不可得不得显为正常）。
+fn read_cpu_temp_c() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
+        let milli_c: f64 = raw.trim().parse().ok()?;
+        let c = milli_c / 1000.0;
+        if c.is_finite() && (-50.0..=200.0).contains(&c) {
+            Some(c)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // 非 Linux 目标 system-monitor 只有硬编码桩值 ⇒ 宁可「未知」也不上假值
+        None
+    }
+}
+
+/// 内存使用率（%）——**仅 Linux 真读**（`/proc/meminfo`，经 `MemoryCollector`）。
+/// 非 Linux 目标的 `MemoryCollector` 返回硬编码 8192/4096/50%
+/// （`crates/system-monitor/src/collectors.rs:186-196`）⇒ 本单元一律取 `None`。
+async fn read_mem_used_pct() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        use mupc_system_monitor::MetricCollector;
+        let snap = mupc_system_monitor::MemoryCollector::new(0).collect().await.ok()?;
+        let pct = snap.memory.usage_percent;
+        if pct.is_finite() && (0.0..=100.0).contains(&pct) {
+            Some(pct)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// 事件类型 → 告警级别（设计未定义映射，本单元给出**显式、可审**的规则表）。
+///
+/// 规则（按序匹配 `event_type`，大小写不敏感）：
+/// 1. 含 `triggered` / `offline` / `failed` / `error` / `fault` / `trip` → [`AlarmLevel::Error`]；
+/// 2. 含 `cleared` / `online` / `restored` / `stopped` / `recovered` / `ack` → [`AlarmLevel::Info`]；
+/// 3. 其余 → [`AlarmLevel::Warn`]。
+///
+/// 兜底取 `Warn`（不取 `Info`）：未知事件既不静默降级为提示，也不冒称错误。
+/// 契约 `AlarmLevel` 无「未知」态、设计亦未给规则 ⇒ 已登记为缺口（见本文件顶部模块文档
+/// 「已知真源缺口」表的 `alarms.level` 条）。
+fn alarm_level_of(event_type: &str) -> AlarmLevel {
+    let t = event_type.to_ascii_lowercase();
+    const ERROR: [&str; 6] = ["triggered", "offline", "failed", "error", "fault", "trip"];
+    const INFO: [&str; 6] = ["cleared", "online", "restored", "stopped", "recovered", "ack"];
+    if ERROR.iter().any(|k| t.contains(k)) {
+        AlarmLevel::Error
+    } else if INFO.iter().any(|k| t.contains(k)) {
+        AlarmLevel::Info
+    } else {
+        AlarmLevel::Warn
+    }
+}
+
+/// 超长告警消息的**可见截断标记**（ASCII `...`，**不是** `…` U+2026）。
+///
+/// 依据：`…`（U+2026）**实测不在** `crates/local-display/fonts/font_subset_charset.txt`
+/// 与生成字体的 cmap 内（屏上是豆腐块），本仓既有处置一律取 ASCII 三点——见
+/// `ui/pages/p5_audit.rs::TEXT_ELLIPSIS`（「`…` 不在 cmap 内 ⇒ 取 ASCII `.`」）与
+/// `ui/pages/p3_logs.rs` LG1 行同款处置。**不造新上屏字**（§3.6 全屏用字表内的 `.`）。
+const ALARM_TRUNCATION_MARK: &str = "...";
+
+/// 单条告警消息按 [`MAX_ALARM_MESSAGE_BYTES`] **字符边界安全**地截断，并加**可见**截断标记。
+///
+/// 为何在 **ingest 侧**截断（而非靠发布侧的编码守卫兜）：契约 §3.5 条 3 的编码守卫一触发就是
+/// **整帧**编码失败。而 HMI 侧（`crates/local-display/src/channel.rs:450`）走的是**裸
+/// `serde_json::from_slice`**、**不经**契约的严格解码器，只受**传输层 64 KiB**
+/// （`channel.rs:78/:675`）限制——即一帧里含一条 2 KiB 消息时 HMI **本可正常显示**。
+/// 若只留编码守卫，**局部**（一条消息）超限会升级成**整帧 500 / 画面冻在旧帧**，把局部超限
+/// 放大为**整屏不可用**（与 EDGE-09 / F7 的取向相反）。故在本层把消息截到上限内，使帧
+/// **恒可编码**；发布侧的 `to_json_slice` 守卫**保留但退化为纯兜底**（防 JSON 转义膨胀等
+/// 本层管不到的膨胀源）。
+///
+/// 截断**可见、不静默**：尾部加 [`ALARM_TRUNCATION_MARK`]（屏上显示为 `...` 收尾）。
+fn truncate_alarm_message(msg: &str) -> String {
+    if msg.len() <= mupc_display_proto::MAX_ALARM_MESSAGE_BYTES {
+        return msg.to_string();
+    }
+    // 为标记留出字节预算；从预算处**向左回退到最近的字符边界**（不切断多字节 UTF-8）
+    let budget = mupc_display_proto::MAX_ALARM_MESSAGE_BYTES - ALARM_TRUNCATION_MARK.len();
+    let mut end = budget;
+    while end > 0 && !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(mupc_display_proto::MAX_ALARM_MESSAGE_BYTES);
+    out.push_str(&msg[..end]);
+    out.push_str(ALARM_TRUNCATION_MARK);
+    out
+}
+
+/// `SystemEvent` → [`AlarmItem`]（`ts_ms` = 事件时间，非采集时间）。
+///
+/// `message` 超 [`MAX_ALARM_MESSAGE_BYTES`] ⇒ 按字符边界截断 + 可见标记（见
+/// [`truncate_alarm_message`]）。
+fn alarm_item_of(ev: &mupc_storage::SystemEvent) -> AlarmItem {
+    AlarmItem {
+        ts_ms: ev.timestamp.timestamp_millis().max(0) as u64,
+        level: alarm_level_of(&ev.event_type),
+        message: truncate_alarm_message(&ev.message),
+    }
+}
+
+/// 生产告警源：`storage.events` 最近若干条（设计 §4.1 #3 裁决 D11：以 `SystemEvent` 为 F7 唯一真源）。
+pub struct StorageAlarmSource {
+    events: Arc<dyn mupc_storage::EventRepository>,
+    page_size: usize,
+}
+
+impl StorageAlarmSource {
+    /// `page_size` = `display.alarm_page_size`（设计 §4.9）。
+    pub fn new(events: Arc<dyn mupc_storage::EventRepository>, page_size: usize) -> Self {
+        Self { events, page_size }
+    }
+}
+
+#[async_trait::async_trait]
+impl AlarmSource for StorageAlarmSource {
+    async fn read_alarms(&self) -> Result<Vec<AlarmItem>, String> {
+        if self.page_size == 0 {
+            return Ok(Vec::new()); // 配置层应拒（validate），此处仅保证不 panic
+        }
+        let end = chrono::Utc::now();
+        let start = end - chrono::Duration::milliseconds(ALARM_LOOKBACK_MS);
+        let rows = self
+            .events
+            .query_range(start, end)
+            .await
+            .map_err(|e| e.to_string())?;
+        // 存储实现已 `ORDER BY timestamp DESC`，但该顺序**非 trait 契约**（仅一种实现）⇒
+        // 本层显式排序，避免换实现后静默取到最旧的 N 条（时间倒序是契约硬要求）。
+        let mut refs: Vec<&mupc_storage::SystemEvent> = rows.iter().collect();
+        refs.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then(b.id.unwrap_or(0).cmp(&a.id.unwrap_or(0)))
+        });
+        Ok(refs
+            .into_iter()
+            .take(self.page_size)
+            .map(alarm_item_of)
+            .collect())
+    }
+}
+
+/// 生产联锁源：`InterlockController`（以 web-api `InterlockApi` 擦除注入，设计 §4.2 表 C 行）。
+pub struct InterlockApiSource {
+    api: Arc<dyn mupc_web_api::app_state::InterlockApi>,
+    /// `io.release_hold_secs`（UI 提示「须保持 N 秒」，契约 `InterlockSection::release_hold_secs`）。
+    release_hold_secs: u64,
+}
+
+impl InterlockApiSource {
+    pub fn new(
+        api: Arc<dyn mupc_web_api::app_state::InterlockApi>,
+        release_hold_secs: u64,
+    ) -> Self {
+        Self {
+            api,
+            release_hold_secs,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl InterlockSource for InterlockApiSource {
+    async fn read_interlock(&self) -> Result<InterlockSection, String> {
+        let st = self.api.status().await;
+        Ok(interlock_section_of(&st, self.release_hold_secs, now_ms()))
+    }
+}
+
+/// `InterlockStatus`（web-api 既有形态）→ 契约 [`InterlockSection`]。
+///
+/// - `available = true`：能拿到 `status()` 即源可用（`status()` 当前无错误通道 ⇒ 失败分支在
+///   生产不可达，见顶部「已知真源缺口」表的 `interlock` 条；`Err` 路径由 [`InterlockWiring`]
+///   与测试桩覆盖）。
+/// - `fault_lamp` / `run_lamp` → `Some(..)`：控制器给出的是**明确值**（目标电平），不是「未知」；
+///   `None` 在契约里表示「不可得」，此处不适用。⚠️ 语义限度：它是**目标电平**而非 DO 回读
+///   （DO 写失败时实际灯态可能不同，控制器只在日志记错）。
+fn interlock_section_of(
+    st: &mupc_web_api::app_state::InterlockStatus,
+    release_hold_secs: u64,
+    ts_ms: u64,
+) -> InterlockSection {
+    InterlockSection {
+        ts_ms,
+        available: true,
+        enabled: st.enabled,
+        latched: st.latched,
+        stop_failed: st.stop_failed,
+        sources: st
+            .sources
+            .iter()
+            .map(|s| InterlockSourceItem {
+                name: s.name.clone(),
+                tripped: s.tripped,
+            })
+            .collect(),
+        fault_lamp: Some(st.fault_lamp),
+        run_lamp: Some(st.run_lamp),
+        release_hold_secs,
+    }
+}
+
+/// 编译时间戳（RFC3339，UTC）：读 `build.rs` 注入的 `BUILD_TIMESTAMP_EPOCH`
+/// （设计 §4.8；`SOURCE_DATE_EPOCH` 优先 ⇒ 可复现）。
+///
+/// **语义口径（如实写清）**：该值是 **`build.rs` 上次运行的时刻**，**不是**「源码最后修改时刻」
+/// ——`build.rs` 声明了 `rerun-if-changed=build.rs`（护增量缓存），故**改其他源文件不会重跑它**
+/// ⇒ 屏上「编译时间」会**静默变旧**、且无提示。契约只要求「编译时间」，本实现满足该口径；
+/// 要「源码最后修改时刻」须换真源（本单元不改）。
+///
+/// 变量缺失或越界 ⇒ `None` ⇒ 屏显「未提供」（EDGE-16）。**不**用 `env!`：那会让「未注入」
+/// 直接编译失败，与契约的 `Option<String>` 降级语义不符。构建期若**时钟早于 epoch**，
+/// `build.rs` **不注入**（不补 0 伪装成 1970-01-01）⇒ 此处自然得 `None`。
+fn build_time_rfc3339() -> Option<String> {
+    build_time_from_raw(option_env!("BUILD_TIMESTAMP_EPOCH"))
+}
+
+/// [`build_time_rfc3339`] 的**纯函数内核**（可单测，不依赖编译期环境变量）：原始字符串 →
+/// RFC3339。任何「不可得」形态一律 `None`：
+/// - 变量缺失（`None`）/ 非数字 / 空白 / 越出 `chrono` 可表示范围 ⇒ `None`。
+///
+/// ⚠️ **不得**把末端写成 `.unwrap_or(0)`（本单元整改前 `build.rs` 的形态）：那会把「取不到
+/// 时间」**冒充**成一个**合法**值 1970-01-01，屏上显成「有值」而实际是假的——与项目
+/// 「显 `--`、**严禁补 0**」口径相反（同 `p5_audit::side_text` 的 C1 级前车之鉴）。
+/// `.parse().ok()?` + `from_timestamp(..)`（`Option`）即「不可得 ⇒ `None`」的正确链路；
+/// 该口径由 `build_time_none_when_epoch_absent_or_malformed` 逐形态钉死。
+fn build_time_from_raw(raw: Option<&str>) -> Option<String> {
+    let secs: i64 = raw?.trim().parse().ok()?;
+    chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+}
+
+/// 装置型号：`/proc/device-tree/model`（设计 §6.6）。
+///
+/// device-tree 的 `model` 是 **NUL 结尾**的字节串，须裁尾零。非 Linux / 无设备树 / 空串 ⇒
+/// `None` ⇒ 屏显「未提供」（EDGE-16，不臆造）。
+fn read_device_model() -> Option<String> {
+    let raw = std::fs::read("/proc/device-tree/model").ok()?;
+    let s = String::from_utf8_lossy(&raw)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 设备管理 IP：本机用于访问**外部网络**的 IPv4（设计 §6.6 / PM 裁定 U-1）。
+///
+/// 实现偏离设计指定的 `getifaddrs`：core-bin 无 `libc` 依赖（workspace `Cargo.toml` 亦未声明
+/// `nix`），且本仓库安全清单要求「无新增 `unsafe` 块」。改用纯 std 的**选路探测**：向
+/// RFC 5737 TEST-NET-1 地址 `connect` 一个 UDP 套接字（UDP `connect` **不发包**，只让内核按
+/// 路由表选本端地址），读回 `local_addr()`。
+///
+/// 语义限度（如实登记）：这是「内核认为的本机对外地址」，**不保证**等于「首个 UP 的非回环
+/// IPv4」（多网卡时未必是管理网那张卡）；无默认路由 / 无可用网卡 ⇒ `None` ⇒ 屏显「未提供」，
+/// **不臆造** IP。与 `service_scope`（服务只监听回环）是**两个不同概念**，UI 必须分列（EDGE-24）。
+fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    match sock.local_addr().ok()? {
+        std::net::SocketAddr::V4(a) if !a.ip().is_loopback() => Some(*a.ip()),
+        _ => None,
+    }
+}
+
+/// P6 装置信息段（设计 §6.6，「来源分列」）——**启动时一次性采集**，不随帧刷新。
+///
+/// 装置类字段取真源（`env!` / build.rs / device-tree / 选路），本地屏专属项取编译期常量；
+/// 取不到一律 `None`（「未提供」）。**序列号无可靠真源 ⇒ 恒 `None`**（EDGE-16，不臆造）。
+pub fn collect_info() -> InfoSection {
+    InfoSection {
+        firmware_version: env!("CARGO_PKG_VERSION").to_string(),
+        // 编译时间戳（`crates/mupc-core-bin/build.rs` 发出）；取不到 ⇒ None ⇒「未提供」
+        build_time: build_time_rfc3339(),
+        model: read_device_model(),
+        serial: None,
+        service_scope: ServiceScope::LoopbackOnly,
+        mgmt_ipv4: primary_ipv4().map(|ip| ip.to_string()),
+    }
+}
+
+/// 当前 Unix 毫秒（各段 `ts_ms` 用）。
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 发布节拍器（纯逻辑：无 I/O 无时钟读取，可用**假时钟**推进单测；设计 §4.2.1 验证要求）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 组帧触发源 = ① 主拍心跳（`publish_ms`）∪ ② 慢拍内容变更（合并窗口 `min_window`）。
+///
+/// 设计 §4.2.1 约束 4：慢拍段**必须**走「变更即组帧」，退化为纯主拍会使 F7.3/F16.5 变为
+/// `0.5 + 1.0 + 0.5 + 0.1 = 2.1 s` 超差。本类型即该机制的**唯一判据点**（可被假时钟钉死）。
+#[derive(Debug)]
+pub struct PublishPacer {
+    publish: std::time::Duration,
+    min_window: std::time::Duration,
+    /// 下一次主拍到期时刻
+    next_main: Instant,
+    /// 上次实际发布时刻（合并窗口基准）
+    last_publish: Instant,
+    /// 有未发布的变更在等合并窗口
+    pending_change: bool,
+}
+
+impl PublishPacer {
+    /// `publish_ms` 主拍周期；`min_window_ms` 合并窗口（≤ `publish_ms`，配置层 validate 保证）。
+    pub fn new(now: Instant, publish_ms: u64, min_window_ms: u64) -> Self {
+        Self {
+            publish: std::time::Duration::from_millis(publish_ms.max(1)),
+            min_window: std::time::Duration::from_millis(min_window_ms),
+            next_main: now + std::time::Duration::from_millis(publish_ms.max(1)),
+            last_publish: now,
+            pending_change: false,
+        }
+    }
+
+    /// 慢拍内容变更（由采样任务在**内容真的变了**时调用；`ts_ms` 变化不算，见 `section_changed`）。
+    pub fn on_change(&mut self) {
+        self.pending_change = true;
+    }
+
+    /// 下一次应当醒来的时刻：主拍到期 ∪ （有待发布变更时的）合并窗口到期，取较早者。
+    pub fn next_deadline(&self) -> Instant {
+        if self.pending_change {
+            (self.last_publish + self.min_window).min(self.next_main)
+        } else {
+            self.next_main
+        }
+    }
+
+    /// 醒来一次：返回**是否应当发布**（`true` 时内部时刻前推）。
+    pub fn on_wake(&mut self, now: Instant) -> bool {
+        let main_due = now >= self.next_main;
+        let window_due =
+            self.pending_change && now.duration_since(self.last_publish) >= self.min_window;
+        if !main_due && !window_due {
+            return false;
+        }
+        self.last_publish = now;
+        self.pending_change = false;
+        self.next_main = now + self.publish;
+        true
+    }
+}
 
 /// 采集+组帧+发布组件（设计 §4.2 DisplayDataProvider）。
 pub struct DisplayDataProvider {
@@ -47,6 +648,26 @@ pub struct DisplayDataProvider {
     seq: u64,
     /// 最新帧共享存储（与 LoopbackHttpPublisher 共享同一 Arc）。
     latest: SharedLatest,
+    /// 「变更即组帧」合并窗口 ms（`display.min_publish_interval_ms`，设计 §4.2.1 约束 2）。
+    min_publish_interval_ms: u64,
+    /// F6 装置状态源（`None` = 未接线 ⇒ 该段保持 `Default` = 各字段「未知」）。
+    device_source: Option<Arc<dyn DeviceSource>>,
+    /// F7 告警源（`None` = 未接线 ⇒ `available=false` = 「告警源不可用」）。
+    alarm_source: Option<Arc<dyn AlarmSource>>,
+    /// F16 联锁接线形态（三态语义见 [`InterlockWiring`]）。
+    interlock_wiring: InterlockWiring,
+    /// 慢拍节拍 ms（`display.{device,alarm,interlock}_poll_ms`；上界为**时延红线**，见 §4.2.1）。
+    device_poll_ms: u64,
+    alarm_poll_ms: u64,
+    interlock_poll_ms: u64,
+    /// F7 告警条数上限（`display.alarm_page_size`，契约「items ≤10」的组帧侧兜底）。
+    alarm_page_size: usize,
+    /// 慢拍段缓存（采样任务写 / 组帧任务读——**帧路径只读内存**）。
+    caches: SlowCaches,
+    /// 慢拍内容变更唤醒（合并窗口内合并为一次发布）。
+    notify: Arc<Notify>,
+    /// P6 装置信息（**启动时一次性**采集，设计 §6.6「不随数据刷新跳动」）。
+    info: InfoSection,
 }
 
 impl DisplayDataProvider {
@@ -67,14 +688,219 @@ impl DisplayDataProvider {
             modbus_transport,
             seq: 0,
             latest,
+            min_publish_interval_ms: cfg.min_publish_interval_ms,
+            device_source: None,
+            alarm_source: None,
+            interlock_wiring: InterlockWiring::Unwired,
+            // 慢拍节拍下界沿用 publish_ms 的同款守卫（0/极小周期会空耗内核）
+            device_poll_ms: cfg.device_poll_ms.max(50),
+            alarm_poll_ms: cfg.alarm_poll_ms.max(50),
+            interlock_poll_ms: cfg.interlock_poll_ms.max(50),
+            alarm_page_size: cfg.alarm_page_size,
+            caches: SlowCaches::default(),
+            notify: Arc::new(Notify::new()),
+            info: collect_info(),
         }
     }
 
-    /// 后台 1s 采集/组帧/发布主循环（startup 装配 `config.display.enabled` 时 spawn）。
+    /// 接入慢拍四段源（设计 §4.2）。**生产装配必调**——不调则四段保持「不可用」缺省
+    /// （`device` 各字段「未知」/ `alarms.available=false` / `interlock.available=false`），
+    /// 屏显「不可用」而**非**「无告警」「未联锁」。
+    pub fn with_slow_sources(
+        mut self,
+        device: Option<Arc<dyn DeviceSource>>,
+        alarms: Option<Arc<dyn AlarmSource>>,
+        interlock: InterlockWiring,
+    ) -> Self {
+        // `io.enabled=false` 是**已知状态**（功能未启用），构造即写入，不必等首个采样周期——
+        // 否则首 0.5 s 会误显「联锁状态不可用」（与「功能未启用」语义不同）。
+        if let InterlockWiring::Disabled = interlock {
+            let mut g = self
+                .caches
+                .interlock
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *g = InterlockSection {
+                ts_ms: now_ms(),
+                available: true,
+                enabled: false,
+                ..Default::default()
+            };
+        }
+        self.device_source = device;
+        self.alarm_source = alarms;
+        self.interlock_wiring = interlock;
+        self
+    }
+
+    /// 后台主循环（startup 装配 `config.display.enabled` 时 spawn）。
+    ///
+    /// `tokio::join!`：主拍与三路慢拍并发于**同一 task**（随 outer task abort 一同终止，无需
+    /// 额外 guard）。慢拍各自失败各自降级，**不阻塞**主拍（设计 §4.2 / D6）。
     pub async fn run(mut self) {
+        let caches = self.caches.clone();
+        let notify = self.notify.clone();
+        let dev = self.device_source.clone();
+        let alm = self.alarm_source.clone();
+        let ilk = match &self.interlock_wiring {
+            InterlockWiring::Wired(src) => Some(src.clone()),
+            _ => None,
+        };
+        let (dp, ap, ip) = (
+            self.device_poll_ms,
+            self.alarm_poll_ms,
+            self.interlock_poll_ms,
+        );
+        let page_size = self.alarm_page_size;
+        tokio::join!(
+            self.run_publish_loop(),
+            Self::run_device_sampler(dev, caches.device.clone(), notify.clone(), dp),
+            Self::run_alarm_sampler(alm, caches.alarms.clone(), notify.clone(), ap, page_size),
+            Self::run_interlock_sampler(ilk, caches.interlock.clone(), notify, ip),
+        );
+    }
+
+    /// 一次慢拍循环体（三路共用）：取新段 → 与旧段比 **展示内容**（`ts_ms` 除外，见
+    /// [`device_changed`] 等）→ 写缓存 → 内容变才唤醒组帧。抽成独立函数便于测试**确定性**
+    /// 驱动（免 sleep，设计 §4.2.1「以假时钟推进」）。
+    ///
+    /// 返回「内容是否变化」（仅供测试判别；生产循环不关心）。
+    async fn slow_tick<T, Fut>(
+        cache: &RwLock<T>,
+        notify: &Notify,
+        fetch: Fut,
+        changed: fn(&T, &T) -> bool,
+    ) -> bool
+    where
+        T: Clone,
+        Fut: std::future::Future<Output = T>,
+    {
+        let fresh = fetch.await;
+        let changed = {
+            let mut g = cache.write().unwrap_or_else(|e| e.into_inner());
+            let c = changed(&g, &fresh);
+            *g = fresh;
+            c
+        };
+        if changed {
+            notify.notify_one();
+        }
+        changed
+    }
+
+    /// 主拍循环：`PublishPacer` 决定何时组帧——主拍到期 ∪ 慢拍变更（受合并窗口约束）。
+    async fn run_publish_loop(&mut self) {
+        let mut pacer = PublishPacer::new(
+            Instant::now(),
+            self.publish_ms,
+            self.min_publish_interval_ms,
+        );
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(self.publish_ms)).await;
-            self.sample_once().await;
+            let deadline = tokio::time::Instant::from_std(pacer.next_deadline());
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {}
+                _ = self.notify.notified() => {
+                    pacer.on_change();
+                    continue; // 重新计算到期时刻（合并窗口可能更早）
+                }
+            }
+            if pacer.on_wake(Instant::now()) {
+                self.sample_once().await;
+            }
+        }
+    }
+
+    /// 慢拍 A：装置状态（设计 §4.2 表 A 行）。
+    async fn run_device_sampler(
+        src: Option<Arc<dyn DeviceSource>>,
+        cache: Arc<RwLock<DeviceSection>>,
+        notify: Arc<Notify>,
+        period_ms: u64,
+    ) {
+        let Some(src) = src else { return }; // 未接线：缓存保持 Default（字段「未知」）
+        let period = std::time::Duration::from_millis(period_ms);
+        loop {
+            Self::slow_tick(&cache, &notify, src.read_device(), device_changed).await;
+            tokio::time::sleep(period).await;
+        }
+    }
+
+    /// 慢拍 B：告警（设计 §4.2 表 B 行）。`Err` ⇒ `available=false`（「告警源不可用」，EDGE-09）。
+    async fn run_alarm_sampler(
+        src: Option<Arc<dyn AlarmSource>>,
+        cache: Arc<RwLock<AlarmsSection>>,
+        notify: Arc<Notify>,
+        period_ms: u64,
+        page_size: usize,
+    ) {
+        let Some(src) = src else { return };
+        let period = std::time::Duration::from_millis(period_ms);
+        loop {
+            let fresh = Self::sample_alarms(src.as_ref(), page_size).await;
+            Self::slow_tick(&cache, &notify, async { fresh }, alarms_changed).await;
+            tokio::time::sleep(period).await;
+        }
+    }
+
+    /// 告警段**单次采集**：`Err` ⇒ `available=false`（「告警源不可用」，EDGE-09）。
+    async fn sample_alarms(src: &dyn AlarmSource, page_size: usize) -> AlarmsSection {
+        match src.read_alarms().await {
+            Ok(items) => {
+                let mut sec = AlarmsSection {
+                    ts_ms: now_ms(),
+                    available: true, // 源可用（哪怕 0 条 = 真「无告警」）
+                    items,
+                };
+                // 契约「items ≤ `alarm_page_size`」的**组帧侧兜底**（源实现亦已截断）：
+                // `cap_items` 只截断、**不动 `available`**——「源不可用」与「条目被裁到上限」
+                // 是两个语义（EDGE-09）。
+                sec.cap_items(page_size);
+                sec
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    "display 告警源读取失败: {reason}（本段置不可用，屏显「告警源不可用」）"
+                );
+                AlarmsSection {
+                    ts_ms: now_ms(),
+                    available: false,
+                    items: Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// 慢拍 C：联锁（设计 §4.2 表 C 行）。`Err` ⇒ `available=false`（「联锁状态不可用」，
+    /// **不是**「未联锁」，IL-01.6）。
+    async fn run_interlock_sampler(
+        src: Option<Arc<dyn InterlockSource>>,
+        cache: Arc<RwLock<InterlockSection>>,
+        notify: Arc<Notify>,
+        period_ms: u64,
+    ) {
+        let Some(src) = src else { return };
+        let period = std::time::Duration::from_millis(period_ms);
+        loop {
+            let fresh = Self::sample_interlock(src.as_ref()).await;
+            Self::slow_tick(&cache, &notify, async { fresh }, interlock_changed).await;
+            tokio::time::sleep(period).await;
+        }
+    }
+
+    /// 联锁段**单次采集**：`Err` ⇒ `available=false`（「联锁状态不可用」，**不是**「未联锁」）。
+    async fn sample_interlock(src: &dyn InterlockSource) -> InterlockSection {
+        match src.read_interlock().await {
+            Ok(sec) => sec,
+            Err(reason) => {
+                tracing::warn!(
+                    "display 联锁状态源读取失败: {reason}（本段置不可用，屏显「联锁状态不可用」）"
+                );
+                InterlockSection {
+                    ts_ms: now_ms(),
+                    available: false,
+                    ..Default::default()
+                }
+            }
         }
     }
 
@@ -155,15 +981,31 @@ impl DisplayDataProvider {
             p_total,
             i_phase,
             inconsistency,
-            // v2 契约新增四段：真实采集由工作单元 F（mupcd `display_host` 四段慢拍采集）接线。
-            // 当前显式置 `Default` = 「不可用」语义（`available=false`）→ 屏显「不可用」，
-            // **不得**显「无告警」/补 0（PRD EDGE-09 / F1.4 / §9 边界）。
-            // 刻意**不**用 `..Default::default()`：契约将来再加字段时应继续编译报错、必须显式处置。
-            device: Default::default(),
-            alarms: Default::default(),
-            info: Default::default(),
-            interlock: Default::default(),
+            // ── v2 四段：读**内存缓存**（慢拍任务写，本路径零阻塞 I/O、零 DB 查询，§2.1/D6）──
+            // 各段均带自己的采集时刻与可用性；未采集/未接线时保持 `Default`——即
+            // `alarms.available=false`（「告警源不可用」）/ `interlock.available=false`
+            // （「联锁状态不可用」）/ 装置字段「未知」，**绝不**退化成「无告警」「未联锁」
+            // （PRD EDGE-09 / IL-01.6 / F1.4 / §9 边界）。
+            device: self.device(),
+            alarms: self.alarms(),
+            info: self.info.clone(),
+            interlock: self.interlock(),
         }
+    }
+
+    /// F6 装置段（缓存快照；`info` 之外唯一来源）。
+    fn device(&self) -> DeviceSection {
+        read_cache(&self.caches.device)
+    }
+
+    /// F7 告警段（缓存快照）。
+    fn alarms(&self) -> AlarmsSection {
+        read_cache(&self.caches.alarms)
+    }
+
+    /// F16 联锁段（缓存快照）。
+    fn interlock(&self) -> InterlockSection {
+        read_cache(&self.caches.interlock)
     }
 
     /// 一段三相读数 → [Field;3]：段缺失全打 missing（Offline/NotRead）；元素量程/有限性校验
@@ -271,10 +1113,21 @@ impl LoopbackHttpPublisher {
         let (status, body) = if method == "GET" && path == LATEST_PATH {
             match frame {
                 // O4：序列化失败明确 500 + 空体（原实现 200 + 空体，对端会当成功帧却解不出）。
-                Some(f) => match serde_json::to_vec(&f) {
+                // 走契约的 `to_json_slice`（**不得**裸 `serde_json::to_vec`）：契约 §3.5 条 3 的
+                // 编码侧守卫要求发布方先自检（逐条告警长度 ≤1 KiB、整帧 ≤64 KiB）。
+                //
+                // ⚠️ **实测事实（2026-09-16 订正，勿再引"HMI 端整帧丢弃"）**：HMI 侧的帧解码是
+                // **裸 `serde_json::from_slice`**（`crates/local-display/src/channel.rs:450`），
+                // **不经**契约的严格解码器 ⇒ HMI 只受**传输层 64 KiB**（`channel.rs:78/:675`）
+                // 限制，不会因单条告警超 1 KiB 就丢帧。故本守卫的真实覆盖面是：
+                // ① 整帧 >64 KiB —— **改进**（此前 200 发出去 HMI 必丢，现改 500 响亮失败）；
+                // ② 单条告警 >1 KiB —— 若只靠本守卫就是**净回退**（把**局部**超限放大成**整帧**
+                //    不可用、画面冻在旧帧）；该半边已在 ingest 侧截断（见 `truncate_alarm_message`）
+                //    予以消除，**本守卫只作纯兜底**（防 JSON 转义膨胀等本层未覆盖的膨胀源）。
+                Some(f) => match f.to_json_slice() {
                     Ok(b) => ("200 OK", b),
                     Err(e) => {
-                        tracing::warn!("display 帧序列化失败: {e}（应答 500，不计为成功帧）");
+                        tracing::warn!("display 帧编码失败: {e}（应答 500，不计为成功帧）");
                         ("500 Internal Server Error", Vec::new())
                     }
                 },
@@ -668,5 +1521,1182 @@ mod tests {
         assert_eq!(r.total_power_max_kw, 300.0);
         assert_eq!(r.pcs_total_rated_kw, 60.0);
         assert_eq!(r.inconsistency_threshold_kw, 3.0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 慢拍四段（设计 §4.2；工作单元 F）
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // 本段用例外**只断言** v2 四段与节拍机制；上方既有 9 条（v1 字段 + HTTP 通路）不动。
+
+    use mupc_display_proto::{
+        AlarmItem, AlarmLevel, ControlSource, InterlockSourceItem, LinkState, ServiceScope,
+    };
+    use mupc_storage::{EventRepository, StorageError, SystemEvent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    // ── 桩源：调用计数 + 可改内容 + 可失败（三路各自独立）──
+
+    /// 装置段桩。
+    ///
+    /// **`ts_ms` 每次读自增**（`1 + 调用序号`），刻意与生产口径一致（真源每拍填采集时刻）。
+    /// 这使「`ts_ms` 不计入内容变更判据」这条**在集成层真的被钉死**：把 `ts_ms` 计入
+    /// [`device_changed`] ⇒ `run_does_not_republish_when_slow_content_unchanged` 立即变红
+    /// （此前桩恒返回 `ts_ms=1`，该用例的注释与实现不符、实际没钉住这条）。
+    struct StubDevice {
+        calls: Arc<AtomicUsize>,
+        section: Arc<Mutex<DeviceSection>>,
+        delay: Duration,
+    }
+
+    impl StubDevice {
+        fn new(section: DeviceSection) -> Self {
+            Self::slow(section, Duration::ZERO)
+        }
+        fn slow(section: DeviceSection, delay: Duration) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                section: Arc::new(Mutex::new(section)),
+                delay,
+            }
+        }
+        fn set(&self, s: DeviceSection) {
+            *self.section.lock().unwrap() = s;
+        }
+        fn count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DeviceSource for StubDevice {
+        async fn read_device(&self) -> DeviceSection {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            let mut s = self.section.lock().unwrap().clone();
+            // 每拍必变（模仿生产「真源每拍填采集时刻」）；**不得**被内容变更判据採纳
+            s.ts_ms = 1 + n as u64;
+            s
+        }
+    }
+
+    /// 告警段桩：`Err` 表示源读失败。
+    struct StubAlarms {
+        calls: Arc<AtomicUsize>,
+        result: Arc<Mutex<Result<Vec<AlarmItem>, String>>>,
+    }
+
+    impl StubAlarms {
+        fn ok(items: Vec<AlarmItem>) -> Self {
+            Self::new(Ok(items))
+        }
+        fn failing(reason: &str) -> Self {
+            Self::new(Err(reason.to_string()))
+        }
+        fn new(result: Result<Vec<AlarmItem>, String>) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Arc::new(Mutex::new(result)),
+            }
+        }
+        fn count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AlarmSource for StubAlarms {
+        async fn read_alarms(&self) -> Result<Vec<AlarmItem>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.lock().unwrap().clone()
+        }
+    }
+
+    /// 联锁段桩：`Err` 表示源读失败。
+    struct StubInterlock {
+        calls: Arc<AtomicUsize>,
+        result: Arc<Mutex<Result<InterlockSection, String>>>,
+    }
+
+    impl StubInterlock {
+        fn ok(sec: InterlockSection) -> Self {
+            Self::new(Ok(sec))
+        }
+        fn failing(reason: &str) -> Self {
+            Self::new(Err(reason.to_string()))
+        }
+        fn new(result: Result<InterlockSection, String>) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                result: Arc::new(Mutex::new(result)),
+            }
+        }
+        fn count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl InterlockSource for StubInterlock {
+        async fn read_interlock(&self) -> Result<InterlockSection, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result.lock().unwrap().clone()
+        }
+    }
+
+    /// 内存 `EventRepository`：`query_range` 按**插入顺序**返回（非倒序）——用于证明
+    /// 采集层自己排序，不依赖存储实现的具体顺序（该顺序非 trait 契约）。
+    #[derive(Default)]
+    struct FakeEventRepo {
+        rows: Arc<Mutex<Vec<SystemEvent>>>,
+        fail: bool,
+    }
+
+    impl FakeEventRepo {
+        fn with_event(&self, ts: chrono::DateTime<chrono::Utc>, event_type: &str, msg: &str) {
+            self.rows.lock().unwrap().push(SystemEvent {
+                id: None,
+                timestamp: ts,
+                event_type: event_type.to_string(),
+                source: "test".to_string(),
+                message: msg.to_string(),
+            });
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventRepository for FakeEventRepo {
+        async fn insert(&self, event: &SystemEvent) -> Result<i64, StorageError> {
+            let mut g = self.rows.lock().unwrap();
+            g.push(event.clone());
+            Ok(g.len() as i64)
+        }
+        async fn query_range(
+            &self,
+            start: chrono::DateTime<chrono::Utc>,
+            end: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<SystemEvent>, StorageError> {
+            if self.fail {
+                return Err(StorageError::DatabaseError("fake: 查询失败".into()));
+            }
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.timestamp >= start && e.timestamp <= end)
+                .cloned()
+                .collect())
+        }
+        async fn purge_older_than(
+            &self,
+            _before: chrono::DateTime<chrono::Utc>,
+        ) -> Result<usize, StorageError> {
+            Ok(0)
+        }
+        async fn latest_by_type(
+            &self,
+            _event_type: &str,
+        ) -> Result<Option<SystemEvent>, StorageError> {
+            Ok(None)
+        }
+    }
+
+    /// 联锁 `InterlockApi` 桩（web-api 形态）。
+    struct FakeInterlockApi(mupc_web_api::app_state::InterlockStatus);
+
+    #[async_trait::async_trait]
+    impl mupc_web_api::app_state::InterlockApi for FakeInterlockApi {
+        async fn status(&self) -> mupc_web_api::app_state::InterlockStatus {
+            self.0.clone()
+        }
+        async fn request_release(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn ack_m1(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    // ── 通用辅助 ──
+
+    /// 带节拍参数的配置（测试用小周期，避免用例真等秒级）。
+    fn cfg_slow(publish_ms: u64, min_window_ms: u64, poll_ms: u64) -> DisplayConfig {
+        DisplayConfig {
+            publish_ms,
+            min_publish_interval_ms: min_window_ms,
+            device_poll_ms: poll_ms,
+            alarm_poll_ms: poll_ms,
+            interlock_poll_ms: poll_ms,
+            ..Default::default()
+        }
+    }
+
+    /// 空载 provider（三相/run_state 全缺，四段未接线）。
+    fn bare_provider(c: &DisplayConfig) -> DisplayDataProvider {
+        DisplayDataProvider::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            stub_client(None, true, None),
+            c,
+            true,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    /// 轮询 `latest` 直到有帧或超时（真实时钟；仅用于 run 级联调用例）。
+    async fn wait_for_frame(latest: &SharedLatest, within: Duration) -> Option<DisplayFrame> {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if let Some(f) = latest.lock().unwrap().clone() {
+                return Some(f);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        latest.lock().unwrap().clone()
+    }
+
+    fn alarm(msg: &str) -> AlarmItem {
+        AlarmItem {
+            ts_ms: 1,
+            level: AlarmLevel::Info,
+            message: msg.to_string(),
+        }
+    }
+
+    // ── A 装置段（F6）──
+
+    /// 装置源：intercore 在线 → `Connected` / 离线 → `Disconnected`；**`hmi_channel` 恒
+    /// `Unknown`**（设计 §5.5：由 HMI 本地覆盖，服务端不得自称已知——否则是"由服务端报告
+    /// 客户端自己的连接状态"的语义倒置）；`iec104` 无真源 ⇒ `Unknown`（F6.5 允许「未知」，
+    /// **不得**显为「正常」）。
+    #[tokio::test]
+    async fn device_source_links_and_hmi_channel_never_faked() {
+        let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
+        let online = SystemDeviceSource::new(
+            stub_client(None, true, None),
+            ai.clone(),
+            Instant::now(),
+        );
+        let d = online.read_device().await;
+        assert_eq!(d.intercore, LinkState::Connected);
+        assert_eq!(
+            d.hmi_channel,
+            LinkState::Unknown,
+            "hmi_channel 必须 Unknown（HMI 侧本地覆盖）；服务端自称 Connected 即为语义倒置"
+        );
+        assert_eq!(d.iec104, LinkState::Unknown, "无链路状态真源 ⇒「未知」");
+        assert!(d.uptime_secs.is_some(), "uptime 真源存在（零点由调用方传入）");
+        assert_ne!(d.hmi_channel, LinkState::Connected, "缺省/不可得绝不落在已连接");
+
+        let offline =
+            SystemDeviceSource::new(stub_client(None, false, None), ai, Instant::now());
+        assert_eq!(offline.read_device().await.intercore, LinkState::Disconnected);
+    }
+
+    /// **uptime 零点必须来自调用方传入的进程起点，而不是本结构体的构造时刻**（设计 §4.1
+    /// 明写「以 `mupcd` 进程启动时刻为准」）。
+    ///
+    /// 生产零点取自 `main()` 入口最顶部，而构造点落在 `initialize_all` 完成 DB / intercore /
+    /// gateway / AI / security 全部装配**之后** ⇒ 若以构造时刻为零点，屏上 uptime 会**系统性
+    /// 偏小**（偏差 = 启动装配耗时，屏上不可察觉、无任何证据支撑"约 1 s 内"的说法）。
+    ///
+    /// **改什么会让本条变红**：把 `Self { started_at, .. }` 写回 `started_at: Instant::now()`
+    /// （即忽略传入零点）⇒ 传入 1 h 前的人工零点后 `uptime_secs` 会退化为 ~0 < 3600 ⇒ 红。
+    #[tokio::test]
+    async fn device_source_uptime_uses_injected_process_start_not_ctor_time() {
+        let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
+        // 人工零点：1 小时前（模拟"进程已启动 1 h"）。绝不依赖真实进程起点。
+        let zero = Instant::now() - Duration::from_secs(3600);
+        let src = SystemDeviceSource::new(stub_client(None, true, None), ai, zero);
+        let up = src.read_device().await.uptime_secs.expect("uptime 真源存在");
+        assert!(
+            (3600..3600 + 60).contains(&up),
+            "uptime 必须按**传入零点**计（1 h 前 ⇒ ≈3600 s）；按构造时刻计会得到 ~0。实际 {up}"
+        );
+    }
+
+    /// 控制源：本地优先已置位 ⇒ `LocalStrategy`；否则 AI 引擎未加载 ⇒ `AiDisabled`；
+    /// 两者皆不成立 ⇒ `Unknown`（**不臆造**下发源）。
+    #[tokio::test]
+    async fn device_source_control_source_never_invents() {
+        let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
+        let src = SystemDeviceSource::new(
+            stub_client(None, true, None),
+            ai.clone(),
+            Instant::now(),
+        );
+        // 默认：local_priority=false 且 ModelStatus::Unloaded（AI 停用期实态）
+        assert_eq!(
+            src.read_device().await.control_source,
+            ControlSource::AiDisabled
+        );
+        ai.set_local_priority(true).await;
+        assert_eq!(
+            src.read_device().await.control_source,
+            ControlSource::LocalStrategy
+        );
+    }
+
+    /// 非 Linux 目标：**不采信** system-monitor 的硬编码桩值（温度 48.0℃ / 内存 8192MB-50%，
+    /// `crates/system-monitor/src/collectors.rs:186-196/291-299`）⇒ `None`（屏显「未知」）。
+    /// 反过来说：本用例若变红，说明有人把桩值直接采信上屏了。
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn device_source_no_stub_metrics_on_non_linux() {
+        let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
+        let d = SystemDeviceSource::new(stub_client(None, true, None), ai, Instant::now())
+            .read_device()
+            .await;
+        assert_eq!(d.cpu_temp_c, None, "非 Linux 无真温度源 ⇒「未知」，不得上桩值");
+        assert_eq!(d.mem_used_pct, None, "非 Linux 无真内存源 ⇒「未知」，不得上桩值");
+    }
+
+    // ── P6 装置信息（F8，来源分列）──
+
+    /// 版本/编译时间取**编译期真源**；序列号**无真源恒 `None`**（不臆造）；`service_scope`
+    /// 恒 `LoopbackOnly`（与 `mgmt_ipv4` 分列，EDGE-24）；型号只在设备树存在时给值。
+    #[test]
+    fn info_section_sources_are_explicit() {
+        let info = collect_info();
+        assert_eq!(info.firmware_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            info.build_time.is_some(),
+            "build.rs 已注入 BUILD_TIMESTAMP_EPOCH ⇒ 编译时间应可得（取不到即「未提供」属降级，不是预期）"
+        );
+        assert_eq!(info.serial, None, "序列号无可靠真源 ⇒「未提供」，不得臆造");
+        assert_eq!(info.service_scope, ServiceScope::LoopbackOnly);
+        assert_eq!(
+            info.model.is_some(),
+            std::path::Path::new("/proc/device-tree/model").exists(),
+            "型号只应来自设备树（存在才给值）"
+        );
+        if let Some(ip) = &info.mgmt_ipv4 {
+            assert!(
+                ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a| !a.is_loopback()),
+                "管理 IP 不得是回环地址: {ip}"
+            );
+        }
+    }
+
+    /// 编译时间戳：必须能被 `chrono` 解析为 RFC3339（不是任意字符串），且可复现
+    /// （`SOURCE_DATE_EPOCH` 优先由 build.rs 落实）。
+    #[test]
+    fn build_time_is_rfc3339() {
+        let ts = build_time_rfc3339().expect("build.rs 注入的 BUILD_TIMESTAMP_EPOCH 应可解析");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&ts).is_ok(),
+            "编译时间戳须为 RFC3339：{ts}"
+        );
+    }
+
+    /// `info.build_time` 的**「不可得 ⇒ `None`」**口径（EDGE-16）：**绝不**补 0 伪装成
+    /// 1970-01-01 这一**合法**值上屏（「显 `--`、严禁补 0」）。
+    ///
+    /// **改什么会让本条变红**：把 [`build_time_from_raw`] 的 `raw?` / `.parse().ok()?` 换成
+    /// `.unwrap_or(0)` 一类补 0 写法（本单元整改前的 `build.rs` 形态）⇒ 前三条 `None` 断言
+    /// 立即红。合法时间戳一条同时钉死「可解析的输入仍须正常格式化」（不是一律返回 `None`）。
+    #[test]
+    fn build_time_none_when_epoch_absent_or_malformed() {
+        assert_eq!(
+            build_time_from_raw(None),
+            None,
+            "变量缺失 ⇒ 「未提供」，**不得**补 0 伪装成 1970-01-01"
+        );
+        assert_eq!(
+            build_time_from_raw(Some("not-a-number")),
+            None,
+            "非数字 ⇒ 「未提供」（不得补 0）"
+        );
+        assert_eq!(
+            build_time_from_raw(Some("   ")),
+            None,
+            "空白 ⇒ 「未提供」（不得补 0）"
+        );
+        assert_eq!(
+            build_time_from_raw(Some("1757412000")).as_deref(),
+            Some("2025-09-09T10:00:00+00:00"),
+            "合法秒级时间戳 ⇒ 正常格式化为 RFC3339（可复现）"
+        );
+    }
+
+    /// 管理 IP：要么是**非回环** IPv4，要么 `None`（「未提供」）——绝不臆造、绝不给回环。
+    #[test]
+    fn mgmt_ipv4_is_non_loopback_or_absent() {
+        if let Some(ip) = primary_ipv4() {
+            assert!(!ip.is_loopback(), "管理 IP 不得为回环地址: {ip}");
+        }
+    }
+
+    /// 事件类型 → 级别的显式规则（设计未定义映射，故本表即实现依据）。
+    #[test]
+    fn alarm_level_mapping_is_explicit() {
+        assert_eq!(alarm_level_of("south_station.s1.offline"), AlarmLevel::Error);
+        assert_eq!(alarm_level_of("interlock.triggered"), AlarmLevel::Error);
+        assert_eq!(alarm_level_of("interlock.stop_failed"), AlarmLevel::Error);
+        assert_eq!(alarm_level_of("interlock.cleared"), AlarmLevel::Info);
+        assert_eq!(alarm_level_of("south_station.s1.online"), AlarmLevel::Info);
+        assert_eq!(alarm_level_of("interlock.stopped"), AlarmLevel::Info);
+        // 未知类型兜底 Warn（既不静默降为 INFO，也不冒称 ERROR）
+        assert_eq!(alarm_level_of("some.new.type"), AlarmLevel::Warn);
+    }
+
+    // ── B 告警段（F7）──
+
+    /// `storage.events` → 时间**倒序** + 截断到 `alarm_page_size`（插库顺序为升序，若采集层不
+    /// 自己排序，本用例会取到最旧的 10 条而变红）。
+    #[tokio::test]
+    async fn alarm_source_newest_first_and_capped() {
+        let repo = Arc::new(FakeEventRepo::default());
+        let now = chrono::Utc::now();
+        for i in 0..15 {
+            repo.with_event(
+                now - chrono::Duration::seconds(15 - i),
+                "south_station.s1.offline",
+                &format!("事件{i}"),
+            );
+        }
+        let src = StorageAlarmSource::new(repo, 10);
+        let items = src.read_alarms().await.unwrap();
+        assert_eq!(items.len(), 10, "须截断到 alarm_page_size");
+        assert_eq!(items[0].message, "事件14", "首条须是最新（时间倒序）");
+        assert!(
+            items.windows(2).all(|w| w[0].ts_ms >= w[1].ts_ms),
+            "必须时间倒序: {:?}",
+            items.iter().map(|i| i.ts_ms).collect::<Vec<_>>()
+        );
+        assert_eq!(items[0].level, AlarmLevel::Error, "offline → ERROR");
+        assert_eq!(
+            items[0].ts_ms,
+            (now - chrono::Duration::seconds(1)).timestamp_millis() as u64,
+            "ts_ms 取**事件时间**（非采集时间）"
+        );
+    }
+
+    /// 回溯窗口外的旧事件不上屏（有界化落地；窗口内为空 ⇒ `available` 仍为 `true` = 真「无告警」）。
+    #[tokio::test]
+    async fn alarm_source_respects_lookback_window() {
+        let repo = Arc::new(FakeEventRepo::default());
+        let now = chrono::Utc::now();
+        repo.with_event(now - chrono::Duration::days(30), "old.event", "很久以前");
+        repo.with_event(now - chrono::Duration::minutes(1), "new.event", "刚刚");
+        let items = StorageAlarmSource::new(repo, 10).read_alarms().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].message, "刚刚");
+    }
+
+    /// **本单元最重要的语义网之一**：告警**源不可用 ≠ 无告警**。
+    /// 查询失败 ⇒ `available=false` + 空列表（屏显「告警源不可用」）；真 0 条 ⇒ `available=true`
+    /// + 空列表（屏显「无告警」）。二者**同形不同义**，只能靠 `available` 区分（EDGE-09）。
+    #[tokio::test]
+    async fn alarm_source_failure_is_unavailable_not_empty() {
+        let failing = StubAlarms::failing("db 挂了");
+        let empty = StubAlarms::ok(Vec::new());
+
+        let unavail = DisplayDataProvider::sample_alarms(&failing, 10).await;
+        let none = DisplayDataProvider::sample_alarms(&empty, 10).await;
+
+        assert!(!unavail.available, "读失败 ⇒ 源不可用");
+        assert!(unavail.items.is_empty());
+        assert!(none.available, "真 0 条 ⇒ 源可用（「无告警」）");
+        assert!(none.items.is_empty(), "两者 items 同为空 ⇒ 唯有 available 能区分语义");
+        assert_ne!(unavail.available, none.available);
+    }
+
+    /// 组帧级：未接线（无告警源）时帧内 `alarms.available=false`，**绝不**退化成「无告警」。
+    #[tokio::test]
+    async fn frame_alarms_unwired_is_unavailable_not_empty() {
+        let mut p = bare_provider(&cfg());
+        let f = p.sample_once().await;
+        assert!(!f.alarms.available, "未接线 ⇒「告警源不可用」，不是「无告警」");
+        assert!(f.alarms.items.is_empty());
+        assert_eq!(f.alarms.ts_ms, 0, "未采集 ⇒ ts_ms=0（契约：0 = 未采集）");
+    }
+
+    /// 源返回超过上限的条数 ⇒ 组帧侧兜底截断，且**不动 `available`**（EDGE-09 的另一半：
+    /// 「条目被裁到上限」也不是「源不可用」）。
+    #[tokio::test]
+    async fn alarm_sampler_caps_items_without_touching_available() {
+        let src = StubAlarms::ok((0..15).map(|i| alarm(&format!("a{i}"))).collect());
+        let sec = DisplayDataProvider::sample_alarms(&src, 10).await;
+        assert_eq!(sec.items.len(), 10);
+        assert!(sec.available, "截断不得改动 available");
+    }
+
+    /// **超长告警消息不得把整帧顶废**（本单元**重要 2** 的整改网）。
+    ///
+    /// ① ingest 侧（[`truncate_alarm_message`]）把消息截到 [`MAX_ALARM_MESSAGE_BYTES`] 内且
+    /// **带可见截断标记**（ASCII `...`，见 [`ALARM_TRUNCATION_MARK`]——`…` U+2026 不在生成
+    /// 字体 cmap 内，屏上是豆腐块）⇒ ② 发布**成功**（不再 500）⇒ ③ 帧仍可被 HMI 侧解码
+    /// （`serde_json` 往返；HMI `channel.rs:450` 走的就是裸 `serde_json::from_slice`）。
+    ///
+    /// **改什么会让本条变红**：把 `alarm_item_of` 里的 `truncate_alarm_message` 去掉 ⇒ 单条
+    /// 2 KiB 消息原样进帧 ⇒ ①（`len ≤ 上限`）与 `to_json_slice()` 双双失败 ⇒ 红。
+    #[tokio::test]
+    async fn oversized_alarm_message_truncated_in_ingest_frame_still_publishes() {
+        let repo = Arc::new(FakeEventRepo::default());
+        // 2 KiB 纯 ASCII 消息（远超 MAX_ALARM_MESSAGE_BYTES = 1 KiB）
+        let long = "x".repeat(2 * mupc_display_proto::MAX_ALARM_MESSAGE_BYTES);
+        repo.with_event(chrono::Utc::now(), "south_station.s1.offline", &long);
+
+        // ① ingest 侧：经 StorageAlarmSource（`alarm_item_of` 的唯一生产入口）截断 + 带标记
+        let src = StorageAlarmSource::new(repo, 10);
+        let items = src.read_alarms().await.unwrap();
+        assert_eq!(items.len(), 1);
+        let msg = &items[0].message;
+        assert!(
+            msg.len() <= mupc_display_proto::MAX_ALARM_MESSAGE_BYTES,
+            "ingest 侧须把消息截到上限内（实际 {} B）",
+            msg.len()
+        );
+        assert!(
+            msg.ends_with(ALARM_TRUNCATION_MARK),
+            "截断必须**可见**（尾部标记 `{ALARM_TRUNCATION_MARK}`），不得静默丢字：{msg:?}"
+        );
+        assert_eq!(
+            msg.len(),
+            mupc_display_proto::MAX_ALARM_MESSAGE_BYTES,
+            "应恰好填满上限（标记已计入预算）"
+        );
+        assert_eq!(items[0].level, AlarmLevel::Error, "截断不得改动级别映射");
+
+        // ② 发布侧：把该段放进真帧 ⇒ 编码**成功**（不再 500）
+        let mut frame = sample_frame(Some(50.0));
+        frame.alarms = AlarmsSection {
+            ts_ms: 1,
+            available: true,
+            items: items.clone(),
+        };
+        let body = frame
+            .to_json_slice()
+            .expect("ingest 已截断 ⇒ 整帧必须恒可编码（不再 500）");
+
+        // ②' 同一帧真过一遍回环发布端：应答必须是 200（`handle` 的 500/200 判据正是
+        //     `to_json_slice` 的成败）
+        let latest: SharedLatest = Arc::new(Mutex::new(Some(frame.clone())));
+        let publisher = LoopbackHttpPublisher::new(latest);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve = tokio::spawn(publisher.serve(listener));
+        let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", LATEST_PATH);
+        let resp = connect_and_get(addr, &req).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "ingest 已截断 ⇒ 必须 200（不再整帧 500）：{text:?}"
+        );
+        serve.abort();
+
+        // ③ 往返：裸 `serde_json`（HMI 侧同款解码路径）与契约严格解码器**都能解出**
+        let back: DisplayFrame = serde_json::from_slice(&body).expect("HMI 裸 serde_json 须可解");
+        assert_eq!(back.alarms.items[0].message, items[0].message);
+        let strict = DisplayFrame::from_json_slice(&body).expect("契约严格解码器须可解");
+        assert_eq!(strict.alarms.items[0].message, items[0].message);
+    }
+
+    /// 截断按**字符边界**回退，绝不切断多字节 UTF-8（中文消息超限时不得 panic / 出乱码）。
+    #[test]
+    fn alarm_message_truncation_is_char_boundary_safe() {
+        let long = "台区".repeat(mupc_display_proto::MAX_ALARM_MESSAGE_BYTES); // 每字 3 B
+        let out = truncate_alarm_message(&long);
+        assert!(out.len() <= mupc_display_proto::MAX_ALARM_MESSAGE_BYTES);
+        assert!(out.ends_with(ALARM_TRUNCATION_MARK));
+        let kept = &out[..out.len() - ALARM_TRUNCATION_MARK.len()];
+        assert!(kept.chars().all(|c| c == '台' || c == '区'), "不得截出半个汉字");
+        // 恰好等于上限 ⇒ 不动
+        let exact = "x".repeat(mupc_display_proto::MAX_ALARM_MESSAGE_BYTES);
+        assert_eq!(truncate_alarm_message(&exact), exact);
+    }
+
+    // ── C 联锁段（F16）──
+
+    /// `InterlockStatus` → 契约段逐字段映射（含 `release_hold_secs` 来自 io 配置）。
+    #[tokio::test]
+    async fn interlock_status_maps_every_field() {
+        let api: Arc<dyn mupc_web_api::app_state::InterlockApi> =
+            Arc::new(FakeInterlockApi(mupc_web_api::app_state::InterlockStatus {
+                enabled: true,
+                latched: true,
+                stop_failed: true,
+                sources: vec![mupc_web_api::app_state::InterlockSourceStatus {
+                    name: "estop".into(),
+                    tripped: true,
+                }],
+                fault_lamp: true,
+                run_lamp: false,
+            }));
+        let src = InterlockApiSource::new(api, 30);
+        let sec = src.read_interlock().await.unwrap();
+        assert!(sec.available, "能取到 status() ⇒ 源可用");
+        assert!(sec.enabled && sec.latched && sec.stop_failed);
+        assert_eq!(sec.release_hold_secs, 30, "来自 io.release_hold_secs");
+        assert_eq!(
+            sec.sources,
+            vec![InterlockSourceItem {
+                name: "estop".into(),
+                tripped: true
+            }]
+        );
+        assert_eq!(sec.fault_lamp, Some(true));
+        assert_eq!(sec.run_lamp, Some(false));
+        assert!(sec.ts_ms > 0, "ts_ms 为采集时刻");
+    }
+
+    /// **本单元最重要的语义网之二**：联锁**状态不可用 ≠ 未联锁**。
+    /// 读取失败 ⇒ `available=false`（屏显「联锁状态不可用」），`latched` 同为 false；真「未联锁」
+    /// ⇒ `available=true` + `latched=false`。二者**同形不同义**（IL-01.6 / EDGE-12）。
+    #[tokio::test]
+    async fn interlock_failure_is_unavailable_not_unlatched() {
+        let failing = StubInterlock::failing("io 句柄丢失");
+        let unlatched = StubInterlock::ok(InterlockSection {
+            ts_ms: 1,
+            available: true,
+            enabled: true,
+            latched: false,
+            ..Default::default()
+        });
+
+        let unavail = DisplayDataProvider::sample_interlock(&failing).await;
+        let ok = DisplayDataProvider::sample_interlock(&unlatched).await;
+
+        assert!(!unavail.available, "读失败 ⇒ 状态不可用");
+        assert!(!unavail.latched);
+        assert!(ok.available, "真「未联锁」⇒ 源可用");
+        assert!(!ok.latched);
+        assert_ne!(
+            unavail.available, ok.available,
+            "同为 latched=false，唯有 available 能区分「不可用」与「未联锁」"
+        );
+    }
+
+    /// `io.enabled=false` ⇒ **已知状态**「联锁功能未启用」：`available=true, enabled=false`
+    /// （设计 §4.2 表 C 行）。**不得**写成 `available=false`（那是「源不可用」，语义不同），
+    /// 也**不得**写成 `available=true, enabled=true, latched=false`（那是「未联锁」）。
+    #[tokio::test]
+    async fn interlock_disabled_is_known_state_not_unavailable() {
+        let mut p = bare_provider(&cfg()).with_slow_sources(
+            None,
+            None,
+            InterlockWiring::Disabled,
+        );
+        let f = p.sample_once().await;
+        assert!(f.interlock.available, "「功能未启用」是已知状态，不是「不可用」");
+        assert!(!f.interlock.enabled);
+        assert!(!f.interlock.latched);
+        assert_eq!(f.interlock.sources, Vec::<InterlockSourceItem>::new());
+        assert_eq!(f.interlock.fault_lamp, None, "未启用时灯态未知 → None，不臆造");
+    }
+
+    /// 装配点三态判定（[`interlock_wiring_for`]）：**三种「非已启用」语义必须互斥**。
+    ///
+    /// 重点钉 `(None, true)`（`io.enabled=true` 却拿不到控制器）⇒ 必须是
+    /// [`InterlockWiring::Unwired`]（屏显「**联锁状态不可用**」），**不得**落到 `Disabled`
+    /// （那会把"该有却没有"谎报成"本来就没开"）。
+    ///
+    /// **改什么会让本条变红**：把 `(None, true)` 合回 `_ => Disabled` ⇒ 第 2 条断言立即红。
+    #[tokio::test]
+    async fn interlock_wiring_three_way_exclusive() {
+        let api: Arc<dyn mupc_web_api::app_state::InterlockApi> =
+            Arc::new(FakeInterlockApi(mupc_web_api::app_state::InterlockStatus {
+                enabled: true,
+                latched: false,
+                stop_failed: false,
+                sources: Vec::new(),
+                fault_lamp: false,
+                run_lamp: false,
+            }));
+        assert!(
+            matches!(
+                interlock_wiring_for(Some(api.clone()), true, 30),
+                InterlockWiring::Wired(_)
+            ),
+            "io.enabled=true 且有控制器 ⇒ 已接线"
+        );
+        assert!(
+            matches!(
+                interlock_wiring_for(None, true, 30),
+                InterlockWiring::Unwired
+            ),
+            "io.enabled=true 却没控制器 ⇒ **不可用**，不得谎报成「功能未启用」"
+        );
+        assert!(
+            matches!(
+                interlock_wiring_for(None, false, 30),
+                InterlockWiring::Disabled
+            ),
+            "io.enabled=false ⇒ 已知状态「功能未启用」"
+        );
+        assert!(
+            matches!(
+                interlock_wiring_for(Some(api), false, 30),
+                InterlockWiring::Disabled
+            ),
+            "io.enabled=false 时即便有控制器也按「功能未启用」处置"
+        );
+    }
+
+    /// 未接线 ⇒ `available=false`（「联锁状态不可用」），**绝不**退化成「未联锁」。
+    #[tokio::test]
+    async fn interlock_unwired_is_unavailable_not_unlatched() {
+        let mut p = bare_provider(&cfg());
+        let f = p.sample_once().await;
+        assert!(!f.interlock.available, "未接线 ⇒「联锁状态不可用」，不是「未联锁」");
+        assert!(!f.interlock.latched);
+        assert_eq!(f.interlock.ts_ms, 0, "未采集 ⇒ ts_ms=0");
+    }
+
+    // ── 帧路径零 I/O（设计 D6 / §2.1 不变量）──
+
+    /// **帧路径零 I/O 之网**：`sample_once`/`build_frame` 只读缓存，**不触碰任何慢源**
+    /// （桩源的调用计数在多次组帧后仍为 0）；只有慢拍任务驱动一次才 +1。
+    /// 若有人把源读取塞回 `build_frame`，计数立刻 >0 ⇒ 变红。
+    #[tokio::test]
+    async fn frame_reads_caches_only_never_touches_slow_sources() {
+        let dev = Arc::new(StubDevice::new(DeviceSection {
+            ts_ms: 1,
+            uptime_secs: Some(42),
+            ..Default::default()
+        }));
+        let alm = Arc::new(StubAlarms::ok(vec![alarm("a")]));
+        let ilk = Arc::new(StubInterlock::ok(InterlockSection {
+            ts_ms: 1,
+            available: true,
+            enabled: true,
+            latched: true,
+            ..Default::default()
+        }));
+        let mut p = bare_provider(&cfg()).with_slow_sources(
+            Some(dev.clone()),
+            Some(alm.clone()),
+            InterlockWiring::Wired(ilk.clone()),
+        );
+
+        // 组帧多次：三段源调用计数必须全为 0
+        for _ in 0..5 {
+            let _ = p.sample_once().await;
+        }
+        assert_eq!(dev.count(), 0, "帧路径不得触碰装置源");
+        assert_eq!(alm.count(), 0, "帧路径不得触碰告警源（DB 查询）");
+        assert_eq!(ilk.count(), 0, "帧路径不得触碰联锁源");
+
+        // 未采集 ⇒ 四段仍是「不可用」缺省（不是「无告警」「未联锁」）
+        let f = p.sample_once().await;
+        assert!(f.device.uptime_secs.is_none() && !f.alarms.available && !f.interlock.available);
+
+        // 慢拍驱动一次 ⇒ 计数 +1 且帧内容随之变化
+        DisplayDataProvider::slow_tick(
+            &p.caches.device,
+            &p.notify,
+            dev.read_device(),
+            device_changed,
+        )
+        .await;
+        DisplayDataProvider::slow_tick(
+            &p.caches.alarms,
+            &p.notify,
+            async { DisplayDataProvider::sample_alarms(alm.as_ref(), 10).await },
+            alarms_changed,
+        )
+        .await;
+        DisplayDataProvider::slow_tick(
+            &p.caches.interlock,
+            &p.notify,
+            async { DisplayDataProvider::sample_interlock(ilk.as_ref()).await },
+            interlock_changed,
+        )
+        .await;
+        let f = p.sample_once().await;
+        assert_eq!(f.device.uptime_secs, Some(42));
+        assert_eq!(f.alarms.items.len(), 1);
+        assert!(f.alarms.available && f.interlock.available && f.interlock.latched);
+        assert_eq!((dev.count(), alm.count(), ilk.count()), (1, 1, 1));
+    }
+
+    /// 慢源**不阻塞**帧路径：装置源单次读要 2 s，主拍 50 ms —— 首帧仍应在数百 ms 内发布，
+    /// 且该帧的装置段如实为「未采集」（`uptime_secs=None`），**不是**凭空补值。
+    /// 若 `build_frame` 去 await 慢源，首帧会被推后到 2 s ⇒ 变红。
+    #[tokio::test]
+    async fn frame_path_not_blocked_by_slow_source() {
+        let latest: SharedLatest = Arc::new(Mutex::new(None));
+        let slow = Arc::new(StubDevice::slow(
+            DeviceSection {
+                ts_ms: 1,
+                uptime_secs: Some(7),
+                ..Default::default()
+            },
+            Duration::from_secs(2),
+        ));
+        let provider = DisplayDataProvider::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            stub_client(None, true, None),
+            &cfg_slow(50, 250, 50),
+            true,
+            latest.clone(),
+        )
+        .with_slow_sources(
+            Some(slow.clone()),
+            None,
+            InterlockWiring::Unwired,
+        );
+        let h = tokio::spawn(provider.run());
+
+        let f = wait_for_frame(&latest, Duration::from_millis(500))
+            .await
+            .expect("慢源未归 ⇒ 主拍仍须按时发布帧（帧路径不得被慢源阻塞）");
+        assert_eq!(
+            f.device.uptime_secs, None,
+            "首帧在慢源返回前发布 ⇒ 装置段如实「未采集」，不得补值"
+        );
+        assert_eq!(f.alarms.ts_ms, 0);
+        h.abort();
+    }
+
+    // ── 节拍：假时钟推进（设计 §4.2.1 验证要求：不 sleep）──
+
+    /// 内容变更判据必须覆盖**每个**字段（漏一个 ⇒ 该字段变化不上屏）。同时：**`ts_ms` 不算
+    /// 内容**（每拍必变，若计入则慢拍退化为恒定 4 Hz 唤醒组帧）。
+    #[test]
+    fn content_change_predicates_cover_every_field() {
+        // 装置段：7 个展示字段
+        let dev = DeviceSection::default();
+        let dev_probes = vec![
+            DeviceSection {
+                uptime_secs: Some(1),
+                ..dev.clone()
+            },
+            DeviceSection {
+                cpu_temp_c: Some(40.0),
+                ..dev.clone()
+            },
+            DeviceSection {
+                mem_used_pct: Some(30.0),
+                ..dev.clone()
+            },
+            DeviceSection {
+                iec104: LinkState::Connected,
+                ..dev.clone()
+            },
+            DeviceSection {
+                intercore: LinkState::Connected,
+                ..dev.clone()
+            },
+            DeviceSection {
+                hmi_channel: LinkState::Connected,
+                ..dev.clone()
+            },
+            DeviceSection {
+                control_source: ControlSource::LocalStrategy,
+                ..dev.clone()
+            },
+        ];
+        assert_eq!(
+            dev_probes.len(),
+            7,
+            "装置段字段数变化必须同步本用例（否则新字段的变化不会触发组帧）"
+        );
+        for p in &dev_probes {
+            assert!(device_changed(&dev, p), "装置段字段变化未被捕获: {p:?}");
+        }
+        let mut ts_only = dev.clone();
+        ts_only.ts_ms = 999;
+        assert!(
+            !device_changed(&dev, &ts_only),
+            "ts_ms 每拍必变，不得计入内容变更（否则退化为恒定 4 Hz 组帧）"
+        );
+
+        // 告警段：available + items
+        let al = AlarmsSection::default();
+        let al_avail = AlarmsSection {
+            available: true,
+            ..al.clone()
+        };
+        let al_items = AlarmsSection {
+            available: true,
+            items: vec![alarm("x")],
+            ..al.clone()
+        };
+        assert!(alarms_changed(&al, &al_avail));
+        assert!(alarms_changed(&al_avail, &al_items));
+        let mut al_ts = al.clone();
+        al_ts.ts_ms = 999;
+        assert!(!alarms_changed(&al, &al_ts));
+
+        // 联锁段：8 个展示字段
+        let il = InterlockSection::default();
+        let il_probes = vec![
+            InterlockSection {
+                available: true,
+                ..il.clone()
+            },
+            InterlockSection {
+                enabled: true,
+                ..il.clone()
+            },
+            InterlockSection {
+                latched: true,
+                ..il.clone()
+            },
+            InterlockSection {
+                stop_failed: true,
+                ..il.clone()
+            },
+            InterlockSection {
+                sources: vec![InterlockSourceItem {
+                    name: "estop".into(),
+                    tripped: true,
+                }],
+                ..il.clone()
+            },
+            InterlockSection {
+                fault_lamp: Some(true),
+                ..il.clone()
+            },
+            InterlockSection {
+                run_lamp: Some(true),
+                ..il.clone()
+            },
+            InterlockSection {
+                release_hold_secs: 30,
+                ..il.clone()
+            },
+        ];
+        assert_eq!(
+            il_probes.len(),
+            8,
+            "联锁段字段数变化必须同步本用例（否则新字段的变化不会触发组帧）"
+        );
+        for p in &il_probes {
+            assert!(interlock_changed(&il, p), "联锁段字段变化未被捕获: {p:?}");
+        }
+        let mut il_ts = il.clone();
+        il_ts.ts_ms = 999;
+        assert!(!interlock_changed(&il, &il_ts));
+    }
+
+    /// 主拍：无变更时按 `publish_ms` 发布；变更在**合并窗口后立即**发布（不等主拍）——
+    /// 这是 F7.3/F16.5「≤2 s 上屏」的达成机制（设计 §4.2.1 约束 4）。
+    #[test]
+    fn pacer_publishes_change_after_merge_window_not_waiting_main_tick() {
+        let t0 = Instant::now();
+        // 主拍 2000ms、合并窗口 250ms
+        let mut p = PublishPacer::new(t0, 2000, 250);
+
+        // 无变更：250ms 不该发布
+        assert!(!p.on_wake(t0 + Duration::from_millis(250)));
+        // 变更：窗口未到（+100ms）不发布，next_deadline 指向窗口到期的 t0+250
+        p.on_change();
+        assert_eq!(p.next_deadline(), t0 + Duration::from_millis(250));
+        assert!(!p.on_wake(t0 + Duration::from_millis(100)));
+        // 窗口到期 ⇒ 立即发布（远早于 2000ms 主拍）
+        assert!(p.on_wake(t0 + Duration::from_millis(250)));
+        // 发布后主拍顺延为 250+2000
+        assert_eq!(p.next_deadline(), t0 + Duration::from_millis(2250));
+        assert!(!p.on_wake(t0 + Duration::from_millis(2000)));
+        assert!(p.on_wake(t0 + Duration::from_millis(2250)));
+    }
+
+    /// 突发变更被合并：发布率上界 = `max(1 Hz 主拍, 1/合并窗口)`，慢源抖动打不爆读通道
+    /// （设计 §4.2.1 约束 2）。
+    #[test]
+    fn pacer_merges_burst_and_bounds_publish_rate() {
+        let t0 = Instant::now();
+        let (publish, window) = (1000u64, 250u64);
+        let mut p = PublishPacer::new(t0, publish, window);
+        let mut count = 0usize;
+        // 10 s 内每 10 ms 来一次变更（1000 次突发）
+        let mut t = t0;
+        for _ in 0..1000 {
+            t += Duration::from_millis(10);
+            p.on_change();
+            if p.on_wake(t) {
+                count += 1;
+            }
+        }
+        // 理论下界 ≈ 10000/250 = 40 次；上界由主拍/窗口双限，留 1 次余量
+        assert!(
+            (39..=41).contains(&count),
+            "持续变更下发布次数应 ≈ 1/合并窗口（40），实际 {count}"
+        );
+        assert!(
+            count <= 1000 / (window as usize / 10) + 1,
+            "发布率不得超出合并窗口上界"
+        );
+    }
+
+    // ── run 级：变更即组帧（端到端）──
+
+    /// `run()` 端到端：慢拍**内容变更**必须在合并窗口后触发一次提前组帧——主拍设 3 s，
+    /// 若「变更即组帧」缺失（退化为纯主拍），1.2 s 内不会有任何帧 ⇒ 本用例变红
+    /// （这正是 §4.2.1 约束 4 点名的失败形态）。
+    #[tokio::test]
+    async fn run_publishes_on_slow_change_before_main_tick() {
+        let latest: SharedLatest = Arc::new(Mutex::new(None));
+        let dev = Arc::new(StubDevice::new(DeviceSection {
+            ts_ms: 1,
+            uptime_secs: Some(11),
+            ..Default::default()
+        }));
+        let provider = DisplayDataProvider::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            stub_client(None, true, None),
+            &cfg_slow(3000, 250, 50), // 主拍 3 s，慢拍 50 ms
+            true,
+            latest.clone(),
+        )
+        .with_slow_sources(Some(dev.clone()), None, InterlockWiring::Unwired);
+        let h = tokio::spawn(provider.run());
+
+        let f = wait_for_frame(&latest, Duration::from_millis(1200))
+            .await
+            .expect("慢拍变更应触发提前组帧（纯主拍下首帧要 3 s）");
+        assert_eq!(f.device.uptime_secs, Some(11), "提前组帧须带上新采到的装置段");
+        assert!(dev.count() >= 1);
+        h.abort();
+    }
+
+    /// **合并窗口不得吞掉尾部变更**：一轮突发变更结束后，**最后一次**内容必须最终上屏。
+    ///
+    /// 合并窗口（`min_publish_interval_ms`）只允许「合并」，不允许「丢弃」——评审用临时用例
+    /// 实测不丢尾，本条把它固化为常驻用例。若 `PublishPacer` 在窗口到期发布后把后续
+    /// `pending_change` 清成 `false` 且不再重算（或 `run_publish_loop` 的 `notified` 分支
+    /// 漏掉 `continue` 重算 deadline 的语义），尾值 `uptime_secs=6` 就永远上不了屏 ⇒ 红。
+    #[tokio::test]
+    async fn run_publishes_tail_change_of_burst_not_swallowed_by_merge_window() {
+        let latest: SharedLatest = Arc::new(Mutex::new(None));
+        let dev = Arc::new(StubDevice::new(DeviceSection {
+            ts_ms: 1,
+            uptime_secs: Some(1),
+            ..Default::default()
+        }));
+        // 主拍 3 s、合并窗口 250 ms、慢拍 20 ms —— 突发全落在主拍之间，只能靠"变更即组帧"上屏
+        let provider = DisplayDataProvider::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            stub_client(None, true, None),
+            &cfg_slow(3000, 250, 20),
+            true,
+            latest.clone(),
+        )
+        .with_slow_sources(Some(dev.clone()), None, InterlockWiring::Unwired);
+        let h = tokio::spawn(provider.run());
+
+        wait_for_frame(&latest, Duration::from_millis(1500))
+            .await
+            .expect("首帧应发布");
+        // 突发 5 次变更（间隔 20 ms，全在同一个 250 ms 合并窗口内 ⇒ 前 4 次被合并）
+        for i in 2..=6u64 {
+            dev.set(DeviceSection {
+                ts_ms: 1,
+                uptime_secs: Some(i),
+                ..Default::default()
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // **尾值 6** 必须在合并窗口 + 余量内上屏（主拍要到 3 s 后，本窗口内只有它唯一出路）
+        let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+        let mut seen = None;
+        while std::time::Instant::now() < deadline {
+            seen = latest.lock().unwrap().as_ref().map(|f| f.device.uptime_secs);
+            if seen == Some(Some(6)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            seen,
+            Some(Some(6)),
+            "突发结束后的**最后一次**变更必须上屏（合并窗口只许合并、不许丢尾）"
+        );
+        h.abort();
+    }
+
+    /// 发布方**必须**走契约编码入口 `to_json_slice`（§3.5 条 3）：单条告警超 1 KiB ⇒ 编码失败
+    /// ⇒ 应答 500（**不得** 200 发出超限帧让发布方**静默**违约）。裸 `serde_json::to_vec` 会让
+    /// 本用例变红（它会「成功地」发出超限帧）。
+    ///
+    /// ⚠️ **订正（2026-09-16，勿再引"HMI 端整帧丢弃"）**：本条曾以"否则对端整帧丢弃"为论据，
+    /// 该前提**未经实测**——HMI 侧走裸 `serde_json::from_slice`
+    /// （`crates/local-display/src/channel.rs:450`），**不经**契约严格解码器，只受传输层
+    /// 64 KiB（`channel.rs:78/:675`）限制 ⇒ 单条超 1 KiB 的帧 HMI **本可正常显示**。故本守卫的
+    /// 真实定位是**编码侧契约自检**（超限即响亮 500），**不是** HMI 丢帧防线；生产路径不会靠它
+    /// ——超长消息已在 ingest 侧截断，见
+    /// `oversized_alarm_message_truncated_in_ingest_frame_still_publishes`。
+    #[tokio::test]
+    async fn http_get_oversized_alarm_returns_500_not_bogus_200() {
+        let mut frame = sample_frame(Some(50.0));
+        frame.alarms = AlarmsSection {
+            ts_ms: 1,
+            available: true,
+            items: vec![AlarmItem {
+                ts_ms: 1,
+                level: AlarmLevel::Error,
+                message: "x".repeat(mupc_display_proto::MAX_ALARM_MESSAGE_BYTES + 1),
+            }],
+        };
+        let latest: SharedLatest = Arc::new(Mutex::new(Some(frame)));
+        let publisher = LoopbackHttpPublisher::new(latest);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve = tokio::spawn(publisher.serve(listener));
+
+        let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", LATEST_PATH);
+        let resp = connect_and_get(addr, &req).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.starts_with("HTTP/1.1 500"),
+            "超限帧必须响亮失败（500），不得谎报 200: {text:?}"
+        );
+
+        serve.abort();
+    }
+
+    /// 慢拍**内容不变**时不额外组帧：主拍 600 ms + 慢拍 50 ms 的恒定源，1.3 s 观察窗内发布
+    /// 次数应 ≈ 主拍节奏（断言 `≤3`），**不是**每拍慢源都触发一次（50 ms 一拍 ⇒ 1.3 s 内
+    /// 20+ 次）。
+    ///
+    /// [`StubDevice`] 的 `ts_ms` **每次读自增**（与生产口径一致）⇒ 本条**真的**钉死了
+    /// 「`ts_ms` 不计入内容变更判据」：把 `a.ts_ms != b.ts_ms` 加进 [`device_changed`]
+    /// ⇒ 该窗口内仍会额外推进 **5 次**（受 250 ms 合并窗口限速）> 上限 3 ⇒ 红
+    /// （2026-09-16 破坏性探针实测；原文写的「20+ 次」未计合并窗口限速，与实现不符，已订正）。
+    #[tokio::test]
+    async fn run_does_not_republish_when_slow_content_unchanged() {
+        let latest: SharedLatest = Arc::new(Mutex::new(None));
+        // 恒定内容的慢源：展示字段不动，只有 ts_ms 每拍自增（不得触发组帧）
+        let dev = Arc::new(StubDevice::new(DeviceSection {
+            ts_ms: 1,
+            uptime_secs: Some(5),
+            ..Default::default()
+        }));
+        let provider = DisplayDataProvider::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            stub_client(None, true, None),
+            &cfg_slow(600, 250, 50),
+            true,
+            latest.clone(),
+        )
+        .with_slow_sources(Some(dev.clone()), None, InterlockWiring::Unwired);
+        let h = tokio::spawn(provider.run());
+
+        // 等首帧（首次采样是"从 Default 变内容" ⇒ 会触发一次提前组帧）
+        wait_for_frame(&latest, Duration::from_millis(500))
+            .await
+            .expect("首帧应发布");
+        let seq_after_first = latest.lock().unwrap().as_ref().unwrap().seq;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        dev.set(DeviceSection {
+            uptime_secs: Some(5), // 展示内容与首段完全相同（ts_ms 由桩自增，见上）
+            ..Default::default()
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let seq_now = latest.lock().unwrap().as_ref().unwrap().seq;
+        // 600+700 ms ≈ 2 个主拍 ⇒ 序号推进 ≤3；若 ts_ms 被计入内容变更，会推进 20+ 次
+        assert!(
+            seq_now - seq_after_first <= 3,
+            "内容未变时不得额外组帧（ts_ms 变化不算内容变更），实际推进 {} 次",
+            seq_now - seq_after_first
+        );
+        assert!(dev.count() >= 10, "慢拍本身仍须按 50 ms 采集（只是不触发组帧）");
+        h.abort();
     }
 }

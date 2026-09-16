@@ -401,9 +401,14 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
 /// 按依赖顺序初始化所有子系统
 ///
 /// 14 步初始化流程，每步失败时级联清理已启动的服务。
+/// `process_started_at` = **进程启动零点**（`main()` 入口最顶部取的 `Instant::now()`）。
+/// 显示终端 F6 的 `device.uptime_secs` 用它作零点（设计 §4.1「以 `mupcd` 进程启动时刻为准」）
+/// ——**不得**在本装配点另取 `Instant::now()`（本点已在 DB/intercore/gateway/AI/security 之后，
+/// 会让屏上 uptime 系统性偏小）。
 pub async fn initialize_all(
     config: &CoreConfig,
     coord: &ServiceCoordinatorImpl,
+    process_started_at: std::time::Instant,
 ) -> Result<StartupContext, MupcError> {
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // 错误路径守卫: 初始化中途失败时 abort 所有已启动的后台任务
@@ -707,12 +712,37 @@ pub async fn initialize_all(
         }
         let latest: Arc<std::sync::Mutex<Option<mupc_display_proto::DisplayFrame>>> =
             Arc::new(std::sync::Mutex::new(None));
+        // 慢拍四段源（设计 §4.2）：
+        // - F6 装置状态：intercore 链路 + 控制源 + 本机温度/内存（uptime 零点取**进程启动时刻**，
+        //   由 `main()` 入口最顶部注入，见 `process_started_at`——不用本装配点时刻）；
+        // - F7 告警：storage.events（设计 §4.1 #3 裁决 D11，「最近 10 条、时间倒序」）；
+        // - F16 联锁：三分支**互斥**、语义不得互替（判定抽到
+        //   `display_host::interlock_wiring_for` 这一**纯函数**并由用例钉死）——
+        //   已接线 / `io.enabled=true` 却没接上（**不可用**）/ `io.enabled=false` 的
+        //   **已知状态**「功能未启用」。
+        let interlock_wiring = crate::display_host::interlock_wiring_for(
+            interlock_api.clone(),
+            config.io.enabled,
+            config.io.release_hold_secs,
+        );
         let provider = crate::display_host::DisplayDataProvider::new(
             ai_integrator.clone(),
             intercore.clone(),
             &config.display,
             config.intercore.transport == "modbus_rtu",
             latest.clone(),
+        )
+        .with_slow_sources(
+            Some(Arc::new(crate::display_host::SystemDeviceSource::new(
+                intercore.clone(),
+                ai_integrator.clone(),
+                process_started_at,
+            ))),
+            Some(Arc::new(crate::display_host::StorageAlarmSource::new(
+                storage.events.clone(),
+                config.display.alarm_page_size,
+            ))),
+            interlock_wiring,
         );
         guard.0.push(tokio::spawn(provider.run()));
         let publisher = crate::display_host::LoopbackHttpPublisher::new(latest.clone());
