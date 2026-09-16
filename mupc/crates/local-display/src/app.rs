@@ -307,10 +307,12 @@ pub fn record_receipt(
 /// |------|------|----------|
 /// | ① 写意图在途被丢弃（`is_busy()`） | [`state::ControlState::push_toast`] | `p4_interlock::TEXT_OP_BUSY`（页面既有串） |
 /// | ② `begin_write` 自身失败 | [`state::ControlState::record_transport_failure_with_text`] | **本函数** |
-/// | ③ 回执形态 / 解码不符（`route` 的 `Err`） | [`state::ControlState::record_transport_failure`] | 通用兜底 `TRANSPORT_FAIL_TEXT`（**不经本函数**：该错的类型是 [`control_route::RouteError`]，不是 [`crate::console::ConsoleError`]） |
+/// | ③ 回执形态 / 解码不符（`route` 的 `Err`，**写端点**） | [`state::ControlState::record_transport_failure_with_receipt`] → **页面** `show_result` | 合成回执的 `message` = 既有 §3.6 串「操作失败」（**不经本函数**：该错的类型是 [`control_route::RouteError`]，不是 [`crate::console::ConsoleError`]） |
+/// | ③′ 同上（**读端点**） | [`state::ControlState::record_transport_failure`]（无在途 ⇒ 机制内部回落） | 通用兜底 `TRANSPORT_FAIL_TEXT` |
 ///
-/// （③ 的这一句 [`App::absorb_console`] 自己也明写。此前本行写"三条失败路径出 Toast 时的
-/// 唯一分派点"，与同文件的实现和注释**自相矛盾**。）
+/// （③ / ③′ 的这一句 [`App::absorb_console`] 自己也明写。此前本行写"三条失败路径出 Toast 时的
+/// 唯一分派点"，与同文件的实现和注释**自相矛盾**；③ 的页面通道由 **PM 裁定 2（2026-09-16，
+/// SH20）** 确立 —— 写端点的失败反馈落在被弹层遮住的 app Toast 上等于屏上什么都不发生。）
 ///
 /// 抽成自由函数（同 [`apply_refresh_request`] 的理由）：`App` 的构造需要 LVGL 会话，
 /// 纯逻辑用例够不着，而这条分派**必须有能红的回归**（写错 `unwrap_or` 的方向即静默降级）。
@@ -329,10 +331,12 @@ pub fn transport_failure_text(e: &crate::console::ConsoleError) -> &'static str 
 ///    [`state::ControlState::push_toast`]（「操作进行中」）；
 /// 2. `begin_write` **自身**发起失败 —— [`state::ControlState::record_transport_failure_with_text`]；
 /// 3. 回执**形态 / 解码不符**（[`crate::control_route::route`] 的 `Err`）——
+///    **写端点**：走**页面通道**（合成回执 ⇒ 页面 `show_result`，PM 裁定 2 / SH20），
+///    app 层这一格子**不再**被写；**读端点**（无在途）：仍落
 ///    [`state::ControlState::record_transport_failure`]。
 ///
-/// 三条都落在 [`state::ControlState`] 的**同一个** Toast 格子里 ⇒ 屏上只需要**一个**消费者
-/// （就是本函数 + [`App`] 持有的那个 `Toast`）。文案一律取自 `state.rs` 的既有映射
+/// ⇒ 落在 [`state::ControlState`] 的**同一个** Toast 格子里的只有 ①②③′ 三条 ⇒ 屏上只需要
+/// **一个**消费者（就是本函数 + [`App`] 持有的那个 `Toast`）。文案一律取自 `state.rs` 的既有映射
 /// （**不自造上屏字**）。
 ///
 /// # 生命周期
@@ -417,6 +421,11 @@ pub struct App {
     /// `lv_layer_top()`**，而弹层**建得晚** ⇒ 弹层打开期间它被面板盖住 + 遮罩压暗，
     /// **用户看不到**（几何实测值 / 可达路径 / 最小改法选项见 `ui/shell.rs` 偏差表
     /// **SH20** —— 本仓"偏差 / 缺口"的单一登记处）。
+    ///
+    /// **PM 裁定（2026-09-16，UI 文档附录 A.8）**：① **不挪位置、不改版式**；② **写路径**的
+    /// 失败反馈（含 `route` 的形态 / 解码 `Err`）**统一走页面通道** ⇒ 本 Toast 在生产上只服务
+    /// **读端点**的失败；③ 读端点残余（本 Toast 在弹层打开期间被遮）**接受** —— 读通道降级
+    /// 另有可见通道（页眉通道胶囊 + EDGE-03 整屏降级），本 Toast 属**补充**。
     ///
     /// ⚠️ **`Toast` 组件自带的 `expires_at`（`Toast::expires_at` / `is_expired`）在 app 这条
     /// 路径上是死字段 —— 不要拿它判断"该不该隐藏"**（B3-2c 整改 · 建议 1）：它的起点是
@@ -1103,14 +1112,36 @@ impl App {
         let decision = match route(&outcome) {
             Ok(d) => d,
             Err(e) => {
-                // **B3-2c 收口**：回执**形态 / 解码不符**这条出口原先只有 stderr。
-                // 现在 `record_transport_failure` 弹的那条兜底 Toast 有了**生产消费者**
-                // （app 层 Toast，见 [`App::sync_toast`]）⇒ 屏上可见「操作失败」。
+                // **【PM 裁定 2 · 2026-09-16 · SH20 收口】写端点改走页面通道**。
+                //
+                // 回执**形态 / 解码不符**这条出口原先只推 `ControlState` 的 app 层兜底 Toast
+                // （B3-2c），而**那条 Toast 在确认弹层打开期间根本不可见**（几何实测与理由：
+                // `ui/shell.rs` 偏差 **SH20** —— 两者同挂 `lv_layer_top()`、弹层**建得晚**
+                // ⇒ 绘在其上；而**页面** Toast 建得比弹层更晚 ⇒ 绘在弹层**之上**，可见）。
+                // 写端点的路由错误恰恰**落在弹层打开的那段时间**（P4 失败不关弹层；
+                // P2 关弹层后亦有页面通道）⇒ 走 app Toast 等于**屏上什么都不发生**（违 §2.6）。
+                //
+                // 修法 = **复用传输失败那一套既有机制**（见上一条 `Err` 分支与
+                // [`crate::control_route::transport_failure_decision`]）：由 `ControlState`
+                // **本地合成**一条 `ControlCode::Unavailable` 回执（`message` = 既有 §3.6 串
+                // 「操作失败」⇒ **零新增上屏字**、`request_id` = 该次在途 id、`at_ms` = 本地
+                // 时钟、`duplicate = false`、`audit_id = None`、`applied = None`、
+                // `field_errors = []`）⇒ 经 [`App::apply_route`] 送对应页的 `show_result`。
+                //
+                // **读端点不合成**（其降级出口是页眉通道胶囊 / EDGE-03 整屏降级）⇒
+                // `record_transport_failure_with_receipt` 内部回落 app 层兜底 Toast ——
+                // 该残余被弹层遮挡一事 **PM 裁定 3 = 接受**（登记于 SH20）。
+                //
                 // ⚠️ 文案**不**走 [`transport_failure_text`]：本条错的类型是
                 // [`RouteError`]（形态 / 解码），不是 `ConsoleError`，没有专属出路。
+                // ⚠️ 合成回执是**本地合成、非服务端回执**（不得冒充服务端判决，理由逐条见
+                // `control_route::transport_failure_decision`）。
                 self.route_errors += 1;
                 let ep = self.control.inflight().map(|i| i.endpoint);
-                self.control.record_transport_failure(epoch_ms);
+                if let Some(decision) = self.control.record_transport_failure_with_receipt(epoch_ms)
+                {
+                    self.apply_route(decision);
+                }
                 if let Some(ep) = ep {
                     self.set_submitting(ep, false);
                 }
@@ -2062,6 +2093,118 @@ mod tests {
             near.contains("self.apply_route(decision)"),
             "合成回执**只造不送**：取用点之后 {NEAR_WINDOW} 字符内没有送进唯一分派点 ⇒ 上屏路径没走到"
         );
+    }
+
+    /// **SH20 裁定 2**：`route` 的 `Err`（回执**形态 / 解码**不符）对**写端点**必须走**页面
+    /// 通道**（复用传输失败同款的**本地合成**回执），**不得**只推 app 层兜底 Toast —— 后者在确认
+    /// 弹层打开期间被面板完全遮住（几何实测与理由 = `ui/shell.rs` 偏差 **SH20**），而写端点的
+    /// 路由错误**恰恰**落在弹层开着的那段时间（P4 失败按 IL11 不关弹层）。只推 app Toast 等于
+    /// **屏上什么都不发生**（违 §2.6「降级可见」）。
+    ///
+    /// # 判据为什么落成**源码哨**（能力边界如实登记）
+    ///
+    /// 判据**本体**（写端点才合成 / 读端点回落 / 逐字段取值）在
+    /// `control_route::tests::transport_failure_synthesizes_an_unavailable_receipt_for_write_endpoints_only`
+    /// 与 `state::tests::transport_failure_hands_back_a_local_receipt_for_inflight_writes`；
+    /// 而 [`App::absorb_console`] 要先建起 LVGL 会话才能构造（`src/ui/tests.rs` 模块头：全仓只有
+    /// **一个** `#[test]` 能串行调起 LVGL）⇒ **运行期**这一步只能由结构保证（该分支只有一条路径 +
+    /// `record_transport_failure_with_receipt` 的**显式** `#[must_use]`）。本条守的是
+    /// "**这一行在源码里**"，与上面那条传输失败分支的哨同款。
+    ///
+    /// **改什么会让本条变红**（**已实测**，见交付报告「探针 1」）：把这一支改回
+    /// `self.control.record_transport_failure(epoch_ms);`（= "只推 app Toast"）⇒ 第 1 / 3 条红。
+    #[test]
+    fn route_error_branch_hands_write_failures_to_the_page_channel() {
+        const SRC: &str = include_str!("app.rs");
+        /// 判据窗口（**按字符**取）：本文件是 UTF-8，`&s[..n]` 按**字节**切会切进多字节字符而
+        /// panic（本项目"扫描器失真"的又一形态）；`route` 的 `Err` 分支实测 ≈1 985 字符。
+        const WINDOW_CHARS: usize = 2_400;
+        let prod = SRC
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("app.rs 应能切出生产段");
+        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        // 锚点取 `route(&outcome)` 的分派点自身：`record_transport_failure_with_receipt` 在
+        // **上面**那条传输失败分支里也有一处 ⇒ 只查"全文含有"会被**那一处**满足、探测力归零
+        // （B3-2b-2 整改踩过同款坑，见 `transport_failure_branch_dispatches_the_receipt_it_built`）。
+        let at = prod
+            .find("let decision = match route(&outcome) {")
+            .expect("`App::absorb_console` 里必须有 `route` 的分派点");
+        let near: String = prod[at..].chars().take(WINDOW_CHARS).collect();
+        assert!(
+            near.contains("route_errors += 1"),
+            "{WINDOW_CHARS} 字符的窗口没盖住 `route` 的 `Err` 分支 ⇒ 扫描器失真，后两条断言不可信"
+        );
+        assert!(
+            near.contains("record_transport_failure_with_receipt(epoch_ms)"),
+            "`route` 的 `Err` 必须走**页面通道**（本地合成回执）—— 否则写端点的失败反馈落在被弹层遮住的 app Toast 上（SH20 / 违 §2.6）"
+        );
+        assert!(
+            near.contains("self.apply_route(decision)"),
+            "合成回执**只造不送**：`route` 的 `Err` 分支里没有送进唯一分派点 ⇒ 页面上屏路径没走到"
+        );
+        // 反向：这一支**不得**再直接推 app 层兜底 Toast（写端点会与页面 Toast 同拍双条 / 被弹层遮住；
+        // 读端点的兜底**由机制内部裁决**，不在这里直呼）。
+        assert!(
+            !near.contains("self.control.record_transport_failure(epoch_ms)"),
+            "`route` 的 `Err` 分支不得直接推 app 兜底 Toast（写端点走页面通道；读端点的兜底由 `record_transport_failure_with_receipt` 内部裁决）"
+        );
+    }
+
+    /// **SH20 裁定 3**（**防"一刀切"**）：读端点的 `route` `Err` **仍**走 app 层兜底 Toast
+    /// —— 读端点从不入 `inflight` ⇒ **没有**合成回执可送 ⇒ 若连 app Toast 也一并去掉，就退化成
+    /// 「屏上什么都不发生」（静默失败，违 §2.6）。其**被弹层遮挡**的残余 **PM 裁定 = 接受**
+    /// （读通道降级另有可见通道：页眉通道胶囊 + EDGE-03 整屏降级，该 Toast 属**补充**）。
+    ///
+    /// # 与既有用例的关系（**如实登记，不重复计数**）
+    ///
+    /// ① 与 `control_route::tests` 里那条的判据**同源**（都取契约端点清单 `is_write`）——
+    /// 本条的增量是**在 SH20 的上下文里**把"读端点不得走页面通道"钉住，并**同时**钉住
+    /// "兜底 Toast 不得丢"这一侧的机制行为（后者原先只在 `state.rs` 的用例里、不在本文件的
+    /// 接线上下文里）。
+    ///
+    /// **改什么会让本条变红**（**均已实测**，见交付报告「探针 2 / 探针 2′」）：
+    /// - 让读端点也合成（把 `transport_failure_decision` 的 `_ => None` 改成造一条回执）
+    ///   ⇒ 第 ① 段红；
+    /// - 把 `record_transport_failure_with_receipt` 的"无在途"分支从 `record_transport_failure`
+    ///   改成 `record_failure_state`（读端点不再给兜底 Toast）⇒ 第 ② 段红。
+    #[test]
+    fn read_endpoint_route_errors_still_fall_back_to_the_app_toast() {
+        const T0: u64 = 1_000;
+        // ① 读端点**不合成**：给它们造"写回执"会把语义接到没有 `show_result` 的页上。
+        //    判据用**契约的端点清单**（`is_write`）⇒ 将来新增读端点自动落网。
+        for ep in ConsoleEndpoint::ALL.into_iter().filter(|e| !e.is_write()) {
+            assert!(
+                crate::control_route::transport_failure_decision(
+                    ep,
+                    "rid-read",
+                    state::TRANSPORT_FAIL_TEXT,
+                    T0
+                )
+                .is_none(),
+                "{ep:?} 是读端点 ⇒ 不得合成回执（无页面上屏出口）"
+            );
+        }
+        // ② 无在途（读端点的生产形态）⇒ 无回执可送，**但** app 层兜底 Toast 必须留着：
+        //    否则读端点失败 = 屏上什么都不发生。
+        let mut st = ControlState::new();
+        assert!(
+            st.record_transport_failure_with_receipt(T0).is_none(),
+            "无在途 ⇒ 没有「哪一次操作」可言，不合成"
+        );
+        assert_eq!(
+            toast_view(&st, T0),
+            Some(state::TRANSPORT_FAIL_TEXT),
+            "读端点失败必须仍落在 app 层兜底 Toast 上（读通道降级的**补充**通道；遮挡残余 PM 已裁定接受，但**不得**因此整条去掉）"
+        );
+        // 对照（证明 ② 不是恒真）：同一时刻、同样是写端点 ⇒ 走页面通道、app 层这一格子**空**。
+        let mut w = ControlState::new();
+        w.begin(ConsoleEndpoint::InterlockRelease, Some("rid-w"));
+        assert!(
+            w.record_transport_failure_with_receipt(T0).is_some(),
+            "写端点 ⇒ 必须交回合成回执（送页面 `show_result`）"
+        );
+        assert_eq!(toast_view(&w, T0), None, "写端点 ⇒ 上屏只走页面 Toast（UI §7.2 同一时刻仅 1 条）");
     }
 
 }
