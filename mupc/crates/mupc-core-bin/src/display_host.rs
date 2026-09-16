@@ -317,7 +317,10 @@ impl LoopbackHttpPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mupc_display_proto::{DisplayConfig, DisplayRange, FieldFlag, SocSource};
+    use mupc_display_proto::{
+        AlarmsSection, DeviceSection, DisplayConfig, DisplayRange, FieldFlag, InfoSection,
+        InterlockSection, SocSource,
+    };
     use std::time::Instant;
 
     // ── 测试桩：核间 transport（可控三相/run_state/连接态），下行接口返回默认 ──
@@ -585,6 +588,14 @@ mod tests {
             p_total: missing,
             i_phase: [missing; 3],
             inconsistency: false,
+            // v2 的四段（`display-proto` §3.1）。本模块的用例只验证 HTTP 发行通路
+            // （GET 最新帧 / 未就绪 503 / 错误路径 404），**不**断言段内容 ⇒ 取各段缺省值
+            // （四段都是 `#[serde(default)]` + `Default`：「旧帧无该段」时 UI 显式降级、
+            // 不伪装正常，与契约语义一致）。
+            device: DeviceSection::default(),
+            alarms: AlarmsSection::default(),
+            info: InfoSection::default(),
+            interlock: InterlockSection::default(),
         }
     }
 
