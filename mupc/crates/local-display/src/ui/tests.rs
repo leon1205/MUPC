@@ -4194,15 +4194,27 @@ pub(crate) fn pages_chain() {
         );
 
         // ── ⑫ 成功回执：用 `applied` 立即刷新（不等下一帧）+ Toast ──────────────
+        //
+        // **PD24（CF-04 降级，PM 裁定 2026-09-16）**：成功 Toast 由固定 `TEXT_TOAST_OK`
+        // 改为**并入回执 `message`** —— 后端 G-2 在这里逐字点名"哪个键需重启"。
+        // **敏感性（破坏性探针）**：把 `success_toast_text` 改回 `TEXT_TOAST_OK.to_string()`
+        // （= 修复前形态）⇒ 下面"并入 message / 需重启 / 点名该字段"三条**立即变红**。
+        //
+        // ⚠️ **样例串随 PD25 更新**：后端回执文案已改为**只用字体 cmap 内的字符**
+        // （修复前 `（项）；mupcd` 与机器键名都含缺字形字符 ⇒ 真机豆腐块），点名对象由
+        // **机器键名**改为**字段 `label`**（`intercore.port` → `对端端口`）。
+        // 下面两条串**逐字取自后端真实拼装**（`mupc-core-bin/src/config_service.rs`
+        // 步骤 8：`receipt::SAVED` + `· ` + `receipt::RESTART_PREFIX` + `restart_labels`）。
         let mut applied = p2_view(false);
         applied.revision = 8;
-        p2.show_result(&ControlResponse::ok(
+        let mut ok_resp = ControlResponse::ok(
             "rid-3",
             Some(applied.clone()),
             Some("audit-2".into()),
             1_002,
-        ))
-        .expect("show_result (ok)");
+        );
+        ok_resp.message = "配置已保存 · 需重启进程生效: 对端端口 · 心跳间隔".into();
+        p2.show_result(&ok_resp).expect("show_result (ok)");
         assert_eq!(
             p2.field_value_text("gateway.port").as_deref(),
             Some("2404"),
@@ -4210,8 +4222,53 @@ pub(crate) fn pages_chain() {
         );
         assert!(!p2.is_dirty(), "刷新后回到不脏");
         assert_eq!(p2.toast_tone(), Some(components::ToastTone::Success));
-        assert_eq!(p2.toast_text().as_deref(), Some(p2_config::TEXT_TOAST_OK));
+        assert_eq!(
+            p2.toast_text().as_deref(),
+            Some(ok_resp.message.as_str()),
+            "成功 Toast **并入**回执 `message`（不再只用固定 [`TEXT_TOAST_OK`]）"
+        );
+        assert!(
+            p2.toast_text().as_deref().unwrap().contains("需重启"),
+            "需重启的键 ⇒ 屏上必须明说（固定串「已生效」对 6/7 个字段是反向陈述）"
+        );
+        // 逐字段点名（后端点的是 label；`intercore.port` → `对端端口`）。
+        for label in ["对端端口", "心跳间隔"] {
+            assert!(
+                p2.toast_text().as_deref().unwrap().contains(label),
+                "必须**点名**需重启的字段 `{label}`（G-2 的如实结论不得被渲染层吞掉）：{:?}",
+                p2.toast_text()
+            );
+        }
+        // **反面对照**：机器键名**不得**出现在屏上（后端已保证不点名它们；渲染层若哪天
+        // 自己去拼键名，这条会红 —— 键名含缺字形的 `t` / `_`，真机即豆腐块）。
+        assert!(
+            !p2.toast_text().as_deref().unwrap().contains("intercore.port"),
+            "机器键名不得上屏（缺字形 ⇒ 豆腐块）：{:?}",
+            p2.toast_text()
+        );
         assert_eq!(p2.field_error_visible("gateway.port"), Some(false), "成功清错误");
+
+        // **反向判据**（PD24 ①）：只改热生效字段（`system.log_level`）的回执不含「需重启」
+        // ⇒ 屏上**不得**冒出"需重启"（否则从"不说真话"翻到"谎报副作用"，同违 §2.6）。
+        let mut hot_resp = ControlResponse::ok(
+            "rid-3b",
+            Some(applied.clone()),
+            Some("audit-3".into()),
+            1_003,
+        );
+        hot_resp.message = "配置已保存".into();
+        p2.show_result(&hot_resp)
+            .expect("show_result (ok, hot-only)");
+        assert_eq!(
+            p2.toast_text().as_deref(),
+            Some("配置已保存"),
+            "热生效路径照抄后端回执"
+        );
+        assert!(
+            !p2.toast_text().as_deref().unwrap().contains("需重启"),
+            "热生效字段**不得**被说成需重启：{:?}",
+            p2.toast_text()
+        );
 
         // ── ⑬ WriteMode::FullRewrite ⇒ Toast 明示（EDGE-23）──────────────────
         applied.write_mode = WriteMode::FullRewrite;

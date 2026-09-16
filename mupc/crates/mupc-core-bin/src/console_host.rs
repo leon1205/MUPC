@@ -30,13 +30,15 @@
 //!   （`system.log_level`，`tracing_subscriber::reload`），**其余 6 个**（`intercore.*` 4 +
 //!   `gateway.*` 2）本轮**未接线**（逐条原因见 `hot_apply.rs` 表）⇒ 回执 / 审计 / 日志
 //!   **如实**声明"需重启"。
-//!   ⚠️ **跨模块缺口（评审重要 4，本单元只登记、不改渲染层）**：渲染端屏面文案当前是
-//!   **反向陈述**（`local-display/src/ui/pages/p2_config.rs:114` 常驻说明与 `:159`
-//!   `TEXT_IMPACT_SAVE` 都写「修改保存后立即生效 · **无需重启装置**」），且成功分支
-//!   **丢弃**后端 `message`（只用固定「保存成功 · 已生效」）⇒ **用户在受理端看不到**
-//!   这条如实结论。后端（回执 `message` / 审计 `reason` / `tracing::warn!`）**三处都在说真话**，
-//!   但**屏上在说谎**。处置 = **PM 裁定项**（设计 §4.3.5 明写该降级须 PM 同意并回写 PRD，
-//!   CF-04 降级），最小改法见本单元交付报告。
+//!   ⚠️ **跨模块缺口（评审重要 4）——✅ 已裁定并修复（2026-09-16）**：渲染端曾**反向陈述**
+//!   （`local-display/src/ui/pages/p2_config.rs` 的常驻说明与 `TEXT_IMPACT_SAVE` 都写
+//!   「修改保存后立即生效 · **无需重启装置**」），且成功分支**丢弃**后端 `message`（只用固定
+//!   「保存成功 · 已生效」）⇒ 用户看不到这条如实结论。**PM 裁定（2026-09-16）：接受降级
+//!   （不投入"把 6 个字段做成真热生效"的改造）+ 改屏上文案 + 回写 PRD（CF-04 降级）**。
+//!   渲染层已同步（单元 **B3-2c 文案收口**，偏差登记 PD24）：两处文案改为分级口径
+//!   「日志级别立即生效 · 连接类参数需重启进程生效」，成功分支**并入回执 `message`**
+//!   （`success_toast_text`）⇒ 后端（回执 `message` / 审计 `reason` / `tracing::warn!`）
+//!   三处的真话**已直达屏面**。**后端侧本文档块以下的口径与行为均未变**（本单元只改注释）。
 //!
 //! ## POST 的错误通道（**与 GET 不同**，这是本单元拍的口径）
 //!
@@ -126,7 +128,8 @@ pub enum ConfigSource {
 pub enum ApplySource {
     /// 写路径就绪。
     Ready(Arc<ConfigService>),
-    /// 写路径不可用（原因串**如实**进回执 `message` 与日志）。**一切写请求都会被拒**。
+    /// 写路径不可用（原因串**如实**进 `tracing`；回执 `message` 取固定串
+    /// [`receipt::WRITE_PATH_UNAVAILABLE`]，见 `receipt` 模块头的用字约束）。**一切写请求都会被拒**。
     ///
     /// 回执 `code` 取 [`ControlCode::AuditUnavailable`]（评审建议 6.1 的口径统一）：装配侧
     /// 产生本态的唯一成因是"审计 sink 建不起来"（`startup::console_apply_source`）⇒ 让屏上
@@ -306,10 +309,14 @@ async fn post_config_apply(State(st): State<HostState>, body: Bytes) -> Response
         // 现场看到的原因反而比事实**更模糊**。统一后：屏上直接落到既有固定文案，
         // 无需为 `Unavailable` 再加一条文案（二选一，取"少改一端 + 语义更准"的那个）。
         tracing::error!(reason, "控制通道写路径未装配（审计不可用），apply 回 AuditUnavailable 信封");
+        // ⚠️ 原因串**不进** `message`（它是外部装配错误串，含 cmap 外的字 ⇒ 真机豆腐块）：
+        // 屏上这条按 `code` 走 EDGE-18 固定文案，`message` 只用于日志 / 现场对拍，
+        // 故这里给**固定且 cmap 内**的一条；详情在上面的 `tracing::error!` 里。
+        // 用字约束见 `receipt` 模块头。
         return Json(ControlResponse::<ConfigView>::rejected(
             "",
             ControlCode::AuditUnavailable,
-            format!("本机配置写路径不可用：{reason}"),
+            receipt::WRITE_PATH_UNAVAILABLE,
             Vec::new(),
             None,
             now,
@@ -324,10 +331,14 @@ async fn post_config_apply(State(st): State<HostState>, body: Bytes) -> Response
             // 解析失败时 `request_id` **不可知** ⇒ 回空串（契约要求回显；回空串比编一个 uuid
             // 诚实：渲染端 `console.rs::parse` 只对**有在途**的请求比对 id，本响应是它自己那次的
             // 结局，不会被误判成"错位回执"）。
+            // 同上：`serde_json` 的错误串是**英文 + 含位置偏移**（必然含 cmap 外的字），
+            // **不进** `message` ⇒ 详情进 `field_errors[0].reason`（结构化，与其余失败同渠道）
+            // + 一条 `warn`（现场排障不丢信息）；屏上只给固定文案。
+            tracing::warn!(error = %e, "POST 体不是合法的控制信封（JSON 解析失败）");
             return Json(ControlResponse::<ConfigView>::rejected(
                 "",
                 ControlCode::RejectedValidation,
-                format!("请求体不是合法的控制信封（JSON 解析失败）：{e}"),
+                receipt::BAD_ENVELOPE,
                 vec![FieldError {
                     field: "request".to_string(),
                     reason: e.to_string(),
@@ -380,6 +391,95 @@ pub const GROUPS: [(&str, &str); 4] = [
     (GROUP_TELEMETRY_LOG, "遥测与日志"),
     (GROUP_LOCAL_ADDR, "本机地址"),
 ];
+
+/// 控制面**回执文案**（`ControlResponse::message`）—— **每一个字符都必须在生成字体的 cmap 内**。
+///
+/// # 为什么这组文案要"查码表"（而告警 `message` 不查）
+///
+/// `local-display` 的既有口径是「**自由文本**（告警 `message`、型号 / 序列号 / 管理 IP）不处理」
+/// —— 那些串**不是 mupcd 生成的**，后端无从约束。本组的性质**不同**：它们**逐字由我们自己拼**，
+/// 完全可控，而且渲染端会**原样上屏**（成功路径连 `display_safe` 都不过，见
+/// `p2_config.rs::success_toast_text`）⇒ 一个 cmap 外的字就是真机上的一个**豆腐块**，属
+/// "自己造的缺陷"。故本组取**硬约束**：只用 cmap 内字符，并由
+/// [`config_receipt_messages_use_only_font_cmap_glyphs`] 逐字符兜底。
+///
+/// **码表真源** = `local-display/fonts/lv_font_cmap.txt`（入库派生清单，324 码位）——
+/// **不在此处复制一份副本**（那会变成第二真源，清单漂移时两边静默不一致）。
+///
+/// # 三条推导出的写法规则（与 `config_service` 模块头硬口径 4 同一条）
+///
+/// a. 全角 `（ ）` `；` `：` `，` 与**半角逗号**都不在 cmap 内 ⇒ 分隔符**只**能用 `·`(U+00B7)，
+///    冒号用**半角** `:`(U+003A)。
+/// b. 机器键名（`gateway.listen_port`）**必然**含缺字形字符（小写 `t` / `_` 都不在）⇒
+///    屏上点名一律用 [`ConfigFieldMeta::label`]，见 `config_service::restart_labels`。
+/// c. 外部错误串（`serde_yaml` / `std::io` / 契约 `ControlEnvelopeError` 的**全小写英文**）
+///    一律**不进** `message` ⇒ 详情走审计 `reason` + `tracing`。
+pub(crate) mod receipt {
+    /// 成功保存（**热生效**路径：无「需重启」子句）。
+    pub(crate) const SAVED: &str = "配置已保存";
+    /// 「需重启」子句（**含前导分隔符**；后接 `restart_labels` 拼出的字段标签）。
+    pub(crate) const RESTART_PREFIX: &str = " · 需重启进程生效: ";
+    /// 本次改动与原值相同 ⇒ 未写盘（不是失败）。
+    pub(crate) const NO_CHANGE: &str = "无字段变化 · 未保存";
+    /// 逐字段校验失败 ⇒ **一条都不执行**（EDGE-10 不得半生效）。
+    pub(crate) const VALIDATION_FAILED: &str = "配置未保存 · 字段取值无效";
+    /// 同一 `request_id` 仍在处理中（幂等占位未释放）。
+    pub(crate) const BUSY: &str = "正在执行 · 未重复下发 · 请重试";
+    /// 信封非法（空 `request_id` / `op` 误路由 / 超出 ±30 s 重放窗）⇒ 原因串**不进 message**。
+    pub(crate) const BAD_ENVELOPE: &str = "控制报文无效";
+    /// 保留式编辑不可定位 ⇒ 回退整体保存（**原文注释与未建模键已丢失**，EDGE-23）。
+    ///
+    /// 取「原有文字已不存在」而非"已整体重写/保存"：`整`(U+6574) / `体`(U+4F53) / `写`(U+5199)
+    /// **三个字都不在 cmap 内**（本条是网 `config_receipt_messages_use_only_font_cmap_glyphs`
+    /// 逐字符抓出来的），而这半句是渲染端 `p2_config::TEXT_TOAST_FULL_REWRITE`
+    /// （`"配置已保存 · 原有文字已不存在"`）**已经在屏上说的话** ⇒ 借它既合法又一致。
+    pub(crate) const FULL_REWRITE_UNLOCATABLE: &str = "原有文字已不存在 · 按行定位失败";
+    /// 真源文件读不出来 ⇒ 无"原文本"可保真，只能整体保存。
+    pub(crate) const FULL_REWRITE_UNREADABLE: &str = "原有文字已不存在 · 配置读取失败";
+    /// 执行期失败：字段取值落进 `CoreConfig` 时异常（校验已过 ⇒ 理论上不可达）。
+    ///
+    /// ⚠️ 不写"写入"：`写`(U+5199) **不在 cmap 内**（网抓出来的第二个缺字，第一个是 `整`)。
+    pub(crate) const WRITE_FAILED_FIELD: &str = "配置保存失败 · 字段更新异常";
+    /// 执行期失败：文本生成（序列化）异常。
+    pub(crate) const WRITE_FAILED_SERIALIZE: &str = "配置保存失败 · 文本生成异常";
+    /// 执行期失败：**写后自检**不过 ⇒ 未落盘、文件未改动。
+    pub(crate) const WRITE_FAILED_SELFCHECK: &str = "配置保存失败 · 文件未改动";
+    /// 执行期失败：原子落盘（tmp → fsync → bak → rename）失败 ⇒ 原文件保持旧内容。
+    pub(crate) const WRITE_FAILED_FILE: &str = "配置保存失败 · 文件保存异常";
+    /// 写路径未装配（成因唯一 = 审计 sink 建不起来 ⇒ `code` 恒为 `AuditUnavailable`）。
+    ///
+    /// ⚠️ 本串**不进屏**：渲染端对 `AuditUnavailable` 按 `code` 覆盖成 EDGE-18 固定文案
+    /// （`state.rs::toast_text` 与 `p2_config::show_result` 两处都是）。留 cmap 内的用字是为了
+    /// 让"回执文案"这条**没有例外**（例外会在下一次改动时被忘掉）。
+    pub(crate) const WRITE_PATH_UNAVAILABLE: &str = "配置保存不可用";
+    /// 审计不可写（`AuditUnavailable` 信封）。同 [`WRITE_PATH_UNAVAILABLE`]：**不进屏**，
+    /// 屏上取渲染端 EDGE-18 固定串（两串**同义不同源**，由 `code` 决定取哪条 ⇒ 漂移无上屏后果）。
+    pub(crate) const AUDIT_UNAVAILABLE: &str = "审计不可用 · 操作未执行";
+    /// 未知字段（字段表查不到 key 时的兜底标签；`restart_labels` 的输入来自 [`FIELDS`] ⇒ 不可达）。
+    pub(crate) const UNKNOWN_FIELD: &str = "未知字段";
+
+    /// **全部**回执文案（网的构造性半边：这条清单里每一个字符都必须 ⊆ cmap）。
+    ///
+    /// 新增文案时**必须**加进来 —— 漏加不会被 `receipt` 的其它用例发现（这正是本清单存在的理由）。
+    #[allow(dead_code)] // 只被 `console_host` 的回执用字网消费（与同文件其它"测试用的尺子"同款）
+    pub(crate) const ALL: &[&str] = &[
+        SAVED,
+        RESTART_PREFIX,
+        NO_CHANGE,
+        VALIDATION_FAILED,
+        BUSY,
+        BAD_ENVELOPE,
+        FULL_REWRITE_UNLOCATABLE,
+        FULL_REWRITE_UNREADABLE,
+        WRITE_FAILED_FIELD,
+        WRITE_FAILED_SERIALIZE,
+        WRITE_FAILED_SELFCHECK,
+        WRITE_FAILED_FILE,
+        WRITE_PATH_UNAVAILABLE,
+        AUDIT_UNAVAILABLE,
+        UNKNOWN_FIELD,
+    ];
+}
 
 /// 一行字段元数据（设计 §4.3.2 的 `ConfigFieldMeta`）。
 ///
@@ -1041,7 +1141,10 @@ mod tests {
             "口径统一（评审建议 6.1）：装配侧 Unavailable 的唯一成因=审计不可用 ⇒ 屏上须落到 EDGE-18 固定文案"
         );
         assert!(r.applied.is_none(), "不得回一个空 ConfigView 冒充处理结果");
-        assert!(r.message.contains("写路径不可用"), "原因须可读: {}", r.message);
+        // ⚠️ 口径变更（回执用字网）：`message` 固定为 `receipt::WRITE_PATH_UNAVAILABLE`；
+        // 装配原因（外部错误串，含 cmap 外的字）**只在 `tracing`**（本 handler 的 `error!`）。
+        // 屏上这条按 `code` 走 EDGE-18 固定文案 ⇒ 信息不丢、屏上不多一个豆腐块。
+        assert_eq!(r.message, receipt::WRITE_PATH_UNAVAILABLE);
         assert!(r.audit_id.is_none());
         h.abort();
     }
@@ -1441,10 +1544,23 @@ gateway:
     }
 
     /// 装配写宿主。`yaml = None` ⇒ 用 [`WRITE_YAML`]；`sink = None` ⇒ 真实文件审计。
+    ///
+    /// `HotApply::new(None)` ⇒ **连 `system.log_level` 也报"需重启"**（"无 reload handle"的诚实
+    /// 回退）。要测"热生效路径的回执"用 [`spawn_write_host_hot`]。
     async fn spawn_write_host(
         tag: &str,
         yaml: Option<&str>,
         sink: Option<Arc<dyn ConsoleAuditSink>>,
+    ) -> WriteHost {
+        spawn_write_host_hot(tag, yaml, sink, crate::hot_apply::HotApply::new(None)).await
+    }
+
+    /// 同上，但**注入指定的 `HotApply`**（回执文案用例需要"真热生效"与"需重启"两条分支）。
+    async fn spawn_write_host_hot(
+        tag: &str,
+        yaml: Option<&str>,
+        sink: Option<Arc<dyn ConsoleAuditSink>>,
+        hot: crate::hot_apply::HotApply,
     ) -> WriteHost {
         let dir = TempDir::new(tag);
         let text = yaml.unwrap_or(WRITE_YAML);
@@ -1454,12 +1570,7 @@ gateway:
         let core = Arc::new(RwLock::new(cfg));
         let audit: Arc<dyn ConsoleAuditSink> =
             sink.unwrap_or_else(|| Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).unwrap()));
-        let svc = Arc::new(ConfigService::new(
-            yaml_path.clone(),
-            core.clone(),
-            audit,
-            crate::hot_apply::HotApply::new(None),
-        ));
+        let svc = Arc::new(ConfigService::new(yaml_path.clone(), core.clone(), audit, hot));
         let (addr, task) = spawn_host_with_apply(
             crate::startup::console_config_source(&core),
             ApplySource::Ready(svc.clone()),
@@ -1482,11 +1593,23 @@ gateway:
         changes: serde_json::Value,
         op: &str,
     ) -> (u16, ControlResponse<ConfigView>) {
+        post_apply_from(addr, request_id, changes, op, "edit").await
+    }
+
+    /// 同上，但**指定 `PatchSource`**（`edit` / `reset_default`）—— 契约两条来源走同一条管线，
+    /// 但回执文案必须**两条都**过用字网（`config_receipt_messages_use_only_font_cmap_glyphs`）。
+    async fn post_apply_from(
+        addr: SocketAddr,
+        request_id: &str,
+        changes: serde_json::Value,
+        op: &str,
+        from: &str,
+    ) -> (u16, ControlResponse<ConfigView>) {
         let body = serde_json::json!({
             "request_id": request_id,
             "issued_at_ms": now_ms(),
             "op": op,
-            "payload": {"changes": changes, "from": "edit"},
+            "payload": {"changes": changes, "from": from},
         })
         .to_string();
         let (status, resp) =
@@ -1611,7 +1734,19 @@ gateway:
         assert!(resp.ok, "{resp:?}");
         let applied = resp.applied.unwrap();
         assert_eq!(applied.write_mode, WriteMode::FullRewrite, "回执必须显式声明整体重写");
-        assert!(resp.message.contains("整体重写"), "文案须明示");
+        // 明示降级的话术取 `receipt::FULL_REWRITE_UNLOCATABLE`（`整`/`体`/`写` 都不在 cmap 内
+        // ⇒ 不能写"整体重写"）；与渲染端 `p2_config::TEXT_TOAST_FULL_REWRITE` 同款措辞。
+        // **逐字**比整条串（比原来的 `contains("整体重写")` 更严）：`gateway.listen_port`
+        // 同时是"需重启"键 ⇒ 两段子句必须**都在**、顺序与分隔符也不许漂。
+        assert_eq!(
+            resp.message,
+            format!(
+                "{} · {} · 需重启进程生效: 端口",
+                receipt::SAVED,
+                receipt::FULL_REWRITE_UNLOCATABLE
+            ),
+            "降级 + 需重启两段子句都要在（且用字 ⊆ cmap）"
+        );
         assert!(w.disk().contains("listen_port: 2405"), "值确实落盘");
         // 后续 GET 也带着这个模式（UI 在任何视图上都该明示）
         assert_eq!(view_from(w.addr).await.write_mode, WriteMode::FullRewrite);
@@ -1652,5 +1787,329 @@ gateway:
             assert_ne!(status, 405, "契约端点 `{}` 的方法注册错误", ep.path());
         }
         h.abort();
+    }
+
+    // ═══ 回执文案的**用字网**（cmap ⊆）═══════════════════════════════════════════
+
+    /// 生成字体的 cmap 清单（**入库真源**：`local-display/fonts/lv_font_cmap.txt`，324 码位）。
+    ///
+    /// # 为什么读**兄弟 crate 的文件**而不是"在 mupc-core-bin 里抄一份清单"
+    ///
+    /// 抄一份 = **第二真源**：渲染端与后端各存一份"能上屏的字"，字库一变（跑 `gen_fonts.sh`
+    /// 重新选字）两边会**静默不一致**，而后端这份抄件没有任何东西在看着它。
+    ///
+    /// # 为什么用 `include_str!` 而不是运行时 `read_to_string(相对路径)`
+    ///
+    /// ① **与工作目录无关**（`cargo test` 的 CWD 是实现细节，`include_str!` 按**源文件**相对
+    ///    路径在**编译期**读）⇒ 不会有"CI 上刚好读不到于是静默跳过"这种事；
+    /// ② 清单改了 ⇒ 本 crate **必须重编**（漂移当场暴露，而不是等到下一轮 CI）。
+    /// 路径校验：`src/console_host.rs` → `../../local-display/fonts/lv_font_cmap.txt`。
+    fn font_cmap() -> std::collections::BTreeSet<char> {
+        let src = include_str!("../../local-display/fonts/lv_font_cmap.txt");
+        let set: std::collections::BTreeSet<char> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("U+"))
+            .filter_map(|h| u32::from_str_radix(h, 16).ok())
+            .filter_map(char::from_u32)
+            .collect();
+        // 清单读空 ⇒ 后面的断言会**全部通过**（空集之外全是"缺字"… 反了：空 baseline 会让
+        // `is_subset` 恒 false，红得很响）。这里仍显式挡一道，防"解析器与清单格式脱节"被
+        // 误读成"文案有问题"。
+        assert!(
+            set.len() >= 300,
+            "码表清单解析出 {} 个码位（应 ≥300）—— 清单损坏或解析器与格式脱节",
+            set.len()
+        );
+        set
+    }
+
+    /// 逐字符判定 + **诊断串**（缺字逐个列 `U+XXXX`，不靠肉眼）。
+    fn missing_glyphs(text: &str, cmap: &std::collections::BTreeSet<char>) -> Vec<String> {
+        let mut out: Vec<String> = text
+            .chars()
+            .filter(|c| !cmap.contains(c))
+            .map(|c| format!("{:?}(U+{:04X})", c, c as u32))
+            .collect();
+        out.dedup();
+        out
+    }
+
+    /// **本任务的核心网**：控制面**回执 `message`** 的用字必须 ⊆ 生成字体的 cmap。
+    ///
+    /// # 为什么这条网必须存在（而不是"自由文本不查码表"的既有口径）
+    ///
+    /// `local-display` 的既有口径是「**自由文本**（告警 `message` / 型号 / 序列号 / 管理 IP）
+    /// 不处理」—— 那些串**不是 mupcd 生成的**。本组文案**性质不同**：逐字由我们自己拼，
+    /// 且渲染端**原样上屏**（成功路径连 `display_safe` 都不过，见
+    /// `p2_config.rs::success_toast_text`；失败路径过的 `display_safe` 对**非 ASCII 原样透传**）
+    /// ⇒ 一个 cmap 外的字 = 真机上一个**豆腐块**，是**自己造的缺陷**。
+    /// 修复前的原串 `配置已保存（1 项）；1 项需重启 mupcd 生效: gateway.listen_port`
+    /// 在这一条下面**有 8 类缺字**：`（`/`）`/`项`/`；` 全是缺字形，`mupcd` 与键名的小写字母
+    /// （`m`/`u`/`p`/`c`/`d`/`t`/`_`…）也全是。
+    ///
+    /// # 网分**两半**（不然就是构造性漏判）
+    ///
+    /// - **构造性半边**：`receipt::ALL` 的每一条常量逐字符 ⊆ cmap；
+    /// - **运行期半边**：**真的**发 HTTP 请求走完管线，把**回执里真实的 `message`** 抓回来
+    ///   再过一次网 —— 防"常量是干净的被测对象，拼出来的串却是脏的"（正是本次修复前的形态：
+    ///   模板与拼接各改一半也能骗过只看常量的网）。
+    ///
+    /// # 敏感性（破坏性探针，实测见交付报告）
+    ///
+    /// ① 把 `receipt::SAVED` 改成 `"配置已保存（1 项）"`（= 修复前的用字）⇒ 构造性半边当场红；
+    /// ② 把 `config_service` 的成功拼接改回 `format!("配置已保存（{} 项）", ..)` ⇒ 运行期半边红；
+    /// ③ 把 `restart_labels` 改回 `restart.join(",")`（点名机器键名）⇒ 运行期半边红；
+    /// ④ 把下面的自检探针（`POISON`）换成 cmap 内的字 ⇒ 红（证明这条网**真的有牙**，
+    ///    而不是"恒真断言"）。
+    #[tokio::test]
+    async fn config_receipt_messages_use_only_font_cmap_glyphs() {
+        let cmap = font_cmap();
+
+        // ⓪ **自检探针**：网本身必须能判出缺字（否则整条用例是恒真的摆设）。
+        //    取样覆盖本次修复前的**每一类**缺字：汉字 / 全角标点 / 小写 ASCII / 下划线。
+        for poison in ["项", "（", "）", "；", "：", "，", "m", "t", "_", "⇒"] {
+            assert!(
+                !missing_glyphs(poison, &cmap).is_empty(),
+                "探针 `{poison}` 被判成「cmap 内」⇒ 这条网认不出缺字，是恒真断言"
+            );
+        }
+        assert!(
+            missing_glyphs("配置已保存 · 需重启进程生效: 端口", &cmap).is_empty(),
+            "正对照：修复后的措辞必须在 cmap 内"
+        );
+
+        // ① **构造性半边**：`receipt::ALL` 逐条逐字符。
+        for text in receipt::ALL {
+            let miss = missing_glyphs(text, &cmap);
+            assert!(
+                miss.is_empty(),
+                "回执文案 `{text}` 含 cmap 外字符（真机豆腐块）：{}",
+                miss.join(" ")
+            );
+        }
+
+        // ② 字段 `label` 也会被拼进成功回执（`restart_labels`）⇒ 一并过网。
+        //    （`label` 来自 `FIELDS`，是屏上每一行的标题，**必须**在 cmap 内。）
+        for m in FIELDS {
+            let miss = missing_glyphs(m.label, &cmap);
+            assert!(
+                miss.is_empty(),
+                "字段 `{}` 的 label `{}` 含 cmap 外字符（拼接后进回执）：{}",
+                m.key,
+                m.label,
+                miss.join(" ")
+            );
+        }
+
+        // ③ **运行期半边**：真发请求，抓真实回执。
+        let mut seen: Vec<String> = Vec::new();
+        let check = |tag: &str, msg: &str, seen: &mut Vec<String>| {
+            let miss = missing_glyphs(msg, &cmap);
+            assert!(
+                miss.is_empty(),
+                "[{tag}] 真实回执 `message` 含 cmap 外字符（真机豆腐块）：{}\n  实得: {msg}",
+                miss.join(" ")
+            );
+            seen.push(msg.to_string());
+        };
+
+        // ③-a 成功 + **热生效**（`system.log_level` 真接线）⇒ 回执**不含**「需重启」。
+        //     真实 reload 句柄（不初始化全局订阅者：句柄只是 layer 的遥控器，与 `hot_apply`
+        //     单测同款构造）⇒ `system.log_level` 落 `Applied`。
+        let (_layer, reload) =
+            tracing_subscriber::reload::Layer::new(tracing_subscriber::EnvFilter::new("info"));
+        {
+            let w = spawn_write_host_hot(
+                "cmap-hot",
+                None,
+                None,
+                crate::hot_apply::HotApply::new(Some(reload)),
+            )
+            .await;
+            let (_, r) = post_apply(
+                w.addr,
+                "cmap-rid-hot",
+                json!({"system.log_level": "debug"}),
+                "apply",
+            )
+            .await;
+            assert!(r.ok, "{r:?}");
+            assert_eq!(
+                r.message,
+                receipt::SAVED,
+                "热生效路径不得冒出「需重启」子句"
+            );
+            check("成功/热生效", &r.message, &mut seen);
+        }
+
+        // ③-b 成功 + **需重启**：全部 6 个未接线键一起改 ⇒ 逐标签点名（**6 条都**要在串里）。
+        {
+            let w = spawn_write_host("cmap-restart", None, None).await;
+            let (_, r) = post_apply(
+                w.addr,
+                "cmap-rid-restart",
+                json!({
+                    "gateway.listen_addr": "127.0.0.1",
+                    "gateway.listen_port": 2405,
+                    "intercore.host": "192.168.3.21",
+                    "intercore.port": 2405,
+                    "intercore.heartbeat_interval_sec": 11,
+                    "intercore.reconnect_interval_sec": 12,
+                }),
+                "apply",
+            )
+            .await;
+            assert!(r.ok, "{r:?}");
+            assert!(
+                r.message.contains("需重启"),
+                "6 键全未接线 ⇒ 必须说需重启: {}",
+                r.message
+            );
+            for key in [
+                "gateway.listen_addr",
+                "gateway.listen_port",
+                "intercore.host",
+                "intercore.port",
+                "intercore.heartbeat_interval_sec",
+                "intercore.reconnect_interval_sec",
+            ] {
+                let label = field_meta(key).expect("键必须在 FIELDS 内").label;
+                assert!(
+                    r.message.contains(label),
+                    "回执须**点名** `{key}`（屏上取其 label `{label}`）: {}",
+                    r.message
+                );
+                // 反面对照：**机器键名本身**不得出现在串里（它必然含缺字形的 `t` / `_`）
+                assert!(
+                    !r.message.contains(key),
+                    "机器键名不得进回执（含缺字形字符，点名也会被打散）: {}",
+                    r.message
+                );
+            }
+            check("成功/需重启", &r.message, &mut seen);
+        }
+
+        // ③-c 成功 + **无字段变化**（不写盘）。
+        {
+            let w = spawn_write_host("cmap-noop", None, None).await;
+            let (_, r) = post_apply(
+                w.addr,
+                "cmap-rid-noop",
+                json!({"intercore.port": 9100}), // 与 WRITE_YAML 同值
+                "apply",
+            )
+            .await;
+            assert!(r.ok, "{r:?}");
+            assert_eq!(r.message, receipt::NO_CHANGE);
+            check("成功/无变化", &r.message, &mut seen);
+        }
+
+        // ③-d 校验失败（逐字段拒绝）。
+        {
+            let w = spawn_write_host("cmap-invalid", None, None).await;
+            let (_, r) = post_apply(
+                w.addr,
+                "cmap-rid-invalid",
+                json!({"intercore.port": 0}),
+                "apply",
+            )
+            .await;
+            assert!(!r.ok && r.code == ControlCode::RejectedValidation);
+            assert_eq!(r.message, receipt::VALIDATION_FAILED);
+            check("失败/校验", &r.message, &mut seen);
+        }
+
+        // ③-e 信封非法（`op` 误路由 ⇒ 外部原因串**不进** `message`，改由 `field_errors` 承载）。
+        {
+            let w = spawn_write_host("cmap-envelope", None, None).await;
+            let (_, r) = post_apply(
+                w.addr,
+                "cmap-rid-envelope",
+                json!({"intercore.port": 2405}),
+                "release",
+            )
+            .await;
+            assert!(!r.ok && r.code == ControlCode::RejectedValidation);
+            assert_eq!(r.message, receipt::BAD_ENVELOPE);
+            assert!(
+                r.field_errors.iter().any(|e| e.reason.contains("release")),
+                "误路由的原因必须**不丢**（只是换了渠道：field_errors）: {:?}",
+                r.field_errors
+            );
+            check("失败/信封", &r.message, &mut seen);
+        }
+
+        // ③-f 畸形 body（连 JSON 都不是）。
+        {
+            let w = spawn_write_host("cmap-badbody", None, None).await;
+            let (status, body) = http(
+                w.addr,
+                "POST",
+                ConsoleEndpoint::ConfigApply.path(),
+                Some("not json"),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let r: ControlResponse<ConfigView> = serde_json::from_str(&body).unwrap();
+            assert_eq!(r.message, receipt::BAD_ENVELOPE);
+            check("失败/畸形 body", &r.message, &mut seen);
+        }
+
+        // ③-g **审计不可用**（`BrokenSink` ⇒ fail-closed）。
+        {
+            let w = spawn_write_host("cmap-nosink", None, Some(Arc::new(BrokenSink))).await;
+            let (_, r) = post_apply(
+                w.addr,
+                "cmap-rid-nosink",
+                json!({"intercore.port": 2405}),
+                "apply",
+            )
+            .await;
+            assert!(!r.ok && r.code == ControlCode::AuditUnavailable);
+            assert_eq!(r.message, receipt::AUDIT_UNAVAILABLE);
+            check("失败/审计不可用", &r.message, &mut seen);
+        }
+
+        // ③-h **写路径未装配**（装配侧 `Unavailable` ⇒ 统一口径为 `AuditUnavailable`）。
+        {
+            let (addr, task) = spawn_host_with_apply(
+                ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+                ApplySource::Unavailable("审计 sink 建不起来（注入）"),
+            )
+            .await;
+            let (_, r) = post_apply(
+                addr,
+                "cmap-rid-nopath",
+                json!({"intercore.port": 2405}),
+                "apply",
+            )
+            .await;
+            assert_eq!(r.code, ControlCode::AuditUnavailable);
+            assert_eq!(r.message, receipt::WRITE_PATH_UNAVAILABLE);
+            check("失败/写路径未装配", &r.message, &mut seen);
+            task.abort();
+        }
+
+        // ③-i `ResetDefault` **来源**（与 `Edit` 同一条管线；回执同样要过网）。
+        {
+            let w = spawn_write_host("cmap-reset", None, None).await;
+            let (_, r) = post_apply_from(
+                w.addr,
+                "cmap-rid-reset",
+                json!({"gateway.listen_port": 2405}),
+                "apply",
+                "reset_default",
+            )
+            .await;
+            assert!(r.ok, "{r:?}");
+            check("成功/恢复默认值来源", &r.message, &mut seen);
+        }
+
+        // 兜底：运行期半边**确实**跑过（防"半边被注释掉"）。
+        assert!(
+            seen.len() >= 9,
+            "运行期半边覆盖不足（只抓到 {} 条回执）",
+            seen.len()
+        );
     }
 }

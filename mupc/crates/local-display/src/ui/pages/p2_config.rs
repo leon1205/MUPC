@@ -55,6 +55,8 @@
 //!
 //! | PD22 | **"当前值非法 **且** `default` 自身也非法"的键在本页无修复路径**（**B3 的残余**，如实登记）：B3 已让 [`defaults_patch_of`] 纳入全部「`editable` 且 `default` 合法」的键 ⇒ "当前值非法但 `default` 合法"的字段**可经「恢复默认值」修好**；但若某键的 `default` **自身**也过不了 [`ConfigKind::validate_value`]（后端字段表自相矛盾：连"可写值"都不合法），则该键**既不能编辑**（控件 `disabled`）、**也不能进恢复补丁**（混入会被后端打回**整单**）⇒ **页内无任何修复路径**（该字段永久不可改，除非重启进程或后端改值） | `default` 不合法时把它写进补丁，会让**整个**恢复请求被后端二次校验打回（不能为一个键牺牲其余键的可恢复性）。本页的既有披露：注入值非法时该行仍**如实**标红（行左危险竖条 + 红字 [`TEXT_INVALID_VALUE`]）—— **非法这件事本身是可见的**，不可见的是"`default` 也非法"（UI §3.6 无对应文案，本页**不**为其造文案） | **后端字段表缺陷，需后端修正**（`default` 必须落在自身 `kind` 的值域内）；字库/文案收口批**不**解决此项 |
 //! | PD23 | **恢复默认值弹层的「当前值」在"注入值非法"行取的是控件近似值**（B3 把该键纳入补丁后**仍然如此**，如实登记）：[`reset_details`] 的 `before` 与行内回显**同源**（读控件，见 [`Core::current_values`]）⇒ 注入值非法时控件显的是**最小可表示值**（PD21(i)：`Enum` ⇒ `options[0]`、`U16`/`U64` ⇒ `min`、`Ipv4` ⇒ `0.0.0.0`），**不是**装置真值。**极端情形**：`default` 恰等于该近似值（如 `U16{min: 1}` 且 `default = 1`）⇒ 明细显示「`1 → 1`」，**看似空操作、实际是真修复**（真值 → `1`） | ①「当前值」的**唯一真源是控件**（与 [`save_details`] 同口径）—— 弹层与行内回显**同源**，屏内不自相矛盾；②该行已用红字 [`TEXT_INVALID_VALUE`] 披露"取值无效"，操作者可判读；③根治在 **PD21 的收口批**（`ui/controls.rs` 给三类控件增"无值档"），届时 `before` 可直显 [`PLACEHOLDER`]（PRD F1.4「显 `--`，严禁补 0」）。**本页不粉饰**：这是**近似值**，对"只看弹层"的操作者构成误读风险 | 无（**有意**，**未**自行扩大改动）；**⚠️ 待 PM / 主控裁定**：若要求本批即改显 [`PLACEHOLDER`]，只需让 [`reset_details`] 在"注入值非法"时改取 `f.value` 作 `before`（≈ 3 行：非法值经 [`format_value`] 自动落 [`PLACEHOLDER`]） **✅ PM 已裁定并已修复（2026-09-15）**：`before` 改取**装置真值** `&f.value`（与 [`save_details`] 同口径），`current` 参数随之删除；非法真值经 [`format_value`] 落 [`PLACEHOLDER`]。回归用例 `reset_details_before_is_device_truth_not_control_echo`（探针实测：把来源换成 `default` ⇒ 红 `"1"` vs `"–"`）。**未**采纳「补丁跳过真值已等于默认值的键」：它能让「将修改的字段」只列真变更，但引入两个新风险 ① 帧值滞后窗口内会**静默少复位**一个字段 ② 全部字段都已在默认值时弹层出现**零行明细**而无对应空态 ⇒ 如实登记为残余（见 UI 附录 A.7）。另：`reset_details` 原先在 `current` 缺键时 `continue`（明细不列）而补丁照写 ⇒ 那正是本节要禁的「写了不列」，现已一并消除 |
+//! | PD24 | **CF-04 降级的渲染层收口（PM 裁定 2026-09-16）**：① [`TEXT_PAGE_NOTE`] / [`TEXT_IMPACT_SAVE`] 由「修改保存后立即生效 · **无需重启装置**」改为**分级口径**「日志级别立即生效 · 连接类参数需重启进程生效 / 保存后…」；② [`P2ConfigPage::show_result`] 成功分支由固定 [`TEXT_TOAST_OK`] 改为**并入后端回执 `message`**（[`success_toast_text`]，该串降级为 `message` 为空时的兜底） | **原串对 6/7 个可写字段是与事实相反的陈述**（`FIELDS` 9 键 ⇒ 可写 7 ⇒ 真热生效 **1** = `system.log_level` ⇒ 需重启 **6**，逐字段依据见 `mupc-core-bin/src/hot_apply.rs` 的结论表）；**PM 已裁定接受该降级**（不投入"把 6 个字段做成真热生效"的改造），故渲染层按"诚实优先"改口径。**为何弹层「影响范围」不按 [`reconnect_in`] 分级**：`requires_reconnect` 的语义是**链路瞬断**而非"需重启"——`intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键 `false` **却仍需重启** ⇒ 分级会对这二键**谎报已生效**（§2.6 铁律）。**为何成功 Toast 不过 [`display_safe`]**：其载荷是**机器键名**，`display_safe("intercore.port")` 实测 = `"IN?ER?ORE.POR?"`（`t` 缺字形）⇒ 点名落空 | **残余三条**（均需 `components.rs` / 后端文案侧收口，**非**本单元范围）：① `Toast` 文本区 400 px ⇒ ≈16 字 `DOTS` 截断，"需重启"可见、**具体键名被截掉**；② `FullRewrite` 时本回执被 [`TEXT_TOAST_FULL_REWRITE`] 取代（PD10）⇒ 该组合下"需重启"不上屏；③ **后端 `message` 的用字不在码表控制面内**（`项`(U+9879) / 全角括号 / `；` 均缺字形 ⇒ 真机豆腐块）——与 §5 顶部「自由文本（告警 `message`）不处理」**同一条**既有口径，本条**新增**之处在于成功路径此后也上屏它。**✅ 残余 ③ 已修复（2026-09-16，见 PD25）**。文档回写：PRD CF-04 降级 + UI §3.6/§6.2/§7.3 + 设计 §4.3.5，见各文档版本表补注行 |
+//! | PD25 | **后端回执 `message` 只用字体 cmap 内的字符**（后端单元，2026-09-16）：`mupc-core-bin` 侧把**全部会走到上屏路径**的回执文案收口成固定模板（`console_host::receipt`），**并新增逐字符网** `config_receipt_messages_use_only_font_cmap_glyphs`（构造性半边：常量清单 + 字段 `label`；运行期半边：真发 HTTP 抓真实 `message`）。渲染层因此同步三处：① [`success_toast_text`] 的样例与判据由**机器键名**改为**字段 `label`**（后端 `restart_labels`）；② [`pages_chain`](crate::ui::tests) 的样例串同步；③ 本表 PD24「为何不过 [`display_safe`]」的理由**换掉了**——不再是"过滤会打散键名"，而是"后端已保证用字 ⊆ cmap ⇒ 过滤多余" | 修复前成功回执 `配置已保存（1 项）；1 项需重启 mupcd 生效: intercore.port` 里 `（`/`）`/`项`/`；` 全是缺字形，`mupcd` 与键名的小写字母（`m`/`u`/`p`/`c`/`d`/`t`）与 `_` 也全是 ⇒ **真机上整条是豆腐块**；而**这条串是我们自己生成的**（不是外部自由文本）⇒ 必须可控。**为何点名改用 `label`**：机器键名**必然**含缺字形字符（`t` 不在 cmap，`_` 也不在），过 [`display_safe`] 更会被打散成 `IN?ER?ORE.POR?` ⇒ 两条路都堵死，只剩"配置页每一行的现成标题" | **残余两条**（均需 `components.rs` / 版式侧收口，**非**本单元范围）：① `Toast` 文本区 400 px ⇒ ≈16 字 `DOTS` 截断，"需重启"可见、**具体字段名被截掉**；② `FullRewrite` 时本回执被 [`TEXT_TOAST_FULL_REWRITE`] 取代（PD10）⇒ 该组合下"需重启"不上屏。**未改**（属其它渠道，各有其口径）：告警 / 型号 / 序列号等**外部自由文本**（§5 顶部口径）、P5 审计页 `reason`（AU9 已登记"非 ASCII 缺字挡不住"） |
 //!
 //! ## 纪律（逐条对应设计要求）
 //!
@@ -111,7 +113,20 @@ pub const TEXT_SAVING: &str = "保存中...";
 /// 恢复默认值按钮 + 其确认弹层标题（UI §3.6 P2 / §6.2 流程 8）。
 pub(crate) const TEXT_RESET_DEFAULT: &str = "恢复默认值";
 /// 页顶说明行（UI §6.2 线框 `Y80`；全角逗号 `，` 不在 cmap 内 ⇒ 取 `·`）。
-pub const TEXT_PAGE_NOTE: &str = "修改保存后立即生效 · 无需重启装置";
+///
+/// ⚠️ **口径订正（CF-04 降级，PM 裁定 2026-09-16）**：原串「修改保存后立即生效 · 无需重启装置」
+/// 对 **6/7** 个可写字段是**与事实相反**的陈述 —— 后端 G-2 实测（`mupc-core-bin/src/hot_apply.rs`
+/// 的逐字段结论表）：`FIELDS` 共 9 键 ⇒ 可写 7 ⇒ **真热生效仅 1**（`system.log_level`）⇒
+/// 其余 6（`intercore.*` 4 + `gateway.*` 2）**需重启 `mupcd`**。PM 已裁定**接受该降级**
+/// （不投入"把 6 个字段做成真热生效"的改造），本串改为**如实的分级口径**。
+///
+/// ⚠️ **为何是"进程"而非"`mupcd`"**：`mupcd` 的 5 个小写字母均**不在生成字体 cmap 内**
+/// （cmap 的小写仅 `h` / `k` / `s`）⇒ 字面量照抄即豆腐块（与 PD1 / PD2 / PD8 同族缺字）。
+/// 取 cmap 内的「进程」表达同一语义（进程名另有出口：成功 Toast 并入的后端回执 `message`
+/// 里逐字写明 `mupcd` —— 见 [`success_toast_text`]）。
+///
+/// **本串是"全页通用口径"，不是"本次改动的结论"** —— 逐键的真结论由回执 `message` 承担。
+pub const TEXT_PAGE_NOTE: &str = "日志级别立即生效 · 连接类参数需重启进程生效";
 /// 只读字段的说明行（设计 §6.2「只读字段」行；⚠️ 见 **PD3**）。
 pub const TEXT_READONLY_NOTE: &str = "仅本机访问 · 不可修改";
 /// **注入值不合法**时该字段行的就地原因（C1；⚠️ 见 **PD21**）。
@@ -156,10 +171,31 @@ pub const TEXT_LOOPBACK_ADDR: &str = "本机地址 · 仅本机";
 /// 保存确认弹层标题（UI §6.2 流程 3）。
 pub const TEXT_DIALOG_TITLE_SAVE: &str = "确认保存运行参数";
 /// 保存确认的「影响范围」段（UI §6.2 流程 3；全角逗号 ⇒ `·`）。
-pub(crate) const TEXT_IMPACT_SAVE: &str = "修改将立即生效 · 无需重启装置";
+///
+/// ⚠️ **口径订正（CF-04 降级，PM 裁定 2026-09-16）**：同 [`TEXT_PAGE_NOTE`]，原串
+/// 「修改将立即生效 · 无需重启装置」对 6/7 个字段失实。本串取**保存场景的分级口径**。
+///
+/// **为何本段"不按键集合分级"**（`save_level` / [`reconnect_in`] 已在那里可用）：
+/// `requires_reconnect` 的语义是**链路瞬断**（设计 §4.3.3），**不是**"需重启" ——
+/// `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键是
+/// `requires_reconnect=false` **却同样需重启**（`hot_apply.rs` 逐字段表）⇒ 若按
+/// [`reconnect_in`] 把本段分成「立即生效 / 需重启」两支，L1 支会对这二键**谎报已生效**
+/// （违反 §2.6「降级可见、**绝不造假**」）。⇒ 本段取**恒真的通用口径**；
+/// 逐键的真结论由成功 Toast 并入的回执 `message`（后端点名具体键）承担，见 [`success_toast_text`]。
+///
+/// **与 [`TEXT_PAGE_NOTE`] 的差异**：仅"保存后："前缀（弹层里这段话紧跟"保存"语义），
+/// 两条串的口径**逐字一致**，不构成第二份真源。
+pub(crate) const TEXT_IMPACT_SAVE: &str = "保存后日志级别立即生效 · 连接类参数需重启进程生效";
 /// 恢复默认值确认的「影响范围」段（设计 §6.2 恢复默认值行；`为` 不在 cmap 内 ⇒ 去之，语义不变）。
 pub(crate) const TEXT_IMPACT_RESET: &str = "全部运行参数将恢复默认值并立即生效";
 /// 保存成功 Toast（UI §3.6 全局；全角逗号 ⇒ `·`）。
+///
+/// ⚠️ **B3 口径订正（CF-04 降级，PM 裁定 2026-09-16）**：本串**不再是保存成功的唯一文案**
+/// —— [`show_result`](P2ConfigPage::show_result) 的成功分支改为**并入后端回执 `message`**
+/// （见 [`success_toast_text`]）。理由：固定串「已生效」对 6/7 个字段是**与事实相反**的陈述，
+/// 而**后端三处**（回执 `message` / 审计 `reason` / `tracing::warn!`）都已如实写明"哪几个键
+/// 需重启 `mupcd`"（G-2），屏上却丢弃了它（跨模块缺口，此前登记在 `hot_apply.rs` / `console_host.rs`
+/// 的"渲染层反向陈述"注里）。本串**降级为兜底**：仅当回执 `message` 为空时使用。
 pub const TEXT_TOAST_OK: &str = "保存成功 · 已生效";
 /// 保存失败 Toast（UI §3.6 P2「保存失败」）。
 pub(crate) const TEXT_TOAST_FAIL: &str = "保存失败";
@@ -605,6 +641,48 @@ where
         .filter(|f| f.requires_reconnect && keys.contains(f.key.as_str()))
         .map(field_label_text)
         .collect()
+}
+
+/// 保存**成功** Toast 的文案：**并入后端回执 `message`**（PM 裁定 2026-09-16，闭合 CF-04 降级
+/// 的跨模块缺口；口径 = UI §7.2「同一时刻仅 1 条 Toast」**只换文案、不叠加第二条**）。
+///
+/// # 为什么必须并入
+///
+/// 后端 G-2（`mupc-core-bin/src/hot_apply.rs` + `config_service.rs`）的 `message` 是**唯一**
+/// 逐字点名"哪几个字段需重启"的出口（形如
+/// `配置已保存 · 需重启进程生效: 对端端口`）；只改日志级别时它**不含**「需重启」字样。
+/// 此前渲染层只用固定 [`TEXT_TOAST_OK`]（「保存成功 · 已生效」）⇒ 对 6/7 个字段**反向陈述**，
+/// 屏上说谎而后端三处（`message` / 审计 `reason` / `tracing::warn!`）都在说真话。
+///
+/// # 用字（PD25 起：后端 `message` **只用字体 cmap 内的字符**）
+///
+/// 后端已把回执文案收口成**固定模板 + 字段 `label`**（`console_host::receipt` / `restart_labels`）
+/// ⇒ **每一个字符都在生成字体的 cmap 内**，本函数**照抄即安全**。这正是本次不再需要
+/// [`display_safe`] 的原因：过滤器的 ASCII 改写面（`-`→`–`、小写→大写、其余→`?`）对**非
+/// ASCII 原样透传**，本来就挡不住中文缺字（`display_safe` 自身文档亦写明"不处理自由文本"），
+/// 而后端现在给的串根本不需要改写。**点名对象是字段 `label`**（`对端端口`）而**不是**机器键名
+/// （`intercore.port` 的 `t` / `_` 都缺字形 ⇒ 真机豆腐块；见
+/// `success_toast_merges_backend_message_and_names_restart_keys` 第 ⑤ 条的量化依据）。
+///
+/// # 兜底
+///
+/// `message` 全空白 ⇒ 回落 [`TEXT_TOAST_OK`]（契约 [`ControlResponse::ok`] 恒给非空串，
+/// 该分支只服务于畸形帧，**不**改变上屏语义）。
+///
+/// # 已知残余（如实登记，见 PD24）
+///
+/// ① `Toast` 文本区宽 = `TOAST_W − ACCENT_W − 3×GAP_MIN − ICON_SM` = **400 px**，按
+/// [`TextSlot::Body`] ≈ 24 px/字 ⇒ 约 **16 字**即 `LongMode::DOTS` 截断；本类回执长逾 30 字
+/// ⇒ **屏上可见的只有前 ~16 字**（"需重启"恰在其内，**具体字段名被截掉**）。
+/// ② `WriteMode::FullRewrite` 时本文案被 `TEXT_TOAST_FULL_REWRITE` 取代（见 PD10 的信息量取舍）
+/// ⇒ 该组合下"需重启"不上屏。两条均需 `components.rs` / 版式侧收口，本单元**未**越界改。
+fn success_toast_text(resp: &ControlResponse<ConfigView>) -> String {
+    let msg = resp.message.trim();
+    if msg.is_empty() {
+        TEXT_TOAST_OK.to_string()
+    } else {
+        msg.to_string()
+    }
 }
 
 /// 保存路径的变更明细（逐字段「旧值 → 新值」，UI §7.3 明细列表）。
@@ -1843,8 +1921,11 @@ impl P2ConfigPage {
             // `full_rewrite` 的信息量更大（数据损失提示），此时 `set_config` 已弹警示 Toast
             // —— 不再叠加"保存成功"（UI §7.2：同一时刻仅 1 条）。见 PD10。
             if !full_rewrite {
-                self.core
-                    .show_toast(ToastTone::Success, ICON_OK, TEXT_TOAST_OK)?;
+                self.core.show_toast(
+                    ToastTone::Success,
+                    ICON_OK,
+                    &success_toast_text(resp),
+                )?;
             }
         } else {
             self.core.apply_field_errors(&resp.field_errors);
@@ -2922,6 +3003,97 @@ mod tests {
         // 就不成立；`s` 是小写里少数有字形的字符之一，故取不含 `s` 的样例）。
         assert_eq!(display_safe("ab-cd"), "AB\u{2013}CD");
         assert_eq!(unavailable_text("ab-cd"), "配置不可用 · AB\u{2013}CD");
+    }
+
+    /// **CF-04 降级的成功 Toast 口径**（PM 裁定 2026-09-16）——**逐条判据，每条都能红**。
+    ///
+    /// 后端 G-2（`mupc-core-bin/src/config_service.rs`）的成功回执 `message` 有三种形态，
+    /// 本用例逐一对账（样例串**逐字取自后端真实拼装**，见 `config_service.rs:402-413`）：
+    ///
+    /// | # | 后端 `message` | 判据 |
+    /// |---|----------------|------|
+    /// | 1 | `配置已保存`（只改 `system.log_level`，**热生效**） | Toast **不得**出现「需重启」 |
+    /// | 2 | `配置已保存 · 需重启进程生效: 对端端口` | 必须出现「需重启」**且点名该字段** |
+    /// | 3 | `配置已保存 · 需重启进程生效: 心跳间隔 · 重连间隔` | 同上（**逐条**点名） |
+    /// | 4 | 空串（畸形帧） | 回落 [`TEXT_TOAST_OK`] |
+    ///
+    /// **敏感性（破坏性探针）**：把 `success_toast_text` 的成功分支改回
+    /// `TEXT_TOAST_OK.to_string()`（= 本次修复前的形态）⇒ 2 / 3 两条**立即变红**
+    /// （`Some("保存成功 · 已生效")` ≠ 含点名的回执串）；把第 4 条的空白兜底删掉 ⇒ 该条变红。
+    /// 把 `msg` 换成 `display_safe(msg)` ⇒ 3 变红（`_`→`–` 等改写面会动到后续若引入的 ASCII）。
+    ///
+    /// ⚠️ **点名对象是字段 `label` 而不是机器键名**（PD25）：后端回执文案已改为**只用字体
+    /// cmap 内的字符**（修复前 `（项）`/`mupcd`/`intercore.port` 的小写字母与 `_` 都缺字形 ⇒
+    /// 真机豆腐块）⇒ 机器键名**不可能**再出现在 `message` 里。本用例因此把"点名"判据落在
+    /// **label** 上（与后端 `restart_labels` 口径一致）。
+    #[test]
+    fn success_toast_merges_backend_message_and_names_restart_keys() {
+        let ok = |msg: &str| {
+            let mut r = ControlResponse::ok(
+                "rid",
+                Some(view()),
+                None::<String>,
+                0,
+            );
+            r.message = msg.to_string();
+            r
+        };
+
+        // ① 只改日志级别（后端**不含**「需重启」）⇒ 屏上**不得**说"需重启"。
+        let hot = ok("配置已保存");
+        assert_eq!(success_toast_text(&hot), "配置已保存");
+        assert!(
+            !success_toast_text(&hot).contains("需重启"),
+            "热生效字段（system.log_level）**不得**被说成需重启：{}",
+            success_toast_text(&hot)
+        );
+
+        // ②③ 需重启的字段 ⇒ 出现「需重启」且**逐个点名**（后端列的是字段 `label`）。
+        for labels in [vec!["对端端口"], vec!["心跳间隔", "重连间隔"]] {
+            let resp = ok(&format!(
+                "配置已保存 · 需重启进程生效: {}",
+                labels.join(" · ")
+            ));
+            let text = success_toast_text(&resp);
+            assert!(
+                text.contains("需重启"),
+                "{labels:?} 需重启 ⇒ 提示必须明说：{text}"
+            );
+            for label in &labels {
+                assert!(
+                    text.contains(label),
+                    "`{label}` 需重启 ⇒ 提示必须**点名该字段**（G-2 的如实结论不得被吞）：{text}"
+                );
+            }
+        }
+
+        // ④ 空白 `message` 才回落固定串（兜底，不改变上屏语义）。
+        assert_eq!(success_toast_text(&ok("")), TEXT_TOAST_OK);
+        assert_eq!(success_toast_text(&ok("   ")), TEXT_TOAST_OK);
+
+        // ⑤ **机器键名不得当点名对象**的量化依据（这是后端 `restart_labels` **不**用 `key`
+        //    的原因）：键名里的 `t`(U+0074) / `_`(U+005F) 都不在生成字体的 cmap 内 ⇒ 原样上屏是
+        //    豆腐块，过 `display_safe` 又会被打散（`t` → `?`）⇒ 点名落空。两条都堵死，
+        //    只剩"字段 label"这一条路。
+        let key_as_text = "intercore.port";
+        assert_ne!(
+            display_safe(key_as_text),
+            key_as_text,
+            "若 display_safe 能原样保住机器键名，则「不得点名键名」这条约束就没有依据了：{}",
+            display_safe(key_as_text)
+        );
+        assert!(
+            !display_safe(key_as_text).contains(key_as_text),
+            "键名经 display_safe 必须已经认不出来（否则点名还能歪打正着）：{}",
+            display_safe(key_as_text)
+        );
+        // 反面对照：字段 label **经得起** display_safe（屏上它就是原样显示的）。
+        let label = "对端端口";
+        assert_eq!(
+            display_safe(label),
+            label,
+            "label 必须是 display_safe 的不动点"
+        );
     }
 
     /// 变更明细：保存路径只列**本次改动**的字段；恢复路径列**全部可编辑**字段。

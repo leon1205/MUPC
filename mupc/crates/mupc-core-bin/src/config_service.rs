@@ -35,6 +35,29 @@
 //! **逐字段条目的 `reason` 承载生效结论**（评审阻塞 2 的修复点，见 [`per_field_reason`]）：
 //! `RestartRequired` 的键在审计里明写"需重启 mupcd 后生效：<原因>" ⇒ 事后查 F19 审计页
 //! 不会把"已落盘"误读成"已生效"。`Applied` 的键保持原 `reason`（成功路径为 `None`）。
+//!
+//! # 回执 `message` 的**用字约束**（硬口径 4）
+//!
+//! `ControlResponse::message` 会被渲染端**上屏**，且成功路径**不过** `display_safe`
+//! （`local-display/src/ui/pages/p2_config.rs::success_toast_text` 原样并入 Toast；失败路径过
+//! `display_safe`，但后者对**非 ASCII 原样透传**，见 `ui/pages/mod.rs::display_safe_char`）
+//! ⇒ 只要有一个字不在**生成字体的 cmap** 内，真机上就是**豆腐块**。
+//!
+//! 这条约束**不是**"自由文本不查码表"那条既有口径：那些串（告警 `message`、型号 / 序列号、
+//! 外部库错误串）**不是我们生成的**，无从约束；而本模块的回执文案**逐字都是我们自己拼的**，
+//! 完全可控 ⇒ **必须**只用 cmap 内的字符。清单真源 = `local-display/fonts/lv_font_cmap.txt`
+//! （入库派生项，324 码位）；**逐字符**的网见 `console_host` 的
+//! `config_receipt_messages_use_only_font_cmap_glyphs` 用例。
+//!
+//! 由此推出三条**写法规则**（本模块内不得破例）：
+//!
+//! a. **标点取 cmap 内的等价物**：全角 `（ ）` `；` `：` `，` 一律缺字形 ⇒ 用 `·`(U+00B7) /
+//!    半角 `:`(U+003A)。注意**半角逗号也不在 cmap 内**（只有 `·` 能当分隔符）。
+//! b. **不得点名机器键名**：`gateway.listen_port` 这类键**必然**含缺字形字符（小写 `t` 不在
+//!    cmap 内、`_` 也不在）⇒ 屏上点名一律取字段表的 **`label`**（见 [`restart_labels`]）。
+//! c. **不得内联外部错误串**：`serde_yaml` / `std::io` / 契约的 `ControlEnvelopeError`
+//!    （后者是**全小写英文**）都含缺字形字符 ⇒ 详情走**审计 `reason` + `tracing`**，
+//!    屏上只给固定文案。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,6 +74,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::console_audit::{AuditIntent, ConsoleAuditSink};
+use crate::console_host::receipt as msg;
 use crate::console_host::{config_view, field_meta, set_field, FIELDS};
 use crate::core_config::CoreConfig;
 use crate::hot_apply::{ApplyOutcome, HotApply};
@@ -141,10 +165,16 @@ impl ConfigService {
         // `op` 可能是别的端点）。渲染端在窗口外**不发包**（`console.rs::retry`），故这条
         // 路径只在"时钟不同步 / 手工构造请求"时可达——但**必须**拒，不能静默接受过期请求。
         if let Err(e) = req.validate_for(ConsoleEndpoint::ConfigApply, now) {
+            // ⚠️ `e`（契约 `ControlEnvelopeError`）是**全小写英文** ⇒ 含 cmap 外的字，
+            // **不进** `message`（硬口径 4c）：屏上给固定文案，原因走 `field_errors`
+            // （结构化，与逐字段失败同渠道）+ 一条 `warn`（现场排障不丢信息）。
+            // 用例 `op_mismatch_and_empty_request_id_are_rejected` 据此断言"误路由仍被点名"。
+            tracing::warn!(request_id = %req.request_id, error = %e,
+                "配置请求信封非法（op 误路由 / request_id 为空 / 超出重放窗）⇒ 拒绝");
             return ControlResponse::rejected(
                 req.request_id.clone(),
                 ControlCode::RejectedValidation,
-                format!("请求信封非法：{e}"),
+                msg::BAD_ENVELOPE,
                 vec![FieldError {
                     field: "request".to_string(),
                     reason: e.to_string(),
@@ -170,7 +200,7 @@ impl ConfigService {
                 return ControlResponse::rejected(
                     req.request_id.clone(),
                     ControlCode::Busy,
-                    "同一请求正在处理中，请稍候再试（未重复执行）",
+                    msg::BUSY,
                     Vec::new(),
                     None,
                     now,
@@ -250,10 +280,9 @@ impl ConfigService {
                 Ok(audit_id) => ControlResponse::rejected(
                     req.request_id.clone(),
                     ControlCode::RejectedValidation,
-                    format!(
-                        "配置未保存：{} 个字段未通过校验（装置维持原配置运行）",
-                        field_errors.len()
-                    ),
+                    // 逐字段的**具体**原因在 `field_errors`（渲染端就地标红，CF-02）；
+                    // `message` 只给"一条都没存"的结论（用字约束见硬口径 4）。
+                    msg::VALIDATION_FAILED,
                     field_errors,
                     // 契约：「审计记录 ID（**成功与失败均返回**；便于现场对拍）」⇒ 失败回执也要带号
                     audit_id,
@@ -269,7 +298,7 @@ impl ConfigService {
             tracing::info!(request_id = %req.request_id, "配置保存：无字段变化，未写盘");
             return with_message(
                 ControlResponse::ok(req.request_id.clone(), Some(self.view(&before)), None, now),
-                "未检测到字段变化（未写盘）",
+                msg::NO_CHANGE,
             );
         }
 
@@ -307,24 +336,38 @@ impl ConfigService {
                 // 校验已过 ⇒ 不可达；仍写成分支而不是 `unwrap`（本模块不 panic）
                 drop(guard);
                 return self.finish_failure(
-                    req, now, &planned, ControlCode::Internal, format!("应用字段 `{key}` 失败: {e}"),
+                    req,
+                    now,
+                    &planned,
+                    ControlCode::Internal,
+                    msg::WRITE_FAILED_FIELD,
+                    format!("应用字段 `{key}` 失败: {e}"),
                 );
             }
         }
+        // `mode_note` 进**成功回执**（`message`）⇒ 必须是 cmap 内的固定串；原因（`{e}`，外部
+        // 错误串）进 `tracing`（**不进屏**，硬口径 4c 与 `receipt` 模块头）。
         let (text, mode, mode_note) = match std::fs::read_to_string(&self.path) {
             Ok(src) => match self.preserve_edit(&src, &planned) {
                 Ok(t) => (t, WriteMode::TextPreserve, None),
                 Err(e) => {
                     // **回退路径**：不可定位 ⇒ 整体序列化回写（**必须显式**：EDGE-23）
-                    let reason = format!("保留式编辑无法定位（{e}）⇒ 已整体重写配置文件");
                     tracing::warn!(path = %self.path.display(), error = %e,
-                        "保留式编辑不可定位：回退整体序列化回写（注释与未建模键将丢失）");
+                        "保留式编辑无法定位：回退整体序列化回写（注释与未建模键将丢失）");
                     match serde_yaml::to_string(&after) {
-                        Ok(t) => (t, WriteMode::FullRewrite, Some(reason)),
+                        Ok(t) => (
+                            t,
+                            WriteMode::FullRewrite,
+                            Some(msg::FULL_REWRITE_UNLOCATABLE),
+                        ),
                         Err(e2) => {
                             drop(guard);
                             return self.finish_failure(
-                                req, now, &planned, ControlCode::ApplyFailed,
+                                req,
+                                now,
+                                &planned,
+                                ControlCode::ApplyFailed,
+                                msg::WRITE_FAILED_SERIALIZE,
                                 format!("整体序列化失败: {e2}"),
                             );
                         }
@@ -333,13 +376,22 @@ impl ConfigService {
             },
             Err(e) => {
                 // 文件读不出来（不存在 / 权限）⇒ 无"原文本"可保真，只能整体回写
-                let reason = format!("读取配置文件失败（{e}）⇒ 已整体重写配置文件");
+                tracing::warn!(path = %self.path.display(), error = %e,
+                    "配置文件读取失败：回退整体序列化回写（写路径无从保留原文本）");
                 match serde_yaml::to_string(&after) {
-                    Ok(t) => (t, WriteMode::FullRewrite, Some(reason)),
+                    Ok(t) => (
+                        t,
+                        WriteMode::FullRewrite,
+                        Some(msg::FULL_REWRITE_UNREADABLE),
+                    ),
                     Err(e2) => {
                         drop(guard);
                         return self.finish_failure(
-                            req, now, &planned, ControlCode::ApplyFailed,
+                            req,
+                            now,
+                            &planned,
+                            ControlCode::ApplyFailed,
+                            msg::WRITE_FAILED_SERIALIZE,
                             format!("整体序列化失败: {e2}"),
                         );
                     }
@@ -352,7 +404,11 @@ impl ConfigService {
         if let Err(e) = self_post_check(&text, &after) {
             drop(guard);
             return self.finish_failure(
-                req, now, &planned, ControlCode::ApplyFailed,
+                req,
+                now,
+                &planned,
+                ControlCode::ApplyFailed,
+                msg::WRITE_FAILED_SELFCHECK,
                 format!("写后自检失败（未落盘）: {e}"),
             );
         }
@@ -360,7 +416,14 @@ impl ConfigService {
         // 原子落盘（设计 §4.3.2 ③：tmp → fsync → bak → rename）
         if let Err(e) = atomic_write(&self.path, &text) {
             drop(guard);
-            return self.finish_failure(req, now, &planned, ControlCode::ApplyFailed, e);
+            return self.finish_failure(
+                req,
+                now,
+                &planned,
+                ControlCode::ApplyFailed,
+                msg::WRITE_FAILED_FILE,
+                e,
+            );
         }
 
         // ── 步骤 6'：进程内生效 + 步骤 7 的一半（内存副本 / revision / write_mode）──────
@@ -398,24 +461,25 @@ impl ConfigService {
         let audit_id = self.write_entries(&entries, req);
 
         // ── 步骤 8：回执（`applied` = **新** `ConfigView`）────────────────────────────────
+        //
+        // ⚠️ 本串**直接用字面量拼给屏看**（渲染端成功分支原样上屏，见本文件模块头硬口径 4）
+        // ⇒ 每一处都必须取 `receipt` 里的固定串 / 字段 `label`：
+        // 全角括号与「项」都缺字形，`mupcd` 的小写字母也缺字形（原串三处都踩了）。
         let view = self.view(&after);
-        let mut msg = format!("配置已保存（{} 项）", planned.len());
+        let mut screen = String::from(msg::SAVED);
         if let Some(note) = mode_note {
-            msg.push('；');
-            msg.push_str(&note);
+            screen.push_str(" · ");
+            screen.push_str(note);
         }
         if !restart.is_empty() {
-            msg.push_str(&format!(
-                "；{} 项需重启 mupcd 生效: {}",
-                restart.len(),
-                restart.join(",")
-            ));
+            screen.push_str(msg::RESTART_PREFIX);
+            screen.push_str(&restart_labels(&restart));
         }
         tracing::info!(request_id = %req.request_id, revision = view.revision,
-            write_mode = ?mode, audit_id = ?audit_id, "配置保存完成: {msg}");
+            write_mode = ?mode, audit_id = ?audit_id, "配置保存完成: {screen}");
         with_message(
             ControlResponse::ok(req.request_id.clone(), Some(view), audit_id, now),
-            msg,
+            screen,
         )
     }
 
@@ -472,16 +536,24 @@ impl ConfigService {
     }
 
     /// 执行期失败（self-check / 落盘 / 序列化）：逐字段 Failed 条目 + 统一回执。
+    ///
+    /// **`screen` 与 `reason` 是两条不同的串**（硬口径 4c）：
+    /// - `screen` 进**回执 `message`** ⇒ 必须是 `receipt` 里的**固定文案**（cmap 内，可上屏）；
+    /// - `reason` 是**外部错误串拼出来的详情**（`serde_yaml` / `std::io` 的英文 + 路径）⇒
+    ///   含 cmap 外的字，**只**进审计条目 `reason` 与 `tracing`（现场排障不丢信息）。
+    ///
+    /// 修复前二者是**同一条**串（`message == reason`）⇒ 屏上是"豆腐块 + 半截英文"。
     fn finish_failure(
         &self,
         req: &ControlRequest<ConfigPatch>,
         now: u64,
         planned: &[(String, Value)],
         code: ControlCode,
+        screen: &str,
         reason: String,
     ) -> ControlResponse<ConfigView> {
         tracing::error!(request_id = %req.request_id, code = ?code, reason = %reason,
-            "配置写入失败（装置维持原配置运行）");
+            "配置写入失败（装置维持原配置运行）: {screen}");
         let entries: Vec<ConsoleAuditEntry> = planned
             .iter()
             .map(|(k, _)| ConsoleAuditEntry {
@@ -501,7 +573,7 @@ impl ConfigService {
         ControlResponse::rejected(
             req.request_id.clone(),
             code,
-            reason,
+            screen,
             Vec::new(),
             audit_id,
             now,
@@ -601,8 +673,10 @@ fn short_mode(m: WriteMode) -> &'static str {
 /// - [`ApplyOutcome::Applied`] ⇒ 沿用调用方传入的 `reason`（成功路径下恒 `None`）：
 ///   真热生效的键**不得**被写成"需重启"（那会把审计页变成反向失真）。
 ///
-/// 文案固定以「需重启」开头/含之：与回执 `message`（`"…项需重启 mupcd 生效: …"`）与
-/// `hot_apply` 的 `tracing::warn!` 同一措辞，现场可用 `grep 需重启` 三处对拍。
+/// 文案固定含「需重启」：与回执 `message`（`"配置已保存 · 需重启进程生效: <标签>"`）与
+/// `hot_apply` 的 `tracing::warn!`（`"配置已保存但运行行为需重启才变…"`）三处共享**同一个词**
+/// ⇒ 现场仍可用 `grep 需重启` 三处对拍（**本串属 P5 审计页的自由文本渠道**，由该页的
+/// `free_text_safe` 与 AU9 残余口径处置，**不**受本单元"回执 `message` 逐字 ⊆ cmap"的约束）。
 fn per_field_reason(reason: Option<&str>, outcome: &ApplyOutcome) -> Option<String> {
     match outcome {
         ApplyOutcome::Applied => reason.map(str::to_string),
@@ -612,21 +686,49 @@ fn per_field_reason(reason: Option<&str>, outcome: &ApplyOutcome) -> Option<Stri
     }
 }
 
+/// 需重启字段的**屏上点名**：取字段表 [`FIELDS`] 的 **`label`**（配置页每一行的现成标题），
+/// **不是** `key`。
+///
+/// ⚠️ **为什么不能点名 `key`**（硬口径 4b）：机器键名**必然**含缺字形字符 —— `t`(U+0074) 与
+/// `_`(U+005F) 都不在 cmap 内 ⇒ `gateway.listen_port` 原样上屏是豆腐块，过 `display_safe`
+/// 又会被打散成 `GA?EWAY.LIS?EN?POR?`（点名落空，渲染端 PD24 有实测记录）。
+/// `label` 来自**同一张字段表**（零新增文案），操作者按它能在 P2 页上直接找到那一行。
+///
+/// 标签之间用 `·` 分隔（**半角逗号也不在 cmap 内**，只有 `·` 能当分隔符）。
+fn restart_labels(keys: &[&str]) -> String {
+    keys.iter()
+        .map(|k| field_meta(k).map_or(msg::UNKNOWN_FIELD, |m| m.label))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// `AuditUnavailable` 回执（fail-closed 的唯一出口；`applied=None` ⇒ 操作未生效）。
 fn audit_unavailable(
     request_id: &str,
     now: u64,
     reason: &str,
 ) -> ControlResponse<ConfigView> {
+    // 契约（`display-proto`，**冻结禁改**）的固定文案含 `写` / 全角括号 / 逗号，**都不在 cmap 内**
+    // ⇒ 在它后面接 `({reason})` 只会让豆腐块更长。这里**整条换掉**：
+    // - 屏上：P2 / `state.rs` 对 `AuditUnavailable` **按 `code` 覆盖**成 EDGE-18 固定串，
+    //   两者**同义**（`receipt::AUDIT_UNAVAILABLE`）⇒ 漂移无上屏后果；
+    // - 现场：原因（外部装配错误串，含 cmap 外的字）改由下面的 `tracing::error!` 承载，
+    //   信息量**不比原来少**（原来读的人是现场排障，读的还是日志）。
+    tracing::error!(
+        request_id,
+        reason,
+        "审计不可写 ⇒ fail-closed 拒绝执行配置写入"
+    );
     let mut r = ControlResponse::audit_unavailable(request_id.to_string(), now);
-    // 契约固定文案是给屏的（P2 对 AuditUnavailable 走 UI §8.3 固定文案，本行不进屏）；
-    // 这里保留原因便于日志 / 现场对拍。
-    r.message = format!("{}({reason})", r.message);
+    r.message = crate::console_host::receipt::AUDIT_UNAVAILABLE.to_string();
     r
 }
 
 /// 覆盖人读消息（契约的 `ok` / `rejected` 构造器把人读文案写死了，而本单元的成功文案必须
-/// 带上"哪些项需重启生效 / 是否整体重写"——那是**事实**，不能省）。
+/// 带上"哪些字段需重启生效 / 原文是否已不存在"——那是**事实**，不能省）。
+///
+/// ⚠️ 传进来的串必须满足用字约束（模块头硬口径 4：逐字 ⊆ 生成字体的 cmap）——
+/// 成功路径的 `message` 被渲染端**原样上屏**。
 ///
 /// 实现为**自由函数**而非 `impl ControlResponse<ConfigView>`：`ControlResponse` 是
 /// `display-proto`（**冻结契约，本单元禁改**）的类型，Rust 不允许对它写 inherent impl
@@ -1083,8 +1185,20 @@ gateway:
         assert!(resp.code.is_rejection());
         assert!(resp.applied.is_none(), "fail-closed ⇒ applied 必须为 None（操作未生效）");
         assert!(resp.audit_id.is_none(), "连审计号都没有 ⇒ 不得编一个");
-        assert!(resp.message.contains("审计不可写"), "文案须可读: {}", resp.message);
-        assert!(resp.message.contains("注入失败"), "具体原因须落到回执（现场排障）");
+        // ⚠️ **口径变更（回执用字网）**：`message` 固定为 `receipt::AUDIT_UNAVAILABLE`
+        // （与渲染端 EDGE-18 上屏文案同义）。**原因串不再进 `message`** —— 它是外部装配错误串
+        // （`BrokenSink` 注入的「注入失败：审计目录不可写」），含 cmap 外的字 ⇒ 真机豆腐块。
+        // 排障信息没丢：它由 `audit_unavailable` 的 `tracing::error!` 承载（P3 日志页可查）。
+        assert_eq!(
+            resp.message,
+            crate::console_host::receipt::AUDIT_UNAVAILABLE,
+            "回执文案必须是固定的 cmap 内串"
+        );
+        assert!(
+            !resp.message.contains("注入失败"),
+            "外部原因串**不得**漏进 message（它在 cmap 外的字上屏即豆腐块）: {}",
+            resp.message
+        );
 
         // 三重证据
         assert_eq!(disk(&h), before_text, "文件不得被改动");
@@ -1209,10 +1323,13 @@ gateway:
         stale.issued_at_ms = now - REPLAY_WINDOW_MS - 5_000;
         let r = h.svc.apply(&stale).await;
         assert!(!r.ok && r.code == ControlCode::RejectedValidation, "过期请求必须拒");
+        // 原因**换个渠道但一个字没少**：`message` 只给 `receipt::BAD_ENVELOPE`（cmap 内），
+        // 契约的英文原因串（含小写字母 ⇒ cmap 外）落在 `field_errors`（结构化渠道）。
+        assert_eq!(r.message, crate::console_host::receipt::BAD_ENVELOPE);
+        let envelope_reason = r.field_errors[0].reason.as_str();
         assert!(
-            r.message.contains("replay window") || r.message.contains("issued_at_ms"),
-            "原因须可定位: {}",
-            r.message
+            envelope_reason.contains("replay window") || envelope_reason.contains("issued_at_ms"),
+            "原因须可定位（`field_errors` 是它现在的落点）: {envelope_reason}"
         );
         // 太超前（未来 90 s）⇒ 拒
         let mut future = ok_request("rid-future", &[("intercore.port", serde_json::json!(2405))]);
@@ -1238,7 +1355,13 @@ gateway:
         wrong_op.op = "release".to_string();
         let r = h.svc.apply(&wrong_op).await;
         assert!(!r.ok && r.code == ControlCode::RejectedValidation);
-        assert!(r.message.contains("release"), "原因须点名误路由: {}", r.message);
+        // 误路由仍被**点名**，只是换了渠道：`message` 固定（cmap 内），原因在 `field_errors`。
+        assert_eq!(r.message, crate::console_host::receipt::BAD_ENVELOPE);
+        assert!(
+            r.field_errors.iter().any(|e| e.reason.contains("release")),
+            "原因须点名误路由: {:?}",
+            r.field_errors
+        );
 
         let mut empty = ok_request("   ", &[("intercore.port", serde_json::json!(2405))]);
         empty.request_id = "  ".to_string();
@@ -1330,7 +1453,13 @@ gateway:
             WriteMode::FullRewrite,
             "EDGE-23：回执必须显式声明整体重写（UI 据此 Toast）"
         );
-        assert!(resp.message.contains("整体重写"), "回执文案须明示降级: {}", resp.message);
+        // ⚠️ 文案由「已整体重写配置文件」改为「原有文字已不存在 …」（`整`/`体`/`写` 三字都不在
+        // cmap 内，逐字网抓出来的）；语义不变，且与渲染端 `TEXT_TOAST_FULL_REWRITE` 同款措辞。
+        assert!(
+            resp.message.contains("原有文字已不存在"),
+            "回执文案须明示降级: {}",
+            resp.message
+        );
         let text = disk(&h);
         assert!(text.contains("listen_port: 2405"), "目标键必须真的写进去");
         assert!(!text.contains("# 注释会丢"), "整体回写 ⇒ 注释确实丢失（降级有测试断言）");
@@ -1447,20 +1576,26 @@ gateway:
             .await;
         assert!(resp.ok, "{resp:?}");
 
-        // ① 回执（后端受理端的真话）
+        // ① 回执（后端受理端的真话）。⚠️ 点名用字段 **label**（`端口`）而非机器键名：
+        //    后者含 cmap 外的字符（小写 `t` / `_`）⇒ 上屏即豆腐块，见 `restart_labels`。
         assert!(
             resp.message.contains("需重启"),
             "回执必须明写需重启（重要 4 ①）：{}",
             resp.message
         );
         assert!(
-            resp.message.contains("gateway.listen_port"),
-            "回执须点名**具体**哪些键需重启: {}",
+            resp.message.contains("端口"),
+            "回执须点名**具体**哪些键需重启（`gateway.listen_port` 的 label）: {}",
             resp.message
         );
         assert!(
-            !resp.message.contains("system.log_level"),
-            "真热生效的键不得出现在需重启清单里: {}",
+            !resp.message.contains("日志级别"),
+            "真热生效的键（`system.log_level` 的 label）不得出现在需重启清单里: {}",
+            resp.message
+        );
+        assert!(
+            !resp.message.contains("gateway.listen_port"),
+            "机器键名不得进回执（含缺字形字符）: {}",
             resp.message
         );
 
