@@ -104,7 +104,9 @@
 //!     —— 外壳要"一次建 6 页、常驻不销毁"，而 `lv_tabview` 的页生命周期归它自己管）。
 //!   - **数据入口仍是契约 2 / 2′**：外壳**不替页做数据决策**，只把页句柄交出去
 //!     （`Shell::p1()` … `Shell::p6()`）⇒ 真实数据源接线属 **B3**。
-//!   - **两条新增的外壳级注入**（页侧无生产可见查询口，见 `shell.rs` 偏差 **SH2**）：
+//!   - **两条新增的外壳级注入**（**B2c-3 时**页侧无生产可见查询口，见 `shell.rs` 偏差
+//!     **SH2**；**弹层那一条已由 B3-2c 闭合** —— 真源改为页面的 `P2ConfigPage::dialog_open`
+//!     / `P4InterlockPage::dialog_open`，接线层每拍取或喂入；注入位本身保留）：
 //!     「是否有确认弹层打开」（暂停空闲计时）与「触摸设备是否可用」（EDGE-13 角标）；
 //!     P2 的「未保存修改」**不**经注入 —— 外壳每拍读生产可见的
 //!     [`p2_config::P2ConfigPage::is_dirty`]，提示条的「放弃修改」直接调
@@ -146,7 +148,8 @@ use crate::lvgl::style::{Color, Style, StyleSelector};
 use crate::lvgl::widgets::{Label, ScrollContainer};
 use crate::lvgl::LvglError;
 use crate::state::{ChannelStatus, Freshness};
-use crate::ui::theme::{self, Dimens, Palette};
+use crate::ui::components::StatusChip;
+use crate::ui::theme::{self, ChipSkin, Dimens, Palette, TextSlot};
 
 pub mod filters;
 pub mod p1_status;
@@ -176,6 +179,38 @@ pub const MISSING: &str = "未提供";
 /// 装置段（`DeviceSection`）`Option` 字段为 `None` 时的文案（=`不可得`，与
 /// [`MISSING`] 的「未提供」区分：前者是**该拍没采到**，后者是**该字段根本没有**）。
 pub const NOT_READ: &str = "未取数";
+
+/// 区块级**「冻结」角标**文案（UI §8.3 EDGE-03 原文用字：「保留最近有效帧并**每区块打
+/// `冻结` 角标**」；逐字取自 §3.6 全屏用字表，**不新增上屏字**）。
+///
+/// **为什么要一个共享常量**（B3-2c）：EDGE-03 / EDGE-20 的「打标」落在**帧驱动的页**上
+/// （`DeviceSection` / `InfoSection` / `InterlockSection` 所辖的各卡），而各页各自写一份
+/// 字面量会让"同一语义两种写法"漂移。判据的**唯一真源**是 [`frame_mark`]。
+pub const TEXT_FROZEN: &str = "冻结";
+
+/// [`PageInput`] → 区块级**帧可信度标记**（EDGE-03 / EDGE-20 的「保留最近有效帧**并打标**」）。
+///
+/// # 判据（**唯一输入 = [`PageInput`] 的三要素**，与 P1 同源，不另立第二套）
+///
+/// | 通道态 | 新鲜度 | 有帧 | 结果 | 理由 |
+/// |--------|--------|:----:|------|------|
+/// | `Down` | 任意 | 有 | [`TEXT_FROZEN`] | EDGE-03：通道断 ⇒ **保留**最近有效帧（**不得**清成占位），并打「冻结」 |
+/// | `Down` | 任意 | 无 | `None` | 数值本就是 `–` 占位，不是"冻结的旧值" ⇒ 打标即**谎报** |
+/// | `Connected` | `Stale` | 有 | [`p1_status::TEXT_STALE`] | 与 P1 的「数据过期」角标**同一串**（§3.6 既有） |
+/// | 其余（`Init` / `Fresh`） | — | — | `None` | 无标记可打 |
+///
+/// ⚠️ **通道断优先于帧旧**：两条**不并存**（与 P1 的 `render_channel` 同口径 —— 通道断已由
+/// 「冻结」表达，再叠一条「数据过期」只是噪声）。
+///
+/// ⚠️ **打标 ≠ 清值**：本函数只回答"打哪个标"，由调用方**只切角标可见性** —— 数值一律
+/// 沿用冻结帧（EDGE-03 / EDGE-20 的明文要求，也是操作者据以决策的那份数据）。
+pub fn frame_mark(input: &PageInput<'_>) -> Option<&'static str> {
+    match (input.channel, input.freshness, input.frame.is_some()) {
+        (ChannelStatus::Down, _, true) => Some(TEXT_FROZEN),
+        (ChannelStatus::Connected, Freshness::Stale, true) => Some(p1_status::TEXT_STALE),
+        _ => None,
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. 页面输入（状态层 → 页面的唯一数据入口）
@@ -345,6 +380,51 @@ pub(crate) fn show_only(objs: &[&Obj], idx: Option<usize>) {
     for (i, o) in objs.iter().enumerate() {
         set_visible(o, Some(i) == idx);
     }
+}
+
+// ── 区块级「冻结 / 数据过期」角标（EDGE-03 / EDGE-20；B3-2c）───────────────────
+
+/// 角标宽（`2 × CHIP_MIN_W` = 192：最长文案 `数据过期` 4 字 × 24 px = 96 + 图标槽 32 = 128，
+/// 留出字形宽度余量；与 P1 的「数据过期」胶囊**同一档**，不另立新尺寸）。
+///
+/// **单一真源**（B3-2c 整改 · 重要 4）：四张卡（P4 总态 / P4 触发源 / P6 装置信息 / P6 运行）
+/// 的角标尺寸只有这一份 —— 此前 P4 与 P6 **各自写了一份逐字相同的表达式**。
+pub(crate) const FROZEN_CHIP_W: i32 = 2 * Dimens::CHIP_MIN_W;
+
+/// 角标 y（在卡头行内垂直居中；`STATUS_CHIP_H` 32 ⇒ 与卡头文字同顶 ⇒ 收敛到 0）。
+///
+/// 卡头行高 = `SectionTitle` 行高 + `GAP_MIN`（P4 / P6 **各自**持同名私有常量 `CARD_HEAD_H`，
+/// 表达式与本行**逐字相同** —— 欲改须三处同改，见各页常量注释）。
+pub(crate) const FROZEN_CHIP_Y: i32 = theme::center_offset(
+    TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN,
+    Dimens::STATUS_CHIP_H,
+);
+
+/// 建一张卡头右端的**区块级「冻结 / 数据过期」角标**（EDGE-03 / EDGE-20）。
+///
+/// **四处共用**（P4 的两张卡 + P6 的两张卡）—— 构造口径只有这一处：尺寸 / 皮肤 / 图标 /
+/// 初始文案 / y 偏移。`x` 由调用方给（各卡头右端的可用段不同：P6 三卡贴右缘，P4 总态卡
+/// 要避开 latch 胶囊）。**建好即隐藏**，运行期由各页 `render` **只切可见性 + 换文案**。
+///
+/// ⚠️ **为什么必须收口到这里**（B3-2c 整改 · 重要 4）：此前只有 P6 走这个构造点，P4 在
+/// 构造处**内联复制**了 `StatusChip::new(.., FROZEN_CHIP_W, ICON_WARN, TEXT_FROZEN,
+/// ChipSkin::WARNING)` 两次，而 `p6_system.rs` 的注释却声称"三处都由它统一口径" ——
+/// 当时 `grep -rn frozen_chip src/` **只命中 `p6_system.rs`**，那句话是**不实陈述**。
+/// 收口后，"同一构造点"才成立：**改本函数的返回值 ⇒ P4 与 P6 的断言同时红**。
+///
+/// **回归**：`ui/tests.rs::pages_chain` 的「四处角标同构造点」段（读回尺寸 / 皮肤 / 图标 /
+/// 文案四项 + 源码哨）。
+pub(crate) fn frozen_chip(parent: &Obj, x: i32) -> Result<StatusChip, LvglError> {
+    let chip = StatusChip::new(
+        parent,
+        FROZEN_CHIP_W,
+        p2_config::ICON_WARN,
+        TEXT_FROZEN,
+        ChipSkin::WARNING,
+    )?;
+    chip.set_pos(x, FROZEN_CHIP_Y);
+    set_visible(chip.obj(), false);
+    Ok(chip)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -544,6 +624,8 @@ pub const ALL_TEXTS: &[&str] = &[
     PLACEHOLDER,
     MISSING,
     NOT_READ,
+    // 共享（B3-2c）：区块级「冻结」角标（EDGE-03；`数据过期` 复用 P1 的同名串）
+    TEXT_FROZEN,
     // P1 共享/通道条
     p1_status::TEXT_CHANNEL_DOWN,
     p1_status::TEXT_CHANNEL_CONNECTING,
@@ -991,6 +1073,47 @@ mod tests {
     use super::*;
     // `RefCell` 只在测试里用（生产侧的回调槽走 `sealed::CbSlot`，其内部借用不外露）。
     use std::cell::RefCell;
+
+    // ── 区块级帧可信度标记（EDGE-03 / EDGE-20；纯逻辑，不触碰 LVGL）──
+
+    /// **冻结 / 数据过期**标记的判据（唯一真源 = [`frame_mark`]）。
+    ///
+    /// **改什么会让本条变红**：
+    /// - 把 `Down` 分支的 `frame.is_some()` 守卫去掉（无帧也打「冻结」）⇒ 第 4 条红
+    ///   （无帧时数值本就是 `–` 占位，不是"冻结的旧值"，打标即**谎报**）；
+    /// - 把 `Stale` 分支的 `channel == Connected` 守卫去掉（通道断也走「数据过期」）⇒
+    ///   第 2 条红（通道断必须显「冻结」，否则与 EDGE-03 的用字不符）；
+    /// - 把 `frame_mark` 改成恒 `None` ⇒ 第 2 / 3 条红。
+    #[test]
+    fn frame_mark_covers_frozen_stale_and_live() {
+        let f = crate::ui::tests::frame_healthy();
+        // ① 实时（通道通 + 帧新鲜）⇒ **不打标**
+        assert_eq!(frame_mark(&PageInput::live(&f)), None);
+        // ② 通道断 + 保留最近有效帧 ⇒ 「冻结」（EDGE-03 原文用字）
+        assert_eq!(frame_mark(&PageInput::down(Some(&f))), Some(TEXT_FROZEN));
+        // ③ 通道通但帧旧 ⇒ 「数据过期」（与 P1 的角标**同一串**，不另造）
+        assert_eq!(
+            frame_mark(&PageInput::new(
+                Some(&f),
+                ChannelStatus::Connected,
+                Freshness::Stale
+            )),
+            Some(p1_status::TEXT_STALE)
+        );
+        // ④ 通道断且**无帧** ⇒ 数值本就是占位符，**不得**打「冻结」（否则谎报"有冻结帧"）
+        assert_eq!(frame_mark(&PageInput::down(None)), None);
+        // ⑤ 尚未首连（`Init`）⇒ 不打标
+        assert_eq!(frame_mark(&PageInput::init()), None);
+        // ⑥ 通道断 + 帧旧 ⇒ **仍是**「冻结」（通道级降级优先，两条不并存 —— 与 P1 同口径）
+        assert_eq!(
+            frame_mark(&PageInput::new(
+                Some(&f),
+                ChannelStatus::Down,
+                Freshness::Stale
+            )),
+            Some(TEXT_FROZEN)
+        );
+    }
 
     // ── 时间戳格式化（纯逻辑；不触碰 LVGL ⇒ 可独立 `#[test]`）──
 

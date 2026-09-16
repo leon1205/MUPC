@@ -35,11 +35,11 @@ use crate::lvgl::obj::Obj;
 use crate::lvgl::style::Style;
 use crate::lvgl::widgets::{Label, LongMode, ScrollContainer};
 use crate::lvgl::LvglError;
-use crate::ui::components::LedIndicator;
+use crate::ui::components::{LedIndicator, StatusChip};
 use crate::ui::pages::{
-    control_source_text, decor, display_safe, fmt_int0, format_uptime, label, link_color,
-    link_icon, page_root, sections, set_style_index, set_visible, text_label, PageInput,
-    LED_STATES, MISSING, PLACEHOLDER,
+    control_source_text, decor, display_safe, fmt_int0, format_uptime, frame_mark, label,
+    link_color, link_icon, page_root, sections, set_style_index, set_visible, text_label,
+    PageInput, LED_STATES, MISSING, PLACEHOLDER,
 };
 use crate::ui::theme::{self, Dimens, Palette, TextSlot};
 
@@ -128,6 +128,16 @@ const VALUE_W: i32 = INNER_W - VALUE_COL_X;
 const LED_W: i32 = VALUE_W;
 /// 说明行高（正文 24 + 上缝 16）。
 const NOTE_H: i32 = TextSlot::Body.px() as i32 + Dimens::GAP_MIN;
+
+// ── 区块级「冻结 / 数据过期」角标（EDGE-03 / EDGE-20；B3-2c）─────────────────
+//
+// ⚠️ **宽 / y 不在本文件**（B3-2c 整改 · 重要 4）：它们与**构造点**一起收口在
+// [`crate::ui::pages::frozen_chip`] / `FROZEN_CHIP_W` / `FROZEN_CHIP_Y` —— 四张卡
+// （P4 两张 + P6 两张）共用同一份，此前 P4 / P6 **各写一份逐字相同的表达式**。
+// 本文件只留**本页专属**的 x。
+
+/// 角标 x（贴卡内容区右缘；三张卡的卡头都只有标题，右侧整段空白）。
+const FROZEN_CHIP_X: i32 = INNER_W - crate::ui::pages::FROZEN_CHIP_W;
 
 /// 装置信息卡行数（型号 / 序列号 / 固件版本 / 编译时间）。
 const INFO_ROWS: usize = 4;
@@ -272,6 +282,13 @@ pub struct P6SystemPage {
     run: Vec<SysRow>,
     about: Vec<SysRow>,
     note: Label,
+    /// 装置信息卡（帧 `InfoSection` 段）的**区块级「冻结 / 数据过期」角标**（EDGE-03）。
+    ///
+    /// 构造期建好、运行期只切可见性 + 换文案（判据 = [`crate::ui::pages::frame_mark`]）
+    /// —— `render` 是 1 Hz 热路径，绝不在此建 / 删对象。
+    info_frozen: StatusChip,
+    /// 运行信息卡（帧 `DeviceSection` 段）的同类角标。
+    run_frozen: StatusChip,
     /// 值样式：[0] = 32 px `text_primary`；[1] = 24 px `text_weak`（「未提供」）。
     value_styles: [Rc<Style>; 2],
     /// 三张卡的**存活锚点** + 静态标题（句柄 `drop` 即 `lv_obj_delete`，会级联删掉卡内全部
@@ -300,6 +317,10 @@ impl P6SystemPage {
         )?;
         info_head.set_pos(0, 0);
         keep.push(info_head.into_obj());
+        // 区块级「冻结」角标（EDGE-03 / EDGE-20；B3-2c）：**构造期建好、建好即隐藏**，
+        // 运行期只切可见性 + 换文案。皮肤取 §8.2 既有警示类（`数据过期` / `冻结` 同款），
+        // 图标取既有 `⚠` 字面量 ⇒ **零新上屏字**。
+        let info_frozen = crate::ui::pages::frozen_chip(&info_card, FROZEN_CHIP_X)?;
         let info_names = [TEXT_MODEL, TEXT_SERIAL, TEXT_FIRMWARE, TEXT_BUILD_TIME];
         let mut info = Vec::with_capacity(INFO_ROWS);
         for (i, name) in info_names.iter().enumerate() {
@@ -323,6 +344,7 @@ impl P6SystemPage {
         )?;
         run_head.set_pos(0, 0);
         keep.push(run_head.into_obj());
+        let run_frozen = crate::ui::pages::frozen_chip(&run_card, FROZEN_CHIP_X)?;
         let run_names = [
             TEXT_UPTIME,
             TEXT_CPU_TEMP,
@@ -345,6 +367,13 @@ impl P6SystemPage {
         }
 
         // ── 关于本屏卡（3 行 + 说明行）──
+        //
+        // ⚠️ **本卡有意不打冻帧标**（与上面两张卡不同 —— `render` 只对 `info` / `run` 打标）。
+        // 理由：本卡 3 行中 **2 行是编译期常量**（版本 `env!("CARGO_PKG_VERSION")` / 服务地址
+        // `loopback_service_text()`），**仅 `mgmt_ip` 一行来自帧** ⇒ 通道断 / 帧旧时给整卡打
+        // 「冻结」是**谎报**（2/3 的行根本没有"冻结的旧值"可言），违 UI §2.6「不得假装实时」
+        // 的同一条精神 —— 与 `pages/mod.rs::frame_mark` 的"无帧不打标即谎报"判据同源。
+        // （`frame_mark` 的适用面因此是"帧驱动页 P4/P6 的**帧驱动卡**"，不是"整页"。）
         let about_card =
             decor(&root, Dimens::CONTENT_W, ABOUT_CARD_H, &theme::card())?;
         about_card.set_pos(0, ABOUT_CARD_Y);
@@ -388,6 +417,8 @@ impl P6SystemPage {
             run,
             about,
             note,
+            info_frozen,
+            run_frozen,
             value_styles,
             _keep: keep,
         };
@@ -396,7 +427,20 @@ impl P6SystemPage {
     }
 
     /// 渲染一帧（**只读**）。
+    ///
+    /// **打标不改变数值**（EDGE-03 / EDGE-20）：通道断 / 帧旧时，`InfoSection` / `DeviceSection`
+    /// 的取值照常铺上屏（"保留最近有效帧"是**明文要求**），只多打一个卡头角标。
     pub fn render(&self, input: &PageInput<'_>) {
+        // ① 区块级可信度打标（判据 = [`frame_mark`]，与 P1 的通道条 / `数据过期` 角标**同源**）。
+        //    只切可见性 + 换文案 —— 不建 / 不删对象（`render` 是 1 Hz 热路径）。
+        let mark = frame_mark(input);
+        if let Some(m) = mark {
+            self.info_frozen.set_text(m);
+            self.run_frozen.set_text(m);
+        }
+        set_visible(self.info_frozen.obj(), mark.is_some());
+        set_visible(self.run_frozen.obj(), mark.is_some());
+
         let (device, _alarms, info) = sections(input);
 
         // 装置信息（F8.3：一次性读取，不随刷新跳动）。
@@ -509,6 +553,44 @@ impl P6SystemPage {
         self.note.text()
     }
 
+    /// 装置信息卡（`InfoSection`）的**区块级「冻结 / 数据过期」角标**是否可见（EDGE-03）。
+    pub fn info_frozen_visible(&self) -> bool {
+        !self.info_frozen.obj().is_hidden()
+    }
+
+    /// 上述角标当前文案（隐藏时仍可读回；可见时恒为 [`crate::ui::pages::TEXT_FROZEN`] 或 `数据过期`）。
+    pub fn info_frozen_text(&self) -> Option<String> {
+        self.info_frozen.text()
+    }
+
+    /// 运行信息卡（`DeviceSection`）的同类角标是否可见。
+    pub fn run_frozen_visible(&self) -> bool {
+        !self.run_frozen.obj().is_hidden()
+    }
+
+    /// 运行信息卡角标当前文案。
+    pub fn run_frozen_text(&self) -> Option<String> {
+        self.run_frozen.text()
+    }
+
+    /// **仅测试**：装置信息卡角标的**构造侧读回**（尺寸 / 皮肤 / 图标）。
+    ///
+    /// 用途（B3-2c 整改 **重要 4**）：证"P4 与 P6 的四张角标**同一个构造点**"——
+    /// **尺寸与皮肤只由 [`crate::ui::pages::frozen_chip`] 给定**，`render` **不覆盖**它们
+    /// （会被 `render` 覆盖的是文案与可见性，那两项由可见性 / 文案用例证）⇒ 在
+    /// `pages_chain` 里读回这两项 = "改构造点 ⇒ 两页断言同时红"的行为判据。
+    /// ⚠️ 读尺寸前须有一次布局趟（`Display::refr_now_for_test`）。
+    #[cfg(test)]
+    pub(crate) fn info_frozen_chip(&self) -> &StatusChip {
+        &self.info_frozen
+    }
+
+    /// **仅测试**：运行信息卡角标的构造侧读回（同 [`Self::info_frozen_chip`]）。
+    #[cfg(test)]
+    pub(crate) fn run_frozen_chip(&self) -> &StatusChip {
+        &self.run_frozen
+    }
+
     /// 装置信息卡行数。
     pub fn info_row_count(&self) -> usize {
         self.info.len()
@@ -563,3 +645,19 @@ fn non_empty_opt(v: &Option<String>) -> Option<&str> {
 pub fn service_scope_text() -> &'static str {
     ServiceScope::LoopbackOnly.display_name()
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. 测试模块标记（**空模块，不是本页用例的落点**）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// ⚠️ **本模块里没有用例**：P6 的用例全部写在 `ui/tests.rs::pages_chain`（B2a 起的分工）。
+///
+/// **为什么仍必须留着它**（B3-2c 整改 重要 4 连带）：码表静态网
+/// `ui/tests.rs::ui_texts_covered_by_font_cmap` 用
+/// [`truncate_before_test_module`](crate::ui::tests) 的判据 —— "第一个**其后紧跟 `mod tests`**
+/// 的 `#[cfg(test)]`" —— 划**生产区 / 测试区**的界。本页新增了两个 `#[cfg(test)]` 访问器
+/// （[`P6SystemPage::info_frozen_chip`] / [`P6SystemPage::run_frozen_chip`]）却**没有**任何
+/// `mod tests` ⇒ 该网判定"截断前提不成立"并**响亮失败**（它明令不得静默放过 —— 实测已红）。
+/// 补一个**位于文件末尾**的空模块即恢复原扫描面（截断点 = 文件尾 ⇒ 生产字面量一条不漏）。
+#[cfg(test)]
+mod tests {}

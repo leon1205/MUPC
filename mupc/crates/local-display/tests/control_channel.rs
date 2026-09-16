@@ -427,3 +427,63 @@ fn startup_echoes_the_live_control_channel_and_never_claims_it_is_inert() {
         "B3-2b-2 已接线 ⇒ 不得再打印「不影响行为」的旧告警（失真文案必须整条删除）：\n{stderr}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ④ `app` 层的两条"喂入值"接线（B3-2c：源码哨）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **`Shell::set_modal_open` 喂的是页面的生产可见查询口**，不是常量。
+///
+/// # 为什么必须是源码哨
+///
+/// 喂入值在 `App::tick` 里（`App` 的构造需要 LVGL 会话 ⇒ 进程内 `#[test]` 起不了第二条
+/// LVGL 线程，见 `src/ui/tests.rs` 模块头）；而 `--smoke` 路径里**任何弹层都不会打开**
+/// （T-3 门禁要求"未确认 = 零写动作"）⇒ 进程级用例同样观测不到这条路径。
+///
+/// 本条守的是**这一行的形态**：喂入值必须由 `P2ConfigPage::dialog_open()` /
+/// `P4InterlockPage::dialog_open()` 取或得到。外壳侧的**语义**（弹层打开 ⇒ 暂停计时 /
+/// 不强制切页）由 `ui/tests.rs::shell_chain` ⑤″ 段以**真弹层 + 对象级断言**证。
+///
+/// # 能力边界（如实登记，不得高估）
+///
+/// 源码扫描证明的是"**这一行在源码里**"，**不是**"它在运行期被执行过"（`tick` 每拍必调，
+/// 由 `timing::run` 的结构保证）。它抓的是那类**屏上看起来正常的退化**：
+/// 把它改回常量 `false`（本单元开工前的状态）⇒ 弹层打开期间空闲回归照常倒计时并把用户
+/// 从 P2/P4 顶回 P1（正在确认写操作的用户被踢出页面）—— 屏上不会报任何错。
+///
+/// **改什么会让本条变红**（**已实测**，见交付报告探针）：把这一行换回
+/// `self.shell.set_modal_open(false)` 或 `self.control.confirm_open()` ⇒ 红。
+#[test]
+fn app_feeds_modal_open_from_the_pages_production_query() {
+    const SRC: &str = include_str!("../src/app.rs");
+    // 只扫**生产段**（测试段自身含同样的字面量 ⇒ 会自证失真，本项目踩过"扫描器失真"）。
+    let prod = SRC
+        .split("#[cfg(test)]\nmod tests {")
+        .next()
+        .expect("app.rs 应能切出生产段");
+    assert_ne!(
+        prod.len(),
+        SRC.len(),
+        "未切出生产段（切分标记失效）：扫描器失真，本用例必须响亮失败"
+    );
+    // 两段合起来 = 那一整条表达式（不锁换行版式：rustfmt 可能把它折成两行）。
+    assert!(
+        prod.contains("set_modal_open(self.shell.p2().dialog_open()"),
+        "`App::tick` 必须把 P2 的**生产可见**弹层查询口喂进 `Shell::set_modal_open`\
+         （喂入点或 P2 那一侧没了 ⇒ TT-13 再次落空）"
+    );
+    assert!(
+        prod.contains("|| self.shell.p4().dialog_open()"),
+        "P4 同理（两页**取或** = 「屏上此刻有任一确认弹层」；少一侧 ⇒ P4 弹层期间照常倒计时）"
+    );
+    // **负向**：恒 `false` / 恒读 `ControlState::confirm_open()` 两种旧写法都不得复活。
+    assert!(
+        !prod.contains("set_modal_open(false)"),
+        "喂入值不得是常量 `false`（B3-2c 开工前的退化形态：TT-13 名存实亡）"
+    );
+    assert!(
+        !prod.contains("confirm_open()"),
+        "喂入值不得读 `ControlState::confirm_open()` —— 它**没有生产者**（恒 `None`），\
+         弹层的生命周期归页面（见 `state.rs` 的 S-4 订正段）"
+    );
+}

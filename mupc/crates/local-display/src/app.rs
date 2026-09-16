@@ -63,7 +63,8 @@ use crate::lvgl::display::Display;
 use crate::lvgl::indev::Indev;
 use crate::lvgl::obj::Obj;
 use crate::screen::{Blitter, MemorySink, PixelSink};
-use crate::state::{ChannelStatus, ControlState, DisplayState, Freshness};
+use crate::state::{self, ChannelStatus, ControlState, DisplayState, Freshness};
+use crate::ui::components::{Toast, ToastTone};
 use crate::timing::Host;
 use crate::ui::pages::p3_logs::LogQuery;
 use crate::ui::pages::p5_audit::AuditQuery;
@@ -251,6 +252,140 @@ pub fn apply_refresh_request(refresh_requested: bool, next_poll_ms: &mut Option<
     true
 }
 
+/// **一次成功路径回执的记账分派**（**纯函数**，可测）：这条回执**要不要**由状态层弹 Toast。
+///
+/// # 判据 = 这条回执**有没有别的上屏通道**
+///
+/// **写端点**（`RouteDecision::ConfigApply` / `RouteDecision::InterlockResult`）的回执由
+/// [`App::apply_route`] 送进 P2 / P4 的 `show_result` —— **页面自己 `show_toast` 弹一条**。
+/// 状态层若照旧再弹一条（[`state::ControlState::record_response`] 对**一切非 `Ok` 的码**与
+/// **任何非空 `message`** 都弹），同一拍就会有**两个** Toast 对象同挂 `lv_layer_top()`、
+/// 同坐标（`Dimens::TOAST_X/Y`）同文案 ⇒ 违 UI §7.2「同一时刻仅 1 条」。
+/// 生产高频可达：P2 字段校验被拒 / P4 前置条件被拒。
+///
+/// **PM 裁定（B3-2c 整改 · 阻塞项）**：**页面负责上屏、状态层只记账** ⇒ 写端点走
+/// [`state::ControlState::record_response_without_toast`]。
+///
+/// **其余决策**（读端点：`Config` / `Logs` / `LogsTargets` / `Audit` / `AuditOps`）的回执
+/// **没有**页面上屏通道 ⇒ 保留状态层兜底 Toast（否则退化成"屏上什么都不发生"，违 §2.6）。
+/// 判据**按决策而非按端点**写：将来新增写端点若不慎让它落到"无页面上屏通道"的新决策上，
+/// 会走**保留**分支（多一条 Toast 是噪声，少一条是静默）—— 取 fail-visible 的那一侧。
+///
+/// 抽成自由函数（同 [`apply_refresh_request`] 的理由）：`App` 的构造需要 LVGL 会话，
+/// 纯逻辑用例够不着，而这条分派**必须能红的回归**（回退成 `record_response` = 同拍双 Toast，
+/// 屏上表现为"两条一模一样、叠在同一坐标"的 Toast，肉眼分不出是 bug）。
+/// 回归：`ui/tests.rs::write_receipt_is_shown_by_the_page_and_not_by_the_state_layer`。
+pub fn record_receipt(
+    control: &mut state::ControlState,
+    decision: &RouteDecision,
+    resp: &mupc_display_proto::ControlResponse<RawPayload>,
+    epoch_ms: u64,
+) {
+    match decision {
+        RouteDecision::ConfigApply(_) | RouteDecision::InterlockResult(_) => {
+            control.record_response_without_toast(resp)
+        }
+        _ => control.record_response(resp, epoch_ms),
+    }
+}
+
+/// 传输层失败的**上屏文案**（**纯函数**，可测）。
+///
+/// - 有**专属出路**的错误（今仅 `RetryWindowExpired`，判据在
+///   [`state::console_error_text`]）⇒ 用 `ui/**` 的专属串；
+/// - 其余 ⇒ 回落既有通用兜底 [`state::TRANSPORT_FAIL_TEXT`]（「操作失败」）。
+///
+/// **为什么不在这里自造串**：上屏文案的唯一真源在 `ui/**`（码表静态网只扫那 13 个文件）；
+/// 本函数只做**二选一**，一个字面量都不产生。
+///
+/// # 它**不是**"三条失败路径的唯一分派点"（B3-2c 整改 重要 4 · 订正）
+///
+/// 本函数**只**被三条失败路径里的**第 ② 条**调用 —— [`App::begin_write_intent`] 里
+/// `ConsoleClient::begin_write` **自身发起失败**那一支。另两条各有其文案来源，**不经此处**：
+///
+/// | 路径 | 落点 | 文案来源 |
+/// |------|------|----------|
+/// | ① 写意图在途被丢弃（`is_busy()`） | [`state::ControlState::push_toast`] | `p4_interlock::TEXT_OP_BUSY`（页面既有串） |
+/// | ② `begin_write` 自身失败 | [`state::ControlState::record_transport_failure_with_text`] | **本函数** |
+/// | ③ 回执形态 / 解码不符（`route` 的 `Err`） | [`state::ControlState::record_transport_failure`] | 通用兜底 `TRANSPORT_FAIL_TEXT`（**不经本函数**：该错的类型是 [`control_route::RouteError`]，不是 [`crate::console::ConsoleError`]） |
+///
+/// （③ 的这一句 [`App::absorb_console`] 自己也明写。此前本行写"三条失败路径出 Toast 时的
+/// 唯一分派点"，与同文件的实现和注释**自相矛盾**。）
+///
+/// 抽成自由函数（同 [`apply_refresh_request`] 的理由）：`App` 的构造需要 LVGL 会话，
+/// 纯逻辑用例够不着，而这条分派**必须有能红的回归**（写错 `unwrap_or` 的方向即静默降级）。
+pub fn transport_failure_text(e: &crate::console::ConsoleError) -> &'static str {
+    crate::state::console_error_text(e).unwrap_or(crate::state::TRANSPORT_FAIL_TEXT)
+}
+
+/// 本拍 **app 层 Toast** 应呈现的样子（**纯函数**，可测）：`Some(文案)` = 显示该文案，
+/// `None` = 隐藏。
+///
+/// # 它是三条失败路径的唯一上屏出口（B3-2c）
+///
+/// 接线层有三条失败路径原先**只落 stderr**、屏上无任何反馈（违 §2.6「降级可见」）：
+///
+/// 1. 写意图在途被丢弃（[`App::begin_write_intent`] 的 `is_busy()` 分支）—— 记一条
+///    [`state::ControlState::push_toast`]（「操作进行中」）；
+/// 2. `begin_write` **自身**发起失败 —— [`state::ControlState::record_transport_failure_with_text`]；
+/// 3. 回执**形态 / 解码不符**（[`crate::control_route::route`] 的 `Err`）——
+///    [`state::ControlState::record_transport_failure`]。
+///
+/// 三条都落在 [`state::ControlState`] 的**同一个** Toast 格子里 ⇒ 屏上只需要**一个**消费者
+/// （就是本函数 + [`App`] 持有的那个 `Toast`）。文案一律取自 `state.rs` 的既有映射
+/// （**不自造上屏字**）。
+///
+/// # 生命周期
+///
+/// 3 s（[`state::TOAST_TTL_MS`] / UI §7.2），**时钟由调用方注入**（`epoch_ms`）⇒ 离屏可确定性
+/// 复现；过期即返回 `None`（屏上那条随之隐藏）。
+///
+/// **改什么会让本条变红**：去掉 `is_expired` 过滤 ⇒
+/// `app::tests::failure_paths_reach_the_app_toast` 的「3 s 到期 ⇒ 隐藏」断言红；
+/// 恒返回 `None` ⇒ 三条路径的断言**全红**。
+pub fn toast_view(control: &ControlState, epoch_ms: u64) -> Option<&str> {
+    control
+        .toast()
+        .filter(|t| !t.is_expired(epoch_ms))
+        .map(state::ToastRecord::text)
+}
+
+/// 把 [`toast_view`] 的结果**落到那一个 app 层 Toast 对象上**（**自由函数**，B3-2c 整改
+/// **重要 1**）。
+///
+/// - `Some(文案)` ⇒ 就地换文本 + 切可见；
+/// - `None` ⇒ 只切可见（**不清文本** —— 隐藏的对象不参与命中与绘制，文本留作诊断）。
+///
+/// # 为什么把它从 `App::sync_toast` 里抽出来（评审实测的覆盖缺口）
+///
+/// 这是**读 evdev / 推进各客户端 / 渲染 6 页**之外，`App::tick` 里**每拍都会跑**的一段
+/// LVGL 写操作。而 `App::tick` 只在真实二进制里跑（`App` 的构造需要 LVGL 会话 + 控制通道
+/// 客户端）⇒ 本仓的**离屏链路看不到它**：在 `App::sync_toast` 首行插一次
+/// `Obj::add_style`（`Obj::add_style` **只增不删** ⇒ 样式表无界增长、对象数纹丝不动）
+/// ⇒ 整改前实测 **354 + 6 + 6 全绿、0 failed**。
+///
+/// `shell_chain` 里那条"双零增长"网盖不到这里：它推的是 `Shell::tick`，而 `Shell::tick`
+/// **不渲染页面、也不碰 app 层 Toast**。抽成本函数后，`ui/tests.rs::ui_chain` 可以**直接
+/// 调它 N 次**并断言 `PROBE_MOUNTS` / `PROBE_STYLE_ATTACHES` **双零增长** —— 被断言的那个
+/// 函数体与生产跑的**是同一个体**（`App::sync_toast` 只有一行转调）。
+///
+/// ⚠️ **能力边界（如实登记）**：本函数**不碰** `App::sync_toast` 的**调用点**（`App::tick`
+/// 的 ⑦ 段）—— "每拍都调"这件事在离屏链路里观测不到，由**源码哨**
+/// `app::tests::app_toast_is_built_once_and_synced_from_tick` 钉住（它断言 `tick` 的函数体里
+/// 出现 `self.sync_toast(`，且 `sync_toast` 转调本函数）。两者合起来才是完整的网。
+///
+/// **改什么会让本条变红**（**已实测**）：在本函数里插任何一次
+/// `toast.obj().add_style(..)` / `Obj::create` ⇒ `ui_chain` 的双零增长断言当场红。
+pub fn sync_toast_view(toast: &Toast, view: Option<&str>) {
+    match view {
+        Some(text) => {
+            toast.set_text(text);
+            pages::set_visible(toast.obj(), true);
+        }
+        None => pages::set_visible(toast.obj(), false),
+    }
+}
+
 /// 渲染进程装配体（事件循环宿主）。
 ///
 /// **字段声明顺序 = 析构顺序**（Rust 保证）：`screen` → `shell` → `indev` → `display`
@@ -263,6 +398,34 @@ pub struct App {
     #[allow(dead_code)] // 持有它只为固定"外壳的父"这一装配事实；句柄本身无需再读。
     screen: Obj,
     shell: Shell,
+    /// **app 层的唯一 Toast**（B3-2c；挂 `lv_layer_top()`）—— 三条失败路径的上屏出口。
+    ///
+    /// # 为什么要它（原缺口）
+    ///
+    /// `ControlState` 的 Toast 记录（纯逻辑）在 B3-1 就有，但**当时没有任何生产消费者**：
+    /// P2 / P4 的上屏 Toast 是**页面自己** `show_toast` 新建的对象（只服务"操作回执"这条
+    /// 路径），而「写意图被丢弃 / `begin_write` 自身失败 / 回执解码失败」三条**不经页面**
+    /// ⇒ 只落 stderr，屏上什么都不发生（违 §2.6「降级可见」）。
+    ///
+    /// # 形态（PM 裁定，UI 文档附录 A.8）
+    ///
+    /// **启动时建一次、运行期只切可见性 / 换文本** —— 绝不在 `tick` 或 LVGL 事件回调里
+    /// 建 / 删对象（本仓已有"回调内建删对象 = UAF 级"的先例与断言）。更新点**只有**
+    /// [`App::sync_toast`]，而它只在 `App::tick` 里被调。
+    ///
+    /// ⚠️ **遮挡登记（B3-2c 整改 重要 3）**：本 Toast 与 P2 / P4 的确认弹层**同挂
+    /// `lv_layer_top()`**，而弹层**建得晚** ⇒ 弹层打开期间它被面板盖住 + 遮罩压暗，
+    /// **用户看不到**（几何实测值 / 可达路径 / 最小改法选项见 `ui/shell.rs` 偏差表
+    /// **SH20** —— 本仓"偏差 / 缺口"的单一登记处）。
+    ///
+    /// ⚠️ **`Toast` 组件自带的 `expires_at`（`Toast::expires_at` / `is_expired`）在 app 这条
+    /// 路径上是死字段 —— 不要拿它判断"该不该隐藏"**（B3-2c 整改 · 建议 1）：它的起点是
+    /// **装配时刻**（`Toast::new` 里的 `Instant::now()`），此后**永不刷新** ⇒ 它早在启动后
+    /// 3 s 就已过期，而 app 层的可见性判据完全在别处 —— [`state::TOAST_TTL_MS`] +
+    /// [`state::ToastRecord::is_expired`]（时钟是每拍注入的 `epoch_ms`，见 [`toast_view`]）。
+    /// 误调 `self.toast.is_expired(now)` 会恒得 `true` ⇒ 每次失败都"立即隐藏"（静默不显）。
+    /// 生产路径**不调用**这两个方法；只读它的离屏用例（若将来要写）须自建 `new_at` 起点。
+    toast: Toast,
     #[cfg(target_os = "linux")]
     touch: Option<crate::touch::TouchDevice>,
     indev: Indev,
@@ -307,15 +470,19 @@ pub struct App {
     p4_refresh_forced: u64,
     /// 在途期间**被丢弃**的写意图数。
     ///
-    /// ⚠️ **订正（B3-2b-2 整改 重要 3）**：此前本行写「丢弃已上屏提示」——**不成立**：
-    /// ① 丢弃路径落的 [`ControlState::push_toast`] 那条「操作进行中」**没有任何页面消费者**
-    ///    （`App` 与 `ui/**` 都不读 `ControlState::toast()` / `toast_text()`；上屏的 Toast
-    ///    一律由页面**自己的** `show_toast` 建）；
-    /// ② 该分支**生产不可达**：提交中两页的按钮均已 disabled（P2 `refresh_actions` 的
+    /// ⚠️ **订正（B3-2c 整改 重要 2）**：此前本行（以及 [`App::begin_write_intent`] 的
+    /// 同款注）写「`ControlState` 的 toast **无页面消费者** ⇒ 屏上无提示」「均待页面补
+    /// Toast 入口」——**B3-2c 起已不成立、且与本文件自身相反**：
+    /// ① **app 层 Toast 已是消费方**：[`App::toast`] 装配期建一次，[`toast_view`] +
+    ///    [`App::sync_toast`] 每拍把 [`ControlState::toast()`] 的记录落到屏上（三条失败
+    ///    路径的出口；见 `app.rs` 模块头三条路径 + `app::tests::failure_paths_reach_the_app_toast`）
+    ///    ⇒ 若本分支真的被走到，那条「操作进行中」**会上屏**（页面自己的 `show_toast` 只是
+    ///    另一条独立出口，本页 P4 的「操作进行中」就是它建的）；
+    /// ② 真正的事实是**生产不可达**：提交中两页的按钮均已 disabled（P2 `refresh_actions` 的
     ///    `usable = available && !submitting` ⇒ `save` / `reset` 同灰；P4 `op_state` 的
     ///    `busy` ⇒ 两按钮同灰）⇒ 在途期间用户**无法**再次触发确认回调 ⇒ 队列里不会有写意图。
-    /// ⇒ 本路径为**防御性**：**只计数**，屏上无提示。与裁定 3 的传输失败出口**同因**
-    /// （均待页面补 Toast 入口；那是 `src/ui/**` 改动，需单独立项）。
+    /// ⇒ 「屏上无提示」是**走不到**的结果，**不是没有上屏出口**；本路径按**防御性记账**保留
+    /// （**只计数** + 照旧压那条 toast，将来若可达即自然可见）。
     write_intents_dropped: u64,
     /// 在途期间**被丢弃**的读意图数（读意图密集，丢弃**只计数**、不弹 Toast —— 见报告"选择"）。
     read_intents_dropped: u64,
@@ -441,6 +608,25 @@ impl App {
             Rc::new(RefCell::new(VecDeque::new()));
         Self::bind_intents(&shell, &intents);
 
+        // **app 层 Toast**（B3-2c）：**装配期建一次**，挂顶层图层；`tick` 只切可见性 / 换文本。
+        //
+        // 建好即隐藏 —— 初始文案取既有通用兜底（`state::TRANSPORT_FAIL_TEXT`，**不自造串**），
+        // 它只是"占位"，真正上屏的文案每次都由 [`App::sync_toast`] 写入。
+        // 图标取 P4 的失败字形（`!`；UI 写 `✕` 但 U+2715 缺字，见该常量注释）。
+        //
+        // ⚠️ **建点唯一**：本行是本文件生产段唯一的 `Toast::new` 调用（判据 =
+        // `app::tests::app_toast_is_built_once_and_synced_from_tick` 的计数断言）—— 挪进
+        // `tick` / 事件回调 = 每次失败都新建对象（定容池迟早耗尽，且回调内建删对象属 UAF 级）。
+        let toast = Toast::new(
+            &crate::lvgl::widgets::layer_top()
+                .map_err(|e| StartupError::Lvgl(format!("顶层浮层不可用（app Toast）：{e}")))?,
+            ToastTone::Failure,
+            crate::ui::pages::p4_interlock::ICON_FAIL,
+            state::TRANSPORT_FAIL_TEXT,
+        )
+        .map_err(|e| StartupError::Lvgl(format!("app Toast 装配失败：{e}")))?;
+        crate::ui::pages::set_visible(toast.obj(), false);
+
         // 启动期的读取清单（设计 §5.5：查询可在启动期发起；写操作**不在此列**）。
         let mut pending_reads: VecDeque<ConsoleEndpoint> = VecDeque::new();
         for ep in [
@@ -456,6 +642,7 @@ impl App {
         Ok(Self {
             screen,
             shell,
+            toast,
             #[cfg(target_os = "linux")]
             touch,
             indev,
@@ -782,10 +969,10 @@ impl App {
     /// （`p4_interlock::TEXT_OP_BUSY`，**不自造新串**）。**不排队、不自动重试**
     /// （重试是显式动作；`RetryWindowExpired` 的出路见交付报告"未决 ③"）。
     ///
-    /// ⚠️ **"可见"不成立（B3-2b-2 整改 重要 3，如实订正）**：那条 Toast 落在
-    /// [`ControlState::push_toast`]，而 `ControlState` 的 toast 当前**无页面消费者**；
-    /// 且提交中两页按钮已 disabled ⇒ 本分支**防御性、生产不可达**。与裁定 3 的传输失败
-    /// 出口**同因**（均待页面补 Toast 入口）。判据与理由见 [`App::write_intents_dropped`]。
+    /// ⚠️ **订正（B3-2c 整改 重要 2）**：那条 Toast 落在 [`ControlState::push_toast`]，
+    /// 而它的**上屏出口是 app 层 Toast**（[`App::toast`] + [`toast_view`] / [`App::sync_toast`]，
+    /// 每拍一次）—— **不是"无消费者"**。本分支之所以看不到提示，只是因为**生产不可达**
+    /// （提交中两页按钮已 disabled ⇒ 防御性分支）。判据与理由见 [`App::write_intents_dropped`]。
     fn begin_write_intent<P: serde::Serialize>(
         &mut self,
         ep: ConsoleEndpoint,
@@ -795,9 +982,10 @@ impl App {
     ) {
         debug_assert!(ep.is_write(), "写意图必须落在写端点上");
         if self.console.is_busy() {
-            // ⚠️ **记账 ≠ 上屏**（重要 3 订正）：`ControlState` 的 toast 无页面消费者，
-            // 且本分支生产不可达（提交中两页按钮已 disabled）⇒ 此处只计数，屏上无提示。
-            // 保留 `push_toast` 是**防御性**记账（将来页面补上 Toast 入口即自然可见）。
+            // ⚠️ **此处只计数不额外上屏**（B3-2c 整改 重要 2 订正）：`ControlState` 的 toast
+            // **有** app 层消费者（`App::sync_toast`，每拍一次）⇒ 下面那条 `push_toast`
+            // 照旧**会上屏**；本分支看不到提示的原因只是**生产不可达**（提交中两页按钮已
+            // disabled），**不是**"没有上屏出口"。
             self.write_intents_dropped += 1;
             self.control
                 .push_toast(crate::ui::pages::p4_interlock::TEXT_OP_BUSY, epoch_ms);
@@ -810,12 +998,14 @@ impl App {
                 self.set_submitting(ep, true);
             }
             Err(e) => {
-                // ⚠️ **登记（B3-2b-2 整改 建议 4，本轮只登记不实现）**：本路径只有 stderr，
-                // **无上屏出口** —— 与传输失败（`absorb_console` 里本地合成回执 → `show_result`）
-                // 的口径**不同**。可达性：`begin_write` 自身失败近乎结构不可达（写端点 + 已拼好的
-                // 载荷）；待页面补通用 Toast 入口后再统一上屏口径。
+                // **B3-2c 收口**：本路径原先只有 stderr（无声失败）。现在与另两条失败路径
+                // 同走 **app 层 Toast**（`control.push_toast` → `App::sync_toast`），
+                // 文案按 [`transport_failure_text`] 分派：有专属出路者（`RetryWindowExpired`）
+                // 用 `ui/**` 的专属串，其余回落既有通用兜底（**不自造新串**）。
+                // 可达性（如实）：`begin_write` 自身失败近乎结构不可达（写端点 + 已拼好的载荷）。
                 self.set_submitting(ep, false);
-                self.control.record_transport_failure(epoch_ms);
+                self.control
+                    .record_transport_failure_with_text(epoch_ms, transport_failure_text(&e));
                 eprintln!("[mupc-local-display] 控制通道写请求发起失败（{}）：{e}", ep.path());
             }
         }
@@ -876,9 +1066,14 @@ impl App {
         let outcome = match res {
             Ok(o) => o,
             Err(e) => {
-                // 传输失败（连接 / 超时 / 非 200 / 解码）：**按既有口径**记入 `ControlState`
-                // （清在途 + 「操作失败」Toast，文案 `state::TRANSPORT_FAIL_TEXT`，**不自造**）；
-                // 另把"提交中"复位，否则按钮永久禁用。
+                // 传输失败（连接 / 超时 / 非 200 / 解码）：记入 `ControlState`（清在途 +
+                // 失败时刻）；另把"提交中"复位，否则按钮永久禁用。
+                //
+                // **上屏只剩一条**（B3-2c 整改 重要 4）：写端点在途时**不**再压 app 层
+                // 「操作失败」Toast —— 该次失败已由下面那条合成回执经**页面**的
+                // `show_result` 上屏（页面 Toast），两条同拍会违 UI §7.2「同一时刻仅 1 条」；
+                // 无在途（读端点）时才由 app 层兜底 Toast 承担。判据见
+                // [`state::ControlState::record_transport_failure_with_receipt`]。
                 //
                 // **裁定 3（B3-2b-2 整改）**：那条兜底 Toast 的句柄归页面、而**没有任何页面
                 // 暴露通用 Toast 入口** ⇒ 光记账 = 用户按「保存」时**屏上什么都不发生**。
@@ -908,9 +1103,11 @@ impl App {
         let decision = match route(&outcome) {
             Ok(d) => d,
             Err(e) => {
-                // ⚠️ **登记（B3-2b-2 整改 建议 4，本轮只登记不实现）**：回执**形态 / 解码不符**
-                // 这条出口同样只有 stderr、**无上屏出口**，与传输失败的合成回执口径**不同**
-                // （那一条走 `show_result` 上屏）。待页面补通用 Toast 入口后再统一。
+                // **B3-2c 收口**：回执**形态 / 解码不符**这条出口原先只有 stderr。
+                // 现在 `record_transport_failure` 弹的那条兜底 Toast 有了**生产消费者**
+                // （app 层 Toast，见 [`App::sync_toast`]）⇒ 屏上可见「操作失败」。
+                // ⚠️ 文案**不**走 [`transport_failure_text`]：本条错的类型是
+                // [`RouteError`]（形态 / 解码），不是 `ConsoleError`，没有专属出路。
                 self.route_errors += 1;
                 let ep = self.control.inflight().map(|i| i.endpoint);
                 self.control.record_transport_failure(epoch_ms);
@@ -921,10 +1118,11 @@ impl App {
                 return;
             }
         };
-        // 回执摘要（写操作才带信封）：清在途 + 按 `toast_text` 规则弹 Toast。
+        // 回执摘要（写操作才带信封）：清在途 + **按"这条回执有没有页面上屏通道"决定**要不要
+        // 在状态层再弹一条 Toast（判据与理由见 [`record_receipt`]）。
         // 查询载荷不是 `ControlResponse` ⇒ 走 `finish()` 清在途（不记摘要）。
         match outcome.response() {
-            Some(resp) => self.control.record_response(resp, epoch_ms),
+            Some(resp) => record_receipt(&mut self.control, &decision, resp, epoch_ms),
             None => self.control.finish(),
         }
         self.apply_route(decision);
@@ -1012,6 +1210,37 @@ impl App {
         if apply_refresh_request(refresh, &mut self.next_poll_ms) {
             self.p4_refresh_forced += 1;
         }
+    }
+
+    /// 把 [`state::ControlState`] 的 Toast 记录**落到屏上**（B3-2c；三条失败路径的出口）。
+    ///
+    /// # 形态（裁定：**只切可见性 / 换文本**）
+    ///
+    /// 判据在纯函数 [`toast_view`]（本拍该显什么），本函数只做**机械应用**：
+    /// 到期 ⇒ 隐藏；有文案 ⇒ 写文本 + 显示。**不建不删任何 LVGL 对象** ⇒
+    /// 可安全放在 `tick`（`Toast::close` 之类的析构只在 `App` 析构时发生）。
+    ///
+    /// # 为什么必须在 `tick`（不能在事件回调）
+    ///
+    /// LVGL 事件回调运行在**派发帧**内；在其中增删对象会让正在派发的对象树失效
+    /// （本仓对 `p3_logs::set_targets` 有同款明令）。这条路径全程只有 `lv_label_set_text`
+    /// 与 `lv_obj_add/clear_flag`，即便如此也**只从 `tick` 调**（保持单一更新点）。
+    ///
+    /// # 调用点
+    ///
+    /// `App::tick` ⑦ 段，每拍一次（`app::tests::app_toast_is_built_once_and_synced_from_tick`
+    /// 以源码哨钉住调用点存在）。
+    ///
+    /// # 函数体在 [`sync_toast_view`]（B3-2c 整改 **重要 1**）
+    ///
+    /// 本函数只做两件事：**判定**（[`toast_view`]）+ **转调**（[`sync_toast_view`]）。
+    /// 真正的 LVGL 写操作全在那个自由函数里 —— 这样 `ui/tests.rs::ui_chain` 能**直接调它
+    /// N 次**并断言双零增长（`App::tick` 在离屏链路里跑不到，见该函数的说明）。
+    /// **不要**把 `set_text` / `set_visible` 搬回本函数：搬回来 = 那段代码重新脱离零增长网。
+    fn sync_toast(&mut self, epoch_ms: u64) {
+        // 到期即清（3 s；清掉后下一次 `toast_view` 自然返回 `None` ⇒ 屏上那条隐藏）。
+        self.control.expire_toast(epoch_ms);
+        sync_toast_view(&self.toast, toast_view(&self.control, epoch_ms));
     }
 
     /// 帧驱动页的 `render`（**只在语义键变化时**）——见模块头取舍 2；
@@ -1144,15 +1373,32 @@ impl Host for App {
         self.tick_console(now_ms, epoch_ms);
         // ⑥ 外壳每拍：页眉通道胶囊 / 时钟文本 / 空闲回归 / 未保存提示条 / 页内延迟动作。
         self.shell.set_channel(self.state.channel_status(epoch_ms));
-        // 确认弹层打开期间暂停空闲回归（TT-13）——**接线已登记的契约**。
-        // ⚠️ **登记（B3-2b-2，未闭合）**：`ControlState.confirm` 的生产者仍缺 —— 页面侧
-        //    **没有**任何生产可见的"弹层是否已打开"查询口（`p2.with_dialog` 是 `#[cfg(test)]`，
-        //    `ui/shell.rs` 偏差 **SH2** 原文即如此）⇒ 接线层**无从**在"弹层刚打开、用户尚未确认"
-        //    这一段置位。可在"确认完成（意图回调）→ 回执到达"那段置位，但那只是窗口的一半，
-        //    半对的模态标记比恒 `false` 更难推理 ⇒ 本单元**不动它**，如实登记待契约定夺
-        //    （见交付报告"未决/存疑 ④"）。
-        self.shell.set_modal_open(self.control.confirm_open());
+        // ⑥′ 确认弹层打开期间暂停空闲回归（TT-13 / UI §4.3）——**B3-2c 闭合**。
+        //
+        // 判据的真源**就在页面上**：两页各有一个"弹层是否打开"的**生产可见**查询口
+        // （`P2ConfigPage::dialog_open` / `P4InterlockPage::dialog_open`，B3-2c 新增），
+        // 两者**取或**即"屏上此刻有任一确认弹层"。原先这里喂 `ControlState` 的模态谓词
+        // —— 它**恒为 `false`**（该字段没有生产者），契约名存实亡（偏差 **SH2**）。
+        // （`tests/control_channel.rs` 有一条源码哨禁止这个旧写法复活。）
+        //
+        // ⚠️ **为什么读页面而不是读 `ControlState::confirm`**：弹层的**生命周期**完全由页面
+        // 掌握（`open_dialog` 建、`close_dialog` 关，且关闭**延迟到下一拍**），接线层**看不到**
+        // 用户按下按钮的那一刻（事件派发期 `App` 正被 `&mut` 借走）。页面是唯一能如实回答
+        // "此刻屏上有没有弹层"的地方。
+        //
+        // **改什么会让本条变红**：把它换回常量 `false`、或改回读 `ControlState` 的模态谓词 ⇒
+        // `tests/control_channel.rs::app_feeds_modal_open_from_the_pages_production_query`
+        // **当场变红**（那是**源码哨**）。⚠️ 如实标注它的**能力边界**：`--smoke` 路径里
+        // 任何弹层都不会打开（T-3 门禁要求"未确认 = 零写动作"）⇒ **进程级用例观测不到**这条
+        // 路径；外壳侧的**语义**（弹层打开 ⇒ 暂停计时）由 `ui/tests.rs::shell_chain` ⑤″ 段
+        // 以**真弹层 + 对象级断言**证 —— 两段合起来才是完整的门禁，任一单独都不够。
+        self.shell
+            .set_modal_open(self.shell.p2().dialog_open() || self.shell.p4().dialog_open());
         self.shell.tick(now, &clock_text(epoch_ms));
+        // ⑦ **app 层 Toast**（B3-2c）——三条失败路径的唯一上屏出口。
+        //    排在最后：本拍（含 ⑤ 段）产生的 Toast 记录**当拍**就上屏，延迟 ≤0 拍。
+        //    ⚠️ 只改可见性 / 文本，**不建不删**对象（见 `App` 的 `toast` 字段注）。
+        self.sync_toast(epoch_ms);
     }
 }
 
@@ -1500,6 +1746,254 @@ mod tests {
         // ④ 对偶：`None` 必须真的让 `poll_due` 判真（判据与 channel.rs 同源，不另立一份）
         assert!(crate::channel::poll_due(0, None), "None = 首拍即轮询");
         assert!(!crate::channel::poll_due(0, Some(1)), "未到期 ⇒ 不轮询");
+    }
+
+    /// **三条失败路径各自都能上屏**（B3-2c：`toast_view` = `App::sync_toast` 写进 LVGL 的
+    /// 那一条文案，逐字相同的取值）。
+    ///
+    /// 三条路径原先**只落 stderr**（屏上无反馈，违 §2.6）；现在统一由 app 层 Toast 承担。
+    /// **判据在此**（纯逻辑），**调用点**由 `tests/control_channel.rs` 的源码哨 + `App::tick`
+    /// 的 ⑦ 段顺序保证（`App` 的构造需要 LVGL 会话 ⇒ 进程内起不了第二条 LVGL 线程，
+    /// 见 `src/ui/tests.rs` 模块头；这是本仓对"接线层不可进程内断言"的既有边界）。
+    ///
+    /// **改什么会让本条变红**（**已实测**）：
+    /// - `toast_view` 恒返回 `None` ⇒ 三条断言全红；
+    /// - 去掉 `is_expired` 过滤 ⇒ 「3 s 后仍显示」红；
+    /// - 把 `record_transport_failure_with_text` 改回恒用通用兜底 ⇒ ② 红。
+    #[test]
+    fn failure_paths_reach_the_app_toast() {
+        use crate::ui::pages::p4_interlock::{TEXT_OP_BUSY, TEXT_RETRY_EXPIRED, TEXT_TOAST_FAIL};
+        const T0: u64 = 1_000;
+
+        // ① 写意图在途被丢弃（`begin_write_intent` 的 `is_busy()` 分支）
+        let mut st = ControlState::new();
+        st.push_toast(TEXT_OP_BUSY, T0);
+        assert_eq!(toast_view(&st, T0), Some(TEXT_OP_BUSY), "①「操作进行中」必须上屏");
+
+        // ② `begin_write` 自身失败 —— 文案分派见 [`transport_failure_text`]
+        let mut st = ControlState::new();
+        let expired = crate::console::ConsoleError::RetryWindowExpired {
+            op: "apply".to_string(),
+            issued_at_ms: 0,
+            age_ms: 30_000,
+            window_ms: 30_000,
+        };
+        st.record_transport_failure_with_text(T0, transport_failure_text(&expired));
+        assert_eq!(
+            toast_view(&st, T0),
+            Some(TEXT_RETRY_EXPIRED),
+            "② 过期重发必须显**专属**出路文案（不是通用「操作失败」）"
+        );
+        // 同一分支的普通错误仍显通用兜底
+        let mut st2 = ControlState::new();
+        st2.record_transport_failure_with_text(
+            T0,
+            transport_failure_text(&crate::console::ConsoleError::Idle),
+        );
+        assert_eq!(toast_view(&st2, T0), Some(TEXT_TOAST_FAIL));
+
+        // ③ 回执形态 / 解码不符（`absorb_console` 的 `route` `Err` 分支）
+        let mut st = ControlState::new();
+        st.record_transport_failure(T0);
+        assert_eq!(
+            toast_view(&st, T0),
+            Some(TEXT_TOAST_FAIL),
+            "③ 回执解码失败必须上屏（不再是「只有 stderr」）"
+        );
+
+        // 生命周期：3 s 内可见、到期即隐（UI §7.2 / `TOAST_TTL_MS`）
+        assert!(toast_view(&st, T0 + state::TOAST_TTL_MS - 1).is_some(), "3 s 内仍显示");
+        assert_eq!(
+            toast_view(&st, T0 + state::TOAST_TTL_MS),
+            None,
+            "3 s 到期 ⇒ 屏上那条隐藏（`now >= until` 即过期）"
+        );
+        // 空状态 ⇒ 从不显示（不得"建好就常显"）
+        assert_eq!(toast_view(&ControlState::new(), T0), None);
+    }
+
+    /// **写端点回执不压状态层 Toast**（B3-2c 整改 **阻塞项**；纯逻辑那一半）。
+    ///
+    /// 评审实测的双 Toast：`record_response` 先弹一条（`toast_text()` 对**一切非 `Ok` 的码**
+    /// 与**任何非空 `message`** 都返回 `Some`），紧接着 `apply_route` 把**同一份回执**送进
+    /// P2 / P4 的 `show_result` ⇒ **页面再弹一条** —— 两条同挂 `lv_layer_top()`、同坐标同文案
+    /// （违 UI §7.2「同一时刻仅 1 条」）。生产高频：P2 字段校验被拒 / P4 前置条件被拒。
+    ///
+    /// **改什么会让本条变红**（**已实测**）：把 [`record_receipt`] 的写端点分支换回
+    /// `control.record_response(resp, epoch_ms)` ⇒ 第 1 条断言红（状态层多出一条）。
+    ///
+    /// ⚠️ **口径局限（如实登记）**：本用例**只**数"状态层"这一侧 —— 它证明的是"状态层为空"，
+    /// **不是**"屏上恰好一条"。合账要两半：**页面侧另有出口**由 `ui/tests.rs` 的
+    /// `write_receipt_is_shown_by_the_page_and_not_by_the_state_layer` 在同一处证
+    /// （P4 `show_result` ⇒ 页面 Toast 出现）。两半合起来：
+    ///
+    /// - 上屏出口 = 页面 Toast（1 条）
+    /// - app 层 Toast（其文案由 [`toast_view`] 独取 `ControlState::toast()` ⇒ 状态层为空 ⇒ 隐藏）
+    ///
+    /// ⇒ **恰好一条**。
+    #[test]
+    fn record_receipt_keeps_the_state_layer_silent_for_write_endpoints() {
+        use mupc_display_proto::{ControlCode, ControlResponse};
+        const T0: u64 = 1_000;
+        // 一条**生产高频**的失败回执：P4 前置条件被拒（`message` 非空 ⇒ `toast_text()` = Some）。
+        let resp: ControlResponse<RawPayload> = ControlResponse::rejected(
+            "rid-1",
+            ControlCode::RejectedPrecondition,
+            "联锁状态已变化",
+            Vec::new(),
+            None,
+            T0,
+        );
+        // ① 写端点（P4 联锁写）：页面 `show_result` 已上屏 ⇒ 状态层**必须为空**。
+        let mut st = ControlState::new();
+        st.begin(ConsoleEndpoint::InterlockRelease, Some("rid-1"));
+        record_receipt(
+            &mut st,
+            &RouteDecision::InterlockResult(ControlResponse::rejected(
+                "rid-1",
+                ControlCode::RejectedPrecondition,
+                "联锁状态已变化",
+                Vec::new(),
+                None,
+                T0,
+            )),
+            &resp,
+            T0,
+        );
+        assert!(
+            st.toast().is_none(),
+            "写端点回执由页面 `show_result` 上屏 ⇒ 状态层不得再压一条（同拍双 Toast）"
+        );
+        assert!(!st.is_busy(), "记账一个不少：在途必须照清");
+        assert!(
+            st.last().is_some(),
+            "记账一个不少：最近回执摘要照记（页面 `show_result` 与诊断都用它）"
+        );
+        assert_eq!(st.toast_text(), None, "（同上，取文案的那个口子也必须为空）");
+
+        // ② 对照（**证明①不是恒真**）：同一份回执走**无页面上屏通道**的决策 ⇒ 保留兜底 Toast。
+        let mut st_read = ControlState::new();
+        record_receipt(&mut st_read, &RouteDecision::LogsTargets(vec![]), &resp, T0);
+        assert_eq!(
+            st_read.toast_text(),
+            Some("联锁状态已变化"),
+            "读/无页面上屏通道 ⇒ 状态层**保留**兜底 Toast（否则退化成「屏上什么都不发生」）"
+        );
+    }
+
+    /// **app Toast 的装配点唯一、且不在运行期**（B3-2c 源码哨）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 「启动时建一次、运行期只切可见/换文本」是 PM 裁定（UI 附录 A.8），而**违反它的代价
+    /// 在屏上完全不可见**：把 `Toast::new` 挪进 `sync_toast`（每次失败新建一个）在离屏用例
+    /// 里照常"能显示"，只是 LVGL 的**定容池**（1 MB）被逐次吃光 —— 到某个时刻整屏建不出来。
+    /// 本仓对同类退化（常驻对象预算 `SHELL_OBJECT_BUDGET`、`PROBE_MOUNTS`）都有判据。
+    ///
+    /// # 能力边界（如实登记）
+    ///
+    /// 源码扫描证明"**这一行在源码里**"，**不是**"运行期它没被重复执行"。
+    /// 运行期的唯一性由**结构**保证：`Toast::new` 在本文件生产段**只出现一次**（本条即判据），
+    /// 且 `App::toast` 是**拥有型字段**（`Drop` 时随 `App` 析构）。
+    ///
+    /// **改什么会让本条变红**（**已实测**）：在 `sync_toast` 里再写一个 `Toast::new(` ⇒
+    /// 计数变 2 ⇒ 第 1 条红；把 `sync_toast(epoch_ms)` 的调用从 `tick` 摘掉 ⇒ 第 2 条红。
+    #[test]
+    fn app_toast_is_built_once_and_synced_from_tick() {
+        const SRC: &str = include_str!("app.rs");
+        let prod = SRC
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("app.rs 应能切出生产段");
+        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_eq!(
+            prod.matches("Toast::new(").count(),
+            1,
+            "app Toast 必须**只装配一次**（写在 `tick`/回调里 = 每次失败新建对象 ⇒ 定容池耗尽）"
+        );
+        // 调用点：`tick` 函数体里必须有 `self.sync_toast(`。
+        //
+        // ⚠️ 窗口按**字符**取（本文件是 UTF-8，`&s[..n]` 会切在多字节字符中间而 panic ——
+        // 本项目"扫描器失真"的又一形态）。
+        const FN_HEAD: &str = "fn tick(&mut self, now_ms: u64) {";
+        let at = prod.find(FN_HEAD).expect("`App::tick` 必须存在（唯一更新点）");
+        let body: String = prod[at + FN_HEAD.len()..].chars().take(4_000).collect();
+        assert!(
+            body.contains("self.sync_toast("),
+            "`App::tick` 里必须调 `sync_toast` —— 否则三条失败路径产生的 Toast 记录**永不落屏**"
+        );
+        // 反向：同步点必须**只**做可见性 / 文本（不得在运行期建删对象），且**函数体必须转调
+        // 「被零增长网罩住的那个自由函数」**（B3-2c 整改 重要 1）。
+        //
+        // ⚠️ **为什么判据是"转调 [`sync_toast_view`]"而不是"体内有 `set_text(`"**：
+        // 整改前 `set_text` / `set_visible` 就写在本函数体里，而**没有任何离屏网盖得到它**
+        // （`App::tick` 在离屏链路里跑不到 —— 评审实测：在首行插一次 `add_style` 全绿）。
+        // 判据改成"转调"后，**"被断言的"与"生产跑的"才是同一个体**：那个自由函数由
+        // `ui/tests.rs::ui_chain` 连推 N 拍做**双零增长**断言。
+        // 把 `set_text` / `set_visible` 搬回本函数（哪怕只是留一份副本）⇒ 本条当场红。
+        let sync_at = prod
+            .find("fn sync_toast(&mut self, epoch_ms: u64) {")
+            .expect("`App::sync_toast` 必须存在");
+        let sync_body: String = prod[sync_at..].chars().take(1_200).collect();
+        assert!(
+            sync_body.contains("sync_toast_view("),
+            "`App::sync_toast` 必须**转调** `sync_toast_view` —— 否则这段 LVGL 写操作重新脱离 \
+             `ui_chain` 的双零增长网（评审实测：旧写法下往里插 `add_style` 全绿）"
+        );
+        assert!(
+            !sync_body.contains("Toast::new(") && !sync_body.contains(".close()"),
+            "`sync_toast` 不得建 / 删 Toast 对象（运行期对象 churn）"
+        );
+        // 自由函数那一侧：**只**做可见性 / 文本（不得建删对象、不得改样式表）。
+        let view_at = prod
+            .find("pub fn sync_toast_view(toast: &Toast, view: Option<&str>) {")
+            .expect("`sync_toast_view` 必须存在（`ui_chain` 的双零增长断言的**同一体**）");
+        let view_body: String = prod[view_at..].chars().take(1_200).collect();
+        assert!(
+            view_body.contains("set_text(") && view_body.contains("set_visible("),
+            "`sync_toast_view` 必须就地换文本 / 切可见性（不得新建对象）"
+        );
+        assert!(
+            !view_body.contains("Toast::new(") && !view_body.contains(".close()"),
+            "`sync_toast_view` 不得建 / 删 Toast 对象（运行期对象 churn）"
+        );
+    }
+
+    /// **失败路径的上屏文案分派**（B3-2c 收口）：有专属出路的错误用专属串，其余回落通用兜底。
+    ///
+    /// 这条分派原先**不存在**（所有传输层失败一律「操作失败」）⇒ `RetryWindowExpired` 的
+    /// 出路指引只躺在英文 `Display` 里（`console.rs` 模块头第 6 条登记的静默语义偏差）。
+    ///
+    /// **改什么会让本条变红**（**已实测**）：
+    /// - 把 `unwrap_or` 的两个分支对调（`console_error_text(e).or(Some(TRANSPORT_FAIL_TEXT))`
+    ///   一类）⇒ 第 2 条红；
+    /// - 删掉 `console_error_text` 的 `RetryWindowExpired` 分支 ⇒ 第 1 / 2 条红；
+    /// - 把它改成自造字面量（不经 `ui/**`）⇒ 第 3 条红。
+    #[test]
+    fn transport_failure_text_routes_by_error_kind() {
+        let expired = crate::console::ConsoleError::RetryWindowExpired {
+            op: "apply".to_string(),
+            issued_at_ms: 0,
+            age_ms: 30_000,
+            window_ms: 30_000,
+        };
+        // ① 专属文案确实取自 `ui/**`（码表网扫得到的那一份）
+        assert_eq!(
+            transport_failure_text(&expired),
+            crate::ui::pages::p4_interlock::TEXT_RETRY_EXPIRED,
+            "过期重发的出路指引必须上屏（不得落到通用「操作失败」）"
+        );
+        // ② 与通用兜底**不同**（否则本条退化成恒真）
+        assert_ne!(transport_failure_text(&expired), crate::state::TRANSPORT_FAIL_TEXT);
+        // ③ 其余错误（超时 / 忙 / 无在途）⇒ **回落**通用兜底，不得乱套专属串
+        assert_eq!(
+            transport_failure_text(&crate::console::ConsoleError::Idle),
+            crate::state::TRANSPORT_FAIL_TEXT
+        );
+        assert_eq!(
+            transport_failure_text(&crate::console::ConsoleError::Busy("apply".into())),
+            crate::state::TRANSPORT_FAIL_TEXT
+        );
     }
 
     /// 语义键节流 ②：**键变 ⇒ 必须渲染**，且**三路互相独立**（通道态 / 新鲜度 / 帧序号

@@ -428,10 +428,12 @@ impl ControlIntent {
     /// 是否为**写**意图（T-3 门禁的判据本体：写与读在"在途"时的**处置不同** ——
     /// 读意图可被新查询 `cancel()` 顶掉，写意图则**绝不被打断**、只能丢弃）。
     ///
-    /// ⚠️ **订正（B3-2b-2 整改 重要 3）**：此前本行写「在途时被丢弃**并上屏提示**」——
-    /// 「上屏提示」**不成立**：丢弃路径落的 `ControlState` toast 当前**无页面消费者**，
-    /// 且提交中两页按钮已 disabled ⇒ 该分支**生产不可达**；丢弃**只计数**
-    /// （`App::write_intents_dropped` / `read_intents_dropped`），屏上无提示。
+    /// ⚠️ **订正（B3-2c 整改 重要 2）**：此前本行写「在途时被丢弃**并上屏提示**」——
+    /// 当时（B3-2b-2）判为「不成立」，理由是丢弃路径落的 `ControlState` toast
+    /// **无页面消费者**；**B3-2c 起前半句已不成立**：该 toast **有**消费者 —— app 层 Toast
+    /// （`App::toast` + `toast_view` / `App::sync_toast`，每拍一次）。丢弃**只计数**
+    /// （`App::write_intents_dropped` / `read_intents_dropped`）的真正原因是**该分支生产
+    /// 不可达**（提交中两页按钮已 disabled）⇒ 屏上**走不到**，**不是没有上屏出口**。
     pub fn is_write(&self) -> bool {
         matches!(
             self,

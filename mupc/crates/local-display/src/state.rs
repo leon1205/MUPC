@@ -17,7 +17,7 @@
 //! | S-1 | 单体 `UiState { frame, channel, soc, … }` | 帧派生部分**已**由 v1.0 [`DisplayState`] + [`UiSnapshot`] 承担（逐条保留，未动）；v2 控制侧另立 [`ControlState`] | 草图把两代模型画成一个结构；合并会把已交付、已被六页消费的契约重写一遍（双份真源风险） |
 //! | S-2 | `dirty: bool` | **不持有**：`dirty` 的真源在**页面** —— `P2ConfigPage::is_dirty()`，`Shell::tick` 每拍直读它（`shell.rs:918` 的空闲计时暂停、`shell.rs:1213` 的 EDGE-11 提示条；偏差 **SH2**）。本层曾加过一个 `dirty` 镜像字段 + `set_dirty`（B3-1 初版），**因全无消费者、且构成同一事实的第二份真源，已删除**（B3-1 规格评审阻塞 1） | `ui/**` 与 `shell.rs` 对 `set_dirty` / `dirty()` **零调用**；只写不读的镜像就是本项目明令禁止的死代码。草图 `dirty: bool` 的语义已由页面承担 |
 //! | S-3 | `toast: Option<Toast>` | `Toast` 是**LVGL 句柄**（`ui/components.rs`，靠 `layer_top()` 建对象）⇒ 纯逻辑层持 [`ToastRecord`]（文本 + 截止时刻）；句柄仍归页面（`p2_config` 的 `toast` 字段） | 本文件**零 LVGL**（v1.0 起即是纯逻辑）；把句柄搬进来会让状态层依赖图形栈 |
-//! | S-4 | `confirm: Option<ConfirmDialog>` | [`ControlState::confirm`] = `Option<ConsoleEndpoint>`（`is_some()` 即「弹层打开」） | 同上（句柄归页面）；`Shell::set_modal_open(state.confirm().is_some())` 是已登记契约，谓词语义一致 |
+//! | S-4 | `confirm: Option<ConfirmDialog>` | [`ControlState::confirm`] = `Option<ConsoleEndpoint>`（`is_some()` 即「弹层打开」） | 同上（句柄归页面）；`Shell::set_modal_open(state.confirm().is_some())` 是已登记契约，谓词语义一致。**⚠️ B3-2c 订正**：`state.confirm` 结构上**拿不到生产者**（弹层生命周期归页面）⇒ `app.tick` 改为直读 `P2ConfigPage::dialog_open() \|\| P4InterlockPage::dialog_open()`（两页新增的**生产可见**查询口）；本格的三个方法**零生产调用者**，保留但勿再当作真源 |
 //! | S-5 | （未提）累计失败计数 | **不记**：累计数归 `crate::console::ConsoleClient::fail_streak()`；本层只记**失败时刻** `last_transport_failure_ms` | 同一事实不记两份（否则两个计数会漂移） |
 //! | S-6 | `ControlCode → 上屏文案` | `Ok` → `None`（**成功文案按操作由页面给定**：P2「保存成功 · 已生效」/ P4「已释放联锁」…）；失败码见 [`control_code_text`] | 草图给不出"这一条成功是什么操作"；由本层硬给一份成功串 = 与页面 `show_result` **双份真源** |
 //! | S-7 | 文案出处 | **全部转出 `ui/**` 既有字面量**（本文件不新增任何上屏字面量）；EDGE-18 取页面已落地的「审计不可用 · 操作未执行」 | 码表覆盖率的静态网只扫 `ui/**`（`ui/tests.rs::ui_texts_covered_by_font_cmap`）⇒ 在本文件自造新串，**豆腐块网照不到**。§8.3 原文的全角逗号 `，` 不在 cmap 内，页面已改写为 `·`（见 `p2_config` 的 PD 登记） |
@@ -35,7 +35,7 @@ use crate::control_route::RouteDecision;
 // 上屏字面量 —— 码表覆盖率的基线在 `ui/tests.rs`，只扫 `ui/**`；若在此自造新串，既有的
 // 豆腐块静态网**照不到**它）。逐个出处见 [`control_code_text`] / [`TRANSPORT_FAIL_TEXT`]。
 use crate::ui::pages::p2_config::TEXT_AUDIT_UNAVAILABLE;
-use crate::ui::pages::p4_interlock::{TEXT_INTERNAL, TEXT_OP_BUSY, TEXT_TOAST_FAIL};
+use crate::ui::pages::p4_interlock::{TEXT_INTERNAL, TEXT_OP_BUSY, TEXT_RETRY_EXPIRED, TEXT_TOAST_FAIL};
 
 /// 通道断判定阈值：无成功 GET 超过该时长 → 切「与主进程数据通道断开」整屏态（UI §7.5 / PRD 6.3）。
 pub const CHANNEL_DOWN_MS: u64 = 3000;
@@ -407,6 +407,31 @@ pub const TOAST_TTL_MS: u64 = 3_000;
 /// `crate::console::ConsoleError` 承载（诊断 / 日志用），上屏不区分细分原因。
 pub const TRANSPORT_FAIL_TEXT: &str = TEXT_TOAST_FAIL;
 
+/// [`crate::console::ConsoleError`] → **专属**上屏文案（`None` = 无专属出路，用通用兜底
+/// [`TRANSPORT_FAIL_TEXT`]）。
+///
+/// # 为什么只有 `RetryWindowExpired` 有专属串（B3-2c）
+///
+/// 其余传输层错误（超时 / 连接失败 / 非 200 / 解码失败）的处置**都一样**（重发即可），
+/// 而 `RetryWindowExpired` 的处置**不一样**：原样重发**必被服务端防重放窗口先拒**，
+/// 唯一出路是**当作新操作**重发（新 uuid）并按 T-3 **重新确认** —— 通用「操作失败」会
+/// 让现场以为"什么都没发生"而再点一次（`console.rs` 模块头第 6 条登记的静默语义偏差）。
+///
+/// # 可达性（**如实登记，不得高估**）
+///
+/// 该错误在当前生产路径上**不可达**：它唯一的产生点是
+/// [`crate::console::ConsoleClient::retry`]，而 `app` 层**从不调用** `retry`
+/// （`begin_*` 按设计不校验重放窗口）。本函数把**映射**建好 ⇒ 一旦接线层将来补上
+/// 「重试是显式动作」的入口，文案自动生效（无需再改本层）。
+///
+/// ⚠️ **文案字面量的唯一落点在 `ui/**`**（码表静态网只扫那 13 个文件）；本层只**转出**。
+pub fn console_error_text(e: &crate::console::ConsoleError) -> Option<&'static str> {
+    match e {
+        crate::console::ConsoleError::RetryWindowExpired { .. } => Some(TEXT_RETRY_EXPIRED),
+        _ => None,
+    }
+}
+
 /// [`ControlCode`] → 上屏兜底文案（**只在服务端 `message` 为空时使用**）。
 ///
 /// - `Ok` → `None`：**成功文案按操作而异**（P2「保存成功 · 已生效」/ P4「已释放联锁」…），
@@ -601,6 +626,10 @@ impl ControlState {
     /// 记一次回执（**清在途** + 存摘要 + 按需弹 Toast）。
     ///
     /// `duplicate=true` **原样保留**且**不**影响 Toast 规则（幂等命中是成功路径的一种）。
+    ///
+    /// ⚠️ **谁该用它**：只有当这条回执**没有**别的上屏通道时才用本方法。**写端点**（P2 配置
+    /// 保存 / P4 两个联锁写）的回执会被接线层送进页面 `show_result`（页面自己弹 Toast）⇒ 用
+    /// [`Self::record_response_without_toast`]，否则同拍两条 Toast（见该方法的说明）。
     pub fn record_response<T>(&mut self, resp: &ControlResponse<T>, now_ms: u64) {
         let summary = LastControlResult::from_response(resp);
         if let Some(text) = summary.toast_text() {
@@ -610,14 +639,62 @@ impl ControlState {
         self.inflight = None;
     }
 
+    /// **记回执的状态、不压 Toast**（B3-2c 整改 **阻塞项**；与
+    /// [`Self::record_failure_state`] / [`Self::record_transport_failure_with_text`] 的
+    /// 切分**同款**：状态记账与"要不要弹 Toast"分成两处）。
+    ///
+    /// # 为什么需要它（同拍双 Toast）
+    ///
+    /// [`LastControlResult::toast_text`] 对**一切非 `Ok` 的 `ControlCode`** 与**任何非空
+    /// `message`** 都返回 `Some` ⇒ 生产高频的失败回执（P2 字段校验被拒 / P4 前置条件被拒）
+    /// 会让本层弹一条；而接线层**紧接着**把**同一份回执**送进 P2 / P4 的 `show_result`
+    /// （页面各自 `show_toast` 再弹一条）⇒ **同拍两条 Toast** 同挂 `lv_layer_top()`、
+    /// 同坐标（`Dimens::TOAST_X/Y`）同文案 —— 违 UI §7.2「同一时刻仅 1 条」。
+    ///
+    /// **PM 裁定（B3-2c 整改）**：**页面负责上屏、状态层只记账**。写端点走本方法；
+    /// 读端点（**没有**页面回执通道）仍走 [`Self::record_response`] 保留兜底 Toast。
+    ///
+    /// **记账一个不少**：`last`（最近回执摘要）与"清在途"照记 —— 唯一不碰的是 `toast`
+    /// 这一格（状态部分与 [`Self::record_response`] **逐字相同**）。
+    ///
+    /// ⚠️ **为什么入参没有 `now_ms`**：本方法不产生时间信息（`at_ms` 来自回执本身，
+    /// Toast 的到期时刻归 [`Self::record_response`] 压的那条）。
+    ///
+    /// **改什么会让本条变红**：把 [`crate::app::record_receipt`] 的写端点分支换回
+    /// `record_response` ⇒ `ui/tests.rs` 的
+    /// `write_receipt_is_shown_by_the_page_and_not_by_the_state_layer` 当场红。
+    pub fn record_response_without_toast<T>(&mut self, resp: &ControlResponse<T>) {
+        self.last = Some(LastControlResult::from_response(resp));
+        self.inflight = None;
+    }
+
     /// 记一次**传输层失败**（超时 / 连接失败 / 非 200 / 解码失败）。
     ///
     /// 清在途、记失败时刻、弹兜底 Toast（[`TRANSPORT_FAIL_TEXT`]）。**累计次数**不在此记
     /// —— 那是 `ConsoleClient::fail_streak()` 的活（同一事实不记两份）。
     pub fn record_transport_failure(&mut self, now_ms: u64) {
+        self.record_transport_failure_with_text(now_ms, TRANSPORT_FAIL_TEXT);
+    }
+
+    /// 同 [`Self::record_transport_failure`]，但**上屏文案由调用方给**（B3-2c）。
+    ///
+    /// 用途：有**专属出路**的错误（今仅 `RetryWindowExpired`，判据由
+    /// [`console_error_text`] 单一分派）不该被通用「操作失败」盖掉 —— 接线层用
+    /// `crate::app::transport_failure_text(&e)` 取文案后从这里灌进来，
+    /// **其余错误照旧回落** [`TRANSPORT_FAIL_TEXT`]（`record_transport_failure` 即其别名路径）。
+    pub fn record_transport_failure_with_text(&mut self, now_ms: u64, text: &str) {
+        self.record_failure_state(now_ms);
+        self.push_toast(text, now_ms);
+    }
+
+    /// **记失败的状态、不压 Toast**（B3-2c 整改 **重要 4**；见
+    /// [`Self::record_transport_failure_with_receipt`] 的"为何恰好一条"）。
+    ///
+    /// 状态部分与 [`Self::record_transport_failure_with_text`] **逐字相同**
+    /// （清在途 + 记失败时刻）—— 唯一差别是**不碰** `toast` 这一格。
+    fn record_failure_state(&mut self, now_ms: u64) {
         self.inflight = None;
         self.last_transport_failure_ms = Some(now_ms);
-        self.push_toast(TRANSPORT_FAIL_TEXT, now_ms);
     }
 
     /// 传输失败 + **给页面补一条本地合成的「不可用」回执**（B3-2b-2 整改 · PM 裁定 3）。
@@ -640,21 +717,38 @@ impl ControlState {
     /// `self.control.record_transport_failure_with_receipt(..);` 不报任何告警，
     /// B3-2b-2 整改时实测过），故此处**必须**写属性而不是靠类型。
     ///
-    /// **与 [`Self::record_transport_failure`] 的关系**：本方法**内含**它（不另记一份失败、
-    /// 不另弹一条 Toast —— 同一事件只有一份记账），只是在清在途**之前**先把"是哪一次在途请求"
-    /// 取出来，再据此合成回执。
+    /// **与 [`Self::record_transport_failure`] 的关系**：状态部分**内含**它（不另记一份失败、
+    /// 不另记一个失败时刻 —— 同一事件只有一份记账），只是在清在途**之前**先把"是哪一次在途
+    /// 请求"取出来，再据此合成回执。
+    ///
+    /// # 为何**恰好一条** Toast（B3-2c 整改 **重要 4**，PM 裁定）
+    ///
+    /// 写端点：失败**已经**由合成回执经页面 `show_result` 上屏（页面自己的 `show_toast`）。
+    /// 若本方法照旧再 `push_toast` 一条，则**同拍**会有**两个** Toast 对象同挂 `layer_top`、
+    /// 同坐标同文案 ⇒ 违 UI §7.2「同一时刻仅 1 条」。故写端点走
+    /// [`Self::record_failure_state`]（**不** `push_toast`）；**失败记账一个不少**
+    /// （在途清空 / `last_transport_failure_ms` 照记）。
+    ///
+    /// 无在途（读端点从不入 `inflight`）：**没有**合成回执可送 ⇒ 此时再不给 app 层 Toast
+    /// 就变成**屏上什么都不发生**（违 §2.6）⇒ 该分支**保留** app 层兜底 Toast。
+    /// 两条分支各自**恰有一条**上屏路径。
     #[must_use = "本地合成回执必须送进页面（只造不送 = 屏上什么都不发生）；调用方须把它交给 `apply_route`"]
     pub fn record_transport_failure_with_receipt(&mut self, now_ms: u64) -> Option<RouteDecision> {
-        // 在途信息必须在下面那句之前取 —— `record_transport_failure` 会**清掉在途**。
+        // 在途信息必须在下面那句之前取 —— `record_failure_state` 会**清掉在途**。
         let ep = self.inflight.as_ref().map(|i| i.endpoint);
         let rid = self
             .inflight
             .as_ref()
             .and_then(|i| i.request_id.clone())
             .unwrap_or_default();
-        self.record_transport_failure(now_ms);
-        // 无在途（读端点从不入 `inflight`）⇒ 没有"哪一次操作"可言 ⇒ 不合成。
-        let ep = ep?;
+        let Some(ep) = ep else {
+            // 无在途（读端点从不入 `inflight`）⇒ 没有"哪一次操作"可言 ⇒ 不合成；
+            // 也没有页面上屏出口 ⇒ 由 app 层 Toast 承担（恰一条）。
+            self.record_transport_failure(now_ms);
+            return None;
+        };
+        // 写端点：**只记状态**，失败由上屏的合成回执（页面 `show_result`）承担 —— 见上文。
+        self.record_failure_state(now_ms);
         crate::control_route::transport_failure_decision(ep, &rid, TRANSPORT_FAIL_TEXT, now_ms)
     }
 
@@ -702,16 +796,33 @@ impl ControlState {
     // ── 外壳层 ────────────────────────────────────────────────────────────
 
     /// 模态确认弹层（`Some` = 打开）。
+    ///
+    /// ⚠️ **B3-2c 订正（如实登记，勿高估）**：本节三个方法（`confirm` / `set_confirm` /
+    /// `confirm_open`）**零生产调用者** —— `set_confirm` 只在 `state.rs` 自己的用例里被调，
+    /// 而 [`Self::confirm_open`] 原先的唯一生产调用点（`app.rs::tick` 喂
+    /// `Shell::set_modal_open`）已改为直读**页面**的生产可见查询口
+    /// （`P2ConfigPage::dialog_open` / `P4InterlockPage::dialog_open`）。
+    ///
+    /// **为什么改读页面**：弹层的**生命周期**（建 / 关，且关闭延迟到下一拍）完全由页面掌握，
+    /// 接线层看不到"用户按下按钮"的那一刻 ⇒ 本层的 `confirm` 结构上**永远拿不到生产者**，
+    /// 恒 `None` 的"权威真源"比没有更危险（下一手读者会以为它在工作）。设计 §5.4 把
+    /// `UiState.confirm` 写作权威真源的前提是"句柄归状态层"，而本仓的句柄**归页面**
+    /// （本文件零 LVGL，见本模块头 S-3）—— 真源因此必须在页面。
     pub fn confirm(&self) -> Option<ConsoleEndpoint> {
         self.confirm
     }
 
     /// 设置 / 清除模态弹层标记（接线层在**打开 / 关闭页面弹层的同一处**调用）。
+    ///
+    /// ⚠️ 同上：B3-2c 后**无生产调用者**。保留是**有意的**（设计与 `ui/shell.rs` 偏差 SH2
+    /// 都登记过这条契约；删除须先订正文档）。
     pub fn set_confirm(&mut self, endpoint: Option<ConsoleEndpoint>) {
         self.confirm = endpoint;
     }
 
     /// 是否有模态弹层打开（= `Shell::set_modal_open(..)` 的取值）。
+    ///
+    /// ⚠️ 同上：**生产路径已不再使用**本谓词（改读页面的 `dialog_open()`）。
     pub fn confirm_open(&self) -> bool {
         self.confirm.is_some()
     }
@@ -984,6 +1095,38 @@ mod tests {
         );
     }
 
+    /// **`RetryWindowExpired` 有专属上屏文案**（不是通用「操作失败」）：它必须点明出路
+    /// （作为新操作重发 + 重新确认），否则现场会把它当成"没发生"再点一次
+    /// （`console.rs` 模块头第 6 条登记的那条静默语义偏差）。
+    ///
+    /// **改什么会让本条变红**：
+    /// - 删掉 `console_error_text` 的 `RetryWindowExpired` 分支（回落 `None`）⇒ 第 1 条红；
+    /// - 把它改成 `Some(TEXT_TOAST_FAIL)` ⇒ 第 2 条红（"有专属文案"变成谎话）；
+    /// - 把文案写进 `state.rs` 而不是转出 `ui/**` 的常量 ⇒ 第 3 条红（码表网扫不到 = 真机豆腐块）。
+    #[test]
+    fn retry_window_expired_has_its_own_screen_text() {
+        let e = crate::console::ConsoleError::RetryWindowExpired {
+            op: "apply".to_string(),
+            issued_at_ms: 0,
+            age_ms: 30_000,
+            window_ms: 30_000,
+        };
+        // ① 有专属文案（不是"没有专属出路"）
+        let text = console_error_text(&e).expect("RetryWindowExpired 必须有专属上屏文案");
+        // ② 与通用兜底**不同**（否则"专属"是空话）
+        assert_ne!(text, TRANSPORT_FAIL_TEXT, "不得落到通用「操作失败」");
+        // ③ 逐字取自 `ui/**` 的既有字面量（本层不得自造上屏字）
+        assert_eq!(text, crate::ui::pages::p4_interlock::TEXT_RETRY_EXPIRED);
+        // ④ 文案点明出路
+        assert!(text.contains("重新确认"), "必须点明 T-3 的出路：{text}");
+        // ⑤ 对偶：**其余** ConsoleError 没有专属文案（回落通用兜底，不得乱套专属串）
+        assert_eq!(console_error_text(&crate::console::ConsoleError::Idle), None);
+        assert_eq!(
+            console_error_text(&crate::console::ConsoleError::Busy("apply".into())),
+            None
+        );
+    }
+
     /// EDGE-18：审计不可写 → **固定串**「审计不可用 · 操作未执行」（**不取**服务端 `message`）。
     #[test]
     fn audit_unavailable_maps_to_the_edge18_fixed_string() {
@@ -1117,6 +1260,12 @@ mod tests {
     /// `record_transport_failure_with_receipt` 里的合成去掉（直接 `return None`）⇒ 第 1 段红；
     /// 把在途信息取在 `record_transport_failure` **之后**（在途已被清 ⇒ `ep` 恒 `None`）⇒
     /// 第 1 段红（这正是"顺序敏感"的哨）；把记账那句删掉 ⇒ 第 2 段红（失败记账不得被本整改削弱）。
+    ///
+    /// **B3-2c 整改 重要 4 追加的那条**（第 ② 段末）：写端点的合成回执路径**不得**再压一条
+    /// `ControlState` Toast（否则与页面 `show_result` 的 Toast 同拍同屏 ⇒ 违 UI §7.2
+    /// 「同一时刻仅 1 条」）。**改什么会让它变红**：把该分支改回
+    /// `record_transport_failure_with_text(..)`（或 `record_transport_failure(..)`）
+    /// ⇒ 「写端点：`toast()` 必须为空」当场红。
     #[test]
     fn transport_failure_hands_back_a_local_receipt_for_inflight_writes() {
         let mut st = ControlState::new();
@@ -1136,11 +1285,23 @@ mod tests {
         // ② 既有记账**不许**被本整改削弱（同一事件只记一份）。
         assert!(!st.is_busy(), "在途必须清掉");
         assert_eq!(st.last_transport_failure_ms(), Some(700));
-        assert_eq!(st.toast_text(), Some(TRANSPORT_FAIL_TEXT));
-        // ③ 无在途（查询不入 `inflight`）⇒ 不合成（读端点的出口是 P3 通道条态）。
+        // ②′ **恰好一条**（B3-2c 整改 重要 4，PM 裁定）：写端点的失败**已经**由上面那条
+        // 合成回执经页面 `show_result` 上屏 ⇒ `ControlState` 这一格**不得**再压一条
+        // （否则同拍两个 Toast 同挂 `layer_top`、同坐标同文案 ⇒ 违 UI §7.2）。
+        assert!(
+            st.toast().is_none(),
+            "写端点传输失败 ⇒ 上屏只走页面 Toast（合成回执），app 层不得再压一条（UI §7.2）"
+        );
+        // ③ 无在途（查询不入 `inflight`）⇒ 不合成（读端点的出口是 P3 通道条态）；
+        //    此时**没有**页面上屏出口 ⇒ app 层兜底 Toast **必须**保留（否则静默失败，违 §2.6）。
         let mut idle = ControlState::new();
         assert!(idle.record_transport_failure_with_receipt(700).is_none());
-        assert_eq!(idle.toast_text(), Some(TRANSPORT_FAIL_TEXT), "记账照旧");
+        assert_eq!(
+            idle.toast_text(),
+            Some(TRANSPORT_FAIL_TEXT),
+            "无在途（读端点）⇒ 没有合成回执可送 ⇒ app 层兜底 Toast 必须保留"
+        );
+        assert_eq!(idle.last_transport_failure_ms(), Some(700), "记账照旧");
     }
 
     /// **查询**成功路径用 [`ControlState::finish`]（B3-2b-2 新增）：清在途，

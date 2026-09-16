@@ -1666,6 +1666,11 @@ fn ui_texts_covered_by_font_cmap() {
         .chain(crate::ui::pages::filters::ALL_TEXTS.iter())
         .chain(crate::ui::pages::p5_audit::ALL_TEXTS.iter())
         .chain(crate::ui::pages::p3_logs::ALL_TEXTS.iter())
+        // P4 的清册（B3-2c 整改 建议 8）：此前**只有** `p4_interlock.rs` 自己的用例读它
+        // （`all_texts_manifest_is_sane` / 运行时常量扫描），**没进过**这条"清册 ↔ 源码字面量"
+        // 的逐字对账链 ⇒ 改了源码文案却忘改清册时，本网照绿。P1 / P6 的文案本就在
+        // [`crate::ui::pages::ALL_TEXTS`]（上面那条）里，**不存在**"p1/p6 漏链"。
+        .chain(crate::ui::pages::p4_interlock::ALL_TEXTS.iter())
     {
         assert!(
             literals.iter().any(|l| l.contains(t)),
@@ -2869,6 +2874,78 @@ pub(crate) fn ui_chain() {
         drop(dt);
     }
 
+    // ── ⑩ app 层 Toast 的**同步函数**：连推 50 拍必须**双零增长** ──────────────
+    //
+    // **B3-2c 整改 重要 1**：`app.rs::sync_toast_view` 是 `App::tick` **每拍都会跑**的一段
+    // LVGL 写操作（把状态层的 Toast 记录落到那**一个**对象上），而 `App::tick` **只在真实
+    // 二进制里跑**（`App` 的构造需要 LVGL 会话 + 控制通道客户端）⇒ 本仓的离屏链路
+    // **看不到它**。评审实测：在 `App::sync_toast` 首行插一次 `add_style`
+    // （`Obj::add_style` **只增不删** ⇒ 样式表无界增长、对象数纹丝不动）⇒
+    // 整改前 **354 + 6 + 6 全绿、0 failed**。`shell_chain` 那条双零增长网盖不到：
+    // 它推的是 `Shell::tick`，而 `Shell::tick` **既不渲染页面、也不碰 app 层 Toast**。
+    //
+    // 修法 = 把那段函数体抽成**自由函数** `sync_toast_view`（`App::sync_toast` 只剩一行转调），
+    // 于是本链路（**有 `Display`、读得到 `PROBE_MOUNTS` / `PROBE_STYLE_ATTACHES`**）能**直接
+    // 调它 N 次** —— "被断言的"与"生产跑的"是**同一个体**。`App::tick` 的**调用点**离屏看不到，
+    // 由源码哨 `app::tests::app_toast_is_built_once_and_synced_from_tick` 钉住
+    // （这一局限在 `sync_toast_view` 的文档里如实登记）。
+    //
+    // **改什么会让本条变红**（**已实测**）：在 `sync_toast_view` 里插一次
+    // `toast.obj().add_style(..)` ⇒ 第 2 条断言红；插一次 `Obj::create(..)` ⇒ 第 1 条红。
+    {
+        use crate::ui::components::{Toast, ToastTone};
+        use std::sync::atomic::Ordering;
+
+        let top = crate::lvgl::widgets::layer_top().expect("layer_top（app Toast 的父）");
+        let toast = Toast::new(
+            &top,
+            ToastTone::Failure,
+            crate::ui::pages::p4_interlock::ICON_FAIL,
+            crate::state::TRANSPORT_FAIL_TEXT,
+        )
+        .expect("app 层 Toast 的等价体");
+        crate::ui::pages::set_visible(toast.obj(), false);
+
+        let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst);
+        let attaches_before = crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst);
+        for i in 0..50u64 {
+            // **两支都走**：显（有文案 ⇒ `set_text` + 显示）/ 隐（`None` ⇒ 只切可见性）。
+            // 只推一支的话，另一支里的对象 churn 与挂样式都抓不到。
+            let view = if i % 2 == 0 {
+                Some("操作失败")
+            } else {
+                None
+            };
+            crate::app::sync_toast_view(&toast, view);
+            // **逐拍复核**（同款理由：等推完 50 拍会先撞 LVGL 的单对象样式上限
+            // `lv_obj_style.c:110`，那是挂死不是红）。
+            assert_eq!(
+                crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst) - attaches_before,
+                0,
+                "app 层 Toast 同步第 {i} 拍往对象上挂样式了（`Obj::add_style` 只增不删）"
+            );
+        }
+        assert_eq!(
+            crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst) - mounts_before,
+            0,
+            "app 层 Toast 同步连推 50 拍（显隐交替）不得新建任何 LVGL 对象 —— \
+             对象在装配期建一次，运行期只切可见性 / 换文本"
+        );
+        assert_eq!(
+            crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst) - attaches_before,
+            0,
+            "app 层 Toast 同步连推 50 拍**也不得往对象上挂任何样式**：`Obj::add_style` 只增不删 \
+             ⇒ 「每拍挂一条样式」= 样式表无界增长，而**对象数不变** —— 评审的破坏性探针 \
+             （在 `sync_toast` 首行插 `add_style`）正是靠本条才抓得住"
+        );
+        // 语义顺带读回：末拍 `i = 49`（奇 ⇒ `None`）⇒ 那条应处于隐藏态；再推一拍 `Some` ⇒ 显示。
+        assert!(toast.obj().is_hidden(), "`None` ⇒ 隐藏（末拍是 `None` 支）");
+        crate::app::sync_toast_view(&toast, Some("操作失败"));
+        assert!(!toast.obj().is_hidden(), "`Some(文案)` ⇒ 显示");
+        assert_eq!(toast.text().as_deref(), Some("操作失败"), "文案就地写入");
+        drop(toast);
+    }
+
     // 释放顺序：先控件树，再 display，最后 deinit（与 A1/A2/A3 同口径）。
     drop(screen);
     drop(disp);
@@ -2889,7 +2966,10 @@ const MAIN_CARD_H_CONTRACT: i32 = 320;
 ///
 /// 用例**自己造帧**（而不是去连 mupcd）：这正是"页面只吃注入参数"的可测性收益
 /// （设计 §11.1「HMI 离屏渲染」是本模块最强的可测性支点）。
-fn frame_healthy() -> mupc_display_proto::DisplayFrame {
+///
+/// **`pub(crate)`**（B3-2c）：`ui/pages/mod.rs` 的 `frame_mark` 纯逻辑用例也要用同一份
+/// 帧源 —— 判据（区块级冻结标记）与"帧长什么样"必须**同一真源**，否则两处各自造帧会漂移。
+pub(crate) fn frame_healthy() -> mupc_display_proto::DisplayFrame {
     use mupc_display_proto::*;
     DisplayFrame {
         version: PROTO_VERSION,
@@ -3407,6 +3487,133 @@ pub(crate) fn pages_chain() {
         );
         assert!(p6_system::service_scope_text().contains("仅回环"), "口径来自契约枚举");
         assert_eq!(p6.note_text().as_deref(), Some(p6_system::TEXT_NO_REMOTE), "说明行");
+
+        // ── ⑥ 区块级「冻结 / 数据过期」打标（EDGE-03 / EDGE-20；B3-2c）──────────────
+        // 判据 = `pages::frame_mark`（与 P1 的通道条 / `数据过期` 角标**同源**）。
+        // **改什么会让本条变红**：把 `P6SystemPage::render` 的打标段删掉 / 写成恒隐藏
+        // ⇒ 下列可见性断言全红；把 `Down` 时的帧清成缺省（`frame = None`）⇒
+        // 「数值仍为冻结帧」两条红（EDGE-03 明文要求**保留**最近有效帧，不得清成占位符）。
+        assert!(
+            !p6.info_frozen_visible() && !p6.run_frozen_visible(),
+            "实时（通道通 + 帧新鲜）⇒ 无角标"
+        );
+        p6.render(&PageInput::down(Some(&f)));
+        assert!(p6.info_frozen_visible(), "通道断 + 保留帧 ⇒ 装置信息卡打「冻结」");
+        assert!(p6.run_frozen_visible(), "运行信息卡同理（同一拍、同一判据）");
+        assert_eq!(
+            p6.info_frozen_text().as_deref(),
+            Some(pages::TEXT_FROZEN),
+            "角标文案 = §3.6 既有串 `冻结`（EDGE-03 原文用字，零新上屏字）"
+        );
+        assert_eq!(p6.run_frozen_text().as_deref(), Some(pages::TEXT_FROZEN));
+        // **打标 ≠ 清值**：冻结帧的数值必须仍在屏上（这两条就是 EDGE-03 的"保留"要求）。
+        assert_eq!(
+            p6.info_value(0).as_deref(),
+            Some("BECG\u{2013}3568"),
+            "通道断 ⇒ 装置信息**沿用冻结帧**（不得清成「未提供」）"
+        );
+        assert_eq!(p6.run_value(1).as_deref(), Some("48 C"), "运行信息同样沿用冻结帧");
+        // 通道恢复 ⇒ 标记**当拍撤除**。
+        p6.render(&PageInput::live(&f));
+        assert!(
+            !p6.info_frozen_visible() && !p6.run_frozen_visible(),
+            "通道恢复 ⇒ 角标当拍撤除"
+        );
+        // 通道正常但帧旧 ⇒ **同一件**角标改文案（同一位置、同一对象，不新建）。
+        p6.render(&PageInput::new(
+            Some(&f),
+            ChannelStatus::Connected,
+            Freshness::Stale,
+        ));
+        assert!(p6.info_frozen_visible(), "帧过期 ⇒ 仍要打标（§8.2 的可信度是逐区块属性）");
+        assert_eq!(
+            p6.info_frozen_text().as_deref(),
+            Some(p1_status::TEXT_STALE),
+            "通道通 + 帧旧 ⇒ 文案改「数据过期」（与 P1 同一串）"
+        );
+        // 从未收到帧 ⇒ **不打标**（此时数值本就是 `–` 占位，不是"冻结的旧值"）。
+        p6.render(&PageInput::init());
+        assert!(
+            !p6.info_frozen_visible() && !p6.run_frozen_visible(),
+            "无帧 ⇒ 无角标（打「冻结」会谎报「有冻结帧」）"
+        );
+
+        // ── ⑦ 角标的**构造侧读回**（B3-2c 整改 重要 4；与 P4 的同款断言成对）──────────
+        // 判据 = [`crate::ui::pages::frozen_chip`]（**四张卡的唯一构造点**）：尺寸与皮肤
+        // **只由那里给定**，`render` 不覆盖（它只切可见性 + 换文案）⇒ 改那个函数的返回，
+        // **两页的断言同时红**（这正是"同一个构造点"的行为判据；P4 侧见其块内 ⑰）。
+        // **改什么会让本条变红**：改 `pages::frozen_chip` 的宽度 / 皮肤 ⇒ 本页两条红；
+        // 改 P6 内联构造（绕开共享点）⇒ 本页仍绿、但 P4 那两条会与它**分叉**。
+        disp.refr_now_for_test();
+        for (n, chip) in [("装置信息", p6.info_frozen_chip()), ("运行信息", p6.run_frozen_chip())]
+        {
+            assert_eq!(
+                chip.size().0,
+                pages::FROZEN_CHIP_W,
+                "{n}卡角标宽 = `pages::FROZEN_CHIP_W`（构造点唯一，不得各页自定）"
+            );
+            assert_eq!(
+                chip.skin(),
+                crate::ui::theme::ChipSkin::WARNING,
+                "{n}卡角标皮肤 = §8.2 警示类（`数据过期` / `冻结` 同款）"
+            );
+        }
+
+        // ── ⑧ 渲染热路径的**双零增长**（B3-2c 整改 重要 2）───────────────────────
+        // 评审实测：在 `P6SystemPage::render` 里插一次 `add_style` ⇒ 整改前 **354 全绿**
+        // ⇒「每拍只切可见性」此前**只有源码阅读作证**。本段连推 50 拍 `render(..)`，
+        // **三态轮转**（断 ⇒ 打「冻结」/ 通+帧旧 ⇒ 改「数据过期」/ 通+帧新 ⇒ 撤标）——
+        // 三个分支都走，「误挂样式」最可能出在"改文案"那两支里。
+        //
+        // **改什么会让本条变红**（**已实测**）：在 `P6SystemPage::render` 里插一次
+        // `add_style` ⇒ 第 2 条红；插一次 `Obj::create` ⇒ 第 1 条红。
+        //
+        // ⚠️ **测量区间前有一轮"热身"**（如实说明，避免把"有界的样式切换"误判成缺陷）：
+        // 上一段把 `p6` 推到了 `init` 态（各值 = `–` 占位）⇒ **占位样式 ⇒ 实际值样式**那一档
+        // 切换（`set_style_index` = remove + add 的**配对**操作）会挂上几条样式 —— 实测
+        // **恰好 6 条**（= 6 个值行）。那是**由内容变化驱动、有界**的，不是"每拍挂一条"；
+        // 本段要钉的是**稳态**：**同一帧**连推 N 拍，样式挂载数**一个字都不许涨**。
+        {
+            use std::sync::atomic::Ordering;
+            for _ in 0..3 {
+                p6.render(&PageInput::down(Some(&f)));
+                p6.render(&PageInput::new(Some(&f), ChannelStatus::Connected, Freshness::Stale));
+                p6.render(&PageInput::live(&f));
+            }
+            let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst);
+            let attaches_before = crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst);
+            for i in 0..50u64 {
+                let input = match i % 3 {
+                    0 => PageInput::down(Some(&f)),
+                    1 => PageInput::new(Some(&f), ChannelStatus::Connected, Freshness::Stale),
+                    _ => PageInput::live(&f),
+                };
+                p6.render(&input);
+                // ⚠️ **逐拍复核，不等推完 50 拍**（理由，实测）：LVGL 对**单个对象的样式条数**
+                // 有硬上限 —— `lv_obj_style.c:110` 断言 `style_cnt < 63`（该断言在本仓配置下
+                // **打印后继续**，随后 `lv_realloc` 把样式数组推到上限之外 ⇒ 进程**挂在循环中途**，
+                // 连断言都跑不到 —— 评审原味探针实测就是挂死，不是红）。逐拍断 ⇒ **第一次越界
+                // 的那一拍立刻红**，回归输出干净可读。
+                assert_eq!(
+                    crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst) - attaches_before,
+                    0,
+                    "P6 `render` 第 {i} 拍往对象上挂样式了（`Obj::add_style` 只增不删）"
+                );
+            }
+            assert_eq!(
+                crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst) - mounts_before,
+                0,
+                "P6 连推 50 拍 `render`（断 / 帧旧 / 实时三态轮转）不得新建任何 LVGL 对象 \
+                 —— 角标在构造期建好，`render` 是 1 Hz 热路径"
+            );
+            assert_eq!(
+                crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst) - attaches_before,
+                0,
+                "P6 连推 50 拍 `render` **也不得往对象上挂任何样式**：`Obj::add_style` 只增不删 \
+                 ⇒「渲染路径每拍挂一条样式」= 样式表无界增长，而**对象数不变** —— \
+                 评审的破坏性探针（在 `render` 里插 `add_style`）正是靠本条才抓得住"
+            );
+        }
         drop(p6);
 
         // 缺失帧 ⇒ 管理 IP「未提供」，而**服务地址仍有值**（两行不联动 —— 分列的实质）
@@ -5223,6 +5430,239 @@ pub(crate) fn pages_chain() {
         // 渲染后确有像素（装配 → 布局 → 像素全链）。
         let painted4 = sink.borrow().iter().filter(|b| **b != 0).count();
         assert!(painted4 > 10_000, "P4 渲染后 sink 中应有成片非背景像素（实际 {painted4}）");
+
+        // ── ⑭ 区块级「冻结 / 数据过期」打标（EDGE-03 / EDGE-20；B3-2c）──────────────
+        // 判据 = `pages::frame_mark`（与 P1 的通道条 / 数据过期角标**同源**）。
+        // **改什么会让本条变红**：删掉 `render` 里的 `apply_frame_mark` 调用（或把可见性
+        // 写成恒隐藏）⇒ 下列可见性断言全红；把 `Down` 时的帧清成缺省 ⇒
+        // 「联锁总态仍为冻结帧」那条红（EDGE-03 明文要求**保留**最近有效帧）。
+        let mut fm = frame_healthy();
+        let mut sec = il(true, true, false); // 未联锁 + 有效
+        sec.sources = two.sources.clone(); // 两个源（让"沿用冻结帧"的断言有区分度）
+        fm.interlock = sec;
+        p4.render(&PageInput::live(&fm));
+        assert!(
+            !p4.state_frozen_visible() && !p4.source_frozen_visible(),
+            "实时 ⇒ 两张卡都无角标"
+        );
+        p4.render(&PageInput::down(Some(&fm)));
+        assert!(p4.state_frozen_visible(), "通道断 + 保留帧 ⇒ 联锁总态卡打「冻结」");
+        assert!(p4.source_frozen_visible(), "触发源卡同理（同一拍、同一判据）");
+        assert_eq!(
+            p4.state_frozen_text().as_deref(),
+            Some(pages::TEXT_FROZEN),
+            "角标文案 = §3.6 既有串 `冻结`（零新上屏字）"
+        );
+        assert_eq!(p4.source_frozen_text().as_deref(), Some(pages::TEXT_FROZEN));
+        // **打标 ≠ 清值**：联锁段的数据照常沿用冻结帧。
+        assert_eq!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNLATCHED),
+            "通道断 ⇒ 联锁总态**沿用冻结帧**（不得回落「不可用」）"
+        );
+        assert_eq!(
+            p4.sources_title_text().as_deref(),
+            Some(p4_interlock::sources_title(2).as_str()),
+            "触发源计数同样沿用冻结帧"
+        );
+        // 通道恢复 ⇒ 当拍撤除。
+        p4.render(&PageInput::live(&fm));
+        assert!(
+            !p4.state_frozen_visible() && !p4.source_frozen_visible(),
+            "通道恢复 ⇒ 角标当拍撤除"
+        );
+        // 通道正常但帧旧 ⇒ 同一件角标改文案。
+        p4.render(&PageInput::new(
+            Some(&fm),
+            ChannelStatus::Connected,
+            Freshness::Stale,
+        ));
+        assert_eq!(
+            p4.state_frozen_text().as_deref(),
+            Some(p1_status::TEXT_STALE),
+            "通道通 + 帧旧 ⇒ 文案改「数据过期」"
+        );
+        // 无帧 ⇒ 不打标（此时联锁段已是「不可用」，不是"冻结的旧值"）。
+        p4.render(&PageInput::init());
+        assert!(
+            !p4.state_frozen_visible() && !p4.source_frozen_visible(),
+            "无帧 ⇒ 无角标"
+        );
+
+        // ── ⑮ 写端点失败回执的**合账口径**（B3-2c 整改 · **阻塞项**）───────────────
+        //
+        // # 缺陷（评审实测）
+        //
+        // `absorb_console` 的成功路径先 `record_response(resp, epoch_ms)`，而
+        // `ControlState::record_response` 在 `toast_text()` 为 `Some` 时 `push_toast`
+        // （`toast_text()` 对**一切非 `Ok` 的 `ControlCode`** 与**任何非空 `message`** 都返回
+        // `Some`）；紧接着 `apply_route` 把**同一份回执**送进 P4 `show_result` ⇒ **页面再弹
+        // 一条**。两条同挂 `lv_layer_top()`、同坐标（`Dimens::TOAST_X/Y`）同文案
+        // ⇒ 违 UI §7.2「同一时刻仅 1 条」。**生产高频**：P2 字段校验被拒 / P4 前置条件被拒。
+        //
+        // # 本用例的合账口径（**恰好一条**）
+        //
+        // | 上屏出口 | 期望 | 本段的判据 |
+        // |----------|------|------------|
+        // | 页面 Toast（P4 `show_result`） | **1 条**（可见） | `p4.toast_text()` 有值 |
+        // | app 层 Toast（`App::sync_toast`） | **0 条**（隐藏） | 状态层为空 ∧ app 层文案**独取**状态层（`toast_view` ⇒ `ControlState::toast()`） |
+        //
+        // ⚠️ **局限（如实登记）**：app 层那一条**没有**在本段里直接观测（`App` 的构造需要
+        // LVGL 会话 + 控制通道客户端，进程内起不了第二条 LVGL 线程）—— 本段证的是"**状态层
+        // 为空**"，再由 `toast_view` 的定义（**唯一**输入 = `ControlState::toast()`）推出
+        // "app 层那条必然隐藏"。**故"恰好一条"是"状态层空 + 页面侧有出口"这两半合起来的
+        // 结论，不是任何单条断言能独立给出的。**
+        //
+        // **改什么会让本条变红**（**已实测**）：把 `app::record_receipt` 的写端点分支换回
+        // `record_response` ⇒ 第 1 条断言红（状态层多出一条 ⇒ app 层与页面侧同拍两条）。
+        {
+            use crate::console::{ConsoleOutcome, OutcomeKind};
+            use crate::control_route::{route, RawPayload, RouteDecision};
+            use crate::state::ControlState;
+            use mupc_display_proto::{ConsoleEndpoint, ControlCode, ControlResponse, InterlockOpAck};
+
+            const T0: u64 = 1_000;
+            const MSG: &str = "联锁状态已变化";
+            let typed: ControlResponse<InterlockOpAck> = ControlResponse::rejected(
+                "rid-1", ControlCode::RejectedPrecondition, MSG, Vec::new(), None, T0,
+            );
+            // 生产路径：`console.rs` 解出**裸 JSON 信封**（`RawPayload` = `Value`），
+            // 由 `route()` 给出决策 + 类型化回执。本段照走这条链，不手搓 `RouteDecision`。
+            let raw: ControlResponse<RawPayload> = ControlResponse::rejected(
+                "rid-1", ControlCode::RejectedPrecondition, MSG, Vec::new(), None, T0,
+            );
+            let outcome = ConsoleOutcome {
+                endpoint: ConsoleEndpoint::InterlockRelease,
+                kind: OutcomeKind::Response(raw.clone()),
+            };
+            let decision = route(&outcome).expect("联锁写回执必须路由到 `InterlockResult`");
+            assert_eq!(
+                decision,
+                RouteDecision::InterlockResult(typed.clone()),
+                "两侧必须是**同一份回执**，否则本用例证的不是生产路径"
+            );
+
+            let mut st = ControlState::new();
+            st.begin(ConsoleEndpoint::InterlockRelease, Some("rid-1"));
+            crate::app::record_receipt(&mut st, &decision, &raw, T0);
+            assert!(
+                st.toast().is_none(),
+                "写端点回执由 P4 `show_result` 上屏 ⇒ **状态层必须为空**（否则同拍两条 Toast）"
+            );
+            assert!(!st.is_busy(), "记账一个不少：在途照清");
+
+            // 同一拍、同一份回执的**页面侧出口**（这就是"另一条出口"，也是唯一的可见条）。
+            p4.show_result(&typed).expect("P4 show_result");
+            assert_eq!(
+                p4.toast_text().as_deref(),
+                Some(MSG),
+                "页面侧另有出口：P4 的 Toast 必须出现（上屏的就是这一条）"
+            );
+        }
+
+        // ── ⑯ 渲染热路径的**双零增长**（B3-2c 整改 重要 2）───────────────────────
+        // 评审实测：在 `P4InterlockPage::render` 里插一次 `add_style` ⇒ 整改前 **354 全绿**
+        // ⇒「每拍只切可见性」此前**只有源码阅读作证**（同款缺口在 P6 上同样存在，见该页块）。
+        // 本段连推 50 拍 `render(..)`，**三态轮转**（断 ⇒ 打「冻结」/ 通+帧旧 ⇒ 改「数据过期」/
+        // 通+帧新 ⇒ 撤标）—— 三个分支都走，「误挂样式」最可能出在"改文案"那两支里。
+        //
+        // **改什么会让本条变红**（**已实测**）：在 `P4InterlockPage::render` 里插一次
+        // `add_style` ⇒ 第 2 条红；插一次 `Obj::create` ⇒ 第 1 条红。
+        //
+        // ⚠️ **热身一轮的理由同 P6 段**（上一段把 `p4` 推到了 `init` 态 ⇒「占位样式 ⇒ 实际值
+        // 样式」那一次**有界**的配对切换不计入本区间）。判据是**稳态**零增长。
+        {
+            use std::sync::atomic::Ordering;
+            for _ in 0..3 {
+                p4.render(&PageInput::down(Some(&fm)));
+                p4.render(&PageInput::new(Some(&fm), ChannelStatus::Connected, Freshness::Stale));
+                p4.render(&PageInput::live(&fm));
+            }
+            let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst);
+            let attaches_before = crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst);
+            for i in 0..50u64 {
+                let input = match i % 3 {
+                    0 => PageInput::down(Some(&fm)),
+                    1 => PageInput::new(Some(&fm), ChannelStatus::Connected, Freshness::Stale),
+                    _ => PageInput::live(&fm),
+                };
+                p4.render(&input);
+                // **逐拍复核**（理由同 P6 段：等推完 50 拍会先撞 LVGL 的单对象样式上限
+                // `lv_obj_style.c:110`，那是挂死不是红）。
+                assert_eq!(
+                    crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst) - attaches_before,
+                    0,
+                    "P4 `render` 第 {i} 拍往对象上挂样式了（`Obj::add_style` 只增不删）"
+                );
+            }
+            assert_eq!(
+                crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst) - mounts_before,
+                0,
+                "P4 连推 50 拍 `render`（断 / 帧旧 / 实时三态轮转）不得新建任何 LVGL 对象 —— \
+                 `render` 是 1 Hz 热路径，角标与行池都在构造期建好、运行期只切可见性 + 换文案"
+            );
+            assert_eq!(
+                crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(Ordering::SeqCst) - attaches_before,
+                0,
+                "P4 连推 50 拍 `render` **也不得往对象上挂任何样式**：`Obj::add_style` 只增不删 \
+                 ⇒「渲染路径每拍挂一条样式」= 样式表无界增长，而**对象数不变** —— \
+                 评审的破坏性探针（在 `render` 里插 `add_style`）正是靠本条才抓得住"
+            );
+        }
+
+        // ── ⑰ 四张冻结角标**同一构造点**（B3-2c 整改 重要 4）──────────────────────
+        // 整改前：P6 走 `p6_system.rs::frozen_chip`、P4 在构造处**内联复制**了两次
+        // `StatusChip::new(.., FROZEN_CHIP_W, ICON_WARN, TEXT_FROZEN, ChipSkin::WARNING)`，
+        // 常量也双份；而 `p6_system.rs` 的注释却写"三处都由它统一口径"（`grep -rn frozen_chip
+        // src/` 当时**只命中 P6**）—— **不实陈述**。现四张卡全部走
+        // `pages/mod.rs::frozen_chip`（唯一构造点，尺寸 / 皮肤 / 图标 / 初始文案 / y 全在那一处）。
+        //
+        // 本段是**源码哨**（与 `app.rs` 的 `Toast::new(` 计数同款）：证明**这一行在源码里**。
+        // 行为侧另一半 = **构造侧读回**（本页四条 + P6 块内四条）：尺寸与皮肤只由那个构造点
+        // 给定、`render` 不覆盖 ⇒ 改 `frozen_chip` 的返回 ⇒ **两页共 8 条断言同时红**。
+        //
+        // **改什么会让本条变红**：把任一页的角标改回内联 `StatusChip::new(..)` ⇒ 第 1 / 2 条红；
+        // 把文案 / 皮肤搬回任一页（即该页源码重新出现 `TEXT_FROZEN` 实参）⇒ 第 3 条红。
+        disp.refr_now_for_test();
+        for (n, chip) in [("联锁总态", p4.state_frozen_chip()), ("触发源", p4.source_frozen_chip())]
+        {
+            assert_eq!(
+                chip.size().0,
+                pages::FROZEN_CHIP_W,
+                "{n}卡角标宽 = `pages::FROZEN_CHIP_W`（与 P6 的两张**同一构造点**，不得各页自定）"
+            );
+            assert_eq!(
+                chip.skin(),
+                crate::ui::theme::ChipSkin::WARNING,
+                "{n}卡角标皮肤 = §8.2 警示类（与 P6 的两张**同一构造点**）"
+            );
+        }
+        {
+            let p4_src = include_str!("pages/p4_interlock.rs");
+            let p6_src = include_str!("pages/p6_system.rs");
+            // 判据用**带路径前缀**的形式：本文件里的读回口 `*_frozen_chip(&self)` 也含
+            // `frozen_chip(` 子串，裸串计数会把它们算进去（实测：裸串 = 4），故锚定调用点全路径。
+            assert_eq!(
+                p4_src.matches("pages::frozen_chip(").count(),
+                2,
+                "P4 的两张卡必须**都**经 `pages::frozen_chip`（内联构造 = 双份口径，禁用）"
+            );
+            assert_eq!(
+                p6_src.matches("pages::frozen_chip(").count(),
+                2,
+                "P6 的两张卡同理"
+            );
+            assert!(
+                !p4_src.contains("TEXT_FROZEN,") && !p6_src.contains("TEXT_FROZEN,"),
+                "冻结角标的文案只许写在 `pages::frozen_chip` 一处 —— 任一页里再出现\
+                 `TEXT_FROZEN` **作实参**（故判据带尾逗号，与文档链接 `[`…TEXT_FROZEN`]` 区分）\
+                 即口径分裂"
+            );
+            assert!(
+                p4_src.contains("pages::frozen_chip(") && p6_src.contains("pages::frozen_chip("),
+                "两页都必须显式指向**同一个**构造点（不是各自的同名私有函数）"
+            );
+        }
 
         drop(p4);
     }
@@ -7308,8 +7748,13 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **对象数量**钉住：往任一处加构件把总量推过 [`SHELL_OBJECT_BUDGET`]，这里会先变红
         // 并给出准确数字，而不是等到某台机器上 OOM 挂死。
         //
-        // **预算 = 实测值（零余量）**：`mounted ≤ 预算`，故 `mounted == 730` 绿、
-        // **把预算改成 729（实测 −1）必红** —— 这是"预算不是摆设"的判据（探针实测见交付报告）。
+        // **B3-2c 重新实测（2026-09-16）：742** —— 730 → 742 的来源 = **4 个区块级
+        // 「冻结 / 数据过期」角标**（P4 总态卡 / P4 触发源卡 / P6 装置信息卡 / P6 运行信息卡），
+        // 每个 `StatusChip` = 3 个对象（容器 + 图标 + 文字）⇒ +12。**零余量**地重钉在这里
+        // （角标是 EDGE-03 的明文要求，属"确需新增"；不再顺手调其它构件）。
+        //
+        // **预算 = 实测值（零余量）**：`mounted ≤ 预算`，故 `mounted == 742` 绿、
+        // **把预算改成 741（实测 −1）必红** —— 这是"预算不是摆设"的判据（探针实测见交付报告）。
         // 下一批若**确需**新增常驻构件：先在此**重新实测**并同步本行数字与注释，不得只抬预算。
         //
         // **⚠️ 口径（B3-2b-1 规格符合性评审 建议 5；如实登记）**：`PROBE_MOUNTS` 计的是
@@ -7323,7 +7768,17 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // （借用也 +1）—— 届时要么把口径改成"新建数"（另设计数器），要么把借用调用挪出区间。
         //
         // **改什么会让本条变红**：给 6 页 / 外壳 / 整屏层任一处加出 ≥1 个常驻对象。
-        const SHELL_OBJECT_BUDGET: usize = 730;
+        //
+        // ⚠️ **口径缺口（B3-2c 整改 建议 2；如实登记）**：本预算**只量 `Shell::new`** 这一个
+        // 区间（外壳 + 6 页 + 整屏层）。**另有 app 层 4 个常驻对象不在本预算内**：
+        // `App::new` 建的 app 层 Toast（`App::toast`）**常驻整场**，实测 = **4 个** LVGL 对象
+        // （容器 `obj` + 左缘色条 `_accent` + 图标 `Rc<Label>` + 文本 `Rc<Label>`）。
+        // **为什么不把它并进来**：`App` 的构造需要 LVGL 会话 **+ 控制通道客户端**
+        // （`ConsoleClient::new`）⇒ 本链路（只有 `Display` + `Shell`）**建不出 `App`**，
+        // 那个区间在这里**测不到**（进程内也起不了第二条 LVGL 线程）。故如实注明而不并账 ——
+        // 真实的常驻对象上限 = **742 + 4 = 746**（若日后新增"能在离屏链路里建出来的"常驻件，
+        // 仍按本预算判）。
+        const SHELL_OBJECT_BUDGET: usize = 742;
         let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         let sh = Shell::new(&home).expect("外壳 + 6 页装配（LVGL_MEM 1 MB）");
         let mounted =
@@ -7802,7 +8257,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         assert_eq!(sh.current(), NavPage::Config);
 
         // ═══ ⑤′ 确认弹层打开 ⇒ 暂停计时且不显示倒计时（UI §4.3）════════════════
-        // **SH2**：页侧拿不到"弹层是否打开"（`with_dialog` 是 `#[cfg(test)]`）⇒ 经注入位驱动。
+        // **SH2（B2c-3 时的口径）**：当时页侧拿不到"弹层是否打开"（`with_dialog` 是
+        // `#[cfg(test)]`）⇒ 只能经注入位驱动。**B3-2c 已闭合**（真源 = 页面的 `dialog_open()`，
+        // 见下面 ⑤″ / ⑤″·P4）；本段（⑤′）保留为"外壳**暂停语义**本身"的单独一网：判据经注入位
+        // 喂入，故与页面真源**解耦**，两者各自可红。
         sh.set_modal_open(true);
         sh.tick(at(300), CLOCK);
         assert!(
@@ -7813,6 +8271,150 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         sh.set_modal_open(false);
         sh.tick(at(301), CLOCK);
         assert_eq!(sh.current(), NavPage::Config, "弹层关闭 ⇒ 恢复计时（从满时长）");
+
+        // ═══ ⑤″ **生产可见的**弹层查询口（B3-2c：闭合 SH2 的「页侧拿不到」）═══════════
+        //
+        // ⑤′ 证明的是外壳**暂停语义**本身（经注入位）；本节证明驱动它的**判据现在是可得的**
+        // —— 页面侧新增的 `P2ConfigPage::dialog_open()` / `P4InterlockPage::dialog_open()`
+        // 必须如实反映"此刻屏上有没有弹层"（`app.tick` 每拍喂的两者取或就取自它们）。
+        //
+        // **改什么会让本条变红**（**已实测**）：
+        // - 把 `P2ConfigPage::dialog_open` 写成恒 `false` ⇒ 「点『保存』⇒ 查询口为真」当场红；
+        // - 把 `sh.set_modal_open(..)` 那一行改回常量 `false` ⇒ 「90 s 后仍停在 P2」红。
+        sh.show(NavPage::Config);
+        assert!(
+            !sh.p2().dialog_open() && !sh.p4().dialog_open(),
+            "无弹层 ⇒ 两个查询口都为 false"
+        );
+        // 改一个可编辑字段（走与控件回调同一条簿记）⇒ 有草稿可保存。
+        assert!(sh.p2().set_field_value("gateway.port", &serde_json::Value::from(2405)));
+        sh.note_activity();
+        sh.tick(at(305), CLOCK); // 消费活动 ⇒ 计时基线 = at(305)
+        // 「保存」= 真实派发路径（向保存按钮派 `CLICKED`），弹层由页面自己开。
+        sh.p2()
+            .save_button()
+            .button()
+            .obj()
+            .send_event(EventCode::CLICKED);
+        assert!(
+            sh.p2().dialog_open(),
+            "点「保存」⇒ 弹层已在屏上，**生产可见的**查询口必须为真（恒 false ⇒ 红）"
+        );
+        assert!(!sh.p4().dialog_open(), "P4 的弹层没打开（两页各持自己的口，互不借光）");
+
+        // 接线层每拍的喂入值 = 两页取或 ⇒ 弹层打开期间计时**暂停**。
+        sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
+        sh.tick(at(395), CLOCK); // 距基线 90 s ≫ 60 s 的超时 ⇒ 未暂停的话早已切回 P1
+        assert!(!sh.countdown_visible(), "弹层打开 ⇒ 不倒计时（TT-13 / UI §4.3）");
+        assert_eq!(sh.current(), NavPage::Config, "弹层打开 ⇒ 不强制切页");
+
+        // 关弹层：走**真实取消路径**（事件回调内不关，延迟到下一拍 —— 见 `P2ConfigPage::tick`）。
+        sh.p2().with_dialog(|d| {
+            d.cancel_button().send_event(EventCode::CLICKED);
+        });
+        assert!(
+            sh.p2().dialog_open(),
+            "取消点击发生在 LVGL 回调内 ⇒ 弹层**此刻仍在屏上**，查询口必须如实为真"
+        );
+        sh.tick(at(396), CLOCK);
+        assert!(!sh.p2().dialog_open(), "下一拍的延迟关闭已执行 ⇒ 查询口变假");
+        // 脏草稿也会暂停计时（EDGE-11）⇒ 先放弃修改，才能观察"弹层关 ⇒ 恢复计时"。
+        sh.p2().discard_draft();
+        assert!(!sh.p2().is_dirty(), "前置：脏态已清（否则暂停判据仍为真）");
+        sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
+        sh.tick(at(397), CLOCK);
+        assert_eq!(
+            sh.current(),
+            NavPage::Config,
+            "弹层关闭且无脏草稿 ⇒ 暂停解除（计时从满时长重算，此刻不切页）"
+        );
+        assert!(!sh.countdown_visible(), "恢复计时 ⇒ 距超时还有 60 s，无胶囊");
+        sh.show(NavPage::Main); // 复位：后续 ③ 段从主状态页起
+        sh.note_activity();
+        sh.tick(at(398), CLOCK);
+
+        // ═══ ⑤″·P4 **P4 侧的**生产可见查询口（B3-2c 规格符合性评审**阻塞 1** 整改）═══════
+        //
+        // **为什么必须补这一节**：⑤″ 里 P4 只有 `assert!(!sh.p4().dialog_open(), ..)` 这类
+        // **否定式**断言（不点 P4 的按钮 ⇒ 它恒成立）⇒ 评审实测：把
+        // `P4InterlockPage::dialog_open()` 改成**恒 `false`**（= 本单元开工前的退化形态，
+        // 接线层恒喂 `false`）时**354/0/6/6/3 全绿、0 failed** —— TT-13 在 P4 这半
+        // **静默失效**。本节按 P2 的**同款真实路径**（向按钮派 `CLICKED`，弹层由页面自己开）
+        // 把 P4 走一遍，且**每条断言都同时钉住"本页为真"与"另一页为假"** ⇒
+        // 接线层取或（`p2.dialog_open() || p4.dialog_open()`）的**两个操作数都是真的**。
+        //
+        // **改什么会让本条变红**（**已实测**，见交付报告）：
+        // - `P4InterlockPage::dialog_open` 写成**恒 `false`** ⇒ 「点『人工释放联锁』⇒ 查询口为真」
+        //   当场红（这正是"恒 false 全套仍绿"缺的那张网）；
+        // - 写成**恒 `true`** ⇒ 本节「注入后、点击前：P4 无弹层」先红（若把它删掉，
+        //   「关闭后查询口变假」也会红）。
+        {
+            use mupc_display_proto::InterlockSection;
+            // 本节的**独立时间基**（`at(600)` 起，与 ⑤″ 的 305–398 段互不干扰）；
+            // 收尾再显式把基线**复位**回 `at(399)`，好让 ③′ 段仍从 `at(400)` 起算。
+            sh.show(NavPage::Interlock);
+            // P4 的操作按钮在**无帧**时 fail-closed 置灰（§8.3「联锁状态不可用」）⇒
+            // 先注入一份可用帧（`available && enabled`，`latched = false` ⇒ 两按钮都可用）。
+            sh.p4().set_section(&InterlockSection {
+                available: true,
+                enabled: true,
+                latched: false,
+                ..Default::default()
+            });
+            assert!(
+                !sh.p4().dialog_open(),
+                "注入可用帧后、**点击前**：P4 屏上无弹层（恒 true 的口在这里先红）"
+            );
+            assert!(!sh.p2().dialog_open(), "P2 的弹层此刻也不该在（互不借光）");
+            sh.note_activity();
+            sh.tick(at(600), CLOCK); // 消费活动 ⇒ 计时基线 = at(600)
+            // 真实派发路径：向「人工释放联锁」按钮派 `CLICKED`，弹层由页面自己开。
+            sh.p4()
+                .release_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED);
+            assert!(
+                sh.p4().dialog_open(),
+                "点「人工释放联锁」⇒ P4 弹层已在屏上，**生产可见的**查询口必须为真\
+                 （恒 false ⇒ 红；B3-2c 评审阻塞 1）"
+            );
+            assert!(
+                !sh.p2().dialog_open(),
+                "P4 弹层 ≠ P2 弹层（两页各持自己的口，**互不借光**）"
+            );
+            // 接线层每拍的喂入值 = 两页取或 ⇒ P4 弹层打开期间**同样暂停计时**（P4 侧也守一次 TT-13）。
+            sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
+            sh.tick(at(690), CLOCK); // 距基线 90 s ≫ 60 s 的超时 ⇒ 未暂停的话早已切回 P1
+            assert!(!sh.countdown_visible(), "P4 弹层打开 ⇒ 不倒计时（TT-13 / UI §4.3）");
+            assert_eq!(sh.current(), NavPage::Interlock, "P4 弹层打开 ⇒ 不强制切页");
+            // 关弹层：走**真实取消路径**（事件回调内不关，延迟到下一拍 —— 同 `P2ConfigPage::tick`）。
+            sh.p4().with_dialog(|d| {
+                d.cancel_button().send_event(EventCode::CLICKED);
+            });
+            assert!(
+                sh.p4().dialog_open(),
+                "取消点击发生在 LVGL 回调内 ⇒ 弹层**此刻仍在屏上**，查询口必须如实为真"
+            );
+            sh.tick(at(691), CLOCK);
+            assert!(!sh.p4().dialog_open(), "下一拍延迟关闭已执行 ⇒ P4 查询口变假（恒 true ⇒ 红）");
+            sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
+            sh.tick(at(692), CLOCK);
+            assert_eq!(
+                sh.current(),
+                NavPage::Interlock,
+                "P4 弹层关闭（本页无草稿概念）⇒ 暂停解除（计时从满时长重算，此刻不切页）"
+            );
+            assert!(!sh.countdown_visible(), "恢复计时 ⇒ 距超时还有 60 s，无胶囊");
+            // **基线复位**：后面的 ③′ 段仍以 `at(400)` 为独立时间基。
+            // `note_activity()` 的消费分支**无条件**把 `last_activity` 覆盖为 `now`
+            // （见 `Shell::tick` ①），故这里能把基线拉回到 at(399)。
+            sh.show(NavPage::Main);
+            assert!(!sh.p4().dialog_open() && !sh.p2().dialog_open(), "复位前：两页弹层都已关");
+            sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
+            sh.note_activity();
+            sh.tick(at(399), CLOCK);
+        }
 
         // ═══ ③ 顶层图层挂点（弹层 / Toast；**SH8 收口后不再是 EDGE-03 的落点**）═══════════
         // 「整屏降级层在它**之下**」这一拓扑是 EDGE-20 的成立条件（通道断时弹层与写路径仍可用）。

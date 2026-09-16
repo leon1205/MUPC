@@ -243,6 +243,25 @@ pub const TEXT_TOAST_RELEASED: &str = "已释放联锁";
 pub const TEXT_TOAST_ACKED: &str = "已授权重启";
 /// 失败 Toast：操作失败（同上）。
 pub const TEXT_TOAST_FAIL: &str = "操作失败";
+/// **重放窗口已过**（`crate::console::ConsoleError::RetryWindowExpired`）的专属上屏文案。
+///
+/// # 为什么它必须点明出路（B3-2c）
+///
+/// 该错误意味着「**首次操作可能已经生效**，而重发必被服务端防重放窗口先拒」——
+/// 若照通用兜底显「操作失败」，用户会当成"什么都没发生"再点一次（`console.rs` 模块头
+/// 第 6 条登记的正是这条静默语义偏差）。出路**只有一条**：当作**新操作**重发 + 按 T-3
+/// **重新确认**，故文案逐字写明。
+///
+/// # 落点为什么在 `ui/**`（不得写进 `state.rs`）
+///
+/// 本仓码表静态网 `ui/tests.rs::UI_PROD_SOURCES` **只覆盖 `ui/**` 的 13 个文件**；写在
+/// `state.rs` 会**漏出扫描面** ⇒ 该串缺字也不会有任何用例变红（真机豆腐块）。
+/// 字符**已在**当前字体码表内（`fonts/lv_font_cmap.txt` 逐字核对：`操 U+64CD` / `已 U+5DF2` /
+/// `过 U+8FC7` / `期 U+671F` / `请 U+8BF7` / `重 U+91CD` / `新 U+65B0` / `确 U+786E` /
+/// `认 U+8BA4` / `后 U+540E` / `试 U+8BD5` / `· U+00B7` 齐备）⇒ **不必**重跑 `gen_fonts.sh`。
+///
+/// **PM 已批准**（UI 文档 §3.6；B3-2c 裁定批次）。
+pub const TEXT_RETRY_EXPIRED: &str = "操作已过期 · 请重新确认后重试";
 /// 审计不可写（UI §8.3 EDGE-18，fail-closed）—— **转出** `p2_config` 的同名字面量（**不另抄**，
 /// 同一串只允许一份源码字面量，见 `ui/pages/mod.rs` 的 M3 口径）。
 pub const TEXT_AUDIT_UNAVAILABLE: &str = p2_config::TEXT_AUDIT_UNAVAILABLE;
@@ -310,6 +329,7 @@ pub const ALL_TEXTS: &[&str] = &[
     TEXT_TOAST_RELEASED,
     TEXT_TOAST_ACKED,
     TEXT_TOAST_FAIL,
+    TEXT_RETRY_EXPIRED,
     TEXT_AUDIT_UNAVAILABLE,
     ICON_OK,
     ICON_FAIL,
@@ -355,6 +375,17 @@ const LATCH_CHIP_W: i32 = Dimens::CARD_STATUS_W;
 const LATCH_CHIP_X: i32 = INNER_W - LATCH_CHIP_W;
 /// latch 胶囊 y（在卡头行内居中；`STATUS_CHIP_H` 32 > 28 ⇒ 收敛到 0，与卡头文字同顶）。
 const LATCH_CHIP_Y: i32 = theme::center_offset(CARD_HEAD_H, Dimens::STATUS_CHIP_H);
+
+// ── 区块级「冻结 / 数据过期」角标（EDGE-03 / EDGE-20；B3-2c）─────────────────
+//
+// ⚠️ **宽 / y 不在本文件**（B3-2c 整改 · 重要 4）：它们与**构造点**一起收口在
+// [`crate::ui::pages::frozen_chip`] / `FROZEN_CHIP_W` / `FROZEN_CHIP_Y` —— 本页两张卡与
+// P6 的两张卡共用同一份（此前两页**各写一份逐字相同的表达式**）。本文件只留**本页专属**的 x。
+/// 总态卡角标 x：落在卡头**未被占用**的一段（标题 4 字 ≈ 112 px 之后、latch 胶囊之前）
+/// —— 与 latch 胶囊同排但**不重叠**（latch 胶囊贴右缘，本角标在它左侧一个缝 + 一个自身宽）。
+const STATE_FROZEN_X: i32 = LATCH_CHIP_X - crate::ui::pages::FROZEN_CHIP_W - Dimens::GAP_MIN;
+/// 触发源卡角标 x（贴卡内容区右缘；该卡头只有标题 + 计数，右侧整段空白）。
+const SOURCE_FROZEN_X: i32 = INNER_W - crate::ui::pages::FROZEN_CHIP_W;
 
 // ── 触发源卡（UI §6.4 区块规格「触发源卡」；线框 992×200）─────────────────────
 /// 触发源行高（UI §6.4：行高 44；`theme` 的 `ROW_LOG_H` 即该档）。
@@ -1169,6 +1200,11 @@ struct Core {
     _state_title: Label,
     /// latch 胶囊三态（已保持 / 未保持 / 不可用）—— `show_only` 切换，皮肤构造期固定。
     state_chips: [Rc<StatusChip>; 3],
+    /// 总态卡的**区块级「冻结 / 数据过期」角标**（EDGE-03 / EDGE-20；B3-2c）。
+    ///
+    /// 构造期建好、运行期**只切可见性 + 换文案**（判据 = [`crate::ui::pages::frame_mark`]）
+    /// —— 绝不在 `render` 里建 / 删对象（本页 `render` 是 1 Hz 的热路径）。
+    state_frozen: StatusChip,
     /// 总态图标（`⚠` / `✓` / `?`）。
     state_icon: Rc<Label>,
     /// 总态词（96 px）。
@@ -1190,6 +1226,8 @@ struct Core {
     source_rows_box: Obj,
     /// 行池（见 **IL9**）。
     source_rows: Vec<SourceRow>,
+    /// 触发源卡的**区块级「冻结 / 数据过期」角标**（口径同 [`Core::state_frozen`]）。
+    source_frozen: StatusChip,
     /// 空态（`当前无联锁触发源`）。
     source_empty: Rc<EmptyState>,
     /// 不可用态（`UnavailableKind::Interlock`）。
@@ -1246,6 +1284,23 @@ impl Core {
     // ── 渲染：帧 → 屏（**只改文本 / 颜色 / 可见性 / 尺寸**，不新建对象）────────
 
     /// 注入一帧的联锁段（`None` ⇒ 契约缺省 = **不可用**）。
+    /// 区块级「冻结 / 数据过期」角标（EDGE-03 / EDGE-20；B3-2c）。
+    ///
+    /// **只切可见性 + 换文案**（对象在构造期就建好了）—— `render` 是 1 Hz 热路径，
+    /// 在其中建 / 删对象会把 LVGL 定容池吃光（本仓既有先例）。
+    ///
+    /// **打标 ≠ 清值**：本函数一个字都不碰联锁段的数据（`apply_section` 照常把帧里的值
+    /// 铺上屏）—— EDGE-03 明文要求"**保留**最近有效帧"，操作者正是据这份**冻结数值**决策。
+    fn apply_frame_mark(&self, mark: Option<&str>) {
+        let visible = mark.is_some();
+        if let Some(m) = mark {
+            self.state_frozen.set_text(m);
+            self.source_frozen.set_text(m);
+        }
+        set_visible(self.state_frozen.obj(), visible);
+        set_visible(self.source_frozen.obj(), visible);
+    }
+
     fn apply_section(&self, s: &InterlockSection) {
         // ⓪ **陈旧倒计时清理（M3 / IL27）**：新帧**改变了展示相关字段** ⇒ 之前那条
         // 「保持时间不足 · 还需 N 秒」的基准已失效（源已复位 / latch 已变），必须清掉 ——
@@ -1700,6 +1755,12 @@ impl P4InterlockPage {
         for c in &state_chips {
             c.set_pos(LATCH_CHIP_X, LATCH_CHIP_Y);
         }
+        // 区块级「冻结」角标（EDGE-03 / EDGE-20；B3-2c）：**构造期建好、建好即隐藏**，
+        // 运行期只切可见性 + 换文案（`Core::apply_frame_mark`）。
+        // ⚠️ **构造点唯一**（B3-2c 整改 · 重要 4）：走 [`crate::ui::pages::frozen_chip`] ——
+        // 与 P6 的两张卡**同一个**构造点（皮肤 / 图标 / 文案 / 尺寸 / y 全在那一处）。
+        // 本页此前在这里**内联复制**了一份，于是"三处统一口径"的说法不成立（见该函数注释）。
+        let state_frozen = crate::ui::pages::frozen_chip(&state_card, STATE_FROZEN_X)?;
         let state_icon = Rc::new(text_label(
             &state_card,
             ICON_STATE_UNAVAILABLE,
@@ -1733,6 +1794,8 @@ impl P4InterlockPage {
             Palette::TEXT_PRIMARY,
         )?;
         source_title.set_pos(0, CARD_HEAD_TEXT_Y);
+        // 同「总态卡角标」：**同一构造点**（[`crate::ui::pages::frozen_chip`]），只有 x 不同。
+        let source_frozen = crate::ui::pages::frozen_chip(&source_card, SOURCE_FROZEN_X)?;
         let source_rows_box = layout_box(&source_card, INNER_W, SOURCE_BODY_MIN_H)?;
         source_rows_box.set_pos(0, CARD_HEAD_H);
         let mut source_rows = Vec::with_capacity(SOURCE_ROW_POOL);
@@ -1844,6 +1907,7 @@ impl P4InterlockPage {
             state_bar_left,
             _state_title: state_title,
             state_chips,
+            state_frozen,
             state_icon,
             state_text_l,
             state_styles,
@@ -1857,6 +1921,7 @@ impl P4InterlockPage {
             source_title,
             source_rows_box,
             source_rows,
+            source_frozen,
             source_empty,
             source_unavailable,
             lamps,
@@ -1938,18 +2003,62 @@ impl P4InterlockPage {
         &self.core.source_card
     }
 
+    /// 联锁总态卡的**区块级「冻结 / 数据过期」角标**当前是否可见（EDGE-03 / EDGE-20）。
+    pub fn state_frozen_visible(&self) -> bool {
+        !self.core.state_frozen.obj().is_hidden()
+    }
+
+    /// 上述角标的当前文案（隐藏时仍可读回；可见时恒为 [`crate::ui::pages::TEXT_FROZEN`]
+    /// 或 [`p1_status::TEXT_STALE`]）。
+    pub fn state_frozen_text(&self) -> Option<String> {
+        self.core.state_frozen.text()
+    }
+
+    /// 触发源卡的同类角标是否可见。
+    pub fn source_frozen_visible(&self) -> bool {
+        !self.core.source_frozen.obj().is_hidden()
+    }
+
+    /// 触发源卡角标的当前文案。
+    pub fn source_frozen_text(&self) -> Option<String> {
+        self.core.source_frozen.text()
+    }
+
+    /// **仅测试**：联锁总态卡角标的**构造侧读回**（尺寸 / 皮肤 / 图标）。
+    ///
+    /// 用途（B3-2c 整改 **重要 4**）：证"本页两张角标与 P6 的两张**同一个构造点**"
+    /// （[`crate::ui::pages::frozen_chip`]）—— **尺寸与皮肤只由那里给定**，`render` 不覆盖；
+    /// 文案与可见性会被 `render` 覆盖，故由可见性 / 文案用例证。
+    /// ⚠️ 读尺寸前须有一次布局趟（`Display::refr_now_for_test`）。
+    #[cfg(test)]
+    pub(crate) fn state_frozen_chip(&self) -> &StatusChip {
+        &self.core.state_frozen
+    }
+
+    /// **仅测试**：触发源卡角标的构造侧读回（同 [`Self::state_frozen_chip`]）。
+    #[cfg(test)]
+    pub(crate) fn source_frozen_chip(&self) -> &StatusChip {
+        &self.core.source_frozen
+    }
+
     // ── 数据入口（**读路径 = 帧驱动**）─────────────────────────────────────
 
     /// 注入一帧（`frame = None` ⇒ 该段取契约缺省 = **不可用**）。
     ///
-    /// ⚠️ `freshness` / `channel` 本页**不消费**：联锁段自身的 `available` 才是判据；通道级降级
-    /// 由 B2c 的外壳遮罩承担（UI §8.3 `通道断（EDGE-03）` 的整屏降级行）。
+    /// **`freshness` / `channel` 的消费点（B3-2c 起）**：只用于**区块级可信度打标**
+    /// （[`crate::ui::pages::frame_mark`] ⇒ 卡头「冻结 / 数据过期」角标）。
+    /// ⚠️ **联锁段自身的 `available` 仍是展示判据**（`frame = None` ⇒ 不可用，绝不回落
+    /// 「未联锁」）；通道级**整屏**降级另由外壳遮罩承担（UI §8.3，`ui/shell.rs`）。
+    ///
+    /// **打标不改变数值**：`Down` / `Stale` 时帧被**保留**（EDGE-03 明文），本方法照常把
+    /// 那份冻结数据铺上屏（`apply_section`），只是多打一个角标。
     pub fn render(&self, input: &PageInput<'_>) {
         let section = match input.frame {
             Some(f) => f.interlock.clone(),
             None => InterlockSection::default(),
         };
         self.core.apply_section(&section);
+        self.core.apply_frame_mark(crate::ui::pages::frame_mark(input));
     }
 
     /// 直接注入联锁段（等价于 [`P4InterlockPage::render`] 的帧内那一段；供 B3 接线与离屏用例）。
@@ -2394,6 +2503,22 @@ impl P4InterlockPage {
     #[cfg(test)]
     pub(crate) fn ever_available(&self) -> bool {
         self.core.ever_available.get()
+    }
+
+    /// **生产可见的「确认弹层是否打开」查询口**（B3-2c，闭合 TT-13；与
+    /// [`p2_config::P2ConfigPage::dialog_open`] **同款**）。
+    ///
+    /// `Shell::set_modal_open`（弹层打开 ⇒ 暂停空闲计时 / 不显示倒计时 / 不强制切页，
+    /// UI §4.3）是 B2c-3 起的已登记契约，而当时页面侧**没有任何生产可见的查询口**
+    /// （[`P4InterlockPage::with_dialog`] 是 `#[cfg(test)]`）⇒ 接线层恒喂 `false`
+    /// （`ui/shell.rs` 偏差 **SH2**）。
+    ///
+    /// **语义**：`true` = 此刻屏上有一个**未关闭**的确认弹层（本页的弹层唯一创建点
+    /// = `open_dialog`，关闭点 = `close_dialog`）。⚠️ 关闭**延迟到下一拍**
+    /// （`ConfirmDialog::close` 不得在 LVGL 事件回调内调用，见 [`P4InterlockPage::tick`]）
+    /// ⇒ 「刚点完取消」的那一瞬间仍为 `true` —— 这正是要的语义（弹层此刻真的还在屏上）。
+    pub fn dialog_open(&self) -> bool {
+        self.core.dialog.borrow().is_some()
     }
 
     /// **仅测试**：就地原因**左槽**当前宽度（加宽策略的断言口径，见 **IL23** ③）。

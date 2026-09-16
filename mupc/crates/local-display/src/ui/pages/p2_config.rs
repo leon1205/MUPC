@@ -1893,6 +1893,25 @@ impl P2ConfigPage {
         self.core.is_dirty()
     }
 
+    /// **生产可见的「确认弹层是否打开」查询口**（B3-2c，闭合 TT-13）。
+    ///
+    /// `Shell::set_modal_open`（弹层打开 ⇒ 暂停空闲计时、不显示倒计时、不强制切页，
+    /// UI §4.3）在 B2c-3 起就是**已登记契约**，但当时页面侧**没有任何生产可见的查询口**
+    /// （[`P2ConfigPage::with_dialog`] 是 `#[cfg(test)]`）⇒ 接线层只能恒喂 `false`，
+    /// 契约名存实亡（`ui/shell.rs` 偏差 **SH2**）。
+    ///
+    /// **语义**：`true` = 此刻屏上有一个**未关闭**的确认弹层（`ConfirmDialog` 的**唯一**
+    /// 创建点 = `open_dialog`，关闭点 = `close_dialog`，两者都只动 `core.dialog` 这一格）
+    /// —— 与 `Shell` 侧要的"模态已打开"谓词**逐字一致**，不引入第二份真源。
+    ///
+    /// ⚠️ **关闭是延迟的**：用户在弹层里点「取消」后，关闭动作落在**下一拍**的
+    /// [`P2ConfigPage::tick`]（`ConfirmDialog::close` 不得在 LVGL 事件回调内调用）⇒
+    /// 本函数在"刚点完取消、尚未 tick"的那一瞬间仍为 `true`。这正是要的语义：
+    /// 弹层**此刻真的还在屏上**。
+    pub fn dialog_open(&self) -> bool {
+        self.core.dialog.borrow().is_some()
+    }
+
     /// 放弃修改：全部字段回退到注入值。
     pub fn discard_draft(&self) {
         self.core.discard();
