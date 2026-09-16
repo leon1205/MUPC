@@ -83,6 +83,28 @@ use super::LvglError;
 pub(crate) static PROBE_MOUNTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// **测试专用**：[`Obj::add_style`] 实际挂到 LVGL 对象上的**样式条数**累计值。
+///
+/// 生产构建不可见。与 [`PROBE_MOUNTS`] **同款形态、同一支持口径**（都是"本薄层的副作用
+/// 计数器"，只在 `cfg(test)` 下存在、只在测试里断言**区间增量**），但计的是**另一件事**：
+/// `PROBE_MOUNTS` 数"挂了几个对象句柄"，本计数器数"往对象上挂了几条样式"。
+///
+/// # 为什么必须另有一个计数器（对象计数器**抓不到**这一形态）
+///
+/// `lv_obj_add_style()` **只增不删**（见 [`Obj::add_style`] 的说明）：它把 `lv_style_t*`
+/// 长期存进对象，重复挂**同一个**样式也会让 LVGL 侧样式表逐条增长。于是"每拍挂一次样式
+/// （哪怕对象只建一次）"是**独立于对象数**的泄漏形态 —— 对象数纹丝不动，LVGL 内存照样被
+/// 吃光。本仓早有**先例认识**：`ui/pages/mod.rs::set_style_index` 的注释原文
+/// 「`Obj::add_style` 只增不删；1 Hz 每拍挂一条新样式必然把 LVGL 内存吃光」—— 那处靠
+/// "先摘后挂"的自律规避，**本计数器把该自律变成可断言的回归锁**。
+///
+/// 自增点**只有一个**：[`Obj::add_style`]（薄层里 `lv_obj_add_style` 的唯一调用点）。
+/// `lv_obj_remove_style`（"摘"）与 `lv_style_set_*`（改 `Style` 自身的属性表，不经对象）
+/// **都不计入**。
+#[cfg(test)]
+pub(crate) static PROBE_STYLE_ATTACHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// 会话级单例（`lv_screen_active` / `lv_layer_top`）的**探针种子**容器。
 ///
 /// # 为什么需要它（防无界增长）
@@ -488,10 +510,18 @@ impl Obj {
         if !self.is_alive() || !style.is_live() {
             return;
         }
+        // **⚠️ 只增不删**：LVGL 把 `lv_style_t*` 追加进对象的样式表，重复挂同一个样式也会
+        // 逐条增长 ⇒ "每拍挂一条"是**独立于对象数**的无界泄漏（先例见
+        // `ui/pages/mod.rs::set_style_index` 的注释）。
         // SAFETY: 本对象存活；`style.raw()` 指向已 `lv_style_init`、世代未变、且地址在
         // 样式存活期内恒定的 `lv_style_t`（`Box`）；紧随其后登记共享所有权 ⇒ 它不会在
         // 本对象（及其事件项）被删除前被 `Drop`。
         unsafe { sys::lv_obj_add_style(self.raw, style.raw(), selector.to_sys()) };
+        // 测试专用计数器在**这里**自增（薄层里 `lv_obj_add_style` 的唯一调用点）⇒
+        // `shell_chain` 的"连推 50 拍"可断言样式挂载数**零增长**（与对象数同款），
+        // 见 [`PROBE_STYLE_ATTACHES`]。
+        #[cfg(test)]
+        PROBE_STYLE_ATTACHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut styles = self.styles.borrow_mut();
         if !styles.iter().any(|s| Rc::ptr_eq(s, style)) {
             styles.push(style.clone());

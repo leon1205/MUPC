@@ -25,7 +25,11 @@
 //! > —— 因为外壳要"一次建 6 页、常驻不销毁"，而 `lv_tabview` 的页生命周期归它自己管。
 //! > **`UiState` 扩展 / 控制通道接线 / 触摸设备初始化仍属 B3**；[`shell`] 只留**注入位**
 //! > （见 `Shell` 的 `p1()` … `p6()` / `set_channel` / `set_touch_available` /
-//! > `set_idle_timeout` / `set_modal_open` / `overlay_layer`）。
+//! > `set_idle_timeout` / `set_modal_open`）。
+//! >
+//! > **B3-2b-1 规格符合性评审整改（建议 4）**：`Shell::overlay_layer()` **已删** —— 它与
+//! > `crate::lvgl::widgets::layer_top()` 等价（只多包一层 `Result`）且**无生产消费者**
+//! > （P2/P4 弹层与 Toast 直接调薄层挂点；EDGE-03 整屏层是 `Shell` 自己的 `Core.overlay`）。
 //!
 //! `controls` 与 `components` **分列**的口径（职责边界）：`components` 只反映既有数据、
 //! 不产生新数据（输出 = 视觉状态 + 无载通知）；`controls` 是**草稿值的生产者**（输出 =

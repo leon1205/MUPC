@@ -10,7 +10,7 @@
 //! | [`state`] | `DisplayState` + `UiSnapshot`：三态归一（正常 / `--`+角标 / 掉线）+ 新鲜度/通道态派生（纯逻辑）；v2 扩展 `ControlState`（控制通道态 / Toast 生命周期 / `confirm` / `hmi_channel` 本地覆盖） | §3.4/§5.3 + §5.4/§5.5 |
 //! | [`console`] | `ConsoleClient`：控制通道 `/v1/console/*` 的非阻塞状态机（`tick` 推进、单次 5 s、幂等重试复用同一 `request_id`） | §5.5 + §3.3/§3.4 |
 //! | [`app`] | **装配层**（B3-2a）：LVGL 会话 + 六页外壳 + 通道状态机 → 事件循环宿主（`timing::Host`）+ `--smoke` 自检 | §5.2/§9 |
-//! | [`canvas`] | `Canvas` trait + `OffscreenCanvas` + `fbdev::FbCanvas`（Linux `/dev/fb0` mmap，**升为 flush sink**） | §B1/§8.3 |
+//! | [`canvas`] | `Canvas` trait（宽 / 高 / `blit_pixels`）+ `fbdev::FbCanvas`（Linux `/dev/fb0` mmap，**升为 flush sink**）；v1.0 的 `OffscreenCanvas` / 绘制原语已在 **B3-2b-1** 删除 | §B1/§8.3 |
 //! | [`config`] | 渲染侧 CLI 参数（`--channel/--poll-ms/--backend/--touch-*/--smoke` 等）+ 校验 | §7.2 |
 //! | [`screen`] | flush_cb 的像素 sink（`MemorySink` / `FbCanvas`）+ `Blitter` 脏区搬运 | §1.1.1.1 |
 //! | [`timing`] | 事件循环骨架：`poll` 唯一阻塞点 + `lv_timer_handler` 驱动 + 停止/统计 | §5.2 |
@@ -60,7 +60,9 @@ pub mod touch;
 // `ui/**` 仅经 `crate::lvgl` 薄安全层访问 LVGL（设计 §5.1 / §11.4）。
 pub mod ui;
 
-pub use crate::canvas::{Canvas, Color, OffscreenCanvas, Rect, blend_over, hex, rgb};
+// B3-2b-1 收敛：`OffscreenCanvas` / `blend_over` / `hex` / `rgb` 已删（v1.0 自绘链路的残留，
+// 无生产消费者）；逐项落点映射见 `canvas.rs` 文件头「死代码清理（开发单元 B3-2b-1）」表。
+pub use crate::canvas::{Canvas, Color, Rect};
 pub use crate::channel::{
     poll_due, ChannelEndpoint, DisplayChannelClient, Progress, GET_TIMEOUT,
 };
@@ -73,7 +75,7 @@ pub use crate::state::{
 pub use crate::timing::{
     apply_zero_timeout_clamp, compute_timeout_ms, install_stop_signals, poll_wait_target,
     remaining_ms, stop_requested_flag, timeout_ms_to_c_int, wait_with_retry, Clock, Host,
-    IdleTimer, LoopConfig, LoopStats, LvglTicker, PollFailure, PollOutcome, PollWait, Poller,
+    LoopConfig, LoopStats, LvglTicker, PollFailure, PollOutcome, PollWait, Poller,
     RawPollResult, SleepPoller, Stop, StopAfter, SystemClock, Ticker, MAX_POLL_TIMEOUT_MS,
     POLL_FAIL_ABORT_AFTER, POLL_FAIL_FALLBACK_AFTER, STOP_FLAG, ZERO_CLAMP_LADDER_MS,
     ZERO_TIMEOUT_BURST_LIMIT,
@@ -91,9 +93,5 @@ pub const SCREEN_W: u32 = 1024;
 /// 默认分辨率高。
 pub const SCREEN_H: u32 = 768;
 
-/// 便捷：按默认参数构造离屏画布（**v1.0 遗留**：v2.0 的离屏出口是
-/// [`screen::MemorySink`]；`OffscreenCanvas` 仅由 `canvas.rs` 自身的用例与
-/// `FbCanvas` 的同构性使用 —— 见交付报告「未决/存疑」）。
-pub fn new_offscreen_canvas() -> OffscreenCanvas {
-    OffscreenCanvas::new(SCREEN_W, SCREEN_H)
-}
+// B3-2b-1 收敛：`new_offscreen_canvas()` 已删（**v1.0 遗留**，无生产消费者）。
+// 离屏像素面的 v2.0 出口 = [`screen::MemorySink::new`]（与真机共用同一条 flush 路径）。

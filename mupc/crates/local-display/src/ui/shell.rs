@@ -14,7 +14,10 @@
 //! │                           倒计时胶囊出现时占**时钟左侧**、通道胶囊与角标让位（**SH3**）
 //! ├── content (0,72,1024,624)  6 个页根容器（**任一时刻只显一个**）
 //! ├── banner (16,72,1008,120)  未保存修改提示条（h48，仅 P2 `dirty` 时可见）
-//! └── nav (0,696,1024,768)     6 个 `NavTab`（170×72）
+//! ├── nav (0,696,1024,768)     6 个 `NavTab`（170×72）
+//! └── overlay (0,0,1024,768)   **整屏降级层（EDGE-03，B3-2b-1）**：**位于最后 ⇒ 画在最上层**；
+//!                              常驻（`Shell::new` 里建好）**只切可见性**；**不带 `CLICKABLE`
+//!                              ⇒ 可穿透输入**（见 §EDGE-03 的实现裁定）
 //! ```
 //!
 //! ⚠️ 上述坐标**能成立的前提**：`root` 必须**清掉父主题内边距**（`theme::screen_bg()` 带
@@ -23,14 +26,56 @@
 //! `pad_all(0)`），**已修并上锁**（绝对坐标断言 + 双向破坏性探针），见偏差表 **SH14**。
 //!
 //! **弹层 / Toast 不在本文件**：P2 / P4 的 `ConfirmDialog` 与各页 `Toast` 都挂在
-//! `lv_layer_top()`（见 `pages/p2_config.rs::show_dialog`），本层只提供
-//! [`Shell::overlay_layer`] 作为 B3「整屏降级（EDGE-03）」的挂点。
+//! `lv_layer_top()`（见 `pages/p2_config.rs::show_dialog`）——它们在**整屏降级层之上**
+//! （`lv_layer_top()` 高于活动屏），故通道断时弹层与写路径仍然完整可用（§8.3 EDGE-20）。
+//!
+//! ## EDGE-03 整屏降级：四条实现裁定（**开发单元 B3-2b-1**；主控已裁定，逐条给理由）
+//!
+//! §8.3 原文：「通道断（EDGE-03）｜全页｜整屏遮罩压暗 20 % + 中央 64 px `#FFB020`
+//! 「与主进程数据通道断开」+ 下方 24 px 秒级恢复倒计时；保留最近有效帧并每区块打 `冻结`
+//! 角标；恢复 ≤1 s 回实时」。
+//!
+//! 1. **层建一次、只切可见性**：整屏层在 [`Shell::new`] 里建好（`overlay` 字段，初始隐藏），
+//!    运行期只 `set_hidden` / `set_text`。**绝不在渲染路径（`tick` / 回调）里建删 LVGL 对象**
+//!    —— 回调内建删对象 = UAF 级风险，且每趟建删会把 LVGL 的**定容池**吃掉（本仓已有 OOM
+//!    前科）。回归锁：`shell_chain` 在断态连推 50 拍后断言 **对象数**（`PROBE_MOUNTS`）
+//!    **与样式挂载数**（`PROBE_STYLE_ATTACHES`）**双零增长** —— 后者是**另一条独立形态**
+//!    （B3-2b-1 代码质量评审 重要 1）：`Obj::add_style` **只增不删**，"对象只建一次、却每拍
+//!    挂一条样式"照样让 LVGL 样式表无界增长，而**对象数纹丝不动** ⇒ 单看对象数抓不到。
+//! 2. **遮罩必须"可穿透输入"（不拦截触摸）**：§8.3 的 **EDGE-20**（同一条触发条件下）明写
+//!    「**P2/P4 写操作仍可用**，实时数值沿用冻结帧并打标」。若遮罩拦截触摸，EDGE-20 即不成立。
+//!    取"可穿透"即可**同时满足两行**（整屏压暗提示 + 写路径仍可用）⇒ 本层**显式**
+//!    `remove_flag(CLICKABLE)`（`lv_obj` 构造时**默认带** `CLICKABLE`，
+//!    `vendor/lvgl/src/core/lv_obj.c:584`；`pages::layout_box` 只摘 `SCROLLABLE`），
+//!    子标签经 `pages::label` 建（它已摘 `CLICKABLE` / `SCROLLABLE`）。
+//!    ⚠️ **与 `ConfirmDialog` 的遮罩语义相反**：那个遮罩**故意** `add_flag(CLICKABLE)`
+//!    （`components.rs::ConfirmDialog::new`，注释原文「全屏、可点以拦穿透」）—— 模态弹层要求
+//!    "点外面不落到页面上"；本层要求"点哪里都落到页面上"。两者在 `shell_chain` 里各有一条
+//!    旗标断言，**改错方向即红**。
+//! 3. **「秒级恢复倒计时」改实现为「秒级递增的已断开时长」**（偏差 **SH15**）：恢复时刻
+//!    **不可预知**（取决于 mupcd 何时起）⇒ 递减倒计时**没有分母**。故下方 24 px 行显示的是
+//!    「已断开 N 秒」，`N` **只在整秒变化时**才写一次文本（每拍刷 LVGL 文本是红线行为）。
+//! 4. **「每区块打 `冻结` 角标」不由本层实现**（偏差 **SH16**）：本层只做"遮罩 + 中央文案 +
+//!    时长行"，**不新增**任何按区块的角标。⚠️ **实际缺口是 P2–P6 五页**（早先写成"由既有
+//!    §8.2 角标承担"**不实** —— 只有 **P1** 有等价标记；**P3 的构件存在但生产零调用者**）。
+//!    逐页核查与两条 PM 裁定项见 **SH16 / SH18 / SH19**。
+//!
+//! **恢复 ≤1 s 回实时**：`ChannelStatus` 由 `Down` 变回非 `Down` 后，**下一拍**（`Shell::tick`）
+//! 即撤遮罩并把断开始刻清零（不需要额外计时）；`shell_chain` 有"恢复即撤"断言。
+//!
+//! **触发面（有意收窄，如实标注）**：整屏层**只对 `ChannelStatus::Down` 显形**。
+//! `ChannelStatus::Init`（尚未首次成功 GET）**不**走整屏层 —— §8.3 的异常态字典里**没有**
+//! Init 的整屏行（`正在连接数据通道…` 只出现在 §3.6 **用字表**里），它的既有落点是
+//! **页眉胶囊**（[`HeaderChannel::Connecting`]）+ P1 页内首连条（`p1_status::TEXT_CHANNEL_CONNECTING`）。
+//! 若 PM 裁定 Init 也要整屏覆盖，改 [`Core::apply_overlay`] 的判据一处即可（并把文案参数化）。
 //!
 //! ## 本单元的边界
 //!
 //! **做**：外壳结构 / 路由 / 超时回归 / 未保存提示条 / 页眉右端（时钟 + 通道胶囊 + 触摸角标）/
-//! 给 B3 的数据注入位。**不做**：`console.rs` / 通道客户端 / 真实 HTTP / 帧解析 / `request_id`
-//! 生成 / 触摸设备初始化 / **整屏降级（EDGE-03）本身**（只留挂点）。
+//! 给 B3 的数据注入位。**B3-2b-1 追加**：**整屏降级（EDGE-03）本身**（上面四条裁定）+
+//! 「`--idle-timeout-secs 0` = 禁用空闲回归」这一条 CLI 语义（原 `timing::IdleTimer` 承担，
+//! 该类型本单元删除 ⇒ 语义唯一落点搬到 [`Shell::tick`]，见 **SH17**）。
+//! **不做**：`console.rs` / 通道客户端 / 真实 HTTP / 帧解析 / `request_id` 生成 / 触摸设备初始化。
 //!
 //! ## 偏差登记（**编号 SH\*** —— 与 `D*` / `CD*` / `PD*` / `IL*` / `AU*` / `FR*` / `LG*` 不冲突）
 //!
@@ -43,7 +88,12 @@
 //! | SH5 | 「**任何**触摸事件重置计时」（§4.3）在本层**只覆盖 3 个控件**：返回键 / 6 个页签 / 「放弃修改」键（**按下即重置**）。**不会**重置的按压：页内任意控件（卡片 / 按钮 / 列表行 / chip …）、页内空白处、页眉空白区、导航条页签之外的空隙。**修整说明（评审 ④）**：原文自称覆盖"外壳根（**全屏**）"，**不成立** —— 已删；现有用例里 `sh.obj().send_event(PRESSED)` 是**合成投递**（不经 `lv_indev`），它锁的只是"根的挂钩**在**且能置位 `pending_activity`"，**不等于**产品里页内按压会重置 | 三件事（**② 探针已逐条实测**，见 §验证）：① `crate::lvgl::obj::ObjFlag` **无** `LV_OBJ_FLAG_EVENT_BUBBLE`（只有 HIDDEN / CLICKABLE / CHECKABLE / SCROLLABLE），而 LVGL **默认不上冒**：`lv_obj_event.c:434::event_is_bubbled` 要求**当前目标自带该标志**、`event_send_core` **逐级**检查 ⇒ 事件要到达外壳根，**链上每一层**都得带标志；② `lv_obj` 构造时**默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），而页眉（0,0,1024,72）/ 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满** 1024×768，`lv_indev.c:618::lv_indev_search_obj` 取"命中的**最深**可点对象" ⇒ **真实触摸永远落在某个后代对象上，外壳根收不到 `PRESSED`**；③ `crate::lvgl::indev::Indev` **未**暴露 `lv_indev_add_event_cb`（该符号**在** `lvgl-sys/allowlist.txt` 里，只是薄层没封装）⇒ `ui/**` 拿不到"任意按压"的全局钩子 | **薄层（`src/lvgl/**`）**，两种**具名**能力需求（二选一）：① `ObjFlag` 补 `EVENT_BUBBLE` —— **注意**：只给页根置位**不够**，须由外壳在装配后**递归**遍历页眉 / 内容区 / 6 页 / 导航条**整棵子树**置位（链上缺一层即断）；② 给 `Indev` 加 `on(EventCode, F)`（`lv_indev_add_event_cb` 直投；`lv_indev.c:997` 的 `send_event(LV_EVENT_PRESSED, indev_act)` 是**每次按压**都发）—— **推荐**：一处挂钩覆盖全屏，且不必触碰 `pages/**`。**两者任一补齐后**，§4.3 的"任何触摸事件重置"才**完全**成立；届时应把 `shell_chain` 的"页内按压**不**重置"那条断言（**现状锁定**，见下）改写成"页内按压**也**重置"，**不得**只是删掉 |
 //! | SH6 | 倒计时胶囊的**出现判据取 ≤10 s**（§4.3 表「超时前 10 s」），故文案从 `10 秒后返回主状态页` 起数；§4.3 表内的示例文案写的是 `12 秒后返回主状态页` —— **规格自身矛盾**（评审 ⑤ 已裁定：取 10 s 正确，实现不改） | **§4.3 自相矛盾**（判据 10 s vs 示例 12 s）。**取判据 10 s**，为什么：① 判据是**行为规格**（"超时前 N 秒出现"，可被 PRD F15 与计时器逐拍核验），而 `12 秒后返回主状态页` 只是表格里的一句**示例文案**（同格的判据已写死 10 s，示例与之冲突 ⇒ 示例才是笔误的一方）；② 取 12 s 会出现"判据说 10 s 显、文案从 12 s 起数"的**自相矛盾**，或需要把判据一并改 12 s（改动行为规格，超出本层权限）。文案按**实际剩余秒数**渲染（`countdown_text`） | 无（**有意**取行为规格）；若 PM 裁定 12 s，改 [`COUNTDOWN_WINDOW_SECS`] 一处即可 |
 //! | SH7 | **页眉通道胶囊的位置**：EDGE-20 的"页眉**左侧** `与主进程数据通道断开`（红）+ 右侧正常时钟"落成「**页眉右端组**内的红通道胶囊 + 右端时钟**同时可见**」（`HEADER_CHIP_X`：胶囊紧跟时钟、角标在胶囊左侧，三件等缝相连、整组贴右安全边）。**位置取 §4.1（右端），§8.3 的「左侧」不采**；**§8.3 的语义（红断开 + 时钟正常"两状态同显"）完整满足** —— 红胶囊与时钟同屏可见 | §4.1 与 §8.3 对**同一元素**给出不同横坐标（§4.1「右端：时钟 `+` 通道状态胶囊」/ §8.3「左侧」）。取 §4.1 的三条理由：① §4.1 是**版式权威**（页眉各件的矩形与"右端"归属都在它的表里），§8.3 是**异常态语义字典**（管"该显哪种状态"，不管坐标）；② §4.3 把倒计时胶囊钉在"页眉右端（**时钟左侧**）" ⇒ 时钟必须留在右端；若把胶囊改挂左端，同一元素会**按状态跳位**，且左端已被返回键（x 12–76）与标题（P1 标题 x16 起、宽 [`HEADER_TITLE_W_P1`]）占满，移过去还要压标题；③ 采纳 (a)「移到右端」而非 (b)「断开态移左端」正是为了**位置恒定的状态件**（F14 一致性）。**EDGE-20 的完整语义**（"控制通道**可达** vs 读通道**断**"的二元区分）需要**两个**独立通道信号，本层只有一个 `ChannelStatus` 输入 ⇒ 归 **B3** | **B3**：`set_channel` 之外再注入"控制通道态"；若 PM 裁定必须落在"左侧"，需同时裁定标题区收缩 + 胶囊换位（属**重新设计**，本层不自行改）。回归锁见 `shell.rs::tests::header_slots_are_disjoint_and_inside_canvas` 的"右端组右锚定 + 左缘在右半区"两条 |
-//! | SH8 | **整屏降级（EDGE-03：压暗 20 % + 中央文案 + 恢复倒计时 + 冻结角标）未实现**，只留挂点 [`Shell::overlay_layer`] | 属 **B3**（需要通道客户端与恢复倒计时状态机）—— 任务书明确"不做" | **B3** |
+//! | SH8 | **【✅ 已实现，残余 = SH15 / SH16 / SH17】整屏降级（EDGE-03）：压暗 20 % + 中央 64 px 文案 + 秒级时长**已落成（"每区块 `冻结` 角标"的**实际缺口**见 **SH16**；"秒级倒计时"改"已断开时长"见 **SH15**；`--idle-timeout-secs 0` 语义搬迁见 **SH17**） | 曾属 **B3**（需通道客户端 + 恢复状态机）—— B3-2b-1 已交付 | **✅ 已实现（2026-09-15，B3-2b-1）**：整屏层落成 `Core::overlay`（`root` 的末子 ⇒ 最上层）+ [`Core::apply_overlay`]（每拍唯一落点），四条实现裁定见模块头「EDGE-03 整屏降级」。**B3-2b-1 规格符合性评审整改（建议 4）**：原"只留挂点 `Shell::overlay_layer()`"里的**挂点已删**（它与 `widgets::layer_top()` 等价、只多包一层 `Result`，且**无生产消费者** —— P2/P4 弹层与 Toast 直接调 `widgets::layer_top()`）⇒ 本行不再是"挂点"条目，而是"EDGE-03 已实现"的登记 |
+//! | SH15 | **EDGE-03 原文的「秒级恢复倒计时」改实现为「秒级递增的已断开时长」**（下方 24 px 行 = `N 秒`） | 原文写"倒计时"，但**恢复时刻不可预知**（取决于 mupcd 何时起）⇒ 递减倒计时**没有分母**（既无"总时长"，也无"预计恢复时刻"这类输入）。本层只有 `ChannelStatus` 一个通道态输入，**没有**任何可推算恢复时刻的真源 ⇒ 递减会编造一个假的分母 | **PM 裁定项**：若确需递减，须先给出「恢复时刻预测源」（如后端提供重连退避进度 / 预计恢复时刻）；当前不存在 ⇒ 本层按"已断开时长"落地。文案字符全部取自 §3.6 用字表（`秒` + 数字，既有用法：`12 秒后返回主状态页` / `保持时间不足，还需 12 秒`），**未自造任何新字**（**非**"新增上屏串"：见 [`disconnect_elapsed_text`] 的说明） |
+//! | SH16 | **EDGE-03 原文的「保留最近有效帧并每区块打 `冻结` 角标」不由本层实现**（本层只做遮罩 + 中央文案 + 时长行）—— **实际缺口 = P2 / P4 / P5 / P6 四页 + P3**（**订正**：早先写成"由既有 §8.2 角标承担"，把 P3 的**构件存在**当成了**标记生效**，**不实**；见下） | 逐页核查（**2026-09-15 规格评审复核后订正**）：§3.6 用字表里确有 `冻结`，但 `ui/pages/**` 六个文件里**没有任何一页**把它上屏（`grep 冻结 src/ui/pages` 结果 = 注释）。各页现有的等价可见标记是**别的名字**：① **P1** —— 页内通道条 [`p1_status::P1StatusPage::channel_text`]（通道断 ⇒ `与主进程数据通道断开`）+ 「`数据过期`」角标（`stale_visible()`，**仅在通道正常但帧旧时**打）+ 逐相/逐字段状态点（`Palette::BORDER_CTRL` 空心 = 停更，见 `p1_status::phase_dot_color` / `state::live_dot_for`）；② **P3** —— 页内 `实时日志已断开 · 正在重连...` 条（**构件存在，但生产零调用者**：`P3LogsPage::set_channel(bool)`（`p3_logs.rs:2118`）全仓只有 `ui/tests.rs` 三条用例调它 ⇒ 读通道断时 P3 **不会**自动显示该条 ⇒ **不计入**"有等价标记"）；③ **P2 / P4 / P5 / P6 在"保留最近有效帧"时没有任何可见标记**（数值照旧显示，与实时不可区分）—— 实测：`grep -n "input.channel" src/ui/pages/*.rs` **只命中 P1**（`p4_interlock.rs:1945` 的注释亦自陈"本页不消费 `freshness` / `channel`"）⇒ 通道级降级对这四页**结构上不可见**。**★ 连带发现（如实登记，非本单元引入）**：P3 的 `connected` 缺省 `false`（`p3_logs.rs:1571`，**B2c-2** 引入）⇒ **生产上 P3 恒显"已断开"**（与实际不符的**静态**文案，方向上 fail-closed）。属**接线缺口**：应由 **B3-2b-2** 把真实读通道态喂进 `set_channel`；**现在缺什么** = `app`/`Shell` 侧对 `p3().set_channel(..)` 的调用（`Shell::set_channel` 只驱动页眉胶囊，**不转发到页**） | **PM 裁定项（本层不擅自改 6 页版式）**：候选 = ① 由各页 §8.2 状态点承担（需先给 P2/P4/P5/P6 补"帧冻结"驱动源 —— 它们**不消费** `freshness`，属**页面层**改动）；② 在整屏层按区块画 `冻结` 角标（需知道"每区块"的矩形，本层拿不到，且会与页面版式耦合）。本单元**只登记、不改六页**（任务书明令）。P3 接线缺口同归 **B3-2b-2** |
+//! | SH18 | **弹层遮蔽**：EDGE-20 要求"控制通道可达 ⇒ P2/P4 写操作仍可用"，实现上 `ConfirmDialog` 挂 `lv_layer_top()`、**压在整屏遮罩之上**（模块头裁定 ②）⇒ 写操作走到"确认"阶段时，**屏上没有任何"数值已冻结"提示**（遮罩被弹层盖住）—— 而**这恰是操作者据冻结数值做决定的那一刻**：最需要"这是冻结帧"警示的时机，反而完全无提示 | 层级**有意**如此（`lv_layer_top()` 高于活动屏 ⇒ 弹层永远在整屏层之上，这正是 EDGE-20 写路径可用的**前提**）。问题**不在层级**，而在"提示**只**在整屏层表达" | **PM 裁定项（本单元不实施：跨页改动 + 需 PM 裁定）**。**最小改法建议**：让 P2 / P4 在 `channel == Down` 时对**受影响数值区**复用既有 §8.2 状态点 / `数据过期` 口径（`state::live_dot_for`）—— 即"该页本来就有的构件换一个输入源"，而**不是**把"每区块角标"塞进整屏层 |
+//! | SH19 | **EDGE-20 的"打标"要求未落实**：原文要求"实时数值沿用冻结帧**并打标**"。本层实现的是**整屏遮罩** —— 它是**全局**表达（"整屏都不可信"），**替代不了** §8.2 的**逐字段**可信度标记：屏上哪个数值刚收到、哪个是三分钟前的，整屏遮罩**区分不了** | §8.3 的"并打标"与 §8.2 的"逐字段状态点"是**同一套**语义 —— 可信度是**逐字段**属性，遮罩是**全局**属性，两者不同轴 | 同 **SH18**（**PM 裁定项**）：逐字段标记的驱动源在各页（`freshness`）；最小改法 = P2–P6 复用 `state::live_dot_for`，而**不是**在整屏层造角标。本单元**只登记** |
+//! | SH17 | **`--idle-timeout-secs 0` 的「0 = 禁用空闲回归」语义**经本单元搬到 [`Shell::tick`]（原落点 `timing::IdleTimer` / `CliConfig::idle_timer` **已按 B3-2b-1 任务书删除**）| 该语义**原先只有 `IdleTimer` 实现**（`is_disabled()`）；删除后若不搬迁，`--idle-timeout-secs 0` 会退化成"每拍强制回 P1"（`remaining_secs` 恒 0 ⇒ `should_return_home(0)` 恒真）—— 与 `--help` 的「0=禁用」和 `config.rs` 用例的直接矛盾，且**屏上表现为"用户根本停不在 P2–P6"**。另一条边界（`IdleTimer::new` 的秒→毫秒**饱和**）经核实**不可达**：`--idle-timeout-secs` 由 `parse_u64_range(.., 0, MAX_IDLE_TIMEOUT_SECS = 3600)` 限定 ⇒ `Duration::from_secs(3600)` 与 `checked_add` 永不溢出 | 无（已实现 + 回归锁：`shell_chain` 的「`--idle-timeout-secs 0` ⇒ 不强制切页 / 不显示倒计时」）。**PM 复核项**：`config.rs` 的 CLI 文案与用例仍以 0=禁用 为准，本层与之对齐 |
 //! | SH9 | 页内通道条（P1 的「与主进程数据通道断开」行）与页眉通道胶囊**重复表达**同一事实 | `pages/mod.rs` 的 **D1** 已登记"外壳装配时移除页内通道条"，但本单元**禁改 `ui/pages/**`**（硬约束 5）⇒ 重复仍在 | **B2c 收口 / 后续批**（需 PM 授权改 `p1_status.rs`） |
 //! | SH10 | 导航 6 项各取 `Dimens::NAV_ITEM_W` = **170**，共 1020 px < 1024（右端余 **4 px** 无页签） | `Dimens::NAV_ITEM_W`（UI §5.1 #1 取整）是 theme 的**单一真源**，本层不得写 170.7；UI §4.2 写"每项宽 1024/6 ≈ 170.7" | 无（**有意**用 theme 常量；4 px 余量不构成可用触摸区） |
 //! | SH11 | **导航页签的图标 / 文字 y 与 §4.2 不符**：§4.2 给「图标 28 px（y 706–734）」⇒ **项内 y 10**、「文字 26 px（y 736–766）」⇒ **项内 y 40**；本层取 [`NAV_ICON_Y`] = **8**、[`NAV_TEXT_Y`] = **44**（图标高 2 px、文字低 4 px） | **不是居中推导**（如实核实）：块高 = 28+缝+26 = 62（含 8 px 缝），真居中应得 5/41；§4.2 的 10/40 自身也不居中（块 10–70、上 10 下 2）。本层取"**半个呼吸缝**"档：图标上沿 = `Dimens::GAP_MIN/2` = 8，图标下沿与文字上沿之间同样 8 ⇒ **等间距**取向，且**全部由 theme 常量派生**（`Dimens::GAP_MIN` / `Dimens::ICON_SM`），零裸值。§4.2 的 10/40 在 theme 里**没有**对应命名常量，而 `ui/theme.rs` 本批**禁改** ⇒ 本层不能写 10/40 | **theme.rs 收口批**：上收 `Dimens::NAV_ICON_Y` / `Dimens::NAV_TEXT_Y`（或 §4.2 逐像素值），本层改为一行引用 **✅ PM 已裁定（2026-09-15）**：UI §4.2 的 y 值已由「图标 706–734 / 文字 736–766」（与**自述的** 28 / 26 px 不符，且 30 px 文字槽未按 26 px 居中）订正为**相对口径**：图标 **y 8**（绝对 704–731）、文字 **y 44**（绝对 740–765），与实现一致，见 UI 附录 **A.7** |
@@ -75,7 +125,9 @@ use crate::ui::pages::{
     decor, label, layout_box, p1_status, p2_config, p3_logs, p4_interlock, p5_audit, p6_system,
     set_style_index, set_visible, CbSlot,
 };
-use crate::ui::theme::{self, ButtonKind, ChipSkin, Dimens, Palette, Radius, Stroke, TextSlot};
+use crate::ui::theme::{
+    self, ButtonKind, ChipSkin, Dimens, Opacity, Palette, Radius, Stroke, TextSlot,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 外壳专属栅格常量（**逐条由 theme 常量推导**；见 UI §4.1 / §4.2 / §4.3）
@@ -166,6 +218,91 @@ fn discard_w() -> i32 {
 
 /// 倒计时窗口：进入"超时前 N 秒"即显示胶囊（UI §4.3 表「超时前 10 s」）。
 pub const COUNTDOWN_WINDOW_SECS: u64 = 10;
+
+// ── 整屏降级层（EDGE-03，B3-2b-1）──────────────────────────────────────────
+//
+// 版式：全屏遮罩（压暗 20 %）+ **中央** 64 px 大字 + **其下** 24 px 时长行。
+// 「中央」的判定与页眉各槽位同口径：整块（大字 + 跨区呼吸缝 + 时长行）**垂直居中**，
+// 大字**水平居中**（时长行随文本宽度逐次居中，见 `overlay_elapsed_x`）。
+
+/// 中央大字文案（UI §3.6「全局降级」行 = `与主进程数据通道断开`，**与页眉红胶囊同一份
+/// 字面量** —— 唯一真源 `p1_status::TEXT_CHANNEL_DOWN`）。
+const OVERLAY_TEXT: &str = p1_status::TEXT_CHANNEL_DOWN;
+/// 时长行文案的模板（`N 秒`；数字与 `秒` 均取自 §3.6 用字表，**未自造新字**）。
+const OVERLAY_ELAPSED_SUFFIX: &str = " 秒";
+
+// ── 两个标签的「槽 + 色」**单一绑定**（B3-2b-1 规格评审 **重要 1+2**）────────────
+//
+// **背景（评审实测的三处静默退化之一）**：原实现里"建标签"写 `TextSlot::PhasePower`、
+// "设尺寸"写 `overlay_title_w()`（它**自己内部**又写了一遍 `TextSlot::PhasePower`），
+// 两处**各写各的常量** ⇒ 把其中一处换成别的槽时另一处不受影响，于是"用错常量"只表现为
+// **字号与对象尺寸不一致**（屏上肉眼可见的字变小 / 色变红），而**全套用例全绿**
+// （薄层无 `text_font` / `text_color` / `bg_opa` 读回，见 `src/lvgl/mod.rs` 的
+// 「薄层能力缺口登记」）。
+//
+// **收口口径**：把两处**收敛成同一个表达式** —— 标签构造与 `set_size` 都读这里的常量，
+// 而 `OVERLAY_BLOCK_H` / `OVERLAY_ELAPSED_Y` / `overlay_*_w()` 也**全部**由它们派生
+// ⇒ "换槽"只可能改这一个地方，改完 `shell_chain` 的对象级尺寸断言**必红**（实测见交付报告）。
+//
+// **改什么会让本条变红**：把 [`OVERLAY_TITLE_SLOT`] 换成 `TextSlot::Body`（或
+// [`OVERLAY_ELAPSED_SLOT`] 换成 `TextSlot::PhasePower`）⇒ 对象尺寸随槽同变 ⇒
+// `ui/tests.rs::shell_chain` 的"大字对象高 == `PhasePower.px()`"当场红。
+/// 中央大字的**字号槽**（UI §8.3 EDGE-03 原文「中央 **64 px**」= `TextSlot::PhasePower`）。
+const OVERLAY_TITLE_SLOT: TextSlot = TextSlot::PhasePower;
+/// 中央大字的**字色**（UI §8.3 EDGE-03 原文 `#FFB020` = `Palette::STALE`）。
+///
+/// ⚠️ **本值在对象层读不回来**（薄层无 `text_color` getter）⇒ 换色**抓不到**，
+/// 属已登记的残余；换成 [`OVERLAY_TITLE_SLOT`] 那种"尺寸可断言"的档才有网。
+const OVERLAY_TITLE_COLOR: Color = Palette::STALE;
+/// 时长行的**字号槽**（UI §8.3 EDGE-03 原文「下方 **24 px**」= `TextSlot::Body`）。
+const OVERLAY_ELAPSED_SLOT: TextSlot = TextSlot::Body;
+/// 时长行的**字色**（同 [`OVERLAY_TITLE_COLOR`] 的残余说明：色在对象层不可判）。
+const OVERLAY_ELAPSED_COLOR: Color = Palette::STANDBY;
+
+/// 中央大字宽（逐字宽 = 字号；薄层无文本度量接口，与 `discard_w()` / `tab_text_w()` 同口径）。
+fn overlay_title_w() -> i32 {
+    OVERLAY_TEXT.chars().count() as i32 * OVERLAY_TITLE_SLOT.px() as i32
+}
+
+/// 中央大字 x（水平居中）。
+fn overlay_title_x() -> i32 {
+    theme::center_offset(Dimens::SCREEN_W, overlay_title_w())
+}
+
+/// 时长行宽（同上口径；随位数增长 ⇒ 由 [`Core::apply_overlay`] 在整秒变化时同步刷新）。
+fn overlay_elapsed_w(text: &str) -> i32 {
+    text.chars().count() as i32 * OVERLAY_ELAPSED_SLOT.px() as i32
+}
+
+/// 时长行 x（水平居中）。
+fn overlay_elapsed_x(text: &str) -> i32 {
+    theme::center_offset(Dimens::SCREEN_W, overlay_elapsed_w(text))
+}
+
+/// 整块高（64 + 跨区呼吸缝 24 + 24）—— **两档字号都取单一绑定的槽**。
+const OVERLAY_BLOCK_H: i32 =
+    OVERLAY_TITLE_SLOT.px() as i32 + Dimens::GAP_SECTION + OVERLAY_ELAPSED_SLOT.px() as i32;
+/// 中央大字 y（整块在 768 高画布上垂直居中）。
+const OVERLAY_TITLE_Y: i32 = theme::center_offset(Dimens::SCREEN_H, OVERLAY_BLOCK_H);
+/// 时长行 y（大字下沿 + 一个跨区呼吸缝）。
+const OVERLAY_ELAPSED_Y: i32 =
+    OVERLAY_TITLE_Y + OVERLAY_TITLE_SLOT.px() as i32 + Dimens::GAP_SECTION;
+
+/// 整屏降级遮罩的不透明度档位（**单一真源**）—— UI §8.3 EDGE-03「整屏遮罩压暗 **20 %**」。
+///
+/// **为什么要有这个常量**（B3-2b-1 规格评审 **重要 1+2**）：薄层**没有样式读回**
+/// （无 `lv_obj_get_style_bg_opa` ⇒ 遮罩对象上读不回实际 `bg_opa`，见 `src/lvgl/mod.rs`
+/// 的「薄层能力缺口登记」）⇒ 把 [`overlay_mask`] 里写的档位偷换成
+/// [`Opacity::MASK_PERCENT`]（62 %，模态遮罩那一档）时，**全套用例全绿**（评审实测）。
+/// 把档位提成常量后，"用了哪一档"至少是**可判定的单点**：`shell_chain` 断言
+/// 本常量 == [`Opacity::DEGRADE_PERCENT`] 且 != [`Opacity::MASK_PERCENT`]。
+///
+/// **残余（如实登记）**：若有人**绕过本常量**、直接在 [`overlay_mask`] 的样式上写死别的
+/// 档位，用例仍抓不到 —— 根因是薄层缺 `bg_opa` 读回（补读回属「薄层收口批」）。
+///
+/// **改什么会让本条变红**：把 `Opacity::DEGRADE_PERCENT` 换成 `Opacity::MASK_PERCENT`
+/// ⇒ `shell_chain` 的两条档位断言（== 20 / != 62）同时红。
+pub const OVERLAY_MASK_OPACITY: u8 = Opacity::DEGRADE_PERCENT;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 2. 上屏固定文案（UI §3.6「页眉 / 底部导航 / 超时」行的**唯一真源**）
@@ -318,6 +455,24 @@ pub const fn shows_countdown(secs: u64) -> bool {
 /// 是否应切回主状态页（UI §4.3：「到达 0 s 自动切 P1」）。
 pub const fn should_return_home(secs: u64) -> bool {
     secs == 0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4′ 纯逻辑：整屏降级（EDGE-03）的时长文案（**不触碰 LVGL** ⇒ 可独立 `#[test]`）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 已断开时长文案（`N 秒`）—— **偏差 SH15**：§8.3 原文写"秒级恢复倒计时"，本实现为
+/// "秒级递增的已断开时长"（恢复时刻不可预知 ⇒ 递减没有分母）。
+///
+/// **为什么不算"新增上屏串"**：本函数只是把**既有**的 `秒`（§3.6 用字表，用法见
+/// `countdown_text` 与 P4 的「保持时间不足，还需 12 秒」）与**数字**拼起来，
+/// **没有引入任何新字**（码表网 `ui_texts_covered_by_font_cmap` 逐字核对；运行时的
+/// 数字字形由 `runtime_formatters_emit_only_cmap_glyphs` 走查）。
+///
+/// **改什么会让本条变红**：把模板改成 `{secs} 秒后恢复`（`后` / `恢` / `复` 虽在 cmap 内，
+/// 但语义变成"倒计时中"= **谎报**）、或改成半角分隔（ASCII `-` / `,` 在生成字体里没字形）。
+pub fn disconnect_elapsed_text(secs: u64) -> String {
+    format!("{secs}{OVERLAY_ELAPSED_SUFFIX}")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -542,6 +697,13 @@ struct Core {
     nav: Obj,
     /// 6 个页签。
     tabs: [NavTab; 6],
+    // ── 整屏降级层（EDGE-03，B3-2b-1）：**root 的末子 ⇒ 画在最上层**；常驻、只切可见性 ──
+    /// 整屏遮罩（1024×768，压暗 20 %，**不带 `CLICKABLE` ⇒ 可穿透输入**）。
+    overlay: Obj,
+    /// 中央 64 px 大字（`与主进程数据通道断开`，`#FFB020`）。
+    overlay_title: Rc<Label>,
+    /// 下方 24 px 时长行（`N 秒`）。
+    overlay_elapsed: Rc<Label>,
     // ── 6 页（外壳**持**页；页不持外壳）──
     p1: p1_status::P1StatusPage,
     p2: p2_config::P2ConfigPage,
@@ -569,6 +731,17 @@ struct Core {
     capsule_on: Cell<bool>,
     /// 未保存提示条当前是否可见（同上）。
     banner_on: Cell<bool>,
+    /// 整屏降级层当前是否可见（**应用标记**，同 [`Core::banner_on`] 口径）。
+    overlay_on: Cell<bool>,
+    /// 通道断的**起始时刻**（**注入时钟**；`None` = 当前未断）—— EDGE-03 时长行的分母起点。
+    /// 用 `RefCell`（不是 `Cell`）：`Instant` 非 `Copy` 且此处"读改"要在一个借用里完成。
+    overlay_since: RefCell<Option<Instant>>,
+    /// 已上屏的**整秒数**（`None` = 尚未上屏）—— 判据「**只在整秒变化时**改文本」的读回值。
+    overlay_secs: Cell<Option<u64>>,
+    /// 时长行文本的**实际写入次数**（判据「每拍刷 LVGL 文本」= 红线行为：`ui/shell.rs`
+    /// 的不变量 2 只允许 `set_text` 等轻量属性写，但**每拍写同一条文本**是纯浪费 +
+    /// 让"整秒才更新"这一要求无从验证 ⇒ 用计数器把它变成可断言的事实）。
+    overlay_writes: Cell<u64>,
     /// 切页通知槽（**契约**：回调内不得再调 [`Shell::show`]；见 [`Shell::set_on_page_change`]）。
     on_page_change: CbSlot<NavPage>,
 }
@@ -701,6 +874,39 @@ impl Shell {
             .try_into()
             .map_err(|_| LvglError::InvalidArgument("导航六项"))?;
 
+        // ── 整屏降级层（EDGE-03）──
+        // **建一次、只切可见性**（裁定 ①）：在装配期建好、`HIDDEN`；运行期只 `set_hidden` /
+        // `set_text`。它是 `root` 的**末子** ⇒ LVGL 按创建序绘制 ⇒ 画在页眉 / 内容区 / 提示条 /
+        // 导航**之上**（弹层与 Toast 另挂 `lv_layer_top()`，仍在它之上 ⇒ EDGE-20 的写路径可用）。
+        // **可穿透输入**（裁定 ②）：`lv_obj` 构造时默认带 `CLICKABLE`
+        // （`vendor/lvgl/src/core/lv_obj.c:584`），而 `pages::layout_box` 只摘 `SCROLLABLE`
+        // ⇒ 此处必须**显式**摘掉，否则整屏遮罩会吃掉所有触摸、EDGE-20 不成立。
+        // **对照**：`components.rs::ConfirmDialog::new` 的遮罩反过来 `add_flag(CLICKABLE)`
+        // （模态弹层要求"点外面不落到页面上"）—— 两者语义相反，`shell_chain` 各有一条断言。
+        let overlay = layout_box(&root, Dimens::SCREEN_W, Dimens::SCREEN_H)?;
+        overlay.set_pos(0, 0);
+        overlay.add_style(&overlay_mask(), StyleSelector::main());
+        overlay.remove_flag(ObjFlag::CLICKABLE);
+        // **槽 + 色 = 单一绑定**（重要 1+2）：构造与 `set_size` **同源**，见
+        // [`OVERLAY_TITLE_SLOT`] 上方说明 —— 两处各写各的常量时"换错槽"抓不到。
+        let overlay_title = Rc::new(label(&overlay, OVERLAY_TITLE_SLOT, OVERLAY_TITLE_COLOR)?);
+        overlay_title.set_text(OVERLAY_TEXT);
+        overlay_title.set_size(overlay_title_w(), OVERLAY_TITLE_SLOT.px() as i32);
+        overlay_title.set_pos(overlay_title_x(), OVERLAY_TITLE_Y);
+        overlay_title.set_long_mode(LongMode::CLIP);
+        let overlay_elapsed = Rc::new(label(&overlay, OVERLAY_ELAPSED_SLOT, OVERLAY_ELAPSED_COLOR)?);
+        overlay_elapsed.set_text(&disconnect_elapsed_text(0));
+        overlay_elapsed.set_size(
+            overlay_elapsed_w(&disconnect_elapsed_text(0)),
+            OVERLAY_ELAPSED_SLOT.px() as i32,
+        );
+        overlay_elapsed.set_pos(
+            overlay_elapsed_x(&disconnect_elapsed_text(0)),
+            OVERLAY_ELAPSED_Y,
+        );
+        overlay_elapsed.set_long_mode(LongMode::CLIP);
+        set_visible(&overlay, false);
+
         let core = Rc::new(Core {
             root,
             header,
@@ -719,6 +925,9 @@ impl Shell {
             discard,
             nav,
             tabs,
+            overlay,
+            overlay_title,
+            overlay_elapsed,
             p1,
             p2,
             p3,
@@ -734,6 +943,10 @@ impl Shell {
             channel: Cell::new(HeaderChannel::Connected),
             capsule_on: Cell::new(false),
             banner_on: Cell::new(false),
+            overlay_on: Cell::new(false),
+            overlay_since: RefCell::new(None),
+            overlay_secs: Cell::new(None),
+            overlay_writes: Cell::new(0),
             on_page_change: CbSlot::new(),
         });
         let shell = Shell { core };
@@ -864,6 +1077,9 @@ impl Shell {
     }
 
     /// 数据注入位 ⑤：空闲超时时长（`--idle-timeout-secs`；默认 60 s）。
+    ///
+    /// `0` ⇒ **禁用**空闲回归（CLI `--help` 的「0=禁用」；语义唯一落点在 [`Shell::tick`]，
+    /// 见偏差 **SH17**）。
     pub fn set_idle_timeout(&self, secs: u64) {
         self.core.timeout.set(Duration::from_secs(secs));
     }
@@ -875,14 +1091,6 @@ impl Shell {
     /// （从**满时长**重新起算）。
     pub fn set_modal_open(&self, open: bool) {
         self.core.modal_open.set(open);
-    }
-
-    /// 数据注入位 ⑦：整屏降级（**EDGE-03**）的挂点 —— 顶层浮层。
-    ///
-    /// 返回 `lv_layer_top()` 的**非拥有**句柄；B3 在此挂"压暗 20 % + 中央 `与主进程数据通道断开`
-    /// + 秒级恢复倒计时 + 冻结角标"的整屏层。本单元**不实现**该层（见偏差 **SH8**）。
-    pub fn overlay_layer(&self) -> Result<Obj, LvglError> {
-        crate::lvgl::widgets::layer_top()
     }
 
     /// 手工记一次"用户活动"（回调之外的入口：B3 若在别处收到输入事件可直接调用）。
@@ -915,7 +1123,14 @@ impl Shell {
 
         // ② 暂停判据：弹层打开 **或** P2 有未保存修改 ⇒ 不倒计时、不强制切页（UI §4.3）。
         //    实现 = 把"最后活动时刻"钉在当下（等价于"计时暂停"）；放开后从**满时长**重算。
-        let paused = c.modal_open.get() || c.p2.is_dirty();
+        //
+        //    ②′ `--idle-timeout-secs 0` = **禁用**空闲回归（CLI「0=禁用」；原 `timing::IdleTimer`
+        //    的 `is_disabled()` 语义，该类型已按 B3-2b-1 任务书删除 ⇒ 语义唯一落点在此，
+        //    见偏差 **SH17**）。口径与"暂停"相同：不显示倒计时、不强制切页。
+        //    **改什么会让本条变红**：删掉 `disabled` 项 ⇒ `remaining_secs` 恒 0 ⇒
+        //    `should_return_home(0)` 恒真 ⇒ 每拍强制回 P1（用户停不在 P2–P6）。
+        let disabled = c.timeout.get().is_zero();
+        let paused = disabled || c.modal_open.get() || c.p2.is_dirty();
         if paused {
             *last = Some(now);
         }
@@ -938,6 +1153,11 @@ impl Shell {
 
         // ③ 页眉右端：倒计时胶囊出现时通道胶囊与触摸角标让位（**SH3**）。
         c.apply_header_channel();
+
+        // ③′ 整屏降级（EDGE-03）：**通道断 ⇒ 遮罩 + 中央文案 + 已断开时长**；
+        //     通道恢复 ⇒ **本拍即撤**（≤1 s 回实时，见模块头「EDGE-03 整屏降级」）。
+        //     时长用**注入**的 `now`（本文件不读 `Instant::now()`，离屏可确定性复现）。
+        c.apply_overlay(now);
 
         // ④ 未保存提示条（EDGE-11）由 P2 的 `is_dirty()` 驱动。
         c.apply_dirty();
@@ -1058,6 +1278,56 @@ impl Shell {
     /// 倒计时胶囊文案。
     pub fn countdown_text_value(&self) -> Option<String> {
         self.core.capsule_text.text()
+    }
+
+    /// 整屏降级层（EDGE-03）的根对象。
+    ///
+    /// **读回口存在的理由**：① 它是"层建一次、常驻"的探针点（写成 `Shell::new` 的局部变量 ⇒
+    /// 构造器返回即级联删除 ⇒ 遮罩永不可见）；② 它的旗标是"**可穿透输入**"（EDGE-20）的
+    /// **唯一可断言落点**（`CLICKABLE` 必须**不在**；对照 `ConfirmDialog` 的遮罩**必须在**）。
+    pub fn overlay_obj(&self) -> &Obj {
+        &self.core.overlay
+    }
+
+    /// 整屏降级层是否可见（通道断 ⇒ `true`）。
+    pub fn overlay_visible(&self) -> bool {
+        !self.core.overlay.is_hidden()
+    }
+
+    /// 整屏降级中央 64 px 大字的**对象**（**对象级尺寸断言口径** —— 重要 1+2）。
+    ///
+    /// **读回口存在的理由**：薄层**没有**字号读回（无 `lv_obj_get_style_text_font`）⇒
+    /// "建标签时用了哪个字号槽"在对象层不可直接问；但 `Obj::size()` **是**可读的，而
+    /// 本层的 `set_size(.., <槽>.px())` 与"建标签的那个槽"**同源**（见 [`OVERLAY_TITLE_SLOT`]）
+    /// ⇒ 断言 `size().1 == 槽档高` 即可抓住"换错槽"。⚠️ 这**不是**"字体读回"，
+    /// 是"尺寸这个可读可见量由同一绑定派生"（残余：字色 / 真实字体仍不可判）。
+    pub fn overlay_title_obj(&self) -> &Obj {
+        self.core.overlay_title.obj()
+    }
+
+    /// 整屏降级中央 64 px 大字文案（`与主进程数据通道断开`）。
+    pub fn overlay_title_text(&self) -> Option<String> {
+        self.core.overlay_title.text()
+    }
+
+    /// 下方时长行的**对象**（**对象级尺寸断言口径**，同 [`Shell::overlay_title_obj`]）。
+    pub fn overlay_elapsed_obj(&self) -> &Obj {
+        self.core.overlay_elapsed.obj()
+    }
+
+    /// 下方时长行文案（`N 秒`）。
+    pub fn overlay_elapsed_text(&self) -> Option<String> {
+        self.core.overlay_elapsed.text()
+    }
+
+    /// 已上屏的**整秒数**（`None` = 通道未断 / 已恢复）。
+    pub fn overlay_elapsed_secs(&self) -> Option<u64> {
+        self.core.overlay_secs.get()
+    }
+
+    /// 时长行文本的**实际写入次数**（判据「只在整秒变化时改文本」—— 每拍刷文本 ⇒ 本值每拍 +1 ⇒ 红）。
+    pub fn overlay_text_writes(&self) -> u64 {
+        self.core.overlay_writes.get()
     }
 
     /// 触摸不可用角标是否可见（EDGE-13）。
@@ -1208,6 +1478,55 @@ impl Core {
         set_visible(&self.badge, !capsule && !self.touch_available.get());
     }
 
+    /// 整屏降级层（EDGE-03）的显隐与时长文本 —— **唯一**落点（每拍由 [`Shell::tick`] 调）。
+    ///
+    /// 语义（三条，逐条对应模块头的实现裁定）：
+    /// 1. **只切可见性、也不挂样式**：本函数**不建、不删**任何 LVGL 对象（创建全在 [`Shell::new`]）、
+    ///    更**不**调 [`Obj::add_style`]（`lv_obj_add_style` 只增不删 ⇒ "每拍挂一条"是**独立于
+    ///    对象数**的泄漏形态）。回归锁 = `shell_chain` 的"断态连推 50 拍 ⇒ `PROBE_MOUNTS`
+    ///    **与** `PROBE_STYLE_ATTACHES` **双零增长**"；
+    /// 2. **断态 ⇔ 可见**：通道态取自 `Core::channel`（[`HeaderChannel::Down`] 即 EDGE-03 / EDGE-20
+    ///    的共同触发条件）；非断态**下一拍**即撤遮罩并把断开始刻清零（"恢复 ≤1 s 回实时"）；
+    /// 3. **时长只在整秒变化时写**：首拍落 `Some(now)`（⇒ 从 `0 秒` 起），此后每拍算
+    ///    `now − since` 的**整秒**值，与上次上屏值不同才 `set_text`（并同步居中宽度 / x）。
+    ///    `now` 由调用方注入 ⇒ 离屏可逐拍确定性断言。
+    fn apply_overlay(&self, now: Instant) {
+        // ── 非断态：撤遮罩 + 清断开始刻（**唯一**的"恢复"路径）──
+        if !matches!(self.channel.get(), HeaderChannel::Down) {
+            *self.overlay_since.borrow_mut() = None;
+            self.overlay_secs.set(None);
+            if self.overlay_on.replace(false) {
+                set_visible(&self.overlay, false);
+            }
+            return;
+        }
+        // ── 断态：断开始刻只在**进入断态的第一拍**落定（`now` 注入 ⇒ 可复现）──
+        let secs = {
+            let mut since = self.overlay_since.borrow_mut();
+            match *since {
+                Some(t) => now.saturating_duration_since(t).as_secs(),
+                None => {
+                    *since = Some(now);
+                    0
+                }
+            }
+        };
+        if self.overlay_secs.get() != Some(secs) {
+            let text = disconnect_elapsed_text(secs);
+            // 位数变化 ⇒ 宽度变 ⇒ 重新水平居中（`≤1 Hz` 的写，不在每拍路径上）。
+            self.overlay_elapsed
+                .set_size(overlay_elapsed_w(&text), OVERLAY_ELAPSED_SLOT.px() as i32);
+            self.overlay_elapsed
+                .set_pos(overlay_elapsed_x(&text), OVERLAY_ELAPSED_Y);
+            self.overlay_elapsed.set_text(&text);
+            self.overlay_secs.set(Some(secs));
+            self.overlay_writes.set(self.overlay_writes.get() + 1);
+        }
+        if !self.overlay_on.replace(true) {
+            set_visible(&self.overlay, true);
+        }
+    }
+
     /// 未保存提示条的显隐（EDGE-11）—— **唯一**落点。
     fn apply_dirty(&self) {
         let dirty = self.p2.is_dirty();
@@ -1257,6 +1576,27 @@ fn capsule_skin() -> Rc<Style> {
     s.set_border_width(Stroke::THIN);
     s.set_border_opa(Opa::COVER);
     s.set_radius(Radius::CHIP);
+    s.set_pad_all(0);
+    Rc::new(s)
+}
+
+/// 整屏降级遮罩皮肤（UI §8.3 EDGE-03：`#0B1220`、**压暗 20 %**）。
+///
+/// ⚠️ **必须清 `pad_all` 与 `radius`**（与 `theme::screen_bg()` / `dialog_mask()` 同款）：
+/// 本对象是**全屏**遮罩，若吃到 LVGL 默认主题的 `card` 内边距（≈20 px）就会缩进、四边露白。
+/// 这是 **SH14**（同类陷阱）复发的封堵点。
+///
+/// 与 `theme::dialog_mask()`（62 %，模态）**不是同一件事**：EDGE-03 的压暗只提示"数据已冻结"，
+/// 底层必须仍然可读（EDGE-20）⇒ 20 %。
+///
+/// **档位只许经 [`OVERLAY_MASK_OPACITY`] 取用**（重要 1+2 的单点收口）—— 不在此处内联
+/// `Opacity::*` 常量：那样"换档"会绕过唯一真源，而对象层又读不回 `bg_opa`（见该常量的残余说明）。
+fn overlay_mask() -> Rc<Style> {
+    let mut s = Style::new();
+    s.set_bg_color(Palette::BG);
+    s.set_bg_opa(Opa::percent(OVERLAY_MASK_OPACITY));
+    s.set_border_width(Stroke::NONE);
+    s.set_radius(Radius::NONE);
     s.set_pad_all(0);
     Rc::new(s)
 }
@@ -1519,6 +1859,70 @@ mod tests {
     fn countdown_text_matches_spec_wording() {
         assert_eq!(countdown_text(10), "10 秒后返回主状态页");
         assert_eq!(countdown_text(3), "3 秒后返回主状态页");
+    }
+
+    // ── 整屏降级（EDGE-03）──
+
+    /// 时长文案的整数口径（`N 秒`；**偏差 SH15**：是"已断开时长"，不是倒计时）。
+    ///
+    /// **改什么会让本条变红**：把模板改成 `{secs} 秒后恢复`（谎报语义）/ `{secs} 秒后返回`
+    /// （那是页眉倒计时胶囊的口径，两者混用即"通道断时说还有多久恢复"= 造假）。
+    #[test]
+    fn disconnect_elapsed_text_is_plain_seconds() {
+        assert_eq!(disconnect_elapsed_text(0), "0 秒");
+        assert_eq!(disconnect_elapsed_text(1), "1 秒");
+        assert_eq!(disconnect_elapsed_text(59), "59 秒");
+        assert_eq!(disconnect_elapsed_text(3600), "3600 秒");
+        assert_ne!(
+            disconnect_elapsed_text(10),
+            countdown_text(10),
+            "EDGE-03 的时长行与页眉倒计时胶囊是**两种语义**，文案不得互相借用"
+        );
+    }
+
+    /// 整屏层版式：大字 + 时长行**在画布内垂直居中**（UI §8.3「中央」的可判定口径）。
+    ///
+    /// **改什么会让本条变红**：把 `OVERLAY_BLOCK_H` 里的呼吸缝换成别的档（如 0 或
+    /// `GAP_MIN`）⇒ 上下留白不再相等 ⇒ 第一条红；把大字字号档从 64 px 换掉 ⇒ 第二 / 三条红。
+    #[test]
+    fn overlay_block_is_centered_and_uses_64px_title() {
+        assert_eq!(
+            TextSlot::PhasePower.px(),
+            64,
+            "中央大字必须取 64 px 档（UI §8.3 EDGE-03 原文「中央 64 px」）"
+        );
+        // 两个标签的**字号槽必须不同**（64 ≠ 24）—— 防"两处写反"（重要 1+2 的纯逻辑那一半；
+        // 对象级那一半见 `ui/tests.rs::shell_chain`）。**改什么会让本条变红**：把
+        // `OVERLAY_TITLE_SLOT` 与 `OVERLAY_ELAPSED_SLOT` 换成同一个槽。
+        assert_eq!(OVERLAY_TITLE_SLOT, TextSlot::PhasePower, "大字的唯一绑定槽");
+        assert_eq!(OVERLAY_ELAPSED_SLOT, TextSlot::Body, "时长行的唯一绑定槽");
+        assert_ne!(
+            OVERLAY_TITLE_SLOT.px(),
+            OVERLAY_ELAPSED_SLOT.px(),
+            "大字与时长行必须取**不同**字号槽（64 ≠ 24），否则两行分不出主次"
+        );
+        assert_eq!(
+            OVERLAY_TITLE_Y,
+            Dimens::SCREEN_H - OVERLAY_ELAPSED_Y - TextSlot::Body.px() as i32,
+            "整块须在画布内垂直居中（上留白 == 下留白）"
+        );
+        assert_eq!(OVERLAY_ELAPSED_Y, OVERLAY_TITLE_Y + 64 + Dimens::GAP_SECTION);
+        assert_eq!(
+            2 * OVERLAY_TITLE_Y + OVERLAY_BLOCK_H,
+            Dimens::SCREEN_H,
+            "整块 + 上下等留白 == 画布高（大字与时长行都落在画布内）"
+        );
+        assert_eq!(
+            overlay_title_x(),
+            (Dimens::SCREEN_W - overlay_title_w()) / 2,
+            "大字水平居中"
+        );
+        // 大字宽 = 逐字宽 × 字数（与 `discard_w()` / `tab_text_w()` 同口径）。
+        assert_eq!(
+            overlay_title_w(),
+            OVERLAY_TEXT.chars().count() as i32 * 64,
+            "大字宽按逐字宽估算（薄层无文本度量接口）"
+        );
     }
 
     // ── 页眉通道状态（连接 / 断开 / EDGE-20 双状态）──

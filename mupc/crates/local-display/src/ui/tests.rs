@@ -88,6 +88,8 @@ fn theme_matches_ui_spec() {
     assert_eq!(Dimens::SCROLLBAR_W, 8, "滚动条宽 8");
     assert_eq!(Dimens::SCROLLBAR_MARGIN, 4, "滚动条距右边缘 4");
     assert_eq!(Opacity::MASK_PERCENT, 62, "弹层遮罩 62%");
+    // 整屏降级（EDGE-03）的压暗档：与模态遮罩**不是同一件事**（底层须仍可读 ⇒ 取 20 %）。
+    assert_eq!(Opacity::DEGRADE_PERCENT, 20, "EDGE-03 整屏遮罩压暗 20%");
 
     // ── UI §5.1 控件尺寸（抽查被组件直接依赖的那几个）──
     assert_eq!(Dimens::STATUS_CHIP_H, 32, "StatusChip 高 32");
@@ -1780,6 +1782,15 @@ fn runtime_formatters_emit_only_cmap_glyphs() {
             crate::ui::shell::countdown_text(s),
         ));
     }
+    // 外壳（B3-2b-1）**整屏降级（EDGE-03）**的「已断开时长」文案：同上 —— 静态模板已由
+    // `ui_texts_covered_by_font_cmap` 覆盖（` 秒` 的 `秒` 在 cmap 内），此处补**运行时数字**
+    // 那一半（位数变化是唯一会引入新字形的路径）。输入含**位数跨界**与 `u64::MAX`。
+    for s in [0u64, 1, 9, 10, 59, 60, 3599, 3600, 99_999, u64::MAX] {
+        cases.push((
+            format!("shell::disconnect_elapsed_text({s})"),
+            crate::ui::shell::disconnect_elapsed_text(s),
+        ));
+    }
 
     // 先自证"输入集真的含负值"（否则本用例会退化成"只查了正数"而静默失效）。
     assert!(
@@ -2132,6 +2143,14 @@ pub(crate) fn ui_chain() {
             warn_fields: &[],
         };
         let d1 = ConfirmDialog::new(&screen, &spec1, ConfirmLevel::L1).expect("ConfirmDialog L1");
+        // **遮罩可点**（拦穿透）—— 与 EDGE-03 的整屏遮罩（**必须**可穿透）语义相反：
+        // 模态弹层要求"点外面不落到页面上"，通道断要求"写路径仍可用"（§8.3 EDGE-20）。
+        // 两者各有一条断言（另一条 = `shell_chain` 的 `overlay_obj()` 无 `CLICKABLE`）。
+        assert!(
+            d1.mask().has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE),
+            "ConfirmDialog 的遮罩**故意**可点（拦穿透）—— 若变红，先确认不是把 EDGE-03 的\
+             可穿透语义误套到模态遮罩上"
+        );
         assert_eq!(d1.level(), ConfirmLevel::L1);
         assert!(!d1.has_progress(), "L1 无长按进度条");
         assert!(!d1.has_warn_banner(), "L1 无 WarnBanner");
@@ -7281,14 +7300,30 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
     {
         // **R4 第一道门**：外壳（页眉 + 6 页签 + 提示条 + 胶囊 + 3 个通道胶囊）**与**
         // 它自己的 6 页同时驻留 1 MB 的 LVGL 定容池。OOM ⇒ 本行 `expect` 即失败。
-        // **R4 对象预算护栏**（实测 2026-09-15：外壳 + 6 页 = **727** 个 LVGL 对象，成功）。
+        // **R4 对象预算护栏**（实测 2026-09-15：外壳 + 6 页 + **整屏降级层** = **730** 个
+        // LVGL 对象，成功；B2c-3 时为 727，B3-2b-1 的 EDGE-03 整屏层 +3 件 —— 1 个遮罩容器
+        // + 中央大字 + 时长行，**常驻**（层建一次、只切可见性，见 `shell.rs` 模块头裁定 ①））。
         // LVGL 的堆是**定容池**（`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE = 1 MB`）⇒ "能建出来"
         // 不是可推定的性质（早期 256 KB 时建到第 4 页即 `lv_realloc` 失败）。本护栏把
         // **对象数量**钉住：往任一处加构件把总量推过 [`SHELL_OBJECT_BUDGET`]，这里会先变红
         // 并给出准确数字，而不是等到某台机器上 OOM 挂死。
         //
-        // **改什么会让本条变红**：给 6 页 / 外壳任一处加出 >73 个常驻对象。
-        const SHELL_OBJECT_BUDGET: usize = 800;
+        // **预算 = 实测值（零余量）**：`mounted ≤ 预算`，故 `mounted == 730` 绿、
+        // **把预算改成 729（实测 −1）必红** —— 这是"预算不是摆设"的判据（探针实测见交付报告）。
+        // 下一批若**确需**新增常驻构件：先在此**重新实测**并同步本行数字与注释，不得只抬预算。
+        //
+        // **⚠️ 口径（B3-2b-1 规格符合性评审 建议 5；如实登记）**：`PROBE_MOUNTS` 计的是
+        // **句柄数**，不是"底层 LVGL 对象数" —— 它的自增点在 `lvgl::obj::Obj::from_raw`
+        // （`obj.rs:276`），而 **`Obj::create`（owns=true）与 `Obj::adopt_borrowed`（owns=false）
+        // 都经 `from_raw`** ⇒ 两者**都**自增（`Obj::share_borrowed` 复用探针、**不**自增）。
+        // 本测量区间（`Shell::new`，见下 `before` / `after`）内**没有**任何 `adopt_borrowed`
+        // 调用（外壳只 `Obj::create`；`layer_top()` / `screen()` 这类"借用既有单例"的路径
+        // **不在此区间**）⇒ 本区间的 `mounted` **数值上等价于"新建对象数"**。
+        // 但若日后把 `layer_top()` 一类**借用**调用搬进 `Shell::new`，本计数会**多算**
+        // （借用也 +1）—— 届时要么把口径改成"新建数"（另设计数器），要么把借用调用挪出区间。
+        //
+        // **改什么会让本条变红**：给 6 页 / 外壳 / 整屏层任一处加出 ≥1 个常驻对象。
+        const SHELL_OBJECT_BUDGET: usize = 730;
         let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         let sh = Shell::new(&home).expect("外壳 + 6 页装配（LVGL_MEM 1 MB）");
         let mounted =
@@ -7779,9 +7814,370 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         sh.tick(at(301), CLOCK);
         assert_eq!(sh.current(), NavPage::Config, "弹层关闭 ⇒ 恢复计时（从满时长）");
 
-        // ═══ ③ 顶层层挂点（EDGE-03；本单元只留挂点，**不实现**降级层）═══════════
-        let layer = sh.overlay_layer().expect("顶层浮层可用");
-        assert!(layer.is_alive(), "EDGE-03 挂点必须返回可用的顶层浮层");
+        // ═══ ③ 顶层图层挂点（弹层 / Toast；**SH8 收口后不再是 EDGE-03 的落点**）═══════════
+        // 「整屏降级层在它**之下**」这一拓扑是 EDGE-20 的成立条件（通道断时弹层与写路径仍可用）。
+        // ⚠️ 该拓扑**无可离屏断言**（薄层无 parent / z-order 读回口）—— 实测：把整屏层改建到
+        // `lv_layer_top()` 之下，全套用例仍绿（2026-09-15 探针；原因见 ⑥ 的"整屏降级层"注释）。
+        // 故它**如实登记为评审复核项**，单点落在 `Shell::new` 的装配行。
+        //
+        // **B3-2b-1 规格符合性评审整改（建议 4）**：原先这里调 `Shell::overlay_layer()` ——
+        // 那个方法**已删**（与 `widgets::layer_top()` 等价、只多包一层 `Result`，且**无生产
+        // 消费者**：P2/P4 弹层与 Toast 直接调 `widgets::layer_top()`）。本断言的目标改为
+        // **直接调薄层挂点**，仍证"挂点本身可用"（弹层 / Toast 的宿主**不必**依赖整屏层存在）。
+        let layer = crate::lvgl::widgets::layer_top().expect("顶层浮层可用");
+        assert!(layer.is_alive(), "顶层浮层挂点必须返回可用对象");
+
+        // ═══ ③′ **整屏降级（EDGE-03）**（B3-2b-1 新增实现；四条裁定见 `shell.rs` 模块头）═══
+        //
+        // 判据逐条对应 §8.3 EDGE-03 原文 + 主控的四条裁定。时间基取 `at(400)` 起的**独立**
+        // 一段（与前面各段的超时链路互不干扰）。
+        sh.show(NavPage::Main);
+        sh.set_channel(ChannelStatus::Connected);
+        let t_down = at(400);
+        sh.tick(t_down, CLOCK); // 落定"通道正常"这一拍
+        assert!(
+            !sh.overlay_visible(),
+            "通道正常 ⇒ 无整屏遮罩（EDGE-03 只在通道断时出现）"
+        );
+        // **裁定 ① 的静态那一半**：层在 `Shell::new` 里建好、常驻（写成局部变量 ⇒ 早已被级联删除）。
+        assert!(
+            sh.overlay_obj().is_alive(),
+            "整屏层必须常驻（装配期建好、只切可见性）—— 写成本地变量会在这里红"
+        );
+        assert!(
+            !sh.overlay_obj().has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE),
+            "整屏遮罩**不得**带 CLICKABLE（**可穿透输入**：EDGE-20 要求 P2/P4 写操作仍可用）"
+        );
+
+        // ── 通道断 ⇒ 遮罩 + 中央 64 px 大字 + 时长从 0 起 ──
+        sh.set_channel(ChannelStatus::Down);
+        sh.tick(t_down, CLOCK);
+        assert!(sh.overlay_visible(), "通道断 ⇒ 整屏遮罩可见（EDGE-03）");
+        assert_eq!(
+            sh.overlay_title_text().as_deref(),
+            Some(crate::ui::pages::p1_status::TEXT_CHANNEL_DOWN),
+            "中央大字 = §3.6 全局降级行原文（与页眉红胶囊同一份字面量）"
+        );
+        assert_eq!(
+            sh.overlay_elapsed_text().as_deref(),
+            Some("0 秒"),
+            "时长**从 0 起**（断开始刻 = 进入断态的第一拍）"
+        );
+        assert_eq!(sh.overlay_elapsed_secs(), Some(0));
+        assert_eq!(sh.overlay_text_writes(), 1, "首次上屏写一次文本");
+        // 中央大字的字号档 = 64 px（UI §8.3「中央 64 px」）。
+        disp.refr_now_for_test();
+        assert_eq!(
+            sh.overlay_obj().size(),
+            (Dimens::SCREEN_W, Dimens::SCREEN_H),
+            "整屏遮罩 = 全屏 1024×768（`pad_all(0)` 已清 ⇒ 不缩进）"
+        );
+        let tc = sh.overlay_obj().coords();
+        assert_eq!(
+            (tc.x1, tc.y1, tc.x2, tc.y2),
+            (0, 0, Dimens::SCREEN_W - 1, Dimens::SCREEN_H - 1),
+            "遮罩须**整屏**贴边（吃默认主题内边距 ⇒ 四边露白 ⇒ 红）"
+        );
+
+        // ── **对象级字号档断言**（B3-2b-1 规格评审 **重要 1+2**）────────────────────────
+        //
+        // **为什么需要它**：薄层**没有**字号 / 字色读回（`bg_opa` / `text_font` / `text_color`
+        // 三个 getter 都缺，见 `src/lvgl/mod.rs` 的「薄层能力缺口登记」）⇒ 评审把中央大字由
+        // `TextSlot::PhasePower`(64 px) + `Palette::STALE` 换成 `TextSlot::Body` + `Palette::DANGER`
+        // 时**全套用例全绿**（屏上字变小变红，无网）。根因是"建标签"与"设尺寸"两处**各写各的
+        // 常量** ⇒ 只改一处不影响另一处。
+        //
+        // **收口**：`shell.rs` 把两处收敛成同一个绑定（`OVERLAY_TITLE_SLOT` /
+        // `OVERLAY_ELAPSED_SLOT`），`set_size` 与"建标签"同源；而 `Obj::size()` **可读**
+        // ⇒ 断言对象实际高度 == 契约槽档高，"换错槽"当场红（探针实测见交付报告）。
+        //
+        // **改什么会让本条变红**：把 `shell.rs` 的 `OVERLAY_TITLE_SLOT` 换成 `TextSlot::Body`
+        // （⇒ 大字对象高 24 ≠ 64）、或把 `OVERLAY_ELAPSED_SLOT` 换成 `TextSlot::PhasePower`
+        // （⇒ 时长行对象高 64 ≠ 24）、或把两者的 `set_size` 实参写死成另一个数。
+        let title_h = sh.overlay_title_obj().size().1;
+        let elapsed_h = sh.overlay_elapsed_obj().size().1;
+        assert_eq!(
+            title_h,
+            TextSlot::PhasePower.px() as i32,
+            "中央大字对象高必须 == `TextSlot::PhasePower`.px()（UI §8.3「中央 64 px」）\
+             —— 换错字号槽（如 Body 的 24）在这里红"
+        );
+        assert_eq!(
+            elapsed_h,
+            TextSlot::Body.px() as i32,
+            "时长行对象高必须 == `TextSlot::Body`.px()（UI §8.3「下方 24 px」）\
+             —— 换错字号槽（如 PhasePower 的 64）在这里红"
+        );
+        assert_ne!(
+            title_h, elapsed_h,
+            "两行的字号槽必须不同（64 ≠ 24）：同高即「两处写反 / 写成同一个槽」，两行分不出主次"
+        );
+
+        // ── **遮罩不透明度档位**（重要 1+2 的第 3 步；对象层读不回 `bg_opa`）─────────────
+        //
+        // 薄层无 `lv_obj_get_style_bg_opa` ⇒ "遮罩实际用了哪一档"在对象层**不可判**
+        // （评审实测：把 20 % 偷换成 62 % 的全屏遮罩，335 全绿）。收口 = 把档位提成
+        // **单一真源** `shell::OVERLAY_MASK_OPACITY`，遮罩只许经它建 ⇒ 断言该常量本身。
+        // ⚠️ **残余（如实登记）**：绕过该常量、直接在 `overlay_mask()` 的样式上写死别的档位，
+        // 用例仍抓不到（根因 = 缺 `bg_opa` 读回，补读回属「薄层收口批」）。
+        assert_eq!(
+            shell::OVERLAY_MASK_OPACITY,
+            Opacity::DEGRADE_PERCENT,
+            "整屏降级遮罩档位 == 20 %（UI §8.3 EDGE-03「整屏遮罩压暗 20 %」）"
+        );
+        assert_ne!(
+            shell::OVERLAY_MASK_OPACITY,
+            Opacity::MASK_PERCENT,
+            "整屏降级遮罩**不得**取模态遮罩那一档（62 %）：EDGE-20 要求底层仍可读 ⇒ 二者必须分档"
+        );
+
+        // ── **只在整秒变化时改文本**（每拍刷 LVGL 文本 = 红线行为 + 使"秒级"无从验证）──
+        // **改什么会让本条变红**：把 `Core::apply_overlay` 的 `!= Some(secs)` 判据删掉
+        // （无条件 `set_text`）⇒ 下面每一条 `overlay_text_writes()` 断言都红。
+        sh.tick(t_down + Duration::from_millis(500), CLOCK);
+        assert_eq!(sh.overlay_text_writes(), 1, "半秒拍：整秒未变 ⇒ 不得重写文本");
+        assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("0 秒"));
+        sh.tick(t_down + Duration::from_secs(1), CLOCK);
+        assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("1 秒"), "整秒拍 ⇒ 时长 +1");
+        assert_eq!(sh.overlay_text_writes(), 2);
+        for i in 2..=5u64 {
+            sh.tick(t_down + Duration::from_secs(i) + Duration::from_millis(300), CLOCK);
+        }
+        assert_eq!(sh.overlay_elapsed_secs(), Some(5));
+        assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("5 秒"));
+        assert_eq!(
+            sh.overlay_text_writes(),
+            6,
+            "0..=5 s 恰好 6 次整秒变化 ⇒ 恰好 6 次写入"
+        );
+
+        // ═══ ③‴ **可穿透输入的"行为级"证据**（B3-2b-1 代码质量评审 建议 4）════════════
+        //
+        // **为什么不能只留旗标断言**：上面那条 `!overlay_obj().has_flag(CLICKABLE)` 只证明
+        // "**标志位**没被误加"，不证明"触摸**真的**穿过去了" —— 它无法发现"遮罩的子对象
+        // 被加了 `CLICKABLE`"这类改法（旗标断言只问遮罩**本身**）。本仓薄层**已有**
+        // `Indev`（`lvgl/indev.rs`，与真机同一条命中链：`read_cb` 快照 → `lv_indev_read` →
+        // `lv_indev_search_obj`），故**真实命中测试是可行的**（无需改薄层、无新增生产代码）。
+        //
+        // **两个投递点**（各投一次"按下"，各自一个独立 `Indev`，**从不**投抬手 ⇒ 全程无
+        // `CLICKED`、不切页）：
+        //
+        // - **A = 未选中页签的中心**（`Config` 页签，y ≈ 732）：证明"**下层控件真的收到**"
+        //   —— 该点在**导航条**上，遮罩**整屏覆盖**它，故只有"可穿透"成立时页签才收得到
+        //   （§8.3 EDGE-20「P2/P4 写操作仍可用」）。
+        // - **B = 中央大字的中心**（`overlay_title_obj`）：证明"**遮罩整棵子树都不吃事件**"
+        //   —— 该点由遮罩的**子标签**覆盖（A 点不覆盖），故它专抓"给子标签加回 `CLICKABLE`"
+        //   这一类改法（**旗标断言只问遮罩本身，抓不到它**）。
+        //
+        // 命中链依据：`lv_indev_read` → `lv_indev_search_obj`（`vendor/lvgl/src/indev/lv_indev.c:617`）
+        // —— `hit_test_ok == false`（即不带 `CLICKABLE`）的对象**不**被返回，但**仍会**递归
+        // 其子树；整棵子树都无命中时才交还给更早的兄弟。
+        //
+        // **改什么会让本条变红**：① 给整屏遮罩 `add_flag(CLICKABLE)`（`lv_obj` 构造时**默认带**
+        // `CLICKABLE`，`vendor/lvgl/src/core/lv_obj.c:584` ⇒ 删掉 `Shell::new` 里那行
+        // `remove_flag(CLICKABLE)` 即等价）⇒ A 点：页签计数 0、遮罩计数 1；② 给中央大字
+        // （或时长行）加回 `CLICKABLE` ⇒ B 点：遮罩子树计数 1。
+        sh.set_channel(ChannelStatus::Down);
+        sh.tick(t_down + Duration::from_millis(5_500), CLOCK);
+        disp.refr_now_for_test();
+        assert!(
+            sh.overlay_visible(),
+            "前置：遮罩可见（这一拍命中链上真的压着它）"
+        );
+        {
+            use crate::lvgl::indev::{Indev, TouchSnapshot};
+            let hits_tab = Rc::new(Cell::new(0u32));
+            let hits_title = Rc::new(Cell::new(0u32));
+            let hits_elapsed = Rc::new(Cell::new(0u32));
+            let hits_overlay = Rc::new(Cell::new(0u32));
+            {
+                let tab = sh
+                    .tab(NavPage::Config)
+                    .expect("第 2 个页签")
+                    .button()
+                    .obj();
+                let c = Rc::clone(&hits_tab);
+                let _keep = tab.on(EventCode::PRESSED, move |_e| c.set(c.get() + 1));
+            }
+            for (o, c) in [
+                (sh.overlay_obj(), Rc::clone(&hits_overlay)),
+                (sh.overlay_title_obj(), Rc::clone(&hits_title)),
+                (sh.overlay_elapsed_obj(), Rc::clone(&hits_elapsed)),
+            ] {
+                let _keep = o.on(EventCode::PRESSED, move |_e| c.set(c.get() + 1));
+            }
+            // 命中判定读的是 `obj->coords`（布局趟写入）⇒ 上面已 `refr_now_for_test()` 落定。
+            let centre = |o: &Obj| {
+                let c = o.coords();
+                ((c.x1 + c.x2) / 2, (c.y1 + c.y2) / 2)
+            };
+            // ── A：页签中心 ──
+            let (ax, ay) = centre(
+                sh.tab(NavPage::Config)
+                    .expect("第 2 个页签")
+                    .button()
+                    .obj(),
+            );
+            assert!(
+                (0..Dimens::SCREEN_W).contains(&ax) && (0..Dimens::SCREEN_H).contains(&ay),
+                "前置：页签中心 ({ax},{ay}) 须在屏内（否则本条测的不是「屏上被遮罩盖住的点」）"
+            );
+            let indev = Indev::create_pointer(disp)
+                .expect("Indev::create_pointer（可穿透输入的行为级证据 A）");
+            indev.feed(TouchSnapshot {
+                pressed: true,
+                x: ax,
+                y: ay,
+            });
+            indev.read();
+            assert_eq!(
+                hits_tab.get(),
+                1,
+                "A：遮罩可见时投递一次按下，下层页签**必须收到**（§8.3 EDGE-20）\
+                 —— 收到 0 次 ⇒ 触摸被整屏遮罩拦住（「可穿透」不成立）"
+            );
+            assert_eq!(
+                hits_overlay.get(),
+                0,
+                "A：整屏遮罩**自身**不得收到该事件 —— 收到 1 次 ⇒ 遮罩可点 = 拦穿透，EDGE-20 失效"
+            );
+            drop(indev);
+            // ── B：中央大字中心（专抓"子标签被加回 CLICKABLE"）──
+            let (bx, by) = centre(sh.overlay_title_obj());
+            let indev = Indev::create_pointer(disp)
+                .expect("Indev::create_pointer（可穿透输入的行为级证据 B）");
+            indev.feed(TouchSnapshot {
+                pressed: true,
+                x: bx,
+                y: by,
+            });
+            indev.read();
+            assert_eq!(
+                (hits_overlay.get(), hits_title.get(), hits_elapsed.get()),
+                (0, 0, 0),
+                "B：投递点 ({bx},{by}) 由遮罩的**子标签**覆盖 ⇒ 遮罩整棵子树（容器 / 中央大字 / \
+                 时长行）**一个都不得收到**（收到即「该子件可拦截触摸」，遮罩的「可穿透」被绕过）"
+            );
+            drop(indev);
+        }
+        // **不影响后续**：全程只投 `pressed`、**不**投抬手 ⇒ 无 `CLICKED` ⇒ 不切页
+        // （页签的切页挂钩在 `on_clicked` 上）。
+        assert_eq!(sh.current(), NavPage::Main, "行为级用例不得切页（只按下、未抬手）");
+
+        // ═══ ③⁗ `Init` 态**不显**整屏降级层（B3-2b-1 代码质量评审 建议 3）════════════
+        //
+        // **理由**：§8.3 的异常态字典里**没有** `Init` 的整屏行（见 `shell.rs` 模块头裁定 ④）
+        // —— 首次连接中的既有落点是**页眉黄胶囊**（`HeaderChannel::Connecting`）+ **P1 首连条**。
+        // 若把 `Init` 也算作"断"，启动瞬间就会全屏压暗、"尚未首次连上"被渲染成"连接已断开"。
+        //
+        // **改什么会让本条变红**：把 `apply_overlay` 的触发判据由 `HeaderChannel::Down` 放宽为
+        // `!matches!(self.channel.get(), HeaderChannel::Connected)`（或任何把 `Init` 归入
+        // "需降级"的写法）⇒ 遮罩在本条位置可见 ⇒ 红。
+        sh.set_channel(ChannelStatus::Init);
+        sh.tick(t_down + Duration::from_millis(5_800), CLOCK);
+        assert!(
+            !sh.overlay_visible(),
+            "`Init`（首次连接中）**不显**整屏降级层 —— §8.3 无该行；既有落点 = 页眉黄胶囊 + P1 首连条"
+        );
+        assert_eq!(
+            sh.channel_text().as_deref(),
+            Some(crate::ui::pages::p1_status::TEXT_CHANNEL_CONNECTING),
+            "同一拍上：`Init` 的落点是页眉胶囊（「正在连接数据通道」），不是整屏层 \
+             —— §8.3 的整屏行只归 `Down`"
+        );
+
+        // ── **裁定 ① 的动态那一半**：渲染路径（`tick`）**绝不建 / 删 LVGL 对象** ──
+        //
+        // ⚠️ **本段曾是一条"看着在把关、实则没把住"的假网（2026-09-15 探针实测，如实登记）**：
+        // 初版连推 50 拍用的是**同一个时刻**（`t_down + 5.9 s`）⇒ 整秒数恒为 5 ⇒
+        // `Core::apply_overlay` 的"整秒变化才写"分支**一次都不进** ⇒ 把 `Obj::create` 塞进
+        // 那个分支的破坏性探针**照样全绿**（实测）。修法 = 第二次循环**逐拍推进 1 s**
+        // （每拍都跨整秒 ⇒ 写入分支必走），并**交替通道态**（显 / 隐两支都走）。
+        // 这样"建对象"无论写在哪一支里都会被本段抓住。
+        //
+        // **⚠️ 双计数器（B3-2b-1 代码质量评审 重要 1；2026-09-16 整改）**：只断言
+        // `PROBE_MOUNTS` **不够** —— 它数的是"挂了几个对象句柄"，抓不到**另一条独立形态**：
+        // `Obj::add_style` **只增不删**，故"每拍挂一次样式（对象只建一次）"会让 LVGL 样式表
+        // 无界增长、整屏层照样把内存吃光，而对象数**纹丝不动**（评审实测：在
+        // `Core::apply_overlay` 写分支插一次 `add_style` ⇒ 原 335 条全绿）。故本段**同时**
+        // 断言 `PROBE_STYLE_ATTACHES` **零增长** —— 与对象数**同款口径**（同为测试专用
+        // 静态计数器、同为区间增量、自增点同为薄层唯一入口）。
+        let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        let attaches_before =
+            crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(std::sync::atomic::Ordering::SeqCst);
+        for i in 0..50u64 {
+            sh.set_channel(if i % 2 == 0 {
+                ChannelStatus::Connected
+            } else {
+                ChannelStatus::Down
+            });
+            sh.tick(t_down + Duration::from_secs(6 + i), CLOCK);
+        }
+        assert_eq!(
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst) - mounts_before,
+            0,
+            "断态连推 50 拍（逐拍跨整秒 + 显隐交替）不得新建任何 LVGL 对象（层建一次、只切可见性）"
+        );
+        assert_eq!(
+            crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(std::sync::atomic::Ordering::SeqCst)
+                - attaches_before,
+            0,
+            "断态连推 50 拍**也不得往对象上挂任何样式**：`Obj::add_style` 只增不删 \
+             （`ui/pages/mod.rs::set_style_index` 有先例），「渲染路径每拍挂一条样式」= 样式表无界 \
+             增长 ⇒ 整屏层照样把 LVGL 定容池吃光，而**对象数不变** —— 故本条与上一条必须成对"
+        );
+        // 收尾：回到断态并落定，供下面"恢复即撤"用（上一轮 i=49 ⇒ 奇数 ⇒ Down）。
+        sh.set_channel(ChannelStatus::Down);
+        sh.tick(t_down + Duration::from_secs(56), CLOCK);
+        assert!(sh.overlay_visible());
+
+        // ── **恢复 ≤1 s 回实时**：`Down → Connected` ⇒ **下一拍即撤** ──
+        // **改什么会让本条变红**：把 `apply_overlay` 的非断态分支删掉（遮罩留在屏上）。
+        sh.set_channel(ChannelStatus::Connected);
+        sh.tick(t_down + Duration::from_secs(57), CLOCK);
+        assert!(
+            !sh.overlay_visible(),
+            "通道恢复 ⇒ **本拍即撤**遮罩（≤1 s 回实时）"
+        );
+        assert_eq!(
+            sh.overlay_elapsed_secs(),
+            None,
+            "恢复 ⇒ 断开始刻清零（下次断开重新从 0 起算）"
+        );
+        // 再次断开 ⇒ **从 0 重新起算**（不是接着上次的 6 s）。
+        sh.set_channel(ChannelStatus::Down);
+        sh.tick(t_down + Duration::from_secs(100), CLOCK);
+        assert_eq!(
+            sh.overlay_elapsed_secs(),
+            Some(0),
+            "重新断开 ⇒ 时长从 0 重新起算"
+        );
+        assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("0 秒"));
+        sh.set_channel(ChannelStatus::Connected);
+        sh.tick(t_down + Duration::from_secs(101), CLOCK);
+        assert!(!sh.overlay_visible());
+
+        // ═══ ③″ `--idle-timeout-secs 0` = **禁用**空闲回归（原 `timing::IdleTimer` 语义，
+        //      该类型已按 B3-2b-1 任务书删除 ⇒ 唯一落点搬到 `Core::tick`，见偏差 **SH17**）═══
+        //
+        // **改什么会让本条变红**：删掉 `Core::tick` 里的 `let disabled = c.timeout.get().is_zero();`
+        // ⇒ `remaining_secs` 恒 0 ⇒ `should_return_home(0)` 恒真 ⇒ **每拍强制回 P1**（下述第一条红）。
+        sh.set_idle_timeout(0);
+        sh.show(NavPage::Interlock);
+        sh.tick(at(700), CLOCK);
+        sh.tick(at(7000), CLOCK); // 远超默认 60 s（禁用 ⇒ 不得切页、不得出胶囊）
+        assert_eq!(
+            sh.current(),
+            NavPage::Interlock,
+            "--idle-timeout-secs 0 ⇒ **禁用**空闲回归，不得强制切页"
+        );
+        assert!(!sh.countdown_visible(), "禁用 ⇒ 不显示倒计时胶囊");
+        // 恢复默认 60 s ⇒ 语义照旧。
+        sh.set_idle_timeout(theme::Timing::IDLE_TIMEOUT_SECS);
+        sh.note_activity();
+        sh.tick(at(7100), CLOCK);
+        sh.tick(at(7160), CLOCK);
+        assert_eq!(sh.current(), NavPage::Main, "恢复 60 s 后超时回归照常生效");
     }
 
     // ═══ ⑥ 建 / 拆外壳 ≥2 次（R1：`Rc` 环 / 泄漏）══════════════════════════════
@@ -7800,6 +8196,18 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             ("页根宿主", sh.page_host_obj().share_borrowed()),
             ("底部导航", sh.nav_obj().share_borrowed()),
             ("提示条", sh.banner_obj().share_borrowed()),
+            // 整屏降级层（EDGE-03）：**随外壳一起释放**。
+            //
+            // ⚠️ **本条目到底锁了什么（2026-09-15 探针实测订正，勿再写错）**：它锁的是
+            // 「整屏层是 `Core` 的**拥有型字段**」，**不是**"父对象是 `root`"。实测：把整屏层
+            // 改建到会话级单例 `lv_layer_top()` 之下，**三条断言全绿** —— 因为拥有型句柄的
+            // `Drop` 本身就会 `lv_obj_delete`，与父是谁无关。**能红**的改法是：把它写成
+            // 非拥有句柄（`adopt_borrowed` / 不再存进 `Core` 而只留局部）。
+            //
+            // 「整屏层**在** `lv_layer_top()` 之下（⇒ 弹层 / Toast 压得住它）」这一拓扑
+            // **无可离屏断言**（薄层没有 parent / z-order 读回口）⇒ 如实登记为**评审复核项**，
+            // 单点落在 `Shell::new` 的那一行（见 `shell.rs` 装配注释）。
+            ("整屏降级层", sh.overlay_obj().share_borrowed()),
             ("返回键", sh.back_button().share_borrowed()),
             ("取消修改键", sh.discard_button().share_borrowed()),
         ];

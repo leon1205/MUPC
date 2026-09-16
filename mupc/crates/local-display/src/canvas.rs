@@ -1,13 +1,38 @@
-//! 画布抽象 + 离屏实现（OffscreenCanvas）+ Linux 帧缓冲后端（FbCanvas）。
+//! 画布色彩类型 + Linux 帧缓冲后端（FbCanvas）。
 //!
 //! 对齐 `[DESIGN_APPROVED]` 设计 §B1 / §5.2 canvas.rs / §6：
 //! - 颜色：32-bit 不透明 `0x00RRGGBB`（alpha 留 0——屏面无合成，仅字形覆盖做 alpha 混合）。
-//! - `Canvas` trait：宽高 / `set_px` / `fill_rect` / `clear`（绘制原语，layout 只面向 trait）。
-//! - OffscreenCanvas：内存 `Vec<Color>` 缓冲，测试可对像素/区域断言；供 layout 离屏单测与
-//!   `--backend offscreen` 全链路（可出 PNG——本期不引 png 依赖，后续 dev feature）。
+//! - `Canvas` trait：**像素面的最小接口**（宽 / 高 / `blit_pixels`）—— 由 [`fbdev::FbCanvas`]
+//!   实现，并被 `screen.rs` 的 [`crate::screen::PixelSink`] 复用为真机 sink。
 //! - FbCanvas（仅 `target_os = "linux"`，`/dev/fb0` mmap）：Windows 本机不编译该 cfg 块；
 //!   真机像素格式(bpp/order)/DRM 后端属设计 §13 前置项 1，实现按「32bpp XRGB 映射」，
 //!   首验不符时切 `--fbdev-path` 或补 DRM dumb-buffer。
+//!
+//! # 死代码清理（开发单元 **B3-2b-1**，主控逐项裁定）
+//!
+//! 本文件曾同时承担 **v1.0 的自绘链路**（v2.0 已整体废弃：`font.rs` / `layout.rs` / `run.rs`
+//! 与 `tests/full_chain.rs` 在 B3-2a 删除，见 `lib.rs` 模块文档）。残留的 v1.0 绘制原语
+//! **无任何生产消费者**，本轮删除：
+//!
+//! | 已删符号 | 原用途（v1.0） | 语义现由谁承担 |
+//! |----------|----------------|----------------|
+//! | `OffscreenCanvas` | 内存像素面（自绘链路的离屏断言） | [`crate::screen::MemorySink`]（v2.0 的离屏出口，**与真机共用同一条 flush 路径**） |
+//! | `blend_over` | 字形反锯齿混合（自绘链路自己光栅化文本时用） | **无**（文本光栅化已由 LVGL 承担，`ui/**` 不再自绘字形）；**真需要时点名**：字体混合属薄层 `crate::lvgl::font` 的职责，不在本文件 |
+//! | `Canvas::{set_px, pixel, clear, fill_rect}` + `fill_rect_default` | 逐像素 / 矩形绘制原语（自绘链路） | **无**（LVGL 负责绘制；`PixelSink` 只需要"写一块像素"，即保留的 `blit_pixels`）。⚠️ 注意 `pixel`（**读**单像素）在 v2.0 的回读需求由 `screen::MemorySink::pixel` 满足（**同一个名字，不同的类型**） |
+//! | `hex` / `rgb` 便捷构造 | 自绘链路里写色值 | `ui/theme.rs` 的 `Palette`（命名常量；`Color::hex` 是 `lvgl::style` 的**另一个** `hex`） |
+//! | `lib.rs::new_offscreen_canvas()` | 快捷构造离屏画布 | [`crate::screen::MemorySink::new`] |
+//!
+//! **保留**：`Color`（`screen.rs` / `app.rs` 的像素类型）、`Rect`（`FbCanvas::blit_pixels`
+//! 的裁剪用）、[`Canvas`] 的 `width` / `height` / `blit_pixels`（`screen.rs` 的 `PixelSink`
+//! impl 直接调它们）、[`fbdev::FbCanvas`]（设计 §8.3 保留资产 ⇒ 真机 flush sink）。
+//!
+//! **残留（如实登记）**：`Rect::width` / `Rect::height` / `Rect::contains` 三个便捷方法
+//! **在生产路径上没有调用点**（`FbCanvas::blit_pixels` 只用 `Rect::new` + 内部的
+//! `clipped_to`；三者目前只由本模块的 `rect_clips_to_canvas_half_open` 用例覆盖）。
+//! 它们**不是死代码**（`pub` + 模块 `pub` ⇒ 仍在 crate 的公开面上，`lib.rs` 也仍 re-export
+//! `Rect`），保留理由 = 它们是 `Rect` 这个值类型的**语义完整性**一部分（删掉后调用者只能
+//! 自己算 `x1 - x0`）。**若 PM 要求砍到最小公开面**：这三条 + `lib.rs` 的 `Rect` 一并删，
+//! 此时 `clipped_to` 的 `dead_code` 许可也要跟着重新评估。
 //!
 //! # 具名豁免：`FbCanvas` 的 `unsafe` 与 §1.1.1.2 纪律 1（评审 C-⑤ 留痕）
 //!
@@ -28,36 +53,6 @@
 
 /// 颜色 = `0x00RRGGBB`（不透明）。
 pub type Color = u32;
-
-/// 便捷：由 RGB 通道构造颜色（0xRRGGBB）。
-pub const fn rgb(r: u8, g: u8, b: u8) -> Color {
-    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-}
-
-/// 便捷：由 `#RRGGBB` 字面量常量构造（编译期）。
-pub const fn hex(h: u32) -> Color {
-    h
-}
-
-/// 把前景不透明色按 coverage 混合到背景上（字形反锯齿）。cov>=1 时直接取前景。
-pub fn blend_over(bg: Color, fg: Color, cov: f32) -> Color {
-    let cov = cov.clamp(0.0, 1.0);
-    if cov >= 1.0 {
-        return fg;
-    }
-    if cov <= 0.0 {
-        return bg;
-    }
-    let bf = |b: u8, f: u8| {
-        let bb = b as f32;
-        let ff = f as f32;
-        (bb + (ff - bb) * cov).round() as u32
-    };
-    let r = bf((bg >> 16) as u8, (fg >> 16) as u8);
-    let g = bf((bg >> 8) as u8, (fg >> 8) as u8);
-    let bl = bf(bg as u8, fg as u8);
-    (r << 16) | (g << 8) | bl
-}
 
 /// 轴对齐矩形（左闭右开：`[x0, x1) × [y0, y1)`）。超出画布的绘制由实现裁剪。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +81,12 @@ impl Rect {
     }
 
     /// 与画布裁剪区求交（空矩形 → None）。
+    ///
+    /// ⚠️ **在非 Linux 构建里"看似无人用"**（`dead_code` 许可）：唯一的生产消费者是
+    /// [`fbdev::FbCanvas::blit_pixels`]（`cfg(target_os = "linux")` 块内，本机 Windows
+    /// **不编译**），另由本模块的 `rect_clips_to_canvas_half_open` 用例直接覆盖。
+    /// 若日后把本方法删掉，**Linux 交叉编译才是判据**（本机 `cargo check` 验不到）。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn clipped_to(&self, w: u32, h: u32) -> Option<Rect> {
         let x0 = self.x0.max(0);
         let y0 = self.y0.max(0);
@@ -99,159 +100,18 @@ impl Rect {
     }
 }
 
-/// 绘制画布抽象。layout 只依赖本 trait（离屏与帧缓冲共用同一套绘制命令）。
+/// 像素面抽象（**v2.0 的最小面**：宽 / 高 / 写一块像素）。
+///
+/// 由 [`fbdev::FbCanvas`] 实现；`screen.rs` 的 [`crate::screen::PixelSink`] 为它写的适配层
+/// 直接调用本 trait 的三个方法。**v1.0 的逐像素 / 矩形 / 清屏原语已删**（无生产消费者，
+/// 见文件头「死代码清理」）。
 pub trait Canvas {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
 
-    /// 画单像素（越界自动忽略）。
-    fn set_px(&mut self, x: i32, y: i32, c: Color);
-
-    /// 读单像素（字形反锯齿混合需要背景色；越界/不支持读 → None）。默认 None。
-    fn pixel(&self, x: i32, y: i32) -> Option<Color> {
-        let _ = (x, y);
-        None
-    }
-
-    /// 清屏。
-    fn clear(&mut self, c: Color);
-
-    /// 填充矩形（自动裁剪）。
-    fn fill_rect(&mut self, r: &Rect, c: Color);
-
     /// 以 (x0,y0) 为左上，blit 一个不透明小位图（行宽 `stride`，仅低 `width` 字节有效）。
-    /// 默认逐像素 `set_px`；连续缓冲实现可覆写为整行 memcpy。offset 按像素。
+    /// 连续缓冲实现可覆写为整行 memcpy。offset 按像素。
     fn blit_pixels(&mut self, x: i32, y: i32, width: u32, height: u32, src: &[Color]);
-}
-
-/// 通用矩形填充（复用默认实现，供各实现 `fill_rect` 兜底）。
-pub fn fill_rect_default<C: Canvas + ?Sized>(c: &mut C, r: &Rect, color: Color) {
-    if let Some(r) = r.clipped_to(c.width(), c.height()) {
-        for yy in r.y0..r.y1 {
-            for xx in r.x0..r.x1 {
-                c.set_px(xx, yy, color);
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// OffscreenCanvas —— 内存缓冲（离屏测试 + offscreen 后端）
-// ---------------------------------------------------------------------------
-
-/// 离屏内存画布（1024x768x4 ≈ 3MB）。`pixel`/`buffer` 供测试断言与未来 PNG 导出。
-pub struct OffscreenCanvas {
-    w: u32,
-    h: u32,
-    buf: Vec<Color>,
-}
-
-impl OffscreenCanvas {
-    pub fn new(w: u32, h: u32) -> Self {
-        Self {
-            w,
-            h,
-            buf: vec![0; (w * h) as usize],
-        }
-    }
-
-    /// 设计默认分辨率：1024x768（8 寸屏）。
-    pub fn new_default() -> Self {
-        Self::new(1024, 768)
-    }
-
-    pub fn width(&self) -> u32 {
-        self.w
-    }
-
-    pub fn height(&self) -> u32 {
-        self.h
-    }
-
-    pub fn buffer(&self) -> &[Color] {
-        &self.buf
-    }
-
-    /// 统计 `rect` 内等于 `c` 的像素数（裁剪越界）。
-    pub fn count_color(&self, r: &Rect, c: Color) -> usize {
-        let mut n = 0;
-        for yy in r.y0.max(0)..r.y1.min(self.h as i32) {
-            for xx in r.x0.max(0)..r.x1.min(self.w as i32) {
-                if self.buf[(yy as u32 * self.w + xx as u32) as usize] == c {
-                    n += 1;
-                }
-            }
-        }
-        n
-    }
-
-    /// `rect` 内是否存在非背景色像素（用于断言某区域被绘制过）。
-    pub fn has_non_background(&self, r: &Rect, bg: Color) -> bool {
-        for yy in r.y0.max(0)..r.y1.min(self.h as i32) {
-            for xx in r.x0.max(0)..r.x1.min(self.w as i32) {
-                if self.buf[(yy as u32 * self.w + xx as u32) as usize] != bg {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-}
-
-impl Canvas for OffscreenCanvas {
-    fn width(&self) -> u32 {
-        self.w
-    }
-    fn height(&self) -> u32 {
-        self.h
-    }
-    fn set_px(&mut self, x: i32, y: i32, c: Color) {
-        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
-            return;
-        }
-        let i = (y as u32 * self.w + x as u32) as usize;
-        self.buf[i] = c;
-    }
-    fn pixel(&self, x: i32, y: i32) -> Option<Color> {
-        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
-            None
-        } else {
-            Some(self.buf[(y as u32 * self.w + x as u32) as usize])
-        }
-    }
-    fn clear(&mut self, c: Color) {
-        self.buf.fill(c);
-    }
-    fn fill_rect(&mut self, r: &Rect, c: Color) {
-        if let Some(r) = r.clipped_to(self.w, self.h) {
-            let w = self.w as usize;
-            let s = (r.y0 as usize) * w + (r.x0 as usize);
-            let n = (r.x1 - r.x0) as usize;
-            for yy in 0..(r.y1 - r.y0) as usize {
-                let start = s + yy * w;
-                self.buf[start..start + n].fill(c);
-            }
-        }
-    }
-    fn blit_pixels(&mut self, x: i32, y: i32, width: u32, height: u32, src: &[Color]) {
-        // O5：`src` 短于声明尺寸 → 直接返回（否则下方切片越界 panic）。
-        if src.len() < (width as usize).saturating_mul(height as usize) {
-            return;
-        }
-        let r = Rect::new(x, y, x + width as i32, y + height as i32);
-        if let Some(clip) = r.clipped_to(self.w, self.h) {
-            let src_w = width as usize;
-            for yy in clip.y0..clip.y1 {
-                let sy = (yy - y) as usize;
-                let sx0 = (clip.x0 - x) as usize;
-                let sx1 = (clip.x1 - x) as usize;
-                let dst0 = (yy as u32 * self.w + clip.x0 as u32) as usize;
-                let dst1 = (yy as u32 * self.w + clip.x1 as u32) as usize;
-                self.buf[dst0..dst1]
-                    .copy_from_slice(&src[sy * src_w + sx0..sy * src_w + sx1]);
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +132,14 @@ pub mod fbdev {
     //! 2. **像素格式**：假定 32bpp `XRGB8888` 且行跨距 = `w*4`。实机若为 16bpp 或
     //!    跨距含 padding，颜色/花屏会异常，需按 `fb_var_screeninfo` 校准。
     //! 3. 建议部署脚本以 `--backend offscreen` 先跑通全链路，再切实屏定位驱动层问题。
+    //!
+    //! ## ⚠️ 本块**只在本机 Linux 上参与编译**（Windows 走 `cfg` 分支不编译）
+    //!
+    //! ⇒ 任何对本块的改动，**本机 `cargo check` 都验不到**。B3-2b-1 删除 v1.0 绘制原语时
+    //! 同步删掉了 `impl Canvas for FbCanvas` 里的 `set_px` / `pixel` / `clear` / `fill_rect`
+    //! 四个方法（它们只被已删的 `OffscreenCanvas` 对称实现与自绘链路消费），**保留的
+    //! `width` / `height` / `blit_pixels` 是 `screen.rs::PixelSink` 唯一的入口** —— 交叉编译
+    //! （`./deploy/scripts/build-for-rk3588.sh --cross`）是这块的唯一编译判据。
 
     use super::*;
 
@@ -465,60 +333,6 @@ pub mod fbdev {
         fn height(&self) -> u32 {
             self.h
         }
-        fn set_px(&mut self, x: i32, y: i32, c: Color) {
-            if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
-                return;
-            }
-            let idx = y as usize * self.w as usize + x as usize;
-            // SAFETY（映射内不变量，全类方法共享）：
-            // - 界内：上方边界检查保证 0 <= x < w、0 <= y < h，故 idx = y*w + x <= w*h - 1，
-            //   即 idx < len/4（`len = w*h*4` 与这里的 w/h 同一来源，且已在 `open` 中校验
-            //   `len <= smem_len`）→ `add(idx)` 落在映射内、且未越过「末尾后一格」的越界红线；
-            // - 对齐：`Color = u32` 对齐 4 字节，`self.map` 来自 mmap（页对齐，严格大于 4），
-            //   故字节偏移 idx*4 恒为 4 的倍数，满足 `*mut Color` 的对齐要求；
-            // - 独占总有性：`&mut self` 保证写期间不存在其他 Rust 侧对同一映射的访问（写与
-            //   `&self` 只读互斥）；`map`/`len`/`w`/`h` 均为私有字段，只在 `open` 中成组赋值，
-            //   此后无任何 setter → 「len 与 w*h*4 一致」这一前提在整个生命周期成立。若未来
-            //   新增能改 w/h 的方法，必须同步维护该不变量，否则本注释失效。
-            // - 索引溢出：w、h 为 u32，乘积在 64 位 usize 下不会回绕（本二进制为 LP64）。
-            unsafe {
-                *(self.map as *mut Color).add(idx) = c;
-            }
-        }
-        fn pixel(&self, x: i32, y: i32) -> Option<Color> {
-            if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
-                return None;
-            }
-            let idx = y as usize * self.w as usize + x as usize;
-            // SAFETY：与 `set_px` 完全相同的映射内不变量——界内检查 ⇒ idx < len/4，
-            // mmap 页对齐地址 + `Color` 对齐 4 ⇒ 读址对齐。此处是只读（`&self`），可与多个
-            // 只读借用共存；Rust 侧的写路径必须取 `&mut self`，与本次只读互斥，故不存在
-            // 「Rust 内并发读写同一元素」。
-            // ⚠️ 残留风险（如实标注）：该读为非原子的普通 `u32` 读。若内核 fbcon console 或
-            // 其他进程并发写 `/dev/fb0`，则与外部写者构成 Rust 模型外的数据竞争（本进程无法
-            // 加锁串行化外部写者）；当前部署假设渲染进程独占 fb0（见文件头「刻意不实现
-            // Send/Sync」小节与设计 §13 前置项 1）。读取值仅用于字形反锯齿的背景混合，即便偶发撕裂也只是
-            // 单帧像素观感问题，不会造成内存安全问题。
-            unsafe { Some(*(self.map as *const Color).add(idx)) }
-        }
-        fn clear(&mut self, c: Color) {
-            // SAFETY：循环下标 i ∈ [0, w*h)，即映射内 Color 元素的合法索引集合本身
-            // （元素数 = len/4 = w*h，由与 `set_px` 同一不变量保证：`len = w*h*4`、
-            // `len <= smem_len`、map 页对齐 ⇒ 每次 `*p.add(i)` 的写入地址均在映射内
-            // 且 4 字节对齐）；`&mut self` 独占写，循环期间无 Rust 侧别名。
-            // 注：本方法只填 `w*h` 个像素，不触碰 `smem_len` 中可能多出的余量（行跨距
-            // padding 等），故即使实机跨距 > w*4 也不会越界写——但像素会错位（属设计 §13
-            // 前置项 1 的像素格式/跨距真机首验项，非内存安全问题）。
-            unsafe {
-                let p = self.map as *mut Color;
-                for i in 0..(self.w as usize * self.h as usize) {
-                    *p.add(i) = c;
-                }
-            }
-        }
-        fn fill_rect(&mut self, r: &Rect, c: Color) {
-            fill_rect_default(self, r, c);
-        }
         fn blit_pixels(&mut self, x: i32, y: i32, width: u32, height: u32, src: &[Color]) {
             // O5：裸指针按声明尺寸读 `src`——过短即越界读；此处长度校验兜底（不越界写显存）。
             if src.len() < (width as usize).saturating_mul(height as usize) {
@@ -568,44 +382,47 @@ pub mod fbdev {
 mod tests {
     use super::*;
 
-    const RED: Color = 0x00_FF_00_00;
+    // ⚠️ **B3-2b-1 删除的四条用例**（与其被测符号**专属**，故一并删；每条都点名落点）：
+    //
+    // | 已删用例 | 被测符号 | 语义现由谁覆盖 |
+    // |----------|----------|----------------|
+    // | `rgb_packs_rrggbb` | `rgb()`（已删） | `ui/tests.rs::theme_matches_ui_spec`（`Palette` 逐色值锚定 `#RRGGBB`） |
+    // | `blend_over_half_coverage` | `blend_over()`（已删） | **无**：字形混合已归 LVGL 渲染器（v2.0 不自绘字形）⇒ 不再有需要断言的本地混合算术 |
+    // | `offscreen_rect_fill_and_clip` / `offscreen_blit_pixels` | `OffscreenCanvas`（已删） | `screen.rs::tests` 的 `memsink_writes_area_pixels_1to1` / `blit_clips_area_partially_outside_target`（**同一个语义，v2.0 的出口 = `MemorySink` + `Blitter`，且走的是生产同一条 flush 路径**） |
 
+    /// `Rect` 的**裁剪口径**（左闭右开 + 越界裁剪）—— `FbCanvas::blit_pixels` 唯一依赖的
+    /// `Rect` 行为（**本文件唯一保留的纯逻辑**）。
+    ///
+    /// **改什么会让本条变红**：把 `clipped_to` 的两处判据（`x0 < x1`、`y0 < y1`）写成 `<=`
+    /// —— **任一处单独改也会红**（下面**各有**一条"零宽 / 零高但另一维非空"的用例，
+    /// 见 `Rect::new(3, 3, 3, 7)` 与 `Rect::new(3, 3, 7, 3)`；只留 `Rect::new(3,3,3,3)`
+    /// 那种"两维同时退化"的用例时，两处判据**互相掩护** ⇒ 单改一处仍绿，评审已实测）；
+    /// 以及把 `clipped_to` 的边界 `min(w)` 改成 `min(w - 1)`（右缘少写一列像素）。
     #[test]
-    fn rgb_packs_rrggbb() {
-        assert_eq!(rgb(0xFF, 0x00, 0x00), 0xFF0000);
-        assert_eq!(rgb(0x0B, 0x12, 0x20), 0x0B1220);
-    }
-
-    #[test]
-    fn blend_over_half_coverage() {
-        // 黑底(0) 上白字(0xFFFFFF) 50% → 约 0x808080
-        let c = blend_over(0x000000, 0xFFFFFF, 0.5);
-        assert!(c > 0x7F7F7F && c < 0x818181);
-        assert_eq!(blend_over(0x000000, 0xFFFFFF, 1.0), 0xFFFFFF);
-        assert_eq!(blend_over(0x000000, 0xFFFFFF, 0.0), 0x000000);
-    }
-
-    #[test]
-    fn offscreen_rect_fill_and_clip() {
-        let mut cv = OffscreenCanvas::new(64, 64);
-        cv.clear(rgb(0, 0, 0));
-        cv.fill_rect(&Rect::new(10, 10, 20, 20), RED);
-        assert_eq!(cv.pixel(10, 10), Some(RED));
-        assert_eq!(cv.pixel(19, 19), Some(RED));
-        assert_eq!(cv.pixel(20, 20), Some(0));
-        // 越界矩形裁剪
-        cv.fill_rect(&Rect::new(0, 0, 70, 70), 0xFFFFFF);
-        assert_eq!(cv.pixel(63, 63), Some(0xFFFFFF));
-        assert_eq!(cv.count_color(&Rect::new(0, 0, 64, 64), 0xFFFFFF), 64 * 64);
-    }
-
-    #[test]
-    fn offscreen_blit_pixels() {
-        let mut cv = OffscreenCanvas::new(32, 32);
-        cv.clear(0);
-        let src = vec![RED, RED, RED, RED]; // 2x2
-        cv.blit_pixels(1, 1, 2, 2, &src);
-        assert_eq!(cv.pixel(2, 2), Some(RED));
-        assert_eq!(cv.pixel(0, 0), Some(0));
+    fn rect_clips_to_canvas_half_open() {
+        let r = Rect::new(10, 10, 20, 20);
+        assert_eq!((r.width(), r.height()), (10, 10));
+        assert!(r.contains(10, 10) && !r.contains(20, 20), "左闭右开");
+        assert_eq!(r.clipped_to(64, 64), Some(r), "完全在画布内 ⇒ 原样");
+        assert_eq!(
+            r.clipped_to(16, 16),
+            Some(Rect::new(10, 10, 16, 16)),
+            "越界部分按画布尺寸裁剪"
+        );
+        assert_eq!(r.clipped_to(5, 64), None, "完全在画布外 ⇒ None（不得返回空矩形）");
+        assert_eq!(Rect::new(3, 3, 3, 3).clipped_to(64, 64), None, "零面积 ⇒ None");
+        // **两维分别退化**（`x0 == x1` / `y0 == y1`，另一维非空）—— 这两条把两处判据
+        // **各自**钉住：缺了它们，`x0 < x1` 单独写成 `<=` 会返回"零宽矩形"而不被察觉。
+        assert_eq!(
+            Rect::new(3, 3, 3, 7).clipped_to(64, 64),
+            None,
+            "零宽（`x0 == x1`）⇒ None —— 不得因 `y0 < y1` 成立就返回 0 宽矩形"
+        );
+        assert_eq!(
+            Rect::new(3, 3, 7, 3).clipped_to(64, 64),
+            None,
+            "零高（`y0 == y1`）⇒ None —— 不得因 `x0 < x1` 成立就返回 0 高矩形"
+        );
+        assert_eq!(Rect::new(-5, -5, 5, 5).clipped_to(64, 64), Some(Rect::new(0, 0, 5, 5)));
     }
 }

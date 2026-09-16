@@ -246,18 +246,12 @@ impl CliConfig {
         }
     }
 
-    /// 空闲回归计时器（TT-12；`idle_timeout_secs == 0` ⇒ 禁用）。
-    ///
-    /// ⚠️ **登记（B3-2a 质量评审 建议 I-5 的裁定：留到 B3-2b 删）**：生产装配**当前不消费**
-    /// 本方法 —— 空闲回归状态机落在 `ui/shell.rs`（B2c-3 交付物，含倒计时胶囊 / `dirty` 不强制
-    /// 切页 / 弹层暂停），`App` 只把 `--idle-timeout-secs` 经 `Shell::set_idle_timeout` 注入，
-    /// **不另建** [`crate::timing::IdleTimer`]（两套计时器 = 同一口径的第二份真源，见
-    /// `app.rs` 模块头取舍 1）。保留理由：决定 `IdleTimer` 去留需要一并核对 B3-2b 的控制通道
-    /// 超时路径，本轮不动。**调用方改动前请先看这条登记**（勿把"测试在调"当成"生产在用"）。
-    /// `--idle-timeout-secs` 本身**是生效的**：它经 `Shell::set_idle_timeout` 上屏。
-    pub fn idle_timer(&self, now_ms: u64) -> crate::timing::IdleTimer {
-        crate::timing::IdleTimer::new(self.idle_timeout_secs, now_ms)
-    }
+    // 【B3-2b-1 已删除】`CliConfig::idle_timer(now_ms) -> timing::IdleTimer`
+    //
+    // 该方法是 `--idle-timeout-secs` → 计时器的便捷构造口，**生产装配从未消费**（`App` 只把
+    // 秒数经 `Shell::set_idle_timeout` 注入；`ui/shell.rs` 的 `Core::tick` 才是 TT-12 状态机
+    // 的唯一真源）。B3-2a 质量评审 建议 I-5 登记"留到 B3-2b 删"，本单元执行。
+    // 见 `timing.rs` 顶部「【B3-2b-1 已删除】`IdleTimer`」块的**边界核对表**。
 
     /// 解析命令行参数（**不含** argv[0]，由 bin 侧 `skip(1)` 后传入）。
     ///
@@ -1043,8 +1037,12 @@ mod tests {
         );
     }
 
+    /// B3-2b-1 订正：原名 `config_builds_touch_and_idle_handles` —— `idle_timer()` 已随
+    /// `timing::IdleTimer` 删除，故本用例只留触摸那一半，`--idle-timeout-secs` 的**解析**
+    /// 仍在此断言（不丢覆盖）。对应的「0 = 禁用」**行为**断言已搬到
+    /// `ui/tests.rs::shell_chain`（那里才是该语义的落点，见偏差 SH17）。
     #[test]
-    fn config_builds_touch_and_idle_handles() {
+    fn config_builds_touch_handles() {
         let c = CliConfig::parse(&args(&[
             "--touch-device",
             "/dev/mupc-touch",
@@ -1063,10 +1061,6 @@ mod tests {
         assert_eq!(t.device.as_deref(), Some(std::path::Path::new("/dev/mupc-touch")));
         assert_eq!((t.width, t.height), (800, 600));
         assert!(t.overrides.swap_xy);
-
-        let idle = c.idle_timer(1_000);
-        assert_eq!(idle.timeout_secs(), 30);
-        assert_eq!(idle.deadline_ms(), Some(31_000));
-        assert!(!CliConfig::default().idle_timer(0).is_disabled());
+        assert_eq!(c.idle_timeout_secs, 30, "`--idle-timeout-secs` 仍被解析（注入 `Shell::set_idle_timeout`）");
     }
 }

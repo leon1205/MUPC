@@ -54,6 +54,12 @@ pub trait PixelSink {
     /// 目标高度（像素）。
     fn height(&self) -> u32;
     /// 写入一行（或一块）像素：`px` 长度 = `w * h`，起点 `(x, y)`。越界部分应被忽略。
+    ///
+    /// ⚠️ **本方法没有返回值，这是 [`BlitCounters`] 的一处已知盲区的根因**（B3-2b-1 复核后
+    /// **原样保留**）：实现侧"静默不写"（如 `Rc<RefCell<S>>` 的 `try_borrow_mut()` 失败）
+    /// 无法上报给 [`Blitter::blit`] ⇒ 该拍 `blits` 照样 +1，**丢帧在计数上不可见**。
+    /// 要覆盖它必须改本签名（返回"是否写入"）—— 属**工作单元 C 的接口语义**，非本单元可动；
+    /// 完整登记（含另两条**已覆盖**的丢帧路径）见 [`BlitCounters`] 的文档。
     fn write_pixels(&mut self, x: i32, y: i32, w: u32, h: u32, px: &[Color]);
 }
 

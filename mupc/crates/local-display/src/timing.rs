@@ -464,8 +464,13 @@ pub trait Host {
     fn read_indev(&mut self);
     /// ⑤ 取 LVGL 事件队列中的 UI 动作 → 业务（切页 / 提交 / 防抖）。
     fn on_lv_events(&mut self);
-    /// 本拍到**下一次必须唤醒**的时刻（单调毫秒）：读通道轮询截止、
-    /// 空闲回归截止（[`IdleTimer`]）、控制通道超时截止……的**最小值**。
+    /// 本拍到**下一次必须唤醒**的时刻（单调毫秒）：读通道轮询截止、控制通道超时截止……
+    /// 的**最小值**。
+    ///
+    /// ⚠️ **不含空闲回归截止**（TT-12）：空闲回归由 `ui/shell.rs` 在 `Shell::tick` 内部逐拍
+    /// 计（时钟经参数注入），**不需要循环级截止** —— 见 `app.rs` 模块头取舍 1。
+    /// （原 `IdleTimer` 曾把该截止并入此值；该类型在 B3-2b-1 已删，故此处只作纯文本记述，
+    /// **不**写成文档链接。）
     /// 返回 `None` ⇒ 本拍无时间驱动任务（只由 LVGL 与输入唤醒）。
     fn next_deadline_ms(&self) -> Option<u64>;
     /// ⑥ 推进通道状态机（**非阻塞**，设计 §5.5）+ 刷新受影响的 `lv_obj`。
@@ -805,66 +810,24 @@ where
     Ok(st)
 }
 
-/// 空闲回归计时器（TT-12 / 设计 §5.6）。
-///
-/// 语义：`--idle-timeout-secs` 内无触摸则「回归主状态页」。本类型只负责**计时**；
-/// 「`dirty=true` 时不强制切页、改为顶部提示条」与「确认弹层打开期间不计时（TT-13）」
-/// 属 UI 策略，由工作单元 B 在拿到 [`IdleTimer::is_expired`] 后决定（本模块不越界）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IdleTimer {
-    timeout_secs: u64,
-    deadline_ms: Option<u64>,
-}
-
-impl IdleTimer {
-    /// 构造（`timeout_secs == 0` ⇒ **禁用**空闲回归，`deadline` 恒为 `None`）。
-    ///
-    /// 秒→毫秒用 [`saturating_mul`](u64::saturating_mul)：`--idle-timeout-secs` 是 CLI 入参，
-    /// 极大值不得在 debug 下 panic（溢出）或在 release 下静默 wrap 成**很小的**超时。
-    pub fn new(timeout_secs: u64, now_ms: u64) -> Self {
-        let mut t = Self {
-            timeout_secs,
-            deadline_ms: None,
-        };
-        if timeout_secs > 0 {
-            t.deadline_ms = Some(now_ms.saturating_add(timeout_secs.saturating_mul(1000)));
-        }
-        t
-    }
-
-    /// 超时秒数（0 = 禁用）。
-    pub fn timeout_secs(&self) -> u64 {
-        self.timeout_secs
-    }
-
-    /// 是否禁用。
-    pub fn is_disabled(&self) -> bool {
-        self.timeout_secs == 0
-    }
-
-    /// 触摸事件到达 → 重置计时（设计 §5.6 TT-12）。
-    pub fn on_touch(&mut self, now_ms: u64) {
-        if self.timeout_secs > 0 {
-            self.deadline_ms = Some(now_ms.saturating_add(self.timeout_secs.saturating_mul(1000)));
-        }
-    }
-
-    /// 到期时刻（`None` = 禁用）；应并入 [`Host::next_deadline_ms`] 的最小值里，
-    /// 否则空闲回归会被 `poll` 的 500 ms 上界之外的其他截止掩盖。
-    pub fn deadline_ms(&self) -> Option<u64> {
-        self.deadline_ms
-    }
-
-    /// 是否已到期（禁用时恒为 `false`）。
-    pub fn is_expired(&self, now_ms: u64) -> bool {
-        matches!(self.deadline_ms, Some(d) if now_ms >= d)
-    }
-
-    /// 到期后重排下一次（调用方在「已处理一次回归」后调用，避免反复触发）。
-    pub fn rearm(&mut self, now_ms: u64) {
-        self.on_touch(now_ms);
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// 【B3-2b-1 已删除】`IdleTimer`（空闲回归计时器，TT-12 / 设计 §5.6）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// **为什么删**（主控裁定，逐条留痕）：TT-12 的状态机已在 `ui/shell.rs::Core::tick` 里
+// **完整实现**（倒计时胶囊 / 到 0 切 P1 / 触摸重置 / `dirty` 与弹层暂停），且**生产装配
+// 只消费外壳那一份**（`app.rs` 把 `--idle-timeout-secs` 经 `Shell::set_idle_timeout` 注入，
+// **不**另建本类型）—— 两套计时器 = "同一口径的第二份真源"，各自都会触发一次回归。
+//
+// **删除前的边界核对**（任务书要求"核它的用例是否覆盖了外壳没覆盖的边界"）：
+//
+// | 原用例 | 边界 | 外壳（`Shell::tick`）是否覆盖 |
+// |--------|------|------------------------------|
+// | `idle_timer_resets_on_touch_and_expires` | 触摸重置 / 到期判定 / 到期重排 | **覆盖**（`shell_chain` ④ 段：`PRESSED ⇒ 计时重置`、`到 0 切 P1`、`回归后从满时长重算`） |
+// | `idle_timer_zero_means_disabled` | **`0` = 禁用** | **原先未覆盖**（`remaining_secs` 恒 0 ⇒ 每拍强制回 P1）⇒ **本单元已补**：`Core::tick` 的 `disabled` 分支 + `shell_chain` ③″ 段的断言（偏差 **SH17**） |
+// | `idle_timer_seconds_to_ms_saturates` | 秒→毫秒饱和（`u64::MAX`） | **不可达**（`--idle-timeout-secs` 经 `parse_u64_range(.., 0, MAX_IDLE_TIMEOUT_SECS = 3600)` 限定 ⇒ `Duration::from_secs(≤3600)` 的 `checked_add` 永不溢出）⇒ **如实登记为"无需覆盖"**，不搬 |
+//
+// **语义落点**：计时算法 = `ui/shell.rs::remaining_secs`；「`0` = 禁用」= `ui/shell.rs::Core::tick`。
 
 #[cfg(test)]
 mod tests {
@@ -1259,53 +1222,12 @@ mod tests {
         assert!(SystemClock::default().now_ms() < 60_000);
     }
 
-    // ---- ⑥ 空闲回归计时器（TT-12） ----
-
-    #[test]
-    fn idle_timer_resets_on_touch_and_expires() {
-        let mut t = IdleTimer::new(60, 1_000);
-        assert_eq!(t.timeout_secs(), 60);
-        assert!(!t.is_disabled());
-        assert_eq!(t.deadline_ms(), Some(61_000));
-        assert!(!t.is_expired(60_999));
-        assert!(t.is_expired(61_000));
-        assert!(t.is_expired(99_999));
-
-        // 触摸重置（TT-12：触摸事件重置计时）
-        t.on_touch(50_000);
-        assert_eq!(t.deadline_ms(), Some(110_000));
-        assert!(!t.is_expired(61_000), "重置后不得因旧截止而触发");
-
-        // 到期后重排
-        t.rearm(110_000);
-        assert_eq!(t.deadline_ms(), Some(170_000));
-    }
-
-    /// Minor 1 整改：秒→毫秒必须**饱和**（debug 不 panic / release 不 wrap 成极小值）。
-    #[test]
-    fn idle_timer_seconds_to_ms_saturates() {
-        let t = IdleTimer::new(u64::MAX, 1_000);
-        assert_eq!(
-            t.deadline_ms(),
-            Some(u64::MAX),
-            "极大秒数不得溢出成小 deadline"
-        );
-        let mut t = IdleTimer::new(u64::MAX, u64::MAX - 10);
-        t.on_touch(u64::MAX - 10);
-        assert_eq!(t.deadline_ms(), Some(u64::MAX));
-        // 正常量级不受影响
-        assert_eq!(IdleTimer::new(3, 40).deadline_ms(), Some(3_040));
-    }
-
-    #[test]
-    fn idle_timer_zero_means_disabled() {
-        let mut t = IdleTimer::new(0, 1_000);
-        assert!(t.is_disabled());
-        assert_eq!(t.deadline_ms(), None);
-        assert!(!t.is_expired(u64::MAX));
-        t.on_touch(u64::MAX - 1);
-        assert_eq!(t.deadline_ms(), None, "禁用时触摸也不得排出截止");
-    }
+    // ---- ⑥ 空闲回归计时器（TT-12）已删（B3-2b-1）----
+    //
+    // 三条专属用例随 `IdleTimer` 一并删除（边界核对表见上面「【B3-2b-1 已删除】」块）：
+    // 其中「触摸重置 / 到期重排」由 `ui/tests.rs::shell_chain` ④ 段覆盖，
+    // 「`0` = 禁用」由本单元新补的外壳分支 + `shell_chain` ③″ 段覆盖（偏差 SH17），
+    // 「秒→毫秒饱和」经核实**不可达**（`--idle-timeout-secs ≤ 3600`）。
 
     // ---- ④-c 防忙等硬钳制 + 退避阶梯（评审 C-② / Important 4 整改） ----
 
