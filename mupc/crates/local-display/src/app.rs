@@ -19,6 +19,10 @@
 //! Shell::new(&Obj::screen())            // 页眉 + 6 页 + 导航（B2c-3 已交付）
 //! ```
 //!
+//! TT-12「**任何**触摸事件重置」（UI §4.3；偏差 **SH5**）**没有装配期的挂号动作** ——
+//! 它就是输入泵的一步：[`apply_touch_snapshot`] 把 evdev 快照交给 `Indev` 时，若
+//! `pressed` 就顺带调一次 [`Shell::note_activity`]。详见该函数的文档。
+//!
 //! # 每拍做什么（[`Host`] 的五个方法 = §5.2 骨架的 ③–⑥ 步）
 //!
 //! | 步 | 方法 | 本实现 |
@@ -60,7 +64,7 @@ use crate::control_route::{
     RouteDecision,
 };
 use crate::lvgl::display::{Display, Rotation};
-use crate::lvgl::indev::Indev;
+use crate::lvgl::indev::{Indev, TouchSnapshot};
 use crate::lvgl::obj::Obj;
 use crate::screen::{Blitter, MemorySink, PixelSink};
 use crate::state::{self, ChannelStatus, ControlState, DisplayState, Freshness};
@@ -632,6 +636,10 @@ impl App {
         let shell = Shell::new(&screen).map_err(|e| StartupError::Lvgl(e.to_string()))?;
         // TT-12 空闲回归参数**注入外壳**（外壳持有该状态机，见模块头取舍 1）。
         shell.set_idle_timeout(cfg.idle_timeout_secs);
+        // TT-12「**任何**触摸事件重置」（UI §4.3；偏差 **SH5**）**不需要在这里挂号** ——
+        // 它的唯一落点是输入泵 [`apply_touch_snapshot`]（喂快照时就地调
+        // [`Shell::note_activity`]），而那条路**与 LVGL 的命中结果无关**。此处 `indev`
+        // 已建好、尚未喂过任何数据。
         // EDGE-13：触摸不可用 ⇒ 页眉角标（只在真的不可用时置位，不猜）。
         #[cfg(target_os = "linux")]
         shell.set_touch_available(touch.is_some());
@@ -1336,6 +1344,49 @@ impl App {
     }
 }
 
+/// **把一次 evdev 快照投进输入管线**（TT-12「**任何**触摸事件重置计时」；UI §4.3 / 偏差 **SH5**）。
+///
+/// **这是该能力的唯一机制、也是唯一真源**：喂快照（[`Indev::feed`]）+ 若 `pressed` 则
+/// [`Shell::note_activity`]。抽成自由函数是为了让"生产跑的那个体"与"离屏用例断言的那个体"
+/// **是同一个**（`ui/tests.rs::shell_chain` 的 ④″ 段直接调本函数；否则"把这一句删掉"这类
+/// 破坏在离屏链路上**没有任何网** —— 本项目 B3-2c 的 Toast 调用点踩过同款）。
+///
+/// # 为什么挂在**快照**上，而不是给 `Indev` 挂设备级按下回调
+///
+/// UI §4.3 的原文是「**任何**触摸事件重置计时」。两条候选都不够：
+///
+/// 1. **对象级**（外壳根挂 `PRESSED`）：LVGL **默认不上冒**（`lv_obj_event.c:391` 的
+///    `event_is_bubbled` 要求链上每层自带 `LV_OBJ_FLAG_EVENT_BUBBLE`），且
+///    `lv_indev_search_obj`（`vendor/lvgl/src/indev/lv_indev.c:618`）取"命中的**最深**可点对象"
+///    —— `lv_obj` 构造时**默认 `CLICKABLE`**（`lv_obj.c:584`）、三区又恰好铺满画布 ⇒
+///    真实按压永远落不到外壳根上；
+/// 2. **设备级**（`lv_indev_add_event_cb` 挂 `LV_EVENT_PRESSED`）：**在禁用态控件上不成立** ——
+///    `lv_indev.c:1339` 的 `is_enabled = !lv_obj_has_state(indev_obj_act, LV_STATE_DISABLED)`
+///    把 `send_event(LV_EVENT_PRESSED, …)`（`:1342`）整个包住，而 `lv_obj_hit_test`
+///    **不排除** `DISABLED`、`lv_indev_search_obj` 照样返回那个禁用对象 ⇒ **回调根本不触发**
+///    （实测：120×120 且置 `DISABLED` 的子对象，按其中点，回调计数 `2 → 2`）。生产命中面真实
+///    存在：`p2_config.rs`（无改动时「保存」置灰）、`components.rs`（步进器越界禁用）、
+///    `p4_interlock.rs`。
+///
+/// evdev 快照是**真实输入源**，与 LVGL 的命中测试**无关** ⇒ 天然覆盖**禁用态控件 /
+/// `lv_layer_top()` 上的弹层与 Toast / 空白**。**幂等**：`pressed` 跨多拍重复到达只会重复
+/// 置位（[`Shell::note_activity`] 只写一个 `Cell`），不会有副作用累积。
+///
+/// # 边界（如实）
+///
+/// - **不改** LVGL 的命中 / 派发语义：`indev.read()` 仍照常把 `PRESSED` 投给命中对象
+///   （禁用对象照旧收不到）—— 本条只负责"计时器知道有人在按"；
+/// - 触摸**不可用**时（`touch` 为 `None`）本函数根本不会被调用 ⇒ 计时只由页内 3 个控件的
+///   对象级挂钩推进（EDGE-13 的降级形态）。
+pub fn apply_touch_snapshot(shell: &Shell, indev: &Indev, snap: TouchSnapshot) {
+    indev.feed(snap);
+    // ⚠️ **只认按下**（§4.3 点名的就是它；抬手不是"用户活动"的新证据）。长按必先有按下
+    // ⇒ 不会漏；同一按压跨多拍重复喂入时这里会重复置位，幂等（见上）。
+    if snap.pressed {
+        shell.note_activity();
+    }
+}
+
 impl Host for App {
     /// ③ 读 evdev → 更新 `Indev` 快照。**绝不阻塞**（fd 在 `TouchDevice::open` 时已置非阻塞）。
     ///
@@ -1350,7 +1401,7 @@ impl Host for App {
                 .map(|t| t.pump().map(|changed| (changed, t.snapshot())));
             match outcome {
                 None => {} // 无触摸设备（降级只读展示）
-                Some(Ok((true, snap))) => self.indev.feed(snap),
+                Some(Ok((true, snap))) => apply_touch_snapshot(&self.shell, &self.indev, snap),
                 Some(Ok((false, _))) => {} // 空闲拍：无新事件
                 Some(Err(e)) => {
                     self.touch_errors += 1;
@@ -1657,6 +1708,31 @@ pub fn ppm_bytes(w: u32, h: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **源码哨的"去注释"视图**（B4b 整改「建议 3.4」）：剔掉**整行注释**（`//` 起首，允许
+    /// 前导空白）后再交给各哨做 `matches` / `contains`。
+    ///
+    /// # 为什么必须有它
+    ///
+    /// 本文件的源码哨此前直接扫 `include_str!("app.rs")` 的**原始文本** ⇒ 把要守的那一行
+    /// **注释掉**照样满足 `matches(..) == 1` / `contains(..)`，哨当场退化成摆设。
+    /// **B4b 整改实测（探针 D / D′）**：把 `pump` 的那一句改成注释形态
+    /// （`// apply_touch_snapshot(&self.shell, &self.indev, snap);`）后，
+    /// 用**原始文本**判 ⇒ 该哨**照样全绿**（伪通过）；换成 `without_line_comments` 后
+    /// ⇒ 当场红（`left: 0, right: 1`）。剔注释后"注释掉即红"。
+    ///
+    /// # 能力边界（如实）
+    ///
+    /// 只剔**整行注释** —— **块注释**（`/* … */`）与**行尾注释**（`let x = 1; // …`）不处理。
+    /// 对本文件的四个哨足够：它们守的都是**独立语句**，不存在"行尾注释里带该串"的形态；
+    /// 而残留的块 / 行尾注释只会让计数**偏大**（判据是 `== 1` / `!contains`）⇒ 偏大即红，
+    /// 落在"响亮失败"这一侧，不会静默放行。
+    fn without_line_comments(src: &str) -> String {
+        src.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     /// 页眉时钟：**只由既有格式化出口派生**，且字符全在生成字体的 cmap 内。
     ///
@@ -2026,7 +2102,8 @@ mod tests {
     /// 且 `App::toast` 是**拥有型字段**（`Drop` 时随 `App` 析构）。
     ///
     /// **改什么会让本条变红**（**已实测**）：在 `sync_toast` 里再写一个 `Toast::new(` ⇒
-    /// 计数变 2 ⇒ 第 1 条红；把 `sync_toast(epoch_ms)` 的调用从 `tick` 摘掉 ⇒ 第 2 条红。
+    /// 计数变 2 ⇒ 第 1 条红；把 `sync_toast(epoch_ms)` 的调用从 `tick` 摘掉 ⇒ 第 2 条红；
+    /// 把装配点**注释掉** ⇒ 去注释后计数变 0 ⇒ 第 1 条红（B4b 整改「建议 3.4」）。
     #[test]
     fn app_toast_is_built_once_and_synced_from_tick() {
         const SRC: &str = include_str!("app.rs");
@@ -2035,8 +2112,11 @@ mod tests {
             .next()
             .expect("app.rs 应能切出生产段");
         assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        // ⚠️ 判据在**去注释**后的文本上取（[`without_line_comments`]）：只数原始字符时，
+        // 把 `let toast = Toast::new(` **注释掉**照样通过 —— 本哨会退化成摆设。
+        let live = without_line_comments(prod);
         assert_eq!(
-            prod.matches("Toast::new(").count(),
+            live.matches("Toast::new(").count(),
             1,
             "app Toast 必须**只装配一次**（写在 `tick`/回调里 = 每次失败新建对象 ⇒ 定容池耗尽）"
         );
@@ -2045,8 +2125,8 @@ mod tests {
         // ⚠️ 窗口按**字符**取（本文件是 UTF-8，`&s[..n]` 会切在多字节字符中间而 panic ——
         // 本项目"扫描器失真"的又一形态）。
         const FN_HEAD: &str = "fn tick(&mut self, now_ms: u64) {";
-        let at = prod.find(FN_HEAD).expect("`App::tick` 必须存在（唯一更新点）");
-        let body: String = prod[at + FN_HEAD.len()..].chars().take(4_000).collect();
+        let at = live.find(FN_HEAD).expect("`App::tick` 必须存在（唯一更新点）");
+        let body: String = live[at + FN_HEAD.len()..].chars().take(4_000).collect();
         assert!(
             body.contains("self.sync_toast("),
             "`App::tick` 里必须调 `sync_toast` —— 否则三条失败路径产生的 Toast 记录**永不落屏**"
@@ -2060,10 +2140,10 @@ mod tests {
         // 判据改成"转调"后，**"被断言的"与"生产跑的"才是同一个体**：那个自由函数由
         // `ui/tests.rs::ui_chain` 连推 N 拍做**双零增长**断言。
         // 把 `set_text` / `set_visible` 搬回本函数（哪怕只是留一份副本）⇒ 本条当场红。
-        let sync_at = prod
+        let sync_at = live
             .find("fn sync_toast(&mut self, epoch_ms: u64) {")
             .expect("`App::sync_toast` 必须存在");
-        let sync_body: String = prod[sync_at..].chars().take(1_200).collect();
+        let sync_body: String = live[sync_at..].chars().take(1_200).collect();
         assert!(
             sync_body.contains("sync_toast_view("),
             "`App::sync_toast` 必须**转调** `sync_toast_view` —— 否则这段 LVGL 写操作重新脱离 \
@@ -2074,10 +2154,10 @@ mod tests {
             "`sync_toast` 不得建 / 删 Toast 对象（运行期对象 churn）"
         );
         // 自由函数那一侧：**只**做可见性 / 文本（不得建删对象、不得改样式表）。
-        let view_at = prod
+        let view_at = live
             .find("pub fn sync_toast_view(toast: &Toast, view: Option<&str>) {")
             .expect("`sync_toast_view` 必须存在（`ui_chain` 的双零增长断言的**同一体**）");
-        let view_body: String = prod[view_at..].chars().take(1_200).collect();
+        let view_body: String = live[view_at..].chars().take(1_200).collect();
         assert!(
             view_body.contains("set_text(") && view_body.contains("set_visible("),
             "`sync_toast_view` 必须就地换文本 / 切可见性（不得新建对象）"
@@ -2085,6 +2165,70 @@ mod tests {
         assert!(
             !view_body.contains("Toast::new(") && !view_body.contains(".close()"),
             "`sync_toast_view` 不得建 / 删 Toast 对象（运行期对象 churn）"
+        );
+    }
+
+    /// **TT-12「任何触摸事件重置」的输入泵接线哨**（B4b 整改；`ui/shell.rs` 偏差 **SH5**）。
+    ///
+    /// # 为什么要一个源码哨
+    ///
+    /// 这一条能力的**机制本体**（[`apply_touch_snapshot`]：喂快照 + `pressed` ⇒
+    /// [`Shell::note_activity`]）与它的**行为**都已经有网：`ui/tests.rs::shell_chain` 的 ④″ 段
+    /// **直接调本函数**（含"**禁用态控件上的按压也重置计时**"的回归锁）。但那一节是**测试
+    /// 自己**调的 —— **生产**那条接线（[`App::pump`] 里的那一句）若被摘掉，离屏链路**照样
+    /// 全绿**（与 B3-2c 的 Toast 调用点同款：**能力**与**接线**是两件事，评审实测过"删掉调用点
+    /// 全绿"）。本哨把"生产确实走了这条路"变成可断言的事实。
+    ///
+    /// # 能力边界（如实）
+    ///
+    /// 它证明"这一行**在源码里**"，**不**证明运行期真的生效 —— 后者由 ④″ 的用例覆盖
+    /// （两者合起来才是完整的网）。且 `pump` 的 evdev 分支带 `cfg(target_os = "linux")`，
+    /// 离屏链路**根本跑不到** ⇒ 这里**只能**是源码哨。
+    ///
+    /// **改什么会让本条变红**（**已实测**）：删掉 `pump` 里的
+    /// `apply_touch_snapshot(&self.shell, &self.indev, snap)` ⇒ 第 1 条红；把它**注释掉**
+    /// ⇒ 去注释后同样红；让它退回裸 `self.indev.feed(snap)`（只喂不记事）⇒ 第 2 条红；
+    /// 摘掉自由函数里的 `if snap.pressed` / `shell.note_activity();` ⇒ 第 3 条红。
+    #[test]
+    fn pump_routes_touch_snapshots_through_apply_touch_snapshot() {
+        const SRC: &str = include_str!("app.rs");
+        let prod = SRC
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("app.rs 应能切出生产段");
+        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        // ⚠️ 判据一律在**去注释**后的文本上取（见 [`without_line_comments`]）：否则把要守的
+        // 那些行**注释掉**照样通过 —— 本哨（及其同款的三个哨）会当场退化成摆设。
+        let live = without_line_comments(prod);
+        assert_eq!(
+            live.matches("apply_touch_snapshot(&self.shell, &self.indev, snap)")
+                .count(),
+            1,
+            "生产输入泵必须**恰好**经过 `apply_touch_snapshot`（§4.3「任何触摸事件重置」；\
+             删掉它 ⇒ 只有返回键 / 6 页签 / 放弃修改这 3 个控件会重置计时）"
+        );
+        // 反向：`pump` 里**不得**再有裸 `self.indev.feed(` —— 那正是"绕开活动记录"的老路
+        // （`App::build` 里那次首拍 `indev.feed(t.snapshot())` 是**局部变量** `indev` 上的
+        // 调用，与 `self.indev` 不同，不受本条约束）。
+        assert_eq!(
+            live.matches("self.indev.feed(").count(),
+            0,
+            "`pump` 不得绕过 `apply_touch_snapshot` 直接喂快照（那样按压不会被记为活动）"
+        );
+        // 机制本体：那一条自由函数必须**在按下时**记活动（不是"无条件记"、也不是"从不记"）。
+        const FN_HEAD: &str =
+            "pub fn apply_touch_snapshot(shell: &Shell, indev: &Indev, snap: TouchSnapshot) {";
+        let at = live
+            .find(FN_HEAD)
+            .expect("`apply_touch_snapshot` 必须存在（输入泵与离屏用例的**同一体**）");
+        let body: String = live[at..].chars().take(400).collect();
+        assert!(
+            body.contains("indev.feed(snap);") && body.contains("shell.note_activity();"),
+            "`apply_touch_snapshot` 必须把「喂快照」与「记一次活动」两件事都做"
+        );
+        assert!(
+            body.contains("if snap.pressed"),
+            "活动记录必须**只在按下时**发生（抬手不是「用户活动」的新证据；§4.3 点名的是 PRESSED）"
         );
     }
 
@@ -2167,7 +2311,8 @@ mod tests {
     /// `Option` 本身在本工具链**不触发**该告警）。
     ///
     /// **改什么会让本条变红**（**已实测**，见报告「探针 4」）：删掉
-    /// `self.apply_route(decision);` ⇒ 第 2 条断言红（同一改动还会报 `unused_must_use` 告警）。
+    /// `self.apply_route(decision);` ⇒ 第 2 条断言红（同一改动还会报 `unused_must_use` 告警）；
+    /// 把 `self.apply_route(decision);` **注释掉** ⇒ 去注释后同样红（B4b 整改「建议 3.4」）。
     #[test]
     fn transport_failure_branch_dispatches_the_receipt_it_built() {
         const SRC: &str = include_str!("app.rs");
@@ -2179,13 +2324,16 @@ mod tests {
             .next()
             .expect("app.rs 应能切出生产段");
         assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把
+        // `self.apply_route(decision);` **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
+        let live = without_line_comments(prod);
         // 判据必须**就近**：`self.apply_route(decision);` 在 `absorb_console` 的成功路径上
         // 也有一处（同一行文本）—— 只查"全文含有"会被**那一处**满足，探测力归零
         // （B3-2b-2 整改实测踩过：探针 4 第一版**没红**）。
-        let at = prod
+        let at = live
             .find("record_transport_failure_with_receipt(epoch_ms)")
             .expect("失败分支必须取用本地合成回执（否则控制通道挂掉时屏上什么都不发生）");
-        let tail = &prod[at..];
+        let tail = &live[at..];
         let near = &tail[..tail.len().min(NEAR_WINDOW)];
         assert!(
             near.contains("self.apply_route(decision)"),
@@ -2210,7 +2358,9 @@ mod tests {
     /// "**这一行在源码里**"，与上面那条传输失败分支的哨同款。
     ///
     /// **改什么会让本条变红**（**已实测**，见交付报告「探针 1」）：把这一支改回
-    /// `self.control.record_transport_failure(epoch_ms);`（= "只推 app Toast"）⇒ 第 1 / 3 条红。
+    /// `self.control.record_transport_failure(epoch_ms);`（= "只推 app Toast"）⇒ 第 1 / 3 条红；
+    /// 把 `record_transport_failure_with_receipt(epoch_ms)` 或 `self.apply_route(decision)`
+    /// **注释掉** ⇒ 去注释后同样红（B4b 整改「建议 3.4」）。
     #[test]
     fn route_error_branch_hands_write_failures_to_the_page_channel() {
         const SRC: &str = include_str!("app.rs");
@@ -2222,13 +2372,16 @@ mod tests {
             .next()
             .expect("app.rs 应能切出生产段");
         assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把被守的那几行
+        // **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
+        let live = without_line_comments(prod);
         // 锚点取 `route(&outcome)` 的分派点自身：`record_transport_failure_with_receipt` 在
         // **上面**那条传输失败分支里也有一处 ⇒ 只查"全文含有"会被**那一处**满足、探测力归零
         // （B3-2b-2 整改踩过同款坑，见 `transport_failure_branch_dispatches_the_receipt_it_built`）。
-        let at = prod
+        let at = live
             .find("let decision = match route(&outcome) {")
             .expect("`App::absorb_console` 里必须有 `route` 的分派点");
-        let near: String = prod[at..].chars().take(WINDOW_CHARS).collect();
+        let near: String = live[at..].chars().take(WINDOW_CHARS).collect();
         assert!(
             near.contains("route_errors += 1"),
             "{WINDOW_CHARS} 字符的窗口没盖住 `route` 的 `Err` 分支 ⇒ 扫描器失真，后两条断言不可信"

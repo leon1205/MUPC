@@ -37,7 +37,7 @@
 //! | AU3 | 操作类型标签取**契约** `ConsoleOp::label()`（`配置保存` / `恢复默认值` / `联锁释放` / **`M1 授权`**），**未**取 §3.6 P5 行的 `M1 授权重启`（差 2 字） | 契约 `ConsoleOp::label()` 是**唯一机器可读的真源**（`/audit/ops` 的 `label` 亦由它生成）；§3.6 P5 行给的是"该页用字集合"。**不**在 UI 层另造一份映射（那会得到"后端标签与屏上标签各一份"的第二真源） | 若 PM 裁定 §3.6 P5 行走字优先：改 `display-proto` 的 `ConsoleOp::label()`（**一处**），UI 自动跟随 |
 //! | AU4 | **不可篡改说明条的锁形取 `■`**（U+25A0） | UI §3.6 在"非中文字形"清单里**明写**「`🔒`（**以几何锁形替代**）」—— 即设计本身要求用几何形状替代 emoji；cmap 内可用的几何字形只有 `● ○ ■ ▲ ▼ ⚠ ✓ ×` ⇒ 取 `■`（实心块，与 `UnavailableKind` 的 `?`、空态的 `○` **不同族**） | 无（**按 §3.6 原文**）；若 PM 要求更"锁"的语义，需扩字表 |
 //! | AU5 | **EDGE-15（检索范围超限）在 P5 侧生产不可达** —— `AuditPage` **没有** `range_too_large` 字段（对照：`LogPage` 有，见 `display-proto/src/log.rs`），而 §8.3 的 EDGE-15 行明写适用「P3 / **P5**」 | **契约缺口**（`display-proto` 本批冻结、不得改）。**本页不造字段**，而是把 **UI 落点**备齐：`WarnBanner` **懒惰构建**（首个 [`P5AuditPage::set_range_too_large`]`(true)` 才建 —— 代码质量评审 **M5**：既然生产不可达，就不该让每页常驻背着一份"永不显形"的构件）、由显式注入驱动并**逐条可测**。⚠️ **残余（如实）**：B3 **无法**从当前 `AuditPage` 推出该标志 ⇒ 生产路径上该 banner **永不可达** | 契约侧给 `AuditPage` 增 `range_too_large: bool`（与 `LogPage` 同口径：**必需**字段、缺失即 `Err`）；届时 [`P5AuditPage::set_page`] 直接读该字段（**单一分派点**），[`P5AuditPage::set_range_too_large`] 退化为测试入口 **✅ PM 已裁定（2026-09-15）**：契约**不改**；UI §8.3 的 EDGE-15 适用范围由「P3 / P5」**收窄为 P3**（「单次最多扫 5 个日志文件 / 5 万行」是**日志**检索语义，审计页按 `page`/`page_size` 分页、本无超限概念）。本页的 `set_range_too_large` 注入入口**保留**为测试入口，见 UI 附录 **A.7** |
-//! | AU6 | **「滚动加载」的触发点在本层不可得** ⇒ 本页提供 [`P5AuditPage::request_next_page`] 作为**触发入口**（由外壳在"列表滚到底"时调用），本页据最近一次注入的 `AuditPage.page` / `has_more` 组装 `page + 1` 的 [`AuditQuery`] 交回外部 | 薄层的 `EventCode` **未镜像** `LV_EVENT_SCROLL`（镜像的事件码实为 `PRESSED` / `PRESS_LOST` / `RELEASED` / `CLICKED` / `LONG_PRESSED` / `LONG_PRESSED_REPEAT` / `VALUE_CHANGED` / `READY` / `CANCEL` / `DELETE` —— **含** `PRESS_LOST` 与 `LONG_PRESSED_REPEAT`，**不含** `SCROLL`），而 `src/lvgl/**` 本批**禁改** ⇒ "检测滚到底"在本单元**结构性不可实现**。故：**意图**由本页组装（含去重所需的 `page`）、**触发与节流**由 B3 承担（与任务书"滚动加载的触发与去重由 B3 负责"一致） | B3 接线时：在滚动容器上挂 `LV_EVENT_SCROLL`（需先在 `src/lvgl/event.rs` 镜像该事件码）后调 `request_next_page()`；或由 B3 自行节流后调用 |
+//! | AU6 | 【**✅ 已实施（2026-09-16，B4b）**】「滚动加载」的触发点**已接线**：本页在**自己的滚动容器**（页根，契约 1）上注册 [`crate::lvgl::event::EventCode::SCROLL`]，滚到「接近底部」时**直接调 [`Core::fire_load_more`]**（**不是**绕道公开入口 [`P5AuditPage::request_next_page`] —— 后者只是 `fire_load_more` 的一层转发，留给外部显式触发）—— 本页据最近一次注入的 `AuditPage.page` / `has_more` 组装 `page + 1` 的 [`AuditQuery`] 交回外部 | 改动前的阻塞（**B4b 已解除**）：薄层的 `EventCode` **未镜像** `LV_EVENT_SCROLL` ⇒ 「检测滚到底」在本层**结构性不可实现**，只能外露一个 `request_next_page()` 干等外壳调用（而外壳**没有**这个事件的钩子 ⇒ 生产上**零调用者**）。B4b 给薄层补了该事件码的镜像（数值早已随 `lv_event_code_t` 生成，**不动 allowlist**）⇒ 触发点归回本页（本页才知道内容有多高）；**意图去重 / 分页 / 请求**仍归 B3。**判据「接近底部」为什么自算**：薄层**没有**「内容高 / 剩余可滚量」读回口（要 `lv_obj_get_scroll_bottom` 一类新符号），而本页布局时就知道 `y_list + list_h` ⇒ 存成 [`Core::content_bottom`] 供滚动回调读 | **✅ 已实施（B4b）**：`Core::on_scroll`（[`Core::near_bottom`] 判 `剩余 ≤ LOAD_MORE_THRESHOLD`= 一行高）+ **边沿触发闩**（`Core::load_more_armed`）—— 一次拖动会连发上百个 `SCROLL` 事件，无闩会把上层意图队列灌爆。**回归锁**：`ui/tests.rs::pages_chain` 的 ⑦″ 段（满页 20 行 + `has_more` ⇒ 滚到中段**不发**、滚到底**发一次且 `page = 2`**、离开区间再到底**再发一次**、**1 px 微步进 `SCROLL` × 561 次末段停在底部区间 ⇒ 意图只产生一次**）。**探针实测**：① 注释掉 `P5AuditPage::new` 里的 SCROLL 注册 ⇒ 该段红（`left: 0, right: 1`）；② **B4b 整改「重要 2」**：把 `Core::on_scroll` 的边沿闩摘掉（判据恒真）⇒ 连发那一条红（原文 `left: 63, right: 3` —— 561 个 `SCROLL` 灌出 60 条重复意图）。**残余（如实）**：① 「滚到底」判据里的视口高取**契约常量** `Dimens::CONTENT_H`（不是 LVGL 读回值）；② 内容不变时用户停在底部**不会**重复要下一页（要翻更多得先离开区间再回去 —— 这是有意的防重语义） |
 //! | AU7 | **操作类型 chip 组占 2 行（块高 112 px），不是设计线框的一行（64 px）** ⇒ 其下方（表头 / 列表）整体下移 48 px | **根因（结构性，非取舍）**：5 个选项里最长的 `恢复默认值` 在 26 px 档实测 **130 px**，选中态再拼 `✓ ` 前缀（**153.6 px**，UI §5.2 要求）⇒ 单 chip 至少 **192 px**（= 153.6 + 按钮内边距 2×16）；5 × 192 + 4 × 16 = **1024 > 992** ⇒ **单行装不下**（即使把标签列挪到上一行，5 项一行仍需 1024 px）。故取 `columns = 4` 的两行网格（换行能力见 §5.3） | 无（**结构性**）；若 PM 要求单行：需缩短选项文案（改契约 `label()`）或缩小 chip 内边距（`theme.rs`） |
 //! | AU8 | 行池上限 **20**（= [`AUDIT_PAGE_SIZE`]，**恰为一页**）：注入超过 20 条时**只渲染前 20 条**（按时间倒序取最新的一页）；**两页共存**时每页只保证 [`COEXIST_ROWS_PER_PAGE`]（= 4）行 | **测量前提（必须与数字一起读）**：`lvgl-sys/lv_conf.h` 的 `LV_MEM_SIZE` = **256 KB**，且离屏链里各页共用**同一个 LVGL 堆**。**① 单页独活**（`pages_chain` 串行建 / 拆六页，逐个 `drop`；此前 `ROW_MAX = 100` 的承诺即在此情形下被证伪）：逐档实测 **N=20 成功、N=22 成功、N=24 即 `lv_realloc: couldn't reallocate memory` + `lv_array_resize` 断言 ⇒ 挂死**（24 复现两次；顺序注入 20→22→24→**26 挂死**）⇒ 单页上界 ≈ **22–24 行** ⇒ 记 [`MEASURED_ROW_CAPACITY`]=22，`ROW_MAX` 收敛到 20（= §6.5 每页条数，对挂死点留 ≥16% 余量）。**② 两页共存**（B2c-1 整改实测 2026-09-13；P3 尚未实现 ⇒ 用两个 P5 实例作代理）：两个**空**页成功；**2 页 × 4 行 / × 5 行成功、2 页 × 6 行即 OOM 挂死**；**单页满行(20) + 第二个空页也 OOM** ⇒ 空页本身 ≈ **12 行**的开销、两页共存的**总**行数上界 ≈ [`MEASURED_COEXIST_TOTAL_ROWS`]=10。**结论（如实）**：256 KB 下**两页各满行（20）不可能**；把 `ROW_MAX` 收敛到"共存可容纳值"（≈5）**也买不到共存**（留给页开销的位置为 0、无任何余量，且等于**连带砍掉单页契约**）⇒ `ROW_MAX` **保持 20**，共存预算另立 [`COEXIST_ROWS_PER_PAGE`]=4（`COEXIST_ROWS_PER_PAGE < ROW_MAX` 由编译期断言钉死）。**与"20 条/页 + 滚动加载"的关系**：本页把 `entries` 视为**外部（B3）组装好的单页窗口** —— 分页 / 累积 / 窗口化在 B3；本页只渲染被喂进来的那一页，**不**自行累加（`apply_page` 是"整体替换窗口"语义，不是 append）。**同一 `Drop` 内建 / 拆 `P5AuditPage` 不泄漏**（实测连拆 30 个空页后仍能建满行页） | **B2c-2（P3 日志页，同样有行池）落地前必须二选一**：① 扩 `LV_MEM_SIZE`（`lv_conf.h`）并**重测两页共存预算**；② 由外壳**串行化页面生命周期**（离开即 `drop` —— 即 `pages_chain` 现模拟的形态）。届时 [`MEASURED_COEXIST_TOTAL_ROWS`] / [`COEXIST_ROWS_PER_PAGE`] 随新实测重新标定，`row_pool_capacity_is_measured` 与 `pages_chain` 的共存预算用例同步更新 |
 //! | AU9 | **机器键 / 自由文本的上屏处置**（本单元最高风险项，逐条列在下方「§6 处置表」）：`operator`（`local-console` → `本地控制台`，未知名走 [`free_text_safe`]）、`target`（**已知键映射中文名；未登记键显示经 `display_safe` 归一后的机器键**，见下方"键的处置"）、`before`/`after`（`Value` → 文本，逐类型处置）、`reason`（自由文本 → [`free_text_safe`]） | 三者都**不在** `ui/**` 的源码字面量走查面内（来自 `display-proto` 或运行时），直上屏含 cmap 外 ASCII（小写 / `-`）即**豆腐块**（同 `pages/mod.rs` **D9** / `p4_interlock.rs` **IL6**）。`display_safe` **只改写 ASCII，非 ASCII 缺字挡不住**（残余） | 同 D9（扩字符集后改写面自然收窄）；`target` 的键全集真源 = mupcd 配置服务（见 [`TARGET_LABELS`] 的"只增不改"口径） |
@@ -86,6 +86,7 @@ use mupc_display_proto::{
 };
 use serde_json::Value;
 
+use crate::lvgl::event::EventCode;
 use crate::lvgl::obj::{Obj, ObjFlag};
 use crate::lvgl::style::{Color, Opa, Style};
 use crate::lvgl::widgets::{Label, LongMode, ScrollContainer};
@@ -439,6 +440,18 @@ const OPS_COLS: u32 = 4;
 const OPS_CHIP_W: i32 = Dimens::CHIP_MIN_W * 2;
 /// 说明条圆角（`theme::Radius::CTRL` 的转出，避免在本文件另抄一个数字）。
 const RADIUS_CTRL: i32 = theme::Radius::CTRL;
+/// 「接近底部」的窗口（**B4b**；`LV_EVENT_SCROLL` 触发「加载更多」的判据）。
+///
+/// 语义 = **剩余可滚量不足一行**（`ROOT 内容高 − scroll_y − 视口高 ≤ 本值`）即算"滚到底"。
+/// 取**一行高**（[`Dimens::ROW_AUDIT_H`]）的理由：更小的话（如 1 px）用户必须**恰好**停在
+/// 最后一个像素上才触发 —— 手指拖拽很难停在那里；再大（如一屏）就变成"刚滚一点就加载"，
+/// 与 §6.5「滚动加载」的"到底"语义不符。
+///
+/// ⚠️ **视口高取契约常量** [`Dimens::CONTENT_H`]（页根尺寸由契约 1 钉死：页根即滚动容器、
+/// `992 × 624`，`pages_chain` 有断言）；**不是**从 LVGL 读回的尺寸 —— 薄层没有"内容高 /
+/// 剩余可滚量"这种读回口（要补它得放行 `lv_obj_get_scroll_bottom`，本批不动 allowlist）。
+/// 内容高则由**本页自己的布局算术**给出（见 [`Core::content_bottom`]）。
+const LOAD_MORE_THRESHOLD: i32 = Dimens::ROW_AUDIT_H;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. 纯逻辑（**不触碰 LVGL** ⇒ 可独立单测；页内一切判据都经这里，保证可离线复现）
@@ -1230,6 +1243,17 @@ struct Core {
     on_query: QuerySlot,
     /// 「加载更多」意图（见 **AU6** / **AU14**）。
     on_load_more: QuerySlot,
+    // ── 「滚动加载」的触发态（**B4b**；见 **AU6**）──
+    /// **内容底沿的页内 y**（= 最后一次 [`Core::layout`] 算出的 `y_list + list_h`）——
+    /// 「接近底部」判据的被减数。
+    ///
+    /// **为什么存下来而不是在回调里重算**：滚动回调里要判"还剩多少可滚"，若把
+    /// `layout()` 的那套 y 锚点算式再抄一遍，两处就会各自漂移（本仓明令禁止的双真源）；
+    /// 存成布局产物与 [`Core::shown`] / [`Core::range_too_large`] 同款（都是"布局所依据的态"）。
+    /// 它是**本页自己的算术结果**，不是从 LVGL 读回的实际几何（薄层没有该读回口）。
+    content_bottom: Cell<i32>,
+    /// 「加载更多」闩（**边沿触发**）：见 [`Core::on_scroll`]。初值 `true` = 允许触发。
+    load_more_armed: Cell<bool>,
     /// 内核自引用（`Weak`，**不构成 `Rc` 环**）：chip 组在**重建路径**里需要它挂回调。
     me: RefCell<Weak<Core>>,
 }
@@ -1311,6 +1335,9 @@ impl Core {
             _ => unavailable_h(),
         };
         self.list_box.set_size(Dimens::CONTENT_W, list_h);
+        // **内容底沿**（B4b）：「接近底部」判据的被减数 —— 布局的产物，随行数 / 档位 / 超限条
+        // 变化（见 [`Core::content_bottom`]）。取值 = 列表区底沿的页内 y。
+        self.content_bottom.set(y_list + list_h);
         // 底部状态行（无行时不显）/ 只读说明行。
         let footer = footer_text(self.has_more.get(), shown);
         match footer {
@@ -1470,6 +1497,48 @@ impl Core {
         }
         *self.last_query.borrow_mut() = Some(q.clone());
         self.on_query.fire(q);
+    }
+
+    /// **滚动事件入口**（B4b；本页滚动容器上的 `LV_EVENT_SCROLL` 回调的唯一落点）。
+    ///
+    /// # 判据（"接近底部"）
+    ///
+    /// `剩余可滚量 = 内容底沿 − scroll_y − 视口高`，**≤ [`LOAD_MORE_THRESHOLD`]**（一行高）即算
+    /// 到底。内容没超出一屏（`剩余 = 0` 且从未可滚）时**永不触发** —— "没得滚"不等于"滚到底"
+    /// （否则空列表 / 不可用态一进来就会空转地要下一页）。
+    ///
+    /// # 闩（**边沿触发**，不是"每到一次就发一次"）
+    ///
+    /// 一次手指拖动会连发**上百个** `SCROLL` 事件 ⇒ 无闩则会向上层意图队列灌入上百条
+    /// `AuditLoadMore`（上层在途时逐条丢弃并计数，日志与计数都被灌爆）。故：
+    /// **进入区间的那一次**发意图，此后闩住；**离开区间**（用户上滚 / 新一页把内容撑高）
+    /// 时复位。`has_more = false` 的拦截仍由 [`Core::fire_load_more`] 承担。
+    ///
+    /// # 边界（如实）
+    ///
+    /// - 本函数**不重取**任何数据、**不发请求**（分页与 `request_id` 归 B3）；
+    /// - 只读 `Cell` + 发意图 ⇒ 不建 / 删 LVGL 对象（回调内建删对象 = UAF 级，本仓有前例）。
+    fn on_scroll(&self) {
+        if !self.near_bottom() {
+            self.load_more_armed.set(true); // 离开区间 ⇒ 复位（下次到底还能再发）
+            return;
+        }
+        if self.load_more_armed.replace(false) {
+            self.fire_load_more();
+        }
+    }
+
+    /// 当前滚动位置是否**已接近底部**（剩余可滚量 ≤ [`LOAD_MORE_THRESHOLD`]）。
+    ///
+    /// 见 [`Core::on_scroll`] 的判据说明。`left` 的钳位（`.max(0)`）保证"内容不足一屏"
+    /// 时判据为**假**（`max_scroll == 0` ⇒ 直接返回 false）。
+    fn near_bottom(&self) -> bool {
+        let max_scroll = self.content_bottom.get() - Dimens::CONTENT_H;
+        if max_scroll <= 0 {
+            return false;
+        }
+        let left = max_scroll - self.root.scroll_y();
+        left <= LOAD_MORE_THRESHOLD
     }
 
     /// 发「加载更多」意图（`has_more = false` ⇒ **不发**；页号 = 当前页 + 1）。
@@ -1638,8 +1707,9 @@ fn audit_banner_style() -> Rc<Style> {
 /// 本页**不发请求、不生成 `request_id`**：
 /// - 筛选条件变化（时间范围档位 / 自定义起止 / 操作类型多选）⇒ [`P5AuditPage::set_on_query`]
 ///   注册的回调收到一份 [`AuditQuery`]（`page` 恒为 `1`）；
-/// - 「加载更多」（滚动加载，见 **AU6**）⇒ [`P5AuditPage::request_next_page`] 触发
-///   [`P5AuditPage::set_on_load_more`] 的回调（`page` = 当前页 + 1）。
+/// - 「加载更多」（滚动加载，见 **AU6**）⇒ [`P5AuditPage::set_on_load_more`] 注册的回调
+///   收到一份 [`AuditQuery`]（`page` = 当前页 + 1）。**B4b 起由本页自己触发**：页根的
+///   `EventCode::SCROLL` 回调滚到接近底部时**直接调 [`Core::fire_load_more`]**。
 ///
 /// 外部（B3 的 `console.rs`）据此生成 `request_id` / 发 `GET /v1/console/audit`，并把结果经
 /// [`P5AuditPage::set_page`] 灌回。
@@ -1796,9 +1866,23 @@ impl P5AuditPage {
             last_query: RefCell::new(None),
             on_query: CbSlot::new(),
             on_load_more: CbSlot::new(),
+            content_bottom: Cell::new(0),
+            load_more_armed: Cell::new(true),
             me: RefCell::new(Weak::new()),
         });
         *core.me.borrow_mut() = Rc::downgrade(&core);
+
+        // **滚动加载的触发点（B4b；AU6 的接线）**：挂在本页**自己的滚动容器**上。
+        // 走 `Weak<Core>`（与 chip 组重建路径同款：`Rc` 会成环 ⇒ 本页永远删不掉，见 **C1**）；
+        // 回调内**只**读 `Cell` + 发意图（不建 / 删 LVGL 对象 —— 本仓的零增长网就盯这个）。
+        {
+            let w = Rc::downgrade(&core);
+            core.root.obj().on(EventCode::SCROLL, move |_e| {
+                if let Some(c) = w.upgrade() {
+                    c.on_scroll();
+                }
+            });
+        }
 
         // chip 组（缺省 = 契约规范选项表；服务端注入后由 `set_ops` 替换）。
         let texts = op_options(&core.ops_opts.borrow());
@@ -2254,9 +2338,16 @@ impl P5AuditPage {
         self.core.on_load_more.set(f);
     }
 
-    /// **「加载更多」的触发入口**（见 **AU6**：滚动事件在本层不可得）。
+    /// **「加载更多」的触发入口**（见 **AU6**）。
     ///
-    /// 外壳（B3）在检测到"列表滚到底"时调用；`has_more = false` ⇒ **不发意图**
+    /// # 谁来调（**B4b 起**）
+    ///
+    /// **本页自己** —— 页根（纵向滚动容器）上的 `EventCode::SCROLL` 回调在"滚到接近底部"时
+    /// **调 [`Core::fire_load_more`] 本身**（不是绕道本函数：本函数只是它的一层转发；
+    /// 见 [`Core::on_scroll`]，含防重复的**边沿触发闩**）。B4b 之前薄层没有滚动事件码 ⇒
+    /// 本函数是**外露给外壳**的干等入口（生产上零调用者）。
+    ///
+    /// 外部（B3）仍可显式调用（如"刷新"按钮一类的语义）；`has_more = false` ⇒ **不发意图**
     /// （最后一页不再空转）。本页据**最近一次注入**的 `AuditPage.page` 组装 `page + 1`。
     pub fn request_next_page(&self) {
         self.core.fire_load_more();

@@ -72,6 +72,19 @@ impl EventCode {
     pub const CANCEL: Self = Self(sys::LV_EVENT_CANCEL);
     /// 宿主即将被删除 —— **本桥的 `user_data` 回收点**。
     pub const DELETE: Self = Self(sys::LV_EVENT_DELETE);
+    /// **滚动发生**（滚动容器被滚动一次就派发一次；**B4b 新增**）。
+    ///
+    /// 由 `lv_obj_scroll_by_raw` 在**每次**位置真正变化后送到**被滚动的那一个对象**上
+    /// （`vendor/lvgl/src/core/lv_obj_scroll.c:427`）⇒ 用户拖动与程序化 `scroll_to_y(..)`
+    /// **同源**（后者经 `scroll_by_bounded` → `scroll_by_raw`）。拖动一次会连发很多个。
+    ///
+    /// # 用途与边界
+    ///
+    /// - **用途**：`ui/pages/p5_audit.rs` 据此实现 §6.5 的「滚动加载」（偏差 **AU6** 的触发点）；
+    /// - **边界（如实）**：本变体只是**事件码的镜像** —— 它**不**带来"滚动偏移量 / 内容高 /
+    ///   视口高"任何一个读回口。判"接近底部"要么自算内容高（P5 走的路：它自己就知道
+    ///   `y_list + list_h`），要么得像 `lv_obj_get_scroll_bottom` 那样另放行符号。
+    pub const SCROLL: Self = Self(sys::LV_EVENT_SCROLL);
 
     /// 原始 C 事件码。
     pub const fn raw(self) -> i32 {

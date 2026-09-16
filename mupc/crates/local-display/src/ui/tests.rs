@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 use crate::lvgl::display::{Area, Display};
 use crate::lvgl::event::EventCode;
 use crate::lvgl::font::FontSize;
+// 真实触摸链路（B4b：SH5 的"任何触摸事件重置"走 `lv_indev`，不再用合成投递代理）。
+use crate::lvgl::indev::{Indev, TouchSnapshot};
 use crate::lvgl::obj::Obj;
 // `Part` / `State` / `ScrollContainer` 不在此处 import：下游用例一律走
 // `crate::lvgl::style::…` / `crate::lvgl::widgets::…` 全限定路径引用，短名反而无人使用。
@@ -5676,6 +5678,8 @@ pub(crate) fn pages_chain() {
     {
         use crate::lvgl::widgets::Dir;
         use crate::ui::pages::{filters, p5_audit};
+        // `AuditQuery` 是重导出（`p5_audit` 的公开面），不是 `mupc_display_proto` 的直接项。
+        use crate::ui::pages::p5_audit::AuditQuery;
         use mupc_display_proto::{
             AuditPage, AuditResult, ConsoleAuditEntry, ConsoleOp, LogRange, OpOption,
             AUDIT_PAGE_SIZE,
@@ -6335,6 +6339,116 @@ pub(crate) fn pages_chain() {
             Some(p5_audit::TEXT_FOOTER_ALL),
             "has_more = false ⇒ 已加载全部"
         );
+
+        // ── ⑦″ **滚到接近底部 ⇒ 自动发「加载更多」**（B4b：AU6 的触发点接线）────────────
+        //
+        // AU6 原先登记的是"滚动事件在本层不可得 ⇒ 触发与节流归 B3"。B4b 给薄层镜了
+        // `LV_EVENT_SCROLL`（[`EventCode::SCROLL`]，数值早已随 `lv_event_code_t` 生成）
+        // ⇒ 本页**在自己的滚动容器上**注册回调，滚到接近底部时调 `request_next_page()`。
+        // 判"接近底部"用的是**本页自己的布局算术**（`y_list + list_h` vs 视口高）——
+        // 薄层没有"内容高 / 剩余可滚量"读回口（补它要放行 `lv_obj_get_scroll_bottom`）。
+        {
+            let seen: Rc<RefCell<Vec<AuditQuery>>> = Rc::new(RefCell::new(Vec::new()));
+            {
+                let m = Rc::clone(&seen);
+                p5.set_on_load_more(move |q| m.borrow_mut().push(q));
+            }
+            // 满页 20 行（列表远高于视口 ⇒ 真能滚）+ `has_more = true`。
+            let full: Vec<_> = (0..AUDIT_PAGE_SIZE)
+                .map(|i| {
+                    audit_entry(
+                        &format!("id-scroll-{i}"),
+                        1_900_000_000_000 + i as u64,
+                        ConsoleOp::ConfigApply,
+                        AuditResult::Ok,
+                        "gateway.port",
+                        None,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            p5.set_page(&audit_page(full, true, true, Some(1)));
+            disp.refr_now_for_test();
+            assert_eq!(p5.visible_rows(), AUDIT_PAGE_SIZE, "⑦″ 前置：满页 20 行");
+
+            // ── 反例：**只滚到中段** ⇒ **不发**（"接近底部"不是恒真判据）──
+            // 注：本行必须**真的产生一次滚动**（`scroll_y` 真的变了），否则"不发"是空断言。
+            p5.obj().scroll_to_y(400);
+            let mid = p5.obj().scroll_y();
+            assert!(
+                mid > 200,
+                "⑦″ 前置：必须真的滚到中段（实得 scroll_y = {mid}）—— 为 0 则下面的\
+                 「不发」断言恒真"
+            );
+            assert_eq!(seen.borrow().len(), 0, "中段 ⇒ **不发**「加载更多」");
+
+            // ── 正例：滚到**底部**（越界值由 LVGL 夹到最大滚动量）⇒ 恰好发一次 ──
+            p5.obj().scroll_to_y(100_000);
+            let bottom = p5.obj().scroll_y();
+            assert!(
+                bottom > mid,
+                "⑦″ 前置：已到最大滚动量（实得 {bottom} > {mid}）"
+            );
+            assert_eq!(
+                seen.borrow().len(),
+                1,
+                "**滚到底 ⇒ 发一次「加载更多」**（`LV_EVENT_SCROLL` 驱动；改什么会让本条变红：\
+                 删掉 `P5AuditPage::new` 里那条 `EventCode::SCROLL` 注册、或删掉\
+                 `Core::on_scroll` 的 `fire_load_more()`）"
+            );
+            assert_eq!(seen.borrow()[0].page, 2, "page = 最近一次注入的 page(1) + 1");
+            assert_eq!(seen.borrow()[0].range, LogRange::H1, "筛选态随意图带出");
+
+            // ── 闩的语义（**边沿触发**）：一次拖动会连发上百个 SCROLL 事件 ⇒ 进区间只发一次 ──
+            p5.obj().scroll_to_y(400); // 离开底部区间
+            assert_eq!(seen.borrow().len(), 1, "离开底部区间 ⇒ 不补发");
+            p5.obj().scroll_to_y(100_000); // 再次进入区间
+            assert_eq!(
+                seen.borrow().len(),
+                2,
+                "再次滚到底 ⇒ **再发一次**（闩在离开区间时复位 —— 否则「到底后拿不到下一页」）"
+            );
+
+            // ── **真连发**（B4b 整改「重要 2」）：1 px 微步进 × 200 次，末段停在底部区间 ──────
+            //
+            // **为什么必须补这一段**：上面两条走的都是 `scroll_to_y` 的**单次**跳变 —— 全链路
+            // 每次只发**一个** `SCROLL`，于是"闩的语义（边沿触发）"那段**恒真**（实测：把
+            // `Core::on_scroll` 的判据 `load_more_armed.replace(false)` 改成恒真，⑦″ **照样
+            // 全绿**）。真实拖动的形态是**连发**：`lv_obj_scroll_by_raw` 每移动一次就派发一个
+            // `LV_EVENT_SCROLL`（`vendor/lvgl/src/core/lv_obj_scroll.c:427`），一次手指拖动会发
+            // 上百个 ⇒ 无闩会把上层意图队列灌爆。本段以 1 px/次复现该形态。
+            assert!(
+                bottom > 400,
+                "⑦″ 前置：最大滚动量必须 > 400（实得 {bottom}）—— 否则下面的 1 px 微步进\
+                 复现不出「从中段拖到底」的完整轨迹"
+            );
+            p5.obj().scroll_to_y(400); // 回到中段（离开区间 ⇒ 闩复位）
+            assert_eq!(seen.borrow().len(), 2, "⑦″ 前置：回到中段 ⇒ 不补发");
+            // 1 px/次从 400 拖到最大滚动量：末段 ~60 次全部落在底部区间内 —— 这正是"一次真实
+            // 拖动"的形态（`lv_obj_scroll_by_raw` 每移动一次就派发一个 `LV_EVENT_SCROLL`，
+            // `vendor/lvgl/src/core/lv_obj_scroll.c:427`；一次手指拖动会连发上百个）。
+            for y in 400..=bottom {
+                p5.obj().scroll_to_y(y);
+            }
+            assert_eq!(
+                p5.obj().scroll_y(),
+                bottom,
+                "⑦″ 前置：微步进必须真的停在最大滚动量（否则本段退化成空断言）"
+            );
+            assert_eq!(
+                seen.borrow().len(),
+                3,
+                "**连发 {} 个 `SCROLL`、末段一直停在底部区间 ⇒ 意图只产生一次**（边沿闩；\
+                 改什么会让本条变红：把 `Core::on_scroll` 的 \
+                 `if self.load_more_armed.replace(false)` 改成无条件 `fire_load_more()`）",
+                bottom - 400 + 1
+            );
+
+            // 复原（避免影响后续单元：⑧ 起的注入都只有几行）。
+            p5.obj().scroll_to_y(0);
+            assert_eq!(p5.obj().scroll_y(), 0, "⑦″ 收尾：回顶");
+        }
 
         // ── ⑧ 空态（EDGE-08）：`entries` 空 + `available = true` ────────────────────
         p5.set_page(&audit_page(vec![], true, false, None));
@@ -8149,58 +8263,253 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         sh.tick(at(116) + Duration::from_millis(500), CLOCK);
         assert_eq!(sh.current(), NavPage::Main, "回归后计时已重置，不得连续切页");
 
-        // ═══ ④″ **计时重置的真实覆盖边界**（评审 ④ 探针；对应偏差 **SH5**）═══════════
+        // ═══ ④″ **计时重置的完整语义**（原"覆盖边界"节；B4b 整改改写，偏差 **SH5**）════
         //
-        // 产品里的触摸走 `lv_indev`：它把 `PRESSED` 投给**命中的最深可点对象**
-        // （`vendor/lvgl/src/indev/lv_indev.c:618::lv_indev_search_obj`），而 `lv_obj` 构造时
-        // **默认 `CLICKABLE`**（`vendor/lvgl/src/core/lv_obj.c:584`），且页眉（0,0,1024,72）/
-        // 内容区（0,72,1024,624）/ 导航条（0,696,1024,72）**恰好铺满**画布 ⇒ **外壳根永远不是
-        // 那个对象**；LVGL 又**默认不上冒**（`lv_obj_event.c:434::event_is_bubbled` 要求**链上
-        // 每层**自带 `LV_OBJ_FLAG_EVENT_BUBBLE`；**【B4a 订正】** 该**枚举**现已镜像
-        // （`ObjFlag::EVENT_BUBBLE`，见 `lvgl/mod.rs` 的 **G2**；原文写"`ObjFlag` 未镜像该标志"
-        // **已过期**），但**行为未实施** —— `ui/**` 尚未递归给子树置位）⇒ **页内按压仍不会
-        // 重置计时**（结论不变）。本节把这条边界**锁住**：合成投递给外壳根 ⇒ 重置；
-        // 投递给页内容器 ⇒ 不重置。
-        //
-        // **本节是"现状锁定"（SH5 的登记锚点）**：**外壳**递归置位整棵子树（枚举那一半 B4a 已备）
-        // 或改走 `Indev::on(..)` 之后，下面三条 `assert!(..visible())` 应**改写为
-        // "页内按压**也**重置"**，而不是静默删除 —— 删掉它等于把 §4.3「任何触摸事件重置」的
-        // 缺口重新藏起来（这正是评审 ④ 点名的问题）。
+        // **改写说明（原注释明令"改写、不要删掉"）**：本节最早锁的是"页内按压**不**重置"
+        // —— 当时薄层没有输入设备级钩子：LVGL 把 `PRESSED` 投给**命中的最深可点对象**
+        // （`vendor/lvgl/src/indev/lv_indev.c:618::lv_indev_search_obj`），`lv_obj` 构造时又
+        // **默认 `CLICKABLE`**（`lv_obj.c:584`）、三区铺满画布 ⇒ 外壳根收不到；子对象的事件
+        // 也**默认不上冒**。B4b 首版改成"外壳挂**设备级** `Indev::on(PRESSED)` 钩子"，
+        // **B4b 整改**判定该机制**在 `LV_STATE_DISABLED` 的命中对象上不成立**
+        // （`lv_indev.c:1339` 的 `is_enabled` 把 `send_event(PRESSED)`（`:1342`）整个包住，而
+        // `lv_obj_hit_test` **不排除** `DISABLED` ⇒ `lv_indev_search_obj` 照样返回那个禁用
+        // 控件 ⇒ 回调**根本不触发**；实测：120×120 且置 `DISABLED` 的子对象按其中点，
+        // 回调计数 `2 → 2`）。生产命中面真实存在（P2 无改动时置灰的「保存」/ 步进器越界禁用 /
+        // P4 联锁）⇒ 换机制：**evdev 快照驱动**（[`crate::app::apply_touch_snapshot`] —— 喂
+        // 快照时就地调 [`shell::Shell::note_activity`]），与 LVGL 的**命中结果无关**。
         {
-            for (i, (what, o)) in [
-                ("页眉容器", sh.header_obj()),
-                ("内容区容器", sh.content_obj()),
-                ("P1 页根", sh.page_obj(NavPage::Main)),
-            ]
-            .into_iter()
-            .enumerate()
+            // **生产同款路径**：`App` 也是"建真实 indev → 每拍 `apply_touch_snapshot`"。
+            let indev = Indev::create_pointer(disp).expect("④″：建真实 indev");
+            // 外壳根的 `PRESSED` 挂钩**仍在**（"非控件 / 合成投递"那一面，见 `Shell::wire` ①）。
+            // 本节给它加一个**计数探针**：证明下面那次按压**没有**落到外壳根上（即真的是
+            // "页内控件"，而**不是**屏对象 / 外壳根 —— LVGL 给每个 `lv_obj` 默认置
+            // `CLICKABLE`，无更深命中时返回的是**屏对象本身**）。
+            let root_hits = Rc::new(Cell::new(0u32));
             {
-                // 每轮独立时间基（互不干扰，且不越过 0 s 的强制切页点）。
-                let t = 1000 * (i as u64 + 1);
-                sh.show(NavPage::Interlock);
-                sh.note_activity();
-                sh.tick(at(t), CLOCK); // 消费 ⇒ last_activity = t
-                sh.tick(at(t + 50), CLOCK);
-                assert!(
-                    sh.countdown_visible(),
-                    "{what}：前置条件不成立（t+50 ⇒ 剩 10 s，胶囊应在）"
-                );
-                o.send_event(EventCode::PRESSED);
-                sh.tick(at(t + 50) + Duration::from_millis(500), CLOCK);
-                assert!(
-                    sh.countdown_visible(),
-                    "{what} 上的按压**不会**重置计时（SH5：LVGL 默认不上冒 + 外壳根不在 \
-                     `lv_indev_search_obj` 的命中链上；`EVENT_BUBBLE` **枚举** B4a 已备、\
-                     **行为**未实施）。**若本条变红** ⇒ 外壳已递归置位子树（或改走 \
-                     `Indev::on`）：请把本条**改写**为\
-                     「页内按压**也**重置」并同步 SH5，**不要**直接删掉"
-                );
+                let c = Rc::clone(&root_hits);
+                sh.obj().on(EventCode::PRESSED, move |_| c.set(c.get() + 1));
             }
+
+            // 落点 = **P1 页内控件**（契约 1 的 SOC 卡）的矩形中心 —— 由对象自己的 `coords()`
+            // 算出，而不是拍一个"大概在页面里"的坐标。
+            let card = sh.p1().soc_card().coords();
+            let (px, py) = ((card.x1 + card.x2) / 2, (card.y1 + card.y2) / 2);
+            assert_eq!(sh.current(), NavPage::Main, "④″ 前置：P1 可见（卡片坐标才有意义）");
+
+            // 接近超时（剩 10 s ⇒ 胶囊在）—— 与既有 ④ 段同款时间口径。
+            sh.note_activity();
+            sh.tick(at(5000), CLOCK); // 消费 ⇒ last_activity = 5000
+            sh.tick(at(5050), CLOCK);
+            assert!(
+                sh.countdown_visible(),
+                "④″ 前置：剩 10 s ⇒ 倒计时胶囊应在（否则本条测不到「重置」）"
+            );
+
+            let hits_before = root_hits.get();
+            crate::app::apply_touch_snapshot(
+                &sh,
+                &indev,
+                TouchSnapshot {
+                    pressed: true,
+                    x: px,
+                    y: py,
+                },
+            );
+            indev.read(); // `lv_indev_read()` → 命中判定 → `LV_EVENT_*` 派发（产品同款）
+            assert_eq!(
+                root_hits.get(),
+                hits_before,
+                "④″ 前置：本次按压**不得**落到外壳根（`({px},{py})` 是 P1 SOC 卡的矩形中心；\
+                 若落到根上，下面那条断言就证明不了「页内控件也重置」）"
+            );
+            crate::app::apply_touch_snapshot(
+                &sh,
+                &indev,
+                TouchSnapshot {
+                    pressed: false,
+                    x: px,
+                    y: py,
+                },
+            );
+            indev.read(); // 抬手（回弹 / 滚动判定在这一步收敛）
+
+            sh.tick(at(5050) + Duration::from_millis(500), CLOCK);
+            assert!(
+                !sh.countdown_visible(),
+                "**页内控件上的按压也重置计时**（§4.3「任何触摸事件」；SH5）—— 改什么会让本条\
+                 变红：删掉 `app::apply_touch_snapshot` 里的 `shell.note_activity()`，或把 \
+                 `App::pump` 的 `apply_touch_snapshot(..)` 接线删掉"
+            );
+            assert_eq!(sh.current(), NavPage::Main, "重置不切页");
+
+            // ── **禁用态控件上的按压也重置计时**（B4b 整改「重要 1」的回归锁）──────────────
+            //
+            // 造一个 `set_disabled(true)` 的可点控件 —— 这正是旧机制（设备级 `PRESSED` 钩子）
+            // 漏掉的那一类。两段合起来才完整：① **启用态**下同一坐标能收到**对象级** `PRESSED`
+            // ⇒ 证明这个坐标确实命中该控件；② **置禁用**后对象级回调消失（LVGL 的 `is_enabled`
+            // 门），而**计时照旧重置** ⇒ 证明机制确实与命中无关。
+            let hits = Rc::new(Cell::new(0u32));
+            let probe_btn = crate::lvgl::widgets::TextButton::create(sh.page_obj(NavPage::Main), "禁用")
+                .expect("④″：造一个可禁用的可点控件");
+            probe_btn.set_pos(8, 8);
+            probe_btn.set_size(160, Dimens::TOUCH_MIN);
+            {
+                let h = Rc::clone(&hits);
+                probe_btn.on(EventCode::PRESSED, move |_e| h.set(h.get() + 1));
+            }
+            disp.refr_now_for_test();
+            let d = probe_btn.coords();
+            let (dx, dy) = ((d.x1 + d.x2) / 2, (d.y1 + d.y2) / 2);
+
+            // ① 启用态：对象级 `PRESSED` 收到 ⇒ `(dx,dy)` 确实命中这个控件。
+            sh.note_activity();
+            sh.tick(at(5100), CLOCK); // 消费 ⇒ last_activity = 5100
+            sh.tick(at(5150), CLOCK);
+            assert!(sh.countdown_visible(), "④″ 禁用段前置：剩 10 s");
+            crate::app::apply_touch_snapshot(
+                &sh,
+                &indev,
+                TouchSnapshot {
+                    pressed: true,
+                    x: dx,
+                    y: dy,
+                },
+            );
+            indev.read();
+            assert_eq!(
+                hits.get(),
+                1,
+                "④″ 前置：启用态下 `({dx},{dy})` 确实命中该控件（对象级 `PRESSED` 恰好一次）"
+            );
+            crate::app::apply_touch_snapshot(
+                &sh,
+                &indev,
+                TouchSnapshot {
+                    pressed: false,
+                    x: dx,
+                    y: dy,
+                },
+            );
+            indev.read();
+
+            // ② 置禁用：同一坐标、同一条投递路径。
+            probe_btn.set_disabled(true);
+            assert!(
+                crate::lvgl::widgets::has_state(&probe_btn, crate::lvgl::style::State::DISABLED),
+                "④″ 前置：`LV_STATE_DISABLED` 必须真的置上"
+            );
+            sh.note_activity();
+            sh.tick(at(5200), CLOCK); // 消费 ⇒ last_activity = 5200
+            sh.tick(at(5250), CLOCK);
+            assert!(sh.countdown_visible(), "④″ 禁用段前置：剩 10 s");
+            crate::app::apply_touch_snapshot(
+                &sh,
+                &indev,
+                TouchSnapshot {
+                    pressed: true,
+                    x: dx,
+                    y: dy,
+                },
+            );
+            indev.read();
+            assert_eq!(
+                hits.get(),
+                1,
+                "④″ 对照：LVGL 在 `LV_STATE_DISABLED` 的**命中对象**上不发 `PRESSED`\
+                 （`lv_indev.c:1339/1342`）—— 这正是旧机制（设备级 `PRESSED` 钩子）漏掉的一幕"
+            );
+            crate::app::apply_touch_snapshot(
+                &sh,
+                &indev,
+                TouchSnapshot {
+                    pressed: false,
+                    x: dx,
+                    y: dy,
+                },
+            );
+            indev.read();
+            sh.tick(at(5250) + Duration::from_millis(500), CLOCK);
+            assert!(
+                !sh.countdown_visible(),
+                "**禁用态控件上的按压也重置计时**（§4.3「任何触摸事件」；B4b 整改「重要 1」的\
+                 回归锁）—— 改什么会让本条变红：删掉 `app::apply_touch_snapshot` 里的 \
+                 `shell.note_activity()`；或把机制退回「设备级 `PRESSED` 钩子」（该钩子在 \
+                 DISABLED 命中对象上不触发，见上一条的对照断言）"
+            );
+            drop(probe_btn); // 临时控件用完即删（不影响后续段）
+
+            // **对照（机制边界，如实锁住）**：**合成投递**（`Obj::send_event`）**不经** evdev
+            // 快照这条路 ⇒ 它**不**会重置计时。这不是产品缺口（产品里的触摸**只**走
+            // `pump` → `apply_touch_snapshot`），而是"为什么必须在输入泵上做"这条机制的锚点：
+            // 光有外壳根那条对象级挂钩**不够**。
+            sh.show(NavPage::Interlock);
+            sh.note_activity();
+            sh.tick(at(5300), CLOCK);
+            sh.tick(at(5350), CLOCK);
+            assert!(sh.countdown_visible(), "对照段前置：剩 10 s");
+            sh.content_obj().send_event(EventCode::PRESSED); // 合成投递，不经输入泵
+            sh.tick(at(5350) + Duration::from_millis(500), CLOCK);
+            assert!(
+                sh.countdown_visible(),
+                "**合成投递**（`send_event`）不经输入泵 ⇒ 不重置计时（机制边界，非产品缺口：\
+                 产品里的触摸一律经 `App::pump` 的 evdev 快照）"
+            );
+
             // 收尾：复位到 P1 且**无胶囊**（后续 ④′ 依赖"角标可见"，而角标在胶囊占位时让位）。
             sh.show(NavPage::Main);
             sh.note_activity();
-            sh.tick(at(5000), CLOCK);
+            sh.tick(at(6000), CLOCK);
             assert!(!sh.countdown_visible(), "收尾：活动后回到满时长，无胶囊");
+        }
+
+        // ═══ ④‴ 超时回归 ⇒ **P1 始终从顶部开始**（UI §4.3；偏差 **SH12**）════════════
+        //
+        // §4.3 原文（"超时回归本身"行）：「不产生审计记录；不改变页面滚动位置以外的状态
+        // （**P1 始终从顶部开始**）」。该行主语是**超时回归这一条路径**，故回顶只落在
+        // `Core::tick` 的强制切页分支，**不**放进 `Core::select`（那会连带"主动返回 / 点页签"
+        // 也清滚动位置 —— §4.3 的"主动返回"行只写"切 P1；按下即反馈"，未提滚动位置）。
+        //
+        // **口径（B4b 整改「建议 3.2」收窄）**：「回归」隐含"**从别页回来**"。超时那一刻
+        // **已经在 P1** 时**不**动滚动位置 —— 否则"用户正在 P1 阅读"会被强制回顶，丢掉阅读
+        // 位置（那已超出「超时**回归**」的字面：无页可回归）。两条断言分别钉住这两面。
+        {
+            let p1_root = sh.page_obj(NavPage::Main);
+            sh.show(NavPage::Main);
+            disp.refr_now_for_test();
+            // **先滚离顶部**：否则"回顶"断言会退化成"恒真"（本项目明令禁止的伪门禁）。
+            p1_root.scroll_to_y(80);
+            let before = p1_root.scroll_y();
+            assert!(
+                before > 0,
+                "④‴ 前置：P1 必须真的能滚（内容高于视口）—— 实得 scroll_y = {before}；\
+                 若为 0 则本段的'回顶'断言恒真、必须换更长的注入数据"
+            );
+
+            // 已在 P1 ⇒ 超时**不**回顶（阅读位置保留）。
+            sh.note_activity();
+            sh.tick(at(6100), CLOCK); // 消费 ⇒ last_activity = 6100
+            sh.tick(at(6160), CLOCK); // 60 s 到（已在 P1）
+            assert_eq!(sh.current(), NavPage::Main, "④‴：已在 P1");
+            assert_eq!(
+                p1_root.scroll_y(),
+                before,
+                "**已在 P1 时超时不得回顶**（「回归」隐含从别页回来；回顶会丢掉用户正在读的\
+                 位置）—— 改什么会让本条变红：把 `Core::tick` 强制切页分支的守卫\
+                 `c.current.get() != NavPage::Main.index()` 摘掉"
+            );
+
+            // 切走 → 空闲到 0 s ⇒ 强制回归（**从别页回来**）。
+            sh.show(NavPage::Interlock);
+            sh.note_activity();
+            sh.tick(at(7000), CLOCK); // 消费 ⇒ last_activity = 7000
+            sh.tick(at(7060), CLOCK); // 60 s 到 ⇒ 自动切 P1
+            assert_eq!(sh.current(), NavPage::Main, "④‴：到 0 s 自动切 P1");
+            assert_eq!(
+                p1_root.scroll_y(),
+                0,
+                "**超时回归后 P1 必须从顶部开始**（UI §4.3；SH12）—— 改什么会让本条变红：\
+                 删掉 `Core::tick` 强制切页分支里的 `reset_primary_scroll()`"
+            );
         }
 
         // ═══ ④′ 触摸不可用角标（EDGE-13）+ 通道断（EDGE-20 的"两状态同显"）══════

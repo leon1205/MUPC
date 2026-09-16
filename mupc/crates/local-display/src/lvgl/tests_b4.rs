@@ -179,7 +179,7 @@ pub(crate) fn thin_capabilities_chain() {
         }
     }
 
-    // ═══ G2：事件冒泡标志（**只镜像枚举值**；SH5 的完整语义归 B4b）═══════════════
+    // ═══ G2：事件冒泡标志（**只镜像枚举值**；本批 `ui/**` 无消费者）═══════════════
     {
         let o = Obj::create(&screen).expect("Obj::create (G2)");
         assert_eq!(
@@ -194,7 +194,7 @@ pub(crate) fn thin_capabilities_chain() {
         o.add_flag(ObjFlag::EVENT_BUBBLE);
         assert!(
             o.has_flag(ObjFlag::EVENT_BUBBLE),
-            "G2：置位后可读回（B4b 递归给子树置位时靠这条检查）"
+            "G2：置位后可读回（「父容器统一处理子事件」一类需求日后靠这条检查）"
         );
         o.remove_flag(ObjFlag::EVENT_BUBBLE);
         assert!(!o.has_flag(ObjFlag::EVENT_BUBBLE), "G2：清位后可读回");
@@ -338,6 +338,32 @@ pub(crate) fn thin_capabilities_chain() {
             "mem_monitor：自检链路的峰值必须留有余量（`has_headroom` 是 `--smoke` 的判定口）"
         );
         drop(keep);
+    }
+
+    // ═══ B4b：`EventCode::SCROLL` 镜像（P5「滚动加载」的触发源）═════════════════════
+    //
+    // | # | 能力 | 判据（改什么会红） |
+    // |---|------|--------------------|
+    // | `EventCode::SCROLL` | 事件码镜像 | `raw()` == C 侧 `LV_EVENT_SCROLL`（15）；把常量绑到别的码 ⇒ 红 |
+    {
+        use super::event::EventCode;
+
+        // ── `EventCode::SCROLL`（P5「滚动加载」的触发源；UI §6.5 / 偏差 AU6）──
+        assert_eq!(
+            EventCode::SCROLL.raw(),
+            lvgl_sys::LV_EVENT_SCROLL,
+            "B4b：`EventCode::SCROLL` 必须**逐位**镜像 C 侧 `lv_event_code_t`"
+        );
+        assert_eq!(
+            EventCode::SCROLL.raw(),
+            15,
+            "B4b：`LV_EVENT_SCROLL` = 15（`lv_event.h` 的枚举序；与 `PRESS_LOST` 等既有码互不相等）"
+        );
+        assert_ne!(
+            EventCode::SCROLL,
+            EventCode::PRESSED,
+            "B4b：别把 SCROLL 镜像成 PRESSED（那会让\"滚一下 = 按一下\"）"
+        );
     }
 
     // ── 释放顺序：先对象树，再 display，最后 deinit（与 A1/A2/A3 同口径）──
