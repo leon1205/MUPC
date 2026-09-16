@@ -11,6 +11,7 @@
 //! Phase 6: 优雅退出 (LIFO 逆序停止, 30s 超时保护)
 
 mod cli;
+mod console_host;
 mod core_config;
 mod display_host;
 mod interlock;
@@ -68,10 +69,14 @@ async fn main() {
     }
 
     // ── Phase 2: tracing 初始化 ──
+    // 这两项在 `config` 被移入共享内存副本（见 Phase 3 前）之前取出：
+    // `log_level` 供 tracing 初始化，`shutdown_timeout_sec` 供 Phase 6 优雅退出。
+    let configured_log_level = config.system.log_level.clone();
+    let shutdown_timeout_sec = config.system.shutdown_timeout_sec;
     let log_level = if cli.verbose {
         "debug"
     } else {
-        &config.system.log_level
+        configured_log_level.as_str()
     };
 
     // 确保日志目录存在
@@ -112,7 +117,14 @@ async fn main() {
     // ── Phase 3: 子系统初始化 ──
     let mut coord = ServiceCoordinatorImpl::new();
 
-    let ctx = match startup::initialize_all(&config, &coord, process_started_at).await {
+    // 12-显示终端 §4.3.2：`CoreConfig` **内存副本**（`Arc<RwLock<…>>`）是写入生效后的
+    // 「进程内唯一权威读源」。**在这里**（Phase 2 tracing 之后、装配之前）就地建立并**移入**
+    // 该副本（`initialize_all` 只借它，不再持有第二份 `CoreConfig` 的所有权）：
+    // 若在装配点再 clone 一份，就出现"装配用 A、控制通道读 B"的双真源 —— 将来 G-2 写入只更新 B，
+    // 而装配期的 A 已过期，属静默漂移。上面两项（`log_level` / `shutdown_timeout_sec`）已先取出。
+    let core_config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+
+    let ctx = match startup::initialize_all(&core_config, &coord, process_started_at).await {
         Ok(ctx) => ctx,
         Err(e) => {
             tracing::error!(error = %e, "子系统初始化失败，开始级联清理...");
@@ -136,10 +148,10 @@ async fn main() {
     signal_handler::wait_for_shutdown().await;
 
     // ── Phase 6: 优雅退出 ──
-    tracing::info!("Phase 6: 开始优雅退出 (超时 {} 秒)...", config.system.shutdown_timeout_sec);
+    tracing::info!("Phase 6: 开始优雅退出 (超时 {} 秒)...", shutdown_timeout_sec);
 
     let shutdown_result = tokio::time::timeout(
-        std::time::Duration::from_secs(config.system.shutdown_timeout_sec),
+        std::time::Duration::from_secs(shutdown_timeout_sec),
         graceful_shutdown(&coord, &ctx),
     )
     .await;
@@ -150,10 +162,7 @@ async fn main() {
             process::exit(0);
         }
         Err(_elapsed) => {
-            tracing::error!(
-                "优雅退出超时 ({} 秒)，强制退出",
-                config.system.shutdown_timeout_sec
-            );
+            tracing::error!("优雅退出超时 ({} 秒)，强制退出", shutdown_timeout_sec);
             process::exit(1);
         }
     }

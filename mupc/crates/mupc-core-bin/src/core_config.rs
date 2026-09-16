@@ -531,59 +531,47 @@ impl CoreConfig {
         Ok(())
     }
 
-    /// 12-本地显示终端 §7.3：display.enabled 时 bind_addr 强制仅回环（127.0.0.1）——
-    /// 本地数据通道禁止暴露到外网/北向网口；非回环地址启动即报错。disabled 整段跳过。
+    /// 12-本地显示终端 §7.3：`display.enabled` 时**两条**地址（`bind_addr` = 读通道 /
+    /// `control_bind_addr` = 控制通道）强制仅回环——本地数据通道禁止暴露到外网/北向网口；
+    /// 非回环地址启动即报错。disabled 整段跳过。
     ///
-    /// 回环判定按 **host 部分**归一（O6 评审整改）：`"127.0.0.1"`（缺端口）、`"127.0.0.1:9810"`、
-    /// `"localhost:9810"`、`"[::1]:9810"` 均识别为回环；缺端口单独报「缺少端口」，不再误报
-    /// 「非回环」这类误导性错误（原实现把 `"127.0.0.1"` 判成非回环）。
+    /// **口径（唯一真源 = 契约）**：只认**字面量**回环 —— host 必须是 `127.0.0.1` 或 `::1`
+    /// （`"[::1]:9811"` 亦可，因按 `SocketAddr` 解析），端口须 ∈ [1, 65535]（**端口 ≠ 0**），
+    /// 且**两条地址不得相同**（同址会让读/控制两条通道互相抢占）。判定与错误文案**全部**由契约
+    /// `DisplayConfig::validate()`（`display-proto/src/config.rs`）给出，本函数只做转发。
+    ///
+    /// **口径收紧的沿革与理由**：本函数原先是**手写**校验，把 `localhost:9810` / `localhost`
+    /// 也识别为回环（按 host 部分归一、缺端口单独报「缺少端口」）——**该口径已废弃**。名字可经
+    /// hosts（或 DNS）重映射到非回环地址，安全红线（PL-4）上不接受名字；渲染端 `console.rs`
+    /// 同样只收字面量，两侧口径由此一致。「缺端口」（`"127.0.0.1"`）现按契约统一归为**非法**
+    /// （报「非合法回环 host:port」，不再是误导性的「缺少端口」）。
+    ///
+    /// ⚠️ **全集校验（不止地址）**：转发的 `DisplayConfig::validate()` 是**全集**校验，启动期
+    /// 一并门禁下列**非地址**不变量（fail-fast，任一不合规则 `mupcd` **启动失败**）：
+    /// `publish_ms >= 100`；`min_publish_interval_ms ∈ [200, publish_ms]`；`alarm_poll_ms` /
+    /// `interlock_poll_ms` / `device_poll_ms` 上界；`alarm_page_size != 0`；`log.live_ring >= 100`；
+    /// `range.*` 须为有限正数（禁 NaN/±Inf/0/负数），且 `phase_power_max_kw <= total_power_max_kw`、
+    /// `inconsistency_threshold_kw <= pcs_total_rated_kw`。原手写实现**只查地址**，这些一律放行
+    /// ⇒ 升级后现场 yaml 若不合规会**首次启动即失败**，迁移核对清单见 `deploy/deploy.md` §9.4。
     fn validate_display(&self) -> Result<(), String> {
         let d = &self.display;
         if !d.enabled {
             return Ok(());
         }
-        let addr = d.bind_addr.trim();
-        if addr.is_empty() {
-            return Err("display.bind_addr 不能为空（display.enabled 时）".to_string());
-        }
-        // host/port 拆分（用最后一个 ':'；IPv6 字面量按方括号剥离）。SocketAddr 能直接解析的
-        // （含带端口的 IPv6）走快路径，语义与 std 一致。
-        let host_port = match addr.parse::<std::net::SocketAddr>() {
-            Ok(sa) => (sa.ip().to_string(), Some(sa.port().to_string())),
-            Err(_) => match addr.rsplit_once(':') {
-                Some((h, p)) if !h.is_empty() => (
-                    h.trim_start_matches('[').trim_end_matches(']').to_string(),
-                    Some(p.to_string()),
-                ),
-                _ => (
-                    addr.trim_start_matches('[').trim_end_matches(']').to_string(),
-                    None,
-                ),
-            },
-        };
-        let (host, port) = host_port;
-        let ok_loopback = host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<std::net::IpAddr>()
-                .map(|ip| ip.is_loopback())
-                .unwrap_or(false);
-        if !ok_loopback {
-            return Err(format!(
-                "display.bind_addr='{}' 非回环地址——本地显示终端数据通道强制仅 127.0.0.1（禁止暴露到外网接口，12-显示终端 §7.3）",
-                d.bind_addr
-            ));
-        }
-        match port {
-            None => Err(format!(
-                "display.bind_addr='{}' 缺少端口——须为 host:port（如 127.0.0.1:9810；仅回环地址）",
-                d.bind_addr
-            )),
-            Some(p) if p.parse::<u16>().map(|n| n > 0).unwrap_or(false) => Ok(()),
-            Some(_) => Err(format!(
-                "display.bind_addr='{}' 端口非法——须为 1..=65535 的数字端口",
-                d.bind_addr
-            )),
-        }
+        // **唯一真源 = 契约的 `DisplayConfig::validate()`**（`display-proto/src/config.rs`）。
+        //
+        // ⚠️ **这条修复堵住一个 P0**（以下是**修复前**的状态，留档说明本函数为何改为转发）：
+        // 原实现是**本文件手写**的 host/port 校验、且**只查 `bind_addr`（读通道）**——
+        // `control_bind_addr`（**控制通道** = T-3 无登录的写通道）**从不校验**；而契约里
+        // 两条都查的 `DisplayConfig::validate()` **当时全仓无调用点**（现由本函数调用，即下一行）。
+        // 后果：把 `display.control_bind_addr` 配成 `0.0.0.0:9811` 时进程照样启动，并把
+        // 写通道暴露到全网（违 PL-4 安全红线）。
+        //
+        // ⚠️ **口径收紧（同一修复的一部分）**：契约只认**字面量**回环 `127.0.0.1` / `::1`，
+        // 而原实现把 `localhost` 也当回环 —— 名字可经 hosts 重映射到非回环地址，安全红线上
+        // 不接受名字（渲染端 `console.rs` 同样只收字面量，两侧口径由此一致）。契约另有两条
+        // 本函数原本没有的检查：**端口 ≠ 0**、**两条地址不得相同**。
+        d.validate().map_err(|e| e.to_string())
     }
 
     /// S2 §12.4: io.enabled 时校验数字 IO/安全联锁配置：
@@ -962,10 +950,15 @@ display:
         );
     }
 
-    /// 12-显示终端 §7.3（O6 整改）：回环 host 的各种写法都识别为回环，缺端口单独报「缺少端口」，
-    /// 不得再误报「非回环」。
+    /// 12-显示终端 §7.3：回环**只认字面量** —— `127.0.0.1` / `::1`（含 `[::1]:port` 写法）
+    /// 通过；`localhost`（名字）与缺端口（`"127.0.0.1"`）按契约**一律拒**。
+    ///
+    /// **沿革**：本用例原名 `..._host_forms_and_missing_port`，断言"缺端口单独报「缺少端口」、
+    /// 各种写法都识别为回环"——那是**已废弃的旧口径**（O6 时期按 host 部分归一）。P0 修复后
+    /// 校验真源收敛为契约 `DisplayConfig::validate()`：名字可经 hosts 重映射到非回环地址，
+    /// 安全红线上不接受名字；缺端口也不再单独分类，统一报「非合法回环 host:port」。
     #[test]
-    fn test_display_loopback_host_forms_and_missing_port() {
+    fn test_display_loopback_is_literal_only() {
         let with_addr = |addr: &str| {
             format!(
                 r#"
@@ -985,8 +978,8 @@ display:
 "#
             )
         };
-        // 回环各写法 → 通过
-        for ok in ["127.0.0.1:9810", "localhost:9810", "[::1]:9810"] {
+        // 回环**字面量**写法 → 通过（`localhost` 已按契约收紧，见下）
+        for ok in ["127.0.0.1:9810", "[::1]:9810"] {
             let config: CoreConfig = serde_yaml::from_str(&with_addr(ok)).unwrap();
             assert!(
                 config.validate().is_ok(),
@@ -994,19 +987,144 @@ display:
                 config.validate()
             );
         }
-        // 缺端口（原实现误报「非回环」）→ 明确报「缺少端口」
-        for missing in ["127.0.0.1", "localhost"] {
-            let config: CoreConfig = serde_yaml::from_str(&with_addr(missing)).unwrap();
+        // 非回环 / 非法 / **非字面量**写法 → 一律拒（错误文案来自契约的
+        // `DisplayConfig::validate`，含 `PL-4` 安全红线说明）。
+        //
+        // ⚠️ `localhost` 与 `localhost:9810` 在此**由通过改为拒绝**（P0 修复的一部分）：
+        // 原实现把它当回环，而契约只认**字面量** `127.0.0.1`/`::1` —— 名字可经 hosts
+        // 重映射到非回环地址，安全红线上不该接受名字。渲染端 `console.rs` 同样只收字面量。
+        for bad in [
+            "localhost:9810",
+            "localhost",
+            "127.0.0.1",
+            "127.0.0.1:abc",
+            "127.0.0.1:0",
+            "0.0.0.0:9810",
+            "192.168.1.5:9810",
+        ] {
+            let config: CoreConfig = serde_yaml::from_str(&with_addr(bad)).unwrap();
             let err = config.validate().unwrap_err();
             assert!(
-                err.contains("缺少端口"),
-                "{missing} 应报缺少端口而非非回环，实际: {err}"
+                err.contains("非合法回环") && err.contains("PL-4"),
+                "{bad} 必须按契约判非法回环，实际: {err}"
             );
-            assert!(!err.contains("非回环"), "{missing} 不应误报非回环: {err}");
         }
-        // 端口非法 → 报端口非法
-        let config: CoreConfig = serde_yaml::from_str(&with_addr("127.0.0.1:abc")).unwrap();
-        assert!(config.validate().unwrap_err().contains("端口非法"));
+    }
+
+    /// **P0 网**：`display.control_bind_addr`（**控制通道** = 无登录的写通道）同样强制回环。
+    ///
+    /// **修复前**（以下为历史状态，现 `validate_display` 已转发契约校验）：`validate_display`
+    /// **只查 `bind_addr`**（读通道），而契约里两条都查的 `DisplayConfig::validate()`
+    /// **那时全仓无调用点** ⇒ 把控制面绑到 `0.0.0.0` 也照样启动，
+    /// 等于把写通道（T-3 无鉴权）暴露到全网。
+    ///
+    /// **改什么会让本条变红**：把 `validate_display` 改回"只查 `bind_addr`"⇒
+    /// 第 1 条（`0.0.0.0:9811`）与第 3 条（两址相同）都会被放行。
+    #[test]
+    fn display_control_bind_addr_is_forced_loopback_too() {
+        let with_both = |read: &str, ctrl: &str| {
+            format!(
+                r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {{}}
+plugins: {{}}
+display:
+  enabled: true
+  bind_addr: "{read}"
+  control_bind_addr: "{ctrl}"
+"#
+            )
+        };
+        // ① 控制通道非回环 ⇒ 拒（就是这条修复的主要动因）
+        let c: CoreConfig = serde_yaml::from_str(&with_both("127.0.0.1:9810", "0.0.0.0:9811")).unwrap();
+        let e = c.validate().unwrap_err();
+        assert!(
+            e.contains("display.control_bind_addr") && e.contains("PL-4"),
+            "控制通道非回环必须拒且点名该键，实际: {e}"
+        );
+        // ② 两条都回环但**同址** ⇒ 拒（同址会让后绑者启动失败）
+        let c: CoreConfig =
+            serde_yaml::from_str(&with_both("127.0.0.1:9810", "127.0.0.1:9810")).unwrap();
+        let e = c.validate().unwrap_err();
+        assert!(e.contains("不得相同"), "两址相同必须拒，实际: {e}");
+        // ③ 两条都回环且不同 ⇒ 通过（防"一刀切拒绝"）
+        let c: CoreConfig =
+            serde_yaml::from_str(&with_both("127.0.0.1:9810", "127.0.0.1:9811")).unwrap();
+        assert!(c.validate().is_ok(), "两条均回环且不同应通过: {:?}", c.validate());
+    }
+
+    /// **重要-4 网**：转发的 `DisplayConfig::validate()` 是**全集**校验 ⇒ 原先"只查地址"时
+    /// 一律放行的**非地址**不变量，现在**同样门禁 `mupcd` 启动**（fail-fast）。
+    ///
+    /// 每条各取一个族代表：时延（`publish_ms`）、环容量（`log.live_ring`）、告警页
+    /// （`alarm_page_size`）、量程（`range.current_max_a`）、量程交叉
+    /// （`phase_power_max_kw > total_power_max_kw`）。**地址一律合法**（`127.0.0.1:9810/9811`），
+    /// 唯一非法项就是被测的那个字段 ⇒ 报错必须点名该键，排除"其实是被地址判死的"。
+    ///
+    /// **改什么会让本条变红**：把 `validate_display` 换成"只查地址"的实现（P0 修复前的写法）
+    /// ⇒ 下面 6 条断言里前 5 条的 `unwrap_err()` 全部 panic。
+    #[test]
+    fn display_non_address_invariants_now_gate_startup() {
+        // 全部合规的基准（address 合法 + 各非地址不变量合规）
+        let with_display = |extra: &str| {
+            format!(
+                r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+web_api:
+  listen_addr: "0.0.0.0:8080"
+ai_engine: {{}}
+plugins: {{}}
+display:
+  enabled: true
+  bind_addr: "127.0.0.1:9810"
+  control_bind_addr: "127.0.0.1:9811"
+{extra}
+"#
+            )
+        };
+        // 基准自证：不带 extra 时必须通过（否则下面的红分不清是"改坏了"还是"本来就不合规"）
+        let base: CoreConfig = serde_yaml::from_str(&with_display("")).unwrap();
+        assert!(base.validate().is_ok(), "基准配置应通过: {:?}", base.validate());
+
+        for (key, extra) in [
+            ("display.publish_ms", "  publish_ms: 50"),
+            (
+                "display.log.live_ring",
+                "  log:\n    live_ring: 50",
+            ),
+            ("display.alarm_page_size", "  alarm_page_size: 0"),
+            (
+                "display.range.current_max_a",
+                "  range:\n    current_max_a: 0\n    phase_power_max_kw: 100\n    \
+                 total_power_max_kw: 300\n    pcs_total_rated_kw: 60\n    \
+                 inconsistency_threshold_kw: 3.0",
+            ),
+            (
+                "display.range.total_power_max_kw",
+                "  range:\n    current_max_a: 300\n    phase_power_max_kw: 100\n    \
+                 total_power_max_kw: 50\n    pcs_total_rated_kw: 60\n    \
+                 inconsistency_threshold_kw: 3.0",
+            ),
+        ] {
+            let c: CoreConfig = serde_yaml::from_str(&with_display(extra)).unwrap();
+            let e = c.validate().unwrap_err();
+            assert!(
+                e.contains(key),
+                "非地址不变量 `{key}` 必须在启动期被门禁且点名该键，实际: {e}"
+            );
+        }
     }
 
     /// 12-显示终端 §7.3: display.enabled 时 bind_addr 非回环 → validate Err（强制仅 127.0.0.1）

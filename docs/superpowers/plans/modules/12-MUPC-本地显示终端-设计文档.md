@@ -976,6 +976,10 @@ display:
   - `device_poll_ms <= 4000`（F6.3 端到端 ≤5 s 的前提）；
   - `100 <= min_publish_interval_ms <= publish_ms`（合并窗口下界防抖动打爆通道，上界防退化为纯主拍）。
 
+> **【实现落地 · 2026-09-16（G-1 整改）】** 上述校验的**唯一真源已收敛为契约** `DisplayConfig::validate()`（`display-proto/src/config.rs`）；`CoreConfig::validate_display()`（`mupc-core-bin/src/core_config.rs`）只做**转发**，不再手写校验。含义有二：
+> ① 回环口径**只认字面量** `127.0.0.1` / `::1`（`localhost` 等**名字**一律拒——名字可经 hosts 重映射，安全红线不接受名字；渲染端 `console.rs` 同口径），且端口 ∈ [1,65535]、两址不得相同；
+> ② 转发的是**全集**校验 ⇒ 上列**非地址**不变量（时延 / 环容量 / 量程 / 告警页条数）**同样在启动期 fail-fast**，现场 yaml 不合规者升级后 `mupcd` **启动失败**（迁移核对清单见 `mupc/deploy/deploy.md` §9.4）。
+
 **删除**：`CoreConfig.web_api` 字段 + `WebApiConfig` + 其 `validate()` 校验 + 默认值函数 + 单测样例中的 `web_api:` 段（约 20 处）。
 
 ---

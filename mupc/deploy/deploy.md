@@ -386,3 +386,51 @@ sudo systemctl restart mupcd
 - [ ] 联锁自测：短接 DI1 急停 → PCS 停止且 DO2 故障灯亮；复位 + Web release → 允许重启
 - [ ] PCS 侧独立硬急停回路（按钮第二副接点直连 PCS 硬急停端子）已核对，MUPC 软停仅为第一层（B1）
 - [ ] GPIO sysfs 权限：`mupc` 用户可读写 `/sys/class/gpio`（udev 规则/组权限已配置，防缺失导致启动即联锁 lock，B2）
+
+---
+
+## 十、本地显示终端 `display:` 段升级须知（2026-09-16）
+
+> 背景：G-1（控制通道宿主）整改把 `display` 段的校验**收敛为唯一真源**——契约的
+> `DisplayConfig::validate()`（`crates/display-proto/src/config.rs`）。`CoreConfig::validate_display()`
+> 只做转发。**影响面 = 所有已部署的现场 yaml**：`display.enabled: true` 时，`display` 段任一
+> 校验不过 ⇒ **mupcd 启动失败**（fail-fast，`validate()` 在装配前执行）。升级前请逐项核对。
+
+### 10.1 地址只用**字面量**（破坏性变更）
+
+`display.bind_addr` / `display.control_bind_addr` **仅接受字面量** `127.0.0.1` 或 `::1`
+（写法 `"127.0.0.1:9810"` / `"[::1]:9810"`）。**不接受 `localhost`**——名字可经 `/etc/hosts`
+（或 DNS）重映射到非回环地址，回环是 PL-4 安全红线，不接受名字（渲染端 `console.rs` 同口径）。
+另两条：**端口不得为 0**（∈ [1, 65535]）、**两条地址不得相同**（同址会让读/控制两条通道互相抢占）。
+
+```yaml
+display:
+  enabled: true
+  bind_addr: "127.0.0.1:9810"           # ✅ 字面量
+  control_bind_addr: "127.0.0.1:9811"   # ✅ 字面量；不得与 bind_addr 相同
+  # bind_addr: "localhost:9810"         # ❌ 升级后启动失败（旧版本可接受）
+```
+
+仓库内无依赖（两个 deploy yaml 均无 `display:` 段，`deploy/local-display.md` 样例即字面量写法）；
+**仓库外现场 yaml** 若写了 `localhost:9810`，升级后**首次启动即失败**，须按上表改。
+
+### 10.2 转发的校验是**全集**：非地址不变量同样门禁启动
+
+原实现（手写）**只查地址**；现在转发的是契约的**全集**校验，下列**非地址**不变量
+**同样在启动期 fail-fast**（升级前一律放行，升级后不合规即起不来）：
+
+| `display` 字段 | 约束 | 不合规的后果（启动报错文案要点） |
+|---|---|---|
+| `publish_ms` | `>= 100` | 越界（1..99 会打成高频通道） |
+| `min_publish_interval_ms` | `∈ [200, publish_ms]` | 合并窗口越界 |
+| `alarm_poll_ms` / `interlock_poll_ms` | `∈ [1, 1000]` | 越界（F7.3 / F16.5 上屏 ≤2 s 前提） |
+| `device_poll_ms` | `∈ [1, 4000]` | 越界（F6.3 ≤5 s 前提） |
+| `alarm_page_size` | `!= 0` | 为 0 ⇒ F7 告警页永远空 |
+| `log.live_ring` | `>= 100` | 太小 ⇒ 上线即被冲掉，检索无意义 |
+| `range.*`（5 个数值） | 有限正数（禁 NaN/±Inf/0/负数） | 量程守卫静默失效 / 读数恒 `RangeError` |
+| `range.phase_power_max_kw` | `<= range.total_power_max_kw` | 单相量程不得大于总有功量程 |
+| `range.inconsistency_threshold_kw` | `<= range.pcs_total_rated_kw` | 超额定 ⇒ 方向不一致角标恒灭 |
+
+**升级核对清单**：`display.publish_ms` / `display.log.live_ring` / `display.alarm_page_size` /
+`display.range.*` 逐项比对上表；改动后**先在本机跑一次启动**（或 `mupcd` 启动日志确认无
+`display.` 开头的校验错误）再上现场。`display.enabled: false` 时整段跳过，不受影响。

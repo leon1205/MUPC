@@ -405,11 +405,31 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
 /// 显示终端 F6 的 `device.uptime_secs` 用它作零点（设计 §4.1「以 `mupcd` 进程启动时刻为准」）
 /// ——**不得**在本装配点另取 `Instant::now()`（本点已在 DB/intercore/gateway/AI/security 之后，
 /// 会让屏上 uptime 系统性偏小）。
+/// G-1 装配点：控制通道的配置读源 = **装配传入的同一个** `Arc<RwLock<CoreConfig>>`
+/// （设计 D10「内存副本 + 原子落盘」的"进程内唯一权威读源"）。
+///
+/// **为什么单独成一个函数**：这条"同一性"是本模块最容易被**无声**破坏的契约——
+/// `CoreConfig: Clone` 让 `Arc::new(RwLock::new(arc.read().await.clone()))` 这种**深拷贝成
+/// 新 `Arc`** 的写法既能编译、也能通过全部既有用例，后果却是"装配写 A、控制通道读 B"
+/// （G-2 的写入在屏上静默不生效）。收敛到一个函数后，装配点与单测
+/// `console_host::tests::console_config_source_is_arc_identical_to_assembly_handle`
+/// 走的是**同一段代码**——`Arc::ptr_eq` 才构成证据（测试里自造等价物只能证明测试自己）。
+pub(crate) fn console_config_source(
+    core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
+) -> crate::console_host::ConfigSource {
+    crate::console_host::ConfigSource::Ready(core_config.clone())
+}
+
 pub async fn initialize_all(
-    config: &CoreConfig,
+    core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
     coord: &ServiceCoordinatorImpl,
     process_started_at: std::time::Instant,
 ) -> Result<StartupContext, MupcError> {
+    // 装配期读一份**快照**（装配是一次性动作，各子系统的构造参数取自启动瞬间的配置）。
+    // 内存副本本身（`core_config`）由控制通道宿主持续持有：G-2 写入后它才是权威读源，
+    // 而装配过的子系统各自持有自己的生效机制（`watch` / reload handle，见设计 §4.3.3）。
+    let config = core_config.read().await.clone();
+    let config = &config;
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // 错误路径守卫: 初始化中途失败时 abort 所有已启动的后台任务
     struct TaskGuard(Vec<tokio::task::JoinHandle<()>>);
@@ -760,6 +780,43 @@ pub async fn initialize_all(
                 tracing::error!(
                     "display 回环绑定 {} 失败: {}——跳过发布端（确认 bind_addr 未被占用）",
                     config.display.bind_addr,
+                    e
+                );
+            }
+        }
+
+        // 10.2 控制通道（设计 §4.9；单元 G-1：**只实现** `GET /v1/console/config`，
+        // 其余 7 条契约端点已登记路由但回 501——见 console_host.rs 模块头「未做的部分」）。
+        // 与读通道**并行不冲突**：不同端口（9811 vs 9810）、不同 listener、不同 task。
+        // 配置读源 = `core_config` 内存副本（设计 D10：内存副本 + 原子落盘），**不**在本点重读 yaml。
+        // ⚠️ **必须**经 `console_config_source()` 取源——它保证"控制通道与装配共用**同一个** `Arc`"
+        // （唯一真源）。**不得**在此内联 `Arc::new(RwLock::new(core_config.read().await.clone()))`
+        // 之类的**深拷贝**：那样能编译、能过其余用例，却会让 G-2 的写入在屏上**静默失效**
+        // （装配写 A、控制通道读 B）。该不变式由单测
+        // `console_host::tests::console_config_source_is_arc_identical_to_assembly_handle` 钉死。
+        let console = crate::console_host::ConsoleHost::new(crate::console_host::ConsoleDeps {
+            config: console_config_source(core_config),
+        });
+        match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
+            Ok(listener) => {
+                // 回环裁决在 `ConsoleHost::serve` 内按**实际绑定结果**再判一次（PL-4 二次兜底）：
+                // 配置层 `CoreConfig::validate_display` **已**调用契约的 `DisplayConfig::validate()`，
+                // 两条地址（bind_addr / control_bind_addr）在启动期即强制字面量回环、端口≠0、两址不同；
+                // 本处兜底防的是"配置校验被绕过 / 被新增调用路径跳过"。
+                guard.0.push(tokio::spawn(async move {
+                    if let Err(e) = console.serve(listener).await {
+                        tracing::error!(
+                            "控制通道 serve 异常退出（非回环地址会被拒绝）: {}",
+                            e
+                        );
+                    }
+                }));
+            }
+            Err(e) => {
+                // 与读通道同口径：bind 失败不阻断 mupcd 启动（本机端口占用属配置问题）
+                tracing::error!(
+                    "控制通道绑定 {} 失败: {}——跳过控制通道（确认 control_bind_addr 未被占用）",
+                    config.display.control_bind_addr,
                     e
                 );
             }
