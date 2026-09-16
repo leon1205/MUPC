@@ -27,9 +27,12 @@
 //! 而"参数被忽略"必须**可见** ⇒ 告警 + `--help` 如实标注（文案见
 //! [`mupc_local_display::config::font_ignored_warning`]）。
 //!
-//! ⚠️ **`--control-channel` 解析后当前无人消费**（`ConsoleClient` 的生产实例化点在 B3-2b）：
-//! 同样在启动时**响亮告警**（文案见
-//! [`mupc_local_display::config::control_channel_pending_warning`]），help 已标注 `[B3-2b 接线]`。
+//! ⚠️ **`--control-channel` 已接线**（B3-2b-2）：`ConsoleClient` 的生产实例化点在
+//! [`mupc_local_display::app::App`] 的装配里，`GET` 查询 + 受控 `POST` 写均经它发起。
+//! 启动时**无条件回显实际取值**（与 `--channel` 同取向；文案见
+//! [`mupc_local_display::config::control_channel_notice`]）—— 原先那条「本参数当前**不影响
+//! 行为**、待 B3-2b 接线」的告警（`control_channel_pending_warning`）此刻失真，
+//! **已按设计连同其调用点与 help 标注整体删除**。
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -119,12 +122,11 @@ fn run_process(cfg: CliConfig) -> ExitCode {
     if let Some(p) = cfg.font.as_deref() {
         eprintln!("[mupc-local-display] {}", config::font_ignored_warning(p));
     }
-    // `--control-channel` 当前**无人消费**（ConsoleClient 的生产实例化点属 B3-2b）：
-    // 同款响亮告警。**无条件打印**（不管解析到的是默认值还是显式取值）—— 该值此刻
-    // 一律不影响行为，"只在显式指定时告警"反而会让默认值这条静默 no-op 溜过去。
+    // `--control-channel` **已接线**（B3-2b-2）：无条件回显实际取值（与 `--channel` 同取向）。
+    // 原先那条"当前不影响行为、待 B3-2b 接线"的告警已完成使命、**按设计删除** —— 它此刻失真。
     eprintln!(
         "[mupc-local-display] {}",
-        config::control_channel_pending_warning(&cfg.control_channel)
+        config::control_channel_notice(&cfg.control_channel)
     );
     // 数据通道 URL 前置校验（解析失败 = 用法错误 ⇒ 退出码 2；不静默回退默认端点）。
     if let Err(e) = DisplayChannelClient::try_new(&cfg.channel) {
@@ -278,15 +280,24 @@ fn run_smoke(app: &mut App, cfg: &CliConfig, stats: &LoopStats) -> ExitCode {
 /// **连续**失败数。真机排障（"到底连的谁 / 超时多长 / 是不是一直在失败"）就靠这三个。
 ///
 /// `zero_clamps` 的非零在**在途请求**期间是正常的（见 `App::next_deadline_ms` 的登记）。
+///
+/// **控制通道六个量**（B3-2b-2）：`console_addr`（解析后的目标地址）、
+/// `console_fail_streak`（P3 通道条态的**真源**）、`p3_channel`（**实际注入 P3 的值**，
+/// `up`/`down` —— 进程级用例据此断言"P3 由控制通道而非帧通道驱动"）、
+/// `write_dropped` / `read_dropped`（在途期间被丢弃的意图数）、
+/// `route_errors`（回执形态/解码不符数）、`p4_refresh`（EDGE-19 补发 GET 的生效次数）。
 fn report_exit(cfg: &CliConfig, app: &App, s: &LoopStats) {
     let (ok, fail) = app.frame_counts();
     let ch = app.channel();
     let (blits, dropped) = app.flush_stats();
+    let ctl = app.console();
     eprintln!(
         "[mupc-local-display] 退出：backend={} channel={} channel_addr={} channel_timeout_ms={} \
          fail_streak={} ticks={} ok={} fail={} renders={} blits={} dropped={} touch={} \
          iterations={} poll_calls={} ready={} timeouts={} last_timeout={}ms lv_next={}ms \
-         zero_iters={} zero_clamps={} poll_failures={}",
+         zero_iters={} zero_clamps={} poll_failures={} \
+         console={} console_addr={} console_fail_streak={} p3_channel={} write_dropped={} \
+         read_dropped={} route_errors={} p4_refresh={}",
         cfg.backend.as_str(),
         cfg.channel,
         ch.addr(),
@@ -307,6 +318,14 @@ fn report_exit(cfg: &CliConfig, app: &App, s: &LoopStats) {
         s.lv_next_ms,
         s.zero_timeout_iters,
         s.zero_timeout_clamps,
-        s.poll_failures
+        s.poll_failures,
+        cfg.control_channel,
+        ctl.addr(),
+        app.console_fail_streak(),
+        if app.p3_channel_connected() { "up" } else { "down" },
+        app.write_intents_dropped(),
+        app.read_intents_dropped(),
+        app.route_errors(),
+        app.p4_refresh_forced(),
     );
 }

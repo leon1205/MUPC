@@ -489,10 +489,11 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
 选项：
   --channel <URL>         数据通道（回环 HTTP GET 最新帧）
                           默认 {default_url}
-  --control-channel <URL>  [B3-2b 接线] 控制通道基址（回环；GET 查询 + POST 写受控接口）
+  --control-channel <URL>  [B3-2b-2 已接线] 控制通道基址（回环；GET 查询 + POST 写受控接口）
                           默认 {default_ctl}
-                          ⚠️ 本参数当前**不影响行为**：消费者 ConsoleClient 尚无生产实例化点
-                          （B3-2b 接线），启动时会打印响亮告警（不静默当没看见）
+                          ⚠️ 该地址非法 ⇒ 启动即报错退出（不静默降级成只读屏）；
+                          启动时会回显实际取值。写操作**只**在页面确认完成后发起，
+                          未确认 = 零网络动作（设计 §6.2 T-3 闭环）
   --poll-ms <MS>           轮询节拍（--interval 同义），{min_i}..={max_i}，默认 {interval}
                            ⚠️ >{max_i} 直接报错（设计 §5.5：影响端到端 ≤2s 验收）
   --interval <MS>          --poll-ms 的 v1.0 别名（同区间）
@@ -573,17 +574,26 @@ pub fn font_ignored_warning(path: &std::path::Path) -> String {
     )
 }
 
-/// `--control-channel` 的启动期告警文案（建议 5）。
+/// `--control-channel` 的启动期**生效回显**（B3-2b-2：该参数已接线）。
 ///
-/// # 为什么是告警而不是删参数 / 硬错误
-/// 参数已解析、已校验（回环 http），但**消费者 `ConsoleClient` 尚无生产实例化点**
-/// （B3-2b 才接线）⇒ 现在给 `--control-channel` 就是"解析了但无人消费的静默 no-op"。
-/// 处理成**响亮告警**（而不是删掉参数）：B3-2b 马上要用它，删了要再改一遍 CLI 契约与 unit；
-/// 也不做硬错误 —— 理由同 [`font_ignored_warning`]（systemd 重启循环）。
-pub fn control_channel_pending_warning(url: &str) -> String {
+/// # 沿革（B3-2a 的"待接线告警"已按设计删除）
+///
+/// B3-2a 时的形态是 `control_channel_pending_warning`（**该函数已在 B3-2b-2 整体删除**；
+/// 此处写**纯文本**而非 intra-doc 链接 —— 指向已删符号的链接是**悬空链接**，会让
+/// `cargo doc` 报 `unresolved link`）：「⚠️ 本参数当前**不影响行为**，
+/// `ConsoleClient` 将在 B3-2b 接线」。B3-2b-2 把 `ConsoleClient` 接进 `app.rs` 之后该文案
+/// **已经失真**（参数此刻**真的**影响行为）⇒ **整体删除**（连同 `main.rs` 的调用点与 help 行），
+/// 换成这条**如实回显**：说明它已生效、地址非法会启动失败、以及 T-3 的写操作门禁。
+///
+/// # 为什么仍然打印（而不是静默生效）
+///
+/// 现场排障要能一眼看到「本进程到底在连哪个控制通道」（`--channel` 的回显是同一取向）；
+/// 且 T-3 的"未确认 = 零网络动作"是本模块最容易被误读的一条 —— 写在启动行上，
+/// 部署与评审都有据可查。
+pub fn control_channel_notice(url: &str) -> String {
     format!(
-        "⚠️ --control-channel {url} 当前**不影响行为**：控制通道客户端（ConsoleClient）将在 \
-         B3-2b 接线，本参数届时生效（现在只是解析 + 校验，不做静默 no-op 处理）。"
+        "控制通道 --control-channel {url}（B3-2b-2 已接线：GET 查询 + POST 写受控接口；\
+         写操作**只**在页面确认完成后发起，未确认 = 零网络动作）"
     )
 }
 
@@ -1006,21 +1016,30 @@ mod tests {
         );
     }
 
-    /// `--control-channel` 须标注 `[B3-2b 接线]`，且启动告警明说"当前不影响行为"。
+    /// `--control-channel` 须标注 `[B3-2b-2 已接线]`，且启动行**如实回显**（不再是"待接线"告警）。
     ///
-    /// **改什么会让本条变红**：把该参数从 help 里删掉、或去掉 `B3-2b` 标注 ⇒ 红。
+    /// **改什么会让本条变红**：把该参数从 help 里删掉、去掉 `B3-2b-2` 标注、或把启动行改回
+    /// "当前不影响行为"（B3-2b-2 之后那句已失真）⇒ 红。
     #[test]
-    fn help_and_warning_register_control_channel_as_pending() {
+    fn help_and_notice_register_control_channel_as_live() {
         let h = help_text();
         let line = h
             .lines()
             .find(|l| l.trim_start().starts_with("--control-channel"))
-            .unwrap_or_else(|| panic!("help 仍须列 --control-channel（B3-2b 马上要用）：\n{h}"));
-        assert!(line.contains("B3-2b"), "须标注接线单元：{line}");
-        let w = control_channel_pending_warning("http://127.0.0.1:9811");
-        assert!(w.contains("不影响行为"), "告警须明说当前不影响行为：{w}");
-        assert!(w.contains("B3-2b"), "告警须给出接线下游：{w}");
-        assert!(w.contains("9811"), "告警须回显实际取值：{w}");
+            .unwrap_or_else(|| panic!("help 仍须列 --control-channel：\n{h}"));
+        assert!(line.contains("B3-2b-2"), "须标注接线单元：{line}");
+        assert!(line.contains("已接线"), "须如实标注已接线：{line}");
+        let n = control_channel_notice("http://127.0.0.1:9811");
+        assert!(n.contains("B3-2b-2"), "启动行须给出接线单元：{n}");
+        assert!(n.contains("9811"), "启动行须回显实际取值：{n}");
+        assert!(
+            n.contains("未确认 = 零网络动作"),
+            "启动行须写明 T-3 门禁（写操作只在确认后发起）：{n}"
+        );
+        assert!(
+            !n.contains("不影响行为"),
+            "已接线后不得再声称「不影响行为」（该表述在 B3-2b-2 之后失真）：{n}"
+        );
     }
 
     /// help 里**不得再引用已删除的 `font.rs`**（B3-2a 已删该模块 ⇒ 照抄者找不到文件）。

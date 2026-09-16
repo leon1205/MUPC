@@ -46,6 +46,9 @@ pub mod channel;
 pub mod config;
 // 控制通道客户端（开发单元 B3-1）：`/v1/console/*` 的非阻塞状态机 + 幂等重试（设计 §5.5）。
 pub mod console;
+// 控制通道的**纯映射层**（开发单元 B3-2b-2）：回执 → 页面路由 + 筛选意图 → 查询串（设计 §3.4）。
+// 与 `console.rs`（线上状态机）分开：这一层**零 I/O、零 LVGL**，因而可在纯逻辑用例里逐端点钉住。
+pub mod control_route;
 pub mod error;
 // LVGL 薄安全层（12-MUPC v2.0 工作单元 A1）：唯一允许 `unsafe` 的 Rust 侧位置之一。
 // 只有本目录可以引用 `lvgl-sys`（设计 §1.1.1.2 unsafe 边界纪律 1）。

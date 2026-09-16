@@ -368,19 +368,40 @@ fn smoke_without_channel_still_renders_pages() {
     }
 }
 
-/// **两个「已解析但当前不生效」的参数必须在启动期可见**（B3-2a 规格评审 建议 4/5）：
-/// `--font`（v2.0 已废弃，字库改由构建期绑定）与 `--control-channel`（消费者属 B3-2b）。
+/// **启动期参数可见性**：`--font`（v2.0 已废弃，字库改由构建期绑定）与
+/// `--control-channel`（**B3-2b-2 已接线**）。
 ///
-/// 三重锁定：
-/// ① 两条告警都真的打到 stderr（不是只在 help 里写写 —— 生产路径必须真调用文案函数）；
+/// # ⚠️ 本用例的沿革（**改名 + 断言订正**；主控裁定 2）
+///
+/// 本用例**原名** `deprecated_params_warn_loudly_and_do_not_abort`，锁的是「`--control-channel`
+/// **待接线**」的告警：它硬断言启动行明说该参数**当前不生效**、`ConsoleClient` 将在 B3-2b
+/// 接线。B3-2b-2 把 `ConsoleClient` 真接进 `app.rs` 之后，**同一行的语义已变** —— 它现在是
+/// 「**生效回显**」（参数此刻真的影响行为），旧断言若留着，就是要求日志里必须写一句**已经
+/// 失真**的话（§2.6）。故：**改名**（见下）+ 断言**随之更新**为「回显实际取值 + 如实标注已接线」，
+/// 且**不再**要求（或引用）任何已失真的字样。
+///
+/// 名称取 `startup_warns_deprecated_font_and_echoes_live_control_channel`：两个参数的性质
+/// 已经**分叉**（`--font` 仍是"已废弃的告警"，`--control-channel` 已是"生效回显"），原名把它们
+/// 统称 `deprecated_params` 已不准确。
+///
+/// **沿革的沿革（原"禁止旧告警复活"那条禁令去哪了）**：它**不在本用例**了 —— 同一禁令由
+/// `tests/control_channel.rs::startup_echoes_the_live_control_channel_and_never_claims_it_is_inert`
+/// 承担（本单元新增的进程级用例，判据同款）；旧告警函数本身已连同
+/// `config.rs::control_channel_pending_warning` 整体删除（见该文件的沿革段）。
+///
+/// 三重锁定（③ 的第 5 段按上文订正后为 3 段）：
+/// ① 两条启动行都真的打到 stderr（不是只在 help 里写写 —— 生产路径必须真调用文案函数）；
 /// ② **退出码 0**：`--font` 是告警而非硬错误（本进程由 systemd `Restart=always` 托管，
 ///    硬错误 = 起不来 + 无限重启）；
-/// ③ 告警里带**实际取值**（现场能据此判断"我这条 unit 是不是要改"）。
+/// ③ 启动行里带**实际取值**（现场能据此判断"我这条 unit 是不是要改"）+ `--control-channel`
+///    如实标注**已接线**。
 ///
 /// **改什么会让本条变红**：删掉 `main.rs::run_process` 里任一条 `eprintln!`（或把
-/// `--font` 改成 `ExitCode::from(EXIT_USAGE)` 硬错误）⇒ ① / ② 立刻红。
+/// `--font` 改成 `ExitCode::from(EXIT_USAGE)` 硬错误）⇒ ① / ② 立刻红；
+/// 把控制通道启动行改回"待接线"口径（`config.rs::control_channel_notice` 不再回显已接线）
+/// ⇒ ③ 的第 3 段红。
 #[test]
-fn deprecated_params_warn_loudly_and_do_not_abort() {
+fn startup_warns_deprecated_font_and_echoes_live_control_channel() {
     let out = Command::new(bin())
         .args([
             "--backend",
@@ -403,8 +424,10 @@ fn deprecated_params_warn_loudly_and_do_not_abort() {
     assert!(err.contains("不生效"), "字体告警须说明不生效：\n{err}");
     assert!(
         err.contains("--control-channel http://127.0.0.1:9811"),
-        "控制通道告警缺失或未回显取值：\n{err}"
+        "控制通道启动行缺失或未回显取值：\n{err}"
     );
-    assert!(err.contains("不影响行为"), "控制通道告警须明说当前不影响行为：\n{err}");
-    assert!(err.contains("B3-2b"), "控制通道告警须给出接线下游：\n{err}");
+    assert!(
+        err.contains("B3-2b-2 已接线"),
+        "控制通道启动行须如实标注已接线（B3-2b-2 之后「待接线」已失真）：\n{err}"
+    );
 }

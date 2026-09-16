@@ -27,6 +27,10 @@ use mupc_display_proto::{
     RunState, SocSource,
 };
 
+// 裁定 3：传输失败时的**本地合成**回执 —— 决策（读/写端点 ⇒ 哪个页面的既有入口）归
+// `control_route`（纯映射层，那里的用例逐字段钉死取值），本层只负责"在清在途之前取出在途信息"。
+use crate::control_route::RouteDecision;
+
 // 控制回执 / 传输失败的**上屏文案**：全部**转出** `ui/**` 的既有字面量（本文件不新增任何
 // 上屏字面量 —— 码表覆盖率的基线在 `ui/tests.rs`，只扫 `ui/**`；若在此自造新串，既有的
 // 豆腐块静态网**照不到**它）。逐个出处见 [`control_code_text`] / [`TRANSPORT_FAIL_TEXT`]。
@@ -579,6 +583,19 @@ impl ControlState {
         self.inflight.is_some()
     }
 
+    /// **清在途**（B3-2b-2 新增）：**查询**成功路径用。
+    ///
+    /// 为什么需要它：[`Self::record_response`] 的入参是 `ControlResponse<T>` **信封**，而按契约
+    /// **查询端点返回裸 DTO**（设计 §3.4：信封只用于 POST 写操作）⇒ 查询完成时**没有**能传给
+    /// `record_response` 的东西，而 [`Self::record_transport_failure`] 会误记一次失败并弹
+    /// 「操作失败」。缺了本方法，接线层只能在"查询永远算在途"与"谎记一次失败"之间二选一。
+    ///
+    /// **语义**：只动"在途"这一格 —— **不碰** `last`（最近一次**回执**摘要仍归写操作）、
+    /// 不碰 Toast、不碰 `last_transport_failure_ms`。
+    pub fn finish(&mut self) {
+        self.inflight = None;
+    }
+
     // ── 结果 ──────────────────────────────────────────────────────────────
 
     /// 记一次回执（**清在途** + 存摘要 + 按需弹 Toast）。
@@ -601,6 +618,44 @@ impl ControlState {
         self.inflight = None;
         self.last_transport_failure_ms = Some(now_ms);
         self.push_toast(TRANSPORT_FAIL_TEXT, now_ms);
+    }
+
+    /// 传输失败 + **给页面补一条本地合成的「不可用」回执**（B3-2b-2 整改 · PM 裁定 3）。
+    ///
+    /// # 为什么需要它（降级必须有**上屏**出口）
+    ///
+    /// [`Self::record_transport_failure`] 只把失败记进本层（清在途 + 一条兜底 Toast），而
+    /// **Toast 的 LVGL 句柄归页面、本层这条没有任何页面暴露通用入口** ⇒ 用户按「保存」/
+    /// 「人工释放联锁」遇控制通道挂掉时，**屏上什么都不发生**（只落 stderr）—— 违 §2.6
+    /// 「降级可见」。故本方法把**同一个失败**同时交回一条**本地合成**的回执，由接线层送进
+    /// 页面**既有**的 `show_result`（`src/ui/**` 零改动，见
+    /// [`crate::control_route::transport_failure_decision`] 的字段取值理由）。
+    ///
+    /// **返回值**：`Some(决策)` = 该次在途请求是**写**端点（P2 配置保存 / P4 两个联锁写），
+    /// 须由调用方送进唯一分派点；`None` = 读端点（其降级出口是 P3 通道条态）或**当时无在途**。
+    ///
+    /// ⚠️ **返回值必须被消费**：只造不送 = 屏上依旧什么都不发生。这条约束由**显式的**
+    /// `#[must_use]`（见下行）在**编译期**兜住 —— 判据是"零警告"。⚠️ **不要**依赖
+    /// "`Option` 自带 `must_use`"这一常见说法：本工具链实测**不成立**（裸调用
+    /// `self.control.record_transport_failure_with_receipt(..);` 不报任何告警，
+    /// B3-2b-2 整改时实测过），故此处**必须**写属性而不是靠类型。
+    ///
+    /// **与 [`Self::record_transport_failure`] 的关系**：本方法**内含**它（不另记一份失败、
+    /// 不另弹一条 Toast —— 同一事件只有一份记账），只是在清在途**之前**先把"是哪一次在途请求"
+    /// 取出来，再据此合成回执。
+    #[must_use = "本地合成回执必须送进页面（只造不送 = 屏上什么都不发生）；调用方须把它交给 `apply_route`"]
+    pub fn record_transport_failure_with_receipt(&mut self, now_ms: u64) -> Option<RouteDecision> {
+        // 在途信息必须在下面那句之前取 —— `record_transport_failure` 会**清掉在途**。
+        let ep = self.inflight.as_ref().map(|i| i.endpoint);
+        let rid = self
+            .inflight
+            .as_ref()
+            .and_then(|i| i.request_id.clone())
+            .unwrap_or_default();
+        self.record_transport_failure(now_ms);
+        // 无在途（读端点从不入 `inflight`）⇒ 没有"哪一次操作"可言 ⇒ 不合成。
+        let ep = ep?;
+        crate::control_route::transport_failure_decision(ep, &rid, TRANSPORT_FAIL_TEXT, now_ms)
     }
 
     /// 最近一次回执摘要。
@@ -680,6 +735,7 @@ impl DisplayState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_route::RouteDecision;
     use mupc_display_proto::{DisplayFrame, Field};
 
     fn frame(seq: u64, ts_ms: u64) -> DisplayFrame {
@@ -1050,6 +1106,67 @@ mod tests {
             "传输失败必须给出上屏兜底文案（不静默）"
         );
         assert!(st.toast().is_some_and(|t| t.until_ms() == 500 + TOAST_TTL_MS));
+    }
+
+    /// 裁定 3：传输失败时**给页面补一条本地合成的「不可用」回执**（写端点才补）。
+    ///
+    /// **为什么必须有这条判据**：本层原来只记失败 + 弹一条**没有任何页面入口**的兜底 Toast
+    /// ⇒ 控制通道挂掉时用户按「保存」/「人工释放联锁」，**屏上什么都不发生**（违 §2.6 降级可见）。
+    ///
+    /// **改什么会让本条变红**（**已实测**，见报告「探针 3」）：把
+    /// `record_transport_failure_with_receipt` 里的合成去掉（直接 `return None`）⇒ 第 1 段红；
+    /// 把在途信息取在 `record_transport_failure` **之后**（在途已被清 ⇒ `ep` 恒 `None`）⇒
+    /// 第 1 段红（这正是"顺序敏感"的哨）；把记账那句删掉 ⇒ 第 2 段红（失败记账不得被本整改削弱）。
+    #[test]
+    fn transport_failure_hands_back_a_local_receipt_for_inflight_writes() {
+        let mut st = ControlState::new();
+        st.begin(ConsoleEndpoint::InterlockRelease, Some("rid-9"));
+        let d = st
+            .record_transport_failure_with_receipt(700)
+            .expect("写端点在途 + 通道死 ⇒ 必须有本地合成回执（否则屏上什么都不发生）");
+        let RouteDecision::InterlockResult(r) = d else {
+            panic!("联锁写必须在 P4 的 show_result 入口上");
+        };
+        assert_eq!(r.code, ControlCode::Unavailable);
+        assert!(!r.ok && r.applied.is_none(), "操作未生效");
+        assert_eq!(r.request_id, "rid-9", "回显该次在途请求（同一次操作对得上）");
+        assert_eq!(r.message, TRANSPORT_FAIL_TEXT, "message = 本地错误文案（不编原因）");
+        assert_eq!(r.at_ms, 700, "at_ms 取本地时钟");
+        assert!(r.audit_id.is_none() && !r.duplicate && r.field_errors.is_empty());
+        // ② 既有记账**不许**被本整改削弱（同一事件只记一份）。
+        assert!(!st.is_busy(), "在途必须清掉");
+        assert_eq!(st.last_transport_failure_ms(), Some(700));
+        assert_eq!(st.toast_text(), Some(TRANSPORT_FAIL_TEXT));
+        // ③ 无在途（查询不入 `inflight`）⇒ 不合成（读端点的出口是 P3 通道条态）。
+        let mut idle = ControlState::new();
+        assert!(idle.record_transport_failure_with_receipt(700).is_none());
+        assert_eq!(idle.toast_text(), Some(TRANSPORT_FAIL_TEXT), "记账照旧");
+    }
+
+    /// **查询**成功路径用 [`ControlState::finish`]（B3-2b-2 新增）：清在途，
+    /// 但**不**碰回执摘要、**不**弹 Toast、**不**记"传输失败时刻"。
+    ///
+    /// 为什么必须有这条判据：查询端点按契约返回**裸 DTO**（没有 `ControlResponse` 信封）
+    /// ⇒ 接线层拿不到能传给 `record_response` 的东西。若没有 `finish`，只剩两条歧路：
+    /// ① 让查询永远算在途（后续写操作被判 `Busy` 而丢弃）；② 用
+    /// `record_transport_failure` 清在途（**谎记一次失败**并弹「操作失败」）。
+    ///
+    /// **改什么会让本条变红**：把 `finish` 实现成 `record_transport_failure` 的别名
+    /// （多弹一条 Toast / 多记一次失败时刻）⇒ 第 3 / 4 段红；把 `finish` 写成空实现
+    /// ⇒ 第 2 段红。
+    #[test]
+    fn finish_clears_inflight_without_faking_a_failure() {
+        let mut st = ControlState::new();
+        st.begin(ConsoleEndpoint::Audit, None);
+        assert!(st.is_busy());
+        st.finish();
+        assert!(!st.is_busy(), "查询完成 ⇒ 在途必须清掉（否则后续写操作恒被判在途）");
+        assert_eq!(st.last_transport_failure_ms(), None, "查询成功**不得**记成传输失败");
+        assert_eq!(st.toast_text(), None, "查询成功不得弹任何 Toast（尤其不是「操作失败」）");
+        assert!(st.last().is_none(), "查询载荷不是信封 ⇒ 不产生回执摘要");
+        // 对偶：清完之后**可以**再起一条（否则连接池被卡死）
+        st.begin(ConsoleEndpoint::ConfigApply, Some("rid-fin"));
+        assert!(st.is_busy());
     }
 
     /// 在途请求记的是**查询端点也无 `op`**（GET 无信封）；写端点记 `op` 与 `request_id`。

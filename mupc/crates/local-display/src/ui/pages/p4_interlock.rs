@@ -37,7 +37,7 @@
 //! | IL9 | 触发源**行池 = 4**（`SOURCE_ROW_POOL`）；帧内源数 > 4（契约 `sources: Vec<_>` **未设上限**）⇒ **卡头数量仍显真实 N**、行只铺 4 条；**且卡头补一行可见提示 ` · 还有 N−4 条`**（[`sources_overflow_note`]，B2b-3 代码质量整改 ②） | **上限取值的理由**：后端 distinct token 全集恰为 4 —— `estop` / `flood` / `fire` / `door`（`mupc-core-bin/src/interlock.rs::source_token()`）；行池固定 ⇒ `new()` 一次性建齐、`render()` **不可失败**（同 P1 的 `alarm_rows` 池口径）且 1 Hz **零对象 churn**。**补偿**：UI §6.4（`：599`）明写「**全部源一次性列出，不折叠**」⇒ 超限必须**可见**（不得静默）—— 本行的差额外显即该补偿（该提示词 `还`/`有`/`条` 逐字在 cmap 内）。⚠️ **IL9 的"钉死"是单向的**：`source_token()` 加变体只会让 `source_token()` 的 `match` **编译失败**，**不会**让 `SOURCE_ROW_POOL` 报错 ⇒ 该提示是**唯一的运行期网** | 无（**有意**）；若后端 token 集合扩张到 > 4，**先**同步扩 `SOURCE_ROW_POOL`（在 §3.6 补中文名），提示自动收敛为空串 **✅ PM 已裁定（2026-09-15）**：维持池 = 4 + 「还有 N 条」；UI §6.4 已由「**全部源一次性列出，不折叠**」改为「全部源**计数**一次性列出；行区**最多 4 行**，超出以「`· 还有 N 条`」**可见提示**」，见 UI 附录 **A.7** |
 //! | IL10 | 弹层明细取 [`ConfirmDialog`] 的**三段式** `字段 旧值 → 新值`（组件本批禁改，**无** `字段：值` 形态）⇒ §6.4 要求的三项信息按「**当前 → 操作后目标态**」表达；本次操作**不改动**的项取 `新值 = 旧值`（**如实**表达「不变」，不编造目标值） | `ConfirmDialog` 的明细行**恒**渲染四槽（字段 / 旧值 / 箭头 / 新值，颜色亦固定），没有「单值行」口。三段式是本批唯一可行形态；语义仍**具体**（非泛化措辞，满足 §7.3「影响范围 / 明细必须具体」） | `components.rs` 收口批：明细行支持「单值」形态后逐字回契约 |
 //! | IL11 | **弹层内**就地红字（UI §6.4 拒绝原因表的「弹层内就地显示」）**不可达** ⇒ 取 `p2_config.rs` **PD7 同款口径**：原因落**页内就地原因带**（红字 24 px `#FF6B6B`），**弹层不自动关闭**（原因常驻可读，用户可「取消」关闭后重试）。⚠️ **本行论证的减损与补正（B2b-3 代码质量整改 ①）**：评审 `PROBE-OCCL` 实测弹层面板底 ≈ y607、就地原因带在 y600–624 ⇒ 原因带**顶部约 7 px 被弹层压住**，而拒绝时弹层**恰恰不关** ⇒「就地可见」在最需要时**被削弱**。补正 = **IL23** ①（同一份原因**同时**走 `layer_top` 的 Toast，无遮挡） | 同上：`ConfirmDialog` 的「影响范围」与明细在**构造期固定**，**没有**可变错误文案口；且关闭弹层不得在 LVGL 事件回调内做 | `components.rs` 补 `set_error()` 后改回弹层内（届时 IL23 ① 的 Toast 通道应**保留** —— 它是遮挡无关的那条） |
-//! | IL12 | **控制通道线上路径**：失败时的**具体原因**由 `ControlResponse.message` 承担 —— 契约 `display-proto/src/control.rs` 该字段文档原文：「**人读消息；UI 直接展示（失败时即 EDGE-10 / EDGE-12 要求的「具体原因」）**」⇒ [`P4InterlockPage::show_result`] 就地上屏 `display_safe(message.trim())`（**不吞**，EDGE-12）；空串时退到 §3.6 全局行的「操作失败」（**不造假原因**）。`RejectedPrecondition` **另**置「请求一次状态刷新」标志（[`P4InterlockPage::take_refresh_request`]）—— 被拒即说明屏上观测可能过期，该标志对**各类**前置条件**都正确**，且与文案**解耦**（改了文案也不影响刷新语义）。EDGE-19 的**固定**文案「联锁状态已变化 · 请刷新后重试」由 [`P4InterlockPage::show_conflict`] 承担，它是**显式入口**：需 B3 在**能判定**「提交时状态已变化」时调用。**当前契约无法自动达成该判定** —— `ControlCode::RejectedPrecondition` 把「状态已变化」与「触发源未复位 / 保持时间不足 / latch / StopPending」**糊在同一个码**里，回执**无**结构化 `InterlockReject` 字段；且 `InterlockReject` 的 **7 个变体里没有「冲突」变体** ⇒ 「B3 自行解析出 `InterlockReject`」对该场景**不可实现**（**契约级缺口**，属 F/G/H/I/J/K 与契约所有者的责任）。⇒ 本页**不假设**该固定文案会被自动触发：它在屏上出现**当且仅当**外部显式调用了 `show_conflict()`。⚠️ **M9**：置位点 2 处（`show_conflict` / `show_result` 的 `RejectedPrecondition` 分支）、**生产读取 0 处**（`console.rs` 尚不存在）⇒ `take_refresh_request` 是**前向 API**：**B3 必须消费它**（每拍先取、`true` 即补发一次 `GET`），否则「自动刷新」的语义**落空** | 契约冻结（`display-proto` 不得改）；不做「按消息串猜语义」的脆弱解析（猜错即**谎报原因**，与 §2.6「绝不造假」冲突） | 若 `display-proto` 在控制回执中增 `reject: Option<InterlockReject>`（或为 EDGE-19 单列一个 `ControlCode` 变体），则 [`P4InterlockPage::show_result`] 直接分派（单一分派点），固定文案即可自动可达 |
+//! | IL12 | **控制通道线上路径**：失败时的**具体原因**由 `ControlResponse.message` 承担 —— 契约 `display-proto/src/control.rs` 该字段文档原文：「**人读消息；UI 直接展示（失败时即 EDGE-10 / EDGE-12 要求的「具体原因」）**」⇒ [`P4InterlockPage::show_result`] 就地上屏 `display_safe(message.trim())`（**不吞**，EDGE-12）；空串时退到 §3.6 全局行的「操作失败」（**不造假原因**）。`RejectedPrecondition` **另**置「请求一次状态刷新」标志（[`P4InterlockPage::take_refresh_request`]）—— 被拒即说明屏上观测可能过期，该标志对**各类**前置条件**都正确**，且与文案**解耦**（改了文案也不影响刷新语义）。EDGE-19 的**固定**文案「联锁状态已变化 · 请刷新后重试」由 [`P4InterlockPage::show_conflict`] 承担，它是**显式入口**：只给**客户端本地能判定**「提交时状态已变化」的场合（例如将来页面自己比对 `observed_*` 与当前帧）。⚠️ **PM 裁定（2026-09-16）：不得谎报拒绝原因** —— B3-2b-2 曾按**任务书**在 `control_route` 里给 `RejectedPrecondition` 单开一条臂 ⇒ `show_conflict()`，**该实现已被推翻**（与本节论证冲突：把「状态已变化」之外的拒绝也显成 EDGE-19 固定文案 = **谎报原因**）；现在**所有**业务拒绝（含 `RejectedPrecondition`）**一律**走 [`P4InterlockPage::show_result`]，具体原因由**服务端** `message` 承担 —— 设计 TD:594 明写真·状态变化时服务端返回的 `message` **就是**「联锁状态已变化，请刷新后重试」⇒ EDGE-19 的文案**照样按其本意出现**（由服务端判定，不由客户端猜）。⇒ `show_conflict()` 在**当前生产路径上不可达**（`app.rs` 的那条臂已删除；仅 `ui/tests.rs` 仍作为**显式入口**直接调它、断言固定文案可达）。**当前契约无法自动达成该判定** —— `ControlCode::RejectedPrecondition` 把「状态已变化」与「触发源未复位 / 保持时间不足 / latch / StopPending」**糊在同一个码**里，回执**无**结构化 `InterlockReject` 字段；且 `InterlockReject` 的 **7 个变体里没有「冲突」变体** ⇒ 「B3 自行解析出 `InterlockReject`」对该场景**不可实现**（**契约级缺口**，属 F/G/H/I/J/K 与契约所有者的责任）。⇒ 本页**不假设**该固定文案会被自动触发：它在屏上出现**当且仅当**外部显式调用了 `show_conflict()`。⚠️ **M9**（B3-2b-2 订正）：置位点 2 处（`show_conflict` / `show_result` 的 `RejectedPrecondition` 分支）、**生产读取 1 处**（`app.rs::tick_console` ⑤ 每拍先取，`true` 即把 `next_poll_ms` 置 `None` ⇒ 下一拍补发一次读通道 `GET`；判据 `apply_refresh_request` 有单测、生效次数计入退出统计行 `p4_refresh`）⇒ 该**前向 API 已被消费**（此处原先"M9 生产读取 0 处、B3 必须消费"的陈述**已过期**，B3-2b-2 接线时订正） | 契约冻结（`display-proto` 不得改）；不做「按消息串猜语义」的脆弱解析（猜错即**谎报原因**，与 §2.6「绝不造假」冲突） | 若 `display-proto` 在控制回执中增 `reject: Option<InterlockReject>`（或为 EDGE-19 单列一个 `ControlCode` 变体），则 [`P4InterlockPage::show_result`] 直接分派（单一分派点），固定文案即可自动可达 |
 //! | IL13 | 回执 → 展示态的映射（**单一映射点** `Core::apply_ack`）：`latched := ack.latched`、`stop_failed := !ack.stopped`（`InterlockOpAck.stopped` 的契约语义是「操作后停机**确认**态」）；`available` / `enabled` / `sources` / 两灯**不变**（回执不带，等下一帧，最坏 ≤1.35 s） | §6.4「成功」行要求「用回执 `applied` **立即**刷新，不等下一帧」（F17.6 / IL-02）⇒ 回执能覆盖的两项立即刷；其余字段回执确无载体（契约冻结）⇒ 不臆造、由下一帧补。**契约未显式声明** `stopped` 与 `stop_failed` 互补 ⇒ 若后端语义有出入，只改 `Core::apply_ack` 一处 | 契约若明示互补关系，此处改为显式字段 |
 //! | IL14 | **保持时间倒计时**（UI §6.4「保持时间不足」行：按钮旁显剩余秒数）**已实现**，时钟由 [`P4InterlockPage::tick`] 注入：收到 `HoldNotElapsed { remaining_secs }` 时记剩余秒数并置「待取基准」标志，**首个 `tick`** 取基准 `Instant`，其后每拍按已过秒数递减（`saturating_sub`，不 panic）；**页面不读 `Instant::now()`**（`Toast::new` 的既有行为除外，同 `p2_config.rs` **PD20**）。倒计时到 `0` 只显示「还需 0 秒」，**不**自作主张放行（是否可操作仍由后端前置判定）；**跨帧存续与否见 IL27**（新帧改变展示态即清，`ts_ms` 不计） | 帧内只有 `release_hold_secs`（**须保持**的时长），**没有**「已保持多久 / 何时复位」⇒ 无法从帧推出绝对剩余时间；唯一可得的绝对量是后端拒绝里的 `remaining_secs` ⇒ 以「拒绝后的首拍」为基准推进是**唯一**不臆造的做法 | 若帧增「源复位时刻 / 已保持秒数」，改为帧驱动（届时删掉基准捕获） |
 //! | IL15 | 提交中（[`P4InterlockPage::set_submitting`]）两按钮 `disabled` 且**无按钮级就地原因** | UI §6.4 未定义「提交中」态的就地文案（§3.6 亦无该行）⇒ 只置灰、**不造文案**；防重由 `ConfirmDialog` 自身的 `Debounce`（500 ms，TT-10）与按钮禁用共同承担 | 无（**有意**） |
@@ -1999,6 +1999,13 @@ impl P4InterlockPage {
 
     /// **结构化**拒绝注入（`InterlockApi` 直连路径 / B3 自行解析出 `InterlockReject` 时调用）。
     ///
+    /// ⚠️ **可达性登记（当前生产路径不可达；行为保持不变）**：控制回执契约
+    /// （`display-proto/src/control.rs`）**没有** `reject: Option<InterlockReject>` 这类字段
+    /// （见 **IL12**）⇒ 线上路径**取不到**结构化的 `InterlockReject`，`show_result` 的分派只会
+    /// 走"服务端 `message`"那条。本方法保留给**将来**契约补上结构化拒绝字段（或 `InterlockApi`
+    /// 直连路径复活）时的单一入口；**不得**为了"让它有用"而在 `control_route` 里按 `code` /
+    /// 消息串**猜**出一个 `InterlockReject`（猜错即**谎报原因**，见 PM 裁定 1）。
+    ///
     /// 文案由 [`reject_text`] 按**结构化字段**重建（含 `SourcesNotReset` 的**具体**源名 ——
     /// EDGE-12「不得静默失败」），**不用**契约的 `user_message()`（含缺字全角标点与小写机器名）。
     /// `HoldNotElapsed` 走**倒计时**槽（UI §6.4「保持时间不足」行；见 **IL14**）。
@@ -2027,6 +2034,21 @@ impl P4InterlockPage {
     ///
     /// 「自动触发一次状态刷新」由**标志**表达：外部调 [`P4InterlockPage::take_refresh_request`]
     /// 取走并执行一次 `GET`（本页**不发请求** —— 与 P2 同一口径，见 **IL12**）。
+    ///
+    /// # ⚠️ 可达性登记（**当前生产路径不可达**）+ 沿革（PM 裁定 1，2026-09-16）
+    ///
+    /// 本方法是**显式入口**，只在**客户端本地能判定**「提交时状态已变化」时才该被调用
+    /// （例如将来页面自己比对 `observed_latched` / `observed_sources` 与当前帧 —— 契约目前
+    /// **没有**能自动达成该判定的字段，见 **IL12**）。
+    ///
+    /// **沿革（不得抹去）**：B3-2b-2 曾按**任务书**在 `control_route::route` 里给
+    /// [`ControlCode::RejectedPrecondition`] 单开一条臂 ⇒ 本方法（即把**所有**前置条件拒绝
+    /// 都显成这条**固定**文案）。**该实现已被主控推翻**（**谎报原因**：`RejectedPrecondition`
+    /// 把「状态已变化」与「触发源未复位 / 保持时间不足 / latch / `StopPending`」糊在同一个码里）
+    /// ⇒ 那条臂已**整条删除**，一切业务拒绝统一走 [`P4InterlockPage::show_result`]（具体原因由
+    /// **服务端** `message` 承担 —— 真·状态变化时服务端返回的就是这句话，EDGE-19 的文案
+    /// **照样按其本意出现**，只是判定方归服务端）。故本方法在**生产路径上零调用者**：
+    /// 当前唯一调用点是 `ui/tests.rs` 的**显式入口**断言（固定文案仍可达、仍可测）。
     pub fn show_conflict(&self) {
         self.core.submitting.set(false);
         *self.core.last_reject.borrow_mut() = None;

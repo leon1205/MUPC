@@ -25,9 +25,9 @@
 //! |----|------|--------|
 //! | ③ | [`Host::pump`] | 读 evdev（**非阻塞**）→ 更新 `Indev` 快照；无事件 = 正常空闲拍 |
 //! | ④ | [`Host::read_indev`] | `lv_indev_read()` → LVGL 命中 / 派发 `LV_EVENT_*` |
-//! | ⑤ | [`Host::on_lv_events`] | **有意为空**（见 [`Host::on_lv_events`] 的说明：LVGL 回调同步派发，无异步事件队列可消费 —— 不是"静默吞"，是**没有源**） |
+//! | ⑤ | [`Host::on_lv_events`] | 消费**接线层的意图队列**（B3-2b-2；`ui/**` 仍无异步事件队列，见该方法的说明）—— **T-3 门禁的落点** |
 //! | — | [`Host::next_deadline_ms`] | 读通道下一次轮询时刻（空闲回归由外壳自己算，见下） |
-//! | ⑥ | [`Host::tick`] | 推进通道状态机（非阻塞）→ `DisplayState` → 帧驱动页 `render` → `Shell::tick` |
+//! | ⑥ | [`Host::tick`] | 推进读/控制两条通道状态机（非阻塞）→ 回执路由 → `DisplayState` → 帧驱动页 `render` → `Shell::tick` |
 //!
 //! # 两条**刻意的**取舍（登记，供评审裁定）
 //!
@@ -45,18 +45,28 @@
 //!    集成用例断言 `renders < ticks`（恒真退化 ⇒ 两者相等 ⇒ 红；见 B3-2a 质量评审 重要 I-2）。
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use mupc_display_proto::{ConfigPatch, ConsoleEndpoint, InterlockOpPayload};
+
 use crate::channel::{next_poll_at, poll_due, DisplayChannelClient, Progress};
 use crate::config::CliConfig;
+use crate::console::{ConsoleClient, ConsoleClock, ConsoleResult};
+use crate::control_route::{
+    audit_query_string, log_query_string, p3_connected, route, ControlIntent, RawPayload,
+    RouteDecision,
+};
 use crate::lvgl::display::Display;
 use crate::lvgl::indev::Indev;
 use crate::lvgl::obj::Obj;
 use crate::screen::{Blitter, MemorySink, PixelSink};
 use crate::state::{ChannelStatus, ControlState, DisplayState, Freshness};
 use crate::timing::Host;
+use crate::ui::pages::p3_logs::LogQuery;
+use crate::ui::pages::p5_audit::AuditQuery;
 use crate::ui::pages::{self, PageInput};
 use crate::ui::shell::{NavPage, Shell};
 use crate::ui::theme::{Dimens, Palette, Timing};
@@ -108,6 +118,12 @@ pub enum StartupError {
     Lvgl(String),
     /// 触摸设备**致命**错误（多候选 / 校准不可信；设计 §1.2 要求启动即报错，不猜设备）。
     Touch(String),
+    /// **控制通道客户端建不起来**（`--control-channel` 非法；B3-2b-2）。
+    ///
+    /// 单列一个变体（而不是塞进 `Lvgl`）：两者的**排障入口完全不同** —— 前者改 CLI / unit，
+    /// 后者查 LVGL 装配。且"控制通道建不起来"**绝不静默降级**为"无控制通道的只读屏"：
+    /// 那会让 P2/P4 的保存与释放按钮永远无效而屏上无任何解释（PRD §2.6 降级必须可见）。
+    Control(String),
 }
 
 impl std::fmt::Display for StartupError {
@@ -115,6 +131,7 @@ impl std::fmt::Display for StartupError {
         match self {
             StartupError::Lvgl(m) => write!(f, "LVGL 初始化/装配失败：{m}"),
             StartupError::Touch(m) => write!(f, "触摸设备致命错误：{m}"),
+            StartupError::Control(m) => write!(f, "控制通道客户端创建失败：{m}"),
         }
     }
 }
@@ -208,6 +225,32 @@ pub fn needs_render(prev: Option<RenderKey>, new: RenderKey) -> bool {
     prev != Some(new)
 }
 
+/// P3 增量拉取的节拍（设计 §6.3「实时追加」行：**每 500 ms 拉 `cursor` 增量**）。
+///
+/// **不取 `--poll-ms`**：该值是**读通道**（帧）的轮询节拍，它的上界 500 ms 是 F7.3 / F16.5
+/// 端到端时延算式的输入（设计 §5.5 的硬上界说明）；日志增量是**另一条通道**的节拍，
+/// 复用会让"改帧节拍"顺带改掉日志时延（耦合两件不相干的事）。设计给的数就是 500 ms。
+const CONSOLE_INCREMENT_MS: u64 = 500;
+
+/// EDGE-19 / **M9** 的「补发一次 GET」判据（**纯函数**，可测）。
+///
+/// P4 在"提交时状态已变化"（或被前置条件拒绝）时置 `refresh_requested` 标志
+/// （`p4_interlock.rs` 的 `show_conflict` / `show_result` 两处置位）；**B3 必须消费它**，
+/// 否则「自动刷新」的语义落空（M9 原文）。消费动作 = 把**读通道**的下一次轮询提前到下一拍
+/// （`next_poll_ms = None` ⇒ `channel::poll_due(_, None)` 恒真）—— 联锁态的真源是**显示帧**，
+/// 不是控制通道的某个 GET，故"补发"补的是帧 GET。
+///
+/// 抽成自由函数（而不是写在 `tick` 里）：`App` 的构造需要 LVGL 会话，纯逻辑用例够不着；
+/// 判据抽出来后可独立断言，**调用点**由 [`App::p4_refresh_forced`] 计数并打印进退出统计行
+/// （与 [`needs_render`] 同款："判据可测 + 调用点有观测口"）。
+pub fn apply_refresh_request(refresh_requested: bool, next_poll_ms: &mut Option<u64>) -> bool {
+    if !refresh_requested {
+        return false;
+    }
+    *next_poll_ms = None;
+    true
+}
+
 /// 渲染进程装配体（事件循环宿主）。
 ///
 /// **字段声明顺序 = 析构顺序**（Rust 保证）：`screen` → `shell` → `indev` → `display`
@@ -234,9 +277,53 @@ pub struct App {
     blit_counters: Rc<crate::screen::BlitCounters>,
     /// 读通道客户端（非阻塞状态机）。
     channel: DisplayChannelClient,
+    /// **控制通道客户端**（`--control-channel`；B3-2b-2 接线）。
+    ///
+    /// 单条在飞：`begin_write` / `begin_query` 在 `is_busy()` 时**响亮失败**（`Busy`）
+    /// ⇒ 接线层必须先判在途（见 [`App::begin_write_intent`] / [`App::begin_query_intent`]）。
+    console: ConsoleClient,
+    /// **意图队列**（屏 → 网络；`Rc<RefCell<..>>` 是因为页面回调持有的是它、而不是 `&mut App`）。
+    ///
+    /// 生产者 = 六页的意图回调（P2 提交 / P4 释放 · M1 授权 / P3 · P5 的筛选与分页）；
+    /// 消费者 = [`Host::on_lv_events`]。**写操作只能从这里产生**（T-3 门禁的结构性保证）。
+    intents: Rc<RefCell<VecDeque<ControlIntent>>>,
+    /// **启动期**要发起的读清单（5 条；GET 串行：同一时刻仅 1 条在飞）。
+    ///
+    /// ⚠️ **订正（B3-2b-2 整改 建议 4）**：此前本行写「启动期 / **切页期**」，**不实** ——
+    /// 全仓**没有**往本清单追加的生产者（唯一写入点是 [`App::build`] 的装配段）。
+    /// 切页 / 筛选变化由**意图队列**真做（`ControlIntent::LogQuery` / `AuditQuery` /
+    /// `AuditLoadMore` → [`App::begin_query_intent`]）。
+    pending_reads: VecDeque<ConsoleEndpoint>,
+    /// 最近一次发出的日志查询（「回到最新」用它重取首屏 —— 该意图载荷是 `()`）。
+    last_log_query: Option<LogQuery>,
+    /// 最近一次发出的审计查询（切页 / 刷新时重发同一条，免去在接线层复制页面筛选态）。
+    last_audit_query: Option<AuditQuery>,
+    /// 上一次注入 P3 的通道条态（`None` = 尚未注入）—— 只在**翻转时**才碰 LVGL，
+    /// 免得每拍都 `Core::layout()`。
+    p3_connected_injected: Option<bool>,
+    /// P3 增量拉取的下一次到期时刻（单调 ms；`None` = 立即）。
+    next_increment_ms: Option<u64>,
+    /// EDGE-19 的「补发一次 GET」生效次数（判据 = [`apply_refresh_request`]）。
+    p4_refresh_forced: u64,
+    /// 在途期间**被丢弃**的写意图数。
+    ///
+    /// ⚠️ **订正（B3-2b-2 整改 重要 3）**：此前本行写「丢弃已上屏提示」——**不成立**：
+    /// ① 丢弃路径落的 [`ControlState::push_toast`] 那条「操作进行中」**没有任何页面消费者**
+    ///    （`App` 与 `ui/**` 都不读 `ControlState::toast()` / `toast_text()`；上屏的 Toast
+    ///    一律由页面**自己的** `show_toast` 建）；
+    /// ② 该分支**生产不可达**：提交中两页的按钮均已 disabled（P2 `refresh_actions` 的
+    ///    `usable = available && !submitting` ⇒ `save` / `reset` 同灰；P4 `op_state` 的
+    ///    `busy` ⇒ 两按钮同灰）⇒ 在途期间用户**无法**再次触发确认回调 ⇒ 队列里不会有写意图。
+    /// ⇒ 本路径为**防御性**：**只计数**，屏上无提示。与裁定 3 的传输失败出口**同因**
+    /// （均待页面补 Toast 入口；那是 `src/ui/**` 改动，需单独立项）。
+    write_intents_dropped: u64,
+    /// 在途期间**被丢弃**的读意图数（读意图密集，丢弃**只计数**、不弹 Toast —— 见报告"选择"）。
+    read_intents_dropped: u64,
+    /// 回执**路由失败**数（形态 / 解码不符；正常恒为 0）。
+    route_errors: u64,
     /// 帧/通道态（三态归一）。
     state: DisplayState,
-    /// 控制通道态（本单元只接线其**确认弹层**入口；写操作生产者在 B3-2b）。
+    /// 控制通道态（在途 / 回执摘要 / Toast 生命周期 / 确认弹层标记）。
     control: ControlState,
     cfg: CliConfig,
     /// 事件循环单调时基原点（与循环 `Clock` **同源** ⇒ `now_ms` 可直接换算成 `Instant`）。
@@ -342,8 +429,29 @@ impl App {
 
         let channel = DisplayChannelClient::try_new(&cfg.channel)
             .map_err(|e| StartupError::Lvgl(format!("数据通道 URL 非法：{e}")))?;
+        // 控制通道客户端（`--control-channel`；B3-2b-2 接实）。**建不起来即启动失败**，
+        // 不静默降级成"无控制通道的只读屏"（见 [`StartupError::Control`] 的说明）。
+        let console = ConsoleClient::new(&cfg.control_channel)
+            .map_err(|e| StartupError::Control(format!("`{}`：{e}", cfg.control_channel)))?;
         let mut state = DisplayState::new();
         state.set_stale_ms(cfg.stale_ms);
+
+        // 意图队列 + 六页的意图回调接线（**唯一的意图生产者**）。
+        let intents: Rc<RefCell<VecDeque<ControlIntent>>> =
+            Rc::new(RefCell::new(VecDeque::new()));
+        Self::bind_intents(&shell, &intents);
+
+        // 启动期的读取清单（设计 §5.5：查询可在启动期发起；写操作**不在此列**）。
+        let mut pending_reads: VecDeque<ConsoleEndpoint> = VecDeque::new();
+        for ep in [
+            ConsoleEndpoint::Config,
+            ConsoleEndpoint::Logs,
+            ConsoleEndpoint::LogsTargets,
+            ConsoleEndpoint::Audit,
+            ConsoleEndpoint::AuditOps,
+        ] {
+            pending_reads.push_back(ep);
+        }
 
         Ok(Self {
             screen,
@@ -355,6 +463,17 @@ impl App {
             mem_sink: None,
             blit_counters,
             channel,
+            console,
+            intents,
+            pending_reads,
+            last_log_query: None,
+            last_audit_query: None,
+            p3_connected_injected: None,
+            next_increment_ms: None,
+            p4_refresh_forced: 0,
+            write_intents_dropped: 0,
+            read_intents_dropped: 0,
+            route_errors: 0,
             state,
             control: ControlState::new(),
             cfg: cfg.clone(),
@@ -367,6 +486,69 @@ impl App {
             renders: 0,
             touch_errors: 0,
         })
+    }
+
+    /// 把六页的**意图回调**接到共享队列上（**唯一的意图生产者**）。
+    ///
+    /// # 为什么经队列而不是在回调里直接发请求
+    ///
+    /// ① 回调在 **LVGL 事件派发**里跑（`Host::read_indev` 内），而 `App` 此刻正被 `&mut` 借走
+    ///    ⇒ 回调**拿不到** `ConsoleClient`；`Rc<RefCell<..>>` 是唯一不引入第二份真源的形态。
+    /// ② **T-3 门禁**：这三条写回调只在**确认完成**时触发（P2 的 L1/L2+ 双步 + 长按、
+    ///    P4 的 L2 长按）——未确认 ⇒ 回调不跑 ⇒ 队列为空 ⇒ 一包都不发。
+    /// ③ 设计 §5.2 不变量 3：LVGL 回调内**不得**做 I/O；队列把动作推到 `Host::on_lv_events`。
+    ///
+    /// ⚠️ **禁止在回调里回灌页面数据**（`p3::set_targets` 会删正在派发的 chip ⇒ UAF 级，
+    /// 见 `p3_logs.rs` 的调用方约束）—— 本函数只登记"意图"，所有回灌都发生在 `tick` 路径。
+    fn bind_intents(shell: &Shell, intents: &Rc<RefCell<VecDeque<ControlIntent>>>) {
+        {
+            let q = Rc::clone(intents);
+            shell.p2().set_on_submit(move |patch: ConfigPatch, _level| {
+                q.borrow_mut().push_back(ControlIntent::ConfigApply(patch));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p4().set_on_release(move |p: InterlockOpPayload| {
+                q.borrow_mut().push_back(ControlIntent::InterlockRelease(p));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p4().set_on_ack_m1(move |p: InterlockOpPayload| {
+                q.borrow_mut().push_back(ControlIntent::InterlockAckM1(p));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p3().set_on_query(move |query: LogQuery| {
+                q.borrow_mut().push_back(ControlIntent::LogQuery(query));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p3().set_on_increment(move |query: LogQuery| {
+                q.borrow_mut().push_back(ControlIntent::LogIncrement(query));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p3().set_on_back_to_latest(move || {
+                q.borrow_mut().push_back(ControlIntent::LogBackToLatest);
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p5().set_on_query(move |query: AuditQuery| {
+                q.borrow_mut().push_back(ControlIntent::AuditQuery(query));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p5().set_on_load_more(move |query: AuditQuery| {
+                q.borrow_mut().push_back(ControlIntent::AuditLoadMore(query));
+            });
+        }
     }
 
     /// 打开触摸设备（仅 Linux）。
@@ -488,6 +670,350 @@ impl App {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // 控制通道接线（B3-2b-2）：意图 → 请求 → 回执 → 页面
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 控制通道客户端的只读句柄（退出统计行 / 集成自证用）。
+    pub fn console(&self) -> &ConsoleClient {
+        &self.console
+    }
+
+    /// 退出时的控制通道连续失败数（**P3 通道条态的真源**，见 [`control_route::p3_connected`]）。
+    pub fn console_fail_streak(&self) -> u32 {
+        self.console.fail_streak()
+    }
+
+    /// 当前注入 P3 的通道条态（`true` = 「实时日志已连接」）。
+    ///
+    /// **口径**：由**控制通道**可达性派生（[`control_route::p3_connected`]），**不是**帧通道
+    /// —— 理由见该函数的文档。退出统计行会打印 `p3_channel=up|down`，进程级用例据此断言。
+    pub fn p3_channel_connected(&self) -> bool {
+        let connected = p3_connected(self.console.fail_streak());
+        // 未注入过 ⇒ 报告**将要**注入的值（上电初值 = 已连接），与实际注入点同源。
+        self.p3_connected_injected.unwrap_or(connected)
+    }
+
+    /// 在途期间被丢弃的**写**意图数（丢弃同时经 ControlState 上屏一条「操作进行中」）。
+    pub fn write_intents_dropped(&self) -> u64 {
+        self.write_intents_dropped
+    }
+
+    /// 在途期间被丢弃的**读**意图数（丢弃**只计数**，不弹 Toast —— 见交付报告"选择"）。
+    pub fn read_intents_dropped(&self) -> u64 {
+        self.read_intents_dropped
+    }
+
+    /// 回执**路由失败**数（形态 / 解码不符；正常恒为 0）。
+    pub fn route_errors(&self) -> u64 {
+        self.route_errors
+    }
+
+    /// EDGE-19 的「补发一次 GET」实际生效次数（M9：B3 必须消费 `take_refresh_request`）。
+    pub fn p4_refresh_forced(&self) -> u64 {
+        self.p4_refresh_forced
+    }
+
+    /// 消费意图队列（**`Host::on_lv_events` 调用**；LVGL 事件派发之外）。
+    ///
+    /// **T-3 门禁的结构性落点**：写请求的 `begin_write` 调用点**只有**
+    /// [`App::begin_write_intent`]，而它的调用点**只有**本函数的
+    /// `ConfigApply` / `Interlock*` 三条分支；这三条分支的唯一生产者是页面**确认完成**回调
+    /// 压入的队列 ⇒ **未确认 = 队列为空 = 零网络动作**。
+    fn handle_control_intents(&mut self, epoch_ms: u64) {
+        loop {
+            let Some(intent) = self.intents.borrow_mut().pop_front() else {
+                return;
+            };
+            match intent {
+                ControlIntent::ConfigApply(patch) => self.begin_write_intent(
+                    ConsoleEndpoint::ConfigApply,
+                    "apply",
+                    &patch,
+                    epoch_ms,
+                ),
+                ControlIntent::InterlockRelease(p) => self.begin_write_intent(
+                    ConsoleEndpoint::InterlockRelease,
+                    "release",
+                    &p,
+                    epoch_ms,
+                ),
+                ControlIntent::InterlockAckM1(p) => self.begin_write_intent(
+                    ConsoleEndpoint::InterlockAckM1,
+                    "ack_m1",
+                    &p,
+                    epoch_ms,
+                ),
+                ControlIntent::LogQuery(q) => {
+                    let qs = log_query_string(&q);
+                    self.last_log_query = Some(q);
+                    self.begin_query_intent(ConsoleEndpoint::Logs, qs);
+                }
+                ControlIntent::LogIncrement(q) => {
+                    let qs = log_query_string(&q);
+                    self.last_log_query = Some(LogQuery { cursor: None, ..q });
+                    self.begin_query_intent(ConsoleEndpoint::Logs, qs);
+                }
+                ControlIntent::LogBackToLatest => {
+                    // 「回到最新」= 用**上一次**查询（游标归零）重取首屏；页面载荷是 `()`，
+                    // 拉不到筛选态 ⇒ 以接线层留存的上一次查询为准（`None` ⇒ 契约默认档）。
+                    let q = self.last_log_query.clone().unwrap_or_default();
+                    let qs = log_query_string(&LogQuery { cursor: None, ..q.clone() });
+                    self.last_log_query = Some(LogQuery { cursor: None, ..q });
+                    self.begin_query_intent(ConsoleEndpoint::Logs, qs);
+                }
+                ControlIntent::AuditQuery(q) => {
+                    let qs = audit_query_string(&q);
+                    self.last_audit_query = Some(q);
+                    self.begin_query_intent(ConsoleEndpoint::Audit, qs);
+                }
+                ControlIntent::AuditLoadMore(q) => {
+                    let qs = audit_query_string(&q);
+                    self.last_audit_query = Some(q);
+                    self.begin_query_intent(ConsoleEndpoint::Audit, qs);
+                }
+            }
+        }
+    }
+
+    /// **写**意图 → `begin_write`（`begin_write` 在本 crate 的**唯一**生产调用点）。
+    ///
+    /// 在途 ⇒ **丢弃**：计数 + 记一条既有 §3.6 文案「操作进行中」
+    /// （`p4_interlock::TEXT_OP_BUSY`，**不自造新串**）。**不排队、不自动重试**
+    /// （重试是显式动作；`RetryWindowExpired` 的出路见交付报告"未决 ③"）。
+    ///
+    /// ⚠️ **"可见"不成立（B3-2b-2 整改 重要 3，如实订正）**：那条 Toast 落在
+    /// [`ControlState::push_toast`]，而 `ControlState` 的 toast 当前**无页面消费者**；
+    /// 且提交中两页按钮已 disabled ⇒ 本分支**防御性、生产不可达**。与裁定 3 的传输失败
+    /// 出口**同因**（均待页面补 Toast 入口）。判据与理由见 [`App::write_intents_dropped`]。
+    fn begin_write_intent<P: serde::Serialize>(
+        &mut self,
+        ep: ConsoleEndpoint,
+        op: &str,
+        payload: &P,
+        epoch_ms: u64,
+    ) {
+        debug_assert!(ep.is_write(), "写意图必须落在写端点上");
+        if self.console.is_busy() {
+            // ⚠️ **记账 ≠ 上屏**（重要 3 订正）：`ControlState` 的 toast 无页面消费者，
+            // 且本分支生产不可达（提交中两页按钮已 disabled）⇒ 此处只计数，屏上无提示。
+            // 保留 `push_toast` 是**防御性**记账（将来页面补上 Toast 入口即自然可见）。
+            self.write_intents_dropped += 1;
+            self.control
+                .push_toast(crate::ui::pages::p4_interlock::TEXT_OP_BUSY, epoch_ms);
+            return;
+        }
+        match self.console.begin_write(op, payload, ConsoleClock::now()) {
+            Ok(request_id) => {
+                self.control.begin(ep, Some(&request_id));
+                // 提交中：按钮 disabled + 「保存中...」（P2）/ 两按钮 disabled（P4）。
+                self.set_submitting(ep, true);
+            }
+            Err(e) => {
+                // ⚠️ **登记（B3-2b-2 整改 建议 4，本轮只登记不实现）**：本路径只有 stderr，
+                // **无上屏出口** —— 与传输失败（`absorb_console` 里本地合成回执 → `show_result`）
+                // 的口径**不同**。可达性：`begin_write` 自身失败近乎结构不可达（写端点 + 已拼好的
+                // 载荷）；待页面补通用 Toast 入口后再统一上屏口径。
+                self.set_submitting(ep, false);
+                self.control.record_transport_failure(epoch_ms);
+                eprintln!("[mupc-local-display] 控制通道写请求发起失败（{}）：{e}", ep.path());
+            }
+        }
+    }
+
+    /// **读**意图 → `begin_query`。
+    ///
+    /// 在途处理（**写优先，绝不打断**）：
+    /// - 在途的是**查询** ⇒ 旧查询已过期（用户换了筛选条件）⇒ `cancel()` 作废后发新的
+    ///   （`ConsoleClient::cancel` 的登记用途即此）；
+    /// - 在途的是**写** ⇒ **丢掉**本次读意图并计数（写请求绝不能被打断；**不弹 Toast**：
+    ///   读意图密集，逐条弹会刷屏，见交付报告"选择"）。
+    fn begin_query_intent(&mut self, ep: ConsoleEndpoint, query: String) {
+        if self.console.is_busy() {
+            if self.console.inflight_request_id().is_none() {
+                self.console.cancel();
+                self.control.finish();
+            } else {
+                self.read_intents_dropped += 1;
+                return;
+            }
+        }
+        if let Err(e) = self.console.begin_query(ep, &query, ConsoleClock::now()) {
+            // 只可能是 `QueryTooLarge` / `BadQuery`（拼串 bug）⇒ 响亮，不静默。
+            self.read_intents_dropped += 1;
+            eprintln!(
+                "[mupc-local-display] 控制通道读请求发起失败（{}）：{e}",
+                ep.path()
+            );
+        }
+    }
+
+    /// 复位「提交中」态（**失败 / 传输错误也必须复位**，否则按钮永久禁用 +「保存中...」）。
+    fn set_submitting(&self, ep: ConsoleEndpoint, on: bool) {
+        match ep {
+            ConsoleEndpoint::ConfigApply => self.shell.p2().set_submitting(on),
+            ConsoleEndpoint::InterlockRelease | ConsoleEndpoint::InterlockAckM1 => {
+                self.shell.p4().set_submitting(on)
+            }
+            _ => {}
+        }
+    }
+
+    /// 某读端点的查询串（GET 参数在 query；写端点不可达）。
+    fn query_for(&self, ep: ConsoleEndpoint) -> String {
+        match ep {
+            ConsoleEndpoint::Logs => log_query_string(&self.last_log_query.clone().unwrap_or_default()),
+            ConsoleEndpoint::Audit => {
+                audit_query_string(&self.last_audit_query.clone().unwrap_or_default())
+            }
+            // `config` / `logs/targets` / `audit/ops` 无参（§3.4 请求列为「—」）。
+            _ => String::new(),
+        }
+    }
+
+    /// 消化一次控制通道完成事件：**路由 / 失败**两条出路。
+    fn absorb_console(&mut self, res: ConsoleResult<crate::console::ConsoleOutcome<RawPayload>>, epoch_ms: u64) {
+        let outcome = match res {
+            Ok(o) => o,
+            Err(e) => {
+                // 传输失败（连接 / 超时 / 非 200 / 解码）：**按既有口径**记入 `ControlState`
+                // （清在途 + 「操作失败」Toast，文案 `state::TRANSPORT_FAIL_TEXT`，**不自造**）；
+                // 另把"提交中"复位，否则按钮永久禁用。
+                //
+                // **裁定 3（B3-2b-2 整改）**：那条兜底 Toast 的句柄归页面、而**没有任何页面
+                // 暴露通用 Toast 入口** ⇒ 光记账 = 用户按「保存」时**屏上什么都不发生**。
+                // 故对**写**端点再补一条**本地合成**的「不可用」回执，走页面**既有**的
+                // `show_result`（复用上屏路径；`src/ui/**` 零改动）。读端点不合成（它们的降级
+                // 出口是 P3 通道条态）。合成回执**不是**服务端回执，字段取值理由见
+                // `control_route::transport_failure_decision`。
+                //
+                // ⚠️ 返回值**必须**被消费 —— 它带**显式** `#[must_use]`（**不要**指望 `Option`
+                // 自带该属性：本工具链实测**不成立** —— 裸调用不报任何告警，见 `state.rs` 该方法的
+                // 注）：漏掉下面那句 `apply_route`，回执就"只造不送" —— 屏上依旧是"什么都不发生"，
+                // 而 `unused_must_use` 告警会在"零警告"判据上当场变红。
+                // 先取在途端点（`record_*` 会清掉在途）；在途信息由 `record_*_with_receipt`
+                // 自己取出，此处只为复位"提交中"。
+                let ep = self.control.inflight().map(|i| i.endpoint);
+                if let Some(decision) = self.control.record_transport_failure_with_receipt(epoch_ms)
+                {
+                    self.apply_route(decision);
+                }
+                if let Some(ep) = ep {
+                    self.set_submitting(ep, false);
+                }
+                eprintln!("[mupc-local-display] 控制通道请求失败：{e}");
+                return;
+            }
+        };
+        let decision = match route(&outcome) {
+            Ok(d) => d,
+            Err(e) => {
+                // ⚠️ **登记（B3-2b-2 整改 建议 4，本轮只登记不实现）**：回执**形态 / 解码不符**
+                // 这条出口同样只有 stderr、**无上屏出口**，与传输失败的合成回执口径**不同**
+                // （那一条走 `show_result` 上屏）。待页面补通用 Toast 入口后再统一。
+                self.route_errors += 1;
+                let ep = self.control.inflight().map(|i| i.endpoint);
+                self.control.record_transport_failure(epoch_ms);
+                if let Some(ep) = ep {
+                    self.set_submitting(ep, false);
+                }
+                eprintln!("[mupc-local-display] {e}（回执已丢弃，不冒充成功）");
+                return;
+            }
+        };
+        // 回执摘要（写操作才带信封）：清在途 + 按 `toast_text` 规则弹 Toast。
+        // 查询载荷不是 `ControlResponse` ⇒ 走 `finish()` 清在途（不记摘要）。
+        match outcome.response() {
+            Some(resp) => self.control.record_response(resp, epoch_ms),
+            None => self.control.finish(),
+        }
+        self.apply_route(decision);
+    }
+
+    /// **唯一的**回执 → 页面分派点（判据来自 [`control_route::route`]，此处只做 `match`）。
+    fn apply_route(&mut self, decision: RouteDecision) {
+        match decision {
+            RouteDecision::Config(view) => {
+                if let Err(e) = self.shell.p2().set_config(&view) {
+                    Self::report_lvgl(e);
+                }
+            }
+            RouteDecision::ConfigApply(resp) => {
+                self.shell.p2().set_submitting(false);
+                if let Err(e) = self.shell.p2().show_result(&resp) {
+                    Self::report_lvgl(e);
+                }
+            }
+            // ⚠️ `set_targets` **只在这里**调用（tick 路径）：它删在屏 chip 并重建，
+            // 在 LVGL 事件回调里回灌会删正在派发的对象（UAF 级，见 `p3_logs.rs` 的调用方约束）。
+            RouteDecision::LogsTargets(t) => self.shell.p3().set_targets(&t),
+            RouteDecision::Logs(page) => self.shell.p3().set_page(&page),
+            RouteDecision::Audit(page) => self.shell.p5().set_page(&page),
+            RouteDecision::AuditOps(o) => self.shell.p5().set_ops(&o),
+            // 联锁写回执：**成功与一切失败**都走这里（含 `RejectedPrecondition`）—— 具体原因
+            // 由服务端 `message` 承担，页面**不**按消息串猜语义（PM 裁定 1，见
+            // `control_route::RouteDecision::InterlockResult` 的沿革段）。
+            RouteDecision::InterlockResult(resp) => {
+                self.shell.p4().set_submitting(false);
+                if let Err(e) = self.shell.p4().show_result(&resp) {
+                    Self::report_lvgl(e);
+                }
+            }
+        }
+    }
+
+    /// 页面注入失败（`LvglError`）：**只诊断、不 panic、不改业务状态**（屏上少一块 ≠ 数据错）。
+    fn report_lvgl(e: crate::lvgl::LvglError) {
+        eprintln!("[mupc-local-display] 控制回执注入页面失败：{e}");
+    }
+
+    /// 每拍推进控制通道（**绝不阻塞**：`tick` 内只有非阻塞调用）。
+    fn tick_console(&mut self, now_ms: u64, epoch_ms: u64) {
+        // ① 推进在途（连接 / 写 / 读三段状态机，一拍一步）。
+        if self.console.is_busy() {
+            if let crate::console::Progress::Done(res) =
+                self.console.tick::<RawPayload>(self.instant_at(now_ms))
+            {
+                self.absorb_console(res, epoch_ms);
+            }
+        }
+        // ② 空闲 ⇒ 发下一条读（**只**消费启动期清单；切页 / 筛选变化走意图队列，
+        //    见 [`App::pending_reads`] 的订正段）。
+        if !self.console.is_busy() {
+            if let Some(ep) = self.pending_reads.pop_front() {
+                let q = self.query_for(ep);
+                if let Err(e) = self.console.begin_query(ep, &q, ConsoleClock::now()) {
+                    self.read_intents_dropped += 1;
+                    eprintln!(
+                        "[mupc-local-display] 控制通道读请求发起失败（{}）：{e}",
+                        ep.path()
+                    );
+                }
+            }
+        }
+        // ③ P3 增量拉取节拍（设计 §6.3：「每 500 ms 拉 cursor 增量」）。
+        //    只在**P3 在前台**且空闲时触发（后台页不空转请求）。
+        if self.shell.current() == NavPage::Logs {
+            // MSRV = 1.75（workspace `rust-version`）⇒ 不用 `Option::is_none_or`（1.82 才稳定）。
+            let due = self.next_increment_ms.map_or(true, |t| now_ms >= t);
+            if due && !self.console.is_busy() {
+                self.next_increment_ms = Some(now_ms.saturating_add(CONSOLE_INCREMENT_MS));
+                self.shell.p3().request_increment();
+            }
+        }
+        // ④ P3 通道条态：**控制通道**可达性（不是帧通道，理由见 `control_route::p3_connected`）。
+        let connected = p3_connected(self.console.fail_streak());
+        if self.p3_connected_injected != Some(connected) {
+            self.p3_connected_injected = Some(connected);
+            self.shell.p3().set_channel(connected);
+        }
+        // ⑤ EDGE-19：被拒 ⇒ 补发一次读通道 GET（M9 登记的"B3 必须消费"）。
+        let refresh = self.shell.p4().take_refresh_request();
+        if apply_refresh_request(refresh, &mut self.next_poll_ms) {
+            self.p4_refresh_forced += 1;
+        }
+    }
+
     /// 帧驱动页的 `render`（**只在语义键变化时**）——见模块头取舍 2；
     /// 判据本身是纯函数 [`needs_render`]（可测，见 `tests::render_key_*`），
     /// **调用点**由 [`App::renders`] 计数（I-2：判据可测但调用点曾零覆盖）。
@@ -552,13 +1078,20 @@ impl Host for App {
 
     /// ⑤ 消费 LVGL 事件队列 → 业务动作。
     ///
-    /// **本实现有意为空，且不是"静默吞信息"**：`ui/**`（B1/B2c）**没有**异步事件队列 ——
-    /// 所有 UI 动作都在 LVGL 事件回调内**同步**落到 `Shell` / 页对象（切页、防抖、草稿、
-    /// 意图回调），投递点就是上一行的 [`Host::read_indev`]。故此处**没有源可消费**：
-    /// 加一个"取出即丢弃"的队列反而会制造"事件被谁处理了"的歧义。
-    /// 若将来 B3-2b 引入需要**延后**处理的动作（例如控制通道回执要在循环里而非回调里落库），
-    /// 其队列入口就挂在这里。
-    fn on_lv_events(&mut self) {}
+    /// # 本实现在 B3-2b-2 起**不再为空**（登记：`ui/**` 仍无异步事件队列）
+    ///
+    /// `ui/**`（B1/B2c）**没有**异步事件队列 —— 所有 UI 动作都在 LVGL 事件回调内**同步**
+    /// 落到 `Shell` / 页对象（切页、防抖、草稿、意图回调），投递点就是上一行的
+    /// [`Host::read_indev`]。故这里**消费的不是 LVGL 事件**，而是**接线层自己的意图队列**
+    /// （[`crate::control_route::ControlIntent`]）：页面回调把"要发的请求"压进队列
+    /// （回调运行在 `&mut App` 被借走的 LVGL 派发帧内、且按 §5.2 不变量 3 不得做 I/O），
+    /// 真正的 `begin_write` / `begin_query` 在本拍、**事件派发之外**执行。
+    ///
+    /// **这一步就是 T-3 门禁的落点**：队列的写侧生产者只有"确认完成"回调
+    /// （见 [`App::bind_intents`]），未确认 ⇒ 队列为空 ⇒ 零网络动作。
+    fn on_lv_events(&mut self) {
+        self.handle_control_intents(now_epoch_ms());
+    }
 
     /// 本拍到下一次必须唤醒的时刻：读通道下一次轮询（TT-12 空闲回归由外壳在 `Shell::tick`
     /// 内部计，不需要循环级截止，见模块头取舍 1）。
@@ -605,10 +1138,19 @@ impl Host for App {
         self.state.apply_hmi_channel(epoch_ms);
         // ④ 帧驱动页渲染（语义键变化才做）。
         self.render_pages_if_needed(epoch_ms);
-        // ⑤ 外壳每拍：页眉通道胶囊 / 时钟文本 / 空闲回归 / 未保存提示条 / 页内延迟动作。
+        // ⑤ **控制通道**每拍推进（B3-2b-2）：非阻塞状态机 → 回执路由 → P3 通道条态。
+        //    排在帧路径之后：`apply_refresh_request` 把 `next_poll_ms` 置 `None`，效果落在**下一拍**
+        //    的 ② 段（≤1 拍延迟，设计 §6.4 的"自动触发一次状态刷新"只要求"尽早"，不要求同拍）。
+        self.tick_console(now_ms, epoch_ms);
+        // ⑥ 外壳每拍：页眉通道胶囊 / 时钟文本 / 空闲回归 / 未保存提示条 / 页内延迟动作。
         self.shell.set_channel(self.state.channel_status(epoch_ms));
-        // 确认弹层打开期间暂停空闲回归（TT-13）——**接线已登记的契约**；生产者（P2/P4 的
-        // 确认流）属 B3-2b，此刻恒为 `false`（无弹层）。
+        // 确认弹层打开期间暂停空闲回归（TT-13）——**接线已登记的契约**。
+        // ⚠️ **登记（B3-2b-2，未闭合）**：`ControlState.confirm` 的生产者仍缺 —— 页面侧
+        //    **没有**任何生产可见的"弹层是否已打开"查询口（`p2.with_dialog` 是 `#[cfg(test)]`，
+        //    `ui/shell.rs` 偏差 **SH2** 原文即如此）⇒ 接线层**无从**在"弹层刚打开、用户尚未确认"
+        //    这一段置位。可在"确认完成（意图回调）→ 回执到达"那段置位，但那只是窗口的一半，
+        //    半对的模态标记比恒 `false` 更难推理 ⇒ 本单元**不动它**，如实登记待契约定夺
+        //    （见交付报告"未决/存疑 ④"）。
         self.shell.set_modal_open(self.control.confirm_open());
         self.shell.tick(now, &clock_text(epoch_ms));
     }
@@ -937,6 +1479,29 @@ mod tests {
         );
     }
 
+    /// EDGE-19 的「补发一次 GET」（M9：B3 必须消费 `take_refresh_request`）。
+    ///
+    /// **改什么会让本条变红**（**实测**）：把 `apply_refresh_request` 里的
+    /// `*next_poll_ms = None` 改成空语句（"消费了但没生效"）⇒ 第 2 条红；
+    /// 把 `if !refresh_requested` 去掉（恒真消费）⇒ 第 1 / 3 条红。
+    #[test]
+    fn refresh_request_forces_the_next_frame_poll() {
+        // ① 未请求刷新 ⇒ **不动**已有的节拍（不得凭空虚增请求）
+        let mut due = Some(12_345);
+        assert!(!apply_refresh_request(false, &mut due), "未请求 ⇒ 不生效");
+        assert_eq!(due, Some(12_345), "未请求刷新时下一次轮询时刻不得被改写");
+        // ② 请求刷新 ⇒ 下一次轮询提前到**下一拍**（`poll_due(_, None)` 恒真）
+        assert!(apply_refresh_request(true, &mut due), "请求 ⇒ 生效");
+        assert_eq!(due, None, "必须把 next_poll_ms 置 None，否则「补发 GET」是空话");
+        // ③ 已经是 None（首拍 / 已在途）⇒ 仍然报告"生效"（调用点可计数），且不改语义
+        let mut already = None;
+        assert!(apply_refresh_request(true, &mut already));
+        assert_eq!(already, None);
+        // ④ 对偶：`None` 必须真的让 `poll_due` 判真（判据与 channel.rs 同源，不另立一份）
+        assert!(crate::channel::poll_due(0, None), "None = 首拍即轮询");
+        assert!(!crate::channel::poll_due(0, Some(1)), "未到期 ⇒ 不轮询");
+    }
+
     /// 语义键节流 ②：**键变 ⇒ 必须渲染**，且**三路互相独立**（通道态 / 新鲜度 / 帧序号
     /// 任一变一位都要重渲染）—— 对偶退化方向「节流过度 ⇒ 屏面停更」的判据。
     ///
@@ -960,6 +1525,49 @@ mod tests {
         let no: RenderKey = (ChannelStatus::Init, Freshness::Stale, None);
         assert!(needs_render(Some(base), no), "seq 消失（None）必须渲染");
         assert!(needs_render(None, no), "首拍即无帧也要渲染（初始化中/断连态文案）");
+    }
+
+    /// 裁定 3 的**调用点**哨：失败分支必须把本地合成回执**送进**唯一分派点（只造不送 = 屏上
+    /// 依旧什么都不发生）。
+    ///
+    /// 判据本体（"写端点才合、字段取什么值"）在 `control_route::tests` 与
+    /// `state::tests::transport_failure_hands_back_a_local_receipt_for_inflight_writes`；
+    /// 本条守的是**这一行的存在**。
+    ///
+    /// # 能力边界（**如实登记，不得高估**）
+    ///
+    /// 源码扫描证明的是"这一行在源码里"（删掉 ⇒ 红），**不是**"它在运行期被执行过" ——
+    /// 离屏自检里**没有任何写意图**（T-3 门禁要求如此：未确认 = 零写请求），故这条路径在
+    /// 进程级用例中**不可达**。运行期的存在性由**结构**保证：该分支**只有**这一条路径、
+    /// 且 `record_transport_failure_with_receipt` 带**显式** `#[must_use]` ⇒ 漏消费即
+    /// `unused_must_use` 编译告警（本仓判据 = 零警告；该属性是**实测**加上去的：
+    /// `Option` 本身在本工具链**不触发**该告警）。
+    ///
+    /// **改什么会让本条变红**（**已实测**，见报告「探针 4」）：删掉
+    /// `self.apply_route(decision);` ⇒ 第 2 条断言红（同一改动还会报 `unused_must_use` 告警）。
+    #[test]
+    fn transport_failure_branch_dispatches_the_receipt_it_built() {
+        const SRC: &str = include_str!("app.rs");
+        /// 「就近」的窗口宽度（字符）：取用点与送入口之间隔着的就是那个 `if let Some(..) {`。
+        const NEAR_WINDOW: usize = 400;
+        // 只扫**生产段**（测试段自身含同样的字面量，会自证失真 —— 本项目踩过"扫描器失真"）。
+        let prod = SRC
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("app.rs 应能切出生产段");
+        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        // 判据必须**就近**：`self.apply_route(decision);` 在 `absorb_console` 的成功路径上
+        // 也有一处（同一行文本）—— 只查"全文含有"会被**那一处**满足，探测力归零
+        // （B3-2b-2 整改实测踩过：探针 4 第一版**没红**）。
+        let at = prod
+            .find("record_transport_failure_with_receipt(epoch_ms)")
+            .expect("失败分支必须取用本地合成回执（否则控制通道挂掉时屏上什么都不发生）");
+        let tail = &prod[at..];
+        let near = &tail[..tail.len().min(NEAR_WINDOW)];
+        assert!(
+            near.contains("self.apply_route(decision)"),
+            "合成回执**只造不送**：取用点之后 {NEAR_WINDOW} 字符内没有送进唯一分派点 ⇒ 上屏路径没走到"
+        );
     }
 
 }
