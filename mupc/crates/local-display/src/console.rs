@@ -1418,14 +1418,72 @@ mod tests {
         }
     }
 
-    /// 推进到谓词成立（同上）。
-    fn drive_until(c: &mut ConsoleClient, pred: impl Fn(&ConsoleClient) -> bool, budget: Duration) {
+    /// 「等到目标阶段」的收口形态（见 [`wait_for_stage`]）。
+    enum StageWait {
+        /// 谓词成立 —— 目标阶段**被观测到**。
+        Reached,
+        /// 在途请求已结束而谓词仍未成立。`Ok` = **请求成功**（阶段被整拍越过，谓词不可能再成立）；
+        /// `Err` = **真实失败**（超时 / 连接 / 解码…）。
+        Finished(ConsoleResult<ConsoleOutcome<serde_json::Value>>),
+    }
+
+    /// **等到目标阶段的唯一原语**（[`drive_until`] 与用例直接调用它）。
+    ///
+    /// **为什么不能写成 `while !pred(c) { let _ = c.tick(now); }`（B3-2c 偶发红根因）**：
+    /// `tick` 的推进循环（`MAX_STEPS_PER_TICK = 64`）刻意允许**一个 tick 内走完全部阶段**
+    /// （见 `tick` 的注释），因此 `writing` / `reading` 是**可能被整拍越过的瞬时中间态**。
+    /// 一旦请求在同一拍内结束，`pending` 被 `take()`、`phase_name()` 恒为 `idle` ⇒ 谓词
+    /// **永不成立**。旧写法丢掉 `tick` 的返回值 ⇒ 既看不见 `Done(Ok)`（合法快路径），
+    /// 也看不见 `Done(Err(e))`（真实失败），只剩 `budget`（本模块 30 s）到期后那句
+    /// **无信息**的「预算内未到达目标阶段」。
+    ///
+    /// **实测形态**（构造 16 进程 CPU 饱和 + 4 GiB 反复换页，60 次中 1 次红）：那一拍
+    /// 插桩打出 `phase=connecting tick=Pending`（连接工作线程 7 ms 未被调度）后紧跟
+    /// `Done(Ok)` —— 即测试线程在「已写完请求、尚未读响应」之间被抢占约 7 ms，桩的回包
+    /// 先就绪 ⇒ 同一拍内读到响应 ⇒ `reading` **从未被观测**、`Done(Ok)` 被丢弃 ⇒ 空转 30 s。
+    /// 也就是说：**底层不是超时，请求是成功的**。
+    fn wait_for_stage(
+        c: &mut ConsoleClient,
+        pred: impl Fn(&ConsoleClient) -> bool,
+        budget: Duration,
+    ) -> StageWait {
         let t0 = Instant::now();
         let mut spins: u32 = 0;
         while !pred(c) {
-            let _ = c.tick::<serde_json::Value>(Instant::now());
-            assert!(t0.elapsed() < budget, "预算 {budget:?} 内未到达目标阶段");
+            match c.tick::<serde_json::Value>(Instant::now()) {
+                Progress::Pending => {}
+                // **根因修复**：`Done` 必须**交回调用方**。吞掉它 ⇒ 请求在同一拍内走完时
+                // `pending` 已被 `take()`、`phase_name()` 恒为 `idle`、谓词永不成立 ⇒ 空转到
+                // `budget` 后报一句**无信息**的话（本条即 B3-2c 那条偶发红的根因）。
+                Progress::Done(r) => return StageWait::Finished(r),
+            }
+            assert!(
+                t0.elapsed() < budget,
+                "预算 {budget:?} 内未到达目标阶段（当前阶段 {}，已推进 {spins} 拍）",
+                c.phase_name()
+            );
             let_worker_run(&mut spins);
+        }
+        StageWait::Reached
+    }
+
+    /// 推进到谓词成立（同上）；请求先结束 ⇒ **当场以真实原因失败**，不空转到 `budget`。
+    ///
+    /// **改什么会让下面两条回归变红**：把 `wait_for_stage` 的 `Progress::Done(r) => return …`
+    /// 改回 `let _ = c.tick(…)`（旧写法）⇒ `Done(Err(Timeout))` 与 `Done(Ok)` 都被吞掉，
+    /// 用例重新变回「耗尽 30 s 预算后报一句无信息的话」。
+    fn drive_until(c: &mut ConsoleClient, pred: impl Fn(&ConsoleClient) -> bool, budget: Duration) {
+        match wait_for_stage(c, pred, budget) {
+            StageWait::Reached => {}
+            StageWait::Finished(Ok(_)) => panic!(
+                "目标阶段在请求结束时仍未被观测到（请求**成功**、阶段现为 {}）：\
+                 中间相被 `MAX_STEPS_PER_TICK` 整拍越过 ⇒ 谓词不可能再成立",
+                c.phase_name()
+            ),
+            StageWait::Finished(Err(e)) => panic!(
+                "目标阶段之前请求已失败（阶段 {}，真实原因）：{e:?}",
+                c.phase_name()
+            ),
         }
     }
 
@@ -1568,6 +1626,13 @@ mod tests {
     // ③ 三阶段推进（真实 TCP）
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// 阶段**有序推进**：`connecting` →（写）→（读）→ `idle`，且回执正确、失败计数清零。
+    ///
+    /// ⚠️ **不许把「必须观测到 `reading`」写成硬断言（B3-2c）**：`reading` 是**可能被整拍
+    /// 越过**的瞬时中间态（见 [`wait_for_stage`]）。旧写法丢掉 `tick` 返回值去等这个相，
+    /// 在「请求同一拍内走完」时会空转 30 s 后报一句无信息的话 —— 实测在 CPU 饱和 + 换页下
+    /// 复现（60 次 1 次红、耗时 30.17 s，真实结果是 `Done(Ok)`）。两条路径**都**必须走到
+    /// 同一个终态断言（`idle` + 回执 + `fail_streak == 0`），所以跳过中间相**不削弱**本用例。
     #[test]
     fn phases_advance_from_connecting_to_done() {
         let stub = Stub::echoing(false, "ok", true);
@@ -1575,9 +1640,17 @@ mod tests {
         c.begin_write("release", &payload(), clock()).expect("begin");
         assert_eq!(c.phase_name(), "connecting", "首拍前处于连接阶段");
         assert!(c.is_busy());
-        drive_until(&mut c, |c| c.phase_name() == "reading", HANG_GUARD);
-        assert_eq!(c.phase_name(), "reading", "写完之后进入读阶段");
-        let out = drive_to_done(&mut c, HANG_GUARD).expect("ok");
+        let out = match wait_for_stage(&mut c, |c| c.phase_name() == "reading", HANG_GUARD) {
+            StageWait::Reached => {
+                assert_eq!(c.phase_name(), "reading", "写完之后进入读阶段");
+                drive_to_done(&mut c, HANG_GUARD).expect("ok")
+            }
+            StageWait::Finished(r) => {
+                assert_eq!(c.phase_name(), "idle", "一 tick 走完 ⇒ 已回到空闲");
+                // `Err` 在此**响亮**，不再被吞成"未到达目标阶段"。
+                r.expect("一 tick 走完也必须是成功；失败必须在此报出真实原因")
+            }
+        };
         assert_eq!(c.phase_name(), "idle", "结束后回到空闲");
         assert!(!c.is_busy());
         let resp = out.response().expect("写操作必是回执信封");
@@ -1588,6 +1661,43 @@ mod tests {
 
     fn c_request_id(stub: &Stub, idx: usize) -> String {
         extract_request_id(&stub.request(idx)).unwrap_or_default()
+    }
+
+    /// **回归（B3-2c 偶发红根因之一）**：在途请求以**真实失败**收口时，等待目标阶段的驱动
+    /// 必须当场把它报出来（带出错误与阶段），而不是丢掉返回值、空转到 30 s 后报一句
+    /// 无信息的话。
+    ///
+    /// **构造**：把单次超时压到 1 ns ⇒ 连接根本来不及交付，`tick` 第一拍即以
+    /// [`ConsoleError::Timeout`] 收口（`phase_name()` 立刻变 `idle`、谓词永不成立）。
+    ///
+    /// **改什么会让本条变红**：把 `wait_for_stage` 的 `Progress::Done(r) => return …` 改回
+    /// 丢掉返回值 ⇒ 本用例耗尽 30 s 预算后以「未到达目标阶段」失败 ⇒ `expected` 不匹配。
+    #[test]
+    #[should_panic(expected = "真实原因")]
+    fn failed_inflight_request_is_reported_immediately_not_swallowed() {
+        let stub = Stub::echoing(false, "ok", true);
+        let mut c =
+            ConsoleClient::with_timeout(&stub.base_url, Duration::from_nanos(1)).expect("client");
+        c.begin_write("release", &payload(), clock()).expect("begin");
+        drive_until(&mut c, |c| c.phase_name() == "reading", HANG_GUARD);
+    }
+
+    /// **回归（B3-2c 偶发红根因之二）**：请求在**同一拍内走完**（合法快路径）时，等待目标
+    /// 阶段的驱动必须把结果**交回调用方**，而不是空转到 30 s。`|_| false` 是"目标相已被
+    /// 整拍越过"之后的状态的等价复刻：谓词永不可能成立，而请求会先结束。
+    ///
+    /// **改什么会让本条变红**：同 [`failed_inflight_request_is_reported_immediately_not_swallowed`]。
+    #[test]
+    fn stage_wait_hands_back_result_when_request_completes_first() {
+        let stub = Stub::echoing(false, "ok", true);
+        let mut c = ConsoleClient::new(&stub.base_url).expect("client");
+        c.begin_write("release", &payload(), clock()).expect("begin");
+        let StageWait::Finished(Ok(out)) = wait_for_stage(&mut c, |_| false, HANG_GUARD) else {
+            panic!("请求先结束时必须交回结果，而不是空转到预算");
+        };
+        assert!(out.response().expect("回执").ok, "请求成功结束");
+        assert_eq!(c.phase_name(), "idle");
+        assert!(!c.is_busy());
     }
 
     /// `duplicate=true` **原样上抛**（幂等命中不是错误）。
