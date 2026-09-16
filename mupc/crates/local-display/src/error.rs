@@ -40,6 +40,19 @@ pub enum Error {
     #[error("channel body too large from `{0}`: {1} bytes > limit")]
     BodyTooLarge(String, usize),
 
+    /// 响应头超过上限（B3-2a 新增：对端可用无终止符的无穷头撑爆内存；
+    /// `console.rs` 早有同类分支 `ConsoleError::HeadTooLarge`，读通道此前只在超长时
+    /// 收成通用 `Io` —— 分类粒度过粗，排障看不出"是头的问题"）。
+    #[error("channel response header too large from `{0}`: {1} bytes > limit")]
+    HeadTooLarge(String, usize),
+
+    /// 通道客户端已有在途请求（同一客户端同时只允许一条在飞；B3-2a 新增）。
+    ///
+    /// **响亮失败**而非静默排队/静默丢弃：调用方（`App::tick`）据 `is_busy()` 已经只会在
+    /// 空闲时发起，此分支出现即意味着装配逻辑错位，必须看得见。
+    #[error("channel client is busy with an in-flight request to `{0}`")]
+    Busy(String),
+
     /// 帧协议版本与渲染端预期不一致（W3：`PROTO_VERSION` 只发不校 → 跨版本静默按旧语义展示；
     /// PRD 4.4.1 要求版本一致性手段）。计一次失败并告警。
     #[error("channel protocol version mismatch from `{0}`: got {1}, expected {2}")]

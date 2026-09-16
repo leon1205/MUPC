@@ -71,10 +71,79 @@
 //! 不再「每次重置完整 timeout」（那会使 `poll` 永不超时 ⇒ `iterations` 停滞、stop 永不检查）。
 //! 剩余 ≤ 0 即按 [`PollOutcome::Timeout`] 返回（POSIX 正确语义）。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// `poll` 超时硬上界（设计 §5.2 不变量 1：`≤500 ms`；与读通道轮询节拍一致）。
 pub const MAX_POLL_TIMEOUT_MS: u64 = 500;
+
+/// 进程级**停止标志**（SIGINT/SIGTERM 处理器写、事件循环读）。
+///
+/// 为什么是 `static` 而非 `Arc<AtomicBool>`：信号处理函数只能触碰 **async-signal-safe**
+/// 的东西 —— 一次无锁原子写可以，堆分配/加锁/`Arc` 克隆不行。做成进程级静态量后，
+/// 处理器里**只有一条 `store`**，没有别的可能（[`install_stop_signals`] 的 SAFETY 说明）。
+///
+/// 它同时实现 [`Stop`]，故可直接 `run(..., &STOP_FLAG, ...)`。
+pub static STOP_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// 停止标志是否已被置位（诊断/测试用）。
+pub fn stop_requested_flag() -> bool {
+    STOP_FLAG.load(Ordering::Relaxed)
+}
+
+/// 复位停止标志（**仅供测试**：`static` 是进程级状态，用例之间必须隔离）。
+pub fn reset_stop_flag() {
+    STOP_FLAG.store(false, Ordering::Relaxed);
+}
+
+/// 注册 SIGINT(Ctrl-C) / SIGTERM(systemd stop) → [`STOP_FLAG`]（**仅 Linux**）。
+///
+/// 事件循环每拍开头查一次停止条件 ⇒ 最迟一个 `poll` 周期（≤500 ms）内退出，并走
+/// `App::drop` → `lvgl::deinit()` 的正常收尾路径（设计 §5.3/§9 的优雅退出）。
+///
+/// **非 Linux**：本函数是空操作（Windows 无 `libc` 依赖；Ctrl-C 由控制台的默认处理终止进程
+/// ——渲染进程只读、无待落盘状态，故无数据损失）。**端到端的优雅停验收在 Linux 真机**；
+/// 本机以 `--smoke`（[`StopAfter`]）+ 单元用例的注入停止条件覆盖"有界停"语义。
+///
+/// ⚠️ **本函数是本 crate 第二处 `unsafe`**（第一处 = [`FdPoller::poll_checked`] 的 `libc::poll`）：
+/// 设计 §1.1.1.2 把 `unsafe` 收在 `lvgl-sys` 与 `src/lvgl/**`，而系统调用类（`poll`/`signal`）
+/// 的落点已由工作单元 C 定在本文件（`FdPoller`）——同类同处，不新开第三处位置。
+/// 待办：若 PM 要求严格回到"unsafe 只在 src/lvgl/**"，应把这两处一并上收为
+/// `src/lvgl/os.rs` 之类的薄层（属结构性调整，不在本单元）。
+pub fn install_stop_signals() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: 处理器 [`stop_signal_handler`] 的全部行为是**一次无锁原子写** —— 属 POSIX
+        // 定义的 async-signal-safe 操作集（不分配、不加锁、不调用非可重入函数、不访问
+        // 非原子共享状态）。`libc::signal` 只登记函数指针、立即返回；`SIG_ERR` 由返回值
+        // 检出（下面**不静默吞**，失败即告警）。返回的旧处理器本进程不关心，显式丢弃。
+        unsafe {
+            let prev_int = libc::signal(libc::SIGINT, stop_signal_handler as libc::sighandler_t);
+            let prev_term = libc::signal(libc::SIGTERM, stop_signal_handler as libc::sighandler_t);
+            if prev_int == libc::SIG_ERR {
+                eprintln!(
+                    "[mupc-local-display] SIGINT 处理器注册失败（Ctrl-C 将走默认终止）；\
+                     停止语义仍由 systemd SIGTERM/StopAfter 覆盖"
+                );
+            }
+            if prev_term == libc::SIG_ERR {
+                eprintln!(
+                    "[mupc-local-display] SIGTERM 处理器注册失败（systemd stop 将走默认终止）"
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Windows 本机：无 libc 依赖，故无信号处理器（见本函数文档的渠道说明）。
+    }
+}
+
+/// SIGINT/SIGTERM 处理器（**只做一次原子写**，async-signal-safe）。
+#[cfg(target_os = "linux")]
+extern "C" fn stop_signal_handler(_sig: libc::c_int) {
+    STOP_FLAG.store(true, Ordering::Relaxed);
+}
 
 /// 单调毫秒时钟（注入用）。
 pub trait Clock {
@@ -322,6 +391,48 @@ impl Poller for FdPoller {
     }
 }
 
+/// **跨平台**的 [`Poller`]：无 fd 的纯超时等待（`std::thread::sleep`）。
+///
+/// # 用途与等价性（B3-2a）
+///
+/// - **Linux**：生产用 [`FdPoller`]（`poll(2)` 包住触摸 evdev fd；无触摸设备时它自己退化为
+///   `poll(NULL, 0, t)`）——本类型在 Linux 上不参与生产装配。
+/// - **非 Linux**（Windows 开发机 / CI）：本机**没有** `poll(2)` 与 evdev，但事件循环的
+///   「唯一阻塞点」不变量（§5.2 不变量 1）**仍须成立** —— 否则 `--backend offscreen`
+///   在开发机上要么跑不起来、要么退化成忙等。本类型即那条路径：**本拍真正阻塞**
+///   `timeout_ms` 毫秒，与 Linux 的 `poll(NULL, 0, t)` **逐条同义**（等价 `sleep`，
+///   **不是**忙等）。
+///
+/// # 语义边界（如实标注）
+///
+/// 它**只能**超时返回：本平台上没有任何 fd 可被唤醒，故 `poll` 的成功路径恒不发生
+/// （返回 [`PollOutcome::Timeout`]，`run` 视之为正常空闲拍）。触摸 / 输入类唤醒是 Linux
+/// 真机路径的事（`FdPoller`）。
+#[derive(Debug, Default)]
+pub struct SleepPoller;
+
+impl SleepPoller {
+    /// 无参构造（与 [`FdPoller::without_fd`] 对称）。
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Poller for SleepPoller {
+    fn poll(&mut self, timeout_ms: u64) -> PollOutcome {
+        // `thread::sleep` 不会失败、不会被打断成错误（`EINTR` 由标准库自行续睡）
+        // ⇒ 唯一可能的结局就是"睡满" = 超时。
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+        PollOutcome::Timeout
+    }
+
+    fn poll_fallback(&mut self, timeout_ms: u64) {
+        // 兜底语义与正常路径**相同**（真阻塞），因为本类型本就不触达任何 fd
+        // ⇒ 不存在"fd 已损坏"这种需要区别对待的情形。
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+    }
+}
+
 /// LVGL 定时器驱动（`lv_timer_handler` 的抽象；返回值 = 距下次需要处理的毫秒数）。
 pub trait Ticker {
     /// 驱动 LVGL 一次，返回距下次需要处理的毫秒数（直接作为 `poll` 超时上界）。
@@ -381,6 +492,48 @@ impl Stop for std::sync::Arc<std::sync::atomic::AtomicBool> {
     }
 }
 
+/// 「跑满 N 拍即停」的 [`Stop`]（`--smoke` 一键自检 / 集成测试用；生产用 Ctrl-C 的
+/// [`std::sync::atomic::AtomicBool`]）。
+///
+/// # 依赖的契约（改 `run` 时必须同步）
+///
+/// `run` 每迭代**恰好查询一次** `stop_requested()`（`while !stop.stop_requested()` 在 `run`
+/// 里唯一）⇒ 本类型的计数**精确等于已完成的拍数**（跑满 `limit` 拍）。若将来 `run` 改为
+/// 多次查询，本类型需同步改，且 [`run`] 的 `iterations` 会先变红（`timing.rs` 有用例把
+/// `iterations == 3` 钉住）。
+///
+/// **为什么不用 `AtomicBool` + 定时器线程**：「跑够 N 拍」是**结构**约束而非时间约束
+/// （机器快慢不影响拍数）⇒ 无需第二个线程，也就不引入跨线程共享状态（§5.2 不变量 4 的
+/// 单线程纪律得以保持：本类型只在事件循环线程内被读写）。
+#[derive(Debug)]
+pub struct StopAfter {
+    limit: u64,
+    seen: std::cell::Cell<u64>,
+}
+
+impl StopAfter {
+    /// 跑满 `limit` 拍后请求停止（`limit == 0` ⇒ 一拍不跑）。
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            seen: std::cell::Cell::new(0),
+        }
+    }
+
+    /// 已观测到的查询次数（= 已开始的迭代数）。
+    pub fn seen(&self) -> u64 {
+        self.seen.get()
+    }
+}
+
+impl Stop for StopAfter {
+    fn stop_requested(&self) -> bool {
+        let n = self.seen.get();
+        self.seen.set(n.saturating_add(1));
+        n >= self.limit
+    }
+}
+
 /// 事件循环配置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoopConfig {
@@ -415,14 +568,28 @@ pub struct LoopStats {
     pub poll_calls: u64,
     /// 其中「有事件」的次数。
     pub ready_events: u64,
-    /// 超时算得 0 的迭代数（诊断哨：持续非零意味着 LVGL 或宿主有即时任务积压）。
-    pub zero_timeout_iters: u64,
-    /// 触发**防忙等硬钳制**的迭代数（连续 0 超时超阈值 ⇒ 抬到阶梯下限；正常恒为 0）。
+    /// 超时算得 0 的迭代数。
     ///
-    /// 真机上该值持续增长 ⇒ 「LVGL 一直返回 0」（异常/积压）。
+    /// ⚠️ **非零有两个来源**（B3-2a 质量评审 建议 I-6 的登记：别把第二个当故障）：
+    /// 1. LVGL 有即时任务（`lv_next == 0`，设计字面 0）；
+    /// 2. **宿主给出已过期的截止** —— 本项目的**正常**形态：`App::next_deadline_ms` 在
+    ///    **在途请求**期间有意返回停滞（已过期）的 `next_poll_ms`（非阻塞状态机需要每拍
+    ///    立即唤醒；若改成返回 `None`，在途期间就只剩 500 ms 上界唤醒 ⇒ 一次 GET 要
+    ///    2~3 拍 ≈ 1.0~1.5 s，逼近 [`crate::channel::GET_TIMEOUT`]）。
+    ///    见 `app.rs` 的 `Host::next_deadline_ms` 与用例
+    ///    `stale_host_deadline_keeps_feeding_the_zero_clamp_ladder`。
+    pub zero_timeout_iters: u64,
+    /// 触发**防忙等硬钳制**的迭代数（连续 0 超时超阈值 ⇒ 抬到阶梯下限）。
+    ///
+    /// ⚠️ **本值在正常路径上就会增长**（来源见 [`LoopStats::zero_timeout_iters`]）：一次在途
+    /// GET（≤ [`crate::channel::GET_TIMEOUT`] = 2 s）期间通常被钳制约 10 拍后饱和到阶梯顶端。
+    /// 故它（以及 [`LoopStats::max_zero_clamp_streak`]）**不能**单独当"病态"判据 ——
+    /// 判病态要看它是否**远超**一次在途请求的时长（例如持续数十秒）。
     pub zero_timeout_clamps: u64,
     /// **最长连续钳制拍数**（诊断：区分「偶发钳制」`<=` [`ZERO_TIMEOUT_BURST_LIMIT`] 与
     /// 「持续钳制」——后者单调增长，且伴随着本次钳制下限沿 [`ZERO_CLAMP_LADDER_MS`] 升级）。
+    ///
+    /// ⚠️ 同 [`LoopStats::zero_timeout_clamps`]：在途请求期间会正常增长到约 10 拍。
     pub max_zero_clamp_streak: u32,
     /// `poll` 失败（[`PollOutcome::Failed`]）的**总**次数。
     pub poll_failures: u64,
@@ -755,6 +922,75 @@ mod tests {
 
     /// 阻塞调用日志（`poll` / `poll_fallback` 的次序）。
     type CallLog = Rc<RefCell<Vec<&'static str>>>;
+
+    // ── 跨平台兜底 poller（`SleepPoller`；B3-2a）─────────────────────────────
+    //
+    // 与上面那些 `Fake*` 不同：本组用例断言的是**真的阻塞**（这是"唯一阻塞点不得退化为忙等"
+    // 的可执行证据）。故用真实墙钟测下界，取值小（20 ms）以免拖慢整套测试。
+
+    /// `poll` 必须**真的阻塞**：耗时 ≥ 请求的超时（下界断言，机器慢只会更久）。
+    ///
+    /// **改什么会让本条变红**：把 `SleepPoller::poll` 改成 `PollOutcome::Timeout` 直接返回
+    /// （即"立即返回"—— 那正是 §5.2 不变量 1 要根治的忙等）⇒ 实测耗时 ~0 ms ⇒ 断言失败。
+    #[test]
+    fn sleep_poller_really_blocks() {
+        let mut p = SleepPoller::new();
+        let t0 = std::time::Instant::now();
+        let out = p.poll(20);
+        let dt = t0.elapsed();
+        assert_eq!(out, PollOutcome::Timeout, "无 fd 可唤醒 ⇒ 唯一结局是超时");
+        assert!(
+            dt >= std::time::Duration::from_millis(15),
+            "poll 未真正阻塞（实测 {dt:?}，请求 20ms）"
+        );
+    }
+
+    /// 兜底路径同样真阻塞（`run` 在 `poll` 连续失败后改用 `poll_fallback`）。
+    #[test]
+    fn sleep_poller_fallback_also_blocks() {
+        let mut p = SleepPoller;
+        let t0 = std::time::Instant::now();
+        p.poll_fallback(20);
+        let dt = t0.elapsed();
+        assert!(
+            dt >= std::time::Duration::from_millis(15),
+            "兜底阻塞路径退化为忙等（实测 {dt:?}）"
+        );
+    }
+
+    /// `SleepPoller` 可直接跑 [`run`]：每拍恰好阻塞一次、无自旋，且 `stop` 生效。
+    ///
+    /// **改什么会让本条变红**：把 `SleepPoller::poll` 的 sleep 删掉（忙等）⇒ `poll_calls`
+    /// 仍等于 `iterations`，但 `iterations` 会瞬间暴涨（`stop` 只在有限拍后置位——
+    /// 本用例用 `Stop` 计数在 3 拍后停，故改为断言**墙钟下界** ≥ 3 × 超时）。
+    #[test]
+    fn run_with_sleep_poller_blocks_once_per_iteration() {
+        let clock = FakeClock::new();
+        let mut poller = SleepPoller::new();
+        let mut ticker = FakeTicker {
+            // 恒返回 20 ms ⇒ 超时 = min(20, cap)。
+            script: Rc::new(RefCell::new(vec![20; 16])),
+            log: Rc::new(RefCell::new(Vec::new())),
+        };
+        let mut host = FakeHost {
+            deadline: None,
+            log: Rc::new(RefCell::new(Vec::new())),
+        };
+        let stop = StopAfter::new(3);
+        let cfg = LoopConfig::new(20);
+        let t0 = std::time::Instant::now();
+        let st = run(&clock, &mut poller, &mut ticker, &mut host, &stop, &cfg).expect("run");
+        let dt = t0.elapsed();
+        assert_eq!(st.iterations, 3, "跑满 3 拍");
+        assert_eq!(st.poll_calls, 3, "每拍恰好一次阻塞调用（恒等 ⇒ 无自旋）");
+        assert!(
+            dt >= std::time::Duration::from_millis(40),
+            "3 拍各阻塞 ~20ms ⇒ 墙钟下界 60ms（放半个余量到 40ms）；实测 {dt:?}"
+        );
+    }
+
+    // 「跑满 N 拍即停」的 `Stop` 实现**是生产可见的 `StopAfter`**（`--smoke` 与集成测试
+    // 都要用）⇒ 不在此另写测试专用桩（避免两份同形实现漂移）。
 
     /// 记录超时并按**脚本**返回结果（脚本耗尽后恒 [`PollOutcome::Timeout`]）；**不真阻塞**。
     struct FakePoller {
@@ -1116,6 +1352,32 @@ mod tests {
         assert_eq!(st.max_zero_clamp_streak, 4, "诊断：最长连续钳制 4 拍（持续病态）");
         assert_eq!(st.poll_calls, st.iterations);
         assert_eq!(st.poll_fallback_iters, 0, "无 poll 失败 ⇒ 恒不走兜底");
+    }
+
+    /// **宿主给出已过期截止 ⇒ 超时恒 0 ⇒ 阶梯照常接管**（I-6 登记的行为锚）。
+    ///
+    /// 这不是病态，而是本项目的**正常形态**：`App::next_deadline_ms` 在在途请求期间有意返回
+    /// 停滞（已过期）的 `next_poll_ms`（非阻塞状态机需要每拍立即唤醒）。与上一条用例的区别：
+    /// 上一条的病根在 **LVGL**（`lv_next == 0`），本条的 `lv_next` 恒 500，**唯一**的 0 来自
+    /// 已过期的宿主截止 —— 两条来源必须都能被单独认出来（否则 `zero_timeout_clamps`
+    /// 会变成一个会误导排障的诊断量）。
+    ///
+    /// **改什么会让本条变红**：把「已过期截止 ⇒ 0」改成"忽略过期截止"（`saturating_sub` 之外
+    /// 再加下限）⇒ 时间序列不再是 `[0,0,1,2,…]`；把阶梯删掉 ⇒ 恒 0（`poll(0)` 自旋）。
+    #[test]
+    fn stale_host_deadline_keeps_feeding_the_zero_clamp_ladder() {
+        // lv_next 恒 500（无 LVGL 即时任务）；宿主截止 = Some(0)（**永远已过期**）。
+        let mut h = harness(vec![500; 16], Some(0), 8);
+        let st = h.run().unwrap();
+        assert_eq!(
+            *h.timeouts.borrow(),
+            vec![0, 0, 1, 2, 4, 8, 16, 32],
+            "已过期宿主截止 ⇒ 前两拍 0、第三拍起沿阶梯升级（与 LVGL 连 0 同一条链路）"
+        );
+        assert_eq!(st.zero_timeout_iters, 8, "每拍都算得 0（截止一直已过期）");
+        assert_eq!(st.zero_timeout_clamps, 6, "第 3~8 拍被钳制（**正常**在途形态）");
+        assert_eq!(st.lv_next_ms, 500, "病根在宿主截止，不在 LVGL");
+        assert_eq!(st.poll_calls, st.iterations, "每拍仍只阻塞一次（钳制不等于自旋）");
     }
 
     /// 非 0 拍**重置**连续计数（偶发 0 抖动不累积成钳制 / 不升级）。

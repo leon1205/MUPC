@@ -247,13 +247,14 @@ impl DisplayState {
         self.fail_streak = self.fail_streak.saturating_add(1);
     }
 
-    /// 通用入口：`Ok(frame)` → success，`Err` → fail。
-    pub fn update(&mut self, res: Result<DisplayFrame, crate::Error>, now_ms: u64) {
-        match res {
-            Ok(f) => self.record_success(f, now_ms),
-            Err(_) => self.record_fail(now_ms),
-        }
-    }
+    // ⚠️ **已删除 `update(res, now_ms)`**（B3-2a 质量评审 建议 I-5 的死代码清单：
+    // 「仅测试用 ⇒ 改测试直调 `record_*` 或删除」）。
+    // 删除理由：它只是 `Ok → record_success` / `Err → record_fail` 的转发，而**生产唯一**
+    // 消费点 `App::absorb` 必须**自己**匹配 `Result`（它要在两条分支上分别累计
+    // `frames_ok`/`frames_fail` 并做有限日志），故 `update` 在生产路径上**零调用**；
+    // 唯一调用者是 `channel.rs` 的一条用例（那是"自比自"式的覆盖：测的是转发本身）。
+    // 该用例已改为直调 [`DisplayState::record_fail`]（并显式断言传输层确实产出 `Err`），
+    // 保留其真正要守的性质：**传输失败 ⇒ 状态层进入「通道断」展示态**。
 
     pub fn frame(&self) -> Option<&DisplayFrame> {
         self.frame.as_ref()

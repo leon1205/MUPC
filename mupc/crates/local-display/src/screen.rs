@@ -37,6 +37,7 @@
 //! （本轮不引依赖；需先走依赖评审）。
 
 use std::cell::RefCell;
+use std::cell::Cell;
 use std::io::Write;
 use std::rc::Rc;
 
@@ -91,6 +92,59 @@ fn required_pixel_bytes(w: u32, h: u32) -> Option<usize> {
         .and_then(|n| n.checked_mul(BYTES_PER_PIXEL))
 }
 
+/// flush 搬运计数（**接线前后可读**的共享句柄）。
+///
+/// # 为什么计数不放在 [`Blitter`] 的字段里（B3-2a 质量评审 建议 I-4）
+/// [`Blitter::into_flush_closure`] 会把 `Blitter` **move** 进 `set_flush_cb` 的闭包 ⇒
+/// 接线之后 `blits()` / `dropped()` 在**生产与自检路径都读不到**。而 `dropped` 正是
+/// 「本拍没画上去」的唯一观测哨（目标被借走 ⇒ 静默跳过本拍 ⇒ 屏上留永久陈旧像素而 LVGL
+/// 不知道）：读不到它就等于这一类丢帧**不可见**。故计数寄存在一个与 sink 平级的 [`Rc`]
+/// 句柄里，[`Blitter::counters`] 在接线前取一份克隆即可长期回读。
+///
+/// **单线程纪律不变**（设计 §5.2 不变量 4）：本模块不提供跨线程 API，[`Cell`] 足够
+/// （`Rc` 本身就不是 `Send`）。
+///
+/// # `dropped` 的**覆盖边界**（如实登记，不夸大）
+/// `dropped` 覆盖 [`Blitter::blit`] **自己知道**没画上的两条路径：
+/// ① 脏区字节数不足（`required_pixel_bytes` 校验失败）；② **目标不可用**
+/// （`target.width()/height() == 0`，即 sink 被**可变**借用走）。
+///
+/// 它**不覆盖**第三条：sink 被**共享**借用时，[`Blitter::blit`] 侧的 `width()` 照样读得到
+/// （`RefCell::try_borrow` 与共享借用相容），真正的跳过发生在
+/// [`PixelSink for Rc<RefCell<S>>::write_pixels`] 内部的 `try_borrow_mut()` 失败分支 ——
+/// 那条路径**没有返回值可上报**（`PixelSink::write_pixels` 无返回值），故这里**统计不到**
+/// （该拍的 `blits` 仍会 +1）。要覆盖它需要改 `PixelSink` 的签名（返回是否写入），
+/// 属工作单元 C 的接口语义 —— **本轮不擅自改**，登记为已知盲区。
+#[derive(Debug, Default)]
+pub struct BlitCounters {
+    /// 累计搬运的脏区数。
+    blits: Cell<u64>,
+    /// 因尺寸/长度不符或目标不可用（可变借用冲突）被丢弃的脏区数（正常恒为 0）。
+    dropped: Cell<u64>,
+}
+
+impl BlitCounters {
+    /// 累计搬运的脏区数。
+    pub fn blits(&self) -> u64 {
+        self.blits.get()
+    }
+
+    /// 被丢弃的脏区数（**正常恒为 0**；增长即"屏上有该画而没画上的像素"）。
+    pub fn dropped(&self) -> u64 {
+        self.dropped.get()
+    }
+
+    /// 记一次搬运（**唯一**计数点：`Blitter::blit` 成功搬完后一行）。
+    fn note_blit(&self) {
+        self.blits.set(self.blits.get().saturating_add(1));
+    }
+
+    /// 记一次丢弃（尺寸不足 / 目标不可用）。
+    fn note_dropped(&self) {
+        self.dropped.set(self.dropped.get().saturating_add(1));
+    }
+}
+
 /// 脏区搬运器：把 LVGL 的像素字节按行搬进 [`PixelSink`]。
 ///
 /// 复用一块**单行**临时缓冲（`scratch`）：flush 回调每帧被调多次（按脏区），
@@ -98,41 +152,45 @@ fn required_pixel_bytes(w: u32, h: u32) -> Option<usize> {
 pub struct Blitter<T: PixelSink> {
     target: T,
     scratch: Vec<Color>,
-    /// 累计搬运的脏区数（测试断言「每帧只搬有效脏区」用）。
-    blits: u64,
-    /// 因尺寸/长度不符被丢弃的脏区数（异常的观测哨；正常恒为 0）。
-    dropped: u64,
+    /// 搬运 / 丢弃计数（见 [`BlitCounters`]：**共享句柄** ⇒ 接线后仍可读）。
+    counters: Rc<BlitCounters>,
 }
 
 impl<T: PixelSink> Blitter<T> {
     /// 以 `target` 为下游建搬运器（`scratch` 按需增长，初始空）。
     pub fn new(target: T) -> Self {
+        Self::with_counters(target, Rc::new(BlitCounters::default()))
+    }
+
+    /// 以既有计数句柄建搬运器（供 [`Blitter::into_shared_flush_closure`] 保持同源）。
+    fn with_counters(target: T, counters: Rc<BlitCounters>) -> Self {
         Self {
             target,
             scratch: Vec::new(),
-            blits: 0,
-            dropped: 0,
+            counters,
         }
     }
 
-    /// 目标只读访问（回读断言/统计用）。
+    /// 计数句柄（**在 `into_*_flush_closure` 之前**取一份克隆 ⇒ 接线之后仍可读 `blits`/`dropped`）。
+    ///
+    /// 这是 I-4 整改的读口：生产（`App`）与自检（`--smoke`）据此断言「没有整拍被静默跳过」。
+    pub fn counters(&self) -> Rc<BlitCounters> {
+        Rc::clone(&self.counters)
+    }
+
+    /// 目标只读访问（**本模块自身用例**的回读口；生产读口是 [`Blitter::counters`]）。
     pub fn target(&self) -> &T {
         &self.target
     }
 
-    /// 目标可变访问（测试构造场景用；**不得**在 flush 回调内额外触达 LVGL）。
-    pub fn target_mut(&mut self) -> &mut T {
-        &mut self.target
-    }
-
-    /// 搬运的脏区数。
+    /// 搬运的脏区数（= [`BlitCounters::blits`]）。
     pub fn blits(&self) -> u64 {
-        self.blits
+        self.counters.blits()
     }
 
-    /// 丢弃（尺寸不符）的脏区数。
+    /// 丢弃（尺寸不符 / 目标不可用）的脏区数（= [`BlitCounters::dropped`]）。
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.counters.dropped()
     }
 
     /// **flush 路径本体**：`area` 是 LVGL 的闭区间脏区，`px` 是其连续像素字节
@@ -151,14 +209,16 @@ impl<T: PixelSink> Blitter<T> {
         match required_pixel_bytes(aw, ah) {
             Some(need) if px.len() >= need => {}
             _ => {
-                self.dropped += 1;
+                self.counters.note_dropped();
                 return;
             }
         }
         let tw = self.target.width() as i64;
         let th = self.target.height() as i64;
         if tw <= 0 || th <= 0 {
-            self.dropped += 1;
+            // 目标不可用（`Rc<RefCell<S>>` 被外部借走 ⇒ `width()` 返回 0）⇒ 本拍**静默跳过**。
+            // 这正是 `dropped` 要观测的那一类丢帧（I-4）：调用方据此知道"屏上少画了"。
+            self.counters.note_dropped();
             return;
         }
         // 防御 2：把脏区与目标求交（LVGL 通常会自行裁剪到屏内，此处不假设）。
@@ -188,7 +248,7 @@ impl<T: PixelSink> Blitter<T> {
             self.target
                 .write_pixels(x0 as i32, y as i32, row_w as u32, 1, &self.scratch[..row_w]);
         }
-        self.blits += 1;
+        self.counters.note_blit();
     }
 
     /// 生成 flush 闭包（交给 `Display::set_flush_cb`）。
@@ -197,7 +257,8 @@ impl<T: PixelSink> Blitter<T> {
     /// 因此 `Blitter` 必须**与 display 同寿**（LVGL 在 display 删除时会 drop 该闭包）。
     ///
     /// ⚠️ 目标 `T` 被 **move** 进闭包 ⇒ 接线后再也回读不到它。离屏验证（回读 / 导出 PPM）
-    /// 请用 [`Blitter::into_shared_flush_closure`]。
+    /// 请用 [`Blitter::into_shared_flush_closure`]；若要回读**搬运/丢帧计数**（不是像素面），
+    /// 对本 `Blitter` 先取一份 [`Blitter::counters`] 的克隆即可（I-4 的读口）。
     pub fn into_flush_closure(mut self) -> impl FnMut(Area, &[u8]) + 'static
     where
         T: 'static,
@@ -220,9 +281,10 @@ impl<T: PixelSink> Blitter<T> {
     where
         T: PixelSink + 'static,
     {
-        let Blitter { target, .. } = self;
+        let Blitter { target, counters, .. } = self;
         let shared = Rc::new(RefCell::new(target));
-        let mut inner = Blitter::new(Rc::clone(&shared));
+        // 计数句柄**随闭包同源传递**：接线前取的 `counters()` 克隆，接线后读到的仍是同一份。
+        let mut inner = Blitter::with_counters(Rc::clone(&shared), counters);
         (
             move |area: Area, px: &[u8]| inner.blit(area, px),
             shared,
@@ -537,6 +599,55 @@ mod tests {
         // 借用释放后恢复正常搬运
         f(area(0, 1, 0, 1), &px_bytes(&[BLUE]));
         assert_eq!(handle.borrow().pixel(0, 1), Some(BLUE));
+    }
+
+    /// **接线之后丢帧仍可见**（B3-2a 质量评审 建议 I-4 的判据）。
+    ///
+    /// 生产装配走的是 `counters()` + `into_flush_closure()` 这条路径（`App::build`）：
+    /// 句柄在接线**之前**取，计数在闭包里累加，**必须**是同一份。
+    ///
+    /// **改什么会让本条变红**（实测）：把 `into_flush_closure` 改成让闭包内部
+    /// `Blitter::new(..)`（即不复用 `self.counters`）⇒ 接线后计数冻在 0 ⇒ 两条断言红。
+    #[test]
+    fn counters_readable_after_flush_closure_wiring() {
+        let b = Blitter::new(MemorySink::new(4, 2));
+        let counters = b.counters();
+        let mut f = b.into_flush_closure();
+        f(area(0, 0, 1, 0), &px_bytes(&[RED, GREEN])); // 2×1 脏区
+        f(area(0, 1, 1, 1), &px_bytes(&[GREEN, RED]));
+        assert_eq!(
+            (counters.blits(), counters.dropped()),
+            (2, 0),
+            "接线后计数必须仍可读（否则丢帧在生产上不可见）"
+        );
+    }
+
+    /// **丢帧计数可见**：目标不可用（被**可变**借用走）⇒ 该拍跳过，`dropped` **必须**+1。
+    ///
+    /// 这是"屏上留永久陈旧像素而 LVGL 不知道"的观测哨之一（I-4）：`--smoke` 据此断言
+    /// `dropped == 0`。**改什么会让本条变红**：把 `tw <= 0` 分支的 `note_dropped()` 删掉
+    /// （改成"静默 skip 且不计数"）⇒ 末条断言红。
+    ///
+    /// 口径边界（见 [`BlitCounters`] 的登记）：**共享**借用不触发本分支 —— 那时 `width()`
+    /// 读得到，跳过发生在 `write_pixels` 内部的 `try_borrow_mut()` 失败处，**统计不到**。
+    #[test]
+    fn dropped_frame_is_counted_when_target_is_borrowed() {
+        let b = Blitter::new(MemorySink::new(4, 2));
+        let counters = b.counters();
+        let (mut f, handle) = b.into_shared_flush_closure();
+        f(area(0, 0, 1, 0), &px_bytes(&[RED, GREEN]));
+        assert_eq!((counters.blits(), counters.dropped()), (1, 0));
+
+        // **可变**借用被外部持住（模拟"跨 timer_handler 持借用"的坏形态）⇒ `width()` 失败 ⇒ 目标无效。
+        let guard = handle.borrow_mut();
+        f(area(0, 1, 1, 1), &px_bytes(&[BLUE, BLUE]));
+        drop(guard);
+        assert_eq!(counters.dropped(), 1, "丢帧必须被计数（否则屏上陈旧像素无人知道）");
+        assert_eq!(counters.blits(), 1, "被跳过的那一拍不计搬运");
+
+        // 借用释放后恢复正常搬运（计数继续累加：丢帧哨没有把后续搬运一并"吃掉"）。
+        f(area(0, 1, 1, 1), &px_bytes(&[BLUE, BLUE]));
+        assert_eq!((counters.blits(), counters.dropped()), (2, 1));
     }
 
     #[test]

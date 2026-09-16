@@ -1,29 +1,47 @@
-//! `mupc-local-display` —— MUPC 本地显示终端**渲染进程**（bin 入口，设计 §5.2 `main.rs`）。
+//! `mupc-local-display` —— MUPC 本地显示终端**渲染进程**（bin 入口，设计 §5.1/§5.2/§9）。
 //!
-//! 职责（设计 §5.3/§7.2/§9）：
+//! 职责（设计 §5.2 的 ①–③ 段 + §9 的退出语义）：
 //! 1. 解析 CLI（[`mupc_local_display::config::CliConfig`]，默认值取 display-proto 常量；
-//!    **不读** `mupc_core_config.yaml`）；
-//! 2. 加载字库（[`TextKit`]：外部 `--font` → 捆绑子集 feature → 内置 ASCII 回退，永不 panic）；
-//! 3. 按 `--backend` 选画布：`offscreen`（离屏内存，本机/CI 全链路）/ `fbdev`（Linux `/dev/fb0`
-//!    mmap，真机）；`drm` 未实现 → 明确报错（不静默回退）；
-//! 4. 起 [`run::run_loop`] 主循环；Ctrl-C/SIGTERM 置停止标志优雅退出。
+//!    **不读** `mupc_core_config.yaml`，零核心配置依赖）；
+//! 2. 按 `--backend` 装配 LVGL 会话：`offscreen`（内存 sink，本机/CI 全链路）/ `fbdev`
+//!    （Linux `/dev/fb0`，真机）；`drm` 未实现 → **明确报错**（不静默回退）；
+//! 3. 跑**唯一阻塞点为 `poll`** 的事件循环（[`mupc_local_display::timing::run`]；
+//!    LVGL 由 `lv_timer_handler` 驱动、通道为非阻塞状态机 —— §5.2 五条不变量）；
+//! 4. `--smoke`：跑有限拍 → 逐页渲染 6 页 → 打印时序与逐页像素统计 →（可选）导出 PPM → 退出。
 //!
 //! 异常与自恢复（设计 §5.3/§9，PRD 4.3.1/6.7）：
-//! - 通道失败**不是**致命错误（属正常展示态：≤3s 切「与主进程数据通道断开」，恢复即回实时）；
-//! - 启动期致命错误（后端打开失败等）→ 打印明确原因 + 非零退出，交给 systemd `Restart=always`
-//!   ≤3s 拉起；
+//! - 通道失败**不是**致命错误（属正常展示态：≤3 s 切「与主进程数据通道断开」，恢复即回实时）；
+//! - 启动期致命错误（LVGL 装配 / 后端打开 / 触摸致命错误）→ 打印明确原因 + 非零退出，
+//!   交给 systemd `Restart=always` ≤3 s 拉起；
 //! - 兜底 `catch_unwind`：任何 panic 打印后以非零码退出（**不吞 panic、不自循环空转**），
 //!   进程隔离保证不影响 mupcd（渲染进程只经回环 GET 单向读，无任何下行写）。
+//!
+//! ⚠️ **本文件是 bin**（`[[bin]]`，不是 lib）：可测逻辑一律落在 `src/app.rs` /
+//! `src/timing.rs` / `src/config.rs`（集成测试够得着），此处只留"装配 + 报告 + 退出码"。
+//!
+//! ⚠️ **`--font` 在 v2.0 已不生效**（字体改由构建期绑定的 LVGL 位图字库承担，见
+//! `lvgl/font.rs` 与 `fonts/gen_fonts.sh`）：**保留参数但启动时响亮告警**（不静默忽略）。
+//!
+//! **裁定留痕（B3-2a 规格评审 建议 4，主控裁定）**：保留参数、不改成硬错误 —— 本进程由
+//! systemd `Restart=always` 托管，硬错误会造成**重启循环**（服务起不来且无人值守）；
+//! 而"参数被忽略"必须**可见** ⇒ 告警 + `--help` 如实标注（文案见
+//! [`mupc_local_display::config::font_ignored_warning`]）。
+//!
+//! ⚠️ **`--control-channel` 解析后当前无人消费**（`ConsoleClient` 的生产实例化点在 B3-2b）：
+//! 同样在启动时**响亮告警**（文案见
+//! [`mupc_local_display::config::control_channel_pending_warning`]），help 已标注 `[B3-2b 接线]`。
 
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::time::Instant;
 
-use mupc_local_display::canvas::OffscreenCanvas;
+use mupc_local_display::app::{self, App, StartupError};
 use mupc_local_display::channel::DisplayChannelClient;
 use mupc_local_display::config::{self, Backend, CliConfig, ConfigError};
-use mupc_local_display::font::TextKit;
-use mupc_local_display::run::{self, Renderer, RunStats};
+use mupc_local_display::timing::{self, Clock, LoopConfig, LoopStats, Stop, StopAfter};
+#[cfg(target_os = "linux")]
+use mupc_local_display::timing::FdPoller;
+#[cfg(not(target_os = "linux"))]
+use mupc_local_display::timing::SleepPoller;
 
 /// 参数错误退出码（与「运行期失败」区分，便于部署脚本诊断）。
 const EXIT_USAGE: u8 = 2;
@@ -31,6 +49,13 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_RUNTIME: u8 = 1;
 /// panic 兜底退出码（systemd 见非零即重启）。
 const EXIT_PANIC: u8 = 70;
+/// `--smoke` 自检失败退出码（六页中存在空页）：与"运行期失败"分开，CI 可据此判读。
+const EXIT_SMOKE: u8 = 3;
+
+/// `--smoke` 的事件循环拍数（20 拍 × ≤25 ms 上限 ≈ 0.5 s；足够走完至少一次 GET 往返）。
+const SMOKE_TICKS: u64 = 20;
+/// `--smoke` 的 `poll` 超时上界（缩短节拍以让自检总时长可控；生产恒用 `--poll-ms`）。
+const SMOKE_POLL_CAP_MS: u64 = 25;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,139 +90,223 @@ fn main() -> ExitCode {
     }
 }
 
-/// 装配 + 跑主循环（在运行时内执行；panic 由 `main` 兜底）。
+/// 事件循环时钟：与 [`App`] 的时基原点**同源**的单调毫秒（时钟跳变不影响节拍/超时）。
+struct LoopClock(Instant);
+
+impl Clock for LoopClock {
+    fn now_ms(&self) -> u64 {
+        self.0.elapsed().as_millis() as u64
+    }
+}
+
+/// 停止条件 = 「收到 SIGINT/SIGTERM」**或**「`--smoke` 已跑满 N 拍」。
+struct StopWhen {
+    /// `--smoke` 的拍数上限（生产 ⇒ `None`，常驻直到信号）。
+    after: Option<StopAfter>,
+}
+
+impl Stop for StopWhen {
+    fn stop_requested(&self) -> bool {
+        // 短路顺序有意为之（先看信号）：收到信号后不再推进 `StopAfter` 的计数。
+        timing::STOP_FLAG.load(std::sync::atomic::Ordering::Relaxed)
+            || self.after.as_ref().is_some_and(|a| a.stop_requested())
+    }
+}
+
+/// 装配 + 跑主循环（panic 由 `main` 兜底）。
 fn run_process(cfg: CliConfig) -> ExitCode {
-    let tk = TextKit::load(cfg.font.as_deref());
-    if !tk.is_real() {
-        eprintln!(
-            "[mupc-local-display] 未加载到真实字库：中文将显示占位盒、数字/拉丁走内置 ASCII 回退。\
-             部署请用 --font <字库> 或按 font.rs 顶部命令子集化后以 bundled-font feature 编译。"
-        );
+    // `--font` 在 v2.0 已不生效（见文件头）：响亮告警而非静默忽略。
+    if let Some(p) = cfg.font.as_deref() {
+        eprintln!("[mupc-local-display] {}", config::font_ignored_warning(p));
+    }
+    // `--control-channel` 当前**无人消费**（ConsoleClient 的生产实例化点属 B3-2b）：
+    // 同款响亮告警。**无条件打印**（不管解析到的是默认值还是显式取值）—— 该值此刻
+    // 一律不影响行为，"只在显式指定时告警"反而会让默认值这条静默 no-op 溜过去。
+    eprintln!(
+        "[mupc-local-display] {}",
+        config::control_channel_pending_warning(&cfg.control_channel)
+    );
+    // 数据通道 URL 前置校验（解析失败 = 用法错误 ⇒ 退出码 2；不静默回退默认端点）。
+    if let Err(e) = DisplayChannelClient::try_new(&cfg.channel) {
+        eprintln!("[mupc-local-display] 数据通道 URL 非法：{e}");
+        return ExitCode::from(EXIT_USAGE);
     }
 
-    // URL 已在解析期校验；此处仍显式处理，避免任何静默回退到默认端点。
-    let client = match DisplayChannelClient::try_new(&cfg.channel) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[mupc-local-display] 数据通道 URL 非法：{e}");
-            return ExitCode::from(EXIT_USAGE);
+    match cfg.backend {
+        Backend::Offscreen => run_with(&cfg, App::new_offscreen),
+        Backend::Fbdev => run_fbdev(&cfg),
+        // drm 后端未实现（设计 §13 前置项 1）：明确报错，不静默回退 offscreen。
+        Backend::Drm => {
+            eprintln!("[mupc-local-display] {}", app::drm_unimplemented_error());
+            ExitCode::from(EXIT_RUNTIME)
         }
-    };
-
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("[mupc-local-display] 异步运行时初始化失败：{e}");
-            return ExitCode::from(EXIT_RUNTIME);
-        }
-    };
-
-    let stop = Arc::new(AtomicBool::new(false));
-    rt.block_on(async move {
-        spawn_signal_handlers(Arc::clone(&stop));
-        match cfg.backend {
-            Backend::Offscreen => {
-                let canvas = OffscreenCanvas::new(cfg.width, cfg.height);
-                let mut r = Renderer::new(tk, canvas, cfg.stale_ms);
-                let stats = run::run_loop(&cfg, &client, &mut r, &stop, None).await;
-                report_exit(&cfg, stats);
-                ExitCode::SUCCESS
-            }
-            Backend::Fbdev => run_fbdev(&cfg, tk, &client, &stop).await,
-            // drm 后端未实现（设计 §13 前置项 1）：明确报错，不静默回退 offscreen。
-            Backend::Drm => {
-                eprintln!("[mupc-local-display] {}", run::drm_unimplemented_error());
-                ExitCode::from(EXIT_RUNTIME)
-            }
-        }
-    })
+    }
 }
 
-/// Linux framebuffer 真机路径（`--backend fbdev`；Windows 本机不编译该分支，设计 §B1）。
+/// Linux framebuffer 真机路径（`--backend fbdev`）。
 #[cfg(target_os = "linux")]
-async fn run_fbdev(
-    cfg: &CliConfig,
-    tk: TextKit,
-    client: &DisplayChannelClient,
-    stop: &AtomicBool,
-) -> ExitCode {
-    use mupc_local_display::canvas::fbdev::FbCanvas;
-    // 打开失败 → 明确报错 + 非零退出（systemd 重启；不静默黑屏运行）。
-    let fb = match FbCanvas::open(&cfg.fbdev_path, cfg.width, cfg.height) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "[mupc-local-display] 打开/映射 framebuffer 失败：{e}\n\
-                 提示：需 root 或 video 组成员权限；可先用 --backend offscreen 验证全链路；\
-                 像素格式/分辨率不符属设计 §13 前置项 1（真机首验）。"
-            );
-            return ExitCode::from(EXIT_RUNTIME);
-        }
-    };
-    eprintln!(
-        "[mupc-local-display] framebuffer {} 已映射 {}x{}（32bpp XRGB 假定，真机首验项见设计 §13）",
-        cfg.fbdev_path, cfg.width, cfg.height
-    );
-    let mut r = Renderer::new(tk, fb, cfg.stale_ms);
-    let stats = run::run_loop(cfg, client, &mut r, stop, None).await;
-    report_exit(cfg, stats);
-    ExitCode::SUCCESS
+fn run_fbdev(cfg: &CliConfig) -> ExitCode {
+    run_with(cfg, App::new_fbdev)
 }
 
-/// 非 Linux 平台上的 `fbdev` 分支：CLI 已拒绝，此处仅为编译完整性（防御不可达路径）。
+/// 非 Linux 平台上的 `fbdev` 分支：CLI 已拒绝（`Backend::available_on_this_platform`），
+/// 此处仅为编译完整性（防御不可达路径，**不静默回退 offscreen**）。
 #[cfg(not(target_os = "linux"))]
-async fn run_fbdev(
-    _cfg: &CliConfig,
-    _tk: TextKit,
-    _client: &DisplayChannelClient,
-    _stop: &AtomicBool,
-) -> ExitCode {
+fn run_fbdev(_cfg: &CliConfig) -> ExitCode {
     eprintln!("[mupc-local-display] framebuffer 后端仅 Linux 支持（本机请用 --backend offscreen）");
     ExitCode::from(EXIT_RUNTIME)
 }
 
-/// SIGINT(Ctrl-C) / SIGTERM(systemd stop) → 置停止标志（优雅退出：在 ≤1 个轮询周期内收尾并打印统计）。
-/// ⚠️ SIGTERM 分支为 unix-only（`tokio::signal::unix`），本机 Windows 不编译——需 Linux 验证。
-fn spawn_signal_handlers(stop: Arc<AtomicBool>) {
-    tokio::spawn(async move {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            match signal(SignalKind::terminate()) {
-                Ok(mut term) => {
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => {}
-                        _ = term.recv() => {}
-                    }
-                }
-                Err(e) => {
-                    // 拿不到 SIGTERM 处理器不致命：仍监听 Ctrl-C（systemd 停服务时由默认处理终止进程）。
-                    eprintln!("[mupc-local-display] SIGTERM 处理器注册失败({e})，仅监听 Ctrl-C");
-                    let _ = tokio::signal::ctrl_c().await;
-                }
-            }
+/// 后端无关的公共流程：装配 → 选 poller → 跑事件循环 → （可选）自检 → 退出报告。
+fn run_with<F>(cfg: &CliConfig, make: F) -> ExitCode
+where
+    F: FnOnce(&CliConfig, Instant) -> Result<App, StartupError>,
+{
+    // 信号 → 停止标志（Linux；本机 Windows 无 handler，走默认终止，见 timing::STOP_FLAG）。
+    timing::install_stop_signals();
+    let origin = Instant::now();
+    let mut app = match make(cfg, origin) {
+        Ok(a) => a,
+        Err(e) => {
+            // 启动期致命错误：明确原因 + 非零退出（交给 systemd Restart=always）。
+            eprintln!("[mupc-local-display] 启动失败：{e}");
+            return ExitCode::from(EXIT_RUNTIME);
         }
-        #[cfg(not(unix))]
-        {
-            let _ = tokio::signal::ctrl_c().await;
-        }
-        eprintln!("[mupc-local-display] 收到中断/终止信号，退出主循环");
-        stop.store(true, Ordering::Relaxed);
+    };
+
+    let clock = LoopClock(origin);
+    let mut ticker = timing::LvglTicker;
+    // ── poller：唯一阻塞点，且**必须真阻塞**（§5.2 不变量 1）──
+    // Linux：`poll(2)` 包住触摸 evdev fd；无触摸设备时 `poll(NULL,0,t)`（仍是唯一阻塞点）。
+    #[cfg(target_os = "linux")]
+    let mut poller = match app.touch_fd() {
+        Some(fd) => FdPoller::new(fd),
+        None => FdPoller::without_fd(),
+    };
+    // 非 Linux（开发机/CI）：本平台无 poll(2)/evdev，用等价语义的纯超时阻塞（仍非忙等）。
+    #[cfg(not(target_os = "linux"))]
+    let mut poller = SleepPoller::new();
+
+    let loop_cfg = LoopConfig::new(if cfg.smoke {
+        SMOKE_POLL_CAP_MS
+    } else {
+        cfg.interval_ms
     });
+    let stop = StopWhen {
+        after: cfg.smoke.then(|| StopAfter::new(SMOKE_TICKS)),
+    };
+
+    let outcome = timing::run(&clock, &mut poller, &mut ticker, &mut app, &stop, &loop_cfg);
+
+    let mut code = ExitCode::SUCCESS;
+    match &outcome {
+        Ok(stats) => report_exit(cfg, &app, stats),
+        Err(pf) => {
+            // poll 已不可用（连续失败超上限）：**有界终止**并把 errno 交给 systemd 重启。
+            eprintln!("[mupc-local-display] {pf}");
+            code = ExitCode::from(EXIT_RUNTIME);
+        }
+    }
+
+    if cfg.smoke && outcome.is_ok() {
+        code = run_smoke(&mut app, cfg, &outcome.unwrap_or_default());
+    }
+    code
+}
+
+/// `--smoke` 一键自检（设计 §9）：逐页渲染 6 页 → 打印统计 →（可选）导出 PPM。
+///
+/// 六页**任一为空** ⇒ 返回码 [`EXIT_SMOKE`]（自检必须能失败，否则它只是"打印"）。
+fn run_smoke(app: &mut App, cfg: &CliConfig, stats: &LoopStats) -> ExitCode {
+    let report = match app.smoke(cfg.smoke_out.as_deref()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[smoke] 自检失败：{e}");
+            return ExitCode::from(EXIT_SMOKE);
+        }
+    };
+    // 自检结论走 **stdout**（人读 + CI 解析双用；诊断/时序走 stderr 由 `report_exit` 打）。
+    // `renders` = 帧驱动页实测渲染次数（I-2 的调用点判据：恒真退化 ⇒ renders == ticks）；
+    // `blits`/`dropped` = flush 搬运 / 丢帧计数（I-4：丢帧此前在接线后读不到）。
+    println!(
+        "[smoke] ticks={} renders={} poll_calls={} frames_ok={} frames_fail={} blits={} dropped={} walk_ms={}",
+        report.ticks,
+        report.renders,
+        stats.poll_calls,
+        report.frames_ok,
+        report.frames_fail,
+        report.blits,
+        report.dropped,
+        report.walk_ms
+    );
+    for (page, px) in &report.pages {
+        // 页名用 P1..P6（ASCII，CI 可直接 grep；中文页名见 NavPage::title）。
+        println!("[smoke] page=P{} active_px={px}", page.index() + 1);
+    }
+    match &report.export {
+        Some((path, bytes)) => {
+            println!("[smoke] export={} bytes={bytes}", path.display());
+        }
+        None => println!("[smoke] export=none（未指定 --smoke-out）"),
+    }
+    // 四条判定口**互相独立**，任一不成立即 FAIL（结论行点名是哪一条，便于 CI 判读）。
+    // `FAIL_NO_FLUSH` 是 `dropped == 0` 的对偶哨：抓"计数根本没接线"（否则恒 0 看着完美）。
+    let verdict = if !report.all_pages_non_empty() {
+        "FAIL_EMPTY_PAGE"
+    } else if !report.throttle_effective() {
+        "FAIL_NO_THROTTLE"
+    } else if !report.flush_observed() {
+        "FAIL_NO_FLUSH"
+    } else if !report.no_dropped_frames() {
+        "FAIL_DROPPED_FRAME"
+    } else {
+        "OK"
+    };
+    println!("[smoke] result={verdict}");
+    if verdict == "OK" {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_SMOKE)
+    }
 }
 
 /// 退出报告（统计行落 journal，便于与设计 §9 预算对照）。
-fn report_exit(cfg: &CliConfig, s: RunStats) {
+///
+/// **通道诊断三个量**（I-5 裁定：接进本行，而不是删掉 `DisplayChannelClient` 的三个读口）：
+/// `channel_addr` = **解析后**的目标地址（与发起连接用的是同一个 `SocketAddr`，不是 CLI 里
+/// 那个未解析的 URL）、`channel_timeout_ms` = 单次 GET 超时、`fail_streak` = 退出时的
+/// **连续**失败数。真机排障（"到底连的谁 / 超时多长 / 是不是一直在失败"）就靠这三个。
+///
+/// `zero_clamps` 的非零在**在途请求**期间是正常的（见 `App::next_deadline_ms` 的登记）。
+fn report_exit(cfg: &CliConfig, app: &App, s: &LoopStats) {
+    let (ok, fail) = app.frame_counts();
+    let ch = app.channel();
+    let (blits, dropped) = app.flush_stats();
     eprintln!(
-        "[mupc-local-display] 退出：backend={} channel={} ticks={} ok={} fail={} redraws={} \
-         last_draw={}ms max_draw={}ms",
+        "[mupc-local-display] 退出：backend={} channel={} channel_addr={} channel_timeout_ms={} \
+         fail_streak={} ticks={} ok={} fail={} renders={} blits={} dropped={} touch={} \
+         iterations={} poll_calls={} ready={} timeouts={} last_timeout={}ms lv_next={}ms \
+         zero_iters={} zero_clamps={} poll_failures={}",
         cfg.backend.as_str(),
         cfg.channel,
-        s.ticks,
-        s.ok,
-        s.fail,
-        s.redraws,
-        s.last_draw_ms,
-        s.max_draw_ms
+        ch.addr(),
+        ch.timeout().as_millis(),
+        ch.fail_streak(),
+        app.ticks(),
+        ok,
+        fail,
+        app.renders(),
+        blits,
+        dropped,
+        app.touch_errors(),
+        s.iterations,
+        s.poll_calls,
+        s.ready_events,
+        s.iterations.saturating_sub(s.ready_events),
+        s.last_timeout_ms,
+        s.lv_next_ms,
+        s.zero_timeout_iters,
+        s.zero_timeout_clamps,
+        s.poll_failures
     );
 }

@@ -13,8 +13,9 @@
 //!   不允许「解析了但无人消费」的静默 no-op。
 //! - 手写参数解析（不引 clap）：选项少、无常量、可确定性单测，依赖面保持最小。
 //!
-//! ⚠️ 本文件仅**解析**，不构造后端/字库/触摸设备——后端的平台可用性错误在 [`crate::run`]/bin 层
-//! 以明确错误返回（`--backend drm` 未实现，见 [`Backend::Drm`]）。
+//! ⚠️ 本文件仅**解析**，不构造后端/字库/触摸设备——后端的平台可用性错误在 **bin 层**
+//! （`main.rs::run_process`）以明确错误返回（`--backend drm` 未实现，见 [`Backend::Drm`]）。
+//! （v1.0 的 `crate::run` 模块已随 LVGL 链路删除，见 `lib.rs`「已废弃的 v1.0 模块」。）
 
 use std::path::PathBuf;
 
@@ -175,7 +176,12 @@ pub struct CliConfig {
     pub width: u32,
     /// 渲染高度(px)。
     pub height: u32,
-    /// 外部/系统字库路径（None = 捆绑子集 feature 或内置 ASCII 回退，设计 §5.4）。
+    /// `--font` 的取值（**v2.0 已废弃：该值被忽略**）。
+    ///
+    /// 字库在**构建期**由 `lv_font_conv` 产物绑定（`lvgl-sys` 的 `noto-font` feature；
+    /// 生成脚本 `crates/local-display/fonts/gen_fonts.sh`），运行期不再加载外部字库
+    /// ⇒ 本字段只解析、只用于**启动期响亮告警**（见 `main.rs::run_process`）。
+    /// v1.0 的 `bundled-font` feature 与 `font.rs` 已删除。
     pub font: Option<PathBuf>,
     /// 触摸设备节点（None = 自动发现；生产 unit 固定 `/dev/mupc-touch`，设计 §12.2）。
     pub touch_device: Option<PathBuf>,
@@ -186,6 +192,15 @@ pub struct CliConfig {
     pub rotate: Rotate,
     /// 空闲回归秒数（TT-12；默认 60，`0` = 禁用）。
     pub idle_timeout_secs: u64,
+    /// `--smoke`：**一键自检**（设计 §9「HMI：`--backend offscreen --smoke`」）——
+    /// 起事件循环跑有限拍 → 逐页渲染 6 页并打印逐页像素统计 → 退出（自检主体见
+    /// [`crate::app::App::smoke`]；六页任一为空 ⇒ **退出码 3**，常量在 bin
+    /// `main.rs::EXIT_SMOKE` —— 本文件是 lib，读不到 bin 常量，故此处只写语义）。
+    pub smoke: bool,
+    /// `--smoke-out <PATH>`：自检导出 **PPM(P6)** 的路径（**仅与 `--smoke` 联用**；
+    /// 缺省 = 不导出）。PPM 而 PNG 的理由见 [`crate::screen::MemorySink::write_ppm`]
+    /// （零依赖；本 crate 不引图像编码依赖）。
+    pub smoke_out: Option<PathBuf>,
 }
 
 impl Default for CliConfig {
@@ -204,6 +219,8 @@ impl Default for CliConfig {
             touch: TouchOverrides::default(),
             rotate: Rotate::Deg0,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            smoke: false,
+            smoke_out: None,
         }
     }
 }
@@ -230,6 +247,14 @@ impl CliConfig {
     }
 
     /// 空闲回归计时器（TT-12；`idle_timeout_secs == 0` ⇒ 禁用）。
+    ///
+    /// ⚠️ **登记（B3-2a 质量评审 建议 I-5 的裁定：留到 B3-2b 删）**：生产装配**当前不消费**
+    /// 本方法 —— 空闲回归状态机落在 `ui/shell.rs`（B2c-3 交付物，含倒计时胶囊 / `dirty` 不强制
+    /// 切页 / 弹层暂停），`App` 只把 `--idle-timeout-secs` 经 `Shell::set_idle_timeout` 注入，
+    /// **不另建** [`crate::timing::IdleTimer`]（两套计时器 = 同一口径的第二份真源，见
+    /// `app.rs` 模块头取舍 1）。保留理由：决定 `IdleTimer` 去留需要一并核对 B3-2b 的控制通道
+    /// 超时路径，本轮不动。**调用方改动前请先看这条登记**（勿把"测试在调"当成"生产在用"）。
+    /// `--idle-timeout-secs` 本身**是生效的**：它经 `Shell::set_idle_timeout` 上屏。
     pub fn idle_timer(&self, now_ms: u64) -> crate::timing::IdleTimer {
         crate::timing::IdleTimer::new(self.idle_timeout_secs, now_ms)
     }
@@ -365,7 +390,26 @@ impl CliConfig {
                     cfg.idle_timeout_secs =
                         parse_u64_range(flag, &v, 0, MAX_IDLE_TIMEOUT_SECS)?;
                 }
+                "--smoke" => cfg.smoke = parse_switch(flag, &inline)?,
+                "--smoke-out" => {
+                    let v = take(flag)?;
+                    if v.is_empty() {
+                        return Err(ConfigError::Invalid(flag.into(), v, "路径不能为空".into()));
+                    }
+                    cfg.smoke_out = Some(PathBuf::from(v));
+                }
                 other => return Err(ConfigError::UnknownArg(other.to_string())),
+            }
+        }
+        // 组合校验（**响亮失败，不静默忽略**）：`--smoke-out` 只被 `--smoke` 消费；
+        // 单给它在当前实现里就是「解析了但无人消费」的静默 no-op（本项目最忌讳的一类）。
+        if let Some(p) = &cfg.smoke_out {
+            if !cfg.smoke {
+                return Err(ConfigError::Invalid(
+                    "--smoke-out".into(),
+                    p.display().to_string(),
+                    "仅与 --smoke 联用（否则该路径不会被写入）".into(),
+                ));
             }
         }
         Ok(cfg)
@@ -451,8 +495,10 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
 选项：
   --channel <URL>         数据通道（回环 HTTP GET 最新帧）
                           默认 {default_url}
-  --control-channel <URL>  控制通道基址（回环；仅 GET 查询 + POST 写受控接口）
+  --control-channel <URL>  [B3-2b 接线] 控制通道基址（回环；GET 查询 + POST 写受控接口）
                           默认 {default_ctl}
+                          ⚠️ 本参数当前**不影响行为**：消费者 ConsoleClient 尚无生产实例化点
+                          （B3-2b 接线），启动时会打印响亮告警（不静默当没看见）
   --poll-ms <MS>           轮询节拍（--interval 同义），{min_i}..={max_i}，默认 {interval}
                            ⚠️ >{max_i} 直接报错（设计 §5.5：影响端到端 ≤2s 验收）
   --interval <MS>          --poll-ms 的 v1.0 别名（同区间）
@@ -464,7 +510,9 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
   --height <PX>            渲染高度，{min_d}..={max_d}，默认 {h}
   --rotate <DEG>           [暂未实现] 仅接受 0（90|180|270 会启动即报错退出）
                            ⚠️ 施加旋转待薄层 lv_display_set_rotation 补齐（不做静默忽略）
-  --font <PATH>            外部/系统字库(.otf/.ttf)；空=捆绑子集或内置 ASCII 回退
+  --font <PATH>            [v2.0 已废弃：字库在构建期由 lv_font_conv 产物绑定
+                           （--features noto-font，见 fonts/gen_fonts.sh），
+                           本参数被忽略；启动时会打印响亮告警]
   --touch-device <PATH>    触摸设备节点；缺省 = 自动发现（多候选即报错并列出）
                            生产固定 /dev/mupc-touch（udev 符号链接，设计 §12.2）
   --touch-calib <V>        原始量程 xmin,xmax,ymin,ymax（覆盖设备 EVIOCGABS 自报值）
@@ -472,6 +520,10 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
   --touch-invert-x[=BOOL]  水平翻转
   --touch-invert-y[=BOOL]  垂直翻转
   --idle-timeout-secs <S>  无触摸回归主状态页秒数，0..={max_idle}，默认 {idle}（0=禁用）
+  --smoke                  一键自检：跑有限拍 → 逐页渲染 6 页 → 打印逐页像素统计 → 退出
+                           （六页任一为空 ⇒ 返回码 3，常量 `EXIT_SMOKE` 见 bin main.rs；
+                             配合 --backend offscreen 本机可跑）
+  --smoke-out <PATH>       自检导出 PPM 的路径（**仅与 --smoke 联用**，缺省不导出）
   -h, --help               显示本帮助
   -V, --version            显示版本
 
@@ -480,7 +532,9 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
   * 生产 unit 的 --channel 须与 mupcd 配置 display.bind_addr 对齐，
     --control-channel 须与 display.control_bind_addr 对齐（两者均硬绑 127.0.0.1）。
   * 触摸设备打开失败不影响数据刷新（EDGE-13）：仅 warn + 屏幕角标「触摸不可用」。
-  * 字库子集化命令见 crates/local-display/src/font.rs 顶部注释。
+  * 字库（中文上屏）在**构建期**由 lv_font_conv 产物绑定：先跑
+    crates/local-display/fonts/gen_fonts.sh，再以 --features noto-font 构建（设计 §1.1.2）。
+    v1.0 的 font.rs 与 --features bundled-font 已删除。
 ",
         default_url = mupc_display_proto::DEFAULT_CHANNEL_URL,
         default_ctl = mupc_display_proto::DEFAULT_CONTROL_BASE_URL,
@@ -498,6 +552,44 @@ mupc-local-display —— MUPC 本地显示终端渲染进程（12-本地显示�
         h = crate::SCREEN_H,
         max_idle = MAX_IDLE_TIMEOUT_SECS,
         idle = DEFAULT_IDLE_TIMEOUT_SECS,
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 启动期**响亮告警**文案（B3-2a 规格评审 建议 4/5）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 为什么文案要落在 lib（而不是 bin 里的 `eprintln!` 字面量）：本 crate 的可测逻辑一律
+// 不得留在 bin（`main.rs` 文件头：bin 不进 lib、集成测试够不着）—— 文案本身也是行为的一部分
+// （"参数被忽略"**必须可见**），所以它要被用例锁住；bin 只负责打印。
+
+/// `--font` 的启动期告警文案。
+///
+/// # 为什么是**告警**而不是硬错误（B3-2a 规格评审 建议 4 的主控裁定）
+/// 本进程由 systemd `Restart=always` 托管：把它降级成硬错误 ⇒ 现场带 `--font` 的 unit
+/// 会**起不来并无限重启**（服务不可用且无人值守），而它只是"这个兼容参数没用了"。
+/// 但"参数被忽略"这件事**必须可见** ⇒ 保留本告警 + `--help` 如实标注已废弃
+/// （[`help_text`] 的 `--font` 行），绝不留下一条"看起来可用"的骗人 help。
+pub fn font_ignored_warning(path: &std::path::Path) -> String {
+    format!(
+        "⚠️ --font {} 在 v2.0 不生效（参数被忽略）：中文上屏改由**构建期**绑定的 LVGL 位图字库\
+         承担（lvgl-sys 的 `noto-font` feature，见 fonts/gen_fonts.sh 与 lvgl/font.rs）；\
+         该参数仅为 CLI 兼容保留，可安全去掉。",
+        path.display()
+    )
+}
+
+/// `--control-channel` 的启动期告警文案（建议 5）。
+///
+/// # 为什么是告警而不是删参数 / 硬错误
+/// 参数已解析、已校验（回环 http），但**消费者 `ConsoleClient` 尚无生产实例化点**
+/// （B3-2b 才接线）⇒ 现在给 `--control-channel` 就是"解析了但无人消费的静默 no-op"。
+/// 处理成**响亮告警**（而不是删掉参数）：B3-2b 马上要用它，删了要再改一遍 CLI 契约与 unit；
+/// 也不做硬错误 —— 理由同 [`font_ignored_warning`]（systemd 重启循环）。
+pub fn control_channel_pending_warning(url: &str) -> String {
+    format!(
+        "⚠️ --control-channel {url} 当前**不影响行为**：控制通道客户端（ConsoleClient）将在 \
+         B3-2b 接线，本参数届时生效（现在只是解析 + 校验，不做静默 no-op 处理）。"
     )
 }
 
@@ -558,6 +650,41 @@ mod tests {
     fn empty_font_means_bundled_or_fallback() {
         let c = CliConfig::parse(&args(&["--font", ""])).unwrap();
         assert!(c.font.is_none());
+    }
+
+    /// `--smoke` / `--smoke-out`（设计 §9 一键自检）。
+    #[test]
+    fn smoke_flags_parse_and_are_off_by_default() {
+        let c = CliConfig::default();
+        assert!(!c.smoke, "默认必须关闭（自检不得在生产 unit 上误触发）");
+        assert!(c.smoke_out.is_none());
+
+        let c = CliConfig::parse(&args(&["--smoke"])).unwrap();
+        assert!(c.smoke);
+        assert!(c.smoke_out.is_none(), "不导出时无需路径");
+
+        let c = CliConfig::parse(&args(&["--smoke", "--smoke-out", "out.ppm"])).unwrap();
+        assert!(c.smoke);
+        assert_eq!(c.smoke_out, Some(PathBuf::from("out.ppm")));
+
+        // `--smoke=false` 显式关闭（部署脚本拼参数时不易出错，与其它开关同口径）
+        assert!(!CliConfig::parse(&args(&["--smoke=false"])).unwrap().smoke);
+    }
+
+    /// **`--smoke-out` 单独出现必须报错**（否则就是"解析了但无人消费"的静默 no-op）。
+    #[test]
+    fn smoke_out_without_smoke_is_rejected() {
+        let e = CliConfig::parse(&args(&["--smoke-out", "out.ppm"])).unwrap_err();
+        match e {
+            ConfigError::Invalid(f, v, why) => {
+                assert_eq!(f, "--smoke-out");
+                assert_eq!(v, "out.ppm");
+                assert!(why.contains("--smoke"), "错误须指出正确用法：{why}");
+            }
+            other => panic!("应判非法，实得 {other:?}"),
+        }
+        // 空路径同样响亮失败
+        assert!(CliConfig::parse(&args(&["--smoke", "--smoke-out", ""])).is_err());
     }
 
     #[test]
@@ -829,6 +956,91 @@ mod tests {
         ] {
             assert!(h.contains(f), "帮助文本缺 {f}");
         }
+    }
+
+    // ---- B3-2a 规格评审整改：help 文案不得说谎（建议 3/4/5） ----
+
+    /// `--help` 的 `--smoke` 行**必须以代码为准**（返回码 3 = bin `EXIT_SMOKE`），
+    /// 且**不得**再出现旧的"返回码 1"（曾与 `deploy/local-display.md` 互相矛盾）。
+    ///
+    /// **改什么会让本条变红**：把 help 里的 `返回码 3` 写回 `返回码 1` ⇒ 第二条断言红。
+    #[test]
+    fn help_smoke_exit_code_matches_bin_constant() {
+        let h = help_text();
+        let smoke_line = h
+            .lines()
+            .find(|l| l.contains("六页任一为空"))
+            .unwrap_or_else(|| panic!("help 里应有一行说明 --smoke 的失败返回码：\n{h}"));
+        assert!(
+            smoke_line.contains("返回码 3") && smoke_line.contains("EXIT_SMOKE"),
+            "help 的 --smoke 行须写实返回码 3 并点名 bin 常量：{smoke_line}"
+        );
+        assert!(
+            !smoke_line.contains("返回码 1"),
+            "旧的「返回码 1」与 main.rs::EXIT_SMOKE=3 矛盾（部署文档据此照抄会误判）：{smoke_line}"
+        );
+    }
+
+    /// `--font` 的 help 行须**如实标注已废弃**（不能再说"空=捆绑子集"——`bundled-font` 已删）。
+    ///
+    /// **改什么会让本条变红**：把该行改回 v1.0 文案「空=捆绑子集或内置 ASCII 回退」⇒ 红。
+    #[test]
+    fn help_marks_font_as_deprecated() {
+        let h = help_text();
+        // 该参数的 help 段 = `--font` 行 + 其续行（缩进对齐的后续行，直到下一个选项/空行）。
+        let mut lines = h.lines().skip_while(|l| !l.trim_start().starts_with("--font"));
+        let head = lines
+            .next()
+            .unwrap_or_else(|| panic!("help 仍须列 --font（防部署脚本踩空）：\n{h}"));
+        let seg = std::iter::once(head)
+            .chain(lines.take_while(|l| !l.starts_with("  --") && !l.trim().is_empty()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(head.contains("已废弃"), "须如实标注已废弃：{head}");
+        assert!(seg.contains("被忽略"), "须说明参数被忽略：\n{seg}");
+        assert!(
+            !h.contains("捆绑子集"),
+            "`bundled-font` feature 已删除 ⇒ 不得再出现「捆绑子集」说法"
+        );
+        // 文案本身也要一致（启动告警与 help 讲同一件事）
+        let w = font_ignored_warning(std::path::Path::new("/nope/x.otf"));
+        assert!(w.contains("/nope/x.otf"), "告警须回显实际取值：{w}");
+        assert!(w.contains("不生效") && w.contains("忽略"), "告警须说明不生效：{w}");
+        assert!(
+            w.contains("noto-font"),
+            "告警须指向真正生效的路径（构建期字库）：{w}"
+        );
+    }
+
+    /// `--control-channel` 须标注 `[B3-2b 接线]`，且启动告警明说"当前不影响行为"。
+    ///
+    /// **改什么会让本条变红**：把该参数从 help 里删掉、或去掉 `B3-2b` 标注 ⇒ 红。
+    #[test]
+    fn help_and_warning_register_control_channel_as_pending() {
+        let h = help_text();
+        let line = h
+            .lines()
+            .find(|l| l.trim_start().starts_with("--control-channel"))
+            .unwrap_or_else(|| panic!("help 仍须列 --control-channel（B3-2b 马上要用）：\n{h}"));
+        assert!(line.contains("B3-2b"), "须标注接线单元：{line}");
+        let w = control_channel_pending_warning("http://127.0.0.1:9811");
+        assert!(w.contains("不影响行为"), "告警须明说当前不影响行为：{w}");
+        assert!(w.contains("B3-2b"), "告警须给出接线下游：{w}");
+        assert!(w.contains("9811"), "告警须回显实际取值：{w}");
+    }
+
+    /// help 里**不得再引用已删除的 `font.rs`**（B3-2a 已删该模块 ⇒ 照抄者找不到文件）。
+    #[test]
+    fn help_does_not_point_at_deleted_font_rs() {
+        let h = help_text();
+        assert!(
+            !h.contains("src/font.rs"),
+            "help 指向已删除的 font.rs（应指向 fonts/gen_fonts.sh）：\n{h}"
+        );
+        assert!(
+            h.contains("gen_fonts.sh"),
+            "help 须给出真正在用的字库生成脚本：\n{h}"
+        );
     }
 
     #[test]

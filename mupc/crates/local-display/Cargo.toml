@@ -3,25 +3,28 @@
 # 命名对齐：目录 crates/local-display（与 display-proto/rs485-plugin 同风格），
 # lib target = mupc_local_display（对齐设计 §5.1 表 `crates/local-display`（`mupc_local_display`））。
 #
-# 职责（对齐 `[DESIGN_APPROVED]` 设计 §5.2/§5.4/§6）：
-#   - channel：DisplayChannelClient（127.0.0.1 回环 GET /v1/display/latest，500ms 轮询）
-#   - state：DisplayState + 三态归一纯逻辑（新鲜度/通道态/NumView）
-#   - canvas：Canvas trait + OffscreenCanvas（默认，内存 Vec<u32>，离屏单测）+ Linux FbCanvas(/dev/fb0 mmap)
-#   - font：ab_glyph 加载（外部路径 / 可选 bundled-font include_bytes）+ 缺失回退「内置 ASCII + 无字形盒」
-#   - layout：固定网格四卡布局渲染（UI §4/§5/§6 坐标与色板）
+# 职责（对齐 `[DESIGN_APPROVED]` 设计 §5.1/§5.2/§5.4/§6）：
+#   - channel：DisplayChannelClient（127.0.0.1 回环 GET /v1/display/latest；**非阻塞状态机**）
+#   - state：DisplayState + 三态归一纯逻辑（新鲜度/通道态/NumView）+ ControlState
+#   - canvas：Canvas trait + OffscreenCanvas + Linux FbCanvas(/dev/fb0 mmap)（升为 flush sink）
+#   - screen：flush_cb 的像素 sink（MemorySink / FbCanvas）+ Blitter 脏区搬运
 #   - config：渲染进程 CLI 参数解析 + 校验（设计 §7.2；手写解析，不引 clap）
-#   - run：主循环编排（Renderer 注入时钟可测 + run_loop 定拍/整流，设计 §5.3）
 #   - 【v2.0 工作单元 C】timing：事件循环骨架（poll 唯一阻塞点 + lv_timer_handler 驱动，§5.2）
 #   - 【v2.0 工作单元 C】touch：evdev 触摸栈（纯逻辑全平台可测；evdev 部分 cfg(linux)，§1.2）
-#   - 【v2.0 工作单元 C】screen：flush_cb 的像素 sink（fb0 复用 FbCanvas / 内存 sink，§1.1.1.1）
-#   - main（bin mupc-local-display）：CLI → 选后端 → 主循环 → 优雅退出（设计 §5.1/§9）
+#   - 【v2.0 工作单元 B3-1】console：控制通道非阻塞状态机（/v1/console/*，幂等重试）
+#   - 【v2.0 工作单元 B3-2a】app：LVGL 会话 + 六页外壳 + 通道状态机的装配层（§5.2）+ `--smoke`
+#   - main（bin mupc-local-display）：CLI → 装配 → 事件循环 → 优雅退出（设计 §5.1/§9）
+#   - 【v2.0 已删除】font（ab_glyph 光栅化）/ layout（固定网格自绘）/ run（定时自绘循环）
 # 依赖刻意保持最小（设计 §5.1）：仅 display-proto 所需 —— 不引入 serde_yaml / HTTP 服务栈。
-# 通道 GET 用裸 tokio TcpStream + HTTP/1.1 手写最小请求（无 reqwest/ureq 重依赖，可 mock 单测）。
+# 通道 GET 用**裸 `std::net::TcpStream`** + HTTP/1.1 手写最小请求（无 reqwest/ureq 依赖），
+# 并由 `tick` 以非阻塞状态机推进（§5.5）⇒ **tokio 已随 v1.0 的 async 通道客户端一并移除**
+# （B3-2a：全 crate 零 `async`/`block_on`；事件循环是 `timing::run` 的单线程同步循环）。
+# 字体：ab_glyph 依赖亦随 `font.rs` 移除 —— 中文上屏改由 LVGL 位图字库承担（见 `noto-font`）。
 #
 # [features]
-#   bundled-font：编译期 include_bytes! 捆绑 CJK 子集 OTF。仓库不随代码提交字库文件，
-#                 启用前须按 font.rs 顶部「子集化命令」生成 ../fonts/NotoSansSC-subset.otf，
-#                 否则该 feature 下编译失败（file not found）——属预期（设计 §13 前置项 8）。
+#   ⚠️ v1.0 的 `bundled-font` feature 已**整体删除**（它唯一的消费者 `font.rs` 已废弃）：
+#      构建脚本若仍传 `--features bundled-font` 会**响亮失败**（"package does not contain
+#      this feature"），而不是静默编出一个"没捆绑字库"的产物。
 [package]
 name = "local-display"
 version.workspace = true
@@ -29,7 +32,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "MUPC 本地显示终端渲染端库：通道客户端/三态归一/离屏+帧缓冲画布/ab_glyph 文本/四卡布局（12-MUPC Dev-B4）"
+description = "MUPC 本地显示终端渲染端库：通道客户端（非阻塞）/三态归一/LVGL 六页外壳与事件循环装配/离屏+帧缓冲像素 sink（12-MUPC v2.0）"
 
 [lib]
 name = "mupc_local_display"
@@ -42,9 +45,6 @@ path = "src/main.rs"
 
 [features]
 default = []
-# 启用后编译期 include_bytes!("../fonts/NotoSansSC-subset.otf")（设计 §5.4 捆绑子集）。
-# 字库文件未入库（前置项 8），默认关闭；真机部署/需复现测试时由开发放字库后开启。
-bundled-font = []
 # 【LVGL 链路】转发到 lvgl-sys 的 `noto-font`：启用后 `lvgl::font::Font::of(档位)`
 # 取到 `lv_font_conv` 生成的 CJK 位图字体（10 档，设计 §1.1.2）。
 # ⚠️ 前置：先跑 `fonts/gen_fonts.sh` 生成 `fonts/lv_font_noto_sc_*.c`（产物不入库）；
@@ -60,8 +60,6 @@ display-proto = { path = "../display-proto" }
 lvgl-sys = { path = "lvgl-sys" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
-ab_glyph = "0.2"
 thiserror = { workspace = true }
 # 控制通道的 `request_id` = **UUID v4**（幂等键兼防重放凭据，设计 §3.3/§5.5）。
 # 工作区已有 `uuid`（根 Cargo.toml，features = ["v4","serde"]）—— 本单元唯一新增的依赖行；
