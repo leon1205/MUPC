@@ -19,6 +19,7 @@ mod display_host;
 mod hot_apply;
 mod idempotency;
 mod interlock;
+mod log_service;
 mod signal_handler;
 mod startup;
 #[cfg(test)]
@@ -56,7 +57,7 @@ async fn main() {
     // 真源读不出来而 `<config>.bak` 在时用它恢复（见 config_service.rs 的窗口登记）。
     // 恢复是**重要事件**，必须响亮：本处 tracing 尚未初始化（Phase 2 才建），故用 `eprintln!`
     // （systemd/journald 会收进日志）。
-    let (config, recovered_from) = match config_service::load_config_with_backup_recovery(&cli.config)
+    let (mut config, recovered_from) = match config_service::load_config_with_backup_recovery(&cli.config)
     {
         Ok(v) => v,
         Err(e) => {
@@ -75,6 +76,28 @@ async fn main() {
             bak.display()
         );
     }
+
+    // ── 日志目录：**收敛成单一真源**（R2 整改）──
+    // 写者（下面的 `rolling::daily`）与读者（`startup` 装配的 `LogService`）必须是**同一个值**。
+    // 改法是"`--log-dir` 为可选覆盖（[`Cli::effective_log_dir`]）+ 就地**写回**
+    // `config.system.log_dir`"：写回之后全进程只有这一个值 —— appender 写它、LogService 读它、
+    // 审计目录（`{log_dir}/audit`）在它下面。
+    // 整改前：appender 吃 `cli.log_dir`（默认 `/opt/mupc/logs`）、LogService 吃
+    // `config.system.log_dir` ⇒ **两个值可以不一致且无人知晓**；最坏不是 503 而是**静默失实**
+    // （`create_dir_all` 把读者那侧目录建出来 ⇒ 目录存在但为空 ⇒ 200 + `entries=[]` ⇒
+    // 屏上「当前筛选条件下无日志」，而日志其实写在别处）。
+    // 此刻 tracing 尚未初始化 ⇒ 用 `eprintln!`（同上面几条启动期告警，systemd/journald 会收）。
+    if let Some(dir) = &cli.log_dir {
+        if *dir != config.system.log_dir {
+            eprintln!(
+                "WARN: --log-dir {} 覆盖配置的 system.log_dir {}（本次生效值以 --log-dir 为准，\
+                 appender / 日志服务 / 审计目录都用它）",
+                dir.display(),
+                config.system.log_dir.display()
+            );
+        }
+    }
+    config.system.log_dir = cli.effective_log_dir(&config.system.log_dir);
 
     if let Err(e) = config.validate() {
         eprintln!("FATAL: 配置校验失败: {}", e);
@@ -98,13 +121,17 @@ async fn main() {
         configured_log_level.as_str()
     };
 
-    // 确保日志目录存在
-    if let Err(e) = std::fs::create_dir_all(&cli.log_dir) {
-        eprintln!("FATAL: 无法创建日志目录 {}: {}", cli.log_dir.display(), e);
+    // 确保日志目录存在（`config.system.log_dir` = 上面收敛出的**单一真源**）
+    if let Err(e) = std::fs::create_dir_all(&config.system.log_dir) {
+        eprintln!(
+            "FATAL: 无法创建日志目录 {}: {}",
+            config.system.log_dir.display(),
+            e
+        );
         process::exit(1);
     }
 
-    let file_appender = tracing_appender::rolling::daily(&cli.log_dir, "mupc.log");
+    let file_appender = tracing_appender::rolling::daily(&config.system.log_dir, "mupc.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -142,7 +169,9 @@ async fn main() {
     tracing::info!("日志级别: {}", log_level);
 
     // ── Phase 3: 子系统初始化 ──
-    let mut coord = ServiceCoordinatorImpl::new();
+    // S-5：`coord` 只被 `&` 借用（`initialize_all(&coord, …)` / `graceful_shutdown(&coord, …)`），
+    // `stop_all()` 的接收者是 `&self` ⇒ 不需要 `mut`（`-D warnings` 的 CI 会红）。
+    let coord = ServiceCoordinatorImpl::new();
 
     // 12-显示终端 §4.3.2：`CoreConfig` **内存副本**（`Arc<RwLock<…>>`）是写入生效后的
     // 「进程内唯一权威读源」。**在这里**（Phase 2 tracing 之后、装配之前）就地建立并**移入**

@@ -474,8 +474,10 @@ pub async fn initialize_all(
     // 而装配过的子系统各自持有自己的生效机制（`watch` / reload handle，见设计 §4.3.3）。
     let config = core_config.read().await.clone();
     let config = &config;
-    let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // 错误路径守卫: 初始化中途失败时 abort 所有已启动的后台任务
+    // （后台任务**只**寄存在 `TaskGuard` 里：装配中途失败即全部 abort；成功路径在函数末尾
+    //  `std::mem::take(&mut guard.0)` 移交给 `StartupContext`。
+    //  S-5：此处原本另有一个 `let mut bg_tasks`（全函数无人使用），已删除。）
     struct TaskGuard(Vec<tokio::task::JoinHandle<()>>);
     impl Drop for TaskGuard {
         fn drop(&mut self) {
@@ -848,9 +850,22 @@ pub async fn initialize_all(
             core_config,
             log_reload,
         );
+        // 单元 H：日志源 = **日志目录扫描**（设计 §4.4）。目录取自 `config.system.log_dir`
+        // （与迁出前的 `web-api::LogsHandler`、以及审计目录 `{log_dir}/audit` 同一个真源）。
+        // ✅ 与 **写者**（`main.rs` 的 `tracing_appender::rolling::daily`）**同值**：`--log-dir` 是
+        // 可选覆盖，`main.rs` 在 Phase 1 之后把它**写回** `config.system.log_dir` 再往下传
+        // （单一真源，R2 整改；见 `log_service.rs` 模块头「日志目录的单一真源」）。
+        // 限额取 `config.display.log`（设计 §8.3「log 限额」的真源）。
+        let logs = crate::console_host::LogSource::Ready(Arc::new(
+            crate::log_service::LogService::new(
+                config.system.log_dir.clone(),
+                config.display.log,
+            ),
+        ));
         let console = crate::console_host::ConsoleHost::new(crate::console_host::ConsoleDeps {
             config: console_config_source(core_config),
             apply,
+            logs,
         });
         match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
             Ok(listener) => {

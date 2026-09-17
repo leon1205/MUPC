@@ -3,7 +3,8 @@
 //!
 //! 对应设计（`docs/superpowers/plans/modules/12-MUPC-本地显示终端-设计文档.md`）：
 //! - §3.3 控制通道：通用信封与管线（**G-1 落读、G-2 落写全 8 步**）；
-//! - §3.4 控制通道端点清单（8 条；已落 2 条：`GET /v1/console/config` + `POST /v1/console/config/apply`）；
+//! - §3.4 控制通道端点清单（8 条；已落 4 条：`GET /v1/console/config` + `POST /v1/console/config/apply`
+//!   + **单元 H 的 `GET /v1/console/logs` 与 `GET /v1/console/logs/targets`**）；
 //! - §3.4 补注（2026-09-15）：**GET 返回裸 DTO、POST 走 `ControlResponse` 信封**；
 //!   **GET 失败一律非 2xx**（渲染端 `console.rs` 落 `Error::HttpStatus`，不解析错误体）；
 //!   **未实现的路由不得"假装成功"**（本模块对已登记但未实现的端点回 **501**，未知路径 **404**，
@@ -20,11 +21,10 @@
 //!
 //! ## 本单元的范围与**未做**的部分（如实登记）
 //!
-//! - 其余 6 条端点（`logs` / `logs/targets` / `audit` / `audit/ops` / `interlock/release` /
-//!   `interlock/ack_m1`）**已登记路由但返回 501**——它们各自的 `LogService` /
-//!   `ConsoleAuditService` / `InterlockOps` 属后续单元。路由**不隐藏**：屏上对未实现端点的请求
-//!   会得到明确的 501（渲染端 → `HttpStatus(501)` 失败提示），而不是被静默当成"服务不可用"
-//!   或"空数据"。
+//! - 其余 4 条端点（`audit` / `audit/ops` / `interlock/release` / `interlock/ack_m1`）**已登记路由
+//!   但返回 501**——它们各自的 `ConsoleAuditService` / `InterlockOps` 属后续单元。路由**不隐藏**：
+//!   屏上对未实现端点的请求会得到明确的 501（渲染端 → `HttpStatus(501)` 失败提示），而不是被静默
+//!   当成"服务不可用"或"空数据"。
 //! - **写路径的"生效"只到位一部分**（⚠️ 计数口径，评审重要 5 已更正）：字段表 `FIELDS` 共
 //!   **9** 键，其中 `editable=true` 的**可写字段 7 个**；这 7 个里 **1 个真热生效**
 //!   （`system.log_level`，`tracing_subscriber::reload`），**其余 6 个**（`intercore.*` 4 +
@@ -48,6 +48,20 @@
 //! 要求"具体原因"）。故本 handler 对**一切**写请求（含信封本身解析失败、写路径未装配）
 //! 都回 **HTTP 200 + 一个 `ok=false` 的信封** —— 与 `501` 的分工是：
 //! **"端点没实现"用 501（结构性事实），"实现但这次没做成"用信封**。
+//!
+//! ## GET 日志两条端点的错误通道（单元 H，与 POST 相反、与 `GET /config` 一致）
+//!
+//! 两条日志端点**都是 GET** ⇒ 失败**一律非 2xx**（§3.4 补注），落在四种 HTTP 状态上：
+//!
+//! | 情形 | HTTP | 说明 |
+//! |------|------|------|
+//! | 查询参数非法（未知键 / 逗号拼多值 / `limit` 越界 / `custom` 缺 `from`/`to` …） | **400** | 具体原因在**响应体**（人读；渲染端不解析、只记 `HttpStatus(400)`） |
+//! | 日志源不可读（目录不存在 / 无权限 / 文件打不开） | **503** | **绝不**回 200 + 空列表 —— 那会被屏上读成 EDGE-08「没有日志」（静默失实） |
+//! | 检索范围超限（EDGE-15） | **200** | ⚠️ **不是错误**：`LogPage{ entries: [], range_too_large: true }` 是**正常回包**，屏上据此显超限提示 |
+//! | 正常 | **200** | 裸 `LogPage` / 裸 `Vec<String>` |
+//!
+//! 「空结果」与「超限」是**两个不同的正常回包**（`range_too_large` 区分），而「源不可用」是**失败**
+//! （503）。三者互不替代：本模块把"我不知道"与"确实是空的"当成**两件事**（§8.3 硬口径）。
 //!
 //! ## `requires_reconnect` 的**唯一真源**
 //!
@@ -84,7 +98,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -137,14 +151,30 @@ pub enum ApplySource {
     Unavailable(&'static str),
 }
 
-/// 宿主依赖（设计 §4.9 `ConsoleDeps` 的可落子集；其余字段（`log_dir` / `interlock` /
-/// `apply_registry`）随后续单元引入）。
+/// **日志源**的装配状态（单元 H；`GET /v1/console/logs` 与 `/logs/targets` 的数据来源）。
+///
+/// 与 [`ConfigSource`] 同款"显式不可用态"的理由：日志**目录读不出来**（不存在 / 无权限）时
+/// 必须有一个能回 **503** 的态，而**不是**降级成"空列表"——后者在屏上就是 EDGE-08
+/// 「当前筛选条件下无日志」，把"读不到"伪装成"确实没有"（本项目硬红线）。
+#[derive(Clone)]
+#[allow(dead_code)] // `Unavailable` 由单测构造（诚实性网 ②）；生产当前恒 `Ready`
+pub enum LogSource {
+    /// 日志服务就绪（`{system.log_dir}` 的文件扫描；设计 §4.4）。
+    Ready(Arc<crate::log_service::LogService>),
+    /// 日志源不可用（装配缺失）。原因串**如实**进 503 响应体（仅现场排障，不进屏）。
+    Unavailable(&'static str),
+}
+
+/// 宿主依赖（设计 §4.9 `ConsoleDeps` 的可落子集；其余字段（`interlock` / `apply_registry`）
+/// 随后续单元引入）。
 #[derive(Clone)]
 pub struct ConsoleDeps {
     /// 配置读源。
     pub config: ConfigSource,
     /// 配置写源（G-2）。
     pub apply: ApplySource,
+    /// 日志源（单元 H）。
+    pub logs: LogSource,
 }
 
 /// 控制通道宿主：持有路由表与依赖，`serve()` 消费一个**已绑定**的 listener。
@@ -188,6 +218,15 @@ impl ConsoleHost {
                 mupc_display_proto::ConsoleMethod::Get if ep == ConsoleEndpoint::Config => {
                     router.route(path, get(get_config))
                 }
+                // 单元 H：日志两条 GET（设计 §3.4 / §4.4）
+                mupc_display_proto::ConsoleMethod::Get if ep == ConsoleEndpoint::Logs => {
+                    router.route(path, get(get_logs))
+                }
+                mupc_display_proto::ConsoleMethod::Get
+                    if ep == ConsoleEndpoint::LogsTargets =>
+                {
+                    router.route(path, get(get_logs_targets))
+                }
                 mupc_display_proto::ConsoleMethod::Get => router.route(path, get(not_implemented)),
                 mupc_display_proto::ConsoleMethod::Post
                     if ep == ConsoleEndpoint::ConfigApply =>
@@ -202,6 +241,7 @@ impl ConsoleHost {
         router.with_state(HostState {
             config: self.deps.config.clone(),
             apply: self.deps.apply.clone(),
+            logs: self.deps.logs.clone(),
         })
     }
 
@@ -228,10 +268,12 @@ impl ConsoleHost {
             ));
         }
         tracing::info!(
-            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；已实现 GET {} 与 POST {}，其余 6 条端点 501）",
+            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；已实现 GET {} / {} / {} 与 POST {}，其余 4 条端点 501）",
             addr,
             ConsoleEndpoint::Config.path(),
             ConsoleEndpoint::Config.path(),
+            ConsoleEndpoint::Logs.path(),
+            ConsoleEndpoint::LogsTargets.path(),
             ConsoleEndpoint::ConfigApply.path()
         );
         axum::serve(listener, self.router()).await
@@ -243,6 +285,7 @@ impl ConsoleHost {
 struct HostState {
     config: ConfigSource,
     apply: ApplySource,
+    logs: LogSource,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -272,6 +315,81 @@ async fn get_config(State(st): State<HostState>) -> Response {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("config source unavailable: {reason}"),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/console/logs` → **裸 `LogPage`**（§3.4 补注：GET 不走信封）。
+///
+/// 参数解析**不用 `Query<T>` 结构体**：多值维度（`levels` / `targets`）在 §3.4 补注里
+/// 定死为**重复键**，只有"键值对序列"这一形态能原样表达（结构体 + `Vec` 会把重复键与逗号
+/// 拼接混为一谈）。⇒ 收 `Query<Vec<(String, String)>>` 后交给
+/// [`crate::log_service::parse_query`]（纯函数、可单测）。
+///
+/// 错误通道：参数非法 **400** / 日志源不可读 **503** / 正常（含空页与**超限页**）**200**。
+async fn get_logs(
+    State(st): State<HostState>,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    let LogSource::Ready(svc) = &st.logs else {
+        let reason = match &st.logs {
+            LogSource::Unavailable(r) => *r,
+            LogSource::Ready(_) => unreachable!(),
+        };
+        tracing::error!(reason, "日志源未装配，GET /v1/console/logs 回 503");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("log source unavailable: {reason}"),
+        )
+            .into_response();
+    };
+    let q = match crate::log_service::parse_query(&pairs) {
+        Ok(q) => q,
+        Err(e) => {
+            // 原因串只进响应体（渲染端不解析错误体 ⇒ 不上屏）与日志；**不进**任何上屏字段。
+            tracing::warn!(error = %e, "GET /v1/console/logs 查询参数非法，回 400");
+            return (StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response();
+        }
+    };
+    match svc.page(&q, now_ms()).await {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "日志源不可读，GET /v1/console/logs 回 503");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("log source unreadable: {e}"),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/console/logs/targets` → **裸 `Vec<String>`**（模块选项，≤ [`LOG_TARGETS_MAX`]）。
+///
+/// 无参（§3.4 请求列为「—」）⇒ 本 handler **不接** `Query`（多给参数也不影响语义）；
+/// 失败口径与 [`get_logs`] 一致（源不可读 ⇒ 503，**不**回空列表）。
+async fn get_logs_targets(State(st): State<HostState>) -> Response {
+    let LogSource::Ready(svc) = &st.logs else {
+        let reason = match &st.logs {
+            LogSource::Unavailable(r) => *r,
+            LogSource::Ready(_) => unreachable!(),
+        };
+        tracing::error!(reason, "日志源未装配，GET /v1/console/logs/targets 回 503");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("log source unavailable: {reason}"),
+        )
+            .into_response();
+    };
+    match svc.targets().await {
+        Ok(t) => Json(t).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "日志源不可读，GET /v1/console/logs/targets 回 503");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("log source unreadable: {e}"),
             )
                 .into_response()
         }
@@ -896,6 +1014,7 @@ pub fn loopback_host_of(addr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mupc_display_proto::{LogLevel, LogPage}; // 契约 DTO（断言 / 解码用）
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -915,9 +1034,30 @@ mod tests {
         config: ConfigSource,
         apply: ApplySource,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_host_full(config, apply, LogSource::Unavailable("本用例不验日志源")).await
+    }
+
+    /// 同上，但注入日志源（单元 H 用例）。
+    async fn spawn_log_host(
+        logs: LogSource,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_host_full(
+            ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+            ApplySource::Unavailable("本用例不验写路径"),
+            logs,
+        )
+        .await
+    }
+
+    /// 全量注入版（三个源都在参数里 ⇒ 用例显式声明它验哪一条通道）。
+    async fn spawn_host_full(
+        config: ConfigSource,
+        apply: ApplySource,
+        logs: LogSource,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let host = ConsoleHost::new(ConsoleDeps { config, apply });
+        let host = ConsoleHost::new(ConsoleDeps { config, apply, logs });
         let h = tokio::spawn(async move {
             let _ = host.serve(listener).await;
         });
@@ -1072,6 +1212,7 @@ mod tests {
         let host = ConsoleHost::new(ConsoleDeps {
             config: crate::startup::console_config_source(&assembly),
             apply: ApplySource::Unavailable("本用例只验读源同一性"),
+            logs: LogSource::Unavailable("本用例只验读源同一性"),
         });
         let got = match host.config_source() {
             ConfigSource::Ready(a) => a.clone(),
@@ -1149,15 +1290,22 @@ mod tests {
         h.abort();
     }
 
-    /// ①' 其余 **6** 条端点（G-2 起 `config/apply` 已实现）：**逐条** 501，且**逐条**不能回 404
+    /// ①' 其余 **4** 条端点（G-1/G-2 的 config 读 + 写、单元 H 的 logs 两条均已实现）：
+    /// **逐条** 501，且**逐条**不能回 404
     /// （404 = 路由没登记 = 屏上无法区分"服务没实现"与"服务根本没这个端点"）。
     #[tokio::test]
     async fn every_registered_but_unimplemented_endpoint_is_honest_per_endpoint() {
         let (addr, h) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
         let mut checked = 0;
         for ep in ConsoleEndpoint::ALL {
-            // 已实现的两条（G-1 读 / G-2 写）不在"未实现"清单内
-            if matches!(ep, ConsoleEndpoint::Config | ConsoleEndpoint::ConfigApply) {
+            // 已实现的四条不在"未实现"清单内
+            if matches!(
+                ep,
+                ConsoleEndpoint::Config
+                    | ConsoleEndpoint::ConfigApply
+                    | ConsoleEndpoint::Logs
+                    | ConsoleEndpoint::LogsTargets
+            ) {
                 continue;
             }
             let method = match ep.method() {
@@ -1171,7 +1319,7 @@ mod tests {
             assert_eq!(status, 501, "`{}` 未实现须 501，实际 {status}", ep.path());
             checked += 1;
         }
-        assert_eq!(checked, 6, "未实现端点应为 6 条（8 条契约端点 − 2 条已实现）");
+        assert_eq!(checked, 4, "未实现端点应为 4 条（8 条契约端点 − 4 条已实现）");
         h.abort();
     }
 
@@ -1199,6 +1347,7 @@ mod tests {
         let host = ConsoleHost::new(ConsoleDeps {
             config: ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             apply: ApplySource::Unavailable("本用例只验回环裁决"),
+            logs: LogSource::Unavailable("本用例只验回环裁决"),
         });
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2111,5 +2260,444 @@ gateway:
             "运行期半边覆盖不足（只抓到 {} 条回执）",
             seen.len()
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 单元 H：`GET /v1/console/logs` + `GET /v1/console/logs/targets`（端到端）
+    //
+    // 解码方式与渲染端**同款**：`serde_json::from_str::<LogPage>` / `<Vec<String>>`
+    // （`console.rs::tick` 的 `decode` 就是这一条路径）。**不做**任何自定义解析。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 日志夹具：目录里一个 `mupc.log.<date>`（`count` 条，1 s 一条，级别交替）。
+    fn log_fixture(t: &crate::testutil::TempDir, count: u64) -> u64 {
+        const BASE_MS: u64 = 1_757_412_000_000;
+        let mut body = String::new();
+        for i in 0..count {
+            let ts = chrono::DateTime::from_timestamp_millis((BASE_MS + i * 1000) as i64)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let lvl = if i % 2 == 0 { "ERROR" } else { "INFO" };
+            body.push_str(
+                &serde_json::json!({
+                    "timestamp": ts, "level": lvl, "target": "mupc_gateway",
+                    "fields": { "message": format!("msg-{i}") },
+                })
+                .to_string(),
+            );
+            body.push('\n');
+        }
+        t.write("mupc.log.2025-09-09", &body);
+        BASE_MS
+    }
+
+    /// 渲染端同款查询串（`control_route.rs::log_query_string` 的逐字形态）。
+    fn log_qs(range: &str, extra: &str) -> String {
+        format!("/v1/console/logs?range={range}{extra}")
+    }
+
+    async fn logs_from(addr: SocketAddr, qs: &str) -> (u16, LogPage) {
+        let (status, body) = http(addr, "GET", qs, None).await;
+        let page = serde_json::from_str::<LogPage>(&body)
+            .unwrap_or_else(|e| panic!("裸 LogPage 解码失败（渲染端同款路径）: {e}\n{body}"));
+        (status, page)
+    }
+
+    /// ① 端到端：真发 HTTP、按渲染端同款方式解 DTO；顺序 / 分页 / 筛选一次覆盖。
+    #[tokio::test]
+    async fn get_logs_end_to_end_decodes_like_the_render_side() {
+        let t = crate::testutil::TempDir::new("h-e2e");
+        let base = log_fixture(&t, 30);
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+
+        // 渲染端首屏查询：range=1h&limit=20（`LogQuery::default()` 的形态）。夹具时间在 2025，
+        // 故这里用 custom 窗口 —— 相对档位用的是**服务端时钟**（生产即是如此）。
+        let from = base;
+        let to = base + 60_000;
+        let qs = log_qs(
+            "custom",
+            &format!("&from={from}&to={to}&limit=10&levels=error&levels=warn"),
+        );
+        let (status, page) = logs_from(addr, &qs).await;
+        assert_eq!(status, 200);
+        assert!(!page.range_too_large, "30 条远未超限");
+        assert!(page.has_more, "命中 15 条 > limit=10 ⇒ 还有更早的");
+        assert_eq!(page.entries.len(), 10, "limit=10");
+        for w in page.entries.windows(2) {
+            assert!(w[0].seq > w[1].seq, "必须 seq 降序");
+        }
+        assert!(page.entries.iter().all(|e| e.level == LogLevel::Error));
+        assert_eq!(page.next_cursor, page.entries.last().map(|e| e.seq));
+
+        // 500 ms 增量：cursor = 已见最大 seq（`p3_logs.rs::fire_increment` 的形态）
+        let max_seq = page.entries[0].seq;
+        let (s2, inc) = logs_from(
+            addr,
+            &log_qs(
+                "custom",
+                &format!(
+                    "&from={from}&to={to}&cursor={max_seq}&limit=10&levels=error&levels=warn"
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(s2, 200);
+        assert!(inc.entries.iter().all(|e| e.seq > max_seq), "只回更新的");
+        assert!(inc.entries.is_empty(), "已到最新 ⇒ 空页（不是重复拉取）");
+        assert!(!inc.has_more && !inc.range_too_large);
+
+        // `/logs/targets`（无参 GET）⇒ 裸 Vec<String>
+        let (s3, body) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert_eq!(s3, 200);
+        let targets: Vec<String> = serde_json::from_str(&body).expect("裸 Vec<String>");
+        assert_eq!(targets, vec!["mupc_gateway".to_string()]);
+        h.abort();
+    }
+
+    /// ② 多值参数**必须**是重复键；逗号拼接 ⇒ 400（**不是** 200 + 当成两个级别）。
+    ///
+    /// ⚠️ **整改五 E-3a**：本用例此前用 `range=1h`（夹具时间在 2025、服务端 `now` 是 2026）
+    /// ⇒ 窗口恒为空 ⇒ 断言 `status == 200` 与注释所称的"两个级别都解析出来"**在断言层面
+    /// 无从体现**（只验了"没报 400"）。现改为 `custom` + 夹具时间窗，并**用命中内容反证**
+    /// 两个重复键都被解析：`levels=error&levels=info` 必须把**两种级别各一条**都取回来
+    /// （只解析出一个键就会少一条），逗号拼接则仍是 400。
+    #[tokio::test]
+    async fn multi_value_query_over_the_wire_is_repeated_keys_only() {
+        let t = crate::testutil::TempDir::new("h-multi");
+        let base = log_fixture(&t, 2); // i=0 ERROR / i=1 INFO
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+
+        // 重复键 ⇒ 200，且**两个级别都被解析出来**（命中内容为证）
+        let qs = log_qs(
+            "custom",
+            &format!("&from={base}&to={}&limit=20&levels=error&levels=info", base + 60_000),
+        );
+        let (ok, page) = logs_from(addr, &qs).await;
+        assert_eq!(ok, 200, "{page:?}");
+        assert_eq!(page.entries.len(), 2, "两种级别的重复键都必须解析出来：{:?}", page.entries);
+        let mut levels: Vec<String> = page.entries.iter().map(|e| format!("{:?}", e.level)).collect();
+        levels.sort();
+        assert_eq!(
+            levels,
+            vec!["Error".to_string(), "Info".to_string()],
+            "只解析出一个键的话这里会只剩一种级别：{:?}",
+            page.entries
+        );
+        assert!(!page.range_too_large);
+
+        // 逗号拼接 ⇒ 400（**不是**把 "error,info" 当成两个级别）
+        let (bad, body) = http(
+            addr,
+            "GET",
+            &log_qs(
+                "custom",
+                &format!("&from={base}&to={}&limit=20&levels=error,info", base + 60_000),
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(bad, 400, "逗号拼多值必须被拒: {body}");
+        h.abort();
+    }
+
+    /// ③ 超限（EDGE-15）：**200 + `range_too_large=true`** —— 它不是错误，是**正常回包**；
+    /// **且带回已收集的最新 `limit` 条**（整改五 A 组裁定：不再是空页），与"无日志"
+    /// （`range_too_large=false`）**不得互替**。
+    #[tokio::test]
+    async fn range_too_large_is_a_200_normal_page_distinct_from_empty() {
+        let t = crate::testutil::TempDir::new("h-limit");
+        let base = log_fixture(&t, 3);
+        // 造超限：3 行 > 2 行
+        let limits = mupc_display_proto::config::LogLimits {
+            max_lines: 2,
+            ..Default::default()
+        };
+        let svc = crate::log_service::LogService::new(t.path(), limits);
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+
+        let (status, page) = logs_from(
+            addr,
+            &log_qs(
+                "custom",
+                &format!("&from={base}&to={}&limit=20", base + 60_000),
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "超限是正常回包，不是 HTTP 错误");
+        assert!(page.range_too_large, "必须显式置位");
+        // ⚠️ A 组裁定（本用例原断言 `entries.is_empty()`）：超限页**带回已收集的条目**，
+        // 否则渲染端 `p3_logs.rs::apply_page` 见空 ⇒ `shown=0` ⇒ 列表被清空（1h 已是最小档，
+        // "再缩也没用"）。这里钉死**具体内容**：3 行里超限发生在第 3 行 ⇒ 交付最新的 2 条。
+        assert_eq!(page.entries.len(), 2, "已收集的 2 条必须带上：{:?}", page.entries);
+        assert_eq!(
+            page.entries.iter().map(|e| e.message.as_str()).collect::<Vec<_>>(),
+            vec!["msg-2", "msg-1"],
+            "必须是**最新**的两条且倒序"
+        );
+        assert!(!page.has_more, "2 条 < limit=20");
+        assert_eq!(page.next_cursor, None);
+
+        h.abort();
+
+        // 对照：**同样为空**但 range_too_large=false —— 两个信号由字段区分（不是靠 HTTP 状态）。
+        // 必须换一个**干净目录**：这里的超限来自上一条 svc 把 `max_lines` 配成 2，而同一时间窗
+        // （`from=base, to=base+60000`）在该目录里**确实有 3 行**（R3 之后判据 = **窗口内容**，
+        // 与"扫描了多少行"无关）⇒ 复用同一目录会得到同一个超限，测不出"空 ≠ 超限"。
+        // ⚠️ S-4：此处原注释写"超限是'扫描工作量'判据（与时间窗无关）"——那是 **R3 之前**的语义，
+        // 已过期；判据现为窗口内容 ⇒ 收窄窗口**可以**让同一个目录不再超限（这正是 R3 的要点）。
+        let t2 = crate::testutil::TempDir::new("h-limit-empty");
+        let svc2 = crate::log_service::LogService::new(
+            t2.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (a2, h2) = spawn_log_host(LogSource::Ready(Arc::new(svc2))).await;
+        let (s, empty) = logs_from(a2, &log_qs("custom", &format!("&from={base}&to={}&limit=20", base + 60_000))).await;
+        assert_eq!(s, 200);
+        assert!(empty.entries.is_empty() && !empty.range_too_large, "无日志 ≠ 超限");
+        h2.abort();
+    }
+
+    /// ④ 日志源不可读 ⇒ **503**（**不得** 200 + 空列表冒充"没有日志"）。
+    #[tokio::test]
+    async fn unreadable_log_source_is_503_not_empty_page() {
+        let t = crate::testutil::TempDir::new("h-503");
+        let missing = t.path().join("absent");
+        let svc = crate::log_service::LogService::new(
+            &missing,
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+
+        let (s1, b1) = http(addr, "GET", "/v1/console/logs?range=1h&limit=20", None).await;
+        assert_eq!(s1, 503, "源不可读必须非 2xx: {b1}");
+        assert!(
+            serde_json::from_str::<LogPage>(&b1).is_err(),
+            "错误体不得是一个可解析的（哪怕是空的）LogPage: {b1}"
+        );
+        let (s2, _) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert_eq!(s2, 503);
+
+        // 装配缺失（`Unavailable`）走同一条非 2xx 通道
+        let (a2, h2) = spawn_log_host(LogSource::Unavailable("日志服务未装配")).await;
+        let (s3, _) = http(a2, "GET", "/v1/console/logs?range=1h&limit=20", None).await;
+        assert_eq!(s3, 503);
+        let (s4, _) = http(a2, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert_eq!(s4, 503);
+        h.abort();
+        h2.abort();
+    }
+
+    /// ⑤ 只读：写方法打到这两条路径 ⇒ **405**（结构性保证，不执行、不落任何副作用）。
+    ///
+    /// ⚠️ **整改五 E-3b**：本用例此前跑在**空页**上（夹具时间 2025 + `range=1h` ⇒ 窗口 = 2026
+    /// ⇒ 0 条）⇒ 注释所称的"内容与写前**逐字段一致**"在断言层面**无从体现**（空页当然一致）。
+    /// 现改为 `custom` + 夹具时间窗，并对**写前 / 写后**两个完整 `LogPage`（含 `entries` 的
+    /// 五个字段）做**逐字段比对**，且先断言这一页**非空**（否则比对仍是恒真）。
+    #[tokio::test]
+    async fn log_endpoints_are_get_only_and_reject_writes_with_405() {
+        let t = crate::testutil::TempDir::new("h-405");
+        let base = log_fixture(&t, 2);
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+
+        let qs = log_qs("custom", &format!("&from={base}&to={}&limit=20", base + 60_000));
+        let (_, before) = logs_from(addr, &qs).await;
+        let (_, before_targets) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert!(!before.entries.is_empty(), "写前必须是**非空页**（否则下面的比对是恒真的）");
+
+        for path in [
+            ConsoleEndpoint::Logs.path(),
+            ConsoleEndpoint::LogsTargets.path(),
+        ] {
+            for m in ["POST", "PUT", "DELETE", "PATCH"] {
+                let (s, _) = http(addr, m, path, (m == "POST").then_some("{}")).await;
+                assert_eq!(s, 405, "{m} {path} 必须 405（只读端点），实际 {s}");
+            }
+        }
+
+        // 只读的**实测**证据：8 次写尝试后，两个端点读到的内容与写前**逐字段一致**（无副作用）
+        let (_, after) = logs_from(addr, &qs).await;
+        assert_eq!(after, before, "`/logs` 的整页（含 entries 五个字段）必须与写前逐字段一致");
+        let (_, after_targets) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert_eq!(after_targets, before_targets, "`/logs/targets` 的裸 Vec 必须与写前一致");
+        h.abort();
+    }
+
+    /// ⑥ 非法查询 ⇒ **400**（非 2xx）；错误体**不是**可解析的 `LogPage`（渲染端不解析错误体，
+    /// 一旦它是合法 DTO，屏上就可能把"参数错"读成"无日志"）。
+    #[tokio::test]
+    async fn illegal_query_is_400_with_a_non_dto_body() {
+        let t = crate::testutil::TempDir::new("h-400");
+        log_fixture(&t, 2);
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+        for qs in [
+            "/v1/console/logs?range=1h&limit=201",
+            "/v1/console/logs?range=1h&limit=0",
+            "/v1/console/logs?range=1h&nope=1",
+            "/v1/console/logs?range=1h&from=1",
+            "/v1/console/logs?range=custom&from=1",
+            "/v1/console/logs?range=custom&from=9&to=1",
+            "/v1/console/logs?range=1h&levels=fatal",
+        ] {
+            let (s, b) = http(addr, "GET", qs, None).await;
+            assert_eq!(s, 400, "{qs} 应 400，实际 {s}: {b}");
+            assert!(serde_json::from_str::<LogPage>(&b).is_err(), "{qs} 错误体: {b}");
+        }
+        h.abort();
+    }
+
+    /// ⑥' 百分号编码的**多字节 / 保留字符** target 必须原样解出（渲染端 `encode_query`
+    /// 把 `核间/gateway` 编成 `%E6%A0%B8%E9%97%B4%2Fgateway`；服务端解错 = 模块筛选静默失效）。
+    #[tokio::test]
+    async fn percent_encoded_multi_byte_target_is_decoded_to_the_raw_key() {
+        let t = crate::testutil::TempDir::new("h-pct");
+        let base = 1_757_412_000_000u64;
+        let ts = chrono::DateTime::from_timestamp_millis(base as i64)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut body = String::new();
+        for target in ["核间/gateway", "mupc_gateway"] {
+            body.push_str(
+                &serde_json::json!({
+                    "timestamp": ts, "level": "INFO", "target": target,
+                    "fields": { "message": "m" },
+                })
+                .to_string(),
+            );
+            body.push('\n');
+        }
+        t.write("mupc.log.2025-09-09", &body);
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+
+        // `%2F`（`/`）与 UTF-8 字节序列都必须被解码；`+` 不被当作空格（渲染端把 `+` 编成 `%2B`）
+        let qs = log_qs(
+            "custom",
+            &format!(
+                "&from={base}&to={}&limit=20&targets=%E6%A0%B8%E9%97%B4%2Fgateway",
+                base + 1000
+            ),
+        );
+        let (status, page) = logs_from(addr, &qs).await;
+        assert_eq!(status, 200);
+        assert_eq!(page.entries.len(), 1, "只命中那个多字节 target");
+        assert_eq!(page.entries[0].target, "核间/gateway");
+
+        // `/logs/targets` 回的也是**原始键**（不是编码形态）
+        let (_, b) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        let targets: Vec<String> = serde_json::from_str(&b).unwrap();
+        assert_eq!(targets, vec!["mupc_gateway".to_string(), "核间/gateway".to_string()]);
+        h.abort();
+    }
+
+    /// ⑦ `LogPage` 的三条**线上字段**一个都不能少（契约 `Critical 2`：缺失 ⇒ 渲染端整帧 `Err`）。
+    /// 本用例把"服务端确实发了全部四个字段"钉死（不是靠 proto 的 derive 保证）。
+    #[tokio::test]
+    async fn wire_json_always_carries_all_four_logpage_fields() {
+        let t = crate::testutil::TempDir::new("h-wire");
+        let base = log_fixture(&t, 1);
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+        let qs = log_qs("custom", &format!("&from={base}&to={}&limit=20", base + 1000));
+        let (_, body) = http(addr, "GET", &qs, None).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for k in ["entries", "next_cursor", "has_more", "range_too_large"] {
+            assert!(v.get(k).is_some(), "回包缺 `{k}`（渲染端会整帧 Err）: {body}");
+        }
+        // 单条日志的五个字段同样齐全（`LogEntry`）
+        let e = &v["entries"][0];
+        for k in ["seq", "ts_ms", "level", "target", "message"] {
+            assert!(e.get(k).is_some(), "条目缺 `{k}`: {body}");
+        }
+        h.abort();
+    }
+
+    /// ⑧ 单条消息超 1 KiB ⇒ **截断且标注可见**（跨侧约定；渲染端 `MAX_BODY_BYTES` 按此推算）。
+    #[tokio::test]
+    async fn over_long_message_is_truncated_and_the_marker_is_visible_on_the_wire() {
+        let t = crate::testutil::TempDir::new("h-trunc");
+        let long = "x".repeat(4096);
+        let ts = chrono::DateTime::from_timestamp_millis(1_757_412_000_000)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        t.write(
+            "mupc.log.2025-09-09",
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "timestamp": ts, "level": "INFO", "target": "mupc_gateway",
+                    "fields": { "message": long },
+                })
+            ),
+        );
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+        let qs = log_qs("custom", "&from=1757412000000&to=1757412001000&limit=20");
+        let (status, page) = logs_from(addr, &qs).await;
+        assert_eq!(status, 200);
+        assert_eq!(page.entries.len(), 1, "夹具恰好一条");
+        let m = &page.entries[0].message;
+        assert!(m.len() <= crate::log_service::MESSAGE_MAX_BYTES, "超长必须截断: {}", m.len());
+        assert!(m.ends_with(crate::log_service::TRUNCATION_MARKER), "截断必须可见");
+        h.abort();
+    }
+
+    /// ⑨ `/logs/targets` 的选项 ≤ [`mupc_display_proto::log::LOG_TARGETS_MAX`]（契约硬上限），
+    /// 且**在整条链路上**（HTTP → 裸 `Vec<String>`）保持。
+    #[tokio::test]
+    async fn log_targets_endpoint_respects_the_contract_cap_over_the_wire() {
+        let t = crate::testutil::TempDir::new("h-targets");
+        let ts = chrono::DateTime::from_timestamp_millis(1_757_412_000_000)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut body = String::new();
+        for i in 0..80 {
+            body.push_str(
+                &serde_json::json!({
+                    "timestamp": ts, "level": "INFO", "target": format!("mod{i:03}"),
+                    "fields": { "message": "m" },
+                })
+                .to_string(),
+            );
+            body.push('\n');
+        }
+        t.write("mupc.log.2025-09-09", &body);
+        let svc = crate::log_service::LogService::new(
+            t.path(),
+            mupc_display_proto::config::LogLimits::default(),
+        );
+        let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
+        let (s, b) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert_eq!(s, 200);
+        let out: Vec<String> = serde_json::from_str(&b).unwrap();
+        assert_eq!(out.len(), mupc_display_proto::log::LOG_TARGETS_MAX);
+        let mut sorted = out.clone();
+        sorted.sort();
+        assert_eq!(out, sorted, "字典序升序（稳定顺序）");
+        h.abort();
     }
 }
