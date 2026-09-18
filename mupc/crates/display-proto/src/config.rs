@@ -13,6 +13,22 @@ pub const DEFAULT_CHANNEL_URL: &str = "http://127.0.0.1:9810/v1/display/latest";
 pub const DEFAULT_PUBLISH_MS: u64 = 1000;
 /// 主拍周期硬下界（设计 §4.9：`publish_ms >= 100`；`1..99` 会被打成高频通道，不得放行）。
 pub const MIN_PUBLISH_MS: u64 = 100;
+/// 主拍周期硬上界（**PM 裁定 · B3-2d**：`publish_ms <= 4000`）。
+///
+/// **依据（设计 §4.2.1）**：该节把 F7.3 / F16.5 的验收写成「上屏 **≤2 s**」，而
+/// `publish_ms` 是这条算式里**主拍路径**的周期项 —— 主拍一旦慢于**最慢的一段采集**
+/// （`device_poll_ms` ≤ `MAX_DEVICE_POLL_MS` = 4000），屏上刷新的瓶颈就只剩主拍本身，
+/// §4.2.1 的整张拆解表随之失效：**上界大于最慢的一段采集，对验收没有任何意义**，
+/// 却能把 `min = publish = 60_000` 这类**退化组合**（端到端 ≈61 s，远超 ≤2 s）放进现场。
+/// 取 4000 与 `MAX_DEVICE_POLL_MS` **同量级**（数值相同是量级对齐的巧合，**不是耦合**：
+/// 两条上界各自服务不同指标 —— 本条服务 §4.2.1 的 ≤2 s，那条服务 F6.3 的 ≤5 s，
+/// 任一指标重算只动自己那条）。
+///
+/// ⚠️ **裁定沿革**：A-2 只抬了 `min_publish_interval_ms` 的**下界**（100→250，见
+/// [`MIN_MERGE_WINDOW_MS`]），关闭的是 `min ∈ [100, 249]` 一族，**没有**关掉上面那个退化
+/// 组合（当时设计未给上界数值 ⇒ 登记为设计缺项，见 `docs/technical-debt.md` U-45）。
+/// B3-2d 由 **PM 裁定上界 = 4000** ⇒ U-45 据此结案。
+pub const MAX_PUBLISH_MS: u64 = 4000;
 /// F7 告警列表最多展示条数（设计 §4.9 `display.alarm_page_size` 默认 10；§3.1「items ≤10」）。
 pub const DEFAULT_ALARM_PAGE_SIZE: usize = 10;
 /// 实时日志 ring 容量硬下界（设计 §4.9：`live_ring >= 100`）。
@@ -34,8 +50,14 @@ pub const DEFAULT_INTERLOCK_POLL_MS: u64 = 500;
 pub const MAX_SLOW_POLL_MS: u64 = 1000;
 /// 装置状态慢拍周期硬上界（设计 §11.1：`device_poll_ms` ≤4000ms）。
 pub const MAX_DEVICE_POLL_MS: u64 = 4000;
-/// 合并窗口下限（设计 §11.1：`min_publish_interval_ms ∈ [100, publish_ms]`）。
-pub const MIN_MERGE_WINDOW_MS: u64 = 100;
+/// 合并窗口下限（`min_publish_interval_ms ∈ [MIN_MERGE_WINDOW_MS, publish_ms]`）。
+///
+/// ⚠️ **取值 250 的裁定沿革（A-2，独立评审）**：设计文档**自己两节打架** —— §4.2.1 **约束 2**
+/// 明写 `min_publish_interval_ms ≥ 250 ms`，而 §4.9 / §11.1 写的是 `[100, publish_ms]`。契约原先
+/// 取 `100`，于是 `min = publish = 60000` 这类配置**能过 validate** ⇒ 端到端上屏可退化为 61 s，
+/// 而验收是 ≤2 s（同一节 §4.2.1 的算式前提被自己放开）。**PM 裁定：契约取 250，以契约（唯一
+/// 真源）为准**，设计文档 §4.9 / §11.1 已就地标注「以契约 250 为准」。
+pub const MIN_MERGE_WINDOW_MS: u64 = 250;
 
 /// 服务端限额（`log` 段；设计 §8.3「log 限额」/ §4.4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -107,7 +129,8 @@ pub struct DisplayConfig {
     pub bind_addr: String,
     /// 控制通道回环绑定端点（默认 `DEFAULT_CONTROL_BIND`；设计 §3.3 / §4.9）。
     pub control_bind_addr: String,
-    /// mupcd 采集/组帧/发布周期(ms)（默认 `DEFAULT_PUBLISH_MS`）。
+    /// mupcd 采集/组帧/发布周期(ms)（默认 `DEFAULT_PUBLISH_MS`；
+    /// 须 ∈ [`MIN_PUBLISH_MS`, `MAX_PUBLISH_MS`]，且**实际**须 ≥ [`MIN_MERGE_WINDOW_MS`]）。
     pub publish_ms: u64,
     /// 慢拍变更唤醒组帧的最小合并窗口(ms)（默认 250；须 ∈ [`MIN_MERGE_WINDOW_MS`, publish_ms]）。
     pub min_publish_interval_ms: u64,
@@ -148,6 +171,19 @@ impl DisplayConfig {
                 "display.publish_ms",
                 format!(
                     "={} 越界，须 ≥ {MIN_PUBLISH_MS}（主拍下界；1..99 会打成高频通道）",
+                    self.publish_ms
+                ),
+            );
+        }
+        // 主拍**上界**（B3-2d，PM 裁定 4000；见 `MAX_PUBLISH_MS` 的文档注释）：
+        // 主拍慢于最慢的一段采集（`device_poll_ms` ≤4000）时，§4.2.1 的拆解表失效 ——
+        // **该上界对验收没有意义**，其唯一价值是把 `min = publish = 60_000` 这类退化组合
+        // （端到端 ≈61 s，验收 ≤2 s）**挡在启动期**，而不是留到现场用手感发现。
+        if self.publish_ms > MAX_PUBLISH_MS {
+            return invalid(
+                "display.publish_ms",
+                format!(
+                    "={} 越界，须 ≤ {MAX_PUBLISH_MS}（主拍上界；慢于最慢一段采集即无验收意义，且会让 §4.2.1 的上屏 ≤2 s 静默失效）",
                     self.publish_ms
                 ),
             );
@@ -514,7 +550,7 @@ mod tests {
             ..Default::default()
         })
         .contains("device_poll_ms"));
-        // 合并窗口越界（< 100 或 > publish_ms）
+        // 合并窗口越界（< MIN_MERGE_WINDOW_MS 或 > publish_ms）
         assert!(err(DisplayConfig {
             min_publish_interval_ms: 99,
             ..Default::default()
@@ -525,9 +561,9 @@ mod tests {
             ..Default::default()
         })
         .contains("min_publish_interval_ms"));
-        // 边界值放行
+        // 边界值放行（下界 = 契约常量，A-2 后为 250）
         let at_lower = DisplayConfig {
-            min_publish_interval_ms: 100,
+            min_publish_interval_ms: MIN_MERGE_WINDOW_MS,
             ..Default::default()
         };
         assert!(at_lower.validate().is_ok());
@@ -688,13 +724,30 @@ mod tests {
             ..Default::default()
         })
         .contains("publish_ms"));
-        // 正例：恰好 100 放行
+        // 正例：主拍取下界。⚠️ **A-2 的连带效果**：`min ≥ 250 ∧ min ≤ publish_ms` ⇒
+        // `publish_ms < 250` 的配置**全部不可达**（必被合并窗口那条拒）⇒ 所谓"恰好 100 放行"
+        // 的旧正例已不成立，改用「主拍 = 合并窗口下界」这一可达边界。`MIN_PUBLISH_MS` 仍是
+        // `publish_ms` 的**第一道**下界（`1..99` 先报 `publish_ms`），只是被交叉约束抬到 250 才可达。
         let at_min = DisplayConfig {
-            publish_ms: MIN_PUBLISH_MS,
+            publish_ms: MIN_MERGE_WINDOW_MS,
             min_publish_interval_ms: MIN_MERGE_WINDOW_MS,
             ..Default::default()
         };
-        assert!(at_min.validate().is_ok(), "publish_ms={MIN_PUBLISH_MS} 须放行");
+        assert!(
+            at_min.validate().is_ok(),
+            "publish_ms = min = {MIN_MERGE_WINDOW_MS} 须放行"
+        );
+        // 交叉约束的实证（同上）：单看 `publish_ms = MIN_PUBLISH_MS` 合法，但 `min` 不可能同时
+        // ≥250 且 ≤100 ⇒ 必拒（拒在合并窗口那条）。现场 yaml 的主拍因此**实际**须 ≥250。
+        let too_small_tick = DisplayConfig {
+            publish_ms: MIN_PUBLISH_MS,
+            min_publish_interval_ms: MIN_PUBLISH_MS,
+            ..Default::default()
+        };
+        assert!(
+            err(too_small_tick).contains("min_publish_interval_ms"),
+            "publish_ms={MIN_PUBLISH_MS} 与 min≥{MIN_MERGE_WINDOW_MS} 不可兼容 ⇒ 拒在合并窗口"
+        );
 
         // ③ live_ring >= 100（旧实现完全缺失该约束）
         let mut small_ring = DisplayConfig::default();
@@ -725,6 +778,103 @@ mod tests {
             ..Default::default()
         })
         .contains("min_publish_interval_ms"));
+    }
+
+    /// **A-2（独立评审）：合并窗口下界的成对边界（`249` 拒 / `250` 过）。**
+    ///
+    /// 背景：契约原为 `100`，设计 §4.2.1 约束 2 却写 ≥250 ms ⇒ 契约比设计松，`min ∈ [100, 249]`
+    /// 这一族**静默放行**（若同时把 `publish_ms` 放大，上屏时延可远超 §4.2.1 的算式前提）。
+    /// PM 裁定：契约取 **250**（唯一真源口径）。
+    ///
+    /// **破坏性验证**：把 `MIN_MERGE_WINDOW_MS` 改回 `100` ⇒ 本用例的 `249` 那条必须变红。
+    ///
+    /// ⚠️ **缺口沿革**：A-2 只抬**下界**，关闭的是 `min ∈ [100, 249]` 一族；当时 `publish_ms`
+    /// **无上界**（设计未给数值，登记为 U-45）⇒ `min = publish = 60_000` 仍能过 validate
+    /// （端到端 ≈61 s > 验收 ≤2 s），本用例的 `degenerate` 一条即把**当时**的行为如实钉住。
+    /// **B3-2d（PM 裁定上界 = 4000，见 [`MAX_PUBLISH_MS`]）已关掉该组合** ⇒ 该断言随之
+    /// **改为新口径：`min = publish = 60_000` 现在必须被拒**（不是放宽，是收紧）。
+    #[test]
+    fn merge_window_lower_bound_250_paired_boundary() {
+        assert_eq!(MIN_MERGE_WINDOW_MS, 250, "契约下界（A-2 裁定）");
+        // 下界 -1 ⇒ 必须拒
+        let below = DisplayConfig {
+            min_publish_interval_ms: MIN_MERGE_WINDOW_MS - 1,
+            ..Default::default()
+        };
+        let e = below.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("min_publish_interval_ms") && e.contains("250"),
+            "249 必须拒且文案带下界值，实际 {e}"
+        );
+        // 下界 ⇒ 必须过
+        let at = DisplayConfig {
+            min_publish_interval_ms: MIN_MERGE_WINDOW_MS,
+            ..Default::default()
+        };
+        assert!(at.validate().is_ok(), "250 须放行: {:?}", at.validate());
+        // **B3-2d 新口径（收紧）**：`min = publish = 60_000` 这一退化组合（端到端 ≈61 s，
+        // 验收 ≤2 s）现在**必须被拒**，且拒在 `publish_ms` 的**上界**那条（不是 min 那条——
+        // 它的 min == publish 本身在旧口径下是合法的，唯一非法项就是主拍上界）。
+        let degenerate = DisplayConfig {
+            publish_ms: 60_000,
+            min_publish_interval_ms: 60_000,
+            ..Default::default()
+        };
+        let e = degenerate.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("publish_ms") && e.contains("4000") && e.contains("上界"),
+            "退化组合 min = publish = 60_000 必须被上界拒（端到端 ≈61 s 超 ≤2 s），实际: {e}"
+        );
+    }
+
+    /// **B3-2d（PM 裁定）：`publish_ms` 上界的成对边界 —— `4000` 过 / `4001` 拒。**
+    ///
+    /// 背景：`min = publish = 60_000` 这类退化组合在 A-2 之后**仍能过 validate**（端到端 ≈61 s，
+    /// 验收 ≤2 s），因为 `publish_ms` 只有下界。PM 裁定补上界 **4000**（与 `device_poll_ms` 的
+    /// 既有上界同量级 —— 上界大于最慢的一段采集没有验收意义，其价值在于把退化组合挡在启动期）。
+    ///
+    /// **破坏性验证**：摘掉 `validate()` 里的上界拒判（或把 `MAX_PUBLISH_MS` 改大）⇒
+    /// **本用例的 `4001`** 与 **`merge_window_lower_bound_250_paired_boundary` 的 `degenerate`**
+    /// 两条必须变红（实测：`72 passed; 2 failed`）。
+    #[test]
+    fn publish_ms_upper_bound_4000_paired_boundary() {
+        assert_eq!(MAX_PUBLISH_MS, 4000, "契约上界（B3-2d 裁定）");
+        // ⚠️ **不**断言 `MAX_PUBLISH_MS == MAX_DEVICE_POLL_MS`：B3-2d 的取值依据是
+        // 「与 `device_poll_ms` 上界**同量级**」，而**不是**「恒等」—— 两条上界各自独立重算
+        // （任一指标重算时不该被另一条绊住）。若日后有人把两者调开量级，应改的是本注释，
+        // 不是让测试红着逼人同步。
+        // 上界 ⇒ **必须过**（`min` 同样取上界，避免被合并窗口那条先拒）
+        let at = DisplayConfig {
+            publish_ms: MAX_PUBLISH_MS,
+            min_publish_interval_ms: MAX_PUBLISH_MS,
+            ..Default::default()
+        };
+        assert!(
+            at.validate().is_ok(),
+            "publish_ms=4000 须放行: {:?}",
+            at.validate()
+        );
+        // 上界 +1 ⇒ **必须拒**，且文案须能看出是**上界**那条（含键名 / 上界值 / 「上界」字样）
+        let above = DisplayConfig {
+            publish_ms: MAX_PUBLISH_MS + 1,
+            min_publish_interval_ms: MAX_PUBLISH_MS,
+            ..Default::default()
+        };
+        let e = above.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("display.publish_ms") && e.contains("4000") && e.contains("上界"),
+            "publish_ms=4001 必须拒在上界那条（文案须含键名/上界值/「上界」），实际: {e}"
+        );
+        // 边界另一侧不得误伤：下界仍照旧（`249` 拒在合并窗口那条，证明上界没把下界判据顶掉）
+        let below = DisplayConfig {
+            min_publish_interval_ms: MIN_MERGE_WINDOW_MS - 1,
+            ..Default::default()
+        };
+        let e = below.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("min_publish_interval_ms"),
+            "上界不得顶掉下界判据，实际: {e}"
+        );
     }
 
     /// mupc_core_config.yaml 的 `display:` 段字面量（设计 §4.9）必须整体可加载且自洽。

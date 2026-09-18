@@ -47,8 +47,8 @@ display:
   enabled: true                         # 【生产】启用本地 HMI 后端（读 + 控制）
   bind_addr: "127.0.0.1:9810"           # 读通道（回环发布最新帧）
   control_bind_addr: "127.0.0.1:9811"   # 控制通道（T-3 无登录写通道 → 硬绑回环）
-  publish_ms: 1000                      # 主拍周期（须 >= 100）
-  min_publish_interval_ms: 250          # 变更即组帧合并窗口（须 ∈ [100, publish_ms]）
+  publish_ms: 1000                      # 主拍周期（须 ∈ [100,4000]，实际须 ≥250）
+  min_publish_interval_ms: 250          # 变更即组帧合并窗口（须 ∈ [250, publish_ms]）
   device_poll_ms: 3000                  # 慢拍 A 装置状态（须 ∈ [1,4000]；F6.3 ≤5 s 前提）
   alarm_poll_ms: 500                    # 慢拍 B 告警（须 ∈ [1,1000]；F7.3 ≤2 s 前提）
   interlock_poll_ms: 500                # 慢拍 C 联锁（须 ∈ [1,1000]；F16.5 ≤2 s 前提）

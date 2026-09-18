@@ -1068,7 +1068,27 @@ impl LoopbackHttpPublisher {
 
     /// 常驻 accept 循环（startup 装配时 spawn）。每连接独立 task（KISS，逐连接短读短写，
     /// 渲染端每轮新建连接，不依赖 keep-alive，§3.1）。
+    ///
+    /// # 回环复查（第二层，**独立评审建议 9，2026-09-18 补**）
+    ///
+    /// 与**控制通道** [`crate::console_host::ConsoleHost::serve`] 对称：配置校验
+    /// （契约 `DisplayConfig::validate()` → 启动期 fail-fast）只保证**配置串**是字面量回环；
+    /// 本函数按**实际绑定结果**再判一次（`listener.local_addr()`，`0.0.0.0` / `::` 一律拒）。
+    /// 防的是"配置校验被绕过 / 被新增调用路径跳过"（将来某条路径自行 `bind` 后直接 `serve`）。
+    ///
+    /// ⚠️ **本函数签名保持返回 `()`**（不像控制通道那样 `Result`）：既有 4 处调用点（`startup`
+    /// 与 3 条用例）都是 `tokio::spawn(...)`，改成 `Result` 会波及调用点与用例形态；而"拒绝"在
+    /// **读**通道上本就是"不提供数据"（无写能力、无授权面），**立即返回 + `error!` 留痕**即可
+    /// 达到同样的 fail-safe 效果（用例据"future 立刻结束/持续运行"这一可观察差异定红绿）。
     pub async fn serve(self, listener: TcpListener) {
+        if let Ok(addr) = listener.local_addr() {
+            if !addr.ip().is_loopback() {
+                tracing::error!(
+                    "display 读通道拒绝服务非回环地址 {addr}——读通道仅允许 127.0.0.1/::1（PL-4 安全红线）"
+                );
+                return;
+            }
+        }
         loop {
             match listener.accept().await {
                 Ok((stream, _peer)) => {
@@ -1458,6 +1478,43 @@ mod tests {
         let mut out = Vec::new();
         s.read_to_end(&mut out).await.unwrap();
         out
+    }
+
+    /// **建议 9（独立评审）：读通道的"按实际绑定结果复查回环"第二层。**
+    ///
+    /// 与控制通道 `ConsoleHost::serve`（`console_host.rs::non_loopback_listener_is_refused`）
+    /// 对称。判据可观察且**确定性**：非回环 listener 上 `serve` 的 future **立刻结束**；
+    /// 回环 listener 上它**持续运行**（accept 循环）。
+    ///
+    /// **改什么会让本条变红**：删掉 `serve` 开头那段 `local_addr().is_loopback()` 复查
+    /// （摘掉后非回环那份会一直跑 ⇒ 下面的 `timeout` 超时 ⇒ 红）。
+    #[tokio::test]
+    async fn read_channel_serve_refuses_non_loopback_listener_by_actual_bind() {
+        // ① 非回环（0.0.0.0）⇒ 立刻拒绝（future 结束、不进 accept 循环）
+        let latest: SharedLatest = Arc::new(Mutex::new(None));
+        let bad = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let bad_addr = bad.local_addr().unwrap();
+        assert!(!bad_addr.ip().is_loopback(), "本用例前提：0.0.0.0 非回环");
+        let out = tokio::time::timeout(
+            Duration::from_millis(500),
+            LoopbackHttpPublisher::new(latest.clone()).serve(bad),
+        )
+        .await;
+        assert!(
+            out.is_ok(),
+            "非回环 listener 必须被**立即拒绝**（serve 不得进入 accept 循环）——控制通道同款第二层"
+        );
+
+        // ② 正对照：回环 listener ⇒ 持续服务（超时到点 = 仍在 accept 循环里）
+        let good = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert!(good.local_addr().unwrap().ip().is_loopback());
+        let mut handle = tokio::spawn(LoopbackHttpPublisher::new(latest).serve(good));
+        let out = tokio::time::timeout(Duration::from_millis(200), &mut handle).await;
+        assert!(
+            out.is_err(),
+            "回环 listener 不得被拒（正对照，防「拒绝一切」式的假绿）"
+        );
+        handle.abort();
     }
 
     #[tokio::test]

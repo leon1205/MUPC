@@ -541,10 +541,17 @@ impl CoreConfig {
     ///
     /// ⚠️ **全集校验（不止地址）**：转发的 `DisplayConfig::validate()` 是**全集**校验，启动期
     /// 一并门禁下列**非地址**不变量（fail-fast，任一不合规则 `mupcd` **启动失败**）：
-    /// ⚠️ **数值逐字以契约为准**（本函数只转发，不自持口径）：`publish_ms >= 100`；
-    /// `min_publish_interval_ms ∈ [100, publish_ms]`（下界 = 契约 `MIN_MERGE_WINDOW_MS` = 100，
+    /// ⚠️ **数值逐字以契约为准**（本函数只转发，不自持口径）：`publish_ms ∈ [100, 4000]`
+    /// （**B3-2d 补上界**：上界 = 契约 `MAX_PUBLISH_MS` = **4000**，PM 裁定，依据设计 §4.2.1 的
+    /// 上屏 ≤2 s 验收——主拍慢于最慢的一段采集（`device_poll_ms` ≤4000）时该拆解表失效，同时
+    /// `min = publish = 60_000` 这类退化组合（端到端 ≈61 s）会被这条**挡在启动期**）；
+    /// `min_publish_interval_ms ∈ [250, publish_ms]`（下界 = 契约 `MIN_MERGE_WINDOW_MS` = **250**，
     /// 与 `deploy/deploy.md` §10.2 核对表同口径。**订正（K 收尾 Q-1）**：本行原写 `[200, …]`，比契约严、
-    /// 且与 deploy 文档的同一句话孪生不一致，已按契约订正）；`alarm_poll_ms` / `interlock_poll_ms` /
+    /// 且与 deploy 文档的同一句话孪生不一致，已按契约订正；**再订正（A-2，独立评审）**：下界由
+    /// `100` 抬到 `250`，对齐设计 §4.2.1 **约束 2**「`min_publish_interval_ms ≥ 250 ms`」——
+    /// 契约是唯一真源，设计 §4.9/§11.1 的 `[100, …]` 已就地标注「以契约 250 为准」。
+    /// ⚠️ **连带效果（如实登记）**：`min ≥ 250 ∧ min ≤ publish_ms` ⇒ `publish_ms < 250` 的现场 yaml
+    /// 会被**这条**拒绝（报 `min_publish_interval_ms`）——主拍**实际**须 ≥250）；`alarm_poll_ms` / `interlock_poll_ms` /
     /// `device_poll_ms` 上界；`alarm_page_size != 0`；`log.live_ring >= 100`；
     /// `range.*` 须为有限正数（禁 NaN/±Inf/0/负数），且 `phase_power_max_kw <= total_power_max_kw`、
     /// `inconsistency_threshold_kw <= pcs_total_rated_kw`。原手写实现**只查地址**，这些一律放行
@@ -1158,13 +1165,15 @@ display:
     /// **重要-4 网**：转发的 `DisplayConfig::validate()` 是**全集**校验 ⇒ 原先"只查地址"时
     /// 一律放行的**非地址**不变量，现在**同样门禁 `mupcd` 启动**（fail-fast）。
     ///
-    /// 每条各取一个族代表：时延（`publish_ms`）、环容量（`log.live_ring`）、告警页
-    /// （`alarm_page_size`）、量程（`range.current_max_a`）、量程交叉
-    /// （`phase_power_max_kw > total_power_max_kw`）。**地址一律合法**（`127.0.0.1:9810/9811`），
-    /// 唯一非法项就是被测的那个字段 ⇒ 报错必须点名该键，排除"其实是被地址判死的"。
+    /// 每条各取一个族代表：时延（`publish_ms`，**下界 50 与上界 4001 两侧都取**，B3-2d）、
+    /// 环容量（`log.live_ring`）、告警页（`alarm_page_size`）、量程（`range.current_max_a`）、
+    /// 量程交叉（`phase_power_max_kw > total_power_max_kw`）。**地址一律合法**
+    /// （`127.0.0.1:9810/9811`），唯一非法项就是被测的那个字段 ⇒ 报错必须点名该键，
+    /// 排除"其实是被地址判死的"。
     ///
     /// **改什么会让本条变红**：把 `validate_display` 换成"只查地址"的实现（P0 修复前的写法）
-    /// ⇒ 下面 6 条断言里前 5 条的 `unwrap_err()` 全部 panic。
+    /// ⇒ 下面循环里 6 条断言的 `unwrap_err()` 全部 panic（B3-2d 新增 `publish_ms: 4001`
+    /// 一条后由 5 条增至 6 条）。
     #[test]
     fn display_non_address_invariants_now_gate_startup() {
         // 全部合规的基准（address 合法 + 各非地址不变量合规）
@@ -1193,6 +1202,13 @@ display:
 
         for (key, extra) in [
             ("display.publish_ms", "  publish_ms: 50"),
+            // **B3-2d**：同键的**上界**一侧（4001 > 契约 `MAX_PUBLISH_MS`）——转发网须同样门禁
+            // 启动。`min_publish_interval_ms` 同步抬到 4001 以免被合并窗口那条先拒（否则本行
+            // 就成了"其实是被 min 判死的"假绿）。
+            (
+                "display.publish_ms",
+                "  publish_ms: 4001\n  min_publish_interval_ms: 4001",
+            ),
             (
                 "display.log.live_ring",
                 "  log:\n    live_ring: 50",

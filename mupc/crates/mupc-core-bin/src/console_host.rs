@@ -33,11 +33,17 @@
 //!   三件都是**同一批既有件**），但 2–8 步的**编排外壳是第二份实现**
 //!   （`InterlockService::handle` 与配置写的 `ConfigService::apply` 各写一遍）——
 //!   **机制复用、编排未复用**。
-//!   ⚠️ **收口点**（登记给**单元 K**）：**第三条写管线出现前**，把 `ConfigService::apply` 与
+//!   ⚠️ **收口点（⚠️ 2026-09-18 改挂 U 号，见 `docs/technical-debt.md` U-46）**：
+//!   **第三条写管线出现前**，把 `ConfigService::apply` 与
 //!   `InterlockService::handle` 各自复写的那段（步骤 2–8 步）编排骨架抽成**公共件**。
 //!   触发条件**绑定"第三条写管线"**——不绑行号 / 不绑门禁数 / 不绑时间：前两者会漂，后者可
 //!   无限推迟；"写管线条数"是这件事真正变质的点（第三条一到，"各写一遍"就从**两处冗余**变成
-//!   **系统性分叉**）；
+//!   **系统性分叉**）。
+//!   **为什么改挂 U 号（独立评审建议 4 的处置）**：原文写「登记给**单元 K**」，而 K 已收尾、
+//!   且其范围**不含**此事 ⇒ 这是一条**孤儿义务**（既没进 `docs/technical-debt.md`，指向的单元
+//!   也已关闭，等于无人持有）；且触发条件"第三条写管线出现"可能**永不触发**（届时连"该不该做"
+//!   都无人复核）。改挂 **U-46** 后：义务有**唯一文档落点**、可在技术债盘点时被周期性重估
+//!   （触发条件原文保留、不弱化——它是这件事真正变质的判据）；
 //! - `receipt::INTERLOCK_*`：两条端点**自己拼**的回执文案（用字约束同下）。
 //!
 //! ## 本单元的范围与**未做**的部分（如实登记）
@@ -692,10 +698,18 @@ async fn handle_interlock_op(
 /// 「诚实」在这里的含义：不返回空 DTO、不返回 200、也不假装 404（路径确实已登记）。
 /// 渲染端会把它归为 `ConsoleError::HttpStatus(501)` = 明确的通道失败（可见），
 /// 而不是"查询成功但没数据"（不可见、且会被误读为业务空态）。
+///
+/// ⚠️ **文案订正（独立评审建议 3，2026-09-18）**：原文写 `(G-1 scope: GET /v1/console/config)`
+/// —— 该括注**已过期**：`GET /v1/console/config` 在 G-2 就已实现，本单元 J 收尾后**8 条契约
+/// 端点全部有 handler** ⇒ 这句会把 501 的成因指向一个**根本不会返回 501** 的端点（误导排障）。
+/// 现在只说**成因**（"路由挂了但没有 handler"），不点具体端点：本 handler 的**唯一**用途是给
+/// 将来往 `console_router()` 里新增路由时兜底（生产不可达，见模块头的范围块）。
 async fn not_implemented() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
-        "console endpoint registered but not implemented yet (G-1 scope: GET /v1/console/config)",
+        "console endpoint registered but not implemented yet \
+         (route wired into the console router without a handler; \
+          all 8 contract endpoints of the v2.0 set are implemented)",
     )
         .into_response()
 }
