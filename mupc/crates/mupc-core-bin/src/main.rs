@@ -20,6 +20,7 @@ mod display_host;
 mod hot_apply;
 mod idempotency;
 mod interlock;
+mod interlock_ops;
 mod log_service;
 mod signal_handler;
 mod startup;

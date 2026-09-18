@@ -1,15 +1,18 @@
 //! 控制通道宿主（`127.0.0.1:9811`）——开发单元 **G-1：控制通道宿主 + 配置读路径**
-//! ＋ **G-2：配置写路径（`POST /v1/console/config/apply`）**。
+//! ＋ **G-2：配置写路径（`POST /v1/console/config/apply`）**
+//! ＋ **J：联锁写路径（`POST /v1/console/interlock/release` 与 `.../ack_m1`）**。
 //!
 //! 对应设计（`docs/superpowers/plans/modules/12-MUPC-本地显示终端-设计文档.md`）：
-//! - §3.3 控制通道：通用信封与管线（**G-1 落读、G-2 落写全 8 步**）；
-//! - §3.4 控制通道端点清单（8 条；已落 **6** 条：`GET /v1/console/config` + `POST /v1/console/config/apply`
+//! - §3.3 控制通道：通用信封与管线（**G-1 落读、G-2 落写全 8 步、J 复用同一套**）；
+//! - §3.4 控制通道端点清单（8 条；**全部落地**：`GET /v1/console/config` + `POST /v1/console/config/apply`
 //!   + 单元 H 的 `GET /v1/console/logs` 与 `GET /v1/console/logs/targets`
-//!   + **单元 I 的 `GET /v1/console/audit` 与 `GET /v1/console/audit/ops`**）；
+//!   + 单元 I 的 `GET /v1/console/audit` 与 `GET /v1/console/audit/ops`
+//!   + **单元 J 的 `POST /v1/console/interlock/release` 与 `POST /v1/console/interlock/ack_m1`**）；
 //! - §3.4 补注（2026-09-15）：**GET 返回裸 DTO、POST 走 `ControlResponse` 信封**；
 //!   **GET 失败一律非 2xx**（渲染端 `console.rs` 落 `Error::HttpStatus`，不解析错误体）；
-//!   **未实现的路由不得"假装成功"**（本模块对已登记但未实现的端点回 **501**，未知路径 **404**，
-//!   方法不符 **405**——三者在 `router()` 里由「路径 → 方法」注册表结构性保证，非纪律要求）；
+//!   **未实现的路由不得"假装成功"**（未知路径 **404**、方法不符 **405**，由 `router()` 里
+//!   「路径 → 方法」注册表结构性保证，非纪律要求。⚠️ **单元 J 起已无 501 端点**——
+//!   8 条契约端点全部实现；`not_implemented` 仅作**将来新增端点**的兜底保留）；
 //! - §4.3.2 `ConfigFieldMeta` 静态表 / §4.3.3 ApplyMode 分发表（字段集与 `requires_reconnect` 的真源）；
 //! - §4.9 启动装配（10.2 控制通道，与读通道 9810 **并存不冲突**：不同端口、不同 listener）。
 //!
@@ -20,11 +23,26 @@
 //! - [`ConfigFieldMeta::set`] / [`set_field`]：字段表的**写侧**（读侧是 `current`）——
 //!   读写共用一张表 ⇒ 不存在"屏上能改的键"与"装置里能写的键"两张清单。
 //!
+//! ## 单元 J（联锁写）在本文件的落点
+//!
+//! - [`InterlockOpsSource`]：联锁写路径的装配状态（三态，**互不替代**，见其文档）；
+//! - [`post_interlock_release`] / [`post_interlock_ack_m1`]：两条 POST handler，实体在
+//!   [`crate::interlock_ops::InterlockService::handle`]。**如实口径（单元 J 第二轮整改建议 1
+//!   订正，改前写的是"未另造一套"——与事实有出入）**：复用同一套**机制**（信封校验
+//!   `ControlRequest::validate_for` / 幂等表 `IdempotencyTable` / 审计 fail-closed 口径，
+//!   三件都是**同一批既有件**），但 2–8 步的**编排外壳是第二份实现**
+//!   （`InterlockService::handle` 与配置写的 `ConfigService::apply` 各写一遍）——
+//!   **机制复用、编排未复用**。
+//!   ⚠️ **收口点**（登记给**单元 K**）：**第三条写管线出现前**，把 `ConfigService::apply` 与
+//!   `InterlockService::handle` 各自复写的那段（步骤 2–8 步）编排骨架抽成**公共件**。
+//!   触发条件**绑定"第三条写管线"**——不绑行号 / 不绑门禁数 / 不绑时间：前两者会漂，后者可
+//!   无限推迟；"写管线条数"是这件事真正变质的点（第三条一到，"各写一遍"就从**两处冗余**变成
+//!   **系统性分叉**）；
+//! - `receipt::INTERLOCK_*`：两条端点**自己拼**的回执文案（用字约束同下）。
+//!
 //! ## 本单元的范围与**未做**的部分（如实登记）
 //!
-//! - 其余 **2** 条端点（`interlock/release` / `interlock/ack_m1`）**已登记路由但返回 501**——
-//!   它们的 `InterlockOps` 属**后续单元 J**。路由**不隐藏**：屏上对未实现端点的请求会得到明确的
-//!   501（渲染端 → `HttpStatus(501)` 失败提示），而不是被静默当成"服务不可用"或"空数据"。
+//! - 8 条契约端点**全部实现**（501 兜底 handler 保留给"将来新增端点"，当前生产不可达）。
 //! - **写路径的"生效"只到位一部分**（⚠️ 计数口径，评审重要 5 已更正）：字段表 `FIELDS` 共
 //!   **9** 键，其中 `editable=true` 的**可写字段 7 个**；这 7 个里 **1 个真热生效**
 //!   （`system.log_level`，`tracing_subscriber::reload`），**其余 6 个**（`intercore.*` 4 +
@@ -121,7 +139,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use mupc_display_proto::{
     ConfigField, ConfigGroup, ConfigKind, ConfigPatch, ConfigView, ConsoleEndpoint, ControlCode,
-    ControlRequest, ControlResponse, FieldError, OptionItem, WriteMode,
+    ControlRequest, ControlResponse, FieldError, InterlockOpAck, InterlockOpPayload, OptionItem,
+    WriteMode,
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -162,7 +181,7 @@ pub enum ApplySource {
     /// [`receipt::WRITE_PATH_UNAVAILABLE`]，见 `receipt` 模块头的用字约束）。**一切写请求都会被拒**。
     ///
     /// 回执 `code` 取 [`ControlCode::AuditUnavailable`]（评审建议 6.1 的口径统一）：装配侧
-    /// 产生本态的唯一成因是"审计 sink 建不起来"（`startup::console_apply_source`）⇒ 让屏上
+    /// 产生本态的唯一成因是"审计 sink 建不起来"（`startup::console_write_paths` 的 `Err` 分支）⇒ 让屏上
     /// 落到 EDGE-18 的固定文案，而不是通用"操作失败"。
     Unavailable(&'static str),
 }
@@ -181,8 +200,35 @@ pub enum LogSource {
     Unavailable(&'static str),
 }
 
-/// 宿主依赖（设计 §4.9 `ConsoleDeps` 的可落子集；其余字段（`interlock` / `apply_registry`）
-/// 随后续单元引入）。
+/// **联锁写路径**的装配状态（单元 J；设计 §3.3 的「装配侧不可用态」口径）。
+///
+/// 三态**互不替代**（每一条都对应屏上一个**不同**的态）：
+///
+/// | 态 | 事实 | 回执 |
+/// |----|------|------|
+/// | [`Ready`](Self::Ready)（后端 `Some`） | 控制器已装配 ⇒ 正常走管线 | 见 `interlock_ops` |
+/// | [`Ready`](Self::Ready)（后端 `None`） | `io.enabled=false`：**功能未启用**（已知状态） | `Unavailable` + 「联锁功能未启用」 |
+/// | [`AuditUnavailable`](Self::AuditUnavailable) | 审计 sink 建不起来（**唯一**成因，与 [`ApplySource::Unavailable`] 同源） | `AuditUnavailable` + **不执行**（fail-closed） |
+///
+/// ⚠️ **为什么"未启用"也在 `Ready` 里而不是第三个变体**：`io.enabled=false` 时后端是
+/// `None`，而**审计仍然可用** ⇒ 该次尝试照样要留痕（PL-1：成功与失败均留痕）。
+/// 把它做成 `Unavailable` 变体就会丢掉这条痕，也会把"功能没开"与"审计坏了"混成一个态。
+// 单元 J 第一轮整改（N1）：此处**不**再挂 `#[allow(dead_code)]` —— 旧注释"由单测构造"与
+// 事实相反：`AuditUnavailable` **生产会构造**（`startup::console_write_paths` 的 `Err` 分支：
+// 审计 sink 建不起来时**两条写路径**（配置写 + 联锁写）整体不可用，fail-closed），与单测无关。
+// （第二轮整改 I-4 订正：上一版此处引用的 `startup::console_sources_from_audit_dir` **全仓
+// 不存在**——正是这条注释要订正的那类假前提，故改为真实符号名。）
+#[derive(Clone)]
+pub enum InterlockOpsSource {
+    /// 写路径就绪（后端可为 `None` = 未启用；审计 sink 已就绪）。
+    Ready(Arc<crate::interlock_ops::InterlockService>),
+    /// 写路径不可用（**唯一**成因 = 审计 sink 建不起来）⇒ 一切写请求被拒且**不执行**。
+    /// 原因串**如实**进 `tracing`；回执 `message` 取固定串 [`receipt::AUDIT_UNAVAILABLE`]。
+    /// **生产可达**（`startup` 的 `Err` 分支构造），非"仅单测构造"。
+    AuditUnavailable(&'static str),
+}
+
+/// 宿主依赖（设计 §4.9 `ConsoleDeps` 的可落子集；其余字段（`apply_registry`）随后续单元引入）。
 #[derive(Clone)]
 pub struct ConsoleDeps {
     /// 配置读源。
@@ -191,6 +237,8 @@ pub struct ConsoleDeps {
     pub apply: ApplySource,
     /// 日志源（单元 H）。
     pub logs: LogSource,
+    /// 联锁写源（单元 J）。
+    pub interlock: InterlockOpsSource,
     /// 审计查询服务（单元 I）。
     ///
     /// ⚠️ **有意**不学 [`ConfigSource`] / [`LogSource`] 做成 `Ready`/`Unavailable` 枚举：
@@ -232,9 +280,12 @@ impl ConsoleHost {
     /// 路由表（**唯一真源 = `ConsoleEndpoint::ALL`**，不手抄路径串，杜绝路由漂移）。
     ///
     /// 三条诚实性保证由 axum 的 `MethodRouter` 结构性给出：
-    /// - 路径**已登记**且方法相符 → 走 handler（本单元：`config` 200 / 其余 501）；
+    /// - 路径**已登记**且方法相符 → 走 handler（8 条契约端点**全部已实现**）；
     /// - 路径已登记但**方法不符** → **405**（如 `POST /v1/console/config`）；
     /// - 路径**未登记** → **404**。
+    ///
+    /// ⚠️ 两条 `not_implemented` 兜底臂（GET / POST 各一条）保留给**将来新增**的契约端点：
+    /// 届时它会回 **501**（而不是 404 或假成功），直到对应 handler 落地。
     pub fn router(&self) -> Router {
         let mut router = Router::new();
         for ep in ConsoleEndpoint::ALL {
@@ -269,6 +320,19 @@ impl ConsoleHost {
                 {
                     router.route(path, axum::routing::post(post_config_apply))
                 }
+                // 单元 J：联锁两条写端点（设计 §3.4 / §4.6）。两条**各自成臂**（不合并成一个
+                // 带路径参数的 handler）：`op` 校验要拿到**端点**，而端点由「路径 → 端点」这
+                // 张表唯一决定 ⇒ 让 axum 的路由做这件事，handler 不再自己解析路径串。
+                mupc_display_proto::ConsoleMethod::Post
+                    if ep == ConsoleEndpoint::InterlockRelease =>
+                {
+                    router.route(path, axum::routing::post(post_interlock_release))
+                }
+                mupc_display_proto::ConsoleMethod::Post
+                    if ep == ConsoleEndpoint::InterlockAckM1 =>
+                {
+                    router.route(path, axum::routing::post(post_interlock_ack_m1))
+                }
                 mupc_display_proto::ConsoleMethod::Post => {
                     router.route(path, axum::routing::post(not_implemented))
                 }
@@ -279,6 +343,7 @@ impl ConsoleHost {
             apply: self.deps.apply.clone(),
             logs: self.deps.logs.clone(),
             audit: self.deps.audit.clone(),
+            interlock: self.deps.interlock.clone(),
         })
     }
 
@@ -305,7 +370,7 @@ impl ConsoleHost {
             ));
         }
         tracing::info!(
-            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；已实现 GET {} / {} / {} / {} / {} 与 POST {}，其余 2 条端点 501）",
+            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；8 条契约端点全部实现：GET {} / {} / {} / {} / {} + POST {} / {} / {}）",
             addr,
             ConsoleEndpoint::Config.path(),
             ConsoleEndpoint::Config.path(),
@@ -313,7 +378,9 @@ impl ConsoleHost {
             ConsoleEndpoint::LogsTargets.path(),
             ConsoleEndpoint::Audit.path(),
             ConsoleEndpoint::AuditOps.path(),
-            ConsoleEndpoint::ConfigApply.path()
+            ConsoleEndpoint::ConfigApply.path(),
+            ConsoleEndpoint::InterlockRelease.path(),
+            ConsoleEndpoint::InterlockAckM1.path()
         );
         axum::serve(listener, self.router()).await
     }
@@ -326,6 +393,7 @@ struct HostState {
     apply: ApplySource,
     logs: LogSource,
     audit: Arc<crate::console_audit::ConsoleAuditService>,
+    interlock: InterlockOpsSource,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -494,7 +562,7 @@ async fn post_config_apply(State(st): State<HostState>, body: Bytes) -> Response
             ApplySource::Ready(_) => unreachable!(),
         };
         // **口径统一为 `AuditUnavailable`**（评审建议 6.1）：装配侧**唯一**的 `Unavailable`
-        // 成因就是"审计 sink 建不起来"（`startup::console_apply_source` 的 Err 分支）⇒
+        // 成因就是"审计 sink 建不起来"（`startup::console_write_paths` 的 Err 分支）⇒
         // 它**本来就是**审计不可用。修复前这里回 `ControlCode::Unavailable`，而屏上 EDGE-18
         // 的**固定文案**「审计不可用，操作未执行」只绑 `AuditUnavailable`
         // （`p2_config.rs:1854`）⇒ 同一件事在两侧各叫一个名字，屏上落到通用"操作失败"，
@@ -543,6 +611,80 @@ async fn post_config_apply(State(st): State<HostState>, body: Bytes) -> Response
     };
 
     Json(svc.apply(&req).await).into_response()
+}
+
+/// `POST /v1/console/interlock/release` → **`ControlResponse<InterlockOpAck>` 信封**。
+///
+/// 与 [`post_config_apply`] **同一条口径**（见模块头「POST 的错误通道」）：
+///
+/// | 结局 | HTTP | body |
+/// |------|------|------|
+/// | 管线跑完（成功 / 一切业务拒绝 / `Busy` / 审计不可用 / 未启用） | **200** | `ControlResponse`（`ok` 由 `code` 决定） |
+/// | body 不是合法信封（JSON 语法错 / 缺字段 / `op` 是别的端点） | **200** | `ControlResponse{code: RejectedValidation, ok: false}` + message |
+///
+/// **没有第三种**：即便写路径整体不可用（审计建不起来）也回 200 + `AuditUnavailable` 信封——
+/// 非 2xx 会让渲染端落 `Error::HttpStatus`（**丢掉具体原因**，EDGE-12 / EDGE-18 落空）。
+async fn post_interlock_release(State(st): State<HostState>, body: Bytes) -> Response {
+    handle_interlock_op(st, ConsoleEndpoint::InterlockRelease, body).await
+}
+
+/// `POST /v1/console/interlock/ack_m1` → 同上（`op` = `ack_m1`）。
+async fn post_interlock_ack_m1(State(st): State<HostState>, body: Bytes) -> Response {
+    handle_interlock_op(st, ConsoleEndpoint::InterlockAckM1, body).await
+}
+
+/// 两条联锁写端点的**共用实体**（差异只有 `ep`；分派 / 审计 `target` / `op` 名全在
+/// [`crate::interlock_ops::InterlockService`] 内按 `ep` 查表，**不在此处复述**）。
+async fn handle_interlock_op(
+    st: HostState,
+    ep: ConsoleEndpoint,
+    body: Bytes,
+) -> Response {
+    let now = now_ms();
+    let svc = match &st.interlock {
+        InterlockOpsSource::Ready(svc) => svc,
+        InterlockOpsSource::AuditUnavailable(reason) => {
+            // 与 `post_config_apply` 的装配侧不可用**完全同款**：审计是唯一操作凭据（T-3）
+            // ⇒ 不执行、回 `AuditUnavailable`，让屏上落到 EDGE-18 的既有固定文案。
+            // 原因串（外部装配错误串，含 cmap 外的字）**只进** `tracing`，不进 `message`。
+            tracing::error!(reason, path = ep.path(),
+                "联锁写路径未装配（审计不可用）⇒ 回 AuditUnavailable 信封，操作未执行");
+            return Json(ControlResponse::<InterlockOpAck>::rejected(
+                "",
+                ControlCode::AuditUnavailable,
+                receipt::AUDIT_UNAVAILABLE,
+                Vec::new(),
+                None,
+                now,
+            ))
+            .into_response();
+        }
+    };
+
+    // 信封解析（语义校验在 `InterlockService::handle` 里；与 G-2 同款：解析失败也回**信封**）
+    let req: ControlRequest<InterlockOpPayload> = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            // `request_id` 不可知 ⇒ 回空串（不编一个 uuid）；`serde_json` 的错误串是英文 +
+            // 位置偏移（必然含 cmap 外的字）⇒ 只进 `field_errors[0].reason` + `warn`。
+            tracing::warn!(path = ep.path(), error = %e,
+                "POST 体不是合法的控制信封（JSON 解析失败）");
+            return Json(ControlResponse::<InterlockOpAck>::rejected(
+                "",
+                ControlCode::RejectedValidation,
+                receipt::BAD_ENVELOPE,
+                vec![FieldError {
+                    field: "request".to_string(),
+                    reason: e.to_string(),
+                }],
+                None,
+                now,
+            ))
+            .into_response();
+        }
+    };
+
+    Json(svc.handle(ep, &req).await).into_response()
 }
 
 /// 已登记但本单元未实现的端点 ⇒ **501 Not Implemented**。
@@ -606,6 +748,40 @@ pub const GROUPS: [(&str, &str); 4] = [
 ///    屏上点名一律用 [`ConfigFieldMeta::label`]，见 `config_service::restart_labels`。
 /// c. 外部错误串（`serde_yaml` / `std::io` / 契约 `ControlEnvelopeError` 的**全小写英文**）
 ///    一律**不进** `message` ⇒ 详情走审计 `reason` + `tracing`。
+///
+/// # ⚠️ 已登记的硬门禁：字体码表 + 文案统一收口批（P4 真机验收前必须完成）
+///
+/// **PM 裁定（单元 J 第一轮整改，2026-09）**：单元 J **保留逐字实现**（不因字库缺口改写契约 /
+/// 设计原文——改写即改语义），字库批**独立排期**；但该批被登记为 **P4 真机验收的硬门禁**：
+/// 未完成前 P4 不得通过真机验收（真机上必然出现豆腐块）。
+///
+/// **批的内容（范围已裁定）**：
+/// 1. **扩字库**：在生成字体的码表里补齐本模块 + `interlock_ops` 回执文案所缺的字形——
+///    **范围以 [`PINNED_MISSING`]（下面的钉死表）的并集为准**，当前并集 **23 个码位**：
+///    **11 个 ASCII**（`,` `a` `c` `d` `e` `i` `l` `o` `p` `r` `t`）+ **4 个全角**
+///    （`，`(U+FF0C) `（`/`）`(U+FF08/FF09) `：`(U+FF1A)）+ **8 个 CJK**
+///    （`候` `理` `稍` `丢` `句` `柄` `误` `错`）。
+///    ⚠️ **上面这三个计数是手抄的**，与 [`PINNED_MISSING`] **无机械约束**，表一变则本处可能
+///    **静默过期**；**以表为准**（改表时须同步本处）。
+///    ⚠️ **ASCII 那一档不是样本产物**：`latch` 的 `l`/`c`、`io` 的 `i`/`o` 出自**固定文案**
+///    （`处于 latch 态` / `内部错误：io 句柄丢失`）⇒ 必然缺、必然出豆腐块 ⇒ 只扩 "CJK / 全角"
+///    会让这两串**仍留豆腐块**（该批作为 P4 硬门禁会验收不通过）。
+///    补齐后同步重生成 `lv_font_cmap.txt`（10 档字号合计约 **+5–15 KB**，见 PM 裁定的体量估算）。
+/// 2. **文案统一收口**：字库补齐后，把本模块与 `interlock_ops` 里**因缺字而绕开**的措辞
+///    （`p4_interlock` IL1/IL2 列的 `×` 代 `✗`、`内部故障` 代 `内部错误`、`操作进行中` 代
+///    `上一操作正在处理中` 等同族处置）**统一回原文**（渲染端与后端同批改，避免两侧再分叉）。
+///
+/// **为什么现在不改**：本批牵动 10 档字号的字体二进制 + 渲染端多处文案，与单元 J 的联锁写
+/// 路径**无耦合**；混做会让 J 的评审面被字体二进制污染。**该批独立走评审**。
+///
+/// # 登记：测试专用尺子（`#[allow(dead_code)]`，只被网消费）
+///
+/// 下列符号**无生产调用方**（只被单测 / 诚实性网当"尺子"用），故挂 `#[allow(dead_code)]`。
+/// 现状可接受；此处**集中登记**，供后续收口（P4 收口批 / 单元 K 删除面）一次性处置：
+/// - [`receipt::ALL`]（本文件）——回执文案清单（网的构造性半边）；
+/// - `interlock_ops::InterlockService::target_of`——审计 `target` 映射（渲染端 `INTERLOCK_TARGETS`
+///   按同一组值转标签）；
+/// - `interlock_ops::reject_messages`——契约 `InterlockReject::user_message()` 全量（用字网）。
 pub(crate) mod receipt {
     /// 成功保存（**热生效**路径：无「需重启」子句）。
     pub(crate) const SAVED: &str = "配置已保存";
@@ -615,7 +791,21 @@ pub(crate) mod receipt {
     pub(crate) const NO_CHANGE: &str = "无字段变化 · 未保存";
     /// 逐字段校验失败 ⇒ **一条都不执行**（EDGE-10 不得半生效）。
     pub(crate) const VALIDATION_FAILED: &str = "配置未保存 · 字段取值无效";
-    /// 同一 `request_id` 仍在处理中（幂等占位未释放）。
+    /// **管线级**幂等命中：同一 `request_id` 仍在处理中（幂等占位未释放）⇒ `ControlCode::Busy`。
+    ///
+    /// ⚠️ **已登记（单元 J 第一轮整改 I3，J 不改）**：本串与**控制器操作闸**的
+    /// `InterlockReject::Busy`（契约文案「上一操作正在处理中，请稍候」，渲染端 `p4_interlock`
+    /// 又因缺字形折叠成「操作进行中」，落 `ControlCode::RejectedPrecondition`）是
+    /// **两条不同文案、两个不同 `code`**：
+    /// - 本条 = **管线级**「这次重复下发已挡下」（结果未知、请重试）；
+    /// - 那条 = **控制器级**「闸被占，本次没排队」（上一次操作的结果与本次无关）。
+    ///
+    /// ⇒ 屏上"幂等语义"（"我这次是不是被去重了"）**不可区分**。属登记项，J 不制造新口径。
+    ///
+    /// ⚠️ **同处登记（单元 J 第二轮整改建议 3，与上面那条同处）**：本串对应的
+    /// `Reserve::InFlight` 臂**不写审计**（`audit_id = None`，直接返回）——与 PL-1 字面
+    /// 「成功与失败均留痕」有一处**字面缺口**。完整口径与理由见 `interlock_ops::InterlockService::handle`
+    /// 里该臂上的登记。
     pub(crate) const BUSY: &str = "正在执行 · 未重复下发 · 请重试";
     /// 信封非法（空 `request_id` / `op` 误路由 / 超出 ±30 s 重放窗）⇒ 原因串**不进 message**。
     pub(crate) const BAD_ENVELOPE: &str = "控制报文无效";
@@ -646,14 +836,57 @@ pub(crate) mod receipt {
     pub(crate) const WRITE_PATH_UNAVAILABLE: &str = "配置保存不可用";
     /// 审计不可写（`AuditUnavailable` 信封）。同 [`WRITE_PATH_UNAVAILABLE`]：**不进屏**，
     /// 屏上取渲染端 EDGE-18 固定串（两串**同义不同源**，由 `code` 决定取哪条 ⇒ 漂移无上屏后果）。
+    ///
+    /// # 登记：**跨 crate 同串约束**（单元 J 第二轮整改建议 4）
+    ///
+    /// 这一句在本仓是**同一句话**，落在**两处字面量**上：
+    /// - 本处（服务端回执）；
+    /// - `local-display/src/ui/pages/p2_config.rs::TEXT_AUDIT_UNAVAILABLE`（渲染端）。
+    ///
+    /// 渲染端的其余落点**都不是第三份字面量**，而是**引用**上面两处之一：
+    /// `local-display/src/ui/pages/p4_interlock.rs::TEXT_AUDIT_UNAVAILABLE` 直接
+    /// `= p2_config::TEXT_AUDIT_UNAVAILABLE`
+    /// （别名，无漂移面）、`state.rs`（EDGE-18 的 `code → 文案` 覆盖与若干断言）import 同一常量；
+    /// 另有**散文引用**（`p4_interlock.rs` 的 IL1 表、`state.rs` 的模块头、`ui/tests.rs`）——
+    /// 那几处**是**会漂移的（改串时不会编译报错），故在此点名。
+    ///
+    /// ⇒ **约束：改动本串必须同时改渲染端那一份（含散文引用）**。"两处不同源"是**有意**的
+    /// （渲染端按 `code` 取自己的固定串，不取服务端 `message`）；但若两处**取值**也漂了，
+    /// 同一件事在屏上与日志里就是两种写法。
     pub(crate) const AUDIT_UNAVAILABLE: &str = "审计不可用 · 操作未执行";
     /// 未知字段（字段表查不到 key 时的兜底标签；`restart_labels` 的输入来自 [`FIELDS`] ⇒ 不可达）。
     pub(crate) const UNKNOWN_FIELD: &str = "未知字段";
 
+    // ── 单元 J：联锁两条写端点的回执文案 ──────────────────────────────────────────────
+
+    /// 联锁功能未启用（`io.enabled=false`）⇒ `ControlCode::Unavailable`。
+    ///
+    /// **与**「联锁状态不可用」（读路径 `available=false`，`p4_interlock` 的
+    /// `TEXT_STATE_UNAVAILABLE`）**不是一回事**：这一条是**正面事实**「功能没开」
+    /// （设计 §4.2 表 C 的三分支口径），不得互替（IL-01.6 同族）。
+    pub(crate) const INTERLOCK_NOT_ENABLED: &str = "联锁功能未启用";
+
+    /// EDGE-19：提交时联锁态已变化（乐观并发检查不符）。
+    ///
+    /// ⚠️ **逐字取设计原文**（设计 §3.4 补注「`observed_*` 的作用」/ §9 EDGE-19 行 /
+    /// `display-proto/src/interlock.rs` 的 `InterlockOpPayload` 文档），**不自行改写**：
+    /// 渲染端 `control_route.rs` 已明确「真·状态变化时服务端返回的 `message` **就是**这句」
+    /// （客户端**不按 `code` 猜语义**）。
+    ///
+    /// ⚠️ **该串含生成字体 cmap 外的 `，`(U+FF0C)** ⇒ 真机上是**已知缺口**，由
+    /// `interlock_receipt_messages_use_only_font_cmap_glyphs` 的**钉死表**兜底登记
+    /// （**不得**加入 [`ALL`]——那份清单是"逐字 ⊆ cmap"的硬约束）。
+    pub(crate) const INTERLOCK_CONFLICT: &str = "联锁状态已变化，请刷新后重试";
+
     /// **全部**回执文案（网的构造性半边：这条清单里每一个字符都必须 ⊆ cmap）。
     ///
     /// 新增文案时**必须**加进来 —— 漏加不会被 `receipt` 的其它用例发现（这正是本清单存在的理由）。
-    #[allow(dead_code)] // 只被 `console_host` 的回执用字网消费（与同文件其它"测试用的尺子"同款）
+    /// **例外**：`INTERLOCK_CONFLICT`（逐字取契约 / 设计原文，原文含缺字）不进本清单，改由
+    /// `interlock_receipt_messages_use_only_font_cmap_glyphs` 的**钉死表**逐字登记。
+    // 只被 `console_host` 的回执用字网消费（与同文件其它"测试用的尺子"同款）。
+    // 单元 J 第一轮整改（N2）：已集中登记（见本模块头「登记：测试专用尺子」小节），
+    // 现状可接受、不扩大改动面。
+    #[allow(dead_code)]
     pub(crate) const ALL: &[&str] = &[
         SAVED,
         RESTART_PREFIX,
@@ -670,6 +903,8 @@ pub(crate) mod receipt {
         WRITE_PATH_UNAVAILABLE,
         AUDIT_UNAVAILABLE,
         UNKNOWN_FIELD,
+        // 单元 J（联锁两条写的回执文案；`INTERLOCK_CONFLICT` 例外，见上）
+        INTERLOCK_NOT_ENABLED,
     ];
 }
 
@@ -1113,6 +1348,7 @@ mod tests {
             config,
             apply,
             LogSource::Unavailable("本用例不验日志源"),
+            interlock_unavailable(),
             audit_at("unused-audit-dir"),
         )
         .await
@@ -1126,6 +1362,7 @@ mod tests {
             ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             ApplySource::Unavailable("本用例不验写路径"),
             logs,
+            interlock_unavailable(),
             audit_at("unused-audit-dir"),
         )
         .await
@@ -1136,6 +1373,15 @@ mod tests {
         Arc::new(crate::console_audit::ConsoleAuditService::new(dir))
     }
 
+    /// 联锁写路径的"本用例不验"占位。
+    ///
+    /// ⚠️ 取 `AuditUnavailable` 而**不是**造一个"能成功"的桩：不验联锁的用例若拿到一个
+    /// 会执行的后端，就等于在用例里偷偷把"钉住某条读路径"变成"也钉住了写路径"（覆盖面
+    /// 失真）。需要联锁的用例用 [`spawn_interlock_host`] **显式**注入自己的源。
+    fn interlock_unavailable() -> InterlockOpsSource {
+        InterlockOpsSource::AuditUnavailable("本用例不验联锁写路径")
+    }
+
     /// 同上，但注入审计服务（单元 I 用例）。
     async fn spawn_audit_host(
         audit: Arc<crate::console_audit::ConsoleAuditService>,
@@ -1144,9 +1390,48 @@ mod tests {
             ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             ApplySource::Unavailable("本用例不验写路径"),
             LogSource::Unavailable("本用例不验日志源"),
+            interlock_unavailable(),
             audit,
         )
         .await
+    }
+
+    /// 注入联锁写源（单元 J 用例；其余三源取"本用例不验"占位）。
+    async fn spawn_interlock_host(
+        interlock: InterlockOpsSource,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_host_full(
+            ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+            ApplySource::Unavailable("本用例不验配置写路径"),
+            LogSource::Unavailable("本用例不验日志源"),
+            interlock,
+            audit_at("unused-audit-dir"),
+        )
+        .await
+    }
+
+    /// 联锁写宿主 + **真实审计落点**（要读审计 JSONL 的用例用它）。
+    async fn spawn_interlock_host_audited(
+        backend: std::sync::Arc<crate::interlock_ops::testkit::FakeBackend>,
+        tag: &str,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>, crate::testutil::TempDir) {
+        let dir = crate::testutil::TempDir::new(tag);
+        let sink: Arc<dyn ConsoleAuditSink> = Arc::new(
+            crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"),
+        );
+        let b: Arc<dyn mupc_display_proto::InterlockApi> = backend;
+        let (addr, h) = spawn_host_full(
+            ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+            ApplySource::Unavailable("本用例不验配置写路径"),
+            LogSource::Unavailable("本用例不验日志源"),
+            InterlockOpsSource::Ready(Arc::new(crate::interlock_ops::InterlockService::new(
+                Some(b),
+                sink,
+            ))),
+            audit_at("unused-audit-dir"),
+        )
+        .await;
+        (addr, h, dir)
     }
 
     /// 全量注入版（四个源都在参数里 ⇒ 用例显式声明它验哪一条通道）。
@@ -1154,6 +1439,7 @@ mod tests {
         config: ConfigSource,
         apply: ApplySource,
         logs: LogSource,
+        interlock: InterlockOpsSource,
         audit: Arc<crate::console_audit::ConsoleAuditService>,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1162,6 +1448,7 @@ mod tests {
             config,
             apply,
             logs,
+            interlock,
             audit,
         });
         let h = tokio::spawn(async move {
@@ -1319,6 +1606,7 @@ mod tests {
             config: crate::startup::console_config_source(&assembly),
             apply: ApplySource::Unavailable("本用例只验读源同一性"),
             logs: LogSource::Unavailable("本用例只验读源同一性"),
+            interlock: interlock_unavailable(),
             audit: audit_at("unused-audit-dir"),
         });
         let got = match host.config_source() {
@@ -1397,26 +1685,39 @@ mod tests {
         h.abort();
     }
 
-    /// ①' 其余 **2** 条端点（G-1/G-2 的 config 读 + 写、单元 H 的 logs 两条、单元 I 的 audit 两条
-    /// 均已实现）：**逐条** 501，且**逐条**不能回 404
-    /// （404 = 路由没登记 = 屏上无法区分"服务没实现"与"服务根本没这个端点"）。
+    /// ①' **8 条契约端点全部落地**（单元 J 补齐联锁两条）⇒ 已无 501。
+    ///
+    /// 这条网取代 G-1 的 `every_registered_but_unimplemented_endpoint_is_honest_per_endpoint`
+    /// （那条断言的 501 是"G-1 阶段未实现"的事实，J 落地后**该事实已改变**）——**保留其精神**：
+    /// 契约端点清单（[`ConsoleEndpoint::ALL`]）里每一条都必须**已登记**（非 404）且
+    /// **不是** 501（"已登记但没实现"这个态**必须为空**）。
+    ///
+    /// ⚠️ 未实现时的诚实做法仍然是 501（`not_implemented` handler 保留），本用例只是钉住
+    /// "当前 **0** 条未实现"；将来加端点忘了实现，这里会红。
+    ///
+    /// # 单元 J 第一轮整改：**补上"响应形状"这一半**
+    ///
+    /// 评审实测：本用例改写成"只数 501 个数"后，把某端点改成**假装成功回 200**
+    /// （不执行却回 `ok=true`）⇒ **本用例仍绿**，原网守的「未实现不得回 2xx」**失去等价替代**。
+    /// 故在循环内逐条补了两层形状判据：
+    /// - **写端点**：2xx + 可解析的 `ControlResponse` 信封 + `ok`/`code` 自洽 + **`!ok`**
+    ///   （本宿主未装配写路径 ⇒ 必然拒绝）；"假装成功"必然踩最后那条；
+    /// - **读端点**：非 2xx（如源未装配的 503）**或** 2xx + 可解析且**非空**的裸 DTO
+    ///   （不得用空体 / `null` / 空数组 / 空对象冒充成功）。
+    ///
+    /// ⚠️ **`code` 白名单（`LEGAL_CONTROL_CODES`）近恒真，不算形状判据**
+    /// （单元 J 第二轮整改建议 6 如实订正）：`r.code` 是 serde 反序列化出来的**契约枚举**⇒
+    /// 解析成功即**必然**是合法变体，白名单**不可能**失败；非法 `code` 串早在上面那条
+    /// "可解析"断言（`serde_json::from_str`）就已经红了。保留它只是为了在**契约新增变体**时
+    /// 提醒同步本表（下条注有说明），**不是**一条有牙的判据。
+    ///
+    /// `not_implemented` **本体**的诚实性另由
+    /// [`not_implemented_handler_is_a_bare_501_never_a_parseable_envelope`] **独立于本清单**钉住。
     #[tokio::test]
-    async fn every_registered_but_unimplemented_endpoint_is_honest_per_endpoint() {
+    async fn every_contract_endpoint_is_registered_and_none_is_left_unimplemented() {
         let (addr, h) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
-        let mut checked = 0;
+        let mut unimplemented = 0;
         for ep in ConsoleEndpoint::ALL {
-            // 已实现的六条不在"未实现"清单内
-            if matches!(
-                ep,
-                ConsoleEndpoint::Config
-                    | ConsoleEndpoint::ConfigApply
-                    | ConsoleEndpoint::Logs
-                    | ConsoleEndpoint::LogsTargets
-                    | ConsoleEndpoint::Audit
-                    | ConsoleEndpoint::AuditOps
-            ) {
-                continue;
-            }
             let method = match ep.method() {
                 mupc_display_proto::ConsoleMethod::Get => "GET",
                 mupc_display_proto::ConsoleMethod::Post => "POST",
@@ -1424,12 +1725,160 @@ mod tests {
             let body = (method == "POST").then_some("{}");
             let (status, resp) = http(addr, method, ep.path(), body).await;
             assert_ne!(status, 404, "`{}` 已登记，不得回 404（{resp}）", ep.path());
-            assert!(!(200..300).contains(&status), "`{}` 未实现却回 {status}", ep.path());
-            assert_eq!(status, 501, "`{}` 未实现须 501，实际 {status}", ep.path());
-            checked += 1;
+            if status == 501 {
+                unimplemented += 1;
+            }
+
+            // ── **响应形状**必须与端点性质匹配（单元 J 第一轮整改新增）─────────────────
+            // 评审实测的漏洞：旧网只数"501 个数"，把某端点改成**假装成功回 200**
+            // （不执行却回 `ok=true`）⇒ 旧网**仍绿**。下面按端点性质断言**形状**，
+            // "假装成功"必然在其中一条上变红（破坏性验证见交付说明）。
+            match ep.method() {
+                mupc_display_proto::ConsoleMethod::Post => {
+                    // 写端点：**必须**是 2xx + 可解析的 `ControlResponse` 信封，且 `code` 合法。
+                    assert!(
+                        (200..300).contains(&status),
+                        "写端点 `{}` 必须回 2xx + 信封（POST 一律走信封，见模块头），实际 {status}: {resp}",
+                        ep.path()
+                    );
+                    let r: ControlResponse<Value> = serde_json::from_str(&resp).unwrap_or_else(|e| {
+                        panic!(
+                            "写端点 `{}` 的回 body 必须是可解析的 `ControlResponse`（渲染端同款路径）: {e}\n{resp}",
+                            ep.path()
+                        )
+                    });
+                    // ⚠️ 近恒真（见本用例文档的"建议 6"条）：解析成功即必为合法变体。留着只为
+                    // 契约新增变体时提醒同步白名单。
+                    assert!(
+                        LEGAL_CONTROL_CODES.contains(&r.code),
+                        "写端点 `{}` 的 `code` 必须是契约 `ControlCode` 的合法取值，实际 {:?}",
+                        ep.path(),
+                        r.code
+                    );
+                    assert_eq!(
+                        r.ok,
+                        r.code.is_ok(),
+                        "写端点 `{}` 的 `ok` 与 `code` 必须自洽（`ok=true` 只能配 `code=Ok`）",
+                        ep.path()
+                    );
+                    // **这是"假装成功"那一刀的正靶**（评审实测：旧网只数 501 个数 ⇒ 端点改成
+                    // 「不执行却回 `ok=true`」仍绿）。本宿主（`spawn_host`）**没有装配任何写路径**
+                    // （`ApplySource::Unavailable` + `InterlockOpsSource::AuditUnavailable`）
+                    // ⇒ 三条写端点**必然**是拒绝信封。若有人把某条改成假成功，**这里必红**。
+                    // （若将来给 `spawn_host` 接上真写路径，本断言会红 ⇒ 那是**前提变更**的信号，
+                    //  应改用带真源的宿主而不是删掉这条断言。）
+                    assert!(
+                        !r.ok,
+                        "本宿主未装配任何写路径 ⇒ 写端点 `{}` **不得**回 `ok=true`；\
+                         回了就是「未执行却声称成功」（诚实性网的正靶）: {resp}",
+                        ep.path()
+                    );
+                }
+                mupc_display_proto::ConsoleMethod::Get => {
+                    // 读端点：**要么非 2xx**（如源未装配的 503），**要么 2xx + 可解析且非空**的
+                    // 裸 DTO（不得用空体 / `null` / 空数组 / 空对象冒充成功——那与"查询成功但没
+                    // 数据"不可区分，正是诚实性网要挡的形态）。
+                    if (200..300).contains(&status) {
+                        let v: Value = serde_json::from_str(&resp).unwrap_or_else(|e| {
+                            panic!(
+                                "读端点 `{}` 回 2xx 时 body 必须是可解析的裸 DTO（渲染端同款路径）: {e}\n{resp}",
+                                ep.path()
+                            )
+                        });
+                        let empty_like = match &v {
+                            Value::Null => true,
+                            Value::Array(a) => a.is_empty(),
+                            Value::Object(o) => o.is_empty(),
+                            _ => false,
+                        };
+                        assert!(
+                            !empty_like,
+                            "读端点 `{}` 回 2xx ⇒ 不得用空体 / `null` / 空数组 / 空对象冒充成功: {resp}",
+                            ep.path()
+                        );
+                    }
+                }
+            }
         }
-        assert_eq!(checked, 2, "未实现端点应为 2 条（8 条契约端点 − 6 条已实现，余下两条属单元 J）");
+        assert_eq!(
+            unimplemented, 0,
+            "8 条契约端点（G-1/G-2 的 config 两条 + H 的 logs 两条 + I 的 audit 两条 + J 的联锁两条）应全部实现"
+        );
+        // **上一轮评审建议 7 的落点**（单元 J 第二轮整改登记）：[`ConsoleHost::router`] 的注说
+        // "唯一真源 = `ConsoleEndpoint::ALL`、不手抄路径串"；而下面这个 `8` 是**同一真源在计数上
+        // 的第二份拷贝**——它与 `ALL` 之间**无机械约束**（`ALL.len()` 本身不会红）。故此处置
+        // **显式标出手抄**：契约增端点时必须同步本常数，不同步这条断言就红，**那正是想要的信号**。
+        assert_eq!(
+            ConsoleEndpoint::ALL.len(),
+            8,
+            "契约端点总数（**手抄**：真源是契约 `ConsoleEndpoint::ALL`；契约增端点时必须同步本常数，\
+             否则这条断言会红——那正是想要的信号）"
+        );
         h.abort();
+    }
+
+    /// 契约 `ControlCode` 的**全部合法取值**（白名单写在这里 ⇒ 新增变体时本表须同步，
+    /// 否则下面的端点形状网会因"新 code 不在表内"而红，**这正是想要的**）。
+    const LEGAL_CONTROL_CODES: &[ControlCode] = &[
+        ControlCode::Ok,
+        ControlCode::RejectedPrecondition,
+        ControlCode::RejectedValidation,
+        ControlCode::ApplyFailed,
+        ControlCode::AuditUnavailable,
+        ControlCode::Unavailable,
+        ControlCode::Busy,
+        ControlCode::Internal,
+    ];
+
+    /// ①''' **`not_implemented` handler 本体**的诚实性——**独立于端点清单**。
+    ///
+    /// # 为什么单独立这条网（单元 J 第一轮整改）
+    ///
+    /// G-1 的 `every_registered_but_unimplemented_endpoint_is_honest_per_endpoint` 被改写成
+    /// 「清单全登记 + 501 计数 == 0」之后，原网守的那句「**未实现不得回 2xx**」**失去了等价
+    /// 替代**：评审实测——把某端点改成**假装成功回 200**（不执行却回 `ok=true`）⇒ 改写后的用例
+    /// **仍绿**。本用例把"诚实"这条不变量**从端点清单里摘出来**，直接钉 handler 本体。
+    ///
+    /// **改什么会让本条变红**：把 `not_implemented` 改成回 2xx / 回可解析的信封或 DTO
+    /// （= 假装成功）/ 回空 body。
+    #[tokio::test]
+    async fn not_implemented_handler_is_a_bare_501_never_a_parseable_envelope() {
+        let resp = not_implemented().await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "未实现的诚实做法是 501（不得 200「假装成功」、也不得 404「假装没这条路径」）"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读 501 响应体");
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        assert!(
+            !text.trim().is_empty(),
+            "501 的 body 不得为空（空体 = 现场无从排障）"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&text).is_err(),
+            "501 的 body **不得**是可解析的 JSON：可解析 ⇒ 渲染端会当 DTO / 信封去解，\
+             「诚实 501」这条不变量就没了\n实得: {text}"
+        );
+        assert!(
+            serde_json::from_str::<ControlResponse<Value>>(&text).is_err(),
+            "501 的 body 尤其**不得**是一个可解析的 `ControlResponse` 信封（= 假装成功）\n实得: {text}"
+        );
+
+        // **负对照（证明上面两条"不可解析"的断言有鉴别力）**：同一个探针在一个真信封上必须
+        // 判出"可解析"、在一个真 DTO 上同理 ⇒ 上面判"不可解析"才是有效结论，而非恒真断言。
+        let envelope = ControlResponse::<Value>::ok("rid-neg-ctrl", None, None, 0);
+        let env_text = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            serde_json::from_str::<ControlResponse<Value>>(&env_text).is_ok(),
+            "负对照失效：真信封都解不出来 ⇒ 上面那条断言是恒真的"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&env_text).is_ok(),
+            "负对照失效：真信封不是合法 JSON ⇒ 上面那条断言是恒真的"
+        );
     }
 
     /// ② 配置源不可用 ⇒ **非 2xx**（不得用 200 + "空视图"冒充成功）。
@@ -1457,6 +1906,7 @@ mod tests {
             config: ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             apply: ApplySource::Unavailable("本用例只验回环裁决"),
             logs: LogSource::Unavailable("本用例只验回环裁决"),
+            interlock: interlock_unavailable(),
             audit: audit_at("unused-audit-dir"),
         });
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -2978,5 +3428,549 @@ gateway:
         let page: mupc_display_proto::AuditPage = serde_json::from_str(&b).unwrap();
         assert!(page.available && page.entries.is_empty(), "空目录 + 合法筛选 = 空态");
         h.abort();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 单元 J：联锁两条写端点（渲染端同款线协议）
+    // ═══════════════════════════════════════════════════════════════════════
+
+    use crate::interlock_ops::testkit::{
+        payload_of, view_latched, view_unlatched, FakeBackend,
+    };
+    use mupc_display_proto::{InterlockOpAck, InterlockOpPayload, InterlockReject};
+
+    /// 发一次联锁写请求（渲染端 `ConsoleClient::begin_write` 同款线格式）。
+    async fn post_interlock(
+        addr: SocketAddr,
+        ep: ConsoleEndpoint,
+        request_id: &str,
+        payload: &InterlockOpPayload,
+    ) -> (u16, ControlResponse<InterlockOpAck>) {
+        let body = serde_json::json!({
+            "request_id": request_id,
+            "issued_at_ms": now_ms(),
+            "op": ep.op_name().unwrap(),
+            "payload": payload,
+        })
+        .to_string();
+        let (status, resp) = http(addr, "POST", ep.path(), Some(&body)).await;
+        let parsed = serde_json::from_str::<ControlResponse<InterlockOpAck>>(&resp)
+            .unwrap_or_else(|e| panic!("回执必须是合法信封（渲染端同款路径）: {e}\n{resp}"));
+        (status, parsed)
+    }
+
+    /// ① 成功路径（释放）**端到端**：线协议 200 + 信封 → `applied` 是操作后状态 →
+    /// 审计 JSONL 里留痕（操作类型 / 目标 / 前后值 / 结果 / request_id）。
+    #[tokio::test]
+    async fn interlock_release_over_the_wire_applies_and_leaves_an_audit_entry() {
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        b.flip_latched_on_write();
+        let (addr, h, dir) = spawn_interlock_host_audited(b.clone(), "j-release").await;
+
+        let (status, resp) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-rel",
+            &payload_of(&view_latched()),
+        )
+        .await;
+        assert_eq!(status, 200, "写端点的结局一律走信封（HTTP 200）");
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(resp.code, ControlCode::Ok);
+        let ack = resp.applied.expect("成功必须带 applied（UI 立即刷屏）");
+        assert!(!ack.latched, "applied.latched 取操作后状态");
+        assert!(ack.stopped, "applied.stopped = 停机已确认");
+        assert!(resp.audit_id.is_some());
+        assert_eq!(b.release_calls(), 1);
+
+        let entries = crate::interlock_ops::testkit::read_entries(dir.path());
+        assert_eq!(entries.len(), 1, "一次成功 ⇒ 恰一条结果审计");
+        use mupc_display_proto::{AuditResult, ConsoleOp};
+        assert_eq!(entries[0].op, ConsoleOp::InterlockRelease);
+        assert_eq!(entries[0].target, "interlock.release");
+        assert_eq!(entries[0].result, AuditResult::Ok);
+        assert_eq!(entries[0].request_id, "rid-j-rel");
+        assert_eq!(entries[0].operator, mupc_display_proto::CONSOLE_OPERATOR);
+        // 前后值取 latch 态（审计页显「开 → 关」；见 `interlock_ops` 的取值口径说明）
+        assert_eq!(entries[0].before, Some(serde_json::json!(true)));
+        assert_eq!(entries[0].after, Some(serde_json::json!(false)));
+        h.abort();
+    }
+
+    /// ① 成功路径（M1 授权）：同一条管线，`op` / `target` 各自成臂。
+    #[tokio::test]
+    async fn interlock_ack_m1_over_the_wire_applies() {
+        let b = Arc::new(FakeBackend::new(view_unlatched()));
+        let (addr, h, dir) = spawn_interlock_host_audited(b.clone(), "j-ack").await;
+        let (status, resp) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockAckM1,
+            "rid-j-ack",
+            &payload_of(&view_unlatched()),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(resp.ok, "{resp:?}");
+        assert_eq!(b.ack_calls(), 1);
+        assert_eq!(b.release_calls(), 0);
+        let entries = crate::interlock_ops::testkit::read_entries(dir.path());
+        assert_eq!(entries[0].op, mupc_display_proto::ConsoleOp::InterlockAckM1);
+        assert_eq!(entries[0].target, "interlock.ack_m1");
+        h.abort();
+    }
+
+    /// ② **七个** `InterlockReject` 变体**逐个过线**：HTTP 200 + `RejectedPrecondition` +
+    /// `message` **逐字**等于契约 `user_message()`（EDGE-12 的上屏面）。
+    ///
+    /// 用后端桩注入拒绝（与真控制器在 `interlock.rs` 的逐路径用例互补：那里证"什么条件产生
+    /// 哪个变体"，这里证"变体怎么变成回执"）。
+    #[tokio::test]
+    async fn interlock_every_reject_variant_reaches_the_screen_verbatim() {
+        let variants = [
+            InterlockReject::SourcesNotReset {
+                remaining: vec!["estop".to_string()],
+            },
+            InterlockReject::HoldNotElapsed {
+                need_secs: 30,
+                remaining_secs: 12,
+            },
+            InterlockReject::Latched,
+            InterlockReject::StopPending,
+            InterlockReject::NotEnabled,
+            InterlockReject::Busy,
+            InterlockReject::Internal("io 句柄丢失".to_string()),
+        ];
+        assert_eq!(variants.len(), 7, "七个变体一个都不能少（设计 §11.3）");
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        let (addr, h, dir) = spawn_interlock_host_audited(b.clone(), "j-rejects").await;
+
+        for (i, r) in variants.iter().enumerate() {
+            b.reject_with(r.clone());
+            let rid = format!("rid-j-rej-{i}");
+            let (status, resp) = post_interlock(
+                addr,
+                ConsoleEndpoint::InterlockRelease,
+                &rid,
+                &payload_of(&view_latched()),
+            )
+            .await;
+            assert_eq!(status, 200, "{r:?}：拒绝也走信封（非 2xx 会让屏上丢掉具体原因）");
+            assert!(!resp.ok, "{r:?} 不得 ok=true");
+            assert_eq!(resp.code, ControlCode::RejectedPrecondition, "{r:?}");
+            assert_eq!(
+                resp.message,
+                r.user_message(),
+                "{r:?}：上屏文案必须逐字等于契约 `user_message()`"
+            );
+            assert!(resp.applied.is_none(), "{r:?}：拒绝不得带 applied");
+            assert!(resp.audit_id.is_some(), "{r:?}：失败也留痕（PL-1）");
+        }
+        // 七条拒绝 ⇒ 七条 Failed 审计（`after` 必须为 None = 未生效）
+        let entries = crate::interlock_ops::testkit::read_entries(dir.path());
+        assert_eq!(entries.len(), 7);
+        assert!(entries.iter().all(|e| e.result == mupc_display_proto::AuditResult::Failed));
+        assert!(entries.iter().all(|e| e.after.is_none()));
+        h.abort();
+    }
+
+    /// ③ EDGE-19：画面观测与服务端当前态不符 ⇒ `RejectedPrecondition` + 设计原文文案，
+    /// 且**后端一个动作都没收到**。
+    #[tokio::test]
+    async fn interlock_conflict_is_rejected_with_edge19_message_and_no_effect() {
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        let (addr, h, dir) = spawn_interlock_host_audited(b.clone(), "j-conflict").await;
+
+        // 画面以为"未联锁"，装置此刻"已联锁"
+        let mut stale = payload_of(&view_latched());
+        stale.observed_latched = false;
+        let (status, resp) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-cf",
+            &stale,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(!resp.ok);
+        assert_eq!(resp.code, ControlCode::RejectedPrecondition);
+        assert_eq!(
+            resp.message, receipt::INTERLOCK_CONFLICT,
+            "EDGE-19 文案逐字取设计原文（客户端不按 `code` 猜语义 ⇒ 服务端必须说这句话）"
+        );
+        assert!(resp.applied.is_none());
+        assert_eq!(b.entered(), 0, "乐观并发不符 ⇒ 一个动作都不许发");
+        assert_eq!(crate::interlock_ops::testkit::read_entries(dir.path()).len(), 1, "冲突也留痕");
+        h.abort();
+    }
+
+    /// ④ 幂等（**500 ms 内重复点击 / 超时重试**的真实形态）：同 `request_id` 再发 ⇒
+    /// 首次回执 + `duplicate=true`，**不重复生效**（后端只被调用一次、审计只一条）。
+    #[tokio::test]
+    async fn interlock_duplicate_click_does_not_take_effect_twice() {
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        b.flip_latched_on_write();
+        let (addr, h, dir) = spawn_interlock_host_audited(b.clone(), "j-dup").await;
+        let p = payload_of(&view_latched());
+
+        let (_, first) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-dup",
+            &p,
+        )
+        .await;
+        assert!(first.ok && !first.duplicate);
+        // 第二次：同一份报文（渲染端 `retry` 原样重发）——**同一 request_id**
+        let (status, second) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-dup",
+            &p,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(second.duplicate, "同 `(op, request_id)` ⇒ duplicate=true");
+        assert_eq!(second.audit_id, first.audit_id, "复用首次审计，不重复留痕");
+        assert_eq!(b.release_calls(), 1, "**不得**第二次生效");
+        assert_eq!(crate::interlock_ops::testkit::read_entries(dir.path()).len(), 1);
+        h.abort();
+    }
+
+    /// ④' 在途重复（第一条还在处理中）⇒ `Busy`（**不排队、不重复执行**）。
+    ///
+    /// ⚠️ **与 ⑤ 的分工（如实登记）**：渲染端**每次点击生成新 uuid** ⇒ 500 ms 内的"两次快点击"
+    /// 是**两个不同 `request_id`**，服务端幂等键拦不住它们（幂等键 = `(op, request_id)`，
+    /// 契约如此）。该场景的防抖在**渲染端**（确认弹层 + `submitting` 期间按钮 disabled，F14 /
+    /// EDGE-14）；服务端这一侧的职责是"**同一次请求**的重发不重复生效"（上面那条）与
+    /// "同一次请求并发到达不重复执行"（本条）。
+    #[tokio::test]
+    async fn interlock_in_flight_duplicate_is_busy_and_not_queued() {
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        b.flip_latched_on_write();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        b.set_gate(gate.clone());
+        let (addr, h, _dir) = spawn_interlock_host_audited(b.clone(), "j-busy").await;
+        let p = payload_of(&view_latched());
+
+        // 第一条：在途（后端停在 await 点）
+        let p_first = p.clone();
+        let a = tokio::spawn(async move {
+            post_interlock(addr, ConsoleEndpoint::InterlockRelease, "rid-j-busy", &p_first).await
+        });
+        // 等"已进入后端"的**确定性**唤醒点（`Notify`；改前是 `sleep(2ms)` 轮询 500 次——
+        // 既慢又在极端负载下会假红/假绿。范式同 `interlock.rs` 的并发用例。见建议 8。）
+        b.wait_entered().await;
+        assert_eq!(b.entered(), 1, "前提：第一条已进入后端且在途");
+
+        // 第二条：**同一 request_id** ⇒ Busy（幂等表命中"处理中"）
+        let (status, resp) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-busy",
+            &p,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(!resp.ok);
+        assert_eq!(resp.code, ControlCode::Busy);
+        assert_eq!(resp.message, receipt::BUSY);
+        assert!(resp.applied.is_none());
+
+        gate.notify_one();
+        let (_, first) = a.await.unwrap();
+        assert!(first.ok, "放闸后第一条正常完成: {first:?}");
+        assert_eq!(b.release_calls(), 1, "Busy 不得产生第二次执行");
+        h.abort();
+    }
+
+    /// ⑤ 审计不可写（装配侧）⇒ `AuditUnavailable` + **不执行**（EDGE-18）。
+    #[tokio::test]
+    async fn interlock_audit_unavailable_is_a_rejection_not_a_fake_success() {
+        let (addr, h) = spawn_interlock_host(InterlockOpsSource::AuditUnavailable(
+            "本用例注入：审计 sink 建不起来",
+        ))
+        .await;
+        let (status, resp) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-fc",
+            &payload_of(&view_latched()),
+        )
+        .await;
+        assert_eq!(status, 200, "写端点结局一律走信封");
+        assert!(!resp.ok);
+        assert_eq!(resp.code, ControlCode::AuditUnavailable);
+        assert_eq!(resp.message, receipt::AUDIT_UNAVAILABLE);
+        assert!(resp.applied.is_none(), "审计不可写 ⇒ 操作未执行");
+        assert!(resp.audit_id.is_none(), "不得编一个审计号");
+        h.abort();
+    }
+
+    /// ⑤ 联锁功能未启用（后端 `None`）⇒ `Unavailable` + 「联锁功能未启用」
+    /// （**不是**「联锁状态不可用」，也不是假成功）。
+    #[tokio::test]
+    async fn interlock_not_enabled_reports_unavailable_not_fake_success() {
+        // `io.enabled=false` 的装配形态：**后端 None**、审计照旧就绪（该次尝试仍要留痕）
+        let dir = crate::testutil::TempDir::new("j-off");
+        let sink: Arc<dyn ConsoleAuditSink> = Arc::new(
+            crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"),
+        );
+        let (addr, h) = spawn_interlock_host(InterlockOpsSource::Ready(Arc::new(
+            crate::interlock_ops::InterlockService::new(None, sink),
+        )))
+        .await;
+        let (status, resp) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-off",
+            &payload_of(&view_latched()),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(!resp.ok);
+        assert_eq!(resp.code, ControlCode::Unavailable);
+        assert_eq!(resp.message, receipt::INTERLOCK_NOT_ENABLED);
+        assert_ne!(
+            resp.message, "联锁状态不可用",
+            "「功能未启用」与「状态不可用」是两个态，不得互替（IL-01.6）"
+        );
+        h.abort();
+    }
+
+    /// ⑥ 方法 / 信封非法：GET 打写路径 ⇒ **405**（不是 404、不是 501）；非信封体 ⇒
+    /// **200 + `RejectedValidation` 信封**（不得让屏上丢掉原因）。
+    #[tokio::test]
+    async fn interlock_method_mismatch_405_and_bad_envelope_200() {
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        let (addr, h, _dir) = spawn_interlock_host_audited(b.clone(), "j-env").await;
+
+        // GET 打写端点 ⇒ 405（路径存在、方法不对）
+        for ep in [
+            ConsoleEndpoint::InterlockRelease,
+            ConsoleEndpoint::InterlockAckM1,
+        ] {
+            let (s, _) = http(addr, "GET", ep.path(), None).await;
+            assert_eq!(s, 405, "`{}` 是写端点 ⇒ GET 必须 405", ep.path());
+        }
+
+        // 非信封体（JSON 语法错）⇒ 200 + 信封（渲染端才拿得到"原因"）
+        let (s, body) = http(
+            addr,
+            "POST",
+            ConsoleEndpoint::InterlockRelease.path(),
+            Some("not json at all"),
+        )
+        .await;
+        assert_eq!(s, 200, "POST 的一切结局都走信封");
+        let r: ControlResponse<InterlockOpAck> = serde_json::from_str(&body).unwrap();
+        assert!(!r.ok);
+        assert_eq!(r.code, ControlCode::RejectedValidation);
+        assert_eq!(r.message, receipt::BAD_ENVELOPE, "屏上只给固定文案（原因进 field_errors）");
+
+        // `op` 是别的端点 ⇒ 同一信封拒绝（防误路由）
+        let body = serde_json::json!({
+            "request_id": "rid-j-mis",
+            "issued_at_ms": now_ms(),
+            "op": "apply",
+            "payload": {"observed_latched": true, "observed_sources": ["estop"]},
+        })
+        .to_string();
+        let (s2, body2) = http(
+            addr,
+            "POST",
+            ConsoleEndpoint::InterlockRelease.path(),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(s2, 200);
+        let r2: ControlResponse<InterlockOpAck> = serde_json::from_str(&body2).unwrap();
+        assert_eq!(r2.code, ControlCode::RejectedValidation);
+        assert_eq!(b.entered(), 0, "信封非法 ⇒ 一个动作都不发");
+        h.abort();
+    }
+
+    /// **回执文案的用字网（单元 J 版）**——既有 `config_receipt_messages_use_only_font_cmap_glyphs`
+    /// 的同款两半（构造性 + 运行期），覆盖两条联锁端点的 `message`。
+    ///
+    /// # 两档判据（**为什么不是"一律必须 ⊆ cmap"**）
+    ///
+    /// 联锁的 `message` 有两个来源：
+    /// 1. **本单元自己拼的固定文案**（`receipt::INTERLOCK_*` / `BAD_ENVELOPE` / `BUSY` /
+    ///    `AUDIT_UNAVAILABLE` / 契约 `ok()` 的缺省成功文案）⇒ **硬约束**：逐字 ⊆ cmap；
+    /// 2. **契约 `InterlockReject::user_message()` 与设计原文的 EDGE-19 文案**——本单元
+    ///    **逐字取原文、禁止改写**（任务书 / 契约冻结）⇒ 只能**登记**它们的缺字。
+    ///
+    /// 第 2 档用 [`PINNED_MISSING`] **逐字钉死**：缺字集合必须**恰好**等于表里的那一组。
+    /// 这样两个方向都有牙：
+    /// - 契约文案将来**新增**缺字 ⇒ 红（回归）；
+    /// - 契约文案将来被**修好**（缺字消失）⇒ 红（钉死表过期，必须同步收窄）。
+    ///
+    /// ⇒ 缺口**不会**被这条网掩盖，也不会被遗忘。**同时上报 PM**（见交付说明）。
+    ///
+    /// **改什么会让本条变红**：① 把某条固定文案改成含 cmap 外字的串；② 删掉
+    /// `PINNED_MISSING` 里的某一项（正例探测会红）；③ 把变体清单砍成 6 条。
+    #[tokio::test]
+    async fn interlock_receipt_messages_use_only_font_cmap_glyphs() {
+        // **已登记**的缺字表（逐字；变更即红）。键 = 文案前缀，值 = 该串里**恰好**落在
+        // 生成字体 cmap 之外的字符（按码位升序）。
+        //
+        // ⚠️ **限度（单元 J 第一轮整改如实登记）**：`SourcesNotReset` 那行的缺字是通过**样本
+        // token**（`estop` / `door`）跑出来的 ⇒ 它是**抽样**，**不是**"任意源 token 都 ⊆ cmap"
+        // 的**全 token 证明**。`InterlockReject::SourcesNotReset` 的 `remaining` 来自现场源名
+        // （`status_sources()` 的 distinct token），可能是任何字符串 ⇒ **理论上**可含本表未覆盖
+        // 的缺字。运行时那一半（第 3 档）同样只跑了这一组样本。
+        // 全 token 的硬保证需要：源名 token 本身被约束进 cmap（属**输入侧**约束，非本网可证）——
+        // 一并登记进字体/文案收口批（见 `receipt` 模块头的 P4 硬门禁）。
+        const PINNED_MISSING: &[(&str, &[char])] = &[
+            // 契约 `InterlockReject::SourcesNotReset`：全角冒号 + `join(", ")` 的**半角逗号**
+            // + 源 token 的小写 ASCII（`estop`/`door` 的 e,s,t,o,p,d,r —— `s` 恰好在 cmap 内）
+            ("触发源未复位", &['\u{2c}', 'd', 'e', 'o', 'p', 'r', 't', '\u{ff1a}']),
+            // 契约 `HoldNotElapsed`：全角逗号 + 全角括号
+            ("保持时间不足", &['\u{ff08}', '\u{ff09}', '\u{ff0c}']),
+            // 契约 `Latched`：全角逗号 + 小写 `latch`
+            ("处于 latch 态", &['a', 'c', 'l', 't', '\u{ff0c}']),
+            // 契约 `StopPending`：全角逗号
+            ("PCS 停机未确认", &['\u{ff0c}']),
+            // 契约 `Busy`：全角逗号 + `理` / `稍` / `候`
+            ("上一操作正在处理中", &['\u{5019}', '\u{7406}', '\u{7a0d}', '\u{ff0c}']),
+            // 契约 `Internal`：全角冒号 + `错`/`误`/`句`/`柄`/`丢` + 小写 `io`
+            (
+                "内部错误",
+                &['i', 'o', '\u{4e22}', '\u{53e5}', '\u{67c4}', '\u{8bef}', '\u{9519}', '\u{ff1a}'],
+            ),
+            // 设计原文（EDGE-19）：全角逗号
+            ("联锁状态已变化", &['\u{ff0c}']),
+        ];
+
+        let cmap = font_cmap();
+        let missing = |s: &str| -> Vec<char> {
+            let mut v: Vec<char> = s.chars().filter(|c| !cmap.contains(c)).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+
+        // ── 正例探测：这条网必须认得出缺字（否则下面的断言全是恒真）──────────────
+        assert_eq!(
+            missing("联锁状态已变化，请刷新后重试"),
+            vec!['\u{ff0c}'],
+            "自检：已知缺字 `，` 必须被判出（网失效 ⇒ 下面全部断言无意义）"
+        );
+
+        // ── 第 1 档（构造性）：本单元自己拼的固定文案**必须**逐字 ⊆ cmap ──────────
+        for s in [
+            receipt::INTERLOCK_NOT_ENABLED,
+            receipt::BAD_ENVELOPE,
+            receipt::BUSY,
+            receipt::AUDIT_UNAVAILABLE,
+            "操作成功", // 契约 `ControlResponse::ok()` 的缺省成功文案（本单元不改写它）
+        ] {
+            assert!(
+                missing(s).is_empty(),
+                "本单元自拼的回执文案 `{s}` 含 cmap 外字符 {:?} ⇒ 真机豆腐块",
+                missing(s)
+            );
+        }
+
+        // ── 第 2 档（构造性）：契约 / 设计原文 —— 缺字集合**恰好**等于钉死表 ────────
+        // 某条契约文案的**应然**缺字：表里有 ⇒ 恰好那一组；表里没有 ⇒ **必须为空**
+        // （未登记 = 声明"这条完全在 cmap 内"，同样有牙）。
+        let want_missing = |s: &str| -> Vec<char> {
+            PINNED_MISSING
+                .iter()
+                .find(|(prefix, _)| s.starts_with(prefix))
+                .map(|(_, v)| v.to_vec())
+                .unwrap_or_default()
+        };
+        let mut contract_texts = crate::interlock_ops::reject_messages();
+        assert_eq!(contract_texts.len(), 7, "契约 `InterlockReject` 七个变体全在内");
+        contract_texts.push(receipt::INTERLOCK_CONFLICT.to_string());
+        for s in &contract_texts {
+            assert_eq!(
+                missing(s),
+                want_missing(s),
+                "`{s}` 的缺字集合与钉死表不符（新增缺字 ⇒ 真机多一个豆腐块；缺字被修好 ⇒ 请收窄钉死表；\
+                 未登记过的文案 ⇒ 必须先登记才知道它能不能上屏）"
+            );
+        }
+        // 正对照：`联锁功能未启用`（NotEnabled）逐字 ⊆ cmap ⇒ 不在表内、缺字必须为空
+        assert!(
+            want_missing(receipt::INTERLOCK_NOT_ENABLED).is_empty(),
+            "`联锁功能未启用` 不得进钉死表（进去就等于承认一个不存在的缺口）"
+        );
+        assert!(
+            PINNED_MISSING.iter().any(|(p, _)| p.starts_with("PCS 停机未确认")),
+            "表里须有 StopPending 的条目"
+        );
+
+        // ── 第 3 档（运行期）：走**真实管线**取回执 `message`，按同样两档判据复核 ─────
+        // （与 `config_receipt_messages_use_only_font_cmap_glyphs` 的"运行期半边"同款：
+        //  上面查常量表，这里查**真跑出来的回执**——表与实现在格式串上漂移时这里会红。）
+        let variants = [
+            InterlockReject::SourcesNotReset {
+                remaining: vec!["estop".to_string(), "door".to_string()],
+            },
+            InterlockReject::HoldNotElapsed {
+                need_secs: 30,
+                remaining_secs: 12,
+            },
+            InterlockReject::Latched,
+            InterlockReject::StopPending,
+            InterlockReject::NotEnabled,
+            InterlockReject::Busy,
+            InterlockReject::Internal("io 句柄丢失".to_string()),
+        ];
+        let b = Arc::new(FakeBackend::new(view_latched()));
+        let (addr, h, _dir) = spawn_interlock_host_audited(b.clone(), "j-cmap").await;
+        for (i, r) in variants.iter().enumerate() {
+            b.reject_with(r.clone());
+            let (_, resp) = post_interlock(
+                addr,
+                ConsoleEndpoint::InterlockRelease,
+                &format!("rid-j-cmap-{i}"),
+                &payload_of(&view_latched()),
+            )
+            .await;
+            assert_eq!(
+                missing(&resp.message),
+                want_missing(&resp.message),
+                "线上回执 `{}` 的缺字集合与钉死表不符（真跑出来的串，不是常量表）",
+                resp.message
+            );
+        }
+        // 运行期：EDGE-19 冲突文案（设计原文）
+        let mut stale = payload_of(&view_latched());
+        stale.observed_latched = false;
+        let (_, conflicted) = post_interlock(
+            addr,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-cmap-cf",
+            &stale,
+        )
+        .await;
+        assert_eq!(
+            missing(&conflicted.message),
+            want_missing(&conflicted.message)
+        );
+        // 运行期：成功回执（`ok()` 的缺省文案）必须**完全**在 cmap 内
+        let b2 = Arc::new(FakeBackend::new(view_latched()));
+        b2.flip_latched_on_write();
+        let (addr2, h2, _d2) = spawn_interlock_host_audited(b2, "j-cmap-ok").await;
+        let (_, ok) = post_interlock(
+            addr2,
+            ConsoleEndpoint::InterlockRelease,
+            "rid-j-cmap-ok",
+            &payload_of(&view_latched()),
+        )
+        .await;
+        assert!(ok.ok);
+        assert!(
+            missing(&ok.message).is_empty(),
+            "成功回执 `{}` 含 cmap 外字符 {:?}",
+            ok.message,
+            missing(&ok.message)
+        );
+        h.abort();
+        h2.abort();
     }
 }

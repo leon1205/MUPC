@@ -420,39 +420,119 @@ pub(crate) fn console_config_source(
     crate::console_host::ConfigSource::Ready(core_config.clone())
 }
 
-/// 控制台**写路径**装配（G-2）：审计 sink 打开失败 ⇒ **整体 `Unavailable`**（fail-closed）。
+/// 控制台**两条写路径**的装配（G-2 配置写 + **单元 J 联锁写**）：审计 sink 打开失败 ⇒
+/// **两条写路径整体不可用**（fail-closed）。
 ///
 /// **为什么抽成独立函数**（评审建议 6.1「`startup.rs` 该分支补一条单测」）：这是
 /// **fail-closed 的唯一裁决点**，而 `initialize_all` 要跑完 DB/网络/串口才能走到这里 ⇒
-/// 单测无法触达那条分支。抽出来后，`console_apply_source_fails_closed_when_audit_is_unusable`
+/// 单测无法触达那条分支。抽出来后，`console_write_paths_fail_closed_when_audit_is_unusable`
 /// 用**真实失败**（审计目录的父路径是普通文件）驱动它。
 ///
 /// 口径：审计是 T-3 无登录后的**唯一操作凭据**（设计 §3.3）⇒ 宁可写路径整体不可用，
 /// **也不**给一个"没有审计的写路径"。
-pub(crate) fn console_apply_source(
+///
+/// # ⚠️ 为什么两条路径**必须**共用同一个 sink（而不是各开一个）
+///
+/// `FileAuditSink` 内含**全进程唯一**的哈希链 `AuditLogger`（`AuditLogger::new` 会读回既有链
+/// 的最后一条哈希）。两个实例各持一条链 ⇒ 各自算 `sequence` ⇒ **链断**（`FileAuditSink` 的
+/// `chain` 字段文档明写此约束）。故本函数**只 open 一次**，把同一个
+/// `Arc<dyn ConsoleAuditSink>` 分别注入 `ConfigService` 与 `InterlockService`。
+///
+/// # 返回
+///
+/// `(配置写源, 联锁写源)`。审计失败时两条一起不可用（**不得**只降级其中一条：那会让
+/// "审计坏了"在一条通道上表现为"操作被拒"、在另一条上表现为"照常执行"——同一件事两种后果）。
+pub(crate) fn console_write_paths(
     audit_dir: &std::path::Path,
     config_path: &std::path::Path,
     core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
     log_reload: Option<crate::hot_apply::LogReloadHandle>,
-) -> crate::console_host::ApplySource {
+    interlock: Option<std::sync::Arc<dyn mupc_display_proto::InterlockApi>>,
+) -> (
+    crate::console_host::ApplySource,
+    crate::console_host::InterlockOpsSource,
+) {
     match crate::console_audit::FileAuditSink::open(audit_dir) {
-        Ok(sink) => crate::console_host::ApplySource::Ready(std::sync::Arc::new(
-            crate::config_service::ConfigService::new(
-                config_path.to_path_buf(),
-                core_config.clone(),
-                std::sync::Arc::new(sink),
-                crate::hot_apply::HotApply::new(log_reload),
-            ),
-        )),
+        Ok(sink) => {
+            let audit: std::sync::Arc<dyn crate::console_audit::ConsoleAuditSink> =
+                std::sync::Arc::new(sink);
+            let apply = crate::console_host::ApplySource::Ready(std::sync::Arc::new(
+                crate::config_service::ConfigService::new(
+                    config_path.to_path_buf(),
+                    core_config.clone(),
+                    audit.clone(),
+                    crate::hot_apply::HotApply::new(log_reload),
+                ),
+            ));
+            let ops = crate::console_host::InterlockOpsSource::Ready(std::sync::Arc::new(
+                crate::interlock_ops::InterlockService::new(interlock, audit),
+            ));
+            (apply, ops)
+        }
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "控制台审计不可用 ⇒ 配置写路径整体不可用（fail-closed：写操作将被拒并回 AuditUnavailable）"
+                "控制台审计不可用 ⇒ 配置写 / 联锁写两条路径整体不可用（fail-closed：写操作将被拒）"
             );
-            crate::console_host::ApplySource::Unavailable(
-                "审计子系统不可用（fail-closed：审计是唯一操作凭据）",
+            const WHY: &str = "审计子系统不可用（fail-closed：审计是唯一操作凭据）";
+            (
+                crate::console_host::ApplySource::Unavailable(WHY),
+                crate::console_host::InterlockOpsSource::AuditUnavailable(WHY),
             )
         }
+    }
+}
+
+/// web-api 旧联锁出口的**过渡适配器**（单元 **K** 的删除面）。
+///
+/// `mupc_web_api::app_state::InterlockApi` 是**迁移前**的旧契约（`Result<(), String>`）。
+/// 单元 J 把 `InterlockController` 的实现迁到了 `mupc_display_proto::interlock`（结构化
+/// `InterlockReject`），但 `AppState.interlock` 与读通道装配
+/// （`display_host::interlock_wiring_for`）**仍按旧 trait 取用**，而 `web-api` crate 属 K 的
+/// 删除面（J 禁改）。⇒ 本适配器把新契约**桥**回旧 trait，**不复制任何逻辑**：
+/// 状态由 `InterlockApi::status()` 转出，错误取 `InterlockReject::user_message()`。
+///
+/// ⚠️ **如实登记**：这不是"两份实现"，而是**同一个实现的两种签名**——真源仍是
+/// `InterlockController` 的 `do_request_release` / `ack_m1`。K 删掉 web-api 时，本适配器与
+/// `mupc-web-api` 依赖一并删除（届时 `display_host` 也应改吃契约版视图，那属 K 的范围）。
+pub(crate) struct WebInterlockApi(pub(crate) std::sync::Arc<crate::interlock::InterlockController>);
+
+#[async_trait::async_trait]
+impl mupc_web_api::app_state::InterlockApi for WebInterlockApi {
+    async fn status(&self) -> mupc_web_api::app_state::InterlockStatus {
+        use mupc_display_proto::InterlockApi as _;
+        let v = self.0.status().await;
+        mupc_web_api::app_state::InterlockStatus {
+            enabled: v.enabled,
+            latched: v.latched,
+            stop_failed: v.stop_failed,
+            sources: v
+                .sources
+                .into_iter()
+                .map(|s| mupc_web_api::app_state::InterlockSourceStatus {
+                    name: s.name,
+                    tripped: s.tripped,
+                })
+                .collect(),
+            // 旧 DTO 的两个灯位是 `bool`（**无**「未知」态），契约是 `Option<bool>` ⇒
+            // `unwrap_or(false)`：**本适配路径不可表达** `None`（旧 DTO 根本没有那个槽，
+            // **不是**"契约的 `None` 不重要"）。真源 `InterlockController::status()` 当前**恒**
+            // 回 `Some(..)` ⇒ 该降级分支零后果；**单元 K 把读通道换到契约版真源时，必须一并
+            // 迁移**（届时 `None` = 「灯未知」须如实上屏，不得再被这里吞成 `false`）。
+            // 取 `false` 而非 `true`：宁可显"灯灭"，也绝不臆造"灯亮"。
+            fault_lamp: v.fault_lamp.unwrap_or(false),
+            run_lamp: v.run_lamp.unwrap_or(false),
+        }
+    }
+
+    async fn request_release(&self) -> Result<(), String> {
+        use mupc_display_proto::InterlockApi as _;
+        self.0.request_release().await.map_err(|r| r.user_message())
+    }
+
+    async fn ack_m1(&self) -> Result<(), String> {
+        use mupc_display_proto::InterlockApi as _;
+        self.0.ack_m1().await.map_err(|r| r.user_message())
     }
 }
 
@@ -723,9 +803,16 @@ pub async fn initialize_all(
         il.restore_from_db().await;
         guard.0.push(tokio::spawn(il.clone().run_loop()));
     }
-    // web 后端注入用（Arc<dyn InterlockApi>）
-    let interlock_api: Option<Arc<dyn mupc_web_api::app_state::InterlockApi>> =
-        interlock_ctl.clone().map(|c| c as Arc<dyn mupc_web_api::app_state::InterlockApi>);
+    // 联锁后端两种签名（**同一实现**，单元 J）：
+    // - `interlock_backend` = 契约版（`display-proto`）⇒ 本地屏控制通道的两条写端点；
+    // - `interlock_api` = 旧 web-api trait，经 `WebInterlockApi` 过渡适配器（K 的删除面）
+    //   ⇒ `AppState.interlock`（web 出口）与读通道 `display_host::interlock_wiring_for`。
+    let interlock_backend: Option<Arc<dyn mupc_display_proto::InterlockApi>> = interlock_ctl
+        .clone()
+        .map(|c| c as Arc<dyn mupc_display_proto::InterlockApi>);
+    let interlock_api: Option<Arc<dyn mupc_web_api::app_state::InterlockApi>> = interlock_ctl
+        .clone()
+        .map(|c| Arc::new(WebInterlockApi(c)) as Arc<dyn mupc_web_api::app_state::InterlockApi>);
 
     // AI 决策循环：周期执行决策并分发到核间/南向（RL 决策 <1s）
     // Task7：联锁 latch 期间抑制 dispatch（skip 本轮 warn；transport 层另有 stopped_latched 兜底）
@@ -843,12 +930,15 @@ pub async fn initialize_all(
         // 10.2' 配置写路径（G-2）。**审计先建**：建不起来 ⇒ 写路径整体 `Unavailable`
         // （fail-closed：宁可写路径整体不可用，也不给一个"没有审计的写路径"——
         // 设计 §3.3：T-3 无登录后审计是唯一操作凭据）。
-        // 装配走 [`console_apply_source`]（fail-closed 的唯一裁决点，独立成函数 ⇒ 可单测）。
-        let apply = console_apply_source(
+        // 装配走 [`console_write_paths`]（fail-closed 的唯一裁决点，独立成函数 ⇒ 可单测）。
+        // **一次性**返回配置写源与联锁写源：两者**共用同一个 `FileAuditSink`**（哈希链唯一实例，
+        // 见该函数的"为什么必须共用"）。
+        let (apply, interlock_ops) = console_write_paths(
             &config.system.log_dir.join("audit"),
             config_path,
             core_config,
             log_reload,
+            interlock_backend.clone(),
         );
         // 单元 H：日志源 = **日志目录扫描**（设计 §4.4）。目录取自 `config.system.log_dir`
         // （与迁出前的 `web-api::LogsHandler`、以及审计目录 `{log_dir}/audit` 同一个真源）。
@@ -863,7 +953,7 @@ pub async fn initialize_all(
             ),
         ));
         // 单元 I：审计**查询**源（设计 §4.5 / F19）。
-        // 目录与写侧 `FileAuditSink`（上面 `console_apply_source` 的入参）**同一个值**
+        // 目录与写侧 `FileAuditSink`（上面 `console_write_paths` 的 `audit_dir` 入参）**同一个值**
         // （`{system.log_dir}/audit`）——两侧不同值会让屏上查到的是**别的目录**（静默失实，
         // 与 R2 整改的日志目录同款风险）。构造**不做 I/O**⇒ 恒 `Ready`；"读不出来"在**请求期**
         // 以 `AuditPage{available:false}` 表达（EDGE-17），不必也不该在此把控制通道打挂。
@@ -874,6 +964,7 @@ pub async fn initialize_all(
             config: console_config_source(core_config),
             apply,
             logs,
+            interlock: interlock_ops,
             audit,
         });
         match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
@@ -1306,27 +1397,29 @@ plugins: {}
         std::sync::Arc::new(tokio::sync::RwLock::new(cfg))
     }
 
-    /// **建议 6.1 的网**：审计 sink 建不起来 ⇒ 写路径必须整体 `Unavailable`（fail-closed），
-    /// 而**不是**降级成"没有审计的写路径"。
+    /// **建议 6.1 的网**（单元 J 扩到**两条**写路径）：审计 sink 建不起来 ⇒ 配置写与联锁写
+    /// **都**必须整体不可用（fail-closed），而**不是**降级成"没有审计的写路径"。
     ///
     /// 注入方式是**真实失败**（审计目录的父路径是一个普通文件 ⇒ `create_dir_all` 必失败），
     /// 不用 mock —— 要证的是**真实装配代码**的裁决，而不是测试桩自己的行为。
     ///
-    /// **改什么会让本条变红**：把 `console_apply_source` 的错误分支改成
-    /// `ApplySource::Ready(..)`（或改成 `expect`/`unwrap` 让它 panic）⇒ 第 1、2 条断言红。
+    /// **改什么会让本条变红**：把 `console_write_paths` 的错误分支改成
+    /// `ApplySource::Ready(..)` / `InterlockOpsSource::Ready(..)`（或改成 `expect`/`unwrap`
+    /// 让它 panic）⇒ 对应的断言红。
     #[test]
-    fn console_apply_source_fails_closed_when_audit_is_unusable() {
+    fn console_write_paths_fail_closed_when_audit_is_unusable() {
         let t = crate::testutil::TempDir::new("apply-assembly");
         let blocker = t.write("blocker", "i am a file, not a dir");
         let bad_audit_dir = blocker.join("audit"); // 父是文件 ⇒ 建不出审计目录
         let core = core_handle();
-        let src = console_apply_source(
+        let (apply, ops) = console_write_paths(
             &bad_audit_dir,
             &t.join("mupc_core_config.yaml"),
             &core,
             None,
+            None,
         );
-        match src {
+        match apply {
             crate::console_host::ApplySource::Unavailable(reason) => {
                 assert!(reason.contains("审计"), "原因须点明审计不可用: {reason}");
                 assert!(reason.contains("fail-closed"), "原因须点明 fail-closed 口径: {reason}");
@@ -1335,17 +1428,31 @@ plugins: {}
                 panic!("审计建不起来 ⇒ 不得给出「没有审计的写路径」（fail-closed 被绕过）")
             }
         }
+        // 联锁写路径**同一条裁决**：审计建不起来 ⇒ 一律不执行（EDGE-18）
+        match ops {
+            crate::console_host::InterlockOpsSource::AuditUnavailable(reason) => {
+                assert!(reason.contains("审计"), "原因须点明审计不可用: {reason}");
+            }
+            crate::console_host::InterlockOpsSource::Ready(_) => panic!(
+                "审计建不起来 ⇒ 联锁写路径也**不得**可用（否则同一件事两条通道两种后果）"
+            ),
+        }
 
-        // 正对照：审计目录可用 ⇒ 装配成 `Ready`（证明上面那条是"审计不可用"而非"函数恒失败"）
-        let ok = console_apply_source(
+        // 正对照：审计目录可用 ⇒ 两条都 `Ready`（证明上面那条是"审计不可用"而非"函数恒失败"）
+        let (ok_apply, ok_ops) = console_write_paths(
             &t.join("audit"),
             &t.join("mupc_core_config.yaml"),
             &core,
             None,
+            None,
         );
         assert!(
-            matches!(ok, crate::console_host::ApplySource::Ready(_)),
-            "审计目录可建 ⇒ 写路径必须 Ready"
+            matches!(ok_apply, crate::console_host::ApplySource::Ready(_)),
+            "审计目录可建 ⇒ 配置写路径必须 Ready"
+        );
+        assert!(
+            matches!(ok_ops, crate::console_host::InterlockOpsSource::Ready(_)),
+            "审计目录可建 ⇒ 联锁写路径必须 Ready"
         );
     }
 }

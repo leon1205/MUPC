@@ -30,10 +30,24 @@ use async_trait::async_trait;
 use mupc_intercore::IntercoreClient;
 use mupc_io::{DigitalIn, DigitalOut, IoError, SysfsIn, SysfsOut};
 use mupc_storage::{EventRepository, SystemEvent};
-use mupc_web_api::app_state::{InterlockApi, InterlockSourceStatus, InterlockStatus};
 use mupc_web_api::SsePushService;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+// 联锁读写接口 + 结构化拒绝原因 —— **迁移到契约**（设计 §4.6，单元 J）。
+//
+// 迁移前：`use mupc_web_api::app_state::{InterlockApi, ...}`，错误是 `Result<(), String>`
+// （字符串只够打日志、不够驱动 UI；EDGE-12 / IL-02 / IL-03 要求「明示**具体**拒绝原因」）。
+// 迁移后：
+// - 视图 = `InterlockView`（即帧内 `interlock` 段的**同一类型**，契约单一真源防双源漂移）；
+//   `InterlockStatus` / `InterlockSourceStatus` 是契约里的迁移别名 ⇒ 既有调用点 `use` 不变；
+// - 错误 = `InterlockReject`，**每条拒绝路径逐一映射到具体变体**（见 `do_request_release` /
+//   `ack_m1` 的「拒绝路径 → 变体」对照表）。
+//
+// ⚠️ **web-api 的旧 trait 不再由本模块实现**：装配层 `startup.rs` 有一个**过渡适配器**
+// （`WebInterlockApi`，单元 K 的删除面）把它桥回去，避免"同一份逻辑两套错误语义"。
+use mupc_display_proto::{InterlockApi, InterlockReject, InterlockSourceStatus, InterlockStatus};
 
 use crate::core_config::IoConfig;
 
@@ -376,10 +390,10 @@ struct DiRuntime {
     last_stop_attempt: Option<Instant>,
 }
 
-/// 安全联锁控制器（runner + web 后端 API 实现）
+/// 安全联锁控制器（runner + 契约 `InterlockApi` 实现）
 pub struct InterlockController {
     cfg: IoConfig,
-    /// 共享联锁状态（runner 写 / web 读 / dispatch 抑制读）
+    /// 共享联锁状态（runner 写 / 控制通道读 / dispatch 抑制读）
     state: Arc<RwLock<InterlockState>>,
     /// 纯逻辑状态机（prev 边沿跨 tick；`request_release` 同步清 latch 时会重置以防旧沿残留）
     sm: Mutex<StateMachine>,
@@ -401,6 +415,24 @@ pub struct InterlockController {
     /// `restore_latched(true)` 与 DB triggered（重启读回依据）是 async，延至 `run_loop` 首帧
     /// `sync_failsafe_latch()` 补做（C-1 双 latch 兜底）。
     failsafe_preset: Mutex<bool>,
+    /// **写操作互斥位**（单元 J）：`release` / `ack_m1` 二者共用一把"有人在写"的闸。
+    ///
+    /// 为什么需要：两条写路径都是 async（`restore_latched` / `authorize_restart` 有 await 点），
+    /// 控制通道是**多 worker** 的 axum ⇒ 两个并发请求会在 await 点交错，可能"看着同一个 before
+    /// 各写一次"（例如 release 清 latch 与 ack_m1 授权重启并发）。闸被占用时后到者**立刻**回
+    /// [`InterlockReject::Busy`]（不排队、不改任何状态）——与幂等表的 `Busy`（同 `request_id`
+    /// 重放）是**两件事**：这里拦的是"不同请求的并发"。
+    op_in_flight: AtomicBool,
+}
+
+/// 写操作占位守卫：`Drop` 保证**任何**返回路径（含 `?` 提前返回、panic 展开）都释放闸，
+/// 不会把控制器永久卡在 `Busy`。
+struct OpGuard<'a>(&'a AtomicBool);
+
+impl Drop for OpGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl InterlockController {
@@ -520,6 +552,7 @@ impl InterlockController {
             }),
             pending_init_events: Mutex::new(Vec::new()),
             failsafe_preset: Mutex::new(false),
+            op_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -528,6 +561,23 @@ impl InterlockController {
     /// dispatch 前 latch 抑制查询（读共享 state，同步非阻塞）
     pub fn is_latched_now(&self) -> bool {
         self.state.read().unwrap().latched
+    }
+
+    /// 进入一次写操作（互斥）。已被占用 ⇒ `None`（调用方回 [`InterlockReject::Busy`]）。
+    ///
+    /// 临界区 = 整个写方法体（含 await 点）：写路径的每个 await 都是"先改本地、后写 transport"
+    /// 这类**必须独占**的序列（`do_request_release` 的取舍 4：transport 先释放成功再清本地）。
+    fn try_begin_op(&self) -> Option<OpGuard<'_>> {
+        self.op_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| OpGuard(&self.op_in_flight))
+    }
+
+    /// 当前是否有写操作在处理中（**测试用的那把尺子**：并发用例据此确定性地等到闸被占住）。
+    #[cfg(test)]
+    pub(crate) fn op_in_flight(&self) -> bool {
+        self.op_in_flight.load(Ordering::SeqCst)
     }
 
     // ── run_loop ──
@@ -751,14 +801,55 @@ impl InterlockController {
         self.runtime.lock().unwrap().last_stop_attempt = Some(Instant::now());
     }
 
-    /// 置 stop_failed（幂等：仅在首次 false→true 记事件/SSE/error）
+    /// 置 stop_failed（幂等：仅在首次 false→true 记事件/SSE/error）。
+    ///
+    /// # ⚠️ `latched` 门（**单元 J 第二轮整改 I-2**）——把 `stop_failed ⟹ latched` 从不变量
+    /// 断言变成**构造性保证**
+    ///
+    /// 本方法是**唯一**写 `stop_failed` 而不碰 `latched` 的地方。改前它只有一个**跨线程
+    /// check-then-act** 的软保证：调用方（`post_stop_maintenance` 的 `if !latched { return }`
+    /// / `on_trigger`）先读 `latched`，再由本方法写 `stop_failed`；两件事分处两次加锁 ⇒ 多线程
+    /// runtime 下（runner 一帧一任务，写路径在 axum worker）**并发 `do_request_release` 可在
+    /// 该窗口内完成**（`restore_latched(false).await` 后于 `do_request_release` 的收尾块
+    /// （`had_stop_failed` 处）把两标志一起清）⇒ 随后
+    /// 本方法把 `stop_failed` 置回 true ⇒ 造出 `!latched && stop_failed`。
+    ///
+    /// 那是个**可用性缺口**（不是安全漏洞：两个结局都是拒绝）：该态**没有任何清除路径**——
+    /// `StateMachine::tick` 的清零分支要求 `s.latched`、`clear_stop_failed_once` 只在
+    /// `post_stop_maintenance` 的 `latched` 门后才可达、`do_request_release` 在 `!latched` 时
+    /// 提前 `Ok(())` 且不清 `stop_failed` ⇒ `ack_m1` **长期**回 `StopPending`（屏上「PCS 停机
+    /// 未确认 · 暂不可授权重启」）、故障灯常亮，只能靠一次新的物理触发或重启进程解开。
+    ///
+    /// 修法：**在读同一把写锁内**判定 `latched`（check-then-act 变成同一临界区内的原子判定）
+    /// ⇒ `!latched` 时**不写**。三个调用点当前都在 `latched` 下（`on_trigger` 紧接 tick 置位、
+    /// `post_stop_maintenance` 的 `latched` 门）⇒ **正常语义不变**；被这道门挡住的只可能是
+    /// "latch 已被并发 release 释放"这一种情形，而"人工放行 override 即清 `stop_failed`"本就是
+    /// 状态机的既有取舍（`do_request_release` 的无条件清除）⇒ 门与语义同向，不是新口径。
     async fn mark_stop_failed(&self, reason: &str) {
-        let was_new = {
+        let (was_new, gated) = {
             let mut st = self.state.write().unwrap();
-            let new = !st.stop_failed;
-            st.stop_failed = true;
-            new
+            if !st.latched {
+                // 与并发 release 撞车：latch 已释放（release 语义 = 人工 override，两标志同清）
+                // ⇒ 停机失败标记在此刻已无对象（自动释放放行 / 授权重启的前置都已随 latch 一并
+                // 消失）。写下去就是这个态**永远解不开**（见上：无清除路径）⇒ 如实丢弃。
+                (false, true)
+            } else {
+                let new = !st.stop_failed;
+                st.stop_failed = true;
+                (new, false)
+            }
         };
+        if gated {
+            // **`warn!` 而非 `debug!`**（单元 J 第二轮整改 A2）：走进这个分支意味着**一次真实的
+            // `port.stop()` 失败**既没进 `stop_failed`、也没进事件库 / 审计 / SSE（上面那条
+            // `error!` + `record_event` 都在 `gated` 的**另一侧**）⇒ 若不在此留痕，该次失败就
+            // 只剩调试日志，生产上等于**消失**。
+            tracing::warn!(
+                "联锁：PCS 停机失败但标记**未写入** —— 该次停机失败**未记入 `stop_failed`**\
+                 （latch 已被并发 release 合法清掉，写下去将成为解不开的粘住态）；原因：{}",
+                reason
+            );
+        }
         if was_new {
             tracing::error!("联锁：PCS 停机确认失败 —— {}", reason);
             let msg = format!("PCS 停机失败/未确认：{reason}（自动释放被禁止，须人工确认放行）");
@@ -920,25 +1011,61 @@ impl InterlockController {
             .collect()
     }
 
-    /// 手动释放（Step 6）：前置（全部 pcs_stop 源复位 + 保持期满）满足才清 latch；
+    /// 手动释放：前置（全部 pcs_stop 源复位 + 保持期满）满足才清 latch；
     /// **同步执行**（取舍 4）——transport 先释放成功再清本地，防状态分裂。stop_failed 放行记审计。
-    async fn do_request_release(&self) -> Result<(), String> {
+    ///
+    /// # 拒绝路径 → [`InterlockReject`] 变体（**逐路径映射表**，EDGE-12 的直接落点）
+    ///
+    /// | 拒绝路径（本函数的顺序） | 变体 | 说明 |
+    /// |--------------------------|------|------|
+    /// | `io.enabled=false` | [`InterlockReject::NotEnabled`] | 结构性事实，优先于一切 |
+    /// | 闸被占用（并发写） | [`InterlockReject::Busy`] | 不排队、不改状态 |
+    /// | 任一 pcs_stop 源仍触发 | [`InterlockReject::SourcesNotReset{remaining}`] | 列出**全部**未复位源 token（不是第一个） |
+    /// | 保持计时未起（`source_safe_since=None`） | [`InterlockReject::HoldNotElapsed{need,remaining=need}`] | 已复位但一帧都还没守住 ⇒ 剩余 = 全额 |
+    /// | 保持未满 | [`InterlockReject::HoldNotElapsed{need,remaining=need-elapsed}`] | 带**剩余秒数** |
+    /// | transport 释放失败 | [`InterlockReject::Internal`] | 透传具体原因，不吞 |
+    ///
+    /// **不是拒绝的情况**：未 latch ⇒ `Ok(())`（幂等：重复释放不报错，F17.5）。
+    /// 修复前这些路径全是 `Result<(), String>` 的中文串 ⇒ 屏上/上层只能整串转发，无法按变体分派。
+    ///
+    /// ⚠️ （单元 J 第二轮整改 I-2）该提前返回**不清 `stop_failed`**——本整改之前这是**缺口的
+    /// 一半**（`mark_stop_failed` 可造出 `!latched && stop_failed`，而这条路径不解它 ⇒ 粘住）。
+    /// I-2 把缺口关在**上游**：`mark_stop_failed` 加 `latched` 门后 `!latched ⇒ !stop_failed`
+    /// 按构造成立 ⇒ 这条提前返回**本来就没有残留标记要清**，故此处**保持原样**（不改语义）。
+    async fn do_request_release(&self) -> Result<(), InterlockReject> {
+        if !self.cfg.enabled {
+            return Err(InterlockReject::NotEnabled);
+        }
+        // ⚠️ 绑到 `_guard`（**不是** `_`/`_op`）：名字带下划线只是为了不必在函数体里读它，
+        // 它**不是**"立刻丢弃"——这把闸（`OpGuard`）**活到函数末尾**，`Busy` 语义全靠它。
+        // （单元 J 第二轮整改建议 5：原写成 `_op` 会让读者误以为是立即丢弃的占位。）
+        let Some(_guard) = self.try_begin_op() else {
+            return Err(InterlockReject::Busy);
+        };
         let now = now_secs();
         // 前置：当前状态快照
         let latched = self.state.read().unwrap().latched;
         if !latched {
             return Ok(());
         }
-        // 1) 任一 pcs_stop 源仍触发 → 拒绝
+        // 1) 任一 pcs_stop 源仍触发 → 拒绝（列出**全部**仍未复位的源 token）
+        let mut remaining: Vec<String> = Vec::new();
         for (i, di) in self.cfg.di.iter().enumerate() {
             if action_of(&di.action) == DiAction::PcsStop
                 && live_active_channel(&self.ins, i, di.active_low)
             {
-                return Err(format!("触发源 {} 未复位，不能释放联锁", di.name));
+                let tok = source_token(classify_source(&di.name, &di.action)).to_string();
+                if !remaining.contains(&tok) {
+                    remaining.push(tok);
+                }
             }
         }
+        if !remaining.is_empty() {
+            return Err(InterlockReject::SourcesNotReset { remaining });
+        }
         // 2) 保持期满校验（release_hold_secs>0 时；source_safe_since 由 runner tick 维护）
-        if self.cfg.release_hold_secs > 0 {
+        let hold = self.cfg.release_hold_secs;
+        if hold > 0 {
             let (since, latched_again) = {
                 let st = self.state.read().unwrap();
                 (st.source_safe_since, st.latched)
@@ -947,10 +1074,20 @@ impl InterlockController {
                 return Ok(());
             }
             match since {
-                None => return Err("触发源未完全复位，不能释放联锁".to_string()),
+                // 计时尚未起步（触发后还没有一帧看到"全复位"）⇒ 已守 0 s、余 `hold` s。
+                None => {
+                    return Err(InterlockReject::HoldNotElapsed {
+                        need_secs: hold,
+                        remaining_secs: hold,
+                    })
+                }
                 Some(t0) => {
-                    if now.saturating_sub(t0) < self.cfg.release_hold_secs {
-                        return Err("触发源复位保持时长不足，不能释放联锁".to_string());
+                    let elapsed = now.saturating_sub(t0);
+                    if elapsed < hold {
+                        return Err(InterlockReject::HoldNotElapsed {
+                            need_secs: hold,
+                            remaining_secs: hold - elapsed,
+                        });
                     }
                 }
             }
@@ -959,7 +1096,7 @@ impl InterlockController {
         self.port
             .restore_latched(false)
             .await
-            .map_err(|e| format!("释放联锁失败: {}", e))?;
+            .map_err(|e| InterlockReject::Internal(format!("释放联锁失败: {e}")))?;
         // 4) 清本地 + 审计（stop_failed 人工放行留痕）
         let had_stop_failed = {
             let mut st = self.state.write().unwrap();
@@ -978,11 +1115,16 @@ impl InterlockController {
         } else {
             "人工释放联锁（触发源已复位且保持期满）"
         };
-        // 操作者审计：本路径由 web release handler 经 InterlockApi::request_release 触发。
-        // 真实用户名受 trait 边界所限未随调用传入（web-api app_state.rs InterlockApi 签名，
-        // Task 8 不改该文件）；角色未分层 U-01 前仅 admin 可登，故以 session 占位如实标注，
-        // U-01/真实 RBAC 落库后改传真实操作者。
-        let msg = format!("{}（operator: admin(session)）", msg);
+        // 操作者口径（单元 J 订正）：本路径的**唯一**调用方是本地屏控制通道
+        // （`console_host` 的两条写端点），T-3 已裁定「无登录 / 无会话 / 无 RBAC」⇒
+        // 操作者恒为契约常量 `local-console`。修复前这里写 `admin(session)`——那句在
+        // web 前端退役后**已是假话**（无 session、无 admin 角色），故一并订正。
+        // 结构性审计（before/after + result + request_id）由写管线的 `ConsoleAuditSink` 承担。
+        let msg = format!(
+            "{}（operator: {}）",
+            msg,
+            mupc_display_proto::CONSOLE_OPERATOR
+        );
         self.record_event("interlock.cleared", "interlock", &msg)
             .await;
         let _ = self.sse.push_interlock("cleared", &msg);
@@ -1003,6 +1145,19 @@ fn live_active_channel(ins: &[Box<dyn DigitalIn>], i: usize, active_low: bool) -
 
 #[async_trait]
 impl InterlockApi for InterlockController {
+    /// 联锁总态（F16）：**即帧内 `interlock` 段**（契约单一真源）。
+    ///
+    /// 字段口径（逐字段的真源 / 限度）：
+    /// - `enabled`：取 `cfg.enabled`（**修复前硬编码 `true`**）——`io.enabled=false` 是
+    ///   **已知状态**（设计 §4.2 表 C：「联锁功能未启用」），谎报成 `true` 会让屏上把
+    ///   "功能没开"读成"开了但没联锁"（IL-01.6 同一族）。生产装配在 `io.enabled=false` 时
+    ///   **不构造**控制器（屏上由 `InterlockWiring::Disabled` 表达），该字段是对**构造入参**
+    ///   的忠实回读 + 写路径的 `NotEnabled` 判据；
+    /// - `available`：`status()` 无错误通道 ⇒ 能被调用即"源可用"（设计 §4.6）；
+    /// - `ts_ms`：**本控制器**的取数时刻（帧侧 `display_host` 另按采集时刻覆写，见其注释）；
+    /// - `release_hold_secs`：取 `cfg.release_hold_secs`（UI 用于提示「须保持 N 秒」）；
+    /// - `fault_lamp` / `run_lamp`：`Some(..)` = 控制器给出的**目标电平**（非 DO 回读，
+    ///   语义限度见 `display_host::interlock_section_of` 的同款项）。
     async fn status(&self) -> InterlockStatus {
         let (latched, stop_failed) = {
             let st = self.state.read().unwrap();
@@ -1015,34 +1170,102 @@ impl InterlockApi for InterlockController {
         let fault_lamp = latched || stop_failed || !pcs_online || m1;
         let run_lamp = run_state_ok && !latched;
         InterlockStatus {
-            enabled: true,
+            ts_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+            available: true,
+            enabled: self.cfg.enabled,
             latched,
             stop_failed,
             sources: self.status_sources(),
-            fault_lamp,
-            run_lamp,
+            fault_lamp: Some(fault_lamp),
+            run_lamp: Some(run_lamp),
+            release_hold_secs: self.cfg.release_hold_secs,
         }
     }
 
-    async fn request_release(&self) -> Result<(), String> {
+    async fn request_release(&self) -> Result<(), InterlockReject> {
         self.do_request_release().await
     }
 
-    async fn ack_m1(&self) -> Result<(), String> {
-        if self.state.read().unwrap().latched {
-            return Err("联锁锁存中，须先 release".to_string());
+    /// M1 保护跳闸 / 停机人工授权重启（仅 `!latched` 且停机已确认时生效）。
+    ///
+    /// # 拒绝路径 → 变体
+    ///
+    /// | 拒绝路径（本函数的顺序） | 变体 |
+    /// |--------------------------|------|
+    /// | `io.enabled=false` | [`InterlockReject::NotEnabled`] |
+    /// | 闸被占用（并发写） | [`InterlockReject::Busy`] |
+    /// | latch 态 | [`InterlockReject::Latched`] |
+    /// | 停机未确认（`stop_failed`，**纵深防御**门：不变量被打破时才可达，见下） | [`InterlockReject::StopPending`] |
+    /// | transport 授权失败 | [`InterlockReject::Internal`] |
+    ///
+    /// ⚠️ **`StopPending` 这道门的可达性（单元 J 第二轮整改 I-2 如实订正）**：
+    /// `!latched && stop_failed` 在**第一轮整改之后、第二轮之前**是**生产可达性极低但非零**
+    /// 的态（需 `mark_stop_failed` 的跨线程 check-then-act 被并发 `do_request_release` 抢占，
+    /// 见 [`InterlockController::mark_stop_failed`] 的文档），而且**一旦到达会粘住**——该态
+    /// **没有任何清除路径**（`StateMachine::tick` 的清零分支要求 `s.latched`；
+    /// `clear_stop_failed_once` 只在 `post_stop_maintenance` 的 `latched` 门后可达；
+    /// `do_request_release` 在 `!latched` 时提前 `Ok(())` 且不清 `stop_failed`）⇒ `ack_m1` 会
+    /// **长期**回 `StopPending`、故障灯常亮（同时 `run_lamp=true`），只能靠一次新的物理触发或
+    /// 重启进程解开。**该缺口已由 `mark_stop_failed` 的 `latched` 门关闭**（门装在**同一把
+    /// 写锁内** ⇒ `stop_failed` 只在 `latched` 时写入按构造成立，不再是"断言不变量"）。
+    ///
+    /// ⚠️ 第一轮整改此处曾写「生产**不可达**」——**说满了**（评审读码实证：那是**断言**，不是
+    /// **保证**，且结论"该门不可达"依赖一个可被抢占的软不变量）。现在的口径是两层：
+    /// ① 可达性由 `mark_stop_failed` 的门**构造性关闭**；② 万一将来不变量仍被打破，本门仍
+    /// 如实映射到 `StopPending`（不静默放行）。**两层都在**，互不替代。
+    ///
+    /// `stop_failed ⟹ latched` 现在是**构造性不变量**（每个写点都在同一临界区内同时满足）：
+    /// - `stop_failed` 的**全部写入点**：`preset_failsafe`（GPIO fail-safe，同一临界区同置两
+    ///   标志）、`restore_from_db`（DB 读回，同置两标志）、`mark_stop_failed`（唯一写
+    ///   `stop_failed` 而不碰 `latched` 的地方——**已加 `latched` 门，同一把写锁内判定**）；
+    /// - `latched` 的**全部清除点**都**同时**清 `stop_failed`——`StateMachine::tick` 的释放
+    ///   分支（两标志一起清）与 `do_request_release`（两标志一起清）；
+    /// - `InterlockState` 字段 `pub` 但 `state` 句柄私有无外部写入口。
+    ///
+    /// ⇒ 真实可达态是 `latched && stop_failed`：此时 `ack_m1` 走的是上面的 `latched` 门，
+    /// 返回的是 **[`InterlockReject::Latched`]**。**真正挡住「PCS 可能仍在运行却授权重启」
+    /// 这一危险动作的，是状态机不变量 + `latched` 门，不是本门。**
+    ///
+    /// 保留本门 = **纵深防御**：若将来不变量被打破（新增一处 `stop_failed` 写入点却未同时
+    /// latch），本门兜底，把该态如实映射到契约变体 `StopPending`（文案「PCS 停机未确认，
+    /// **暂不可授权重启**」），而不是静默放行。对应用例
+    /// `ack_m1_rejects_stop_pending_when_stop_unconfirmed` 是**不可达态防御测试**
+    /// （直接构造该状态，非生产可达路径；I-2 的缺口与门由
+    /// `stop_failed_never_sticks_when_a_concurrent_release_wins` 独立覆盖）。
+    ///
+    /// 物理判据：`stop_failed` = 停机写失败/未确认 ⇒ PCS 可能仍在运行 ⇒ 此时"授权重启"无意义。
+    /// **latch 优先于 `stop_failed`**：latch 态必须先 release（PRD F18.4 明写「仅非 latch 态
+    /// 可授权」）。
+    async fn ack_m1(&self) -> Result<(), InterlockReject> {
+        if !self.cfg.enabled {
+            return Err(InterlockReject::NotEnabled);
+        }
+        // 同 `do_request_release`：`_guard` 活到函数末尾（`Busy` 语义靠它），不是立即丢弃。
+        let Some(_guard) = self.try_begin_op() else {
+            return Err(InterlockReject::Busy);
+        };
+        let (latched, stop_failed) = {
+            let st = self.state.read().unwrap();
+            (st.latched, st.stop_failed)
+        };
+        if latched {
+            return Err(InterlockReject::Latched);
+        }
+        if stop_failed {
+            return Err(InterlockReject::StopPending);
         }
         self.port
             .authorize_restart()
             .await
-            .map_err(|e| format!("M1 重启授权失败: {}", e))?;
-        // 操作者审计：ack_m1 由 web handler 经 InterlockApi::ack_m1 触发，真实用户名受 trait
-        // 边界所限未随调用传入（Task 8 不改 app_state.rs）；角色未分层 U-01 前仅 admin 可登，
-        // 故以 session 占位如实标注，U-01/真实 RBAC 落库后改传真实操作者。
+            .map_err(|e| InterlockReject::Internal(format!("M1 重启授权失败: {e}")))?;
+        // 操作者口径（单元 J 订正，同 `do_request_release`）：T-3 无登录 ⇒ 恒 `local-console`。
         self.record_event(
             "interlock.ack_m1",
             "interlock",
-            "M1 保护跳闸/停机人工授权重启（operator: admin(session)）",
+            &format!(
+                "M1 保护跳闸/停机人工授权重启（operator: {}）",
+                mupc_display_proto::CONSOLE_OPERATOR
+            ),
         )
         .await;
         let _ = self
@@ -1304,6 +1527,15 @@ mod runner_tests {
         run_state: Option<u16>,
         stop_ok: bool,
         stop_sets_zero: bool,
+        /// `restore_latched` 是否成功（默认 `true`；置 `false` 驱动 `Internal` 分支）。
+        restore_ok: bool,
+        /// `authorize_restart` 是否成功（默认 `true`）。
+        authorize_ok: bool,
+        /// 置位后 `restore_latched` 会**先**等一个 `Notify` 才返回 —— 供并发用例把
+        /// 「写操作闸已被占住」这一瞬间**确定性地**造出来（不靠 sleep 猜时序）。
+        gate: Option<Arc<tokio::sync::Notify>>,
+        /// 已进入 `restore_latched`（等待 `gate` 前）—— 并发用例据此确认抢占先于第二次调用。
+        gated_in: bool,
     }
 
     struct FakePort {
@@ -1312,7 +1544,11 @@ mod runner_tests {
     impl FakePort {
         fn new() -> Self {
             Self {
-                inner: Arc::new(Mutex::new(FakePortInner::default())),
+                inner: Arc::new(Mutex::new(FakePortInner {
+                    restore_ok: true,
+                    authorize_ok: true,
+                    ..Default::default()
+                })),
             }
         }
         fn set_run_state(&self, s: Option<u16>) {
@@ -1337,22 +1573,33 @@ mod runner_tests {
             Ok(())
         }
         async fn restore_latched(&self, latched: bool) -> Result<(), String> {
-            self.inner
-                .lock()
-                .unwrap()
-                .calls
-                .push(format!("restore_latched({})", latched));
+            let gate = {
+                let mut g = self.inner.lock().unwrap();
+                g.calls.push(format!("restore_latched({})", latched));
+                g.gated_in = true;
+                let ok = g.restore_ok;
+                if !ok {
+                    // 失败注入：状态与调用记录都留着（调用方据此断言"确实尝试过"）
+                    return Err("fake: restore_latched 写失败".into());
+                }
+                g.gate.clone()
+            };
+            if let Some(n) = gate {
+                // `notify_one`（不是 `notify_waiters`）：前者在"尚无等待者"时**存一个许可**
+                // ⇒ 放闸方先发信号也不会丢（并发用例里放闸点在断言之后，必然晚于注册）。
+                n.notified().await;
+            }
             Ok(())
         }
         fn last_run_state(&self) -> Option<u16> {
             self.inner.lock().unwrap().run_state
         }
         async fn authorize_restart(&self) -> Result<(), String> {
-            self.inner
-                .lock()
-                .unwrap()
-                .calls
-                .push("authorize_restart".into());
+            let mut g = self.inner.lock().unwrap();
+            g.calls.push("authorize_restart".into());
+            if !g.authorize_ok {
+                return Err("fake: authorize_restart 写失败".into());
+            }
             Ok(())
         }
     }
@@ -1748,7 +1995,10 @@ mod runner_tests {
         }
     }
 
-    /// request_release 前置：触发源未复位 → Err（不允许释放）
+    /// request_release 前置：触发源未复位 → `SourcesNotReset`（列出**具体**源 token）
+    ///
+    /// 迁移前断言 `err.contains("未复位")`（字符串）；迁移后断言**结构化变体 + 字段值**——
+    /// 这正是 EDGE-12「明示具体拒绝原因」在契约层的判别力所在。
     #[tokio::test]
     async fn request_release_rejected_while_source_still_tripped() {
         let cfg = io_cfg(false, 1000);
@@ -1765,13 +2015,405 @@ mod runner_tests {
 
         // 源仍触发 → 拒绝
         let err = ctl.request_release().await.expect_err("源未复位应 Err");
-        assert!(err.contains("未复位"), "实际: {}", err);
+        assert_eq!(
+            err,
+            InterlockReject::SourcesNotReset {
+                remaining: vec!["estop".to_string()]
+            },
+            "必须点名**具体**未复位源（不是一句『未复位』）"
+        );
         assert!(ctl.is_latched_now(), "拒绝时 latch 应保持");
 
         // 源复位后 → 成功
         pin.set(false);
         assert!(ctl.request_release().await.is_ok());
         assert!(!ctl.is_latched_now());
+    }
+
+    /// **保持时间不足** ⇒ `HoldNotElapsed`，且**带剩余秒数**（UI 倒计时用）。
+    ///
+    /// 造法：`release_hold_secs=30`，触发 → 复位后**不 tick**（`source_safe_since` 仍为
+    /// `None`）⇒ 已守 0 s、余 30 s。这条同时钉死「计时未起步」这一路径（修复前是另一句
+    /// 中文串"触发源未完全复位"）。
+    #[tokio::test]
+    async fn request_release_rejects_hold_not_elapsed_with_remaining_secs() {
+        let cfg = io_cfg(false, 1000); // io_cfg 的 release_hold_secs=0 ⇒ 本用例改成 30
+        let mut cfg = cfg;
+        cfg.release_hold_secs = 30;
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = true;
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.is_latched_now());
+        // 源复位但**不 tick**：状态机还没记下 `source_safe_since`
+        pin.set(false);
+        let err = ctl.request_release().await.expect_err("保持未满应 Err");
+        assert_eq!(
+            err,
+            InterlockReject::HoldNotElapsed {
+                need_secs: 30,
+                remaining_secs: 30
+            },
+            "计时未起步 ⇒ 剩余 = 全额（不臆造『已守若干秒』）"
+        );
+        assert!(ctl.is_latched_now(), "拒绝时 latch 应保持");
+
+        // tick 一帧 → 记下 safe_since（now-0s）⇒ 剩余仍是 30 s（**不是**变成可释放）
+        ctl.tick_frame().await;
+        let err2 = ctl.request_release().await.expect_err("刚复位即释放应 Err");
+        assert!(
+            matches!(err2, InterlockReject::HoldNotElapsed { remaining_secs, .. } if remaining_secs >= 1),
+            "复位后须守满 30 s，实际 {err2:?}"
+        );
+    }
+
+    /// **未启用**（`io.enabled=false`）⇒ `NotEnabled`（两条写路径**都**要挡）。
+    ///
+    /// 生产装配在 `io.enabled=false` 时**不构造**控制器（屏上由 `InterlockWiring::Disabled`
+    /// 表达）⇒ 本用例所钉的这条路径**在生产装配下同样不可达**；它钉的是**第二道防线**：
+    /// 即便构造出来（或被将来某条装配路径漏判），写路径也必须回**具体**的 `NotEnabled`，
+    /// 而不是"看不见地成功"。（与 `ack_m1` 的 `StopPending` 门同一性质：防御性，非可达判据。）
+    #[tokio::test]
+    async fn write_ops_reject_not_enabled_when_io_disabled() {
+        let mut cfg = io_cfg(false, 1000);
+        cfg.enabled = false;
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        // 先造出"已 latch"（否则 release 会走"未 latch ⇒ Ok"的幂等分支，测不到 NotEnabled）
+        pin.set(true);
+        ctl.tick_frame().await;
+
+        assert_eq!(
+            ctl.request_release().await.unwrap_err(),
+            InterlockReject::NotEnabled
+        );
+        assert_eq!(ctl.ack_m1().await.unwrap_err(), InterlockReject::NotEnabled);
+        assert!(
+            !inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|c| c.starts_with("restore_latched(false)") || c == "authorize_restart"),
+            "未启用 ⇒ 一个 transport 动作都不许发（不得静默执行）"
+        );
+        // 状态视图也必须如实报未启用（不得硬编码 true）
+        assert!(!ctl.status().await.enabled, "enabled 须回读 cfg.enabled");
+    }
+
+    /// **不可达态防御测试**：直接构造 `!latched && stop_failed` 这一**按构造不可达**的状态
+    /// （`stop_failed ⟹ latched` 由 [`InterlockController::mark_stop_failed`] 的 `latched` 门
+    /// 保证，见 `InterlockApi::ack_m1` 文档——真实可达态下 `ack_m1` 先被 `latched` 门挡，
+    /// 回的是 [`InterlockReject::Latched`]），钉住纵深防御门：一旦将来不变量被打破，该态必须
+    /// 如实映射到 `StopPending`（契约文案「暂不可授权重启」），而不是静默放行。
+    ///
+    /// ⚠️ **本用例不是"危险动作被本门挡住"的证据**——挡住它的是状态机不变量 + `latched` 门。
+    /// **也不是"该态生产不可达"的证据**：本用例只证"若到达则如实映射"；不可达性由
+    /// `stop_failed_never_sticks_when_a_concurrent_release_wins` 独立证明。
+    #[tokio::test]
+    async fn ack_m1_rejects_stop_pending_when_stop_unconfirmed() {
+        let cfg = io_cfg(false, 40);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = false; // 停机写失败 ⇒ stop_failed
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        assert!(ctl.state.read().unwrap().stop_failed);
+        // 源复位 + 人工 release 放行 stop_failed ⇒ 此时 !latched 但 stop_failed 仍为 false
+        // ……不成立：release 会一并清 stop_failed。故本用例直接构造"未 latch + stop_failed"：
+        pin.set(false);
+        ctl.tick_frame().await;
+        {
+            let mut st = ctl.state.write().unwrap();
+            st.latched = false;
+            st.stop_failed = true;
+        }
+        assert_eq!(
+            ctl.ack_m1().await.unwrap_err(),
+            InterlockReject::StopPending,
+            "防御门：人工构造的不可达态必须被如实映射到 StopPending（不得静默放行）"
+        );
+        assert!(
+            !inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|c| c == "authorize_restart"),
+            "被拒 ⇒ 不得发出授权（不得先发后拒）"
+        );
+
+        // **不变量对照（单元 J 第一轮整改新增）**：真实可达态是 `latched && stop_failed`
+        // （`stop_failed ⟹ latched`，两标志同置同清）⇒ 此时走的是 **`latched` 门**、回
+        // `Latched`——这正是"危险动作被挡"的真实归因（不变量 + `latched` 门），
+        // 而非上面那道**防御性**的 `StopPending` 门（其可达性已由 I-2 的门构造性关闭）。
+        {
+            let mut st = ctl.state.write().unwrap();
+            st.latched = true;
+            st.stop_failed = true;
+        }
+        assert_eq!(
+            ctl.ack_m1().await.unwrap_err(),
+            InterlockReject::Latched,
+            "真实可达态（stop_failed ⟹ latched）先被 latched 门挡 ⇒ StopPending 门在该态不可达"
+        );
+        assert!(
+            !inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|c| c == "authorize_restart"),
+            "latched 态同样不得发出授权"
+        );
+        // 回到正对照的起点（未 latch + 停机已确认）
+        {
+            let mut st = ctl.state.write().unwrap();
+            st.latched = false;
+        }
+        // 正对照（证明上面那条不是"恒 Err"）：停机确认 + 未 latch ⇒ 放行
+        ctl.state.write().unwrap().stop_failed = false;
+        assert!(ctl.ack_m1().await.is_ok());
+        assert!(inner
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|c| c == "authorize_restart"));
+    }
+
+    /// **I-2（单元 J 第二轮整改）：`mark_stop_failed` 的 `latched` 门 ⇒ 该态不再粘住。**
+    ///
+    /// # 造法（**确定性**，不靠 sleep 猜时序）
+    ///
+    /// 闸（`Notify`）装到 `restore_latched` 上 ⇒ 触发帧的 `on_trigger` 停在
+    /// `restore_latched(true)` 的 await 点：此刻 `tick` 已把 `latched=true` 写进共享状态，
+    /// 但触发沿**还没走到** `stop_once`。趁着这个窗口，本任务完成一次"并发 release 抢先"
+    /// ——等价于 `do_request_release` 的收尾块（`had_stop_failed` 处，**两标志一起清**），并把
+    /// `stop_ok` 改成 `false`（让迟到的停机写失败）。放闸后触发沿继续 ⇒ **迟到的
+    /// `stop_once` → `mark_stop_failed` 在 `!latched` 下被调用**——这正是评审指出的
+    /// 跨线程 check-then-act 窗口，本用例把它**确定性**地钉住。
+    ///
+    /// # 修法前 / 后
+    ///
+    /// - 修法前：`stop_failed` 被置回 `true` ⇒ `!latched && stop_failed` 成立且**粘住**
+    ///   （该态**无任何清除路径**：`tick` 的清零分支要求 `latched`、`clear_stop_failed_once`
+    ///   只在 `post_stop_maintenance` 的 `latched` 门后可达、`do_request_release` 在
+    ///   `!latched` 时提前 `Ok(())`）⇒ 下面两条断言全红（故障灯常亮 + `ack_m1` 长期
+    ///   `StopPending`）。
+    /// - 修法后：门在**同一把写锁内**判定 ⇒ 不写 ⇒ `ack_m1` 正常放行。
+    ///
+    /// **改什么会让本条变红**：删掉 `mark_stop_failed` 里的 `if !st.latched` 门
+    /// （破坏性验证记录见交付说明）。
+    #[tokio::test]
+    async fn stop_failed_never_sticks_when_a_concurrent_release_wins() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        // 闸装到 `restore_latched` 上：`on_trigger` 的第一个 await 点（先于 `stop_once`）
+        let gate = Arc::new(tokio::sync::Notify::new());
+        inner.lock().unwrap().gate = Some(gate.clone());
+
+        pin.set(true);
+        let frame = {
+            let c = ctl.clone();
+            tokio::spawn(async move { c.tick_frame().await })
+        };
+        for _ in 0..1000 {
+            if inner.lock().unwrap().gated_in {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            inner.lock().unwrap().gated_in,
+            "前提：触发沿已停在 restore_latched(true) 的 await 点上"
+        );
+        assert!(ctl.is_latched_now(), "前提：tick 已置 latched=true");
+
+        // 让**迟到**的那次停机写失败（它发生在闸后）⇒ 触发沿会走到 mark_stop_failed
+        inner.lock().unwrap().stop_ok = false;
+        // **并发 release 抢先**：等价于 do_request_release 的收尾块（had_stop_failed 处，两标志一起清）
+        {
+            let mut st = ctl.state.write().unwrap();
+            st.latched = false;
+            st.stop_failed = false;
+        }
+        gate.notify_one();
+        frame.await.unwrap();
+
+        // ① `!latched` ⇒ 停机失败标记**不得**被写入（写下去就是粘住态，无清除路径）
+        {
+            let st = ctl.state.read().unwrap();
+            assert!(
+                !st.latched,
+                "前提：并发 release 已把 latch 清掉（与 do_request_release 收尾块 had_stop_failed 处同款）"
+            );
+            assert!(
+                !st.stop_failed,
+                "`!latched && stop_failed` 是**粘住态**（无清除路径 ⇒ ack_m1 长期 StopPending + \
+                 故障灯常亮）；`mark_stop_failed` 的 `latched` 门之后不得出现"
+            );
+        }
+        assert!(
+            !events.has("interlock.stop_failed"),
+            "门挡下 ⇒ 也不得记一条「停机失败」事件（如实：该标记此刻已无对象）"
+        );
+
+        // ② 用户可见面：`ack_m1` **不再长期 StopPending**（缺口态下这里恒 Err 且永不自愈）
+        assert!(
+            ctl.ack_m1().await.is_ok(),
+            "修法后必须能正常授权重启（修法前恒 StopPending）"
+        );
+        assert!(
+            inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|c| c == "authorize_restart"),
+            "正对照：放行必须**真的**发出授权（上面那条不是恒真的 Ok）"
+        );
+    }
+
+    /// **并发写** ⇒ `Busy`（闸被占住时后到者立刻返回，不排队、不改状态）。
+    ///
+    /// 造法：`FakePort::restore_latched` 被要求先等一个 `Notify` ⇒ 第一个 `request_release`
+    /// 卡在 await 点（**闸已占**），此时同任务再调一次 ⇒ 必须 `Busy`。
+    ///
+    /// ⚠️ 闸**必须在触发帧之后**才装上：`Action::TriggerLatch` 也会调 `restore_latched(true)`，
+    /// 提前装闸会让 `tick_frame` 自己卡死（本用例第一次实现就踩了这个坑）。
+    #[tokio::test]
+    async fn concurrent_write_ops_report_busy_without_second_effect() {
+        let cfg = io_cfg(false, 1000); // hold=0 ⇒ 源复位即可释放
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = true;
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        pin.set(false);
+        // 触发帧已过 ⇒ 现在装闸：之后的 `restore_latched` 都会停在 await 点上
+        let gate = Arc::new(tokio::sync::Notify::new());
+        inner.lock().unwrap().gate = Some(gate.clone());
+
+        // 第一次释放：卡在 `restore_latched` 的 await 点（闸已占）
+        let a = {
+            let c = ctl.clone();
+            tokio::spawn(async move { c.request_release().await })
+        };
+        for _ in 0..1000 {
+            if ctl.op_in_flight() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(ctl.op_in_flight(), "前提：第一次写操作已占住闸");
+
+        // 第二次（并发）：立刻 Busy，且**不**产生第二个 transport 动作
+        assert_eq!(
+            ctl.request_release().await.unwrap_err(),
+            InterlockReject::Busy,
+            "并发提交必须回 Busy（不排队、不重复执行）"
+        );
+        assert_eq!(
+            ctl.ack_m1().await.unwrap_err(),
+            InterlockReject::Busy,
+            "两条写路径共用同一把闸"
+        );
+        let restore_calls = |inner: &Arc<Mutex<FakePortInner>>| {
+            inner
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|c| c.starts_with("restore_latched(false)"))
+                .count()
+        };
+        assert_eq!(restore_calls(&inner), 1, "Busy 不得产生第二个释放动作");
+
+        // 放闸 ⇒ 第一次正常完成；闸**必须**已释放（否则控制器永久 Busy）
+        gate.notify_one();
+        assert!(a.await.unwrap().is_ok());
+        assert!(!ctl.op_in_flight(), "闸必须随操作结束释放");
+        assert!(!ctl.is_latched_now());
+    }
+
+    /// transport 失败 ⇒ `Internal(具体原因)`（**透传**，不吞、不降级成"成功"）。
+    #[tokio::test]
+    async fn transport_failures_map_to_internal_with_reason() {
+        let cfg = io_cfg(false, 1000);
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        port.inner().lock().unwrap().stop_ok = true;
+        port.inner().lock().unwrap().stop_sets_zero = true;
+        port.inner().lock().unwrap().restore_ok = false; // 释放写 transport 失败
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, pin, _run, _fault, inner) = estop_board(cfg, port, events.clone());
+
+        pin.set(true);
+        ctl.tick_frame().await;
+        pin.set(false);
+
+        let err = ctl.request_release().await.expect_err("transport 失败应 Err");
+        assert!(
+            matches!(&err, InterlockReject::Internal(d) if d.contains("释放联锁失败")),
+            "必须透传具体原因，实际 {err:?}"
+        );
+        assert!(ctl.is_latched_now(), "transport 未成功 ⇒ 本地 latch 不得被清");
+
+        // ack_m1 侧同款：停机已确认但授权写失败
+        {
+            let mut st = ctl.state.write().unwrap();
+            st.latched = false;
+            st.stop_failed = false;
+        }
+        inner.lock().unwrap().authorize_ok = false;
+        let err = ctl.ack_m1().await.expect_err("授权失败应 Err");
+        assert!(
+            matches!(&err, InterlockReject::Internal(d) if d.contains("M1 重启授权失败")),
+            "必须透传具体原因，实际 {err:?}"
+        );
+    }
+
+    /// `status()` 迁移后的**新字段**口径：`available` / `release_hold_secs` / 灯态 `Some(..)`
+    /// （契约 `InterlockView` 比旧 web-api `InterlockStatus` 多了这几项）。
+    #[tokio::test]
+    async fn status_view_carries_available_hold_and_lamp_options() {
+        let mut cfg = io_cfg(false, 1000);
+        cfg.release_hold_secs = 42;
+        let port = FakePort::new();
+        port.set_run_state(Some(2));
+        let events = Arc::new(FakeEventRepo::default());
+        let (ctl, _pin, _run, _fault, _inner) = estop_board(cfg, port, events.clone());
+
+        let v = ctl.status().await;
+        assert!(v.available, "能被调用即源可用（设计 §4.6）");
+        assert!(v.enabled);
+        assert_eq!(v.release_hold_secs, 42, "UI 提示『须保持 N 秒』的真源");
+        assert_eq!(v.fault_lamp, Some(false), "灯态是**明确值**，不是『未知』");
+        assert_eq!(v.run_lamp, Some(true));
+        assert!(v.ts_ms > 0, "取数时刻须有值（帧侧另按采集时刻覆写）");
+        assert_eq!(v.sources.len(), 1);
+        assert_eq!(v.sources[0].name, "estop");
     }
 
     /// 门禁/event DI：只记事件，不参与 latch
@@ -1883,7 +2525,7 @@ mod runner_tests {
         assert!(calls.iter().any(|c| c == "restore_latched(false)"));
     }
 
-    /// ack_m1：latch 时 Err；非 latch 时授权重启 + 事件
+    /// ack_m1：latch 时 `Latched`；非 latch 时授权重启 + 事件
     #[tokio::test]
     async fn ack_m1_gated_by_latch() {
         let cfg = io_cfg(false, 1000);
@@ -1896,11 +2538,12 @@ mod runner_tests {
         assert!(ctl.ack_m1().await.is_ok());
         assert!(events.has("interlock.ack_m1"));
 
-        // latch：拒绝
+        // latch：拒绝（结构化变体；契约文案「处于 latch 态，须先释放联锁」）
         pin.set(true);
         ctl.tick_frame().await;
         let err = ctl.ack_m1().await.expect_err("latch 时应 Err");
-        assert!(err.contains("release"), "实际: {}", err);
+        assert_eq!(err, InterlockReject::Latched);
+        assert!(err.user_message().contains("先释放联锁"), "上屏文案");
     }
 
     /// status()：暴露 sources / latch / 灯位
@@ -1915,14 +2558,14 @@ mod runner_tests {
         let st0 = ctl.status().await;
         assert!(st0.enabled);
         assert!(!st0.latched);
-        assert!(st0.run_lamp, "在线运行且未 latch → 运行灯");
+        assert_eq!(st0.run_lamp, Some(true), "在线运行且未 latch → 运行灯");
 
         pin.set(true);
         ctl.tick_frame().await;
         let st1 = ctl.status().await;
         assert!(st1.latched);
-        assert!(!st1.run_lamp);
-        assert!(st1.fault_lamp);
+        assert_eq!(st1.run_lamp, Some(false));
+        assert_eq!(st1.fault_lamp, Some(true));
         assert!(st1.sources.iter().any(|s| s.name == "estop" && s.tripped));
     }
 

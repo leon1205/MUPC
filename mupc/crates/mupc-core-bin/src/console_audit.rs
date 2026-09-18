@@ -158,8 +158,11 @@ impl FileAuditSink {
     /// 打开（必要时创建）审计落点。
     ///
     /// **失败即"审计不可用"**：调用方**不得**降级成"没有审计也照跑"——那正是 fail-closed
-    /// 要防的事（设计 §3.3：审计是唯一操作凭据）。装配点据此让写路径整体
-    /// [`crate::console_host::ApplySource::Unavailable`]。
+    /// 要防的事（设计 §3.3：审计是唯一操作凭据）。装配点（`startup::console_write_paths` 的
+    /// `Err` 分支）据此让**两条写路径整体**不可用：配置写
+    /// [`crate::console_host::ApplySource::Unavailable`] + 联锁写
+    /// [`crate::console_host::InterlockOpsSource::AuditUnavailable`]（单元 J 起是**两条**写
+    /// 路径；不得只降级其中一条）。
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, AuditError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)

@@ -730,8 +730,15 @@ pub fn sources_overflow_note(count: usize) -> String {
 /// - `M1 授权重启`：**不因 `stop_failed` 置灰**。§6.4「操作与拒绝原因」表与 §9 F18 **只**要求
 ///   **latch 态**置灰 M1，**没有** `stop_failed` 这一行；本地预判「停机未确认」会**替代**后端回的
 ///   `RejectedPrecondition[StopPending]` 的**具体**原因（现场只看到灰按钮、看不到为什么）⇒ 与
-///   **IL18** 对 `release` 的取向是同一条道理（EDGE-12「不得静默失败」）。放开后后端必回
-///   `StopPending`，其具体原因（`停机未确认 · 暂不可授权重启`，见 [`reject_text`]）随之可达。
+///   **IL18** 对 `release` 的取向是同一条道理（EDGE-12「不得静默失败」）。
+///
+///   ⚠️ **订正（单元 J 第一轮整改；第二轮 I-2 再订正措辞）**：放开后后端**实际由 `latched`
+///   规则先挡** —— `stop_failed ⟹ latched` 已由 `mark_stop_failed` 的 `latched` 门**按构造成立**
+///   （写点在锁内判定，详见 `interlock.rs` 的同名文档）⇒ `!latched && stop_failed` **已被后端
+///   构造性关闭**，故后端回的是 `Latched`（`处于自锁态 · 须先释放联锁`），**不是** `StopPending`。
+///   `StopPending` 的具体原因（`停机未确认 · 暂不可授权重启`，见 [`reject_text`]）在后端这道门
+///   **成立期间不可达**（纯纵深防御门）。此订正**只改注释**：本地仍**不**按 `stop_failed` 预判置灰
+///   （取向不变，IL18 的结论不受影响）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpState {
     /// 释放按钮是否禁用。
