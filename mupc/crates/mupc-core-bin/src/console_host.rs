@@ -3,8 +3,9 @@
 //!
 //! 对应设计（`docs/superpowers/plans/modules/12-MUPC-本地显示终端-设计文档.md`）：
 //! - §3.3 控制通道：通用信封与管线（**G-1 落读、G-2 落写全 8 步**）；
-//! - §3.4 控制通道端点清单（8 条；已落 4 条：`GET /v1/console/config` + `POST /v1/console/config/apply`
-//!   + **单元 H 的 `GET /v1/console/logs` 与 `GET /v1/console/logs/targets`**）；
+//! - §3.4 控制通道端点清单（8 条；已落 **6** 条：`GET /v1/console/config` + `POST /v1/console/config/apply`
+//!   + 单元 H 的 `GET /v1/console/logs` 与 `GET /v1/console/logs/targets`
+//!   + **单元 I 的 `GET /v1/console/audit` 与 `GET /v1/console/audit/ops`**）；
 //! - §3.4 补注（2026-09-15）：**GET 返回裸 DTO、POST 走 `ControlResponse` 信封**；
 //!   **GET 失败一律非 2xx**（渲染端 `console.rs` 落 `Error::HttpStatus`，不解析错误体）；
 //!   **未实现的路由不得"假装成功"**（本模块对已登记但未实现的端点回 **501**，未知路径 **404**，
@@ -21,10 +22,9 @@
 //!
 //! ## 本单元的范围与**未做**的部分（如实登记）
 //!
-//! - 其余 4 条端点（`audit` / `audit/ops` / `interlock/release` / `interlock/ack_m1`）**已登记路由
-//!   但返回 501**——它们各自的 `ConsoleAuditService` / `InterlockOps` 属后续单元。路由**不隐藏**：
-//!   屏上对未实现端点的请求会得到明确的 501（渲染端 → `HttpStatus(501)` 失败提示），而不是被静默
-//!   当成"服务不可用"或"空数据"。
+//! - 其余 **2** 条端点（`interlock/release` / `interlock/ack_m1`）**已登记路由但返回 501**——
+//!   它们的 `InterlockOps` 属**后续单元 J**。路由**不隐藏**：屏上对未实现端点的请求会得到明确的
+//!   501（渲染端 → `HttpStatus(501)` 失败提示），而不是被静默当成"服务不可用"或"空数据"。
 //! - **写路径的"生效"只到位一部分**（⚠️ 计数口径，评审重要 5 已更正）：字段表 `FIELDS` 共
 //!   **9** 键，其中 `editable=true` 的**可写字段 7 个**；这 7 个里 **1 个真热生效**
 //!   （`system.log_level`，`tracing_subscriber::reload`），**其余 6 个**（`intercore.*` 4 +
@@ -62,6 +62,22 @@
 //!
 //! 「空结果」与「超限」是**两个不同的正常回包**（`range_too_large` 区分），而「源不可用」是**失败**
 //! （503）。三者互不替代：本模块把"我不知道"与"确实是空的"当成**两件事**（§8.3 硬口径）。
+//!
+//! ## GET 审计两条端点的错误通道（单元 I）——**与日志相反**：源不可用走 **200 + `available=false`**
+//!
+//! | 情形 | HTTP | 说明 |
+//! |------|------|------|
+//! | 查询参数非法（未知键 / 逗号拼多值 / `page=0` / `page_size≠20` / 半截或倒置窗口） | **400** | 同日志：具体原因只进响应体与人读日志 |
+//! | **审计源不可用**（目录读不出 / 文件打不开 / 某行解析失败 / 扫描预算耗尽） | **200** | `AuditPage{ available: false, entries: [], has_more: false, newest_ts_ms: null }` |
+//! | 正常（含**空页**） | **200** | 裸 `AuditPage`（`available: true`） |
+//!
+//! ⚠️ **为什么唯独这里不回 503**（与 [`get_logs`] 的 503 **不矛盾**）：`ConsoleClient` 对非 2xx
+//! 落 `ConsoleError::HttpStatus` 且**不解析错误体** ⇒ `control_route::route` 不会被调用 ⇒
+//! `P5AuditPage::set_page` **一次都不会被调用** ⇒ 列表区**到不了** `ListView::Unavailable`，
+//! 屏上只会飘一条通用"通道失败" Toast。而契约 `AuditPage` **专门留了 `available` 字段**
+//! （缺省 `false` 是安全方向）⇒ 200 + `available=false` 才是 EDGE-17 要的那个态。
+//! 日志契约**没有**该字段，所以它只能走 503——**两侧契约不同构，先例不能照搬**。
+//! 详细论证见 `console_audit.rs` 读侧模块头。
 //!
 //! ## `requires_reconnect` 的**唯一真源**
 //!
@@ -175,6 +191,15 @@ pub struct ConsoleDeps {
     pub apply: ApplySource,
     /// 日志源（单元 H）。
     pub logs: LogSource,
+    /// 审计查询服务（单元 I）。
+    ///
+    /// ⚠️ **有意**不学 [`ConfigSource`] / [`LogSource`] 做成 `Ready`/`Unavailable` 枚举：
+    /// ① `ConsoleAuditService::new` **不做 I/O**（只存一个路径）⇒ 装配**不可能失败**，枚举里
+    /// 那个 `Unavailable` 分支在生产上恒不可达（造一个恒不可达的态 = 造一句无用的声明）；
+    /// ② 审计的"不可用"**在页对象里**表达（`AuditPage.available`，EDGE-17）而不是在 HTTP 状态码上
+    /// ⇒ 装配侧没有"必须回 503"的那种需求（那正是 `LogSource` 枚举存在的理由）。
+    /// "不可用"因此只有**一条**产生路径：请求期真实读不出来（用例走真实失败，不用 mock）。
+    pub audit: Arc<crate::console_audit::ConsoleAuditService>,
 }
 
 /// 控制通道宿主：持有路由表与依赖，`serve()` 消费一个**已绑定**的 listener。
@@ -227,6 +252,17 @@ impl ConsoleHost {
                 {
                     router.route(path, get(get_logs_targets))
                 }
+                // 单元 I：审计两条 GET（设计 §3.4 / §4.5）
+                mupc_display_proto::ConsoleMethod::Get
+                    if ep == ConsoleEndpoint::Audit =>
+                {
+                    router.route(path, get(get_audit))
+                }
+                mupc_display_proto::ConsoleMethod::Get
+                    if ep == ConsoleEndpoint::AuditOps =>
+                {
+                    router.route(path, get(get_audit_ops))
+                }
                 mupc_display_proto::ConsoleMethod::Get => router.route(path, get(not_implemented)),
                 mupc_display_proto::ConsoleMethod::Post
                     if ep == ConsoleEndpoint::ConfigApply =>
@@ -242,6 +278,7 @@ impl ConsoleHost {
             config: self.deps.config.clone(),
             apply: self.deps.apply.clone(),
             logs: self.deps.logs.clone(),
+            audit: self.deps.audit.clone(),
         })
     }
 
@@ -268,12 +305,14 @@ impl ConsoleHost {
             ));
         }
         tracing::info!(
-            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；已实现 GET {} / {} / {} 与 POST {}，其余 4 条端点 501）",
+            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；已实现 GET {} / {} / {} / {} / {} 与 POST {}，其余 2 条端点 501）",
             addr,
             ConsoleEndpoint::Config.path(),
             ConsoleEndpoint::Config.path(),
             ConsoleEndpoint::Logs.path(),
             ConsoleEndpoint::LogsTargets.path(),
+            ConsoleEndpoint::Audit.path(),
+            ConsoleEndpoint::AuditOps.path(),
             ConsoleEndpoint::ConfigApply.path()
         );
         axum::serve(listener, self.router()).await
@@ -286,6 +325,7 @@ struct HostState {
     config: ConfigSource,
     apply: ApplySource,
     logs: LogSource,
+    audit: Arc<crate::console_audit::ConsoleAuditService>,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -394,6 +434,40 @@ async fn get_logs_targets(State(st): State<HostState>) -> Response {
                 .into_response()
         }
     }
+}
+
+/// `GET /v1/console/audit` → **裸 `AuditPage`**（§3.4 补注：GET 不走信封）。
+///
+/// 参数解析同 [`get_logs`]：多值维度（`ops`）在 §3.4 补注里定死为**重复键**，只有"键值对序列"
+/// 这一形态能原样表达 ⇒ 收 `Query<Vec<(String, String)>>` 交给
+/// [`crate::console_audit::parse_query`]（纯函数、可单测）。
+///
+/// 错误通道（**与 [`get_logs`] 不同**，理由见模块头）：
+/// 参数非法 **400** / **审计源不可用 = 200 + `available=false`**（EDGE-17） / 正常（含空页）**200**。
+/// 本 handler **不**把服务的不可用态翻成 503 —— 那会让屏上丢掉「审计记录不可用」这个态。
+async fn get_audit(
+    State(st): State<HostState>,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    let q = match crate::console_audit::parse_query(&pairs) {
+        Ok(q) => q,
+        Err(e) => {
+            // 原因串只进响应体（渲染端不解析错误体 ⇒ 不上屏）与日志；**不进**任何上屏字段。
+            tracing::warn!(error = %e, "GET /v1/console/audit 查询参数非法，回 400");
+            return (StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response();
+        }
+    };
+    // 不可用态在 body 里（`available=false`），HTTP 恒 200 ⇒ 这里没有分支。
+    Json(st.audit.page(&q, now_ms()).await).into_response()
+}
+
+/// `GET /v1/console/audit/ops` → **裸 `Vec<OpOption>`**（设计 §3.4：操作类型选项）。
+///
+/// 无参（§3.4 请求列为「—」）⇒ 本 handler **不接** `Query`（多给参数也不影响语义）。
+/// 选项来自**契约常量**（PL-1 定稿的 4 类写操作），**不读审计存储** ⇒ 审计源不可用时照旧可得
+/// （现场仍能看到"能筛什么"）。故本端点**没有**失败分支。
+async fn get_audit_ops(State(st): State<HostState>) -> Response {
+    Json(st.audit.op_options()).into_response()
 }
 
 /// `POST /v1/console/config/apply` → **`ControlResponse<ConfigView>` 信封**（§3.4 / §3.3 管线）。
@@ -1016,6 +1090,7 @@ mod tests {
     use super::*;
     use mupc_display_proto::{LogLevel, LogPage}; // 契约 DTO（断言 / 解码用）
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1034,7 +1109,13 @@ mod tests {
         config: ConfigSource,
         apply: ApplySource,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        spawn_host_full(config, apply, LogSource::Unavailable("本用例不验日志源")).await
+        spawn_host_full(
+            config,
+            apply,
+            LogSource::Unavailable("本用例不验日志源"),
+            audit_at("unused-audit-dir"),
+        )
+        .await
     }
 
     /// 同上，但注入日志源（单元 H 用例）。
@@ -1045,19 +1126,44 @@ mod tests {
             ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             ApplySource::Unavailable("本用例不验写路径"),
             logs,
+            audit_at("unused-audit-dir"),
         )
         .await
     }
 
-    /// 全量注入版（三个源都在参数里 ⇒ 用例显式声明它验哪一条通道）。
+    /// 指向某个审计目录的审计服务（单元 I 用例；**不做 I/O**，目录是否存在在请求期才知道）。
+    fn audit_at(dir: impl Into<PathBuf>) -> Arc<crate::console_audit::ConsoleAuditService> {
+        Arc::new(crate::console_audit::ConsoleAuditService::new(dir))
+    }
+
+    /// 同上，但注入审计服务（单元 I 用例）。
+    async fn spawn_audit_host(
+        audit: Arc<crate::console_audit::ConsoleAuditService>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_host_full(
+            ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+            ApplySource::Unavailable("本用例不验写路径"),
+            LogSource::Unavailable("本用例不验日志源"),
+            audit,
+        )
+        .await
+    }
+
+    /// 全量注入版（四个源都在参数里 ⇒ 用例显式声明它验哪一条通道）。
     async fn spawn_host_full(
         config: ConfigSource,
         apply: ApplySource,
         logs: LogSource,
+        audit: Arc<crate::console_audit::ConsoleAuditService>,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let host = ConsoleHost::new(ConsoleDeps { config, apply, logs });
+        let host = ConsoleHost::new(ConsoleDeps {
+            config,
+            apply,
+            logs,
+            audit,
+        });
         let h = tokio::spawn(async move {
             let _ = host.serve(listener).await;
         });
@@ -1213,6 +1319,7 @@ mod tests {
             config: crate::startup::console_config_source(&assembly),
             apply: ApplySource::Unavailable("本用例只验读源同一性"),
             logs: LogSource::Unavailable("本用例只验读源同一性"),
+            audit: audit_at("unused-audit-dir"),
         });
         let got = match host.config_source() {
             ConfigSource::Ready(a) => a.clone(),
@@ -1290,21 +1397,23 @@ mod tests {
         h.abort();
     }
 
-    /// ①' 其余 **4** 条端点（G-1/G-2 的 config 读 + 写、单元 H 的 logs 两条均已实现）：
-    /// **逐条** 501，且**逐条**不能回 404
+    /// ①' 其余 **2** 条端点（G-1/G-2 的 config 读 + 写、单元 H 的 logs 两条、单元 I 的 audit 两条
+    /// 均已实现）：**逐条** 501，且**逐条**不能回 404
     /// （404 = 路由没登记 = 屏上无法区分"服务没实现"与"服务根本没这个端点"）。
     #[tokio::test]
     async fn every_registered_but_unimplemented_endpoint_is_honest_per_endpoint() {
         let (addr, h) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
         let mut checked = 0;
         for ep in ConsoleEndpoint::ALL {
-            // 已实现的四条不在"未实现"清单内
+            // 已实现的六条不在"未实现"清单内
             if matches!(
                 ep,
                 ConsoleEndpoint::Config
                     | ConsoleEndpoint::ConfigApply
                     | ConsoleEndpoint::Logs
                     | ConsoleEndpoint::LogsTargets
+                    | ConsoleEndpoint::Audit
+                    | ConsoleEndpoint::AuditOps
             ) {
                 continue;
             }
@@ -1319,7 +1428,7 @@ mod tests {
             assert_eq!(status, 501, "`{}` 未实现须 501，实际 {status}", ep.path());
             checked += 1;
         }
-        assert_eq!(checked, 4, "未实现端点应为 4 条（8 条契约端点 − 4 条已实现）");
+        assert_eq!(checked, 2, "未实现端点应为 2 条（8 条契约端点 − 6 条已实现，余下两条属单元 J）");
         h.abort();
     }
 
@@ -1348,6 +1457,7 @@ mod tests {
             config: ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             apply: ApplySource::Unavailable("本用例只验回环裁决"),
             logs: LogSource::Unavailable("本用例只验回环裁决"),
+            audit: audit_at("unused-audit-dir"),
         });
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2698,6 +2808,175 @@ gateway:
         let mut sorted = out.clone();
         sorted.sort();
         assert_eq!(out, sorted, "字典序升序（稳定顺序）");
+        h.abort();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ⑨ 审计两条端点（单元 I / F19 / PL-2）
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 审计用例的固定基准时刻（2025-09-09T10:00:00Z）——**不读时钟**。
+    const AUDIT_T0: u64 = 1_757_412_000_000;
+
+    /// 用真实写侧把一条审计条目落进 `t`（读侧必须读得回写侧写的东西）。
+    fn seed_audit_entry(t: &crate::testutil::TempDir, ts_ms: u64) {
+        use crate::console_audit::ConsoleAuditSink;
+        let sink = crate::console_audit::FileAuditSink::open(t.path()).unwrap();
+        sink.record_outcome(&mupc_display_proto::ConsoleAuditEntry {
+            id: format!("id-{ts_ms}"),
+            ts_ms,
+            operator: mupc_display_proto::CONSOLE_OPERATOR.to_string(),
+            op: mupc_display_proto::ConsoleOp::ConfigApply,
+            target: "system.log_level".to_string(),
+            before: Some(serde_json::json!("info")),
+            after: Some(serde_json::json!("debug")),
+            result: mupc_display_proto::AuditResult::Ok,
+            reason: None,
+            request_id: format!("rid-{ts_ms}"),
+        })
+        .unwrap();
+    }
+
+    /// `GET /v1/console/audit` 端到端：**裸 `AuditPage`**（渲染端同款解码路径），
+    /// 且返回体里 `available=true` —— 屏上走"有行 / 空态"分支而不是"不可用"分支。
+    #[tokio::test]
+    async fn get_audit_returns_a_bare_audit_page_the_renderer_can_decode() {
+        let t = crate::testutil::TempDir::new("i-e2e");
+        seed_audit_entry(&t, AUDIT_T0 - 1000);
+        let (addr, h) = spawn_audit_host(audit_at(t.path())).await;
+        let from = AUDIT_T0 - 86_400_000u64;
+        let (s, b) = http(
+            addr,
+            "GET",
+            &format!(
+                "{}?from={from}&to={AUDIT_T0}&page=1&page_size=20",
+                ConsoleEndpoint::Audit.path()
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(s, 200, "GET /audit 应 200（裸 DTO），实际 {s}: {b}");
+        let page: mupc_display_proto::AuditPage = serde_json::from_str(&b)
+            .unwrap_or_else(|e| panic!("裸 AuditPage 解码失败（渲染端同款路径）: {e}\n{b}"));
+        assert!(page.available);
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].ts_ms, AUDIT_T0 - 1000);
+        assert_eq!((page.page, page.page_size), (1, 20));
+        assert!(!page.has_more);
+        assert_eq!(page.newest_ts_ms, Some(AUDIT_T0 - 1000));
+        h.abort();
+    }
+
+    /// `GET /v1/console/audit/ops` → 裸 `Vec<OpOption>`（4 条契约选项），**且不依赖审计存储**：
+    /// 审计目录压根不存在时也必须照常给选项（否则现场连"能筛什么"都看不到）。
+    #[tokio::test]
+    async fn get_audit_ops_returns_the_contract_options_even_without_a_store() {
+        let (addr, h) = spawn_audit_host(audit_at("no-such-audit-dir-anywhere")).await;
+        let (s, b) = http(addr, "GET", ConsoleEndpoint::AuditOps.path(), None).await;
+        assert_eq!(s, 200, "ops 端点不得因审计源不可用而失败: {s} {b}");
+        let opts: Vec<mupc_display_proto::OpOption> = serde_json::from_str(&b).unwrap();
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opts[0].label, "配置保存");
+        assert_eq!(opts[3].label, "M1 授权");
+        h.abort();
+    }
+
+    /// **EDGE-17 的判据在 HTTP 层**：审计源不可用 ⇒ **200 + `available=false`**
+    /// （**不是** 503：非 2xx 会被渲染端收口成 `HttpStatus`，`P5AuditPage::set_page` 根本不会被调用
+    /// ⇒ 屏上到不了「审计记录不可用」那个态，只剩一句通用通道失败）。
+    ///
+    /// 与「确实没有」（同为空 `entries` 但 `available=true`）**结构性地分得开**。
+    #[tokio::test]
+    async fn unavailable_audit_source_is_available_false_at_200_not_503() {
+        // (a) 源不可用（父路径是普通文件 ⇒ `read_dir` 必失败；真实失败，不用 mock）
+        let t = crate::testutil::TempDir::new("i-unavail");
+        let blocker = t.write("blocker", "i am a file, not a dir");
+        let (addr, h) = spawn_audit_host(audit_at(blocker.join("audit"))).await;
+        let (s, b) = http(addr, "GET", ConsoleEndpoint::Audit.path(), None).await;
+        assert_ne!(s, 503, "**不得**用 503：非 2xx 到不了屏上的「审计记录不可用」态");
+        assert_eq!(s, 200);
+        let un: mupc_display_proto::AuditPage = serde_json::from_str(&b).unwrap();
+        assert!(!un.available, "源不可用必须显式打招呼");
+        assert!(un.entries.is_empty() && !un.has_more && un.newest_ts_ms.is_none());
+        h.abort();
+
+        // (b) 同为空 `entries`，但源**可读**（目录在、没记录）⇒ available=true（空态）
+        let empty_dir = crate::testutil::TempDir::new("i-empty");
+        let (addr2, h2) = spawn_audit_host(audit_at(empty_dir.path())).await;
+        let (s2, b2) = http(addr2, "GET", ConsoleEndpoint::Audit.path(), None).await;
+        assert_eq!(s2, 200);
+        let empty: mupc_display_proto::AuditPage = serde_json::from_str(&b2).unwrap();
+        assert!(empty.available, "可读但没有记录 = 空态，不是不可用");
+
+        // **结构性可分**：两者行数相同、has_more 相同 ⇒ 只有 available 分得开
+        assert_eq!(un.entries.len(), empty.entries.len());
+        assert_ne!(un, empty, "「不可用」与「无记录」必须是两个不同的页对象");
+        h2.abort();
+    }
+
+    /// 审计查询参数非法 ⇒ **400**（且响应体**不是**一个可解析的 `AuditPage`：不得用 200 + 空页冒充）。
+    #[tokio::test]
+    async fn audit_query_errors_are_400_and_not_a_page() {
+        let t = crate::testutil::TempDir::new("i-400");
+        let (addr, h) = spawn_audit_host(audit_at(t.path())).await;
+        for q in [
+            "?page=0",                       // 1-based
+            "?page_size=50",                 // 契约固定 20
+            "?from=5",                       // 半截窗口
+            "?from=9&to=5",                  // 倒置窗口
+            "?ops=mode_switch",              // 非本期操作集
+            "?ops=config_apply,interlock_release", // 逗号拼多值
+            "?unknown=1",                    // 未知键
+        ] {
+            let (s, b) = http(
+                addr,
+                "GET",
+                &format!("{}{q}", ConsoleEndpoint::Audit.path()),
+                None,
+            )
+            .await;
+            assert_eq!(s, 400, "`{q}` 必须 400，实际 {s}: {b}");
+            assert!(
+                serde_json::from_str::<mupc_display_proto::AuditPage>(&b).is_err(),
+                "400 的响应体不得是一个可解析的 AuditPage: {b}"
+            );
+        }
+        // 反面对照：同一路径在合法参数下确实回 200 —— 证明上面的 400 是"参数非法"而非"路由坏了"
+        let (s_ok, _) = http(addr, "GET", &format!("{}?page=1", ConsoleEndpoint::Audit.path()), None).await;
+        assert_eq!(s_ok, 200);
+        h.abort();
+    }
+
+    /// **只读接口面**（PL-02）：审计两条端点**只**注册了 `GET` ⇒ `POST` 一律 **405**
+    /// （不是 404、不是 501、更不是被某个 handler 收下）。这条网守的是"审计页不得出现写入口"
+    /// 在**接口面**上的那一半；另一半（文件打开模式 / 不建目录）见
+    /// `console_audit::tests::the_query_path_never_creates_or_modifies_anything_on_disk`。
+    #[tokio::test]
+    async fn audit_endpoints_are_get_only_and_reject_writes_with_405() {
+        let t = crate::testutil::TempDir::new("i-405");
+        let (addr, h) = spawn_audit_host(audit_at(t.path())).await;
+        for ep in [ConsoleEndpoint::Audit, ConsoleEndpoint::AuditOps] {
+            let (s, b) = http(addr, "POST", ep.path(), Some("{}")).await;
+            assert_eq!(s, 405, "`{}` 只读 ⇒ POST 必须 405，实际 {s}: {b}", ep.path());
+            let (s2, _) = http(addr, "GET", ep.path(), None).await;
+            assert_eq!(s2, 200, "`{}` 的 GET 必须照常可用（证明 405 不是路由坏了）", ep.path());
+        }
+        h.abort();
+    }
+
+    /// 多值 `ops` 按 **重复键** 解码（§3.4 补注），且**非 2xx 之外**的所有结局都落在裸 `AuditPage`。
+    #[tokio::test]
+    async fn audit_ops_repeated_keys_are_decoded_as_a_multi_select_filter() {
+        let t = crate::testutil::TempDir::new("i-multi");
+        let (addr, h) = spawn_audit_host(audit_at(t.path())).await;
+        let q = format!(
+            "{}?ops=config_apply&ops=interlock_release&page=1&page_size=20",
+            ConsoleEndpoint::Audit.path()
+        );
+        let (s, b) = http(addr, "GET", &q, None).await;
+        assert_eq!(s, 200, "重复键必须被接受: {b}");
+        let page: mupc_display_proto::AuditPage = serde_json::from_str(&b).unwrap();
+        assert!(page.available && page.entries.is_empty(), "空目录 + 合法筛选 = 空态");
         h.abort();
     }
 }

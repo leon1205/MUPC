@@ -862,10 +862,19 @@ pub async fn initialize_all(
                 config.display.log,
             ),
         ));
+        // 单元 I：审计**查询**源（设计 §4.5 / F19）。
+        // 目录与写侧 `FileAuditSink`（上面 `console_apply_source` 的入参）**同一个值**
+        // （`{system.log_dir}/audit`）——两侧不同值会让屏上查到的是**别的目录**（静默失实，
+        // 与 R2 整改的日志目录同款风险）。构造**不做 I/O**⇒ 恒 `Ready`；"读不出来"在**请求期**
+        // 以 `AuditPage{available:false}` 表达（EDGE-17），不必也不该在此把控制通道打挂。
+        let audit = Arc::new(crate::console_audit::ConsoleAuditService::new(
+            config.system.log_dir.join("audit"),
+        ));
         let console = crate::console_host::ConsoleHost::new(crate::console_host::ConsoleDeps {
             config: console_config_source(core_config),
             apply,
             logs,
+            audit,
         });
         match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
             Ok(listener) => {

@@ -333,6 +333,10 @@ use mupc_display_proto::log::{
     LOG_SCAN_MAX_LINES, LOG_TARGETS_MAX,
 };
 
+// 有界按行读（整改五 D-2 起的共用实现；单元 I 复用后被上收为独立模块 `src/bounded_io.rs`）。
+// 用 `use` 引进本模块后，下面文档里的 `[`BoundedLineReader`]` 类**内联链接**仍照原样解析。
+use crate::bounded_io::{BoundedLine, BoundedLineReader};
+
 /// 日志文件名前缀（`tracing_appender::rolling::daily(dir, "mupc.log")` ⇒ `mupc.log.YYYY-MM-DD`）。
 const LOG_FILE_PREFIX: &str = "mupc.log";
 
@@ -505,7 +509,17 @@ fn parse_level(v: &str) -> Result<LogLevel, String> {
     }
 }
 
-fn parse_ms(v: &str, field: &str) -> Result<u64, String> {
+/// 查询串里的毫秒参数（`from` / `to` / `cursor`）⇒ `u64`。
+///
+/// **全 crate 唯一实现**（`pub(crate)`）：单元 I（`console_audit.rs`）的 `from`/`to` 与本模块的
+/// `from`/`to`/`cursor` 是**同一类参数**，此前两个文件各抄一份，且**错误文案不同**
+/// （本模块"不是合法的非负毫秒数" vs 审计侧"不是非负整数毫秒"）—— 同一个 400 在日志页与审计页
+/// 长成两样，现场对查错误日志时会当成两类错。本轮上收，**文案取本模块的原文**（H 的 45 条用例
+/// 与文案均未动，只多了一个 `pub(crate)`）。
+///
+/// 按设计 §3.4 的口径，`field` 只出现在错误文案里（`from` / `to` / `cursor`），
+/// 故它必须由调用方原样传**线上键名**。
+pub(crate) fn parse_ms(v: &str, field: &str) -> Result<u64, String> {
     v.parse::<u64>()
         .map_err(|_| format!("{field} 不是合法的非负毫秒数: {v}"))
 }
@@ -918,157 +932,16 @@ const TARGETS_READ_CHUNK_BYTES: usize = 64 * 1024;
 const TARGETS_LINE_MAX_BYTES: usize = TARGETS_READ_CHUNK_BYTES;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 2'. 有界按行读（**正读**与 `/logs/targets` 采样**共用**）
+// 2'. 有界按行读 —— **已上收为共用模块** `crate::bounded_io`
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// [`BoundedLineReader::next_line`] 的一次产出。
-enum BoundedLine<'a> {
-    /// 一整行 —— **不含**行尾 `'\n'`（若该行以 `\r\n` 结尾，`'\r'` 也一并去掉，
-    /// 与 `tokio::io::BufReadExt::lines()` **逐字**同口径；见 [`BoundedLineReader::next_line`]）。
-    /// 字节数 ≤ 构造时给的 `line_max`。
-    Line(&'a [u8]),
-    /// 一条**超过行长上限**的行：**整行已被丢弃**（前缀既没有留在 `line` 里、也没有交给调用方，
-    /// 后续字节只是被跳过）⇒ 调用方按各自口径记账 / 告警。`bytes` = 该行**读入的字节数**
-    /// （含被丢弃的前缀，不含行尾 `'\n'`）—— 与倒读路径"读了却没产出行的字节"同口径。
-    Overlong { bytes: u64 },
-}
-
-/// **有界**按行读：单行物化 ≤ `line_max` 字节、单次 `read` ≤ `chunk_bytes` 字节
-/// ⇒ 无论输入多大，本读器的瞬时分配都是常数。
-///
-/// # 为什么要有它（整改五 **D-2**，正读路径的漏网）
-///
-/// 同一类缺陷在整改五里已被修掉**两处**：`/logs/targets`（C 组：`BufReader::lines()` ⇒
-/// 1 GB 无换行文件一次 ~1 GB 分配）与倒读路径（B-1 / 整改三：读窗 ± 字节闸）。
-/// **只剩正读 `read_forward` 一条**仍是 `BufReader::new(f).lines()` —— 它对**单行**没有任何上限：
-/// 一行多长就物化多长，物化**先于** `truncate_message` 截断，且 `lines_read` 只 +1 ⇒ **任何闸都
-/// 不触发**。现实可达：择向 [`LogService::choose_direction`] 在"文件头是可解析时间戳、窗口靠
-/// 文件头"时选 `Forward`，此后文件中间夹一条百 MB~GB 级的行（大 payload 打进 `message`、
-/// 或别的工具把二进制块写进 `mupc.log*`）就是一次与行长同阶的分配。本模块的设计前提就是
-/// "日志目录可能被别的工具污染"（见模块头）⇒ 这不是臆想输入。
-///
-/// # 语义（**逐字**对齐 `BufRead::lines()`，只多一条行长上限）
-///
-/// - 以 `'\n'` 切行；空段（`'\n'` 紧跟 `'\n'`）产出**空行**（照常交给调用方解析 ⇒ 解析失败，
-///   与旧实现一致 —— 旧实现也**不**跳过空行）；
-/// - 行尾 `'\n'` 去掉；**仅当**该行以 `'\n'` 结尾时再吃掉一个 `'\r'`（`\r\n` ⇒ 两个都去）；
-///   **文件末行没有 `'\n'`** ⇒ 该行照常消费，其末尾的 `'\r'`（若有）**保留**
-///   （`tokio::io::BufReadExt::lines()` 的实现就是这样：`ends_with('\n')` 才 pop `'\r'`）；
-/// - 单行字节数 **> `line_max`** ⇒ 该行**整行丢弃**（**绝不物化**）⇒ 产出 [`BoundedLine::Overlong`]；
-/// - 文件末尾没有 `'\n'` 的**最后一行**若本身超长 ⇒ 同样产出 [`BoundedLine::Overlong`]。
-///
-/// # 调用点（**两处共用，不许再抄第三份**）
-///
-/// | 调用方 | 块大小 | 行长上限 | 超长行的处置 |
-/// |--------|--------|----------|--------------|
-/// | [`LogService::targets`] | [`TARGETS_READ_CHUNK_BYTES`] | [`TARGETS_LINE_MAX_BYTES`] | 计数 + 事后一条 `warn!` |
-/// | [`read_forward`] | [`REVERSE_CHUNK_BYTES`] | [`MAX_REVERSE_WINDOW_BYTES`] | 计入**字节闸** [`SCAN_READ_BUDGET_BYTES`] + 逐条 `warn!`（**与倒读同口径**） |
-///
-/// 两处的**单行上限取值不同**是刻意的：`targets` 只做 target 采样（一行几百字节足够），
-/// 正读则是**页路径**——它要尽量与倒读同口径，免得两个方向对同一份文件给出不同的条目集。
-/// ⚠️ **复核实测订正（本轮）**：原写"否则同一份文件会给出不同的条目集（同一个 1 MiB 的行，
-/// 倒读能组装上屏、**正读却被跳过**）"—— **理由说反了**：恰 1 MiB 的行是**正读交付、
-/// 倒读装不下**（倒读还要求行尾 `'\n'` 挤进窗口 ⇒ 可容行长比正读**少 1 字节**；行长 ≥ 上限时
-/// 倒读是整页拒绝、正读只跳过那一条）。取同值的意义是**把差距压到最小**，**不是**两侧等价。
-/// 真正的对齐口径与已知不对称见模块头「复核实测订正」。故正读沿用倒读的读窗上限
-/// [`MAX_REVERSE_WINDOW_BYTES`] 作为行长口径。
-struct BoundedLineReader<'a> {
-    /// 底层文件（**从当前游标**读；调用方负责先 `seek`）。
-    f: &'a mut tokio::fs::File,
-    /// 块缓冲：一次 `read` 最多 `buf.len()` 字节。
-    buf: Vec<u8>,
-    /// `buf` 中已消费到的下标。
-    filled: usize,
-    /// `buf` 中本轮有效字节数。
-    read: usize,
-    /// 已确认读到文件尾（`read` 返回 0）。
-    eof: bool,
-    /// 当前行已累积的字节（**≤ `line_max`**）。
-    line: Vec<u8>,
-    /// 单行字节上限（达到即转"丢弃整行"）。
-    line_max: usize,
-    /// 正在丢弃一条超长行的剩余字节（直到下一个 `'\n'`）。
-    skipping: bool,
-    /// 当前这条被丢弃的超长行已读入的字节数（含丢弃前积在 `line` 里的那部分）。
-    skipped_bytes: u64,
-}
-
-impl<'a> BoundedLineReader<'a> {
-    fn new(f: &'a mut tokio::fs::File, chunk_bytes: usize, line_max: usize) -> Self {
-        Self {
-            f,
-            buf: vec![0u8; chunk_bytes],
-            filled: 0,
-            read: 0,
-            eof: false,
-            line: Vec::new(),
-            line_max,
-            skipping: false,
-            skipped_bytes: 0,
-        }
-    }
-
-    /// 下一条有效产出；`None` = 文件读完。IO 错误原样上抛（调用方按各自口径包成 `Err`）。
-    ///
-    /// 返回的 `Line` 借用 `self` ⇒ 调用方在本次迭代内用完即弃（下一轮再调本方法）。
-    async fn next_line(&mut self) -> std::io::Result<Option<BoundedLine<'_>>> {
-        use tokio::io::AsyncReadExt;
-
-        // 上一轮返回的 `Line` 已经交付 ⇒ 从空行重新累积。
-        self.line.clear();
-        loop {
-            while self.filled < self.read {
-                let b = self.buf[self.filled];
-                self.filled += 1;
-                if b == b'\n' {
-                    if self.skipping {
-                        self.skipping = false;
-                        return Ok(Some(BoundedLine::Overlong { bytes: self.take_skipped() }));
-                    }
-                    // `lines()` 语义：`\r\n` 去掉两个；文件末行（无 `\n`）的 `\r` 保留
-                    // （后者走下面 `eof` 分支，不经这里）。
-                    if self.line.last() == Some(&b'\r') {
-                        self.line.pop();
-                    }
-                    return Ok(Some(BoundedLine::Line(&self.line)));
-                }
-                if self.skipping {
-                    self.skipped_bytes += 1;
-                    continue;
-                }
-                if self.line.len() >= self.line_max {
-                    // 单行已达上限 ⇒ **丢弃整行**（含已经积起来的那部分）：既不再往 `line` 里塞，
-                    // 也不把半截交给调用方（半截 JSON 只会解析失败，徒增一次 `lines_read`）。
-                    self.skipping = true;
-                    self.skipped_bytes = self.line.len() as u64 + 1; // 前缀 + 当前这一字节
-                    self.line.clear(); // 立刻真释放：别让上界变成 `line_max + chunk`
-                    continue;
-                }
-                self.line.push(b);
-            }
-            if self.eof {
-                if self.skipping {
-                    self.skipping = false;
-                    return Ok(Some(BoundedLine::Overlong { bytes: self.take_skipped() }));
-                }
-                if !self.line.is_empty() {
-                    // 文件末尾**没有 `'\n'`** 的最后一行：照常消费（`lines()` 语义）
-                    return Ok(Some(BoundedLine::Line(&self.line)));
-                }
-                return Ok(None);
-            }
-            self.read = self.f.read(&mut self.buf).await?;
-            self.filled = 0;
-            if self.read == 0 {
-                self.eof = true;
-            }
-        }
-    }
-
-    fn take_skipped(&mut self) -> u64 {
-        std::mem::take(&mut self.skipped_bytes)
-    }
-}
+//
+// 单元 I（`ConsoleAuditService`）复用同一实现后，`BoundedLineReader` / `BoundedLine` 从本文件
+// **搬到** `src/bounded_io.rs`（**代码体逐字节未改**，只加了 `pub(crate)` 与模块路径）。
+// 搬迁理由：本文件的原文写的是「两处共用，**不许再抄第三份**」——审计读取是第三个调用方，
+// 就地再抄一份就是**第四份**同类代码。上收后本文件的既有用例（45 条）即搬迁的回归网。
+// 原先的详细设计说明（为什么必须有界、与 `lines()` 的逐字语义、三个调用方的口径差异）
+// 随代码一并搬到 `bounded_io.rs` 的模块头。
+//
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 3. 服务
