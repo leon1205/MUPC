@@ -1903,6 +1903,11 @@ tempfile = "3.10"
 tokio-test = "0.4"
 ```
 
+> ⚠️ **已过期（单元 K，2026-09-18）**：上面清单里的 `mupc-web-api = { path = "../web-api" }`
+> 一行已**不成立**——`crates/web-api` 已整 crate 删除（12-本地显示终端 设计 §7.2/§7.3），
+> 该依赖项**不存在**。OTA 状态查询/资源监控等原 REST 出口由本机触摸屏 HMI（`mupcd` 的
+> `console_host` + 显示终端读通道）承接；此处仅保留历史沿革，**不得**据此新增 `web-api` 依赖。
+
 ### 9.4 配置文件
 
 **`/etc/mupc/ota-firmware.toml`（固件 OTA 配置）：**

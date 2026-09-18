@@ -1259,14 +1259,13 @@ pub fn config_view(cfg: &CoreConfig, revision: u64, write_mode: WriteMode) -> Co
 /// 而 `CoreConfig::validate()` 要求它非空。它**不是** UI 字段（不进 `ConfigView`），
 /// 故占位值不上屏；取 `"0.1.0"` 仅为让 `def().validate()` 这一自洽断言可用。
 ///
-/// `web_api.tls_cert` / `tls_key` 显式写 `null`（`Option` 字段，写 null 与缺省同为 `None`，二者皆可）。
+/// 单元 K：原样例里的 `web_api: { tls_cert: null, tls_key: null }` 已删——该字段随 `web-api`
+/// crate 删除，**不再是必需段**。此处不再保留它：本常量的职责是"最小可解析输入"；legacy 段的
+/// 兼容性由 `core_config.rs`（能读）+ `config_service.rs`（写了不丢）两处专项用例承担。
 const MINIMAL_CORE_YAML: &str = r#"
 version: "0.1.0"
 system: {}
 intercore: {}
-web_api:
-  tls_cert: null
-  tls_key: null
 ai_engine: {}
 plugins: {}
 "#;
@@ -2200,6 +2199,9 @@ mod tests {
     use mupc_display_proto::ConsoleAuditEntry;
 
     /// 端到端样例 yaml：含必需段（`CoreConfig` 无 serde 默认的那几段）+ 注释 + 未建模键。
+    ///
+    /// 单元 K：保留 `web_api:`（现为**未建模段**，见 `core_config.rs` 记）——顺带让本文件的
+    /// 端到端写路径用例覆盖"保存时 legacy 段不得被抹掉"。
     const WRITE_YAML: &str = r#"# 现场 yaml（注释必须保留）
 version: "0.1.0"
 system:
@@ -2563,7 +2565,9 @@ gateway:
     ///   再过一次网 —— 防"常量是干净的被测对象，拼出来的串却是脏的"（正是本次修复前的形态：
     ///   模板与拼接各改一半也能骗过只看常量的网）。
     ///
-    /// # 敏感性（破坏性探针，实测见交付报告）
+    /// # 敏感性（破坏性探针；下面四条是**注入式破坏**，逐条只对应一处变红）
+    ///
+    /// （原写"实测见交付报告"——该报告不随仓库分发 ⇒ 悬空引用，K 收尾 Q-4 改为自足表述。）
     ///
     /// ① 把 `receipt::SAVED` 改成 `"配置已保存（1 项）"`（= 修复前的用字）⇒ 构造性半边当场红；
     /// ② 把 `config_service` 的成功拼接改回 `format!("配置已保存（{} 项）", ..)` ⇒ 运行期半边红；

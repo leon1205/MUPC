@@ -47,7 +47,7 @@
 
 use mupc_display_proto::{
     AlarmItem, AlarmLevel, AlarmsSection, ControlSource, DeviceSection, DisplayConfig, DisplayFrame,
-    DisplayRange, Field, FieldFlag, InfoSection, InterlockSection, InterlockSourceItem, LinkState,
+    DisplayRange, Field, FieldFlag, InfoSection, InterlockSection, LinkState,
     RunState, ServiceScope, SocSource, PROTO_VERSION,
 };
 use std::sync::{Arc, Mutex, RwLock};
@@ -180,8 +180,11 @@ pub enum InterlockWiring {
 ///   **谎报**成"本来就没开"（`Disabled` 的屏文「联锁功能未启用」是一条**正面事实**）；
 /// - `io.enabled=false` ⇒ [`InterlockWiring::Disabled`]（**已知状态**「功能未启用」，
 ///   `available=true / enabled=false`），既不是「不可用」也不是「未联锁」。
+///
+/// 入参 `api` 的类型是**契约** `mupc_display_proto::InterlockApi`（单元 K：原为 web-api 的旧
+/// trait，随 crate 删除迁移到契约——两份签名合一，装配点与读通道现在吃同一个 `Arc<dyn>`）。
 pub fn interlock_wiring_for(
-    api: Option<Arc<dyn mupc_web_api::app_state::InterlockApi>>,
+    api: Option<Arc<dyn mupc_display_proto::InterlockApi>>,
     io_enabled: bool,
     release_hold_secs: u64,
 ) -> InterlockWiring {
@@ -424,16 +427,17 @@ impl AlarmSource for StorageAlarmSource {
     }
 }
 
-/// 生产联锁源：`InterlockController`（以 web-api `InterlockApi` 擦除注入，设计 §4.2 表 C 行）。
+/// 生产联锁源：`InterlockController`（以**契约** `mupc_display_proto::InterlockApi` 擦除注入，
+/// 设计 §4.2 表 C 行；单元 K：入参类型由 web-api 旧 trait 换成契约）。
 pub struct InterlockApiSource {
-    api: Arc<dyn mupc_web_api::app_state::InterlockApi>,
+    api: Arc<dyn mupc_display_proto::InterlockApi>,
     /// `io.release_hold_secs`（UI 提示「须保持 N 秒」，契约 `InterlockSection::release_hold_secs`）。
     release_hold_secs: u64,
 }
 
 impl InterlockApiSource {
     pub fn new(
-        api: Arc<dyn mupc_web_api::app_state::InterlockApi>,
+        api: Arc<dyn mupc_display_proto::InterlockApi>,
         release_hold_secs: u64,
     ) -> Self {
         Self {
@@ -446,41 +450,37 @@ impl InterlockApiSource {
 #[async_trait::async_trait]
 impl InterlockSource for InterlockApiSource {
     async fn read_interlock(&self) -> Result<InterlockSection, String> {
-        let st = self.api.status().await;
-        Ok(interlock_section_of(&st, self.release_hold_secs, now_ms()))
+        // 契约 `InterlockApi::status()` 的返回类型**就是**帧内联锁段的同一类型（`InterlockView`
+        // = `InterlockSection`，单一真源）⇒ 不再需要旧 DTO → 契约的字段搬运。字段就是 `Arc<dyn
+        // mupc_display_proto::InterlockApi>`，`status()` 经 dyn 直接可调，无需再 `use` trait。
+        let view = self.api.status().await;
+        Ok(interlock_section_of(&view, self.release_hold_secs, now_ms()))
     }
 }
 
-/// `InterlockStatus`（web-api 既有形态）→ 契约 [`InterlockSection`]。
+/// 契约 `InterlockView` → 帧内 [`InterlockSection`]：**只补两处本层才知道的事**。
 ///
-/// - `available = true`：能拿到 `status()` 即源可用（`status()` 当前无错误通道 ⇒ 失败分支在
-///   生产不可达，见顶部「已知真源缺口」表的 `interlock` 条；`Err` 路径由 [`InterlockWiring`]
-///   与测试桩覆盖）。
-/// - `fault_lamp` / `run_lamp` → `Some(..)`：控制器给出的是**明确值**（目标电平），不是「未知」；
-///   `None` 在契约里表示「不可得」，此处不适用。⚠️ 语义限度：它是**目标电平**而非 DO 回读
-///   （DO 写失败时实际灯态可能不同，控制器只在日志记错）。
+/// 契约视图已是段本体，本函数**不做字段搬运**（没有第二套字段可搬），只改写：
+/// - `ts_ms` = **本层的取数时刻**（`now_ms()`）。控制器自己的 `ts_ms` 是"控制器算完那一刻"，
+///   而帧的语义是"**采集时刻**"（设计 §3.1）⇒ 以本层为准（两者仅差微秒级，但语义不可混）；
+/// - `release_hold_secs` = **注入值**（装配点取的 `io.release_hold_secs`，与控制器 `cfg` 同源）。
+///
+/// 其余字段**逐字透传**，包括：
+/// - `available` / `enabled`：契约字段如实带走（**不再硬编码 `true`**）——`available=false`
+///   必须能被屏读成「联锁状态不可用」，不得被本层吞成"可用"（IL-01.6）；
+/// - `fault_lamp` / `run_lamp`：`Option<bool>` **如实透传**，`None` = 「灯未知」。
+///   ⚠️ 迁出前的 web-api 适配器把这两个槽 `unwrap_or(false)`（旧 DTO 根本没有"未知"槽），
+///   单元 K 迁移时按该适配器留的交接说明**如实透传**，不再吞 `None`。语义限度不变：它是
+///   **目标电平**而非 DO 回读（DO 写失败时实际灯态可能不同，控制器只在日志记错）。
 fn interlock_section_of(
-    st: &mupc_web_api::app_state::InterlockStatus,
+    view: &mupc_display_proto::interlock::InterlockView,
     release_hold_secs: u64,
     ts_ms: u64,
 ) -> InterlockSection {
     InterlockSection {
-        ts_ms,
-        available: true,
-        enabled: st.enabled,
-        latched: st.latched,
-        stop_failed: st.stop_failed,
-        sources: st
-            .sources
-            .iter()
-            .map(|s| InterlockSourceItem {
-                name: s.name.clone(),
-                tripped: s.tripped,
-            })
-            .collect(),
-        fault_lamp: Some(st.fault_lamp),
-        run_lamp: Some(st.run_lamp),
         release_hold_secs,
+        ts_ms,
+        ..view.clone()
     }
 }
 
@@ -1705,18 +1705,23 @@ mod tests {
         }
     }
 
-    /// 联锁 `InterlockApi` 桩（web-api 形态）。
-    struct FakeInterlockApi(mupc_web_api::app_state::InterlockStatus);
+    /// 联锁 `InterlockApi` 桩（**契约形态**——单元 K：原实现 web-api 旧 trait）。
+    ///
+    /// 桩形态必须与生产实现**同一个 trait**（契约 `mupc_display_proto::InterlockApi`），
+    /// 否则测的是"另一条只在测试里存在的路径"。
+    struct FakeInterlockApi(mupc_display_proto::interlock::InterlockView);
 
     #[async_trait::async_trait]
-    impl mupc_web_api::app_state::InterlockApi for FakeInterlockApi {
-        async fn status(&self) -> mupc_web_api::app_state::InterlockStatus {
+    impl mupc_display_proto::InterlockApi for FakeInterlockApi {
+        async fn status(&self) -> mupc_display_proto::interlock::InterlockView {
             self.0.clone()
         }
-        async fn request_release(&self) -> Result<(), String> {
+        async fn request_release(
+            &self,
+        ) -> Result<(), mupc_display_proto::InterlockReject> {
             Ok(())
         }
-        async fn ack_m1(&self) -> Result<(), String> {
+        async fn ack_m1(&self) -> Result<(), mupc_display_proto::InterlockReject> {
             Ok(())
         }
     }
@@ -2112,26 +2117,30 @@ mod tests {
 
     // ── C 联锁段（F16）──
 
-    /// `InterlockStatus` → 契约段逐字段映射（含 `release_hold_secs` 来自 io 配置）。
+    /// 契约 `InterlockView` → 帧内联锁段：**逐字段**（含 `release_hold_secs` 来自 io 配置、
+    /// `ts_ms` 换成采集时刻）。这是本层唯一做的两处改写，其余必须逐字透传。
     #[tokio::test]
     async fn interlock_status_maps_every_field() {
-        let api: Arc<dyn mupc_web_api::app_state::InterlockApi> =
-            Arc::new(FakeInterlockApi(mupc_web_api::app_state::InterlockStatus {
+        let api: Arc<dyn mupc_display_proto::InterlockApi> =
+            Arc::new(FakeInterlockApi(InterlockSection {
+                ts_ms: 777, // 控制器的取数时刻：**必须**被本层按采集时刻覆写（见下）
+                available: true,
                 enabled: true,
                 latched: true,
                 stop_failed: true,
-                sources: vec![mupc_web_api::app_state::InterlockSourceStatus {
+                sources: vec![InterlockSourceItem {
                     name: "estop".into(),
                     tripped: true,
                 }],
-                fault_lamp: true,
-                run_lamp: false,
+                fault_lamp: Some(true),
+                run_lamp: Some(false),
+                release_hold_secs: 999, // 控制器自报值：**必须**被注入值覆写
             }));
         let src = InterlockApiSource::new(api, 30);
         let sec = src.read_interlock().await.unwrap();
-        assert!(sec.available, "能取到 status() ⇒ 源可用");
+        assert!(sec.available, "契约视图的 available 如实透传（不再硬编码 true）");
         assert!(sec.enabled && sec.latched && sec.stop_failed);
-        assert_eq!(sec.release_hold_secs, 30, "来自 io.release_hold_secs");
+        assert_eq!(sec.release_hold_secs, 30, "来自 io.release_hold_secs（覆写控制器自报的 999）");
         assert_eq!(
             sec.sources,
             vec![InterlockSourceItem {
@@ -2142,6 +2151,31 @@ mod tests {
         assert_eq!(sec.fault_lamp, Some(true));
         assert_eq!(sec.run_lamp, Some(false));
         assert!(sec.ts_ms > 0, "ts_ms 为采集时刻");
+        assert_ne!(sec.ts_ms, 777, "必须换成本层采集时刻，不得沿用控制器自报时刻");
+    }
+
+    /// **单元 K 交接项**：灯态 `None`（"未知"）必须**如实上屏**，不得被吞成"灯灭"。
+    ///
+    /// 迁出前的 web-api 适配器把 `Option<bool>` 强制 `unwrap_or(false)`（旧 DTO 无"未知"槽），
+    /// 并在注释里明确要求"单元 K 把读通道换到契约版真源时一并迁移"——本条就是那张网。
+    ///
+    /// **改什么会让本条变红**：把 `interlock_section_of` 的灯位改回 `Some(view.fault_lamp
+    /// .unwrap_or(false))` ⇒ 「未知」被谎报成「灭」，第 1、2 条断言红。
+    #[tokio::test]
+    async fn interlock_lamp_unknown_is_passed_through_not_flattened_to_false() {
+        let api: Arc<dyn mupc_display_proto::InterlockApi> =
+            Arc::new(FakeInterlockApi(InterlockSection {
+                available: true,
+                enabled: true,
+                latched: true,
+                fault_lamp: None,
+                run_lamp: None,
+                ..Default::default()
+            }));
+        let sec = InterlockApiSource::new(api, 30).read_interlock().await.unwrap();
+        assert_eq!(sec.fault_lamp, None, "「灯未知」必须如实透传，不得臆造为灭");
+        assert_eq!(sec.run_lamp, None, "同上");
+        assert_ne!(sec.fault_lamp, Some(false), "未知 ≠ 灭（IL-01.6 同族：语义不得互替）");
     }
 
     /// **本单元最重要的语义网之二**：联锁**状态不可用 ≠ 未联锁**。
@@ -2198,14 +2232,16 @@ mod tests {
     /// **改什么会让本条变红**：把 `(None, true)` 合回 `_ => Disabled` ⇒ 第 2 条断言立即红。
     #[tokio::test]
     async fn interlock_wiring_three_way_exclusive() {
-        let api: Arc<dyn mupc_web_api::app_state::InterlockApi> =
-            Arc::new(FakeInterlockApi(mupc_web_api::app_state::InterlockStatus {
+        let api: Arc<dyn mupc_display_proto::InterlockApi> =
+            Arc::new(FakeInterlockApi(InterlockSection {
+                available: true,
                 enabled: true,
                 latched: false,
                 stop_failed: false,
                 sources: Vec::new(),
-                fault_lamp: false,
-                run_lamp: false,
+                fault_lamp: Some(false),
+                run_lamp: Some(false),
+                ..Default::default()
             }));
         assert!(
             matches!(

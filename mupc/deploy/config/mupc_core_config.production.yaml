@@ -31,11 +31,40 @@ intercore:
     response_timeout_ms: 200
     heartbeat_poll_ms: 1000
 
-web_api:
-  listen_addr: "0.0.0.0:8080"
-  enable_https: false            # Phase 2+ 启用
-  # tls_cert: "/opt/mupc/certs/server.crt"
-  # tls_key: "/opt/mupc/certs/server.key"
+# 【单元 K 已删除 `web_api:` 段】对外 HTTP 面（0.0.0.0:8080）随 `mupc-web-api` crate 整体移除，
+# 由本地触摸屏 HMI 取代（见 12-本地显示终端 设计 §7）。现场**既有**的带 `web_api:` 段的 yaml
+# 仍可正常加载（未建模段被忽略），且保存配置时**逐字保留**——不强制运维立即改文件。
+
+# 本地显示终端（12-本地显示终端 设计 §4.9 / §7.3 `display:` 段；mupcd 装配读通道 +
+# 控制通道 + `hmi_backend` 服务注册）。**字段真源 = 契约** `display-proto::DisplayConfig`。
+# 【生产】`enabled: true`（设计 §7.3「`.production.yaml` 同上 + 开启 `display.enabled: true`」）
+#   ⇒ 本机触摸屏 HMI 的读通道 / 控制通道随 mupcd 启动，`hmi_backend` 在册。
+#   ⚠️ 置 true 后下列字段**全量**过契约 `validate()`，任一项不合规 ⇒ mupcd **启动失败**
+#   （fail-fast；核对清单见 `deploy/deploy.md` §十）。地址只认**字面量**回环 `127.0.0.1` / `::1`
+#   （`localhost` 等名字一律拒——名字可经 hosts 重映射，PL-4 安全红线），端口 ∈ [1,65535]，
+#   且**两条地址不得相同**。
+display:
+  enabled: true                         # 【生产】启用本地 HMI 后端（读 + 控制）
+  bind_addr: "127.0.0.1:9810"           # 读通道（回环发布最新帧）
+  control_bind_addr: "127.0.0.1:9811"   # 控制通道（T-3 无登录写通道 → 硬绑回环）
+  publish_ms: 1000                      # 主拍周期（须 >= 100）
+  min_publish_interval_ms: 250          # 变更即组帧合并窗口（须 ∈ [100, publish_ms]）
+  device_poll_ms: 3000                  # 慢拍 A 装置状态（须 ∈ [1,4000]；F6.3 ≤5 s 前提）
+  alarm_poll_ms: 500                    # 慢拍 B 告警（须 ∈ [1,1000]；F7.3 ≤2 s 前提）
+  interlock_poll_ms: 500                # 慢拍 C 联锁（须 ∈ [1,1000]；F16.5 ≤2 s 前提）
+  alarm_page_size: 10                   # F7 告警列表最多展示条数（不得为 0）
+  log:                                  # 控制通道日志检索限额（EDGE-15）
+    max_files: 5
+    max_lines: 50000
+    live_ring: 2000                     # 实时日志 ring 容量（须 >= 100）
+    page_limit_max: 200
+    audit_page_size: 20
+  range:                                # 域值化量程（PRD §6.5 越界判 RangeError）
+    current_max_a: 300.0                # 五个数值均须有限正数（禁 NaN/±Inf/0/负数）
+    phase_power_max_kw: 100.0           # 须 <= total_power_max_kw
+    total_power_max_kw: 300.0
+    pcs_total_rated_kw: 60.0
+    inconsistency_threshold_kw: 3.0     # 须 <= pcs_total_rated_kw（超额定 ⇒ 角标恒灭）
 
 # IEC 104 北向网关监听（S2 §12.3 gateway 段；缺省 0.0.0.0:2404，与历史硬编码一致）
 # ⚠️ 本段**必须存在**：保留式编辑只做"行级替换"，段缺失会让该段字段的首次写入整体回写
@@ -52,7 +81,7 @@ ai_engine:
   enable_npu: true               # 是否启用 RK3588 NPU
   inference_timeout_ms: 500
   # 部署默认：本地策略优先（本地台区储能治理策略控制，AI 旁路参考不下发）
-  # 需 AI 智能控制时置 false 或经 Web API /api/v1/strategy-mode 运行时切换
+  # 需 AI 智能控制时置 false（单元 K 后**无**运行时切换端点：原 Web API 出口已随 crate 删除）
   local_priority: true  # AI 暂停期恒 true（平台目标调整 2026-09-09，观测空间维度重构前禁止置 false）
 
 plugins:
@@ -78,7 +107,7 @@ strategy:
 # io:
 #   enabled: true
 #   poll_ms: 100
-#   auto_release: false          # false = 须 Web 人工解除
+#   auto_release: false          # false = 须本地屏（P4）人工解除（K 后无 Web 面）
 #   release_hold_secs: 5
 #   stop_confirm_ms: 5000        # ⚠️ 须 ≥ 2× intercore.modbus_rtu.heartbeat_poll_ms（停机确认依赖心跳报 1013）
 #   di:

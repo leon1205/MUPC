@@ -1350,7 +1350,9 @@ Step 2  新建 mupcd 承接组件：ConfigService / LogService / ConsoleAuditSer
 Step 3  替换 startup.rs 步骤 10 整块（AppState 装配 + Router + 监听 + register_service）
         替换 SouthSink.sse 字段 → AlertFeed
 Step 4  删除 CoreConfig.web_api 字段 + WebApiConfig + validate 校验 + 默认值函数 + 单测样例
-Step 5  删除 crates/web-api 目录 + workspace members 条目 + core-bin Cargo.toml 的 mupc-web-api / axum 依赖
+Step 5  删除 crates/web-api 目录 + workspace members 条目 + core-bin Cargo.toml 的 mupc-web-api 依赖
+        ⚠️ 本行原写「/ axum 依赖」——**该部分已过期（单元 K 实测）**：`console_host` 直接用
+        axum，`axum` **必须保留**（逐字理由见 §7.3 的 core-bin / workspace 两行注记）
 Step 6  清理残余：yaml 段、部署文档、注释性引用（无害但应清）
 ```
 
@@ -1358,10 +1360,10 @@ Step 6  清理残余：yaml 段、部署文档、注释性引用（无害但应�
 
 | 文件 | 改动 | 说明 |
 |------|------|------|
-| `mupc/Cargo.toml` | 删 member `crates/web-api`；清理 `[workspace.dependencies]` 中仅 web-api 使用的 `axum` / `tower-http` / `jsonwebtoken`（须先确认无其它使用者） | — |
+| `mupc/Cargo.toml` | 删 member `crates/web-api`；清理 `[workspace.dependencies]` 中仅 web-api 使用的 `tower-http` / `jsonwebtoken`（须先确认无其它使用者）<br>⚠️ **「清理 `axum`」已过期（单元 K 实测）**——`axum` **必须保留**（`console_host` 直接用 axum，理由同下一张表 core-bin 行）；**本行仅把 `axum` 从清理清单划掉，其余处置不变** | — |
 | `mupc/crates/web-api/**`（32 个 .rs + static） | **整目录删除** | 含其全部单测 |
-| `mupc/crates/mupc-core-bin/Cargo.toml` | 删 `mupc-web-api`、`axum`（core-bin 直接用 axum 仅为止 Router 装配）；**LVGL 相关依赖不在此时 crate**（HMI 才需要） | — |
-| `mupc/crates/mupc-core-bin/src/core_config.rs` | 删 `web_api` 字段 / `WebApiConfig` / `default_listen_addr` / `default_enable_https` / `validate()` 该校验 / 约 20 处单测 yaml 样例中的 `web_api:` 段；**新增** `display` 段新字段的 validate | 改动面大但机械 |
+| `mupc/crates/mupc-core-bin/Cargo.toml` | 删 `mupc-web-api`、`axum`（core-bin 直接用 axum 仅为止 Router 装配）；**LVGL 相关依赖不在此时 crate**（HMI 才需要）<br>⚠️ **「删 `axum`」已过期（单元 K 实测）**——该判断写于 `console_host` 落地**之前**（"删掉 web-api 后 core-bin 只剩 Router 装配"）；而单元 G/H/I/J/K 新增的本地 HMI 控制通道**正在用 axum**（`console_host.rs:134-139` 的 `Router` / `extract::{Query, State}` / `Json`，`:385` 的 `axum::serve` 听 `display.control_bind_addr`）⇒ **`axum` 必须保留**，删掉即本 crate 编译失败。**本行仅订正「删 `axum`」这半句，其余处置不变** | — |
+| `mupc/crates/mupc-core-bin/src/core_config.rs` | 删 `web_api` 字段 / `WebApiConfig` / `default_listen_addr` / `default_enable_https` / `validate()` 该校验 / **36 处**单测 yaml 样例中的 `web_api:` 段（⚠️ 订正 S-6：原文写「约 20 处」，单元 K 实测为 36，量法 `git diff -- mupc/crates/mupc-core-bin/src/core_config.rs \| grep -c '^-.*web_api:'`）；**新增** `display` 段新字段的 validate | 改动面大但机械 |
 | `mupc/crates/mupc-core-bin/src/startup.rs` | 步骤 10 整块替换（约 −90 行 / +约 60 行）；`SouthSink.sse` → `alert_feed`；`register_service("web_api")` → `("hmi_backend")`；`ota_manager` 的创建失去唯一消费者（见下） | 关键路径 |
 | `mupc/crates/mupc-core-bin/src/interlock.rs`（约 1300 行） | `use` 改指 `display-proto::interlock`；`request_release`/`ack_m1` 返回 `Result<(), InterlockReject>`；错误构造改造；既有单测同步 | **中风险回归点** |
 | `mupc/crates/mupc-core-bin/src/display_host.rs` | 扩展：慢拍任务 A/B/C + 缓存 + 帧组装的四个新段；`LoopbackHttpPublisher` 保持 | 核心复用面 |

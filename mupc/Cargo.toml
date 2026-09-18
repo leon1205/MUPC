@@ -8,7 +8,6 @@ members = [
     "crates/intercore",
     "crates/data-processing",
     "crates/strategy-engine",
-    "crates/web-api",
     "crates/security",
     "crates/iec61850-plugin",
     "crates/mqtt-plugin",
@@ -47,11 +46,23 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
+# 控制通道 binder（`console_host.rs`：`axum::serve` + Router/State 装配）。
+# ⚠️ 设计 §7.3 写「core-bin 删 `axum`（core-bin 直接用 axum 仅为止 Router 装配）」——**该句已过期**：
+# 那句写在 `console_host` 落地**之前**，它描述的是"删掉 web-api 后 core-bin 只剩 Router 装配、
+# 因而 axum 无用"这一**当时**的判断；而单元 G/H/I/J/K 新增的本地 HMI 控制通道**正在用 axum**：
+# `console_host.rs` 直接 `use axum::Router` / `axum::extract::State` / `axum::serve`（听
+# `display.control_bind_addr`），路由与提取器都不是"无用装配"。
+# ⇒ `axum` 依赖**必须保留**；删掉即 `console_host` 编译失败（另一份同类登记见
+# `crates/mupc-core-bin/Cargo.toml` 同名注释）。设计 §7.3 该句已就地订正（标「已过期」）。
 axum = "0.7"
-tower = "0.5"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
-hyper = "1.3"
-hyper-util = { version = "0.1", features = ["full"] }
+# 以下**四项**随 web-api crate 一并清理（单元 K 核实：全仓 `crates/*/src/**` 零使用者；订正 S-8，
+# 原文写「三项」而下面列了四行）：
+#   `tower`（core-bin 只是声明了依赖，从未 `use`）/ `tower-http` / `hyper` / `hyper-util`
+#   —— `LoopbackHttpPublisher` 走**裸 tokio** `TcpListener`+`TcpStream`，不经 hyper。
+# `jsonwebtoken`：**依赖表内无该项**（`[workspace.dependencies]`、各 crate 的 `[dependencies]`
+# 与 `Cargo.lock` 均无条目 ⇒ 从未真正参与构建），无需处置。⚠️ 措辞订正（第一轮整改 S-4）：
+# 它并非"全仓 0 命中"——字面串仍出现在**本行注释**与设计文档 §7.2/§7.3 两处（均为文字提及，
+# 非依赖声明）；"0 命中"仅对**依赖表/源码引用**成立。
 tokio-net = "0.1"
 libloading = "0.8"
 chrono = { version = "0.4.35", features = ["serde"] }

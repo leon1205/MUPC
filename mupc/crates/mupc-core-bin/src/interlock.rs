@@ -30,7 +30,6 @@ use async_trait::async_trait;
 use mupc_intercore::IntercoreClient;
 use mupc_io::{DigitalIn, DigitalOut, IoError, SysfsIn, SysfsOut};
 use mupc_storage::{EventRepository, SystemEvent};
-use mupc_web_api::SsePushService;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -45,8 +44,8 @@ use std::time::{Duration, Instant};
 // - 错误 = `InterlockReject`，**每条拒绝路径逐一映射到具体变体**（见 `do_request_release` /
 //   `ack_m1` 的「拒绝路径 → 变体」对照表）。
 //
-// ⚠️ **web-api 的旧 trait 不再由本模块实现**：装配层 `startup.rs` 有一个**过渡适配器**
-// （`WebInterlockApi`，单元 K 的删除面）把它桥回去，避免"同一份逻辑两套错误语义"。
+// ⚠️ **单元 K 已完成收口**：web-api 的旧 trait 与装配层的过渡适配器**都已删除**，本模块现在
+// **只**实现契约 trait（上面那个 `use` 就是全部实现面）——不再存在"同一份逻辑两套签名"。
 use mupc_display_proto::{InterlockApi, InterlockReject, InterlockSourceStatus, InterlockStatus};
 
 use crate::core_config::IoConfig;
@@ -276,7 +275,9 @@ impl StateMachine {
 //
 // 测试性取舍：GPIO 用 `Box<dyn DigitalIn/Out>` 注入（mupc_io::MockIn/Out 或本地 stub）；
 // transport 用薄 trait `InterlockPort`（Arc<IntercoreClient> 真机转发，测试注入 fake 记调用）；
-// DB/SSE 用真实 trait 对象 `Arc<dyn EventRepository>` / `Arc<SsePushService>`（测试注入内存 fake）。
+// DB/告警投递用真实 trait 对象 `Arc<dyn EventRepository>` / `Arc<AlertFeed>`（测试注入内存 fake）。
+// ⚠️ 单元 K：原 `Arc<SsePushService>`（web-api）已换成 `crate::alert_feed::AlertFeed`
+//    ——事件名与文案**逐字不变**，只是换了承载（设计 §4.7）。
 
 /// 触发动作映射（与 `DiConf.action` 对齐）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,8 +406,8 @@ pub struct InterlockController {
     port: Box<dyn InterlockPort>,
     /// 事件落库（DB；测试注入内存 fake）
     events: Arc<dyn EventRepository>,
-    /// SSE 推送（联锁 major 事件）
-    sse: Arc<SsePushService>,
+    /// 告警即时投递（联锁 major 事件；⚠️ 非 F7 真源，见 `alert_feed` 模块头）
+    alert_feed: Arc<crate::alert_feed::AlertFeed>,
     /// 帧内可变数据（去抖/门禁沿/退避）
     runtime: Mutex<DiRuntime>,
     /// 构造期 GPIO 初始化失败待上报事件（run_loop 启动时 flush）
@@ -441,7 +442,7 @@ impl InterlockController {
         cfg: IoConfig,
         port: Box<dyn InterlockPort>,
         events: Arc<dyn EventRepository>,
-        sse: Arc<SsePushService>,
+        alert_feed: Arc<crate::alert_feed::AlertFeed>,
     ) -> Self {
         let mut ins: Vec<Box<dyn DigitalIn>> = Vec::with_capacity(cfg.di.len());
         let mut outs: Vec<Box<dyn DigitalOut>> = Vec::with_capacity(cfg.do_out.len());
@@ -488,7 +489,7 @@ impl InterlockController {
             }
         }
 
-        let ctl = Self::new_with_io(cfg, ins, outs, port, events, sse);
+        let ctl = Self::new_with_io(cfg, ins, outs, port, events, alert_feed);
         if any_pcs_failed {
             // 首 tick 前即呈现锁存（无人值守也无未联锁运行的窗口）；transport/DB 同步延至
             // run_loop 首帧（new 为同步构造无法 await，见 `sync_failsafe_latch` P2-1）。
@@ -511,7 +512,7 @@ impl InterlockController {
         *self.failsafe_preset.lock().unwrap() = true;
     }
 
-    /// 可测构造：外部直接注入 ins/outs/port/events/sse（不触碰 sysfs）。
+    /// 可测构造：外部直接注入 ins/outs/port/events/alert_feed（不触碰 sysfs）。
     /// 仅供本模块测试与 `new` 内部使用。
     fn new_with_io(
         cfg: IoConfig,
@@ -519,7 +520,7 @@ impl InterlockController {
         outs: Vec<Box<dyn DigitalOut>>,
         port: Box<dyn InterlockPort>,
         events: Arc<dyn EventRepository>,
-        sse: Arc<SsePushService>,
+        alert_feed: Arc<crate::alert_feed::AlertFeed>,
     ) -> Self {
         let n = cfg.di.len();
         let do_n = cfg.do_out.len();
@@ -543,7 +544,7 @@ impl InterlockController {
             outs,
             port,
             events,
-            sse,
+            alert_feed,
             runtime: Mutex::new(DiRuntime {
                 debounce: vec![0; n],
                 door_prev: vec![false; n],
@@ -622,7 +623,7 @@ impl InterlockController {
         let msg = "联锁锁存：GPIO pcs_stop DI 初始化失败 fail-safe 预置（transport/DB 同步）";
         self.record_event("interlock.triggered", "interlock", msg)
             .await;
-        let _ = self.sse.push_interlock("triggered", msg);
+        self.alert_feed.push_interlock("triggered", msg);
         tracing::warn!("{}", msg);
     }
 
@@ -772,7 +773,7 @@ impl InterlockController {
         let msg = format!("联锁触发（源：{}），下发 PCS 停机", summary);
         self.record_event("interlock.triggered", &summary, &msg)
             .await;
-        let _ = self.sse.push_interlock("triggered", &msg);
+        self.alert_feed.push_interlock("triggered", &msg);
         self.stop_once().await;
     }
 
@@ -787,7 +788,7 @@ impl InterlockController {
         let msg = "联锁自动释放（触发源已复位且保持期满，停机已确认）";
         self.record_event("interlock.cleared", "interlock", msg)
             .await;
-        let _ = self.sse.push_interlock("cleared", msg);
+        self.alert_feed.push_interlock("cleared", msg);
     }
 
     /// 单次停机写（**非阻塞**：只发一次 `port.stop()` + 记录 last_stop_attempt，不轮询等待确认）。
@@ -855,7 +856,7 @@ impl InterlockController {
             let msg = format!("PCS 停机失败/未确认：{reason}（自动释放被禁止，须人工确认放行）");
             self.record_event("interlock.stop_failed", "interlock", &msg)
                 .await;
-            let _ = self.sse.push_interlock("stop_failed", &msg);
+            self.alert_feed.push_interlock("stop_failed", &msg);
         }
     }
 
@@ -1127,7 +1128,7 @@ impl InterlockController {
         );
         self.record_event("interlock.cleared", "interlock", &msg)
             .await;
-        let _ = self.sse.push_interlock("cleared", &msg);
+        self.alert_feed.push_interlock("cleared", &msg);
         Ok(())
     }
 }
@@ -1268,8 +1269,7 @@ impl InterlockApi for InterlockController {
             ),
         )
         .await;
-        let _ = self
-            .sse
+        self.alert_feed
             .push_interlock("ack_m1", "M1 保护跳闸/停机人工授权重启");
         Ok(())
     }
@@ -1499,7 +1499,7 @@ mod runner_tests {
     use chrono::{DateTime, Utc};
     use mupc_io::{IoError, MockIn, MockOut};
     use mupc_storage::StorageError;
-    use mupc_web_api::SsePushService;
+    use crate::alert_feed::AlertFeed;
     use std::sync::{Arc, Mutex};
 
     use crate::core_config::{DiConf, DoConf, IoConfig};
@@ -1711,7 +1711,7 @@ mod runner_tests {
         let pin = Arc::new(MockIn::new());
         let run = Arc::new(MockOut::new());
         let fault = Arc::new(MockOut::new());
-        let sse = Arc::new(SsePushService::new(16));
+        let alert_feed = Arc::new(AlertFeed::new());
         let inner = port.inner();
         let ctl = Arc::new(InterlockController::new_with_io(
             cfg,
@@ -1722,7 +1722,7 @@ mod runner_tests {
             ],
             Box::new(port),
             events,
-            sse,
+            alert_feed,
         ));
         (ctl, pin, run, fault, inner)
     }
@@ -2451,14 +2451,14 @@ mod runner_tests {
         port.inner().lock().unwrap().stop_ok = true;
         port.inner().lock().unwrap().stop_sets_zero = true;
         let events = Arc::new(FakeEventRepo::default());
-        let sse = Arc::new(SsePushService::new(16));
+        let alert_feed = Arc::new(AlertFeed::new());
         let ctl = Arc::new(InterlockController::new_with_io(
             cfg,
             vec![Box::new(DiReadFailStub)],
             vec![],
             Box::new(port),
             events.clone(),
-            sse,
+            alert_feed,
         ));
         ctl.tick_frame().await;
         assert!(
@@ -2581,7 +2581,7 @@ mod runner_tests {
         let run = Arc::new(MockOut::new());
         let fault = Arc::new(MockOut::new());
         let inner = port.inner();
-        let sse = Arc::new(SsePushService::new(16));
+        let alert_feed = Arc::new(AlertFeed::new());
         let ctl = Arc::new(InterlockController::new_with_io(
             cfg,
             vec![Box::new(DiReadFailStub) as Box<dyn DigitalIn>], // pcs_stop DI init 失败 stub
@@ -2591,7 +2591,7 @@ mod runner_tests {
             ],
             Box::new(port),
             events.clone(),
-            sse,
+            alert_feed,
         ));
         // 模拟 new() 的 any_pcs_failed 分支：预置本地 latch + 标记（transport/DB 尚未同步）
         ctl.preset_failsafe();

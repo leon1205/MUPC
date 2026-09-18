@@ -228,7 +228,7 @@ impl ModelManager {
         }
     }
 
-    /// v3.1: 订阅安全事件流（供 bin crate / web-api SSE 推送使用）
+    /// v3.1: 订阅安全事件流（供 bin crate 侧的告警/事件消费使用）
     ///
     /// 返回一个新的 broadcast Receiver，可多次调用创建多个独立订阅。
     /// 每个 Receiver 通过 `recv()` 异步接收 SafetyWrapperEvent。

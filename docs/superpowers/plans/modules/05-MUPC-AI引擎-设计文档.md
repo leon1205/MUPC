@@ -153,6 +153,11 @@ mupc-strategy-engine --> mupc-ai-engine (AiIntegrator, AiCommandValidator)
 mupc-web-api          --> mupc-ai-engine (通过 AiIntegrator 门面)
 ```
 
+> ⚠️ **已过期（单元 K，2026-09-18）**：上表第二行 `mupc-web-api` 已在单元 K 随
+> **`crates/web-api` 整 crate 删除**（12-本地显示终端 设计 §7.2/§7.3），该依赖关系
+> **不再存在**；原「通过 AI 可视化 Web 面读取 AI 状态」的出口由本机触摸屏 HMI
+> （`mupc-core-bin` 的 `console_host` / 显示终端读通道）取代。本行仅为历史沿革保留。
+
 ### 1.4 数据流
 
 ```

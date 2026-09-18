@@ -895,11 +895,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::time::Duration;
 
-    /// 现场样例 yaml：**含注释 + 含未建模键 + 非字母序**。
+    /// 现场样例 yaml：**含注释 + 含 legacy `web_api:` 段 + 含未建模键 + 非字母序**。
     ///
     /// ⚠️ 必须含 `CoreConfig` 里**没有 `#[serde(default)]` 的顶层段**（`system` / `intercore` /
-    /// `web_api` / `ai_engine` / `plugins`）——缺一个就解析不了，而解析不了的文件**根本不可能**
-    /// 出现在现场（`mupcd` 启动期就会失败）。测试样例若"偷懒少写段"，测的就不是真实输入。
+    /// `ai_engine` / `plugins`）——缺一个就解析不了，而解析不了的文件**根本不可能**出现在现场
+    /// （`mupcd` 启动期就会失败）。测试样例若"偷懒少写段"，测的就不是真实输入。
+    ///
+    /// 单元 K：`web_api:` **不再是**必需段（该字段随 crate 删除，见 `core_config.rs` 记）；此处
+    /// **故意保留**它——它现在是本样例里「**现场 legacy 段**」的实证，本文件的字节级用例正好证明
+    /// 「保存配置不会抹掉它」（设计 §7.3 兼容性主张后半）。
     const YAML: &str = r#"# 现场 yaml（注释必须保留）
 version: "0.1.0"
 system:
@@ -911,7 +915,7 @@ intercore:
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
   transport: tcp
-web_api:
+web_api:                   # 现场 legacy 段（单元 K 后 CoreConfig 已无此字段）：保存必须逐字保留
   listen_addr: 0.0.0.0:8080
   tls_cert: null
   tls_key: null
@@ -927,6 +931,10 @@ legacy_top:                # 未建模的**顶层段**（CoreConfig 不认，必
 
     /// 与 [`YAML`] 同形，但**故意不含 `gateway:` 段**（"不可定位 ⇒ 整体回写"回退路径的输入；
     /// 其余必需段齐全，否则它连 `CoreConfig` 都解析不出来，不构成现场输入）。
+    ///
+    /// 单元 K：这里保留 `web_api:`（现为**未建模段**）——整体回写**确实会丢掉它**，而这正是
+    /// 回退路径已登记的代价（`WriteMode::FullRewrite` 在回执/审计里可见，EDGE-23）。
+    /// 不在此断言它"应当幸存"：那会与"未建模段在整体回写下整段消失"的既有结论自相矛盾。
     const YAML_NO_GATEWAY: &str = "# 注释会丢\nversion: \"0.1.0\"\nsystem:\n  log_level: info\n\
                     intercore:\n  host: 10.0.0.7\n  port: 9100\n\
                     web_api:\n  tls_cert: null\n  tls_key: null\n\
@@ -934,6 +942,9 @@ legacy_top:                # 未建模的**顶层段**（CoreConfig 不认，必
 
     /// 「恢复默认值」用例的输入：**7 个可写键全部与默认值不同** ⇒ 一次重置必须全部落盘
     /// （只改一个键的样例测不出"全量应用"，也测不出"逐字段审计条目"）。
+    ///
+    /// 单元 K：保留 `web_api:`（现为**未建模段**）——同 [`YAML`]，用最少的字节顺带覆盖
+    /// "批量写入也不得碰它"。
     const YAML_ALL_DIFFERENT: &str = "\
 # 恢复默认值用例
 version: \"0.1.0\"
@@ -1145,6 +1156,87 @@ gateway:
         // 审计：1 条 intent + 2 条 outcome（1 字段 + 1 write_mode）
         assert_eq!(h.sink.intents.load(Ordering::SeqCst), 1);
         assert_eq!(h.sink.outcomes.load(Ordering::SeqCst), 2);
+    }
+
+    /// **配置向后兼容 ②「写了不丢」**（设计 §7.2 Step 4 末段 / §7.3 兼容性主张后半，单元 K）。
+    ///
+    /// 端到端（真 `ConfigService` + 真临时文件）：输入含**现场 legacy `web_api:` 段**（且该段
+    /// 带行内注释 —— 比原样更严的形态），改一个**无关键**后断言：
+    /// 1. 该段连同其注释**逐字节**出现在保存后的文件里（"能读"之外还要"写了不丢"）；
+    /// 2. 整个文件除目标那一行外**逐行字节不变**（含注释行数守恒）；
+    /// 3. 写模式是 `TextPreserve`（**不是** `FullRewrite`——后者才会丢未建模段）。
+    ///
+    /// 与 `core_config.rs::legacy_web_api_section_still_loads_and_is_ignored` 合起来 = 完整主张：
+    /// **"能读"且"写了不丢"**。前者单测"忽略未知段不报错"，本条单测"保存不抹掉它"。
+    ///
+    /// **改什么会让本条变红**：把写路径改回"整棵树序列化回写"（`web_api` 已不在模型内 ⇒
+    /// 第 1 条立刻红）；或把保留式编辑降级成 FullRewrite ⇒ 第 3 条红。
+    #[tokio::test]
+    async fn legacy_web_api_section_survives_a_real_save_verbatim() {
+        let yaml = YAML; // 含 legacy `web_api:` 段（带行内注释）+ 未建模键 + 未建模顶层段
+        assert!(
+            yaml.contains("web_api:                   # 现场 legacy 段"),
+            "本用例前提：样例里必须有带注释的 legacy `web_api:` 段"
+        );
+        let h = harness_with(Arc::new(ProbeSink::default()), yaml); // 解析失败即 panic ⇒ 兼容①
+        let before = disk(&h);
+        let block_before = legacy_block(&before);
+        assert_eq!(
+            block_before,
+            "web_api:                   # 现场 legacy 段（单元 K 后 CoreConfig 已无此字段）：保存必须逐字保留\n  listen_addr: 0.0.0.0:8080\n  tls_cert: null\n  tls_key: null\n",
+            "取块函数必须先取对（否则下面的断言是恒真）"
+        );
+
+        let resp = h
+            .svc
+            .apply(&ok_request("rid-legacy", &[("intercore.port", serde_json::json!(2405))]))
+            .await;
+        assert!(resp.ok, "保存必须成功: {resp:?}");
+        assert_eq!(
+            resp.applied.unwrap().write_mode,
+            WriteMode::TextPreserve,
+            "本用例前提：走保留式编辑（回退路径本就会丢未建模段，已由 EDGE-23 登记）"
+        );
+
+        let after = disk(&h);
+        assert_eq!(
+            legacy_block(&after),
+            block_before,
+            "legacy `web_api:` 段（含行内注释）必须**逐字节**保留——不得被抹掉、不得被重排"
+        );
+        // 逐行比：恰有目标行不同（其余含注释 / 未建模段 / 行尾全不动）
+        let (a, b): (Vec<&str>, Vec<&str>) =
+            (before.split_inclusive('\n').collect(), after.split_inclusive('\n').collect());
+        assert_eq!(a.len(), b.len(), "行数不得变化");
+        let diff: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+        assert_eq!(diff.len(), 1, "恰有 1 行被替换，实得 {diff:?}");
+        assert_eq!(
+            b[diff[0]],
+            "  port: 2405   # PCS 端口\n",
+            "且被替换的就是目标行（行内注释与空格原样）"
+        );
+        // 内存副本同步（写 A 读 B 的静默失实在此不适用）
+        assert_eq!(h.core.read().await.intercore.port, 2405);
+    }
+
+    /// 从 yaml 文本里**逐字**取出 `web_api:` 段（含其后缩进行，到下一个顶层键或文末为止）。
+    fn legacy_block(text: &str) -> String {
+        let mut out = String::new();
+        let mut inside = false;
+        for line in text.split_inclusive('\n') {
+            let top_level = !line.starts_with(' ') && !line.starts_with('\t') && !line.starts_with('#');
+            if top_level {
+                if line.starts_with("web_api:") {
+                    inside = true;
+                } else if inside {
+                    break;
+                }
+            }
+            if inside {
+                out.push_str(line);
+            }
+        }
+        out
     }
 
     /// 保存一个"值没变"的字段 ⇒ **不写盘**（mtime / 字节都不动），但仍是成功回执。
@@ -1553,7 +1645,12 @@ gateway:
     /// 明写"需重启"，而**真热生效**的键**不得**被写成需重启（不然是反向失真）。
     ///
     /// 同时钉住**重要 4 ①**：后端**受理端**（回执 `message`）确实**有**这条真话——
-    /// 用户在屏上看不到它是**渲染层**的缺口（本单元只登记，见交付报告）。
+    /// 用户在屏上看不到它是**渲染层**的缺口（本单元只登记不改）。**登记落点 = 设计 §4.3.5
+    /// 末段「⚠️ 残余（如实登记）」+ UI 设计文档 **PD24**（`local-display/src/ui/pages/p2_config.rs:58`）**：
+    /// `Toast` 文本区 400 px（`DOTS` 截断）⇒ 长回执的键名可能被截掉；回执 `message` 的用字
+    /// （`项` / 全角括号等）不在字体码表控制面内。
+    /// ⚠️ 原句写"见**交付报告**"——该报告**不随仓库分发**（全仓只有 `docs/superpowers/reports/`
+    /// 下 2026-05-27 的两份 Phase1/2 报告）⇒ 悬空引用，K 收尾 Q-4 已改为就地写清依据。
     ///
     /// **改什么会让本条变红**：把 `outcome_entries` 的 `|(k, v, outcome)|` 改回
     /// `|(k, v, _)|`（丢弃 `ApplyOutcome`）⇒ 第 2 条断言红（`reason` 变回 `None`）；

@@ -1,7 +1,9 @@
 //! 主配置文件 `mupc_core_config.yaml` 结构定义
 //!
 //! 定义 mupcd 守护进程的完整配置结构，包括系统参数、
-//! 核间通信、Web API、AI 引擎和插件配置。
+//! 核间通信、AI 引擎、插件、网关、IO/联锁、站级南向与本地显示终端配置。
+//! （原「Web API」段已随 `mupc-web-api` crate 删除——单元 K；现场遗留的 `web_api:` 段按
+//! **未建模段**容忍并逐字保留，见 [`CoreConfig`] 顶部说明。）
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -16,11 +18,16 @@ use mupc_display_proto::DisplayConfig;
 /// 未新增 `deny_unknown_fields`（设计 §4.3.2.1「`Serialize` 的边界」）：现场 yaml 里仍有
 /// **本结构未建模**的段/键（运维手写的 `legacy_top:` 一类）必须继续可加载，否则升级即启动失败。
 ///
-/// ⚠️ **更正（评审重要 5）**：`web_api:` **不是**"未建模"段——本结构有
-/// [`WebApiConfig`] 字段 `pub web_api`（见下）。故在**整体回写**（保留式编辑不可定位时的
-/// 回退路径）下，它会被 `serde_yaml` **重新序列化**：**内容不丢**，但**格式被重排**
-/// （缩进转 2 空格、键序按结构体字段序、段内注释消失）。真正的"未建模"是
-/// `CoreConfig` 里**没有对应字段**的段（那种段在整体回写时才会**整段消失**）。
+/// ⚠️ **单元 K 订正（2026-09）：`web_api:` 已从「已建模段」退为「未建模段」**。本结构原有一个
+/// `pub web_api: WebApiConfig` 字段，随 `mupc-web-api` crate 整体删除（设计 §7.2 Step 4）。
+/// 结论有二，**两条都必须成立**：
+/// - **能读**：现场既有的带 `web_api:` 段的 yaml **仍可正常加载**（未设 `deny_unknown_fields`
+///   ⇒ 该段被**忽略**而非报错），不强制运维立即改文件（设计 §7.3 兼容性主张前半）。
+///   由 `legacy_web_api_section_still_loads_and_is_ignored` 钉死。
+/// - **写了不丢**：正常保存路径是**保留式编辑**（文本行级替换，见 `yaml_edit.rs`），`web_api:`
+///   段连同其注释**逐字保留**。只有在**整体回写**（保留式编辑不可定位时的回退路径）下它才会
+///   整段消失——而现在它与 `legacy_top:` 属**同一类**（未建模段），"整体回写会丢未建模段"
+///   这条已登记的边界**同样覆盖它**（`WriteMode::FullRewrite` 在回执/审计里可见，EDGE-23）。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CoreConfig {
     /// 配置版本号（用于兼容性校验）
@@ -29,8 +36,6 @@ pub struct CoreConfig {
     pub system: SystemConfig,
     /// 核间通信配置
     pub intercore: InterCoreConfig,
-    /// Web API 配置
-    pub web_api: WebApiConfig,
     /// AI 引擎配置
     pub ai_engine: AiEngineConfig,
     /// 插件配置
@@ -230,21 +235,6 @@ impl Default for ModbusRtuConfig {
     }
 }
 
-/// Web API 配置
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WebApiConfig {
-    /// 监听地址，如 "0.0.0.0:8080"
-    #[serde(default = "default_listen_addr")]
-    pub listen_addr: String,
-    /// 是否启用 HTTPS（Phase 2+）
-    #[serde(default = "default_enable_https")]
-    pub enable_https: bool,
-    /// TLS 证书路径
-    pub tls_cert: Option<PathBuf>,
-    /// TLS 私钥路径
-    pub tls_key: Option<PathBuf>,
-}
-
 /// AI 引擎配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AiEngineConfig {
@@ -427,14 +417,6 @@ fn default_debounce() -> u32 {
     3
 }
 
-fn default_listen_addr() -> String {
-    "0.0.0.0:8080".to_string()
-}
-
-fn default_enable_https() -> bool {
-    false
-}
-
 // IEC 104 网关段（S2 §12.3 gateway）默认值
 fn default_gateway_addr() -> String {
     "0.0.0.0".to_string()
@@ -461,7 +443,8 @@ fn default_inference_timeout_ms() -> u64 {
 }
 
 fn default_local_priority() -> bool {
-    // 部署默认：本地台区储能治理策略优先（AI 旁路）；需 AI 控制时经配置或 Web API 切换
+    // 部署默认：本地台区储能治理策略优先（AI 旁路）；需 AI 控制时改 `ai_engine.local_priority`
+    // 后重启（单元 K 后**无**运行时切换端点——原 Web API 出口已随 crate 删除）
     true
 }
 
@@ -498,9 +481,6 @@ impl CoreConfig {
         }
         if self.intercore.port == 0 {
             return Err("intercore.port 不能为 0".to_string());
-        }
-        if self.web_api.listen_addr.is_empty() {
-            return Err("web_api.listen_addr 不能为空".to_string());
         }
         // M7/生产安全：transport=modbus_rtu（PCS 主链路）时，串口/从站/波特率须合法。
         // 非法值启动即报错，避免运行时 open_ctx 才暴露。
@@ -561,8 +541,11 @@ impl CoreConfig {
     ///
     /// ⚠️ **全集校验（不止地址）**：转发的 `DisplayConfig::validate()` 是**全集**校验，启动期
     /// 一并门禁下列**非地址**不变量（fail-fast，任一不合规则 `mupcd` **启动失败**）：
-    /// `publish_ms >= 100`；`min_publish_interval_ms ∈ [200, publish_ms]`；`alarm_poll_ms` /
-    /// `interlock_poll_ms` / `device_poll_ms` 上界；`alarm_page_size != 0`；`log.live_ring >= 100`；
+    /// ⚠️ **数值逐字以契约为准**（本函数只转发，不自持口径）：`publish_ms >= 100`；
+    /// `min_publish_interval_ms ∈ [100, publish_ms]`（下界 = 契约 `MIN_MERGE_WINDOW_MS` = 100，
+    /// 与 `deploy/deploy.md` §10.2 核对表同口径。**订正（K 收尾 Q-1）**：本行原写 `[200, …]`，比契约严、
+    /// 且与 deploy 文档的同一句话孪生不一致，已按契约订正）；`alarm_poll_ms` / `interlock_poll_ms` /
+    /// `device_poll_ms` 上界；`alarm_page_size != 0`；`log.live_ring >= 100`；
     /// `range.*` 须为有限正数（禁 NaN/±Inf/0/负数），且 `phase_power_max_kw <= total_power_max_kw`、
     /// `inconsistency_threshold_kw <= pcs_total_rated_kw`。原手写实现**只查地址**，这些一律放行
     /// ⇒ 升级后现场 yaml 若不合规会**首次启动即失败**，迁移核对清单见 `deploy/deploy.md` §9.4。
@@ -748,7 +731,10 @@ system:
   log_level: "debug"
 intercore:
   host: "192.168.1.1"
-  port: 9100
+  port: 9101
+# ── 现场 legacy 段（单元 K：`CoreConfig` 已无 `web_api` 字段）──
+# 它不是任何被建模的段，此处**故意保留**：证明"带 `web_api:` 的现场 yaml 仍可加载"
+# （设计 §7.3 兼容性主张前半）。专项回归见 `legacy_web_api_section_still_loads_and_is_ignored`。
 web_api:
   listen_addr: "0.0.0.0:9000"
 ai_engine: {}
@@ -758,7 +744,15 @@ plugins: {}
         assert_eq!(config.version, "1.0");
         assert_eq!(config.system.log_level, "debug");
         assert_eq!(config.intercore.host, "192.168.1.1");
-        assert_eq!(config.web_api.listen_addr, "0.0.0.0:9000");
+        // 单元 K：原断言是 `config.web_api.listen_addr == "0.0.0.0:9000"`（该字段已随 crate 删除）。
+        // **替代断言**：改断 `intercore.port`——它替代的是"解析确实生效"，不是"某个 web-api 字段"。
+        //
+        // ⚠️ **本断言必须取非默认值**（第一轮整改 I-1）：`default_intercore_port()` 返回 9100，
+        // 若此处夹具写 `port: 9100` 并断言 9100，则**解析完全失效时断言依然为真**（恒真网）。
+        // 故夹具取 9101（≠ 默认 9100）⇒ 删掉夹具那一行 `port: 9101`（或把断言值改回 9100）
+        // 本行即红，**可自行复现**（第二轮整改 ②：原文写"实测记录见本用例的破坏性验证"，
+        // 而本文件里并无这样一份记录 ⇒ 指向不存在之物，改为可复现的操作说明）。
+        assert_eq!(config.intercore.port, 9101);
         // 默认值校验
         assert_eq!(config.system.shutdown_timeout_sec, 30);
         assert_eq!(
@@ -786,6 +780,55 @@ plugins: {}
         assert!(!config.mqtt_bridge.local_enabled);
     }
 
+    /// **配置向后兼容 ①「能读」**（设计 §7.2 Step 4 末段 / §7.3 兼容性主张前半，单元 K）：
+    /// 现场既有的、**带完整 `web_api:` 段**（含注释、含 `tls_cert`/`tls_key`）的 yaml
+    /// **仍必须能加载并通过 `validate()`**——不强制运维在升级时立即改文件。
+    ///
+    /// 依据：`CoreConfig` **未**设 `deny_unknown_fields` ⇒ `web_api` 退为**未建模段**后被
+    /// **忽略**（不是报错）。同时钉住"忽略 ≠ 影响其它段"：同一个 yaml 里的已建模段照常生效。
+    ///
+    /// **改什么会让本条变红**：给 `CoreConfig` 加 `#[serde(deny_unknown_fields)]`
+    /// （现场 yaml 立刻启动失败）⇒ 第 1 条断言红。
+    #[test]
+    fn legacy_web_api_section_still_loads_and_is_ignored() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "192.168.1.1"   # 已建模段照常生效
+  port: 9100
+web_api:                  # 现场 legacy 段（单元 K 后不再是模型的一部分）
+  listen_addr: "0.0.0.0:8080"
+  enable_https: false
+  tls_cert: null
+  tls_key: null
+ai_engine: {}
+plugins: {}
+"#;
+        let cfg: CoreConfig = serde_yaml::from_str(yaml)
+            .expect("带 `web_api:` 段的现场 yaml 必须仍可解析（未设 deny_unknown_fields）");
+        cfg.validate()
+            .expect("该 yaml 必须仍过 validate()（否则现场升级即启动失败）");
+        // 已建模段照常生效（"忽略整段"不等于"忽略整个文件"）
+        assert_eq!(cfg.intercore.port, 9100);
+        assert_eq!(cfg.system.log_level, "info");
+        // 边界登记（**事实**，不是主张）：该段确实**不在**模型里 ⇒ 整体序列化回写会丢它。
+        // 正常保存路径不受影响（保留式编辑按文本行替换，见 `yaml_edit.rs`），
+        // 端到端往返由 `config_service` / `yaml_edit` 的字节级用例钉死。
+        let round = serde_yaml::to_string(&cfg).unwrap();
+        // ⚠️ **订正 S-3（点明本断言证的边界）**：这条证的是**模型边界**——`web_api` 不是
+        // `CoreConfig` 的字段 ⇒ **整体序列化回写**这座桥必然丢它。它**不**证、也**证不了**
+        // "现场文件不被抹掉"：那取决于**保存路径**是否走保留式编辑。
+        // "写了不丢"由 `config_service::legacy_web_api_section_survives_a_real_save_verbatim`
+        // 负责（真实保存动作的**逐字节**往返）。两条断言合起来才是完整的兼容性主张。
+        assert!(
+            !round.contains("web_api"),
+            "`web_api` 已不在模型内 ⇒ **整体回写**必然丢它（模型边界；「写了不丢」见 \
+             config_service::legacy_web_api_section_survives_a_real_save_verbatim）"
+        );
+    }
+
     /// R2-B5: mqtt_bridge 段显式配置可解析（north/local_enabled 生效）
     #[test]
     fn test_mqtt_bridge_enabled_config() {
@@ -796,8 +839,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 mqtt_bridge:
@@ -829,12 +870,6 @@ mqtt_bridge:
                 reconnect_interval_sec: 3,
                 transport: "tcp".into(),
                 modbus_rtu: ModbusRtuConfig::default(),
-            },
-            web_api: WebApiConfig {
-                listen_addr: "0.0.0.0:8080".into(),
-                enable_https: false,
-                tls_cert: None,
-                tls_key: None,
             },
             ai_engine: AiEngineConfig {
                 model_dir: PathBuf::from("/tmp/models"),
@@ -877,12 +912,6 @@ mqtt_bridge:
                 transport: "tcp".into(),
                 modbus_rtu: ModbusRtuConfig::default(),
             },
-            web_api: WebApiConfig {
-                listen_addr: "0.0.0.0:8080".into(),
-                enable_https: false,
-                tls_cert: None,
-                tls_key: None,
-            },
             ai_engine: AiEngineConfig {
                 model_dir: PathBuf::from("/tmp"),
                 config_file: PathBuf::from("/tmp"),
@@ -914,8 +943,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 "#;
@@ -936,8 +963,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 display:
@@ -963,6 +988,67 @@ display:
         );
     }
 
+    /// **I-2 回归（第一轮整改）：两份 deploy yaml 的 `display:` 段必须整体合规**。
+    ///
+    /// 依据设计 §7.3 的两行：`mupc/deploy/config/mupc_core_config.yaml` 与 `.production.yaml`
+    /// 「删 `web_api:` 段；加 `display:` 的 `enabled/control_bind_addr/*_poll_ms/log:`」，
+    /// 且「`.production.yaml` 同上 + **开启 `display.enabled: true`**」。
+    /// 背景：`DisplayConfig.enabled` 缺省 **false** ⇒ 两份 yaml 原先都**没有** `display:` 段时，
+    /// 直接按仓库 yaml 部署 = 读通道 / 控制通道 / `hmi_backend` 注册**全部不启动**（静默无 HMI）。
+    ///
+    /// 以**真文件**（`include_str!` ⇒ 与现场逐字节同源）为输入，逐份断言：
+    /// ① 可解析为 `CoreConfig`；② 过 `CoreConfig::validate()`；③ **直接**过契约
+    /// `DisplayConfig::validate()`；④ `enabled` 取值（仅 production 为 true）。
+    ///
+    /// ⚠️ **③ 是必需的第二道网**：非生产那份 `enabled: false` ⇒ `validate_display()` 会
+    /// **整段早退跳过**，只靠 ② 就**验不到**它的非地址不变量（时延 / ring / 量程）。故此处
+    /// 对两份都**真跑**契约校验，不看 `enabled`。
+    ///
+    /// **改什么会让本条变红**：把任一 `bind_addr` / `control_bind_addr` 改成 `"localhost:9810"`
+    /// （名字不是字面量回环）、端口改成 `0`、两址写成同一个、`publish_ms` 压到 99、
+    /// `log.live_ring` 压到 99、`alarm_page_size: 0`、`range.*` 写成 `.inf` /
+    /// `phase_power_max_kw > total_power_max_kw` ⇒ ③ 红（实测记录：`localhost` 与端口 0 各红一次）；
+    /// 把 `.production.yaml` 的 `enabled` 改回 `false` ⇒ ④ 红。
+    #[test]
+    fn deploy_configs_display_sections_are_contract_valid() {
+        for (name, text, expect_enabled) in [
+            (
+                "mupc_core_config.yaml",
+                include_str!("../../../deploy/config/mupc_core_config.yaml"),
+                false,
+            ),
+            (
+                "mupc_core_config.production.yaml",
+                include_str!("../../../deploy/config/mupc_core_config.production.yaml"),
+                true,
+            ),
+        ] {
+            let cfg: CoreConfig = serde_yaml::from_str(text)
+                .unwrap_or_else(|e| panic!("`{name}` 必须能解析为 CoreConfig: {e}"));
+            assert!(
+                cfg.validate().is_ok(),
+                "`{name}` 必须过 CoreConfig::validate(): {:?}",
+                cfg.validate()
+            );
+            assert_eq!(
+                cfg.display.enabled, expect_enabled,
+                "`{name}` 的 display.enabled（设计 §7.3：仅 production 开启）"
+            );
+            // ③ 契约**全集**校验：两份都真跑（不因 enabled=false 早退而漏验）
+            assert!(
+                cfg.display.validate().is_ok(),
+                "`{name}` 的 display 段必须过契约 DisplayConfig::validate(): {:?}",
+                cfg.display.validate()
+            );
+            // 地址取值本身（防"复制粘贴换名"式错配：两址须各占一端点、均为字面量回环）
+            assert_eq!(cfg.display.bind_addr, "127.0.0.1:9810", "`{name}` 读通道端点");
+            assert_eq!(
+                cfg.display.control_bind_addr, "127.0.0.1:9811",
+                "`{name}` 控制通道端点"
+            );
+        }
+    }
+
     /// 12-显示终端 §7.3：回环**只认字面量** —— `127.0.0.1` / `::1`（含 `[::1]:port` 写法）
     /// 通过；`localhost`（名字）与缺端口（`"127.0.0.1"`）按契约**一律拒**。
     ///
@@ -981,8 +1067,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {{}}
 plugins: {{}}
 display:
@@ -1044,8 +1128,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {{}}
 plugins: {{}}
 display:
@@ -1095,8 +1177,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {{}}
 plugins: {{}}
 display:
@@ -1150,8 +1230,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 display:
@@ -1180,8 +1258,6 @@ intercore:
   transport: "modbus_rtu"
   modbus_rtu:
     slave_addr: 0
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 "#;
@@ -1209,8 +1285,6 @@ intercore:
   modbus_rtu:
     serial_port: ""
     slave_addr: 1
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 "#;
@@ -1233,8 +1307,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 strategy:
@@ -1262,8 +1334,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 "#;
@@ -1281,8 +1351,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 "#;
@@ -1309,8 +1377,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1360,8 +1426,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1388,8 +1452,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1416,8 +1478,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1446,8 +1506,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1476,8 +1534,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1506,8 +1562,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1550,8 +1604,6 @@ intercore:
   host: "127.0.0.1"
   port: 9100
   transport: "modbus_rtu"
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1578,8 +1630,6 @@ intercore:
   host: "127.0.0.1"
   port: 9100
   transport: "modbus_rtu"
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1608,8 +1658,6 @@ intercore:
   transport: "modbus_rtu"
   modbus_rtu:
     heartbeat_poll_ms: 0
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1635,8 +1683,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1663,8 +1709,6 @@ intercore:
   host: "127.0.0.1"
   port: 9100
   transport: "modbus_rtu"
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 io:
@@ -1697,8 +1741,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:
@@ -1745,8 +1787,6 @@ intercore:
   modbus_rtu:
     serial_port: "/dev/ttyS0"
     slave_addr: 1
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:
@@ -1777,8 +1817,6 @@ intercore:
   modbus_rtu:
     serial_port: "/dev/ttyS0"
     slave_addr: 1
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:
@@ -1815,8 +1853,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:
@@ -1852,8 +1888,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 "#;
@@ -1878,8 +1912,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:
@@ -1906,8 +1938,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:
@@ -1940,8 +1970,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-web_api:
-  listen_addr: "0.0.0.0:8080"
 ai_engine: {}
 plugins: {}
 south_stations:

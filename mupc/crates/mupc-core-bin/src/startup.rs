@@ -246,12 +246,14 @@ fn datapackage_to_telemetry_points(
 ///   仅配非 grid 站（B2）时本 sink 不触发 on_grid_package，AiIntegrator 由 pv/load 南向模拟兜底。
 /// - 非 grid 遥测点（is_event=false）→ WriteBuffer 落库（telemetry）。
 /// - offline/online 状态事件（is_event=true，metric=offline/online）→ storage.events 落库
-///   + SSE system alert。
+///   + `AlertFeed` 即时投递（单元 K：原 web-api 的 SSE 推送服务已随 crate 删除）。
 struct SouthSink {
     ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
     write_buffer: Arc<mupc_storage::WriteBuffer>,
     events: Arc<dyn mupc_storage::EventRepository>,
-    sse: Arc<mupc_web_api::SsePushService>,
+    /// **即时投递环**（设计 §4.7）。⚠️ **不是 F7 真源**——F7 真源仍是 `storage.events`；
+    /// 本字段只做「未落库也能上屏」的可选增强（是否并入 F7 由待裁项 R-07 决定，本轮不裁）。
+    alert_feed: Arc<crate::alert_feed::AlertFeed>,
     /// IEC104 服务器（审查 R2-A2：meter_grid 真值上送北向）。SouthSink 是 core-bin 类型，
     /// mupc-southd 仅定义 StationSink trait——不引入 southd→gateway 反向依赖。
     iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
@@ -264,14 +266,14 @@ impl SouthSink {
         ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
         write_buffer: Arc<mupc_storage::WriteBuffer>,
         events: Arc<dyn mupc_storage::EventRepository>,
-        sse: Arc<mupc_web_api::SsePushService>,
+        alert_feed: Arc<crate::alert_feed::AlertFeed>,
         iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
     ) -> Self {
         Self {
             ai_integrator,
             write_buffer,
             events,
-            sse,
+            alert_feed,
             iec104,
             grid_bcast_at: std::sync::Mutex::new(None),
         }
@@ -371,7 +373,9 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 // online 恢复是状态正常化，用 info 级；offline/其它状态异常才告警级，
                 // 避免站恢复上线时刷屏 warning。
                 let level = if metric == "online" { "info" } else { "warning" };
-                let _ = self.sse.push_system_alert(level, &ev.message);
+                // 落库之后**同时**投递（设计 §4.7：`SouthSink` 写系统事件时同时投递；
+                // 无订阅者时投递返回 0，属正常态，不是错误）。
+                self.alert_feed.push_system_alert(level, &ev.message);
             } else {
                 // 普通遥测点落库
                 let tp = mupc_storage::TelemetryPoint {
@@ -480,59 +484,6 @@ pub(crate) fn console_write_paths(
                 crate::console_host::InterlockOpsSource::AuditUnavailable(WHY),
             )
         }
-    }
-}
-
-/// web-api 旧联锁出口的**过渡适配器**（单元 **K** 的删除面）。
-///
-/// `mupc_web_api::app_state::InterlockApi` 是**迁移前**的旧契约（`Result<(), String>`）。
-/// 单元 J 把 `InterlockController` 的实现迁到了 `mupc_display_proto::interlock`（结构化
-/// `InterlockReject`），但 `AppState.interlock` 与读通道装配
-/// （`display_host::interlock_wiring_for`）**仍按旧 trait 取用**，而 `web-api` crate 属 K 的
-/// 删除面（J 禁改）。⇒ 本适配器把新契约**桥**回旧 trait，**不复制任何逻辑**：
-/// 状态由 `InterlockApi::status()` 转出，错误取 `InterlockReject::user_message()`。
-///
-/// ⚠️ **如实登记**：这不是"两份实现"，而是**同一个实现的两种签名**——真源仍是
-/// `InterlockController` 的 `do_request_release` / `ack_m1`。K 删掉 web-api 时，本适配器与
-/// `mupc-web-api` 依赖一并删除（届时 `display_host` 也应改吃契约版视图，那属 K 的范围）。
-pub(crate) struct WebInterlockApi(pub(crate) std::sync::Arc<crate::interlock::InterlockController>);
-
-#[async_trait::async_trait]
-impl mupc_web_api::app_state::InterlockApi for WebInterlockApi {
-    async fn status(&self) -> mupc_web_api::app_state::InterlockStatus {
-        use mupc_display_proto::InterlockApi as _;
-        let v = self.0.status().await;
-        mupc_web_api::app_state::InterlockStatus {
-            enabled: v.enabled,
-            latched: v.latched,
-            stop_failed: v.stop_failed,
-            sources: v
-                .sources
-                .into_iter()
-                .map(|s| mupc_web_api::app_state::InterlockSourceStatus {
-                    name: s.name,
-                    tripped: s.tripped,
-                })
-                .collect(),
-            // 旧 DTO 的两个灯位是 `bool`（**无**「未知」态），契约是 `Option<bool>` ⇒
-            // `unwrap_or(false)`：**本适配路径不可表达** `None`（旧 DTO 根本没有那个槽，
-            // **不是**"契约的 `None` 不重要"）。真源 `InterlockController::status()` 当前**恒**
-            // 回 `Some(..)` ⇒ 该降级分支零后果；**单元 K 把读通道换到契约版真源时，必须一并
-            // 迁移**（届时 `None` = 「灯未知」须如实上屏，不得再被这里吞成 `false`）。
-            // 取 `false` 而非 `true`：宁可显"灯灭"，也绝不臆造"灯亮"。
-            fault_lamp: v.fault_lamp.unwrap_or(false),
-            run_lamp: v.run_lamp.unwrap_or(false),
-        }
-    }
-
-    async fn request_release(&self) -> Result<(), String> {
-        use mupc_display_proto::InterlockApi as _;
-        self.0.request_release().await.map_err(|r| r.user_message())
-    }
-
-    async fn ack_m1(&self) -> Result<(), String> {
-        use mupc_display_proto::InterlockApi as _;
-        self.0.ack_m1().await.map_err(|r| r.user_message())
     }
 }
 
@@ -730,7 +681,7 @@ pub async fn initialize_all(
     ai_integrator.set_tai_storage_strategy(Arc::new(
         mupc_strategy_engine::TaiStorageStrategy::new(tai_cfg),
     ));
-    // 本地策略优先模式（YAML 配置：ai_engine.local_priority；Web API 可运行时切换）
+    // 本地策略优先模式（YAML 配置：ai_engine.local_priority；单元 K 后**无**运行时切换端点）
     ai_integrator.set_local_priority(config.ai_engine.local_priority).await;
 
     // v2.23: 注入 AI 指令安全校验器（安全闸门，dispatch 前校验 AI 指令，不通过降级本地兜底）
@@ -778,19 +729,24 @@ pub async fn initialize_all(
     let ai_integrator = Arc::new(ai_integrator);
     coord.register_service("strategy_engine", ServiceStatus::Running);
 
-    // SSE 推送服务（提前创建，供 AI 决策循环推送决策事件）
-    let sse_push = Arc::new(mupc_web_api::SsePushService::new(256));
+    // 告警即时投递环（提前创建，供联锁 major 事件 / 南向站事件 / 策略下发三个生产者共用）。
+    //
+    // ⚠️ **不是 F7 真源**（设计 §4.7）：F7 真源仍是 `storage.events`；本环只是「未落库也能上屏」
+    // 的**可选增强**，是否与 `storage.events` 合并成 F7 的一路源属待裁项 **R-07**（本轮不裁）。
+    // 容量取 `ALERT_FEED_CAPACITY`(=64)，不再沿用迁出前那个 `new(256)` 的 256——
+    // 设计 §4.7 对最小形态**写死 64**。
+    let alert_feed = Arc::new(crate::alert_feed::AlertFeed::new());
 
     // ── S2 §12.4 / Task7：安全联锁控制器（io.enabled 时装配）──
-    // 依赖：intercore(步骤 4) + storage(步骤 3) + sse_push 均已就绪。GPIO(sysfs) 打开失败由
+    // 依赖：intercore(步骤 4) + storage(步骤 3) + alert_feed 均已就绪。GPIO(sysfs) 打开失败由
     // InterlockController::new 内部 fail-safe（预置 latch，绝不静默无 latch 运行）。disabled 时
-    // 不装配 → AppState.interlock=None（未启用部署行为不变）。
+    // 不装配 → 读通道走 `InterlockWiring::Disabled`（未启用部署行为不变）。
     let interlock_ctl: Option<Arc<crate::interlock::InterlockController>> = if config.io.enabled {
         let il = Arc::new(crate::interlock::InterlockController::new(
             config.io.clone(),
             Box::new(intercore.clone()), // Arc<IntercoreClient> → InterlockPort
             storage.events.clone(),
-            sse_push.clone(),
+            alert_feed.clone(),
         ));
         tracing::info!("安全联锁已启用（io.enabled=true），装配联锁控制器");
         Some(il)
@@ -803,21 +759,17 @@ pub async fn initialize_all(
         il.restore_from_db().await;
         guard.0.push(tokio::spawn(il.clone().run_loop()));
     }
-    // 联锁后端两种签名（**同一实现**，单元 J）：
-    // - `interlock_backend` = 契约版（`display-proto`）⇒ 本地屏控制通道的两条写端点；
-    // - `interlock_api` = 旧 web-api trait，经 `WebInterlockApi` 过渡适配器（K 的删除面）
-    //   ⇒ `AppState.interlock`（web 出口）与读通道 `display_host::interlock_wiring_for`。
+    // 联锁后端（**唯一签名**：契约 `mupc_display_proto::InterlockApi`）。单元 K 删除了
+    // 旧 web-api trait 与那个过渡适配器（单元 K 已删）⇒ 两个消费点（控制通道两条写端点、
+    // 读通道 `display_host::interlock_wiring_for`）现在**吃同一个 `Arc<dyn>`**。
     let interlock_backend: Option<Arc<dyn mupc_display_proto::InterlockApi>> = interlock_ctl
         .clone()
         .map(|c| c as Arc<dyn mupc_display_proto::InterlockApi>);
-    let interlock_api: Option<Arc<dyn mupc_web_api::app_state::InterlockApi>> = interlock_ctl
-        .clone()
-        .map(|c| Arc::new(WebInterlockApi(c)) as Arc<dyn mupc_web_api::app_state::InterlockApi>);
 
     // AI 决策循环：周期执行决策并分发到核间/南向（RL 决策 <1s）
     // Task7：联锁 latch 期间抑制 dispatch（skip 本轮 warn；transport 层另有 stopped_latched 兜底）
     let decision_integrator = ai_integrator.clone();
-    let decision_sse = sse_push.clone();
+    let decision_alert_feed = alert_feed.clone();
     let decision_interlock = interlock_ctl.clone();
     guard.0.push(tokio::spawn(async move {
         // 遗留待办 A（2026-09-09）：latch 释放边沿检测——上一拍联锁锁存中、本拍已释放时，
@@ -843,9 +795,9 @@ pub async fn initialize_all(
             if let Err(e) = decision_integrator.dispatch_ai_decision().await {
                 tracing::debug!("AI 决策周期失败: {}", e);
             } else {
-                // 推送策略下发事件（SSE 生产者；AI 引擎已停用 2026-09-09，每拍实际为本地台区
-                // 储能治理 run_fallback_strategies 下发——沿用 AiDecision 通道，仅文案中性化）
-                let _ = decision_sse.push_ai_decision("策略下发完成");
+                // 推送策略下发事件（`AlertFeed` 生产者；AI 引擎已停用 2026-09-09，每拍实际为本地
+                // 台区储能治理 run_fallback_strategies 下发——沿用同一环，仅文案中性化）
+                decision_alert_feed.push_strategy_dispatch("策略下发完成");
             }
         }
     }));
@@ -856,6 +808,12 @@ pub async fn initialize_all(
     // 两 handle 都入 guard（优雅退出随其它后台任务 abort）；主进程不 spawn/不管理渲染子进程
     // （渲染生命周期归 systemd，§4.2/§11）。disabled 不装配（warn）。
     if config.display.enabled {
+        // 设计 §4.9 字面稿的「初始化本地 HMI 后端」日志行（第一轮整改 S-3：原先只存在于设计里，
+        // 实现无对应日志 ⇒ 现场无法从启动日志确认 HMI 后端是否真的在装配）。
+        // ⚠️ **不带步号**：设计字面稿写的是 `[10/14]`，而实现里 HMI 装配**并入步骤 8 之后**
+        // （`[10/14]` 现为 OTA 管理器）⇒ 带号会与现行 14 步编号体系冲突（登记见
+        // `docs/technical-debt.md` U-38）。
+        tracing::info!("初始化本地 HMI 后端（读通道 + 控制通道）...");
         // §7.3 warn：非 modbus_rtu（tcp 仿真/联调）可看 SOC/通道，三相 1022-1032 将 NotRead
         if config.intercore.transport != "modbus_rtu" {
             tracing::warn!(
@@ -874,7 +832,7 @@ pub async fn initialize_all(
         //   已接线 / `io.enabled=true` 却没接上（**不可用**）/ `io.enabled=false` 的
         //   **已知状态**「功能未启用」。
         let interlock_wiring = crate::display_host::interlock_wiring_for(
-            interlock_api.clone(),
+            interlock_backend.clone(),
             config.io.enabled,
             config.io.release_hold_secs,
         );
@@ -991,6 +949,10 @@ pub async fn initialize_all(
                 );
             }
         }
+        // 单元 K：本服务名由迁出前那个 web 服务名改名而来（`web-api` crate 已整体删除）。
+        // 注册位置随之从"步骤 10 的 Web API 装配"移到**本地 HMI 后端**的装配点——若仍留在原处，
+        // 会在 `display.enabled=false` 时谎报"HMI 后端已运行"。
+        coord.register_service("hmi_backend", ServiceStatus::Running);
     } else {
         tracing::debug!(
             "本地显示终端未启用（config.display.enabled=false），跳过 DisplayDataProvider/回环发布"
@@ -1048,7 +1010,7 @@ pub async fn initialize_all(
             ai_integrator.clone(),
             write_buffer.clone(),
             storage.events.clone(),
-            sse_push.clone(),
+            alert_feed.clone(),
             // 审查 R2-A2：meter_grid 真值上送 IEC104 的接收句柄（已在步骤 9 创建）
             iec104_server.clone(),
         ));
@@ -1161,101 +1123,41 @@ pub async fn initialize_all(
         }));
     }
 
-    // ── 10. Web API ──
-    // AppState 所需依赖在步骤 07/08/11 中已初始化
-    tracing::info!("[10/14] 初始化 Web API...");
+    // ══ 10. OTA 管理器（原「10. Web API」装配整块已随 `web-api` crate 删除，单元 K）══
+    //
+    // **处置口径（设计 §7.3 末段备注 / 待裁项 R-16，逐字照办）**：
+    // 迁出前 `ota_manager` 的**唯一消费者**是 web-api 的 `AppState.ota_manager`；crate 删除后
+    // 该实例失去消费者。本单元**保留 `ota_update` 服务注册与实例（不删除能力），但不启动任何
+    // 服务面**——即在后续 OTA 需求里重新接线即可，不必重新发明实例构造。
+    //
+    // ⚠️ **绝不可**因此连带删除 `mupc-ota-update` crate：那是能力删除，不在本单元授权范围内。
+    tracing::info!("[10/14] 初始化 OTA 管理器...");
     let ota_manager: Arc<dyn mupc_ota_update::OtaManager> =
         Arc::new(mupc_ota_update::manager::OtaManagerImpl::new(
             mupc_ota_update::OtaConfig::default(),
             config.system.data_dir.join("ota"),
         )
         .map_err(|e| MupcError::new(ErrorCode::Unknown, format!("OTA 管理器初始化失败: {}", e), "startup"))?);
-
-    let web_config = Arc::new(tokio::sync::RwLock::new(
-        mupc_web_api::routes::config::AppConfig {
-            gateway: Default::default(),
-            intercore: Default::default(),
-            system: Default::default(),
-        },
-    ));
-    // Phase 2+ TODO: 从配置读取管理员用户名，当前硬编码
-    let session_manager = mupc_web_api::SessionManager::new("admin".to_string());
-    let status_handler = mupc_web_api::routes::StatusHandler::new();
-    let logs_handler = mupc_web_api::routes::LogsHandler::new(config.system.log_dir.clone());
-    let ws_streamer = mupc_web_api::WsLogStreamer::new();
-    let audit_logger = Arc::new(
-        mupc_web_api::AuditLogger::new(
-            config.system.log_dir.join("audit").to_str().unwrap_or("/opt/mupc/logs/audit"),
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!("审计日志初始化失败，降级使用 /tmp: {}", e);
-            mupc_web_api::AuditLogger::new("/tmp/mupc-audit")
-                .expect("审计日志初始化致命失败 — 磁盘满或 /tmp 不可写")
-        }),
-    );
-    // 使用 ModelManager 内部的 online_updater（与 AI 引擎共享同一实例，避免两实例不连通）
-    let online_updater = ai_engine.online_updater().clone();
-    let ab_test_manager = Arc::new(mupc_web_api::routes::ai::ab_test_manager::AbTestManager::new());
-    let mode_selector = ai_engine.mode_selector_arc();
-
-    let app_state = Arc::new(mupc_web_api::AppState {
-        config: web_config,
-        ai_integrator: ai_integrator.clone(),
-        mode_selector,
-        sse_push,
-        audit_logger,
-        session_manager,
-        status_handler,
-        logs_handler,
-        ws_streamer,
-        storage: storage.clone(),
-        ota_manager: ota_manager.clone(),
-        online_updater,
-        ab_test_manager,
-        // Task7：io.enabled 时注入真实联锁 controller；disabled → None（路由返回 503 语义）
-        interlock: interlock_api,
-    });
-
-    // 组装 Router 并启动 HTTP 服务
-    let app_router = axum::Router::new()
-        .merge(mupc_web_api::routes::mode::create_router())
-        .merge(mupc_web_api::routes::strategy_mode::create_router())
-        .merge(mupc_web_api::routes::ai::ai_routes())
-        .merge(mupc_web_api::routes::ai::sse_route())
-        .merge(mupc_web_api::routes::status::create_router())
-        .merge(mupc_web_api::routes::config::create_router())
-        .merge(mupc_web_api::routes::logs::create_router())
-        .merge(mupc_web_api::routes::interlock::create_router())
-        .merge(mupc_web_api::ws::create_router())
-        .merge(mupc_web_api::auth::create_router())
-        .with_state(app_state.clone());
-
-    let listen_addr = config.web_api.listen_addr.clone();
-    guard.0.push(tokio::spawn(async move {
-        let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
-            Ok(l) => {
-                tracing::info!("Web API 已启动: http://{}", listen_addr);
-                l
-            }
-            Err(e) => {
-                tracing::error!("Web API 绑定 {} 失败: {}", listen_addr, e);
-                return;
-            }
-        };
-        axum::serve(listener, app_router)
-            .await
-            .unwrap_or_else(|e| tracing::error!("Web API 服务器异常退出: {}", e));
-    }));
+    // 实例**仍然**随 `StartupContext.ota_manager`（本文件 `:33` 的字段）交回调用方——该字段本就
+    // 在，非本单元新增。⚠️ 措辞订正（第二轮整改 ②）：交回方类型是 `StartupContext`，
+    // **不存在** `InitializeResult` 这个类型。
+    // 「保留实例」的可观测性来自**源文本静态断言**：单测
+    // `ota_manager_is_still_constructed_and_registered` 只对生产段做 `contains`（构造调用 /
+    // `StartupContext` 字段 / 字段交回 / 服务注册 四处）。⚠️ 该用例**不取实例、不核对数据目录**
+    // ——`initialize_all` 需 DB/intercore/gateway/sysfs 全套真环境，本机单测起不来。
+    // 这条断言挡住的是"用删掉构造的方式悄悄退化成不保留实例"。
     tracing::info!(
-        "Web API 配置: listen={}, https={}",
-        config.web_api.listen_addr,
-        config.web_api.enable_https
+        "OTA 管理器已创建（数据目录 {}）——本期无服务面（原消费者 web-api 已删除，见设计 §7.3 / R-16）",
+        config.system.data_dir.join("ota").display()
     );
-    coord.register_service("web_api", ServiceStatus::Running);
 
-    // ── 11. OTA 管理器 (实例已在步骤 10 中创建) ──
-    tracing::info!("[11/14] 初始化 OTA 管理器...");
-    coord.register_service("ota_update", ServiceStatus::Running);
+    // ── 11. OTA 服务注册（实例已在步骤 10 中创建；**本期不启动任何服务面**，见步骤 10 口径）──
+    // 状态取 **`Stopped`**（订正 S-5）：本单元只保留实例与注册，**没有任何服务面在跑**；
+    // 注册成 `Running` 会与上一行的日志"本期无服务面"自相矛盾，属"谎报已运行"。同 crate 对
+    // 无运行时面的服务有现成先例（步骤 14 `wireless` 即 `Stopped`）。R-16 要求的"保留注册"
+    // 由本行的注册动作本身满足——**注册在册 ≠ 状态为 Running**。
+    tracing::info!("[11/14] 注册 OTA 服务（实例已在步骤 10 创建，本期无服务面，状态=Stopped）...");
+    coord.register_service("ota_update", ServiceStatus::Stopped);
 
     // ── 12. 系统资源监控 ──
     tracing::info!("[12/14] 初始化系统资源监控...");
@@ -1381,13 +1283,17 @@ mod tests {
     use super::*;
 
     /// 写路径装配的最小可解析 yaml（只需 `CoreConfig` 里**没有 `#[serde(default)]`** 的段）。
+    ///
+    /// 单元 K：原样保留现场运维手写的 `legacy_top:` 段——它**不是**任何字段，用来钉住
+    /// "未建模段不得让 `CoreConfig` 解析失败"（`CoreConfig` 未设 `deny_unknown_fields`）。
+    /// （`web_api:` 段此前也充当同一角色；该段随 crate 删除从 CoreConfig 退为未建模段，
+    /// 其"仍能加载"的兼容性断言改由本段的 `legacy_top:` 与 `core_config.rs` 的专项用例承担。）
     const MIN_YAML: &str = r#"
 version: "1.0"
 system: {}
 intercore: {}
-web_api:
-  tls_cert: null
-  tls_key: null
+legacy_top:
+  a: 1
 ai_engine: {}
 plugins: {}
 "#;
@@ -1453,6 +1359,242 @@ plugins: {}
         assert!(
             matches!(ok_ops, crate::console_host::InterlockOpsSource::Ready(_)),
             "审计目录可建 ⇒ 联锁写路径必须 Ready"
+        );
+    }
+
+    /// **本文件的生产段源码**（`#[cfg(test)] mod tests` 之前），且**行尾统一为 LF**。
+    ///
+    /// 两条硬要求，缺一条断言就会变成坏网：
+    /// 1. **必须切掉测试段**：下面的被禁串清单里就有 `mupc_web_api` / `WebInterlockApi`
+    ///    这类字面量（**断言自己**写出来的），若不切段，`src.contains(..)` 会因断言自身而恒真
+    ///    / 恒假——那是自指坏网，不是回归网；
+    /// 2. **归一化行尾**：`startup.rs` 是 **CRLF**（现场 Windows 编辑过），`\n#[cfg(test)]\n`
+    ///    这样的锚点匹配不上 `\r\n#[cfg(test)]\r\n`。锚点匹配不上就 panic，**不静默退化成考核空串**。
+    fn production_src() -> String {
+        let src = include_str!("startup.rs").replace("\r\n", "\n");
+        let (production, _) = src
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("`#[cfg(test)] mod tests` 标记必须存在（生产段/测试段的分段锚点）");
+        assert!(
+            production.len() > 10_000,
+            "分段锚点必须真的切出生产段，实得 {} 字节",
+            production.len()
+        );
+        production.to_string()
+    }
+
+    /// **单元 K ①：`ota_manager` 仍被创建与注册（能力未删）**——设计 §7.2 Step 3 末 / §7.3 末段
+    /// 备注 / 待裁项 R-16 的**逐字口径**：「保留 `ota_update` 服务注册与实例（不删除能力），
+    /// 但不启动任何服务面」。
+    ///
+    /// 这里用**源文本静态断言**（与 `cli.rs` 对 `startup.rs` 的同款手法）：`initialize_all`
+    /// 需要 DB / intercore / gateway / sysfs 全套真环境才能跑，本机单测起不来；而本单元要证的
+    /// 恰恰是"装配源码里这两件事还在"，不是"运行时它返回了什么"。
+    ///
+    /// **改什么会让本条变红**：删掉 `OtaManagerImpl::new` 的构造、把它从 `StartupContext`
+    /// 摘掉、删掉 `register_service("ota_update"`、或**把注册状态从 `Stopped` 改回 `Running`**
+    /// （K 收尾 Q-3 补的那条网）⇒ 对应断言红。
+    #[test]
+    fn ota_manager_is_still_constructed_and_registered() {
+        let production = production_src();
+        assert!(
+            production.contains("mupc_ota_update::manager::OtaManagerImpl::new("),
+            "OTA 实例必须仍被构造（不得因失去 web-api 消费者就删掉能力，见 R-16）"
+        );
+        assert!(
+            production.contains("pub ota_manager: Arc<dyn mupc_ota_update::OtaManager>"),
+            "实例必须仍随 StartupContext 交回调用方（否则只是「构造完就丢」）"
+        );
+        assert!(
+            production.contains("ota_manager,"),
+            "实例必须真的被放进 StartupContext（构造了却不交回 = 静默退化）"
+        );
+        assert!(
+            production.contains("register_service(\"ota_update\""),
+            "`ota_update` 服务注册不得删（这是「能力未删」的在册证据）"
+        );
+        // **状态必须是 `Stopped`**（订正 S-5；K 收尾 Q-3 补网）：本单元**没有任何服务面在跑**，注册成
+        // `Running` 会与步骤 10 的日志"本期无服务面"（`:1150`）以及步骤 11 的注释自相矛盾
+        // ⇒ 属"谎报已运行"。⚠️ 这条断言**必须钉住状态本身**：只 `contains("register_service(\"ota_update\"")`
+        // 时，把 `Stopped` 改回 `Running` 仍然全绿（正是 Q-3 指出的"实质改动无守护"）。
+        assert!(
+            production.contains("register_service(\"ota_update\", ServiceStatus::Stopped)"),
+            "`ota_update` 必须以 `Stopped` 注册（订正 S-5；K 收尾 Q-3）：改回 `Running` = 谎报服务面在跑"
+        );
+        // 「实例用哪个数据目录构造」也钉在**源文本**上（`config.system.data_dir` 下的 `ota/`）：
+        // 这是**不取实例**的前提下能给出的最强证据（第二轮整改 ② 的补强）。
+        assert!(
+            production.contains("config.system.data_dir.join(\"ota\")"),
+            "OTA 实例的数据目录必须来自配置（`config.system.data_dir` / `ota`），不得硬编码"
+        );
+        // 反向网：`mupc-ota-update` crate 不得被连带删除（同一次断言里钉住"能力仍在"）
+        assert!(
+            production.contains("mupc_ota_update::OtaConfig::default()"),
+            "OTA 配置构造在，能力未删"
+        );
+    }
+
+    /// 只读的事件仓储桩（`on_station_telemetry` 的事件分支只会 `insert`，其余方法用不到）。
+    struct RecordingEvents(std::sync::Mutex<Vec<mupc_storage::SystemEvent>>);
+
+    #[async_trait::async_trait]
+    impl mupc_storage::EventRepository for RecordingEvents {
+        async fn insert(&self, event: &mupc_storage::SystemEvent) -> Result<i64, mupc_storage::StorageError> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(1)
+        }
+        async fn query_range(
+            &self,
+            _start: chrono::DateTime<chrono::Utc>,
+            _end: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Vec<mupc_storage::SystemEvent>, mupc_storage::StorageError> {
+            Ok(Vec::new())
+        }
+        async fn purge_older_than(
+            &self,
+            _before: chrono::DateTime<chrono::Utc>,
+        ) -> Result<usize, mupc_storage::StorageError> {
+            Ok(0)
+        }
+        async fn latest_by_type(
+            &self,
+            _event_type: &str,
+        ) -> Result<Option<mupc_storage::SystemEvent>, mupc_storage::StorageError> {
+            Ok(None)
+        }
+    }
+
+    /// **单元 K ③：投递链路端到端** —— `SouthSink` 收到状态事件 ⇒ **先落库、同刻投递**
+    /// ⇒ `AlertFeed` 订阅者收到（设计 §4.7：「`SouthSink` 写入系统事件时同时投递」）。
+    ///
+    /// 走**真实装配类型**（真 `SouthSink` + 真 `WriteBuffer` + 真 `Iec104Server`），只把
+    /// 事件仓储换成记账桩（`insert` 是否被调用本身就是"先落库"的证据）。仓储用真 SQLite
+    /// 临时文件连池（`init_pool` 不跑迁移，本用例不触表）。
+    ///
+    /// **改什么会让本条变红**：删掉 `SouthSink` 里的 `push_system_alert(..)` 调用
+    /// （投递断链）⇒ 第 2 条断言 5 s 超时红；把投递挪到落库**之前**且删掉落库 ⇒ 第 1 条红。
+    #[tokio::test]
+    async fn south_sink_event_lands_in_storage_and_is_delivered_to_alert_feed() {
+        use mupc_southd::scheduler::StationSink as _;
+
+        let t = crate::testutil::TempDir::new("south-sink-feed");
+        let db = t.join("mupcd.db");
+        std::fs::File::create(&db).unwrap();
+        let pool = mupc_storage::init_pool(db.to_str().unwrap()).await.unwrap();
+        let write_buffer = Arc::new(mupc_storage::WriteBuffer::new(1000, 5000, Arc::new(pool)));
+        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
+
+        let feed = Arc::new(crate::alert_feed::AlertFeed::new());
+        let mut rx = feed.subscribe();
+
+        let sink = SouthSink::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            write_buffer,
+            events.clone(),
+            feed.clone(),
+            Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+                mupc_gateway::iec104::server::Iec104Config::default(),
+            )),
+        );
+
+        // 站离线：`is_event=true` 的状态事件点
+        sink.on_station_telemetry(
+            "st-1",
+            mupc_southd::config::Role::MeterGrid,
+            vec![("offline".to_string(), 0.0, true)],
+        )
+        .await;
+
+        // ① 先落库（`storage.events` 仍是 F7 真源）
+        let logged = events.0.lock().unwrap().clone();
+        assert_eq!(logged.len(), 1, "事件必须落库（AlertFeed 不是真源，只是附加投递）");
+        assert_eq!(logged[0].event_type, "south_station.st-1.offline");
+
+        // ② 同刻投递到 `AlertFeed`（有界即时环）
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("5 s 内必须收到投递（超时 = 投递断链）")
+            .expect("订阅者必须收到事件");
+        assert_eq!(got.source, crate::alert_feed::FeedOrigin::System);
+        assert_eq!(got.subtype, "warning", "offline 走告警级（online 才是 info）");
+        assert!(
+            got.message.contains("离线"),
+            "文案逐字沿用落库那条: {}",
+            got.message
+        );
+        assert_eq!(got.message, logged[0].message, "投递文案与落库文案必须同源");
+    }
+
+    /// **单元 K ②：`startup.rs` 生产段里不得再有任何 web-api 残引用**（设计 §7.2 Step 3 / §7.3）。
+    ///
+    /// 这是"删干净"的可编译版网：`mupc-web-api` 依赖一删，任何残留 `use` / 路径都会**编译失败**
+    /// ——但**注释与字符串里的残留不会**（例如 `register_service("web_api")` 是字符串，
+    /// 编译得过却让协调器里多一个幽灵服务）。故此处逐条钉死。
+    ///
+    /// ⚠️ **只考核 `#[cfg(test)] mod tests` 之前的生产段**：本条断言自身的**字面量**就含被禁串，
+    /// 若把测试段也纳入考核，`src.contains("…")` 会因**断言自己**而成真/成假——那是自指坏网，
+    /// 不是回归网。分段锚点缺失即 panic（不许静默退化成"考核空串"）。
+    ///
+    /// **改什么会让本条变红**：把服务名改回 `"web_api"`、重新引入 `WebInterlockApi` 适配器、
+    /// 或把 `register_service("hmi_backend", …)` 搬出 `display` 门——**搬进 `} else {` 分支**
+    /// 或**搬回步骤 10 一带**，两条均已于第二轮整改 ① 各实测一次：都红。
+    /// **订正 K 收尾 Q-2（伪造锚点绕过）**：判据的 `gate` / `at` 已从**子串查找**改为**行首锚定**
+    /// ——改前在注册点正上方插一行注释 `// if config.display.enabled {` 即可把锚点"拉"过来
+    /// （复核员实测假通过）；改后注释行不满足行首条件，同样插入后**必红**（已实测）。
+    #[test]
+    fn startup_production_code_has_no_web_api_residue() {
+        let production = production_src();
+        assert!(!production.contains("mupc_web_api"), "不得再引用 `mupc_web_api`（crate 已删）");
+        assert!(!production.contains("WebInterlockApi"), "过渡适配器已删除，不得回流");
+        assert!(
+            !production.contains("\"web_api\""),
+            "服务名已改为 `hmi_backend`，不得再注册幽灵服务名"
+        );
+        assert!(!production.contains("SsePushService"), "`SsePushService` 已随 crate 删除");
+        assert!(
+            production.contains("register_service(\"hmi_backend\""),
+            "本地 HMI 后端必须在册"
+        );
+        // `hmi_backend` 的注册必须在 `display.enabled` 的 **`if` 分支体**内：若留在原处
+        // （step 10），`display.enabled=false` 时会谎报"HMI 后端已运行"。
+        //
+        // ⚠️ 上界**必须**取 `} else {` 分界，**不能**取"步骤 9 注释行"（订正 I-1）：
+        // `if { … } else { … }` 是一个视觉块，若用步骤 9 注释当上界，`else` 块体（其内也含
+        // `tracing::debug!` 等语句）会被一并算进"门内区间" ⇒ 把注册点搬进 `else`
+        // （`display.enabled=false` 时才注册——正是本断言要防的那件事）**也能通过**。
+        // 判据因此是三元：注册点必须晚于「注册点**之前最近**的 `if config.display.enabled {`」
+        // （S-4：从 `at` 往前找，防将来在装配点前再出现同样 `if` 时静默放宽），
+        // 且早于该 `if` 之后的 `} else {`。
+        //
+        // ⚠️ **两处锚点都必须"行首锚定"**（订正 K 收尾 Q-2，复核员实测过伪造绕过）：原先用
+        // `find` / `rfind` 做**子串**查找 ⇒ 只要在注册点正上方插一行注释
+        // `// if config.display.enabled {`，`rfind` 就会把"门"拉到该注释处（`gate < at` 仍成立、
+        // 后面 `find("} else {")` 仍找到真 `else`）⇒ 把注册点搬进 `else` 也能假通过。
+        // 现要求锚点**独占行首**：注释行（行首为 `//`）与字符串天然不满足。
+        // 上界 `} else {` 仍是子串查找——伪造只会把它**提前**（`find` 取首个匹配 ⇒ 判据更严，
+        // 是红而非假绿），故不必动。
+        let line_start = |i: usize| production[..i].rfind('\n').map_or(0, |n| n + 1);
+        let at = production
+            .match_indices("register_service(\"hmi_backend\"")
+            .map(|(i, _)| i)
+            .find(|&i| production[line_start(i)..i].trim() == "coord.")
+            .expect("生产段必须存在 `hmi_backend` 的注册点（须独占行首 `coord.register_service(`）");
+        let gate = production
+            .match_indices("if config.display.enabled {")
+            .map(|(i, _)| i)
+            .filter(|&i| production[line_start(i)..i].trim().is_empty())
+            .map(line_start)
+            .filter(|&i| i < at)
+            .last()
+            .expect("注册点之前必须存在独占行首的 `if config.display.enabled {`（门）");
+        let else_anchor = gate
+            + production[gate..]
+                .find("} else {")
+                .expect("display 块必须有 `} else {` 作为上界锚点（若改成无 else 的 if，请同步改本判据）");
+        assert!(
+            gate < at && at < else_anchor,
+            "`hmi_backend` 注册必须在 `config.display.enabled` 的 **`if` 分支体内**\
+             （不得落到 `}} else {{` 分支、也不得在块外）（实得 gate={gate} at={at} else={else_anchor}）"
         );
     }
 }

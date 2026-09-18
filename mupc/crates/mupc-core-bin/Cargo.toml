@@ -25,7 +25,6 @@ mupc-data-processing = { path = "../data-processing" }
 mupc-ai-engine = { path = "../ai-engine" }
 mupc-strategy-engine = { path = "../strategy-engine" }
 mupc-gateway = { path = "../gateway" }
-mupc-web-api = { path = "../web-api" }
 mupc-ota-update = { path = "../ota-update" }
 mupc_system_monitor = { path = "../system-monitor" }
 mupc_mqtt_bridge = { path = "../mqtt-bridge" }
@@ -38,10 +37,14 @@ display-proto = { path = "../display-proto" }
 
 tokio.workspace = true
 async-trait.workspace = true
+# 控制通道 binder（`console_host.rs`）。⚠️ 设计 §7.3 的「core-bin 删 `axum`」**已过期**——
+# 那句写在 `console_host` 落地**之前**，它描述的是"删掉 web-api 后 core-bin 只剩 Router 装配、
+# 因而 `axum` 无用"这一**当时**的判断。但单元 G/H/I/J/K 新增的本地 HMI 控制通道**正在用 axum**：
+# `console_host.rs:134-139` 直接 `use axum::{Json, Router}` / `axum::extract::{Query, State}` /
+# `axum::http::StatusCode` / `axum::routing::get`，并在 `console_host.rs:385` 用 `axum::serve`
+# 听 `display.control_bind_addr`——全是**承重**用法，不是"只为装配"。删掉 `axum` ⇒ 本 crate
+# **编译失败** ⇒ **必须保留**（workspace 侧同类登记见 `mupc/Cargo.toml`，设计 §7.3 已就地订正）。
 axum.workspace = true
-tower.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true

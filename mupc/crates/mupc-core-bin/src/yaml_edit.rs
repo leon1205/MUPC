@@ -3,9 +3,9 @@
 //! # 为什么不是"把 `CoreConfig` 序列化回去"
 //!
 //! 现场 `mupc_core_config.yaml` 里有人写的注释、空行、键顺序、以及 `CoreConfig` **未建模**的
-//! 段/键（运维手写的 `legacy_top:` 一类；注意 `web_api:` **不是**未建模——`CoreConfig` 有
-//! `pub web_api: WebApiConfig`，见 `core_config.rs` 的更正说明）。若整棵树序列化回写，这些
-//! 字节**全部消失**（已建模段则"内容不丢、格式被重排"）——而本模块的
+//! 段/键（运维手写的 `legacy_top:` 一类；单元 K 起，**现场 legacy `web_api:` 段也属这类**——
+//! 该字段随 `web-api` crate 删除已从模型里退出，见 `core_config.rs` 的订正说明）。若整棵树
+//! 序列化回写，这些字节**全部消失**（已建模段则"内容不丢、格式被重排"）——而本模块的
 //! 兼容性主张（§7.3「现场既有 yaml 仍可正常加载、不强制运维立即改文件」）正是靠"文件不会
 //! 被装置改写"支撑的。故正常路径**只替换目标标量所在的那一行**，其余字节**逐字不动**。
 //!
@@ -339,12 +339,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 现场样例：**含注释 + 含已建模的 `web_api:` 段 + 含未建模键 + 非字母序**（设计 §4.3.2.1
+    /// 现场样例：**含注释 + 含 legacy `web_api:` 段 + 含未建模键 + 非字母序**（设计 §4.3.2.1
     /// 往返单测 1 的输入形态）。CRLF / LF 两版共用同一份内容，缩进为 2 空格。
     ///
-    /// ⚠️ 更正（评审重要 5）：`web_api:` **不是**"未建模"段——`CoreConfig` 有 `pub web_api`。
-    /// 它在保留式编辑下**同样**逐字保留（本算法的性质），差异只在**整体回写**回退路径下
-    /// （那时它会被重新序列化：内容不丢、格式重排）。
+    /// ⚠️ 单元 K 订正（原为「评审重要 5」的相反结论）：`web_api:` **曾经**是已建模段
+    /// （`CoreConfig` 有 `pub web_api: WebApiConfig`），随 `web-api` crate 删除已退为**未建模段**。
+    /// 对本算法**没有影响**：保留式编辑一律逐字保留非目标行，建模与否都不进判据。差异只在
+    /// **整体回写**回退路径下——那时未建模段**整段消失**（`WriteMode::FullRewrite` 可见，
+    /// EDGE-23 已登记）。
     fn field_sample(eol: &str) -> String {
         let lf: &str = r#"# MUPC 主配置（现场手工维护，注释务必保留）
 version: "0.1.0"
@@ -361,7 +363,7 @@ intercore:
 south_stations:            # 不在本模块字段表 FIELDS 内（保留式编辑下逐字保留）
   poll_ms: 1000
   stations: []
-web_api:                   # 已建模段（WebApiConfig）：保留式编辑下注释与键都必须原样保留
+web_api:                   # 现场 legacy 段（单元 K 后 CoreConfig 已无此字段）：保留式编辑下逐字保留
   listen_addr: 0.0.0.0:8080
 gateway:
   listen_addr: 0.0.0.0
@@ -397,10 +399,10 @@ plugins:
         // 负对照：确认期望串确实与源不同（否则本用例是恒真）
         assert_ne!(want, src);
         // 其余关键字节**逐条**复核（不靠"整体相等"一条兜着）
-        // 注：期望串随样例注释的**事实更正**同步更新（评审重要 5：`web_api:` 是**已建模**段，
-        // 不是 legacy）。断言强度不变——仍是**逐字节**包含该行（含对齐空格与注释全文）。
+        // 注：期望串随样例注释的**事实订正**同步更新（单元 K：`web_api:` 已从"已建模段"退为
+        // legacy 段）。断言强度不变——仍是**逐字节**包含该行（含对齐空格与注释全文）。
         assert!(out.contains(
-            "web_api:                   # 已建模段（WebApiConfig）：保留式编辑下注释与键都必须原样保留"
+            "web_api:                   # 现场 legacy 段（单元 K 后 CoreConfig 已无此字段）：保留式编辑下逐字保留"
         ));
         assert!(out.contains("  future_key: keep-me"));
         assert!(out.contains("  log_level: info        # 现场调过：默认 info"));

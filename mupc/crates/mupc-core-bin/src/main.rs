@@ -10,6 +10,7 @@
 //! Phase 5: 主循环 wait-for-shutdown
 //! Phase 6: 优雅退出 (LIFO 逆序停止, 30s 超时保护)
 
+mod alert_feed;
 mod bounded_io;
 mod cli;
 mod config_service;

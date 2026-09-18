@@ -37,7 +37,10 @@ pub enum ErrorCode {
     WriteFailure = 0x0302,
     ReadFailure = 0x0303,
 
-    // Web API 错误 (0x0400-0x04FF)
+    // 0x0400-0x04FF 段（原「Web API 错误」）——**数值保留**。
+    // 单元 K 删除了 `mupc-web-api` crate，但本段是 `ErrorCode` 的**线格式编号**（`from_u16`
+    // 双向映射 + `deploy.md` 的排障表按 `0x0402` 检索），删变体会**改协议**、且不在本单元授权内。
+    // 其中 `ConfigError` 仍被配置加载路径真实使用（`ConfigError = 0x0402`）。
     AuthFailed = 0x0400,
     InvalidSession = 0x0401,
     ConfigError = 0x0402,

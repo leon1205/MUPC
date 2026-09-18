@@ -47,7 +47,7 @@ pub struct AuditLogEntry {
     pub event_type: AuditEventType,
     /// 严重级别
     pub severity: AuditSeverity,
-    /// 事件来源（如 "web-api", "gateway", "strategy-engine"）
+    /// 事件来源（如 "hmi_backend", "gateway", "strategy-engine"）
     pub source: String,
     /// 操作描述
     pub message: String,
@@ -123,7 +123,7 @@ pub enum AuditSeverity {
 /// logger.log(
 ///     AuditEventType::UserLogin,
 ///     AuditSeverity::Info,
-///     "web-api",
+///     "hmi_backend",
 ///     "用户 admin 登录成功",
 ///     "admin",
 ///     "192.168.1.100",
@@ -747,7 +747,7 @@ mod tests {
             .log(
                 AuditEventType::UserLogin,
                 AuditSeverity::Info,
-                "web-api",
+                "hmi_backend",
                 "用户 admin 登录成功",
                 "admin",
                 "192.168.1.100",
@@ -758,7 +758,7 @@ mod tests {
             .log(
                 AuditEventType::ConfigChanged,
                 AuditSeverity::Warning,
-                "web-api",
+                "hmi_backend",
                 "配置已更新",
                 "admin",
                 "192.168.1.100",
@@ -769,7 +769,7 @@ mod tests {
             .log(
                 AuditEventType::UserLogout,
                 AuditSeverity::Info,
-                "web-api",
+                "hmi_backend",
                 "用户 admin 登出",
                 "admin",
                 "192.168.1.100",

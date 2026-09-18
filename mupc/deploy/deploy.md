@@ -102,9 +102,34 @@ intercore:
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
 
-web_api:
-  listen_addr: "0.0.0.0:8080"
-  enable_https: false
+# 【单元 K】原 `web_api:` 段已随 `mupc-web-api` crate 整体删除（对外 8080 HTTP 面取消，由
+# 本地触摸屏 HMI 取代）。现场既有的带 `web_api:` 段的 yaml 仍可加载，且保存时逐字保留。
+
+# ⚠️ **本地触摸屏 HMI 必须有本段**（K 收尾 Q-5）：段缺失 = `enabled` 缺省 false ⇒ 整段早退、
+# **静默无屏**（不报错，只是没数据通道）。本段取值与 `deploy/config/mupc_core_config.production.yaml`
+# 逐字段一致（生产口径 `enabled: true`）；升级/手工建 yaml 的核对清单见 **§十**。
+display:
+  enabled: true                         # 现场屏上机置 true；仿真/联调置 false（整段跳过）
+  bind_addr: "127.0.0.1:9810"           # 读通道（回环发布最新帧）
+  control_bind_addr: "127.0.0.1:9811"   # 控制通道（T-3 无登录写通道 → 硬绑回环）
+  publish_ms: 1000                      # 主拍周期（须 >= 100）
+  min_publish_interval_ms: 250          # 变更即组帧合并窗口（须 ∈ [100, publish_ms]）
+  device_poll_ms: 3000                  # 慢拍 A 装置状态（须 ∈ [1,4000]；F6.3 ≤5 s 前提）
+  alarm_poll_ms: 500                    # 慢拍 B 告警（须 ∈ [1,1000]；F7.3 ≤2 s 前提）
+  interlock_poll_ms: 500                # 慢拍 C 联锁（须 ∈ [1,1000]；F16.5 ≤2 s 前提）
+  alarm_page_size: 10                   # F7 告警列表最多展示条数（不得为 0）
+  log:                                  # 控制通道日志检索限额（EDGE-15）
+    max_files: 5
+    max_lines: 50000
+    live_ring: 2000                     # 实时日志 ring 容量（须 >= 100）
+    page_limit_max: 200
+    audit_page_size: 20
+  range:                                # 域值化量程（PRD §6.5 越界判 RangeError）
+    current_max_a: 300.0                # 五个数值均须有限正数（禁 NaN/±Inf/0/负数）
+    phase_power_max_kw: 100.0           # 须 <= total_power_max_kw
+    total_power_max_kw: 300.0
+    pcs_total_rated_kw: 60.0
+    inconsistency_threshold_kw: 3.0     # 须 <= pcs_total_rated_kw（超额定 ⇒ 角标恒灭）
 
 ai_engine:
   model_dir: "/opt/mupc/models"
@@ -295,8 +320,9 @@ sudo systemctl restart mupcd
 [07/14] 初始化 AI 引擎...      — LSTM + RL + ModelManager
 [08/14] 初始化策略引擎...      — 削峰填谷/需量控制/防逆流
 [09/14] 初始化 IEC 104 网关... — 北向调度主站通信
-[10/14] 初始化 Web API...      — Axum HTTP 服务 (0.0.0.0:8080)
-[11/14] 初始化 OTA 管理器...   — 固件/模型远程升级
+[10/14] 初始化 OTA 管理器...   — 构造实例（单元 K 后**无服务面**，原 [10/14]「初始化 Web API
+                                  — Axum HTTP 服务 (0.0.0.0:8080)」已随 crate 删除）
+[11/14] 注册 OTA 服务（实例已在步骤 10 创建，本期无服务面）... — 服务名 `ota_update`（能力保留）
 [12/14] 初始化系统资源监控...  — CPU/内存/磁盘
 [13/14] 初始化 MQTT 桥接...    — 物联平台对接
 [14/14] 初始化近场无线...      — WiFi/BLE/NearLink (stub)
@@ -311,7 +337,9 @@ sudo systemctl restart mupcd
 | `预测增强未配置，使用基线 LSTM 推理路径` | 正常，未启用 VMD+Attention |
 | `预测增强管线已启用: 初始等级=VmdAttention` | 已启用 VMD 增强 |
 | `安全模块初始化 (stub)` | 正常，国密 Phase 2+ 实现 |
-| `Web API 配置: listen=0.0.0.0:8080` | Web 管理页面已启动 |
+| （已删除）`Web API 配置: listen=…` | 单元 K 后**不再出现**：对外 HTTP 面随 crate 删除 |
+| `本地显示终端数据通道已启动: http://127.0.0.1:9810` | 读通道（仅回环）已启动 |
+| `控制通道绑定 … 失败` | 控制通道端口占用：检查 `display.control_bind_addr` |
 | `子系统初始化失败: [0x0005] 数据库连接失败` | 检查 `/opt/mupc/data/` 权限 |
 | `子系统初始化失败: [0x0402] 数据库迁移失败` | 删除 `mupc.db` 重试 |
 
@@ -411,7 +439,9 @@ display:
   # bind_addr: "localhost:9810"         # ❌ 升级后启动失败（旧版本可接受）
 ```
 
-仓库内无依赖（两个 deploy yaml 均无 `display:` 段，`deploy/local-display.md` 样例即字面量写法）；
+仓库内已对齐（2026-09-18 单元 K 整改：`deploy/config/` **两份 yaml 均已补 `display:` 段**，
+地址即字面量写法；`.production.yaml` 为 `enabled: true`——设计 §7.3；仓库默认那份为
+`enabled: false`（其用途是仿真/联调，整段跳过、行为不变）；`deploy/local-display.md` 样例同）。
 **仓库外现场 yaml** 若写了 `localhost:9810`，升级后**首次启动即失败**，须按上表改。
 
 ### 10.2 转发的校验是**全集**：非地址不变量同样门禁启动
@@ -422,7 +452,7 @@ display:
 | `display` 字段 | 约束 | 不合规的后果（启动报错文案要点） |
 |---|---|---|
 | `publish_ms` | `>= 100` | 越界（1..99 会打成高频通道） |
-| `min_publish_interval_ms` | `∈ [200, publish_ms]` | 合并窗口越界 |
+| `min_publish_interval_ms` | `∈ [100, publish_ms]` | 合并窗口越界 |
 | `alarm_poll_ms` / `interlock_poll_ms` | `∈ [1, 1000]` | 越界（F7.3 / F16.5 上屏 ≤2 s 前提） |
 | `device_poll_ms` | `∈ [1, 4000]` | 越界（F6.3 ≤5 s 前提） |
 | `alarm_page_size` | `!= 0` | 为 0 ⇒ F7 告警页永远空 |

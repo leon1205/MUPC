@@ -1,7 +1,8 @@
 //! AI 引擎集成模块
 //!
 //! Phase 3C: 将 AI 优化引擎与策略引擎集成。
-//! v2.0: 扩展为 web-api 的服务门面，提供完整的 AI 查询和控制接口。
+//! v2.0: 扩展为 AI 查询/控制门面（原 Web 服务面随 `web-api` crate 删除，单元 K；现由
+//! `mupcd` 的本地屏读/控制通道消费）。
 
 use crate::strategies::{AiCommandValidator, CommandType, ControlCommand, FallbackStrategy};
 use crate::tai_storage::TaiStorageStrategy;
@@ -15,8 +16,8 @@ use tokio::sync::RwLock;
 
 /// AI 集成器
 ///
-/// web-api 通过此门面访问 ai-engine，不直接调用 ai-engine。
-/// 承担安全校验、指令兜底校验职责。
+/// `mupcd` 侧（读通道 `display_host` / 控制通道 `console_host`）通过此门面访问 ai-engine，
+/// 不直接调用 ai-engine。承担安全校验、指令兜底校验职责。
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
@@ -769,7 +770,7 @@ fn is_dual_source_lost(
     !bms_fresh && !intercore_fresh
 }
 
-/// AI 引擎状态信息（供 web-api 序列化）
+/// AI 引擎状态信息（供上层序列化：读通道 `device.control_source` 段由此取数）
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiEngineStatusInfo {
     pub engine_status: &'static str,
