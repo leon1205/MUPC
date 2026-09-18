@@ -314,6 +314,20 @@
 
 ---
 
+### 6.10 单元 L 收尾整改登记（真字库下 P 值截断 + `LONG_DOTS` 文本缓冲改写，2026-09-18）
+
+> 来源：工作单元 L（测试与交付）两项收尾整改。两条事实**同源**：都**只在真字库在位**时暴露
+> （`--features noto-font` + 先跑 `fonts/gen_fonts.sh` 生成 `fonts/lv_font_noto_sc_*.c`），
+> **默认构建（`default = []`）下不可见** ⇒ 本地门禁全绿与真机表现**不一致**。
+> **本轮口径（PM 裁定）：只登记，不改版式常量** —— 加宽槽位 / 缩小字号 / 换字形由 UI 设计裁定；
+> 登记内容与渲染端落点同源（`local-display/src/ui/pages/p1_status.rs` 的 `PHASE_P_SLOT_W` 文档注释）。
+
+| # | 类别 | 严重程度 | 问题 | 依据/处置 |
+|---|------|----------|------|-----------|
+| U-42 | 渲染端缺陷（真字库下**数据被截断展示**）＋同源的"注释为假" | **P1** | ① **P1 页三相卡带符号 P 值装不下槽宽**：`PHASE_P_SLOT_W = 2 × TextSlot::PhasePower.px()`（`mupc/crates/local-display/src/ui/pages/p1_status.rs:321`；本单元 L 收尾把登记块插在其文档注释里 ⇒ 该常量由 `:279` 移到 `:321`，`12-本地显示终端-测试报告.md` 与本表旧引用已同步订正）= **2 em**（该槽档位 = 64 px，见 `theme.rs` 的 `TextSlot::PhasePower => FontSize::S64` ⇒ 槽宽 **128 px**），而带符号的 1 位小数数值需 ≈ **2.50 em**（`U+2212` 的 `adv_w` **逐档恒等于一个数字**）⇒ **任何负数都越槽**，与数值大小无关。**实测**（真源 `mupc/crates/local-display/fonts/lv_font_metrics.txt`，单位 1/16 px：`−` 与数字 = 568、`.` = 285）：64 px 档 `−12.3` = 4×568+285 = 2557/16 = **159.8 px** > 槽宽 **128 px**（越槽 **31.8 px**）；对照 `12.5` = 124.3 px（恰好放得下，余 3.7 px）、`123.4` = 159.8 px（越槽）。比值**逐档恒定**（≈2.50 em vs 2 em，10 档全部越槽），按 28 px 档折算即 **70.1 px > 56 px**。**后果**：真机上**充电方向（P < 0）的相 P 被 `LongMode::DOTS` 截断成 `−1...`**（label 建在 `p1_status.rs:785-795`；该形式按 DOTS 分支逐字节推算——同路径正值的实测见下条）。② **同源事实：LVGL v9.5.0 的 `LONG_DOTS` 就地改写 label 文本缓冲** —— `mupc/vendor/lvgl/src/widgets/label/lv_label.c:1368` 的 `lv_label_set_dots()`（由同文件 `:1314-1348` 的 DOTS 分支调起）把 `text[dot_begin + i]` 覆写成 `.` 并把尾部置 `\0`（被覆盖字符先存 `dot[]`），仅由 `lv_label_revert_dots()`（`:1357`）在**下一次** `lv_label_refr_text`（`:1111`）/ `lv_label_set_text_vfmt`（`:154`）/ `set_text_internal`（`:988`）时才还原 ⇒ **`lv_label_get_text()` 读回的就是截断串**，"`DOTS` 只影响绘制"**为假**。 | **触发前提**：`noto-font`（**非默认 feature** —— `mupc/crates/local-display/Cargo.toml:54`；`default = []` 见 `:47`）+ 先跑 `fonts/gen_fonts.sh` 生成 10 档 `.c`（不入库，见 `.gitignore:60`）。**为何默认构建看不出来**：默认下 `Font::of(..)` 恒 `None` ⇒ 走 `Font::fallback()`（LVGL 内置 `lv_font_montserrat_14`），`123.4` 在这 2 em 里**放得下**、不触发 DOTS ⇒ **本地全绿是"字库缺席"撑起来的伪绿**，只能由真机 / `--features noto-font` 暴露。**连带必须一并订正的假话**：`ui/tests.rs::pages_chain` 的断言「`` `DOTS` 只影响**绘制**，文本属性仍完整（截断不是丢数据）``」（**工作树 `mupc/crates/local-display/src/ui/tests.rs:3692`**；HEAD 版 `:3268`）在真字库下**必红** —— **本轮实测**（2026-09-18，`cargo test -p local-display --features noto-font -j 2`）：**`368 passed; 1 failed`，唯一红点就是本条**，`left: Some("12...") / right: Some("123.4")`（与默认构建的 `369 passed` 对照，差值即这一条）；`mupc/crates/local-display/src/ui/controls.rs` 第 4 条薄层缺能力原文「`LongMode::DOTS` 只影响**绘制**，`Ipv4Stepper::text` 仍返回完整串 ⇒ 离屏断言结构上抓不到"可视截断"」同属此列（**该假设正是"溢出保护网在真机上恒空转"的原因**）—— **该假前提已于 L 收尾就地订正**（工作树 `controls.rs:50-61`；原文保留在 `:53-54` 的引号内并标注"该前提为假"）。**⚠️ P1 / P4 真机验收硬门禁：本项未处置前不得通过**（与已登记的"字体豆腐块 23 码位"批**同批**处置，那批的登记见 `mupc/crates/mupc-core-bin/src/console_host.rs:752` 与 `interlock_ops.rs:45`）。处置时**须一并裁定**"截断后读回文本"的语义（接受失真 / 改判据 / 另存原文），否则测试口径悬空 |
+
+---
+
 ## 7. 技术债统计
 
 | 类别 | 数量 | 已修复 | 待修复 | 状态 |

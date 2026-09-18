@@ -403,10 +403,9 @@ const MAX_CHAR_LITERAL_LEN: usize = 12;
 ///
 /// - **③a 未闭合即响亮失败** —— 字符串 / 原始串 / 块注释扫到 **EOF 仍无闭合定界符** ⇒
 ///   `panic!`（[`unclosed`]）并点名 `文件:行` 与形态。合法 Rust 里不存在未闭合字面量 ⇒ 零误报；
-/// - **③b 非原始串不得跨行** —— 合法 Rust 的普通 / 字节 / C 串**不能含裸换行**（唯一跨行途径
-///   是 `\` 行续接，已被转义分支吃掉）⇒ 扫描中遇到裸换行即响亮失败。这一条正是为
-///   `r"a\"` / `r#"…"#` 那类"越过真实闭引号、到**下一个无关引号**才闭合"的失真形态设的：
-///   它们一旦失真，就必然跨过行边界（本单元实测：两形态**均可**被 ③b 抓到）。
+/// - ~~**③b 非原始串不得跨行**~~ —— **已于工作单元 L 删除**：前提错误（Rust **允许**普通
+///   字符串含裸换行，见下文"已修误报"）。删除的代价与替代控制见
+///   [`strip_comments_and_literals`] 里对应分支的注释。
 ///
 /// **残余边界（如实登记，不声称覆盖）**：若某形态的失真**恰好在同一行内**遇到下一个无关引号
 /// 而闭合（例如 `let a = r#"x"#; let b = "y";` 这一行的旧实现），③ 不报错。此时被吞的仅限于
@@ -427,22 +426,47 @@ const MAX_CHAR_LITERAL_LEN: usize = 12;
 ///
 /// 本仓库 `core.autocrlf = true`（git 检出时把 LF 落成 `\r\n`）⇒ **Windows 全新克隆 /
 /// 重新检出后的工作区全是 CRLF**。原实现在转义分支里只认 `` `\` `` **紧跟** `\n`，而
-/// CRLF 下 `` `\` `` 后面是 `\r` ⇒ 行续接判据落空、控制流掉进 ③b 的"裸换行"判据
+/// CRLF 下 `` `\` `` 后面是 `\r` ⇒ 行续接判据落空、控制流掉进**当时还在的** ③b 判据
 /// ⇒ **合法源码被响亮误报**。2026-09-15 实测：仅仅把 `ui/shell.rs` 的换行风格由 LF 改成
 /// CRLF（**内容一字未改**），`shell_static_constraints` / `ui_layout_setters_use_theme_constants` /
 /// `ui_const_i32_definitions_derive_from_theme` **三处同时变红**，报
 /// `ui/shell.rs:1635 —— 非原始字符串在闭合前跨了行`。
 ///
 /// **修法**：两个转义分支统一走 [`line_continuation`]（认 `\r\n` 并把它一并推进掉）；
-/// 回归用例 [`scanner_accepts_crlf_line_continuation`]（**含反向探针**：真·裸换行仍须响亮失败）。
+/// 回归用例 [`scanner_accepts_crlf_line_continuation_and_multi_line_strings`]。
+///
+/// ## 已知边界（**曾误报，已修**）：**裸换行在非原始串里是合法的**（工作单元 L 订正）
+///
+/// 同一条判据（旧 ③b）还咬到第二种合法源码：**非原始串含裸换行**。Rust **允许**普通字符串
+/// 字面量跨行（独立 crate 实测：`let s = "\<LF>abc<LF>def";` 编译通过、产出 `abc\ndef`）——
+/// 旧 ③b 的"唯一跨行途径是 `\` 行续接"是**错的**。首例误报 = `src/config.rs::help_text`
+/// 的 53 行帮助文本（一直在用），只有当扫描面从 `ui/**` 扩到 `src/**`（工作单元 L 的
+/// 架构边界网）时才暴露。**修法**：删除旧 ③b，裸换行按普通字符处理（补回换行、内容剥空）；
+/// 回归用例同上（第 ② 段），并保留 ③a（EOF 未闭合仍响亮失败）。
 ///
 /// **教训（写给下一条判据）**：③ 系列的前提是"合法 Rust 源码里不存在未闭合字面量"，
 /// 而**换行风格也在这个前提内** —— 任何依赖"两字符紧邻"的判据都要先问一句
 /// **"CRLF 下还紧邻吗？"**（这是本网首条、也是唯一一条**误报**形态；其余边界一律偏漏检方向）。
 fn strip_comments_and_literals(src: &str, name: &str) -> String {
+    strip_comments_and_literals_audited(src, name).0
+}
+
+/// 同 [`strip_comments_and_literals`] —— **同一份实现**（本函数是唯一扫描器，上面那个只是
+/// 丢掉审计输出的薄壳，**不是第二份扫描器**），额外返回**被识别为原始串**的位置清单
+/// `(1 起行号, `#` 个数)`。
+///
+/// **为什么需要这个出口**：旧 ③b 判据删除后（见 [`strip_comments_and_literals`] 的
+/// "已知边界：裸换行在非原始串里是合法的"），"某类字面量**前缀**没被识别 ⇒ 把非字面量处的
+/// 引号当成开引号、越过真实闭引号一路吞下去"这一失真形态**再无自动哨**：吞掉的内容里换行
+/// 也被保留 ⇒ 行数自证 ① 抓不到，③a 只在"恰好扫到 EOF 仍未闭合"时才炸。本出口让下游能把
+/// "**扫描面里已知的原始串是否真被认出来**"变成一条可对拍的硬判据
+/// —— 见 [`scanner_recognizes_every_raw_string_on_the_scan_face`]。
+fn strip_comments_and_literals_audited(src: &str, name: &str) -> (String, Vec<(usize, usize)>) {
     let cs: Vec<char> = src.chars().collect();
     let line_of = |at: usize| 1 + cs[..at.min(cs.len())].iter().filter(|&&c| c == '\n').count();
     let mut out = String::with_capacity(src.len());
+    // 每枚**被 `literal_prefix` 判为原始串**的字面量记一条 `(1 起行号, `#` 个数)`。
+    let mut raw_opens: Vec<(usize, usize)> = Vec::new();
     let mut i = 0usize;
     while i < cs.len() {
         let c = cs[i];
@@ -484,6 +508,10 @@ fn strip_comments_and_literals(src: &str, name: &str) -> String {
         // （前一字符不是标识符字符）区分。
         if let Some(lp) = literal_prefix(&cs, i) {
             let open = i;
+            if lp.raw {
+                // 审计出口：本处**被认出是原始串**（供"前缀失认"判据对拍，见函数文档）。
+                raw_opens.push((line_of(open), lp.hashes));
+            }
             i = lp.quote + 1;
             let mut closed = false;
             while i < cs.len() {
@@ -513,16 +541,24 @@ fn strip_comments_and_literals(src: &str, name: &str) -> String {
                     i += 1;
                     closed = true;
                     break;
-                } else if cs[i] == '\n' {
-                    // **自证 ③b**：合法 Rust 的**非原始**串不得含裸换行（唯一跨行途径是
-                    // `\` 行续接，已在上一条被吃掉）⇒ 走到这里即坐实"这个引号不是真开引号"
-                    //（典型成因：原始串前缀 `r"` / `r#"` / `br"` / `br#"` 没被识别）。
-                    unclosed(
-                        name,
-                        line_of(i),
-                        &format!("非原始字符串（起于第 {} 行）在闭合前跨了行", line_of(open)),
-                    );
                 }
+                // ⚠️ **旧的 ③b（"非原始串不得含裸换行 ⇒ 遇见即响亮失败"）已于工作单元 L 删除**
+                // —— 它的**前提本身是错的**：Rust **允许**普通字符串字面量含裸换行
+                // （`let s = "\<LF>abc<LF>def";` 合法，产出 `abc\ndef`；L 单元用独立 crate
+                // 实测确认）。首例误报 = `src/config.rs::help_text` 的 53 行帮助文本（合法、
+                // 在用），把扫描面从 `ui/**` 扩到 `src/**` 的当天即触发。
+                // **代价（如实登记）**：失去"前缀没被识别 ⇒ 跨越真实闭引号吞行"的自动哨 ——
+                // 该风险的**替代控制**是各条静态网自带的**扫描面自证**（must-contain token，
+                // 见 `no_text_input_widget_symbol_anywhere_in_src` / `binding_crate_is_not_used…`），
+                // 以及 [`literal_prefix`] 已逐条列出的前缀形态清单（`r` / `b` / `c` / `br` / `cr`
+                // + 任意 `#`）。EOF 未闭合仍由 ③a 响亮失败。
+                //
+                // ⚠️ **订正（L 收尾，2026-09-18）**：上面那段"替代控制"曾把话说过头 —— **实测**
+                // 往 [`literal_prefix`] 注入"`r` 前缀失认"（`if cs[i] == 'r' { return None; }`）
+                // ⇒ 全量 **368 passed / 0 failed**（该红却没红），即那三条替代控制**一条都没接住**。
+                // 现已**补真控制**：[`scanner_recognizes_every_raw_string_on_the_scan_face`]
+                // 用"扫描面内**已知 15 处**原始串（逐文件条数 + 端到端剥空）"对拍，
+                // 同款注入下**必红**（实测），是本失真的**唯一**自动哨。
                 if cs[i] == '\n' {
                     out.push('\n'); // 字面量内容置空，但**不吞行**
                 }
@@ -589,7 +625,7 @@ fn strip_comments_and_literals(src: &str, name: &str) -> String {
         i += 1;
     }
     assert_line_count_kept(name, src, &out);
-    out
+    (out, raw_opens)
 }
 
 /// 前缀字面量的识别结果（[`literal_prefix`] 返回）。
@@ -684,20 +720,22 @@ fn line_continuation(cs: &[char], i: usize) -> (bool, usize) {
     }
 }
 
-/// **自证 ③ 的失败出口**：一类定界符"扫到 EOF 仍未闭合"或"非原始串跨了行" ⇒ **响亮失败**
-/// （永不返回）。
+/// **自证 ③a 的失败出口**：某类定界符"扫到 EOF 仍未闭合" ⇒ **响亮失败**（永不返回）。
 ///
-/// 抽成独立函数只为让三处调用点共用一段文案（`-> !` ⇒ 调用点不必写 `return`）。判据、为什么
+/// 抽成独立函数只为让调用点共用一段文案（`-> !` ⇒ 调用点不必写 `return`）。判据、为什么
 /// 合法 Rust 里零误报、以及**残余边界**见 [`strip_comments_and_literals`] 的"自证 ③"一节。
+///
+/// ⚠️ **沿革（工作单元 L）**：原文案还断言"非原始串不得含裸换行"并据此判"跨行字符串"失真 ——
+/// 该前提**为假**（Rust 允许普通串含裸换行，首例误报 = `src/config.rs::help_text`），
+/// 那条判据（旧 ③b）已删除，本函数现只负责 EOF 未闭合。
 fn unclosed(name: &str, line: usize, what: &str) -> ! {
     panic!(
         "{name}:{line} —— {what}。\n\
-         合法 Rust 源码里**不存在**未闭合的字面量 / 块注释，也不存在**含裸换行**的非原始\
-         字符串 ⇒ 这是**扫描器失真**（不是源码问题）：多半是某类字面量**前缀**没被识别\
-         （`r\"…\"` / `r#\"…\"#` / `b\"…\"` / `br#\"…\"#`），于是把非字面量处的引号当成开\
-         引号、越过真实闭引号一路吞下去。被吞掉的源码对下游**全部静态网不可见**（静默失明）。\
-         请修 [`literal_prefix`] / [`strip_comments_and_literals`]（判据与前缀形态清单见\
-         二者文档）。"
+         合法 Rust 源码里**不存在**未闭合的字面量 / 块注释 ⇒ 这是**扫描器失真**（不是源码\
+         问题）：多半是某类字面量**前缀**没被识别（`r\"…\"` / `r#\"…\"#` / `b\"…\"` / \
+         `br#\"…\"#` / `c\"…\"`），于是把非字面量处的引号当成开引号、越过真实闭引号一路吞下去。\
+         被吞掉的源码对下游**全部静态网不可见**（静默失明）。请修 [`literal_prefix`] / \
+         [`strip_comments_and_literals`]（判据与前缀形态清单见二者文档）。"
     )
 }
 
@@ -803,6 +841,228 @@ fn ui_static_constraints() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ①′ / ⑤′ 架构边界静态约束（工作单元 **L** 补缺；设计 §11.1 静态约束行 ① ⑤ + §11.4 CI 六条）
+//
+// **为什么必须补这两条**（L 单元覆盖度审计的实测结论，逐条 grep 复核）：
+// - ⑤「`lvgl-sys` 不得被 `ui`/`state`/`channel`/`console` 直接 `use`」——
+//   `FORBIDDEN_UI_SYMBOLS` 里**有** `lvgl_sys` 这一项，但它只被各条 `*_static_constraints`
+//   用在**各自那几个 `ui/**` 文件**上；设计点名的 `state` / `channel` / `console` **三个模块
+//   此前零覆盖**（全库 grep：无任何用例读这三个文件的源码）。
+// - ①「`ui/**` **与 `src/**`** 不得引用 `lv_textarea`/`lv_keyboard`/`lv_spinbox`」——
+//   此前只有 `lvgl/tests_a3.rs` 里对 **`widgets.rs` 一个文件**的扫描；
+//   `src/**` 其余 20+ 个文件**零覆盖**。
+// ⇒ 两条都收敛为**同一张显式文件清单**（本文件是扫描面的唯一真源，含自证段防清单腐化）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **薄层之外**的生产源清单（`src/**` 去掉 `src/lvgl/**`；设计 §1.1.1.2 纪律 1 的"业务模块"面）。
+///
+/// 逐条显式列出（不用 glob / 不靠遍历目录：`include_str!` 指错文件时**编译期**就红，
+/// 而目录遍历会把"文件被删"伪装成"扫描通过"）。
+const NON_THIN_LAYER_SOURCES: [(&str, &str); 26] = [
+    ("src/lib.rs", include_str!("../lib.rs")),
+    ("src/main.rs", include_str!("../main.rs")),
+    ("src/app.rs", include_str!("../app.rs")),
+    ("src/canvas.rs", include_str!("../canvas.rs")),
+    ("src/channel.rs", include_str!("../channel.rs")),
+    ("src/config.rs", include_str!("../config.rs")),
+    ("src/console.rs", include_str!("../console.rs")),
+    ("src/control_route.rs", include_str!("../control_route.rs")),
+    ("src/error.rs", include_str!("../error.rs")),
+    ("src/screen.rs", include_str!("../screen.rs")),
+    ("src/state.rs", include_str!("../state.rs")),
+    ("src/timing.rs", include_str!("../timing.rs")),
+    ("src/touch.rs", include_str!("../touch.rs")),
+    ("ui/mod.rs", include_str!("mod.rs")),
+    ("ui/theme.rs", include_str!("theme.rs")),
+    ("ui/components.rs", include_str!("components.rs")),
+    ("ui/controls.rs", include_str!("controls.rs")),
+    ("ui/shell.rs", include_str!("shell.rs")),
+    ("ui/pages/mod.rs", include_str!("pages/mod.rs")),
+    ("ui/pages/filters.rs", include_str!("pages/filters.rs")),
+    ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
+    ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
+    ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs")),
+    ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
+    ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
+    ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
+];
+
+/// **薄层自身 + 其测试**的源清单（`src/lvgl/**`；设计 §11.1 静态约束 ① 的 `src/**` 面之另一半）。
+///
+/// 薄层**允许** `use lvgl_sys`（那正是它的职责）⇒ 清单 ⑤ 的检查**不含**本组；
+/// 但**文本输入控件零出现**（约束 ①）对薄层同样成立（薄层也不提供文本框封装）。
+const THIN_LAYER_SOURCES: [(&str, &str); 12] = [
+    ("lvgl/mod.rs", include_str!("../lvgl/mod.rs")),
+    ("lvgl/obj.rs", include_str!("../lvgl/obj.rs")),
+    ("lvgl/style.rs", include_str!("../lvgl/style.rs")),
+    ("lvgl/font.rs", include_str!("../lvgl/font.rs")),
+    ("lvgl/display.rs", include_str!("../lvgl/display.rs")),
+    ("lvgl/event.rs", include_str!("../lvgl/event.rs")),
+    ("lvgl/indev.rs", include_str!("../lvgl/indev.rs")),
+    ("lvgl/widgets.rs", include_str!("../lvgl/widgets.rs")),
+    ("lvgl/tests.rs", include_str!("../lvgl/tests.rs")),
+    ("lvgl/tests_a2.rs", include_str!("../lvgl/tests_a2.rs")),
+    ("lvgl/tests_a3.rs", include_str!("../lvgl/tests_a3.rs")),
+    ("lvgl/tests_b4.rs", include_str!("../lvgl/tests_b4.rs")),
+];
+
+/// 静态约束 ⑤（设计 §11.1 / §11.4）：**`lvgl-sys` 不得被薄层之外的生产模块直接引用**。
+///
+/// 判据 = 剥掉注释与字面量后，源码里**不出现** `lvgl_sys` / `lvgl-sys` 这两个 token
+/// （`use lvgl_sys as sys;` 与 `lvgl_sys::LV_…` 两种形态**一并**被这条覆盖 ——
+/// 只查 `use` 会漏掉全限定路径，那是本约束最常见的绕过形态）。
+///
+/// **改什么会让本条变红**：在 `src/state.rs`（或 `channel`/`console`/任一 `ui/**`）里写
+/// `use lvgl_sys as sys;` / `lvgl_sys::lv_obj_t` —— 这正是"unsafe 边界扩散"的起点。
+/// **反向探针（L 交付报告）**：往 `src/console.rs` 生产区插入一行 `use lvgl_sys as sys;` ⇒ 红。
+#[test]
+fn binding_crate_is_not_used_outside_the_thin_layer() {
+    // 自证：清单必须真的含设计点名的四个模块（否则"扫了 26 个文件"里可能恰好漏了它们）。
+    for must in ["src/state.rs", "src/channel.rs", "src/console.rs", "ui/mod.rs"] {
+        assert!(
+            NON_THIN_LAYER_SOURCES.iter().any(|(n, _)| *n == must),
+            "扫描面自证失败：`{must}` 不在 NON_THIN_LAYER_SOURCES 内"
+        );
+    }
+    for (name, src) in NON_THIN_LAYER_SOURCES {
+        let code = strip_comments_and_literals(src, name);
+        let lower = code.to_ascii_lowercase();
+        for needle in [concat!("lvgl", "_sys"), concat!("lvgl", "-sys")] {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得引用 `{needle}`（设计 §11.1 静态约束 ⑤：unsafe 边界收敛，\
+                 只有 `src/lvgl/**` 薄安全层可直接触碰绑定）"
+            );
+        }
+    }
+    // **反向自证（防"扫了个空文件"）**：清单里的代表文件必须含其生产 token。
+    let app = NON_THIN_LAYER_SOURCES
+        .iter()
+        .find(|(n, _)| *n == "src/app.rs")
+        .map(|(_, s)| *s)
+        .expect("src/app.rs 在清单内");
+    assert!(
+        app.contains("pub struct App"),
+        "src/app.rs 未含 `pub struct App` —— include_str! 指错文件（本用例会构造性全绿）"
+    );
+}
+
+/// 静态约束 ①（设计 §11.1 / §11.4，F12 零键盘红线）：**`ui/**` 与 `src/**` 均不得引用
+/// `lv_textarea` / `lv_keyboard` / `lv_spinbox` 符号**。
+///
+/// 与既有网的分工（**互补，不重叠**）：
+/// - 编译期：`lv_conf.h` 三者置 0 ⇒ 产物里根本不存在这些控件（**最强**，但只到"当前配置"为止）；
+/// - 源码面：本用例覆盖 **`src/**` 全量**（薄层 + 业务层 + `ui/**`，共 38 个文件）；
+///   `ui/**` 另由各条 `*_static_constraints` 覆盖（口径同 [`FORBIDDEN_UI_SYMBOLS`]）。
+///
+/// 符号名一律 `concat!` 拼接 —— 本文件同属 `src/**`，直写会被自己的规则误伤
+/// （`lvgl/tests_a3.rs` 同法）。
+///
+/// **改什么会让本条变红**：把 P2 的步进器改成 `lv_spinbox`、或在薄层加一个 `lv_textarea`
+/// 封装（后者尤其要紧：薄层一旦封装，`ui/**` 只需一次调用就绕开了"零键盘"）。
+#[test]
+fn no_text_input_widget_symbol_anywhere_in_src() {
+    let forbidden = [
+        concat!("lv_", "text", "area"),
+        concat!("lv_", "key", "board"),
+        concat!("lv_", "spin", "box"),
+    ];
+    for (name, src) in NON_THIN_LAYER_SOURCES.iter().chain(THIN_LAYER_SOURCES.iter()) {
+        let lower = strip_comments_and_literals(src, name).to_ascii_lowercase();
+        for needle in forbidden {
+            assert!(
+                !lower.contains(needle),
+                "{name} 不得出现文本输入控件符号 `{needle}`（F12 / TT-02 零键盘红线；\
+                 设计 §11.1 静态约束 ① 的扫描面 = `ui/**` **与** `src/**`）"
+            );
+        }
+    }
+    // **反向自证**：清单确实覆盖到薄层（否则 `src/**` 只剩业务层，约束 ① 只做了一半）。
+    let widgets = THIN_LAYER_SOURCES
+        .iter()
+        .find(|(n, _)| *n == "lvgl/widgets.rs")
+        .map(|(_, s)| *s)
+        .expect("lvgl/widgets.rs 在清单内");
+    assert!(
+        widgets.contains("ScrollContainer"),
+        "lvgl/widgets.rs 未含 `ScrollContainer` —— include_str! 指错文件"
+    );
+}
+
+/// 静态约束 ②（设计 §11.1 / §11.4，§4.4.6 禁直连）：**`local-display` 的依赖图不得含
+/// `mupc-intercore` / `mupc-southd` / `mupc-gateway`**（渲染进程只能经回环通道取数，
+/// 不得直连核间总线 / 南向 / 北向）。
+///
+/// 判据 = 解析 `crates/local-display/Cargo.toml` 的**依赖键名**（`[dependencies]` 与
+/// 全部 `[…dependencies]` 段；与 crate 名同形，含 path 依赖的**键**）。
+/// 设计原文给的是 `cargo tree` 断言 —— 这里取**清单层**等价物：清单里没有，依赖图里就不可能有
+/// （`cargo tree` 只多出传递依赖，而传递依赖的源头同样只能来自本清单）。
+///
+/// **自证（防解析失手 ⇒ 恒真）**：解析结果**必须**含 `display-proto` 与 `lvgl-sys`
+/// （两者是这个 crate 的既有硬依赖）；解析不出 ⇒ 响亮失败，绝不允许"解析不到"伪装成"没违规"。
+///
+/// **改什么会让本条变红**：在 `Cargo.toml` 里加一行 `mupc-intercore = { path = "../intercore" }`。
+#[test]
+fn local_display_manifest_has_no_direct_dependency_on_core_crates() {
+    /// 本 crate **允许**的依赖（写死；新增依赖 ⇒ 本条红 —— 渲染端的依赖面是设计 §5.1 的
+    /// "刻意保持最小"承诺，新增必须过评审，不能悄悄长出来）。
+    const ALLOWED: [&str; 8] = [
+        "display-proto",
+        "lvgl-sys",
+        "serde",
+        "serde_json",
+        "thiserror",
+        "uuid",
+        "libc",
+        "evdev",
+    ];
+    let manifest = include_str!("../../Cargo.toml");
+    let mut in_deps = false;
+    let mut seen: Vec<String> = Vec::new();
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            // `[dependencies]` / `[dev-dependencies]` / `[target.'cfg(..)'.dependencies]`
+            in_deps = line.contains("dependencies]");
+            continue;
+        }
+        if !in_deps || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if !key.is_empty() {
+            seen.push(key.to_string());
+        }
+    }
+    // 自证：解析必须真的读到依赖（否则下面的断言是恒真的空转）。
+    for must in ["display-proto", "lvgl-sys"] {
+        assert!(
+            seen.iter().any(|k| k == must),
+            "Cargo.toml 依赖解析未读到 `{must}` —— 解析式失效（本条会构造性全绿）：{seen:?}"
+        );
+    }
+    for forbidden in ["mupc-intercore", "mupc-southd", "mupc-gateway", "intercore", "southd"] {
+        assert!(
+            !seen.iter().any(|k| k == forbidden),
+            "`local-display` 不得直接依赖 `{forbidden}`（设计 §11.1 静态约束 ② / §4.4.6 禁直连；\
+             渲染端只能经回环读/控制通道取数）：实测依赖 = {seen:?}"
+        );
+    }
+    // 依赖面**恰为**允许清单（防"新增一个没人审的依赖"）。
+    let mut got = seen.clone();
+    got.sort();
+    let mut want = ALLOWED.to_vec();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "`local-display` 的依赖面与设计 §5.1 的既定集合不符（新增依赖须同步本条并过评审）"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ⑥′ 码表覆盖率（**B2a 规格评审 ③ 重写**：基线 = 生成字体的实际 cmap，待查集合 = 扫源码）
 //
 // 旧实现的**构造性漏判**（评审实测）：以手写常量 `ALL_TEXTS` 为待查集合、以
@@ -844,6 +1104,18 @@ const UI_PROD_SOURCES: [(&str, &str); 13] = [
     ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
+
+/// **`ui/**` 之外**、但同样**产出上屏文案**的生产源（设计 §11.1 码表覆盖率行原文：
+/// "静态扫描 **`ui/**` + `state.rs`** 中的中文字面量"）。
+///
+/// **为什么此前只有 `ui/**`**：`state.rs` 的模块头自陈"文案字面量的唯一落点在 `ui/**`，
+/// 本层只转出"，且 `control_texts_are_aliases_of_existing_ui_literals` 等用例逐条比对过
+/// **别名**关系。但"逐条比对"只覆盖**被点名的那几个出口** —— `dash_badge`（`未取数` /
+/// `源离线` / `数据异常` 三个屏上角标词）的**唯一**断言是 `dash_badge_words_match_ui`
+/// （拿函数与自己的字面量比 ⇒ **自证式恒真**，对"缺字"零判别力），而它是 `p1_status.rs`
+/// 生产路径（`card.reason_chip.set_text(state::dash_badge(flag))`）直接上屏的字符串。
+/// 工作单元 L 的覆盖度审计据此把本文件纳入扫描面（设计原文即如此要求）。
+const UI_ADJACENT_PROD_SOURCES: [(&str, &str); 1] = [("src/state.rs", include_str!("../state.rs"))];
 
 /// **非屏显出口**白名单：紧跟这些 token 的字符串字面量**不会**被画到屏上（逐条列出，
 /// 不靠正则猜）。除此之外**一律**当上屏候选查（宁可多查）：
@@ -898,7 +1170,13 @@ const UI_PROD_SOURCES: [(&str, &str); 13] = [
 /// token 是**小写 ASCII 且从不上屏**（上屏的是中文名 `核间` / `主站` / `审计`，未登记名经
 /// `display_safe` 归一）。该文件里 `module_key("…")` 的计数由 `p3_static_constraints`
 /// 钉死为恰 3 处。
-const NON_DISPLAY_SINKS: [&str; 10] = [
+///
+/// **L 单元新增一条 `#[must_use =`**：把扫描面扩到 `src/state.rs`（[`UI_ADJACENT_PROD_SOURCES`]）
+/// 后首个命中的就是它 —— `#[must_use = "本地合成回执必须送进页面（…）"]`。它是**编译器诊断**
+/// （`unused_must_use` 的提示语），与 `env!(` / `stderr(),` **同一条**非屏显口径：
+/// **结构上不可能**成为上屏文案。若不登记，它会按"上屏候选"被逐字要求字形齐备
+/// （`（` `）` `；` 均不在 cmap 内）—— 那是对**判据**的迁就，不是对**屏显**的保证。
+const NON_DISPLAY_SINKS: [&str; 11] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
@@ -909,6 +1187,7 @@ const NON_DISPLAY_SINKS: [&str; 10] = [
     "source_key(",
     "audit_key(",
     "module_key(",
+    "#[must_use =",
 ];
 
 /// **已登记**的字库缺口：扫源码确实用到、但生成字体的 cmap 里**没有**的字形。
@@ -1109,23 +1388,24 @@ fn truncate_before_test_module_forms_are_accepted_or_loud() {
     );
 }
 
-/// **CRLF 行尾**回归（见 [`strip_comments_and_literals`] 的"已知边界：CRLF 行尾"）。
+/// **CRLF 行尾** + **多行字符串**回归（见 [`strip_comments_and_literals`] 的"已知边界"两节）。
 ///
-/// 判据：`` `\` `` 行续接在 **CRLF 源码**里必须被正常吃掉，**不得**触发 ③b 的
-/// "跨行字符串"误报。
+/// 判据：① `` `\` `` 行续接在 **CRLF 源码**里必须被正常吃掉；② **非原始串里的裸换行是合法
+/// Rust**（工作单元 L 实测订正）⇒ 必须被接受、内容剥空、**行数守恒**，且**不得**吞掉其后的源码。
 ///
 /// **改什么会让本条变红**：把 [`line_continuation`] 的 `(Some(&'\r'), Some(&'\n'))` 分支
-/// 删掉（退回"只认 `\n`"）⇒ 第一段直接 panic（**已实测**：`shell_static_constraints`
-/// 三网红于同一形态）。
+/// 删掉（退回"只认 `\n`"）⇒ 第 ① 段直接 panic（**已实测**：`shell_static_constraints`
+/// 三网红于同一形态）；把多行串的长度按"到下一个引号为止"乱吞（不补换行）⇒ 第 ② 段的行数
+/// 自证红。
 ///
-/// ⚠️ **反向探针的已知限度（2026-09-15 代码质量评审实测，如实登记）**：它只证明
-/// "③b 被改成**什么都不做**时会红"。若有人把 ③b 的 `unclosed(..)` 换成"**补一个换行**"
-/// （一种看起来更"宽容"的改法），本反向断言会**假绿** —— 多推的那个换行会触发
-/// [`assert_line_count_kept`] 的行数自证，把缺口**掩饰**成绿。故本条**不能**单独当作
-/// "③b 仍然有效"的证明；③b 的正面覆盖来自它在真实源码上的运行（`ui/**` 一旦出现
-/// 真·跨行字符串，三张静态网即红）。**要改 ③b 的失败分支，先读本段。**
+/// ⚠️ **沿革（工作单元 L，如实登记）**：本条此前还有一条**反向探针**——"真·裸换行必须响亮
+/// 失败"。该断言的前提（"合法 Rust 的非原始串不得含裸换行"）**经实测为假**：Rust 允许字符串
+/// 字面量含裸换行（独立 crate 实测 `let s = "\<LF>abc<LF>def";` 合法，产出两行），
+/// 首例误报是 `src/config.rs::help_text`（53 行帮助文本，一直在用）——只有当扫描面从
+/// `ui/**` 扩到 `src/**` 时才被触发。故旧 ③b 判据连同该反向探针一并删除，
+/// **替以第 ② 段的正面判据**（接受了什么、剥成什么、行数如何）。
 #[test]
-fn scanner_accepts_crlf_line_continuation() {
+fn scanner_accepts_crlf_line_continuation_and_multi_line_strings() {
     // 源码本身仍是 LF；被测的 CRLF 由**字面转义**给出 ⇒ 不依赖检出时的换行风格。
     let crlf_src = "fn f() {\r\n    let s = \"a\\\r\nb\";\r\n    const SENTINEL: i32 = 48;\r\n}\r\n";
     let out = strip_comments_and_literals(crlf_src, "crlf-probe.rs");
@@ -1139,14 +1419,146 @@ fn scanner_accepts_crlf_line_continuation() {
         "行数须守恒 —— `\\r` 必须随 `\\n` 一并被推进掉，否则账目对不上"
     );
 
-    // ── 反向探针：真的**裸换行**仍须响亮失败（证明修 CRLF 没把 ③b 一起废掉）──
-    let bare_nl = "fn f() {\n    let s = \"a\nb\";\n}\n";
+    // ── ② 多行字符串（**裸换行**）：合法，必须被接受 + 剥空 + 行数守恒 + 不吞后续源码 ──
+    let multi = "fn f() {\n    let s = \"line1\nLINE2_SENTINEL_INSIDE\nline3\";\n    const AFTER: i32 = 48;\n}\n";
+    let out = strip_comments_and_literals(multi, "multi-line-string-probe.rs");
+    assert!(
+        !out.contains("LINE2_SENTINEL_INSIDE"),
+        "多行串的**内容**必须被剥空（否则字面量会被下游静态网当成源码）：{out:?}"
+    );
+    assert!(
+        out.contains("const AFTER"),
+        "多行串之后的源码必须仍然可见（不许一路吞到文件尾）：{out:?}"
+    );
+    assert_eq!(
+        out.matches('\n').count(),
+        multi.matches('\n').count(),
+        "多行串里的裸换行**必须逐个补回**（行号/行数账目守恒）：{out:?}"
+    );
+
+    // ── 反向探针（③a 仍在岗）：**EOF 未闭合**的字符串必须响亮失败 ──
+    let unclosed_src = "fn f() {\n    let s = \"never closed\n";
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        strip_comments_and_literals(bare_nl, "bare-nl-probe.rs")
+        strip_comments_and_literals(unclosed_src, "eof-unclosed-probe.rs")
     }));
     assert!(
         r.is_err(),
-        "非原始串里的**裸换行**必须仍然响亮失败（③b 未被削弱）"
+        "扫到 EOF 仍未闭合的字符串必须响亮失败（③a 未被上一条的放宽削弱）"
+    );
+}
+
+/// 扫描面内**已知的原始串**清单：`(文件, 条数)`。由
+/// `grep -cE '(^|[^A-Za-z0-9_])r#*"'` 在 [`NON_THIN_LAYER_SOURCES`] + [`THIN_LAYER_SOURCES`]
+/// 上逐文件抄录（2026-09-18 实测：`src/control_route.rs` 13 / `src/channel.rs` 1 /
+/// `src/console.rs` 1，合计 **15**，薄层 0）。
+///
+/// **未列出的文件隐含期望 0** —— 所以往任一扫描面文件里新增一枚原始串都会让本条变红：
+/// 那不是误报，是**清单需要显式登记**（这条判据的强度正来自"清单必须与源码同步"）。
+const EXPECTED_RAW_STRING_COUNTS: [(&str, usize); 3] = [
+    ("src/control_route.rs", 13),
+    ("src/channel.rs", 1),
+    ("src/console.rs", 1),
+];
+
+/// **"原始串前缀失认"失真**的自动哨（L 收尾补，见 [`strip_comments_and_literals`] 的订正段）。
+///
+/// ## 为什么需要它（判据删除后的实测空白）
+///
+/// 旧 ③b 判据（"非原始串不得含裸换行"）因**前提为假**被删除后，其注释曾声称"替代控制 =
+/// 扫描面自证 + `literal_prefix` 前缀清单"。**该声称经实测不成立**：往 [`literal_prefix`]
+/// 注入 `if cs[i] == 'r' { return None; }`（正是"原始串前缀失认"，本失真专防的形态）
+/// ⇒ 全量 **368 passed / 0 failed** —— 三条替代控制**一条都没接住**。
+///
+/// ## 判据（两段，互为补充）
+///
+/// 1. **端到端**：把扫描面里**最险的真实形态**（原始串**内含 `"`**，正是失认后会把内容
+///    泄漏成"代码"、并让闭引号错位的那类）喂给扫描器，断言内容**整枚剥空**、其后源码**仍然
+///    可见**、行数**守恒**（含**多行**原始串 —— `src/channel.rs:849` 就是跨行的）；
+/// 2. **对拍**：扫**全部扫描面文件**，用 [`strip_comments_and_literals_audited`] 取"被识别为
+///    原始串"的条数，逐文件与 [`EXPECTED_RAW_STRING_COUNTS`] 相等（未列出的文件 = 0）。
+///    失认 ⇒ 条数掉到 0 ⇒ **红**。
+///
+/// **改什么会让本条变红**（实测口径）：把 [`literal_prefix`] 的 `r` 分支改成 `return None`
+/// （前身判据失认），或把原始串当普通串处理（`\` 转义 / 裸引号闭合）⇒ 第 1 段内容泄漏、
+/// 第 2 段条数归零，**两段同时红**。
+#[test]
+fn scanner_recognizes_every_raw_string_on_the_scan_face() {
+    // ── ① 端到端：原始串**内含引号**（失认后泄漏面最大）⇒ 必须整枚剥空、不吞后续、行数守恒 ──
+    let inner_quote = "fn f() {\n    let j = r#\"{\"INNER_SENTINEL\":1}\"#;\n    const AFTER: i32 = 48;\n}\n";
+    let out = strip_comments_and_literals(inner_quote, "raw-inner-quote-probe.rs");
+    assert!(
+        !out.contains("INNER_SENTINEL"),
+        "原始串的**内容**（含其中的裸引号）必须被整枚剥空 —— 泄漏即说明前缀没被认出\
+         （裸 `\"` 被当成开引号 ⇒ 内部引号错位闭合 ⇒ 内容被下游静态网当成源码）：{out:?}"
+    );
+    assert!(
+        out.contains("const AFTER"),
+        "原始串之后的源码必须仍然可见（不许吞到文件尾）：{out:?}"
+    );
+    assert_eq!(
+        out.matches('\n').count(),
+        inner_quote.matches('\n').count(),
+        "行数须守恒：{out:?}"
+    );
+
+    // ── ② 端到端：**跨行**原始串（`src/channel.rs:849` 的真实形态）──
+    let multi_raw =
+        "fn f() {\n    let j = r#\"{\nMULTI_RAW_SENTINEL\n}\"#;\n    const AFTER: i32 = 48;\n}\n";
+    let out = strip_comments_and_literals(multi_raw, "raw-multi-line-probe.rs");
+    assert!(
+        !out.contains("MULTI_RAW_SENTINEL"),
+        "跨行原始串的内容同样必须被剥空：{out:?}"
+    );
+    assert!(
+        out.contains("const AFTER"),
+        "跨行原始串之后的源码必须仍然可见：{out:?}"
+    );
+    assert_eq!(
+        out.matches('\n').count(),
+        multi_raw.matches('\n').count(),
+        "跨行原始串里的换行必须逐个补回（行号/行数账目守恒）：{out:?}"
+    );
+
+    // ── ③ 对拍：自证清单里的每个文件都真的在扫描面内（否则下面的断言是空转）──
+    for (must, want) in EXPECTED_RAW_STRING_COUNTS {
+        assert!(want > 0, "清单里的 `{must}` 期望条数为 0 ⇒ 该条不构成判据");
+        assert!(
+            NON_THIN_LAYER_SOURCES
+                .iter()
+                .chain(THIN_LAYER_SOURCES.iter())
+                .any(|(n, _)| *n == must),
+            "扫描面自证失败：清单登记的 `{must}` 不在 [`NON_THIN_LAYER_SOURCES`] / \
+             [`THIN_LAYER_SOURCES`] 内 ⇒ 本条对它恒真（清单腐化）"
+        );
+    }
+
+    // ── ④ 对拍：逐文件条数必须与清单相等（未列出的文件 = 0）──
+    let mut total = 0usize;
+    for (name, src) in NON_THIN_LAYER_SOURCES
+        .iter()
+        .chain(THIN_LAYER_SOURCES.iter())
+    {
+        let (_, raw_opens) = strip_comments_and_literals_audited(src, name);
+        let want = EXPECTED_RAW_STRING_COUNTS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        let got = raw_opens.len();
+        total += got;
+        assert_eq!(
+            got, want,
+            "{name}：被识别为**原始串**的字面量有 {got} 枚，清单期望 {want} 枚。\n\
+             盘点（实测）：{raw_opens:?}。\n\
+             少 ⇒ **前缀失认**（[`literal_prefix`] 没认出 `r\"…\"` / `r#\"…\"#` / `br#\"…\"#`）——\
+             被吞掉的源码对下游全部静态网不可见；\n\
+             多 ⇒ 源码里新增了原始串，请把条数登记进 [`EXPECTED_RAW_STRING_COUNTS`]。"
+        );
+    }
+    assert_eq!(
+        total,
+        EXPECTED_RAW_STRING_COUNTS.iter().map(|(_, c)| *c).sum::<usize>(),
+        "扫描面原始串**总数**必须与清单一致（防『清单只对拍了几条、其余漂移没人管』）"
     );
 }
 
@@ -1643,13 +2055,25 @@ fn ui_texts_covered_by_font_cmap() {
     // 一条只含单个通用字的清册条目（如 `%`）能从**任何**含该字的字面量里"借光"通过 ——
     // 弱于"该串确实在源码里"）。
     let mut literals: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (name, src) in UI_PROD_SOURCES {
+    // 扫描面 = `ui/**`（13 个文件）+ `src/state.rs`（设计 §11.1 明写的 "+ state.rs"；
+    // 理由见 [`UI_ADJACENT_PROD_SOURCES`]）。
+    for (name, src) in UI_PROD_SOURCES.iter().chain(UI_ADJACENT_PROD_SOURCES.iter()) {
         for (ch, lit, line) in ui_source_chars(src, name) {
             literals.insert(lit.clone());
             if !cmap.contains(&ch) {
-                missing.push((ch, lit, name, line));
+                missing.push((ch, lit, *name, line));
             }
         }
+    }
+    // **扫描面自证**：`state.rs` 的三个屏上角标词必须真的进了待查集合 —— 否则
+    // `include_str!` 指错文件 / 截断点失效（`state.rs` 无 `#[cfg(test)] mod tests` 时
+    // 会把测试区一并扫入，反之若路径写错则**整份文件不漏**）时，本条会**构造性全绿**。
+    for must in ["未取数", "源离线", "数据异常"] {
+        assert!(
+            literals.contains(must),
+            "扫描面自证失败：`src/state.rs` 的屏上角标词 `{must}` 未进入待查集合 —— \
+             UI_ADJACENT_PROD_SOURCES / 截断点失效（本条会构造性全绿）"
+        );
     }
 
     // 清册（`ALL_TEXTS`）**不是基线**，但必须与源码不脱节：**每个条目都得整串出现在某个
@@ -8567,6 +8991,147 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
                 "**超时回归后 P1 必须从顶部开始**（UI §4.3；SH12）—— 改什么会让本条变红：\
                  删掉 `Core::tick` 强制切页分支里的 `reset_primary_scroll()`"
             );
+        }
+
+        // ═══ ④⁗ 手势语义：**滑动不误触发点击**（TT-11）+ **滚动条纯指示不可拖**（§5.6-A）══
+        //
+        // 工作单元 **L** 补缺：设计 §11.1「HMI 交互」层**逐条点名**这两项，此前**零用例**
+        // （全库 grep：无任何用例经 lv_indev 投递"按下→移动→抬起"手势 —— 既有用例的移动
+        // 都是程序化 scroll_by_raw / scroll_to_y，证明不了框架的**点击/滚动判别**）。
+        //
+        // 判据都在**真实命中链**上：Indev::feed → lv_indev_read → lv_indev_search_obj。
+        {
+            use crate::lvgl::indev::{Indev, TouchSnapshot};
+
+            let p1_root = sh.page_obj(NavPage::Main);
+            sh.show(NavPage::Main);
+            p1_root.scroll_to_y(0);
+            disp.refr_now_for_test();
+
+            /// 投递一套「按下 → 纵向拖 drag_px → 抬起」手势，返回手势前后的 scroll_y 增量。
+            ///
+            /// drag_px 必须**大于** LV_INDEV_DEF_SCROLL_LIMIT（默认 10 px）—— 这正是 LVGL 的
+            /// "点击 / 滚动"判别阈值：拖出阈值 ⇒ 手势被判为滚动，CLICKED 不再派发。
+            ///
+            /// **每次手势用一枚全新 Indev**（与 ④′ 段同法）：LVGL 的 indev 在抬手后会留下
+            /// 抛掷 / 方向锁状态，复用同一枚会让两次手势的增量不同（L 单元实测：同 x 连投三次
+            /// 会得到 ≈拖动量与 ≈2 倍拖动量两族值 —— 该现象**与 x 无关**，见 ② 的口径说明）。
+            fn swipe_y(disp: &Display, root: &Obj, x: i32, y: i32, drag_px: i32, steps: i32) -> i32 {
+                let indev = Indev::create_pointer(disp).expect("④⁗：建真实 indev");
+                let before = root.scroll_y();
+                indev.feed(TouchSnapshot {
+                    pressed: true,
+                    x,
+                    y,
+                });
+                indev.read();
+                for k in 1..=steps {
+                    indev.feed(TouchSnapshot {
+                        pressed: true,
+                        x,
+                        y: y - drag_px * k / steps,
+                    });
+                    indev.read();
+                }
+                indev.feed(TouchSnapshot {
+                    pressed: false,
+                    x,
+                    y: y - drag_px,
+                });
+                indev.read();
+                let delta = root.scroll_y() - before;
+                drop(indev);
+                delta
+            }
+
+            // 探针控件 = P1 页根（滚动容器）的**可点子件**（内容区靠上位置）。
+            let hits_pressed = Rc::new(Cell::new(0u32));
+            let hits_clicked = Rc::new(Cell::new(0u32));
+            let probe = crate::lvgl::widgets::TextButton::create(p1_root, "滑动")
+                .expect("④⁗：造一个可点探针控件");
+            probe.set_pos(120, 120);
+            probe.set_size(240, Dimens::TOUCH_MIN);
+            let _keep_p = probe.on(EventCode::PRESSED, {
+                let p = Rc::clone(&hits_pressed);
+                move |_e| p.set(p.get() + 1)
+            });
+            let _keep_c = probe.on(EventCode::CLICKED, {
+                let c = Rc::clone(&hits_clicked);
+                move |_e| c.set(c.get() + 1)
+            });
+            disp.refr_now_for_test();
+
+            let btn = probe.coords();
+            let (bx, by) = ((btn.x1 + btn.x2) / 2, (btn.y1 + btn.y2) / 2);
+            let root_c = p1_root.coords();
+            assert!(
+                (root_c.x1..root_c.x2).contains(&bx) && (root_c.y1..root_c.y2).contains(&by),
+                "④⁗ 前置：探针中心 ({bx},{by}) 须在 P1 页根 {}..{} × {}..{} 内",
+                root_c.x1,
+                root_c.x2,
+                root_c.y1,
+                root_c.y2
+            );
+
+            // ── ① TT-11：在控件上滑动 ⇒ 不产生点击，但**真的滚了** ──
+            let delta_btn = swipe_y(disp, p1_root, bx, by, 60, 6);
+            assert_eq!(
+                hits_pressed.get(),
+                1,
+                "④⁗ 前置：手势起点 ({bx},{by}) 必须真的命中探针控件（对象级 PRESSED 恰一次）"
+            );
+            assert_eq!(
+                hits_clicked.get(),
+                0,
+                "**TT-11：滑动不得误触发列表项/控件点击**（按下后纵向拖出 60 px ⇒ LVGL 判为                 滚动，CLICKED 不派发）—— 改什么会让本条变红：把 LV_INDEV_DEF_SCROLL_LIMIT                 调大到 60 px 以上 ⇒ 同一次拖动会被当成点击"
+            );
+            assert!(
+                delta_btn > 0,
+                "④⁗ 反空壳：这一拖必须**真的滚动**容器（实得 Δscroll_y = {delta_btn}）——                 若为 0，上一条「没触发点击」是恒真的废话（手势根本没被消费）"
+            );
+
+            // ── ② §5.6-A：滚动条**不是对象**⇒ 结构上无处可挂拖拽逻辑 ──────────────
+            //
+            // ⚠️ **口径（L 单元实测订正，如实登记）**：设计 §11.1 的原文判据是"在滚动条带
+            // （x ∈ [右缘−8, 右缘]）注入按下→移动→抬起，断言 scroll_y 变化量与**同等手势落在
+            // 内容区完全一致**"。**该判据在本机不可靠**：实测（P1 页根、同 y、同 60 px 拖动、
+            // 同一 x 连投 3 次）增量呈**双峰且与 x 无关** —— [60, 110, 113] / [60, 60, 113] /
+            // [60, 113, 113]…（x = 36…1006 逐点复现，两族 = 拖动量 60 与 ≈113）。既然**量本身**
+            // 就是双峰的，"与内容区完全一致"这一比较无法区分"滚动条行为"与"框架残留状态" ⇒
+            // 改为断言**条带内起手仍然拖动内容**（不是被吞掉的死区），且增量在拖动量的合理
+            // 倍数内（抓 thumb 会把内容**跳到**与拖动无关的位置）。结构性主张（滚动条是绘制
+            // 部件、不是对象）由 `lvgl/tests_a3.rs` 的 ScrollContainer 段 + 设计 §5.6-A 的
+            // 源码引用（lv_obj.c::draw_scrollbar 仅在 DRAW_POST，输入侧无命中测试）承担。
+            let band_x = root_c.x2 - Dimens::SCROLLBAR_MARGIN - Dimens::SCROLLBAR_W / 2;
+            let band_y = root_c.y1 + 200;
+            assert!(
+                band_x > root_c.x1 && band_x < root_c.x2,
+                "④⁗ 前置：条带中点 x={band_x} 须在容器内（{root_c:?}）"
+            );
+            // 对照：**同一 y** 的内容区起手（与条带内起手配对，见上"口径"说明）。
+            p1_root.scroll_to_y(0);
+            let delta_content = swipe_y(disp, p1_root, root_c.x2 - 60, band_y, 60, 6);
+            assert!(
+                delta_content > 0,
+                "④⁗ 对照：同 y 的内容区起手必须能滚动（实得 Δ = {delta_content}）"
+            );
+            p1_root.scroll_to_y(0);
+            let delta_band = swipe_y(disp, p1_root, band_x, band_y, 60, 6);
+            assert!(
+                delta_band > 0,
+                "④⁗：条带内起手必须**仍然拖动内容**（实得 Δscroll_y = {delta_band}）——\
+                 为 0 即「滚动条吃掉了手势」（死区 / 不可穿透），那会让「纯指示」变成「不可用」"
+            );
+            assert!(
+                delta_band <= 3 * 60,
+                "④⁗：条带内起手的滚动量 {delta_band} 超出合理倍数（> 3× 拖动量）——\
+                 抓 thumb 会把内容**跳到**与拖动无关的位置（实测对照：内容区 = {delta_content}）"
+            );
+            drop(_keep_p);
+            drop(_keep_c);
+            drop(probe);
+            p1_root.scroll_to_y(0);
+            disp.refr_now_for_test();
         }
 
         // ═══ ④′ 触摸不可用角标（EDGE-13）+ 通道断（EDGE-20 的"两状态同显"）══════
