@@ -240,6 +240,9 @@ const TABLE_HEAD_H: i32 = NEWEST_H;
 ///
 /// 用于**编译期**钉住「操作类型行紧接时间范围行」这条线框关系（`layout()` 的实际算式是
 /// `y_range + filters::body_h(range) + GAP_MIN`，见下）。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 const FILTER_STEP: i32 = Dimens::CHIP_H + Dimens::GAP_MIN;
 /// 操作类型 chip 组的块高（2 行 × 48 + 缝 16 = 112；**AU7** 给出单行不可达的推导）。
 const OPS_BLOCK_H: i32 = 2 * Dimens::CHIP_H + Dimens::GAP_MIN;
@@ -335,6 +338,9 @@ pub(crate) const ROW_MAX: usize = AUDIT_PAGE_SIZE;
 /// `pub`（不是 `pub(crate)`）：它是**测量结论**、也是 `ui/tests.rs` 与 `p5_audit` 单测共同的
 /// 判据常量；且若只在本 crate 的测试里用，非测试构建会报 `dead_code` —— 让它进公开面即可
 /// 如实暴露"这台屏能装多少行"这一事实。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 pub(crate) const MEASURED_ROW_CAPACITY: usize = 22;
 
 /// **两页共存**时**每页**可安全容纳的行数（见 **AU8**）。
@@ -348,10 +354,16 @@ pub(crate) const MEASURED_ROW_CAPACITY: usize = 22;
 /// ⚠️ **它不是"新的一页容量"**：共存时每页只保证 4 行，而 [`ROW_MAX`]=20 的**单页**契约
 /// **不变**（`COEXIST_ROWS_PER_PAGE < ROW_MAX` 由编译期断言钉死 —— 把"两页都满行不可能"
 /// 这件事写在类型层，而不是留在注释里）。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 pub(crate) const COEXIST_ROWS_PER_PAGE: usize = 4;
 
 /// **两页共存**实测的**总行数上界**（两页共用同一个 LVGL 堆；见 **AU8** 与
 /// [`COEXIST_ROWS_PER_PAGE`] 的测量前提）。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 pub(crate) const MEASURED_COEXIST_TOTAL_ROWS: usize = 10;
 
 /// **编译期自证**（**AU8**）：行池上限**不超实测可容纳上界**，且**至少装得下一页**。

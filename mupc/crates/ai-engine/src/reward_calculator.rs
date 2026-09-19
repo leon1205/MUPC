@@ -191,6 +191,10 @@ pub struct RewardCalculator {
     /// 冲击负荷检测阈值（kW），当 P90 - P50 > threshold 时触发
     shock_threshold_kw: f64,
     /// 冲击负荷响应奖励权重
+    ///
+    /// ⚠️ v2.13 重构为「预备度奖励」后本字段不再被读（同 [`Self::response_time_penalty`]
+    /// 的处境），保留仅为配置兼容 ⇒ 显式放行 dead_code。
+    #[allow(dead_code)]
     shock_response_weight: f64,
     /// 响应时间惩罚系数 λ（v2.13 废弃，仅保留兼容）
     #[allow(dead_code)]
@@ -235,9 +239,7 @@ fn safety_override_penalty_impl(state: &FusedSystemState) -> f64 {
     let ratio_penalty = -k_override * state.safety_override_ratio;
     let consecutive_penalty =
         -k_consecutive * (state.safety_override_consecutive as f64 / 10.0).min(1.0);
-    ((ratio_penalty + consecutive_penalty) / norm_divisor)
-        .max(-1.0)
-        .min(0.0)
+    ((ratio_penalty + consecutive_penalty) / norm_divisor).clamp(-1.0, 0.0)
 }
 
 impl RewardCalculator {
@@ -556,7 +558,7 @@ impl RewardCalculator {
 
         // 7. 下垂系数平滑标准化 [-130, 0] → [-1, 0]
         // r_smooth 范围约 [-130, 0]，除以 130 映射到 [-1, 0]
-        let r_smooth_norm = (r_smooth / 130.0).max(-1.0).min(0.0);
+        let r_smooth_norm = (r_smooth / 130.0).clamp(-1.0, 0.0);
 
         // 8. 安全覆盖惩罚（v2.14 已归一化，safety_override_penalty 返回 [-1, 0]）
 
@@ -610,7 +612,7 @@ impl RewardCalculator {
         &self,
         state: &FusedSystemState,
         p_action: f64,
-        prev_v_avg: f64,
+        _prev_v_avg: f64,
     ) -> f64 {
         let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
         let v_dev_curr = (v_avg - 1.0).abs();
@@ -996,6 +998,10 @@ impl RewardCalculator {
     /// v2.11: SCENE-B2 需量控制（含不确定性）
     ///
     /// 考虑冲击负荷概率，预留额外安全裕度
+    ///
+    /// ⚠️ **当前未被调用**：SCENE-B2 需量控制尚未接入 `calculate` 的奖励合成路径。
+    /// 保留实现（属已定稿的 v2.11 公式）并显式放行 dead_code；接线时删除本注解。
+    #[allow(dead_code)]
     fn calc_demand_with_uncertainty(
         &self,
         action: &ActionOutput,

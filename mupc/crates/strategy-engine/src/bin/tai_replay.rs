@@ -119,7 +119,7 @@ fn main() {
         eprintln!("错误: --capacity-profile 需要配合 --config-file <档位YAML> 使用（未指定档位表，将静默落默认档，已拒绝）");
         print_usage_and_exit();
     }
-    let path = pos.get(0).unwrap_or_else(|| {
+    let path = pos.first().unwrap_or_else(|| {
         eprintln!("缺少 <xlsx路径> 参数");
         print_usage_and_exit()
     });

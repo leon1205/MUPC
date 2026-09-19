@@ -135,7 +135,6 @@ impl Rs485Device {
     pub fn open(&self) -> Result<(), Rs485Error> {
         #[cfg(unix)]
         {
-            use std::os::unix::io::FromRawFd;
 
             use std::ffi::CString;
 

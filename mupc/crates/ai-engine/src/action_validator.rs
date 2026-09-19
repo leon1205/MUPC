@@ -23,6 +23,10 @@ pub struct ActionValidator {
     /// v2.6 双参数模式：k_droop 范围（由实时控制模块提供）
     droop_range: RwLock<(f64, f64)>,
     /// v2.6 双参数模式：启用 ACT-DUAL-01~04 校验
+    ///
+    /// ⚠️ 由三个构造器分别置位（`with_droop*` 置 true），但 **ACT-DUAL-01~04 的校验路径
+    /// 尚未接入** ⇒ 当前无读取点，显式放行 dead_code；接线时删除本注解。
+    #[allow(dead_code)]
     dual_mode: bool,
 }
 

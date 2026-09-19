@@ -96,88 +96,88 @@ use super::LvglError;
 /// 用途：滚动容器的**滚动方向**（[`Dir::VER`] = 结构性禁横滚）、`lv_dropdown` 的展开方向、
 /// `lv_tabview` 的标签栏位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Dir(u32);
+pub struct Dir(sys::lv_dir_t);
 
 impl Dir {
     /// 无方向（`lv_dropdown` 可用来固定只朝某侧展开前的默认值）。
-    pub const NONE: Self = Self(sys::LV_DIR_NONE as u32);
+    pub const NONE: Self = Self(sys::LV_DIR_NONE);
     /// 左。
-    pub const LEFT: Self = Self(sys::LV_DIR_LEFT as u32);
+    pub const LEFT: Self = Self(sys::LV_DIR_LEFT);
     /// 右。
-    pub const RIGHT: Self = Self(sys::LV_DIR_RIGHT as u32);
+    pub const RIGHT: Self = Self(sys::LV_DIR_RIGHT);
     /// 上。
-    pub const TOP: Self = Self(sys::LV_DIR_TOP as u32);
+    pub const TOP: Self = Self(sys::LV_DIR_TOP);
     /// 下。
-    pub const BOTTOM: Self = Self(sys::LV_DIR_BOTTOM as u32);
+    pub const BOTTOM: Self = Self(sys::LV_DIR_BOTTOM);
     /// 水平（左 + 右）。
-    pub const HOR: Self = Self(sys::LV_DIR_HOR as u32);
+    pub const HOR: Self = Self(sys::LV_DIR_HOR);
     /// 垂直（上 + 下）—— 滚动容器只给这一项。
-    pub const VER: Self = Self(sys::LV_DIR_VER as u32);
+    pub const VER: Self = Self(sys::LV_DIR_VER);
     /// 全部。
-    pub const ALL: Self = Self(sys::LV_DIR_ALL as u32);
+    pub const ALL: Self = Self(sys::LV_DIR_ALL);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_dir_t {
         self.0
     }
 }
 
 /// 滚动条显示模式（`lv_scrollbar_mode_t` 的镜像）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScrollMode(u32);
+pub struct ScrollMode(sys::lv_scrollbar_mode_t);
 
 impl ScrollMode {
     /// 从不显示。
-    pub const OFF: Self = Self(sys::LV_SCROLLBAR_MODE_OFF as u32);
+    pub const OFF: Self = Self(sys::LV_SCROLLBAR_MODE_OFF);
     /// 常显。
-    pub const ON: Self = Self(sys::LV_SCROLLBAR_MODE_ON as u32);
+    pub const ON: Self = Self(sys::LV_SCROLLBAR_MODE_ON);
     /// 滚动时显示。
-    pub const ACTIVE: Self = Self(sys::LV_SCROLLBAR_MODE_ACTIVE as u32);
+    pub const ACTIVE: Self = Self(sys::LV_SCROLLBAR_MODE_ACTIVE);
     /// 内容超出视口才显示（**本设计的默认口径**，设计 §5.6-A 方案 A）。
-    pub const AUTO: Self = Self(sys::LV_SCROLLBAR_MODE_AUTO as u32);
+    pub const AUTO: Self = Self(sys::LV_SCROLLBAR_MODE_AUTO);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_scrollbar_mode_t {
         self.0
     }
 }
 
 /// 文本长模式（`lv_label_long_mode_t` 的镜像）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LongMode(u32);
+pub struct LongMode(sys::lv_label_long_mode_t);
 
 impl LongMode {
     /// 定宽换行、高度自适应（**长文本用这一档**，设计 §1.1.2「中文断行由 LVGL 处理」）。
-    pub const WRAP: Self = Self(sys::LV_LABEL_LONG_MODE_WRAP as u32);
+    pub const WRAP: Self = Self(sys::LV_LABEL_LONG_MODE_WRAP);
     /// 定尺寸，超出部分以 `…` 收尾。
-    pub const DOTS: Self = Self(sys::LV_LABEL_LONG_MODE_DOTS as u32);
+    pub const DOTS: Self = Self(sys::LV_LABEL_LONG_MODE_DOTS);
     /// 定尺寸，来回滚动。
-    pub const SCROLL: Self = Self(sys::LV_LABEL_LONG_MODE_SCROLL as u32);
+    pub const SCROLL: Self = Self(sys::LV_LABEL_LONG_MODE_SCROLL);
     /// 定尺寸，循环滚动。
-    pub const SCROLL_CIRCULAR: Self = Self(sys::LV_LABEL_LONG_MODE_SCROLL_CIRCULAR as u32);
+    pub const SCROLL_CIRCULAR: Self = Self(sys::LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
     /// 定尺寸，直接裁剪。
-    pub const CLIP: Self = Self(sys::LV_LABEL_LONG_MODE_CLIP as u32);
+    pub const CLIP: Self = Self(sys::LV_LABEL_LONG_MODE_CLIP);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_label_long_mode_t {
         self.0
     }
 }
 
 /// 进度条模式（`lv_bar_mode_t` 的镜像）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BarMode(u32);
+pub struct BarMode(sys::lv_bar_mode_t);
 
 impl BarMode {
     /// 从 min 起单向填充。
-    pub const NORMAL: Self = Self(sys::LV_BAR_MODE_NORMAL as u32);
+    pub const NORMAL: Self = Self(sys::LV_BAR_MODE_NORMAL);
     /// 以 0 为中点双向填充（充电/放电这类双向量）。
-    pub const SYMMETRICAL: Self = Self(sys::LV_BAR_MODE_SYMMETRICAL as u32);
+    pub const SYMMETRICAL: Self = Self(sys::LV_BAR_MODE_SYMMETRICAL);
     /// 用 start/end 两点画区间（SOC 15 %/85 % 警示档即用它）。
-    pub const RANGE: Self = Self(sys::LV_BAR_MODE_RANGE as u32);
+    pub const RANGE: Self = Self(sys::LV_BAR_MODE_RANGE);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_bar_mode_t {
         self.0
     }
 }

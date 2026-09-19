@@ -55,14 +55,12 @@ impl TcpTransport {
             match TcpStream::connect(&addr).await {
                 Ok(mut stream) => {
                     let mut buf = [0u8; 64];
-                    loop {
-                        match timeout(Duration::from_secs(2), stream.read_exact(&mut buf)).await {
-                            Ok(Ok(_)) => {
-                                if let Ok(frame) = IntercoreFrame::from_bytes(&buf) {
-                                    self.handle_frame(&frame).await;
-                                }
-                            }
-                            _ => break, // 读失败/超时：断开重连
+                    // 读失败/超时 ⇒ 退出内层循环（断开重连）
+                    while let Ok(Ok(_)) =
+                        timeout(Duration::from_secs(2), stream.read_exact(&mut buf)).await
+                    {
+                        if let Ok(frame) = IntercoreFrame::from_bytes(&buf) {
+                            self.handle_frame(&frame).await;
                         }
                     }
                 }

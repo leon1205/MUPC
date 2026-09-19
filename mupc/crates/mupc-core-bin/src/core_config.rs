@@ -300,9 +300,10 @@ impl Default for GatewayConfig {
 }
 
 /// MQTT 桥接配置（审查 R2-B5：north_enabled/local_enabled 缺省双 false——未启用不 spawn，
-/// 不再用 Default 真连 mqtt.example.com 假域名）。手动实现 `Default`（不走 derive），使
-/// `#[serde(default)]` 缺省整段配置时落到 false，与历史（无条件 spawn）行为变更对齐。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// 不再用 Default 真连 mqtt.example.com 假域名）。`derive(Default)`（两字段皆 `bool` ⇒
+/// 缺省全 false）与 `#[serde(default)]` 配合，缺省整段配置时同样落到 false，与历史
+/// （无条件 spawn）行为变更对齐。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MqttBridgeConfig {
     /// 北向 emqx 桥接是否启用（缺省 false）
     #[serde(default)]
@@ -310,15 +311,6 @@ pub struct MqttBridgeConfig {
     /// 本地 mosquitto 桥接是否启用（缺省 false）
     #[serde(default)]
     pub local_enabled: bool,
-}
-
-impl Default for MqttBridgeConfig {
-    fn default() -> Self {
-        Self {
-            north_enabled: false,
-            local_enabled: false,
-        }
-    }
 }
 
 // ── 默认值函数 ──

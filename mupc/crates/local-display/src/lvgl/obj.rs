@@ -165,17 +165,17 @@ thread_local! {
 /// 三个标志（`CHECKABLE` 页签/多选 Chip、`CLICKABLE` 模态拦截、`SCROLLABLE` 滚动容器）——
 /// 这样 A3 不必回头改本文件。需要更多标志时按同一形式增列即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjFlag(u32);
+pub struct ObjFlag(sys::lv_obj_flag_t);
 
 impl ObjFlag {
     /// 隐藏（"如同不存在"：不参与布局与命中）。
-    pub const HIDDEN: Self = Self(sys::LV_OBJ_FLAG_HIDDEN as u32);
+    pub const HIDDEN: Self = Self(sys::LV_OBJ_FLAG_HIDDEN);
     /// 可点（命中测试/事件派发的对象）。
-    pub const CLICKABLE: Self = Self(sys::LV_OBJ_FLAG_CLICKABLE as u32);
+    pub const CLICKABLE: Self = Self(sys::LV_OBJ_FLAG_CLICKABLE);
     /// 可勾选（点击后自动切换 `LV_STATE_CHECKED`）。
-    pub const CHECKABLE: Self = Self(sys::LV_OBJ_FLAG_CHECKABLE as u32);
+    pub const CHECKABLE: Self = Self(sys::LV_OBJ_FLAG_CHECKABLE);
     /// 可滚动。
-    pub const SCROLLABLE: Self = Self(sys::LV_OBJ_FLAG_SCROLLABLE as u32);
+    pub const SCROLLABLE: Self = Self(sys::LV_OBJ_FLAG_SCROLLABLE);
     /// **事件沿父链上冒**（`LV_OBJ_FLAG_EVENT_BUBBLE`；B4a 新增，仅镜像枚举值）。
     ///
     /// # 为什么现在补它（`ui/shell.rs` 偏差 **SH5** 的**前提**）
@@ -190,10 +190,10 @@ impl ObjFlag {
     /// 改写成"也重置")属 **B4b**，本单元**不改 `ui/**` 的行为**。
     /// 另一条候选路（给 [`super::indev::Indev`] 加 `on(EventCode, F)`，一处挂钩覆盖全屏）
     /// 见 `mod.rs` 的 G2 登记——二选一由 B4b 定夺。
-    pub const EVENT_BUBBLE: Self = Self(sys::LV_OBJ_FLAG_EVENT_BUBBLE as u32);
+    pub const EVENT_BUBBLE: Self = Self(sys::LV_OBJ_FLAG_EVENT_BUBBLE);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_obj_flag_t {
         self.0
     }
 }

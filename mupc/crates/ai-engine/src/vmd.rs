@@ -183,7 +183,7 @@ impl VmdDecomposer {
         for iter in 0..max_iter {
             // 保存上一轮 u_hat（仅 tau=0 时需要用于收敛检查）
             if tau == 0.0 {
-                u_hat_prev = u_hat.iter().map(|u| u.clone()).collect();
+                u_hat_prev = u_hat.to_vec();
             }
 
             for k_idx in 0..k {
@@ -191,9 +191,9 @@ impl VmdDecomposer {
                 for i in 0..h {
                     // 残差 = f_hat + lambda/2 - sum_{j != k} u_j
                     let mut residual = f_hat[i] + lambda_hat[i] * 0.5;
-                    for j in 0..k {
+                    for (j, u) in u_hat.iter().enumerate() {
                         if j != k_idx {
-                            residual -= u_hat[j][i];
+                            residual -= u[i];
                         }
                     }
 
@@ -227,8 +227,8 @@ impl VmdDecomposer {
             if tau > 0.0 {
                 for i in 0..h {
                     let mut sum_u = Complex64::new(0.0, 0.0);
-                    for k_idx in 0..k {
-                        sum_u += u_hat[k_idx][i];
+                    for u in &u_hat {
+                        sum_u += u[i];
                     }
                     lambda_hat[i] += tau * (f_hat[i] - sum_u);
                 }
@@ -272,8 +272,8 @@ impl VmdDecomposer {
         let mut imfs: Vec<Vec<f32>> = Vec::with_capacity(k);
         let mut reconstructed: Vec<f32> = vec![0.0_f32; n];
 
-        for k_idx in 0..k {
-            let full_spectrum = half_to_full_spectrum(&u_hat[k_idx], n);
+        for (k_idx, u) in u_hat.iter().enumerate() {
+            let full_spectrum = half_to_full_spectrum(u, n);
             let imf_complex = ifft(&full_spectrum);
             // L-01: 实信号 IFFT 虚部应接近零（共轭对称性保证）
             // 容差说明：原判据 1e-10*(|re|+1e-15) 的绝对下限仅 1e-25，低于 rustfft 实测舍入噪声

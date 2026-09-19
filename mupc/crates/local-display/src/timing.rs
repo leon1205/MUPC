@@ -118,8 +118,11 @@ pub fn install_stop_signals() {
         // 非原子共享状态）。`libc::signal` 只登记函数指针、立即返回；`SIG_ERR` 由返回值
         // 检出（下面**不静默吞**，失败即告警）。返回的旧处理器本进程不关心，显式丢弃。
         unsafe {
-            let prev_int = libc::signal(libc::SIGINT, stop_signal_handler as libc::sighandler_t);
-            let prev_term = libc::signal(libc::SIGTERM, stop_signal_handler as libc::sighandler_t);
+            // ⚠️ 先转**函数指针**再转 `sighandler_t`（= `usize`）：函数项直接转整数会被
+            // `clippy::fn_to_numeric_cast_any` 判为可疑（本行原写法），两步转换语义等价。
+            let handler = stop_signal_handler as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            let prev_int = libc::signal(libc::SIGINT, handler);
+            let prev_term = libc::signal(libc::SIGTERM, handler);
             if prev_int == libc::SIG_ERR {
                 eprintln!(
                     "[mupc-local-display] SIGINT 处理器注册失败（Ctrl-C 将走默认终止）；\
@@ -359,14 +362,12 @@ impl FdPoller {
                     // 等待（等价 `sleep`）；`t >= 0` ⇒ 有限阻塞。
                     PollWait::Sleep => unsafe { libc::poll(std::ptr::null_mut(), 0, t) },
                 };
-                if ret > 0 {
-                    RawPollResult::Ready
-                } else if ret == 0 {
-                    RawPollResult::Timeout
-                } else {
-                    RawPollResult::Failed(
+                match ret.cmp(&0) {
+                    std::cmp::Ordering::Greater => RawPollResult::Ready,
+                    std::cmp::Ordering::Equal => RawPollResult::Timeout,
+                    std::cmp::Ordering::Less => RawPollResult::Failed(
                         std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),
-                    )
+                    ),
                 }
             },
             libc::EINTR,

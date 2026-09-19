@@ -10,12 +10,12 @@ fn f(row: &[Data], i: usize) -> f64 {
 }
 
 fn tstr(row: &[Data]) -> String {
-    if let Some(dt) = row.get(0).and_then(|d| d.get_datetime()) {
+    if let Some(dt) = row.first().and_then(|d| d.get_datetime()) {
         if let Some(ndt) = dt.as_datetime() {
             return ndt.format("%Y-%m-%d %H:%M:%S").to_string();
         }
     }
-    row.get(0)
+    row.first()
         .and_then(|d| d.get_string())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "?".to_string())
@@ -31,10 +31,10 @@ fn main() {
 
     let rows: Vec<&[Data]> = range.rows().skip(1).collect();
     for row in &rows[..3] {
-        println!("[时间样例] {}", tstr(*row));
+        println!("[时间样例] {}", tstr(row));
     }
     for row in &rows {
-        let t = tstr(*row);
+        let t = tstr(row);
         if t.contains(needle) {
             println!("time = {}", t);
             // 列索引：0=时间 1-3=U 4-6=I 7=P_总 8-10=P_A/B/C 11=Q_总 12-14=Q_A/B/C

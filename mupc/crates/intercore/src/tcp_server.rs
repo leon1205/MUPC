@@ -102,6 +102,12 @@ pub struct ControlCmdPayloadV2 {
     pub frame_version: Option<u8>,
 }
 
+impl Default for ControlCmdPayloadV2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ControlCmdPayloadV2 {
     pub const FRAME_VERSION: u8 = 2;
 
@@ -339,6 +345,12 @@ pub struct IntercoreConnectionState {
     pub safety_override_count: RwLock<u32>,
     /// 安全覆盖首次触发时间戳（用于 1 分钟窗口计算）
     pub safety_override_first_ts: RwLock<Option<i64>>,
+}
+
+impl Default for IntercoreConnectionState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IntercoreConnectionState {
