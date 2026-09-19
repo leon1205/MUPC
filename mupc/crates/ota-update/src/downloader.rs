@@ -41,47 +41,41 @@ pub struct Downloader {
     retry_interval_ms: u64,
 }
 
-/// 从 URL 推导临时文件名。
+/// 从 URL 推导临时文件名（**保证只含单一文件名，不含任何目录成分**）。
 ///
 /// - 查询参数 `file=<名>` **优先** —— 形如 `…/download?file=model.rknn&version=1` 的地址，
 ///   真正的文件名在查询串里，取路径末段只会得到 `download`；
 /// - 否则取路径末段（已剥掉查询串）；
-/// - 都取不到 ⇒ `download.tmp`（如 `https://host/`）。
+/// - 都取不到 / 都不安全 ⇒ `download.tmp`（如 `https://host/`）。
+///
+/// ⚠️ **净化是必需的**（2026-09-20 评审修复）：候选名含路径分隔符、NUL、`..`/`.` 或为空即弃用。
+/// 否则服务器可控的 `?file=a/b.rknn` 会把名字拼成 `ota_<hash>_a/b.rknn` ⇒ 父目录不存在、
+/// `create_new` 恒 ENOENT、该 URL **永远下载不了**（旧实现取路径末段，天然不含分隔符）。
 fn extract_filename(url: &str) -> &str {
-    if let Some(query) = url.split_once('?').map(|(_, q)| q) {
-        for kv in query.split('&') {
-            if let Some(name) = kv.strip_prefix("file=") {
-                if !name.is_empty() {
-                    return name;
-                }
-            }
-        }
-    }
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
 
-    let last = url
-        .split('/')
-        .next_back()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("");
-    if last.is_empty() {
-        "download.tmp"
-    } else {
-        last
-    }
+    let from_query = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("file=").filter(|n| is_safe_filename(n)));
+
+    from_query
+        .or_else(|| path.rsplit('/').next().filter(|n| is_safe_filename(n)))
+        .unwrap_or("download.tmp")
+}
+
+/// 只接受「单一文件名」：非空、无路径分隔符/NUL、且不是 `.` / `..`。
+fn is_safe_filename(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
 impl Downloader {
     /// 创建新的下载器
     pub fn new(temp_dir: PathBuf) -> Result<Self, OtaError> {
-        // 临时目录不可用（不存在且建不出 / 无权限）⇒ **构造期**即报错，而不是等到第一次
-        // 下载才失败（2026-09-19：原实现不校验，测试 `test_downloader_invalid_temp_dir`
-        // 断言的"非法临时目录应失败"因此从未成立）。
-        std::fs::create_dir_all(&temp_dir).map_err(|e| {
-            OtaError::DownloadFailed(format!("临时目录不可用 {}: {}", temp_dir.display(), e))
-        })?;
-
+        // ⚠️ 本构造函数**不做任何文件系统操作**（2026-09-20 评审回退）：此前的
+        // `create_dir_all` 会让 `Downloader::new` 失败，而它在 `OtaManagerImpl::new`
+        // 里被 `?` 上抛、最终令 mupcd **启动即退出**（startup.rs → process::exit(1)）——
+        // 一个"临时目录建不出来"的局部问题不该变成整机起不来。目录改在真正下载时确保
+        // （见 `download_with_progress`），失败也只影响这一次下载。
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
@@ -140,14 +134,37 @@ impl Downloader {
         resume_from: u64,
         progress: Option<ProgressCallback>,
     ) -> Result<DownloadResult, OtaError> {
+        // 确保临时目录存在（失败只影响本次下载；**不**放在构造函数里，见 `new`）
+        tokio::fs::create_dir_all(&self.temp_dir)
+            .await
+            .map_err(|e| {
+                OtaError::DownloadFailed(format!(
+                    "临时目录不可用 {}: {}",
+                    self.temp_dir.display(),
+                    e
+                ))
+            })?;
+
         // 生成临时文件路径
         let temp_path = self.generate_temp_path(url);
 
-        // 获取已下载的大小（用于断点续传）
+        // `resume_from == 0` = 调用方**不要续传**（`manager.rs` 传 0 并注明"不支持断点续传"）
+        // ⇒ 必须清掉同名陈旧文件：否则 (1) start_offset 会等于旧文件长度 ⇒ `Range: bytes=<全长>-`
+        // 被服务端判 416；(2) 即便偏移为 0，`do_download` 用 `create_new(true)` 打开 ⇒
+        // 文件已存在时 EEXIST，同一 URL **再也下载不了**（2026-09-20 评审修复）。
         let start_offset = if resume_from > 0 {
             resume_from
         } else {
-            self.get_downloaded_size(&temp_path).await
+            if temp_path.exists() {
+                tokio::fs::remove_file(&temp_path).await.map_err(|e| {
+                    OtaError::DownloadFailed(format!(
+                        "清理陈旧临时文件失败 {}: {}",
+                        temp_path.display(),
+                        e
+                    ))
+                })?;
+            }
+            0
         };
 
         // 执行下载（带重试机制）
@@ -297,8 +314,7 @@ impl Downloader {
         hasher.update(url.as_bytes());
         let url_hash = &format!("{:x}", hasher.finalize())[..16];
 
-        self.temp_dir
-            .join(format!("ota_{}_{}", url_hash, filename))
+        self.temp_dir.join(format!("ota_{}_{}", url_hash, filename))
     }
 
     /// 获取已下载的大小
@@ -364,11 +380,106 @@ mod tests {
         assert_eq!(downloader.retry_interval_ms, 2000);
     }
 
+    /// 回归保护（2026-09-20 评审）：构造函数**不得**触碰文件系统 —— 早先版本在 `new` 里
+    /// `create_dir_all` 并在失败时返回 Err，会让 `OtaManagerImpl::new` 上抛、令 mupcd
+    /// **启动即退出**；且用例 `Downloader::new("/nonexistent/...")` 的断言在 root 下会翻转
+    /// （路径真能建出来）。此处改为**确定性判据**：以「普通文件」充当父目录 ⇒ `create_dir_all`
+    /// 必然 ENOTDIR（与 uid 无关），失败只落在**下载**这一步。
+    #[tokio::test]
+    async fn download_into_unusable_temp_dir_fails_without_touching_ctor() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker_file");
+        std::fs::write(&blocker, b"x").unwrap();
+        let unusable = blocker.join("sub"); // 父路径是文件 ⇒ 建目录必失败
+
+        let downloader = Downloader::new(unusable).expect("构造函数不应依赖文件系统");
+        let err = downloader
+            .download_with_progress("https://example.invalid/model.rknn", "deadbeef", 0, None)
+            .await
+            .expect_err("临时目录不可用时的下载必须失败");
+        assert!(
+            err.to_string().contains("临时目录不可用"),
+            "错误应明确指向临时目录，实际: {err}"
+        );
+    }
+
+    /// `?file=` 含路径分隔符/`..`/空 ⇒ 必须弃用并回退（净化），否则临时路径会指向不存在的
+    /// 父目录（`ota_<hash>_a/b.rknn`）使该 URL 永远下载不了。
     #[test]
-    fn test_downloader_invalid_temp_dir() {
-        // 使用不存在的父目录创建下载器应该失败
-        let result = Downloader::new(PathBuf::from("/nonexistent/path/that/does/not/exist"));
-        assert!(result.is_err());
+    fn test_generate_temp_path_rejects_unsafe_file_param() {
+        let dir = TempDir::new().unwrap();
+        let downloader = Downloader::new(dir.path().to_path_buf()).unwrap();
+
+        let p =
+            downloader.generate_temp_path("https://ota.example.com/dl/real.rknn?file=a/b.rknn&v=2");
+        assert!(p.to_str().unwrap().ends_with("real.rknn"), "实际 {p:?}");
+
+        let p2 = downloader.generate_temp_path("https://ota.example.com/dl/real2.rknn?file=..");
+        assert!(p2.to_str().unwrap().ends_with("real2.rknn"), "实际 {p2:?}");
+
+        let p3 = downloader.generate_temp_path("https://ota.example.com/?file=..");
+        assert!(
+            p3.to_str().unwrap().ends_with("download.tmp"),
+            "实际 {p3:?}"
+        );
+
+        // 反向保护：安全的 file= 仍照常生效（净化不得误伤原有行为）
+        let p4 =
+            downloader.generate_temp_path("https://ota.example.com/download?file=model.rknn&v=1");
+        assert!(p4.to_str().unwrap().ends_with("model.rknn"), "实际 {p4:?}");
+    }
+
+    /// 极简 HTTP 桩：对 `serve_count` 个连接各回一份 `body`（`Connection: close`）。
+    /// 返回 `(url, 服务线程句柄)`；不引入任何新依赖。
+    fn spawn_stub_http(body: Vec<u8>, serve_count: usize) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..serve_count {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf); // 只读请求头即可
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}/model.rknn"), handle)
+    }
+
+    /// 回归保护：**同一 URL 必须能重复下载**。早先实现会在成功后留下临时文件，而
+    /// `do_download` 用 `create_new(true)` 打开 ⇒ 第二次必然 EEXIST（或按陈旧长度发 Range 被
+    /// 判 416），该 URL 从此不可下载（2026-09-20 评审修复）。
+    #[tokio::test]
+    async fn same_url_is_downloadable_twice() {
+        use sha2::Sha256;
+        let body = b"model-bytes-for-regression".to_vec();
+        let hash = format!("{:x}", Sha256::digest(&body));
+        let (url, server) = spawn_stub_http(body.clone(), 2);
+
+        let dir = TempDir::new().unwrap();
+        let downloader = Downloader::new(dir.path().to_path_buf()).unwrap();
+
+        let first = downloader
+            .download_with_progress(&url, &hash, 0, None)
+            .await
+            .expect("第一次下载应成功");
+        let second = downloader
+            .download_with_progress(&url, &hash, 0, None)
+            .await
+            .expect("第二次下载同一 URL 也应成功（陈旧临时文件必须被清理）");
+
+        assert_eq!(first.hash, hash);
+        assert_eq!(second.hash, hash);
+        assert_eq!(first.path, second.path);
+        drop(server);
     }
 
     // ========== generate_temp_path 测试 ==========
