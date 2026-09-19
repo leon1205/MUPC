@@ -201,12 +201,17 @@ jobs:
   # （FbCanvas 的 fb0 映射与像素格式探测 / FdPoller / evdev 触摸 / 信号处理）
   # **一次都没过编译器**。
   #
-  # ⚠️ 两条如实声明：
-  #   1. 本 job 为**新增**，其语义（含下面对 libclang / 字库源 / sysroot 的处理）
-  #      在撰写时**未经验证**（撰写环境为 Windows）⇒ **首次在 CI 上跑绿之前，
-  #      不得对外声称"aarch64 已通过"**；
-  #   2. 首跑**预计会红**，这正是它存在的理由（把"从未编译"变成"编译不过就报错"）。
-  #      届时按报错逐条修，修绿后再把它设为硬门禁。
+  # ✅ 验证状态（2026-09-19，Linux 构建机手跑，步骤与本 job 逐条对齐）：
+  #   1. `cargo build -p lvgl-sys --target aarch64-unknown-linux-gnu` 通过（1m28s）；
+  #   2. `cargo build -p local-display --release --features noto-font --target
+  #      aarch64-unknown-linux-gnu` 通过，产物经 `file` 验为 ARM aarch64
+  #      （解释器 /lib/ld-linux-aarch64.so.1）；
+  #   3. 首跑确如预期**红了 27 处**，已逐条修掉（详见 `docs/technical-debt.md` §8.6
+  #      L-1）——根因不是 CI 语义，而是**代码从未在 Linux 上编译过**：
+  #      `lv_event_code_t` 在 Linux 上由 bindgen 生成为 `c_uint`、Windows 上为 `i32`，
+  #      而 `event.rs` 写死了 `i32`；`touch.rs` 的 `#[cfg(target_os="linux")] mod linux`
+  #      漏引入 `select_index`。
+  # ⇒ 本 job 自此为**硬门禁**：它红了就是真结论，不再有"未验证"豁免。
   #
   # 无 `needs:` —— 有意与 lint/test 并行：lint 若因 Linux 侧问题变红，本 job 仍能
   # 独立给出 HMI 的编译结论（这正是当前最需要的信号）。
@@ -262,12 +267,9 @@ jobs:
       # 产物与入库清单一致（漂移检测仍成立）。
       - name: Generate bitmap fonts (10 tiers)
         working-directory: mupc/crates/local-display/fonts
-        # ⚠️ 用 `bash <script>` 而不是 `./gen_fonts.sh`：该脚本在 git 中的模式位是
-        # 100644（**没有执行位**），直接 `./` 调用会 `Permission denied`（与被测代码无关，
-        # 但会让本 job 首跑就失败在权限上、掩盖真正的编译信号）。
-        # 根治办法是 `git update-index --chmod=+x crates/local-display/fonts/gen_fonts.sh`，
-        # 属仓库权限变更，留给 Linux 侧一并做。
-        run: bash ./gen_fonts.sh
+        # 执行位已根治（2026-09-19，`git update-index --chmod=+x` ⇒ 模式位 100755，
+        # 见 `docs/technical-debt.md` §8.6 L-2）⇒ 直接 `./` 调用即可。
+        run: ./gen_fonts.sh
 
       # ── 门禁（设计要求"先单独跑通 sys 层"）：一条命令暴露交叉 bindgen 的全部问题 ──
       - name: Gate - cross-build lvgl-sys alone
