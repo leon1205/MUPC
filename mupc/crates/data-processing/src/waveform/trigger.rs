@@ -279,13 +279,7 @@ impl TriggerEngine {
 
         // 频率过低（值 > 0 才判定）
         if freq > 0.0
-            && self.check_condition(
-                5,
-                freq,
-                self.config.frequency_low,
-                false,
-                timestamp_us,
-            )
+            && self.check_condition(5, freq, self.config.frequency_low, false, timestamp_us)
         {
             return TriggerResult::FrequencyLow;
         }
@@ -489,11 +483,15 @@ mod tests {
         assert_eq!(result, TriggerResult::None);
 
         // ④ 恢复（380 < 399，退出回差区）⇒ Triggered → HysteresisWaiting
-        let result = engine.detect(380.0, 380.0, 380.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 300000);
+        let result = engine.detect(
+            380.0, 380.0, 380.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 300000,
+        );
         assert_eq!(result, TriggerResult::None);
 
         // ⑤ 再一拍仍恢复（debounce_samples = 1）⇒ HysteresisWaiting → Normal（重新武装）
-        let result = engine.detect(380.0, 380.0, 380.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 310000);
+        let result = engine.detect(
+            380.0, 380.0, 380.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 310000,
+        );
         assert_eq!(result, TriggerResult::None);
 
         // ⑥ 重新越限且冷却期已过 ⇒ 再次触发（这才是"冷却期过后再次触发"的完整路径）

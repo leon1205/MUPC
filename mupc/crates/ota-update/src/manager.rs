@@ -1129,9 +1129,8 @@ mod tests {
         });
         std::fs::write(&version_file, version_data.to_string()).unwrap();
 
-        let manager = std::sync::Arc::new(
-            OtaManagerImpl::new(config, temp_dir.join("temp")).unwrap(),
-        );
+        let manager =
+            std::sync::Arc::new(OtaManagerImpl::new(config, temp_dir.join("temp")).unwrap());
 
         // 初始历史为空（同步读取口用 `blocking_read()`，**不得**在运行时线程内调用 ⇒
         // 经 `spawn_blocking` 挪到阻塞线程池；`Arc` 以便后续仍可复用 manager）
