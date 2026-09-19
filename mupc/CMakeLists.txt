@@ -34,7 +34,8 @@ if(ENABLE_NPU)
         set(ENV{RKNN_SDK_ROOT} "${RKNN_SDK_ROOT}")
     elseif(NOT DEFINED ENV{RKNN_SDK_ROOT})
         # 自动检测: 项目父目录的 rknn-toolkit2-2.3.2
-        get_filename_component(WORKSPACE_PARENT "${CMAKE_SOURCE_DIR}/../.." ABSOLUTE)
+        # CMAKE_SOURCE_DIR = mupc/ ⇒ 上一级才是仓库根（早先写成 ../.. 会得到仓库的父目录）
+        get_filename_component(WORKSPACE_PARENT "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
         set(RKNN_AUTO_PATH "${WORKSPACE_PARENT}/rknn-toolkit2-2.3.2")
         if(EXISTS "${RKNN_AUTO_PATH}")
             set(ENV{RKNN_SDK_ROOT} "${RKNN_AUTO_PATH}")

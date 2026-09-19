@@ -136,8 +136,18 @@ if $DO_BUILD; then
     export PKG_CONFIG_ALLOW_CROSS=1
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 
+    # NPU 是**显式开关**（`mupc-ai-engine` 的 `default = []`）：只有拿到真实 librknnrt.so
+    # 才开 `--features npu`；否则不加（加了会强制真实 FFI 而在链接期失败）。
+    NPU_FEATURES=""
+    if [ -f "$PROJECT_DIR/vendor/rknn/librknnrt.so" ] || [ -n "${RKNN_SDK_ROOT:-}" ]; then
+        NPU_FEATURES="--features npu"
+        log "NPU: 启用（--features npu）"
+    else
+        warn "NPU: 未找到 librknnrt.so ⇒ 本次构建为 stub（无 NPU 推理）"
+    fi
+
     cargo build --workspace --release --target "$CROSS_TARGET" \
-        --exclude mupc-iec61850-plugin --exclude device-trait 2>&1 | tail -3
+        --exclude mupc-iec61850-plugin --exclude device-trait $NPU_FEATURES 2>&1 | tail -3
 
     BUILD_DIR="$PROJECT_DIR/target/$CROSS_TARGET/release"
     log "编译完成: $BUILD_DIR/mupcd"

@@ -80,9 +80,9 @@ pub unsafe fn rknn_init(
 /// FFI 的签名逐一对齐，使调用方无需按平台分叉。
 #[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
-pub unsafe fn rknn_inputs_set(
-    _ctx: u64, _n: u32, _inputs: *mut rknn_input,
-) -> c_int { -1 }
+pub unsafe fn rknn_inputs_set(_ctx: u64, _n: u32, _inputs: *mut rknn_input) -> c_int {
+    -1
+}
 
 /// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
 ///
@@ -91,7 +91,9 @@ pub unsafe fn rknn_inputs_set(
 /// FFI 的签名逐一对齐，使调用方无需按平台分叉。
 #[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
-pub unsafe fn rknn_run(_ctx: u64, _reserved: *mut u64) -> c_int { -1 }
+pub unsafe fn rknn_run(_ctx: u64, _reserved: *mut u64) -> c_int {
+    -1
+}
 
 /// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
 ///
@@ -100,9 +102,9 @@ pub unsafe fn rknn_run(_ctx: u64, _reserved: *mut u64) -> c_int { -1 }
 /// FFI 的签名逐一对齐，使调用方无需按平台分叉。
 #[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
-pub unsafe fn rknn_outputs_get(
-    _ctx: u64, _n: u32, _outputs: *mut rknn_output,
-) -> c_int { -1 }
+pub unsafe fn rknn_outputs_get(_ctx: u64, _n: u32, _outputs: *mut rknn_output) -> c_int {
+    -1
+}
 
 /// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
 ///
@@ -111,7 +113,9 @@ pub unsafe fn rknn_outputs_get(
 /// FFI 的签名逐一对齐，使调用方无需按平台分叉。
 #[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
-pub unsafe fn rknn_destroy(_ctx: u64) -> c_int { -1 }
+pub unsafe fn rknn_destroy(_ctx: u64) -> c_int {
+    -1
+}
 
 /// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
 ///
@@ -120,6 +124,19 @@ pub unsafe fn rknn_destroy(_ctx: u64) -> c_int { -1 }
 /// FFI 的签名逐一对齐，使调用方无需按平台分叉。
 #[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
-pub unsafe fn rknn_query(
-    _ctx: u64, _cmd: c_int, _info: *mut c_void, _size: u32,
-) -> c_int { -1 }
+pub unsafe fn rknn_query(_ctx: u64, _cmd: c_int, _info: *mut c_void, _size: u32) -> c_int {
+    -1
+}
+
+/// 本二进制**是否编入真实 NPU 推理** —— 这是**构建期事实**，不是运行期配置。
+///
+/// 仅当 `npu` feature 开启 **且** 目标是 linux+aarch64 时为 `true`（此时才链接真实
+/// `librknnrt.so`）；其余情形编译的是 stub（`rknn_*` 一律返回 -1）。
+///
+/// 用途：启动期与配置项 `.ai_engine.enable_npu` 对账并显式告警 —— NPU 自 2026-09-19 起是
+/// **构建期开关**，配置文件里写 `enable_npu: true` 并不会让 stub 二进制长出推理能力。
+pub const NPU_BUILD_ENABLED: bool = cfg!(all(
+    feature = "npu",
+    target_os = "linux",
+    target_arch = "aarch64"
+));

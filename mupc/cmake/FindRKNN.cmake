@@ -23,7 +23,8 @@ if(DEFINED ENV{RKNN_SDK_ROOT})
 endif()
 
 # 项目相对路径 (MUPC 仓库与 rknn-toolkit2 平级)
-get_filename_component(PROJECT_PARENT "${CMAKE_SOURCE_DIR}/../.." ABSOLUTE)
+# CMAKE_SOURCE_DIR = mupc/ ⇒ 上一级才是仓库根（早先少一级，SDK 在机器上也探测不到）
+get_filename_component(PROJECT_PARENT "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
 list(APPEND RKNN_SEARCH_PATHS "${PROJECT_PARENT}/rknn-toolkit2-2.3.2/rknpu2/runtime/Linux/librknn_api")
 list(APPEND RKNN_SEARCH_PATHS "${PROJECT_PARENT}/rknn-toolkit2-2.3.2/rknpu2/runtime/Linux/librknn_api/include")
 list(APPEND RKNN_SEARCH_PATHS "${PROJECT_PARENT}/rknn-toolkit2-2.3.2")

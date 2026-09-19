@@ -46,7 +46,8 @@ setup_rknn() {
 
     # 自动检测
     local detect_paths=(
-        "$PROJECT_DIR/../../rknn-toolkit2-2.3.2"
+        # 仓库根 = deploy/scripts/../../..（早先少一级，导致 SDK 在机器上也探测不到）
+        "$PROJECT_DIR/../../../rknn-toolkit2-2.3.2"
         "/opt/rknn"
         "$HOME/rknn-toolkit2-2.3.2"
     )
