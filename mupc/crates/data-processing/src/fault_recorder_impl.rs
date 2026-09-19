@@ -106,15 +106,48 @@ impl FaultRecorderImpl {
         )
         .map_err(|e| DataProcessingError::DatabaseError(e.to_string()))?;
 
-        // 清理超过30天的旧记录
-        if let Err(e) = Self::cleanup_old_records_impl(&conn, 30) {
-            tracing::warn!("清理旧故障记录失败: {}", e);
+        // ── 单位迁移（必须**先于**保留期清理）──────────────────────────────────
+        // 早期版本把 `trigger_time` 写成**秒**，本版起统一为**毫秒**（设计 §3.3.3「毫秒时间戳」）。
+        // 旧行若不先换算，下面按毫秒算出的 cutoff（≈1.7e12）会把它们全部判为"过期"而整表删除。
+        let unit_migrated = Self::migrate_trigger_time_unit(&conn);
+
+        // 清理超过30天的旧记录（**仅在单位口径已统一时**执行，否则宁可不清）
+        if unit_migrated {
+            if let Err(e) = Self::cleanup_old_records_impl(&conn, 30) {
+                tracing::warn!("清理旧故障记录失败: {}", e);
+            }
+        } else {
+            tracing::warn!("跳过保留期清理：trigger_time 单位迁移未成功，避免把秒级旧行误判为过期");
         }
 
         Ok(Self {
             conn: Mutex::new(conn),
             recording: Mutex::new(false),
         })
+    }
+
+    /// 把历史 `trigger_time` 由**秒**换算为**毫秒**（幂等）。
+    ///
+    /// 判据：秒级 Unix 时间戳约 `1.7e9`，毫秒级约 `1.7e12` ⇒ `trigger_time < 1e11` 必为秒级。
+    /// 迁移后所有值都 ≥ `1e11`，再次执行不会命中任何行 ⇒ 天然幂等。
+    ///
+    /// 返回 `true` = 口径已统一（可安全执行按毫秒计算的保留期清理）；`false` = 迁移失败。
+    fn migrate_trigger_time_unit(conn: &Connection) -> bool {
+        match conn.execute(
+            "UPDATE fault_records SET trigger_time = trigger_time * 1000 \
+             WHERE trigger_time < 100000000000",
+            [],
+        ) {
+            Ok(0) => true,
+            Ok(n) => {
+                tracing::info!("fault_records.trigger_time 单位迁移（秒→毫秒）: {} 行", n);
+                true
+            }
+            Err(e) => {
+                tracing::warn!("fault_records.trigger_time 单位迁移失败: {}", e);
+                false
+            }
+        }
     }
 
     /// 为已存在的旧表迁移添加波形元数据列（幂等：忽略"duplicate column"错误）
@@ -142,7 +175,9 @@ impl FaultRecorderImpl {
         retention_days: i64,
     ) -> Result<usize, DataProcessingError> {
         // 与写入同口径：**毫秒**（单位不一致会让保留期删除永不命中，见 `record_sync`）。
-        let cutoff = Utc::now().timestamp_millis() - (retention_days * 86_400_000);
+        // `saturating_mul`：`retention_days` 是公开入参，极大值不应触发 debug 溢出 panic
+        // （release 下回绕还会让 cutoff 变成负数、DELETE 静默失效）。
+        let cutoff = Utc::now().timestamp_millis() - retention_days.saturating_mul(86_400_000);
         let deleted = conn
             .execute(
                 "DELETE FROM fault_records WHERE trigger_time < ?1",
@@ -511,7 +546,8 @@ impl FaultRecorderImpl {
                                 .take(channels.len())
                                 .map(|s| s.to_string())
                                 .collect();
-                            let stats = Self::compute_channel_stats(&channels, pre_samples, &ch_names);
+                            let stats =
+                                Self::compute_channel_stats(&channels, pre_samples, &ch_names);
                             (stats.pre, stats.post, trigger_ts)
                         }
                         Err(_) => (vec![], vec![], 0),
@@ -567,30 +603,30 @@ impl FaultRecorderImpl {
             });
         }
 
-        let mut reader = WaveformReader::open(waveform_path).map_err(|e| {
-            DataProcessingError::WaveformError(format!("打开波形文件失败: {}", e))
-        })?;
-        let (channels, _timestamps) = reader.read_all().map_err(|e| {
-            DataProcessingError::WaveformError(format!("读取波形数据失败: {}", e))
-        })?;
+        let mut reader = WaveformReader::open(waveform_path)
+            .map_err(|e| DataProcessingError::WaveformError(format!("打开波形文件失败: {}", e)))?;
+        let (channels, _timestamps) = reader
+            .read_all()
+            .map_err(|e| DataProcessingError::WaveformError(format!("读取波形数据失败: {}", e)))?;
 
         let waveforms_dir = waveform_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        let exporter = ComtradeExporter::new(
-            waveforms_dir,
-            output_dir.to_path_buf(),
-            device_id,
-        );
+        let exporter = ComtradeExporter::new(waveforms_dir, output_dir.to_path_buf(), device_id);
 
-        let channel_names: Vec<String> =
-            DEFAULT_CHANNEL_NAMES.iter().take(channels.len()).map(|s| s.to_string()).collect();
+        let channel_names: Vec<String> = DEFAULT_CHANNEL_NAMES
+            .iter()
+            .take(channels.len())
+            .map(|s| s.to_string())
+            .collect();
 
         let base = output_dir.join(format!("event_{}", event_id));
         let cfg_path = exporter
             .export_cfg(&base.with_extension("cfg"), &reader.meta, &channel_names)
-            .map_err(|e| DataProcessingError::WaveformError(format!("COMTRADE cfg 导出失败: {}", e)))?;
+            .map_err(|e| {
+                DataProcessingError::WaveformError(format!("COMTRADE cfg 导出失败: {}", e))
+            })?;
         let dat_path = exporter
             .export_dat(
                 &base.with_extension("dat"),
@@ -598,7 +634,9 @@ impl FaultRecorderImpl {
                 reader.meta.sample_rate,
                 reader.meta.pre_trigger_samples,
             )
-            .map_err(|e| DataProcessingError::WaveformError(format!("COMTRADE dat 导出失败: {}", e)))?;
+            .map_err(|e| {
+                DataProcessingError::WaveformError(format!("COMTRADE dat 导出失败: {}", e))
+            })?;
 
         Ok(ExportResult {
             files: vec![cfg_path, dat_path],
@@ -633,20 +671,27 @@ impl FaultRecorderImpl {
             });
         }
 
-        let mut reader = WaveformReader::open(waveform_path).map_err(|e| {
-            DataProcessingError::WaveformError(format!("打开波形文件失败: {}", e))
-        })?;
-        let (channels, _timestamps) = reader.read_all().map_err(|e| {
-            DataProcessingError::WaveformError(format!("读取波形数据失败: {}", e))
-        })?;
+        let mut reader = WaveformReader::open(waveform_path)
+            .map_err(|e| DataProcessingError::WaveformError(format!("打开波形文件失败: {}", e)))?;
+        let (channels, _timestamps) = reader
+            .read_all()
+            .map_err(|e| DataProcessingError::WaveformError(format!("读取波形数据失败: {}", e)))?;
 
         let exporter = CsvExporter::new(output_dir.to_path_buf());
-        let channel_names: Vec<String> =
-            DEFAULT_CHANNEL_NAMES.iter().take(channels.len()).map(|s| s.to_string()).collect();
+        let channel_names: Vec<String> = DEFAULT_CHANNEL_NAMES
+            .iter()
+            .take(channels.len())
+            .map(|s| s.to_string())
+            .collect();
 
         let csv_path = output_dir.join(format!("event_{}.csv", event_id));
         let out = exporter
-            .export_csv(&csv_path, &channels, &channel_names, reader.meta.sample_rate)
+            .export_csv(
+                &csv_path,
+                &channels,
+                &channel_names,
+                reader.meta.sample_rate,
+            )
             .map_err(|e| DataProcessingError::WaveformError(format!("CSV 导出失败: {}", e)))?;
 
         Ok(ExportResult {
@@ -836,5 +881,51 @@ impl FaultRecorder for FaultRecorderImpl {
                 "data-processing",
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归保护（2026-09-20 评审）：**秒级旧行必须被迁移保留，而不是被保留期清理误删**。
+    /// 早期版本写秒、本版写毫秒，若不做换算，`new()` 里按毫秒算出的 30 天 cutoff 会把
+    /// 全部历史记录判为"过期"整表删除 —— 且是在开机瞬间。
+    #[test]
+    fn legacy_second_unit_rows_are_migrated_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mig.db");
+
+        // ① 模拟"旧版本已落库"：先建表，再直接写入一条**秒级**记录（1 小时前）
+        {
+            let _recorder = FaultRecorderImpl::new(&db).expect("建库");
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let legacy_secs = chrono::Utc::now().timestamp() - 3600;
+            conn.execute(
+                "INSERT INTO fault_records (fault_type, trigger_time) VALUES ('GRID_OVERLOAD', ?1)",
+                [legacy_secs],
+            )
+            .unwrap();
+        }
+
+        // ② 重新打开 ⇒ 触发迁移（且不得被保留期清理删除）
+        let recorder = FaultRecorderImpl::new(&db).expect("重开并迁移");
+        let rows = recorder.query_sync(0, i64::MAX).expect("查询");
+        assert_eq!(rows.len(), 1, "秒级旧行应被迁移保留，而不是被清理删除");
+        assert!(
+            rows[0].trigger_time > 100_000_000_000,
+            "应已换算为毫秒（≈1.7e12），实际 {}",
+            rows[0].trigger_time
+        );
+
+        // ③ 幂等：再开一次不会重复乘 1000
+        let expected = rows[0].trigger_time;
+        drop(recorder);
+        let recorder2 = FaultRecorderImpl::new(&db).expect("再次打开");
+        let rows2 = recorder2.query_sync(0, i64::MAX).expect("查询");
+        assert_eq!(
+            rows2[0].trigger_time, expected,
+            "迁移必须幂等（不得重复 ×1000）"
+        );
     }
 }
