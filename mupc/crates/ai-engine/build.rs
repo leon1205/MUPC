@@ -16,6 +16,11 @@
 use std::path::Path;
 
 fn main() {
+    // 本构建脚本会发出 `rknn_real_rt`（= "真的链接 librknnrt.so、真 FFI 可用"）。
+    // **必须无条件声明**：rustc 1.80+ 对未声明的 cfg 会报 `unexpected_cfgs`，而 CI 的 lint
+    // job 用 `-D warnings` ⇒ 漏声明会直接变成编译错误（旧 cargo 忽略本指令，无副作用）。
+    println!("cargo:rustc-check-cfg=cfg(rknn_real_rt)");
+
     let npu_enabled = std::env::var("CARGO_FEATURE_NPU").is_ok();
     let is_linux = std::env::var("CARGO_CFG_TARGET_OS")
         .map(|os| os == "linux")
@@ -55,6 +60,11 @@ fn main() {
         );
         return;
     }
+
+    // 走到这里 = npu 已开 ∧ linux ∧ aarch64 ⇒ **真 FFI**。
+    // 发出单一真源 cfg：`rknn_runtime_sys.rs`（链接与 stub 的分派）与 `model_manager.rs`
+    // （NPU 路径 vs CPU 优雅回退）都按它判定，避免"两处谓词手工同步"再次漂移（2026-09-20 评审）。
+    println!("cargo:rustc-cfg=rknn_real_rt");
 
     println!("cargo:rerun-if-env-changed=RKNN_VENDOR_DIR");
     println!("cargo:rerun-if-env-changed=RKNN_SDK_ROOT");
