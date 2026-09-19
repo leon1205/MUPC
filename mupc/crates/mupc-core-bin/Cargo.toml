@@ -22,7 +22,7 @@ mupc-security = { path = "../security" }
 mupc_storage = { path = "../storage" }
 mupc-intercore = { path = "../intercore" }
 mupc-data-processing = { path = "../data-processing" }
-mupc-ai-engine = { path = "../ai-engine" }
+mupc-ai-engine = { path = "../ai-engine", default-features = false }
 mupc-strategy-engine = { path = "../strategy-engine" }
 mupc-gateway = { path = "../gateway" }
 mupc-ota-update = { path = "../ota-update" }

@@ -24,7 +24,12 @@ nalgebra = "0.33"
 tokio-test = "0.4"
 
 [features]
-default = ["npu"]
+# ⚠️ **npu 是显式开关，不做默认**：`cargo --workspace` 类命令会把**每个成员自身的
+# default features** 打开（与依赖方是否 `default-features = false` 无关）⇒ 只要这里是
+# `default = ["npu"]`，CI 的 test/lint job（x86_64）就会去链接 aarch64 的 librknnrt.so
+# 而结构性不可跑。开启方式（均已带 `--features npu`）：CI build job /
+# `deploy/scripts/build-for-rk3588.sh --cross` / CMake 的 ENABLE_NPU。
+default = []
 npu = []
 
 [build-dependencies]

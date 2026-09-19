@@ -18,7 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 parking_lot = "0.12"
 tempfile = "3.10"
-mupc-ai-engine = { path = "../ai-engine" }
+mupc-ai-engine = { path = "../ai-engine", default-features = false }
 
 # 压缩解压支持
 flate2 = "1.0"

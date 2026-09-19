@@ -82,7 +82,8 @@ if(CARGO_FEATURES)
     string(JOIN "," CARGO_FEATURES_STR ${CARGO_FEATURES})
     set(CARGO_FEATURE_FLAG "--features=${CARGO_FEATURES_STR}")
 else()
-    # 无 NPU 时需显式禁用 default features (Cargo.toml 中 default = ["npu"])
+    # 无 NPU 时显式禁用 default features（保险起见；自 2026-09-19 起 npu 已是显式开关、
+    # mupc-ai-engine 的 default = []，故此处不再是必需，但保持"未启用即明确关闭"的口径）。
     set(CARGO_FEATURE_FLAG "--no-default-features")
 endif()
 

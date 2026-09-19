@@ -24,7 +24,12 @@ pub struct rknn_output {
     pub is_preallocated: c_int,
 }
 
-#[cfg(all(feature = "npu", target_os = "linux"))]
+// ⚠️ **必须带 `target_arch = "aarch64"`**：Rockchip 只发布 aarch64 的 `librknnrt.so`
+// （项目 build.rs 的自动探测也只在 `rknpu2/runtime/Linux/librknn_api/aarch64/` 下找）。
+// 少了这条，x86_64 宿主（本机开发 / CI 的 test+lint job）会去链接 aarch64 的 .so
+// ⇒ `rust-lld: ... is incompatible with elf64-x86-64`，整条 CI 流水线结构性不可跑。
+// x86_64 目标走下面的 stub（与 Windows 同口径：npu 语义保留，运行时返回 -1）。
+#[cfg(all(feature = "npu", target_os = "linux", target_arch = "aarch64"))]
 #[link(name = "rknnrt")]
 extern "C" {
     pub fn rknn_init(
@@ -45,8 +50,19 @@ extern "C" {
     pub fn rknn_query(ctx: u64, cmd: c_int, info: *mut c_void, size: u32) -> c_int;
 }
 
-// ── 非 Linux 或未启用 npu feature 时的 stub 实现 ──
-#[cfg(not(all(feature = "npu", target_os = "linux")))]
+// ── 其余情形（非 Linux / 非 aarch64 / 未启用 npu）的 stub 实现 ──
+//
+// # Safety
+//
+// 以下各 stub 与真 FFI 的签名逐一对齐（便于调用方无差别编译），但**不触碰任何指针**：
+// 一律直接返回 `-1`（"未启用 NPU"）。因此调用它们不会产生任何内存安全义务 —— 指
+// 参即便悬垂/为空也仅被忽略。保留 `unsafe` 仅因签名必须与真实现一致。
+/// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
+///
+/// # Safety
+/// 不产生任何内存安全义务 —— 指针参数被忽略（即便悬垂/为空）。保留 `unsafe` 仅为与真
+/// FFI 的签名逐一对齐，使调用方无需按平台分叉。
+#[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_init(
     _ctx: *mut u64,
@@ -57,27 +73,52 @@ pub unsafe fn rknn_init(
     -1 // 未启用 NPU
 }
 
-#[cfg(not(all(feature = "npu", target_os = "linux")))]
+/// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
+///
+/// # Safety
+/// 不产生任何内存安全义务 —— 指针参数被忽略（即便悬垂/为空）。保留 `unsafe` 仅为与真
+/// FFI 的签名逐一对齐，使调用方无需按平台分叉。
+#[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_inputs_set(
     _ctx: u64, _n: u32, _inputs: *mut rknn_input,
 ) -> c_int { -1 }
 
-#[cfg(not(all(feature = "npu", target_os = "linux")))]
+/// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
+///
+/// # Safety
+/// 不产生任何内存安全义务 —— 指针参数被忽略（即便悬垂/为空）。保留 `unsafe` 仅为与真
+/// FFI 的签名逐一对齐，使调用方无需按平台分叉。
+#[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_run(_ctx: u64, _reserved: *mut u64) -> c_int { -1 }
 
-#[cfg(not(all(feature = "npu", target_os = "linux")))]
+/// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
+///
+/// # Safety
+/// 不产生任何内存安全义务 —— 指针参数被忽略（即便悬垂/为空）。保留 `unsafe` 仅为与真
+/// FFI 的签名逐一对齐，使调用方无需按平台分叉。
+#[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_outputs_get(
     _ctx: u64, _n: u32, _outputs: *mut rknn_output,
 ) -> c_int { -1 }
 
-#[cfg(not(all(feature = "npu", target_os = "linux")))]
+/// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
+///
+/// # Safety
+/// 不产生任何内存安全义务 —— 指针参数被忽略（即便悬垂/为空）。保留 `unsafe` 仅为与真
+/// FFI 的签名逐一对齐，使调用方无需按平台分叉。
+#[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_destroy(_ctx: u64) -> c_int { -1 }
 
-#[cfg(not(all(feature = "npu", target_os = "linux")))]
+/// stub：未启用 NPU（非 Linux / 非 aarch64 / feature 未开），恒返回 `-1`。
+///
+/// # Safety
+/// 不产生任何内存安全义务 —— 指针参数被忽略（即便悬垂/为空）。保留 `unsafe` 仅为与真
+/// FFI 的签名逐一对齐，使调用方无需按平台分叉。
+#[cfg(not(all(feature = "npu", target_os = "linux", target_arch = "aarch64")))]
 #[allow(non_snake_case)]
 pub unsafe fn rknn_query(
     _ctx: u64, _cmd: c_int, _info: *mut c_void, _size: u32,

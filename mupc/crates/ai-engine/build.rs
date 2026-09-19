@@ -19,14 +19,36 @@ fn main() {
     let npu_enabled = std::env::var("CARGO_FEATURE_NPU").is_ok();
     let is_linux = std::env::var("CARGO_CFG_TARGET_OS").map(|os| os == "linux").unwrap_or(false);
 
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let is_aarch64 = target_arch == "aarch64";
+
     if !npu_enabled {
-        println!("cargo:warning=AI Engine: npu feature 未启用，跳过 RKNN FFI 链接");
+        // 安全网：aarch64 目标的**部署**构建若漏了 `--features npu`，产物会静默变成
+        // stub（无 NPU 推理）—— 这里显式喊一声，避免"以为带了 NPU"。
+        if is_linux && is_aarch64 {
+            println!(
+                "cargo:warning=⚠️ AI Engine: aarch64 目标但 npu feature **未启用** ⇒ 产物为 stub（无 NPU 推理）。\
+                 部署构建请加 `--features npu`（build-for-rk3588.sh / CMake ENABLE_NPU 均已带）。"
+            );
+        } else {
+            println!("cargo:warning=AI Engine: npu feature 未启用，跳过 RKNN FFI 链接");
+        }
         return;
     }
 
     if !is_linux {
         println!("cargo:warning=AI Engine: 非 Linux 平台 ({}), npu feature 使用 stub 实现",
             std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default());
+        return;
+    }
+
+    if !is_aarch64 {
+        // npu 开在非 aarch64（本机 x86_64 开发 / CI）⇒ 真 FFI 不编译（见
+        // `src/rknn_runtime_sys.rs` 的 cfg：Rockchip 只发 aarch64 的 .so），走 stub。
+        println!(
+            "cargo:warning=AI Engine: 目标 {} 非 aarch64 ⇒ npu feature 使用 stub 实现（与 Windows 同口径）",
+            target_arch
+        );
         return;
     }
 
