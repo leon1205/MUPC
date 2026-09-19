@@ -8,6 +8,9 @@
 //!    本层所有类型都含裸指针（故自动 `!Send` / `!Sync`），编译期即挡住跨线程使用；
 //!    所有 `lv_*` 调用必须发生在事件循环线程内（设计 §5.2 不变量 4）。
 //! 3. 回调内**绝不 panic**（跨 FFI 展开为 UB）：[`event`] 的桥统一 `catch_unwind` 收敛。
+//!    ⚠️ **回调内的诊断一律走 [`diag`]，不得用 `eprintln!` / `println!`** —— 后者在
+//!    stderr/stdout 写失败时**自身会 panic**，而该 panic 位于 `catch_unwind` 之外、栈上
+//!    已是 C 帧 ⇒ 跨 FFI 展开 = UB（比它要报告的那个 panic 更严重）。
 //! 4. [`display`] 的 flush 桥**只做像素搬运**，不得阻塞、不得做通道 I/O
 //!    （设计 §1.1.1.1 P-1 / §5.2 不变量 3）。
 //! 5. `user_data` 生命周期由 [`event`] **统一管理**（`Box::into_raw` / `from_raw` 配对，
@@ -282,4 +285,32 @@ pub fn mem_monitor() -> MemStats {
         used_pct: m.used_pct,
         frag_pct: m.frag_pct,
     }
+}
+
+/// 供 **C 回调内部**输出一行诊断（本层唯一允许的诊断出口）。
+///
+/// 用法与 `eprintln!` 一致，但接受 [`std::fmt::Arguments`] 以避免为插值分配
+/// `String`：`diag(format_args!("...code={raw}..."))`。
+///
+/// # 为什么不能用 `eprintln!`
+///
+/// 三个 C 蹦床（[`display`] 的 flush、[`indev`] 的 read、[`event`] 的派发）在
+/// `catch_unwind` **之外**仍需打印"已拦截 panic"这类诊断，而 `eprintln!`
+/// **在 stderr 写失败时自身会 panic**。该 panic 发生在 `catch_unwind` 之外、栈上
+/// 已是 C 帧 ⇒ **跨 FFI 展开 = UB**（这比它要报告的那个 panic 更严重）。
+///
+/// 本函数改用 [`std::io::Write::write_fmt`] 并**丢弃 `Result`**：写失败只是丢掉
+/// 一行诊断，不产生 panic。零分配，可在每帧路径上安全调用。
+///
+/// # 边界（如实登记）
+///
+/// 这是一次**短写系统调用**，严格讲仍属「回调内 I/O」（设计 §5.2 不变量 3）。
+/// 接受理由：本函数只在**已发生并已被拦截的 panic**这条已退化路径上被调用
+/// （不是稳态路径），且其替代品（`eprintln!`）会引入 UB。稳态的 panic 观测性
+/// 由 `catch_unwind` 的返回值与各调用方的计数承担，不依赖本函数。
+pub fn diag(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    // 单次写入（而不是"正文 + 换行"两次）：两次之间若混入其它输出，会得到**半行交错**
+    // 的诊断。`writeln!` 一次成型，仍零分配、仍忽略 I/O 错误（不 panic）。
+    let _ = writeln!(std::io::stderr(), "{args}");
 }

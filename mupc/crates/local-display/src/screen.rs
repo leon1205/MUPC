@@ -89,9 +89,14 @@ impl<S: PixelSink> PixelSink for Rc<RefCell<S>> {
 
 /// 一块 `w × h` 脏区需要的**像素字节数**（`w * h * 4`；**checked**，溢出返回 `None`）。
 ///
-/// Minor 2 整改：原先直接 `area.pixel_bytes()`（内部 `w*h*4` 的 usize 乘法）做防御比较 ——
-/// 乘法本身可溢出（32 位目标必然，64 位在极端量程下也可能），而本函数由 flush 回调内调用，
-/// **回调内 panic = 跨 FFI 展开 = UB**（设计 §5.2 不变量 5）。溢出时按「宁可不画」处理。
+/// Minor 2 整改：原先直接做**未检查**的 `w*h*4` usize 乘法 —— 乘法本身可溢出（32 位目标
+/// 必然，64 位在极端量程下也可能），而本函数由 flush 回调内调用，**回调内 panic =
+/// 跨 FFI 展开 = UB**（设计 §5.2 不变量 5）。溢出时按「宁可不画」处理。
+///
+/// **订正（2026-09-19）**：本函数原文提到"原先直接用 `area.pixel_bytes()`"——**那句现已失真**：
+/// `Area::pixel_bytes` 自身已改为 checked 并返回 `Option`（`lvgl/display.rs`），两侧口径现已
+/// 一致。本函数**保留独立存在**是有意的：它接收**裸 `w`/`h`**（不构造 `Area`），
+/// 供「拿到两个 u32 就校验」的场合使用；与 `pixel_bytes` 是同口径的两个入口，**不是**重复实现。
 fn required_pixel_bytes(w: u32, h: u32) -> Option<usize> {
     (w as usize)
         .checked_mul(h as usize)
@@ -210,8 +215,10 @@ impl<T: PixelSink> Blitter<T> {
             return;
         }
         // 防御 1：LVGL 保证 `px.len() == area.width() * area.height() * 4`；不满足时宁可不画。
-        // 用 `required_pixel_bytes`（checked）而非 `area.pixel_bytes()`：后者是**未检查**的
-        // usize 乘法，溢出会 panic —— 而这里是 flush 回调内（panic 跨 FFI = UB）。
+        // 走 `required_pixel_bytes`（checked）：这里是 flush 回调内，乘法溢出 panic 会跨 FFI 展开
+        // = UB。**订正（2026-09-19）**：原注释写"`area.pixel_bytes()` 是未检查的乘法"——该句
+        // 已失真（它现在也是 checked/Option，见 `lvgl/display.rs`）；本行保留 `required_pixel_bytes`
+        // 的理由只是"此处手上是两个 u32、没有 `Area` 之外的用途"，非"另一个不安全"。
         match required_pixel_bytes(aw, ah) {
             Some(need) if px.len() >= need => {}
             _ => {

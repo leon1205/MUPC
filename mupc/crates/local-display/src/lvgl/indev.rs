@@ -183,6 +183,10 @@ unsafe extern "C" fn read_trampoline(indev: *mut sys::lv_indev_t, data: *mut sys
         d.continue_reading = false;
     }));
     if r.is_err() {
-        eprintln!("[lvgl] indev read_cb 内 panic 已被拦截；本次快照作废（视为未按下）");
+        // 同 `display.rs::flush_trampoline`：此处仍在 `catch_unwind` 之外 ⇒ 必须走
+        // `diag`（`eprintln!` 写失败时自身 panic，跨 FFI 展开 = UB）。
+        super::diag(format_args!(
+            "[lvgl] indev read_cb 内 panic 已被拦截；本次快照作废（视为未按下）"
+        ));
     }
 }

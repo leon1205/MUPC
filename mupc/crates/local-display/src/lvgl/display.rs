@@ -66,18 +66,32 @@ impl Area {
     };
 
     /// 区域宽度（像素）。
+    ///
+    /// 用 `i64` 计算：`x2 - x1 + 1` 在 `i32` 下**可溢出**（debug 构建 panic、release 回绕），
+    /// 而本函数是 [`Area::pixel_bytes`] 的输入、后者在 flush 回调内被调用 ——
+    /// **回调内的任何 panic 都会跨 FFI 展开**（UB）⇒ 上游也必须一并做无溢出运算
+    /// （否则下游的 `checked_mul` 被上游的溢出抵消）。
     pub fn width(&self) -> u32 {
-        (self.x2 - self.x1 + 1).max(0) as u32
+        let w = (self.x2 as i64) - (self.x1 as i64) + 1;
+        w.clamp(0, u32::MAX as i64) as u32
     }
 
-    /// 区域高度（像素）。
+    /// 区域高度（像素）。溢出口径同 [`Area::width`]。
     pub fn height(&self) -> u32 {
-        (self.y2 - self.y1 + 1).max(0) as u32
+        let h = (self.y2 as i64) - (self.y1 as i64) + 1;
+        h.clamp(0, u32::MAX as i64) as u32
     }
 
     /// 该区域像素字节数 —— 即 flush 闭包收到的 `&[u8]` 长度。
-    pub fn pixel_bytes(&self) -> usize {
-        self.width() as usize * self.height() as usize * BYTES_PER_PIXEL
+    ///
+    /// **返回 `Option` 而非裸 `usize`**：`w * h * 4` 是**未检查**的 `usize` 乘法，
+    /// 回绕既会给出错误长度，更会让 `from_raw_parts` 造出超出真实分配的切片（UB）。
+    /// 溢出时返回 `None`，由调用方按「本脏区不画」处理 —— 与 `screen.rs` 的
+    /// `required_pixel_bytes`（同为 checked 口径）一致；**本函数不得改回裸乘法**。
+    pub fn pixel_bytes(&self) -> Option<usize> {
+        (self.width() as usize)
+            .checked_mul(self.height() as usize)?
+            .checked_mul(BYTES_PER_PIXEL)
     }
 
     /// 从 C 侧 `lv_area_t` 读取（薄层内部用：flush 桥、`obj.rs` 的 `Obj::coords`）。
@@ -209,7 +223,16 @@ impl Display {
         }
 
         let rows = buffer_rows(height);
-        let buf_bytes = rows as usize * width as usize * BYTES_PER_PIXEL;
+        // checked 乘法：`buf_bytes` 直接决定 `AlignedBuf` 的分配尺寸，回绕会让缓冲
+        // **小于** LVGL 的写入量（后续 flush 越界写）。溢出即拒绝建屏，不静默缩小。
+        let buf_bytes = (rows as usize)
+            .checked_mul(width as usize)
+            .and_then(|n| n.checked_mul(BYTES_PER_PIXEL))
+            .ok_or(LvglError::InvalidArgument("display 缓冲尺寸溢出（width×rows×4）"))?;
+        // 下传给 LVGL 的是 `u32`（`lv_display_set_buffers` 的形参）⇒ 必须显式校验能装下，
+        // 否则 `as u32` 会**静默截断**（与上一句"不静默缩小"的承诺自相矛盾）。
+        let buf_bytes_u32 = u32::try_from(buf_bytes)
+            .map_err(|_| LvglError::InvalidArgument("display 缓冲尺寸超出 u32"))?;
         let mut buf1 = AlignedBuf::new(buf_bytes).ok_or(LvglError::OutOfMemory("display buf1"))?;
         let mut buf2 = AlignedBuf::new(buf_bytes).ok_or(LvglError::OutOfMemory("display buf2"))?;
 
@@ -225,7 +248,7 @@ impl Display {
                 raw,
                 buf1.as_mut_ptr() as *mut c_void,
                 buf2.as_mut_ptr() as *mut c_void,
-                buf_bytes as u32,
+                buf_bytes_u32,
                 sys::LV_DISPLAY_RENDER_MODE_PARTIAL,
             );
         }
@@ -395,7 +418,11 @@ unsafe extern "C" fn flush_trampoline(
         }
         // SAFETY: `area` 由 LVGL 传入且指向有效（闭区间）矩形。
         let a = Area::read(unsafe { &*area });
-        let n = a.pixel_bytes();
+        // `pixel_bytes` 是 checked 的（见其文档）：溢出 ⇒ 本脏区不画，绝不 panic、
+        // 也不造出超长切片。这是 flush 回调内，panic 跨 FFI 展开 = UB。
+        let Some(n) = a.pixel_bytes() else {
+            return;
+        };
         if n == 0 {
             return;
         }
@@ -406,7 +433,11 @@ unsafe extern "C" fn flush_trampoline(
         sink(a, px);
     }));
     if r.is_err() {
-        eprintln!("[lvgl] flush 回调内 panic 已被拦截；本次脏区丢弃（不阻塞刷新队列）");
+        // 走 `diag` 而非 `eprintln!`：此处仍在 `catch_unwind` **之外**、栈上是 C 帧，
+        // 而 `eprintln!` 在 stderr 写失败时自身会 panic ⇒ 跨 FFI 展开 = UB。
+        super::diag(format_args!(
+            "[lvgl] flush 回调内 panic 已被拦截；本次脏区丢弃（不阻塞刷新队列）"
+        ));
     }
     // SAFETY: `disp` 由 LVGL 传入且存活。
     unsafe { sys::lv_display_flush_ready(disp) };

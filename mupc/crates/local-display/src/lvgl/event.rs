@@ -114,6 +114,12 @@ impl Event {
 }
 
 /// 挂到 LVGL 事件项上的 `user_data`：唯一所有者是 `Box<Ctx>`。
+///
+/// ⚠️ **本结构内不得添加需要"在 `Ctx` 可能已释放时读取"的字段** —— 任何这类判据都
+/// 必须放在**不依赖 `Ctx` 存活**的地方（现有先例：[`CallbackHandle::detach`] 用 LVGL
+/// `remove_event_cb` 的**返回值**判断本 dsc 是否已被 DELETE 路径摘除）。
+/// 理由：`reclaim` 在**延迟分支**里根本不读 `p`（只把指针推进 `pending`），而
+/// `Ctx` 是否已被释放、以及"重复回收"的窗口，都不在本结构可观测的范围内。
 struct Ctx {
     /// 调用方声明的过滤器（原始码；`LV_EVENT_ALL` = 不过滤）。
     filter: i32,
@@ -174,6 +180,18 @@ impl Drop for ReentryGuard {
 ///
 /// `p` 必须来自 [`on`] 的 `Box::into_raw`，且此前未被回收。
 unsafe fn reclaim(p: *mut Ctx) {
+    // ⚠️ **本函数不得在任何分支读/写 `(*p)` 的内容**（`Box::from_raw` 除外）。
+    //
+    // 这不是风格偏好，是**实测**出来的（2026-09-19，本机）：在函数入口加一句
+    // `(*p).live.set(..)` 之类的"回收令牌"写入后，`lvgl_core_bridge_chain` 出现
+    // **间歇 `STATUS_ACCESS_VIOLATION`**（定向 20 次出现 2 次；撤掉该写入 20/20 稳定，
+    // 且"只保留该写入"的对照组 0/20）。⇒ **存在一条"`reclaim` 收到已释放 `p`"的路径**：
+    // 延迟分支原本**根本不触碰 `Ctx`**（只把指针推进 `pending`），故这份重复回收请求被
+    // **推迟且静默**；一旦在入口写 `p`，就变成"当场写已释放内存" ⇒ 堆损坏。
+    //
+    // ⇒ 要判断"某 `Ctx` 是否已被回收"，**只能用不依赖 `Ctx` 存活的信号**；若做不到，
+    // 就不要判（见 [`CallbackHandle::detach`] 的说明：两种判据都被评审否掉）。
+    // 那条真正的路径尚未定位 —— 本机无 ASAN/valgrind 级工具，见 `docs/technical-debt.md` U-58。
     let deferred = CB_STATE.with(|s| {
         let mut st = s.borrow_mut();
         if st.depth > 0 {
@@ -279,7 +297,11 @@ unsafe extern "C" fn trampoline(e: *mut sys::lv_event_t) {
         }
     });
     if r.is_err() {
-        eprintln!("[lvgl] 事件回调内 panic 已被拦截（code={raw}）；该次事件作废，事件循环继续");
+        // 走 `diag` 而非 `eprintln!`：此处仍在 `catch_unwind` 之外、栈上是 C 帧 ⇒
+        // `eprintln!` 的写失败 panic 会跨 FFI 展开（UB）。`format_args!` 零分配。
+        super::diag(format_args!(
+            "[lvgl] 事件回调内 panic 已被拦截（code={raw}）；该次事件作废，事件循环继续"
+        ));
     }
 }
 
@@ -393,6 +415,17 @@ impl<H: EventHost> CallbackHandle<H> {
             self.host.remove_event_cb(self.user_data);
         }
         // SAFETY: `user_data` 由 `on()` 分配且尚未回收（DELETE 未到达，detach 只调一次）。
+        //
+        // ⚠️ **2026-09-19 评审结论：这里有意不返回/不判 `remove_event_cb` 的返回值。**
+        // 曾经试过两种"幂等闸"，结论是**都不做**：
+        //   ① 给 `Ctx` 加"回收令牌"并在 `reclaim` 入口写它 —— **实测引入间歇 AV**
+        //      （见 `reclaim` 的禁令注释）；
+        //   ② 用 `remove_event_cb` 的返回值（`0` ⇒ 本 dsc 已被摘除 ⇒ 不再 reclaim）——
+        //      独立评审判定它在**可达路径上是纯防御性的**（本单回调窗口的双回收已被
+        //      `reclaim` 的 `pending.contains` 去重覆盖），却**换来一条潜在静默泄漏**：
+        //      若某条非 DELETE 的摘除路径清掉 dsc 而 DELETE 从未派发，提前返回会让该
+        //      `Ctx` **再无回收点**（`reclaim` 只有 trampoline 与本函数两个调用者）。
+        // ⇒ 保持与 A1 原始实现一致；**已知残余**记在 `docs/technical-debt.md` U-58。
         unsafe { reclaim(self.user_data as *mut Ctx) };
     }
 }
