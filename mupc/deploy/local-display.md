@@ -51,21 +51,37 @@ sudo cp mupc-local-display /opt/mupc/bin/ && sudo chmod 755 /opt/mupc/bin/mupc-l
 #      enabled: true
 #      bind_addr: "127.0.0.1:9810"     # 必须与 unit 的 --channel 同端点
 #      publish_ms: 1000
+#    ⚠️ 配置目录须对 mupc 用户可写（本地屏「配置保存」的原子落盘目标）：
+#       mupcd.service 已把 /opt/mupc/config 列入 ReadWritePaths；
+#       文件属主仍需可写 —— sudo chown mupc:mupc /opt/mupc/config/*.yaml
 sudo systemctl restart mupcd
 
-# 3) 渲染进程 unit
-sudo cp mupc-display.service /etc/systemd/system/
+# 3) 触摸屏稳定设备名（udev）——**不可省**，否则 /dev/mupc-touch 不存在、触摸不可用
+#    规则默认注释，须按真机 idVendor/idProduct 填写后再启用（步骤见文件内注释）
+sudo cp udev/99-mupc-touch.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+ls -l /dev/mupc-touch               # 应指向 /dev/input/eventN
+
+# 4) 渲染进程 unit
+sudo cp systemd/mupc-display.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now mupc-display
 systemctl status mupc-display
 journalctl -u mupc-display -f
 ```
 
-## 4. framebuffer / DRM 权限（真机校准，设计 §13 前置项 7）
+## 4. framebuffer / DRM / 触摸 权限（真机校准，设计 §13 前置项 7）
 
 - `--backend fbdev`（默认）需读写 `/dev/fb0`：通常属 `video` 组 →
   `sudo usermod -aG video mupc`（并保留 unit 的 `SupplementaryGroups`）。
 - 若改用 DRM（本期**未实现**，`--backend drm` 会明确报错）需 `/dev/dri/*` 与 `render` 组。
-- 快速自检：`sudo -u mupc /opt/mupc/bin/mupc-local-display --backend fbdev --width 1024 --height 768`
+- **触摸需 `/dev/input/event*`（属 `input` 组）**——`/dev/input/event*` 为 `root:input 0660`，
+  进程以 `User=mupc` 运行，**缺 `input` 组即 EACCES**：进程仍会启动，但退化为
+  「只读展示 + 页眉『触摸不可用』角标」，v2.0 的全部交互功能（配置/日志/联锁/审计）不可达。
+  unit 已含 `SupplementaryGroups=dialout video render input`；若改用 `usermod` 方式亦需含 `input`。
+  自检：`id mupc` 应列出 `input`。
+- 快速自检（同时验三样：fb / 触摸 / 通道）：
+  `sudo -u mupc /opt/mupc/bin/mupc-local-display --backend fbdev --touch-device /dev/mupc-touch
+  --width 1024 --height 768`
   （打不开设备时进程以非零码退出并打印原因，日志落 journal）。
 
 ## 5. 字库（设计 §1.1.2 / §13 前置项 8）

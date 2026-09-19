@@ -23,8 +23,13 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/mupc/data /opt/mupc/logs /opt/mupc/models
-ReadOnlyPaths=/opt/mupc/bin /opt/mupc/lib /opt/mupc/config /opt/mupc/certs
+# /opt/mupc/config 必须可写：本地屏「配置保存」走 ConfigService 的原子落盘
+# （tmp -> fsync -> .bak -> rename），目标是 --config 指向的 mupc_core_config.yaml。
+# ProtectSystem=strict 使整个文件系统只读，不列入 ReadWritePaths 即写必然 EROFS
+# ⇒ 屏上每次保存都失败（设计文档 §12.2 / §14 R-11 的「配置热写前提」）。
+# 另需文件属主可写：chown mupc:mupc /opt/mupc/config/*.yaml
+ReadWritePaths=/opt/mupc/data /opt/mupc/logs /opt/mupc/models /opt/mupc/config
+ReadOnlyPaths=/opt/mupc/bin /opt/mupc/lib /opt/mupc/certs
 
 # 资源限制
 LimitNOFILE=4096

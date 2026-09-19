@@ -1,0 +1,48 @@
+# 12-MUPC 本地显示终端 —— 触摸屏稳定设备名
+#
+# 安装：
+#   sudo cp 99-mupc-touch.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -l /dev/mupc-touch          # 应指向 /dev/input/eventN
+#
+# 为什么需要本文件：
+#   内核分配的 eventN 编号**不保证跨重启稳定**（取决于枚举顺序）。渲染进程 unit 以
+#   `--touch-device /dev/mupc-touch` 固定路径启动（见 systemd/mupc-display.service），
+#   若符号链接缺失，进程启动时找不到设备 ⇒ 退化为「只读展示 + 触摸不可用角标」。
+#
+# ⚠️ 本文件的规则默认**注释掉**：`ATTRS{}` 的选择条件必须按真机实际值填写，
+#    照抄一个匹配不到（或过宽匹配到键盘/鼠标）的条件，比不加规则更糟
+#    （过宽匹配会让 /dev/mupc-touch 指向错误设备，症状与"触摸失效"同样难查）。
+#
+# ── 第 1 步：在真机上查出触摸屏的标识 ────────────────────────────────
+#   # 列出所有输入设备及其名称：
+#   cat /proc/bus/input/devices | grep -E '^N:|^H:'
+#   # 或（更直观，用 evtest 逐个试出哪个是触摸屏）：
+#   sudo evtest
+#   # 取触摸屏的供应商/产品号（十六进制）：
+#   udevadm info -a -n /dev/input/eventN | grep -E 'idVendor|idProduct|ATTRS\{name\}'
+#
+# ── 第 2 步：按查到的值取消注释并替换占位符 ──────────────────────────
+#
+# 写法 A（按供应商/产品号匹配，推荐 —— 最稳定）：
+# SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="<4位十六进制>", ATTRS{idProduct}=="<4位十六进制>", SYMLINK+="mupc-touch"
+#
+# 写法 B（按设备名匹配，最简单 —— 但重名设备会歧义）：
+# SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="<触摸屏名>", SYMLINK+="mupc-touch"
+#
+# ── 第 3 步（二选一）：把设备权限交给渲染进程 ────────────────────────
+#   /dev/input/event* 默认 root:input 0660。渲染进程以 User=mupc 运行，
+#   因此必须**至少满足以下一条**，否则 evdev 打开 EACCES：
+#
+#   (a) 组方式（本仓库采用）：unit 已有 `SupplementaryGroups=... input`
+#       （见 systemd/mupc-display.service）——本文件无需额外动作。
+#   (b) 或在此规则末尾追加（让本设备无需 input 组即可访问）：
+#       , MODE="0660", GROUP="input"
+#       （若希望脱离 input 组，可改用 `TAG+="uaccess"`，由 systemd-logind 按登录会话授权；
+#         本设备无人登录，故不采用。）
+#
+# ── 第 4 步：验证 ────────────────────────────────────────────────────
+#   ls -l /dev/mupc-touch
+#   sudo -u mupc /opt/mupc/bin/mupc-local-display --backend fbdev \
+#        --touch-device /dev/mupc-touch --width 1024 --height 768
+#   进程应在启动日志里报告发现了触摸设备（找不到时以非零码退出并打印原因）。

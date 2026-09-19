@@ -7,8 +7,13 @@
 # 前置（详见 deploy/local-display.md）：
 #   1) 产物落点 /opt/mupc/bin/mupc-local-display（aarch64 交叉编译）；
 #   2) 需访问 /dev/fb0（video 组）或 /dev/dri（render 组）——按真机组名校准；
-#   3) 字库：随二进制捆绑子集（bundled-font feature）或用 --font 指向系统字库；
-#   4) --channel 必须与 mupcd 配置 display.bind_addr 对齐（默认同为 127.0.0.1:9810）。
+#   3) 字库：编译期由 `--features noto-font` 把 lv_font_conv 生成的位图字库静态链入
+#      （v2.0 起；v1.0 的 `bundled-font` feature 与 `--font` 已废弃/不生效）。
+#      未启用 noto-font 时中文为占位框 ⇒ 出包必须带该 feature；
+#   4) 触摸需读 /dev/input/event*（**input 组，见 SupplementaryGroups**）；
+#      设备节点名必须用 udev 规则固定为 /dev/mupc-touch（见 deploy/udev/），
+#      否则 eventN 编号漂移会导致启动时找不到设备；
+#   5) --channel 必须与 mupcd 配置 display.bind_addr 对齐（默认同为 127.0.0.1:9810）。
 #
 # 自恢复语义（PRD 4.3.1 / 设计 §5.3、§9）：Restart=always + RestartSec=1 → 崩溃后 ≤3s 拉起；
 # 渲染进程崩溃不影响 mupcd（进程隔离，只经回环 GET 单向读，无任何下行写）。
@@ -24,11 +29,15 @@ After=multi-user.target
 Type=simple
 User=mupc
 Group=mupc
-# fbdev 需 /dev/fb0（video）；DRM 需 /dev/dri（render）；按真机实际组名保留所需项。
-SupplementaryGroups=dialout video render
+# fbdev 需 /dev/fb0（video）；DRM 需 /dev/dri（render）；evdev 触摸需 /dev/input/event*（input）。
+# ⚠️ `input` 不可省：/dev/input/event* 为 root:input 0660，缺该组则 evdev 打开 EACCES，
+#    进程仍会运行但退化为「只读展示 + 触摸不可用角标」——v2.0 的全部交互功能不可达。
+# `dialout` 本进程并不使用（不碰串口），保留仅为与既有部署口径一致。
+SupplementaryGroups=dialout video render input
 
 ExecStart=/opt/mupc/bin/mupc-local-display \
     --channel http://127.0.0.1:9810/v1/display/latest \
+    --touch-device /dev/mupc-touch \
     --backend fbdev --fbdev-path /dev/fb0 \
     --width 1024 --height 768 \
     --interval 500 --stale-ms 2000
@@ -48,7 +57,10 @@ ProtectHome=yes
 ReadWritePaths=/opt/mupc/logs
 ReadOnlyPaths=/opt/mupc/bin /opt/mupc/config
 
-# 资源限制（设计 §9：常驻内存 ≤64MB、CPU ≤15% 单核；此处给宽裕上限防失控）
+# 资源限制：PRD §4.1 已将本模块重定档为「交互式 HMI」（常驻内存 ≤256MB、稳态 CPU ≤40% 单核、
+# 瞬时 ≤60%、断连态 ≤10%），设计 §10 的设计目标为 ≤96MB。v1.0 的「≤64MB / ≤15%」是只读屏口径，
+# 已随 v2.0 废止。此处取 128M 作为「防失控上限」，高于设计目标、低于 PRD 上限。
+# ⚠️ 上述均为**未实测**指标（设计 §14 R-05）：真机需以 ps/pidstat 复核后再收紧。
 MemoryMax=128M
 LimitNOFILE=1024
 

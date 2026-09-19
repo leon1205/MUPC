@@ -20,11 +20,29 @@ jobs:
         working-directory: mupc
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `mupc/vendor/lvgl` 是 submodule（pin v9.5.0）。缺此步 ⇒ 目录为空 ⇒
+          # lvgl-sys 的 build.rs 无 C 源可编（本 job 因此**结构性无法通过**）。
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # clippy 覆盖全 workspace ⇒ 会跑 lvgl-sys 的 build.rs（bindgen）⇒ 需 libclang。
+      - name: Install libclang (for lvgl-sys bindgen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      # 显式指路：clang-sys 会自己找，但版本随镜像变化，给出来更稳（与 hmi job 同款）。
+      - name: Point bindgen at libclang
+        run: |
+          lib=$(find /usr/lib/llvm-* /usr/lib/x86_64-linux-gnu -name 'libclang.so*' 2>/dev/null | head -1)
+          test -n "$lib" || { echo "ERROR: 未找到 libclang.so"; exit 1; }
+          echo "LIBCLANG_PATH=$(dirname "$lib")" >> "$GITHUB_ENV"
+          echo "libclang = $lib"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -50,9 +68,24 @@ jobs:
         working-directory: mupc
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 同 lint job：lvgl-sys 需要 `vendor/lvgl` 的 C 源。
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libclang (for lvgl-sys bindgen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Point bindgen at libclang
+        run: |
+          lib=$(find /usr/lib/llvm-* /usr/lib/x86_64-linux-gnu -name 'libclang.so*' 2>/dev/null | head -1)
+          test -n "$lib" || { echo "ERROR: 未找到 libclang.so"; exit 1; }
+          echo "LIBCLANG_PATH=$(dirname "$lib")" >> "$GITHUB_ENV"
+          echo "libclang = $lib"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -84,6 +117,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 本 job 只编 mupc-core-bin，但保持与其它 job 一致的检出形态
+          # （submodule pin 是仓库状态的一部分；HMI 的交叉编译见 `hmi` job）。
+          submodules: recursive
 
       - name: Install cross
         uses: taiki-e/install-action@cross
@@ -155,3 +192,94 @@ jobs:
             mupc/target/${{ matrix.target }}/release/*.so
             mupc/config/
             mupc/deploy/
+
+  # ── Job 4: 本地显示终端（HMI / LVGL）交叉编译门禁 ──────────────────────────────
+  # 依据：设计 §12.1「构建」/ §14 R-20 / R-23 —— 设计把
+  #   `cargo build --target aarch64-unknown-linux-gnu -p lvgl-sys`
+  # 列为**实施第一步门禁**，而此前 CI 的 build job **只编 mupc-core-bin**，
+  # 从不编译 local-display / lvgl-sys ⇒ 全部 `#[cfg(target_os="linux")]` 代码
+  # （FbCanvas 的 fb0 映射与像素格式探测 / FdPoller / evdev 触摸 / 信号处理）
+  # **一次都没过编译器**。
+  #
+  # ⚠️ 两条如实声明：
+  #   1. 本 job 为**新增**，其语义（含下面对 libclang / 字库源 / sysroot 的处理）
+  #      在撰写时**未经验证**（撰写环境为 Windows）⇒ **首次在 CI 上跑绿之前，
+  #      不得对外声称"aarch64 已通过"**；
+  #   2. 首跑**预计会红**，这正是它存在的理由（把"从未编译"变成"编译不过就报错"）。
+  #      届时按报错逐条修，修绿后再把它设为硬门禁。
+  #
+  # 无 `needs:` —— 有意与 lint/test 并行：lint 若因 Linux 侧问题变红，本 job 仍能
+  # 独立给出 HMI 的编译结论（这正是当前最需要的信号）。
+  hmi:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: mupc
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      # 交叉 bindgen 的 sysroot 处置（设计 §12.1 ③ 的处置 ①）：clang 需目标 libc 头；
+      # `gcc-aarch64-linux-gnu` 会带来 /usr/aarch64-linux-gnu/include。
+      BINDGEN_EXTRA_CLANG_ARGS: -isystem /usr/aarch64-linux-gnu/include
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain + aarch64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      # 字库由 `lv_font_conv`（npx）生成；需要 node。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install cross C toolchain + libclang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libclang-dev
+
+      - name: Point bindgen at libclang
+        run: |
+          lib=$(find /usr/lib/llvm-* /usr/lib/x86_64-linux-gnu -name 'libclang.so*' 2>/dev/null | head -1)
+          test -n "$lib" || { echo "ERROR: 未找到 libclang.so"; exit 1; }
+          echo "LIBCLANG_PATH=$(dirname "$lib")" >> "$GITHUB_ENV"
+          echo "libclang = $lib"
+
+      # 字库源（OFL-1.1）与生成物（.c）**都不入库**（设计 §1.1.2 / 仓库 .gitignore）
+      # ⇒ CI 必须先把 .otf 取下来，否则 gen_fonts.sh 会以 exit 1 拒绝运行。
+      - name: Fetch font source (not in repo by design)
+        working-directory: mupc/crates/local-display/fonts
+        run: |
+          curl -fL -o NotoSansSC-Regular.otf \
+            https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf
+          ls -l NotoSansSC-Regular.otf
+
+      # 约 1–2 分钟（10 档 × 全码表）。注意：本脚本会**覆写**两个入库派生清单
+      # （lv_font_cmap.txt / lv_font_metrics.txt）——CI 不提交，且输入码表未变时
+      # 产物与入库清单一致（漂移检测仍成立）。
+      - name: Generate bitmap fonts (10 tiers)
+        working-directory: mupc/crates/local-display/fonts
+        # ⚠️ 用 `bash <script>` 而不是 `./gen_fonts.sh`：该脚本在 git 中的模式位是
+        # 100644（**没有执行位**），直接 `./` 调用会 `Permission denied`（与被测代码无关，
+        # 但会让本 job 首跑就失败在权限上、掩盖真正的编译信号）。
+        # 根治办法是 `git update-index --chmod=+x crates/local-display/fonts/gen_fonts.sh`，
+        # 属仓库权限变更，留给 Linux 侧一并做。
+        run: bash ./gen_fonts.sh
+
+      # ── 门禁（设计要求"先单独跑通 sys 层"）：一条命令暴露交叉 bindgen 的全部问题 ──
+      - name: Gate - cross-build lvgl-sys alone
+        run: cargo build -p lvgl-sys --target aarch64-unknown-linux-gnu
+
+      - name: Cross-build HMI binary (release, with fonts)
+        run: |
+          cargo build -p local-display --release --features noto-font \
+            --target aarch64-unknown-linux-gnu
+
+      - name: Verify artifact
+        run: |
+          f=target/aarch64-unknown-linux-gnu/release/mupc-local-display
+          test -f "$f" || { echo "ERROR: $f 不存在"; exit 1; }
+          file "$f"
