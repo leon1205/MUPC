@@ -1,6 +1,7 @@
 //! IEC 104 服务器
 
 use mupc_common::{ErrorCode, MupcError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -8,6 +9,27 @@ use tracing::{error, info, warn};
 
 use super::command::CommandHandler;
 use super::{Connection, ConnectionState, Iec104Frame};
+
+/// 链路状态（**对外聚合口径**，设计 §4.1 #1 —— 供本地显示终端 F6「IEC 104 连接状态」）。
+///
+/// 与 [`ConnectionState`] 的分工：后者是**单条连接**的内部状态机（含 `WaitingStartDt`
+/// 这类 104 协议细节态），本枚举是**面向 HMI 的 4 态聚合**（与显示契约
+/// `display-proto::LinkState` 的 `Connected/Connecting/Disconnected/NotConfigured`
+/// 一一对应，映射在 `mupc-core-bin/src/display_host.rs`）。
+///
+/// ⚠️ 不设 `Unknown`：真源不可得的场景由**调用方**（未接线时）自行给出，本枚举只表达
+/// 服务器自己**已知**的状态（PRD F6.5 的「未知」由显示侧兜底，不由本层臆造）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    /// 未配置 / 未启动（`start()` 从未成功绑定监听）。
+    NotConfigured,
+    /// 已启动，但当前无任何连接。
+    Disconnected,
+    /// 有连接，但均未进入 [`ConnectionState::Connected`]（连接中 / 等待 STARTDT / 已停止）。
+    Connecting,
+    /// 至少一条连接已 [`ConnectionState::Connected`]。
+    Connected,
+}
 
 /// IEC 104 服务器配置
 #[derive(Debug, Clone)]
@@ -42,6 +64,9 @@ pub struct Iec104Server {
     connections: Arc<RwLock<Vec<Arc<RwLock<Connection>>>>>,
     shutdown_tx: broadcast::Sender<()>,
     telemetry_txs: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
+    /// `start()` 是否已成功绑定监听 —— [`Iec104Server::link_state`] 的
+    /// 「未配置 / 未启动」判据（无此位则"从未启动"与"无连接"不可区分）。
+    started: AtomicBool,
 }
 
 impl Iec104Server {
@@ -53,6 +78,7 @@ impl Iec104Server {
             connections: Arc::new(RwLock::new(Vec::new())),
             shutdown_tx,
             telemetry_txs: Arc::new(Mutex::new(Vec::new())),
+            started: AtomicBool::new(false),
         }
     }
 
@@ -68,6 +94,9 @@ impl Iec104Server {
         })?;
 
         info!("IEC 104 server listening on {}", addr);
+        // 绑定成功即视为「已启动」（`link_state()` 的 NotConfigured 判据）——bind 失败时
+        // 上面的 `?` 已提前返回，本行不执行 ⇒ 此时状态仍为「未启动」。
+        self.started.store(true, Ordering::SeqCst);
 
         let connections = self.connections.clone();
         let shutdown_rx = self.shutdown_tx.subscribe();
@@ -287,5 +316,132 @@ impl Iec104Server {
     /// 获取连接数
     pub async fn connection_count(&self) -> usize {
         self.connections.read().await.len()
+    }
+
+    /// 链路状态聚合（设计 §4.1 #1 的对外口径；HMI F6「IEC 104 连接状态」的真源）。
+    ///
+    /// 判据（与设计逐字一致）：
+    /// - 未启动（`start()` 未成功绑定） → [`LinkState::NotConfigured`]；
+    /// - 已启动且无连接 → [`LinkState::Disconnected`]；
+    /// - 有连接但均未 `Connected` → [`LinkState::Connecting`]；
+    /// - 任一连 `Connected` → [`LinkState::Connected`]。
+    ///
+    /// ⚠️ 与 [`Self::connection_count`] 的分工：本方法是**状态**查询（HMI 3 s 慢拍），
+    /// 计数只反映连接表长度；两者都不触碰协议逻辑。
+    pub async fn link_state(&self) -> LinkState {
+        if !self.started.load(Ordering::SeqCst) {
+            return LinkState::NotConfigured;
+        }
+        let conns = self.connections.read().await;
+        if conns.is_empty() {
+            return LinkState::Disconnected;
+        }
+        for conn in conns.iter() {
+            if conn.read().await.state == ConnectionState::Connected {
+                return LinkState::Connected;
+            }
+        }
+        LinkState::Connecting
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::iec104::command::{CommandResponse, ControlCommand};
+
+    struct StubHandler;
+
+    #[async_trait::async_trait]
+    impl CommandHandler for StubHandler {
+        async fn handle_command(&self, cmd: ControlCommand) -> Result<CommandResponse, MupcError> {
+            Ok(CommandResponse {
+                cmd_id: cmd.cmd_id,
+                success: false,
+                message: "测试桩".to_string(),
+                timestamp: 0,
+            })
+        }
+
+        fn name(&self) -> &str {
+            "stub"
+        }
+    }
+
+    /// 回环 + 临时端口：测试不占固定端口（`listen_port = 0` 由内核分配）。
+    fn cfg() -> Iec104Config {
+        Iec104Config {
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: 0,
+            ..Default::default()
+        }
+    }
+
+    /// 向连接表注入一条**状态可控**的连接（同模块可见私有字段；用真实 TCP 对端避免
+    /// `Connection` 内部裸状态被伪造）。
+    async fn push_conn(server: &Iec104Server, state: ConnectionState) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (server_side, peer) = listener.accept().await.expect("accept");
+        let mut conn = Connection::new(server_side, peer);
+        conn.state = state;
+        drop(client);
+        server
+            .connections
+            .write()
+            .await
+            .push(Arc::new(RwLock::new(conn)));
+    }
+
+    /// 未 `start()` ⇒ `NotConfigured`（**即便连接表里已有连接**——"未启动"优先于一切）。
+    #[tokio::test]
+    async fn link_state_is_not_configured_before_start() {
+        let server = Iec104Server::new(cfg());
+        assert_eq!(server.link_state().await, LinkState::NotConfigured);
+        push_conn(&server, ConnectionState::Connected).await;
+        assert_eq!(
+            server.link_state().await,
+            LinkState::NotConfigured,
+            "未启动优先于连接表内容"
+        );
+    }
+
+    /// `start()` 成功 ⇒ 「已启动」；无连接 = `Disconnected`。
+    #[tokio::test]
+    async fn link_state_is_disconnected_after_start_without_connections() {
+        let server = Iec104Server::new(cfg());
+        server
+            .start(Arc::new(StubHandler))
+            .await
+            .expect("bind 127.0.0.1:0");
+        assert_eq!(server.link_state().await, LinkState::Disconnected);
+    }
+
+    /// 连接表聚合：有连接但均未 `Connected` → `Connecting`；任一连 `Connected` → `Connected`。
+    #[tokio::test]
+    async fn link_state_aggregates_connections() {
+        let server = Iec104Server::new(cfg());
+        server
+            .start(Arc::new(StubHandler))
+            .await
+            .expect("bind 127.0.0.1:0");
+
+        push_conn(&server, ConnectionState::Connecting).await;
+        assert_eq!(server.link_state().await, LinkState::Connecting);
+
+        push_conn(&server, ConnectionState::WaitingStartDt).await;
+        assert_eq!(
+            server.link_state().await,
+            LinkState::Connecting,
+            "WaitingStartDt 属「连接中」而非「已连接」"
+        );
+
+        push_conn(&server, ConnectionState::Connected).await;
+        assert_eq!(
+            server.link_state().await,
+            LinkState::Connected,
+            "任一连 Connected ⇒ 聚合为 Connected"
+        );
     }
 }

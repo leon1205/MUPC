@@ -10,4 +10,4 @@ pub use connection::{Connection, ConnectionState};
 pub use protocol::{
     AsduHeader, Cot, FrameType, Iec104Frame, Ioa, Quality, TypeId, UFrameType, Value,
 };
-pub use server::{Iec104Config, Iec104Server};
+pub use server::{Iec104Config, Iec104Server, LinkState};

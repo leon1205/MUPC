@@ -198,7 +198,7 @@ fn dataframe_to_datapackage(frame: &device_trait::DataFrame) -> mupc_data_proces
             load_power: Some(40.0),
             ev_charger_power: Some(10.0),
         },
-        timestamp: (frame.timestamp / 1000) as u64,
+        timestamp: frame.timestamp / 1000,
     }
 }
 
@@ -807,6 +807,17 @@ pub async fn initialize_all(
     // 快照、三相/run_state 取 intercore），再起 LoopbackHttpPublisher（127.0.0.1 GET 最新帧）。
     // 两 handle 都入 guard（优雅退出随其它后台任务 abort）；主进程不 spawn/不管理渲染子进程
     // （渲染生命周期归 systemd，§4.2/§11）。disabled 不装配（warn）。
+    // IEC 104 服务器**实例提前构造**（步骤 9 只做 `start()`）：HMI 的装置状态源要读它的
+    // 链路状态（`Iec104Server::link_state()`，U-59 / L-5），而 HMI 装配在步骤 8 末尾、
+    // 早于步骤 9。实例构造**无 I/O**（只建连接表/通道），提前无副作用。
+    let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+        mupc_gateway::iec104::server::Iec104Config {
+            listen_addr: config.gateway.listen_addr.clone(),
+            listen_port: config.gateway.listen_port,
+            ..Default::default()
+        },
+    ));
+
     if config.display.enabled {
         // 设计 §4.9 字面稿的「初始化本地 HMI 后端」日志行（第一轮整改 S-3：原先只存在于设计里，
         // 实现无对应日志 ⇒ 现场无法从启动日志确认 HMI 后端是否真的在装配）。
@@ -847,6 +858,9 @@ pub async fn initialize_all(
             Some(Arc::new(crate::display_host::SystemDeviceSource::new(
                 intercore.clone(),
                 ai_integrator.clone(),
+                // IEC 104 链路真源（U-59 / L-5）：实例已在下方提前构造（**尚未** start()，
+                // 故此刻读得「未配置」，start() 后自动转「断开/连接中/已连接」）。
+                Some(iec104_server.clone()),
                 process_started_at,
             ))),
             Some(Arc::new(crate::display_host::StorageAlarmSource::new(
@@ -963,17 +977,13 @@ pub async fn initialize_all(
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
     // 审查 R2-A2 (2026-09-09)：北向监听地址/端口读 config.gateway 段（缺省 0.0.0.0:2404，
     // 见 core_config.rs GatewayConfig::default——不再硬编码 2404）。
-    let iec104_config = mupc_gateway::iec104::server::Iec104Config {
-        listen_addr: config.gateway.listen_addr.clone(),
-        listen_port: config.gateway.listen_port,
-        ..Default::default()
-    };
+    // 实例本身已在 HMI 装配点**提前构造**（那里要取 `link_state()` 句柄，见该处注释）；
+    // 本步只做「告知监听地址 + 起 start()」。
     tracing::info!(
         "IEC 104 监听 {}:{}",
         config.gateway.listen_addr,
         config.gateway.listen_port
     );
-    let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(iec104_config));
     let cmd_handler = Arc::new(StrategyCommandHandler {
         intercore: intercore.clone(),
         interlock: interlock_ctl.clone(),
@@ -1212,33 +1222,34 @@ pub async fn initialize_all(
     // (mqtt.example.com:8883 + dummy 证书) 无条件构造并 spawn 假域名；启用走原连接逻辑。
     let mut mqtt_spawned = false;
     if config.mqtt_bridge.local_enabled {
-        if let Some(local) = mupc_mqtt_bridge::LocalMqttClient::new(
-            &mupc_mqtt_bridge::LocalMqttConfig::default(),
-        )
-        .map(Arc::new)
-        .inspect_err(|e| tracing::warn!("本地 MQTT 客户端初始化失败: {}", e))
-        .ok()
+        // 用 `match` 而非 `…inspect_err(..).ok()`：后者所需的 `inspect_err` 稳定于
+        // Rust 1.76，高于本仓声明的 MSRV（1.75）⇒ 保持 MSRV 干净。
+        match mupc_mqtt_bridge::LocalMqttClient::new(&mupc_mqtt_bridge::LocalMqttConfig::default())
         {
-            guard.0.push(tokio::spawn(async move {
-                let _ = local.run().await;
-            }));
-            mqtt_spawned = true;
+            Ok(local) => {
+                let local = Arc::new(local);
+                guard.0.push(tokio::spawn(async move {
+                    let _ = local.run().await;
+                }));
+                mqtt_spawned = true;
+            }
+            Err(e) => tracing::warn!("本地 MQTT 客户端初始化失败: {}", e),
         }
     } else {
         tracing::debug!("本地 MQTT 未启用（config.mqtt_bridge.local_enabled=false），跳过");
     }
     if config.mqtt_bridge.north_enabled {
-        if let Some(north) = mupc_mqtt_bridge::NorthMqttClient::new(
-            &mupc_mqtt_bridge::NorthMqttConfig::default(),
-        )
-        .map(Arc::new)
-        .inspect_err(|e| tracing::warn!("北向 MQTT 客户端初始化失败: {}", e))
-        .ok()
+        // 同上：避开 `inspect_err`（1.76 稳定 vs MSRV 1.75）。
+        match mupc_mqtt_bridge::NorthMqttClient::new(&mupc_mqtt_bridge::NorthMqttConfig::default())
         {
-            guard.0.push(tokio::spawn(async move {
-                let _ = north.run().await;
-            }));
-            mqtt_spawned = true;
+            Ok(north) => {
+                let north = Arc::new(north);
+                guard.0.push(tokio::spawn(async move {
+                    let _ = north.run().await;
+                }));
+                mqtt_spawned = true;
+            }
+            Err(e) => tracing::warn!("北向 MQTT 客户端初始化失败: {}", e),
         }
     } else {
         tracing::warn!(
