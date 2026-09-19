@@ -105,31 +105,36 @@
 //!
 //! ## `requires_reconnect` 的**唯一真源**
 //!
-//! 设计 §4.3.3 分发表（文件行 **783–791**）是 `requires_reconnect` 的判据来源；渲染端
+//! 设计 §4.3.3 的「F9 配置项」分发表是 `requires_reconnect` 的判据来源；渲染端
 //! `ui/pages/p2_config.rs::save_level` 据「**本次改动涉及**的字段」在 L1 与 L2+ 之间分级
-//! （PM 裁定 2026-09-15，见设计文档行 30 与 §6.2 保存行）——**错一个字段就会让屏上的确认分级
-//! 与副作用提示失真**。故本文件的每一行 `requires_reconnect` 都带设计行号引用，并由
+//! （PM 裁定 2026-09-15，见 §2.5 与 §6.2 保存行）——**错一个字段就会让屏上的确认分级
+//! 与副作用提示失真**。故本文件的每一行 `requires_reconnect` 都带**设计依据**，并由
 //! `tests::requires_reconnect_matches_design_section_4_3_3_per_field` 逐字段钉死。
 //!
-//! ## 字段集的**逐行差异**（如实登记：比 UI §6.2 **少 3 行、多 2 行**）
+//! ⚠️ **引用一律用章节锚点，不要写设计文档的行号**（2026-09-19 订正）：行号会随文档修订漂移
+//! —— 本轮项目级审查就发现本文件多处行号引用已失效，且**其中两处的引文内容也已被设计订正**
+//! （旧引文写"核间心跳/重连 `watch` → 下一拍生效"，设计 §4.3.3 现已按代码事实改为
+//! **需重启进程生效**；结论 `requires_reconnect=false` 未变）。
 //!
-//! 本单元落地的 [`FIELDS`]（9 行）与 UI §6.2「组与字段」表（行 506–514，7 行）**并不相同**——
-//! 两个方向都如实登记，不做"只报少、不报多"的半截陈述：
+//! ## 字段集的**逐行差异**（如实登记：与 PRD F9 **少 3 项 / 多 3 项**）
 //!
-//! - **少 3 行**：`gateway.heartbeat_interval`（IEC 104 心跳间隔）、`intercore.local_port`
+//! 本单元落地的 [`FIELDS`]（9 行 = 7 可写 + 2 只读）与 **PRD §3.2 F9 的 7 个配置项**
+//! **并不相同**——两个方向都如实登记，不做"只报少、不报多"的半截陈述：
+//!
+//! - **少 3 项**：`gateway.heartbeat_interval`（IEC 104 心跳间隔）、`intercore.local_port`
 //!   （核间本地端口）、`telemetry.report_interval_sec`（遥测上报周期）——三者在现网 `CoreConfig`
-//!   中**没有承载字段**（设计 §4.3.3 自己标注"新增字段"或根本未建模）⇒ 本单元**不把它们
-//!   放进 `ConfigView`**（放进去就等于造一个"屏上能改、装置里不存在"的键——正是 §11.3
-//!   「配置元数据一致性测试」要防的静默失效）：见 [`PENDING_NO_CARRIER`]。
-//! - **多 2 行**：`intercore.heartbeat_interval_sec` / `intercore.reconnect_interval_sec` ——
-//!   二者在**设计 §4.3.3（行 788「核间心跳/重连间隔」，生效方式 `watch` → 心跳循环读新值、
-//!   时效"下一拍"、副作用"无"）**里明确列出，**只是 UI §6.2 的字段表没有它们**。
-//!   ⇒ 实现**忠实于设计 §4.3.3**；差异的性质是 **UI §6.2 与设计 §4.3.3 两份清单不同步**，
-//!   **不是**实现擅自加字段（本文件每行 `requires_reconnect` 都带 §4.3.3 行号引用，见下）。
+//!   中**没有承载字段** ⇒ 本单元**不把它们放进 `ConfigView`**（放进去就等于造一个"屏上能改、
+//!   装置里不存在"的键——正是 §11.3「配置元数据一致性测试」要防的静默失效）：
+//!   见 [`PENDING_NO_CARRIER`]。**该降级已由 PM 于 2026-09-19 裁定接受**（PRD §3.2 F9 第二处
+//!   补注块 / 设计 §4.3.3 末注），**不再是待裁项**。
+//! - **多 3 项**：`intercore.host`（对端地址）/ `intercore.heartbeat_interval_sec` /
+//!   `intercore.reconnect_interval_sec` —— 三者在设计 §4.3.3 里明确列出、`CoreConfig` 有承载、
+//!   只是 **PRD F9 的表没列**。⇒ 实现**忠实于设计**；差异的性质是 **PRD 与设计两份清单不同步**，
+//!   **不是**实现擅自加字段。
 //!
-//! （计数口径：与 UI §6.2 的**可编辑字段行**表比对。另有 `intercore.host` 一行出自设计 §4.3.3
-//! 行 787「对端端口 `intercore.port` / `intercore.host`」，两行只读服务地址出自 §3.4 行 624–626
-//! 与 §6.2 行 1232 的只读行——三者不在这两张表的差集口径内。）
+//! （计数口径：与 PRD F9 的字段表比对。另有两行**只读**服务地址
+//! `display.bind_addr` / `display.control_bind_addr` 出自 §3.4 / §6.2 的只读行——
+//! 二者不在这两张表的差集口径内。）
 //!
 //! ⚠️ **"缺行"在屏上是静默缺失**：`ConfigView.groups` 只表达"有什么"，不表达"少了什么"——
 //! 渲染端只能按收到的 `groups` 渲染，**无法**自行提示"设计里还有 3 项没上屏"。故这三行的
@@ -729,7 +734,7 @@ pub const GROUP_LOCAL_ADDR: &str = "local_addr";
 
 /// 分组表（**有序**：屏上分组顺序即此序；组内字段顺序即 [`FIELDS`] 序）。
 ///
-/// 标签逐字取自 UI 设计文档 §6.2「组与字段」（行 506–514）与设计 §6.2 进入行（行 1230），
+/// 标签逐字取自 UI 设计文档 §6.2「组与字段」与设计 §6.2 的进入行，
 /// 且**逐字落在生成字体的 cmap 内**（`local-display/fonts/lv_font_cmap.txt`）——
 /// 后端标签是自由文本，屏上是豆腐块的直接来源（渲染端 PD13 明写"后端字段表的 label 必须
 /// 约束在 UI §3.6 用字表内，属联调/后端责任"）。
@@ -1032,12 +1037,16 @@ fn set_log_level(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 字段表。**唯一真源**：设计 §4.3.3（行 783–791）+ UI §6.2（行 506–514）。
+/// 字段表。**唯一真源**：设计 §4.3.3 的「F9 配置项」分发表 + 其后的「与实现的对账」注 + UI §6.2。
 ///
-/// 每行末尾注释给出 `requires_reconnect` 的**设计依据行号**——不是"看起来像"，是逐行对账。
+/// 每行末尾注释给出 `requires_reconnect` 的**设计依据**——不是"看起来像"，是逐行对账。
+/// ⚠️ **引用一律用章节锚点（§4.3.3 / §6.2），不要写设计文档的行号**：行号会随文档修订漂移
+/// （2026-09-19 项目级审查时就发现本文件多处行号引用已失效，且其中两处引文内容也已被设计订正）。
+/// 逐字段对账表见设计 §4.3.3 末注（实现 9 键 vs PRD F9 的 7 项 = −3 / +3）。
 pub const FIELDS: &[ConfigFieldMeta] = &[
-    // ── IEC 104 连接参数（UI §6.2 行 508–510）──────────────────────────────
-    // 设计 §4.3.3 行 790：「IEC 104 监听地址/端口 … 调度通道瞬断（requires_reconnect=true，高风险须明示）」
+    // ── IEC 104 连接参数（UI §6.2 的 IEC 104 组）──────────────────────────
+    // 设计 §4.3.3「IEC 104 监听地址」行：落盘 + 内存副本，**需重启进程生效**；
+    // 副作用「调度通道瞬断（requires_reconnect=true，高风险须明示）」
     ConfigFieldMeta {
         group: GROUP_IEC104,
         key: "gateway.listen_addr",
@@ -1068,9 +1077,11 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         current: |c| json!(c.gateway.listen_port),
         set: set_gateway_listen_port,
     },
-    // ── 核间通信参数（UI §6.2 行 511–512）──────────────────────────────────
-    // 设计 §4.3.3 行 787：「核间本地端口 / 对端端口 intercore.port / intercore.host …
-    // 链路瞬断（须 requires_reconnect=true，弹层明示）」
+    // ── 核间通信参数（UI §6.2 的核间组）────────────────────────────────────
+    // 设计 §4.3.3「核间『对端地址』/『对端端口』」两行（`intercore.host` / `intercore.port`）：
+    // 落盘 + 内存副本，**需重启进程生效**；副作用「链路瞬断（requires_reconnect=true，弹层明示）」。
+    // ⚠️ 注意：PRD F9 的「核间**本地**端口」**无配置承载**（`InterCoreConfig` 只有对端 host/port），
+    // 故 `intercore.host` 是**实现多出**的一行（PRD 未列），见设计 §4.3.3 末注。
     ConfigFieldMeta {
         group: GROUP_INTERCORE,
         key: "intercore.host",
@@ -1101,7 +1112,9 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         current: |c| json!(c.intercore.port),
         set: set_intercore_port,
     },
-    // 设计 §4.3.3 行 788：「核间心跳/重连间隔 … 时效=下一拍，副作用=无」⇒ **不**要求重连提示
+    // 设计 §4.3.3「核间心跳/重连间隔」行：**需重启进程生效**，副作用 = 无
+    // ⇒ **不**要求重连提示（`requires_reconnect=false`）
+    // ⚠️ 该行属**实现多出**（PRD F9 未列），见设计 §4.3.3 末注
     ConfigFieldMeta {
         group: GROUP_INTERCORE,
         key: "intercore.heartbeat_interval_sec",
@@ -1137,7 +1150,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         set: set_intercore_reconnect,
     },
     // ── 遥测与日志（UI §6.2 行 513–514）────────────────────────────────────
-    // 设计 §4.3.3 行 785：「日志级别 system.log_level … 时效 ≤1 s，副作用 无」⇒ 不要求重连提示
+    // 设计 §4.3.3「日志级别」行：`system.log_level` 热生效（≤1 s），副作用 无 ⇒ 不要求重连提示
     ConfigFieldMeta {
         group: GROUP_TELEMETRY_LOG,
         key: "system.log_level",
@@ -1170,7 +1183,7 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         current: |c| json!(c.system.log_level),
         set: set_log_level,
     },
-    // ── 本机地址（**只读**；设计 §3.4 行 624–626 / §6.2 行 1232 / §4.9）──────
+    // ── 本机地址（**只读**；设计 §3.4 的只读字段说明 / §6.2 / §4.9）────────
     //
     // 回环是 PL-4 安全红线 ⇒ `editable=false`，且**不参与** L2+ 分级（不可改 ⇒ 永不进「本次改动」；
     // 设计 §4.3.3 未列它们，故 `requires_reconnect=false` 与其"改了才要重连"的物理语义一致）。
@@ -1205,17 +1218,19 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
 /// 设计 §4.3.3 列了、但**现网 `CoreConfig` 无承载字段**的三行（本单元**不**放进视图）。
 ///
 /// 逐条给出"为什么不能进"：
-/// 1. `gateway.heartbeat_interval`（设计行 789「IEC 104 心跳间隔 | `gateway.*`（**新增字段**）」）——
-///    设计自己标注为**新增**；`GatewayConfig`（`core_config.rs:281-288`）只有
-///    `listen_addr` / `listen_port`，**没有**心跳间隔。造一个键 = 屏上能改、装置里不存在。
-/// 2. `intercore.local_port`（设计行 787「核间**本地端口**」）——`InterCoreConfig`
+/// 1. `gateway.heartbeat_interval`（设计 §4.3.3「IEC 104 心跳间隔」行）——`GatewayConfig`
+///    （`core_config.rs:281-288`）只有 `listen_addr` / `listen_port`，**没有**心跳间隔。
+///    造一个键 = 屏上能改、装置里不存在。
+/// 2. `intercore.local_port`（设计 §4.3.3「核间『本地端口』」行）——`InterCoreConfig`
 ///    （`core_config.rs:152-171`）只有 `host` / `port`（**对端**地址与端口）/ `heartbeat_interval_sec`
 ///    / `reconnect_interval_sec` / `transport` / `modbus_rtu`，**没有**本地绑定端口。
-/// 3. `telemetry.report_interval_sec`（设计行 786「遥测上报周期 | 上送任务节拍（`startup.rs` 上送路径）」）——
-///    上送节拍在 `startup.rs` 是**硬编码常量**，`CoreConfig` 无对应项（行 786 的"现网真实 key"一栏
-///    写的是一句**代码位置描述**，不是配置键——这本身就是该项无配置承载的证据）。
+/// 3. `telemetry.report_interval_sec`（设计 §4.3.3「遥测上报周期」行）——上送节拍在 `startup.rs`
+///    是**硬编码常量**，`CoreConfig` 无对应项（该行"现网真实 key"一栏写的是一句**代码位置描述**，
+///    不是配置键——这本身就是该项无配置承载的证据）。
 ///
-/// 三者都是**写路径 + 配置结构**的净新增（属 G-2 或 PM 裁定），不是读路径能"补"出来的。
+/// 三者都是**写路径 + 配置结构**的净新增，不是读路径能"补"出来的。
+/// **处置已定（2026-09-19，PM 裁定）**：**接受降级**，本期不为这 3 项新增承载
+/// （PRD §3.2 F9 第二处补注块 / 设计 §4.3.3 末注 / UI §6.2 降级说明）。
 #[allow(dead_code)] // 清单本身是**记录**（读路径不消费），由单测 `metadata_table_has_no_duplicate_or_pending_keys` 钉死
 pub const PENDING_NO_CARRIER: [&str; 3] = [
     "gateway.heartbeat_interval",
@@ -1988,7 +2003,7 @@ mod tests {
 
     // ── ③ requires_reconnect 对账网（**逐字段**，不是数个数）─────────────────
 
-    /// 设计 §4.3.3（行 783–791）里 `requires_reconnect=true` 的字段**逐个**必须为 `true`。
+    /// 设计 §4.3.3 的「F9 配置项」分发表里 `requires_reconnect=true` 的字段**逐个**必须为 `true`。
     ///
     /// 判据不是"数量对得上"，而是**逐键**比对：多一个 ⇒ 屏上谎报"链路瞬断"（L1 被抬成 L2+）；
     /// 少一个 ⇒ 屏上漏报（危险操作被降级成 L1）。
@@ -1998,25 +2013,25 @@ mod tests {
         let view = view_from(addr).await;
         h.abort();
 
-        // 设计 §4.3.3 逐行：`true` 的键（行 787 核间端点、行 790 IEC 104 监听地址/端口）
+        // 设计 §4.3.3 逐行：`true` 的键（核间「对端地址」/「对端端口」两行、IEC 104 监听地址/端口两行）
         for key in [
-            "intercore.host",      // §4.3.3 行 787
-            "intercore.port",      // §4.3.3 行 787
-            "gateway.listen_addr", // §4.3.3 行 790
-            "gateway.listen_port", // §4.3.3 行 790
+            "intercore.host",      // §4.3.3「核间『对端地址』」
+            "intercore.port",      // §4.3.3「核间『对端端口』」
+            "gateway.listen_addr", // §4.3.3「IEC 104 监听地址」
+            "gateway.listen_port", // §4.3.3「IEC 104 端口」
         ] {
             assert!(
                 field(&view, key).requires_reconnect,
                 "`{key}` 在设计 §4.3.3 里副作用为「链路瞬断」⇒ requires_reconnect 必须为 true"
             );
         }
-        // 设计 §4.3.3 逐行：`false` 的键（行 785 日志级别、行 788 核间心跳/重连）
+        // 设计 §4.3.3 逐行：`false` 的键（日志级别行、核间心跳/重连间隔行）
         for key in [
-            "system.log_level",                // §4.3.3 行 785（时效 ≤1 s，无副作用）
-            "intercore.heartbeat_interval_sec", // §4.3.3 行 788（下一拍，无）
-            "intercore.reconnect_interval_sec", // §4.3.3 行 788（下一拍，无）
-            "display.bind_addr",               // 只读字段（不可改 ⇒ 永不进「本次改动」）
-            "display.control_bind_addr",       // 同上
+            "system.log_level",                 // §4.3.3「日志级别」（热生效，无副作用）
+            "intercore.heartbeat_interval_sec", // §4.3.3「核间心跳/重连间隔」（需重启，无副作用）
+            "intercore.reconnect_interval_sec", // 同上
+            "display.bind_addr",                // 只读字段（不可改 ⇒ 永不进「本次改动」）
+            "display.control_bind_addr",        // 同上
         ] {
             assert!(
                 !field(&view, key).requires_reconnect,

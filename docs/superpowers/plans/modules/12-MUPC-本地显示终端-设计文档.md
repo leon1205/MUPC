@@ -134,7 +134,12 @@ crates/local-display/
 **unsafe 边界纪律（编码约束）**：
 1. `unsafe` **只允许**出现在 `lvgl-sys` 生成物与 `src/lvgl/*` 薄层内部；**`lvgl-sys` 不得被 `pages`/`state`/`channel` 等模块直接引用**（CI 以源码扫描断言，§11.1 静态约束 ⑥）。
 2. 所有 `lv_*` 调用的**调用线程必须是事件循环线程**（LVGL 非线程安全）；薄层不提供任何跨线程 API。
-3. C 回调 → Rust 的 `user_data` 生命周期由 `event.rs` 统一管理（`Box::into_raw` / `from_raw` 配对，对象删除时 drop），**禁止**在回调内 `panic`（跨 FFI 展开为 UB；统一 `.catch_unwind` 或改为错误码返回）。
+3. C 回调 → Rust 的 `user_data` 生命周期由 `event.rs` 统一管理（`Box::into_raw` / `from_raw` 配对，对象删除时 drop），**禁止**在回调内 `panic`（跨 FFI 展开为 UB；统一 `.catch_unwind` 或改为错误码返回）。**回调内的诊断输出必须走 `lvgl::diag`，禁用 `eprintln!`/`println!`** —— 后者的"写失败即 panic"发生在 `catch_unwind` 之外、栈上已是 C 帧，同样构成 UB（2026-09-19 补）。
+4. **具名豁免（两条，均不引用 `lvgl_sys`，与纪律 1 的立意不冲突）**——2026-09-19 补记，此前仅存在于代码注释中：
+   - **`src/canvas.rs::fbdev::FbCanvas`**（v1.0 既有资产，设计 §8.3 保留、v2.0 升为 `flush_cb` 的像素 sink）：其 `unsafe` 为 libc `open`/`ioctl`/`mmap`/`munmap`，**不涉及任何 LVGL 绑定**；
+   - **`src/timing.rs`**（`FdPoller::poll_checked` 的 `libc::poll` 与 `install_stop_signals` 的信号处理器）：系统调用类，落点由工作单元 C 定于本文件，**同类同处**。
+   ⚠️ 两处均**刻意不实现 `Send`/`Sync`**（含 mmap 裸指针/事件循环独占），把单线程约束交给编译器。
+   **若将来要求严格回到"`unsafe` 只在 `src/lvgl/**`"**，应把这两处一并上收为 `src/lvgl/os.rs` 之类的薄层（属结构性调整，不在本期）。
 
 #### 1.1.2 中文文本与字体资源（`lv_font_conv`）
 
@@ -764,15 +769,25 @@ DisplayDataProvider（主拍 publish_ms=1 s，已有逻辑；新增「内容变�
 
 #### 4.3.3 ApplyMode 分发表（决定「自动生效」的达成度）
 
-| F9 配置项 | 现网真实 key | 生效方式 | 时效 | 副作用 |
+> ⚠️ **订正（2026-09-19）**：下表原有两行（**遥测上报周期**、**IEC 104 心跳间隔**）写了 `watch` 热生效方式，而**现网 `CoreConfig` 根本没有对应配置键** ⇒ 该两行的"生效方式"是**零实现**（不是"实现了但慢"）。本表按**代码事实**重写为"**无承载**"，与 §4.3.5 的计数口径（`FIELDS` 9 键 / 可写 7 / 热生效 1 / 需重启 6）**对齐**。对应的 PRD 字段级降级已由 PM 于 2026-09-19 裁定（见 PRD §3.2 F9 第二处补注块）。
+
+| F9 配置项（PRD §3.2 表） | 现网真实 key | 生效方式 | 时效 | 副作用 |
 |-----------|--------------|----------|------|--------|
 | 日志级别 | `system.log_level` | `tracing_subscriber::reload` handle（`tracing_subscriber` 已具备 reload 能力，需在 logging 初始化处保留 handle） | ≤1 s | 无 |
-| 遥测上报周期 | 上送任务节拍（`startup.rs` 上送路径） | `tokio::sync::watch` → 任务每拍读新值 | ≤1 s | 无 |
-| 核间本地端口 / 对端端口 | `intercore.port` / `intercore.host` | `watch` → intercore 任务**主动断开并重建连接** | ≤5 s | **链路瞬断**（须 `requires_reconnect=true`，弹层明示） |
-| 核间心跳/重连间隔 | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | `watch` → 心跳循环读新值 | 下一拍 | 无 |
-| IEC 104 心跳间隔 | `gateway.*`（新增字段） | `watch` → gateway 心跳任务读新值 | 下一拍 | 无 |
-| IEC 104 监听地址/端口 | `gateway.listen_addr` | `stop()` → `start()` 重绑定 | ≤5 s | **调度通道瞬断**（`requires_reconnect=true`，高风险须明示） |
-| **「对端 IP 地址」（PRD F9 第 1 行）** | ⚠️ **无对应配置项** | — | — | **见 §4.3.4** |
+| **遥测上报周期** | ⚠️ **无对应配置项**（上送节拍在 `startup.rs` 是**硬编码常量**，`CoreConfig` 无该项）⇒ **本期不可读写** | — | — | **见 §4.3.5 与 PRD F9 补注** |
+| 核间「对端端口」 | `intercore.port` | 落盘 + 内存副本；**需重启 `mupcd` 进程生效**（`hot_apply.rs` 判 `RestartRequired`） | 重启 | 弹层须提示**链路瞬断**（`requires_reconnect=true`） |
+| 核间「对端地址」（**PRD 未列**，实现多出；UI §6.2 标签 = 「对端地址」） | `intercore.host` | 同上一行：**需重启进程生效** | 重启 | 同上（`requires_reconnect=true`） |
+| 核间「本地端口」 | ⚠️ **无对应配置项**（`InterCoreConfig` 只有 `host` / `port`——均为**对端**——无本地绑定端口）⇒ **本期不可读写** | — | — | **见 §4.3.5 与 PRD F9 补注** |
+| 核间心跳/重连间隔（**PRD 未列**，实现多出） | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | 落盘 + 内存副本；**需重启进程生效** | 重启 | 无 |
+| **IEC 104 心跳间隔** | ⚠️ **无对应配置项**（`GatewayConfig` 只有 `listen_addr` / `listen_port`，无心跳字段；`Iec104Config.heartbeat_interval_secs` 恒取默认 10 s）⇒ **本期不可读写** | — | — | **见 §4.3.5 与 PRD F9 补注** |
+| IEC 104 监听地址 | ⚠️ **无对应配置项**（现网是服务端模型，「对端 IP」不存在）⇒ 按 §4.3.4 落为 `gateway.listen_addr`（**本机监听地址**） | 落盘 + 内存副本；**需重启进程生效** | 重启 | 弹层须提示**调度通道瞬断**（`requires_reconnect=true`，高风险须明示） |
+| IEC 104 端口 | `gateway.listen_port` | 同上一行 | 重启 | 同上（`requires_reconnect=true`） |
+
+> **本表与实现的对账（2026-09-19，逐字段核 `mupc/crates/mupc-core-bin/src/console_host.rs` 的 `FIELDS`）**：
+> 实现侧 **9 键**（7 可写 + 2 只读），与上表的关系是 **−3 / +3**：
+> **少 3**（PRD 有、实现无承载）＝ 遥测上报周期、核间本地端口、IEC 104 心跳间隔；
+> **多 3**（实现可写、PRD 未列）＝ `intercore.host`、`intercore.heartbeat_interval_sec`、`intercore.reconnect_interval_sec`。
+> 另有 2 键只读（`display.bind_addr` / `display.control_bind_addr`，`editable=false`，见 §6.2）。
 
 #### 4.3.4 两个必须让 PM 拍板的口径问题（诚实标注）
 
@@ -786,6 +801,7 @@ DisplayDataProvider（主拍 publish_ms=1 s，已有逻辑；新增「内容变�
 - 本项是**独立子系统的净新增**（配置写 + 原子落盘 + 元数据表 + 多模块 `watch` 接线 + 校验 + 审计 + 测试），是全模块**最大的工作量单元**（见 §13.4 工作量表，标记为 **L**）。
 - **若工期不足的降级方案（须 PM 裁决，因它偏离 CF-04）**：本期仅支持 **HotApply 子集**（`system.log_level` / 遥测周期 / 心跳类），连接类参数**只落盘 + 提示「需重启 mupcd 生效」**。此方案必须回写 PRD（CF-04 降级）并获 PM 同意，**不得静默实施**。
   - **✅ 已裁定（2026-09-16，PM）：接受本降级**（**不投入**"把 6 个字段做成真热生效"的改造）。**实测计数口径**（G-2 交付；逐字段依据见 `mupc/crates/mupc-core-bin/src/hot_apply.rs` 的结论表）：字段表 **9** 键 ⇒ `editable=true` 可写 **7** ⇒ **真热生效 1**（`system.log_level`）⇒ **需重启 6**（`intercore.host` / `intercore.port` / `intercore.heartbeat_interval_sec` / `intercore.reconnect_interval_sec` / `gateway.listen_addr` / `gateway.listen_port`）。
+    > ⚠️ **口径澄清（2026-09-19）**：这里的「字段表 9 键」指**实现侧 `FIELDS`**（`console_host.rs`），它**不等于** PRD §3.2 F9 的 7 个配置项 —— 二者差 **−3 / +2**：**缺** IEC 104 心跳间隔 / 核间本地端口 / 遥测上报周期（**无配置承载**，见 §4.3.3 订正），**多** `intercore.heartbeat_interval_sec` / `reconnect_interval_sec`（PRD 未列）。因此"可写 7"与"PRD 的 7 项"是**两个不同的 7**，不可互相印证；PRD 侧的真实达成度见 PRD §3.2 F9 的第二处补注块（**字段级 4/7**）。
   - **回写落点**：PRD（头部补注 + §3.2 F9 补注块，标 CF-04 降级）与 UI 设计文档（§3.6 P2 行 / §6.2 线框 `Y80` 行 / §6.2 流程 3「影响范围」/ §6.2 流程 5 / §7.3 弹层线框；版本表补注 4）。**屏上口径**：页面说明行与弹层「影响范围」改为分级口径「**日志级别立即生效 · 连接类参数需重启进程生效**」；保存成功 Toast **并入后端回执 `message`**（后端逐字点名需重启的键），不再统一写「已生效」。实现落点 = `local-display/src/ui/pages/p2_config.rs`（其偏差登记 **PD24**）。
   - **⚠️ 残余（如实登记）**：`Toast` 文本区 400 px（≈16 字，`DOTS` 截断）⇒ 长回执的**具体键名可能被截掉**；回执 `message` 的用字（`项` / 全角括号等）**不在字体码表控制面内**（真机豆腐块）。两条同属既有「自由文本不受码表约束」口径，收口批见 PD24。
 
@@ -1596,7 +1612,7 @@ cargo run  -p lvgl-sys --example spike_offscreen --features noto-font -j 2   # S
 cargo test -p local-display --features offscreen
 ```
 
-- **mupcd**：构建方式不变（移除 `web-api` 后依赖树更小；`axum` 不再需要）。
+- **mupcd**：构建方式不变（移除 `web-api` 后依赖树更小）。⚠️ **订正（2026-09-19）**：本行原写「`axum` 不再需要」，与 §7.2 / §7.3 的两处「已过期」注记**自相矛盾**——`axum` **必须保留**（`console_host` 直接用 axum 装配控制通道，见 §7.3 的 core-bin 行逐字理由）。
 - 脚本：`deploy/scripts/build-for-rk3588.sh` 增加 `--hmi` 子模式（设好上述 env 后产出 `mupc-local-display`），或新增 `build-hmi.sh`。
 - **CI 影响（诚实）**：`cargo test --workspace` **现在会触发 LVGL C 编译**（数十秒到数分钟，取决于机器）→ 建议 CI 加缓存（`target/` 目录）与"`lvgl-sys` 未变更则跳过"的 `rerun-if-changed` 精确化。**实测**：冷构建 **1m07s**（409 个 `.c` + bindgen）、增量 ~41s、release 49–82s → `target/` 缓存收益明显；`rerun-if-changed` 已覆盖 `lv_conf.h` / `allowlist.txt` / `build.rs` / `vendor/lvgl/src` / `vendor/lvgl/lvgl.h` / `../fonts/`（spike 已实现）。CI 另需 `git submodule update --init --depth 1`（⑧）。
 
