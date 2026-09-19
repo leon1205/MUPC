@@ -58,10 +58,20 @@ fn:lv_indev_get_user_data
 fn:lv_indev_read
 fn:lv_indev_add_event_cb
 fn:lv_indev_remove_event_cb_with_user_data
+# 删 indev **之前**须先删掉绑定到它的动画：LVGL v9.5.0 的 `lv_indev_delete`
+# 不清理 `indev_scroll_throw_anim`（惯性抛掷动画），而该动画的 `var` 就是 indev
+# 指针（`lv_indev.c` 的 `lv_anim_set_var(&a, indev)`）⇒ indev 释放后动画仍在全局
+# 动画表里，下一次 `lv_anim_refr_now` 即对已释放 indev 解引用（UAF，实测 ASAN SEGV：
+# `indev_scroll_throw_anim_cb` → `lv_indev_scroll_throw_handler` → `lv_obj_has_flag`）。
+# 对象侧有对称处理（`lv_obj_destruct` → `lv_anim_delete(obj, NULL)`），indev 侧没有
+# ⇒ 由薄层 `indev.rs` 的 `Drop` 补上（`exec_cb = None` = 该 var 上的全部动画）。
+fn:lv_anim_delete
 type:lv_indev_t
 type:lv_indev_data_t
 type:lv_indev_type_t
 type:lv_indev_read_cb_t
+# `lv_anim_delete` 的 `exec_cb` 形参类型（传 `None` = 删该 var 上的全部动画）。
+type:lv_anim_exec_xcb_t
 type:lv_indev_mode_t
 type:lv_indev_state_t
 type:lv_point_t
@@ -309,6 +319,11 @@ var:lv_font_noto_sc_148
 # ⚠️ **计数订正**：上一段"全量：137 fn / 54 type / 11 var = 202 条"在本批**开工前已过期**
 # —— 实测 B4a 改动前的清单为 **141 fn / 55 type / 11 var = 207 条**（A3 之后的单元也加过条目，
 # 未在此处同步）。B4a 之后的全量为 **147 fn / 60 type / 11 var = 218 条**。
+#
+# 【L-3 复核（2026-09-19）】+1 fn / +1 type（`lv_anim_delete` 与其 `exec_cb` 形参类型
+# `lv_anim_exec_xcb_t`，理由见上面 indev 分节的注释块；修复对象是 ASAN 实测到的
+# indev 惯性抛掷动画 UAF，见 `docs/technical-debt.md` U-58）。重跑双向断言三个集合均为空。
+# 全量：**148 fn / 61 type / 11 var = 220 条**（与 `lvgl-sys` 构建脚本打印的 "220 entries" 一致）。
 #
 # ⚠️ 本分节由 `tests/allowlist_consistency.rs` 的"越界/缺失"断言机械核对；
 # 新增直接声明的 type 请写在上面对应用点分节内，不要混进这里。

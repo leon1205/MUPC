@@ -714,8 +714,8 @@ mod linux {
     };
 
     use super::{
-        build_calibration, candidate_from_caps, detect_source_lenient, CalibBounds, Candidate,
-        DeviceCaps, RawEvent, RawState, TouchConfig, TouchError, TouchSource,
+        build_calibration, candidate_from_caps, detect_source_lenient, select_index, CalibBounds,
+        Candidate, DeviceCaps, RawEvent, RawState, TouchConfig, TouchError, TouchSource,
     };
     use crate::lvgl::indev::TouchSnapshot;
 
@@ -854,13 +854,13 @@ mod linux {
         let axes = dev.supported_absolute_axes();
         let keys = dev.supported_keys();
         let props = dev.properties();
-        let has = |a: AbsoluteAxisCode| axes.map_or(false, |s| s.contains(a));
+        let has = |a: AbsoluteAxisCode| axes.is_some_and(|s| s.contains(a));
         DeviceCaps {
             has_abs: dev.supported_events().contains(EventType::ABSOLUTE),
             has_mt_xy: has(AbsoluteAxisCode::ABS_MT_POSITION_X)
                 && has(AbsoluteAxisCode::ABS_MT_POSITION_Y),
             has_abs_xy: has(AbsoluteAxisCode::ABS_X) && has(AbsoluteAxisCode::ABS_Y),
-            has_btn_touch: keys.map_or(false, |k| k.contains(KeyCode::BTN_TOUCH)),
+            has_btn_touch: keys.is_some_and(|k| k.contains(KeyCode::BTN_TOUCH)),
             direct: props.contains(PropType::DIRECT),
             accelerometer: props.contains(PropType::ACCELEROMETER),
         }
