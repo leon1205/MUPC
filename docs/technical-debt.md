@@ -440,6 +440,65 @@
 | U-06 WiFi/NearLink/BLE | 10天 | Hi2821 硬件 + 内核驱动 |
 | U-25 waveform/report 对接 | 3天 | 依赖 IEC 104 TI=122 + MQTT 主题发布完成 |
 
+### 8.6 Linux 环境交接清单（12 号本地显示终端，2026-09-19）
+
+> **为什么单列一节**：本批（`efd1277` 部署+CI / `81c81c0` 显示终端安全面 / `24e55c6` 文档）**在 Windows 开发机上无法完成或验证**的工作共 6 类。它们共同的特征是「**本地测试结构性看不到**」——`ProtectSystem` 是内核级挂载、`/dev/input` 是设备权限、交叉编译要工具链。**按序执行**：**L-1 不过，不要跳到 L-4**（真机验收依赖交叉产物）。
+
+**L-1 · 首次跑通 CI 的 `hmi` job（P0，最高优先；关联 U-57 · 设计 R-20 / R-23 / §12.1）**
+
+- **为什么**：设计把 `cargo build -p lvgl-sys --target aarch64-unknown-linux-gnu` 列为「**实施第一步门禁**」，而此前 CI 的 build job **只编 `mupc-core-bin`**，从不编译 HMI ⇒ 全部 `#[cfg(target_os="linux")]` 代码（`FbCanvas` 的 fb0 映射与像素格式探测 / `FdPoller` / evdev / 信号处理）**一次都没过编译器**。本批新增了 `hmi` job，但其语义（含 libclang / 字库源 / sysroot 的处理）**在撰写时未经验证**（撰写环境为 Windows）。
+- **做法**（二选一）：
+  1. 推一次触发 workflow，看 job 日志；或
+  2. 在 Linux 构建机上按 job 步骤**手跑**（更快定位）：
+     ```bash
+     git submodule update --init --recursive
+     sudo apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libclang-dev
+     rustup target add aarch64-unknown-linux-gnu
+     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+     export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+     cd mupc
+     cargo build -p lvgl-sys --target aarch64-unknown-linux-gnu      # ← 门禁：一条命令暴露交叉 bindgen 的全部问题
+     cargo build -p local-display --release --features noto-font --target aarch64-unknown-linux-gnu
+     ```
+     前置另需：node（`npx lv_font_conv`）、python3、下载 `NotoSansSC-Regular.otf`（`.otf` 与 `.c` 均不入库）。
+- **通过判据**：产出 `target/aarch64-unknown-linux-gnu/release/mupc-local-display`，`file` 报 ARM aarch64。
+- **预计会红** —— 设计 §12.1 已给两个候选处置（③ 交叉 bindgen 的 sysroot：`-isystem /usr/aarch64-linux-gnu/include`，或 64 位宿主→64 位目标时**不传 `--target`**），逐条试。
+- **跑绿后**：把 `hmi` job 转**硬门禁**；并顺带观察 lint/test job（它们现已真编 Linux 版 `local-display`/`lvgl-sys`）。
+
+**L-2 · `gen_fonts.sh` 执行位根治（小；关联 U-57）**
+
+- `git update-index --chmod=+x crates/local-display/fonts/gen_fonts.sh`（当前 git 模式位是 `100644`；CI 暂用 `bash ./gen_fonts.sh` 规避）。
+- **通过判据**：`git ls-files -s crates/local-display/fonts/gen_fonts.sh` 显示 `100755`。
+
+**L-3 · ASAN / valgrind 定位 U-58 的未定路径，并收 U-61（P2；关联 U-58 / U-61 与 `lvgl/event.rs` 的 `reclaim` 禁令注释）**
+
+- **为什么**：U-58 只拿到「**存在一条"`reclaim` 收到已释放 `p`"的路径**」的**存在性证据**（加"回收令牌"必现间歇 AV、不加则静默），**触发序列未定位**；U-61 的两处 FFI 缺口在同一段延迟回收逻辑上。
+- **做法**：`RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -p local-display --lib lvgl_core_bridge_chain`（或 valgrind 跑该测试二进制），必要时放大迭代次数——该缺陷是**间歇**的（本机定向 20 次出现 2 次）。
+- **通过判据**：给出具体调用序列（或证明其不可达）。**据结论再决定**是否重新引入"回收幂等闸"——本批两次尝试都被否（令牌版引入 AV；返回值版经评审判定纯防御却带来潜在静默泄漏），**那次是没证据，这次要有**。
+
+**L-4 · 真机验收两条 P0 的「实际效果」（P0；关联 U-55 / U-56 · 设计 §12.2 / R-11）**
+
+- **L-4a 配置写入**：部署后**屏上改一个键 → 保存成功 → 重启 `mupcd` 后值仍在**。前置：`chown mupc:mupc /opt/mupc/config/*.yaml`；确认 unit 的 `ReadWritePaths` 含 `/opt/mupc/config`（本批已改）。
+- **L-4b 触摸**：`ls -l /dev/mupc-touch` 指向 `eventN`（**须先按真机 `idVendor`/`idProduct` 填写并取消注释 udev 规则**）；`id mupc` 含 `input`；`sudo -u mupc /opt/mupc/bin/mupc-local-display --backend fbdev --touch-device /dev/mupc-touch --width 1024 --height 768` 能点动；页眉**无**「触摸不可用」角标。
+- **判据**：这两条是 v2.0 的**核心可用性**——L-4a 不成立则 PRD F9 全线不成立；L-4b 不成立则 v2.0 相对 v1.0 的交互增量全部不可达。
+
+**L-5 · U-59 `gateway::Iec104Server::link_state()`（功能新增，独立单元；关联 U-59 · 设计 §4.1 #1）**
+
+- **为什么**：设计 §4.1 #1 明确要求 `gateway` crate 新增该方法（`ConnectionState` 的 5 个变体已就绪、映射干净），而**全仓零实现** ⇒ `display_host` 的 `device.iec104` 硬为 `Unknown`，PRD F6 的「IEC 104 连接状态」四态本功能域不可达。
+- **做法**：跨 3 文件接线（gateway 新增方法 + `display_host` 注入点 + `startup.rs` 传参；`display_host` 当前**完全不持有 gateway 句柄**），须走「实现 → 规格评审 → 代码质量评审」。
+- **不做也可**（替代路径）：回写 PRD F6 表并登记降级——F6.5 已允许显「未知」，故**不构成假值**。
+
+**L-6 · 仓库级 CI 卫生（顺带；非 12 号模块债务，关联 U-57 的旁证）**
+
+- CI 的 lint job 用 `cargo clippy --workspace -- -D warnings`，而按**同口径**实测本工作区有 **93 条既有告警**（分布在 `ai-engine` / `strategy-engine` / `rs485-plugin` / `mupc-core-bin/startup.rs` 等**与本模块无关**的代码中）⇒ **该 gate 在本次改动之前就不可能通过**。需裁定：清账，还是调整 gate 口径（如分 crate 白名单）。
+
+**L-7 · 本批未动的既有真机硬门禁（提醒，勿以为已随本批关闭）**
+
+- **字体相关**：U-42（真字库下 P1 页带符号 P 值装不下槽宽 ⇒ 数据被截断展示）及其关联的「**字体豆腐块 23 码位**」批——**本批未动**。
+- **既有真机项**：设计 §14 的 R-03（`/dev/fb0` 映射与像素格式）、R-04（触摸协议与校准）、R-05（时延与资源实测）、R-22（滚动 ≥30 fps）**全部仍待真机**。
+
+> **完成后**：回写本节的执行结果，并同步对应 U 行（U-55 ~ U-61）与设计 §14 的 R 项状态。**本清单不是新需求**，只是把已登记的债务/风险按"在哪个环境做"重新排序。
+
 ---
 
 ## 9. 附录
