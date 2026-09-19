@@ -13,6 +13,7 @@
 //! 1. scene_states (std::sync::RwLock)
 //! 2. standby (tokio::sync::RwLock)
 //! 3. active (tokio::sync::RwLock)
+//!
 //! 任何违反此顺序的代码路径都会导致死锁。
 
 use crate::action_space::ActionSpaceConfig;

@@ -44,6 +44,9 @@ impl StorageService {
     /// 更新动作空间配置（upsert 语义）
     ///
     /// 若 transformer_id 已存在则更新，若不存在则插入。
+    // 参数即表列（`action_space_config` 的写入面），拆结构体属公开 API 变更，
+    // 会波及 ai-engine 侧调用点 ⇒ 此处按签名原样放行。
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_action_space_config(
         &self,
         transformer_id: &str,
@@ -109,6 +112,8 @@ impl StorageService {
     ///
     /// v2.6 扩展：新增 transformer_kva, battery_capacity_kwh,
     /// soc_min, soc_max, overload_threshold 字段。
+    // 同 `update_action_space_config`：14 个参数 = 全字段写入面，放行理由一致。
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_action_space_config_full(
         &self,
         transformer_id: &str,
@@ -424,7 +429,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
 
     for (col_name, stmt) in &alter_stmts {
         if !existing_cols.iter().any(|c| c == col_name) {
-            sqlx::query(*stmt)
+            sqlx::query(stmt)
                 .execute(pool)
                 .await
                 .map_err(|e| StorageError::MigrationError(e.to_string()))?;

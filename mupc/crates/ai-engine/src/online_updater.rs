@@ -435,7 +435,7 @@ impl KLDivergenceCalculator {
     pub fn adapt_beta(&mut self, kl: f32) {
         let delta = kl - self.config.target_kl;
         // 简单自适应：β *= (1 - 0.1 * delta)
-        self.config.beta *= (1.0 - 0.1 * delta).max(0.001).min(10.0);
+        self.config.beta *= (1.0 - 0.1 * delta).clamp(0.001, 10.0);
         tracing::debug!("KL adapt: kl={:.6}, beta={:.6}", kl, self.config.beta);
     }
 }

@@ -27,6 +27,8 @@ struct TopicState {
 /// ```
 pub struct TokioMessageBus {
     topics: RwLock<HashMap<String, TopicState>>,
+    /// 仅 `get_or_create_tx` 使用（见该方法上的说明）。
+    #[allow(dead_code)]
     channel_capacity: usize,
 }
 
@@ -42,7 +44,12 @@ impl TokioMessageBus {
         }
     }
 
-    /// 获取或创建 Topic 的 channel sender
+    /// 获取或创建 Topic 的 channel sender。
+    ///
+    /// ⚠️ **当前未被调用**：`MessageBus::subscribe` 是**简化实现**（只登记 handler，
+    /// 不启动 listener —— 见该方法内的注释）。本方法与 `spawn_listener` 是完整实现的
+    /// 脚手架，保留待接线；接线前显式放行 dead_code，避免 lint 噪声掩盖真实告警。
+    #[allow(dead_code)]
     async fn get_or_create_tx(&self, topic: &Topic) -> broadcast::Sender<Message> {
         let key = topic.as_ref().to_string();
         let mut topics = self.topics.write().await;
@@ -59,7 +66,10 @@ impl TokioMessageBus {
         }
     }
 
-    /// 后台监听任务：接收 broadcast 消息并分发给注册的处理器
+    /// 后台监听任务：接收 broadcast 消息并分发给注册的处理器。
+    ///
+    /// ⚠️ 同 [`Self::get_or_create_tx`]：当前未被调用（`subscribe` 为简化实现）。
+    #[allow(dead_code)]
     async fn spawn_listener(
         topic_key: String,
         mut rx: broadcast::Receiver<Message>,

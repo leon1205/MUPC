@@ -26,11 +26,14 @@ pub struct SimBridgeConfig {
     #[serde(default = "default_engine_script")]
     pub engine_script: String,
 
+    // ⚠️ 以下两项为 **Phase 2** 预留（节拍限速 / 自动停止的步数上限）：当前由 TCP 驱动
+    // 与 Ctrl+C 控制，字段已解析但不参与运行 ⇒ 显式放行 dead_code（接线时删除本注解）。
+    #[allow(dead_code)]
     #[serde(default = "default_step_interval_ms")]
-    pub step_interval_ms: u64,         // Phase 2: 速率限制, 当前由TCP驱动
-
+    pub step_interval_ms: u64,
+    #[allow(dead_code)]
     #[serde(default = "default_max_episode_steps")]
-    pub max_episode_steps: u32,        // Phase 2: 自动停止, 当前由Ctrl+C控制
+    pub max_episode_steps: u32,
 }
 
 fn default_scenario() -> String { "MODE-01".into() }

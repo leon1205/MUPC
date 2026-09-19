@@ -221,8 +221,8 @@ impl SmoothSceneTransition {
         let min_len = current.len().min(target.len());
         let result: Vec<f32> = (0..min_len)
             .map(|i| {
-                let c = current[i] as f32;
-                let t = target[i] as f32;
+                let c = current[i];
+                let t = target[i];
                 (1.0 - alpha) * c + alpha * t
             })
             .collect();
@@ -237,7 +237,7 @@ impl SmoothSceneTransition {
 
         // 临时存储结果（下次调用时覆盖）
         self.current_weights = Some(result);
-        &self.current_weights.as_ref().unwrap()
+        self.current_weights.as_ref().unwrap()
     }
 
     /// 当前过渡状态

@@ -136,12 +136,6 @@ impl RewardNormalizer {
         }
     }
 
-    /// 获取或创建指定子项的统计量
-    fn get_or_create_stats(&self, key: &str) -> RunningStats {
-        let stats = self.stats.read().unwrap();
-        stats.get(key).cloned().unwrap_or_default()
-    }
-
     /// 归一化单个奖励值
     ///
     /// # 参数

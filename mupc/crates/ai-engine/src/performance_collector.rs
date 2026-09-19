@@ -11,7 +11,7 @@
 
 use crate::adaptive_weight_optimizer::{HistoricalPerformance, PerformanceFeatures};
 use crate::error::AiEngineError;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 // ============================================================================
 // PerformanceCollectorImpl
@@ -132,6 +132,9 @@ impl crate::adaptive_weight_optimizer::PerformanceCollector for PerformanceColle
 mod tests {
     use super::*;
     use crate::adaptive_weight_optimizer::PerformanceCollector;
+    // `Arc` 仅测试用到（生产路径不持有 `Arc`）⇒ 在测试模块内引入，
+    // 避免让非测试构建出现 unused import（clippy 不带 `--tests` 看不到此处）。
+    use std::sync::Arc;
 
     fn make_features(
         pv: f64,

@@ -46,8 +46,12 @@ use lvgl_sys as sys;
 ///
 /// 用 newtype 而非 `enum`：LVGL 的事件码是开放集合，未知码也要能原样带回 Rust 侧
 /// 比较 / 打印，不应被强行折叠。
+///
+/// 内层**直接用 FFI 别名**（而非固定位宽的整数）：`lv_event_code_t` 是 C 枚举的
+/// typedef，bindgen 的产物**随平台而异** —— Linux 上 `c_uint`(u32)、Windows 上 `i32`。
+/// 写死任一侧都会让另一侧编不过（本项目就曾因此在 Linux 首次真编时红 26 处）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EventCode(i32);
+pub struct EventCode(sys::lv_event_code_t);
 
 impl EventCode {
     /// 全部事件（`LV_EVENT_ALL`）—— 用作过滤器即"不过滤"。
@@ -87,7 +91,7 @@ impl EventCode {
     pub const SCROLL: Self = Self(sys::LV_EVENT_SCROLL);
 
     /// 原始 C 事件码。
-    pub const fn raw(self) -> i32 {
+    pub const fn raw(self) -> sys::lv_event_code_t {
         self.0
     }
 }
@@ -122,7 +126,7 @@ impl Event {
 /// `Ctx` 是否已被释放、以及"重复回收"的窗口，都不在本结构可观测的范围内。
 struct Ctx {
     /// 调用方声明的过滤器（原始码；`LV_EVENT_ALL` = 不过滤）。
-    filter: i32,
+    filter: sys::lv_event_code_t,
     /// 闭包。`None` 仅出现于"已 `take` 出来准备 drop"的瞬间。
     f: Option<Box<dyn FnMut(Event)>>,
 }
@@ -167,7 +171,16 @@ impl Drop for ReentryGuard {
         for p in drained {
             // SAFETY: `p` 来自 `on()` 的 `Box::into_raw`；每个指针仅在"深度归零"这一次
             // 被移出 `pending`（`mem::take` 保证不重复取出）⇒ 恰好释放一次。
-            drop(unsafe { Box::from_raw(p) });
+            //
+            // ⚠️ 用户捕获值的**析构也要拦 panic**（U-61 ①）：本 `drop` 由蹦床的 guard 触发，
+            // 栈上仍是 C 帧 —— 若捕获值的 `Drop` panic 而无人接住，就会跨 FFI 展开（UB）。
+            // 与闭包调用同等对待：拦截 + `diag` 记录（`format_args!` 零分配）。
+            let r = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(p) })));
+            if r.is_err() {
+                super::diag(format_args!(
+                    "[lvgl] 事件闭包的捕获值在析构时 panic 已被拦截；该回收完成，事件循环继续"
+                ));
+            }
         }
     }
 }
@@ -214,7 +227,15 @@ unsafe fn reclaim(p: *mut Ctx) {
     });
     if !deferred {
         // SAFETY: 由调用方保证 `p` 有效且尚未回收；`depth == 0` ⇒ 无回调正在使用它。
-        drop(unsafe { Box::from_raw(p) });
+        //
+        // 同 `ReentryGuard::drop`：捕获值的析构 panic 不得外泄（U-61 ①）——本函数也可能
+        // 从 C 回调链上的 `detach()` 走到这里，拦截后只记录、不上抛。
+        let r = catch_unwind(AssertUnwindSafe(|| drop(unsafe { Box::from_raw(p) })));
+        if r.is_err() {
+            super::diag(format_args!(
+                "[lvgl] 事件闭包的捕获值在析构时 panic 已被拦截（立即回收分支）"
+            ));
+        }
     }
 }
 
@@ -251,12 +272,28 @@ unsafe extern "C" fn trampoline(e: *mut sys::lv_event_t) {
             let ctx = unsafe { &mut *p };
             if ctx.filter == sys::LV_EVENT_ALL || ctx.filter == raw {
                 if let Some(mut f) = ctx.f.take() {
+                    // U-61 ②：DELETE 回调期间**也登记"执行中"**（非 DELETE 分支早已如此）。
+                    // 否则若该闭包内对**同一宿主**同步派发事件（如 `scroll_to_y`），嵌套蹦床
+                    // 会在 `f` 已被 `take` 之后再次取 `&mut *p`，与上面的 `ctx` 形成别名。
+                    // 登记后嵌套调用命中 `is_executing` 直接返回。
+                    CB_STATE.with(|s| s.borrow_mut().active.push(p));
                     // 同非 DELETE 分支：回调内绝不 panic。
-                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                    let r = catch_unwind(AssertUnwindSafe(|| {
                         f(Event {
                             code: EventCode(raw),
                         })
                     }));
+                    CB_STATE.with(|s| {
+                        let mut st = s.borrow_mut();
+                        if let Some(i) = st.active.iter().rposition(|q| *q == p) {
+                            st.active.remove(i);
+                        }
+                    });
+                    if r.is_err() {
+                        super::diag(format_args!(
+                            "[lvgl] DELETE 回调内 panic 已被拦截；宿主删除流程继续"
+                        ));
+                    }
                 }
             }
         }

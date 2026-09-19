@@ -60,6 +60,10 @@ pub struct FaultRecorderImpl {
     recording: Mutex<bool>,
 }
 
+/// `fault_records` 一行元数据的列元组（见 [`FaultRecorderImpl::query_waveform_meta`]）。
+/// 7 元组内联会造成「very complex type」；具名后调用处与文档都更清楚。
+type WaveformMetaRow = (String, u32, u32, u32, u16, String, f64);
+
 impl FaultRecorderImpl {
     pub fn new(db_path: &PathBuf) -> Result<Self, DataProcessingError> {
         let conn = Connection::open(db_path)
@@ -387,10 +391,12 @@ impl FaultRecorderImpl {
     }
 
     /// 从 DB 查询波形的路径和元数据列
+    ///
+    /// 行元组字段顺序：`(波形路径, 采样率, 触发前 ms, 触发后 ms, 通道掩码, 触发类型, 触发电平)`。
     fn query_waveform_meta(
         conn: &Connection,
         event_id: i64,
-    ) -> Result<Option<(String, u32, u32, u32, u16, String, f64)>, DataProcessingError> {
+    ) -> Result<Option<WaveformMetaRow>, DataProcessingError> {
         let mut stmt = conn
             .prepare(
                 "SELECT waveform_path, sample_rate, pre_trigger_ms, post_trigger_ms,
@@ -427,7 +433,15 @@ impl FaultRecorderImpl {
         let meta = Self::query_waveform_meta(&conn, event_id)?;
 
         match meta {
-            Some((waveform_path, sample_rate, pre_ms, post_ms, _channel_mask, trigger_type, _threshold)) => {
+            Some((
+                waveform_path,
+                sample_rate,
+                pre_ms,
+                post_ms,
+                _channel_mask,
+                _trigger_type,
+                _threshold,
+            )) => {
                 let path = Path::new(&waveform_path);
                 let (channels, duration_ms) = if path.exists() {
                     match WaveformReader::open(path) {
@@ -480,7 +494,7 @@ impl FaultRecorderImpl {
         let meta = Self::query_waveform_meta(&conn, event_id)?;
 
         match meta {
-            Some((waveform_path, _sr, pre_ms, _post_ms, _cm, trigger_type, trigger_value)) => {
+            Some((waveform_path, _sr, _pre_ms, _post_ms, _cm, trigger_type, trigger_value)) => {
                 let path = Path::new(&waveform_path);
                 let (pre_stats, post_stats, ts) = if path.exists() {
                     match WaveformReader::open(path) {

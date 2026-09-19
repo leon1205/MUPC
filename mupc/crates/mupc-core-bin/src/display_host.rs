@@ -25,9 +25,9 @@
 //! - 各段字段 `None` / `LinkState::Unknown` ⇒ 屏显「未知」/「未提供」，不臆造。
 //!
 //! # 已知真源缺口（本单元**如实登记**，未臆造补齐）
-//! - `device.iec104`：`Iec104Server` 只暴露 `connection_count()`
-//!   （`crates/gateway/src/iec104/server.rs:288`），无链路状态查询 ⇒ 恒 `Unknown`
-//!   （F6.5 允许「未知」，**不得**显为「正常」）。
+//! - ~~`device.iec104`~~：**已补齐**（U-59 / L-5，2026-09-19）——`gateway` 新增
+//!   `Iec104Server::link_state()` 聚合内部连接表，本层经
+//!   [`map_iec104_link_state`] 1:1 映射（未装配服务器 ⇒「未配置」，不再恒 `Unknown`）。
 //! - `info.serial`：无可靠真源 ⇒ 恒 `None`（「未提供」，EDGE-16 / 设计 §4.1 F8 行）。
 //! - `info.mgmt_ipv4`：设计指定 `getifaddrs`；core-bin 无 `libc` 依赖（workspace 亦未声明
 //!   `nix`）且本仓库安全清单要求「无新增 `unsafe` 块」⇒ 改用纯 std 的 UDP 选路求本机对外
@@ -209,6 +209,11 @@ pub struct SystemDeviceSource {
     started_at: Instant,
     intercore: Arc<mupc_intercore::IntercoreClient>,
     ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+    /// IEC 104 服务器句柄（设计 §4.1 #1）：`link_state()` 即 F6「IEC 104 连接状态」真源。
+    ///
+    /// `None` = **本进程未装配该服务器**（如 `display.enabled` 而网关未起）⇒ 该字段报
+    /// [`LinkState::NotConfigured`]（「未配置」，F6.5 语义），**不**报 `Unknown` 也不臆造。
+    iec104: Option<Arc<mupc_gateway::iec104::server::Iec104Server>>,
 }
 
 impl SystemDeviceSource {
@@ -216,13 +221,37 @@ impl SystemDeviceSource {
     pub fn new(
         intercore: Arc<mupc_intercore::IntercoreClient>,
         ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
+        iec104: Option<Arc<mupc_gateway::iec104::server::Iec104Server>>,
         started_at: Instant,
     ) -> Self {
         Self {
             started_at,
             intercore,
             ai_integrator,
+            iec104,
         }
+    }
+
+    /// IEC 104 链路状态（U-59 / L-5）：装配了服务器就问它，未装配即「未配置」。
+    async fn iec104_link_state(&self) -> LinkState {
+        match &self.iec104 {
+            Some(server) => map_iec104_link_state(server.link_state().await),
+            None => LinkState::NotConfigured,
+        }
+    }
+}
+
+/// gateway 聚合态 → 显示契约态（**1:1、无损**；两侧枚举一一对应，见各自的文档）。
+///
+/// 为什么不让 gateway 直接返回 `display_proto::LinkState`：`gateway` 是协议侧 crate，
+/// 不应反向依赖 HMI 的显示契约（设计 §4.1 #1 亦明确"改动局限在 server.rs"）。
+fn map_iec104_link_state(s: mupc_gateway::iec104::server::LinkState) -> LinkState {
+    use mupc_gateway::iec104::server::LinkState as Gw;
+    match s {
+        Gw::Connected => LinkState::Connected,
+        Gw::Connecting => LinkState::Connecting,
+        Gw::Disconnected => LinkState::Disconnected,
+        Gw::NotConfigured => LinkState::NotConfigured,
     }
 }
 
@@ -240,9 +269,9 @@ impl DeviceSource for SystemDeviceSource {
             uptime_secs: Some(self.started_at.elapsed().as_secs()),
             cpu_temp_c: read_cpu_temp_c(),
             mem_used_pct: read_mem_used_pct().await,
-            // 真源缺口：Iec104Server 无链路状态查询（见顶部「已知真源缺口」表的 `device.iec104`
-            // 条）⇒ 如实 Unknown（「未知」，不得显为「正常」）
-            iec104: LinkState::Unknown,
+            // 真源已补齐（U-59 / L-5，2026-09-19）：`Iec104Server::link_state()` 聚合内部
+            // 连接表 ⇒ 未装配服务器报「未配置」，其余四态由服务器给出（不再恒 `Unknown`）。
+            iec104: self.iec104_link_state().await,
             intercore,
             // 契约硬要求：本通道状态由 **HMI 本地覆盖**（设计 §5.5）；服务端**必须**给 Unknown，
             // 否则就是"由服务端报告客户端自己的连接状态"这一语义倒置。
@@ -303,7 +332,9 @@ async fn read_mem_used_pct() -> Option<f64> {
         let snap = mupc_system_monitor::MemoryCollector::new(0).collect().await.ok()?;
         let pct = snap.memory.usage_percent;
         if pct.is_finite() && (0.0..=100.0).contains(&pct) {
-            Some(pct)
+            // `usage_percent` 是 `f32`（system-monitor 侧口径），本函数对外口径是 `f64`
+            // （`DeviceSection.mem_used_pct`）—— f32→f64 为无损加宽，直接提升。
+            Some(f64::from(pct))
         } else {
             None
         }
@@ -1828,18 +1859,42 @@ mod tests {
         }
     }
 
+    /// `Iec104Server::start()` 需要一个 `CommandHandler`；本模块只验链路状态、不验命令，
+    /// 故给最小桩（收到命令即回失败——测试中不会有真连接发命令）。
+    struct StubCommandHandler;
+
+    #[async_trait::async_trait]
+    impl mupc_gateway::iec104::command::CommandHandler for StubCommandHandler {
+        async fn handle_command(
+            &self,
+            cmd: mupc_gateway::iec104::command::ControlCommand,
+        ) -> Result<mupc_gateway::iec104::command::CommandResponse, mupc_common::MupcError> {
+            Ok(mupc_gateway::iec104::command::CommandResponse {
+                cmd_id: cmd.cmd_id,
+                success: false,
+                message: "display_host 测试桩".to_string(),
+                timestamp: 0,
+            })
+        }
+
+        fn name(&self) -> &str {
+            "stub"
+        }
+    }
+
     // ── A 装置段（F6）──
 
     /// 装置源：intercore 在线 → `Connected` / 离线 → `Disconnected`；**`hmi_channel` 恒
     /// `Unknown`**（设计 §5.5：由 HMI 本地覆盖，服务端不得自称已知——否则是"由服务端报告
-    /// 客户端自己的连接状态"的语义倒置）；`iec104` 无真源 ⇒ `Unknown`（F6.5 允许「未知」，
-    /// **不得**显为「正常」）。
+    /// 客户端自己的连接状态"的语义倒置）；`iec104` 未装配服务器 ⇒ `NotConfigured`
+    /// （U-59 / L-5 补齐后的语义：真源已存在，**未接线**即「未配置」，仍不臆造）。
     #[tokio::test]
     async fn device_source_links_and_hmi_channel_never_faked() {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
         let online = SystemDeviceSource::new(
             stub_client(None, true, None),
             ai.clone(),
+            None,
             Instant::now(),
         );
         let d = online.read_device().await;
@@ -1849,13 +1904,74 @@ mod tests {
             LinkState::Unknown,
             "hmi_channel 必须 Unknown（HMI 侧本地覆盖）；服务端自称 Connected 即为语义倒置"
         );
-        assert_eq!(d.iec104, LinkState::Unknown, "无链路状态真源 ⇒「未知」");
+        assert_eq!(
+            d.iec104,
+            LinkState::NotConfigured,
+            "未装配 Iec104Server ⇒「未配置」（不得是 Unknown/Connected）"
+        );
         assert!(d.uptime_secs.is_some(), "uptime 真源存在（零点由调用方传入）");
         assert_ne!(d.hmi_channel, LinkState::Connected, "缺省/不可得绝不落在已连接");
 
         let offline =
-            SystemDeviceSource::new(stub_client(None, false, None), ai, Instant::now());
+            SystemDeviceSource::new(stub_client(None, false, None), ai, None, Instant::now());
         assert_eq!(offline.read_device().await.intercore, LinkState::Disconnected);
+    }
+
+    /// **IEC 104 链路状态接线**（U-59 / L-5）：装配了服务器即问它，枚举 1:1 映射，
+    /// 未启动的服务器报「未配置」而非「断开」。
+    #[tokio::test]
+    async fn device_source_iec104_follows_server_link_state() {
+        let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
+        let server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+            mupc_gateway::iec104::server::Iec104Config {
+                listen_addr: "127.0.0.1".to_string(),
+                listen_port: 0,
+                ..Default::default()
+            },
+        ));
+        let src = SystemDeviceSource::new(
+            stub_client(None, true, None),
+            ai,
+            Some(server.clone()),
+            Instant::now(),
+        );
+        assert_eq!(
+            src.read_device().await.iec104,
+            LinkState::NotConfigured,
+            "服务器尚未 start() ⇒「未配置」"
+        );
+
+        src.read_device().await;
+        assert_eq!(
+            map_iec104_link_state(server.link_state().await),
+            LinkState::NotConfigured
+        );
+
+        // 启动（回环 + 临时端口：测试不占固定端口）⇒ 无连接 =「断开」
+        let handler = Arc::new(StubCommandHandler);
+        server
+            .start(handler)
+            .await
+            .expect("bind 127.0.0.1:0 必成功");
+        assert_eq!(
+            src.read_device().await.iec104,
+            LinkState::Disconnected,
+            "已启动且无连接 ⇒「断开」"
+        );
+    }
+
+    /// 映射函数**逐变体**自证（防"少映射一个变体"这类静默偏差）。
+    #[test]
+    fn iec104_link_state_mapping_is_total() {
+        use mupc_gateway::iec104::server::LinkState as Gw;
+        for (gw, expect) in [
+            (Gw::Connected, LinkState::Connected),
+            (Gw::Connecting, LinkState::Connecting),
+            (Gw::Disconnected, LinkState::Disconnected),
+            (Gw::NotConfigured, LinkState::NotConfigured),
+        ] {
+            assert_eq!(map_iec104_link_state(gw), expect, "{gw:?} 映射错误");
+        }
     }
 
     /// **uptime 零点必须来自调用方传入的进程起点，而不是本结构体的构造时刻**（设计 §4.1
@@ -1872,7 +1988,7 @@ mod tests {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
         // 人工零点：1 小时前（模拟"进程已启动 1 h"）。绝不依赖真实进程起点。
         let zero = Instant::now() - Duration::from_secs(3600);
-        let src = SystemDeviceSource::new(stub_client(None, true, None), ai, zero);
+        let src = SystemDeviceSource::new(stub_client(None, true, None), ai, None, zero);
         let up = src.read_device().await.uptime_secs.expect("uptime 真源存在");
         assert!(
             (3600..3600 + 60).contains(&up),
@@ -1888,6 +2004,7 @@ mod tests {
         let src = SystemDeviceSource::new(
             stub_client(None, true, None),
             ai.clone(),
+            None,
             Instant::now(),
         );
         // 默认：local_priority=false 且 ModelStatus::Unloaded（AI 停用期实态）
@@ -1909,7 +2026,7 @@ mod tests {
     #[tokio::test]
     async fn device_source_no_stub_metrics_on_non_linux() {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
-        let d = SystemDeviceSource::new(stub_client(None, true, None), ai, Instant::now())
+        let d = SystemDeviceSource::new(stub_client(None, true, None), ai, None, Instant::now())
             .read_device()
             .await;
         assert_eq!(d.cpu_temp_c, None, "非 Linux 无真温度源 ⇒「未知」，不得上桩值");

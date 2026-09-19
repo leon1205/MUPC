@@ -11,10 +11,9 @@ use clap::Parser;
 use config::{validate_environment, SimBridgeConfig};
 use metrics::MetricsCollector;
 use mqtt::MqttPublisher;
-use py_engine::{PyEngine, SimRequest, SimResponse};
+use py_engine::{PyEngine, SimResponse};
 use scenario::validate_scenario;
 use std::path::PathBuf;
-use tokio::net::TcpStream;
 
 #[derive(Parser)]
 #[command(name = "mupc-sim-bridge")]

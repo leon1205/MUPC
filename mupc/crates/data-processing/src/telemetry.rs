@@ -34,7 +34,7 @@ pub struct PhaseElectricalData {
 }
 
 /// 电气数据
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ElectricalData {
     pub voltage: Option<f64>,        // 电压 (V)
     pub current: Option<f64>,        // 电流 (A)
@@ -44,20 +44,6 @@ pub struct ElectricalData {
     pub frequency: Option<f64>,      // 频率 (Hz)
     /// 分相数据（台区总表），None = 不可用
     pub phase: Option<PhaseElectricalData>,
-}
-
-impl Default for ElectricalData {
-    fn default() -> Self {
-        Self {
-            voltage: None,
-            current: None,
-            active_power: None,
-            reactive_power: None,
-            cos_phi: None,
-            frequency: None,
-            phase: None,
-        }
-    }
 }
 
 /// 电池数据

@@ -131,27 +131,27 @@ impl Opa {
 
 /// 样式部件（`LV_PART_*` 的镜像；与 [`State`] 一起构成 [`StyleSelector`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Part(u32);
+pub struct Part(sys::lv_part_t);
 
 impl Part {
     /// 主体（背景/文字所在部件）。
-    pub const MAIN: Self = Self(sys::LV_PART_MAIN as u32);
+    pub const MAIN: Self = Self(sys::LV_PART_MAIN);
     /// 滚动条部件（UI §5.6 的"纯指示"滚动条宽度即 8 px 挂此部件）。
-    pub const SCROLLBAR: Self = Self(sys::LV_PART_SCROLLBAR as u32);
+    pub const SCROLLBAR: Self = Self(sys::LV_PART_SCROLLBAR);
     /// 指示器部件（`lv_bar` / `lv_switch` 的"已选"段）。
-    pub const INDICATOR: Self = Self(sys::LV_PART_INDICATOR as u32);
+    pub const INDICATOR: Self = Self(sys::LV_PART_INDICATOR);
     /// 旋钮部件（`lv_switch` 的滑块）。取值须与 C 端 `LV_PART_KNOB` 一致（`0x030000`）。
-    pub const KNOB: Self = Self(sys::LV_PART_KNOB as u32);
+    pub const KNOB: Self = Self(sys::LV_PART_KNOB);
     /// 选中项部件（`lv_dropdown` 的当前选项 / `lv_buttonmatrix` 的选中段）。
     /// 取值须与 C 端 `LV_PART_SELECTED` 一致（`0x040000`）。
-    pub const SELECTED: Self = Self(sys::LV_PART_SELECTED as u32);
+    pub const SELECTED: Self = Self(sys::LV_PART_SELECTED);
     /// 子项部件（`lv_buttonmatrix` 的段）。
-    pub const ITEMS: Self = Self(sys::LV_PART_ITEMS as u32);
+    pub const ITEMS: Self = Self(sys::LV_PART_ITEMS);
     /// 通配（仅用于 [`super::obj::Obj::remove_style`] 一类"匹配全部"的场合）。
-    pub const ANY: Self = Self(sys::LV_PART_ANY as u32);
+    pub const ANY: Self = Self(sys::LV_PART_ANY);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_part_t {
         self.0
     }
 
@@ -170,26 +170,26 @@ impl std::ops::BitOr for Part {
 
 /// 样式状态（`LV_STATE_*` 的镜像）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct State(u32);
+pub struct State(sys::lv_state_t);
 
 impl State {
     /// 默认态（**不是**"任何态"）。
-    pub const DEFAULT: Self = Self(sys::LV_STATE_DEFAULT as u32);
+    pub const DEFAULT: Self = Self(sys::LV_STATE_DEFAULT);
     /// 按下（UI §5.2「pressed ≤100 ms 反馈」）。
-    pub const PRESSED: Self = Self(sys::LV_STATE_PRESSED as u32);
+    pub const PRESSED: Self = Self(sys::LV_STATE_PRESSED);
     /// 选中（`LV_OBJ_FLAG_CHECKABLE` 控件自动维护）。
-    pub const CHECKED: Self = Self(sys::LV_STATE_CHECKED as u32);
+    pub const CHECKED: Self = Self(sys::LV_STATE_CHECKED);
     /// 聚焦（确认弹层的"默认焦点「取消」"）。
-    pub const FOCUSED: Self = Self(sys::LV_STATE_FOCUSED as u32);
+    pub const FOCUSED: Self = Self(sys::LV_STATE_FOCUSED);
     /// 禁用。
-    pub const DISABLED: Self = Self(sys::LV_STATE_DISABLED as u32);
+    pub const DISABLED: Self = Self(sys::LV_STATE_DISABLED);
     /// 滚动中（滚动条 thumb 变色用）。
-    pub const SCROLLED: Self = Self(sys::LV_STATE_SCROLLED as u32);
+    pub const SCROLLED: Self = Self(sys::LV_STATE_SCROLLED);
     /// 通配（仅用于"匹配全部态"的场合）。
-    pub const ANY: Self = Self(sys::LV_STATE_ANY as u32);
+    pub const ANY: Self = Self(sys::LV_STATE_ANY);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_state_t {
         self.0
     }
 
@@ -208,24 +208,24 @@ impl std::ops::BitOr for State {
 
 /// 描边侧（`LV_BORDER_SIDE_*` 的镜像）——UI §3.5 的"卡顶 / 卡左缘 3 px 警示描边"即单侧描边。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BorderSide(u32);
+pub struct BorderSide(sys::lv_border_side_t);
 
 impl BorderSide {
     /// 不描边。
-    pub const NONE: Self = Self(sys::LV_BORDER_SIDE_NONE as u32);
+    pub const NONE: Self = Self(sys::LV_BORDER_SIDE_NONE);
     /// 上缘。
-    pub const TOP: Self = Self(sys::LV_BORDER_SIDE_TOP as u32);
+    pub const TOP: Self = Self(sys::LV_BORDER_SIDE_TOP);
     /// 下缘。
-    pub const BOTTOM: Self = Self(sys::LV_BORDER_SIDE_BOTTOM as u32);
+    pub const BOTTOM: Self = Self(sys::LV_BORDER_SIDE_BOTTOM);
     /// 左缘。
-    pub const LEFT: Self = Self(sys::LV_BORDER_SIDE_LEFT as u32);
+    pub const LEFT: Self = Self(sys::LV_BORDER_SIDE_LEFT);
     /// 右缘。
-    pub const RIGHT: Self = Self(sys::LV_BORDER_SIDE_RIGHT as u32);
+    pub const RIGHT: Self = Self(sys::LV_BORDER_SIDE_RIGHT);
     /// 四边（默认）。
-    pub const FULL: Self = Self(sys::LV_BORDER_SIDE_FULL as u32);
+    pub const FULL: Self = Self(sys::LV_BORDER_SIDE_FULL);
 
     /// 原始 C 取值。
-    pub const fn raw(self) -> u32 {
+    pub const fn raw(self) -> sys::lv_border_side_t {
         self.0
     }
 }

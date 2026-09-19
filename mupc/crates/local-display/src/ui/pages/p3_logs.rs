@@ -276,8 +276,14 @@ pub(crate) const MODULE_CHIP_W: i32 =
 const MODULE_BOX_W: i32 =
     MODULE_COLS as i32 * MODULE_CHIP_W + (MODULE_COLS as i32 - 1) * Dimens::GAP_MIN;
 /// 模块网格**行数上限**（§6.3 ②「最多 7 行」）。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 const MODULE_ROWS_MAX: u32 = 7;
 /// 模块网格**项数上限**（「全部」+ 契约 `LOG_TARGETS_MAX` = 50）—— 用于编译期容量自证。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 const MODULE_ITEMS_MAX: u32 = 1 + LOG_TARGETS_MAX as u32;
 
 /// 表头高（§6.3 线框：表头 36 px；推导同 `p5_audit.rs` 的 36 px 档）。
@@ -1399,6 +1405,9 @@ pub(crate) const ROW_MAX: usize = 20;
 /// - P3 的行比 P5 的行**更省**（P5 每行 ≈ 10 个对象：行 + 竖条 + 5 文字 + 2 个胶囊（各 2 对象）；
 ///   P3 每行 = 行 + 色块 + 4 文字 = 6 个对象）⇒ P5 的单页上界是 22–24
 ///   （见 `p5_audit.rs::MEASURED_ROW_CAPACITY`）、P3 是 44（**约 2 倍**）。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 pub(crate) const MEASURED_ROW_CAPACITY: usize = 44;
 
 /// **P3 + P5 两页共存**时 **P3 侧**可安全容纳的行数（**R3** 的共存预算）。
@@ -1424,6 +1433,9 @@ pub(crate) const MEASURED_ROW_CAPACITY: usize = 44;
 /// （`COEXIST_ROWS_PER_PAGE < ROW_MAX` 由编译期断言钉死）；它只说明"**两页同时满行在
 /// 256 KB 下不可能**"——与 `p5_audit.rs::AU8` 的结论**同族**（两条页各自的上界都低于
 /// `ROW_MAX` 时，唯一的根治是扩 `LV_MEM_SIZE` 或由外壳**串行化页面生命周期**）。
+// 只被 `const _` 编译期自证与 `#[cfg(test)]` 引用 —— rustc 的 dead_code 不计入
+// `const _: () = assert!(…);` 初始化器里的引用（实测），故显式放行。
+#[allow(dead_code)]
 pub(crate) const COEXIST_ROWS_PER_PAGE: usize = 12;
 
 /// **编译期自证**：行池上限不超实测上界，且至少装得下一页；共存预算严格小于单页上限。

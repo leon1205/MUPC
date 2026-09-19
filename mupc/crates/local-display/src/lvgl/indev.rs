@@ -152,6 +152,19 @@ impl Drop for Indev {
         // 用世代令牌而非仅 `is_initialized()`：`init → deinit → init` 之后该标志又为
         // `true`，但本句柄的 indev 早已随上一世代 `lv_deinit()` 释放（否则 double free）。
         if self.is_live() {
+            // ⚠️ **必须先删掉绑定到本 indev 的动画，再删 indev**（顺序不可交换）：
+            // LVGL v9.5.0 的 `lv_indev_delete` 只清 read_timer / 事件表 / 链表项，
+            // **不清理动画表**，而惯性抛掷动画的 `var` 就是 indev 指针
+            // （`lv_indev.c` 的 `lv_anim_set_var(&a, indev)`）⇒ indev 释放后该动画仍在
+            // 全局动画表里，下一次 `lv_anim_refr_now` 即对已释放 indev 解引用：
+            // `indev_scroll_throw_anim_cb` → `lv_indev_scroll_throw_handler` →
+            // 读 `indev->pointer.scroll_obj`（已释放内存）→ `lv_obj_has_flag(野指针)` ⇒ SEGV。
+            // 对象侧有对称处理（`lv_obj_destruct` → `lv_anim_delete(obj, NULL)`），indev 侧没有。
+            // 实测（2026-09-19，ASAN/x86_64）：不加此行时 `lvgl_core_bridge_chain` 3 跑 2 崩；
+            // 加了之后 20/20 不崩（证据与调用序列见 `docs/technical-debt.md` U-58）。
+            // SAFETY: `self.raw` 仍存活（世代未变）；`exec_cb = None` = 删该 var 上的全部动画，
+            // 动画摘除后其回调不再可能触达本 indev。
+            unsafe { sys::lv_anim_delete(self.raw as *mut std::ffi::c_void, None) };
             // SAFETY: 仍存活（已初始化且世代未变）⇒ 该 indev 尚未被删除。
             unsafe { sys::lv_indev_delete(self.raw) };
         }

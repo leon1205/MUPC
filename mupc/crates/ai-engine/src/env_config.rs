@@ -61,23 +61,12 @@ impl Default for OperationalConfig {
 }
 
 /// 完整环境配置（YAML 结构）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvConfig {
     pub version: EnvConfigMetadata,
     pub physical: PhysicalConfig,
     pub safety: SafetyConfig,
     pub operational: OperationalConfig,
-}
-
-impl Default for EnvConfig {
-    fn default() -> Self {
-        Self {
-            version: EnvConfigMetadata::default(),
-            physical: PhysicalConfig::default(),
-            safety: SafetyConfig::default(),
-            operational: OperationalConfig::default(),
-        }
-    }
 }
 
 impl EnvConfig {

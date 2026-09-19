@@ -18,6 +18,12 @@ use tokio::sync::RwLock;
 ///
 /// `mupcd` 侧（读通道 `display_host` / 控制通道 `console_host`）通过此门面访问 ai-engine，
 /// 不直接调用 ai-engine。承担安全校验、指令兜底校验职责。
+/// 每拍下发落库回调（`(phase_p_set, phase_q_set)`）——见 [`AiIntegrator::set_decision_sink`]。
+///
+/// 具名而非内联：内联的 `Arc<dyn Fn(..) + Send + Sync>` 嵌在 `RwLock<Option<..>>` 里会被
+/// `clippy::type_complexity` 判为「very complex type」，且调用处签名同样受益于具名。
+pub type DecisionSink = Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>;
+
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
@@ -55,7 +61,7 @@ pub struct AiIntegrator {
     /// 审查 R1-A3 2026-09-09：本地策略每拍实际下发成功后触发（phase_p_set, phase_q_set 三相
     /// [f64;3]），启动侧注入 storage 落库闭包；None=不落库。同步闭包内由 tokio::spawn 异步落库
     /// （避免 async trait/依赖）。
-    decision_sink: RwLock<Option<Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>>>,
+    decision_sink: RwLock<Option<DecisionSink>>,
     /// 节流期空耗防护（审查 R1-B6，2026-09-09）：上次实际下发的分相 P/Q，值不变跳过重发。
     /// TaiStorage evaluate 命中 60s 节流时返回缓存 cmd，而 run_fallback_strategies 每 dispatch
     /// 拍（1s）仍对相同指令重复 send_tai_command——空耗 RS485 带宽并放大在线/离线抖动窗口。
@@ -287,10 +293,10 @@ impl AiIntegrator {
         };
         let now = std::time::Instant::now();
         let value_pct = resolve_soc_source(bms, intercore, existing, now, Self::DATA_STALE_AFTER);
-        let bms_fresh = bms.map_or(false, |(_, ts)| {
+        let bms_fresh = bms.is_some_and(|(_, ts)| {
             now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER
         });
-        let intercore_fresh = intercore.map_or(false, |(_, ts)| {
+        let intercore_fresh = intercore.is_some_and(|(_, ts)| {
             now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER
         });
         let source = if bms_fresh {
@@ -343,7 +349,7 @@ impl AiIntegrator {
     /// 注入本地策略决策落库回调（审查 R1-A3 2026-09-09）：本地兜底每拍实际下发成功后以
     /// (phase_p_set, phase_q_set) 三相 [f64;3] 触发；None=不落库。同步闭包（落库异步由闭包内
     /// tokio::spawn），避免 async trait/strategy-engine→storage 依赖。
-    pub async fn set_decision_sink(&self, sink: Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>) {
+    pub async fn set_decision_sink(&self, sink: DecisionSink) {
         *self.decision_sink.write().await = Some(sink);
     }
 
@@ -764,9 +770,9 @@ fn is_dual_source_lost(
     if existing.is_none() {
         return false;
     }
-    let bms_fresh = bms.map_or(false, |(_, ts)| now.saturating_duration_since(ts) <= stale_after);
+    let bms_fresh = bms.is_some_and(|(_, ts)| now.saturating_duration_since(ts) <= stale_after);
     let intercore_fresh =
-        intercore.map_or(false, |(_, ts)| now.saturating_duration_since(ts) <= stale_after);
+        intercore.is_some_and(|(_, ts)| now.saturating_duration_since(ts) <= stale_after);
     !bms_fresh && !intercore_fresh
 }
 

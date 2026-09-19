@@ -1,6 +1,6 @@
 use crate::config::{parse_broker_addr, SimBridgeConfig};
 use crate::error::SimBridgeError;
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
+use rumqttc::{AsyncClient, MqttOptions, QoS};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 

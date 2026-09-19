@@ -53,6 +53,9 @@ pub struct ParetoSolution {
 /// NSGA-II 多目标权重优化器
 pub struct ParetoWeightOptimizer {
     config: ParetoOptimizerConfig,
+    /// ⚠️ 构造时收纳的目标定义（供未来按目标数动态计算）；当前实现按固定的
+    /// `WeightCandidate.objectives` 逐项比较 ⇒ 本字段未被读，显式放行 dead_code。
+    #[allow(dead_code)]
     objectives: Vec<OptimizationObjective>,
     /// 当前 Pareto 前沿
     pareto_front: RwLock<Vec<ParetoSolution>>,
@@ -105,7 +108,7 @@ impl ParetoWeightOptimizer {
                     *front = front
                         .iter()
                         .zip(solutions.iter())
-                        .map(|(c, s)| WeightCandidate {
+                        .map(|(_, s)| WeightCandidate {
                             weights: s.weights.clone(),
                             objectives: s.objectives.clone(),
                         })
@@ -226,14 +229,14 @@ impl ParetoWeightOptimizer {
     }
 
     /// 计算拥挤度距离
-    fn calculate_crowding_distance(&self, front: &mut Vec<ParetoSolution>) {
+    fn calculate_crowding_distance(&self, front: &mut [ParetoSolution]) {
         let n = front.len();
         if n < 2 {
             return;
         }
 
-        for i in 0..n {
-            front[i].crowding_distance = 0.0;
+        for f in front.iter_mut() {
+            f.crowding_distance = 0.0;
         }
 
         for obj_idx in 0..front[0].objectives.len() {
@@ -262,7 +265,7 @@ impl ParetoWeightOptimizer {
     /// 生成下一代
     fn evolve(&self, fronts: &[Vec<WeightCandidate>]) -> Vec<WeightCandidate> {
         // 简化实现：返回第一前沿
-        fronts.first().map(|f| f.clone()).unwrap_or_default()
+        fronts.first().cloned().unwrap_or_default()
     }
 
     /// 获取当前 Pareto 前沿
@@ -281,7 +284,7 @@ impl ParetoWeightOptimizer {
                 // 添加随机扰动
                 for wi in &mut w {
                     let perturbation: f64 = rng.gen_range(-0.2..0.2);
-                    *wi = (*wi + perturbation).max(0.01).min(10.0);
+                    *wi = (*wi + perturbation).clamp(0.01, 10.0);
                 }
 
                 // 计算目标值（简化：使用随机值）
