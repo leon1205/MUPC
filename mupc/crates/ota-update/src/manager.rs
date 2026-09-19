@@ -49,10 +49,17 @@ pub trait OtaManager: Send + Sync {
     /// 回滚
     async fn rollback(&self, model_type: ModelType) -> Result<(), OtaError>;
 
-    /// 获取更新状态
+    /// 获取更新状态。
+    ///
+    /// ⚠️ **同步方法**：实现里用 `tokio::sync::RwLock::blocking_read()`，在任何 tokio 运行时
+    /// 线程内调用都会 panic（"Cannot block the current thread from within a runtime"）。
+    /// 调用方须在运行时**之外**（或在 `spawn_blocking` 里）调用（2026-09-20 评审登记；
+    /// 本 trait 暂无生产调用方）。
     fn get_update_status(&self) -> UpdateStatus;
 
-    /// 获取更新历史
+    /// 获取更新历史。
+    ///
+    /// ⚠️ 同 [`OtaManager::get_update_status`]：同步口，不得在异步上下文直接调用。
     fn get_update_history(&self, limit: usize) -> Result<Vec<UpdateRecord>, OtaError>;
 
     /// 查询版本信息
@@ -133,22 +140,40 @@ impl OtaManagerImpl {
     }
 
     /// 创建 OTA 管理器（带回调）
+    ///
+    /// `on_strategy_engine_notify` 会**同时**交给两个消费者：
+    /// ① `ModelApplicator`（应用新模型后通知策略引擎重载）；
+    /// ② `RollbackManager`（**回滚后**通知策略引擎加载旧模型 —— 设计 §2.9.2 第 5 步）。
+    ///
+    /// ⚠️ 早先版本只把它给了 ①、给 ② 传了 `None`（2026-09-20 评审修复：回滚后策略引擎
+    /// 永远收不到通知，"重启策略引擎加载旧模型"形同虚设）。参数由 `Box` 改为 `Arc`，因为
+    /// 两个消费者的形参各需一份所有权。
     pub fn with_callbacks(
         config: OtaConfig,
         temp_dir: PathBuf,
-        on_strategy_engine_notify: Option<Box<dyn Fn(ModelType) + Send + Sync>>,
+        on_strategy_engine_notify: Option<Arc<dyn Fn(ModelType) + Send + Sync>>,
     ) -> Result<Self, OtaError> {
+        // 每个消费者各取一份 `Box` 适配（`ModelApplicator` / `RollbackManager` 的形参都是
+        // `Box<dyn Fn(ModelType) + Send + Sync>`）。
+        let boxed =
+            |f: &Arc<dyn Fn(ModelType) + Send + Sync>| -> Box<dyn Fn(ModelType) + Send + Sync> {
+                let f = Arc::clone(f);
+                Box::new(move |m| f(m))
+            };
+        let for_applicator = on_strategy_engine_notify.as_ref().map(&boxed);
+        let for_rollback = on_strategy_engine_notify.as_ref().map(&boxed);
+
         let downloader = Downloader::new(temp_dir)?;
         let verifier = Verifier::new(PathBuf::from(&config.public_key_path))?;
         let applicator = ModelApplicator::new(
             PathBuf::from(&config.model_storage_path),
             Arc::new(verifier.clone()),
-            on_strategy_engine_notify,
+            for_applicator,
         )?;
         let rollback_manager = RollbackManager::with_callback(
             PathBuf::from(&config.model_storage_path),
             config.max_rollback_count,
-            None,
+            for_rollback,
         )?;
 
         Ok(Self {
@@ -710,17 +735,26 @@ impl OtaManager for OtaManagerImpl {
         // 同步方法，使用 blocking read
         let state = self.state.blocking_read();
 
-        // 获取当前任务信息
+        // 获取当前任务信息。
+        // ⚠️ **不得**用 `tasks.values().next()`：`HashMap` 迭代序任意，多任务并存时会报出
+        // 与全局 `state` 无关的 task_id / 进度（失败任务除 `cancel_download` 外不会被移除）。
+        // 判据：优先「状态与全局 state 同变体」的任务，其次最近更新的一条（2026-09-20 评审修复）。
         let (current_task_id, current_model_type, download_progress) = {
             let tasks = self.tasks.blocking_read();
-            if let Some(task) = tasks.values().next() {
-                let progress = match task.state {
-                    OtaState::Downloading { progress } => Some(progress),
-                    _ => None,
-                };
-                (Some(task.task_id.clone()), Some(task.model_type), progress)
-            } else {
-                (None, None, None)
+            let picked = tasks
+                .values()
+                .filter(|t| std::mem::discriminant(&t.state) == std::mem::discriminant(&*state))
+                .max_by_key(|t| t.updated_at)
+                .or_else(|| tasks.values().max_by_key(|t| t.updated_at));
+            match picked {
+                Some(task) => {
+                    let progress = match task.state {
+                        OtaState::Downloading { progress } => Some(progress),
+                        _ => None,
+                    };
+                    (Some(task.task_id.clone()), Some(task.model_type), progress)
+                }
+                None => (None, None, None),
             }
         };
 
@@ -956,7 +990,7 @@ mod tests {
 
         let notified = std::sync::Arc::new(std::sync::Mutex::new(None::<ModelType>));
         let notified_clone = notified.clone();
-        let callback = Box::new(move |model_type| {
+        let callback = std::sync::Arc::new(move |model_type: ModelType| {
             *notified_clone.lock().unwrap() = Some(model_type);
         });
 
@@ -964,6 +998,73 @@ mod tests {
             OtaManagerImpl::with_callbacks(config, temp_dir.clone().join("temp"), Some(callback));
 
         assert!(result.is_ok());
+    }
+
+    /// 回归保护（2026-09-20 评审）：`with_callbacks` 必须把回调**也**转发给回滚管理器 ——
+    /// 早先只给了 `ModelApplicator`、给 `RollbackManager` 传 `None` ⇒ 回滚后策略引擎收不到
+    /// 通知（设计 §2.9.2 第 5 步"重启策略引擎加载旧模型"不可达）。用例装置镜像
+    /// `rollback.rs::test_rollback_success`，但经由**管理器**走完整回滚路径并断言回调触发。
+    #[tokio::test]
+    async fn rollback_notifies_strategy_engine_when_callback_supplied() {
+        const MODEL_FILE: &str = "model.rknn"; // = rollback.rs 的私有 `MODEL_FILENAME`
+
+        let temp_dir = TempDir::new().unwrap().into_path();
+        let models_dir = temp_dir.join("models");
+
+        // 回滚目录 + 旧模型；current 目录 + 新模型；version.json 指向可回滚版本 1.0.0
+        let rollback_dir = models_dir.join("rollback").join("1.0.0");
+        std::fs::create_dir_all(&rollback_dir).unwrap();
+        std::fs::write(rollback_dir.join(MODEL_FILE), b"old_model_data").unwrap();
+        let current_dir = models_dir.join("current").join("lstm");
+        std::fs::create_dir_all(&current_dir).unwrap();
+        std::fs::write(current_dir.join(MODEL_FILE), b"new_model_data").unwrap();
+        std::fs::write(
+            models_dir.join("version.json"),
+            serde_json::json!({
+                "models": [{
+                    "model_type": "lstm",
+                    "version": "1.0.0",
+                    "updated_at": "2026-05-28T10:00:00Z",
+                    "md5": "old_md5",
+                    "size": 1024
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = OtaConfig {
+            server_url: "https://ota.example.com".to_string(),
+            check_interval: 3600,
+            download_window_start: "02:00".to_string(),
+            download_window_end: "05:00".to_string(),
+            auto_download: true,
+            auto_apply: true,
+            download_timeout: 300,
+            retry_count: 3,
+            max_rollback_count: 3,
+            public_key_path: temp_dir.join("public_key.pem").display().to_string(),
+            model_storage_path: models_dir.display().to_string(),
+        };
+        std::fs::write(temp_dir.join("public_key.pem"), b"test key").unwrap();
+
+        let notified = std::sync::Arc::new(std::sync::Mutex::new(None::<ModelType>));
+        let n2 = notified.clone();
+        let manager = OtaManagerImpl::with_callbacks(
+            config,
+            temp_dir.join("temp"),
+            Some(std::sync::Arc::new(move |m: ModelType| {
+                *n2.lock().unwrap() = Some(m);
+            })),
+        )
+        .expect("构造 OTA 管理器");
+
+        manager.rollback(ModelType::Lstm).await.expect("回滚应成功");
+        assert_eq!(
+            *notified.lock().unwrap(),
+            Some(ModelType::Lstm),
+            "回滚完成后必须通知策略引擎加载旧模型（设计 §2.9.2 第 5 步）"
+        );
     }
 
     // ========== get_current_version 测试 ==========
