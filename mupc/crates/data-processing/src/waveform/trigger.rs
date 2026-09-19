@@ -509,4 +509,33 @@ mod tests {
         let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::None);
     }
+    /// 冷却期的**可观测**语义：冷却窗口内**整拍早退**（连别的条件也不评判）。
+    ///
+    /// 修正说明（2026-09-20 评审）：`test_cooldown` 的三处 `None` 断言在**删掉冷却检查后
+    /// 依然成立**（状态机停在 `Triggered` 时本就返回 false）⇒ 对 `cool_down_ms` 零约束。
+    /// 本用例用"窗口内切换故障类型"制造可观测差异：若无冷却检查，过流是**另一个条件**、
+    /// 其状态机为 `Normal`，会当场触发。
+    #[test]
+    fn test_cooldown_suppresses_other_conditions_within_window() {
+        let mut engine = make_engine();
+
+        // ① 短路（条件 3）触发 ⇒ 进入冷却（cool_down_ms = 100 ⇒ 到 ts = 101000）
+        let r = engine.detect(
+            430.0, 430.0, 430.0, 600.0, 600.0, 600.0, 0.0, 0.0, 50.0, 1000,
+        );
+        assert_eq!(r, TriggerResult::ShortCircuit, "首次短路应触发");
+
+        // ② 冷却期内改用**另一个条件**（过流 200 > 150，其状态机为 Normal）
+        //    ⇒ 冷却检查整拍早退，不得触发
+        let r = engine.detect(
+            220.0, 220.0, 220.0, 200.0, 200.0, 200.0, 0.0, 0.0, 50.0, 50000,
+        );
+        assert_eq!(r, TriggerResult::None, "冷却期内不得触发任何条件");
+
+        // ③ 冷却期已过、同一过流条件 ⇒ 正常触发（证明 ② 确由冷却抑制，而非阈值未满足）
+        let r = engine.detect(
+            220.0, 220.0, 220.0, 200.0, 200.0, 200.0, 0.0, 0.0, 50.0, 200000,
+        );
+        assert_eq!(r, TriggerResult::OverCurrent, "冷却期后同一条件应正常触发");
+    }
 }

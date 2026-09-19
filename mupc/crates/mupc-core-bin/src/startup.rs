@@ -1182,6 +1182,13 @@ pub async fn initialize_all(
     //
     // ⚠️ **绝不可**因此连带删除 `mupc-ota-update` crate：那是能力删除，不在本单元授权范围内。
     tracing::info!("[10/14] 初始化 OTA 管理器...");
+    // ⚠️ 这里用 `OtaManagerImpl::new`（**不传策略引擎回调**）⇒ 自动回滚完成后策略引擎不会
+    // 被告知加载旧模型（设计 §2.9.2 第 5 步"重启策略引擎加载旧模型"）。原因：策略引擎侧
+    // 目前**没有**模型重载/通知入口（`AiIntegrator` 只有 `set_model_manager`），凭空接线会
+    // 造出一个无消费者的空壳。**管理器侧的回调转发已修好并有用例钉住**（`with_callbacks`
+    // 会同份转发给 applicator 与 rollback，见 `ota-update/src/manager.rs` 的
+    // `rollback_notifies_strategy_engine_when_callback_supplied`）⇒ 待策略引擎补上重载 API
+    // 后，这里改用 `with_callbacks(..., Some(cb))` 即可（缺口登记见 U-63）。
     let ota_manager: Arc<dyn mupc_ota_update::OtaManager> = Arc::new(
         mupc_ota_update::manager::OtaManagerImpl::new(
             mupc_ota_update::OtaConfig::default(),
