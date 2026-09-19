@@ -212,6 +212,8 @@ jobs:
   #      而 `event.rs` 写死了 `i32`；`touch.rs` 的 `#[cfg(target_os="linux")] mod linux`
   #      漏引入 `select_index`。
   # ⇒ 本 job 自此为**硬门禁**：它红了就是真结论，不再有"未验证"豁免。
+  #   仓库设置侧：需在 master 的分支保护里把本 job（check 名 = job id `hmi`）加为
+  #   required status check —— 步骤与 check 名清单见 `mupc/build.md` §分支保护配置。
   #
   # 无 `needs:` —— 有意与 lint/test 并行：lint 若因 Linux 侧问题变红，本 job 仍能
   # 独立给出 HMI 的编译结论（这正是当前最需要的信号）。

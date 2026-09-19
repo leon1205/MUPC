@@ -380,15 +380,28 @@ git push origin fix/my-change
 
 ### 分支保护配置
 
-在 GitHub 仓库 `Settings → Branches → Add rule`：
+在 GitHub 仓库 `Settings → Branches → Add rule`（或编辑既有 master 规则）：
 
 ```
 Branch name pattern: master
 ☑ Require a pull request before merging
 ☑ Require status checks to pass before merging
+    ‣ 必选 check（= `.github/workflows/build-ubuntu.yml` 的 **job id**，非 workflow 名）：
+        lint   ← cargo clippy --workspace -- -D warnings
+        test   ← cargo test --workspace（排除三个既有失败 crate）
+        hmi    ← aarch64 交叉编译门禁（lvgl-sys + local-display 产物）
 ☑ Require branches to be up to date before merging
 ☐ Allow force pushes  (必须取消勾选)
 ```
+
+> **check 名的由来**：job 没写 `name:` ⇒ GitHub 用 **job id** 作为 check 名（本仓即 `lint` /
+> `test` / `build` / `hmi`）。改名 job id 等于改 check 名，**会静默让 required check 失配**。
+>
+> **前提（已满足）**：workflow 的 `pull_request: branches: [master]` 触发 ⇒ 三个 job 在 PR 上
+> 都会跑（`hmi` 无 `needs:`，与 lint/test 并行）。
+>
+> ⚠️ **未纳入 CI 的门禁**：`cargo fmt --check` **尚未接入**（仓库存在既有格式漂移；上面
+> "质量门禁"表里的"格式化"一行是**目标**而非现状）。
 
 ## 仿真测试环境
 
