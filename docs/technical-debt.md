@@ -535,6 +535,44 @@
 
 **L-7 · 📋 提醒（未动）**：U-42 字体门禁与设计 §14 的 R-03 / R-04 / R-05 / R-22 仍待真机。
 
+#### 8.6.2 CI test job 打通 + 既有失败测试修复（2026-09-19 续）
+
+L-1~L-6 完成后，CI 的 `lint` job 可达（clippy 0 告警），但 `test` job 仍**结构性跑不起来**。
+本节记录根因与修复：
+
+**① `npu` 构建接线缺陷（P0，阻断 CI test/lint job 与 CMake 的"无 NPU"路径）**
+
+- **现象**：x86_64 上 `cargo test --workspace` 在链接期失败 —— `vendor/rknn/librknnrt.so`
+  是 **aarch64** 库，而 `#[link(name = "rknnrt")]` 原先只按 `target_os = "linux"` 判定
+  ⇒ `rust-lld: ... is incompatible with elf64-x86-64`。CI（无 vendor/）同理报
+  `cannot find -lrknnrt`。
+- **第二层缺陷**：`mupc-ai-engine` 的 `default = ["npu"]` 让"关 npu"**不可达** ——
+  `cargo --workspace` 类命令会打开**每个成员自身**的 default features（与依赖方是否
+  `default-features = false` 无关）⇒ `--no-default-features` 无效（CMakeLists 原注释
+  所依赖的假设不成立），CI 的 "no npu" 回退构建同样会链接失败。
+- **修复**：(a) 真 FFI 的 cfg 增补 `target_arch = "aarch64"`（Rockchip 只发布 aarch64 的
+  .so，项目 build.rs 的自动探测也只在 `aarch64/` 下找）；(b) `mupc-ai-engine` 改
+  `default = []`，三个依赖方改 `default-features = false` ⇒ **`--features npu` 成为唯一开关**；
+  (c) build.rs 补两条安全网警告（aarch64 漏开关 ⇒ 提示"部署请加 --features npu"；非 aarch64
+  开 npu ⇒ 提示走 stub）。
+- **验证**：x86_64 全量测试**链接错误 0**；aarch64 + `--features npu` 仍链接真实库
+  （SHA256 校验通过）；aarch64 不带 npu 时给出上述警告并走 stub。
+
+**② 既有失败测试逐个修复（这些曾让 CI test job 即使能跑也必红）**
+
+| crate | 失败项 | 根因（实测） | 处置 |
+|-------|--------|--------------|------|
+| data-processing | `waveform::trigger::test_cooldown` | 用例期望"冷却期过后**持续故障**再次触发"，与设计 §3.3.2 状态机（`Triggered` 仅在完全恢复后回 `Normal`，**回差优先于冷却**）相悖；P1-03 引入回差后该用例一直红 | 按设计**改测试**（补全"恢复→回 Normal→再越限"的完整路径） |
+| data-processing | `fault_recorder_tests` | ① 临时库只按 pid 命名 ⇒ 同进程多用例抢锁（`database is locked`）；② `trigger_time` 写入用**秒**、查询/测试用**毫秒**（设计 §3.3.3 与建表注释均规定毫秒）⇒ 时间范围查询永远取不到 | ① 按用例名隔离库文件；② 写入与保留期截止统一改为 `timestamp_millis()` |
+| mqtt-plugin | `test_mqtt_client_creation` ×2 | 构造函数经 tokio 通道，而用例是同步 `#[test]` ⇒ "no reactor running" | 改 `#[tokio::test]` |
+| mqtt-bridge | `test_qos_mapping` | `LocalMqttClient::new` 把 `connected` 硬编码为 `true`（握手都没做就自称已连接） | 初值改 `false`（真值由事件循环在 ConnAck/断开时置位） |
+| ota-update | 13 例 | ① `parse_hhmm` 不强制 `HH:MM` 两位（设计用 "02:00"）；② 同步读取口用 `tokio::RwLock::blocking_read()` 却在 `#[tokio::test]` 内直接调用；③ `generate_temp_path` 缺 `ota_` 前缀、不认 `?file=` 查询参数；④ `Downloader::new` 不校验临时目录；⑤ `rollback_success` 的两个断言指向**同一路径**（自相矛盾）；⑥ `with_callback` 的回调只在回滚时触发而用例断言其已被调用；⑦ `verify_platform_compatibility` 用例 `copy_from_slice` 源/目标长度不匹配；⑧ `validate()` 缺 `retry_count == 0` 下界 | ① 严格两位；② 测试改 `spawn_blocking` / 降为 `#[test]`；③ 补前缀 + 支持 `file=` 参数；④ 构造期 `create_dir_all` 校验；⑤ 改为校验**内容**为旧模型；⑥ 断言改为"未被调用"并注明触发路径；⑦ 按头部布局写 4 字节；⑧ 补下界（新增 `InvalidRetryCount`） |
+| hplc-plugin | doctest `HplcConfig::new` | 示例缺 `use`（E0433） | 补 `use hplc_plugin::config::HplcConfig;` |
+
+**结果**：`cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin
+--exclude device-trait` = **1738 passed / 0 failed**（退出码 0），`cargo clippy --workspace`
+= **0 错误 0 告警** ⇒ CI 的 lint 与 test 两个 job 均可按原口径跑通。
+
 **⚠️ 环境侧两条（非模块代码，供后续同环境复现参考）**
 
 1. rustup **目录 override** 把 `mupc/` 钉在 **1.86.0**，而拉取后的 `Cargo.lock` 中 `time 0.3.46` 要求 **≥ 1.88** ⇒ 该目录下裸 `cargo` 命令直接报错。本次验证一律用 `cargo +stable`（本机 stable = 1.95.0）。建议 `rustup override set stable`。
