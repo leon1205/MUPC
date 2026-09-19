@@ -72,9 +72,20 @@ pub struct ModbusRtuTransport {
 
 /// 折叠 tokio-modbus 双层 Result（外层传输/IO 错误 + 内层协议异常）→ `Result<_, MupcError>`
 fn fold_tm<T>(tag: &str, r: tokio_modbus::Result<T>) -> Result<T, MupcError> {
-    let inner = r
-        .map_err(|e| MupcError::new(ErrorCode::SendFailed, format!("{tag} transport: {e}"), "intercore"))?;
-    inner.map_err(|e| MupcError::new(ErrorCode::SendFailed, format!("{tag} exception: {e}"), "intercore"))
+    let inner = r.map_err(|e| {
+        MupcError::new(
+            ErrorCode::SendFailed,
+            format!("{tag} transport: {e}"),
+            "intercore",
+        )
+    })?;
+    inner.map_err(|e| {
+        MupcError::new(
+            ErrorCode::SendFailed,
+            format!("{tag} exception: {e}"),
+            "intercore",
+        )
+    })
 }
 
 /// 打开串口并 attach 到指定从站（每次请求独立连接，天然规避半双工总线残留帧）
@@ -122,7 +133,11 @@ async fn open_ctx(s: &ModbusRtuSettings) -> Result<Context, MupcError> {
             .parity(parity),
     )
     .map_err(|e| {
-        MupcError::new(ErrorCode::ConnectionFailed, format!("open {}: {}", s.serial_port, e), "intercore")
+        MupcError::new(
+            ErrorCode::ConnectionFailed,
+            format!("open {}: {}", s.serial_port, e),
+            "intercore",
+        )
     })?;
     Ok(rtu::attach_slave(stream, Slave::from(s.slave_addr)))
 }
@@ -261,7 +276,11 @@ impl ModbusRtuTransport {
         )
         .await
         .map_err(|_| {
-            MupcError::new(ErrorCode::IntercoreTimeout, format!("modbus write timeout reg@{addr}"), "intercore")
+            MupcError::new(
+                ErrorCode::IntercoreTimeout,
+                format!("modbus write timeout reg@{addr}"),
+                "intercore",
+            )
         })?;
         fold_tm(&format!("write_single_register@{addr}"), r)
     }
@@ -287,7 +306,11 @@ impl ModbusRtuTransport {
         )
         .await
         .map_err(|_| {
-            MupcError::new(ErrorCode::IntercoreTimeout, format!("modbus read timeout reg@{addr}"), "intercore")
+            MupcError::new(
+                ErrorCode::IntercoreTimeout,
+                format!("modbus read timeout reg@{addr}"),
+                "intercore",
+            )
         })?;
         fold_tm(&format!("read_input_registers@{addr}"), r)
     }
@@ -386,7 +409,10 @@ impl ModbusRtuTransport {
     /// 单次读事务持有 [`Self::bus`]，不与并发的下行写序列交错（W3）。
     async fn probe_link(&self) -> bool {
         let _bus_guard = self.bus.lock().await;
-        self.read_input(REG_RUN_STATE, 1).await.map(|_| true).unwrap_or(false)
+        self.read_input(REG_RUN_STATE, 1)
+            .await
+            .map(|_| true)
+            .unwrap_or(false)
     }
 
     /// 后台心跳轮询：按 [`ModbusRtuSettings::heartbeat_poll_ms`] 周期读 3 区 REG_RUN_STATE
@@ -464,7 +490,9 @@ impl ModbusRtuTransport {
                     bad += 1;
                     if bad >= BAD_LIMIT {
                         self.mark_offline().await;
-                        tracing::debug!("modbus run-state read error after {bad} polls (silent): {e}");
+                        tracing::debug!(
+                            "modbus run-state read error after {bad} polls (silent): {e}"
+                        );
                     }
                 }
             }
@@ -481,7 +509,12 @@ impl IntercoreTransport for ModbusRtuTransport {
     ///
     /// ⚠️ 整条序列持有 [`Self::bus`]：模式切换 + 启停 + 6 寄存器写须原子，避免与并发的
     /// 恒功率下发/读事务在物理线路上互插（W3）。内部 ensure_*/write_reg 不取锁。
-    async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], _mode: &str) -> Result<(), MupcError> {
+    async fn send_tai_command(
+        &self,
+        p: [f64; 3],
+        q: [f64; 3],
+        _mode: &str,
+    ) -> Result<(), MupcError> {
         // C-1 下行中止（R-B）：联锁 latch 期间整条下行（模式/启停/功率写）在**任何总线 IO 前**
         // 拒绝——避免 stop_failed（PCS 仍运行）时后续周期按设定继续出力。检查置于 bus 锁前，
         // latch 期间连锁都不取（省去等待在途写序列）。latch 检查不 open 串口（测试可离线验证）。
@@ -496,10 +529,16 @@ impl IntercoreTransport for ModbusRtuTransport {
         let _bus_guard = self.bus.lock().await;
         self.ensure_mode(MODE_PHASE_SPLIT).await?;
         self.ensure_started().await?;
-        for (i, reg) in [REG_PHASE_P_A, REG_PHASE_P_A + 1, REG_PHASE_P_A + 2].iter().enumerate() {
+        for (i, reg) in [REG_PHASE_P_A, REG_PHASE_P_A + 1, REG_PHASE_P_A + 2]
+            .iter()
+            .enumerate()
+        {
             self.write_reg(*reg, to_pcs_reg(clamp_phase(p[i]))).await?;
         }
-        for (i, reg) in [REG_PHASE_Q_A, REG_PHASE_Q_A + 1, REG_PHASE_Q_A + 2].iter().enumerate() {
+        for (i, reg) in [REG_PHASE_Q_A, REG_PHASE_Q_A + 1, REG_PHASE_Q_A + 2]
+            .iter()
+            .enumerate()
+        {
             self.write_reg(*reg, to_pcs_reg(clamp_phase(q[i]))).await?;
         }
         Ok(())
@@ -521,7 +560,8 @@ impl IntercoreTransport for ModbusRtuTransport {
         let _bus_guard = self.bus.lock().await;
         self.ensure_mode(MODE_CONST_POWER).await?;
         self.ensure_started().await?;
-        self.write_reg(REG_CONST_P_SET, to_pcs_reg(cmd.p_ref)).await?;
+        self.write_reg(REG_CONST_P_SET, to_pcs_reg(cmd.p_ref))
+            .await?;
         self.write_reg(REG_CONST_Q_SET, to_pcs_reg(0.0)).await?;
         Ok(())
     }
@@ -661,7 +701,10 @@ mod tests {
         let t = ModbusRtuTransport::new(test_settings());
         // 0xFF 哨兵：首条指令必写模式字；started=false 首条必写启停
         assert_eq!(t.mode.load(Ordering::Relaxed), 0xFF);
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         assert!(!rt.block_on(async { *t.started.read().await }));
         assert!(!rt.block_on(async { *t.connected.read().await }));
     }
@@ -726,12 +769,18 @@ mod tests {
         // !latch：复位 started
         *tr.started.write().await = true;
         tr.authorize_restart().await.unwrap();
-        assert!(!*tr.started.read().await, "authorize 应复位 started，允许下次 send 重发 500=1");
+        assert!(
+            !*tr.started.read().await,
+            "authorize 应复位 started，允许下次 send 重发 500=1"
+        );
         // latch：authorize 拒绝且不改 started
         tr.restore_interlock_latched(true).await.unwrap();
         *tr.started.write().await = true;
         assert!(tr.authorize_restart().await.is_err());
-        assert!(*tr.started.read().await, "latch 期间 authorize 不得复位 started");
+        assert!(
+            *tr.started.read().await,
+            "latch 期间 authorize 不得复位 started"
+        );
     }
 
     #[tokio::test]
@@ -767,7 +816,10 @@ mod tests {
         // W1：离线复位须清模式/启停缓存（0xFF 哨兵/false），下次指令强制重写
         // REG_MODE/REG_START_STOP，避免缓存与实机不符
         let t = ModbusRtuTransport::new(test_settings());
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             // 模拟已缓存运行态（此前成功下发过）
             t.mode.store(MODE_PHASE_SPLIT as u8, Ordering::Relaxed);
