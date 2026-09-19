@@ -141,7 +141,8 @@ impl FaultRecorderImpl {
         conn: &Connection,
         retention_days: i64,
     ) -> Result<usize, DataProcessingError> {
-        let cutoff = Utc::now().timestamp() - (retention_days * 86400);
+        // 与写入同口径：**毫秒**（单位不一致会让保留期删除永不命中，见 `record_sync`）。
+        let cutoff = Utc::now().timestamp_millis() - (retention_days * 86_400_000);
         let deleted = conn
             .execute(
                 "DELETE FROM fault_records WHERE trigger_time < ?1",
@@ -196,7 +197,10 @@ impl FaultRecorderImpl {
 
     pub fn record_sync(&self, condition: &FaultCondition) -> Result<(), DataProcessingError> {
         let conn = self.conn.lock().unwrap();
-        let trigger_time = Utc::now().timestamp();
+        // ⚠️ **毫秒**（设计 §3.3.3 `trigger_timestamp` 与 §表 `trigger_time INTEGER -- 毫秒时间戳`
+        // 均如此规定）。原实现写的是 `timestamp()`（**秒**），而查询侧（含集成测试）按毫秒
+        // 给出时间范围 ⇒ 任何时间范围查询都取不到记录（2026-09-19 修正）。
+        let trigger_time = Utc::now().timestamp_millis();
 
         let fault_type = self.determine_fault_type(condition);
 

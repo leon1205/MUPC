@@ -561,7 +561,10 @@ mod tests {
         let mut data = vec![0u8; 1_048_576 + 100];
         data[0..4].copy_from_slice(b"RKNN");
         data[4..8].copy_from_slice(&8u32.to_be_bytes()); // 版本 8
-        data[8..16].copy_from_slice(b"RK3588    "); // 平台标识
+        // 头部布局（见 `verify_platform_compatibility` 的注释）：魔数(4) + 版本(4) +
+        // **平台标识(4)** + 保留(20)。原写法把 10 字节的 `b"RK3588    "` 拷进 8 字节切片
+        // ⇒ `copy_from_slice` 必 panic（2026-09-19 修正）。
+        data[8..12].copy_from_slice(b"RK35"); // 平台标识（4 字节）
         tokio::fs::write(&file_path, data).await.unwrap();
 
         let result = verifier

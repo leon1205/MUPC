@@ -29,6 +29,9 @@ pub enum OtaConfigError {
     #[error("下载超时必须大于 0")]
     InvalidDownloadTimeout,
 
+    #[error("重试次数必须大于 0")]
+    InvalidRetryCount,
+
     #[error("重试次数不能超过 10")]
     RetryCountExceeded,
 
@@ -104,6 +107,11 @@ impl OtaConfig {
         if parts.len() != 2 {
             return Err(OtaConfigError::InvalidTimeFormat(time_str.to_string()));
         }
+        // 严格 `HH:MM`（各两位、零填充）—— 设计 §配置表给的就是 "02:00" / "05:00"。
+        // 缺这条会把 "2:00" / "02:0" 这类放宽格式放进来（2026-09-19 修正，原实现只查数值范围）。
+        if parts[0].len() != 2 || parts[1].len() != 2 {
+            return Err(OtaConfigError::InvalidTimeFormat(time_str.to_string()));
+        }
 
         let hour: u32 = parts[0]
             .parse()
@@ -149,7 +157,11 @@ impl OtaConfig {
             return Err(OtaConfigError::InvalidDownloadTimeout);
         }
 
-        // 验证重试次数
+        // 验证重试次数（下界与 `check_interval` / `download_timeout` 同口径：0 视为误配 ——
+        // 设备侧一次瞬时网络抖动就会让本次 OTA 直接失败）
+        if self.retry_count == 0 {
+            return Err(OtaConfigError::InvalidRetryCount);
+        }
         if self.retry_count > 10 {
             return Err(OtaConfigError::RetryCountExceeded);
         }

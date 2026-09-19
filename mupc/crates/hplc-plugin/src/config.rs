@@ -32,7 +32,10 @@ impl HplcConfig {
     ///
     /// # Example
     /// ```
+    /// use hplc_plugin::config::HplcConfig;
+    ///
     /// let config = HplcConfig::new("/dev/ttyUSB0", 115200);
+    /// assert_eq!(config.baud_rate, 115200);
     /// ```
     pub fn new(port: impl Into<String>, baud_rate: u32) -> Self {
         Self {

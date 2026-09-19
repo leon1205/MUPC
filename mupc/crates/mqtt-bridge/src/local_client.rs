@@ -37,7 +37,11 @@ impl LocalMqttClient {
         Ok(Self {
             client,
             eventloop: Arc::new(Mutex::new(eventloop)),
-            connected: Arc::new(Mutex::new(true)),
+            // ⚠️ 初值是 **false**：`AsyncClient::new` 只建客户端与事件循环，**尚未**与
+            // broker 完成握手 ⇒ 此刻自称"已连接"是假值（2026-09-19 修正；原为 `true`，
+            // 与测试 `test_qos_mapping` 的断言「新建客户端不应处于已连接」相悖）。
+            // 真值由事件循环在 ConnAck / 断开事件时置位（见 `handle_event` 与 `run`）。
+            connected: Arc::new(Mutex::new(false)),
             reconnect_config: config.reconnect.clone(),
         })
     }

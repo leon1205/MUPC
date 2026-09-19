@@ -1060,8 +1060,11 @@ mod tests {
 
     // ========== get_update_status 测试 ==========
 
-    #[tokio::test]
-    async fn test_get_update_status_idle() {
+    // ⚠️ 本用例体**全同步**（`OtaManagerImpl::new` 亦为同步构造），而 `get_update_status`
+    // 实现里用 `tokio::RwLock::blocking_read()` —— 在运行时线程内调用会 panic
+    // 「Cannot block the current thread from within a runtime」⇒ 这里不得挂 `#[tokio::test]`。
+    #[test]
+    fn test_get_update_status_idle() {
         let temp_dir = TempDir::new().unwrap().into_path();
         let models_dir = temp_dir.join("models");
         std::fs::create_dir_all(&models_dir).unwrap();
@@ -1126,10 +1129,16 @@ mod tests {
         });
         std::fs::write(&version_file, version_data.to_string()).unwrap();
 
-        let manager = OtaManagerImpl::new(config, temp_dir.join("temp")).unwrap();
+        let manager = std::sync::Arc::new(
+            OtaManagerImpl::new(config, temp_dir.join("temp")).unwrap(),
+        );
 
-        // 初始历史为空
-        let history = manager.get_update_history(10).unwrap();
+        // 初始历史为空（同步读取口用 `blocking_read()`，**不得**在运行时线程内调用 ⇒
+        // 经 `spawn_blocking` 挪到阻塞线程池；`Arc` 以便后续仍可复用 manager）
+        let m = std::sync::Arc::clone(&manager);
+        let history = tokio::task::spawn_blocking(move || m.get_update_history(10).unwrap())
+            .await
+            .expect("spawn_blocking");
         assert!(history.is_empty());
 
         // 添加一些历史记录
@@ -1145,7 +1154,10 @@ mod tests {
         };
         manager.add_to_history(record).await;
 
-        let history = manager.get_update_history(10).unwrap();
+        let m = std::sync::Arc::clone(&manager);
+        let history = tokio::task::spawn_blocking(move || m.get_update_history(10).unwrap())
+            .await
+            .expect("spawn_blocking");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].task_id, "task-123");
     }
@@ -1195,8 +1207,10 @@ mod tests {
             manager.add_to_history(record).await;
         }
 
-        // 限制为 3 条
-        let history = manager.get_update_history(3).unwrap();
+        // 限制为 3 条（同 `test_get_update_history`：同步读取口不在运行时线程内调用）
+        let history = tokio::task::spawn_blocking(move || manager.get_update_history(3).unwrap())
+            .await
+            .expect("spawn_blocking");
         assert_eq!(history.len(), 3);
     }
 

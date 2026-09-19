@@ -41,9 +41,47 @@ pub struct Downloader {
     retry_interval_ms: u64,
 }
 
+/// 从 URL 推导临时文件名。
+///
+/// - 查询参数 `file=<名>` **优先** —— 形如 `…/download?file=model.rknn&version=1` 的地址，
+///   真正的文件名在查询串里，取路径末段只会得到 `download`；
+/// - 否则取路径末段（已剥掉查询串）；
+/// - 都取不到 ⇒ `download.tmp`（如 `https://host/`）。
+fn extract_filename(url: &str) -> &str {
+    if let Some(query) = url.split_once('?').map(|(_, q)| q) {
+        for kv in query.split('&') {
+            if let Some(name) = kv.strip_prefix("file=") {
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+    }
+
+    let last = url
+        .split('/')
+        .next_back()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("");
+    if last.is_empty() {
+        "download.tmp"
+    } else {
+        last
+    }
+}
+
 impl Downloader {
     /// 创建新的下载器
     pub fn new(temp_dir: PathBuf) -> Result<Self, OtaError> {
+        // 临时目录不可用（不存在且建不出 / 无权限）⇒ **构造期**即报错，而不是等到第一次
+        // 下载才失败（2026-09-19：原实现不校验，测试 `test_downloader_invalid_temp_dir`
+        // 断言的"非法临时目录应失败"因此从未成立）。
+        std::fs::create_dir_all(&temp_dir).map_err(|e| {
+            OtaError::DownloadFailed(format!("临时目录不可用 {}: {}", temp_dir.display(), e))
+        })?;
+
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
@@ -252,27 +290,15 @@ impl Downloader {
 
     /// 生成临时文件路径
     fn generate_temp_path(&self, url: &str) -> PathBuf {
-        // 从 URL 提取文件名
-        let filename = url
-            .split('/')
-            .next_back()
-            .unwrap_or("download.tmp")
-            .split('?')
-            .next()
-            .unwrap_or("download.tmp");
+        let filename = extract_filename(url);
 
-        let filename = if filename.is_empty() {
-            "download.tmp"
-        } else {
-            filename
-        };
-
-        // 生成带哈希前缀的唯一文件名
+        // 生成带哈希前缀的唯一文件名（`ota_` 前缀 = 本仓临时产物的命名约定）
         let mut hasher = Sha256::new();
         hasher.update(url.as_bytes());
         let url_hash = &format!("{:x}", hasher.finalize())[..16];
 
-        self.temp_dir.join(format!("{}_{}", url_hash, filename))
+        self.temp_dir
+            .join(format!("ota_{}_{}", url_hash, filename))
     }
 
     /// 获取已下载的大小

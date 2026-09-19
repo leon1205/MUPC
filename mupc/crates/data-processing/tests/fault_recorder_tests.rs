@@ -3,8 +3,13 @@ use mupc_data_processing::recorder::FaultRecorder;
 use mupc_data_processing::telemetry::FaultCondition;
 use std::path::PathBuf;
 
-fn create_temp_db() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mupc_test_{}", std::process::id()));
+/// 每个用例**各自一个库文件**。
+///
+/// ⚠️ 原版只按进程号命名 ⇒ 同一进程内并行运行的多个用例共用同一个 SQLite 文件，
+/// 相互抢锁 ⇒ 间歇 `DatabaseError("database is locked")`（2026-09-19 实测复现，
+/// 与 `test_fault_recorder_new` 并发时必现）。按用例名再加一段后缀即彻底隔离。
+fn create_temp_db(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mupc_test_{}_{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("test_faults.db")
 }
@@ -21,7 +26,7 @@ fn test_fault_type_enum() {
 
 #[test]
 fn test_fault_recorder_new() {
-    let db_path = create_temp_db();
+    let db_path = create_temp_db("new");
     let recorder = FaultRecorderImpl::new(&db_path);
     assert!(recorder.is_ok());
     let recorder = recorder.unwrap();
@@ -30,7 +35,7 @@ fn test_fault_recorder_new() {
 
 #[tokio::test]
 async fn test_fault_recorder_record_and_query() {
-    let db_path = create_temp_db();
+    let db_path = create_temp_db("record_and_query");
     let recorder = FaultRecorderImpl::new(&db_path).unwrap();
 
     let condition = FaultCondition {
