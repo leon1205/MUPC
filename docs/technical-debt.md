@@ -551,7 +551,8 @@ L-1~L-6 完成后，CI 的 `lint` job 可达（clippy 0 告警），但 `test` j
   `default-features = false` 无关）⇒ `--no-default-features` 无效（CMakeLists 原注释
   所依赖的假设不成立），CI 的 "no npu" 回退构建同样会链接失败。
 - **修复**：(a) 真 FFI 的 cfg 增补 `target_arch = "aarch64"`（Rockchip 只发布 aarch64 的
-  .so，项目 build.rs 的自动探测也只在 `aarch64/` 下找）；(b) `mupc-ai-engine` 改
+  .so —— 注：build.rs 的自动探测同时找 `aarch64/` 与 `armhf/`，但新 cfg 只认 aarch64，
+  armhf 分支自此只会在 aarch64 目标上误拷 32 位库）；(b) `mupc-ai-engine` 改
   `default = []`，三个依赖方改 `default-features = false` ⇒ **`--features npu` 成为唯一开关**；
   (c) build.rs 补两条安全网警告（aarch64 漏开关 ⇒ 提示"部署请加 --features npu"；非 aarch64
   开 npu ⇒ 提示走 stub）。
@@ -571,7 +572,13 @@ L-1~L-6 完成后，CI 的 `lint` job 可达（clippy 0 告警），但 `test` j
 
 **结果**：`cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin
 --exclude device-trait` = **1738 passed / 0 failed**（退出码 0），`cargo clippy --workspace`
-= **0 错误 0 告警** ⇒ CI 的 lint 与 test 两个 job 均可按原口径跑通。
+= **0 错误 0 告警**。
+
+> ⚠️ **订正（2026-09-20 评审）**：上面两项只证明 `test` job 与 `lint` job 的 **clippy 一步**
+> 可跑通。`lint` job 的**第一步**是 `cargo fmt --all -- --check`（workflow:57），而仓库存在
+> **既有格式漂移**（实测 114 文件 / 1236 处差异）⇒ **`lint` job 整体仍结构性红**，不可在分支
+> 保护里启用（否则所有 PR 卡在 Check formatting）。**此前本节"lint 与 test 两个 job 均可按
+> 原口径跑通"的表述不准确，已更正。** 漂移清零是启用 `lint` 的前置。
 
 **⚠️ 环境侧两条（非模块代码，供后续同环境复现参考）**
 

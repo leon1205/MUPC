@@ -97,7 +97,8 @@ cargo fmt --all
 #       export OPENSSL_DIR=/work/MUPC/external/openssl-4.0.1/aarch64-install
 
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-cargo build --workspace --release --target aarch64-unknown-linux-gnu \
+# ⚠️ ARM64 **必须显式 --features npu**（npu 是显式开关；漏带 ⇒ 构建成功但产物是 stub）
+cargo build --workspace --release --features npu --target aarch64-unknown-linux-gnu \
   --exclude mupc-iec61850-plugin --exclude device-trait
 
 # === CMake 构建 ===

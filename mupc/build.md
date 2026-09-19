@@ -201,24 +201,26 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-L /work/MUPC/external/
 ### 方式 1: Cargo 直接编译
 
 ```bash
-# 本机编译 (RK3588 开发板上) — npu feature 默认启用
-cargo build -p mupc-core-bin --release
+# 本机编译 (RK3588 开发板上) — **必须显式 --features npu**
+cargo build -p mupc-core-bin --release --features npu
 
-# 交叉编译 (x86_64 Linux → ARM64) — npu feature 默认启用
+# 交叉编译 (x86_64 Linux → ARM64) — **必须显式 --features npu**
 export RKNN_SDK_ROOT=/work/MUPC/rknn-toolkit2-2.3.2
-cargo build -p mupc-core-bin --release --target aarch64-unknown-linux-gnu
+cargo build -p mupc-core-bin --release --features npu --target aarch64-unknown-linux-gnu
 
-# Windows 开发环境 — npu feature 自动使用 stub 实现，无需 --no-default-features
+# Windows / x86_64 本机开发 — 不带开关即 stub（无需 --no-default-features）
 cargo build -p mupc-core-bin --release
 
-# 使用 cross-rs 容器化编译
-cross build -p mupc-core-bin --release --target aarch64-unknown-linux-gnu
+# 使用 cross-rs 容器化编译（同样需要 --features npu）
+cross build -p mupc-core-bin --release --features npu --target aarch64-unknown-linux-gnu
 ```
 
-> **npu feature 默认行为**：
-> - Linux: `npu` 默认启用，`librknnrt.so` 真实链接
-> - Windows: `npu` 默认启用但自动降级为 stub 实现（`rknn_runtime_sys.rs` 中 `target_os = "linux"` 条件编译），无需手动 `--no-default-features`
-> - 显式禁用: `cargo build --no-default-features`
+> **npu 是显式开关**（2026-09-19 起）：`mupc-ai-engine` 的 `default = []`，三个依赖方均
+> `default-features = false` ⇒ **不带 `--features npu` 就是 stub**（`rknn_*` 返回 -1）。
+> - **aarch64 部署**：必须带 `--features npu`，且需 `librknnrt.so`（缺库则构建期硬报错）；
+> - **x86_64 / Windows 开发**：不带即可，本就走 stub（Rockchip 不发布 x86_64 的 .so）；
+> - aarch64 漏带开关时 `build.rs` 会打印显式警告，但**构建仍会成功**、产物无 NPU 推理
+>   ⇒ 部署脚本与 CI 必须自己带上该开关（见 `deploy/scripts/` 与 `.github/workflows/build-ubuntu.yml`）。
 
 RKNN SDK 自动检测优先级：
 1. `RKNN_VENDOR_DIR` 环境变量 — 直接指定 `librknnrt.so` 所在目录
@@ -387,9 +389,10 @@ Branch name pattern: master
 ☑ Require a pull request before merging
 ☑ Require status checks to pass before merging
     ‣ 必选 check（= `.github/workflows/build-ubuntu.yml` 的 **job id**，非 workflow 名）：
-        lint   ← cargo clippy --workspace -- -D warnings
-        test   ← cargo test --workspace（排除三个既有失败 crate）
-        hmi    ← aarch64 交叉编译门禁（lvgl-sys + local-display 产物）
+        test   ← cargo test --workspace（排除三个既有失败 crate）—— ✅ 可先启用
+        hmi    ← aarch64 交叉编译门禁（lvgl-sys + local-display 产物）—— ✅ 可先启用
+        lint   ← cargo fmt --all -- --check + cargo clippy --workspace -- -D warnings
+                 ⚠️ **暂不可启用**：fmt 一步在既有漂移上必红（见下方注）
 ☑ Require branches to be up to date before merging
 ☐ Allow force pushes  (必须取消勾选)
 ```
@@ -400,8 +403,11 @@ Branch name pattern: master
 > **前提（已满足）**：workflow 的 `pull_request: branches: [master]` 触发 ⇒ 三个 job 在 PR 上
 > 都会跑（`hmi` 无 `needs:`，与 lint/test 并行）。
 >
-> ⚠️ **未纳入 CI 的门禁**：`cargo fmt --check` **尚未接入**（仓库存在既有格式漂移；上面
-> "质量门禁"表里的"格式化"一行是**目标**而非现状）。
+> ⚠️ **`lint` job 当前不可用**：它的**第一步**就是 `cargo fmt --all -- --check`
+> （`.github/workflows/build-ubuntu.yml:57`，无 `continue-on-error`），而本仓存在**既有格式
+> 漂移**（实测 114 个文件、1236 处差异）⇒ 该 job 必然红。
+> **因此：`test` 与 `hmi` 可以先设为 required check；`lint` 须等格式漂移清零后再启用**
+> （否则任何 PR 都会卡在 Check formatting 一步）。
 
 ## 仿真测试环境
 
