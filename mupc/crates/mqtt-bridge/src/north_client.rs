@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use device_trait::errors::PluginError;
 use device_trait::MqttBridge;
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, Transport};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -17,7 +18,7 @@ use tokio::time::{sleep, Duration};
 pub struct NorthMqttClient {
     client: AsyncClient,
     eventloop: Arc<Mutex<EventLoop>>,
-    connected: Arc<Mutex<bool>>,
+    connected: Arc<AtomicBool>,
     reconnect_config: crate::config::ReconnectConfig,
 }
 
@@ -48,7 +49,8 @@ impl NorthMqttClient {
         Ok(Self {
             client,
             eventloop: Arc::new(Mutex::new(eventloop)),
-            connected: Arc::new(Mutex::new(true)),
+            // 与 `LocalMqttClient` 对齐：**未完成握手前不得自称已连接**（2026-09-20 评审修复）。
+            connected: Arc::new(AtomicBool::new(false)),
             reconnect_config: config.reconnect.clone(),
         })
     }
@@ -58,16 +60,16 @@ impl NorthMqttClient {
         let mut eventloop = self.eventloop.lock().await;
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                *self.connected.lock().await = true;
+                self.connected.store(true, Ordering::SeqCst);
                 Ok(())
             }
             Ok(Event::Incoming(Packet::Disconnect)) => {
-                *self.connected.lock().await = false;
+                self.connected.store(false, Ordering::SeqCst);
                 Err(MqttBridgeError::Disconnected("连接断开".to_string()))
             }
             Ok(_) => Ok(()),
             Err(e) => {
-                *self.connected.lock().await = false;
+                self.connected.store(false, Ordering::SeqCst);
                 Err(MqttBridgeError::ConnectionFailed(e.to_string()))
             }
         }
@@ -109,15 +111,15 @@ impl NorthMqttClient {
                 let mut el = eventloop.lock().await;
                 match el.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                        *connected.lock().await = true;
+                        connected.store(true, Ordering::SeqCst);
                         _interval_secs = 1;
                     }
                     Ok(Event::Incoming(Packet::Disconnect)) => {
-                        *connected.lock().await = false;
+                        connected.store(false, Ordering::SeqCst);
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        *connected.lock().await = false;
+                        connected.store(false, Ordering::SeqCst);
                     }
                 }
             }
@@ -128,16 +130,13 @@ impl NorthMqttClient {
 #[async_trait]
 impl MqttBridge for NorthMqttClient {
     async fn connect(&mut self) -> Result<(), PluginError> {
-        if self.is_connected() {
-            return Ok(());
-        }
-        // 北向客户端连接由构造函数建立，此处标记重连意图
-        *self.connected.blocking_lock() = true;
+        // 同 `LocalMqttClient::connect`：不置位 `connected`（真值由事件循环在 ConnAck/断开
+        // 时维护）。此前直接置 true 会让"broker 不可达"被报成在线（2026-09-20 评审修复）。
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<(), PluginError> {
-        *self.connected.blocking_lock() = false;
+        self.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -165,8 +164,13 @@ impl MqttBridge for NorthMqttClient {
             .map_err(|e| PluginError::Other(format!("订阅失败: {}", e)))
     }
 
+    /// 是否已与 broker 完成握手。
+    ///
+    /// ⚠️ 用 `AtomicBool` 而非 `tokio::sync::Mutex<bool>`：后者只能 `blocking_lock()`（在任何
+    /// 运行时线程内调用即 panic「Cannot block the current thread from within a runtime」），
+    /// 而本方法是**同步 trait 方法**、必须可被任意上下文调用（2026-09-20 评审修复）。
     fn is_connected(&self) -> bool {
-        *self.connected.blocking_lock()
+        self.connected.load(Ordering::SeqCst)
     }
 
     fn name(&self) -> &'static str {

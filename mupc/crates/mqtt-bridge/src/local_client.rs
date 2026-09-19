@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use device_trait::errors::PluginError;
 use device_trait::MqttBridge;
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -16,7 +17,7 @@ use tokio::time::{sleep, Duration};
 pub struct LocalMqttClient {
     client: AsyncClient,
     eventloop: Arc<Mutex<EventLoop>>,
-    connected: Arc<Mutex<bool>>,
+    connected: Arc<AtomicBool>,
     reconnect_config: crate::config::ReconnectConfig,
 }
 
@@ -41,7 +42,7 @@ impl LocalMqttClient {
             // broker 完成握手 ⇒ 此刻自称"已连接"是假值（2026-09-19 修正；原为 `true`，
             // 与测试 `test_qos_mapping` 的断言「新建客户端不应处于已连接」相悖）。
             // 真值由事件循环在 ConnAck / 断开事件时置位（见 `handle_event` 与 `run`）。
-            connected: Arc::new(Mutex::new(false)),
+            connected: Arc::new(AtomicBool::new(false)),
             reconnect_config: config.reconnect.clone(),
         })
     }
@@ -51,16 +52,16 @@ impl LocalMqttClient {
         let mut eventloop = self.eventloop.lock().await;
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                *self.connected.lock().await = true;
+                self.connected.store(true, Ordering::SeqCst);
                 Ok(())
             }
             Ok(Event::Incoming(Packet::Disconnect)) => {
-                *self.connected.lock().await = false;
+                self.connected.store(false, Ordering::SeqCst);
                 Err(MqttBridgeError::Disconnected("连接断开".to_string()))
             }
             Ok(_) => Ok(()),
             Err(e) => {
-                *self.connected.lock().await = false;
+                self.connected.store(false, Ordering::SeqCst);
                 Err(MqttBridgeError::ConnectionFailed(e.to_string()))
             }
         }
@@ -104,15 +105,15 @@ impl LocalMqttClient {
                 let mut el = eventloop.lock().await;
                 match el.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                        *connected.lock().await = true;
+                        connected.store(true, Ordering::SeqCst);
                         _interval_secs = 1; // 重置
                     }
                     Ok(Event::Incoming(Packet::Disconnect)) => {
-                        *connected.lock().await = false;
+                        connected.store(false, Ordering::SeqCst);
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        *connected.lock().await = false;
+                        connected.store(false, Ordering::SeqCst);
                     }
                 }
             }
@@ -123,16 +124,16 @@ impl LocalMqttClient {
 #[async_trait]
 impl MqttBridge for LocalMqttClient {
     async fn connect(&mut self) -> Result<(), PluginError> {
-        if self.is_connected() {
-            return Ok(());
-        }
-        // 本地客户端连接由构造函数建立，此处标记重连意图
-        *self.connected.blocking_lock() = true;
+        // ⚠️ 本方法**不置位** `connected`：真正的握手发生在事件循环处理 `ConnAck` 时
+        // （见 `process_events` / `start_event_loop`）。此前这里直接置 true 是**假值** ——
+        // broker 不可达时 `is_connected()` 也会报 true，上层据此跳过重连/误报在线
+        // （2026-09-20 评审修复）。连接动作由调用方启动事件循环（`run()`）完成，本方法保持
+        // 幂等以兼容既有调用序。
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<(), PluginError> {
-        *self.connected.blocking_lock() = false;
+        self.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -160,8 +161,13 @@ impl MqttBridge for LocalMqttClient {
             .map_err(|e| PluginError::Other(format!("订阅失败: {}", e)))
     }
 
+    /// 是否已与 broker 完成握手。
+    ///
+    /// ⚠️ 用 `AtomicBool` 而非 `tokio::sync::Mutex<bool>`：后者只能 `blocking_lock()`（在任何
+    /// 运行时线程内调用即 panic「Cannot block the current thread from within a runtime」），
+    /// 而本方法是**同步 trait 方法**、必须可被任意上下文调用（2026-09-20 评审修复）。
     fn is_connected(&self) -> bool {
-        *self.connected.blocking_lock()
+        self.connected.load(Ordering::SeqCst)
     }
 
     fn name(&self) -> &'static str {
