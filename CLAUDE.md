@@ -121,7 +121,7 @@ cargo test -p <crate> <test_name>
 
 | 场景 | 命令 | 实际链接 |
 |------|------|------|
-| **部署（aarch64）** | `--features npu`（`build-for-rk3588.sh` / CMake `ENABLE_NPU` / CI 的 build job 都已带） | 真实 `librknnrt.so`（缺库则**构建期硬报错**） |
+| **部署（aarch64）** | `--features npu`（`build-for-rk3588.sh` / CMake `ENABLE_NPU` / CI 的 build job 都已带） | 真实 `librknnrt.so`。**缺库 = 构建失败，但失败点在链接期**：`build.rs` 只**警告**「未找到 …跳过 SHA256 校验」就返回，真正的硬失败是随后链接报 `cannot find -lrknnrt`（排查时别去 build.rs 的输出里找 panic） |
 | aarch64 漏了开关 | 无 `--features npu` | stub —— build.rs 会显式警告"部署构建请加 `--features npu`" |
 | 本机开发 / CI lint+test（x86_64） | 默认 | stub（FFI 返回 -1；Rockchip 不发布 x86_64 的 `librknnrt.so`，真 FFI 仅 aarch64 编译） |
 | Windows（开发） | 默认 | stub |
