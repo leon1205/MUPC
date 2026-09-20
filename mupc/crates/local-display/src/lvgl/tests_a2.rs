@@ -205,9 +205,12 @@ pub(super) fn obj_style_font_chain() {
     let scrollbar_style = Rc::new(scrollbar_style);
     card.add_style(&scrollbar_style, StyleSelector::part_of(Part::SCROLLBAR));
     // 选择器组合语义（纯 Rust 断言，不需要渲染）：部件 | 状态。
+    // 两侧各自 cast 到 `lv_style_selector_t`（恒 u32），与 `StyleSelector::to_sys` 同口径 ——
+    // 直接 `|` 在 MSVC 上会因 `lv_part_t`/`lv_state_t` = i32 而报 `expected u32, found i32`。
     assert_eq!(
         StyleSelector::new(Part::ITEMS, State::CHECKED).to_sys(),
-        Part::ITEMS.raw() | State::CHECKED.raw(),
+        (Part::ITEMS.raw() as sys::lv_style_selector_t)
+            | (State::CHECKED.raw() as sys::lv_style_selector_t),
         "选择器 = 部件 | 状态"
     );
     assert_eq!(StyleSelector::main().to_sys(), 0, "MAIN|DEFAULT 即 C 侧的 0");

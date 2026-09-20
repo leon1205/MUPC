@@ -316,7 +316,10 @@ pub fn scroll_dir(obj: &Obj) -> Dir {
         return Dir::NONE;
     }
     // SAFETY: 刚校验存活。
-    Dir(unsafe { sys::lv_obj_get_scroll_dir(obj.raw()) } as u32)
+    // ⚠️ **不要在此加 `as u32`**：`Dir` 包装的就是 `sys::lv_dir_t`，而该别名由 bindgen
+    // 随平台浮动 —— MSVC 上是 `c_int`(i32)、Linux 上是 `c_uint`(u32)；写死任一侧都会让
+    // 另一侧编不过（本仓已因此红过 13 处）。FFI 返回值与之同型，直接透传即两平台皆可。
+    Dir(unsafe { sys::lv_obj_get_scroll_dir(obj.raw()) })
 }
 
 /// 设滚动条显示模式（[`ScrollMode::AUTO`] = 内容超出视口才出现）。
@@ -336,7 +339,9 @@ pub fn scrollbar_mode(obj: &Obj) -> ScrollMode {
         return ScrollMode::OFF;
     }
     // SAFETY: 刚校验存活。
-    ScrollMode(unsafe { sys::lv_obj_get_scrollbar_mode(obj.raw()) } as u32)
+    // ⚠️ 同 [`scroll_dir`]：`ScrollMode` 包装的就是 `sys::lv_scrollbar_mode_t`（平台浮动
+    // 别名），**不得加 `as u32`**。
+    ScrollMode(unsafe { sys::lv_obj_get_scrollbar_mode(obj.raw()) })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

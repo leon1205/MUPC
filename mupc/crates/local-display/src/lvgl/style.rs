@@ -280,9 +280,15 @@ impl StyleSelector {
         Self { state, ..self }
     }
 
-    /// 转 C 侧选择器（`lv_style_selector_t`）。
+    /// 转 C 侧选择器（`lv_style_selector_t` = 部件位 | 状态位）。
+    ///
+    /// ⚠️ **两侧各自 cast 到目标别名、不可省**：`lv_part_t` / `lv_state_t` 是 bindgen 随
+    /// 平台浮动的别名（MSVC `c_int` / Linux `c_uint`），而 `lv_style_selector_t` **恒为**
+    /// `u32`（C 侧是 `typedef uint32_t`）⇒ 不 cast 时 Linux 恰好同型、Windows 直接报
+    /// `expected u32, found i32`。此处与 LVGL C 的实现同构（`(uint32_t)part | (uint32_t)state`）。
     pub(crate) const fn to_sys(self) -> sys::lv_style_selector_t {
-        self.part.raw() | self.state.raw()
+        (self.part.raw() as sys::lv_style_selector_t)
+            | (self.state.raw() as sys::lv_style_selector_t)
     }
 }
 

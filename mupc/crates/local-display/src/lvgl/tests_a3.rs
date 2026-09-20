@@ -131,7 +131,8 @@ pub(super) fn widgets_chain() {
     value.set_size(40, 20);
     value.set_long_mode(LongMode::WRAP);
     assert_eq!(value.text().as_deref(), Some("128"));
-    assert_eq!(LongMode::WRAP.raw(), sys::LV_LABEL_LONG_MODE_WRAP as u32);
+    // 两侧同为 `lv_label_long_mode_t`（平台浮动别名）⇒ **不得**在一侧写 `as u32`（MSVC 下是 i32）。
+    assert_eq!(LongMode::WRAP.raw(), sys::LV_LABEL_LONG_MODE_WRAP);
     // 状态机制（TT-10 按钮禁用 / §6.2 步进器越界共用这一入口）。
     assert!(!widgets::has_state(&bare, State::DISABLED));
     widgets::set_state(&bare, State::DISABLED, true);
@@ -355,8 +356,10 @@ pub(super) fn widgets_chain() {
     // ── Important (d)：`Style::set_width` + `Part::{KNOB, SELECTED}` ─────────
     {
         // 取值与 C 端 `lv_part_t` 逐位一致（评审已核，测试再钉一遍）。
-        assert_eq!(Part::KNOB.raw(), sys::LV_PART_KNOB as u32);
-        assert_eq!(Part::SELECTED.raw(), sys::LV_PART_SELECTED as u32);
+        // 两侧同为 `lv_part_t`（平台浮动别名）⇒ **不得**在一侧写 `as u32`（MSVC 下是 i32）；
+        // 下面两行与裸字面量比较，字面量按左侧类型推断，故两平台都成立。
+        assert_eq!(Part::KNOB.raw(), sys::LV_PART_KNOB);
+        assert_eq!(Part::SELECTED.raw(), sys::LV_PART_SELECTED);
         assert_eq!(Part::KNOB.raw(), 0x030000, "LV_PART_KNOB");
         assert_eq!(Part::SELECTED.raw(), 0x040000, "LV_PART_SELECTED");
         // 已登记的四个取值与原值不冲突（无重复 / 错值）。
