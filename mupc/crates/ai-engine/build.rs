@@ -16,19 +16,55 @@
 use std::path::Path;
 
 fn main() {
+    // 本构建脚本会发出 `rknn_real_rt`（= "真的链接 librknnrt.so、真 FFI 可用"）。
+    // **必须无条件声明**：rustc 1.80+ 对未声明的 cfg 会报 `unexpected_cfgs`，而 CI 的 lint
+    // job 用 `-D warnings` ⇒ 漏声明会直接变成编译错误（旧 cargo 忽略本指令，无副作用）。
+    println!("cargo:rustc-check-cfg=cfg(rknn_real_rt)");
+
     let npu_enabled = std::env::var("CARGO_FEATURE_NPU").is_ok();
-    let is_linux = std::env::var("CARGO_CFG_TARGET_OS").map(|os| os == "linux").unwrap_or(false);
+    let is_linux = std::env::var("CARGO_CFG_TARGET_OS")
+        .map(|os| os == "linux")
+        .unwrap_or(false);
+
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let is_aarch64 = target_arch == "aarch64";
 
     if !npu_enabled {
-        println!("cargo:warning=AI Engine: npu feature 未启用，跳过 RKNN FFI 链接");
+        // 安全网：aarch64 目标的**部署**构建若漏了 `--features npu`，产物会静默变成
+        // stub（无 NPU 推理）—— 这里显式喊一声，避免"以为带了 NPU"。
+        if is_linux && is_aarch64 {
+            println!(
+                "cargo:warning=⚠️ AI Engine: aarch64 目标但 npu feature **未启用** ⇒ 产物为 stub（无 NPU 推理）。\
+                 部署构建请加 `--features npu`（build-for-rk3588.sh / CMake ENABLE_NPU 均已带）。"
+            );
+        } else {
+            println!("cargo:warning=AI Engine: npu feature 未启用，跳过 RKNN FFI 链接");
+        }
         return;
     }
 
     if !is_linux {
-        println!("cargo:warning=AI Engine: 非 Linux 平台 ({}), npu feature 使用 stub 实现",
-            std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default());
+        println!(
+            "cargo:warning=AI Engine: 非 Linux 平台 ({}), npu feature 使用 stub 实现",
+            std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+        );
         return;
     }
+
+    if !is_aarch64 {
+        // npu 开在非 aarch64（本机 x86_64 开发 / CI）⇒ 真 FFI 不编译（见
+        // `src/rknn_runtime_sys.rs` 的 cfg：Rockchip 只发 aarch64 的 .so），走 stub。
+        println!(
+            "cargo:warning=AI Engine: 目标 {} 非 aarch64 ⇒ npu feature 使用 stub 实现（与 Windows 同口径）",
+            target_arch
+        );
+        return;
+    }
+
+    // 走到这里 = npu 已开 ∧ linux ∧ aarch64 ⇒ **真 FFI**。
+    // 发出单一真源 cfg：`rknn_runtime_sys.rs`（链接与 stub 的分派）与 `model_manager.rs`
+    // （NPU 路径 vs CPU 优雅回退）都按它判定，避免"两处谓词手工同步"再次漂移（2026-09-20 评审）。
+    println!("cargo:rustc-cfg=rknn_real_rt");
 
     println!("cargo:rerun-if-env-changed=RKNN_VENDOR_DIR");
     println!("cargo:rerun-if-env-changed=RKNN_SDK_ROOT");
@@ -38,9 +74,9 @@ fn main() {
     // 优先级: RKNN_VENDOR_DIR > vendor/rknn (自动复制) > RKNN_SDK_ROOT 自动推导 > 默认 vendor/rknn
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace_vendor = Path::new(&manifest_dir)
-        .parent()  // crates/
+        .parent() // crates/
         .unwrap()
-        .parent()  // mupc/
+        .parent() // mupc/
         .unwrap()
         .join("vendor")
         .join("rknn");
@@ -55,7 +91,10 @@ fn main() {
             println!("cargo:warning=使用自定义 RKNN_VENDOR_DIR: {}", custom);
             p.to_path_buf()
         } else {
-            println!("cargo:warning=RKNN_VENDOR_DIR 指定但不存在: {}，回退默认", custom);
+            println!(
+                "cargo:warning=RKNN_VENDOR_DIR 指定但不存在: {}，回退默认",
+                custom
+            );
             workspace_vendor
         }
     } else {
@@ -83,15 +122,13 @@ fn main() {
 
         if hash_file.exists() {
             // 已验证文件存在 → 校验 SHA256
-            let expected = std::fs::read_to_string(&hash_file)
-                .expect("Failed to read SHA256 file");
+            let expected = std::fs::read_to_string(&hash_file).expect("Failed to read SHA256 file");
             let expected = expected
                 .split_whitespace()
                 .next()
                 .expect("Invalid SHA256 file format");
-            let actual = compute_sha256(
-                &std::fs::read(&so_path).expect("Failed to read librknnrt.so"),
-            );
+            let actual =
+                compute_sha256(&std::fs::read(&so_path).expect("Failed to read librknnrt.so"));
             if expected != actual {
                 panic!(
                     "librknnrt.so SHA256 校验失败!\n  Expected: {}\n  Actual:   {}\n  \
@@ -111,19 +148,31 @@ fn main() {
             );
         } else {
             // 首次导入 → 生成 .unverified 文件，强制用户确认
-            let actual = compute_sha256(
-                &std::fs::read(&so_path).expect("Failed to read librknnrt.so"),
-            );
+            let actual =
+                compute_sha256(&std::fs::read(&so_path).expect("Failed to read librknnrt.so"));
             std::fs::write(&unverified_file, format!("{}  librknnrt.so\n", actual))
                 .expect("Failed to write SHA256 file");
-            println!("cargo:warning=╔══════════════════════════════════════════════════════════════╗");
-            println!("cargo:warning=║  librknnrt.so 首次导入 — SHA256 校验文件已生成               ║");
+            println!(
+                "cargo:warning=╔══════════════════════════════════════════════════════════════╗"
+            );
+            println!(
+                "cargo:warning=║  librknnrt.so 首次导入 — SHA256 校验文件已生成               ║"
+            );
             println!("cargo:warning=║  SHA256: {} ║", actual);
-            println!("cargo:warning=║  请确认此哈希与 Rockchip 官方 SDK 一致后，重命名文件:        ║");
-            println!("cargo:warning=║    mv {} {} ║",
-                unverified_file.display(), hash_file.display());
-            println!("cargo:warning=║  官方 SDK: https://github.com/airockchip/rknn-toolkit2       ║");
-            println!("cargo:warning=╚══════════════════════════════════════════════════════════════╝");
+            println!(
+                "cargo:warning=║  请确认此哈希与 Rockchip 官方 SDK 一致后，重命名文件:        ║"
+            );
+            println!(
+                "cargo:warning=║    mv {} {} ║",
+                unverified_file.display(),
+                hash_file.display()
+            );
+            println!(
+                "cargo:warning=║  官方 SDK: https://github.com/airockchip/rknn-toolkit2       ║"
+            );
+            println!(
+                "cargo:warning=╚══════════════════════════════════════════════════════════════╝"
+            );
             panic!("librknnrt.so 未验证。请按上述提示确认 SHA256 后重命名 .unverified 文件，然后重新构建。");
         }
     } else {
@@ -131,7 +180,10 @@ fn main() {
             "cargo:warning=librknnrt.so 未找到 ({}), 跳过 SHA256 校验",
             vendor_dir.display()
         );
-        println!("cargo:warning=提示: 将 librknnrt.so 复制到 {} 或设置 RKNN_VENDOR_DIR", vendor_dir.display());
+        println!(
+            "cargo:warning=提示: 将 librknnrt.so 复制到 {} 或设置 RKNN_VENDOR_DIR",
+            vendor_dir.display()
+        );
     }
 }
 
@@ -145,10 +197,8 @@ fn find_rknn_library() -> Option<std::path::PathBuf> {
     // 方法 1: RKNN_SDK_ROOT 环境变量
     if let Ok(sdk_root) = std::env::var("RKNN_SDK_ROOT") {
         let candidates = vec![
-            Path::new(&sdk_root)
-                .join("rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"),
-            Path::new(&sdk_root)
-                .join("rknpu2/runtime/Linux/librknn_api/armhf/librknnrt.so"),
+            Path::new(&sdk_root).join("rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"),
+            Path::new(&sdk_root).join("rknpu2/runtime/Linux/librknn_api/armhf/librknnrt.so"),
             Path::new(&sdk_root).join("librknnrt.so"),
         ];
         for c in &candidates {
@@ -160,9 +210,8 @@ fn find_rknn_library() -> Option<std::path::PathBuf> {
 
     // 方法 2: 项目父目录搜索
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let workspace_root =
-        Path::new(&manifest_dir).parent()?.parent()?; // crates/ -> mupc/
-    let project_parent = workspace_root.parent()?;      // mupc/ -> workspace/
+    let workspace_root = Path::new(&manifest_dir).parent()?.parent()?; // crates/ -> mupc/
+    let project_parent = workspace_root.parent()?; // mupc/ -> workspace/
 
     let rknn_root = project_parent.join("rknn-toolkit2-2.3.2");
     if rknn_root.exists() {
@@ -195,7 +244,10 @@ fn find_rknn_library() -> Option<std::path::PathBuf> {
 fn copy_rknn_to_vendor(src: &Path, vendor_dir: &Path) {
     let dest = vendor_dir.join("librknnrt.so");
     if dest.exists() {
-        println!("cargo:warning=librknnrt.so 已存在于 {}，跳过复制。如需更新，请手动删除旧文件。", dest.display());
+        println!(
+            "cargo:warning=librknnrt.so 已存在于 {}，跳过复制。如需更新，请手动删除旧文件。",
+            dest.display()
+        );
         return;
     }
     if let Err(e) = std::fs::copy(src, &dest) {
@@ -206,10 +258,7 @@ fn copy_rknn_to_vendor(src: &Path, vendor_dir: &Path) {
             e
         );
     } else {
-        println!(
-            "cargo:warning=已将 librknnrt.so 复制到 {}",
-            dest.display()
-        );
+        println!("cargo:warning=已将 librknnrt.so 复制到 {}", dest.display());
     }
 }
 

@@ -12,15 +12,17 @@ use crate::config::{AiEngineConfig, ModeConfig};
 use crate::data_fusion::{normalize_observation, DataFusionEngine, FusedSystemState, RealtimeData};
 use crate::dynamic_config_loader::DynamicConfigLoader;
 use crate::error::AiEngineError;
-use crate::lstm_model::{LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction};
+use crate::lstm_model::{
+    LstmInput, LstmModel, LstmOutput, ProbabilisticLoadOutput, QuantilePrediction,
+};
 use crate::mode_selector::{ModeSelector, RunningMode, SwitchSource};
 use crate::model_registry::{ModelRegistry, SceneModelState};
-use crate::pipeline_config::EnhancementLevel;
-use crate::prediction_pipeline::PredictionPipeline;
-use crate::reward_calculator::RewardCalculator;
 use crate::online_updater::{
     DataPoint, DefaultPerformanceMonitor, DefaultSafetyChecker, OnlineUpdater, SafeOnlineUpdater,
 };
+use crate::pipeline_config::EnhancementLevel;
+use crate::prediction_pipeline::PredictionPipeline;
+use crate::reward_calculator::RewardCalculator;
 use crate::rl_model::ActionOutput;
 use crate::safety_wrapper::{SafetyRLWrapper, SafetyWrapperEvent};
 use std::collections::VecDeque;
@@ -144,7 +146,8 @@ impl ModelManager {
             (config.lstm.step_seconds / config.fusion.fusion_period_secs.max(1)).max(1);
 
         // v2.17/v3.1: 创建 broadcast channel 并注入 SafetyRLWrapper
-        let (safety_event_tx, safety_event_rx) = tokio::sync::broadcast::channel::<SafetyWrapperEvent>(64);
+        let (safety_event_tx, safety_event_rx) =
+            tokio::sync::broadcast::channel::<SafetyWrapperEvent>(64);
         let safety_wrapper = Arc::new(SafetyRLWrapper::new(
             config.safety_wrapper.clone(),
             Some(safety_event_tx),
@@ -187,9 +190,7 @@ impl ModelManager {
         let online_updater = Arc::new(RwLock::new(OnlineUpdater::new(
             config.online_update.clone(),
         )));
-        let safety_checker = Arc::new(DefaultSafetyChecker::new(
-            ONLINE_UPDATE_SAFETY_THRESHOLD,
-        ));
+        let safety_checker = Arc::new(DefaultSafetyChecker::new(ONLINE_UPDATE_SAFETY_THRESHOLD));
         let perf_monitor = Arc::new(DefaultPerformanceMonitor::new(
             ONLINE_UPDATE_PERFORMANCE_THRESHOLD,
         ));
@@ -232,7 +233,9 @@ impl ModelManager {
     ///
     /// 返回一个新的 broadcast Receiver，可多次调用创建多个独立订阅。
     /// 每个 Receiver 通过 `recv()` 异步接收 SafetyWrapperEvent。
-    pub fn subscribe_safety_events(&mut self) -> tokio::sync::broadcast::Receiver<SafetyWrapperEvent> {
+    pub fn subscribe_safety_events(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<SafetyWrapperEvent> {
         // resubscribe() 创建新的 Receiver 订阅同一 Sender
         self.safety_event_rx.resubscribe()
     }
@@ -245,7 +248,10 @@ impl ModelManager {
     /// # 参数
     /// - `model_path`: .rknn 模型文件路径
     /// - `expected_sha256`: 可选的 SHA256 期望值（None 时跳过校验）
-    #[cfg(feature = "npu")]
+    // 与真 FFI 同一判据（构建脚本的 `rknn_real_rt`）：`feature = "npu"` 在非 aarch64 上
+    // 编译的是 stub ⇒ 若仍走 NPU 分支，`rknn_init` 返回 -1 会让启动期**硬失败**，
+    // 而不是文档承诺的"WARN 且 Ok 不阻塞启动"（2026-09-20 评审修复）。
+    #[cfg(rknn_real_rt)]
     pub async fn load_rknn_model(
         &self,
         model_path: &std::path::Path,
@@ -253,10 +259,7 @@ impl ModelManager {
     ) -> Result<(), AiEngineError> {
         use crate::rknn_runtime::RknnRuntime;
 
-        tracing::info!(
-            "加载 RKNN 模型: {} (NPU enabled)",
-            model_path.display()
-        );
+        tracing::info!("加载 RKNN 模型: {} (NPU enabled)", model_path.display());
 
         let runtime = RknnRuntime::new(model_path, expected_sha256)?;
         runtime.load().await?;
@@ -266,7 +269,7 @@ impl ModelManager {
     }
 
     /// 无 NPU 时的回退：记录 WARN 日志，走 CPU LSTM 推理路径
-    #[cfg(not(feature = "npu"))]
+    #[cfg(not(rknn_real_rt))]
     pub async fn load_rknn_model(
         &self,
         _model_path: &std::path::Path,
@@ -395,7 +398,9 @@ impl ModelManager {
             let raw_vector = fused_state_with_forecast.to_input_vector();
             let normalized_vector = normalize_observation(&raw_vector);
             let action_space_config = self.action_space_config.read().await;
-            registry.decide(&normalized_vector, &action_space_config).await?
+            registry
+                .decide(&normalized_vector, &action_space_config)
+                .await?
         };
 
         // Step 6.5: v2.17 安全包装器检查（RL 决策后、ActionValidator 前）
@@ -457,7 +462,8 @@ impl ModelManager {
                 let yesterday_offset = self.config.lstm.yesterday_offset_steps;
                 let mut history = self.lstm_history.write().await;
                 let yesterday_pv = if history.len() >= yesterday_offset {
-                    history.get(history.len() - yesterday_offset)
+                    history
+                        .get(history.len() - yesterday_offset)
                         .map(|s| s.pv_power)
                         .unwrap_or(current_pv)
                 } else {
@@ -624,25 +630,32 @@ impl ModelManager {
             90 => {
                 // p10p50p90 格式: (2, 15, 3) = [PV:P10(15), PV:P50(15), PV:P90(15),
                 //                                Load:P10(15), Load:P50(15), Load:P90(15)]
-                let pv_p50: Vec<f64> = output.predictions[15..30].iter().map(|&v| v as f64).collect();
-                let load_p50: Vec<f64> = output.predictions[60..75].iter().map(|&v| v as f64).collect();
+                let pv_p50: Vec<f64> = output.predictions[15..30]
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect();
+                let load_p50: Vec<f64> = output.predictions[60..75]
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect();
 
                 // 从同一输出构建 D10 分位数
-                let load_quantiles = self.build_quantiles_from_output(
-                    &output.predictions, timestamp, output_len,
-                );
+                let load_quantiles =
+                    self.build_quantiles_from_output(&output.predictions, timestamp, output_len);
 
                 Ok((pv_p50, load_p50, load_quantiles))
             }
             47 | 30 => {
                 // legacy 格式: [pv(15), load(15), (quantiles(15), shock(1), base(1))]
-                let pv_forecast: Vec<f64> = output.predictions[..15].iter().map(|&v| v as f64).collect();
-                let load_forecast: Vec<f64> = output.predictions[15..30].iter().map(|&v| v as f64).collect();
+                let pv_forecast: Vec<f64> =
+                    output.predictions[..15].iter().map(|&v| v as f64).collect();
+                let load_forecast: Vec<f64> = output.predictions[15..30]
+                    .iter()
+                    .map(|&v| v as f64)
+                    .collect();
 
                 let load_quantiles = if output_len >= 47 {
-                    self.build_quantiles_from_output(
-                        &output.predictions, timestamp, output_len,
-                    )
+                    self.build_quantiles_from_output(&output.predictions, timestamp, output_len)
                 } else {
                     None
                 };
@@ -655,7 +668,12 @@ impl ModelManager {
                     "LSTM 输出维度 {} 未识别，使用前 15 维作为 PV 预测",
                     output_len
                 );
-                let pv: Vec<f64> = output.predictions.iter().take(15).map(|&v| v as f64).collect();
+                let pv: Vec<f64> = output
+                    .predictions
+                    .iter()
+                    .take(15)
+                    .map(|&v| v as f64)
+                    .collect();
                 Ok((pv, vec![0.0; 15], None))
             }
         }
@@ -678,9 +696,18 @@ impl ModelManager {
 
             let mut quantiles: Vec<QuantilePrediction> = Vec::with_capacity(45);
             for i in 0..15 {
-                quantiles.push(QuantilePrediction { quantile: 0.10, value: predictions[45 + i] });
-                quantiles.push(QuantilePrediction { quantile: 0.50, value: predictions[60 + i] });
-                quantiles.push(QuantilePrediction { quantile: 0.90, value: predictions[75 + i] });
+                quantiles.push(QuantilePrediction {
+                    quantile: 0.10,
+                    value: predictions[45 + i],
+                });
+                quantiles.push(QuantilePrediction {
+                    quantile: 0.50,
+                    value: predictions[60 + i],
+                });
+                quantiles.push(QuantilePrediction {
+                    quantile: 0.90,
+                    value: predictions[75 + i],
+                });
             }
 
             Some(ProbabilisticLoadOutput {
@@ -701,9 +728,18 @@ impl ModelManager {
                 let p50 = *predictions.get(15 + i).unwrap_or(&0.0);
                 let p90 = *predictions.get(30 + i).unwrap_or(&p50);
                 let p10 = (p50 * 0.7).max(0.0);
-                quantiles.push(QuantilePrediction { quantile: 0.10, value: p10 });
-                quantiles.push(QuantilePrediction { quantile: 0.50, value: p50 });
-                quantiles.push(QuantilePrediction { quantile: 0.90, value: p90 });
+                quantiles.push(QuantilePrediction {
+                    quantile: 0.10,
+                    value: p10,
+                });
+                quantiles.push(QuantilePrediction {
+                    quantile: 0.50,
+                    value: p50,
+                });
+                quantiles.push(QuantilePrediction {
+                    quantile: 0.90,
+                    value: p90,
+                });
             }
 
             Some(ProbabilisticLoadOutput {
@@ -734,7 +770,9 @@ impl ModelManager {
     /// erfc approximation
     fn erfc_helper(x: f32) -> f32 {
         let abs_x = x.abs();
-        if abs_x > 8.0 { return 0.0; }
+        if abs_x > 8.0 {
+            return 0.0;
+        }
         let exp_term = (-x * x).exp();
         let denom = std::f32::consts::PI * abs_x + (std::f32::consts::PI * x * x + 4.0).sqrt();
         exp_term / denom
@@ -811,16 +849,17 @@ impl ModelManager {
         use crate::model_validator::{validate_rknn_model, PredictionModelType};
 
         // 校验模型文件
-        validate_rknn_model(ec_model_path, PredictionModelType::ErrorCorrection, expected_sha256)?;
+        validate_rknn_model(
+            ec_model_path,
+            PredictionModelType::ErrorCorrection,
+            expected_sha256,
+        )?;
 
         // 加载 EC Runtime（通过 PredictionPipeline 内部管理）
         // 当前阶段：EC Runtime 在 PredictionPipeline::new() 中已创建。
         // 若需要热加载（OTA 升级后），可在此处重新创建 Runtime。
 
-        tracing::info!(
-            "误差修正模型加载完成: path={}",
-            ec_model_path.display()
-        );
+        tracing::info!("误差修正模型加载完成: path={}", ec_model_path.display());
         Ok(())
     }
 

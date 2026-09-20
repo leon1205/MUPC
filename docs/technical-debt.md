@@ -356,6 +356,8 @@
 | U-59 | 真源缺口（登记） | **P2** | **PRD F6 的「IEC 104 连接状态」恒为「未知」**：设计 §4.1 #1 明确要求 `gateway` crate **新增 `Iec104Server::link_state() -> LinkState`**（`ConnectionState` 的 5 个变体 `Disconnected/Connecting/WaitingStartDt/Connected/Stopped` 已就绪，映射干净），而全仓 **`grep "fn link_state"` 零命中** ⇒ `display_host` 的 `device.iec104` **硬为 `LinkState::Unknown`**（`display_host.rs:245`，代码注释已如实登记）。PRD F6 表列的四个态（已连接/连接中/断开/未配置）**本功能域不可达**，ST-12/ST-13 中该行不成立 | **登记·本轮不做**（PM 裁定：属**功能新增**而非缺陷修复，须走「实现 → 规格评审 → 代码质量评审」，且要跨 3 文件接线：gateway 新增方法 + `display_host` 注入点 + `startup.rs` 传参；`display_host` 当前**完全不持有 gateway 句柄**）⇒ 拆独立单元，**Linux 环境下实施**。F6.5 允许显示「未知」，故**不构成假值**（详见本轮审查报告 3a-A1）<br>**已实现（2026-09-19，交接清单 L-5）**：`gateway/src/iec104/server.rs` 新增对外聚合枚举 `LinkState{NotConfigured,Disconnected,Connecting,Connected}` 与 `Iec104Server::link_state()`（判据与设计 §4.1 #1 逐字一致：未启动→NotConfigured；已启动无连接→Disconnected；有连接但均未 `Connected`→Connecting；任一连 `Connected`→Connected；新增 `started: AtomicBool` 区分「未启动」与「无连接」）；`display_host` 增 `Option<Arc<Iec104Server>>` 注入点 + 1:1 映射 `map_iec104_link_state`（未装配 ⇒「未配置」）；`startup.rs` 把服务器实例**提前构造**（步骤 9 只做 `start()`）并接线。**测试**：gateway 3 例（未启动/已启动无连接/连接表聚合）+ display_host 2 例（未装配=未配置、映射逐变体自证）全部通过 |
 | U-60 | 语义收窄（登记·待 PM 确认） | **P3** | P3 日志页顶部的「实时日志已连接/已断开」通道条，其判据是**控制通道**可达性（`control_route.rs:303`），**不反映 1 Hz 读帧链路**。⇒ 「读链路已断、控制链路仍活」时（EDGE-20 场景），屏上会**同时**出现「实时日志已连接」与**整屏降级遮罩**，语义上易被现场误读为"日志正常"。设计 §6.3 原文即按控制通道判定（"断开由控制通道请求失败判定"），故属**设计如此**、非实现偏离 | **登记·待 PM 确认**：若认为该并存态会误导现场，候选改法 = 通道条改按**读帧链路**判定，或文案改为「日志服务已连接」（点明它指的是日志服务而非数据通道）。本轮**不改**（涉及上屏文案，须走 §3.6 收口）|
 | U-61 | FFI 边界两处既存缺口（登记） | **P2** | 由 2026-09-19 项目级审查的独立代码质量评审发现，**均非本轮引入、此前无人登记**：<br>① **用户闭包的 `Drop` panic 未被 `catch_unwind` 覆盖**：`event.rs` 的 `catch_unwind` 只包住闭包**调用**（`f(Event{..})`），而 `Ctx`（含用户捕获值）的**析构**发生在 `ReentryGuard::drop` 的 drain 与 `reclaim` 的立即分支里，**两者都在 `catch_unwind` 之外** ⇒ 若捕获值的 `Drop` panic，panic 从 C 蹦床逃进 C 帧 = **UB**（设计 §5.2 不变量 5 的同一理由）。<br>② **DELETE 分支未把 `p` 登记进 `active`**：只有非 DELETE 分支（`event.rs` 的 `active.push(p)`）登记；⇒ 若用户的 DELETE 回调内对**同一宿主**同步派发事件（如 `scroll_to_y`），嵌套蹦床会在 `f` 已被 `take` 前再取 `&mut *p`，与第 246 行的可变借用形成别名。实际危害**有限**：`f.take()` 后嵌套调用在 `f == None` 处提前 return，且模块文档所称"同闭包重入跳过"的保护在 DELETE 侧并不成立 | **登记**（如实标注"既存 + 现值不可达/危害有限"，**不夸大**）。建议收口方式：① 把 `Ctx` 的析构也纳入 `catch_unwind`（或把 `Box::from_raw` 的 drop 包进 `catch_unwind`）—— 与本轮 `diag` 的处置同一类；② DELETE 分支也推 `active`（或明确写清"DELETE 期间不支持对同宿主重入派发"的契约）。**须与本表 U-58 的 ASAN 定位同批做**（三者都在同一段延迟回收逻辑上）<br>**已收口（2026-09-19，交接清单 L-3）**：① `ReentryGuard::drop` 的 drain 循环与 `reclaim` 的立即分支现在都用 `catch_unwind` 包住 `Box::from_raw` 的析构（捕获值 `Drop` panic 只记录、不跨 FFI 展开）；② DELETE 分支派发前也把 `p` 推入 `active`（与闭包调用同等登记，嵌套调用命中 `is_executing` 直接返回），消除 `f` 被 `take` 后嵌套蹦床再取 `&mut *p` 的别名。**验证**：常规测试 369 passed / 0 failed；ASAN 20 次运行零报告 |
+| U-62 | 平台身份**从未被校验**（登记） | **P2** | 由 2026-09-20 评审发现（既存，非本轮引入）：① `ota-update/src/verifier.rs::verify_platform_compatibility` 的头部布局注释写了"魔数(4) + 版本(4) + **平台标识(4)** + 保留(20)"，但实现**只读** 魔数 与 版本(4..8)，**从不解析平台标识(8..12)**；`platform_version` 形参仅用于在 `PLATFORM_MIN_VERSION` 里取最低版本。② OTA 包元数据的 `target_platform`（`ota-update/src/firmware/mupc_package.rs:48`）全仓**只被赋值、从不校验**（构造处均为空串）。⇒ 为其他 Rockchip 平台构建、版本号达标的模型/包会被接受，直到设备上 `rknn_init` 才失败 | **登记**（不臆造校验）：真正的平台校验需要先有 **.rknn 头部规格**（设计文档未定义该布局，现有注释是本模块自造的约定）或改为校验 OTA 包的 `target_platform`（设计 §`target_platform` 行给了取值口径 `rk3588-openeuler`，但设备侧身份来源需一并定：`/proc/device-tree/model` 与包内字符串的**匹配口径**必须显式定义，否则严格比较会误拒真实包）。**已把"平台不被校验"钉成用例**（`verifier.rs::test_verify_platform_compatibility_valid` 故意写入不符的平台标识并断言仍通过），防后来者误以为它已生效 |
+| U-63 | 回滚后**未通知策略引擎**（登记） | **P2** | 设计 §2.9.2 回滚流程第 5 步要求"重启策略引擎加载旧模型"，而：① `mupcd` 用 `OtaManagerImpl::new`（无回调）构造 OTA 管理器；② 策略引擎侧**没有**模型重载/通知入口（`AiIntegrator` 只有 `set_model_manager`）⇒ 自动回滚完成后，策略引擎会继续持有被否决的模型直到进程重启。**管理器侧的转发缺陷已修**（2026-09-20 评审：`with_callbacks` 早先只把回调给了 `ModelApplicator`、给 `RollbackManager` 传 `None`；现同份转发给两者，并有回归用例 + 变异验证钉住） | **半修**：转发路径已可用且被用例覆盖；**剩余的接线阻塞点**是在策略引擎补一个"模型已变更/请重载"入口（属功能新增，须走实现→规格评审→质量评审），随后把 `startup.rs` 的 `OtaManagerImpl::new` 换成 `with_callbacks(..., Some(cb))`。`startup.rs` 该处已加注释说明现状与改法 |
 
 > ⚠️ **统计口径提示（本轮如实标注）**：本表第 7 节的既存行**未计入** U-40 / U-41 / U-42
 > （已核对：单元 K 行只列了 4 条、单元 L 的 U-42 无对应行）⇒ 该节的「总计」**本就偏低 ≥3**。
@@ -439,6 +441,7 @@
 | U-05 安全启动信任链 | 5天 | RK3588 OTP/eFuse 驱动 |
 | U-06 WiFi/NearLink/BLE | 10天 | Hi2821 硬件 + 内核驱动 |
 | U-25 waveform/report 对接 | 3天 | 依赖 IEC 104 TI=122 + MQTT 主题发布完成 |
+
 
 ### 8.6 Linux 环境交接清单（12 号本地显示终端，2026-09-19）
 
@@ -534,6 +537,51 @@
 其中 **45 条是 `casting to the same type is unnecessary (u32 -> u32)`**（集中在 `local-display/src/lvgl/{widgets,style,obj}.rs`）——**与 L-1 同一根因**：Linux 上 FFI 枚举即 u32，而薄层为跨平台写的 `as sys::lv_xxx_t` 在 Linux 上变成恒等转换 ⇒ **不能一删了之**（删了 Windows 侧可能编不过），需按 `EventCode` 的别名化思路重做。其余为 unused import/variable、`map_or`、`deref`、`clamp` 等常规项。**✅ 已裁定并执行（2026-09-19）：清账** —— 45 条 cast 按 `EventCode` 的别名化思路重做（8 个薄层 newtype 内层类型改为 FFI 别名），其余逐条机械修复或加**带理由**的 `#[allow]`；清后 `cargo clippy --workspace` **0 告警 / 0 错误**，`-D warnings` gate 自此可按 CI 原口径运行（不含 `--tests`；测试目标的既有告警不在该 gate 口径内）。
 
 **L-7 · 📋 提醒（未动）**：U-42 字体门禁与设计 §14 的 R-03 / R-04 / R-05 / R-22 仍待真机。
+
+#### 8.6.2 CI test job 打通 + 既有失败测试修复（2026-09-19 续）
+
+L-1~L-6 完成后，CI 的 `lint` job 可达（clippy 0 告警），但 `test` job 仍**结构性跑不起来**。
+本节记录根因与修复：
+
+**① `npu` 构建接线缺陷（P0，阻断 CI test/lint job 与 CMake 的"无 NPU"路径）**
+
+- **现象**：x86_64 上 `cargo test --workspace` 在链接期失败 —— `vendor/rknn/librknnrt.so`
+  是 **aarch64** 库，而 `#[link(name = "rknnrt")]` 原先只按 `target_os = "linux"` 判定
+  ⇒ `rust-lld: ... is incompatible with elf64-x86-64`。CI（无 vendor/）同理报
+  `cannot find -lrknnrt`。
+- **第二层缺陷**：`mupc-ai-engine` 的 `default = ["npu"]` 让"关 npu"**不可达** ——
+  `cargo --workspace` 类命令会打开**每个成员自身**的 default features（与依赖方是否
+  `default-features = false` 无关）⇒ `--no-default-features` 无效（CMakeLists 原注释
+  所依赖的假设不成立），CI 的 "no npu" 回退构建同样会链接失败。
+- **修复**：(a) 真 FFI 的 cfg 增补 `target_arch = "aarch64"`（Rockchip 只发布 aarch64 的
+  .so —— 注：build.rs 的自动探测同时找 `aarch64/` 与 `armhf/`，但新 cfg 只认 aarch64，
+  armhf 分支自此只会在 aarch64 目标上误拷 32 位库）；(b) `mupc-ai-engine` 改
+  `default = []`，三个依赖方改 `default-features = false` ⇒ **`--features npu` 成为唯一开关**；
+  (c) build.rs 补两条安全网警告（aarch64 漏开关 ⇒ 提示"部署请加 --features npu"；非 aarch64
+  开 npu ⇒ 提示走 stub）。
+- **验证**：x86_64 全量测试**链接错误 0**；aarch64 + `--features npu` 仍链接真实库
+  （SHA256 校验通过）；aarch64 不带 npu 时给出上述警告并走 stub。
+
+**② 既有失败测试逐个修复（这些曾让 CI test job 即使能跑也必红）**
+
+| crate | 失败项 | 根因（实测） | 处置 |
+|-------|--------|--------------|------|
+| data-processing | `waveform::trigger::test_cooldown` | 用例期望"冷却期过后**持续故障**再次触发"，与设计 §3.3.2 状态机（`Triggered` 仅在完全恢复后回 `Normal`，**回差优先于冷却**）相悖；P1-03 引入回差后该用例一直红 | 按设计**改测试**（补全"恢复→回 Normal→再越限"的完整路径） |
+| data-processing | `fault_recorder_tests` | ① 临时库只按 pid 命名 ⇒ 同进程多用例抢锁（`database is locked`）；② `trigger_time` 写入用**秒**、查询/测试用**毫秒**（设计 §3.3.3 与建表注释均规定毫秒）⇒ 时间范围查询永远取不到 | ① 按用例名隔离库文件；② 写入与保留期截止统一改为 `timestamp_millis()` |
+| mqtt-plugin | `test_mqtt_client_creation` ×2 | 构造函数经 tokio 通道，而用例是同步 `#[test]` ⇒ "no reactor running" | 改 `#[tokio::test]` |
+| mqtt-bridge | `test_qos_mapping` | `LocalMqttClient::new` 把 `connected` 硬编码为 `true`（握手都没做就自称已连接） | 初值改 `false`（真值由事件循环在 ConnAck/断开时置位） |
+| ota-update | 13 例 | ① `parse_hhmm` 不强制 `HH:MM` 两位（设计用 "02:00"）；② 同步读取口用 `tokio::RwLock::blocking_read()` 却在 `#[tokio::test]` 内直接调用；③ `generate_temp_path` 缺 `ota_` 前缀、不认 `?file=` 查询参数；④ `Downloader::new` 不校验临时目录；⑤ `rollback_success` 的两个断言指向**同一路径**（自相矛盾）；⑥ `with_callback` 的回调只在回滚时触发而用例断言其已被调用；⑦ `verify_platform_compatibility` 用例 `copy_from_slice` 源/目标长度不匹配；⑧ `validate()` 缺 `retry_count == 0` 下界 | ① 严格两位；② 测试改 `spawn_blocking` / 降为 `#[test]`；③ 补前缀 + 支持 `file=` 参数；④ 构造期 `create_dir_all` 校验；⑤ 改为校验**内容**为旧模型；⑥ 断言改为"未被调用"并注明触发路径；⑦ 按头部布局写 4 字节；⑧ 补下界（新增 `InvalidRetryCount`） |
+| hplc-plugin | doctest `HplcConfig::new` | 示例缺 `use`（E0433） | 补 `use hplc_plugin::config::HplcConfig;` |
+
+**结果**：`cargo test --workspace --exclude mupc-iec61850-plugin --exclude rs485-plugin
+--exclude device-trait` = **1738 passed / 0 failed**（退出码 0），`cargo clippy --workspace`
+= **0 错误 0 告警**。
+
+> ⚠️ **订正（2026-09-20 评审）**：上面两项只证明 `test` job 与 `lint` job 的 **clippy 一步**
+> 可跑通。`lint` job 的**第一步**是 `cargo fmt --all -- --check`（workflow:57），而仓库存在
+> **既有格式漂移**（实测 114 文件 / 1236 处差异）⇒ **`lint` job 整体仍结构性红**，不可在分支
+> 保护里启用（否则所有 PR 卡在 Check formatting）。**此前本节"lint 与 test 两个 job 均可按
+> 原口径跑通"的表述不准确，已更正。** 漂移清零是启用 `lint` 的前置。
 
 **⚠️ 环境侧两条（非模块代码，供后续同环境复现参考）**
 

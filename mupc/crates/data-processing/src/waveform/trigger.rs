@@ -279,13 +279,7 @@ impl TriggerEngine {
 
         // 频率过低（值 > 0 才判定）
         if freq > 0.0
-            && self.check_condition(
-                5,
-                freq,
-                self.config.frequency_low,
-                false,
-                timestamp_us,
-            )
+            && self.check_condition(5, freq, self.config.frequency_low, false, timestamp_us)
         {
             return TriggerResult::FrequencyLow;
         }
@@ -464,19 +458,45 @@ mod tests {
     }
 
     #[test]
+    /// 冷却期 + 回差的**联合语义**（设计 §3.3.2 的触发状态机）。
+    ///
+    /// ⚠️ **本用例于 2026-09-19 修正**：原版第三段直接断言"冷却期过后（故障仍持续）
+    /// 再次触发"，与设计 §3.3.2 的状态机相悖 —— 该设计规定 `Triggered` **仅在"完全回到
+    /// 正常范围"后**才回 `Normal`，即**回差优先于冷却**：持续故障不重复触发；冷却期约束的
+    /// 是"恢复 → 再次越限"之间的最小间隔。P1-03（`cab5879`）引入 `recovered`/回差后本用例
+    /// 即失效并一直红（CI 从未跑到 ⇒ 未被发现），本次按设计改正。
     fn test_cooldown() {
         let mut engine = make_engine();
-        // 第一次触发
+        // ① 首次过压（430 > 420）⇒ 触发
         let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::OverVoltage);
 
-        // 冷却期内不触发
+        // ② 冷却期内（cool_down_ms = 100 ⇒ 至 ts=101000）⇒ 不触发
         let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 50000);
         assert_eq!(result, TriggerResult::None);
 
-        // 冷却期过后再次触发
+        // ③ 冷却期已过，但**故障持续**（430 > 回差下限 420−5% = 399）⇒ 仍不重复触发
+        //    （回差优先：状态机停在 `Triggered`，不回到 `Normal`）
         let result = engine.detect(
             430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 200000,
+        );
+        assert_eq!(result, TriggerResult::None);
+
+        // ④ 恢复（380 < 399，退出回差区）⇒ Triggered → HysteresisWaiting
+        let result = engine.detect(
+            380.0, 380.0, 380.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 300000,
+        );
+        assert_eq!(result, TriggerResult::None);
+
+        // ⑤ 再一拍仍恢复（debounce_samples = 1）⇒ HysteresisWaiting → Normal（重新武装）
+        let result = engine.detect(
+            380.0, 380.0, 380.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 310000,
+        );
+        assert_eq!(result, TriggerResult::None);
+
+        // ⑥ 重新越限且冷却期已过 ⇒ 再次触发（这才是"冷却期过后再次触发"的完整路径）
+        let result = engine.detect(
+            430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 400000,
         );
         assert_eq!(result, TriggerResult::OverVoltage);
     }
@@ -488,5 +508,34 @@ mod tests {
         let mut engine = TriggerEngine::new(config);
         let result = engine.detect(430.0, 430.0, 430.0, 10.0, 10.0, 10.0, 0.0, 0.0, 50.0, 1000);
         assert_eq!(result, TriggerResult::None);
+    }
+    /// 冷却期的**可观测**语义：冷却窗口内**整拍早退**（连别的条件也不评判）。
+    ///
+    /// 修正说明（2026-09-20 评审）：`test_cooldown` 的三处 `None` 断言在**删掉冷却检查后
+    /// 依然成立**（状态机停在 `Triggered` 时本就返回 false）⇒ 对 `cool_down_ms` 零约束。
+    /// 本用例用"窗口内切换故障类型"制造可观测差异：若无冷却检查，过流是**另一个条件**、
+    /// 其状态机为 `Normal`，会当场触发。
+    #[test]
+    fn test_cooldown_suppresses_other_conditions_within_window() {
+        let mut engine = make_engine();
+
+        // ① 短路（条件 3）触发 ⇒ 进入冷却（cool_down_ms = 100 ⇒ 到 ts = 101000）
+        let r = engine.detect(
+            430.0, 430.0, 430.0, 600.0, 600.0, 600.0, 0.0, 0.0, 50.0, 1000,
+        );
+        assert_eq!(r, TriggerResult::ShortCircuit, "首次短路应触发");
+
+        // ② 冷却期内改用**另一个条件**（过流 200 > 150，其状态机为 Normal）
+        //    ⇒ 冷却检查整拍早退，不得触发
+        let r = engine.detect(
+            220.0, 220.0, 220.0, 200.0, 200.0, 200.0, 0.0, 0.0, 50.0, 50000,
+        );
+        assert_eq!(r, TriggerResult::None, "冷却期内不得触发任何条件");
+
+        // ③ 冷却期已过、同一过流条件 ⇒ 正常触发（证明 ② 确由冷却抑制，而非阈值未满足）
+        let r = engine.detect(
+            220.0, 220.0, 220.0, 200.0, 200.0, 200.0, 0.0, 0.0, 50.0, 200000,
+        );
+        assert_eq!(r, TriggerResult::OverCurrent, "冷却期后同一条件应正常触发");
     }
 }

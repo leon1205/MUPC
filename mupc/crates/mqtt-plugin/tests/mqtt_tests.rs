@@ -17,8 +17,9 @@ fn test_mqtt_qos() {
     assert_eq!(MqttQos::ExactlyOnce as u8, 2);
 }
 
-#[test]
-fn test_mqtt_client_creation() {
+// 同 `src/client.rs` 的单测：构造需要 tokio 运行时。
+#[tokio::test]
+async fn test_mqtt_client_creation() {
     let config = MqttConfig::default();
     let _client = MqttClient::new(config);
 }

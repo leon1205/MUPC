@@ -25,10 +25,10 @@ pub mod lstm_model;
 pub mod mode_selector;
 pub mod model_manager;
 pub mod model_registry;
+pub mod model_validator;
 pub mod online_updater;
 pub mod pareto_optimizer;
 pub mod performance_collector;
-pub mod model_validator;
 pub mod pipeline_config;
 pub mod prediction_pipeline;
 pub mod residual_buffer;
@@ -38,6 +38,9 @@ pub mod rl_model;
 
 pub mod rknn_runtime;
 pub mod rknn_runtime_sys;
+
+/// 本二进制是否编入真实 NPU 推理（构建期事实；见 [`rknn_runtime_sys::NPU_BUILD_ENABLED`]）。
+pub use rknn_runtime_sys::NPU_BUILD_ENABLED;
 pub mod rknn_types;
 pub mod robustness_manager;
 pub mod safety_config;

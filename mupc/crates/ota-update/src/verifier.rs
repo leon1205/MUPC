@@ -303,8 +303,14 @@ impl Verifier {
             ));
         }
 
-        // 从头部提取平台版本信息（偏移量 8-15 字节为版本字段）
-        // 格式：魔数(4) + 版本(4) + 平台标识(4) + 保留(20)
+        // 头部布局（本模块的约定）：魔数(4) + 版本(4) + 平台标识(4) + 保留(20)。
+        //
+        // ⚠️ **平台标识（8..12）当前不被解析**（2026-09-20 评审确认）：本函数只校验
+        // ① 魔数、② 文件大小区间、③ 版本号 —— 而版本号仅与 `PLATFORM_MIN_VERSION` 里
+        // **调用方给出的**平台名对应的最低版本比较；头部自称的平台与调用方是否一致、
+        // 与设备是否匹配，**都没有校验**。要真正校验平台身份，需先确定 .rknn 的真实头部规格
+        // （设计文档未定义）或改用 OTA 包的 `target_platform`（当前该字段亦从不校验）。
+        // 缺口登记见 `docs/technical-debt.md` U-62。
         let version_bytes = &header[4..8];
 
         // 解析版本信息（大端序）
@@ -557,17 +563,23 @@ mod tests {
         let verifier = Verifier::new(key_path).unwrap();
         let file_path = temp_dir.join("model.rknn");
 
-        // 创建大于 1MB 的有效 RKNN 文件
+        // 创建大于 1MB 的有效 RKNN 文件（魔数 + 版本 8 = RK3588 的最低要求）
         let mut data = vec![0u8; 1_048_576 + 100];
         data[0..4].copy_from_slice(b"RKNN");
         data[4..8].copy_from_slice(&8u32.to_be_bytes()); // 版本 8
-        data[8..16].copy_from_slice(b"RK3588    "); // 平台标识
+                                                         // 平台标识（8..12）**故意写成与调用方平台不符**的值：当前实现不解析它
+                                                         // ⇒ 仍应通过。把"平台不被校验"钉成用例，避免后来者误以为它已生效
+                                                         // （2026-09-20 评审：原写法写 `b"RK35"` 是**代码永不读取**的死数据）。
+        data[8..12].copy_from_slice(b"XXXX");
         tokio::fs::write(&file_path, data).await.unwrap();
 
         let result = verifier
             .verify_platform_compatibility(&file_path, "RK3588")
             .await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "当前实现不解析头部平台标识（已知缺口 U-62）—— 平台不符仍会通过"
+        );
     }
 
     #[tokio::test]

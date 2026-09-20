@@ -17,7 +17,7 @@ serde_yaml = "0.9"
 async-trait = "0.1"
 mupc-common = { path = "../common" }
 mupc-data-processing = { path = "../data-processing" }
-mupc-ai-engine = { path = "../ai-engine" }
+mupc-ai-engine = { path = "../ai-engine", default-features = false }
 mupc-intercore = { path = "../intercore" }
 chrono.workspace = true
 calamine.workspace = true

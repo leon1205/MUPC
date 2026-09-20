@@ -353,7 +353,7 @@ sudo systemctl restart mupcd
 | `unable to open database file` | `/opt/mupc/data/` 不存在或无权限 | `sudo mkdir -p /opt/mupc/data && sudo chown mupc:mupc /opt/mupc/data` |
 | `duplicate column name` | 迁移重复执行 | 删除 `mupc.db` 重建（开发阶段） |
 | `file is not a database` | db 文件损坏 | 删除 `mupc.db` 重建 |
-| `librknnrt.so: cannot open` | NPU 库缺失 | 从 SDK 复制或禁用 `enable_npu` |
+| `librknnrt.so: cannot open` | 产物是 **stub**（构建时未带 `--features npu`）或设备缺库 | 用 `--features npu` 重新构建（并确保 `librknnrt.so` 随产物部署）；⚠️ 配置项 `enable_npu` **只是信息性字段**，改它不会改变二进制能力 |
 | `cannot find -lssl` | OpenSSL 缺失 | `sudo apt install libssl-dev` |
 
 ---

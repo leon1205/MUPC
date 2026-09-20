@@ -133,6 +133,18 @@ jobs:
           # 优先使用 GitHub Secrets 中的 base64 编码 .so
           if [ -n "$RKNN_SO_B64" ]; then
             echo "$RKNN_SO_B64" | base64 -d > vendor/rknn/librknnrt.so
+            # ⚠️ `crates/ai-engine/build.rs` 对 `vendor/rknn/librknnrt.so` 做 SHA256 校验，
+            # 且**首次导入时缺 `.sha256` 会直接 panic**（防篡改闸门）⇒ 本步必须一并写出该
+            # 文件，否则 `--features npu` 的构建在干净 runner 上**必定失败**
+            # （构建 job 的缓存只含 ~/.cargo，不含 vendor/，重跑也一样）。
+            if [ -n "$RKNN_SO_SHA256" ]; then
+              echo "$RKNN_SO_SHA256  librknnrt.so" > vendor/rknn/librknnrt.so.sha256
+              echo "[RKNN] 期望哈希来自 secrets.RKNN_SO_SHA256（可校验来源真实性）"
+            else
+              sha256sum vendor/rknn/librknnrt.so > vendor/rknn/librknnrt.so.sha256
+              echo "WARNING: 未提供 secrets.RKNN_SO_SHA256 ⇒ 只能校验文件未损坏，无法校验来源真实性"
+            fi
+            cat vendor/rknn/librknnrt.so.sha256
             echo "BUILD_NO_NPU=0" >> $GITHUB_ENV
           elif [ -f vendor/rknn/librknnrt.so ]; then
             echo "BUILD_NO_NPU=0" >> $GITHUB_ENV
@@ -141,6 +153,7 @@ jobs:
           fi
         env:
           RKNN_SO_B64: ${{ secrets.RKNN_SO_B64 }}
+          RKNN_SO_SHA256: ${{ secrets.RKNN_SO_SHA256 }}
 
       - name: Cache cross cargo
         uses: actions/cache@v4
@@ -212,6 +225,8 @@ jobs:
   #      而 `event.rs` 写死了 `i32`；`touch.rs` 的 `#[cfg(target_os="linux")] mod linux`
   #      漏引入 `select_index`。
   # ⇒ 本 job 自此为**硬门禁**：它红了就是真结论，不再有"未验证"豁免。
+  #   仓库设置侧：需在 master 的分支保护里把本 job（check 名 = job id `hmi`）加为
+  #   required status check —— 步骤与 check 名清单见 `mupc/build.md` §分支保护配置。
   #
   # 无 `needs:` —— 有意与 lint/test 并行：lint 若因 Linux 侧问题变红，本 job 仍能
   # 独立给出 HMI 的编译结论（这正是当前最需要的信号）。

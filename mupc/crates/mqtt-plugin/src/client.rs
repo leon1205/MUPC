@@ -224,8 +224,11 @@ impl MqttMessageHandler {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mqtt_client_creation() {
+    // `MqttClient::new` 内部经 tokio 通道（`client.rs` 的构造路径）⇒ 必须在运行时内构造，
+    // 否则 panic「there is no reactor running」（与相邻 `test_mqtt_client_disconnected_state`
+    // 同口径）。
+    #[tokio::test]
+    async fn test_mqtt_client_creation() {
         let config = MqttConfig::default();
         let client = MqttClient::new(config);
         assert_eq!(client.config().client_id, "mupc_client");

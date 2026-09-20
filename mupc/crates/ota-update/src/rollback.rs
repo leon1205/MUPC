@@ -507,11 +507,17 @@ mod tests {
         let result = RollbackManager::with_callback(models_dir, 3, callback);
         assert!(result.is_ok());
 
-        let manager = result.unwrap();
-        // restart_strategy_engine requires async runtime; tested via integration
-
+        let _manager = result.unwrap();
+        // ⚠️ `with_callback` 只**保管**回调；真正的调用发生在 `rollback()` →
+        // `restart_strategy_engine()`（异步）里 —— 本用例不执行回滚，故此刻回调必然**未**
+        // 被调用（2026-09-19 修正：原断言写的是 `Some(Lstm)`，与该用例自己的注释
+        // "restart_strategy_engine requires async runtime; tested via integration" 相悖，
+        // 永不可能成立）。回调的**触发**由集成测试覆盖。
         let notified = notified_type.lock().unwrap();
-        assert_eq!(*notified, Some(ModelType::Lstm));
+        assert_eq!(
+            *notified, None,
+            "未执行回滚 ⇒ 回调不得被调用（回调触发属回滚路径，见 restart_strategy_engine）"
+        );
     }
 
     // ========== should_rollback 测试 ==========
@@ -666,11 +672,16 @@ mod tests {
         let result = manager.rollback(ModelType::Lstm).await;
         assert!(result.is_ok());
 
-        // 验证 new 模型已被删除
-        assert!(!new_model_path.exists());
-
-        // 验证旧模型已恢复到 current 目录
-        assert!(current_dir.join(MODEL_FILENAME).exists());
+        // ⚠️ 2026-09-19 修正：原断言 `!new_model_path.exists()` 与紧随其后的
+        // "旧模型已恢复到 current 目录"**指向同一路径**（`new_model_path` 就是
+        // `current_dir.join(MODEL_FILENAME)`）⇒ 两者自相矛盾、永不可能同时成立。
+        // 实现的口径是「删除 current 新模型 → 从 rollback/ 复制旧模型回 current」
+        // （`delete_current_model` + `restore_from_rollback`）⇒ 正确判据是**内容**为旧模型。
+        let restored = std::fs::read(&new_model_path).expect("回滚后 current 应存在模型文件");
+        assert_eq!(
+            restored, b"old_model_data",
+            "回滚后 current/ 下应是**旧模型**的内容（而非新模型）"
+        );
 
         // 验证回滚计数增加
         assert_eq!(manager.get_rollback_count(), 1);

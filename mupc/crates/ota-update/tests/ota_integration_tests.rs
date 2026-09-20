@@ -205,7 +205,10 @@ async fn test_get_update_status_idle() {
     let temp_dir = TempDir::new().unwrap();
     let manager = create_test_manager(&temp_dir).await;
 
-    let status = manager.get_update_status();
+    // `get_update_status` 用 `blocking_read()` ⇒ 不得在运行时线程内直接调用。
+    let status = tokio::task::spawn_blocking(move || manager.get_update_status())
+        .await
+        .expect("spawn_blocking");
     assert_eq!(status.state, OtaState::Idle);
     assert!(status.current_task_id.is_none());
 }
@@ -219,6 +222,8 @@ async fn test_get_update_history_empty() {
     let temp_dir = TempDir::new().unwrap();
     let manager = create_test_manager(&temp_dir).await;
 
-    let history = manager.get_update_history(10).unwrap();
+    let history = tokio::task::spawn_blocking(move || manager.get_update_history(10).unwrap())
+        .await
+        .expect("spawn_blocking");
     assert!(history.is_empty());
 }

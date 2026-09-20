@@ -97,7 +97,8 @@ cargo fmt --all
 #       export OPENSSL_DIR=/work/MUPC/external/openssl-4.0.1/aarch64-install
 
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-cargo build --workspace --release --target aarch64-unknown-linux-gnu \
+# ⚠️ ARM64 **必须显式 --features npu**（npu 是显式开关；漏带 ⇒ 构建成功但产物是 stub）
+cargo build --workspace --release --features npu --target aarch64-unknown-linux-gnu \
   --exclude mupc-iec61850-plugin --exclude device-trait
 
 # === CMake 构建 ===
@@ -114,11 +115,21 @@ cargo test -p <crate> <test_name>
 
 ### npu feature 行为
 
-| 平台 | 默认 | 实际链接 |
-|------|:--:|------|
-| Linux (开发/部署) | `npu` 启用 | 真实 `librknnrt.so` |
-| Windows (开发) | `npu` 启用 | 自动 stub（FFI 返回 -1） |
-| 显式禁用 | `--no-default-features` | stub |
+`npu` 是**显式开关**（`mupc-ai-engine` 的 `default = []`，且 `mupc-core-bin` /
+`mupc-ota-update` / `mupc-strategy-engine` 三个依赖方都是 `default-features = false`）
+—— 不开就是 stub，开了才按目标架构决定真实链接：
+
+| 场景 | 命令 | 实际链接 |
+|------|------|------|
+| **部署（aarch64）** | `--features npu`（`build-for-rk3588.sh` / CMake `ENABLE_NPU` / CI 的 build job 都已带） | 真实 `librknnrt.so`（缺库则**构建期硬报错**） |
+| aarch64 漏了开关 | 无 `--features npu` | stub —— build.rs 会显式警告"部署构建请加 `--features npu`" |
+| 本机开发 / CI lint+test（x86_64） | 默认 | stub（FFI 返回 -1；Rockchip 不发布 x86_64 的 `librknnrt.so`，真 FFI 仅 aarch64 编译） |
+| Windows（开发） | 默认 | stub |
+
+> 为什么必须这样接线（2026-09-19）：`cargo --workspace` 类命令会把**每个成员自身的
+> default features** 打开（与依赖方是否 `default-features = false` 无关），而
+> `#[link(name = "rknnrt")]` 原先只按 `target_os = "linux"` 判定 ⇒ CI 的 lint/test job
+> （x86_64）会去链接 aarch64 的 .so 而**结构性不可跑**（`is incompatible with elf64-x86-64`）。
 
 ### 仿真测试环境
 
