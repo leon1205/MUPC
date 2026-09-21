@@ -345,8 +345,7 @@ fn ac1_rule5_zero_scale_rejected() {
 }
 
 /// 规则 6 ③（负向）：`lookup` 查不到行 → **放行**（RC-3 现场改 `addr` 基准的合法配置
-/// 不得被拒）。规则 6 的 ①/② 判定核心由 `config.rs` 的 `check_symbolicity_row` 单测钉住
-/// （点表 618 行转写属 T4，届时另补配置级用例）。
+/// 不得被拒）。
 #[test]
 fn ac1_rule6_unknown_registry_row_passes_through() {
     let cfg = one_station(
@@ -354,6 +353,101 @@ fn ac1_rule6_unknown_registry_row_passes_through() {
         &regs_of("- { name: z, addr: 5000, count: 2, format: uint16, scale: 1.0, points: [{ at: 1, offset: -40.0 }, { at: 2, offset: -40.0 }] }"),
     );
     assert_ok(&cfg, "uint16 + 非零 offset 但点表无行（addr 基准已改）");
+}
+
+/// 规则 6 ②（**T4 补：点表已落 510 行 ⇒ 配置级用例可达**）：`lookup` 命中而行内 `offset`
+/// 与配置不等（含"漏配 → 缺省 0 ≠ −1600/−40"）→ Err；相等 → 放行。
+///
+/// 期望值取自 `point_table::POINT_REGS` 的 BMS 行（116 = −1600.0、117 = −40.0，PRD §9.5.1）。
+#[test]
+fn ac1_rule6_registry_offset_drift_rejected() {
+    // 正例：与点表登记值逐点一致（+ `soc` 点满足规则 4）
+    let ok = one_station(
+        "battery",
+        &regs_of(
+            "- { name: bms_io, addr: 100, count: 19, format: uint16, scale: 1.0, points: [ \
+               { at: 1, count: 16 }, \
+               { at: 17, offset: -1600.0 }, \
+               { at: 18, offset: -40.0 }, \
+               { at: 19, name: soc } ] }",
+        ),
+    );
+    assert_ok(&ok, "116/117/118 与点表登记值一致");
+    assert_eq!(
+        mupc_southd::point_table::lookup(Role::Battery, 116).unwrap().offset,
+        -1600.0
+    );
+
+    // 反例 1：**漏配 offset**（缺省 0 ≠ −1600，这正是"现场抄点表时漏了零点平移"的形态）
+    assert_err_contains(
+        &one_station(
+            "battery",
+            &regs_of(
+                "- { name: bms_io, addr: 100, count: 19, format: uint16, scale: 1.0, points: [ \
+                   { at: 1, count: 18 }, { at: 19, name: soc } ] }",
+            ),
+        ),
+        "与点表登记值",
+        "116 漏配 offset（0 ≠ −1600）",
+    );
+
+    // 反例 2：**配错值**（−1500 ≠ −1600）
+    assert_err_contains(
+        &one_station(
+            "battery",
+            &regs_of(
+                "- { name: bms_io, addr: 100, count: 19, format: uint16, scale: 1.0, points: [ \
+                   { at: 1, count: 16 }, { at: 17, offset: -1500.0 }, { at: 19, name: soc } ] }",
+            ),
+        ),
+        "与点表登记值",
+        "116 配了 −1500（≠ 登记的 −1600）",
+    );
+
+    // 反例 3：117 的 −40 抄成 −50
+    assert_err_contains(
+        &one_station(
+            "battery",
+            &regs_of(
+                "- { name: bms_io, addr: 100, count: 19, format: uint16, scale: 1.0, points: [ \
+                   { at: 1, count: 16 }, { at: 17, offset: -1600.0 }, { at: 18, offset: -50.0 }, \
+                   { at: 19, name: soc } ] }",
+            ),
+        ),
+        "与点表登记值",
+        "117 配了 −50（≠ 登记的 −40）",
+    );
+}
+
+/// 规则 6 的**适用边界**（三条，均由 T4 的真实点表决定）：
+/// ① 查表按 `role` 隔离 —— 同址在别的 role 上无行 ⇒ 放行（不误伤）；
+/// ② 非 16 位格式不参与本条（`int32_scaled`/`float32` ⇒ 放行，PRD §9.4.3 只要求 16 位可追溯）；
+/// ③ `sym_src` 空 + `offset ≠ 0` 的 ① 形态在**真实点表下结构性不可达**（BMS 全部非零
+///   offset 行都已登记来源），故 ① 由 `config.rs::symbolicity_rejects_untraceable_offset`
+///   的行级单测与 `point_table_vs_reference_config.rs::registry_internal_invariants`
+///   的全表不变量共同钉住（配置级无法构造出该形态 —— 这本身就是"表已自洽"的证明）。
+#[test]
+fn ac1_rule6_scope_boundaries() {
+    // ① role 隔离：BMS 的 116 在 Pcs 站上无登记行
+    assert_ok(
+        &one_station(
+            "pcs",
+            &regs_of("- { name: pcs_x, addr: 100, count: 17, format: uint16, scale: 1.0, points: [ { at: 1, count: 16 }, { at: 17, offset: -1600.0 } ] }"),
+        ),
+        "Pcs/116 无登记行（查表按 role 隔离）",
+    );
+    // ② int32_scaled 覆盖 116 时整块不参与符号性判定
+    assert_ok(
+        &one_station(
+            "hvac",
+            &regs_of(
+                "- { name: z, addr: 100, count: 18, format: int32_scaled, scale: 0.1, points: [ \
+                   { at: 1 }, { at: 3 }, { at: 5 }, { at: 7 }, { at: 9 }, { at: 11 }, { at: 13 }, \
+                   { at: 15 }, { at: 17 } ] }",
+            ),
+        ),
+        "int32_scaled 点不参与规则 6（116 被 32 位点覆盖）",
+    );
 }
 
 /// 规则 7（点位越界）：点覆盖区间超出 `[0, count)` → Err。

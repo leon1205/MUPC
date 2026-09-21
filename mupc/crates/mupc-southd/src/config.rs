@@ -1250,18 +1250,25 @@ south_stations:
 
     // ── 规则 6（符号性一致性）的判定核心：`check_symbolicity_row` 逐条 ──
     //
-    // 配置级用例（对 `POINT_REGS` 的命中/未命中）依赖 §11.4.4 的 618 行登记表，
-    // 该表属 **T4**（本 Task 落空表 ⇒ 配置级只覆盖"查不到行 → 放行"）。故此处直接对
-    // 判定核心注入登记行，把 ①（来源未登记）与 ②（与登记值不一致）两条钉死。
+    // 配置级用例（对**真实** `POINT_REGS` 的命中/未命中）见 `tests/s3b2_config.rs` 的
+    // `ac1_rule6_registry_offset_drift_rejected`（②，T4 落表后可达）与
+    // `ac1_rule6_scope_boundaries`（role 隔离 / 非 16 位格式）；**① 在真实表下结构性
+    // 不可达**（所有 `offset ≠ 0` 的标量行都已登记 `sym_src`，全表不变量由
+    // `tests/point_table_vs_reference_config.rs::registry_internal_invariants` 钉住），
+    // 故此处对判定核心**注入**登记行，把 ①（来源未登记）单独钉死。
 
-    use crate::point_table::{PointReg, SymSrc};
+    use crate::point_table::{PointReg, RegPointKind, SymSrc};
 
     fn row(offset: f64, sym_src: Option<SymSrc>) -> PointReg {
         PointReg {
             role: Role::Battery,
             addr: 116,
+            kind: RegPointKind::Scalar(RegFormat::Uint16),
+            scale: 0.1,
             offset,
             sym_src,
+            label: "簇组电流 A",
+            signals: &[],
         }
     }
 
