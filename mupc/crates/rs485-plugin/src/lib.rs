@@ -20,6 +20,9 @@ pub mod protocol;
 pub use config::Config;
 pub use device::{unpack_bits, Rs485Device};
 pub use device_trait::CrcMode;
+// S3b-2 T5：具名导出校验位，供 `mupc-southd` 透传站级 `parity` 使用（设计 §11.3/§11.4.5）
+// —— downstream 经本 crate 引用即可，**不必**再依赖 `device-trait`。
+pub use device_trait::Parity;
 pub use errors::Rs485Error;
 
 // ============================================================================

@@ -37,6 +37,10 @@ pub trait StationBus: Send + Sync {
     async fn read_holding(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
     /// 读一段输入寄存器（FC04；与 FC03 解码同构，供厂方点表用 input regs 的设备）。
     async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
+    /// 读离散输入（FC02）：`count` = **位数**（非寄存器数）；返回长度 = `count` 的位向量
+    /// （`bit k` = 响应字节第 `k%8` 位，bit0 = LSB —— 见 `rs485_plugin::unpack_bits`）。
+    /// S3b-2 T5（设计 §11.4.5）：位块（`RegFunc::Discrete`）的通路，与既有两方法同构。
+    async fn read_discrete(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<bool>, BusError>;
 }
 
 /// 真机：每 port 单 `Rs485Device`。构造 open 失败 → Err（该口全站 offline，不阻断启动，§10.7）。
@@ -55,16 +59,12 @@ impl Rs485PortBus {
     ///
     /// port 归一：不以 `/` 开头则补 `/dev/`（兼容 §10.3 两种写法：`ttyS4` / `/dev/ttyS4`）。
     /// 串口参数：baud_rate 透传 `conf.baud_rate`（per-station baud，同口一致性由段内
-    /// validate 保证，Task 1），余 8N1/timeout1000/Crc16Modbus 用 rs485 `Config::default()`。
+    /// validate 保证，Task 1），**parity 透传 `conf.parity`**（S3b-2 T5，见 [`bus_config`]），
+    /// 余 8N1/timeout1000/Crc16Modbus 用 rs485 `Config::default()`。
     /// device_addr = 该口首个站的 slave（仅作 handler/委托缺省；southd 读走 `*_from`
     /// 显式 slave，不受影响）。
     pub fn open(conf: &crate::config::StationConf) -> Result<Self, BusError> {
-        let c = rs485_plugin::config::Config {
-            port: normalize_port(&conf.port),
-            baud_rate: conf.baud_rate, // per-station baud（同口一致性由段内 validate 保证）
-            device_addr: conf.slave,
-            ..rs485_plugin::config::Config::default()
-        };
+        let c = bus_config(conf);
         let handler = rs485_plugin::handlers::ProtocolHandlerRegistry::get(&conf.protocol, &c)
             .ok_or_else(|| {
                 BusError::Open(
@@ -122,6 +122,45 @@ impl StationBus for Rs485PortBus {
         .await
         .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
     }
+
+    async fn read_discrete(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<bool>, BusError> {
+        // 同 read_holding/read_input：per-port bus_lock 强制口内串行后再做阻塞 IO
+        //（FC02 离散输入；count = 位数，返回长度 = count 的位向量）。
+        let _g = self.bus_lock.lock().await;
+        let dev = self.device.clone();
+        let port = self.port.clone();
+        tokio::task::spawn_blocking(move || {
+            tracing::debug!(port = %port, slave, addr, count, "southd 口读离散输入");
+            dev.read_discrete_inputs_from(slave, addr, count)
+                .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })
+        })
+        .await
+        .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
+    }
+}
+
+/// 参数 → rs485 口配置（纯函数，可测接缝：**不必触碰真串口**即可断言透传结果）。
+///
+/// **S3b-2 T5 新增 `parity` 透传（设计 §11.4.5 末条，v1.4 补）**：既有实现只透传
+/// `baud_rate`/`device_addr`，其余走 `Config::default()` ⇒ 校验位**恒 `Parity::None`**，
+/// 站级 `parity` 被**静默忽略**（配置写 `even` 却按 `none` 通信 ⇒ 空调站整站通信失败，
+/// 且现象是 "offline" 而非"配置错"）。该透传是 **D-1 空调校验位裁定（RC-6）的代码侧前置**：
+/// 现场一旦裁定为 `even`，**只改配置即可生效、无需改代码**。
+///
+/// 其余参数（`timeout_ms`/`crc_mode`/8N1/DE-RE）仍取 `Config::default()`（本轮不改）。
+fn bus_config(conf: &crate::config::StationConf) -> rs485_plugin::config::Config {
+    use crate::config::StationParity;
+    rs485_plugin::config::Config {
+        port: normalize_port(&conf.port),
+        baud_rate: conf.baud_rate, // per-station baud（同口一致性由段内 validate 保证）
+        device_addr: conf.slave,
+        parity: match conf.parity {
+            StationParity::None => rs485_plugin::Parity::None,
+            StationParity::Even => rs485_plugin::Parity::Even,
+            StationParity::Odd => rs485_plugin::Parity::Odd,
+        },
+        ..rs485_plugin::config::Config::default()
+    }
 }
 
 /// 归一串口节点：`ttyS4` → `/dev/ttyS4`；已带 `/`（`/dev/ttyS1`）原样返回。
@@ -151,6 +190,13 @@ pub struct MockBus {
     input_fail_next: std::sync::Mutex<Vec<(u8, u16)>>,
     /// FC04 读调用清单（(slave, addr, count)，测试断言）。
     pub input_calls: std::sync::Mutex<Vec<(u8, u16, u16)>>,
+    /// FC02 位读响应（离散输入）：(slave, addr) → 位向量。与 holding/input 三套**独立键**
+    ///（FC03/FC04/FC02 是三个不同地址空间）。
+    bits_responses: std::sync::Mutex<std::collections::HashMap<(u8, u16), Vec<bool>>>,
+    /// FC02 读失败队列（模拟超时），消费即清。
+    bits_fail_next: std::sync::Mutex<Vec<(u8, u16)>>,
+    /// FC02 读调用清单（(slave, addr, count)，测试断言）。
+    pub bit_calls: std::sync::Mutex<Vec<(u8, u16, u16)>>,
 }
 
 impl MockBus {
@@ -162,6 +208,9 @@ impl MockBus {
             input_responses: std::sync::Mutex::new(std::collections::HashMap::new()),
             input_fail_next: std::sync::Mutex::new(Vec::new()),
             input_calls: std::sync::Mutex::new(Vec::new()),
+            bits_responses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            bits_fail_next: std::sync::Mutex::new(Vec::new()),
+            bit_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
     /// 预置 (slave, addr) → 返回寄存器。
@@ -197,6 +246,26 @@ impl MockBus {
     /// FC04 读调用次数。
     pub fn input_call_count(&self, slave: u8, addr: u16) -> usize {
         self.input_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&(s, a, _)| s == slave && a == addr)
+            .count()
+    }
+
+    /// 预置 FC02 离散输入位响应（`count` = 位数；返回长度由测试自行保证 = count）。
+    pub fn put_bits(&self, slave: u8, addr: u16, bits: Vec<bool>) {
+        self.bits_responses.lock().unwrap().insert((slave, addr), bits);
+    }
+
+    /// FC02 读失败一次（队列；消费即清）。
+    pub fn fail_bits_once(&self, slave: u8, addr: u16) {
+        self.bits_fail_next.lock().unwrap().push((slave, addr));
+    }
+
+    /// FC02 读调用次数。
+    pub fn bit_call_count(&self, slave: u8, addr: u16) -> usize {
+        self.bit_calls
             .lock()
             .unwrap()
             .iter()
@@ -276,6 +345,39 @@ impl StationBus for MockBus {
                 addr,
                 count,
                 reason: "mock input 未预置".into(),
+            })
+    }
+
+    async fn read_discrete(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<bool>, BusError> {
+        self.bit_calls.lock().unwrap().push((slave, addr, count));
+        // 与 read_holding/read_input 同构：先在同一 guard 内查 + 删（消费即清），guard 出块即释放。
+        let to_fail = {
+            let mut q = self.bits_fail_next.lock().unwrap();
+            if let Some(pos) = q.iter().position(|&(s, a)| s == slave && a == addr) {
+                q.remove(pos);
+                true
+            } else {
+                false
+            }
+        };
+        if to_fail {
+            return Err(BusError::Read {
+                slave,
+                addr,
+                count,
+                reason: "mock 位读超时".into(),
+            });
+        }
+        self.bits_responses
+            .lock()
+            .unwrap()
+            .get(&(slave, addr))
+            .cloned()
+            .ok_or_else(|| BusError::Read {
+                slave,
+                addr,
+                count,
+                reason: "mock 位读未预置".into(),
             })
     }
 }
@@ -382,6 +484,46 @@ mod tests {
         assert_eq!(bus.input_call_count(2, 0x100), 2);
     }
 
+    // ---------- MockBus FC02（位读） ----------
+
+    /// FC02 预置 → 位向量原样返回；调用记账；与 holding/input 键独立（三个地址空间）。
+    #[tokio::test]
+    async fn mock_put_bits_then_read_discrete_returns_preset() {
+        let bus = MockBus::new();
+        bus.put_bits(2, 200, vec![true, false, true]);
+        let r = bus.read_discrete(2, 200, 3).await.expect("位读应返回预置");
+        assert_eq!(r, vec![true, false, true]);
+        assert_eq!(bus.bit_call_count(2, 200), 1);
+        // 键独立：同 (slave,addr) 的 holding/input 未预置仍 Err（FC03/FC04/FC02 不同空间）
+        assert!(bus.read_holding(2, 200, 3).await.is_err());
+        assert!(bus.read_input(2, 200, 3).await.is_err());
+        // 反向：holding 预置不影响位读（此处位读已成功，改为断言 calls 互不串台）
+        assert_eq!(bus.call_count(2, 200), 1, "holding 记账只记自己那次");
+    }
+
+    /// FC02 未预置 → Err（显式失败，不静默给全 0 位）。
+    #[tokio::test]
+    async fn mock_read_discrete_unpreset_addr_errors() {
+        let bus = MockBus::new();
+        let r = bus.read_discrete(9, 0x200, 8).await;
+        assert!(
+            matches!(r, Err(BusError::Read { slave: 9, addr: 0x200, count: 8, .. })),
+            "未预置位地址应报 Err，实际 {r:?}"
+        );
+        assert_eq!(bus.bit_call_count(9, 0x200), 1);
+    }
+
+    /// FC02 失败一次后恢复（与 fail_once/fail_input_once 同构，队列消费即清）。
+    #[tokio::test]
+    async fn mock_bits_fail_once_consumes_then_recovers() {
+        let bus = MockBus::new();
+        bus.put_bits(2, 200, vec![true]);
+        bus.fail_bits_once(2, 200);
+        assert!(bus.read_discrete(2, 200, 1).await.is_err());
+        assert_eq!(bus.read_discrete(2, 200, 1).await.expect("恢复"), vec![true]);
+        assert_eq!(bus.bit_call_count(2, 200), 2);
+    }
+
     // ---------- normalize_port ----------
 
     #[test]
@@ -431,5 +573,32 @@ mod tests {
         // modbus handler 存在 → 进入 device.open() 失败路径（Windows 恒失败 / unix 不存在节点）
         let r = Rs485PortBus::open(&conf("southd_ut_no_such_tty", "modbus"));
         assert!(r.is_err());
+    }
+
+    // ---------- bus_config：parity 透传（S3b-2 T5；纯函数接缝，不触真串口）----------
+
+    /// 站级 `parity` 必须**透传**进 rs485 `Config`：三种取值逐一对映（RC-6 的代码侧前置
+    /// —— 现场裁定 `even` 后只改配置即生效，无需改代码）。
+    #[test]
+    fn bus_config_passes_station_parity_through() {
+        let mut c = conf("ttyS4", "modbus");
+        assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::None, "缺省 none");
+        c.parity = StationParity::Even;
+        assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::Even);
+        c.parity = StationParity::Odd;
+        assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::Odd);
+    }
+
+    /// 透传的同时**不得**改动既有透传项（port 归一 / baud_rate / device_addr）。
+    #[test]
+    fn bus_config_keeps_existing_passthrough_fields() {
+        let mut c = conf("ttyS4", "modbus");
+        c.baud_rate = 19200;
+        c.slave = 7;
+        c.parity = StationParity::Even;
+        let cfg = bus_config(&c);
+        assert_eq!(cfg.port, "/dev/ttyS4");
+        assert_eq!(cfg.baud_rate, 19200);
+        assert_eq!(cfg.device_addr, 7);
     }
 }
