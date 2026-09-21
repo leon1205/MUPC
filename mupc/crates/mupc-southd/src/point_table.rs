@@ -124,6 +124,18 @@ pub enum SignalPick {
     },
 }
 
+impl SignalPick {
+    /// 活跃判据求值（§11.4.7.1）：`WordBit` = `字 & mask ≠ 0`；`WordEnum` = `字 ∈ active`。
+    ///
+    /// **只读整字、不改写遥测值**（事件层只做位/枚举判定，不做字节拆解 —— G-6 的三层边界，§11.10）。
+    pub fn is_active(&self, word: u16) -> bool {
+        match self {
+            SignalPick::WordBit { mask } => word & mask != 0,
+            SignalPick::WordEnum { active } => active.iter().any(|(v, _)| *v == word),
+        }
+    }
+}
+
 /// 点表登记行（§11.4.4 全字段）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointReg {

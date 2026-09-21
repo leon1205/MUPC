@@ -294,6 +294,42 @@ pub fn telemetry_points(reads: &BlockReads) -> Vec<(String, f64)> {
     out
 }
 
+/// 消防探测器**地址升序**交叉校验（PRD §9.10 Q-9；设计 §11.4.6 / §11.7.2 第 9 条）。
+///
+/// 探测器"按地址号从小到大顺序排列"是**位置式点名 ↔ 物理探测器一一对应**的前提
+///（PRD §9.5.4）：顺序异常时"第 n 只"不再等于"地址升序的第 n 只"，探测器区点位不可信
+/// （telemetry 仍落原值，判据层拒用；事件由 scheduler 产 `fire_detector_addr_order_invalid`）。
+///
+/// 判据：`fire_det` 为前缀的块（分片时同名多块），每 6 个寄存器一组，各组 **`+0` 寄存器**
+///（地址号）必须**严格升序**（重复/回退均判违规）。返回 `Some((首个违规组的 1 基序号,
+/// 该组的地址值))` —— 组序号在**探测器区内跨分片块连续**；升序且唯一 → `None`。
+/// 非 `fire` 站 / 无 `fire_det*` 块 / 块读失败 → `None`（无判据可依时不臆断）。
+pub fn fire_detector_addr_order_violation(role: Role, reads: &BlockReads) -> Option<(usize, u16)> {
+    if role != Role::Fire {
+        return None;
+    }
+    let mut prev: Option<u16> = None;
+    let mut group: usize = 0;
+    for (b, res) in reads {
+        if !b.name.starts_with("fire_det") {
+            continue;
+        }
+        let Some(regs) = res.as_ref().ok().and_then(|d| d.regs()) else {
+            continue;
+        };
+        for addr in regs.iter().step_by(6) {
+            group += 1;
+            if let Some(p) = prev {
+                if *addr <= p {
+                    return Some((group, *addr));
+                }
+            }
+            prev = Some(*addr);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

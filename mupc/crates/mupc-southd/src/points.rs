@@ -15,7 +15,7 @@
 //! 展开同时承担规则 7（点位越界）/ 8（点位重叠）/ 9（32 位点对齐）的判定——它们在
 //! "把点映射到寄存器"的那一刻才能判，故落在本函数（§11.5.1 的落点列）。
 
-use crate::config::{PointConf, RegBlockConf, RegFunc};
+use crate::config::{PointConf, RegBlockConf, RegFunc, Role};
 use mupc_data_processing::meter_regs::{RegDecode, WordOrder};
 
 /// 设备单次读的**保守**寄存器上限（PRD §9.5.4 自己的分片口径：BMS ≤120、消防每片 ≤120）。
@@ -86,6 +86,43 @@ pub fn footprint(block: &RegBlockConf) -> Result<Vec<(u16, u16)>, String> {
         .into_iter()
         .map(|p| (p.kind.offset(), p.kind.width()))
         .collect())
+}
+
+/// **字级信号**：把某块的整字读数按 `point_table::SignalSpec` 求值为"活跃/非活跃"
+///（设计 §11.4.3 / §11.4.7.1）。返回 `(<点名>@<信号键>, 是否活跃)`；`scheduler` 用它喂
+/// [`crate::scheduler::EdgeTracker`]。
+///
+/// **只读整字、不改写遥测值**；未登记信号的点**不产出**（未入表 = 只落 telemetry）；
+/// 无信号的块 → 空 `Vec`（绝大多数块如此）。
+///
+/// 口径与边界：
+/// - 逐点按 **`点内偏移`** 取该点所在的那个寄存器（`字号 = block.addr + offset`），
+///   再按 `(role, 字号)` 查登记信号 —— 与 `point_table` 的寄存器空间查表键一致；
+/// - 消防全部状态点均为 **16 位**（`format: uint16`，宽 1 寄存器）⇒ 一个点 = 一个整字；
+///   32 位点本轮**没有**登记信号（不引入"跨字位图"这一无定义形态）；
+/// - 块读失败（`Err`）不传入本函数（调用方只对 `Ok` 的寄存器块求值）。
+pub fn signals_of_block(role: Role, block: &RegBlockConf, regs: &[u16]) -> Vec<(String, bool)> {
+    let Ok(pts) = expand(block) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for p in pts {
+        // 位点无字级信号（位点走 EdgeTracker 的另一条臂）；只处理标量点
+        let PointKind::Scalar { offset, .. } = p.kind else {
+            continue;
+        };
+        let specs = crate::point_table::signals_of(role, block.addr.wrapping_add(offset));
+        if specs.is_empty() {
+            continue;
+        }
+        let Some(&word) = regs.get(offset as usize) else {
+            continue; // 读回长度不足（防御；正常路径由块读长度保证）
+        };
+        for s in specs {
+            out.push((format!("{}@{}", p.metric, s.key), s.pick.is_active(word)));
+        }
+    }
+    out
 }
 
 /// 位置式点名（PRD §9.4.2.2）：`<块名>_<序号>`，序号 = 块内偏移 + 1。

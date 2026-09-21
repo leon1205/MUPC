@@ -28,7 +28,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::config::{RegFunc, Role, SouthStationsConfig, StationConf};
-use crate::mapper::{self, BlockReads, PollResult};
+use crate::mapper::{self, BlockData, BlockReads, PollResult};
+use crate::point_table::{self, BitClass, RegPointKind};
+use crate::points::{self, PointKind};
 use crate::port_runtime::{BusError, StationBus};
 use crate::station::Station;
 
@@ -221,6 +223,76 @@ struct PortRunner {
     trackers: std::sync::Mutex<HashMap<usize, EdgeTracker>>,
 }
 
+/// 本轮参与变化沿检测的信号全集 + 分类（判据见 §11.4.7.1 的信号形态表）。
+#[derive(Default)]
+struct RoundSignals {
+    /// 全部信号 `(信号名, 是否活跃)` —— 喂 [`EdgeTracker`]
+    all: Vec<(String, bool)>,
+    /// 其中"离散位点"的信号名集合（这些信号**只取 0→1 上升沿**）
+    bits: std::collections::HashSet<String>,
+    /// 其中"离散告警位"（`BitClass::Alarm`）的信号名集合（`State`/`Reserved` 只落 telemetry）
+    alarm_bits: std::collections::HashSet<String>,
+}
+
+/// 汇总一站本轮的信号：离散位点（FC02 位向量逐点）+ 字级信号（消防整字 `字 & mask` / `字 ∈ active`）。
+///
+/// **位点与字级信号共用同一条产出路径**（`EdgeTracker`），差别只在活跃判据的求值处：
+/// 位点的活跃 = 位向量第 k 位；字级信号的活跃 = `SignalPick::is_active(整字)`。
+fn round_signals(role: Role, reads: &BlockReads) -> RoundSignals {
+    let mut rs = RoundSignals::default();
+    for (blk, res) in reads {
+        let Ok(data) = res else { continue };
+        match data {
+            BlockData::Bits(bits) => {
+                let Ok(pts) = points::expand(blk) else {
+                    continue;
+                };
+                for p in pts {
+                    let PointKind::Bit { offset } = p.kind else {
+                        continue;
+                    };
+                    // 位地址 = 块位地址 + 块内位偏移（**位空间**，与寄存器空间各自编址）
+                    let class = match point_table::lookup_bit(role, blk.addr.wrapping_add(offset)) {
+                        Some(row) => match row.kind {
+                            RegPointKind::Bit(c) => Some(c),
+                            RegPointKind::Scalar(_) => None,
+                        },
+                        None => None, // 查不到登记行：不产事件（只落 telemetry）
+                    };
+                    if class == Some(BitClass::Alarm) {
+                        rs.alarm_bits.insert(p.metric.clone());
+                    }
+                    rs.bits.insert(p.metric.clone());
+                    let active = bits.get(offset as usize).copied().unwrap_or(false);
+                    rs.all.push((p.metric, active));
+                }
+            }
+            BlockData::Regs(regs) => {
+                rs.all.extend(points::signals_of_block(role, blk, regs));
+            }
+        }
+    }
+    rs
+}
+
+/// 变化沿 → 事件（**不对称过滤**，§11.4.7.1 的刻意设计）：
+/// - 离散位点（`Bit`）：**仅 0→1 上升沿**，且**仅 `BitClass::Alarm`**（`State`/`Reserved` 只落 telemetry）；
+/// - 字级信号（`WordBit`/`WordEnum`，消防）：**进入与退出都产事件** —— 消防是联锁判据源
+///   （§10.4"恢复需双方复位"），只有上升沿会让"消防侧已解除"永远不可观测。
+fn edges_to_events(rs: &RoundSignals, edges: Vec<(String, f64, bool)>) -> Vec<(String, f64, bool)> {
+    edges
+        .into_iter()
+        .filter(|(metric, value, _)| {
+            if rs.bits.contains(metric) {
+                // 位点：只上升沿 + 只告警位（其余类别只落 telemetry，不进 events）
+                *value == 1.0 && rs.alarm_bits.contains(metric)
+            } else {
+                true // 字级信号：双向
+            }
+        })
+        .collect()
+}
+
 /// 口级调度器：每 port 一条采集 task（间隔 `poll_ms` tick），口内多站按 next_due 串行轮询。
 ///
 /// `state` = 全站调度态（`Arc<RwLock<Vec<Station>>>`，state Vec 序即 cfg.stations 序）；
@@ -305,9 +377,7 @@ impl SouthScheduler {
         }
         let mut failed: Vec<usize> = Vec::new();
         for poll in due {
-            let ok = self
-                .poll_station(poll.station_index, runner.bus.clone())
-                .await;
+            let ok = self.poll_station(runner, poll.station_index).await;
             if !ok {
                 failed.push(poll.station_index);
             }
@@ -343,7 +413,8 @@ impl SouthScheduler {
     ///
     /// 返回本轮是否成功（站数据可用）。false = 失败（offline 记账 + 事件已由内部处理；
     /// 调用方据此退避该站，§10.2 M-11）。
-    async fn poll_station(&self, station_index: usize, bus: Option<Arc<dyn StationBus>>) -> bool {
+    async fn poll_station(&self, runner: &PortRunner, station_index: usize) -> bool {
+        let bus = runner.bus.clone();
         let (station_id, role, slave, regs) = {
             let st = self.state.read().unwrap();
             let s = &st[station_index];
@@ -408,17 +479,40 @@ impl SouthScheduler {
                 false
             }
             PollResult::Data(pkg) => {
+                // 恢复判定须在 `mark_success` 清零 offline_count **之前**取：站恢复后变化沿基线
+                // 必须重建（现势值连续性不可假设），否则"恢复即刷一屏事件"（§11.4.7）。
+                let recovered = { self.state.read().unwrap()[station_index].offline_count > 0 };
                 self.mark_success(station_index).await;
                 if role == Role::MeterGrid {
                     self.sink.on_grid_package(pkg).await;
                 } else {
-                    // 非 grid（battery/hvac/fire/meter_batt）遥测全量落库（is_event=false）。
+                    // 非 grid（battery/hvac/fire/meter_batt/pcs）遥测全量落库（is_event=false）。
                     let pts: Vec<(String, f64, bool)> = mapper::telemetry_points(&reads)
                         .into_iter()
                         .map(|(m, v)| (m, v, false))
                         .collect();
                     if !pts.is_empty() {
                         self.sink.on_station_telemetry(&station_id, role, pts).await;
+                    }
+                    // ── 事件侧（§11.4.7.1 统一事件模型）：离散位 + 字级信号共用同一 EdgeTracker ──
+                    let signals = round_signals(role, &reads);
+                    let mut events = {
+                        let mut trackers = runner.trackers.lock().unwrap();
+                        let tracker = trackers.entry(station_index).or_default();
+                        if recovered {
+                            tracker.reset(); // 恢复后首轮只重建基线（不产事件）
+                        }
+                        edges_to_events(&signals, tracker.edges(&signals.all))
+                    }; // 锁在 await 前释放（勿持锁跨 await）
+                    // 消防探测器地址升序违规（Q-9，§11.4.7 事件 ⑤）：异常判据（非跃迁量），
+                    // 命中即产；value = 首个违规组的 1 基序号（详见 mapper 的同名函数）。
+                    if let Some((group, _addr)) =
+                        mapper::fire_detector_addr_order_violation(role, &reads)
+                    {
+                        events.push(("fire_detector_addr_order_invalid".to_string(), group as f64, true));
+                    }
+                    if !events.is_empty() {
+                        self.sink.on_station_telemetry(&station_id, role, events).await;
                     }
                     // SOC 双源通道（04 §2.11.1）：battery 站 pkg.battery.soc 由 mapper 解码；
                     // 本轮采集成功即新鲜 → 独立推给 AiIntegrator（BMS 优先源）。telemetry 落库照旧。
@@ -668,6 +762,28 @@ mod tests {
                 .find(|(id, _)| id == station_id)
                 .map(|(_, v)| *v)
         }
+        /// station 的全部事件点（`is_event=true`）按发生序 —— 含 `offline`/`online` 状态事件
+        /// 与位/信号变化沿事件；`(metric, value)`。
+        fn events_of(&self, station_id: &str) -> Vec<(String, f64)> {
+            self.msgs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _, _)| id == station_id)
+                .flat_map(|(_, _, pts)| {
+                    pts.iter()
+                        .filter(|&&(_, _, ev)| ev)
+                        .map(|(m, v, _)| (m.clone(), *v))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
+        /// 自 `from`（= 上一次 `events_of(..).len()`）起的新增事件 —— 按轮切片的断言用。
+        fn events_since(&self, station_id: &str, from: usize) -> Vec<(String, f64)> {
+            self.events_of(station_id)[from..].to_vec()
+        }
+
         /// station 的状态事件计数（metric ∈ offline/online，is_event=true）
         fn event_count(&self, station_id: &str, metric: &str) -> usize {
             self.msgs
@@ -1201,6 +1317,478 @@ mod tests {
             t.edges(&[sig("a", false), sig("new", false)]),
             vec![("new".to_string(), 0.0, true)]
         );
+    }
+
+    // ---------- 消防字级信号 / 位块事件（AC-5 事件侧，§11.4.7.1）----------
+
+    /// 消防站：`fire_sys`（addr 4，count 13，逐点声明，`at: 7` = 契约点 `fire_det_count`）
+    /// + `fire_det` 探测器区（addr 17，`6×det_groups` 个寄存器 = 探测器 2..n，整字无 `points`）。
+    /// 形态照录 PRD §9.4.1 的 fire 站（比例缩小到 1..det_groups 只探测器）。
+    fn fire_conf(port: &str, slave: u8, det_groups: u16) -> StationConf {
+        let mut pts: Vec<PointConf> = Vec::new();
+        for k in 1..=13u16 {
+            pts.push(PointConf {
+                at: k,
+                count: 1,
+                name: (k == 7).then(|| "fire_det_count".to_string()),
+                format: None,
+                scale: None,
+                offset: None,
+                word_order: WordOrder::HiLo,
+            });
+        }
+        StationConf {
+            id: "fire".into(),
+            role: Role::Fire,
+            port: port.into(),
+            protocol: "modbus".into(),
+            slave,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![
+                RegBlockConf {
+                    name: "fire_sys".into(),
+                    addr: 4,
+                    func: RegFunc::Holding,
+                    format: RegFormat::Uint16,
+                    scale: 1.0,
+                    count: 13,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: pts,
+                    read_slice: false,
+                },
+                RegBlockConf {
+                    name: "fire_det".into(),
+                    addr: 17,
+                    func: RegFunc::Holding,
+                    format: RegFormat::Uint16,
+                    scale: 1.0,
+                    count: 6 * det_groups,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
+                },
+            ],
+        }
+    }
+
+    /// 预置 fire 站：`sys4` = 系统状态（addr 4）整字；`det` = 探测器区逐寄存器
+    /// （`[地址, 状态, 数据1, CO, VOC, H2]` 每 6 个一组）。
+    fn put_fire(bus: &MockBus, slave: u8, sys4: u16, det: &[u16]) {
+        let mut sys = vec![0u16; 13];
+        sys[0] = sys4; // 偏移 0 = addr 4 = 系统状态
+        bus.put(slave, 4, sys);
+        bus.put(slave, 17, det.to_vec());
+    }
+
+    /// 正/负向（AC-5 事件侧）：`WordBit` 进入**与退出**都产事件，`0x4400` 恰产 2 个。
+    /// 首轮只建基线；telemetry 仍落整字原值（事件不改写遥测）。
+    #[tokio::test]
+    async fn fire_wordbit_signals_emit_enter_and_exit_events() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+
+        put_fire(&bus, 1, 0x0000, &[1, 0, 0, 0, 0, 0]);
+        sched.tick_once(0).await;
+        assert!(sink.events_of("fire").is_empty(), "首轮只建基线、不产事件");
+
+        // 0x4400 = bit14 主电故障 | bit10 压力传感器故障 → 恰 2 个进入事件（不多产其它位）
+        put_fire(&bus, 1, 0x4400, &[1, 0, 0, 0, 0, 0]);
+        sched.tick_once(1000).await;
+        assert_eq!(
+            sink.events_since("fire", 0),
+            vec![
+                ("fire_sys_1@main_power_fault".to_string(), 1.0),
+                ("fire_sys_1@pressure_sensor_fault".to_string(), 1.0),
+            ],
+            "进入活跃：仅登记的两位产事件"
+        );
+
+        // 归零 → 恰 2 个"退出活跃"事件（联锁恢复的可观测点，§10.4）
+        put_fire(&bus, 1, 0x0000, &[1, 0, 0, 0, 0, 0]);
+        sched.tick_once(2000).await;
+        assert_eq!(
+            sink.events_since("fire", 2),
+            vec![
+                ("fire_sys_1@main_power_fault".to_string(), 0.0),
+                ("fire_sys_1@pressure_sensor_fault".to_string(), 0.0),
+            ],
+            "退出活跃：消防双向（与位块只上升沿刻意不对称）"
+        );
+        // telemetry 仍落整字原值（事件不改写遥测值）
+        assert!(sink.telemetry_of("fire").iter().any(|(m, v)| m == "fire_sys_1" && *v == 0.0));
+    }
+
+    /// 枚举跃迁（`WordEnum`）：0 → 1 → 2 → 0；活跃值之间（1→2）亦产事件。
+    #[tokio::test]
+    async fn fire_wordenum_emits_transition_events_between_active_values() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+        // 火警状态 = `fire_sys_6`（addr 9，`fire_sys` 块内偏移 5）
+        let det = [1u16, 0, 0, 0, 0, 0];
+        let with_level = |lv: u16| {
+            let mut sys = vec![0u16; 13];
+            sys[5] = lv;
+            bus.put(1, 4, sys);
+            bus.put(1, 17, det.to_vec());
+        };
+
+        with_level(0);
+        sched.tick_once(0).await;
+        assert!(sink.events_of("fire").is_empty(), "首轮只建基线");
+
+        with_level(1);
+        sched.tick_once(1000).await;
+        assert_eq!(
+            sink.events_since("fire", 0),
+            vec![("fire_sys_6@level1".to_string(), 1.0)],
+            "0 → 1：一级报警进入"
+        );
+
+        with_level(2);
+        sched.tick_once(2000).await;
+        assert_eq!(
+            sink.events_since("fire", 1),
+            vec![
+                ("fire_sys_6@level1".to_string(), 0.0),
+                ("fire_sys_6@level2".to_string(), 1.0),
+            ],
+            "1 → 2：活跃值之间跃迁（level1 退出 + level2 进入）"
+        );
+
+        with_level(0);
+        sched.tick_once(3000).await;
+        assert_eq!(
+            sink.events_since("fire", 3),
+            vec![("fire_sys_6@level2".to_string(), 0.0)],
+            "2 → 0：任何活跃值回到 0 即退出活跃"
+        );
+    }
+
+    /// 负向：**预留位（bit2 点型，未启用）零事件**（PRD §9.7.6），但 telemetry 仍落整字原值。
+    #[tokio::test]
+    async fn fire_reserved_bit_yields_no_event_but_keeps_telemetry() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+        let det = [1u16, 0, 0, 0, 0, 0];
+        let with_smoke = |v: u16| {
+            let mut sys = vec![0u16; 13];
+            sys[2] = v; // 偏移 2 = addr 6 = 烟感状态
+            bus.put(1, 4, sys);
+            bus.put(1, 17, det.to_vec());
+        };
+
+        with_smoke(0);
+        sched.tick_once(0).await;
+        with_smoke(0x0004); // bit2 = 点型探测器（预留未启用，不在 mask 内）
+        sched.tick_once(1000).await;
+        assert!(
+            sink.events_since("fire", 0).is_empty(),
+            "预留位不产事件（mask = 0b11 不含 bit2）"
+        );
+        assert!(
+            sink.telemetry_of("fire").iter().any(|(m, v)| m == "fire_sys_3" && *v == 4.0),
+            "telemetry 仍落整字原值 4"
+        );
+        // 对照：同一寄存器 bit0（干接点触发）在 mask 内 → 产事件
+        with_smoke(0x0001);
+        sched.tick_once(2000).await;
+        assert_eq!(
+            sink.events_since("fire", 0),
+            vec![("fire_sys_3@smoke_trigger".to_string(), 1.0)],
+            "mask 内的位照常产事件（证明上一条的零事件源于「未登记」而非「未检测」）"
+        );
+    }
+
+    /// 负向：**钢瓶气压零事件**（PRD §9.7.6，任何取值含恒 0 —— 不为其造判据）。
+    #[tokio::test]
+    async fn fire_cylinder_pressure_never_emits_event() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+        let det = [1u16, 0, 0, 0, 0, 0];
+        let with_pressure = |p: u16| {
+            let mut sys = vec![0u16; 13];
+            sys[1] = p; // 偏移 1 = addr 5 = 钢瓶气压
+            bus.put(1, 4, sys);
+            bus.put(1, 17, det.to_vec());
+        };
+
+        with_pressure(0);
+        sched.tick_once(0).await;
+        with_pressure(0);
+        sched.tick_once(1000).await;
+        with_pressure(123); // 非 0 亦不产事件（该点未登记任何信号）
+        sched.tick_once(2000).await;
+        assert!(
+            sink.events_since("fire", 0).is_empty(),
+            "钢瓶气压不产任何事件（恒 0 不得判「气压异常」）"
+        );
+        assert!(sink.telemetry_of("fire").iter().any(|(m, v)| m == "fire_sys_2" && *v == 123.0));
+    }
+
+    /// 探测器总状态（addr 12 / 探测器区 `+1`）：只 `alarm`(bit12) / `fault`(bit14) 产事件；
+    /// bit0–4 的传感器细分**不产独立事件**（设计取舍，§11.12.1 项 6）。
+    #[tokio::test]
+    async fn fire_detector_state_emits_alarm_and_fault_only() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        // 探测器区 1 组（探测器 2）：offset 1 = 状态（addr 18 → 模板 +1）
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+
+        put_fire(&bus, 1, 0, &[2, 0x0000, 0, 0, 0, 0]);
+        sched.tick_once(0).await;
+        // 探测器 1 状态（addr 12 = `fire_sys_9`）bit12 → 报警总状态
+        let mut sys = vec![0u16; 13];
+        sys[8] = 1 << 12;
+        bus.put(1, 4, sys);
+        // 探测器 2 状态（addr 18 = `fire_det_2`）bit14 → 故障总状态 + bit0–4 细分位
+        bus.put(1, 17, vec![2, (1 << 14) | 0x001F, 0, 0, 0, 0]);
+        sched.tick_once(1000).await;
+        assert_eq!(
+            sink.events_since("fire", 0),
+            vec![
+                ("fire_sys_9@alarm".to_string(), 1.0),
+                ("fire_det_2@fault".to_string(), 1.0),
+            ],
+            "只取两条总状态；bit0–4 传感器细分不产独立事件"
+        );
+    }
+
+    /// 负向：**消防地址序违规（Q-9）** —— 探测器 `+0` 地址非严格升序 → 产事件；
+    /// 升序 → 不产（事件 value = 首个违规组的 1 基序号）。
+    #[tokio::test]
+    async fn fire_detector_addr_order_violation_emits_event() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 3)], bus.clone(), sink.clone());
+
+        // 3 组探测器：+0 地址 3 / 2 / 4 → 第 2 组回退 ⇒ 违规
+        put_fire(&bus, 1, 0, &[3, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]);
+        sched.tick_once(0).await;
+        assert_eq!(
+            sink.events_of("fire"),
+            vec![("fire_detector_addr_order_invalid".to_string(), 2.0)],
+            "非升序 → 产事件，value = 首个违规组的 1 基序号"
+        );
+
+        // 升序（2/3/4）→ 不产
+        let before = sink.events_of("fire").len();
+        put_fire(&bus, 1, 0, &[2, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]);
+        sched.tick_once(1000).await;
+        assert!(sink.events_since("fire", before).is_empty(), "严格升序 → 不产事件");
+    }
+
+    /// 负向：**位块只上升沿**（与消防双向刻意不对称，§11.4.7.1）——
+    /// BMS `bms_alarm_*` 注入 1（进入）→ 产事件；回 0（退出）→ **不产**。
+    /// 同时钉住 AC-3 的点位名映射：点位名序号 225 = 位内偏移 224 = **位地址 424**。
+    #[tokio::test]
+    async fn alarm_bit_block_emits_rising_edge_only() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        // 位块 `bms_alarm`（位地址 200..487，`_k` ↔ 位地址 199+k）
+        let st = StationConf {
+            id: "bms".into(),
+            role: Role::Battery,
+            port: "ttyS2".into(),
+            protocol: "modbus".into(),
+            slave: 2,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![dblk("bms_alarm", 200, 288)],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        let with_bit = |k: usize| {
+            let mut bits = vec![false; 288];
+            bits[k] = true;
+            bus.put_bits(2, 200, bits);
+        };
+
+        with_bit(0);
+        sched.tick_once(0).await; // 首轮：只建基线
+        assert!(sink.events_of("bms").is_empty());
+
+        with_bit(224); // 位地址 424 = 簇一级告警（点名为 `bms_alarm_225`）
+        sched.tick_once(1000).await;
+        assert_eq!(
+            sink.events_since("bms", 0),
+            vec![("bms_alarm_225".to_string(), 1.0)],
+            "告警位 0→1 产事件；点位名序号 225 ↔ 位地址 424"
+        );
+
+        with_bit(0); // 该位回 0
+        sched.tick_once(2000).await;
+        assert!(
+            sink.events_since("bms", 1).is_empty(),
+            "位块只上升沿：0→1 之后的 1→0 不产退出事件"
+        );
+    }
+
+    /// 位块的非告警类别（`State`/`Reserved`）只落 telemetry、不产事件：
+    /// 空调 `hvac_di` 位 0（内风机 = `State`）与保留位 25 置位 → 零事件；
+    /// 同类里位 9（`Alarm` 柜内温感故障）置位 → 产事件（`hvac_di_10`）。
+    #[tokio::test]
+    async fn state_and_reserved_bits_yield_no_event_alarm_bit_does() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "hvac".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![dblk("hvac_di", 0, 31)],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        let with_bits = |ks: &[usize]| {
+            let mut bits = vec![false; 31];
+            for &k in ks {
+                bits[k] = true;
+            }
+            bus.put_bits(3, 0, bits);
+        };
+
+        with_bits(&[]);
+        sched.tick_once(0).await;
+        with_bits(&[0, 25]); // 位 0 = 内风机（State）、位 25 = 保留
+        sched.tick_once(1000).await;
+        assert!(sink.events_since("hvac", 0).is_empty(), "State/Reserved 位不产事件");
+
+        with_bits(&[9]); // 位 9 = 柜内温感故障（Alarm）→ 点名 `hvac_di_10`
+        sched.tick_once(2000).await;
+        assert_eq!(
+            sink.events_since("hvac", 0),
+            vec![("hvac_di_10".to_string(), 1.0)],
+            "同类中 Alarm 位产事件（点名序号 = 位偏移 + 1）"
+        );
+    }
+
+    /// 站从 offline 恢复后首轮**不产事件**（`reset()` 生效：现势值连续性不可假设）。
+    #[tokio::test]
+    async fn tracker_reset_after_recovery_suppresses_event_burst() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+
+        put_fire(&bus, 1, 0, &[1, 0, 0, 0, 0, 0]);
+        sched.tick_once(0).await; // 基线（全 0）
+        assert_eq!(sink.event_count("fire", "offline"), 0);
+
+        // 读失败一轮 → offline
+        bus.fail_once(1, 4);
+        sched.tick_once(1000).await;
+        assert_eq!(sink.event_count("fire", "offline"), 1);
+        let before = sink.events_of("fire").len();
+
+        // 恢复首轮：系统状态已置位（若基线未重建，会立刻误产"进入"事件）
+        put_fire(&bus, 1, 0x4400, &[1, 0, 0, 0, 0, 0]);
+        sched.tick_once(2000).await;
+        let after_recovery = sink.events_of("fire");
+        assert_eq!(
+            sink.events_since("fire", before),
+            vec![("online".to_string(), 1.0)],
+            "恢复首轮只发 online 状态事件，不刷信号事件"
+        );
+        assert_eq!(after_recovery.len(), 2, "offline + online 两条状态事件");
+
+        // 恢复之后的变化照常产事件（基线已重建为恢复轮的 0x4400：两位皆活跃 ⇒ 清 bit14 即退出）
+        put_fire(&bus, 1, 0x0400, &[1, 0, 0, 0, 0, 0]); // 仅剩 bit10 压力传感器故障
+        sched.tick_once(3000).await;
+        assert_eq!(
+            sink.events_since("fire", after_recovery.len()),
+            vec![("fire_sys_1@main_power_fault".to_string(), 0.0)],
+            "恢复后的基线已重建：其后变化照常产事件（此轮为 bit14 退出）"
+        );
+    }
+
+    // ---------- AC-4：pcs 站调度预算与隔离 ----------
+
+    /// AC-4：`role_priority(Pcs) = 1` —— 排在 grid/battery(0) 之后、hvac/fire(2) 之前
+    /// （PCS 不参与控制决策，不得抢占总表 phase 的调度预算，PRD §9.3.2.3）。
+    #[tokio::test]
+    async fn pcs_priority_is_between_grid_and_hvac() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let pcs = StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 5,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 500,
+            regs: vec![blk("pcs_3zone", 0, 6)],
+        };
+        put_grid(&bus, 1);
+        bus.put(5, 0, phase_regs(1.0, 2.0, 3.0));
+        bus.put(3, 100, f32_regs(23.5));
+        let sched = build(
+            vec![hvac_conf("hvac", "ttyS1", 3, 1000), pcs, grid_conf("grid", "ttyS1", 1, 1000)],
+            bus.clone(),
+            sink.clone(),
+        );
+        sched.tick_once(0).await;
+
+        // 同轮到期时的读序（口内串行）= 优先级序：grid(slave 1，多块) → pcs(5) → hvac(3)。
+        // 按"站首现序"归并（grid 站有 6 个块 ⇒ 连续多次 slave=1）。
+        let mut order: Vec<u8> = Vec::new();
+        for &(slave, _, _) in bus.calls.lock().unwrap().iter() {
+            if order.last() != Some(&slave) {
+                order.push(slave);
+            }
+        }
+        assert_eq!(order, vec![1, 5, 3], "读序应为 grid → pcs → hvac（prio 0/1/2）");
+    }
+
+    /// AC-4：`pcs` 站超时 → 该站 offline + 事件、同口其它站不受影响；恢复 online **一次**。
+    #[tokio::test]
+    async fn pcs_station_isolated_then_recovers_online_once() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let pcs = StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 5,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 500,
+            regs: vec![blk("pcs_3zone", 0, 6)],
+        };
+        bus.put(3, 100, f32_regs(23.5));
+        let sched = build(vec![hvac_conf("hvac", "ttyS1", 3, 1000), pcs], bus.clone(), sink.clone());
+
+        sched.tick_once(0).await; // pcs 未预置 → 超时
+        assert_eq!(sink.event_count("pcs", "offline"), 1, "pcs 超时应 offline 告警一次");
+        assert_eq!(
+            sink.telemetry_of("hvac"),
+            vec![("temp_1".to_string(), 23.5)],
+            "同口 hvac 不受 pcs 隔离影响"
+        );
+
+        sched.tick_once(500).await; // pcs interval=500 到期（退避后 oc=2 → next_due=1500）
+        assert_eq!(sink.event_count("pcs", "offline"), 1, "窗口内防刷屏仍一次");
+
+        bus.put(5, 0, phase_regs(1.0, 2.0, 3.0));
+        sched.tick_once(1500).await; // 退避到期点 → 恢复
+        assert_eq!(sink.event_count("pcs", "online"), 1, "恢复 online 一次");
+        {
+            let st = sched.state.read().unwrap();
+            assert_eq!(st[1].offline_count, 0, "恢复后 offline_count 归零");
+        }
+        assert_eq!(sink.event_count("hvac", "offline"), 0, "hvac 全程健康");
     }
 
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。
