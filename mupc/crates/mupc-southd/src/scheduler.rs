@@ -978,6 +978,13 @@ mod tests {
     /// 负面 gating：battery 站 regs **无 soc 块**（role Battery，但 mapper Battery 分支仅空占位
     /// soc=None）→ 采集成功（无 offline 事件）但**不误推** on_battery_soc——`pkg.battery.soc`
     /// 为 None 时 `if let` 不触发，核心保证（无 soc 数据不产生 soc 通道噪声）。
+    ///
+    /// **C6（设计 §11.5.3.4）**：该配置形态（battery 站无 `soc` 点）**在配置期已被规则 4 拒**
+    /// （`SouthStationsConfig::validate`），但本用例**不调 `validate`**（直接构造 `StationConf`
+    /// 交给调度器）⇒ 仍绿。它保的是**调度器层不依赖配置校验的负向 gating**（PRD §9.4.3 规则 4
+    /// 的运行期对偶：无 `soc` 点 ⇒ 绝不误推 `on_battery_soc`）；配置期侧由
+    /// `config.rs::validate_rejects_battery_without_soc_point` 覆盖（两层各有其测）。
+    /// **全部断言保留不动**。
     #[tokio::test]
     async fn battery_station_without_soc_block_does_not_push() {
         let bus = Arc::new(MockBus::new());

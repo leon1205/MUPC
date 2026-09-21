@@ -666,10 +666,25 @@ fn check_symbolicity_row(
 /// 再判 ③，最后 ①② 与 `read_slice` 豁免。三条判据对"拒绝"是**合取**关系，故顺序不影响
 /// 判定结果；按建议顺序实现是为了让"本就该分片"的形态（如 `fire` 的 13+114=127）一眼可见地
 /// 走放行分支，不被后续条件误拒。
+///
+/// **与块书写顺序无关（S1 订正）**：相邻对按**地址序**（`addr` 升序）枚举，不按 `regs` 列表的
+/// 书写顺序 —— 逆序书写的相邻块同样会被判"应合并"（回归钉子见
+/// `tests/s3b2_config.rs::ac1_rule15_maximality_independent_of_written_order`）。
 fn validate_maximality(stations: &[StationConf]) -> Result<(), String> {
     for s in stations {
-        for (i, a) in s.regs.iter().enumerate() {
-            for b in s.regs.iter().skip(i + 1) {
+        // **枚举顺序：按地址序，不得按书写序**（S1）。判据 ② 说的是"**地址**严格相邻"，而
+        // YAML 里块的**书写顺序**是自由的（现场/工具生成的配置可能逆序书写）；若直接按列表
+        // 顺序两两配对，逆序书写的相邻块会让 `b.addr == a.addr + a.count` 永不成立 ⇒ 该判
+        // 形态被放行、极大性形同虚设（首轮评审实测）。按 `addr` 升序预处理后，配对结果与
+        // 书写顺序无关。
+        //
+        // 同 `func` 空间内块两两不重叠（规则 14 已先拒），故"满足 ② 的对"在升序下必然
+        // **低地址块在前**；`merged_max_hole` 的"(a = 低地址, b = 紧邻其后的高地址)"假设
+        // 亦由本次排序保证（否则空洞计算会错位）。
+        let mut blocks: Vec<&RegBlockConf> = s.regs.iter().collect();
+        blocks.sort_by_key(|b| b.addr);
+        for (i, a) in blocks.iter().enumerate() {
+            for b in blocks.iter().skip(i + 1) {
                 // 适用域过滤
                 if a.points.is_empty() || b.points.is_empty() {
                     continue;
@@ -878,42 +893,53 @@ south_stations:
         assert_eq!(w.south_stations.grid_station().unwrap().id, "meter_grid");
     }
 
+    /// **S2 顺带排查订正**：首站是 battery 而 fixture 无 `soc` 点 ⇒ **先被规则 4 拒**
+    /// （2026-09-22 实测 `Err = "…站 a battery 站无任何点位名为 \`soc\`…"`），`is_err()` 虽绿
+    /// 却**测不到 id 重复**。补 `soc` 点 regs 后本用例的 `Err` 才真正来自 id 重复。
+    /// **断言不变**（仍 `is_err()`）。
     #[test]
     fn validate_rejects_duplicate_id() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 1 }
-    - { id: a, role: hvac, port: t2, slave: 2 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 1, {} }}\n    - {{ id: a, role: hvac, port: t2, slave: 2 }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
     }
 
+    /// **S2 顺带排查订正**：两站均须配**完整相量块**，否则先被①的既有 `meter_grid` 整组校验
+    /// （"缺相量块 p"）拒 ⇒ `is_err()` 虽绿却**测不到规则 2（至多一个 meter_grid）**。
+    /// **断言不变**（仍 `is_err()`）。
     #[test]
     fn validate_rejects_multiple_meter_grid() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: mg1, role: meter_grid, port: t1, slave: 1, interval_ms: 1000 }
-    - { id: mg2, role: meter_grid, port: t2, slave: 2, interval_ms: 1000 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let regs = meter_grid_full_regs_yaml();
+        let station = |id: &str, port: &str, slave: u8| {
+            format!(
+                "    - id: {id}\n      role: meter_grid\n      port: {port}\n      slave: {slave}\n      interval_ms: 1000\n      regs:\n{regs}\n"
+            )
+        };
+        let yaml = format!(
+            "south_stations:\n  stations:\n{}{}",
+            station("mg1", "t1", 1),
+            station("mg2", "t2", 2)
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(
             w.south_stations.validate().is_err(),
             "两个 meter_grid 站应被拒绝（AiIntegrator 单写方）"
         );
     }
 
+    /// **S2 顺带排查订正**：两站均补 `soc` 点 regs，否则首站先被规则 4 拒
+    /// （2026-09-22 实测），`is_err()` 虽绿却**测不到规则 3（至多一个 battery）**。
+    /// **断言不变**（仍 `is_err()`）。
     #[test]
     fn validate_rejects_multiple_battery() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: b1, role: battery, port: t1, slave: 1, interval_ms: 1000 }
-    - { id: b2, role: battery, port: t2, slave: 2, interval_ms: 1000 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: b1, role: battery, port: t1, slave: 1, interval_ms: 1000, {} }}\n    - {{ id: b2, role: battery, port: t2, slave: 2, interval_ms: 1000, {} }}",
+            BATTERY_SOC_REGS, BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(
             w.south_stations.validate().is_err(),
             "两个 battery 站应被拒绝（BMS SOC 单源约束，AiIntegrator bms_soc 单槽）"
@@ -940,6 +966,35 @@ south_stations:
 "#;
         let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
+    }
+
+    /// **C6（配置期侧，设计 §11.5.3.4）**：battery 站点名集合无 `soc` → 规则 4 拒
+    /// （`soc` 点契约，PRD §9.4.3；消费方**按点名**查找，缺名即静默不推 SOC）。
+    ///
+    /// 与 `scheduler.rs::battery_station_without_soc_block_does_not_push` 的**分工**：那一例是
+    /// **运行期**纵深防御（不调 `validate`、直接构造 `StationConf` ⇒ 仍绿，保"调度器不依赖配置
+    /// 校验"），本用例是**配置期**拦截（启动即 fail-fast）——两层各有其测。
+    /// AC-1 ③ 的规则 4 验收用例（含"块名为 `soc` 已不是契约"等 3 种形态）见
+    /// `tests/s3b2_config.rs::ac1_rule4_battery_soc_point_contract`（本用例只钉最小负向形态）。
+    #[test]
+    fn validate_rejects_battery_without_soc_point() {
+        let yaml = r#"
+south_stations:
+  stations:
+    - id: bms
+      role: battery
+      port: t1
+      slave: 1
+      interval_ms: 1000
+      regs:
+        - { name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0 }
+"#;
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let err = w.south_stations.validate().unwrap_err();
+        assert!(
+            err.contains("soc"),
+            "battery 站无点名 soc 的点应被规则 4 拒，实际: {err}"
+        );
     }
 
     /// A3（fixture 订正）：battery 站补含 `soc` 点的 `regs`，使本用例真正测到 slave 上界
@@ -1244,6 +1299,66 @@ south_stations:
         assert!(check_symbolicity_row("x", 116, RegFormat::Int32Scaled, -1600.0, Some(&r)).is_ok());
     }
 
+    // ── 规则 15 判据 ③（合并后空洞 ≤ 4）的**直接单测**：直接钉 `merged_max_hole` 的契约，
+    // 使 ③ 不再只经由端到端用例（`tests/s3b2_config.rs` 的极大性形态）间接覆盖。──
+
+    /// 构造一个声明了点位的块（`ats` 为 1 起的点偏移，各占 1 寄存器）。
+    /// 注意：多数构造形态会被规则 11 的首尾锚定拒——**无妨**，本组用例直测纯函数
+    /// `merged_max_hole`（它按定义必须能对任意点清单算出合并窗口内的最大连续空洞）。
+    fn pts_blk(name: &str, addr: u16, count: u16, ats: &[u16]) -> RegBlockConf {
+        RegBlockConf {
+            name: name.into(),
+            addr,
+            func: RegFunc::Holding,
+            format: RegFormat::Uint16,
+            scale: 1.0,
+            count,
+            offset: 0.0,
+            byte_swap: false,
+            points: ats
+                .iter()
+                .map(|at| PointConf {
+                    at: *at,
+                    count: 1,
+                    name: None,
+                    format: None,
+                    scale: None,
+                    offset: None,
+                    word_order: WordOrder::HiLo,
+                })
+                .collect(),
+            read_slice: false,
+        }
+    }
+
+    /// 契约 = 合并窗口 `[a.addr, b.addr + b.count)` 内**未声明寄存器的最大连续段**（寄存器数）。
+    #[test]
+    fn merged_max_hole_measures_the_merged_window() {
+        // ① 两块各自满覆盖（偏移 0/1 各声明）⇒ 合并窗口无空洞
+        let a = pts_blk("a", 10, 2, &[1, 2]);
+        let b = pts_blk("b", 12, 2, &[1, 2]);
+        assert_eq!(merged_max_hole(&a, &b).unwrap(), 0);
+
+        // ② **接缝空洞必须计入**：a 只声明其偏移 0、b 只声明其偏移 1（= 合并窗口偏移 3）
+        //    ⇒ 窗口 0..4 中偏移 [1,3) 未声明 ⇒ 空洞 2（若只看单块内部空洞会误算成 0）
+        let a = pts_blk("a", 10, 2, &[1]);
+        let b = pts_blk("b", 12, 2, &[2]);
+        assert_eq!(
+            merged_max_hole(&a, &b).unwrap(),
+            2,
+            "判据 ③ 说的是**合并后**的窗口，接缝处空洞须计入"
+        );
+
+        // ③ 边界：空洞恰为 MAX_HOLE_REGS(4) ⇒ 不触发（`>` 语义）；取两块内部空洞的最大者
+        let a = pts_blk("a", 10, 6, &[1, 6]); // 内部空洞 4（偏移 1..5）
+        let b = pts_blk("b", 16, 2, &[1, 2]); // 无空洞
+        assert_eq!(merged_max_hole(&a, &b).unwrap(), points::MAX_HOLE_REGS);
+        // 空洞 5（偏移 1..6）⇒ 超上限
+        let a = pts_blk("a", 10, 7, &[1, 7]);
+        assert_eq!(merged_max_hole(&a, &b).unwrap(), 5);
+        assert!(merged_max_hole(&a, &b).unwrap() > points::MAX_HOLE_REGS);
+    }
+
     #[test]
     fn default_field_fallbacks_apply() {
         let yaml = r#"
@@ -1310,15 +1425,17 @@ south_stations:
         assert_eq!(regs[1].func, RegFunc::Holding); // 缺省 FC03
     }
 
+    /// **S2 订正（规则 16 的 baud 分支，改法与 A4/A5/A15/A16 同）**：battery 侧补含 `soc` 点的
+    /// `regs` —— 否则**先被规则 4 拒**（`Err = "…battery 站无任何点位名为 \`soc\`…"`，
+    /// 2026-09-22 实测），`is_err()` 虽绿却**测不到规则 16**（假绿）。补后本用例的 `Err` 即来自
+    /// 规则 16（同口 baud 不一致，消息含 `baud_rate`）。**断言不变**（仍 `is_err()`）。
     #[test]
     fn validate_rejects_same_port_mixed_baud() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
-    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 19200 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 1, baud_rate: 9600, {} }}\n    - {{ id: b, role: hvac,    port: t1, slave: 2, baud_rate: 19200 }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
     }
 
@@ -1337,17 +1454,16 @@ south_stations:
         );
     }
 
+    /// **S2 订正（同 [`validate_rejects_same_port_mixed_baud`]）**：battery 侧补 `soc` 点 regs，
+    /// 否则先被规则 4 拒（同前实测），`is_err()` 虽绿却测不到规则 16。**断言不变**。
     #[test]
     fn validate_rejects_same_port_mixed_baud_3_station() {
         // 第 3 站异 baud → 应被拒（同口物理共享波特率）
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
-    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 9600 }
-    - { id: c, role: fire,    port: t1, slave: 3, baud_rate: 19200 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 1, baud_rate: 9600, {} }}\n    - {{ id: b, role: hvac,    port: t1, slave: 2, baud_rate: 9600 }}\n    - {{ id: c, role: fire,    port: t1, slave: 3, baud_rate: 19200 }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
     }
 

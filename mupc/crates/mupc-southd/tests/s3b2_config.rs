@@ -550,6 +550,53 @@ fn ac1_rule15_maximality_forms() {
     assert_ok(&bits, "discrete 块相邻（保守读法：discrete 一律不参与）");
 }
 
+/// **规则 15 判据 ② 与「块书写顺序」无关**（S1 回归钉子 —— 首轮评审实测：同址集**逆序书写**
+/// 曾被放行）。
+///
+/// 判据 ② 的语义是"**地址**严格相邻"，而 YAML 里块的**书写顺序**是自由的 —— 逆序书写时
+/// 若按列表顺序两两配对，`b.addr == a.addr + a.count` 永不成立 ⇒ 该判形态被放行、极大性形同
+/// 虚设。故配对应按**地址序**枚举。本用例把同一对块**两种书写顺序**各跑一遍，两者都必须 `Err`。
+#[test]
+fn ac1_rule15_maximality_independent_of_written_order() {
+    // 正序（低地址块在前）——与既有 `ac1_rule15_maximality_forms` 的反向形态同形
+    let asc = one_station(
+        "hvac",
+        &regs_of(&format!(
+            "{}\n{}",
+            pts_block("a", 10, 2, 2),
+            pts_block("b", 12, 2, 2)
+        )),
+    );
+    assert_err_contains(&asc, "应合并", "正序书写：a@10(2) → b@12(2)");
+
+    // 逆序（高地址块在前）：同一对块、同一形态 ⇒ 必须同样 `Err`（书写顺序不得影响判定）
+    let desc = one_station(
+        "hvac",
+        &regs_of(&format!(
+            "{}\n{}",
+            pts_block("b", 12, 2, 2),
+            pts_block("a", 10, 2, 2)
+        )),
+    );
+    assert_err_contains(
+        &desc,
+        "应合并",
+        "逆序书写：b@12(2) → a@10(2)（同址集逆序仍应判为应合并）",
+    );
+
+    // 三块连续、**逆序**书写：非相邻对（a@10 与 c@20 间隔 8）不得误判，相邻对（a-b、b-c）仍拒
+    let three = one_station(
+        "hvac",
+        &regs_of(&format!(
+            "{}\n{}\n{}",
+            pts_block("c", 20, 2, 2),
+            pts_block("b", 12, 2, 2),
+            pts_block("a", 10, 2, 2)
+        )),
+    );
+    assert_err_contains(&three, "应合并", "三块逆序书写：地址相邻对仍应被拒");
+}
+
 /// 规则 16（同口一致性）：同 `port` 的 `parity` 必须一致（与 `baud_rate` 同形态）。
 #[test]
 fn ac1_rule16_same_port_parity_consistency() {
