@@ -156,10 +156,69 @@ impl DueCalc {
     }
 }
 
-/// 口运行时：bus（open 失败 → None，该口全站 offline）+ 本口独立 DueCalc。
+/// 某站的**变化沿记忆**（S3b-2 §11.4.7.1「统一事件模型」的实现 —— `PortRunner` 按站下标各持一个）。
+///
+/// **统一口径**：一个"信号"在 tracker 里占一格"上轮活跃态"，无论它是
+/// ① 离散位点（`Bit`：`func: discrete` 块的位向量第 k 位）还是
+/// ② 字级信号（`WordBit`：整字 `& mask ≠ 0`；`WordEnum`：整字 ∈ `active` 值集）。
+/// 每轮算出 `(上轮, 本轮)` 二元组：`false→true` = 进入活跃（`value = 1.0`）、
+/// `true→false` = 退出活跃（`value = 0.0`），**两者都返回**（是否采纳由调用方过滤，
+/// 见 [`SouthScheduler::poll_station`] 的不对称过滤）。
+///
+/// **首次采样 / 站恢复后**：只建立基线、**不产事件**（`primed = false` 时 `edges()` 只
+/// `prime()` 并返回空；`reset()` 使其回到该状态）—— 避免"启动即刷一屏事件""恢复即刷一屏"。
+#[derive(Default)]
+pub struct EdgeTracker {
+    /// 信号名 → 上轮活跃态（信号名 = 位点名 / `<点名>@<信号键>`）
+    last: HashMap<String, bool>,
+    /// 是否已有基线（false = 本轮只建基线，不产事件）
+    primed: bool,
+}
+
+impl EdgeTracker {
+    /// 建基线：把本轮的活跃态记为基线并**清空旧记忆**（首轮、站恢复后调用）。
+    pub fn prime(&mut self, now: &[(String, bool)]) {
+        self.last.clear();
+        for (k, v) in now {
+            self.last.insert(k.clone(), *v);
+        }
+        self.primed = true;
+    }
+
+    /// 丢弃基线（下一个 `edges()` 退化为"只建基线、不产事件"）。
+    pub fn reset(&mut self) {
+        self.last.clear();
+        self.primed = false;
+    }
+
+    /// 返回本轮的变化沿事件 `(metric, value, is_event=true)`；首轮/复位后首轮 → 空（只建基线）。
+    ///
+    /// 未见过的新信号（上轮无记忆）**不产事件**（"未知 → X" 不是跃迁），但会记入基线。
+    pub fn edges(&mut self, now: &[(String, bool)]) -> Vec<(String, f64, bool)> {
+        if !self.primed {
+            self.prime(now);
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (k, v) in now {
+            match self.last.get(k) {
+                Some(prev) if prev != v => {
+                    out.push((k.clone(), if *v { 1.0 } else { 0.0 }, true));
+                }
+                _ => {}
+            }
+        }
+        self.prime(now); // 本轮活跃态成为下一轮基线
+        out
+    }
+}
+
+/// 口运行时：bus（open 失败 → None，该口全站 offline）+ 本口独立 DueCalc + 各站变化沿记忆。
 struct PortRunner {
     bus: Option<Arc<dyn StationBus>>,
     calc: std::sync::Mutex<DueCalc>,
+    /// 站下标 → 该站的变化沿记忆（离散位 + 字级信号共用，§11.4.7.1）
+    trackers: std::sync::Mutex<HashMap<usize, EdgeTracker>>,
 }
 
 /// 口级调度器：每 port 一条采集 task（间隔 `poll_ms` tick），口内多站按 next_due 串行轮询。
@@ -203,6 +262,7 @@ impl SouthScheduler {
             runners.push(PortRunner {
                 bus: buses.get(port).cloned(),
                 calc: std::sync::Mutex::new(DueCalc::from_group(&group)),
+                trackers: std::sync::Mutex::new(HashMap::new()),
             });
         }
         Arc::new(Self {
@@ -1097,6 +1157,50 @@ mod tests {
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
         assert_eq!(sink.event_count("hvac", "offline"), 1);
+    }
+
+    // ---------- EdgeTracker（§11.4.7.1 统一事件模型，纯逻辑） ----------
+
+    fn sig(k: &str, v: bool) -> (String, bool) {
+        (k.to_string(), v)
+    }
+
+    /// 首轮只建基线（不产事件）；此后按 `(上轮, 本轮)` 二元组产"进入 1.0 / 退出 0.0"。
+    #[test]
+    fn edge_tracker_first_round_primes_then_reports_both_directions() {
+        let mut t = EdgeTracker::default();
+        assert!(t.edges(&[sig("a", false), sig("b", true)]).is_empty(), "首轮只建基线");
+        // b 由 true→false（退出）、a 由 false→true（进入），两者都返回（过滤在调用方）
+        assert_eq!(
+            t.edges(&[sig("a", true), sig("b", false)]),
+            vec![("a".to_string(), 1.0, true), ("b".to_string(), 0.0, true)]
+        );
+        // 无变化 → 空
+        assert!(t.edges(&[sig("a", true), sig("b", false)]).is_empty());
+    }
+
+    /// `reset()`（站从 offline 恢复时调用）后下一个 `edges()` 只重建基线、**不产事件**。
+    #[test]
+    fn edge_tracker_reset_suppresses_burst_after_recovery() {
+        let mut t = EdgeTracker::default();
+        t.edges(&[sig("a", false)]);
+        assert_eq!(t.edges(&[sig("a", true)]), vec![("a".to_string(), 1.0, true)]);
+        t.reset();
+        assert!(t.edges(&[sig("a", true)]).is_empty(), "恢复后首轮不刷事件");
+        // 恢复基线已建立：之后的变化照常产事件
+        assert_eq!(t.edges(&[sig("a", false)]), vec![("a".to_string(), 0.0, true)]);
+    }
+
+    /// 上轮无记忆的新信号（未见过）不算跃迁：只记入基线、不产事件。
+    #[test]
+    fn edge_tracker_unknown_signal_is_not_an_edge() {
+        let mut t = EdgeTracker::default();
+        t.edges(&[sig("a", false)]);
+        assert!(t.edges(&[sig("a", false), sig("new", true)]).is_empty());
+        assert_eq!(
+            t.edges(&[sig("a", false), sig("new", false)]),
+            vec![("new".to_string(), 0.0, true)]
+        );
     }
 
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。
