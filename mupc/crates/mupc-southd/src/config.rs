@@ -1,10 +1,18 @@
 //! `south_stations:` 配置段类型（core_config 嵌入用；§10.3）。
 //!
-//! 定义站级南向统一调度的配置结构：轮询周期、新鲜度门限、站（role/port/slave）
-//! 与每站寄存器块。校验仅限段内（跨段/互斥在 core-bin validate——Task 6）。
+//! 定义站级南向统一调度的配置结构：轮询周期、新鲜度门限、站（role/port/slave/parity）
+//! 与每站寄存器块（块 = 一次读事务；块内 `points[]` = 逐点换算口径，S3b-2 §11.4.1）。
+//! 校验仅限段内（跨段/互斥在 core-bin validate——Task 6）。
 
 use mupc_data_processing::meter_regs::RegFormat;
 use serde::{Deserialize, Serialize};
+
+use crate::points::{self, PointKind, PointSpec};
+
+/// 32 位值的字序 —— **全项目唯一一处定义在 `mupc_data_processing::meter_regs`**
+/// （设计 §11.4.2：它与 `RegDecode` 同居，解码原语与字序参数不可分离）。
+/// 本 crate 只 `pub use` 复用，**不得**再定义一份（v1.2 的双定义即被否掉的 B3 缺陷）。
+pub use mupc_data_processing::meter_regs::WordOrder;
 
 pub const DEFAULT_POLL_MS: u64 = 1000;
 pub const DEFAULT_STALE_TIMEOUT_S: u64 = 5;
@@ -13,6 +21,23 @@ pub const DEFAULT_BAUD_RATE: u32 = 9600;
 /// 策略 5s 数据新鲜度共享常量落点（M-6）：单一真源在 data-processing
 /// （`mupc_data_processing::DATA_FRESHNESS_MS`），此处别名引用避免双定义漂移。
 pub const DATA_FRESHNESS_MS: u64 = mupc_data_processing::DATA_FRESHNESS_MS;
+
+/// `pcs` 站轮询周期下界（PRD §9.3.2.2(2) + §9.8.1 末条；设计 §11.5.1 规则 18）。
+/// `pcs` 无 `< 5000` 上界（不参与控制决策），只有这条下界——防"误配的超短周期打满总线"。
+pub const PCS_MIN_INTERVAL_MS: u64 = 500;
+
+/// 站级串口校验位（PRD §9.4.1 `parity`；YAML: `none` 缺省 / `even` / `odd`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StationParity {
+    /// 无校验（缺省，与 rs485 `Config::default()` 一致）
+    #[default]
+    None,
+    /// 偶校验（空调厂方默认，§9.10 Q-14/RC-6）
+    Even,
+    /// 奇校验
+    Odd,
+}
 
 /// 站类型角色（南向调度语义划分，YAML 用 snake_case）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -28,6 +53,8 @@ pub enum Role {
     Hvac,
     /// 消防子系统（联动/联锁）
     Fire,
+    /// 两级式 PCS（只读 3 区，S3b-2 §9.3.2；不参与控制决策，不推进 5s 闸门）
+    Pcs,
 }
 
 /// 单站配置（role + 端口 + 从站地址 + 采集间隔 + 寄存器块）
@@ -43,14 +70,18 @@ pub struct StationConf {
     /// 口波特率（同口各站必须一致——物理共享口波特率；缺省 9600）
     #[serde(default = "default_baud_rate")]
     pub baud_rate: u32,
+    /// 串口校验位（同口各站必须一致——物理共享校验位；缺省 none）
+    #[serde(default)]
+    pub parity: StationParity,
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
     #[serde(default)]
     pub regs: Vec<RegBlockConf>,
 }
 
-/// 寄存器块读取功能码（YAML: `holding` / `input`）。默认 FC03 保持寄存器；
-/// FC04 输入寄存器供厂方点表用 input regs 的设备（解码同构，读回同格式）。
+/// 寄存器块读取功能码（YAML: `holding` / `input` / `discrete`）。
+/// 默认 FC03 保持寄存器；FC04 输入寄存器供厂方点表用 input regs 的设备（解码同构）；
+/// FC02 离散输入（S3b-2 G-3）——此时 `count` 语义为**位数**、`addr` 为**位地址**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegFunc {
@@ -58,14 +89,20 @@ pub enum RegFunc {
     Holding,
     /// 输入寄存器（FC0x04）
     Input,
+    /// 离散输入（FC0x02，位块）
+    Discrete,
 }
 
-/// 寄存器块配置（一段起始地址 + 数值格式 + 块长度）
+/// 寄存器块配置（一次读事务：起始地址 + 传输口径 + **块级缺省换算** + 可选逐点清单）。
+///
+/// S3b-2 新增字段**全部 `#[serde(default)]` 且缺省 = 既有行为**（设计 §11.4.1），
+/// 故既有 `meter_grid` 写法（`{ name: p, addr: 0x1000, format: int32_scaled, scale: 0.01,
+/// count: 6 }`）的解析结果与改动前**逐字段相同**。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegBlockConf {
     pub name: String,
     pub addr: u16,
-    /// 功能码（FC03 保持 / FC04 输入；缺省 FC03）
+    /// 功能码（FC03 保持 / FC04 输入 / FC02 离散输入；缺省 FC03）
     #[serde(default = "default_reg_func")]
     pub func: RegFunc,
     /// **注意：RegFormat 无 Default**，故用 `#[serde(default = "default_reg_format")]`
@@ -76,6 +113,60 @@ pub struct RegBlockConf {
     pub scale: f64,
     #[serde(default = "default_reg_count")]
     pub count: u16,
+    // ── S3b-2 新增（PRD §9.4.2.4 块级字段表；缺省 = 既有行为）──
+    /// 换算偏移：`值 = raw × scale + offset`（G-2；`offset` 只表示零点平移，与符号性无关，
+    /// 见 PRD §9.4.2.4「换算与符号性」）
+
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub offset: f64,
+    /// 逐寄存器字节低-高互换（G-5；PCS 专用，PRD §9.7.3）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub byte_swap: bool,
+    /// 逐点换算口径清单（G-4）；空 = 窗口内**每个值槽** 1 点（PRD §9.4.2.1 第 4 条）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<PointConf>,
+    /// 现场分片豁免标记：`true` 仅豁免"块落地极大性"（规则 15），不豁免其它各条
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_slice: bool,
+}
+
+/// 点级换算口径（PRD §9.4.2.4 点级字段表）。
+///
+/// **为什么用 `Option<T>` 而不是"缺省值语义"**：`scale`/`offset` 的"未声明"与"显式 0"
+/// 是**两种不同事实**——前者须继承块级，后者是配置错误（`scale == 0` 拒）。用 `Option`
+/// 让"继承"与"显式 0"在类型上可区分，校验器才能既拒 `scale: 0` 又不误伤"继承块级 scale"的点。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PointConf {
+    /// 块内**寄存器/位偏移 + 1**（1 起）；32 位点填其**低地址寄存器**的序号
+    pub at: u16,
+    /// 自 `at` 起连续产出 `count` 个点（同换算、地址递增）；**32 位点必须 1**
+    #[serde(default = "default_point_count")]
+    pub count: u16,
+    /// 显式点名（站内唯一）；用于跨文档契约点（如 `soc`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 点级格式；`None` = 继承块级
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<RegFormat>,
+    /// 点级比例；`None` = 继承块级
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// 点级零点平移；`None` = 继承块级
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f64>,
+    /// 32 位值的字序（仅 32 位格式生效；块级无该字段，故无"继承"概念）
+    #[serde(default, skip_serializing_if = "is_default_word_order")]
+    pub word_order: WordOrder,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+fn is_default_word_order(w: &WordOrder) -> bool {
+    *w == WordOrder::HiLo
 }
 
 /// 顶层配置段：轮询周期、数据过期门限与站表
@@ -100,17 +191,22 @@ impl Default for SouthStationsConfig {
 }
 
 impl SouthStationsConfig {
-    /// 段内校验（跨段/互斥在 core-bin validate——Task 6）：id 唯一非空；
-    /// meter_grid 至多一站（AiIntegrator 单写方约束，grid_station 取唯一）；
-    /// battery 至多一站（BMS SOC 单源约束，AiIntegrator bms_soc 单槽——多站抢写最后写入者胜）；
-    /// port 非空；slave 1..=247；interval_ms>0；baud_rate 1..=4000000；
-    /// meter_grid/battery interval_ms < DATA_FRESHNESS_MS（BMS SOC fresh 窗口 5s）；
-    /// meter_grid regs 完整性（缺相量块 p/q/pf/u/i、addr>0、区间不重叠、count≥6、块名唯一）；
-    /// 同口 baud 一致（见下）。
+    /// 段内校验（跨段/互斥在 core-bin validate）。
+    ///
+    /// **判定顺序（设计 §11.5.1「顺序」+ §11.5.3.4.1 实现约束，不得调整）**：
+    /// ① 站级基础校验（id 非空唯一 / port / slave / interval_ms / baud_rate /
+    ///    `pcs` 周期下界（规则 18）/ meter_grid·battery 新鲜度上界）
+    ///    **+ 既有 `meter_grid` 整组校验**（缺相量块 / `count ≥ 6` / `int32_scaled` 显式
+    ///    `scale > 0` / **块名唯一** / `addr > 0` / 区间不重叠——**原地不动，不得后移**）；
+    /// ② [`validate_station_regs`]（通用规则 4/5/7/8/9/10/11/12/13/14/19，含点展开）；
+    /// ③ 跨站（单站约束计数（规则 2/3）、同口一致性（规则 16）、块落地极大性（规则 15））。
+    ///
+    /// **为什么①必须整组先于②**：既有 `meter_grid` 校验对同一份坏配置给出**更具体**的文案
+    ///（`块名重复` / `addr 不能为 0` / `寄存器区间重叠` / `count 须 ≥ 6` / `须显式 scale>0`），
+    /// 而 S3b-1c 校验语义的回归锚（§11.5.3.4 C2）逐条断言了这些文案；顺序一换即失配。
+    /// 逐站短路返回首个 Err（错误消息即定位信息）。
     pub fn validate(&self) -> Result<(), String> {
         let mut ids: Vec<&str> = Vec::new();
-        let mut grid_seen = false;
-        let mut battery_seen = false;
         for s in &self.stations {
             if s.id.trim().is_empty() {
                 return Err("south_stations: station id 为空".into());
@@ -119,21 +215,6 @@ impl SouthStationsConfig {
                 return Err(format!("south_stations: 站 id 重复: {}", s.id));
             }
             ids.push(s.id.as_str());
-            if s.role == Role::MeterGrid {
-                if grid_seen {
-                    return Err("south_stations: 至多一个 meter_grid 站（AiIntegrator 单写方约束）".into());
-                }
-                grid_seen = true;
-            }
-            if s.role == Role::Battery {
-                if battery_seen {
-                    return Err(
-                        "south_stations: 至多一个 battery 站（BMS SOC 单源约束，AiIntegrator bms_soc 单槽）"
-                            .into(),
-                    );
-                }
-                battery_seen = true;
-            }
             if s.port.trim().is_empty() {
                 return Err(format!("south_stations: 站 {} port 为空", s.id));
             }
@@ -157,6 +238,14 @@ impl SouthStationsConfig {
                     s.id, s.baud_rate
                 ));
             }
+            // 规则 18：pcs 站周期下界（PRD §9.3.2.2(2) + §9.8.1 末条；未进 §9.4.3 表，
+            // 设计 §11.5.1 #18 补落点）。pcs 无 <5000 上界（不参与控制决策）。
+            if s.role == Role::Pcs && s.interval_ms < PCS_MIN_INTERVAL_MS {
+                return Err(format!(
+                    "south_stations: pcs 站 {} interval_ms={} 须 ≥ {}ms（防超短周期打满总线）",
+                    s.id, s.interval_ms, PCS_MIN_INTERVAL_MS
+                ));
+            }
             if s.role == Role::MeterGrid && s.interval_ms >= DATA_FRESHNESS_MS {
                 return Err(format!(
                     "south_stations: meter_grid 站 {} interval_ms 须 < {}ms",
@@ -169,89 +258,58 @@ impl SouthStationsConfig {
                     s.id, DATA_FRESHNESS_MS
                 ));
             }
-            // S3b-1c（承接已删 core_config validate_reg_map P2-2/N2）：meter_grid 是总表 phase
-            // 真源——regs 块须完整（相量块 p/q/pf/u/i 各须存在）、addr>0、半开区间不重叠，
-            // 防配置 typo（addr 重叠/addr=0）静默读到错寄存器喂策略。
+            // ① 既有 `meter_grid` 整组（S3b-1c 语义，原地不动——见本方法文档与 §11.5.3.4.1）
             if s.role == Role::MeterGrid {
-                // 相量块语义（mapper 按 name 找块，缺失/读失败 → Failed→offline 是运行期；
-                // 此处配置期拦截缺失与地址错误）。空 regs 亦落入缺 p 分支被拒。
-                for required in ["p", "q", "pf", "u", "i"] {
-                    if !s.regs.iter().any(|b| b.name == required) {
+                validate_meter_grid_regs(s)?;
+            }
+            // ② 通用站内规则（S3b-2 §11.5.1，含点展开）
+            validate_station_regs(s)?;
+        }
+        // ③ 跨站：单站约束计数（规则 2/3——pcs 必填点表）
+        let mut grid_seen = false;
+        let mut battery_seen = false;
+        let mut pcs_seen = false;
+        for s in &self.stations {
+            match s.role {
+                Role::MeterGrid => {
+                    if grid_seen {
+                        return Err(
+                            "south_stations: 至多一个 meter_grid 站（AiIntegrator 单写方约束）".into(),
+                        );
+                    }
+                    grid_seen = true;
+                }
+                Role::Battery => {
+                    if battery_seen {
+                        return Err(
+                            "south_stations: 至多一个 battery 站（BMS SOC 单源约束，AiIntegrator bms_soc 单槽）"
+                                .into(),
+                        );
+                    }
+                    battery_seen = true;
+                }
+                Role::Pcs => {
+                    if pcs_seen {
+                        return Err(
+                            "south_stations: 至多一个 pcs 站（同设备双站双读、点表冲突）".into(),
+                        );
+                    }
+                    pcs_seen = true;
+                    if s.regs.is_empty() {
                         return Err(format!(
-                            "south_stations: meter_grid 站 {} regs 缺相量块 {}（总表 phase 真源须 p/q/pf/u/i）",
-                            s.id, required
+                            "south_stations: pcs 站 {} regs 为空（必填点表——空 regs = 站永久 offline 的静默死配）",
+                            s.id
                         ));
                     }
                 }
-                // count 语义：相量块须 count>=6（3 相×2 寄存器三相连续，mapper decode_phase_block
-                // 硬性 ≥6）；p_total（可选）count>=2。count 配错（漏配→default 2，或 4）时
-                // name/addr/重叠都过、启动绿灯，但 scheduler 每轮只读 blk.count → 读回 <6 →
-                // decode None → meter_grid 永久 offline（phase 断供），只在运行期暴露；配置期须拦截。
-                for b in &s.regs {
-                    // int32_scaled 块须显式 scale>0：RegBlockConf.scale serde 默认 0.0，
-                    // 漏写会 raw×0 整块解 0（p/q/pf/i 全 0 静默喂策略，decode_regs 语义）。
-                    if b.format == RegFormat::Int32Scaled && b.scale == 0.0 {
-                        return Err(format!(
-                            "south_stations: meter_grid 站 {} 块 {} format=int32_scaled 须显式 scale>0（默认 0.0 会整块解 0）",
-                            s.id, b.name
-                        ));
-                    }
-                    let is_phase = ["p", "q", "pf", "u", "i"].contains(&b.name.as_str());
-                    if is_phase && b.count < 6 {
-                        return Err(format!(
-                            "south_stations: meter_grid 站 {} 相量块 {} count={} 须 ≥ 6（3 相×2 寄存器）",
-                            s.id, b.name, b.count
-                        ));
-                    }
-                    if b.name == "p_total" && b.count < 2 {
-                        return Err(format!(
-                            "south_stations: meter_grid 站 {} p_total 块 count={} 须 ≥ 2",
-                            s.id, b.count
-                        ));
-                    }
-                }
-                // 块名唯一：mapper 按 name 取首块（`.find`），异 addr 同名不重叠时后者静默死配置。
-                let mut names: Vec<&str> = Vec::new();
-                for b in &s.regs {
-                    if names.contains(&b.name.as_str()) {
-                        return Err(format!(
-                            "south_stations: meter_grid 站 {} regs 块名重复: {}（mapper 按 name 取首块，后者静默失效）",
-                            s.id, b.name
-                        ));
-                    }
-                    names.push(&b.name);
-                }
-                // addr>0 + 区间不重叠（含 p_total；width 取块 count，至少 1）
-                let mut seen: Vec<(&str, u16, u32)> = Vec::new();
-                for b in &s.regs {
-                    if b.addr == 0 {
-                        return Err(format!(
-                            "south_stations: meter_grid 站 {} regs 块 {} addr 不能为 0",
-                            s.id, b.name
-                        ));
-                    }
-                    let width = (b.count as u32).max(1);
-                    for (name, addr, w) in &seen {
-                        let ai = b.addr as u32;
-                        let aj = *addr as u32;
-                        if ai < aj + w && aj < ai + width {
-                            return Err(format!(
-                                "south_stations: meter_grid 站 {} regs 块 {} 与 {} 寄存器区间重叠（{}@{:#x} 与 {}@{:#x}）",
-                                s.id, b.name, name, b.name, b.addr, name, addr
-                            ));
-                        }
-                    }
-                    seen.push((&b.name, b.addr, width));
-                }
+                _ => {}
             }
         }
-        // 同口 baud 一致性：物理共享口波特率（Rs485Device 无动态切波特，同口只能一个波特率）。
-        // 同 port 的站 baud_rate 必须相同，否则 Err（startup 每口用首站 conf open，异 baud 会被静默忽略）。
-        let mut port_bauds: Vec<(&str, &str, u32)> = Vec::new();
+        // ③ 跨站：同口一致性（规则 16：baud_rate 与 parity——物理共享口参数被静默忽略的防线）
+        let mut ports: Vec<(&str, &str, u32, StationParity)> = Vec::new();
         for s in &self.stations {
-            if let Some((_, first_id, first_baud)) = port_bauds
-                .iter()
-                .find(|(p, _, _)| *p == s.port.as_str())
+            if let Some((_, first_id, first_baud, first_parity)) =
+                ports.iter().find(|(p, ..)| *p == s.port.as_str())
             {
                 if *first_baud != s.baud_rate {
                     return Err(format!(
@@ -259,10 +317,18 @@ impl SouthStationsConfig {
                         s.id, s.port, s.baud_rate, first_id, first_baud
                     ));
                 }
+                if *first_parity != s.parity {
+                    return Err(format!(
+                        "south_stations: 站 {} port {} parity={:?} 与同口首站 {}（parity={:?}）不一致——同口共享物理校验位，须统一（否则被静默忽略）",
+                        s.id, s.port, s.parity, first_id, first_parity
+                    ));
+                }
             } else {
-                port_bauds.push((s.port.as_str(), s.id.as_str(), s.baud_rate));
+                ports.push((s.port.as_str(), s.id.as_str(), s.baud_rate, s.parity));
             }
         }
+        // ③ 跨站：块落地极大性（规则 15）
+        validate_maximality(&self.stations)?;
         Ok(())
     }
 
@@ -272,6 +338,401 @@ impl SouthStationsConfig {
             .iter()
             .find(|s| s.role == Role::MeterGrid)
     }
+}
+
+/// 既有 `meter_grid` 站内完整性校验（S3b-1c；**整组原地不动**——见 [`SouthStationsConfig::validate`]）。
+///
+/// 相量块 `p/q/pf/u/i` 齐备 / `count ≥ 6` / `p_total count ≥ 2` / `int32_scaled` 块须显式
+/// `scale > 0` / 块名唯一 / `addr > 0` / 半开区间不重叠。
+fn validate_meter_grid_regs(s: &StationConf) -> Result<(), String> {
+    // 相量块语义（mapper 按 name 找块，缺失/读失败 → Failed→offline 是运行期；
+    // 此处配置期拦截缺失与地址错误）。空 regs 亦落入缺 p 分支被拒。
+    for required in ["p", "q", "pf", "u", "i"] {
+        if !s.regs.iter().any(|b| b.name == required) {
+            return Err(format!(
+                "south_stations: meter_grid 站 {} regs 缺相量块 {}（总表 phase 真源须 p/q/pf/u/i）",
+                s.id, required
+            ));
+        }
+    }
+    // count 语义：相量块须 count>=6（3 相×2 寄存器三相连续，mapper decode_phase_block
+    // 硬性 ≥6）；p_total（可选）count>=2。count 配错（漏配→default 2，或 4）时
+    // name/addr/重叠都过、启动绿灯，但 scheduler 每轮只读 blk.count → 读回 <6 →
+    // decode None → meter_grid 永久 offline（phase 断供），只在运行期暴露；配置期须拦截。
+    for b in &s.regs {
+        // int32_scaled 块须显式 scale>0：RegBlockConf.scale serde 默认 0.0，
+        // 漏写会 raw×0 整块解 0（p/q/pf/i 全 0 静默喂策略，decode_regs 语义）。
+        if b.format == RegFormat::Int32Scaled && b.scale == 0.0 {
+            return Err(format!(
+                "south_stations: meter_grid 站 {} 块 {} format=int32_scaled 须显式 scale>0（默认 0.0 会整块解 0）",
+                s.id, b.name
+            ));
+        }
+        let is_phase = ["p", "q", "pf", "u", "i"].contains(&b.name.as_str());
+        if is_phase && b.count < 6 {
+            return Err(format!(
+                "south_stations: meter_grid 站 {} 相量块 {} count={} 须 ≥ 6（3 相×2 寄存器）",
+                s.id, b.name, b.count
+            ));
+        }
+        if b.name == "p_total" && b.count < 2 {
+            return Err(format!(
+                "south_stations: meter_grid 站 {} p_total 块 count={} 须 ≥ 2",
+                s.id, b.count
+            ));
+        }
+    }
+    // 块名唯一：mapper 按 name 取首块（`.find`），异 addr 同名不重叠时后者静默死配置。
+    let mut names: Vec<&str> = Vec::new();
+    for b in &s.regs {
+        if names.contains(&b.name.as_str()) {
+            return Err(format!(
+                "south_stations: meter_grid 站 {} regs 块名重复: {}（mapper 按 name 取首块，后者静默失效）",
+                s.id, b.name
+            ));
+        }
+        names.push(&b.name);
+    }
+    // addr>0 + 区间不重叠（含 p_total；width 取块 count，至少 1）
+    let mut seen: Vec<(&str, u16, u32)> = Vec::new();
+    for b in &s.regs {
+        if b.addr == 0 {
+            return Err(format!(
+                "south_stations: meter_grid 站 {} regs 块 {} addr 不能为 0",
+                s.id, b.name
+            ));
+        }
+        let width = (b.count as u32).max(1);
+        for (name, addr, w) in &seen {
+            let ai = b.addr as u32;
+            let aj = *addr as u32;
+            if ai < aj + w && aj < ai + width {
+                return Err(format!(
+                    "south_stations: meter_grid 站 {} regs 块 {} 与 {} 寄存器区间重叠（{}@{:#x} 与 {}@{:#x}）",
+                    s.id, b.name, name, b.name, b.addr, name, addr
+                ));
+            }
+        }
+        seen.push((&b.name, b.addr, width));
+    }
+    Ok(())
+}
+
+/// 站内通用校验（S3b-2 §11.5.1 规则 4/5/7/8/9/10/11/12/13/14/19）。
+///
+/// 落点说明（逐条对齐 §11.5.1 的"落点函数"列）：
+/// - 规则 7/8/9（越界 / 重叠 / 32 位对齐）由 [`points::expand`] 在展开时报错（校验期与
+///   运行期**同一函数**，防"校验通过但运行期展开不同"）；
+/// - 规则 11（空洞上限 + 窗口首尾锚定）由 [`validate_anchoring`] 基于 `expand` 结果判；
+/// - 规则 6（符号性一致性）由 [`check_symbolicity`] 逐展开点对 `point_table` 登记值判。
+fn validate_station_regs(s: &StationConf) -> Result<(), String> {
+    let prefix = format!("south_stations: 站 {} ", s.id);
+    // 规则 12（`count` 有效性 + `discrete` 位块上限）
+    for b in &s.regs {
+        if b.count == 0 {
+            return Err(format!(
+                "{}regs 块 {} count 须 > 0（显式取值须为正；serde 层不拦截 0）",
+                prefix, b.name
+            ));
+        }
+        if b.func == RegFunc::Discrete && b.count > points::MAX_DISCRETE_BITS {
+            return Err(format!(
+                "{}discrete 块 {} count={} 超位块上限 {}（PRD §9.4.3 规则 12）",
+                prefix,
+                b.name,
+                b.count,
+                points::MAX_DISCRETE_BITS
+            ));
+        }
+        // 规则 13（地址有效性：addr == 0 仅 meter_batt / hvac 合法；meter_grid 的
+        // addr>0 已由①的既有整组校验先判，行为不变）
+        if b.addr == 0 && !matches!(s.role, Role::MeterBatt | Role::Hvac) {
+            return Err(format!(
+                "{}regs 块 {} addr 不能为 0（仅 meter_batt/hvac 首址可为 0）",
+                prefix, b.name
+            ));
+        }
+    }
+    // 规则 5（格式与标度）+ 规则 19（无 points 块的宽度护栏）
+    for b in &s.regs {
+        validate_scale(&prefix, b)?;
+        if b.func != RegFunc::Discrete && b.points.is_empty() {
+            let width = b.format.reg_width() as u16;
+            if b.count % width != 0 {
+                return Err(format!(
+                    "{}regs 块 {} count={} 非 format={:?} 宽度 {} 的整数倍——步进的尾槽装不下一个完整值，会**静默少产点**（设计补落点规则 19）",
+                    prefix, b.name, b.count, b.format, width
+                ));
+            }
+        }
+    }
+    // 规则 14（区间与重叠，按 func 空间分别判）
+    validate_block_spans(&prefix, &s.regs)?;
+    // 展开（规则 7/8/9）→ 规则 11 → 规则 6 → 汇聚点名（规则 4/10）
+    let mut metrics: Vec<String> = Vec::new();
+    for b in &s.regs {
+        let pts = points::expand(b).map_err(|e| format!("{prefix}{e}"))?;
+        validate_anchoring(&prefix, b, &pts)?;
+        for p in &pts {
+            if let PointKind::Scalar { offset, decode } = p.kind {
+                check_symbolicity(s.role, &p.metric, b.addr + offset, decode.format, decode.offset)
+                    .map_err(|e| format!("{prefix}{e}"))?;
+            }
+        }
+        metrics.extend(pts.into_iter().map(|p| p.metric));
+    }
+    // 规则 4（`soc` 点契约）：消费方按**点名**查找，缺名即静默不推 SOC（对齐 meter_grid
+    // 缺相量块的既有拦截力度）
+    if s.role == Role::Battery && !metrics.iter().any(|m| m == "soc") {
+        return Err(format!(
+            "{}battery 站无任何点位名为 `soc`（PRD §9.4.3 规则 4 `soc` 点契约）——SOC 控制链路会静默断供（消费方按点名查找）",
+            prefix
+        ));
+    }
+    // 规则 10（点名唯一：含自动位置点名与显式 `name` 相撞；meter_grid 的同名**块**由①先拒，文案不同）
+    let mut seen: Vec<&str> = Vec::new();
+    for m in &metrics {
+        if seen.contains(&m.as_str()) {
+            return Err(format!(
+                "{}regs 点名重复: {}（遥测键冲突，指标相互覆盖）",
+                prefix, m
+            ));
+        }
+        seen.push(m.as_str());
+    }
+    Ok(())
+}
+
+/// 规则 5（格式与标度）：`int32_scaled`/`uint16`/`int16` 的**块级或点级** `scale == 0` → 拒。
+///
+/// 点级 `scale` 为 `None` 时按"继承块级"判**一次**（不重复报同一点）；`float32` 忽略
+/// `scale`（既有语义）；`discrete` 块不适用（位值恒 0/1，声明换算即无意义配置）。
+fn validate_scale(prefix: &str, b: &RegBlockConf) -> Result<(), String> {
+    if b.func == RegFunc::Discrete {
+        return Ok(());
+    }
+    if is_integer_format(b.format) && b.scale == 0.0 {
+        return Err(format!(
+            "{}regs 块 {} format={:?} 须显式 scale>0（serde 默认 0.0 会 raw×0 整块解 0）",
+            prefix, b.name, b.format
+        ));
+    }
+    for p in &b.points {
+        let format = p.format.unwrap_or(b.format);
+        let scale = p.scale.unwrap_or(b.scale);
+        if is_integer_format(format) && scale == 0.0 {
+            return Err(format!(
+                "{}regs 块 {} 点 at={} format={:?} 须显式 scale>0（点级未声明时继承块级 scale={}）",
+                prefix, b.name, p.at, format, b.scale
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 整数类格式（须显式非零 `scale`）：`int32_scaled` / `uint16` / `int16`。
+fn is_integer_format(f: RegFormat) -> bool {
+    matches!(
+        f,
+        RegFormat::Int32Scaled | RegFormat::Uint16 | RegFormat::Int16
+    )
+}
+
+/// 规则 11（空洞上限，仅作用于**声明了 `points` 的标量块**）。
+///
+/// 两条锚定 + 一条空洞：① 首个声明寄存器须落在块内偏移 **0**（不得含前导未声明寄存器）；
+/// ② 最后一个声明寄存器的**末端须恰好等于 `count`**（末尾未声明寄存器不计入 count）；
+/// ③ 块内未声明寄存器的**连续空洞 ≤ 4**（PRD §9.4.2.1 第 3 条：补读量不得超过一次请求帧）。
+/// `discrete` 位块不受本条限制（位块整窗口产出）。
+fn validate_anchoring(prefix: &str, b: &RegBlockConf, pts: &[PointSpec]) -> Result<(), String> {
+    if b.func == RegFunc::Discrete || b.points.is_empty() {
+        return Ok(());
+    }
+    let mut spans: Vec<(u16, u16)> = pts.iter().map(|p| (p.kind.offset(), p.kind.width())).collect();
+    spans.sort_unstable();
+    let first = spans[0].0;
+    let last_end = spans.iter().map(|(o, w)| *o + *w).max().unwrap_or(0);
+    if first != 0 {
+        return Err(format!(
+            "{}regs 块 {} 声明点窗口首尾锚定：首个声明寄存器落在块内偏移 {}（须为 0，不得含前导未声明寄存器）",
+            prefix, b.name, first
+        ));
+    }
+    if last_end != b.count {
+        return Err(format!(
+            "{}regs 块 {} 声明点窗口首尾锚定：末个声明寄存器末端={} 与 count={} 不等（末尾未声明寄存器不计入 count）",
+            prefix, b.name, last_end, b.count
+        ));
+    }
+    let mut cursor: u16 = 0;
+    for (off, w) in &spans {
+        if *off > cursor {
+            let hole = *off - cursor;
+            if hole > points::MAX_HOLE_REGS {
+                return Err(format!(
+                    "{}regs 块 {} 块内未声明寄存器连续空洞 {} > {}（块内偏移 {}..{} 未声明；须在该空洞处拆块）",
+                    prefix,
+                    b.name,
+                    hole,
+                    points::MAX_HOLE_REGS,
+                    cursor,
+                    off
+                ));
+            }
+        }
+        cursor = cursor.max(off + w);
+    }
+    Ok(())
+}
+
+/// 规则 14（区间与重叠）：同站**按功能码空间**（holding / input / discrete 三套地址空间）
+/// 分别判半开区间重叠。PCS 的 3 区/4 区同址不同 func 由此天然放行。
+fn validate_block_spans(prefix: &str, regs: &[RegBlockConf]) -> Result<(), String> {
+    for (i, a) in regs.iter().enumerate() {
+        for b in regs.iter().skip(i + 1) {
+            if a.func != b.func {
+                continue;
+            }
+            let (ai, aw) = (a.addr as u32, a.count as u32);
+            let (bi, bw) = (b.addr as u32, b.count as u32);
+            if ai < bi + bw && bi < ai + aw {
+                return Err(format!(
+                    "{}regs 块 {} 与 {} 寄存器区间重叠（{:?} 空间 {}@{:#x}+{} 与 {}@{:#x}+{}）",
+                    prefix, a.name, b.name, a.func, a.name, a.addr, a.count, b.name, b.addr, b.count
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 规则 6（符号性一致性）：查点表登记值判"可追溯"与"不漂移"。
+///
+/// **查不到行 → 放行**（§11.4.4 P0-2 裁定）：现场 RC-3 会合法改 `addr` 基准，
+/// 此时按基准登记的键自然全部失配；若"无行即拒"会把**合法的现场校准配置拒在启动期**。
+fn check_symbolicity(
+    role: Role,
+    metric: &str,
+    addr: u16,
+    format: RegFormat,
+    offset: f64,
+) -> Result<(), String> {
+    check_symbolicity_row(metric, addr, format, offset, crate::point_table::lookup(role, addr))
+}
+
+/// 规则 6 的判定核心（纯函数，供单测直接注入登记行）：
+/// ① `offset ≠ 0` 而登记行未登记符号性来源（`sym_src` 空）→ 拒；
+/// ② `offset` 与登记值不等（含"漏配 → 缺省 0 ≠ −40"）→ 拒；无行 → 放行。
+/// 仅对 `format ∈ {uint16, int16}` 生效（PRD §9.4.3；`float32`/`int32_scaled` 不参与）。
+fn check_symbolicity_row(
+    metric: &str,
+    addr: u16,
+    format: RegFormat,
+    offset: f64,
+    row: Option<&crate::point_table::PointReg>,
+) -> Result<(), String> {
+    if !matches!(format, RegFormat::Uint16 | RegFormat::Int16) {
+        return Ok(());
+    }
+    let Some(row) = row else {
+        return Ok(());
+    };
+    if (row.offset - offset).abs() > f64::EPSILON {
+        return Err(format!(
+            "点 {} (addr={:#06x}, format={:?}) offset={} 与点表登记值 {} 不一致——配置与 §9.5 点表漂移",
+            metric, addr, format, offset, row.offset
+        ));
+    }
+    if offset != 0.0 && row.sym_src.is_none() {
+        return Err(format!(
+            "点 {} (addr={:#06x}, format={:?}) 携带 offset={} 但点表未登记符号性来源（raw 的解释方式无人可考）",
+            metric, addr, format, offset
+        ));
+    }
+    Ok(())
+}
+
+/// 规则 15（块落地极大性，PRD §9.4.3 v1.8 订正后的适用域与判据）。
+///
+/// **适用域（先行过滤）**：仅当被考察的两个块**都声明了 `points`** 且**均非 `discrete`**
+/// 时才参与判定；任一块未声明 `points` → 跳过不判（既有 `meter_grid` 六相量块、
+/// `discrete` 位块均属此列——否则会拒掉既有 `grid_meter`，现场启动 fail-fast）。
+///
+/// **判据（同时满足才拒）**：① `func`/`byte_swap` 相同；② 地址严格相邻
+///（`b.addr == a.addr + a.count`）；③ 合并窗口内连续空洞 ≤ 4；④ 合并后
+/// `count ≤ MAX_SINGLE_READ_REGS(120)`；且**两块均未标 `read_slice: true`** → `Err`。
+///
+/// **判定顺序（§11.5.2(1) 建议）**：先判 ④（超上限 ⇒ 本就该分片 ⇒ **提前放行**），
+/// 再判 ③，最后 ①② 与 `read_slice` 豁免。三条判据对"拒绝"是**合取**关系，故顺序不影响
+/// 判定结果；按建议顺序实现是为了让"本就该分片"的形态（如 `fire` 的 13+114=127）一眼可见地
+/// 走放行分支，不被后续条件误拒。
+fn validate_maximality(stations: &[StationConf]) -> Result<(), String> {
+    for s in stations {
+        for (i, a) in s.regs.iter().enumerate() {
+            for b in s.regs.iter().skip(i + 1) {
+                // 适用域过滤
+                if a.points.is_empty() || b.points.is_empty() {
+                    continue;
+                }
+                if a.func == RegFunc::Discrete || b.func == RegFunc::Discrete {
+                    continue; // 保守读法（§11.12.2 Δ-8）：discrete 块一律不参与
+                }
+                // ① func / byte_swap 相同（func 同空间 + 显式同 swap）
+                if a.func != b.func || a.byte_swap != b.byte_swap {
+                    continue;
+                }
+                // ② 地址严格相邻
+                if b.addr as u32 != a.addr as u32 + a.count as u32 {
+                    continue;
+                }
+                let merged: u32 = a.count as u32 + b.count as u32;
+                // ④ 合并后超设备单次读上限 ⇒ 本就该分片 ⇒ 放行
+                if merged > points::MAX_SINGLE_READ_REGS as u32 {
+                    continue;
+                }
+                // ③ 合并窗口内连续空洞 ≤ 4
+                if merged_max_hole(a, b)? > points::MAX_HOLE_REGS {
+                    continue;
+                }
+                // 豁免：任一块显式 read_slice（现场按实测上限分片，PRD §9.4.2.4）
+                if a.read_slice || b.read_slice {
+                    continue;
+                }
+                return Err(format!(
+                    "south_stations: 站 {} regs 块 {}@{:#x}(count={}) 与 {}@{:#x}(count={}) 同 func/同 byte_swap、地址连续、合并后 {} ≤ {} 且未标 read_slice ⇒ 应合并为一块（PRD §9.4.3 规则 15 块落地极大性）",
+                    s.id, a.name, a.addr, a.count, b.name, b.addr, b.count, merged,
+                    points::MAX_SINGLE_READ_REGS
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 合并窗口（`[a.addr, b.addr + b.count)`）内未声明寄存器的**最大连续空洞**（寄存器数）。
+fn merged_max_hole(a: &RegBlockConf, b: &RegBlockConf) -> Result<u16, String> {
+    let len = a.count as usize + b.count as usize;
+    let mut covered = vec![false; len];
+    for (blk, base) in [(a, 0usize), (b, a.count as usize)] {
+        for (off, w) in points::footprint(blk)? {
+            for k in 0..w as usize {
+                let idx = base + off as usize + k;
+                if idx < len {
+                    covered[idx] = true;
+                }
+            }
+        }
+    }
+    let (mut max_hole, mut cur) = (0u16, 0u16);
+    for c in covered {
+        if c {
+            cur = 0;
+        } else {
+            cur += 1;
+            max_hole = max_hole.max(cur);
+        }
+    }
+    Ok(max_hole)
 }
 
 fn default_poll_ms() -> u64 {
@@ -288,6 +749,9 @@ fn default_interval_ms() -> u64 {
 }
 fn default_reg_count() -> u16 {
     2
+}
+fn default_point_count() -> u16 {
+    1
 }
 fn default_reg_format() -> RegFormat {
     RegFormat::Float32
@@ -309,7 +773,13 @@ mod tests {
         south_stations: SouthStationsConfig,
     }
 
-    /// 合法 5 站示例 YAML（role 走 snake_case）
+    /// 合法 5 站示例 YAML（role 走 snake_case）。
+    ///
+    /// S3b-2 T3 订正（设计 §11.5.3.2 **A1**）：① `battery_1` 的块改为**点名式**
+    /// （`name: soc` 的块名式在规则 4「`soc` 点契约」下会被拒——契约锚定**点名**）；
+    /// ② `fire_1` 的 `addr: 0` → `4`（规则 13：`addr == 0` 仅 `meter_batt`/`hvac` 合法）。
+    /// **本 fixture 的 meter_grid 段仍保留 legacy 写法**（块名 `soc` 的旧形态见
+    /// `default_reg_format_used_when_omitted` 等解析类用例，§11.5.3.4 C3）。
     const VALID_5_STATION_YAML: &str = r#"
 south_stations:
   poll_ms: 1000
@@ -338,7 +808,7 @@ south_stations:
       port: /dev/ttyS2
       slave: 1
       interval_ms: 1000
-      regs: [{ name: soc, addr: 100, format: int32_scaled, scale: 0.1, count: 2 }]
+      regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }]
     - id: hvac_1
       role: hvac
       port: /dev/ttyS3
@@ -350,8 +820,13 @@ south_stations:
       port: /dev/ttyS4
       slave: 1
       interval_ms: 2000
-      regs: [{ name: alarm, addr: 0, format: int32_scaled, scale: 1.0, count: 2 }]
+      regs: [{ name: alarm, addr: 4, format: int32_scaled, scale: 1.0, count: 2 }]
 "#;
+
+    /// 含点名 `soc` 点的 battery 侧 regs（设计 §11.5.3.2 A2–A5/A15/A16 的共用订正片段：
+    /// 规则 4 的 `soc` 点契约要求 battery 站必须有点名为 `soc` 的点）。
+    const BATTERY_SOC_REGS: &str =
+        "regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }]";
 
     #[test]
     fn parses_valid_5_station_yaml() {
@@ -467,17 +942,19 @@ south_stations:
         assert!(w.south_stations.validate().is_err());
     }
 
+    /// A3（fixture 订正）：battery 站补含 `soc` 点的 `regs`，使本用例真正测到 slave 上界
+    /// （否则会先被规则 4 拒——"测试通过却没测到"的隐患，设计 §11.5.3.5）。
     #[test]
     fn validate_accepts_max_slave() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 247 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 247, {} }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(
             w.south_stations.validate().is_ok(),
-            "slave=247 为合法上界，应通过"
+            "slave=247 为合法上界，应通过: {:?}",
+            w.south_stations.validate()
         );
     }
 
@@ -498,6 +975,8 @@ south_stations:
         }
     }
 
+    /// A2（fixture 订正）：battery 侧补含 `soc` 点的 `regs`，使本用例真正测到 interval 上界
+    /// （否则会先被规则 4 拒）。断言**不变**。
     #[test]
     fn validate_battery_interval_boundary() {
         // Battery 站与 meter_grid 对称：interval 须 < DATA_FRESHNESS_MS——battery 是 BMS SOC
@@ -505,22 +984,27 @@ south_stations:
         // 翻转、soc_protect 剪带震荡。4999(<5000) 合法，6000(>=5000) 拒绝。
         for (iv, ok) in [(4999u64, true), (6000u64, false)] {
             let yaml = format!(
-                "south_stations:\n  stations:\n    - {{ id: bat, role: battery, port: t1, slave: 1, interval_ms: {iv} }}"
+                "south_stations:\n  stations:\n    - {{ id: bat, role: battery, port: t1, slave: 1, interval_ms: {iv}, {} }}",
+                BATTERY_SOC_REGS
             );
             let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
             assert_eq!(
                 w.south_stations.validate().is_ok(),
                 ok,
-                "battery interval_ms={iv} 期望 ok={ok}"
+                "battery interval_ms={iv} 期望 ok={ok}: {:?}",
+                w.south_stations.validate()
             );
         }
     }
 
+    /// A15（fixture 订正，v1.4 从"期望 Err 类"移入）：补合法 `regs`，使本用例仍由
+    /// **slave 下界**规则拒（而非新规则 4）——断言 `is_err()` 不变。
     #[test]
     fn validate_rejects_slave_out_of_range() {
         for bad in [0u16, 248u16] {
             let yaml = format!(
-                "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: {bad} }}"
+                "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: {bad}, {} }}",
+                BATTERY_SOC_REGS
             );
             let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
             assert!(
@@ -530,14 +1014,14 @@ south_stations:
         }
     }
 
+    /// A16（fixture 订正，同上）：补合法 `regs`，使本用例仍由 interval 下界规则拒。
     #[test]
     fn validate_rejects_zero_interval() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 1, interval_ms: 0 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 1, interval_ms: 0, {} }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
     }
 
@@ -709,6 +1193,57 @@ south_stations:
         );
     }
 
+    // ── 规则 6（符号性一致性）的判定核心：`check_symbolicity_row` 逐条 ──
+    //
+    // 配置级用例（对 `POINT_REGS` 的命中/未命中）依赖 §11.4.4 的 618 行登记表，
+    // 该表属 **T4**（本 Task 落空表 ⇒ 配置级只覆盖"查不到行 → 放行"）。故此处直接对
+    // 判定核心注入登记行，把 ①（来源未登记）与 ②（与登记值不一致）两条钉死。
+
+    use crate::point_table::{PointReg, SymSrc};
+
+    fn row(offset: f64, sym_src: Option<SymSrc>) -> PointReg {
+        PointReg {
+            role: Role::Battery,
+            addr: 116,
+            offset,
+            sym_src,
+        }
+    }
+
+    /// ① 命中行、`offset ≠ 0`，而该行 `sym_src` 为空 → 拒（raw 的解释方式无人可考）
+    #[test]
+    fn symbolicity_rejects_untraceable_offset() {
+        let r = row(-1600.0, None);
+        let err = check_symbolicity_row("x", 116, RegFormat::Uint16, -1600.0, Some(&r)).unwrap_err();
+        assert!(err.contains("未登记符号性来源"), "实际: {err}");
+        // 同值但已登记来源 → 放行
+        let r = row(-1600.0, Some(SymSrc::VendorTypo));
+        assert!(check_symbolicity_row("x", 116, RegFormat::Uint16, -1600.0, Some(&r)).is_ok());
+    }
+
+    /// ② 命中行而 `offset` 与登记值不等（含"漏配 → 缺省 0 ≠ −40"）→ 拒（配置与点表漂移）
+    #[test]
+    fn symbolicity_rejects_registry_drift() {
+        let r = row(-40.0, Some(SymSrc::VendorTypo));
+        // 漏配 offset（缺省 0 ≠ −40）
+        let err = check_symbolicity_row("x", 117, RegFormat::Uint16, 0.0, Some(&r)).unwrap_err();
+        assert!(err.contains("与点表登记值"), "实际: {err}");
+        // 配错值
+        assert!(check_symbolicity_row("x", 117, RegFormat::Uint16, -50.0, Some(&r)).is_err());
+        // 一致且已登记来源 → 放行
+        assert!(check_symbolicity_row("x", 117, RegFormat::Uint16, -40.0, Some(&r)).is_ok());
+    }
+
+    /// ③ 查不到行 → **放行**（§11.4.4 P0-2 裁定：现场 RC-3 合法改 `addr` 基准不得被拒）；
+    /// 非 16 位格式不参与本条（PRD §9.4.3 只对 `uint16`/`int16` 要求符号性可追溯）。
+    #[test]
+    fn symbolicity_passes_when_no_row_or_wide_format() {
+        assert!(check_symbolicity_row("x", 116, RegFormat::Uint16, -1600.0, None).is_ok());
+        let r = row(-1600.0, None);
+        assert!(check_symbolicity_row("x", 116, RegFormat::Float32, -1600.0, Some(&r)).is_ok());
+        assert!(check_symbolicity_row("x", 116, RegFormat::Int32Scaled, -1600.0, Some(&r)).is_ok());
+    }
+
     #[test]
     fn default_field_fallbacks_apply() {
         let yaml = r#"
@@ -787,16 +1322,19 @@ south_stations:
         assert!(w.south_stations.validate().is_err());
     }
 
+    /// A4（fixture 订正）：battery 侧补 `regs`（否则先被规则 4 拒）。断言不变。
     #[test]
     fn validate_accepts_same_port_same_baud() {
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
-    - { id: b, role: hvac,    port: t1, slave: 2, baud_rate: 9600 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
-        assert!(w.south_stations.validate().is_ok());
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 1, baud_rate: 9600, {} }}\n    - {{ id: b, role: hvac,    port: t1, slave: 2, baud_rate: 9600 }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
+        assert!(
+            w.south_stations.validate().is_ok(),
+            "同口同 baud/同 parity 应通过: {:?}",
+            w.south_stations.validate()
+        );
     }
 
     #[test]
@@ -813,16 +1351,15 @@ south_stations:
         assert!(w.south_stations.validate().is_err());
     }
 
+    /// A5（fixture 订正）：battery 侧补 `regs`（否则先被规则 4 拒）。断言不变。
     #[test]
     fn validate_accepts_diff_ports_same_baud() {
         // 不同口独立物理口，同 baud 无冲突 → Ok
-        let yaml = r#"
-south_stations:
-  stations:
-    - { id: a, role: battery, port: t1, slave: 1, baud_rate: 9600 }
-    - { id: b, role: hvac,    port: t2, slave: 2, baud_rate: 9600 }
-"#;
-        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        let yaml = format!(
+            "south_stations:\n  stations:\n    - {{ id: a, role: battery, port: t1, slave: 1, baud_rate: 9600, {} }}\n    - {{ id: b, role: hvac,    port: t2, slave: 2, baud_rate: 9600 }}",
+            BATTERY_SOC_REGS
+        );
+        let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_ok());
     }
 

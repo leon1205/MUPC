@@ -9,7 +9,8 @@
 //! [`telemetry_points`] 直接落库（不须经 DataPackage）。
 
 use crate::config::{RegBlockConf, Role};
-use mupc_data_processing::meter_regs::decode_regs;
+use crate::points::{self, PointKind};
+use mupc_data_processing::meter_regs::{decode_regs, RegDecode};
 use mupc_data_processing::telemetry::PhaseElectricalData;
 use mupc_data_processing::{
     BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
@@ -150,12 +151,30 @@ fn build_grid_package(
     }
 }
 
+/// 找点名 `soc` 的点（PRD §9.4.3 规则 4 的消费侧查找键）：返回
+/// `(该点所在块的读结果, 点内偏移, 解码规格)`；无该点 / 块展开失败 → `None`。
+fn soc_point(reads: &BlockReads) -> Option<(Result<Vec<u16>, String>, u16, RegDecode)> {
+    for (b, res) in reads {
+        let Ok(pts) = points::expand(b) else {
+            continue;
+        };
+        for p in pts {
+            if p.metric == "soc" {
+                if let PointKind::Scalar { offset, decode } = p.kind {
+                    return Some((res.clone(), offset, decode));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 站一次 poll 的结果组装。role 语义：
 /// - `MeterGrid`：p/q/pf/u/i 五相量块缺任一或读失败 → Failed（沿用旧数据）；p_total
 ///   独立块缺省/失败 → 降级分相和，不整周期失败。
-/// - `Battery`：若含 soc 块且读失败 → Failed；读成功 → 填 battery.soc；无 soc 块
-///   或长度不足 → battery 空（占位，不 Failed）。
-/// - 其它 role（MeterBatt/Hvac/Fire）：无语义点表 → 最小 DataPackage（"站活着"信号）。
+/// - `Battery`：按**点名**找 `soc` 点（PRD §9.4.3 规则 4）；该点所在块读失败 → Failed；
+///   读成功 → 填 battery.soc；无 `soc` 点或长度不足 → battery 空（占位，不 Failed）。
+/// - 其它 role（MeterBatt/Hvac/Fire/**Pcs**）：无语义点表 → 最小 DataPackage（"站活着"信号）。
 pub fn poll_to_result(role: Role, reads: &BlockReads) -> PollResult {
     match role {
         Role::MeterGrid => {
@@ -184,43 +203,61 @@ pub fn poll_to_result(role: Role, reads: &BlockReads) -> PollResult {
         }
         Role::Battery => {
             let mut pkg = empty_package();
-            match reads.iter().find(|(b, _)| b.name == "soc") {
-                None => {} // 无 soc 块：battery 空占位
-                Some((b, res)) => match res {
-                    Ok(r) if r.len() >= 2 => {
-                        pkg.battery.soc = Some(decode_regs(&r[..2], b.format, b.scale))
+            // PRD §9.4.3「`soc` 点契约」（v1.3 修订）：按**点名**查找（不再按块名），
+            // 解码用该点的 `RegDecode`（块级缺省已在 `points::expand` 折算）。
+            match soc_point(reads) {
+                None => {} // 无 soc 点：battery 空占位（该形态配置期已被规则 4 拒）
+                Some((res, offset, decode)) => match res {
+                    Ok(r) => {
+                        let start = offset as usize;
+                        if r.len() >= start + decode.width() {
+                            pkg.battery.soc = Some(decode.decode(&r[start..]));
+                        }
+                        // 长度不足：保持 None（best-effort，不 Failed）——沿用既有语义
                     }
-                    Ok(_) => {} // soc 块长度不足：保持 None（best-effort，不 Failed）
-                    Err(e) => return PollResult::Failed(format!("battery soc 块读失败: {e}")),
+                    Err(e) => return PollResult::Failed(format!("battery soc 点所在块读失败: {e}")),
                 },
             }
             PollResult::Data(pkg)
         }
-        Role::MeterBatt | Role::Hvac | Role::Fire => PollResult::Data(empty_package()),
+        Role::MeterBatt | Role::Hvac | Role::Fire | Role::Pcs => {
+            PollResult::Data(empty_package())
+        }
     }
 }
 
-/// 遥测点提取：每块读成功取首值（前 2 寄存器 decode 一个标量），metric 名 = 块名。
+/// 遥测点提取（S3b-2 §11.2.1 的**刻意行为变更**）：对**未声明 `points` 的块**由
+/// "取前 2 寄存器 1 点、metric = 块名"改为"**每个值槽 1 点、metric = `<块名>_<序号>`**"
+/// （PRD §9.4.2.1 第 4 条 + §9.4.2.2 命名规则），由 [`points::expand`] 统一展开
+/// ——**校验期与运行期同一函数**。
 ///
-/// 相量块（float32 三相）也取前 2 寄存器单值——对 S3b 语义点表补全前的占位 role
-/// 够 scheduler 直接落库（不须经 DataPackage）。块读失败/长度不足 → 跳过。
+/// 该函数**只被非 grid 站调用**（grid 走 `on_grid_package`）；块读失败 / 长度不足 → 跳过。
+/// 位点（`discrete`）的解包依赖 FC02 位向量，其落库口径在 S3b-2 的 S5/S6（D2 变化沿）接入，
+/// 故此处对 `PointKind::Bit` **不产点**（当前运行期 discrete 块读根本不会成功——见 scheduler）。
 pub fn telemetry_points(reads: &BlockReads) -> Vec<(String, f64)> {
-    reads
-        .iter()
-        .filter_map(|(b, res)| match res {
-            Ok(r) if r.len() >= 2 => {
-                Some((b.name.clone(), decode_regs(&r[..2], b.format, b.scale)))
+    let mut out = Vec::new();
+    for (b, res) in reads {
+        let Ok(r) = res else { continue };
+        let Ok(pts) = points::expand(b) else {
+            continue;
+        };
+        for p in pts {
+            if let PointKind::Scalar { offset, decode } = p.kind {
+                let start = offset as usize;
+                if r.len() >= start + decode.width() {
+                    out.push((p.metric, decode.decode(&r[start..])));
+                }
             }
-            _ => None,
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RegFunc;
-    use mupc_data_processing::meter_regs::RegFormat;
+    use crate::config::{PointConf, RegFunc};
+    use mupc_data_processing::meter_regs::{RegFormat, WordOrder};
 
     fn blk(name: &str) -> RegBlockConf {
         RegBlockConf {
@@ -230,6 +267,34 @@ mod tests {
             format: RegFormat::Float32,
             scale: 0.0,
             count: 6,
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
+        }
+    }
+
+    /// 点名式块（S3b-2 A12/A13）：块名不再是查找键，`soc` 由**点级 `name`** 声明。
+    fn named_soc_block() -> RegBlockConf {
+        RegBlockConf {
+            name: "bms_io".into(),
+            addr: 100,
+            func: RegFunc::Holding,
+            format: RegFormat::Float32,
+            scale: 1.0,
+            count: 2,
+            offset: 0.0,
+            byte_swap: false,
+            points: vec![PointConf {
+                at: 1,
+                count: 1,
+                name: Some("soc".into()),
+                format: None,
+                scale: None,
+                offset: None,
+                word_order: WordOrder::HiLo,
+            }],
+            read_slice: false,
         }
     }
 
@@ -364,10 +429,14 @@ mod tests {
         ));
     }
 
-    /// battery：soc 块读成功 → battery.soc；读失败 → Failed
+    /// battery：**点名式** `soc` 点所在块读成功 → battery.soc；读失败 → Failed
+    /// （A12 fixture 订正：按点名查找后，承载 soc 的块名可任意）
     #[test]
     fn poll_to_result_battery_soc_block_maps_soc() {
-        let ok = vec![sblock("soc", 65.5), sblock("temp", 25.0)];
+        let ok = vec![
+            (named_soc_block(), Ok(f32_regs(65.5).to_vec())),
+            sblock("temp", 25.0),
+        ];
         let pkg = unwrap_data(poll_to_result(Role::Battery, &ok));
         assert_eq!(pkg.battery.soc, Some(65.5));
         // 其余占位
@@ -381,22 +450,33 @@ mod tests {
             PollResult::Failed(_)
         ));
 
-        // 无 soc 块 → Data 占位（不 Failed）
+        // 无 soc 点 → Data 占位（不 Failed）
         let empty: BlockReads = Vec::new();
         let pkg2 = unwrap_data(poll_to_result(Role::Battery, &empty));
         assert_eq!(pkg2.battery.soc, None);
     }
 
-    /// telemetry_points：每块取首值，metric=块名；读失败块跳过
+    /// telemetry_points：**每个值槽 1 点**（PRD §9.4.2.1 第 4 条），metric = `<块名>_<序号>`；
+    /// 读失败块整块跳过。单块 6 寄存器 / float32 ⇒ 3 个值槽 ⇒ 序号 1/3/5。
     #[test]
-    fn telemetry_points_first_value_per_block() {
+    fn telemetry_points_every_value_slot() {
         let reads = vec![
             fblock("p", 1.0, 2.0, 3.0),
             fblock("u", 220.0, 221.0, 222.0),
             (blk("bad"), Err("io".into())),
         ];
         let pts = telemetry_points(&reads);
-        assert_eq!(pts, vec![("p".to_string(), 1.0), ("u".to_string(), 220.0)]);
+        assert_eq!(
+            pts,
+            vec![
+                ("p_1".to_string(), 1.0),
+                ("p_3".to_string(), 2.0),
+                ("p_5".to_string(), 3.0),
+                ("u_1".to_string(), 220.0),
+                ("u_3".to_string(), 221.0),
+                ("u_5".to_string(), 222.0),
+            ]
+        );
     }
 
     /// 非 grid/battery role → 最小 DataPackage（Running + battery 空 + electrical 缺省）

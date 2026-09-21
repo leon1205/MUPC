@@ -29,7 +29,7 @@ use chrono::Utc;
 
 use crate::config::{RegFunc, Role, SouthStationsConfig, StationConf};
 use crate::mapper::{self, BlockReads, PollResult};
-use crate::port_runtime::StationBus;
+use crate::port_runtime::{BusError, StationBus};
 use crate::station::Station;
 
 /// 采集结果上送回调（core-bin 实现；southd 不依赖 strategy/ai-integration）。
@@ -75,10 +75,12 @@ fn backoff_extra(interval_ms: u64, offline_count: u32) -> u64 {
 }
 
 /// 角色优先级（口调度预算 §10.2：grid/battery 关键量优先于 hvac/fire；慢站降频不拖累关键站 cadence）。
+/// S3b-2（PRD §9.3.2.3）：`pcs` 与 `meter_batt` 同为 1 档——**不与 grid/battery 同档**
+/// （PCS 不参与控制决策，不得抢占总表 phase 的调度预算）。
 fn role_priority(r: Role) -> u8 {
     match r {
         Role::MeterGrid | Role::Battery => 0,
-        Role::MeterBatt => 1,
+        Role::MeterBatt | Role::Pcs => 1,
         Role::Hvac | Role::Fire => 2,
     }
 }
@@ -298,10 +300,18 @@ impl SouthScheduler {
         let mut io_error: Option<String> = None;
         if let Some(b) = &bus {
             for blk in &regs {
-                // 按块 func 分发读方法：Holding → FC03 read_holding，Input → FC04 read_input
+                // 按块 func 分发读方法：Holding → FC03 read_holding，Input → FC04 read_input，
+                // Discrete → FC02 read_discrete（S3b-2 T5 接入 `StationBus::read_discrete`）。
+                // T5 之前该块读视为失败：配置了 discrete 块的站在运行期显式 offline（不静默无数据）。
                 let res = match blk.func {
                     RegFunc::Holding => b.read_holding(slave, blk.addr, blk.count).await,
                     RegFunc::Input => b.read_input(slave, blk.addr, blk.count).await,
+                    RegFunc::Discrete => Err(BusError::Read {
+                        slave,
+                        addr: blk.addr,
+                        count: blk.count,
+                        reason: "discrete（FC02）块读取尚未接入（S3b-2 T5）".into(),
+                    }),
                 };
                 match res {
                     Ok(reg) => reads.push((blk.clone(), Ok(reg))),
@@ -420,9 +430,9 @@ impl SouthScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DEFAULT_BAUD_RATE, RegBlockConf, RegFunc};
+    use crate::config::{PointConf, StationParity, DEFAULT_BAUD_RATE, RegBlockConf, RegFunc};
     use crate::port_runtime::MockBus;
-    use mupc_data_processing::meter_regs::RegFormat;
+    use mupc_data_processing::meter_regs::{RegFormat, WordOrder};
 
     // ---------- 测试构件 ----------
 
@@ -434,6 +444,10 @@ mod tests {
             format: RegFormat::Float32,
             scale: 0.0,
             count,
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
         }
     }
 
@@ -456,6 +470,7 @@ mod tests {
             protocol: "modbus".into(),
             slave,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms,
             regs: vec![
                 blk("p", 0, 6),
@@ -468,8 +483,9 @@ mod tests {
         }
     }
 
-    /// battery 站：soc 块（float32，slave 2，地址 100）——mapper Battery 分支 decode 进
-    /// pkg.battery.soc；telemetry 与独立 SOC 通道都用它。单测成功路径值 65.5（f32 精确）。
+    /// battery 站：**点名式** `soc` 点（float32，slave 2，地址 100）——mapper Battery 分支
+    /// 按**点名**查找并 decode 进 pkg.battery.soc；telemetry 与独立 SOC 通道都用它。
+    /// 单测成功路径值 65.5（f32 精确）。
     fn battery_conf() -> StationConf {
         StationConf {
             id: "bms".into(),
@@ -478,8 +494,28 @@ mod tests {
             protocol: "modbus".into(),
             slave: 2,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms: 1000,
-            regs: vec![blk("soc", 100, 2)],
+            regs: vec![RegBlockConf {
+                name: "bms_io".into(),
+                addr: 100,
+                func: RegFunc::Holding,
+                format: RegFormat::Float32,
+                scale: 1.0,
+                count: 2,
+                offset: 0.0,
+                byte_swap: false,
+                points: vec![PointConf {
+                    at: 1,
+                    count: 1,
+                    name: Some("soc".into()),
+                    format: None,
+                    scale: None,
+                    offset: None,
+                    word_order: WordOrder::HiLo,
+                }],
+                read_slice: false,
+            }],
         }
     }
 
@@ -491,6 +527,7 @@ mod tests {
             protocol: "modbus".into(),
             slave,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms,
             regs: vec![blk("temp", 100, 2)],
         }
@@ -629,7 +666,7 @@ mod tests {
         assert_eq!(bus.call_count(3, 100), 1, "hvac interval=5000 首轮后应隔 5000 才到期");
         // sink：grid 每轮 on_grid_package；hvac 一次 telemetry（非事件）
         assert_eq!(sink.grid_count(), 3);
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
         assert_eq!(sink.event_count("grid", "offline"), 0);
         assert_eq!(sink.event_count("hvac", "offline"), 0);
         assert_eq!(sink.event_count("grid", "online"), 0);
@@ -659,7 +696,7 @@ mod tests {
         assert_eq!(sink.grid_count(), 0);
         // 同口 hvac 不受隔离影响：仍读到并上送普通遥测
         assert_eq!(bus.call_count(3, 100), 1);
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
         assert_eq!(sink.event_count("hvac", "offline"), 0);
     }
 
@@ -682,7 +719,7 @@ mod tests {
 
         sched.tick_once(1000).await; // 恢复（fail 已消费）
         assert_eq!(sink.event_count("hvac", "online"), 1);
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
     }
 
     /// 多轮退避（oc≥3，next_due 已推远）后恢复：probe 在退避到期点成功 → oc 归零、
@@ -716,7 +753,7 @@ mod tests {
             assert_eq!(st[0].offline_count, 0, "恢复后 oc 归零");
             assert_eq!(sink.event_count("hvac", "online"), 1);
         }
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
         // 恢复后 cadence 正常：next_due=8000，8000 到期再采一次（不因退避残留再跳）
         sched.tick_once(8000).await;
         assert_eq!(
@@ -741,6 +778,7 @@ mod tests {
             protocol: "modbus".into(),
             slave: 3,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![
                 RegBlockConf {
@@ -750,6 +788,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
                 RegBlockConf {
                     name: "alarm_in".into(),
@@ -758,6 +800,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
             ],
         };
@@ -766,8 +812,8 @@ mod tests {
         assert_eq!(bus.call_count(3, 100), 1, "holding 块应被 FC03 读");
         assert_eq!(bus.input_call_count(3, 200), 1, "input 块应被 FC04 读");
         let tel = sink.telemetry_of("mix");
-        assert!(tel.iter().any(|(m, _)| m == "temp"));
-        assert!(tel.iter().any(|(m, _)| m == "alarm_in"));
+        assert!(tel.iter().any(|(m, _)| m == "temp_1"));
+        assert!(tel.iter().any(|(m, _)| m == "alarm_in_1"));
         assert_eq!(sink.event_count("mix", "offline"), 0);
     }
 
@@ -789,6 +835,7 @@ mod tests {
             protocol: "modbus".into(),
             slave: 3,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![
                 RegBlockConf {
@@ -798,6 +845,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
                 RegBlockConf {
                     name: "alarm_in".into(),
@@ -806,6 +857,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
                 RegBlockConf {
                     name: "temp2".into(),
@@ -814,6 +869,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
             ],
         };
@@ -848,6 +907,7 @@ mod tests {
             protocol: "modbus".into(),
             slave: 3,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![
                 RegBlockConf {
@@ -857,6 +917,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
                 RegBlockConf {
                     name: "status_in".into(),
@@ -865,6 +929,10 @@ mod tests {
                     format: RegFormat::Float32,
                     scale: 0.0,
                     count: 2,
+                    offset: 0.0,
+                    byte_swap: false,
+                    points: Vec::new(),
+                    read_slice: false,
                 },
             ],
         };
@@ -875,8 +943,8 @@ mod tests {
         assert_eq!(bus.input_call_count(3, 202), 1);
         assert_eq!(bus.call_count(3, 200), 0, "纯 input 块站不应发 FC03 holding 读");
         let tel = sink.telemetry_of("pure_in");
-        assert!(tel.iter().any(|(m, v)| m == "alarm_in" && *v == 0.5));
-        assert!(tel.iter().any(|(m, v)| m == "status_in" && *v == 1.5));
+        assert!(tel.iter().any(|(m, v)| m == "alarm_in_1" && *v == 0.5));
+        assert!(tel.iter().any(|(m, v)| m == "status_in_1" && *v == 1.5));
         assert_eq!(sink.event_count("pure_in", "offline"), 0);
     }
 
@@ -922,6 +990,7 @@ mod tests {
             protocol: "modbus".into(),
             slave: 2,
             baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![],
         };
@@ -948,7 +1017,7 @@ mod tests {
         );
         sched.tick_once(0).await;
         // 正常采遥测（temp 点落库，无 offline 事件）——证明站本身健康
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp".to_string(), 23.5)]);
+        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
         assert_eq!(sink.event_count("hvac", "offline"), 0);
         // 关键断言：hvac（非 Battery）不走 on_battery_soc 通道
         assert!(sink.soc_of("hvac").is_none(), "非 battery role 不应触发 soc 推送");
