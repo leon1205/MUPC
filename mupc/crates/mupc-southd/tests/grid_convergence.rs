@@ -28,7 +28,14 @@ fn phase_regs(a: f32, b: f32, c: f32) -> Vec<u16> {
 /// S3b-2 T5：读结果按 `BlockData::Regs(...)` 包装（同上，**构造侧的机械订正**）；
 /// 本文件**全部断言一个字节都不动**（S3a 收敛闸门回归锚，设计 §11.5.3.4 C1）——
 /// grid 路径走 `poll_to_result(MeterGrid)` → 按**块名**查找，不经过 `points[]`/`telemetry_points`。
-fn block(name: &str, addr: u16, format: RegFormat, scale: f64, count: u16, regs: Vec<u16>) -> (RegBlockConf, Result<BlockData, String>) {
+fn block(
+    name: &str,
+    addr: u16,
+    format: RegFormat,
+    scale: f64,
+    count: u16,
+    regs: Vec<u16>,
+) -> (RegBlockConf, Result<BlockData, String>) {
     (
         RegBlockConf {
             name: name.into(),

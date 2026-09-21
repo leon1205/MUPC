@@ -132,10 +132,20 @@ impl StationBus for Rs485PortBus {
         tokio::task::spawn_blocking(move || {
             tracing::debug!(port = %port, slave, addr, count, "southd 口读离散输入");
             dev.read_discrete_inputs_from(slave, addr, count)
-                .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })
+                .map_err(|e| BusError::Read {
+                    slave,
+                    addr,
+                    count,
+                    reason: e.to_string(),
+                })
         })
         .await
-        .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
+        .map_err(|e| BusError::Read {
+            slave,
+            addr,
+            count,
+            reason: e.to_string(),
+        })?
     }
 }
 
@@ -255,7 +265,10 @@ impl MockBus {
 
     /// 预置 FC02 离散输入位响应（`count` = 位数；返回长度由测试自行保证 = count）。
     pub fn put_bits(&self, slave: u8, addr: u16, bits: Vec<bool>) {
-        self.bits_responses.lock().unwrap().insert((slave, addr), bits);
+        self.bits_responses
+            .lock()
+            .unwrap()
+            .insert((slave, addr), bits);
     }
 
     /// FC02 读失败一次（队列；消费即清）。
@@ -507,7 +520,15 @@ mod tests {
         let bus = MockBus::new();
         let r = bus.read_discrete(9, 0x200, 8).await;
         assert!(
-            matches!(r, Err(BusError::Read { slave: 9, addr: 0x200, count: 8, .. })),
+            matches!(
+                r,
+                Err(BusError::Read {
+                    slave: 9,
+                    addr: 0x200,
+                    count: 8,
+                    ..
+                })
+            ),
             "未预置位地址应报 Err，实际 {r:?}"
         );
         assert_eq!(bus.bit_call_count(9, 0x200), 1);
@@ -520,7 +541,10 @@ mod tests {
         bus.put_bits(2, 200, vec![true]);
         bus.fail_bits_once(2, 200);
         assert!(bus.read_discrete(2, 200, 1).await.is_err());
-        assert_eq!(bus.read_discrete(2, 200, 1).await.expect("恢复"), vec![true]);
+        assert_eq!(
+            bus.read_discrete(2, 200, 1).await.expect("恢复"),
+            vec![true]
+        );
         assert_eq!(bus.bit_call_count(2, 200), 2);
     }
 
@@ -582,7 +606,11 @@ mod tests {
     #[test]
     fn bus_config_passes_station_parity_through() {
         let mut c = conf("ttyS4", "modbus");
-        assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::None, "缺省 none");
+        assert_eq!(
+            bus_config(&c).parity,
+            rs485_plugin::Parity::None,
+            "缺省 none"
+        );
         c.parity = StationParity::Even;
         assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::Even);
         c.parity = StationParity::Odd;

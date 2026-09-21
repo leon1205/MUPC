@@ -504,15 +504,21 @@ impl SouthScheduler {
                         }
                         edges_to_events(&signals, tracker.edges(&signals.all))
                     }; // 锁在 await 前释放（勿持锁跨 await）
-                    // 消防探测器地址升序违规（Q-9，§11.4.7 事件 ⑤）：异常判据（非跃迁量），
-                    // 命中即产；value = 首个违规组的 1 基序号（详见 mapper 的同名函数）。
+                       // 消防探测器地址升序违规（Q-9，§11.4.7 事件 ⑤）：异常判据（非跃迁量），
+                       // 命中即产；value = 首个违规组的 1 基序号（详见 mapper 的同名函数）。
                     if let Some((group, _addr)) =
                         mapper::fire_detector_addr_order_violation(role, &reads)
                     {
-                        events.push(("fire_detector_addr_order_invalid".to_string(), group as f64, true));
+                        events.push((
+                            "fire_detector_addr_order_invalid".to_string(),
+                            group as f64,
+                            true,
+                        ));
                     }
                     if !events.is_empty() {
-                        self.sink.on_station_telemetry(&station_id, role, events).await;
+                        self.sink
+                            .on_station_telemetry(&station_id, role, events)
+                            .await;
                     }
                     // SOC 双源通道（04 §2.11.1）：battery 站 pkg.battery.soc 由 mapper 解码；
                     // 本轮采集成功即新鲜 → 独立推给 AiIntegrator（BMS 优先源）。telemetry 落库照旧。
@@ -1248,10 +1254,18 @@ mod tests {
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
 
-        assert_eq!(bus.bit_call_count(3, 0), 1, "discrete 块应走 FC02（read_discrete）");
+        assert_eq!(
+            bus.bit_call_count(3, 0),
+            1,
+            "discrete 块应走 FC02（read_discrete）"
+        );
         assert_eq!(bus.call_count(3, 0), 0, "不应发 FC03 holding 读");
         assert_eq!(bus.input_call_count(3, 0), 0, "不应发 FC04 input 读");
-        assert_eq!(sink.event_count("hvac", "offline"), 0, "FC02 读成功 ⇒ 站不 offline");
+        assert_eq!(
+            sink.event_count("hvac", "offline"),
+            0,
+            "FC02 读成功 ⇒ 站不 offline"
+        );
     }
 
     /// 位块读失败（FC02 超时）→ 与寄存器块同策：整站 offline（§10.7 两层失败语义一致）。
@@ -1285,7 +1299,10 @@ mod tests {
     #[test]
     fn edge_tracker_first_round_primes_then_reports_both_directions() {
         let mut t = EdgeTracker::default();
-        assert!(t.edges(&[sig("a", false), sig("b", true)]).is_empty(), "首轮只建基线");
+        assert!(
+            t.edges(&[sig("a", false), sig("b", true)]).is_empty(),
+            "首轮只建基线"
+        );
         // b 由 true→false（退出）、a 由 false→true（进入），两者都返回（过滤在调用方）
         assert_eq!(
             t.edges(&[sig("a", true), sig("b", false)]),
@@ -1300,11 +1317,17 @@ mod tests {
     fn edge_tracker_reset_suppresses_burst_after_recovery() {
         let mut t = EdgeTracker::default();
         t.edges(&[sig("a", false)]);
-        assert_eq!(t.edges(&[sig("a", true)]), vec![("a".to_string(), 1.0, true)]);
+        assert_eq!(
+            t.edges(&[sig("a", true)]),
+            vec![("a".to_string(), 1.0, true)]
+        );
         t.reset();
         assert!(t.edges(&[sig("a", true)]).is_empty(), "恢复后首轮不刷事件");
         // 恢复基线已建立：之后的变化照常产事件
-        assert_eq!(t.edges(&[sig("a", false)]), vec![("a".to_string(), 0.0, true)]);
+        assert_eq!(
+            t.edges(&[sig("a", false)]),
+            vec![("a".to_string(), 0.0, true)]
+        );
     }
 
     /// 上轮无记忆的新信号（未见过）不算跃迁：只记入基线、不产事件。
@@ -1322,7 +1345,7 @@ mod tests {
     // ---------- 消防字级信号 / 位块事件（AC-5 事件侧，§11.4.7.1）----------
 
     /// 消防站：`fire_sys`（addr 4，count 13，逐点声明，`at: 7` = 契约点 `fire_det_count`）
-    /// + `fire_det` 探测器区（addr 17，`6×det_groups` 个寄存器 = 探测器 2..n，整字无 `points`）。
+    /// 与 `fire_det` 探测器区（addr 17，`6×det_groups` 个寄存器 = 探测器 2..n，整字无 `points`）。
     /// 形态照录 PRD §9.4.1 的 fire 站（比例缩小到 1..det_groups 只探测器）。
     fn fire_conf(port: &str, slave: u8, det_groups: u16) -> StationConf {
         let mut pts: Vec<PointConf> = Vec::new();
@@ -1420,7 +1443,10 @@ mod tests {
             "退出活跃：消防双向（与位块只上升沿刻意不对称）"
         );
         // telemetry 仍落整字原值（事件不改写遥测值）
-        assert!(sink.telemetry_of("fire").iter().any(|(m, v)| m == "fire_sys_1" && *v == 0.0));
+        assert!(sink
+            .telemetry_of("fire")
+            .iter()
+            .any(|(m, v)| m == "fire_sys_1" && *v == 0.0));
     }
 
     /// 枚举跃迁（`WordEnum`）：0 → 1 → 2 → 0；活跃值之间（1→2）亦产事件。
@@ -1493,7 +1519,9 @@ mod tests {
             "预留位不产事件（mask = 0b11 不含 bit2）"
         );
         assert!(
-            sink.telemetry_of("fire").iter().any(|(m, v)| m == "fire_sys_3" && *v == 4.0),
+            sink.telemetry_of("fire")
+                .iter()
+                .any(|(m, v)| m == "fire_sys_3" && *v == 4.0),
             "telemetry 仍落整字原值 4"
         );
         // 对照：同一寄存器 bit0（干接点触发）在 mask 内 → 产事件
@@ -1530,7 +1558,10 @@ mod tests {
             sink.events_since("fire", 0).is_empty(),
             "钢瓶气压不产任何事件（恒 0 不得判「气压异常」）"
         );
-        assert!(sink.telemetry_of("fire").iter().any(|(m, v)| m == "fire_sys_2" && *v == 123.0));
+        assert!(sink
+            .telemetry_of("fire")
+            .iter()
+            .any(|(m, v)| m == "fire_sys_2" && *v == 123.0));
     }
 
     /// 探测器总状态（addr 12 / 探测器区 `+1`）：只 `alarm`(bit12) / `fault`(bit14) 产事件；
@@ -1570,7 +1601,12 @@ mod tests {
         let sched = build(vec![fire_conf("ttyS6", 1, 3)], bus.clone(), sink.clone());
 
         // 3 组探测器：+0 地址 3 / 2 / 4 → 第 2 组回退 ⇒ 违规
-        put_fire(&bus, 1, 0, &[3, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]);
+        put_fire(
+            &bus,
+            1,
+            0,
+            &[3, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0],
+        );
         sched.tick_once(0).await;
         assert_eq!(
             sink.events_of("fire"),
@@ -1580,9 +1616,17 @@ mod tests {
 
         // 升序（2/3/4）→ 不产
         let before = sink.events_of("fire").len();
-        put_fire(&bus, 1, 0, &[2, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0]);
+        put_fire(
+            &bus,
+            1,
+            0,
+            &[2, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0],
+        );
         sched.tick_once(1000).await;
-        assert!(sink.events_since("fire", before).is_empty(), "严格升序 → 不产事件");
+        assert!(
+            sink.events_since("fire", before).is_empty(),
+            "严格升序 → 不产事件"
+        );
     }
 
     /// 负向：**位块只上升沿**（与消防双向刻意不对称，§11.4.7.1）——
@@ -1662,7 +1706,10 @@ mod tests {
         sched.tick_once(0).await;
         with_bits(&[0, 25]); // 位 0 = 内风机（State）、位 25 = 保留
         sched.tick_once(1000).await;
-        assert!(sink.events_since("hvac", 0).is_empty(), "State/Reserved 位不产事件");
+        assert!(
+            sink.events_since("hvac", 0).is_empty(),
+            "State/Reserved 位不产事件"
+        );
 
         with_bits(&[9]); // 位 9 = 柜内温感故障（Alarm）→ 点名 `hvac_di_10`
         sched.tick_once(2000).await;
@@ -1734,7 +1781,11 @@ mod tests {
         bus.put(5, 0, phase_regs(1.0, 2.0, 3.0));
         bus.put(3, 100, f32_regs(23.5));
         let sched = build(
-            vec![hvac_conf("hvac", "ttyS1", 3, 1000), pcs, grid_conf("grid", "ttyS1", 1, 1000)],
+            vec![
+                hvac_conf("hvac", "ttyS1", 3, 1000),
+                pcs,
+                grid_conf("grid", "ttyS1", 1, 1000),
+            ],
             bus.clone(),
             sink.clone(),
         );
@@ -1748,7 +1799,11 @@ mod tests {
                 order.push(slave);
             }
         }
-        assert_eq!(order, vec![1, 5, 3], "读序应为 grid → pcs → hvac（prio 0/1/2）");
+        assert_eq!(
+            order,
+            vec![1, 5, 3],
+            "读序应为 grid → pcs → hvac（prio 0/1/2）"
+        );
     }
 
     /// AC-4：`pcs` 站超时 → 该站 offline + 事件、同口其它站不受影响；恢复 online **一次**。
@@ -1768,10 +1823,18 @@ mod tests {
             regs: vec![blk("pcs_3zone", 0, 6)],
         };
         bus.put(3, 100, f32_regs(23.5));
-        let sched = build(vec![hvac_conf("hvac", "ttyS1", 3, 1000), pcs], bus.clone(), sink.clone());
+        let sched = build(
+            vec![hvac_conf("hvac", "ttyS1", 3, 1000), pcs],
+            bus.clone(),
+            sink.clone(),
+        );
 
         sched.tick_once(0).await; // pcs 未预置 → 超时
-        assert_eq!(sink.event_count("pcs", "offline"), 1, "pcs 超时应 offline 告警一次");
+        assert_eq!(
+            sink.event_count("pcs", "offline"),
+            1,
+            "pcs 超时应 offline 告警一次"
+        );
         assert_eq!(
             sink.telemetry_of("hvac"),
             vec![("temp_1".to_string(), 23.5)],
@@ -1789,6 +1852,42 @@ mod tests {
             assert_eq!(st[1].offline_count, 0, "恢复后 offline_count 归零");
         }
         assert_eq!(sink.event_count("hvac", "offline"), 0, "hvac 全程健康");
+    }
+
+    /// AC-5：`pcs` 站**只读** —— 正常采集也不触发 `on_grid_package`（不推进 5s 控制闸门）
+    /// 与 `on_battery_soc`（不参与 SOC 双源）；其点位只走 `on_station_telemetry`。
+    #[tokio::test]
+    async fn pcs_station_never_triggers_grid_or_soc_channels() {
+        let bus = Arc::new(MockBus::new());
+        bus.put(5, 0, phase_regs(1.0, 2.0, 3.0));
+        let sink = Arc::new(FakeSink::default());
+        let pcs = StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 5,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 500,
+            regs: vec![blk("pcs_3zone", 0, 6)],
+        };
+        let sched = build(vec![pcs], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+
+        assert_eq!(
+            sink.grid_count(),
+            0,
+            "pcs 站不得走 on_grid_package（不推进控制闸门）"
+        );
+        assert!(sink.soc_of("pcs").is_none(), "pcs 站不得走 on_battery_soc");
+        assert_eq!(sink.event_count("pcs", "offline"), 0);
+        assert!(
+            sink.telemetry_of("pcs")
+                .iter()
+                .any(|(m, _)| m == "pcs_3zone_1"),
+            "点位仍经 on_station_telemetry 落库"
+        );
     }
 
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。

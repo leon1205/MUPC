@@ -511,7 +511,10 @@ mod tests {
     #[test]
     fn poll_to_result_battery_soc_block_maps_soc() {
         let ok = vec![
-            (named_soc_block(), Ok(BlockData::Regs(f32_regs(65.5).to_vec()))),
+            (
+                named_soc_block(),
+                Ok(BlockData::Regs(f32_regs(65.5).to_vec())),
+            ),
             sblock("temp", 25.0),
         ];
         let pkg = unwrap_data(poll_to_result(Role::Battery, &ok));
