@@ -300,16 +300,36 @@ pub fn telemetry_points(reads: &BlockReads) -> Vec<(String, f64)> {
 ///（PRD §9.5.4）：顺序异常时"第 n 只"不再等于"地址升序的第 n 只"，探测器区点位不可信
 /// （telemetry 仍落原值，判据层拒用；事件由 scheduler 产 `fire_detector_addr_order_invalid`）。
 ///
-/// 判据：`fire_det` 为前缀的块（分片时同名多块），每 6 个寄存器一组，各组 **`+0` 寄存器**
-///（地址号）必须**严格升序**（重复/回退均判违规）。返回 `Some((首个违规组的 1 基序号,
-/// 该组的地址值))` —— 组序号在**探测器区内跨分片块连续**；升序且唯一 → `None`。
+/// 判据：升序链 = **〔寄存器 11：探测器 1 的地址号〕→〔`fire_det*` 区各组的 `+0`〕**，
+/// 每 6 个寄存器一组，各组 **`+0` 寄存器**（地址号）必须**严格升序**（重复/回退均判违规）。
+/// 返回 `Some((首个违规组的 1 基序号, 该组的地址值))` —— 组序号从**探测器 1 起算**、
+/// 在探测器区内跨分片块连续；升序且唯一 → `None`。
 /// 非 `fire` 站 / 无 `fire_det*` 块 / 块读失败 → `None`（无判据可依时不臆断）。
+///
+/// **链首 = 寄存器 11（v1.7 订正，§11.4.6）**：依据 PRD §9.10 Q-9 原文"以**寄存器 11**
+/// 读回的地址值交叉校验" + §9.5.4"第 n 只 = 按地址升序的第 n 只"（该表述对 **n = 1 同样
+/// 成立**）—— 探测器 1 不在链里时"第 1 只是否为最小地址"**无判据**。
+/// **取数方式与配置解耦**：取 `reads` 中**覆盖寄存器 11 的那一块**的块内偏移 `11 − addr`
+///（§9.4.1 参考配置 = `fire_sys`（`addr: 4`）的偏移 7）⇒ **不依赖块名、不依赖点位名**；
+/// 该值**只参与升序比较**，不另判其合法域（PRD 未给判据，不猜）。
+/// 寄存器 11 未被任何**读成功的寄存器块**覆盖（非 §9.4.1 参考形态）⇒ 链首不可得，
+/// 退化为"只校 `fire_det*` 区"（= T5 现状），**不臆断违规**（本设计不新增配置期规则要求
+/// 覆盖 11）。寄存器空间按 `BlockData::Regs` 统一处理（不区分 FC03/FC04 —— 与 `fire_det*`
+/// 区的既有处理同口径；§9.4.1 参考形态中该寄存器在保持寄存器块内）。
 pub fn fire_detector_addr_order_violation(role: Role, reads: &BlockReads) -> Option<(usize, u16)> {
     if role != Role::Fire {
         return None;
     }
-    let mut prev: Option<u16> = None;
-    let mut group: usize = 0;
+    // 链首：探测器 1 的地址号（寄存器 11）。取首个**可读且覆盖**它的寄存器块。
+    let head: Option<u16> = reads.iter().find_map(|(b, res)| {
+        let off = 11usize.checked_sub(usize::from(b.addr))?;
+        if off >= usize::from(b.count) {
+            return None; // 该块不覆盖寄存器 11
+        }
+        res.as_ref().ok()?.regs()?.get(off).copied()
+    });
+    let mut prev: Option<u16> = head;
+    let mut group: usize = usize::from(head.is_some()); // 链首占第 1 组（探测器 1）
     for (b, res) in reads {
         if !b.name.starts_with("fire_det") {
             continue;
@@ -349,6 +369,40 @@ mod tests {
             points: Vec::new(),
             read_slice: false,
         }
+    }
+
+    /// 寄存器块（`addr`/`count` 可指定）—— 地址升序校验的用例只需要这两个字段。
+    fn rblk(name: &str, addr: u16, count: u16) -> RegBlockConf {
+        let mut b = blk(name);
+        b.addr = addr;
+        b.count = count;
+        b
+    }
+
+    /// `fire` 站一次 poll 的块读结果：覆盖寄存器 11 的块（**链首载体**，`name`/`addr` 可任意
+    /// —— 链首取数不依赖块名/点位名）+ `fire_det*` 区（`addrs` = 各探测器组的 `+0` 地址号，
+    /// 每 6 寄存器一组）。
+    ///
+    /// `reg11 = None` ⇒ 配置**未覆盖寄存器 11**（非 §9.4.1 参考形态）。
+    fn fire_order_reads(reg11: Option<(RegBlockConf, u16)>, addrs: &[u16]) -> BlockReads {
+        let mut reads: BlockReads = Vec::new();
+        if let Some((b, det1)) = reg11 {
+            let mut regs = vec![0u16; usize::from(b.count)];
+            regs[usize::from(11 - b.addr)] = det1; // 覆盖性由用例传入的块参数保证
+            reads.push((b, Ok(BlockData::Regs(regs))));
+        }
+        if !addrs.is_empty() {
+            let mut det = Vec::with_capacity(addrs.len() * 6);
+            for a in addrs {
+                det.push(*a);
+                det.extend([0u16; 5]);
+            }
+            reads.push((
+                rblk("fire_det", 17, 6 * addrs.len() as u16),
+                Ok(BlockData::Regs(det)),
+            ));
+        }
+        reads
     }
 
     /// 点名式块（S3b-2 A12/A13）：块名不再是查找键，`soc` 由**点级 `name`** 声明。
@@ -556,6 +610,76 @@ mod tests {
                 ("u_3".to_string(), 221.0),
                 ("u_5".to_string(), 222.0),
             ]
+        );
+    }
+
+    /// **链首 = 寄存器 11（探测器 1 的地址号，v1.7 §11.4.6 订正）**：探测器 1 也在升序链里
+    /// ⇒ 组序号与 PRD §9.5.4"第 n 只 = 按地址升序的第 n 只"的 n 逐一对齐。
+    #[test]
+    fn fire_addr_order_chain_head_includes_detector_one() {
+        // 探测器 1 地址 9 > 探测器 2 地址 3 ⇒ **第 2 组**违规
+        assert_eq!(
+            fire_detector_addr_order_violation(
+                Role::Fire,
+                &fire_order_reads(Some((rblk("fire_sys", 4, 13), 9)), &[3, 4])
+            ),
+            Some((2, 3))
+        );
+        // 探测器 1 地址 0 < 3 < 4 ⇒ 严格升序，无违规
+        assert_eq!(
+            fire_detector_addr_order_violation(
+                Role::Fire,
+                &fire_order_reads(Some((rblk("fire_sys", 4, 13), 0)), &[3, 4])
+            ),
+            None
+        );
+        // 探测器 1 地址 4 = 探测器 2 地址 4 ⇒ **重复**亦判违规（链首参与比较）
+        assert_eq!(
+            fire_detector_addr_order_violation(
+                Role::Fire,
+                &fire_order_reads(Some((rblk("fire_sys", 4, 13), 4)), &[4, 5])
+            ),
+            Some((2, 4))
+        );
+    }
+
+    /// 链首取数**不依赖块名、不依赖点位名**（§11.4.6）：覆盖寄存器 11 的块叫什么都行，
+    /// 只要块内偏移是 `11 − addr`；未覆盖寄存器 11 ⇒ 退化为"只校 `fire_det*` 区"
+    ///（= T5 现状），**不臆断违规**；非 fire 站 / 无探测器块 ⇒ 无判据可依，同样不臆断。
+    #[test]
+    fn fire_addr_order_chain_head_is_name_agnostic_with_fallback() {
+        // 换个块名（addr 10 / count 3 ⇒ 覆盖寄存器 10..12，偏移 1 = 寄存器 11）
+        assert_eq!(
+            fire_detector_addr_order_violation(
+                Role::Fire,
+                &fire_order_reads(Some((rblk("whatever", 10, 3), 9)), &[3])
+            ),
+            Some((2, 3))
+        );
+        // 未覆盖寄存器 11：无链首 ⇒ 只校 fire_det 区（组序号回到 1 基起）
+        assert_eq!(
+            fire_detector_addr_order_violation(Role::Fire, &fire_order_reads(None, &[3, 2])),
+            Some((2, 2))
+        );
+        // 未覆盖 11 且 fire_det 区自身严格升序 ⇒ 无判据可依，不臆断
+        assert_eq!(
+            fire_detector_addr_order_violation(Role::Fire, &fire_order_reads(None, &[2, 3])),
+            None
+        );
+        // 非 fire 站 / 无 fire_det 块 ⇒ 不产判据
+        assert_eq!(
+            fire_detector_addr_order_violation(
+                Role::Hvac,
+                &fire_order_reads(Some((rblk("fire_sys", 4, 13), 9)), &[3, 2])
+            ),
+            None
+        );
+        assert_eq!(
+            fire_detector_addr_order_violation(
+                Role::Fire,
+                &fire_order_reads(Some((rblk("fire_sys", 4, 13), 9)), &[])
+            ),
+            None
         );
     }
 

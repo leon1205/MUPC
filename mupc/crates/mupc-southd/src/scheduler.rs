@@ -1435,6 +1435,16 @@ mod tests {
         bus.put(slave, 17, det.to_vec());
     }
 
+    /// 预置 fire 站，并**显式给出探测器 1 的地址号（寄存器 11）**——`fire_sys` 块
+    ///（addr 4）的偏移 7。地址升序链首的载体（v1.7 §11.4.6）。
+    fn put_fire_det1(bus: &MockBus, slave: u8, sys4: u16, det1: u16, det: &[u16]) {
+        let mut sys = vec![0u16; 13];
+        sys[0] = sys4;
+        sys[7] = det1;
+        bus.put(slave, 4, sys);
+        bus.put(slave, 17, det.to_vec());
+    }
+
     /// 正/负向（AC-5 事件侧）：`WordBit` 进入**与退出**都产事件，`0x4400` 恰产 2 个。
     /// 首轮只建基线；telemetry 仍落整字原值（事件不改写遥测）。
     #[tokio::test]
@@ -1622,13 +1632,16 @@ mod tests {
 
     /// 负向：**消防地址序违规（Q-9）** —— 探测器 `+0` 地址非严格升序 → 产事件；
     /// 升序 → 不产（事件 value = 首个违规组的 1 基序号）。
+    ///
+    /// 组序号含**链首 = 寄存器 11（探测器 1）**（v1.7 §11.4.6 订正）：故"第 2 只探测器"
+    /// 回退时组序号是 **3**（探测器 1 / 探测器 2 / 探测器 3 的 1 基序号）。
     #[tokio::test]
     async fn fire_detector_addr_order_violation_emits_event() {
         let bus = Arc::new(MockBus::new());
         let sink = Arc::new(FakeSink::default());
         let sched = build(vec![fire_conf("ttyS6", 1, 3)], bus.clone(), sink.clone());
 
-        // 3 组探测器：+0 地址 3 / 2 / 4 → 第 2 组回退 ⇒ 违规
+        // 链首（探测器 1 地址 0）+ 3 组探测器：+0 地址 3 / 2 / 4 → 第 3 组回退 ⇒ 违规
         put_fire(
             &bus,
             1,
@@ -1638,8 +1651,8 @@ mod tests {
         sched.tick_once(0).await;
         assert_eq!(
             sink.events_of("fire"),
-            vec![("fire_detector_addr_order_invalid".to_string(), 2.0)],
-            "非升序 → 产事件，value = 首个违规组的 1 基序号"
+            vec![("fire_detector_addr_order_invalid".to_string(), 3.0)],
+            "非升序 → 产事件，value = 首个违规组的 1 基序号（含链首探测器 1）"
         );
 
         // 升序（2/3/4）→ 不产
@@ -1654,6 +1667,33 @@ mod tests {
         assert!(
             sink.events_since("fire", before).is_empty(),
             "严格升序 → 不产事件"
+        );
+    }
+
+    /// 【补改 2 / v1.7 §11.4.6】**探测器 1（寄存器 11）已纳入升序链首**：
+    /// 探测器 1 的地址大于探测器 2 ⇒ 第 2 组违规（旧实现只看 `fire_det*` 区，此形态漏检）。
+    #[tokio::test]
+    async fn fire_addr_order_chain_head_checks_detector_one() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
+
+        // 探测器 1（寄存器 11）地址 9 > 探测器 2 地址 3 ⇒ 违规（组序号 2 = 探测器 2）
+        put_fire_det1(&bus, 1, 0, 9, &[3, 0, 0, 0, 0, 0]);
+        sched.tick_once(0).await;
+        assert_eq!(
+            sink.events_of("fire"),
+            vec![("fire_detector_addr_order_invalid".to_string(), 2.0)],
+            "链首参与比较：探测器 1 地址 9 之后出现 3 ⇒ 第 2 只违规"
+        );
+
+        // 对照：探测器 1 地址 1 < 3 ⇒ 严格升序，不产
+        let before = sink.events_of("fire").len();
+        put_fire_det1(&bus, 1, 0, 1, &[3, 0, 0, 0, 0, 0]);
+        sched.tick_once(1000).await;
+        assert!(
+            sink.events_since("fire", before).is_empty(),
+            "探测器 1 地址 1 < 探测器 2 地址 3 ⇒ 升序成立"
         );
     }
 
