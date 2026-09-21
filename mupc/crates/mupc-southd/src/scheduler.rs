@@ -21,7 +21,7 @@
 //! （无自动重 spawn）。调用方必须持有并观测 [`SouthScheduler::spawn`] 返回的每个
 //! `JoinHandle`（详见其文档；core-bin Task 7 接线时落实）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -174,26 +174,61 @@ impl DueCalc {
     }
 }
 
+/// 第 5 类信号：**站级派生布尔量**（`StationFlag`，v1.7 §11.4.7.1 末行 / §11.4.7.2 C）——
+/// 判据是 `mapper` 的交叉校验 / 域检查的**布尔返回**（无寄存器、非跃迁量）：
+/// 地址序违规（`fire_detector_addr_order_violation`）/ SOC 域检查 / 登记数交叉校验。
+///
+/// 它与前四类（`Bit`/`WordBit`/`WordEnum`）**共用同一个 [`EdgeTracker`] 与同一条事件产出
+/// 路径**，区别只在①**产出频次口径**（状态翻转制：进入 1 条 / `@recovered` 1 条 / 未变不产，
+/// 且**首次观测即产**）与②进入事件的 `value` 承载**诊断量**（见 [`station_flag_events`]）。
+struct StationFlag {
+    /// 事件名（**进入**用它；**退出**追加 `@recovered`）
+    metric: &'static str,
+    /// 本轮判据值（true = 异常成立）—— 喂 [`EdgeTracker`] 的那一格
+    active: bool,
+    /// 进入事件承载的**诊断量**（⑤ = 首个违规组的 1 基序号；③ = 读回登记数；
+    /// ① = 越界原始值）。**退出**事件的 `value` 恒 `0.0`（哨兵），不取此字段。
+    diag: f64,
+}
+
+/// 消防探测器地址序违规的事件名（§11.4.7 事件 ⑤）。
+const ADDR_ORDER_INVALID: &str = "fire_detector_addr_order_invalid";
+
 /// 某站的**变化沿记忆**（S3b-2 §11.4.7.1「统一事件模型」的实现 —— `PortRunner` 按站下标各持一个）。
 ///
 /// **统一口径**：一个"信号"在 tracker 里占一格"上轮活跃态"，无论它是
-/// ① 离散位点（`Bit`：`func: discrete` 块的位向量第 k 位）还是
-/// ② 字级信号（`WordBit`：整字 `& mask ≠ 0`；`WordEnum`：整字 ∈ `active` 值集）。
+/// ① 离散位点（`Bit`：`func: discrete` 块的位向量第 k 位）、
+/// ② 字级信号（`WordBit`：整字 `& mask ≠ 0`；`WordEnum`：整字 ∈ `active` 值集），还是
+/// ③ 第 5 类站级派生布尔量（`StationFlag`，见 [`EdgeTracker::mark_station_flags`]）。
 /// 每轮算出 `(上轮, 本轮)` 二元组：`false→true` = 进入活跃（`value = 1.0`）、
 /// `true→false` = 退出活跃（`value = 0.0`），**两者都返回**（是否采纳由调用方过滤，
 /// 见 [`SouthScheduler::poll_station`] 的不对称过滤）。
 ///
 /// **首次采样 / 站恢复后**：只建立基线、**不产事件**（`primed = false` 时 `edges()` 只
 /// `prime()` 并返回空；`reset()` 使其回到该状态）—— 避免"启动即刷一屏事件""恢复即刷一屏"。
+/// **唯一例外** = 已登记的 `StationFlag`（见其方法文档）。
 #[derive(Default)]
 pub struct EdgeTracker {
-    /// 信号名 → 上轮活跃态（信号名 = 位点名 / `<点名>@<信号键>`）
+    /// 信号名 → 上轮活跃态（信号名 = 位点名 / `<点名>@<信号键>` / `StationFlag` 的事件名）
     last: HashMap<String, bool>,
     /// 是否已有基线（false = 本轮只建基线，不产事件）
     primed: bool,
+    /// **分类**（非记忆）：第 5 类信号的事件名 —— 这些信号首轮/复位后首轮**仍产进入事件**。
+    /// `prime()`/`reset()` 都不清它（信号分类由配置与 role 决定，不随轮次变化）。
+    station_flags: HashSet<String>,
 }
 
 impl EdgeTracker {
+    /// 登记第 5 类信号（`StationFlag`）的事件名（幂等；每轮调用无副作用）。
+    ///
+    /// 它们**首次观测即产**（进入）——这是"首轮/站恢复后首轮只建基线、不产事件"的
+    /// **唯一例外**（§11.4.7.2 C）：① 至多 1 条/站，不构成风暴；② 若不产，
+    /// "上线时地址序就已经错了""SOC 一直在域外"这类**无翻转点**的状态将**永久静默**。
+    fn mark_station_flags(&mut self, flags: &[StationFlag]) {
+        self.station_flags
+            .extend(flags.iter().map(|f| f.metric.to_string()));
+    }
+
     /// 建基线：把本轮的活跃态记为基线并**清空旧记忆**（首轮、站恢复后调用）。
     pub fn prime(&mut self, now: &[(String, bool)]) {
         self.last.clear();
@@ -212,10 +247,17 @@ impl EdgeTracker {
     /// 返回本轮的变化沿事件 `(metric, value, is_event=true)`；首轮/复位后首轮 → 空（只建基线）。
     ///
     /// 未见过的新信号（上轮无记忆）**不产事件**（"未知 → X" 不是跃迁），但会记入基线。
+    /// **例外**：已登记的 `StationFlag` 活跃时首轮即产（见 [`Self::mark_station_flags`]）。
     pub fn edges(&mut self, now: &[(String, bool)]) -> Vec<(String, f64, bool)> {
         if !self.primed {
+            // 首轮 / 站恢复后首轮：只建基线、不产事件 —— 第 5 类信号除外（"首次观测即产"）
+            let first: Vec<(String, f64, bool)> = now
+                .iter()
+                .filter(|(k, v)| *v && self.station_flags.contains(k))
+                .map(|(k, _)| (k.clone(), 1.0, true))
+                .collect();
             self.prime(now);
-            return Vec::new();
+            return first;
         }
         let mut out = Vec::new();
         for (k, v) in now {
@@ -245,15 +287,19 @@ struct RoundSignals {
     /// 全部信号 `(信号名, 是否活跃)` —— 喂 [`EdgeTracker`]
     all: Vec<(String, bool)>,
     /// 其中"离散位点"的信号名集合（这些信号**只取 0→1 上升沿**）
-    bits: std::collections::HashSet<String>,
+    bits: HashSet<String>,
     /// 其中"离散告警位"（`BitClass::Alarm`）的信号名集合（`State`/`Reserved` 只落 telemetry）
-    alarm_bits: std::collections::HashSet<String>,
+    alarm_bits: HashSet<String>,
+    /// 其中"第 5 类站级派生布尔量"（`StationFlag`，`all` 里对应条目的诊断量来源）
+    station_flags: Vec<StationFlag>,
 }
 
-/// 汇总一站本轮的信号：离散位点（FC02 位向量逐点）+ 字级信号（消防整字 `字 & mask` / `字 ∈ active`）。
+/// 汇总一站本轮的信号：离散位点（FC02 位向量逐点）+ 字级信号（消防整字 `字 & mask` / `字 ∈ active`）
+/// + 第 5 类站级派生布尔量（`StationFlag`：判据是 mapper 的交叉校验布尔返回，无寄存器）。
 ///
-/// **位点与字级信号共用同一条产出路径**（`EdgeTracker`），差别只在活跃判据的求值处：
-/// 位点的活跃 = 位向量第 k 位；字级信号的活跃 = `SignalPick::is_active(整字)`。
+/// **三类信号共用同一条产出路径**（`EdgeTracker`），差别只在活跃判据的求值处与
+/// （`StationFlag` 独有）**产出频次口径**：位点的活跃 = 位向量第 k 位；字级信号的活跃 =
+/// `SignalPick::is_active(整字)`；站级量的活跃 = 判据函数 `is_some()`。
 fn round_signals(role: Role, reads: &BlockReads) -> RoundSignals {
     let mut rs = RoundSignals::default();
     for (blk, res) in reads {
@@ -288,6 +334,24 @@ fn round_signals(role: Role, reads: &BlockReads) -> RoundSignals {
             }
         }
     }
+    // ── 第 5 类信号 `StationFlag`（§11.4.7.1 末行 / §11.4.7.2 C）──
+    // 消防探测器地址升序违规（Q-9）：判据是 mapper 的交叉校验返回，**判据本身不是跃迁量**
+    // ⇒ 按其布尔态喂进同一个 EdgeTracker（产出频次 = 状态翻转，见 `station_flag_events`）。
+    // 非 fire 站无此判据（`mapper` 对非 fire 直接返回 None）⇒ 不喂信号、不占记忆格。
+    if role == Role::Fire {
+        let violation = mapper::fire_detector_addr_order_violation(role, reads);
+        rs.station_flags.push(StationFlag {
+            metric: ADDR_ORDER_INVALID,
+            active: violation.is_some(),
+            diag: violation.map(|(group, _addr)| group as f64).unwrap_or(0.0),
+        });
+    }
+    // 站级量与前四类**同栏**喂进 tracker（"喂进同一个 `RoundSignals.all`"，§11.4.7.2 C）
+    rs.all.extend(
+        rs.station_flags
+            .iter()
+            .map(|f| (f.metric.to_string(), f.active)),
+    );
     rs
 }
 
@@ -304,6 +368,36 @@ fn edges_to_events(rs: &RoundSignals, edges: Vec<(String, f64, bool)>) -> Vec<(S
                 *value == 1.0 && rs.alarm_bits.contains(metric)
             } else {
                 true // 字级信号：双向
+            }
+        })
+        .collect()
+}
+
+/// 第 5 类信号（`StationFlag`）事件的**后处理**（§11.4.7.2 C 的 `value` 约定，进入/退出正交）：
+/// - **进入**（变化沿 `value = 1.0`）⇒ `value` 替换为**诊断量**（⑤ = 首个违规组的 1 基序号）
+///   —— 诊断量只能由本轮的判据给出（[`StationFlag::diag`]），[`EdgeTracker`] 只知布尔；
+/// - **退出**（`value = 0.0`）⇒ metric 追加 **`@recovered`**、`value` 恒 **`0.0`**（哨兵）。
+///
+/// **为什么把"状态"放在事件名而不是 `value`**：诊断量本身可以取 0（如③读回 0 只）⇒ 单靠
+/// `value` 无法同时承载"诊断量"与"进入/退出"两维；`@recovered` 后缀让两者正交、消费方零
+/// 歧义（它仍在事件命名空间内，`metric` 不对应任何遥测点 —— §11.4.7.2 C）。
+///
+/// **安全红线**（§11.4.7.2 E）：本类事件是**数据可信性告警**，**不得并入 §10.4 的联锁
+/// OR 触发**（否则"配错地址"会升级成消防停机）。本函数只改事件流的名字与 `value`，
+/// 不触碰任何判据/联锁/telemetry 路径；§11.7.2 的"每轮点位不可信"标记**照旧逐轮生效**。
+fn station_flag_events(
+    flags: &[StationFlag],
+    edges: Vec<(String, f64, bool)>,
+) -> Vec<(String, f64, bool)> {
+    edges
+        .into_iter()
+        .map(|(metric, value, is_event)| {
+            match flags.iter().find(|f| f.metric == metric) {
+                // 进入活跃：`value` 换成诊断量（原值 1.0 只是 EdgeTracker 的布尔占位）
+                Some(f) if value != 0.0 => (metric, f.diag, is_event),
+                // 恢复：改名 `@recovered` + 哨兵 0.0
+                Some(_) => (format!("{metric}@recovered"), 0.0, is_event),
+                None => (metric, value, is_event), // 前四类信号：原样
             }
         })
         .collect()
@@ -510,27 +604,20 @@ impl SouthScheduler {
                     if !pts.is_empty() {
                         self.sink.on_station_telemetry(&station_id, role, pts).await;
                     }
-                    // ── 事件侧（§11.4.7.1 统一事件模型）：离散位 + 字级信号共用同一 EdgeTracker ──
+                    // ── 事件侧（§11.4.7.1 统一事件模型）：离散位 + 字级信号 + 第 5 类站级量
+                    //（`StationFlag`）**共用同一 EdgeTracker 与同一条产出路径** ──
                     let signals = round_signals(role, &reads);
-                    let mut events = {
+                    let events = {
                         let mut trackers = runner.trackers.lock().unwrap();
                         let tracker = trackers.entry(station_index).or_default();
                         if recovered {
-                            tracker.reset(); // 恢复后首轮只重建基线（不产事件）
+                            tracker.reset(); // 恢复后首轮只重建基线（`StationFlag` 仍"首次观测即产"）
                         }
-                        edges_to_events(&signals, tracker.edges(&signals.all))
+                        tracker.mark_station_flags(&signals.station_flags);
+                        let edges = edges_to_events(&signals, tracker.edges(&signals.all));
+                        // 站级量：进入事件的 value 换诊断量、退出事件改名 `@recovered`（§11.4.7.2 C）
+                        station_flag_events(&signals.station_flags, edges)
                     }; // 锁在 await 前释放（勿持锁跨 await）
-                       // 消防探测器地址升序违规（Q-9，§11.4.7 事件 ⑤）：异常判据（非跃迁量），
-                       // 命中即产；value = 首个违规组的 1 基序号（详见 mapper 的同名函数）。
-                    if let Some((group, _addr)) =
-                        mapper::fire_detector_addr_order_violation(role, &reads)
-                    {
-                        events.push((
-                            "fire_detector_addr_order_invalid".to_string(),
-                            group as f64,
-                            true,
-                        ));
-                    }
                     if !events.is_empty() {
                         self.sink
                             .on_station_telemetry(&station_id, role, events)
@@ -1631,7 +1718,8 @@ mod tests {
     }
 
     /// 负向：**消防地址序违规（Q-9）** —— 探测器 `+0` 地址非严格升序 → 产事件；
-    /// 升序 → 不产（事件 value = 首个违规组的 1 基序号）。
+    /// **首次观测即产**（§11.4.7.2 C 对"首轮只建基线"的唯一例外：上线时就已违规
+    /// 必须可见），但**状态未变的轮次不重复产**（状态翻转制，原"命中即产"= 8.6 万条/日）。
     ///
     /// 组序号含**链首 = 寄存器 11（探测器 1）**（v1.7 §11.4.6 订正）：故"第 2 只探测器"
     /// 回退时组序号是 **3**（探测器 1 / 探测器 2 / 探测器 3 的 1 基序号）。
@@ -1642,21 +1730,54 @@ mod tests {
         let sched = build(vec![fire_conf("ttyS6", 1, 3)], bus.clone(), sink.clone());
 
         // 链首（探测器 1 地址 0）+ 3 组探测器：+0 地址 3 / 2 / 4 → 第 3 组回退 ⇒ 违规
+        let violation = [3u16, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0];
+        put_fire(&bus, 1, 0, &violation);
+        sched.tick_once(0).await;
+        assert_eq!(
+            sink.events_of("fire"),
+            vec![("fire_detector_addr_order_invalid".to_string(), 3.0)],
+            "首轮即违规 ⇒ 首次观测即产 1 条，value = 首个违规组的 1 基序号（含链首探测器 1）"
+        );
+
+        // 违规状态**未变**：连续多轮（含第 5 轮）**一条都不产**（去抖 = 状态翻转，非时间窗）
+        for t in 1..5u64 {
+            put_fire(&bus, 1, 0, &violation);
+            sched.tick_once(t * 1000).await;
+        }
+        assert_eq!(
+            sink.events_of("fire").len(),
+            1,
+            "判据仍成立的稳态轮次不重复产事件（翻转为零才产）"
+        );
+        // 去重**只作用于事件**：telemetry 逐轮照落（§11.4.7.2 E —— 5 轮 × `fire_sys_1`）
+        assert_eq!(
+            sink.telemetry_of("fire")
+                .iter()
+                .filter(|(m, _)| m == "fire_sys_1")
+                .count(),
+            5,
+            "去重不得扩散到非事件路径：telemetry 每轮都落"
+        );
+    }
+
+    /// **恢复必产"已恢复"事件**（§11.4.7.2 C）：升序恢复 ⇒ 恰 1 条
+    /// `fire_detector_addr_order_invalid@recovered`（`value = 0.0`，哨兵不承载诊断量）
+    /// —— 否则事件日志分不清"仍违规"与"已修复"。恢复后再保持升序 → 不再产。
+    #[tokio::test]
+    async fn fire_addr_order_flag_recovery_emits_recovered_event() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 3)], bus.clone(), sink.clone());
+
         put_fire(
             &bus,
             1,
             0,
             &[3, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0],
         );
-        sched.tick_once(0).await;
-        assert_eq!(
-            sink.events_of("fire"),
-            vec![("fire_detector_addr_order_invalid".to_string(), 3.0)],
-            "非升序 → 产事件，value = 首个违规组的 1 基序号（含链首探测器 1）"
-        );
+        sched.tick_once(0).await; // 进入（首次观测即产）
 
-        // 升序（2/3/4）→ 不产
-        let before = sink.events_of("fire").len();
+        // 升序（2/3/4）→ 状态翻转 false：产 1 条 `@recovered`
         put_fire(
             &bus,
             1,
@@ -1664,9 +1785,53 @@ mod tests {
             &[2, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0],
         );
         sched.tick_once(1000).await;
+        assert_eq!(
+            sink.events_since("fire", 1),
+            vec![(
+                "fire_detector_addr_order_invalid@recovered".to_string(),
+                0.0
+            )],
+            "恢复升序 ⇒ 必产 1 条「已恢复」（value 恒 0.0）"
+        );
+
+        // 保持升序 → 稳态零事件
+        let before = sink.events_of("fire").len();
+        sched.tick_once(2000).await;
+        sched.tick_once(3000).await;
         assert!(
             sink.events_since("fire", before).is_empty(),
-            "严格升序 → 不产事件"
+            "恢复后的稳态轮次一条都不产"
+        );
+    }
+
+    /// "首次观测即产"的例外对**站恢复后的首轮**同样成立（§11.4.7.2 C 的 offline→恢复行）：
+    /// 恢复后首轮**仍违规** ⇒ 再产 1 条进入事件（`reset()` 重建基线后仍可见），
+    /// 不为它单开"跨离线保持"的第二套记忆。
+    #[tokio::test]
+    async fn fire_addr_order_flag_reemits_after_station_recovery() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![fire_conf("ttyS6", 1, 3)], bus.clone(), sink.clone());
+        let violation = [3u16, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0];
+
+        put_fire(&bus, 1, 0, &violation);
+        sched.tick_once(0).await;
+        assert_eq!(sink.events_of("fire").len(), 1, "首轮即违规 ⇒ 产 1 条");
+
+        bus.fail_once(1, 4); // 系统状态块读失败 → 整站 offline
+        sched.tick_once(1000).await;
+        assert_eq!(sink.event_count("fire", "offline"), 1);
+        let before = sink.events_of("fire").len();
+
+        put_fire(&bus, 1, 0, &violation); // 恢复后首轮**仍违规**
+        sched.tick_once(2000).await;
+        assert_eq!(
+            sink.events_since("fire", before),
+            vec![
+                ("online".to_string(), 1.0),
+                ("fire_detector_addr_order_invalid".to_string(), 3.0),
+            ],
+            "恢复首轮仍违规 ⇒ 按「首次观测即产」再产 1 条（基线已重建）"
         );
     }
 
@@ -1678,22 +1843,21 @@ mod tests {
         let sink = Arc::new(FakeSink::default());
         let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
 
-        // 探测器 1（寄存器 11）地址 9 > 探测器 2 地址 3 ⇒ 违规（组序号 2 = 探测器 2）
-        put_fire_det1(&bus, 1, 0, 9, &[3, 0, 0, 0, 0, 0]);
+        // 对照：探测器 1 地址 1 < 探测器 2 地址 3 ⇒ 严格升序，零事件
+        put_fire_det1(&bus, 1, 0, 1, &[3, 0, 0, 0, 0, 0]);
         sched.tick_once(0).await;
-        assert_eq!(
-            sink.events_of("fire"),
-            vec![("fire_detector_addr_order_invalid".to_string(), 2.0)],
-            "链首参与比较：探测器 1 地址 9 之后出现 3 ⇒ 第 2 只违规"
+        assert!(
+            sink.events_of("fire").is_empty(),
+            "探测器 1 地址 1 < 探测器 2 地址 3 ⇒ 升序成立、无违规"
         );
 
-        // 对照：探测器 1 地址 1 < 3 ⇒ 严格升序，不产
-        let before = sink.events_of("fire").len();
-        put_fire_det1(&bus, 1, 0, 1, &[3, 0, 0, 0, 0, 0]);
+        // 探测器 1（寄存器 11）地址 9 > 探测器 2 地址 3 ⇒ 违规（组序号 2 = 探测器 2）
+        put_fire_det1(&bus, 1, 0, 9, &[3, 0, 0, 0, 0, 0]);
         sched.tick_once(1000).await;
-        assert!(
-            sink.events_since("fire", before).is_empty(),
-            "探测器 1 地址 1 < 探测器 2 地址 3 ⇒ 升序成立"
+        assert_eq!(
+            sink.events_since("fire", 0),
+            vec![("fire_detector_addr_order_invalid".to_string(), 2.0)],
+            "链首参与比较：探测器 1 地址 9 之后出现 3 ⇒ 第 2 只违规"
         );
     }
 
