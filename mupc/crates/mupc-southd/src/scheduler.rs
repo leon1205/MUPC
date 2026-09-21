@@ -596,28 +596,50 @@ impl SouthScheduler {
                 if role == Role::MeterGrid {
                     self.sink.on_grid_package(pkg).await;
                 } else {
-                    // 非 grid（battery/hvac/fire/meter_batt/pcs）遥测全量落库（is_event=false）。
-                    let pts: Vec<(String, f64, bool)> = mapper::telemetry_points(&reads)
-                        .into_iter()
-                        .map(|(m, v)| (m, v, false))
-                        .collect();
-                    if !pts.is_empty() {
-                        self.sink.on_station_telemetry(&station_id, role, pts).await;
-                    }
-                    // ── 事件侧（§11.4.7.1 统一事件模型）：离散位 + 字级信号 + 第 5 类站级量
-                    //（`StationFlag`）**共用同一 EdgeTracker 与同一条产出路径** ──
+                    // ── 事件侧 + **位点落库节流**共用**同一个** EdgeTracker（§11.4.7.1）──
+                    // 位点的"与上轮不同"就是 `edges()` 的 `prev != v`；首轮/恢复后首轮取
+                    // **全量快照**（§11.4.7「每轮取与上轮不同的位/信号 + 首次/复位后全量」）。
                     let signals = round_signals(role, &reads);
-                    let events = {
+                    let (events, changed_bits) = {
                         let mut trackers = runner.trackers.lock().unwrap();
                         let tracker = trackers.entry(station_index).or_default();
                         if recovered {
                             tracker.reset(); // 恢复后首轮只重建基线（`StationFlag` 仍"首次观测即产"）
                         }
                         tracker.mark_station_flags(&signals.station_flags);
-                        let edges = edges_to_events(&signals, tracker.edges(&signals.all));
+                        // `edges()` 会 prime（此后 `primed = true`）⇒ 快照判定须在它之前取
+                        let full_snapshot = !tracker.primed;
+                        let raw_edges = tracker.edges(&signals.all);
+                        let changed: HashSet<String> =
+                            raw_edges.iter().map(|(m, _, _)| m.clone()).collect();
                         // 站级量：进入事件的 value 换诊断量、退出事件改名 `@recovered`（§11.4.7.2 C）
-                        station_flag_events(&signals.station_flags, edges)
+                        let events = station_flag_events(
+                            &signals.station_flags,
+                            edges_to_events(&signals, raw_edges),
+                        );
+                        // 需落库的位点：全量快照轮 = 全部位；其后 = 仅变化位（字级信号属**事件
+                        // 命名空间**，不是遥测点，故只取 `bits` 集合内的那些）。
+                        let bits: Vec<(String, f64)> = signals
+                            .all
+                            .iter()
+                            .filter(|(m, _)| signals.bits.contains(m))
+                            .filter(|(m, _)| full_snapshot || changed.contains(m))
+                            .map(|(m, a)| (m.clone(), if *a { 1.0 } else { 0.0 }))
+                            .collect();
+                        (events, bits)
                     }; // 锁在 await 前释放（勿持锁跨 await）
+
+                    // 遥测落库（§11.7.2 第 1/2 条）：**标量每轮全量 + 位点仅变化沿**
+                    // （稳态位点写量 ≈ 0 —— D2 口径；"点产出"在 mapper，节流在本层）。
+                    let mut pts: Vec<(String, f64, bool)> = mapper::telemetry_points(role, &reads)
+                        .into_iter()
+                        .filter(|s| s.kind == mapper::SampleKind::Scalar)
+                        .map(|s| (s.metric, s.value, false))
+                        .collect();
+                    pts.extend(changed_bits.into_iter().map(|(m, v)| (m, v, false)));
+                    if !pts.is_empty() {
+                        self.sink.on_station_telemetry(&station_id, role, pts).await;
+                    }
                     if !events.is_empty() {
                         self.sink
                             .on_station_telemetry(&station_id, role, events)
@@ -1402,6 +1424,70 @@ mod tests {
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
         assert_eq!(sink.event_count("hvac", "offline"), 1);
+    }
+
+    /// **位点落 telemetry 按变化沿**（S3b-2 T6，§11.4.7 变化沿过滤行 + §11.7.2 第 1/2 条，
+    /// D2 口径）：首轮/恢复后首轮**全量快照**一次，此后**稳态零写**，只有变化的位才再落
+    /// ——"位点每轮全量落库"会形成 288 行/s（≈2490 万行/天）的写压，本用例把该形态封死。
+    ///
+    /// 同时钉住"**落库**与**事件**是两条路径"：`State` 位（位 0 内风机）**落 telemetry
+    /// 但不产事件**（`BitClass::State`），而 `Alarm` 位（位 9）走事件（既有用例覆盖）。
+    #[tokio::test]
+    async fn bit_points_land_in_telemetry_only_on_change() {
+        let bus = Arc::new(MockBus::new());
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "hvac".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![dblk("hvac_di", 0, 31)],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+
+        // 首轮（全 0）：31 位**全量快照**落库一次
+        bus.put_bits(3, 0, vec![false; 31]);
+        sched.tick_once(0).await;
+        let n_first = sink.telemetry_of("hvac").len();
+        assert_eq!(n_first, 31, "首轮 = 全量快照（位点基线）");
+
+        // 状态未变 → 稳态零写
+        sched.tick_once(1000).await;
+        assert_eq!(
+            sink.telemetry_of("hvac").len(),
+            n_first,
+            "位点未变 ⇒ 不落库（稳态写量 0）"
+        );
+
+        // 位 0（`State`：内风机）= 1 → **该位**补落一条（其余 30 位不落）
+        let mut bits = vec![false; 31];
+        bits[0] = true;
+        bus.put_bits(3, 0, bits);
+        sched.tick_once(2000).await;
+        let tel = sink.telemetry_of("hvac");
+        assert_eq!(tel.len(), n_first + 1, "只有变化的位补落一条");
+        assert_eq!(
+            tel.last(),
+            Some(&("hvac_di_1".to_string(), 1.0)),
+            "补落的是位 0（`hvac_di_1`）的新值"
+        );
+        assert!(
+            sink.events_since("hvac", 0).is_empty(),
+            "State 位不产事件（事件侧与落库侧分流，§11.7.2 第 3 条）"
+        );
+
+        // 位 0 回 0 → 再落一条（落库取**双向**变化沿，与事件侧的"只上升沿"刻意不同）
+        bus.put_bits(3, 0, vec![false; 31]);
+        sched.tick_once(3000).await;
+        assert_eq!(
+            sink.telemetry_of("hvac").len(),
+            n_first + 2,
+            "1→0 亦落一条（变化沿双向）"
+        );
     }
 
     // ---------- EdgeTracker（§11.4.7.1 统一事件模型，纯逻辑） ----------

@@ -263,30 +263,74 @@ pub fn poll_to_result(role: Role, reads: &BlockReads) -> PollResult {
     }
 }
 
+/// 遥测点样本（S3b-2 §11.4.6）：比 `(String, f64)` 多一个**类别标志**，供 scheduler 做
+/// **位点的变化沿过滤**（标量点每轮全量落库、位点仅在与上轮不同时落库，§11.7.2 第 1/2 条
+/// 的 D2 口径）。`kind` 用枚举而非 `bool`（设计 v1.3 订正）：将来若加"字级信号"不破签名。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TelemetrySample {
+    /// 点位名（PRD §9.4.2.2）
+    pub metric: String,
+    /// 遥测值（位点 = `1.0` / `0.0`）
+    pub value: f64,
+    /// 点位形态（决定 scheduler 侧是否走变化沿过滤）
+    pub kind: SampleKind,
+}
+
+/// 点位形态：`Scalar` = 标量点（16/32 位）、`Bit` = 位点（`func: discrete`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleKind {
+    Scalar,
+    Bit,
+}
+
 /// 遥测点提取（S3b-2 §11.2.1 的**刻意行为变更**）：对**未声明 `points` 的块**由
 /// "取前 2 寄存器 1 点、metric = 块名"改为"**每个值槽 1 点、metric = `<块名>_<序号>`**"
 /// （PRD §9.4.2.1 第 4 条 + §9.4.2.2 命名规则），由 [`points::expand`] 统一展开
 /// ——**校验期与运行期同一函数**。
 ///
-/// 该函数**只被非 grid 站调用**（grid 走 `on_grid_package`）；块读失败 / 长度不足 → 跳过。
+/// **返回全部点**（含**位点**，S3b-2 T6 补齐）：标量与位一视同仁地产出（位点 `value` =
+/// `1.0`/`0.0`、`kind = Bit`），AC-6 ①"点产出"在 mapper 层断言；**变化沿过滤在 scheduler**
+/// （§11.4.7）——"点产出"与"落库节流"是两层，互不混淆（§11.2.4 末注）。
 ///
-/// **位点（`discrete`）在此不产点**（S3b-2 T5 状态，落点见 T6）：T5 已接通 FC02 读通路
-/// （`BlockData::Bits` 承载位向量）并**在 scheduler 侧**用统一 `EdgeTracker` 产位/信号事件，
-/// 但位点的 **telemetry 落库**（§11.7.2 第 2 条"仅在与上轮不同时落库"）是 T6 的
-/// `telemetry_points` 重构内容 ⇒ 本函数当前对 `PointKind::Bit` 仍不产点。
-pub fn telemetry_points(reads: &BlockReads) -> Vec<(String, f64)> {
+/// 该函数**只被非 grid 站调用**（grid 走 `on_grid_package`，分相语义不经本函数）；
+/// 块读失败 / 该点形态与块数据形态不符 / 长度不足 → 该点跳过。
+pub fn telemetry_points(role: Role, reads: &BlockReads) -> Vec<TelemetrySample> {
+    // 只读断言：本函数只服务非 grid 站（`role` 参数在此形态下**无判据作用** —— 点的形态
+    // 与取值只由「块 + 配置」决定；它的存在是为保持 §11.4.6 的接口形状，且把"grid 站不得
+    // 走本函数"这条分流口径写成可执行断言，防将来把分相站也接进逐点展开）。
+    debug_assert_ne!(
+        role,
+        Role::MeterGrid,
+        "meter_grid 站走 on_grid_package（分相语义），不得经 telemetry_points"
+    );
     let mut out = Vec::new();
     for (b, res) in reads {
         let Ok(d) = res else { continue };
-        let Some(r) = d.regs() else { continue };
         let Ok(pts) = points::expand(b) else {
             continue;
         };
         for p in pts {
-            if let PointKind::Scalar { offset, decode } = p.kind {
-                let start = offset as usize;
-                if r.len() >= start + decode.width() {
-                    out.push((p.metric, decode.decode(&r[start..])));
+            match p.kind {
+                PointKind::Scalar { offset, decode } => {
+                    let Some(r) = d.regs() else { continue };
+                    let start = offset as usize;
+                    if r.len() >= start + decode.width() {
+                        out.push(TelemetrySample {
+                            metric: p.metric,
+                            value: decode.decode(&r[start..]),
+                            kind: SampleKind::Scalar,
+                        });
+                    }
+                }
+                PointKind::Bit { offset } => {
+                    let Some(bits) = d.bits() else { continue };
+                    // 读回位数不足 → 该位按 0（防御；正常路径由块读长度保证）
+                    let active = bits.get(offset as usize).copied().unwrap_or(false);
+                    out.push(TelemetrySample {
+                        metric: p.metric,
+                        value: if active { 1.0 } else { 0.0 },
+                        kind: SampleKind::Bit,
+                    });
                 }
             }
         }
@@ -369,6 +413,14 @@ mod tests {
             points: Vec::new(),
             read_slice: false,
         }
+    }
+
+    /// 位块（`func: discrete`，`count` = 位数）—— 位点产出用例用。
+    fn dblk(name: &str, count: u16) -> RegBlockConf {
+        let mut b = blk(name);
+        b.func = RegFunc::Discrete;
+        b.count = count;
+        b
     }
 
     /// 寄存器块（`addr`/`count` 可指定）—— 地址升序校验的用例只需要这两个字段。
@@ -599,9 +651,10 @@ mod tests {
             fblock("u", 220.0, 221.0, 222.0),
             (blk("bad"), Err("io".into())),
         ];
-        let pts = telemetry_points(&reads);
+        let pts = telemetry_points(Role::Hvac, &reads);
+        let got: Vec<(String, f64)> = pts.iter().map(|s| (s.metric.clone(), s.value)).collect();
         assert_eq!(
-            pts,
+            got,
             vec![
                 ("p_1".to_string(), 1.0),
                 ("p_3".to_string(), 2.0),
@@ -611,6 +664,72 @@ mod tests {
                 ("u_5".to_string(), 222.0),
             ]
         );
+        assert!(
+            pts.iter().all(|s| s.kind == SampleKind::Scalar),
+            "寄存器块产出的都是标量点"
+        );
+    }
+
+    /// **位点也落 telemetry**（S3b-2 T6，§11.7.2 第 2 条）：`discrete` 块逐位产点，
+    /// `value` = 1.0/0.0、`kind = Bit`（scheduler 据此只对位点做变化沿过滤）。
+    /// 位块与寄存器块**混排**时两类点按块序产出。
+    #[test]
+    fn telemetry_points_includes_bit_points() {
+        let reads = vec![
+            (dblk("hvac_di", 3), Ok(BlockData::Bits(vec![true, false, true]))),
+            sblock("temp", 23.5),
+        ];
+        let pts = telemetry_points(Role::Hvac, &reads);
+        assert_eq!(
+            pts,
+            vec![
+                TelemetrySample {
+                    metric: "hvac_di_1".to_string(),
+                    value: 1.0,
+                    kind: SampleKind::Bit,
+                },
+                TelemetrySample {
+                    metric: "hvac_di_2".to_string(),
+                    value: 0.0,
+                    kind: SampleKind::Bit,
+                },
+                TelemetrySample {
+                    metric: "hvac_di_3".to_string(),
+                    value: 1.0,
+                    kind: SampleKind::Bit,
+                },
+                TelemetrySample {
+                    metric: "temp_1".to_string(),
+                    value: 23.5,
+                    kind: SampleKind::Scalar,
+                },
+            ]
+        );
+    }
+
+    /// **位点的形态与数据错配 → 跳过**（防御）：位块数据（`Bits`）喂给标量点视图 ⇒ 该点
+    /// 不产；反之寄存器块数据喂给位点视图同理（块 `func` 与 `BlockData` 由 scheduler 保证
+    /// 对应，此处只钉住"不 panic、不误产"）。
+    #[test]
+    fn telemetry_points_skips_shape_mismatch() {
+        let reads = vec![
+            (blk("scalar_blk"), Ok(BlockData::Bits(vec![true, false]))),
+            (dblk("bit_blk", 2), Ok(BlockData::Regs(vec![7, 8]))),
+        ];
+        assert!(telemetry_points(Role::Hvac, &reads).is_empty());
+    }
+
+    /// `Role::Pcs` 与其它非 grid/battery role 同臂 → 最小 `DataPackage`（"站活着"信号）：
+    /// PCS 的全部点只走 `telemetry_points`/`on_station_telemetry`，**不触发** `on_battery_soc`
+    /// （N-1）与 `on_grid_package`（N-2）——后两条由 scheduler 的 role 判断结构性保证。
+    #[test]
+    fn pcs_role_returns_minimal_data_package() {
+        let reads = vec![sblock("pcs_3zone", 1.0)];
+        let pkg = unwrap_data(poll_to_result(Role::Pcs, &reads));
+        assert_eq!(pkg.device_status.inverter_status, InverterStatus::Running);
+        assert_eq!(pkg.battery.soc, None, "N-1：PCS 转述 SOC 不得进控制链");
+        assert_eq!(pkg.electrical.voltage, None);
+        assert!(pkg.electrical.phase.is_none(), "N-2：phase 真源唯一 = meter_grid");
     }
 
     /// **链首 = 寄存器 11（探测器 1 的地址号，v1.7 §11.4.6 订正）**：探测器 1 也在升序链里
