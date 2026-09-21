@@ -18,7 +18,7 @@ pub mod protocol;
 
 // Re-export commonly used types
 pub use config::Config;
-pub use device::Rs485Device;
+pub use device::{unpack_bits, Rs485Device};
 pub use device_trait::CrcMode;
 pub use errors::Rs485Error;
 
