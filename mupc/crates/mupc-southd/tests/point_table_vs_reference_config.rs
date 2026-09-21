@@ -186,6 +186,8 @@ fn every_registry_row_is_claimed_exactly_once() {
             row.label
         );
     }
+    // 108 的推导：探测器区在 n=20 下展开 **114 点**（19 只 × 6 寄存器），而静态表只登记
+    // **6** 条组内语义模板 ⇒ 静态表比"逐点登记"少 `114 − 6 = 108` 行。
     assert_eq!(
         point_table::POINT_REGS.len() + 108,
         618,

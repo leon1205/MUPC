@@ -12,7 +12,9 @@
 //! `tests/point_table_vs_reference_config.rs`）。
 //!
 //! **查表键是 `(role, space, addr)` 而不是设计的 `(role, addr)`**（[`AddrSpace`]）：
-//! 位地址与寄存器地址是两个独立编址的空间（PRD §9.4.3 规则 14），`hvac` 站两者在同批
+//! 位地址与寄存器地址是两个独立编址的空间，"同站按功能码空间分别判"出自 **PRD §9.4.2.1
+//! 第 6 条 / §9.4.3 的「区间与重叠」行**（"规则 14"这个**编号**出自**设计 §11.5.1 的
+//! 落点表第 14 行**，PRD §9.4.3 本身无编号），`hvac` 站两者在同批
 //! 地址上真实共存；只用 `(role, addr)` 会互相遮蔽（已上报设计，见 T4 汇报）。
 //!
 //! **强制口径（§11.4.4，随表生效）**：① `format ∈ {uint16,int16}` 且 `offset ≠ 0`，
@@ -30,11 +32,15 @@ use mupc_data_processing::meter_regs::RegFormat;
 /// 符号性来源（PRD §9.5 前言的三分类）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymSrc {
-    /// 厂方逐点明写（PCS、空调、ADL400 的 4 字节功率类/PF）
+    /// 厂方逐点明写（PCS、空调、ADL400 的 **4 字节功率类/PF**、ADL400 的 **6 个总电能
+    /// （0x0000/0x000A/0x0014/0x001E/0x0028/0x0032）与 3 个分相电能（0x0087–0x008C）**
+    /// —— 后两类原文备注「**整形**」= 厂方标注的无符号 4 字节量，**不是**工程判断；
+    /// 另有 ADL400 的不平衡度 0x0093/0x0094，原文备注「整型」（PRD §9.5.3 逐点来源表））
     Vendor,
     /// 厂方标注 + 推断订正（BMS 的 `UNIT` → `UINT`）
     VendorTypo,
-    /// 工程判断（消防、ADL400 2 字节点）
+    /// 工程判断（消防、ADL400 的 **2 字节无量类型字样点**：电压/电流/频率/线电压/零序/PT/CT
+    /// —— **不含** 0x0093/0x0094 的不平衡度，后者厂方备注「整型」，见 [`SymSrc::Vendor`]）
     Engineer,
 }
 
@@ -63,8 +69,10 @@ pub enum RegPointKind {
 
 /// **地址空间**：寄存器空间（FC03 保持 / FC04 输入）与位空间（FC02 离散输入）。
 ///
-/// 两个空间**地址各自从 0 编址、互不相干**（PRD §9.4.3 规则 14 明确"同站按功能码空间分别判
-/// 重叠"）。故 `(role, addr)` **不足以**定位一行：`hvac` 站的 `hvac_in`（FC04，寄存器 0/2/3）
+/// 两个空间**地址各自从 0 编址、互不相干**（PRD §9.4.2.1 第 6 条 / §9.4.3 的「区间与重叠」
+/// 行明确"同站按功能码空间分别判重叠"；该条在设计 §11.5.1 落点表中的编号是 14 —— 引用时
+/// 勿写成"PRD §9.4.3 规则 14"，PRD §9.4.3 的表是无编号表）。
+/// 故 `(role, addr)` **不足以**定位一行：`hvac` 站的 `hvac_in`（FC04，寄存器 0/2/3）
 /// 与 `hvac_di`（FC02，位 0..30）在同一批地址上**真实共存**。登记表因此按
 /// `(role, space, addr)` 索引（设计 §11.4.4 的"`(role, addr)`"在实现上须补 space 维度，
 /// 否则 HVAC 的位 0 与寄存器 0 会互相遮蔽 —— 已上报，见 T4 汇报）。
@@ -731,7 +739,10 @@ pub const POINT_REGS: &[PointReg] = &[
     sc(Role::Pcs, 1074, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "直流累计放电电量 kWh（word_order lo_hi）"),
 
     // ══════════════ 3) 储能电能表 ADL400（`Role::MeterBatt`，FC03，40 点）══════════════
-    // 来源混合：4 字节功率类/PF = Vendor（厂方明写「有符号整形」）；2 字节点 = Engineer。
+    // 来源混合（**逐点判定，见 PRD §9.5.3 的逐点来源表**）：
+    //   · Vendor    —— 6 个总电能 + 3 个分相电能（原文备注「整形」）、4 字节功率类/PF
+    //                  （原文备注「有符号整形」）、不平衡度 0x0093/0x0094（原文备注「整型」）；
+    //   · Engineer  —— 其余 2 字节点（电压/电流/频率/线电压/零序/PT/CT），原文**无任何类型字样**。
     sc(Role::MeterBatt, 0x0000, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前组合有功总电能 kWh"),
     sc(Role::MeterBatt, 0x000A, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前正向总有功电能 kWh"),
     sc(Role::MeterBatt, 0x0014, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前反向总有功电能 kWh"),
@@ -754,8 +765,11 @@ pub const POINT_REGS: &[PointReg] = &[
     sc(Role::MeterBatt, 0x008D, RegFormat::Uint16, 1.0, 0.0, SymSrc::Engineer, "电压变比 PT（只读对照，写侧归写 Task）"),
     sc(Role::MeterBatt, 0x008E, RegFormat::Uint16, 1.0, 0.0, SymSrc::Engineer, "电流变比 CT（只读对照）"),
     sc(Role::MeterBatt, 0x0092, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "零序电流 A（可为负的疑点，同 Q-20 判别）"),
-    sc(Role::MeterBatt, 0x0093, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "电压不平衡度 %"),
-    sc(Role::MeterBatt, 0x0094, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "电流不平衡度 %"),
+    // 0x0093/0x0094：PRD §9.5.3 逐点来源表明确其来源为「**厂方标「整型」**」（0x0093 备注
+    // 「整型 单位0.1%」、0x0094 无备注承前）⇒ `Vendor`，**不是**工程判断（§9.5 前言的
+    // "工程判断"行 ADL400 清单只列电压/电流/频率/线电压/零序/PT/CT，不含不平衡度）。
+    sc(Role::MeterBatt, 0x0093, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "电压不平衡度 %"),
+    sc(Role::MeterBatt, 0x0094, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "电流不平衡度 %"),
     sc(Role::MeterBatt, 0x0164, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相有功功率 kW"),
     sc(Role::MeterBatt, 0x0166, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相有功功率 kW"),
     sc(Role::MeterBatt, 0x0168, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相有功功率 kW"),
