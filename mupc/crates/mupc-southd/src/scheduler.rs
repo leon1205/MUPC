@@ -57,6 +57,22 @@ pub trait StationSink: Send + Sync {
     /// 刚成功即新鲜）。独立通道——AiIntegrator SOC 双源裁决用（BMS 优先/掉线回落核间，04 §2.11.1）。
     /// 不替代 on_station_telemetry（遥测全量落库照旧）；soc 值语义为 0-100 百分数。
     async fn on_battery_soc(&self, station_id: &str, soc: f64);
+
+    /// 站失败（offline）事件 —— 把失败 `reason` 交给消费层（S3b-2 T5 新增接缝）。
+    ///
+    /// **为什么需要它**：PRD §9.7.2 第 1 条要求"站进入 offline，事件 `reason` 含
+    /// `slave/addr/count` → 运维据 `events` 定位到具体块"，而 [`Self::on_station_telemetry`]
+    /// 的三元组 `(metric, value, is_event)` **没有承载文案的字段**（`reason` 是字符串）。
+    ///
+    /// **默认实现 = 既有行为**：合成 `metric = "offline"` 的状态事件（与 S3a 口径逐字一致 ⇒
+    /// 既有 `event_count(.., "offline")` 类断言不受影响）。消费方（core-bin `SouthSink`）可
+    /// **覆写**本方法把 `reason` 写进 `SystemEvent.message` —— 事件文案的组装属消费层
+    /// （设计 §11.3 的 core-bin 行），故 southd 侧只负责"把 reason 交出去"。
+    async fn on_station_offline(&self, station_id: &str, role: Role, reason: &str) {
+        let _ = reason;
+        self.on_station_telemetry(station_id, role, vec![("offline".to_string(), 1.0, true)])
+            .await;
+    }
 }
 
 /// 本轮应采的一站。`station_index` = 调度 state Vec 全局下标。
@@ -556,9 +572,9 @@ impl SouthScheduler {
         };
         if emit {
             tracing::warn!(station = %id, ?role, reason, "southd 站采集失败（offline 隔离）");
-            self.sink
-                .on_station_telemetry(&id, role, vec![("offline".to_string(), 1.0, true)])
-                .await;
+            // reason 含 `slave/addr/count`（PRD §9.7.2 第 1 条）；经 `on_station_offline`
+            // 交出去，使消费层可把它写进事件 message（默认实现 = 既有 `offline` 事件）。
+            self.sink.on_station_offline(&id, role, reason).await;
         }
     }
 
@@ -739,6 +755,8 @@ mod tests {
         grid_pkgs: std::sync::Mutex<Vec<mupc_data_processing::DataPackage>>,
         msgs: std::sync::Mutex<Vec<(String, Role, Vec<(String, f64, bool)>)>>,
         battery_socs: std::sync::Mutex<Vec<(String, f64)>>,
+        /// 覆写 `on_station_offline` 收到的 `reason`（PRD §9.7.2 第 1 条的落证）
+        offline_reasons: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     impl FakeSink {
@@ -824,6 +842,16 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((station_id.to_string(), soc));
+        }
+        /// 覆写默认实现：记下 `reason`，并**保持默认实现的既有事件**（两条都要有，
+        /// 否则本用例无法同时验证"事件不变"与"reason 已交出"）。
+        async fn on_station_offline(&self, station_id: &str, role: Role, reason: &str) {
+            self.offline_reasons
+                .lock()
+                .unwrap()
+                .push((station_id.to_string(), reason.to_string()));
+            self.on_station_telemetry(station_id, role, vec![("offline".to_string(), 1.0, true)])
+                .await;
         }
     }
 
@@ -1852,6 +1880,28 @@ mod tests {
             assert_eq!(st[1].offline_count, 0, "恢复后 offline_count 归零");
         }
         assert_eq!(sink.event_count("hvac", "offline"), 0, "hvac 全程健康");
+    }
+
+    /// PRD §9.7.2 第 1 条：站 offline 的**事件 reason 含 `slave/addr/count`**（运维据 events
+    /// 定位到具体块）。southd 侧经 `StationSink::on_station_offline` 交出 reason；事件文案的
+    /// 组装属消费层（core-bin，T6）。
+    #[tokio::test]
+    async fn offline_reason_contains_slave_addr_count() {
+        let bus = Arc::new(MockBus::new()); // 未预置 → 读 Err
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![hvac_conf("hvac", "ttyS1", 3, 1000)], bus, sink.clone());
+        sched.tick_once(0).await;
+
+        let reasons = sink.offline_reasons.lock().unwrap();
+        assert_eq!(reasons.len(), 1, "offline 一次即交出一次 reason");
+        let (id, reason) = &reasons[0];
+        assert_eq!(id, "hvac");
+        assert!(
+            reason.contains("slave=3") && reason.contains("0x0064") && reason.contains("x2"),
+            "reason 须含 slave/addr/count（块 temp @ 0x0064 x2），实际: {reason}"
+        );
+        // 默认实现的事件形态不变（C5 锚：`event_count(.., "offline")` 语义不动）
+        assert_eq!(sink.event_count("hvac", "offline"), 1);
     }
 
     /// AC-5：`pcs` 站**只读** —— 正常采集也不触发 `on_grid_package`（不推进 5s 控制闸门）
