@@ -301,20 +301,25 @@ impl SouthScheduler {
         if let Some(b) = &bus {
             for blk in &regs {
                 // 按块 func 分发读方法：Holding → FC03 read_holding，Input → FC04 read_input，
-                // Discrete → FC02 read_discrete（S3b-2 T5 接入 `StationBus::read_discrete`）。
-                // T5 之前该块读视为失败：配置了 discrete 块的站在运行期显式 offline（不静默无数据）。
-                let res = match blk.func {
-                    RegFunc::Holding => b.read_holding(slave, blk.addr, blk.count).await,
-                    RegFunc::Input => b.read_input(slave, blk.addr, blk.count).await,
-                    RegFunc::Discrete => Err(BusError::Read {
-                        slave,
-                        addr: blk.addr,
-                        count: blk.count,
-                        reason: "discrete（FC02）块读取尚未接入（S3b-2 T5）".into(),
-                    }),
+                // Discrete → FC02 read_discrete（S3b-2 T5 接通 `StationBus::read_discrete`；
+                // T5 之前该块读被显式判失败——配置了 discrete 块的站在运行期 offline 而不静默无数据）。
+                // 读结果按 `BlockData` 统一承载（寄存器块 = Regs / 位块 = Bits），见 `mapper::BlockData`。
+                let res: Result<mapper::BlockData, BusError> = match blk.func {
+                    RegFunc::Holding => b
+                        .read_holding(slave, blk.addr, blk.count)
+                        .await
+                        .map(mapper::BlockData::Regs),
+                    RegFunc::Input => b
+                        .read_input(slave, blk.addr, blk.count)
+                        .await
+                        .map(mapper::BlockData::Regs),
+                    RegFunc::Discrete => b
+                        .read_discrete(slave, blk.addr, blk.count)
+                        .await
+                        .map(mapper::BlockData::Bits),
                 };
                 match res {
-                    Ok(reg) => reads.push((blk.clone(), Ok(reg))),
+                    Ok(data) => reads.push((blk.clone(), Ok(data))),
                     Err(e) => {
                         // 站失败语义（§10.7）：任一块读失败 → 整站 offline，本轮无有效数据，
                         // 不部分交付——已读 Ok 块随失败路径整体弃用（io_error 即返回，reads 丢弃）。
@@ -516,6 +521,22 @@ mod tests {
                 }],
                 read_slice: false,
             }],
+        }
+    }
+
+    /// 位块（FC02）构造：`addr` = **位地址**，`count` = **位数**。
+    fn dblk(name: &str, addr: u16, count: u16) -> RegBlockConf {
+        RegBlockConf {
+            name: name.into(),
+            addr,
+            func: RegFunc::Discrete,
+            format: RegFormat::Uint16, // discrete 块的 format/scale 不参与（位恒 0/1）
+            scale: 0.0,
+            count,
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
         }
     }
 
@@ -1028,6 +1049,54 @@ mod tests {
         assert_eq!(sink.event_count("hvac", "offline"), 0);
         // 关键断言：hvac（非 Battery）不走 on_battery_soc 通道
         assert!(sink.soc_of("hvac").is_none(), "非 battery role 不应触发 soc 推送");
+    }
+
+    /// S3b-2 T5：`func: discrete` 块按 **FC02** 读（`StationBus::read_discrete`），
+    /// 即 `read_discrete` 通路真正接通（T5 之前该块读被显式判失败 ⇒ 整站 offline）。
+    #[tokio::test]
+    async fn discrete_block_dispatches_to_fc02_read() {
+        let bus = Arc::new(MockBus::new());
+        bus.put_bits(3, 0, vec![false; 31]);
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "hvac".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![dblk("hvac_di", 0, 31)],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+
+        assert_eq!(bus.bit_call_count(3, 0), 1, "discrete 块应走 FC02（read_discrete）");
+        assert_eq!(bus.call_count(3, 0), 0, "不应发 FC03 holding 读");
+        assert_eq!(bus.input_call_count(3, 0), 0, "不应发 FC04 input 读");
+        assert_eq!(sink.event_count("hvac", "offline"), 0, "FC02 读成功 ⇒ 站不 offline");
+    }
+
+    /// 位块读失败（FC02 超时）→ 与寄存器块同策：整站 offline（§10.7 两层失败语义一致）。
+    #[tokio::test]
+    async fn discrete_block_read_failure_isolates_station() {
+        let bus = Arc::new(MockBus::new()); // 未预置位 → 读 Err
+        let sink = Arc::new(FakeSink::default());
+        let st = StationConf {
+            id: "hvac".into(),
+            role: Role::Hvac,
+            port: "ttyS1".into(),
+            protocol: "modbus".into(),
+            slave: 3,
+            baud_rate: DEFAULT_BAUD_RATE,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![dblk("hvac_di", 0, 31)],
+        };
+        let sched = build(vec![st], bus.clone(), sink.clone());
+        sched.tick_once(0).await;
+        assert_eq!(sink.event_count("hvac", "offline"), 1);
     }
 
     /// 纯 DueCalc：到期/间隔/优先级/同 now 去重/落后钳制。

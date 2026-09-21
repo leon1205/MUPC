@@ -9,7 +9,7 @@
 
 use mupc_data_processing::meter_regs::RegFormat;
 use mupc_southd::config::{RegBlockConf, RegFunc, Role};
-use mupc_southd::mapper::{poll_to_result, PollResult};
+use mupc_southd::mapper::{poll_to_result, BlockData, PollResult};
 
 /// f32 → 大端 u16 寄存器对（高字在前；与 decode_regs 字节序一致）
 fn f32_regs(v: f32) -> [u16; 2] {
@@ -25,9 +25,10 @@ fn phase_regs(a: f32, b: f32, c: f32) -> Vec<u16> {
 /// 一块配置 + 该块读成功结果。
 ///
 /// S3b-2 T3：**只补齐 `RegBlockConf` 的 4 个新增字段**（机械补字段，缺省 = 既有行为）；
+/// S3b-2 T5：读结果按 `BlockData::Regs(...)` 包装（同上，**构造侧的机械订正**）；
 /// 本文件**全部断言一个字节都不动**（S3a 收敛闸门回归锚，设计 §11.5.3.4 C1）——
 /// grid 路径走 `poll_to_result(MeterGrid)` → 按**块名**查找，不经过 `points[]`/`telemetry_points`。
-fn block(name: &str, addr: u16, format: RegFormat, scale: f64, count: u16, regs: Vec<u16>) -> (RegBlockConf, Result<Vec<u16>, String>) {
+fn block(name: &str, addr: u16, format: RegFormat, scale: f64, count: u16, regs: Vec<u16>) -> (RegBlockConf, Result<BlockData, String>) {
     (
         RegBlockConf {
             name: name.into(),
@@ -41,7 +42,7 @@ fn block(name: &str, addr: u16, format: RegFormat, scale: f64, count: u16, regs:
             points: Vec::new(),
             read_slice: false,
         },
-        Ok(regs),
+        Ok(BlockData::Regs(regs)),
     )
 }
 
@@ -58,7 +59,7 @@ fn unwrap_data(res: PollResult) -> mupc_data_processing::DataPackage {
 /// p_total 缺失 → 降级 Σp=6.0；电流方向 p>=0 → +幅值。
 #[test]
 fn meter_grid_phase_matches_legacy_semantics_canned() {
-    let reads: Vec<(RegBlockConf, Result<Vec<u16>, String>)> = vec![
+    let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
         block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(1.0, 2.0, 3.0)),
         block("q", 0x0006, RegFormat::Float32, 1.0, 6, phase_regs(0.5, 0.25, 0.125)),
         block("pf", 0x000C, RegFormat::Float32, 1.0, 6, phase_regs(0.75, 0.875, 0.9375)),
@@ -85,7 +86,7 @@ fn meter_grid_phase_matches_legacy_semantics_canned() {
 /// p_total 块存在 → active_power 用原始块值（非 Σp）
 #[test]
 fn meter_grid_p_total_raw_when_present() {
-    let reads: Vec<(RegBlockConf, Result<Vec<u16>, String>)> = vec![
+    let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
         block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(1.0, 2.0, 3.0)),
         block("q", 0x0006, RegFormat::Float32, 1.0, 6, phase_regs(0.5, 0.25, 0.125)),
         block("pf", 0x000C, RegFormat::Float32, 1.0, 6, phase_regs(0.75, 0.875, 0.9375)),
@@ -100,7 +101,7 @@ fn meter_grid_p_total_raw_when_present() {
 /// 缺相量块（如 q）→ 整周期 Failed（沿用旧数据语义，§10.7）
 #[test]
 fn meter_grid_missing_phase_block_returns_failed() {
-    let reads: Vec<(RegBlockConf, Result<Vec<u16>, String>)> = vec![
+    let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
         block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(1.0, 2.0, 3.0)),
         block("u", 0x0012, RegFormat::Float32, 1.0, 6, phase_regs(220.0, 221.0, 222.0)),
         block("i", 0x0018, RegFormat::Float32, 1.0, 6, phase_regs(10.0, 11.0, 12.0)),
@@ -112,7 +113,7 @@ fn meter_grid_missing_phase_block_returns_failed() {
 /// 负 p → 电流方向取负（带符号电流差模判据；p≈0 相取正——P2-3）
 #[test]
 fn meter_grid_negative_p_direction_signs_current() {
-    let reads: Vec<(RegBlockConf, Result<Vec<u16>, String>)> = vec![
+    let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
         block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(-1.0, 2.0, 0.0)),
         block("q", 0x0006, RegFormat::Float32, 1.0, 6, phase_regs(0.5, 0.25, 0.125)),
         block("pf", 0x000C, RegFormat::Float32, 1.0, 6, phase_regs(0.75, 0.875, 0.9375)),

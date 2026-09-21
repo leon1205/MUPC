@@ -16,11 +16,44 @@ use mupc_data_processing::{
     BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
 };
 
+/// 一块的原始读结果（S3b-2 T5 新增，设计 §11.4.7「块读分发」行）：
+/// 寄存器块（FC03 保持 / FC04 输入）→ [`BlockData::Regs`]；位块（FC02 离散输入）→
+/// [`BlockData::Bits`]。
+///
+/// **为什么扩成枚举而不是并行的 `BitReads` 通道**（设计的取舍）：`discrete` 块与寄存器块
+/// 共用同一条「逐块读 → mapper 判定 → 分发」管线，若另开一条通道，则 mapper 与 scheduler
+/// 各出现一份"逐块遍历 + 整站失败"逻辑（两条入口 = 两处可漂移）。扩枚举后**只有一处**。
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockData {
+    /// 寄存器块读数（FC03/FC04）：`count` 个寄存器。
+    Regs(Vec<u16>),
+    /// 位块读数（FC02）：`count` **位**（`bit k` = 第 `k%8` 字节的第 `k%8` 位，bit0 = LSB）。
+    Bits(Vec<bool>),
+}
+
+impl BlockData {
+    /// 寄存器视图；位块 → `None`（调用方按块的 `func` 已知形态，此处只做类型防御）。
+    pub fn regs(&self) -> Option<&[u16]> {
+        match self {
+            BlockData::Regs(r) => Some(r),
+            BlockData::Bits(_) => None,
+        }
+    }
+
+    /// 位视图；寄存器块 → `None`。
+    pub fn bits(&self) -> Option<&[bool]> {
+        match self {
+            BlockData::Bits(b) => Some(b),
+            BlockData::Regs(_) => None,
+        }
+    }
+}
+
 /// 每站一次 poll 的原始读结果：每个 regs 块一个条目（该块读失败为 Err）。
 ///
-/// scheduler 读回原始 u16 寄存器后交 mapper 内部 decode，使 meter_grid 的
+/// scheduler 读回原始寄存器后交 mapper 内部 decode，使 meter_grid 的
 /// 「某块读失败/长度不足 → 整周期失败」语义能在 mapper 内表达。
-pub type BlockReads = Vec<(RegBlockConf, Result<Vec<u16>, String>)>;
+pub type BlockReads = Vec<(RegBlockConf, Result<BlockData, String>)>;
 
 /// 站一次 poll 的组装结果（scheduler 分发用）。
 // DataPackage 体量远大于 Failed(String)；scheduler 以引用持有结果，未装箱保持
@@ -52,19 +85,14 @@ fn decode_phase_block(regs: &[u16], b: &RegBlockConf) -> Option<[f64; 3]> {
 /// 从块读结果中取某 name 的相量块；缺块或读失败 → None（整周期失败）。
 fn phase_block(reads: &BlockReads, name: &str) -> Option<[f64; 3]> {
     let (b, res) = reads.iter().find(|(b, _)| b.name == name)?;
-    match res {
-        Ok(r) => decode_phase_block(r, b),
-        Err(_) => None,
-    }
+    decode_phase_block(res.as_ref().ok()?.regs()?, b)
 }
 
-/// 取 `p_total` 标量块（2 寄存器）：缺块/读失败 → None（调用方降级分相和）。
+/// 取 `p_total` 标量块（2 寄存器）：缺块/读失败/长度不足 → None（调用方降级分相和）。
 fn scalar_total(reads: &BlockReads) -> Option<f64> {
     let (b, res) = reads.iter().find(|(b, _)| b.name == "p_total")?;
-    match res {
-        Ok(r) if r.len() >= 2 => Some(decode_regs(&r[..2], b.format, b.scale)),
-        _ => None,
-    }
+    let r = res.as_ref().ok()?.regs()?;
+    (r.len() >= 2).then(|| decode_regs(&r[..2], b.format, b.scale))
 }
 
 /// 最小 DataPackage（非 grid/battery 站"活着"信号；electrical 缺省 + battery 空）。
@@ -161,7 +189,16 @@ fn soc_point(reads: &BlockReads) -> Option<(Result<Vec<u16>, String>, u16, RegDe
         for p in pts {
             if p.metric == "soc" {
                 if let PointKind::Scalar { offset, decode } = p.kind {
-                    return Some((res.clone(), offset, decode));
+                    // 位块（`func: discrete`）展开只产 `PointKind::Bit`，故走到这里的块必为寄存器块；
+                    // `regs()` 为 None 时按"该块无有效读数"跳过（不误报 Failed）。
+                    let regs_res = match res.as_ref() {
+                        Ok(d) => match d.regs() {
+                            Some(r) => Ok(r.to_vec()),
+                            None => continue,
+                        },
+                        Err(e) => Err(e.clone()),
+                    };
+                    return Some((regs_res, offset, decode));
                 }
             }
         }
@@ -232,12 +269,16 @@ pub fn poll_to_result(role: Role, reads: &BlockReads) -> PollResult {
 /// ——**校验期与运行期同一函数**。
 ///
 /// 该函数**只被非 grid 站调用**（grid 走 `on_grid_package`）；块读失败 / 长度不足 → 跳过。
-/// 位点（`discrete`）的解包依赖 FC02 位向量，其落库口径在 S3b-2 的 S5/S6（D2 变化沿）接入，
-/// 故此处对 `PointKind::Bit` **不产点**（当前运行期 discrete 块读根本不会成功——见 scheduler）。
+///
+/// **位点（`discrete`）在此不产点**（S3b-2 T5 状态，落点见 T6）：T5 已接通 FC02 读通路
+/// （`BlockData::Bits` 承载位向量）并**在 scheduler 侧**用统一 `EdgeTracker` 产位/信号事件，
+/// 但位点的 **telemetry 落库**（§11.7.2 第 2 条"仅在与上轮不同时落库"）是 T6 的
+/// `telemetry_points` 重构内容 ⇒ 本函数当前对 `PointKind::Bit` 仍不产点。
 pub fn telemetry_points(reads: &BlockReads) -> Vec<(String, f64)> {
     let mut out = Vec::new();
     for (b, res) in reads {
-        let Ok(r) = res else { continue };
+        let Ok(d) = res else { continue };
+        let Some(r) = d.regs() else { continue };
         let Ok(pts) = points::expand(b) else {
             continue;
         };
@@ -310,15 +351,15 @@ mod tests {
     }
 
     /// 相量块条目（读成功）
-    fn fblock(name: &str, a: f32, b: f32, c: f32) -> (RegBlockConf, Result<Vec<u16>, String>) {
-        (blk(name), Ok(phase_regs(a, b, c)))
+    fn fblock(name: &str, a: f32, b: f32, c: f32) -> (RegBlockConf, Result<BlockData, String>) {
+        (blk(name), Ok(BlockData::Regs(phase_regs(a, b, c))))
     }
 
     /// 标量块条目（读成功，count=2）
-    fn sblock(name: &str, v: f32) -> (RegBlockConf, Result<Vec<u16>, String>) {
+    fn sblock(name: &str, v: f32) -> (RegBlockConf, Result<BlockData, String>) {
         let mut b = blk(name);
         b.count = 2;
-        (b, Ok(f32_regs(v).to_vec()))
+        (b, Ok(BlockData::Regs(f32_regs(v).to_vec())))
     }
 
     /// 测值均选 f32 可精确表示（1.0/0.5/0.25/220.0/5.5…），decode f32→f64 无误差。
@@ -434,7 +475,7 @@ mod tests {
     #[test]
     fn poll_to_result_battery_soc_block_maps_soc() {
         let ok = vec![
-            (named_soc_block(), Ok(f32_regs(65.5).to_vec())),
+            (named_soc_block(), Ok(BlockData::Regs(f32_regs(65.5).to_vec()))),
             sblock("temp", 25.0),
         ];
         let pkg = unwrap_data(poll_to_result(Role::Battery, &ok));
