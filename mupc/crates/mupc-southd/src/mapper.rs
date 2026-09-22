@@ -311,24 +311,51 @@ fn scalar_at(reads: &BlockReads, addr: u16) -> Option<f64> {
     None
 }
 
+/// 探测器 1 的地址号所在的**绝对寄存器地址**（PRD §9.10 Q-9："以**寄存器 11** 读回的
+/// 地址值交叉校验"）。
+const FIRE_DET1_ADDR_REG: u16 = 11;
+
+/// 升序链的**链首** = 探测器 1 的地址号（[`fire_detector_addr_order_violation`]），同时
+/// 也是"配置是否覆盖探测器 1"的判据（[`fire_detector_mismatch`] 的容量式据它决定是否 +1）。
+///
+/// 取 `reads` 中**读成功且覆盖寄存器 11** 的寄存器块的块内偏移 `11 − addr` ——
+/// 与块名、点位名**解耦**（§11.4.6），现场改块划分/改名都不会让判据失配。
+/// **配置未覆盖 11 / 覆盖它的块读失败 / 该块是位块 ⇒ `None` = 链首不可得。**
+///
+/// 两个判据**共用本函数** ⇒ "链首不可得"的降级口径在两者间**结构性一致**（不会各自漂移）。
+fn fire_chain_head(reads: &BlockReads) -> Option<u16> {
+    reads.iter().find_map(|(b, res)| {
+        let off = usize::from(FIRE_DET1_ADDR_REG).checked_sub(usize::from(b.addr))?;
+        if off >= usize::from(b.count) {
+            return None; // 该块不覆盖寄存器 11
+        }
+        res.as_ref().ok()?.regs()?.get(off).copied()
+    })
+}
+
 /// 消防探测器登记数交叉校验（PRD §9.5.4"登记数交叉校验（**强制**）"；设计 §11.4.6）。
 ///
 /// 判据：把**点名 `fire_det_count` 的点**（= 寄存器 10，v1.7 定名；**按点名查找**，
 /// 不得按"块名 `fire_det` + 硬编码寄存器 10" —— 那属设备特判，违反 PRD G-5）读回的值，
-/// 与**配置的探测器块容量**（全部以 `fire_det` 为前缀的块 `count` 之和 ÷ 6）比对；
-/// **不一致 → 返回读回值**（作为事件的诊断量），一致 → `None`。
+/// 与**配置登记的探测器只数**比对；**不一致 → 返回读回值**（作为事件的诊断量），
+/// 一致 → `None`。
+///
+/// **容量式 = 链首存在时 `1 + Σ(fire_det 前缀块 count) / 6`**（架构师订正口径）：
+/// 探测器 1 的 6 个寄存器在 **`fire_sys`** 块内（addr 11–16），**不在** `fire_det*` 区
+/// ⇒ 只数 `fire_det` 前缀块会**漏计探测器 1**：按 §9.4.1 参考配置（n=20：
+/// `fire_det.count = 114` ⇒ 19 组）得 **19**，而寄存器 10 读回 **20** ⇒ 判据**恒真**
+/// ⇒ 永久假告警（首次观测 1 条 + 每次站恢复再 1 条），**PRD §9.5.4 的强制交叉校验随之
+/// 永久失效**（RC-5 失效）。
+///
+/// **降级口径（与地址序校验一致）**：`fire_sys`（或任何读成功的寄存器块）**未覆盖寄存器
+/// 11** ⇒ 链首不可得 ⇒ **不加 1**，只按 `Σ/6` 计 —— 与
+/// [`fire_detector_addr_order_violation`] 的"链首不可得 ⇒ 退化为只校 `fire_det*` 区"
+/// 同源（两者共用 [`fire_chain_head`]）。此时"设备报了 20 只、配置只采到 19 只"**正是本
+/// 校验要抓的盲区** ⇒ 判不一致是**期望行为**，不是误报。
 ///
 /// 探测器增减须人工复核配置，防"新增探测器未被采集"的静默盲区 —— 这是 PRD 标"强制"的
 /// 原因。非 `fire` 站 / 无 `fire_det_count` 点（含承载它的块读失败）/ 块展开失败 → `None`
 ///（**无判据可依时不臆断**，与地址序校验同策）。
-///
-/// > **⚠️ 已知口径冲突（T6 就地登记，待需求侧/架构师裁定）**：本式照录 PRD §9.5.4 与
-/// > 设计 §11.4.6 的原文（"全部 `fire_det` 前缀块的 `count` 之和 ÷ 6"），但它**漏计
-/// > 探测器 1** —— 探测器 1 的 6 个寄存器在 `fire_sys` 块内（addr 11–16，PRD §9.5.4 的
-/// > 块划分表 + v1.7 链首订正 §11.4.6 均已确认）。⇒ 按 §9.4.1 的参考配置（n=20：
-/// > `fire_det` count = 114）本式得 **19**，而寄存器 10 读回 **20**，**每轮都会判不一致**
-/// > 并产出事件（正是 §11.4.7.2 要消除的形态）。**正确式应为 `1 + Σ fire_det.count / 6`**
-/// > （即"含探测器 1"）。本 Task **不擅自改**：按 PRD/设计原文实现并上报，待裁定后一行修正。
 pub fn fire_detector_mismatch(role: Role, reads: &BlockReads) -> Option<f64> {
     if role != Role::Fire {
         return None;
@@ -347,12 +374,14 @@ pub fn fire_detector_mismatch(role: Role, reads: &BlockReads) -> Option<f64> {
             (regs.len() >= start + decode.width()).then(|| decode.decode(&regs[start..]))
         })
     })?;
-    let capacity: u32 = reads
+    let groups: u32 = reads
         .iter()
         .filter(|(b, _)| b.name.starts_with("fire_det"))
         .map(|(b, _)| u32::from(b.count))
         .sum::<u32>()
         / 6;
+    // 链首存在（配置覆盖寄存器 11）⇒ 容量含探测器 1；链首不可得 ⇒ 退化为只按 `fire_det*` 区。
+    let capacity = groups + u32::from(fire_chain_head(reads).is_some());
     (read_back != f64::from(capacity)).then_some(read_back)
 }
 
@@ -529,20 +558,17 @@ pub fn telemetry_points(role: Role, reads: &BlockReads) -> Vec<TelemetrySample> 
 /// 该值**只参与升序比较**，不另判其合法域（PRD 未给判据，不猜）。
 /// 寄存器 11 未被任何**读成功的寄存器块**覆盖（非 §9.4.1 参考形态）⇒ 链首不可得，
 /// 退化为"只校 `fire_det*` 区"（= T5 现状），**不臆断违规**（本设计不新增配置期规则要求
-/// 覆盖 11）。寄存器空间按 `BlockData::Regs` 统一处理（不区分 FC03/FC04 —— 与 `fire_det*`
-/// 区的既有处理同口径；§9.4.1 参考形态中该寄存器在保持寄存器块内）。
+/// 覆盖 11）。**该降级由 [`fire_chain_head`] 与 [`fire_detector_mismatch`] 的容量式共用**
+/// ⇒ 两条判据对"链首是否存在"的判断**结构性一致**。寄存器空间按 `BlockData::Regs` 统一
+/// 处理（不区分 FC03/FC04 —— 与 `fire_det*` 区的既有处理同口径；§9.4.1 参考形态中该
+/// 寄存器在保持寄存器块内）。
 pub fn fire_detector_addr_order_violation(role: Role, reads: &BlockReads) -> Option<(usize, u16)> {
     if role != Role::Fire {
         return None;
     }
-    // 链首：探测器 1 的地址号（寄存器 11）。取首个**可读且覆盖**它的寄存器块。
-    let head: Option<u16> = reads.iter().find_map(|(b, res)| {
-        let off = 11usize.checked_sub(usize::from(b.addr))?;
-        if off >= usize::from(b.count) {
-            return None; // 该块不覆盖寄存器 11
-        }
-        res.as_ref().ok()?.regs()?.get(off).copied()
-    });
+    // 链首：探测器 1 的地址号（寄存器 11）。取首个**可读且覆盖**它的寄存器块
+    // （与 `fire_detector_mismatch` 的容量式**共用**，⇒ 降级口径一致）。
+    let head: Option<u16> = fire_chain_head(reads);
     let mut prev: Option<u16> = head;
     let mut group: usize = usize::from(head.is_some()); // 链首占第 1 组（探测器 1）
     for (b, res) in reads {
@@ -1037,8 +1063,9 @@ mod tests {
         b
     }
 
-    /// fire 站一次 poll：覆盖寄存器 4..10 的块（`count_reg10` 写进偏移 6 = 寄存器 10）
-    /// + `fire_det` 探测器区（`det_groups` 组 × 6 寄存器）。
+    /// fire 站一次 poll（**链首不可得的降级形态**）：块只覆盖寄存器 4..10（`count: 7`）——
+    /// **不含**探测器 1 的地址寄存器 11 ⇒ 链首不可得、容量不加 1。`count_reg10` 写进
+    /// 偏移 6 = 寄存器 10；另有 `fire_det` 探测器区（`det_groups` 组 × 6 寄存器）。
     fn fire_count_reads(count_reg10: u16, det_groups: u16) -> BlockReads {
         let mut sys = vec![0u16; 7];
         sys[6] = count_reg10;
@@ -1051,11 +1078,31 @@ mod tests {
         ]
     }
 
+    /// fire 站一次 poll（**§9.4.1 参考配置形态，链首可得**）：`fire_sys` 覆盖寄存器 4..16
+    /// （`count: 13`）—— 含探测器 1 的 6 个寄存器（11–16）⇒ **容量含探测器 1（+1）**。
+    ///
+    /// `det1_addr` 写进块内偏移 7 = 寄存器 11（探测器 1 的地址号，升序链首的载体）。
+    fn fire_count_reads_ref(count_reg10: u16, det_groups: u16, det1_addr: u16) -> BlockReads {
+        let mut sys = vec![0u16; 13];
+        sys[6] = count_reg10; // 偏移 6 = 寄存器 10 = 契约点 `fire_det_count`
+        sys[7] = det1_addr; // 偏移 7 = 寄存器 11 = 探测器 1 的地址号
+        vec![
+            (fire_count_block(4, 13), Ok(BlockData::Regs(sys))),
+            (
+                rblk("fire_det", 17, 6 * det_groups),
+                Ok(BlockData::Regs(vec![0u16; 6 * det_groups as usize])),
+            ),
+        ]
+    }
+
     /// **消防登记数交叉校验**（PRD §9.5.4"强制" / §11.4.6）：一致 → `None`；不一致 →
-    /// `Some(读回登记数)`。查找键 = **点名**（块名无关），容量 = `fire_det` 前缀块 count 之和 ÷ 6。
+    /// `Some(读回登记数)`。查找键 = **点名**（块名无关）。
+    ///
+    /// 本用例的 fixture **不覆盖寄存器 11** ⇒ 走**降级口径**：容量 = `fire_det` 前缀块
+    /// count 之和 ÷ 6（**不加 1**），与地址序校验的降级同口径。
     #[test]
     fn fire_detector_count_mismatch_by_point_name() {
-        // 一致：读回 3 == 容量 18/6 = 3
+        // 一致：读回 3 == 容量 18/6 = 3（链首不可得 ⇒ 不加 1）
         assert_eq!(
             fire_detector_mismatch(Role::Fire, &fire_count_reads(3, 3)),
             None
@@ -1078,18 +1125,36 @@ mod tests {
         assert_eq!(fire_detector_mismatch(Role::Fire, &failed), None);
     }
 
-    /// **⚠️ 口径冲突的就地登记（T6）**：按 PRD §9.5.4 / §11.4.6 的**原文算式**（只数
-    /// `fire_det` 前缀块），PRD §9.4.1 的参考配置形态（n=20：`fire_det.count = 114`）得到
-    /// 容量 **19**，而寄存器 10 读回 **20** ⇒ **每轮都判不一致**（探测器 1 在 `fire_sys`
-    /// 的 11–16，被该式漏计 —— 与 v1.7 链首订正 §11.4.6 同源）。本用例把该冲突钉成
-    /// **可执行事实**，防"悄悄改一行"：修正须由需求/架构裁定（正确式应为 `1 + Σ/6`）。
+    /// **容量式含探测器 1（链首存在 ⇒ +1）** —— "漏 +1" 的回归锚。
+    ///
+    /// §9.4.1 参考配置形态（n=20：`fire_det.count = 114` ⇒ 19 组；探测器 1 在 `fire_sys`
+    /// 的 11–16）⇒ 容量 = `1 + 114/6` = **20**，与寄存器 10 读回 **20** **一致** ⇒ 判据不
+    /// 成立、不产事件（PRD §9.5.4 的强制交叉校验由此**恢复有效**）。
+    ///
+    /// **若把 `+1` 去掉**：容量 = 19 ≠ 读回 20 ⇒ 恒判不一致 ⇒ 永久假告警 ⇒ **本用例必红**
+    /// （首次观测 1 条 + 每次站恢复再 1 条，且 RC-5 交叉校验永久失效）。
     #[test]
-    fn fire_detector_count_reference_config_form_is_inconsistent() {
-        // n=20：fire_det.count = 114（19 只）+ 探测器 1（在 fire_sys 内）⇒ 实际登记 20 只
+    fn fire_detector_count_reference_config_includes_detector_one() {
+        // 参考配置形态：读回 20 == 容量 20（1 + 114/6）⇒ 一致、不产事件
+        assert_eq!(
+            fire_detector_mismatch(Role::Fire, &fire_count_reads_ref(20, 19, 1)),
+            None,
+            "链首存在 ⇒ 容量含探测器 1（1 + 114/6 = 20），与读回 20 一致"
+        );
+        // 反向：设备报 19 只 ⇒ 19 != 20 ⇒ 不一致（+1 生效的另一面：确能抓到少报）
+        assert_eq!(
+            fire_detector_mismatch(Role::Fire, &fire_count_reads_ref(19, 19, 1)),
+            Some(19.0),
+            "读回 19 != 容量 20 ⇒ 判不一致"
+        );
+        // **降级对照**：同样的探测器区容量，但块**不覆盖寄存器 11**（`fire_sys` count 7）
+        // ⇒ 链首不可得 ⇒ 不加 1 ⇒ 容量 19 ≠ 读回 20 ⇒ 判不一致。
+        // 语义上这是**期望行为**（"设备报 20 只、配置只采到 19 只"正是本校验要抓的盲区），
+        // 而非误报 —— 与地址序校验"链首不可得 ⇒ 只校 fire_det* 区"同口径。
         assert_eq!(
             fire_detector_mismatch(Role::Fire, &fire_count_reads(20, 19)),
             Some(20.0),
-            "照录原文算式 ⇒ 参考配置形态恒判不一致（设计/PRD 口径冲突，待裁定）"
+            "未覆盖寄存器 11 ⇒ 退化为 Σ/6 = 19（不加 1）"
         );
     }
 

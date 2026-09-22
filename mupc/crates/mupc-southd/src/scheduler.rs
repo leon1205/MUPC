@@ -1791,13 +1791,17 @@ mod tests {
     ///
     /// **`sys[6]` 的取值（S3b-2 T6 的 fixture 订正，断言不变）**：偏移 6 = 寄存器 10 =
     /// 契约点 `fire_det_count`（登记数）。T6 起 ③「登记数交叉校验」按 §11.4.7.2 的状态翻转
-    /// 口径产事件 ⇒ 若 fixture 不填该寄存器（缺省 0），每轮都会命中 `0 != det.len()/6` 的
-    /// 不一致并插进既有用例的 `events_since` 期望序列。故此处按 `det.len()/6`（= 本 fixture
-    /// 形态下的容量）填平，使「登记数」与「探测器块容量」一致 —— 该文件其余断言**一字不改**。
+    /// 口径产事件 ⇒ 若 fixture 不填该寄存器（缺省 0），每轮都会命中不一致并插进既有用例的
+    /// `events_since` 期望序列。故此处按**容量**填平，使「登记数」与「探测器容量」一致。
+    ///
+    /// **容量式（本轮订正）**：本 fixture 的 `fire_sys`（addr 4，`count: 13`）**覆盖寄存器
+    /// 11** ⇒ **链首存在 ⇒ 容量 = `1 + det.len()/6`**（`1` = 探测器 1，它的 6 个寄存器在
+    /// `fire_sys` 的 11–16 里，不在 `fire_det` 区）—— 漏掉这一项即"判据恒真、永久假告警"。
+    /// 该文件其余断言**一字不改**。
     fn put_fire(bus: &MockBus, slave: u8, sys4: u16, det: &[u16]) {
         let mut sys = vec![0u16; 13];
         sys[0] = sys4; // 偏移 0 = addr 4 = 系统状态
-        sys[6] = (det.len() / 6) as u16; // 偏移 6 = addr 10 = 登记数（与容量一致）
+        sys[6] = (det.len() / 6 + 1) as u16; // 偏移 6 = addr 10 = 登记数（= 容量，含探测器 1）
         bus.put(slave, 4, sys);
         bus.put(slave, 17, det.to_vec());
     }
@@ -1807,7 +1811,7 @@ mod tests {
     fn put_fire_det1(bus: &MockBus, slave: u8, sys4: u16, det1: u16, det: &[u16]) {
         let mut sys = vec![0u16; 13];
         sys[0] = sys4;
-        sys[6] = (det.len() / 6) as u16; // 登记数（见 `put_fire` 的 fixture 订正说明）
+        sys[6] = (det.len() / 6 + 1) as u16; // 登记数 = 容量（见 `put_fire` 的 fixture 订正说明）
         sys[7] = det1;
         bus.put(slave, 4, sys);
         bus.put(slave, 17, det.to_vec());
@@ -1866,7 +1870,7 @@ mod tests {
         let with_level = |lv: u16| {
             let mut sys = vec![0u16; 13];
             sys[5] = lv;
-            sys[6] = 1; // 登记数 = 容量（探测器 1 组 ⇒ 1；见 `put_fire` 的 fixture 订正说明）
+            sys[6] = 2; // 登记数 = 容量（1 + 6/6 = 2：含探测器 1；见 `put_fire` 的订正说明）
             bus.put(1, 4, sys);
             bus.put(1, 17, det.to_vec());
         };
@@ -1913,7 +1917,7 @@ mod tests {
         let with_smoke = |v: u16| {
             let mut sys = vec![0u16; 13];
             sys[2] = v; // 偏移 2 = addr 6 = 烟感状态
-            sys[6] = 1; // 登记数 = 容量（见 `put_fire` 的 fixture 订正说明）
+            sys[6] = 2; // 登记数 = 容量（1 + 6/6 = 2：含探测器 1；见 `put_fire` 的订正说明）
             bus.put(1, 4, sys);
             bus.put(1, 17, det.to_vec());
         };
@@ -1952,7 +1956,7 @@ mod tests {
         let with_pressure = |p: u16| {
             let mut sys = vec![0u16; 13];
             sys[1] = p; // 偏移 1 = addr 5 = 钢瓶气压
-            sys[6] = 1; // 登记数 = 容量（见 `put_fire` 的 fixture 订正说明）
+            sys[6] = 2; // 登记数 = 容量（1 + 6/6 = 2：含探测器 1；见 `put_fire` 的订正说明）
             bus.put(1, 4, sys);
             bus.put(1, 17, det.to_vec());
         };
@@ -1986,7 +1990,7 @@ mod tests {
         sched.tick_once(0).await;
         // 探测器 1 状态（addr 12 = `fire_sys_9`）bit12 → 报警总状态
         let mut sys = vec![0u16; 13];
-        sys[6] = 1; // 登记数 = 容量（见 `put_fire` 的 fixture 订正说明）
+        sys[6] = 2; // 登记数 = 容量（1 + 6/6 = 2：含探测器 1；见 `put_fire` 的订正说明）
         sys[8] = 1 << 12;
         bus.put(1, 4, sys);
         // 探测器 2 状态（addr 18 = `fire_det_2`）bit14 → 故障总状态 + bit0–4 细分位
@@ -2150,10 +2154,9 @@ mod tests {
     /// §11.4.7 事件 ③ + §11.4.7.2 C 的 v1.7 口径，与 ⑤ 地址序**同口径**）：
     /// 进入 1 条（`value` = **读回登记数**）、稳态 0 条、恢复 1 条（`@recovered`, 0.0）。
     ///
-    /// **判据的容量口径**：全部以 `fire_det` 为前缀的块 `count` 之和 ÷ 6（PRD §9.5.4 /
-    /// 设计 §11.4.6 原文）。⚠️ 该式**漏计探测器 1**（它在 `fire_sys` 块内 11–16）——
-    /// 与 v1.7 链首订正（§11.4.6）冲突，**已按原文实现并上报**（见 `mapper::fire_detector_mismatch`
-    /// 的"已知口径冲突"注与 T6 汇报），待裁定后一行修正。
+    /// **判据的容量口径（本轮订正）**：本 fixture 的 `fire_sys`（addr 4，`count: 13`）覆盖
+    /// 寄存器 11 ⇒ **链首存在 ⇒ 容量 = `1 + Σ(fire_det.count)/6`**（`1` = 探测器 1）。
+    /// 漏掉 `+1` ⇒ 容量 3 ≠ 读回 4 ⇒ **判据恒真、永久假告警**（本用例的 `put(4)` 首轮即红）。
     #[tokio::test]
     async fn fire_detector_count_mismatch_follows_state_flip() {
         let bus = Arc::new(MockBus::new());
@@ -2168,8 +2171,8 @@ mod tests {
             bus.put(1, 17, det.to_vec());
         };
 
-        // 首轮：登记数 3 == 容量（fire_det.count 18 ÷ 6 = 3）⇒ 一致，无事件
-        put(3);
+        // 首轮：登记数 4 == 容量（1 + fire_det.count 18 ÷ 6 = 4）⇒ 一致，无事件
+        put(4);
         sched.tick_once(0).await;
         assert!(
             sink.events_of("fire").is_empty(),
@@ -2206,7 +2209,7 @@ mod tests {
         );
 
         // 改回一致 → 恰 1 条 `@recovered`（value 恒 0.0）
-        put(3);
+        put(4);
         sched.tick_once(6000).await;
         assert_eq!(
             sink.events_since("fire", 1),
@@ -2222,7 +2225,8 @@ mod tests {
         let bus = Arc::new(MockBus::new());
         let sink = Arc::new(FakeSink::default());
         let sched = build(vec![fire_conf("ttyS6", 1, 1)], bus.clone(), sink.clone());
-        // 容量 = `fire_det`.count 6 ÷ 6 = 1；寄存器 10 读回 **4** ⇒ 首轮即不一致
+        // 容量 = 1（探测器 1，`fire_sys` 覆盖寄存器 11）+ `fire_det`.count 6 ÷ 6 = **2**；
+        // 寄存器 10 读回 **4** ⇒ 首轮即不一致
         let mut sys = vec![0u16; 13];
         sys[6] = 4;
         bus.put(1, 4, sys);
@@ -2264,7 +2268,7 @@ mod tests {
         // 出现非 0（123 kPa）⇒ 置位
         let mut sys = vec![0u16; 13];
         sys[1] = 123; // 偏移 1 = addr 5 = 钢瓶气压
-        sys[6] = 1; // 登记数 = 容量（见 `put_fire` 的 fixture 订正说明）
+        sys[6] = 2; // 登记数 = 容量（1 + 6/6 = 2：含探测器 1；见 `put_fire` 的订正说明）
         bus.put(1, 4, sys);
         bus.put(1, 17, det.to_vec());
         sched.tick_once(3000).await;
