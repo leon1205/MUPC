@@ -1,5 +1,7 @@
 # PCS 对接：ModbusRtuTransport 重构为 PCS 真实协议 Implementation Plan
 
+> ✅ **已实施完成（2026-09-22 核验）**｜**设计已并入**：核间 10 §11.9「PCS 真实协议 V1.3」｜**实现证据**：`mupc/crates/intercore/src/transport/modbus.rs` + `src/bin/pcs_slave.rs`｜**本文件已归档至 `plans/archive/`**。<br>⚠️ 复选框于 2026-09-22 按**整体完成状态**补齐，未逐项复核（原为全未勾选）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 `intercore` 的 `ModbusRtuTransport`（transport=modbus_rtu）从早期假设点表重构为**两级式 PCS 真实协议 V1.3** 驱动：分相下行（模式2 + 单相 P/Q FC06 逐写，clamp ±25）、恒功率下行（模式0 + 1001/1002）、SOC 读 3 区 1010、心跳/在线读 3 区 1013、int16 缩放 + 高 8/低 8 字节互换。上层接口不变。
@@ -24,19 +26,19 @@ cargo check --workspace
 - Create: `mupc/crates/intercore/src/pcs.rs`
 - Modify: `mupc/crates/intercore/src/lib.rs`
 
-- [ ] **Step 1: 写失败测试**（先建模块含测试，编译红）
+- [x] **Step 1: 写失败测试**（先建模块含测试，编译红）
 
 `mupc/crates/intercore/src/pcs.rs` 内容（模块 + 测试）先落地，随后跑测试。测试覆盖：
 - int16 缩放 roundtrip（含负值、±25 clamp）
 - 字节 swap（`0x1234` ↔ `0x3412`）
 - 点表常量值
 
-- [ ] **Step 2: 运行测试验证**
+- [x] **Step 2: 运行测试验证**
 
 Run: `cargo test -p mupc-intercore --lib pcs`
 Expected: FAIL（`pcs` 模块未在 lib.rs 声明）
 
-- [ ] **Step 3: 实现 pcs.rs**
+- [x] **Step 3: 实现 pcs.rs**
 
 ```rust
 //! 两级式 PCS 设备 Modbus 点表与编解码（协议 V1.3，v2.2）
@@ -114,18 +116,18 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: lib.rs 注册**
+- [x] **Step 4: lib.rs 注册**
 
 ```rust
 pub mod pcs;
 ```
 
-- [ ] **Step 5: 运行测试验证通过**
+- [x] **Step 5: 运行测试验证通过**
 
 Run: `cargo test -p mupc-intercore --lib pcs`
 Expected: 4 PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/intercore/src/pcs.rs crates/intercore/src/lib.rs
@@ -139,11 +141,11 @@ git commit -m "feat: PCS 点表与 int16+字节互换编解码（pcs.rs，v2.2 �
 **Files:**
 - Modify: `mupc/crates/intercore/src/transport/modbus.rs`
 
-- [ ] **Step 1: Read 现状，理解假设表逻辑移除点**
+- [x] **Step 1: Read 现状，理解假设表逻辑移除点**
 
 先 Read `mupc/crates/intercore/src/transport/modbus.rs` 与 `mupc/crates/intercore/src/modbus_rtu.rs`（假设表将不被新实现引用）。确认要替换的方法：`send_tai_command`/`send_dual_param`（现走假设 cmd_ctrl/issue/exec）、`latest_soc`（现 None）、心跳读（现 `REG_HEARTBEAT`=0x0100 假设）。`modbus_rtu.rs` 假设编解码在重构后不再被 transport 引用。
 
-- [ ] **Step 2: 加 PCS 读写原语**
+- [x] **Step 2: 加 PCS 读写原语**
 
 `transport/modbus.rs` 顶部 `use crate::pcs::*;`。新增 FC06 单写与 FC04 读（tokio-modbus `Reader::read_input_registers` / `Writer::write_single_register`）：
 - 现 `write_regs`（FC16 多写）替换/新增 `write_reg(addr, value)`（FC06 `ctx.write_single_register(addr, value)`）
@@ -169,7 +171,7 @@ async fn read_input(&self, addr: u16, len: u16) -> Result<Vec<u16>, MupcError> {
 
 （若 tokio-modbus 0.13.1 的 `read_input_registers`/`write_single_register` 在 prelude/Reader/Writer trait 上，以实际签名适配——先 Read tokio-modbus 源码确认。）
 
-- [ ] **Step 3: 模式与启停管理**
+- [x] **Step 3: 模式与启停管理**
 
 加字段 `mode: std::sync::atomic::AtomicU8`（0 未设），`started: RwLock<bool>`：
 
@@ -194,7 +196,7 @@ async fn ensure_started(&self) -> Result<(), MupcError> {
 
 > 注：模式字 500/1000 是否也受"高 8/低 8 互换"影响——协议标注全设备寄存器互换，故统一 `to_pcs_reg`/`from_pcs_reg`；若实机不符（如控制字不互换）调为直写并记录（PCS 契约待确认项）。
 
-- [ ] **Step 4: 重写 send_tai_command / send_dual_param**
+- [x] **Step 4: 重写 send_tai_command / send_dual_param**
 
 ```rust
 async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], _mode: &str) -> Result<(), MupcError> {
@@ -222,7 +224,7 @@ async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError>
 }
 ```
 
-- [ ] **Step 5: latest_soc 读 3 区 1010**
+- [x] **Step 5: latest_soc 读 3 区 1010**
 
 ```rust
 async fn latest_soc(&self) -> Option<(f64, Instant)> {
@@ -243,20 +245,20 @@ async fn latest_soc(&self) -> Option<(f64, Instant)> {
 
 （若 `self.soc` 字段已存在（N3 通用）则复用；无则新增 `soc: RwLock<Option<(f64, Instant)>>`。）
 
-- [ ] **Step 6: 心跳/在线改读 3 区 1013**
+- [x] **Step 6: 心跳/在线改读 3 区 1013**
 
 现 `probe_heartbeat`/`run_heartbeat_loop`（假设表读 0x0100）改为读 `REG_RUN_STATE`（FC04）——成功即在线（run_state ∈ 0..=3），连续失败判离线。若现实现按 0x0100 心跳计数则替换为"读 1013 成功判在线"。删除假设表 heartbeat_counter 引用。
 
-- [ ] **Step 7: 移除假设表逻辑**
+- [x] **Step 7: 移除假设表逻辑**
 
 删除 `issue()`/exec 确认轮询、`cmd_ctrl`/`protocol_version`/假设 `REG_*` 写路径（原 `use crate::modbus_rtu::*` 若不再用则移除）。`probe_heartbeat`/`run_heartbeat_loop` 保留（改读 1013）。删除后 `cargo check` 清未用 import/死代码。
 
-- [ ] **Step 8: 编译 + 测试**
+- [x] **Step 8: 编译 + 测试**
 
 Run: `cargo check -p mupc-intercore` → 修编译错；`cargo test -p mupc-intercore --lib`
 Expected: 全绿（保留 protocol/tcp 测试 + pcs 4 测试）
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/intercore/src/transport/modbus.rs
@@ -272,7 +274,7 @@ git commit -m "refactor: ModbusRtuTransport 重构为 PCS 真实协议驱动（F
 - Modify: `mupc/crates/intercore/src/bin/modbus_slave.rs`
 - Modify: `mupc/crates/intercore/src/lib.rs`（若导出变化）
 
-- [ ] **Step 1: 标注假设模块**
+- [x] **Step 1: 标注假设模块**
 
 若 `modbus_rtu.rs`（假设 int32/cmd_ctrl 编解码）与 `bin/modbus_slave.rs`（假设表 slave）在新 transport 重构后不再被生产路径引用，则在其文件头加注：
 ```
@@ -281,11 +283,11 @@ git commit -m "refactor: ModbusRtuTransport 重构为 PCS 真实协议驱动（F
 ```
 若 `lib.rs` 仍导出其类型但无生产引用，确认无 dead-code 门禁冲突（保留导出但注释说明即可）。
 
-- [ ] **Step 2: 编译 + 测试确认无回归**
+- [x] **Step 2: 编译 + 测试确认无回归**
 
 Run: `cargo check --workspace`（确认重构后无 crate 引用假设表被破坏）；`cargo test -p mupc-intercore --lib`（全绿）
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/intercore/src/modbus_rtu.rs crates/intercore/src/bin/modbus_slave.rs crates/intercore/src/lib.rs
@@ -300,19 +302,19 @@ git commit -m "docs: PCS 重构后标注假设点表为旧路径/仿真专用"
 - Modify: `mupc/deploy/config/mupc_core_config.yaml`（intercore 段注释已是 19200，核验）
 - Modify: `E:/MUPC2/docs/superpowers/plans/modules/10-MUPC-核间通信-设计文档.md`（§11.9 验证状态补记）
 
-- [ ] **Step 1: 核验配置示例**
+- [x] **Step 1: 核验配置示例**
 
 Read `mupc/deploy/config/mupc_core_config.yaml` intercore/modbus_rtu 段——`baud_rate` 应为 19200（v2.2 已改，核验保留）；注释标注生产 PCS 主链路 / tcp 仿真。
 
-- [ ] **Step 2: 文档验证状态**
+- [x] **Step 2: 文档验证状态**
 
 10 设计文档 §11.9 后补「验证状态（2026-09-04）」：pcs.rs 编解码单测 + ModbusRtuTransport 重构编译/单测通过；端到端 PCS 实机 RS485 联调待具备 PCS 硬件（填点表/核相后）。标注 PCS 契约待确认清单仍未厂方答复。
 
-- [ ] **Step 3: workspace 回归**
+- [x] **Step 3: workspace 回归**
 
 Run: `cargo check --workspace`（0 error）；`cargo test -p mupc-intercore --lib`（全绿）
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add deploy/config/mupc_core_config.yaml docs/superpowers/plans/modules/10-MUPC-核间通信-设计文档.md
