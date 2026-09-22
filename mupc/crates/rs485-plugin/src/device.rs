@@ -1145,6 +1145,140 @@ mod fc02_tests {
         assert_eq!(bits, unpack_bits(&[0x3B, 0xBB], 16));
     }
 
+    // ── G1 闭合（S3b-2 测试报告 §4.1）：帧级字节→位端到端断言 ───────────
+    //
+    // 上述 parse_bits_response 用例中，288 位一例以 unpack_bits 自身为期望值
+    // （同义反复，位序改坏时两侧同变 ⇒ 无判别力）。本段全部使用**独立逐位锚**
+    // （手写期望向量 / 独立位提取公式），并把 PRD §9.7.4 位序口径钉在帧层：
+    // 即使 southd L2 经 MockBus 注入已解包位向量而绕过帧层（P3 实证），
+    // 位序回归也必然在此变红。
+
+    /// 手工构造完整 FC02 响应帧：[slave, 0x02, byte_count, data…, CRC16(lo,hi)]。
+    /// CRC 用产线同一实现计算（parse_bits_response 本身不校验 CRC，但帧必须真实）。
+    fn build_fc02_response(slave: u8, data: &[u8]) -> Vec<u8> {
+        let mut frame = vec![slave, 0x02, data.len() as u8];
+        frame.extend_from_slice(data);
+        let crc = Frame::calculate_crc(slave, 0x02, &frame[2..], CrcMode::Crc16Modbus);
+        frame.push(crc as u8);
+        frame.push((crc >> 8) as u8);
+        frame
+    }
+
+    #[test]
+    fn fc02_frame_8_bits_prd_anchor() {
+        // PRD §9.7.4 原文示例字节 0x3B 由**完整响应帧**驱动（1 字节最小正向帧）：
+        // 0x3B = 0b0011_1011，bit0=LSB ⇒ 1,1,0,1,1,1,0,0
+        let resp = build_fc02_response(0x01, &[0x3B]);
+        let bits = parse_bits_response(&resp, 8).unwrap();
+        assert_eq!(
+            bits,
+            vec![true, true, false, true, true, true, false, false],
+            "帧级 8 位解包必须逐位等于 PRD 示例（bit0 = LSB）"
+        );
+    }
+
+    #[test]
+    fn fc02_frame_bit_order_is_lsb_first() {
+        // 位序回归钉（G1/P3）：两帧**不对称**单字节，钉死 bit0/bit7 的归属。
+        // 若 unpack_bits 被改成 MSB-first，本用例两帧全部翻转 ⇒ 必红，且红在帧层。
+        let resp_a = build_fc02_response(0x01, &[0b0000_0001]);
+        let bits_a = parse_bits_response(&resp_a, 8).unwrap();
+        assert!(bits_a[0], "0x01 的 LSB ⇒ 位 0 必须为 true");
+        assert!(
+            bits_a[1..].iter().all(|b| !*b),
+            "0x01 只有 bit0 置位，位 1..7 必须全 false"
+        );
+
+        let resp_b = build_fc02_response(0x01, &[0b1000_0000]);
+        let bits_b = parse_bits_response(&resp_b, 8).unwrap();
+        assert!(bits_b[7], "0x80 的 MSB ⇒ 位 7 必须为 true");
+        assert!(
+            bits_b[..7].iter().all(|b| !*b),
+            "0x80 只有 bit7 置位，位 0..6 必须全 false"
+        );
+    }
+
+    #[test]
+    fn fc02_frame_31_bits_tail_irrelevant_bit_no_pollution() {
+        // 空调 hvac_di 规格：count=31 ⇒ 4 数据字节，末字节仅 bit7 为无关位。
+        // 无关位置 0（0x5A）/ 置 1（0xDA）两帧结果必须**逐位相同**，
+        // 且等于独立手写期望向量（不经 unpack_bits 比对）。
+        let expected: Vec<bool> = [
+            // 0x3B = 0b0011_1011（bit0=LSB）
+            true, true, false, true, true, true, false, false, // 0xBB = 0b1011_1011
+            true, true, false, true, true, true, false, true, // 0xA5 = 0b1010_0101
+            true, false, true, false, false, true, false, true,
+            // 0x5A/0xDA 低 7 位 = 0b101_1010（bit7 无关）
+            false, true, false, true, true, false, true,
+        ]
+        .to_vec();
+        assert_eq!(expected.len(), 31);
+
+        let tail_clear =
+            parse_bits_response(&build_fc02_response(0x01, &[0x3B, 0xBB, 0xA5, 0x5A]), 31).unwrap();
+        let tail_set =
+            parse_bits_response(&build_fc02_response(0x01, &[0x3B, 0xBB, 0xA5, 0xDA]), 31).unwrap();
+        assert_eq!(tail_clear, expected, "无关位=0 帧必须逐位等于独立锚");
+        assert_eq!(tail_set, tail_clear, "末字节 bit7 置 1 不得改变前 31 位");
+        assert_eq!(tail_set.len(), 31, "长度恒 = count，无关位不入列");
+    }
+
+    #[test]
+    fn fc02_frame_288_bits_independent_anchor() {
+        // BMS bms_alarm 规格：count=288 ⇒ 36 数据字节。期望值用**独立位提取公式**
+        // （非 unpack_bits 调用）逐位比对，并硬编码跨字节边界与首末位抽样。
+        let data: Vec<u8> = (0..36u32).map(|i| (i * 37 + 11) as u8).collect();
+        let resp = build_fc02_response(0x01, &data);
+        let bits = parse_bits_response(&resp, 288).unwrap();
+        assert_eq!(bits.len(), 288);
+        for k in 0..288usize {
+            let expected = (data[k / 8] >> (k % 8)) & 1 == 1;
+            assert_eq!(
+                bits[k],
+                expected,
+                "帧级位 {k}（字节 {} 的 bit {}）不符",
+                k / 8,
+                k % 8
+            );
+        }
+        // 硬编码抽样：首末位 + 字节 31/32 交界（防"公式与实现同错"的极端情形）
+        assert!(bits[0], "data[0]=11=0b0000_1011 ⇒ 位 0 = true");
+        assert!(
+            !bits[287],
+            "data[35]=26=0b0001_1010 ⇒ 位 287（bit7）= false"
+        );
+        assert!(bits[255], "data[31]=134=0b1000_0110 ⇒ 位 255（bit7）= true");
+        assert!(
+            bits[256],
+            "data[32]=171=0b1010_1011 ⇒ 位 256（次字节 bit0）= true"
+        );
+    }
+
+    #[test]
+    fn fc02_frame_byte_count_one_below_needed_err() {
+        // 精确边界：count=9 需 ceil(9/8)=2 字节，帧只给 1 字节 ⇒ Err（不得补 0 放行）
+        let resp = build_fc02_response(0x01, &[0xFF]);
+        let err = parse_bits_response(&resp, 9).unwrap_err();
+        assert!(matches!(err, Rs485Error::ConfigFailed(_)), "实际: {err:?}");
+    }
+
+    #[test]
+    fn fc02_frame_truncated_crc_err() {
+        // byte_count=1、数据字节在位，但 CRC 只剩 1 字节（len=5 < 3+1+2）⇒ Err
+        let resp = vec![0x01, 0x02, 0x01, 0x3B, 0x00];
+        assert!(parse_bits_response(&resp, 8).is_err(), "CRC 截断必须拒");
+    }
+
+    #[test]
+    fn fc02_frame_byte_count_exceeds_buffer_err() {
+        // byte_count 声称 10 字节，缓冲实际只有 3 数据字节 + 2 CRC（len=8 < 3+10+2）⇒ Err
+        let resp = vec![0x01, 0x02, 0x0A, 0x3B, 0xBB, 0x00, 0x00, 0x00];
+        assert!(
+            parse_bits_response(&resp, 16).is_err(),
+            "byte_count 超出缓冲必须拒（防越界读）"
+        );
+    }
+
     // ── read_discrete_inputs_from：请求帧与委托路径 ─────────────────────
 
     #[test]
