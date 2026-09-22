@@ -1767,7 +1767,7 @@ south_stations:
         - { name: u, addr: 0x1012, format: float32, count: 6 }
         - { name: i, addr: 0x1018, format: float32, count: 6 }
     - { id: meter_batt, role: meter_batt, port: /dev/ttyS1, slave: 2, interval_ms: 1000 }
-    - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
     - { id: hvac_1, role: hvac, port: /dev/ttyS3, slave: 3, interval_ms: 2000 }
     - { id: fire_1, role: fire, port: /dev/ttyS4, slave: 1, interval_ms: 2000 }
 "#;
@@ -1799,7 +1799,7 @@ ai_engine: {}
 plugins: {}
 south_stations:
   stations:
-    - { id: battery_1, role: battery, port: "ttyS0", slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: "ttyS0", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
@@ -1829,7 +1829,7 @@ ai_engine: {}
 plugins: {}
 south_stations:
   stations:
-    - { id: battery_1, role: battery, port: "/dev/ttyS0", slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: "/dev/ttyS0", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
@@ -1876,7 +1876,7 @@ south_stations:
         - { name: pf, addr: 0x100C, format: float32, count: 6 }
         - { name: u, addr: 0x1012, format: float32, count: 6 }
         - { name: i, addr: 0x1018, format: float32, count: 6 }
-    - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: /dev/ttyS2, slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(
@@ -1951,7 +1951,7 @@ plugins: {}
 south_stations:
   stations:
     - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
-    - { id: battery_1, role: battery, port: "/dev/ttyS3", slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: "/dev/ttyS3", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
@@ -1983,7 +1983,7 @@ plugins: {}
 south_stations:
   stations:
     - { id: hvac_1, role: hvac, port: "ttyS3", slave: 3, interval_ms: 2000 }
-    - { id: battery_1, role: battery, port: "ttyS3", slave: 1, interval_ms: 1000 }
+    - { id: battery_1, role: battery, port: "ttyS3", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(

@@ -1,5 +1,7 @@
 # MUPC 南向通信模块 设计文档
 
+> ✅ **`[DESIGN_APPROVED: 2026-09-21, 设计评审员]`** —— §11「站级南向设备语义点表集成（S3b-2）」（v1.4）经三轮设计评审通过（§10「S3a」沿用既有批准，见 S3a 计划合同）。
+
 > **文档定位：** 本文档记录实现级设计决策。需求级内容（功能描述、验收标准、性能指标）请参考 [02-MUPC-南向通信-PRD](../specs/modules/02-MUPC-南向通信-PRD.md)。
 
 ## 目录
@@ -14,6 +16,7 @@
 8. [配置格式](#8-配置格式)
 9. [技术决策记录](#9-技术决策记录)
 10. [站级多从站统一调度框架](#10-站级多从站统一调度框架)
+11. [站级南向设备语义点表集成（S3b-2）](#11-站级南向设备语义点表集成s3b-2)
 
 ---
 
@@ -1303,6 +1306,1140 @@ BMS 站在线时其 SOC **优先**于 intercore `latest_soc`（核间回读）�
 
 ---
 
+## 11. 站级南向设备语义点表集成（S3b-2）
+
+> **状态**：`[DESIGN_APPROVED: 2026-09-21]` —— 已按二轮设计评审意见修订（v1.4），**三轮设计评审通过**（本章不自行改标记，标记由设计评审员于 2026-09-21 补注）。
+>
+> **`[CODE_REVIEWED: PASS: 2026-09-22]`** —— S3b-2 的 **T1–T7 全部实现**（分支 `feature/s3b2-2-south-point-table`，23 提交 `518a4e2`…`db54c47`）**通过项目级最终代码评审门禁**。评审报告见 `../../reports/S3b-2-代码评审报告-2026-09-22.md`。要点：AC-1…AC-7 逐条有落点；§11.5.1 **十七条 + 规则 18/19 逐条有落点**（逐条核对，非抽样）；四个回归锚（`grid_convergence.rs` / `core_config.rs` / `config.rs` 的 meter_grid-only 与解析类 / `scheduler.rs` 的调度-退避-隔离-SOC gating 断言）经 `git diff master...HEAD` **独立核对未被改**，唯一断言改动集与 §11.5.3.3 的 9 处 metric 更名逐条吻合；五条裁定（全 `uint16` / `(role, space, addr)` 查表键 / 状态翻转制 / `1 + Σ/6` 容量式 / `fire` 启用而 `pcs` 保持注释）**均忠于裁定**，且以探针实测证明关键用例有判别力。**警告 2 项**（均为文档口径类，不阻塞）：**W1** §11.11.2.1 判据 ② 的"新建文件零报出"与同节条目 3 把 T3 新增行按基线处理**口径相左**（T3 新建的 `points.rs` 实测 16 处不符行）——建议限定判据 ② 的适用对象或把 T1–T3 全部不符行统一按判据 ③ 基线处理，并另立格式债任务；**W2** AC-5 括号注"（core-bin 侧单测断言 `last_data_ts` 不被刷新）"无直接落点 —— 等价保证已由 scheduler 侧"`on_grid_package` 未被调用"断言 + `startup.rs:378` 是 `last_data_ts` 唯一写入路径构成，建议补断言或订正该注为"等价落点"。遗留项 Q-1 / RC-11 / Δ-9 / fmt 基线 / **PRD §9.5.4 同款算式少算 1** 均已在 PRD §9.10 或本章 §11.11.3/§11.12.2/§11.4.6 登记且表述准确。
+>
+> **[§11 勘误 v1.5：订正 §11.11.2 规则 15 用例期望值与 §11.5.2 合取判据相左，2026-09-21]**
+> **勘误范围（批准后的勘误订正，不改变已批准的设计语义；`[DESIGN_APPROVED]` 标记不动）**：
+> ① **§11.11.2** —— "规则 15 判据 ③ 单列用例"的期望值由 `Ok` 订正为 **`Err`**（③ **不是独立放行条件**：①②③④ 为**合取**，而 ③ 在适用域内由规则 11 恒成立，故该形态四判据全成立 ⇒ 拒）；§11.5.2(1) 同步补一句**澄清**（不改判据语义），§11.5.2(2) 的形态计数与之一致（`Ok` **7** + `Err` **1** = 8 种）。
+> ② **§11.5.3.5** —— 其中 5 例（`validate_rejects_duplicate_id` / `_multiple_meter_grid` / `_multiple_battery` / `_same_port_mixed_baud{,_3_station}`）原判"fixture 无需改"，经实现期实证为**假绿**（先被规则 4 / 既有 `meter_grid` 整组校验截胡）⇒ **移入 §11.5.3.2 的 A17–A21**（**断言不变**），本类余 5 例结论不变；§11.12.3 R-1 的 ① 处数 **15 → 20**。
+> ③ **未改动**：§11.4 数据结构、§11.5.1 十七条落点、§11.5.2 四判据语义、§11.13 Task 拆分。演进记录见附录 v1.5。
+>
+> **[§11 勘误 v1.6：补登查表键 AddrSpace 维度（§11.4.4）+ 订正 AC-7/T7 的 fmt 门禁口径，2026-09-21]**
+> **勘误范围（批准后的勘误订正，不改变已批准的设计语义；`[DESIGN_APPROVED]` 标记不动）**：
+> ① **§11.4.4 —— 查表键补 `AddrSpace` 维度（设计缺陷补登）**：`point_table` 的查表键由 `(role, addr)` 正式补登为 **`(role, space, addr)`**，`space ∈ {AddrSpace::Reg, AddrSpace::Bit}`（Reg = FC03 保持 / FC04 输入；Bit = FC02 离散输入，两空间**各自从 0 编址**）。**依据**：PRD §9.4.2.1 第 6 条 / §9.4.3「区间与重叠」行规定区间与重叠**按功能码空间分别计算**，§11.5.1 规则 14 的落点亦按空间分别判定 ⇒ 点表侧必须先能区分空间，否则"先混成一个再事后拆"自相矛盾。**实证**：`hvac` 站的 FC04 温湿度寄存器 **0/2/3** 与 FC02 位块 `hvac_di` 的位 **0/2/3 真实同址**，单一 `(role, addr)` 键只能靠**数组顺序**消歧（脆弱），且 `label()` 无法区分 `hvac_in_1`（寄存器 0）与 `hvac_di_1`（位 0）。**兼容性**：`lookup(role, addr)` **保留为 `Reg` 空间包装**（规则 6 只作用于标量点，其地址必属寄存器空间 ⇒ 两条强制 `Err` 判据一字不改），新增 `lookup_in(role, space, addr)` 与 `lookup_bit(role, addr)`。**T4 实现即按此落地**（`mupc-southd/src/point_table.rs`），属"**实现修正正确、向后兼容**"的补登，非语义变更。落点 = §11.4.4 新增段"**地址空间维度**"。
+> ② **§11.11.2 AC-7 / §11.13 T7 —— `cargo fmt` 门禁口径订正**：原文把"`cargo fmt`"列为 DoD，**该口径在本项目不可执行**：① 仓库级 `cargo fmt --all --check` 报 **1204 处 / 106 个文件**（既有基线，非 S3b-2 回归）；② 本项目**明令禁止** `cargo fmt --all`（会以 1204 处无关改动淹没真实 diff）。DoD 订正为**可验证的行级口径**："**本 Task 新增/修改的行** fmt-clean"（`rustfmt --edition 2021 --check <触及文件>` 报出的行号集合 ∩ 本次 diff 的新增行号集合 **= ∅**），**不含**项目既有基线；新建文件另加"零报出"判据。T4 唯一违反者 = `tests/s3b2_config.rs`（`rustfmt` 报 `:374`，链式调用超 `chain_width`）**由 T7 收口**。落点 = §11.11.2 新增 **§11.11.2.1「AC-7 的 fmt 口径」** + §11.13 的 T7 行。
+> ③ **未改动**：§11.4.4 以外的 §11.4 内容、§11.5.1 十七条落点、§11.5.2 四判据语义、§11.5.3 三类清单、§11.13 其它 Task。演进记录见附录 v1.6。
+>
+> **[§11 勘误 v1.7：事件口径裁定（地址序去重 / WordEnum 退出语义）+ fmt 判据措辞 + 探测器 1 链首，2026-09-21]**
+> **勘误范围（批准后的勘误订正，不改变已批准的设计语义；`[DESIGN_APPROVED]` 标记不动）**：
+> ① **新增 §11.4.7.2「状态型事件的口径裁定」—— 补上 PRD 与设计都缺的"事件产出频次"口径**（T5 代码评审把 2 条事件口径问题升级为设计裁定）。**裁定 1**：站级派生判据（⑤ 地址序违规 / ① SOC 越界 / ③ 登记数不一致）一律按**状态翻转**产事件（`false→true` 进入 = 原名；`true→false` 恢复 = **`<原名>@recovered`**、`value = 0.0`；**状态未变的轮次一条都不产**），并**不得套用 offline 的时间窗去抖**（配置/接线类事实不随时间变化，时间窗只把 8.6 万条/日降成 1.7 万条/日）。**首次观测即产**（`§11.4.7.1` "首轮只建基线"的**唯一例外**，至多 1 条/站）；**恢复产"已恢复"事件**；记忆与产出**复用同一个 `EdgeTracker`**（作第 5 类信号 `StationFlag`）。**影响：⑤ 需 T5 补改；① ③ 属 T6（尚未实现 ⇒ 按同一口径实现，无补改成本）**。
+> ② **裁定 2：`WordEnum` 的"退出"事件语义 —— 维持现状（不改代码），补消费方判据**：`0→1→2` 时 `1→2` 同轮产出 `level1 = 0.0`（退出）+ `level2 = 1.0`（进入）；**退出只表示"该整字已离开该枚举值"，不表示"一级报警已解除"**。消费方判定"消防侧已复位"**必须按点名成组、同轮整体判读**：同一 `<点名>` 同轮内「退出 + 进入」= **级别跃迁**（报警仍在）、「只有退出、无进入」= 回到非活跃（值 0 工作正常）。**§11.8** 的 §10.4 联接段同步补一句（**§10.4 本体不改**）。
+> ③ **§11.4.6 / §11.7.2 第 9 条 —— 探测器 1（寄存器 11）纳入地址升序链首**：原设计/实现只链 `fire_det*`（探测器 2..n），**探测器 1 的地址号未参与校验**（`prev` 由 `None` 起）⇒ PRD §9.5.4"第 n 只 = 按地址升序的第 n 只"对 **n = 1 无判据**。按 **PRD §9.10 Q-9 原文**（"以寄存器 11 读回的地址值交叉校验"）订正为**链首 = 寄存器 11**（位于 `fire_sys` 块内偏移 7），事件的组序号随之与"第 n 只"的 n **逐一对齐**。**需 T5 补改**（含既有用例期望值 +1 与新用例）。**非 PRD 差异**（Q-9 原文即此口径），故**不进** §11.12.2。
+> ④ **§11.11.2.1 判据 ① 的抽取措辞订正（评审建议项，已实测核实）**：原文取 `rustfmt` 输出的 **hunk 锚点行号**（`Diff in <file>:N:` 的 `N`）与新增行求交 —— 锚点行**本身可能是 format-clean 的 context 行**（实测 `tests/s3b2_config.rs`：锚点 `:374`，**真正不符合行 = `:377`**），且锚点数与"处"数**并不一一对应**（该文件 **27 个 hunk / 34 条不符合行**）⇒ 订正为取**输出中带 `-` 的行**的行号，并补"逐行推进规则"与"同一行号坐标系"两条说明。§11.13 T7 行同步订正。
+> ⑤ **未改动**：§11.4 其它数据结构（含 `fire_detector_addr_order_violation` 的**签名**）、§11.5.1 十七条落点、§11.5.2 四判据语义、§11.5.3 三类清单、§11.13 其它 Task、**§10 全部内容**。演进记录见附录 v1.7。
+>
+> **[§11 勘误 v1.8：消防登记数容量式订正（1 + Σ/6）+ SocOutcome 补判据 + 归属/登记订正，2026-09-21]**
+> **勘误范围（批准后的勘误订正，不改变已批准的设计语义；`[DESIGN_APPROVED]` 标记不动）**：
+> ① **§11.4.6「消防登记数」容量式订正（设计自相矛盾，T6 代码评审升级）**：旧式「全部 `fire_det` 前缀块 `count` 之和 ÷ 6」与 v1.7 的「**探测器 1（寄存器 11）纳入升序链首**」**自相矛盾** —— **探测器 1 不在 `fire_det` 块里，它在 `fire_sys`（寄存器 11–16）**，故旧式只数得到探测器 2..n、比设备登记数**恒少 1**（§9.4.1 参考配置：`fire_det.count = 114` ⇒ 旧式得 **19**，而寄存器 10 读回 **20**）⇒ **判据恒真**。**后果（按评审纠正后的表述）**：在 v1.7 的**状态翻转制**下**不是"事件风暴"**（翻转制下稳态本为 0 条），而是**永久假告警** —— 首次观测产 1 条 + **每次站恢复再产 1 条** ⇒ **PRD §9.5.4 的"强制交叉校验"永久失效（RC-5 失效）**：真正的探测器增减被一个恒定成立的本底告警淹没。订正为 **`1 + Σ(fire_det 前缀块 count) / 6`**（**链首存在时 +1**），使容量式与地址序校验**覆盖同一个探测器集合**；**链首不可得时的降级口径 = `Σ/6`（不加 1）**，与 §11.4.6 地址序校验的降级条件**同源同判**（同一"是否覆盖寄存器 11"判定）；**按 §9.4.1 参考配置复核：式得 `1 + 114/6` = 20，寄存器 10 读回 20 ⇒ 一致（不产告警）**。**门槛**：**`fire` 站写入生效配置前必须先结清本条**（与 T5 的「裁定前禁止写入 fire 站」同构）—— 落 §11.7.4 迁移清单。
+> ② **§11.4.6 `SocOutcome` 表 —— 补一行判据**：「**读回长度不足以容纳 `soc` 点**」（该块 `Ok(v)` 但 `v.len() <` 该点 `RegDecode::width()`）**明确归属 ②（`BlockFailed` ⇒ `PollResult::Failed`）**，**不计作第五种情形**（`SocOutcome` 三变体不变）；理由：该形态下若静默返回 `None`＋`Data`，即构成 §11.4.6 ② 禁止的"**SOC 静默缺失**"（更糟：`decode_regs` 对长度不足解出 `0.0`，而 `0.0` 在 SOC 域内 ⇒ 会被当成"真实 SOC = 0"推给控制链 —— 现状事实见 §11.1）。T6 已按 ② 同策实现（`SocOutcome::BlockFailed`），本行属**设计补齐**，后人不必推断。
+> ③ **§11.11.2.1 判据 ② 条目 / §11.13 T7 行 —— 归属订正**：`tests/s3b2_decode_e2e.rs` 实为 **T6-5** 新建（`fb925e7`；评审以 `git log --diff-filter=A` 核实），v1.6/v1.7 将其并列于"T4 实测"条目下易被读成 T4 新建 ⇒ **只订正归属，判据 ② 的"0 处报出"结论不变**（该文件复跑发生在 T6-5 落地之后）。
+> ④ **登记（消费方可见变更，供 T7）**：`SouthSink` 的 **`offline` 事件文案新增 `：{reason}` 后缀**（事件类型 `south_station.<站id>.offline`、等级 `warning`、去抖口径**一字不变**；**`online` 文案逐字不变**）—— 这是 PRD §9.7.2 第 1 条的落地，但属**消费方可见变更** ⇒ 落 §11.7.2 第 10 条 + §11.13 T7 行，**提示 T7 时留意**。
+> ⑤ **登记（设计新增项）**：`SouthScheduler::cylinder_pressure_configured(station_index) -> bool` 取数接缝 + `PortRunner` 的每站"曾非 0"记忆（只置位、不回退）⇒ **§11.12.1 项 9**（**展示侧的实际消费属后续任务**）。
+> ⑥ **未改动**：§11.4 其它数据结构（含 `fire_detector_mismatch` / `fire_detector_addr_order_violation` 的**签名**）、§11.5.1 十七条落点、§11.5.2 四判据语义、§11.5.3 三类清单、**§11.4.7.2 两条裁定**、§11.13 其它 Task、**§10 全章**、**PRD**（含 §9.5.4 的同款算式原文 —— 已在 §11.4.6 就地登记"建议需求侧同步订正"，本设计不擅自改 PRD）。演进记录见附录 v1.8。
+>
+> **本版（v1.4）修订范围（回应二轮评审的「3 处须补 + 8 条建议」；小范围收尾，不推翻 v1.3 已获认可内容）**：
+> - **须补 1（事实错误订正）**：§11.5.2(2) 的 `grid_meter` 行原写 `p→p_total→q→pf→u→i`，实为**单测 fixture（`config.rs:324-329`）的形态**；按**生效配置的真值**（`deploy/config/*.yaml` 与 PRD §9.4.1 第 6 站）重写为 `p(0x1000,6)→q(0x1006,6)→pf(0x100C,6)→u(0x1012,6)→i(0x1018,6)→p_total(0x101E,2)`，并**分别标注"生效配置真值 / 单测 fixture 形态"及其差异**；同时逐站复核 §11.5.2(2) 其余 5 站（结论：仅 `grid_meter` 一行有误，其余取值与厂方/PRD 一致）；
+> - **须补 2（顺序冲突钉死）**：C2 的 `validate_rejects_meter_grid_duplicate_block_name` 与**新规则 10（点名唯一）**冲突 ⇒ §11.5.1「顺序」与 §11.5.3.4 C2 明确**实现判定顺序约束**（既有 `meter_grid` 校验整组先于 `validate_station_regs`），保住 C2 断言（**不订正 C2**，理由见该处第 4 点）；
+> - **须补 3（PRD 差异登记）**：PRD §9.8.4「PCS 32 位电量比对未通过（若配置）→ 事件」**无运行期落点**（比对是 RC-2 的现场人工比对，且 §9.7.2 明令本轮不做量程自校验）⇒ 取「RC-2 未通过则不配点」替代口径，在 §11.12.2 **登记 Δ-9**（标注需需求侧追认或订正 PRD），并在 §11.4.7 事件表 ⑦ 给出**一眼可见的处置**；
+> - **建议（一并改净）**：§11.7.2 的 `bms_alarm_225` 示例取值订正（位 424 = 簇一级告警，非"簇 SOC 低·轻"）；`RegBlockConf` 字段数「9 → 13」订正为 **6 → 10**；A14「三个 crate」订正为 **1 个（`mupc-southd`）**；A1 的 `fire_1` 行号 `:345` → **`:348`**；§11.5.3.5 两个需补 `regs` 的用例**移入 ①（A15/A16）**并给该节改号；删除无定义的 `emit_falling_edges(EmitBidi)`；补 `Rs485PortBus::open` 的 **`parity` 透传**落点；补 **RC-12**（消防/PCS 设备软件版本核对，§9.7.2 第 3 条 + §9.8.4）。
+>
+> **上一版（v1.3）修订范围（回应首轮设计评审的 4 个 P0 + 3 处完整性遗漏 + 4 条建议）**：
+> - **P0-1**：§11.5.1 第 15 条（极大性）**重写落点**（限定适用域 + 改判据），§11.5.2 给出「§9.4.1 六站配置必然通过」的逐站证明，§11.2.1/§11.13 的 T3/T7 口径同步订正；
+> - **P0-2**：§11.4.4 取「**无行不拒**」，删除 ① 中"无行"半句，全表自洽；
+> - **P0-3**：新增**消防事件落点**（§11.4.7 事件模型推广为「信号」+ §11.7.2 消防信号清单 + §11.10 与 G-6 的边界澄清）；
+> - **P0-4**：§11.5.3 连锁订正清单**扩至「用例名 + 断言」级**，并区分「fixture 订正 / 断言订正 / 断言不得改」；
+> - **完整性遗漏**：新增 §11.5.1 规则 18（`pcs` 站 `interval_ms ≥ 500ms` 下界）、规则 19（无 `points` 块的 `count` 宽度护栏）、消防事件（同 P0-3）、§11.11.3 补 RC-9/RC-10/RC-11（钢瓶气压口径 / Q-9 / Q-19）；
+> - **建议**：`WordOrder` 单一定义（§11.4.2，§11.4.1 改为复用）、Battery 底块读失败语义（§11.4.6）、无 `points` 的 32 位块静默少产点护栏（规则 19）。
+>
+> **输入契约**：`specs/modules/02-MUPC-南向通信-PRD.md` §9（`[REVIEWED: PASS: 2026-09-21]`，**v1.7 补登 + v1.8 订正**）。§9 已定的块/点模型、位置式点名、类型来源三分类、G-1…G-6 范围、Q-1/Q-20 登记与 AC/RC 划分是**需求约束**，本章只落地、不推翻。
+>
+> **与 PRD v1.8 / v1.7 的对齐声明（本设计已按同一表述对齐，不另起炉灶）**：
+> ① **第 15 条**：PRD v1.8 已落定 ——「**仅作用于声明了 `points` 的块**」「未声明 `points` 的块（含既有 `meter_grid` 形态、`discrete` 位块）**不参与**合并判定」「拒绝条件 = ① `func`/`byte_swap` 同 ② 地址连续 **③ 合并后空洞 ≤ 4** **④ 合并后 `count ≤ 120`**」「`read_slice: true` 豁免，且只在本条适用域内有对象」。本设计的 §11.5.1 #15 / §11.5.2 **四条全实现**（不是只取 ④），并额外给出：**③ 在适用域内由规则 11 的首尾锚定恒成立**（⇒ 实现 ③ 不引入额外拒绝，与 PRD 行为等价）、**§9.4.1 六站必然通过本条**的逐站证明、以及**建议的实现判定顺序**（先 ④ 再 ③）。**本设计未推翻：`grid_meter` 形态、`discrete` 位块、既有站行为一律不参与判定。**
+> ② **Δ-1**（`format` 缺省 = `float32`）与 **Δ-4**（`fire_det_count` 定名）已由 PRD v1.7 正式补登，本设计**不再是差异**（§11.12.2 已标注"已闭合"）；③ **Δ-3**（块级 `read_slice`）已由 PRD v1.7 正式补登为块级字段（§9.4.2.4），本设计的 §11.4.1/§11.5.2 改为**引用 PRD 定义**而非"设计新增"。
+>
+> **与 §10 的关系**：§10（S3a，已批准并实施）的**调度架构、故障隔离语义、role→DataPackage 分发骨架全部不变**。本章只做两件事：① 补齐点表**表达与读取所必需**的数据面能力（PRD §9.1.1 的 G-1…G-5）；② 接入**一个新 role**（`Role::Pcs`）并落实 5 份厂方点表。所有扩展都落在 §10 已预留的接缝上（见 §11.3 的"扩展点"列）。
+
+### 11.1 背景与现状差距（Why）
+
+**现状（代码事实核对，2026-09-21）**：`mupc-southd` 的 role 分发骨架已就位，但数据面只能表达"每块 2 寄存器 1 值"：
+
+| 现状代码事实 | 位置 | 后果 |
+|--------------|------|------|
+| `Role` 无 `Pcs`；`Role::{MeterBatt,Hvac,Fire}` 在 mapper 返回 `empty_package()` | `config.rs:20` / `mapper.rs:199` | 三站只作"站在线"信号 |
+| `RegFormat` 仅 `Float32`/`Int32Scaled`，**两者都固定占 2 寄存器**；`decode_regs` 对 `len < 2` 返回 0.0 | `meter_regs.rs:16,39` | 16 位点表（绝大多数）无法表达 |
+| 只有 `scale`，无 `offset` / `byte_swap` / `word_order` | `config.rs:65` | 温度类（`raw−40`）与 PCS 字节序不可表达 |
+| `StationBus` 只有 `read_holding`(FC03) / `read_input`(FC04) | `port_runtime.rs:35` | FC02 位块（BMS 288 位 + 空调 31 位）读不到 |
+| `mapper::telemetry_points` 每块只取**前 2 寄存器解 1 标量**、metric = 块名 | `mapper.rs:207` | 单点块（`count:1`）**不产任何点** |
+| 无逐点换算参数 | `mapper.rs` 全篇 | 同一读窗口内混排换算（0.1V 与 0.01A、`raw−40` 与纯计数）无法表达 |
+
+**本轮目标**：把上表 6 项能力补齐（PRD G-1…G-5），并让 5 份厂方点表（§9.5 共 **618 点**：`battery` 345 + `pcs` 72 + `meter_batt` 40 + `fire` 127 + `hvac` 34）**逐点可配置、可解码、可校验、可消费**。G-6（寄存器内字节拆分）PRD 已裁定**本轮不做**，替代口径见 §11.10。
+
+**G-1…G-6 的设计落点（一眼定位）**：
+
+| 差距 | 设计落点 |
+|------|----------|
+| G-1（16 位格式） | §11.4.2 `RegFormat::{Uint16,Int16}` + `RegDecode::width()` |
+| G-2（`offset`） | §11.4.1 块/点级 `offset`；§11.4.2 换算 `值 = raw×scale + offset` |
+| G-3（FC02） | §11.4.1 `RegFunc::Discrete`；§11.4.5 `StationBus::read_discrete` + `unpack_bits` |
+| G-4（单寄存器块 / 多值块 / 逐点换算） | §11.4.1 `points[]`；§11.4.3 `points::expand()`（校验与运行期**同一函数**） |
+| G-5（字节序/字序） | §11.4.1 `byte_swap` / `word_order`；§11.4.2 解码顺序（先逐寄存器 swap，再按字序拼） |
+| G-6（字节拆分） | **不做**；§11.10 整字采集 + 展示层拆解 |
+| **消防事件（`fire → events`）**（PRD §9.6.1 明文要求，**不属 G-1…G-6**，v1.3 补） | **§11.2.6 选型（F3）→ §11.4.7.1 统一事件模型（`SignalSpec` + `EdgeTracker`）→ §11.7.2 信号清单 → §11.10 与 G-6 的三层边界表** |
+
+### 11.2 方案探索与选型决策（先探索，后设计）
+
+#### 11.2.1 配置模型：块=事务 / 点=换算口径
+
+| 路线 | 形态 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| **A1（选定）块内嵌 `points[]`** | `RegBlockConf` 原地扩字段：传输口径（`func/addr/count/byte_swap`）+ 缺省换算（`format/scale/offset`）+ 可选 `points[]` | 与 PRD §9.4.2.4 字段表**逐字对应**；向后兼容仅靠 `#[serde(default)]`；单一解析路径、单一校验器 | `RegBlockConf` 字段变多（**6 → 10**：既有 `name`/`addr`/`func`/`format`/`scale`/`count`，新增 `offset`/`byte_swap`/`points`/`read_slice`；v1.4 订正字段数 —— 原写"9 → 13"多算） | **选 A1** |
+| A2 双形态枚举 | `RegsConf = Legacy(Block) \| Pointed(Block+points)`（untagged） | "老写法/新写法"概念分离清晰 | YAML 两套写法长期并存 → 文档歧义 + 校验分支翻倍；`untagged` 报错信息极差 | 否 |
+| A3 双数组并行 | 保留 `regs` 旧语义 + 新增 `blocks` 段，旧站走 `regs`、新站走 `blocks` | 旧站零风险 | 同一语义两处配置（漂移）；`meter_grid` 站要同时兼容两段；违背 PRD"唯一落地规则" | 否 |
+
+**不破坏既有 `meter_grid` 写法的机制（本设计的关键约束）**：新增字段**全部**带 `#[serde(default)]`，且**缺省值 = 既有行为**：`offset=0.0`（等价无偏移）、`byte_swap=false`、`points=[]`（空）、`read_slice=false`。因此既有 `- { name: p, addr: 0x1000, format: int32_scaled, scale: 0.01, count: 6 }` 一行的解析结果与改动前**逐字段相同**；`meter_grid` 的运行路径（mapper 按**块名** `p/q/pf/u/i/p_total` 查找 + `decode_phase_block`）**完全不经过** `points[]` 与新的逐点展开（§11.4.6），回归锚 = `tests/grid_convergence.rs` 的**全部断言**（`config.rs` 的既有用例中，**只有 meter_grid-only 系列与解析类**同属回归锚 —— 非 grid 站的用例含 9 处因 metric 更名而必须订正的期望值，见 §11.5.3.3/§11.5.3.4）。
+
+> **一处刻意的行为变更（须登记）**：`telemetry_points` 对**未声明 `points` 的块**由"取前 2 寄存器 1 点、metric=块名"改为"**每个值槽 1 点、metric=`<块名>_<序号>`**"（PRD §9.4.2.1 第 4 条）。该函数**只被非 grid 站调用**（grid 走 `on_grid_package`），而当前生效配置中只有 `grid_meter` 一个站 → **线上零影响**；但任何"非 grid 站靠块名做 metric"的旧配置（`deploy` 里的注释占位）会改名，须随本轮一并对齐 §9.4.1（§11.7.4 迁移清单）。
+>
+> **该变更的测试级影响（上轮评审 P0-4 的要点，清单见 §11.5.3）**：**线上零影响 ≠ 测试零影响** —— 单元测试里大量以"非 grid 站 + 块名即 metric"构造期望值，metric 更名后这些**断言期望值必须订正**（属"断言订正"，不是回归）。因此 §11.2.1 的"回归锚"口径随之收窄为：**`tests/grid_convergence.rs` 的断言零改动**（grid 路径不经 `telemetry_points`），`config.rs`/`core_config.rs`/`scheduler.rs`/`mapper.rs` 的既有用例按 §11.5.3 的**分类清单**处理（fixture 订正 / 断言订正 / 不得改）。
+
+#### 11.2.2 `RegFormat` 的扩展方式
+
+| 路线 | 形态 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| **B1（选定）扩枚举 + 引入解码规格** | `RegFormat` 增 `Uint16/Int16` 并给 `reg_width()`；新增 `RegDecode{format,scale,offset,word_order,byte_swap}` 承载解码；`decode_regs` 保留为薄包装 | 宽度/字节序/字序**集中在一处**（"代码只提供通用解码原语"，PRD B-1 裁定）；既有调用点**零改动**；4 种格式用 `match` 足够 | `decode_regs` 与 `RegDecode::decode` 两个入口（须靠测试钉住等价） | **选 B1** |
+| B2 trait 化 codec | `trait PointCodec { fn width(); fn decode() }` + 各格式实现 | 未来加格式不改 match | 4 个格式无扩展压力（YAGNI）；动态分派/trait object 徒增复杂度 | 否 |
+| B3 双枚举并存 | 块级仍 `RegFormat`，点级新 `PointFormat` | 不动既有类型 | 双枚举的转换/校验/文档三处重复，`format` 一个概念两个名字 | 否 |
+
+宽度口径**单点定义**：`RegFormat::reg_width() -> usize`（`Uint16`/`Int16` → 1，`Float32`/`Int32Scaled` → 2）。PRD 的"32 位点对齐/占 2 寄存器"等规则全部引用该函数，不再散落魔数。
+
+#### 11.2.3 FC02 离散输入的接入点
+
+| 路线 | 形态 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| **C1（选定）`read_discrete → Vec<bool>`** | bus 层完成"响应字节 → 位向量"解包（`unpack_bits` 纯函数在 rs485-plugin） | 语义最清晰（长度 = 位数）；解包公式只有一份；MockBus canned 注入即"位向量"，AC-3 逐位比对**直接可测** | `StationBus` 增 1 个方法（MockBus/未来实现都要补） | **选 C1** |
+| C2 bus 返回原始字节 | `read_discrete → Vec<u8>`，解包在 southd | 帧层最小改动 | 帧格式知识泄漏到 southd（MockBus 也要造字节）；解包公式与 §9.7.4 的对应关系跨 crate 断裂 | 否 |
+| C3 复用 `Vec<u16>` 签名 | 把位图塞进 u16 数组，复用现有 `Result<Vec<u16>>` | diff 最小 | 位数非 16 倍数时尾部含无关位（AC-3 明确要求"末字节高 1 位不得污染前 31 位"）→ 需另一套文档化的掩码约定，最易错 | 否 |
+
+#### 11.2.4 位块点的落库策略（PRD §9.8.1 末条要求设计定口径）
+
+| 路线 | 形态 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| D1 全量落库（现状口径） | 每轮 319 个位点全落 telemetry | 实现最简、时序最完整 | BMS 位块 **288 行/s ≈ 2490 万行/天**；`storage` 逐行 `INSERT ... VALUES`（事务批内）→ BECG-3568 上写入压力与 `retention` 清理量级均不可接受；而稳态下 99.9% 的行是重复的 0 | 否 |
+| **D2（选定）变化沿落库 + 告警上升沿事件** | 位点**仅在与上一轮不同时**落 telemetry；`alarm` 类的 0→1 跳变另产**事件**；模拟量点照旧全量落库 | 稳态写量≈0；跳变有记录、可回溯；与 PRD §9.6.1"告警位→events/SSE"一致；**内存现势值**仍每轮可得（供即时展示） | 需每站一份位图记忆（288 位 ≈ 36 字节/块，可忽略）；"某位长时间未变"时最后一条 telemetry 时间戳陈旧（须按 §11.7.3 展示口径标 stale） | **选 D2** |
+| D3 位块不入 telemetry，只产事件 | 位点只走 events | 写量最小 | 丢失"位现势值"，无法回答"此刻该位是 0 还是 1"（只能靠事件重建）；AC-6 ① 的点产出与落库被割裂 | 否 |
+
+> **落库口径与 AC-6 的分工**：`mapper::telemetry_points` 仍**返回全部点**（含 288 位，AC-6 ① 在 mapper 层断言"点产出"）；**变化沿过滤发生在 scheduler**（§11.4.7），即"点产出"与"落库节流"是两层，互不混淆。
+>
+> **保留策略**：沿用 `storage` 既有 `telemetry_retention_days` / `event_retention_days`（`RetentionManager`），本轮**不新增**清理逻辑；模拟量点新增约 299 行/轮（618 − 319 位点 = 299），5 站合计 ≈ 300 行/s，与既有 `meter_grid` 量级同阶，retention 天数须在投运前按盘容量复核（§11.12 待决项）。
+
+#### 11.2.5 Q-1（BMS 主从方向）：口径裁定与可切换设计
+
+**这是 PRD 标为【设计阶段阻塞】的项，本节给出显式处理（详见 §11.9）**。三条路线的比较：
+
+| 路线 | 形态 | 是否可行 | 结论 |
+|------|------|----------|------|
+| E1 按 PRD §2.2 单一口径实现（MUPC 主动轮询） | 无切换代码 | 可行 | 采纳为**基线**，但不单独使用（见 E3） |
+| E2 实现"主站轮询 + 被动接收"双模式可配置切换 | southd 增从站模式 | **不可行（伪选项）** —— Modbus 从机语义下，"BMS 做主机"意味着 BMS 来**读 MUPC 的寄存器**，链路上**不存在** BMS 数据的下行通道；MUPC 拿不到数据不是"southd 缺一个模式"，而是**该采集链不存在** | 否（诚实说明，见 §11.9.2） |
+| **E3（选定）基线轮询 + 消费侧与发起方解耦 + 第二方案影响面评估** | 按 E1 实现；同时把 SOC 消费契约锚定在"**点名 `soc`**"而非"battery 站轮询"（§11.9.3），并给出相反口径下的替代链路（BMS LAN/Modbus-TCP 客户端）与切换判据/代价/新鲜度影响 | 可行且满足 PRD ③"给两套可切换方案"的实质 | **选 E3** |
+
+选 E3 的关键权衡：E2 看起来"更灵活"，但它把"链路是否存在"错当成"配置项"——真正能切换的不是初动方向，而是**接入路径**（RTU 主站轮询 / TCP 客户端）。E3 把**唯一会随口径变化的接缝**（SOC 供给源）从调度器里剥离出来，使两种口径下的消费侧（AiIntegrator/策略/telemetry）**零改动**。
+
+#### 11.2.6 消防事件（`fire → events`）的落点（v1.3 新增，P0-3 的方案探索）
+
+**问题**：PRD §9.6.1 要求 `fire` 的系统状态位/探测器/火警状态进 events，但消防**没有任何 `discrete` 块**（全部状态量在保持寄存器整字内）⇒ §11.4.7 原事件模型（只认离散位）**一条都产不出来**。
+
+| 路线 | 形态 | 优点 | 缺点 | 结论 |
+|------|------|------|------|------|
+| F1 把消防状态位改配为 `func: discrete` 块 | 用 FC02 读 addr 4/6/7/8/9/12 | 直接复用既有 `BitClass::Alarm` 通路 | **物理上不可行**：这些量在**保持寄存器**（FC03）里，FC02 读的是另一套离散输入空间（消防协议亦未提供对应位区） | 否 |
+| F2 在展示层/Web 侧检测 | 由前端或 core-bin 旁路读 telemetry 后判跃迁 | southd 零改动 | **落点错**：事件必须进 `storage.events` + `AlertFeed` + SSE，且要与 §10.4 联锁融合 —— 该通道只由 southd 持有；展示层检测会**错过实时性**，也让 `fire` 行的"events"名不副实 | 否 |
+| F2′ 不加语义，把整字当 16 个位逐位建信号 | 用离散位的 `Bit` 机制套整字 | 复用现有 `Bit` 通路、零新概念 | **语义噪声**：20+ 寄存器的每个位都成信号（含保留位、备电电量的 8 位、预留的 bit2）⇒ 事件量爆炸且**违背 PRD §9.7.6"预留位不产事件"**；还会把"0 = 离线"的极性位误判成"1 = 异常" | 否 |
+| **F3（选定）信号层：`SignalSpec` + 统一 `EdgeTracker`** | `point_table` 登记**逐信号**的 `SignalPick`（`WordBit{mask}` / `WordEnum{active}`），**只登记产事件的信号**；scheduler 用**同一个** `EdgeTracker` 同时处理离散位与字级信号 | ① 语义显式且可逐条对表 PRD §9.5.4；② 与既有位点**共用**跃迁记忆与事件产出路径（"统一"而非"并存"）；③ 天然支持"预留位不产事件"（不入 mask）、"极性反转位不猜"（不入表）、"未登记 = 只落 telemetry"；④ 消防取**双向**事件，正好补上 §10.4"恢复需双方复位"缺的输入 | 需新增一个内部枚举与一张信号表（规模：系统状态 ~6 + 火警 4 + 3 组触发 + 探测器 2×n） | **选 F3**，落点见 §11.4.7.1 |
+
+> **与 G-6 的关系**：F3 **不**触碰字节拆解（只用 `mask`/`active`），故与 §11.10 的"整字采集 + 展示层拆解"并存不冲突，边界见 §11.10 的三层表。
+
+### 11.3 模块划分与文件结构
+
+**依赖方向不变**（§10.8/§10 依赖声明）：`mupc-southd` 仍**不依赖** strategy-engine / storage；回传由 core-bin 的 `SouthSink` 回调注入；`mupc-southd` 仍以静态库形态依赖 `rs485-plugin` 与 `mupc-data-processing`。
+
+| 文件 | 动作 | 职责 | 扩展点来源 |
+|------|------|------|------------|
+| `crates/data-processing/src/meter_regs.rs` | 修改 | `RegFormat` 增 2 变体 + `reg_width()`；新增 `WordOrder`/`RegDecode`；`decode_regs` 保留为薄包装 | §10 已定"复用 meter_regs 解码" |
+| `crates/rs485-plugin/src/device.rs` | 修改 | `read_discrete_inputs_from` + `parse_bits_response` + `unpack_bits`（纯函数） | §10.8 "Rs485Device 按口内多从站需要扩展" |
+| `crates/rs485-plugin/src/lib.rs` | 修改 | 导出 `unpack_bits` / `read_discrete_inputs_from` 相关符号（+ `pub use device_trait::Parity`，供 southd 具名使用） | 同上 |
+| `crates/mupc-southd/src/config.rs` | 修改 | `Role::Pcs`、`RegFunc::Discrete`、`StationParity`、`RegBlockConf` 新字段、`PointConf`；`validate()` 扩展（§11.5） | §10.3 stations 配置段 |
+| `crates/mupc-southd/src/points.rs` | **新增** | 块 → 点展开（`expand`/`footprint`）、命名规则、位解包适配、**字级信号的活跃判据（`SignalSpec` → `SignalState`）** | §10 未涉及（新能力）；信号表见 §11.4.7.1 |
+| `crates/mupc-southd/src/point_table.rs` | **新增** | 点表登记注册表（§11.4.4）：`(role, addr) → {format, scale, offset, sym_src, kind, label, signals}`（探测器区为 **6 条组内模板**） | PRD §9.4.3 要求的"校验器内点表登记值常量表"；`signals` 承载消防事件源 |
+| `crates/mupc-southd/src/mapper.rs` | 修改 | `telemetry_points` 重构（逐点）、`Battery` 按**点名** `soc` 查找、`Role::Pcs` 臂、SOC 域检查、消防登记数比对 | §10.5 role 映射 |
+| `crates/mupc-southd/src/port_runtime.rs` | 修改 | `StationBus::read_discrete`；`Rs485PortBus` 实现（`bus_lock` + `spawn_blocking` 同构）；`MockBus` 位注入；**`Rs485PortBus::open` 的 `parity` 透传（v1.4 补）** | §10.2/§10.7 口级总线 |
+| `crates/mupc-southd/src/scheduler.rs` | 修改 | `RegFunc::Discrete` 分发、位点变化沿过滤、`role_priority(Pcs)=1`、SOC 越界/消防登记数事件 | §10.2 口调度预算 |
+| `crates/mupc-southd/src/station.rs` | 修改（可选） | 若把位变化沿记忆放 `Station`（本设计放 `PortRunner`，故**不改**） | — |
+| `crates/mupc-core-bin/src/startup.rs` | 修改（小） | `SouthSink`：`is_event=true` 且非 offline/online 时把 **value 写进事件 message**（SOC 越界原始值落证）；事件 message 可选查 `point_table::label` 补中文名 | §10.6 事件落库 |
+| `crates/mupc-core-bin/src/core_config.rs` | 修改（测试数据） | 既有 fixture 订正（§11.5.3） | §10.3 跨段校验 |
+| `mupc/deploy/config/mupc_core_config.yaml`(+`.production`) | 修改 | `south_stations` 段换为 §9.4.1 的 6 站（PCS 站默认**保持注释**，待 Q-15 裁定） | §10.3 |
+
+**不新增 crate、不新增独立设计文档**（项目 CLAUDE.md 文档原则）。
+
+### 11.4 数据结构与接口定义
+
+#### 11.4.1 配置结构（`mupc-southd::config`）
+
+```rust
+/// 站级校验位（YAML: none 缺省 / even / odd）——PRD §9.4.1 站级 `parity`（D-1 裁定 ① 的落地形态）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StationParity { #[default] None, Even, Odd }
+
+/// 站类型角色（新增 Pcs；YAML 值 `pcs`）
+pub enum Role { MeterGrid, MeterBatt, Battery, Hvac, Fire, Pcs }
+
+/// 读功能码（新增 Discrete = FC02）
+pub enum RegFunc { Holding, Input, Discrete }
+
+// ── 32 位值的字序（YAML: hi_lo 缺省 / lo_hi）：**单一定义（v1.3 订正）** ──
+// 类型**只在 `mupc-data-processing::meter_regs` 定义一次**（§11.4.2 —— 它与 `RegDecode` 同居，
+// 解码原语与它的字序参数不可分离；该 crate 已依赖 serde，`RegFormat` 即同一先例）。
+// 本 crate **复用**同一类型、不再重定义（v1.2 在 §11.4.1/§11.4.2 各定义一次 = §11.2.2 B3 的双枚举缺陷）：
+pub use mupc_data_processing::meter_regs::WordOrder;
+
+pub struct StationConf {
+    // 既有字段全部保留（id/role/port/protocol/slave/baud_rate/interval_ms/regs）
+    #[serde(default)] pub parity: StationParity,          // 新增
+}
+
+pub struct RegBlockConf {
+    pub name: String,
+    pub addr: u16,
+    #[serde(default = "default_reg_func")]    pub func: RegFunc,
+    #[serde(default = "default_reg_format")]  pub format: RegFormat,
+    #[serde(default)]                         pub scale: f64,
+    #[serde(default = "default_reg_count")]   pub count: u16,
+    // ── S3b-2 新增：全部 #[serde(default)]，缺省 = 既有行为 ──
+    #[serde(default, skip_serializing_if = "is_zero_f64")] pub offset: f64,        // G-2
+    #[serde(default, skip_serializing_if = "is_false")]    pub byte_swap: bool,    // G-5
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub points: Vec<PointConf>, // G-4
+    #[serde(default, skip_serializing_if = "is_false")]    pub read_slice: bool,   // PRD §9.4.2.4 块级字段（v1.7 补登），语义见 §11.5.2
+}
+
+/// 点级换算口径（PRD §9.4.2.4 点级字段表）
+pub struct PointConf {
+    pub at: u16,                                   // 块内寄存器/位偏移 + 1（32 位点填低地址寄存器序号）
+    #[serde(default = "default_point_count")] pub count: u16,     // 缺省 1
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub format: Option<RegFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub offset: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_default_word_order")] pub word_order: WordOrder,
+}
+```
+
+**为什么点级用 `Option<T>` 而不是"缺省值语义"**：`scale`/`offset` 的"未声明"与"显式 0"是**两种不同事实**——前者须继承块级，后者是配置错误（`scale == 0` 拒，PRD §9.4.3）。用 `Option` 让"继承"与"显式 0"在类型上可区分，校验器才能既拒 `scale: 0` 又不误伤"继承块级 `scale: 0.01`"的点。
+
+**`read_slice`（PRD 已正式补登，本设计只做落地）**：语义 = "本块是按**设备单次读上限**主动分片的结果，**仅**豁免 §11.5 的块落地极大性检查（第 15 条）"；缺省 `false`。字段定义、适用场景与四条"不得用于逃避合并"的约束以 **PRD §9.4.2.4 块级字段表**为准（v1.7 补登），落地口径见 §11.5.2。
+
+**兼容性论证（"既有 `meter_grid` 写法不得破坏"）**：
+
+| 既有写法 | 解析结果 | 运行行为 |
+|----------|----------|----------|
+| `{ name: p, addr: 0x1000, format: int32_scaled, scale: 0.01, count: 6 }` | 与改动前逐字段相同（新字段取缺省） | 同（mapper 按块名找 `p` → `decode_phase_block` → `decode_regs`） |
+| 站级无 `parity` | `StationParity::None` | `Rs485PortBus::open` 传 `Parity::None`（与 `Config::default()` 一致） |
+| 无 `points` 的块 | `points = []` | **非 grid 站的 metric 命名变化**（§11.2.1 已登记；grid 不受影响） |
+
+#### 11.4.2 解码原语（`mupc-data-processing::meter_regs`）
+
+```rust
+pub enum RegFormat { Float32, Int32Scaled, Uint16, Int16 }   // 新增 2 变体
+
+impl RegFormat {
+    /// 单值占用的寄存器数（16 位 = 1，32 位 = 2）——"宽度"的唯一定义
+    pub fn reg_width(self) -> usize { match self { Uint16 | Int16 => 1, Float32 | Int32Scaled => 2 } }
+}
+
+/// 32 位值的字序 —— **全项目唯一一处定义（v1.3 订正）**：`hi_lo` = 高字在低地址（缺省，
+/// 与既有 `regs_to_u32_be` 一致）/ `lo_hi`（PCS 32 位电量）。serde 形态与同文件的
+/// `RegFormat` 完全同构（`rename_all = "snake_case"` + 全链 `Serialize` 供配置回写）；
+/// `mupc-southd::config` 以 `pub use` 复用（§11.4.1），**不得**在别处再定义一份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WordOrder { #[default] HiLo, LoHi }
+
+/// 解码规格：格式 + 换算 + 字节序/字序（"通用解码原语"的载体）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegDecode {
+    pub format: RegFormat,
+    pub scale: f64,        // Float32 忽略（沿用既有语义：float32 不乘 scale）
+    pub offset: f64,       // Float32 忽略（offset 是"整数零点平移"的语义，浮点原值无零点平移概念）
+    pub word_order: WordOrder,   // 仅 32 位格式生效
+    pub byte_swap: bool,         // 仅按寄存器生效（逐寄存器 u16::swap_bytes）
+}
+impl RegDecode {
+    pub fn width(&self) -> usize { self.format.reg_width() }
+    /// 解码 1 个值；寄存器数不足 → 0.0；非有限值 → 0.0（沿用既有守卫）
+    pub fn decode(&self, regs: &[u16]) -> f64;
+}
+/// 既有入口保留（薄包装，语义不变：hi_lo + 无 swap + offset 0）
+pub fn decode_regs(r: &[u16], format: RegFormat, scale: f64) -> f64;
+```
+
+**解码算法（唯一、有序）**：
+
+```
+1) 长度守卫：regs.len() < width() → 0.0
+2) 字节序还原：对参与本次解码的每个寄存器做 swap_bytes()（byte_swap=true 时）
+3) 位模式组装：
+   - width == 1：v = regs[0]
+     - Uint16 → raw_u = v as u64
+     - Int16  → raw_i = v as i16 as i64
+   - width == 2：依 word_order
+     - HiLo（缺省）：u32 = (regs[0] << 16) | regs[1]        ← 与既有 regs_to_u32_be 逐位等价
+     - LoHi         ：u32 = (regs[1] << 16) | regs[0]
+4) 物理解算：
+   - Float32      → f32::from_bits(u32) as f64（忽略 scale/offset）
+   - Int32Scaled  → (u32 as i32) as f64 * scale + offset
+   - Uint16/Int16 → raw as f64 * scale + offset
+5) 非有限守卫 → 0.0
+```
+
+> **算法顺序的判据（PCS 场景）**：AC-2 的期望值**唯一地**钉住了顺序 —— `reg[1042]=0x6400, reg[1043]=0x0100`，`byte_swap=true`、`word_order=lo_hi` ⇒ 先逐寄存器 swap 得 `[0x0064, 0x0001]`，再按 `lo_hi` 拼得 `0x00010064 = 65636`，`×0.1 = 6563.6 kWh`（若**先拼后 swap** 会得不同值；若误用 `hi_lo` 得 655360.1，**必须不一致**）。故"先 swap 再拼字"不是风格选择，而是被验收用例固定的语义。
+
+#### 11.4.3 点展开与命名（`mupc-southd::points`，新模块）
+
+```rust
+/// 一个可产出的遥测点（16 位/32 位标量 或 1 个位）
+pub struct PointSpec {
+    pub metric: String,      // 点位名（PRD §9.4.2.2 唯一命名规则）
+    pub kind: PointKind,     // Scalar { offset: u16, decode: RegDecode } | Bit { offset: u16 }
+}
+pub enum PointKind { Scalar { offset: u16, decode: RegDecode }, Bit { offset: u16 } }
+
+/// 块 → 完整点清单。**校验期与运行期调用同一函数**（防"校验通过但运行期展开不同"）
+pub fn expand(block: &RegBlockConf) -> Result<Vec<PointSpec>, String>;
+
+/// 某块点清单的寄存器占位（校验空洞/极大性用）：返回 [(起始偏移, 长度)]
+pub fn footprint(block: &RegBlockConf) -> Result<Vec<(u16, u16)>, String>;
+
+/// **字级信号**：把某块的整字读数按 `point_table::SignalSpec` 求值为"活跃/非活跃"（§11.4.7.1）。
+/// 返回 (信号键全名 `<点名>@<key>`, 是否活跃)；`scheduler` 用它喂 `EdgeTracker`。
+/// 注意：**只读整字、不改写遥测值**；无信号的块 → 空 Vec。
+pub fn signals_of_block(role: Role, block: &RegBlockConf, regs: &[u16]) -> Vec<(String, bool)>;
+```
+
+**展开规则（与 PRD §9.4.2.1 第 4 条一一对应）**：
+
+| 情形 | 产出 |
+|------|------|
+| `func: discrete` + 无 `points` | `count` 位各 1 点，`metric = <块名>_<k+1>`（k = 位偏移，0 起） |
+| `func: discrete` + 有 `points` | 仅列出的位（`at` 与点级 `count` 展开），同上命名 |
+| 标量块 + 无 `points` | 窗口内**每个值槽** 1 点：按 `format.reg_width()` 步进；`metric = <块名>_<序号>`，序号 = **低地址寄存器的块内偏移 + 1** |
+| 标量块 + 有 `points` | 仅列出的点；点级 `format/scale/offset/word_order` 覆盖块级缺省（`Option::None` = 继承）；点级 `count: N` 在 16 位格式下产出连续 N 点（序号 `at, at+1, …`），**32 位格式必须 `count = 1`** |
+| 点级 `name` | 覆盖位置命名；**仅允许 `count == 1`**（多值点无"命名序列"定义，PRD 未定义 → 取保守口径**配置期拒**，见 §11.5.2 设计补充） |
+
+**护栏（v1.3 新增，落规则 19）——无 `points` 的块 `count` 必须是宽度的整数倍**：无 `points` 的标量块按 `format.reg_width()` 步进产点，若 `count % width != 0`（例如 32 位格式 `count: 3`），步进的最后一格**装不下一个完整值** ⇒ 该尾槽**静默不产点**（`3 / 2 = 1` 点，而非 2 点），配置者却看不出少了一个点。这条**不产生运行时错误、只产生"少产点"的静默失真**，正是 PRD §9.4.3 要防的形态，故在**配置期直接拒**（规则 19，§11.5.1）：`func != Discrete && points.is_empty() && count % format.reg_width() != 0 → Err`。`discrete` 块（`count` = 位数，无"宽度"概念）与**声明了 `points` 的块**（`count` 由规则 11 的"首尾锚定"约束，见 §11.5.1 #11）均不适用。
+
+**位解包（`unpack_bits`，rs485-plugin 提供纯函数）**：
+
+```rust
+/// Modbus FC02 响应字节 → 位向量（PRD §9.7.4 公式，唯一）
+/// bit k = bytes[k/8] 的第 (k % 8) 位（bit0 = LSB）；返回长度 = count
+pub fn unpack_bits(bytes: &[u8], count: u16) -> Vec<bool>;
+```
+- 响应字节数 = `ceil(count / 8)`；`count` 非 8 倍数时**末字节高位为无关位，不得影响前 `count` 位**（AC-3 空调 31 位的断言点）。
+- 示例（PRD §9.7.4 引用 BMS 协议原文）：连续 16 位 `1,1,0,1,1,1,0,0,…` → 首字节 `00111011B = 0x3B`；随后 `1,1,0,1,1,1,0,1` → `10111011B = 0xBB`。
+
+#### 11.4.4 点表登记注册表（`mupc-southd::point_table`，新模块）
+
+**为什么需要它**：PRD §9.4.3 明确要求"符号性声明一致性"的第 ② 条的可判定性**以设计落成"点表登记值常量表"为前提**（**查表键 = `(role, space, addr)`**（v1.6 补登，见下"地址空间维度"段），行内容 → `{format, scale, offset, 来源}`，由设计阶段按 §9.5 逐点转写）。
+
+```rust
+/// 符号性来源（PRD §9.5 前言的三分类）
+pub enum SymSrc { Vendor,       // 厂方逐点明写（PCS、空调、ADL400 的 4 字节功率类/PF）
+                  VendorTypo,   // 厂方标注 + 推断订正（BMS 的 UNIT→UINT）
+                  Engineer }    // 工程判断（消防、ADL400 2 字节点）
+
+/// 位点分类（决定是否产出告警事件，见 §11.7.2）
+pub enum BitClass { Alarm, State, Reserved }
+
+pub struct PointReg {
+    pub role: Role,
+    pub addr: u16,               // 绝对寄存器地址；discrete 块为**位地址**
+    pub kind: RegPointKind,      // Scalar(RegFormat) | Bit(BitClass)
+    pub scale: f64,
+    pub offset: f64,
+    pub sym_src: Option<SymSrc>, // Bit 行 / 无偏移点可为 None
+    pub label: &'static str,     // 中文名（事件/展示/RC-1 核对清单用）
+    pub signals: &'static [SignalSpec],  // v1.3 新增：该格子内的**字级信号**（消防专用，见 §11.4.7）
+}
+
+/// 字级信号：一个整字（或一位）上的**可跃迁量**，**入表即产事件**。仅消防站使用（其状态位/枚举
+/// 全在保持寄存器整字内，无 `discrete` 块）—— 详见 §11.4.7.1 的事件模型与 §11.7.2 的信号清单。
+///
+/// **口径（避免"登记了却不产事件"的歧义）**：`signals` **只登记产事件的信号**；
+/// 未登记的位/枚举**一律只落 telemetry**（等价于离散位块的 `State`/`Reserved` 语义）。
+/// 故**不设 `class` 字段**（本轮无"登记为 State"的形态；将来若需要，再以新变体扩展）。
+pub struct SignalSpec {
+    pub key: &'static str,       // 信号键（事件名后缀），表内唯一
+    pub pick: SignalPick,        // 活跃判据
+}
+pub enum SignalPick {
+    /// 位图：整字 & `mask` ≠ 0 视为活跃。`mask` 应为**单一或一组同类位**，
+    /// 不得跨位图混装（每 bit 一个独立 key，便于事件定位）。
+    /// **极性反转位不建信号**（如消防探测器 bit15「1 = 在线 / 0 = 离线」）—— 本设计不为其造判据。
+    WordBit { mask: u16 },
+    /// 枚举：整字值 ∈ `active` 视为活跃（活跃值之间跃迁亦产事件：如 1 一级报警 → 2 二级火警）。
+    WordEnum { active: &'static [(u16, &'static str)] },
+}
+
+/// **地址空间维度（v1.6 补登）**：位空间与寄存器空间**各自从 0 编址、互不相干**
+///（PRD §9.4.2.1 第 6 条 / §9.4.3「区间与重叠」按功能码空间分别计算）。故查表键是
+/// `(role, space, addr)` 而**不是** `(role, addr)`（理由见下"地址空间维度"段）。
+pub enum AddrSpace {
+    Reg,   // 寄存器空间（FC03 保持 / FC04 输入）
+    Bit,   // 位空间（FC02 离散输入）
+}
+
+pub const POINT_REGS: &[PointReg] = &[ /* 展开后 618 行（n=20），由 §9.5 逐点转写 */ ];
+
+/// 按 `(role, space, addr)` 查登记行（**规范形态**；查不到 → `None` ⇒ 调用方**放行**，见下"查不到行"口径）。
+pub fn lookup_in(role: Role, space: AddrSpace, addr: u16) -> Option<&'static PointReg>;
+
+/// **寄存器空间**查登记行 = `lookup_in(role, Reg, addr)` —— **兼容包装（语义不变）**：
+/// 规则 6 的强制校验只作用于**标量点**，其地址必属寄存器空间，故该签名足够。
+pub fn lookup(role: Role, addr: u16) -> Option<&'static PointReg>;
+
+/// **位空间**查登记行 = `lookup_in(role, Bit, addr)`（`discrete` 块的 `addr` 是**位地址**）。
+pub fn lookup_bit(role: Role, addr: u16) -> Option<&'static PointReg>;
+
+pub fn label(role: Role, metric: &str) -> Option<&'static str>;
+
+/// 某 `(role, addr)` 上的信号（无信号 → 空切片）。**不设 `space` 参数**：字级信号仅消防使用，
+/// 而消防站**没有** `discrete` 块（状态量全在保持寄存器整字内）⇒ 只查寄存器空间。
+pub fn signals_of(role: Role, addr: u16) -> &'static [SignalSpec];
+```
+
+**地址空间维度：为什么查表键必须带 `space`（v1.6 补登 —— 实现期发现的设计缺陷，实现修正正确且向后兼容）**
+
+| 项 | 口径 |
+|----|------|
+| **两个取值** | `AddrSpace::Reg` = **寄存器空间**（FC03 保持 / FC04 输入）；`AddrSpace::Bit` = **位空间**（FC02 离散输入）。两者**各自从 0 编址、互不相干** —— `(role, Reg, 0)` 与 `(role, Bit, 0)` 是**两行不同的登记**，不是同一行的两种解释 |
+| **为什么必须带（实证）** | **`hvac`（风冷空调机组）站在同一批地址上真实共存两个空间的行**：FC04 温湿度寄存器 **0 / 2 / 3**（柜内测量温度 / 内盘管测量温度 / 柜内测量湿度）与 FC02 位块 `hvac_di` 的位 **0 / 2 / 3**（位 0 = 内风机、位 2 = 制冷状态、位 3 = 加热状态）。在单一 `(role, addr)` 键下，**后登记的行遮蔽先登记的行**（或反之），消歧只能依赖**数组顺序** —— **顺序一改、查表语义就变**，属"靠顺序维持正确性"的脆弱形态（本设计一贯拒绝；PRD §9.4.3 要防的正是这类**静默失真**）。带上 `space` 后两行各有唯一键，**结果与登记顺序无关** |
+| **`label()` 同样受害** | `label(Role::Hvac, "hvac_in_1")`（= 寄存器 0 → "柜内测量温度 ℃"）与 `label(Role::Hvac, "hvac_di_1")`（= 位 0 → "内风机"）**必须给出两个不同的中文名**。无 `space` 时二者会解析到**同一行** ⇒ 事件 `message` 与 RC-1 的机读核对清单**双双出错**（这正是"能过校验但语义已错"的形态） |
+| **与规则 14 的对应（口径自洽性）** | §11.5.1 规则 14（区间与重叠）按**功能码空间**（holding / input / discrete 三套）分别判半开区间重叠（PCS 的 3 区/4 区同址不同 `func` 由此天然放行）。**查表键的 `space` 维度就是规则 14 在点表侧的同一件事**：规则 14 宣告"两个空间的重叠互不相干"，则点表必须**在键里就能区分**这两个空间，否则等于"先把两个空间混成一个、再由规则 14 事后拆分" —— 同一文档内两处口径相左。故 `space` 不是实现细节，而是规则 14 的**前置条件** |
+| **`holding` / `input` 为何合成 `Reg`** | 规则 14 的**判定**单位是功能码空间（三套），但**换算**口径（`RegFormat` / `scale` / `offset`）对 FC03 与 FC04 **完全相同**，故登记表只需**寄存器 vs 位**二分；`func`（FC03/FC04）由**配置块**声明、不参与查表。**边界**：若将来某 role 同时以 holding 与 input 在**重叠地址**上登记点，则该二分不足（需 `space` 细分为三）——§9.4.1 六站**均不属**此形态（`bms`/`pcs` 全 `input`、`meter_batt`/`fire`/`grid_meter` 全 `holding`、`hvac` = `input` + `discrete`），故**本轮该边界不可达**；登记为**残余边界（就地登记于本节，不新开风险条目）**：出现时**扩展 `AddrSpace` 枚举**（而非改语义），并同步规则 14 的判定粒度 |
+| **规则 6 是否受影响** | **不受**：规则 6 的强制校验只作用于**标量点**（`format ∈ {uint16,int16} && offset ≠ 0`），其 `addr` 必属寄存器空间 ⇒ 其 `lookup(role, addr)` 即 **`Reg` 空间包装**，下文"覆盖范围与强制口径"的两条 `Err` 判据与 §11.5.1 #6 **一字不改**（`lookup` 的调用点亦不变，向后兼容） |
+
+> **探测器区的登记形态（v1.3 补充，防"618 行"与可变长度区矛盾）**：`fire_det` 区的行数**随现场登记数变化**（n=20 时 114 行；n=100 时 594 行），无法逐地址静态登记。故该区在 `POINT_REGS` 中登记为 **6 条"组内语义模板"**（`+0 地址` / `+1 状态` / `+2 数据 1` / `+3 CO` / `+4 VOC` / `+5 H2`），运行期按 `(addr − 17) % 6` 取模板（**仅在 `space = Reg` 时生效** —— 探测器区是保持寄存器区，位空间无模板，见上"地址空间维度"段）；**信号挂在前两条模板上**（`+1 状态` 的 bit12/bit14）。因此 §11.4.4 末的断言口径改为：**"按 n=20 的参考配置展开后 == 618 行"**（而不是"静态数组 618 行"）。
+
+**覆盖范围与强制口径（本设计的取舍，须评审确认）**：
+
+| 用途 | 口径 |
+|------|------|
+| 覆盖 | **全 618 点**（按 n=20 参考配置展开；探测器区为模板 + 运行期展开）逐点转写（PRD §9.4.3 明文要求）——它同时是 RC-1 的**机读核对清单**与事件/展示的中文名来源 |
+| **强制**（`Err`） | ① `format ∈ {uint16,int16}` 且 `offset ≠ 0`，而 `lookup(role, addr)` **命中一行**、但该行 `sym_src` 为空 → 拒<br>② `lookup` 命中且 `offset` 与登记值不等（**含"漏配 → 缺省 0 ≠ −40"**）→ 拒（PRD ② 明文，比较字段 = `offset`） |
+| **不强制**（测试期） | `format` / `scale` 与登记值不一致**不拒** —— 这是刻意的：Q-4（PCS 地址基准）、Q-16（4000/4005 的 16/32 位）、Q-20（116/186 改 `int16`）三项**现场裁定会合法改变** `addr`/`format`/`scale`，若强校验会把现场裁定后的正确配置**拒在启动期**。这些字段的一致性改由 `tests/point_table_vs_reference_config.rs`（§11.4.4 末）与 RC-1 逐点比对保证 |
+| **查不到行** | **不拒**（v1.3 裁定，取代 v1.2 的"① 无行 → 拒"） |
+
+> **为什么「查不到行 → 不拒」（P0-2 的裁定理由，必须写清）**：**现场 RC-3 会合法改 `addr` 基准** —— PCS 3 区首点到底是 0 基还是 1000 基**文档自相矛盾**（PRD §9.5.2 / Q-4），现场实测后**回写 `addr` 就是本次裁定的产物**；此时 `POINT_REGS` 按 1000 基登记的键**自然全部失配**。若"无行即拒"，则**合法的现场校准配置会把站拒在启动期**（而且是 PCS 站，恰好是 Q-4 唯一要校准的站）——这是"把不确定性误判为错误"。故 v1.2 的 ① 「无行或 `sym_src` 空 → 拒」**删去"无行"半句**，只保留"**命中而行内 `sym_src` 为空** → 拒"（该形态是**表自身的转录错误**：一条 `offset ≠ 0` 的现行偏偏没登记来源），全表据此自洽（§11.5.1 #6 同步）。**代价与补偿**：查不到行时，`offset` 的**可追溯性由 ② 与 RC-1 逐点比对兜底**（登记为 §11.12.3 R-3）。
+
+**漂移防护（表 vs 配置的双向核对，实现期必做）**：`tests/fixtures/south_stations_s3b2.yaml`（= PRD §9.4.1 的 6 站参考配置）与 `POINT_REGS` 逐行交叉核对：凡表内 `offset ≠ 0` 的行，配置展开后必须命中同名同值；凡配置中 `offset ≠ 0` 的点，表内必须命中。测试同时断言**展开后行数 == 618**（= PRD §9.8.3 的点数；探测器区模板按 n=20 展开，见上）。
+
+#### 11.4.5 总线与帧层扩展
+
+```rust
+#[async_trait]
+pub trait StationBus: Send + Sync {
+    async fn read_holding (&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
+    async fn read_input   (&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError>;
+    /// FC02 读离散输入：`count` = **位数**（非寄存器数）；返回长度 = count 的位向量
+    async fn read_discrete(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<bool>, BusError>;
+}
+```
+- `Rs485PortBus::read_discrete`：与既有两方法**同构**（先取 per-port `bus_lock` 强制口内串行 → `spawn_blocking` 内 `dev.read_discrete_inputs_from(slave, addr, count)`）。
+- `rs485-plugin`：`read_discrete_inputs_from(slave, addr, count)` 复用 `build_read_frame(slave, 0x02, addr, count, crc)`；响应解析**不能**复用 `parse_regs_response`（它按 `byte_count / 2` 拆寄存器，**会丢掉非偶数字节的末字节**）→ 新增 `parse_bits_response(response, count) -> Result<Vec<bool>, Rs485Error>`，内部调 `unpack_bits`。
+- `MockBus`：新增 `put_bits(slave, addr, Vec<bool>)` / `fail_bits_once(slave, addr)` / `bit_calls`（与 holding/input 三套独立键，FC03/04/02 是不同寄存器空间）。
+- **`Rs485PortBus::open` 的 `parity` 透传（v1.4 补，落点见 §11.3 表）**：现有实现只透传 `baud_rate`/`device_addr`，其余走 `rs485_plugin::config::Config::default()` ⇒ **校验位恒 `Parity::None`**，站级 `parity` 会被**静默忽略**（配置写了 `even` 却按 `none` 通信 ⇒ 空调站全站通信失败，且现象是"offline"而非"配置错"）。本轮须补一行映射：`parity: match conf.parity { StationParity::None => device_trait::Parity::None, Even => Parity::Even, Odd => Parity::Odd }`（`device_trait::Parity` 由 `rs485-plugin` 的 `pub use` 具名引入，避免在本 crate 再依赖 `device-trait`）；`timeout_ms`/`crc_mode`/8N1/DE-RE 仍取 `Config::default()`（**本轮不改**）。该透传是 **D-1 空调校验位裁定（RC-6）的代码侧前置**：校验位一旦由现场裁定为 `even`，**只改配置即可生效、无需改代码**；测试须在 `port_runtime.rs` 的 `open` 失败路径用例族中**新增一条**（构造 `StationParity::Even` 的 `StationConf`，断言送进 `Config` 的 `parity` 为 `Parity::Even` —— 可借 `Rs485PortBus::open` 拆出的纯函数或对 `Config` 构造的可测接缝，避免触及真串口）。
+
+#### 11.4.6 mapper 扩展（`mupc-southd::mapper`）
+
+```rust
+/// 遥测点样本（比 (String, f64) 多一个类别标志，供 scheduler 做变化沿过滤）
+pub struct TelemetrySample { pub metric: String, pub value: f64, pub kind: SampleKind }
+pub enum SampleKind { Scalar, Bit }   // v1.3：bool → 枚举（后续若加"字级信号"不破签名）
+
+/// 全量点位（含 288 位）——逐点展开，读失败的块整块跳过
+pub fn telemetry_points(role: Role, reads: &BlockReads) -> Vec<TelemetrySample>;
+
+/// battery 的 SOC 域检查（PRD §9.6.3）：0 ≤ v ≤ 100 且有限 ⇒ Some(v)，否则 None
+pub fn soc_in_domain(v: f64) -> bool;
+
+/// battery 分支的 SOC 取值结果（v1.3 新增：把"底块读失败"等四种情形显式化，见下）
+pub enum SocOutcome { Value(f64), NoSuchPoint, BlockFailed(String) }
+pub fn battery_soc(reads: &BlockReads) -> SocOutcome;
+
+/// 消防探测器登记数交叉校验（PRD §9.5.4"强制"）：返回 (读回的登记数, 配置容量) 不一致时的读回值
+pub fn fire_detector_mismatch(role: Role, reads: &BlockReads) -> Option<f64>;
+
+/// 消防探测器**地址升序**交叉校验（PRD §9.10 Q-9）：读回**全部探测器**的 `+0` 寄存器（地址号），
+/// 非严格升序或重复 → Some((首个违规探测器的 1 基序号, 该探测器的地址值))。**Q-9 的设计落点。**
+/// **链首 = 寄存器 11（探测器 1 的地址号，v1.7 订正）**，其后接 `fire_det*` 区的各探测器组
+/// ⇒ 序号与 PRD §9.5.4"第 n 只 = 按地址升序的第 n 只"的 **n 逐一对齐**（口径见 §11.4.7.2）。
+pub fn fire_detector_addr_order_violation(role: Role, reads: &BlockReads) -> Option<(usize, u16)>;
+
+/// 钢瓶气压「是否配置」（PRD §9.7.6）：`ever_nonzero` = 本站生命周期内该点是否出现过非 0 值。
+/// 从未非 0 ⇒ false（展示层标"未配置"而非 "0 kPa"），一旦出现过 ⇒ true（此后恒 0 按真实 0 展示）。
+pub fn cylinder_pressure_configured(reads: &BlockReads, ever_nonzero: bool) -> bool;
+```
+
+- **按点名查找（本轮新语义）**：`Battery` 分支由"找 `b.name == "soc"` 的块"改为"**展开各块点清单，找 `metric == "soc"` 的点**"（PRD §9.4.3 的 `soc` 点契约）。解码用该点的 `RegDecode`。
+- **Battery 分支的四种情形（v1.3 新增 —— 上轮评审指出"底块读失败"语义未写）**：`SocOutcome` 把语义钉死，**逐条实现、逐条测**（**v1.8 补**：② 另含"**读回长度装不下 `soc` 点**"这一子情形 —— 见下表 **② 补**行）：
+
+  | 情形 | 判据 | `pkg.battery.soc` | `PollResult` | 说明 |
+  |------|------|-------------------|--------------|------|
+  | ① 底块读成功且含 `soc` 点 | 该块 `Ok(_)`，展开后 `metric == "soc"` | `Some(值)`（**域外则 `None`**，见下条） | `Data` | 正常路径 |
+  | ② **底块读失败**（承载 `soc` 的那一块） | 该块 `Err(e)` | `None` | **`Failed(e)`** | **整轮无数据**：沿用 §10.7"任一块失败 = 整站本轮失败、无部分交付"的既有语义；退避/offline 记账同既有。**不得**退化为"只丢 SOC、其余照常"（那会造成"站在线但 SOC 静默缺失"） |
+  | **② 补（v1.8 判据补充 —— 不计作第五种情形，`SocOutcome` 三变体不变）** | **读回长度不足以容纳 `soc` 点**：承载 `soc` 的块 `Ok(v)`，但 `v.len() <` 该点占用的寄存器数（`RegDecode::width()`；如 32 位 `soc` 点只读回 1 寄存器、分片/截断返回） | `None` | **`Failed(...)`（= `SocOutcome::BlockFailed`，归属 ②）** | **必须归 ②**：该形态与"块 `Err`"同为"数据不可用 ⇒ 整站本轮失败"。**若静默返回 `None` + `Data`，即构成 §11.4.6 ② 明确禁止的"站在线但 SOC 静默缺失"**（更糟：`decode_regs` 对长度不足**解出 `0.0`**（§11.1 现状表），而 `0.0` 在域内 ⇒ 会被当成"真实 SOC = 0"推给控制链）。T6 实现即按 ② 同策处理，本行是**设计补齐**、后人不必推断 |
+  | ③ 全站无任何块含 `soc` 点 | 展开后无 `metric == "soc"` | `None` | `Data`（空占位） | 防御性分支：**该形态在配置期已被规则 4 拒**（§11.5.1），此处的 `Data` 只为"调度器单测可绕过 validate"而保留，**不是**允许的配置形态 |
+  | ④ 非承载 `soc` 的其它块读失败 | 任一其它块 `Err(e)` | `None` | **`Failed(e)`** | 与 ② 同：整站失败（§10.7），避免"半个站" |
+
+  > ②③④ 的差别是刻意的：**②④ 属"通信/链路"故障 ⇒ 整站失败（可退避自愈）**；**③ 属"配置"错误 ⇒ 配置期拒**。二者混为一谈会让"配置错"在运行期表现为"站离线"（PRD §9.7.2 第 5 条明确禁止：配置错误一律由配置期校验拦截，不在运行期兜底）。**② 补**（读回长度装不下 `soc` 点）与 ② 同类（**链路/数据不可用 ⇒ 整站失败、可退避自愈**），**不得**按 ③ 的"配置缺该点"处理（它是**本轮没读全**，不是配置里没有）。
+- **`Role::Pcs`**：与 `MeterBatt/Hvac/Fire` 同臂 → `empty_package()`（"站活着"信号）；其全部点只走 `telemetry_points`/`on_station_telemetry`，**不触发** `on_battery_soc`（N-1）与 `on_grid_package`（N-2）——这两条由 scheduler 的 role 判断**结构性保证**（只有 `Role::Battery` 才调 `on_battery_soc`；只有 `Role::MeterGrid` 才调 `on_grid_package`）。
+- **SOC 域检查落点**：`Battery` 分支解出 `soc` 后，**域外则把 `pkg.battery.soc` 置 `None`**（控制链拿不到坏值），而 `telemetry_points` 仍按**原值**产出 `soc`（`§9.6.3` ③"telemetry 保留证据"）。越界的**告警事件**由 scheduler 发（§11.4.7）。
+- **消防登记数**：`fire_detector_mismatch` 读"点名 `fire_det_count` 的点"（PRD §9.4.1 参考配置已在 `fire_sys` 的 `at: 7`（寄存器 10）上声明 `name: fire_det_count`，v1.7 定名），容量 = **升序链实际覆盖的探测器只数** = **`1 + Σ(以 `fire_det` 为前缀的块 `count`) / 6`**（**链首存在时 +1**；单块即退化为 `1 + 此块 count/6`）。两者不等 → 返回读回值。
+  - **为什么必须 +1（v1.8 勘误 —— 订正原文的 `Σ/6`，原文与 v1.7 的链首订正自相矛盾）**：v1.7 已裁定**探测器 1（寄存器 11）纳入升序链首**，而**探测器 1 并不在 `fire_det` 块里 —— 它在 `fire_sys`（寄存器 11–16）**。因此 `Σ(fire_det 前缀块 count)/6` 只数得到探测器 **2..n**，比设备的登记数**恒少 1**：按 §9.4.1 参考配置 `fire_det.count = 114` ⇒ 旧式得 **19**（19 只），而**寄存器 10 读回 20** ⇒ **判据恒真**。
+  - **恒真的后果（在 v1.7 的状态翻转制下）**：**不是"事件风暴"** —— 翻转制下稳态本应 0 条；而是 **判据恒真 ⇒ 永久假告警**：首次观测产 **1** 条 + **每次站恢复再产 1 条**（§11.4.7.2 C 的"恢复后首轮仍成立 ⇒ 按首次观测即产再产 1 条"）⇒ **PRD §9.5.4 的"强制交叉校验"永久失效（RC-5 失效）**：真正的探测器增减被一个恒定成立的本底告警淹没，运维再也分不出"现场真的改了探测器"。
+  - **与地址序校验同源（这是 `+1` 的判据，不是"凑数"）**：容量式与 `fire_detector_addr_order_violation` **覆盖同一个探测器集合**（链首 + `fire_det*` 区各组的 `+0`）。若两处集合不同，会出现"地址序链含 n 只、容量却按 n−1 只算"的口径分裂，且这类分裂在**探测器 1 被漏采**时恰好互相掩盖。
+  - **链首不可得时的降级口径（与地址序校验的降级口径一致 —— 同一条条件、同一个集合）**：v1.7 已定"配置未覆盖寄存器 11（非 §9.4.1 参考形态）⇒ **链首不可得，退化为只校 `fire_det*` 区**、不臆断违规"。**同一降级下容量式取 `Σ(fire_det 前缀块 count) / 6`（不加 1）**：即**容量式只计"链实际覆盖的探测器集合"**，与地址序校验**共用同一个"是否覆盖寄存器 11"的判定**、随之一同降级。**该形态下的比对照常执行（不得跳过）**：它是"配置所采 vs 设备登记"的事实比对，与地址序的"不臆断违规"是两回事 —— 配置只覆盖 `fire_det*` 区而设备登记数为 20 ⇒ **应当**报不一致（**这正是 RC-5 该抓的形态**：探测器 1 被漏采）。
+  - **按 §9.4.1 参考配置复核（v1.8）**：链首存在（`fire_sys` 的 `addr: 4` + `count: 13` 覆盖寄存器 11）⇒ 容量 = **`1 + 114/6` = 20**；寄存器 10 读回 **20** ⇒ **一致，不产告警**（旧式 19 与之不等 ⇒ 判据恒真，即上条后果）。
+  - **注（就地登记，非阻塞）**：**PRD §9.5.4 的同款算式原文亦是 `Σ(fire_det 前缀块 count)/6`**（未含链首）—— v1.7 的链首裁定后该原文**同样少算 1**，与本设计的订正口径出现差异。本设计**按订正口径（`1 + Σ/6`）实现**（否则触发上条"永久假告警"），并**建议需求侧随 §9.5.4 同步订正**（属链首裁定的连带订正；**不改 PRD**，仅登记）。
+- **消防地址升序（Q-9）**：`fire_detector_addr_order_violation` 逐只读 `+0`（地址号），**必须严格升序**（PRD §9.5.4"探测器按地址号从小到大顺序排列"）；违规 → 产事件（§11.4.7 ⑤，**事件产出频次口径见 §11.4.7.2**），并把该轮探测器区的点**标记为不可信**（telemetry 仍落原值，判据层拒用）——含义：**"第 n 只"只能等于"地址升序的第 n 只"**，顺序异常时点位与物理探测器**不再一一对应**。
+  - **链首含探测器 1（v1.7 订正，须评审追认见 §11.12.1 项 8）**：升序链 = **〔寄存器 11〕→〔`fire_det*` 区各组的 `+0`〕**。依据 **PRD §9.10 Q-9 原文**"以**寄存器 11** 读回的地址值交叉校验" + §9.5.4"第 n 只 = 按地址升序的第 n 只"（该表述对 **n = 1 同样成立**，故探测器 1 必须在链里，否则"第 1 只"是否为最小地址**无判据**）。**取数方式与配置解耦**：在 `reads` 中取**覆盖寄存器 11 的那一块**的块内偏移 `11 − addr`（§9.4.1 参考配置即 `fire_sys`（`addr: 4`）的偏移 7），因此**不依赖块名、不依赖点位名**；若配置未覆盖寄存器 11（非 §9.4.1 参考形态）⇒ **链首不可得，退化为"只校 `fire_det*` 区"（= T5 现状），不臆断违规**（本设计**不新增**配置期规则要求覆盖 11）。该值**只参与升序比较**，不另判其合法域（PRD 未给判据，不猜）。
+
+#### 11.4.7 scheduler 扩展（`mupc-southd::scheduler`）
+
+| 改动 | 内容 |
+|------|------|
+| 块读分发 | `match blk.func { Holding => read_holding, Input => read_input, Discrete => read_discrete }`（`read_discrete` 的 `BlockReads` 需要承载 `Vec<bool>`：`BlockReads` 元素类型扩为 `BlockData::Regs(Vec<u16>) \| BlockData::Bits(Vec<bool>)`，**或**引入平行的 `BitReads` 通道——本设计选**前者**：`BlockReads = Vec<(RegBlockConf, Result<BlockData, String>)>`，避免两条 mapper 入口） |
+| 变化沿过滤 | `PortRunner` 增 `edge_tracker: Mutex<HashMap<usize /*站下标*/, EdgeTracker>>`（**v1.3 把 `BitEdgeTracker` 推广为 `EdgeTracker`**，同时承载离散位与字级信号，见下"统一事件模型"）；每轮取"与上轮不同的位/信号 + 首次/复位后全量"；**站从 offline 恢复时先 `reset()`**（恢复后现势值连续性不可假设，须重发一次全量快照） |
+| 事件产出 | ① `Battery` 且 SOC 越界 → `on_station_telemetry(id, role, vec![("soc_out_of_range", 原始值, true)])`（**不调** `on_battery_soc`；**属"状态型事件"，产出频次按 §11.4.7.2 的状态翻转口径 —— T6 落地）** ② 位点 `BitClass::Alarm` 的 **0→1** 跳变 → `(点位名, 1.0, true)` ③ 消防登记数不一致 → `("fire_detector_count_mismatch", 读回值, true)`（**同为状态型事件，按 §11.4.7.2 —— T6 落地**）④ **消防字级信号**（系统状态位 / 火警状态枚举 / 探测器总状态位）进入与退出活跃 → `("<点名>@<信号键>", 1.0/0.0, true)` ⑤ **消防探测器地址升序违规**（Q-9）→ **按状态翻转产出**：进入 = `("fire_detector_addr_order_invalid", 首个违规探测器的 1 基序号, true)`、恢复 = `("fire_detector_addr_order_invalid@recovered", 0.0, true)`；**状态未变的轮次一条都不产**、**首次观测即产**（**v1.7 裁定，口径见 §11.4.7.2 —— T5 需按此补改**；原"命中即产"= 8.6 万条/日） ⑥ 消防钢瓶气压"未配置"**不产事件**（仅展示层标注，PRD §9.7.6）⑦ **PCS 32 位电量比对未通过**（PRD §9.8.4）：**本设计不产该事件** —— 该要求由 RC-2「未通过则不配 4 个 32 位电量点」替代（§11.7.4），**处置与理由见 §11.12.2 Δ-9（须需求侧追认）**；故事件表**不含**此项，实现时**不得**自行造判据（PRD §9.7.2 第 2 条禁本轮做量程自校验） |
+| role 优先级 | `role_priority`：`MeterGrid\|Battery => 0`、**`Pcs\|MeterBatt => 1`**、`Hvac\|Fire => 2`（PRD §9.3.2.3） |
+| 闸门不变 | 只有 `MeterGrid` 的 `on_grid_package` 推进 AiIntegrator 闸门；`Pcs`/`Battery`/`MeterBatt`/`Hvac`/`Fire` 一律不推进（§10.5 语义**零改动**） |
+
+#### 11.4.7.1 统一事件模型（v1.3 新增 —— P0-3 的落点）
+
+**问题（上轮评审 P0-3）**：PRD §9.6.1 要求 `fire` 的「**系统状态位 / 探测器 / 火警状态**」进 `events` + SSE，但 §11.4.7 的事件模型只认**离散位点**（`func: discrete` 块的 `BitClass::Alarm`）—— 而**消防全部状态量都在保持寄存器整字里**（`fire_sys`：addr 4 系统状态位图、addr 6/7/8 烟/温/可燃状态位图、addr 9 火警状态枚举；探测器 addr 12 状态位图），**本站没有任何 `discrete` 块** ⇒ 消防一个事件都产不出来，§11.7.1 的 `fire` 行「events」与 §11.8「维持 §10.4 融合」**缺一半输入**。
+
+**解法：把"事件源"从"离散位"推广为"信号（Signal）"** —— 四类"字/位信号"（下表前四行）共用**同一套跃迁记忆与同一条事件产出路径**，唯一的差别是**活跃判据函数**（v1.7 另加第 5 类**站级派生布尔量** `StationFlag`，见下表末行 —— 它同样走这条路径，但产出频次口径不同，见 §11.4.7.2）：
+
+| 信号形态 | 载体 | 取值 | 活跃判据 | 事件产出 |
+|----------|------|------|----------|----------|
+| `Bit`（**既有**：BMS 288 位、空调 31 位） | `func: discrete` 块 | 位向量第 k 位 | 位 == 1 | 仅 **0→1 上升沿**（`BitClass::Alarm` 行；`State`/`Reserved` 只落 telemetry） |
+| `WordBit`（**新增**：消防系统状态 / 烟温可燃 / 探测器总状态） | 保持寄存器**整字** | 整字值 | `字 & mask ≠ 0`（mask 取自 `point_table::signals`） | **进入/退出活跃均**产事件（见下"为何双向"）。**入表即产事件**，未入表的位一律只落 telemetry |
+| `WordEnum`（**新增**：消防火警状态 addr 9） | 保持寄存器**整字** | 整字值 | 值 ∈ `active` 集合 | 同上；**活跃值之间跃迁亦产事件**（1 一级报警 → 2 二级火警） |
+| `WordScalar`（阈值型模拟量） | — | — | — | **本轮不引入**（PRD 明令不做通用量程自校验；消防无模拟量消费方 —— 这同时是 G-6 延后的保护边界，见 §11.10） |
+| **`StationFlag`（v1.7 新增：站级派生布尔量 —— 地址序违规 / SOC 域检查 / 登记数交叉校验）** | **无寄存器**（`mapper` 的交叉校验/域检查结果） | 布尔（判据成立与否） | `mapper::fire_detector_addr_order_violation(..).is_some()` / `!soc_in_domain(..)` / `fire_detector_mismatch(..).is_some()` | **按状态翻转产出**（进入 1 条 + `@recovered` 1 条、**状态未变不产**、**首次观测即产**）—— 与前三行的"跃迁即产"**不同**，口径与理由见 **§11.4.7.2** |
+
+**统一机制（同一 `EdgeTracker`）**：每个信号（含每个离散位）在 `EdgeTracker` 里占一格"上轮活跃态"，每轮算出 `(上轮, 本轮)` 二元组：
+- `false → true`：**进入活跃** ⇒ 产事件（`value = 1.0`）；
+- `true → false`：**退出活跃** ⇒ 产事件（`value = 0.0`）；
+- 其余（含首次采样的"未知 → X"）：**不产事件**（首轮只建立基线；站恢复后 `reset()` 同理，避免"恢复即刷一屏事件"）。
+> **唯一例外（v1.7）**：第 5 类信号 `StationFlag`（站级派生布尔量）**首次观测即产**（它至多 1 条/站，"上线时已异常"必须可见）—— 见 **§11.4.7.2**。其余四类的"首轮只建基线"规则**不变**。
+
+```rust
+/// 某站的变化沿记忆（scheduler 内，按站下标索引）
+pub struct EdgeTracker { last: HashMap<String /*信号全名或点位名*/, bool>, primed: bool }
+impl EdgeTracker {
+    /// 首轮/站恢复时调用：清空记忆并把本轮的活跃态记为基线（不产事件）
+    pub fn prime(&mut self, now: &[(String, bool)]);
+    /// 产事件：返回 (metric, value, is_event=true) —— 含 进入(1.0)/退出(0.0) 两类跳变
+    pub fn edges(&mut self, now: &[(String, bool)]) -> Vec<(String, f64, bool)>;
+}
+```
+
+> **双向/单向的落地形态（v1.4 订正 —— 删除无定义的 `EmitBidi`/`emit_falling_edges`）**：v1.3 曾在上面列出一个 `pub fn emit_falling_edges(class: EmitBidi) -> bool;`，但 **`EmitBidi` 在本设计中从未定义**（悬空符号）。本版**删去该行**：双向性是**信号形态自身的属性**，不需要额外开关 —— `WordBit`/`WordEnum`（消防字级信号）进入与退出**都产事件**；`Bit`（离散位块）**仅 0→1 上升沿**（`BitClass::Alarm` 行）。该差别落在 `scheduler` 调 `EdgeTracker::edges()` 后的**一次过滤**上（离散位只取 `false→true` 的项），**不是**一个公开 API，也不引入新类型。若将来需要开关，再按"新变体扩展"（与 `SignalSpec` 同一取向）。
+
+事件名（**事件命名空间，非遥测命名空间**）：`<遥测点名>@<信号键>`。例：`fire_sys_1@main_power_fault`（系统状态 bit14 主电故障）、`fire_sys_6@level2`（火警状态 = 2 二级火警）、`fire_sys_8@alarm`（探测器 1 报警总状态）、`fire_det_2@fault`（探测器 2 故障总状态）。事件最终进 `storage.events` 的键仍是既有的 `south_station.<站id>.<metric>`，`metric` 即上述带 `@` 的名字（`SouthSink` 侧查 `point_table::label` 补中文名，查不到用原名）。
+
+**为什么消防取"双向"，而 BMS/空调位块仍只取上升沿（不对称是刻意的，须登记）**：
+1. 消防是**联锁判据源**（PRD §9.6.1：`fire` 行"是（仅事件/联锁判据，非控制量）"）；设计 §10.4 的融合规则含「**恢复需双方复位**」—— 联锁要能收敛，就必须知道**消防侧已解除**；只有上升沿会让"消防侧复位"这一事实**永远不可观测**。
+2. BMS 288 位 / 空调 31 位的告警位**没有停机或联锁消费方**（PRD §9.6.1：BMS 告警位不触发停机），下降沿无消费方；对 288 位产双向事件只会制造事件噪声（去重键与保留策略压力）。
+3. 消防信号总数受登记数约束、跃迁稀疏；BMS 位块相反（288 位/轮）。
+> 该不对称登记为设计决策（§11.12.1 项 6），待评审追认。若评审要求统一，退路是"全部双向 + 事件节流"，代价见 §11.12.1。
+
+**消防信号清单（哪些产事件、哪些只落 telemetry）**：
+
+| 寄存器 | 点名 | 登记的信号键（**入表 = 产事件**） | 形态 | 依据 |
+|--------|------|-----------------------------------|------|------|
+| 4 系统状态 | `fire_sys_1` | `main_power_fault`（bit14）/ `backup_power_fault`（bit13）/ `drive_circuit_fault`（bit11）/ `pressure_sensor_fault`（bit10） | `WordBit{mask: 1<<n}` | PRD §9.5.4 位定义表；均为「1 = 故障」 |
+| 4 | `fire_sys_1` | `spray_fired`（bit8，1 = 已喷）/ `valve_open`（bit9，1 = 开启） | `WordBit{mask: 1<<n}` | 灭火动作必须留痕（PRD 明确要求列举"喷洒标记"）；语义由 `label` 文案区分为"动作"而非"故障" |
+| 6 / 7 / 8 | `fire_sys_3/4/5` | `smoke_trigger` / `temp_trigger` / `combustible_trigger` | `WordBit{mask: 0b11}` | bit1 复合探测器触发、bit0 干接点触发；**bit2（点型，预留未启用）不纳入 mask** —— PRD §9.7.6 明文"采集成点但不产出告警事件" |
+| 9 火警状态 | `fire_sys_6` | `level1`（值 1）/ `level2`（值 2）/ `emg_start`（值 4）/ `emg_stop`（值 5） | `WordEnum{active: …}` | 值 3 预留（不纳入 `active`）；值 0 工作正常 = 非活跃（`active` 只列 1/2/4/5，故"任何活跃值 → 0"即退出活跃） |
+| 12 探测器状态 | `fire_sys_9`（探测器 1）/ `fire_det_<序号>`（探测器 2..n） | `alarm`(bit12 报警总状态) / `fault`(bit14 故障总状态) | `WordBit{mask: 1<<n}` | PRD §9.6.1 明确要求"**探测器**"进 events；**探测器级只取这两条总状态**，bit0–4 的传感器细分**不产独立事件**（取舍：n≤100 ⇒ 逐传感器产事件会让事件源数 ×5，且告警类别可从该探测器原始整字回溯；登记为设计取舍 §11.12.1 项 6） |
+
+**不登记信号（只落 telemetry，与上表同等重要 —— 防止"顺手多产"）**：
+
+| 寄存器 / 位 | 为什么不登记 |
+|-------------|--------------|
+| 系统状态 bit15 工作模式 / bit12 充电状态 / bit7–0 备电电量 | 普通状态量与连续量；备电量是"值"不是"跃迁"（§11.7.2 第 7 条） |
+| 探测器状态 bit15 通信状态（**0 = 离线，与其余位极性相反**）/ bit13 电磁阀 / bit10–11 反馈输入 | **极性反转位与反馈位无明确告警语义 ⇒ 本设计不猜、不造判据**（`SignalPick::WordBit` 的注释已把该口径写成约束） |
+| 探测器状态 bit0–4（烟雾/温度/CO/H2/VOC 报警与传感器故障）| 逐传感器事件会让事件源数 ×5（n≤100），且 bit12 报警总状态已覆盖"该探测器报警"；细分可从整字原值回溯 |
+| 5 钢瓶气压（整字） | 恒 0 不得判"气压异常"（PRD §9.7.6）；展示层按"未配置"呈现（§11.7.3），**永不产事件** |
+| 11 探测器地址 / 13 数据 1 / 14–16 CO·VOC·H2 | 数据 1 的字节拆解属 G-6 展示层（§11.10），**事件层不触碰**；CO/VOC/H2 无阈值口径（文档未给），不得自行造判据 |
+
+**事件检测**发生在**哪一层**：**`mupc-southd` 侧的 scheduler/tracker 层**（南向的"事件层"），**不**在下游展示层 —— 因为事件只能经 `on_station_telemetry(is_event=true)` 进 `storage.events` + `AlertFeed`，而**该通道只由 southd 持有**；若把检测放到 Web/展示层，火警将无法及时进 events/SSE，也接不上 §10.4 的联锁融合。
+
+**与 §11.10 的 G-6 口径是否冲突：不冲突，边界如下（三层职责互不重叠）**：
+1. **telemetry 值**：消防状态量一律**整字原值**落库（G-6 延后，`fire_sys_1/6/9` 等点的 `value` 就是整字 0–65535）——**不变**；
+2. **事件层**：只做 **`字 & mask` / `字 ∈ 枚举集`** 的**位/枚举判定**（不涉跨字节组合的物理量、**不修改 telemetry 值**）—— 这是 PRD §9.7.6 明文授权的范围（"展示/**事件层**按字节语义拆解"）；
+3. **展示层**：仍负责 §11.10 的**字节拆解**（唯一涉及跨字节的是"探测器数据 1"：高字节烟雾/低字节温度）—— 该点 **不产事件**（无模拟量消费方，PRD D-2 重启条件 ②），故与事件层**零重叠**。
+
+> 一句话：**G-6 延后的是"把整字拆成两个遥测点"；消防事件用的是位/枚举语义 —— 二者不是同一件事，也不共用同一份拆解代码**（事件层只有 `mask/active` 常量，没有"字节切片"逻辑）。
+
+#### 11.4.7.2 状态型事件的口径裁定（v1.7 新增 —— T5 代码评审升级为设计裁定）
+
+> **本节是两条事件口径的**设计裁定**（架构师职权），不是实现细节**：T5 已实现并通过代码评审，评审把 2 条事件口径问题**升级为设计裁定**，并明确"**不阻塞 T5，但禁止在裁定前把 `fire` 站写入生效配置**"。故本节给出可实施、可测、可验收的口径；**若需改代码，明确写出"需 T5 补改"**。
+
+##### A. 背景（问题是什么）
+
+| 项 | 事实 |
+|----|------|
+| **问题 1：事件风暴** | §11.4.7 的 ⑤「消防探测器地址升序违规」在 T5 实现上按"**命中即产**"落地 —— 判据仍成立的**每个轮询周期都产一条**。评审实测：5 轮 = **5 条**；`fire` 站 `interval_ms = 1000` ⇒ **约 8.6 万条/日**，对 `storage.events`（写入 + retention 清理）与 SSE（`AlertFeed` 推送）有实际压力 |
+| **问题 2：`WordEnum` 退出的误读风险** | 火警枚举 `0→1→2` 时，`1→2` 那一轮**同轮**产出 `fire_sys_6@level1 = 0.0`（退出）与 `fire_sys_6@level2 = 1.0`（进入）。**联锁消费方逐条独立处理**时，看到 `level1 = 0.0` 会误判"一级报警已解除"，而 §10.4 的语义是"**恢复需双方复位**"（报警并未解除，只是**升级**） |
+| **口径缺口（本裁定的对象）** | 设计目前只给 **offline** 定义了去抖口径（"首次失败立即记一次 + `stale_timeout_s` 窗内不重复"，§10.7）；**⑤（及同类 ① ③）没有任何产出频次口径**，PRD §9.10 Q-9 也未定义 ⇒ 实现忠于设计（**故不判 T5 错**），缺口由本节补齐 |
+
+##### B. 判定的类：什么算"状态型事件"
+
+| §11.4.7 事件 | 判据来源 | 判据取值 | 类别 |
+|--------------|----------|----------|------|
+| ① `soc_out_of_range` | `mapper::soc_in_domain`（PRD §9.6.3） | 布尔（域内 / 域外） | **状态型（本节口径）** |
+| ② 位点 `BitClass::Alarm` | 离散位向量第 k 位 | 布尔 | 非（**已是跃迁量**，走 §11.4.7.1 的 `EdgeTracker`） |
+| ③ `fire_detector_count_mismatch` | `mapper::fire_detector_mismatch` | 布尔（一致 / 不一致） | **状态型（本节口径）** |
+| ④ 消防字级信号 | `SignalPick::is_active` | 布尔 | 非（**已是跃迁量**） |
+| ⑤ `fire_detector_addr_order_invalid` | `mapper::fire_detector_addr_order_violation` | 布尔（合法 / 违规） | **状态型（本节口径，T5 已实现待补改）** |
+| ⑥ 消防钢瓶气压"未配置" | — | — | **不产事件**（PRD §9.7.6，不适用） |
+
+**"状态型"的判据 = 该事件的"成立与否"是一个判据函数的布尔返回**，**它本身不是跃迁量**（跃迁由"与上一轮的比较"产生，不是判据函数的输出）。**这一类的共同风险 = 只要判据不清零，就会每轮重产**。
+
+##### C. 裁定 1：状态型事件一律按"状态翻转"产出（不逐轮重复）
+
+| 项 | 口径（**可实施、可测**） |
+|----|--------------------------|
+| **产出口径** | **只在该布尔态发生翻转的那一轮产事件**：`false → true`（进入）产 **1** 条（事件名 = **原名**）；`true → false`（恢复）产 **1** 条（事件名 = **`<原名>@recovered`**）。**状态未变的轮次一条都不产**（稳态事件数 = **0**，只留翻转点） |
+| **判据/去重的载体** | **复用 §11.4.7.1 的同一个 `EdgeTracker`**（不新建第二套记忆）：把该布尔量作为**第 5 类信号 `StationFlag`** 喂进同一个 `RoundSignals.all`，与位/字级信号**共用同一条事件产出路径**（信号形态表见 §11.4.7.1 末行） |
+| **首次发现是否产** | **产**（进入事件）—— 这是"首轮/恢复后首轮只建基线、不产事件"**唯一的一条例外**。**理由**：① 它至多产 **1 条/站**（不构成风暴，无需靠"不产"来防刷屏）；② 若不产，则"**上线时地址序就已经错了**"将**永不产出事件**（状态无翻转点）⇒ §9.5.4"第 n 只 = 按地址升序的第 n 只"的前提**永久不可观测**，点位与物理探测器的错配被静默；这与 PRD §9.7.2 第 5 条（配置错误不得由运行期静默兜底）与 §9.7.6 的取舍取向（**该产的必须产**，不该产的一条都不产）同源 |
+| **恢复后是否产"已恢复"事件** | **产**（`<原名>@recovered`，`value = 0.0`）。**理由**：它是"现场已改正探测器地址/接线"**唯一**的可观测点；没有它，事件日志**无法区分"仍然违规"与"已修复"**（与 §10.4"恢复需双方复位"要求复位可观测同一取向） |
+| **站 offline → 恢复后** | 与其它信号**同等**处理（共用 `EdgeTracker`，恢复后首轮 `reset()` 重建基线）：恢复后首轮**仍违规** ⇒ 按"首次观测即产"**再产 1 条**。**不为它单开"跨离线保持"的第二种记忆** —— 代价 = 每次恢复最多多 1 条（恢复本身已是事件、由 offline 口径去抖），**收益 = 全系统只有一套记忆语义**（KISS） |
+| **`value` 约定（进入/退出正交）** | **进入**：`value` = **诊断量**（⑤ = 首个违规探测器的 **1 基序号**；③ = 读回登记数；① = 越界原始值）—— ⑤ 与 T5 已实现的取值**一致**（不丢 RC-10 的定位信息）；**退出**：`value` 恒为 **`0.0`**（哨兵，不承载诊断量）。**为什么把"状态"放在事件名而不是 `value` 上**：诊断量**本身可以取 0**（③ 读回 0 只；① 若 `offset < 0` 则 raw 0 解出越界值）⇒ 单靠 `value` **无法同时承载"诊断量"与"进入/退出"两个维度**；`@recovered` 后缀让两维**正交**、消费方零歧义、存储键可直接区分（`south_station.<站id>.<metric>@recovered`）。它仍在 §11.4.7.1 的**事件命名空间**内（其 `metric` **不对应任何遥测点** ⇒ 与 `<遥测点名>@<信号键>` 的区分判据 = **前缀是否为已登记遥测点名**） |
+| **为何不选"套 offline 的 `stale_timeout_s` 去抖窗"** | offline 用时间窗是**刻意**的：通信故障是"**每轮仍在发生的过程**"，周期性重提醒有意义（链路仍断着）。而**配置/接线类事实不随时间变化** —— 时间窗只把 **8.6 万条/日**降成 **1.7 万条/日**（5s 窗），**治标不治本**且把"频次"绑到一个语义无关的通信参数上；状态翻转口径把稳态事件数降到 **0** |
+| **不做的事** | ① **不新增**"事件节流/采样/漏桶"机制（不引入 `stale_timeout_s` 之外的第二套窗）；② **不改** ② ④（它们已是跃迁量，本就是翻转产事件）；③ **不改**消防字级信号的双向决策（见下 D 节） |
+
+**落点与影响（谁要补改）**
+
+| 项 | 影响 | 说明 |
+|----|------|------|
+| **⑤ 地址序（T5）** | **需 T5 补改** | `mupc-southd/src/scheduler.rs`：把 `mapper::fire_detector_addr_order_violation(role, &reads).is_some()` 作为 `StationFlag` 汇入 `RoundSignals.all`（**去掉**现在"每轮直接 `events.push(...)`"的写法）；`edges()` **不**直接给这个 metric 的进入事件赋 `1.0` —— 在**同一处的后处理**里把进入事件的 `value` 替换为本轮判定出的**组序号**、把退出事件的 metric 改名为 `...@recovered`（`value = 0.0`）。**测试补改**：`scheduler.rs::fire_detector_addr_order_violation_emits_event` 现断言"首轮即违规 ⇒ 产 1 条 `value = 2.0`"，须改为"**首轮即违规 ⇒ 产 1 条**（首次观测即产）"+"**连续违规轮不重复**"+"**恢复升序 ⇒ 产 1 条 `@recovered`/`0.0`**"；并按 §11.4.6 的链首订正用例（见 E 节） |
+| **① SOC 越界 / ③ 登记数不一致（T6，尚未实现）** | **无补改成本，但必须按本口径实现** | 这两条落在 T6（§11.13 T6："SOC 域检查、消防登记数"）。**若 T6 沿用"命中即产"，同样的风暴会原样重现**（SOC 越界持续 1h = 3600 条；登记数不一致持续 1 天 = 8.6 万条）—— 这正是本次裁定把口径**按类**给出（而非只补 ⑤）的原因 |
+| **是否需需求侧追认"周期重提醒"** | 见 §11.12.1 项 8 | 若运维要求"持续异常须**周期性**重提醒"，那是一个**周期口径**，须由**需求侧**给出（本设计**不自造**窗）；机制上退化为"状态翻转 + 固定周期重发" |
+
+##### D. 裁定 2：`WordEnum` 跃迁的"退出"事件语义 —— 维持现状 + 补消费方判据
+
+**问题复述（评审原话的落地）**：`WordEnum` 取**双向**（§11.4.7.1 的刻意设计），故 `0→1→2` 时 `1→2` 会**同轮**产出 `fire_sys_6@level1 = 0.0` 与 `fire_sys_6@level2 = 1.0`。评审明确"这是统一规则的必然结果、与设计字面一致，**非缺陷**"；但需裁定是否存在**理解/联锁风险**。
+
+**裁定：维持现状（不删退出事件、不改"活跃值间跃迁亦产"），把语义与消费方判据写死（不改代码）。**
+
+| 项 | 口径 |
+|----|------|
+| **退出事件的语义** | "**该点（整字）已离开该枚举值**"——**不表示**该级别报警已解除，**不表示**消防侧已复位 |
+| **消费方判据（★强制，须在联锁/展示消费侧生效）** | 判定"消防侧已复位"**必须按点名成组、同轮整体判读**，**禁止逐条独立解读**：<br>① 同一轮内、**同一 `<点名>`**（如 `fire_sys_6`）下出现**「退出 + 进入」** ⇒ 这是**级别跃迁**（报警**仍在**，级别已变，如 1→2、2→5）；<br>② 同一轮内、同一 `<点名>` 下**只有退出、无进入** ⇒ 该整字已回到**非活跃**（`WordEnum` 即值 0「工作正常」）⇒ **这才是"消防侧复位"的可观测证据**（§10.4"恢复需双方复位"的消防侧输入）；<br>③ `WordBit`（系统状态位图 / 探测器总状态）的各 bit **相互独立**，某 bit 退出即该位归 0，**可直接采用**（不适用①②的成组规则） |
+| **是否需改 T5 代码** | **不需要**。T5 的实现与既有用例（`fire_wordenum_emits_transition_events_between_active_values`：`1→2` 恰产 1 退 1 进）**与此一致**；本裁定补的是**此前缺的消费方判据**，不是行为 |
+| **现存消费方（实测）** | **无** —— core-bin 的联锁（`mupc-core-bin/src/interlock.rs`）目前**只由 DI/GPIO 通道驱动**（"停机仅以 DI3 触发"），**尚未消费 southd 的 fire 事件**；核间 10 §I-2 规划的"事件流 / `fire_state` 二选一"属**待实现**。故本裁定**无需补改任何现存消费代码**；它的作用是给**将来实现该消费方的人**一条**强制判据**（否则必踩"`level1 = 0.0` ⇒ 一级报警已解除"的坑） |
+| **为何不选 (b)"只产更重级别的进入"** | 会**破坏按事件流重建状态**：`0→1→2` 下 `level1` 被静默置为非活跃（**不产**退出），消费方重建状态时会认为 `level1` **仍活跃**；且该规则要求 `EdgeTracker` **跨信号联动**（低级是否产退出取决于高级是否同轮进入），破坏 §11.4.7.1"一个信号占一格、彼此独立"的结构 |
+| **为何不选 (c)"载荷带整字"** | 会让 `value` **同时**承载"该信号的活跃态"与"整字诊断量"两个维度，与 `Bit`/`WordBit` 的 `value = 0.0/1.0` 口径**分裂**；而整字原值**已在 telemetry 里**（§11.7.2 第 6 条"telemetry 仍落整字原值"）⇒ 需要整字的消费方**读 telemetry 现势值**即可，不必在事件里重复 |
+
+##### E. 与 §10.4 联锁语义、§11.7 消费链路的边界（防误用，必须写清）
+
+| 关系 | 口径 |
+|------|------|
+| **⑤ / ③ 不得并入 §10.4 的"触发取 OR"**（**强制**） | `fire_detector_addr_order_invalid`（与 `fire_detector_count_mismatch`）是**数据可信性告警**，**不是火警信号** ⇒ 若并入 §10.4 的 OR 判据，"**探测器地址配错 / 登记数不符**"会被升级为**消防停机触发**（PRD §9.6.1 的 fire 行是"仅事件/联锁判据"，其触发语义仍只能来自消防**报警/状态**量）。它们的消费方**只有运维侧**：事件流 / SSE / 展示层的"点位不可信"标记（§11.7.3） |
+| **⑤ 的"不可信标记"不随事件去重而改变** | 事件**去重**只作用于 `events` 产出；§11.7.2 第 9 条的"**该轮**探测器区点位标记不可信"是**逐轮现势判定**，**每一轮都照旧生效**（两者互不影响：一个是事件频次，一个是判据层拒用） |
+| **§11.7.1 的 fire 行** | "telemetry（整字原值）+ events（信号进入/退出活跃 + 登记数/地址序异常）"**不变**；本次新增的只是①②③的**频次口径**与 `@recovered` 命名 |
+| **§11.7.2 第 7 条枚举清单** | 四条枚举信号与"值 0 = 非活跃"**一字不改** |
+| **§11.8 的 §10.4 联接** | **已在 §11.8 同处补入**"成组判读约束"一句（v1.7；**§10.4 本体不改**、§10 全章不改 —— 硬约束「只改 §11」）。**若 §10/S2 侧的既有实现日后按"单条退出 = 复位"解读，须单独立项修正**（不属本章范围） |
+| **§11.4.7.1 的"双向"理由（① 联锁要能收敛）** | **不变**：退出事件仍是"消防侧复位"的**必要**观测点 —— 本裁定只声明它**不充分**（同轮若有同点名进入 ⇒ 是跃迁而非复位） |
+
+
+### 11.5 配置期校验（PRD §9.4.3 十七条逐条落点 + 2 条补落点）
+
+#### 11.5.1 落点表
+
+| # | PRD 规则 | 落点函数 | 判定依据 | 说明 |
+|---|----------|----------|----------|------|
+| 1 | 新 role 合法性 | serde（`Role`/`RegFunc`/`RegFormat`/`WordOrder`/`StationParity` 枚举） | 未知 YAML 取值 → 反序列化 `Err`（启动期 config load 即失败） | 无需新代码，**补单测**（未知 role 字符串 → Err） |
+| 2 | 单站约束 | `SouthStationsConfig::validate` | `Role::Pcs` 计数 > 1 → Err | 与既有 `meter_grid`/`battery` 单站约束同形态 |
+| 3 | 必填点表 | 同上 | `role == Pcs && regs.is_empty()` → Err | 空 regs = 站永久 offline 的静默死配 |
+| 4 | `soc` 点契约 | `validate_station_regs` | `role == Battery` 且 `points::expand()` 展开后**无 `metric == "soc"`** → Err | 消费方按点名查找，缺名即静默不推 SOC |
+| 5 | 格式与标度 | `validate_station_regs` | `int32_scaled/int16/uint16` 的**块级或点级** `scale == 0`（点级 `None` = 继承块级，只判一次）→ Err；`discrete` 块**不适用** | 防"raw×0 整块解 0" |
+| 6 | 符号性一致性 | `validate_symbolicity` | ① `format∈{u16,i16} && offset≠0` 且 `lookup(role,addr)` **命中一行**、而该行 `sym_src` 为空 → Err（**v1.3 删去 v1.2 的"无行"半句**，理由见 §11.4.4）② `lookup` 命中且 `offset` 与登记值不等（含漏配 → 0）→ Err | 期望值来自 §11.4.4 的 `POINT_REGS`；`format`/`scale` 不强制（§11.4.4 口径）；**查不到行 → 放行** |
+| 7 | 点位越界 | `points::expand` | 点覆盖 `[at−1, at−1+width)` 超出 `[0, count)` → Err | 返回 Err 含块名/点名/`at` |
+| 8 | 点位重叠 | `points::expand` | 同块内两点覆盖同一寄存器/位 → Err | 32 位点占 2 寄存器，与相邻 16 位点重叠也算 |
+| 9 | 32 位点对齐 | `points::expand` | `width == 2 && at − 1 + 2 > count` → Err | "半个 32 位值" |
+| 10 | 点名唯一 | `validate_station_regs` | 展开后站内 `metric` 去重（含自动点名与显式 `name` 相撞）→ Err | 遥测键冲突 |
+| 11 | 空洞上限 | `validate_station_regs` + `footprint` | 声明了 `points` 的标量块**窗口首尾以声明点锚定**：首个声明寄存器必须落在块内偏移 **0**（不得含前导未声明寄存器），最后一个声明寄存器**末端必须恰好等于 `count`**（末尾未声明寄存器不计入 `count`）；块内未声明寄存器的**连续空洞 > 4** → Err。`discrete` 块**不受此限** | 空洞判据来自 PRD §9.4.2.1 第 3 条（空读 ≤ 一次请求帧 8 字节） |
+| 12 | 位块上限 | `validate_station_regs` | `func == Discrete && count > 2000` → Err | BMS ≤ 2000 位；`count == 0` 亦拒 |
+| 13 | 地址有效性 | `validate_station_regs` | `addr == 0` **仅允许** `role ∈ {MeterBatt, Hvac}`；其余 role（含既有 `MeterGrid`、新增 `Battery`/`Pcs`/`Fire`）要求 `addr > 0` | 既有 `MeterGrid` 的 `addr > 0` 检查**被吸收进**本规则（行为不变） |
+| 14 | 区间与重叠 | `validate_station_regs` | 同站**按功能码空间**（holding / input / discrete 三套地址空间）分别判半开区间重叠 → Err | 覆盖既有"仅 meter_grid 做重叠检查"的形态（PCS 3 区/4 区同址不同 func 由此天然放行） |
+| **15** | **块落地极大性（v1.3 重写）** | `validate_maximality` | **适用域（先行过滤）**：**仅当被考察的两个块都声明了 `points`（非空点清单）、且均非 `discrete` 块时才参与判定**；任一块未声明 `points` → **跳过、不判**（既有 `meter_grid` 六相量块、`bms_alarm`/`hvac_di` 两个位块均属此列）。<br>**判据（同时满足才拒）**：两块 `func` 相同、`byte_swap` 相同、地址**严格相邻**（`b.addr == a.addr + b.count` 即 `b.addr == a.addr + a.count`）、**合并后 `count = a.count + b.count ≤ MAX_SINGLE_READ_REGS (120)`**、**合并窗口内连续空洞 ≤ 4**、且**两块均未标 `read_slice: true`** → **Err**（提示合并）。<br>**豁免**：相邻块中**任一块**标 `read_slice: true` → 不拒（PRD §9.4.2.4 v1.7 补登；四条"不得用于逃避合并"的边界以 PRD 为准） | **重写要点**：① **限定适用域**（只作用于声明了 `points` 的标量块）—— 否则会拒掉既有 `grid_meter`（六块地址严格相邻）⇒ 现场启动 fail-fast；② **判据与 PRD v1.8 逐条对齐**：`count ≤ 120`（④）+ 空洞 ≤ 4（③）**都实现**，其中 **③ 在适用域内由规则 11 的首尾锚定恒成立**（证明见 §11.5.2(1) 表后"③ 的等价性"），故实现 ③ 只是与 PRD 逐字对齐、不引入额外拒绝。**逐站证明见 §11.5.2(2)** |
+| **18** | **`pcs` 站周期下界**（v1.3 补落点；PRD §9.3.2.2(2) + §9.8.1 末条） | `SouthStationsConfig::validate`（站级基础校验，**与既有 `meter_grid`/`battery` 的 `< 5000` 拦截同址**） | `role == Pcs && interval_ms < 500` → Err | 防"误配的超短周期打满总线"；`pcs` **无** `< 5000` 上界约束（不参与控制决策，PRD §9.3.2.2(2)）。**该条不在 PRD §9.4.3 表内，由 PRD 另两条明文要求**（§9.3.2.2(2)、§9.8.1 末条）——AC-1 ③ 一并断言（§11.11.2） |
+| **19** | **无 `points` 块的宽度护栏**（v1.3 补落点；设计补充） | `validate_station_regs` | `func != Discrete && points.is_empty() && count % format.reg_width() != 0` → Err | 防"32 位格式的尾槽静默不产点"（如 `count: 3` 只产 1 点、少 1 点而无人知）。`discrete` 块与声明了 `points` 的块不适用（理由见 §11.4.3 护栏段）。登记为设计补充（§11.12.1 项 3b） |
+| 16 | 同口一致性 | `validate_port_consistency` | 同 `port` 各站 `baud_rate` **与 `parity`** 必须一致 → Err | 既有 baud 循环扩展 parity（缺省 `none` 参与比较：空调站配 `even` 而同口另站未写 → Err，防静默忽略） |
+| 17 | 跨段互斥 | `core_config::validate_south_stations` | `port` 与 `intercore.modbus_rtu.serial_port` 同节点 → Err | **既有实现，沿用，零改动** |
+
+**顺序（v1.4 钉住，含一条保住既有断言的实现约束）**：`validate()` 内先做站级基础校验（id/port/slave/interval/baud，**含规则 18 的 `pcs` 下界**）→ 再 `validate_station_regs`（含展开，**含规则 10/13/14/19**）→ 最后跨站（单站约束计数、同口一致性、极大性）。**逐站短路返回首个 Err**（沿用既有风格：错误消息即定位信息，含站 id / 块名 / 点名 / 期望值）。
+
+> **⚠️ 实现约束（必须遵守，理由见 §11.5.3.4.1）**：既有的 **`meter_grid` 站内完整性校验整组**（缺相量块 `p/q/pf/u/i` / `int32_scaled` 块 `scale > 0` / 相量块 `count ≥ 6` / `p_total count ≥ 2` / **块名唯一** / `addr > 0` / 半开区间不重叠）**保持在 `validate_station_regs` 之前、原地不动**（即仍在逐站循环的"站级基础校验"阶段），**不得后移、不得被通用规则 10/13/14/19 取代**。原因：这组校验对同一份坏配置会给出**与通用规则不同但更具体**的文案（`块名重复` / `addr 不能为 0` / `寄存器区间重叠` / `count 须 ≥ 6` / `须显式 scale>0`），而 §11.5.3.4 **C2**（S3b-1c 校验语义的回归锚）逐条断言了这些文案；顺序一换，C2 即失配（其中"两块同名 `p`"这一例**新规则 10 同样成立**，最易被误判为"文案可改"）。
+
+> **规则 18/19 的编号说明**：PRD §9.4.3 的表是 **17 条**；18/19 是设计侧补的两条落点（18 由 PRD §9.3.2.2(2)+§9.8.1 明文要求但**未进 §9.4.3 表**；19 为设计补充的护栏）。二者均上报需求侧（§11.12.2），**AC-1 ③ 一并断言**但标注"非 §9.4.3 表内条件"。
+
+#### 11.5.2 第 15 条的完整口径与「§9.4.1 六站必然通过」的证明（P0-1）
+
+**（1）第 15 条的完整口径（v1.3 按 PRD v1.8 逐条对齐重写）**
+
+| 要素 | v1.2（旧） | **v1.3（本版）** | 为什么必须改 |
+|------|-----------|------------------|--------------|
+| **适用域** | 无（对所有块生效） | **仅当被考察的两个块都声明了 `points`（非空点清单）、且均非 `discrete` 块时才参与判定**；不满足者（未声明 `points` / 位块）**一律不参与**极大性合并判定 | 旧口径会把 `grid_meter` 的 6 个相量块（地址严格相邻）判成"可合并"→ `Err` → **现场启动 fail-fast**，与 PRD §9.4.1 第 6 站"逐字不动"、§11.2.1 的兼容性承诺、以及 T3/T7（v1.2 口径）的"既有 20 例零破坏"互相矛盾（v1.3 已把 T3/T7 与回归闸门的措辞一并订正，见 §11.13） |
+| **判据** | 合并后**空洞 ≤ 4 寄存器**（PRD v1.6 的表述，只有这一条） | **PRD v1.8 的四条全实现**：①`func`/`byte_swap` 相同 ②地址连续 ③合并后空洞 ≤ 4 ④**合并后 `count ≤ MAX_SINGLE_READ_REGS (120)`**。其中 **③ 在适用域内恒成立**（证明见下），**④ 是真正起作用的新判据** | v1.6 少了 ④ ⇒ 仅凭"空洞 0"就会把 `fire_sys`(13)+`fire_det`(114) 判成"可合并"→ `Err`，而合并体 127 寄存器**本就超过设备单次读上限**（PRD §9.5.4 要求 ≤120 分片）⇒ 结论方向反了。补 ④（"合并后能否一次读回"）后，`fire` 这类"本就该分片"的形态**不会被要求合并** |
+| **豁免** | 块级 `read_slice`（v1.2 设计自创，PRD 未列） | 相邻块中**任一块**标 **`read_slice: true`** → 不拒（**PRD §9.4.2.4 已正式补登**，v1.7；四条边界以 PRD 为准）；**且 `read_slice` 只在适用域内有对象**（未声明 `points` 的块本就不参与，标它是冗余、不构成错误配置 —— PRD v1.8 明文） | 现场按实测上限分片是**合法配置**，不能误拒；但豁免必须**显式、可审计**（注释登记理由，属 RC-1/RC-5 目视项），**不得**按 `role` 隐式特判（违反 G-5） |
+
+`MAX_SINGLE_READ_REGS = 120`：取 **PRD 自己的分片口径**（BMS ≤120 寄存器、消防每片 ≤120 寄存器）——比 Modbus 标准上限 125 留 5 寄存器余量，是"保守的设备单次读上限"。也正因如此，**`pcs_3zone`（76 寄存器）与 `fire_det`（114 寄存器）自身单块 ≤120**，不需要 `read_slice`；只有当它们在现场被拆成多片时，才由配置者给分片块标 `read_slice: true`。
+
+> **为什么必须"两块都声明 `points`"才判（强化理由，不只是"legacy 豁免"）**：未声明 `points` 的块，其点清单由**窗口宽度隐式决定**（每值槽 1 点），合并会同时改变**点的数量与默认点位名** —— 例如把 `fire_det` 并入 `fire_sys` 后，原 `fire_det_1` 会变成 `fire_sys_17`，而 PRD §9.4.2.2 明确"**改名 = 破坏历史数据可比性**、须按变更流程登记与评审"。而 `grid_meter` 的块名 `p/q/pf/u/i/p_total` **本身就是 mapper 的查找键**（PRD §9.4.2.4 明列为契约），合并它们等于**销毁契约**。因此对"含未声明 `points` 块"的相邻对做合并提示，是把**改名/契约破坏风险**伪装成"碎块风险"，**收益为负**。
+
+> **③（合并后空洞 ≤ 4）在适用域内恒成立 —— 等价性证明（v1.3，与 PRD v1.8 逐条对齐的关键）**：PRD v1.8 的拒绝条件是 ① `func`/`byte_swap` 相同、② 地址连续、③ 合并窗口内连续空洞 ≤ 4、④ 合并后 `count ≤ 120`。但在**适用域**（两块**都声明了 `points` 的标量块**）内，③ **必然成立**，理由：
+> - 由 §11.5.1 **规则 11 的首尾锚定**，任一 `points` 块"**首个声明寄存器落在块内偏移 0**、**最后一个声明寄存器的末端恰好等于 `count`**" ⇒ A 块的**最后一个寄存器必被声明**、B 块的**第一个寄存器（= A 的末寄存器 +1）必被声明** ⇒ **接缝处空洞 = 0**；
+> - 合并窗口内的连续空洞**只能来自 A、B 各块的内部空洞**（接缝已无空洞），而各块内部空洞**已被规则 11 单独限制为 ≤ 4**（否则该块自身早被拒）⇒ 合并后的每个连续空洞 ≤ 4 ⇒ **③ 成立**。
+>
+> **结论**：实现 ③（与 PRD 逐字对齐）**不引入额外拒绝**；同时 ④ 是本条真正起作用的新判据（"合并后能否被设备一次读回"）。**故本设计的判据与 PRD v1.8 行为等价**，且"六站必然通过"的结论不受 ③ 影响。实现顺序建议：先判 ④（`count > 120` → **不拒**，直接返回），再判 ③，最后判 ① ② 与 `read_slice` —— 这样 `fire` 的 `fire_sys+fire_det`（若未来 `fire_det` 也声明 `points`）会被 ④ 提前放行，**不会**因错误顺序被 ③ 之外的条件误拒。（注：`fire_det` 当前**未声明 `points`**，故 `fire` 站在适用域外，与实现顺序无关。）
+>
+> **澄清（v1.5 勘误补句，不改变判据语义）：①②③④ 是「合取」——四者全成立 ⇒ 拒；任一不成立 ⇒ 不拒（放行）。因此 ③ *不是独立放行条件*，也不存在"仅 ③ 成立即放行"的形态**：在适用域内 ③ 恒成立，故一个"两块均声明 `points`、地址连续、合并后 `count ≤ 120`、无 `read_slice`"的配置**四判据全成立 ⇒ 必判 `Err`（提示合并）**。任何把"判据 ③ 单列"读成"③ 成立 ⇒ `Ok`"的用例期望值都与本条相左（§11.11.2 的该处已按此订正，见 §11 勘误 v1.5）。
+>
+> **一处需求文本的两种读法 —— 本设计取更保守者，并说明其本轮不可达（须评审备案）**：PRD v1.8 的本条正文以"**未声明 `points` 的块**（…亦含 `discrete` 位块）不参与"为例，但同条 ② / ③ 又出现"`discrete` 按位地址同理""`discrete` 位块不受 ③ 限制" —— 字面上可读成"**声明了 `points` 的 `discrete` 位块仍参与本条**"。**本设计取保守读法：`discrete` 块一律不参与**（与"本体不改变既有行为"的立意一致，也避免为位块引入"合并后位数折算成寄存器数"的口径）。**该分歧在本轮不可达**：§9.4.1 的两个位块（`bms_alarm` 288 位、`hvac_di` 31 位）**都未声明 `points`** ⇒ 两种读法对本轮配置**判定结果完全相同**。登记为需求侧备案项（§11.12.2 Δ-8）。
+
+**（2）§9.4.1 参考配置（6 站）必然通过第 15 条 —— 逐站证明**
+
+先枚举"同 `func` 且地址严格相邻（`b.addr == a.addr + a.count`）"的块对，再按适用域过滤。下表每一格的 `addr`/`count` **逐字取自 PRD §9.4.1 的 YAML**（可逐行复核，无需推断）。
+
+> **取值真源与「不得取证于单测 fixture」的口径（v1.4 订正 —— 二轮评审判定 §11.5.2(2) 的 `grid_meter` 行事实错误）**：
+> - **生效配置的真值（唯一权威）**：`mupc/deploy/config/mupc_core_config.yaml:143-148` 与 `mupc/deploy/config/mupc_core_config.production.yaml:148-153` —— 两份文件该站的 6 行 `regs` **取值逐字相同**（仅注释措辞不同），且与 **PRD §9.4.1 第 6 站（PRD:1391-1396）逐字一致**：
+>   `p`@`0x1000`(6) → `q`@`0x1006`(6) → `pf`@`0x100C`(6) → `u`@`0x1012`(6) → `i`@`0x1018`(6) → `p_total`@`0x101E`(2)。
+> - **单测 fixture 的形态（仅测试自用，**不得**作为核对待迁移配置的依据）**：`mupc/crates/mupc-southd/src/config.rs:324-329` 的 `VALID_5_STATION_YAML` 里是另一种写法：`p`@`0x1000`(6) → **`p_total`@`0x1006`(2) → `q`@`0x1008`(6) → `pf`@`0x100E`(6) → `u`@`0x1014`(6) → `i`@`0x101A`(6)`，且 `format` **全部** `float32`（生效配置是 `int32_scaled`/`float32` 混排）、站 `id` 为 `meter_grid`（生效配置是 `grid_meter`）。
+> - **两者确实不同，这是允许的**（单测自有构造数据、不调 `validate` 的解析类用例更不要求与现场配置同形），但**必须分别标注**：§11.5.3.4 C3 已把该 fixture 定性为"legacy 写法解析逐字段不变"的实证锚、**不得**被"顺手改成新写法"；而**本节及 §11.7.4 的迁移结论一律以"生效配置的真值"为准**。v1.3 的 `grid_meter` 行恰恰把 fixture 形态当成了真值（并误称"逐字取自 PRD §9.4.1"）—— 该错误据二轮评审订正，**结论不变**（见该行"不拒 ✓"）。
+> - **其余 5 站的逐站复核结论**：`bms` / `pcs` / `meter_batt` / `fire` / `hvac` 五行的 `addr`/`count`/`func` **逐格与 PRD §9.4.1 的 5 个新增站一致**（这五站在生效配置中仍是注释占位，真值即 PRD §9.4.1，不存在"fixture 与真值两张皮"的问题）⇒ **仅 `grid_meter` 一行有此类取证错误，已订正**。
+
+| 站 | 同 `func` 且严格相邻的块对（穷举） | 是否参与判定 | 结论 |
+|----|-----------------------------------|--------------|------|
+| **`grid_meter`（既有站，PRD §9.4.1 第 6 站 = 生效配置真值）** | `p`(0x1000,6) → `q`(0x1006,6) → `pf`(0x100C,6) → `u`(0x1012,6) → `i`(0x1018,6) → `p_total`(0x101E,2)：**5 个相邻对全部成立**（0x1006=0x1000+6、0x100C=0x1006+6、0x1012=0x100C+6、0x1018=0x1012+6、0x101E=0x1018+6，`func` 均 `holding`、`byte_swap` 均缺省 false）。**注**：`p_total` 是**末块**（不是第二块）—— 单测 fixture（`config.rs:324-329`）把 `p_total` 放第二位且 `format` 全为 `float32`，**与生效配置不同**，勿据其核对待迁移配置 | **否 —— 6 块均未声明 `points`** | **不拒 ✓**（这正是旧口径误拒、必须重写的那一处） |
+| `bms` | `bms_io`(100,31) 止于 130；`bms_energy`(139,19) 止于 157；`bms_meta`(181,9) 止于 189；`bms_term`(2991,4)；`bms_cap`(4000,6)；`bms_alarm` 为 `discrete`。逐对检查：139−131=**8**、181−158=**23**、2991−190 巨大、4000−2995 巨大 ⇒ **无相邻对** | 无 | **不拒 ✓** |
+| `pcs` | 单块 `pcs_3zone`(1000,76) | 无相邻对 | **不拒 ✓** |
+| `meter_batt` | `mb_e_*` 六块起点 0x0000/0x000A/0x0014/0x001E/0x0028/0x0032，`count` 均 2 ⇒ 0x0000+2=0x0002 ≠ 0x000A（**相隔 8 寄存器**，PRD 注释亦写明）；`mb_ui`(0x0061,6) 止于 0x0067 ≠ 0x0077；`mb_freq_line`(0x0077,4) 止于 0x007B ≠ 0x0087；`mb_phase`(0x0087,14) 止于 0x0095 ≠ 0x0164 ⇒ **无相邻对** | 无 | **不拒 ✓** |
+| `fire` | `fire_sys`(4,13) 与 `fire_det`(17,114)：4+13 = **17**，同 `holding`、同 `byte_swap` ⇒ **1 个相邻对成立** | **否 —— `fire_det` 未声明 `points`**（`fire_sys` 有）⇒ 不参与 | **不拒 ✓**。**双重保险**：即便参与判定，合并后 `count = 13 + 114 = 127 > 120` ⇒ 判据也不触发（与现场"探测器区必须分片"的事实一致） |
+| `hvac` | `hvac_in`(0,4,`input`) 与 `hvac_di`(0,31,`discrete`)：`func` **不同** ⇒ 非相邻；块内无其它块 | 无 | **不拒 ✓** |
+
+**结论**：**§9.4.1 的 6 站参考配置（含既有 `grid_meter` 形态）必然通过第 15 条**。依据两条、各自充分：
+1. **`bms`/`pcs`/`meter_batt`/`hvac` 四站**：穷举后**不存在任何"同 `func` 且严格相邻"的块对** ⇒ 第 15 条**无从触发**；
+2. **`grid_meter` 与 `fire` 两站**：相邻对确实存在（前者 5 对、后者 1 对），但**都因"至少一方未声明 `points`"而不参与判定** ⇒ **不拒**；其中 `fire` 还有第二重保险（合并体 127 > 120，即便参与也不触发）。
+
+故 **AC-1 ② 的断言（"除 §9.4.3 明列条件外不触发任何既有/新增拒绝"）对第 15 条成立** —— 现场启动不会因本条 fail-fast；且 §11.11.2 的 AC-1 ③ 已把第 15 条的 **8 种形态**（`Ok` **7** + `Err` **1**）**全部做成可执行用例**（`Ok`：六站 YAML / 仅 grid_meter / 一方无 `points` / 双方无 `points` / 合并后 >120 / 带 `read_slice` / `discrete` 块相邻；`Err`：双方有 `points` + 合并 ≤120 + 无 `read_slice` —— **该形态即"判据 ③ 单列"的形态**，因 ③ 在适用域内恒成立，故其断言是 `Err`，见 §11.11.2 v1.5 勘误），"必然通过"这句话本身也有断言钉住。
+
+**（3）`read_slice` 真正的适用场景（避免被当成"逃避合并的开关"）**：只有**两个都声明了 `points` 的块**、合并后 `count ≤ 120`（说明"设备本来能一次读回"）、却因现场实测上限更低而必须分片时，才标 `read_slice: true` —— 典型是 **PCS 3 区按实测拆成 38+38**（两块都是 `points` 块，合并 76 ≤ 120 ⇒ 不标就会拒）。PRD §9.4.2.4 的四条约束（合并后仍可一次读回者必须合并 / 只豁免本条 / 块级逐块判定 / 须注释登记理由）在此**逐条适用**。
+
+**（4）另一处设计补充的保守口径（PRD 未定义）**：点级 `name` 与 `count > 1` 同时出现 → **配置期拒**。理由：PRD §9.4.2.2 只定义了"点名 ↔ 序号"的单点形态，未定义"命名序列"；禁用比发明安全。该条**不在 PRD §9.4.3 清单内**，登记为设计补充（§11.12.1 项 3）。
+
+#### 11.5.3 既有测试的连锁订正清单（**v1.3 扩至「用例名 + 断言」级**；上轮评审 P0-4）
+
+上轮清单只到"文件 + fixture"级，且漏报了**断言级失配**与两处用例（`core_config::test_south_stations_grid_only_passes`、`test_south_stations_same_port_same_spelling_passes`），与 §11.13「仅 §11.5.3 列出的 fixture 订正」口径不符。本版按**三类**重建清单（已逐处 grep 核实到 `file:行`）：
+
+- **① fixture 订正**：构造数据要改，**断言不改**；
+- **② 断言订正**：期望值要改（**因 metric 更名而来，不是回归**）；
+- **③ 断言不得改**：回归锚 —— 改了就是**掩盖回归**，须在评审中说明理由。
+
+##### 11.5.3.1 订正规模（逐个数核实，取代 v1.2 的"≈13 处"）
+
+| 受影响的构造点 | 实测处数 | 位置（`file:行`） |
+|----------------|----------|-------------------|
+| `RegBlockConf` 字面量 | **10** | `mupc-southd/src/mapper.rs:226`、`mupc-southd/src/scheduler.rs:430`、`746`、`754`、`794`、`802`、`810`、`853`、`861`、`tests/grid_convergence.rs:28` |
+| `StationConf` 字面量 | **8** | `mupc-southd/src/port_runtime.rs:289`、`mupc-southd/src/scheduler.rs:452`、`474`、`487`、`737`、`785`、`844`、`918` |
+| 需改构造数据的 YAML fixture / 内联 YAML | 见 11.5.3.2 | （下同） |
+| 需改期望值的断言 | 见 11.5.3.3 | （下同） |
+
+> 这 18 处**全部**要补新字段（`RegBlockConf` 补 `offset/byte_swap/points/read_slice`；`StationConf` 补 `parity`），属**纯机械补字段**（Rust 结构体字面量无 `..Default::default()`，故逐处补），**不改变任何测值**。
+
+##### 11.5.3.2 【① fixture 订正】（构造数据要改，断言不改）
+
+| # | 文件 | 用例 / fixture（`file:行`） | 订正内容 | 订正后断言 |
+|---|------|---------------------------|----------|-----------|
+| A1 | `mupc-southd/src/config.rs` | 静态 fixture `VALID_5_STATION_YAML`（`:336` `battery_1`、`:348` `fire_1` —— v1.4 订正行号，原写 `:345`；该 fixture 的 meter_grid 段见 `:324-329`，其取值与生效配置**不同**，理由见 §11.5.2(2) 的"取值真源"注） | ① `battery_1` 的块 `{ name: soc, addr: 100, format: int32_scaled, scale: 0.1, count: 2 }` → 改为**点名式**：`{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }`（否则规则 4 拒）；② `fire_1` 的 `addr: 0` → `addr: 4`（否则规则 13 拒） | 使用该 fixture 的 3 个用例：`parses_valid_5_station_yaml`（只解析，**不受影响**）、`meter_grid_regs_contain_pq_pfu_i_p_total`（只查 grid 站，**不受影响**）、`validate_passes_for_valid_config`（`is_ok()`，**依赖本订正**） |
+| A2 | 同上 | `validate_battery_interval_boundary`（`:502`，内联 YAML `{ id: bat, role: battery, … interval_ms: {iv} }`） | 补含 `soc` 点的 `regs` | `assert_eq!(validate().is_ok(), ok)`（2 组 iv）**不变** |
+| A3 | 同上 | `validate_accepts_max_slave`（`:471`，`slave: 247`） | 同上 | `is_ok()` **不变** |
+| A4 | 同上 | `validate_accepts_same_port_same_baud`（`:791`） | battery 侧补 `regs` | `is_ok()` **不变** |
+| A5 | 同上 | `validate_accepts_diff_ports_same_baud`（`:817`） | 同上 | `is_ok()` **不变** |
+| A6 | `mupc-core-bin/src/core_config.rs` | `test_south_stations_valid_5_station_passes`（`:1744`） | `battery_1` 补含 `soc` 点的 `regs` | `is_ok()` **不变** |
+| **A7** | 同上 | **`test_south_stations_grid_only_passes`（`:1856`）** —— **上轮漏报** | 同上 | `is_ok()` **不变** |
+| **A8** | 同上 | **`test_south_stations_same_port_same_spelling_passes`（`:1973`）** —— **上轮漏报** | 同上 | `is_ok()` **不变** |
+| A9 | 同上 | `test_south_stations_shared_serial_with_pcs_short_rejected`（`:1786`） | `battery_1` 补 `regs` —— **必须补**：否则规则 4 的 `soc` 错误会**先于**跨段校验返回，`err.contains("重复") && err.contains("仲裁")` 直接失配（这正属"断言级"影响，旧清单只说"补 regs"未说清**为什么**） | 断言**不变** |
+| A10 | 同上 | `test_south_stations_shared_serial_with_pcs_fullpath_rejected`（`:1816`） | 同上 | 断言**不变** |
+| A11 | 同上 | `test_south_stations_same_port_alias_spelling_rejected`（`:1941`） | `battery_1` 补 `regs` | `err.contains("别名")或("同节点")` + `contains("hvac_1") && contains("battery_1")` **不变** |
+| A12 | `mupc-southd/src/mapper.rs` | `poll_to_result_battery_soc_block_maps_soc`（`:369`）的 `let ok = vec![sblock("soc", 65.5), sblock("temp", 25.0)];` | 承载 `soc` 的条目改为**点名式块**（`RegBlockConf{ name: "bms_io", addr: 100, func: Holding, format: Float32, scale: 1.0, count: 2, points: [PointConf{at:1, name: Some("soc")}] , …}`）—— 否则新语义（按**点名**查找）找不到 `soc` 点 | `pkg.battery.soc == Some(65.5)`、`temperature == None`、`inverter_status == Running`、`Err → Failed`、`空 reads → Data + soc None` **全部不变** |
+| A13 | `mupc-southd/src/scheduler.rs` | `battery_conf()`（`:473`，块名 `soc`） | 同 A12 改为点名式（保持 float32 + 65.5 量值，使 `soc_of == Some(65.5)` 成立） | 见 11.5.3.3 **第 9 条**（v1.4 订正交叉引用：原写"第 8 条"，该条讲的是 `telemetry_points` 的值槽数，与本例无关） |
+| A14 | **同一 crate（`mupc-southd`）**的 18 处字面量（11.5.3.1；v1.4 订正 —— 原写"三个 crate"有误，这 18 处全部落在 `mupc-southd`：`src/mapper.rs`、`src/scheduler.rs`、`src/port_runtime.rs`、`tests/grid_convergence.rs`） | 机械补新字段 | 无 | 无 |
+| **A15** | `mupc-southd/src/config.rs` | **`validate_rejects_slave_out_of_range`（`:520`）** —— **v1.4 由 §11.5.3.5 移入本类** | 补合法 `regs`（含 `soc` 点） | `is_err()` **不变**（见下方"语义漂移"注） |
+| **A16** | 同上 | **`validate_rejects_zero_interval`（`:534`）** —— **同上移入** | 同上 | `is_err()` **不变** |
+| **A17** | 同上 | **`validate_rejects_duplicate_id`（原 `:406`）** —— **v1.5 由 §11.5.3.5 移入本类（实现期实证为假绿）** | 首站 `battery` 补含 `soc` 点的 `regs`（否则先被规则 4 拒，`Err` 文案即规则 4） | `is_err()` **不变** |
+| **A18** | 同上 | **`validate_rejects_multiple_meter_grid`（原 `:419`）** —— **同上移入** | 两个 `meter_grid` 站均补**完整相量块**（否则先被既有 `meter_grid` 整组校验"缺相量块"拒） | `is_err()` **不变** |
+| **A19** | 同上 | **`validate_rejects_multiple_battery`（原 `:434`）** —— **同上移入** | 两站均补含 `soc` 点的 `regs`（否则先被规则 4 拒） | `is_err()` **不变** |
+| **A20** | 同上 | **`validate_rejects_same_port_mixed_baud`（原 `:779`）** —— **同上移入** | battery 侧补含 `soc` 点的 `regs`（否则先被规则 4 拒，测不到规则 16） | `is_err()` **不变** |
+| **A21** | 同上 | **`validate_rejects_same_port_mixed_baud_3_station`（原 `:803`）** —— **同上移入** | 同上 | `is_err()` **不变** |
+
+##### 11.5.3.3 【② 断言订正】（metric 更名导致期望值要改 —— **不是**回归锚）
+
+根因：`telemetry_points` 对**未声明 `points` 的块**由"取首值、metric = 块名"改为"**每值槽 1 点、metric = `<块名>_<序号>`**"（§11.2.1 已登记的行为变更）。**受影响范围已逐处核实**：
+
+| # | 用例（`file:行`） | 原断言 | 订正为 | 依据 |
+|---|-------------------|--------|--------|------|
+| 1–5 | `scheduler.rs`：`two_stations_same_port_schedules_by_due`（`:632`）、`grid_offline_isolated_hvac_continues`（`:662`）、`station_recovers_after_failure`（`:685`）、`station_recovers_after_extended_backoff`（`:719`）、`non_battery_role_never_triggers_soc_channel`（`:951`）—— **共 5 处 `assert_eq!(telemetry_of("hvac"), …)`** | `vec![("temp".to_string(), 23.5)]` | **`vec![("temp_1".to_string(), 23.5)]`** | 块 `temp`：`addr 100`、`count 2`、`format float32` ⇒ 宽度 2 ⇒ 1 个值槽 ⇒ 序号 = 0+1 = 1 |
+| 6 | `scheduler.rs::station_mixed_holding_and_input_blocks`（`:768-770`） | `m == "temp"`、`m == "alarm_in"` | `m == "temp_1"`、`m == "alarm_in_1"` | 同上（两块各 `count 2` + `float32`） |
+| 7 | `scheduler.rs::pure_input_blocks_station_collects_via_fc04`（`:877-879`） | `m == "alarm_in" && v == 0.5`、`m == "status_in" && v == 1.5` | `m == "alarm_in_1"`、`m == "status_in_1"`（**值 0.5/1.5 不变**） | 同上 |
+| 8 | `mapper.rs::telemetry_points_first_value_per_block`（`:392`） | `assert_eq!(pts, vec![("p",1.0),("u",220.0)])` | **`vec![("p_1",1.0),("p_3",2.0),("p_5",3.0),("u_1",220.0),("u_3",221.0),("u_5",222.0)]`**（**测试名同步改为 `telemetry_points_every_value_slot`**） | 单块 6 寄存器 / `float32` ⇒ 3 个值槽；**点产出数量本身也变了**（1 点 → 3 点），这是 AC-6 ①"每值槽 1 点"的钉子。注：`blk()` 的 `scale = 0.0` 不影响 `float32`（`scale` 仅对整数格式生效，规则 5 亦不适用于 `Float32`），故值仍为 1.0/2.0/3.0 |
+| 9 | `scheduler.rs::battery_station_soc_pushed_via_dedicated_channel`（`:896`） | `m == "soc"` | **不变**（`battery_conf` 按 A13 改为点名式后，点位名就是显式 `soc`） | PRD §9.4.2.2"显式 `name` 优先" |
+
+> **为什么这些不属"断言不得改"**：它们断言的是**遥测键名**，而键名的变化是 PRD §9.4.2.1 第 4 条**规定的**（"未声明 `points` ⇒ 每值槽 1 点 + 位置式命名"）；#8 甚至断言的是**点数**，也由同一条规定改变。把它们当回归锚会**永久锁死 PRD 的规则**。反之（见 11.5.3.4）`grid_convergence.rs` 的断言与 grid 站的 `decode_phase_block` 语义**不经过**这条路径 —— 那才是回归锚。
+
+##### 11.5.3.4 【③ 断言不得改】（回归锚，逐项说明"为什么它是锚"）
+
+| # | 用例 / 断言 | 为什么不得改 |
+|---|-------------|--------------|
+| C1 | **`mupc-southd/tests/grid_convergence.rs` 全部 4 个用例的全部断言**（`meter_grid_phase_matches_legacy_semantics_canned` / `meter_grid_p_total_raw_when_present` / `meter_grid_missing_phase_block_returns_failed` / `meter_grid_negative_p_direction_signs_current`） | **评审员特别强调**：这是 S3a 收敛闸门（§10.9）。grid 路径走 `poll_to_result(MeterGrid)` → `decode_phase_block`（**按块名**查找），**完全不经过** `points[]`/`telemetry_points` ⇒ 本轮所有更名对它**零影响**。**只允许改 `block()` helper 的构造**（补 4 个新字段），**任何断言值的改动都视为掩盖回归** |
+| C2 | `mupc-southd/src/config.rs` 的 **meter_grid-only 系列**：`meter_grid_regs_contain_pq_pfu_i_p_total`、`validate_meter_grid_interval_boundary`、`validate_rejects_meter_grid_missing_phase_block`/`_empty_regs`/`_zero_addr`/`_overlapping_regs`/`_phase_block_count_lt_6`/`_int32_scaled_zero_scale`/`_duplicate_block_name`、`validate_accepts_meter_grid_complete_regs`/`_without_p_total`、`meter_grid_full_regs_yaml`/`meter_grid_only_yaml` | 它们是 S3b-1c 的既有校验语义（相量块齐备、`count ≥ 6`、`addr > 0`、区间不重叠、块名唯一、`int32_scaled` 的 `scale > 0`）的**唯一钉子**；且这 6 个相量块**未声明 `points`** ⇒ 新的规则 15/19 与逐点展开**都不触碰它们**（这正是 §11.5.2 的适用域限定要保住的）。**⚠️ 与规则 10 的冲突及钉法见下方 §11.5.3.4.1** |
+| C3 | `mupc-southd/src/config.rs` 的**解析类**：`default_reg_format_used_when_omitted`（`blk.format == Float32`、`scale == 0.0`、`count == 2`）、`reg_block_func_parses_holding_input`（`func` 缺省 = `Holding`）、`default_field_fallbacks_apply`、`default_baud_and_func_apply_when_omitted`、`parses_valid_5_station_yaml` | 它们钉住"**legacy 写法（块名 `soc`、无 `points`、缺省 `format`）解析逐字段不变**" = §11.2.1 兼容性论证的实证。**其 fixture 仍保留 `name: soc` 的旧写法**（parse-only，不调 `validate`），**不得**被"顺手改成新写法" |
+| C4 | `mupc-core-bin/src/core_config.rs` 的 6 个 southern-stations 用例的**断言**（含 `err.contains("重复") && err.contains("仲裁")`、`err.contains("别名")`、`err.contains("interval_ms") && err.contains("south_stations")`、两处 `is_ok()`） | 跨段校验（port 与 intercore 互斥、同口别名、interval 传播）是 §10.3 的既有契约；**只改 fixture（A6–A11），断言一个字节都不动** |
+| C5 | `scheduler.rs` 的 `soc_of` / `grid_count` / `event_count` / `bus.call_count` / `input_call_count` / `state[..].offline_count` 类断言（`:632` 的 `call_count`、`:640`、`:668`、`:693`、`:778`、`:839`、`:886`、`:901`、`:1015`、`:1039`、`:1066` 等） | 与 metric 命名无关：断言的是**调度节拍、退避、隔离、SOC 通道 gating**（§10.2/§10.5 语义）。若它们变红，就是**回归** |
+| C6 | `scheduler.rs::battery_station_without_soc_block_does_not_push`（`:914`，`regs: vec![]`）**的全部断言**（无 offline/online 事件、`soc_of` 为 `None`） | 该配置形态在新规则下**已被配置期拒**（规则 4），但本用例**不调 `validate`**（直接构造 `StationConf` 交给调度器）⇒ 仍绿，且它是**调度器层的纵深防御锚**："无 `soc` 点 ⇒ 绝不误推 `on_battery_soc`"（PRD §9.4.3 规则 4 的运行期对偶）。故：**断言保留不动**，只加注释说明"该形态在配置期已被规则 4 拒，本测保的是调度器侧不依赖配置校验的负向 gating"；**同时**在 `config.rs` **新增** `validate_rejects_battery_without_soc_point` 覆盖配置期侧（两层各有其测） |
+| C7 | `mupc-southd/src/mapper.rs` 的 `meter_grid_*`（`:286`/`:314`/`:331`/`:338`/`:347`）与 `poll_to_result_other_role_returns_minimal_data`（`:404`）断言 | 前者是 mapper 层的总表语义锚，后者钉住"非 grid/battery role ⇒ 空 `DataPackage`"；本轮只给 `Pcs` 加同臂，**语义零改动** |
+
+> **`SouthScheduler::new` 不得新增 `validate()` 调用**（决议）：否则 C6 会因"构造了非法配置"而变红，且会把"配置期一次校验"变成"每次装配都校验"。配置校验的**唯一入口**仍是 `core_config` 的装配期（§10.3）。
+
+##### 11.5.3.4.1 【C2 与规则 10 的冲突：实现判定顺序约束】（v1.4 新增 —— 二轮评审「须补 2」）
+
+**冲突事实**：C2 里的 `validate_rejects_meter_grid_duplicate_block_name`（`config.rs:681-694`）构造的是**两个同名 `p` 块**（`p`@0x1000(6) 与 `p`@0x1006(6)，均无 `points`、`format: float32`）：
+- **既有规则**（`meter_grid` 块名唯一，`config.rs:213-223`）命中 ⇒ 报 `south_stations: meter_grid 站 {id} regs 块名重复: {name}（mapper 按 name 取首块，后者静默失效）`，断言 `err.contains("块名重复") && err.contains("p")`；
+- **但新规则 10（点名唯一）同样成立**：两个块展开后各产 `p_1`/`p_3`/`p_5`（`float32` 宽度 2、`count 6` ⇒ 3 个值槽）⇒ 站内 `metric` 重复 ⇒ 规则 10 也可判 `Err`（文案是"点名重复"一类）。
+
+**若实现顺序变化，报错文案随之改变，而 C2 又把它列为"断言不得改"** ⇒ 开发无从猜测。**本设计按下述方式钉死（不必猜）**：
+
+1. **判定顺序固定为**：站级基础校验（含既有 `meter_grid` 整组校验，**块名唯一在其中**）→ `validate_station_regs`（含展开 + 规则 10/13/14/19）→ 跨站（单站计数 / 同口一致性 / 极大性）。即 §11.5.1「顺序」给出的**实现约束**：既有 `meter_grid` 整组**原地不动、先于展开校验**。
+2. **该用例命中的规则与文案**：命中**既有 `meter_grid` 块名唯一规则**，文案**逐字不变**（上引原文）⇒ **C2 断言不动**（"断言不得改"类别维持）。
+3. **规则 10 不得因此删除，且有它独有的覆盖面**：块名唯一是 **`meter_grid` 专有**（因 mapper 按 `name` 用 `.find` 取首块）；其余 role 的同名块，以及"**块名不同、展开后 metric 却相同**"（如两块各有一个 `name: soc` 的显式点名、或显式 `name` 与另一块的自动位置点名相撞）**只有规则 10 能拒** ⇒ 须**新增用例**覆盖（已并入 §11.11.2 AC-1 ③ 的规则 10 一条）。
+4. **为什么不订正 C2（对上一轮清单的处置说明）**：上一轮把 C2 列为"断言不得改"是**正确的，本轮不作订正** —— ① `块名重复` 是**根因**（mapper 按 `name` 取首块 ⇒ 后者静默死配），`点名重复` 只是同一配置的**派生症状**，报根因对运维可操作性更强；② C2 是 S3b-1c 校验语义的**唯一钉子**，改文案等于削弱回归锚；③ 本约束**零实现成本**（既有检查原地不动即可），不存在"为了保测试而扭曲设计"的代价。
+
+##### 11.5.3.5 【④ 期望 `Err` 的用例：fixture 与断言均无需改动】
+
+> **分类归属订正（v1.4，二轮评审建议 5）**：本类原本被标为"③"（与 §11.5.3.4 的"断言不得改"重号），且其中**两个用例实为 ①（fixture 订正）**。现：本类改号为 **④**；`validate_rejects_slave_out_of_range` 与 `validate_rejects_zero_interval` **移入 §11.5.3.2 的 A15/A16**（见该表与下方"语义漂移"注）。
+>
+> **再订正（v1.5，勘误）**：实现期实测发现本类原列的 10 例中另有 **5 例的 fixture 亦须订正**（与 A15/A16 同因：**前置规则截胡 ⇒ 假绿**，`is_err()` 虽绿却测不到目标规则）⇒ `validate_rejects_duplicate_id`、`validate_rejects_multiple_meter_grid`、`validate_rejects_multiple_battery`、`validate_rejects_same_port_mixed_baud`、`validate_rejects_same_port_mixed_baud_3_station` **移入 §11.5.3.2 的 A17–A21**（**断言仍不变**）。**本类余下 5 例"整例无需改动"的结论不变。**
+
+本类**余下 5 例**（`validate_rejects_empty_id`（`:449`）、`validate_rejects_empty_port`（`:460`）、`validate_rejects_meter_grid_slow_poll`（`:545`）、`validate_rejects_zero_baud_rate`（`:830`）、`validate_rejects_zero_baud_same_port_all_zero`（`:842`））—— 断言均为 `is_err()`，fixture 亦无需改，**整例无需改动**。理由：它们的目标规则（`id`/`port` 非空、`interval` 下界、`baud` 下界）**都落在"站级基础校验"阶段**（§11.5.1「顺序」），**先于**规则 3/4（`regs` 相关）执行 ⇒ 不存在被截胡的假绿。（原列表中的 `validate_rejects_slave_out_of_range`、`validate_rejects_zero_interval` 已移出本类见 A15/A16；上述 5 例见 A17–A21。）
+
+> **须登记的一处语义漂移（不是缺陷，但要写下来；v1.4 已将其从"口头要求"落成 ① 的 A15/A16）**：`validate_rejects_slave_out_of_range`（`:520`，battery、无 `regs`）与 `validate_rejects_zero_interval`（`:534`，battery、无 `regs`）在实现新规则后**会先被规则 4（`soc` 点契约）拒**，而**不再由原本要测的那条规则拒**（`is_err()` 仍成立 ⇒ 用例仍绿，但已测不到 slave 下界 / interval 下界）。这不是缺陷，但属"测试通过却没测到"的隐患 ⇒ 实现期按 **A15/A16 补上合法 `regs`** 使二者真正测到目标规则；另**新增**两个用例（`validate_rejects_battery_without_soc_point` 已含在 C6；`pcs` 下界 `validate_rejects_pcs_interval_below_500` 对应规则 18）。**"补 regs"属 ① fixture 订正，断言仍不得改**。
+
+### 11.6 字节序 / 字序 / 特殊编码（含 AC-2 算式复算）
+
+| 场景 | 配置 | 解码链 | AC-2 期望值（逐位复算） |
+|------|------|--------|--------------------------|
+| BMS `soc`（118） | 块 `uint16`/`scale 1.0` + 点 `name: soc` | 1 寄存器 → u16 → ×1.0 | raw `0x0041`(65) → **65.0 %** |
+| BMS 簇组电压（115） | `uint16`/`0.1` | 1 寄存器 → u16 → ×0.1 | raw `0x1403`(5123) → **512.3 V** |
+| BMS 簇组模块温度（117） | `uint16`/`1.0`/`offset −40.0` | 1 寄存器 → u16 → ×1.0 + (−40) | raw 65 → **25.0 ℃** |
+| BMS 116 簇组电流 | `uint16`/`0.1`/`offset −1600.0` | 1 寄存器 → u16 → ×0.1 − 1600 | raw 16000 → **0.0 A**；raw 15000 → **−100.0 A**；raw 0 → **−1600.0 A**；raw 65535 → **+4953.5 A**（判别点，与 `int16` 的 −1600.1 **必须不同**） |
+| PCS `soc` 转述（1010） | 块 `byte_swap: true` | swap(0x4100) = 0x0041 → u16 → ×1.0 | 注入 `0x4100` → **65.0 %** |
+| PCS 交流累计充电电量（1042–1043） | `int32_scaled`/`0.1`/`byte_swap`/`word_order: lo_hi` | swap 后 `[0x0064, 0x0001]` → lo_hi 拼 → 65636 → ×0.1 | 注入 `[0x6400, 0x0100]` → **6563.6 kWh**（误用 `hi_lo` 得 655360.1 → 必须不等） |
+| ADL400 A 相电流（0x0064） | `uint16`/`0.01` | 1 寄存器 → u16 → ×0.01 | raw 946 → **9.46 A** |
+| ADL400 组合有功总电能（0x0000） | `int32_scaled`/`0.01`（无 swap/字序） | hi_lo → (0×65536+12326) → ×0.01 | `[0x0000, 0x3026]` → **123.26 kWh** |
+| 消防火警状态（9） | `uint16`/`1.0` | 1 寄存器 → u16 | 2 → **二级火警**（枚举语义，非位） |
+| 消防探测器数据 1（13） | `uint16`/`1.0` | 1 寄存器 → u16（**整字**，G-6 延后） | `0x4150` → telemetry 落 **16720**；展示层拆解得烟雾 6.5 dB/M、温度 25 ℃（§11.10） |
+| 空调 30001 / 30004 | `int16`/`0.1`；`uint16`/`0.1` | 1 寄存器 → i16/u16 → ×0.1 | 258 → **25.8 ℃**；602 → **60.2 %** |
+| 位点（`hvac_di_1`） | `discrete`,`addr 0`,`count 31` | `unpack_bits(bytes, 31)[0]` | 首字节 `0x3B` → 位 0/1/3/4/5 = 1、位 2/6/7 = 0 |
+
+> **换算的符号性口径（PRD v1.5 重裁定，设计不得回退）**：`offset` 只表示**零点平移**，与"raw 如何解释为整数"**无关**；`uint16`/`int16` 与任意 `offset` 的组合**一律放行**（BMS 的 116/117/122/127/129/155/157/186/2991–2994 全部是"无符号编码 + 负偏移"）。校验器**只校验"可追溯"与"与点表一致"**，不校验"符号性对不对"（后者靠 §9.5 的"类型来源"栏 + Q-20 现场判别 + RC-1）。
+
+### 11.7 消费链路
+
+#### 11.7.1 分流总表（对齐 PRD §9.6.1 / §10.5，**零语义变更**）
+
+| 站 | 数据 | 通道 | 是否推进 5s 控制闸门 |
+|----|------|------|----------------------|
+| `battery` | 点名 `soc`（118） | `on_battery_soc` → `AiIntegrator::set_battery_soc`（BMS 优先源，超期回落核间，04 §2.11.1） | **否** |
+| `battery` | 其余 344 点（含 288 位） | `on_station_telemetry`(is_event=false) → storage `telemetry`（device_id = 站 id） | 否 |
+| `battery` | 告警族位的 0→1 跳变 | `on_station_telemetry`(is_event=true) → storage `events` + `AlertFeed` | 否 |
+| `pcs` | 3 区 72 点 | `on_station_telemetry` → telemetry + 健康/校核展示 | 否 |
+| `meter_batt` | 40 点 | telemetry + 能量流核算 | 否 |
+| `fire` | 127 点 + **字级信号**（§11.7.2）+ 登记数不一致 + 探测器地址升序违规（**后两条属"状态型事件"，按状态翻转产出，见 §11.4.7.2**） | telemetry（整字原值）+ **events**（信号进入/退出活跃 + 登记数/地址序异常）；火警/联锁融合维持 §10.4（**停机仅以 DI3 触发**；**地址序/登记数告警不得并入 OR 触发**，§11.4.7.2 E） | 否（**仅事件/联锁判据，非控制量**，PRD §9.6.1） |
+| `hvac` | 34 点 | telemetry + events（告警位） | 否 |
+| `grid_meter`（既有） | 6 点 | `on_grid_package` → AiIntegrator + IEC104 | **是（唯一）** |
+
+#### 11.7.2 位点落库与事件（D2 口径的落地 + v1.3 的消防信号落点）
+
+1. **每轮**在内存中形成完整点位（`mapper::telemetry_points` 返回全部 288+31 位），供即时展示/判据使用；
+2. **落库**：位点仅在与上轮不同时经 `on_station_telemetry(is_event=false)` 落 `telemetry`（稳态≈0 行/s）；
+3. **事件**：`BitClass::Alarm` 的 **0→1** 跳变 → events（metric = 点位名，如 `bms_alarm_225`）；`Reserved` 位（如 364–423、484–599）**只产 telemetry、不产事件**（PRD §9.7.6）；`State` 位同理只落 telemetry；
+4. **事件可读性**：`SouthSink` 组装 `SystemEvent.message` 时可选查 `mupc_southd::point_table::label(role, metric)` 补中文名（如 **`bms_alarm_225` → "簇一级告警"** —— 按 §9.7.4/§9.5.1B，点名序号 225 = 位偏移 224 = **位地址 424 = 簇一级告警**；**勿**与位地址 225（"簇 SOC 低·轻"）混淆 —— 位地址 225 对应的**点名**是 `bms_alarm_26`，v1.3 此处示例把两者串了、v1.4 订正），查不到则用原名（**不引入新的事件类型枚举**，沿用 `south_station.<站id>.<metric>`）；
+5. **SOC 越界事件**（PRD §9.6.3）：metric `soc_out_of_range`，`value` = **原始寄存器解码值**（`SouthSink` 侧把 `is_event` 且非 offline/online 的点的 `value` 写进 message，作为"原始值落证"）。
+
+**消防字级信号（v1.3 新增，P0-3 的落地；机制见 §11.4.7.1）**：
+
+6. **信号来源与检测层**：消防全部状态量在**保持寄存器整字**内（`fire_sys_1/3/4/5/6/9` 等）⇒ 由 `scheduler` 每轮在**整字原值**上做 **`字 & mask`（`WordBit`）/ `字 ∈ active`（`WordEnum`）** 判定，与离散位共用同一个 `EdgeTracker` 与同一条事件产出路径。**telemetry 仍落整字原值**（值不变、可回溯），事件**不改写**任何 telemetry 值；
+7. **产事件的信号清单**（逐条对表 PRD §9.5.4 的位定义表）：
+   - **系统状态（addr 4）**：`main_power_fault`(bit14) / `backup_power_fault`(bit13) / `drive_circuit_fault`(bit11) / `pressure_sensor_fault`(bit10) / **`spray_fired`(bit8)** / `valve_open`(bit9) —— 前 4 条为故障类；**`spray_fired`/`valve_open` 为"灭火动作已发生"的留痕**（PRD 明确要求列举"喷洒标记"），文案由 `label` 区分（"喷洒标记置位"而非"故障"）；`work_mode_manual`(bit15)、`charging`(bit12)、备电电量 bit7–0 只落 telemetry（普通状态量，无事件消费方）；
+   - **烟/温/可燃状态（addr 6/7/8）**：各产 `smoke_trigger` / `temp_trigger` / `combustible_trigger`，`mask = 0b11`（bit1 复合探测器触发 + bit0 干接点触发）—— **bit2 点型探测器"预留未启用"不纳入 mask**（PRD §9.7.6 明文"不产出告警事件"）；
+   - **火警状态（addr 9，枚举）**：`level1`(值 1) / `level2`(值 2) / `emg_start`(值 4) / `emg_stop`(值 5)；值 3 预留不入 `active`；**值 0 工作正常 = 非活跃** ⇒ 任何活跃值回到 0 即"退出活跃"事件（联锁恢复的可观测点，§10.4"恢复需双方复位"）；
+   - **探测器状态（addr 12）**：每只探测器产 `alarm`(bit12 报警总状态) 与 `fault`(bit14 故障总状态)；bit0–4 传感器细分**不产独立事件**（取舍见 §11.12.1 项 6）；
+   - **不产事件的消防点**：钢瓶气压（addr 5，PRD §9.7.6）、探测器地址/数据 1/CO/VOC/H2（无阈值口径）、复合探测器 `comm_offline`(bit15) 与反馈位（极性相反，不猜 —— 仅展示）；
+8. **事件名**：`<遥测点名>@<信号键>`（例 `fire_sys_1@spray_fired`、`fire_sys_6@level2`、`fire_sys_9@alarm`）—— **属事件命名空间，不新增遥测点、不占用 telemetry 命名**（§11.12.1 项 5）；
+9. **探测器地址升序违规（Q-9）**：`fire_detector_addr_order_violation` 命中 → 按**状态翻转**产事件（**v1.7 口径，见 §11.4.7.2**）：进入 = `("fire_detector_addr_order_invalid", 首个违规探测器的 1 基序号, true)`、恢复 = `("fire_detector_addr_order_invalid@recovered", 0.0, true)`、**状态未变的轮次不产**（**不是"命中即产"**）、**首次观测即产**；且**每一轮**（不论是否产事件）**该轮探测器区点位标记为不可信**（telemetry 照落原值）——**事件去重与逐轮"不可信"标记是两件事，互不影响**。升序链的**链首 = 寄存器 11**（探测器 1），见 §11.4.6。
+
+10. **（v1.8 登记，**不属**上面的消防信号清单）`offline` 事件的块级 `reason` —— 消费方可见变更**：`SouthSink` **覆写** `on_station_offline`，把 scheduler 组装的 `reason`（含 `slave/addr/count`，§11.4.7/§10.7 的站失败信息）写进事件 `message`，使 **PRD §9.7.2 第 1 条**（"站进入 offline，事件 `reason` 含 `slave/addr/count` → 运维据 `events` 定位到具体块"）**真正可用**（默认实现只发 `("offline", 1.0, true)`，`reason` 被丢弃）。**与默认实现逐字一致的部分（刻意保持，防消费方被动受影响）**：事件类型仍 `south_station.<站id>.offline`、等级仍 `warning`、**事件去抖仍归 scheduler**（本层不重复去抖 ⇒ **不会多产** offline 事件）。**唯一差异是文案**：既有文案（`站 <站id> role=<role> 离线（采集失败）`）**追加 `：{reason}` 后缀**。**`online` 的文案逐字不变**（`站 <站id> role=<role> 恢复上线`，info 级）。
+   > **属消费方可见变更**（v1.8 登记）：若有消费方 / 文档 / 告警规则 / 前端按 `offline` 文案**逐字**匹配，须同步核对（`online` 无需处理）。**T6 已落地，本项只作登记，提示 T7 时留意**（§11.13 T7 行）。
+
+#### 11.7.3 展示与存储口径
+
+- 位点"长时间未变" ⇒ 最后一条 telemetry 时间戳陈旧，展示层按"最后变更时刻 + 现势内存值"呈现，**不得**把陈旧时间戳当作"该位当前为 0/1 的证据"（与 §10/§9.7.6"保留上一有效值并标记 stale"同口径）。
+- 新增模拟量点 ≈ 299 行/轮（5 站合计 ≈ 300 行/s），与既有 `meter_grid` 同阶；retention 天数复用既有配置，投运前按盘容量复核（§11.12.3 待决项）。
+- **消防钢瓶气压"未配置"口径（v1.3 新增，PRD §9.7.6 的设计落点）**：`fire_sys_2`（addr 5）在**本站生命周期内从未出现过非 0 值** ⇒ 展示层标 **"未配置"**，**不得**显示 "0 kPa"、**不得**据此判"气压异常/泄漏"（`cylinder_pressure_configured`，§11.4.6）。该"从未非 0"事实由 scheduler 每站一个 `bool` 记忆维护（初值 false，任何一轮读到非 0 即置 true 且此后不再回退 —— 钢瓶气压不会在业务上"变回未配置"）。**注意**：该点**不产任何事件**（PRD §9.7.6 明令），故它不是"阈值判据"，只是**展示口径**。
+- **消防探测器点位的"地址序有效前提"（v1.3 新增，Q-9 的展示侧落点）**：`fire_detector_addr_order_violation` 命中的那一轮，展示层对探测器区（`fire_det_*`）**不得**按"第 n 只探测器"呈现点位与物理编号的对应关系（升序前提被破坏 ⇒ 位置式点名与实物不再一一对应），应同时展示地址序异常告警；原始值仍可查（telemetry 照落）。
+
+#### 11.7.4 配置迁移清单（生效配置从"1 站"到"6 站"）
+
+| 项 | 动作 |
+|----|------|
+| `grid_meter` 站 | **逐字不动**（PRD §9.4.1 第 6 站与生效配置取值一致） |
+| `bms`/`pcs`/`meter_batt`/`fire`/`hvac` | 按 PRD §9.4.1 的 6 站 YAML 替换注释占位；`pcs` 站**默认保持注释**，待 Q-15（A1/B1 是否隔离）现场裁定后启用（RC-8） |
+| 旧 `battery` 站写法（`name: soc` 的**块**） | 必须改成"点名 `soc` 的点"（§11.4.6）；`deploy` 中的注释行按 §9.4.1 重写 |
+| `fire` 站的两处"非默认"写法 | ① `fire_sys` 的 `at: 7` 声明 `name: fire_det_count`（PRD §9.4.1 参考配置已给，直接照录）；② 探测器区若现场需分片，分片块加 `read_slice: true` **并在注释登记理由**（PRD §9.4.2.4 第 ④ 条，RC-5 目视项） |
+| **`fire` 站的准入门槛（v1.8 新增）** | **写入生效配置前，必须先结清 §11.4.6 的「消防登记数」容量式订正（`1 + Σ(fire_det 前缀块 count)/6`）** —— 与 T5 的「**裁定前禁止把 `fire` 站写入生效配置**」（§11.4.7.2 引言）**同构**：容量式若仍按旧式 `Σ/6` 实现，`fire` 站一上线即 **`fire_detector_count_mismatch` 恒真 ⇒ 永久假告警**（首次观测 1 条 + 每次站恢复 1 条），且 **RC-5 的登记数交叉校验随之永久失效**（真增减被本底告警淹没）。结清 = 代码按 `1 + Σ/6`（含链首不可得时的 `Σ/6` 降级）实现并经用例钉住，再由本行放行 |
+| `pcs` 站若按 RC-2 不配 4 个 32 位电量点 | 从 `pcs_3zone` 的 `points` 中删去 `at: 43/45/73/75` 四条（**删点不删块**：块窗口与其余点的序号锚定绝对地址，故删点**不构成改名**；但须在变更流程中登记）—— 与 §9.7.3"比对通过前 32 位电量视为不可信"一致。**⚠️ 本行同时是 PRD §9.8.4「比对未通过 → 事件」的替代口径（用"不配点"替代运行期事件），差异登记见 §11.12.2 Δ-9** |
+
+### 11.8 写操作独立 Task 的设计边界与 S2 联锁分工
+
+**本轮结构性保证"只读"**：`StationBus` trait **没有任何写方法**（§11.4.5 只加 `read_discrete`），scheduler/mapper 均无写路径 ⇒ PRD N-4（`pcs` 不写）、N-5（消防 1999 不被调用）、N-6（不改写设备参数寄存器）**由类型系统保证**，不依赖约定。PCS 4 区（1000–1057 与 500–503）与 BMS 1000+ 阈值、消防 1999、空调 40001–40059 **一律不配块**（不进 `regs`），避免"设定值被当实测值"（§9.5.1C）。
+
+**写 Task 立项时须先结清的 4 件事（本设计只给边界，不给实现）**：
+
+1. **PCS 写归属**：4 区 **500 = 模块启停**已被 S2 DI/DO 安全联锁用作**停机原语**（`intercore::ModbusRtuTransport` 持有，触发即 `500=0` 并**锁存禁启**）。若 `southd` 也写 4 区，将出现**两个写方争用同一停机原语**。故"并入 intercore 还是下放 southd"须**单独评审**后再立项；归属未定前 `southd` 对 PCS **一律只读**。
+2. **写路径的仲裁**：写必须与读共用同一个 `Rs485PortBus`（同一 `bus_lock` + 同一 `tx_lock` 语义），否则口内请求会交错。
+3. **控制动作的准入**：写指令必须经策略/AiValidator 链路（PRD N-5），不得由采集站直写；写操作须有"谁/何时/写了什么/回读确认"审计。
+4. **与 S2 的分工（不得重叠）**：`southd` 负责**采集面**（`fire` 的状态位、`hvac` 的只读告警/温湿度、`pcs` 的只读 3 区）；S2 负责**安全联锁面**（DI 触发 → 停机原语 → 锁存）。两面的接口 = 既有事件通道（storage `events` + `AlertFeed`），**不新增直连调用**。消防的融合规则维持 §10.4（OR 取触发、停机仅 DI3、恢复需双方复位、去重键"消防+源"）。**v1.3 补一处联接**：§10.4 的"**恢复需双方复位**"需要知道**消防侧是否已解除** —— 这正是 §11.4.7.1 给消防信号取**双向**（进入/退出活跃）的原因；`fire` 侧的"退出"事件（`fire_sys_6@level2` 等，`value = 0.0`）是融合判据**唯一**可观测的消防侧复位信号，故该不对称决策**不是风格选择，而是 §10.4 融合的必要输入**。
+> **v1.7 成组判读约束（消费侧澄清，`§10.4` 本体不改）**：上句的"退出事件 = 消防侧复位信号"**须按点名成组判读**，**不得**逐条独立解读 —— **同一轮内、同一 `<点名>` 下「退出 + 进入」= 级别跃迁（报警仍在，如 `level1 → level2`）**；**「只有退出、无进入」= 回到非活跃（值 0 工作正常）**，仅后者可作为"消防侧已复位"。理由与完整判据见 **§11.4.7.2 D**（`WordEnum` 跃迁时 `level1 = 0.0` 不表示"一级报警已解除"）。另：**地址序/登记数告警（数据可信性）不得并入 §10.4 的 OR 触发**（§11.4.7.2 E）。
+
+### 11.9 Q-1（BMS 主从方向）的处理【PRD 标记为设计阶段阻塞项】
+
+#### 11.9.1 采用的口径（书面结论）
+
+**本设计采用 PRD §2.2 口径：MUPC（EMS）为 Modbus 主机，BMS 主控模块为从机，由 `southd` 主动轮询**（`port: /dev/ttyS2`、`protocol: modbus`(RTU)、`slave: 1` = 簇号）。依据：① 与 `southd`"每口一 master、主动轮询"的调度模型一致（无需新增从站模式）；② 与 `slave` 字段、`interval_ms` 排程、退避降频语义自洽；③ 该口径是 PRD §9.5.1 点表映射与 §9.6.1 SOC 消费链的既定基线。
+
+**本设计不擅自修改 PRD**：若厂方书面确认为相反口径，按 PRD Q-1 ④-b **须由需求侧重新走需求评审**（点表映射与 SOC 消费链），设计不代庖。
+
+#### 11.9.2 相反口径的影响面（为何"双模式"不可行，以及真正会变的是什么）
+
+若厂方确认"**BMS 主控做主机、EMS 做从机**"：
+
+- **RTU 链路的数据面消失**：Modbus 从机（MUPC）只会被 BMS **读取**自己的寄存器，链路上**不存在** BMS → MUPC 的数据下行。因此① `battery` 站的采集路径**不存在**（不是"参数取几"）；② `on_battery_soc` 的控制链时序、5s 新鲜度窗口、退避降频语义**失去意义**；③ 由此可得结论：**"主站/从站双模式可切换"是伪选项**——真正可切换的不是初动方向，而是**接入路径**。
+- **唯一可行的替代路径**：BMS 协议 §1.1 载明同时支持 **LAN**，§3.1 载明 TCP 形态（"主控模块做 TCP 服务器，后台监控主动连接"）。即相反口径下的替代方案 = **MUPC 作为 Modbus-TCP 客户端**连到 BMS 的 TCP 服务器（数据由 MUPC 主动读，与"MUPC 轮询"的消费语义相同，只是传输换成 TCP）。
+- **影响面清单（切换代价）**：
+  | 维度 | 影响 |
+  |------|------|
+  | 传输层 | 新增 `protocol: modbus_tcp` 站点类型（`StationConf.protocol` 字段已在，但 `StationBus` 需新增 TCP 客户端实现：连接管理 + 重连 + MBAP 头 + 与串口的超时/退避语义对齐）→ **≈1 个新模块 + 一套连接生命周期测试** |
+  | 采集面 | 点表、块划分、点位名、解码**完全复用**（本设计的 `points`/`RegDecode`/`point_table` 与传输无关）→ **零改动** |
+  | SOC 链 | 若采用 TCP 客户端，消费侧**零改动**（见 §11.9.3）；若不采用（无 LAN 施工条件），则 BMS 站的 SOC **不可得**，SOC 只能回落核间（PCS 侧转述值 1010 **不得**作为控制源——N-1；若要启用，须重新评审） |
+  | 新鲜度 | TCP 轮询语义与 RTU 相同（仍是轮询），5s 窗口/`interval_ms < 5000` 约束不变；若退化为"BMS 主动上报"，则须重新定义新鲜度与丢报判据（**属需求变更，非设计可裁**） |
+  | `slave` 字段 | RTU 从机地址语义失效（TCP 用 Unit ID，缺省 1），配置字段保留、语义转为 Unit ID |
+- **切换判据与时点**：判据 = **RC-4**（按 §2.2 口径实测，连续 ≥1h 无离线）；时点 = **PCS 站启用前**（Q-15 同理）。判据不成立 → 立即转厂方书面确认，按 PRD Q-1 ④ 分支处置。
+
+#### 11.9.3 让口径切换不牵动消费侧的设计（E3 的落点）
+
+把"SOC 供给"从"某站必须轮询"解耦为"**站内有点名为 `soc` 的点**"：
+
+- 消费契约（PRD §9.4.3）锚定在**点名**而非块名/站类型；
+- scheduler 只在 `role == Battery` 时推 `on_battery_soc`（当前唯一供给方）；
+- 若将来供给方换成 TCP 客户端站，只需该站仍声明 `soc` 点名，`scheduler`/`SouthSink`/`AiIntegrator`/策略**均不需改**。
+
+> **结论**：设计**不阻塞于** Q-1 的书面答复即可开工实现（按 §11.9.1 基线），但 **RC-4 与 PCS 站启用前必须结清**；本设计已按要求给出可切换方案（E3）与切换代价（§11.9.2）。
+
+### 11.10 G-6（寄存器内字节拆分）延后口径与展示层拆解边界
+
+**本轮不做**（PRD §9.4.2.3，配置契约**不含 `slice` 字段**），替代口径 = **整字采集原值 + 展示/事件层拆解**：
+
+| 点 | 采集 | 展示层拆解（**仅展示，不作判据**） |
+|----|------|-----------------------------------|
+| BMS 位置编号 124/126/128/130（`bms_io_25/27/29/31`） | 整字 u16 原值 | **不拆**——原文 Bit15–8 与 Bit7–0 都标"PACK 编号"，低字节语义自相矛盾（Q-18）⇒ 拆解结果**不得**作为判据、也不建议展示"哪个单体" |
+| 消防探测器数据 1（`fire_sys_10` / `fire_det_*`） | 整字 u16 原值 | 可拆：烟雾 = `(raw >> 8) × 0.1` dB/M；温度 = `(raw & 0xFF) − 55` ℃（原文语义无歧义） |
+
+**跨模块一致性靠什么保证（必须有落点）**：拆解公式**不在南向代码里**，而是由 ① PRD §9.5.1/§9.5.4 明文（唯一真源）+ ② `point_table` 的 `label` 与 §11.10 表格（展示侧可直接引用本节的公式与示例值 `0x4150 → 6.5 dB/M / 25 ℃`）+ ③ 展示层单测复算 AC-2 的同一个例子共同保证。**南向侧只保证"原值不丢、不改、可回溯"**。
+
+**与"消防事件层"的边界（v1.3 新增，回应 P0-3 的"是否与 G-6 冲突"）**：不冲突，因为两件事不同、代码也不同 ——
+
+| 层 | 处理对象 | 手法 | 产物 | 本轮是否做 |
+|----|----------|------|------|-----------|
+| **遥测层**（southd `telemetry_points`） | 整字 | **不拆** | telemetry 落整字原值（`fire_sys_1/6`、`fire_det_*` 的 `value` = 0–65535） | 做（口径不变） |
+| **事件层**（southd `scheduler` + `EdgeTracker`，§11.4.7.1） | 整字内的**位/枚举** | `字 & mask` / `字 ∈ active` —— **只有常量掩码与活跃集，没有"字节切片"逻辑** | 事件（`点名@信号键`），**不产出新遥测点、不改写原值** | 做（本轮新增） |
+| **展示层** | 整字内的**字节**（唯一：探测器数据 1） | `raw >> 8` / `raw & 0xFF` − 55 | 界面/报表的"烟雾 dB/M、温度 ℃" | 做（不在南向仓库） |
+
+> 即：**G-6 延后的是"把整字拆成两个遥测点"**（避免配置/带宽爆炸与语义不可信），而**事件层用的是位/枚举语义** —— 位定义表（PRD §9.5.4）是厂方**无歧义**给出的，与 G-6 的两个"不可可靠拆"候选点无关。**唯一涉及字节拆解的点（探测器数据 1）在事件层被显式排除**（它不产事件），故三层零重叠。
+
+### 11.11 测试策略（AC / RC 在设计层的落点）
+
+#### 11.11.1 可测接缝（三层，逐层可独立断言）
+
+| 层 | 接缝 | 能断言什么 |
+|----|------|------------|
+| L1 纯函数 | `RegDecode::decode` / `unpack_bits` / `points::expand` / `validate_*` / `soc_in_domain` | AC-2 的**全部数值**、AC-3 位序、AC-1 ③ 逐条拒绝、AC-6 点产出/命名 |
+| L2 总线注入 | `MockBus::{put, put_input, put_bits}` + `fail_*_once` + `calls` | AC-2 的**端到端**解码（canned 寄存器 → 点位值）、AC-4 隔离/退避、AC-5 分发 |
+| L3 装配 | `SouthScheduler::new(cfg, buses, FakeSink)` + `tick_once`（既有测试驱动） | 站级分发（`on_battery_soc`/`on_grid_package` 是否被调）、位点/信号变化沿（含**消防字级信号进入与退出活跃**、预留位零事件、恢复后不刷事件）、SOC 越界事件、消防登记数与探测器地址序事件 |
+
+#### 11.11.2 AC 逐条落点
+
+| AC | 用例落点 | 要点 |
+|----|----------|------|
+| **AC-1** | `mupc-southd/tests/s3b2_config.rs` + `tests/fixtures/south_stations_s3b2.yaml`（= PRD §9.4.1 六站 YAML） | ① **既有字段子集**（剥离 `parity`/`discrete`/`byte_swap`/`points`/`offset`/`word_order` 后）解析通过 + 逐条核对既有拒绝条件不触发（其中 `grid_meter` 逐字一致 ⇒ 必过）② 完整 YAML 解析通过且除 §9.4.3 明列条件外无拒绝 ③ **§9.4.3 的 17 条 + 设计补落点的 2 条（规则 18/19）逐条**各一个最小坏配置 → `Err`。**必含的边界用例**（上轮评审打回的直接对应项）：<br>• 规则 15 —— **正向**：`tests/fixtures/south_stations_s3b2.yaml`（六站）与**仅含 `grid_meter` 六相量块**的配置均 `Ok`（**"六站必然通过第 15 条"的可执行断言**，见 §11.5.2(2)）；**反向**：两个**都声明 `points`** 的相邻块、合并后 `count ≤ 120` 且无 `read_slice` → `Err`（**①②③④ 四条合取全成立**；③ 在适用域内恒成立，见 §11.5.2(1)）；同一对块任一方标 `read_slice: true` → `Ok`；两块合并后 `count > 120` → `Ok`（fire 形态：127）；**相邻的一方未声明 `points`** → `Ok`（grid_meter / fire 形态）；**两块都未声明 `points` 且严格相邻**（grid_meter 形态）→ `Ok`；**`discrete` 块相邻** → `Ok`（保守读法，Δ-8）<br>• 规则 15 的**判据 ③（合并后空洞 ≤ 4）**不另立"放行"用例 —— **v1.5 勘误**：原写"单列一个用例、断言 `Ok`"与 §11.5.1 #15 / §11.5.2 的**合取判据**相左（**③ 不是独立放行条件**）。正确形态：构造两个**各自合法（含块内 ≤4 空洞）、地址连续（`b.addr == a.addr + a.count`）且均声明 `points`** 的块，合并后 `count ≤ 120`、无 `read_slice` ⇒ **①②③④ 全成立 ⇒ `Err`**（与上一条反向用例**同判**，可作为其**变体**：块内各带 ≤4 空洞）；该用例的价值在于**拒因文案"应合并"**：`Err` 由 ①②④ 给出、③ 恒成立 ⇒ 证明"③ 的加入不引入额外拒绝"（§11.5.2(1) 等价性证明的钉子）<br>• 规则 6 —— ① 命中行而 `sym_src` 空 → `Err`；② `offset` 与登记值不等 → `Err`；**③ 负向：`addr` 改基准（RC-3 形态）使 `lookup` 无行、且 `offset ≠ 0` → `Ok`（"无行不拒"的可执行断言）**<br>• 规则 18 —— `pcs` 站 `interval_ms: 499` → `Err`、`500` → `Ok`；规则 19 —— 32 位块 `count: 3` 且无 `points` → `Err`、`count: 4` → `Ok`、`discrete` 块 `count: 31` → `Ok`<br>• **规则 10（点名唯一）—— v1.4 补一个"只有它能拒"的形态**：两个**块名不同**、展开后 `metric` 相同的配置（如两块各声明 `points: [{ at: 1, name: soc }]`，或一块的显式 `name` 与另一块的自动位置点名相撞）→ `Err` 含"点名重复"。**注意与 `meter_grid` 块名唯一的分工**：同名块（两块都叫 `p`）由**既有块名唯一规则**先拒（文案"块名重复"，见 §11.5.3.4.1），本用例**不得**用它退化替换 |
+| **AC-2** | L1 `meter_regs`/`points` 表驱动 + L2 `tests/s3b2_decode_e2e.rs` | 逐设备抽样，期望值取 §11.6 表（全部已回原文复算）；**必含** BMS 116 raw=65535 → +4953.5（与 `int16` 的 −1600.1 不等）、PCS 32 位 `lo_hi` 6563.6（与误用 `hi_lo` 不等） |
+| **AC-3** | L1 `rs485-plugin`（`unpack_bits` 单测）+ L2 点位名映射 | 288 位逐位比对（含跨字节边界、非 8 倍数尾部）、31 位（末字节高位不污染）、`bms_alarm_225` = 位 424 = 簇一级告警、`hvac_di_1` = 位 0 |
+| **AC-4** | L3 scheduler | `pcs` 站超时 → 该站 offline + 事件、同口其它站不受影响；退避 `interval << min(n−1,5)` 封顶；恢复 online 一次；`role_priority(Pcs) = 1`（不与 grid/battery 同档） |
+| **AC-5** | L3 scheduler（`FakeSink` 记录调用） | battery 注入合法 SOC → `on_battery_soc` 被调且为百分数；注入越界（65535）→ **不调** + 事件 + telemetry 保留原值；`pcs` 站任何输入 → 不调 `on_battery_soc`/`on_grid_package`；`meter_grid` 之外不推进闸门（core-bin 侧单测断言 `last_data_ts` 不被刷新）。<br>**v1.3 事件侧扩展（承接 PRD §9.6.1 的 `fire` 行"events + SSE"，PRD 的 AC 表未单列，属需求承接、一并上报）**：<br>• **消防字级信号**（§11.4.7.1）—— 注入 `fire_sys_1 = 0x4400`（bit14 主电故障 + bit10 压力传感器故障）→ 恰产 **2** 个事件（`fire_sys_1@main_power_fault`、`fire_sys_1@pressure_sensor_fault`），**不产**其它位的事件；下一轮注入 `0x0000` → 恰产 **2** 个"退出活跃"事件（`value = 0.0`）；**首轮只建基线、不产事件**；站从 offline 恢复后首轮同样**不产**事件（`reset()` 生效）<br>• **枚举跃迁**：`fire_sys_6`（火警状态）= 0 → 1 → 2 逐轮注入 → `0→1` 产 `level1`（进入）；**`1→2` **同轮**产 `level1` 退出（`value = 0.0`）**+** `level2` 进入（`value = 1.0`）**（活跃值间跃迁）；`2→0` 产 `level2` 退出。**并钉住消费方成组判据（§11.4.7.2 D）**：`1→2` 那一轮的 `level1 = 0.0` **不得**被判为"一级报警已解除"（该轮存在同点名进入事件 ⇒ 属**级别跃迁**）<br>• **预留位不产事件**：`fire_sys_3 = 0x0004`（bit2 点型，预留未启用）→ **零事件**（PRD §9.7.6），但 telemetry 仍落 4<br>• **探测器总状态**：`fire_sys_9`（探测器 1 状态）bit12 → `fire_sys_9@alarm`；`fire_det_2`（探测器 2 状态，整字）= 0x4000（bit14）→ `fire_det_2@fault`<br>• **不产事件**：`fire_sys_2`（钢瓶气压）任何取值（含恒 0）→ 零事件；探测器 bit0–4 传感器位 → 零事件<br>• **地址序（Q-9，v1.7 按 §11.4.7.2 的状态翻转口径 + §11.4.6 的链首订正）**：注入**探测器 1（寄存器 11）地址 3、探测器 2..n 的 `+0` 为 4,5,…（严格升序）** → **不产**；注入**非升序**（如探测器 2 的地址 ≤ 探测器 1 的地址）→ **首轮即产 1 条** `fire_detector_addr_order_invalid`（**首次观测即产**，`value` = 首个违规探测器的 1 基序号）；**其后各轮沿用同一非升序值 → 一条都不产**（**去重的可执行断言**，即"5 轮 = 1 条"而非"5 轮 = 5 条"）；**改回严格升序 → 产 1 条 `fire_detector_addr_order_invalid@recovered`（`value = 0.0`）**；**再次违规 → 再产 1 条进入事件**。**链首覆盖用例（防"探测器 1 不在链里"回归）**：探测器 2..n 各自升序、但**探测器 1 的地址最大**（如 寄存器 11 = 9，探测器 2..n = 2,3,4）→ **必须产**（`value = 2`，即"第 2 只的地址 ≤ 第 1 只"）；**且每一轮（不论是否产事件）探测器区点位标记不可信照旧生效**<br>• **位块仍只上升沿**：BMS `bms_alarm_*` 注入 1 → 0 → **不产**"退出"事件（与消防双向形成对照，钉住 §11.4.7.1 的不对称决策）|
+| **AC-6** | L1 `points::expand` 表驱动 | ① 无 `points` 块按"每值槽 1 点"（`bms_term` → 4 点、`bms_alarm` → 288 点）② 有 `points` 块只产列出点（`bms_meta` 8 点，188/190 不产）③ 点级 `count: N` 连续产出（`bms_io` `at:8,count:8` → `bms_io_8..15`）④ 点级 `name` 覆盖（`soc`、**`fire_det_count`**）⑤ 32 位点占 2 寄存器产 1 点（`pcs_3zone` 76 → **72 点**，`pcs_3zone_43` = 1042–1043）⑥ 单寄存器点必产 1 点 ⑦ **无 `points` 的 32 位块产 `count/2` 点**（`count: 6` → 3 点，即 §11.5.3.3 第 8 条的 mapper 用例）|
+| **AC-7** | 工程门禁 | `cargo build --release` 无警告 / `cargo clippy` 无 Error / `cargo test` 全绿 / 格式：**本 Task 新增或修改的行 fmt-clean**（v1.6 订正，口径见 §11.11.2.1 —— **行级**判据，**不含**项目既有基线；**禁止**执行 `cargo fmt --all`） |
+
+##### 11.11.2.1 AC-7 的 fmt 口径（v1.6 订正 —— 把不可执行的仓库级命题收敛为行级可判定命题）
+
+**背景（为什么原文的"`cargo fmt`"不可执行）**：AC-7 原文把"`cargo fmt`"与 build/clippy/test 并列，隐含前提是"仓库整体格式正确"。**该前提在本仓库不成立**：S3b-2 实施期实测 `cargo fmt --all --check` = **1204 处**不符合，分布在 **106 个文件**，集中在 `local-display/src/ui/tests.rs`（221）、`mupc-core-bin/src/log_service.rs`（89）、`mupc-core-bin/src/console_host.rs`（66）、`mupc-southd/src/scheduler.rs`（22）等。这是**项目既有基线**（自 S3a 及更早累积），**不是 S3b-2 引入的回归** —— 用"全仓 fmt 变绿"当验收条件，等于把 1204 处历史债算进本特性。
+
+**更关键的约束（为什么不能"跑一次全仓 fmt 了事"）**：本项目**明令禁止**执行 `cargo fmt --all`。理由有二：① 一次性全仓格式化产生 1204 处**与本特性无关**的改动，会把真实 diff 淹没到不可评审（本项目已有"无差别暂存导致回归"的事故先例，见根 `CLAUDE.md` 的提交规范）；② 工作区存在大量与本特性无关的既有格式差异，全仓格式化的结果**不可归因**到本特性。**故 AC-7 的 fmt 部分必须给出可执行、可验证的替代口径，而不是"豁免格式检查"。**
+
+**订正后的判据（AC-7 的 fmt 部分以此为准）**：
+
+| # | 判据 | 验证方式（可执行、可复现） |
+|---|------|--------------------------|
+| **① 不得新增**（**主判据**） | **本 Task 新增/修改的行** fmt-clean：**"实际不符合行"集合 ∩ 本次变更的新增行集合 = ∅** | ① 对**本 Task 触及的 `.rs` 文件**（**工作区**版本）跑 `rustfmt --edition 2021 --check <file>`；② 从输出取**带 `-` 的行**（= `rustfmt` 要替换掉的**当前文件内容**，即**真正不符合**的行）：以每个 `Diff in <file>:N:` 的 `N` 为该 hunk **首行**在**工作区文件**中的行号，**逐行推进** —— **context 行与 `-` 行各占一个行号，`+` 行不占**（`+` 行只属于格式化后的结果）⇒ 得集合 `R`；③ `R ∩ git diff <Task 起点>..HEAD -- <file>` 的**新增（`+`）行号集合** ⇒ **为空即通过；非空即给出具体 `file:行`**（可复核、可定位）。**⚠️ 两条不得省**：(a) **不得**拿 hunk **锚点行号** `N` 当"不符合行" —— 锚点行常是 format-clean 的 **context 行**（实测 `tests/s3b2_config.rs`：锚点 `:374`，**实际不符合行 = `:377`**），且**锚点数 ≠ 不符合行数**（该文件 **27 个 hunk / 34 条不符合行**，v1.7 实测）；(b) `R` 与新增行号**必须是同一坐标系** —— `rustfmt --check` 读的是**工作区（新）文件**，其行号即 `git diff` 的**新文件**行号（**不得**与旧文件行号混用，否则有增删行时整体错位） |
+| **② 纯新增文件零报出** | 本 Task **新建**的 `.rs` 文件必须 **0 处**报出（无既存基线可援引） | `rustfmt --edition 2021 --check <新文件>` → 无输出 |
+| **③ 既存基线一律不动** | 本 Task **未触及**的文件、以及文件内**未被本 Task 修改**的既有行，其既存不符合**一律不处置**（**不得顺手格式化**） | 不适用（**禁止** `cargo fmt --all`；发现即视为超范围改动） |
+
+> **为什么这是"可验证"而不是"豁免"**：判据 ① 把"格式正确"从**不可执行的仓库级命题**收敛为**行级可判定命题** —— 两条命令（`rustfmt --check` 输出的**实际不符合行（带 `-` 的行）**行号；`git diff` 的新增行号）取交集，**空/非空是确定的二值结果**，且非空时直接给出 `file:行`（可复核、可定位）。它既能被 T7 的闸门自动断言，也**不会**因基线 1204 处而恒假（原文口径的问题）、**不会**退化为"随便看看"。**代价（刻意接受）**：本判据不承诺仓库整体趋近 `rustfmt` 风格 —— 历史债的清理是**独立的格式债任务**（须单独立项、独立 PR，不与本特性混提），不在 S3b-2 的 AC 内。
+
+**T4 的实测结论（截至 `5d46541`，供 T7 收口用 —— 行号口径按 v1.7 判据 ① = 输出中**带 `-` 的行**）**：
+1. **判据 ② 满足**：`mupc-southd/src/point_table.rs`（T4 填实的点表主体）、`tests/point_table_vs_reference_config.rs`（**T4 新建**）、`tests/s3b2_decode_e2e.rs`（**T6-5 新建** —— **v1.8 归属订正**：v1.6/v1.7 把它并列在"T4 实测"条目下，易被读成 T4 新建，评审以 `git log --diff-filter=A` 核实其**实由 T6-5（`fb925e7`）新建**；**只订正归属，"0 处报出"的结论不变**）均 **0 处**报出（v1.7 复跑：三个文件带 `-` 的行数均为 **0**；其中 `s3b2_decode_e2e.rs` 的复跑发生在 T6-5 落地之后）—— 判据 ② 覆盖的三个**新增文件零报出**；
+2. **判据 ① 违反 1 处（T4 引入）**：`tests/s3b2_config.rs`（T3 新建文件，T4 在其中补规则 6 ② 配置级用例）的 `assert_eq!` 中，链式调用 `mupc_southd::point_table::lookup(Role::Battery, 116).unwrap().offset` 长度超 `rustfmt` 的 `chain_width`（60）⇒ 该 hunk 的锚点为 `:374`，**实际不符合行（带 `-` 者）= `:377`**（v1.7 实测复核，见 §11.11.2.1 判据 ① 的注意事项 (a)）。**由 T7 收口**（见 §11.13 T7）；
+3. **判据 ③ 的实例（须区分，防误判为 T4 回归）**：同一文件 `tests/s3b2_config.rs` 整体另有 **26 个 hunk / 33 条不符合行**（按判据 ① 的 `-` 行计；**该文件合计 27 个 hunk / 34 条**），**全部由 T3 引入**（`git show 8db56df` 的既有行），按判据 ③ **不在本 Task 处置范围**。**这正是判据 ① 与 ② 并存的原因**：对"跨 Task 演进的文件"必须用**行级**判据（①），只有**纯新增文件**才适用文件级判据（②）。同理，T1–T3 若曾修改既有文件（如 `config.rs` / `points.rs` / `scheduler.rs`），其既存不符合属基线，不计入本特性。
+
+#### 11.11.3 RC 的代码/配置准备（设计侧已就位，现场只做裁定与回写）
+
+| RC | 现场动作 | 回写项 | 设计侧准备 |
+|----|----------|--------|------------|
+| RC-1 逐点比对 | 每站 ≥10 点与设备显示/厂方工具比对（**必须点名** BMS 116/186，另加 ADL400 0x0092、BMS 2991–2994） | 不一致 → 改配置（**禁止**代码加设备特判） | `POINT_REGS` + `label` 即核对清单；`tests/point_table_vs_reference_config.rs` 保证表↔配置不漂移 |
+| RC-2 PCS 字节/字序 | 1010/1018 判据裁定；32 位电量与显示比对 | `byte_swap` / `word_order` 结论；未通过则不配 4 个 32 位电量点 | `byte_swap`/`word_order` 已是显式字段（无隐式特判） |
+| RC-3 PCS 地址基准 | FC04 读 `addr=1000` 与 `addr=0` 各一次 | PCS 站 `addr` | 表按 (role, addr) 查，基准变更后退化为"无证据"（不误拒） |
+| RC-4 BMS 主从方向 | 按 §2.2 口径实测 ≥1h | Q-1 降级/升级 | §11.9（基线 + 切换方案 + 代价） |
+| RC-5 消防全量探测器 | 按实际登记数读全量、记单轮耗时 | `fire_det` 块 `count`（分片时加 `read_slice: true`） | `fire_detector_mismatch` 自动告警登记数不一致 |
+| RC-6 空调校验位 | 按 D-1 结论落地并实测 | 站级 `parity`（建议 `even`） | `parity` 字段 + 同口一致性校验 + **`Rs485PortBus::open` 的 `parity` 透传**（§11.4.5 末条，v1.4 补 —— 否则现场改配置不生效） |
+| RC-7 连续运行 | 全站 ≥1h、丢包 < 0.1% | — | 站级 offline/online 事件 + 退避封顶 |
+| RC-8 总线不冲突 | 确认 `ttyS7` 与 intercore 的 `ttyS0` 物理独立 | 若同总线 → **PCS 站不启用**（保持注释） | 跨段互斥校验（沿用） |
+| **RC-9 消防钢瓶气压功能有无**（v1.3 补，PRD §9.7.6） | 现场确认该机型**是否有钢瓶气压功能**（读 `fire_sys_2` 是否恒 0）；有 → 用厂方工具核对量值 | 无 → **展示层标"未配置"**（不回写配置；该点**不产事件**） | `cylinder_pressure_configured`（§11.4.6）+ §11.7.3 展示口径已就位 |
+| **RC-10 Q-9 探测器地址序**（v1.3 补，PRD §9.10 Q-9） | 读回**全部探测器（含探测器 1 = 寄存器 11）**的 `+0` 地址寄存器，确认**严格升序且唯一**；核对"第 n 只"= **地址升序第 n 只** | 若顺序/编号与预期不符 → 调整探测器实际地址（或按实际序核对点位名） | `fire_detector_addr_order_violation` 自动产事件（**链首含寄存器 11**，§11.4.6；**产出频次按状态翻转**，§11.4.7.2/§11.7.2 第 9 条），现场只需确认 |
+| **RC-11 Q-19 消防/空调总线归属**（v1.3 补，PRD §9.10 Q-19） | 现场核对消防主机、空调是否**并接在储能侧 BMS 的 485-2 总线**上（旁证：BMS 位 482「485-2 通讯失联」告警） | 若并接 → **该站不得启用**（§9.3.1"禁双 master 共总线"），改由储能侧转发或重新布线 | 与 RC-8 同构（跨段互斥校验只覆盖 `intercore` 串口，**不覆盖此情形 ⇒ 只能现场核对**，故必列） |
+| **RC-12 消防/PCS 设备软件版本核对**（v1.4 补，PRD **§9.7.2 第 3 条** + **§9.8.4**） | 核对① 消防主机软件版本 **≥ V1.72**（消防协议 V1.3.1 的前置要求）、② PCS 协议为 **V1.3**（点表对应该版本）；**两者均无版本寄存器**（只有 BMS 有：输入寄存器 **181** 主控程序版本号，已由 `bms_meta` 的 `at: 1` 点采集）⇒ 只能凭**设备铭牌 / 本机显示屏 / 厂方调试工具**核对 | 版本不符 → **重新取点表**，**不得**按现表凑读（§9.7.2 第 3 条）；核对结论记入投运记录（与 RC-1 同批） | **刻意无代码落点**：系统内**不得**声称"读到消防/PCS 版本号"（§9.8.4 明文；PCS 1017 是**故障告警代码**不是版本号）；BMS 侧的可读依据由 `bms_meta` 的 `at: 1`（181）点提供（§11.4.4 登记） |
+
+> **RC-9…RC-12 的来源与编号说明（v1.4 扩至 4 条）**：PRD §9.9.2 的 RC 表只到 **RC-8**，但这四项分别由 **PRD §9.7.6**（钢瓶气压）、**§9.10 Q-9**（探测器地址序）、**§9.10 Q-19**（消防/空调总线归属）、**§9.7.2 第 3 条 + §9.8.4**（消防/PCS 版本核对，v1.4 补）明文要求（前两项还需**展示层口径**与**交叉校验**落地，RC-12 明确**不得**在系统内落代码）。本设计**续号补充**并**上报需求侧回写 PRD §9.9.2**（§11.12.2 Δ-6），不擅自改动 PRD 的 RC 编号体系。
+
+### 11.12 风险、待决项与 PRD 差异上报
+
+#### 11.12.1 本设计新增/变更的字段与契约（须评审追认）
+
+| 项 | 层级 | 来源 | 用途 | 若不追认的退路 |
+|----|------|------|------|----------------|
+| 1 `read_slice` | 块级（缺省 false） | **PRD §9.4.2.4 已正式补登（v1.7，Δ-3）** —— 本设计改为"落地 PRD 定义"，不再是设计新增 | 豁免第 15 条（设备单次读上限导致的分片，Q-6/Q-7 现场才知） | 不适用（PRD 已定）；若需求侧撤回该字段，退路 = 第 15 条改为"仅警告不拒"（弱化 PRD） |
+| 2 点名 `fire_det_count` | 点级（消防 `fire_sys` 的 `at: 7`） | **PRD §9.4.1/§9.5.4 已正式定名（v1.7，Δ-4）** —— 不再是设计补充 | 消防登记数交叉校验（PRD §9.5.4"强制"） | 不适用（PRD 已定）；撤回则退化为"硬编码消防地址 10 / 块名 `fire_det`"（**违背** PRD 反设备特判取向）或不做该校验 |
+| 3 `name` 与 `count > 1` 并存 → 拒 | 校验规则 | **PRD 未定义** | 保守口径（禁用而非发明） | 允许并取"首点命名、其余位置命名"（语义模糊） |
+| **3b** 无 `points` 块的 `count % width != 0` → 拒（规则 19） | 校验规则 | **PRD 未定义**（设计补充，护栏） | 防"尾槽静默不产点"（§11.4.3） | 改为加载期告警（不拒），或允许静默（**不建议**：与本 PRD 反复整治的"静默失真"取向相反） |
+| 4 `MAX_SINGLE_READ_REGS = 120` | 常量 | PRD §9.5.4 的分片口径 | 第 15 条判据 + 分片口径统一 | 取标准 125（与 PRD 分片口径不一致） |
+| 5 **`TelemetrySample.kind` / `BlockData::{Regs,Bits}` / `SocOutcome`** | 内部类型 | 设计选择 | 位点变化沿过滤 + "点产出/落库节流"分层 + Battery 四种情形显式化（§11.4.6） | 两条 mapper 入口（前者）；Battery 语义继续隐式（后者，**不建议**，上轮评审正因语义未写而打回） |
+| **6 消防字级信号（`SignalSpec` / `@信号键` 事件名 / 双向事件 / "入表即产事件"）** | 内部类型 + 事件命名契约 | **PRD 只要求"消防 → events"（§9.6.1）与"告警位 → events"，未定义信号的表达形态、事件名语法、单向/双向与"哪些位入表"** | 补齐消防事件落点（P0-3） | ① 若评审不接受 `@` 语法 → 改用 `<点名>.<信号键>`（换分隔符，语义不变）；② 若评审要求**位块也双向** → 统一双向 + 事件节流（代价：BMS 288 位在"全 1 复位"时刷新 288 条恢复事件，须加去抖窗口与事件保留策略复核）；③ 若不接受"探测器只取 bit12/bit14" → 展开到 bit0–4（代价：信号源数 ×5）；④ 若不接受"`signals` 只登记产事件者（无 `class` 字段）" → 恢复 `SignalClass{Alarm,State}` 并在表中登记 State 行（代价：出现"登记了却不产事件"的歧义，且需为极性反转位补判据语义） |
+| **7 规则 18（`pcs` ≥ 500ms）** | 校验规则 | **PRD §9.3.2.2(2) + §9.8.1 末条明文要求，但未进 §9.4.3 表** | 设计侧补落点 | 不适用（PRD 已要求）；建议需求侧把该条**补进 §9.4.3 表**（现表 17 条 → 18 条），使 AC-1 ③ 有明确出处 |
+| **8 状态型事件的产出频次与载荷约定 + `WordEnum` 退出语义（v1.7）** | **事件契约（运行时语义）** | **PRD 未定义**：§9.10 Q-9 只定义"按地址升序 + 以寄存器 11 交叉校验"，**未定义事件产出频次**；§9.6.1 只要求 `fire` → events + SSE，**未定义"退出事件"的语义与消费方判据**；§9.5.4/§9.9.1 亦未给"登记数不一致"的产出频次 | 消除 T5 实测的"**命中即产**"事件风暴（5 轮 = 5 条 ⇒ 约 **8.6 万条/日**，压力在 `storage.events` + SSE）；并把"进入/退出"与"诊断量"两个维度分离（**§11.4.7.2**） | ① 若评审/运维要求"持续异常须**周期性**重提醒" → 需**需求侧给出周期口径**（本设计**不自造**窗），机制退化为"状态翻转 + 固定周期重发"；② 若不接受 `@recovered` 后缀 → 退回"同名 + `value = 0.0` 哨兵"（**代价**：③ 读回 0 只、① 配负 offset 时 raw 0 越界 ⇒ **进入与退出同值不可分**）；③ 若不接受"首次观测即产" → "上线时已违规"的站**永不产事件**（**不可接受**，不建议）；④ 若要求"位块也双向" → 见项 6 的退路（统一双向 + 事件节流） |
+| **8b 建议需求侧补登（非阻塞，v1.7）** | 需求文档 | 同上：**"状态型异常按状态翻转产事件（不逐轮重复）"这一取向 PRD 无出处** | 防后续实现反复（同一形态在 ①③ 上重犯，见 §11.4.7.2 B/C） | **建议**在 PRD §9.6.1 或 §9.9.1 补一句频次口径；**不追认亦按本设计执行**，不影响验收 —— 故**不登记为 §11.12.2 的 Δ**（不是"设计与 PRD 相左"，而是"PRD 未定义、设计补齐"） |
+| **9 钢瓶气压「是否配置」的取数接缝 + 每站"曾非 0"记忆（v1.8 登记，评审裁定"可接受"）** | 接缝（`mupc-southd` → 展示侧）+ 运行期状态 | **PRD §9.7.6 有明文要求**（钢瓶气压恒 0 不得判"气压异常/泄漏"、未配置须标"未配置"），但**未定义取数形态**；设计 §11.4.6/§11.7.3 只给了 **mapper 纯函数** `cylinder_pressure_configured(reads, ever_nonzero)`，**未写"谁持有 `ever_nonzero`、展示侧如何按站取"** | ① `PortRunner` 维护**每站一个"本站生命周期内是否曾出现非 0"**的记忆（初值 false，任一读到非 0 即置 true、**只置位不回退** —— 气压不会在业务上"变回未配置"）；② 取数接缝 **`SouthScheduler::cylinder_pressure_configured(station_index: usize) -> bool`**，使**展示侧**能按站取"该点是否已配置"（落地 §11.7.3 的展示口径）。**展示侧的实际消费（Web/展示层读取该接缝）不属本章范围，属后续任务** —— 本章只保证记忆与接缝就位；该点**永不产事件**（PRD §9.7.6 明令） | ① 若不追认该接缝 → 展示侧拿不到 `ever_nonzero`，只能按**当轮值**呈现 ⇒ **把"未配置"显示成 `0 kPa`**（PRD §9.7.6 明确禁止的形态）；② 若把记忆上移给调用方每轮传入，等于把同一记忆挪到外部、未减少耦合，且"只置位不回退"的语义会散落多处 |
+
+#### 11.12.2 PRD 差异上报（**需求侧待订正，设计与实现按下列口径执行**）
+
+| 编号 | 差异 | 事实 | 本设计执行口径 |
+|------|------|------|----------------|
+| **Δ-1**（**已闭合**） | PRD §9.4.2.4 点级 `format` 行注"⚠️ 缺省是 `int32_scaled`" | **代码事实是 `Float32`**（`config.rs::default_reg_format`，且既有单测 `default_reg_format_used_when_omitted` 钉住） | **PRD v1.7 已订正为 `float32` 并补登"本轮新增块一律显式声明 `format`"护栏** ⇒ 差异闭合。本设计**维持 `Float32` 缺省**（改缺省会改既有 S3a 行为、破坏既有单测与 §9.4.1 第 6 站语义），并把该单测列入"**断言不得改**"（§11.5.3.4 C3） |
+| **Δ-2**（**部分闭合**） | PRD §9.4.3 把符号性规则 ① 标为"本轮不可机械校验、不纳入 AC-1" | 有了 §11.4.4 的 `POINT_REGS`（含 `sym_src`），① 变为**可机械判定** —— 但**只对"命中的行"成立**：v1.3 按 P0-2 裁定，**查不到行 → 不拒**（现场 RC-3 合法改 `addr` 基准），故 ① 的形态为"**命中而 `sym_src` 空 → 拒**" | **实现 ①（收窄形态）**（不改变 AC-1 清单，故不违反 §9.4.1 的 YAML ⇒ AC-1 ② 仍成立）。是否把 ① 纳入 AC-1 ③ **属需求侧决定**，本设计不擅自改 AC；**请需求侧注意**："无行不拒"是 ① 的**能力边界**（可追溯性由 ② + RC-1 兜底），PRD §9.4.3 的表述宜同步说明 |
+| **Δ-3**（**已闭合**） | PRD 第 15 条"块落地极大性 → 拒"与 §9.5.2/§9.5.4 的"现场分片"张力；以及第 15 条**作用域**未限定（会误拒 `grid_meter`） | PCS 单次读上限（Q-6）、消防上限（Q-7）**均"文档未明确"** ⇒ 分片与否现场才定；且既有 `grid_meter` 六块严格相邻 | **PRD v1.7 已补登 `read_slice`（Δ-3 落地）；v1.8 按项目经理裁定补明第 15 条的适用域（仅作用于声明了 `points` 的块）与判据（合并后 `count ≤ 120`）** ⇒ 差异闭合。本设计 §11.5.1 #15 / §11.5.2 与之一致，并给出"六站必然通过"的证明 |
+| **Δ-4**（**已闭合**） | PRD §9.5.4 登记数交叉校验为"强制"，但参考配置未给该点的可识别形态 | `fire_sys` 的点均无 `name` | **PRD v1.7 已正式定名 `fire_det_count` 并在 §9.4.1 的 `at: 7` 声明该名** ⇒ 差异闭合。本设计 §11.4.6/§11.4.7 按**点名**查找（禁按块名 + 硬编码地址） |
+| **Δ-5**（**新，v1.3**） | **规则 18（`pcs` 站 `interval_ms ≥ 500ms`）在 PRD 有明文要求（§9.3.2.2(2)、§9.8.1 末条），但未进 §9.4.3 的 17 条表** | AC-1 ③ 的措辞是"逐条触发 §9.4.3 的拒绝条件" ⇒ 该条**没有 AC 出处** | 本设计**补落点并纳入 AC-1 ③**（§11.5.1 #18、§11.11.2），标注"非 §9.4.3 表内条件"。**建议需求侧把该条补进 §9.4.3 表**（17 → 18 条） |
+| **Δ-6**（**新，v1.3；v1.4 扩列**） | PRD §9.6.1 要求 `fire` 的数据进 **events + SSE**，但 **PRD §9.9.1 的 AC 表没有对应验收项**；同理 **§9.7.6 的钢瓶气压展示口径、§9.10 的 Q-9/Q-19、§9.7.2 第 3 条 + §9.8.4 的消防/PCS 版本核对，均未进 §9.9.2 的 RC 表** | 需求侧确有要求（上述各条均为明文），但**验收侧无落点** | 本设计在 §11.11.2（AC-5 事件侧扩展）与 §11.11.3（**续号 RC-9/RC-10/RC-11/RC-12**）补齐落点并上报；**建议需求侧回写 PRD 的 AC/RC 表**（本设计不擅自改 PRD 编号体系） |
+| **Δ-7**（**新，v1.3；已闭合，仅登记过程**） | PRD §9.4.3 第 15 条判据若只按 **v1.6 原文**（"合并后空洞 ≤ 4"）实现，会把 `fire_sys`+`fire_det`（空洞 0、合并 127 > 120）判为"应合并"⇒ 与 §9.5.4"必须分片"直接冲突 | 单一判据下"空洞小"并不等于"合并不超设备上限"，结论方向反了 | **PRD v1.8 已补 ④"合并后 `count ≤ 120`"并保留 ③，同时限定适用域** ⇒ 差异闭合。本设计**四条判据全实现**（§11.5.1 #15），并证明 **③ 在适用域内由规则 11 恒成立**（§11.5.2(1)）⇒ 与 PRD **行为等价**；实现顺序建议先判 ④（提前放行"本就该分片"的形态） |
+| **Δ-8**（**新，v1.3；备案项，非阻塞**） | PRD v1.8 第 15 条的"`discrete` 位块是否参与合并判定"**字面有两种读法**（正文把位块列为"不参与"的例子，但 ②/③ 又出现"`discrete` 按位地址同理""位块不受 ③ 限制"） | 本设计取**保守读法**（`discrete` 一律不参与）；两种读法在本轮**判定结果完全相同**（§9.4.1 的两个位块均未声明 `points`） | 按保守读法实现；**请需求侧在 §9.4.3 第 15 条补一句消歧**（例如"声明了 `points` 的 `discrete` 位块是否参与：不参与/参与并如何折算位数为寄存器数"）。本设计不擅自改 PRD |
+| **Δ-9**（**新，v1.4；须需求侧追认**） | PRD **§9.8.4「事件」栏要求「PCS 32 位电量比对未通过（若配置）」产事件** | 该"比对"是 **RC-2 的现场人工比对**（把 1042–1045/1072–1075 的累计电量与设备显示/大屏读数比对，§9.7.3），**系统内没有参考量可判**；而 PRD §9.7.2 第 2 条又明令"本轮**不做自动量程校验**（除 SOC 外）" ⇒ 运行期**不存在可落地的判据**（既不能自动比对、又不允许量程自校验） | **本设计以 RC-2「未通过则不配 4 个 32 位电量点」替代**（落地口径见 §11.7.4 迁移清单末行"删点不删块"；现场动作见 §11.11.3 RC-2）——即**用投运前的显式裁定替代运行期事件**：比对不通过 ⇒ 这些点根本不进配置 ⇒ 系统内不存在"不可信数据"，也就无需"比对未通过"事件（这正是 PRD §9.7.3"该比对通过前 32 位电量视为不可信"的形态）。**本轮实现口径 = 不产该事件**（§11.4.7 事件产出表 ⑦）。**登记为与 PRD 的差异，需需求侧追认或订正 PRD §9.8.4**：二者择一 —— a. **接受本口径**，把该事件从句中删除（或改写为"RC-2 未通过 ⇒ 不配点"，与 §9.7.3 表述对齐）；b. **坚持要事件**，则须由需求侧给出**系统内可判的判据**（例如"该 4 点已配置且值域/单调性校核失败"），本设计再据以补落点 |
+
+> **v1.7 说明：本表不新增 Δ。** 本章 v1.7 的两条事件口径裁定**均不与 PRD 字面相左** —— ① **探测器 1 链首**（§11.4.6）是 PRD §9.10 Q-9 处理口径"以**寄存器 11** 读回的地址值交叉校验"的**字面落地**（原设计/实现少算了链首，属**欠实现**而非"多出的设计"）；② **状态型事件的产出频次与 `@recovered` 载荷**（§11.4.7.2）属 **PRD 未定义、由设计补齐**（PRD 未给"事件产出频次"，§9.6.1 只要求 `fire` → events + SSE），已登记为**设计侧新增契约**（§11.12.1 项 8，**须评审追认**），并**建议**需求侧在 §9.6.1/§9.9.1 补一句频次口径（**非阻塞**，不追认亦按本设计执行）。
+>
+> **另需注意（不属 Δ，属跨章实现约束）**：§11.4.7.2 D 的"**成组判读**"判据约束的是 **§10.4 融合的消费侧**（未来实现者），**§10.4 融合规则本体与 PRD 均不改**；实测现存联锁（core-bin `interlock.rs`）**只由 DI/GPIO 驱动、尚未消费 southd 的 fire 事件**，故**无需补改现存代码**。
+
+#### 11.12.3 实现风险（开发期须注意）
+
+| 风险 | 说明 | 缓解 |
+|------|------|------|
+| R-1 既有测试/构造点连锁订正 | ① **20 处** YAML fixture / 内联 YAML 需改构造数据（含 A1–A13 + **A15/A16**（v1.4 移入）+ **A17–A21**（v1.5 移入，均为"假绿订正"）；其中多数是"battery 补含 `soc` 点的 `regs`"、1 处 `fire` `addr` 改非 0、2 处 mapper/scheduler fixture 改点名式、1 处两站补完整相量块）；② **`RegBlockConf` 字面量 10 处 + `StationConf` 字面量 8 处**（逐个核实，非 v1.2 的"≈13 处"）需机械补新字段；③ `BlockReads` 改为承载 `BlockData::{Regs,Bits}` 后，`grid_convergence.rs` 与 mapper/scheduler 单测的 canned 构造点需同步；④ `telemetry_points` 签名/返回类型变更（`(String,f64)` → `TelemetrySample`），其单测**断言与测试名**需订正（§11.5.3.3 第 8 条）；⑤ **9 处 metric 更名导致的断言订正**（§11.5.3.3） | **完整分类清单见 §11.5.3**（fixture 订正 / 断言订正 / 断言不得改，逐项到 `file:行`）。执行顺序：先做类型改造 + 机械补字面量 + 改 fixture（**在一个提交内完成**），再按 11.5.3.3 订正断言期望值；`§11.5.3.4`（C1–C7）列出的断言**一个都不许改** |
+| R-2 表↔配置漂移 | `POINT_REGS`（展开后 618 行，探测器区为模板）与配置双份数据 | `tests/point_table_vs_reference_config.rs` 双向核对（§11.4.4）+ 行数断言 |
+| R-3 需求未定项的现场回写 | Q-4/Q-16/Q-20/RC-2/RC-3 会合法改 `addr`/`format`/`word_order`；**RC-3 改 `addr` 基准后 `POINT_REGS` 的键会整体失配** | 这些字段**不做**强校验（只作用于 `offset`），且 **`lookup` 查不到行 → 放行**（v1.3/P0-2 裁定）⇒ 现场校准**不会**被启动期拒；漂移由 `tests/point_table_vs_reference_config.rs`（参考配置侧）与 RC-1 逐点比对兜底 |
+| R-4 位错 1 位 ⇒ 全表语义偏移 | FC02 位序（bit0 = LSB） | `unpack_bits` 单测（PRD 原文示例 0x3B/0xBB）+ AC-3 逐位 + RC-1 抽点 |
+| R-5 618 点落库量 | 模拟量 ≈300 行/s；位点按 D2 稳态≈0 | retention 天数投运前复核；位点稳态零写 |
+| **R-6 消防信号误报/漏报**（v1.3 新增） | 信号 mask/活跃集写错 → 火警事件误报（虚假停机判据）或漏报；`bit15 = 0 表示离线` 的**极性反转**位最易写错 | ① 信号清单逐条对表 PRD §9.5.4（§11.4.7.1 表）；② AC-5 事件侧用例**逐信号钉住**（含"预留 bit2 零事件""bit15 不入事件"的负向断言）；③ `EdgeTracker` 首轮/恢复后只建基线不产事件（防"上线即刷事件"）；④ 探测器地址序异常时点位标记不可信（防空地址乱序下的误判） |
+
+### 11.13 实施顺序（建议 Task 拆分，供项目经理排期）
+
+| # | Task | 内容 | 闸门 |
+|---|------|------|------|
+| T1 | 解码原语 | `RegFormat` 扩展 + `RegDecode` + **`WordOrder`（唯一定义）**；`decode_regs` 薄包装 | `meter_regs` 单测全绿（含既有 6 例不变）+ 新增 AC-2 L1 向量 |
+| T2 | 帧层 FC02 | `unpack_bits` + `parse_bits_response` + `read_discrete_inputs_from` | `unpack_bits` 单测（PRD 示例 + 31 位/288 位） |
+| T3 | 配置与校验 | §11.4.1 结构 + §11.5 **十七条 + 规则 18/19** + `read_slice`；**含 ① fixture 订正（§11.5.3.2）与 ② 断言订正（§11.5.3.3）**；`validate_maximality` 按 §11.5.2(1) 的四条判据实现（**建议判定顺序：先 ④ `count > 120` → 放行；再 ③ 空洞；再 ① ② 与 `read_slice`**，使"本就该分片"的形态提前放行） | **AC-1 ①②③ 全绿**（含 §11.11.2 AC-1 ③ 的规则 15/6/18/19 边界用例）；**既有用例经 §11.5.3 分类订正后全绿**——注意 T3 的"DoD"不是"既有用例一字不改"（v1.2 的该措辞不准确，见下注） |
+| T4 | 点展开与点表 | `points.rs` + `point_table.rs`（探测器区**模板 + 运行期展开**，n=20 展开 618 行）+ 消防 `SignalSpec` 表 | AC-6 全绿；表↔配置交叉核对绿；**消防信号清单与 PRD §9.5.4 位定义逐条对表** |
+| T5 | 总线与调度 | `StationBus::read_discrete`/MockBus；scheduler 分发 + **统一 `EdgeTracker`（位点 + 字级信号）** + `role_priority(Pcs)`<br>**（v1.7 补改，T5 已实现并通过代码评审，下列 2 项为评审升级的设计裁定所致）**：① **⑤ 地址序事件改按"状态翻转"产出**（进入 / `@recovered` 退出、连续同态不产、**首次观测即产** —— **§11.4.7.2 C**；去掉现"每轮直接 `events.push`"）；② **升序链首含寄存器 11**（探测器 1 —— **§11.4.6**） | AC-3/AC-4 绿；**消防信号正向（进入/退出/枚举跃迁/地址序）与负向（预留位零事件、气压零事件、位块无退出事件）用例见 AC-5 事件侧**；**v1.7 追加**：`fire_detector_addr_order_violation_emits_event` 按 AC-5 的地址序条目重写（"首轮即产 1 条 / 连续轮 0 条 / 恢复产 `@recovered`"），并新增"**探测器 1 地址最大仍须产**"的链首用例（既有用例期望值因链首 +1） |
+| T6 | mapper 与消费 | `telemetry_points` 重构（逐点/每值槽）、**`soc` 点名 + `SocOutcome` 四情形**、`Pcs` 臂、SOC 域检查、消防登记数 + 地址序 + 钢瓶气压口径；core-bin `SouthSink` 事件 message<br>**（v1.7 补一句约束）**：① SOC 越界与 ③ 登记数不一致**必须按 §11.4.7.2 的"状态型事件"口径实现**（状态翻转 + 首次观测即产 + `@recovered` 退出），**不得**沿用"命中即产"（否则同一风暴在 ①③ 上原样重现） | AC-2 L2 / AC-5 绿（含事件侧扩展）；**v1.7 追加**：①③ 的"首轮即产 1 条 / 连续轮 0 条 / 恢复产 `@recovered`"用例 |
+| T7 | 配置迁移与文档 | `deploy/config/*.yaml` 换 §9.4.1 的 6 站（PCS 保持注释）；确认本设计的落地状态（**不新增构建参数，`build.md` 不改**）；**收口 T4 遗留的格式不符合 1 处**：`tests/s3b2_config.rs` 的 `assert_eq!` 链式调用 `point_table::lookup(Role::Battery, 116).unwrap().offset` 超 `rustfmt` 的 `chain_width`（报 `:374`，实际不符合行 `= :377`）⇒ 按 `rustfmt` 建议拆链（**断言语义不变**） | AC-7 + `grid_convergence.rs` 回归锚（**断言零改动**）。**AC-7 的 fmt 部分按 §11.11.2.1 的 v1.6 行级口径执行**（**不是**"跑一次 `cargo fmt`"）：<br>① **主判据（不得新增）**：`rustfmt --edition 2021 --check` 对**本 Task 触及的 `.rs` 文件**报出的**"实际不符合行"集合**（= 输出中**带 `-` 的行**；**不是** hunk 锚点行，抽取规则见 §11.11.2.1 判据 ① 的注意事项 (a)(b)）∩ 本 Task diff 的新增行号集合 = **∅**（非空即给出 `file:行`）；<br>② **纯新增文件零报出**：`mupc-southd/src/point_table.rs`、`tests/point_table_vs_reference_config.rs`、`tests/s3b2_decode_e2e.rs`（**归属订正：前者 T4 新建、末者 T6-5 新建** —— v1.8）均**已实测 0 处**，T7 复跑仍须 0 处；<br>③ **禁止** `cargo fmt --all`（既有基线 **1204 处 / 106 文件**，与本特性无关；全仓格式化会淹没真实 diff）；**T3 遗留在 `tests/s3b2_config.rs` 的 26 个 hunk / 33 条既存不符合行（v1.7 口径）不动**（§11.11.2.1 判据 ③）；<br>④ **消费方可见变更核对（v1.8 登记，提示本 Task 留意）**：`SouthSink` 的 **`offline` 事件文案新增 `：{reason}` 后缀**（**`online` 文案逐字不变**；事件类型 `south_station.<站id>.offline`、等级 `warning`、去抖归 scheduler **一字不变**）—— PRD §9.7.2 第 1 条的落地（§11.7.2 第 10 条），**若有消费方/文档/告警规则/前端按旧文案逐字匹配须同步核对**；<br>⑤ **准入门槛（v1.8）**：**`fire` 站写入生效配置前，必须先结清 §11.4.6 的登记数容量式订正**（`1 + Σ/6`；旧式 `Σ/6` 恒真 ⇒ 永久假告警 + RC-5 失效）—— 见 §11.7.4 的 `fire` 站门槛行，与本行同批放行 |
+
+> **T3 闸门措辞订正（v1.3，上轮评审 P0-4 的直接后果）**：v1.2 写的是"既有用例全绿"＋回归闸门写"三者零破坏（**仅** §11.5.3 列出的 fixture 数据订正）"——该口径**不成立**：metric 更名（`temp` → `temp_1`）会让 `scheduler.rs` / `mapper.rs` 的**断言期望值**必须改（§11.5.3.3，共 9 处），这不是"fixture 订正"。本版统一为：**"经 §11.5.3 的三类分类处理（fixture 订正 / 断言订正 / 断言不得改）后全绿"**，并在 §11.5.3.4 明确"不得改"的回归锚清单。
+
+> **T7 的 AC-7 / fmt 口径订正（v1.6，实现期实测的直接后果）**：T7 原列的 `cargo fmt` 闸门**不可执行** —— 实测仓库既有基线 `cargo fmt --all --check` = **1204 处 / 106 文件**（非 S3b-2 回归），且本项目**明令禁止** `cargo fmt --all`（1204 处无关改动会淹没真实 diff）⇒ **不能**用"跑一次全仓 fmt 使其变绿"来满足 AC-7。现按 **§11.11.2.1** 改为**行级可验证口径**：判据 ①（本 Task **新增/修改的行** fmt-clean：`rustfmt --check` 报出行号 ∩ 本次 diff 新增行号 = ∅）为主判据、判据 ②（本 Task **新建**的 `.rs` 文件零报出）对纯新增文件适用、判据 ③（既存基线一律不动）封住超范围格式化。**T4 实测**：`point_table.rs`、`tests/point_table_vs_reference_config.rs`、`tests/s3b2_decode_e2e.rs` = **0 处**（判据 ② 满足；其中 `tests/s3b2_decode_e2e.rs` 为 **T6-5** 新建，**v1.8 归属订正** —— 其复跑在 T6-5 落地之后，见 §11.11.2.1 条目 1）；T4 **仅**在 `tests/s3b2_config.rs` 引入 **1 处**（判据 ① 违反）⇒ **T7 收口**（见上表 T7 行）；该文件另有的 **26 处**为 T3 既存基线（判据 ③，不动）。
+> **v1.7 措辞订正（本注内的"报出行号"即判据 ① 的抽取对象）**：`rustfmt --check` 的"不符合行"**须取输出中带 `-` 的行**，**不是** hunk 锚点行 `Diff in <file>:N:` 的 `N` —— 实测该文件锚点 `:374` 对应**实际不符合行 `:377`**，且**锚点数（27 个 hunk）≠ 不符合行数（34 条）** ⇒ 判据 ① 的抽取规则与逐行推进方式见 **§11.11.2.1 判据 ① 的注意事项 (a)(b)**（v1.6 本注的"报出行号"按此理解为"带 `-` 的行"）。
+
+**回归闸门（v1.3 精确化）**：
+1. **`mupc-southd/tests/grid_convergence.rs`** —— meter_grid 语义逐字段等价，**只改 `block()` 构造的字段补齐，断言一个字节都不动**（§11.5.3.4 C1）；
+2. **`config.rs` 的 meter_grid-only 系列 + 解析类系列**（§11.5.3.4 C2/C3）—— 断言不动；
+3. **`core_config.rs` 的 6 个 southern-stations 用例** —— 断言不动（只改 fixture，§11.5.3.4 C4）；
+4. **`scheduler.rs` 的调度/退避/隔离/SOC gating 断言**（§11.5.3.4 C5）—— 不动。
+
+> 即：**"零破坏"的对象是"断言语义"，不是"逐字不动"** —— 因 PRD §9.4.2.1 第 4 条（每值槽 1 点 + 位置式命名）而必须改的期望值属**规则变更的传导**（§11.5.3.3 已逐处列明），其余任何断言变红都按**回归**处理。
+
+### 11.14 一致性声明
+
+| 关联 | 关系 |
+|------|------|
+| PRD §9（**v1.8**，`[REVIEWED: PASS: 2026-09-21]`；第 15 条已按项目经理裁定订正适用域与判据） | 本章是 §9 的实现级落地；§9.4.3 的 **17 条 + 设计补落点的 2 条（规则 18/19）**逐条落点见 §11.5（**第 15 条四条判据的完整口径、"③ 恒成立"的等价性证明与"六站必然通过"的逐站证明**见 §11.5.2）；G-1…G-6 落点见 §11.1（含**消防事件**这一非 G-项落点）；Q-1 处理见 §11.9；**G-6 替代口径与"消防事件层"三层边界**见 §11.10；**消防事件统一模型（信号/`EdgeTracker`）**见 §11.4.7.1；既有测试连锁订正的**三类分类清单（fixture / 断言 / 不得改）**见 §11.5.3；PRD 差异上报（**Δ-1…Δ-9**）见 §11.12.2（Δ-1/Δ-3/Δ-4/Δ-7 已闭合；**Δ-8 为待需求侧消歧的备案项**；**Δ-9 为 v1.4 新增、须需求侧追认**：§9.8.4 的"PCS 32 位电量比对未通过 → 事件"由 RC-2「未通过则不配点」替代，本轮不产该事件）；**v1.7 的事件口径裁定（⑤ 地址序去重 / `WordEnum` 退出语义 / 探测器 1 链首）**见 **§11.4.7.2 / §11.4.6**，**不新增 Δ**（两项均**不偏离 PRD 字面**：Q-9 原文即要求"以**寄存器 11** 读回的地址值交叉校验"；PRD 未定义"事件产出频次"，属设计补齐） |
+| 本文档 §10（S3a） | 调度架构/故障隔离/role 分发骨架**不变**；本章只在 §10 预留接缝上扩展（§11.3 扩展点列），并对 §10.6"role 映射"与 §10.8"文件结构"作**增量补充**（不回改原条款） |
+| PRD §9.11 ① | 已明确要求设计文档至少覆盖：`RegBlockConf.points` 结构与校验（§11.4.1/§11.5）、`StationConf.parity`（§11.4.1，D-1 裁定 ①）、位块点落库口径（§11.7.2）——**三项均已落实** |
+| 核间 10 §2.4 / `2026-09-08-S2-DI-DO安全联锁.md` | PCS 只读 + 4 区 500 停机原语归属见 §11.8；数据面边界 ADR-012 维持 |
+| 04 策略引擎 §2.11.1 | SOC 双源（BMS 优先/超期回落核间）链路不变（§11.7.1、§11.9.3） |
+| 项目 CLAUDE.md | 无硬编码密钥；无新增 `unsafe`；错误类型实现 `std::error::Error`；不新增独立设计文档 |
+
+---
+
 ## 附录 A：术语表
 
 | 术语 | 说明 |
@@ -1321,6 +2458,15 @@ BMS 站在线时其 SOC **优先**于 intercore `latest_soc`（核间回读）�
 | termios | Unix 终端 I/O 控制系统（串口配置标准接口） |
 | CRC | 循环冗余校验 (Cyclic Redundancy Check) |
 | RKNN | Rockchip Neural Network（RK3588 NPU 推理框架） |
+| FC02 / FC03 / FC04 | Modbus 功能码：读离散输入 / 读保持寄存器 / 读输入寄存器（§11.4.5） |
+| 读窗口（块） | 一次 Modbus 事务覆盖的连续地址区间，只承载**传输口径**（`func`/`addr`/`count`/`byte_swap`）与缺省换算（§11.2.1） |
+| 点位（point） | 一个物理量的**换算口径**（`format`/`scale`/`offset`/`word_order`/`name`）+ 其遥测键（metric）；块内 `points[]` 逐点声明（§11.4.1/§11.4.3） |
+| 位块 | `func: discrete` 的离散输入区间，逐位产出 0/1 点（§11.4.3/§11.4.5） |
+| 点表登记注册表 | `mupc-southd::point_table::POINT_REGS`：`(role, addr) → {format, scale, offset, 符号性来源, 分类, 中文名, signals}`，按 n=20 参考配置**展开后 618 行**（探测器区为 6 条组内模板 + 运行期展开）由 PRD §9.5 逐点转写；用作配置期一致性校验的期望值来源、RC-1 核对清单与消防事件源（§11.4.4/§11.4.7.1） |
+| 变化沿落库 | 位点仅在与上一轮取值不同时写 telemetry（稳态零写），`Alarm` 位另产上升沿事件（§11.2.4 D2 / §11.7.2） |
+| **信号（Signal）** | 一个**可跃迁量**：离散位（`Bit`）或保持寄存器整字内的**位/枚举**（`WordBit`/`WordEnum`）（**v1.7 另含站级派生布尔量 `StationFlag`** —— 地址序违规/SOC 域/登记数一致性）。四类"字/位信号"+ `StationFlag` 共用一套跃迁记忆与事件产出路径，差别仅在"活跃判据函数"与**产出频次口径**（§11.4.7.1 / §11.4.7.2） |
+| **`EdgeTracker`** | scheduler 内按站维护的"上轮活跃态"记忆表，同时承载离散位与字级信号；站恢复后 `reset()`（首轮只建基线、不产事件）（§11.4.7） |
+| **`read_slice`** | 块级字段（PRD §9.4.2.4，v1.7 补登）：该块是"按设备单次读上限主动分片"的结果，**仅**豁免第 15 条极大性检查（§11.5.2） |
 
 ---
 
@@ -1330,5 +2476,12 @@ BMS 站在线时其 SOC **优先**于 intercore `latest_soc`（核间回读）�
 
 | 版本 | 主要变更 |
 |------|----------|
+| **v1.8（2026-09-21，`[DESIGN_APPROVED]` 后的勘误订正 —— 不改设计语义、不重开评审）** | **只改 §11**（不新建文件、**不改任何 Rust 代码**、**不改 PRD**、**不改 §10**）。**背景**：**T6（mapper 与消费）已实现并通过代码评审**；评审**升级 1 条设计自相矛盾**（消防登记数的容量式与 v1.7 的链首订正冲突）、**裁定 2 条"可接受"**（`SocOutcome` 的"读回长度不足"归 ②；钢瓶气压取数接缝）、**核实 1 条归属误记**（`tests/s3b2_decode_e2e.rs`）。**勘误 1（§11.4.6「消防登记数」—— 容量式订正，必做）**：旧式「全部 `fire_det` 前缀块 `count` 之和 ÷ 6」与 v1.7「**探测器 1（寄存器 11）纳入升序链首**」**自相矛盾** —— **探测器 1 在 `fire_sys`（寄存器 11–16），不在 `fire_det` 块里**，故旧式只数探测器 2..n、比设备登记数**恒少 1**（§9.4.1 参考配置：`fire_det.count = 114` ⇒ 旧式得 **19**，而寄存器 10 读回 **20**）⇒ **判据恒真**。**后果（按评审纠正后的表述）**：在 v1.7 的**状态翻转制**下**不是"事件风暴"**（翻转制稳态本为 0 条），而是**永久假告警**（首次观测产 1 条 + **每次站恢复再产 1 条**）⇒ **PRD §9.5.4 的"强制交叉校验"永久失效（RC-5 失效）**。**订正为 `1 + Σ(fire_det 前缀块 count)/6`（链首存在时 +1）**，使容量式与地址序校验**覆盖同一探测器集合**；**链首不可得时降级为 `Σ/6`（不加 1）** —— 与 §11.4.6 地址序校验的降级**同源同判**（同一"是否覆盖寄存器 11"判定，只计链实际覆盖的集合；该形态下比对照常执行 —— 配置漏采探测器 1 正是 RC-5 该抓的形态）；**按 §9.4.1 复核：`1 + 114/6` = 20，读回 20 ⇒ 一致**。**门槛**：**`fire` 站写入生效配置前必须先结清本条**（与 T5「裁定前禁止写入 fire 站」同构），落 §11.7.4。**勘误 2（§11.4.6 `SocOutcome` 表 —— 补一行判据，必做）**：「**读回长度不足以容纳 `soc` 点**」（该块 `Ok(v)` 但 `v.len() <` 该点 `RegDecode::width()`）**明确归属 ②（`BlockFailed` ⇒ `PollResult::Failed`）**，**不计作第五种情形**（三变体不变）；理由：该形态下若静默返回 `None` + `Data`，即构成 §11.4.6 ② 禁止的"**SOC 静默缺失**"（更糟：`decode_regs` 对长度不足解出 `0.0`，而 `0.0` 在域内 ⇒ 会被当成"真实 SOC = 0"推给控制链，§11.1 现状表）；T6 已按 ② 同策实现，本行为设计补齐。**勘误 3（§11.11.2.1 条目 1 / §11.13 T7 行 ② —— 归属订正）**：`tests/s3b2_decode_e2e.rs` 实为 **T6-5** 新建（`fb925e7`；评审以 `git log --diff-filter=A` 核实），v1.6/v1.7 并列于"T4 实测"条目下易被读成 T4 新建 ⇒ **只订正归属，判据 ② 的"0 处报出"结论不变**。**登记 1（消费方可见变更，供 T7）**：`SouthSink` 的 **`offline` 事件文案新增 `：{reason}` 后缀**（事件类型/等级/去抖口径**一字不变**；**`online` 文案逐字不变**）—— PRD §9.7.2 第 1 条的落地（§11.7.2 第 10 条），落 §11.13 T7 行 ④。**登记 2（设计新增项）**：`SouthScheduler::cylinder_pressure_configured(station_index) -> bool` 取数接缝 + `PortRunner` 每站"曾非 0"记忆（只置位不回退）⇒ **§11.12.1 项 9**（**展示侧实际消费属后续任务**）。**未改动**：§11.4 其它数据结构（含 `fire_detector_mismatch` / `fire_detector_addr_order_violation` 的**签名**）、§11.5.1 十七条落点、§11.5.2 四判据语义、§11.5.3 三类清单、**§11.4.7.2 两条裁定**、§11.13 其它 Task、**§10 全章**、**PRD**（§9.5.4 的同款算式原文已在 §11.4.6 就地登记"建议需求侧同步订正"，本设计不擅自改 PRD）。标记 `[DESIGN_APPROVED: 2026-09-21]` 保留（批准后的勘误，非修订、不重开评审）。 |
+| **v1.7（2026-09-21，`[DESIGN_APPROVED]` 后的勘误订正 —— 不改设计语义、不重开评审）** | **只改 §11**（不新建文件、**不改任何 Rust 代码**、**不改 PRD**、**不改 §10**）。**背景**：T5（总线与调度 + 统一事件模型）已实现并通过代码评审，评审把 **2 条事件口径问题升级为设计裁定**（明确"**不阻塞 T5**，但**裁定前禁止把 `fire` 站写入生效配置**"）。**勘误 1（新增 §11.4.7.2，裁定 1 —— 状态型事件的产出频次口径）**：⑤ 地址序违规在 T5 按"**命中即产**"落地 ⇒ 评审实测 **5 轮 = 5 条**、`fire` 站 `interval_ms = 1s` ⇒ **约 8.6 万条/日**（压 `storage.events` + SSE）；而设计此前只为 **offline** 定义去抖（§10.7），⑤ 及同类 ① ③ **无任何口径**（**实现忠于设计，不判 T5 错**，缺口由设计补）。裁定：**按"状态翻转"产出** —— `false→true` 进入 1 条（`value` = 诊断量：⑤ 首个违规探测器 1 基序号 / ③ 读回登记数 / ① 越界原始值）、`true→false` 恢复 1 条（事件名 **`<原名>@recovered`**、`value = 0.0` 哨兵）、**状态未变的轮次一条都不产**；**首次观测即产**（**§11.4.7.1"首轮只建基线"的唯一例外** —— 至多 1 条/站，防"上线时已违规却永久静默"）；**恢复产"已恢复"事件**（否则无法区分"仍违规"与"已修复"）；**复用同一个 `EdgeTracker`**（新增第 5 类信号 `StationFlag`，信号形态表加行 + 统一机制处加例外说明）；**不得套 offline 时间窗**（配置/接线类事实不随时间变化，时间窗只把 8.6 万条/日降成 1.7 万条/日，治标不治本）。**影响：⑤ 需 T5 补改**；**① SOC 越界 / ③ 登记数不一致属 T6（尚未实现 ⇒ 按同一口径实现，无补改成本；若沿用"命中即产"则同一风暴原样重现）**。**勘误 2（§11.4.7.2，裁定 2 —— `WordEnum` 退出语义）**：`0→1→2` 时 `1→2` **同轮**产 `fire_sys_6@level1 = 0.0` + `@level2 = 1.0`；**维持现状（不删退出、不改"活跃值间跃迁亦产"）**、**不改代码**，但补**强制消费方判据**：判定"消防侧已复位"**必须按点名成组、同轮整体判读** —— 同一 `<点名>` 同轮「退出 + 进入」= **级别跃迁（报警仍在）**、「只有退出、无进入」= 回到非活跃（值 0 工作正常）；`WordBit` 各位独立、可直接采用。**§11.8** 同处补一句（**§10.4 本体不改**）；实测现存联锁（`core-bin/interlock.rs`）**只由 DI/GPIO 驱动、尚未消费 southd 的 fire 事件** ⇒ **无现存消费方、无需补改**，该判据是给未来实现者的强制约束。**勘误 3（§11.4.6 / §11.7.2 第 9 条 —— 探测器 1 纳入升序链首）**：原设计/实现只链 `fire_det*`（探测器 2..n），**探测器 1 的地址号（寄存器 11）未参与校验** ⇒ PRD §9.5.4"第 n 只 = 按地址升序的第 n 只"对 **n = 1 无判据**。按 **Q-9 原文**（"以**寄存器 11** 读回的地址值交叉校验"）订正为**链首 = 寄存器 11**（取**覆盖 11 的那一块**的块内偏移，**与块名/点位名解耦**；配置未覆盖 11 ⇒ 退化为只校 `fire_det*` 区、**不臆断**），事件的组序号随之与 n 对齐 ⇒ **需 T5 补改**（既有用例期望值 **+1** + 新增"探测器 1 地址最大仍须产"用例）。**非 PRD 差异**（Q-9 原文即此口径）⇒ **不进 §11.12.2**。**勘误 4（§11.11.2.1 判据 ① + §11.13 T7 —— fmt 判据措辞订正，已实测核实）**：判据 ① 原取 `rustfmt` 的 hunk **锚点行号**（`Diff in <file>:N:` 的 `N`）与新增行求交，而**锚点行本身常是 format-clean 的 context 行**（实测 `tests/s3b2_config.rs`：锚点 `:374`、**实际不符合行 `= :377`**；该文件 **27 个 hunk / 34 条不符合行**，**锚点数 ≠ 处数**）⇒ 订正为取**输出中带 `-` 的行**的行号，并补两条不得省的说明：(a) 不得用锚点行；(b) `R` 与 `git diff` 新增行号**必须同一坐标系**（`rustfmt --check` 读**工作区文件** ⇒ 即 `git diff` 的**新文件**行号）。T4 实测条目同步精确化（T4 引入 **1 条 = `:377`**；T3 既存 **26 hunk / 33 条**）。**同时**：§11.12.1 新增**项 8 / 8b**（状态型事件契约须评审追认 + 建议需求侧补登频次口径，**不新增 Δ**）、§11.12.2 加 v1.7 说明、§11.14 加落点、§11.13 T5/T6/T7 行与 §11.11.2 AC-5 两处用例口径同步。**未改动**：`fire_detector_addr_order_violation` 的**签名**、§11.5.1 十七条落点、§11.5.2 四判据语义、§11.5.3 三类清单、§11.7.2 第 6/7/8 条、§11.13 其它 Task、**§10 全章**、**PRD**。标记 `[DESIGN_APPROVED: 2026-09-21]` 保留（批准后的勘误，非修订、不重开评审）。 |
+| **v1.6（2026-09-21，`[DESIGN_APPROVED]` 后的勘误订正 —— 不改设计语义、不重开评审）** | **只改 §11**（不新建文件）。**勘误 1（设计缺陷补登，来自 T4 代码评审）—— 点表查表键补 `AddrSpace` 维度（§11.4.4）**：查表键由 `(role, addr)` 补登为 **`(role, space, addr)`**（`space ∈ {AddrSpace::Reg（FC03/FC04）, AddrSpace::Bit（FC02）}`，两空间**各自从 0 编址**）。**依据**：PRD §9.4.2.1 第 6 条 / §9.4.3「区间与重叠」按功能码空间分别计算，§11.5.1 规则 14 亦按空间分别判定 ⇒ 点表侧必须在**键里**就能区分空间，否则"先混成一个、再事后拆"自相矛盾。**实证**：`hvac` 站 FC04 寄存器 **0/2/3**（柜内温度/盘管温度/湿度）与 FC02 位块 `hvac_di` 的位 **0/2/3**（内风机/制冷/加热）**真实同址** ⇒ 单一 `(role, addr)` 键只能靠**数组顺序**消歧（顺序一改语义就变，属本设计一贯拒绝的脆弱形态），且 `label()` 无法区分 `hvac_in_1` 与 `hvac_di_1`（事件 message 与 RC-1 核对清单会双双出错）。**兼容性（向后兼容、语义不变）**：`lookup(role, addr)` 保留为 **`Reg` 空间包装**（规则 6 只作用于标量点，其地址必属寄存器空间 ⇒ §11.5.1 #6 的两条 `Err` 判据与 §11.4.4 的两条强制口径**一字不改**、调用点不变），新增 `lookup_in(role, space, addr)`（规范形态）与 `lookup_bit`；`signals_of` 签名不变（字级信号仅消防使用，消防**无** `discrete` 块 ⇒ 只查寄存器空间）。**实现（T4/`5d46541`）即按此落地并已通过代码评审** ⇒ 本次为**实现修正正确前提下的设计补登**，非语义变更。**残余边界（就地登记，不新开风险条目）**：`Reg` 把 FC03 与 FC04 合成一个空间，若将来某 role 在**重叠地址**上同时以 holding 与 input 登记点则该二分不足（需三值枚举）——§9.4.1 六站**均不属**此形态（`bms`/`pcs` 全 `input`、`meter_batt`/`fire`/`grid_meter` 全 `holding`、`hvac` = `input` + `discrete`），本轮不可达。**勘误 2（门禁口径订正）—— AC-7 / T7 的 `cargo fmt` DoD 不可执行**：实测仓库级 `cargo fmt --all --check` = **1204 处 / 106 个文件**（`local-display/src/ui/tests.rs` 221、`mupc-core-bin/src/log_service.rs` 89、`console_host.rs` 66、`mupc-southd/src/scheduler.rs` 22 等），属**项目既有基线**、非 S3b-2 回归；且本项目**明令禁止** `cargo fmt --all`（1204 处无关改动会淹没真实 diff）⇒ 订正为**行级可验证口径**：**判据 ①（主）**"本 Task **新增/修改的行** fmt-clean"（`rustfmt --edition 2021 --check <触及文件>` 的报出行号集合 ∩ 本次 diff 的**新增行号集合** = **∅**，非空即给出 `file:行`）、**判据 ②**"本 Task **新建**的 `.rs` 文件零报出"、**判据 ③**"既存基线一律不动（不得顺手格式化）"。**T4 实测**：`point_table.rs` / `tests/point_table_vs_reference_config.rs` / `tests/s3b2_decode_e2e.rs` = **0 处**（②满足）；T4 仅在 `tests/s3b2_config.rs` 引入 **1 处**（`assert_eq!` 链式调用超 `chain_width`，报 `:374`、实际不符合行 `= :377`）⇒ **T7 收口**；该文件另有的 **26 处**为 T3 既存基线（③，不动）。落点：§11.11.2 AC-7 行 + 新增 **§11.11.2.1**、§11.13 T7 行 + 新增 v1.6 注。**未改动** §11.4.4 以外的 §11.4 内容、§11.5.1 十七条、§11.5.2 四判据、§11.5.3 三类清单、§11.13 其它 Task；标记 `[DESIGN_APPROVED: 2026-09-21]` 保留（批准后的勘误，非修订、不重开评审）。 |
+| **v1.5（2026-09-21，`[DESIGN_APPROVED]` 后的勘误订正 —— 不改设计语义、不重开评审）** | **只改 §11**（不新建文件）。**勘误 1（评审发现的设计文本自相矛盾）**：§11.11.2 的"规则 15 **判据 ③**（合并后空洞 ≤ 4）单列一个用例…断言 `Ok`"与 **§11.5.1 #15 / §11.5.2** 的**合取判据**（①`func`/`byte_swap` 相同 ②地址连续 ③合并窗口内连续空洞 ≤ 4 ④合并后 `count ≤ 120`，**四者全成立 ⇒ 拒**）相左 —— ③ 在适用域内**由规则 11 恒成立**（§11.5.2(1)），故"两块均声明 `points`、地址连续、合并 ≤ 120、无 `read_slice`"的形态**四判据全成立 ⇒ `Err`**。开发（T3）按 #15/§11.5.2 实现（`Err`）并在用例注释登记上报；本次据此**订正设计文本**：该条改为 `Err`（并写明"③ 不是独立放行条件"），同节其余规则 15 用例（反向 `Err` / `read_slice` 豁免 `Ok` / 合并 >120 `Ok` / 一方未声明 `points` `Ok` / 双方未声明 `points` `Ok` / `discrete` 相邻 `Ok`）**逐一与 §11.5.2 对标后确认无误**（仅补一句"①②③④ 合取全成立"的显式说明）；§11.5.2(1) 补**澄清句**（③ 非独立放行条件，不改判据语义），§11.5.2(2) 的形态计数同步为 `Ok` 7 + `Err` 1。**勘误 2（§11.5.3.5 与实现不一致）**：本类 10 例原称"fixture 与断言均无需改动"，其中 **5 例经实现期实测为假绿**（目标规则被前置规则截胡：`duplicate_id`/`multiple_battery`/`same_port_mixed_baud{,_3_station}` 先被规则 4 拒、`multiple_meter_grid` 先被既有 `meter_grid` 整组校验拒）⇒ 移入 §11.5.3.2 的 **A17–A21**（补 `soc` 点 `regs` / 完整相量块；**断言仍不变**），本类余 5 例（目标规则落在"站级基础校验"阶段、先于规则 3/4 执行）结论不变；§11.12.3 **R-1** 的 ① 处数 **15 → 20**。**未改动** §11.4 数据结构、§11.5.1 十七条落点、§11.5.2 四判据、§11.13 Task 拆分；标记 `[DESIGN_APPROVED: 2026-09-21]` 保留（本次为批准后的勘误，非修订、不重开评审）。 |
 | v1.0 | 初版：定义南向通信模块实现级设计（RS485/HPLC/插件系统） |
 | v1.1 | BECG-3568 站级多从站统一调度（S3，§10）：`mupc-southd` 调度器、`south_stations` 配置、role（meter_grid/meter_batt/battery/hvac/fire）映射、master_meter 收敛 meter_grid、口内多从站轮询与站级故障隔离、DeviceRegistry 接线、SOC 源融合接口（04 §2.11 注） |
+| **v1.4（2026-09-21，按二轮设计评审意见修订，三轮设计评审通过 —— 本章当前版本）** | **只改 §11；小范围收尾，不推翻 v1.3 已获认可内容（P0-1 的 #15 重写与"六站必然通过"结论、P0-2 的"无行不拒"、P0-3 的统一事件模型与消防信号清单、P0-4 的三级清单结构、规则 18/19、`SocOutcome`、`WordOrder` 单一定义、RC-9/10/11 一律保留）；不自行加 `[DESIGN_APPROVED]` 标记。** 修订内容：① **事实错误订正** —— §11.5.2(2) 的 `grid_meter` 行原按**单测 fixture（`config.rs:324-329`）**写成 `p→p_total→q→pf→u→i` @0x1000/0x1006/0x1008/0x100E/0x1014/0x101A（并误称"逐字取自 PRD §9.4.1"），现按**生效配置真值**（`deploy/config/mupc_core_config.yaml:143-148` 与 `.production.yaml:148-153`，二者逐字相同，且与 PRD §9.4.1 第 6 站一致）重写为 `p→q→pf→u→i→p_total` @0x1000/0x1006/0x100C/0x1012/0x1018/0x101E，并新增"**取值真源 / 不得取证于 fixture**"注、逐站复核其余 5 站（无同类错误）；② **C2 与规则 10 的顺序冲突钉死** —— 新增 §11.5.3.4.1 给出**实现判定顺序约束**（既有 `meter_grid` 校验整组先于 `validate_station_regs`）与文案，**C2 维持"断言不得改"（不订正）**，并说明规则 10 独有的覆盖面（补 AC-1 ③ 用例）；§11.5.1「顺序」同步加约束；③ **Δ-9 登记** —— PRD §9.8.4「PCS 32 位电量比对未通过 → 事件」无运行期落点（比对是 RC-2 现场人工比对，且 §9.7.2 禁本轮量程自校验）⇒ 以 RC-2「未通过则不配点」替代，§11.12.2 登记 Δ-9 并标注**须需求侧追认或订正 PRD**，§11.4.7 事件表 ⑦ 与 §11.7.4 给出**一眼可见的处置**；④ **建议一并改净** —— `bms_alarm_225` 示例订正为"簇一级告警"（位 424；原写"簇 SOC 低·轻"混淆位地址与点名）、`RegBlockConf` 字段数 9→13 订正为 **6→10**、A14"三个 crate"订正为 **1 个（`mupc-southd`）**、A1 的 `fire_1` 行号 `:345`→**`:348`**、§11.5.3.5 两个需补 `regs` 的用例**移入 ①（A15/A16）**且该节改号 **④**、**删除悬空符号 `emit_falling_edges(EmitBidi)`**（改述双向性的落地形态）、补 **`Rs485PortBus::open` 的 `parity` 透传**（§11.3/§11.4.5/RC-6）、补 **RC-12**（消防/PCS 设备软件版本核对，§9.7.2 第 3 条 + §9.8.4）并更新 Δ-6。 |
+| **v1.3（2026-09-21，按首轮设计评审意见修订，已由 v1.4 收尾）** | **只改 §11，不动 §10/§11 已获批准的部分；不自行加 `[DESIGN_APPROVED]` 标记。** 修订内容：① **P0-1** —— §11.5.1 第 15 条**重写落点**（适用域限定为"两块都声明了 `points`" + 判据改为"合并后 `count ≤ 120`" + `read_slice` 豁免），§11.5.2 新增**逐站穷举证明**"§9.4.1 六站（含既有 `grid_meter`）必然通过第 15 条"，并给出"为什么必须限定适用域"的**改名/契约破坏**论证；② **P0-2** —— §11.4.4 取「**查不到行不拒**」（删去 ① 中"无行"半句），写明理由（RC-3 会合法改 `addr` 基准，无行即拒会让合法校准配置启动失败），§11.5.1 #6 同步；③ **P0-3** —— 新增 **§11.4.7.1 统一事件模型**（把"事件源"从离散位推广为四类**信号**，共用 `EdgeTracker`；消防取**双向**事件并说明与 BMS/空调只取上升沿的**刻意不对称**）、**消防信号清单**（系统状态位/火警枚举/烟温可燃/探测器总状态，含"预留 bit2 零事件""钢瓶气压零事件"的负向边界）、§11.7.2 消防事件落点、§11.10 **与 G-6 的三层边界表**（遥测层不拆 / 事件层只做位与枚举判定 / 展示层做字节拆解）；④ **P0-4** —— §11.5.3 **重建为「用例名 + 断言」级**并分**三类**（fixture 订正 / 断言订正 / **断言不得改**），实测规模订正为 `RegBlockConf` **10 处**、`StationConf` **8 处**，点名 9 处 metric 更名断言订正与 C1–C7 回归锚，补报上轮漏掉的两个 `core_config` 用例；⑤ **完整性遗漏** —— 补**规则 18**（`pcs` `interval_ms ≥ 500ms`，落站级基础校验）、**规则 19**（无 `points` 块 `count % width == 0` 护栏）、§11.11.3 补 **RC-9/RC-10/RC-11**（钢瓶气压 / Q-9 / Q-19）并说明续号与上报；⑥ **建议** —— `WordOrder` **单一定义**（落 `meter_regs`，`config` 复用）、**Battery 底块读失败等四情形**（`SocOutcome` 表）、无 `points` 的 32 位块静默少产点护栏；§11.12.2 差异表更新（Δ-1/Δ-3/Δ-4 **已由 PRD v1.7 采纳闭合**，新增 Δ-5/Δ-6/Δ-7）、§11.13 的 T3/T7 与回归闸门口径**订正**。 |
+| **v1.2（2026-09-21，设计评审【不通过】，已由 v1.3 修订）** | 新增 §11「站级南向设备语义点表集成（S3b-2）」，落实 PRD §9（v1.6）：① **方案探索**（配置模型 A1/A2/A3、`RegFormat` 扩展 B1/B2/B3、FC02 接入 C1/C2/C3、位块落库 D1/D2/D3、Q-1 口径 E1/E2/E3，逐项给选型与权衡）；② **能力补齐**：`RegFormat::{Uint16,Int16}` + `RegDecode`（G-1/G-2/G-5）、`RegFunc::Discrete` + `StationBus::read_discrete` + `unpack_bits`（G-3）、块内 `points[]` 逐点换算 + `points::expand`（G-4）、G-6 延后口径（§11.10）；③ **新角色** `Role::Pcs`（只读 3 区）与 `role_priority` 中档；④ **17 条配置期规则**逐条落点（§11.5）+ 既有 fixture 订正清单；⑤ **`POINT_REGS` 点表登记注册表**（618 行，PRD §9.4.3 的"校验器内常量表"，兼作 RC-1 机读核对清单与事件中文名来源）；⑥ **位块点落库口径**（变化沿 telemetry + 告警上升沿事件，替代全量 288 行/s）；⑦ Q-1 的书面口径确认、影响面与可切换设计（§11.9）；⑧ 写操作独立 Task 边界与 S2 联锁分工（§11.8）；⑨ AC/RC 三层可测接缝与逐条落点（§11.11）；⑩ 新增字段/契约追认清单与 **4 项 PRD 差异上报**（含 §9.4.2.4"缺省 `int32_scaled`"与代码事实 `float32` 不符，Δ-1）。 |

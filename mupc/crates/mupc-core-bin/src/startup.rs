@@ -289,6 +289,50 @@ impl SouthSink {
     /// on_grid_package 一次。config::validate 仅约束 meter_grid interval_ms>0 且 <5000
     /// （DATA_FRESHNESS_MS），**未保证 >=1s**（现场可配如 500ms）→ 在此钳 1Hz 上界防
     /// broadcast flood。生产样例 interval_ms=1000 每收即上送，不受节流影响。
+    /// 系统事件落库 + **即时投递**（设计 §4.7：「`SouthSink` 写入系统事件时同时投递」）。
+    ///
+    /// 两条入口（[`StationSink::on_station_telemetry`] 的状态事件分支与覆写的
+    /// [`StationSink::on_station_offline`]）**共用本函数** ⇒ "落库文案 == 投递文案"由代码结构
+    /// 保证（单元 K ③ 的断言即靠此）。落库失败仅 warn 不 panic（与 interlock 同范式）。
+    async fn record_event(&self, event_type: &str, source: &str, message: &str, level: &str) {
+        let ev = mupc_storage::SystemEvent {
+            id: None,
+            timestamp: chrono::Utc::now(),
+            event_type: event_type.to_string(),
+            source: source.to_string(),
+            message: message.to_string(),
+        };
+        if let Err(e) = self.events.insert(&ev).await {
+            tracing::warn!("南向站事件落库失败 {}: {}", ev.event_type, e);
+        }
+        // 无订阅者时投递返回 0，属正常态，不是错误。
+        self.alert_feed.push_system_alert(level, message);
+    }
+
+    /// 状态事件的**中文名 + 原始值**文案（设计 §11.7.2 第 4/5 条）：
+    /// - **中文名**：`point_table::label(role, metric)` 命中则用之（如 `bms_alarm_225`
+    ///   → "簇一级告警"，RC-1 的机读核对清单同源）；未命中（`<点名>@<信号键>`、
+    ///   `<原名>@recovered`、`soc_out_of_range`、`fire_detector_*` 等**事件命名空间**的名字）
+    ///   **用原名** —— 不引入新的事件类型枚举，事件键仍是 `south_station.<站id>.<metric>`；
+    /// - **原始值落证**：offline/online 是纯状态信号（value 恒 1.0，写进文案无信息量，且
+    ///   既有 SSE 文案与断言逐字依赖），故这两者保持原文案；其余事件把 `value` 写进文案
+    ///   （PRD §9.6.3 ② 要求"越界告警含原始寄存器值"——`soc_out_of_range` 的 value 即越界原值）。
+    fn event_message(
+        station_id: &str,
+        role: mupc_southd::config::Role,
+        metric: &str,
+        value: f64,
+    ) -> String {
+        match metric {
+            "offline" => format!("站 {station_id} role={role:?} 离线（采集失败）"),
+            "online" => format!("站 {station_id} role={role:?} 恢复上线"),
+            _ => {
+                let name = mupc_southd::point_table::label(role, metric).unwrap_or(metric);
+                format!("站 {station_id} role={role:?} {name}（值 {value}）")
+            }
+        }
+    }
+
     async fn broadcast_grid_iec104(&self, pkg: &mupc_data_processing::DataPackage) {
         let now = std::time::Instant::now();
         let allowed = {
@@ -346,30 +390,11 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
     ) {
         for (metric, value, is_event) in points {
             if is_event {
-                // 状态事件（offline/online 由 scheduler handle_failure/mark_success 合成）：
-                // DB 落库 + SSE system alert。落库失败仅 warn 不 panic（interlock 同范式）。
-                let ev = mupc_storage::SystemEvent {
-                    id: None,
-                    timestamp: chrono::Utc::now(),
-                    // 形如 south_station.<站id>.offline / .online
-                    event_type: format!("south_station.{}.{}", station_id, metric),
-                    source: station_id.to_string(),
-                    message: format!(
-                        "站 {} role={:?} {}",
-                        station_id,
-                        role,
-                        if metric == "offline" {
-                            "离线（采集失败）"
-                        } else if metric == "online" {
-                            "恢复上线"
-                        } else {
-                            metric.as_str()
-                        }
-                    ),
-                };
-                if let Err(e) = self.events.insert(&ev).await {
-                    tracing::warn!("南向站事件落库失败 {}: {}", ev.event_type, e);
-                }
+                // 状态事件（offline/online 由 scheduler handle_failure/mark_success 合成，
+                // 其余为位/信号/站级量事件）：DB 落库 + SSE system alert（先落库、后投递）。
+                // 形如 south_station.<站id>.offline / .fire_sys_1@main_power_fault。
+                let event_type = format!("south_station.{}.{}", station_id, metric);
+                let message = Self::event_message(station_id, role, &metric, value);
                 // online 恢复是状态正常化，用 info 级；offline/其它状态异常才告警级，
                 // 避免站恢复上线时刷屏 warning。
                 let level = if metric == "online" {
@@ -377,9 +402,8 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 } else {
                     "warning"
                 };
-                // 落库之后**同时**投递（设计 §4.7：`SouthSink` 写系统事件时同时投递；
-                // 无订阅者时投递返回 0，属正常态，不是错误）。
-                self.alert_feed.push_system_alert(level, &ev.message);
+                self.record_event(&event_type, station_id, &message, level)
+                    .await;
             } else {
                 // 普通遥测点落库
                 let tp = mupc_storage::TelemetryPoint {
@@ -396,6 +420,26 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 }
             }
         }
+    }
+
+    /// **覆写默认实现**（T5 留在 `StationSink` 上的接缝，T6 落地）：把站失败的 `reason`
+    /// （含 `slave/addr/count`，由 scheduler 组装）写进事件 `message`，使 PRD §9.7.2 第 1 条
+    /// "站进入 offline，事件 `reason` 含 `slave/addr/count` → 运维据 `events` 定位到具体块"
+    /// **真正可用**。
+    ///
+    /// 与默认实现的**一致项**（刻意保持，防消费方被动受影响）：事件类型仍是
+    /// `south_station.<站id>.offline`、等级仍是 warning、事件**去抖仍由 scheduler 负责**
+    /// （本层不重复去抖，故不会多产 offline 事件）。**差异只有文案**：多一句 `reason`。
+    async fn on_station_offline(
+        &self,
+        station_id: &str,
+        role: mupc_southd::config::Role,
+        reason: &str,
+    ) {
+        let event_type = format!("south_station.{}.offline", station_id);
+        let message = format!("站 {station_id} role={role:?} 离线（采集失败）：{reason}");
+        self.record_event(&event_type, station_id, &message, "warning")
+            .await;
     }
 
     async fn on_battery_soc(&self, station_id: &str, soc: f64) {
@@ -1605,6 +1649,121 @@ plugins: {}
             got.message
         );
         assert_eq!(got.message, logged[0].message, "投递文案与落库文案必须同源");
+    }
+
+    /// 真 `SouthSink` + 记账仓储 + 真 `AlertFeed`（T6 的两个文案用例共用装配，避免三处复制）。
+    async fn south_sink_for_test(
+        tag: &str,
+        events: Arc<RecordingEvents>,
+        feed: Arc<crate::alert_feed::AlertFeed>,
+    ) -> SouthSink {
+        let t = crate::testutil::TempDir::new(tag);
+        let db = t.join("mupcd.db");
+        std::fs::File::create(&db).unwrap();
+        let pool = mupc_storage::init_pool(db.to_str().unwrap()).await.unwrap();
+        SouthSink::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            Arc::new(mupc_storage::WriteBuffer::new(1000, 5000, Arc::new(pool))),
+            events,
+            feed,
+            Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+                mupc_gateway::iec104::server::Iec104Config::default(),
+            )),
+        )
+    }
+
+    /// **T6 / PRD §9.7.2 第 1 条**：站 offline 的**块级 reason** 必须落到事件 `message`
+    /// （运维据 `events` 定位到具体块）。覆写 `on_station_offline` 前，reason 被默认实现
+    /// **丢弃**（默认只发 `("offline", 1.0, true)`）⇒ 本条会红。
+    #[tokio::test]
+    async fn south_sink_offline_event_carries_block_reason() {
+        use mupc_southd::scheduler::StationSink as _;
+
+        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
+        let feed = Arc::new(crate::alert_feed::AlertFeed::new());
+        let mut rx = feed.subscribe();
+        let sink = south_sink_for_test("south-offline-reason", events.clone(), feed).await;
+
+        sink.on_station_offline(
+            "grid_meter",
+            mupc_southd::config::Role::MeterGrid,
+            "站 slave=3 读 0x1000x6 失败: mock 超时",
+        )
+        .await;
+
+        let logged = events.0.lock().unwrap().clone();
+        assert_eq!(
+            logged.len(),
+            1,
+            "覆写后仍是**一条** offline 事件（不多产，去抖仍归 scheduler）"
+        );
+        assert_eq!(
+            logged[0].event_type, "south_station.grid_meter.offline",
+            "事件类型与默认实现逐字一致（消费方零改动）"
+        );
+        assert!(
+            logged[0].message.contains("slave=3") && logged[0].message.contains("0x1000"),
+            "reason 必须进 message（运维据此定位到块）: {}",
+            logged[0].message
+        );
+        assert!(logged[0].message.contains("离线"), "既有文案片段保留");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("5 s 内必须收到投递")
+            .expect("订阅者必须收到事件");
+        assert_eq!(got.subtype, "warning");
+        assert_eq!(got.message, logged[0].message, "投递文案与落库文案同源");
+    }
+
+    /// **T6 / §11.7.2 第 4/5 条**：状态事件的 `message` = **中文名（点表 label）+ 原始值**。
+    /// - `soc_out_of_range`（事件命名空间的名字，label 查不到）⇒ 用原名 + 越界原值（PRD
+    ///   §9.6.3 ② 要求"soc 越界告警含原始寄存器值"，该值由 scheduler 作为进入事件 `value` 传出）；
+    /// - `bms_alarm_225`（**遥测**点名）⇒ 查 `point_table::label` 得"簇一级告警"；
+    /// - `<原名>@recovered`（§11.4.7.2 C 的哨兵 value = 0.0）⇒ 原名 + 值 0。
+    #[tokio::test]
+    async fn south_sink_event_message_carries_label_and_raw_value() {
+        use mupc_southd::config::Role;
+        use mupc_southd::scheduler::StationSink as _;
+
+        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
+        let feed = Arc::new(crate::alert_feed::AlertFeed::new());
+        let sink = south_sink_for_test("south-event-message", events.clone(), feed).await;
+
+        sink.on_station_telemetry(
+            "bms",
+            Role::Battery,
+            vec![
+                ("soc_out_of_range".to_string(), 65535.0, true),
+                ("bms_alarm_225".to_string(), 1.0, true),
+                (
+                    "fire_detector_addr_order_invalid@recovered".to_string(),
+                    0.0,
+                    true,
+                ),
+            ],
+        )
+        .await;
+
+        let logged = events.0.lock().unwrap().clone();
+        assert_eq!(
+            logged[0].event_type, "south_station.bms.soc_out_of_range",
+            "事件键仍是 south_station.<站id>.<metric>（不新造事件类型枚举）"
+        );
+        assert!(
+            logged[0].message.contains("soc_out_of_range") && logged[0].message.contains("65535"),
+            "越界原值必须落证: {}",
+            logged[0].message
+        );
+        assert!(
+            logged[1].message.contains("簇一级告警"),
+            "点表 label 反查中文名（点名 225 ↔ 位地址 424）: {}",
+            logged[1].message
+        );
+        assert!(
+            logged[2].message.contains("@recovered") && logged[2].message.contains("值 0"),
+            "`@recovered` 是事件命名空间的名字（label 查不到）⇒ 原名 + 哨兵 0: {}",
+            logged[2].message
+        );
     }
 
     /// **单元 K ②：`startup.rs` 生产段里不得再有任何 web-api 残引用**（设计 §7.2 Step 3 / §7.3）。

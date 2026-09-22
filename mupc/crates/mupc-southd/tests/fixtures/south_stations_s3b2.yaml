@@ -1,0 +1,298 @@
+# S3b-2 站级南向设备语义点表 —— **6 站参考配置**（= PRD §9.4.1 的 YAML，逐字照录）。
+#
+# 用途：
+#   ① AC-1 ② 的验收输入（完整 6 站 YAML → 解析通过 + validate Ok）；
+#   ② 点表 `POINT_REGS`（§11.4.4，T4 落 618 行）与配置的双向漂移核对输入
+#      （`tests/point_table_vs_reference_config.rs`）。
+#
+# 第 6 站 `grid_meter` 与生效配置 `deploy/config/mupc_core_config.yaml` **取值逐字一致**
+# （站 id 是 `grid_meter`；`meter_grid` 是 role 名，二者不同），仅行内注释按本文体例改写。
+# 其余 5 站在生效配置中仍是注释占位（启用以本文件为准）。
+south_stations:
+  poll_ms: 1000            # 缺省轮询周期
+  stale_timeout_s: 5       # 数据过期门限（对齐 AiIntegrator 5s）
+  stations:
+    # ================= 1) 储能主控模块 BMS（FC04 遥测 + FC02 告警位）=================
+    - id: bms
+      role: battery
+      port: "/dev/ttyS2"
+      protocol: modbus
+      slave: 1
+      baud_rate: 9600            # 现场核对（§9.10 Q-2）
+      parity: none
+      interval_ms: 1000          # 须 <5000（配置期强校验）
+      regs:
+        - name: bms_io           # 100–130；_k ↔ 寄存器 99+k
+          func: input
+          addr: 100
+          count: 31
+          format: uint16
+          scale: 1.0
+          points:
+            - { at: 1 }                                   # 100 簇电池簇状态（枚举）
+            - { at: 2,  count: 6, scale: 0.1 }             # 101–106 允许充放功率/电压/电流
+            - { at: 8,  count: 8 }                        # 107–114 主控 DI1–DI8
+            - { at: 16, scale: 0.1 }                      # 115 簇组电压 V
+            - { at: 17, format: uint16, scale: 0.1, offset: -1600.0 }  # 116 簇组电流 A（原文 UNIT=UINT）
+            - { at: 18, format: uint16, scale: 1.0, offset: -40.0 }    # 117 簇组模块温度 ℃
+            - { at: 19, name: soc }                       # 118 簇组 SOC（控制输入，点名契约）
+            - { at: 20 }                                  # 119 簇组 SOH %
+            - { at: 21 }                                  # 120 簇组绝缘电阻 kΩ
+            - { at: 22, scale: 0.001 }                    # 121 簇平均单体电压 V
+            - { at: 23, format: uint16, scale: 1.0, offset: -40.0 }    # 122 簇平均单体温度 ℃
+            - { at: 24, scale: 0.001 }                    # 123 簇最高单体电压 V
+            - { at: 25 }                                  # 124 最高单体电压对应点（整字，§9.10 Q-18）
+            - { at: 26, scale: 0.001 }                    # 125 簇最低单体电压 V
+            - { at: 27 }                                  # 126 最低单体电压对应点（整字）
+            - { at: 28, format: uint16, scale: 1.0, offset: -40.0 }    # 127 簇最高单体温度 ℃
+            - { at: 29 }                                  # 128 最高单体温度对应点（整字）
+            - { at: 30, format: uint16, scale: 1.0, offset: -40.0 }    # 129 簇最低单体温度 ℃
+            - { at: 31 }                                  # 130 最低单体温度对应点（整字）
+        - name: bms_energy       # 139–157；_k ↔ 寄存器 138+k
+          func: input
+          addr: 139
+          count: 19
+          format: int32_scaled
+          scale: 0.1
+          points:
+            - { at: 1 }                                   # 139–140 簇累计充电电量 kWh
+            - { at: 3 }                                   # 141–142 簇累计放电电量
+            - { at: 5 }                                   # 143–144 簇单次累计充电电量
+            - { at: 7 }                                   # 145–146 簇单次累计放电电量
+            - { at: 9 }                                   # 147–148 簇可充电量
+            - { at: 11 }                                  # 149–150 簇可放电量
+            - { at: 13, format: uint16, scale: 1.0 }      # 151 簇最高单体温升 ℃
+            - { at: 15, format: uint16, scale: 0.001 }    # 153 簇最高单体最高电压变化 V
+            - { at: 17, format: uint16, scale: 1.0, offset: -40.0 }   # 155 最高单体极柱温度 ℃
+            - { at: 19, format: uint16, scale: 1.0, offset: -40.0 }   # 157 最低单体极柱温度 ℃
+        - name: bms_meta         # 181–189；_k ↔ 寄存器 180+k
+          func: input
+          addr: 181
+          count: 9
+          format: uint16
+          scale: 1.0
+          points:
+            - { at: 1 }                                   # 181 主控程序版本号
+            - { at: 2 }                                   # 182 从控数量
+            - { at: 3 }                                   # 183 簇组 SOE %
+            - { at: 4 }                                   # 184 单体温度极差 ℃
+            - { at: 5, scale: 0.001 }                     # 185 单体电压极差 V
+            - { at: 6, format: uint16, scale: 0.1 }       # 186 簇实时充放电功率 kW
+            - { at: 7, scale: 0.1 }                       # 187 PACK 组压最高电压 V
+            - { at: 9, scale: 0.1 }                       # 189 PACK 组压最低电压 V（188 为对应点，不采）
+        - name: bms_term         # 2991–2994 端子温度 001–004；整窗口产出 4 点
+          func: input
+          addr: 2991
+          count: 4
+          format: uint16         # 原文 UNIT=UINT
+          scale: 1.0
+          offset: -40.0
+        - name: bms_cap          # 4000–4005；_k ↔ 寄存器 3999+k
+          func: input
+          addr: 4000
+          count: 6
+          format: uint16
+          scale: 1.0
+          points:
+            - { at: 1 }                                   # 4000 簇累计充电容量 Ah
+            - { at: 3 }                                   # 4002 簇累计放电容量 Ah
+            - { at: 5 }                                   # 4004 簇单次累计充电容量 Ah
+            - { at: 6 }                                   # 4005 簇单次累计放电容量 Ah
+        - name: bms_alarm        # FC02 位块 200–487；_k ↔ 位地址 199+k
+          func: discrete
+          addr: 200
+          count: 288
+    # ================= 2) 两级式 PCS（只读 3 区，FC04）=================
+    - id: pcs
+      role: pcs
+      port: "/dev/ttyS7"           # 建议值，待现场校准（§9.10 Q-15）
+      protocol: modbus
+      slave: 1                     # 拨码默认
+      baud_rate: 19200
+      parity: none
+      interval_ms: 1000            # 配置期下界 500ms
+      regs:
+        - name: pcs_3zone          # 1000–1075；_k ↔ 寄存器 999+k
+          func: input
+          addr: 1000
+          count: 76
+          byte_swap: true          # 「高 8 位和低 8 位互换」（§9.7.3）
+          format: uint16
+          scale: 1.0
+          points:
+            - { at: 1,  count: 6 }                                   # 1000–1005 告警1–5/BMS 工作状态
+            - { at: 7,  format: int16, scale: 0.1, count: 2 }        # 1006–1007 可接受充/放电流 A
+            - { at: 9,  scale: 0.1 }                                 # 1008 BMS 系统总电压 V
+            - { at: 10, format: int16, scale: 0.1 }                  # 1009 BMS 系统总电流 A
+            - { at: 11 }                                             # 1010 BMS 系统 SOC %（不得作控制源）
+            - { at: 12, format: int16, scale: 0.1, count: 2 }        # 1011–1012 直流母线/中点电压 V
+            - { at: 14, count: 5 }                                   # 1013–1017 运行/故障/降额/并离网/故障码
+            - { at: 19, format: int16, scale: 0.1, count: 3 }        # 1018–1020 电网 A/B/C 相电压 V
+            - { at: 22, format: int16, scale: 0.01 }                  # 1021 交流母线频率 Hz
+            - { at: 23, format: int16, scale: 0.1, count: 3 }        # 1022–1024 输出电流 A/B/C A
+            - { at: 26, format: int16, scale: 0.1, count: 4 }        # 1025–1028 视在功率 A/B/C/总 kVA
+            - { at: 30, format: int16, scale: 0.1, count: 4 }        # 1029–1032 有功功率 A/B/C/总 kW
+            - { at: 34, format: int16, scale: 0.1, count: 4 }        # 1033–1036 无功功率 A/B/C/总 kvar
+            - { at: 38, format: int16, scale: 0.001, count: 4 }      # 1037–1040 A/B/C/总功率因数
+            - { at: 42, format: int16, scale: 1.0 }                  # 1041 PCS 温度 ℃
+            - { at: 43, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1042–1043 交流累计充电电量
+            - { at: 45, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1044–1045 交流累计放电电量
+            - { at: 47, format: int16, scale: 0.1, count: 3 }        # 1046–1048 STS 网侧电压 A/B/C V
+            - { at: 50, format: int16, scale: 0.1 }                  # 1049 STS 电网电压幅值 V
+            - { at: 51, format: int16, scale: 0.01 }                 # 1050 STS 电网电压频率 Hz
+            - { at: 52, format: int16, scale: 0.1, count: 3 }        # 1051–1053 负载电流 A/B/C A
+            - { at: 55, format: int16, scale: 0.1, count: 3 }        # 1054–1056 负载视在功率 kVA
+            - { at: 58, format: int16, scale: 0.1, count: 3 }        # 1057–1059 负载有功功率 kW
+            - { at: 61, format: int16, scale: 0.1, count: 3 }        # 1060–1062 负载无功功率 kvar
+            - { at: 64, format: int16, scale: 0.001, count: 3 }      # 1063–1065 负载功率因数
+            - { at: 67 }                                             # 1066 工作模式判断（枚举）
+            - { at: 68, format: int16, scale: 0.1, count: 3 }        # 1067–1069 低压/高压总电流、低压外总压
+            - { at: 71, format: int16, scale: 0.1 }                  # 1070 低压总功率 kW
+            - { at: 72, format: int16, scale: 1.0 }                  # 1071 DCDC 温度 ℃
+            - { at: 73, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1072–1073 直流累计充电电量
+            - { at: 75, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1074–1075 直流累计放电电量
+    # ================= 3) 储能电能表 ADL400（FC03）=================
+    - id: meter_batt
+      role: meter_batt
+      port: "/dev/ttyS5"
+      protocol: modbus
+      slave: 1                     # 现场校准（§9.10 Q-12）
+      baud_rate: 9600
+      parity: none
+      interval_ms: 1000
+      regs:
+        # 6 个总电能点各占 2 寄存器、彼此间隔 8 寄存器（空洞 8 > 4）⇒ 按 §9.4.2.1 第 3 条必须拆为 6 块
+        - { name: mb_e_act_comb, func: holding, addr: 0x0000, count: 2, format: int32_scaled, scale: 0.01 }  # 组合有功总电能 kWh
+        - { name: mb_e_act_fwd,  func: holding, addr: 0x000A, count: 2, format: int32_scaled, scale: 0.01 }  # 正向总有功电能
+        - { name: mb_e_act_rev,  func: holding, addr: 0x0014, count: 2, format: int32_scaled, scale: 0.01 }  # 反向总有功电能
+        - { name: mb_e_rea_comb, func: holding, addr: 0x001E, count: 2, format: int32_scaled, scale: 0.01 }  # 组合无功总电能 kvarh
+        - { name: mb_e_rea_fwd,  func: holding, addr: 0x0028, count: 2, format: int32_scaled, scale: 0.01 }  # 正向总无功电能
+        - { name: mb_e_rea_rev,  func: holding, addr: 0x0032, count: 2, format: int32_scaled, scale: 0.01 }  # 反向总无功电能
+        - name: mb_ui            # 0x0061–0x0066；_k ↔ 0x0060+k
+          func: holding
+          addr: 0x0061
+          count: 6
+          format: uint16
+          scale: 0.1
+          points:
+            - { at: 1, count: 3 }                        # 0x0061–0x0063 A/B/C 相电压 V
+            - { at: 4, count: 3, scale: 0.01 }           # 0x0064–0x0066 A/B/C 相电流 A
+        - name: mb_freq_line     # 0x0077–0x007A
+          func: holding
+          addr: 0x0077
+          count: 4
+          format: uint16
+          scale: 0.1
+          points:
+            - { at: 1, scale: 0.01 }                     # 0x0077 频率 Hz
+            - { at: 2, count: 3 }                        # 0x0078–0x007A A-B/C-B/A-C 线电压 V
+        - name: mb_phase         # 0x0087–0x0094（14 寄存器；内含 0x008F–0x0091 保留空洞 3）
+          func: holding
+          addr: 0x0087
+          count: 14
+          format: int32_scaled
+          scale: 0.01
+          points:
+            - { at: 1  }                                 # 0x0087–0x0088 A 相正向有功电能 kWh
+            - { at: 3  }                                 # 0x0089–0x008A B 相正向有功电能
+            - { at: 5  }                                 # 0x008B–0x008C C 相正向有功电能
+            - { at: 7,  format: uint16, scale: 1.0 }     # 0x008D 电压变比 PT（只读对照）
+            - { at: 8,  format: uint16, scale: 1.0 }     # 0x008E 电流变比 CT（只读对照）
+            - { at: 12, format: uint16, scale: 0.01 }    # 0x0092 零序电流 A
+            - { at: 13, format: uint16, scale: 0.1 }     # 0x0093 电压不平衡度 %
+            - { at: 14, format: uint16, scale: 0.1 }     # 0x0094 电流不平衡度 %
+        - name: mb_power         # 0x0164–0x017F（28 寄存器；_k ↔ 0x0163+k）
+          func: holding
+          addr: 0x0164
+          count: 28
+          format: int32_scaled
+          scale: 0.001
+          points:
+            - { at: 1  }                                 # 0x0164–0x0165 A 相有功功率 kW
+            - { at: 3  }                                 # 0x0166–0x0167 B 相有功功率
+            - { at: 5  }                                 # 0x0168–0x0169 C 相有功功率
+            - { at: 7  }                                 # 0x016A–0x016B 总有功功率
+            - { at: 9  }                                 # 0x016C–0x016D A 相无功功率 kvar
+            - { at: 11 }                                 # 0x016E–0x016F B 相无功功率
+            - { at: 13 }                                 # 0x0170–0x0171 C 相无功功率
+            - { at: 15 }                                 # 0x0172–0x0173 总无功功率
+            - { at: 17 }                                 # 0x0174–0x0175 A 相视在功率 kVA
+            - { at: 19 }                                 # 0x0176–0x0177 B 相视在功率
+            - { at: 21 }                                 # 0x0178–0x0179 C 相视在功率
+            - { at: 23 }                                 # 0x017A–0x017B 总视在功率
+            - { at: 25, format: int16, scale: 0.001, count: 4 }   # 0x017C–0x017F A/B/C/总功率因数
+    # ================= 4) 工商储火灾报警控制器（FC03）=================
+    - id: fire
+      role: fire
+      port: "/dev/ttyS6"
+      protocol: modbus
+      slave: 1                     # 本机地址出厂默认 1
+      baud_rate: 9600
+      parity: none
+      interval_ms: 1000            # 探测器块 n>20 时须 ≥5000（§9.5.4）
+      regs:
+        - name: fire_sys         # 4–16（含第 1 只探测器 11–16）；_k ↔ 寄存器 3+k
+          func: holding
+          addr: 4
+          count: 13
+          format: uint16
+          scale: 1.0
+          points:
+            - { at: 1 }                                  # 4 系统状态（位图）
+            - { at: 2 }                                  # 5 钢瓶气压 kPa（可选功能）
+            - { at: 3 }                                  # 6 烟感状态（位图）
+            - { at: 4 }                                  # 7 温感状态（位图）
+            - { at: 5 }                                  # 8 可燃状态（位图）
+            - { at: 6 }                                  # 9 火警状态（枚举）
+            - { at: 7, name: fire_det_count }            # 10 复合探测器登记数量（跨文档契约点，不得改名）
+            - { at: 8 }                                  # 11 探测器 1：地址
+            - { at: 9 }                                  # 12 探测器 1：状态（位图）
+            - { at: 10 }                                 # 13 探测器 1：数据 1（整字，§9.4.2.3）
+            - { at: 11 }                                 # 14 探测器 1：数据 2 CO ppm
+            - { at: 12 }                                 # 15 探测器 1：数据 3 VOC ppm
+            - { at: 13 }                                 # 16 探测器 1：数据 4 H2 ppm
+        - name: fire_det         # 探测器 2..n：17 起，6×(n−1) 寄存器（整窗口产出，整字口径）
+          func: holding
+          addr: 17
+          count: 114             # n=20 时的取值；投运按登记数展开（每片 ≤120 寄存器 = ≤20 只）
+          format: uint16         # 逐寄存器 1 点（数据 1 亦为整字）
+          scale: 1.0
+    # ================= 5) 风冷空调机组（FC02 告警位 + FC04 温湿度）=================
+    - id: hvac
+      role: hvac
+      port: "/dev/ttyS3"
+      protocol: modbus
+      slave: 1
+      baud_rate: 9600
+      parity: even               # 出厂为偶校验（§9.10 Q-14 / D-1 裁定后生效）
+      interval_ms: 5000
+      regs:
+        - name: hvac_in          # FC04 30001–30004；_k ↔ 寄存器 k-1
+          func: input
+          addr: 0
+          count: 4
+          format: int16
+          scale: 0.1
+          points:
+            - { at: 1 }                                  # 30001 柜内测量温度 ℃
+            - { at: 3 }                                  # 30003 内盘管测量温度 ℃（§9.10 Q-10）
+            - { at: 4, format: uint16 }                  # 30004 柜内测量湿度 %（无符号）
+        - name: hvac_di          # FC02 位 0–30（PLC 10001–10031）
+          func: discrete
+          addr: 0
+          count: 31
+    # ================= 6) 关口/台区总表 grid_meter（既有站，本轮不动）=================
+    - id: grid_meter              # 站 id（生效配置原值；注意 role 名才是 meter_grid）
+      role: meter_grid
+      port: "/dev/ttyS4"          # BECG COM4(ttyS4) ↔ 关口/台区总表；⚠️ 须与 intercore 串口不同
+      baud_rate: 9600             # 同口多从站须一致（物理共享口波特率）
+      protocol: modbus
+      slave: 3                    # 现场校准
+      interval_ms: 1000           # 须 < 5000（策略 phase 周期约束）
+      regs:                       # 三相连续，Int32/Float32 均 2 寄存器/相；count=块寄存器数
+        - { name: p,       addr: 0x1000, format: int32_scaled, scale: 0.01,  count: 6 }   # P_A/B/C
+        - { name: q,       addr: 0x1006, format: int32_scaled, scale: 0.01,  count: 6 }   # Q_A/B/C
+        - { name: pf,      addr: 0x100C, format: int32_scaled, scale: 0.001, count: 6 }   # PF_A/B/C
+        - { name: u,       addr: 0x1012, format: float32,       scale: 1.0,   count: 6 }   # U_A/B/C（float32 不乘 scale）
+        - { name: i,       addr: 0x1018, format: int32_scaled, scale: 0.01,  count: 6 }   # I_A/B/C
+        - { name: p_total, addr: 0x101E, format: int32_scaled, scale: 0.01,  count: 2 }   # 可选：缺省降级 Σp

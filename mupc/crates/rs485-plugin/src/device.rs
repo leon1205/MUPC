@@ -107,6 +107,51 @@ fn parse_regs_response(response: &[u8]) -> Result<Vec<u16>, Rs485Error> {
     Ok(registers)
 }
 
+/// Modbus FC02 响应字节 → 位向量（PRD §9.7.4 的唯一解包公式）。
+///
+/// 位 `k`（`0 ≤ k < count`）取自 `bytes[k / 8]` 的第 `(k % 8)` 位（**bit0 = LSB**），
+/// 即协议规定的"较低地址的寄存器存储在一个字节的较低位上"。返回长度**恒为 `count`**。
+///
+/// - `count` 非 8 倍数时，**末字节高位为无关位**，既不参与解包也不污染前 `count` 位
+///   （设计 §11.2.3 选型 C1 —— 这正是"复用 `Vec<u16>`"被否掉的原因）。
+/// - 字节不足时按 0 补齐（长度契约优先于静默截断）；"响应字节数不足"由帧层
+///   [`parse_bits_response`] 拒绝，本纯函数保持全定义：不 panic、不越界。
+pub fn unpack_bits(bytes: &[u8], count: u16) -> Vec<bool> {
+    (0..count as usize)
+        .map(|k| {
+            let byte = bytes.get(k / 8).copied().unwrap_or(0);
+            (byte >> (k % 8)) & 1 == 1
+        })
+        .collect()
+}
+
+/// 解析 Modbus FC02 离散输入响应。
+///
+/// 响应格式：[slave, func, byte_count, data..., crc_lo, crc_hi]
+/// 与 [`parse_regs_response`] 同口径：只做长度校验与解包，**不校验 CRC**。
+///
+/// **刻意不复用 `parse_regs_response`**：后者按 `byte_count / 2` 拆寄存器，
+/// 会丢掉非偶数字节的末字节（位宽 1..8 时响应只有 1 个数据字节）。
+fn parse_bits_response(response: &[u8], count: u16) -> Result<Vec<bool>, Rs485Error> {
+    if response.len() < 5 {
+        return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
+    }
+
+    let byte_count = response[2] as usize;
+    if response.len() < 3 + byte_count + 2 {
+        return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
+    }
+
+    let needed = (count as usize).div_ceil(8);
+    if byte_count < needed {
+        return Err(Rs485Error::ConfigFailed(format!(
+            "位块响应字节数不足：count={count} 需 {needed} 字节，实得 {byte_count}"
+        )));
+    }
+
+    Ok(unpack_bits(&response[3..3 + byte_count], count))
+}
+
 impl Rs485Device {
     /// 创建新的 RS485 设备
     pub fn new(
@@ -135,7 +180,6 @@ impl Rs485Device {
     pub fn open(&self) -> Result<(), Rs485Error> {
         #[cfg(unix)]
         {
-
             use std::ffi::CString;
 
             let port_path = self.config.port.clone();
@@ -580,6 +624,22 @@ impl Rs485Device {
         ))
     }
 
+    /// 读取离散输入（Modbus **FC02**），显式从站地址（同口多从站，口内串行轮询）。
+    ///
+    /// `count` = **位数**（非寄存器数）；返回长度 = `count` 的位向量。
+    /// 与 [`Self::read_holding_registers_from`] / [`Self::read_input_registers_from`] 同构：
+    /// 复用 [`build_read_frame`] 与同一条 `send_recv` 事务路径，仅功能码与响应解析不同。
+    pub fn read_discrete_inputs_from(
+        &self,
+        slave: u8,
+        addr: u16,
+        count: u16,
+    ) -> Result<Vec<bool>, Rs485Error> {
+        let cmd = build_read_frame(slave, 0x02, addr, count, self.config.crc_mode);
+        let response = self.send_recv(&cmd, self.config.timeout_ms)?;
+        parse_bits_response(&response, count)
+    }
+
     /// 私有：发送读请求帧并解析响应寄存器。
     fn read_regs(&self, cmd: Vec<u8>) -> Result<Vec<u16>, Rs485Error> {
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
@@ -767,7 +827,7 @@ fn gpio_set_value(gpio_num: u32, value: bool) -> Result<(), Rs485Error> {
 mod tests {
     use super::*;
 
-    fn create_test_device() -> Rs485Device {
+    pub(super) fn create_test_device() -> Rs485Device {
         let config = Config {
             port: "/dev/ttyUSB0".to_string(),
             baud_rate: 9600,
@@ -919,5 +979,198 @@ mod tests {
             .read_input_registers_from(0x2A, 0x0000, 4)
             .unwrap_err();
         assert!(matches!(err2, Rs485Error::NotConnected(_)));
+    }
+}
+
+/// S3b-2 T2：FC02 离散输入帧层（设计 §11.4.3 / §11.4.5，PRD §9.7.4）。
+#[cfg(test)]
+mod fc02_tests {
+    use super::tests::create_test_device;
+    use super::*;
+
+    // ── unpack_bits：PRD §9.7.4 的唯一解包公式（bit0 = LSB） ────────────
+
+    #[test]
+    fn test_unpack_bits_prd_original_example() {
+        // PRD §9.7.4 引用 BMS 协议 §3.2.4 原文示例：
+        // 连续 16 位 1,1,0,1,1,1,0,0,… → 首字节 00111011B = 0x3B
+        // 随后      1,1,0,1,1,1,0,1   → 10111011B = 0xBB
+        assert_eq!(
+            unpack_bits(&[0x3B], 8),
+            vec![true, true, false, true, true, true, false, false]
+        );
+        assert_eq!(
+            unpack_bits(&[0x3B, 0xBB], 16),
+            vec![
+                true, true, false, true, true, true, false, false, // 0x3B
+                true, true, false, true, true, true, false, true, // 0xBB
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unpack_bits_31_bits_tail_byte_does_not_pollute() {
+        // 空调 hvac_di：addr 0 / count 31 ⇒ 响应 4 字节，末字节的 bit7 是无关位。
+        // 设计 §11.2.3 选型 C1 明确否掉了"复用 Vec<u16>"：尾部无关位不得污染前 31 位。
+        let tail_set = unpack_bits(&[0x3B, 0xBB, 0x00, 0xFF], 31);
+        assert_eq!(tail_set.len(), 31, "长度必须 = count，不含无关位");
+        assert!(
+            tail_set[24..31].iter().all(|b| *b),
+            "bit7=1 无关位，前 7 位仍为 1"
+        );
+
+        let tail_clear = unpack_bits(&[0x3B, 0xBB, 0x00, 0x80], 31);
+        assert_eq!(tail_clear.len(), 31);
+        assert!(
+            tail_clear[24..31].iter().all(|b| !*b),
+            "无关位置 1 也不得被读进来（bit 31 不是有效位）"
+        );
+        // 反证：把 count 提到 32，同一位就是有效位 ⇒ 必须为 true
+        assert!(unpack_bits(&[0x3B, 0xBB, 0x00, 0x80], 32)[31]);
+    }
+
+    #[test]
+    fn test_unpack_bits_288_bits_bms_scale() {
+        // BMS bms_alarm：288 位 = 36 字节，逐位与构造位图比对（含跨字节边界）
+        let bytes: Vec<u8> = (0..36u32).map(|i| (i * 37 + 11) as u8).collect();
+        let bits = unpack_bits(&bytes, 288);
+        assert_eq!(bits.len(), 288);
+        for k in 0..288usize {
+            let expected = (bytes[k / 8] >> (k % 8)) & 1 == 1;
+            assert_eq!(
+                bits[k],
+                expected,
+                "位 {k} 不符（应取第 {} 字节的 bit {}）",
+                k / 8,
+                k % 8
+            );
+        }
+    }
+
+    #[test]
+    fn test_unpack_bits_cross_byte_boundary_explicit() {
+        // 显式边界断言：bit7 = 字节 0 的最高位；bit8 = 字节 1 的最低位（跨字节）
+        let edge = unpack_bits(&[0x80, 0x01], 16);
+        assert!(edge[..7].iter().all(|b| !*b), "bit0..6 应为 0");
+        assert!(edge[7], "bit7 是字节 0 的 bit7");
+        assert!(edge[8], "bit8 是字节 1 的 bit0（跨字节边界）");
+        assert!(edge[9..].iter().all(|b| !*b), "bit9..15 应为 0");
+    }
+
+    #[test]
+    fn test_unpack_bits_edges_and_non_multiples() {
+        assert_eq!(unpack_bits(&[], 0), Vec::<bool>::new());
+        assert_eq!(unpack_bits(&[0x01], 1), vec![true]);
+        assert_eq!(
+            unpack_bits(&[0x02], 1),
+            vec![false],
+            "count 之外的位不得取用"
+        );
+        assert_eq!(unpack_bits(&[0xFF], 3), vec![true, true, true]);
+        let nine = unpack_bits(&[0x00, 0x01], 9);
+        assert_eq!(nine.len(), 9);
+        assert!(nine[8], "第 9 位取自字节 1 的 bit0");
+        assert!(nine[..8].iter().all(|b| !*b));
+    }
+
+    #[test]
+    fn test_unpack_bits_short_input_pads_false() {
+        // 契约："返回长度 = count"（设计 §11.4.3）。字节不足时按 0 补齐（不 panic、不越界）；
+        // "响应字节数不足"由帧层 parse_bits_response 拒（见下），纯函数保持全定义。
+        let bits = unpack_bits(&[0x01], 16);
+        assert_eq!(bits.len(), 16);
+        assert!(bits[0]);
+        assert!(bits[1..].iter().all(|b| !*b));
+    }
+
+    // ── parse_bits_response：FC02 响应 → 位向量 ────────────────────────
+
+    #[test]
+    fn test_parse_bits_response_31_bits() {
+        // [slave, func, byte_count, b0..b3, crc_lo, crc_hi]
+        let resp = vec![0x01, 0x02, 0x04, 0x3B, 0xBB, 0x00, 0x00, 0x00, 0x00];
+        let bits = parse_bits_response(&resp, 31).unwrap();
+        assert_eq!(bits.len(), 31);
+        assert_eq!(
+            &bits[..6],
+            &[true, true, false, true, true, true],
+            "首字节 0x3B 的 bit0..5"
+        );
+    }
+
+    #[test]
+    fn test_parse_bits_response_288_bits() {
+        let mut resp = vec![0x01, 0x02, 36];
+        resp.extend((0..36u8).map(|i| i.wrapping_mul(7)));
+        resp.extend([0x00, 0x00]); // crc 占位（本函数不校验 CRC，与原 parse_regs_response 同口径）
+        let bits = parse_bits_response(&resp, 288).unwrap();
+        assert_eq!(
+            bits,
+            unpack_bits(
+                &(0..36u8).map(|i| i.wrapping_mul(7)).collect::<Vec<_>>(),
+                288
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_bits_response_too_short() {
+        assert!(parse_bits_response(&[], 8).is_err());
+        assert!(parse_bits_response(&[0x01, 0x02, 0x01], 8).is_err());
+    }
+
+    #[test]
+    fn test_parse_bits_response_incomplete() {
+        // byte_count=4 但报文只有 3 个数据字节 → 判不完整
+        let resp = vec![0x01, 0x02, 0x04, 0x3B, 0xBB, 0x00];
+        assert!(parse_bits_response(&resp, 31).is_err());
+    }
+
+    #[test]
+    fn test_parse_bits_response_byte_count_insufficient_for_count() {
+        // 288 位需 36 字节，响应只给 2 字节 ⇒ 必须拒（不得静默补 0 冒充"全部正常"）
+        let resp = vec![0x01, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00];
+        let err = parse_bits_response(&resp, 288).unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::ConfigFailed(_)),
+            "应为配置/帧错误，实际: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_bits_response_extra_bytes_ignored() {
+        // byte_count 大于所需时只取前 ceil(count/8) 字节（多余字节不参与解包）
+        let resp = vec![0x01, 0x02, 0x05, 0x3B, 0xBB, 0x00, 0x00, 0xAA, 0x00, 0x00];
+        let bits = parse_bits_response(&resp, 16).unwrap();
+        assert_eq!(bits, unpack_bits(&[0x3B, 0xBB], 16));
+    }
+
+    // ── read_discrete_inputs_from：请求帧与委托路径 ─────────────────────
+
+    #[test]
+    fn test_build_read_frame_fc02_known_vectors() {
+        // 独立已知向量（CRC16-Modbus 参考实现复算）
+        // 空调 hvac_di：slave 1、FC02、addr 0、count 31
+        assert_eq!(
+            build_read_frame(0x01, 0x02, 0x0000, 31, CrcMode::Crc16Modbus),
+            vec![0x01, 0x02, 0x00, 0x00, 0x00, 0x1F, 0x39, 0xC2]
+        );
+        // BMS bms_alarm：slave 1、FC02、addr 400(0x0190)、count 288(0x0120)
+        assert_eq!(
+            build_read_frame(0x01, 0x02, 400, 288, CrcMode::Crc16Modbus),
+            vec![0x01, 0x02, 0x01, 0x90, 0x01, 0x20, 0x79, 0x93]
+        );
+    }
+
+    #[test]
+    fn test_read_discrete_inputs_from_no_io() {
+        // 与既有 read_holding_registers_from / read_input_registers_from 同构：
+        // 未打开串口 ⇒ 在触碰真实串口之前即返回 NotConnected。
+        let device = create_test_device();
+        let err = device.read_discrete_inputs_from(1, 0, 31).unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::NotConnected(_)),
+            "应返回 NotConnected（串口未打开），实际: {err:?}"
+        );
     }
 }
