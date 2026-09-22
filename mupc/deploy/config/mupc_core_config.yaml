@@ -390,7 +390,7 @@ south_stations:
       protocol: modbus
       slave: 1
       baud_rate: 9600
-      parity: even               # 出厂为偶校验（§9.10 Q-14 / D-1 裁定后生效）
+      parity: even               # 出厂为偶校验（§9.10 Q-14 / D-1 已裁定按①，2026-09-22 生效）
       interval_ms: 5000
       regs:
         - name: hvac_in          # FC04 30001–30004；_k ↔ 寄存器 k-1
