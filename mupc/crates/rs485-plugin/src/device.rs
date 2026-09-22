@@ -1087,15 +1087,29 @@ mod fc02_tests {
 
     #[test]
     fn test_parse_bits_response_31_bits() {
-        // [slave, func, byte_count, b0..b3, crc_lo, crc_hi]
-        let resp = vec![0x01, 0x02, 0x04, 0x3B, 0xBB, 0x00, 0x00, 0x00, 0x00];
-        let bits = parse_bits_response(&resp, 31).unwrap();
-        assert_eq!(bits.len(), 31);
-        assert_eq!(
-            &bits[..6],
-            &[true, true, false, true, true, true],
-            "首字节 0x3B 的 bit0..5"
-        );
+        // 保留 PRD §9.7.4 示例锚（首字节 0x3B，bit0=LSB ⇒ 1,1,0,1,1,1,0,0），但断言从
+        // bits[..6] **扩到全部 31 位**，且期望值为**独立手写常量**（不经 unpack_bits 反读，
+        // 否则与实现同义反复）。
+        //
+        // 载荷刻意避开 0x3B/0xBB 这类"低 6 位平移不变"的组合（两者低 6 位均 = 111011）：
+        // 原用例只断言 bits[..6]，帧层数据段错位 1 字节时读到的是 0xBB，其低 6 位与原
+        // 0x3B 恰好相同 ⇒ 对该缺陷**零判别力**（S3b-2 测试门禁报告 R3 / 探针 C 实证）。
+        // 现相邻字节低 6 位两两不同 ⇒ 取数错位必然使本用例变红。
+        let data = [0x3B, 0xC5, 0x6E, 0x93];
+        let bits = parse_bits_response(&build_fc02_response(0x01, &data), 31).unwrap();
+        assert_eq!(bits.len(), 31, "长度恒 = count，末字节 bit7 为无关位不入列");
+
+        let expected: Vec<bool> = [
+            // 0x3B = 0b0011_1011（PRD §9.7.4 示例字节）
+            true, true, false, true, true, true, false, false, // 0xC5 = 0b1100_0101
+            true, false, true, false, false, false, true, true, // 0x6E = 0b0110_1110
+            false, true, true, true, false, true, true, false,
+            // 0x93 = 0b1001_0011：末字节只取低 7 位（bit7 无关）
+            true, true, false, false, true, false, false,
+        ]
+        .to_vec();
+        assert_eq!(expected.len(), 31, "手写锚长度必须为 31");
+        assert_eq!(bits, expected, "帧级 31 位须逐位等于独立手写锚");
     }
 
     #[test]
