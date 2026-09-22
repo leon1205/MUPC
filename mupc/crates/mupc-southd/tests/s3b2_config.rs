@@ -374,7 +374,9 @@ fn ac1_rule6_registry_offset_drift_rejected() {
     );
     assert_ok(&ok, "116/117/118 与点表登记值一致");
     assert_eq!(
-        mupc_southd::point_table::lookup(Role::Battery, 116).unwrap().offset,
+        mupc_southd::point_table::lookup(Role::Battery, 116)
+            .unwrap()
+            .offset,
         -1600.0
     );
 
