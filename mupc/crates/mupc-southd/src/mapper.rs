@@ -206,6 +206,169 @@ fn soc_point(reads: &BlockReads) -> Option<(Result<Vec<u16>, String>, u16, RegDe
     None
 }
 
+/// battery 分支的 SOC 取值结果（设计 §11.4.6 v1.3：把"底块读失败"等四种情形**显式化**）。
+///
+/// 四情形与 [`poll_to_result`] 的对应（逐条实现、逐条测）：
+///
+/// | 情形 | 判据 | [`SocOutcome`] | `pkg.battery.soc` | `PollResult` |
+/// |------|------|----------------|-------------------|--------------|
+/// | ① 底块读成功且含 `soc` 点 | 该块 `Ok` 且展开后 `metric == "soc"` | [`SocOutcome::Value`] | 域内 `Some(值)` / **域外 `None`** | `Data` |
+/// | ② **底块读失败** | 该块 `Err(e)` | [`SocOutcome::BlockFailed`] | `None` | **`Failed(e)`** |
+/// | ③ 全站无任何块含 `soc` 点 | 展开后无 `metric == "soc"` | [`SocOutcome::NoSuchPoint`] | `None` | `Data`（空占位） |
+/// | ④ 非承载 `soc` 的其它块读失败 | 任一其它块 `Err` | （本枚举不表达） | `None` | **`Failed(e)`** |
+///
+/// **②③④ 的差别是刻意的**：②④ 属「通信/链路」故障 ⇒ 整站失败（可退避自愈）；③ 属「配置」
+/// 错误 ⇒ 配置期（规则 4）已拒，此处的 `Data` 只为"调度器单测可绕过 validate"而保留。
+/// 二者混为一谈会让"配置错"在运行期表现为"站离线"（PRD §9.7.2 第 5 条禁止）。
+///
+/// 注意 [`SocOutcome::Value`] **不做域检查**（域检查是调用方的事，见 [`soc_in_domain`]）
+/// ——"解出值"与"该值可否进控制链"是两件事，`telemetry` 要的是前者、控制链要的是后者。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SocOutcome {
+    /// ① 该块读成功且 `soc` 点可完整解码 → 原始解码值（**未做域检查**）
+    Value(f64),
+    /// ③ 全站无任何块含 `soc` 点（该形态在配置期已被规则 4 拒；此处只为单测可绕过 validate）
+    NoSuchPoint,
+    /// ② 承载 `soc` 点的块读失败（含"读回长度装不下该点"）——整站失败，**不得**只丢 SOC
+    BlockFailed(String),
+}
+
+/// battery 的 SOC 域检查（PRD §9.6.3）：`0 ≤ v ≤ 100` 且有限 ⇒ `true`。
+///
+/// `soc` 是唯一进控制链的南向采集点 ⇒ 解出的值**先做域检查**，越界视为该点无效：
+/// ① 不推 AiIntegrator（回落核间 SOC，避免以坏值剪带）；② 产告警事件（scheduler，
+/// §11.4.7 事件 ①）；③ telemetry **仍按原值落库**（保留证据，不掩盖 —— 由
+/// [`telemetry_points`] 独立完成，不看本判据）。
+pub fn soc_in_domain(v: f64) -> bool {
+    v.is_finite() && (0.0..=100.0).contains(&v)
+}
+
+/// battery 分支的 SOC 取值（四情形见 [`SocOutcome`] 表）。
+///
+/// 查找键 = **点名 `soc`**（不再按块名；PRD §9.4.3 规则 4 的消费契约），解码用该点的
+/// `RegDecode`（块级缺省已在 [`points::expand`] 折算）。
+pub fn battery_soc(reads: &BlockReads) -> SocOutcome {
+    match soc_point(reads) {
+        None => SocOutcome::NoSuchPoint,
+        Some((res, offset, decode)) => match res {
+            Err(e) => SocOutcome::BlockFailed(e),
+            Ok(r) => {
+                let start = offset as usize;
+                if r.len() >= start + decode.width() {
+                    SocOutcome::Value(decode.decode(&r[start..]))
+                } else {
+                    // 读回长度装不下该点（响应被截断）⇒ 属"该块读失败"（②），**不得**静默
+                    // 退化为"站在线但 SOC 缺失"——那正是 §11.4.6 ② 明文禁止的形态。
+                    // ⚠️ 设计未列此形态（四情形表不含"长度不足"），本实现按 ② 同策处理（**待评审追认**）。
+                    SocOutcome::BlockFailed(format!(
+                        "soc 点读回长度不足：块内偏移 {start} + 宽度 {} > 实际寄存器数 {}",
+                        decode.width(),
+                        r.len()
+                    ))
+                }
+            }
+        },
+    }
+}
+
+/// 消防钢瓶气压的**绝对寄存器地址**（PRD §9.5.4：addr 5 = 钢瓶气压 kPa）。
+const FIRE_CYLINDER_PRESSURE_ADDR: u16 = 5;
+/// 消防登记数的**点名**（PRD §9.4.1/§9.5.4 v1.7 定名的跨文档契约点；禁按块名 + 硬编码地址查）。
+const FIRE_DET_COUNT_METRIC: &str = "fire_det_count";
+
+/// 取**绝对寄存器地址 `addr` 上的那个标量点**的解码值（点位起始地址 == `addr`）。
+///
+/// **取数方式与配置解耦**（与 [`fire_detector_addr_order_violation`] 的链首取数同取向，
+/// §11.4.6）：不依赖块名、不依赖点位名，现场改块划分/改名都不会让判据失配；
+/// 块读失败 / 无点落在该地址 / 解码长度不足 → `None`。
+///
+/// **边界（刻意的）**：只认"点的**起始**地址等于 `addr`"，故若某 32 位点**跨**该地址
+/// （一个点占 `addr-1`/`addr` 两寄存器）⇒ 视为无判据。消防站的这些量全是 16 位
+/// （`uint16`/`scale 1.0`，PRD §9.5.4）⇒ 本边界在适用域内不可达。
+fn scalar_at(reads: &BlockReads, addr: u16) -> Option<f64> {
+    for (b, res) in reads {
+        let Some(regs) = res.as_ref().ok().and_then(|d| d.regs()) else {
+            continue;
+        };
+        let Ok(pts) = points::expand(b) else {
+            continue;
+        };
+        for p in pts {
+            let PointKind::Scalar { offset, decode } = p.kind else {
+                continue;
+            };
+            if b.addr.wrapping_add(offset) != addr {
+                continue;
+            }
+            let start = offset as usize;
+            return if regs.len() >= start + decode.width() {
+                Some(decode.decode(&regs[start..]))
+            } else {
+                None
+            };
+        }
+    }
+    None
+}
+
+/// 消防探测器登记数交叉校验（PRD §9.5.4"登记数交叉校验（**强制**）"；设计 §11.4.6）。
+///
+/// 判据：把**点名 `fire_det_count` 的点**（= 寄存器 10，v1.7 定名；**按点名查找**，
+/// 不得按"块名 `fire_det` + 硬编码寄存器 10" —— 那属设备特判，违反 PRD G-5）读回的值，
+/// 与**配置的探测器块容量**（全部以 `fire_det` 为前缀的块 `count` 之和 ÷ 6）比对；
+/// **不一致 → 返回读回值**（作为事件的诊断量），一致 → `None`。
+///
+/// 探测器增减须人工复核配置，防"新增探测器未被采集"的静默盲区 —— 这是 PRD 标"强制"的
+/// 原因。非 `fire` 站 / 无 `fire_det_count` 点（含承载它的块读失败）/ 块展开失败 → `None`
+///（**无判据可依时不臆断**，与地址序校验同策）。
+///
+/// > **⚠️ 已知口径冲突（T6 就地登记，待需求侧/架构师裁定）**：本式照录 PRD §9.5.4 与
+/// > 设计 §11.4.6 的原文（"全部 `fire_det` 前缀块的 `count` 之和 ÷ 6"），但它**漏计
+/// > 探测器 1** —— 探测器 1 的 6 个寄存器在 `fire_sys` 块内（addr 11–16，PRD §9.5.4 的
+/// > 块划分表 + v1.7 链首订正 §11.4.6 均已确认）。⇒ 按 §9.4.1 的参考配置（n=20：
+/// > `fire_det` count = 114）本式得 **19**，而寄存器 10 读回 **20**，**每轮都会判不一致**
+/// > 并产出事件（正是 §11.4.7.2 要消除的形态）。**正确式应为 `1 + Σ fire_det.count / 6`**
+/// > （即"含探测器 1"）。本 Task **不擅自改**：按 PRD/设计原文实现并上报，待裁定后一行修正。
+pub fn fire_detector_mismatch(role: Role, reads: &BlockReads) -> Option<f64> {
+    if role != Role::Fire {
+        return None;
+    }
+    let read_back = reads.iter().find_map(|(b, res)| {
+        let regs = res.as_ref().ok()?.regs()?;
+        let pts = points::expand(b).ok()?;
+        pts.into_iter().find_map(|p| {
+            if p.metric != FIRE_DET_COUNT_METRIC {
+                return None;
+            }
+            let PointKind::Scalar { offset, decode } = p.kind else {
+                return None;
+            };
+            let start = offset as usize;
+            (regs.len() >= start + decode.width()).then(|| decode.decode(&regs[start..]))
+        })
+    })?;
+    let capacity: u32 = reads
+        .iter()
+        .filter(|(b, _)| b.name.starts_with("fire_det"))
+        .map(|(b, _)| u32::from(b.count))
+        .sum::<u32>()
+        / 6;
+    (read_back != f64::from(capacity)).then_some(read_back)
+}
+
+/// 钢瓶气压「是否配置」（PRD §9.7.6；设计 §11.4.6/§11.7.3）：`ever_nonzero` = 本站生命周期内
+/// 该点是否出现过非 0 值（由 scheduler 每站一个 `bool` 记忆维护，一旦为真**不再回退** ——
+/// 钢瓶气压不会在业务上"变回未配置"）。
+///
+/// 从未出现过非 0（含本轮仍为 0）⇒ `false`：**展示层标"未配置"，不得显示 "0 kPa"、
+/// 不得据此判"气压异常/泄漏"**；一旦出现过 ⇒ `true`（此后恒 0 按真实 0 展示）。
+///
+/// **该点不产任何事件**（PRD §9.7.6 明令）：本函数只是**展示口径**的判据，与事件层零重叠。
+/// 取数按**绝对寄存器地址 5**（不依赖块名/点位名，见 [`scalar_at`]）。
+pub fn cylinder_pressure_configured(reads: &BlockReads, ever_nonzero: bool) -> bool {
+    ever_nonzero || scalar_at(reads, FIRE_CYLINDER_PRESSURE_ADDR).is_some_and(|v| v != 0.0)
+}
+
 /// 站一次 poll 的结果组装。role 语义：
 /// - `MeterGrid`：p/q/pf/u/i 五相量块缺任一或读失败 → Failed（沿用旧数据）；p_total
 ///   独立块缺省/失败 → 降级分相和，不整周期失败。
@@ -242,18 +405,26 @@ pub fn poll_to_result(role: Role, reads: &BlockReads) -> PollResult {
             let mut pkg = empty_package();
             // PRD §9.4.3「`soc` 点契约」（v1.3 修订）：按**点名**查找（不再按块名），
             // 解码用该点的 `RegDecode`（块级缺省已在 `points::expand` 折算）。
-            match soc_point(reads) {
-                None => {} // 无 soc 点：battery 空占位（该形态配置期已被规则 4 拒）
-                Some((res, offset, decode)) => match res {
-                    Ok(r) => {
-                        let start = offset as usize;
-                        if r.len() >= start + decode.width() {
-                            pkg.battery.soc = Some(decode.decode(&r[start..]));
-                        }
-                        // 长度不足：保持 None（best-effort，不 Failed）——沿用既有语义
+            match battery_soc(reads) {
+                // ① 正常路径。**域外 ⇒ `pkg.battery.soc` 保持 `None`**（控制链拿不到坏值，
+                // PRD §9.6.3 ①：回落核间 SOC）；telemetry 仍按**原值**落库（§9.6.3 ③，
+                // 由 `telemetry_points` 独立完成 —— 它不看本判据），越界告警事件由 scheduler 发。
+                SocOutcome::Value(v) => {
+                    if soc_in_domain(v) {
+                        pkg.battery.soc = Some(v);
                     }
-                    Err(e) => return PollResult::Failed(format!("battery soc 点所在块读失败: {e}")),
-                },
+                }
+                // ③ 无 `soc` 点：battery 空占位（该形态配置期已被规则 4 拒）
+                SocOutcome::NoSuchPoint => {}
+                // ② 承载 `soc` 点的块读失败 → 整站本轮失败（不退化为"只丢 SOC"）
+                SocOutcome::BlockFailed(e) => {
+                    return PollResult::Failed(format!("battery soc 点所在块读失败: {e}"));
+                }
+            }
+            // ④ 非承载 `soc` 的其它块读失败 ⇒ 整站失败（§10.7"任一块失败 = 整站本轮失败、
+            // 无部分交付"）：避免"站在线而其余量静默缺失"的半个站。
+            if let Some((b, Err(e))) = reads.iter().find(|(_, r)| r.is_err()) {
+                return PollResult::Failed(format!("battery 站块 {} 读失败: {e}", b.name));
             }
             PollResult::Data(pkg)
         }
@@ -642,6 +813,106 @@ mod tests {
         assert_eq!(pkg2.battery.soc, None);
     }
 
+    /// **Battery 分支的四情形**（设计 §11.4.6 v1.3 表：逐条实现、逐条测）。
+    ///
+    /// ②④ 属"通信/链路"故障 ⇒ 整站失败（可退避自愈）；③ 属"配置"错误 ⇒ 配置期已拒，
+    /// 运行期只保留空占位（不把配置错表现为"站离线"，PRD §9.7.2 第 5 条）。
+    #[test]
+    fn battery_soc_four_cases() {
+        // ① 底块读成功且含 `soc` 点（域内）→ Value + pkg.battery.soc = Some
+        let ok = vec![(named_soc_block(), Ok(BlockData::Regs(f32_regs(65.5).to_vec())))];
+        assert_eq!(battery_soc(&ok), SocOutcome::Value(65.5));
+        assert_eq!(
+            unwrap_data(poll_to_result(Role::Battery, &ok)).battery.soc,
+            Some(65.5)
+        );
+
+        // ①′ 域外（1234.0 > 100）→ **仍解出 Value**（telemetry 用原值落库），
+        //     但 `pkg.battery.soc` = None（控制链拿不到坏值，PRD §9.6.3 ①）
+        let out = vec![(
+            named_soc_block(),
+            Ok(BlockData::Regs(f32_regs(1234.0).to_vec())),
+        )];
+        assert_eq!(battery_soc(&out), SocOutcome::Value(1234.0));
+        assert_eq!(
+            unwrap_data(poll_to_result(Role::Battery, &out)).battery.soc,
+            None,
+            "域外值不得进控制链（回落核间 SOC）"
+        );
+
+        // ② 承载 soc 点的块读失败 → BlockFailed + PollResult::Failed（整站失败）
+        let bad = vec![(named_soc_block(), Err("io 超时".into()))];
+        assert!(matches!(
+            battery_soc(&bad),
+            SocOutcome::BlockFailed(ref e) if e.contains("io 超时")
+        ));
+        assert!(matches!(
+            poll_to_result(Role::Battery, &bad),
+            PollResult::Failed(_)
+        ));
+
+        // ③ 全站无任何块含 `soc` 点 → NoSuchPoint + Data 空占位（不 Failed）
+        assert_eq!(battery_soc(&vec![]), SocOutcome::NoSuchPoint);
+        assert_eq!(
+            unwrap_data(poll_to_result(Role::Battery, &vec![])).battery.soc,
+            None
+        );
+
+        // ④ 非承载 soc 的其它块读失败（soc 所在块 Ok）→ 整站失败（不得"半个站"）
+        let other_bad = vec![
+            (
+                named_soc_block(),
+                Ok(BlockData::Regs(f32_regs(65.5).to_vec())),
+            ),
+            (blk("other"), Err("io".into())),
+        ];
+        assert_eq!(
+            battery_soc(&other_bad),
+            SocOutcome::Value(65.5),
+            "② 与 ④ 的分界：soc 所在块本身是 Ok"
+        );
+        let e = match poll_to_result(Role::Battery, &other_bad) {
+            PollResult::Failed(e) => e,
+            PollResult::Data(_) => panic!("④ 其它块失败应整站失败"),
+        };
+        assert!(e.contains("other"), "失败文案须定位到块: {e}");
+    }
+
+    /// **读回长度装不下 `soc` 点**（响应被截断）→ 按 ② 同策（`BlockFailed`）。
+    /// **不得**静默退化为 `None` —— 那正是 §11.4.6 ② 明文禁止的"站在线但 SOC 静默缺失"。
+    ///
+    /// ⚠️ 该形态**不在设计四情形表内**（T6 就地登记，待评审追认；口径见 [`battery_soc`] 注释）。
+    #[test]
+    fn battery_soc_short_read_is_block_failure() {
+        let short = vec![(named_soc_block(), Ok(BlockData::Regs(vec![0u16])))];
+        assert!(matches!(
+            battery_soc(&short),
+            SocOutcome::BlockFailed(ref e) if e.contains("长度不足")
+        ));
+        assert!(matches!(
+            poll_to_result(Role::Battery, &short),
+            PollResult::Failed(_)
+        ));
+    }
+
+    /// SOC 域检查边界（PRD §9.6.3）：闭区间 `[0, 100]` + 有限性。
+    #[test]
+    fn soc_domain_boundaries() {
+        for v in [0.0, 1.0, 50.0, 99.9, 100.0] {
+            assert!(soc_in_domain(v), "{v} 应在域内");
+        }
+        for v in [
+            -0.1,
+            100.1,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1600.0,
+        ] {
+            assert!(!soc_in_domain(v), "{v} 应在域外");
+        }
+    }
+
     /// telemetry_points：**每个值槽 1 点**（PRD §9.4.2.1 第 4 条），metric = `<块名>_<序号>`；
     /// 读失败块整块跳过。单块 6 寄存器 / float32 ⇒ 3 个值槽 ⇒ 序号 1/3/5。
     #[test]
@@ -730,6 +1001,103 @@ mod tests {
         assert_eq!(pkg.battery.soc, None, "N-1：PCS 转述 SOC 不得进控制链");
         assert_eq!(pkg.electrical.voltage, None);
         assert!(pkg.electrical.phase.is_none(), "N-2：phase 真源唯一 = meter_grid");
+    }
+
+    /// 消防块（`addr` 起 `count` 个寄存器，逐点声明并把 `at: 7` 命名为契约点
+    /// `fire_det_count` = 寄存器 10）。**块名故意取 `whatever`**：登记数按**点名**查找，
+    /// 越依赖块名越容易写成设备特判（PRD G-5）。
+    fn fire_count_block(addr: u16, count: u16) -> RegBlockConf {
+        let mut b = blk("whatever");
+        b.addr = addr;
+        b.count = count;
+        b.format = RegFormat::Uint16;
+        b.scale = 1.0;
+        b.points = (1..=count)
+            .map(|k| PointConf {
+                at: k,
+                count: 1,
+                name: (k == 7).then(|| FIRE_DET_COUNT_METRIC.to_string()),
+                format: None,
+                scale: None,
+                offset: None,
+                word_order: WordOrder::HiLo,
+            })
+            .collect();
+        b
+    }
+
+    /// fire 站一次 poll：覆盖寄存器 4..10 的块（`count_reg10` 写进偏移 6 = 寄存器 10）
+    /// + `fire_det` 探测器区（`det_groups` 组 × 6 寄存器）。
+    fn fire_count_reads(count_reg10: u16, det_groups: u16) -> BlockReads {
+        let mut sys = vec![0u16; 7];
+        sys[6] = count_reg10;
+        vec![
+            (fire_count_block(4, 7), Ok(BlockData::Regs(sys))),
+            (
+                rblk("fire_det", 17, 6 * det_groups),
+                Ok(BlockData::Regs(vec![0u16; 6 * det_groups as usize])),
+            ),
+        ]
+    }
+
+    /// **消防登记数交叉校验**（PRD §9.5.4"强制" / §11.4.6）：一致 → `None`；不一致 →
+    /// `Some(读回登记数)`。查找键 = **点名**（块名无关），容量 = `fire_det` 前缀块 count 之和 ÷ 6。
+    #[test]
+    fn fire_detector_count_mismatch_by_point_name() {
+        // 一致：读回 3 == 容量 18/6 = 3
+        assert_eq!(fire_detector_mismatch(Role::Fire, &fire_count_reads(3, 3)), None);
+        // 不一致：读回 5 != 3 ⇒ 返回读回值（事件诊断量）
+        assert_eq!(
+            fire_detector_mismatch(Role::Fire, &fire_count_reads(5, 3)),
+            Some(5.0)
+        );
+        // 非 fire 站无此判据（不臆断）
+        assert_eq!(
+            fire_detector_mismatch(Role::Battery, &fire_count_reads(5, 3)),
+            None
+        );
+        // 无 `fire_det` 前缀块 ⇒ 容量 0；读回 0 ⇒ 一致
+        let no_det: BlockReads = vec![(fire_count_block(4, 7), Ok(BlockData::Regs(vec![0u16; 7])))];
+        assert_eq!(fire_detector_mismatch(Role::Fire, &no_det), None);
+        // 承载登记数的块读失败 ⇒ 无判据可依，不臆断
+        let failed: BlockReads = vec![(fire_count_block(4, 7), Err("io".into()))];
+        assert_eq!(fire_detector_mismatch(Role::Fire, &failed), None);
+    }
+
+    /// **⚠️ 口径冲突的就地登记（T6）**：按 PRD §9.5.4 / §11.4.6 的**原文算式**（只数
+    /// `fire_det` 前缀块），PRD §9.4.1 的参考配置形态（n=20：`fire_det.count = 114`）得到
+    /// 容量 **19**，而寄存器 10 读回 **20** ⇒ **每轮都判不一致**（探测器 1 在 `fire_sys`
+    /// 的 11–16，被该式漏计 —— 与 v1.7 链首订正 §11.4.6 同源）。本用例把该冲突钉成
+    /// **可执行事实**，防"悄悄改一行"：修正须由需求/架构裁定（正确式应为 `1 + Σ/6`）。
+    #[test]
+    fn fire_detector_count_reference_config_form_is_inconsistent() {
+        // n=20：fire_det.count = 114（19 只）+ 探测器 1（在 fire_sys 内）⇒ 实际登记 20 只
+        assert_eq!(
+            fire_detector_mismatch(Role::Fire, &fire_count_reads(20, 19)),
+            Some(20.0),
+            "照录原文算式 ⇒ 参考配置形态恒判不一致（设计/PRD 口径冲突，待裁定）"
+        );
+    }
+
+    /// 钢瓶气压「是否配置」（PRD §9.7.6 / §11.7.3）：取数按**绝对寄存器 5**（块名无关）；
+    /// 从未非 0 ⇒ `false`（展示层标"未配置"）；出现过非 0（或本轮非 0）⇒ `true`。
+    #[test]
+    fn cylinder_pressure_configured_by_absolute_addr() {
+        // 块覆盖寄存器 4..6（`uint16` ⇒ 每寄存器 1 点），偏移 1 = 寄存器 5（钢瓶气压）
+        let with_pressure = |p: u16| -> BlockReads {
+            let mut b = rblk("sys", 4, 3);
+            b.format = RegFormat::Uint16;
+            b.scale = 1.0; // `blk()` 的 scale 缺省是 0.0（既有夹具口径），此处须为 1.0
+            vec![(b, Ok(BlockData::Regs(vec![0, p, 0])))]
+        };
+        assert!(!cylinder_pressure_configured(&with_pressure(0), false), "从未非 0 ⇒ 未配置");
+        assert!(cylinder_pressure_configured(&with_pressure(0), true), "曾非 0 ⇒ 已配置（不回退）");
+        assert!(cylinder_pressure_configured(&with_pressure(123), false), "本轮非 0 ⇒ 已配置");
+        // 无块覆盖寄存器 5 ⇒ 无判据：未配置
+        assert!(!cylinder_pressure_configured(&vec![], false));
+        // 覆盖块读失败 ⇒ 同样视作"本轮未见非 0"（记忆不回退由 scheduler 保证）
+        let failed: BlockReads = vec![(rblk("sys", 4, 3), Err("io".into()))];
+        assert!(!cylinder_pressure_configured(&failed, false));
     }
 
     /// **链首 = 寄存器 11（探测器 1 的地址号，v1.7 §11.4.6 订正）**：探测器 1 也在升序链里
