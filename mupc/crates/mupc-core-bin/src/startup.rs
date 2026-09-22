@@ -317,7 +317,12 @@ impl SouthSink {
     /// - **原始值落证**：offline/online 是纯状态信号（value 恒 1.0，写进文案无信息量，且
     ///   既有 SSE 文案与断言逐字依赖），故这两者保持原文案；其余事件把 `value` 写进文案
     ///   （PRD §9.6.3 ② 要求"越界告警含原始寄存器值"——`soc_out_of_range` 的 value 即越界原值）。
-    fn event_message(station_id: &str, role: mupc_southd::config::Role, metric: &str, value: f64) -> String {
+    fn event_message(
+        station_id: &str,
+        role: mupc_southd::config::Role,
+        metric: &str,
+        value: f64,
+    ) -> String {
         match metric {
             "offline" => format!("站 {station_id} role={role:?} 离线（采集失败）"),
             "online" => format!("站 {station_id} role={role:?} 恢复上线"),
@@ -392,7 +397,11 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 let message = Self::event_message(station_id, role, &metric, value);
                 // online 恢复是状态正常化，用 info 级；offline/其它状态异常才告警级，
                 // 避免站恢复上线时刷屏 warning。
-                let level = if metric == "online" { "info" } else { "warning" };
+                let level = if metric == "online" {
+                    "info"
+                } else {
+                    "warning"
+                };
                 self.record_event(&event_type, station_id, &message, level)
                     .await;
             } else {
@@ -1726,7 +1735,11 @@ plugins: {}
             vec![
                 ("soc_out_of_range".to_string(), 65535.0, true),
                 ("bms_alarm_225".to_string(), 1.0, true),
-                ("fire_detector_addr_order_invalid@recovered".to_string(), 0.0, true),
+                (
+                    "fire_detector_addr_order_invalid@recovered".to_string(),
+                    0.0,
+                    true,
+                ),
             ],
         )
         .await;

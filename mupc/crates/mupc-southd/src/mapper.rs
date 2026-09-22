@@ -820,7 +820,10 @@ mod tests {
     #[test]
     fn battery_soc_four_cases() {
         // ① 底块读成功且含 `soc` 点（域内）→ Value + pkg.battery.soc = Some
-        let ok = vec![(named_soc_block(), Ok(BlockData::Regs(f32_regs(65.5).to_vec())))];
+        let ok = vec![(
+            named_soc_block(),
+            Ok(BlockData::Regs(f32_regs(65.5).to_vec())),
+        )];
         assert_eq!(battery_soc(&ok), SocOutcome::Value(65.5));
         assert_eq!(
             unwrap_data(poll_to_result(Role::Battery, &ok)).battery.soc,
@@ -854,7 +857,9 @@ mod tests {
         // ③ 全站无任何块含 `soc` 点 → NoSuchPoint + Data 空占位（不 Failed）
         assert_eq!(battery_soc(&vec![]), SocOutcome::NoSuchPoint);
         assert_eq!(
-            unwrap_data(poll_to_result(Role::Battery, &vec![])).battery.soc,
+            unwrap_data(poll_to_result(Role::Battery, &vec![]))
+                .battery
+                .soc,
             None
         );
 
@@ -947,7 +952,10 @@ mod tests {
     #[test]
     fn telemetry_points_includes_bit_points() {
         let reads = vec![
-            (dblk("hvac_di", 3), Ok(BlockData::Bits(vec![true, false, true]))),
+            (
+                dblk("hvac_di", 3),
+                Ok(BlockData::Bits(vec![true, false, true])),
+            ),
             sblock("temp", 23.5),
         ];
         let pts = telemetry_points(Role::Hvac, &reads);
@@ -1000,7 +1008,10 @@ mod tests {
         assert_eq!(pkg.device_status.inverter_status, InverterStatus::Running);
         assert_eq!(pkg.battery.soc, None, "N-1：PCS 转述 SOC 不得进控制链");
         assert_eq!(pkg.electrical.voltage, None);
-        assert!(pkg.electrical.phase.is_none(), "N-2：phase 真源唯一 = meter_grid");
+        assert!(
+            pkg.electrical.phase.is_none(),
+            "N-2：phase 真源唯一 = meter_grid"
+        );
     }
 
     /// 消防块（`addr` 起 `count` 个寄存器，逐点声明并把 `at: 7` 命名为契约点
@@ -1045,7 +1056,10 @@ mod tests {
     #[test]
     fn fire_detector_count_mismatch_by_point_name() {
         // 一致：读回 3 == 容量 18/6 = 3
-        assert_eq!(fire_detector_mismatch(Role::Fire, &fire_count_reads(3, 3)), None);
+        assert_eq!(
+            fire_detector_mismatch(Role::Fire, &fire_count_reads(3, 3)),
+            None
+        );
         // 不一致：读回 5 != 3 ⇒ 返回读回值（事件诊断量）
         assert_eq!(
             fire_detector_mismatch(Role::Fire, &fire_count_reads(5, 3)),
@@ -1090,9 +1104,18 @@ mod tests {
             b.scale = 1.0; // `blk()` 的 scale 缺省是 0.0（既有夹具口径），此处须为 1.0
             vec![(b, Ok(BlockData::Regs(vec![0, p, 0])))]
         };
-        assert!(!cylinder_pressure_configured(&with_pressure(0), false), "从未非 0 ⇒ 未配置");
-        assert!(cylinder_pressure_configured(&with_pressure(0), true), "曾非 0 ⇒ 已配置（不回退）");
-        assert!(cylinder_pressure_configured(&with_pressure(123), false), "本轮非 0 ⇒ 已配置");
+        assert!(
+            !cylinder_pressure_configured(&with_pressure(0), false),
+            "从未非 0 ⇒ 未配置"
+        );
+        assert!(
+            cylinder_pressure_configured(&with_pressure(0), true),
+            "曾非 0 ⇒ 已配置（不回退）"
+        );
+        assert!(
+            cylinder_pressure_configured(&with_pressure(123), false),
+            "本轮非 0 ⇒ 已配置"
+        );
         // 无块覆盖寄存器 5 ⇒ 无判据：未配置
         assert!(!cylinder_pressure_configured(&vec![], false));
         // 覆盖块读失败 ⇒ 同样视作"本轮未见非 0"（记忆不回退由 scheduler 保证）
