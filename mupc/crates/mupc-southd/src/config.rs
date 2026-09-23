@@ -8,6 +8,8 @@ use mupc_data_processing::meter_regs::RegFormat;
 use serde::{Deserialize, Serialize};
 
 use crate::points::{self, PointKind, PointSpec};
+// S3b-3（T8）：块级周期分组与「组 → 块集」映射的**唯一实现**在 scheduler（配置期与调度期共用）
+use crate::scheduler::{read_groups_of, ReadGroup};
 
 /// 32 位值的字序 —— **全项目唯一一处定义在 `mupc_data_processing::meter_regs`**
 /// （设计 §11.4.2：它与 `RegDecode` 同居，解码原语与字序参数不可分离）。
@@ -22,9 +24,15 @@ pub const DEFAULT_BAUD_RATE: u32 = 9600;
 /// （`mupc_data_processing::DATA_FRESHNESS_MS`），此处别名引用避免双定义漂移。
 pub const DATA_FRESHNESS_MS: u64 = mupc_data_processing::DATA_FRESHNESS_MS;
 
+/// "最快允许轮询节奏"的**唯一常量**（PRD §10.3.2 **C2**；设计 §12.7 常量段）：
+/// 站级 `pcs` 周期下界（规则 18）与**块级**周期下界（规则 20 的 C2 分支）**共用同一常量**
+/// —— 二者同源同值（项目内"最快允许轮询节奏"的唯一先例），防双定义漂移。
+pub const MIN_POLL_INTERVAL_MS: u64 = 500;
+
 /// `pcs` 站轮询周期下界（PRD §9.3.2.2(2) + §9.8.1 末条；设计 §11.5.1 规则 18）。
 /// `pcs` 无 `< 5000` 上界（不参与控制决策），只有这条下界——防"误配的超短周期打满总线"。
-pub const PCS_MIN_INTERVAL_MS: u64 = 500;
+/// **既有名保留为别名**（设计 §12.7：「**不得删除**：既有单测与文档引用它」）。
+pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
 /// 站级串口校验位（PRD §9.4.1 `parity`；YAML: `none` 缺省 / `even` / `odd`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -128,6 +136,26 @@ pub struct RegBlockConf {
     /// 现场分片豁免标记：`true` 仅豁免"块落地极大性"（规则 15），不豁免其它各条
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_slice: bool,
+    // ── S3b-3 新增（PRD §10.3.1；设计 §12.2.1，**唯一新增字段**）──
+    /// **块级采集周期覆盖**：`Some(v)` = 本块按 v ms 轮询；`None`（**缺省**）= 继承站级
+    /// `interval_ms`。**缺省 ⇒ 既有配置与既有行为零变化**（PRD §10.3.1 定性 1；回归锚
+    /// `no_block_interval_is_bit_identical_to_legacy`）。
+    ///
+    /// 取值由 PRD §10.3.2 的 C1–C5 约束（本 crate 落 [`validate_block_intervals`] 规则 20/21）
+    /// 与 C6/C7（规则 22，按 `R(role)` 判）；`skip_serializing_if` 使**既有 YAML 往返逐字不变**。
+    /// **`None` 与 `Some(站周期)` 在校验语义上等价、在配置意图上不同**——与点级
+    /// `scale`/`offset` 用 `Option<T>` 区分"未声明"与"显式值"是同一取向（设计 §12.2.1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+}
+
+/// 块的有效采集周期 —— **唯一求值点**（校验期与调度期共用同一函数，防"两处各算一次"漂移）。
+///
+/// `None`（缺省）= 继承站级 `interval_ms`；`Some(v)` = 本块显式声明 v ms。
+impl RegBlockConf {
+    pub fn effective_interval_ms(&self, station_interval_ms: u64) -> u64 {
+        self.interval_ms.unwrap_or(station_interval_ms)
+    }
 }
 
 /// 点级换算口径（PRD §9.4.2.4 点级字段表）。
@@ -199,7 +227,12 @@ impl SouthStationsConfig {
     ///    **+ 既有 `meter_grid` 整组校验**（缺相量块 / `count ≥ 6` / `int32_scaled` 显式
     ///    `scale > 0` / **块名唯一** / `addr > 0` / 区间不重叠——**原地不动，不得后移**）；
     /// ② [`validate_station_regs`]（通用规则 4/5/7/8/9/10/11/12/13/14/19，含点展开）；
+    /// **②′** [`validate_block_intervals`]（S3b-3 规则 20–24，按口聚合，**须在②之后、③之前**）；
     /// ③ 跨站（单站约束计数（规则 2/3）、同口一致性（规则 16）、块落地极大性（规则 15））。
+    ///
+    /// **为什么②′必须排在②之后（设计 §12.7 落点表注）**：②（含点展开）先给出**更具体**的文案
+    ///（点位越界/重叠/点名重复等）；若先跑②′的"判据完整性"检查，可能对同一份坏配置先报出
+    /// "`R(role)` 块异周期"这类**次生**结论，破既有回归锚的文案断言。
     ///
     /// **为什么①必须整组先于②**：既有 `meter_grid` 校验对同一份坏配置给出**更具体**的文案
     ///（`块名重复` / `addr 不能为 0` / `寄存器区间重叠` / `count 须 ≥ 6` / `须显式 scale>0`），
@@ -265,6 +298,8 @@ impl SouthStationsConfig {
             // ② 通用站内规则（S3b-2 §11.5.1，含点展开）
             validate_station_regs(s)?;
         }
+        // ②′ 块级采集周期覆盖（S3b-3 §12.7 规则 20–24；**须在②之后、③之前**——见本方法文档）
+        validate_block_intervals(self)?;
         // ③ 跨站：单站约束计数（规则 2/3——pcs 必填点表）
         let mut grid_seen = false;
         let mut battery_seen = false;
@@ -750,9 +785,334 @@ fn merged_max_hole(a: &RegBlockConf, b: &RegBlockConf) -> Result<u16, String> {
     Ok(max_hole)
 }
 
+// ══════════════════════════ S3b-3：块级采集周期覆盖（T8）══════════════════════════
+
+/// 探测器 1 的地址所在寄存器（PRD §9.5.4：寄存器 11 起为探测器 1）。
+/// 与 `mapper::fire_chain_head` 的私有常量 `FIRE_DET1_ADDR_REG` **同源同值**——本轮无公共
+/// 常量可复用（见 T8 报告的"偏离/待办"：宜由后续 Task 收敛为单一真源）。
+const FIRE_CHAIN_HEAD_REG: u16 = 11;
+
+/// 口占用上界（PRD §10.3.2 **C9** / §10.5 第 2 行）：`U_口 ≤ 0.5`（留 ≥2× 余量吸收抖动/重试）。
+const MAX_PORT_UTILIZATION: f64 = 0.5;
+
+/// 组周期相对下界系数（PRD §10.3.2 **C4** / §10.5 第 1 行：`组周期 ≥ 1.5 × T_组`）。
+const GROUP_INTERVAL_HEADROOM: f64 = 1.5;
+
+/// 规则 23/24 的**口内组视图**：`(所属站, 该站的一个读组, 该组的整组耗时 T_组(ms))`。
+/// `T_组` 按设计 §12.6 公式用**该站** `baud_rate` 复算（同口 `baud_rate` 已由既有规则 16 强制一致）。
+type PortGroup<'a> = (&'a StationConf, ReadGroup, f64);
+
+/// `T_组` 估值用的**1 字节耗时**（ms；设计 §12.6 公式的第一项）。
+///
+/// §12.6 写死「1 字节 = `10 / baud_rate` 秒（9600 bps ⇒ **1.04 ms**）」，且设计表内**全部**
+/// 数字（`21.68` / `25.84` / `267.12` / `801.36` / `1202.04`）都按该取值复算 ⇒ 本函数按
+/// **2 位小数**取该系数（规则 20/23/24 的**唯一求值点**）。
+///
+/// **为什么必须取 2 位小数**：若用未取整的 `1.0416667`，AC-8-5 的 C4 一例会算成
+/// `1.5 × T_组 = 1203.94`，与 PRD **AC-8-5**「文案含 `1202`」的机械判据不符。
+fn byte_time_ms(baud_rate: u32) -> f64 {
+    // `baud_rate == 0` 已被 `validate` 的①拒（此处 `.max(1)` 仅为"绝不出 `inf`"的防御）
+    let ms = 10.0 / f64::from(baud_rate.max(1)) * 1000.0;
+    (ms * 100.0).round() / 100.0
+}
+
+/// **单事务耗时**（ms；设计 §12.6）：`T = 帧字节 × 10/baud_rate × 1000 + 4`，
+/// 其中帧字节 = 请求 `8` + 响应 `5 + D`，`D`（数据字节）= **FC02 `ceil(位数/8)`**、
+/// **FC03/FC04 `2 × 寄存器数`**；每事务另加 **4 ms** 从站周转。
+fn tx_time_ms(baud_rate: u32, func: RegFunc, count: u16) -> f64 {
+    let data_bytes = match func {
+        RegFunc::Discrete => u32::from(count).div_ceil(8),
+        RegFunc::Holding | RegFunc::Input => 2 * u32::from(count),
+    };
+    f64::from(8 + 5 + data_bytes) * byte_time_ms(baud_rate) + 4.0
+}
+
+/// 某读组的**整组耗时 `T_组`**（ms）—— 规则 20 与规则 23/24 的**同一口径**
+/// （设计 §12.7「`T_组` 定义写死」注 + §12.10.3 **R-13**）：**逐事务按 §12.6 公式累加**，
+/// **不是单块耗时**（否则多块组会被低估而漏拒）。
+fn group_tx_time_ms(s: &StationConf, g: &ReadGroup) -> f64 {
+    g.blk_indices
+        .iter()
+        .filter_map(|&i| s.regs.get(i))
+        .map(|b| tx_time_ms(s.baud_rate, b.func, b.count))
+        .sum()
+}
+
+/// 块下标 → 其所属读组（`read_groups_of` 的"块 → 组 1:1"不变量保证唯一命中；
+/// 不命中返回 `None`，调用方按"无组"处理，**不 panic**）。
+fn group_of_block(groups: &[ReadGroup], blk: usize) -> Option<&ReadGroup> {
+    groups.iter().find(|g| g.blk_indices.contains(&blk))
+}
+
+/// 组内块名清单（错误文案用；空块集 = `regs` 为空的退化组 ⇒ 标 `<空块集>`）。
+fn group_block_names(s: &StationConf, g: &ReadGroup) -> String {
+    if g.blk_indices.is_empty() {
+        return "<空块集>".into();
+    }
+    g.blk_indices
+        .iter()
+        .filter_map(|&i| s.regs.get(i))
+        .map(|b| b.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 本口全部组的明细（段文案，规则 23/24 共用）。
+fn groups_detail(groups: &[PortGroup]) -> String {
+    groups
+        .iter()
+        .map(|(st, g, t)| {
+            format!(
+                "站 {} 块[{}] T_组={:.2}ms 周期={}ms",
+                st.id,
+                group_block_names(st, g),
+                t,
+                g.interval_ms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
+/// 站级语义判据所需块集合 **`R(role)` 的块下标集**（PRD §10.3.2 的 `R(role)` 定义表）
+/// —— 本 crate 的**唯一定义载体（配置侧）**。
+///
+/// **T9 的 `judges_evaluable`（02 设计 §12.4.5）是同一定义的运行期对偶**（在 `BlockReads`
+/// 上求值），**不得另立第二套定义**。
+///
+/// 逐 role（PRD §10.3.2 原文口径）：
+/// - `meter_grid` = 块名 ∈ `{p, q, pf, u, i, p_total}`（`mapper::poll_to_result` 的 MeterGrid
+///   分支按**块名**取数，缺任一 → `Failed`；`p_total` 供 `scalar_total` 降级求和）；
+/// - `battery` = **承载点名 `soc` 的那一块**（`mapper::battery_soc` 按**点名**查找）；
+/// - `fire` = **覆盖寄存器 11 的寄存器块**（`func != discrete`，与 `mapper::fire_chain_head`
+///   的 `res.regs()?` 同判）∪ **块名前缀 `fire_det` 的块**（两类判据共用这两类输入）；
+/// - `meter_batt` / `hvac` / `pcs` = **∅**（`mapper::poll_to_result` 返回空包，无站级判据）。
+pub(crate) fn criterion_block_indices(s: &StationConf) -> Vec<usize> {
+    match s.role {
+        Role::MeterGrid => s
+            .regs
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b.name.as_str(), "p" | "q" | "pf" | "u" | "i" | "p_total"))
+            .map(|(i, _)| i)
+            .collect(),
+        Role::Battery => s
+            .regs
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| block_carries_point(b, "soc"))
+            .map(|(i, _)| i)
+            .collect(),
+        Role::Fire => s
+            .regs
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| is_fire_criterion_block(b))
+            .map(|(i, _)| i)
+            .collect(),
+        Role::MeterBatt | Role::Hvac | Role::Pcs => Vec::new(),
+    }
+}
+
+/// 块是否承载点名 `metric` 的**标量点**——与 `mapper::soc_point` 的判据（`points::expand` +
+/// `PointKind::Scalar` + 点名相等）**同源**；展开失败（坏块）按"不承载"处理。
+fn block_carries_point(b: &RegBlockConf, metric: &str) -> bool {
+    match points::expand(b) {
+        Ok(pts) => pts
+            .iter()
+            .any(|p| p.metric == metric && matches!(p.kind, PointKind::Scalar { .. })),
+        Err(_) => false,
+    }
+}
+
+/// `fire` 的判据块（PRD §10.3.2）：覆盖**寄存器 11** 的**寄存器块**（`func != discrete`）
+/// ∪ 块名前缀 `fire_det` 的块。
+///
+/// **不得**改写成"块名 == `fire_sys`"（那属设备特判，违反 G-5）；寄存器块的限定与
+/// `mapper::fire_chain_head` 的 `res.regs()?`（位块取不到寄存器 ⇒ 不能当链首）**同判**。
+fn is_fire_criterion_block(b: &RegBlockConf) -> bool {
+    if b.name.starts_with("fire_det") {
+        return true;
+    }
+    b.func != RegFunc::Discrete
+        && b.addr <= FIRE_CHAIN_HEAD_REG
+        && u32::from(b.addr) + u32::from(b.count) > u32::from(FIRE_CHAIN_HEAD_REG)
+}
+
+/// **块级采集周期覆盖的配置期校验**（S3b-3；PRD §10.3.2 的 C1–C9 与 §10.5 第 3 行；设计 §12.7）。
+///
+/// **落点**：`SouthStationsConfig::validate` 的 **②′** —— 在 ②[`validate_station_regs`] 之后、
+/// ③ 跨站之前（见该方法文档的落点图）。**② 的文案更具体，故本函数不得前移**。
+///
+/// **判据顺序（设计 §12.7 的注，S-2 之一的前提）**：按**规则号升序**逐条求值，
+/// **首个失败即 `Err` 返回**；同一规则内部按 `iv == 0` → `iv < MIN_POLL_INTERVAL_MS`
+/// → `iv < 1.5 × T_组` 的顺序。该顺序使 PRD AC-8-5 的"文案含 `1202`"能**机械证明**
+/// 触发者是**规则 20 的 C4 分支**（规则 23 的文案只写 `U` 值与触发的组，**不写** `1.5 × T_组`）。
+///
+/// 规则 ↔ 约束：**20** = C1+C2+C4；**21** = C3+C5；**22** = C6+C7；**23** = C9（口预算）；
+/// **24** = PRD §10.5 第 3 行（单轮最坏耗时，PRD 侧无 C 编号）。
+/// **规则 20/21/22 只判"显式声明了 `interval_ms` 的块"**（`None` ⇒ 继承站周期，其下界/上界
+/// 已由站级既有规则覆盖）；**规则 23/24 对全部组求值**（未声明的块也参与口预算）。
+///
+/// `T_组` 一律 = **该块所在读组**的整组耗时（[`group_tx_time_ms`]），组由 [`read_groups_of`]
+/// （**唯一分组实现**，配置期与调度期共用）给出 ⇒ 同组内各块 `eff` 相同、定义**无循环**。
+pub fn validate_block_intervals(cfg: &SouthStationsConfig) -> Result<(), String> {
+    // ── 规则 20（C1 + C2 + C4）：逐块，仅显式声明者；`iv == 0` → `< 500` → `< 1.5×T_组` ──
+    for s in &cfg.stations {
+        let groups = read_groups_of(s);
+        for (bi, b) in s.regs.iter().enumerate() {
+            let Some(iv) = b.interval_ms else { continue };
+            if iv == 0 {
+                return Err(format!(
+                    "south_stations: 站 {} 块 {} interval_ms=0 须 > 0（PRD §10.3.2 C1 正数）",
+                    s.id, b.name
+                ));
+            }
+            if iv < MIN_POLL_INTERVAL_MS {
+                return Err(format!(
+                    "south_stations: 站 {} 块 {} interval_ms={} 须 ≥ {}ms（PRD §10.3.2 C2 绝对下界，与 pcs 站周期下界同源）",
+                    s.id, b.name, iv, MIN_POLL_INTERVAL_MS
+                ));
+            }
+            // C4：本块**所在读组**的整组耗时（单块组时退化为 T_块）
+            let grp = group_of_block(&groups, bi);
+            let t = grp.map_or(0.0, |g| group_tx_time_ms(s, g));
+            let lower = GROUP_INTERVAL_HEADROOM * t;
+            if (iv as f64) < lower {
+                return Err(format!(
+                    "south_stations: 站 {} 块 {} interval_ms={} 须 ≥ 1.5 × T_组 = {:.2}ms（PRD §10.3.2 C4 相对下界；本块所在读组 [{}] 的单轮耗时 T_组={:.2}ms）",
+                    s.id,
+                    b.name,
+                    iv,
+                    lower,
+                    grp.map_or_else(String::new, |g| group_block_names(s, g)),
+                    t
+                ));
+            }
+        }
+    }
+
+    // ── 规则 21（C3 + C5）：仍只判显式声明者；C3（`% poll_ms`）→ C5（`≤ 站周期`） ──
+    // `poll_ms == 0` 时取 1（与 `scheduler::spawn` 的 `.max(1)` 同款防御；`% 0` 会 panic）
+    let poll_ms = cfg.poll_ms.max(1);
+    for s in &cfg.stations {
+        for b in &s.regs {
+            let Some(iv) = b.interval_ms else { continue };
+            if iv % poll_ms != 0 {
+                return Err(format!(
+                    "south_stations: 站 {} 块 {} interval_ms={} 须为 poll_ms={} 的整数倍（PRD §10.3.2 C3 tick 网格对齐；非整数倍会被网格静默量化、配置名不副实）",
+                    s.id, b.name, iv, cfg.poll_ms
+                ));
+            }
+            if iv > s.interval_ms {
+                return Err(format!(
+                    "south_stations: 站 {} 块 {} interval_ms={} 须 ≤ 站周期 {}ms（PRD §10.3.2 C5 只提速不降速；降速诉求应由站级 interval_ms 表达）",
+                    s.id, b.name, iv, s.interval_ms
+                ));
+            }
+        }
+    }
+
+    // ── 规则 22（C6 + C7）：`R(role)` 的判据块；C6（eff 须全相同）→ C7（eff 须 ≥ 站周期） ──
+    for s in &cfg.stations {
+        let mut effs: Vec<(&RegBlockConf, u64)> = Vec::new();
+        for i in criterion_block_indices(s) {
+            if let Some(b) = s.regs.get(i) {
+                effs.push((b, b.effective_interval_ms(s.interval_ms)));
+            }
+        }
+        // `R(role) = ∅`（meter_batt / hvac / pcs，或判据块尚缺）⇒ 无站级判据，本条不适用
+        let Some(&(b0, e0)) = effs.first() else {
+            continue;
+        };
+        if let Some(&(b1, e1)) = effs.iter().find(|&&(_, e)| e != e0) {
+            return Err(format!(
+                "south_stations: 站 {} role={:?} 的判据块（R(role)）有效周期不一致：{} 的 eff={}ms 与 {} 的 eff={}ms（PRD §10.3.2 C6 判据完整性——站级判据按一次读集求值，拆到不同组会缺块误判）",
+                s.id, s.role, b0.name, e0, b1.name, e1
+            ));
+        }
+        if let Some(&(b, e)) = effs.iter().find(|&&(_, e)| e < s.interval_ms) {
+            return Err(format!(
+                "south_stations: 站 {} role={:?} 的判据块 {} 有效周期 eff={}ms 须 ≥ 站周期 {}ms（PRD §10.3.2 C7 判据块不得提速——会静默改变控制链 cadence）",
+                s.id, s.role, b.name, e, s.interval_ms
+            ));
+        }
+    }
+
+    // ── 规则 23 + 24：按 **port 聚合**（同口全部站的组并起来算；口按首次出现序，同规则 16）──
+    let mut port_groups: Vec<(&str, Vec<PortGroup>)> = Vec::new();
+    for s in &cfg.stations {
+        if port_groups.iter().any(|(p, _)| *p == s.port.as_str()) {
+            continue;
+        }
+        let mut groups: Vec<PortGroup> = Vec::new();
+        for st in cfg.stations.iter().filter(|x| x.port == s.port) {
+            for g in read_groups_of(st) {
+                let t = group_tx_time_ms(st, &g);
+                groups.push((st, g, t));
+            }
+        }
+        port_groups.push((s.port.as_str(), groups));
+    }
+
+    // ── 规则 23（C9）：`U_口 = Σ_组 (T_组 / 组周期) > 0.5` ⇒ `Err`
+    //    文案含 port + U 值 + 触发的组（站 id / 块名 / T / 周期），**不写** `1.5 × T_组`
+    //    （该值只由规则 20 的 C4 分支写 ⇒ "文案含 `1202`" 可机械区分触发者） ──
+    for (port, groups) in &port_groups {
+        // 组周期恒 > 0（显式声明为 0 的块已被规则 20 先拒；站级 `interval_ms > 0` 由①保证）
+        let u: f64 = groups
+            .iter()
+            .map(|(_, g, t)| t / g.interval_ms as f64)
+            .sum();
+        if u > MAX_PORT_UTILIZATION {
+            return Err(format!(
+                "south_stations: port {} 口预算 U_口 = Σ_组(T_组 / 组周期) = {:.4} > {}（PRD §10.3.2 C9 上界；本口各组：{}）",
+                port,
+                u,
+                MAX_PORT_UTILIZATION,
+                groups_detail(groups)
+            ));
+        }
+    }
+
+    // ── 规则 24（PRD §10.5 第 3 行，**PRD 侧无 C 编号**）：单轮最坏耗时
+    //    `Σ T_组 > 1.5 × 最小非零组周期` ⇒ `Err`（同口全部到期组串行；各站用**本站** baud_rate）
+    //    **正当性**：C9 的违规域（`iv < 2×T_组`）真包含 C4 的（`iv < 1.5×T_组`）⇒ C9 **不能**蕴含本条
+    //    （设计 §12.7 的 W-1 构造：`U = 0.447 ≤ 0.5` 但 `Σ T = 2156.6 > 1500`） ──
+    for (port, groups) in &port_groups {
+        let sum_t: f64 = groups.iter().map(|(_, _, t)| t).sum();
+        let mut min_iv: Option<u64> = None;
+        for (_, g, _) in groups {
+            min_iv = Some(min_iv.map_or(g.interval_ms, |m: u64| m.min(g.interval_ms)));
+        }
+        if let Some(mi) = min_iv {
+            let threshold = GROUP_INTERVAL_HEADROOM * mi as f64;
+            if sum_t > threshold {
+                let source = groups
+                    .iter()
+                    .find(|(_, g, _)| g.interval_ms == mi)
+                    .map_or_else(String::new, |(st, g, _)| {
+                        format!("站 {} 块[{}]", st.id, group_block_names(st, g))
+                    });
+                return Err(format!(
+                    "south_stations: port {} 单轮最坏耗时 Σ T_组 = {:.2}ms > 1.5 × 最小非零组周期 = {:.2}ms（最小非零组周期 {}ms 来自 {}；本口各组：{}）",
+                    port,
+                    sum_t,
+                    threshold,
+                    mi,
+                    source,
+                    groups_detail(groups)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn default_poll_ms() -> u64 {
     DEFAULT_POLL_MS
 }
+
 fn default_stale_timeout_s() -> u64 {
     DEFAULT_STALE_TIMEOUT_S
 }
@@ -1335,6 +1695,7 @@ south_stations:
                 })
                 .collect(),
             read_slice: false,
+            interval_ms: None,
         }
     }
 
@@ -1510,5 +1871,425 @@ south_stations:
 "#;
         let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
         assert!(w.south_stations.validate().is_err());
+    }
+
+    // ═════ S3b-3（T8）：块级采集周期覆盖的配置期校验（设计 §12.7 / §12.8 的 4 条用例）═════
+
+    /// 现网 6 站参考配置（PRD §9.4.1 / §10.5 的现网复核输入；CRLF 逐字，故下方 `.replace`
+    /// 的锚串须带 `\r\n`）。
+    const FIELD_6_STATION_YAML: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
+
+    /// 解析 + 段内校验（本组用例的统一入口）。`Wrapper` = 模拟 core_config 的外层嵌入键。
+    fn validated(yaml: &str) -> Result<(), String> {
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+        w.south_stations.validate()
+    }
+
+    /// 单站探针 YAML（`hvac`，`R(role) = ∅` ⇒ **规则 22 不介入**）：一块 FC04（`count: 4`、
+    /// 无 `points` ⇒ 规则 11/19 均不介入），块级周期可选声明（`None` = 不写该行 = 继承站周期）。
+    fn probe_hvac_yaml(station_iv: u64, blk_iv: Option<u64>) -> String {
+        let line = blk_iv.map_or(String::new(), |v| format!("\n          interval_ms: {v}"));
+        format!(
+            "south_stations:\n  poll_ms: 1000\n  stations:\n    - id: probe\n      role: hvac\n      port: /dev/ttyP0\n      slave: 1\n      baud_rate: 9600\n      interval_ms: {station_iv}\n      regs:\n        - name: probe_blk\n          func: input\n          addr: 0\n          count: 4\n          format: int16\n          scale: 0.1{line}\n"
+        )
+    }
+
+    /// **AC-8-5（PRD §10.7）**：非法块级周期逐条拒绝 —— C1（`0`）/ C2（`300`）/
+    /// C3（`1500`，`poll_ms = 1000`）/ C5（`6000 > 站周期`）/ C6（`fire` 的 `R` 内异周期）/
+    /// C7（`battery` 的 `soc` 块提速）/ **C4**（`1.5 × T_组` 相对下界）⇒ **均 `Err`**，
+    /// 各类文案含**站 id + 块名**（+ 实际取值 + 期望下界）。
+    #[test]
+    fn block_interval_constraints_rejected() {
+        // C1 / C2 / C3 / C5：同一探针配置，只改块级周期一个值
+        let check = |blk_iv: u64, station_iv: u64, marker: &str, value: &str| {
+            let err = validated(&probe_hvac_yaml(station_iv, Some(blk_iv))).unwrap_err();
+            assert!(
+                err.contains("probe") && err.contains("probe_blk"),
+                "{marker} 文案须含站 id 与块名，实际: {err}"
+            );
+            assert!(
+                err.contains(value),
+                "{marker} 文案须含实际取值 {value}，实际: {err}"
+            );
+            assert!(err.contains(marker), "{marker} 分支标记缺失，实际: {err}");
+            err
+        };
+        let e1 = check(0, 5000, "C1", "interval_ms=0");
+        assert!(e1.contains("> 0"), "C1 文案须写期望下界，实际: {e1}");
+        let e2 = check(300, 5000, "C2", "interval_ms=300");
+        assert!(e2.contains("500"), "C2 文案须写期望下界 500，实际: {e2}");
+        let e3 = check(1500, 5000, "C3", "interval_ms=1500");
+        assert!(
+            e3.contains("poll_ms=1000"),
+            "C3 文案须写 poll_ms 当前值，实际: {e3}"
+        );
+        let e5 = check(6000, 5000, "C5", "interval_ms=6000");
+        assert!(e5.contains("5000"), "C5 文案须写站周期，实际: {e5}");
+
+        // C6（R(role) 内块异周期）：fire 的 R = {覆盖寄存器 11 的寄存器块 fire_sys}
+        // ∪ {块名前缀 fire_det 的块}；fire_det 声明 1000、fire_sys 继承站周期 5000
+        let c6 = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: fire_probe
+      role: fire
+      port: /dev/ttyP1
+      slave: 1
+      baud_rate: 9600
+      interval_ms: 5000
+      regs:
+        - { name: fire_sys, func: holding, addr: 4, count: 13, format: uint16, scale: 1.0 }
+        - { name: fire_det, func: holding, addr: 17, count: 114, format: uint16, scale: 1.0, interval_ms: 1000 }
+"#;
+        let err = validated(c6).unwrap_err();
+        assert!(
+            err.contains("fire_probe") && err.contains("fire_sys") && err.contains("fire_det"),
+            "C6 文案须含站 id 与冲突的两个块名，实际: {err}"
+        );
+        assert!(
+            err.contains("5000") && err.contains("1000") && err.contains("C6"),
+            "C6 文案须含两个块的取值，实际: {err}"
+        );
+
+        // C7（R(role) 内提速）：battery 的 R = {承载点名 soc 的那一块}；该块声明 1000 < 站周期 2000
+        let c7 = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: bms_probe
+      role: battery
+      port: /dev/ttyP2
+      slave: 1
+      baud_rate: 9600
+      interval_ms: 2000
+      regs:
+        - { name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, interval_ms: 1000, points: [{ at: 1, name: soc }] }
+"#;
+        let err = validated(c7).unwrap_err();
+        assert!(
+            err.contains("bms_probe") && err.contains("bms_io"),
+            "C7 文案须含站 id 与判据块名，实际: {err}"
+        );
+        assert!(
+            err.contains("1000") && err.contains("2000") && err.contains("C7"),
+            "C7 文案须含块的取值与站周期，实际: {err}"
+        );
+
+        // C4（`1.5 × T_组` 相对下界）：独立站（9600、`poll_ms = 1000`、站周期 2000）内
+        // **3 个** FC04 `count: 120` 块**均声明** `interval_ms: 1000`（三块 `eff` 相同 ⇒
+        // **仍为同一读组**，V-1；只声明一块则不触发 C4 —— 该块自成一组、`T_组` 只剩 267.12ms）：
+        // `T_块 = (8 + (5 + 240)) × 1.04 + 4 = 267.12ms` ⇒ `T_组 = 3 × 267.12 = 801.36ms`
+        // ⇒ `1.5 × T_组 = 1202.04ms > 1000` ⇒ **C4 拒**（文案含 `1202`）
+        let c4 = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: c4_probe
+      role: hvac
+      port: /dev/ttyP3
+      slave: 1
+      baud_rate: 9600
+      interval_ms: 2000
+      regs:
+        - { name: c4_blk_1, func: input, addr: 0, count: 120, format: uint16, scale: 1.0, interval_ms: 1000 }
+        - { name: c4_blk_2, func: input, addr: 120, count: 120, format: uint16, scale: 1.0, interval_ms: 1000 }
+        - { name: c4_blk_3, func: input, addr: 240, count: 120, format: uint16, scale: 1.0, interval_ms: 1000 }
+"#;
+        assert_eq!(
+            c4.matches("interval_ms: 1000").count(),
+            3,
+            "C4 的构造要求**三块均声明**（否则该组只剩 1 块、C4 反而通过）"
+        );
+        let err = validated(c4).unwrap_err();
+        assert!(
+            err.contains("c4_probe") && err.contains("c4_blk_1"),
+            "C4 文案须含站 id 与块名，实际: {err}"
+        );
+        assert!(
+            err.contains("1202"),
+            "C4 文案须含 `1.5 × T_组` 的计算值 1202.04，实际: {err}"
+        );
+        // 判据顺序（设计 §12.7 的注）：规则号升序、首个失败即返回 ⇒ 该 `Err` 必来自
+        // **规则 20 的 C4 分支**，而不是规则 23（后者的文案写 `U_口`、**不写** `1.5 × T_组`）
+        assert!(
+            !err.contains("U_口"),
+            "规则 20 须先于规则 23 返回（否则无法机械证明 C4 被求值），实际: {err}"
+        );
+    }
+
+    /// **首例（HVAC 位块快采）配置可通过**（设计 §12.8；PRD §10.3.3 的示例配置逐字）。
+    #[test]
+    fn accepts_first_case_hvac_fast_bit_block() {
+        let yaml = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: hvac
+      role: hvac
+      port: /dev/ttyS3
+      slave: 1
+      baud_rate: 9600
+      parity: even
+      interval_ms: 5000
+      regs:
+        - name: hvac_in
+          func: input
+          addr: 0
+          count: 4
+          format: int16
+          scale: 0.1
+          points:
+            - { at: 1 }
+            - { at: 3 }
+            - { at: 4, format: uint16 }
+        - name: hvac_di
+          func: discrete
+          addr: 0
+          count: 31
+          interval_ms: 1000
+"#;
+        assert_eq!(
+            validated(yaml),
+            Ok(()),
+            "首例 YAML 须通过（含 S3b-3 新增的规则 20–24）"
+        );
+    }
+
+    /// **AC-8-6（PRD §10.7）**：口预算与单轮最坏耗时可复算 ——
+    /// ① 现网 6 站（含改造后的 hvac）⇒ `Ok`（**零新增拒绝**）；
+    /// ② 构造 `U_口 > 0.5` ⇒ `Err`（规则 23）；
+    /// ③ **规则 24 的正反两例**：通过例 = hvac 首例（`Σ T_组 = 47.52ms ≤ 1500ms`）；
+    ///    拒绝例 = 设计 §12.7 的 W-1 构造（同口两组，`U = 0.447 ≤ 0.5` **但**
+    ///    `Σ T_组 = 2156.56ms > 1500ms`）⇒ 必须 `Err`。
+    /// **该例在只有规则 23 时必然 `Ok`** ⇒ 是本条存在的**判别锚**（规则 24 ≠ C9 的推论）。
+    #[test]
+    fn bus_budget_accepts_field_config_and_rejects_overload() {
+        // ①-a 现网 6 站（fixture 逐字；hvac 尚未含 S3b-3 的新增行）
+        assert_eq!(
+            validated(FIELD_6_STATION_YAML),
+            Ok(()),
+            "现网 6 站不得被规则 20–24 新增拒绝"
+        );
+        // ①-b 改造后的 hvac（`hvac_di` 加 `interval_ms: 1000`；§12.6 的迁移行）⇒ 仍 `Ok`
+        let fast = FIELD_6_STATION_YAML.replace(
+            "          func: discrete\r\n          addr: 0\r\n          count: 31\r\n",
+            "          func: discrete\r\n          addr: 0\r\n          count: 31\r\n          interval_ms: 1000   # S3b-3 首例（测试注入）\r\n",
+        );
+        assert_eq!(
+            fast.matches("S3b-3 首例（测试注入）").count(),
+            1,
+            "注入须恰好命中 hvac_di 一处（锚串失配即本用例失效）"
+        );
+        assert_eq!(
+            validated(&fast),
+            Ok(()),
+            "改造后的现网 6 站（hvac 位块 1000ms）不得被规则 20–24 拒"
+        );
+
+        // ② `U_口 > 0.5`：组周期夹到 ≈`T_组`（两个 FC04 count 120 块声明 1000 同组）
+        let overload = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: overload
+      role: hvac
+      port: /dev/ttyP9
+      slave: 1
+      baud_rate: 9600
+      interval_ms: 2000
+      regs:
+        - { name: ov_1, func: input, addr: 0, count: 120, format: uint16, scale: 1.0, interval_ms: 1000 }
+        - { name: ov_2, func: input, addr: 120, count: 120, format: uint16, scale: 1.0, interval_ms: 1000 }
+        - { name: ov_3, func: input, addr: 240, count: 120, format: uint16, scale: 1.0 }
+"#;
+        let err = validated(overload).unwrap_err();
+        assert!(
+            err.contains("U_口"),
+            "② 须由规则 23（C9 口预算）拒，实际: {err}"
+        );
+        assert!(
+            err.contains("/dev/ttyP9") && err.contains("overload") && err.contains("ov_1"),
+            "规则 23 文案须含 port + 触发的组（站 id / 块名），实际: {err}"
+        );
+        // 复算（与实现同一纯函数）：`U = 534.24/1000 + 267.12/2000 = 0.6678 > 0.5`
+        {
+            let w: Wrapper = serde_yaml::from_str(overload).expect("解析失败");
+            let s = &w.south_stations.stations[0];
+            let gs = read_groups_of(s);
+            let u: f64 = gs
+                .iter()
+                .map(|g| group_tx_time_ms(s, g) / g.interval_ms as f64)
+                .sum();
+            assert!(
+                u > MAX_PORT_UTILIZATION,
+                "U={u} 须 > 0.5（本用例的构造前提）"
+            );
+        }
+
+        // ③-通过例：hvac 首例（`Σ T_组 = 21.68 + 25.84 = 47.52ms ≤ 1.5 × 1000 = 1500ms`）
+        let first_case = probe_free_hvac_first_case();
+        assert_eq!(
+            validated(&first_case),
+            Ok(()),
+            "规则 24 通过例：首例 Σ T_组 = 47.52ms ≤ 1500ms"
+        );
+        {
+            let w: Wrapper = serde_yaml::from_str(&first_case).expect("解析失败");
+            let s = &w.south_stations.stations[0];
+            let gs = read_groups_of(s);
+            assert_eq!(gs.len(), 2, "首例 = 快组（1000）+ 站周期组（5000）");
+            let sum: f64 = gs.iter().map(|g| group_tx_time_ms(s, g)).sum();
+            assert!(
+                (sum - 47.52).abs() < 1e-9,
+                "Σ T_组 须 = 47.52ms（21.68 + 25.84），实际 {sum}"
+            );
+            assert!(sum <= 1.5 * 1000.0);
+        }
+
+        // ③-拒绝例：同口两组 —— 组 A（周期 1000、`T_组 = 19.6ms`）+ 组 B（周期 5000、
+        // `T_组 = 8 × 267.12 = 2136.96ms`）⇒ `Σ T_组 = 2156.56ms > 1.5 × 1000 = 1500ms` ⇒ `Err`
+        let rule24 = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: rule24_fast
+      role: hvac
+      port: /dev/ttyP8
+      slave: 1
+      baud_rate: 9600
+      interval_ms: 1000
+      regs:
+        - { name: f1, func: input, addr: 0, count: 1, format: uint16, scale: 1.0, interval_ms: 1000 }
+    - id: rule24_slow
+      role: hvac
+      port: /dev/ttyP8
+      slave: 2
+      baud_rate: 9600
+      interval_ms: 5000
+      regs:
+        - { name: s1, func: input, addr: 0, count: 120, format: uint16, scale: 1.0 }
+        - { name: s2, func: input, addr: 120, count: 120, format: uint16, scale: 1.0 }
+        - { name: s3, func: input, addr: 240, count: 120, format: uint16, scale: 1.0 }
+        - { name: s4, func: input, addr: 360, count: 120, format: uint16, scale: 1.0 }
+        - { name: s5, func: input, addr: 480, count: 120, format: uint16, scale: 1.0 }
+        - { name: s6, func: input, addr: 600, count: 120, format: uint16, scale: 1.0 }
+        - { name: s7, func: input, addr: 720, count: 120, format: uint16, scale: 1.0 }
+        - { name: s8, func: input, addr: 840, count: 120, format: uint16, scale: 1.0 }
+"#;
+        // 先机械复算两个口径（与实现同一纯函数）：`U = 0.446992 ≤ 0.5` **但** `Σ T > 1500`
+        {
+            let w: Wrapper = serde_yaml::from_str(rule24).expect("解析失败");
+            let (sa, sb) = (&w.south_stations.stations[0], &w.south_stations.stations[1]);
+            let ga = read_groups_of(sa);
+            let gb = read_groups_of(sb);
+            assert_eq!((ga.len(), gb.len()), (1, 1), "本例每站单组");
+            let ta = group_tx_time_ms(sa, &ga[0]);
+            let tb = group_tx_time_ms(sb, &gb[0]);
+            assert!((ta - 19.6).abs() < 1e-9, "T_组(A) 须 = 19.6ms，实际 {ta}");
+            assert!(
+                (tb - 2136.96).abs() < 1e-9,
+                "T_组(B) 须 = 8 × 267.12 = 2136.96ms，实际 {tb}"
+            );
+            let u = ta / 1000.0 + tb / 5000.0;
+            assert!(
+                u <= MAX_PORT_UTILIZATION,
+                "U = {u} 须 ≤ 0.5 —— 这证明规则 24 不是规则 23（C9）的推论"
+            );
+            assert!(
+                ta + tb > 1.5 * 1000.0,
+                "Σ T_组 = {} 须 > 1.5 × 最小非零组周期 = 1500ms",
+                ta + tb
+            );
+        }
+        let err = validated(rule24).unwrap_err();
+        assert!(
+            err.contains("Σ T_组") && err.contains("最小非零组周期"),
+            "③ 须由规则 24 拒，实际: {err}"
+        );
+        assert!(
+            !err.contains("U_口"),
+            "规则 24 须独立于规则 23（U ≤ 0.5 仍拒），实际: {err}"
+        );
+        assert!(
+            err.contains("/dev/ttyP8") && err.contains("2156") && err.contains("1500"),
+            "规则 24 文案须含 port + 实测 Σ T_组 + 阈值，实际: {err}"
+        );
+        assert!(
+            err.contains("最小非零组周期 1000ms") && err.contains("rule24_fast"),
+            "规则 24 文案须给出最小周期的取值与来源组，实际: {err}"
+        );
+    }
+
+    /// 首例配置（`accepts_first_case_hvac_fast_bit_block` 的同一份 YAML；本处供 `bus_budget_*`
+    /// 的规则 24 通过例做**数值复算**用）。
+    fn probe_free_hvac_first_case() -> String {
+        r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: hvac
+      role: hvac
+      port: /dev/ttyS3
+      slave: 1
+      baud_rate: 9600
+      parity: even
+      interval_ms: 5000
+      regs:
+        - name: hvac_in
+          func: input
+          addr: 0
+          count: 4
+          format: int16
+          scale: 0.1
+          points:
+            - { at: 1 }
+            - { at: 3 }
+            - { at: 4, format: uint16 }
+        - name: hvac_di
+          func: discrete
+          addr: 0
+          count: 31
+          interval_ms: 1000
+"#
+        .to_string()
+    }
+
+    /// **兼容性承诺（设计 §12.2.1）**：既有 YAML（无该字段）⇒ `None`；
+    /// `serde_yaml::to_string` 往返**不出现**块级 `interval_ms` 键（`skip_serializing_if`）。
+    #[test]
+    fn block_interval_serde_roundtrip_is_unchanged_when_absent() {
+        let w: Wrapper = serde_yaml::from_str(VALID_5_STATION_YAML).expect("解析失败");
+        let cfg = w.south_stations;
+        assert!(
+            cfg.stations
+                .iter()
+                .flat_map(|s| s.regs.iter())
+                .all(|b| b.interval_ms.is_none()),
+            "既有 YAML 未声明该字段 ⇒ 全部块须解析为 None（缺省 = 继承站周期）"
+        );
+        // 块级键不落盘：单看块列表（站级 `interval_ms` 是既有字段、恒被序列化，
+        // 故不能对整段用 `!contains` —— 那会把站级键误判为块级键）
+        let blocks = serde_yaml::to_string(&cfg.stations[0].regs).expect("序列化失败");
+        assert!(
+            !blocks.contains("interval_ms"),
+            "skip_serializing_if 须使 None 不落盘，实际: {blocks}"
+        );
+        // 整段往返：`interval_ms` 出现次数 == 站数（每站恰一处**站级**键），块级一处也不多
+        let whole = serde_yaml::to_string(&cfg).expect("序列化失败");
+        assert_eq!(
+            whole.matches("interval_ms").count(),
+            cfg.stations.len(),
+            "整段往返不得新增块级 interval_ms 键，实际: {whole}"
+        );
+        // `whole` 是**段内**结构（`SouthStationsConfig`）的序列化，**不含**外层
+        // `south_stations:` 嵌入键 ⇒ 回读须用同一层类型（用 `Wrapper` 会因缺键而失败）
+        let cfg2: SouthStationsConfig = serde_yaml::from_str(&whole).expect("往返解析失败");
+        assert_eq!(cfg2.stations.len(), cfg.stations.len());
+        assert!(cfg2
+            .stations
+            .iter()
+            .flat_map(|s| s.regs.iter())
+            .all(|b| b.interval_ms.is_none()));
     }
 }

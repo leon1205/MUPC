@@ -609,6 +609,7 @@ mod tests {
             byte_swap: false,
             points: Vec::new(),
             read_slice: false,
+            interval_ms: None,
         }
     }
 
@@ -675,6 +676,7 @@ mod tests {
                 word_order: WordOrder::HiLo,
             }],
             read_slice: false,
+            interval_ms: None,
         }
     }
 

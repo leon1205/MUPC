@@ -103,6 +103,90 @@ fn role_priority(r: Role) -> u8 {
     }
 }
 
+// ═══════════ S3b-3（T8）：块级采集周期的分组纯函数与内部结构（§12.2.2 / §12.4.1）═══════════
+//
+// 本节的 5 个定义（`EMPTY_GROUP_ANCHOR` / `ReadGroup` / `GroupKey` / [`read_groups_of`] /
+// [`carrier_group`]）是 S3b-3 的**分组契约**：配置期校验（`config.rs::validate_block_intervals`
+// 的规则 20/23/24）与调度期构造（T9 的 `DueCalc::from_group`）**共用同一实现**，防两处漂移。
+// **T8 只新增**（既有调度流程——`DueCalc` / `PortRunner` / `run_port_round` / `poll_station` /
+// `round_signals` / `EdgeTracker`——**一字未动**）；`GroupPoll` 与 `DueEntry` 的改造属 T9。
+
+/// 空块集（`regs` 为空）退化组的**哨兵锚**。取 `usize::MAX`：任何真实块下标（`< regs.len()`）
+/// 都不可能与之相等 ⇒ 「锚 → 组」仍是**单射**，`(station_index, anchor_blk)` 仍可作稳定
+/// `HashMap` 键（设计 §12.4.1 的注；§12.10.1 第 7 项）。
+pub const EMPTY_GROUP_ANCHOR: usize = usize::MAX;
+
+/// 站内一个「读组」：**有效周期相同**的块合为一组；一组一次轮询读齐组内全部块。
+///
+/// 字段对 T9 与配置期校验均可见（`pub`；设计 §12.2.2 的字段定义，仅可见性放宽、语义不变）。
+#[derive(Debug, Clone)]
+pub struct ReadGroup {
+    /// 组内块在 `StationConf::regs` 中的下标（**升序 = regs 书写序**）
+    pub blk_indices: Vec<usize>,
+    /// 组周期 = 组内块的有效周期（构造期由 [`read_groups_of`] 保证同组同值）
+    pub interval_ms: u64,
+    /// 组锚 = `blk_indices[0]`（块 → 组是 1:1，故锚**唯一**，可直接作稳定键）；
+    /// **空块集（`regs` 为空的退化组）取哨兵 [`EMPTY_GROUP_ANCHOR`]**
+    /// —— 无真实块下标可与之相等，故锚仍**单射**（§12.4.1）。
+    pub anchor_blk: usize,
+}
+
+/// 组键：`(站下标, 组锚块下标)` —— 稳定、与 cfg 序绑定、可作 `HashMap` 键（`Hash + Eq`）。
+///
+/// T9 用它替换 `PortRunner.trackers` 的 `usize`（站）键（§12.4.4：不改则组间互相清空基线）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupKey {
+    pub station_index: usize,
+    pub anchor_blk: usize,
+}
+
+/// 站 → 读组划分。**唯一分组实现**（配置期校验与调度期构造都调它，防两处漂移）。
+/// 返回按**组周期升序**（`BTreeMap` 序）。
+///
+/// **不变量：对任何 `StationConf`（含 `regs` 为空）至少返回一个组。**
+/// - 有块且无块声明 `interval_ms` ⇒ 唯一桶（= 全部块、周期 = 站周期）—— V-5(a)；
+/// - **`regs` 为空 ⇒ 一个退化组**（空块集、周期 = 站周期、锚 = [`EMPTY_GROUP_ANCHOR`]）—— V-5(b)。
+///   **不得**返回 0 个组：那会使该站**永不进入 `DueCalc`**（= 被静默移出调度），与既有
+///   "空 `regs` 站照常被轮询、读集为空、成功/失败记账照旧"的行为不符 —— 既有单测
+///   `battery_station_without_soc_block_does_not_push` 内联构造 `regs: vec![]` 直接
+///   `tick_once`、**不经 `validate`** ⇒ 该输入**可达**（设计 §12.4.1 / §12.10.3 R-12）。
+pub fn read_groups_of(c: &StationConf) -> Vec<ReadGroup> {
+    let mut by_period: std::collections::BTreeMap<u64, Vec<usize>> = Default::default();
+    for (i, b) in c.regs.iter().enumerate() {
+        by_period
+            .entry(b.effective_interval_ms(c.interval_ms))
+            .or_default()
+            .push(i);
+    }
+    if by_period.is_empty() {
+        by_period.insert(c.interval_ms, Vec::new()); // 退化组：空块集、周期 = 站周期
+    }
+    by_period
+        .into_iter()
+        .map(|(interval_ms, blk_indices)| ReadGroup {
+            // 键：块 → 组 1:1 ⇒ 锚唯一；空块集取哨兵（**不索引 `blk_indices[0]`**）
+            anchor_blk: blk_indices.first().copied().unwrap_or(EMPTY_GROUP_ANCHOR),
+            blk_indices,
+            interval_ms,
+        })
+        .collect()
+}
+
+/// 站级承载组（PRD §10.3.2 **C8**）：**周期最大**的组；并列取 `anchor_blk` 最小者。
+/// 语义：`offline`/`online` 状态事件、`offline_count` 与站级退避都由它承载
+/// ⇒ **站离线判定时延与现状一致**（不被快组影响）。
+///
+/// **返回 `Option<ReadGroup>`（设计 §12.4.1 的 S-1 注：绝不在该可达输入上 panic）**：
+/// [`read_groups_of`] 的"至少一组"不变量保证实际恒 `Some`（含空 `regs` 站的退化组），
+/// 但**即便如此也不得用 `expect`/`unwrap`** —— 空 `regs` 是**可达输入**（配置期只对
+/// `Role::Pcs` 拒空；调度器单测直接内联构造），一旦将来 `read_groups_of` 的不变量被改坏，
+/// `expect` 会把"配置错误"变成"进程 panic"。
+pub fn carrier_group(c: &StationConf) -> Option<ReadGroup> {
+    read_groups_of(c)
+        .into_iter()
+        .max_by_key(|g| (g.interval_ms, std::cmp::Reverse(g.anchor_blk)))
+}
+
 /// 到期计算条目（纯逻辑）。
 struct DueEntry {
     /// state Vec 全局下标
@@ -791,6 +875,7 @@ mod tests {
             byte_swap: false,
             points: Vec::new(),
             read_slice: false,
+            interval_ms: None,
         }
     }
 
@@ -858,6 +943,7 @@ mod tests {
                     word_order: WordOrder::HiLo,
                 }],
                 read_slice: false,
+                interval_ms: None,
             }],
         }
     }
@@ -894,6 +980,7 @@ mod tests {
                     word_order: WordOrder::HiLo,
                 }],
                 read_slice: false,
+                interval_ms: None,
             }],
         }
     }
@@ -911,6 +998,7 @@ mod tests {
             byte_swap: false,
             points: Vec::new(),
             read_slice: false,
+            interval_ms: None,
         }
     }
 
@@ -1230,6 +1318,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
                 RegBlockConf {
                     name: "alarm_in".into(),
@@ -1242,6 +1331,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
             ],
         };
@@ -1287,6 +1377,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
                 RegBlockConf {
                     name: "alarm_in".into(),
@@ -1299,6 +1390,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
                 RegBlockConf {
                     name: "temp2".into(),
@@ -1311,6 +1403,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
             ],
         };
@@ -1359,6 +1452,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
                 RegBlockConf {
                     name: "status_in".into(),
@@ -1371,6 +1465,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
             ],
         };
@@ -1769,6 +1864,7 @@ mod tests {
                     byte_swap: false,
                     points: pts,
                     read_slice: false,
+                    interval_ms: None,
                 },
                 RegBlockConf {
                     name: "fire_det".into(),
@@ -1781,6 +1877,7 @@ mod tests {
                     byte_swap: false,
                     points: Vec::new(),
                     read_slice: false,
+                    interval_ms: None,
                 },
             ],
         }
@@ -2708,5 +2805,100 @@ mod tests {
         let mut buses: HashMap<String, Arc<dyn StationBus>> = HashMap::new();
         buses.insert(stations[0].port.clone(), bus as Arc<dyn StationBus>);
         SouthScheduler::new(cfg(stations, stale_timeout_s), buses, sink)
+    }
+
+    // ══════ S3b-3（T8）：分组纯函数的不变量（设计 §12.4.1 / §12.3 的 V-5）══════
+
+    /// `read_groups_of` / `carrier_group` 的**直接单测**（不依赖调度流程）：
+    /// ① 无声明 ⇒ 唯一组（周期 = 站周期、全部块、锚 = 0）；
+    /// ② 快慢两块 ⇒ 两组、按**周期升序**、锚正确、承载组 = 周期最大者（C8）；
+    /// ③ **空 `regs`** ⇒ 恰好 1 组、空块集、锚 = [`EMPTY_GROUP_ANCHOR`]、周期 = 站周期；
+    /// ④ 空 `regs` 时 `carrier_group` 返回 `Some` 且就是那唯一组（**不得 panic**）。
+    #[test]
+    fn read_groups_of_invariants() {
+        // ① 全部块未声明 `interval_ms` ⇒ 唯一桶（V-5(a)；单组站 ⇒ 零行为变化的依据）
+        let c = grid_conf("grid_meter", "ttyS4", 3, 1000);
+        let gs = read_groups_of(&c);
+        assert_eq!(gs.len(), 1, "无声明 ⇒ 唯一组");
+        assert_eq!(gs[0].interval_ms, 1000);
+        assert_eq!(
+            gs[0].blk_indices,
+            vec![0, 1, 2, 3, 4, 5],
+            "组内块 = 全部块（书写序）"
+        );
+        assert_eq!(gs[0].anchor_blk, 0, "锚 = blk_indices[0] = 0");
+        let cg = carrier_group(&c).expect("至少一组");
+        assert_eq!((cg.interval_ms, cg.anchor_blk), (1000, 0));
+
+        // ② 快慢两块 ⇒ 两组（周期升序）、锚 = 各组首块；承载组 = 周期最大者（PRD §10.3.2 C8）
+        let mut c = hvac_conf("hvac", "ttyS3", 1, 5000);
+        c.regs.push(dblk("hvac_di", 0, 31));
+        assert!(
+            c.regs[0].interval_ms.is_none(),
+            "hvac_in 不声明 ⇒ 继承站周期"
+        );
+        c.regs[1].interval_ms = Some(1000);
+        let gs = read_groups_of(&c);
+        assert_eq!(gs.len(), 2);
+        assert_eq!(
+            (
+                gs[0].interval_ms,
+                gs[0].blk_indices.clone(),
+                gs[0].anchor_blk
+            ),
+            (1000, vec![1], 1),
+            "快组（锚 = 块下标 1）"
+        );
+        assert_eq!(
+            (
+                gs[1].interval_ms,
+                gs[1].blk_indices.clone(),
+                gs[1].anchor_blk
+            ),
+            (5000, vec![0], 0),
+            "站周期组（锚 = 块下标 0）"
+        );
+        let cg = carrier_group(&c).expect("至少一组");
+        assert_eq!(
+            (cg.interval_ms, cg.anchor_blk),
+            (5000, 0),
+            "承载组 = 周期最大的组（快组不承载站级语义）"
+        );
+
+        // ③ 空 `regs` ⇒ 恰好 1 个**退化组**（空块集、哨兵锚、周期 = 站周期）—— V-5(b)。
+        //    该输入**可达**（既有 `battery_station_without_soc_block_does_not_push` 内联构造
+        //    空 `regs` 站、不经 `validate`）⇒ 不得返回 0 组、不得 panic。
+        let mut c = hvac_conf("empty", "ttyS9", 1, 3000);
+        c.regs = Vec::new();
+        let gs = read_groups_of(&c);
+        assert_eq!(gs.len(), 1, "空 regs 站须仍产 1 个组（否则被静默移出调度）");
+        assert!(gs[0].blk_indices.is_empty());
+        assert_eq!(gs[0].anchor_blk, EMPTY_GROUP_ANCHOR);
+        assert_eq!(gs[0].interval_ms, 3000, "退化组周期 = 站周期");
+
+        // ④ 空 `regs` 时 `carrier_group` 返回 `Some`（不 panic；设计 §12.4.1 的 S-1 注）
+        let cg = carrier_group(&c).expect("空 regs 站也必有 1 组（退化组）");
+        assert_eq!(
+            (cg.interval_ms, cg.anchor_blk, cg.blk_indices.len()),
+            (3000, EMPTY_GROUP_ANCHOR, 0)
+        );
+
+        // 组键（T9 的 `HashMap` 键）须可对退化组使用：哨兵锚仍是**单射**的合法键
+        let mut keys: HashMap<GroupKey, usize> = HashMap::new();
+        keys.insert(
+            GroupKey {
+                station_index: 0,
+                anchor_blk: cg.anchor_blk,
+            },
+            1,
+        );
+        assert!(keys.contains_key(&GroupKey {
+            station_index: 0,
+            anchor_blk: EMPTY_GROUP_ANCHOR,
+        }));
+        assert!(!keys.contains_key(&GroupKey {
+            station_index: 1,
+            anchor_blk: EMPTY_GROUP_ANCHOR,
+        }));
     }
 }
