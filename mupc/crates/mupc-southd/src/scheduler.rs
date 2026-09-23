@@ -80,19 +80,8 @@ pub trait StationSink: Send + Sync {
     }
 }
 
-/// 本轮应采的一站。`station_index` = 调度 state Vec 全局下标。
-///
-/// **S3b-3（T9）起生产路径一律用 [`GroupPoll`]**（调度粒度由"站"细化为"读组"，§12.2.2）。
-/// 本类型**保留**只为一件事：既有纯逻辑单测 `due_calc_respects_intervals_and_priority` 的
-/// 期望值字面量（`vec![StationPoll { .. }]`）必须**一字不改**（T9 的零回归门禁）—— 故保留本
-/// 类型并为其实现跨类型等值比较（见 [`GroupPoll`] 的 `PartialEq<StationPoll>`），
-/// **不得**据此认为"本轮应采的粒度仍是站"。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StationPoll {
-    pub station_index: usize,
-}
-
-/// 本轮应采的**一个读组**（替代既有的 [`StationPoll`]；设计 §12.2.2）。
+/// 本轮应采的**一个读组**（替代本模块此前**按站粒度**的那套类型 —— 本轮已整体删除，含其
+/// 跨类型等值实现；设计 §12.2.2：`GroupPoll` **替代**站级 `Poll`，**不保留兼容类型**）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupPoll {
     /// state Vec 全局下标（站）
@@ -103,17 +92,6 @@ pub struct GroupPoll {
     pub is_carrier: bool,
     /// 该组**上一轮是否失败**（决定本轮成功后是否重建变化沿基线；§12.5）
     pub was_failing: bool,
-}
-
-/// 跨类型等值：**只比 `station_index`**。
-///
-/// 存在的唯一理由：既有纯逻辑用例的期望值字面量是 `Vec<StationPoll>`，而 `due_round` 现在返回
-/// `Vec<GroupPoll>` —— 该用例的断言必须一字不改（T9 零回归门禁），故提供本跨型比较。
-/// 单组站（含空 `regs` 站）每站恰 1 条目 ⇒ "站"与"该站的唯一组"退化等同，比较语义成立。
-impl PartialEq<StationPoll> for GroupPoll {
-    fn eq(&self, other: &StationPoll) -> bool {
-        self.station_index == other.station_index
-    }
 }
 
 /// M-11 退避封顶：extra = interval << min(offline_count-1, MAX_BACKOFF_SHIFT)。
@@ -625,11 +603,12 @@ fn fire_head_present(reads: &BlockReads) -> bool {
 /// 站级量事件；本组的位/标量遥测**照常产出**），**不是**"丢弃本组数据"。
 fn judges_evaluable(role: Role, reads: &BlockReads) -> bool {
     match role {
-        // p/q/pf/u/i 齐备（`poll_to_result` 的 MeterGrid 分支的**硬要求**，缺任一 → `Failed`）。
-        // ⚠️ `p_total` 只在配置侧 R 内（供 `scalar_total` 降级求和）、**不在**本守卫的硬要求内
-        // —— 该不对称**不可达**（MeterGrid 不进遥测/事件路径，本守卫对其恒不被调用），
-        // 由 `runtime_guard_and_config_criterion_agree` 逐条钉住，登记为待裁定。
-        Role::MeterGrid => ["p", "q", "pf", "u", "i"]
+        // `p/q/pf/u/i/p_total` 齐备 —— **与配置侧 `criterion_block_indices` 逐字同集**
+        // （PRD §10.3.2 的 `R(role)` 定义表是**唯一权威口径**且含 `p_total`，其注写明
+        // "`p_total` 供 `scalar_total` 降级求和"）。缺 `p_total` 时 `poll_to_result` 只**降级**
+        // （不 `Failed`），但本守卫判的是"判据块是否齐备"而非"是否 `Failed`" ⇒ 两侧必须同集，
+        // 不得各留一套口径（由 `runtime_guard_and_config_criterion_agree` 钉住）。
+        Role::MeterGrid => ["p", "q", "pf", "u", "i", "p_total"]
             .iter()
             .all(|n| reads.iter().any(|(b, r)| b.name == *n && r.is_ok())),
         // `soc` 点所在块在组内且读成功 —— **复用 `mapper::battery_soc` 的四情形**，不另造判据
@@ -932,7 +911,19 @@ impl SouthScheduler {
                 // 两条硬理由：① 站被判 offline ⇒ 12 号 F25.4 令该站**全部**点显示"站离线"，
                 // 会把**刚刚成功采到并上送的快采告警位**一并遮蔽；② `mark_success` 会重置
                 // offline 去抖窗口 ⇒ 快/慢组交替成败时每轮"online+offline"对刷屏（≈3.5 万条/日）。
-                tracing::warn!(station = %station_id, ?role, group = poll.anchor_blk, reason,
+                // 字段按 §12.5 的语义表给全（`station/role/块名/reason`）——块名由**组锚 + 组内
+                // 块下标**（`group_of` 表，见上方 `blk_indices` 的取法）查 `cfg` 得；空 `regs` 站
+                // 的退化组无块可列 ⇒ 记 `<空块集>`（不省略字段，防水位却缺块的日志失真）。
+                let blocks: String = if blk_indices.is_empty() {
+                    "<空块集>".to_string()
+                } else {
+                    blk_indices
+                        .iter()
+                        .map(|&bi| self.cfg.stations[si].regs[bi].name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                tracing::warn!(station = %station_id, ?role, anchor_blk = poll.anchor_blk, blocks = %blocks, reason,
                     "southd 块组采集失败（组级退避；不升级为站级 offline）");
             }
             return false;
@@ -2997,16 +2988,50 @@ mod tests {
         // 首轮两站都到期（next_due=0 启动即采），grid(prio0) 在 hvac(prio2) 前
         assert_eq!(
             calc.due_round(0),
-            vec![StationPoll { station_index: 0 }, StationPoll { station_index: 1 }]
+            vec![
+                GroupPoll {
+                    station_index: 0,
+                    anchor_blk: 0,
+                    is_carrier: true,
+                    was_failing: false,
+                },
+                GroupPoll {
+                    station_index: 1,
+                    anchor_blk: 0,
+                    is_carrier: true,
+                    was_failing: false,
+                },
+            ]
         );
         // 同一 now 二次调用不再返回（已推进 next_due）
         assert!(calc.due_round(0).is_empty());
         // now=1000：仅 grid 到期（hvac next_due 已推进到 5000）
-        assert_eq!(calc.due_round(1000), vec![StationPoll { station_index: 0 }]);
+        assert_eq!(
+            calc.due_round(1000),
+            vec![GroupPoll {
+                station_index: 0,
+                anchor_blk: 0,
+                is_carrier: true,
+                was_failing: false,
+            }]
+        );
         // now=5000：grid（1000 到期后 1000+1000=2000→5000 已落后一轮，钳到 6000）与 hvac 都到期
         assert_eq!(
             calc.due_round(5000),
-            vec![StationPoll { station_index: 0 }, StationPoll { station_index: 1 }]
+            vec![
+                GroupPoll {
+                    station_index: 0,
+                    anchor_blk: 0,
+                    is_carrier: true,
+                    was_failing: false,
+                },
+                GroupPoll {
+                    station_index: 1,
+                    anchor_blk: 0,
+                    is_carrier: true,
+                    was_failing: false,
+                },
+            ]
         );
     }
 
@@ -3910,28 +3935,38 @@ mod tests {
         // ── battery：`soc` 用例（R = 承载 `soc` 点的那一块）──
         assert_guard_matches_criterion(&battery_soc_conf());
 
-        // ── meter_grid：**已知不对称（如实登记，非本任务可裁）** ──
-        // 配置侧 R 含 `p_total`（供 `scalar_total` 降级求和），而运行期守卫只要求
-        // `poll_to_result` 的**硬要求** `p/q/pf/u/i`（缺 `p_total` 只降级、**不** `Failed`）
-        // ⇒ 两侧**对 `p_total` 的判定不同**。该不对称**当前不可达**：`MeterGrid` 不进
-        // 遥测/事件路径（`if role != Role::MeterGrid`）⇒ 守卫对该 role **恒不被调用**。
-        // 下面把这个不对称写成**可执行的机械证明**（若将来让 grid 走该路径，须先统一口径）。
+        // ── meter_grid：**两侧集合必须相等**（含 `p_total`）──
+        // PRD §10.3.2 的 `R(role)` 定义表是唯一权威口径且含 `p_total` ⇒ 运行期守卫的硬要求集
+        // 必须与配置侧 `criterion_block_indices` **逐字同集**（下方对全块集双向断言：R 内块
+        // 去掉 ⇒ 守卫 false；R 外块去掉 ⇒ 守卫仍 true ⇒ 集合相等，非仅单向包含）。
         let grid = grid_conf("grid_meter", "ttyS4", 1, 1000);
         let r = crate::config::criterion_block_indices(&grid);
-        assert_eq!(r, vec![0, 1, 2, 3, 4, 5], "配置侧 R = 6 块（含 p_total）");
-        let all: Vec<usize> = (0..grid.regs.len()).collect();
-        assert!(judges_evaluable(Role::MeterGrid, &ok_reads(&grid, &all)));
-        let without_p_total: Vec<usize> = all.iter().copied().filter(|&k| k != 1).collect();
-        assert!(
-            judges_evaluable(Role::MeterGrid, &ok_reads(&grid, &without_p_total)),
-            "`p_total` 只在配置侧 R 内、不在运行期硬要求内（已知不对称，见上方注释）"
+        assert_eq!(
+            r,
+            vec![0, 1, 2, 3, 4, 5],
+            "配置侧 R = 6 块（含 p_total —— 供 scalar_total 降级求和）"
         );
-        // 而 p/q/pf/u/i 五块是**两侧共同认定**的判据块：逐个去掉 ⇒ 守卫 false
-        for &i in r.iter().filter(|&&i| i != 1) {
+        let all: Vec<usize> = (0..grid.regs.len()).collect();
+        // ① R 内逐块去掉 ⇒ 守卫 false（缺任一判据块 ⇒ 判据不全）
+        for &i in &r {
             let kept: Vec<usize> = all.iter().copied().filter(|&k| k != i).collect();
             assert!(
                 !judges_evaluable(Role::MeterGrid, &ok_reads(&grid, &kept)),
-                "grid 的判据块 {} 被去掉后守卫仍为 true",
+                "grid 的判据块 {}（下标 {}）被去掉后守卫仍为 true ⇒ 两侧口径漂移",
+                grid.regs[i].name,
+                i
+            );
+        }
+        // ② 全块齐备 ⇒ 守卫 true；R 外块（本配置为空集）去掉 ⇒ 守卫仍 true
+        assert!(
+            judges_evaluable(Role::MeterGrid, &ok_reads(&grid, &all)),
+            "R 齐备时守卫应为 true"
+        );
+        for &i in all.iter().filter(|i| !r.contains(i)) {
+            let kept: Vec<usize> = all.iter().copied().filter(|&k| k != i).collect();
+            assert!(
+                judges_evaluable(Role::MeterGrid, &ok_reads(&grid, &kept)),
+                "非判据块 {} 不在 R 内 ⇒ 去掉它不得让守卫为 false（两侧集合须相等）",
                 grid.regs[i].name
             );
         }
