@@ -183,7 +183,8 @@ async fn main() {
     // 而装配期的 A 已过期，属静默漂移。上面两项（`log_level` / `shutdown_timeout_sec`）已先取出。
     let core_config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
 
-    let ctx = match startup::initialize_all(
+    // `mut`：U-64 后 `StartupContext::shutdown` 需要 `&mut`（它要把协作任务句柄取出来等待）。
+    let mut ctx = match startup::initialize_all(
         &core_config,
         &coord,
         process_started_at,
@@ -219,7 +220,7 @@ async fn main() {
 
     let shutdown_result = tokio::time::timeout(
         std::time::Duration::from_secs(shutdown_timeout_sec),
-        graceful_shutdown(&coord, &ctx),
+        graceful_shutdown(&coord, &mut ctx),
     )
     .await;
 
@@ -236,16 +237,19 @@ async fn main() {
 }
 
 /// 优雅退出流程：LIFO 逆序停止各子系统
+///
+/// `ctx` 取 `&mut`（U-64）：`StartupContext::shutdown` 要把协作任务句柄**取出来等待**
+/// （`std::mem::take`），故需要可变借用。
 async fn graceful_shutdown(
     coord: &ServiceCoordinatorImpl,
-    ctx: &startup::StartupContext,
+    ctx: &mut startup::StartupContext,
 ) {
     tracing::info!("停止所有子系统 (逆序)...");
     coord.stop_all().await;
-    // abort 后台任务（此前 _ctx 被忽略，background_tasks 永不 abort）。
-    // P0-1：`ctx.shutdown()` 内部顺序 = **先 abort（含遥测定时 flush 任务、南向采集生产者）→
-    // 再 flush 遥测缓冲**，把不足一批的剩余数据落盘（修复前退出不 flush ⇒ 外设数据滞留内存、
-    // 断电即丢）。顺序的理由见 `StartupContext::shutdown` 的文档注释。
+    // P0-1 + U-64：`ctx.shutdown()` 内部顺序 = **通知协作生产者收工 → 等它们确认退出（有上限）
+    // → 最后 flush 遥测缓冲**，把不足一批的剩余数据落盘（修复前退出不 flush ⇒ 外设数据滞留内存、
+    // 断电即丢）。两个顺序理由（为什么不能先 flush、为什么不能只 abort）见
+    // `StartupContext::shutdown` 的文档注释。
     ctx.shutdown().await;
     tracing::info!("所有子系统已停止");
 }

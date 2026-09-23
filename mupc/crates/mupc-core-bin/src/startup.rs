@@ -7,6 +7,97 @@
 //! Phase 2+ 实现: 11 OTA 管理器已完成初始化。
 //! 剩余 6 个 TODO 见代码注释。
 
+// ── 协作式停机（U-64，2026-09-23）─────────────────────────────────────────────────
+//
+// 背景（审查警告 W3）：`abort()` **丢弃 future**、且要到该任务的下一个 await 点才生效 ⇒
+// "先 abort 全部后台任务、再 flush"会在两个地方丢点：① 被 abort 的任务若正卡在
+// `commit_batch` 的 await 上，已 drain 出缓冲的那一批随 future 消失（连 `Err` 分支都走不到）；
+// ② 生产者在 flush 之后仍可能推新点。本节的次序把这两条都堵住。
+
+/// 协作式停机信号（生产者侧只读端）。
+///
+/// 用 tokio 的 `watch` 通道（**不新增依赖**：tokio 已在依赖表内且 `features=["full"]`）。
+/// 生产者把它 `select!` 进自己的调度循环，收到即**收工**（在途工作做完再返回）。
+#[derive(Clone)]
+pub struct StopSignal {
+    rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl StopSignal {
+    /// 供生产者 `select!`：停机信号已发出（或发送端已 drop）即就绪。
+    ///
+    /// 先查当前值再等 `changed()`：信号若在生产者进入 `select!` **之前**就已发出，
+    /// 只等 `changed()` 会永远等不到"下一次变化"（这是 watch 的语义），必须补这一步。
+    pub async fn stopped(&mut self) {
+        if *self.rx.borrow() {
+            return;
+        }
+        let _ = self.rx.changed().await;
+    }
+}
+
+/// 协作任务退出等待上限。取值理由：协作生产者是 pv/load 南向模拟环（每轮 `sleep(1s)` + 两次
+/// 串口读，一轮 ≤ 约 2 s）与定时 flush 任务（提交在毫秒级）⇒ 3 s 覆盖"一整轮 + 一次提交"，
+/// 又远小于 `main.rs` 对整段优雅退出的 30 s 总闸（`system.shutdown_timeout_sec`）。
+pub(crate) const COOPERATIVE_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// **优雅停机的第一步：停生产者**（U-64）——从 `StartupContext::shutdown` 抽出的**可测接缝**
+/// （同 `console_write_paths` 的手法与理由：真环境起不来 ⇒ 把裁决点抽出来单测）。
+///
+/// 次序（**不得调换**）：
+/// 1. `stop_tx.send(true)`：通知协作生产者收工 —— 它们 `select!` 到信号即退出，**在途的
+///    最后一次写入得以完成**（这正是"先 abort 再 flush"丢掉的那一步）；
+/// 2. abort **非协作**任务：southd 采集口 / 网关 / MQTT / 指标采集等**没有退出钩子**
+///    （`mupc-southd::scheduler::spawn` 是独立 crate 的常驻 poll 循环，本轮不跨 crate 加停机
+///    协议）⇒ 只能 abort。它们的在途批次不会因此消失：`storage` 的 `BatchGuard` 在 future
+///    被丢弃时把"已 drain、未提交"的点回填缓冲（见 `WriteBuffer::flush_batch` 的三层保护）；
+/// 3. **有上限地**等协作任务**确认退出**：超时即如实告警并 abort 该任务（不无限 hang）；
+/// 4. 返回 —— 调用方随后做**最后一次 flush**（此刻最后一个写者已停，这才是真正的"最后一批"）。
+pub(crate) async fn stop_producers(
+    stop_tx: &tokio::sync::watch::Sender<bool>,
+    abort_tasks: &[tokio::task::JoinHandle<()>],
+    cooperative_tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>,
+    cooperative_timeout: std::time::Duration,
+) {
+    // 1) 通知收工
+    if stop_tx.send(true).is_err() {
+        // 接收端全 drop 了 ⇒ 没有协作生产者在场（信号已无意义），照常往下走。
+        tracing::debug!("停机信号无接收者（协作生产者均已退出）");
+    }
+    // 2) 非协作任务：abort 生效点在下一次 await；其未提交批次由 BatchGuard 回填兜底
+    tracing::info!(
+        "优雅退出：abort {} 个无停机钩子的后台任务",
+        abort_tasks.len()
+    );
+    for handle in abort_tasks {
+        handle.abort();
+    }
+    // 3) 等协作任务确认退出（总预算 cooperative_timeout）
+    let deadline = tokio::time::Instant::now() + cooperative_timeout;
+    for (label, handle) in cooperative_tasks {
+        // 先取 abort 句柄：`timeout_at` 会**消费** handle，超时分支就必须靠它收尾。
+        let abort = handle.abort_handle();
+        match tokio::time::timeout_at(deadline, handle).await {
+            Ok(Ok(())) => tracing::info!(task = label, "协作任务已确认收工"),
+            Ok(Err(e)) if e.is_panic() => tracing::error!(
+                task = label,
+                "协作任务 panic 退出（其未提交批次由 BatchGuard 回填，仍在缓冲里待落盘）"
+            ),
+            Ok(Err(_)) => tracing::debug!(task = label, "协作任务已被取消"),
+            Err(_) => {
+                // 超时：不能死等（用户/运维等着进程退出），如实告警后 abort，继续进 flush。
+                abort.abort();
+                tracing::warn!(
+                    task = label,
+                    timeout_ms = cooperative_timeout.as_millis(),
+                    "协作任务未在上限内确认收工 ⇒ 已 abort；其已 drain 未提交的批次由 BatchGuard 回填，\
+                     仍会随随后那次 flush 落盘（超时属异常路径，如实记录）"
+                );
+            }
+        }
+    }
+}
+
 use device_trait::plugin_loader::PluginLoader;
 use device_trait::Device;
 use mupc_common::{ErrorCode, MupcError};
@@ -41,28 +132,50 @@ pub struct StartupContext {
     pub write_buffer: Arc<mupc_storage::WriteBuffer>,
     /// 后台任务句柄（Phase 6 优雅退出时 abort）
     pub background_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// **协作式退出**的生产者句柄（U-64）：`shutdown()` **先通知它们收工并等确认**，
+    /// 而不是 abort —— 定时 flush 任务与 pv/load 南向模拟环都在这里。
+    ///
+    /// 与 `background_tasks` 分开登记是**刻意的**：混在一起就退化成"全部 abort"（U-64 缺陷本身）。
+    pub cooperative_tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>,
+    /// 协作式停机信号的**发送端**（U-64）：`shutdown()` 第一步置 true。
+    stop_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl StartupContext {
-    /// 优雅退出：**先 abort 后台任务（含遥测定时 flush 任务）→ 再落盘剩余遥测缓冲**。
+    /// 优雅退出（U-64 重做，2026-09-23）：**通知生产者收工 → 等它们确认退出（有上限）→
+    /// 最后 flush**。
     ///
-    /// **为什么顺序是"先 abort 再 flush"**（P0-1）：生产者（southd 采集 task、pv/load 南向模拟
-    /// 循环）本身就在 `background_tasks` 里 —— 若反过来先 flush 再 abort，两次调用之间生产者
-    /// 仍可能写入新点，那批新点就**落在 flush 之后**、随进程退出滞留内存（正是本缺陷要消灭的形态）。
-    /// 先 abort 把生产者停下，flush 才真正是"最后一批"。
+    /// **为什么不再是"先 abort 再 flush"**（原 P0-1 的次序，其问题已被审查 W3 定位）：
+    /// `abort()` 是**丢弃 future**，要到任务的下一个 await 点才生效 ⇒ 任务若恰好停在
+    /// `commit_batch` 的 await 上，它**已经 drain 出缓冲的那一批**随 future 一起消失，
+    /// 连 `flush_batch` 的 `Err` 分支都走不到（无日志、无计数）。改成"通知 → 等确认"后，
+    /// 生产者是在**自己的循环里**看到信号才退出的，在途工作（含那次提交）会正常走完。
+    ///
+    /// **为什么还必须 flush 在最后**（P0-1 的原始理由仍然成立）：若先 flush 再停生产者，
+    /// 两次调用之间生产者仍可能写入新点，那批新点就落在 flush 之后、随进程退出滞留内存。
     ///
     /// **为什么放在这里而不是 `main.rs`**：本方法是**唯一**的优雅退出入口（`main.rs` 的
     /// `graceful_shutdown` 调用）。放在这里 ⇒ "忘了 flush"在结构上不可能发生，而不是靠调用方
     /// 记得多打一行；`main.rs` 也就无需知道 `WriteBuffer` 的存在。
     ///
-    /// 残留竞态（如实登记，不夸大）：`abort()` 需等到 task 的下一个 await 点才生效，
-    /// 毫秒级窗口内仍可能有一次并发 `buffer_telemetry`；但 `flush()` 与它争的是同一把
-    /// `buffer` 互斥锁，谁先拿到谁生效、不会漏掉已完成 push 的点。
-    pub async fn shutdown(&self) {
-        tracing::info!("优雅退出：abort {} 个后台任务", self.background_tasks.len());
-        for handle in &self.background_tasks {
-            handle.abort();
-        }
+    /// **残留窗口（如实登记，不夸大）**：无停机钩子的任务（southd 采集口等）仍靠 `abort`，
+    /// 其 abort 生效点在下一次 await ⇒ 它们可能在本方法返回后才真正停下；若它们在最后一次
+    /// flush **之后**又 push 点位，那批点仍会滞留内存。与修复前的区别是：① 已 drain 未提交的
+    /// 批次**不再丢**（`BatchGuard` 回填）；② 这个窗口从"每个任务都可能踩"缩小到"仅无钩子任务
+    /// 的极端时序"。协作任务（定时 flush、pv/load 环）**已无此窗口**。
+    pub async fn shutdown(&mut self) {
+        tracing::info!(
+            "优雅退出：{} 个协作任务（通知收工并等确认）+ {} 个无钩子任务（abort）",
+            self.cooperative_tasks.len(),
+            self.background_tasks.len()
+        );
+        stop_producers(
+            &self.stop_tx,
+            &self.background_tasks,
+            std::mem::take(&mut self.cooperative_tasks),
+            COOPERATIVE_EXIT_TIMEOUT,
+        )
+        .await;
         self.flush_telemetry_buffer().await;
     }
 
@@ -71,11 +184,14 @@ impl StartupContext {
         match self.write_buffer.flush().await {
             Ok(0) => tracing::info!("优雅退出：遥测缓冲已空，无需落盘"),
             Ok(n) => tracing::info!(points = n, "优雅退出：最后一批遥测已落盘"),
-            // 失败语义与运行期同源（整批丢弃、不重试）；此处**必须响亮** —— 这是进程最后一次
-            // 落盘机会，静默会让"退出丢数据"不可观测。
+            // 失败语义与运行期同源（U-68③：**回填**缓冲、不丢弃）；此处**必须响亮** —— 这是
+            // 进程最后一次落盘机会。⚠️ 如实说清后果：数据还在内存里，但进程随即退出 ⇒ 实为丢失
+            // （不得说成"已丢弃"——那会掩盖"若下一拍能重试就能救回"的事实；也不必说成"已保全"）。
             Err(e) => tracing::error!(
                 error = %e,
-                "优雅退出：最后一批遥测落盘失败（本批已丢弃；设计无重试/背压条款，本轮不重试）"
+                dropped_total = self.write_buffer.dropped_points(),
+                "优雅退出：最后一批遥测落盘失败（批次已回填内存缓冲，但进程即将退出 ⇒ 该批数据仍会丢失；\
+                 丢弃计数见 dropped_total）"
             ),
         }
     }
@@ -601,6 +717,24 @@ pub async fn initialize_all(
     }
     let mut guard = TaskGuard(Vec::new());
 
+    /// 协作式退出任务的装配期哨兵（U-64）：与 [`TaskGuard`] 同为"装配中途失败即 abort"，
+    /// 但登记的是**带标签的协作任务**（成功路径移交 `StartupContext::cooperative_tasks`，
+    /// 退出时走"通知 + 等确认"而不是 abort）。
+    struct ProducerGuard(Vec<(&'static str, tokio::task::JoinHandle<()>)>);
+    impl Drop for ProducerGuard {
+        fn drop(&mut self) {
+            for (label, h) in &self.0 {
+                tracing::debug!(task = label, "装配失败：abort 协作任务");
+                h.abort();
+            }
+        }
+    }
+    let mut producers = ProducerGuard(Vec::new());
+
+    // ── U-64：协作式停机信号（`tokio::sync::watch`，**不新增依赖**）──
+    // **必须在生产者 spawn 之前建**：接收端要随 spawn 交到生产者手里，否则"通知收工"无从送达。
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
     // ── 1. 消息总线 (无依赖) ──
     tracing::info!("[01/14] 初始化消息总线...");
     let message_bus = Arc::new(mupc_core::TokioMessageBus::new(256));
@@ -664,9 +798,13 @@ pub async fn initialize_all(
         storage.pool().clone(),
     ));
     // P0-1：`flush_interval_ms` 的**读取方**（此前无任何读取方 ⇒ 不满一批的数据永久滞留内存）。
-    // 句柄入 guard：装配中途失败即随 TaskGuard::drop 一并 abort；成功则随
-    // `StartupContext.background_tasks` 移交，退出时由 `shutdown()` abort。
-    guard.0.push(write_buffer.clone().spawn_flush_timer());
+    // U-64：句柄入 `producers`（**协作退出名单**，不是 abort 名单）——它是运行期**唯一会 drain
+    // 缓冲**的常驻者，必须"收到停机信号 → 确认收工"之后才轮到退出路径那次 flush；
+    // 装配中途失败仍随 ProducerGuard::drop 一并 abort。
+    producers.0.push((
+        "flush_timer",
+        write_buffer.clone().spawn_flush_timer(stop_rx.clone()),
+    ));
     coord.register_service("storage", ServiceStatus::Running);
 
     // ── 4. 核间通信 ──
@@ -1214,49 +1352,61 @@ pub async fn initialize_all(
         let wb = write_buffer.clone();
         let g = iec104_server.clone();
         let ai_int = ai_integrator.clone();
-        guard.0.push(tokio::spawn(async move {
-            let grid_on = grid_on; // grid 策略源在时（southd 含 meter_grid）由它提供，南向模拟不覆盖
-                                   // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
-            let mut ioa_seq = 0u32;
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                for (dev, name) in [(&pv, "pv_inverter_001"), (&load, "load_ctrl_001")] {
-                    match dev.read() {
-                        Ok(frame) => {
-                            let pkg = dataframe_to_datapackage(&frame);
-                            // 注入遥测到 AiIntegrator（grid_on：southd meter_grid 策略源在，
-                            // 南向模拟不覆盖——M-4 防双写；无 grid 源时南向模拟兜底测量）
-                            if !grid_on {
-                                ai_int.set_latest_data(pkg.clone()).await;
-                            }
-                            for point in datapackage_to_telemetry_points(&pkg, name) {
-                                if let Err(e) = wb.buffer_telemetry(point).await {
-                                    tracing::debug!("遥测写入失败: {}", e);
+        // U-64：本环是**遥测缓冲的生产者**之一（另一处是 `SouthSink`）⇒ 入协作退出名单：
+        // 收到停机信号即结束本轮、把在途写入做完，而不是被 abort 在半路。
+        let mut stop = StopSignal {
+            rx: stop_rx.clone(),
+        };
+        producers.0.push((
+            "south_sim_loop",
+            tokio::spawn(async move {
+                let grid_on = grid_on; // grid 策略源在时（southd 含 meter_grid）由它提供，南向模拟不覆盖
+                                       // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
+                let mut ioa_seq = 0u32;
+                loop {
+                    // 停机信号与 1 s 节拍二选一：先到先执行（信号到了就收工，不再采新点）
+                    tokio::select! {
+                        _ = stop.stopped() => break,
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
+                    }
+                    for (dev, name) in [(&pv, "pv_inverter_001"), (&load, "load_ctrl_001")] {
+                        match dev.read() {
+                            Ok(frame) => {
+                                let pkg = dataframe_to_datapackage(&frame);
+                                // 注入遥测到 AiIntegrator（grid_on：southd meter_grid 策略源在，
+                                // 南向模拟不覆盖——M-4 防双写；无 grid 源时南向模拟兜底测量）
+                                if !grid_on {
+                                    ai_int.set_latest_data(pkg.clone()).await;
                                 }
-                            }
-                            // 北向上送（仅无 grid 源兜底路径；审查 R2-A2）：grid_on 时 meter_grid
-                            // 真值已由 SouthSink 以固定 IOA 1..6 上送，此 pv/load 假遥测 ioa_seq
-                            // 亦自 1 递增 → 若仍上送会与真值 IOA 相撞（M-4 同款单写方语义，
-                            // grid 源在即南向模拟不覆盖北向）。取有功功率作为示例（FIXME: 完整点表映射）
-                            if !grid_on {
-                                if let Some(v) = pkg.electrical.active_power {
-                                    ioa_seq = ioa_seq.wrapping_add(1);
-                                    let asdu =
-                                        mupc_gateway::iec104::protocol::encode_telemetry_asdu(
-                                            ioa_seq, v as f32, 1,
+                                for point in datapackage_to_telemetry_points(&pkg, name) {
+                                    if let Err(e) = wb.buffer_telemetry(point).await {
+                                        tracing::debug!("遥测写入失败: {}", e);
+                                    }
+                                }
+                                // 北向上送（仅无 grid 源兜底路径；审查 R2-A2）：grid_on 时 meter_grid
+                                // 真值已由 SouthSink 以固定 IOA 1..6 上送，此 pv/load 假遥测 ioa_seq
+                                // 亦自 1 递增 → 若仍上送会与真值 IOA 相撞（M-4 同款单写方语义，
+                                // grid 源在即南向模拟不覆盖北向）。取有功功率作为示例（FIXME: 完整点表映射）
+                                if !grid_on {
+                                    if let Some(v) = pkg.electrical.active_power {
+                                        ioa_seq = ioa_seq.wrapping_add(1);
+                                        let asdu =
+                                            mupc_gateway::iec104::protocol::encode_telemetry_asdu(
+                                                ioa_seq, v as f32, 1,
+                                            );
+                                        let frame = mupc_gateway::iec104::Iec104Frame::make_i_frame(
+                                            0, 0, &asdu,
                                         );
-                                    let frame = mupc_gateway::iec104::Iec104Frame::make_i_frame(
-                                        0, 0, &asdu,
-                                    );
-                                    g.broadcast_telemetry(frame).await;
+                                        g.broadcast_telemetry(frame).await;
+                                    }
                                 }
                             }
+                            Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),
                         }
-                        Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),
                     }
                 }
-            }
-        }));
+            }),
+        ));
     }
 
     // ══ 10. OTA 管理器（原「10. Web API」装配整块已随 `web-api` crate 删除，单元 K）══
@@ -1418,8 +1568,10 @@ pub async fn initialize_all(
 
     tracing::info!("所有 14 个子系统初始化完成 ({} 个 TODO 待阶段补全)", 2);
 
-    // 初始化成功，取出 bg_tasks（防止 Drop abort）并移交 StartupContext
+    // 初始化成功，取出两份任务清单（防止 Drop abort）并移交 StartupContext：
+    // `bg_tasks` 退出时 abort；`coop_tasks` 退出时**先通知收工、等确认**（U-64）。
     let bg_tasks = std::mem::take(&mut guard.0);
+    let coop_tasks = std::mem::take(&mut producers.0);
     Ok(StartupContext {
         message_bus,
         storage,
@@ -1431,6 +1583,8 @@ pub async fn initialize_all(
         fault_recorder,
         write_buffer,
         background_tasks: bg_tasks,
+        cooperative_tasks: coop_tasks,
+        stop_tx,
     })
 }
 
@@ -1605,12 +1759,17 @@ plugins: {}
     /// **改什么会让本条变红**：删掉定时任务的 spawn（⇒ `flush_interval_ms` 又成死字段）、
     /// 把 `write_buffer` 从 `StartupContext` 摘掉（⇒ 退出路径够不到缓冲）、删掉 `shutdown()`
     /// 里的 flush 调用、或 `main.rs` 不再调用 `ctx.shutdown()`。
+    ///
+    /// ⚠️ **U-64 订正**：`spawn_flush_timer()` 的字面量改为 `spawn_flush_timer(`——
+    /// 该函数现在要求传入停机信号接收端（协作退出），断言随之改为同时钉住"传了信号"
+    /// （只钉函数名会漏掉"定时任务收不到停机信号 ⇒ 退出时仍被 abort 在半路"）。
     #[test]
     fn telemetry_buffer_timer_and_shutdown_flush_are_wired() {
         let production = production_src();
         assert!(
-            production.contains("spawn_flush_timer()"),
-            "装配点必须起定时 flush 任务（否则 `flush_interval_ms` 又变成无读取方的死字段）"
+            production.contains("spawn_flush_timer(stop_rx.clone())"),
+            "装配点必须起定时 flush 任务并**把停机信号交给它**（否则 `flush_interval_ms` 又成死字段、\
+             或定时任务无法协作退出）"
         );
         assert!(
             production.contains("pub write_buffer: Arc<mupc_storage::WriteBuffer>"),
@@ -1627,6 +1786,162 @@ plugins: {}
         assert!(
             include_str!("main.rs").contains("ctx.shutdown().await;"),
             "main.rs 的关闭路径必须调用 StartupContext::shutdown（flush 在其内）"
+        );
+    }
+
+    // ── U-64 优雅停机 ──────────────────────────────────────────────────────────────
+
+    /// 真缓冲 + 真库（`StorageService` 供落库断言用；本 crate 不依赖 `sqlx` ⇒ 不出现 `sqlx` 类型名）。
+    async fn u64_setup(
+        tag: &str,
+    ) -> (mupc_storage::StorageService, Arc<mupc_storage::WriteBuffer>) {
+        let t = crate::testutil::TempDir::new(tag);
+        let db = t.join("mupcd.db");
+        std::fs::File::create(&db).unwrap();
+        let pool = Arc::new(mupc_storage::init_pool(db.to_str().unwrap()).await.unwrap());
+        mupc_storage::run_migrations(&pool).await.unwrap();
+        // flush_interval_ms=60_000 ⇒ 定时任务在本用例期间不会自己提交：落盘只能来自退出路径那次 flush
+        let wb = Arc::new(mupc_storage::WriteBuffer::new(1000, 60_000, pool.clone()));
+        (mupc_storage::StorageService::new(pool), wb)
+    }
+
+    fn u64_point(i: f64) -> mupc_storage::TelemetryPoint {
+        mupc_storage::TelemetryPoint {
+            id: None,
+            device_id: "dev-u64".to_string(),
+            timestamp: chrono::Utc::now(),
+            metric_name: "v".to_string(),
+            value: i,
+            quality: 0,
+        }
+    }
+
+    /// **U-64 主用例**：停机时**不丢已完成 push 的点** —— 生产者必须在**被 flush 之前**收到
+    /// 停机信号、把在途的最后一次写入做完；随后退出路径的 flush 必须把全部点落盘。
+    ///
+    /// 生产者刻意在"收到信号之后"再写一点：这正是修复前 `abort` 会杀掉的那一步。
+    /// 改什么会让本条红：把 `stop_producers` 改回"直接 abort 所有任务"（不看信号、不等确认）
+    /// ⇒ 生产者死在 `stopped()` 上、第 4 点永远不产生（`pushed_after_stop` 为 false、库里只有 3 行）。
+    #[tokio::test]
+    async fn stop_producers_lets_producer_finish_its_last_push_before_flush() {
+        let (svc, wb) = u64_setup("u64-stop").await;
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+
+        let pushed_after_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = pushed_after_stop.clone();
+        let wb_p = wb.clone();
+        let mut stop = StopSignal {
+            rx: stop_rx.clone(),
+        };
+        let producer = tokio::spawn(async move {
+            for i in 0..3 {
+                wb_p.buffer_telemetry(u64_point(i as f64)).await.unwrap();
+            }
+            stop.stopped().await;
+            wb_p.buffer_telemetry(u64_point(99.0)).await.unwrap();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // 真定时 flush 任务（与生产同款协作退出者）
+        let timer = wb.clone().spawn_flush_timer(stop_rx.clone());
+
+        // 让生产者先把前 3 点写进缓冲（此后它停在 `stopped()` 上等信号）
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        stop_producers(
+            &stop_tx,
+            &[],
+            vec![("south_sim_loop", producer), ("flush_timer", timer)],
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        assert!(
+            pushed_after_stop.load(std::sync::atomic::Ordering::SeqCst),
+            "生产者必须在被 flush 之前确认收工并做完最后一次写入（abort-first 会把它杀死 ⇒ 静默丢点）"
+        );
+
+        // 退出路径的最后一次 flush（次序与 `StartupContext::shutdown` 一致：先停生产者、再 flush）
+        assert_eq!(
+            wb.flush().await.unwrap(),
+            4,
+            "停机路径的 flush 必须落盘全部 4 点（含收工前最后一批）"
+        );
+        let rows = svc
+            .telemetry
+            .query_range(
+                "dev-u64",
+                chrono::Utc::now() - chrono::Duration::minutes(1),
+                chrono::Utc::now() + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 4, "4 点全部入库");
+        assert_eq!(wb.dropped_points(), 0, "正常停机路径不得丢点");
+    }
+
+    /// **U-64 超时保护**：生产者**不理会**停机信号时，等待必须有上限（不得 hang 住退出流程）。
+    ///
+    /// 改什么会让本条红：把 `timeout_at` 去掉（直接 `handle.await`）⇒ 本用例卡在 30 s 的
+    /// 顽固任务上直到测试超时。
+    #[tokio::test]
+    async fn stop_producers_gives_up_on_uncooperative_task_within_timeout() {
+        let (stop_tx, _stop_rx) = tokio::sync::watch::channel(false);
+        let stubborn = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let started = std::time::Instant::now();
+        stop_producers(
+            &stop_tx,
+            &[],
+            vec![("stubborn", stubborn)],
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "必须在有上限的时间内返回（实得 {:?}）",
+            started.elapsed()
+        );
+    }
+
+    /// **U-64 接线网（源文本静态断言）**：`shutdown()` 的次序必须是
+    /// **通知/停生产者 → 等确认 → 最后 flush**，且协作任务与 abort 名单**分开登记**。
+    ///
+    /// 同 `telemetry_buffer_timer_and_shutdown_flush_are_wired` 的手法与理由：装配期起不来真环境，
+    /// 而本条要证的恰恰是"装配源码里的次序与分组"。
+    ///
+    /// 改什么会让本条变红：`shutdown` 里把 `self.flush_telemetry_buffer().await;` 提到
+    /// `stop_producers(..)` 之前（回到"先 flush 再停生产者"或"先 abort 后 flush"的次序）；
+    /// 把协作任务又塞回 `background_tasks`（⇒ 定时 flush 任务会被 abort 在半路）。
+    #[test]
+    fn graceful_shutdown_stops_producers_before_final_flush() {
+        let production = production_src();
+        assert!(
+            production.contains(
+                "pub cooperative_tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>"
+            ),
+            "协作式退出任务必须单独登记（不得混进 abort 名单）"
+        );
+        assert!(
+            production.contains("stop_tx.send(true)"),
+            "停机第一步必须是**通知收工**（而不是直接 abort）"
+        );
+        assert!(
+            production.contains("&self.stop_tx,"),
+            "`shutdown` 必须把**停机信号发送端**交给 `stop_producers`（否则生产者收不到信号）"
+        );
+        // 取**最后一次**出现：第一次是函数定义本身，调用点在 `shutdown` 里（定义在前、调用在后）。
+        let stop_at = production
+            .rfind("stop_producers(")
+            .expect("`shutdown` 必须经 `stop_producers` 接缝停生产者");
+        let flush_at = production
+            .find("self.flush_telemetry_buffer().await;")
+            .expect("退出必须落盘剩余缓冲");
+        assert!(
+            stop_at < flush_at,
+            "次序必须是「先停生产者、后 flush」（实得 stop={stop_at} flush={flush_at}）"
         );
     }
 
