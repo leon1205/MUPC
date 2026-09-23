@@ -2236,12 +2236,30 @@ south_stations:
             let s = &w.south_stations.stations[0];
             let gs = read_groups_of(s);
             assert_eq!(gs.len(), 2, "首例 = 快组（1000）+ 站周期组（5000）");
+            // 逐组钉周期：只断言"2 组"时，快/慢组周期互换仍会绿（AC-8-6 的锚会失守）
+            let mut periods: Vec<u64> = gs.iter().map(|g| g.interval_ms).collect();
+            periods.sort_unstable();
+            assert_eq!(
+                periods,
+                vec![1000, 5000],
+                "首例两组周期须为 1000（hvac_di 快采）与 5000（站周期），实际 {periods:?}"
+            );
             let sum: f64 = gs.iter().map(|g| group_tx_time_ms(s, g)).sum();
             assert!(
                 (sum - 47.52).abs() < 1e-9,
                 "Σ T_组 须 = 47.52ms（21.68 + 25.84），实际 {sum}"
             );
             assert!(sum <= 1.5 * 1000.0);
+            // AC-8-6 的第二个可测口径：口占用率（PRD §10.5「口占用上界」的复算值）
+            let u: f64 = gs
+                .iter()
+                .map(|g| group_tx_time_ms(s, g) / g.interval_ms as f64)
+                .sum();
+            assert!(
+                (u - 0.026848).abs() < 1e-6,
+                "首例 U_口 须 = 0.026848（= 21.68/1000 + 25.84/5000），实际 {u}"
+            );
+            assert!(u <= MAX_PORT_UTILIZATION);
         }
 
         // ③-拒绝例：同口两组 —— 组 A（周期 1000、`T_组 = 19.6ms`）+ 组 B（周期 5000、
