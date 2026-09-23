@@ -11,7 +11,22 @@
 > - **③【建议 a–d】** AC-8-5 补 **C4 的可构造用例**（`T_组 = 801.36 ms` ⇒ `1.5×T_组 = 1202.04 ms`，§12.8）；AC-8-3 钉 **tick 序 `0,1000,…,9000` 与逐项计数**；AC-8-8 **移出用例映射**（元要求，落 §12.9 边界声明）；AC-8-7 ② 退避断言改为 **fail 两轮（`oc=2` ⇒ `2×组周期`）**。
 > - **④【口径偏订正】** `mapper.rs:363-372` 实为 **`read_back` 取数段**（**容量算式在 `:377-385`**）；"既有 20 例"订正为 **`scheduler.rs` 现为 44 例（`#[tokio::test]` 38 + `#[test]` 6）**（§12.8 / §12.11）。
 > - **⑤【同轮连带】** 评审对 **02 PRD §10** 的 4 项文档级订正 + 4 条建议已**同轮落入 PRD 正文**（PRD v1.13，见 §12.10.2 末的对照表）⇒ 本章与 PRD 的数字/引用**逐位一致**（占用率统一为公式精确值 `0.95 %`；Q-22 选项 B 补第三环）。
-> - **改动范围**：只动本文件的 **§12**（§1–§11 零改动）与 `01-MUPC-通信网关-设计文档.md` §9.1.3 / §9.4（两处**小补登记**，见该文件）；**另动** `02-MUPC-南向通信-PRD.md` 的 **§10 正文**（评审附项，v1.13）。**不改任何代码/配置**；**12 号设计未动**。
+> - **改动范围**：只动本文件的 **§12**（§1–§11 零改动）与 `02-MUPC-南向通信-PRD.md` 的 **§10 正文**（评审附项，见 PRD 的 v1.13 行）。**01 号设计的接口登记不属本批改动** —— 它是 `01-MUPC-通信网关-设计文档.md` **自身版本行 `v1.4-r3`** 的内容（来源 = T1 `latest_values` 代码评审的两项设计侧偏离登记，见**该文件**的版本行与 §9.1.3 / §9.1.8 / §9.4）。**不改任何代码/配置**；**12 号设计未动**。
+
+> **[§12 按设计评审意见（第二轮）修订（v1.13-r1，2026-09-23）—— 待复审，未门禁]** 第二轮设计评审对 §12（v1.13）判 **REJECTED（3 阻塞 + 3 警告 + 4 优化）**，但**独立验证了原阻塞 B-1 的修法正确**（`judges_evaluable` 的作用域已改对、占位不用动）。本轮逐条处置，**本次未获任何门禁标记**（**不自行添加 `[DESIGN_APPROVED]`**；既有 `[DESIGN_APPROVED: 2026-09-21]` / `[CODE_REVIEWED: PASS: 2026-09-22]` **原文未动**，其覆盖范围仍**只到 §11**）：
+>
+> - **①【阻塞 S-1】空 `regs` 站 = 可达 panic + 静默移出调度**：`carrier_group` 旧写法在空 `regs` 上走 `.expect` ⇒ **panic**；且 `from_group` 对该站产 **0** 条目 ⇒ 该站**永不轮询**。该输入**可达**：`scheduler.rs::battery_station_without_soc_block_does_not_push`（`:1515-1535`）**内联构造** `StationConf { regs: vec![], .. }` 并直接 `tick_once(0)`，**不经 `validate`**；而配置期也只对 `Role::Pcs` 拒空 `regs`（`config.rs:296-303`）。⇒ **已改为**：`read_groups_of` 对空 `regs` **产出一个退化组**（**空块集**、周期 = 站周期、锚 = 哨兵 `EMPTY_GROUP_ANCHOR`）⇒ `from_group` 恒产 **1** 条目、该组即承载组 ⇒ 与既有"**站照常被轮询、读集为空、`poll_to_result(role, &[])` 照常求值、成功/失败记账照旧**"**逐字等价**（不是"不调度"）；`carrier_group` 改返回 **`Option<ReadGroup>`**（构造期**无任何 `expect`/`unwrap` 落在该可达输入上**）；**`.expect` 的理由文案已订正**（原称"空 regs 由配置期规则 3（pcs）与运行期空读路径分别覆盖"——**与事实不符**，配置期只对 `pcs` 拒空）；**V-5 补空集情形**；**新增 Δ-12**（"是否应在配置期对非 `pcs` role 也拒空 `regs`"登记为**待裁定**：空 `regs` 是"静默死配"，但新增配置期拒绝 = **新增约束 = 需求变更** ⇒ **本轮不单方面加**，现状由"逐字保持既有行为"兜住）。**同源加固**：`run_port_round` 里两处 `calc.group_backoff_input(key).unwrap()` 一并去掉 —— `bump_group_fail` 改为**原子返回** `Option<(组周期, 加一后的计数)>`、调用点一律 `if let`（§12.4.2 / §12.4.3）⇒ 该段**无 `unwrap`/`expect`**（同类缺陷的纵深防御：键必存在，但不以 panic 表达）。
+> - **②【阻塞 S-2】AC-8-5 的"C4 可构造用例"按字面构造时并不触发 C4**：旧例"同组 3 个 FC04 块 + 取**其中一个**块声明 `interval_ms: 1000`" —— 按 §12.4.1 的分组语义，**只要有块声明了 `interval_ms`，该块就按 `eff` 自成一组**（另两块继承站周期）⇒ 该块所在组 `T_组 = 267.12 ms`、`1.5×T_组 = 400.7 ms ≤ 1000` ⇒ **C4 通过**；实际触发的是 **C9**（`U = 267.12/1000 + 2×267.12/2000 = 0.534 > 0.5`），而 C9 文案不写 `1202` ⇒ "文案含 `1202`"落空、**C4 在 AC-8-5 里无人覆盖**。**修法**：改为**三块均声明** `interval_ms: 1000`（仍为同一读组 ⇒ `T_组 = 801.36 ms` ⇒ `1000 < 1202.04` ⇒ **规则 20（C4）先于规则 23（C9）返回**，文案含 `1202`）；并把**规则 20 的 `T_组` 定义写死**为"**该块所在读组**的整组耗时"（同组内各块 `eff` 相同 ⇒ 组由 `eff` 唯一确定 ⇒ **定义无循环**），消除复审点出的"两种读法必居其一"。**同轮落 PRD §10.7 的 AC-8-5 那一格**（只改"C4 的构造法"的**例子**并补"三块 `eff` 相同 ⇒ 仍为同一读组"一句，**判据未动**；PRD v1.13-r1）。
+> - **③【阻塞 S-3】"站级重建全部组基线"的触发条件取错 + 同 tick 组序**：旧伪码用 `if station_was_offline`（`= offline_count > 0`）触发全组基线重建，而 `mark_success`（**清 `offline_count`**，`scheduler.rs:730-737`）**只在承载组分支**调用 ⇒ **承载组持续失败**时非承载组**每一轮**成功都会重建全组 ⇒（i）该组 `primed` 恒 `false` ⇒ **0→1 变化沿事件永不产出**（与 §12.5 表"只受本组基线状态与组级失败重建影响"**直接矛盾**）；（ii）`full_snapshot` 每轮为真 ⇒ 该组**每轮全量落位**（BMS 288 位/轮 ≈ 2.5×10⁷ 行/天，正是 PRD §9.8.1 末条明文告警的量级）。既有实现不会出现（单组 ⇒ 成功即清 `offline_count`）。**修法**：① 触发条件限定为 **`poll.is_carrier && station_was_offline`**（真正的"本轮恢复"）；② **同 tick 组序**改为"**站内承载组优先**"—— `due_round` 排序键由 `(role_priority, station_index, anchor_blk)` 改为 **`(role_priority, station_index, !is_carrier, anchor_blk)`** ⇒ 站恢复当轮**承载组先**重建全组基线、**再**轮到其它组产出（否则快组会先用**离线前**的基线产出一屏，且**下一轮**还要多一次 `full_snapshot`；论证见 §12.4.2）；③ §12.8 补 **S-3 判别锚** `non_carrier_group_events_survive_carrier_failure`（承载组**持续失败**期间，非承载组仍逐轮产变化沿事件、且**不每轮全量落位**；**按旧写法必红**）；④ §12.4.4 连带项 a / §12.5 重建条件表 / §12.10 / §12.11 / §12.12 的"谁能重建基线"表述**全章统一**为：「**站级重建（全组）只由承载组触发**；组级重建（仅本组）由本组 `was_failing` 触发」。
+> - **④【警告 W-1】PRD §10.5「单轮最坏耗时」在 §12 无落点，且 C9 不能蕴含它**：新增 **规则 24**（同 `port` 全部组 **`Σ T_组 > 1.5 × 最小非零组周期`** ⇒ 配置期 `Err`，文案含口名 / 站 id / 实测 `Σ T_组` 与阈值）—— **逐字落 PRD §10.5 第 3 行**；并登记"**`U ≤ 0.5` 但 `Σ T` 超标**"的**反例**（同口两组 `(1000, 19.6 ms)` + `(5000, 8×267.12 = 2137 ms)` ⇒ 各组 C4 通过、`U = 0.0196 + 0.4274 = 0.447 ≤ 0.5` 通过，而 `Σ T = 2156.6 ms > 1500 ms`）作为规则 24 的**正当性证据**；**现网复核**：`hvac` `Σ T = 21.68 + 25.84 = 47.52 ms ≤ 1.5 × 1000 = 1500 ms ✓`（其余 4 站为单组站、由 C4 蕴含，`grid_meter` 缺 `T` 同 Δ-11）。**PRD §10.5 一字未动**（需求侧约束已在那儿，本轮只是把它落到设计）。
+> - **⑤【警告 W-2】新增引用漂移**：§12.8 用例①（= v1.13 行 Ⅱ 项所指的同一个用例）把"`battery` 回退周期 2000 ms"的依据标为 `02 PRD:1754` ⇒ 订正为 **`:1768`**（"须把 `battery` 的周期上调到 2000ms"，另 `:2208` 同义）；`:1754` 实为"不采点区"表的 `定制保留 / 保留区` 行。**已逐处核**：全文 `:1754` 引用**只此一处**（用例①），其余引用（`:1515-1535` / `:1768` / `:2208` / `config.rs:296-303` / `scheduler.rs:730-737` / `production.yaml:398`）均指向所述内容。
+> - **⑥【警告 W-3】用例① 的断言时点自相矛盾**：按 tick 序 `0,1000,…,5000`，t=0 建基线（不产事件）、**t=1000 就该产边沿**；旧文写"t=2000 的那一轮必须产出 `is_event == true`"⇒ 按字面**取不到**。**修法**：断言时点改为 **t=1000 轮**（判别力不变），并**逐条复核**了其余数字/时点（`bit_call_count(1,200)==6`、`input_call_count(1,100)==3`、承载组 t=0/2000/4000）—— 改动后**仍自洽**。
+> - **⑦【优化 1】文首"改动范围"误导**：旧文写"…与 `01-MUPC-通信网关-设计文档.md` §9.1.3 / §9.4（两处小补登记）"，易读成"本批含 01 号"⇒ 已改写为"**01 号不属本批**，其登记见该文件**自身版本行 `v1.4-r3`**"。
+> - **⑧【优化 2】§12.3 标题"一一对应"不实**：C3/C4/C8/C9 无对应 V，V-5/V-6 对应的是 §10.3.1 定性 1 与 §10.6 第 3 条 ⇒ 已**改标题**并补一句**对应关系声明**（去掉"一一对应"）。
+> - **⑨【优化 3】§12.6 两处口径错**：① `hvac` 实为 **`parity: even`（8E1）**（`production.yaml:398`），非 8N1 ⇒ 已按 **PRD §9.8.1 的 10 bit/字节口径**显式声明并给 8E1 的敏感性复算（`T_快组 ≈ 23.5 ms` / `T_慢组 ≈ 28.1 ms` / `U_后 ≈ 2.91 %`），**余量极大 ⇒ 结论不变**（且不动 PRD §10.4 的数字）；② 响应帧算式 `(5 + 2N)` 与同表 `FC02 = 8 + (5+4) = 17` **不自洽** ⇒ 已改正为 **`5 + D`**（`D` = **数据字节数**：FC02 = `ceil(位数/8)`；FC03/04 = `2 × 寄存器数`），改正后与表内 `17` / `21` 及 `T_快组 = 21.68 ms` / `T_慢组 = 25.84 ms` **仍一致** ⇒ **无需改 PRD §10.4 的任何数字**；PRD §10.4 的**同一句文字**偏差登记为 **Δ-13**（文档级，不影响任何数字/判据）。
+> - **⑩【优化 4】伪码可编译性/冗余字段**：`GroupKey { ..poll.into() }`（需一个**未声明**的 `From<GroupPoll>`）已改**显式构造**（与同段下方同款）；`PortRunner.carrier_anchor` **无使用点**（`poll_group` 查的是 `runner.group_of[&key]`）⇒ **已删除**；§12.5 表的"站级退避 = `backoff_extra(站周期, offline_count)`"与 §12.4.3 注的"承载组自身**组**周期"⇒ **统一为后者**（非退化配置下二者恒等，退化配置下按实际 cadence 才自洽）。
+>
+> **改动范围（本轮）**：只动本文件的 **§12**（§1–§11 零改动）与 `02-MUPC-南向通信-PRD.md` 的 **§10.7 AC-8-5 那一格（仅"C4 的构造法"的例子）+ 版本行**（PRD v1.13-r1，**判据未动、不构成重新评审**）。**01 号的接口登记属其自身版本行 `v1.4-r3`，不属本批**；**不改任何代码/配置**；**12 号设计未动**。**本次未加任何新门禁标记**（待复审）。
 
 > **[§12 新增（v1.12，2026-09-23）：块级采集周期覆盖（告警位单独快采，S3b-3）]** 新增 **§12**，落实 02 PRD **§10（v1.12）** 与用户 2026-09-23 就 12 号 R-33 作出的裁定「**告警位单独快采**」。**改动范围**：① 本文件**仅追加 §12**（§1–§11 与既有门禁标记 `[DESIGN_APPROVED: 2026-09-21, 设计评审员]` / `[CODE_REVIEWED: PASS: 2026-09-22]` **原文未动**）；② **未改**任何 PRD、12 号设计（除其 R-45 **那一行**的状态回写，见 02 PRD §10.8.2）、任何代码/配置。**实现状态：尚未实现**（开发由后续 S3b-3 任务做，Task 拆分见 §12.11）。**§12 是新增章节，不覆盖既有门禁**（体例同 §11 由 `[DESIGN_APPROVED]` 单独覆盖）。
 
@@ -2489,7 +2504,9 @@ struct ReadGroup {
     blk_indices: Vec<usize>,
     /// 组周期 = 组内块的有效周期（构造期由 `read_groups_of` 保证同组同值）
     interval_ms: u64,
-    /// 组锚 = `blk_indices[0]`（块 → 组是 1:1，故锚**唯一**，可直接作稳定键）
+    /// 组锚 = `blk_indices[0]`（块 → 组是 1:1，故锚**唯一**，可直接作稳定键）；
+    /// **空块集（`regs` 为空的退化组）取哨兵 `EMPTY_GROUP_ANCHOR = usize::MAX`**
+    /// —— 无真实块下标可与之相等，故锚仍**单射**（§12.4.1）。
     anchor_blk: usize,
 }
 
@@ -2528,38 +2545,56 @@ struct PortRunner {
     calc: std::sync::Mutex<DueCalc>,
     /// **变化沿记忆：键由 `usize`（站下标）改为 `GroupKey`**（§12.4.4 给出"必须改"的理由）
     trackers: std::sync::Mutex<HashMap<GroupKey, EdgeTracker>>,
-    /// 站下标 → 站级承载组的锚块（C8；构造期算好，`poll_group` 不再重算）
-    carrier_anchor: HashMap<usize, usize>,
-    /// 站下标 → 该站的**全部组键**（站恢复时须"重建全部组基线"，§12.5）
+    /// 站下标 → 该站的**全部组键**（**承载组**判定"站恢复"时须"重建全部组基线"，§12.4.4 连带项 a）
+    /// —— 注意：**只有承载组**会用到它（S-3 修订：非承载组不得触发站级全组重建）
     groups_of_station: HashMap<usize, Vec<GroupKey>>,
     /// **组键 → 组内块在 `StationConf::regs` 中的下标**（构造期由 `read_groups_of` 一次算好，
-    /// `poll_group` 直接查表 ⇒ 免每轮重新分组；也是"块 → 组"的唯一权威映射）
+    /// `poll_group` 直接查表 ⇒ 免每轮重新分组；也是"块 → 组"的唯一权威映射）。
+    /// **空 `regs` 站的退化组映射到空块集 `vec![]`** ⇒ `poll_group` 的读循环 **0 次**、
+    /// `poll_to_result(role, &[])` 照常求值（与既有空 `regs` 站逐字等价，见 §12.4.1）。
     group_of: HashMap<GroupKey, Vec<usize>>,
     cylinder_seen_nonzero: std::sync::Mutex<HashSet<usize>>, // 语义不变（站级）
 }
 ```
 
-### 12.3 分组不变量（V-1…V-6，与 PRD §10.3.2 的 C1–C9 一一对应）
+> **已删除的字段（优化 4 之二）**：v1.13 曾声明 `carrier_anchor: HashMap<usize, usize>`（"站下标 → 承载组锚块"），但 §12.4.3 的 `poll_group` 实际查的是 `runner.group_of[&key]`、承载性由 `GroupPoll.is_carrier`（构造期由 `DueCalc::from_group` 算好）携带 ⇒ **该字段无任何使用点**，v1.13-r1 **删除**（需要"站 → 承载组锚"时用 `carrier_group(c).map(|g| g.anchor_blk)` 现算，或由 `DueEntry.is_carrier` 携带）。
+
+### 12.3 分组不变量（V-1…V-6）
+
+> **与 PRD 的对应关系（不再是"一一对应"，优化 2 订正）**：v1.13 的标题自称"与 §10.3.2 的 C1–C9 **一一对应**"—— **不实**。实际对应是：**V-1** ↔ §10.3.3（分组语义）；**V-2** ↔ C6；**V-3** ↔ C5/C7；**V-4** ↔ C1/C2；**V-5** ↔ §10.3.1 定性 1；**V-6** ↔ §10.6 第 3 条。**C3 / C4 / C8 / C9 没有"分组不变量"形式**：C3（`poll_ms` 网格）与 C4（`1.5×T_组` 下界）与 C9（口占用上界 `U ≤ 0.5`）是**数值约束**（落 §12.7 规则 21 / 20 / 23），C8 是**承载组选择规则**（落 `carrier_group()` 与 §12.5）；PRD §10.5 第 3 行（`Σ T_组` 上界）落**规则 24**（同样无 V 形式）。⇒ 「不变量」与「C 编号」是**两种不同形态的约束**，本节与 C1–C9 **不是一一对应**。
 
 | 不变量 | 内容 | 对应 PRD | 保证方式 |
 |--------|------|----------|----------|
 | **V-1** | 分组键 = **有效周期**：`ReadGroup` 按 `eff(块)` 分桶，同桶同组 | §10.3.3 | `read_groups_of`（§12.4.1，**唯一分组实现**） |
 | **V-2** | `R(role)` 内块**同组**（⇒ 判据恒看到齐备读集） | C6 | 配置期 `Err`（§12.7 规则 22）+ 运行期守卫（§12.4.5） |
 | **V-3** | `R(role)` 的组周期 **= 站级 `interval_ms`**（C5+C7 合取） | C5/C7 | 配置期 `Err`（规则 21/22） |
-| **V-4** | 组周期恒 `> 0`（⇒ `next_due` 推进与 `backoff_extra` 的 `interval_ms > 0` 前提成立，与 `scheduler.rs:536-541` 的既有论证同源） | C1/C2 | 配置期 `Err`（规则 20） |
-| **V-5** | 单组站（无块声明）⇒ 组划分恒为 `[(站周期, 全部块)]`（**一项**）⇒ 调度行为与改造前**逐字等价** | §10.3.1 定性 1 | `read_groups_of` 在"全部块 `None`"时天然只产出一个桶 |
+| **V-4** | 组周期恒 `> 0`（⇒ `next_due` 推进与 `backoff_extra` 的 `interval_ms > 0` 前提成立，与 `scheduler.rs:536-541` 的既有论证同源） | C1/C2 | 配置期 `Err`（规则 20）；退化组取站周期，而站级 `interval_ms > 0` 由既有站级校验保证（`config.rs:227-229`） |
+| **V-5** | **单组站恒恰有 `1` 个组** ⇒ 调度行为与改造前**逐字等价**。两种情形：**(a)** 有块且全部块未声明 `interval_ms` ⇒ 唯一组 = `(站周期, 全部块)`；**(b) `regs` 为空** ⇒ 唯一**退化组** = `(站周期, **空块集**)`（锚 = 哨兵 `EMPTY_GROUP_ANCHOR`） | §10.3.1 定性 1 | `read_groups_of`：情形 (a) 在"全部块 `None`"时天然只产出一个桶；情形 (b) 由**显式的"空则补一个空桶"分支**保证（§12.4.1）—— **不得**返回 0 个组 |
 | **V-6** | 口内**串行**不变：组是新的调度粒度，但同口仍单 poller 串行（`Rs485PortBus` 的 per-port async Mutex，§10.2 / `scheduler.rs:1-5`） | §10.6 第 3 条 | 不改 `spawn` 的"每口一条 task"结构（`scheduler.rs:492-507`） |
 
-**V-5 的机械证明（零行为变化的依据）**：全部块 `interval_ms == None` ⇒ `eff` 全等于 `station.interval_ms` ⇒ `read_groups_of` 产出**唯一桶**（周期 = 站周期、`blk_indices` = 全部块、`anchor_blk = 0`）⇒ `DueCalc.entries` 与改造前**逐条目同值**（`interval_ms`/`next_due` 初值 0 均同）；`due_round` 的推进/钳制（`scheduler.rs:146-155`）与排序键（`role_priority, station_index, anchor_blk` ≡ 既有的 `role_priority, 条目序`，因条目序 = cfg 站序）**逐项相同**；`poll_group` 读的块集 = 全部块（同 `poll_station`）⇒ 读事务序列、上送点、事件序列**全部相同**。
+**V-5 的机械证明（零行为变化的依据，两情形并列）**：
+
+- **情形 (a)**（有块、全部块 `interval_ms == None`）：`eff` 全等于 `station.interval_ms` ⇒ `read_groups_of` 产出**唯一桶**（周期 = 站周期、`blk_indices` = 全部块、`anchor_blk = 0`）⇒ `DueCalc.entries` 与改造前**逐条目同值**（`interval_ms`/`next_due` 初值 0 均同）；`due_round` 的推进/钳制（`scheduler.rs:146-155`）与排序键（`(role_priority, station_index, !is_carrier, anchor_blk)` ≡ 既有的 `(role_priority, 条目序)` —— 单组站的 `!is_carrier = false` 恒同、`anchor_blk = 0` 恒同、条目序 = cfg 站序）**逐项相同**；`poll_group` 读的块集 = 全部块（同 `poll_station`）⇒ 读事务序列、上送点、事件序列**全部相同**。
+- **情形 (b)**（`regs` 为空）：退化组**仍产 1 条目**（`interval_ms` = 站周期、`next_due` 初值 0，与改造前的该站条目**同值**）⇒ 到期节奏、`delay_station`→`delay_group` 的后移量**同值**；`poll_group` 的读循环 **0 次**（`group_of` = `vec![]`）⇒ `io_error = None`（口已打开）⇒ 该组为承载组 ⇒ `poll_to_result(role, &[])` 与 `mark_success` **照常调用**；`round_signals_group`/`round_station_flags` 在空读集上产空信号 ⇒ **无遥测、无事件**。⇒ 与既有 `poll_station` 空 `regs` 站的行为**逐字等价**（既有单测 `battery_station_without_soc_block_does_not_push` 的断言"`offline`/`online` 各 0 条 + `soc` 不误推"继续成立）。
 
 ### 12.4 调度器改造（可直接编码的伪码与签名）
 
 #### 12.4.1 分组划分（**纯函数**，校验期与调度期共用）
 
 ```rust
+/// 空块集（`regs` 为空）退化组的**哨兵锚**。取 `usize::MAX`：任何真实块下标（`< regs.len()`）
+/// 都不可能与之相等 ⇒ 「锚 → 组」仍是**单射**，`(station_index, anchor_blk)` 仍可作稳定 `HashMap` 键。
+pub const EMPTY_GROUP_ANCHOR: usize = usize::MAX;
+
 /// 站 → 读组划分。**唯一分组实现**（配置期校验与调度期构造都调它，防两处漂移）。
-/// 返回按**组周期升序**（`BTreeMap` 序）；无任何块声明 `interval_ms` 时**只返回一个桶**
-/// （= 全部块、周期 = 站周期）——V-5 的零行为变化由此结构性成立。
+/// 返回按**组周期升序**（`BTreeMap` 序）。
+/// **不变量：对任何 `StationConf`（含 `regs` 为空）至少返回一个组。**
+/// - 有块且无块声明 `interval_ms` ⇒ 唯一桶（= 全部块、周期 = 站周期）—— V-5(a)；
+/// - **`regs` 为空 ⇒ 一个退化组**（空块集、周期 = 站周期、锚 = `EMPTY_GROUP_ANCHOR`）—— V-5(b)。
+///   **不得**返回 0 个组：那会使该站**永不进入 `DueCalc`**（= 被静默移出调度），
+///   与既有"空 `regs` 站照常被轮询、读集为空、`poll_to_result(role, &[])` 照常求值、
+///   成功/失败记账照旧"的行为**不符**（既有单测 `scheduler.rs::battery_station_without_soc_block_does_not_push`
+///   内联构造 `regs: vec![]` 直接 `tick_once`，**不经 `validate`** ⇒ 该输入**可达**）。
 pub fn read_groups_of(c: &StationConf) -> Vec<ReadGroup> {
     let mut by_period: std::collections::BTreeMap<u64, Vec<usize>> = Default::default();
     for (i, b) in c.regs.iter().enumerate() {
@@ -2568,10 +2603,14 @@ pub fn read_groups_of(c: &StationConf) -> Vec<ReadGroup> {
             .or_default()
             .push(i);
     }
+    if by_period.is_empty() {
+        by_period.insert(c.interval_ms, Vec::new());   // 退化组：空块集、周期 = 站周期
+    }
     by_period
         .into_iter()
         .map(|(interval_ms, blk_indices)| ReadGroup {
-            anchor_blk: blk_indices[0],   // 键：块 → 组 1:1 ⇒ 锚唯一
+            // 键：块 → 组 1:1 ⇒ 锚唯一；空块集取哨兵（**不索引 `blk_indices[0]`**）
+            anchor_blk: blk_indices.first().copied().unwrap_or(EMPTY_GROUP_ANCHOR),
             blk_indices,
             interval_ms,
         })
@@ -2581,25 +2620,35 @@ pub fn read_groups_of(c: &StationConf) -> Vec<ReadGroup> {
 /// 站级承载组（PRD §10.3.2 **C8**）：**周期最大**的组；并列取 `anchor_blk` 最小者。
 /// 语义：`offline`/`online` 状态事件、`offline_count` 与站级退避都由它承载
 /// ⇒ **站离线判定时延与现状一致**（不被快组影响）。
-pub fn carrier_group(c: &StationConf) -> ReadGroup {
+///
+/// **返回 `Option<ReadGroup>`（S-1 修订：绝不在该可达输入上 panic）**：
+/// `read_groups_of` 的"至少一组"不变量保证实际恒 `Some`（含空 `regs` 站的退化组），
+/// 但**即便如此也不得用 `expect`/`unwrap`** —— 空 `regs` 是**可达输入**
+/// （配置期只对 `Role::Pcs` 拒空，`config.rs:296-303`；调度器单测直接内联构造），
+/// 一旦将来 `read_groups_of` 的不变量被改坏，`expect` 会把"配置错误"变成"进程 panic"。
+pub fn carrier_group(c: &StationConf) -> Option<ReadGroup> {
     read_groups_of(c)
         .into_iter()
         .max_by_key(|g| (g.interval_ms, std::cmp::Reverse(g.anchor_blk)))
-        .expect("regs 非空时必有组；空 regs 由配置期规则 3（pcs）与运行期空读路径分别覆盖")
 }
 ```
 
-> **`anchor_blk` 作键的合法性**：每个块**恰属一个组**，组锚 = 组内最小块下标 ⇒ 组锚 → 组是**单射**，故 `(station_index, anchor_blk)` 唯一标识一个组（也唯一标识该组内的块集 = 配置的纯函数）。
+> **`.expect` 的理由文案订正（S-1 之三）**：v1.13 曾写"`regs` 非空时必有组；空 regs 由配置期规则 3（pcs）与运行期空读路径分别覆盖"—— 该理由**两条都不成立**：① 配置期**只**对 `Role::Pcs` 拒空 `regs`（`config.rs:296-303`），非 `pcs` role 的空 `regs` 站**能通过校验**；② "运行期空读路径"覆盖的是"口未打开/读失败"，与"空 `regs` 站"无关。⇒ 正确做法就是上面两条：**`read_groups_of` 不变量保证至少一组 + `carrier_group` 返回 `Option`**（无需任何解释性理由来自证不 panic）。
+>
+> **`anchor_blk` 作键的合法性**：每个块**恰属一个组**，组锚 = 组内最小块下标 ⇒ 组锚 → 组是**单射**；空块集退化为哨兵 `usize::MAX`（无真实下标可与之相等）⇒ 单射性保持，故 `(station_index, anchor_blk)` 唯一标识一个组（也唯一标识该组内的块集 = 配置的纯函数）。
 
 #### 12.4.2 `DueCalc` 改造
 
 ```rust
 impl DueCalc {
-    /// 构造：由本口站组构造。**每站产 `read_groups_of(c).len()` 个条目**（单组站 = 1 个，同既有）。
+    /// 构造：由本口站组构造。**每站产 `read_groups_of(c).len()` 个条目，且恒 ≥ 1**
+    /// （单组站与**空 `regs` 站**各 1 个，同既有；见 §12.4.1 的不变量）。
     fn from_group(group: &[(usize, &StationConf)]) -> Self {
         let mut entries = Vec::new();
         for (idx, c) in group {
-            let carrier = carrier_group(c).anchor_blk;
+            // `carrier_group` 返回 `Option`（S-1）：不变量保证 `Some`；`unwrap_or` 仅作**无 panic 兜底**
+            // —— 真取到 `None` 时 `read_groups_of` 亦为空 ⇒ 下面循环不执行，该值不被使用。
+            let carrier = carrier_group(c).map(|g| g.anchor_blk).unwrap_or(EMPTY_GROUP_ANCHOR);
             for g in read_groups_of(c) {
                 entries.push(DueEntry {
                     key: GroupKey { station_index: *idx, anchor_blk: g.anchor_blk },
@@ -2615,7 +2664,8 @@ impl DueCalc {
     }
 
     /// 到期判定与推进：**推进/钳制逻辑与既有逐字相同**（`scheduler.rs:146-155`），
-    /// 仅排序键由 `(role_priority, 条目序)` 改为 `(role_priority, station_index, anchor_blk)`。
+    /// 排序键由 `(role_priority, 条目序)` 改为
+    /// `(role_priority, station_index, **!is_carrier**, anchor_blk)`（S-3 修订，理由见下注）。
     pub fn due_round(&mut self, now_ms: u64) -> Vec<GroupPoll> {
         let mut due: Vec<usize> = Vec::new();
         for (i, e) in self.entries.iter_mut().enumerate() {
@@ -2628,11 +2678,15 @@ impl DueCalc {
                 due.push(i);
             }
         }
-        // 原序（`i`）→ `(station_index, anchor_blk)`：单组站二者等价（条目序 = cfg 站序），
-        // 多组站内按**块书写序**稳定（站周期组通常含块 0 ⇒ 通常先跑，但**两种次序皆正确**）
+        // 原序（`i`）→ `(station_index, !is_carrier, anchor_blk)`：
+        //  · 单组站：每站恰 1 条目、且恒为该站承载组 ⇒ `!is_carrier = false`、`anchor_blk` 恒同
+        //    ⇒ 键退化为 `(role_priority, station_index)`，与既有的 `(role_priority, 条目序)`
+        //    **逐项等价**（条目序 = cfg 站序）⇒ V-5 的零行为变化不受影响；
+        //  · 多组站：**站内承载组恒排最前**（S-3 修订）—— 使"站恢复当轮的全组基线重建"发生在本站
+        //    其它组的产出**之前**（论证见下方注）。
         due.sort_by_key(|&i| {
             let e = &self.entries[i];
-            (role_priority(e.role), e.key.station_index, e.key.anchor_blk)
+            (role_priority(e.role), e.key.station_index, !e.is_carrier, e.key.anchor_blk)
         });
         due.into_iter()
             .map(|i| {
@@ -2651,14 +2705,31 @@ impl DueCalc {
     /// `now_ms + extra_ms`（若现 `next_due` 已更晚则不动）。签名与语义逐字沿用。
     pub fn delay_group(&mut self, key: GroupKey, now_ms: u64, extra_ms: u64);
 
-    /// 组级失败计数 +1 / 清零（仅**块级组**使用；站级承载组的失败由 `offline_count` 记账）
-    pub fn bump_group_fail(&mut self, key: GroupKey);
+    /// 组级失败计数 +1，**并返回 `(组周期, 加一后的失败计数)`**（= 退避入参；见下注：使
+    /// "计数 +1"与"取入参"**原子**，调用方无需二次查表）；键不存在 ⇒ `None`（**不 panic**）。
+    pub fn bump_group_fail(&mut self, key: GroupKey) -> Option<(u64, u32)>;
     pub fn clear_group_fail(&mut self, key: GroupKey);
 
-    /// 读该组的 `(组周期, 组级失败计数)` —— 退避公式的入参（替代既有从 `state` 取 `(interval, oc)`）
+    /// 读该组的 `(组周期, 组级失败计数)` —— 退避公式的入参（替代既有从 `state` 取 `(interval, oc)`）；
+    /// 键不存在 ⇒ `None`（**不 panic**）。
     pub fn group_backoff_input(&self, key: GroupKey) -> Option<(u64, u32)>;
 }
 ```
+
+> **为什么 `bump_group_fail` 顺带返回入参（v1.13-r1）**：v1.13 的 `run_port_round` 写作 `calc.bump_group_fail(key);` 紧接 `calc.group_backoff_input(key).unwrap()` —— 与 S-1 同类的"查表失败即 panic"风险（虽然该键必然存在）。改为**返回 `Option` 并在调用点 `if let`**（§12.4.3）⇒ 该段**无 `unwrap`/`expect`**；两个方法都返回 `Option` 且都不 panic。
+
+> **为什么排序键要加 `!is_carrier`（S-3 修订的"同 tick 组序"论证）**：
+>
+> **问题的来源**：站级全组基线重建的触发者是**承载组**（`poll.is_carrier && station_was_offline`，§12.4.3 的 ① 段）。而承载组是**周期最大**的组，其组锚**不必然最大** —— 例：`hvac` 若把 `hvac_di`（1000 ms）写在配置前面，则快组锚 = 0、承载组锚 = 1 ⇒ 旧的升序键 `(.., anchor_blk)` 会把**承载组排在快组之后**。于是"站恢复的那一 tick"里，快组**先**（在承载组重建全组基线之前）完成产出，承载组**后**才 `reset()` 全组。
+>
+> **为什么这不可接受（三条，按重要性）**：
+> 1. **语义原子性**：站恢复是**站级**事实（"该站全部组基线一并重建"，§12.4.4 连带项 a）。若次序不钉住，则同 tick 内会出现"某组已按其（可能陈旧的）基线产出、随后才被重建"的**半状态**；该组本轮的产出是否成立取决于**配置书写次序**（锚的偶然大小），这不是设计可接受的"两种次序皆正确"。
+> 2. **多一次全量落位**：承载组后跑 ⇒ 已经把本轮产出交付出去的组，会在**下一轮**再做一次 `full_snapshot`（该组的位点全量落位，BMS 组 = 288 位）—— 与连带项 a 的"防恢复即刷一屏"取向相悖（量级小，但方向相反）。承载组先跑 ⇒ 全组在**同一轮**完成"重建基线（全量快照、不产事件）"，无多余轮次。
+> 3. **钉住"谁能观察到站恢复"**：承载组先跑 ⇒ 它在本轮 `mark_success` 清 `offline_count` 发生在其它组读它**之前**，其它组看到的 `station_was_offline` 恒为 `false` —— 这是**正确**值（站在本轮已恢复），且**不丢失任何重建**：其它组**不需要**该标志（组级重建由 `poll.was_failing` 独立决定，`was_failing` 在 `due_round` 时**已快照**，先于本轮任何组执行；站级重建已由承载组替它们完成）。
+>
+> **为什么"承载组先跑 + `mark_success` 先清 `offline_count`"不会让同 tick 后来的组误判**：后来组的 `station_was_offline` 只用于 ① 段（且 ① 段已被 `poll.is_carrier` 门控 ⇒ 对它们恒不生效）；它们的组级重建入参 `poll.was_failing` 取自 `due_round` 的快照，与本轮 `offline_count` 的读写时序**完全无关**。⇒ 清零只影响"谁触发站级重建"，而站级重建**已经**由承载组执行完毕。
+>
+> **对既有行为的影响 = 零**：单组站（含空 `regs` 站）每站恰 1 条目、且它就是承载组 ⇒ `!is_carrier = false` 为常量、`anchor_blk` 亦为常量 ⇒ 排序与既有 `(role_priority, 条目序)` 逐项一致（V-5；用例 `single_group_ordering_unchanged` 钉住）。
 
 #### 12.4.3 `run_port_round` / `poll_group`
 
@@ -2675,25 +2746,32 @@ async fn run_port_round(&self, port_i: usize, now_ms: u64) {
     for poll in due {
         let ok = self.poll_group(runner, poll).await;
         let mut calc = runner.calc.lock().unwrap();
-        if ok { calc.clear_group_fail(GroupKey { ..poll.into() }); }
-        else  { failed.push(poll); }
+        if ok {
+            // 显式构造（优化 4 之一：v1.13 曾写 `GroupKey { ..poll.into() }`，那需要一个
+            // **未声明**的 `From<GroupPoll> for GroupKey`；与下方 `let key = ..` 同款即可）
+            calc.clear_group_fail(GroupKey { station_index: poll.station_index, anchor_blk: poll.anchor_blk });
+        } else {
+            failed.push(poll);
+        }
     }
     if failed.is_empty() { return; }
 
-    // 站级承载组：退避入参 = (站周期, 站级 offline_count)（**与既有 scheduler.rs:526-542 同源**）
-    // 块级组：     退避入参 = (组周期, **组级** fail_count)（先 bump 再取）
+    // 站级承载组：退避入参 = (**承载组自身组周期**, 站级 offline_count)（非退化配置下 ≡ 站周期，
+    //             与既有 scheduler.rs:526-542 同源；口径统一说明见下注）
+    // 块级组：     退避入参 = (组周期, **组级** fail_count)（`bump_group_fail` **原子**返回两者）
     // 先一次锁 state 快取承载组的 offline_count，**勿持 state 锁跨 calc 锁**（既有约定）
     let oc_of = |si: usize| -> u32 { self.state.read().unwrap()[si].offline_count };
     let mut calc = runner.calc.lock().unwrap();
     for p in failed {
         let key = GroupKey { station_index: p.station_index, anchor_blk: p.anchor_blk };
+        // `key` 必存在（来自本 tick 的 `due_round`，条目由 `from_group` 建成）⇒ 两方法恒 `Some`；
+        // 但**一律用 `if let`、不 `unwrap`**（v1.13-r1：与 S-1 同款"查表失败不得 panic"取向）。
         if p.is_carrier {
-            let (iv, _) = calc.group_backoff_input(key).unwrap();
-            calc.delay_group(key, now_ms, backoff_extra(iv, oc_of(p.station_index)));
+            if let Some((iv, _)) = calc.group_backoff_input(key) {
+                calc.delay_group(key, now_ms, backoff_extra(iv, oc_of(p.station_index)));
+            }
             // 承载组失败：站级 offline 记账已在 poll_group 内完成（handle_failure）
-        } else {
-            calc.bump_group_fail(key);
-            let (iv, fc) = calc.group_backoff_input(key).unwrap();
+        } else if let Some((iv, fc)) = calc.bump_group_fail(key) {
             calc.delay_group(key, now_ms, backoff_extra(iv, fc));
         }
     }
@@ -2799,8 +2877,19 @@ async fn poll_group(&self, runner: &PortRunner, poll: GroupPoll) -> bool {
         }
         let (events, changed_bits) = {
             let mut trackers = runner.trackers.lock().unwrap();
-            // ① 站级恢复（`station_was_offline`）⇒ **该站全部组**基线重建（§12.4.4 连带项 a）
-            if station_was_offline {
+            // ① **站级恢复** ⇒ **该站全部组**基线重建（§12.4.4 连带项 a）。
+            //    ★★ 触发者**只能是承载组**（S-3 修订）★★：`station_was_offline` 单独**不足以**定
+            //    触发 —— `offline_count` 只在**承载组**成功时被 `mark_success` 清零
+            //    （`scheduler.rs:730-737`），因此当**承载组持续失败**时该标志对非承载组**恒为真**，
+            //    若据此触发"全组重建"，则非承载组**每一轮**成功都会把自己的基线重置 ⇒
+            //    (i) 该组 `primed` 恒 `false` ⇒ **0→1 变化沿事件永不产出**（与 §12.5 表
+            //        "只受本组基线状态与组级失败重建影响"直接矛盾）；
+            //    (ii) `full_snapshot` 每轮为真 ⇒ **每轮全量落位**（BMS 288 位/轮 ≈ 2.5×10⁷ 行/天，
+            //         正是 PRD §9.8.1 末条明文告警的量级）。
+            //    ⇒ 门控 = `is_carrier` **且** 读前 `offline_count > 0`（= 真正的"本轮恢复"）。
+            //    ⇒ 承载组在站内**恒排最前**（§12.4.2 的排序键）⇒ 本段的重建**先于**该站其它组的
+            //       本轮产出发生，不存在"先产出、后被重建"的半状态。
+            if poll.is_carrier && station_was_offline {
                 for k in &runner.groups_of_station[&si] {
                     trackers.entry(*k).or_default().reset();
                 }
@@ -2829,7 +2918,7 @@ async fn poll_group(&self, runner: &PortRunner, poll: GroupPoll) -> bool {
 > **判据路径与非判据路径的边界（B-1 修订的"三句话"）**：
 > 1. **`poll_to_result`（分发 + 站级成功/失败记账）** —— 只由 `is_carrier` 门控（既有权衡，不变）；
 > 2. **`judges_evaluable`（判据完整性守卫）** —— 只由 `is_carrier && judges_evaluable(..)` 门控 **`round_station_flags`（`StationFlag` 三项）** 的求值；**不得**用来门控位/标量遥测与事件；
-> 3. **位/标量遥测 + 变化沿事件** —— **任意组**都可产出，只受"本组 tracker 的基线状态"（§12.4.4）与"组级失败重建"（§12.5）影响。
+> 3. **位/标量遥测 + 变化沿事件** —— **任意组**都可产出，只受"本组 tracker 的基线状态"（§12.4.4）影响；该基线的**重建只有两个来源**：「**本组** `was_failing` 恢复（组级，仅本组）」与「**该站承载组**判定站恢复（站级，该站全部组）」—— **非承载组自身的成功不触发站级全组重建**（S-3 修订；§12.5 的重建条件表）。
 
 #### 12.4.4 变化沿记忆的键（**必须改为组键**，否则组间互相清空）
 
@@ -2845,8 +2934,10 @@ async fn poll_group(&self, runner: &PortRunner, poll: GroupPoll) -> bool {
 
 | # | 规范 | 理由 |
 |---|------|------|
-| a | **站恢复 ⇒ 该站全部组一并 `reset()`** | 既有 `poll_station` 在 `recovered` 时只 `reset()` 当前（唯一）tracker（`scheduler.rs:634-636`）。有了多组，若只重置"先成功的那一组"，其余组会拿**离线前**的基线比对 ⇒ 恢复即刷一屏事件（`online` 之后紧跟一堆位事件）。实现：`PortRunner.groups_of_station` + 上面伪码 ① 段的遍历 |
+| a | **站恢复 ⇒ 该站全部组一并 `reset()`；且"站恢复"只由承载组判定**（S-3 修订） | 既有 `poll_station` 在 `recovered` 时只 `reset()` 当前（唯一）tracker（`scheduler.rs:634-636`）。有了多组，若只重置"先成功的那一组"，其余组会拿**离线前**的基线比对 ⇒ 恢复即刷一屏事件（`online` 之后紧跟一堆位事件）。实现：`PortRunner.groups_of_station` + §12.4.3 伪码 ① 段的遍历，**门控 = `poll.is_carrier && station_was_offline`**。<br>**为什么门控必须有 `is_carrier`**：`offline_count` 只在承载组成功时清零 ⇒ 承载组持续失败时该标志对非承载组恒真；若任由非承载组触发全组重建，其基线每轮被重置 ⇒ 该组**永不产变化沿事件**且**每轮全量落位**（§12.4.3 ① 段的两条后果）。<br>**为什么还要"承载组站内排最前"**：见 §12.4.2 的排序键论证（重建必须**先于**本站其它组的本轮产出发生，否则同 tick 出现"先产出、后被重建"的半状态，且该组下一轮多做一次全量快照） |
 | b | **首轮/组恢复后只建基线、不产事件** | 沿用既有口径（`primed = false` ⇒ `edges()` 只 `prime()` 返回空，`scheduler.rs:255-265`）；**唯一例外**仍是已登记的 `StationFlag`（首次观测即产）——该例外**不需要**跨组推广（`StationFlag` 的判据块恒在承载组，§12.4.5） |
+
+> **全章一致的"谁能重建基线"口径（S-3 之四）**：① **站级（该站全部组）重建 —— 唯一触发者 = 承载组**（条件：读前 `offline_count > 0` 且本轮成功）；② **组级（仅本组）重建 —— 触发者 = 本组**（条件：`poll.was_failing`，即本组上一轮失败过）。**不存在**"任一组成功即全组重建"或"站恢复即由任意组触发全组重建"的写法（§12.5 重建条件表 / §12.4.3 ① 段 / §12.10.1 第 4 项 / §12.11 T9 / §12.12 均已按本条统一）。
 
 #### 12.4.5 判据完整性守卫（运行期对偶，纵深防御）
 
@@ -2903,10 +2994,10 @@ fn judges_evaluable(role: Role, reads: &BlockReads) -> bool {
 | 事件/状态 | 承载者 | 语义 |
 |-----------|--------|------|
 | 站级 `offline` / `online` | **站级承载组**（C8） | 与既有**逐字相同**：组内任一块读 `Err` 或 `poll_to_result::Failed` ⇒ `handle_failure`（`offline_count` +1、按 `stale_timeout_s` 窗口去抖后产一次事件、`reason` 含 `slave/addr/count`）；成功 ⇒ `mark_success`（`online` 一次 + 归零） |
-| 站级退避 | **站级承载组** | `backoff_extra(站周期, offline_count)`（同既有 `scheduler.rs:536-541`） |
+| 站级退避 | **站级承载组** | `backoff_extra(**承载组自身组周期**, 站级 `offline_count`)` —— **口径与 §12.4.3 的注统一**（v1.13 此处曾写"站周期"，与 §12.4.3 注的"组周期"并存 ⇒ 优化 4 之三已统一为**组周期**）：**非退化配置**下 `组周期 ≡ 站周期`（C5+C7 ⇒ 承载组 = 站周期组）⇒ 与既有 `scheduler.rs:536-541` **逐字等价**；只在**退化配置**（站内全部块都声明了 `interval_ms`，PRD §10.6 第 8 条）下二者不同，此时按该组**实际 cadence** 退避才自洽 |
 | 块级（快采）组失败 | **无事件** | ① `warn` 日志（含 `station/role/块名/reason`）；② **组级**计数 + 按**组周期**指数退避（`backoff_extra(组周期, group_fail_count)`，封顶 32× 同既有 `MAX_BACKOFF_SHIFT`）；③ `offline_count` **不自增**、`offline`/`online` **不产** |
 | 变化沿输入 | **组级 tracker** | 组内块只喂**本组** tracker（§12.4.4）；**各组的基线互不可见**（故非承载组不会清空承载组的记忆，反之亦然） |
-| **位 / 标量遥测 · 变化沿事件产出** | **任一读组**（承载组与块级组**同一路径**） | **非承载组照常产出** —— **不受** `judges_evaluable` 门控（B-1 修订；§12.4.3 的"三句话"第 3 条）。产出内容 = 本组块自身的位（变化沿 / 首轮全量）+ 标量（每轮全量），同既有 D2 口径 |
+| **位 / 标量遥测 · 变化沿事件产出** | **任一读组**（承载组与块级组**同一路径**） | **非承载组照常产出** —— **不受** `judges_evaluable` 门控（B-1 修订；§12.4.3 的"三句话"第 3 条）。产出内容 = 本组块自身的位（变化沿 / 首轮全量）+ 标量（每轮全量），同既有 D2 口径。**基线的重建只受两个来源影响**：「本组 `was_failing`」与「**该站承载组**判定站恢复（全组，S-3 修订）」—— **非承载组自身的成功/失败不触发站级全组重建**（否则其基线每轮被重置 ⇒ 0→1 变化沿永不产出 + 每轮全量落位） |
 | **站级派生量 `StationFlag`**（SOC 域 / 消防地址序 / 消防登记数） | **站级承载组**（且组内齐备 `R(role)`） | **唯一**求值点：`if poll.is_carrier && judges_evaluable(..)`。非承载组**跳过求值**（不臆断、不产事件）——该量的判据**跨块**，用部分读集求值会**假报**（§12.4.5） |
 
 **"块级组失败不得升级为站级 offline"的两条硬理由（不得违反）**：
@@ -2914,32 +3005,38 @@ fn judges_evaluable(role: Role, reads: &BlockReads) -> bool {
 1. **否则会隐藏正在正常上送的快采告警位**：站被判 offline ⇒ 12 号 F25.4 规定该站**全部**点显示 `--` + 「站离线」（12 PRD F25.4 第 3 条），把**刚刚成功采到并上送的告警位**一并遮蔽 —— 与本能力的诉求（告警位 ≤2 s 可见）**直接冲突**。
 2. **否则会形成周期性事件对刷屏**：`mark_success` 会把 `last_offline_event` 清 `None`（`scheduler.rs:737`），恰好**重置 offline 去抖窗口** ⇒ "快组成 / 慢组败"交替时，每轮都会"`online` 1 条 + `offline` 1 条"（以 5 s 承载周期计 ≈ **3.5 万条/日**，且全都指向同一物理事实）。
 
-**组级基线的重建条件（两条，取"或"）**：
+**组级基线的重建条件（两条，取"或"）—— 唯一的"谁能重建"口径（S-3 修订），全章一致**：
 
-| 触发 | 范围 | 依据 |
+| 触发（**谁能重建**） | 范围 | 依据 |
 |------|------|------|
-| 组级：`poll.was_failing == true` 且本轮成功 | **仅该组** | 与服务体"恢复后现势值连续性不可假设"同一取向（`scheduler.rs:620-621`）；避免用离线前基线产出陈旧跃迁 |
-| 站级：承载组判定 `recovered`（`offline_count > 0`） | **该站全部组** | §12.4.4 的连带项 a（防"恢复即刷一屏事件"） |
+| 组级：**本组** `poll.was_failing == true`（= 本组上一轮失败过）且本轮成功 | **仅该组** | 与服务体"恢复后现势值连续性不可假设"同一取向（`scheduler.rs:620-621`）；避免用离线前基线产出陈旧跃迁 |
+| 站级：**该站承载组**（`poll.is_carrier`）且**读前** `offline_count > 0`、且本轮成功 | **该站全部组** | §12.4.4 的连带项 a（防"恢复即刷一屏事件"）。**触发者被限定为承载组** —— `offline_count` 只在承载组成功时清零（`mark_success` 只在承载分支调用），若允许非承载组按该标志触发，则承载组持续失败期间非承载组会**每轮**把全组基线重置（⇒ 变化沿永不产出 + 每轮全量落位） |
+
+> **两个来源的集合关系（消除"谁重建"的歧义）**：站级重建（承载组、范围 = 全站组）**真包含**承载组自身的组级需求；非承载组若在站离线期间**也在失败**，则其自身的 `was_failing` 规则已保证"恢复后只建基线"（**不依赖**站级重建）；若它在站离线期间**一直成功**，则其基线**本就是新鲜的**，无需重建。⇒ 两条规则合起来覆盖全部情形，且**任何一条都不会让一个健康的非承载组每轮重置**。
 
 **已知盲区（如实登记，不粉饰）**：块级组失败期间，其位点在 01 号 `latest_values` 中**仍标 `Ok`**（位点可得性 = 站级活性 ∧ 点位质量，而站级活性由承载组刷新）⇒ 由 `warn` 日志暴露，属跨文档待裁项（PRD **§10.9 Q-23**）。**本章不在 02 号侧新造第二套新鲜度判据**（12 PRD F25.1 同款禁令）。
 
 ### 12.6 带宽与单轮耗时（按 §9.8.1 的既有口径重算）
 
-**估时公式（沿用 PRD §9.8.1，不另立口径）**：1 字节 = `10 / baud_rate` 秒（9600 bps ⇒ **1.04 ms**）；事务字节数 = 请求 **8** + 响应 `(5 + 2N)`（FC02 时 `N = ceil(位数/8)` **字节**）；每事务另加 **4 ms** 从站周转。
+**估时公式（沿用 PRD §9.8.1 的常数与结构，不另立口径）**：1 字节 = `10 / baud_rate` 秒（9600 bps ⇒ **1.04 ms**）；事务字节数 = 请求 **8** + 响应 **`5 + D`**，其中 **`D` = 响应中的"数据字节数"**（FC02 读离散输入：`D = ceil(位数/8)`；FC03/FC04 读寄存器：`D = 2 × 寄存器数`）；每事务另加 **4 ms** 从站周转。
 
-**首例（`hvac` 站 = `/dev/ttyS3`，9600 8N1，**独占一口**）**：
+> **算式订正（优化 3 之二）**：v1.13 写"响应 `(5 + 2N)`（FC02 时 `N = ceil(位数/8)` **字节**）"—— 该句与**同一张表**的 `FC02 = 8 + (5+4) = 17` **不自洽**（按该句应为 `5 + 2×4 = 13` ⇒ `8 + 13 = 21`）。FC02 的响应帧结构 = `slave(1) + func(1) + byte_count(1) + D + CRC(2)` = **`5 + D`**（`D = ceil(位数/8)`）；FC04 = `5 + 2×寄存器数`（= 原式 `2N` 的 `N` 取"寄存器数"）。改正后与表内 `17` / `21`、以及 `T_快组 = 17 × 1.04 + 4 = 21.68 ms` / `T_慢组 = 21 × 1.04 + 4 = 25.84 ms` **逐位一致** ⇒ **PRD §10.4 的任何数字都无需改动**（PRD §9.8.1 的常数 `10 bit/字节` 与 `4 ms` 周转亦未动）；PRD §10.4 中**同一句的 `(5+2N)` 文字**偏差（文档级、不影响其表内数字）已登记为 **Δ-13**。
 
-| 组 | 块（PRD §9.4.1 取值） | func | N | 帧字节 | **T_组** | 组周期 | 占用率 |
+**首例（`hvac` 站 = `/dev/ttyS3`，9600 **8E1**（`parity: even`，生效配置 `mupc_core_config.production.yaml:398`），**独占一口**）**：
+
+> **比特/字节口径声明（优化 3 之一，防新写错事实）**：本表沿用 **PRD §9.8.1 的 `10 bit/字节` 口径**（1 起始 + 8 数据 + 1 停止），而生效配置的 hvac 站为 **8E1 = 11 bit/字节** ⇒ 按 8E1 精确复算为：`T_快组 = 17 × 11/9600 + 4 = 23.5 ms`、`T_慢组 = 21 × 11/9600 + 4 = 28.1 ms`、整站 `Σ T = 51.5 ms`、`U_后 = 23.5/1000 + 28.1/5000 = 0.0291 ⇒ 2.91 %`、`U_前 = 51.5/5000 = 1.03 %`（倍数仍 **2.8×**）。**结论不变**：C4 `1.5 × 23.5 = 35.2 ms ≤ 1000` ✓ / `1.5 × 28.1 = 42.1 ms ≤ 5000` ✓；C9 `2.91 % ≤ 50 %`（余量 **17.2×**）；规则 24 `Σ T = 51.5 ms ≤ 1.5 × 1000 = 1500 ms` ✓。**本表保留 `10 bit/字节` 口径**的唯一理由是**与 PRD §9.8.1 / §10.4 逐位同源**（§9.8.1 公式即该口径；若改口径则 PRD 全表数字需连动，超出本章授权）。
+
+| 组 | 块（PRD §9.4.1 取值） | func | `D`（数据字节） | 帧字节 | **T_组** | 组周期 | 占用率 |
 |----|------------------------|------|---|--------|----------|--------|--------|
-| 快组 | `hvac_di`（`addr: 0`, `count: 31` 位, **`interval_ms: 1000`**） | FC02 | 4 字节 | `8 + (5+4) = 17` | `17 × 1.04 + 4 =` **21.68 ms**（≈**22 ms**） | 1000 | **2.17 %** |
-| 站周期组（= **承载组**，C8） | `hvac_in`（`addr: 0`, `count: 4`, `points` 3 点, 未声明） | FC04 | 4 寄存器 | `8 + (5+8) = 21` | `21 × 1.04 + 4 =` **25.84 ms**（≈**26 ms**） | 5000 | **0.52 %** |
+| 快组 | `hvac_di`（`addr: 0`, `count: 31` 位, **`interval_ms: 1000`**） | FC02 | `ceil(31/8) = 4` | `8 + (5+4) = 17` | `17 × 1.04 + 4 =` **21.68 ms**（≈**22 ms**） | 1000 | **2.17 %** |
+| 站周期组（= **承载组**，C8） | `hvac_in`（`addr: 0`, `count: 4`, `points` 3 点, 未声明） | FC04 | `2 × 4 = 8` | `8 + (5+8) = 21` | `21 × 1.04 + 4 =` **25.84 ms**（≈**26 ms**） | 5000 | **0.52 %** |
 | **合计** | | | | **38** | **47.5 ms**（两组同刻到期的上界） | — | **`U_口 = 0.02168 + 0.005168 = 0.026848` ⇒ 2.68 %** |
 
 - **改造前**：整站一轮 = `38 × 1.04 + 2 × 4 = 47.52 ms`（**同一批事务**，只是每轮都做）⇒ 占用率 **`U_前 = 47.52 / 5000 = 0.95040 % ⇒ 0.95 %`**（与 §9.8.1 的 "≈1%" 一致）。
   > **占用率口径统一（评审订正，2026-09-23）**：**统一取"按本表公式复算的精确值"**（与"改造后"的 `0.026848` 完全同口径）：
   > `U_前 = 47.52 / 5000 = 0.0095040` ⇒ **0.95 %**；`U_后 = 0.026848` ⇒ **2.68 %**；倍数 `0.026848 / 0.009504 = 2.8248 ≈ 2.8×`。
   > **不得**改用 §9.8.1 的**取整值** `48 ms`（那会得 `48/5000 = 0.96 %`，与"改造后"的精确口径**不同源**，且使倍数算成 2.79×）。⇒ PRD §10.4 表中原写的 `≈0.96 %` 已在同轮订正为 **`≈0.95 %`**（02 PRD §10.4，v1.13）。
-- **改造后**：占用率 **2.68 %**（精确 0.026848；**2.8×**），单轮耗时**不变**（47.5 ms），最坏同刻叠加仍 `≪ 1000 ms` ⇒ **无积压**；C4 下界：快组 `1.5 × 21.68 = 32.5 ms ≤ 1000` ✓，慢组 `1.5 × 25.84 = 38.8 ms ≤ 5000` ✓；C9 上界 `0.026848 ≤ 0.5` ✓（**余量 18.6×**）。
+- **改造后**：占用率 **2.68 %**（精确 0.026848；**2.8×**），单轮耗时**不变**（47.5 ms），最坏同刻叠加仍 `≪ 1000 ms` ⇒ **无积压**；C4 下界：快组 `1.5 × 21.68 = 32.5 ms ≤ 1000` ✓，慢组 `1.5 × 25.84 = 38.8 ms ≤ 5000` ✓；C9 上界 `0.026848 ≤ 0.5` ✓（**余量 18.6×**）；**规则 24**（PRD §10.5 第 3 行，W-1 新增）：本口两组 `Σ T_组 = 21.68 + 25.84 = 47.52 ms ≤ 1.5 × 最小非零组周期 = 1.5 × 1000 = 1500 ms` ✓（**余量 31.6×**）。
 - **三档敏感性**（对应 PRD §10.9 **Q-21**）：2000 ms ⇒ `U = 1.60 %`；**1000 ms（推荐）** ⇒ `2.68 %`；500 ms ⇒ `4.85 %` **但须把段级 `poll_ms` 1000 → 500**（C3 网格对齐；`poll_ms` 是段级字段，`mupc_core_config.production.yaml:143`）。
 - **口预算复核（证明 C9 不拒既有配置）**：`battery` 286/1000 = 0.286、`meter_batt` 310/1000 = 0.310、`fire` 300/1000 = 0.300、`pcs` 90/1000 = 0.090、`hvac`（改造后）0.0268 ⇒ **全部 ≤ 0.5**（最大 = `meter_batt` 0.310）。`grid_meter` 的 `T` 本 PRD/设计**均未复算**（§9.8.1 该行标"既有"）⇒ 见 PRD §10.9 **Q-21 ③**（补算后纳入断言）。
 
@@ -2975,10 +3072,15 @@ fn judges_evaluable(role: Role, reads: &BlockReads) -> bool {
 
 | # | PRD 约束 | 落点 | 判据（可机械判定） | 文案要求 |
 |---|----------|------|--------------------|----------|
-| **规则 20** | C1 + C2 + C4 | 同上 | 逐块：`iv == 0` → `Err`；`iv < BLOCK_MIN_INTERVAL_MS(500)` → `Err`；`iv < 1.5 × T_组`（`T_组` 按 §12.6 公式用本站 `baud_rate` 复算）→ `Err`。**仅当块显式声明了 `interval_ms` 时才判**（`None` ⇒ 继承站周期，站级已有规则覆盖） | 含**站 id + 块名 + 实际取值 + 期望下界** |
+| **规则 20** | C1 + C2 + C4 | 同上 | 逐块：`iv == 0` → `Err`；`iv < BLOCK_MIN_INTERVAL_MS(500)` → `Err`；`iv < 1.5 × T_组` → `Err`。`T_组` 按 §12.6 公式用本站 `baud_rate` 复算。**仅当块显式声明了 `interval_ms` 时才判**（`None` ⇒ 继承站周期，站级已有规则覆盖） | 含**站 id + 块名 + 实际取值 + 期望下界**（C4 分支的文案须写 `1.5 × T_组` 的**计算值**，见下注） |
 | **规则 21** | C3 + C5 | 同上 | `iv % cfg.poll_ms != 0` → `Err`；`iv > 站 interval_ms` → `Err` | 同上（C3 须写出 `poll_ms` 当前值） |
 | **规则 22** | C6 + C7（V-2/V-3） | 同上 | 按 `R(role)`（§12.4.5 同表）取该站所需块的下标集；若其 `eff` **不唯一** → `Err`（C6）；若其 `eff < 站 interval_ms` → `Err`（C7） | 含站 id、`role`、**冲突的两个块名与其取值** |
-| **规则 23** | C9（口预算） | 同上（按 `port` 聚合） | `U_口 = Σ_组 (T_组 / 组周期) > 0.5` → `Err`（`T_组` 按 §12.6 公式；`组` 由 `read_groups_of` 给出） | 含 **port + 计算出的 U 值 + 触发的组（站 id / 块名 / T / 周期）** |
+| **规则 23** | C9（口预算） | 同上（按 `port` 聚合） | `U_口 = Σ_组 (T_组 / 组周期) > 0.5` → `Err`（`T_组` 按 §12.6 公式；`组` 由 `read_groups_of` 给出） | 含 **port + 计算出的 U 值 + 触发的组（站 id / 块名 / T / 周期）**（**不写** `1.5 × T_组` —— 该值只由规则 20 的 C4 分支写，故"文案含 `1202`"机械证明触发者是 C4） |
+| **规则 24** | **PRD §10.5 第 3 行**（"单轮最坏耗时"：同口全部到期组串行执行，最坏 `Σ T_组 ≤ 最小非零组周期的 1.5 倍"） | 同上（按 `port` 聚合） | `Σ_{组 ∈ 本口} T_组 > 1.5 × min{ 组周期 \| 本口全部组 }` → `Err`（`T_组` 按 §12.6 公式；`组` 由 `read_groups_of` 给出；各站用**本站** `baud_rate`，同口 `baud_rate` 已由既有规则 16 强制一致）。"**非零**"字样逐字沿用 PRD（V-4/站级校验保证组周期恒 `> 0`，此处作防御性表述） | 含 **port（口名）+ 站 id + 实测 `Σ T_组` + 阈值 `1.5 × 最小非零组周期`（并给出该最小周期的取值与来源组）** |
+
+> **`T_组` 的定义写死（S-2 之三；消除复审点出的"两种读法"）**：规则 20 与规则 23/24 中的 `T_组` 一律指 **"**该块所在读组**的整组耗时"**（= 该组全部块的事务耗时之和，逐事务按 §12.6 公式累加），**不是**"单块耗时"。定义**无循环**：同一读组内所有块的 `eff` 相同（V-1）⇒ **组由 `eff` 唯一确定** ⇒ "该块所在读组"在比较之前就已由 `read_groups_of` 确定，故 `T_组` 与"正在校验的那一块"一一对应、可直接算出（含**单块组**时 `T_组 = T_块` 的退化情形，与 §12.6 的 C4 一致）。
+>
+> **多约束同时违反时报哪一条（判据顺序，S-2 之一的前提）**：`validate_block_intervals` **按规则号升序逐条求值，首个失败即 `Err` 返回**（同一规则内部亦按"`iv == 0` → `< 500` → `< 1.5×T_组`"顺序）。⇒ AC-8-5 的"文案含 `1202`"能**机械证明触发者是规则 20 的 C4 分支**（若先判规则 23，则报的是 `U` 值、文案里没有 `1202`）。
 
 **常量**：
 
@@ -2992,6 +3094,26 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
 **C8 不设配置期拒绝**（PRD §10.3.2 C8 的"确定性规则"）：站级承载组由 `carrier_group()` 按"周期最大、并列取锚最小"唯一确定；"站内全部块都声明了 `interval_ms`"⇒ 承载组 = 周期最大的组，**加载期 `debug` 日志提示**（不产事件、不拒配置）。
 
+**规则 24 的正当性证据（W-1：C9 **不能**蕴含它）**：
+
+| 项 | 构造 | 复算 |
+|----|------|------|
+| 组 A | 组周期 **1000**、`T_组 = 19.6 ms` | C4：`1.5 × 19.6 = 29.4 ≤ 1000` ✓ |
+| 组 B | 组周期 **5000**、`T_组 = 8 × 267.12 = 2137 ms`（如 §12.8 的 C4 构造：8 个 FC04 `count: 120` 块同组） | C4：`1.5 × 2137 = 3205.5 ≤ 5000` ✓ |
+| **C9**（规则 23） | `U_口 = 19.6/1000 + 2137/5000 = 0.0196 + 0.4274` | **0.447 ≤ 0.5 ⇒ 通过** |
+| **PRD §10.5 第 3 行**（规则 24） | `Σ T_组 = 19.6 + 2137 = 2156.6 ms` vs `1.5 × min{1000, 5000} = 1500 ms` | **2156.6 > 1500 ⇒ `Err`** |
+| 实际后果（若不设本条） | 慢组**独占同口 ≈ 2.16 s**（一轮内串行做完 8 个重事务） ⇒ 快组的 `1000 ms` cadence 被打坏，且 `U ≤ 0.5` 对此**完全不敏感** | ⇒ **规则 24 不是 C9 的推论**，必须独立落地 |
+
+**规则 24 的现网复核（证明它不构成对既有 6 站的新增拒绝）**：
+
+| 口 | 本口的组（`Σ T_组`） | 实测 `Σ T_组` | 最小非零组周期 | 阈值 `1.5 ×` | 结论 |
+|----|----------------------|---------------|----------------|--------------|------|
+| `ttyS3` | `hvac`：快组 21.68 + 站周期组 25.84 | **47.52 ms** | 1000 | 1500 | ✓（余量 31.6×） |
+| `ttyS2` / `ttyS5` / `ttyS6` / `ttyS7` | `battery` / `meter_batt` / `fire` / `pcs` 各**单组** | 286 / 310 / 300 / 90 ms（§9.8.1 表值） | 1000 | 1500 | ✓（各站远低于阈值） |
+| `ttyS4` | `grid_meter`（**单组**） | 未复算（`§9.8.1` 该行标"既有"）⇒ **本章不擅填** | 1000 | 1500 | **待补**（口径同 **Δ-11** / PRD §10.9 Q-21 ③；补算后一并纳入断言） |
+
+> **与 C4 的关系（防误读为"对现网的新增拒绝"）**：在**块显式声明了 `interval_ms`** 的组上，C4（`iv ≥ 1.5 × T_组`）已给出 `T_组 ≤ 组周期 / 1.5`；对**单组站（且口内仅此一组）** `Σ T_组 = T_组 ≤ 组周期/1.5 ≤ 1.5 × 组周期` ⇒ 本条**自动成立**。⇒ 本条只在**同一口内多于一个组**（同站多组，或同口多站）时**可能**产生新增拒绝；现网 6 站中未声明块级周期的 4 站（`battery`/`meter_batt`/`fire`/`pcs`，C4 不求值）其单轮 `T_组` 亦远小于 `1.5 × 站周期`（上表已复算）⇒ **现网零新增拒绝**。
+
 ### 12.8 测试策略
 
 | 层 | 用例（`scheduler.rs` 的 `mod tests`，复用既有 `MockBus` / `FakeSink` / `tick_once`） | 钉住的判据 |
@@ -3001,21 +3123,22 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 | 单测·调度 | `no_block_interval_is_bit_identical_to_legacy`（**AC-8-3 已钉 tick 序与计数**）：取首例配置**去掉** `hvac_di.interval_ms` ⇒ 单组站（`eff` 全 = 5000）；**确定性 tick 序列 `t = 0,1000,…,9000`（10 tick）** 下逐项断言：① `bus.bit_call_count(1, 0) == 2`、`bus.input_call_count(1, 0) == 2`（单组每 5000 ms 到期一次）；② `sink.telemetry_of("hvac")` 的**调用次数 = 2**（每轮 1 次；位块无变化 ⇒ 第 2 轮无位点）；③ 第 1 次调用项数 = **34**（3 标量 + 31 位，**首轮全量快照**）、第 2 次 = **3**（标量全量 + 无变化位）；④ `event_count("hvac", *) == 0`（首轮只建基线）<br>—— 该四项与**改造前**的既有断言**逐条相同**（"一个字节都不动"） | **AC-8-3**（V-5）+ 既有 **44 例**（`scheduler.rs`：`#[tokio::test]` **38** + `#[test]` **6**；**断言一字不改**） |
 | 单测·调度 | `bit_change_event_within_block_period`：位 10 由 0→1（`put_bits`），下一 tick 即产事件（`is_event = true`，无新增 metric） | **AC-8-4** |
 | 单测·调度 | `edge_memory_is_per_group`：**交错 tick**（快组 t=0/1000/2000…、慢组 t=5000）下位块的 0→1 **必须**产事件（若 tracker 键未改 ⇒ 静默吞掉 ⇒ 本用例**必红**） | §12.4.4 的机制钉子 |
-| 单测·调度 | **`non_carrier_group_still_emits_its_bits`（B-1 回归锚，2026-09-23 新增）**：以 **`battery` 站**构造"**非承载组**"——站 `interval_ms: 2000`（该档位在 02 PRD §9.5.1「对照算式」段已登记为 `battery` 的回退周期，`:1754`；且站级校验 `interval_ms < 5000` 通过 ⇒ **合法可构造**）、`bms_alarm`（FC02，`addr 200`，`count 288`）声明 `interval_ms: 1000`、含 `soc` 点的 `bms_io`（FC04，`addr 100`，`count 31`）**不声明**（`eff = 2000` = **承载组**，C8）；tick 序列 `t = 0,1000,2000,3000,4000,5000`（6 tick）⇒ 断言：<br>① **分组与计数**：`bus.bit_call_count(1, 200) == 6`（非承载组每 tick 到期）、`bus.input_call_count(1, 100) == 3`（承载组 t=0/2000/4000）—— 该计数同时证明"C6/C7 未被破坏"（`soc` 块恒在承载组）；<br>② **非承载组的位遥测与事件照发（判别性断言）**：t=1000 前 `put_bits(1, 200, …)` 把**位地址 201**（`point_table::lookup_bit(Role::Battery, 201) == BitClass::Alarm` ⇒ metric **`bms_alarm_2`**，`point_table.rs:388`）由 0 置 1 ⇒ **t=2000 的那一轮必须产出 `bms_alarm_2` 的 telemetry 项且 `is_event == true`**；<br>③ 非承载组的**标量**点同样照发（该组若有标量块，按 D2 口径每轮全量） | **B-1 的作用域钉子**：②是该用例的**判别性断言** —— 若把守卫误扩到**整段遥测/事件**（旧写法），非承载组的读集 `reads = {bms_alarm}` 在 `judges_evaluable(Role::Battery, …)` 下**恒 `false`**（`battery_soc` 见不到 `soc` 点 ⇒ `SocOutcome::NoSuchPoint`，`mapper.rs:250-252`）⇒ 位跳变**永不产出**（该组的**全部**位/标量遥测与事件被静默丢弃）⇒ **本用例必红** |
+| 单测·调度 | **`non_carrier_group_still_emits_its_bits`（B-1 回归锚，2026-09-23 新增）**：以 **`battery` 站**构造"**非承载组**"——站 `interval_ms: 2000`（该档位在 02 PRD §9.5.1「对照算式」段已登记为 `battery` 的回退周期，**`:1768`**（同义见 `:2208`）；且站级校验 `interval_ms < 5000` 通过 ⇒ **合法可构造**）、`bms_alarm`（FC02，`addr 200`，`count 288`）声明 `interval_ms: 1000`、含 `soc` 点的 `bms_io`（FC04，`addr 100`，`count 31`）**不声明**（`eff = 2000` = **承载组**，C8）；tick 序列 `t = 0,1000,2000,3000,4000,5000`（6 tick）⇒ 断言：<br>① **分组与计数**：`bus.bit_call_count(1, 200) == 6`（非承载组每 tick 到期）、`bus.input_call_count(1, 100) == 3`（承载组 t=0/2000/4000）—— 该计数同时证明"C6/C7 未被破坏"（`soc` 块恒在承载组）；<br>② **非承载组的位遥测与事件照发（判别性断言）**：t=1000 前 `put_bits(1, 200, …)` 把**位地址 201**（`point_table::lookup_bit(Role::Battery, 201) == BitClass::Alarm` ⇒ metric **`bms_alarm_2`**，`point_table.rs:388`）由 0 置 1 ⇒ **t=1000 的那一轮必须产出 `bms_alarm_2` 的 telemetry 项且 `is_event == true`**（**时点订正 W-3**：t=0 轮只建基线、**不产事件**，故边沿必在**第一次看到新值的那一轮** = **t=1000** 产出；旧文写 t=2000 —— 按该 tick 序 t=2000 时该值**已无变化** ⇒ 取不到 `is_event == true`）；<br>③ 非承载组的**标量**点同样照发（该组若有标量块，按 D2 口径每轮全量） | **B-1 的作用域钉子**：②是该用例的**判别性断言** —— 若把守卫误扩到**整段遥测/事件**（旧写法），非承载组的读集 `reads = {bms_alarm}` 在 `judges_evaluable(Role::Battery, …)` 下**恒 `false`**（`battery_soc` 见不到 `soc` 点 ⇒ `SocOutcome::NoSuchPoint`，`mapper.rs:250-252`）⇒ 位跳变**永不产出**（该组的**全部**位/标量遥测与事件被静默丢弃）⇒ **本用例必红** |
 | 单测·调度 | **`station_flag_guard_still_scopes_to_carrier`（守卫有效性负向用例，2026-09-23 新增）**：**直接构造**（绕过 `validate()`，同既有 `battery_station_without_soc_block_does_not_push` 的用法）一个 **`fire` 站**：`fire_det` 声明 `interval_ms: 1000`、`fire_sys` 不声明（站 `interval_ms: 5000`）—— 该形态**违 C7**（配置期会拒，故只能直接构造）⇒ 断言：① **非承载组照常产出**：6 tick 内 `sink.telemetry_of("fire")` 的**非空调用次数 ≥ 6**（`fire_det` 组每 tick 一轮的标量全量），证明"读集不含 `R(fire)` 的组"仍在正常交付（**不得**因守卫恒 `false` 而整段静默）；② **`fire_detector_count_mismatch` 与 `fire_detector_addr_order_invalid` 事件恒 0 条**（6 tick 内），且此时 `fire_sys` 的 `fire_det_count` 读数（20）与容量构造（`0 + 1 = 1`）**本不相等** | **守卫"未被削弱"的钉子**：若不设守卫/把守卫删掉，承载组的 `reads = {fire_sys}` 会让 `fire_detector_mismatch` **假报**（`read_back = 20`、`capacity = 0 + 1 = 1`，`mapper.rs:363-372` / 容量算式 `:377-385`）⇒ **必产一条假告警 ⇒ 本用例红**。该用例同时钉住"B-1 的修法是**收窄作用域**，不是**取消守卫**" |
 | 单测·调度 | `block_group_failure_no_station_offline` + `block_group_backs_off_by_group_period`：① `fail_bits_once` 后 `event_count(id,"offline") == 0`、`offline_count == 0`；② **退避断言改为"失败两轮"**（`oc = 2`）：首例 `hvac` 配置下，对**位组**连续 `fail` **两轮**（每轮失败后该组 `group_fail_count` +1，`backoff_extra(1000, 1) = 1000`、`backoff_extra(1000, 2) = 2000`）⇒ 断言 **第 3 轮到期间隔 = `2 × 组周期 = 2000 ms`**（判据：`next_due` 相对失败时刻的后移量）。**为什么必须两轮**：单轮失败时 `backoff_extra(组周期,1) == 组周期` 与 `due_round` 自身的 `next_due += interval` **数值相同** ⇒ 无法区分"退避生效"与"退避未生效"（评审建议 d） | **AC-8-7 ②** |
 | 单测·调度 | `carrier_group_failure_emits_offline_once`：慢组读失败 ⇒ `offline` 1 条 + `offline_count == 1` + 按站周期退避 | **AC-8-7 ①** |
-| 单测·调度 | `station_recovery_resets_all_group_baselines`：站离线 → 离线期间位由 0→1 → 恢复 ⇒ **只产 `online` 1 条**、无位事件（全组基线重建） | **AC-8-7 ③** + §12.4.4 连带项 a |
+| 单测·调度 | `station_recovery_resets_all_group_baselines`：站离线 → 离线期间位由 0→1 → 恢复 ⇒ **只产 `online` 1 条**、无位事件（全组基线重建；**触发者 = 承载组**，非承载组不得触发） | **AC-8-7 ③** + §12.4.4 连带项 a |
+| 单测·调度 | **`non_carrier_group_events_survive_carrier_failure`（S-3 判别锚，2026-09-23 新增）**：与 B-1 锚**同款构造**（`battery` 站：站 `interval_ms: 2000`、`bms_alarm`（FC02 `addr 200` `count 288`）声明 `1000`、含 `soc` 点的 `bms_io`（FC04 `addr 100` `count 31`）不声明 ⇒ 快组 = **非承载组**、`bms_io` 组 = 承载组）；tick 序 `t = 0,1000,…,6000`（7 tick）；**承载组到期 tick = t=0/2000/4000/6000**，在 **t=2000/4000/6000 三轮前各调一次** `bus.fail_input_once(1, 100)`（⇒ 承载组在窗口内**持续失败、不恢复** ⇒ `offline_count` 自 t=2000 起恒 `> 0`；**这一点必须写死** —— 若让 t=6000 的承载组成功，则站恢复当轮会（按 §12.4.2 的"承载组优先"）先重建全组基线，t=6000 的边沿会被正确地抑制掉，断言 ② 就不该期望 2 条）；位 201 的摆布：t=0 起为 0（基线），**t=3000 前置 1**、t=5000 前置 0、**t=6000 前再置 1** ⇒ 两次 0→1 上升沿（`Alarm` 位只在上升沿产事件）⇒ 断言：<br>① `bus.bit_call_count(1, 200) == 7`（非承载组每 tick 照常到期、**不被**承载组失败影响）；<br>② **变化沿照常产出**：`sink.event_count("battery", "bms_alarm_2") == 2`（两次 0→1 各 1 条，分别在 **t=3000 轮**与 **t=6000 轮** —— 用 `events_since` 按轮切片钉时点）；<br>③ **不每轮全量落位**：t=3000 轮的**该组位遥测项数 = 1**（仅变化的位 201），而非 **288**（全量快照）；<br>④ 站级语义不被非承载组污染：`offline_count > 0` 期间 `event_count("battery","offline")` 仍为去抖后的 **1** 条，且非承载组成功**不**清 `offline_count`（`sink.event_count("battery","online") == 0`） | **S-3 的判别锚**：按旧写法（① 段触发条件只用 `station_was_offline`、不含 `is_carrier`）—— 承载组持续失败时 `offline_count > 0` 对非承载组**恒真** ⇒ 非承载组**每轮**成功都把全组基线 `reset()` ⇒ ② 取到 **0 条**事件（该组的位跳变被静默吞掉）且 ③ 取到 **288** 项/轮（每轮全量落位，≈2.5×10⁷ 行/天）⇒ **本用例必红** |
 | 单测·调度 | `single_group_ordering_unchanged`：`DueCalc::due_round` 对单组站的返回序与既有 `(role_priority, 站序)` **逐项一致** | V-5 |
-| 单测·配置 | `block_interval_constraints_rejected`（逐条）：`0`（C1）/ `300`（C2）/ `1500`（`poll_ms = 1000`，C3）/ `6000 > 站周期`（C5）/ `R` 内异周期（以 `fire` 的两块构造，C6）/ `R` 内提速（以 `battery` 的 `soc` 块构造，C7）/ **C4 一例** ⇒ **均 `Err`**（各类文案含站 id + 块名 + 实际取值 + 期望下界）<br>**C4 的可构造用例（评审建议 a；现网 `T_组 ≤ 310 ms` ⇒ `1.5×T_组 ≤ 465 ms < C2 下界 500` ⇒ **C4 被 C2 完全吸收**，须专门构造）**：造一个 `T_组 > 333.3 ms` 的组即可。**构造法**：与首例同口无关的独立站（`baud_rate: 9600`、`poll_ms: 1000`、站 `interval_ms: 2000`），同组放 **3 个 FC04 块**（各 `count: 120`、不声明 `points`、`addr` 互不重叠）⇒ 单事务帧字节 `8 + (5 + 240) = 253` ⇒ `T_块 = 253 × 1.04 + 4 = 267.12 ms` ⇒ **`T_组 = 801.36 ms`**（按 §12.6 公式逐事务累加）⇒ **`1.5 × T_组 = 1202.04 ms`**。取该组某块 `interval_ms: 1000`：C1 ✓、**C2 ✓（1000 ≥ 500）**、C3 ✓（`% 1000 == 0`）、C5 ✓（`≤ 2000`）、**C4 ✗（1000 < 1202.04）** ⇒ 断言 `Err` 且**文案含 `1202`（`1.5×T_组` 的计算值）** —— 该值**只有 C4 分支会写**，故机械证明 C4 被求值。<br>**诚实登记（C4 不可单独触发）**：C9 的违规域是 `iv < 2×T_组`（`U > 0.5`），**真包含** C4 的违规域 `iv < 1.5×T_组` ⇒ 单组站上 C4 触发时 **C9 必然同时触发**；二者由**文案**区分（C9 文案写 `U` 值与触发的组，不写 `1.5×T_组`） | **AC-8-5**（规则 20–22；C4 一例见左） |
+| 单测·配置 | `block_interval_constraints_rejected`（逐条）：`0`（C1）/ `300`（C2）/ `1500`（`poll_ms = 1000`，C3）/ `6000 > 站周期`（C5）/ `R` 内异周期（以 `fire` 的两块构造，C6）/ `R` 内提速（以 `battery` 的 `soc` 块构造，C7）/ **C4 一例** ⇒ **均 `Err`**（各类文案含站 id + 块名 + 实际取值 + 期望下界）<br>**C4 的可构造用例（评审建议 a；现网 `T_组 ≤ 310 ms` ⇒ `1.5×T_组 ≤ 465 ms < C2 下界 500` ⇒ **C4 被 C2 完全吸收**，须专门构造）**：造一个 `T_组 > 333.3 ms` 的组即可。**构造法（v1.13-r1 订正：S-2）**：与首例同口无关的独立站（`baud_rate: 9600`、`poll_ms: 1000`、站 `interval_ms: 2000`），同组放 **3 个 FC04 块**（各 `count: 120`、不声明 `points`、`addr` 互不重叠）⇒ 单事务帧字节 `8 + (5 + 240) = 253` ⇒ `T_块 = 253 × 1.04 + 4 = 267.12 ms` ⇒ **`T_组 = 3 × 267.12 = 801.36 ms`**（按 §12.6 公式逐事务累加）⇒ **`1.5 × T_组 = 1202.04 ms`**。**三块均声明** `interval_ms: 1000`（**必须三块都声明** —— 只要有**一块**声明、另两块继承站周期 2000，该块就按 `eff` **自成一组**，组内只剩 1 块 ⇒ `T_组 = 267.12 ms`、`1.5×T_组 = 400.7 ms ≤ 1000` ⇒ **C4 通过**，实际触发的是 C9：`U = 267.12/1000 + 2×267.12/2000 = 0.534 > 0.5`，而 C9 文案**不写** `1202` ⇒ C4 未被覆盖）：C1 ✓、**C2 ✓（1000 ≥ 500）**、C3 ✓（`% 1000 == 0`）、C5 ✓（`≤ 2000`）、**C4 ✗（1000 < 1202.04）** ⇒ 断言 `Err` 且**文案含 `1202`（`1.5×T_组` 的计算值）** —— 该值**只有规则 20 的 C4 分支会写**（判据顺序见 §12.7 的注：规则号升序、首个失败即返回），故机械证明 C4 被求值。**该形态另需登记**：三块 `eff` 相同 ⇒ 仍为**同一读组**（V-1）；规则 24 对本例**通过**（`Σ T = 801.36 ≤ 1.5 × 1000 = 1500`）。<br>**诚实登记（C4 不可单独触发）**：C9 的违规域是 `iv < 2×T_组`（`U > 0.5`），**真包含** C4 的违规域 `iv < 1.5×T_组` ⇒ 单组站上 C4 触发时 **C9 必然同时触发**；二者由**文案**区分（C9 文案写 `U` 值与触发的组，不写 `1.5×T_组`） | **AC-8-5**（规则 20–22；C4 一例见左） |
 | 单测·配置 | `accepts_first_case_hvac_fast_bit_block`：首例 YAML ⇒ `validate().is_ok()` | 首例可通过 |
-| 单测·配置 | `bus_budget_accepts_field_config_and_rejects_overload`：① §10.5 的现网 6 站（含改造后的 hvac）⇒ `Ok`；② 构造 `U > 0.5`（组周期夹到 ≈`T_组`）⇒ `Err` | **AC-8-6**（规则 23） |
+| 单测·配置 | `bus_budget_accepts_field_config_and_rejects_overload`：① §10.5 的现网 6 站（含改造后的 hvac）⇒ `Ok`；② 构造 `U > 0.5`（组周期夹到 ≈`T_组`）⇒ `Err`；③ **规则 24 的正反两例（W-1 新增）**：**通过例** = §12.7 的现网复核（`hvac` `Σ T = 47.52 ≤ 1500`）⇒ `Ok`；**拒绝例** = §12.7 的正当性证据构造（同口两组 `(周期 1000, T 19.6 ms)` + `(周期 5000, T 8×267.12 = 2137 ms)` ⇒ `U = 0.447 ≤ 0.5` **但** `Σ T = 2156.6 > 1500`）⇒ **必须 `Err`**（**该例在只有规则 23 时必然 `Ok`** ⇒ 是本条存在的判别锚），文案须含**口名 + 站 id + `Σ T_组` + 阈值** | **AC-8-6**（规则 23 + 规则 24） |
 | 单测·配置 | `block_interval_serde_roundtrip_is_unchanged_when_absent`：既有 YAML（无该字段）反序列化 ⇒ `None`；`serde_yaml::to_string` 往返**不出现 `interval_ms` 键**（`skip_serializing_if`） | §12.2.1 的兼容性承诺 |
 | 集成 | `tests/s3b2_config.rs` 与 `tests/grid_convergence.rs` 的**既有断言全部保留**（同 §11.11.2 的回归闸门 1–4） | 零回归 |
 
 > **AC-8-8 不设用例（评审建议 c）**：PRD §10.7 原 **AC-8-8**（"端到端边界声明，不得越界断言"）是**元要求**（"不得断言什么"），**不可执行验证** ⇒ 建议需求侧将其移入 §10.8 的**边界声明**（PRD v1.13 已办）。本章对应落点为 **§12.9 的接口边界表**（第 1/2 行）与 **§12.5 的"已知盲区"**，**不上用例表**。
 >
-> **用例总数**：调度 **12** 个测试函数（11 行；含 §12.8 新增的 `non_carrier_group_still_emits_its_bits` 与 `station_flag_guard_still_scopes_to_carrier`）+ 配置 **4** 个 + 集成回归 **2 套**。
+> **用例总数**：调度 **13** 个测试函数（12 行；含 §12.8 新增的 `non_carrier_group_still_emits_its_bits`（B-1 锚）、`station_flag_guard_still_scopes_to_carrier`（守卫负向锚）与 **`non_carrier_group_events_survive_carrier_failure`（S-3 锚，v1.13-r1）**）+ 配置 **4** 个（`bus_budget_...` 一例中新增**规则 24 的正反两例**）+ 集成回归 **2 套**。
 
 **复跑门禁**：`cargo test -p mupc-southd`（**既有 44 例**：`scheduler.rs` 的 `#[tokio::test]` **38** + `#[test]` **6**，断言一字不改）+ `cargo clippy --workspace` 0 warning + `cargo fmt --all`（判据同 §11.11.2.1 的行级口径）。
 
@@ -3041,7 +3164,9 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 | 3 **`EdgeTracker` 键由站改为组** | 内部状态 | 设计选择（§12.4.4 的机制论证） | 防组间互相清空基线 | **不可退**：不改则 `edge_memory_is_per_group` 必红（真实丢事件） |
 | 4 **组级退避 + "块级失败不升级为站级 offline"** | 运行期语义 | 设计选择（§12.5 两条硬理由） | ① 不遮蔽正在上送的快采告警位；② 消除周期性事件对刷屏 | **不可退**（退则会破 12 号 F25.4 的显示口径或产生 ≈3.5 万条/日事件） |
 | 5 **`judges_evaluable` 运行期守卫** | 内部函数 | 设计补充（PRD 的 C6 已在**配置期**保证；本守卫是其**运行期对偶**） | 纵深防御（配置校验被绕过 / 未来放开 C6 时的假事件防线） | 可退化为 `debug_assert!`（代价：Q-22 选项 B 失去前置守卫） |
-| 6 **规则 20–23 与常量 `MIN_POLL_INTERVAL_MS`** | 校验规则 + 常量 | PRD §10.3.2 / §10.5 明文要求，**未进 §9.4.3 的 17 条表**（同既有规则 18/19 的形态） | 配置期拦截误配 | 不适用（PRD 已要求）；**建议需求侧把 20–23 补进 §10.3.2 的 C 表**（本版已写入，见 PRD §10.3.2） |
+| 6 **规则 20–24 与常量 `MIN_POLL_INTERVAL_MS`** | 校验规则 + 常量 | PRD §10.3.2 / §10.5 明文要求，**未进 §9.4.3 的 17 条表**（同既有规则 18/19 的形态） | 配置期拦截误配 | 不适用（PRD 已要求）；**建议需求侧把 20–24 补进 §10.3.2 的 C 表**（本版已写入，见 PRD §10.3.2）。**规则 24 是 v1.13-r1 新增**（落 PRD §10.5 **第 3 行**的"单轮最坏耗时"，原设计无落点；PRD 侧无对应 C 编号） |
+| 7 **退化组哨兵 `EMPTY_GROUP_ANCHOR`** | 内部常量（`usize::MAX`） | 设计选择（S-1 修订：空 `regs` 站须有 1 个组、且不得 panic） | 使 `read_groups_of` 的"至少一组"不变量对空 `regs` 成立，同时保持"锚 → 组"单射 | 不适用（内部常量，无对外契约）。**注**：本项是**行为等价**的实现细节 —— 空 `regs` 站的调度行为仍与既有逐字相同（§12.3 V-5(b)） |
+| 8 **站级重建的触发者 = 承载组**（S-3 修订） | 运行期语义 | 设计选择（§12.4.3 ① 段的门控 + §12.4.2 的"承载组站内优先"排序键） | 使站恢复当轮"全组基线重建"**先于**本站其它组产出，且非承载组不会每轮被重置（否则变化沿永不产出 + 每轮全量落位） | **不可退**（退则 §12.8 的 `non_carrier_group_events_survive_carrier_failure` 必红，且与 PRD §9.8.1 末条告警的写量同量级） |
 
 #### 12.10.2 PRD 差异上报
 
@@ -3050,7 +3175,10 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 | **Δ-10** | **PRD §9.5.4「n>20 时**探测器块**独立降频（≥5000 ms）」的字面诉求 = **块级拆分**（系统态 1000 ms + 探测器块 5000 ms）** | 该字面诉求**必须**块级周期才能表达；但 `fire` 的两类判据跨块（`mapper.rs:359` / `:565`），受本章 **C6/C7** 约束 ⇒ **`fire` 站本轮无可提速块** ⇒ 该诉求在 n>20 时仍只能"整站 5000 ms" | **本轮按"整站 5000 ms"执行**（= 现状，与 §9.5.4 的字面有差异，已如实登记为 PRD **§10.9 Q-22**）。**选项 A（推荐本轮）** 保持 C6/C7；**选项 B（下轮）** 放开 C6/C7 并同时落地"**完整性守卫 + 合并视图**"。<br>**★ 选项 B 的第三环（评审补登，2026-09-23；已同步 PRD §10.9 Q-22 选项 B）**：放开 C6/C7 **还不够** —— 仍须把 **`fire` 站级 `interval_ms` 设为 5000**，否则 `fire_det` 声明的 5000 **违 C5**（`eff ≤ S`）。其直接后果有二：① `fire_sys`（系统态）的 1000 ms 诉求只能由**块级覆盖**表达（这正是 §9.5.4 的字面形态）；② **站级承载组由 `fire_sys`（1000）变为 `fire_det`（5000）** ⇒ **站离线判定节奏随之由 1 s 变为 5 s**（与"整站 5000"同），且该变化落在 **12 号 F25.4 的显示口径**上（站离线判定时延），**必须与"完整性守卫 + 合并视图"一并登记并由 12 号确认**。<br>**建议需求侧在 §9.5.4 或 §10 消歧**（本节不擅自改 PRD §9.5.4） |
 | **Δ-11** | PRD **§9.8.1 的 `grid_meter` 行未给单轮耗时**（标"既有"） | 本章的 **C9（口预算）** 要对**每一口**复算 `U`，`grid_meter`（`ttyS4`）缺 `T` | **本章不擅自估填**（避免造一个无出处的数字）；已在 PRD §10.9 **Q-21 ③** 登记"补算后再纳入断言"。**不影响本章任何结论**（C9 的判据是 `U ≤ 0.5`，其余 5 站已复算通过，且 `grid_meter` 独占一口） |
 
-> **说明**：本章**不新增其他 Δ** —— PRD §10 是本轮**与本章同时新写**的（同一轮次的需求/设计增量），其 C1–C9 与本章的规则 20–23 逐条对齐；上表两条是"需**下一步**动作"的真实缺口（消歧 / 补算），不是"设计与 PRD 相左"。
+| **Δ-12**（**v1.13-r1 新增**） | **"空 `regs` 站"是否应在配置期被拒（非 `pcs` role）** —— 待裁定 | 事实：① 空 `regs` = "站永不产出任何点"的**静默死配**，仅由运行期"读集为空 + 成功记账"兜住（**无任何日志**）；② 既有配置期**只**对 `Role::Pcs` 拒空（`config.rs:296-303`，文案已写明"空 regs = 站永久 offline 的静默死配"）；③ 其余 role 的空 `regs` 站**能通过 `validate`**，且**行为上是"合法"的**（既有单测 `battery_station_without_soc_block_does_not_push` 就以空 `regs` 的 battery 站为**正例**，断言"不产 `offline`/`online`、不误推 soc"） | **本轮不单方面加配置期拒绝**，执行口径 = **逐字保持既有行为**（§12.3 V-5(b) 的机械证明 + `carrier_group` 不 panic）。**理由**：对非 `pcs` role 新增拒绝 = **新增约束**（会让既有"合法可构造"的用法变成配置错误）= **需求变更**，须由需求侧裁定（建议与 §10.3.2 的 C 表一并审）⇒ **登记为待裁定项**（本章**不**把 `battery`/`hvac` 等 role 的空 `regs` 变成 `Err`） |
+| **Δ-13**（**v1.13-r1 新增**） | PRD **§10.4 的响应帧算式文字** `(5+2N)` 与**该表自己的 `FC02 = 8 + (5+4) = 17`** 不自洽 | 行政性（文档级）：FC02 响应 = `slave(1)+func(1)+byte_count(1)+D+CRC(2)` = **`5 + D`**（`D = ceil(位数/8)` 字节）；PRD §10.4 的 `N` 注写作"FC02 时 `N = ceil(位数/8)` **字节**" ⇒ 按该注算得 `5+2×4 = 13`、帧 `21`，与其表内 `17` 矛盾（`17` 才是对的） | **本章 §12.6 已按 `5 + D` 写死**（与本表 `17`/`21`、`T_快组 = 21.68 ms` / `T_慢组 = 25.84 ms` 逐位一致）⇒ **PRD 表内**的**任何数字都无需改动**；只需需求侧把该句的 `N` 定义订正为"`D` = 数据字节数（FC02 = `ceil(位数/8)`；FC03/04 = `2 × 寄存器数`）"。**不影响任何判据/结论** |
+
+> **说明**：本章的 Δ 表 = **需下一步动作的真实缺口**（消歧 / 补算 / 待裁定 / 文档级文字），**不是**"设计与 PRD 相左"。**Δ-10 / Δ-11 为 v1.13 既有**；**Δ-12 / Δ-13 为 v1.13-r1 新增**。PRD §10 的 **C1–C9 与本章的规则 20–23 逐条对齐**，**PRD §10.5 第 3 行**由 **v1.13-r1 新增的规则 24** 落点（该行在 PRD 侧没有 C 编号，故不计入"C ↔ 规则"的对齐表）。
 
 > **同轮落地的 PRD §10 文档级订正（评审附 4 项 + 建议改进 4 条，2026-09-23）**：设计评审对 **02 PRD §10** 提出的 4 项非阻塞订正与 4 条建议改进，**已同轮落入 PRD §10 正文**（PRD v1.13 的 `[§10 增补 v1.13]` 块逐条登记）；本章据此同步的口径见下表 —— 这些**不是** Δ（无需设计侧另行"上报差异"），只是**两文档必须逐位一致**的数字/引用：
 >
@@ -3065,13 +3193,17 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 > | 建议 c | **AC-8-8 移入边界声明**（元要求，不可执行验证） | §12.8 的**用例映射不列 AC-8-8**；其性质 = §12.9 的**边界声明**（本节表第 1/2 行）+ **§12.5 的"已知盲区"**（不设用例） |
 > | 建议 d | **AC-8-7 ② 退避断言改 `fail` 两轮（oc=2）** | §12.8 的 `block_group_backs_off_by_group_period` 用例改为**两轮失败、断言 `2 × 组周期`** |
 
+> **v1.13-r1 的 PRD 落点（S-2 之二，**仅** AC-8-5 的"C4 构造法"示例）**：02 PRD **§10.7 的 AC-8-5 那一格**中"**C4 的构造法**"的**例子**已改为"**三块均声明** `interval_ms: 1000`"，并补一句"**该组内三块 `eff` 相同 ⇒ 仍为同一读组**"（PRD **v1.13-r1**）。**AC-8-5 的判据本身（非法值逐条 `Err`、文案含 `1202`）未动**；PRD 的 C1–C9 约束内容、任何 AC 判据、§9 与 §1–§9 的内容**一字未动**。（旧例"取该组某块声明 1000"按 §12.4.1 的分组语义**不触发 C4** —— 见文首 v1.13-r1 块的 ② 项。）
+
 #### 12.10.3 实现风险
 
 | 风险 | 说明 | 缓解 |
 |------|------|------|
 | R-7 **组间基线互相清空**（最易犯） | 见 §12.4.4 的机制论证；若照搬 `PortRunner.trackers: HashMap<usize, _>`（`scheduler.rs:284-285`）而不换键，症状是"位块事件随机丢失"（5 s 周期复发一次），**测试若只跑单组站则完全测不出** | 专测 `edge_memory_is_per_group`（交错 tick）；并在 `poll_group` 处加注释指向 §12.4.4 |
 | R-8 **对快组误调 `poll_to_result`** | `MeterGrid` 缺相量即 `Failed`（`mapper.rs:410-429`）⇒ **快组恒判失败**（若将来有 grid 快组） | 只在 `is_carrier` 分支调用（§12.4.3 伪码已钉）；加负向单测（构造 grid 站 + 假快组 ⇒ 不得产 offline） |
-| R-9 **恢复时只重置当前组** | 见 §12.4.4 连带项 a（症状：`online` 后紧跟一屏位事件） | 专测 `station_recovery_resets_all_group_baselines` |
+| R-9 **恢复时只重置当前组** | 见 §12.4.4 连带项 a（症状：`online` 后紧跟一屏位事件）。**触发者被限定为承载组**（S-3 修订）⇒ 非承载组在"承载组持续失败"期间**不会**每轮重置全组（否则症状反过来：0→1 事件永不产出 + 每轮全量落位） | 专测 `station_recovery_resets_all_group_baselines`（正向：恢复当轮只建基线）+ **`non_carrier_group_events_survive_carrier_failure`**（负向：不得每轮重建） |
+| R-12（**v1.13-r1 新增**）**空 `regs` 站的可达 panic / 静默移出调度** | 若 `carrier_group` 用 `.expect`、或 `read_groups_of` 对空 `regs` 返回 **0** 个组，则既有单测 `battery_station_without_soc_block_does_not_push`（内联构造 `regs: vec![]`、**不经 `validate`**）会 **panic** 或该站**永不轮询**（§12.4.1 / §12.3 V-5(b)） | `read_groups_of` 的"**至少返回一个组**"不变量（空 ⇒ 退化组）+ `carrier_group` 返回 `Option`（**无 `expect`/`unwrap`**）；由既有 44 例（含该用例）作回归锚 |
+| R-13（**v1.13-r1 新增**）**规则 24 的 `T_组` 口径** | 与规则 20 的 `T_组` 必须是**同一口径**（"该块所在读组的整组耗时"）；若规则 24 误用"单块耗时"，则多块组会被低估而漏拒（§12.7 的 `T_组` 定义注） | 两处共用同一个纯函数 `group_tx_time(baud_rate, &ReadGroup)`（与 R-10 同源）；单测在 `bus_budget_...` 的规则 24 拒绝例中钉住 `Σ T = 2156.6 ms` |
 | R-10 **C4 的 `T_组` 用错 baud_rate** | 同口各站 `baud_rate` 由规则 16 强制一致（`config.rs:308-327`），但**跨口不同**（PCS 19200）⇒ 复算须用**本站**的 `baud_rate` | 纯函数 `group_tx_time(baud_rate, func, count)` 单测（9600 / 19200 各一例）；调用点只传本站值 |
 | R-11 **C3 网格对齐被误当成"可放宽"** | 若实现成"运行时把 `iv` 向上取整到 `poll_ms`"，则配置写的 1500 实际跑 2000（**静默失真**，与本 PRD 反复整治的取向相反） | 规则 21 在**配置期** `Err`；单测 `block_interval_constraints_rejected` 钉住 `1500` 一例 |
 
@@ -3079,8 +3211,8 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
 | # | Task | 内容 | 闸门 |
 |---|------|------|------|
-| **T8** | 配置与校验 | §12.2.1 的 `interval_ms`（`Option<u64>` + `skip_serializing_if`）+ `effective_interval_ms` + `read_groups_of`/`carrier_group` + **规则 20–23**（`validate_block_intervals`，插入为 ②′）+ 常量 `MIN_POLL_INTERVAL_MS` | 配置期单测全绿（§12.8 的 4 条 `*_config` 用例）+ **既有 `config.rs` 用例断言零改动** |
-| **T9** | 调度器改造 | §12.2.2 的结构 + `DueCalc`（`due_round`/`delay_group`/`bump_*`/`clear_*`）+ `run_port_round` + `poll_group` + **`round_signals` 拆为 `round_signals_group` / `round_station_flags`** + `judges_evaluable`（**作用域 = 判据/站级量路径**，§12.4.5）+ **tracker 键改 `GroupKey`** + 站恢复"全组重建" | 调度器单测全绿（§12.8 的**前 11 行 / 12 个测试函数**，含 **B-1 回归锚 `non_carrier_group_still_emits_its_bits`** 与**守卫负向锚 `station_flag_guard_still_scopes_to_carrier`**）+ **既有 `scheduler.rs` 44 例断言零改动**（AC-8-3） |
+| **T8** | 配置与校验 | §12.2.1 的 `interval_ms`（`Option<u64>` + `skip_serializing_if`）+ `effective_interval_ms` + `read_groups_of`（**含空 `regs` 的退化组**）/`carrier_group`（**返回 `Option`**）+ **规则 20–24**（`validate_block_intervals`，插入为 ②′）+ 常量 `MIN_POLL_INTERVAL_MS` / `EMPTY_GROUP_ANCHOR` | 配置期单测全绿（§12.8 的 4 条 `*_config` 用例，含**规则 24 的正反两例**）+ **既有 `config.rs` 用例断言零改动** |
+| **T9** | 调度器改造 | §12.2.2 的结构（**无 `carrier_anchor`**）+ `DueCalc`（`due_round`（**排序键含 `!is_carrier`**）/`delay_group`/`bump_*`/`clear_*`）+ `run_port_round` + `poll_group` + **`round_signals` 拆为 `round_signals_group` / `round_station_flags`** + `judges_evaluable`（**作用域 = 判据/站级量路径**，§12.4.5）+ **tracker 键改 `GroupKey`** + **站恢复"全组重建"（触发者 = 承载组，`poll.is_carrier && station_was_offline`）** | 调度器单测全绿（§12.8 的**前 12 行 / 13 个测试函数**，含 **B-1 回归锚 `non_carrier_group_still_emits_its_bits`**、**守卫负向锚 `station_flag_guard_still_scopes_to_carrier`** 与 **S-3 锚 `non_carrier_group_events_survive_carrier_failure`**）+ **既有 `scheduler.rs` 44 例断言零改动**（AC-8-3，含空 `regs` 站那一例） |
 | **T10** | 配置与文档落地 | 生效配置的 hvac 站加 `interval_ms: 1000`（§12.6 迁移行）+ `tests/fixtures/south_stations_s3b2.yaml` 同步 + 12 号设计 R-45 行回写（**若 T10 由需求侧执行则见 PRD §10.8.2**） | **AC-8-1…AC-8-7 全绿**（**AC-8-8 已移入边界声明 ⇒ 不适用例**，v1.13）+ `cargo test -p mupc-southd` + `cargo clippy --workspace` + `cargo fmt --all` |
 
 **依赖**：T8 → T9 → T10（T9 依赖 T8 的 `read_groups_of`）；**三者均不依赖 12 号侧的任何改动**（§12.9）。
@@ -3089,9 +3221,9 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
 | 关联 | 关系 |
 |------|------|
-| PRD §10（**v1.12 新增 / v1.13 评审附项订正**，2026-09-23） | 本章是 §10 的实现级落地：C1–C9 → **规则 20–23 + C8 的确定性规则**（§12.7）；首例与负载数字 → §12.6（与 PRD §10.4 **逐位一致**，占用率统一为公式精确值 `0.95 %` / `2.68 %`）；边界与异常 8 条 → §12.5 与 §12.4（含"块级失败不升级站级 offline"的两条硬理由）；**AC-8-1…AC-8-7 → §12.8 的用例映射**（**AC-8-8 已按评审建议 c 移入 §10.8 的边界声明**，不适用例；本章对应落点 = §12.9 的接口边界表与 §12.5 的"已知盲区"） |
-| 本文档 §10（S3a）/ §11（S3b-2） | **调度架构、故障隔离语义、role→DataPackage 分发骨架全部不变**；本章只把**调度粒度**由"站"细化为"组"，且**单组站（无块声明）与既有逐字等价**（§12.3 V-5 的机械证明）。§11 的统一事件模型（`EdgeTracker`/`StationFlag`）**零改动**，只改其**记忆键** |
-| 本文档 §11.4.7 / §11.7.2 | 事件产出路径与位点落库节流口径（D2）**零改动**；"恢复后只建基线"由"当前站"推广为"该站全部组"（§12.4.4 连带项 a），**不新增事件名** |
+| PRD §10（**v1.12 新增 / v1.13 评审附项订正 / v1.13-r1 仅 AC-8-5 例子订正**，2026-09-23） | 本章是 §10 的实现级落地：C1–C9 → **规则 20–23 + C8 的确定性规则**（§12.7）；**PRD §10.5 第 3 行（单轮最坏耗时 `Σ T_组`）→ 规则 24**（v1.13-r1 新增，PRD 侧无 C 编号）；首例与负载数字 → §12.6（与 PRD §10.4 **逐位一致**，占用率统一为公式精确值 `0.95 %` / `2.68 %`）；边界与异常 8 条 → §12.5 与 §12.4（含"块级失败不升级站级 offline"的两条硬理由）；**AC-8-1…AC-8-7 → §12.8 的用例映射**（**AC-8-8 已按评审建议 c 移入 §10.8 的边界声明**，不适用例；本章对应落点 = §12.9 的接口边界表与 §12.5 的"已知盲区"） |
+| 本文档 §10（S3a）/ §11（S3b-2） | **调度架构、故障隔离语义、role→DataPackage 分发骨架全部不变**；本章只把**调度粒度**由"站"细化为"组"，且**单组站（无块声明）与空 `regs` 站均与既有逐字等价**（§12.3 V-5(a)/(b) 的机械证明）。§11 的统一事件模型（`EdgeTracker`/`StationFlag`）**零改动**，只改其**记忆键** |
+| 本文档 §11.4.7 / §11.7.2 | 事件产出路径与位点落库节流口径（D2）**零改动**；"恢复后只建基线"由"当前站"推广为"该站全部组"，且**触发者被钉为『该站承载组』**（§12.4.4 连带项 a + §12.5 重建条件表，S-3 修订），**不新增事件名** |
 | `plans/modules/12-MUPC-本地显示终端-设计文档.md` | 本章是 12 号 **R-45 / F25.3 的前置能力**；接口边界见 §12.9（**不新增任何接口签名**）。12 号文档**只回写 R-45 那一行**（PRD §10.8.2） |
 | `plans/modules/01-MUPC-通信网关-设计文档.md` §9.1 | `latest_values` 的归属与判据**不变**；Q-23（位点可得性粒度）是跨文档待裁项，本章不假定其扩展（§12.5 的"已知盲区"如实登记） |
 | 项目 CLAUDE.md | 无硬编码密钥；无新增 `unsafe`；错误类型实现 `std::error::Error`；不新增独立设计文档 |
@@ -3134,6 +3266,7 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
 | 版本 | 主要变更 |
 |------|----------|
+| **v1.13-r1（2026-09-23，按设计评审意见（第二轮）修订，待复审；本次未获门禁标记）** | **只改 §12（§1–§11 零改动）**，逐条处置第二轮设计评审的 **3 阻塞 + 3 警告 + 4 优化**（并确认其独立验证的"B-1 修法正确"不动）：<br>**① 阻塞 S-1（空 `regs` 站的可达 panic + 静默移出调度）**：`carrier_group` 的 `.expect` 在空 `regs` 上必 panic（该输入**可达**：既有单测内联构造 `regs: vec![]` 直接 `tick_once`；配置期只对 `Role::Pcs` 拒空，`config.rs:296-303`），且 `from_group` 产 0 条目 ⇒ 该站永不轮询 ⇒ 破"既有 44 例零改动"。**修法**：`read_groups_of` 对空 `regs` **产出一个退化组**（空块集、周期 = 站周期、锚 = 哨兵 `EMPTY_GROUP_ANCHOR`）⇒ 恒 1 条目、该组即承载组 ⇒ 与既有"站照常轮询、读集为空、`poll_to_result(role,&[])` 照常求值、成败记账照旧"**逐字等价**；`carrier_group` 改返回 **`Option<ReadGroup>`**（无可达 `expect`/`unwrap`）；**订正 `.expect` 的理由文案**；**V-5 补空集情形**；新增 **Δ-12**（"非 `pcs` role 的空 `regs` 是否应配置期拒绝" = **待裁定**，**本轮不加**）；**同源加固**：`bump_group_fail` 改**原子返回** `Option<(组周期, 计数)>`、调用点一律 `if let` ⇒ 退避段**无 `unwrap`/`expect`**。<br>**② 阻塞 S-2（AC-8-5 的 C4 用例按字面构造不触发 C4）**：旧例"只取该组**一块**声明 `interval_ms: 1000`" —— 声明周期的块按 `eff` **自成一组** ⇒ `T_组 = 267.12 ms`、`1.5×T_组 = 400.7 ≤ 1000` ⇒ **C4 通过**，实际触发 **C9**（`U = 534 > 500`）而 C9 文案不写 `1202` ⇒ C4 无人覆盖。**修法**：改为**三块均声明** `1000`（仍同组 ⇒ `T_组 = 801.36 ms`、`1.5×T_组 = 1202.04` ⇒ `1000 < 1202.04` ⇒ **规则 20 先于规则 23 返回**）；**规则 20 的 `T_组` 定义写死**为"该块**所在读组**的整组耗时"（同组同 `eff` ⇒ 组由 `eff` 唯一确定 ⇒ **无循环**）；**同轮落 PRD §10.7 的 AC-8-5 那一格（仅例子，判据未动，PRD v1.13-r1）**。<br>**③ 阻塞 S-3（站级重建的触发条件取错 + 同 tick 组序）**：旧条件 `if station_was_offline` 而 `offline_count` 只在承载组成功时清零 ⇒ 承载组持续失败时非承载组**每轮**重置全组 ⇒ 变化沿永不产出 + 每轮全量落位（288 位/轮 ≈ 2.5×10⁷ 行/天）。**修法**：门控 **`poll.is_carrier && station_was_offline`**；`due_round` 排序键加 **`!is_carrier`**（**站内承载组优先**，使全组基线重建**先于**本站其它组产出；并在 §12.4.2 给出"清零不会让后来组误判"的论证）；新增用例 **`non_carrier_group_events_survive_carrier_failure`**（**按旧写法必红**）；§12.4.4 / §12.5 / §12.10 / §12.11 / §12.12 的"谁能重建基线"表述**全章统一**。<br>**④ 警告 W-1（PRD §10.5 第 3 行无落点）**：新增 **规则 24**（同口 `Σ T_组 > 1.5 × 最小非零组周期` ⇒ `Err`），并登记"`U ≤ 0.5` 但 `Σ T` 超标"的**反例**（`Σ T = 2156.6 > 1500`）为正当性证据 + 现网复核（`hvac` `47.52 ≤ 1500` ✓）；**PRD §10.5 一字未动**。<br>**⑤ 警告 W-2（引用漂移）**：`battery` 回退周期 2000 ms 的依据 `:1754` ⇒ **`:1768`**（`:2208` 同义）。<br>**⑥ 警告 W-3（断言时点自相矛盾）**：用例① 的边沿断言由 t=2000 改为 **t=1000**（t=0 只建基线），其余计数逐条复核仍自洽。<br>**⑦ 优化 1–4**：文首"改动范围"去歧义（01 号属其自身 `v1.4-r3`）；§12.3 去掉"与 C1–C9 一一对应"的不实标题并补对应关系；§12.6 订正 **hvac = 8E1**（按 §9.8.1 的 10 bit/字节口径声明 + 8E1 敏感性复算，结论不变）与**响应帧算式**（`5 + D`，与表内 `17`/`21`、`21.68`/`25.84 ms` 自洽 ⇒ **PRD §10.4 数字无需改**；其文字偏差登记 **Δ-13**）；`GroupKey { ..poll.into() }` 改显式构造；删 `PortRunner.carrier_anchor`（无使用点）；§12.5 退避口径统一为"承载组自身组周期"。<br>**未改**：§1–§11、任何代码/配置、12 号设计；**既有门禁标记**（`[DESIGN_APPROVED: 2026-09-21]` / `[CODE_REVIEWED: PASS: 2026-09-22]` 原文未动，覆盖范围仍只到 §11）；**本次未加任何新门禁标记**（待复审）。**PRD 侧只动**：§10.7 的 AC-8-5 示例（"C4 的构造法"例子）+ 版本行（v1.13-r1，**判据未动、不构成重新评审**） |
 | **v1.13（2026-09-23，按设计评审意见修订，待复审；本次未获门禁标记）** | **只改 §12（§1–§11 零改动）**，逐条处置设计评审的 1 阻塞 + 非阻塞项：<br>**① 阻塞 B-1 —— `judges_evaluable` 作用域错**：旧写法把守卫套在**整段**遥测/事件上，而它按"**组内**齐备 `R(role)`"判定 ⇒ **`R(role) ≠ ∅` 的站上非承载组恒 `false`**（battery 快组不含 `soc` 块）⇒ **静默丢弃全部位/标量遥测与事件**（无日志、无用例），既与 §12.5"组内块只喂本组 tracker"自相矛盾，也使 PRD §10.3.2 允许的"`bms_alarm` 可提速"失效。**修法**：守卫**只管「判据 / 站级量」路径** —— 把既有 `round_signals`（`scheduler.rs:311-383`）机械拆为 `round_signals_group`（逐块位/字信号，**恒产**）与 `round_station_flags`（`StationFlag` 三项，**仅 `if poll.is_carrier && judges_evaluable(..)` 时求值**）；位/标量遥测与变化沿事件**对任意读组照常产出**（§12.4.3 的"三句话" + §12.4.5 的作用域声明 + §12.5 产出归属表两行）。**并订正"合法配置下恒真"的错误自述**（正确 = "**承载组作用域内**、配置合法时恒真；非承载组**不适用**"）。<br>**② 补两个用例**：**B-1 判别锚** `non_carrier_group_still_emits_its_bits`（battery 站：站 2000 / `bms_alarm` 1000 / `soc` 块不声明；tick 6 轮 ⇒ 断言 `bit_call_count(1,200)==6`、`input_call_count(1,100)==3`、位地址 201（`bms_alarm_2`，`BitClass::Alarm`）的 telemetry + `is_event` **必产**；**按旧写法实现必红**）；**守卫负向锚** `station_flag_guard_still_scopes_to_carrier`（fire 站绕过校验构造"判据跨组" ⇒ 断言 `fire_detector_count_mismatch` / `fire_detector_addr_order_invalid` 恒 0 条；**删掉守卫即红**）。<br>**③ 建议 a–d**：AC-8-5 补 **C4 可构造用例**（3×FC04 `count:120` ⇒ `T_组 = 801.36 ms` ⇒ `1.5×T_组 = 1202.04 ms`；并如实登记"C4 违规域被 C9 真包含 ⇒ 只能由**文案**区分"）；AC-8-3 钉 **tick 序 `0,1000,…,9000` + 逐项计数（2/2/34/3/0 事件）**；AC-8-8 **移出用例映射**；AC-8-7 ② 退避断言改 **fail 两轮 ⇒ `2×组周期`**。<br>**④ 口径偏订正**：`mapper.rs:363-372` 订正为 **`read_back` 取数段**（容量算式在 **`:377-385`**）；"既有 20 例"订正为 **`scheduler.rs` 44 例（38 `#[tokio::test]` + 6 `#[test]`）**。<br>**⑤ Q-22 选项 B 补第三环**（Δ-10）：放开 C6/C7 后**仍须 `fire` 站级 = 5000**（否则违 C5）⇒ **承载组由 `fire_sys`(1000) 变 `fire_det`(5000)** ⇒ 站离线判定节奏 1 s → 5 s，须与"完整性守卫 + 合并视图"一并登记。<br>**⑥ 占用率口径统一**（§12.6）：`U_前 = 47.52/5000 = 0.95 %`、`U_后 = 0.026848 = 2.68 %`、倍数 2.8×，**不得**改用 §9.8.1 的取整值 48 ms（那会得 0.96 % 且与"改造后"不同源）。<br>**⑦ 同轮连带**：02 PRD §10 的 4 项文档级订正 + 4 条建议已**同轮落入 PRD 正文**（PRD v1.13）；本章与 PRD 逐位一致。<br>**未改**：§1–§11、任何代码/配置、**既有门禁标记**（`[DESIGN_APPROVED: 2026-09-21]` / `[CODE_REVIEWED: PASS: 2026-09-22]` 原文未动；其覆盖范围仍只到 §11）。**本次未加任何新门禁标记**（待复审） |
 | **v1.12（2026-09-23）** | **新增 §12「块级采集周期覆盖（告警位单独快采，S3b-3）」**（对应 02 PRD §10 v1.12，用户 2026-09-23 就 12 号 R-33 的裁定）：① **配置**——`RegBlockConf` 新增 `interval_ms: Option<u64>`（`#[serde(default, skip_serializing_if)]`，缺省 = 继承站周期 ⇒ **零行为变化**）+ `effective_interval_ms`；② **内部结构**——`ReadGroup` / `GroupKey` / `GroupPoll` / `DueEntry{key,is_carrier,group_fail_count}`，`PortRunner` 增 `carrier_anchor` / `groups_of_station`，**`trackers` 键由站改为 `GroupKey`**；③ **调度器**——`read_groups_of`（唯一分组实现）+ `carrier_group`（C8）+ `DueCalc::due_round/delay_group/bump_group_fail/clear_group_fail` + `run_port_round` + `poll_group`（含**只在承载组调 `poll_to_result`** 与 `judges_evaluable` 运行期守卫）；④ **失败语义**——「站级 `offline`/`online` 由**站级承载组**唯一承载，**块级组失败不升级为站级 offline**」+ 组级退避 + "站恢复重建**全部组**基线"（两条硬理由：不遮蔽正在上送的告警位、消除周期性事件对刷屏）；⑤ **带宽重算**——按 §9.8.1 公式复算首例：`T_快组 = 21.68 ms` / `T_慢组 = 25.84 ms` / `U_口 = 2.68 %`（精确 0.026848；改造前 0.95 %），三档敏感性 1.60/2.68/4.85 %，并复核现网 6 站的 C9（最大 `meter_batt` 0.310 ≤ 0.5）；⑥ **校验落点**——新增 `validate_block_intervals`（**规则 20–23**，插入为判定顺序的 ②′）+ 常量 `MIN_POLL_INTERVAL_MS`（与 `PCS_MIN_INTERVAL_MS` 同源，旧名保留为别名）；⑦ **测试策略**（13 条单测 + 集成回归）+ **Task T8/T9/T10**；⑧ 差异上报 **Δ-10**（§9.5.4 的"探测器块独立降频"需块级拆分而 `fire` 站受 C6/C7 约束 ⇒ 本轮按整站 5000 ms，登记 PRD Q-22）/ **Δ-11**（§9.8.1 的 `grid_meter` 行缺 `T` ⇒ 不擅填，登记 PRD Q-21 ③）；风险 R-7…R-11。**未改**：§1–§11、PRD、任何代码/配置、**既有门禁标记**（`[DESIGN_APPROVED: 2026-09-21]` / `[CODE_REVIEWED: PASS: 2026-09-22]` 原文未动）<br>**⚠️ 订正（v1.13）**：本行的"**未改 PRD**"在 v1.13 轮次被推翻 —— 设计评审对 02 PRD §10 提出的 **4 项文档级订正 + 4 条建议**要求落到 **PRD 正文**，已随 v1.13 同轮执行（见 v1.13 行第 ⑦ 条与 §12.10.2 末的对照表）。**§1–§11 与门禁标记仍未改动**（该部分承诺继续成立）。 |
 | **v1.11** | D-1 裁定闭合（空调串口校验位按 ①：新增站级 `parity`、空调站配 `even`、同口一致性校验同 `baud_rate`）同步至 §11.4.1 / §11.4.5 / §11.5.1 / §11.11.2 / §11.11.3 / §11.12 / §11.14。 |
