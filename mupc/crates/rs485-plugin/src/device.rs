@@ -77,15 +77,71 @@ fn build_read_frame(slave: u8, func: u8, addr: u16, count: u16, crc_mode: CrcMod
     cmd
 }
 
+/// 帧级校验：请求级读路径（FC03/FC04/FC02）响应解析的**唯一校验入口**。
+///
+/// 口径对齐设计 §3.4.1「CRC 验证：**严格校验，地址+数据不匹配则拒绝**」与既有
+/// [`crate::protocol::Frame::parse`] / `ModbusHandler::decode_response`：
+/// 1. **最小帧长与 CRC16** —— 复用 [`Frame::parse`]（CRC 复用同一实现，不另写一套）；
+/// 2. **响应从站号 == 请求从站号** —— 防同口多从站时他站帧被当本站数据（S3a 请求级
+///    读路径的关键风险面：口内轮询多 slave，串扰帧在旧路径被无条件接受）；
+/// 3. **Modbus 异常帧**（`func & 0x80 != 0`）—— 按 PRD §9.7.1 语义直接拒绝，异常码
+///    入错误报文，**绝不静默当数据**。
+///
+/// 错误沿既有 `Result` 上抛；上层 southd 已按「单块读超时 / CRC 错 / 异常码 → 该站本轮
+/// 失败 → `offline_count + 1`」（PRD §9.7.1）处理，本函数不触碰上层语义。
+fn validate_read_response(response: &[u8], slave: u8, crc_mode: CrcMode) -> Result<(), Rs485Error> {
+    // ① 长度（≥5）+ ② CRC16：Frame::parse 已含二者，且与写路径/旧 handler 路径同源。
+    let frame = Frame::parse(response, crc_mode)?;
+
+    // ③ 从站号：请求谁就只认谁（同口多从站语义的必要防线）。
+    if frame.addr != slave {
+        return Err(Rs485Error::ConfigFailed(format!(
+            "响应从站号不匹配：请求 slave={slave}，响应 slave={}（他站帧不得当本站数据）",
+            frame.addr
+        )));
+    }
+
+    // ④ 异常帧：func 最高位置 1 ⇒ [slave, func|0x80, 异常码, crc_lo, crc_hi]。
+    if frame.func_code & 0x80 != 0 {
+        let code = response.get(2).copied().unwrap_or(0);
+        return Err(Rs485Error::ConfigFailed(format!(
+            "Modbus 异常响应：func=0x{:02X}，异常码=0x{code:02X}（{}）",
+            frame.func_code,
+            modbus_exception_desc(code)
+        )));
+    }
+
+    Ok(())
+}
+
+/// Modbus 标准异常码 → 中文描述（仅用于错误报文可读性，**不参与判定**）。
+fn modbus_exception_desc(code: u8) -> &'static str {
+    match code {
+        0x01 => "非法功能",
+        0x02 => "非法数据地址",
+        0x03 => "非法数据值",
+        0x04 => "从站设备故障",
+        0x05 => "确认（需要长时间处理）",
+        0x06 => "从站设备忙",
+        0x08 => "存储奇偶性差错",
+        0x0A => "网关路径不可用",
+        0x0B => "网关目标设备响应失败",
+        _ => "未知异常码",
+    }
+}
+
 /// 解析 Modbus 读寄存器响应（FC03/FC04 通用）。
 ///
 /// 响应格式：[slave, func, byte_count, reg(大端 2 字节)..., crc_lo, crc_hi]
-/// 本函数只做长度校验与寄存器拆解（大端 u16），不校验 CRC（与原实现逐行为一致）。
+/// 先经 [`validate_read_response`] 做帧级严格校验（长度/CRC/从站号/异常帧），
+/// 再做长度校验与寄存器拆解（大端 u16）。
 /// 纯函数、无 IO，便于单元测试。
-fn parse_regs_response(response: &[u8]) -> Result<Vec<u16>, Rs485Error> {
-    if response.len() < 5 {
-        return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
-    }
+fn parse_regs_response(
+    response: &[u8],
+    slave: u8,
+    crc_mode: CrcMode,
+) -> Result<Vec<u16>, Rs485Error> {
+    validate_read_response(response, slave, crc_mode)?;
 
     let byte_count = response[2] as usize;
     if response.len() < 3 + byte_count + 2 {
@@ -128,14 +184,18 @@ pub fn unpack_bits(bytes: &[u8], count: u16) -> Vec<bool> {
 /// 解析 Modbus FC02 离散输入响应。
 ///
 /// 响应格式：[slave, func, byte_count, data..., crc_lo, crc_hi]
-/// 与 [`parse_regs_response`] 同口径：只做长度校验与解包，**不校验 CRC**。
+/// 与 [`parse_regs_response`] 同口径：先经 [`validate_read_response`] 帧级严格校验
+/// （长度/CRC/从站号/异常帧），再做长度校验与解包。
 ///
 /// **刻意不复用 `parse_regs_response`**：后者按 `byte_count / 2` 拆寄存器，
 /// 会丢掉非偶数字节的末字节（位宽 1..8 时响应只有 1 个数据字节）。
-fn parse_bits_response(response: &[u8], count: u16) -> Result<Vec<bool>, Rs485Error> {
-    if response.len() < 5 {
-        return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
-    }
+fn parse_bits_response(
+    response: &[u8],
+    slave: u8,
+    count: u16,
+    crc_mode: CrcMode,
+) -> Result<Vec<bool>, Rs485Error> {
+    validate_read_response(response, slave, crc_mode)?;
 
     let byte_count = response[2] as usize;
     if response.len() < 3 + byte_count + 2 {
@@ -599,13 +659,10 @@ impl Rs485Device {
         addr: u16,
         count: u16,
     ) -> Result<Vec<u16>, Rs485Error> {
-        self.read_regs(build_read_frame(
+        self.read_regs(
+            build_read_frame(slave, 0x03, addr, count, self.config.crc_mode),
             slave,
-            0x03,
-            addr,
-            count,
-            self.config.crc_mode,
-        ))
+        )
     }
 
     /// 读取输入寄存器（Modbus 0x04），显式从站地址（同口多从站，口内串行轮询）。
@@ -615,13 +672,10 @@ impl Rs485Device {
         addr: u16,
         count: u16,
     ) -> Result<Vec<u16>, Rs485Error> {
-        self.read_regs(build_read_frame(
+        self.read_regs(
+            build_read_frame(slave, 0x04, addr, count, self.config.crc_mode),
             slave,
-            0x04,
-            addr,
-            count,
-            self.config.crc_mode,
-        ))
+        )
     }
 
     /// 读取离散输入（Modbus **FC02**），显式从站地址（同口多从站，口内串行轮询）。
@@ -637,13 +691,15 @@ impl Rs485Device {
     ) -> Result<Vec<bool>, Rs485Error> {
         let cmd = build_read_frame(slave, 0x02, addr, count, self.config.crc_mode);
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
-        parse_bits_response(&response, count)
+        parse_bits_response(&response, slave, count, self.config.crc_mode)
     }
 
     /// 私有：发送读请求帧并解析响应寄存器。
-    fn read_regs(&self, cmd: Vec<u8>) -> Result<Vec<u16>, Rs485Error> {
+    ///
+    /// `slave` 透传给 [`parse_regs_response`] 作响应从站号校验（与请求同源，防他站帧）。
+    fn read_regs(&self, cmd: Vec<u8>, slave: u8) -> Result<Vec<u16>, Rs485Error> {
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
-        parse_regs_response(&response)
+        parse_regs_response(&response, slave, self.config.crc_mode)
     }
 
     /// 写入单个寄存器（Modbus 功能码 0x06）
@@ -935,22 +991,30 @@ mod tests {
     #[test]
     fn test_parse_regs_response_ok() {
         // [slave, func, byte_count, reg1_hi, reg1_lo, reg2_hi, reg2_lo, crc_lo, crc_hi]
-        let response = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xC5, 0xC4];
-        let regs = parse_regs_response(&response).unwrap();
+        // 原用例 CRC 位是请求帧 [02 03 01 00 00 02] 的 CRC（C5 C4），非本响应帧的真实 CRC；
+        // 请求级读路径补 CRC 校验后必须换成真值：独立复算 CRC(lo,hi)=A9 7F。
+        let response = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA9, 0x7F];
+        let regs = parse_regs_response(&response, 0x02, CrcMode::Crc16Modbus).unwrap();
         assert_eq!(regs, vec![0x0102, 0xFFFE]);
     }
 
     #[test]
     fn test_parse_regs_response_too_short() {
-        assert!(parse_regs_response(&[]).is_err());
-        assert!(parse_regs_response(&[0x02, 0x03, 0x04, 0x01]).is_err());
+        assert!(parse_regs_response(&[], 0x02, CrcMode::Crc16Modbus).is_err());
+        assert!(
+            parse_regs_response(&[0x02, 0x03, 0x04, 0x01], 0x02, CrcMode::Crc16Modbus).is_err()
+        );
     }
 
     #[test]
     fn test_parse_regs_response_incomplete() {
-        // byte_count=4，但 len=6 < 3+4+2=9，应判不完整
-        let response = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF];
-        assert!(parse_regs_response(&response).is_err());
+        // byte_count 声称 4，实际只有 3 个数据字节：CRC 覆盖实际字节（自洽 ⇒ 校验通过），
+        // 应由 byte_count/长度一致性检查判"不完整"——保持本用例原有判别意图。
+        let mut response = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF];
+        let crc = Frame::calculate_crc(0x02, 0x03, &response[2..], CrcMode::Crc16Modbus);
+        response.push(crc as u8);
+        response.push((crc >> 8) as u8);
+        assert!(parse_regs_response(&response, 0x02, CrcMode::Crc16Modbus).is_err());
     }
 
     #[test]
@@ -979,6 +1043,151 @@ mod tests {
             .read_input_registers_from(0x2A, 0x0000, 4)
             .unwrap_err();
         assert!(matches!(err2, Rs485Error::NotConnected(_)));
+    }
+}
+
+/// 审查 P0-2：请求级读路径（FC03/FC04/FC02）的帧级严格校验。
+///
+/// 期望值全部来自**独立 CRC 向量**（Python 复算，非本仓实现产出），
+/// 见各用例注释中的 "CRC(lo,hi)=…"。
+#[cfg(test)]
+mod frame_validation_tests {
+    use super::tests::create_test_device;
+    use super::*;
+
+    // ── parse_regs_response（FC03/FC04） ────────────────────────────────
+
+    #[test]
+    fn regs_valid_frame_passes() {
+        // 请求 slave=2 FC03；响应 02 03 04 01 02 FF FE → CRC(lo,hi)=A9 7F
+        let resp = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA9, 0x7F];
+        let regs = parse_regs_response(&resp, 2, CrcMode::Crc16Modbus).unwrap();
+        assert_eq!(regs, vec![0x0102, 0xFFFE], "CRC 与从站号均正确 ⇒ 必须放行");
+    }
+
+    #[test]
+    fn regs_tampered_crc_err() {
+        // 同上帧，末 CRC 字节 0x7F 篡改为 0x7E（数据改动而 CRC 未跟改的典型现场）
+        let resp = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA9, 0x7E];
+        let err = parse_regs_response(&resp, 2, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::CrcFailed(_)),
+            "坏 CRC 必须返回 CrcFailed（设计 §2.7），实际: {err:?}"
+        );
+    }
+
+    #[test]
+    fn regs_tampered_payload_err() {
+        // 数据字节篡改（0x0102 → 0x0103）而 CRC 不变 ⇒ 同样必须拒
+        let resp = vec![0x02, 0x03, 0x04, 0x01, 0x03, 0xFF, 0xFE, 0xA9, 0x7F];
+        let err = parse_regs_response(&resp, 2, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(matches!(err, Rs485Error::CrcFailed(_)), "实际: {err:?}");
+    }
+
+    #[test]
+    fn regs_foreign_slave_err() {
+        // 请求 slave=2，总线回的是 slave=3 的**格式完全合法**帧（同口多从站串扰）
+        // 03 03 04 01 02 FF FE → CRC(lo,hi)=B9 BF
+        let resp = vec![0x03, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xB9, 0xBF];
+        let err = parse_regs_response(&resp, 2, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::ConfigFailed(_)),
+            "他站帧必须拒，实际: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("slave=2") && err.to_string().contains("slave=3"),
+            "错误报文须含请求/响应双方从站号，实际: {err}"
+        );
+    }
+
+    #[test]
+    fn regs_exception_frame_err() {
+        // 异常帧 [slave=1, 0x03|0x80, 异常码 0x02(非法数据地址)] → CRC(lo,hi)=C0 F1
+        let resp = vec![0x01, 0x83, 0x02, 0xC0, 0xF1];
+        let err = parse_regs_response(&resp, 1, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(matches!(err, Rs485Error::ConfigFailed(_)), "实际: {err:?}");
+        assert!(
+            err.to_string().contains("异常") && err.to_string().contains("02"),
+            "错误报文须带异常码，实际: {err}"
+        );
+    }
+
+    #[test]
+    fn regs_exception_frame_not_silently_parsed_as_data() {
+        // 反证：异常码恰为 0x00 时旧实现的长度检查会放行（3+0+2=5）⇒ 返回空寄存器"成功"。
+        // 现必须按异常帧拒。
+        let mut resp = vec![0x01, 0x83, 0x00];
+        let crc = Frame::calculate_crc(0x01, 0x83, &resp[2..], CrcMode::Crc16Modbus);
+        resp.push(crc as u8);
+        resp.push((crc >> 8) as u8);
+        let err = parse_regs_response(&resp, 1, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(err.to_string().contains("异常"), "实际: {err}");
+    }
+
+    // ── parse_bits_response（FC02） ────────────────────────────────────
+
+    #[test]
+    fn bits_valid_frame_passes() {
+        // 请求 slave=1 FC02 addr0 count8；响应 01 02 01 3B → CRC(lo,hi)=E0 5B
+        let resp = vec![0x01, 0x02, 0x01, 0x3B, 0xE0, 0x5B];
+        let bits = parse_bits_response(&resp, 1, 8, CrcMode::Crc16Modbus).unwrap();
+        assert_eq!(
+            bits,
+            vec![true, true, false, true, true, true, false, false],
+            "PRD §9.7.4 位序（bit0=LSB）不得因新增校验而改变"
+        );
+    }
+
+    #[test]
+    fn bits_tampered_crc_err() {
+        // 末 CRC 字节 0x5B 篡改为 0x5A
+        let resp = vec![0x01, 0x02, 0x01, 0x3B, 0xE0, 0x5A];
+        let err = parse_bits_response(&resp, 1, 8, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::CrcFailed(_)),
+            "坏 CRC 必须返回 CrcFailed，实际: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bits_foreign_slave_err() {
+        // 请求 slave=1，回的是 slave=3 的合法帧 03 02 04 3B C5 6E 93 → CRC(lo,hi)=A9 36
+        let resp = vec![0x03, 0x02, 0x04, 0x3B, 0xC5, 0x6E, 0x93, 0xA9, 0x36];
+        let err = parse_bits_response(&resp, 1, 31, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(
+            err.to_string().contains("slave=1") && err.to_string().contains("slave=3"),
+            "他站帧必须拒且报文含双方从站号，实际: {err}"
+        );
+    }
+
+    #[test]
+    fn bits_exception_frame_err() {
+        // 异常帧 [slave=1, 0x02|0x80, 异常码 0x02] → CRC(lo,hi)=C1 61
+        let resp = vec![0x01, 0x82, 0x02, 0xC1, 0x61];
+        let err = parse_bits_response(&resp, 1, 8, CrcMode::Crc16Modbus).unwrap_err();
+        assert!(
+            err.to_string().contains("异常"),
+            "异常帧不得当数据解包，实际: {err}"
+        );
+    }
+
+    // ── 读路径委托链：slave 透传（防"校验参数接错线"） ───────────────────
+
+    #[test]
+    fn read_from_methods_forward_requested_slave() {
+        // 关键接线：*_from 的 `slave` 必须一路透传到响应校验（read_regs/parse_* 的
+        // 第二参数）。串口未打开时委托链在 send_recv 处即返回 NotConnected —— 该用例
+        // 钉的是"编译期接线 + 不 panic + 零 IO"，真机帧校验由上面各用例覆盖。
+        let device = create_test_device(); // config.device_addr = 0x01
+        for err in [
+            device
+                .read_holding_registers_from(2, 0x0100, 2)
+                .unwrap_err(),
+            device.read_input_registers_from(3, 0x0000, 4).unwrap_err(),
+            device.read_discrete_inputs_from(4, 0x0000, 31).unwrap_err(),
+        ] {
+            assert!(matches!(err, Rs485Error::NotConnected(_)), "实际: {err:?}");
+        }
     }
 }
 
@@ -1096,7 +1305,13 @@ mod fc02_tests {
         // 0x3B 恰好相同 ⇒ 对该缺陷**零判别力**（S3b-2 测试门禁报告 R3 / 探针 C 实证）。
         // 现相邻字节低 6 位两两不同 ⇒ 取数错位必然使本用例变红。
         let data = [0x3B, 0xC5, 0x6E, 0x93];
-        let bits = parse_bits_response(&build_fc02_response(0x01, &data), 31).unwrap();
+        let bits = parse_bits_response(
+            &build_fc02_response(0x01, &data),
+            0x01,
+            31,
+            CrcMode::Crc16Modbus,
+        )
+        .unwrap();
         assert_eq!(bits.len(), 31, "长度恒 = count，末字节 bit7 为无关位不入列");
 
         let expected: Vec<bool> = [
@@ -1114,48 +1329,52 @@ mod fc02_tests {
 
     #[test]
     fn test_parse_bits_response_288_bits() {
-        let mut resp = vec![0x01, 0x02, 36];
-        resp.extend((0..36u8).map(|i| i.wrapping_mul(7)));
-        resp.extend([0x00, 0x00]); // crc 占位（本函数不校验 CRC，与原 parse_regs_response 同口径）
-        let bits = parse_bits_response(&resp, 288).unwrap();
-        assert_eq!(
-            bits,
-            unpack_bits(
-                &(0..36u8).map(|i| i.wrapping_mul(7)).collect::<Vec<_>>(),
-                288
-            )
-        );
+        // 原用例 CRC 用 0x00,0x00 占位（当时本函数不校验 CRC）；补校验后改用真实帧
+        // （build_fc02_response 按产线同一 CRC 实现生成）。
+        let data: Vec<u8> = (0..36u8).map(|i| i.wrapping_mul(7)).collect();
+        let resp = build_fc02_response(0x01, &data);
+        let bits = parse_bits_response(&resp, 0x01, 288, CrcMode::Crc16Modbus).unwrap();
+        assert_eq!(bits, unpack_bits(&data, 288));
     }
 
     #[test]
     fn test_parse_bits_response_too_short() {
-        assert!(parse_bits_response(&[], 8).is_err());
-        assert!(parse_bits_response(&[0x01, 0x02, 0x01], 8).is_err());
+        assert!(parse_bits_response(&[], 0x01, 8, CrcMode::Crc16Modbus).is_err());
+        assert!(parse_bits_response(&[0x01, 0x02, 0x01], 0x01, 8, CrcMode::Crc16Modbus).is_err());
     }
 
     #[test]
     fn test_parse_bits_response_incomplete() {
-        // byte_count=4 但报文只有 3 个数据字节 → 判不完整
-        let resp = vec![0x01, 0x02, 0x04, 0x3B, 0xBB, 0x00];
-        assert!(parse_bits_response(&resp, 31).is_err());
+        // byte_count 声称 4 但报文只有 3 个数据字节：CRC 覆盖实际字节（自洽 ⇒ 帧级校验通过），
+        // 应由 byte_count/长度一致性检查判"不完整"——保持本用例原有判别意图。
+        let mut resp = vec![0x01, 0x02, 0x04, 0x3B, 0xBB, 0x00];
+        let crc = Frame::calculate_crc(0x01, 0x02, &resp[2..], CrcMode::Crc16Modbus);
+        resp.push(crc as u8);
+        resp.push((crc >> 8) as u8);
+        assert!(parse_bits_response(&resp, 0x01, 31, CrcMode::Crc16Modbus).is_err());
     }
 
     #[test]
     fn test_parse_bits_response_byte_count_insufficient_for_count() {
         // 288 位需 36 字节，响应只给 2 字节 ⇒ 必须拒（不得静默补 0 冒充"全部正常"）
-        let resp = vec![0x01, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00];
-        let err = parse_bits_response(&resp, 288).unwrap_err();
+        // 帧级校验（CRC/从站号）先行通过，本用例专钉 byte_count 不足这一层。
+        let resp = build_fc02_response(0x01, &[0x00, 0x00]);
+        let err = parse_bits_response(&resp, 0x01, 288, CrcMode::Crc16Modbus).unwrap_err();
         assert!(
             matches!(err, Rs485Error::ConfigFailed(_)),
             "应为配置/帧错误，实际: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("字节数不足"),
+            "错误须指向字节数不足而非 CRC，实际: {err}"
         );
     }
 
     #[test]
     fn test_parse_bits_response_extra_bytes_ignored() {
         // byte_count 大于所需时只取前 ceil(count/8) 字节（多余字节不参与解包）
-        let resp = vec![0x01, 0x02, 0x05, 0x3B, 0xBB, 0x00, 0x00, 0xAA, 0x00, 0x00];
-        let bits = parse_bits_response(&resp, 16).unwrap();
+        let resp = build_fc02_response(0x01, &[0x3B, 0xBB, 0x00, 0x00, 0xAA]);
+        let bits = parse_bits_response(&resp, 0x01, 16, CrcMode::Crc16Modbus).unwrap();
         assert_eq!(bits, unpack_bits(&[0x3B, 0xBB], 16));
     }
 
@@ -1168,7 +1387,7 @@ mod fc02_tests {
     // 位序回归也必然在此变红。
 
     /// 手工构造完整 FC02 响应帧：[slave, 0x02, byte_count, data…, CRC16(lo,hi)]。
-    /// CRC 用产线同一实现计算（parse_bits_response 本身不校验 CRC，但帧必须真实）。
+    /// CRC 用产线同一实现计算（审查 P0-2 起 `parse_bits_response` **严格校验 CRC**）。
     fn build_fc02_response(slave: u8, data: &[u8]) -> Vec<u8> {
         let mut frame = vec![slave, 0x02, data.len() as u8];
         frame.extend_from_slice(data);
@@ -1183,7 +1402,7 @@ mod fc02_tests {
         // PRD §9.7.4 原文示例字节 0x3B 由**完整响应帧**驱动（1 字节最小正向帧）：
         // 0x3B = 0b0011_1011，bit0=LSB ⇒ 1,1,0,1,1,1,0,0
         let resp = build_fc02_response(0x01, &[0x3B]);
-        let bits = parse_bits_response(&resp, 8).unwrap();
+        let bits = parse_bits_response(&resp, 0x01, 8, CrcMode::Crc16Modbus).unwrap();
         assert_eq!(
             bits,
             vec![true, true, false, true, true, true, false, false],
@@ -1196,7 +1415,7 @@ mod fc02_tests {
         // 位序回归钉（G1/P3）：两帧**不对称**单字节，钉死 bit0/bit7 的归属。
         // 若 unpack_bits 被改成 MSB-first，本用例两帧全部翻转 ⇒ 必红，且红在帧层。
         let resp_a = build_fc02_response(0x01, &[0b0000_0001]);
-        let bits_a = parse_bits_response(&resp_a, 8).unwrap();
+        let bits_a = parse_bits_response(&resp_a, 0x01, 8, CrcMode::Crc16Modbus).unwrap();
         assert!(bits_a[0], "0x01 的 LSB ⇒ 位 0 必须为 true");
         assert!(
             bits_a[1..].iter().all(|b| !*b),
@@ -1204,7 +1423,7 @@ mod fc02_tests {
         );
 
         let resp_b = build_fc02_response(0x01, &[0b1000_0000]);
-        let bits_b = parse_bits_response(&resp_b, 8).unwrap();
+        let bits_b = parse_bits_response(&resp_b, 0x01, 8, CrcMode::Crc16Modbus).unwrap();
         assert!(bits_b[7], "0x80 的 MSB ⇒ 位 7 必须为 true");
         assert!(
             bits_b[..7].iter().all(|b| !*b),
@@ -1228,10 +1447,20 @@ mod fc02_tests {
         .to_vec();
         assert_eq!(expected.len(), 31);
 
-        let tail_clear =
-            parse_bits_response(&build_fc02_response(0x01, &[0x3B, 0xBB, 0xA5, 0x5A]), 31).unwrap();
-        let tail_set =
-            parse_bits_response(&build_fc02_response(0x01, &[0x3B, 0xBB, 0xA5, 0xDA]), 31).unwrap();
+        let tail_clear = parse_bits_response(
+            &build_fc02_response(0x01, &[0x3B, 0xBB, 0xA5, 0x5A]),
+            0x01,
+            31,
+            CrcMode::Crc16Modbus,
+        )
+        .unwrap();
+        let tail_set = parse_bits_response(
+            &build_fc02_response(0x01, &[0x3B, 0xBB, 0xA5, 0xDA]),
+            0x01,
+            31,
+            CrcMode::Crc16Modbus,
+        )
+        .unwrap();
         assert_eq!(tail_clear, expected, "无关位=0 帧必须逐位等于独立锚");
         assert_eq!(tail_set, tail_clear, "末字节 bit7 置 1 不得改变前 31 位");
         assert_eq!(tail_set.len(), 31, "长度恒 = count，无关位不入列");
@@ -1243,7 +1472,7 @@ mod fc02_tests {
         // （非 unpack_bits 调用）逐位比对，并硬编码跨字节边界与首末位抽样。
         let data: Vec<u8> = (0..36u32).map(|i| (i * 37 + 11) as u8).collect();
         let resp = build_fc02_response(0x01, &data);
-        let bits = parse_bits_response(&resp, 288).unwrap();
+        let bits = parse_bits_response(&resp, 0x01, 288, CrcMode::Crc16Modbus).unwrap();
         assert_eq!(bits.len(), 288);
         for k in 0..288usize {
             let expected = (data[k / 8] >> (k % 8)) & 1 == 1;
@@ -1272,7 +1501,7 @@ mod fc02_tests {
     fn fc02_frame_byte_count_one_below_needed_err() {
         // 精确边界：count=9 需 ceil(9/8)=2 字节，帧只给 1 字节 ⇒ Err（不得补 0 放行）
         let resp = build_fc02_response(0x01, &[0xFF]);
-        let err = parse_bits_response(&resp, 9).unwrap_err();
+        let err = parse_bits_response(&resp, 0x01, 9, CrcMode::Crc16Modbus).unwrap_err();
         assert!(matches!(err, Rs485Error::ConfigFailed(_)), "实际: {err:?}");
     }
 
@@ -1280,7 +1509,10 @@ mod fc02_tests {
     fn fc02_frame_truncated_crc_err() {
         // byte_count=1、数据字节在位，但 CRC 只剩 1 字节（len=5 < 3+1+2）⇒ Err
         let resp = vec![0x01, 0x02, 0x01, 0x3B, 0x00];
-        assert!(parse_bits_response(&resp, 8).is_err(), "CRC 截断必须拒");
+        assert!(
+            parse_bits_response(&resp, 0x01, 8, CrcMode::Crc16Modbus).is_err(),
+            "CRC 截断必须拒"
+        );
     }
 
     #[test]
@@ -1288,7 +1520,7 @@ mod fc02_tests {
         // byte_count 声称 10 字节，缓冲实际只有 3 数据字节 + 2 CRC（len=8 < 3+10+2）⇒ Err
         let resp = vec![0x01, 0x02, 0x0A, 0x3B, 0xBB, 0x00, 0x00, 0x00];
         assert!(
-            parse_bits_response(&resp, 16).is_err(),
+            parse_bits_response(&resp, 0x01, 16, CrcMode::Crc16Modbus).is_err(),
             "byte_count 超出缓冲必须拒（防越界读）"
         );
     }
