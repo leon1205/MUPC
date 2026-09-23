@@ -46,6 +46,12 @@ pub struct Rs485Device {
     opened: AtomicBool,
     /// 发送锁（保证事务原子性）
     tx_lock: StdMutex<()>,
+    /// **测试专用**响应注入缝：非 `None` 时 [`Rs485Device::send_recv`] 直接返回该字节流，
+    /// 使「请求帧 → 响应 → 帧级校验」整条链可在无真实串口（Windows/CI）下被断言。
+    ///
+    /// `#[cfg(test)]` ⇒ 产线构建**不含此字段**、`send_recv` 也不含对应分支，语义零影响。
+    #[cfg(test)]
+    test_response: Mutex<Option<Vec<u8>>>,
 }
 
 /// 平台无关的文件描述符类型
@@ -75,6 +81,21 @@ fn build_read_frame(slave: u8, func: u8, addr: u16, count: u16, crc_mode: CrcMod
     cmd.push(crc as u8);
     cmd.push((crc >> 8) as u8);
     cmd
+}
+
+/// 期望从站号 = **请求帧首字节**（审查 W1 的结构性保证）。
+///
+/// 请求帧由 [`build_read_frame`] 构造，其首字节恒为 `slave`（已有独立单测
+/// `test_build_read_frame_*` 钉住）⇒ "请求谁 → 就校验谁" 由**构造关系**决定，
+/// 而不是调用点"记得传对参数"：
+/// 请求级读路径不再向 [`parse_regs_response`] / [`parse_bits_response`] 另传 `slave`，
+/// 而是把请求帧本身交进来取值 —— 传错/漏传在语法上无从发生。
+///
+/// 用 `first()` 而非 `cmd[0]`：空帧返回 `Err` 而非 panic（同一提交内 O1 的口径）。
+fn expected_slave_of(cmd: &[u8]) -> Result<u8, Rs485Error> {
+    cmd.first()
+        .copied()
+        .ok_or_else(|| Rs485Error::ConfigFailed("请求帧为空，无法确定期望从站号".to_string()))
 }
 
 /// 帧级校验：请求级读路径（FC03/FC04/FC02）响应解析的**唯一校验入口**。
@@ -143,7 +164,12 @@ fn parse_regs_response(
 ) -> Result<Vec<u16>, Rs485Error> {
     validate_read_response(response, slave, crc_mode)?;
 
-    let byte_count = response[2] as usize;
+    // 安全取值（审查 O1）：不裸索引 `response[2]` —— 其安全性此前完全依赖 `validate_read_response`
+    // 先保 `len ≥ 5`，一旦该前置被短路/重排即 panic；而南向采集 task 内 panic 会**静默终止整口
+    // 采集**（不是干净 Err）。此处显式取 `get(2)` ⇒ 失败形态统一为 Err。
+    let byte_count = response.get(2).copied().ok_or_else(|| {
+        Rs485Error::ConfigFailed("响应帧不足 3 字节，缺少 byte_count 字段".to_string())
+    })? as usize;
     if response.len() < 3 + byte_count + 2 {
         return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
     }
@@ -197,7 +223,10 @@ fn parse_bits_response(
 ) -> Result<Vec<bool>, Rs485Error> {
     validate_read_response(response, slave, crc_mode)?;
 
-    let byte_count = response[2] as usize;
+    // 同 [`parse_regs_response`]：`get(2)` 安全取值，杜绝"前置被短路 ⇒ 口内 panic"（审查 O1）。
+    let byte_count = response.get(2).copied().ok_or_else(|| {
+        Rs485Error::ConfigFailed("响应帧不足 3 字节，缺少 byte_count 字段".to_string())
+    })? as usize;
     if response.len() < 3 + byte_count + 2 {
         return Err(Rs485Error::ConfigFailed("响应数据不完整".to_string()));
     }
@@ -229,6 +258,8 @@ impl Rs485Device {
             status: Mutex::new(DeviceStatus::Offline),
             opened: AtomicBool::new(false),
             tx_lock: StdMutex::new(()),
+            #[cfg(test)]
+            test_response: Mutex::new(None),
         }
     }
 
@@ -573,6 +604,14 @@ impl Rs485Device {
 
     /// 发送并接收数据
     pub fn send_recv(&self, frame: &[u8], recv_timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
+        // 测试注入缝（仅 `#[cfg(test)]` 编译进来；产线分支与语义逐字节不变）：
+        // 让「请求 → 响应 → 校验/解析」整链可在无串口环境（Windows/CI）下被断言。
+        #[cfg(test)]
+        {
+            if let Some(injected) = self.test_response.lock().clone() {
+                return Ok(injected);
+            }
+        }
         self.send_frame(frame)?;
         self.recv_frame(recv_timeout_ms)
     }
@@ -659,10 +698,13 @@ impl Rs485Device {
         addr: u16,
         count: u16,
     ) -> Result<Vec<u16>, Rs485Error> {
-        self.read_regs(
-            build_read_frame(slave, 0x03, addr, count, self.config.crc_mode),
+        self.read_regs(build_read_frame(
             slave,
-        )
+            0x03,
+            addr,
+            count,
+            self.config.crc_mode,
+        ))
     }
 
     /// 读取输入寄存器（Modbus 0x04），显式从站地址（同口多从站，口内串行轮询）。
@@ -672,10 +714,13 @@ impl Rs485Device {
         addr: u16,
         count: u16,
     ) -> Result<Vec<u16>, Rs485Error> {
-        self.read_regs(
-            build_read_frame(slave, 0x04, addr, count, self.config.crc_mode),
+        self.read_regs(build_read_frame(
             slave,
-        )
+            0x04,
+            addr,
+            count,
+            self.config.crc_mode,
+        ))
     }
 
     /// 读取离散输入（Modbus **FC02**），显式从站地址（同口多从站，口内串行轮询）。
@@ -691,15 +736,21 @@ impl Rs485Device {
     ) -> Result<Vec<bool>, Rs485Error> {
         let cmd = build_read_frame(slave, 0x02, addr, count, self.config.crc_mode);
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
-        parse_bits_response(&response, slave, count, self.config.crc_mode)
+        parse_bits_response(
+            &response,
+            expected_slave_of(&cmd)?,
+            count,
+            self.config.crc_mode,
+        )
     }
 
     /// 私有：发送读请求帧并解析响应寄存器。
     ///
-    /// `slave` 透传给 [`parse_regs_response`] 作响应从站号校验（与请求同源，防他站帧）。
-    fn read_regs(&self, cmd: Vec<u8>, slave: u8) -> Result<Vec<u16>, Rs485Error> {
+    /// 期望从站号**取自请求帧首字节**（[`expected_slave_of`]），不再由调用方另传 ——
+    /// "请求谁就校验谁" 是构造关系而非调用点约定（审查 W1）。
+    fn read_regs(&self, cmd: Vec<u8>) -> Result<Vec<u16>, Rs485Error> {
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
-        parse_regs_response(&response, slave, self.config.crc_mode)
+        parse_regs_response(&response, expected_slave_of(&cmd)?, self.config.crc_mode)
     }
 
     /// 写入单个寄存器（Modbus 功能码 0x06）
@@ -1189,6 +1240,63 @@ mod frame_validation_tests {
             assert!(matches!(err, Rs485Error::NotConnected(_)), "实际: {err:?}");
         }
     }
+
+    #[test]
+    fn read_path_validates_the_slave_actually_requested_not_config_addr() {
+        // 审查 W1：探针③证实"把透传的 slave 换成 config.device_addr"后 59+10 条全绿 ⇒
+        // 该接线接错也无人发现。本用例经 `send_recv` 测试注入口（零 IO）把
+        // 「请求帧 → 响应 → 帧级校验」整链跑到底，并刻意让 **请求 slave=2 ≠ config.device_addr=1**：
+        //   ① 回 slave=2（= 请求帧首字节）的合法帧 ⇒ 必须放行（期望值若误取 config.device_addr 必红）；
+        //   ② 回 slave=1（= config.device_addr）的合法帧 ⇒ 必须拒（且报文含双方从站号）。
+        // ①② 一正一反互为对照：既钉"必须按请求校验"，也钉"不是碰巧什么都放行"。
+        let device = create_test_device(); // config.device_addr = 0x01
+        assert_eq!(
+            device.config.device_addr, 0x01,
+            "前提：config 的从站号必须与请求从站号不同，否则本用例失去判别力"
+        );
+
+        // ① FC03：请求 slave=2，响应 slave=2 的合法帧（独立复算 CRC(lo,hi)=A9 7F）
+        *device.test_response.lock() =
+            Some(vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA9, 0x7F]);
+        assert_eq!(
+            device.read_holding_registers_from(2, 0x0100, 2).unwrap(),
+            vec![0x0102, 0xFFFE],
+            "请求 slave=2 且响应 slave=2 ⇒ 必须放行；期望值只能来自请求帧首字节"
+        );
+
+        // ② FC03：请求 slave=2，回的是 slave=1（= config.device_addr）合法帧（CRC=9A 7F）⇒ 必拒
+        *device.test_response.lock() =
+            Some(vec![0x01, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0x9A, 0x7F]);
+        let err = device
+            .read_holding_registers_from(2, 0x0100, 2)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("slave=2") && err.to_string().contains("slave=1"),
+            "回 config.device_addr 的帧对请求 slave=2 而言仍是**他站帧**，必须拒，实际: {err}"
+        );
+
+        // ③ FC04 走同一条 read_regs（同一接线），正反各一次（响应帧亦为 FC04，CRC=A8 C8 / 9B C8）
+        *device.test_response.lock() =
+            Some(vec![0x02, 0x04, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA8, 0xC8]);
+        assert!(device.read_input_registers_from(2, 0x0100, 2).is_ok());
+        *device.test_response.lock() =
+            Some(vec![0x01, 0x04, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0x9B, 0xC8]);
+        assert!(device.read_input_registers_from(2, 0x0100, 2).is_err());
+
+        // ④ FC02 独立接线（不经 read_regs）：正反各一次
+        *device.test_response.lock() = Some(vec![0x02, 0x02, 0x01, 0x3B, 0xE0, 0x1F]);
+        assert_eq!(
+            device.read_discrete_inputs_from(2, 0, 8).unwrap(),
+            vec![true, true, false, true, true, true, false, false],
+            "FC02 请求 slave=2 且响应 slave=2 ⇒ 必须放行"
+        );
+        *device.test_response.lock() = Some(vec![0x01, 0x02, 0x01, 0x3B, 0xE0, 0x5B]);
+        let err = device.read_discrete_inputs_from(2, 0, 8).unwrap_err();
+        assert!(
+            err.to_string().contains("slave=2") && err.to_string().contains("slave=1"),
+            "FC02 回 config.device_addr 的帧必须拒，实际: {err}"
+        );
+    }
 }
 
 /// S3b-2 T2：FC02 离散输入帧层（设计 §11.4.3 / §11.4.5，PRD §9.7.4）。
@@ -1507,21 +1615,31 @@ mod fc02_tests {
 
     #[test]
     fn fc02_frame_truncated_crc_err() {
-        // byte_count=1、数据字节在位，但 CRC 只剩 1 字节（len=5 < 3+1+2）⇒ Err
-        let resp = vec![0x01, 0x02, 0x01, 0x3B, 0x00];
+        // 判别意图（审查 W2 恢复）：钉的是 **byte_count 与帧长不一致** 分支
+        // （`parse_bits_response` 的 `len < 3 + byte_count + 2`），不是 CRC 分支。
+        // 帧 [01 02 01 E0 A0]：byte_count=1，消息体只有它自己，CRC 覆盖 [01 02 01]
+        // （独立复算 CRC(lo,hi)=E0 A0）⇒ **帧级校验通过**，但 3+1+2=6 > len=5
+        // ⇒ 必须落"响应数据不完整"。**补真 CRC 之前该帧被 CRC 分支先拦**，
+        // 该用例因此不再敏感于本分支（探针①实证）。断言错误报文，钉死落点。
+        let resp = vec![0x01, 0x02, 0x01, 0xE0, 0xA0];
+        let err = parse_bits_response(&resp, 0x01, 8, CrcMode::Crc16Modbus).unwrap_err();
         assert!(
-            parse_bits_response(&resp, 0x01, 8, CrcMode::Crc16Modbus).is_err(),
-            "CRC 截断必须拒"
+            err.to_string().contains("不完整"),
+            "CRC 有效而消息体截断 ⇒ 必须落长度一致性分支（而非 CRC 分支），实际: {err}"
         );
     }
 
     #[test]
     fn fc02_frame_byte_count_exceeds_buffer_err() {
-        // byte_count 声称 10 字节，缓冲实际只有 3 数据字节 + 2 CRC（len=8 < 3+10+2）⇒ Err
-        let resp = vec![0x01, 0x02, 0x0A, 0x3B, 0xBB, 0x00, 0x00, 0x00];
+        // 判别意图（审查 W2 恢复）：byte_count 声称 10 字节、缓冲只有 3 数据字节
+        // （len=8 < 3+10+2）⇒ 必须落"响应数据不完整"（防按虚报长度越界读）。
+        // CRC 覆盖实际字节 [01 02 0A 3B BB 00]（独立复算 CRC(lo,hi)=78 EF）⇒ 帧级校验
+        // **通过**，否则又会被 CRC 分支先拦（同 W2 的问题）。
+        let resp = vec![0x01, 0x02, 0x0A, 0x3B, 0xBB, 0x00, 0x78, 0xEF];
+        let err = parse_bits_response(&resp, 0x01, 16, CrcMode::Crc16Modbus).unwrap_err();
         assert!(
-            parse_bits_response(&resp, 0x01, 16, CrcMode::Crc16Modbus).is_err(),
-            "byte_count 超出缓冲必须拒（防越界读）"
+            err.to_string().contains("不完整"),
+            "byte_count 超出缓冲必须拒于长度一致性分支（防越界读），实际: {err}"
         );
     }
 
