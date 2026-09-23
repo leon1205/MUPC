@@ -597,6 +597,21 @@ fn fire_head_present(reads: &BlockReads) -> bool {
 /// 的**运行期求值域** —— 同一份 `R(role)` 定义，一侧判"哪些块下标在 R 内"、一侧判"这些块在
 /// 本组读集里是否读成功"。**不得另立第二套口径**。
 ///
+/// **总口径（各 role 的"可用性"按各自自然口径判定）**：本函数回答的是一个统一命题
+/// —— "**`R(role)` 本轮可求值**"，但它**按 role 具体化**，不强行统一成同一字面谓词：
+///
+/// | role | "本轮可求值"的具体化 |
+/// |------|----------------------|
+/// | `MeterGrid` | `R` 的**五块**（`p/q/pf/u/i`，+ `p_total`）**存在且 `is_ok()`** |
+/// | `Battery` | **`soc` 点本轮可解出**（`SocOutcome::Value` = 承载块在组内 ∧ 读成功 ∧ 长度足够） |
+/// | `Fire` | 链首（覆盖寄存器 11 的寄存器块）+ 至少一个 `fire_det*` 块 |
+///
+/// ⚠️ **不得**为追求"字面统一"而把两侧改成同一谓词：`Battery` 若只看"承载块 `is_ok()`"，
+/// 就会把**读回截断**（响应长度装不下 `soc` 点，`mapper` 判为 `BlockFailed`）误判为"可求值"
+/// —— 那与 `MeterGrid` 侧"块 `is_ok()` 但相量长度不足"同样不该算可求值。**故
+/// `runtime_guard_and_config_criterion_agree` 的"集合相等"比的是 `R` 的**块集合**
+/// （配置侧 `criterion_block_indices` ⟷ 运行期"哪些块必需"），"可用性"则各按自然口径判。
+///
 /// **在承载组作用域内、配置合法时恒 `true`**（V-2 由配置期 C6 保证）；本守卫是纵深防御，
 /// 为两种"配置期保证失效"的场合兜底：① 配置校验被绕过（直接构造 `StationConf` 的既有用法）；
 /// ② 将来放开 C6/C7（PRD §10.9 **Q-22** 选项 B）。**守卫失败 = "跳过求值"**（本轮不产任何
@@ -611,8 +626,19 @@ fn judges_evaluable(role: Role, reads: &BlockReads) -> bool {
         Role::MeterGrid => ["p", "q", "pf", "u", "i", "p_total"]
             .iter()
             .all(|n| reads.iter().any(|(b, r)| b.name == *n && r.is_ok())),
-        // `soc` 点所在块在组内且读成功 —— **复用 `mapper::battery_soc` 的四情形**，不另造判据
-        Role::Battery => !matches!(mapper::battery_soc(reads), mapper::SocOutcome::NoSuchPoint),
+        // 语义 = "**该 role 的站级判据本轮可求值**"（"`soc` 点本轮可解出"）—— **复用
+        // `mapper::battery_soc` 的四情形**，不另造判据。
+        // ★ 只认 `SocOutcome::Value`：`BlockFailed` 的**两种形态**（① 承载块 `Err(e)`；
+        //   ② **读回长度装不下该点** = 响应被截断）**都必须返回 `false`** —— 截断与"块读
+        //   失败"同属"本轮求不出该判据"，不得当成"站在线但 SOC 缺失"而放行求值。
+        //   （旧写法 `!matches!(.., NoSuchPoint)` 会把 ② 误判为 `true`，与 `MeterGrid` 侧
+        //   "块须 `is_ok()`"的语义不对称。）
+        // ★ 可达性：运行期 `reads` **恒为全 `Ok`** —— `poll_group` 的读循环在组内任一块
+        //   `Err` 时即 `break` 并**整组弃用**，`Err` 从不进 `reads` ⇒ `BlockFailed` 的 ① 形态
+        //   在运行期不可达。可达的只有 ②，而 ② 若发生在承载组上，`poll_to_result` 已先将其
+        //   拦成 `Failed`（早返回，见其调用点）⇒ 本支路是**纵深防御**（非承载组按 C6/C7 不含
+        //   `soc` 块 ⇒ 亦不可达）。语义仍须精确：守卫就是"配置期保证失效"时的兜底。
+        Role::Battery => matches!(mapper::battery_soc(reads), mapper::SocOutcome::Value(_)),
         // 链首（覆盖寄存器 11 的**寄存器块**）+ 至少一个 `fire_det*` 块（地址序与登记数两个
         // 判据**共用**这两类输入，mapper.rs 的 `fire_chain_head` / `fire_detector_mismatch`）
         Role::Fire => {
@@ -4202,6 +4228,53 @@ mod tests {
                 grid.regs[i].name
             );
         }
+    }
+
+    /// **守卫的 `Battery` 支路：`soc` 块读回**截断** ⇒ 必须 `false`（T9 评审遗留项）**。
+    ///
+    /// `SocOutcome::BlockFailed` 覆盖**两种**形态（见 [`judges_evaluable`] 的 `Battery` 支路注释）：
+    /// ① 承载块 `Err(e)`；② **读回长度装不下 `soc` 点**（响应被截断）。旧写法
+    /// `!matches!(.., NoSuchPoint)` 会把 ② 误判为"可求值"，而 `MeterGrid` 侧要求块 `is_ok()`
+    /// ⇒ 两侧语义不对称。本用例**直接构造 `BlockReads`**（绕开 IO 与 `poll_group` 的"失败即
+    /// 整组弃用"，故 ② 在此可达），钉住"② 同样必须 `false`"。
+    ///
+    /// **判别力**：把该支路改回 `!matches!(.., NoSuchPoint)` ⇒ ③ 截断断言**必红**
+    /// （`BlockFailed ≠ NoSuchPoint` ⇒ 旧写法返回 `true`）。
+    #[test]
+    fn battery_guard_false_when_soc_block_truncated() {
+        // 块：FC04 输入寄存器，**声明 `count = 2`**，`soc` 点落在**块内偏移 1**（`at = 2`、
+        // `uint16` ⇒ 宽 1 寄存器 ⇒ 完整解码需 `len >= 1 + 1 = 2`）。
+        let mut conf = battery_soc_conf();
+        conf.regs[0].count = 2;
+        conf.regs[0].points[0].at = 2;
+        let b = conf.regs[0].clone();
+
+        // ③ **截断**：实际只回 1 个寄存器（声明 2 > 载荷 1）⇒ 装不下偏移 1 处的 `soc` 点。
+        let truncated: BlockReads = vec![(b.clone(), Ok(BlockData::Regs(vec![42])))];
+        // 前置：确系**承载** `soc` 点的块（不是 `NoSuchPoint`——否则本用例会因"找不到点"
+        // 而假绿，注入验证也真不出红），且落进 `BlockFailed` 的**② 截断**形态。
+        assert!(
+            matches!(
+                mapper::battery_soc(&truncated),
+                mapper::SocOutcome::BlockFailed(_)
+            ),
+            "构造必须落入 BlockFailed 的**截断**形态（而非 NoSuchPoint）"
+        );
+        assert!(
+            !judges_evaluable(Role::Battery, &truncated),
+            "读回截断 ⇒ 该 role 的站级判据本轮**不可求值** ⇒ 守卫必须 false"
+        );
+
+        // ④ **正常**：载荷长度足够（`len = 2 >= 2`）⇒ 可解出 ⇒ 可求值 ⇒ `true`。
+        let ok: BlockReads = vec![(b, Ok(BlockData::Regs(vec![0, 42])))];
+        assert!(
+            matches!(mapper::battery_soc(&ok), mapper::SocOutcome::Value(_)),
+            "构造必须可解出（否则 ④ 不是「正常」形态）"
+        );
+        assert!(
+            judges_evaluable(Role::Battery, &ok),
+            "soc 点本轮可解出 ⇒ 判据可求值 ⇒ 守卫 true"
+        );
     }
 
     /// 断言"配置侧 `R(role)`"与"运行期守卫"对**同一块**的判定一致（**只**用于 R 非空的 role）：
