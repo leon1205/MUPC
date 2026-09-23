@@ -11,7 +11,12 @@
 > **原 v1.4 的 7 项勘误（评审员裁定"随本批开发同一提交修正，修正前不得回填 PRD §8.7"）中，①（§9.3.7 `bms` 行 52→53 / 289→288）、②（§9.1.6「289 点」→345 点）、⑦（AC-U74-14 缺 MQTT 侧带宽行）在本增量内一并落地** —— 理由：本增量须回填 PRD §8.7，而上述三项即该回填的显式前置条件；**③④⑤⑥ 未动**，仍待开发同批修正。
 > **本增量的数字在复审确认前不得作为开发冻结基线。**
 
-> **版本：** **v1.4-r2**（2026-09-23，**用户裁定回写；待复审确认**）—— 承 **v1.4**（2026-09-23，按设计评审意见修订；**设计评审复审通过**）
+> **§9 增量 r3（2026-09-23，T1 代码评审的 2 项设计侧偏离登记）—— ⚠️ 本增量【未经设计复审】，但**不改任何既有条款/语义/门禁标记**（纯登记）：**T1 `latest_values` 代码评审（`[CODE_REVIEWED: PASS: 2026-09-23]`，报告见 `../../reports/端到端数据流审查-外设采集到显示存储上云-2026-09-23.md` §T1）**判定的两项"设计侧登记缺失"已回写本节，使 §9 正文与实现逐条对齐：**
+> - **偏离①（警告）`station_last_poll_ms` 未登记**：12 设计 §15.1.2 / §15.9 的 **R-38** 要求本件提供"该站最近一次成功采集时刻"的读口，实现已就位（`latest_values.rs:249`）而 **§9.1.3 全表原未列** ⇒ 令"方法签名全表"失真。**已在 §9.1.3 补一行** `pub fn station_last_poll_ms(&self, station: &str) -> Option<u64>`（**签名以 T1 实现为准**），并注明"**不自建第二套新鲜度真源**：过期判据仍**唯一**由 `is_fresh` / `station_is_active` 持有，真源仍是注入的 `stale_timeout_s` = 5 s"。
+> - **偏离②（警告）`SouthSink::new` 多一个 `grid_station_id` 入参未登记**：§9.4 序 3 原只写"新增 `latest` 入参"，而 §9.1.4 要求 `on_grid_package` 内 `mark_station_polled(id)`、该回调入参**不含站 id**、且 §9.1.1 **明禁改 `StationSink` trait** ⇒ 这是"**取唯一不破 §9.1.1 禁令的解**"：站 id 在**装配期**由 `south_stations.grid_station()` 解析一次、经构造参数注入（`None` ⇒ 不写快照、**不臆造站 id**）。**已在 §9.4 序 3 与 §9.1.8 补登记该参数及其理由**（**不改 trait**）。
+> - **改动范围**：**只动 §9.1.3 / §9.1.8 / §9.4 序 3 三处**（**纯登记，无一处改语义、改数字口径或改实现要求**）；**未改** §1–§8、任何代码、PRD、12 号设计、**既有门禁标记**（`[DESIGN_APPROVED: 2026-09-23, 设计评审员]` 原文未动，其覆盖范围仍为 §9 v1.4 增量）。
+
+> **版本：** **v1.4-r3**（2026-09-23，**T1 代码评审的两项设计侧偏离登记（纯登记）**）—— 承 **v1.4-r2**（2026-09-23，用户裁定回写；待复审确认）← **v1.4**（2026-09-23，按设计评审意见修订；**设计评审复审通过**）
 
 > **文档定位：** 本文档记录实现级设计决策。需求级内容（功能描述、验收标准、性能指标）请参考 [01-MUPC-通信网关-PRD](../specs/modules/01-MUPC-通信网关-PRD.md)。
 >
@@ -1561,6 +1566,21 @@ impl LatestValues {
     /// 站未知（从未轮询成功）⇒ `false`。
     pub fn station_is_active(&self, station: &str, now_ms: u64) -> bool;
 
+    /// **该站最近一次成功采集时刻**（= `station_poll_ms[station]` 的公开读口）。
+    /// `None` = **从未轮询成功**（含已被 `mark_station_offline` 清除者）——消费方须显示
+    /// 不可得（如 `--`），**不得**臆造、**不得**自维护第二份真源。
+    ///
+    /// **接口要求 `R-38` 的落地登记（v1.13 补，评审偏离①）**：该 getter 是 12 号设计
+    /// **§15.1.2 / §15.9 `R-38`** 提出的"对 01 的接口要求"（外设站状态条要显示"最后成功
+    /// 时刻"），实现已就位（`latest_values.rs:249`）但 §9.1.3 全表原未列 ⇒ 令"方法签名全表"
+    /// 失真。**本行即其登记**（实现签名以 T1 为准：`pub fn station_last_poll_ms(&self,
+    /// station: &str) -> Option<u64>`）。
+    ///
+    /// ⚠️ **它不自建第二套新鲜度真源**：本 getter **不新增任何判据** —— 过期判据仍**唯一**由
+    /// [`is_fresh`] / [`station_is_active`] 持有，真源仍是注入的 `stale_timeout_s`（**5 s**，
+    /// 02 PRD §9.7.1 同源）；本方法只是**同一字段的读取口**（12 设计 §15.1.2 亦已按此口径登记）。
+    pub fn station_last_poll_ms(&self, station: &str) -> Option<u64>;
+
     /// **活性刷新（唯一调用点 = `SouthSink` 每次站轮成功）**：更新 `station_poll_ms[station] = now_ms`。
     /// 只刷新"站在采"这一事实，**不改任何点值/点位时标** ⇒ 不产生变更批、不影响 COS 语义。
     pub fn mark_station_polled(&self, station: &str, now_ms: u64);
@@ -1640,7 +1660,7 @@ loop {
 | 项 | 落点 |
 |---|---|
 | 构造 | `startup.rs` 步骤 8（南向调度装配）之前：`let latest = Arc::new(LatestValues::new(config.south_stations.stale_timeout_s));` |
-| 注入 `SouthSink` | `SouthSink::new(..., latest: Arc<LatestValues>)`（新增第 6 个入参；构造点 `startup.rs:1287` 调用处、定义 `startup.rs:414-430`） |
+| 注入 `SouthSink` | `SouthSink::new(..., latest: Arc<LatestValues>, grid_station_id: Option<String>)`（**新增第 6 / 第 7 两个入参**；构造点 `startup.rs:1287` 调用处、定义 `startup.rs:414-430`）<br>**`grid_station_id` 的理由（v1.13 补登记，评审偏离②）**：§9.1.4 要求 `on_grid_package` 内 `mark_station_polled(id)`，而**该回调的入参不含站 id**（既有 `StationSink` 契约），且 §9.1.1 **明禁改 `StationSink` trait** ⇒ 站 id 只能在**装配期**从 `south_stations.grid_station()` 解析一次并作为构造参数注入。`None` = 未配 `meter_grid` ⇒ 该回调**不写快照**（**不臆造站 id**）。实现：`startup.rs:420`（字段）/ `:424-443`（`new`）/ `:456-459`（`Some` 分支早返回）。**私有类型、不改公开面、不改任何语义、不触落库路径** |
 | 注入上送器 | §9.2 的 `Iec104UplinkDriver`、§9.3 的 `MqttUplinkPublisher` 各持 `Arc<LatestValues>` |
 | 点表生成 | §9.2.1 的 `build_uplink_points(&config.south_stations)`，装配期调用一次；**失败 ⇒ 拒启动**（`Err` 冒泡，与 `validate_south_stations`（`core_config.rs:679`）同范式） |
 | **站活性刷新** | 三个 `StationSink` 回调（`startup.rs:526/535`）内 `mark_station_polled(id, now_ms)`；无需新增任务 |
@@ -2433,7 +2453,7 @@ pub const NORTH_FAULT:  &str = "mupc/north/fault";    // 不变
 |----|------|------|
 | 1 | `startup.rs` 南向装配前（现 `:1255-1290` 段） | `LatestValues::new(cfg.south_stations.stale_timeout_s)` |
 | 2 | `startup.rs` | `build_uplink_points(&cfg.south_stations)?`（失败拒启动）→ `Arc<Vec<UplinkPoint>>`；落 `uplink_points.json` |
-| 3 | `SouthSink::new(..)`（现 `:1287` 调用 / `:414-430` 定义） | 新增 `latest` 入参；三个 sink 回调写快照 + `mark_station_polled` + BMS 聚合求值（§9.1.4 / §9.2.1.1） |
+| 3 | `SouthSink::new(..)`（现 `:1287` 调用 / `:414-430` 定义） | 新增 **`latest` + `grid_station_id` 两个入参**；三个 sink 回调写快照 + `mark_station_polled` + BMS 聚合求值（§9.1.4 / §9.2.1.1）。<br>**`grid_station_id` 的登记与理由（v1.13，评审偏离②）**：§9.1.4 要求 `on_grid_package` 内 `mark_station_polled(id)`，但**该回调入参不含站 id**，而 §9.1.1 **明禁改 `StationSink` trait** ⇒ 这是"取唯一不破 §9.1.1 禁令的解"——站 id 在**装配期**由 `south_stations.grid_station()` 解析一次、经构造参数注入；`None`（未配 `meter_grid`）⇒ **不写快照、不臆造站 id**。详见 §9.1.8 的"注入 `SouthSink`"行 |
 | 4 | `startup.rs:486-521`（`broadcast_grid_iec104` + `grid_bcast_at`） | **删除**（并入 A 档任务，§9.2.2） |
 | 5 | `startup.rs` 步骤 9（gateway 之后） | spawn `Iec104UplinkDriver { latest, points, server }`：A 档 / B 档 / C 档三条任务 |
 | 6 | `StrategyCommandHandler`（定义 `startup.rs:201`、`impl` `:222`） | 新增 `latest` + `points` 字段；覆写 `on_interrogation`（快照 → `TelemetryItem`） |
@@ -2560,6 +2580,7 @@ pub const NORTH_FAULT:  &str = "mupc/north/fault";    // 不变
 
 | 版本 | 主要变更 |
 |------|----------|
+| **v1.4-r3（2026-09-23，T1 代码评审的 2 项设计侧偏离登记）** | **纯登记，只动 §9.1.3 / §9.1.8 / §9.4 序 3 三处，不改任何语义、数字口径或实现要求。** 来源 = **T1 `latest_values` 代码评审**（`[CODE_REVIEWED: PASS: 2026-09-23]` + `[TEST_PASSED: 2026-09-23]`，报告 `…-2026-09-23.md` §T1 的"偏离清单"①②）。<br>**偏离①（警告）**：12 设计 §15.1.2 / §15.9 的 **R-38** 要求"该站最近一次成功采集时刻"读口，实现已就位（`latest_values.rs:249`）而 §9.1.3 全表未列 ⇒ **§9.1.3 补一行** `pub fn station_last_poll_ms(&self, station: &str) -> Option<u64>`（**签名以 T1 实现为准**），并注明"**不自建第二套新鲜度真源**：过期判据仍唯一由 `is_fresh` / `station_is_active` 持有，真源仍是注入的 `stale_timeout_s` = 5 s"。<br>**偏离②（警告）**：`SouthSink::new` 实为"新增 `latest` + `grid_station_id` **两个**入参"（实现在 `startup.rs:420/424-443/456-459`），而 §9.4 序 3 只写"新增 `latest` 入参" —— 该参数是"**取唯一不破 §9.1.1「禁改 `StationSink` trait」禁令的解**"（`on_grid_package` 入参不含站 id，只能在装配期由 `south_stations.grid_station()` 解析一次注入；`None` ⇒ 不写快照、**不臆造站 id**）⇒ **§9.4 序 3 与 §9.1.8 已补登记该参数及其理由**。<br>**未改**：§1–§8、任何代码/PRD/12 号设计、**既有门禁标记**（`[DESIGN_APPROVED: 2026-09-23, 设计评审员]` 原文未动，覆盖范围仍为 §9 v1.4 增量）。**本增量未经设计复审**（登记类，不构成新契约）。 |
 | **v1.4-r2（2026-09-23，用户裁定回写）⚠️ 待复审确认** | **本条由 2026-09-23 用户裁定引起，待复审确认**。**只改 §9 与 PRD §8 的数字与必要说明，不改需求语义、不改代码、不改 03/12 号文档。** ① **裁定 A（Q-B 关闭）**：把位 **424–426 / 454–459 / 460 共 10 位**（簇级告警 / 继电器粘连 / AFE 故障）纳入 IEC104，**落地形态 = 新增 3 个聚合组**（`bms_aggr_cluster_level` / `bms_aggr_relay_stuck` / `bms_aggr_afe_fault`），段 4 **301–312 → 301–315**；**其余 50 位维持不入**。② **裁定 B（Q-C 关闭）**：**放宽带宽上界**（IEC 104 ≤ **16 kbps**、MQTT ≤ **6 KB/s**，60 s 滑动平均；**高峰瞬时不作保证**；`cos_merge_ms` 维持 200 ms 保 COS ≤ 1 s）⇒ PRD §8.7 与 **AC-U74-14** 判据同步重写。③ **全量重算**：`card(A∪S) = 221 = 143 + 78`（覆盖 133→**143**、排除 88→**78**）；IEC104 **159/231 → 162/234**；并集 **564/636 → 567/639**；A/B/C 档 **19/84/56 → 19/84/59**；突发 **3,975/5,775 → 4,050/5,850 B**；**帧长与稳态/高峰带宽不变**（由变位率假设驱动）。④ **原 v1.4 的 7 项勘误中 ①②⑦ 一并落地**（§9.3.7 `bms` 行 52→53 / 289→288 并重算下游；§9.1.6「289 点」→345 点；§9.5 补 MQTT 侧 + COS 时延带宽测试行），**③④⑤⑥ 未动**。⑤ 新增 **C-19**（基线变更）与 **Q-B-1**（落地形态待裁定：3 组 / 2 组 / 10 单列）。**门禁标记未改**（保留 v1.4 的 `[DESIGN_APPROVED: 2026-09-23]` 及其"有条件项"原文）。 |
 | v1.0 | 初版：综合 5 份来源文档，定义通信网关实现级设计 |
 | v1.1 | 补全 `ControlCommand` 一次调频参数、明确 UTC 时标规范（CP56Time2a）、补充跨模块引用 |
