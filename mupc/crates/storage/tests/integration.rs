@@ -438,7 +438,9 @@ async fn writebuffer_flush_timer_commits_without_full_capacity() {
         .await
         .unwrap();
 
-    let timer = wb.clone().spawn_flush_timer();
+    // 停机信号只发不收（U-64）：本用例只验周期触发，不发停机 ⇒ 传一个"永不停机"的接收端。
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let timer = wb.clone().spawn_flush_timer(stop_rx);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     timer.abort();
 
@@ -468,7 +470,8 @@ async fn writebuffer_flush_timer_commits_without_full_capacity() {
 async fn writebuffer_flush_timer_is_periodic() {
     let (pool, svc) = setup().await;
     let wb = Arc::new(WriteBuffer::new(1000, 50, pool));
-    let timer = wb.clone().spawn_flush_timer();
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let timer = wb.clone().spawn_flush_timer(stop_rx);
 
     let wide = (
         Utc::now() - Duration::minutes(1),
@@ -535,6 +538,279 @@ async fn writebuffer_empty_flush() {
     let wb = WriteBuffer::new(100, 1000, pool);
     let count = wb.flush().await.unwrap();
     assert_eq!(count, 0);
+}
+
+// ── WriteBuffer 失败语义（U-68③：落库失败不得静默丢弃）──
+//
+// 失败注入方式 = **真实失败**（文件库里**不建表** ⇒ `INSERT INTO telemetry` 必 Err），
+// 不用 mock：要证的是真实提交路径的行为，而不是测试桩自己的行为。
+// 为什么用文件库而不是 `sqlite::memory:`：内存库与连接一一对应，`run_migrations` 只建在
+// 其中一条连接上，"先失败、后恢复"的用例会因换连接而变成非确定性（假红/假绿）。
+
+/// 文件型 SQLite 池（**未跑迁移**）：插 `telemetry` 必失败。
+async fn bare_file_pool(tag: &str) -> (Arc<SqlitePool>, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "mupc_storage_wb_{tag}_{}_{nanos}.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    // sqlx 的 SQLite 缺省打开模式不会**创建**文件（生产装配同样先 `File::create`）⇒ 必须先建空文件
+    std::fs::File::create(&path).expect("建空 db 文件");
+    let pool = mupc_storage::init_pool(path.to_str().unwrap())
+        .await
+        .expect("建文件库");
+    (Arc::new(pool), path)
+}
+
+fn values_of(rows: &[TelemetryPoint]) -> Vec<f64> {
+    let mut v: Vec<f64> = rows.iter().map(|p| p.value).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v
+}
+
+/// **U-68③ ①**：写失败 ⇒ 该批**不丢**。故障排除后，**同一批**（而非重采的新点）被写入。
+///
+/// 改什么会让本条红：把 `flush_batch` 的失败分支改回"整批丢弃"（drain 走掉就不还）⇒
+/// `buffered_points()` 归零、第二次 flush 提交 0 条、库里 0 行。
+#[tokio::test]
+async fn writebuffer_flush_failure_keeps_batch_until_next_success() {
+    let (pool, path) = bare_file_pool("keep").await;
+    let svc = StorageService::new(pool.clone());
+    // capacity=100 ⇒ 2 个点不会触发容量提交
+    let wb = WriteBuffer::new(100, 1000, pool.clone());
+    wb.buffer_telemetry(make_telemetry("dev-keep", "v", 1.0))
+        .await
+        .unwrap();
+    wb.buffer_telemetry(make_telemetry("dev-keep", "v", 2.0))
+        .await
+        .unwrap();
+
+    let err = wb.flush().await.expect_err("未建表 ⇒ 提交必须失败");
+    assert!(
+        err.to_string().contains("telemetry") || err.to_string().contains("no such table"),
+        "失败原因应确为「表不存在」（证明注入的是真实失败）: {err}"
+    );
+    assert_eq!(
+        wb.buffered_points(),
+        2,
+        "写失败后这 2 条必须仍在缓冲（不得整批丢弃）"
+    );
+    assert_eq!(wb.dropped_points(), 0, "未超上限 ⇒ 不得丢点");
+    assert_eq!(wb.requeued_batches(), 1, "失败批次必须回填（可观测）");
+
+    // 故障排除（建表）后重试 ⇒ 回填的那一批被写入
+    run_migrations(&pool).await.unwrap();
+    assert_eq!(
+        wb.flush().await.unwrap(),
+        2,
+        "重试必须提交回填的同一批（不是重采）"
+    );
+
+    let rows = svc
+        .telemetry
+        .query_range(
+            "dev-keep",
+            Utc::now() - Duration::minutes(1),
+            Utc::now() + Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(values_of(&rows), vec![1.0, 2.0], "两条原值都必须落库");
+    assert_eq!(wb.buffered_points(), 0, "提交成功后缓冲排空");
+    let _ = std::fs::remove_file(path);
+}
+
+/// **U-68③ ②**：超上限 ⇒ 丢**最旧**的 + 计数递增（而不是丢新来的、也不是无限增长）。
+///
+/// 改什么会让本条红：去掉上限 ⇒ `buffered_points()` 涨到 5（第 1 点仍在）、`dropped_points()`
+/// 恒 0；或改成丢**最新**的 ⇒ 落库的值会是 `[1,2,3,4]` 而不是 `[2,3,4,5]`。
+#[tokio::test]
+async fn writebuffer_drops_oldest_and_counts_when_over_limit() {
+    let (pool, path) = bare_file_pool("overflow").await;
+    let svc = StorageService::new(pool.clone());
+    // 上限 4 点；capacity=100 ⇒ 只由"超上限"触发裁剪，不受容量触发干扰
+    let wb = WriteBuffer::new_with_max_points(100, 1000, pool.clone(), 4);
+    assert_eq!(wb.max_points(), 4);
+
+    for v in 1..=3 {
+        wb.buffer_telemetry(make_telemetry("dev-ovf", "v", v as f64))
+            .await
+            .unwrap();
+    }
+    assert!(wb.flush().await.is_err(), "首批必失败（未建表）");
+    assert_eq!(wb.buffered_points(), 3, "失败批次回填后为 3 点");
+
+    wb.buffer_telemetry(make_telemetry("dev-ovf", "v", 4.0))
+        .await
+        .unwrap();
+    assert_eq!(wb.buffered_points(), 4, "正好到上限");
+    assert_eq!(wb.dropped_points(), 0, "未超上限不得丢任何点");
+
+    wb.buffer_telemetry(make_telemetry("dev-ovf", "v", 5.0))
+        .await
+        .unwrap();
+    assert_eq!(wb.buffered_points(), 4, "超上限后仍被钳在上限");
+    assert_eq!(wb.dropped_points(), 1, "只丢溢出的 1 条");
+    assert_eq!(wb.dropped_batches(), 1, "丢弃事件计数（供观测/告警）递增");
+
+    run_migrations(&pool).await.unwrap();
+    assert_eq!(wb.flush().await.unwrap(), 4);
+    let rows = svc
+        .telemetry
+        .query_range(
+            "dev-ovf",
+            Utc::now() - Duration::minutes(1),
+            Utc::now() + Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        values_of(&rows),
+        vec![2.0, 3.0, 4.0, 5.0],
+        "丢的必须是**最旧**的（1.0），留下的按序落库"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// **U-68③（边界次序）**：容量触发那一刻**不得**因为上限而先裁——那批马上要尝试提交，
+/// 裁掉等于"丢掉本可以入库的点"（正常库上就会无谓丢最旧一条）。
+///
+/// 判据：`max_points=2`、`capacity=3`、**库正常**。第 3 个 push 触发提交 ⇒ 3 条都该入库、
+/// 丢弃计数为 0。（若实现改成"先 trim 再 drain"，则第 1 条被无谓丢掉 ⇒ 库里只有 2 条。）
+#[tokio::test]
+async fn writebuffer_healthy_commit_is_not_preempted_by_limit_trim() {
+    let (pool, path) = bare_file_pool("order").await;
+    run_migrations(&pool).await.unwrap();
+    let svc = StorageService::new(pool.clone());
+    let wb = WriteBuffer::new_with_max_points(3, 1000, pool, 2);
+
+    for v in 1..=3 {
+        wb.buffer_telemetry(make_telemetry("dev-order", "v", v as f64))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(wb.dropped_points(), 0, "这批正要提交 ⇒ 不得裁剪丢弃");
+    let rows = svc
+        .telemetry
+        .query_range(
+            "dev-order",
+            Utc::now() - Duration::minutes(1),
+            Utc::now() + Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(values_of(&rows), vec![1.0, 2.0, 3.0], "3 条全部入库");
+    let _ = std::fs::remove_file(path);
+}
+
+/// **U-68③（活锁防护）**：失败后**不是每个 push 都触发一次注定失败的大批提交** ——
+/// 容量触发按「**自上次尝试以来新 push 的点数**」计，失败回填的老点不重复计入。
+///
+/// 判据：capacity=2、落库持续失败。4 次 push 只应产生 **2 次**提交尝试
+/// （第 2、4 次 push 各一次），而不是每 push 一次；同时**没有任何点被丢**（还在等重试）。
+#[tokio::test]
+async fn writebuffer_failed_commit_is_not_retried_on_every_push() {
+    let (pool, path) = bare_file_pool("backoff").await;
+    let wb = WriteBuffer::new_with_max_points(2, 1000, pool, 1000);
+
+    // 容量触发的那两次 push 会把提交失败**上抛**（既有 API 语义不变：调用方据 Err 记 warn）；
+    // 点不会因此丢（回填）⇒ 本用例只看缓冲状态与"尝试了几次"。
+    for v in 1..=4 {
+        let _ = wb
+            .buffer_telemetry(make_telemetry("dev-bo", "v", v as f64))
+            .await;
+    }
+
+    assert_eq!(
+        wb.requeued_batches(),
+        2,
+        "4 次 push / 容量 2 ⇒ 只应尝试 2 次（每 push 都试 = 失败风暴）"
+    );
+    assert_eq!(wb.buffered_points(), 4, "失败的点全部留着等重试");
+    assert_eq!(wb.dropped_points(), 0);
+    let _ = std::fs::remove_file(path);
+}
+
+/// **U-64 子情形**（"生产者正卡在写库中途"）：`flush` 已 `drain` 出缓冲、卡在提交 await 上时
+/// 任务被 **abort** ⇒ 这一批**必须回填**（否则 future 被丢弃、连 `Err` 分支都走不到、静默消失）。
+///
+/// 用**真实阻塞**制造窗口（不用 mock）：另一条连接上的事务已写入 `telemetry` 未提交 ⇒ WAL 下
+/// 另一个写者的 INSERT 会按 `busy_timeout`（5 s）等待 ⇒ 200 ms 后 flush 任务**必然仍在提交中**。
+///
+/// 改什么会让本条红：去掉 `BatchGuard`（回到"drain 走掉就不还"）⇒ 被 abort 的 2 条永久消失。
+#[tokio::test]
+async fn writebuffer_abort_mid_commit_keeps_drained_batch() {
+    let (pool, path) = bare_file_pool("abort").await;
+    run_migrations(&pool).await.unwrap();
+    let wb = Arc::new(WriteBuffer::new_with_max_points(
+        100,
+        1000,
+        pool.clone(),
+        1000,
+    ));
+    wb.buffer_telemetry(make_telemetry("dev-abort", "v", 1.0))
+        .await
+        .unwrap();
+    wb.buffer_telemetry(make_telemetry("dev-abort", "v", 2.0))
+        .await
+        .unwrap();
+
+    // 阻塞源：持写锁的未提交事务
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO telemetry (device_id, timestamp, metric_name, value, quality)
+         VALUES ('blocker', 0, 'x', 0.0, 0)",
+    )
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+
+    let wb2 = wb.clone();
+    let flush_task = tokio::spawn(async move {
+        let _ = wb2.flush().await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        wb.buffered_points(),
+        0,
+        "此刻缓冲已被 drain（这正是丢点窗口的现场：点已离开缓冲、还没进库）"
+    );
+
+    flush_task.abort();
+    let _ = flush_task.await; // 等 future 真被丢弃（Drop 回填在此刻发生）
+
+    assert_eq!(
+        wb.buffered_points(),
+        2,
+        "被 abort 的批次必须回填缓冲（bug 形态：这 2 条无日志、无计数地永久消失）"
+    );
+    assert_eq!(wb.requeued_batches(), 1, "abort 回填也要可观测");
+
+    blocker.rollback().await.unwrap();
+
+    // 释放写锁后，退出路径的那次 flush 应能把回填的数据真正落盘
+    assert_eq!(
+        wb.flush().await.unwrap(),
+        2,
+        "回填的数据必须能被后续 flush 提交"
+    );
+    let svc = StorageService::new(pool.clone());
+    let rows = svc
+        .telemetry
+        .query_range(
+            "dev-abort",
+            Utc::now() - Duration::minutes(1),
+            Utc::now() + Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(values_of(&rows), vec![1.0, 2.0], "两条都落库");
+    let _ = std::fs::remove_file(path);
 }
 
 // ── RetentionManager ──
