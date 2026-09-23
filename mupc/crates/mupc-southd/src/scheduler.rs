@@ -798,12 +798,17 @@ impl SouthScheduler {
         //    （站内全部块都声明了 `interval_ms`，PRD §10.6 第 8 条）下二者不同。
         //  · **块级组**     → 入参 = (组周期, **组级** fail_count)（`bump_group_fail` **原子**返回两者）。
         // 先一次锁 state 快取 `offline_count`，**勿持 state 锁跨 calc 锁**（既有约定）。
-        let station_oc: Vec<(usize, u32)> = {
+        //
+        // ★ **按站下标直取**（评审 修 2）★ 快照 = `state` 的**全量** offline_count，下标即站下标
+        //   ⇒ `station_oc.get(p.station_index)` 一步命中。**不得**退回"按 `failed` 拷成
+        //   `(si, oc)` 再线性 `find(..).unwrap_or(0)`"的写法：那使**站缺失时 `oc` 静默退化为
+        //   `0`**（既不报错也不告警），退避被悄悄压成 1×。快照长度 = `state.len()`，而
+        //   `state` 与 `DueCalc` 的站条目**同源**（`SouthScheduler::new` 里都由 `cfg.stations`
+        //   的下标构造）⇒ `p.station_index` 必在；仍**不以 panic 表达**（取向同 §12.4.1/§12.4.2
+        //   的 `Option` 查表）。
+        let station_oc: Vec<u32> = {
             let st = self.state.read().unwrap();
-            failed
-                .iter()
-                .map(|p| (p.station_index, st[p.station_index].offline_count))
-                .collect()
+            st.iter().map(|s| s.offline_count).collect()
         };
         let mut calc = runner.calc.lock().unwrap();
         for p in failed {
@@ -816,11 +821,22 @@ impl SouthScheduler {
             if p.is_carrier {
                 if let Some((iv, _)) = calc.group_backoff_input(key) {
                     // 承载组失败：站级 offline 记账已在 `poll_group` 内完成（handle_failure）
-                    let oc = station_oc
-                        .iter()
-                        .find(|(si, _)| *si == p.station_index)
-                        .map(|(_, oc)| *oc)
-                        .unwrap_or(0);
+                    //
+                    // 缺站下标 ⇒ **不静默**（评审 修 2）：`warn!` 一次并按 **`oc = 1`**（= 首次
+                    // 失败口径 ⇒ `extra = 1 × 组周期`，即**最短**退避）处理。选最短退避而非更长：
+                    // ① `oc` 的语义下界就是 1（计数自首次失败起算，**无 0 态**）；② 本条路径只在
+                    // "快照与下标空间不一致"这一结构性故障下可达，按最短退避重试可**尽早重新观测**，
+                    // 不会把故障放大成"更晚才发现"（也不给"永久停采"留机会 —— M-11 的取向）。
+                    let oc = match station_oc.get(p.station_index) {
+                        Some(oc) => *oc,
+                        None => {
+                            tracing::warn!(
+                                station_index = p.station_index,
+                                "southd 站级退避取 `offline_count` 失败（state 快照缺该站下标）⇒ 按首次失败口径（1 × 组周期）退避"
+                            );
+                            1
+                        }
+                    };
                     // 退避公式抽离为 backoff_extra（纯函数，封顶/边界见 tests 单测）。
                     // config::validate 已强校验 interval_ms>0 且此处 oc≥1 → extra 恒 > 0，
                     // 原 `if extra > 0` 守卫冗余已去（delay_group 不空转）。
@@ -850,13 +866,25 @@ impl SouthScheduler {
         let (station_id, role, slave, blk_indices) = {
             let st = self.state.read().unwrap();
             let s = &st[si];
-            (
-                s.conf.id.clone(),
-                s.conf.role,
-                s.conf.slave,
-                // 构造期算好的「组 → 组内块下标」表（免每轮重新分组；空 `regs` 站 ⇒ 空块集）
-                runner.group_of[&key].clone(),
-            )
+            // 构造期算好的「组 → 组内块下标」表（免每轮重新分组；空 `regs` 站 ⇒ 空块集）。
+            //
+            // ★ **查表失败不 panic**（评审 修 1）★ 取向与本章对 `DueCalc` 的查表**一致**
+            //   （§12.4.1 / §12.4.2：查表失败**不以 panic 表达**，恒用 `Option` 退化）：
+            //   缺键 ⇒ 退化为**空块集**，与既有 `poll_to_result(role, &[])` 的退化语义**自洽**
+            //   （读循环 0 次 = 空转；空 `regs` 站的退化组**本就**走这条路，§12.3 V-5(b)）。
+            //   `group_of` 与 `DueCalc::from_group` **同源**（构造期共用同一个 `read_groups_of`）
+            //   ⇒ 键必在；`debug_assert!` 使"两表漂移"在 **debug 构建下即刻可见**，
+            //   而 **release 行为不变**（仍走空块集退化、不 panic）。
+            debug_assert!(
+                runner.group_of.contains_key(&key),
+                "southd: `group_of` 缺组键（与 `DueCalc::from_group` 应同源共用 `read_groups_of`）"
+            );
+            let blk_indices = match runner.group_of.get(&key) {
+                Some(v) => v.clone(),
+                // 缺键 ⇒ 空块集（**不 panic**；debug 构建下上面的 `debug_assert!` 已先行暴露漂移）
+                None => Vec::new(),
+            };
+            (s.conf.id.clone(), s.conf.role, s.conf.slave, blk_indices)
         };
         // **读前**的站离线态 —— 必须在 `mark_success` 清 `offline_count` **之前**取（既有约定）：
         // 站恢复后（该站**全部组**）变化沿基线必须重建，否则"恢复即刷一屏事件"（§12.4.4 连带项 a）。
@@ -998,8 +1026,19 @@ impl SouthScheduler {
                 //    ⇒ 承载组在站内**恒排最前**（§12.4.2 的排序键）⇒ 本段的重建**先于**该站其它组的
                 //       本轮产出发生，不存在"先产出、后被重建"的半状态，也不会多一次全量快照。
                 if poll.is_carrier && station_was_offline {
-                    for k in &runner.groups_of_station[&si] {
-                        trackers.entry(*k).or_default().reset();
+                    // ★ **查表失败不 panic**（评审 修 1）★ 取向同 §12.4.1/§12.4.2 的 `Option`
+                    //   查表：缺站下标 ⇒ 退化为**空列表**（无组可重置），**不** panic ——
+                    //   与上面 `group_of` 的"缺键 ⇒ 空块集"同款退化，两处风格由此一致。
+                    //   `groups_of_station` 与 `group_of` **同源**（同一构造循环里一并建成）
+                    //   ⇒ 键必在；`debug_assert!` 使漂移在 debug 构建下可见，**release 行为不变**。
+                    debug_assert!(
+                        runner.groups_of_station.contains_key(&si),
+                        "southd: `groups_of_station` 缺站下标（应与 `group_of` 同源构造）"
+                    );
+                    if let Some(keys) = runner.groups_of_station.get(&si) {
+                        for k in keys {
+                            trackers.entry(*k).or_default().reset();
+                        }
                     }
                 }
                 // ② **组级**：本组上一轮失败过 ⇒ 本轮只重建基线（不产事件，§12.5 的重建条件表）。
@@ -3349,6 +3388,20 @@ mod tests {
         c
     }
 
+    /// **退化配置变体**（PRD §10.6 第 8 条 / 设计 §12.4.3 的注）：站内**全部**块都声明了
+    /// `interval_ms` ⇒ 站级 `interval_ms`（5000）**完全不参与分组**，`read_groups_of` 只按
+    /// 声明值分桶：`{1000 → [hvac_di], 2000 → [hvac_in]}`。**承载组 = 周期最大的组 = 2000**
+    /// （`hvac_in`），与站周期 5000 **不等** ⇒ 正是"站级退避入参取承载组自身组周期"这一设计
+    /// 选择可被观测的唯一形态（非退化配置下二者恒等 ⇒ 不可区分）。
+    ///
+    /// C1–C5 全部满足（依赖 `validate_block_intervals` 规则 20/21 的判据）：两块 `≥ 500` ✓、
+    /// `% poll_ms(1000) == 0` ✓、`≤ 站周期 5000` ✓；`R(Role::Hvac) = ∅`（规则 22 不适用）。
+    fn hvac_all_declared_conf() -> StationConf {
+        let mut c = hvac_first_case_conf(true); // regs[0] = hvac_in（原不声明）, regs[1] = hvac_di(1000)
+        c.regs[0].interval_ms = Some(2000); // 补上声明 ⇒ 站内全部块都已声明（站周期 5000 落空）
+        c
+    }
+
     /// 预置首例站点：`hvac_in` 4 寄存器（全 0 ⇒ 3 个标量点值 0.0）+ `hvac_di` 31 位（全 0）。
     fn put_hvac_first_case(bus: &MockBus) {
         bus.put_input(1, 0, vec![0u16; 4]);
@@ -3629,11 +3682,15 @@ mod tests {
         for t in [0u64, 1000, 2000, 3000, 4000, 5000] {
             sched.tick_once(t).await;
         }
-        // ① 读集不含 `R(fire)` 的**非承载组**仍在正常交付（每 tick 一轮标量全量）
-        assert!(
-            sink.telemetry_call_count("fire") >= 6,
-            "非承载组不得因守卫恒 false 而整段静默（实际 {} 次）",
-            sink.telemetry_call_count("fire")
+        // ① 读集不含 `R(fire)` 的**非承载组**仍在正常交付（每 tick 一轮标量全量）。
+        //    **精确值 = 8**（评审 修 5：原为软下界 `>= 6`）—— 确定性 tick 序下该计数**完全可算**：
+        //    · 非承载组（`fire_det`，组周期 1000）：t=0/1000/2000/3000/4000/5000 共 **6** 轮各 1 次；
+        //    · 承载组（`fire_sys`，组周期 5000）：t=0/5000 共 **2** 轮各 1 次（标量全量）。
+        //    软下界 `>= 6` 会同时**放过**"承载组整段静默"（=6）与"某轮多采"两类回归 ⇒ 改精确值。
+        assert_eq!(
+            sink.telemetry_call_count("fire"),
+            8,
+            "非承载组 6 轮 + 承载组 2 轮 = 8 次；软下界会放过「承载组整段静默」这类回归"
         );
         // ② 站级判据守卫：承载组的 StationFlag 恒不求值 ⇒ 两类事件恒 0 条
         assert_eq!(
@@ -3754,6 +3811,89 @@ mod tests {
         );
     }
 
+    /// **退化配置下：承载组退避按「承载组自身组周期」而非「站周期」**（设计 §12.4.3 的注 +
+    /// §12.5 的站级退避行；PRD §10.6 第 8 条允许"站内全部块都声明 `interval_ms`"）。
+    ///
+    /// **判别力从何而来**（既有 `carrier_group_failure_emits_offline_once` 钉不住这点）：
+    /// 那条例用的是 `hvac_first_case_conf(true)` —— 站周期 5000、承载组即"周期最大的组"，
+    /// 其组周期**恒等于**站周期 ⇒ 入参取"组周期"还是"站周期"**结果相同、不可区分**。本用例
+    /// 改用 [`hvac_all_declared_conf`]：站 5000、块声明 **2000 / 1000** ⇒ 承载组 = 2000 组
+    /// （`hvac_in`），与站周期 5000 **不等**，两条口径给出**不同的到期点**：
+    ///  · 取**组周期 2000**（本实现）：t=0 首次失败（oc=1）后 `next_due = 0 + 2000 = 2000`
+    ///    （与 `due_round` 自身推进**同值** ⇒ 单轮不可判）；t=2000 第 2 次失败（oc=2）后
+    ///    `next_due = 2000 + 2 × 2000 = **6000**`；
+    ///  · 取**站周期 5000**：t=0 失败后 `next_due = 0 + 1 × 5000 = 5000` ⇒ **t=2000 就不重试**
+    ///    （**已实注入验证**：本用例在 t=2000 的 `input_call_count` 断言即红）；
+    ///  · 取"无退避"退化：t=2000 时 `next_due = 4000`（仅 `due_round` 推进）⇒ **t=4000 会重试**
+    ///    ⇒ 该轮计数断言红。
+    /// ⇒ 三重判别：只有"组周期 2000"口径能同时满足 t=2000 采第 2 次、t=3000/4000/5000 **不**采、
+    ///   t=6000 采第 3 次。
+    ///
+    /// **确定性 tick 序**：t = 0, 1000, 2000, 3000, 4000, 5000, 6000（步长 1000 = `poll_ms`）。
+    /// **为什么承载组必须失败两轮**：单轮失败时 `backoff_extra(2000, 1) == 2000` 与
+    /// `due_round` 自身的 `next_due += interval` **数值相同** ⇒ 无法区分"退避生效"与"未生效"
+    /// （同用例⑨的注）；`oc = 2` 时 `extra = 4000` 才有判别力。
+    #[tokio::test]
+    async fn carrier_backoff_uses_group_period_when_all_blocks_declared() {
+        let bus = Arc::new(MockBus::new());
+        put_hvac_first_case(&bus); // hvac_in（FC04 addr 0）4 寄存器 + hvac_di（FC02 addr 0）31 位
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![hvac_all_declared_conf()], bus.clone(), sink.clone());
+
+        // t=0：承载组（2000 组）+ 快组（1000 组）都到期（承载组恒排最前）⇒ 承载组读失败
+        bus.fail_input_once(1, 0);
+        sched.tick_once(0).await; // oc=1 ⇒ extra = 1×2000 = 2000（与 due_round 的推进同值 ⇒ 不可判）
+        assert_eq!(sink.event_count("hvac", "offline"), 1, "承载组失败 ⇒ offline 一次");
+        assert_eq!(bus.input_call_count(1, 0), 1, "承载组 t=0 采一轮（失败）");
+
+        // t=1000：只有快组到期（承载组 next_due = 2000）
+        sched.tick_once(1000).await;
+        assert_eq!(bus.input_call_count(1, 0), 1, "承载组未到期");
+
+        // t=2000：承载组第 2 次到期 ⇒ 再失败（oc=2 ⇒ extra = 2×2000 = 4000）
+        bus.fail_input_once(1, 0);
+        sched.tick_once(2000).await;
+        assert_eq!(bus.input_call_count(1, 0), 2, "承载组 t=2000 再采一轮（失败）");
+        {
+            let st = sched.state.read().unwrap();
+            assert_eq!(st[0].offline_count, 2, "offline_count 逐失败轮累加 = 2");
+        }
+
+        // 退避后的下一次到期 = 2000 + 4000 = **6000**（组周期口径；站周期口径应为 12000）
+        for t in [3000u64, 4000, 5000] {
+            sched.tick_once(t).await;
+            assert_eq!(
+                bus.input_call_count(1, 0),
+                2,
+                "t={t} 承载组不应到期（退避到 6000 ⇒ 非站周期口径的 12000、也非无退避的 4000）"
+            );
+        }
+        // t=4000 **必须**不重试：「无退避」的退化写法在 t=4000 就会重试 ⇒ 此处红（关键判别点）
+        sched.tick_once(6000).await;
+        assert_eq!(
+            bus.input_call_count(1, 0),
+            3,
+            "退避到期点 = 2000 + 2 × 组周期(2000) = 6000（按站周期 5000 则为 12000 ⇒ 此处红）"
+        );
+        assert_eq!(
+            sink.event_count("hvac", "online"),
+            1,
+            "重试成功 ⇒ online 一次"
+        );
+
+        // 快组（1000 组）cadence 全程不受承载组退避影响：t=0…6000 共 7 轮
+        assert_eq!(
+            bus.bit_call_count(1, 0),
+            7,
+            "快组每 tick 到期（0/1000/…/6000）"
+        );
+        assert_eq!(
+            sink.event_count("hvac", "offline"),
+            1,
+            "退避窗口内不重复产 offline（stale_timeout_s = 5s 去抖 + 退避跳过）"
+        );
+    }
+
     /// §12.8 用例⑪（**AC-8-7 ③** + §12.4.4 连带项 a）：**站恢复 ⇒ 该站全部组基线一并重建**。
     ///
     /// 时点安排使三个机制同时被钉住：① 触发者**只能是承载组**（`is_carrier && 读前
@@ -3798,6 +3938,98 @@ mod tests {
             sink.events_since("hvac", 1),
             vec![("online".to_string(), 1.0)],
             "恢复当轮**只**产 online 一条"
+        );
+    }
+
+    /// **站恢复当轮会重置"本轮未到期"的组**（§12.4.4 连带项 a；补齐既有用例⑪盖不住的缺口）。
+    ///
+    /// **既有用例⑪为何盖不住**：它用 `hvac_fast_first_conf()`（快组 1000，站 5000）且恢复设在
+    /// **t=10000** —— 10000 既是承载组的退避到期点、**又是快组的到期点** ⇒ 快组在恢复当轮
+    /// **本来就到期**，其基线被重建究竟是"全组重建"带来的、还是"本组 `was_failing` 重建"
+    /// 带来的，**不可区分**（该用例的判别力只在"同 tick 组序"与"承载组先行"两点上）。
+    /// 若把全组重建误改成"**只重建承载组自己**"，用例⑪仍**绿**（快组同轮到期、随后自身
+    /// 也会重建……不 —— 快组 `was_failing = false`，它**不会**重建；⑪ 之所以绿是因为恢复当轮
+    /// 快组还没产出就被重建了 —— 但"未到期组"这一路径⑪**从未覆盖**）。
+    ///
+    /// **本用例的构造（错开 tick 序列）**：`hvac_interleaved_conf()`（承载组 5000 / 快组 **2000**，
+    /// 互不整除）⇒ 恢复点 **t=5000 是承载组到期、而快组不到期**的 tick（快组 next_due = 6000）。
+    /// 离线期间把位 10 改成 1（快组**尚不知情** —— 它在 5000 **不被采**）；恢复后快组
+    /// **首次到期**在 t=6000 ⇒ 该轮必须**只产基线、不产假事件**。
+    ///
+    /// **确定性 tick 序**：t = 0, 2000, 4000, **5000（恢复）**, 6000。
+    /// **判别力**：把"全组重建"改成"只重建承载组自己"，则 t=6000 快组仍持**离线前**基线
+    /// （位全 0）⇒ 位 10 的 0→1 被当成真事件 ⇒ ② 断言取到 1 条**假报**、③ 该轮落位仅 1 项
+    /// （非 31 项全量快照）⇒ 本用例**必红**（已实注入验证）。
+    #[tokio::test]
+    async fn recovery_resets_even_groups_not_due_this_round() {
+        let bus = Arc::new(MockBus::new());
+        put_hvac_first_case(&bus);
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![hvac_interleaved_conf()], bus.clone(), sink.clone());
+
+        // t=0：承载组（5000）读失败 ⇒ 站离线；快组（2000）同 tick 首采 ⇒ 只建基线（31 位快照）
+        bus.fail_input_once(1, 0);
+        sched.tick_once(0).await;
+        assert_eq!(sink.event_count("hvac", "offline"), 1, "承载组失败 ⇒ offline 一次");
+        {
+            let st = sched.state.read().unwrap();
+            assert_eq!(st[0].offline_count, 1, "offline_count = 1（站离线）");
+        }
+
+        // t=2000 / t=4000：**只有快组**到期（承载组退避到 5000）；位未变 ⇒ 零事件、零位点
+        sched.tick_once(2000).await;
+        sched.tick_once(4000).await;
+        assert_eq!(bus.bit_call_count(1, 0), 3, "快组 0/2000/4000 各一轮");
+        assert_eq!(bus.input_call_count(1, 0), 1, "承载组仅 t=0 一轮（退避到 5000）");
+        assert_eq!(
+            sink.events_since("hvac", 1),
+            Vec::<(String, f64)>::new(),
+            "快组位未变 ⇒ 除 offline 外零事件"
+        );
+        assert_eq!(
+            sink.telemetry_call_count("hvac"),
+            1,
+            "此前仅 t=0 快组的 31 位全量快照 1 次"
+        );
+
+        // **离线期间**位 10（`hvac_di_11`）由 0→1 —— 快组**尚未观测到**（它下次到期才采）
+        let mut bits = vec![false; 31];
+        bits[10] = true;
+        bus.put_bits(1, 0, bits);
+
+        // t=5000：**承载组**到期且成功 ⇒ 站恢复；快组本轮**不到期**（next_due = 6000）
+        sched.tick_once(5000).await;
+        assert_eq!(sink.event_count("hvac", "online"), 1, "恢复 ⇒ online 一次");
+        assert_eq!(
+            bus.bit_call_count(1, 0),
+            3,
+            "快组在恢复轮**不到期**（t=5000 不是 2000 的倍数）⇒ 本用例钉的正是「未到期组」"
+        );
+
+        // t=6000：快组**恢复后首次到期** ⇒ 必须只产基线、**不产假事件**
+        sched.tick_once(6000).await;
+        assert_eq!(bus.bit_call_count(1, 0), 4, "快组 t=6000 首次到期");
+        assert_eq!(
+            sink.event_count("hvac", "hvac_di_11"),
+            0,
+            "未到期组也已被恢复轮一并重建基线 ⇒ 恢复后首轮不得把 0→1 误报为真事件"
+        );
+        assert_eq!(
+            sink.events_since("hvac", 1),
+            vec![("online".to_string(), 1.0)],
+            "全窗口**只**产 online 一条"
+        );
+        // 该轮为**全量快照**（基线刚重建）——非"仅 1 个变化位"（旧写法：1 项）
+        let calls = sink.telemetry_calls_of("hvac");
+        assert_eq!(
+            calls.len(),
+            3,
+            "t=0 快组快照 / t=5000 承载组标量 / t=6000 快组快照"
+        );
+        assert_eq!(
+            calls.last().map(|c| c.len()),
+            Some(31),
+            "t=6000 轮须为全量快照（31 位）；旧写法该轮只落 1 个「变化位」"
         );
     }
 
