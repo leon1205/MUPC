@@ -412,6 +412,7 @@ south_stations:
           func: discrete
           addr: 0
           count: 31
+          interval_ms: 1000      # 告警位单独快采（S3b-3 首例；站周期仍 5000，本块只提速）
     # 关口/台区总表 = 策略 phase 真源（投产遥测真源；interval_ms 须 < 5000）。addr 为示例
     # 占位（0x1000 基址，承已删 master_meter.reg_map 的相对布局 0x0006 步进），【现场校准】
     # 投运前须按总表厂方真实点表校准 addr/format/scale/count——注意须 addr>0 且块间不重叠
