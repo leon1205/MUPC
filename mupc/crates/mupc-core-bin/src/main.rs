@@ -242,7 +242,10 @@ async fn graceful_shutdown(
 ) {
     tracing::info!("停止所有子系统 (逆序)...");
     coord.stop_all().await;
-    // abort 后台任务（此前 _ctx 被忽略，background_tasks 永不 abort）
+    // abort 后台任务（此前 _ctx 被忽略，background_tasks 永不 abort）。
+    // P0-1：`ctx.shutdown()` 内部顺序 = **先 abort（含遥测定时 flush 任务、南向采集生产者）→
+    // 再 flush 遥测缓冲**，把不足一批的剩余数据落盘（修复前退出不 flush ⇒ 外设数据滞留内存、
+    // 断电即丢）。顺序的理由见 `StartupContext::shutdown` 的文档注释。
     ctx.shutdown().await;
     tracing::info!("所有子系统已停止");
 }

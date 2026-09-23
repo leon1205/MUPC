@@ -33,16 +33,50 @@ pub struct StartupContext {
     pub ota_manager: Arc<dyn mupc_ota_update::OtaManager>,
     /// 故障录波器（保留实例供录波使用）
     pub fault_recorder: Arc<mupc_data_processing::FaultRecorderImpl>,
+    /// 遥测写缓冲（P0-1：**退出前必须落盘**的最后一批数据在这里）。
+    ///
+    /// 持有方式是 `Arc`（**多持有者共享同一缓冲区**，不是各持一份拷贝）：`SouthSink`、
+    /// pv/load 南向模拟循环、定时 flush 任务各持一个 `Arc` 克隆，缓冲本体（`Mutex<Vec<…>>`）
+    /// 只有一份 ⇒ 退出路径拿到的是**同一个**缓冲，`flush()` 排空的就是生产者刚写进去的那批。
+    pub write_buffer: Arc<mupc_storage::WriteBuffer>,
     /// 后台任务句柄（Phase 6 优雅退出时 abort）
     pub background_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl StartupContext {
-    /// 优雅退出：abort 所有后台任务
+    /// 优雅退出：**先 abort 后台任务（含遥测定时 flush 任务）→ 再落盘剩余遥测缓冲**。
+    ///
+    /// **为什么顺序是"先 abort 再 flush"**（P0-1）：生产者（southd 采集 task、pv/load 南向模拟
+    /// 循环）本身就在 `background_tasks` 里 —— 若反过来先 flush 再 abort，两次调用之间生产者
+    /// 仍可能写入新点，那批新点就**落在 flush 之后**、随进程退出滞留内存（正是本缺陷要消灭的形态）。
+    /// 先 abort 把生产者停下，flush 才真正是"最后一批"。
+    ///
+    /// **为什么放在这里而不是 `main.rs`**：本方法是**唯一**的优雅退出入口（`main.rs` 的
+    /// `graceful_shutdown` 调用）。放在这里 ⇒ "忘了 flush"在结构上不可能发生，而不是靠调用方
+    /// 记得多打一行；`main.rs` 也就无需知道 `WriteBuffer` 的存在。
+    ///
+    /// 残留竞态（如实登记，不夸大）：`abort()` 需等到 task 的下一个 await 点才生效，
+    /// 毫秒级窗口内仍可能有一次并发 `buffer_telemetry`；但 `flush()` 与它争的是同一把
+    /// `buffer` 互斥锁，谁先拿到谁生效、不会漏掉已完成 push 的点。
     pub async fn shutdown(&self) {
         tracing::info!("优雅退出：abort {} 个后台任务", self.background_tasks.len());
         for handle in &self.background_tasks {
             handle.abort();
+        }
+        self.flush_telemetry_buffer().await;
+    }
+
+    /// 落盘遥测缓冲中**剩余的全部**数据（含不足一批的），供退出路径使用。
+    pub async fn flush_telemetry_buffer(&self) {
+        match self.write_buffer.flush().await {
+            Ok(0) => tracing::info!("优雅退出：遥测缓冲已空，无需落盘"),
+            Ok(n) => tracing::info!(points = n, "优雅退出：最后一批遥测已落盘"),
+            // 失败语义与运行期同源（整批丢弃、不重试）；此处**必须响亮** —— 这是进程最后一次
+            // 落盘机会，静默会让"退出丢数据"不可观测。
+            Err(e) => tracing::error!(
+                error = %e,
+                "优雅退出：最后一批遥测落盘失败（本批已丢弃；设计无重试/背压条款，本轮不重试）"
+            ),
         }
     }
 }
@@ -620,11 +654,19 @@ pub async fn initialize_all(
         )
     })?;
     let storage = Arc::new(mupc_storage::StorageService::new(Arc::new(pool)));
+    // ⚠️ 容量口径（P0-1 审查核对项，**未改**）：设计 03:1321 为"100ms 或积累 **100** 条"，
+    // 而这里是 `capacity=1000` / `flush_interval_ms=5000`。容量影响吞吐与事务频率，**须设计确认
+    // 后再动**（本轮只补"时间触发"这一半，见下方定时任务）；此处就地登记差异，避免下次又被当成
+    // "已对齐"。
     let write_buffer = Arc::new(mupc_storage::WriteBuffer::new(
         1000,
         5000,
         storage.pool().clone(),
     ));
+    // P0-1：`flush_interval_ms` 的**读取方**（此前无任何读取方 ⇒ 不满一批的数据永久滞留内存）。
+    // 句柄入 guard：装配中途失败即随 TaskGuard::drop 一并 abort；成功则随
+    // `StartupContext.background_tasks` 移交，退出时由 `shutdown()` abort。
+    guard.0.push(write_buffer.clone().spawn_flush_timer());
     coord.register_service("storage", ServiceStatus::Running);
 
     // ── 4. 核间通信 ──
@@ -1387,6 +1429,7 @@ pub async fn initialize_all(
         ai_integrator,
         ota_manager,
         fault_recorder,
+        write_buffer,
         background_tasks: bg_tasks,
     })
 }
@@ -1547,6 +1590,43 @@ plugins: {}
         assert!(
             production.contains("mupc_ota_update::OtaConfig::default()"),
             "OTA 配置构造在，能力未删"
+        );
+    }
+
+    /// **P0-1 网：遥测缓冲的「时间触发」与「退出落盘」两条接线不得被静默摘除。**
+    ///
+    /// 同 `ota_manager_is_still_constructed_and_registered` 的手法（源文本静态断言）：
+    /// 两处都在 `initialize_all` / 优雅退出里，本机单测起不来真环境（DB/intercore/串口全套），
+    /// 而本节要证的恰恰是"装配源码里这两件事还在"。**行为级**证据在 storage 侧
+    /// （`writebuffer_flush_timer_commits_without_full_capacity` /
+    /// `writebuffer_flush_timer_is_periodic` / `writebuffer_manual_flush`），本网只负责
+    /// "核心接线没被摘掉"，两者互补：storage 侧证机制、本节证装配。
+    ///
+    /// **改什么会让本条变红**：删掉定时任务的 spawn（⇒ `flush_interval_ms` 又成死字段）、
+    /// 把 `write_buffer` 从 `StartupContext` 摘掉（⇒ 退出路径够不到缓冲）、删掉 `shutdown()`
+    /// 里的 flush 调用、或 `main.rs` 不再调用 `ctx.shutdown()`。
+    #[test]
+    fn telemetry_buffer_timer_and_shutdown_flush_are_wired() {
+        let production = production_src();
+        assert!(
+            production.contains("spawn_flush_timer()"),
+            "装配点必须起定时 flush 任务（否则 `flush_interval_ms` 又变成无读取方的死字段）"
+        );
+        assert!(
+            production.contains("pub write_buffer: Arc<mupc_storage::WriteBuffer>"),
+            "缓冲必须随 StartupContext 交回调用方（否则退出路径够不到它、无法落盘）"
+        );
+        assert!(
+            production.contains("write_buffer,\n"),
+            "实例必须真的被放进 StartupContext（构造了却不交回 = 退出仍丢最后一批）"
+        );
+        assert!(
+            production.contains("self.flush_telemetry_buffer().await;"),
+            "优雅退出必须落盘剩余缓冲（含不足一批的数据）"
+        );
+        assert!(
+            include_str!("main.rs").contains("ctx.shutdown().await;"),
+            "main.rs 的关闭路径必须调用 StartupContext::shutdown（flush 在其内）"
         );
     }
 

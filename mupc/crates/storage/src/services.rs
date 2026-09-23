@@ -233,7 +233,49 @@ impl WriteBuffer {
         Ok(())
     }
 
-    /// 调用方负责定时调用。使用事务保证批量写入原子性。
+    /// 启动**周期 flush** 任务 —— 时间触发半边（设计 03:1321「100ms 或积累 100 条触发批量事务
+    /// 提交（**先到先执行**）」）。
+    ///
+    /// 修复前 `flush_interval_ms` **无任何读取方**（只在 `new` 里存下、只被 getter 读出）：
+    /// 只有"攒满 `capacity`"一条触发路径 ⇒ 不满一批的数据**永久滞留内存**、断电即丢。定时任务
+    /// 补上另一条：到点即提交当前批次，与容量触发**互为先到先执行**（两者都只是调用 `flush()`，
+    /// 由 `buffer` 互斥锁串行化，谁先拿到谁提交，不会重复提交同一批）。
+    ///
+    /// **为什么放在 storage 而不是调用方**：`flush_interval_ms` 是 `WriteBuffer` 自己的字段，
+    /// 契约（容量 OR 时间）应由持有该字段的类型自己解释；放到 core-bin 就得把间隔再读一遍、
+    /// 在装配层重建一遍节拍。core-bin 的职责只剩"spawn + 句柄入 TaskGuard"（装配期失败即 abort）。
+    ///
+    /// 调用方**必须**持有返回句柄：它只负责周期触发，**不负责退出落盘** —— 优雅退出的最后一批由
+    /// `flush()` 承担（见 `mupc-core-bin` 的 `StartupContext::shutdown`）。
+    ///
+    /// 与 `flush()` 的**失败语义同源**：`flush()` 内部已先 drain 再提交，提交失败即整批丢弃
+    /// （不重试，设计未见落库侧背压/重试条款）⇒ 本任务只做**响亮化**（`flush_batch` 内 error 日志
+    /// 带丢弃条数），不引入自创重试。
+    pub fn spawn_flush_timer(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        // `interval(0)` 会 panic；0 视为"每个 tick 立即到点"的最小正周期（1ms），
+        // 不静默退化成"永不触发"。
+        let period = std::time::Duration::from_millis(self.flush_interval_ms.max(1));
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(period);
+            // 落后时按"顺延"而不是"追赶补打"：补打只会连续产生空批（数据早已被上一批带走），
+            // 白占一次事务。写阻塞后恢复时按原节拍继续即可。
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // 第一次 `tick()` 立即返回（缓冲刚建、必然为空）⇒ 先吞掉，避免启动瞬间一次空 flush。
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                match self.flush().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(points = n, "定时 flush 已提交遥测批次"),
+                    // 失败已由 `flush_batch` 统一响亮化（那里才知道"丢弃了多少条"）⇒ 此处不重复
+                    // 打第二条日志。下一周期自然重试**新**数据（本批不重试，见 `flush_batch`）。
+                    Err(_) => {}
+                }
+            }
+        })
+    }
+
+    /// 调用方负责定时调用（见 [`Self::spawn_flush_timer`] 与优雅退出路径）。使用事务保证批量写入原子性。
     pub async fn flush(&self) -> Result<usize, StorageError> {
         let batch: Vec<TelemetryPoint> = {
             let mut buf = self.buffer.lock();
@@ -244,17 +286,37 @@ impl WriteBuffer {
         self.flush_batch(batch).await
     }
 
+    /// 失败语义（P0-1 处置口径）：`batch` 已由调用方 `drain` 出缓冲 ⇒ 只要走到这里，提交失败
+    /// 就是**整批丢弃**（丢的是内存里那批，不在库里）。设计**未见**落库侧重试/背压明文
+    /// （审查报告将此条定性为【部分】）⇒ 本轮**不自创**重试/背压，只做**响亮化**：把"丢了多少条"
+    /// 明确打进 error 日志——避免"批量写入静默丢数据"这一最坏的静默失实形态。
     async fn flush_batch(&self, batch: Vec<TelemetryPoint>) -> Result<usize, StorageError> {
         let count = batch.len();
         if count == 0 {
             return Ok(0);
         }
+        match self.commit_batch(&batch).await {
+            Ok(()) => Ok(count),
+            Err(e) => {
+                tracing::error!(
+                    points = count,
+                    error = %e,
+                    "遥测批量落库失败：本批 {} 条已从缓冲取出，提交失败即丢弃（设计无重试/背压条款，本轮不重试）",
+                    count
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// 真正的批量事务提交（`flush_batch` 只负责失败计数与日志）。
+    async fn commit_batch(&self, batch: &[TelemetryPoint]) -> Result<(), StorageError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        for point in &batch {
+        for point in batch {
             sqlx::query(
                 "INSERT INTO telemetry (device_id, timestamp, metric_name, value, quality)
                  VALUES (?, ?, ?, ?, ?)",
@@ -271,7 +333,7 @@ impl WriteBuffer {
         tx.commit()
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        Ok(count)
+        Ok(())
     }
 
     pub fn capacity(&self) -> usize {

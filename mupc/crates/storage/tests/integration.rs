@@ -424,6 +424,85 @@ async fn writebuffer_flush_on_capacity() {
     assert!(!results.is_empty());
 }
 
+/// P0-1 ①（时间触发半边）：**未凑满容量**，仅靠时间窗口到期即提交。
+///
+/// 设计 03:1321「100ms 或积累 100 条触发批量事务提交（**先到先执行**）」——本用例钉的是
+/// 「先到」里的**时间**这一半。修复前 `flush_interval_ms` 无读取方 ⇒ 只写 1 点（容量 1000
+/// 远未到）时数据永远停在内存里 ⇒ 本用例红。
+#[tokio::test]
+async fn writebuffer_flush_timer_commits_without_full_capacity() {
+    let (pool, svc) = setup().await;
+    // capacity=1000（远未达到）+ flush_interval=50ms
+    let wb = Arc::new(WriteBuffer::new(1000, 50, pool));
+    wb.buffer_telemetry(make_telemetry("dev-timer", "v", 1.0))
+        .await
+        .unwrap();
+
+    let timer = wb.clone().spawn_flush_timer();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    timer.abort();
+
+    let results = svc
+        .telemetry
+        .query_range(
+            "dev-timer",
+            Utc::now() - Duration::minutes(1),
+            Utc::now() + Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "50ms 时间窗到期即应提交（容量 1000 远未达到 ⇒ 只可能是时间触发）"
+    );
+    assert_eq!(
+        wb.flush().await.unwrap(),
+        0,
+        "定时任务应已排空缓冲，显式 flush 无残留可提交"
+    );
+}
+
+/// P0-1 ①（周期**可重复**，不是一次性）：连续两个周期各自提交各自的批次。
+#[tokio::test]
+async fn writebuffer_flush_timer_is_periodic() {
+    let (pool, svc) = setup().await;
+    let wb = Arc::new(WriteBuffer::new(1000, 50, pool));
+    let timer = wb.clone().spawn_flush_timer();
+
+    let wide = (
+        Utc::now() - Duration::minutes(1),
+        Utc::now() + Duration::minutes(1),
+    );
+
+    wb.buffer_telemetry(make_telemetry("dev-periodic", "v", 1.0))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let first = svc
+        .telemetry
+        .query_range("dev-periodic", wide.0, wide.1)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1, "第一个周期应已提交");
+
+    wb.buffer_telemetry(make_telemetry("dev-periodic", "v", 2.0))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    timer.abort();
+    let second = svc
+        .telemetry
+        .query_range("dev-periodic", wide.0, wide.1)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.len(),
+        2,
+        "第二个周期同样应生效（定时任务不是一次性）"
+    );
+}
+
 #[tokio::test]
 async fn writebuffer_manual_flush() {
     let (pool, svc) = setup().await;
