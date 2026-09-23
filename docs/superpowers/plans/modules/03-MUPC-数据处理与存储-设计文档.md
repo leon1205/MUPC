@@ -1,6 +1,12 @@
 # MUPC 数据处理与存储模块 技术设计文档
 
-> **版本：** v1.1（2026-09-23）
+> ✅ **`[DESIGN_APPROVED: 2026-09-23, 设计评审员]`** —— **§9「总表电气量聚合落库与存储参数可配置（U-69 / U-67 / U-68③ / U-70）」v1.3 增量复审通过**（上轮 P1–P5 逐条闭合：§9.0 基线逐项标"已修/未修"、`value` 可空化 + 幂等迁移、FLS 交付边界逐条给实现行号、缓冲上界 10 000、映射改落装配层 `quality_map.rs`；`storage/src/services.rs` 行号抽查全部精确）。**有条件项**：4 项文档级勘误（受影响代码点清单误列 `high_freq_telemetry.rs`、"共 12 处"计数、3 处行号微差、迁移仅重建 2 个索引中的 1 个）须随本批开发同一提交修正。**该标记仅覆盖 §9 增量**；§1–§8 既有正文与门禁标记未改。
+
+> **版本：** v1.3（2026-09-23）**（按设计评审意见修订；设计评审复审通过，2026-09-23）**
+
+> **v1.3 修订（2026-09-23，按设计评审意见，只改 §9）**：逐条闭合评审 P1–P5 —— ① **P1 基线重校**：§9.0 的行号改写为 HEAD `724225c`，并**逐项标注"已修/未修"**（原稿把已随 U-68③ 落地的"回填/有界/计数"写成未实现）；② **P2 `NoData` 值映射**：`AggregateRow.value: Option<f64>` 与 `telemetry.value REAL NOT NULL` 的冲突已裁定 —— **`value` 列改为可空、缺测行写 `NULL`**（唯一与 PRD R-11.2-E「不得写入 0」字面一致的做法），并给出**幂等迁移**与**5 处代码点**（§9.1.4 / §9.6 序 9）；③ **P3 FLS 交付边界**：§9.3 由"期望接缝、不交付实现"改为「**与已合并实现（`724225c`）的对接说明 + 残留缺口**」——FLS-01/02/05 与 FLS-03①③ **已交付**（逐条给实现行号），FLS-03②（`major` 事件）与 FLS-04（采集路径仍 await）**未交付**，给出**可编码的落地方案**；④ **P4 上界口径统一**：采用实现值 **`10_000`**（`DEFAULT_MAX_BUFFERED_POINTS`）并说明依据、登记与 PRD R-11.5-A2 的偏差（新 Q-9/C-3）；⑤ **P5 依赖边**：`Quality::from_point_quality` **改落装配层** `mupc-core-bin/src/quality_map.rs`（放 `storage` 会新增 `storage → data-processing` 依赖边，现无该边，新 D-8）。另：§9.7 测试行同步（GRD-04 改断言 `value IS NULL`、新增 GRD-09 迁移幂等、FLS 逐条标注状态）。**未改**：PRD、代码、既有门禁标记、§4.2/§4.3/§4.4 粒度、§6.1 保留期、§7.3 容量规划。
+>
+> **v1.2 增量（2026-09-23）**：新增 **§9 增量设计：总表电气量聚合落库与存储参数可配置（U-69 / U-67 / U-68③ / U-70）**（落 03 PRD §11 `[REVIEWED: PASS: 2026-09-23]`）——① §9.1 `mupc-storage::GridAggregator`（1 分钟聚合，18 通道均值 + 2 通道极值 = **22 行/周期**，周期起点时标、无采样产行、重启不回溯）；② §9.2 `core_config.storage` 段（三键、默认值 = 现实现、非法值拒启动）；③ §9.3 **落库失败语义期望接缝**（`TelemetrySink::offer` 非阻塞 + 回填/上界/计数/聚合告警；**只描述接缝，实现由同期开发承接**）；④ §9.5 最新值入口归属确认（**唯一真源 = 01 设计 §9.1**）；⑤ §9.8 冲突清单 + §9.9 待裁定项。**未改** PRD、`storage`/`core-bin` 代码、§4.2/§4.3/§4.4 粒度口径、§6.1 保留期、§7.3 容量规划。
 
 ---
 
@@ -14,6 +20,7 @@
 - [6. 接口定义](#6-接口定义)
 - [7. 文件结构](#7-文件结构)
 - [8. 技术决策记录](#8-技术决策记录)
+- [9. 增量设计：总表电气量聚合落库与存储参数可配置](#9-增量设计总表电气量聚合落库与存储参数可配置u-69--u-67--u-68--u-70)
 
 ---
 
@@ -1340,6 +1347,10 @@ impl WriteBuffer {
 > - **当前差异（另行登记）**：「存储周期**可配置**」**当前未实现** —— `core_config.rs` **无 storage 段**
 >   任何字段（本节的 1000 与 5000 均为装配期硬编码常量）。该差异**不在本文档处置**，已登记于
 >   技术债（D2）；本处**只做概念消歧，不新增配置项、不改 PRD**。
+>
+> ✅ **本注已被 §9 取代（2026-09-23）**：03 PRD §11 增量把 1000 / 5000 提升为 `core_config.storage`
+> 配置项，并新增第三个键 `grid_aggregate_period_ms`（即上文所指的"**存储周期**"）。本节的
+> 「本轮不引入配置项」**自 §9 起不再成立**；两参数正交的口径与落点见 **§9.2.2 末**。
 
 #### 4.4.3 数据分区策略
 
@@ -1812,6 +1823,422 @@ mupc/crates/storage/
 
 ---
 
+## 9. 增量设计：总表电气量聚合落库与存储参数可配置（U-69 / U-67 / U-68③ / U-70）
+
+> **本章性质**：**实现级设计增量**，落 [03 PRD §11](../specs/modules/03-MUPC-数据处理与存储-PRD.md)（`[REVIEWED: PASS: 2026-09-23]`）。**不改需求**；与 PRD 不一致者集中登记于 §9.9，不得就地改 PRD。
+> **与 §4 的关系**：§4.1.1 的「存储周期（默认 1 分钟）」自本章起**适用于台区总表电气量**并以**聚合**实现（§9.1）；§4.2/§4.3/§4.4 的粒度口径不变。冲突时以本章为准。
+> **跨文档**：外设遥测「最新值快照 + 变更通知」入口的**唯一设计真源在 [01 设计 §9.1](01-MUPC-通信网关-设计文档.md)**，本章 §9.5 只声明引用与归属确认，**不复制结构**。
+> **不做**：U-68 的另两项（API 形态、按月分区重算）不在本章；清理链路装配不在本章（§9.4）。
+> **并发改动协同（v1.3 订正）**：`storage` 侧 U-68③ 的**最小加固已合并**（定时 flush 在 `services.rs:407-439`、失败回填/有界/计数在 `:459-503` + `:550-599`，见 `724225c`）——故本章 §9.3 **不再是"期望接缝"，而是"与已合并实现的对接说明 + 残留缺口清单"**。
+
+### 9.0 现状基线与落点
+
+**行号按 HEAD `724225c` 全量重校；同时重校"是否已修"（评审 P1：原稿按旧基线写，把已修项写成未修）**：
+
+| # | 现状（**重校后**） | 证据（**已重校**） |
+|---|------|------|
+| 1 | `meter_grid` 不落库：`on_grid_package` 只 `set_latest_data` + 广播 IEC104 | `mupc-core-bin/src/startup.rs:526-533` |
+| 2 | `WriteBuffer` 容量 1000 / 间隔 5000 为**装配期硬编码**，`core_config` **无 `storage` 段** | `startup.rs:795-799`；`core_config.rs`（无该段，`.storage` 字段不存在） |
+| 3 | ✅ **已修（U-68③ 修复，`724225c`）**：提交失败**回填缓冲头部**（<span>不再整批丢</span>），缓冲**有界**（常驻上限 `DEFAULT_MAX_BUFFERED_POINTS = 10_000`），丢弃/回填**均有计数**（`dropped_points` / `dropped_batches` / `requeued_batches`）与 `error!` 日志 | `services.rs:459-503`（`flush_batch` 三层保护）、`:550-599`（`BatchGuard` + `Drop` 回填）、`:207`（常量）、`:308-320`（`trim_oldest`）、`:338-355`（`requeue_front`）、`:368-383`（三个计数器）、`:322-330`（`log_dropped`） |
+| 4 | ⚠️ **仍未修**：`buffer_telemetry` 在**容量触发的路径上 `await` 提交**（`self.flush_batch(batch).await?`）⇒ 采集调用栈仍可能被 DB 阻塞 | `services.rs:273-305`，await 在 `:300-303` |
+| 5 | `RetentionManager` **未装配**（全仓仅 `lib.rs` 导出 + 集成测试使用，生产装配无引用），§6.2 清理未生效 | `services.rs:602-639`；`storage/src/lib.rs:14`；`tests/integration.rs:816-821` |
+| 6 | `quality` 字段在写入侧**恒为 0**（无枚举语义） | `startup.rs:565`（`quality: 0`） |
+| 7 | `telemetry` 窄表列约束：`value REAL NOT NULL` / `quality INTEGER NOT NULL DEFAULT 0`（**决定"无采样行"怎么写**，见 §9.1.4） | `services.rs:650-661`（`CREATE TABLE IF NOT EXISTS telemetry`，`value` 在 `:655`） |
+
+**落点**：`storage`（`GridAggregator` + `Quality` 枚举 + 缓冲失败语义加固）+ `core-bin`（装配、样本转发与 tick、`core_config.storage` 配置类型与 `validate_storage`），逐项见 §9.6。
+
+---
+
+### 9.1 总表电气量 1 分钟聚合落库（U-69）
+
+#### 9.1.1 聚合点裁定
+
+**裁定：在 `mupc-storage` 新增 `GridAggregator`（纯逻辑、无 IO），`core-bin` 的 `on_grid_package` 只做"转发样本 + 定时 tick"。**
+
+| 备选 | 评估 | 结论 |
+|------|------|------|
+| A. `core-bin` 的 grid 接收闭包内实现 | core-bin 是装配层，**无可单测环境**（`initialize_all` 需 DB/intercore/串口全套真环境，见 `startup.rs:1447` 的既有说明）⇒ "周期边界 / 无采样产行 / 极值"这类时序逻辑**无法被单测钉住** | ❌ |
+| **B. `storage` 新增 `GridAggregator`** | 可纯逻辑单测（喂 `(ts_ms, sample)` 序列 → 断言产出记录）；`storage` 在 CI 测试面内；装配层只剩"转发 + spawn tick" | ✅ **采用** |
+
+**为什么不是 `data-processing`**：聚合的**输入**（`DataPackage` 的电气量语义）在 `mupc-southd::mapper`，但聚合的**输出形态**（落库记录：通道名/时间戳/quality）是**存储语义**（§4.1.1 / 附录 C 的 `quality`）。放 `storage` 与"落库记录形态的唯一所有者"一致；且 `storage` 已被 core-bin 依赖，**不新增依赖边**。
+
+#### 9.1.2 接口（实现契约）
+
+```rust
+// mupc/crates/storage/src/grid_aggregate.rs（新增）
+
+/// 落库通道规格（**表驱动**：增删通道 / 开关极值 = 改本表，不改算法）
+pub struct ChannelSpec {
+    /// 落库用通道名（= `telemetry.metric_name`）
+    pub metric: &'static str,
+    /// 是否产出分钟极值（max/min 各 1 行）
+    pub extremes: bool,
+    /// 取数闭包：从样本取该通道值（None = 本周期该通道缺测）
+    pub pick: fn(&GridSample) -> Option<f64>,
+    /// 表意注记（如"取 A 相"），写入设计对照表与日志，**不改数据**
+    pub note: &'static str,
+}
+
+/// 一个采样点（core-bin 从 `DataPackage` 抽取后传入；**已换算工程值**）
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GridSample {
+    pub u: [Option<f64>; 3],
+    pub i: [Option<f64>; 3],
+    pub p: [Option<f64>; 3],
+    pub q: [Option<f64>; 3],
+    pub pf: [Option<f64>; 3],
+    pub p_total: Option<f64>,
+    pub q_total: Option<f64>,
+}
+
+/// 落库用的（窄表）记录：**与 `TelemetryPoint` 同构的"意图"形态**
+pub struct AggregateRow {
+    pub metric_name: &'static str,
+    /// 聚合周期**起点**（UTC ms，`period_ms` 的整数倍）
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// 均值/极值；`None` = 本周期**无有效采样**（不可得）——**不得写 0**。
+    /// 落库时经 `to_telemetry_point()` 原样传成 `Option<f64>`（`telemetry.value` 已按
+    /// §9.1.4 改为**可空**）⇒ 库内为**真 NULL**，不是 0。**禁止**任何 `unwrap_or(0.0)`。
+    pub value: Option<f64>,
+    pub quality: Quality,     // Good | NoData（见 §9.1.4）
+}
+
+impl AggregateRow {
+    /// **唯一落库转换点**（防"`None` 被某处 `unwrap_or(0.0)` 悄悄变成 0"）。
+    /// `device_id = "grid_meter"`（站 id）、`metric_name`、`timestamp`、`quality` 逐字带过。
+    pub fn to_telemetry_point(&self, device_id: &str) -> mupc_storage::TelemetryPoint;
+}
+
+pub struct GridAggregator { /* period_ms, specs: &'static [ChannelSpec], cur: Option<PeriodAcc>, last_start_ms: Option<u64> */ }
+
+impl GridAggregator {
+    pub fn new(period_ms: u64) -> Self;
+
+    /// 喂入一个采样：若跨过周期边界，返回**已闭合周期**的全部行（0 或 1 个周期）。
+    /// ⚠️ **只闭合、不回溯**：`ts_ms` 直接跳到 N 个周期之后时，中间周期**不补产**
+    /// （防长断连后一次补出大量行；口径见 §9.1.5）
+    pub fn observe(&mut self, ts_ms: u64, s: &GridSample) -> Vec<AggregateRow>;
+
+    /// 时间推进（定时 tick）：闭合"已越过 `start + period` 但仍无新采样"的**当前**周期。
+    /// **无采样周期照样产行**（PRD R-11.2-E），quality = NoData
+    pub fn tick(&mut self, now_ms: u64) -> Vec<AggregateRow>;
+
+    /// 退出前 flush：把当前未闭合周期闭合并产出（**进程优雅退出**）
+    pub fn flush(&mut self, now_ms: u64) -> Vec<AggregateRow>;
+
+    /// 本周期是否已有采样（供 tick 的幂等判断；测试用）
+    pub fn current_start_ms(&self) -> Option<u64>;
+}
+```
+
+#### 9.1.3 通道清单（落库集合）
+
+**默认落库 18 通道 + 2 通道极值**（表驱动，见 §9.9 Q-2/Q-3 的裁定悬挂点）：
+
+| 组 | 通道（`metric_name`） | 均值 | 极值 | 取数来源 | 表意注记 |
+|----|----------------------|------|------|----------|----------|
+| 电压 | `u_a` / `u_b` / `u_c` | ✅ | — | `phase.voltage[0..3]` | — |
+| 电流 | `i_a` / `i_b` / `i_c` | ✅ | — | `phase.current[0..3]`（**带符号**，方向由分相有功符号承载 `mapper.rs:133-149`） | — |
+| 分相有功 | `p_a` / `p_b` / `p_c` | ✅ | — | `phase.active_power[0..3]` | — |
+| 分相无功 | `q_a` / `q_b` / `q_c` | ✅ | — | `phase.reactive_power[0..3]` | — |
+| 分相功率因数 | `pf_a` / `pf_b` / `pf_c` | ✅ | — | `phase.cos_phi[0..3]` | — |
+| 总有功 | `p_total` | ✅ | ✅ max/min | `electrical.active_power`（缺块时 mapper 已降级 Σp，`mapper.rs:131`） | — |
+| 总无功 | `q_total` | ✅ | ✅ max/min | `electrical.reactive_power`（= Σq，`mapper.rs:163`） | — |
+| 总功率因数 | `pf_total` | ✅ | — | `electrical.cos_phi` | ⚠️ **实为 A 相值**（`mapper.rs:164`）。若产品裁"语义不符不落"⇒ 从本表删 1 行（§9.9 Q-3） |
+| 频率 | ✗ **不落** | — | — | `electrical.frequency` **恒 50.0 常量**（`mapper.rs:165`） | 常量入库会污染统计（PRD Q5 建议 (b)）⇒ **不落**，登记"无源" |
+| 视在功率 S | ✗ 不落 | — | — | 无点表来源 | 避免为凑维度造数据（PRD Q4 口径同源） |
+| 电能（进/出） | ✗ 不落 | — | — | 仪表侧无电能块（`meter_grid` 配置 `mupc/deploy/config/mupc_core_config.yaml:413-426`） | 同上 |
+
+**行数**：每周期 = 18（均值） + 2×2（极值） = **22 行**（PRD §11.2-F 的 21+6=27 是**含频率/视在功率**时的上界；本设计按 Q5 建议排除频率后为 22，见 §9.9 C-1）。
+
+**容量重算（回填 PRD §11.2-F 的口径）**：22 行/分钟 ⇒ 31,680 行/天；按 §7.3 的 200 B/行 ⇒ **6.3 MB/天**、90 天 ≈ **570 MB**、年 ≈ 2.3 GB。占数据分区（§7.3：44 GB）约 **1.3%** ⇒ 与 §6.1 的 90 天保留相容。
+
+#### 9.1.4 聚合语义与时间戳
+
+| 项 | 口径 |
+|----|------|
+| 聚合量 | **算术均值**（`Σx / n`，`n` = 本周期该通道**有效采样数**，非周期总采样数）；极值通道另出 `max` / `min` |
+| **不得抽样** | 严禁"取周期内首个/末个瞬时值"（PRD R-11.2-A）。**反向用例**：把实现改为取首值 ⇒ 单测必红（GRD-02） |
+| 时间戳 | 周期**起点**：`start = ts_ms - (ts_ms % period_ms)`，UTC 毫秒，**必为 `period_ms` 的整数倍**（PRD R-11.2-C / GRD-03） |
+| 极值行的时间戳 | **与均值行同**（同周期起点）；区分靠 `metric_name`（`p_total_max` / `p_total_min`） |
+| 极值行的 `metric_name` | `p_total_max` / `p_total_min` / `q_total_max` / `q_total_min` |
+| 缺测 | 通道本周期**无有效采样** ⇒ `value = None`、`quality = NoData`；**严禁写 0**（PRD R-11.2-E / GRD-05） |
+| 全周期无采样 | **仍产出全部 22 行**（含极值行的 `None`）——"断档可被查询识别，而非静默少行"（PRD R-11.2-E / GRD-04） |
+| 部分缺测 | 该通道的均值按**有效采样**算；极值同理（仅用有效采样求） |
+| 落库形态 | **复用 `telemetry` 窄表**（每通道 1 行；`INSERT` 在 `services.rs:506-530` 的 `commit_batch`）：`device_id = "grid_meter"`（站 id）、`metric_name` = 通道名、`timestamp` = 周期起点、`value`、`quality`。**不新建表、不加迁移** |
+| **NoData 的落库映射（P2：原稿未定义 ⇒ `Option<f64>` 撞 `REAL NOT NULL`）** | **裁定：`telemetry.value` 改为可空，缺测行写 `NULL`（真 NULL），`quality = NoData`。** 机读形态：`value REAL`（去掉 `NOT NULL`）、`TelemetryPoint.value: Option<f64>`。**这是唯一与 PRD R-11.2-E「不得写入 0 冒充有效值」字面一致的做法**——排在前面而**被否决**的两个方案：① 写 `0.0` + `quality = NoData`（**仍写入了 0**，与禁令字面冲突，且任何忽略 quality 的 `AVG` 都会被污染）；② 不产行（**违反 GRD-04"断档可被查询识别，而非静默少行"**）。 |
+| **迁移（本章唯一的结构变更，须写进实现）** | 在 `run_migrations`（`services.rs:647`）末尾新增一次**幂等**的"可空化重建"：先 `PRAGMA table_info(telemetry)` 检查 `value` 的 `notnull`，**为 0 则跳过**；否则 `BEGIN` → `ALTER TABLE telemetry RENAME TO telemetry_old` → 按**同一 DDL 但 `value REAL`** 重建（`services.rs:650-661`）→ `INSERT INTO telemetry SELECT id,device_id,timestamp,metric_name,value,quality FROM telemetry_old` → `DROP TABLE telemetry_old` → **重建既有索引** `ON telemetry(metric_name, timestamp)`（`:661`）→ `COMMIT`。**既有行全部为 `Some`** ⇒ 迁移前后**数据语义不变**（R-11.3-C / STG-01 的"零行为变化"仍成立）。 |
+| **受影响的代码点（逐处列出，避免漏改）** | ① `storage/src/models.rs:10` `value: f64 → Option<f64>`；② `storage/src/services.rs:520` `.bind(point.value)`（sqlx 自动绑 `NULL`）；③ `storage/src/repository.rs:138` `.bind(point.value)`、`:153/:174` 的 `SELECT … value …` 与 `FromRow`（`telemetry` 行结构体 `:490` 起）改 `Option<f64>`；④ 其余 `TelemetryPoint { … }` 构造点（共 12 处：`data-processing/src/high_freq_telemetry.rs`、`mupc-core-bin/src/startup.rs`、`storage/tests/integration.rs` 等）一律写 `Some(v)`；⑤ `GridAggregator` 的缺测行写 `None`。**⑤ 之外全部是机械替换**（`value: x` → `value: Some(x)`） |
+| **查询契约（防"NULL 行进统计"）** | NULL 天然被 SQL 聚合忽略（`AVG/SUM` 跳过 NULL）⇒ **无需额外过滤**即不会污染统计；但仍要求：① 对 `quality` 的非 Good 行做**存在性/计数**查询时显式按 `quality` 过滤；② 该口径写入 `models.rs` 的文档注释（§9.10 同步项）；③ GRD-04 的验收断言 = 注入断连 ⇒ 该周期 22 行存在、`quality = 1`、**`value IS NULL`**；对比用例：注入真实 0 值采样 ⇒ `quality = 0`、`value = 0.0`（**二者在库内可区分**） |
+| `quality` 语义 | 现有 `TelemetryPoint.quality: i32`（写入侧恒 0，`startup.rs:565`）⇒ **本章新增枚举** `storage::Quality { Good = 0, NoData = 1, Invalid = 2, Stale = 3, Unconfigured = 4 }`。**`Good = 0` 保持既有写入值不变**（零行为变化）；枚举与 [01 设计 §9.1.2](01-MUPC-通信网关-设计文档.md) 的 `PointQuality` **一一映射**（同一语义、两处命名）。⚠️ **映射函数 `quality_from_point_quality(PointQuality) -> i32` 落在 `mupc-core-bin`（装配层），不落 `storage`** —— 理由见 §9.6 与 §9.8 D-8（放 `storage` 会**新增 `storage → data-processing` 依赖边**，现无该边） |
+| 关闭开关 | **不提供**（PRD R-11.1-A / GRD-08）：`storage:` 段无任何字段可关闭本项 |
+
+#### 9.1.5 无采样、断连与重启的行为（逐条明确）
+
+| 情形 | 行为 |
+|------|------|
+| 单周期内无采样（站离线中） | `tick` 闭合该周期 ⇒ 22 行 `NoData`（**有行、可查**）。tick 由装配层 1 s 定时（周期 ≤ 60 s，粒度足够） |
+| 站离线**长时间**（如 30 min） | 每周期 22 行 `NoData` ⇒ 660 行/30 min ⇒ **约 130 KB**，可接受。**不设补产上限**（PRD R-11.2-E 的"不得静默少行"优先；上限会制造不可区分的空洞） |
+| **跨重启的空档** | **不回溯补产**（`GridAggregator` 的 `last_start_ms` 不落盘；重启后从当前周期开始）。⇒ 重启造成的空档表现为**时间戳跳变**（可查、可识别），而非 `NoData` 行。**如实声明**：这是本设计的**已知边界**（PRD 未规定跨重启，登记 §9.9 C-2） |
+| 退出 | tick 任务作为 **U-64 的"协作生产者"** 入 `producers` 名单：收到 `stop_rx` ⇒ 先 `flush(now)` 入队 ⇒ 收工；随后由既有退出序列最后 flush 遥测缓冲（`startup.rs:804-806`，与 P0-1 同范式）。**不得**绕开该名单自行 `main.rs` 加 flush（会破坏 U-64 的顺序契约） |
+| 采样跨多个周期（调度抖动/时钟跳变） | `observe` **只闭合"当前"周期**，中间周期由 `tick` 的 `NoData` 行覆盖（若 tick 先跑过）或跳过（若 tick 未跑）⇒ 由时间戳跳变可识别。**不做**"把样本按时间戳分摊到历史周期"（无定义、易造数） |
+
+---
+
+### 9.2 `storage:` 配置段（U-67）
+
+#### 9.2.1 schema 与默认值
+
+```yaml
+# mupc_core_config.yaml 新增段（**不进 DB**，重启生效）
+storage:
+  batch_capacity: 1000              # 遥测写缓冲批量提交容量（条）
+  flush_interval_ms: 5000           # 遥测写缓冲提交间隔（ms）
+  grid_aggregate_period_ms: 60000   # 总表电气量聚合落库周期（ms）
+```
+
+```rust
+// mupc/crates/mupc-core-bin/src/core_config.rs（新增）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]                       // **整段缺省 ⇒ 取 Default（= 现实现常量）**
+pub struct StorageSectionConfig {
+    #[serde(default = "default_batch_capacity")]
+    pub batch_capacity: u64,
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    #[serde(default = "default_grid_aggregate_period_ms")]
+    pub grid_aggregate_period_ms: u64,
+}
+impl Default for StorageSectionConfig { /* 1000 / 5000 / 60000 —— **与现实现逐字相同** */ }
+```
+
+| 键 | 默认 | 合法范围 | 依据 |
+|----|------|----------|------|
+| `batch_capacity` | **1000** | 1 ~ 100000（`≥ 1`） | = 现实现 `startup.rs:795-799` |
+| `flush_interval_ms` | **5000** | 100 ~ 600000（**禁 0**） | = 现实现 |
+| `grid_aggregate_period_ms` | **60000** | 10000 ~ 3600000 **且 `% 1000 == 0`** | §4.1.1「默认 1 分钟」 |
+
+**零行为变化（PRD R-11.3-C / STG-01）**：整段缺省 ⇒ 三值 = 上述默认 ⇒ 与变更前逐条一致。**本段不含保留期字段**（PRD R-11.3-A 的命名消歧）；**不含** `max_retained_points`（`storage:` 段**只含三键**，PRD R-11.3-A 明文）。
+
+> **缓冲上界口径的**统一**（P4：原设计写 `2 × batch_capacity`，实现是常量 `10_000`，二者未登记）**：
+> **采用实现值 `10_000`**（`services.rs:207` 的 `DEFAULT_MAX_BUFFERED_POINTS`），**并说明依据** —— 代码注释（`services.rs:203-207`）给出两条：① 生产装配为 `capacity = 1000` ⇒ **10,000 = 10 个满批**，一次 `busy_timeout`（5 s 量级）的落库抖动不会触顶，而长故障时又不会无限增长；② 单点 ≈ 100 B ⇒ 满额 ≈ **1 MB**，对 RK3588 安全。
+> **与 PRD R-11.5-A2 的差异登记（§9.9 Q-9 / C-3）**：PRD 写"默认 = **2 × batch_capacity**"，实现为**不随 `batch_capacity` 变的常量** —— 默认口径下二者差 5 倍（2,000 vs 10,000）。**本设计裁定：以 10,000 为准**，并**请求 PRD 订正该行为**"默认 **10,000 条**（= 10 × 默认 `batch_capacity`；由 `DEFAULT_MAX_BUFFERED_POINTS` 常量给出，**不随用户配置的 `batch_capacity` 缩放**）"。⇒ **FLS-02 的断言口径按 10,000**（不是 2 × capacity）。若产品要求"随 `batch_capacity` 缩放"⇒ 新增配置键 `storage.max_buffered_points`（PRD Q1 附带项），属**另立需求**。
+
+#### 9.2.2 校验与非法值处置
+
+**裁定：`拒启动`（fail-fast），错误信息点名违规键**（PRD R-11.3-E 建议 (a) / STG-04）。
+
+```rust
+// core_config.rs：与既有 validate_io / validate_display / validate_south_stations 同范式
+impl CoreConfig {
+    fn validate_storage(&self) -> Result<(), String> {
+        let s = &self.storage;
+        if !(1..=100_000).contains(&s.batch_capacity) {
+            return Err(format!("storage.batch_capacity={} 须在 1..=100000", s.batch_capacity));
+        }
+        if !(100..=600_000).contains(&s.flush_interval_ms) {
+            return Err(format!("storage.flush_interval_ms={} 须在 100..=600000（禁 0）", s.flush_interval_ms));
+        }
+        if !(10_000..=3_600_000).contains(&s.grid_aggregate_period_ms) {
+            return Err(format!("storage.grid_aggregate_period_ms={} 须在 10000..=3600000", s.grid_aggregate_period_ms));
+        }
+        if s.grid_aggregate_period_ms % 1000 != 0 {
+            return Err(format!("storage.grid_aggregate_period_ms={} 须为 1000 的整数倍（时间戳按整秒对齐）", s.grid_aggregate_period_ms));
+        }
+        Ok(())
+    }
+}
+```
+
+**衔接**：在 `CoreConfig::validate()`（`core_config.rs:464`）内、`self.validate_display()?` 之前**新增一行** `self.validate_storage()?;`（存储校验不依赖其它段，放在无跨段依赖的段落即可）。**该函数不读文件、不做跨段校验**（与 `validate_io` 的 `enabled` 门控不同——本段**无 enabled 开关**，PRD R-11.1-A）。
+
+**两参数正交（PRD R-11.3-D / STG-05）**：`batch_capacity`/`flush_interval_ms` = **提交节拍**；`grid_aggregate_period_ms` = **记录时间粒度**。**两个量不可互推**，代码上分属两个类型（`WriteBuffer` / `GridAggregator`），互不引用 ⇒ 正交由结构保证（STG-05 的交叉验证即断言此结构）。
+
+#### 9.2.3 装配点
+
+| 项 | 落点 |
+|----|------|
+| `WriteBuffer::new` | `startup.rs:795-799` 的硬编码 `1000, 5000` → `cfg.storage.batch_capacity, cfg.storage.flush_interval_ms` |
+| `GridAggregator::new` | 同处新增；实例随 `SouthSink` 注入（`Arc<Mutex<GridAggregator>>`，因 `observe` 需 `&mut`） |
+| tick 任务（含退出 flush） | 新增 `spawn`：每 1000 ms 调 `tick(now_ms)` → 产出 → `WriteBuffer` 入队；**句柄入 `producers`（U-64 的"协作生产者"名单）**，收到 `stop_rx` 后先 `flush(now)` 入队再收工 —— **与既有 `flush_timer` 同范式、同顺序**（`startup.rs:804-806`；U-64 退出顺序 = 通知生产者收工 → 等它们确认 → 最后 flush 遥测缓冲） |
+
+---
+
+### 9.3 落库失败语义：**与已合并实现的对接说明**（U-68③）
+
+> **本节性质（v1.3 改写，评审 P1/P3）**：U-68③ 的**最小加固已实现并合并**（`724225c`）——本节**不再是"期望接缝"**，而是「**已实现项（对齐 `724225c`）+ 残留缺口（含落地方案）**」。FLS-01～05 的**验收归属**见表末。
+
+**已合并实现的接口面（`storage` 对外，逐条给出实现行号）**：
+
+| S-# | 要求（PRD） | 实现状态 | 实现点（`724225c`） |
+|-----|-------------|----------|---------------------|
+| S-1 | 提交失败**回填**（保序）、下次触发重试 | ✅ **已实现** | `flush_batch`（`services.rs:470-503`）：失败 ⇒ `guard.requeue_now()`；`BatchGuard` + `Drop`（`:550-599`）兜住 abort/panic 路径；`requeue_front`（`:338-355`）头插保序 + 裁剪计数 |
+| S-1' | 回填**不清空**已提交点（`abort`/`panic` 亦不丢） | ✅ **已实现**（超出原要求，登记为**增强**） | `BatchGuard::disarm`（`:570-573`）在 `tx.commit()` 后**无 await 点**处解除守卫 ⇒ 不存在"已提交未解除"窗口 |
+| S-2 | 缓冲**有上界**、超限丢**最旧** | ✅ **已实现（上界口径 = 10,000，见下 P4）** | `DEFAULT_MAX_BUFFERED_POINTS = 10_000`（`:207`）；`trim_oldest`（`:308-320`）两条增长路径（新 push `:296-298` / 回填 `:349`）都过同一剪刀 |
+| S-3 ① | 丢弃须 `error` 日志（含条数） | ✅ **已实现** | `log_dropped`（`:322-330`，含 `dropped/buffered/max_points/dropped_total`）；失败批日志 `:484-499` |
+| S-3 ② | 丢弃须产**一条 `major` 级告警/事件** | ❌ **未实现（残留缺口 #1）** | `storage` crate **无告警/事件通道**（`AlertFeed` 在 core-bin，`storage` 不依赖它，也不应依赖） |
+| S-3 ③ | 丢弃计数**可观测** | ✅ **已实现**（**接口名与草案不同**，见下） | `dropped_points()`（`:368-371`）、`dropped_batches()`（`:374-377`）、`requeued_batches()`（`:380-383`）、`buffered_points()`（`:358-360`）、`max_points()`（`:363-365`） |
+| S-4 | 持续失败**按周期聚合告警**、不风暴 | ⚠️ **结构性缓解已实现**，告警聚合**未实现（残留缺口 #2）** | 缓解：`since_attempt`（`:228-238`）使"失败后每个 push 都重试"的活锁式风暴不可能发生（恢复靠定时任务 `:407-439`）；聚合告警随 #1 一并缺失 |
+| S-5 | **不得阻塞采集**：`offer` 内不 await | ❌ **未实现（残留缺口 #3）** | `buffer_telemetry` 在容量触发路径仍 `self.flush_batch(batch).await?`（`:300-303`）⇒ DB 提交耗时进入采集调用栈 |
+
+**接口形态订正（**原草案的 `TelemetrySink` trait 与 `OfferOutcome` 未被采用**，如实登记）**：
+
+```rust
+// 现状公开面（storage/src/services.rs）—— 采集侧入口仍是 async 的 buffer_telemetry
+impl WriteBuffer {
+    pub async fn buffer_telemetry(&self, point: TelemetryPoint) -> Result<(), StorageError>; // :273
+    pub fn buffered_points(&self) -> usize;      // :358   ← 草案 buffered_len
+    pub fn max_points(&self) -> usize;           // :363   ← 草案未列
+    pub fn dropped_points(&self) -> u64;         // :368   ← 草案 dropped_total
+    pub fn dropped_batches(&self) -> u64;        // :374   ← 草案未列
+    pub fn requeued_batches(&self) -> u64;       // :380   ← 草案未列
+    pub fn capacity(&self) -> usize;             // :532
+    pub fn flush_interval_ms(&self) -> u64;      // :536
+}
+```
+
+> **为什么没有 `TelemetrySink`/`OfferOutcome`**：加固选择了**最小面**（不新增 trait、不改采集侧调用签名），代价是 **S-5 与 S-3② 未闭合**。⇒ **对接方不得**按草案的 trait 形态接线（会编译不过）；**采集侧照旧 `buffer_telemetry(..).await`**。
+
+**残留缺口与落地方案（须由对接方实现，本章给出可编码的方案）**：
+
+| # | 缺口 | 落地条件与方案 | 对应 PRD | 归属 |
+|---|------|---------------|----------|------|
+| 1 | S-3② 丢弃无 `major` 事件 | **storage 不发事件**（依赖方向不允许）⇒ 由 **core-bin 的健康巡检任务**（新增，周期 1 s 或复用既有 tick）读 `dropped_points()/dropped_batches()` 的**增量**，增量 > 0 时调 `AlertFeed::push_system_alert("major", 文案)`（含增量条数 + 累计值）。**只在增量 > 0 时发**⇒ 自然按周期聚合（同时闭合 S-4） | R-11.5-A3② / A4 / FLS-03 | 新增 1 个 core-bin 任务（≤ 30 行） |
+| 2 | S-4 聚合告警 | 同上一条：按"增量 > 0"触发 + 一条 `major` 事件内**携带递增计数**（连续失败时段合并） | R-11.5-A4 | 同上 |
+| 3 | S-5 采集路径仍 await | **两条路可选**（本章推荐 (a)）：(a) **把 `buffer_telemetry` 改为非阻塞**：内部改 `mpsc::Sender`（`try_send`），`flush/tick` 逻辑搬进 `spawn_flush_timer` 那个 task（`:407-439`）——但这会改 `buffer_telemetry` 的签名（`await` 仍在，只是不再干 DB 活）；**最小改法**：容量触发时**不在调用栈内 await**，而是 `tokio::spawn(flush_batch(batch))`（**保住签名、去掉阻塞**，代价是失败回填的时序略变，`BatchGuard` 已覆盖）；(b) 维持现状 + 在装配期给 `capacity` 配足够大（把 await 概率降到"每 1000 点一次"）。**推荐 (a) 的最小改法** | R-11.5-A5 / FLS-04 | 对接方 |
+
+> **§9.3 与 PRD 验收的对应（P3：不留交付缺口）**：**FLS-01 / FLS-02 / FLS-03①③ / FLS-05 已随 `724225c` 交付**（本设计只做**对齐说明**）；**FLS-03② / FLS-04 未交付**，由本节的缺口 1/3 承接，**并作为本增量的剩余验收项**（见表末 §9.7 的 FLS 行）。
+
+**崩溃/断电边界（PRD R-11.5-B）**：进程内不可恢复场景（断电、强杀、介质故障）**不在**上述要求内；内存中未提交数据的丢失属**已知边界**。§7.6「写入失败不上报告警」**仅对单条写入**成立；**批量丢失必须告警**（S-3）。
+
+---
+
+### 9.4 保留期与冷数据：边界声明
+
+| 项 | 本章口径 |
+|----|----------|
+| 90 天保留（§6.1） | **口径不变**；总表聚合记录同纳 90 天（PRD §11.4） |
+| 本期是否需要单独保留期 / 降采样 | **不需要**：90 天聚合记录 ≈ 570 MB（占分区 ~1.3%，§9.1.3） |
+| `RetentionManager` | **未装配**（定义 `services.rs:602-639`；仅 `storage/src/lib.rs:14` 导出 + `tests/integration.rs:816-821` 使用，**生产装配无引用**）⇒ §6.2 自动清理**尚未生效**；"90 天保留"当前是**规格而非现状**（PRD §11.4 / Q6 建议 (a)） |
+| 清理链路落地 | **另立需求**，不在本章（§8.8 未解决问题表已有"是否迁移到 mupc-storage 统一管理"一行的同源登记） |
+| `storage:` 段是否承载保留期 | **不**（PRD R-11.3-A 明确本段只含三项；与 §5.6.2 原规划的 `/api/v1/storage` 不是同一组配置） |
+| 冷数据下沉/归档 | **不做**（无需求依据；登记为未提出项） |
+
+---
+
+### 9.5 最新值入口：归属确认与引用（U-70）
+
+**U-70 的消费方改判与数据可用性要求已由 [01 设计 §9.1](01-MUPC-通信网关-设计文档.md) 完整设计**（01/03/12 三份共用件）。本章只做两件事：
+
+| 项 | 本章口径 |
+|----|----------|
+| **归属确认** | 03 PRD §11.6.2 R-11.6-D1 的「**本模块**须提供」由 `mupc-data-processing::latest_values` 满足——该 crate 即 03 模块的 crate（§1.2/§7.1）。**类型与所有权在 03，写入调用方在 core-bin（装配层）**；依赖方向 `southd → data-processing`、`core-bin → data-processing` 均已存在，**零新增边** |
+| **不重复定义** | 数据结构（`PointValue/PointQuality/PointId/ChangeBatch`）、刷新活性（R-11.6-D2）、陈旧表达（R-11.6-D3）、变更通知 ≤1 s（R-11.6-D4）、禁轮询 `telemetry`（R-11.6-D5）**一律以 01 设计 §9.1 为准**，本章不复制、不另立门限 |
+| **过期判据单一真源** | `stale_timeout_s = 5 s`（`SouthStationsConfig.stale_timeout_s`，`mupc-southd/src/config.rs:177`）由 `LatestValues::new` **注入**，`is_fresh` 是唯一实现 |
+| 消费方分层（R-11.6-A） | `telemetry` 历史表 ⇒ **历史查询类**（报表/导出/复盘；本期无已实现消费方）；实时值 ⇒ 内存快照（上云/屏/策略）。**不得互相替代** |
+| 已知设计余量 | `telemetry` 表**只写不读**（R-11.6-B）——本章与 §9.1 的总表聚合**同样只写**；**不得**据此宣称"历史查询已实现"（CNS-03 为评审项） |
+
+---
+
+### 9.6 装配点汇总（core-bin）
+
+| 序 | 落点 | 改动 |
+|----|------|------|
+| 序 | 落点（**行号按 HEAD `724225c` 重校**） | 改动 |
+|----|------|------|
+| 1 | `core_config.rs`（`validate()` 在 `:464`、既有各段校验 `:506-515`） | 新增 `StorageSectionConfig` + 字段 `pub storage: StorageSectionConfig` + `validate_storage()` + 在 `validate()` 内调用（放在 `self.validate_display()?`（`:515`）之前） |
+| 2 | 两份 deploy YAML（`deploy/config/mupc_core_config.yaml` / `.production.yaml`） | 新增 `storage:` 段（**注释态或显式默认值**，二者等效；建议显式写出以便现场可见） |
+| 3 | `startup.rs:795-799` | `WriteBuffer::new(cfg.storage.batch_capacity, cfg.storage.flush_interval_ms, pool)` |
+| 4 | `startup.rs`（`SouthSink` 构造前，现 `:1287` 附近） | `Arc<Mutex<GridAggregator::new(cfg.storage.grid_aggregate_period_ms)>>` |
+| 5 | `SouthSink::on_grid_package`（`startup.rs:526-533`） | 新增：从 `pkg` 抽取 `GridSample` → `observe(now_ms, &s)` → 产出 `AggregateRow` → `to_telemetry_point("grid_meter")` → `WriteBuffer`。**在现有 `set_latest_data`（`:528`）+ `broadcast_grid_iec104`（`:532`）之后**（既有路径不动，GRD-07）。⚠️ `:532` 的 grid 上送支路按 [01 设计 v1.4 §9.2.2](01-MUPC-通信网关-设计文档.md) **将被删除**（并入 A 档任务）——**两条增量同时落地时以 01 号为准**，本序只管"在其后追加聚合" |
+| 6 | `startup.rs`（`flush_timer` 注册处 `:804-806` 旁） | spawn tick 任务（1000 ms）→ `Mutex<GridAggregator>` → `tick(now_ms)` → 入队；**句柄入 `producers`（协作生产者名单，非 abort 名单）**，收工前 `flush(now)` |
+| 7 | `main.rs` | **无需改动**（退出 flush 由步骤 6 的协作生产者契约 + 既有退出序列承担） |
+| 8 | `storage/src/grid_aggregate.rs` | **新增**（§9.1.2；含 `Quality` 枚举、`AggregateRow::to_telemetry_point`、`CHANNELS` 表与单测） |
+| 9 | `storage/src/models.rs` + `services.rs` + `repository.rs` | **`telemetry.value` 可空化**（§9.1.4 的迁移与 5 处代码点）——**本增量唯一的 `storage` 结构变更** |
+| 10 | `mupc-core-bin/src/quality_map.rs` | **新增**（`quality_from_point_quality(PointQuality) -> i32`；**落装配层**，见 §9.8 D-8） |
+| 11 | `storage/src/services.rs` 失败语义 | **已由 `724225c` 落地**（回填/有界/计数）；**残留 S-3②/S-4/S-5 由对接方按 §9.3 的缺口表实现** |
+
+**`GridSample` 抽取点（唯一）**：`mupc-data-processing::DataPackage` 的 `electrical.phase`（`Option<PhaseElectricalData>`）+ 顶层 6 字段。**缺相量块** ⇒ 分相通道全 `None`（产 `NoData` 行）；**顶层缺块** ⇒ 该通道 `None`。映射函数 `GridSample::from_package(&DataPackage) -> GridSample` 落在 `storage`（`From` 实现），单测可直喂构造的 `DataPackage`。
+
+---
+
+### 9.7 测试策略
+
+| 用例（对应 PRD §11.7） | 层次 | 要点 |
+|------------------------|------|------|
+| GRD-01 每 1 分钟恰 1 个周期 | 集成 | 跑 ≥ 3 min，按 `timestamp` 分组计数 |
+| GRD-02 聚合是统计值 + **反例必红** | 单测 | 恒定序列 ⇒ 均值 == 该值；阶梯序列 ⇒ 均值/极值精确；**把实现改成取首值 ⇒ 用例变红**（注入式反向验证） |
+| GRD-03 时间戳 = 周期起点且整倍 | 单测 | 注入 `ts = 1_000_000_001`、period 60000 ⇒ `start == 999_960_000` |
+| GRD-04 无采样仍产行 + `quality` 可区分 | 单测 + 库内断言 | `tick` 跨 1 周期 ⇒ 22 行存在、`quality == 1(NoData)`、**`value IS NULL`**（§9.1.4 的映射；**不是 0**）；对比用例：注入真实 0 值采样 ⇒ 22 行 `quality == 0`、`value == 0.0` ⇒ **二者在库内可区分**（这正是 PRD 要求"可区分"的机械判据） |
+| GRD-05 通道集合 == 表 | 单测 | `CHANNELS` 的 `metric_name` 集合逐一断言；缺测通道 `quality == NoData` |
+| GRD-06 行数下降 ≥ 95% | 集成 | 连续 1 h 实测外推（22 行/min vs 逐点 21×60） |
+| GRD-07 不影响北向上送与策略 | 集成 | 对照 `on_grid_package` 前后的 IEC104 上送内容与 `latest_data` |
+| GRD-08 无"关闭"路径 | 配置测试 | 穷举 `storage:` 取值，无关闭语义 |
+| STG-01 缺省 = 现状 | 集成 | 回放对照（**逐条一致**） |
+| STG-02 显式配置生效 | 集成 | `batch_capacity: 200` ⇒ 满 200 提交；`flush_interval_ms: 2000` ⇒ 最迟 2000 ms 提交 |
+| STG-03 重启生效 | 集成 | 改 YAML → 重启 → 生效；不重启 → 不生效 |
+| STG-04 非法值拒启动且点名键 | 单测 | `validate_storage()` 逐字段边界（含 `% 1000 != 0`） |
+| STG-05 两参数正交 | 单测 | 只改节拍 ⇒ 周期粒不变；只改周期 ⇒ 提交行为不变（结构断言 + 行为断言） |
+| STG-06 不进 DB | 结构检查 | 库内无新表/覆写项 |
+| **FLS-01 / FLS-02 / FLS-05** | 集成 | ✅ **已随 `724225c` 交付**：注入提交失败 ⇒ 缓冲条数不减、恢复后**行数守恒**（FLS-01，`services.rs:470-503` + `:550-599`）；持续失败 ⇒ 条数 ≤ **10,000**、丢最旧（FLS-02，`:207/:308-320`）；断电/强杀不在要求内（FLS-05，§9.3 末）⇒ 本设计只需**回放断言**，不需新实现 |
+| **FLS-03** | 集成 | ⚠️ **部分已交付**：① error 日志 ✅（`log_dropped` `:322-330`、失败批 `:484-499`）；③ 计数可观测 ✅（`dropped_points/dropped_batches/requeued_batches` `:368-383`）；**② `major` 事件 ❌ 未交付** ⇒ 由 §9.3 缺口 1 承接（**core-bin 健康巡检读增量 → `AlertFeed`**），**验收归属 = 本增量剩余项**；告警按周期聚合（`连续失败 10 周期不得 ≥10 条告警`）由"仅在增量 > 0 时发"满足（缺口 2） |
+| **FLS-04** | 性能测试 | ❌ **未交付** ⇒ 由 §9.3 缺口 3 承接（推荐"容量触发路径 `tokio::spawn(flush_batch)`"最小改法）；验收 = 采集侧写入 p99 ≤ 10 ms（HST-ELEC-02 不回归） |
+| GRD-09（**新增**，本设计） | 单测 | **`value` 可空化的迁移幂等**：对已迁移库再跑 `run_migrations` ⇒ 不重复重建（`PRAGMA table_info` 判 `notnull == 0` 即跳过）、既有行数值不变（§9.1.4） |
+| CNS-01/02 | 集成 | 锁 `telemetry` 表 30 s / 注入 DB 写延迟 ⇒ 屏与上送不受影响 |
+| CNS-04 | 集成 | 引用 [01 设计 §9.1](01-MUPC-通信网关-设计文档.md) 的快照用例（不重复实现） |
+
+---
+
+### 9.8 与既有设计的冲突清单与取舍
+
+| # | 冲突 | 取舍（本章裁定） |
+|---|------|------------------|
+| **D-1** | 本章 §9.1.3 落库 **18+4 = 22 行/周期** vs PRD §11.2-F 的 **21+6 = 27 行/周期** | 差异来源：PRD 的 21 含频率与视在功率；本章按 PRD **Q3/Q4/Q5 的建议**（频率"无源"不落、电能不落、S 待定）取 18 均值通道。**表驱动**：产品若改选 Q3(a) 全通道落库 ⇒ 改 `CHANNELS` 表一行，算法与单测不变。§9.9 C-1 |
+| **D-2** | §4.4.2 的「容量满 1000 或间隔满 5000 ms」与本章 §9.2 的**可配置化** | **口径不变，来源改为配置**：默认值与 §4.4.2 逐字相同（零行为变化）；§4.4.2 的「本轮不引入配置项」自本章起**被取代**（其口径对齐注记同步更新，见 §9.10） |
+| **D-3** | §4.4.2 的「概念消歧」（flush 窗口 ≠ 存储周期）与本章的 `grid_aggregate_period_ms` | **同源落地**：`grid_aggregate_period_ms` 即 §4.4.2 所指的"**存储周期**"（此前"未实现"）；`batch_capacity`/`flush_interval_ms` 即"**flush 窗口**"。两者在**两个类型**中实现（§9.2.2 末），结构上不可互推 |
+| **D-4** | §4.1.1「按可配置的存储周期将**电气量数据**持久化」此前只覆盖核间 `TelemetryData`；本章把它落到**台区总表** | 本章为**扩展而非替换**：`telemetry` 表的其它写入方（电池/告警/事件/外设遥测）**不改**。总表以 `device_id = "grid_meter"` 区分 |
+| **D-5**（v1.3 订正） | `buffer_telemetry` 在容量路径 `await` 提交（`services.rs:300-303`）vs PRD R-11.5-A5 的 p99 ≤ 10 ms | **仍未闭合**，但**原稿的"期望接缝 = 非阻塞 `offer` trait"未被采用**（实现选了最小面，见 §9.3 接口形态订正）⇒ 本章改为**残留缺口 #3 + 可编码的两条落地方案**（§9.3）：推荐"容量触发路径改 `tokio::spawn(flush_batch)`"（保签名、去阻塞）。**必须改**这条本身不变 |
+| **D-6** | §7.3「存储容量规划」按"每设备每周期 1 条"的逻辑记录口径；本章按窄表物理行口径（22 行/周期/设备） | **两口径不可互推**（PRD §11.2-F 的口径提示已明示相差约 27×）。本章的容量结论**只以 §9.1.3 的物理行为准**；§7.3 是否按物理行重算**属另立需求**（PRD §11.9 同款登记），本章**不改 §7.3** |
+| **D-7** | 附录 C 的 `quality`（`good`/`invalid`/`reserved`）与本章新增的 `Quality` 枚举（5 值） | **扩展枚举**：`Good = 0` **保持既有写入值 0 不变**；`Reserved` 在附录 C 中未定义取值 ⇒ 本章不占用其语义，新增 `NoData`/`Stale`/`Unconfigured` 为更大取值。附录 C 应随本章更新（**登记为文档同步项**，§9.10） |
+| **D-8**（v1.3 新增，**依赖边**） | 原稿把 `Quality::from_point_quality` 的落点写成 `storage` —— 但 `storage` **不依赖 `data-processing`**（`storage/Cargo.toml` 无该依赖；反向也无）⇒ 放 `storage` 会**新增 `storage → data-processing` 依赖边**（纯为一次枚举映射，代价不成比例） | **改落点：映射函数落装配层 `mupc-core-bin/src/quality_map.rs`**（core-bin 同时依赖两者，**零新增边**）。`storage` 只拥有 `Quality` 枚举（落库记录形态的唯一所有者），**不认识 `PointQuality`**；`data-processing` 只拥有 `PointQuality`，**不认识 `Quality`**。转换只在装配层发生（与"装配层是跨域转换点"的既有口径一致） |
+
+---
+
+### 9.9 待产品 / 项目经理裁定项
+
+| # | 事项 | 选项 | 本设计默认 |
+|---|------|------|-----------|
+| Q-2 | 分钟极值覆盖通道（PRD Q2） | (a) 全部可落通道 (b) 仅总有功/总无功/频率 (c) 不存 | **(b)**，但"频率"因无源被排除 ⇒ 实为 `p_total`/`q_total` 两通道（+4 行/周期） |
+| Q-3 | 落库通道范围（PRD Q3） | (a) 顶层 6 通道 (b) 顶层 + 分相 21 通道（含视在功率 S） | **(b) 的分相部分**：15 分相 + `p_total` + `q_total` + `pf_total` = 18；**S 不落**（无点表来源） |
+| Q-4 | 电能（进/出）无点表来源（PRD Q4） | (a) 本期不落 + 标注"无源" (b) 补点表 | **(a)** |
+| Q-5 | 频率（恒 50.0）与总 PF（取 A 相）（PRD Q5） | (a) 照落 (b) 标"无源"不落 (c) 补点表 | **频率 (b) 不落**（常量入库污染统计）；**`pf_total` 保留但须在文档注明"取 A 相"**（若产品要求语义严格 ⇒ 删该行，落库变 17 通道） |
+| Q-6 | 保留期与清理链路（PRD Q6） | (a) 沿用 90 天 + 清理另立 (b) 本次一并立 | **(a)**，并如实登记 `RetentionManager` 未装配 |
+| Q-8 | 最新值快照是否本期立（PRD Q8） | (a) 本期立 (b) 随 U-73/U-74 另立 | **(b)**：本期只落**数据可用性要求**（已在 01 §9.1 设计），排期随 U-74 |
+| **Q-7**（v1.3 新增） | **缺测行的落库形态**（P2）：`AggregateRow.value: Option<f64>` 与 `telemetry.value REAL NOT NULL` 冲突，无采样行的 `value` 怎么写？ | (a) **`telemetry.value` 可空化 + 写 `NULL`**（本章裁定） (b) 维持 `NOT NULL`、写 `0.0` + `quality = NoData` (c) 缺测不产行 | **(a)**；已给出迁移与 5 处代码点（§9.1.4）。**若产品认可 (b)**（零迁移），则需接受"库内缺测行的 `value` 为 0"，并把"先按 `quality` 过滤"写成强制查询契约 |
+| **Q-9**（v1.3 新增） | **缓冲上界口径**（P4）：实现常量 **10_000** vs PRD R-11.5-A2 的"默认 **2 × batch_capacity**" | (a) 以实现为准（10,000，请求 PRD 订正） (b) 新增配置键 `storage.max_buffered_points`（PRD Q1 附带项） (c) 改实现为 `2 × batch_capacity`（默认 2,000） | **(a)**；理由见 §9.2 末（10 个满批 + ≈1 MB 上界）。**FLS-02 的断言口径按 10,000** |
+| ✚ C-1 | 订正 PRD §11.2-F 的"21 均值 + 6 极值 = 27 行"为本章的 **18+4 = 22 行**（或产品回选含频率 ⇒ 维持 27） | 纯文档订正 | 请项目经理在 PRD 修订时同步 |
+| ✚ C-2 | 跨重启空档"不回溯补产"是否可接受（§9.1.5） | (a) 接受（时间戳跳变可识别） (b) 需 `NoData` 行补齐 | **(a)**；若选 (b) 需给 `last_start_ms` 落盘（新增持久化项，不建议） |
+| ✚ C-3（v1.3 新增） | 订正 PRD R-11.5-A2 的"默认 = 2 × batch_capacity"为"默认 **10,000 条**（常量，不随 `batch_capacity` 缩放）" | 纯文档订正 | 请项目经理在 PRD 修订时同步（同 Q-9） |
+| ✚ C-4（v1.3 新增） | 订正 PRD R-11.2-E 的实现口径：缺测行**写 `NULL`**（而不是任何数值），需在 PRD 注明"`telemetry.value` 可空" | 纯文档订正（并与 §7.3 的"每行 200 B"口径无关） | 请项目经理在 PRD 修订时同步（同 Q-7） |
+
+---
+
+### 9.10 与既有条目的关系与文档同步项
+
+| 既有条目 | 本章的作用 |
+|----------|------------|
+| §4.1.1 / HST-ELEC-01 | "存储周期可配置（默认 1 分钟）"自本章起由 `storage.grid_aggregate_period_ms` 承载（STG-02 / GRD-01 验收） |
+| §4.4.2 | 「本轮不引入配置项」自本章起被 §9.2 取代；「概念消歧」保持不变并落地为两个类型（D-3） |
+| §4.5.1 / §6.1 / §6.2 | 口径不变；`RetentionManager` 未装配的事实见 §9.4 |
+| §4.5.3/§4.5.4（磁盘空间与降级模式） | 本章**不改**。⚠️ 与 §9.3 的失败语义存在**潜在交叉**（>95% 停止时序写入 vs "不得静默丢弃"）：本设计口径 = 磁盘降级触发的写入停止仍须**计数 + 告警**（不得静默），与 S-3 一致 |
+| 附录 C（数据质量标记） | **须随本章更新**（D-7）：新增 `NoData/Stale/Unconfigured` 三个取值并注明与 `PointQuality` 的映射（**映射函数在 core-bin 装配层**，`quality_map.rs`，见 D-8） |
+| `models.rs` / `repository.rs` | **须随本章改**：`TelemetryPoint.value: f64 → Option<f64>`（§9.1.4 迁移）；`models.rs` 的 `value` 字段注释须写"`None` = 无数据，**只有总表聚合的缺测行会写 `None`**" |
+| §9.3（本章旧版"期望接缝"） | 自 v1.3 起改为"**与已合并实现的对接说明**"（§9.3）；原 `TelemetrySink`/`OfferOutcome` 草案**未被采用**，实现沿用 `WriteBuffer::buffer_telemetry` |
+| §7.3 | **不改**（D-6）；按物理行重算属另立需求 |
+| §8.8 未解决问题表 | 本章为其中的"是否需要将故障录波迁移到 storage"提供**旁证**（storage 已是落库主体），但不裁定该项 |
+
+---
+
 ## 附录 A：非功能性需求汇总
 
 | 指标 | 要求 |
@@ -1872,3 +2299,6 @@ mupc/crates/storage/
 |------|----------|
 | v1.0 | 初版：合并 Phase3A 实施计划、故障录波与数据存储设计，定义数据处理与存储五大功能域 |
 | v1.1 | flush 口径对齐实现现状（**容量 1000 条 / 间隔 5000 ms**，原写「100ms 或 100 条」）并说明取此量级的理由（避免高频小事务与写入放大，SQLite WAL / SD 卡寿命）；新增概念消歧「**flush 窗口**（提交节拍）≠ **存储周期**（采样/落库聚合周期）」，并注明"存储周期可配置"当前未实现（`core_config` 无 storage 段，另册登记 D2）。本轮只改口径、不新增配置项、不改 PRD |
+| **v1.3-r1（2026-09-23）** | **设计评审员复审：`[DESIGN_APPROVED: 2026-09-23]`**（仅覆盖 §9 增量）。**验收结果**：P1 已解决（§9.0 按 HEAD `724225c` 重校并逐项标"已修/未修"；`storage/src/services.rs` 的行号 `:207`/`:273`/`:358-383`/`:407-439`/`:470-503`/`:550-599`/`:602-639`/`:647`/`:650-661` **抽查全部精确**）；P2 已解决（`telemetry.value` 可空化 + 缺测写 `NULL` + 幂等迁移 + 5 处代码点，与 PRD R-11.2-E 字面一致；否决"写 0.0 + quality""不产行"两案的理由成立）；P3 已解决（FLS-01/02/05 与 FLS-03①③ 已交付并逐条给实现行号；FLS-03②/FLS-04 明确标"未交付"并给出可编码落地方案）；P4 已解决（上界采用 `10_000`，与 `services.rs:207` 实现常量一致；与 PRD R-11.5-A2 的偏差已登记 Q-9/C-3）；P5 已解决（`quality_from_point_quality` 改落 `mupc-core-bin/src/quality_map.rs`；经核 `storage/Cargo.toml` 确无 `mupc-data-processing` 依赖、`mupc-southd` 与 core-bin 均已依赖 `data-processing` ⇒ 零新增边成立）。**须随本批开发同一提交修正的勘误（4 项，不改变裁决）**：① §9.1.4 受影响代码点④误列 `data-processing/src/high_freq_telemetry.rs` —— 该文件的 `TelemetryPoint` 是**另一（crate 内私有）类型**、无 `value` 字段，且 `data-processing` 不依赖 `mupc-storage` ⇒ **无需改动**；同处"共 **12** 处"系含该类型**定义**的 grep 计数，`mupc_storage::TelemetryPoint` 构造点实为 7 处（`startup.rs:379/559/1809` + `storage/tests/integration.rs` 4 处），清单须按实数逐处列；② §9.1.4 迁移只重建 **1 个**索引，`services.rs:658-661` 实有**两个**（`idx_telemetry_device_ts` / `idx_telemetry_metric_ts`）⇒ 须一并重建（否则 `query_range` 的 `device_id + timestamp` 路径丢索引，至下次启动 `CREATE INDEX IF NOT EXISTS` 才恢复）；③ 行号微差：`models.rs:10` → **:11**、`repository.rs:490`（`TelemetryRow`）→ **:486**、`config.rs:177`（`stale_timeout_s`）→ **:178**；④ §9.6 序 4/序 5 的 `:1287`（`SouthSink::new`）与 §9.1.3 的 `mupc_core_config.yaml:413-426` 与本文其余行号一致，无需改（仅记录已核）。**开发前必决**：迁移（含两索引）须纳入本批；FLS-03②/FLS-04 须指定归属（§9.3 缺口 1/3 的"对接方"） |
+| v1.3 | **按设计评审意见修订 §9（P1–P5 逐条闭合），设计评审复审通过（`[DESIGN_APPROVED: 2026-09-23]`）**：① **P1** §9.0 基线按 HEAD `724225c` 全量重校并逐项标注"已修/未修"（U-68③ 的回填/有界/计数**已实现**：`services.rs:459-503`+`:550-599`+`:207`）；② **P2** 缺测行落库映射裁定 = **`telemetry.value` 可空化 + 写 `NULL`**（`quality = NoData`），含**幂等迁移**与 5 处代码点，与 PRD R-11.2-E「不得写入 0」字面一致（否决"写 0.0 + quality""不产行"两案）；③ **P3** §9.3 由"期望接缝"改为「**与已合并实现的对接说明 + 残留缺口**」：FLS-01/02/05、FLS-03①③ 已交付（逐条实现行号），**FLS-03②（`major` 事件）与 FLS-04（采集路径 await）未交付**并给落地方案（core-bin 健康巡检读增量 → `AlertFeed`；`tokio::spawn(flush_batch)`）；原 `TelemetrySink`/`OfferOutcome` 草案**未被采用**（接口形态订正表）；④ **P4** 缓冲上界统一为 **`10_000`** 并说明依据（10 个满批 / ≈1 MB），登记与 PRD R-11.5-A2「2 × batch_capacity」的偏差（Q-9/C-3）；`storage:` 段仍只含三键；⑤ **P5** `quality_from_point_quality` **改落 `mupc-core-bin/src/quality_map.rs`**（避免新增 `storage → data-processing` 边，D-8）。另：§9.6 装配点补"`telemetry.value` 可空化"条目；§9.7 新增 GRD-09（迁移幂等）、GRD-04 改断言 `value IS NULL`、FLS 行逐条标注状态；§9.9 新增 Q-7/Q-9/C-3/C-4。**未改**：PRD、`storage`/`core-bin` 代码、既有门禁标记、§4/§6/§7 各口径 |
+| v1.2 | **新增 §9 增量设计（U-69 / U-67 / U-68③ / U-70）**（对应 03 PRD §11，`[REVIEWED: PASS: 2026-09-23]`）：① **§9.1 总表 1 分钟聚合**——聚合点裁定为 `mupc-storage::GridAggregator`（`core-bin` 只做样本转发 + tick，理由：装配层无单测环境而聚合时序逻辑必须可单测）；接口 `observe/tick/flush`；**通道表驱动**（18 均值 + `p_total`/`q_total` 极值 ×2 = **22 行/周期**；频率因"恒 50.0 无源"不落、电能无点表来源不落、S 不落）；时间戳 = 周期**起点**且为 `period_ms` 整倍；**无采样周期照样产行**（`quality = NoData`，严禁写 0）；跨重启**不回溯补产**（如实声明为已知边界）；落库复用 `telemetry` 窄表（`device_id = "grid_meter"`），新增 `storage::Quality` 枚举（`Good = 0` 保持既有写入值）。② **§9.2 `storage:` 段**——三键 schema（1000 / 5000 / 60000，**默认值 = 现实现 ⇒ 零行为变化**）、`validate_storage()` 与 `CoreConfig::validate()` 衔接（非法值**拒启动**并点名键）、两参数正交由**两个类型**保证。③ **§9.3 落库失败语义期望接缝**——`TelemetrySink::offer`（**非阻塞**，采集 p99 ≤ 10 ms）+ S-1～S-5 契约（回填 / `2×capacity` 上界丢最旧 / 丢弃必告警计数 / 告警按周期聚合 / 不阻塞采集），并**如实登记当前实现的 4 处差距**；**本章只交付接缝、实现由同期开发承接**。④ **§9.4** 保留期边界（`RetentionManager` 未装配，90 天是规格非现状）。⑤ **§9.5** 最新值入口归属确认（**唯一真源 = 01 设计 §9.1**，本章不复制）。⑥ §9.7 测试策略 ↔ PRD GRD/STG/FLS/CNS 逐条映射；§9.8 **D-1～D-7 冲突清单与取舍**；§9.9 **7 项待裁定 + 2 项文档订正**；§9.10 文档同步项（附录 C 的 `quality` 须随本章扩展）。**未改**：PRD、`storage`/`core-bin` 代码、§4.2/§4.3/§4.4 粒度、§6.1 保留期、§7.3 容量规划 |
