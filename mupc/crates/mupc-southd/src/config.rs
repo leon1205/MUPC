@@ -1106,6 +1106,25 @@ pub fn validate_block_intervals(cfg: &SouthStationsConfig) -> Result<(), String>
             }
         }
     }
+
+    // ── C8 的**配置异味提示**（PRD §10.6 第 8 条；设计 §12.7 末段）：
+    //    站内**全部**块都声明了 `interval_ms` ⇒ **不拒绝**（C8 是确定性规则：站级承载组
+    //    = 周期最大的组，仍唯一确定），但此时站级 `interval_ms` 已**不再描述该站的实际
+    //    节奏** ⇒ 只记一条 `debug`（**不产事件、不拒配置、无 `Err` 分支**）。
+    //
+    //    落点为何在本函数**末尾**：本行以上的任一规则一旦返回 `Err`，该配置进不到加载期
+    //    （整段被拒），提示"节奏已不描述"无意义；放在末尾 ⇒ 恒与"加载期"同真值域。
+    for s in &cfg.stations {
+        if !s.regs.is_empty() && s.regs.iter().all(|b| b.interval_ms.is_some()) {
+            tracing::debug!(
+                station = %s.id,
+                role = ?s.role,
+                blocks = s.regs.len(),
+                station_interval_ms = s.interval_ms,
+                "southd 站内全部块都声明了 interval_ms（C8 不拒绝）：该站站级 interval_ms 已不再描述实际采集节奏（PRD §10.6 第 8 条）"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2291,5 +2310,156 @@ south_stations:
             .iter()
             .flat_map(|s| s.regs.iter())
             .all(|b| b.interval_ms.is_none()));
+    }
+
+    /// **PRD §10.6 第 8 条（C8）/ 设计 §12.7 末段**：站内**全部**块都声明了 `interval_ms`
+    /// ⇒ **不拒绝**（C8 是确定性规则：站级承载组 = 周期最大的组，仍唯一确定），只在
+    /// **加载期**给一条 `tracing::debug!` 提示（此时站级 `interval_ms` 已不再描述该站的
+    /// 实际节奏）。
+    ///
+    /// 本用例**只钉"不拒绝"这一半**：`validate()` 须 `is_ok()`。
+    /// **日志本身不作断言** —— `tracing` 未接入测试订阅器 ⇒ 无捕获手段；提示的生产代码
+    /// 落点是 `validate_block_intervals` 末尾的 `debug!`（字段含站 id / role / 块数 /
+    /// 站级周期，文案写明 "PRD §10.6 第 8 条"）。
+    #[test]
+    fn all_blocks_declared_is_accepted_with_debug_hint() {
+        // 首例配置（HVAC 位块快采）的**退化形态**：`hvac_in` 也显式声明站周期 5000
+        let yaml = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: hvac
+      role: hvac
+      port: /dev/ttyS5
+      slave: 1
+      baud_rate: 9600
+      parity: even
+      interval_ms: 5000
+      regs:
+        - name: hvac_in
+          func: input
+          addr: 0
+          count: 4
+          format: int16
+          scale: 0.1
+          interval_ms: 5000
+          points:
+            - { at: 1 }
+            - { at: 3 }
+            - { at: 4, format: uint16 }
+        - name: hvac_di
+          func: discrete
+          addr: 0
+          count: 31
+          interval_ms: 1000
+"#;
+        // 构造前提：站内**每块**都声明了 `interval_ms`（= C8 的配置异味，故会走到该提示）
+        {
+            let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+            let s = &w.south_stations.stations[0];
+            assert!(
+                !s.regs.is_empty() && s.regs.iter().all(|b| b.interval_ms.is_some()),
+                "前提：站内全部块都声明了 interval_ms（本用例若不满足即为构造失效）"
+            );
+        }
+        assert_eq!(
+            validated(yaml),
+            Ok(()),
+            "全声明 ⇒ 不得拒绝（PRD §10.6 第 8 条：C8 不设配置期拒绝）"
+        );
+    }
+
+    /// **设计 §12.10.3 的 R-10**：`T_组` 的复算必须用**本站**的 `baud_rate` —— 同口一致
+    /// （规则 16 强制），但**跨口不同**（PCS 站是 19200）⇒ 复算须逐站取本站值。
+    ///
+    /// 直接单测私有纯函数 `tx_time_ms`（与本 `mod tests` 同文件 ⇒ 可直接调用）：
+    /// - `9600` + `FC02(discrete)` + `count = 31` ⇒ 数据字节 `ceil(31/8) = 4` ⇒ 帧字节
+    ///   `8 + 5 + 4 = 17` ⇒ 字节耗时 `10/9600 s = 1.0416667… → **1.04ms**`
+    ///   （`byte_time_ms` 的 2 位小数口径）⇒ `17 × 1.04 + 4 = **21.68ms**`；
+    /// - `19200` + `FC04(input)` + `count = 4` ⇒ 数据字节 `2 × 4 = 8` ⇒ 帧字节
+    ///   `8 + 5 + 8 = 21` ⇒ 字节耗时 `10/19200 s = 0.5208333… → **0.52ms**`（同一取整口径）
+    ///   ⇒ `21 × 0.52 + 4 = **14.92ms**`。
+    ///
+    /// **判别力**：两例的字节耗时不同（1.04 ≠ 0.52）⇒ 实现若误把某个 **固定** baud_rate
+    /// （或另一站的 19200）代入复算，两例中必有一例失配。
+    #[test]
+    fn tx_time_uses_station_baud_rate() {
+        let t9600 = tx_time_ms(9600, RegFunc::Discrete, 31);
+        assert!(
+            (t9600 - 21.68).abs() < 0.01,
+            "9600/FC02/count=31 ⇒ 17 字节 × 1.04ms + 4 = 21.68ms，实际 {t9600}"
+        );
+        let t19200 = tx_time_ms(19200, RegFunc::Input, 4);
+        assert!(
+            (t19200 - 14.92).abs() < 0.01,
+            "19200/FC04/count=4 ⇒ 21 字节 × 0.52ms + 4 = 14.92ms，实际 {t19200}"
+        );
+    }
+
+    /// **判据钉**：`meter_grid` 的 `R(role)` **含 `p_total`**（PRD §10.3.2 的定义表）——
+    /// 把 `p_total` 从 `criterion_block_indices` 的 `meter_grid` 集合里删掉，本用例**必红**。
+    ///
+    /// **构造法（为什么是"六块一律提速"而不是"只提速 `p_total`"）**：规则 22 的 **C6 先于
+    /// C7** 求值，且 C6 要求 `R(role)` 内 `eff` 全相同；只提速 `p_total` 的配置**必然**先被
+    /// C6 拒（文案含 `C6`、**不含** `C7`）⇒ 永远到不了 C7。故这里把 `R(role)` 的六块**一律**
+    /// 声明为同一 `eff = 1000ms`（C6 恒真、"全部块都声明"仅触发 C8 的 `debug` 提示），站周期
+    /// `2000ms`（`meter_grid` 须 `< 5000ms`，见①的新鲜度上界）⇒ **只触发 C7（判据块不得提速）**。
+    ///
+    /// **为什么 `p_total` 写在 `regs` 首位**：C7 的文案只写**首个**违反块的名字，而
+    /// `criterion_block_indices` 按 `regs` 书写序返回 ⇒ 首位即 C7 的指名对象。
+    /// **判别力**（若 `p_total` 不在 `R(role)` 内）：`R(role)` = {p,q,pf,u,i}（仍全 1000 ⇒ C7
+    /// 仍拒）**但文案改指 `p`** ⇒ 下方 `contains("p_total")` 失配 ⇒ 本用例红。
+    #[test]
+    fn meter_grid_criterion_block_cannot_be_speeded_up() {
+        let yaml = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: grid_probe
+      role: meter_grid
+      port: /dev/ttyP6
+      slave: 1
+      baud_rate: 9600
+      interval_ms: 2000
+      regs:
+        - { name: p_total, addr: 0x1006, format: float32, count: 2, interval_ms: 1000 }
+        - { name: p,       addr: 0x1000, format: float32, count: 6, interval_ms: 1000 }
+        - { name: q,       addr: 0x1008, format: float32, count: 6, interval_ms: 1000 }
+        - { name: pf,      addr: 0x100E, format: float32, count: 6, interval_ms: 1000 }
+        - { name: u,       addr: 0x1014, format: float32, count: 6, interval_ms: 1000 }
+        - { name: i,       addr: 0x101A, format: float32, count: 6, interval_ms: 1000 }
+"#;
+        // 构造前提（机械复算，与实现同一批纯函数）：六块 `eff` 全 = 1000ms 且相同
+        // ⇒ 规则 22 的 C6 不介入；规则 20/21 亦通过（`1000 % poll_ms == 0`、
+        // `1000 ≤ 站周期 2000`、`1.5 × T_组 = 1.5 × 171.68 = 257.52 ≤ 1000`）
+        // ⇒ 唯一可能拒的条件就是 C7（`eff < 站周期`）。
+        {
+            let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
+            let s = &w.south_stations.stations[0];
+            let idx = criterion_block_indices(s);
+            assert!(
+                idx.iter().any(|&i| s.regs[i].name == "p_total"),
+                "前提：p_total 须属 R(role)（本用例的被钉对象）"
+            );
+            assert_eq!(idx.len(), 6, "前提：R(role) 须为 p/q/pf/u/i/p_total 六块");
+            assert!(
+                idx.iter()
+                    .all(|&i| s.regs[i].effective_interval_ms(s.interval_ms) == 1000),
+                "前提：六块 eff 须全相同（否则 C6 先拒、到不了 C7 分支）"
+            );
+        }
+        let err = validated(yaml).unwrap_err();
+        assert!(
+            err.contains("p_total"),
+            "C7 文案须指名 R(role) 首位的判据块 p_total，实际: {err}"
+        );
+        assert!(
+            err.contains("C7"),
+            "本配置须由 C7（判据块不得提速）拒，实际: {err}"
+        );
+        assert!(
+            !err.contains("C6"),
+            "不得由 C6（判据块异周期）拒 —— 它先于 C7 求值，出现即说明本用例构造失效，实际: {err}"
+        );
     }
 }
