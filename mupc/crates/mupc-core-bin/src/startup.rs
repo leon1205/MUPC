@@ -1384,6 +1384,16 @@ pub async fn initialize_all(
                 config.south_stations.stations.len()
             );
         }
+        // ── S3b-3（T8）C8 配置异味提示的**发射点**（PRD §10.6 第 8 条；设计 §12.7 末段）──
+        //   判定是纯函数 `mupc_southd::config::block_interval_hints`（站内全部块都声明了
+        //   `interval_ms` ⇒ 站级 `interval_ms` 已不再描述实际节奏；**不拒配置**）。
+        //   为何在**此处**发射而非配置期：`CoreConfig::validate` 属 main **Phase 1**（`main.rs:105`），
+        //   早于 `tracing_subscriber::try_init()`（**Phase 2**，`main.rs:164`）⇒ 配置期发射的
+        //   日志**无订阅者、被直接丢弃**（同 `core_config.rs:511-512` 的成文约定：判定放配置期、
+        //   发射放 startup 装配期）。本处是"南向配置 → 调度器装配"的入口，日志与装配上下文同批。
+        for h in mupc_southd::config::block_interval_hints(&config.south_stations) {
+            tracing::debug!("{}", h);
+        }
         let sink = Arc::new(SouthSink::new(
             ai_integrator.clone(),
             write_buffer.clone(),

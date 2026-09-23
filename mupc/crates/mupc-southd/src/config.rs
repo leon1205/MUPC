@@ -7,6 +7,9 @@
 use mupc_data_processing::meter_regs::RegFormat;
 use serde::{Deserialize, Serialize};
 
+// S3b-3（T8 返工）：探测器 1 的**地址寄存器**号的**唯一真源**在 mapper（与 `fire_chain_head`
+// 同源）—— 本文件**不得**再定义一份同值常量（此前 `FIRE_CHAIN_HEAD_REG` 即被删除的双定义）
+use crate::mapper::FIRE_DET1_ADDR_REG;
 use crate::points::{self, PointKind, PointSpec};
 // S3b-3（T8）：块级周期分组与「组 → 块集」映射的**唯一实现**在 scheduler（配置期与调度期共用）
 use crate::scheduler::{read_groups_of, ReadGroup};
@@ -139,7 +142,7 @@ pub struct RegBlockConf {
     // ── S3b-3 新增（PRD §10.3.1；设计 §12.2.1，**唯一新增字段**）──
     /// **块级采集周期覆盖**：`Some(v)` = 本块按 v ms 轮询；`None`（**缺省**）= 继承站级
     /// `interval_ms`。**缺省 ⇒ 既有配置与既有行为零变化**（PRD §10.3.1 定性 1；回归锚
-    /// `no_block_interval_is_bit_identical_to_legacy`）。
+    /// `block_interval_serde_roundtrip_is_unchanged_when_absent`）。
     ///
     /// 取值由 PRD §10.3.2 的 C1–C5 约束（本 crate 落 [`validate_block_intervals`] 规则 20/21）
     /// 与 C6/C7（规则 22，按 `R(role)` 判）；`skip_serializing_if` 使**既有 YAML 往返逐字不变**。
@@ -787,11 +790,6 @@ fn merged_max_hole(a: &RegBlockConf, b: &RegBlockConf) -> Result<u16, String> {
 
 // ══════════════════════════ S3b-3：块级采集周期覆盖（T8）══════════════════════════
 
-/// 探测器 1 的地址所在寄存器（PRD §9.5.4：寄存器 11 起为探测器 1）。
-/// 与 `mapper::fire_chain_head` 的私有常量 `FIRE_DET1_ADDR_REG` **同源同值**——本轮无公共
-/// 常量可复用（见 T8 报告的"偏离/待办"：宜由后续 Task 收敛为单一真源）。
-const FIRE_CHAIN_HEAD_REG: u16 = 11;
-
 /// 口占用上界（PRD §10.3.2 **C9** / §10.5 第 2 行）：`U_口 ≤ 0.5`（留 ≥2× 余量吸收抖动/重试）。
 const MAX_PORT_UTILIZATION: f64 = 0.5;
 
@@ -801,6 +799,22 @@ const GROUP_INTERVAL_HEADROOM: f64 = 1.5;
 /// 规则 23/24 的**口内组视图**：`(所属站, 该站的一个读组, 该组的整组耗时 T_组(ms))`。
 /// `T_组` 按设计 §12.6 公式用**该站** `baud_rate` 复算（同口 `baud_rate` 已由既有规则 16 强制一致）。
 type PortGroup<'a> = (&'a StationConf, ReadGroup, f64);
+
+/// `tx_time_ms` 的帧结构常量（设计 §12.6 公式 / PRD §9.8.1 带宽算式）：
+/// **请求帧 `8` 字节**（从站地址 1 + 功能码 1 + 起始地址 2 + 数量 2 + CRC 2）。
+const FRAME_REQ_BYTES: u32 = 8;
+
+/// 响应帧的**固定开销** `5` 字节（从站地址 1 + 功能码 1 + 字节数 1 + CRC 2），
+/// **不含**数据字节 `D`（`D` 由功能码与数量算出）。
+const RESP_FIXED_BYTES: u32 = 5;
+
+/// 每事务的**从站周转耗时** `4 ms`（设计 §12.6 公式的加项：从站处理 + 总线换向）。
+const TURNAROUND_MS: f64 = 4.0;
+
+/// UART **每字节的位开销** `10 bit/字节`（1 起始 + 8 数据 + 1 停止；设计 §12.6 / PRD §9.8.1
+/// 的 `10 / baud_rate` 秒/字节，9600 bps ⇒ 1.04 ms）。
+/// **勿与** `div_ceil(8)`（位块的"8 位/字节"打包口径）混同：二者是不同用途的 8 与 10。
+const BITS_PER_BYTE: f64 = 10.0;
 
 /// `T_组` 估值用的**1 字节耗时**（ms；设计 §12.6 公式的第一项）。
 ///
@@ -812,19 +826,22 @@ type PortGroup<'a> = (&'a StationConf, ReadGroup, f64);
 /// `1.5 × T_组 = 1203.94`，与 PRD **AC-8-5**「文案含 `1202`」的机械判据不符。
 fn byte_time_ms(baud_rate: u32) -> f64 {
     // `baud_rate == 0` 已被 `validate` 的①拒（此处 `.max(1)` 仅为"绝不出 `inf`"的防御）
-    let ms = 10.0 / f64::from(baud_rate.max(1)) * 1000.0;
+    let ms = BITS_PER_BYTE / f64::from(baud_rate.max(1)) * 1000.0;
     (ms * 100.0).round() / 100.0
 }
 
 /// **单事务耗时**（ms；设计 §12.6）：`T = 帧字节 × 10/baud_rate × 1000 + 4`，
-/// 其中帧字节 = 请求 `8` + 响应 `5 + D`，`D`（数据字节）= **FC02 `ceil(位数/8)`**、
-/// **FC03/FC04 `2 × 寄存器数`**；每事务另加 **4 ms** 从站周转。
+/// 其中帧字节 = 请求 [`FRAME_REQ_BYTES`] + 响应 [`RESP_FIXED_BYTES`] + `D`，
+/// `D`（数据字节）= **FC02 `ceil(位数 / 8)`**、**FC03/FC04 `2 × 寄存器数`**；
+/// 每事务另加 [`TURNAROUND_MS`] 从站周转，字节耗时用 [`BITS_PER_BYTE`]。
 fn tx_time_ms(baud_rate: u32, func: RegFunc, count: u16) -> f64 {
     let data_bytes = match func {
+        // 位块：位 → 字节按 **8 位/字节**向上取整（与 `BITS_PER_BYTE` 的 UART 10 bit/字节无关）
         RegFunc::Discrete => u32::from(count).div_ceil(8),
         RegFunc::Holding | RegFunc::Input => 2 * u32::from(count),
     };
-    f64::from(8 + 5 + data_bytes) * byte_time_ms(baud_rate) + 4.0
+    f64::from(FRAME_REQ_BYTES + RESP_FIXED_BYTES + data_bytes) * byte_time_ms(baud_rate)
+        + TURNAROUND_MS
 }
 
 /// 某读组的**整组耗时 `T_组`**（ms）—— 规则 20 与规则 23/24 的**同一口径**
@@ -925,18 +942,20 @@ fn block_carries_point(b: &RegBlockConf, metric: &str) -> bool {
     }
 }
 
-/// `fire` 的判据块（PRD §10.3.2）：覆盖**寄存器 11** 的**寄存器块**（`func != discrete`）
-/// ∪ 块名前缀 `fire_det` 的块。
+/// `fire` 的判据块（PRD §10.3.2）：覆盖**探测器 1 的地址寄存器**（[`FIRE_DET1_ADDR_REG`]，
+/// = 寄存器 11）的**寄存器块**（`func != discrete`）∪ 块名前缀 `fire_det` 的块。
 ///
 /// **不得**改写成"块名 == `fire_sys`"（那属设备特判，违反 G-5）；寄存器块的限定与
-/// `mapper::fire_chain_head` 的 `res.regs()?`（位块取不到寄存器 ⇒ 不能当链首）**同判**。
+/// `mapper::fire_chain_head` 的 `res.regs()?`（位块取不到寄存器 ⇒ 不能当链首）**同判**，
+/// 且**复用同一常量**（模块头 `use crate::mapper::FIRE_DET1_ADDR_REG` ⇒ 单一真源）。
 fn is_fire_criterion_block(b: &RegBlockConf) -> bool {
     if b.name.starts_with("fire_det") {
         return true;
     }
+    let det1 = FIRE_DET1_ADDR_REG;
     b.func != RegFunc::Discrete
-        && b.addr <= FIRE_CHAIN_HEAD_REG
-        && u32::from(b.addr) + u32::from(b.count) > u32::from(FIRE_CHAIN_HEAD_REG)
+        && b.addr <= det1
+        && u32::from(b.addr) + u32::from(b.count) > u32::from(det1)
 }
 
 /// **块级采集周期覆盖的配置期校验**（S3b-3；PRD §10.3.2 的 C1–C9 与 §10.5 第 3 行；设计 §12.7）。
@@ -976,6 +995,16 @@ pub fn validate_block_intervals(cfg: &SouthStationsConfig) -> Result<(), String>
             }
             // C4：本块**所在读组**的整组耗时（单块组时退化为 T_块）
             let grp = group_of_block(&groups, bi);
+            // 「块 → 组 1:1」不变量（`read_groups_of`）保证唯一命中；不命中即不变量被破坏
+            // ⇒ **debug 构建下即刻可见**（`debug_assert!` 在 release 下不生效 ⇒ 不命中时
+            // 行为与改动前**逐字一致**：仍按"无组"取 `t = 0.0` 继续，**不 panic**）。
+            debug_assert!(
+                grp.is_some(),
+                "站 {} 的块下标 {}（块 {}）未命中任何读组：read_groups_of 的「块 → 组 1:1」不变量被破坏",
+                s.id,
+                bi,
+                b.name
+            );
             let t = grp.map_or(0.0, |g| group_tx_time_ms(s, g));
             let lower = GROUP_INTERVAL_HEADROOM * t;
             if (iv as f64) < lower {
@@ -1000,8 +1029,10 @@ pub fn validate_block_intervals(cfg: &SouthStationsConfig) -> Result<(), String>
             let Some(iv) = b.interval_ms else { continue };
             if iv % poll_ms != 0 {
                 return Err(format!(
+                    // 文案打印**实际用于判定的那个值** `poll_ms`（= `cfg.poll_ms.max(1)`），
+                    // 与判据同源（此前打印原始 `cfg.poll_ms` ⇒ `poll_ms == 0` 时文案与判据不一致）
                     "south_stations: 站 {} 块 {} interval_ms={} 须为 poll_ms={} 的整数倍（PRD §10.3.2 C3 tick 网格对齐；非整数倍会被网格静默量化、配置名不副实）",
-                    s.id, b.name, iv, cfg.poll_ms
+                    s.id, b.name, iv, poll_ms
                 ));
             }
             if iv > s.interval_ms {
@@ -1107,25 +1138,41 @@ pub fn validate_block_intervals(cfg: &SouthStationsConfig) -> Result<(), String>
         }
     }
 
-    // ── C8 的**配置异味提示**（PRD §10.6 第 8 条；设计 §12.7 末段）：
-    //    站内**全部**块都声明了 `interval_ms` ⇒ **不拒绝**（C8 是确定性规则：站级承载组
-    //    = 周期最大的组，仍唯一确定），但此时站级 `interval_ms` 已**不再描述该站的实际
-    //    节奏** ⇒ 只记一条 `debug`（**不产事件、不拒配置、无 `Err` 分支**）。
-    //
-    //    落点为何在本函数**末尾**：本行以上的任一规则一旦返回 `Err`，该配置进不到加载期
-    //    （整段被拒），提示"节奏已不描述"无意义；放在末尾 ⇒ 恒与"加载期"同真值域。
-    for s in &cfg.stations {
-        if !s.regs.is_empty() && s.regs.iter().all(|b| b.interval_ms.is_some()) {
-            tracing::debug!(
-                station = %s.id,
-                role = ?s.role,
-                blocks = s.regs.len(),
-                station_interval_ms = s.interval_ms,
-                "southd 站内全部块都声明了 interval_ms（C8 不拒绝）：该站站级 interval_ms 已不再描述实际采集节奏（PRD §10.6 第 8 条）"
-            );
-        }
-    }
+    // ── C8 的**配置异味**（PRD §10.6 第 8 条；设计 §12.7 末段）**不构成本函数的拒配置分支**
+    //    ⇒ 判定由纯函数 [`block_interval_hints`] 给出（本函数只做 C1–C9 的 `Err` 判定），
+    //    **发射在 startup 装配期**（理由见该函数与 `core_config.rs:511-512` 的同款说明）──
     Ok(())
+}
+
+/// **C8 的配置异味判定 —— 纯函数，不发射日志、不改判定、不拒配置**（PRD §10.6 第 8 条；
+/// 设计 §12.7 末段）：站 `regs` **非空且每块都显式声明了 `interval_ms`** ⇒ 该站站级
+/// `interval_ms` 已**不再描述该站的实际采集节奏**（C8 本身**是确定性规则**：站级承载组
+/// = 周期最大的组，仍唯一确定）⇒ **不产事件、不拒配置、无 `Err` 分支**。返回**每站一条**
+/// 提示文案（含站 id、role、块数、站级周期）供调用方发射。
+///
+/// **本函数只做判定；发射点在 startup 装配期**（`mupc-core-bin` 的南向站装配处
+/// `startup.rs` 的 `block_interval_hints(&config.south_stations)` 循环）
+/// —— 理由与落点照 `crates/mupc-core-bin/src/core_config.rs:511-512` 的既有成文约定：
+/// **判定放配置期、发射放 startup 装配期**。不可在此处直接 `tracing::debug!`：
+/// 本 crate 的唯一生产调用链是 `SouthStationsConfig::validate`（`config.rs:302`）→
+/// `core_config.rs::validate_south_stations` → `CoreConfig::validate`，由 **main Phase 1
+/// 配置加载**（`crates/mupc-core-bin/src/main.rs:105`）调用；而 `tracing_subscriber` 到
+/// **Phase 2**（`main.rs:164`）才 `try_init()` ⇒ **此处发射的日志在整条生产路径上都没有
+/// 订阅者、事件被直接丢弃**（既不可达也测不到）。故拆成"可测的纯判定 + 装配期发射"。
+pub fn block_interval_hints(cfg: &SouthStationsConfig) -> Vec<String> {
+    cfg.stations
+        .iter()
+        .filter(|s| !s.regs.is_empty() && s.regs.iter().all(|b| b.interval_ms.is_some()))
+        .map(|s| {
+            format!(
+                "southd 站 {} role={:?} 站内 {} 个块全部声明了 interval_ms（C8 不拒绝）：该站站级 interval_ms={}ms 已不再描述实际采集节奏（PRD §10.6 第 8 条，配置异味）",
+                s.id,
+                s.role,
+                s.regs.len(),
+                s.interval_ms
+            )
+        })
+        .collect()
 }
 
 fn default_poll_ms() -> u64 {
@@ -2035,6 +2082,37 @@ south_stations:
             !err.contains("U_口"),
             "规则 20 须先于规则 23 返回（否则无法机械证明 C4 被求值），实际: {err}"
         );
+        // 用例形态说明（评审确认项）：各子例**各自**调 `validated()`、**无提前 return**
+        // （C4 确被执行），但单函数串行的代价是 **C1–C7 的失败不可同时观测** —— 首条
+        // `assert` panic 即掩盖其后各条（设计 §12.8 即把 AC-8-5 列作**一条**用例，故不拆分）。
+    }
+
+    /// **`interval_ms: None`（缺省 = 继承站周期）路径**（PRD §10.3.1 定性 1；设计 §12.2.1/§12.7）：
+    /// `None` ⇒ 规则 20/21/22 **均不判**该块（其下界/上界已由站级既有规则覆盖），
+    /// 规则 23/24 仍按"该块所在组"参与口预算 ⇒ 本配置须 `validate()` **`Ok`**。
+    ///
+    /// 本用例是探针 `probe_hvac_yaml` 的 **`blk_iv: None` 形参路径的唯一调用点**（此前该形参
+    /// 无调用点 ⇒ 该路径无覆盖）。形参**不删**：`None`/`Some` 两态共用同一 fixture 才有判别力。
+    ///
+    /// **与 `accepts_first_case_hvac_fast_bit_block` 不重复**（取舍理由）：后者是**首例逐字配置**
+    /// （2 块、块级周期真实取值、`eff` 分属两组的完整形态）；本用例是**单块探针**、只改
+    /// `blk_iv` 一个变量 ⇒ 钉住的是"`None` **不被当成** 0 / 不被跳过"这一条**形参语义**
+    /// （若把 `None` 误当 0 或强行代入下界，本用例即红，而首例用例对此完全不敏感）。
+    #[test]
+    fn block_interval_none_inherits_station_period_and_passes() {
+        // 站周期 5000：若 `None` 被误当作 0 ⇒ 踩 C1；被误当作 1 ⇒ 踩 C2；被误当作未对齐值
+        // ⇒ 踩 C3（`poll_ms = 1000`）。三者都不成立 ⇒ 才 `Ok`。
+        assert_eq!(
+            validated(&probe_hvac_yaml(5000, None)),
+            Ok(()),
+            "块级 interval_ms 缺省 ⇒ 继承站周期、规则 20/21/22 不判 ⇒ 不得拒绝"
+        );
+        // 判别力对照：同一站、同一块的**显式**取值走判定路径（`Some`）⇒ 与 `None` 非同一真值域
+        assert_eq!(
+            validated(&probe_hvac_yaml(5000, Some(1000))),
+            Ok(()),
+            "显式 1000（≥ C2 下界、mod poll_ms 对齐、≤ 站周期）⇒ 亦通过"
+        );
     }
 
     /// **首例（HVAC 位块快采）配置可通过**（设计 §12.8；PRD §10.3.3 的示例配置逐字）。
@@ -2313,14 +2391,17 @@ south_stations:
     }
 
     /// **PRD §10.6 第 8 条（C8）/ 设计 §12.7 末段**：站内**全部**块都声明了 `interval_ms`
-    /// ⇒ **不拒绝**（C8 是确定性规则：站级承载组 = 周期最大的组，仍唯一确定），只在
-    /// **加载期**给一条 `tracing::debug!` 提示（此时站级 `interval_ms` 已不再描述该站的
-    /// 实际节奏）。
+    /// ⇒ **不拒绝**（C8 是确定性规则：站级承载组 = 周期最大的组，仍唯一确定），在
+    /// **startup 装配期**发一条 `tracing::debug!` 提示（此时站级 `interval_ms` 已不再描述
+    /// 该站的实际节奏）。
     ///
-    /// 本用例**只钉"不拒绝"这一半**：`validate()` 须 `is_ok()`。
-    /// **日志本身不作断言** —— `tracing` 未接入测试订阅器 ⇒ 无捕获手段；提示的生产代码
-    /// 落点是 `validate_block_intervals` 末尾的 `debug!`（字段含站 id / role / 块数 /
-    /// 站级周期，文案写明 "PRD §10.6 第 8 条"）。
+    /// 本用例钉**两半**：
+    /// ① `validate()` 须 `is_ok()`（不拒绝）；
+    /// ② **提示的判定本身**可测 —— 断言纯函数 [`block_interval_hints`] 的**返回值**
+    ///   （全声明站 ⇒ 恰 1 条、文案含站 id；未全声明站 ⇒ 不出现、列表为空）。
+    /// **不再依赖日志订阅器**：`validate_block_intervals` 里原先那段"只记日志"的分支已按
+    /// 评审返工删除（在 main Phase 1 无订阅者、不可达），判定与发射已拆开（判定 = 本函数，
+    /// 发射 = `core-bin/startup.rs` 南向站装配处）。
     #[test]
     fn all_blocks_declared_is_accepted_with_debug_hint() {
         // 首例配置（HVAC 位块快采）的**退化形态**：`hvac_in` 也显式声明站周期 5000
@@ -2354,8 +2435,8 @@ south_stations:
           interval_ms: 1000
 "#;
         // 构造前提：站内**每块**都声明了 `interval_ms`（= C8 的配置异味，故会走到该提示）
+        let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
         {
-            let w: Wrapper = serde_yaml::from_str(yaml).expect("解析失败");
             let s = &w.south_stations.stations[0];
             assert!(
                 !s.regs.is_empty() && s.regs.iter().all(|b| b.interval_ms.is_some()),
@@ -2366,6 +2447,55 @@ south_stations:
             validated(yaml),
             Ok(()),
             "全声明 ⇒ 不得拒绝（PRD §10.6 第 8 条：C8 不设配置期拒绝）"
+        );
+        // ① 提示**本身**可测（不再依赖日志订阅器）：全声明站 ⇒ **恰 1 条**、文案含站 id
+        let hints = block_interval_hints(&w.south_stations);
+        assert_eq!(
+            hints.len(),
+            1,
+            "全声明站须恰产 1 条 C8 提示（每站一条），实际: {hints:?}"
+        );
+        assert!(
+            hints[0].contains("hvac"),
+            "提示文案须含站 id，实际: {}",
+            hints[0]
+        );
+        // ② 反例（未全声明）：同形配置但 `hvac_in` **不声明**（继承站周期）⇒ 不构成
+        //    "站内全部块都声明" ⇒ 该站**不出现在**列表里（列表为空）
+        let partial = r#"
+south_stations:
+  poll_ms: 1000
+  stations:
+    - id: hvac_partial
+      role: hvac
+      port: /dev/ttyS7
+      slave: 1
+      baud_rate: 9600
+      parity: even
+      interval_ms: 5000
+      regs:
+        - { name: hvac_in, func: input, addr: 0, count: 4, format: int16, scale: 0.1, points: [{ at: 1 }, { at: 3 }, { at: 4, format: uint16 }] }
+        - { name: hvac_di, func: discrete, addr: 0, count: 31, interval_ms: 1000 }
+"#;
+        let wp: Wrapper = serde_yaml::from_str(partial).expect("解析失败");
+        assert_eq!(
+            wp.south_stations.stations[0]
+                .regs
+                .iter()
+                .filter(|b| b.interval_ms.is_some())
+                .count(),
+            1,
+            "反例的构造前提：仅 `hvac_di` 声明（另一块继承站周期）"
+        );
+        assert_eq!(
+            validated(partial),
+            Ok(()),
+            "反例须是**合法**配置（否则「提示为空」会因整段被拒而失去判别力）"
+        );
+        assert_eq!(
+            block_interval_hints(&wp.south_stations),
+            Vec::<String>::new(),
+            "只有部分块声明 ⇒ 不构成 C8 配置异味 ⇒ 提示列表须为空"
         );
     }
 
@@ -2402,7 +2532,8 @@ south_stations:
     /// **构造法（为什么是"六块一律提速"而不是"只提速 `p_total`"）**：规则 22 的 **C6 先于
     /// C7** 求值，且 C6 要求 `R(role)` 内 `eff` 全相同；只提速 `p_total` 的配置**必然**先被
     /// C6 拒（文案含 `C6`、**不含** `C7`）⇒ 永远到不了 C7。故这里把 `R(role)` 的六块**一律**
-    /// 声明为同一 `eff = 1000ms`（C6 恒真、"全部块都声明"仅触发 C8 的 `debug` 提示），站周期
+    /// 声明为同一 `eff = 1000ms`（C6 恒真、"全部块都声明"仅触发 C8 配置异味提示 —— 该提示的
+    /// 发射在 startup 装配期、**不构成拒配置分支**），站周期
     /// `2000ms`（`meter_grid` 须 `< 5000ms`，见①的新鲜度上界）⇒ **只触发 C7（判据块不得提速）**。
     ///
     /// **为什么 `p_total` 写在 `regs` 首位**：C7 的文案只写**首个**违反块的名字，而

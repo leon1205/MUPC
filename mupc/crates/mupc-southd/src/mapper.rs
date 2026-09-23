@@ -313,7 +313,15 @@ fn scalar_at(reads: &BlockReads, addr: u16) -> Option<f64> {
 
 /// 探测器 1 的地址号所在的**绝对寄存器地址**（PRD §9.10 Q-9："以**寄存器 11** 读回的
 /// 地址值交叉校验"）。
-const FIRE_DET1_ADDR_REG: u16 = 11;
+///
+/// **正名**：寄存器 11 是"探测器 1 的**地址寄存器**"，**不是**"链首寄存器"——链首是**读回值**
+/// （即探测器 1 的地址号，见 [`fire_chain_head`]）。
+///
+/// **唯一真源**（S3b-3 T8 返工收敛）：`config::is_fire_criterion_block` 的"配置是否覆盖探测器 1"
+/// 判据**复用本常量**（经 `use crate::mapper::FIRE_DET1_ADDR_REG`）；此前 config 侧另有一份
+/// 同值本地常量 `FIRE_CHAIN_HEAD_REG`，名不副实且构成双定义，已删除。两处判据**必须**同值，
+/// 否则"配置覆盖探测器 1"与"链首是否可得"会各自漂移。
+pub(crate) const FIRE_DET1_ADDR_REG: u16 = 11;
 
 /// 升序链的**链首** = 探测器 1 的地址号（[`fire_detector_addr_order_violation`]），同时
 /// 也是"配置是否覆盖探测器 1"的判据（[`fire_detector_mismatch`] 的容量式据它决定是否 +1）。
