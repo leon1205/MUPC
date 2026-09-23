@@ -411,11 +411,10 @@ impl Iec104Server {
     /// `class` 决定背压策略（§9.2.2）：A/B 档 `try_send`、通道满即**丢弃该批并计数**；
     /// C 档 `send().await`（阻塞等待，**绝不静默丢遥信变位**）。返回本次投递结果
     /// （[`PublishOutcome`]）；**无连接时不计入丢弃**，直接返回 `NoSubscriber`（§9.2.6）。
+    /// ⚠️ **空批次不短路**：空批同样走一次订阅者判定，使三态语义对空批成立
+    /// （无订阅者 ⇒ `NoSubscriber` 并计数；有订阅者 ⇒ `Delivered { n }`，`n` = 连接数）。
+    /// 若让空批直接返回 `Delivered { subscribers: 0 }`，调用方误发空批就会**掩盖"无主站"**。
     pub async fn publish_asdus(&self, asdus: Vec<Vec<u8>>, class: DataClass) -> PublishOutcome {
-        if asdus.is_empty() {
-            return PublishOutcome::Delivered { subscribers: 0 };
-        }
-
         // C 档会 `await`（可能长时间阻塞）⇒ 先在锁内快照发送句柄、出锁后再 await
         // （否则一个慢主站会挡住其它发布方）。同时剪除已关闭的连接句柄，防序号表随重连无界增长。
         let senders: Vec<mpsc::Sender<Vec<u8>>> = {
@@ -490,10 +489,16 @@ impl Iec104Server {
     }
 
     /// **兼容壳（仅过渡）**：收**完整 I 帧**字节，剥掉 APCI 头后转
-    /// [`Iec104Server::publish_asdus`]（A 档）。
+    /// [`Iec104Server::publish_asdus`]（**C 档**）。
     ///
     /// 唯一既有调用方在 `mupc-core-bin`（迁移由 T13 完成）；保留本方法只为不打破该依赖方。
     /// ⚠️ 传入的非 I 帧会被**丢弃并告警**（遥测通道只承载监视方向 I 帧）。
+    ///
+    /// ⚠️ **档位刻意取 C（不丢）而非 A**：本壳对应改造前 `tx.send().await` 的**必达**语义
+    /// （旧实现 `for tx in txs { tx.send(...).await }`，通道满则等待）。若取 A 档
+    /// （`try_send` 满则丢），T12→T13 过渡窗口内 core-bin 既有的"总表 6 点"上送会从
+    /// **阻塞必达**静默退化为**满则丢**，现场对点期间可能丢帧。过渡期保持既有语义不变；
+    /// **T13 迁移完成后本壳删除**。
     #[deprecated(note = "改用 publish_asdus（逐连接序号由连接层维护）")]
     pub async fn broadcast_telemetry(&self, frame: Vec<u8>) {
         let asdu = match Iec104Frame::parse(&frame) {
@@ -503,7 +508,7 @@ impl Iec104Server {
                 return;
             }
         };
-        let _ = self.publish_asdus(vec![asdu], DataClass::A).await;
+        let _ = self.publish_asdus(vec![asdu], DataClass::C).await;
     }
 
     /// A/B 档背压累计丢弃的 ASDU 条数（§9.2.2 的 `iec104_dropped_total`）。
@@ -670,6 +675,36 @@ mod tests {
         assert_eq!(server.dropped_total(), 0);
     }
 
+    /// **空批次不短路**：无订阅者时仍须判 `NoSubscriber` 并计数（三态语义对空批同样成立）。
+    ///
+    /// 旧实现空批直接返回 `Delivered { subscribers: 0 }` ⇒ 调用方误发空批会**掩盖"无主站"**。
+    #[tokio::test]
+    async fn publish_asdus_empty_batch_reports_no_subscriber_without_connections() {
+        let server = Iec104Server::new(cfg());
+        let outcome = server
+            .publish_asdus(Vec::<Vec<u8>>::new(), DataClass::A)
+            .await;
+        assert_eq!(outcome, PublishOutcome::NoSubscriber);
+        assert_eq!(server.no_subscriber_total(), 1);
+        assert_eq!(server.dropped_total(), 0);
+    }
+
+    /// 空批次 + 有订阅者 ⇒ `Delivered { subscribers: 1 }`（判定走完、**不**走丢弃路径）。
+    #[tokio::test]
+    async fn publish_asdus_empty_batch_delivers_to_subscriber() {
+        let server = Iec104Server::new(cfg());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(2);
+        server.telemetry_txs.lock().await.push(tx);
+
+        let outcome = server
+            .publish_asdus(Vec::<Vec<u8>>::new(), DataClass::C)
+            .await;
+        assert_eq!(outcome, PublishOutcome::Delivered { subscribers: 1 });
+        assert_eq!(server.no_subscriber_total(), 0);
+        assert_eq!(server.dropped_total(), 0);
+        assert!(rx.try_recv().is_err(), "空批不得向通道写入任何载荷");
+    }
+
     /// A/B 档：通道满 ⇒ **整批丢弃**并计数（§9.2.2 的 `iec104_dropped_total`）。
     #[tokio::test]
     async fn publish_asdus_ab_class_drops_when_channel_full_and_counts() {
@@ -759,6 +794,44 @@ mod tests {
             .broadcast_telemetry(Iec104Frame::make_s_frame(0))
             .await;
         assert!(rx.try_recv().is_err(), "非 I 帧不得进遥测通道");
+    }
+
+    /// 兼容壳过渡期**刻意取 C 档**（不丢）：通道满时**阻塞等待**，与改造前
+    /// `for tx in txs { tx.send(..).await }` 的必达语义一致——取 A 档会在过渡窗口内
+    /// 让 core-bin 既有的"总表 6 点"上送静默退化为满则丢。
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn broadcast_telemetry_compat_shell_keeps_c_class_guaranteed_delivery() {
+        use std::time::Duration;
+
+        let server = Iec104Server::new(cfg());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+        server.telemetry_txs.lock().await.push(tx);
+
+        // 先把容量 1 的通道占满
+        assert_eq!(
+            server.publish_asdus(vec![vec![0xAA]], DataClass::A).await,
+            PublishOutcome::Delivered { subscribers: 1 }
+        );
+
+        let asdu = encode_me_tf1(7, 1.0, 1_000, COT_CYCLIC);
+        let frame = Iec104Frame::make_i_frame(0, 0, &asdu);
+        // 同一任务内先 poll 一次：C 档必挂起（不返回），A 档立即丢弃并返回
+        let fut = server.broadcast_telemetry(frame);
+        tokio::pin!(fut);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut fut)
+                .await
+                .is_err(),
+            "过渡壳必须取 C 档（通道满时阻塞等待）；取 A 档会立即丢弃并返回"
+        );
+        assert_eq!(server.dropped_total(), 0, "C 档不得计入丢弃");
+
+        // 排空一个名额 ⇒ 被挂起的投递得以完成
+        assert_eq!(rx.recv().await.expect("drain"), vec![0xAA]);
+        fut.await;
+        assert_eq!(rx.recv().await.expect("C 档过渡壳必须送达"), asdu);
+        assert_eq!(server.dropped_total(), 0);
     }
 
     /// **本增量硬前提的端到端回归**：234 点一轮突发（§9.2.2）的 I 帧序号**逐帧单调、

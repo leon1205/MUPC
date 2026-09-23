@@ -430,8 +430,10 @@ pub fn encode_cp56time2a(ts_ms: u64) -> [u8; 7] {
     // 首字段 = 秒(0..59) × 1000 + 毫秒(0..999)，上界 59999
     let ms_field = ((sod % 60) as u16) * 1000 + millis;
 
-    // ISO 星期：周一 = 1 … 周日 = 7（1970-01-01 = 周四 = 4）
-    let weekday = (days.rem_euclid(7) + 3) as u8 + 1;
+    // ISO 星期：周一 = 1 … 周日 = 7（1970-01-01 = 周四 = 4）。
+    // ⚠️ 必须**先取模再 +1**：`days + 3` 本身可达 7..9（周一..周三），若"先 +1 再 `& 0x07`"
+    // 就会把它们掩成 0/1/2 —— 违反 IEC 60870-5-4 的 DOW ∈ 1..7（周四恰好落 4 而漏检）。
+    let weekday = ((days + 3).rem_euclid(7) + 1) as u8;
 
     [
         (ms_field & 0xFF) as u8,
@@ -982,6 +984,38 @@ mod tests {
         // 字节不足 / 字段越界 ⇒ None（不 panic）
         assert_eq!(decode_cp56time2a(&b[..6]), None);
         assert_eq!(decode_cp56time2a(&[0, 0, 0, 0, 0, 0, 0][..7]), None); // 月 = 0 越界
+    }
+
+    /// CP56Time2a 的 **ISO 星期域（`DOW ∈ 1..=7`，IEC 60870-5-4）**：周一 / 周三 / 周四**逐字节**钉。
+    ///
+    /// 旧写法 `(days.rem_euclid(7) + 3) + 1` 之后再 `& 0x07` ⇒ 周一 = 0 / 周二 = 1 / 周三 = 2
+    /// （**非法 DOW**）。既有两个 CP56Time2a 用例只取**周四**（1970-01-01 与 2026-09-24 皆为周四）
+    /// ⇒ 恰好落在 4 而全绿漏检；本用例补周一/周三两个断裂点。
+    #[test]
+    fn test_cp56time2a_iso_weekday_bytes() {
+        // 1970-01-01 为周四 ⇒ 4（epoch 基准锚）
+        assert_eq!(encode_cp56time2a(0)[4] >> 5, 4, "1970-01-01 必须为周四");
+        // 2026-09-24 为周四 ⇒ 4（既有用例同款，防回归）
+        assert_eq!(encode_cp56time2a(1_790_253_296_789)[4] >> 5, 4);
+        // 2026-09-28 为周一 ⇒ 1（旧写法得 0）
+        let mon = encode_cp56time2a(1_790_553_600_000);
+        assert_eq!([mon[4] & 0x1F, mon[4] >> 5], [28, 1], "2026-09-28 = 周一");
+        // 2026-09-30 为周三 ⇒ 3（旧写法得 2）
+        let wed = encode_cp56time2a(1_790_726_400_000);
+        assert_eq!([wed[4] & 0x1F, wed[4] >> 5], [30, 3], "2026-09-30 = 周三");
+    }
+
+    /// CP56Time2a 星期域的**范围不变量**：连续 7 天各编码一次，结果恰为 `{1,2,3,4,5,6,7}`
+    /// （不越界、不重复）——钉住"绝不发出 0"这个不变量，防将来再引入同类掩码错。
+    #[test]
+    fn test_cp56time2a_iso_weekday_covers_1_to_7_over_seven_days() {
+        const DAY_MS: u64 = 86_400_000;
+        let start = 1_790_553_600_000u64; // 2026-09-28（周一）
+        let mut got: Vec<u8> = (0..7)
+            .map(|i| encode_cp56time2a(start + i * DAY_MS)[4] >> 5)
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 3, 4, 5, 6, 7], "7 天必须恰覆盖 DOW 1..=7");
     }
 
     /// `M_ME_TF_1`(TI=36)：ASDU 19 B、帧长 25 B（§9.2.2 帧长表）。
