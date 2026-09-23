@@ -8,6 +8,8 @@ pub mod database;
 pub mod errors;
 pub mod fault_recorder_impl;
 pub mod high_freq_telemetry;
+/// 外设遥测「最新值快照 + 变更通知」入口（01 设计 §9.1；01/03/12 三份设计的共用件）。
+pub mod latest_values;
 pub mod meter_regs;
 pub mod recorder;
 pub mod reporter;

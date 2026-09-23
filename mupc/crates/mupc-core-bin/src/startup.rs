@@ -103,6 +103,7 @@ use device_trait::Device;
 use mupc_common::{ErrorCode, MupcError};
 use mupc_core::service_coord::ServiceStatus;
 use mupc_core::service_coord_impl::ServiceCoordinatorImpl;
+use mupc_data_processing::latest_values::{LatestValues, PointId, PointQuality, PointValue};
 use mupc_system_monitor::MetricCollector;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -409,6 +410,14 @@ struct SouthSink {
     iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
     /// grid 上送节流：meter_grid 最后广播时刻（1Hz 上界，见 broadcast_grid_iec104 注释）
     grid_bcast_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// **外设遥测最新值快照**（01 设计 §9.1；本 sink 是其**唯一写入方**，§9.1.4 / §9.4 序 3）。
+    /// 与既有 `WriteBuffer`（**历史**通道）**并存不互替**：本支路只**新增**快照写入，
+    /// 不改落库路径（§9.1.7 的边界：实时值与历史表"不是一回事、不得互相替代"）。
+    latest: Arc<LatestValues>,
+    /// grid 站 id。`on_grid_package(pkg)` 的入参**不含站 id**（既有 `StationSink` 契约
+    /// **不改**，§9.1.1），故在装配期从 `south_stations.grid_station()` 解析一次。
+    /// `None` = 未配 meter_grid ⇒ 该回调不写快照（**不臆造站 id**）。
+    grid_station_id: Option<String>,
 }
 
 impl SouthSink {
@@ -418,6 +427,8 @@ impl SouthSink {
         events: Arc<dyn mupc_storage::EventRepository>,
         alert_feed: Arc<crate::alert_feed::AlertFeed>,
         iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
+        latest: Arc<LatestValues>,
+        grid_station_id: Option<String>,
     ) -> Self {
         Self {
             ai_integrator,
@@ -426,7 +437,57 @@ impl SouthSink {
             alert_feed,
             iec104,
             grid_bcast_at: std::sync::Mutex::new(None),
+            latest,
+            grid_station_id,
         }
+    }
+
+    /// 01 设计 §9.1.4 第 1 行：`DataPackage.electrical` 顶层 **6 个派生量** → 最新值快照。
+    ///
+    /// 点名沿用既有 IEC104 固定 IOA 表（§9.2.1 段 1）的**派生名** —— 这是 §9.7 C-17 ②
+    /// 登记的**唯一点名例外**（grid 6 点是 `DataPackage.electrical` 的派生量，非 02 号点表
+    /// 展开名；改名会同时破坏既有对点与 `AiIntegrator` 的键）。
+    ///
+    /// `ts_ms = Utc::now()`：与**同一次** `on_grid_package` 内的既有 grid 路径同刻
+    /// （§9.1.4 时标语义）。
+    ///
+    /// **不可得**（字段 `None`）写 `value: None` + `Invalid`（**不补 0**，LV-6）。这与既有
+    /// IEC104 支路"Some 才上送"**效果一致**：上送侧按 `quality == Ok` 过滤，`Invalid` 点同样不发。
+    fn apply_grid_snapshot(&self, pkg: &mupc_data_processing::DataPackage) {
+        let Some(station) = self.grid_station_id.as_deref() else {
+            return;
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        self.latest.mark_station_polled(station, now_ms);
+        let el = &pkg.electrical;
+        let samples: Vec<(PointId, PointValue)> = [
+            ("active_power", el.active_power),
+            ("reactive_power", el.reactive_power),
+            ("voltage", el.voltage),
+            ("current", el.current),
+            ("cos_phi", el.cos_phi),
+            ("frequency", el.frequency),
+        ]
+        .into_iter()
+        .map(|(metric, v)| {
+            (
+                PointId {
+                    station: station.to_string(),
+                    metric: metric.to_string(),
+                },
+                PointValue {
+                    value: v,
+                    ts_ms: now_ms,
+                    quality: if v.is_some() {
+                        PointQuality::Ok
+                    } else {
+                        PointQuality::Invalid
+                    },
+                },
+            )
+        })
+        .collect();
+        self.latest.apply(samples);
     }
 
     /// 北向 IEC104 上送 meter_grid 遥测真值（审查 R2-A2，2026-09-09）。
@@ -530,6 +591,8 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
         // pv/load 南向模拟固定假遥测。数据流接线在 startup 层（SouthSink 为 core-bin 内联
         // 类型，见广播实现注释的依赖方向约束）。
         self.broadcast_grid_iec104(&pkg).await;
+        // 01 设计 §9.1.4 第 1 行：同包派生 6 量写最新值快照（**只新增**，上面两条既有路径不动）
+        self.apply_grid_snapshot(&pkg);
     }
 
     async fn on_station_telemetry(
@@ -538,6 +601,14 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
         role: mupc_southd::config::Role,
         points: Vec<(String, f64, bool)>,
     ) {
+        // ① 01 设计 §9.1.4 第 2 行①：**先**刷站活性（与点数无关；`online` 合成事件的那次
+        //    调用同样刷新）。只刷"站在采"这一事实 ⇒ 不产生变更批、不影响 COS 语义。
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        self.latest.mark_station_polled(station_id, now_ms);
+
+        // ② 非事件点（**含位点**，LV-5 要求位块点同样有入口）→ 快照；③ 事件点**不写**快照
+        //    （它们是站级/信号级事件，归 `events` 表，不属"点位最新值"）。
+        let mut samples: Vec<(PointId, PointValue)> = Vec::with_capacity(points.len());
         for (metric, value, is_event) in points {
             if is_event {
                 // 状态事件（offline/online 由 scheduler handle_failure/mark_success 合成，
@@ -555,7 +626,21 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 self.record_event(&event_type, station_id, &message, level)
                     .await;
             } else {
-                // 普通遥测点落库
+                // ② 非事件点（**含位点**）写最新值快照：`is_event == false` ⇒ 有采集事实
+                //    ⇒ `value: Some(_)` + `Ok`；同一轮交付的全部点**共用同一 `ts_ms`**
+                //    （southd mapper 逐点不携带时标，§9.1.4 时标语义）。
+                samples.push((
+                    PointId {
+                        station: station_id.to_string(),
+                        metric: metric.clone(),
+                    },
+                    PointValue {
+                        value: Some(value),
+                        ts_ms: now_ms,
+                        quality: PointQuality::Ok,
+                    },
+                ));
+                // 普通遥测点落库（**既有路径原样不动**：历史通道与实时快照并存不互替）
                 let tp = mupc_storage::TelemetryPoint {
                     id: None,
                     device_id: station_id.to_string(),
@@ -570,6 +655,10 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                 }
             }
         }
+        // 本批（含全部非事件点）一次 `apply` ⇒ 天然合并为一批（LV-4 允许合并）
+        self.latest.apply(samples);
+        // ④ `role == Battery` ⇒ 15 组 BMS 聚合求值后 `apply`（§9.2.1.1）——依赖
+        //    `mupc-southd::uplink::evaluate_bms_aggregates`（U-74 后续任务），**不在本任务范围**。
     }
 
     /// **覆写默认实现**（T5 留在 `StationSink` 上的接缝，T6 落地）：把站失败的 `reason`
@@ -586,6 +675,11 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
         role: mupc_southd::config::Role,
         reason: &str,
     ) {
+        // 01 设计 §9.1.4 第 3 行：全站置 `Invalid`、清站活性、**保原值原时标**（EX-1）。
+        // 该站全部点（含同站聚合点）因此被上送侧按 `quality == Ok` 过滤 ⇒ 与"站离线该点
+        // 从周期上送与总召响应中消失"一致（§9.2.6），不靠本回调产出变更批。
+        self.latest.mark_station_offline(station_id);
+
         let event_type = format!("south_station.{}.offline", station_id);
         let message = format!("站 {station_id} role={role:?} 离线（采集失败）：{reason}");
         self.record_event(&event_type, station_id, &message, "warning")
@@ -1274,6 +1368,12 @@ pub async fn initialize_all(
     //   C. 无 stations → grid_on=false → pv/load 南向模拟兜底。
     // grid_on = 策略 phase 源可用（决定下方 pv/load 南向模拟 task 是否 set_latest_data；
     // M-4 防双写方并存：grid 源在即南向模拟不覆盖；无 grid 源则南向模拟兜底测量）。
+    // ── 01 设计 §9.1.8：外设遥测**最新值快照**（上云 / 上屏 / 策略的共用取数入口）──
+    //   `stale_timeout_s` 由配置**注入** ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）；
+    //   构造点在南向调度装配**之前**，写入方 = 下方 `SouthSink`（§9.1.1 归属裁定）。
+    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+        config.south_stations.stale_timeout_s,
+    ));
     let mut grid_on = false;
     if !config.south_stations.stations.is_empty() {
         // B. southd 路径（stations 非空即装配——非 grid 站 battery/hvac/fire telemetry/状态
@@ -1291,6 +1391,10 @@ pub async fn initialize_all(
             alert_feed.clone(),
             // 审查 R2-A2：meter_grid 真值上送 IEC104 的接收句柄（已在步骤 9 创建）
             iec104_server.clone(),
+            // 01 设计 §9.1.8：最新值快照句柄（写入方 = 本 sink）
+            latest.clone(),
+            // `on_grid_package(pkg)` 契约不含站 id ⇒ 装配期解析 grid 站 id（未配则 None）
+            config.south_stations.grid_station().map(|s| s.id.clone()),
         ));
         // 每口 open 一次 Rs485PortBus：按 port 去重。open 失败口不入 map → 该口全站走
         // offline 事件隔离（§10.7 不阻断启动）。口单 poller、站级隔离由 scheduler 负责。
@@ -2009,6 +2113,10 @@ plugins: {}
             Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
                 mupc_gateway::iec104::server::Iec104Config::default(),
             )),
+            Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+                mupc_data_processing::DATA_FRESHNESS_MS / 1000,
+            )),
+            None,
         );
 
         // 站离线：`is_event=true` 的状态事件点
@@ -2046,6 +2154,119 @@ plugins: {}
         assert_eq!(got.message, logged[0].message, "投递文案与落库文案必须同源");
     }
 
+    /// **T1 写入侧接线**（01 设计 §9.1.4 / §9.4 序 3）：`SouthSink` 三个回调把采集结果写入
+    /// `LatestValues` 快照，且**不动**既有落库路径（本用例用真 `WriteBuffer`，落库同时发生）。
+    ///
+    /// **改什么会让本条变红**：删掉 `on_station_telemetry` 里的 `mark_station_polled` /
+    /// `apply`（快照恒空）、把 `is_event` 分支也写进快照（点数变 3）、
+    /// 或把 `on_station_offline` 的 `mark_station_offline` 删掉（质量仍 `Ok`、站活性不消失）。
+    #[tokio::test]
+    async fn south_sink_writes_telemetry_and_grid_into_latest_values() {
+        use mupc_southd::scheduler::StationSink as _;
+
+        let t = crate::testutil::TempDir::new("south-sink-latest");
+        let db = t.join("mupcd.db");
+        std::fs::File::create(&db).unwrap();
+        let pool = mupc_storage::init_pool(db.to_str().unwrap()).await.unwrap();
+        let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+            mupc_data_processing::DATA_FRESHNESS_MS / 1000,
+        ));
+        let sink = SouthSink::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            Arc::new(mupc_storage::WriteBuffer::new(1000, 5000, Arc::new(pool))),
+            Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new()))),
+            Arc::new(crate::alert_feed::AlertFeed::new()),
+            Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+                mupc_gateway::iec104::server::Iec104Config::default(),
+            )),
+            latest.clone(),
+            Some("meter_grid".to_string()),
+        );
+
+        let soc_id = PointId {
+            station: "bms".to_string(),
+            metric: "soc".to_string(),
+        };
+
+        // ① 非事件点 ⇒ 写快照；事件点**不**写（§9.1.4 第 2 行 ②③）
+        sink.on_station_telemetry(
+            "bms",
+            mupc_southd::config::Role::Battery,
+            vec![
+                ("soc".to_string(), 55.0, false),
+                ("bms_alarm_225".to_string(), 1.0, false),
+                ("online".to_string(), 1.0, true),
+            ],
+        )
+        .await;
+
+        let soc = latest.get(&soc_id);
+        assert_eq!(soc.value.value, Some(55.0), "非事件点必须进快照");
+        assert_eq!(soc.value.quality, PointQuality::Ok);
+        assert_eq!(
+            latest.station_snapshot("bms").len(),
+            2,
+            "事件点不得进快照（仍只有 2 个非事件点）"
+        );
+        assert_eq!(
+            latest.station_last_poll_ms("bms"),
+            Some(soc.value.ts_ms),
+            "同一轮：点 ts_ms == 站最后成功时刻（R-38 的消费前提，12 设计 §15.1.2 C-4）"
+        );
+        assert!(latest.station_is_active("bms", soc.value.ts_ms));
+
+        // ② 站离线 ⇒ **保原值原时标** + `Invalid` + 清站活性（EX-1）
+        sink.on_station_offline("bms", mupc_southd::config::Role::Battery, "mock 超时")
+            .await;
+        let soc_off = latest.get(&soc_id);
+        assert_eq!(soc_off.value.value, Some(55.0), "保原值，不补 0");
+        assert_eq!(soc_off.value.ts_ms, soc.value.ts_ms, "保原始时标");
+        assert_eq!(soc_off.value.quality, PointQuality::Invalid);
+        assert_eq!(latest.station_last_poll_ms("bms"), None);
+        assert!(!latest.station_is_active("bms", soc.value.ts_ms));
+
+        // ③ grid 回调 ⇒ 6 个派生量；字段不可得 ⇒ `None` + `Invalid`（**禁补 0**，LV-6）
+        sink.on_grid_package(mupc_data_processing::DataPackage {
+            electrical: mupc_data_processing::ElectricalData {
+                voltage: Some(220.0),
+                current: Some(10.0),
+                active_power: Some(50.0),
+                reactive_power: Some(10.0),
+                cos_phi: Some(0.98),
+                frequency: None, // 本轮不可得
+                phase: None,
+            },
+            battery: mupc_data_processing::BatteryData {
+                soc: None,
+                soh: None,
+                temperature: None,
+            },
+            device_status: mupc_data_processing::DeviceStatus {
+                inverter_status: mupc_data_processing::InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            timestamp: 0,
+        })
+        .await;
+
+        let grid = latest.station_snapshot("meter_grid");
+        assert_eq!(grid.len(), 6, "grid 段固定 6 个派生量（C-17 ② 的点名例外）");
+        let freq = latest.get(&PointId {
+            station: "meter_grid".to_string(),
+            metric: "frequency".to_string(),
+        });
+        assert_eq!(freq.value.value, None, "不可得字段严禁以 0 顶替");
+        assert_eq!(freq.value.quality, PointQuality::Invalid);
+        let volt = latest.get(&PointId {
+            station: "meter_grid".to_string(),
+            metric: "voltage".to_string(),
+        });
+        assert_eq!(volt.value.value, Some(220.0));
+        assert_eq!(volt.value.quality, PointQuality::Ok);
+    }
+
     /// 真 `SouthSink` + 记账仓储 + 真 `AlertFeed`（T6 的两个文案用例共用装配，避免三处复制）。
     async fn south_sink_for_test(
         tag: &str,
@@ -2064,6 +2285,10 @@ plugins: {}
             Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
                 mupc_gateway::iec104::server::Iec104Config::default(),
             )),
+            Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+                mupc_data_processing::DATA_FRESHNESS_MS / 1000,
+            )),
+            None,
         )
     }
 
