@@ -1152,7 +1152,7 @@ pub fn validate_block_intervals(cfg: &SouthStationsConfig) -> Result<(), String>
 ///
 /// **本函数只做判定；发射点在 startup 装配期**（`mupc-core-bin` 的南向站装配处
 /// `startup.rs` 的 `block_interval_hints(&config.south_stations)` 循环）
-/// —— 理由与落点照 `crates/mupc-core-bin/src/core_config.rs:511-512` 的既有成文约定：
+/// —— 理由与落点照 `crates/mupc-core-bin/src/core_config.rs:512-514` 的既有成文约定：
 /// **判定放配置期、发射放 startup 装配期**。不可在此处直接 `tracing::debug!`：
 /// 本 crate 的唯一生产调用链是 `SouthStationsConfig::validate`（`config.rs:302`）→
 /// `core_config.rs::validate_south_stations` → `CoreConfig::validate`，由 **main Phase 1
