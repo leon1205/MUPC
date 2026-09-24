@@ -325,7 +325,22 @@ pub(crate) async fn write_uplink_points_json(
     let json: Vec<UplinkPointJson> = points.iter().map(UplinkPointJson::from).collect();
     let text = serde_json::to_string_pretty(&json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    tokio::fs::write(path, text).await
+
+    // **原子落盘（T13 独立评审 B2）**：先写同目录临时文件再 rename（Windows 的
+    // `std::fs::rename` 带 MOVEFILE_REPLACE_EXISTING ⇒ 可覆盖）。这样任何一步失败都
+    // **不会留下半截 JSON**；且失败时**一并删除旧目标文件**——旧基线冒充本次基线
+    // 对点人员比对**比"没有文件"更误导**（该 JSON 是派生产物，每次启动重生成）。
+    let tmp = path.with_extension("json.tmp");
+    let write_then_rename = async {
+        tokio::fs::write(&tmp, text).await?;
+        tokio::fs::rename(&tmp, path).await
+    };
+    if let Err(e) = write_then_rename.await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 // ───────────────────────────── 单测（01 设计 §9.5「core-bin」行 + 任务交付物 3） ─────────────────────────────
@@ -523,6 +538,41 @@ mod tests {
         assert!((items[0].value - 10.0f32).abs() < 1e-6);
         assert_eq!(items[0].cot, COT_INTROGEN, "总召 cot=20");
         assert_eq!(items[0].ts_ms, now, "时标=采集时刻，不是响应时刻（§8.4）");
+    }
+
+    /// **GI-3 守卫的隔离用例（T13 独立评审 B1）**：`value: None` **且** `quality: Ok`
+    /// **且**时标新鲜 ⇒ `is_fresh` 为真 ⇒ **只有** `value.is_some()` 这一道守卫能把它排除。
+    ///
+    /// 既有 `interrogation_excludes_stale_invalid_and_none` 的 None 点写成 `Invalid`
+    /// （被 `is_fresh` 先滤掉）⇒ 该守卫**当时零覆盖**（评审实测：删掉守卫，8 条用例全绿）。
+    /// 本用例把它单独钉住——否则将来出现 `None + Ok` 的写方会**静默上送 0.0** 且无网。
+    #[test]
+    fn gi3_none_value_with_ok_quality_is_excluded_by_guard() {
+        let pts = points();
+        let latest = LatestValues::new(5);
+        let now = 1_000_000u64;
+        let ap = id("grid_meter", "active_power");
+        latest.apply(vec![(
+            ap.clone(),
+            PointValue {
+                value: None,
+                ts_ms: now,
+                quality: PointQuality::Ok,
+            },
+        )]);
+
+        // 前置断言（防假绿）：该点确实新鲜 ⇒ 唯一能排除它的就是 `value.is_some()` 守卫
+        let pv = latest.get(&ap);
+        assert!(
+            latest.is_fresh(&pv.id, &pv.value, false, now),
+            "前提：None+Ok+新鲜 ⇒ is_fresh 为真，故排除只能来自 value.is_some() 守卫"
+        );
+
+        let items = interrogation_items(&latest, &pts, now);
+        assert!(
+            items.iter().all(|i| i.ioa != 1),
+            "GI-3：value=None 的点不得出现（即便质量 Ok、时标新鲜）——不得以 0 顶替"
+        );
     }
 
     /// **C 档 COS：值不变不发 / 变位合批 / 时标=采集时刻**。
