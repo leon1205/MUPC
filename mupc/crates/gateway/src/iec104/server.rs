@@ -8,7 +8,7 @@ use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{error, info, warn};
 
 use super::command::CommandHandler;
-use super::protocol::{FrameType, COT_INTROGEN};
+use super::protocol::COT_INTROGEN;
 use super::{Connection, ConnectionState, Iec104Frame};
 
 /// 每连接遥测队列容量（§9.2.2「队列容量」）。
@@ -488,29 +488,6 @@ impl Iec104Server {
         }
     }
 
-    /// **兼容壳（仅过渡）**：收**完整 I 帧**字节，剥掉 APCI 头后转
-    /// [`Iec104Server::publish_asdus`]（**C 档**）。
-    ///
-    /// 唯一既有调用方在 `mupc-core-bin`（迁移由 T13 完成）；保留本方法只为不打破该依赖方。
-    /// ⚠️ 传入的非 I 帧会被**丢弃并告警**（遥测通道只承载监视方向 I 帧）。
-    ///
-    /// ⚠️ **档位刻意取 C（不丢）而非 A**：本壳对应改造前 `tx.send().await` 的**必达**语义
-    /// （旧实现 `for tx in txs { tx.send(...).await }`，通道满则等待）。若取 A 档
-    /// （`try_send` 满则丢），T12→T13 过渡窗口内 core-bin 既有的"总表 6 点"上送会从
-    /// **阻塞必达**静默退化为**满则丢**，现场对点期间可能丢帧。过渡期保持既有语义不变；
-    /// **T13 迁移完成后本壳删除**。
-    #[deprecated(note = "改用 publish_asdus（逐连接序号由连接层维护）")]
-    pub async fn broadcast_telemetry(&self, frame: Vec<u8>) {
-        let asdu = match Iec104Frame::parse(&frame) {
-            Ok(f) if f.frame_type == FrameType::IFrame => f.asdu,
-            _ => {
-                warn!("broadcast_telemetry 收到的不是合法 I 帧，已丢弃（请改用 publish_asdus）");
-                return;
-            }
-        };
-        let _ = self.publish_asdus(vec![asdu], DataClass::C).await;
-    }
-
     /// A/B 档背压累计丢弃的 ASDU 条数（§9.2.2 的 `iec104_dropped_total`）。
     pub fn dropped_total(&self) -> u64 {
         self.dropped_total.load(Ordering::Relaxed)
@@ -567,6 +544,8 @@ impl Iec104Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `FrameType` 只被测试用到（删掉 T12 过渡壳后，生产路径不再解析入向帧）
+    use crate::iec104::protocol::FrameType;
     use crate::iec104::command::{CommandResponse, ControlCommand};
 
     struct StubHandler;
@@ -773,65 +752,6 @@ mod tests {
             PublishOutcome::Delivered { subscribers: 1 }
         );
         assert_eq!(server.dropped_total(), 0, "C 档不计入丢弃");
-    }
-
-    /// 兼容壳（`#[deprecated]`）：收到的 **I 帧**被剥掉 APCI 头后按 ASDU 投递；
-    /// 非 I 帧被丢弃且不投递。
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn broadcast_telemetry_compat_shell_strips_i_frame_header() {
-        let server = Iec104Server::new(cfg());
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
-        server.telemetry_txs.lock().await.push(tx);
-
-        let asdu = encode_me_tf1(7, 1.0, 1_000, COT_CYCLIC);
-        let frame = Iec104Frame::make_i_frame(0, 0, &asdu); // 旧调用方形态（自带 seq=0）
-        server.broadcast_telemetry(frame).await;
-        assert_eq!(rx.recv().await.unwrap(), asdu, "兼容壳必须只投递 ASDU");
-
-        // 非 I 帧（S 帧）⇒ 丢弃，不投递
-        server
-            .broadcast_telemetry(Iec104Frame::make_s_frame(0))
-            .await;
-        assert!(rx.try_recv().is_err(), "非 I 帧不得进遥测通道");
-    }
-
-    /// 兼容壳过渡期**刻意取 C 档**（不丢）：通道满时**阻塞等待**，与改造前
-    /// `for tx in txs { tx.send(..).await }` 的必达语义一致——取 A 档会在过渡窗口内
-    /// 让 core-bin 既有的"总表 6 点"上送静默退化为满则丢。
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn broadcast_telemetry_compat_shell_keeps_c_class_guaranteed_delivery() {
-        use std::time::Duration;
-
-        let server = Iec104Server::new(cfg());
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
-        server.telemetry_txs.lock().await.push(tx);
-
-        // 先把容量 1 的通道占满
-        assert_eq!(
-            server.publish_asdus(vec![vec![0xAA]], DataClass::A).await,
-            PublishOutcome::Delivered { subscribers: 1 }
-        );
-
-        let asdu = encode_me_tf1(7, 1.0, 1_000, COT_CYCLIC);
-        let frame = Iec104Frame::make_i_frame(0, 0, &asdu);
-        // 同一任务内先 poll 一次：C 档必挂起（不返回），A 档立即丢弃并返回
-        let fut = server.broadcast_telemetry(frame);
-        tokio::pin!(fut);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut fut)
-                .await
-                .is_err(),
-            "过渡壳必须取 C 档（通道满时阻塞等待）；取 A 档会立即丢弃并返回"
-        );
-        assert_eq!(server.dropped_total(), 0, "C 档不得计入丢弃");
-
-        // 排空一个名额 ⇒ 被挂起的投递得以完成
-        assert_eq!(rx.recv().await.expect("drain"), vec![0xAA]);
-        fut.await;
-        assert_eq!(rx.recv().await.expect("C 档过渡壳必须送达"), asdu);
-        assert_eq!(server.dropped_total(), 0);
     }
 
     /// **本增量硬前提的端到端回归**：234 点一轮突发（§9.2.2）的 I 帧序号**逐帧单调、
