@@ -64,6 +64,62 @@ pub struct CoreConfig {
     /// 段部署行为不变，不启屏）
     #[serde(default)]
     pub display: DisplayConfig,
+    /// 存储运行参数（03 设计 §9.2 / PRD §11.3，U-67）。**整段缺省 ⇒ 取 `Default`
+    /// （= 现实现常量 1000 / 5000 / 60000）⇒ 零行为变化**（PRD R-11.3-C / STG-01）。
+    /// **只含三键**（PRD R-11.3-A 明文）：不含保留期字段、不含 `max_retained_points`。
+    #[serde(default)]
+    pub storage: StorageSectionConfig,
+}
+
+/// 03 设计 §9.2.1（U-67）：`storage:` 段的三个键 —— **进 YAML、不进 DB**，**重启生效**
+/// （不引入 DB 覆写层，不做运行时热更新）。
+///
+/// ```yaml
+/// storage:
+///   batch_capacity: 1000              # 遥测写缓冲批量提交容量（条）
+///   flush_interval_ms: 5000           # 遥测写缓冲提交间隔（ms）
+///   grid_aggregate_period_ms: 60000   # 总表电气量聚合落库周期（ms）
+/// ```
+///
+/// **两个量不可互推（PRD R-11.3-D / STG-05）**：`batch_capacity` + `flush_interval_ms` 是
+/// **flush 窗口**（缓冲区**提交节拍**，只影响落库延迟与事务粒度）；`grid_aggregate_period_ms`
+/// 是**存储周期**（记录**时间粒度**）。前者由 `mupc_storage::WriteBuffer` 解释、后者由
+/// `mupc_storage::GridAggregator` 解释，**两个类型互不引用** ⇒ 正交由结构保证。
+///
+/// `Default` 的取值 = **变更前的硬编码**（`startup.rs` 的 `WriteBuffer::new(1000, 5000, …)`
+/// 与 §4.1.1 的「默认 1 分钟」）⇒ 段缺省时运行行为**逐条一致**。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)] // **整段缺省 ⇒ 取 Default（= 现实现常量）**
+pub struct StorageSectionConfig {
+    #[serde(default = "default_batch_capacity")]
+    pub batch_capacity: u64,
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    #[serde(default = "default_grid_aggregate_period_ms")]
+    pub grid_aggregate_period_ms: u64,
+}
+
+impl Default for StorageSectionConfig {
+    /// **1000 / 5000 / 60000** —— 与变更前的现实现**逐字相同**（零行为变化，PRD R-11.3-C）。
+    fn default() -> Self {
+        Self {
+            batch_capacity: default_batch_capacity(),
+            flush_interval_ms: default_flush_interval_ms(),
+            grid_aggregate_period_ms: default_grid_aggregate_period_ms(),
+        }
+    }
+}
+
+fn default_batch_capacity() -> u64 {
+    1000
+}
+
+fn default_flush_interval_ms() -> u64 {
+    5000
+}
+
+fn default_grid_aggregate_period_ms() -> u64 {
+    60_000
 }
 
 /// 数字 IO / 安全联锁配置（S2 §12.4 io: 段；缺省 disabled——未配置 io 段部署行为不变）
@@ -509,10 +565,53 @@ impl CoreConfig {
         if !self.south_stations.stations.is_empty() {
             self.validate_south_stations()?;
         }
+        // 03 设计 §9.2.2（U-67）：storage 段校验（**无 enabled 门控** —— PRD R-11.1-A 明文
+        // 「总表落库不设关闭开关」⇒ 本段任何取值都必须合法，不存在"整段跳过"）。
+        self.validate_storage()?;
         // 12-本地显示终端 §7.3：display 段校验（enabled 时 bind_addr 强制仅回环 127.0.0.1；
         // disabled 整段跳过——未启用用户不打扰）。非 modbus transport 的 warn 在 startup
         // 装配处发射（main Phase 1 validate 早于 tracing 初始化，此处 warn 不可达）。
         self.validate_display()?;
+        Ok(())
+    }
+
+    /// 03 设计 §9.2.2（U-67 / PRD R-11.3-E）：`storage:` 段合法性 —— **违规即拒启动**
+    /// （fail-fast，错误信息**点名违规键**）。
+    ///
+    /// 为什么拒启动而不是"告警 + 降级取默认"：三项均**仅在启动期读取一次**（重启生效，
+    /// 不进 DB、无热更新），静默降级会造成「以为配了其实没配」的失真；且与既有各段
+    /// （`intercore` / `gateway` / `io` / `display`）「违规即 `Err`」的惯例一致。
+    ///
+    /// 本函数**不读文件、不做跨段校验**（与 `validate_io` 的 `enabled` 门控不同：本段
+    /// **无开关**，PRD R-11.1-A）。两参数的**正交性**（`batch_capacity`/`flush_interval_ms`
+    /// = 提交节拍 vs `grid_aggregate_period_ms` = 记录时间粒度，PRD R-11.3-D）**不在此断言** ——
+    /// 由结构保证（分属 `WriteBuffer` / `GridAggregator` 两个类型，互不引用，STG-05）。
+    fn validate_storage(&self) -> Result<(), String> {
+        let s = &self.storage;
+        if !(1..=100_000).contains(&s.batch_capacity) {
+            return Err(format!(
+                "storage.batch_capacity={} 须在 1..=100000（遥测写缓冲批量提交容量，条）",
+                s.batch_capacity
+            ));
+        }
+        if !(100..=600_000).contains(&s.flush_interval_ms) {
+            return Err(format!(
+                "storage.flush_interval_ms={} 须在 100..=600000（禁 0；遥测写缓冲提交间隔，ms）",
+                s.flush_interval_ms
+            ));
+        }
+        if !(10_000..=3_600_000).contains(&s.grid_aggregate_period_ms) {
+            return Err(format!(
+                "storage.grid_aggregate_period_ms={} 须在 10000..=3600000（总表聚合落库周期，ms）",
+                s.grid_aggregate_period_ms
+            ));
+        }
+        if s.grid_aggregate_period_ms % 1000 != 0 {
+            return Err(format!(
+                "storage.grid_aggregate_period_ms={} 须为 1000 的整数倍（时间戳按整秒对齐）",
+                s.grid_aggregate_period_ms
+            ));
+        }
         Ok(())
     }
 
@@ -887,6 +986,7 @@ mqtt_bridge:
             gateway: GatewayConfig::default(),
             mqtt_bridge: MqttBridgeConfig::default(),
             display: DisplayConfig::default(),
+            storage: StorageSectionConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -928,6 +1028,7 @@ mqtt_bridge:
             gateway: GatewayConfig::default(),
             mqtt_bridge: MqttBridgeConfig::default(),
             display: DisplayConfig::default(),
+            storage: StorageSectionConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -1991,5 +2092,184 @@ south_stations:
             "同物理口同拼写（合法同口多从站）应通过: {:?}",
             config.validate()
         );
+    }
+
+    // ── 03 设计 §9.2 / PRD §11.3（U-67）：`storage:` 段 ──
+
+    /// **STG-01**：`storage:` 段**整段缺省** ⇒ 三值 = 变更前的现实现常量（零行为变化）。
+    ///
+    /// 改什么会让本条变红：把 `Default` 的任一值改掉（如 `batch_capacity` 默认改 2000）⇒ ① 红。
+    #[test]
+    fn stg01_storage_section_defaults_equal_pre_change_constants() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.storage.batch_capacity, 1000, "= 变更前 startup.rs 的硬编码");
+        assert_eq!(config.storage.flush_interval_ms, 5000);
+        assert_eq!(config.storage.grid_aggregate_period_ms, 60_000, "§4.1.1 默认 1 分钟");
+        assert!(config.validate().is_ok());
+
+        // 显式空段 / 部分键：其余键同样落到默认（serde 容器级 default）
+        let yaml_empty = "version: \"1.0\"\nsystem: {log_level: info}\nintercore: {host: h, port: 9100}\nai_engine: {}\nplugins: {}\nstorage: {}\n";
+        let c2: CoreConfig = serde_yaml::from_str(yaml_empty).unwrap();
+        assert_eq!(c2.storage.batch_capacity, 1000);
+        assert_eq!(c2.storage.flush_interval_ms, 5000);
+        assert_eq!(c2.storage.grid_aggregate_period_ms, 60_000);
+        let yaml_partial = "version: \"1.0\"\nsystem: {log_level: info}\nintercore: {host: h, port: 9100}\nai_engine: {}\nplugins: {}\nstorage: {batch_capacity: 500}\n";
+        let c3: CoreConfig = serde_yaml::from_str(yaml_partial).unwrap();
+        assert_eq!(c3.storage.batch_capacity, 500);
+        assert_eq!(c3.storage.flush_interval_ms, 5000, "未写的键取默认");
+        assert_eq!(c3.storage.grid_aggregate_period_ms, 60_000);
+        assert!(c3.validate().is_ok());
+    }
+
+    /// **STG-01（真文件）**：两份部署 yaml 的 `storage:` 段**显式写出**且取值 = 默认
+    /// （§9.6 序 2：注释态或显式默认值等效，本仓选显式写出以便现场可见）。
+    #[test]
+    fn stg01_deploy_configs_storage_section_is_present_and_is_the_default() {
+        for (name, text) in [
+            (
+                "mupc_core_config.yaml",
+                include_str!("../../../deploy/config/mupc_core_config.yaml"),
+            ),
+            (
+                "mupc_core_config.production.yaml",
+                include_str!("../../../deploy/config/mupc_core_config.production.yaml"),
+            ),
+        ] {
+            let cfg: CoreConfig = serde_yaml::from_str(text)
+                .unwrap_or_else(|e| panic!("`{name}` 必须能解析为 CoreConfig: {e}"));
+            assert_eq!(cfg.storage.batch_capacity, 1000, "`{name}` 的 storage.batch_capacity");
+            assert_eq!(cfg.storage.flush_interval_ms, 5000, "`{name}` 的 storage.flush_interval_ms");
+            assert_eq!(
+                cfg.storage.grid_aggregate_period_ms, 60_000,
+                "`{name}` 的 storage.grid_aggregate_period_ms"
+            );
+            assert!(
+                text.contains("\nstorage:"),
+                "`{name}` 必须**显式**写出 storage: 段（现场可见；§9.6 序 2）"
+            );
+            assert!(cfg.validate().is_ok(), "`{name}` 的 storage 段必须过 validate_storage");
+        }
+    }
+
+    /// **STG-02 / STG-03**：显式配置生效（装配点是**启动期读一次** ⇒ 「重启生效」由
+    /// 「值从 YAML 来、不来自硬编码」体现；热改 YAML 不生效属预期，见 §9.2.1「不进 DB」）。
+    #[test]
+    fn stg02_stg03_explicit_storage_values_are_taken() {
+        let yaml = r#"
+version: "1.0"
+system:
+  log_level: "info"
+intercore:
+  host: "127.0.0.1"
+  port: 9100
+ai_engine: {}
+plugins: {}
+storage:
+  batch_capacity: 200
+  flush_interval_ms: 2000
+  grid_aggregate_period_ms: 120000
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.storage.batch_capacity, 200);
+        assert_eq!(config.storage.flush_interval_ms, 2000);
+        assert_eq!(config.storage.grid_aggregate_period_ms, 120_000);
+        assert!(config.validate().is_ok());
+        // 序列化往返：三键都在（供「保留式编辑不可定位」时的整体回退路径）
+        let back: StorageSectionConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&config.storage).unwrap()).unwrap();
+        assert_eq!(back.batch_capacity, 200);
+        assert_eq!(back.flush_interval_ms, 2000);
+        assert_eq!(back.grid_aggregate_period_ms, 120_000);
+    }
+
+    /// **STG-04**：非法值**拒启动**且错误信息**点名违规键**（逐字段边界，含 `% 1000 != 0`）。
+    #[test]
+    fn stg04_storage_invalid_values_are_rejected_by_name() {
+        fn with(apply: impl FnOnce(&mut StorageSectionConfig)) -> CoreConfig {
+            let yaml = "version: \"1.0\"\nsystem: {log_level: info}\nintercore: {host: h, port: 9100}\nai_engine: {}\nplugins: {}\n";
+            let mut c: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+            apply(&mut c.storage);
+            c
+        }
+        // batch_capacity：0 / 100001 拒；1 / 100000 过
+        let err = with(|s| s.batch_capacity = 0).validate().unwrap_err();
+        assert!(err.contains("storage.batch_capacity"), "错误必须点名键: {err}");
+        let err = with(|s| s.batch_capacity = 100_001).validate().unwrap_err();
+        assert!(err.contains("storage.batch_capacity"));
+        assert!(with(|s| s.batch_capacity = 1).validate().is_ok());
+        assert!(with(|s| s.batch_capacity = 100_000).validate().is_ok());
+        // flush_interval_ms：禁 0；99 / 600001 拒；100 / 600000 过
+        let err = with(|s| s.flush_interval_ms = 0).validate().unwrap_err();
+        assert!(err.contains("storage.flush_interval_ms"), "错误必须点名键: {err}");
+        let err = with(|s| s.flush_interval_ms = 99).validate().unwrap_err();
+        assert!(err.contains("storage.flush_interval_ms"));
+        let err = with(|s| s.flush_interval_ms = 600_001).validate().unwrap_err();
+        assert!(err.contains("storage.flush_interval_ms"));
+        assert!(with(|s| s.flush_interval_ms = 100).validate().is_ok());
+        assert!(with(|s| s.flush_interval_ms = 600_000).validate().is_ok());
+        // grid_aggregate_period_ms：9999 / 3600001 拒；10000 / 3600000 过
+        let err = with(|s| s.grid_aggregate_period_ms = 9_999).validate().unwrap_err();
+        assert!(err.contains("storage.grid_aggregate_period_ms"));
+        let err = with(|s| s.grid_aggregate_period_ms = 3_600_001)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("storage.grid_aggregate_period_ms"));
+        assert!(with(|s| s.grid_aggregate_period_ms = 10_000).validate().is_ok());
+        assert!(with(|s| s.grid_aggregate_period_ms = 3_600_000).validate().is_ok());
+        // 须为 1000 的整数倍（时间戳按整秒对齐）：60001 拒、61000 过
+        let err = with(|s| s.grid_aggregate_period_ms = 60_001).validate().unwrap_err();
+        assert!(
+            err.contains("storage.grid_aggregate_period_ms") && err.contains("1000"),
+            "整倍约束的错误文案须点名键 + 说明整倍: {err}"
+        );
+        let err = with(|s| s.grid_aggregate_period_ms = 60_500).validate().unwrap_err();
+        assert!(err.contains("storage.grid_aggregate_period_ms"));
+        assert!(with(|s| s.grid_aggregate_period_ms = 15_000).validate().is_ok());
+    }
+
+    /// **GRD-08**：`storage:` 段**无任何「关闭」语义**（PRD R-11.1-A / R-11.3-A：本段**只含三键**）。
+    ///
+    /// 两条判据：① 结构 —— 序列化只出这三个键（加不了 `enabled: false` 一类开关）；
+    /// ② 行为 —— 现场 yaml 里硬塞 `enabled: false` 这类未建模键**既不报错也不改变三值**
+    /// （`CoreConfig` 无 `deny_unknown_fields`）⇒ 不存在「配错即静默不落库」的合法路径。
+    #[test]
+    fn grd08_storage_section_has_no_disable_switch() {
+        // ① 结构：恰好三键
+        let yaml = serde_yaml::to_string(&StorageSectionConfig::default()).unwrap();
+        let keys: Vec<&str> = yaml
+            .lines()
+            .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["batch_capacity", "flush_interval_ms", "grid_aggregate_period_ms"],
+            "storage 段只含三键（不含 enabled / 保留期 / max_retained_points）"
+        );
+        // ② 行为：塞未建模键不生效（三值仍默认、validate 仍过）
+        let yaml_off = r#"
+version: "1.0"
+system: { log_level: "info" }
+intercore: { host: "127.0.0.1", port: 9100 }
+ai_engine: {}
+plugins: {}
+storage:
+  enabled: false
+  aggregate_enabled: false
+"#;
+        let c: CoreConfig = serde_yaml::from_str(yaml_off).unwrap();
+        assert_eq!(c.storage.batch_capacity, 1000);
+        assert_eq!(c.storage.flush_interval_ms, 5000);
+        assert_eq!(c.storage.grid_aggregate_period_ms, 60_000);
+        assert!(c.validate().is_ok(), "未建模键被忽略而非报错（与 CoreConfig 既有兼容性口径一致）");
     }
 }

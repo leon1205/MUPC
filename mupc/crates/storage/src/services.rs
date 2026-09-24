@@ -643,22 +643,37 @@ pub struct RetentionReport {
     pub events_deleted: usize,
 }
 
-/// 数据库迁移：建表与索引
-pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
-    let statements = [
-        // 遥测表 — 按月分区建议用外部脚本，这里建基础表
-        "CREATE TABLE IF NOT EXISTS telemetry (
+/// `telemetry` 建表 DDL（**新库的形态**：`value REAL` 可空，03 设计 §9.1.4）。
+///
+/// 只此一处持有 DDL 文本：`run_migrations` 的建表语句与「可空化重建」共用它 ⇒ 重建后的表结构
+/// 与新建的表**逐字一致**（否则重建产物与现场新装产物会漂移）。
+const TELEMETRY_DDL: &str = "CREATE TABLE IF NOT EXISTS telemetry (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             device_id TEXT NOT NULL,
             timestamp INTEGER NOT NULL,
             metric_name TEXT NOT NULL,
-            value REAL NOT NULL,
+            value REAL,
             quality INTEGER NOT NULL DEFAULT 0
-        )",
-        "CREATE INDEX IF NOT EXISTS idx_telemetry_device_ts
+        )";
+
+/// `telemetry` 的索引 DDL（**两个都要**在可空化重建后重放：只重建
+/// `idx_telemetry_metric_ts` 会让 `query_range` 的 `device_id + timestamp` 路径丢索引）。
+const TELEMETRY_INDEX_DDL: [&str; 2] = [
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_device_ts
          ON telemetry(device_id, timestamp)",
-        "CREATE INDEX IF NOT EXISTS idx_telemetry_metric_ts
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_metric_ts
          ON telemetry(metric_name, timestamp)",
+];
+
+/// 数据库迁移：建表与索引
+pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
+    let statements = [
+        // 遥测表 — 按月分区建议用外部脚本，这里建基础表
+        // ⚠️ `value REAL`（**可空**）：缺测行落**真 NULL**（03 设计 §9.1.4 / PRD R-11.2-E）。
+        // 老库（`value REAL NOT NULL`）由本函数末尾的幂等「可空化重建」就地升级。
+        TELEMETRY_DDL,
+        TELEMETRY_INDEX_DDL[0],
+        TELEMETRY_INDEX_DDL[1],
         // 故障表
         "CREATE TABLE IF NOT EXISTS faults (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -751,6 +766,93 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
         }
     }
 
+    // ── `telemetry.value` 可空化（03 设计 §9.1.4；本增量唯一的**结构变更**）──
+    ensure_telemetry_value_nullable(pool).await?;
+
+    Ok(())
+}
+
+/// 把老库的 `telemetry.value REAL NOT NULL` 就地升级为**可空**（缺测行要写真 `NULL`）。
+///
+/// # 为什么必须重建表
+///
+/// SQLite 不支持 `ALTER COLUMN` 去约束 ⇒ 只能「改名 → 按新 DDL 重建 → 搬数据 → 删旧表 →
+/// 重放索引」。老库中**既有行全部为 `Some`**（此前 `value` 是 `f64`）⇒ 搬过去后**值逐行不变**、
+/// 语义不变（PRD R-11.3-C 的「零行为变化」仍成立）。
+///
+/// # 幂等
+///
+/// 每次 `run_migrations` 先 `PRAGMA table_info(telemetry)` 读 `value` 列的 `notnull`：
+/// **已为 0（可空）即跳过**（含「本进程刚建的新表」与「已迁移过的库」两种情形）。
+/// 迁移动作整体在一个事务里 ⇒ 中途失败不留半成品。
+///
+/// # 必须一并重建**两个**索引
+///
+/// `RENAME TO` 后索引仍挂在旧表上、随 `DROP TABLE telemetry_old` 一并消失 ⇒ 不重放就会让
+/// `query_range`（走 `idx_telemetry_device_ts`）与按 `metric_name` 的查询
+/// （走 `idx_telemetry_metric_ts`）直到**下次启动**（`CREATE INDEX IF NOT EXISTS`）才恢复索引
+/// （03 设计 §9.1.4 的勘误 ②：原稿只列一个索引，实际**两个都要重建**）。
+async fn ensure_telemetry_value_nullable(pool: &SqlitePool) -> Result<(), StorageError> {
+    // `notnull` 是 SQLite 关键字 ⇒ 取列时加双引号。`pragma_table_info` 是表值函数，可显式选列。
+    let cols: Vec<(String, i64)> =
+        sqlx::query_as("SELECT name, \"notnull\" FROM pragma_table_info('telemetry')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| StorageError::MigrationError(e.to_string()))?;
+
+    let notnull = cols
+        .iter()
+        .find(|(name, _)| name == "value")
+        .map(|(_, notnull)| *notnull)
+        .ok_or_else(|| {
+            StorageError::MigrationError(
+                "telemetry 表缺 value 列（建表语句与迁移前置不一致）".to_string(),
+            )
+        })?;
+
+    // 已可空 ⇒ 幂等跳过（GRD-09：对已迁移库再跑不重复重建）。
+    if notnull == 0 {
+        return Ok(());
+    }
+    tracing::info!("telemetry.value 为 NOT NULL（老库）⇒ 执行一次性可空化重建");
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::MigrationError(e.to_string()))?;
+
+    let step = |e: sqlx::Error| StorageError::MigrationError(format!("telemetry 可空化失败: {e}"));
+
+    sqlx::query("ALTER TABLE telemetry RENAME TO telemetry_old")
+        .execute(&mut *tx)
+        .await
+        .map_err(step)?;
+    // 同一 DDL 但 `value REAL`（去掉 NOT NULL）—— 与新建库逐字一致。
+    sqlx::query(TELEMETRY_DDL)
+        .execute(&mut *tx)
+        .await
+        .map_err(step)?;
+    // 显式列名搬数据：老库既有行全为 `Some` ⇒ 逐行等值（`NULL` 行也原样搬）。
+    sqlx::query(
+        "INSERT INTO telemetry (id, device_id, timestamp, metric_name, value, quality)
+         SELECT id, device_id, timestamp, metric_name, value, quality FROM telemetry_old",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(step)?;
+    sqlx::query("DROP TABLE telemetry_old")
+        .execute(&mut *tx)
+        .await
+        .map_err(step)?;
+    // 两个索引都必须重放（`RENAME`/`DROP` 把原索引一起带走了）。
+    for ddl in TELEMETRY_INDEX_DDL {
+        sqlx::query(ddl).execute(&mut *tx).await.map_err(step)?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::MigrationError(format!("telemetry 可空化提交失败: {e}")))?;
+    tracing::info!("telemetry.value 可空化完成（既有行数值不变）");
     Ok(())
 }
 

@@ -66,6 +66,18 @@ display:
     pcs_total_rated_kw: 60.0
     inconsistency_threshold_kw: 3.0     # 须 <= pcs_total_rated_kw（超额定 ⇒ 角标恒灭）
 
+# 存储运行参数（03 设计 §9.2 / PRD §11.3，U-67）。**进 YAML、不进 DB**，**重启生效**。
+# 三值即本段**全部**内容（PRD R-11.3-A：本段只含三键，不含保留期 / max_retained_points）。
+# ⚠️ 合法范围（越界**拒启动**，错误信息点名键，PRD R-11.3-E）：
+#   batch_capacity            ∈ [1, 100000]
+#   flush_interval_ms         ∈ [100, 600000]（**禁 0**）
+#   grid_aggregate_period_ms  ∈ [10000, 3600000] 且须为 1000 的整数倍
+# 下面三个值 = **缺省值**（不写本段也等价）：与变更前的硬编码逐字相同 ⇒ 零行为变化。
+storage:
+  batch_capacity: 1000              # 遥测写缓冲批量提交容量（条）
+  flush_interval_ms: 5000           # 遥测写缓冲提交间隔（ms）
+  grid_aggregate_period_ms: 60000   # 总表电气量聚合落库周期（ms；60000 = 1 分钟）
+
 # IEC 104 北向网关监听（S2 §12.3 gateway 段；缺省 0.0.0.0:2404，与历史硬编码一致）
 # ⚠️ 本段**必须存在**：保留式编辑只做"行级替换"，段缺失会让该段字段的首次写入整体回写
 #    （WriteMode=FullRewrite）⇒ 本文件全部注释丢失（详见 yaml_edit.rs 模块头的边界登记）。

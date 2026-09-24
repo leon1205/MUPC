@@ -25,7 +25,8 @@ fn make_telemetry(device: &str, metric: &str, value: f64) -> TelemetryPoint {
         device_id: device.to_string(),
         timestamp: Utc::now(),
         metric_name: metric.to_string(),
-        value,
+        // `value` 自 03 设计 §9.1.4 起可空（`None` = 缺测）；本文件的写入方一律**有值**。
+        value: Some(value),
         quality: 0,
     }
 }
@@ -90,7 +91,8 @@ async fn telemetry_insert_and_query() {
 
     let latest = svc.telemetry.get_latest("dev1", "voltage").await.unwrap();
     assert!(latest.is_some());
-    assert!((latest.unwrap().value - 220.0).abs() < 0.01);
+    // `value` 可空化后须先解出 `Option`（既有写入方都是有值 ⇒ `expect` 即原断言语义）。
+    assert!((latest.unwrap().value.expect("有值") - 220.0).abs() < 0.01);
 }
 
 #[tokio::test]
@@ -102,7 +104,7 @@ async fn telemetry_query_range() {
         device_id: "dev1".into(),
         timestamp: now - Duration::hours(1),
         metric_name: "v".into(),
-        value: 1.0,
+        value: Some(1.0),
         quality: 0,
     };
     let t2 = TelemetryPoint {
@@ -110,7 +112,7 @@ async fn telemetry_query_range() {
         device_id: "dev1".into(),
         timestamp: now,
         metric_name: "v".into(),
-        value: 2.0,
+        value: Some(2.0),
         quality: 0,
     };
     svc.telemetry.insert(&t1).await.unwrap();
@@ -139,7 +141,7 @@ async fn telemetry_delete_older_than() {
         device_id: "dev1".into(),
         timestamp: Utc::now() - Duration::days(100),
         metric_name: "v".into(),
-        value: 0.0,
+        value: Some(0.0),
         quality: 0,
     };
     svc.telemetry.insert(&old).await.unwrap();
@@ -567,7 +569,9 @@ async fn bare_file_pool(tag: &str) -> (Arc<SqlitePool>, std::path::PathBuf) {
 }
 
 fn values_of(rows: &[TelemetryPoint]) -> Vec<f64> {
-    let mut v: Vec<f64> = rows.iter().map(|p| p.value).collect();
+    // `value` 自 03 设计 §9.1.4 起可空：本文件的写入方**全部有值** ⇒ `filter_map` 与旧行为
+    // 等价（若哪天写了 `None`，下面的 `assert_eq!(values_of(..), vec![..])` 会因条数少而红）。
+    let mut v: Vec<f64> = rows.iter().filter_map(|p| p.value).collect();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v
 }

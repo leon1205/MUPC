@@ -23,6 +23,7 @@ mod idempotency;
 mod interlock;
 mod interlock_ops;
 mod log_service;
+mod quality_map;
 mod signal_handler;
 mod startup;
 #[cfg(test)]
