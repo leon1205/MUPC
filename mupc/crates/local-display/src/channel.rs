@@ -845,8 +845,10 @@ mod tests {
     }
 
     fn sample_frame_json() -> String {
-        // v2 契约：`version` 必须等于 `PROTO_VERSION`（=2），否则帧被拒（设计 §3.5 条 1）。
-        r#"{"version":2,"seq":7,"ts_ms":1700000000000,"soc":65.0,"soc_source":"pcs_reg1010",
+        // v3 契约：`version` 必须等于 `PROTO_VERSION`（=3），否则帧被拒（设计 §3.5 条 1 / §15.2.1）。
+        // 本样例**不带** `peripherals` 段 ⇒ 走 `serde(default)` 的显式降级（`available=false`），
+        // 即"缺失新字段不补 0"（§15.2.3）。
+        r#"{"version":3,"seq":7,"ts_ms":1700000000000,"soc":65.0,"soc_source":"pcs_reg1010",
             "soc_flag":"valid","run_state":2,"pcs_online":true,
             "p_phase":[{"v":12.3,"flag":"valid"},{"v":11.8,"flag":"valid"},{"v":12.0,"flag":"valid"}],
             "p_total":{"v":36.1,"flag":"valid"},
@@ -1140,7 +1142,7 @@ mod tests {
     /// W3：帧 `version` 与 `PROTO_VERSION` 不符 ⇒ `Err(ProtoVersion)`（不静默按旧语义展示）。
     #[test]
     fn proto_version_mismatch_is_error() {
-        let body = sample_frame_json().replace("\"version\":2", "\"version\":99");
+        let body = sample_frame_json().replace("\"version\":3", "\"version\":99");
         let stub = Stub::spawn(move |_i, _req| Some(ok_response(&body)));
         let mut c = stub.client();
         let t0 = Instant::now();

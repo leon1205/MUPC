@@ -3399,6 +3399,8 @@ pub(crate) fn frame_healthy() -> mupc_display_proto::DisplayFrame {
     use mupc_display_proto::*;
     DisplayFrame {
         version: PROTO_VERSION,
+        // v3 新增段（§15.2.2）：健康帧用例不涉外设 ⇒ 取默认（available=false）
+        peripherals: Default::default(),
         seq: 7,
         ts_ms: 1_789_047_727_000,
         soc: Some(62.0),

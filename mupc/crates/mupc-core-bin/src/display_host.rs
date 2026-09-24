@@ -1001,6 +1001,8 @@ impl DisplayDataProvider {
 
         DisplayFrame {
             version: PROTO_VERSION,
+            // v3 新增段（§15.2.2）：取数接线与容量守卫在 T20 落（本行只保证编译与既有字段不变）
+            peripherals: Default::default(),
             seq: 0, // sample_once 写入真实 seq
             ts_ms: now_ms,
             soc,
@@ -1481,6 +1483,8 @@ mod tests {
         let missing = Field { v: None, flag: FieldFlag::NotRead };
         DisplayFrame {
             version: PROTO_VERSION,
+            // v3 新增段（§15.2.2）：本用例不涉外设 ⇒ 取默认（available=false）
+            peripherals: Default::default(),
             seq: 7,
             ts_ms: 1_757_412_000_000,
             soc,

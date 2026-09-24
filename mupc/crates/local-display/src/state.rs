@@ -861,6 +861,8 @@ mod tests {
     fn frame(seq: u64, ts_ms: u64) -> DisplayFrame {
         DisplayFrame {
             version: mupc_display_proto::PROTO_VERSION,
+            // v3 新增段（§15.2.2）：本用例只关心既有字段 ⇒ 取默认（available=false）
+            peripherals: Default::default(),
             seq,
             ts_ms,
             soc: Some(65.0),

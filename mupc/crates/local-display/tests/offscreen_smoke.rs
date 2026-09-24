@@ -38,9 +38,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// 帧 JSON（**字面量**，不用 display-proto 序列化 —— 避免"同源同错"掩盖契约偏差）。
+/// **v3 契约（§15.2.1）**：`version` 必须 = `PROTO_VERSION`（=3）；本样例不带 `peripherals`
+/// 段 ⇒ 走 `serde(default)` 显式降级（`available=false`、不补 0，§15.2.3）。
 fn frame_json(seq: u64) -> String {
     format!(
-        r#"{{"version":2,"seq":{seq},"ts_ms":{},"soc":65.0,"soc_source":"pcs_reg1010",
+        r#"{{"version":3,"seq":{seq},"ts_ms":{},"soc":65.0,"soc_source":"pcs_reg1010",
         "soc_flag":"valid","run_state":2,"pcs_online":true,
         "p_phase":[{{"v":12.3,"flag":"valid"}},{{"v":11.8,"flag":"valid"}},{{"v":12.0,"flag":"valid"}}],
         "p_total":{{"v":36.1,"flag":"valid"}},
