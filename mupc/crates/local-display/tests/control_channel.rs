@@ -394,7 +394,9 @@ fn frame_json() -> String {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     format!(
-        r#"{{"version":2,"seq":1,"ts_ms":{ts},"soc":65.0,"soc_source":"pcs_reg1010",
+        // **v3 契约（§15.2.1）**：必须 = `PROTO_VERSION`（=3）。此处曾漏改仍写 2 ⇒ 帧被拒
+        // （`frames_ok=0 frames_fail=1`）而使本文件"通道健康"前提失真却仍绿（T19 评审警告①）。
+        r#"{{"version":3,"seq":1,"ts_ms":{ts},"soc":65.0,"soc_source":"pcs_reg1010",
         "soc_flag":"valid","run_state":2,"pcs_online":true,
         "p_phase":[{{"v":12.3,"flag":"valid"}},{{"v":11.8,"flag":"valid"}},{{"v":12.0,"flag":"valid"}}],
         "p_total":{{"v":36.1,"flag":"valid"}},
