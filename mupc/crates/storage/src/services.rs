@@ -823,6 +823,16 @@ async fn ensure_telemetry_value_nullable(pool: &SqlitePool) -> Result<(), Storag
 
     let step = |e: sqlx::Error| StorageError::MigrationError(format!("telemetry 可空化失败: {e}"));
 
+    // **重建前取出 AUTOINCREMENT 序列**（T15/T16 评审残留②）：`RENAME` + 重建会把
+    // `sqlite_sequence` 里的 `telemetry` 序列一并带走 —— 若旧表**行已全被清空**，
+    // 重建后无行可搬 ⇒ 新表 id 会从 1 重发（与"最大 id 行存活"时表现不同）。
+    // 故显式取旧序列、重建后单调恢复（见下），使"序列不倒退"**无条件成立**。
+    let old_seq: Option<i64> =
+        sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'telemetry'")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(step)?;
+
     sqlx::query("ALTER TABLE telemetry RENAME TO telemetry_old")
         .execute(&mut *tx)
         .await
@@ -844,6 +854,23 @@ async fn ensure_telemetry_value_nullable(pool: &SqlitePool) -> Result<(), Storag
         .execute(&mut *tx)
         .await
         .map_err(step)?;
+    // **恢复 AUTOINCREMENT 序列**（评审残留②）：新表尚未插入任何行时 `sqlite_sequence`
+    // 里没有 `telemetry` 行 ⇒ 先按条件插入，再取 `MAX(seq, 旧序列)`（单调、绝不倒退）。
+    if let Some(seq) = old_seq {
+        sqlx::query(
+            "INSERT INTO sqlite_sequence (name, seq) SELECT 'telemetry', ?1
+             WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'telemetry')",
+        )
+        .bind(seq)
+        .execute(&mut *tx)
+        .await
+        .map_err(step)?;
+        sqlx::query("UPDATE sqlite_sequence SET seq = MAX(seq, ?1) WHERE name = 'telemetry'")
+            .bind(seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(step)?;
+    }
     // 两个索引都必须重放（`RENAME`/`DROP` 把原索引一起带走了）。
     for ddl in TELEMETRY_INDEX_DDL {
         sqlx::query(ddl).execute(&mut *tx).await.map_err(step)?;

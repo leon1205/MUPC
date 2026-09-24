@@ -248,7 +248,10 @@ fn grd06_row_count_reduction_is_at_least_95_percent() {
 ///
 /// 老库（`value REAL NOT NULL` + 两个索引 + 既有行）跑 `run_migrations` ⇒
 /// ① `value` 变可空、既有行数值**逐行不变**；
-/// ② 再跑一次**不重复重建**（若实现里没有 `PRAGMA` 判定，第二次会因 `telemetry_old` 已存在而报错）；
+/// ② 再跑一次**不重复重建** —— **判别判据 = 表的 `rootpage` 不变**（重建必然换页）。
+///    ⚠️ 原稿写的判据"没有 PRAGMA 判定时第二次会因 `telemetry_old` 已存在而报错"**不成立**
+///    （T15/T16 评审探针实录：`telemetry_old` 在同一事务里已被 DROP ⇒ 抹掉守卫仍绿
+///    ⇒ 那是假保证）；故改用 rootpage 断言把"是否真重建过"钉死。
 /// ③ **两个**索引都重放（只重放一个 ⇒ 第二次后 `sqlite_master` 少一条）。
 #[tokio::test]
 async fn grd09_value_nullable_migration_is_idempotent() {
@@ -300,7 +303,22 @@ async fn grd09_value_nullable_migration_is_idempotent() {
     assert_eq!(rows[1], (2, 1235, Some(0.0), 0), "真 0 值仍是 0.0（不是 NULL）");
 
     // ② 幂等：二次迁移必须通过且不改变行数/数值
+    //    判别判据：`rootpage` 不变 ⇒ 没有发生"搬数据重建"（抹掉 PRAGMA 守卫会换页 ⇒ 本断言红）
+    let rootpage_before: i64 =
+        sqlx::query_scalar("SELECT rootpage FROM sqlite_master WHERE type='table' AND name='telemetry'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     run_migrations(&pool).await.expect("二次迁移必须幂等通过");
+    let rootpage_after: i64 =
+        sqlx::query_scalar("SELECT rootpage FROM sqlite_master WHERE type='table' AND name='telemetry'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rootpage_before, rootpage_after,
+        "二次迁移不得重建 telemetry（rootpage 换页即说明又搬了一次数据）"
+    );
     assert_eq!(value_notnull(&pool).await, 0);
     let count: (i64, Option<i64>) =
         sqlx::query_as("SELECT COUNT(*), SUM(value IS NULL) FROM telemetry")
@@ -340,6 +358,61 @@ async fn grd09_value_nullable_migration_is_idempotent() {
     // ④ 新装库（新 DDL 建出即可空）再跑迁移：走「notnull == 0 ⇒ 跳过」分支，同样通过
     let (_, svc) = setup().await;
     let _ = svc;
+}
+
+/// **GRD-09b**：老库**行已全被清空**时，可空化重建后的 AUTOINCREMENT 序列**仍不得倒退**。
+///
+/// 这正是 §9.1.4 那条"序列不倒退"断言的**边界**（T15/T16 评审残留②）：`RENAME` + 重建
+/// 会把 `sqlite_sequence` 一并带走，而旧表无行可搬 ⇒ 若不显式恢复序列，新表 id 会从 1 重发。
+/// 本用例先删空老表再迁移，插一行断言 id > 旧最大 id ⇒ **无"取旧序列并单调恢复"的实现必红**。
+#[tokio::test]
+async fn grd09b_sequence_preserved_when_old_table_emptied() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("创建内存数据库");
+    sqlx::query(
+        "CREATE TABLE telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            metric_name TEXT NOT NULL,
+            value REAL NOT NULL,
+            quality INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO telemetry (device_id, timestamp, metric_name, value, quality)
+         VALUES ('d', 1, 'v', 1.0, 0), ('d', 2, 'v', 2.0, 0), ('d', 3, 'v', 3.0, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 清空（`sqlite_sequence` 保留 3）；老库形态仍是 NOT NULL
+    sqlx::query("DELETE FROM telemetry")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(value_notnull(&pool).await, 1, "前提：老库 value 仍为 NOT NULL");
+
+    run_migrations(&pool).await.expect("迁移（空表路径）");
+    assert_eq!(value_notnull(&pool).await, 0, "迁移后 value 可空");
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO telemetry (device_id, timestamp, metric_name, value, quality)
+         VALUES ('d', 4, 'v', 4.0, 0) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        id > 3,
+        "空表迁移后序列不得倒退（新行 id 应 > 旧最大 id 3，实际 {id}）"
+    );
 }
 
 async fn value_notnull(pool: &SqlitePool) -> i64 {
