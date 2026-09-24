@@ -51,9 +51,12 @@ pub use waveform_reporter::WaveformReporterAdapter;
 
 // Re-export MQTT bridge components for convenience
 pub use mupc_mqtt_bridge::config::{LocalMqttConfig, MqttConfig, NorthMqttConfig};
-pub use mupc_mqtt_bridge::topics::{
-    LOCAL_STRATEGY_COMMAND, LOCAL_TELEMETRY, NORTH_FAULT, NORTH_TELEMETRY,
-};
+pub use mupc_mqtt_bridge::topics::{LOCAL_STRATEGY_COMMAND, LOCAL_TELEMETRY, NORTH_FAULT};
+// `NORTH_TELEMETRY` 已按 §9.3.4 废弃（北向遥测改为**按站分片** `north_telemetry(station_id)`），
+// 但**保留名字**（不删）供旧消费者平滑迁移；本行只是 re-export ⇒ 定向放行废弃告警。
+// ⚠️ **不得**用该常量发布（发布路径一律走分片函数）。
+#[allow(deprecated)]
+pub use mupc_mqtt_bridge::topics::NORTH_TELEMETRY;
 pub use mupc_mqtt_bridge::{LocalMqttClient, MqttBridge, MqttBridgeError, NorthMqttClient};
 
 // ── 共享常量 ───────────────────────────────────────────────────────────
