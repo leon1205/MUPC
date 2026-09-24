@@ -2160,6 +2160,11 @@ impl WriteBuffer {
 
 **`GridSample` 抽取点（唯一）**：`mupc-data-processing::DataPackage` 的 `electrical.phase`（`Option<PhaseElectricalData>`）+ 顶层 6 字段。**缺相量块** ⇒ 分相通道全 `None`（产 `NoData` 行）；**顶层缺块** ⇒ 该通道 `None`。映射函数 `GridSample::from_package(&DataPackage) -> GridSample` 落在 `storage`（`From` 实现），单测可直喂构造的 `DataPackage`。
 
+> **⚠️ 勘误（T15/T16 评审裁定，2026-09-24）：本行与 §9.8 D-8 冲突，以 D-8 为准。**
+> 事实：`storage` 与 `data-processing` **互不依赖**（只有 `ai-engine`/`core-bin` 依赖 `storage`）⇒ 把 `from_package` 落 `storage` 会**新增 `storage → data-processing` 依赖边**，违 §9.1.1「不新增依赖边」。
+> 更硬的一条：装配层写 `impl From<&DataPackage> for GridSample` **违孤儿规则（orphan rule）、不可编译**（两侧类型均为外部类型）⇒ 只能用**自由函数**。
+> ⇒ **实现取 D-8**：抽取函数落 **`core-bin` 装配层**（`startup.rs` 内自由函数 `grid_sample_from_package`，语义等价、可单测）。本行中"落在 `storage`（`From` 实现）"作废。
+
 ---
 
 ### 9.7 测试策略

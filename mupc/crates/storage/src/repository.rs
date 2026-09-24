@@ -488,7 +488,8 @@ struct TelemetryRow {
     device_id: String,
     timestamp: i64,
     metric_name: String,
-    value: f64,
+    /// 可空：`None` = 缺测（真 NULL；只有总表聚合的缺测行会写 `None`，见 `models::TelemetryPoint`）。
+    value: Option<f64>,
     quality: i32,
 }
 
