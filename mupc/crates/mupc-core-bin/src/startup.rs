@@ -206,6 +206,12 @@ struct StrategyCommandHandler {
     /// 额定有功上限 (kW)：IEC104 主站外部指令 p_set clamp 用（审查 R1-A1，2026-09-09），
     /// 来源台区储能容量档 p_cap（电池功率上限，YAML 真值）。
     p_max_kw: f64,
+    /// **总召 / 连接初始快照数据源**（01 设计 §9.4 序 6）：最新值快照 + 上送点表。
+    /// `on_interrogation` 从 `latest.all()` 过滤 `channels.has(IEC104) && is_fresh(..)` 转
+    /// `TelemetryItem`（无有效值的点不出现，GI-3）；`on_connection_snapshot` 走 trait 默认
+    /// 实现转发到 `on_interrogation`（**一个实现两处调用**，§9.2.5）。
+    latest: Arc<LatestValues>,
+    points: Arc<Vec<mupc_southd::uplink::UplinkPoint>>,
 }
 
 impl StrategyCommandHandler {
@@ -297,6 +303,17 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
             message: "命令已下发".into(),
             timestamp: chrono::Utc::now().timestamp() as u64,
         })
+    }
+
+    /// **站召唤（总召 `C_IC_NA_1`）数据源**（01 设计 §9.2.5 / §9.4 序 6）。
+    ///
+    /// 从最新值快照取全部 `channels.has(IEC104) && is_fresh(..)` 的点转 `TelemetryItem`
+    /// （`cot = COT_INTROGEN(20)`）；**无有效值的点不出现**（GI-3：不得以 0 或旧值顶替）。
+    /// 连接初始快照 `on_connection_snapshot` 走 trait 默认实现**转发到本方法**
+    /// （一个实现两处调用，防两套口径）。取数/编码在 `crate::uplink::interrogation_items`。
+    async fn on_interrogation(&self) -> Vec<mupc_gateway::iec104::command::TelemetryItem> {
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        crate::uplink::interrogation_items(&self.latest, &self.points, now_ms)
     }
 }
 
@@ -405,11 +422,12 @@ struct SouthSink {
     /// **即时投递环**（设计 §4.7）。⚠️ **不是 F7 真源**——F7 真源仍是 `storage.events`；
     /// 本字段只做「未落库也能上屏」的可选增强（是否并入 F7 由待裁项 R-07 决定，本轮不裁）。
     alert_feed: Arc<crate::alert_feed::AlertFeed>,
-    /// IEC104 服务器（审查 R2-A2：meter_grid 真值上送北向）。SouthSink 是 core-bin 类型，
-    /// mupc-southd 仅定义 StationSink trait——不引入 southd→gateway 反向依赖。
+    /// IEC104 服务器句柄。⚠️ **T13 后本字段不再被读取**：grid 真值上送已从本 sink 的
+    /// `broadcast_grid_iec104`（旧 R2-A2 路径，TI=13 无时标）迁移到 `Iec104UplinkDriver`
+    /// 的 A 档任务（01 设计 §9.4 序 4「删除，并入 A 档」）。保留字段与构造入参只为
+    /// **不改既有 `SouthSink::new` 签名**（三处既有用例的装配零改动），故 `allow(dead_code)`。
+    #[allow(dead_code)]
     iec104: Arc<mupc_gateway::iec104::server::Iec104Server>,
-    /// grid 上送节流：meter_grid 最后广播时刻（1Hz 上界，见 broadcast_grid_iec104 注释）
-    grid_bcast_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// **外设遥测最新值快照**（01 设计 §9.1；本 sink 是其**唯一写入方**，§9.1.4 / §9.4 序 3）。
     /// 与既有 `WriteBuffer`（**历史**通道）**并存不互替**：本支路只**新增**快照写入，
     /// 不改落库路径（§9.1.7 的边界：实时值与历史表"不是一回事、不得互相替代"）。
@@ -436,7 +454,6 @@ impl SouthSink {
             events,
             alert_feed,
             iec104,
-            grid_bcast_at: std::sync::Mutex::new(None),
             latest,
             grid_station_id,
         }
@@ -544,41 +561,50 @@ impl SouthSink {
         }
     }
 
-    async fn broadcast_grid_iec104(&self, pkg: &mupc_data_processing::DataPackage) {
-        let now = std::time::Instant::now();
-        let allowed = {
-            let mut last = self.grid_bcast_at.lock().unwrap();
-            match *last {
-                Some(t) if now.duration_since(t) < std::time::Duration::from_millis(1000) => false,
-                _ => {
-                    *last = Some(now);
-                    true
+    /// 01 设计 §9.2.1.1 / §9.4 序 3：**写入侧**求值 15 组 BMS 聚合并写回快照（唯一求值点）。
+    ///
+    /// 触发：`on_station_telemetry` 内 `role == Battery` 且 `mark_station_polled` + 本批
+    /// `apply` **之后**（看到的是本轮一致视图）。求值输入 = 快照里该站**全部 288 个位点**
+    /// （一次 `station_snapshot` 取读锁，**不得逐点 `get`**——那会取 288 次锁）；位地址 `a`
+    /// ↔ 点名 `bms_alarm_{a-199}`（`bms_alarm` 块 `addr:200` + `positional`，§9.2.1.1）。
+    /// 结果以聚合点名经**唯一写入口** `apply` 写回（`ts_ms = 本轮`）⇒ C 档变更订阅 / 总召 /
+    /// 初始快照天然可见，不存在第二写方。值不变 ⇒ `apply` 不广播（COS，§9.1.5）。
+    fn apply_bms_aggregates(&self, station_id: &str, now_ms: u64) {
+        // 单次取读锁拿该站全部点，构建 位地址 → (值, 质量) 查询表
+        let snap = self.latest.station_snapshot(station_id);
+        let mut bit_map: HashMap<u16, (f64, PointQuality)> = HashMap::new();
+        for pv in &snap {
+            if let Some(k) = pv
+                .id
+                .metric
+                .strip_prefix("bms_alarm_")
+                .and_then(|s| s.parse::<u16>().ok())
+            {
+                if let Some(v) = pv.value.value {
+                    // 位地址 = 199 + 序号（`bms_alarm_k` ↔ 位地址 199+k）
+                    bit_map.insert(199 + k, (v, pv.value.quality));
                 }
             }
-        };
-        if !allowed {
-            return;
         }
-        let el = &pkg.electrical;
-        // 固定 IOA 分配：1=有功(kW) 2=无功(kVAr) 3=电压(V) 4=电流(A) 5=功率因数 6=频率(Hz)
-        let points: [(&str, u32, Option<f64>); 6] = [
-            ("active_power", 1, el.active_power),
-            ("reactive_power", 2, el.reactive_power),
-            ("voltage", 3, el.voltage),
-            ("current", 4, el.current),
-            ("cos_phi", 5, el.cos_phi),
-            ("frequency", 6, el.frequency),
-        ];
-        for (name, ioa, val) in points {
-            if let Some(v) = val {
-                // 仿 pv/load 南向模拟上送循环：encode_telemetry_asdu(ioa, v as f32, cot=1)，
-                // 单点单 ASDU 各自 make_i_frame 广播（pv/load 同范式，I 帧序号由连接层维护）。
-                tracing::debug!(ioa, name, v, "IEC104 上送 meter_grid 真值");
-                let asdu = mupc_gateway::iec104::protocol::encode_telemetry_asdu(ioa, v as f32, 1);
-                let frame = mupc_gateway::iec104::Iec104Frame::make_i_frame(0, 0, &asdu);
-                self.iec104.broadcast_telemetry(frame).await;
-            }
-        }
+        let lookup = |addr: u16| bit_map.get(&addr).copied();
+        let aggrs = mupc_southd::uplink::evaluate_bms_aggregates(&lookup);
+        let samples: Vec<(PointId, PointValue)> = aggrs
+            .into_iter()
+            .map(|(metric, value, quality)| {
+                (
+                    PointId {
+                        station: station_id.to_string(),
+                        metric: metric.to_string(),
+                    },
+                    PointValue {
+                        value,
+                        ts_ms: now_ms,
+                        quality,
+                    },
+                )
+            })
+            .collect();
+        self.latest.apply(samples);
     }
 }
 
@@ -587,11 +613,9 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
     async fn on_grid_package(&self, pkg: mupc_data_processing::DataPackage) {
         // 策略 phase 单写方（唯一 grid 源 south_stations.meter_grid，M-4 防双写方并存）。
         self.ai_integrator.set_latest_data(pkg.clone()).await;
-        // 审查 R2-A2 (2026-09-09)：同包 meter_grid 真值上送 IEC104——调度主站不再只收
-        // pv/load 南向模拟固定假遥测。数据流接线在 startup 层（SouthSink 为 core-bin 内联
-        // 类型，见广播实现注释的依赖方向约束）。
-        self.broadcast_grid_iec104(&pkg).await;
-        // 01 设计 §9.1.4 第 1 行：同包派生 6 量写最新值快照（**只新增**，上面两条既有路径不动）
+        // 01 设计 §9.1.4 第 1 行：同包派生 6 量写最新值快照。**IEC104 上送不再在此**——
+        // 旧 `broadcast_grid_iec104`（R2-A2，TI=13 无时标）已删除（§9.4 序 4），grid 6 点
+        // 由 `Iec104UplinkDriver` 的 A 档任务统一上送（TI=36 带时标，§9.2.4 方案 A）。
         self.apply_grid_snapshot(&pkg);
     }
 
@@ -657,8 +681,13 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
         }
         // 本批（含全部非事件点）一次 `apply` ⇒ 天然合并为一批（LV-4 允许合并）
         self.latest.apply(samples);
-        // ④ `role == Battery` ⇒ 15 组 BMS 聚合求值后 `apply`（§9.2.1.1）——依赖
-        //    `mupc-southd::uplink::evaluate_bms_aggregates`（U-74 后续任务），**不在本任务范围**。
+        // ④ 01 设计 §9.2.1.1 / §9.4 序 3：`role == Battery` ⇒ 本批 `apply` 之后立即求值
+        //    15 组 BMS 聚合并写回快照（写入侧唯一求值点；输入 = 快照里该站全部 288 位点，
+        //    一次取读锁，不逐点 get）。幂等：scheduler 每轮至多两次调用本回调（遥测 + 事件），
+        //    值不变 ⇒ `apply` 不广播（COS）。
+        if role == mupc_southd::config::Role::Battery {
+            self.apply_bms_aggregates(station_id, now_ms);
+        }
     }
 
     /// **覆写默认实现**（T5 留在 `StationSink` 上的接缝，T6 落地）：把站失败的 `reason`
@@ -1335,6 +1364,49 @@ pub async fn initialize_all(
         );
     }
 
+    // ── 01 设计 §9.1.8 / §9.4 序 1+2：外设遥测最新值快照 + 上送点表（机械生成）──
+    //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）；
+    //   构造点在网关 / 南向调度装配**之前**——写入方 = 下方 `SouthSink`，读取方 = IEC104
+    //   上送驱动器（序 5）与 `StrategyCommandHandler` 总召/初始快照（序 6）。
+    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+        config.south_stations.stale_timeout_s,
+    ));
+    // §9.4 序 2：上送点表机械生成（`build_uplink_points`），失败 ⇒ **拒启动**（配置/点表
+    // 漂移的 fail-fast，与 `validate_south_stations` 同范式，§9.2.1）。
+    let uplink_points = Arc::new(
+        mupc_southd::uplink::build_uplink_points(&config.south_stations).map_err(|e| {
+            MupcError::new(
+                ErrorCode::Unknown,
+                format!("上送点表生成失败（拒启动）: {e}"),
+                "startup",
+            )
+        })?,
+    );
+    // §9.2.1 启动期产物：点表 JSON 落 `system.data_dir/uplink_points.json`（供 RC-U74-02
+    // 与主站逐点对点；**不得手写 IOA 常量**）。落盘失败**不**拒启动——内存点表才是上送真源，
+    // JSON 只是离线对点产物，故只 error 观测（与 `validate` 的 fail-fast 区分）。
+    {
+        let json_path = config.system.data_dir.join("uplink_points.json");
+        let total = uplink_points.len();
+        let iec104_n = uplink_points
+            .iter()
+            .filter(|p| p.channels.has(mupc_southd::uplink::ChannelMask::IEC104))
+            .count();
+        match crate::uplink::write_uplink_points_json(&json_path, &uplink_points).await {
+            Ok(()) => tracing::info!(
+                "上送点表已生成：共 {} 条 / IEC104 子集 {} 条 → 落 {}",
+                total,
+                iec104_n,
+                json_path.display()
+            ),
+            Err(e) => tracing::error!(
+                "uplink_points.json 落盘失败（不阻断启动；内存点表为真源）{}: {}",
+                json_path.display(),
+                e
+            ),
+        }
+    }
+
     // ── 9. IEC 104 网关 ──
     tracing::info!("[09/14] 初始化 IEC 104 网关...");
     // 审查 R2-A2 (2026-09-09)：北向监听地址/端口读 config.gateway 段（缺省 0.0.0.0:2404，
@@ -1350,6 +1422,9 @@ pub async fn initialize_all(
         intercore: intercore.clone(),
         interlock: interlock_ctl.clone(),
         p_max_kw,
+        // §9.4 序 6：总召 / 连接初始快照数据源（与上送驱动器同一份快照 + 点表）
+        latest: latest.clone(),
+        points: uplink_points.clone(),
     });
     let server_clone = iec104_server.clone();
     guard.0.push(tokio::spawn(async move {
@@ -1358,6 +1433,22 @@ pub async fn initialize_all(
         }
     }));
     coord.register_service("gateway", ServiceStatus::Running);
+
+    // ── 01 设计 §9.4 序 5：IEC 104 上送驱动器（A/B/C 三档任务；A/B 周期、C 变位 COS）──
+    //   持同一份 `latest` + `uplink_points`；三任务无停机钩子（不写存储、在途无未落盘批次）
+    //   ⇒ 入 abort 名单（`guard`），与网关/指标采集同范式。档位过滤表驱动（读 `UplinkPoint.class`）。
+    let uplink_driver = Arc::new(crate::uplink::Iec104UplinkDriver::new(
+        latest.clone(),
+        uplink_points.clone(),
+        iec104_server.clone(),
+        // A/B 档周期（§9.2.2「周期须可配置」的注入点；当前用缺省 1000/5000 ms，
+        // 后续可改读 config——本任务不动 core_config schema）。
+        crate::uplink::DEFAULT_CLASS_A_INTERVAL,
+        crate::uplink::DEFAULT_CLASS_B_INTERVAL,
+    ));
+    for h in uplink_driver.spawn() {
+        guard.0.push(h);
+    }
 
     // ── S3 §10.3：策略 phase 源装配（master_meter 段已删除收敛，2026-09-09 S3b-1c）──
     //   B. south_stations.stations 非空 → southd scheduler：grid 单写 AiIntegrator。
@@ -1368,12 +1459,8 @@ pub async fn initialize_all(
     //   C. 无 stations → grid_on=false → pv/load 南向模拟兜底。
     // grid_on = 策略 phase 源可用（决定下方 pv/load 南向模拟 task 是否 set_latest_data；
     // M-4 防双写方并存：grid 源在即南向模拟不覆盖；无 grid 源则南向模拟兜底测量）。
-    // ── 01 设计 §9.1.8：外设遥测**最新值快照**（上云 / 上屏 / 策略的共用取数入口）──
-    //   `stale_timeout_s` 由配置**注入** ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）；
-    //   构造点在南向调度装配**之前**，写入方 = 下方 `SouthSink`（§9.1.1 归属裁定）。
-    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
-        config.south_stations.stale_timeout_s,
-    ));
+    // `latest`（最新值快照，01 设计 §9.1.8）已在步骤 9 之前构造（§9.4 序 1，上送驱动器与
+    // 总召共用同一实例）——此处不再重建，下方 `SouthSink` 经 `latest.clone()` 注入为写入方。
     let mut grid_on = false;
     if !config.south_stations.stations.is_empty() {
         // B. southd 路径（stations 非空即装配——非 grid 站 battery/hvac/fire telemetry/状态
@@ -1460,11 +1547,11 @@ pub async fn initialize_all(
         );
     }
 
-    // 南向数据采集循环（上行）：读取 → 转换 → 持久化 + 北向 gateway 上送。
+    // 南向数据采集循环（上行）：读取 → 转换 → 持久化（+ 无 grid 源时兜底注入 AiIntegrator）。
+    // ⚠️ 原本还有一条 IEC104 假遥测上送支路，已按 §9.4 序 10 删除（见循环内注释）。
     // AI 观测注入已停（平台目标调整 2026-09-09：观测维度重构前停采）。
     if let (Some(pv), Some(load)) = (pv_device.clone(), load_device.clone()) {
         let wb = write_buffer.clone();
-        let g = iec104_server.clone();
         let ai_int = ai_integrator.clone();
         // U-64：本环是**遥测缓冲的生产者**之一（另一处是 `SouthSink`）⇒ 入协作退出名单：
         // 收到停机信号即结束本轮、把在途写入做完，而不是被 abort 在半路。
@@ -1475,8 +1562,6 @@ pub async fn initialize_all(
             "south_sim_loop",
             tokio::spawn(async move {
                 let grid_on = grid_on; // grid 策略源在时（southd 含 meter_grid）由它提供，南向模拟不覆盖
-                                       // FIXME: IOA 分配和发送序号按连接维护，这里用固定值
-                let mut ioa_seq = 0u32;
                 loop {
                     // 停机信号与 1 s 节拍二选一：先到先执行（信号到了就收工，不再采新点）
                     tokio::select! {
@@ -1497,23 +1582,12 @@ pub async fn initialize_all(
                                         tracing::debug!("遥测写入失败: {}", e);
                                     }
                                 }
-                                // 北向上送（仅无 grid 源兜底路径；审查 R2-A2）：grid_on 时 meter_grid
-                                // 真值已由 SouthSink 以固定 IOA 1..6 上送，此 pv/load 假遥测 ioa_seq
-                                // 亦自 1 递增 → 若仍上送会与真值 IOA 相撞（M-4 同款单写方语义，
-                                // grid 源在即南向模拟不覆盖北向）。取有功功率作为示例（FIXME: 完整点表映射）
-                                if !grid_on {
-                                    if let Some(v) = pkg.electrical.active_power {
-                                        ioa_seq = ioa_seq.wrapping_add(1);
-                                        let asdu =
-                                            mupc_gateway::iec104::protocol::encode_telemetry_asdu(
-                                                ioa_seq, v as f32, 1,
-                                            );
-                                        let frame = mupc_gateway::iec104::Iec104Frame::make_i_frame(
-                                            0, 0, &asdu,
-                                        );
-                                        g.broadcast_telemetry(frame).await;
-                                    }
-                                }
+                                // 01 设计 §9.4 序 10 / §9.7 C-15：原本此处还有一条 IEC104
+                                // 假遥测上送支路（以自增的点表外 IOA、固定序号组 I 帧广播），
+                                // 已**删除**——它与段 1（总表 IOA 1–6）语义相撞、破坏 AC-U74-01。
+                                // pv/load 是 `create_rs485_device` 造的模拟设备，**不在** `south_stations`
+                                // ⇒ 无点表 IOA；北向真值上送统一由 `Iec104UplinkDriver`（读快照）承担。
+                                // **保留** `set_latest_data` 注入与 `buffer_telemetry` 落库两条非 IEC104 职责。
                             }
                             Err(e) => tracing::debug!("南向采集 {} 失败: {}", name, e),
                         }
@@ -2213,10 +2287,26 @@ plugins: {}
         let soc = latest.get(&soc_id);
         assert_eq!(soc.value.value, Some(55.0), "非事件点必须进快照");
         assert_eq!(soc.value.quality, PointQuality::Ok);
+        // T13（§9.2.1.1）：`role==Battery` ⇒ 本批 apply 后写回 **15 组聚合**（`bms_aggr_*`）。
+        // 故 "bms" 快照 = 2 个非事件源点（soc + bms_alarm_225）+ 15 聚合。本断言的原判据是
+        // 「**事件点不得进快照**」⇒ 过滤掉聚合点后计数（原 `.len()==2` 系聚合接线**前**的 T1
+        // 口径，随 T13 按 §9.2.1.1 更新；意图不变，并新增聚合数断言钉住写回）。
+        let bms_snap = latest.station_snapshot("bms");
         assert_eq!(
-            latest.station_snapshot("bms").len(),
+            bms_snap
+                .iter()
+                .filter(|pv| !pv.id.metric.starts_with("bms_aggr_"))
+                .count(),
             2,
-            "事件点不得进快照（仍只有 2 个非事件点）"
+            "事件点不得进快照（非聚合仍只有 2 个非事件点）"
+        );
+        assert_eq!(
+            bms_snap
+                .iter()
+                .filter(|pv| pv.id.metric.starts_with("bms_aggr_"))
+                .count(),
+            15,
+            "role==Battery ⇒ 15 组 BMS 聚合写回快照（§9.2.1.1）"
         );
         assert_eq!(
             latest.station_last_poll_ms("bms"),
@@ -2275,6 +2365,77 @@ plugins: {}
         });
         assert_eq!(volt.value.value, Some(220.0));
         assert_eq!(volt.value.quality, PointQuality::Ok);
+    }
+
+    /// **T13（§9.2.1.1）：BMS 15 组聚合写回快照** —— `on_station_telemetry(role==Battery)`
+    /// 在本批 `apply` 之后，从快照读该站**全部位点**（一次取读锁，不逐点 get）求值 15 组聚合，
+    /// 以聚合点名经同一 `apply` 写回。判据：① 15 组 `bms_aggr_*` 出现；② OR 语义（任一位 1
+    /// ⇒ 聚合 1）；③ 全组不可得 ⇒ `None`（**严禁写 0**，EX-6，不得假报"无告警"）。
+    ///
+    /// **改什么会让本条变红**：删掉 `on_station_telemetry` 末尾的 `apply_bms_aggregates` 调用
+    /// （聚合恒缺失 ⇒ ① 红）；用"本批交付位"而非全快照求值；或把不可得组写成 0（③ 红）。
+    #[tokio::test]
+    async fn south_sink_battery_writes_back_15_bms_aggregates() {
+        use mupc_southd::scheduler::StationSink as _;
+
+        let t = crate::testutil::TempDir::new("bms-aggr-writeback");
+        let db = t.join("mupcd.db");
+        std::fs::File::create(&db).unwrap();
+        let pool = mupc_storage::init_pool(db.to_str().unwrap()).await.unwrap();
+        let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+            mupc_data_processing::DATA_FRESHNESS_MS / 1000,
+        ));
+        let sink = SouthSink::new(
+            Arc::new(mupc_strategy_engine::AiIntegrator::new()),
+            Arc::new(mupc_storage::WriteBuffer::new(1000, 5000, Arc::new(pool))),
+            Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new()))),
+            Arc::new(crate::alert_feed::AlertFeed::new()),
+            Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+                mupc_gateway::iec104::server::Iec104Config::default(),
+            )),
+            latest.clone(),
+            None,
+        );
+
+        // 组 1 cluster_voltage = 位地址 201–206 ↔ `bms_alarm_2..7`；置 bms_alarm_2=1、其余 0
+        let bits: Vec<(String, f64, bool)> = (2..=7u16)
+            .map(|k| {
+                (
+                    format!("bms_alarm_{k}"),
+                    if k == 2 { 1.0 } else { 0.0 },
+                    false,
+                )
+            })
+            .collect();
+        sink.on_station_telemetry("bms", mupc_southd::config::Role::Battery, bits)
+            .await;
+
+        // ① 15 组聚合写回
+        let aggrs: Vec<_> = latest
+            .station_snapshot("bms")
+            .into_iter()
+            .filter(|pv| pv.id.metric.starts_with("bms_aggr_"))
+            .collect();
+        assert_eq!(aggrs.len(), 15, "15 组 BMS 聚合必须写回快照");
+
+        // ② OR 语义：cluster_voltage 组有位 201=1 ⇒ 聚合=1，且组内位齐 ⇒ Ok
+        let cv = latest.get(&PointId {
+            station: "bms".to_string(),
+            metric: "bms_aggr_cluster_voltage".to_string(),
+        });
+        assert_eq!(cv.value.value, Some(1.0), "任一位 1 ⇒ 聚合 1（OR）");
+        assert_eq!(cv.value.quality, PointQuality::Ok, "组内位齐 ⇒ Ok");
+        assert!(cv.value.ts_ms > 0, "ts_ms = 本轮");
+
+        // ③ 全组不可得（位未交付）⇒ None（严禁写 0，EX-6）
+        let ct = latest.get(&PointId {
+            station: "bms".to_string(),
+            metric: "bms_aggr_cell_temp".to_string(),
+        });
+        assert_eq!(
+            ct.value.value, None,
+            "全组不可得 ⇒ None（严禁写 0；不得假报无告警）"
+        );
     }
 
     /// 真 `SouthSink` + 记账仓储 + 真 `AlertFeed`（T6 的两个文案用例共用装配，避免三处复制）。
