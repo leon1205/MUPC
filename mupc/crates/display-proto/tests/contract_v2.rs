@@ -1,19 +1,21 @@
-//! 契约 v2 集成断言（**只用公开 API + 字面量 JSON**）。
+//! 契约 v2/v3 集成断言（**只用公开 API + 字面量 JSON**）。
 //!
 //! 为什么单独一层：模块内单测在 crate 内部，与实现同源——若实现与设计同错，往返断言
 //! （`to_string` → `from_str`）**照样通过**，掩盖契约偏差。本文件以**手写字面量 JSON**
 //! 钉死线上线格式（字段名 / 枚举词表 / `null` 语义），任何字段改名或语义漂移都会在此失败。
 //!
 //! 覆盖（设计 §11.1 `display-proto` 行）：
-//! 帧 v2 往返（含新段缺省）、旧帧兼容（v1 帧 → v2 类型）、未知字段容忍、
-//! `PROTO_VERSION` 不匹配拒绝、畸形帧（超限）拒绝、控制信封 / 回执 / 错误码、
-//! 幂等与审计 fail-closed、配置字段越界拒绝。
+//! 帧 v3 往返（含 v2 段 + 外设段缺省）、旧帧兼容（v1 帧 → 类型层缺省）、未知字段容忍、
+//! `PROTO_VERSION` 不匹配拒绝（**含旧帧 v2 拒绝，§15.2.1**）、畸形帧（超限）拒绝、
+//! 控制信封 / 回执 / 错误码、幂等与审计 fail-closed、配置字段越界拒绝。
+//!
+//! 外设段（U-73 / 设计 §15.2）的 T-1~T-4b 断言见 `tests/contract_v3_peripherals.rs`。
 
 use mupc_display_proto::*;
 
-/// 设计 §3.1 的完整 v2 帧（字面量；四新段齐备）。
-const V2_FRAME_JSON: &str = r#"{
-    "version": 2,
+/// 设计 §3.1 的完整 v3 帧（字面量；v2 四新段齐备，`peripherals` 由 `serde(default)` 取缺省）。
+const V3_FRAME_JSON: &str = r#"{
+    "version": 3,
     "seq": 123,
     "ts_ms": 1757412000000,
     "soc": 65.0,
@@ -61,12 +63,17 @@ const V2_FRAME_JSON: &str = r#"{
     }
 }"#;
 
+/// 旧帧（v2 线上形态；**无 `peripherals`**）——用于 §15.2.1 的拒帧断言。
+fn v2_legacy_json() -> String {
+    V3_FRAME_JSON.replace("\"version\": 3", "\"version\": 2")
+}
+
 #[test]
-fn v2_frame_wire_shape_is_pinned() {
-    let frame = DisplayFrame::from_json_slice(V2_FRAME_JSON.as_bytes()).expect("合法 v2 帧须可解码");
+fn v3_frame_wire_shape_is_pinned() {
+    let frame = DisplayFrame::from_json_slice(V3_FRAME_JSON.as_bytes()).expect("合法 v3 帧须可解码");
 
     // v1 段语义不变
-    assert_eq!(frame.version, 2);
+    assert_eq!(frame.version, 3);
     assert_eq!(frame.seq, 123);
     assert_eq!(frame.ts_ms, 1_757_412_000_000);
     assert_eq!(frame.soc, Some(65.0));
@@ -89,11 +96,14 @@ fn v2_frame_wire_shape_is_pinned() {
     assert_eq!(frame.info.mgmt_ipv4, None);
     assert!(!frame.interlock.available, "available=false ≠ 未联锁（IL-01.6）");
     assert_eq!(frame.interlock.fault_lamp, None, "null → 未知，不臆造为灭");
+    // v3 外设段：本帧不含该段 ⇒ 取缺省 = 「外设数据不可用」（EDGE-22），不出"空段正常"
+    assert!(!frame.peripherals.available);
+    assert_eq!(frame.peripherals, PeripheralsSection::default());
 
     // 再编码：字段名与 null 语义必须逐字保持（防实现侧改名 / 补 0）
     let out = serde_json::to_string(&frame).unwrap();
     for needle in [
-        "\"version\":2",
+        "\"version\":3",
         "\"soc_source\":\"pcs_reg1010\"",
         "\"run_state\":2",
         "\"p_phase\":[",
@@ -107,6 +117,7 @@ fn v2_frame_wire_shape_is_pinned() {
         "\"mgmt_ipv4\":null",
         "\"interlock\":{",
         "\"fault_lamp\":null",
+        "\"peripherals\":{",
     ] {
         assert!(out.contains(needle), "编码结果缺 `{needle}`：{out}");
     }
@@ -120,7 +131,7 @@ fn v2_frame_wire_shape_is_pinned() {
 }
 
 #[test]
-fn v1_frame_into_v2_type_degrades_explicitly_and_version_is_rejected() {
+fn v1_frame_into_v3_type_degrades_explicitly_and_version_is_rejected() {
     // 真实 v1 发布方：无四新段，version=1
     let v1 = r#"{"version":1,"seq":9,"ts_ms":1757412000000,"soc":null,
         "soc_source":"lost","soc_flag":"offline","run_state":null,"pcs_online":false,
@@ -138,20 +149,35 @@ fn v1_frame_into_v2_type_degrades_explicitly_and_version_is_rejected() {
     assert_eq!(frame.device.iec104, LinkState::Unknown);
     assert_eq!(frame.device.control_source, ControlSource::Unknown);
     assert_eq!(frame.info.firmware_version, "");
+    assert!(!frame.peripherals.available, "外设段缺失 ⇒ 不可用（EDGE-22）");
 
-    // 2) 但版本校验**必须拒绝**——绝不允许静默按 v2 语义展示 v1 帧
+    // 2) 但版本校验**必须拒绝**——绝不允许静默按 v3 语义展示 v1 帧
     let err = DisplayFrame::from_json_slice(v1.as_bytes()).unwrap_err();
     assert!(
-        matches!(err, Error::ProtoVersionMismatch { got: 1, expected: 2 }),
+        matches!(err, Error::ProtoVersionMismatch { got: 1, expected: 3 }),
         "v1 帧必须被拒绝，实际: {err:?}"
     );
     assert!(err.to_string().contains("version mismatch"));
 
-    // 3) 未来版本同样拒绝（不静默接受）
-    let v3 = V2_FRAME_JSON.replace("\"version\": 2", "\"version\": 3");
+    // 3) **旧帧 v2** 同样拒绝（§15.2.1：v3 不放宽拒帧规则；F26.2 / EX-29）
+    let v2 = v2_legacy_json();
+    let err = DisplayFrame::from_json_slice(v2.as_bytes()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::ProtoVersionMismatch {
+                got: 2,
+                expected: 3
+            }
+        ),
+        "旧帧 v2 必须被拒绝，实际: {err:?}"
+    );
+
+    // 4) 未来版本同样拒绝（不静默接受）
+    let v4 = V3_FRAME_JSON.replace("\"version\": 3", "\"version\": 4");
     assert!(matches!(
-        DisplayFrame::from_json_slice(v3.as_bytes()),
-        Err(Error::ProtoVersionMismatch { got: 3, expected: 2 })
+        DisplayFrame::from_json_slice(v4.as_bytes()),
+        Err(Error::ProtoVersionMismatch { got: 4, expected: 3 })
     ));
 }
 
@@ -169,7 +195,7 @@ fn malformed_frame_is_rejected_not_parsed() {
         Err(Error::Json(_))
     ));
     // 枚举外运行态：反序列化即拒（越界不得被接受）
-    let bad = V2_FRAME_JSON.replace("\"run_state\": 2", "\"run_state\": 7");
+    let bad = V3_FRAME_JSON.replace("\"run_state\": 2", "\"run_state\": 7");
     assert!(DisplayFrame::from_json_slice(bad.as_bytes()).is_err());
 }
 

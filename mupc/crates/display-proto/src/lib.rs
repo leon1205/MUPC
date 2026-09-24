@@ -7,6 +7,10 @@
 //!   `info` / `interlock` 四新段）及 `Field` / `FieldFlag` / `RunState` / `SocSource` /
 //!   `LinkState` / `ControlSource` / `AlarmLevel` / `ServiceScope` 等。mupcd（发布方）与
 //!   mupc-local-display（订阅方）及测试桩共享。
+//!   **v3（U-73，设计 §15.2）**：新增 [`peripherals::PeripheralsSection`] 外设段 +
+//!   §15.2.4 的帧预算常量（`POINT_JSON_BYTES_*` / `MAX_PERIPH_BYTES` 等）。
+//! - [`peripherals`]：外设段 DTO（设计 §15.2.2）+ 帧预算守卫常量与**纯函数**（设计 §15.2.4，
+//!   调用点在组帧侧 `display_host::build_frame`）。
 //! - [`control`]：控制通道（设计 §3.3 / §3.4）——统一信封 `ControlRequest` / 回执
 //!   `ControlResponse` / 错误码 `ControlCode` / 幂等键 / 端点清单 / 配置字段元数据。
 //! - [`interlock`]：安全 / 联锁（设计 §4.6）——`InterlockApi` trait + `InterlockView` /
@@ -28,6 +32,7 @@ pub mod error;
 pub mod frame;
 pub mod interlock;
 pub mod log;
+pub mod peripherals;
 
 pub use crate::audit::{AuditPage, AuditResult, ConsoleAuditEntry, ConsoleOp, OpOption, AUDIT_PAGE_SIZE};
 pub use crate::config::{
@@ -47,11 +52,19 @@ pub use crate::error::{Error, Result};
 pub use crate::frame::{
     AlarmItem, AlarmLevel, AlarmsSection, ControlSource, DeviceSection, DisplayFrame, Field,
     FieldFlag, InfoSection, InterlockSection, InterlockSourceItem, LinkState, RunState,
-    ServiceScope, SocSource, DEFAULT_STALE_MS, LATEST_PATH, MAX_ALARM_MESSAGE_BYTES,
-    MAX_FRAME_BYTES, PROTO_VERSION,
+    ServiceScope, SocSource, DEFAULT_STALE_MS, EXISTING_SEGMENTS_RESERVE, LATEST_PATH,
+    MAX_ALARM_MESSAGE_BYTES, MAX_FRAME_BYTES, MAX_PERIPH_BYTES, PERIPH_FIXED_JSON_BYTES,
+    POINT_JSON_BYTES_F64_ABS_MAX, POINT_JSON_BYTES_TYPICAL, POINT_JSON_BYTES_UPPER, PROTO_VERSION,
 };
 pub use crate::interlock::{
     InterlockApi, InterlockOpAck, InterlockOpPayload, InterlockReject, InterlockSourceStatus,
     InterlockStatus, InterlockView,
+};
+pub use crate::peripherals::{
+    enforce_exit_guard, enforce_fire_det_budget, fire_det_keep_units, fire_det_truncated_note,
+    truncate_fire_det_prefix, ExitGuardOutcome, PeriphRole, PeripheralBlock, PeripheralStation,
+    PeripheralsSection, PointValue, FIRE_DET_BLOCK_NAME, FIRE_DET_POINTS_PER_UNIT,
+    FIRE_DET_TRUNCATE_MIN_N, K_MAX_FIRE_DET, PERIPH_NON_FIRE_DET_POINTS,
+    PERIPH_NON_FIRE_DET_UPPER_BYTES,
 };
 pub use crate::log::{LogEntry, LogLevel, LogPage, LogRange};

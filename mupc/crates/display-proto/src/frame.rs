@@ -10,15 +10,23 @@
 //! - v2 新增 [`DeviceSection`] / [`AlarmsSection`] / [`InfoSection`] / [`InterlockSection`]
 //!   四段，全部 `#[serde(default)]`：**旧帧（v1）反序列化到 v2 类型时新段取 `Default`**，
 //!   其 `available=false` 等缺省值恰好落在 §9 降级语义上（显「不可用」而非伪装正常）。
+//! - v3 新增 [`crate::peripherals::PeripheralsSection`]（U-73 外设段，设计 §15.2）：同样
+//!   `#[serde(default)]`；**旧帧（v2）反序列化到 v3 类型时该段取 `Default`**
+//!   （`available=false` → 屏显「外设数据不可用」，EDGE-22），但该帧仍会在
+//!   [`DisplayFrame::check_version`] 处被拒（`version=2 ≠ 3`）——两条防线语义不同、缺一不可。
 //! - 慢拍段的 `Option` 字段 `None` 一律表示「不可得」→ 渲染端显式降级（`--` / 「未提供」），
 //!   **严禁补 0 或臆造**（PRD §5 总原则，EDGE-16 等）。
 
 /// 帧协议版本。
 ///
 /// v1 → v2：段扩展（新增 `device` / `alarms` / `info` / `interlock` 四段）。
+/// v2 → v3：段扩展（新增 `peripherals` 外设段，设计 §15.2.1；U-73 增量）。
 /// 消费方**必须**校验本值（[`DisplayFrame::check_version`] / [`DisplayFrame::from_json_slice`]）：
 /// 不一致即拒绝该帧，不得静默按旧语义展示（设计 §3.5 条 1 / PRD §4.4.1）。
-pub const PROTO_VERSION: u8 = 2;
+///
+/// **单一真源**（设计 §15.2.1 / F26.1）：版本号只在本处定义，**各段不带版本**；
+/// v3 **不放宽**任何拒帧规则——`mupcd` 与 `mupc-local-display` 必须同版本发布（F26.3）。
+pub const PROTO_VERSION: u8 = 3;
 
 /// 渲染端判「数据过期」阈值（PRD F5.3：当前时间 − 帧时间戳 > 2s 判过期）。
 pub const DEFAULT_STALE_MS: u64 = 2000;
@@ -36,6 +44,47 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// 无此约束时，发布方 10 条 × 7 KB 消息 = 70 KB 会「正常发出」，
 /// HMI 端整帧 [`crate::Error::FrameTooLarge`] 丢弃 → 画面停在旧帧且**无法定位责任方**。
 pub const MAX_ALARM_MESSAGE_BYTES: usize = 1024;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U-73 外设段（v3）帧预算常量 —— 设计 §15.2.4 的**单一真源**（落点：设计 §15.11 #1）
+//
+// ⚠️ 三档点编码口径**不得互相顶替**（§15.2.4 实测依据 N-21）：
+// - `POINT_JSON_BYTES_TYPICAL`  只用于**容量陈述**（"n=100 占帧多少"）；
+// - `POINT_JSON_BYTES_UPPER`    才是**守卫预检**的输入（决定裁不裁、裁到几只）；
+// - `POINT_JSON_BYTES_F64_ABS_MAX` 只用于**兜底说明**（出口守卫的失效模式），不作预检口径。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 单点 JSON 的**典型**字节数（`serde_json` 紧凑形态，实测）。
+/// 实测形态 `{"at":201,"v":1.0,"flag":"valid"}` = **33 B**（§15.2.4 表）。
+/// **仅用于容量陈述**，不得作为守卫预检口径。
+pub const POINT_JSON_BYTES_TYPICAL: usize = 33;
+
+/// 白名单内**可达的**单点上界字节数：`at ≤ 594`（3 位）+ 工程值 ≤ 12 字符 + 最长 flag。
+/// 实测形态 `{"at":594,"v":-214748364.7,"flag":"range_error"}` = **48 B**（§15.2.4 表）。
+/// **守卫预检唯一口径**（用上界而非典型值 ⇒ 不会"按典型说不裁、按实际却爆帧"）。
+pub const POINT_JSON_BYTES_UPPER: usize = 48;
+
+/// f64 最短往返表示的**理论**极值（`-1.7976931348623157e308`，23 字符）⇒ **60 B**。
+/// **工程不可达**（登记 `scale` 已消解量纲、幅值受 `reg_format` 约束）；仅用于说明
+/// 出口守卫的失效边界（§15.2.4「兜底边界（R-43）」）。
+pub const POINT_JSON_BYTES_F64_ABS_MAX: usize = 60;
+
+/// 外设段**固定开销**的保守上界（字节）：5 站 + 21 块的 `id` / `role` / `online` /
+/// 时间戳 / `renames` / `truncated` / 空数组括号。实测 ≈2.7 KiB ⇒ 取 4 KiB（§15.2.2）。
+pub const PERIPH_FIXED_JSON_BYTES: usize = 4 * 1024;
+
+/// 给既有 5 段（F1–F5 + `device` / `alarms` / `info` / `interlock`）的预留字节。
+/// 实测基线（10 条短告警）≈**1.6 KiB** ⇒ 8 KiB = **≥5× 余量**（§15.2.4）。
+///
+/// ⚠️ **不覆盖** 10 条 × [`MAX_ALARM_MESSAGE_BYTES`] = 10 KiB 的极端组合；该组合由
+/// [`crate::peripherals::enforce_exit_guard`]（§15.2.4 步骤 5）兜底（登记 R-43）。
+pub const EXISTING_SEGMENTS_RESERVE: usize = 8 * 1024;
+
+/// 外设段预算 = 帧上限 − 既有段预留 = **56 KiB**（= 57,344 B，占帧上限 87.5 %）。
+/// 取值由「n=100（PRD 探测器上限）**不触发裁剪**」反解并留余量（§15.2.4「守卫取值」表）：
+/// `k_max = ⌊(56 KiB − 441×48 B − 4 KiB) / (6×48 B)⌋ = 111 只 > 99 只`
+/// （见 [`crate::peripherals::K_MAX_FIRE_DET`]）。
+pub const MAX_PERIPH_BYTES: usize = MAX_FRAME_BYTES - EXISTING_SEGMENTS_RESERVE;
 
 /// 读通道唯一端点路径（设计 §3.2）。`config::DEFAULT_CHANNEL_URL` 以本常量为路径。
 pub const LATEST_PATH: &str = "/v1/display/latest";
@@ -416,6 +465,12 @@ pub struct DisplayFrame {
     /// F16 联锁状态。
     #[serde(default)]
     pub interlock: InterlockSection,
+
+    // ── v3 新增分节（`serde(default)`；v2 帧 → v3 类型取 Default ⇒ `available=false`）──
+    /// F20–F24 外设数值段（U-73；设计 §15.2.2）。缺省 = 「外设数据不可用」（EDGE-22），
+    /// **绝不伪装正常**（不补 0、不出"空段正常"）。
+    #[serde(default)]
+    pub peripherals: crate::peripherals::PeripheralsSection,
 }
 
 impl DisplayFrame {
@@ -574,9 +629,10 @@ mod tests {
     }
 
     // ---- DisplayFrame：JSON 全往返（含 Option None）----
-    /// 设计 §3.1 JSON 示例帧（v2；v1 段 + 四新段，run_state 为数值 2、soc 65.0）。
+    /// 设计 §3.1 JSON 示例帧（**v3**；v1 段 + v2 四新段；`peripherals` 段由
+    /// `#[serde(default)]` 取缺省 ⇒ `available=false`，run_state 为数值 2、soc 65.0）。
     const SAMPLE_JSON: &str = r#"{
-        "version": 2,
+        "version": 3,
         "seq": 123,
         "ts_ms": 1757412000000,
         "soc": 65.0,
@@ -659,6 +715,15 @@ mod tests {
         assert_eq!(f.interlock.run_lamp, Some(true));
         assert_eq!(f.interlock.release_hold_secs, 30);
         assert_eq!(f.interlock.sources[0].name, "estop");
+        // v3 段：示例帧不含 `peripherals` → 取缺省 ⇒ 「外设数据不可用」（EDGE-22）
+        assert_eq!(
+            f.peripherals,
+            crate::peripherals::PeripheralsSection::default()
+        );
+        assert!(
+            !f.peripherals.available,
+            "段缺失 ⇒ available=false（显式降级，不得伪装为空段正常）"
+        );
         // 编码后回解码 == 原帧（稳定往返）
         let encoded = serde_json::to_string(&f).unwrap();
         let dec: DisplayFrame = serde_json::from_str(&encoded).unwrap();
@@ -666,27 +731,41 @@ mod tests {
     }
 
     /// 版本一致性：帧 `version != PROTO_VERSION` → 必须拒绝（设计 §3.5 条 1 / PRD §4.4.1）。
+    ///
+    /// **v3 不放宽**（设计 §15.2.1 / F26.2）：旧帧（v1 无四新段、**v2 无 `peripherals`**）
+    /// 与未来版本一律拒帧 ⇒ 「旧帧落入新类型取 Default」这条类型层容忍**不能**替代版本校验
+    /// ——两条防线语义不同、缺一不可。
     #[test]
     fn frame_version_mismatch_is_rejected() {
         // 字面量 JSON：同结构、仅 version 为旧值 1
-        let v1_json = SAMPLE_JSON.replace("\"version\": 2", "\"version\": 1");
+        let v1_json = SAMPLE_JSON.replace("\"version\": 3", "\"version\": 1");
         let bytes = v1_json.as_bytes();
         let err = DisplayFrame::from_json_slice(bytes).unwrap_err();
         assert!(
             matches!(
                 err,
-                crate::Error::ProtoVersionMismatch { got: 1, expected: 2 }
+                crate::Error::ProtoVersionMismatch { got: 1, expected: 3 }
             ),
             "版本不一致必须 Err(ProtoVersionMismatch)，实际: {err:?}"
         );
         // 逐字含断言：错误文案暴露 got/expected，便于现场定位
         assert!(err.to_string().contains("mismatch"));
 
-        // 未来版本（version=3）同样拒绝，不得静默接受
-        let v3_json = SAMPLE_JSON.replace("\"version\": 2", "\"version\": 3");
+        // 旧帧 v2（本增量前的线上形态：无 `peripherals`）同样拒绝，不得按 v3 语义展示
+        let v2_json = SAMPLE_JSON.replace("\"version\": 3", "\"version\": 2");
         assert!(matches!(
-            DisplayFrame::from_json_slice(v3_json.as_bytes()),
-            Err(crate::Error::ProtoVersionMismatch { got: 3, .. })
+            DisplayFrame::from_json_slice(v2_json.as_bytes()),
+            Err(crate::Error::ProtoVersionMismatch {
+                got: 2,
+                expected: 3
+            })
+        ));
+
+        // 未来版本（version=4）同样拒绝，不得静默接受
+        let v4_json = SAMPLE_JSON.replace("\"version\": 3", "\"version\": 4");
+        assert!(matches!(
+            DisplayFrame::from_json_slice(v4_json.as_bytes()),
+            Err(crate::Error::ProtoVersionMismatch { got: 4, .. })
         ));
     }
 
@@ -803,16 +882,16 @@ mod tests {
         );
     }
 
-    /// 向后兼容（设计 §3.1 JSON 兼容性说明）：v1 帧（无四新段）→ v2 类型，
+    /// 向后兼容（设计 §3.1 JSON 兼容性说明 + §15.2.1）：v1 帧（无四新段）→ **v3** 类型，
     /// 新段取 Default，且 `available=false` 落在「不可用」降级语义上（**不**伪装正常 / 无告警）。
     #[test]
-    fn v1_frame_deserializes_into_v2_with_degraded_defaults() {
-        let v1_json = SAMPLE_JSON.replace("\"version\": 2", "\"version\": 1");
-        // 去掉四新段，模拟真实 v1 发布方
+    fn v1_frame_deserializes_into_v3_with_degraded_defaults() {
+        let v1_json = SAMPLE_JSON.replace("\"version\": 3", "\"version\": 1");
+        // 去掉新段，模拟真实 v1 发布方
         let f: DisplayFrame = {
             let v: serde_json::Value = serde_json::from_str(&v1_json).unwrap();
             let mut obj = v.as_object().unwrap().clone();
-            for k in ["device", "alarms", "info", "interlock"] {
+            for k in ["device", "alarms", "info", "interlock", "peripherals"] {
                 obj.remove(k);
             }
             serde_json::from_value(serde_json::Value::Object(obj)).unwrap()
@@ -826,7 +905,10 @@ mod tests {
         assert_eq!(f.device.control_source, ControlSource::Unknown);
         assert_eq!(f.info.firmware_version, "");
         assert_eq!(f.info.mgmt_ipv4, None);
-        // 注意：v1 帧的 version=1 → 消费方须走 check_version 拒绝，而非按 v2 语义展示
+        // 外设段缺失 → 不可用（EDGE-22），不得出"空段正常"
+        assert!(!f.peripherals.available && f.peripherals.stations.is_empty());
+        assert_eq!(f.peripherals.ts_ms, 0, "未采集 ⇒ ts_ms = 0（不臆造时刻）");
+        // 注意：v1 帧的 version=1 → 消费方须走 check_version 拒绝，而非按 v3 语义展示
         assert!(f.check_version().is_err());
     }
 
@@ -859,6 +941,7 @@ mod tests {
             alarms: AlarmsSection::default(),
             info: InfoSection::default(),
             interlock: InterlockSection::default(),
+            peripherals: crate::peripherals::PeripheralsSection::default(),
         };
         let json = serde_json::to_string(&f).unwrap();
         assert!(json.contains("\"soc\":null"));
@@ -869,6 +952,8 @@ mod tests {
         assert!(json.contains("\"build_time\":null"));
         assert!(json.contains("\"mgmt_ipv4\":null"));
         assert!(json.contains("\"fault_lamp\":null"));
+        // 外设段缺省 ⇒ `available:false`（「外设数据不可用」），**不得**被补成空段正常
+        assert!(json.contains("\"peripherals\":{\"ts_ms\":0,\"available\":false"));
         let back: DisplayFrame = serde_json::from_str(&json).unwrap();
         assert_eq!(back, f);
     }
