@@ -84,6 +84,38 @@ gateway:
   listen_addr: "0.0.0.0"        # 缺省 0.0.0.0（全网口）；投产建议按现场网口收紧
   listen_port: 2404             # IEC 60870-5-104 标准端口
 
+# ── 北向/本地 MQTT（01 设计 §9.3.2，U-71）──
+# ⚠️ 本段**必须存在**（保留式编辑：段缺失会让该段字段的首次写入整体回写 ⇒ 丢注释）。
+# 缺省 `enabled: false` ⇒ **零连接尝试**（CFG-2）：不构造客户端、不 spawn 事件循环、不连 broker。
+# 投产前按现场填写 Broker 与三件证书（或用 mupcd 的配置写路径改），**不得**留占位域名/dummy 证书。
+# `username`/`password` 可空；密码不进日志与载荷（§9.3.5）。改本段**重启生效**（无热更新）。
+mqtt_bridge:
+  enabled: false               # 总开关；false ⇒ 一行连接代码都不执行
+  north:
+    enabled: false             # 北向（物联平台）分向开关
+    broker: ""                 # "host:port"；enabled=true 时不得为空（validate 拒）
+    client_id: ""              # 物联平台侧客户端 ID；enabled=true 时不得为空
+    username: null             # 可选
+    password: null             # 可选；**不进日志/载荷**
+    tls:
+      ca_cert: ""              # enabled=true 且 allow_plaintext=false ⇒ 三路径均须非空且可读
+      client_cert: ""          # 客户端证书（TLS-3 到期监控读它的 notAfter，剩余 <30 天告警）
+      client_key: ""
+      allow_plaintext: false   # 仅非生产构建 + 显式 true 允许明文（Q9/TLS-4；默认 fail-closed）
+    topic_prefix: "mupc/north" # 分片主题前缀：{prefix}/telemetry/{station}、{prefix}/event/{station}
+    qos: 1                     # 0..=2
+    periods:
+      a_ms: 1000               # A 档周期（100..=60000）
+      b_ms: 5000               # B 档周期（a_ms..=600000）
+      cos_merge_ms: 200        # C 档 COS 合并窗（1..=1000；保「变化后 ≤1 s 发出」）
+    cache:
+      max_age_s: 1800          # 断线缓存时间窗（≥60；PRD BF-4 建议 ≥1800）
+      max_messages: 10000      # 条数上限（≥100）；与 max_age_s **先到先淘汰**
+  local:
+    enabled: false             # 本地 mosquitto（进程间）分向开关
+    broker: "127.0.0.1:1883"
+    client_id: "mupc-local"
+
 ai_engine:
   model_dir: "/opt/mupc/models"
   config_file: "/opt/mupc/config/mupc_env_config.yaml"
@@ -99,7 +131,6 @@ plugins:
   auto_load:
     - "rs485_plugin"
     - "hplc_plugin"
-    - "mqtt_plugin"
 
 # 策略引擎配置（v2.24 容量档位 §2.10.2）
 # tai_config_file 指向档位 YAML；空 = 默认档 pcs60_dual（60kW 双级式，唯一向后兼容分支）。

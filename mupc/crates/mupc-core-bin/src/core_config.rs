@@ -54,9 +54,9 @@ pub struct CoreConfig {
     /// 部署行为不变，仅端口不再硬编码 2404、可经 config 指定。审查 R2-A2）
     #[serde(default)]
     pub gateway: GatewayConfig,
-    /// MQTT 桥接开关（审查 R2-B5 §mqtt_bridge 段；缺省双 false——未启用不 spawn，不再用
-    /// Default（mqtt.example.com:8883 + dummy 证书）无条件真连假域名。端点/证书细节仍走
-    /// mupc_mqtt_bridge crate Default）
+    /// MQTT 桥接配置（01 设计 §9.3.2 的**完整 schema**，替换原 2-bool 结构）。
+    /// 缺省整段 ⇒ 全 false / broker 空串 ⇒ **零连接尝试**（CFG-2）；装配层按
+    /// `north.enabled` 逐字段映射到 `mupc_mqtt_bridge::NorthMqttConfig`（§9.4 序 7）。
     #[serde(default)]
     pub mqtt_bridge: MqttBridgeConfig,
     /// 本地显示终端发布侧配置（12-本地显示终端 设计 §7：mupcd 解析 yaml `display:` 段 →
@@ -355,18 +355,226 @@ impl Default for GatewayConfig {
     }
 }
 
-/// MQTT 桥接配置（审查 R2-B5：north_enabled/local_enabled 缺省双 false——未启用不 spawn，
-/// 不再用 Default 真连 mqtt.example.com 假域名）。`derive(Default)`（两字段皆 `bool` ⇒
-/// 缺省全 false）与 `#[serde(default)]` 配合，缺省整段配置时同样落到 false，与历史
-/// （无条件 spawn）行为变更对齐。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// 北向 + 本地 MQTT 桥接配置（01 设计 §9.3.2；**替换**原 2-bool 结构）。
+///
+/// ```yaml
+/// mqtt_bridge:
+///   enabled: false                 # 总开关；缺省 false ⇒ 零连接尝试（CFG-2）
+///   north:
+///     enabled: false
+///     broker: ""                   # "host:port"；enabled=true 时不得为空（validate 拒）
+///     client_id: ""                # 空 ⇒ 装配期取 dev_id，仍空 ⇒ validate 拒
+///     username: null
+///     password: null               # 不得进日志/载荷（§9.3.5）
+///     tls:
+///       ca_cert: ""
+///       client_cert: ""
+///       client_key: ""
+///       allow_plaintext: false     # 仅非生产构建 + 显式 true（Q9）
+///     topic_prefix: "mupc/north"
+///     qos: 1
+///     periods: { a_ms: 1000, b_ms: 5000, cos_merge_ms: 200 }
+///     cache:   { max_age_s: 1800, max_messages: 10000 }
+///   local:
+///     enabled: false
+///     broker: "127.0.0.1:1883"
+///     client_id: "mupc-local"
+/// ```
+///
+/// **缺省整段 ⇒ 全 false / 空串 ⇒ 零行为变化、零连接尝试**（`#[serde(default)]` +
+/// 手写 `Default`；broker 缺省是**空串**而**不是** `mqtt.example.com`，§9.7 C-11）。
+///
+/// ⚠️ **`Debug` 手写**（§9.3.5 ①：凭据不得进日志）——不得改回 `derive(Debug)`：
+/// 密码字段必须打 `***`（`north` 的 `Debug` 已掩码，这里不再整体打印任何凭据字段）。
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct MqttBridgeConfig {
-    /// 北向 emqx 桥接是否启用（缺省 false）
+    /// 总开关。`false` ⇒ **零连接尝试**（不构造客户端、不 spawn 事件循环、不连 broker）。
+    pub enabled: bool,
+    pub north: NorthCfg,
+    pub local: LocalCfg,
+}
+
+impl std::fmt::Debug for MqttBridgeConfig {
+    /// 手写（§9.3.5）：只打印非敏感结构；`north.password` 由 [`NorthCfg`] 的 `Debug` 掩码。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttBridgeConfig")
+            .field("enabled", &self.enabled)
+            .field("north", &self.north)
+            .field("local", &self.local)
+            .finish()
+    }
+}
+
+impl Default for MqttBridgeConfig {
+    /// **全 false / 空串**（§9.3.2；broker 空串而非 example.com）。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            north: NorthCfg::default(),
+            local: LocalCfg::default(),
+        }
+    }
+}
+
+/// 北向段（§9.3.2）。`Debug` **手写掩码密码**（§9.3.5 ①）。
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct NorthCfg {
     #[serde(default)]
-    pub north_enabled: bool,
-    /// 本地 mosquitto 桥接是否启用（缺省 false）
+    pub enabled: bool,
+    /// `"host:port"`；`enabled=true` 时不得为空（validate 拒）。缺省**空串**。
     #[serde(default)]
-    pub local_enabled: bool,
+    pub broker: String,
+    /// 客户端 ID；空 ⇒ 装配期取 dev_id，仍空 ⇒ validate 拒。缺省**空串**。
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    /// ⚠️ **不得进日志/载荷**（§9.3.5）。`Debug` 打 `***`。
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: TlsCfg,
+    #[serde(default = "default_mqtt_topic_prefix")]
+    pub topic_prefix: String,
+    #[serde(default = "default_mqtt_qos")]
+    pub qos: u8,
+    #[serde(default)]
+    pub periods: PeriodsCfg,
+    #[serde(default)]
+    pub cache: CacheCfg,
+}
+
+impl std::fmt::Debug for NorthCfg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NorthCfg")
+            .field("enabled", &self.enabled)
+            .field("broker", &self.broker)
+            .field("client_id", &self.client_id)
+            .field("username", &self.username)
+            // §9.3.5 ①：密码**手写掩码**（`Some`/`None` 可辨，内容不可辨）
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("tls", &self.tls)
+            .field("topic_prefix", &self.topic_prefix)
+            .field("qos", &self.qos)
+            .field("periods", &self.periods)
+            .field("cache", &self.cache)
+            .finish()
+    }
+}
+
+impl Default for NorthCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            broker: String::new(),
+            client_id: String::new(),
+            username: None,
+            password: None,
+            tls: TlsCfg::default(),
+            topic_prefix: default_mqtt_topic_prefix(),
+            qos: default_mqtt_qos(),
+            periods: PeriodsCfg::default(),
+            cache: CacheCfg::default(),
+        }
+    }
+}
+
+/// 北向 TLS 三件证书 + 明文开关（§9.3.2 / §9.3.5）。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TlsCfg {
+    /// `enabled=true && !allow_plaintext` ⇒ 三路径均非空且文件存在可读（validate 拒）。
+    #[serde(default)]
+    pub ca_cert: String,
+    #[serde(default)]
+    pub client_cert: String,
+    #[serde(default)]
+    pub client_key: String,
+    /// **仅非生产构建 + 显式 true** 允许明文（Q9；默认 false ⇒ fail-closed）。
+    #[serde(default)]
+    pub allow_plaintext: bool,
+}
+
+/// 北向上送档位周期（§9.3.3：A/B 定时 + COS 合并窗）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PeriodsCfg {
+    /// A 档周期（ms，100..=60000）。
+    pub a_ms: u64,
+    /// B 档周期（ms，a_ms..=600000）。
+    pub b_ms: u64,
+    /// C 档 COS 合并窗（ms，1..=1000；保「变化后 ≤1 s 发出」）。
+    pub cos_merge_ms: u64,
+}
+
+impl Default for PeriodsCfg {
+    fn default() -> Self {
+        Self {
+            // 与 `uplink::DEFAULT_MQTT_*` **同源**（§9.3.2 表；同一缺省不得各写一份字面量）
+            a_ms: crate::uplink::DEFAULT_MQTT_A_MS,
+            b_ms: crate::uplink::DEFAULT_MQTT_B_MS,
+            cos_merge_ms: crate::uplink::DEFAULT_MQTT_COS_MERGE_MS,
+        }
+    }
+}
+
+/// 断线离线缓存上限（§9.3.3：时间窗 ∨ 条数 **先到先淘汰**）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CacheCfg {
+    /// 时间窗（s，≥60；PRD BF-4 建议 ≥1800）。
+    pub max_age_s: u64,
+    /// 条数上限（≥100）。
+    pub max_messages: usize,
+}
+
+impl Default for CacheCfg {
+    fn default() -> Self {
+        Self {
+            max_age_s: 1800,
+            max_messages: 10_000,
+        }
+    }
+}
+
+/// 本地段（§9.3.2 的 `local`）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LocalCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_local_mqtt_broker")]
+    pub broker: String,
+    #[serde(default = "default_local_mqtt_client_id")]
+    pub client_id: String,
+}
+
+impl Default for LocalCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            broker: default_local_mqtt_broker(),
+            client_id: default_local_mqtt_client_id(),
+        }
+    }
+}
+
+fn default_mqtt_topic_prefix() -> String {
+    "mupc/north".to_string()
+}
+
+fn default_mqtt_qos() -> u8 {
+    1
+}
+
+fn default_local_mqtt_broker() -> String {
+    "127.0.0.1:1883".to_string()
+}
+
+fn default_local_mqtt_client_id() -> String {
+    "mupc-local".to_string()
 }
 
 // ── 默认值函数 ──
@@ -500,12 +708,14 @@ fn default_plugin_search_paths() -> Vec<PathBuf> {
     vec![PathBuf::from("/opt/mupc/lib/plugins")]
 }
 
+/// 插件自动加载缺省名单。
+///
+/// ⚠️ **`mqtt_plugin` 已移除**（01 设计 §9.3.1 / CFG-4，U-71/Q6）：北向 MQTT 承载收敛为
+/// `mqtt-bridge`（`NorthMqttClient`），`mqtt-plugin` 下架——它的 `start()` 是空实现，
+/// 而"注册为 Running 但无行为"正是 CFG-4 明文禁止的形态。**crate 目录不删**（§9.3.1 的
+/// "不做"行），移除的只是"按名加载"这一唯一有效入口。
 fn default_auto_load() -> Vec<String> {
-    vec![
-        "rs485_plugin".to_string(),
-        "hplc_plugin".to_string(),
-        "mqtt_plugin".to_string(),
-    ]
+    vec!["rs485_plugin".to_string(), "hplc_plugin".to_string()]
 }
 
 impl CoreConfig {
@@ -572,6 +782,136 @@ impl CoreConfig {
         // disabled 整段跳过——未启用用户不打扰）。非 modbus transport 的 warn 在 startup
         // 装配处发射（main Phase 1 validate 早于 tracing 初始化，此处 warn 不可达）。
         self.validate_display()?;
+        // 01 设计 §9.3.2（U-71）：mqtt_bridge 段校验。**先校验、后接线**（§9.6 第 6 步）——
+        // 违规即拒启动，杜绝"配了却连不上/悄悄降级为明文"。
+        self.validate_mqtt_bridge()?;
+        Ok(())
+    }
+
+    /// 01 设计 §9.3.2：`mqtt_bridge` 段 **8 条**校验（逐条对应设计表，错误文案**点名键**）。
+    ///
+    /// **为什么拒启动**：MQTT 是北向唯一上云通道，其配置错误（假地址、缺证书、明文）在
+    /// 运行期表现为"静默不上云"或"安全降级"，属最难发现的故障形态 ⇒ 启动期 fail-fast。
+    /// 与 `intercore` / `gateway` / `io` / `display` / `storage` 的「违规即 `Err`」惯例一致。
+    ///
+    /// **本函数读文件**（证书可读性，第 4 条）——这是与其余 validate 的唯一差别；只做
+    /// `File::open` 级探测（不解析内容，解析在运行期 `NorthMqttClient` 侧）。
+    fn validate_mqtt_bridge(&self) -> Result<(), String> {
+        let m = &self.mqtt_bridge;
+        let n = &m.north;
+
+        // ① 总开关打开 ⇒ 至少要有一个分向启用（否则是"开着什么都不做"的死配置）
+        if m.enabled && !n.enabled && !m.local.enabled {
+            return Err(
+                "mqtt_bridge.enabled=true 但 north/local 均未启用（死配置）——请开启 north 或 local，或置 enabled=false"
+                    .to_string(),
+            );
+        }
+
+        // ② 北向启用 ⇒ broker 非空且可解析为 host:port（port ∈ 1..=65535）
+        if n.enabled {
+            let broker = n.broker.trim();
+            if broker.is_empty() {
+                return Err(
+                    "mqtt_bridge.north.broker 不能为空（north.enabled=true；须为 \"host:port\"）"
+                        .to_string(),
+                );
+            }
+            if mupc_mqtt_bridge::north_client::parse_broker(broker).is_none() {
+                return Err(format!(
+                    "mqtt_bridge.north.broker=\"{broker}\" 非法（须为 host:port，port ∈ 1..=65535）"
+                ));
+            }
+        }
+
+        // ③ 北向启用 ⇒ client_id 非空（§9.3.2：空 ⇒ 装配期取 dev_id；本仓**无**
+        //    `system.dev_id` 键 ⇒ 回落源不存在 ⇒ 直接拒，不臆造装置标识）
+        if n.enabled && n.client_id.trim().is_empty() {
+            return Err(
+                "mqtt_bridge.north.client_id 不能为空（north.enabled=true；空值时须回落 system.dev_id，\
+                 而本仓配置无该键 ⇒ 无回落源，不臆造装置标识）"
+                    .to_string(),
+            );
+        }
+
+        // ④ / ⑤ 传输层二选一：TLS 三件证书（fail-closed）**或**显式明文（仅非生产）
+        if n.enabled && !n.tls.allow_plaintext {
+            for (key, path) in [
+                ("mqtt_bridge.north.tls.ca_cert", &n.tls.ca_cert),
+                ("mqtt_bridge.north.tls.client_cert", &n.tls.client_cert),
+                ("mqtt_bridge.north.tls.client_key", &n.tls.client_key),
+            ] {
+                if path.trim().is_empty() {
+                    return Err(format!(
+                        "{key} 不能为空（north.enabled=true && allow_plaintext=false ⇒ 三件证书必须齐备，\
+                         禁回落明文——TLS-2 fail-closed）"
+                    ));
+                }
+                if std::fs::File::open(path).is_err() {
+                    return Err(format!(
+                        "{key}=\"{path}\" 不存在或不可读（TLS-2 fail-closed：配置期即拒启动，不等到连接时）"
+                    ));
+                }
+            }
+        }
+        if n.enabled && n.tls.allow_plaintext {
+            // ⑥ 明文例外（TLS-4 / Q9）：仅非生产构建，或显式环境变量放行
+            let env_ok = std::env::var("MUPC_ALLOW_PLAINTEXT_MQTT").as_deref() == Ok("1");
+            if !(cfg!(debug_assertions) || env_ok) {
+                return Err(
+                    "mqtt_bridge.north.tls.allow_plaintext=true 被拒：生产构建禁止明文 MQTT（须\
+                     debug 构建，或显式置 MUPC_ALLOW_PLAINTEXT_MQTT=1；TLS-4）"
+                        .to_string(),
+                );
+            }
+        }
+
+        // ⑦ 主题前缀：非空且**不以 `/` 结尾**（否则拼出 `mupc/north//bms`，下游订阅漏配）
+        if n.topic_prefix.trim().is_empty() {
+            return Err("mqtt_bridge.north.topic_prefix 不能为空".to_string());
+        }
+        if n.topic_prefix.ends_with('/') {
+            return Err(format!(
+                "mqtt_bridge.north.topic_prefix=\"{}\" 不得以 '/' 结尾（分片主题会拼出双斜杠）",
+                n.topic_prefix
+            ));
+        }
+
+        // ⑧ 档位与缓存取值域（§9.3.2 表）
+        if n.qos > 2 {
+            return Err(format!("mqtt_bridge.north.qos={} 须在 0..=2", n.qos));
+        }
+        let p = &n.periods;
+        if !(100..=60_000).contains(&p.a_ms) {
+            return Err(format!(
+                "mqtt_bridge.north.periods.a_ms={} 须在 100..=60000",
+                p.a_ms
+            ));
+        }
+        if p.b_ms < p.a_ms || p.b_ms > 600_000 {
+            return Err(format!(
+                "mqtt_bridge.north.periods.b_ms={} 须在 a_ms..=600000（a_ms={}）",
+                p.b_ms, p.a_ms
+            ));
+        }
+        if !(1..=1000).contains(&p.cos_merge_ms) {
+            return Err(format!(
+                "mqtt_bridge.north.periods.cos_merge_ms={} 须在 1..=1000（上限保「变化后 ≤1 s 发出」）",
+                p.cos_merge_ms
+            ));
+        }
+        if n.cache.max_age_s < 60 {
+            return Err(format!(
+                "mqtt_bridge.north.cache.max_age_s={} 须 ≥60（断线缓存时间窗）",
+                n.cache.max_age_s
+            ));
+        }
+        if n.cache.max_messages < 100 {
+            return Err(format!(
+                "mqtt_bridge.north.cache.max_messages={} 须 ≥100（断线缓存条数上限）",
+                n.cache.max_messages
+            ));
+        }
         Ok(())
     }
 
@@ -873,9 +1213,22 @@ plugins: {}
         // 未配置 gateway 段时缺省 0.0.0.0:2404（审查 R2-A2：端口读 config 且向后兼容）
         assert_eq!(config.gateway.listen_addr, "0.0.0.0");
         assert_eq!(config.gateway.listen_port, 2404);
-        // 未配置 mqtt_bridge 段时缺省双 false（审查 R2-B5：不 spawn，不再真连假域名）
-        assert!(!config.mqtt_bridge.north_enabled);
-        assert!(!config.mqtt_bridge.local_enabled);
+        // 未配置 mqtt_bridge 段 ⇒ 全 false / broker 空串（§9.3.2：零连接尝试，不连假域名）
+        assert!(!config.mqtt_bridge.enabled);
+        assert!(!config.mqtt_bridge.north.enabled);
+        assert!(!config.mqtt_bridge.local.enabled);
+        assert_eq!(
+            config.mqtt_bridge.north.broker, "",
+            "缺省 broker 必须是空串（C-11：不得回落 mqtt.example.com）"
+        );
+        assert_eq!(config.mqtt_bridge.north.topic_prefix, "mupc/north");
+        assert_eq!(config.mqtt_bridge.north.qos, 1);
+        assert_eq!(config.mqtt_bridge.north.periods.a_ms, 1000);
+        assert_eq!(config.mqtt_bridge.north.periods.b_ms, 5000);
+        assert_eq!(config.mqtt_bridge.north.periods.cos_merge_ms, 200);
+        assert_eq!(config.mqtt_bridge.north.cache.max_age_s, 1800);
+        assert_eq!(config.mqtt_bridge.north.cache.max_messages, 10000);
+        assert_eq!(config.mqtt_bridge.local.broker, "127.0.0.1:1883");
     }
 
     /// **配置向后兼容 ①「能读」**（设计 §7.2 Step 4 末段 / §7.3 兼容性主张前半，单元 K）：
@@ -927,9 +1280,9 @@ plugins: {}
         );
     }
 
-    /// R2-B5: mqtt_bridge 段显式配置可解析（north/local_enabled 生效）
+    /// §9.3.2：`mqtt_bridge` 段**完整 schema 往返**（YAML → Rust → YAML 保真；`Debug` 掩码密码）。
     #[test]
-    fn test_mqtt_bridge_enabled_config() {
+    fn mqtt_bridge_section_roundtrip_with_full_schema() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -940,13 +1293,241 @@ intercore:
 ai_engine: {}
 plugins: {}
 mqtt_bridge:
-  north_enabled: true
-  local_enabled: false
+  enabled: false
+  north:
+    enabled: true
+    broker: "mqtt.example.org:8883"
+    client_id: "mupc-north-01"
+    username: "user1"
+    password: "p@ssw0rd-should-never-leak"
+    tls:
+      ca_cert: "/etc/mupc/certs/ca.crt"
+      client_cert: "/etc/mupc/certs/client.crt"
+      client_key: "/etc/mupc/certs/client.key"
+      allow_plaintext: false
+    topic_prefix: "mupc/north"
+    qos: 1
+    periods:
+      a_ms: 1000
+      b_ms: 5000
+      cos_merge_ms: 200
+    cache:
+      max_age_s: 1800
+      max_messages: 10000
+  local:
+    enabled: false
+    broker: "127.0.0.1:1883"
+    client_id: "mupc-local"
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.mqtt_bridge.north_enabled);
-        assert!(!config.mqtt_bridge.local_enabled);
-        assert!(config.validate().is_ok());
+        // 逐字段解析正确
+        assert!(config.mqtt_bridge.north.enabled);
+        assert!(!config.mqtt_bridge.local.enabled);
+        assert_eq!(config.mqtt_bridge.north.broker, "mqtt.example.org:8883");
+        assert_eq!(config.mqtt_bridge.north.client_id, "mupc-north-01");
+        assert_eq!(config.mqtt_bridge.north.username.as_deref(), Some("user1"));
+        assert_eq!(config.mqtt_bridge.north.tls.client_cert, "/etc/mupc/certs/client.crt");
+        assert!(!config.mqtt_bridge.north.tls.allow_plaintext);
+        assert_eq!(config.mqtt_bridge.north.periods.cos_merge_ms, 200);
+        assert_eq!(config.mqtt_bridge.north.cache.max_messages, 10000);
+
+        // ① 凭据不得进 Debug（§9.3.5 ① / AC-U74-07 的一部分）
+        let dbg = format!("{:?}", config.mqtt_bridge);
+        assert!(
+            !dbg.contains("p@ssw0rd-should-never-leak") && !dbg.contains("p@ssw0rd"),
+            "密码明文绝不得出现在 Debug 输出：{dbg}"
+        );
+        assert!(dbg.contains("***"), "密码位应打掩码：{dbg}");
+
+        // ② YAML 往返（保留式编辑/整体回写路径都不丢字段）
+        let round = serde_yaml::to_string(&config).unwrap();
+        let cfg2: CoreConfig = serde_yaml::from_str(&round).unwrap();
+        assert_eq!(
+            format!("{:?}", cfg2.mqtt_bridge.north),
+            format!("{:?}", config.mqtt_bridge.north)
+        );
+        assert_eq!(cfg2.mqtt_bridge.north.broker, config.mqtt_bridge.north.broker);
+        assert_eq!(cfg2.mqtt_bridge.north.password, config.mqtt_bridge.north.password);
+    }
+
+    /// §9.3.2 validate：**缺省整段 ⇒ 零行为 + 零连接**（enabled 缺省 false，不校验后续）。
+    #[test]
+    fn mqtt_bridge_absent_section_is_valid_and_disabled() {
+        let yaml = r#"
+version: "1.0"
+system: { log_level: "info" }
+intercore: { host: "127.0.0.1", port: 9100 }
+ai_engine: {}
+plugins: {}
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().expect("缺省 mqtt_bridge 段必须合法");
+        assert!(!config.mqtt_bridge.enabled);
+    }
+
+    /// §9.3.2 validate 的**逐条拒规则**（每条一个 yaml；错误文案须点名违规键）。
+    #[test]
+    fn mqtt_bridge_validate_rejects_per_design_rules() {
+        let base = |mb: &str| {
+            format!(
+                r#"
+version: "1.0"
+system: {{ log_level: "info" }}
+intercore: {{ host: "127.0.0.1", port: 9100 }}
+ai_engine: {{}}
+plugins: {{}}
+mqtt_bridge:
+{mb}
+"#
+            )
+        };
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "enabled=true 但 north/local 均未启用",
+                "  enabled: true\n".to_string(),
+                "均未启用",
+            ),
+            (
+                "north.enabled 但 broker 空",
+                "  enabled: true\n  north:\n    enabled: true\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n"
+                    .to_string(),
+                "north.broker",
+            ),
+            (
+                "broker 缺端口（不可解析）",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n"
+                    .to_string(),
+                "north.broker",
+            ),
+            (
+                "broker 端口 0",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:0\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n"
+                    .to_string(),
+                "north.broker",
+            ),
+            (
+                "client_id 空",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    tls: { allow_plaintext: true }\n"
+                    .to_string(),
+                "north.client_id",
+            ),
+            (
+                "TLS 三路径为空（fail-closed）",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n"
+                    .to_string(),
+                "tls.ca_cert",
+            ),
+            (
+                "TLS 证书路径不存在",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls:\n      ca_cert: \"Z:/nope/ca.crt\"\n      client_cert: \"Z:/nope/client.crt\"\n      client_key: \"Z:/nope/client.key\"\n"
+                    .to_string(),
+                "tls.ca_cert",
+            ),
+            (
+                "topic_prefix 空",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    topic_prefix: \"\"\n"
+                    .to_string(),
+                "topic_prefix",
+            ),
+            (
+                "topic_prefix 以 / 结尾",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    topic_prefix: \"mupc/north/\"\n"
+                    .to_string(),
+                "topic_prefix",
+            ),
+            (
+                "qos 超界",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    qos: 3\n"
+                    .to_string(),
+                "qos",
+            ),
+            (
+                "a_ms 过小",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    periods: { a_ms: 99, b_ms: 5000, cos_merge_ms: 200 }\n"
+                    .to_string(),
+                "a_ms",
+            ),
+            (
+                "b_ms < a_ms",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    periods: { a_ms: 1000, b_ms: 500, cos_merge_ms: 200 }\n"
+                    .to_string(),
+                "b_ms",
+            ),
+            (
+                "cos_merge_ms 超上限 1000",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    periods: { a_ms: 1000, b_ms: 5000, cos_merge_ms: 1001 }\n"
+                    .to_string(),
+                "cos_merge_ms",
+            ),
+            (
+                "cache.max_age_s < 60",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    cache: { max_age_s: 59, max_messages: 10000 }\n"
+                    .to_string(),
+                "max_age_s",
+            ),
+            (
+                "cache.max_messages < 100",
+                "  enabled: true\n  north:\n    enabled: true\n    broker: \"host:8883\"\n    client_id: \"c1\"\n    tls: { allow_plaintext: true }\n    cache: { max_age_s: 1800, max_messages: 99 }\n"
+                    .to_string(),
+                "max_messages",
+            ),
+        ];
+        for (label, mb, needle) in cases {
+            let yaml = base(&mb);
+            let config: CoreConfig = serde_yaml::from_str(&yaml)
+                .unwrap_or_else(|e| panic!("{label}: yaml 应可解析: {e}"));
+            let err = config
+                .validate()
+                .expect_err(&format!("{label}: 必须被 validate 拒绝"));
+            assert!(
+                err.contains(needle),
+                "{label}: 错误文案须点名 `{needle}`，实得「{err}」"
+            );
+        }
+    }
+
+    /// §9.3.5 TLS-4/Q9：`allow_plaintext=true` 在**非 debug 生产构建**必须被拒。
+    /// 本用例在 debug 下运行 ⇒ 反向断言"debug 放行"，并**另加一个不受构建类型影响的分支**：
+    /// 清空 `MUPC_ALLOW_PLAINTEXT_MQTT` 时 `debug_assertions` 仍为真 ⇒ 放行；
+    /// 故本用例钉的是"规则由 `cfg!(debug_assertions)` **或** 环境变量二者之一满足"，
+    /// 生产侧不可满足由 §9.3.2 的 `cfg!` 分支本身保证（构建期常量，无法在本机 debug 用例中证伪）。
+    #[test]
+    fn mqtt_bridge_plaintext_requires_non_production() {
+        let yaml = r#"
+version: "1.0"
+system: { log_level: "info" }
+intercore: { host: "127.0.0.1", port: 9100 }
+ai_engine: {}
+plugins: {}
+mqtt_bridge:
+  enabled: true
+  north:
+    enabled: true
+    broker: "127.0.0.1:1883"
+    client_id: "c1"
+    tls:
+      allow_plaintext: true
+"#;
+        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
+        if cfg!(debug_assertions) {
+            config
+                .validate()
+                .expect("debug 构建 + 显式 allow_plaintext ⇒ 放行（Q9 的明文例外）");
+        } else {
+            let e = config.validate().expect_err("生产构建必须拒明文");
+            assert!(e.contains("allow_plaintext"), "文案须点名 allow_plaintext: {e}");
+        }
+    }
+
+    /// `default_auto_load()` **不得**再含 `mqtt_plugin`（§9.3.1 下架，CFG-4）——
+    /// 与两份 deploy YAML 的 `auto_load` 断言同一个事实（插件按名动态加载 ⇒ 只有配置层可断）。
+    #[test]
+    fn default_auto_load_excludes_mqtt_plugin() {
+        let names = default_auto_load();
+        assert!(
+            !names.iter().any(|n| n == "mqtt_plugin"),
+            "mqtt_plugin 已下架（§9.3.1）⇒ 缺省 auto_load 不得再含它：{names:?}"
+        );
     }
 
     #[test]
