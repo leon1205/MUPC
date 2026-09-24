@@ -1466,6 +1466,16 @@ pub async fn initialize_all(
         },
     ));
 
+    // ── 01 设计 §9.1.8：外设遥测最新值快照（**在此提前构造**）──
+    //   U-73（12 号设计 §15.1.1）把 `latest_values` 定为外设段（慢拍 D）的**唯一取数面**，
+    //   而外设源必须随 `DisplayDataProvider` 一同装配（本函数下方）⇒ 快照的构造点随之
+    //   上移到 HMI 装配**之前**。**语义不变**：本项仍是 §9.4 序 1 的"第一步构造"，
+    //   仍早于其全部读取方（HMI 慢拍 D / IEC104 上送驱动器 / 总召 / `SouthSink` 写入方）。
+    //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）。
+    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+        config.south_stations.stale_timeout_s,
+    ));
+
     if config.display.enabled {
         // 设计 §4.9 字面稿的「初始化本地 HMI 后端」日志行（第一轮整改 S-3：原先只存在于设计里，
         // 实现无对应日志 ⇒ 现场无法从启动日志确认 HMI 后端是否真的在装配）。
@@ -1480,7 +1490,9 @@ pub async fn initialize_all(
                 config.intercore.transport
             );
         }
-        let latest: Arc<std::sync::Mutex<Option<mupc_display_proto::DisplayFrame>>> =
+        // ⚠️ 命名：本变量是**帧共享存储**，与上面的 `latest`（`latest_values` 快照）**不同物**
+        // （U-73 起两者在本函数内同时可见）⇒ 显式区分名，避免误用（设计 §15.2.2 的同款提醒）。
+        let shared_frame: Arc<std::sync::Mutex<Option<mupc_display_proto::DisplayFrame>>> =
             Arc::new(std::sync::Mutex::new(None));
         // 慢拍四段源（设计 §4.2）：
         // - F6 装置状态：intercore 链路 + 控制源 + 本机温度/内存（uptime 零点取**进程启动时刻**，
@@ -1495,12 +1507,41 @@ pub async fn initialize_all(
             config.io.enabled,
             config.io.release_hold_secs,
         );
+        // U-73（12 号设计 §15.11 #6/#8）：外设段计划（配置 → 白名单投影）+ 点表目录 + 数据源。
+        // - 计划：**装配期一次算**（纯函数 `peripheral_plan`），运行期只做内存读（帧路径零 I/O）；
+        // - 目录：与帧内 `catalog_rev` **同源同值**（同一份 `Arc<PeripheralCatalog>` 既进
+        //   控制通道三端点、也提供帧内 `catalog_rev`）——两处各建一份会让屏侧永远在重取；
+        // - 源：`latest_values` 的**公开只读面**投影（禁 DB / 禁第二真源，§15.1.2 C-1/C-5）。
+        let periph_plan = crate::display_host::peripheral_plan(&config.south_stations);
+        let periph_catalog = Arc::new(crate::console_host::build_peripheral_catalog(
+            &config.south_stations,
+            &periph_plan,
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+        ));
+        let periph_source: Arc<dyn crate::display_host::PeripheralSource> = Arc::new(
+            crate::display_host::StationPeripheralSource::new(
+                latest.clone(),
+                periph_plan.clone(),
+                periph_catalog.rev,
+            ),
+        );
+        tracing::info!(
+            "外设段已接线：{} 站 / catalog {} 条（rev={}）/ 兜底 tick {} ms",
+            periph_plan.len(),
+            periph_catalog
+                .stations
+                .iter()
+                .map(|s| s.blocks.iter().map(|b| b.points.len()).sum::<usize>())
+                .sum::<usize>(),
+            periph_catalog.rev,
+            config.display.periph_poll_ms,
+        );
         let provider = crate::display_host::DisplayDataProvider::new(
             ai_integrator.clone(),
             intercore.clone(),
             &config.display,
             config.intercore.transport == "modbus_rtu",
-            latest.clone(),
+            shared_frame.clone(),
         )
         .with_slow_sources(
             Some(Arc::new(crate::display_host::SystemDeviceSource::new(
@@ -1516,9 +1557,10 @@ pub async fn initialize_all(
                 config.display.alarm_page_size,
             ))),
             interlock_wiring,
-        );
+        )
+        .with_peripheral_source(periph_source.clone());
         guard.0.push(tokio::spawn(provider.run()));
-        let publisher = crate::display_host::LoopbackHttpPublisher::new(latest.clone());
+        let publisher = crate::display_host::LoopbackHttpPublisher::new(shared_frame.clone());
         match tokio::net::TcpListener::bind(&config.display.bind_addr).await {
             Ok(listener) => {
                 tracing::info!(
@@ -1583,6 +1625,11 @@ pub async fn initialize_all(
             logs,
             interlock: interlock_ops,
             audit,
+            // U-73 §15.3.2：外设三只读端点的数据源（**与帧内同一份段**）。
+            peripherals: crate::console_host::PeripheralConsoleSource::Ready {
+                source: periph_source,
+                catalog: periph_catalog,
+            },
         });
         match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
             Ok(listener) => {
@@ -1619,9 +1666,7 @@ pub async fn initialize_all(
     //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）；
     //   构造点在网关 / 南向调度装配**之前**——写入方 = 下方 `SouthSink`，读取方 = IEC104
     //   上送驱动器（序 5）与 `StrategyCommandHandler` 总召/初始快照（序 6）。
-    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
-        config.south_stations.stale_timeout_s,
-    ));
+    // `latest` 已在**本地 HMI 装配之前**构造（上文；U-73 慢拍 D 需要同一实例），此处不再重建。
     // §9.4 序 2：上送点表机械生成（`build_uplink_points`），失败 ⇒ **拒启动**（配置/点表
     // 漂移的 fail-fast，与 `validate_south_stations` 同范式，§9.2.1）。
     let uplink_points = Arc::new(

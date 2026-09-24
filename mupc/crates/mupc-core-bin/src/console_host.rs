@@ -12,7 +12,7 @@
 //!   **GET 失败一律非 2xx**（渲染端 `console.rs` 落 `Error::HttpStatus`，不解析错误体）；
 //!   **未实现的路由不得"假装成功"**（未知路径 **404**、方法不符 **405**，由 `router()` 里
 //!   「路径 → 方法」注册表结构性保证，非纪律要求。⚠️ **单元 J 起已无 501 端点**——
-//!   8 条契约端点全部实现；`not_implemented` 仅作**将来新增端点**的兜底保留）；
+//!   11 条契约端点全部实现；`not_implemented` 仅作**将来新增端点**的兜底保留）；
 //! - §4.3.2 `ConfigFieldMeta` 静态表 / §4.3.3 ApplyMode 分发表（字段集与 `requires_reconnect` 的真源）；
 //! - §4.9 启动装配（10.2 控制通道，与读通道 9810 **并存不冲突**：不同端口、不同 listener）。
 //!
@@ -48,7 +48,7 @@
 //!
 //! ## 本单元的范围与**未做**的部分（如实登记）
 //!
-//! - 8 条契约端点**全部实现**（501 兜底 handler 保留给"将来新增端点"，当前生产不可达）。
+//! - 11 条契约端点**全部实现**（501 兜底 handler 保留给"将来新增端点"，当前生产不可达）。
 //! - **写路径的"生效"只到位一部分**（⚠️ 计数口径，评审重要 5 已更正）：字段表 `FIELDS` 共
 //!   **9** 键，其中 `editable=true` 的**可写字段 7 个**；这 7 个里 **1 个真热生效**
 //!   （`system.log_level`，`tracing_subscriber::reload`），**其余 6 个**（`intercore.*` 4 +
@@ -259,6 +259,27 @@ pub struct ConsoleDeps {
     /// ⇒ 装配侧没有"必须回 503"的那种需求（那正是 `LogSource` 枚举存在的理由）。
     /// "不可用"因此只有**一条**产生路径：请求期真实读不出来（用例走真实失败，不用 mock）。
     pub audit: Arc<crate::console_audit::ConsoleAuditService>,
+    /// U-73 外设元数据 / 明细下钻**三只读端点**的数据源（设计 §15.3.2）。
+    ///
+    /// **只读、无副作用、不进 PL-1 审计**：三条路径都是 `GET`，不经过写管线
+    /// （`ControlPipeline::validate_for`）⇒ 不产生审计条目、不需要 `request_id`。
+    pub peripherals: PeripheralConsoleSource,
+}
+
+/// 外设三端点的数据源（设计 §15.3.2）。
+///
+/// `Ready` 的两个句柄**同源**：`source` 给出帧内同一份外设段（值与帧**逐点同源**，
+/// 不另建第二真源），`catalog` 的 `rev` 就是帧内 `peripherals.catalog_rev`（§15.3.1）。
+pub enum PeripheralConsoleSource {
+    /// 已接线（`display.enabled` 且外设源已装配）。
+    Ready {
+        /// 外设段源（与 `DisplayDataProvider` 注入的**同一个** `Arc`）。
+        source: Arc<dyn crate::display_host::PeripheralSource>,
+        /// 点表目录（同一次装配构建，`rev` = `catalog_rev`）。
+        catalog: Arc<mupc_display_proto::PeripheralCatalog>,
+    },
+    /// 未接线（`display.enabled=false` 或外设源未装配）⇒ 三端点回 **503**（不谎报空目录）。
+    Unavailable(&'static str),
 }
 
 /// 控制通道宿主：持有路由表与依赖，`serve()` 消费一个**已绑定**的 listener。
@@ -291,7 +312,7 @@ impl ConsoleHost {
     /// 路由表（**唯一真源 = `ConsoleEndpoint::ALL`**，不手抄路径串，杜绝路由漂移）。
     ///
     /// 三条诚实性保证由 axum 的 `MethodRouter` 结构性给出：
-    /// - 路径**已登记**且方法相符 → 走 handler（8 条契约端点**全部已实现**）；
+    /// - 路径**已登记**且方法相符 → 走 handler（11 条契约端点**全部已实现**）；
     /// - 路径已登记但**方法不符** → **405**（如 `POST /v1/console/config`）；
     /// - 路径**未登记** → **404**。
     ///
@@ -325,6 +346,22 @@ impl ConsoleHost {
                 {
                     router.route(path, get(get_audit_ops))
                 }
+                // U-73 §15.3.2：外设元数据 + 两条明细下钻（**全只读 GET，不进 PL-1 审计**）
+                mupc_display_proto::ConsoleMethod::Get
+                    if ep == ConsoleEndpoint::PeripheralsCatalog =>
+                {
+                    router.route(path, get(get_peripherals_catalog))
+                }
+                mupc_display_proto::ConsoleMethod::Get
+                    if ep == ConsoleEndpoint::PeripheralsFireDetectors =>
+                {
+                    router.route(path, get(get_peripherals_fire_detectors))
+                }
+                mupc_display_proto::ConsoleMethod::Get
+                    if ep == ConsoleEndpoint::PeripheralsBmsAlarms =>
+                {
+                    router.route(path, get(get_peripherals_bms_alarms))
+                }
                 mupc_display_proto::ConsoleMethod::Get => router.route(path, get(not_implemented)),
                 mupc_display_proto::ConsoleMethod::Post
                     if ep == ConsoleEndpoint::ConfigApply =>
@@ -355,6 +392,7 @@ impl ConsoleHost {
             logs: self.deps.logs.clone(),
             audit: self.deps.audit.clone(),
             interlock: self.deps.interlock.clone(),
+            peripherals: self.deps.peripherals.clone(),
         })
     }
 
@@ -381,7 +419,7 @@ impl ConsoleHost {
             ));
         }
         tracing::info!(
-            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；8 条契约端点全部实现：GET {} / {} / {} / {} / {} + POST {} / {} / {}）",
+            "本地显示终端控制通道已启动: http://{}{}（回环仅本机；11 条契约端点全部实现：GET {} / {} / {} / {} / {} / {} / {} / {} + POST {} / {} / {}）",
             addr,
             ConsoleEndpoint::Config.path(),
             ConsoleEndpoint::Config.path(),
@@ -389,6 +427,9 @@ impl ConsoleHost {
             ConsoleEndpoint::LogsTargets.path(),
             ConsoleEndpoint::Audit.path(),
             ConsoleEndpoint::AuditOps.path(),
+            ConsoleEndpoint::PeripheralsCatalog.path(),
+            ConsoleEndpoint::PeripheralsFireDetectors.path(),
+            ConsoleEndpoint::PeripheralsBmsAlarms.path(),
             ConsoleEndpoint::ConfigApply.path(),
             ConsoleEndpoint::InterlockRelease.path(),
             ConsoleEndpoint::InterlockAckM1.path()
@@ -405,6 +446,19 @@ struct HostState {
     logs: LogSource,
     audit: Arc<crate::console_audit::ConsoleAuditService>,
     interlock: InterlockOpsSource,
+    peripherals: PeripheralConsoleSource,
+}
+
+impl Clone for PeripheralConsoleSource {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Ready { source, catalog } => Self::Ready {
+                source: source.clone(),
+                catalog: catalog.clone(),
+            },
+            Self::Unavailable(r) => Self::Unavailable(r),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -547,6 +601,531 @@ async fn get_audit(
 /// （现场仍能看到"能筛什么"）。故本端点**没有**失败分支。
 async fn get_audit_ops(State(st): State<HostState>) -> Response {
     Json(st.audit.op_options()).into_response()
+}
+
+// ═══════════════════════════════════════════════════════════════
+// U-73 外设三只读端点（设计 §15.3.2）
+//
+// **为什么放控制通道**（§15.3.2 三条理由）：① 不改 D6「读侧只有一个端点」；② 复用
+// `ConsoleClient` 的非阻塞状态机与"GET 失败走 HTTP 状态码"的既有口径；③ 与 `/config`、
+// `/logs`、`/audit` 同属**"一次性 / 带参 / 有限额的受控读"**。
+//
+// **不进 PL-1 审计**：三条都是 `GET`（`ConsoleEndpoint::is_write() == false`、无 `op`），
+// **不经过**写管线 ⇒ 结构上不可能产生审计条目（不是"记得别写审计"的君子协定）。
+// ═══════════════════════════════════════════════════════════════
+
+/// `GET /v1/console/peripherals/catalog` → **裸 `PeripheralCatalog`**（§3.4 补注：GET 不走信封）。
+///
+/// 未接线 ⇒ **503**（非 2xx ⇒ 渲染端落 `Error::HttpStatus`，按"该端点不可用"处理），
+/// **绝不**回 `200` + 空目录冒充成功（空目录会被屏侧当成"该装置没有点表"）。
+async fn get_peripherals_catalog(State(st): State<HostState>) -> Response {
+    match &st.peripherals {
+        PeripheralConsoleSource::Ready { catalog, .. } => Json((**catalog).clone()).into_response(),
+        PeripheralConsoleSource::Unavailable(reason) => {
+            tracing::warn!(reason, "外设端点不可用，GET /peripherals/catalog 回 503");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("peripherals source unavailable: {reason}"),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/console/peripherals/fire_detectors?page&page_size` → **裸 `FireDetectorPage`**。
+///
+/// `page` 默认 1；`page_size` 默认 [`mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE`] = 20、
+/// **上限 50**（超限 **400**，不静默截断——静默截断会让屏侧"登记数与明细一致"的判据失真）。
+async fn get_peripherals_fire_detectors(
+    State(st): State<HostState>,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    let (source, ) = match &st.peripherals {
+        PeripheralConsoleSource::Ready { source, .. } => (source.clone(),),
+        PeripheralConsoleSource::Unavailable(reason) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("peripherals source unavailable: {reason}"),
+            )
+                .into_response()
+        }
+    };
+    let (page, page_size) = match parse_page(
+        &pairs,
+        mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
+        mupc_display_proto::MAX_PERIPH_PAGE_SIZE,
+    ) {
+        Ok(v) => v,
+        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+    };
+    let section = source.snapshot(now_ms());
+    Json(fire_detector_page(&section, page, page_size)).into_response()
+}
+
+/// `GET /v1/console/peripherals/bms_alarms?page&page_size` → **裸 `BmsAlarmPage`**。
+///
+/// `page` 默认 1；`page_size` 默认 [`mupc_display_proto::DEFAULT_BMS_ALARM_PAGE_SIZE`] = 50、
+/// **上限 100**（超限 **400**）。
+async fn get_peripherals_bms_alarms(
+    State(st): State<HostState>,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Response {
+    let source = match &st.peripherals {
+        PeripheralConsoleSource::Ready { source, .. } => source.clone(),
+        PeripheralConsoleSource::Unavailable(reason) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("peripherals source unavailable: {reason}"),
+            )
+                .into_response()
+        }
+    };
+    let (page, page_size) = match parse_page(
+        &pairs,
+        mupc_display_proto::DEFAULT_BMS_ALARM_PAGE_SIZE,
+        mupc_display_proto::MAX_BMS_ALARM_PAGE_SIZE,
+    ) {
+        Ok(v) => v,
+        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+    };
+    let section = source.snapshot(now_ms());
+    Json(bms_alarm_page(&section, page, page_size)).into_response()
+}
+
+/// 分页参数解析（纯函数，可单测）：`page` 默认 1（1 起）、`page_size` 默认 `default`、
+/// **上限 `max` 超限即 400**。空值 / 非数字 / 0 一律拒（"第 0 页"无定义，`page_size = 0`
+/// 会让下钻页恒空）。
+pub fn parse_page(
+    pairs: &[(String, String)],
+    default: u32,
+    max: u32,
+) -> Result<(u32, u32), String> {
+    let get = |k: &str| pairs.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+    let page = match get("page") {
+        None => 1,
+        Some(v) => v
+            .parse::<u32>()
+            .map_err(|_| format!("page 非法: `{v}`"))?
+            .max(1),
+    };
+    let page_size = match get("page_size") {
+        None => default,
+        Some(v) => {
+            let n = v
+                .parse::<u32>()
+                .map_err(|_| format!("page_size 非法: `{v}`"))?;
+            if n == 0 || n > max {
+                return Err(format!("page_size 越界: {n}（须 ∈ [1, {max}]）"));
+            }
+            n
+        }
+    };
+    Ok((page, page_size))
+}
+
+/// 分页切片（纯函数）：返回本页 `[start, end)`（越界页 ⇒ 空区间，`end <= start`）。
+fn page_slice(total: usize, page: u32, page_size: u32) -> (usize, usize) {
+    let start = ((page.max(1) - 1) as usize).saturating_mul(page_size as usize);
+    let start = start.min(total);
+    (start, (start + page_size as usize).min(total))
+}
+
+/// 段内按 role 找站（未配置 / 未接线 ⇒ `None`）。
+fn station_of(
+    sec: &mupc_display_proto::PeripheralsSection,
+    role: mupc_display_proto::PeriphRole,
+) -> Option<&mupc_display_proto::PeripheralStation> {
+    sec.stations.iter().find(|s| s.role == role)
+}
+
+fn block_of<'s>(
+    st: &'s mupc_display_proto::PeripheralStation,
+    name: &str,
+) -> Option<&'s mupc_display_proto::PeripheralBlock> {
+    st.blocks.iter().find(|b| b.name == name)
+}
+
+/// 取"点名键 → 帧内点值"（键口径 = [`mupc_display_proto::PeripheralBlock::key`]，屏侧与帧同源）。
+fn value_by_key(
+    blk: &mupc_display_proto::PeripheralBlock,
+    key: &str,
+) -> Option<mupc_display_proto::PointValue> {
+    blk.values.iter().find(|pv| blk.key(pv) == key).copied()
+}
+
+/// **探测器明细分页投影**（纯函数，可单测；设计 §15.3.2 / §15.4 明细表）。
+///
+/// 点位构造（**照设计公式**，不臆造）：
+/// - `k = 1`：在 `fire_sys` 块，`at` 8..13（`+0 地址`…`+5 H₂`）；
+/// - `k ≥ 2`：在 `fire_det` 块，`at = 6(k−2)+1 … +6`。
+///
+/// `total` = 登记数（`fire_det_count`，未取数 ⇒ `None`）；`expanded` = **实际可读只数**
+/// （= 1 + `fire_det` 的只数，由配置展开决定）——`expanded != total` 时屏侧**必须显式提示
+/// 不一致**（F21.4 / EX-12），**不得静默裁剪**。
+/// `available` = 消防站已配置且段可用（`false` ⇒ 「消防源不可用」，**不是**"无探测器"）。
+pub fn fire_detector_page(
+    sec: &mupc_display_proto::PeripheralsSection,
+    page: u32,
+    page_size: u32,
+) -> mupc_display_proto::FireDetectorPage {
+    use mupc_display_proto::{FireDetectorItem, FireDetectorPage, PointValue};
+    let none = PointValue {
+        at: 0,
+        v: None,
+        flag: mupc_display_proto::FieldFlag::NotRead,
+    };
+    let Some(st) = station_of(sec, mupc_display_proto::PeriphRole::Fire) else {
+        return FireDetectorPage {
+            page,
+            page_size,
+            available: false,
+            ..Default::default()
+        };
+    };
+    let sys = block_of(st, "fire_sys");
+    let det = block_of(st, "fire_det");
+    // 只数：fire_sys 提供第 1 只（at 8..13），fire_det 每 6 点 1 只
+    let units_in_det = det.map(|b| b.values.len() / 6).unwrap_or(0);
+    let expanded = (1 + units_in_det) as u16;
+    let pick = |blk: Option<&mupc_display_proto::PeripheralBlock>, at: u16| -> PointValue {
+        blk.and_then(|b| b.values.iter().find(|pv| pv.at == at).copied())
+            .unwrap_or(PointValue { at, ..none })
+    };
+    let total = sys
+        .and_then(|b| value_by_key(b, "fire_det_count"))
+        .and_then(|pv| match (pv.flag, pv.v) {
+            (mupc_display_proto::FieldFlag::Valid, Some(v)) if v.is_finite() => {
+                Some(v.round().max(0.0) as u16)
+            }
+            _ => None,
+        });
+    let total_units = expanded as usize;
+    let (start, end) = page_slice(total_units, page, page_size);
+    let mut items = Vec::with_capacity(end.saturating_sub(start));
+    for idx in start..end {
+        let k = idx + 1; // 1 起
+        let (addr, state, data1, co, voc, h2) = if k == 1 {
+            (
+                pick(sys, 8),
+                pick(sys, 9),
+                pick(sys, 10),
+                pick(sys, 11),
+                pick(sys, 12),
+                pick(sys, 13),
+            )
+        } else {
+            let base = 6 * (k as u16 - 2);
+            (
+                pick(det, base + 1),
+                pick(det, base + 2),
+                pick(det, base + 3),
+                pick(det, base + 4),
+                pick(det, base + 5),
+                pick(det, base + 6),
+            )
+        };
+        items.push(FireDetectorItem {
+            index: k as u16,
+            addr,
+            state,
+            data1,
+            co,
+            voc,
+            h2,
+        });
+    }
+    FireDetectorPage {
+        page,
+        page_size,
+        total,
+        expanded,
+        has_more: end < total_units,
+        available: sec.available,
+        items,
+    }
+}
+
+/// **BMS 告警位下钻分页投影**（纯函数；设计 §15.3.2 / §15.5.2 段「电池」）。
+///
+/// `total` = 位数总量（= 帧内 `bms_alarm` 块携带的点数，n=20 时为 **288**）；
+/// `active_total` = 活跃位数（`v` 有效且 ≠ 0）；名称由 **catalog 按下标提供**（本 DTO 不携带）。
+/// `available` = 段可用 ∧ 该站配了 `bms_alarm` 块（`false` ⇒ 「BMS 告警源不可用」，
+/// **≠** 「无活跃告警位」，EDGE-24）。
+pub fn bms_alarm_page(
+    sec: &mupc_display_proto::PeripheralsSection,
+    page: u32,
+    page_size: u32,
+) -> mupc_display_proto::BmsAlarmPage {
+    use mupc_display_proto::{BmsAlarmItem, BmsAlarmPage, FieldFlag};
+    let Some(st) = station_of(sec, mupc_display_proto::PeriphRole::Battery) else {
+        return BmsAlarmPage {
+            page,
+            page_size,
+            available: false,
+            ..Default::default()
+        };
+    };
+    let Some(blk) = block_of(st, "bms_alarm") else {
+        return BmsAlarmPage {
+            page,
+            page_size,
+            available: false,
+            ..Default::default()
+        };
+    };
+    let total = blk.values.len() as u32;
+    let is_active =
+        |pv: &mupc_display_proto::PointValue| pv.flag == FieldFlag::Valid && pv.v.is_some_and(|v| v != 0.0);
+    let active_total = blk.values.iter().filter(|pv| is_active(pv)).count() as u32;
+    let (start, end) = page_slice(blk.values.len(), page, page_size);
+    let items = blk.values[start..end]
+        .iter()
+        .map(|pv| BmsAlarmItem {
+            at: pv.at,
+            active: is_active(pv),
+        })
+        .collect();
+    BmsAlarmPage {
+        page,
+        page_size,
+        total,
+        active_total,
+        has_more: end < blk.values.len(),
+        available: sec.available,
+        items,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// catalog 构建器（设计 §15.3.2 / §15.11 #8：白名单投影 + `rev`）
+// ═══════════════════════════════════════════════════════════════
+
+/// `fire_det` 每只探测器的 6 个模板位的短标签（`+0 地址`…`+5 H₂`，§15.4 明细表列名）。
+const FIRE_DET_TEMPLATE_LABELS: [&str; 6] = ["地址", "状态", "数据 1", "CO", "VOC", "H₂"];
+
+/// `fire_sys_6`（火警等级）枚举文案：**唯一权威 = PRD §3.9 F21 展示表**
+/// （`0 正常 / 1 一级报警 / 2 二级火警 / 3 预留 ⇒ 显「未定义」 / 4 紧急启动 / 5 紧急停止`；
+/// **表外值 ⇒ 屏显「未知」**）。⚠️ **不得**引 `SIG_FIRE_LEVEL`（那只有 4 条事件值）。
+const FIRE_LEVEL_ENUM: [(u16, &str); 6] = [
+    (0, "正常"),
+    (1, "一级报警"),
+    (2, "二级火警"),
+    (3, "未定义"),
+    (4, "紧急启动"),
+    (5, "紧急停止"),
+];
+
+/// `fire_sys_1`（系统状态位图）的 6 个已定义位：`(位号, 短标签)`（§15.4 A1 组）。
+const FIRE_SYS_BITS: [(u8, &str); 6] = [
+    (14, "主电故障"),
+    (13, "备电故障"),
+    (11, "驱动电路"),
+    (10, "压力传感器"),
+    (9, "电磁阀"),
+    (8, "喷洒标记"),
+];
+
+/// `fire_sys_3/4/5`（烟感 / 温感 / 可燃状态）的 3 个位（§15.4 A3 组）。
+const FIRE_TRIGGER_BITS: [(u8, &str); 3] =
+    [(0, "干接点触发"), (1, "复合触发"), (2, "预留")];
+
+/// 探测器状态整字（`fire_sys_9` / `fire_det_{+1}`）的 2 个已定义位（§15.4 明细表）。
+/// **bit15「通信状态」不在此列**（点表登记明令"不猜、不造判据"，PRD F21 未要求 ⇒ 显
+/// 「未定义位 15」；R-41 追认后才可能启用）。
+const FIRE_DETECTOR_STATE_BITS: [(u8, &str); 2] = [(12, "报警总状态"), (14, "故障总状态")];
+
+/// 「数据 1」的拆解规格（高字节烟雾 0.1 dB/M；低字节温度 raw−55 ℃；§15.4 明细表）。
+fn data1_decompose() -> Vec<mupc_display_proto::Decompose> {
+    use mupc_display_proto::{DecodeFrom, Decompose};
+    vec![
+        Decompose {
+            label: "烟雾".into(),
+            unit: Some("dB/M".into()),
+            decimals: 1,
+            from: DecodeFrom::HighByte {
+                scale: 0.1,
+                offset: 0.0,
+            },
+        },
+        Decompose {
+            label: "温度".into(),
+            unit: Some("℃".into()),
+            decimals: 0,
+            from: DecodeFrom::LowByte {
+                scale: 1.0,
+                offset: -55.0,
+            },
+        },
+    ]
+}
+
+/// 位语义投影（三种形态见 [`mupc_display_proto::BitMeta`] 的文档）。
+///
+/// - **离散位块**的点（`hvac_di` / `bms_alarm`）：恰 1 项，`index = at − 1`，
+///   `class` / `label` 取 `point_table` 登记（`defined = class != Reserved`）；
+/// - **字内位图**的点：16 项，只有设计点名的位 `defined = true`（未定义位 `defined = false`
+///   ⇒ 屏显「未定义位 n」，**禁止**为凑满 16 位编造语义 F21.1 / EX-09）；
+/// - 其余整字点：16 项全 `defined = false`（本增量无位语义登记）。
+fn bits_for(
+    row: Option<&mupc_southd::point_table::PointReg>,
+    is_bit: bool,
+    at: u16,
+    role: mupc_display_proto::PeriphRole,
+    block: &str,
+) -> Vec<mupc_display_proto::BitMeta> {
+    use mupc_display_proto::{BitMeta, CatalogBitClass};
+    let mut out = Vec::new();
+    if is_bit {
+        let cls = match row.map(|r| r.kind) {
+            Some(mupc_southd::point_table::RegPointKind::Bit(c)) => match c {
+                mupc_southd::point_table::BitClass::Alarm => CatalogBitClass::Alarm,
+                mupc_southd::point_table::BitClass::State => CatalogBitClass::State,
+                mupc_southd::point_table::BitClass::Reserved => CatalogBitClass::Reserved,
+            },
+            _ => CatalogBitClass::Reserved,
+        };
+        out.push(BitMeta {
+            index: (at.saturating_sub(1)) as u8,
+            label: row.map(|r| r.label.to_string()).unwrap_or_default(),
+            class: cls,
+            defined: cls != CatalogBitClass::Reserved,
+            active_text: None,
+            inverted: false, // R-41 裁定前**无生产者**
+        });
+        return out;
+    }
+    // 字内位图：设计点名的三类
+    let named: &[(u8, &str)] = if role == mupc_display_proto::PeriphRole::Fire {
+        if block == "fire_sys" && at == 1 {
+            &FIRE_SYS_BITS
+        } else if block == "fire_sys" && (3..=5).contains(&at) {
+            &FIRE_TRIGGER_BITS
+        } else if (block == "fire_sys" && at == 9) || (block == "fire_det" && at % 6 == 2) {
+            &FIRE_DETECTOR_STATE_BITS
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    for index in 0..16u8 {
+        match named.iter().find(|(i, _)| *i == index) {
+            Some((_, label)) => out.push(BitMeta {
+                index,
+                label: (*label).to_string(),
+                class: CatalogBitClass::Alarm,
+                defined: true,
+                active_text: None,
+                inverted: false,
+            }),
+            None => out.push(BitMeta {
+                index,
+                label: String::new(),
+                class: CatalogBitClass::Reserved,
+                defined: false,
+                active_text: None,
+                inverted: false,
+            }),
+        }
+    }
+    out
+}
+
+/// **构建点表目录**（设计 §15.3.2「catalog 是白名单投影」）。
+///
+/// 三条硬要求的落点：W-1 = 逐点取自 [`mupc_display_proto::PERIPH_WHITELIST`]（排除项结构性不在
+/// 表内）；W-2 = `decimals` 由 `point_table::lookup_in` 的登记 `scale` 经
+/// [`mupc_display_proto::decimals_from_scale`] 派生（**不另写数值字面表**）；W-3 的第二半
+/// （屏用短标签）见 `peripherals_labels.rs` 模块头登记的偏离。
+///
+/// `rev` 由 [`mupc_display_proto::catalog_rev`] 自算 ⇒ 与帧内 `catalog_rev` **同源同值**。
+pub fn build_peripheral_catalog(
+    cfg: &mupc_southd::config::SouthStationsConfig,
+    plan: &[crate::display_host::PeripheralStationPlan],
+    generated_ms: u64,
+) -> mupc_display_proto::PeripheralCatalog {
+    use mupc_display_proto::{
+        CatalogBlock, CatalogBlockKind, CatalogPoint, CatalogStation, PeripheralCatalog,
+    };
+    let mut stations = Vec::with_capacity(plan.len());
+    for st in plan {
+        let conf = cfg.stations.iter().find(|c| c.id == st.id);
+        let mut blocks = Vec::with_capacity(st.blocks.len());
+        for bp in &st.blocks {
+            let blk_conf = conf
+                .and_then(|c| c.regs.iter().find(|b| b.name == bp.name));
+            let space = if bp.is_bit {
+                mupc_southd::point_table::AddrSpace::Bit
+            } else {
+                mupc_southd::point_table::AddrSpace::Reg
+            };
+            let base = blk_conf.map(|b| b.addr).unwrap_or(0);
+            let mut points = Vec::with_capacity(bp.ats.len());
+            for at in &bp.ats {
+                let addr = base.saturating_add(at.saturating_sub(1));
+                let row = conf
+                    .map(|c| c.role)
+                    .and_then(|role| mupc_southd::point_table::lookup_in(role, space, addr));
+                let decimals = row.map(|r| mupc_display_proto::decimals_from_scale(r.scale)).unwrap_or(0);
+                let is_fire_det = bp.name == "fire_det";
+                // 短标签：`fire_det` 用模板名（6 个位语义在块内按 `at % 6` 循环）；
+                // 其余点取登记 `label`（**短标签表未就绪的临时来源，已登记偏离**）。
+                let label = if is_fire_det {
+                    FIRE_DET_TEMPLATE_LABELS[((*at as usize).saturating_sub(1)) % 6].to_string()
+                } else {
+                    row.map(|r| r.label.to_string()).unwrap_or_default()
+                };
+                let enum_labels = if bp.name == "fire_sys" && *at == 6 {
+                    FIRE_LEVEL_ENUM
+                        .iter()
+                        .map(|(v, s)| (*v, (*s).to_string()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let decompose = if (bp.name == "fire_sys" && *at == 10)
+                    || (is_fire_det && at % 6 == 3)
+                {
+                    data1_decompose()
+                } else {
+                    Vec::new()
+                };
+                points.push(CatalogPoint {
+                    at: *at,
+                    label,
+                    unit: None, // 单位真源 = 短标签表（未就绪，见偏离登记）
+                    decimals,
+                    bits: bits_for(row, bp.is_bit, *at, st.role, &bp.name),
+                    enum_labels,
+                    decompose,
+                    group: mupc_display_proto::group_of(st.role, &bp.name, *at).to_string(),
+                });
+            }
+            blocks.push(CatalogBlock {
+                name: bp.name.clone(),
+                kind: if bp.is_bit {
+                    CatalogBlockKind::Discrete
+                } else {
+                    CatalogBlockKind::Scalar
+                },
+                renames: bp.renames.clone(),
+                points,
+            });
+        }
+        stations.push(CatalogStation {
+            id: st.id.clone(),
+            role: st.role,
+            enabled: true, // 计划内的站 = 配置内已启用（未启用站不进计划）
+            blocks,
+        });
+    }
+    let mut cat = PeripheralCatalog {
+        rev: 0,
+        generated_ms,
+        stations,
+    };
+    cat.rev = mupc_display_proto::catalog_rev(&cat);
+    cat
 }
 
 /// `POST /v1/console/config/apply` → **`ControlResponse<ConfigView>` 信封**（§3.4 / §3.3 管线）。
@@ -1478,6 +2057,7 @@ mod tests {
             logs,
             interlock,
             audit,
+            peripherals: PeripheralConsoleSource::Unavailable("测试未接线"),
         });
         let h = tokio::spawn(async move {
             let _ = host.serve(listener).await;
@@ -1636,6 +2216,7 @@ mod tests {
             logs: LogSource::Unavailable("本用例只验读源同一性"),
             interlock: interlock_unavailable(),
             audit: audit_at("unused-audit-dir"),
+            peripherals: PeripheralConsoleSource::Unavailable("测试未接线"),
         });
         let got = match host.config_source() {
             ConfigSource::Ready(a) => a.clone(),
@@ -1713,7 +2294,7 @@ mod tests {
         h.abort();
     }
 
-    /// ①' **8 条契约端点全部落地**（单元 J 补齐联锁两条）⇒ 已无 501。
+    /// ①' **11 条契约端点全部落地**（单元 J 补齐联锁两条）⇒ 已无 501。
     ///
     /// 这条网取代 G-1 的 `every_registered_but_unimplemented_endpoint_is_honest_per_endpoint`
     /// （那条断言的 501 是"G-1 阶段未实现"的事实，J 落地后**该事实已改变**）——**保留其精神**：
@@ -1830,15 +2411,15 @@ mod tests {
         }
         assert_eq!(
             unimplemented, 0,
-            "8 条契约端点（G-1/G-2 的 config 两条 + H 的 logs 两条 + I 的 audit 两条 + J 的联锁两条）应全部实现"
+            "11 条契约端点（G-1/G-2 的 config 两条 + H 的 logs 两条 + I 的 audit 两条 + J 的联锁两条 + U-73 的外设三条）应全部实现"
         );
         // **上一轮评审建议 7 的落点**（单元 J 第二轮整改登记）：[`ConsoleHost::router`] 的注说
-        // "唯一真源 = `ConsoleEndpoint::ALL`、不手抄路径串"；而下面这个 `8` 是**同一真源在计数上
+        // "唯一真源 = `ConsoleEndpoint::ALL`、不手抄路径串"；而下面这个 `11` 是**同一真源在计数上
         // 的第二份拷贝**——它与 `ALL` 之间**无机械约束**（`ALL.len()` 本身不会红）。故此处置
         // **显式标出手抄**：契约增端点时必须同步本常数，不同步这条断言就红，**那正是想要的信号**。
         assert_eq!(
             ConsoleEndpoint::ALL.len(),
-            8,
+            11,
             "契约端点总数（**手抄**：真源是契约 `ConsoleEndpoint::ALL`；契约增端点时必须同步本常数，\
              否则这条断言会红——那正是想要的信号）"
         );
@@ -1936,6 +2517,7 @@ mod tests {
             logs: LogSource::Unavailable("本用例只验回环裁决"),
             interlock: interlock_unavailable(),
             audit: audit_at("unused-audit-dir"),
+            peripherals: PeripheralConsoleSource::Unavailable("测试未接线"),
         });
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4006,4 +4588,471 @@ gateway:
         h.abort();
         h2.abort();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // U-73 外设三只读端点（设计 §15.3.2 / §15.8.1 T-13）
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// 三端点用的最小南向配置（白名单投影能命中 `point_table` 登记行）。
+    const PERIPH_TEST_YAML: &str = r#"
+poll_ms: 1000
+stale_timeout_s: 5
+stations:
+  - id: fire
+    role: fire
+    port: "/dev/ttyS6"
+    interval_ms: 1000
+    regs:
+      - name: fire_sys
+        func: holding
+        addr: 4
+        count: 13
+        format: uint16
+        scale: 1.0
+        points:
+          - { at: 7, name: fire_det_count }
+      - name: fire_det
+        func: holding
+        addr: 17
+        count: 114
+        format: uint16
+        scale: 1.0
+  - id: bms
+    role: battery
+    port: "/dev/ttyS2"
+    interval_ms: 1000
+    regs:
+      - name: bms_alarm
+        func: discrete
+        addr: 200
+        count: 288
+"#;
+
+    /// 造一个"已接线"的外设端点数据源 + 目录（值由 `latest_values` 注入）。
+    fn peripherals_ready(
+        fire_count: Option<f64>,
+        active_bits: &[u16],
+    ) -> (
+        PeripheralConsoleSource,
+        Arc<mupc_data_processing::latest_values::LatestValues>,
+        Arc<mupc_display_proto::PeripheralCatalog>,
+    ) {
+        use mupc_data_processing::latest_values::{
+            LatestValues, PointId, PointQuality, PointValue,
+        };
+        let cfg: mupc_southd::config::SouthStationsConfig =
+            serde_yaml::from_str(PERIPH_TEST_YAML).unwrap();
+        let plan = crate::display_host::peripheral_plan(&cfg);
+        let cat = Arc::new(crate::console_host::build_peripheral_catalog(&cfg, &plan, 42));
+        let latest = Arc::new(LatestValues::new(5));
+        // ⚠️ 用**真实时钟**：端点侧 `snapshot(now_ms())` 判站活性，假时标会让整段变 Offline
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        latest.mark_station_polled("fire", now);
+        latest.mark_station_polled("bms", now);
+        let mut samples: Vec<(PointId, PointValue)> = Vec::new();
+        if let Some(n) = fire_count {
+            samples.push((
+                PointId {
+                    station: "fire".into(),
+                    metric: "fire_det_count".into(),
+                },
+                PointValue {
+                    value: Some(n),
+                    ts_ms: now,
+                    quality: PointQuality::Ok,
+                },
+            ));
+        }
+        for at in active_bits {
+            samples.push((
+                PointId {
+                    station: "bms".into(),
+                    metric: format!("bms_alarm_{at}"),
+                },
+                PointValue {
+                    value: Some(1.0),
+                    ts_ms: now,
+                    quality: PointQuality::Ok,
+                },
+            ));
+        }
+        latest.apply(samples);
+        let src: Arc<dyn crate::display_host::PeripheralSource> =
+            Arc::new(crate::display_host::StationPeripheralSource::new(
+                latest.clone(),
+                plan,
+                cat.rev,
+            ));
+        (
+            PeripheralConsoleSource::Ready {
+                source: src,
+                catalog: cat.clone(),
+            },
+            latest,
+            cat,
+        )
+    }
+
+    /// 起一个**已接线**外设端点的宿主（其余源用"本用例不验"占位）。
+    async fn spawn_periph_host(
+        periph: PeripheralConsoleSource,
+        audit_dir: impl Into<PathBuf>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = ConsoleHost::new(ConsoleDeps {
+            config: ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
+            apply: ApplySource::Unavailable("本用例只验外设只读端点"),
+            logs: LogSource::Unavailable("本用例只验外设只读端点"),
+            interlock: interlock_unavailable(),
+            audit: audit_at(audit_dir),
+            peripherals: periph,
+        });
+        let h = tokio::spawn(async move {
+            let _ = host.serve(listener).await;
+        });
+        (addr, h)
+    }
+
+    /// **T-13：catalog 端点逐字段**（设计 §15.3.2 的响应体形态 + `rev` 与帧内**同源同值**）。
+    #[tokio::test]
+    async fn peripherals_catalog_endpoint_returns_design_dto_field_by_field() {
+        let (periph, _latest, cat) = peripherals_ready(Some(20.0), &[2, 3]);
+        let (addr, h) = spawn_periph_host(periph, "unused-audit-dir").await;
+        let (status, body) = http(
+            addr,
+            "GET",
+            ConsoleEndpoint::PeripheralsCatalog.path(),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "已接线 ⇒ 200 + 裸 PeripheralCatalog：{body}");
+        let got: mupc_display_proto::PeripheralCatalog = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("catalog 必须是可解析的裸 PeripheralCatalog: {e}\n{body}"));
+        assert_eq!(got.rev, cat.rev, "rev 必须与装配的目录同值（帧内 catalog_rev 的唯一真源）");
+        assert_eq!(got.generated_ms, 42);
+        // 站点：id / role / enabled / blocks；块：name / kind / renames / points
+        let fire = got.stations.iter().find(|s| s.id == "fire").expect("fire 站");
+        assert_eq!(fire.role, mupc_display_proto::PeriphRole::Fire);
+        assert!(fire.enabled);
+        let det = fire.blocks.iter().find(|b| b.name == "fire_det").expect("fire_det 块");
+        assert_eq!(det.kind, mupc_display_proto::CatalogBlockKind::Scalar);
+        assert_eq!(det.points.len(), 114, "fire_det 按配置 count 展开（6×(n−1)）");
+        // 点：at / label / unit / decimals / bits / enum_labels / decompose / group
+        let p = &det.points[2]; // at = 3 → 「数据 1」（模板第 3 位）
+        assert_eq!(p.at, 3);
+        assert_eq!(p.label, "数据 1", "模板短标签来自 §15.4 明细列名");
+        assert_eq!(p.decimals, 0, "登记 scale = 1.0 ⇒ 0 位（W-2：由 lookup_in 派生）");
+        assert_eq!(p.group, "fire_detector");
+        assert_eq!(p.decompose.len(), 2, "「数据 1」拆解（烟雾 + 温度，F21.5）");
+        assert_eq!(p.decompose[0].label, "烟雾");
+        assert_eq!(p.decompose[0].unit.as_deref(), Some("dB/M"));
+        // 火警等级枚举（唯一权威 = PRD F21 展示表）
+        let sys = fire.blocks.iter().find(|b| b.name == "fire_sys").unwrap();
+        let lvl = sys.points.iter().find(|p| p.at == 6).expect("fire_sys_6");
+        assert_eq!(lvl.group, "fire_level");
+        assert_eq!(lvl.enum_labels.len(), 6);
+        assert_eq!(lvl.enum_labels[0], (0, "正常".to_string()));
+        assert_eq!(lvl.enum_labels[5], (5, "紧急停止".to_string()));
+        // 系统状态位图：6 个已定义位 + 10 个未定义位（**不得**为凑满 16 位编造语义）
+        let st1 = sys.points.iter().find(|p| p.at == 1).expect("fire_sys_1");
+        assert_eq!(st1.bits.len(), 16);
+        assert_eq!(st1.bits.iter().filter(|b| b.defined).count(), 6);
+        assert!(st1.bits.iter().all(|b| !b.inverted), "R-41 追认前 inverted 无生产者");
+        assert!(st1.bits[14].defined && st1.bits[14].label == "主电故障");
+        assert!(!st1.bits[0].defined && st1.bits[0].label.is_empty());
+        // 位块（discrete）⇒ kind = discrete；离散位点恰 1 项 bits、index = at−1
+        let bms = got.stations.iter().find(|s| s.id == "bms").unwrap();
+        let alarm = bms.blocks.iter().find(|b| b.name == "bms_alarm").unwrap();
+        assert_eq!(alarm.kind, mupc_display_proto::CatalogBlockKind::Discrete);
+        assert_eq!(alarm.points.len(), 288);
+        let a2 = alarm.points.iter().find(|p| p.at == 2).unwrap();
+        assert_eq!(a2.bits.len(), 1);
+        assert_eq!(a2.bits[0].index, 1);
+        assert_eq!(a2.group, "bms_alarm");
+        // 点位总数 = 外设段行数（屏侧行数与 catalog 行数恒等，F25）：114 + 13 + 288
+        let total: usize = got
+            .stations
+            .iter()
+            .map(|s| s.blocks.iter().map(|b| b.points.len()).sum::<usize>())
+            .sum();
+        assert_eq!(total, 114 + 13 + 288);
+        h.abort();
+    }
+
+    /// **T-13：`fire_detectors` 分页 + `expanded != total` 如实返回**（不静默裁剪，F21.4/EX-12）。
+    #[tokio::test]
+    async fn peripherals_fire_detectors_endpoint_pages_and_reports_mismatch() {
+        // 登记数 25 只、实际可读 19 + 1 = 20 只 ⇒ 必须如实暴露不一致
+        let (periph, _latest, _cat) = peripherals_ready(Some(25.0), &[]);
+        let (addr, h) = spawn_periph_host(periph, "unused-audit-dir").await;
+        let (status, body) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/fire_detectors?page=1&page_size=5",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let got: mupc_display_proto::FireDetectorPage = serde_json::from_str(&body).unwrap();
+        assert_eq!((got.page, got.page_size), (1, 5), "回显请求分页");
+        assert_eq!(got.total, Some(25), "登记数 = `fire_det_count`");
+        assert_eq!(got.expanded, 20, "实际可读只数 = 1（fire_sys）+ 19（fire_det）");
+        assert_ne!(got.expanded, got.total.unwrap(), "不一致必须如实返回，不得静默裁剪");
+        assert!(got.available, "消防站已配置 ⇒ available");
+        assert_eq!(got.items.len(), 5, "默认页大小 20 被显式 5 覆盖");
+        assert!(got.has_more, "25 只 / 每页 5 ⇒ 还有下一页");
+        // 第 1 只来自 fire_sys（at 8..13），序号 1 起
+        let first = &got.items[0];
+        assert_eq!(first.index, 1);
+        assert_eq!(first.addr.at, 8);
+        assert_eq!(first.state.at, 9);
+        assert_eq!(first.data1.at, 10);
+        assert_eq!((first.co.at, first.voc.at, first.h2.at), (11, 12, 13));
+        // 第 2 只来自 fire_det（at = 6(k−2)+j ⇒ k=2 ⇒ 1..6）
+        let second = &got.items[1];
+        assert_eq!(second.index, 2);
+        assert_eq!(second.addr.at, 1);
+        assert_eq!(second.h2.at, 6);
+        // 末页：不补齐 + has_more = false
+        let (s2, b2) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/fire_detectors?page=4&page_size=5",
+            None,
+        )
+        .await;
+        assert_eq!(s2, 200);
+        let last: mupc_display_proto::FireDetectorPage = serde_json::from_str(&b2).unwrap();
+        assert_eq!(last.items.len(), 5, "第 4 页仍有 5 只（20 只 = 4 页 × 5）");
+        assert!(!last.has_more);
+        let (_, b3) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/fire_detectors?page=5&page_size=5",
+            None,
+        )
+        .await;
+        let empty: mupc_display_proto::FireDetectorPage = serde_json::from_str(&b3).unwrap();
+        assert!(empty.items.is_empty() && !empty.has_more, "越界页 = 空页，不报错");
+        // 未接线 ⇒ 503（不谎报 200 + 空页）
+        let (addr2, h2) = spawn_periph_host(
+            PeripheralConsoleSource::Unavailable("本用例验 503"),
+            "unused-audit-dir",
+        )
+        .await;
+        let (s4, _) = http(
+            addr2,
+            "GET",
+            ConsoleEndpoint::PeripheralsFireDetectors.path(),
+            None,
+        )
+        .await;
+        assert_eq!(s4, 503, "未接线 ⇒ 503（屏侧落 Error::HttpStatus）");
+        h.abort();
+        h2.abort();
+    }
+
+    /// **T-13：`bms_alarms` 分页 + 活跃数 + 上限**（290 位总量以外的三态语义由 `available` 表达）。
+    #[tokio::test]
+    async fn peripherals_bms_alarms_endpoint_pages_and_counts_active() {
+        let (periph, _latest, _cat) = peripherals_ready(Some(20.0), &[2, 5, 288]);
+        let (addr, h) = spawn_periph_host(periph, "unused-audit-dir").await;
+        let (status, body) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/bms_alarms?page=3&page_size=10",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let got: mupc_display_proto::BmsAlarmPage = serde_json::from_str(&body).unwrap();
+        assert_eq!((got.page, got.page_size), (3, 10));
+        assert_eq!(got.total, 288, "位数总量（n=20 时 288，位 200–487）");
+        assert_eq!(got.active_total, 3, "活跃位数（v 有效且 ≠ 0）");
+        assert!(got.available, "段可用且配了 bms_alarm ⇒ available");
+        assert_eq!(got.items.len(), 10);
+        assert_eq!(got.items[0].at, 21, "第 3 页起点 = (3−1)×10 + 1");
+        assert!(got.has_more);
+        assert!(got.items.iter().all(|i| i.at != 2 && i.at != 5 && i.at != 288));
+        // 活跃位在第 1 页可见且 active=true
+        let (_, b1) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/bms_alarms?page=1&page_size=50",
+            None,
+        )
+        .await;
+        let p1: mupc_display_proto::BmsAlarmPage = serde_json::from_str(&b1).unwrap();
+        assert_eq!(
+            p1.items.iter().find(|i| i.at == 2).map(|i| i.active),
+            Some(true)
+        );
+        assert_eq!(
+            p1.items.iter().find(|i| i.at == 3).map(|i| i.active),
+            Some(false)
+        );
+        h.abort();
+    }
+
+    /// **T-13：`page_size` 上限拒绝（400）**，不静默截断；`page_size = 0` 同拒。
+    #[tokio::test]
+    async fn peripherals_endpoints_reject_bad_page_size() {
+        let (periph, _l, _c) = peripherals_ready(Some(20.0), &[]);
+        let (addr, h) = spawn_periph_host(periph, "unused-audit-dir").await;
+        for (path, bad) in [
+            (
+                "/v1/console/peripherals/fire_detectors?page_size=51",
+                "探测器上限 50",
+            ),
+            (
+                "/v1/console/peripherals/fire_detectors?page_size=0",
+                "0 无定义",
+            ),
+            (
+                "/v1/console/peripherals/bms_alarms?page_size=101",
+                "告警位上限 100",
+            ),
+            (
+                "/v1/console/peripherals/bms_alarms?page_size=abc",
+                "非数字",
+            ),
+        ] {
+            let (status, _) = http(addr, "GET", path, None).await;
+            assert_eq!(status, 400, "`{path}` 必须 400（{bad}）——不得静默截断");
+        }
+        // 合法边界（= 上限）放行
+        for path in [
+            "/v1/console/peripherals/fire_detectors?page_size=50",
+            "/v1/console/peripherals/bms_alarms?page_size=100",
+        ] {
+            let (status, _) = http(addr, "GET", path, None).await;
+            assert_eq!(status, 200, "`{path}` 在上限内必须放行");
+        }
+        h.abort();
+    }
+
+    /// `parse_page` 的缺省与边界（纯函数；缺省 = 设计值，`page` 下限 1）。
+    #[test]
+    fn parse_page_defaults_and_bounds() {
+        let d = |v: &str| vec![("page_size".to_string(), v.to_string())];
+        assert_eq!(parse_page(&[], 20, 50).unwrap(), (1, 20), "全缺省 ⇒ (1, 设计默认)");
+        assert_eq!(parse_page(&d("50"), 20, 50).unwrap(), (1, 50));
+        assert!(parse_page(&d("51"), 20, 50).is_err());
+        assert!(parse_page(&d("0"), 20, 50).is_err());
+        assert!(parse_page(&d(""), 20, 50).is_err());
+        assert!(parse_page(&d("1.5"), 20, 50).is_err());
+        let p = |v: &str| vec![("page".to_string(), v.to_string())];
+        assert_eq!(parse_page(&p("3"), 20, 50).unwrap(), (3, 20));
+        assert_eq!(parse_page(&p("0"), 20, 50).unwrap(), (1, 20), "第 0 页按第 1 页");
+        assert!(parse_page(&p("x"), 20, 50).is_err());
+    }
+
+    /// **只读 + 不进 PL-1 审计**（设计 §15.3.2 的两条硬要求）：
+    /// ① 三条路径**只有 GET**（POST ⇒ 405）⇒ 结构上无写操作、无审计条目；
+    /// ② 三条 GET 跑完后审计目录**零文件**（审计只由写管线产生）。
+    #[tokio::test]
+    async fn peripherals_endpoints_are_read_only_and_audited_never() {
+        let dir = TempDir::new("periph-audit");
+        let (periph, _l, _c) = peripherals_ready(Some(20.0), &[]);
+        let (addr, h) = spawn_periph_host(periph, dir.path()).await;
+        // ① 方法面：POST 一律 405（**不是** 501、更不是 200）
+        for path in [
+            ConsoleEndpoint::PeripheralsCatalog.path(),
+            ConsoleEndpoint::PeripheralsFireDetectors.path(),
+            ConsoleEndpoint::PeripheralsBmsAlarms.path(),
+        ] {
+            let (status, _) = http(addr, "POST", path, Some("{}")).await;
+            assert_eq!(status, 405, "`{path}` 不得有写方法（只读端点）");
+            let (status, _) = http(addr, "GET", path, None).await;
+            assert_eq!(status, 200, "`{path}` GET 必须可用");
+        }
+        // ② 审计面：三个 GET 之后审计目录仍为空（无条目 ⇒ 无 PL-1 审计痕迹）
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("审计目录可读")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            files.is_empty(),
+            "只读端点**不得**产生审计条目，实际出现: {files:?}"
+        );
+        // 语义补充：契约层已把它们定义为非写端点（无 `op` 名 ⇒ 不进写管线）
+        assert!(!ConsoleEndpoint::PeripheralsCatalog.is_write());
+        assert_eq!(ConsoleEndpoint::PeripheralsCatalog.op_name(), None);
+        h.abort();
+    }
+
+
+    /// **W-2（设计 §15.3.2）：量纲投影一致性** —— catalog 的每一行都必须在
+    /// `point_table::lookup_in` **命中**，且 `decimals` 恰等于
+    /// `decimals_from_scale(登记 scale)`（**不得**另写数值字面表）。
+    ///
+    /// 输入 = **生产配置**（`deploy/config/mupc_core_config.production.yaml`，与现场同源），
+    /// 覆盖 5 站（`pcs` 段在生产配置里注释掉 ⇒ 4 站 + 消防探测器区按模板解析）。
+    #[test]
+    fn catalog_rows_hit_point_table_and_derive_decimals_from_scale() {
+        use mupc_southd::point_table::{lookup_in, AddrSpace};
+        let core: crate::core_config::CoreConfig = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/mupc_core_config.production.yaml"
+        ))
+        .expect("生产配置可解析");
+        let cfg = core.south_stations;
+        let plan = crate::display_host::peripheral_plan(&cfg);
+        let cat = build_peripheral_catalog(&cfg, &plan, 0);
+
+        let mut checked = 0usize;
+        for st in &cat.stations {
+            let conf = cfg.stations.iter().find(|c| c.id == st.id).expect("站配置");
+            let south_role = conf.role;
+            for blk in &st.blocks {
+                let bconf = conf.regs.iter().find(|b| b.name == blk.name).expect("块配置");
+                let space = match blk.kind {
+                    mupc_display_proto::CatalogBlockKind::Discrete => AddrSpace::Bit,
+                    mupc_display_proto::CatalogBlockKind::Scalar => AddrSpace::Reg,
+                };
+                for p in &blk.points {
+                    let addr = bconf.addr + (p.at - 1);
+                    let row = lookup_in(south_role, space, addr).unwrap_or_else(|| {
+                        panic!(
+                            "W-2 破：{}/{} at={} (addr={}) 在 point_table 中查不到登记行",
+                            st.id, blk.name, p.at, addr
+                        )
+                    });
+                    assert_eq!(
+                        p.decimals,
+                        mupc_display_proto::decimals_from_scale(row.scale),
+                        "{}/{} at={} 的 decimals 必须由登记 scale({}) 派生",
+                        st.id,
+                        blk.name,
+                        p.at,
+                        row.scale
+                    );
+                    assert_ne!(
+                        p.group,
+                        mupc_display_proto::GROUP_UNKNOWN,
+                        "{}/{} at={} 必须有设计分组键",
+                        st.id,
+                        blk.name,
+                        p.at
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // 生产配置的外设行数（白名单内有配置的块）—— 与 §15.2.4 的容量分子同口径；
+        // 生产 yaml 里 `pcs` 站整段被注释、`bms_alarm`/`fire_det` 按 count 展开 ⇒ 非 0 且规模量级正确
+        assert!(checked > 500, "应覆盖 5 站白名单的主要部分，实测 {checked} 行");
+        // 抽样：mb_ui（scale 0.1 ⇒ 1 位）、mb_power（0.001 ⇒ 3 位）、bms_alarm（位点 0 位）
+        let mb = cat.stations.iter().find(|s| s.id == "meter_batt").expect("meter_batt");
+        let ui = mb.blocks.iter().find(|b| b.name == "mb_ui").expect("mb_ui");
+        assert_eq!(ui.points[0].decimals, 1);
+        let pw = mb.blocks.iter().find(|b| b.name == "mb_power").expect("mb_power");
+        assert_eq!(pw.points[0].decimals, 3);
+        let bms = cat.stations.iter().find(|s| s.id == "bms").expect("bms");
+        let alarm = bms.blocks.iter().find(|b| b.name == "bms_alarm").expect("bms_alarm");
+        assert_eq!(alarm.points.len(), 288);
+        assert_eq!(alarm.points[0].decimals, 0);
+    }
+
 }

@@ -75,11 +75,22 @@ pub enum ConsoleEndpoint {
     InterlockRelease,
     /// `POST /v1/console/interlock/ack_m1` → `InterlockOpPayload` → `InterlockOpAck`。
     InterlockAckM1,
+    /// `GET /v1/console/peripherals/catalog` → [`crate::PeripheralCatalog`]（设计 §15.3.2）。
+    ///
+    /// **只读、无副作用、不进 PL-1 审计**（一次性读取：P4/P6 首次进入或帧内 `catalog_rev`
+    /// 变化时；元数据**不进帧**——入帧即结构性爆帧，§15.3.1）。
+    PeripheralsCatalog,
+    /// `GET /v1/console/peripherals/fire_detectors?page&page_size` →
+    /// [`crate::FireDetectorPage`]（设计 §15.3.2；`page_size` 默认 20、≤50）。
+    PeripheralsFireDetectors,
+    /// `GET /v1/console/peripherals/bms_alarms?page&page_size` →
+    /// [`crate::BmsAlarmPage`]（设计 §15.3.2；`page_size` 默认 50、≤100）。
+    PeripheralsBmsAlarms,
 }
 
 impl ConsoleEndpoint {
-    /// 全部端点（§3.4 清单，共 8 条；其中 3 条为写）。
-    pub const ALL: [ConsoleEndpoint; 8] = [
+    /// 全部端点（§3.4 清单 8 条 + U-73 外设三只读端点 §15.3.2，共 11 条；其中 3 条为写）。
+    pub const ALL: [ConsoleEndpoint; 11] = [
         Self::Config,
         Self::ConfigApply,
         Self::Logs,
@@ -88,6 +99,9 @@ impl ConsoleEndpoint {
         Self::AuditOps,
         Self::InterlockRelease,
         Self::InterlockAckM1,
+        Self::PeripheralsCatalog,
+        Self::PeripheralsFireDetectors,
+        Self::PeripheralsBmsAlarms,
     ];
 
     /// 请求路径。
@@ -101,15 +115,24 @@ impl ConsoleEndpoint {
             Self::AuditOps => "/v1/console/audit/ops",
             Self::InterlockRelease => "/v1/console/interlock/release",
             Self::InterlockAckM1 => "/v1/console/interlock/ack_m1",
+            // U-73（设计 §15.3.2）：外设元数据 / 明细下钻三端点（**全部只读 GET**）
+            Self::PeripheralsCatalog => "/v1/console/peripherals/catalog",
+            Self::PeripheralsFireDetectors => "/v1/console/peripherals/fire_detectors",
+            Self::PeripheralsBmsAlarms => "/v1/console/peripherals/bms_alarms",
         }
     }
 
     /// HTTP 方法。
     pub fn method(self) -> ConsoleMethod {
         match self {
-            Self::Config | Self::Logs | Self::LogsTargets | Self::Audit | Self::AuditOps => {
-                ConsoleMethod::Get
-            }
+            Self::Config
+            | Self::Logs
+            | Self::LogsTargets
+            | Self::Audit
+            | Self::AuditOps
+            | Self::PeripheralsCatalog
+            | Self::PeripheralsFireDetectors
+            | Self::PeripheralsBmsAlarms => ConsoleMethod::Get,
             Self::ConfigApply | Self::InterlockRelease | Self::InterlockAckM1 => ConsoleMethod::Post,
         }
     }
@@ -612,6 +635,10 @@ mod tests {
             (ConsoleEndpoint::AuditOps, "/v1/console/audit/ops", ConsoleMethod::Get, None),
             (ConsoleEndpoint::InterlockRelease, "/v1/console/interlock/release", ConsoleMethod::Post, Some("release")),
             (ConsoleEndpoint::InterlockAckM1, "/v1/console/interlock/ack_m1", ConsoleMethod::Post, Some("ack_m1")),
+            // U-73 §15.3.2：三只读端点（op = None ⇒ **无信封 op、不进 PL-1 审计**）
+            (ConsoleEndpoint::PeripheralsCatalog, "/v1/console/peripherals/catalog", ConsoleMethod::Get, None),
+            (ConsoleEndpoint::PeripheralsFireDetectors, "/v1/console/peripherals/fire_detectors", ConsoleMethod::Get, None),
+            (ConsoleEndpoint::PeripheralsBmsAlarms, "/v1/console/peripherals/bms_alarms", ConsoleMethod::Get, None),
         ];
         assert_eq!(cases.len(), ConsoleEndpoint::ALL.len());
         for (ep, path, method, op) in cases {
@@ -623,6 +650,17 @@ mod tests {
         }
         assert!(!ConsoleEndpoint::Config.is_write(), "查询端点非写");
         assert!(ConsoleEndpoint::InterlockRelease.is_write());
+        // U-73 §15.3.2：外设三端点**只读**（无 POST 路径）+ **无 op 名** ⇒ 不构成写操作、
+        // 不进 PL-1 审计（审计的唯一入口是写管线，见 `ControlPipeline::validate_for`）
+        for ep in [
+            ConsoleEndpoint::PeripheralsCatalog,
+            ConsoleEndpoint::PeripheralsFireDetectors,
+            ConsoleEndpoint::PeripheralsBmsAlarms,
+        ] {
+            assert!(!ep.is_write(), "{ep:?} 必须只读（设计 §15.3.2）");
+            assert_eq!(ep.op_name(), None, "{ep:?} 不得有写操作 op 名");
+            assert_eq!(ep.method(), ConsoleMethod::Get);
+        }
     }
 
     // ---- 信封：字面量 JSON 往返 + 关键字段断言 ----

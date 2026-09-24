@@ -58,6 +58,25 @@ pub const MAX_DEVICE_POLL_MS: u64 = 4000;
 /// 而验收是 ≤2 s（同一节 §4.2.1 的算式前提被自己放开）。**PM 裁定：契约取 250，以契约（唯一
 /// 真源）为准**，设计文档 §4.9 / §11.1 已就地标注「以契约 250 为准」。
 pub const MIN_MERGE_WINDOW_MS: u64 = 250;
+/// 外设段慢拍（慢拍 D）兜底 tick 周期默认值（设计 §15.1.1 / §15.6.1：**500 ms**）。
+///
+/// 取 500 的理由（设计 §15.1.1「节拍取值」）：使**帧发布侧**的兜底最坏值
+/// `0.5 + 0.25 = 0.75 s ≤ 1 s` 自身达标（PRD F25 验收 3 分句①「≤ 站周期 + 1 帧节拍」）。
+/// ⚠️ 该取值**不足以保证**"告警位变化后 ≤2 s 上屏在**任何**丢帧下成立"——见设计 §15.6.1
+/// 约束 1 的完整算式（丢帧窗口最坏 2.35 s）与 §15.9 **R-33** 的两侧选项（选项 B 用 100 ms）。
+pub const DEFAULT_PERIPH_POLL_MS: u64 = 500;
+/// 外设段慢拍周期硬上界（= [`MAX_SLOW_POLL_MS`]）。设计 §15.1.1：`periph_poll_ms`
+/// **默认 500**，`validate()` 硬校验 `∈ [1, 1000]`（与 `alarm_poll_ms` / `interlock_poll_ms`
+/// 同口径）——上界即"广播丢帧后由兜底 tick 收敛"的时延红线（§15.6.1 约束 1）。
+pub const MAX_PERIPH_POLL_MS: u64 = MAX_SLOW_POLL_MS;
+/// 探测器明细下钻单页默认条数（设计 §15.3.2 `FireDetectorPage`：默认 20）。
+pub const DEFAULT_PERIPH_PAGE_SIZE: u32 = 20;
+/// 探测器明细下钻单页**硬上限**（设计 §15.3.2：`page_size` 默认 20、**≤50**）。
+pub const MAX_PERIPH_PAGE_SIZE: u32 = 50;
+/// BMS 告警位下钻单页默认条数（设计 §15.3.2 `BmsAlarmPage`：默认 50）。
+pub const DEFAULT_BMS_ALARM_PAGE_SIZE: u32 = 50;
+/// BMS 告警位下钻单页**硬上限**（设计 §15.3.2：`page_size` 默认 50、**≤100**）。
+pub const MAX_BMS_ALARM_PAGE_SIZE: u32 = 100;
 
 /// 服务端限额（`log` 段；设计 §8.3「log 限额」/ §4.4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -140,6 +159,16 @@ pub struct DisplayConfig {
     pub alarm_poll_ms: u64,
     /// 联锁慢拍周期(ms)（默认 500；≤ [`MAX_SLOW_POLL_MS`]）。
     pub interlock_poll_ms: u64,
+    /// 外设段慢拍（慢拍 D）兜底 tick 周期(ms)（默认 [`DEFAULT_PERIPH_POLL_MS`] = 500；
+    /// 须 ∈ [1, [`MAX_PERIPH_POLL_MS`]]；设计 §15.1.1 / §15.6.1）。
+    ///
+    /// 语义：**变更通知（`latest_values` 广播，会丢）只降时延；收敛由本 tick 保证**
+    /// ——广播丢一次最多晚 `periph_poll_ms` 收敛（任一次采样都是"读全量 → 重建整段"的
+    /// 无状态操作）。**不得**把它当成"通知必达"的补偿参数（§15.6.1 约束 1 / R-33）。
+    pub periph_poll_ms: u64,
+    /// 探测器明细分页单页条数（默认 [`DEFAULT_PERIPH_PAGE_SIZE`] = 20；
+    /// 须 ∈ [1, [`MAX_PERIPH_PAGE_SIZE`]]；设计 §15.3.2）。
+    pub periph_page_size: u32,
     /// F7 告警列表最多展示条数（默认 [`DEFAULT_ALARM_PAGE_SIZE`] = 10；
     /// 设计 §4.9 `display.alarm_page_size`，落地 §3.1 的「items ≤10」）。
     pub alarm_page_size: usize,
@@ -212,6 +241,28 @@ impl DisplayConfig {
                 format!(
                     "={} 越界，须 ∈ [1, {MAX_DEVICE_POLL_MS}]（F6.3 ≤5 s 前提）",
                     self.device_poll_ms
+                ),
+            );
+        }
+        // 慢拍 D（外设段兜底 tick）：上界即"广播丢帧后由兜底 tick 收敛"的时延红线
+        // （设计 §15.6.1 约束 1：丢帧最坏 = 站周期 + periph_poll_ms + 0.85 s）。
+        if self.periph_poll_ms == 0 || self.periph_poll_ms > MAX_PERIPH_POLL_MS {
+            return invalid(
+                "display.periph_poll_ms",
+                format!(
+                    "={} 越界，须 ∈ [1, {MAX_PERIPH_POLL_MS}]（外设段兜底 tick；F25 验收 3 的收敛上界，设计 §15.1.1/§15.6.1）",
+                    self.periph_poll_ms
+                ),
+            );
+        }
+        // 探测器明细分页单页条数：0 = 永远空页（下钻页恒空，"登记数与明细一致"不可达）；
+        // 超上限 = 一屏装不下且违背设计 §15.3.2 的 `page_size ≤50`。
+        if self.periph_page_size == 0 || self.periph_page_size > MAX_PERIPH_PAGE_SIZE {
+            return invalid(
+                "display.periph_page_size",
+                format!(
+                    "={} 越界，须 ∈ [1, {MAX_PERIPH_PAGE_SIZE}]（探测器明细分页；设计 §15.3.2）",
+                    self.periph_page_size
                 ),
             );
         }
@@ -341,6 +392,8 @@ impl Default for DisplayConfig {
             device_poll_ms: DEFAULT_DEVICE_POLL_MS,
             alarm_poll_ms: DEFAULT_ALARM_POLL_MS,
             interlock_poll_ms: DEFAULT_INTERLOCK_POLL_MS,
+            periph_poll_ms: DEFAULT_PERIPH_POLL_MS,
+            periph_page_size: DEFAULT_PERIPH_PAGE_SIZE,
             alarm_page_size: DEFAULT_ALARM_PAGE_SIZE,
             log: LogLimits::default(),
             range: DisplayRange::default(),
@@ -372,6 +425,76 @@ mod tests {
         // 设计 §7.3 yaml 值对齐
         let r = DisplayRange::default();
         assert_eq!(r.inconsistency_threshold_kw, 60.0 * 0.05);
+    }
+
+    /// 设计 §15.1.1 / §15.3.2 / §15.11 #4：外设段两个新键的**缺省值**。
+    ///
+    /// 缺省必须 = 设计默认（`periph_poll_ms = 500` / `periph_page_size = 20`），
+    /// 否则现场不写这两个键的既有 yaml 会拿到与设计不同的节拍与分页（静默偏离）。
+    #[test]
+    fn periph_keys_default_to_design_values() {
+        let c = DisplayConfig::default();
+        assert_eq!(c.periph_poll_ms, 500, "设计 §15.1.1：默认 500");
+        assert_eq!(c.periph_page_size, 20, "设计 §15.3.2：默认 20");
+        assert_eq!(DEFAULT_PERIPH_POLL_MS, 500);
+        assert_eq!(DEFAULT_PERIPH_PAGE_SIZE, 20);
+        assert_eq!(MAX_PERIPH_POLL_MS, 1000, "§15.1.1：∈ [1, 1000]");
+        assert_eq!(MAX_PERIPH_PAGE_SIZE, 50, "§15.3.2：≤50");
+        assert_eq!(DEFAULT_BMS_ALARM_PAGE_SIZE, 50, "§15.3.2：默认 50");
+        assert_eq!(MAX_BMS_ALARM_PAGE_SIZE, 100, "§15.3.2：≤100");
+        // 缺省配置整体合规（新键不得把默认配置打成非法）
+        assert!(c.validate().is_ok());
+        // serde 缺省：老 yaml（无这两个键）解析后仍取设计默认
+        let parsed: DisplayConfig = parse_with_defaults("{}");
+        assert_eq!(parsed.periph_poll_ms, 500);
+        assert_eq!(parsed.periph_page_size, 20);
+    }
+
+    /// 极简 YAML→类型解析（本文件不引 serde_yaml：用 serde_json 走同一 `serde(default)` 语义；
+    /// 两者对「缺键取 Default」的行为一致，见 `DisplayConfig` 的 `#[serde(default)]`）。
+    fn parse_with_defaults(json: &str) -> DisplayConfig {
+        serde_json::from_str(json).expect("缺键应全部取 Default")
+    }
+
+    /// 越界即拒启动（fail-fast）：`periph_poll_ms` 的 0 / 1001 与 `periph_page_size` 的
+    /// 0 / 51 必须逐条被拒，且错误**点名键**（不得靠字符串解析）。
+    #[test]
+    fn periph_keys_out_of_range_are_rejected_by_field_name() {
+        let base = DisplayConfig::default();
+        assert!(base.validate().is_ok(), "基线须合法，否则归因不成立");
+
+        for bad in [0u64, 1001, 5000] {
+            let mut c = base.clone();
+            c.periph_poll_ms = bad;
+            match c.validate() {
+                Err(crate::Error::InvalidConfig { field, .. }) => {
+                    assert_eq!(field, "display.periph_poll_ms", "必须点名键（bad={bad}）");
+                }
+                other => panic!("periph_poll_ms={bad} 应被拒，实得 {other:?}"),
+            }
+        }
+        // 边界值 1 / 1000 必须放行（闭区间）
+        for ok in [1u64, 1000] {
+            let mut c = base.clone();
+            c.periph_poll_ms = ok;
+            assert!(c.validate().is_ok(), "periph_poll_ms={ok} 在 [1,1000] 内应放行");
+        }
+
+        for bad in [0u32, 51, 1000] {
+            let mut c = base.clone();
+            c.periph_page_size = bad;
+            match c.validate() {
+                Err(crate::Error::InvalidConfig { field, .. }) => {
+                    assert_eq!(field, "display.periph_page_size", "必须点名键（bad={bad}）");
+                }
+                other => panic!("periph_page_size={bad} 应被拒，实得 {other:?}"),
+            }
+        }
+        for ok in [1u32, 50] {
+            let mut c = base.clone();
+            c.periph_page_size = ok;
+            assert!(c.validate().is_ok(), "periph_page_size={ok} 在 [1,50] 内应放行");
+        }
     }
 
     /// Critical 1：`range` 段每个数值字段都要**正例放行 + 反例拒绝**。

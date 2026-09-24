@@ -961,7 +961,12 @@ mod tests {
     #[test]
     fn display_frame_unknown_fields_tolerated() {
         // 设计 §1 前向兼容：未知字段容忍，结构体默认忽略未知键。
-        let json = r#"{"version":2,"seq":1,"ts_ms":1,"soc":null,"soc_source":"lost",
+        //
+        // ⚠️ 版本字面量取 `3`（= `PROTO_VERSION`）而非历史的 `2`（**T19 评审残留**：出帧侧
+        // 升 3 后，`"version":2` 已**非线上可达形态**——v2 帧一律被 `from_json_slice` 拒。
+        // 本用例走 `serde_json::from_str`（**绕开**版本门）⇒ 断言本身与版本无关，但字面量
+        // 须与线上一致，否则读者会误以为 v2 帧仍被接受；拒帧判据由专门用例钉死）。
+        let json = r#"{"version":3,"seq":1,"ts_ms":1,"soc":null,"soc_source":"lost",
             "soc_flag":"offline","run_state":null,"pcs_online":false,
             "p_phase":[{"v":null,"flag":"not_read"},{"v":null,"flag":"not_read"},{"v":null,"flag":"not_read"}],
             "p_total":{"v":null,"flag":"not_read"},

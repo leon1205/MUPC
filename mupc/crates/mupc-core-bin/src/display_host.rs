@@ -45,15 +45,19 @@
 //! - `alarms.level`：设计/PRD 均**未定义** `event_type` → 级别的映射，本单元给出**显式、
 //!   可审**的规则表（见 [`alarm_level_of`]），兜底 `Warn`（契约 `AlarmLevel` 无「未知」态）。
 
+use mupc_data_processing::latest_values::{self, ChangeBatch};
+use mupc_display_proto::peripherals::PointValue as FramePoint;
 use mupc_display_proto::{
     AlarmItem, AlarmLevel, AlarmsSection, ControlSource, DeviceSection, DisplayConfig, DisplayFrame,
-    DisplayRange, Field, FieldFlag, InfoSection, InterlockSection, LinkState,
-    RunState, ServiceScope, SocSource, PROTO_VERSION,
+    DisplayRange, ExitGuardOutcome, Field, FieldFlag, InfoSection, InterlockSection, LinkState,
+    PeriphRole, PeripheralBlock, PeripheralStation, PeripheralsSection, RunState, ServiceScope,
+    SocSource, PROTO_VERSION,
 };
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Notify;
 
 /// 帧共享存储：provider 每 tick 原子更新；publisher 每请求 clone 返回。
@@ -87,6 +91,9 @@ pub struct SlowCaches {
     device: Arc<RwLock<DeviceSection>>,
     alarms: Arc<RwLock<AlarmsSection>>,
     interlock: Arc<RwLock<InterlockSection>>,
+    /// 外设段（慢拍 D，U-73 §15.1.1）。未接线时保持 `Default` ⇒ `available=false`
+    /// （「外设数据不可用」，EDGE-22）——**绝不是**"空段正常"。
+    peripherals: Arc<RwLock<PeripheralsSection>>,
 }
 
 /// 读缓存（毒化不 panic，同 `latest` 的 O2 口径）。
@@ -602,6 +609,324 @@ fn now_ms() -> u64 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 外设段（慢拍 D）—— U-73 设计 §15.1.1 / §15.6.1
+//
+// **消费形态**（§15.1.1 D 方案，与既有慢拍 A/B/C 逐条同构）：
+//   `latest_values` 变更广播（`broadcast` 容量 64、**会丢**） ∪ 兜底 tick（`periph_poll_ms`）
+//   ⇒ 触发源只影响"多久跑一次"，**不影响正确性**：任一次采样都是
+//   「逐站读全量 → 重建整段」的**无状态**操作 ⇒ 丢一次广播 = 晚 ≤`periph_poll_ms` 收敛。
+//
+// **边界（硬）**：① 取数一律走 `latest_values` 的**公开只读面**（`station_snapshot` /
+//   `station_is_active` / `station_last_poll_ms`），**禁轮询 DB / telemetry 表**（RQ-9.0-1）、
+//   **禁自建第二真源**（"最后成功时刻"只有一个来源：R-38 的 getter）；② 帧路径零 I/O
+//   （组帧只 `read_cache` 克隆，§2.1 / D6 不变量不破）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 外设段源（**可注入 seam**，与 [`DeviceSource`] / [`AlarmSource`] 同范式）。
+///
+/// 实现方**必须**满足：`snapshot` 是「读全量 → 重建整段」的纯内存操作（无 I/O、不阻塞、
+/// 不返回 `Result`——不可得在段内以逐点 `flag` 表达）。
+pub trait PeripheralSource: Send + Sync {
+    /// 重建一次外设段（`now_ms` 由调用方给，便于假时钟单测）。
+    fn snapshot(&self, now_ms: u64) -> PeripheralsSection;
+
+    /// 订阅 `latest_values` 变更广播（容量 64；**落后即丢**，`Lagged` 只意味着"提前量没了"）。
+    /// `None` = 该源无变更通知 ⇒ 只靠兜底 tick（§15.1.1 的"丢失由兜底 tick 收敛"在此退化为常态）。
+    fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeBatch>>;
+}
+
+/// 外设段的白名单计划：**站 → 块 → 白名单点**（由站配置 + `display-proto` 白名单投影而来）。
+///
+/// **为什么要有这一层**：取数与组帧必须**只携带白名单内的点**（§15.5.2 W-1：屏侧行数与
+/// catalog 行数恒等，`flag != Valid` 只改值不改行数）。计划在**装配期**由配置一次性算出
+/// （纯函数、可单测），运行期只做内存读。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralStationPlan {
+    /// 南向站 id。
+    pub id: String,
+    /// 显示契约 role。
+    pub role: PeriphRole,
+    /// 块计划（顺序 = 站配置 `regs` 顺序）。
+    pub blocks: Vec<PeripheralBlockPlan>,
+}
+
+/// 单个块的计划。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeripheralBlockPlan {
+    /// 块名（点名前缀）。
+    pub name: String,
+    /// 白名单内的 `at` 列表（升序；`fire_det` 已按配置 `count` 展开）。
+    pub ats: Vec<u16>,
+    /// 显式点名覆盖 `(at, name)`（与帧内 `renames` 同源 = 站配置 `PointConf.name`）。
+    pub renames: Vec<(u16, String)>,
+    /// 是否位块（`discrete`）——**位点跳过"本轮未更新"判据**（§15.1.2）。
+    pub is_bit: bool,
+}
+
+/// 南向 role → 显示契约 role（设计 §15.2.2 注：两侧 serde 名逐字对应）。
+///
+/// `MeterGrid`（台区关口总表）**不在本增量内**（§15 范围外 #3）⇒ 映射为
+/// [`PeriphRole::Unknown`]，其块**不进计划**（不上屏，也不进 catalog）。
+pub fn periph_role_of(role: mupc_southd::config::Role) -> PeriphRole {
+    use mupc_southd::config::Role as R;
+    match role {
+        R::Hvac => PeriphRole::Hvac,
+        R::Fire => PeriphRole::Fire,
+        R::Battery => PeriphRole::Battery,
+        R::MeterBatt => PeriphRole::MeterBatt,
+        R::Pcs => PeriphRole::Pcs,
+        R::MeterGrid => PeriphRole::Unknown,
+    }
+}
+
+/// `fire_det` 块名（与 `display-proto` 的守卫块名**同源同值**，不得另写一份字面量）。
+const FIRE_DET_BLOCK: &str = mupc_display_proto::peripherals::FIRE_DET_BLOCK_NAME;
+
+/// 由站配置投影出**白名单计划**（纯函数，可单测；装配期一次性调用）。
+///
+/// 规则（逐条）：
+/// - 站 role 映射不过（`meter_grid`）⇒ **整站跳过**（§15 范围外 #3）；
+/// - 每块的 `at` 取自 `display-proto` 的 [`mupc_display_proto::PERIPH_WHITELIST`]（W-1 单一真源）；
+/// - `fire_det`：白名单里只有**模板 6 行**，按配置 `count`（= 寄存器数 = 点数）展开成
+///   `at ∈ 1..=count`（`count = 6×(n−1)`，n = 探测器只数 + 1）——**与 `point_table` 的
+///   `FIRE_DET_TEMPLATE_START(17)` / `FIRE_DET_STRIDE(6)` 同源**（位置式点名 `at = addr − 16`）；
+/// - 配置里没有的块（如现场未配 `bms_alarm`）⇒ **不进计划**（⇒ 站内该块缺席，屏侧按 catalog 行数
+///   与帧内块数比对即可发现——"BMS 告警源不可用"的判据在 catalog/屏侧，不在本层臆造）；
+/// - 白名单有、而**该块在配置内存在但某 `at` 未配**（如 `point_table` 未登记）⇒ 仍带该点，
+///   值走 `NotRead`（§15.1.2 第 2 条：点缺 ⇒ `NotRead`，不补 0）。
+pub fn peripheral_plan(cfg: &mupc_southd::config::SouthStationsConfig) -> Vec<PeripheralStationPlan> {
+    let mut out = Vec::new();
+    for st in &cfg.stations {
+        let role = periph_role_of(st.role);
+        if role == PeriphRole::Unknown {
+            continue; // meter_grid：不在本增量内（§15 范围外 #3）
+        }
+        let mut blocks = Vec::new();
+        for blk in &st.regs {
+            // 白名单内本块的 at（模板行对 fire_det 只给 1..=6，下面按 count 展开）
+            let mut ats: Vec<u16> = mupc_display_proto::PERIPH_WHITELIST
+                .iter()
+                .filter(|(r, b, _)| *r == role && *b == blk.name)
+                .map(|(_, _, at)| *at)
+                .collect();
+            if ats.is_empty() {
+                continue; // 该块整体不在白名单（如 pcs_3zone 之外的 PCS 块）
+            }
+            if blk.name == FIRE_DET_BLOCK {
+                // 运行期展开：整块逐寄存器 1 点（`count` = 点数 = 6 × 只数）
+                ats = (1..=blk.count.max(1)).collect();
+            } else {
+                ats.sort_unstable();
+                ats.dedup();
+            }
+            let renames: Vec<(u16, String)> = blk
+                .points
+                .iter()
+                .filter_map(|pt| pt.name.clone().map(|n| (pt.at, n)))
+                .collect();
+            blocks.push(PeripheralBlockPlan {
+                name: blk.name.clone(),
+                ats,
+                renames,
+                is_bit: matches!(blk.func, mupc_southd::config::RegFunc::Discrete),
+            });
+        }
+        if blocks.is_empty() {
+            continue; // 该站没有任何白名单块（现场未启用）⇒ 整站不进计划（catalog 会显「未启用」）
+        }
+        out.push(PeripheralStationPlan {
+            id: st.id.clone(),
+            role,
+            blocks,
+        });
+    }
+    out
+}
+
+/// **单点的 `flag` / `v` 判定**（设计 §15.1.2 伪码逐行；**不引入任何时间阈值**——只比"同一轮"）。
+///
+/// 返回 `(v, flag)`，**恒满足 `flag != Valid ⇒ v == None`**（不补 0、不沿用旧值）。
+fn point_field(
+    is_bit: bool,
+    station_active: bool,
+    last_poll_ms: Option<u64>,
+    metric: &std::collections::HashMap<String, latest_values::PointValue>,
+    key: &str,
+) -> (Option<f64>, FieldFlag) {
+    if !station_active {
+        return (None, FieldFlag::Offline); // ① 站离线 ⇒ 该站全部点 Offline
+    }
+    let Some(pv) = metric.get(key) else {
+        return (None, FieldFlag::NotRead); // ② 点缺（`station_snapshot` 无此 metric 键）
+    };
+    // ③ 标量点「本轮该点未更新」：`point.ts_ms < 站最后成功时刻`（含越界被 mapper 滤除的点）。
+    //    位点跳过本判据（位点 `ts_ms` = 最后变化时刻，天然旧，§9.1.2/§9.1.3）。
+    //    ⚠️ `station_last_poll_ms` 未落地（`None`）时该判据**不可判** ⇒ 退化（R-30：可能把陈旧值
+    //    当实时值展示），**不得**用 `now − ts > X` 之类的时间阈值去补（那是第二套新鲜度判据）。
+    if !is_bit {
+        if let Some(lp) = last_poll_ms {
+            if pv.ts_ms < lp {
+                return (None, FieldFlag::NotRead);
+            }
+        }
+    }
+    if pv.quality != latest_values::PointQuality::Ok {
+        return (None, FieldFlag::NotRead); // ④ 01 已判过陈旧 / 未配置 ⇒ 本节不重判
+    }
+    match pv.value {
+        None => (None, FieldFlag::NotRead), // 不可得（严禁以 0 顶替）
+        Some(v) if v.is_finite() => (Some(v), FieldFlag::Valid),
+        Some(_) => (None, FieldFlag::RangeError), // ⑤ 非有限（NaN / ±Inf）
+    }
+}
+
+/// 生产外设源：把 `latest_values` 的逐站快照投影成 [`PeripheralsSection`]。
+pub struct StationPeripheralSource {
+    latest: Arc<latest_values::LatestValues>,
+    plan: Vec<PeripheralStationPlan>,
+    /// 帧内 `catalog_rev` = catalog 端点的 `rev`（**同源同值**，§15.3.1）。
+    catalog_rev: u32,
+}
+
+impl StationPeripheralSource {
+    /// `catalog_rev` 由装配点从**同一份** catalog 求出（`display_proto::catalog_rev`）；
+    /// 未接线 catalog（如未启用控制通道）⇒ 传 0（屏侧按"从未取到名称表"处理，不臆造）。
+    pub fn new(
+        latest: Arc<latest_values::LatestValues>,
+        plan: Vec<PeripheralStationPlan>,
+        catalog_rev: u32,
+    ) -> Self {
+        Self {
+            latest,
+            plan,
+            catalog_rev,
+        }
+    }
+
+    /// **逐站重建**区间（读全量 → 重建整段；无状态 ⇒ 可重复调用、可丢通知）。
+    pub fn build_section(&self, now_ms: u64) -> PeripheralsSection {
+        let mut stations = Vec::with_capacity(self.plan.len());
+        for st in &self.plan {
+            // ① 站级：活性（`stale_timeout_s` 的唯一持有者）+ 最后成功时刻（R-38 getter）
+            let active = self.latest.station_is_active(&st.id, now_ms);
+            let last_ok_ms = self.latest.station_last_poll_ms(&st.id).unwrap_or(0);
+            // 点的原始快照（**单次持读锁克隆该站全部点**，不逐点取锁）
+            let raw: std::collections::HashMap<String, latest_values::PointValue> = self
+                .latest
+                .station_snapshot(&st.id)
+                .into_iter()
+                .map(|pv| (pv.id.metric, pv.value))
+                .collect();
+
+            let mut blocks = Vec::with_capacity(st.blocks.len());
+            for b in &st.blocks {
+                let mut values = Vec::with_capacity(b.ats.len());
+                let mut block_ts = 0u64;
+                for at in &b.ats {
+                    let key = rename_or(&b.renames, *at, &b.name);
+                    if let Some(pv) = raw.get(&key) {
+                        if pv.ts_ms > block_ts {
+                            block_ts = pv.ts_ms; // 块级"最近更新"= 块内点的最新采集时刻（信息性，F25.2）
+                        }
+                    }
+                    let (v, flag) = point_field(
+                        b.is_bit,
+                        active,
+                        Some(last_ok_ms).filter(|x| *x > 0),
+                        &raw,
+                        &key,
+                    );
+                    debug_assert!(
+                        flag == FieldFlag::Valid || v.is_none(),
+                        "不变量：flag != Valid ⇒ v 必须 None（不补 0）"
+                    );
+                    values.push(FramePoint {
+                        at: *at,
+                        v,
+                        flag,
+                    });
+                }
+                blocks.push(PeripheralBlock {
+                    name: b.name.clone(),
+                    ts_ms: block_ts,
+                    renames: b.renames.clone(),
+                    values,
+                });
+            }
+            stations.push(PeripheralStation {
+                id: st.id.clone(),
+                role: st.role,
+                // 站在线 = 采集侧结论（本节**不重判、不另立门限**）
+                online: active,
+                last_ok_ms,
+                // EDGE-23 的钢瓶气压接缝（`SouthStations::cylinder_pressure_configured`）**未接线**
+                // ⇒ `None` = 不可得 ⇒ 屏侧按值正常展示（设计 §15.2.2 的 `None` 语义）。
+                // ⚠️ 该接缝的适配器属设计 §15.11 #7（startup 侧），本任务**未做**（已登记）。
+                cylinder_configured: None,
+                blocks,
+            });
+        }
+        PeripheralsSection {
+            ts_ms: now_ms,
+            // 段可用性：本源每次采样都**真的**重建了段（内存读，不可能失败）⇒ `true`；
+            // 未接线（`DisplayDataProvider` 无源）时缓存保持 `Default` ⇒ `available=false`
+            // （EDGE-22「外设数据不可用」），两条路径语义不同、不得互相顶替。
+            available: true,
+            catalog_rev: self.catalog_rev,
+            truncated: Vec::new(), // 裁剪痕迹由组帧侧守卫填（§15.2.4 步骤 4）
+            stations,
+        }
+    }
+}
+
+/// 键的唯一构造点（与 `display_proto::PeripheralBlock::key` **同口径**：显式 `name` 优先，
+/// 否则 `<块名>_<at>`）——两侧必须逐字一致，否则帧内键与 `latest_values` 的 metric 对不上。
+fn rename_or(renames: &[(u16, String)], at: u16, block: &str) -> String {
+    match renames.iter().find(|(a, _)| *a == at) {
+        Some((_, n)) => n.clone(),
+        None => format!("{block}_{at}"),
+    }
+}
+
+impl PeripheralSource for StationPeripheralSource {
+    fn snapshot(&self, now_ms: u64) -> PeripheralsSection {
+        self.build_section(now_ms)
+    }
+
+    fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeBatch>> {
+        Some(self.latest.subscribe())
+    }
+}
+
+/// 外设段**内容真变化**判定（设计 §15.1.1，对齐 N-16 的既有范式）。
+///
+/// **忽略** `ts_ms` / `last_ok_ms` / `block.ts_ms` / `catalog_rev` / `truncated`：
+/// 兜底 tick 每 500 ms 都会让这些时标前进；若计入"内容"，慢拍 D 将退化为**恒定 4 Hz**
+/// 唤醒组帧（发布率上界虽不破，但"合并突发"的语义失效，且平白抬高 HMI 轮询负载）。
+/// 比较的是**展示内容**：段可用性 / 站集合与在线态 / 块集合与点名覆盖 / 点的 `(at, v, flag)`。
+fn peripherals_changed(a: &PeripheralsSection, b: &PeripheralsSection) -> bool {
+    if a.available != b.available || a.stations.len() != b.stations.len() {
+        return true;
+    }
+    for (x, y) in a.stations.iter().zip(b.stations.iter()) {
+        if x.id != y.id
+            || x.role != y.role
+            || x.online != y.online
+            || x.cylinder_configured != y.cylinder_configured
+            || x.blocks.len() != y.blocks.len()
+        {
+            return true;
+        }
+        for (bx, by) in x.blocks.iter().zip(y.blocks.iter()) {
+            if bx.name != by.name || bx.renames != by.renames || bx.values != by.values {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 发布节拍器（纯逻辑：无 I/O 无时钟读取，可用**假时钟**推进单测；设计 §4.2.1 验证要求）
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -693,6 +1018,10 @@ pub struct DisplayDataProvider {
     interlock_poll_ms: u64,
     /// F7 告警条数上限（`display.alarm_page_size`，契约「items ≤10」的组帧侧兜底）。
     alarm_page_size: usize,
+    /// 外设段源（U-73 慢拍 D；`None` = 未接线 ⇒ 段保持 `Default` = 「外设数据不可用」）。
+    peripheral_source: Option<Arc<dyn PeripheralSource>>,
+    /// 外设段兜底 tick 周期（`display.periph_poll_ms`，设计 §15.1.1）。
+    periph_poll_ms: u64,
     /// 慢拍段缓存（采样任务写 / 组帧任务读——**帧路径只读内存**）。
     caches: SlowCaches,
     /// 慢拍内容变更唤醒（合并窗口内合并为一次发布）。
@@ -728,6 +1057,9 @@ impl DisplayDataProvider {
             alarm_poll_ms: cfg.alarm_poll_ms.max(50),
             interlock_poll_ms: cfg.interlock_poll_ms.max(50),
             alarm_page_size: cfg.alarm_page_size,
+            peripheral_source: None,
+            // 兜底 tick 下界沿用 publish_ms 的同款守卫（0/极小周期会空耗内核）
+            periph_poll_ms: cfg.periph_poll_ms.max(50),
             caches: SlowCaches::default(),
             notify: Arc::new(Notify::new()),
             info: collect_info(),
@@ -764,6 +1096,18 @@ impl DisplayDataProvider {
         self
     }
 
+    /// 接入外设段源（U-73 §15.1.1 慢拍 D）。**不调则外设段保持「不可用」缺省**
+    /// （`available=false` ⇒ 屏显「外设数据不可用」），**不是**"没有外设"。
+    pub fn with_peripheral_source(mut self, src: Arc<dyn PeripheralSource>) -> Self {
+        self.peripheral_source = Some(src);
+        self
+    }
+
+    /// 外设段缓存快照（组帧用；`available=false` = 段不可用，EDGE-22）。
+    pub fn peripherals(&self) -> PeripheralsSection {
+        read_cache(&self.caches.peripherals)
+    }
+
     /// 后台主循环（startup 装配 `config.display.enabled` 时 spawn）。
     ///
     /// `tokio::join!`：主拍与三路慢拍并发于**同一 task**（随 outer task abort 一同终止，无需
@@ -783,11 +1127,15 @@ impl DisplayDataProvider {
             self.interlock_poll_ms,
         );
         let page_size = self.alarm_page_size;
+        let periph = self.peripheral_source.clone();
+        let pp = self.periph_poll_ms;
         tokio::join!(
             self.run_publish_loop(),
             Self::run_device_sampler(dev, caches.device.clone(), notify.clone(), dp),
             Self::run_alarm_sampler(alm, caches.alarms.clone(), notify.clone(), ap, page_size),
-            Self::run_interlock_sampler(ilk, caches.interlock.clone(), notify, ip),
+            Self::run_interlock_sampler(ilk, caches.interlock.clone(), notify.clone(), ip),
+            // 慢拍 D（外设段）：自有 `notify` 副本（`join!` 第四路），既有三路不变
+            Self::run_periph_sampler(periph, caches.peripherals.clone(), notify, pp),
         );
     }
 
@@ -918,6 +1266,42 @@ impl DisplayDataProvider {
         }
     }
 
+    /// 慢拍 D：外设段（设计 §15.1.1 / §15.6.1）。触发 = **变更广播 ∪ 兜底 tick**。
+    ///
+    /// **正确性不依赖广播**：每次采样都是「逐站读全量 → 重建整段」的无状态操作 ⇒ 广播
+    /// 丢一次（`Lagged`）只意味着"提前量没了"，最坏晚 `periph_poll_ms` 收敛
+    /// （§15.6.1 约束 1 的收敛由本 tick 保证，**不**压在"通知必达"上）。
+    async fn run_periph_sampler(
+        src: Option<Arc<dyn PeripheralSource>>,
+        cache: Arc<RwLock<PeripheralsSection>>,
+        notify: Arc<Notify>,
+        period_ms: u64,
+    ) {
+        let Some(src) = src else { return }; // 未接线：缓存保持 Default（「外设数据不可用」）
+        let period = std::time::Duration::from_millis(period_ms);
+        let mut rx = src.subscribe();
+        loop {
+            let fresh = src.snapshot(now_ms());
+            Self::slow_tick(&cache, &notify, async { fresh }, peripherals_changed).await;
+            match rx.as_mut() {
+                Some(r) => {
+                    tokio::select! {
+                        // 兜底 tick：**丢帧收敛的唯一保证**（§15.6.1 约束 1）
+                        _ = tokio::time::sleep(period) => {}
+                        msg = r.recv() => match msg {
+                            // Ok（有变更）/ Lagged（落后丢帧）都只是"提前一拍"：下一次采样本就是
+                            // 全量重建 ⇒ `Lagged` **无需**额外补救（§9.1.5 的"全量重读"天然成立）。
+                            // Closed ⇒ 通知源消失 ⇒ 退化为纯兜底 tick。
+                            Ok(_) | Err(RecvError::Lagged(_)) => {}
+                            Err(RecvError::Closed) => rx = None,
+                        },
+                    }
+                }
+                None => tokio::time::sleep(period).await,
+            }
+        }
+    }
+
     /// 联锁段**单次采集**：`Err` ⇒ `available=false`（「联锁状态不可用」，**不是**「未联锁」）。
     async fn sample_interlock(src: &dyn InterlockSource) -> InterlockSection {
         match src.read_interlock().await {
@@ -941,6 +1325,12 @@ impl DisplayDataProvider {
         let mut frame = self.build_frame(now_ms).await;
         frame.seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
+        // §15.2.4 步骤 5：出口守卫把**既有段自身超预算**的帧标为不可发布 ⇒ 此时**不覆盖**
+        // `latest`（屏侧继续拿上一帧：画面冻结，而非黑屏 / 半帧）。seq 仍递增（序 = 组帧次数）。
+        if frame.to_json_slice().is_err() {
+            tracing::error!("本帧不可编码（超 MAX_FRAME_BYTES）⇒ 不更新 latest（保留上一帧）");
+            return frame;
+        }
         // O2：毒化不 panic——仓库既有风格取回内部值（采集路径不得因一次 panic 永久失效）。
         let mut g = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         *g = Some(frame.clone());
@@ -999,10 +1389,23 @@ impl DisplayDataProvider {
         let inconsistency =
             Self::check_inconsistency(run_state, &p_phase, self.range.inconsistency_threshold_kw);
 
-        DisplayFrame {
+        // ── v3 外设段（U-73 §15.2.4 步骤 2–5；顺序**不得调换**）──
+        // 步骤 2：段可用性——源未接线 / 快照不可得 ⇒ 缓存保持 `Default`（`available=false`，
+        //         屏显「外设数据不可用」EDGE-22，**不伪装**）。
+        // 步骤 3：非 `fire_det` 块全量携带（白名单 441 点，与 n 无关）——取样时已按白名单带上。
+        // 步骤 4：`fire_det` 预算预检（**按 `POINT_JSON_BYTES_UPPER` 上界口径**）⇒ 超 `k_max`
+        //         只数即**前缀截断**并 push `truncated`（屏侧必须显式提示，F21.4）。
+        let mut peripherals = self.peripherals();
+        if mupc_display_proto::enforce_fire_det_budget(&mut peripherals) {
+            tracing::warn!(
+                truncated = ?peripherals.truncated,
+                "外设 fire_det 明细超出帧预算，已按地址升序前缀截断（F21.4：屏侧须显式提示）"
+            );
+        }
+
+        let mut frame = DisplayFrame {
             version: PROTO_VERSION,
-            // v3 新增段（§15.2.2）：取数接线与容量守卫在 T20 落（本行只保证编译与既有字段不变）
-            peripherals: Default::default(),
+            peripherals,
             seq: 0, // sample_once 写入真实 seq
             ts_ms: now_ms,
             soc,
@@ -1023,7 +1426,22 @@ impl DisplayDataProvider {
             alarms: self.alarms(),
             info: self.info.clone(),
             interlock: self.interlock(),
+        };
+
+        // 步骤 5：出口守卫（**唯一出口** `DisplayFrame::to_json_slice`，不得绕开）——估算
+        // 失准时的兜底。调用点在此（`build_frame`，设计 §15.11 #6）；`tracing` 由调用方补
+        // （契约层 `display-proto` 无 tracing 依赖，T19 评审残留 ③①）。
+        match mupc_display_proto::enforce_exit_guard(&mut frame) {
+            ExitGuardOutcome::NoChange => {}
+            ExitGuardOutcome::PeripheralsDowngraded => tracing::error!(
+                "peripherals 段超帧预算，本段置不可用（不重试、不发超限帧）；既有段照常发布"
+            ),
+            // 清空外设段后仍不可编码（既有段自身超预算）⇒ **本帧不得发布**（§15.2.4 步骤 5）
+            ExitGuardOutcome::StillTooLarge => tracing::error!(
+                "整帧超 MAX_FRAME_BYTES（既有段自身超预算）⇒ 本帧不发布，保留上一帧（不黑屏）"
+            ),
         }
+        frame
     }
 
     /// F6 装置段（缓存快照；`info` 之外唯一来源）。
@@ -2913,4 +3331,651 @@ mod tests {
         assert!(dev.count() >= 10, "慢拍本身仍须按 50 ms 采集（只是不触发组帧）");
         h.abort();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // U-73 外设段（慢拍 D 取数接线 + 组帧守卫；设计 §15.1 / §15.2.4 / §15.8.1 T-8..T-12/T-24）
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    use mupc_data_processing::latest_values::{LatestValues, PointId as PId, PointQuality, PointValue};
+
+    /// 测试用南向配置（生产形状裁剪：bms 标量+位块 / meter_batt / fire / hvac + 台区总表）。
+    /// 地址与生产同口径（`_k ↔ 起始 addr + k − 1`）⇒ `point_table::lookup_in` 能命中（W-2）。
+    const TEST_SOUTH_YAML: &str = r#"
+poll_ms: 1000
+stale_timeout_s: 5
+stations:
+  - id: bms
+    role: battery
+    port: "/dev/ttyS2"
+    interval_ms: 1000
+    regs:
+      - name: bms_io
+        func: input
+        addr: 100
+        count: 31
+        format: uint16
+        scale: 1.0
+        points:
+          - { at: 16, scale: 0.1 }
+          - { at: 17, scale: 0.1 }
+          - { at: 19, name: soc }
+          - { at: 1 }
+      - name: bms_alarm
+        func: discrete
+        addr: 200
+        count: 288
+  - id: meter_batt
+    role: meter_batt
+    port: "/dev/ttyS5"
+    interval_ms: 1000
+    regs:
+      - { name: mb_ui, func: holding, addr: 0x0061, count: 6, format: uint16, scale: 0.1 }
+      - { name: mb_phase, func: holding, addr: 0x0087, count: 14, format: int32_scaled, scale: 0.01 }
+  - id: fire
+    role: fire
+    port: "/dev/ttyS6"
+    interval_ms: 1000
+    regs:
+      - name: fire_sys
+        func: holding
+        addr: 4
+        count: 13
+        format: uint16
+        scale: 1.0
+        points:
+          - { at: 7, name: fire_det_count }
+      - name: fire_det
+        func: holding
+        addr: 17
+        count: 114
+        format: uint16
+        scale: 1.0
+  - id: hvac
+    role: hvac
+    port: "/dev/ttyS3"
+    interval_ms: 5000
+    regs:
+      - name: hvac_in
+        func: input
+        addr: 0
+        count: 4
+        format: int16
+        scale: 0.1
+        points:
+          - { at: 1 }
+          - { at: 3 }
+      - name: hvac_di
+        func: discrete
+        addr: 0
+        count: 31
+  - id: grid_meter
+    role: meter_grid
+    port: "/dev/ttyS4"
+    interval_ms: 1000
+    regs:
+      - { name: p, func: holding, addr: 0x1000, count: 6, format: int32_scaled, scale: 0.01 }
+"#;
+
+    fn test_south_cfg() -> mupc_southd::config::SouthStationsConfig {
+        serde_yaml::from_str(TEST_SOUTH_YAML).expect("测试南向配置可解析")
+    }
+
+    /// 逐点写入 `latest_values`：`(station, metric, value, ts_ms, quality)`。
+    fn fill(latest: &LatestValues, samples: &[(&str, &str, Option<f64>, u64, PointQuality)]) {
+        latest.apply(
+            samples
+                .iter()
+                .map(|(st, m, v, ts, q)| {
+                    (
+                        PId {
+                            station: (*st).to_string(),
+                            metric: (*m).to_string(),
+                        },
+                        PointValue {
+                            value: *v,
+                            ts_ms: *ts,
+                            quality: *q,
+                        },
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    fn ok() -> PointQuality {
+        PointQuality::Ok
+    }
+
+    /// 段内取点（白名单内每一点都在 ⇒ 取不到即测试自身写错）。
+    fn at_of(sec: &PeripheralsSection, role: PeriphRole, block: &str, at: u16) -> FramePoint {
+        sec.stations
+            .iter()
+            .find(|s| s.role == role)
+            .unwrap_or_else(|| panic!("{role:?} 站必须在段内"))
+            .blocks
+            .iter()
+            .find(|b| b.name == block)
+            .unwrap_or_else(|| panic!("{block} 块必须在段内"))
+            .values
+            .iter()
+            .find(|pv| pv.at == at)
+            .copied()
+            .unwrap_or_else(|| panic!("{block}_{at} 必须在段内（白名单内每一点都在）"))
+    }
+
+    /// **T-9：点级 flag 判定六分支**（§15.1.2 伪码逐行）+ 「`flag != Valid ⇒ v = None`」不变量。
+    #[test]
+    fn periph_point_flag_six_branches_and_never_zero_fill() {
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        latest.mark_station_polled("bms", now);
+        latest.mark_station_polled("meter_batt", now);
+        fill(
+            &latest,
+            &[
+                // ① 站离线（fire 从未轮询成功）：写了值也不展示
+                ("fire", "fire_sys_2", Some(880.0), now, ok()),
+                // ② 标量点「本轮未更新」：ts < 站最后轮询时刻 ⇒ NotRead
+                ("bms", "bms_io_16", Some(650.0), now - 5_000, ok()),
+                // ③ 位点：ts 恒旧（= 最后变化时刻）但站在窗内 ⇒ **仍 Valid**
+                ("bms", "bms_alarm_1", Some(1.0), now - 60_000, ok()),
+                // ④ quality != Ok ⇒ NotRead（值即使存在也不展示）
+                ("bms", "bms_io_17", Some(12.0), now, PointQuality::Stale),
+                // ⑤ 非有限 ⇒ RangeError（v = None）
+                ("meter_batt", "mb_ui_1", Some(f64::NAN), now, ok()),
+                // ⑥ 正常 ⇒ Valid（工程值原样；量纲已由采集侧消解）
+                ("meter_batt", "mb_ui_2", Some(229.6), now, ok()),
+            ],
+        );
+        let sec = StationPeripheralSource::new(latest, plan, 7).build_section(now);
+
+        let fire = sec.stations.iter().find(|s| s.role == PeriphRole::Fire).unwrap();
+        assert!(!fire.online, "fire 站从未轮询成功 ⇒ 离线");
+        assert_eq!(
+            {
+                let p = at_of(&sec, PeriphRole::Fire, "fire_sys", 2);
+                (p.v, p.flag)
+            },
+            (None, FieldFlag::Offline),
+            "① 站离线 ⇒ Offline 且不展示旧值"
+        );
+        assert_eq!(
+            {
+                let p = at_of(&sec, PeriphRole::Battery, "bms_io", 16);
+                (p.v, p.flag)
+            },
+            (None, FieldFlag::NotRead),
+            "② 标量点本轮未更新 ⇒ NotRead（不补 0）"
+        );
+        assert_eq!(
+            {
+                let p = at_of(&sec, PeriphRole::Battery, "bms_alarm", 1);
+                (p.v, p.flag)
+            },
+            (Some(1.0), FieldFlag::Valid),
+            "③ 位点不得按标量口径判旧（位点 ts = 最后变化时刻）"
+        );
+        assert_eq!(
+            {
+                let p = at_of(&sec, PeriphRole::Battery, "bms_io", 17);
+                (p.v, p.flag)
+            },
+            (None, FieldFlag::NotRead),
+            "④ quality != Ok ⇒ NotRead"
+        );
+        assert_eq!(
+            {
+                let p = at_of(&sec, PeriphRole::MeterBatt, "mb_ui", 1);
+                (p.v, p.flag)
+            },
+            (None, FieldFlag::RangeError),
+            "⑤ 非有限 ⇒ RangeError"
+        );
+        assert_eq!(
+            {
+                let p = at_of(&sec, PeriphRole::MeterBatt, "mb_ui", 2);
+                (p.v, p.flag)
+            },
+            (Some(229.6), FieldFlag::Valid),
+            "⑥ 其余 ⇒ Valid"
+        );
+
+        // 不变量：**任何** `flag != Valid` 的点 `v` 必须 None（不补 0 / 不沿用旧值，EX-30）
+        for st in &sec.stations {
+            for b in &st.blocks {
+                for pv in &b.values {
+                    assert!(
+                        pv.flag == FieldFlag::Valid || pv.v.is_none(),
+                        "{}:{} 的 flag={:?} 却带值",
+                        b.name,
+                        pv.at,
+                        pv.flag
+                    );
+                }
+            }
+        }
+    }
+
+    /// `latest_values` **无该点** ⇒ `NotRead`（点缺 ≠ 0；同段其它点不受影响）。
+    #[test]
+    fn periph_missing_point_degrades_to_not_read_not_zero() {
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        latest.mark_station_polled("bms", now);
+        // 一个点都没写 ⇒ 该站全部白名单点都是"点缺"
+        let sec = StationPeripheralSource::new(latest, plan, 0).build_section(now);
+        let bms = sec.stations.iter().find(|s| s.role == PeriphRole::Battery).unwrap();
+        assert!(bms.online, "站在采集窗口内");
+        let bms_io = bms.blocks.iter().find(|b| b.name == "bms_io").unwrap();
+        assert_eq!(
+            bms_io.values.len(),
+            mupc_display_proto::PERIPH_WHITELIST
+                .iter()
+                .filter(|(r, b, _)| *r == PeriphRole::Battery && *b == "bms_io")
+                .count(),
+            "块内点数 = 白名单点数（行数与 catalog 恒等）"
+        );
+        for pv in &bms_io.values {
+            assert_eq!(pv.flag, FieldFlag::NotRead, "点缺 ⇒ NotRead");
+            assert_eq!(pv.v, None, "点缺**不得**补 0");
+        }
+        // 位块同样逐点 NotRead（块间互不影响）
+        assert_eq!(
+            at_of(&sec, PeriphRole::Battery, "bms_alarm", 288).flag,
+            FieldFlag::NotRead
+        );
+    }
+
+    /// **T-10：站离线 ⇒ 该站全部点 `v=None`；其余站不受影响**（站级隔离，EX-04）。
+    #[test]
+    fn periph_station_offline_isolates_other_stations() {
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        latest.mark_station_polled("hvac", now);
+        latest.mark_station_polled("bms", now);
+        latest.mark_station_offline("bms");
+        fill(&latest, &[("hvac", "hvac_in_1", Some(24.5), now, ok())]);
+        let sec = StationPeripheralSource::new(latest, plan, 0).build_section(now);
+        let bms = sec.stations.iter().find(|s| s.role == PeriphRole::Battery).unwrap();
+        let hvac = sec.stations.iter().find(|s| s.role == PeriphRole::Hvac).unwrap();
+        assert!(!bms.online, "离线站 ⇒ online=false");
+        assert_eq!(bms.last_ok_ms, 0, "离线后 `station_poll_ms` 被清除 ⇒ 0（屏显 --）");
+        assert!(
+            bms.blocks.iter().flat_map(|b| &b.values).all(|pv| pv.v.is_none()),
+            "站离线 ⇒ 该站全部点 v=None"
+        );
+        assert!(hvac.online, "其余站不受影响（站级隔离）");
+        assert_eq!(
+            at_of(&sec, PeriphRole::Hvac, "hvac_in", 1).flag,
+            FieldFlag::Valid
+        );
+    }
+
+    /// **R-38 缺口的退化（T-24）**：无 `station_last_poll_ms` 数据时 `last_ok_ms = 0`
+    /// （屏显 `--`，**不臆造、不自维护第二份真源**）；该情形下站也不在采集窗口内 ⇒ 全 Offline。
+    #[test]
+    fn periph_last_ok_ms_is_zero_when_unavailable_never_invented() {
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        // 只写点、**不** `mark_station_polled`
+        fill(&latest, &[("bms", "bms_io_16", Some(650.0), now - 9_000, ok())]);
+        let sec = StationPeripheralSource::new(latest, plan, 0).build_section(now);
+        let bms = sec.stations.iter().find(|s| s.role == PeriphRole::Battery).unwrap();
+        assert_eq!(bms.last_ok_ms, 0, "无「最后成功时刻」⇒ 0（显 --，不臆造）");
+        assert!(
+            bms.blocks.iter().flat_map(|b| &b.values).all(|pv| pv.flag == FieldFlag::Offline),
+            "从未成功轮询 ⇒ 站不 active ⇒ 全部 Offline"
+        );
+    }
+
+    /// 计划投影 = **白名单唯一真源**：跳过 `meter_grid`、排除项结构性缺席、`fire_det` 按
+    /// 配置 `count` 展开、`renames` 与站配置同源。
+    #[test]
+    fn periph_plan_projects_whitelist_and_skips_meter_grid() {
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        assert!(
+            !plan.iter().any(|s| s.id == "grid_meter"),
+            "台区总表不在本增量内（§15 范围外 #3）"
+        );
+        assert_eq!(plan.len(), 4, "bms / meter_batt / fire / hvac");
+        let ats = |id: &str, blk: &str| -> Vec<u16> {
+            plan.iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.blocks.iter().find(|b| b.name == blk))
+                .map(|b| b.ats.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            ats("fire", "fire_det"),
+            (1..=114).collect::<Vec<_>>(),
+            "fire_det 按配置 count（114 = 6×19）展开为逐寄存器点"
+        );
+        assert!(!ats("hvac", "hvac_di").contains(&26), "位 25 保留位不上屏");
+        assert!(!ats("meter_batt", "mb_phase").contains(&7), "PT 对照不上屏");
+        assert!(!ats("meter_batt", "mb_phase").contains(&8), "CT 对照不上屏");
+        assert_eq!(ats("bms", "bms_io").len(), 17, "bms_io 白名单 17 点（§15.5.2）");
+        assert_eq!(ats("bms", "bms_alarm").len(), 288, "告警位 288 点（位 200–487）");
+        let bms_io = plan
+            .iter()
+            .find(|s| s.id == "bms")
+            .and_then(|s| s.blocks.iter().find(|b| b.name == "bms_io"))
+            .unwrap();
+        assert_eq!(bms_io.renames, vec![(19u16, "soc".to_string())], "点名覆盖投影");
+        // `soc`（bms_io_19）**不在**本增量白名单内：§15.5.2 段「电池」未列它，且 330 = 17 + 8
+        // + 9 + 4 + 4 + 288 的等式只有"bms_io 取 17 点"成立（SOC 仍由 P1 的 F1 展示）
+        assert!(!bms_io.ats.contains(&19), "SOC 不在外设白名单（P6 电池段不重复展示 F1）");
+        assert!(!bms_io.is_bit, "`input` 块 ⇒ 非位块");
+        assert_eq!(ats("bms", "bms_alarm").len(), 288);
+        let alarm_blk = plan
+            .iter()
+            .find(|s| s.id == "bms")
+            .and_then(|s| s.blocks.iter().find(|b| b.name == "bms_alarm"))
+            .unwrap();
+        assert!(alarm_blk.is_bit, "`discrete` 块 ⇒ is_bit（位点跳过「本轮未更新」判据）");
+    }
+
+    /// **T-12：内容比较忽略 `ts_ms` / `last_ok_ms` / 块 `ts_ms`**（否则 500 ms 兜底 tick 会把
+    /// 发布率打满 4 Hz）；内容真变（值 / 在线态）才判"变更"。
+    #[test]
+    fn periph_content_compare_ignores_timestamps_only() {
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        latest.mark_station_polled("bms", now);
+        fill(&latest, &[("bms", "bms_io_16", Some(650.0), now, ok())]);
+        let src = StationPeripheralSource::new(latest.clone(), plan, 3);
+        let a = src.build_section(now);
+        // 「同一轮成功轮询、值一字未改」——兜底 tick 每 500 ms 都会发生的事：时标前进、内容不变
+        latest.mark_station_polled("bms", now + 500);
+        fill(&latest, &[("bms", "bms_io_16", Some(650.0), now + 500, ok())]);
+        let b = src.build_section(now + 500);
+        assert_ne!(a.stations[0].last_ok_ms, b.stations[0].last_ok_ms, "前提：时标确实前进了");
+        assert_eq!(
+            at_of(&a, PeriphRole::Battery, "bms_io", 16).flag,
+            FieldFlag::Valid
+        );
+        assert!(
+            !peripherals_changed(&a, &b),
+            "只前进时标（值不变）不得判为内容变更（否则发布率打满 4 Hz）"
+        );
+        // 值变 ⇒ 判变更
+        fill(&latest, &[("bms", "bms_io_16", Some(651.0), now + 500, ok())]);
+        let c = src.build_section(now + 500);
+        assert!(peripherals_changed(&a, &c), "值变化必须判为内容变更");
+        // 在线态变 ⇒ 判变更（站离线要尽快上屏）
+        latest.mark_station_offline("bms");
+        let d = src.build_section(now + 600);
+        assert!(peripherals_changed(&c, &d), "站离线必须判为内容变更");
+        // 空段 → 有段 ⇒ 判变更
+        assert!(peripherals_changed(
+            &PeripheralsSection::default(),
+            &src.build_section(now + 700)
+        ));
+    }
+
+    /// 造一个 `fire_det` 带 `units` 只（每只 6 点）的段（供守卫用例）。
+    fn fire_det_section(units: usize) -> PeripheralsSection {
+        let mut sec = PeripheralsSection {
+            ts_ms: 1,
+            available: true,
+            catalog_rev: 1,
+            truncated: vec![],
+            stations: vec![PeripheralStation {
+                id: "fire".into(),
+                role: PeriphRole::Fire,
+                online: true,
+                last_ok_ms: 1,
+                cylinder_configured: None,
+                blocks: vec![PeripheralBlock {
+                    name: "fire_det".into(),
+                    ts_ms: 1,
+                    renames: vec![],
+                    values: (1..=units as u16 * 6)
+                        .map(|at| FramePoint {
+                            at,
+                            v: Some(1.0),
+                            flag: FieldFlag::Valid,
+                        })
+                        .collect(),
+                }],
+            }],
+        };
+        sec.stations[0].blocks[0].values.truncate(units * 6);
+        sec
+    }
+
+    /// **T-11 / 守卫顺序**：`build_frame` 的**步骤 4（预算预检 → 前缀截断）必须早于
+    /// 步骤 5（出口守卫）**。
+    ///
+    /// 构造：`fire_det` **119 只**（714 点）+ 441 个非 fire_det 点的上界口径已超
+    /// `MAX_PERIPH_BYTES`（119 只 > `k_max = 111`）。
+    /// - 若步骤 4 缺席 / 后置 ⇒ `truncated` 空、点数仍是 714；
+    /// - 若步骤 5 先跑 ⇒ 整段被置 `available=false` 并**清空载荷**（`stations` 空）；
+    /// ⇒ 「`truncated == ["fire_det:119→111"]` ∧ 点数 666 ∧ `available` 仍 true ∧ 帧可编码」
+    /// 唯一对应"先裁后守"。
+    #[tokio::test]
+    async fn build_frame_truncates_before_exit_guard() {
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500));
+        {
+            let mut g = p.caches.peripherals.write().unwrap();
+            *g = fire_det_section(119);
+        }
+        let frame = p.sample_once().await;
+        assert!(frame.peripherals.available, "裁剪 ≠ 段不可用（不得整段降级）");
+        assert_eq!(
+            frame.peripherals.truncated,
+            vec!["fire_det:119→111".to_string()],
+            "步骤 4 必须裁到 k_max=111 只并留下可复现条目（F21.4 不得静默）"
+        );
+        let det = frame
+            .peripherals
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Fire)
+            .and_then(|s| s.blocks.iter().find(|b| b.name == "fire_det"))
+            .expect("裁剪后段体仍在（证明步骤 5 未清载荷）");
+        assert_eq!(det.values.len(), 111 * 6, "前缀截断到 111 只 × 6 点");
+        assert_eq!(det.values[0].at, 1, "保留地址最小的前缀（可复现）");
+        assert!(frame.to_json_slice().is_ok(), "裁剪后整帧必须在 64 KiB 内");
+        // 幂等：再组一帧不得重复记条目
+        let frame2 = p.sample_once().await;
+        assert_eq!(frame2.peripherals.truncated.len(), 1);
+    }
+
+    /// **步骤 5 兜底**（T-11 ③）：估算失准（人为构造超预算帧）⇒ 整段置不可用、**既有段
+    /// 逐字段不受影响**、帧照常发布（不黑屏）。
+    #[tokio::test]
+    async fn build_frame_exit_guard_downgrades_section_and_keeps_existing_segments() {
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500));
+        // 人为把段与告警一起做大：1035 点 × f64 极值形态（≈64 KiB）+ 8 条 1 KiB 告警（≈8 KiB）
+        // ⇒ 整帧必然 > MAX_FRAME_BYTES（§15.2.4 的 R-43 失效模式）
+        {
+            let mut g = p.caches.peripherals.write().unwrap();
+            *g = fire_det_section(111); // 666 点
+            g.stations[0].blocks[0].values.iter_mut().for_each(|pv| {
+                pv.v = Some(f64::MIN); // −1.7976931348623157e308（23 字符/点）
+            });
+            g.stations[0].blocks.push(PeripheralBlock {
+                name: "fire_sys".into(),
+                ts_ms: 1,
+                renames: vec![],
+                values: (1..=369u16)
+                    .map(|at| FramePoint {
+                        at,
+                        v: Some(f64::MIN),
+                        flag: FieldFlag::Valid,
+                    })
+                    .collect(),
+            });
+        }
+        {
+            let mut g = p.caches.alarms.write().unwrap();
+            for i in 0..8 {
+                g.items.push(AlarmItem {
+                    ts_ms: 1,
+                    level: mupc_display_proto::AlarmLevel::Warn,
+                    message: "x".repeat(1024),
+                });
+                g.available = true;
+                let _ = i;
+            }
+        }
+        let frame = p.sample_once().await;
+        assert!(
+            !frame.peripherals.available,
+            "兜底 ⇒ 段置不可用（屏显「外设数据不可用」）"
+        );
+        assert!(frame.peripherals.stations.is_empty(), "载荷已清空（仅翻布尔位不减字节）");
+        assert!(frame.peripherals.truncated.is_empty());
+        assert!(frame.to_json_slice().is_ok(), "既有段照常发布（不黑屏）");
+        assert_eq!(frame.alarms.items.len(), 8, "既有告警段逐字段不受影响");
+        assert!(frame.alarms.available);
+        // 既有段与"无外设段"的基线帧逐字段一致
+        let mut q = bare_provider(&cfg_slow(1000, 250, 500));
+        let baseline = q.sample_once().await;
+        assert_eq!(frame.device, baseline.device);
+        assert_eq!(frame.info, baseline.info);
+        assert_eq!(frame.interlock, baseline.interlock);
+        assert_eq!(frame.p_total, baseline.p_total);
+        assert_eq!(frame.soc_source, baseline.soc_source);
+    }
+
+    /// **T-8：未接线 ⇒ `available=false`**（「外设数据不可用」，**不得**出空段伪装正常）。
+    #[tokio::test]
+    async fn periph_unwired_keeps_section_unavailable() {
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500));
+        assert!(!p.peripherals().available, "缓存缺省即「不可用」");
+        let frame = p.sample_once().await;
+        assert!(!frame.peripherals.available, "EDGE-22：整段「外设数据不可用」");
+        assert!(frame.peripherals.stations.is_empty(), "不得出空段伪装正常");
+        assert!(frame.to_json_slice().is_ok(), "外设缺失不得拖垮既有段");
+    }
+
+    /// §15.3.1 的**同源同值**：帧内 `catalog_rev` = catalog 端点的 `rev`（单一真源）。
+    #[tokio::test]
+    async fn frame_catalog_rev_matches_catalog_endpoint_rev() {
+        let core: crate::core_config::CoreConfig = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/mupc_core_config.production.yaml"
+        ))
+        .expect("生产配置可解析");
+        let prod = core.south_stations;
+        let plan = peripheral_plan(&prod);
+        assert!(!plan.is_empty(), "生产配置必须投影出外设站（否则本用例无鉴别力）");
+        let cat = crate::console_host::build_peripheral_catalog(&prod, &plan, 1);
+        assert_eq!(cat.rev, mupc_display_proto::catalog_rev(&cat), "rev 自洽");
+        assert_ne!(cat.rev, 0, "有内容的目录 rev 不得为 0（0 = 未取得）");
+        let latest = Arc::new(LatestValues::new(5));
+        let src_obj = Arc::new(StationPeripheralSource::new(
+            latest.clone(),
+            plan.clone(),
+            cat.rev,
+        ));
+        // 段缓存的内容 = 采样器的产物；此处直接落缓存（等价于慢拍 D 跑过一拍，免 sleep）
+        let seed = src_obj.snapshot(now_ms());
+        assert_eq!(seed.catalog_rev, cat.rev, "源产出的段必须带装配时的 catalog_rev");
+        let src: Arc<dyn PeripheralSource> = src_obj;
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500)).with_peripheral_source(src);
+        {
+            let mut g = p.caches.peripherals.write().unwrap();
+            *g = seed;
+        }
+        let f = p.sample_once().await;
+        assert_eq!(
+            f.peripherals.catalog_rev, cat.rev,
+            "帧内 catalog_rev 必须与端点 rev 同源同值（否则屏侧无休止重取 catalog）"
+        );
+        assert!(f.peripherals.available);
+    }
+
+    /// **兜底 tick 收敛**（§15.1.1 / §15.6.1 约束 1）：变更通知一路**完全丢失**
+    /// （`subscribe() → None`）时，外设值仍在 `periph_poll_ms` 量级内收敛到段缓存。
+    /// 用短周期真实推进（`period = 50 ms`，用例总时长 ≈150 ms；语义与 500 ms 等价）。
+    #[tokio::test]
+    async fn periph_fallback_tick_converges_without_broadcast() {
+        /// 包装：把订阅面**摘掉**（模拟"广播一路全丢"）。
+        struct NoNotify(Arc<StationPeripheralSource>);
+        impl PeripheralSource for NoNotify {
+            fn snapshot(&self, now_ms: u64) -> PeripheralsSection {
+                self.0.snapshot(now_ms)
+            }
+            fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<ChangeBatch>> {
+                None
+            }
+        }
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let t0 = now_ms();
+        latest.mark_station_polled("hvac", t0);
+        fill(&latest, &[("hvac", "hvac_in_1", Some(24.5), t0, ok())]);
+        let src = Arc::new(StationPeripheralSource::new(latest.clone(), plan, 0));
+        let cache: Arc<RwLock<PeripheralsSection>> =
+            Arc::new(RwLock::new(PeripheralsSection::default()));
+        let period = 50u64; // = periph_poll_ms（测试取短周期；语义等价）
+        let h = tokio::spawn(DisplayDataProvider::run_periph_sampler(
+            Some(Arc::new(NoNotify(src)) as Arc<dyn PeripheralSource>),
+            cache.clone(),
+            Arc::new(Notify::new()),
+            period,
+        ));
+        let read_v = |sec: &PeripheralsSection| -> Option<f64> {
+            sec.stations
+                .iter()
+                .find(|s| s.role == PeriphRole::Hvac)
+                .and_then(|s| s.blocks.iter().find(|b| b.name == "hvac_in"))
+                .and_then(|b| b.values.iter().find(|pv| pv.at == 1))
+                .and_then(|pv| pv.v)
+        };
+        tokio::time::sleep(Duration::from_millis(period)).await;
+        assert_eq!(
+            read_v(&read_cache(&cache)),
+            Some(24.5),
+            "首拍必须把初值带进段缓存"
+        );
+        // 值变化（**不发任何通知**）
+        fill(&latest, &[("hvac", "hvac_in_1", Some(25.5), now_ms(), ok())]);
+        // 兜底 tick：≤ 1 拍（这里给 2 拍余量，断言"收敛在上界量级内"）
+        tokio::time::sleep(Duration::from_millis(period * 2)).await;
+        assert_eq!(
+            read_v(&read_cache(&cache)),
+            Some(25.5),
+            "广播全丢时，兜底 tick（periph_poll_ms）必须保证收敛"
+        );
+        h.abort();
+    }
+
+
+    /// **南向 role → 显示 role 的运行时映射**（T19 评审残留 ⑤③ 的落点，设计 §15.2.2 注）。
+    ///
+    /// 两侧 serde 名逐字对应；**`meter_grid`（台区关口总表）不在本增量内** ⇒ 映射为
+    /// `Unknown`，其块由 [`peripheral_plan`] 整站跳过（§15 范围外 #3）。
+    #[test]
+    fn south_role_maps_to_display_role_and_meter_grid_is_excluded() {
+        use mupc_southd::config::Role as R;
+        for (south, want) in [
+            (R::Hvac, PeriphRole::Hvac),
+            (R::Fire, PeriphRole::Fire),
+            (R::Battery, PeriphRole::Battery),
+            (R::MeterBatt, PeriphRole::MeterBatt),
+            (R::Pcs, PeriphRole::Pcs),
+            (R::MeterGrid, PeriphRole::Unknown),
+        ] {
+            assert_eq!(periph_role_of(south), want, "{south:?} 映射漂移");
+        }
+        // 台区总表：即便白名单里存在同名块也不进计划（role = Unknown 的整站跳过）
+        assert!(mupc_display_proto::PERIPH_WHITELIST
+            .iter()
+            .all(|(r, _, _)| *r != PeriphRole::Unknown));
+    }
+
 }
