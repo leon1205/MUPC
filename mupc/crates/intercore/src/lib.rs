@@ -10,6 +10,9 @@ pub mod transport;
 // 保留导出仅因 modbus_slave bin（仿真）与历史/旧路径测试仍引用；生产 transport=modbus_rtu 走 pcs.rs。
 pub mod modbus_rtu;
 pub mod pcs;
+// pcs_sim：PCS 从站仿真库（自 bin/pcs_slave.rs 沉入，T-L0）——bin 薄壳与进程内 e2e
+// 测试（transport::modbus 测试缝）共用；纯仿真，无 unsafe/副作用。
+pub mod pcs_sim;
 
 pub use heartbeat::HeartbeatManager;
 pub use protocol::{FrameHeader, FrameType as IntercoreFrameType, IntercoreFrame};

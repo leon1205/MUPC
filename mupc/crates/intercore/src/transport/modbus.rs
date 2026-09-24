@@ -17,6 +17,8 @@ use async_trait::async_trait;
 use mupc_common::{ErrorCode, MupcError};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
+use std::task::Poll;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_modbus::client::Context;
@@ -88,6 +90,102 @@ fn fold_tm<T>(tag: &str, r: tokio_modbus::Result<T>) -> Result<T, MupcError> {
     })
 }
 
+/// PCS 链路字节流（`rtu::attach_slave` 的流类型）。生产仅 `Serial`（tokio-serial 串口）；
+/// `Test` 变体（进程内 `DuplexStream`）**仅 `#[cfg(test)]` 编译存在**——生产二进制不含
+/// 任何 Test 分支（编译期消除，无运行时开销与攻击面），仅服务于 `e2e_pcs_sim` 进程内
+/// 回归（本机无物理/虚拟串口环境下跑通完整 Modbus RTU 客户端栈）。
+#[derive(Debug)]
+pub enum PcsStream {
+    Serial(SerialStream),
+    #[cfg(test)]
+    Test(tokio::io::DuplexStream),
+}
+
+impl AsyncRead for PcsStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        // 两变体均 Unpin，Pin::new 免 unsafe 解引用
+        match self.get_mut() {
+            PcsStream::Serial(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            #[cfg(test)]
+            PcsStream::Test(t) => std::pin::Pin::new(t).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for PcsStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            PcsStream::Serial(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            #[cfg(test)]
+            PcsStream::Test(t) => std::pin::Pin::new(t).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            PcsStream::Serial(s) => std::pin::Pin::new(s).poll_flush(cx),
+            #[cfg(test)]
+            PcsStream::Test(t) => std::pin::Pin::new(t).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            PcsStream::Serial(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            #[cfg(test)]
+            PcsStream::Test(t) => std::pin::Pin::new(t).poll_shutdown(cx),
+        }
+    }
+}
+
+/// 进程内 e2e **测试缝**（仅 `#[cfg(test)]` 编译存在）：设置字节流工厂后，[`open_ctx`]
+/// 改从工厂取 `DuplexStream`（客户端半），绕过物理串口；未设置工厂时测试构建同样照旧
+/// 走串口。生产构建不含本模块（编译期消除）。工厂为**进程级单例**——e2e 测试须持
+/// [`e2e_pcs_sim::E2E_SERIAL`] 串行执行，且每条测试结束调用 [`clear`]（harness Drop 兜底）。
+#[cfg(test)]
+pub mod test_seam {
+    use std::sync::{Mutex, OnceLock};
+    use tokio::io::DuplexStream;
+
+    type Factory = Box<dyn Fn() -> DuplexStream + Send + Sync>;
+
+    fn slot() -> &'static Mutex<Option<Factory>> {
+        static SLOT: OnceLock<Mutex<Option<Factory>>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
+
+    /// 设置测试字节流工厂：此后每次 `open_ctx` 调用工厂取一条客户端半 `DuplexStream`
+    /// （服务器半由工厂闭包交给 e2e harness 的 serve 任务）。
+    pub fn set_test_stream_factory(f: Factory) {
+        *slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// `open_ctx` 调用：工厂已设置 → 造一条测试流；未设置 → None（照旧串口）。
+    pub(super) fn make_stream() -> Option<DuplexStream> {
+        let guard = slot().lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|f| f())
+    }
+
+    /// 清除工厂（每条 e2e 测试结束必须调用，防止缝泄漏影响其它测试）。
+    pub fn clear() {
+        *slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// 打开串口并 attach 到指定从站（每次请求独立连接，天然规避半双工总线残留帧）
 async fn open_ctx(s: &ModbusRtuSettings) -> Result<Context, MupcError> {
     // Modbus RTU 单从站有效地址 1..=247（0 为广播，主从应答式控制不适用）。
@@ -126,6 +224,17 @@ async fn open_ctx(s: &ModbusRtuSettings) -> Result<Context, MupcError> {
             ))
         }
     };
+    // ── 测试缝（仅 `#[cfg(test)]` 编译存在，生产构建无此分支）──
+    // e2e harness 设置工厂后返回进程内 DuplexStream（见 mod e2e_pcs_sim），绕过物理
+    // 串口；未设置工厂时测试构建同样照旧走下方串口路径。参数校验（slave_addr/线格式）
+    // 对测试路径同样生效（缝在全部校验之后）。
+    #[cfg(test)]
+    if let Some(test_stream) = test_seam::make_stream() {
+        return Ok(rtu::attach_slave(
+            PcsStream::Test(test_stream),
+            Slave::from(s.slave_addr),
+        ));
+    }
     let stream = SerialStream::open(
         &tokio_serial::new(&s.serial_port, s.baud_rate)
             .data_bits(data_bits)
@@ -139,7 +248,10 @@ async fn open_ctx(s: &ModbusRtuSettings) -> Result<Context, MupcError> {
             "intercore",
         )
     })?;
-    Ok(rtu::attach_slave(stream, Slave::from(s.slave_addr)))
+    Ok(rtu::attach_slave(
+        PcsStream::Serial(stream),
+        Slave::from(s.slave_addr),
+    ))
 }
 
 /// 解码 PCS 3 区 SOC 字 → 百分比（0..=100）；非有限或越界返回 None（视为无效读数）
@@ -882,5 +994,277 @@ mod tests {
         assert_eq!(r2.p_total, None, "第 4 字缺失 → 总有功 None");
 
         assert_eq!(compose_three_phase(None, None), None, "两段皆失败 → 整体 None");
+    }
+}
+
+/// 进程内 e2e 回归（T-L0，方案 §6.0 L0 主判据）：`ModbusRtuTransport` 的**真实
+/// Modbus RTU 客户端栈** ↔ [`crate::pcs_sim`] 从站仿真，经 [`test_seam`] 的
+/// `tokio::io::DuplexStream` 对对接——无需任何串口硬件/驱动（本机 Windows 无
+/// 物理/虚拟串口、无 WSL 亦可跑）。覆盖方案 §1.2 A3–A7 在传输层的等价物。
+///
+/// ⚠️ test_seam 工厂为进程级单例：全部 e2e 测试持 [`E2E_SERIAL`] 串行执行；每条测试
+/// 结束清缝（测试体显式 `test_seam::clear()` + Harness Drop 兜底，panic 路径也清）。
+#[cfg(test)]
+mod e2e_pcs_sim {
+    use super::*;
+    use crate::pcs_sim::{serve_rtu, PcsSimState, PcsSlaveService, REG_ALARM_BASE};
+    use tokio::io::DuplexStream;
+    use tokio::sync::mpsc;
+
+    /// e2e 串行锁：全局工厂单例不允许两个测试并发设缝（cargo test 默认多线程跑）
+    static E2E_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct Harness {
+        tr: Arc<ModbusRtuTransport>,
+        /// 仿真状态（测试经 `set_alarm` 等直接操纵从站侧）
+        state: Arc<PcsSimState>,
+        /// 后台任务（serve/心跳）：Drop 统一 abort，防测试 panic 后任务泄漏串缝
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Harness {
+        fn push_task(&mut self, t: tokio::task::JoinHandle<()>) {
+            self.tasks.push(t);
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            // 先清缝（工厂随闭包释放其 channel 发送端 → serve 循环自然收尾），再 abort 兜底
+            test_seam::clear();
+            for t in self.tasks.drain(..) {
+                t.abort();
+            }
+        }
+    }
+
+    fn e2e_settings() -> ModbusRtuSettings {
+        ModbusRtuSettings {
+            // 工厂已设时该串口不会被真正打开；若缝意外失效，打开此名必失败（响亮报错）
+            serial_port: "SEAM-INPROCESS".to_string(),
+            baud_rate: 19200,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: "none".to_string(),
+            slave_addr: 1,
+            // 进程内管道远快于串口；宽超时防慢机/调度抖动误报
+            response_timeout_ms: 2000,
+            heartbeat_poll_ms: 50,
+        }
+    }
+
+    /// 建缝 + serve 任务：工厂每被调一次造一对 `tokio::io::duplex(4096)`，client 半
+    /// 返给 `open_ctx`，server 半经 channel 交给 spawn 的 serve 任务——与生产「每次
+    /// 请求独立开串口」同构：serve 到 EOF（client 半随 ctx drop 关闭）再取下一条流。
+    async fn setup() -> Harness {
+        let (tx, mut rx) = mpsc::unbounded_channel::<DuplexStream>();
+        let state = Arc::new(PcsSimState::new());
+        test_seam::set_test_stream_factory(Box::new(move || {
+            let (client, server) = tokio::io::duplex(4096);
+            // serve 已退出时 send 失败：server 半被 drop ⇒ client 侧得 EOF（错误可见，不悬挂）
+            let _ = tx.send(server);
+            client
+        }));
+        let st = Arc::clone(&state);
+        let serve = tokio::spawn(async move {
+            while let Some(stream) = rx.recv().await {
+                let _ = serve_rtu(stream, PcsSlaveService::new(Arc::clone(&st))).await;
+            }
+        });
+        Harness {
+            tr: Arc::new(ModbusRtuTransport::new(e2e_settings())),
+            state,
+            tasks: vec![serve],
+        }
+    }
+
+    /// bus 锁下写 4 区单寄存器（镜像生产入口纪律：内部原语不取锁、入口取锁，W3）
+    async fn locked_write(tr: &ModbusRtuTransport, addr: u16, value: u16) {
+        let _bus = tr.bus.lock().await;
+        tr.write_reg(addr, value).await.unwrap();
+    }
+
+    /// bus 锁下读 1013 并解码 run_state（与心跳每拍同构）
+    async fn locked_read_run_state(tr: &ModbusRtuTransport) -> Option<u16> {
+        let _bus = tr.bus.lock().await;
+        let words = tr.read_input(REG_RUN_STATE, 1).await.unwrap();
+        decode_run_state(words[0])
+    }
+
+    /// FC03 回读 4 区：返回（原始线值, 解码实值）。transport 无公开 4 区读原语，
+    /// 借 `open_ctx` 开裸 ctx 走同一测试缝（客户端栈与生产一致）。
+    async fn readback_hold(tr: &ModbusRtuTransport, addr: u16) -> (u16, f64) {
+        let mut ctx = open_ctx(&tr.settings).await.unwrap();
+        let raw = ctx.read_holding_registers(addr, 1).await.unwrap().unwrap();
+        (raw[0], from_pcs_reg(raw[0]))
+    }
+
+    /// E1 链路与心跳（A3 等价）：probe_link/is_connected 成功；心跳维护 last_run_state。
+    /// run_state 语义以 [`PcsSimState::run_state`] 为准：500 未写（缺省 0）⇒ 停机(0)；
+    /// 写 500=1 且 P=0 ⇒ 待机(1)。
+    #[tokio::test]
+    async fn e1_link_probe_and_heartbeat_run_state() {
+        let _serial = E2E_SERIAL.lock().await;
+        let mut h = setup().await;
+
+        assert!(
+            h.tr.probe_link().await,
+            "probe_link 应经测试缝读到 3 区 1013"
+        );
+        assert!(h.tr.is_connected().await, "读事务成功后应标记在线");
+
+        // 心跳维护 last_run_state：500 缺省 0 ⇒ 停机(0)
+        let hb = Arc::clone(&h.tr);
+        h.push_task(tokio::spawn(hb.run_heartbeat_loop()));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            h.tr.last_run_state(),
+            Some(0),
+            "500 缺省 0 ⇒ run_state=0（停机）"
+        );
+
+        // 写 500=1 ⇒ 待机(1)
+        locked_write(&h.tr, REG_START_STOP, to_pcs_reg(1.0)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            h.tr.last_run_state(),
+            Some(1),
+            "500=1 且 P=0 ⇒ run_state=1（待机）"
+        );
+        test_seam::clear();
+    }
+
+    /// E2 3 区读 + 字节序（A4 等价）：SOC=1010 ⇒ 66%；1013 与 E1 口径一致（缺省停机 0）；
+    /// 并对**原始线格式**断言一次字节互换：写 1001=+5 后 FC03 回读线值 = `to_pcs_reg(5.0)`。
+    #[tokio::test]
+    async fn e2_input_area_read_and_wire_byte_order() {
+        let _serial = E2E_SERIAL.lock().await;
+        let h = setup().await;
+
+        // SOC(1010)：仿真固定 66%（latest_soc 公共路径，含 0..=100 合法性过滤）
+        let (soc, _) = h.tr.latest_soc().await.expect("SOC 读应经缝成功");
+        assert_eq!(soc, 66.0);
+
+        // 1013：500 未写 ⇒ 停机(0)，与 E1 起点口径一致
+        assert_eq!(locked_read_run_state(&h.tr).await, Some(0));
+
+        // 原始线格式字节互换断言：5 ⇒ 0x0005，互换后线上应为 0x0500
+        locked_write(&h.tr, REG_START_STOP, to_pcs_reg(1.0)).await;
+        locked_write(&h.tr, REG_CONST_P_SET, to_pcs_reg(5.0)).await;
+        let (wire, real) = readback_hold(&h.tr, REG_CONST_P_SET).await;
+        assert_eq!(wire, to_pcs_reg(5.0), "线值应为实值的字节互换");
+        assert_eq!(wire, 0x0500, "0x0005 互换 ⇒ 0x0500");
+        assert_eq!(real, 5.0, "from_pcs_reg 回解应还原实值");
+        test_seam::clear();
+    }
+
+    /// E3 4 区写-回读（A5 等价）：经传输写 1001=+5 ⇒ 回读 5；写 −5 ⇒ 回读 −5
+    /// （负数经 PCS 端序往返不坏）。
+    #[tokio::test]
+    async fn e3_holding_write_readback_signed() {
+        let _serial = E2E_SERIAL.lock().await;
+        let h = setup().await;
+        locked_write(&h.tr, REG_START_STOP, to_pcs_reg(1.0)).await;
+
+        locked_write(&h.tr, REG_CONST_P_SET, to_pcs_reg(5.0)).await;
+        assert_eq!(
+            readback_hold(&h.tr, REG_CONST_P_SET).await.1,
+            5.0,
+            "+5 回读"
+        );
+
+        locked_write(&h.tr, REG_CONST_P_SET, to_pcs_reg(-5.0)).await;
+        let (wire, real) = readback_hold(&h.tr, REG_CONST_P_SET).await;
+        assert_eq!(real, -5.0, "−5 回读（负数经 PCS 端序往返不坏）");
+        assert_eq!(wire, to_pcs_reg(-5.0), "负数线值同样字节互换");
+        test_seam::clear();
+    }
+
+    /// E4 启停与方向状态机（A6 等价）：写 500=1 ⇒ 1013=1（待机，P=0）；写 1001=+5 ⇒
+    /// 3（放电）；写 1001=−5 ⇒ 2（充电）；trait `stop()`（写 500=0）⇒ 0（停机）。
+    #[tokio::test]
+    async fn e4_start_stop_direction_state_machine() {
+        let _serial = E2E_SERIAL.lock().await;
+        let h = setup().await;
+
+        locked_write(&h.tr, REG_START_STOP, to_pcs_reg(1.0)).await;
+        assert_eq!(
+            locked_read_run_state(&h.tr).await,
+            Some(1),
+            "500=1、P=0 ⇒ 待机(1)"
+        );
+
+        locked_write(&h.tr, REG_CONST_P_SET, to_pcs_reg(5.0)).await;
+        assert_eq!(locked_read_run_state(&h.tr).await, Some(3), "P>0 ⇒ 放电(3)");
+
+        locked_write(&h.tr, REG_CONST_P_SET, to_pcs_reg(-5.0)).await;
+        assert_eq!(locked_read_run_state(&h.tr).await, Some(2), "P<0 ⇒ 充电(2)");
+
+        h.tr.stop().await.expect("stop() 写 500=0 应成功");
+        assert_eq!(
+            locked_read_run_state(&h.tr).await,
+            Some(0),
+            "500=0 ⇒ 停机(0)"
+        );
+        test_seam::clear();
+    }
+
+    /// E5 急停故障位可读（A7 等价，R2 边界消除）：告警1（3 区 1000）bit2=急停
+    /// （协议 p6 序号 3）经 `set_alarm` 置位后可经传输读到。
+    /// ⚠️ 位序核对：`to_pcs_reg` 语义 = **字内高/低字节互换**——字节内 bit 序不变，
+    /// 但字内整体位号 n ⇔ n±8（bit2 ⇔ 线上 bit10）；`from_pcs_reg` 回解后位序还原，
+    /// 故断言「解码后 bit2 置位」且「线值 = 0x0004 的字节互换 0x0400」。
+    #[tokio::test]
+    async fn e5_alarm_estop_bit_readable() {
+        let _serial = E2E_SERIAL.lock().await;
+        let h = setup().await;
+
+        h.state.set_alarm(0, 1 << 2); // 告警1 bit2 = 急停
+        let words = {
+            let _bus = h.tr.bus.lock().await;
+            h.tr.read_input(REG_ALARM_BASE, 1).await.unwrap()
+        };
+        let wire = words[0];
+        assert_eq!(
+            wire,
+            (1u16 << 2).swap_bytes(),
+            "线值应为告警字的字节互换（bit10 置位）"
+        );
+        let decoded = from_pcs_reg(wire) as u16;
+        assert!(decoded & (1 << 2) != 0, "解码后急停位 bit2 应置位");
+        test_seam::clear();
+    }
+
+    /// E6 并发不串线：写方（`send_dual_param` 完整入口序列：模式/启停/1001/1002）与
+    /// 读方（心跳同款 bus 锁 + 读 1013）各 50 次并发 ⇒ 无错误、run_state 恒合法
+    /// （500=1 ⇒ ∈{1,2,3}，绝无 0/乱码），验证 W3 bus 互斥与每事务独立流在缝上仍成立。
+    #[tokio::test]
+    async fn e6_concurrent_write_read_no_crosstalk() {
+        let _serial = E2E_SERIAL.lock().await;
+        let h = setup().await;
+        locked_write(&h.tr, REG_START_STOP, to_pcs_reg(1.0)).await;
+
+        let tr_w = Arc::clone(&h.tr);
+        let writer = tokio::spawn(async move {
+            for i in 0..50u16 {
+                let p = if i % 2 == 0 { 5.0 } else { -5.0 };
+                let cmd = DualParamCommand::new(p, 0.0, true, "fallback");
+                tr_w.send_dual_param(&cmd)
+                    .await
+                    .unwrap_or_else(|e| panic!("写 1001 第 {i} 次失败: {e}"));
+            }
+        });
+        let tr_r = Arc::clone(&h.tr);
+        let reader = tokio::spawn(async move {
+            for i in 0..50u16 {
+                let st = locked_read_run_state(&tr_r)
+                    .await
+                    .unwrap_or_else(|| panic!("读 1013 第 {i} 次得非法值（疑似串帧）"));
+                assert!(matches!(st, 1..=3), "500=1 ⇒ run_state∈{{1,2,3}}，得 {st}");
+            }
+        });
+        writer.await.expect("writer 任务不应 panic");
+        reader.await.expect("reader 任务不应 panic");
+        test_seam::clear();
     }
 }
