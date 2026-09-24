@@ -1,3 +1,11 @@
+//! ⚠️ 已下架（U-71/Q6，2026-09-23）：不参与运行，勿新增调用方
+//!
+//! 下架动作 = 从两份 deploy YAML 的 `plugins.auto_load` 移除 `mqtt_plugin`（01 设计 §9.3.1
+//! 裁定①：插件按名动态加载，本 crate **不在** core-bin 的依赖表里 ⇒ 配置层是唯一有效开关）；
+//! 北向 MQTT 的唯一承载 = `mupc-mqtt-bridge::NorthMqttClient`（`mqtt-bridge`）。本 crate 的
+//! `start()` 是空实现，且其 `MqttConfig` 与 `mqtt-bridge` 的同名不同型 ⇒ 保留即双份缺陷面。
+//! **源码暂留**（§9.3.1「不做」：删除会牵动 workspace 成员表与既有 FFI 测试，另立清理批次）。
+//!
 //! MQTT 北向插件
 //!
 //! 实现 MQTT 协议客户端，支持 TLS 加密和 QoS 0/1/2

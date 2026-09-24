@@ -450,11 +450,60 @@ fn grid_sample_from_package(pkg: &mupc_data_processing::DataPackage) -> mupc_sto
 ///
 /// 落库失败语义沿用既有路径：`buffer_telemetry` 返回 `Err` 只 `warn`（与南向遥测、事件落库
 /// 同范式：丢点可观测、不 panic、不停采集）。
+/// 聚合行的**生产者 → 入队者**通道（T15/T16 遗留③ 的修法，2026-09-24）。
+///
+/// # 为什么是通道而不是 `tokio::spawn`（竞态消除的**结构性**理由）
+///
+/// **修复前**：`SouthSink::forward_grid_sample` 每产出一次聚合行就 `tokio::spawn` 一个
+/// **游离任务**去入队。该 spawn **不登记**在 `producers`/`bg_tasks` 任何名单里 ⇒ 退出序列
+/// 对它**没有任何可见性**：它可能在 `stop_producers` 返回**之后**才被创建，其
+/// `buffer_telemetry`（容量触发路径会 `await` 提交）就可能落在**最后一次 flush 之后**
+/// ⇒ 这一批（≤22 行）随进程退出滞留内存而丢失。这正是 U-64 之后残留的那条窄竞态。
+///
+/// **修复后**：聚合行**不再有任何游离任务**——`forward_grid_sample` 只做一次**同步内存
+/// 投递**（同一调用栈内，无 await、无 spawn），由**已注册**的 `grid_agg_timer` 任务
+/// 统一入队。于是：
+/// 1. 聚合行通往 `WriteBuffer` 的路径**唯一**，且该路径的终点是一个
+///    `producers` 名单里的任务 ⇒ `stop_producers` 会**等它确认收工**（有上限）之后
+///    才做最后 flush ⇒ "入队落在最后 flush 之后"在结构上不再可能（不再存在
+///    退出序列看不见的写者）；
+/// 2. 投递本身是**同一调用栈内的同步 send** ⇒ 任务收工时刻不可能还有"在半空中的
+///    入队工作"：要么行已在通道里（收工分支会 drain），要么行的生产者回调**尚未执行**；
+/// 3. 收工分支先 drain 通道、再 `flush(now)` 关闭未闭合周期、最后二次 drain 才入队
+///    ⇒ 最后一段周期由**退出序列等待的那个任务**亲自闭合与入队（修复前这一步只发生在
+///    与退出竞跑的 tick 里）。
+pub(crate) type AggregateRowSender =
+    tokio::sync::mpsc::UnboundedSender<Vec<mupc_storage::AggregateRow>>;
+
+/// 聚合行通道的接收端。
+pub(crate) type AggregateRowReceiver =
+    tokio::sync::mpsc::UnboundedReceiver<Vec<mupc_storage::AggregateRow>>;
+
+/// 建通道（无界：投递侧处**同步回调**内，不能 await；有界通道的 `try_send` 会在满时丢行
+/// ——丢弃聚合行是设计不允许的静默损失）。
+pub(crate) fn aggregate_row_channel() -> (AggregateRowSender, AggregateRowReceiver) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
+/// 把通道里已投递的批次**全部**取出（保持投递顺序）。
+fn drain_aggregate_rows(rx: &mut AggregateRowReceiver) -> Vec<mupc_storage::AggregateRow> {
+    let mut out = Vec::new();
+    while let Ok(mut batch) = rx.try_recv() {
+        out.append(&mut batch);
+    }
+    out
+}
+
+/// 总表聚合的**唯一**入队者（§9.2.3 末 / §9.6 序 6；U-64 协作退出名单成员）。
+///
+/// 见 [`AggregateRowSender`] 的"结构性理由"：本任务同时是 ① 周期闭合者（`tick`）与
+/// ② 聚合行入队者（drain 通道），收工时 ③ drain + `flush(now)` 关闭最后一段 + 再 drain。
 fn spawn_grid_aggregate_timer(
     aggregator: Arc<parking_lot::Mutex<mupc_storage::GridAggregator>>,
     write_buffer: Arc<mupc_storage::WriteBuffer>,
     device_id: String,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    mut agg_rx: AggregateRowReceiver,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1_000));
@@ -463,15 +512,24 @@ fn spawn_grid_aggregate_timer(
         loop {
             tokio::select! {
                 _ = stop.changed() => {
+                    // ① 先 drain 通道里**已投递**的行（按投递顺序，早于下面的 flush 产出）
+                    let mut rows = drain_aggregate_rows(&mut agg_rx);
+                    // ② 再关闭**未闭合周期**（最后一段不丢）
                     let now_ms = now_ms();
-                    let rows = { aggregator.lock().flush(now_ms) };
-                    tracing::debug!(rows = rows.len(), "停机信号：总表聚合任务收工（先 flush 未闭合周期）");
+                    rows.extend(aggregator.lock().flush(now_ms));
+                    // ③ 让出一次调度：无停机钩子的南向采集口只是被 `abort`（生效点在它下一次
+                    //    await），其**在途回调**仍可能刚投递完；再 drain 一次把这批也带走。
+                    tokio::task::yield_now().await;
+                    rows.extend(drain_aggregate_rows(&mut agg_rx));
+                    tracing::debug!(rows = rows.len(), "停机信号：总表聚合任务收工（drain 通道 + flush 未闭合周期）");
                     enqueue_aggregate_rows(&write_buffer, &device_id, rows).await;
                     break;
                 }
                 _ = ticker.tick() => {
+                    // 投递顺序 = 采集时序：先取 handoff 的行，再取本轮 `tick` 闭合的行
+                    let mut rows = drain_aggregate_rows(&mut agg_rx);
                     let now_ms = now_ms();
-                    let rows = { aggregator.lock().tick(now_ms) };
+                    rows.extend(aggregator.lock().tick(now_ms));
                     enqueue_aggregate_rows(&write_buffer, &device_id, rows).await;
                 }
             }
@@ -535,10 +593,16 @@ struct SouthSink {
     /// 聚合算法本身在 `mupc_storage::GridAggregator`（纯逻辑、可单测），**周期闭合由 tick 任务
     /// 驱动**（`spawn_grid_aggregate_timer`），二者共用同一个 `Arc`。
     grid_aggregator: Arc<parking_lot::Mutex<mupc_storage::GridAggregator>>,
+    /// 聚合行**投递通道**（T15/T16 遗留③ 修法）：本 sink 只做**同步投递**，
+    /// 入队由已注册的 `grid_agg_timer` 承担（理由见 [`AggregateRowSender`] 的文档）。
+    ///
+    /// ⚠️ **不得**改回 `tokio::spawn`：那会让聚合行的入队重新落进"退出序列看不见的
+    /// 游离任务"，从而恢复"落在最后一次 flush 之后"的窄竞态（U-64 之后 T15/T16 的遗留项）。
+    agg_tx: AggregateRowSender,
 }
 
 impl SouthSink {
-    // 装配层构造器：7 个入参全是**依赖注入点**（各自都不可由其它入参推出）⇒ 按签名原样放行。
+    // 装配层构造器：8 个入参全是**依赖注入点**（各自都不可由其它入参推出）⇒ 按签名原样放行。
     #[allow(clippy::too_many_arguments)]
     fn new(
         ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
@@ -549,6 +613,7 @@ impl SouthSink {
         latest: Arc<LatestValues>,
         grid_station_id: Option<String>,
         grid_aggregator: Arc<parking_lot::Mutex<mupc_storage::GridAggregator>>,
+        agg_tx: AggregateRowSender,
     ) -> Self {
         Self {
             ai_integrator,
@@ -559,25 +624,27 @@ impl SouthSink {
             latest,
             grid_station_id,
             grid_aggregator,
+            agg_tx,
         }
     }
 
     /// U-69（03 设计 §9.1.4 / §9.6 序 5）：把 grid 包的电气量**样本转发**给聚合器，把**已闭合
-    /// 周期**的行落库。本函数**只做转发 + 入队**，不做任何聚合计算（周期边界/均值/极值全在
-    /// `mupc_storage::GridAggregator` 内，可单测）。
+    /// 周期**的行**投递**给聚合行通道。本函数**只做转发 + 投递**，不做任何聚合计算
+    /// （周期边界/均值/极值全在 `mupc_storage::GridAggregator` 内，可单测）。
     ///
     /// 时序：在既有 `set_latest_data`（策略 phase 单写方）与 `apply_grid_snapshot`（最新值快照）
     /// **之后**调用 ⇒ 两条既有路径**逐字不动**（PRD GRD-07：不改变北向上送与策略输入）。
     ///
-    /// 落库在**独立 task**里做（`tokio::spawn`）：`observe` 若恰好闭合一个周期，本回调会多出
-    /// 「入队 22 行」的活儿 —— 采集调用栈不得被 DB 提交阻塞（PRD R-11.5-A5 的同一条口径，
-    /// 与 §9.3 缺口 3 推荐的「容量触发路径 `tokio::spawn`」同一手法）。
+    /// **本函数不含 `tokio::spawn`**（T15/T16 遗留③ 修复，2026-09-24）：投递是**同步内存
+    /// 动作**（同一调用栈、无 await），入队由已注册的 `grid_agg_timer` 任务承担 ⇒ 采集调用栈
+    /// 仍**不被 DB 提交阻塞**（原 spawn 的这一目的保持成立），但聚合行不再存在"退出序列看不见
+    /// 的在飞任务"（原竞态的成因）。理由详见 [`AggregateRowSender`]。
     fn forward_grid_sample(&self, pkg: &mupc_data_processing::DataPackage) {
-        let Some(device_id) = self.grid_station_id.clone() else {
+        if self.grid_station_id.is_none() {
             // 未配 meter_grid ⇒ 不该走到这里（`on_grid_package` 只由 meter_grid 站触发）；
             // 真发生也**不臆造站 id**：只跳过聚合，既有两条路径不受影响。
             return;
-        };
+        }
         let ts_ms = now_ms();
         let sample = grid_sample_from_package(pkg);
         // 临界区只有纯计算（无 await）⇒ 用 parking_lot，不跨 await 持锁。
@@ -585,10 +652,20 @@ impl SouthSink {
         if rows.is_empty() {
             return;
         }
-        let write_buffer = self.write_buffer.clone();
-        tokio::spawn(async move {
-            enqueue_aggregate_rows(&write_buffer, &device_id, rows).await;
-        });
+        if let Err(e) = self.agg_tx.send(rows) {
+            // 通道已关 = `grid_agg_timer` 已收工（只可能发生在退出期：它是唯一接收方，
+            // 其收工分支在 exit 序列内、且排在最后 flush 之前）。**如实记 ERROR 不静默**
+            // ——若这条日志出现，说明南向采集回调在该任务收工之后仍在跑（即 `shutdown()`
+            // 文档里已登记的"abort 名单任务的极端时序"窗口），需按该窗口的口径评估。
+            let n = e.0.len();
+            // 文案**避开**异步 spawn 的 API 字面（本函数有源文本结构断言：函数体内不得再出现
+            // 该串，防回退成游离任务）——此处只描述"不得改回游离任务"的语义。
+            tracing::error!(
+                rows = n,
+                "聚合行通道已关闭（grid_agg_timer 已收工）⇒ 本批 {n} 行未入队（退出期极端时序，\
+                 已如实记录；不得改回游离任务——那会恢复更宽的窄竞态）"
+            );
+        }
     }
 
     /// 01 设计 §9.1.4 第 1 行：`DataPackage.electrical` 顶层 **6 个派生量** → 最新值快照。
@@ -1069,6 +1146,9 @@ pub async fn initialize_all(
     let grid_aggregator = Arc::new(parking_lot::Mutex::new(
         mupc_storage::GridAggregator::new(config.storage.grid_aggregate_period_ms),
     ));
+    // 聚合行通道（T15/T16 遗留③）：生产端 = `SouthSink`（同步投递），消费端 = 下方
+    // `grid_agg_timer`（**已注册的协作生产者**，也就是"唯一入队者"）。
+    let (agg_tx, agg_rx) = aggregate_row_channel();
     // 总表聚合记录的 `device_id`（§9.1.4：= 生效配置的 grid 站 id；未配 meter_grid 的部署
     // 用设计明文的常量 `grid_meter` 兜底 —— 与 `mupc_core_config.yaml` 的站 id 一致）。
     let grid_device_id: String = config
@@ -1096,6 +1176,7 @@ pub async fn initialize_all(
             write_buffer.clone(),
             grid_device_id.clone(),
             stop_rx.clone(),
+            agg_rx,
         ),
     ));
     coord.register_service("storage", ServiceStatus::Running);
@@ -1664,6 +1745,8 @@ pub async fn initialize_all(
             config.south_stations.grid_station().map(|s| s.id.clone()),
             // U-69（03 设计 §9.2.3）：聚合器实例（与上面 tick 任务共用同一个 Arc）
             grid_aggregator.clone(),
+            // T15/T16 遗留③：聚合行**投递通道**（消费端 = 上面已注册的 grid_agg_timer）
+            agg_tx.clone(),
         ));
         // 每口 open 一次 Rs485PortBus：按 port 去重。open 失败口不入 map → 该口全站走
         // offline 事件隔离（§10.7 不阻断启动）。口单 poller、站级隔离由 scheduler 负责。
@@ -1870,52 +1953,45 @@ pub async fn initialize_all(
     }));
     coord.register_service("system_monitor", ServiceStatus::Running);
 
-    // ── 13. MQTT 桥接 ──
+    // ── 13. MQTT 桥接（01 设计 §9.4 序 7 / §9.3）──
     tracing::info!("[13/14] 初始化 MQTT 桥接...");
-    // 审查 R2-B5：由 config.mqtt_bridge.*_enabled 门控。缺省双 false——不再用 Default
-    // (mqtt.example.com:8883 + dummy 证书) 无条件构造并 spawn 假域名；启用走原连接逻辑。
-    let mut mqtt_spawned = false;
-    if config.mqtt_bridge.local_enabled {
-        // 用 `match` 而非 `…inspect_err(..).ok()`：后者所需的 `inspect_err` 稳定于
-        // Rust 1.76，高于本仓声明的 MSRV（1.75）⇒ 保持 MSRV 干净。
-        match mupc_mqtt_bridge::LocalMqttClient::new(&mupc_mqtt_bridge::LocalMqttConfig::default())
-        {
-            Ok(local) => {
-                let local = Arc::new(local);
-                guard.0.push(tokio::spawn(async move {
-                    let _ = local.run().await;
-                }));
-                mqtt_spawned = true;
-            }
-            Err(e) => tracing::warn!("本地 MQTT 客户端初始化失败: {}", e),
-        }
-    } else {
-        tracing::debug!("本地 MQTT 未启用（config.mqtt_bridge.local_enabled=false），跳过");
+    // 装配**整段**由 `assemble_mqtt_bridge` 承担（可测接缝：真环境起不来，而
+    // "未配置 ⇒ 零连接尝试"这条 CFG-2 回归防护必须可机械验证 ⇒ 见该函数的用例）。
+    //
+    // ⚠️ 现状缺陷已消除（§9.3.2 的装配点替换）：原实现用
+    // `NorthMqttClient::new(&NorthMqttConfig::default())` —— 其 `broker_addr` 是
+    // `mqtt.example.com:8883` + dummy 证书路径 ⇒ 一旦分向开关被打开就**真连假域名**。
+    // 现在：① 客户端配置**逐字段来自 `config.mqtt_bridge.north`**（C-12 分层映射）；
+    // ② 缺省 `enabled=false` ⇒ `plan_mqtt_launch` 返回全 `None` ⇒ **一行连接代码都不执行**；
+    // ③ `NorthMqttConfig::default()` 的假域名/dummy 证书已改空串（C-11）。
+    let mqtt_roles = Arc::new(crate::uplink::station_roles(&config.south_stations));
+    let mqtt_outcome = crate::uplink::assemble_mqtt_bridge(
+        &config.mqtt_bridge,
+        latest.clone(),
+        uplink_points.clone(),
+        mqtt_roles,
+        // 装置标识（§9.3.4：PRD Q10 来源未定 ⇒ 本仓无权威来源 ⇒ 载荷 `dev` 写 `null`，不臆造）。
+        // 待产品裁定后：`client_id` 缺省时取该值，仍在配置层。
+        None,
+        storage.events.clone(),
+    )
+    .await;
+    for (label, h) in mqtt_outcome.tasks {
+        // MQTT 任务**无退出钩子**（事件循环/定时器；离线缓存不落盘、掉电即丢——§9.3.3
+        // "不落盘"是设计明文）⇒ 入 abort 名单 `guard`，与网关/指标采集同范式。
+        tracing::debug!(task = label, "MQTT 后台任务已登记（abort 名单）");
+        guard.0.push(h);
     }
-    if config.mqtt_bridge.north_enabled {
-        // 同上：避开 `inspect_err`（1.76 稳定 vs MSRV 1.75）。
-        match mupc_mqtt_bridge::NorthMqttClient::new(&mupc_mqtt_bridge::NorthMqttConfig::default())
-        {
-            Ok(north) => {
-                let north = Arc::new(north);
-                guard.0.push(tokio::spawn(async move {
-                    let _ = north.run().await;
-                }));
-                mqtt_spawned = true;
-            }
-            Err(e) => tracing::warn!("北向 MQTT 客户端初始化失败: {}", e),
-        }
-    } else {
-        tracing::warn!(
-            "mqtt-bridge 北向未启用（config.mqtt_bridge.north_enabled=false），跳过——不再默认连 mqtt.example.com 假域名"
-        );
+    if let Some(detail) = mqtt_outcome.detail.as_deref() {
+        tracing::error!("MQTT 装配未完成：{detail}");
     }
     coord.register_service(
         "mqtt_bridge",
-        if mqtt_spawned {
-            ServiceStatus::Running
-        } else {
-            ServiceStatus::Stopped
+        match mqtt_outcome.status {
+            crate::uplink::MqttServiceStatus::Running => ServiceStatus::Running,
+            // 未启用 / 构造失败一律不得谎报 Running（CFG-4；审查 R2-B5 的同一口径）
+            crate::uplink::MqttServiceStatus::Disabled => ServiceStatus::Stopped,
+            crate::uplink::MqttServiceStatus::Failed => ServiceStatus::Failed,
         },
     );
 
@@ -1951,6 +2027,21 @@ pub async fn initialize_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 只投递、不收的聚合行通道（T15/T16 遗留③ 修法后 `SouthSink::new` 多出的入参）。
+    ///
+    /// 接收端**故意保活**：无界通道的接收端一旦 drop，`forward_grid_sample` 的投递就会走
+    /// "通道已关"的 ERROR 分支（那是退出期语义，不该出现在用例里）；本组用例不落库、
+    /// 不闭合周期，故"遗忘接收端"等价于"下游仍在"。需要断言聚合行的用例请**直接建通道**
+    /// （见 `grd07_grid_package_forwards_sample_without_disturbing_snapshot_or_strategy`）。
+    ///
+    /// ⚠️ 本助手**不是**生产路径的一部分（`#[cfg(test)]`）——生产侧通道在 `initialize_all`
+    /// 里建，接收端交给 `grid_agg_timer`。
+    fn agg_tx_for_test() -> AggregateRowSender {
+        let (tx, rx) = aggregate_row_channel();
+        std::mem::forget(rx);
+        tx
+    }
 
     /// 写路径装配的最小可解析 yaml（只需 `CoreConfig` 里**没有 `#[serde(default)]`** 的段）。
     ///
@@ -2381,6 +2472,7 @@ plugins: {}
             )),
             None,
             grid_agg(),
+            agg_tx_for_test(),
         );
 
         // 站离线：`is_event=true` 的状态事件点
@@ -2446,6 +2538,7 @@ plugins: {}
             latest.clone(),
             Some("meter_grid".to_string()),
             grid_agg(),
+            agg_tx_for_test(),
         );
 
         let soc_id = PointId {
@@ -2569,6 +2662,9 @@ plugins: {}
         ));
         // 聚合周期 60 s：单次包不闭合周期
         let agg = grid_agg();
+        // 本用例**直接持有接收端**：① 断言"同包不产行"；② 反证聚合行只经该通道
+        //（T15/T16 遗留③：`forward_grid_sample` 已无 `tokio::spawn`）
+        let (agg_tx, mut agg_rx) = aggregate_row_channel();
         let sink = SouthSink::new(
             Arc::new(mupc_strategy_engine::AiIntegrator::new()),
             wb.clone(),
@@ -2580,6 +2676,7 @@ plugins: {}
             latest.clone(),
             Some("meter_grid".to_string()),
             agg.clone(),
+            agg_tx,
         );
 
         sink.on_grid_package(mupc_data_processing::DataPackage {
@@ -2631,6 +2728,31 @@ plugins: {}
             wb.buffered_points(),
             0,
             "单包不闭合周期 ⇒ 不得往遥测缓冲塞点（聚合只在周期闭合时产行）"
+        );
+        // ④ T15/T16 遗留③：聚合行**只经投递通道**（本包未闭合周期 ⇒ 通道为空；
+        //    且这一步能读到 rx 本身就证明"入队不再由游离 spawn 承担"）
+        assert!(
+            drain_aggregate_rows(&mut agg_rx).is_empty(),
+            "单包不闭合周期 ⇒ 通道内不得有聚合行"
+        );
+        // ⑤ 结构断言：`forward_grid_sample` **不得**再出现 `tokio::spawn`
+        //    （回归防护：改回 spawn 即恢复"退出序列看不见的写者"窄竞态）
+        let src = production_src();
+        let start = src
+            .find("fn forward_grid_sample")
+            .expect("forward_grid_sample 必须存在");
+        let end = src[start..]
+            .find("fn apply_grid_snapshot")
+            .map(|o| start + o)
+            .expect("apply_grid_snapshot 必须紧随其后（作为右锚点）");
+        assert!(
+            !src[start..end].contains("tokio::spawn"),
+            "`forward_grid_sample` 不得含 `tokio::spawn`（T15/T16 遗留③：聚合行须经通道交给\
+             已注册的 grid_agg_timer 入队）"
+        );
+        assert!(
+            src[start..end].contains("agg_tx.send("),
+            "`forward_grid_sample` 必须经 `agg_tx.send(..)` 投递聚合行"
         );
     }
 
@@ -2785,6 +2907,7 @@ plugins: {}
             latest.clone(),
             None,
             grid_agg(),
+            agg_tx_for_test(),
         );
 
         // 组 1 cluster_voltage = 位地址 201–206 ↔ `bms_alarm_2..7`；置 bms_alarm_2=1、其余 0
@@ -2851,6 +2974,7 @@ plugins: {}
             )),
             None,
             grid_agg(),
+            agg_tx_for_test(),
         )
     }
 

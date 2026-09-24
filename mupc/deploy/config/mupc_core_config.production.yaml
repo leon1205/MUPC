@@ -87,6 +87,40 @@ gateway:
   listen_addr: "0.0.0.0"        # 缺省 0.0.0.0（全网口）；投产**建议**按现场网口收紧
   listen_port: 2404             # IEC 60870-5-104 标准端口（按调度主站约定）
 
+# ── 北向/本地 MQTT（01 设计 §9.3.2，U-71）──
+# 【生产】⚠️ 本段**必须存在**（保留式编辑：段缺失会让该段字段的首次写入整体回写 ⇒ 丢注释）。
+# 缺省 `enabled: false` ⇒ **零连接尝试**（CFG-2）。**启用前必须**：① 填真实 Broker（host:port）
+# 与 client_id；② 投放三件真实证书（CA / 客户端证书 / 私钥）并填绝对路径——**严禁**占位域名
+# 或 dummy 证书路径（CFG-3）；③ 保持 `allow_plaintext: false`（生产**禁止**明文，TLS-4）。
+# 证书私钥文件权限须限 root 可读；证书剩余 <30 天会在启动/每日检查时产 major 事件（TLS-3）。
+# 改本段**重启生效**（无热更新）。
+mqtt_bridge:
+  enabled: false               # 总开关；false ⇒ 一行连接代码都不执行
+  north:
+    enabled: false             # ⚠️ 置 true 前须完成上面 ①②③
+    broker: ""                 # "host:port"；enabled=true 时不得为空（validate 拒）
+    client_id: ""              # 物联平台侧客户端 ID；enabled=true 时不得为空
+    username: null             # 可选（按物联平台账号）
+    password: null             # 可选；**不进日志/载荷**（建议用只读最小权限账号）
+    tls:
+      ca_cert: ""              # 【现场填写】CA 证书绝对路径（三路径均须非空且可读）
+      client_cert: ""          # 【现场填写】客户端证书（TLS-3 读它的 notAfter 做到期告警）
+      client_key: ""           # 【现场填写】客户端私钥（权限限 root）
+      allow_plaintext: false   # 生产**必须** false（明文仅限非生产构建 + 显式开关，Q9/TLS-4）
+    topic_prefix: "mupc/north" # 分片主题前缀：{prefix}/telemetry/{station}、{prefix}/event/{station}
+    qos: 1                     # 0..=2（故障类事件走 event 主题 QoS2）
+    periods:
+      a_ms: 1000               # A 档周期（100..=60000）
+      b_ms: 5000               # B 档周期（a_ms..=600000）
+      cos_merge_ms: 200        # C 档 COS 合并窗（1..=1000；保「变化后 ≤1 s 发出」）
+    cache:
+      max_age_s: 1800          # 断线缓存时间窗（≥60；内存态，掉电即丢，PRD Q7 ①）
+      max_messages: 10000      # 条数上限（≥100）；与 max_age_s **先到先淘汰**
+  local:
+    enabled: false             # 本地 mosquitto（进程间）分向开关
+    broker: "127.0.0.1:1883"
+    client_id: "mupc-local"
+
 ai_engine:
   model_dir: "/opt/mupc/models"
   config_file: "/opt/mupc/config/mupc_env_config.yaml"
@@ -102,7 +136,6 @@ plugins:
   auto_load:
     - "rs485_plugin"
     - "hplc_plugin"
-    - "mqtt_plugin"
 
 # 策略引擎配置（v2.24 容量档位 §2.10.2）
 # 【生产】默认空 = pcs60_dual（60kW 双级式，与 modbus_rtu PCS V1.3 驱动点表匹配）；

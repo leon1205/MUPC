@@ -12,6 +12,9 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 rustls.workspace = true
+# 证书 `notAfter` 解析（TLS-3 / §9.3.5）。**版本 0.16 = workspace 既有版本**
+# （`crates/security/Cargo.toml` 同为 "0.16"，`Cargo.lock` 锁 0.16.0）⇒ 不新增重复版本树。
+x509-parser = "0.16"
 device-trait = { path = "../device-trait" }
 
 [dev-dependencies]
