@@ -22,9 +22,10 @@
 //! | S-6 | `ControlCode → 上屏文案` | `Ok` → `None`（**成功文案按操作由页面给定**：P2「保存成功 · 已生效」/ P4「已释放联锁」…）；失败码见 [`control_code_text`] | 草图给不出"这一条成功是什么操作"；由本层硬给一份成功串 = 与页面 `show_result` **双份真源** |
 //! | S-7 | 文案出处 | **全部转出 `ui/**` 既有字面量**（本文件不新增任何上屏字面量）；EDGE-18 取页面已落地的「审计不可用 · 操作未执行」 | 码表覆盖率的静态网只扫 `ui/**`（`ui/tests.rs::ui_texts_covered_by_font_cmap`）⇒ 在本文件自造新串，**豆腐块网照不到**。§8.3 原文的全角逗号 `，` 不在 cmap 内，页面已改写为 `·`（见 `p2_config` 的 PD 登记） |
 
+use mupc_display_proto::peripherals_labels::{ui_text, FIRE_DETECTOR_STATE_BITS, FIRE_LEVEL_ENUM};
 use mupc_display_proto::{
-    ConsoleEndpoint, ControlCode, ControlResponse, DisplayFrame, Field, FieldFlag, LinkState,
-    RunState, SocSource,
+    BitMeta, CatalogPoint, ConsoleEndpoint, ControlCode, ControlResponse, DecodeFrom, Decompose,
+    DisplayFrame, Field, FieldFlag, LinkState, PointValue, RunState, SocSource,
 };
 
 // 裁定 3：传输失败时的**本地合成**回执 —— 决策（读/写端点 ⇒ 哪个页面的既有入口）归
@@ -41,6 +42,10 @@ use crate::ui::pages::p4_interlock::{TEXT_INTERNAL, TEXT_OP_BUSY, TEXT_RETRY_EXP
 pub const CHANNEL_DOWN_MS: u64 = 3000;
 
 /// 通道状态（设计 §5.3 四种态里与主进程连通性相关的三种；新鲜度另由 [`Freshness`] 表达）。
+///
+/// ⚠️ **既有 3 态语义不动**（N-12 / §15.6.2 的代码块注）；本增量**只增 1 个变体**
+/// [`ChannelStatus::Incompatible`]（U-73 / EDGE-21 / F26.3）。`Stale` **不在**本枚举内
+/// （它属 [`Freshness`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelStatus {
     /// 尚未首次成功 GET（渲染可先于 mupcd 启动 → 显示「初始化中」）。
@@ -49,6 +54,18 @@ pub enum ChannelStatus {
     Connected,
     /// 无成功 GET > `CHANNEL_DOWN_MS` → 整屏「与主进程数据通道断开」。
     Down,
+    /// **帧版本不匹配**（EDGE-21 / F26.3；设计 §15.6.2 的代码块）。
+    ///
+    /// `got` = 帧内版本，`expected` = 本地 [`mupc_display_proto::PROTO_VERSION`]。
+    /// 归因来源 = [`crate::Error::ProtoVersion`]（产生点 `channel.rs` 的版本校验），
+    /// 由 [`DisplayState::record_incompatible`] 记入、**粘性**（须一次成功帧才清除，见
+    /// [`DisplayState::channel_status`]）。
+    Incompatible {
+        /// 帧内 `version`。
+        got: u8,
+        /// 本地 `PROTO_VERSION`。
+        expected: u8,
+    },
 }
 
 /// 单帧数据新鲜度（PRD F5.3：now − ts_ms > stale_ms → 过期）。
@@ -67,6 +84,18 @@ pub enum ScreenMode {
     Init,
     /// 有实时/过期数据帧正常展示（过期仅在字段加「数据过期」标，非整屏覆盖）。
     Live,
+    /// **版本不匹配**（EDGE-21 / F26.3；设计 §15.6.2 情形 ③）：灰底 +
+    /// 「屏与主进程版本不匹配：屏 v`got` / 主进程 v`expected`，请刷同版本固件」+
+    /// 「最后成功 …」；**不黑屏、不显示半帧 / 混版帧、不显示任何数值**。
+    ///
+    /// 与 [`ScreenMode::ChannelDown`] 的文案**字符串不相等**（T-16）——现场排障要能区分
+    /// 「刷固件」与「查进程」。
+    VersionMismatch {
+        /// 帧内版本。
+        got: u8,
+        /// 本地 `PROTO_VERSION`。
+        expected: u8,
+    },
 }
 
 /// 数值字段三态归一：正常展示值 / 该字段显 `--` + 角标。
@@ -180,6 +209,383 @@ pub fn live_dot_for(nv: &NumView, fresh: Freshness) -> LiveDot {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// U-73（T21c-1 / 落点 §15.11 #9）：外设上屏的**降级语义**与展示派生
+//
+// 设计 §15.6.2 的代码块在此**逐行落地**（枚举定义 / 语义 / 互异要求）。
+// 本节的函数**全部是纯逻辑**（零 LVGL、零 I/O、不读时钟）⇒ 可离线复现（T-14 / T-15 / T-17）。
+//
+// **文案纪律**（硬约束 #1）：本节的每一条上屏中文都**转出** `display-proto` 的常量
+// （[`ui_text`] / 位名与枚举来自 catalog 或 `display-proto` 的锁定表）——
+// 本文件**不新增任何上屏字面量**（`ui/tests.rs` 的码表网会扫本文件）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **点级**降级原因（设计 §15.6.2 的代码块；六态）。
+///
+/// **各语义的字符串两两互异**（T-14）：`站离线` / `未取数` / `数据异常` / `未配置` /
+/// `名称未获取` / `明细不可用` —— 判据是 [`MissingReason::text`] 的返回值集合**无重复**
+/// （见 `ui/tests.rs` 的 T-14 用例）。
+///
+/// ⚠️ **不含站级态**：「站点未启用」（R-3 裁定 / 情形 ⑦）是**站级 / 段级**状态（该 role
+/// 根本未配置 ⇒ 谈不上"这一点的值")，落 [`StationState`] —— 硬塞进本枚举会让"点级降级"
+/// 与"整站缺席"两件事混为一谈（判据不同：一个是 `flag` / 配置，另一个是 `CatalogStation.enabled`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingReason {
+    /// 站离线（站级降级；EDGE-18 / F25.4）。
+    StationOffline,
+    /// 点未取数（`flag = NotRead`；EDGE-19）。
+    NotRead,
+    /// 数据异常（非有限 / 越界；`flag = RangeError`；EDGE-20）。
+    RangeError,
+    /// 未配置（仅消防钢瓶气压：`cylinder_configured == Some(false)`；EDGE-23 / EX-11）。
+    NotConfigured,
+    /// 名称未获取（catalog 未取到 ⇒ **不臆造中文名**，§15.3.1）。
+    NameUnavailable,
+    /// 明细不可用（下钻端点失败；§15.6.2 ⑥ / R-4 产品裁定）。
+    DetailUnavailable,
+}
+
+impl MissingReason {
+    /// 全部六态（**升序遍历**用；T-14 的"两两互异"断言即遍历本数组）。
+    pub const ALL: [MissingReason; 6] = [
+        MissingReason::StationOffline,
+        MissingReason::NotRead,
+        MissingReason::RangeError,
+        MissingReason::NotConfigured,
+        MissingReason::NameUnavailable,
+        MissingReason::DetailUnavailable,
+    ];
+
+    /// 上屏文案（**全部转出** `display-proto::peripherals_labels::ui_text`，本文件零字面量）。
+    pub const fn text(self) -> &'static str {
+        match self {
+            MissingReason::StationOffline => ui_text::STATION_OFFLINE,
+            MissingReason::NotRead => ui_text::NOT_READ,
+            MissingReason::RangeError => ui_text::RANGE_ERROR,
+            MissingReason::NotConfigured => ui_text::NOT_CONFIGURED,
+            MissingReason::NameUnavailable => ui_text::NAME_UNKNOWN,
+            MissingReason::DetailUnavailable => ui_text::DETAIL_UNAVAILABLE,
+        }
+    }
+}
+
+/// **站级**展示态（情形 ⑦ 的落点；设计 §15.6.2 ⑦ / §15.5.2 装置段 / R-3 产品裁定）。
+///
+/// 判据 = `catalog.CatalogStation.enabled`（该 role 是否**已配置**）∪ 帧内站的 `online`
+/// —— 两者都是注入值，本层**不重判、不另立门限**（F25.1 单真源）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StationState {
+    /// 已配置且在窗内（帧内站 `online = true`）。
+    Online,
+    /// 已配置但当前不可达（`online = false`）⇒ 段顶状态条 + 段内行均显「站离线」。
+    Offline,
+    /// **该 role 未配置**（catalog `enabled = false`；帧内**不含**该站）⇒
+    /// 装置段该行显「**未启用**」、段内各段显「**站点未启用**」（**与「站离线」互异**）。
+    Disabled,
+    /// 两处都不可得（catalog 未取到 ∧ 帧内无该站）⇒ 「不可用」（**不猜**"未配置"或"离线"）。
+    Unknown,
+}
+
+impl StationState {
+    /// **装置段站状态行**文案（§15.5.2 装置段：`未启用` / `站离线` / `在线`）。
+    pub const fn row_text(self) -> &'static str {
+        match self {
+            StationState::Online => ui_text::ONLINE,
+            StationState::Offline => ui_text::STATION_OFFLINE,
+            StationState::Disabled => ui_text::STATION_DISABLED,
+            StationState::Unknown => ui_text::UNAVAILABLE,
+        }
+    }
+
+    /// **段级**文案（该站各段；`None` = 站在线 ⇒ 无段级降级）。
+    ///
+    /// 「站点未启用」（`Disabled`，单站缺席）**≠**「外设数据不可用」（整段源不可得，
+    /// §15.6.2 ⑤）—— 后者由 `PeripheralsSection::available == false` 承担。
+    pub const fn section_text(self) -> Option<&'static str> {
+        match self {
+            StationState::Online => None,
+            StationState::Offline => Some(ui_text::STATION_OFFLINE),
+            StationState::Disabled => Some(ui_text::SECTION_STATION_DISABLED),
+            StationState::Unknown => Some(ui_text::UNAVAILABLE),
+        }
+    }
+
+    /// **点级**原因（只有 `Offline` 会给出点级「站离线」）。
+    ///
+    /// `Disabled` **不**给点级原因（该站无任何数据可谈 ⇒ 由段级文案承担，设计 §15.5.2：
+    /// 段内显「站点未启用」）；`Online` 无降级。
+    pub const fn point_missing(self) -> Option<MissingReason> {
+        match self {
+            StationState::Offline => Some(MissingReason::StationOffline),
+            _ => None,
+        }
+    }
+}
+
+/// 站级态判据（**唯一真源**；纯函数 ⇒ 可单测）。
+///
+/// - `enabled`：catalog `CatalogStation.enabled`（`None` = catalog 未取到）；
+/// - `online`：帧内该站 `PeripheralStation.online`（`None` = 帧内**不含**该站）。
+///
+/// **优先级**：`enabled == Some(false)` ⇒ [`StationState::Disabled`]（未配置优先 ——
+/// 帧内本就不含该站，谈"离线"没有意义）；其后 `online` 的真值；两处皆缺 ⇒ `Unknown`。
+pub const fn station_state(enabled: Option<bool>, online: Option<bool>) -> StationState {
+    match (enabled, online) {
+        (Some(false), _) => StationState::Disabled,
+        (_, Some(true)) => StationState::Online,
+        (_, Some(false)) => StationState::Offline,
+        _ => StationState::Unknown,
+    }
+}
+
+/// 消防钢瓶「未配置」判定（EDGE-23 / EX-11；**只对 role=Fire 的点 `fire_sys_2` 有意义**）。
+///
+/// `Some(false)` ⇒ [`MissingReason::NotConfigured`]，调用方须**忽略 `v`**（不得显 `0 kPa`）、
+/// 且该点**不产告警条目**（组帧侧口径；HMI 侧即"不把它当数值展示"）。
+/// `Some(true)` / `None` ⇒ 按值正常展示（`None` = 不可得，**不臆造**"未配置"）。
+pub const fn cylinder_missing(configured: Option<bool>) -> Option<MissingReason> {
+    match configured {
+        Some(false) => Some(MissingReason::NotConfigured),
+        _ => None,
+    }
+}
+
+/// 单点的**展示视图**（U-73）：帧内点值 × 站级态 × catalog 元数据 → 屏上**一行**。
+///
+/// 派生规则（逐条可测）：
+/// 1. **站级优先**：`Disabled` ⇒ 无点级原因（段级文案承担）；`Offline` ⇒
+///    [`MissingReason::StationOffline`]（**不保留旧值**）；
+/// 2. 点级：`flag != Valid` ⇒ [`MissingReason::NotRead`] / `RangeError` / `StationOffline`
+///    （`flag = Offline` 即"该点所在源不可达"）；`Valid` 但 `v = None` / 非有限 ⇒ `RangeError`
+///    （**不补 0**，与 [`NumView::from_field`] 同口径）；
+/// 3. `名称未获取`：catalog 未取到（`meta = None`）⇒ `missing = NameUnavailable`
+///    （**值照常显示**，只是没有中文名 —— §15.3.1）；
+/// 4. **位语义 / 枚举文案 / 拆解规格**一律**照抄 catalog**（`meta`），**屏侧不猜**。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeriphView {
+    /// 站级态（`Disabled` / `Offline` 决定段级与点级降级）。
+    pub station: StationState,
+    /// catalog 短标签（`None` = catalog 未取到 ⇒ 显 [`ui_text::NAME_UNKNOWN`]）。
+    pub label: Option<String>,
+    /// 单位（catalog；`None` = 无量纲 **或** 不可得）。
+    pub unit: Option<String>,
+    /// 小数位（catalog 给出；**由登记 `scale` 派生**，屏侧不自行决定）。
+    pub decimals: u8,
+    /// 展示值（`None` = 降级，原因见 [`PeriphView::missing`]）。
+    pub value: Option<f64>,
+    /// 降级原因（`None` = 正常展示）。
+    pub missing: Option<MissingReason>,
+    /// 位语义（照抄 catalog；空 = 标量点）。
+    pub bits: Vec<BitMeta>,
+    /// 枚举文案（照抄 catalog；空 = 非枚举 / 文案未登记）。
+    pub enum_labels: Vec<(u16, String)>,
+    /// 展示层拆解规格（照抄 catalog；空 = 不拆解、按整字显示）。
+    pub decompose: Vec<Decompose>,
+}
+
+impl PeriphView {
+    /// 由「站级态 + 帧内点值 + catalog 点（可缺）」派生（见结构体文档的四条规则）。
+    pub fn derive(station: StationState, pv: &PointValue, meta: Option<&CatalogPoint>) -> Self {
+        let station_reason = station.point_missing();
+        let point_reason = match pv.flag {
+            FieldFlag::Valid => match pv.v {
+                Some(v) if v.is_finite() => None,
+                // Valid 却无值 / 非有限 = 生产方异常 ⇒ 数据异常（**绝不补 0**，同 NumView）。
+                _ => Some(MissingReason::RangeError),
+            },
+            FieldFlag::NotRead => Some(MissingReason::NotRead),
+            // 帧内点级「源离线」= 该点所在源不可达 ⇒ 归到站级语义（`MissingReason` 无
+            // 「源离线」态；站级才是它的判据面，设计 §15.6.2 ①）。
+            FieldFlag::Offline => Some(MissingReason::StationOffline),
+            FieldFlag::RangeError => Some(MissingReason::RangeError),
+        };
+        // **站级降级优先于点级**（站离线时组帧侧已把该站全部点置 `v=None`，此处再兜一层）。
+        let missing = station_reason.or(point_reason);
+        let (label, unit, decimals, bits, enum_labels, decompose) = match meta {
+            Some(m) => (
+                Some(m.label.clone()),
+                m.unit.clone(),
+                m.decimals,
+                m.bits.clone(),
+                m.enum_labels.clone(),
+                m.decompose.clone(),
+            ),
+            None => (None, None, 0, Vec::new(), Vec::new(), Vec::new()),
+        };
+        // ⚠️ **名称未获取不参与值级降级**（§15.3.1：「**从未取到** catalog ⇒ 值照常显示
+        // （按点名），中文名位显「名称未获取」」）⇒ 它是**名称槽**的降级，由
+        // [`PeriphView::name_missing`] 单独回答；`missing` 只表达**值**不可用。
+        Self {
+            station,
+            label,
+            unit,
+            decimals,
+            value: if missing.is_none() {
+                pv.v.filter(|v| v.is_finite())
+            } else {
+                None
+            },
+            missing,
+            bits,
+            enum_labels,
+            decompose,
+        }
+    }
+
+    /// 应用消防钢瓶「未配置」覆盖（EDGE-23）：`Some(false)` ⇒ **忽略 `v`**、置
+    /// [`MissingReason::NotConfigured`]（断言**不含 `0 kPa`** —— 因为值已被清成 `None`）。
+    pub fn apply_cylinder(&mut self, configured: Option<bool>) {
+        if let Some(m) = cylinder_missing(configured) {
+            self.value = None;
+            self.missing = Some(m);
+        }
+    }
+
+    /// 短标签（catalog 未取到 ⇒ [`ui_text::NAME_UNKNOWN`]，**不臆造中文名**）。
+    pub fn label_text(&self) -> &str {
+        self.label.as_deref().unwrap_or(ui_text::NAME_UNKNOWN)
+    }
+
+    /// 降级时该行右端的原因文案（正常 ⇒ `None`）。
+    pub fn missing_text(&self) -> Option<&'static str> {
+        self.missing.map(MissingReason::text)
+    }
+
+    /// **名称槽**的降级（catalog 未取到 ⇒ [`MissingReason::NameUnavailable`]）。
+    ///
+    /// 与 [`PeriphView::missing`] **分开**：名不可得**不影响**值照常展示（§15.3.1）。
+    pub fn name_missing(&self) -> Option<MissingReason> {
+        self.label
+            .is_none()
+            .then_some(MissingReason::NameUnavailable)
+    }
+
+    /// 值是否可展示（`true` ⇒ 按 [`PeriphView::value`] + 单位 + 小数位渲染）。
+    pub fn is_shown(&self) -> bool {
+        self.value.is_some()
+    }
+}
+
+/// 位行文案（A1 逐位 16 行 / A3 / 明细表状态列的**唯一**构造点；F21.1 / EX-09）。
+///
+/// - `defined == false` ⇒ 「未定义位 `index`」（其后接位号；**不猜语义**，**禁止**为凑满
+///   16 位而编造）；
+/// - 已定义 ⇒ `"{位名} {活跃 / 非活跃}"`；`active_text`（catalog 给的活跃语义）优先于通用
+///   「活跃」；`inverted == true`（极性反转位，R-41 追认前**无生产者**）⇒ `在线 / 离线`。
+///
+/// 位名 / `active_text` **一律来自 catalog**（帧外元数据），本函数不产出中文。
+pub fn bit_text(
+    index: u8,
+    defined: bool,
+    label: &str,
+    active: bool,
+    active_text: Option<&str>,
+    inverted: bool,
+) -> String {
+    if !defined {
+        return format!("{} {index}", ui_text::BIT_UNDEFINED);
+    }
+    let state = if inverted {
+        if active {
+            ui_text::ONLINE
+        } else {
+            ui_text::OFFLINE
+        }
+    } else if active {
+        active_text.unwrap_or(ui_text::BIT_ACTIVE)
+    } else {
+        ui_text::BIT_INACTIVE
+    };
+    format!("{label} {state}")
+}
+
+/// 从整字 `raw` 取某一位的活跃态（`(raw >> index) & 1`；位点与标量在帧内同构）。
+///
+/// 非有限 `raw` ⇒ `false`（**不猜**）；`index ≥ 64` 由调用方按 catalog 的 0..16 位号约束。
+pub fn bit_active(raw: f64, index: u8) -> bool {
+    if !raw.is_finite() {
+        return false;
+    }
+    let word = raw.round() as i64;
+    (word >> index) & 1 == 1
+}
+
+/// 「数据 1」（`fire_sys_10` / `fire_det_{…+3}`）的**展示层**拆解（F21.5 / EX-13 / T-17）。
+///
+/// 唯一字节语义来源 = catalog 的 [`DecodeFrom`]（**屏侧不自行猜位序**）：
+/// `HighByte` ⇒ 高字节（烟雾 `×0.1` `dB/M`）；`LowByte` ⇒ 低字节（温度 `raw−55` `℃`）；
+/// `Whole` ⇒ 整字。
+///
+/// ⚠️ **帧内整字值不变**：本函数**只读** `raw`（`Copy` 语义，调用点拿到的
+/// `PointValue.v` 与 `latest_values` 里的值都是**整字**，不被改写）。
+///
+/// 非有限 `raw` ⇒ 原样返回（`NaN` 会经 [`PeriphView::derive`] 的有限性判据转成降级）
+/// —— **不 panic、不造数**。
+pub fn decompose_value(from: DecodeFrom, raw: f64) -> f64 {
+    if !raw.is_finite() {
+        return raw;
+    }
+    let word = raw.round() as i64;
+    let hi = ((word >> 8) & 0xFF) as f64;
+    let lo = (word & 0xFF) as f64;
+    match from {
+        DecodeFrom::Whole { scale, offset } => raw * scale + offset,
+        DecodeFrom::HighByte { scale, offset } => hi * scale + offset,
+        DecodeFrom::LowByte { scale, offset } => lo * scale + offset,
+    }
+}
+
+/// 火警等级文案（F21.2 / EX-10 / T-15）—— 两条来源，**都不许屏侧猜**：
+///
+/// 1. **catalog `enum_labels` 优先**（运行时真源；屏侧**逐字照抄**）；
+/// 2. catalog 未取到 / 该点无 `enum_labels` ⇒ 回退 **`display-proto` 锁定的
+///    [`FIRE_LEVEL_ENUM`]**（六值，唯一权威 = PRD §3.9 F21 展示表）；
+/// 3. **表外值 ⇒ 「未知」**（**绝不落「正常」**）。
+pub fn fire_level_text(value: f64, enum_labels: &[(u16, String)]) -> String {
+    let key = if value.is_finite() {
+        Some(value.round())
+    } else {
+        None
+    };
+    if !enum_labels.is_empty() {
+        return match key.and_then(|k| {
+            enum_labels
+                .iter()
+                .find(|(v, _)| f64::from(*v) == k)
+                .map(|(_, t)| t.clone())
+        }) {
+            Some(t) => t,
+            None => ui_text::ENUM_UNKNOWN.to_string(),
+        };
+    }
+    fire_level_text_static(value).to_string()
+}
+
+/// [`fire_level_text`] 的**无 catalog 回退**（返回 `display-proto` 的锁定量，零分配）。
+///
+/// 与前者**同一值域判据**（六值齐全 + 表外「未知」）；`ui/tests.rs` 的 T-15 对两条路径
+/// **各断言一次**（catalog 路径用构造的 `enum_labels`，回退路径用本函数）。
+pub fn fire_level_text_static(value: f64) -> &'static str {
+    if !value.is_finite() {
+        return ui_text::ENUM_UNKNOWN;
+    }
+    let k = value.round();
+    FIRE_LEVEL_ENUM
+        .iter()
+        .find(|(v, _)| f64::from(*v) == k)
+        .map(|(_, t)| *t)
+        .unwrap_or(ui_text::ENUM_UNKNOWN)
+}
+
+/// 探测器状态整字的**已定义位**判据（T-19b）：位号 ∈ [`FIRE_DETECTOR_STATE_BITS`]。
+///
+/// **bit15（通信状态）恒 `false`** —— 点表登记明令"不猜、不造判据"、PRD F21 未要求
+/// （R-41 追认前不上屏）⇒ 屏显「未定义位 15」。若产品 / 厂方追认，只改 catalog 的
+/// `BitMeta{index:15, inverted:true}` 即可（**屏侧代码零改动**，本函数不参与判据）。
+pub fn fire_det_state_bit_defined(index: u8) -> bool {
+    FIRE_DETECTOR_STATE_BITS.iter().any(|(i, _)| *i == index)
+}
+
 // ---------------------------------------------------------------------------
 // 显示状态容器（DisplayState）：由 run 主循环喂「拉帧结果 + 时钟」，向外派生通道态/新鲜度
 // ---------------------------------------------------------------------------
@@ -198,6 +604,14 @@ pub struct DisplayState {
     reorder_dropped: u64,
     /// 过期阈值（设计：默认取 display-proto `DEFAULT_STALE_MS=2000`，可 `--stale-ms` 覆盖）。
     stale_ms: u64,
+    /// **粘性的**帧版本不匹配（EDGE-21 / F26.3；T-16）。
+    ///
+    /// `Some((got, expected))` = 已观测到版本不匹配、且**尚未**收到任何成功帧 ⇒
+    /// [`ChannelStatus::Incompatible`]。**为什么粘性**：版本不匹配是**部署态**（两端不同版本
+    /// 发布），不会因一次超时消失；若随 `record_fail` / 时钟回落就抖动，屏面会在
+    /// 「版本不匹配」与「通道断开」之间闪 —— 现场无法判断该刷固件还是查进程（设计 §15.6.2 ③）。
+    /// 唯一清除路径 = [`DisplayState::record_success`]（**一次成功帧**才清除）。
+    incompatible: Option<(u8, u8)>,
 }
 
 impl Default for DisplayState {
@@ -215,6 +629,7 @@ impl DisplayState {
             fail_streak: 0,
             reorder_dropped: 0,
             stale_ms: mupc_display_proto::DEFAULT_STALE_MS,
+            incompatible: None,
         }
     }
 
@@ -236,6 +651,8 @@ impl DisplayState {
         self.first_attempt_ms.get_or_insert(now_ms);
         self.last_ok_ms = Some(now_ms);
         self.fail_streak = 0;
+        // **一次成功帧即清除粘性「版本不匹配」**（§15.6.2 ③ / T-16 的唯一清除路径）。
+        self.incompatible = None;
         if let Some(prev) = &self.frame {
             if frame.seq < prev.seq && frame.ts_ms <= prev.ts_ms {
                 self.reorder_dropped = self.reorder_dropped.saturating_add(1);
@@ -249,6 +666,25 @@ impl DisplayState {
     pub fn record_fail(&mut self, now_ms: u64) {
         self.first_attempt_ms.get_or_insert(now_ms);
         self.fail_streak = self.fail_streak.saturating_add(1);
+    }
+
+    /// 记录一次**版本不匹配**（EDGE-21 / F26.3；落点见 §15.11 #9 / #10）。
+    ///
+    /// 语义（**粘性**）：一旦记入，[`Self::channel_status`] 即返回
+    /// [`ChannelStatus::Incompatible`]，**直到** [`Self::record_success`] 收到一帧。
+    /// 本方法**不**替代失败记账 —— 调用方（`app.rs::absorb`）在同一分支上照常调
+    /// [`Self::record_fail`]（`Err(ProtoVersion)` 同时也是"本拍拉帧失败"）。
+    ///
+    /// ⚠️ **`now_ms` 只用于"首次尝试"基准**（与 [`Self::record_fail`] 同口径），
+    /// 不参与新判据 —— 禁止在此另造时间阈值（F25.1 单一新鲜度真源）。
+    pub fn record_incompatible(&mut self, got: u8, expected: u8, now_ms: u64) {
+        self.first_attempt_ms.get_or_insert(now_ms);
+        self.incompatible = Some((got, expected));
+    }
+
+    /// 当前是否处于粘性「版本不匹配」态（诊断 / 装配断言用）。
+    pub fn incompatible(&self) -> Option<(u8, u8)> {
+        self.incompatible
     }
 
     // ⚠️ **已删除 `update(res, now_ms)`**（B3-2a 质量评审 建议 I-5 的死代码清单：
@@ -278,7 +714,14 @@ impl DisplayState {
     }
 
     /// 通道态派生（纯逻辑）。`now_ms` 为注入时钟。
+    ///
+    /// **优先级**：粘性 [`ChannelStatus::Incompatible`] **最高**（§15.6.2 ③：版本不匹配期间
+    /// 不显示任何数值 ⇒ 屏面不该退回「通道断开」/「实时」），其后才是既有的
+    /// `Connected` / `Down` / `Init` 三态（语义不动）。
     pub fn channel_status(&self, now_ms: u64) -> ChannelStatus {
+        if let Some((got, expected)) = self.incompatible {
+            return ChannelStatus::Incompatible { got, expected };
+        }
         match self.last_ok_ms {
             Some(t) if now_ms.saturating_sub(t) < CHANNEL_DOWN_MS => ChannelStatus::Connected,
             Some(_) => ChannelStatus::Down,
@@ -304,6 +747,9 @@ impl DisplayState {
             ChannelStatus::Down => ScreenMode::ChannelDown,
             ChannelStatus::Init => ScreenMode::Init,
             ChannelStatus::Connected => ScreenMode::Live,
+            ChannelStatus::Incompatible { got, expected } => {
+                ScreenMode::VersionMismatch { got, expected }
+            }
         }
     }
 
@@ -383,6 +829,10 @@ pub fn hmi_link_state(status: ChannelStatus) -> LinkState {
         ChannelStatus::Init => LinkState::Connecting,
         ChannelStatus::Connected => LinkState::Connected,
         ChannelStatus::Down => LinkState::Disconnected,
+        // **版本不匹配 ⇒ 「未知」（不得落「已连接」）**：链路本身可能是通的，但**帧不可用**
+        // ⇒ 既非 Connected 也非 Disconnected。版本不匹配的**专属文案**由
+        // [`ScreenMode::VersionMismatch`] 承担（§15.6.2 ③），本枚举只表达"链路态不可信"。
+        ChannelStatus::Incompatible { .. } => LinkState::Unknown,
     }
 }
 
