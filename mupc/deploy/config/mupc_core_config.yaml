@@ -50,6 +50,8 @@ display:
   device_poll_ms: 3000                  # 慢拍 A 装置状态（须 ∈ [1,4000]；F6.3 ≤5 s 前提）
   alarm_poll_ms: 500                    # 慢拍 B 告警（须 ∈ [1,1000]；F7.3 ≤2 s 前提）
   interlock_poll_ms: 500                # 慢拍 C 联锁（须 ∈ [1,1000]；F16.5 ≤2 s 前提）
+  periph_poll_ms: 500                   # 慢拍 D 外设段兜底 tick（须 ∈ [1,1000]；U-73 §15.1.1/§15.6.1）
+  periph_page_size: 20                  # 探测器明细下钻单页条数（须 ∈ [1,50]；U-73 §15.3.2）
   alarm_page_size: 10                   # F7 告警列表最多展示条数（不得为 0）
   log:                                  # 控制通道日志检索限额（EDGE-15）
     max_files: 5

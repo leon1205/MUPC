@@ -80,6 +80,18 @@ impl Dimens {
     /// 跨区区块间呼吸缝（UI §3.5）。
     pub const GAP_SECTION: i32 = 24;
 
+    /// **分段页签（`SegmentedTabs`）的段间隙** 16 px（UI §2.1 补注 / §5.1 #21；
+    /// 设计 §15.5.1 / §15.11 #15）。语义 = F14.2「相邻可点控件触摸目标间距 ≥ 16 px」：
+    /// `lv_button` 的命中区**即其自身边界**（无 `lv_buttonmatrix` 的命中区外扩）⇒
+    /// **净距 = 本值，精确成立**（T-25 断言）。供 **P6**（T21c-2）使用；本增量只落常量。
+    pub const SEG_GAP: i32 = 16;
+
+    /// **P4「安全总览带」单卡宽** 488 px（UI §6.4.1「区块规格」表：两卡各 488、
+    /// 卡间隙 `GAP_MIN`(16) ⇒ `2×488 + 16 = 992`；设计 §15.4 同式）。
+    ///
+    /// **推导而非抄数**：`(CONTENT_W − GAP_MIN) / 2`（992 − 16 = 976 → 488）。
+    pub const BAND_CARD_W: i32 = (Self::CONTENT_W - Self::GAP_MIN) / 2;
+
     /// 滚动条 Visual 宽度（UI §3.5 `scrollbar_w`；**纯指示、非触摸目标**）。
     pub const SCROLLBAR_W: i32 = 8;
     /// 滚动条距右边缘（UI §3.5）。

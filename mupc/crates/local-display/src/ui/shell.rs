@@ -529,11 +529,19 @@ impl HeaderChannel {
     ];
 
     /// 由状态层的通道态派生。
+    ///
+    /// ⚠️ **U-73 增量接入（T21c-1）：`ChannelStatus::Incompatible` ⇒ 红（`Down`）**。
+    /// 理由：帧版本不匹配时**所有帧都不可信**，对屏而言就是"读通道不可用"（与 EDGE-20
+    /// 「控制通道可达但读通道断」的红语义一致）；**专属文案**由
+    /// [`crate::state::ScreenMode::VersionMismatch`] 承担（§15.6.2 ③ 的整屏降级画面）。
+    /// 本臂是该变体引入后**为保持穷尽匹配可编译的最小改动**（整屏层不属 T21c-1 范围，
+    /// 已如实登记在交付报告）。
     pub const fn from_status(status: ChannelStatus) -> Self {
         match status {
             ChannelStatus::Connected => HeaderChannel::Connected,
             ChannelStatus::Init => HeaderChannel::Connecting,
             ChannelStatus::Down => HeaderChannel::Down,
+            ChannelStatus::Incompatible { .. } => HeaderChannel::Down,
         }
     }
 

@@ -74,7 +74,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mupc_display_proto::{
-    ConsoleEndpoint, ConsoleMethod, ControlRequest, ControlResponse, REPLAY_WINDOW_MS,
+    ConsoleEndpoint, ConsoleMethod, ControlRequest, ControlResponse, MAX_BMS_ALARM_PAGE_SIZE,
+    MAX_PERIPH_PAGE_SIZE, REPLAY_WINDOW_MS,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -241,6 +242,15 @@ pub enum ConsoleError {
     #[error("console client has no in-flight request")]
     Idle,
 
+    /// **分页参数越界**（U-73 的外设三个只读端点；`page` 须 ≥ 1、`page_size` ∈ `[1, max]`）。
+    ///
+    /// **为什么在客户端挡**：§15.3.2 把「`page_size` 上限拒绝」列为**服务端**的 400 语义，
+    /// 而客户端本就知道上限（`display-proto` 的 `MAX_PERIPH_PAGE_SIZE` 等常量）⇒ 让一个
+    /// 明知非法的参数上线，只会换来一个 400 与一条**不可上屏**的错误体（R-4 裁定）。
+    /// 本分支**不发任何包**（与 [`ConsoleError::RetryWindowExpired`] 同款）。
+    #[error("console page param `{0}` out of range: {1} (max {2})")]
+    PageOutOfRange(&'static str, u32, u32),
+
     /// **重试已过期**：重发的信封印于 `issued_at_ms`，此刻距其已 ≥ 服务端防重放窗口
     /// （`REPLAY_WINDOW_MS` = 30 s）。**原样重发必被服务端窗口先拒**（§3.3 管线「2 窗口 →
     /// 3 幂等表」）⇒ 客户端会把「**首次操作可能已生效**」显示成「操作失败」（静默语义偏差）。
@@ -302,6 +312,58 @@ pub fn encode_query(pairs: &[(&str, &str)]) -> String {
         push_encoded(&mut out, v);
     }
     out
+}
+
+/// **探测器分页查询串**（`page` 与 `page_size`；设计 §15.3.2）。
+///
+/// 越界即 [`ConsoleError::PageOutOfRange`]（**在发包前**拒绝 —— 不让服务端去替我们兜 400；
+/// §15.3.2 的「非 2xx ⇒ `HttpStatus`」是**服务端**侧的错误面，客户端不该主动制造它）。
+pub fn fire_det_query(page: u32, page_size: u32) -> ConsoleResult<String> {
+    page_query(
+        page,
+        page_size,
+        MAX_PERIPH_PAGE_SIZE,
+        "fire_detectors page_size",
+    )
+}
+
+/// **BMS 告警位分页查询串**（语义同 [`fire_det_query`]，上限取
+/// [`MAX_BMS_ALARM_PAGE_SIZE`] = 100；设计 §15.3.2）。
+pub fn bms_alarm_query(page: u32, page_size: u32) -> ConsoleResult<String> {
+    page_query(
+        page,
+        page_size,
+        MAX_BMS_ALARM_PAGE_SIZE,
+        "bms_alarms page_size",
+    )
+}
+
+/// 两个分页端点的**公共**组装（`page` 1 起；`page_size` ∈ `[1, max]`）。
+fn page_query(
+    page: u32,
+    page_size: u32,
+    max_page_size: u32,
+    what: &'static str,
+) -> ConsoleResult<String> {
+    if page == 0 {
+        return Err(ConsoleError::PageOutOfRange("page", page, u32::MAX));
+    }
+    if page_size == 0 || page_size > max_page_size {
+        return Err(ConsoleError::PageOutOfRange(what, page_size, max_page_size));
+    }
+    let page = page.to_string();
+    let size = page_size.to_string();
+    Ok(encode_query(&[("page", &page), ("page_size", &size)]))
+}
+
+/// 总页数（`ceil(total / page_size)`，**至少 1 页**）—— 供「第 X / Y 页」指示器。
+///
+/// `page_size == 0` ⇒ 返回 1（不 panic、不除零；调用方本不该传 0，见 [`page_query`]）。
+pub fn page_count(total: u32, page_size: u32) -> u32 {
+    if page_size == 0 {
+        return 1;
+    }
+    total.div_ceil(page_size).max(1)
 }
 
 /// 逐字节百分号编码（非保留字符原样）。
@@ -732,6 +794,45 @@ impl ConsoleClient {
             },
             clock,
         )
+    }
+
+    // ── U-73：三个只读 GET（catalog / 探测器分页 / BMS 告警分页；设计 §15.3.2 / D20）──
+
+    /// 发起 `GET /v1/console/peripherals/catalog`（**元数据一次性读取**，设计 §15.3.1）。
+    ///
+    /// 读取时机（**不在本层判**，由接线层按帧内 `catalog_rev` 决定）：P4 / P6 首次进入，
+    /// 或 `frame.peripherals.catalog_rev != 本地缓存.rev` 时**异步重取**（不阻塞显示）。
+    /// `T` 取 [`mupc_display_proto::PeripheralCatalog`]。
+    pub fn begin_catalog(&mut self, clock: ConsoleClock) -> ConsoleResult<()> {
+        self.begin_query(ConsoleEndpoint::PeripheralsCatalog, "", clock)
+    }
+
+    /// 发起 `GET /v1/console/peripherals/fire_detectors?page&page_size`
+    /// （探测器明细分页；设计 §15.3.2；`page` 1 起、`page_size` ≤ [`MAX_PERIPH_PAGE_SIZE`]）。
+    ///
+    /// `T` 取 [`mupc_display_proto::FireDetectorPage`]。
+    pub fn begin_fire_detectors(
+        &mut self,
+        page: u32,
+        page_size: u32,
+        clock: ConsoleClock,
+    ) -> ConsoleResult<()> {
+        let query = fire_det_query(page, page_size)?;
+        self.begin_query(ConsoleEndpoint::PeripheralsFireDetectors, &query, clock)
+    }
+
+    /// 发起 `GET /v1/console/peripherals/bms_alarms?page&page_size`
+    /// （BMS 288 位下钻；设计 §15.3.2；`page` 1 起、`page_size` ≤ [`MAX_BMS_ALARM_PAGE_SIZE`]）。
+    ///
+    /// `T` 取 [`mupc_display_proto::BmsAlarmPage`]。
+    pub fn begin_bms_alarms(
+        &mut self,
+        page: u32,
+        page_size: u32,
+        clock: ConsoleClock,
+    ) -> ConsoleResult<()> {
+        let query = bms_alarm_query(page, page_size)?;
+        self.begin_query(ConsoleEndpoint::PeripheralsBmsAlarms, &query, clock)
     }
 
     /// **幂等重试**：原样重发**上一次**请求（同一 `request_id`、同一 `issued_at_ms`）。

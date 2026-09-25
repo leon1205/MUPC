@@ -1024,6 +1024,80 @@ pub(crate) fn console_write_paths(
     }
 }
 
+// ── U-73 §15.11 #7：消防钢瓶气压「是否配置」取数适配器（EDGE-23 / EX-11）──────────────────
+//
+// 包装 `SouthScheduler::cylinder_pressure_configured(station_index)`
+// （`crates/mupc-southd/src/scheduler.rs`，真源 = 该站生命周期内绝对寄存器 5 是否出现过非 0，
+// PRD §9.7.6），把 southd 的「**站下标**」口径翻成帧侧的「**站 id**」口径，并把
+// §15.2.2 的三种状态**逐字**落地：
+//   - `Some(false)` = 未配置 ⇒ 屏显「未配置」（忽略 `v`、不得含 `0 kPa`）；
+//   - `Some(true)`  = 已配置 ⇒ 按值正常展示；
+//   - `None`        = 不可得（**非消防站** / **接缝未接线**）⇒ 按值正常展示。
+//
+// # 为什么是「先建空壳、后 `attach`」而不是构造期入参
+//
+// `initialize_all` 内 HMI（`DisplayDataProvider` / `ConsoleDeps`）的装配点**早于** southd
+// 调度器（顺序见该函数内两处注释）。要做成构造期依赖，就得把整段 HMI 装配搬到调度器之后
+// —— 那会动到多条既有装配不变量（读通道 / 控制通道路由、`latest` 构造点、guard 顺序），
+// 收益只是"少一个 `attach`"。故改为：装配期先建空壳（`attach` 前恒 `None`），
+// `SouthScheduler::new` 之后立刻 `attach`。启动期那一瞬的 `None` **语义正确**
+// （= 接缝尚未接线），不是造假。
+//
+// ⚠️ **不臆造**：本适配器**不**用"气压读数为 0"去猜 `Some(false)` —— "未配置"的判据是 southd
+// 的 `cylinder_seen_nonzero` 记忆（**只置位、不回退**），本层只做口径转换与查表。
+pub struct SouthCylinderPressureQuery {
+    /// 站 id → `cfg.stations` 下标。**下标口径 = `SouthScheduler::new` 里 `state` 的构造序**
+    /// （`cfg.stations.iter().enumerate()`）⇒ 两侧同序，本表是唯一转换点。
+    index_of: std::collections::HashMap<String, usize>,
+    /// 消防站 id 集合（`None` 成因之一"非消防站"的**唯一判定点**）。
+    fire_ids: std::collections::HashSet<String>,
+    /// 调度器句柄；`attach` 前 = `None` ⇒ 一律回 `None`（= 接缝未接线）。
+    scheduler: std::sync::RwLock<Option<Arc<mupc_southd::scheduler::SouthScheduler>>>,
+}
+
+impl SouthCylinderPressureQuery {
+    /// 从**站配置**（唯一真源）建"站 id → 下标"表与消防站集合。
+    pub fn new(cfg: &mupc_southd::config::SouthStationsConfig) -> Self {
+        let mut index_of = std::collections::HashMap::with_capacity(cfg.stations.len());
+        let mut fire_ids = std::collections::HashSet::new();
+        for (i, s) in cfg.stations.iter().enumerate() {
+            index_of.insert(s.id.clone(), i);
+            if s.role == mupc_southd::config::Role::Fire {
+                fire_ids.insert(s.id.clone());
+            }
+        }
+        Self {
+            index_of,
+            fire_ids,
+            scheduler: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// 调度器建好后注入（装配期一次；`initialize_all` 内 `SouthScheduler::new` 之后）。
+    /// 毒化不 panic（与仓内 `read_cache` 同口径：装配 / 采集路径不得因一次 panic 永久失效）。
+    pub fn attach(&self, scheduler: Arc<mupc_southd::scheduler::SouthScheduler>) {
+        *self.scheduler.write().unwrap_or_else(|e| e.into_inner()) = Some(scheduler);
+    }
+}
+
+impl crate::display_host::CylinderPressureQuery for SouthCylinderPressureQuery {
+    fn cylinder_configured(&self, station_id: &str) -> Option<bool> {
+        // 入口守卫：**非消防站** ⇒ 不可得（§15.2.2 明文的 `None` 成因之一）。
+        if !self.fire_ids.contains(station_id) {
+            return None;
+        }
+        // 接缝未接线 ⇒ 不可得（另一成因）。**不得**回 `Some(false)`。
+        let scheduler = self
+            .scheduler
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        // 未登记站（配置里没有）⇒ 不可得（不臆造下标）。
+        let idx = *self.index_of.get(station_id)?;
+        Some(scheduler.cylinder_pressure_configured(idx))
+    }
+}
+
 pub async fn initialize_all(
     core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
     coord: &ServiceCoordinatorImpl,
@@ -1466,6 +1540,23 @@ pub async fn initialize_all(
         },
     ));
 
+    // ── 01 设计 §9.1.8：外设遥测最新值快照（**在此提前构造**）──
+    //   U-73（12 号设计 §15.1.1）把 `latest_values` 定为外设段（慢拍 D）的**唯一取数面**，
+    //   而外设源必须随 `DisplayDataProvider` 一同装配（本函数下方）⇒ 快照的构造点随之
+    //   上移到 HMI 装配**之前**。**语义不变**：本项仍是 §9.4 序 1 的"第一步构造"，
+    //   仍早于其全部读取方（HMI 慢拍 D / IEC104 上送驱动器 / 总召 / `SouthSink` 写入方）。
+    //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）。
+    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+        config.south_stations.stale_timeout_s,
+    ));
+
+    // ── U-73 §15.11 #7 / §15.2.2：消防钢瓶气压取数接缝（EDGE-23 / EX-11）──
+    //   在本文件的**HMI 装配之前**建空壳（`attach` 前恒 `None` = "接缝未接线"），
+    //   等下方 `SouthScheduler::new` 之后再 `attach`（原因见适配器的类型文档）。
+    //   ⚠️ 这段与 `latest` 分开的原因：`latest` 是先构造后接线也**必须**的分叉点，
+    //   而本接缝的"空壳 → attach"是**装配顺序**的产物，两者不是同一类约束。
+    let cylinder_query = Arc::new(SouthCylinderPressureQuery::new(&config.south_stations));
+
     if config.display.enabled {
         // 设计 §4.9 字面稿的「初始化本地 HMI 后端」日志行（第一轮整改 S-3：原先只存在于设计里，
         // 实现无对应日志 ⇒ 现场无法从启动日志确认 HMI 后端是否真的在装配）。
@@ -1480,7 +1571,9 @@ pub async fn initialize_all(
                 config.intercore.transport
             );
         }
-        let latest: Arc<std::sync::Mutex<Option<mupc_display_proto::DisplayFrame>>> =
+        // ⚠️ 命名：本变量是**帧共享存储**，与上面的 `latest`（`latest_values` 快照）**不同物**
+        // （U-73 起两者在本函数内同时可见）⇒ 显式区分名，避免误用（设计 §15.2.2 的同款提醒）。
+        let shared_frame: Arc<std::sync::Mutex<Option<mupc_display_proto::DisplayFrame>>> =
             Arc::new(std::sync::Mutex::new(None));
         // 慢拍四段源（设计 §4.2）：
         // - F6 装置状态：intercore 链路 + 控制源 + 本机温度/内存（uptime 零点取**进程启动时刻**，
@@ -1495,12 +1588,43 @@ pub async fn initialize_all(
             config.io.enabled,
             config.io.release_hold_secs,
         );
+        // U-73（12 号设计 §15.11 #6/#8）：外设段计划（配置 → 白名单投影）+ 点表目录 + 数据源。
+        // - 计划：**装配期一次算**（纯函数 `peripheral_plan`），运行期只做内存读（帧路径零 I/O）；
+        // - 目录：与帧内 `catalog_rev` **同源同值**（同一份 `Arc<PeripheralCatalog>` 既进
+        //   控制通道三端点、也提供帧内 `catalog_rev`）——两处各建一份会让屏侧永远在重取；
+        // - 源：`latest_values` 的**公开只读面**投影（禁 DB / 禁第二真源，§15.1.2 C-1/C-5）。
+        let periph_plan = crate::display_host::peripheral_plan(&config.south_stations);
+        let periph_catalog = Arc::new(crate::console_host::build_peripheral_catalog(
+            &config.south_stations,
+            &periph_plan,
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+        ));
+        let periph_source: Arc<dyn crate::display_host::PeripheralSource> = Arc::new(
+            crate::display_host::StationPeripheralSource::new(
+                latest.clone(),
+                periph_plan.clone(),
+                periph_catalog.rev,
+            )
+            // §15.11 #7：钢瓶气压接缝（消防站的 EDGE-23「未配置」由此可达）
+            .with_cylinder_query(cylinder_query.clone()),
+        );
+        tracing::info!(
+            "外设段已接线：{} 站 / catalog {} 条（rev={}）/ 兜底 tick {} ms",
+            periph_plan.len(),
+            periph_catalog
+                .stations
+                .iter()
+                .map(|s| s.blocks.iter().map(|b| b.points.len()).sum::<usize>())
+                .sum::<usize>(),
+            periph_catalog.rev,
+            config.display.periph_poll_ms,
+        );
         let provider = crate::display_host::DisplayDataProvider::new(
             ai_integrator.clone(),
             intercore.clone(),
             &config.display,
             config.intercore.transport == "modbus_rtu",
-            latest.clone(),
+            shared_frame.clone(),
         )
         .with_slow_sources(
             Some(Arc::new(crate::display_host::SystemDeviceSource::new(
@@ -1516,9 +1640,10 @@ pub async fn initialize_all(
                 config.display.alarm_page_size,
             ))),
             interlock_wiring,
-        );
+        )
+        .with_peripheral_source(periph_source.clone());
         guard.0.push(tokio::spawn(provider.run()));
-        let publisher = crate::display_host::LoopbackHttpPublisher::new(latest.clone());
+        let publisher = crate::display_host::LoopbackHttpPublisher::new(shared_frame.clone());
         match tokio::net::TcpListener::bind(&config.display.bind_addr).await {
             Ok(listener) => {
                 tracing::info!(
@@ -1583,6 +1708,14 @@ pub async fn initialize_all(
             logs,
             interlock: interlock_ops,
             audit,
+            // U-73 §15.3.2：外设三只读端点的数据源（**与帧内同一份段**）。
+            peripherals: crate::console_host::PeripheralConsoleSource::Ready {
+                source: periph_source,
+                catalog: periph_catalog,
+            },
+            // U-73 §15.11 #4（评审 T20 (B) D5 的"静默空转"收口）：`fire_detectors` 的默认页
+            // 大小取自**配置**——这是该键在全仓的**唯一消费点**（改键 ⇒ 端点的缺省分页真的变）。
+            periph_page_size: config.display.periph_page_size,
         });
         match tokio::net::TcpListener::bind(&config.display.control_bind_addr).await {
             Ok(listener) => {
@@ -1619,9 +1752,7 @@ pub async fn initialize_all(
     //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）；
     //   构造点在网关 / 南向调度装配**之前**——写入方 = 下方 `SouthSink`，读取方 = IEC104
     //   上送驱动器（序 5）与 `StrategyCommandHandler` 总召/初始快照（序 6）。
-    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
-        config.south_stations.stale_timeout_s,
-    ));
+    // `latest` 已在**本地 HMI 装配之前**构造（上文；U-73 慢拍 D 需要同一实例），此处不再重建。
     // §9.4 序 2：上送点表机械生成（`build_uplink_points`），失败 ⇒ **拒启动**（配置/点表
     // 漂移的 fail-fast，与 `validate_south_stations` 同范式，§9.2.1）。
     let uplink_points = Arc::new(
@@ -1774,6 +1905,10 @@ pub async fn initialize_all(
         let station_count = config.south_stations.stations.len();
         let scheduler =
             mupc_southd::scheduler::SouthScheduler::new(config.south_stations.clone(), buses, sink);
+        // §15.11 #7：调度器已建 ⇒ 立刻接上钢瓶气压接缝（此前一律 `None` = "接缝未接线"）。
+        // 与 HMI 装配**解耦**：`display.enabled=false` 时本接缝无人消费，`attach` 仍执行
+        // （幂等且零 I/O，不做条件分支可少一条"配置组合 × 接线状态"的分叉）。
+        cylinder_query.attach(scheduler.clone());
         let handles = scheduler.spawn();
         let handle_count = handles.len();
         // grid_on 仅 grid 源配置存在才 true（B1）；B2（只非 grid 站）false → pv/load 兜底
@@ -3154,5 +3289,94 @@ plugins: {}
             "`hmi_backend` 注册必须在 `config.display.enabled` 的 **`if` 分支体内**\
              （不得落到 `}} else {{` 分支、也不得在块外）（实得 gate={gate} at={at} else={else_anchor}）"
         );
+    }
+
+    /// **D2（§15.2.2 / §15.11 #7）钢瓶气压接缝适配器**：真对象、真接缝，无 mock。
+    ///
+    /// 三态与"接缝未接线"的可达性：
+    /// - `attach` 前 ⇒ 消防站回 `None`（**接缝未接线**；**不得**回 `Some(false)`）；
+    /// - 非消防站 ⇒ 恒 `None`（§15.2.2 的"非消防站"成因，**本适配器是唯一判定点**）；
+    /// - 未登记站 ⇒ `None`（不臆造下标）；
+    /// - `attach` 真 `SouthScheduler`（无口可开 ⇒ 从未采到非 0）⇒ **`Some(false)`**
+    ///   —— 这正是 EDGE-23「未配置」/ EX-11 的生产可达态。
+    ///
+    /// **改什么会让本条变红**：把 `attach` 后的 `Some(..)` 改回 `None` ⇒ ⑤ 红；去掉"非消防站
+    /// ⇒ `None`"的入口守卫 ⇒ ② 红（会把 `bms` 也判成「未配置」）。
+    ///
+    /// ⚠️ **本用例不判别"站 id → 站下标"映射的正确性**：无口可开时**任何**下标都回 `false`
+    /// （要有真差别，需"某站采到非 0 而另一站没有"，而 `cylinder_seen_nonzero` 没有可注入句柄）。
+    /// 该映射目前只有**结构性**保证（两侧都用 `cfg.stations.iter().enumerate()` 的同一序，
+    /// 且调度器由**同一份** `config.south_stations` 构造）——如实登记于任务报告。
+    #[test]
+    fn cylinder_pressure_query_follows_attach_and_filters_non_fire() {
+        use crate::display_host::CylinderPressureQuery as _;
+
+        /// 调度器需要一个 sink；本用例不验采集投递 ⇒ 全空实现。
+        struct NoopSink;
+        #[async_trait::async_trait]
+        impl mupc_southd::scheduler::StationSink for NoopSink {
+            async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+            async fn on_station_telemetry(
+                &self,
+                _station_id: &str,
+                _role: mupc_southd::config::Role,
+                _points: Vec<(String, f64, bool)>,
+            ) {
+            }
+            async fn on_battery_soc(&self, _station_id: &str, _soc: f64) {}
+        }
+
+        // 站序刻意让**消防不是首站**（`bms` 在下标 0）
+        let cfg: mupc_southd::config::SouthStationsConfig = serde_yaml::from_str(
+            r#"
+poll_ms: 1000
+stale_timeout_s: 5
+stations:
+  - id: bms
+    role: battery
+    port: "/dev/ttyS2"
+    interval_ms: 1000
+    regs:
+      - { name: bms_io, func: input, addr: 100, count: 31, format: uint16, scale: 1.0 }
+  - id: fire
+    role: fire
+    port: "/dev/ttyS6"
+    interval_ms: 1000
+    regs:
+      - { name: fire_sys, func: holding, addr: 4, count: 13, format: uint16, scale: 1.0 }
+"#,
+        )
+        .expect("测试南向配置可解析");
+
+        let q = SouthCylinderPressureQuery::new(&cfg);
+        // ① `attach` 前 = 接缝未接线 ⇒ 消防站也不得回 `Some(false)`
+        assert_eq!(
+            q.cylinder_configured("fire"),
+            None,
+            "接缝未接线 ⇒ 不可得（**不得**伪装成「未配置」）"
+        );
+        // ② 非消防站 ⇒ 恒不可得（`None` 成因之一）
+        assert_eq!(q.cylinder_configured("bms"), None, "非消防站 ⇒ 不可得");
+        // ③ 未登记站 ⇒ 不可得（不臆造下标）
+        assert_eq!(q.cylinder_configured("no-such-station"), None);
+
+        // ④/⑤ 接**真**调度器：无口可开 ⇒ 该站从未采到非 0 ⇒ "未配置"
+        let sched = mupc_southd::scheduler::SouthScheduler::new(
+            cfg.clone(),
+            std::collections::HashMap::new(),
+            Arc::new(NoopSink),
+        );
+        assert!(
+            !sched.cylinder_pressure_configured(0) && !sched.cylinder_pressure_configured(1),
+            "前提：无口可开 ⇒ 两站都没有「曾出现过非 0」的记忆"
+        );
+        q.attach(sched);
+        assert_eq!(
+            q.cylinder_configured("fire"),
+            Some(false),
+            "消防站 + 已接线 ⇒ 权威结论 Some(false)（EDGE-23「未配置」的可达态）"
+        );
+        assert_eq!(q.cylinder_configured("bms"), None, "接线后非消防站仍不可得");
+        assert_eq!(q.cylinder_configured("no-such-station"), None);
     }
 }

@@ -47,6 +47,9 @@ use crate::ui::components::{
 use crate::ui::theme::{
     self, ChipSkin, ConfirmLevel, Dimens, Opacity, Palette, Radius, Stroke, TextSlot, Timing,
 };
+// U-73（T21c-1）的 H-2 / T-23 覆盖率网与 P4 消防用例（下同）：
+// `ui_text` 是**上屏中文的唯一来源**（`display-proto`），`GROUP_TITLES` 是分组标题的唯一来源。
+use mupc_display_proto::peripherals_labels::{ui_text, GROUP_TITLES};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 小工具
@@ -1176,7 +1179,14 @@ const UI_ADJACENT_PROD_SOURCES: [(&str, &str); 1] = [("src/state.rs", include_st
 /// （`unused_must_use` 的提示语），与 `env!(` / `stderr(),` **同一条**非屏显口径：
 /// **结构上不可能**成为上屏文案。若不登记，它会按"上屏候选"被逐字要求字形齐备
 /// （`（` `）` `；` 均不在 cmap 内）—— 那是对**判据**的迁就，不是对**屏显**的保证。
-const NON_DISPLAY_SINKS: [&str; 11] = [
+///
+/// **T21c-1 新增一条 `group_title(`**：同款机制、同款理由 —— `ui/pages/p4_interlock.rs` 的
+/// **分组标题查找**必须写出**分组键**（`fire_level` / `fire_sys_status` / …），而键是
+/// **小写 ASCII 且从不上屏**（上屏的是它查出来的中文标题；键本身在生成字体里没有字形）。
+/// 与 `config_key(` / `source_key(` 同一条自证纪律：`p4_static_constraints` 钉死本文件里
+/// `group_title("…")`（恰 6 处）与 `block_key("…")`（恰 12 处）的**调用点计数**（防把**上屏串**
+/// 塞进这两个函数从而静默逃过码表网）。
+const NON_DISPLAY_SINKS: [&str; 13] = [
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
@@ -1187,6 +1197,8 @@ const NON_DISPLAY_SINKS: [&str; 11] = [
     "source_key(",
     "audit_key(",
     "module_key(",
+    "group_title(",
+    "block_key(",
     "#[must_use =",
 ];
 
@@ -1198,66 +1210,320 @@ const NON_DISPLAY_SINKS: [&str; 11] = [
 /// 条目未删 ⇒ 也红 —— **有意**如此：防止登记腐化）。
 const KNOWN_MISSING: [(char, &str); 0] = [];
 
-/// 从 `lv_font_noto_sc_*.c` 解析**实际支持的码点集合**。
+/// 从 cmap 结构体文本片段里取**十进制**字段（如 `.range_start = 32`）。
 ///
-/// **本版本 `lv_font_conv` 生成物的确切形态**（2026-09-11 对 10 个字号逐一实测，
-/// 不是猜的）：
-///
-/// ```c
-/// static const uint16_t unicode_list_0[] = { 0x0, 0x1, 0x5, /* …升序… */ };
-/// static const lv_font_fmt_txt_cmap_t cmaps[] = { {
-///     .range_start = 32, .range_length = 40633, .glyph_id_start = 1,
-///     .unicode_list = unicode_list_0, .glyph_id_ofs_list = NULL,
-///     .list_length = 324, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY } };
-/// ```
-///
-/// ⇒ **码点 = `.range_start + unicode_list_0[i]`**（数组存的是相对偏移，**不是**码点本身；
-/// 直接当码点用会漏掉几乎全部 CJK）。形态与解析前提不符时**响亮失败** —— 否则"解析不到"
-/// 会伪装成"全部覆盖"（正是要修的那类缺陷）。
-fn font_cmap_from_c(src: &str, name: &str) -> std::collections::BTreeSet<char> {
-    let lists = src.matches("static const uint16_t unicode_list_0[]").count();
-    let ranges = src.matches(".range_start =").count();
-    assert!(
-        lists == 1 && ranges == 1,
-        "{name}：`lv_font_conv` 输出形态已变（unicode_list_0 × {lists}、range_start × {ranges}）\
-         —— 本解析器只认「单 cmap + 单 unicode_list」形态，请据此更新（不得静默跳过）"
-    );
-    assert!(
-        src.contains("LV_FONT_FMT_TXT_CMAP_SPARSE_TINY"),
-        "{name}：cmap 类型不是 SPARSE_TINY（`unicode_list` 的偏移语义随之不同），请复核解析"
-    );
-    let start = src.find("static const uint16_t unicode_list_0[]").expect("已断言存在");
-    let body_open = start + src[start..].find('{').expect("数组体");
-    let body = &src[body_open + 1..];
-    let body = &body[..body.find("};").expect("数组结束")];
-    let rs_at = src.find(".range_start =").expect("已断言存在");
-    let rs: u32 = src[rs_at + ".range_start =".len()..]
+/// 字段缺失 ⇒ **响亮 `panic`**（不返回默认值）：形态变了就必须有人来改解析器，而不是让
+/// "读到 0" 伪装成合法取值。
+fn cmap_field_u32(chunk: &str, key: &str, name: &str) -> u32 {
+    let at = chunk.find(key).unwrap_or_else(|| {
+        panic!("{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）")
+    });
+    chunk[at + key.len()..]
         .trim_start()
         .split(|c: char| !c.is_ascii_digit())
         .next()
+        .filter(|s| !s.is_empty())
         .and_then(|s| s.parse().ok())
-        .expect("range_start 应是十进制整数");
-    let mut set = std::collections::BTreeSet::new();
+        .unwrap_or_else(|| panic!("{name}：`{key}` 后不是十进制整数（该字段应为十进制，请复核解析）"))
+}
+
+/// 从 cmap 结构体文本片段里取**标识符**字段（如 `.unicode_list = unicode_list_1` / `NULL`）。
+fn cmap_field_ident<'a>(chunk: &'a str, key: &str, name: &str) -> &'a str {
+    let at = chunk.find(key).unwrap_or_else(|| {
+        panic!("{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）")
+    });
+    let tail = chunk[at + key.len()..].trim_start();
+    let n = tail
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(tail.len());
+    &tail[..n]
+}
+
+/// 取 `static const <decl> <array_name>[] = { … };` 数组体里的**全部整数**。
+///
+/// **两种进制都要认**：`unicode_list` 写成十六进制（`0x…`）、`glyph_id_ofs_list` 写成十进制
+/// （`lv_font_conv` 的实际写法）⇒ 只认十六进制会**漏读** `glyph_id_ofs_list`。
+///
+/// **必须从声明行之后的 `{` 起切数组体**：数组名（`unicode_list_1`）与 `uint8_t` 里都含数字，
+/// 从声明行起切会把它们当成元素读进来（实测会多出 2 个假元素）。
+fn c_array_u32(src: &str, decl: &str, array_name: &str, name: &str) -> Vec<u32> {
+    let head = format!("static const {decl} {array_name}[]");
+    let at = src.find(&head).unwrap_or_else(|| {
+        panic!(
+            "{name}：找不到数组声明 `{head}` —— `lv_font_conv` 产物形态与解析器脱节\
+             （请按 LVGL `get_glyph_dsc_id` 的语义同步更新；**不得静默跳过**）"
+        )
+    });
+    let open = at
+        + src[at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name}：`{head}` 声明后找不到 `{{`"));
+    let end = open
+        + src[open..]
+            .find("};")
+            .unwrap_or_else(|| panic!("{name}：`{array_name}[]` 数组体未闭合"));
+    let body = &src[open + 1..end];
     let b = body.as_bytes();
+    let mut out = Vec::new();
     let mut i = 0usize;
-    while i + 1 < b.len() {
-        if b[i] == b'0' && b[i + 1] == b'x' {
+    while i < b.len() {
+        if b[i] == b'0' && i + 1 < b.len() && (b[i + 1] | 0x20) == b'x' {
             let mut j = i + 2;
             while j < b.len() && b[j].is_ascii_hexdigit() {
                 j += 1;
             }
             if let Ok(v) = u32::from_str_radix(&body[i + 2..j], 16) {
-                if let Some(ch) = char::from_u32(rs + v) {
-                    set.insert(ch);
-                }
+                out.push(v);
+            }
+            i = j;
+        } else if b[i].is_ascii_digit() {
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if let Ok(v) = body[i..j].parse::<u32>() {
+                out.push(v);
             }
             i = j;
         } else {
             i += 1;
         }
     }
-    assert!(!set.is_empty(), "{name}：unicode_list 解析出 0 个码点 —— 解析器与生成物脱节");
+    out
+}
+
+/// 从 `lv_font_noto_sc_*.c` 的 `cmaps[]` 解析**全部 `(码位, glyph_id)` 条目**。
+///
+/// **本解析器是 [`font_cmap_from_c`] 与 [`adv_w_from_c`] 的公用底座**（两处口径必须同源，
+/// 否则一条网说"覆盖"、另一条说"宽度缺" —— 正是要避免的漂移）。
+/// 语义**逐条照抄 LVGL** `get_glyph_dsc_id`
+/// （`vendor/lvgl/src/font/fmt_txt/lv_font_fmt_txt.c:280-330`）：
+///
+/// | cmap 类型 | 码位 | glyph_id |
+/// |---|---|---|
+/// | `FORMAT0_TINY`  | `range_start + rcp`，`rcp ∈ 0..range_length` | `glyph_id_start + rcp` |
+/// | `FORMAT0_FULL`  | `range_start + rcp`，**但 `glyph_id_ofs_list[rcp] == 0 && rcp != 0` ⇒ 无字形、跳过** | `glyph_id_start + glyph_id_ofs_list[rcp]` |
+/// | `SPARSE_TINY`   | `range_start + unicode_list[i]` | `glyph_id_start + i` |
+/// | `SPARSE_FULL`   | `range_start + unicode_list[i]` | `glyph_id_start + glyph_id_ofs_list[i]` |
+///
+/// **产物形态（2026-09-25 订正，实测 10 档，不是猜的）**：`cmaps[]` **可以是 N 个**（N ≥ 1），
+/// 且**每个 cmap 类型可不同**。T21a 把码表从 326 扩到 464 字符（U-73 外设上屏的 `ppm` / `kvar`
+/// / `Hz` / `PACK` 等单位所需小写拉丁字母）后，ASCII 段变"密" ⇒ `lv_font_conv` **不再**产出
+/// 单个 `SPARSE_TINY`，而是切成
+///
+/// ```c
+/// static const uint8_t  glyph_id_ofs_list_0[] = { 0, 1, 0, /* …十进制… */ };
+/// static const uint16_t unicode_list_1[]       = { 0x0, 0x2, /* …十六进制… */ };
+/// static const lv_font_fmt_txt_cmap_t cmaps[] = {
+///     { .range_start = 32, .range_length = 56, .glyph_id_start = 1,
+///       .unicode_list = NULL, .glyph_id_ofs_list = glyph_id_ofs_list_0, .list_length = 56,
+///       .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL },
+///     { .range_start = 97, .range_length = 65193, .glyph_id_start = 39,
+///       .unicode_list = unicode_list_1, .glyph_id_ofs_list = NULL, .list_length = 423,
+///       .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY } };
+/// ```
+///
+/// ⚠️ **数组名不固定**：旧形态是 `unicode_list_0`，本次是 `unicode_list_1` ⇒ **按声明行找、
+/// 不按固定名字找**。⚠️ **`glyph_id` 是全局的**（跨 cmap 连续编排），`adv_w` 必须用**真实
+/// `glyph_id`** 去索引 `glyph_dsc[]`，不能再用"第 i 个 = i+1"的特例。
+///
+/// **漂移检测的口径一致性（强制）**：本函数与 `fonts/gen_fonts.sh` 里的 Python
+/// `cmap_entries()` **必须逐条一致**（后者产出入库清单 `lv_font_cmap.txt` /
+/// `lv_font_metrics.txt`）；产物形态再变（如新增 cmap 类型）⇒ **两侧都要改**，否则
+/// `load_font_cmap` 的漂移检测会红。
+///
+/// 形态不符 / 找不到 `cmaps[]` / 单条 cmap 解析不出 / 未知 cmap 类型 ⇒ **响亮 `panic`**，
+/// **绝不**静默跳过或返回空集 —— 否则"解析不到"会伪装成"全部覆盖"（正是要修的那类缺陷）。
+fn cmap_entries_from_c(src: &str, name: &str) -> Vec<(u32, usize)> {
+    const HEAD: &str = "static const lv_font_fmt_txt_cmap_t cmaps[]";
+    const T_FORMAT0_TINY: &str = "LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY";
+    const T_FORMAT0_FULL: &str = "LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL";
+    const T_SPARSE_TINY: &str = "LV_FONT_FMT_TXT_CMAP_SPARSE_TINY";
+    const T_SPARSE_FULL: &str = "LV_FONT_FMT_TXT_CMAP_SPARSE_FULL";
+
+    let at = src.find(HEAD).unwrap_or_else(|| {
+        panic!(
+            "{name}：找不到 cmap 数组声明 `{HEAD}` —— `lv_font_conv` 产物形态与解析器脱节\
+             （请按 LVGL `get_glyph_dsc_id` 的语义同步更新；**不得静默跳过**）"
+        )
+    });
+    let open = at
+        + src[at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name}：`{HEAD}` 后找不到 `{{`"));
+    let end = open
+        + src[open..]
+            .find("};")
+            .unwrap_or_else(|| panic!("{name}：`cmaps[]` 数组体未闭合"));
+    let body = &src[open + 1..end];
+
+    // `(码位, glyph_id)`（`rcp` = 相对码位；`gid` = 该 cmap 语义下的**全局** glyph id）。
+    let entry = |rs: u32, rcp: u32, gid: usize| -> (u32, usize) {
+        let cp = rs.checked_add(rcp).unwrap_or_else(|| {
+            panic!("{name}：码位溢出（range_start = {rs} + 相对码位 {rcp}）—— 产物形态异常")
+        });
+        (cp, gid)
+    };
+
+    let mut entries: Vec<(u32, usize)> = Vec::new();
+    let mut cmap_count = 0usize;
+    for chunk in body.split('}') {
+        if !chunk.contains(".range_start") {
+            continue;
+        }
+        cmap_count += 1;
+        let rs = cmap_field_u32(chunk, ".range_start =", name);
+        let rl = cmap_field_u32(chunk, ".range_length =", name);
+        let gis = cmap_field_u32(chunk, ".glyph_id_start =", name);
+        let list_len = cmap_field_u32(chunk, ".list_length =", name);
+        let ul = cmap_field_ident(chunk, ".unicode_list =", name);
+        let ofs = cmap_field_ident(chunk, ".glyph_id_ofs_list =", name);
+        let ty = cmap_field_ident(chunk, ".type =", name);
+        match ty {
+            T_FORMAT0_TINY => {
+                for rcp in 0..rl {
+                    entries.push(entry(rs, rcp, (gis as usize) + rcp as usize));
+                }
+            }
+            T_FORMAT0_FULL => {
+                let tbl = c_array_u32(src, "uint8_t", ofs, name);
+                assert!(
+                    tbl.len() == rl as usize,
+                    "{name}：FORMAT0_FULL 的 `{ofs}` 长度（{}）≠ range_length（{rl}）—— 产物形态异常",
+                    tbl.len()
+                );
+                for (rcp, ofs_rcp) in tbl.iter().enumerate() {
+                    // LVGL 原文：首字符必有效、其 offset 恒 0；其余位置 offset == 0 ⇒ **该码位无字形**。
+                    if *ofs_rcp == 0 && rcp != 0 {
+                        continue;
+                    }
+                    entries.push(entry(rs, rcp as u32, (gis as usize) + *ofs_rcp as usize));
+                }
+            }
+            T_SPARSE_TINY => {
+                let lst = c_array_u32(src, "uint16_t", ul, name);
+                assert!(
+                    lst.len() == list_len as usize,
+                    "{name}：SPARSE_TINY 的 `{ul}` 长度（{}）≠ list_length（{list_len}）—— 产物形态异常",
+                    lst.len()
+                );
+                for (i, v) in lst.iter().enumerate() {
+                    entries.push(entry(rs, *v, (gis as usize) + i));
+                }
+            }
+            T_SPARSE_FULL => {
+                let lst = c_array_u32(src, "uint16_t", ul, name);
+                let o16 = c_array_u32(src, "uint16_t", ofs, name);
+                assert!(
+                    o16.len() >= lst.len(),
+                    "{name}：SPARSE_FULL 的 `{ofs}` 长度（{}）< `{ul}` 长度（{}）—— 产物形态异常",
+                    o16.len(),
+                    lst.len()
+                );
+                for (i, v) in lst.iter().enumerate() {
+                    entries.push(entry(rs, *v, (gis as usize) + o16[i] as usize));
+                }
+            }
+            other => panic!(
+                "{name}：未知 cmap 类型 `{other}` —— 解析器与生成物脱节，请按 LVGL \
+                 `get_glyph_dsc_id` 的语义同步更新（**不得静默跳过**）"
+            ),
+        }
+    }
+    assert!(
+        cmap_count >= 1 && !entries.is_empty(),
+        "{name}：`cmaps[]` 解析出 {cmap_count} 个 cmap / {} 条码位条目 —— 解析器与生成物脱节\
+         （**不得静默跳过**；旧版断言精神：形态已变请据此更新）",
+        entries.len()
+    );
+    entries
+}
+
+/// 从 `lv_font_noto_sc_*.c` 解析**实际支持的码点集合**（基于 [`cmap_entries_from_c`]）。
+///
+/// 码位语义、N 个 cmap、四种类型与产物形态说明**见 [`cmap_entries_from_c`]**（公用底座，
+/// 两处口径必须同源）。形态与解析前提不符 / 解析出 0 个码点 ⇒ **响亮失败**，不静默跳过。
+fn font_cmap_from_c(src: &str, name: &str) -> std::collections::BTreeSet<char> {
+    let mut set = std::collections::BTreeSet::new();
+    for (cp, _gid) in cmap_entries_from_c(src, name) {
+        let ch = char::from_u32(cp).unwrap_or_else(|| {
+            panic!("{name}：码位 U+{cp:04X} 不是合法 Unicode 标量 —— 产物异常或解析器脱节")
+        });
+        set.insert(ch);
+    }
+    assert!(
+        !set.is_empty(),
+        "{name}：cmaps[] 解析出 0 个码点 —— 解析器与生成物脱节（不得静默跳过）"
+    );
     set
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `cmap_entries_from_c` 的**合成入参**单测：覆盖本仓 10 档产物**从不出现**的两条分支
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 背景（T21a 评审 (D)-20 / 建议 G-8）：本仓 10 档 `.c` 实测只出现 `FORMAT0_FULL`
+// + `SPARSE_TINY` ⇒ `FORMAT0_TINY` / `SPARSE_FULL` 两条分支**只经代码走查、零执行**。
+// 用**手写的最小 `.c` 片段**当纯函数入参即可覆盖（不依赖 `lv_font_conv` / 不依赖产物存在），
+// 成本极低。**只加测、不改生产逻辑。**
+
+/// `FORMAT0_TINY`：`码位 = range_start + rcp`、`glyph_id = glyph_id_start + rcp`
+/// （`rcp ∈ 0..range_length`，**无** `glyph_id_ofs_list`、**不跳任何码位**）。
+#[test]
+fn cmap_format0_tiny_maps_range_start_plus_rcp() {
+    let src = r#"
+static const lv_font_fmt_txt_cmap_t cmaps[] = {
+    { .range_start = 32, .range_length = 4, .glyph_id_start = 7,
+      .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 4,
+      .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY } };
+"#;
+    assert_eq!(
+        cmap_entries_from_c(src, "synthetic_f0_tiny"),
+        vec![(32, 7), (33, 8), (34, 9), (35, 10)],
+        "FORMAT0_TINY：码位 = range_start + rcp、glyph_id = glyph_id_start + rcp"
+    );
+}
+
+/// `SPARSE_FULL`：`码位 = range_start + unicode_list[i]`、
+/// `glyph_id = glyph_id_start + glyph_id_ofs_list[i]`（**两张表按下标配对**，
+/// 与 `SPARSE_TINY` 的"glyph_id = glyph_id_start + i"不同 —— 用**非递增**的 ofs 表
+/// 才能区分二者，故此处刻意取 `[3, 1, 0]`）。
+///
+/// ⚠️ **入参约定**：`range_start` 必须是**十进制**（两侧解析器一致：Rust `cmap_field_u32`
+/// 只认十进制数字，`gen_fonts.sh` 的 Python 正则也是 `= (\d+)`）。`lv_font_conv` 的实际写法
+/// 就是十进制（如 `.range_start = 32` / `= 97`）⇒ 这里按同一约定构造，不引入产物里没有的形态。
+///
+/// `unicode_list` = `{0x0, 0x5, 0x9}`（十六进制，`lv_font_conv` 的写法），
+/// `glyph_id_ofs_list` = `{3, 1, 0}`（十进制，同产物写法）⇒ 顺带覆盖"两种进制都要读"。
+#[test]
+fn cmap_sparse_full_pairs_unicode_list_with_glyph_id_ofs_list() {
+    let src = r#"
+static const uint16_t unicode_list_0[] = { 0x0, 0x5, 0x9 };
+static const uint16_t glyph_id_ofs_list_0[] = { 3, 1, 0 };
+static const lv_font_fmt_txt_cmap_t cmaps[] = {
+    { .range_start = 19968, .range_length = 65193, .glyph_id_start = 11,
+      .unicode_list = unicode_list_0, .glyph_id_ofs_list = glyph_id_ofs_list_0,
+      .list_length = 3,
+      .type = LV_FONT_FMT_TXT_CMAP_SPARSE_FULL } };
+"#;
+    assert_eq!(
+        cmap_entries_from_c(src, "synthetic_sparse_full"),
+        vec![(19968, 14), (19973, 12), (19977, 11)],
+        "SPARSE_FULL：glyph_id 必须取 glyph_id_ofs_list[i]（不是 i）"
+    );
+}
+
+/// 未知 cmap 类型 ⇒ **响亮 `panic`**（"解析不到"不得伪装成"全部覆盖"）。
+#[test]
+#[should_panic(expected = "未知 cmap 类型")]
+fn cmap_unknown_type_panics_loudly() {
+    let src = r#"
+static const lv_font_fmt_txt_cmap_t cmaps[] = {
+    { .range_start = 32, .range_length = 4, .glyph_id_start = 7,
+      .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 4,
+      .type = LV_FONT_FMT_TXT_CMAP_SPARSE_FULL_V2_FUTURE } };
+"#;
+    let _ = cmap_entries_from_c(src, "synthetic_unknown_type");
 }
 
 /// 剥掉 `format!` 模板里的 `{…}` 占位符（其内容是**表达式**，屏上出现的是它的**值**）。
@@ -1722,8 +1988,11 @@ fn cps(set: &std::collections::BTreeSet<char>) -> Vec<String> {
 /// 上屏都得出字形"，只有交集能**保证**这一点；并集会让"只在部分档存在"的字符蒙混过关
 /// （真机某档即豆腐块 = 漏）。b) 交集可能"误报"（某字只在小档用到、且该档有它），但
 /// **误报可消解**（把字补进全部档 / 登记缺字），漏报在屏上是静默的豆腐块。
-/// c) 实测 2026-09-11：10 档 cmap **完全相同**（各 324 码位，并集 − 交集 = 0）⇒ 当前
+/// c) 实测 2026-09-11：10 档 cmap **完全相同**（当时各 324 码位，并集 − 交集 = 0）⇒ 当前
 /// 两种取法**结果一致**，选交集只是把"未来某档掉字"这件事**钉在红灯上**。
+/// **2026-09-25 T21a 后重测：10 档仍完全相同，各 461 码位**（扩到 464 字符的码表里，有 3 个
+/// 码位**字库源本身就没有字形**、故不在任何档的 cmap 内：U+2082 / U+2715 / U+275A
+/// —— 已用 `fontTools` 对 `NotoSansSC-Regular.otf` 实测确认 ⇒ 交集只有 461）—— 两种取法仍一致。
 fn load_font_cmap() -> Option<std::collections::BTreeSet<char>> {
     let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
     let manifest_path = fonts_dir.join(CMAP_MANIFEST);
@@ -1799,12 +2068,21 @@ const METRICS_MANIFEST: &str = "lv_font_metrics.txt";
 /// 从**生产字体产物** `fonts/lv_font_noto_sc_{px}.c` 取 `adv_w` 表（码位 → 1/16 px）。
 /// `None` = 该档产物不存在（干净 clone / CI 常态）。
 ///
-/// 口径：`glyph_dsc` 的 `adv_w` 按 **glyph id 顺序**出现；`unicode_list_0[i]` = 码位 −
-/// `range_start`(32)，其 glyph id = 1 + i。
+/// **口径（2026-09-25 订正）**：码位 → `glyph_id` 走 [`cmap_entries_from_c`]（**支持 N 个
+/// cmap、四种 cmap 类型**，语义同 LVGL `get_glyph_dsc_id`）；`glyph_dsc[]` 的 `adv_w` 按
+/// **glyph id 顺序**出现 ⇒ 取 `adv[glyph_id]`。
+///
+/// ⚠️ 旧实现是**单 cmap 特例**（`unicode_list_0[i]` ⇒ glyph id `i + 1`、码位 `v + 32`），
+/// 扩字库后产物切成两个 cmap ⇒ 该特例失效（`glyph_id_start` 不再是 1）。**不得回退**：
+/// 一律用**真实 `glyph_id`** 索引，并保留 `gid < adv.len()` 的越界保护。
+///
+/// 某个码位**找不到对应 `adv_w`** ⇒ **响亮 `panic`**（与 `fonts/gen_fonts.sh` 的 Python
+/// `adv_of` 同款判据）：静默丢条目会让宽度网少测一片且无人察觉。
 fn adv_w_from_c(px: u32) -> Option<std::collections::BTreeMap<u32, u64>> {
+    let name = format!("lv_font_noto_sc_{px}.c");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fonts")
-        .join(format!("lv_font_noto_sc_{px}.c"));
+        .join(&name);
     let src = std::fs::read_to_string(path).ok()?;
     let adv: Vec<u64> = src
         .split(".adv_w = ")
@@ -1817,20 +2095,26 @@ fn adv_w_from_c(px: u32) -> Option<std::collections::BTreeMap<u32, u64>> {
                 .unwrap_or(0)
         })
         .collect();
-    let head = "unicode_list_0[] = {";
-    let start = src.find(head)? + head.len();
-    let end = src[start..].find("};")? + start;
     let mut map = std::collections::BTreeMap::new();
-    for (i, tok) in src[start..end].split(',').enumerate() {
-        let tok = tok.trim();
-        if let Some(hex) = tok.strip_prefix("0x") {
-            if let Ok(v) = u32::from_str_radix(hex, 16) {
-                if let Some(a) = adv.get(i + 1) {
-                    map.insert(v + 32, *a);
-                }
-            }
+    let mut missing: Vec<u32> = Vec::new();
+    for (cp, gid) in cmap_entries_from_c(&src, &name) {
+        if gid < adv.len() {
+            map.insert(cp, adv[gid]);
+        } else {
+            missing.push(cp);
         }
     }
+    assert!(
+        missing.is_empty(),
+        "{name}：cmap 里有 {} 个码位在 `glyph_dsc[]` 里没有对应 `adv_w`（最大码位 \
+         U+{:04X}）—— 解析器与生成物脱节（与 `fonts/gen_fonts.sh` 的 Python `adv_of` 同款判断）",
+        missing.len(),
+        missing.iter().copied().max().unwrap_or(0)
+    );
+    assert!(
+        !map.is_empty(),
+        "{name}：`adv_w` 表解析出 0 个码位 —— 解析器与生成物脱节（不得静默返回空表）"
+    );
     Some(map)
 }
 
@@ -2149,6 +2433,7 @@ fn ui_texts_covered_by_font_cmap() {
 /// | [`pages::fmt_signed_1dp`] | 1 位小数（三相 P/I、总卡、ΣP 幅值） | 见 [`RUNTIME_FMT_NUM_INPUTS`] |
 /// | [`pages::fmt_int0`] | 整数（SOC / CPU 温度 / 内存率） | 同上 |
 /// | [`pages::fmt_sigma_kw`] | `ΣP ±x.x kW`（**含 `+` / `−` 前缀**） | 同上 |
+/// | [`pages::fmt_decimals`] | catalog 驱动小数位（A2 压力 / 温度等 P4 数值） | 见 [`RUNTIME_FMT_NUM_INPUTS`] × `decimals ∈ {0..3, 越界}` + 非有限 |
 /// | [`pages::format_epoch_ms_utc`] | 告警时间 `YYYY/MM/DD HH:MM:SS` | 见 [`RUNTIME_FMT_MS_INPUTS`] |
 /// | [`pages::format_uptime`] | 运行时长 `N 日 HH:MM:SS` | 见 [`RUNTIME_FMT_SECS_INPUTS`] |
 ///
@@ -2195,6 +2480,18 @@ fn runtime_formatters_emit_only_cmap_glyphs() {
         cases.push((format!("fmt_signed_1dp({v})"), pages::fmt_signed_1dp(v)));
         cases.push((format!("fmt_int0({v})"), pages::fmt_int0(v)));
         cases.push((format!("fmt_sigma_kw({v})"), pages::fmt_sigma_kw(v)));
+    }
+    // `fmt_decimals`（A2 压力 / 温度等 **P4 上屏数值** 的出口；T21c-1-r1 补入本网 —— 评审
+    // **F4②**：`ui/pages/mod.rs` 的文档早就声称"由本用例构造性校验"，而 `cases` 里**没有它**）。
+    // 输入集 = 数值集 × `decimals ∈ {0,1,2,3}`（登记表值域 **加**越界 4 / 255 ⇒ clamp 3）+ 非有限
+    // （NaN / ±∞ ⇒ `--`）—— 与 `fmt_signed_1dp` 同款地覆盖**负号那一支**（`\u{2212}`）。
+    for v in RUNTIME_FMT_NUM_INPUTS {
+        for d in [0u8, 1, 2, 3, 4, 255] {
+            cases.push((format!("fmt_decimals({v}, {d})"), pages::fmt_decimals(v, d)));
+        }
+    }
+    for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        cases.push((format!("fmt_decimals({v}, 2)"), pages::fmt_decimals(v, 2)));
     }
     for ms in RUNTIME_FMT_MS_INPUTS {
         cases.push((format!("format_epoch_ms_utc({ms})"), pages::format_epoch_ms_utc(ms)));
@@ -3399,6 +3696,8 @@ pub(crate) fn frame_healthy() -> mupc_display_proto::DisplayFrame {
     use mupc_display_proto::*;
     DisplayFrame {
         version: PROTO_VERSION,
+        // v3 新增段（§15.2.2）：健康帧用例不涉外设 ⇒ 取默认（available=false）
+        peripherals: Default::default(),
         seq: 7,
         ts_ms: 1_789_047_727_000,
         soc: Some(62.0),
@@ -5079,12 +5378,18 @@ pub(crate) fn pages_chain() {
             (Dimens::CONTENT_W, Dimens::CONTENT_H),
             "页根 = 内容区整幅 992×624（**不是**滚动容器 —— 见 pages/mod.rs 契约 1′）"
         );
+        // U-73（T21c-1）：滚动视口下移到常驻总览带之下 ⇒ 高 342（= 624 − 上边距 8 − 带 162
+        // − 同组缝 16 − 原因带 24 − 操作条 72）。**首屏可行性**：§B 全量 = 源卡 202 + 16 +
+        // 灯卡 106 = 324 ≤ 342 ⇒ 既有联锁区仍**首屏全可见**（UI §6.4.1 的核心不变量；
+        // 差值见 p4_interlock.rs 的 **IL29③**）。
         assert_eq!(
             p4.scroll_obj().size(),
-            (Dimens::CONTENT_W, 528),
-            "滚动视口 = 624 − 操作条 72 − **就地原因带 24** = 528（⚠️ UI 线框写 552 —— \
-             见 p4_interlock.rs 的 **IL4**：原因带落在**视口末 24 px**（绝对 y600–624），\
-             线框只是**未画**该行；固定操作条仍与线框逐像素一致）"
+            (Dimens::CONTENT_W, 342),
+            "滚动视口 = 624 − 上边距 8 − 总览带 162 − 缝 16 − 原因带 24 − 操作条 72 = 342"
+        );
+        assert!(
+            p4.scroll_obj().size().1 >= 340,
+            "§B 既有内容全量 340（触发源 216 + 缝 16 + 灯卡 108，按 UI 口径）⇒ 视口必须 ≥ 340"
         );
         let root_c = p4.obj().coords();
         let bar_c = p4.action_bar_obj().coords();
@@ -5135,14 +5440,14 @@ pub(crate) fn pages_chain() {
             assert_eq!(p4.lamp_head_text(i).as_deref(), Some(*head));
         }
 
-        // 两张主卡的尺寸锚点（总态卡 `174` 见 **IL3**；触发源卡在 2 源时 `202`）。
+        // 两张主卡的尺寸锚点（总态卡 `162`/宽 `488` 见 **IL29**；触发源卡在 2 源时 `202`）。
         // **这两条同时是"存活锚点"回归锁**：`Core::state_card` 曾是 `new()` 的局部变量 ⇒ 返回时
         // 被 `Drop`、总态卡**整棵子树级联删除**（屏幕上一块空白、控制台无任何报错）；本用例的
         // 「骨架态 ⇒ 联锁状态不可用」断言（读卡内标签的文本）当场抓出了它（B2b-3 实测）。
         assert_eq!(
-            p4.state_card_obj().size().1,
-            174,
-            "联锁总态卡高（UI 线框 180，−6 见 **IL3**）"
+            p4.state_card_obj().size(),
+            (Dimens::BAND_CARD_W, 162),
+            "联锁总态卡 = 488×162（UI §6.4.1 写 488×164；差 2 px 见 **IL29③**）"
         );
         assert!(p4.state_card_obj().is_alive(), "总态卡必须存活（否则卡内全部子件被级联删除）");
         assert!(p4.source_card_obj().is_alive(), "触发源卡必须存活");
@@ -5150,10 +5455,19 @@ pub(crate) fn pages_chain() {
         // ── ② 骨架态 = **无帧** ⇒ 不可用（**绝不**「未联锁」）─────────────────────
         // 「改什么会让本条变红」：把 `new()` 末尾的 `apply_section(default)` 去掉（或把
         // `state_view` 的 `!available` 分支删掉）⇒ 下面「联锁状态不可用」那条立刻变红。
+        // ⚠️ **IL29① 订正（2026-09-25）**：96 px 主值槽只有 366 px，「联锁状态不可用」7 字
+        // × 96 = 672 px **放不下**（`DOTS` 截断）⇒ 该槽取**缩短形态**「不可用」；全串仍是
+        // **就地原因带 / 触发源卡 / latch 胶囊**三处的落点（④ 段逐条断言，见
+        // `reason_left_text()` == 全串）⇒ **语义不缩水，只是落点不同**。
         assert_eq!(
             p4.state_text().as_deref(),
-            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
-            "无帧 ⇒ 契约缺省 = 不可用"
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE_SHORT),
+            "无帧 ⇒ 契约缺省 = 不可用（96 px 主值槽取缩短形态，见 IL29①）"
+        );
+        assert_ne!(
+            p4.state_text().as_deref(),
+            Some(p4_interlock::TEXT_STATE_UNLATCHED),
+            "**不可用 ≠ 未联锁**（fail-closed；缩短的是字形数，不是语义）"
         );
         assert!(!p4.ever_available(), "尚未注入过有效帧");
 
@@ -5238,8 +5552,8 @@ pub(crate) fn pages_chain() {
         p4.set_section(&il(false, true, false));
         assert_eq!(
             p4.state_text().as_deref(),
-            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
-            "状态源不可用 ⇒ 「联锁状态不可用」（F16.6 / IL-01）"
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE_SHORT),
+            "状态源不可用 ⇒ 主值槽「不可用」（**缩短形态**，IL29①）"
         );
         assert_ne!(
             p4.state_text().as_deref(),
@@ -5315,8 +5629,8 @@ pub(crate) fn pages_chain() {
         );
         assert_eq!(
             p4.state_text().as_deref(),
-            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
-            "屏上**只能**是「联锁状态不可用」—— **绝不**因 `latched = true` 显示「已联锁」"
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE_SHORT),
+            "屏上主值槽**只能**是不可用（缩短形态）—— **绝不**因 `latched = true` 显示「已联锁」"
         );
         assert_ne!(
             p4.state_text().as_deref(),
@@ -5906,8 +6220,8 @@ pub(crate) fn pages_chain() {
         p4.render(&PageInput::init());
         assert_eq!(
             p4.state_text().as_deref(),
-            Some(p4_interlock::TEXT_STATE_UNAVAILABLE),
-            "无帧 ⇒ 不可用（**不**沿用上一帧的「未联锁」—— 缺帧 ≠ 确知未联锁）"
+            Some(p4_interlock::TEXT_STATE_UNAVAILABLE_SHORT),
+            "无帧 ⇒ 不可用（**不**沿用上一帧的「未联锁」—— 缺帧 ≠ 确知未联锁；IL29① 缩短形态）"
         );
         assert!(p4.release_disabled() && p4.restart_disabled());
         // 渲染后确有像素（装配 → 布局 → 像素全链）。
@@ -5929,13 +6243,28 @@ pub(crate) fn pages_chain() {
             "实时 ⇒ 两张卡都无角标"
         );
         p4.render(&PageInput::down(Some(&fm)));
-        assert!(p4.state_frozen_visible(), "通道断 + 保留帧 ⇒ 联锁总态卡打「冻结」");
-        assert!(p4.source_frozen_visible(), "触发源卡同理（同一拍、同一判据）");
-        assert_eq!(
-            p4.state_frozen_text().as_deref(),
-            Some(pages::TEXT_FROZEN),
-            "角标文案 = §3.6 既有串 `冻结`（零新上屏字）"
+        // ⚠️ **U-73 / IL29② 订正（2026-09-25）**：联锁总态卡的角标**已恢复**，但取
+        // **图标-only** 形态（28 px 落在标题与 latch 胶囊之间的空槽 —— 192 px 文字胶囊
+        // 与 latch 胶囊在本卡宽内**必然重叠**，见 `pages::FROZEN_BADGE_W` 的几何论证）。
+        // **图标-only ⇒ 结构上没有文字通道** ⇒ 标记身份由 `state_frozen_icon()`
+        // （⚠ = 冻结 / `!` = 数据过期）承担，而**不是**恒 `None` 的 `text()`。
+        //
+        // **改什么会让本条变红**（本条是"冻结态"的**正半边**）：
+        // ① 把 `Core::apply_frame_mark` 里对本卡的 `set_visible` 删掉（或写死 `false`）
+        //    ⇒ 下面"可见"一条红；
+        // ② 把 `pages::frozen_mark_icon` 的两支对调（⚠ ↔ `!`）⇒ 字形一条红。
+        // **对偶**：同段的"实时 ⇒ 两张卡都无角标"（不可见半边）与下方"帧旧 ⇒ `!`"
+        // 共同构成 **可见 ⇄ 不可见 × 冻结 ⇄ 过期** 的四格，任一格失效即红。
+        assert!(
+            p4.state_frozen_visible(),
+            "通道断 + 保留帧 ⇒ 联锁总态卡打「冻结」（IL29② 恢复；与触发源卡同一拍、同一判据）"
         );
+        assert_eq!(
+            p4.state_frozen_icon().as_deref(),
+            Some("⚠"),
+            "图标-only 形态的**唯一**标记通道 = 字形（此处 = `冻结` ⇒ ⚠，与 `p2_config::ICON_WARN` 同值）"
+        );
+        assert!(p4.source_frozen_visible(), "触发源卡打「冻结」（同一拍、同一判据）");
         assert_eq!(p4.source_frozen_text().as_deref(), Some(pages::TEXT_FROZEN));
         // **打标 ≠ 清值**：联锁段的数据照常沿用冻结帧。
         assert_eq!(
@@ -5954,16 +6283,26 @@ pub(crate) fn pages_chain() {
             !p4.state_frozen_visible() && !p4.source_frozen_visible(),
             "通道恢复 ⇒ 角标当拍撤除"
         );
-        // 通道正常但帧旧 ⇒ 同一件角标改文案。
+        // 通道正常但帧旧 ⇒ 同一判据改标记：触发源卡（文字胶囊）换**文案**，
+        // 联锁总态卡（图标-only，IL29②）换**字形** —— 两条通道同为 `frame_mark` 单一真源。
         p4.render(&PageInput::new(
             Some(&fm),
             ChannelStatus::Connected,
             Freshness::Stale,
         ));
         assert_eq!(
-            p4.state_frozen_text().as_deref(),
+            p4.source_frozen_text().as_deref(),
             Some(p1_status::TEXT_STALE),
-            "通道通 + 帧旧 ⇒ 文案改「数据过期」"
+            "通道通 + 帧旧 ⇒ 文案改「数据过期」（触发源卡）"
+        );
+        assert!(
+            p4.state_frozen_visible(),
+            "通道通 + 帧旧 ⇒ 联锁总态卡**同样**打标（EDGE-20；IL29② 恢复的正是这张）"
+        );
+        assert_eq!(
+            p4.state_frozen_icon().as_deref(),
+            Some("!"),
+            "帧旧 ⇒ 字形改「数据过期」= `!`（与 `冻结` 的 ⚠ **成对**；两支对调即红）"
         );
         // 无帧 ⇒ 不打标（此时联锁段已是「不可用」，不是"冻结的旧值"）。
         p4.render(&PageInput::init());
@@ -6107,17 +6446,34 @@ pub(crate) fn pages_chain() {
         // **改什么会让本条变红**：把任一页的角标改回内联 `StatusChip::new(..)` ⇒ 第 1 / 2 条红；
         // 把文案 / 皮肤搬回任一页（即该页源码重新出现 `TEXT_FROZEN` 实参）⇒ 第 3 条红。
         disp.refr_now_for_test();
-        for (n, chip) in [("联锁总态", p4.state_frozen_chip()), ("触发源", p4.source_frozen_chip())]
+        // ⚠️ **U-73 / IL29② 订正（2026-09-25）**：联锁总态卡的角标**已恢复**，取**图标-only**
+        // 形态 —— 488 宽的总览带卡内「标题(112) + 192 px 文字胶囊 + latch 胶囊(236)」
+        // = 540 px > 卡内容区 454 px ⇒ **文字胶囊必然与 latch 胶囊重叠**；28 px 图标徽标
+        // 落进标题与胶囊之间的空槽（112 < 174 < 202 < 218）⇒ 三件互不重叠（见 `IL29②`）。
+        // ⇒ 四张打标件现分属 `pages/mod.rs` 的**同一构造点族的两支**：三张文字胶囊
+        // （P4 触发源卡 + P6 ×2）经 `pages::frozen_chip`，一张图标徽标（P4 总态卡）经
+        // `pages::frozen_icon_badge`。**本段两支都断**（尺寸 + 皮肤 + 源码哨），
+        // 否则"总态卡角标由谁构造"就又回到无网状态。
         {
+            let chip = p4.source_frozen_chip();
             assert_eq!(
                 chip.size().0,
                 pages::FROZEN_CHIP_W,
-                "{n}卡角标宽 = `pages::FROZEN_CHIP_W`（与 P6 的两张**同一构造点**，不得各页自定）"
+                "触发源卡角标宽 = `pages::FROZEN_CHIP_W`（与 P6 的两张**同一构造点**，不得各页自定）"
             );
             assert_eq!(
                 chip.skin(),
                 crate::ui::theme::ChipSkin::WARNING,
-                "{n}卡角标皮肤 = §8.2 警示类（与 P6 的两张**同一构造点**）"
+                "触发源卡角标皮肤 = §8.2 警示类（与 P6 的两张**同一构造点**）"
+            );
+        }
+        {
+            let badge = p4.state_frozen_badge();
+            assert_eq!(
+                badge.obj().size().0,
+                pages::FROZEN_BADGE_W,
+                "总态卡角标宽 = `pages::FROZEN_BADGE_W`(28) —— **图标-only** 形态（IL29②）；\
+                 它落在标题与 latch 胶囊之间的空槽（192 px 文字胶囊会重叠）"
             );
         }
         {
@@ -6125,10 +6481,21 @@ pub(crate) fn pages_chain() {
             let p6_src = include_str!("pages/p6_system.rs");
             // 判据用**带路径前缀**的形式：本文件里的读回口 `*_frozen_chip(&self)` 也含
             // `frozen_chip(` 子串，裸串计数会把它们算进去（实测：裸串 = 4），故锚定调用点全路径。
+            // ⚠️ **U-73 / IL29② 订正**：联锁总态卡的角标**已恢复**但换形态 ⇒ P4 的文字胶囊
+            // 只剩**触发源卡**一张（`frozen_chip(` 计数 2 → 1），另有**一张图标徽标**经
+            // `pages::frozen_icon_badge`（下方单独计数）。P6 侧不变（两张，仍文字胶囊）。
             assert_eq!(
                 p4_src.matches("pages::frozen_chip(").count(),
-                2,
-                "P4 的两张卡必须**都**经 `pages::frozen_chip`（内联构造 = 双份口径，禁用）"
+                1,
+                "P4 现只**触发源卡**经 `pages::frozen_chip`（总态卡因 488 宽卡内放不下文字胶囊\
+                 而改走 `frozen_icon_badge`，见 IL29②；内联构造 = 双份口径，仍禁用）。\
+                 若计数变 2，请同时确认 IL29② 的重叠问题已解"
+            );
+            assert_eq!(
+                p4_src.matches("pages::frozen_icon_badge(").count(),
+                1,
+                "总态卡的**图标-only** 角标必须经 `pages::frozen_icon_badge`（同一模块的构造点族）——\
+                 页面里内联建（容器 + 图标两件）即口径分裂，且本段/⑭ 的读回断言全部失锚"
             );
             assert_eq!(
                 p6_src.matches("pages::frozen_chip(").count(),
@@ -6144,6 +6511,427 @@ pub(crate) fn pages_chain() {
             assert!(
                 p4_src.contains("pages::frozen_chip(") && p6_src.contains("pages::frozen_chip("),
                 "两页都必须显式指向**同一个**构造点（不是各自的同名私有函数）"
+            );
+        }
+
+        // ═══ ⑯ U-73（T21c-1）：P4 消防区 + 下钻视图的**离屏渲染**（T-18）+ 版面常量（T-25）═══
+        //
+        // 判据（设计 §15.8）：T-18 = 「P4 各段渲染非空；关键区域语义色；降级态；中文墨量密度；
+        // 导出 PNG」；T-25 = 「总览带两卡间隙 == GAP_MIN(16)、总览带↔滚动区 == GAP_GROUP(16)、
+        // 滚动区↔操作条 == GAP_SECTION(24)、火警卡↔危险按钮 ≥ GAP_DANGER(48)；`ui/**` 零裸尺寸 /
+        // 零裸色值（承既有两张网）」。PNG 导出按本仓**已登记的偏离**（评审 C-④）取 PPM ——
+        // 本用例只断言**像素非空 + 中文墨量密度**（导出链路由 `screen.rs::write_ppm` 与进程级
+        // `offscreen_smoke.rs` 承担）。
+        {
+            // ── 版面常量（T-25；几何从**实测 `coords()`** 读出，不看常量名）──
+            let band_c = p4.band_obj().coords();
+            let state_c = p4.state_card_obj().coords();
+            let fire_c = p4.fire_card_obj().coords();
+            let sc_c = p4.scroll_obj().coords();
+            let bar_c2 = p4.action_bar_obj().coords();
+            assert_eq!(
+                state_c.x2 - state_c.x1 + 1,
+                Dimens::BAND_CARD_W,
+                "联锁总态卡宽 = `Dimens::BAND_CARD_W`（488；UI §6.4.1）"
+            );
+            // ── S-1（T21c-1-r1 复核整改）：卡头三件**互不重叠** ──────────────────────
+            //
+            // IL29② 的产品裁定「角标取图标-only 形态」**成立的全部理由就是"不重叠"** ——
+            // 但此前该不变量只写在注释 / 文档里：把 `pages::FROZEN_BADGE_W` 从 28 改回 192
+            // （即**复现** IL29② 要避免的「标题 + 角标 + latch 胶囊」三件重叠）**测试全绿**
+            // （复核探针 P-F 实证）。本条把它钉住：三件同处卡头一行 ⇒ 判据 = **横向分离**
+            // （`coords()` 是闭区间，`x2` 为最后一个像素列 ⇒ 不重叠 ⟺ 前一件 `x2 <` 后一件 `x1`）。
+            //
+            // **几何口径（两路子断言，互相独立）**：
+            // ① **角标 / latch 胶囊**：读**实测 `coords()`** —— 二者都是显式 `set_size` 的
+            //    容器（`FROZEN_BADGE_W` / `Dimens::CARD_STATUS_W`）⇒ 布局趟后可靠。
+            // ② **标题**：本卡标题是这块卡上**唯一没有显式宽**的标签（`text_label` 之后不
+            //    `set_size`）⇒ 按本文件 P1 的 **I1** 段既有登记「无显式宽度时 `coords()` 返回的
+            //    是**陈旧的 obj 盒**而非绘出的文本外延」；且本用例默认构建**未开 `noto-font`**
+            //    （`Font::of` 走 `fallback()` = montserrat_14）⇒ 那个盒量到的是 **4 个占位框**
+            //    （实测 40×16）而**不是** CJK 文本的 112 px。故标题右缘取「**实测左缘**
+            //    `coords().x1` ＋ **生产字体 `adv_w` 实测宽**」= `title_right`
+            //    （`measured_text_px`，与下方 D-2 列宽判据同一口径；求和为上界、不计 kerning）。
+            //    两路**都断**：① 钉住布局趟里的 obj 盒，② 钉住真机上真正画出来的文本外延。
+            //
+            // **为什么不是"自比式"**：三件的坐标全部取自**布局趟落定后的实测值**，标题宽取自
+            // **字体资产**的 `adv_w`；全式**不含**任何"把 `STATE_FROZEN_X` / `LATCH_CHIP_X`
+            // 再算一遍再与常量比"的项 —— 那种写法在常量本身写错时**恒绿**、零判别力。
+            // 这里只有「实测右缘 < 实测左缘」这一条关系式，外加一条「实测缝 == `GAP_MIN`」。
+            //
+            // **改什么会让本条变红**：把 `pages::FROZEN_BADGE_W` 由 28 加宽（如复原 192）
+            // ⇒ `STATE_FROZEN_X` 左移（218 − W − 16 = 10）、徽标同时撞上标题 ⇒ 第 ①②③ 条红
+            // （**这正是 IL29② 要避免的重叠**：192 的文字胶囊更会直接压住 latch 胶囊）；
+            // 把标题文案改长（越过标题与角标之间的空槽）⇒ 第 ②③ 条红；
+            // 把 latch 胶囊左移 ⇒ 第 ②③④ 条红；改角标落位的缝 ⇒ 第 ⑤ 条红。
+            let title_c = p4.state_title_obj().coords();
+            let badge_c = p4.state_frozen_badge().obj().coords();
+            let latch_c = p4.state_latch_chip_obj().coords();
+            let title_px =
+                measured_text_px(p4_interlock::TEXT_CARD_STATE, TextSlot::SectionTitle.px());
+            let title_right = title_c.x1 + title_px - 1;
+            assert!(
+                title_c.x2 < badge_c.x1,
+                "卡头标题的**布局趟 obj 盒**右缘（实测 x2 = {}）必须 < 冻结角标左缘（实测 x1 = {}）\
+                 —— 否则「标题 ↔ 角标」重叠（IL29②：取 28 px 图标-only 形态的全部理由）",
+                title_c.x2,
+                badge_c.x1
+            );
+            assert!(
+                title_right < badge_c.x1,
+                "卡头标题的**真机文本外延**右缘（实测左缘 {} + `TEXT_CARD_STATE` 在 {} px 档的 \
+                 `adv_w` 和 {} − 1 = {}）必须 < 冻结角标左缘（实测 x1 = {}）—— 这是 IL29② 的\
+                 几何论证直接依赖的那条不变量（标题 112 之后才轮到 174 的角标槽）",
+                title_c.x1,
+                TextSlot::SectionTitle.px(),
+                title_px,
+                title_right,
+                badge_c.x1
+            );
+            assert!(
+                badge_c.x2 < latch_c.x1,
+                "冻结角标右缘（实测 x2 = {}）必须 < latch 胶囊左缘（实测 x1 = {}）—— \
+                 否则「角标 ↔ 胶囊」重叠：192 px 文字胶囊撞的正是这里（IL29②）",
+                badge_c.x2,
+                latch_c.x1
+            );
+            assert!(
+                title_right < latch_c.x1,
+                "标题真机外延右缘（实测 {title_right}）必须 < latch 胶囊左缘（实测 x1 = {}）—— \
+                 卡头三件两两不重叠的传递闭合（标题与胶囊之间还夹着角标槽）",
+                latch_c.x1
+            );
+            assert_eq!(
+                latch_c.x1 - badge_c.x2 - 1,
+                Dimens::GAP_MIN,
+                "冻结角标 ↔ latch 胶囊的缝必须 == `GAP_MIN`(16)（角标 x = 胶囊左缘 − 角标宽 − 缝，\
+                 见 `p4_interlock.rs::STATE_FROZEN_X`；`coords()` 闭区间 ⇒ 缝 = x1 − x2 − 1）"
+            );
+            assert_eq!(
+                fire_c.x1 - state_c.x2 - 1,
+                Dimens::GAP_MIN,
+                "总览带两卡间隙必须 == `GAP_MIN`(16)（T-25）"
+            );
+            assert_eq!(
+                fire_c.y1, band_c.y1,
+                "两卡同排同高（UI §6.4.1「两卡并排」）"
+            );
+            assert_eq!(
+                sc_c.y1 - (band_c.y1 + band_c.y2 - band_c.y1 + 1),
+                Dimens::GAP_GROUP,
+                "总览带 ↔ 滚动区必须 == `GAP_GROUP`(16)（T-25）"
+            );
+            assert_eq!(
+                bar_c2.y1 - (sc_c.y1 + sc_c.y2 - sc_c.y1 + 1),
+                Dimens::GAP_SECTION,
+                "滚动区 ↔ 固定操作条必须 == `GAP_SECTION`(24)（T-25；那 24 px 就是就地原因带）"
+            );
+            // 火警等级卡 ↔ 危险按钮（**纵向**口径；UI §6.4.1 明写"远超 48 px"）
+            let fire_bottom = fire_c.y2 + 1;
+            let danger_top = p4.release_button().button().obj().coords().y1;
+            assert!(
+                danger_top - fire_bottom >= Dimens::GAP_DANGER,
+                "火警等级卡 ↔ 危险按钮必须 ≥ `GAP_DANGER`(48)：实测 {} px",
+                danger_top - fire_bottom
+            );
+            // A4「查看明细」按钮 ≥ TOUCH_MIN×TOUCH_MIN
+            let det_c = p4.a4_detail_button().button().obj().coords();
+            assert!(
+                det_c.x2 - det_c.x1 + 1 >= Dimens::TOUCH_CRITICAL
+                    && det_c.y2 - det_c.y1 + 1 >= Dimens::TOUCH_MIN,
+                "「查看明细」= 200×48 ≥ 键盘/关键操作目标（UI §6.4.1）"
+            );
+            // 下钻表头「状态」列**两个位名都完整可读**（W-2 回归网；T21c-1-r1 订正）
+            //
+            // 判据 = 用**生产字体的 `adv_w`**（口径同 `measured_text_px`；求和为上界、不计
+            // kerning）量**表头那一串**，必须 ≤ 该列宽 `DRILL_COL_STATUS`（328）。旧形态
+            // `状态 · 报警总状态 / 故障总状态` 实测 **342 px** ⇒ 第 2 个位名被 `DOTS` 截成
+            // 「故障总…」；现取紧凑式 `报警总状态/故障总状态`（**249 px**）。
+            //
+            // **改什么会让本条变红**：把列名或分隔空格加回表头串（如 `… · … / …`）⇒
+            // 第 1 条红（342 > 328）；把任一 `BIT_*` 常量改长 / 改短到放不下 ⇒ 第 1 条红；
+            // 把两个位名之一从表头串里删掉 ⇒ 第 2 条红。
+            let head_status = p4_interlock::drill_head_texts()[2].clone();
+            let head_status_w = measured_text_px(&head_status, TextSlot::Weak.px());
+            assert!(
+                head_status_w <= p4_interlock::DRILL_COL_STATUS,
+                "表头「状态」列串 `{head_status}` 实测 {head_status_w} px > 列宽 {} px ⇒ \
+                 第 2 个位名会被 `DOTS` 截断（W-2）",
+                p4_interlock::DRILL_COL_STATUS
+            );
+            assert!(
+                head_status.contains(ui_text::BIT_ALARM_TOTAL)
+                    && head_status.contains(ui_text::BIT_FAULT_TOTAL),
+                "bit12 / bit14 两个位名**逐字**都在表头串内 ⇒ 都完整可读（实测 `{head_status}`）"
+            );
+
+            // ── 数据：catalog + 外设段 + 明细页 ──
+            let (sec, cat) = u73_fire_fixture(3, 3, Some(true), 2.0);
+            p4.set_catalog(&cat);
+            p4.set_periph(&sec);
+            disp.refr_now_for_test();
+
+            // T-18：火警等级卡（三重冗余：文案 + 图标 + 语义色档）
+            assert_eq!(
+                p4.fire_value_text().as_deref(),
+                Some("二级火警"),
+                "枚举文案来自 catalog 的 `enum_labels`（`fire_sys_6`）"
+            );
+            assert_eq!(p4.fire_icon_text().as_deref(), Some("⚠"), "图标通道");
+            assert_eq!(
+                p4.fire_slot(),
+                p4_interlock::fire_level_slot(2.0),
+                "语义色档由值映射（与 p4 的纯函数同源）"
+            );
+            assert_eq!(
+                p4_interlock::fire_slot_color(p4.fire_slot()),
+                Palette::DANGER
+            );
+            // A1：已定义位写字、未定义位显「未定义位 n」
+            let a1_14 = p4.a1_row_text(14).unwrap_or_default();
+            assert!(
+                a1_14.contains("主电故障") && a1_14.contains("活跃"),
+                "A1 第 15 行（bit14 主电故障）= 位名 + 活跃文字，实测 `{a1_14}`"
+            );
+            let a1_15 = p4.a1_row_text(15).unwrap_or_default();
+            assert!(
+                a1_15.contains("未定义位") && a1_15.contains("15"),
+                "A1 第 16 行（bit15）= 「未定义位 15」（**不猜语义**），实测 `{a1_15}`"
+            );
+            // A1 **行数断言**（§15.4「逐位 16 行」；T21c-1-r1 / 评审 W-3②）
+            //
+            // 位行恒 16、**恒从 bit0 起**（通告不占位行）⇒ 两个方向都要锁：
+            // ① 池大小恰 16（`a1_row_count()`）：多一行 = "逐位 16 行"被破坏；少一行 = 末位不可读；
+            // ② 第 0 行是 bit0 的语义（`未定义位 0`），**不是**通告。
+            //
+            // **改什么会让本条变红**：`A1_ROWS` 改成 15/17 ⇒ 第 1 条红；把通告写回第 0 行
+            // （即 `refresh_fire` 里再出现 `(0, Some(n))` 那种分派）⇒ 第 2 条红。
+            assert_eq!(
+                p4.a1_row_count(),
+                p4_interlock::A1_ROWS,
+                "A1 位行数 = `A1_ROWS`(16) —— §15.4「逐位 16 行」"
+            );
+            let a1_0 = p4.a1_row_text(0).unwrap_or_default();
+            assert!(
+                a1_0.contains("未定义位") && a1_0.contains('0'),
+                "A1 第 1 行 = **bit0 的语义**（此夹具下 bit0 未定义 ⇒ 「未定义位 0」）—— \
+                 通告**不得**占用位行（T21c-1-r1；实测 `{a1_0}`）"
+            );
+            assert!(
+                !p4.a1_notice_visible(),
+                "真实数据 ⇒ A1 段顶通告行**不显**（恒留白 ⇒ 位行 y 稳定）"
+            );
+            // A2：值 + 单位
+            assert_eq!(p4.a2_text().as_deref(), Some("250 kPa"));
+            // A3：三段（含「预留」不显 0/1）
+            let a3_0 = p4.a3_row_text(0).unwrap_or_default();
+            assert!(
+                a3_0.contains("干接点触发") && a3_0.contains("复合触发") && a3_0.contains("预留"),
+                "A3 第 1 行三段齐全（含「预留」），实测 `{a3_0}`"
+            );
+            assert!(
+                !a3_0.contains("预留 活跃") && !a3_0.contains("预留 非活跃"),
+                "「预留」**不得**显 0/1 语义"
+            );
+            // A4 汇总（**§15.4 逐字口径**：登记 3 只 / 可读 3 只 / 报警 1 / 故障 1 / 离线 0）
+            //
+            // ⚠️ **T21c-1-r1 订正（评审 W-3①）**：本节曾以**单个空格**分隔五元组，与 §15.4
+            // 原文（含 `/`）不符 ⇒ 现按合同补回。断言同时锁**分隔符个数**（4 个 ` / `）与
+            // **逐字全文**（顺序 + 量词 + 数字）—— 只判 `contains` 抓不到"分隔符退化成空格"。
+            //
+            // **改什么会让本条变红**：把 `.join(" / ")` 换回空格分隔 ⇒ 第 1 条红；
+            // 调换五元组顺序 / 漏掉量词 `只` ⇒ 第 2 条红。
+            let a4 = p4.a4_summary_text().unwrap_or_default();
+            assert_eq!(
+                a4.matches(" / ").count(),
+                4,
+                "A4 汇总行以 ` / ` 分隔**五**元组 ⇒ 恰 4 个分隔符（§15.4 原文），实测 `{a4}`"
+            );
+            assert_eq!(
+                a4,
+                format!(
+                    "{} 3 {} / {} 3 {} / {} 1 / {} 1 / {} 0",
+                    ui_text::REGISTERED,
+                    ui_text::COUNT_UNIT,
+                    ui_text::READABLE,
+                    ui_text::COUNT_UNIT,
+                    ui_text::COUNT_ALARM,
+                    ui_text::COUNT_FAULT,
+                    ui_text::OFFLINE,
+                ),
+                "A4 汇总行**逐字** = §15.4 口径（登记 N 只 / 可读 M 只 / 报警 x / 故障 y / 离线 z）"
+            );
+            let sum = p4.fire_summary();
+            assert_eq!(sum.registered, Some(3));
+            assert_eq!(sum.readable, 3);
+            assert_eq!(sum.alarm, 1, "第 1 只状态字 bit12 活跃");
+            assert_eq!(sum.fault, 1);
+            assert_eq!(sum.offline, 0);
+            assert!(!p4.a4_mismatch_visible(), "N == M ⇒ 无「不一致」提示");
+
+            // 降级：值班侧数据不可用 ⇒ 段级文案（「外设数据不可用」），**不是 0 / 正常**
+            p4.set_periph(&mupc_display_proto::PeripheralsSection::default());
+            assert_eq!(p4.a2_text().as_deref(), Some(ui_text::PERIPH_UNAVAILABLE));
+            // A1：通告落**段顶通告行**（**不静默**），而**位行仍是 bit0..bit15**（W-3② 订正）
+            assert!(
+                p4.a1_notice_visible(),
+                "段级降级 ⇒ A1 段顶通告行**可见**（不得静默）"
+            );
+            assert_eq!(
+                p4.a1_notice_text().as_deref(),
+                Some(ui_text::PERIPH_UNAVAILABLE),
+                "通告行文案 = 段级文案（与 A2 / A4 同一真源）"
+            );
+            assert_eq!(
+                p4.a1_row_count(),
+                p4_interlock::A1_ROWS,
+                "降级态下**位行数不变**（恒 16）—— 通告另占一行，不挤掉 bit0"
+            );
+            let a1_0_down = p4.a1_row_text(0).unwrap_or_default();
+            assert!(
+                a1_0_down.contains("未定义位") && a1_0_down.contains('0'),
+                "降级态下第 1 行**仍是 bit0 的语义**（此夹具 bit0 未定义 ⇒「未定义位 0」）—— \
+                 这是「通告不占位行」的直接判据；实测 `{a1_0_down}`"
+            );
+            assert_eq!(
+                p4.a4_summary_text().as_deref(),
+                Some(ui_text::PERIPH_UNAVAILABLE)
+            );
+            // 恢复
+            p4.set_periph(&sec);
+            disp.refr_now_for_test();
+
+            // ── N != M ⇒ **显式提示**（不得静默裁剪，F21.4 / EX-12）──
+            let (sec_mm, cat_mm) = u73_fire_fixture(5, 3, Some(true), 2.0);
+            p4.set_catalog(&cat_mm);
+            p4.set_periph(&sec_mm);
+            assert!(
+                p4.a4_mismatch_visible(),
+                "登记 5 ≠ 可读 3 ⇒ 必须显式提示不一致（EX-12）"
+            );
+            assert_eq!(
+                p4.a4_mismatch_text().as_deref(),
+                Some(ui_text::REGISTERED_READABLE_MISMATCH)
+            );
+            // ── 钢瓶未配置 ⇒ 「未配置」且**不含 0 kPa**（EDGE-23 / EX-11）──
+            let (sec_cyl, cat_cyl) = u73_fire_fixture(3, 3, Some(false), 0.0);
+            p4.set_catalog(&cat_cyl);
+            p4.set_periph(&sec_cyl);
+            assert_eq!(p4.a2_text().as_deref(), Some(ui_text::NOT_CONFIGURED));
+            assert!(!p4.a2_text().unwrap_or_default().contains("0"));
+            // ── 表外枚举值 ⇒ 「未知」+ 中性色档 ──
+            let (sec_unk, cat_unk) = u73_fire_fixture(3, 3, Some(true), 9.0);
+            p4.set_catalog(&cat_unk);
+            p4.set_periph(&sec_unk);
+            assert_eq!(p4.fire_value_text().as_deref(), Some(ui_text::ENUM_UNKNOWN));
+            assert_eq!(
+                p4_interlock::fire_slot_color(p4.fire_slot()),
+                Palette::TEXT_WEAK,
+                "「未知」= 中性色（**绝不用绿**）"
+            );
+
+            // ── 下钻视图：进入 → 渲染明细 → 收起（**不改 current_page**）──
+            assert!(!p4.drill_open(), "初始态不在下钻");
+            p4.set_fire_page_size(20);
+            p4.show_detail();
+            assert!(p4.drill_open(), "「查看明细」⇒ 进下钻");
+            assert_eq!(p4.fire_page_req(), 1, "首次请求第 1 页");
+            let page = u73_fire_page(3, 20, 1, true, 3);
+            p4.set_fire_page(&page);
+            disp.refr_now_for_test();
+            // ── 新增只读控件 ↔ 危险按钮（§15.4 相邻关系表：「下钻『收起』↔ 危险按钮
+            //    ≥ `GAP_DANGER`(48)」，与 T-25 同族；本断言取**实测**值）──
+            //
+            // **实测口径（T21c-1-r1 订正）**：收起按钮在下钻视图顶部（滚动区首行，
+            // 页内 y = 视口顶 186），高 `TOUCH_MIN`(48) ⇒ 底 = 234；危险按钮 top = 556
+            // ⇒ **322 px**（≥ 48 ✓）。⚠️ 设计 §15.4 该行写「纵向 **316 px**」是按**线框**
+            // 的 y260–308 复算的，实现的视口起点是页内 y186（总览带 162 + `GAP_GROUP` 16 +
+            // 内容区上内边距 8）⇒ 差 6 px，两者都 ≫48。**自报「392 px」复现不出**（参照点
+            // 混用），本断言以**实测 322** 为准并锁死。
+            //
+            // **改什么会让本条变红**：把下钻顶部条移出滚动区顶部 / 改其高 ⇒ 本条红。
+            let collapse_c = p4.drill_collapse_button().button().obj().coords();
+            let danger_top2 = p4.release_button().button().obj().coords().y1;
+            assert_eq!(
+                danger_top2 - (collapse_c.y2 + 1),
+                322,
+                "「收起」↔ 危险按钮实测 **322 px**（≥ `GAP_DANGER`(48) ✓；设计 §15.4 的 \
+                 316 px 系线框口径、自报 392 px 不可复现 ⇒ 以本实测值为准）"
+            );
+            assert!(!p4.drill_fail_visible(), "有数据 ⇒ 不显失败态");
+            assert!(p4.drill_row_visible(0) && p4.drill_row_visible(2));
+            assert!(!p4.drill_row_visible(3), "第 4 行无数据 ⇒ 隐藏（不补空行）");
+            let title = p4.drill_title_text().unwrap_or_default();
+            assert!(
+                title.contains('1') && title.contains('1'),
+                "标题「探测器 · 第 1 / 1 页」，实测 `{title}`"
+            );
+            assert_eq!(
+                p4.drill_head_text(0).as_deref(),
+                Some(ui_text::COL_SEQ),
+                "明细表第 1 列 = 序号"
+            );
+            assert!(p4.drill_head_text(1).as_deref() == Some("地址"));
+            let head2 = p4.drill_head_text(2).unwrap_or_default();
+            assert!(
+                head2.contains(ui_text::BIT_ALARM_TOTAL)
+                    && head2.contains(ui_text::BIT_FAULT_TOTAL),
+                "状态列的表头含两个位名，实测 `{head2}`"
+            );
+            // 第 1 行：序号 / 地址 / 状态（bit12+bit14 活跃）/ 烟雾（拆解）/ 温度
+            assert_eq!(p4.drill_cell_text(0, 0).as_deref(), Some("1"));
+            assert_eq!(p4.drill_cell_text(0, 1).as_deref(), Some("1"));
+            let st12 = p4.drill_cell_text(0, 2).unwrap_or_default();
+            assert!(
+                st12.contains("活跃"),
+                "状态格 = 圆点 + 活跃（双通道），实测 `{st12}`"
+            );
+            assert_eq!(
+                p4.drill_cell_text(0, 4).as_deref(),
+                Some("1.0"),
+                "烟雾 = 高字节 0x0A × 0.1（**展示层拆解**）"
+            );
+            assert_eq!(
+                p4.drill_cell_text(0, 5).as_deref(),
+                Some("\u{2212}12"),
+                "温度 = 低字节 0x2B − 55 = −12 ℃（负号是 U+2212）"
+            );
+            // 分页：末页 ⇒ 「下一页」禁用；首页 ⇒ 「上一页」禁用
+            assert!(p4.drill_prev_disabled(), "首页 ⇒ 上一页 disabled");
+            assert!(
+                p4.drill_next_disabled(),
+                "has_more = false ⇒ 下一页 disabled"
+            );
+            // 收起 ⇒ 回列表（`current_page` 结构性不变：本页代码零路由 API，见 T-20）
+            p4.collapse_detail();
+            assert!(!p4.drill_open(), "「收起」⇒ 退出下钻（F11.3）");
+            // 失败态：端点非 2xx ⇒ 屏上只显本地固定文案 + 重试（R-4）
+            p4.show_detail();
+            p4.set_fire_page_failed();
+            disp.refr_now_for_test();
+            assert_eq!(
+                p4.drill_fail_text().as_deref(),
+                Some(ui_text::DETAIL_UNAVAILABLE)
+            );
+            assert!(p4.drill_fail_visible(), "失败态可见（**不静默**）");
+            assert!(p4.drill_retry_visible(), "失败态给「重试」出路");
+            // 消防源不可用 ⇒ 另一条文案（与「明细不可用」互异）
+            let bad = u73_fire_page(0, 20, 1, false, 0);
+            p4.set_fire_page(&bad);
+            assert_eq!(
+                p4.drill_fail_text().as_deref(),
+                Some(ui_text::FIRE_SOURCE_UNAVAILABLE)
+            );
+            p4.collapse_detail();
+            p4.set_fire_page(&page);
+            disp.refr_now_for_test();
+
+            // ── 中文墨量密度（T-18；§11.1 判据：成片非背景像素）──
+            let painted = sink.borrow().iter().filter(|b| **b != 0).count();
+            assert!(
+                painted > 10_000,
+                "P4 消防区渲染后 sink 应有成片非背景像素（实际 {painted}）—— \
+                 总览带 + 四组 + 下钻共 200+ 个文本件，墨量必须显著"
             );
         }
 
@@ -8375,9 +9163,38 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **为什么不把它并进来**：`App` 的构造需要 LVGL 会话 **+ 控制通道客户端**
         // （`ConsoleClient::new`）⇒ 本链路（只有 `Display` + `Shell`）**建不出 `App`**，
         // 那个区间在这里**测不到**（进程内也起不了第二条 LVGL 线程）。故如实注明而不并账 ——
-        // 真实的常驻对象上限 = **742 + 4 = 746**（若日后新增"能在离屏链路里建出来的"常驻件，
-        // 仍按本预算判）。
-        const SHELL_OBJECT_BUDGET: usize = 742;
+        // 真实的常驻对象上限 = `SHELL_OBJECT_BUDGET` + **4**（若日后新增"能在离屏链路里建出来的"
+        // 常驻件，仍按本预算判）。
+        //
+        // **U-73 / T21c-1-r1 重新实测（2026-09-25）：981** —— 742 → 981 的来源 = **P4 消防区**
+        // （逐条可核，`p4_interlock.rs`）。**账** = 978（T21c-1 首轮实测，**但那一轮把总态卡的
+        // 冻结角标误移除了** —— 评审 F2/F3 的返工项）+ **2**（IL29② 恢复该角标的 **图标-only**
+        // 形态 = 容器 + 图标两件）+ **1**（A1 段顶通告行 = 评审 W-3② 订正：通告独立成行）
+        // = **981**（本用例**实测**兜底）：
+        // | 构件 | 对象数 |
+        // |------|-------|
+        // | 【安全总览带】容器 + 火警等级卡（卡 1 + 色条 1 + 标题 1 + 图标 1 + 文案 1）
+        //   + 总态卡**冻结徽标**（容器 1 + 图标 1；IL29② 的图标-only 形态） | 8 |
+        // | §A1 消防系统状态（卡 1 + 标题 1 + **段顶通告行 1** + **逐位 16 行**） | 19 |
+        // | §A2 灭火瓶压力（卡 + 标题 + 主值） | 3 |
+        // | §A3 探测器触发（卡 + 标题 + 3 行） | 5 |
+        // | §A4 探测器汇总（卡 + 标题 + 汇总行 + 不一致提示 + 「查看明细」按钮 2） | 7 |
+        // | 下钻视图（容器 1 + 标题 1 + 表头 8 + 行区容器 1 + **20 行 × 9 格** 180
+        //   + 上一页/下一页/收起 6 + 页码 1 + 失败文案 1 + 重试 2） | 201 |
+        // | 合计 | **≈243**（其中 §B 联锁区变动件 = 0；其余为既有外壳 + 6 页基线） |
+        //
+        // **为什么是"确需新增"**：§A 四组（F21）与下钻视图（F21.4 的分页明细）都是
+        // **本增量的交付物**，对象数与"逐位 16 行 / 逐只明细"的呈现规格**同构**（设计 §15.4）。
+        // **未做窗口化**（设计 §15.5.3 的"可视行 ×1.5"）⇒ 下钻的 180 个格对象**一次性建齐**；
+        // 这是**已登记的偏差**（`p4_interlock.rs` **IL29⑥**）：薄层**无滚动事件**
+        // （`EventCode` 未镜像 `LV_SCROLL`，见 `pages/mod.rs` 的 R2）⇒ 窗口化在本层
+        // 结构性不可实现（要复用行对象必须先知道滚动位置）。**真机余量须复核**（设计 §15.9
+        // **R-34** / 真机档 D-5：`lv_mem_monitor`）。
+        // **代价已量化**：981 个对象按 LVGL `lv_obj` 量级（≈150–200 B）≈ **150–200 KB**，
+        // 在 `LV_MEM_SIZE = 1 MB` 池内（此前 256 KB 池建到第 4 页即失败的记录见上）。
+        // ⚠️ **余量 ~0.8 %**（账上推算：对象 ≈150–200 KB vs 1 MB 池；**非实测**）⇒ 真机
+        // `lv_mem_monitor` 复核为验收项（设计 §15.9 **R-34** / 真机档 D-5；见 **IL29⑥**）。
+        const SHELL_OBJECT_BUDGET: usize = 981;
         let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         let sh = Shell::new(&home).expect("外壳 + 6 页装配（LVGL_MEM 1 MB）");
         let mounted =
@@ -10181,6 +10998,45 @@ fn p4_static_constraints() {
         );
     }
 
+    // ⑤′ **U-73（T21c-1）新增的两条豁免后门**的计数自证 —— 同 ⑤ 的机制与理由：
+    //     `group_title("…")` / `block_key("…")` 紧跟的字面量会被**豁免**出"上屏候选"走查。
+    //     两处在 P4 **正当**（分组键与块名是**小写 ASCII 机器键**，上屏的是它们查出来的中文），
+    //     但同样可能被误用（把**上屏串**写成 `group_title("…")` ⇒ 静默逃过码表网）⇒ 钉死计数。
+    {
+        let (name, src) = (
+            "ui/pages/p4_interlock.rs",
+            include_str!("pages/p4_interlock.rs"),
+        );
+        let prod = truncate_before_test_module(src, name);
+        assert_eq!(
+            prod.matches("group_title(\"").count(),
+            6,
+            "{name}：`group_title(\"…\")` 必须**恰为 6 处**（新页 5 张卡的分组标题 + 下钻标题 1 处）。\
+             计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是分组键**"
+        );
+        assert_eq!(
+            prod.matches("block_key(\"").count(),
+            12,
+            "{name}：`block_key(\"…\")` 必须**恰为 12 处**（`fire_sys` / `fire_det` 两个块名的\
+             全部查找点）。计数变化 = 有新的字面量被声明为「非屏显」——请逐条复核它**确实是块名**"
+        );
+        // **键确实存在**：本页用到的 6 个分组键都必须在 `GROUP_TITLES` 里有非空标题
+        // （漏一个 ⇒ 屏上那块**没有标题**，属静默降级）。
+        for key in [
+            "fire_level",
+            "fire_sys_status",
+            "fire_cylinder",
+            "fire_trigger",
+            "fire_detector",
+        ] {
+            let t = crate::ui::pages::p4_interlock::group_title(key);
+            assert!(
+                !t.is_empty(),
+                "分组键 `{key}` 在 `GROUP_TITLES` 里没有标题（屏上无处安放）"
+            );
+        }
+    }
+
     let sources: [(&str, &str); 1] = [(
         "ui/pages/p4_interlock.rs",
         include_str!("pages/p4_interlock.rs"),
@@ -11481,4 +12337,927 @@ fn call_args(code: &str, at: usize, name_len: usize) -> Option<(usize, String)> 
     }
     let open = at + name_len + pad + open_rel;
     Some((open, balanced_args(code, open).to_string()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// U-73（T21c-1）新增用例：H-2 / T-23 覆盖率网 + P4 消防的 T-14 / T-15 / T-16 / T-17 /
+// T-19 / T-19b / T-20（**纯逻辑**，不触碰 LVGL ⇒ 可独立并行跑）。
+//
+// 离屏渲染类（T-18）与版面常量类（T-25）落在 `pages_chain` 的 P4 段（那里有 `Display` 会话）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `display-proto::peripherals_labels::ui_text` 的**全部常量**（名 → 值，逐条列出）。
+///
+/// **为什么手工列**：H-2 / T-23 的待查集合必须包含「UI 固定文案常量表」（设计 §15.7.3 的
+/// 第 2–7 行），而 `ui_text` 是**扁平常量模块**（无 `ALL` 数组 ⇒ 无反射可枚举）。手工列表由
+/// **计数自证**（本表的长度钉死）兜住"新增常量忘了进表"的漏项。
+const UI_TEXT_CONSTANTS: [(&str, &str); 55] = [
+    // 站位 / 取值降级（7）
+    ("STATION_OFFLINE", ui_text::STATION_OFFLINE),
+    ("NOT_READ", ui_text::NOT_READ),
+    ("RANGE_ERROR", ui_text::RANGE_ERROR),
+    ("NOT_CONFIGURED", ui_text::NOT_CONFIGURED),
+    ("NAME_UNKNOWN", ui_text::NAME_UNKNOWN),
+    ("DETAIL_UNAVAILABLE", ui_text::DETAIL_UNAVAILABLE),
+    ("UNAVAILABLE", ui_text::UNAVAILABLE),
+    // 站点未启用（2）
+    ("STATION_DISABLED", ui_text::STATION_DISABLED),
+    (
+        "SECTION_STATION_DISABLED",
+        ui_text::SECTION_STATION_DISABLED,
+    ),
+    // 段级降级（5）
+    ("PERIPH_UNAVAILABLE", ui_text::PERIPH_UNAVAILABLE),
+    ("FIRE_SOURCE_UNAVAILABLE", ui_text::FIRE_SOURCE_UNAVAILABLE),
+    ("NO_ACTIVE_ALARM_BIT", ui_text::NO_ACTIVE_ALARM_BIT),
+    (
+        "BMS_ALARM_SOURCE_UNAVAILABLE",
+        ui_text::BMS_ALARM_SOURCE_UNAVAILABLE,
+    ),
+    ("PAGE_DEVICE_AND_PERIPH", ui_text::PAGE_DEVICE_AND_PERIPH),
+    // 位语义（9）
+    ("BIT_UNDEFINED", ui_text::BIT_UNDEFINED),
+    ("BIT_RESERVED", ui_text::BIT_RESERVED),
+    ("BIT_ACTIVE", ui_text::BIT_ACTIVE),
+    ("BIT_INACTIVE", ui_text::BIT_INACTIVE),
+    ("ONLINE", ui_text::ONLINE),
+    ("OFFLINE", ui_text::OFFLINE),
+    ("BIT_ALARM_TOTAL", ui_text::BIT_ALARM_TOTAL),
+    ("BIT_FAULT_TOTAL", ui_text::BIT_FAULT_TOTAL),
+    ("BIT_COMM_STATE", ui_text::BIT_COMM_STATE),
+    // 枚举文案（9）
+    ("ENUM_NORMAL", ui_text::ENUM_NORMAL),
+    ("ENUM_FIRE_LEVEL1", ui_text::ENUM_FIRE_LEVEL1),
+    ("ENUM_FIRE_LEVEL2", ui_text::ENUM_FIRE_LEVEL2),
+    ("ENUM_FIRE_UNDEFINED", ui_text::ENUM_FIRE_UNDEFINED),
+    ("ENUM_FIRE_EMG_START", ui_text::ENUM_FIRE_EMG_START),
+    ("ENUM_FIRE_EMG_STOP", ui_text::ENUM_FIRE_EMG_STOP),
+    ("ENUM_UNKNOWN", ui_text::ENUM_UNKNOWN),
+    ("ENUM_STOPPED", ui_text::ENUM_STOPPED),
+    ("ENUM_RUNNING", ui_text::ENUM_RUNNING),
+    // 时刻与提示（12；**含 T21c-1 补的三条**：COUNT_UNIT / REGISTERED_READABLE_MISMATCH / COL_SEQ）
+    ("LAST_OK", ui_text::LAST_OK),
+    ("LAST_UPDATE", ui_text::LAST_UPDATE),
+    ("REGISTERED", ui_text::REGISTERED),
+    ("READABLE", ui_text::READABLE),
+    ("COUNT_ALARM", ui_text::COUNT_ALARM),
+    ("COUNT_FAULT", ui_text::COUNT_FAULT),
+    ("COUNT_UNIT", ui_text::COUNT_UNIT),
+    (
+        "REGISTERED_READABLE_MISMATCH",
+        ui_text::REGISTERED_READABLE_MISMATCH,
+    ),
+    ("COL_SEQ", ui_text::COL_SEQ),
+    ("CATALOG_STALE", ui_text::CATALOG_STALE),
+    ("TRUNCATED_TO", ui_text::TRUNCATED_TO),
+    ("ENUM_PENDING_VENDOR", ui_text::ENUM_PENDING_VENDOR),
+    // 分页与下钻（8）
+    ("VIEW_DETAIL", ui_text::VIEW_DETAIL),
+    ("VIEW_ALL", ui_text::VIEW_ALL),
+    ("PREV_PAGE", ui_text::PREV_PAGE),
+    ("NEXT_PAGE", ui_text::NEXT_PAGE),
+    ("COLLAPSE", ui_text::COLLAPSE),
+    ("RETRY", ui_text::RETRY),
+    ("PAGE_PREFIX", ui_text::PAGE_PREFIX),
+    ("PAGE_SUFFIX", ui_text::PAGE_SUFFIX),
+    // 版本降级（3）
+    ("VERSION_MISMATCH", ui_text::VERSION_MISMATCH),
+    ("FLASH_SAME_VERSION", ui_text::FLASH_SAME_VERSION),
+    ("CHANNEL_DOWN_RETRYING", ui_text::CHANNEL_DOWN_RETRYING),
+];
+
+/// **H-2 / T-23 覆盖率网**（设计 §15.7.2 H-2 / §15.8 T-23）。
+///
+/// 待查集合 = ① `ui/**` + `state.rs` 的既有字面量（**由既有**
+/// [`ui_texts_covered_by_font_cmap`]**承担**，本条不重扫）∪ ② `display-proto` 短标签表的
+/// **全部 `label` / `unit`** ∪ ③ **UI 固定文案常量表**（[`UI_TEXT_CONSTANTS`]，含 §15.7.3 的
+/// 七行）∪ ④ **分组标题**（`GROUP_TITLES`，按**字面量**：33 项含全角括号与数字 10 / 20 / 288）
+/// ∪ ⑤ `display-proto` 的**消防锁定表**（位名 / 枚举 / 拆解标签与单位 —— §15.3.2 / §15.4）。
+///
+/// 基线 = [`load_font_cmap`]（**与既有那条网同一份读取逻辑**：有 `.c` 产物取 10 档交集并做
+/// 漂移检测，无产物取入库清单 `lv_font_cmap.txt`；两者皆缺才跳过）—— **不另造第二套扫描器**。
+///
+/// **失败时打印缺失码位集合**（`U+XXXX` + 出处），便于**直接补** `font_subset_charset.txt`
+/// 并重跑 `gen_fonts.sh`（§15.7 的收口口径）。
+///
+/// **为什么必须有它**：H-2 的使命是消除 F-5「运行时字符串扫不到」的盲区 —— 短标签表 /
+/// 分组标题 / 固定文案在 T21a 之后**都在 `display-proto` 的源码里**，但**本 crate 的既有
+/// 扫描面（`ui/**` + `state.rs`）看不到它们**（不在清单内）⇒ 本条把它们**逐字**拉进同一张
+/// 码表网。
+#[test]
+fn h2_peripheral_texts_are_covered_by_font_cmap() {
+    let Some(cmap) = load_font_cmap() else {
+        return;
+    };
+    // 缺失码位 → 出处（去重后按码位升序打印）。
+    let mut missing: std::collections::BTreeMap<char, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut push = |s: &str, from: String| {
+        for ch in s.chars() {
+            if !ch.is_whitespace() && !cmap.contains(&ch) {
+                missing.entry(ch).or_default().insert(from.clone());
+            }
+        }
+    };
+
+    // ② 短标签表（每条 label + unit）
+    let mut labels = 0usize;
+    for (label, unit) in mupc_display_proto::peripherals_labels::PERIPH_LABELS {
+        push(label, format!("短标签 `{label}`"));
+        if let Some(u) = unit {
+            push(u, format!("单位 `{u}`（随 `{label}`）"));
+        }
+        labels += 1;
+    }
+    assert_eq!(labels, 447, "短标签表行数 = 白名单 447（W-4 / H-3）");
+
+    // ④ 分组标题（**按字面量** —— 全角括号与数字 10 / 20 / 288 都是字面量的一部分）
+    for (key, title) in GROUP_TITLES {
+        push(title, format!("分组标题 `{key}`"));
+    }
+    assert_eq!(GROUP_TITLES.len(), 33, "§15.7.3 按字面量 33 项（去重 31）");
+    assert!(
+        GROUP_TITLES.iter().any(|(_, t)| t.contains('（')),
+        "分组标题集合必须含全角括号字面量（`告警位（20）` 等）—— 否则本条的缺口核算失真"
+    );
+
+    // ③ UI 固定文案常量表（含 T21c-1 补的三条）
+    assert_eq!(
+        UI_TEXT_CONSTANTS.len(),
+        55,
+        "`ui_text` 常量表长度自证：新增常量必须同步进本表（否则本条会漏扫它）"
+    );
+    // **常量表完备性自证**（比"长度 == 55"强得多）：`ui_text` 模块里**每一条** `pub const`
+    // 都必须在 [`UI_TEXT_CONSTANTS`] 里 ⇒ 「加了新常量却忘了进表」⇒ **本条亮红**
+    // （否则本表的"全覆盖"只是自说自话 —— 那正是 H-2 要防的静默漏判形态）。
+    {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../display-proto/src/peripherals_labels.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读 `{}` 失败：{e}", path.display()));
+        let start = src.find("pub mod ui_text {").expect("`ui_text` 模块声明");
+        let body = &src[start..];
+        let end = body.find("\n}").expect("`ui_text` 模块闭合");
+        let declared = body[..end].matches("pub const ").count();
+        assert_eq!(
+            declared,
+            UI_TEXT_CONSTANTS.len(),
+            "`display-proto::peripherals_labels::ui_text` 模块里声明了 {declared} 条 `pub const`，\
+             而 [`UI_TEXT_CONSTANTS`] 只列了 {} 条 ⇒ **新增的常量没进本表**（本条会漏扫它的字形）。\
+             请把它补进本表（并在需要时同步字库）。",
+            UI_TEXT_CONSTANTS.len()
+        );
+    }
+    for (name, text) in UI_TEXT_CONSTANTS {
+        push(text, format!("ui_text::{name}"));
+    }
+
+    // ⑤ display-proto 的消防锁定表（位名 / 枚举 / 拆解标签与单位）
+    for (_, t) in mupc_display_proto::peripherals_labels::FIRE_LEVEL_ENUM {
+        push(t, "FIRE_LEVEL_ENUM".to_string());
+    }
+    for (_, t) in mupc_display_proto::peripherals_labels::FIRE_SYS_BITS {
+        push(t, "FIRE_SYS_BITS".to_string());
+    }
+    for (_, t) in mupc_display_proto::peripherals_labels::FIRE_TRIGGER_BITS {
+        push(t, "FIRE_TRIGGER_BITS".to_string());
+    }
+    for (_, t) in mupc_display_proto::peripherals_labels::FIRE_DETECTOR_STATE_BITS {
+        push(t, "FIRE_DETECTOR_STATE_BITS".to_string());
+    }
+    for t in mupc_display_proto::peripherals_labels::FIRE_DET_TEMPLATE_LABELS {
+        push(t, "FIRE_DET_TEMPLATE_LABELS".to_string());
+    }
+    for d in mupc_display_proto::peripherals_labels::data1_decompose() {
+        push(&d.label, "data1_decompose.label".to_string());
+        if let Some(u) = &d.unit {
+            push(u, "data1_decompose.unit".to_string());
+        }
+    }
+
+    // **扫描面自证**：待查集合必须真的捞到东西（否则"全覆盖"是构造性全绿）。
+    for must in [
+        "未取数",
+        "消防系统状态",
+        "登记数与可读数不一致",
+        "灭火瓶压力",
+    ] {
+        assert!(
+            UI_TEXT_CONSTANTS.iter().any(|(_, t)| *t == must)
+                || GROUP_TITLES.iter().any(|(_, t)| *t == must)
+                || mupc_display_proto::peripherals_labels::PERIPH_LABELS
+                    .iter()
+                    .any(|(l, _)| *l == must),
+            "扫描面自证失败：待查集合里没有 `{must}` —— 本条会构造性全绿"
+        );
+    }
+
+    let detail = missing
+        .iter()
+        .map(|(ch, froms)| {
+            format!(
+                "U+{:04X} `{ch}` ← {}",
+                *ch as u32,
+                froms.iter().cloned().collect::<Vec<_>>().join(" / ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n          ");
+    assert!(
+        missing.is_empty(),
+        "H-2 / T-23：以下码位**不在生成字体 cmap 内** ⇒ 真机豆腐块（共 {} 个码位）：\n          {detail}\n\
+         处置：把缺失字符并入 `mupc/crates/local-display/fonts/font_subset_charset.txt`\
+         （单行、无换行、无注释）→ 重跑 `fonts/gen_fonts.sh` → 同批提交 `lv_font_cmap.txt`\
+         （+ `lv_font_metrics.txt` 若变）。详见设计 §15.7。",
+        missing.len()
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// U-73（T21c-1）离屏用例的**数据夹具**：一个「已配置 / 在线」的 fire 站 + 对应 catalog
+// + 一页探测器明细。**全部照契约构造**（`PeriphView` / catalog 的位语义 / 枚举 / 拆解均按
+// §15.3.2 的语义填）—— **不用生产端代码**（那属 T21b；本 crate 也不得依赖 `mupc-core-bin`）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 消防站 `fire_sys` 块里第 1 只探测器的首点（`at` 8..13）。
+const U73_FIRE_SYS_FIRST_DET_AT: u16 = 8;
+
+/// 位语义：按 `FIRE_SYS_BITS` 的 6 个已定义位 + 10 个 `defined: false` 构造 16 位。
+fn u73_fire_sys_bits() -> Vec<mupc_display_proto::BitMeta> {
+    (0..16u8)
+        .map(|i| {
+            let hit = mupc_display_proto::peripherals_labels::FIRE_SYS_BITS
+                .iter()
+                .find(|(idx, _)| *idx == i);
+            mupc_display_proto::BitMeta {
+                index: i,
+                label: hit.map(|(_, t)| (*t).to_string()).unwrap_or_default(),
+                class: if hit.is_some() {
+                    mupc_display_proto::CatalogBitClass::Alarm
+                } else {
+                    mupc_display_proto::CatalogBitClass::Reserved
+                },
+                defined: hit.is_some(),
+                active_text: None,
+                // R-41 追认前**无生产者** ⇒ 一律 false（T-19b 的判据面）
+                inverted: false,
+            }
+        })
+        .collect()
+}
+
+/// 探测器状态整字的 16 位：只在 `FIRE_DETECTOR_STATE_BITS`（{12, 14}）上 `defined = true`。
+fn u73_det_state_bits() -> Vec<mupc_display_proto::BitMeta> {
+    (0..16u8)
+        .map(|i| {
+            let hit = mupc_display_proto::peripherals_labels::FIRE_DETECTOR_STATE_BITS
+                .iter()
+                .find(|(idx, _)| *idx == i);
+            mupc_display_proto::BitMeta {
+                index: i,
+                label: hit.map(|(_, t)| (*t).to_string()).unwrap_or_default(),
+                class: if hit.is_some() {
+                    mupc_display_proto::CatalogBitClass::State
+                } else {
+                    mupc_display_proto::CatalogBitClass::Reserved
+                },
+                defined: hit.is_some(),
+                active_text: None,
+                inverted: false,
+            }
+        })
+        .collect()
+}
+
+/// 一个 catalog 点（标签 / 单位 / 分组键由 `display-proto` 的短标签表给出 —— **与生产同源**）。
+fn u73_cat_pt(
+    role: mupc_display_proto::PeriphRole,
+    block: &str,
+    at: u16,
+    bits: Vec<mupc_display_proto::BitMeta>,
+    enum_labels: Vec<(u16, String)>,
+    decompose: Vec<mupc_display_proto::Decompose>,
+) -> mupc_display_proto::CatalogPoint {
+    mupc_display_proto::CatalogPoint {
+        at,
+        label: mupc_display_proto::peripherals_labels::label_for(role, block, at)
+            .unwrap_or_default()
+            .to_string(),
+        unit: mupc_display_proto::peripherals_labels::unit_for(role, block, at).map(str::to_string),
+        decimals: 0,
+        bits,
+        enum_labels,
+        decompose,
+        group: mupc_display_proto::group_of(role, block, at).to_string(),
+    }
+}
+
+/// 消防夹具：`(外设段, catalog)`。
+///
+/// - `registered`：catalog 的 `fire_det_count`（登记只数）；
+/// - `readable_units`：帧内**实际携带**的探测器只数（第 1 只在 `fire_sys` 的 at 8..13，
+///   其余在 `fire_det`）—— `registered != readable_units` 即 `N != M` 场景；
+/// - `cylinder`：`fire_sys_2` 的「已配置」标志；
+/// - `level`：火警等级的**原始值**（帧内 `fire_sys_6`）。
+fn u73_fire_fixture(
+    registered: u16,
+    readable_units: usize,
+    cylinder: Option<bool>,
+    level: f64,
+) -> (
+    mupc_display_proto::PeripheralsSection,
+    mupc_display_proto::PeripheralCatalog,
+) {
+    use mupc_display_proto::{
+        CatalogBlock, CatalogBlockKind, CatalogStation, Decompose, FieldFlag, PeriphRole,
+        PeripheralBlock, PeripheralCatalog, PeripheralStation, PeripheralsSection, PointValue,
+    };
+
+    let pt = |at: u16, v: Option<f64>| PointValue {
+        at,
+        v,
+        flag: if v.is_some() {
+            FieldFlag::Valid
+        } else {
+            FieldFlag::NotRead
+        },
+    };
+
+    // ── 帧内 `fire_sys`（at 1..13）──
+    // at1 = 系统状态字（bit14 主电故障）；at6 = 火警等级；at7 = 登记数；
+    // at8..13 = 第 1 只探测器（状态字 bit12+bit14 活跃；数据 1 = 0x0A2B ⇒ 烟雾 1.0 dB/M、温度 −12 ℃）
+    let mut sys_values = vec![
+        pt(1, Some(f64::from(1u16 << 14))),
+        pt(2, Some(250.0)),
+        pt(3, Some(3.0)),
+        pt(4, Some(0.0)),
+        pt(5, Some(0.0)),
+        pt(6, Some(level)),
+        pt(7, Some(f64::from(registered))),
+        pt(U73_FIRE_SYS_FIRST_DET_AT, Some(1.0)), // +0 地址
+        pt(U73_FIRE_SYS_FIRST_DET_AT + 1, Some(f64::from(0x5000u16))), // +1 状态
+        pt(U73_FIRE_SYS_FIRST_DET_AT + 2, Some(f64::from(0x0A2Bu16))), // +2 数据 1
+        pt(U73_FIRE_SYS_FIRST_DET_AT + 3, Some(3.0)), // +3 CO
+        pt(U73_FIRE_SYS_FIRST_DET_AT + 4, Some(4.0)), // +4 VOC
+        pt(U73_FIRE_SYS_FIRST_DET_AT + 5, Some(5.0)), // +5 H2
+    ];
+    sys_values.sort_by_key(|p| p.at);
+
+    // 第 2..readable_units 只在 `fire_det`（每只 6 点）
+    let mut det_values: Vec<PointValue> = Vec::new();
+    if readable_units >= 2 {
+        for k in 2..=readable_units {
+            let base = 6 * (k as u16 - 2);
+            det_values.push(pt(base + 1, Some(k as f64))); // 地址
+            det_values.push(pt(base + 2, Some(0.0))); // 状态
+            det_values.push(pt(base + 3, Some(55.0))); // 数据 1 ⇒ 温度 0 ℃
+            det_values.push(pt(base + 4, Some(0.0)));
+            det_values.push(pt(base + 5, Some(0.0)));
+            det_values.push(pt(base + 6, Some(0.0)));
+        }
+    }
+
+    let sec = PeripheralsSection {
+        ts_ms: 1_000,
+        available: true,
+        catalog_rev: 7,
+        truncated: Vec::new(),
+        stations: vec![PeripheralStation {
+            id: "fire".to_string(),
+            role: PeriphRole::Fire,
+            online: true,
+            last_ok_ms: 900,
+            cylinder_configured: cylinder,
+            blocks: vec![
+                PeripheralBlock {
+                    name: "fire_sys".to_string(),
+                    ts_ms: 900,
+                    renames: vec![(7, "fire_det_count".to_string())],
+                    values: sys_values,
+                },
+                PeripheralBlock {
+                    name: "fire_det".to_string(),
+                    ts_ms: 900,
+                    renames: Vec::new(),
+                    values: det_values,
+                },
+            ],
+        }],
+    };
+
+    // ── catalog：与帧同构的元数据（标签 / 单位取自短标签表；位语义 / 枚举 / 拆解按 §15.3.2）──
+    let mut sys_points: Vec<_> = Vec::new();
+    for at in 1..=13u16 {
+        let bits = match at {
+            1 => u73_fire_sys_bits(),
+            9 => u73_det_state_bits(),
+            _ => Vec::new(),
+        };
+        let enums: Vec<(u16, String)> = if at == 6 {
+            mupc_display_proto::peripherals_labels::FIRE_LEVEL_ENUM
+                .iter()
+                .map(|(v, t)| (*v, (*t).to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let dec: Vec<Decompose> = if at == 10 {
+            mupc_display_proto::peripherals_labels::data1_decompose()
+        } else {
+            Vec::new()
+        };
+        sys_points.push(u73_cat_pt(
+            PeriphRole::Fire,
+            "fire_sys",
+            at,
+            bits,
+            enums,
+            dec,
+        ));
+    }
+    let mut det_points: Vec<_> = Vec::new();
+    for at in 1..=6u16 {
+        let dec: Vec<Decompose> = if at == 3 {
+            mupc_display_proto::peripherals_labels::data1_decompose()
+        } else {
+            Vec::new()
+        };
+        let bits = if at == 2 {
+            u73_det_state_bits()
+        } else {
+            Vec::new()
+        };
+        det_points.push(u73_cat_pt(
+            PeriphRole::Fire,
+            "fire_det",
+            at,
+            bits,
+            Vec::new(),
+            dec,
+        ));
+    }
+    let cat = PeripheralCatalog {
+        rev: 7,
+        generated_ms: 1_000,
+        stations: vec![CatalogStation {
+            id: "fire".to_string(),
+            role: PeriphRole::Fire,
+            enabled: true,
+            blocks: vec![
+                CatalogBlock {
+                    name: "fire_sys".to_string(),
+                    kind: CatalogBlockKind::Scalar,
+                    renames: vec![(7, "fire_det_count".to_string())],
+                    points: sys_points,
+                },
+                CatalogBlock {
+                    name: "fire_det".to_string(),
+                    kind: CatalogBlockKind::Scalar,
+                    renames: Vec::new(),
+                    points: det_points,
+                },
+            ],
+        }],
+    };
+    (sec, cat)
+}
+
+/// 一页探测器明细（字段按 §15.3.2 的 `FireDetectorItem` 填；第 1 只 bit12 + bit14 活跃）。
+fn u73_fire_page(
+    total: u16,
+    page_size: u32,
+    page: u32,
+    available: bool,
+    items: u16,
+) -> mupc_display_proto::FireDetectorPage {
+    use mupc_display_proto::{FieldFlag, FireDetectorItem, FireDetectorPage, PointValue};
+    let v = |x: f64| PointValue {
+        at: 1,
+        v: Some(x),
+        flag: FieldFlag::Valid,
+    };
+    FireDetectorPage {
+        page,
+        page_size,
+        total: Some(total),
+        expanded: total,
+        has_more: page * page_size < u32::from(total),
+        available,
+        items: (1..=items)
+            .map(|i| FireDetectorItem {
+                index: i,
+                addr: v(f64::from(i)),
+                state: v(if i == 1 { f64::from(0x5000u16) } else { 0.0 }),
+                data1: v(f64::from(0x0A2Bu16)),
+                co: v(3.0),
+                voc: v(4.0),
+                h2: v(5.0),
+            })
+            .collect(),
+    }
+}
+
+/// 构造一个 `CatalogPoint` 夹具（T-14 / T-15 用）。
+fn u73_cat_point(
+    label: &str,
+    unit: Option<&str>,
+    decimals: u8,
+) -> mupc_display_proto::CatalogPoint {
+    mupc_display_proto::CatalogPoint {
+        at: 1,
+        label: label.to_string(),
+        unit: unit.map(str::to_string),
+        decimals,
+        ..Default::default()
+    }
+}
+
+/// **T-14**：`MissingReason` 各语义的字符串**两两互异**；消防钢瓶 `Some(false)` ⇒「未配置」
+/// 且**忽略 `v`**（断言屏上文本**不含 `0 kPa`**）；站级态（情形 ⑦）**不塞进点级枚举**。
+#[test]
+fn t14_missing_reasons_are_pairwise_distinct_and_cylinder_ignores_value() {
+    use crate::state::{cylinder_missing, dash_badge, MissingReason, PeriphView, StationState};
+    use mupc_display_proto::{FieldFlag, PointValue};
+
+    // ① 六态齐全且**两两互异**
+    assert_eq!(MissingReason::ALL.len(), 6, "六态（§15.6.2 的代码块）");
+    let texts: Vec<&str> = MissingReason::ALL.iter().map(|m| m.text()).collect();
+    for i in 0..texts.len() {
+        for j in (i + 1)..texts.len() {
+            assert_ne!(
+                texts[i], texts[j],
+                "MissingReason 的文案必须两两互异（T-14）：第 {i} / {j} 项都是 `{}`",
+                texts[i]
+            );
+        }
+    }
+    // ② 与既有 `dash_badge` **同一语义同一串**（不另抄一份）
+    assert_eq!(
+        MissingReason::NotRead.text(),
+        dash_badge(FieldFlag::NotRead)
+    );
+    assert_eq!(
+        MissingReason::RangeError.text(),
+        dash_badge(FieldFlag::RangeError)
+    );
+    assert_eq!(
+        MissingReason::StationOffline.text(),
+        ui_text::STATION_OFFLINE
+    );
+
+    // ③ `cylinder_configured == Some(false)` ⇒ 「未配置」+ 忽略 v（**不含 `0 kPa`**）
+    let pv = PointValue {
+        at: 2,
+        v: Some(0.0),
+        flag: FieldFlag::Valid,
+    };
+    let meta = u73_cat_point("灭火瓶压力", Some("kPa"), 0);
+    let mut view = PeriphView::derive(StationState::Online, &pv, Some(&meta));
+    assert_eq!(view.value, Some(0.0), "未覆盖前按值正常展示");
+    view.apply_cylinder(Some(false));
+    assert_eq!(view.missing, Some(MissingReason::NotConfigured));
+    assert_eq!(view.missing_text(), Some(ui_text::NOT_CONFIGURED));
+    assert!(
+        view.value.is_none(),
+        "「未配置」⇒ **忽略 `v`**（值须被清掉）"
+    );
+    let (text, slot) = crate::ui::pages::p4_interlock::a2_display(Some(&view), None, false);
+    assert_eq!(text, ui_text::NOT_CONFIGURED);
+    assert!(
+        !text.contains('0') && !text.contains("kPa"),
+        "「未配置」行的屏上文本**不得**含 `0` / `kPa`（EDGE-23 / EX-11）：`{text}`"
+    );
+    assert_eq!(slot, 1, "「未配置」取弱注档（32 px `text_weak`）");
+
+    // ④ `Some(true)` ⇒ 按值正常展示（带单位）—— 与 ③ 成对照
+    let mut ok = PeriphView::derive(StationState::Online, &pv, Some(&meta));
+    ok.apply_cylinder(Some(true));
+    let (text, slot) = crate::ui::pages::p4_interlock::a2_display(Some(&ok), None, false);
+    assert_eq!(text, "0 kPa", "已配置 ⇒ 按值 + 单位展示");
+    assert_eq!(slot, 0);
+
+    // ⑤ `None`（不可得）⇒ **不臆造**"未配置"
+    assert_eq!(cylinder_missing(None), None);
+    assert_eq!(cylinder_missing(Some(true)), None);
+
+    // ⑥ 站离线 ⇒ 点级「站离线」；站**未启用**（Disabled）⇒ **无点级原因**（由段级文案承担）
+    let offline = PeriphView::derive(StationState::Offline, &pv, Some(&meta));
+    assert_eq!(offline.missing, Some(MissingReason::StationOffline));
+    assert!(offline.value.is_none(), "站离线 ⇒ 不保留旧值");
+    let disabled = PeriphView::derive(StationState::Disabled, &pv, Some(&meta));
+    assert_eq!(
+        disabled.missing, None,
+        "「未启用」是**站级**语义，不塞进点级枚举"
+    );
+    assert_eq!(
+        StationState::Disabled.section_text(),
+        Some(ui_text::SECTION_STATION_DISABLED)
+    );
+    assert_ne!(
+        ui_text::STATION_DISABLED,
+        ui_text::STATION_OFFLINE,
+        "「未启用」≠「站离线」（R-3 裁定 / §15.6.2 ⑦）"
+    );
+    assert_ne!(
+        ui_text::SECTION_STATION_DISABLED,
+        ui_text::PERIPH_UNAVAILABLE,
+        "「站点未启用」≠「外设数据不可用」（单站缺席 vs 整段源不可得）"
+    );
+
+    // ⑦ catalog 未取到 ⇒ **只有名称槽降级**（值照常展示，§15.3.1）
+    let no_cat = PeriphView::derive(StationState::Online, &pv, None);
+    assert_eq!(
+        no_cat.value,
+        Some(0.0),
+        "缺 catalog **不影响**值展示（按点名）"
+    );
+    assert_eq!(no_cat.missing, None);
+    assert_eq!(no_cat.name_missing(), Some(MissingReason::NameUnavailable));
+    assert_eq!(no_cat.label_text(), ui_text::NAME_UNKNOWN);
+}
+
+/// **T-15**：火警等级 6 值文案齐全（值域出处 = PRD F21 展示表）＋ **表外值 ⇒ 「未知」**
+/// （**绝不落「正常」**）＋ catalog 路径与回退路径**各断言一次** ＋ 语义色档（未知 ⇒ 中性）。
+#[test]
+fn t15_fire_level_is_complete_and_out_of_table_is_unknown() {
+    use crate::state::{fire_level_text, fire_level_text_static};
+    use crate::ui::pages::p4_interlock::{fire_level_slot, fire_slot_color};
+
+    // ① 回退路径（无 catalog ⇒ 用 display-proto 的锁定表）：六值齐全
+    for (v, t) in mupc_display_proto::peripherals_labels::FIRE_LEVEL_ENUM {
+        assert_eq!(fire_level_text_static(f64::from(v)), t, "值 {v}");
+        assert_eq!(
+            fire_level_text(f64::from(v), &[]),
+            t,
+            "空 enum_labels ⇒ 回退锁定表"
+        );
+    }
+    // ② 表外值 ⇒ 「未知」且**不等于「正常」**
+    assert_eq!(fire_level_text_static(6.0), ui_text::ENUM_UNKNOWN);
+    assert_ne!(fire_level_text_static(6.0), ui_text::ENUM_NORMAL);
+    assert_eq!(fire_level_text_static(f64::NAN), ui_text::ENUM_UNKNOWN);
+    assert_eq!(fire_level_text(6.0, &[]), ui_text::ENUM_UNKNOWN);
+
+    // ③ catalog 路径（运行时真源优先）
+    let labels: Vec<(u16, String)> = mupc_display_proto::peripherals_labels::FIRE_LEVEL_ENUM
+        .iter()
+        .map(|(v, t)| (*v, t.to_string()))
+        .collect();
+    for (v, t) in &labels {
+        assert_eq!(fire_level_text(f64::from(*v), &labels), *t);
+    }
+    assert_eq!(
+        fire_level_text(99.0, &labels),
+        ui_text::ENUM_UNKNOWN,
+        "catalog 有表 ⇒ 表外值仍显「未知」（**绝不落「正常」**）"
+    );
+
+    // ④ 语义色档：**未知 / 未定义 ⇒ 中性，绝不用绿**（F21.2 / EX-10）
+    assert_eq!(
+        fire_slot_color(fire_level_slot(0.0)),
+        Palette::OK,
+        "正常 = 绿"
+    );
+    assert_eq!(
+        fire_slot_color(fire_level_slot(6.0)),
+        Palette::TEXT_WEAK,
+        "表外值 = 中性色"
+    );
+    assert_eq!(
+        fire_slot_color(fire_level_slot(3.0)),
+        Palette::TEXT_WEAK,
+        "「未定义」（值 3 预留）同样是中性色"
+    );
+    assert_ne!(fire_slot_color(fire_level_slot(6.0)), Palette::OK);
+    assert_eq!(
+        fire_slot_color(fire_level_slot(2.0)),
+        Palette::DANGER,
+        "二级火警 = 危险红"
+    );
+}
+
+/// **T-16**：版本不匹配 vs 通道断开的**文案字符串不相等**；`Incompatible` **粘性**
+/// （须**一次成功帧**才清除）；`got / expected` 数值正确落进屏侧状态。
+#[test]
+fn t16_version_mismatch_is_distinct_from_channel_down_and_sticky() {
+    use crate::state::{ChannelStatus, DisplayState, ScreenMode};
+
+    // ① 两条降级的文案**不相等**（现场排障要能区分"刷固件"与"查进程"）
+    assert_ne!(ui_text::VERSION_MISMATCH, ui_text::CHANNEL_DOWN_RETRYING);
+    assert_ne!(ui_text::FLASH_SAME_VERSION, ui_text::CHANNEL_DOWN_RETRYING);
+
+    // ② 归一：**只有** `Error::ProtoVersion` 才是版本不匹配
+    assert_eq!(
+        crate::channel::version_mismatch(&crate::Error::ProtoVersion("u".into(), 2, 3)),
+        Some((2, 3))
+    );
+    assert_eq!(
+        crate::channel::version_mismatch(&crate::Error::Timeout("u".into())),
+        None,
+        "超时**不是**版本问题（不得点亮「版本不匹配」）"
+    );
+    assert_eq!(
+        crate::channel::version_mismatch(&crate::Error::HttpStatus(503, "u".into())),
+        None
+    );
+
+    // ③ 粘性：记入后**即使有旧成功帧 + 在窗内**，通道态仍是 `Incompatible`
+    let mut st = DisplayState::new();
+    st.record_success(frame_healthy(), 1_000);
+    assert_eq!(st.channel_status(1_000), ChannelStatus::Connected);
+    st.record_incompatible(2, 3, 1_100);
+    assert_eq!(
+        st.channel_status(1_100),
+        ChannelStatus::Incompatible {
+            got: 2,
+            expected: 3
+        },
+        "got / expected 数值必须原样落到屏侧状态"
+    );
+    assert_eq!(
+        st.screen_mode(1_100),
+        ScreenMode::VersionMismatch {
+            got: 2,
+            expected: 3
+        }
+    );
+    // 后续失败**不清除**粘性态（版本不匹配是部署态，不会因一次超时消失）
+    st.record_fail(1_200);
+    st.record_fail(5_000);
+    assert_eq!(
+        st.channel_status(5_000),
+        ChannelStatus::Incompatible {
+            got: 2,
+            expected: 3
+        },
+        "粘性：失败不清除（否则屏面会在两种降级之间抖动）"
+    );
+    // ④ **一次成功帧**才清除
+    st.record_success(frame_healthy(), 5_100);
+    assert_eq!(st.channel_status(5_100), ChannelStatus::Connected);
+    assert_eq!(st.incompatible(), None);
+    // ⑤ 版本不匹配态下 `hmi_channel` 落「未知」（**不得**落「已连接」）
+    let mut st2 = DisplayState::new();
+    st2.record_incompatible(3, 4, 0);
+    assert_eq!(
+        crate::state::hmi_link_state(st2.channel_status(0)),
+        mupc_display_proto::LinkState::Unknown
+    );
+}
+
+/// **T-17**：探测器「数据 1」拆解 = `(raw >> 8) * 0.1` `dB/M` 与 `(raw & 0xFF) − 55` `℃`；
+/// **帧内整字值不变**（EX-13）。
+#[test]
+fn t17_data1_decompose_matches_spec_and_keeps_the_word_intact() {
+    use crate::state::decompose_value;
+    use mupc_display_proto::{FieldFlag, PointValue};
+
+    let specs = mupc_display_proto::peripherals_labels::data1_decompose();
+    assert_eq!(specs.len(), 2, "拆解恰两项（烟雾 / 温度）");
+    assert_eq!(specs[0].label, "烟雾");
+    assert_eq!(specs[0].unit.as_deref(), Some("dB/M"));
+    assert_eq!(specs[1].label, "温度");
+    assert_eq!(specs[1].unit.as_deref(), Some("℃"));
+
+    // raw = 0x0A2B ⇒ 高字节 0x0A = 10 → 1.0 dB/M；低字节 0x2B = 43 → −12 ℃
+    let pv = PointValue {
+        at: 3,
+        v: Some(f64::from(0x0A2B_u16)),
+        flag: FieldFlag::Valid,
+    };
+    let smoke = decompose_value(specs[0].from, pv.v.unwrap());
+    let temp = decompose_value(specs[1].from, pv.v.unwrap());
+    assert!((smoke - 1.0).abs() < 1e-9, "高字节 × 0.1：实测 {smoke}");
+    assert_eq!(temp, -12.0, "低字节 − 55：实测 {temp}");
+
+    // 边界：55 ⇒ 0 ℃；255 ⇒ 200 ℃；高字节 0xFF ⇒ 25.5 dB/M
+    assert_eq!(decompose_value(specs[1].from, 55.0), 0.0);
+    assert_eq!(decompose_value(specs[1].from, 255.0), 200.0);
+    assert!((decompose_value(specs[0].from, f64::from(0xFF00_u16)) - 25.5).abs() < 1e-9);
+
+    // **帧内整字值不变**（拆解只发生在展示层：本函数只读 `raw`，`PointValue.v` 未被改写）
+    assert_eq!(
+        pv.v,
+        Some(f64::from(0x0A2B_u16)),
+        "拆解**不得**写回帧内的整字值"
+    );
+    // 非有限 ⇒ 原样返回（不 panic、不造数）
+    assert!(decompose_value(specs[0].from, f64::NAN).is_nan());
+}
+
+/// **T-19 负向验收（结构性）**：屏上**不存在**「柜外温度 / 柜外湿度」**数值**行；
+/// **不存在**「台区 / 关口 / 总表」命名的 `meter_batt` 字段；**不存在**取自 1046–1065 的
+/// 键**被标注为**「PCS 输出 / 充放功率 / 台区负荷」；**另按本设计的选择**（§15.5.2 选项 A /
+/// R-42）**单独断言** `pcs_3zone_50`（1049）**整体不在白名单** —— **该条是设计决策的断言，
+/// 不是 EX-23 的判据**。
+#[test]
+fn t19_negative_acceptance_is_structural() {
+    use mupc_display_proto::{periph_whitelist_contains, PeriphRole, PERIPH_WHITELIST};
+
+    for (i, (role, block, at)) in PERIPH_WHITELIST.iter().enumerate() {
+        let (label, _unit) = mupc_display_proto::peripherals_labels::PERIPH_LABELS[i];
+        // ① 无「柜外温度 / 柜外湿度」**数值**行（「柜外温感故障」等**告警位名**允许上屏）
+        assert!(
+            !matches!(label, "柜外温度" | "柜外湿度"),
+            "屏上不得出现「{label}」数值字段（F20.4 / EX-08；点表只登记 3 个 HVAC 标量）"
+        );
+        // ② 无「台区 / 关口 / 总表」命名的 meter_batt 字段（F23 / EX-21）
+        if *role == PeriphRole::MeterBatt {
+            assert!(
+                !label.contains("台区") && !label.contains("关口") && !label.contains("总表"),
+                "储能表段不得有「台区/关口/总表」命名：`{label}`（{block}_{at}）"
+            );
+        }
+        // ③ 1046–1065 不得**在表内**（因而无从被标注为 PCS 输出 / 充放功率 / 台区负荷）
+        if *role == PeriphRole::Pcs && *block == "pcs_3zone" {
+            assert!(
+                !(47..=66).contains(at),
+                "1046–1065（STS / 负载区）不得上屏：pcs_3zone_{at}（PRD §7 #11）"
+            );
+        }
+    }
+    // ④ 设计决策的**单独**断言（选项 A / R-42）：1049 = `pcs_3zone_50` 整体不在白名单
+    assert!(
+        !periph_whitelist_contains(PeriphRole::Pcs, "pcs_3zone", 50),
+        "`pcs_3zone_50`（1049 STS 电网电压幅值）按本设计的选择**不上屏**（PRD §7 #11 侧）"
+    );
+    // ⑤ 屏侧源码**不得**出现把 1046–1065 误标为 PCS 输出 / 充放 / 台区负荷的串
+    let src = include_str!("pages/p4_interlock.rs");
+    for bad in [
+        "PCS 输出",
+        "充放功率",
+        "台区负荷",
+        "柜外温度",
+        "柜外湿度",
+        "pcs_3zone_50",
+    ] {
+        assert!(
+            !src.contains(bad),
+            "P4 源码不得出现 `{bad}`（EX-08 / EX-21 / EX-23 的误用禁止；\
+             负向验收**不配可见声明**，§15.7.3 的刻意决定）"
+        );
+    }
+}
+
+/// **T-19b**：探测器状态整字 **bit15 `defined == false` 且无 `label`**；`BitMeta.inverted`
+/// 在屏侧**无生产者**（R-41 追认前）；已定义位**恰 `{12, 14}`**。
+#[test]
+fn t19b_bit15_is_not_enabled_and_inverted_has_no_producer() {
+    use mupc_display_proto::peripherals_labels::FIRE_DETECTOR_STATE_BITS;
+
+    // ① 已定义位恰 {12, 14}（PRD F21 展示表只要求这两条）
+    let idx: Vec<u8> = FIRE_DETECTOR_STATE_BITS.iter().map(|(i, _)| *i).collect();
+    assert_eq!(idx, vec![12, 14]);
+    assert!(FIRE_DETECTOR_STATE_BITS.iter().all(|(_, t)| !t.is_empty()));
+    // ② bit15（通信状态）**不启用**（R-41 未追认）⇒ 屏显「未定义位 15」
+    assert!(!crate::state::fire_det_state_bit_defined(15));
+    assert!(crate::state::fire_det_state_bit_defined(12));
+    assert!(crate::state::fire_det_state_bit_defined(14));
+    assert_eq!(
+        crate::state::bit_text(15, false, "", false, None, false),
+        "未定义位 15",
+        "未定义位 ⇒ 「未定义位 n」（**不猜语义**，F21.1 / EX-09）"
+    );
+    // ③ `inverted` 在**屏侧代码**里**无生产者**
+    let src = include_str!("pages/p4_interlock.rs");
+    assert!(
+        !src.contains("inverted: true") && !src.contains("inverted = true"),
+        "屏侧不得设置 `inverted`：R-41 追认前**无生产者**（catalog 构建器一律填 false）"
+    );
+    // ④ 「不猜」纪律：未定义位的位名恒不参与文案（屏上不出现编造语义）
+    assert!(crate::state::bit_text(0, false, "", false, None, false).starts_with("未定义位"));
+    // ⑤ 已定义位=「位名 + 活跃/非活跃」；`inverted` 位若被追认启用则走「在线 / 离线」
+    assert_eq!(
+        crate::state::bit_text(12, true, "报警总状态", true, None, false),
+        "报警总状态 活跃"
+    );
+    assert_eq!(
+        crate::state::bit_text(15, true, "通信状态", true, None, true),
+        "通信状态 在线",
+        "`inverted` 位的文案通道（追认后才可能启用；**屏侧代码零改动**）"
+    );
+}
+
+/// **T-20**：页数 == 6；**无新增路由项**；下钻**不改 `current_page`**（§15.5.3）。
+#[test]
+fn t20_page_count_is_six_and_the_drill_is_not_a_page() {
+    use crate::ui::shell::NavPage;
+
+    assert_eq!(NavPage::ALL.len(), 6, "页数不增（T-8 裁定 / §15.5.3）");
+    assert_eq!(
+        mupc_display_proto::ConsoleEndpoint::ALL.len(),
+        11,
+        "端点清单不变（8 读 + 3 写；外设三端点在 T20 已入册，**本增量不新增**）"
+    );
+    // 下钻**不是页面**：页面**代码**（**剥掉注释与字面量** —— 文档里当然会写"不改
+    // `current_page`"这句话）里不存在任何路由 / 页号 API ⇒ 结构性不可能改 `current_page`。
+    let src = include_str!("pages/p4_interlock.rs");
+    let code = strip_comments_and_literals(src, "ui/pages/p4_interlock.rs");
+    for bad in ["current_page", "set_act(", "tabview", "NavPage"] {
+        assert!(
+            !code.contains(bad),
+            "P4 的**代码**不得出现 `{bad}` —— 下钻视图**不构成页面**\
+             （无独立页面状态、不经导航路由 ⇒ `current_page` 结构性不变）"
+        );
+    }
 }

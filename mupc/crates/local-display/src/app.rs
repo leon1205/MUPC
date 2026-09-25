@@ -905,6 +905,12 @@ impl App {
                     );
                 }
                 self.state.record_fail(epoch_ms);
+                // U-73（§15.6.2 ③ / §15.11 #10）：版本不匹配**另记**（粘性）—— 它同时
+                // 也是一次"本拍失败"，故上面那句 record_fail 照旧（两件事、两份记账）。
+                // 归一逻辑在 `channel.rs`（错误分类的真源），此处只做转交。
+                if let Some((got, expected)) = crate::channel::version_mismatch(&e) {
+                    self.state.record_incompatible(got, expected, epoch_ms);
+                }
             }
         }
     }

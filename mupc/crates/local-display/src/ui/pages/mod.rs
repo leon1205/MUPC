@@ -430,6 +430,102 @@ pub(crate) fn frozen_chip(parent: &Obj, x: i32) -> Result<StatusChip, LvglError>
     Ok(chip)
 }
 
+// ── 角标的**图标-only 形态**（P4 联锁总态卡的**不重叠替代布局**；IL29②）──────────
+
+/// 图标-only 角标宽（`ICON_SM` = 28 px；**不带**「冻结 / 数据过期」文字）。
+///
+/// **为什么需要第二形态**（产品裁定 2026-09-25 / P4 的 **IL29②**）：P4 联锁总态卡按
+/// UI §6.4.1「几何单一真源」只有 **488 px**（[`Dimens::BAND_CARD_W`]），卡内容区 454 px；
+/// 而该卡头行还要放标题（`联锁状态` 4 字 × 28 = **112**）与 latch 胶囊（`CARD_STATUS_W` =
+/// **236**）⇒ 「标题 + [`FROZEN_CHIP_W`](192) + 胶囊」= **540 > 454**，**必然与胶囊重叠**。
+/// 取 28 px 图标形态后落在标题与胶囊之间的空槽（112 < x < 218），**三件互不重叠**。
+///
+/// **代价（如实登记）**：失去「冻结 / 数据过期」的**文字**区分 —— 改由图标通道承担
+/// （[`frozen_mark_icon`]：⚠ / `!`，与 P1 的两个角标同源）。EDGE-03 的「**每区块**打标」
+/// 语义**保留**（可见性判据仍是 [`frame_mark`] 单一真源）。
+pub(crate) const FROZEN_BADGE_W: i32 = Dimens::ICON_SM;
+
+/// 标记（[`frame_mark`] 的返回值）→ 图标-only 角标的**图标通道**字形。
+///
+/// **两个来源都是既有件**（不新增字形、不新增色值）：
+/// `冻结` ⇒ [`p2_config::ICON_WARN`]（`⚠`，与 [`frozen_chip`] 的图标通道**同一取值**）；
+/// `数据过期` ⇒ [`p2_config::ICON_FAIL`]（`!`，与 P1 的 `stale_chip` 同一取向 —— 该处亦是
+/// `WARNING` 皮肤 + `!`）。**非 `冻结` 一律按「数据过期」**（[`frame_mark`] 的值域只有这两条）。
+pub(crate) fn frozen_mark_icon(mark: &str) -> &'static str {
+    if mark == TEXT_FROZEN {
+        p2_config::ICON_WARN
+    } else {
+        p2_config::ICON_FAIL
+    }
+}
+
+/// **图标-only** 的区块级「冻结 / 数据过期」角标（EDGE-03 / EDGE-20）。
+///
+/// 与 [`frozen_chip`] **同类但不共形**：那个是「图标 + 文字」的 192 px 胶囊（触发源卡 / P6
+/// 两卡），本形态只有一支**可换字形的图标**（见 [`FROZEN_BADGE_W`] 的几何论证）。
+/// **为什么不是 `StatusChip`**：`components.rs` 的 `StatusChip` **没有 `set_icon`**
+/// （图标只能建时给）⇒ 无法在运行期按标记换 ⚠ / `!`；且其文字槽固定在 x=32（> 28 px 宽），
+/// 在图标形态里恒被裁掉（多一个永不显示的对象）。故此处用「容器 + 单图标标签」两件实现，
+/// 皮肤取 [`ChipSkin::WARNING`] 的**同一份样式**（圆角 / 底 / 描边 / 字色不新增真源）。
+///
+/// **建好即隐藏**，运行期由各页 `render` 只切可见性 + 换图标（[`FrozenBadge::set_mark`]）。
+pub(crate) fn frozen_icon_badge(parent: &Obj, x: i32, y: i32) -> Result<FrozenBadge, LvglError> {
+    let obj = layout_box(parent, FROZEN_BADGE_W, Dimens::STATUS_CHIP_H)?;
+    obj.add_style(
+        &ChipSkin::WARNING.style(),
+        crate::lvgl::style::StyleSelector::main(),
+    );
+    obj.set_pos(x, y);
+    let icon = text_label(
+        &obj,
+        frozen_mark_icon(TEXT_FROZEN),
+        TextSlot::Body,
+        ChipSkin::WARNING.text,
+    )?;
+    let icon_px = TextSlot::Body.px() as i32;
+    icon.set_size(FROZEN_BADGE_W, icon_px);
+    icon.set_pos(
+        theme::center_offset(FROZEN_BADGE_W, icon_px),
+        theme::center_offset(Dimens::STATUS_CHIP_H, icon_px),
+    );
+    set_visible(&obj, false);
+    Ok(FrozenBadge {
+        obj,
+        icon: Rc::new(icon),
+    })
+}
+
+/// 图标-only 角标的句柄（见 [`frozen_icon_badge`]）。
+///
+/// 与 `components.rs` 的 [`StatusChip`] 同族：只暴露**只读**读回口（行为断言用）与
+/// **换标记**（热路径唯一允许的写操作）。
+///
+/// ⚠️ **皮肤不设读回口**：`skin()` 只被 `ui/tests.rs` 用到 ⇒ 在非 test 构建里会触发
+/// `dead_code`（门禁是"零新增告警"）。该形态的皮肤由构造点 [`frozen_icon_badge`] 的
+/// **源码哨**（`pages::frozen_icon_badge(` 计数）与 `ui/**` 零裸色值网共同兜住。
+#[derive(Debug)]
+pub(crate) struct FrozenBadge {
+    obj: Obj,
+    icon: Rc<Label>,
+}
+
+impl FrozenBadge {
+    /// 底层容器（改位置 / 切可见性用）。
+    pub(crate) fn obj(&self) -> &Obj {
+        &self.obj
+    }
+
+    /// 按标记换图标（⚠ / `!`）；**标记 → 字形**的唯一映射点见 [`frozen_mark_icon`]。
+    pub(crate) fn set_mark(&self, mark: &str) {
+        self.icon.set_text(frozen_mark_icon(mark));
+    }
+
+    /// 当前图标字形（**上屏那一枚**；断言口径 = [`frozen_mark_icon`]）。
+    pub(crate) fn icon_text(&self) -> Option<String> {
+        self.icon.text()
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 4. 纯逻辑：时间戳格式化（可独立单测；**不触碰 LVGL**）
 // ═══════════════════════════════════════════════════════════════════════════
@@ -514,6 +610,27 @@ pub fn fmt_int0(v: f64) -> String {
         format!("\u{2212}{:.0}", -v)
     } else {
         format!("{v:.0}")
+    }
+}
+
+/// **N 位小数**（U-73：小数位由 catalog 的 `decimals` 给出 —— 登记 `scale` 的派生值，
+/// 屏侧不得自行决定，§15.3.2）；负号口径同 [`fmt_signed_1dp`]。
+///
+/// `decimals` 由 catalog 给出且登记表只取 0..=3（§15.3.2 的四值映射）⇒ 越界值 clamp 到 3
+/// （**不 panic**、不生成长尾浮点串）。非有限值 ⇒ `--` 占位（**不造数**）。
+///
+/// **为什么必须走本函数而不是页面里 `format!("{v:.p$}")`**：ASCII `-`（U+002D）在生成字体
+/// 里**没有字形**（C1 同族缺陷）⇒ 负号必须一律 `\u{2212}`。运行时产出字符集由
+/// `ui/tests.rs::runtime_formatters_emit_only_cmap_glyphs` 构造性校验（含负值输入）。
+pub fn fmt_decimals(v: f64, decimals: u8) -> String {
+    if !v.is_finite() {
+        return PLACEHOLDER.to_string();
+    }
+    let p = usize::from(decimals.min(3));
+    if v.is_sign_negative() {
+        format!("\u{2212}{:.p$}", -v, p = p)
+    } else {
+        format!("{v:.p$}", p = p)
     }
 }
 
