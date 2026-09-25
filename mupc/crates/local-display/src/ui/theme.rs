@@ -86,6 +86,54 @@ impl Dimens {
     /// **净距 = 本值，精确成立**（T-25 断言）。供 **P6**（T21c-2）使用；本增量只落常量。
     pub const SEG_GAP: i32 = 16;
 
+    // ── P6「装置与外设」页（T21c-2；**几何单一真源 = UI §6.6.1**）───────────────
+    //
+    // 页内坐标 = UI §6.6.1 的绝对坐标 − (16, 72)（契约 1 的同一条换算式，见 `pages` 模块头）。
+
+    /// 分段页签的段数（UI §6.6.1：装置 / 空调 / 电池 / 储能表 / PCS）。
+    pub const TAB_COUNT: i32 = 5;
+    /// 单段宽 **185**（UI §6.6.1「每段 **185×48**」）。
+    ///
+    /// **推导而非抄数**：`(CONTENT_W − (TAB_COUNT − 1) × SEG_GAP) / TAB_COUNT`
+    /// = `(992 − 64) / 5 = 185`（向下取整）⇒ `5×185 + 4×16 = 989 ≤ 992`（余 3 px 不收尾，
+    /// 与 §15.5.1 的算式**逐字一致**；T-25 断言段宽 == 185、段间隙 == `SEG_GAP`）。
+    pub const TAB_W: i32 = (Self::CONTENT_W - (Self::TAB_COUNT - 1) * Self::SEG_GAP) / Self::TAB_COUNT;
+    /// 分段页签高 48（UI §6.6.1「每段 185×**48**」；取 `TOUCH_MIN` = 触摸目标下限）。
+    pub const TAB_H: i32 = Self::TOUCH_MIN;
+    /// 分段控件在**页内**的 y（绝对 y80 − 页顶 y72 = 8 = 内容区上内边距）。
+    pub const TABS_Y: i32 = Self::CONTENT_PAD_TOP;
+    /// 段内容在页内的 y（UI §6.6.1：`128 + GAP_GROUP(16) = 144` 绝对 ⇒ 页内 72）。
+    pub const SECTION_Y: i32 = Self::TABS_Y + Self::TAB_H + Self::GAP_GROUP;
+    /// 段内容视口高 **528**（UI §6.6.1「(16,144,1008,672) 视口 992×**528**」；页内
+    /// `CONTENT_H(624) − SECTION_Y(72) − CONTENT_PAD_BOTTOM(24) = 528`）。
+    pub const SECTION_VIEW_H: i32 = Self::CONTENT_H - Self::SECTION_Y - Self::CONTENT_PAD_BOTTOM;
+
+    /// **分组卡卡头高 40**（UI §6.6.1「卡头高 **40**、标题 28 px」）。
+    ///
+    /// ⚠️ **与既有 §6.6 的三张卡不同**：那三张卡沿用 [`Dimens::ROW_SYS_H`] 的 56 px 行与
+    /// 44 px 卡头（`SectionTitle` + `GAP_MIN`）；本值是 §6.6.1 为**外设分段**新给定的规格，
+    /// 两者并列存在、**不得互相"纠偏"**（§6.6 是 v2.0 已批准正文，本增量不改其版面）。
+    pub const CARD_HEAD_H: i32 = 40;
+    /// 卡内**数值行 / 枚举行**行高 44（UI §6.6.1「数值行 **44**」「枚举行 **44**」）。
+    pub const ROW_DATA_H: i32 = Self::ROW_LOG_H;
+    /// 卡内**位行**行高 40（UI §6.6.1「位行 **40**」）。
+    ///
+    /// ⚠️ **`theme` 此前无 40 px 档**（P4 的 **IL29③** 同款缺口）⇒ 按 UI §6.6.1 的契约值
+    /// **直接落常量**（本文件即"屏上尺寸的单一真源"）；**不**为凑该值去改任何既有档位。
+    pub const ROW_BIT_H: i32 = 40;
+    /// BMS 告警摘要行高 44（UI §6.6.1「卡头 40 + 摘要行 44 + 入口行 56 = 140」）。
+    pub const ROW_SUMMARY_H: i32 = Self::ROW_LOG_H;
+    /// 摘要卡入口行高 56（同上一行的算式；取既有 [`Dimens::BANNER_H`] = 56，不另立档位）。
+    pub const ROW_ENTRY_H: i32 = Self::BANNER_H;
+    /// 段顶**站状态条**行高 48（UI §6.6.1「站状态条…宽 992，**行高 48**」）。
+    pub const ROW_STATION_H: i32 = Self::TOUCH_MIN;
+    /// 下钻视图行高 44（UI §6.6.1「**行高 44**、`page_size = 50`」）。
+    pub const DRILL_ROW_H: i32 = Self::ROW_LOG_H;
+    /// 下钻分页 / 「收起」按钮宽 120（UI §6.6.1 触摸目标表：`120×48`）。
+    pub const DRILL_BTN_W: i32 = Self::BTN_MIN_W;
+    /// 摘要卡「查看全部 288 位」入口按钮宽 200（UI §6.6.1：**200×48**）。
+    pub const DRILL_ENTRY_W: i32 = Self::BTN_MAIN_W;
+
     /// **P4「安全总览带」单卡宽** 488 px（UI §6.4.1「区块规格」表：两卡各 488、
     /// 卡间隙 `GAP_MIN`(16) ⇒ `2×488 + 16 = 992`；设计 §15.4 同式）。
     ///

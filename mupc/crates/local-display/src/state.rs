@@ -470,16 +470,22 @@ impl PeriphView {
 ///
 /// - `defined == false` ⇒ 「未定义位 `index`」（其后接位号；**不猜语义**，**禁止**为凑满
 ///   16 位而编造）；
-/// - 已定义 ⇒ `"{位名} {活跃 / 非活跃}"`；`active_text`（catalog 给的活跃语义）优先于通用
-///   「活跃」；`inverted == true`（极性反转位，R-41 追认前**无生产者**）⇒ `在线 / 离线`。
+/// - 已定义 ⇒ `"{位名} {两态词}"`；`active_text` / `inactive_text`（catalog 给的**两态**语义）
+///   各自优先于通用「活跃」/「非活跃」；`inverted == true`（极性反转位，R-41 追认前
+///   **无生产者**）⇒ `在线 / 离线`（该支**不看**两态词）。
 ///
-/// 位名 / `active_text` **一律来自 catalog**（帧外元数据），本函数不产出中文。
+/// 位名 / `active_text` / `inactive_text` **一律来自 catalog**（帧外元数据），本函数不产出中文。
+///
+/// **两态词的来源（T21c-2-r1 / F3）**：双态词由 catalog 承载（[`BitMeta::inactive_text`]），
+/// 屏侧**不猜语义**（D22）。只给 `active_text` 的位，非活跃侧**回退**到通用「非活跃」
+/// （与 `inactive_text` 引入前的行为逐字相同）。
 pub fn bit_text(
     index: u8,
     defined: bool,
     label: &str,
     active: bool,
     active_text: Option<&str>,
+    inactive_text: Option<&str>,
     inverted: bool,
 ) -> String {
     if !defined {
@@ -494,7 +500,7 @@ pub fn bit_text(
     } else if active {
         active_text.unwrap_or(ui_text::BIT_ACTIVE)
     } else {
-        ui_text::BIT_INACTIVE
+        inactive_text.unwrap_or(ui_text::BIT_INACTIVE)
     };
     format!("{label} {state}")
 }
@@ -1145,6 +1151,23 @@ impl ControlState {
     fn record_failure_state(&mut self, now_ms: u64) {
         self.inflight = None;
         self.last_transport_failure_ms = Some(now_ms);
+    }
+
+    /// 读端点失败、**且该失败有页面就地出口**时用（T21c-3）：只记账、**不压 app Toast**。
+    ///
+    /// # 为什么需要它（与写端点同款"为何恰好一条"）
+    ///
+    /// U-73 的两个明细端点（`/peripherals/fire_detectors` / `/peripherals/bms_alarms`）
+    /// 失败时，**页面自己**就地显「明细不可用」+「重试」（§15.6.2 ⑥ 的**本地固定文案**，
+    /// R-4：服务端原因串只进日志）⇒ 若本层再压一条通用的「操作失败」Toast，
+    /// 同拍会出现**两个**失败面、且那条通用文案对一个"取数"动作是**误导**
+    /// （它不是用户发起的操作）。故与写端点走同一条口径：
+    /// **页面负责上屏、状态层只记账**（见 [`Self::record_failure_state`] 的说明）。
+    ///
+    /// **记账一个不少**：清在途 + `last_transport_failure_ms` 照记（与
+    /// [`Self::record_transport_failure_with_text`] 的状态部分**逐字相同**）。
+    pub fn record_read_failure(&mut self, now_ms: u64) {
+        self.record_failure_state(now_ms);
     }
 
     /// 传输失败 + **给页面补一条本地合成的「不可用」回执**（B3-2b-2 整改 · PM 裁定 3）。

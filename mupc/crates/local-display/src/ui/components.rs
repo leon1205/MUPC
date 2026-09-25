@@ -350,7 +350,9 @@ pub struct LedIndicator {
     led: Rc<Led>,
     icon: Rc<Label>,
     text: Rc<Label>,
-    color: Color,
+    /// 颜色通道的**当前值**（`Cell` 而非裸字段：T21c-2 起由 [`LedIndicator::set_color`]
+    /// 运行期改写 —— 窗口化行池会把同一个指示器复用到另一行）。
+    color: Cell<Color>,
     lit: Cell<bool>,
 }
 
@@ -390,7 +392,7 @@ impl LedIndicator {
             led,
             icon: Rc::new(icon_l),
             text: Rc::new(text_l),
-            color,
+            color: Cell::new(color),
             lit: Cell::new(true),
         })
     }
@@ -410,6 +412,29 @@ impl LedIndicator {
         self.lit.set(lit);
     }
 
+    /// **运行期改文字通道**（T21c-2 新增）。
+    ///
+    /// **为什么必须有它**：**窗口化行池**里同一个 `LedIndicator` 会被逐行**复用**（滚动时
+    /// 重新绑到另一行）⇒ 三个通道都必须能在不重建对象的前提下更新。此前只有
+    /// [`LedIndicator::set_lit`]（灯通道）可写，**文字与颜色只能建时给** ⇒ "复用"会退化成
+    /// "每行建一个"（正是窗口化要避免的对象膨胀）。
+    ///
+    /// 语义与构造期 `text` 参数**逐字相同**（都写同一个 `lv_label`）；不影响灯与图标通道。
+    pub fn set_text(&self, text: &str) {
+        self.text.set_text(text);
+    }
+
+    /// **运行期改颜色通道**（F14 的色通道；与 [`LedIndicator::set_text`] 同一条理由）。
+    ///
+    /// 同时改 `lv_led` 的灯色（控件字段，经 [`Led::set_color`]）与**图标字形色**（局部文字色，
+    /// 经 [`Obj::set_text_color`] —— 两者在构造期同取一个 `color`），并刷新本组件记录的值
+    /// ⇒ [`LedIndicator::color`] 读回恒为**当前上屏色**（离屏断言口径不变）。
+    pub fn set_color(&self, color: Color) {
+        self.led.set_color(color);
+        self.icon.set_text_color(color);
+        self.color.set(color);
+    }
+
     /// 本组件记录的点亮态。
     pub fn is_lit(&self) -> bool {
         self.lit.get()
@@ -420,9 +445,9 @@ impl LedIndicator {
         self.led.brightness()
     }
 
-    /// **颜色通道**（F14 断言口径）。
+    /// **颜色通道**（F14 断言口径；`set_color` 后读回**新**颜色）。
     pub fn color(&self) -> Color {
-        self.color
+        self.color.get()
     }
 
     /// 文字通道。

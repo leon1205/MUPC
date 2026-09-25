@@ -256,13 +256,17 @@ fn on_lv_events_consumes_the_intent_queue() {
     /// 「就近」窗口（字符）：函数体很短，取足够覆盖它、又不至于越过下一个函数。
     const BODY_WINDOW: usize = 200;
     // 只扫**生产段**：测试段自身含同样的字面量（本文件与 `app.rs` 都算），会自证失真。
-    let prod = SRC
+    //
+    // 归一化 CRLF：本机 `core.autocrlf=true` ⇒ 工作区是 CRLF、CI 上是 LF。切分/长度判据
+    // 一律取归一化后的文本，**不得**依赖换行符（否则守卫会因换行符而误触发）。
+    let src = SRC.replace("\r\n", "\n");
+    let prod = src
         .split("#[cfg(test)]\nmod tests {")
         .next()
         .expect("app.rs 应能切出生产段");
     assert_ne!(
         prod.len(),
-        SRC.len(),
+        src.len(),
         "未切出生产段（切分标记失效）：扫描器失真，本用例必须响亮失败"
     );
     let at = prod
@@ -459,13 +463,17 @@ fn startup_echoes_the_live_control_channel_and_never_claims_it_is_inert() {
 fn app_feeds_modal_open_from_the_pages_production_query() {
     const SRC: &str = include_str!("../src/app.rs");
     // 只扫**生产段**（测试段自身含同样的字面量 ⇒ 会自证失真，本项目踩过"扫描器失真"）。
-    let prod = SRC
+    //
+    // 归一化 CRLF：本机 `core.autocrlf=true` ⇒ 工作区是 CRLF、CI 上是 LF。切分/长度判据
+    // 一律取归一化后的文本，**不得**依赖换行符（否则守卫会因换行符而误触发）。
+    let src = SRC.replace("\r\n", "\n");
+    let prod = src
         .split("#[cfg(test)]\nmod tests {")
         .next()
         .expect("app.rs 应能切出生产段");
     assert_ne!(
         prod.len(),
-        SRC.len(),
+        src.len(),
         "未切出生产段（切分标记失效）：扫描器失真，本用例必须响亮失败"
     );
     // 两段合起来 = 那一整条表达式（不锁换行版式：rustfmt 可能把它折成两行）。
