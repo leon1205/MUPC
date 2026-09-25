@@ -682,6 +682,66 @@ pub fn periph_role_of(role: mupc_southd::config::Role) -> PeriphRole {
 /// `fire_det` 块名（与 `display-proto` 的守卫块名**同源同值**，不得另写一份字面量）。
 const FIRE_DET_BLOCK: &str = mupc_display_proto::peripherals::FIRE_DET_BLOCK_NAME;
 
+/// **catalog 的站集合 = 5 个 role 全集**（R-3 产品裁定 2026-09-25；设计 §15.5.2 装置段
+/// 「5 行站状态条」/ §15.3.2 `CatalogStation`）。
+///
+/// 每项 `(role, 规范站 id)`：id 取自 §15.5.2 逐字列出的站名（`hvac` / `fire` / `bms` /
+/// `meter_batt` / `pcs`，与生产配置各站 `id` 一致）。**该 role 已配置时 id 以站配置为准**
+/// （现场可改名）；缺席时回本条规范 id。
+///
+/// **为什么是常量表而不是"从配置推"**：`pcs` 在生产配置里**整段被注释**
+/// （`production.yaml:284-293`，T20 D6）⇒ 配置里根本取不到这一行；而 F25.5 要求
+/// 「站状态条行数与在线状态**无关**」⇒ 行集合只能是**固定 5 行**。**不含 `meter_grid`**：
+/// 台区关口总表不在 §15.5.2 的 5 段 / 5 行之内（§15 范围外 #3）。
+pub const CATALOG_STATION_ROLES: [(PeriphRole, &str); 5] = [
+    (PeriphRole::Hvac, "hvac"),
+    (PeriphRole::Fire, "fire"),
+    (PeriphRole::Battery, "bms"),
+    (PeriphRole::MeterBatt, "meter_batt"),
+    (PeriphRole::Pcs, "pcs"),
+];
+
+/// catalog 的**站项计划**：`enabled` = 该 `role` 在 `south_stations` 中**已配置**。
+///
+/// 与 [`PeripheralStationPlan`]（帧内站计划）**不是一回事**：后者只含"已配置且至少有
+/// 一个白名单块"的站（缺席站无数据可谈 ⇒ **不进帧**，§15.2.2）；本计划恒 **5 行**
+/// （catalog 侧的行集合，驱动屏侧装置段的状态条与「未启用」判定）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogStationPlan {
+    /// 站 id（已配置 ⇒ 取站配置 `id`；缺席 ⇒ 取 [`CATALOG_STATION_ROLES`] 的规范 id）。
+    pub id: String,
+    /// 显示契约 role。
+    pub role: PeriphRole,
+    /// 该 role 是否在 `south_stations` 中已配置（false ⇒ 屏侧显「未启用」，§15.6.2）。
+    pub enabled: bool,
+}
+
+/// 由站配置投影出 **catalog 的站集合**（纯函数，可单测）= 5 个 role 全集。
+///
+/// `enabled` 的**单一真源** = `cfg.stations` 里是否存在该 `role` 的站（与
+/// [`peripheral_plan`] 同源同表，**不新造第二份"哪些站已配置"的判断**）。
+pub fn catalog_station_plan(
+    cfg: &mupc_southd::config::SouthStationsConfig,
+) -> Vec<CatalogStationPlan> {
+    CATALOG_STATION_ROLES
+        .iter()
+        .map(|(role, fallback_id)| {
+            // 同一 role 若有多个站，取**配置顺序第一个**（与 `peripheral_plan` 的站序一致）。
+            let conf = cfg
+                .stations
+                .iter()
+                .find(|s| periph_role_of(s.role) == *role);
+            CatalogStationPlan {
+                id: conf
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| (*fallback_id).to_string()),
+                role: *role,
+                enabled: conf.is_some(),
+            }
+        })
+        .collect()
+}
+
 /// 由站配置投影出**白名单计划**（纯函数，可单测；装配期一次性调用）。
 ///
 /// 规则（逐条）：
@@ -3859,6 +3919,75 @@ stations:
             &PeripheralsSection::default(),
             &src.build_section(now + 700)
         ));
+    }
+
+    /// **S-3（T21b 评审残留）**：`cylinder_configured` 的**跳变必须触发组帧**。
+    ///
+    /// T21b 让该字段**首次生产可达**（`startup::SouthCylinderPressureQuery` 接线 ⇒
+    /// `Some(false)` = 「钢瓶气压未配置」，EDGE-23）；`peripherals_changed` 的谓词里本来就含它
+    /// （T20 既有），但**一直没有用例**证明它的跳变会判为"内容变更"。缺了它，「未配置」这条
+    /// 屏上语义会**等到下一次主拍**（或更久）才出现 —— 与"值变 / 站离线必须尽快上屏"同类
+    /// （§15.1.1 的慢拍内容变更合并）。
+    ///
+    /// **改什么会让本条变红（已做探针）**：从 `peripherals_changed` 的站级比较里删掉
+    /// `x.cylinder_configured != y.cylinder_configured` ⇒ 下面三条断言全红。
+    #[test]
+    fn periph_cylinder_configured_flip_is_a_content_change() {
+        use std::collections::HashMap;
+
+        struct StubCylinder(HashMap<String, Option<bool>>);
+        impl CylinderPressureQuery for StubCylinder {
+            fn cylinder_configured(&self, station_id: &str) -> Option<bool> {
+                self.0.get(station_id).copied().flatten()
+            }
+        }
+
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        latest.mark_station_polled("fire", now);
+        fill(&latest, &[("fire", "fire_sys_2", Some(0.0), now, ok())]);
+
+        // 三段共用同一份 latest / plan / now ⇒ 差异**只有** `cylinder_configured`（可归因）
+        let stub = |v: Option<bool>| -> Arc<dyn CylinderPressureQuery> {
+            Arc::new(StubCylinder(
+                [("fire".to_string(), v)].into_iter().collect(),
+            ))
+        };
+        let src_none = StationPeripheralSource::new(latest.clone(), plan.clone(), 3);
+        let src_false = StationPeripheralSource::new(latest.clone(), plan.clone(), 3)
+            .with_cylinder_query(stub(Some(false)));
+        let src_true = StationPeripheralSource::new(latest.clone(), plan.clone(), 3)
+            .with_cylinder_query(stub(Some(true)));
+
+        let a = src_none.build_section(now);
+        let b = src_false.build_section(now);
+        let c = src_true.build_section(now);
+        let cyl = |s: &PeripheralsSection| {
+            s.stations
+                .iter()
+                .find(|x| x.role == PeriphRole::Fire)
+                .expect("fire 站")
+                .cylinder_configured
+        };
+        assert_eq!(
+            (cyl(&a), cyl(&b), cyl(&c)),
+            (None, Some(false), Some(true)),
+            "前提：三段的差异确实只是 `cylinder_configured`"
+        );
+        assert!(
+            peripherals_changed(&a, &b),
+            "None → Some(false)：必须判为内容变更（否则「未配置」不即时上屏）"
+        );
+        assert!(
+            peripherals_changed(&b, &c),
+            "Some(false) → Some(true)：必须判为内容变更"
+        );
+        assert!(
+            peripherals_changed(&a, &c),
+            "None → Some(true)：必须判为内容变更"
+        );
     }
 
     /// 造一个 `fire_det` 带 `units` 只（每只 6 点）的段（供守卫用例）。

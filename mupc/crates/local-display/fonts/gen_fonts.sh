@@ -15,6 +15,15 @@
 #   2) 码表由 UI 设计文档 §3.6「全屏用字表」提取，**用字表是唯一真源**：
 #        python3 extract_charset.py
 #
+#      ⚠️ **R-2 口径（产品裁定 2026-09-25）：重跑不得丢字**。
+#        `extract_charset.py` 以 §3.6 为唯一真源并**覆盖写** `font_subset_charset.txt`，
+#        而该表单元格里混有**叙述性文字**（实测净增 ~22 字）⇒ 重跑结果与入库码表**不同**。
+#        · **硬失败**：重跑结果 ⊉ 入库码表（**丢了字** ⇒ 屏上豆腐块、真机不可自愈）
+#          ⇒ 脚本打印缺失字符集并**非 0 退出**。要删字是**显式决定**：先手工改码表再重跑。
+#        · **可见但不失败**：重跑**净增**字符 ⇒ 只打印净增集合与条数（不阻塞无关工作）。
+#        本脚本自身**不**再做一遍该比对（它只消费码表；比对落在**产生漂移的那一步**）。
+#        改动码表后**必须**重跑本脚本并同批提交 `lv_font_cmap.txt` / `lv_font_metrics.txt`。
+#
 # 说明（spike 实测，见 docs/TODO/12-v2.0-LVGL-spike-报告.md）：
 #   · **默认启用 LVGL 内置 RLE 压缩**（即不传 `--no-compress`）：实测位图字节
 #     131,793 → 71,078（-46%），无损、不掉画质。要复现设计原文的无压缩口径，
@@ -87,7 +96,11 @@ if [ ! -f "$CHARSET" ]; then
 fi
 
 SYMBOLS="$(cat "$CHARSET")"
-CHARS=$(printf '%s' "$SYMBOLS" | python3 -c 'import sys;print(len(sys.stdin.read()))')
+# ⚠️ 字符数**必须按 UTF-8 字节流自解**（`sys.stdin.buffer.read().decode("utf-8")`）而不是
+# `sys.stdin.read()`：后者用**本地 locale 编码**解码 stdin —— Windows 中文环境是 GBK
+# ⇒ 3 字节的 UTF-8 汉字被折成 ~1.5 个"字符"，日志会**谎报**字符数（2026-09-25 T21b2 实测：
+# 真 463 被报成 698）。数字失真是本项目最忌讳的一类信号（会掩盖字库漂移）。
+CHARS=$(printf '%s' "$SYMBOLS" | python3 -c 'import sys;print(len(sys.stdin.buffer.read().decode("utf-8")))')
 
 for size in "${SIZES[@]}"; do
     out="lv_font_noto_sc_${size}.c"

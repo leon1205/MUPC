@@ -568,14 +568,17 @@ pub const PERIPH_LABELS: &[(&str, Option<&str>)] = &[
     ("数据 1", None),
     ("CO", Some("ppm")),
     ("VOC", Some("ppm")),
-    ("H₂", Some("ppm")),
+    // ⚠️ R-1 产品裁定（2026-09-25）：上屏文案取 **ASCII `H2`**，不用 `H₂`（U+2082）——
+    // 字库源 `NotoSansSC-Regular.otf` **无 U+2082 字形**（fontTools 独立复核）⇒ 任何档位都
+    // 渲染不出、真机必出豆腐块；且 `point_table` 的登记文本本身写的就是 ASCII `H2`。
+    ("H2", Some("ppm")),
     // ── Fire / fire_det（6 点）──
     ("地址", None),
     ("状态", None),
     ("数据 1", None),
     ("CO", Some("ppm")),
     ("VOC", Some("ppm")),
-    ("H₂", Some("ppm")),
+    ("H2", Some("ppm")),
     // ── Battery / bms_io（17 点）──
     ("允许充电最大功率", Some("kW")),
     ("允许放电最大功率", Some("kW")),
@@ -1278,6 +1281,14 @@ pub mod ui_text {
     /// 不可用（通用兜底；不臆造具体原因）。
     pub const UNAVAILABLE: &str = "不可用";
 
+    // ── 站点未启用（§15.6.2 新增情形；R-3 产品裁定 2026-09-25）──
+    /// 未启用（catalog `CatalogStation.enabled = false` ⇒ P6 装置段**站状态表该行**；
+    /// **≠** 「站离线」——前者是"该 role 未配置、无任何数据可谈"，后者是"已配置但当前离线"）。
+    pub const STATION_DISABLED: &str = "未启用";
+    /// 站点未启用（该站缺席时，**段内**该站各段（空调 / 电池 / 储能表 / PCS）的段级文案；
+    /// 与「站离线」「外设数据不可用」「无活跃告警位」**两两互异**，沿用 EDGE-24 同口径）。
+    pub const SECTION_STATION_DISABLED: &str = "站点未启用";
+
     // ── 段级降级（§15.7.3 第 2 行）──
     /// 外设数据不可用（外设段 `available = false`，EDGE-22）。
     pub const PERIPH_UNAVAILABLE: &str = "外设数据不可用";
@@ -1384,9 +1395,13 @@ pub mod ui_text {
 // 到 HMI ⇒ 码表覆盖率用例（H-2 / T-23）**看不见**（F-5 的盲区）。落点见 §15.11 #3。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `fire_det` 每只探测器的 6 个模板位的短标签（`+0 地址`…`+5 H₂`，§15.4 明细表列名）。
+/// `fire_det` 每只探测器的 6 个模板位的短标签（`+0 地址`…`+5 H2`，§15.4 明细表列名）。
 /// **与 [`PERIPH_LABELS`] 的 `fire_det` 模板 6 行逐字相同**（单测钉住，防两处漂移）。
-pub const FIRE_DET_TEMPLATE_LABELS: [&str; 6] = ["地址", "状态", "数据 1", "CO", "VOC", "H₂"];
+///
+/// ⚠️ 第 6 位为 **ASCII `H2`**（R-1 产品裁定 2026-09-25）：`H₂` 的 `₂`（U+2082）在
+/// `NotoSansSC-Regular.otf` 里**无字形** ⇒ 任何档位都渲染不出、真机必出豆腐块
+/// （原登记见 UI 设计文档 §3.6 补注 6 / T21b 评审 G-2）。
+pub const FIRE_DET_TEMPLATE_LABELS: [&str; 6] = ["地址", "状态", "数据 1", "CO", "VOC", "H2"];
 
 /// `fire_sys_6`（火警等级）枚举文案：**唯一权威 = PRD §3.9 F21 展示表**
 /// （`0 正常 / 1 一级报警 / 2 二级火警 / 3 预留 ⇒ 显「未定义」 / 4 紧急启动 / 5 紧急停止`；
@@ -1503,7 +1518,7 @@ mod tests {
         // `bms_meta` 的 8 = 「主控程序版本号」等在表内；`bms_energy` 的 15（最高单体最高电压变化）
         // 不在 §15.5.2 的「累计量」清单内 ⇒ 结构性不上屏
         assert!(!contains(PeriphRole::Battery, "bms_energy", 15));
-        // `fire_det` 模板只到 +5（H₂）；at ≥ 7 属运行期展开行
+        // `fire_det` 模板只到 +5（H2）；at ≥ 7 属运行期展开行
         assert!(contains(PeriphRole::Fire, "fire_det", 6));
         assert!(!contains(PeriphRole::Fire, "fire_det", 7));
         // 台区总表（`meter_grid`）不在本增量内（§15 范围外 #3）
@@ -1629,12 +1644,12 @@ mod tests {
     /// （两处字面量必须一致：一处是 run-time 模板常量，一处是短标签表本体）。
     #[test]
     fn fire_det_template_rows_match_locked_literals() {
-        assert_eq!(FIRE_DET_TEMPLATE_LABELS, ["地址", "状态", "数据 1", "CO", "VOC", "H₂"]);
+        assert_eq!(FIRE_DET_TEMPLATE_LABELS, ["地址", "状态", "数据 1", "CO", "VOC", "H2"]);
         let rows: Vec<&str> = (1..=6u16)
             .map(|at| label_for(PeriphRole::Fire, "fire_det", at).expect("fire_det 模板行必须有短标签"))
             .collect();
         assert_eq!(rows, FIRE_DET_TEMPLATE_LABELS.to_vec());
-        // 单位：CO / VOC / H₂ 为 ppm，前三列无量纲
+        // 单位：CO / VOC / H2 为 ppm，前三列无量纲
         assert_eq!(unit_for(PeriphRole::Fire, "fire_det", 1), None);
         assert_eq!(unit_for(PeriphRole::Fire, "fire_det", 2), None);
         assert_eq!(unit_for(PeriphRole::Fire, "fire_det", 3), None);
@@ -1657,7 +1672,7 @@ mod tests {
             );
         }
         // n=100 ⇒ 末只末寄存器 at = 6n−6 = 594（与 §15.2.4 的容量口径同源）
-        assert_eq!(label_for(PeriphRole::Fire, "fire_det", 594), Some("H₂"));
+        assert_eq!(label_for(PeriphRole::Fire, "fire_det", 594), Some("H2"));
         // 非 fire_det 块不归约（at 越界即 None）
         assert_eq!(label_for(PeriphRole::Hvac, "hvac_in", 7), None);
         // 不在白名单的键 ⇒ None（既有排除项的短标签同样不得存在）
@@ -1733,6 +1748,7 @@ mod tests {
             ui_text::STATION_OFFLINE, ui_text::NOT_READ, ui_text::RANGE_ERROR,
             ui_text::NOT_CONFIGURED, ui_text::NAME_UNKNOWN, ui_text::DETAIL_UNAVAILABLE,
             ui_text::UNAVAILABLE,
+            ui_text::STATION_DISABLED, ui_text::SECTION_STATION_DISABLED,
             ui_text::PERIPH_UNAVAILABLE, ui_text::FIRE_SOURCE_UNAVAILABLE,
             ui_text::NO_ACTIVE_ALARM_BIT, ui_text::BMS_ALARM_SOURCE_UNAVAILABLE,
             ui_text::PAGE_DEVICE_AND_PERIPH,
@@ -1749,7 +1765,8 @@ mod tests {
             ui_text::COLLAPSE, ui_text::RETRY, ui_text::PAGE_PREFIX, ui_text::PAGE_SUFFIX,
             ui_text::VERSION_MISMATCH, ui_text::FLASH_SAME_VERSION, ui_text::CHANNEL_DOWN_RETRYING,
         ];
-        assert_eq!(all.len(), 50, "§15.7.3「UI 固定文案」表逐条 = 50 条");
+        // `50 → 52` = R-3（2026-09-25）：新增「未启用」/「站点未启用」两条（§15.6.2 新情形）。
+        assert_eq!(all.len(), 52, "§15.7.3「UI 固定文案」表逐条 = 52 条");
         for s in all {
             assert!(!s.trim().is_empty(), "固定文案不得为空");
         }
@@ -1767,6 +1784,21 @@ mod tests {
                 assert_ne!(a, b, "取值降级语义 `{a}` / `{b}` 不得同串");
             }
         }
+        // **R-3 新增情形**（§15.6.2「站点未启用」）与三条既有语义**两两互异**（EDGE-24 同口径）：
+        // 「未启用」≠「站离线」（未配置 vs 已配置但离线）；「站点未启用」≠「外设数据不可用」
+        // （单站缺席 vs 整段源不可用）。缺任一条 ⇒ 屏上两义同串、现场误读。
+        for new in [ui_text::STATION_DISABLED, ui_text::SECTION_STATION_DISABLED] {
+            for old in [
+                ui_text::STATION_OFFLINE,
+                ui_text::PERIPH_UNAVAILABLE,
+                ui_text::NO_ACTIVE_ALARM_BIT,
+                ui_text::NOT_CONFIGURED,
+            ] {
+                assert_ne!(new, old, "「{new}」与既有语义「{old}」不得同串（两两互异）");
+            }
+        }
+        // 两条新文案彼此也不同（站状态行 vs 段级，语义不同）
+        assert_ne!(ui_text::STATION_DISABLED, ui_text::SECTION_STATION_DISABLED);
     }
 
     /// 消防迁移常量：枚举 6 值（权威 = PRD F21 展示表，**不是** `SIG_FIRE_LEVEL` 的 4 条）、

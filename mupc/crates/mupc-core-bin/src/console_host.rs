@@ -632,11 +632,18 @@ async fn get_audit_ops(State(st): State<HostState>) -> Response {
 ///
 /// 未接线 ⇒ **503**（非 2xx ⇒ 渲染端落 `Error::HttpStatus`，按"该端点不可用"处理），
 /// **绝不**回 `200` + 空目录冒充成功（空目录会被屏侧当成"该装置没有点表"）。
+///
+/// ⚠️ **非 2xx 的响应体「仅供日志 / 现场排障，不得上屏」**（R-4 产品裁定 2026-09-25）：
+/// 原因串是**外部装配错误串**（含生成字体 cmap 外的字，如 `_` / `=` / `:` / 英文单词）
+/// ⇒ 一旦被渲染成屏上文案就是**真机豆腐块**；且它是**运行期字符串**，既有码表覆盖率用例
+/// 天生扫不到。屏上该情形只显**本地固定文案** [`mupc_display_proto::peripherals_labels::ui_text::DETAIL_UNAVAILABLE`]
+/// + 「重试」（§15.6.2 ⑥）——与 `post_config_apply` 把外部错误串挡在 `message` 之外同款。
 async fn get_peripherals_catalog(State(st): State<HostState>) -> Response {
     match &st.peripherals {
         PeripheralConsoleSource::Ready { catalog, .. } => Json((**catalog).clone()).into_response(),
         PeripheralConsoleSource::Unavailable(reason) => {
             tracing::warn!(reason, "外设端点不可用，GET /peripherals/catalog 回 503");
+            // R-4：本 body **仅供日志 / 排障**（已进上面的 `warn`），**不得**被屏侧当文案上屏。
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("peripherals source unavailable: {reason}"),
@@ -658,6 +665,12 @@ async fn get_peripherals_fire_detectors(
     let (source, ) = match &st.peripherals {
         PeripheralConsoleSource::Ready { source, .. } => (source.clone(),),
         PeripheralConsoleSource::Unavailable(reason) => {
+            // R-4：body **仅供日志 / 排障**（外部错误串，含 cmap 外的字）⇒ **不得上屏**；
+            // 屏上该情形只显本地固定文案「明细不可用」+「重试」（§15.6.2 ⑥）。
+            tracing::warn!(
+                reason,
+                "外设端点不可用，GET /peripherals/fire_detectors 回 503"
+            );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("peripherals source unavailable: {reason}"),
@@ -682,7 +695,15 @@ async fn get_peripherals_fire_detectors(
         mupc_display_proto::MAX_PERIPH_PAGE_SIZE,
     ) {
         Ok(v) => v,
-        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+        // R-4：400 的 body 同样**仅供日志 / 排障**（`parse_page` 的英文原因串含 cmap 外的字）
+        // ⇒ **不得上屏**；屏上显本地固定文案「明细不可用」+「重试」。
+        Err(reason) => {
+            tracing::warn!(
+                reason,
+                "非法分页参数，GET /peripherals/fire_detectors 回 400"
+            );
+            return (StatusCode::BAD_REQUEST, reason).into_response();
+        }
     };
     let section = source.snapshot(now_ms());
     Json(fire_detector_page(&section, page, page_size)).into_response()
@@ -699,6 +720,8 @@ async fn get_peripherals_bms_alarms(
     let source = match &st.peripherals {
         PeripheralConsoleSource::Ready { source, .. } => source.clone(),
         PeripheralConsoleSource::Unavailable(reason) => {
+            // R-4：同 `fire_detectors` —— body 仅供日志 / 排障，**不得上屏**。
+            tracing::warn!(reason, "外设端点不可用，GET /peripherals/bms_alarms 回 503");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("peripherals source unavailable: {reason}"),
@@ -712,7 +735,11 @@ async fn get_peripherals_bms_alarms(
         mupc_display_proto::MAX_BMS_ALARM_PAGE_SIZE,
     ) {
         Ok(v) => v,
-        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+        // R-4：同 `fire_detectors` —— 400 body 仅供日志 / 排障，**不得上屏**。
+        Err(reason) => {
+            tracing::warn!(reason, "非法分页参数，GET /peripherals/bms_alarms 回 400");
+            return (StatusCode::BAD_REQUEST, reason).into_response();
+        }
     };
     let section = source.snapshot(now_ms());
     Json(bms_alarm_page(&section, page, page_size)).into_response()
@@ -782,7 +809,7 @@ fn value_by_key(
 /// **探测器明细分页投影**（纯函数，可单测；设计 §15.3.2 / §15.4 明细表）。
 ///
 /// 点位构造（**照设计公式**，不臆造）：
-/// - `k = 1`：在 `fire_sys` 块，`at` 8..13（`+0 地址`…`+5 H₂`）；
+/// - `k = 1`：在 `fire_sys` 块，`at` 8..13（`+0 地址`…`+5 H2`）；
 /// - `k ≥ 2`：在 `fire_det` 块，`at = 6(k−2)+1 … +6`。
 ///
 /// `total` = 登记数（`fire_det_count`，未取数 ⇒ `None`）；`expanded` = **实际可读只数**
@@ -1017,6 +1044,10 @@ fn bits_for(
 /// 直上屏会引入字库缺口（设计阶段实测 189 码位）并造成界面噪音；`label_for` 返回 `None`
 /// 是 W-3 **契约破损**（两表不同序 / 漏项），按"debug 断言 + 跳过该点"处置（见下）。
 ///
+/// **站集合 = 5 个 role 全集**（R-3 / §15.5.2「5 行站状态条」/ F25.5 行数与在线状态无关）：
+/// 由 [`crate::display_host::catalog_station_plan`] 给行（缺席 role 仍有行、`enabled=false`），
+/// `plan` 只用来取**已配置站**在帧内的白名单块 —— 缺席站**不进帧**（§15.2.2）。
+///
 /// `rev` 由 [`mupc_display_proto::catalog_rev`] 自算 ⇒ 与帧内 `catalog_rev` **同源同值**。
 pub fn build_peripheral_catalog(
     cfg: &mupc_southd::config::SouthStationsConfig,
@@ -1027,13 +1058,24 @@ pub fn build_peripheral_catalog(
     use mupc_display_proto::{
         CatalogBlock, CatalogBlockKind, CatalogPoint, CatalogStation, PeripheralCatalog,
     };
-    let mut stations = Vec::with_capacity(plan.len());
-    for st in plan {
-        let conf = cfg.stations.iter().find(|c| c.id == st.id);
-        let mut blocks = Vec::with_capacity(st.blocks.len());
-        for bp in &st.blocks {
-            let blk_conf = conf
-                .and_then(|c| c.regs.iter().find(|b| b.name == bp.name));
+    // ── R-3 产品裁定（2026-09-25）：catalog 的**站集合 = 5 个 role 全集** ────────────
+    // 不是 `plan`（帧内站集合）——帧内只含"已配置且有白名单块"的站，缺席站（如生产配置里
+    // 整段注释的 `pcs`）**没有数据可谈、不进帧**（§15.2.2 `PeripheralStation` 无 `enabled`
+    // 字段）；而 §15.5.2 要求装置段「5 行站状态条」**与在线状态无关**（F25.5）⇒ 行集合由
+    // catalog 驱动，`enabled` = 该 role 在 `south_stations` 中已配置（同源 = `peripheral_plan`）。
+    let station_plans = crate::display_host::catalog_station_plan(cfg);
+    let empty_blocks: [crate::display_host::PeripheralBlockPlan; 0] = [];
+    let mut stations = Vec::with_capacity(station_plans.len());
+    for cs in &station_plans {
+        let conf = cfg.stations.iter().find(|c| c.id == cs.id);
+        // 帧内站计划按 id 对齐（缺席站 ⇒ None ⇒ 零块；已配置站 ⇒ 其在帧内的白名单块）。
+        let plan_st = plan.iter().find(|p| p.id == cs.id);
+        let blocks_plan: &[crate::display_host::PeripheralBlockPlan] = plan_st
+            .map(|p| p.blocks.as_slice())
+            .unwrap_or(&empty_blocks);
+        let mut blocks = Vec::with_capacity(blocks_plan.len());
+        for bp in blocks_plan {
+            let blk_conf = conf.and_then(|c| c.regs.iter().find(|b| b.name == bp.name));
             let space = if bp.is_bit {
                 mupc_southd::point_table::AddrSpace::Bit
             } else {
@@ -1050,7 +1092,7 @@ pub fn build_peripheral_catalog(
                 let is_fire_det = bp.name == "fire_det";
                 // 屏用短标签（**唯一真源 = 短标签表**；`fire_det` 的展开行由 `label_for`
                 // 自带归约，故此处**不**再做 `at % 6` 的形状运算）。
-                let Some(label) = label_for(st.role, &bp.name, *at) else {
+                let Some(label) = label_for(cs.role, &bp.name, *at) else {
                     // **W-3 契约破损**（短标签表与白名单不同序 / 漏项）。处置取
                     // 「**warn 日志 + debug 断言 + 跳过该点**」而不是 `expect`：catalog 是
                     // **只读端点**，单点契约破损不得打挂整个端点（§15.3.2 只允许"该端点不可用"），
@@ -1063,7 +1105,7 @@ pub fn build_peripheral_catalog(
                     // 行数恒等」的可检测面之外（HMI 依 catalog 建行 ⇒ 缺行无法自发现）⇒ 必须有
                     // 日志兜底（零风险：不 panic、不改返回值、不新增依赖）。
                     tracing::warn!(
-                        role = ?st.role,
+                        role = ?cs.role,
                         block = %bp.name,
                         at = *at,
                         "短标签表白名单漏项 ⇒ catalog 少一行（W-3 契约破损，见 display-proto/peripherals_labels.rs）"
@@ -1094,12 +1136,12 @@ pub fn build_peripheral_catalog(
                     at: *at,
                     label: label.to_string(),
                     // 单位真源 = 短标签表（W-2）；`None` = 无量纲
-                    unit: unit_for(st.role, &bp.name, *at).map(str::to_string),
+                    unit: unit_for(cs.role, &bp.name, *at).map(str::to_string),
                     decimals,
-                    bits: bits_for(row, bp.is_bit, *at, st.role, &bp.name),
+                    bits: bits_for(row, bp.is_bit, *at, cs.role, &bp.name),
                     enum_labels,
                     decompose,
-                    group: mupc_display_proto::group_of(st.role, &bp.name, *at).to_string(),
+                    group: mupc_display_proto::group_of(cs.role, &bp.name, *at).to_string(),
                 });
             }
 
@@ -1115,9 +1157,11 @@ pub fn build_peripheral_catalog(
             });
         }
         stations.push(CatalogStation {
-            id: st.id.clone(),
-            role: st.role,
-            enabled: true, // 计划内的站 = 配置内已启用（未启用站不进计划）
+            id: cs.id.clone(),
+            role: cs.role,
+            // **真实判定**（R-3）：该 role 在 `south_stations` 中已配置（原为硬编码 `true`，
+            // 在 `pcs` 缺席时会让「未启用」分支永无生产者 ⇒ §15.3.2 / §15.6.2 不可达）。
+            enabled: cs.enabled,
             blocks,
         });
     }
@@ -5241,6 +5285,10 @@ stations:
     ///
     /// 输入 = **生产配置**（`deploy/config/mupc_core_config.production.yaml`，与现场同源），
     /// 覆盖 5 站（`pcs` 段在生产配置里注释掉 ⇒ 4 站 + 消防探测器区按模板解析）。
+    ///
+    /// ⚠️ **R-3（2026-09-25）**：catalog 站集合已扩为 **5 个 role 全集** ⇒ 缺席的 `pcs`
+    /// 现在**也在 `cat.stations` 里**（`enabled == false`、零块）。故本用例先按"是否在站配置里"
+    /// 分流：缺席站**不得**有块（无站点配置就查不到基址）；已配置站照旧逐点核。
     #[test]
     fn catalog_rows_hit_point_table_and_derive_decimals_from_scale() {
         use mupc_southd::point_table::{lookup_in, AddrSpace};
@@ -5253,11 +5301,27 @@ stations:
         let cat = build_peripheral_catalog(&cfg, &plan, 0);
 
         let mut checked = 0usize;
+        let mut disabled = 0usize;
         for st in &cat.stations {
-            let conf = cfg.stations.iter().find(|c| c.id == st.id).expect("站配置");
+            let Some(conf) = cfg.stations.iter().find(|c| c.id == st.id) else {
+                // 缺席站（R-3）：catalog 有行、但是 `enabled=false` 且**零块**
+                assert!(!st.enabled, "不在站配置里的站必须 enabled=false（{}）", st.id);
+                assert!(
+                    st.blocks.is_empty(),
+                    "缺席站不得携带任何块（{}：无站配置 ⇒ 不存在白名单投影）",
+                    st.id
+                );
+                disabled += 1;
+                continue;
+            };
+            assert!(st.enabled, "在站配置里的站必须 enabled=true（{}）", st.id);
             let south_role = conf.role;
             for blk in &st.blocks {
-                let bconf = conf.regs.iter().find(|b| b.name == blk.name).expect("块配置");
+                let bconf = conf
+                    .regs
+                    .iter()
+                    .find(|b| b.name == blk.name)
+                    .expect("块配置");
                 let space = match blk.kind {
                     mupc_display_proto::CatalogBlockKind::Discrete => AddrSpace::Bit,
                     mupc_display_proto::CatalogBlockKind::Scalar => AddrSpace::Reg,
@@ -5294,6 +5358,8 @@ stations:
         // 生产配置的外设行数（白名单内有配置的块）—— 与 §15.2.4 的容量分子同口径；
         // 生产 yaml 里 `pcs` 站整段被注释、`bms_alarm`/`fire_det` 按 count 展开 ⇒ 非 0 且规模量级正确
         assert!(checked > 500, "应覆盖 5 站白名单的主要部分，实测 {checked} 行");
+        // R-3：生产配置里只有 1 个 role 缺席（`pcs`，整段被注释）⇒ 恰 1 行 enabled=false
+        assert_eq!(disabled, 1, "生产配置缺席 role 应恰为 1（pcs），实测 {disabled}");
         // 抽样：mb_ui（scale 0.1 ⇒ 1 位）、mb_power（0.001 ⇒ 3 位）、bms_alarm（位点 0 位）
         let mb = cat.stations.iter().find(|s| s.id == "meter_batt").expect("meter_batt");
         let ui = mb.blocks.iter().find(|b| b.name == "mb_ui").expect("mb_ui");
@@ -5304,6 +5370,139 @@ stations:
         let alarm = bms.blocks.iter().find(|b| b.name == "bms_alarm").expect("bms_alarm");
         assert_eq!(alarm.points.len(), 288);
         assert_eq!(alarm.points[0].decimals, 0);
+    }
+
+    /// **R-3（产品裁定 2026-09-25）**：catalog 的**站集合 = 5 个 role 全集**
+    /// （§15.5.2 装置段「5 行站状态条」），`enabled` = **该 role 在 `south_stations` 中已配置**
+    /// （**真实判定**，不再是硬编码 `true`）。
+    ///
+    /// 覆盖两条（任务 R-3 用例要求）：
+    /// - **`pcs` 缺席 ⇒ `enabled == false`**：生产配置里 `pcs` 段**整段被注释**
+    ///   （`production.yaml:284-293`，T20 D6）⇒ ① §15.3.2 的「未启用」分支**有生产者**；
+    ///   ② 装置段仍能出满 **5 行**（F25.5：行数与在线状态**无关**）。
+    /// - **已配置站 ⇒ `enabled == true`**：生产配置的 `hvac` / `fire` / `bms` / `meter_batt`
+    ///   四个 role + 一份**显式带 `pcs` 站**的配置（证明"配置了就是 true"，不是恒 false）。
+    ///
+    /// **改什么会让本条变红**：把 `enabled` 写回常量 `true`（②缺席断言红）或常量 `false`
+    /// （①已配置断言红）；把站集合改回 `plan`（缺席行消失 ⇒ 行数断言红）。
+    #[test]
+    fn catalog_station_set_is_five_roles_with_real_enabled_flag() {
+        use mupc_display_proto::PeriphRole;
+
+        let parse = |y: &str| -> mupc_southd::config::SouthStationsConfig {
+            serde_yaml::from_str(y).expect("南向配置可解析")
+        };
+        // ⚠️ 生产配置顶层是 `CoreConfig`，`south_stations` 才是本函数入参。
+        let prod: crate::core_config::CoreConfig = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/mupc_core_config.production.yaml"
+        ))
+        .expect("生产配置可解析");
+        let prod_cfg = prod.south_stations;
+        let plan = crate::display_host::peripheral_plan(&prod_cfg);
+        let cat = build_peripheral_catalog(&prod_cfg, &plan, 0);
+
+        // ① 行集合 = 5 个 role 全集，顺序 = 设计 §15.5.2 的逐字顺序（与 CATALOG_STATION_ROLES 同源）
+        let ids: Vec<&str> = cat.stations.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["hvac", "fire", "bms", "meter_batt", "pcs"],
+            "§15.5.2：装置段站状态条 = 5 行（与在线状态无关，F25.5）"
+        );
+        assert!(
+            !cat.stations.iter().any(|s| s.role == PeriphRole::Unknown),
+            "`meter_grid` 不在 5 段 / 5 行之内（§15 范围外 #3）——不得顺手放进外设页"
+        );
+
+        // ② `pcs` 缺席（生产配置整段注释）⇒ enabled=false + 零块
+        let pcs = cat
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Pcs)
+            .expect("pcs 行");
+        assert!(
+            !pcs.enabled,
+            "`pcs` 未配置 ⇒ enabled=false（屏显「未启用」）"
+        );
+        assert!(pcs.blocks.is_empty(), "缺席站不得携带块");
+        // ②b **F25.5 的可测形式**：装置段行集合**不来自帧**。
+        // 反例：未接线 / 未采集时帧内**零站**（EDGE-22），而 catalog 仍恒 5 行 ⇒ 屏侧照 catalog
+        // 建行就与"在线状态"无关（离线/未采集**不删行**）。
+        let unwired = mupc_display_proto::PeripheralsSection::default();
+        assert!(
+            unwired.stations.is_empty(),
+            "前提：未采集 ⇒ 帧内零站（EDGE-22）"
+        );
+        assert_eq!(
+            cat.stations.len(),
+            5,
+            "catalog 行数与帧 / 在线状态无关（F25.5）"
+        );
+        // ③ 已配置站 ⇒ enabled=true
+        for role in [
+            PeriphRole::Hvac,
+            PeriphRole::Fire,
+            PeriphRole::Battery,
+            PeriphRole::MeterBatt,
+        ] {
+            let s = cat
+                .stations
+                .iter()
+                .find(|s| s.role == role)
+                .unwrap_or_else(|| panic!("{role:?} 行"));
+            assert!(s.enabled, "{role:?} 已在 south_stations ⇒ enabled=true");
+        }
+
+        // ④ 反例侧：把 `pcs` **真的配进** `south_stations` ⇒ 同一判定必须翻成 `true`
+        //    （证明 `enabled` 是真实判定，不是"Pcs 恒 false"的另一种硬编码）。
+        let with_pcs = r#"
+poll_ms: 1000
+stale_timeout_s: 5
+stations:
+  - id: hvac
+    role: hvac
+    port: "/dev/ttyS3"
+    interval_ms: 5000
+    regs:
+      - { name: hvac_in, func: input, addr: 0, count: 4, format: int16, scale: 0.1 }
+  - id: pcs
+    role: pcs
+    port: "/dev/ttyS7"
+    interval_ms: 1000
+    regs:
+      - { name: pcs_3zone, func: input, addr: 1000, count: 76, format: uint16, scale: 1.0 }
+"#;
+        let cfg_pcs = parse(with_pcs);
+        let plan_pcs = crate::display_host::peripheral_plan(&cfg_pcs);
+        let cat_pcs = build_peripheral_catalog(&cfg_pcs, &plan_pcs, 0);
+        assert_eq!(
+            cat_pcs.stations.len(),
+            5,
+            "站集合恒 5 行（配置里有没有 pcs 都一样）"
+        );
+        let pcs = cat_pcs
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Pcs)
+            .expect("pcs 行");
+        assert!(pcs.enabled, "`pcs` 已配置 ⇒ enabled=true");
+        assert!(
+            pcs.blocks.iter().any(|b| b.name == "pcs_3zone"),
+            "已配置的 `pcs` 必须带上其白名单块（否则本行只是空壳）"
+        );
+        let hvac = cat_pcs
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Hvac)
+            .expect("hvac 行");
+        assert!(hvac.enabled);
+        for role in [PeriphRole::Fire, PeriphRole::Battery, PeriphRole::MeterBatt] {
+            let s = cat_pcs
+                .stations
+                .iter()
+                .find(|s| s.role == role)
+                .unwrap_or_else(|| panic!("{role:?} 行"));
+            assert!(!s.enabled, "{role:?} 未配置 ⇒ enabled=false");
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -5364,12 +5563,19 @@ stations:
         /// `Role::Pcs` 登记区间（1000–1075）一致。**只补这一处**，不建第二套查询。
         const PCS_3ZONE_BASE_FROM_COMMENTED_CONFIG: u16 = 1000;
 
-        /// **设计点名豁免（恰 5 条）**：短标签的措辞**优先于**登记文本，故其用字允许不出现在
+        /// **设计点名豁免（恰 3 条）**：短标签的措辞**优先于**登记文本，故其用字允许不出现在
         /// 登记 `label` 里。四元组 `(role, block, at, 短标签)`**逐字**锁定 ⇒ 少一条 / 多一条 /
         /// 文案漂移都会红（防豁免表腐化成"忽略所有不匹配"）。
         ///
         /// ⚠️ 豁免**不是**"这条查不动就算了"：每条都会被下面的用例**反向验证**（判据确实
         /// 拒绝它）⇒ 一旦登记文本改得能被接受，用例会要求把该条从白名单里删掉。
+        ///
+        /// **R-1 收口（2026-09-25）**：原表有 **5 条**，其中两条是 `fire_sys`/`13` 与
+        /// `fire_det`/`6` 的 `H₂`（U+2082 不在登记文本内）。产品裁定把该上屏文案改为
+        /// **ASCII `H2`** 后，登记文本本身就是 ASCII `H2`（`point_table` 原文
+        /// `…数据 4 H2 浓度 ppm`）⇒ 判据「短标签字符集 ⊆ 登记文本字符集」**自然通过**
+        /// ⇒ 这两条**不再是豁免**（实测：保留会让下面的"反向必要性"断言直接红）
+        /// ⇒ 依"豁免表不得留下不必要项"**删除**，计数断言同步 `5 → 3`。
         const DESIGN_EXEMPTIONS: &[(PeriphRole, &str, u16, &str)] = &[
             // §15.4 P4 消防字段表「灭火瓶压力」（`fire_cylinder`）；登记文本为
             // 「钢瓶气压 kPa（部分产品无此功能…）」——「灭火瓶」是设计锁定的展示措辞。
@@ -5377,12 +5583,6 @@ stations:
             // §15.4 P4 总览带卡 + §15.7.3 分组标题「火警等级」；登记文本为
             // 「火警状态（枚举：…）」——「等级」的权威是 PRD §3.9 F21 展示表（非登记文本）。
             (PeriphRole::Fire, "fire_sys", 6, "火警等级"),
-            // §15.4 明细表列名 `+5 H₂`（＝ `FIRE_DET_TEMPLATE_LABELS[5]`，模板字面量锁定）；
-            // 登记文本写 ASCII `H2` ⇒ `₂`(U+2082) 不在登记文本内。
-            // ⚠️ 该字符在 NotoSansSC 里**无字形**（UI §3.6 补注 6 / 评审 G-2）⇒ 真机豆腐块
-            // 缺口（H-4 门禁项）。本用例**只记录**"设计字面量优先"，不掩盖该缺口。
-            (PeriphRole::Fire, "fire_sys", 13, "H₂"),
-            (PeriphRole::Fire, "fire_det", 6, "H₂"),
             // §15.5.2 PCS 字段表「直流中点电压」（`pcs_3zone_13` ↔ 登记 1012「中点电压 V」）；
             // 「直流」是设计写明的限定词。
             (PeriphRole::Pcs, "pcs_3zone", 13, "直流中点电压"),
@@ -5503,8 +5703,9 @@ stations:
             deviations.len(),
             deviations.join("\n")
         );
-        // ③ 豁免表：恰 5 条、且**每条都被真实命中**（没有"写了却不生效"的僵尸豁免）。
-        assert_eq!(exempted.len(), 5, "设计点名豁免恰 5 处，实测 {exempted:?}");
+        // ③ 豁免表：恰 3 条、且**每条都被真实命中**（没有"写了却不生效"的僵尸豁免）。
+        // `5 → 3` = R-1（2026-09-25）：`H₂` → ASCII `H2` 后，两条 H2 豁免被判据自然接受 ⇒ 删。
+        assert_eq!(exempted.len(), 3, "设计点名豁免恰 3 处，实测 {exempted:?}");
         assert_eq!(exempted.len(), DESIGN_EXEMPTIONS.len(), "豁免必须全部生效");
         // ④ 基址路径统计：27 行走"被注释的 pcs 块"，其余 420 行走站配置。
         assert_eq!(

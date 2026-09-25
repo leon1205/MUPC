@@ -29,7 +29,11 @@ use crate::frame::{
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PeripheralsSection {
-    /// 本段组帧时刻（Unix ms；0 = 未采集）。
+    /// 本段**重建**时刻（Unix ms；0 = 未采集）。
+    ///
+    /// ⚠️ 措辞与设计 §15.2.2 **逐字一致**（H-1：T21b 评审残留 —— 契约 crate 这处镜像注释
+    /// 曾漏改，造成设计↔契约不一致）。语义同 `display_host.rs` 采样侧：取 `now_ms()`，
+    /// **非**严格"组帧时刻"（与 `device` / `alarms` / `interlock` 三段逐段同构）。
     pub ts_ms: u64,
     /// 段可用性；`Default = false` ⇒ 「外设数据不可用」（EDGE-22），绝不伪装。
     pub available: bool,
@@ -308,7 +312,14 @@ pub struct CatalogStation {
     pub id: String,
     /// role 字面量。
     pub role: PeriphRole,
-    /// 该站是否在 `south_stations` 中启用（false ⇒ 屏侧在 P6「装置」段的站状态表显「未启用」）。
+    /// 该站是否在 `south_stations` 中启用（**判据 = 该 `role` 在 `south_stations` 中已配置**，
+    /// R-3 产品裁定 2026-09-25）。
+    ///
+    /// `false` ⇒ 屏侧在 P6「装置」段的站状态表该行显「**未启用**」（与「**站离线**」互异，
+    /// §15.6.2 新增情形）；段内该站各段（空调 / 电池 / 储能表 / PCS）显「**站点未启用**」。
+    /// **站集合 = 5 个 role 全集**（行数与在线状态**无关**，F25.5）⇒ 缺席站（如生产配置里
+    /// 整段注释的 `pcs`）在 catalog 里**仍有行**、只是 `enabled = false`；帧内则**不含**缺席站
+    /// （无任何数据可谈，见 §15.2.2 `PeripheralStation`）。
     pub enabled: bool,
     /// 块，顺序 = 站配置 `regs` 顺序。
     pub blocks: Vec<CatalogBlock>,
@@ -477,7 +488,7 @@ pub struct FireDetectorItem {
     pub co: PointValue,
     /// `+4` VOC ppm。
     pub voc: PointValue,
-    /// `+5` H₂ ppm。
+    /// `+5` H2 ppm（R-1 裁定：短标签取 ASCII `H2`；`₂` U+2082 字库无字形）。
     pub h2: PointValue,
 }
 

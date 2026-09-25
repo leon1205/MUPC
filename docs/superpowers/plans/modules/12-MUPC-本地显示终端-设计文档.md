@@ -1762,7 +1762,7 @@ cargo test -p local-display --features offscreen
 | N-11 | HMI 通道层已有版本拒绝：`Error::ProtoVersion(url, got, expected)` | `mupc/crates/local-display/src/error.rs:59`（变体声明）；`mupc/crates/local-display/src/channel.rs:455-459`（产生点） | 只需**归因与文案**（§15.6 情形③） |
 | N-12 | `ChannelStatus` **仅 3 态**：`Init / Connected / Down`，**无「版本不匹配」态**；**`Stale` 不属 `ChannelStatus`，而在独立枚举 `Freshness { Fresh, Stale }` 内**；`ScreenMode` 仅 `ChannelDown / Init / Live` | `mupc/crates/local-display/src/state.rs:45-52`（`ChannelStatus`）、`:56-59`（`Freshness`）、`:63-70`（`ScreenMode`）、`:294-299`（`freshness()`） | 需新增归因分支（§15.6 情形③）。**订正记录**：本节 v2.1-r1 曾写「`ChannelStatus` 4 态含 `Stale`」——**错误**，`state.rs:43` 的注释原文即「设计 §5.3 四种态里与主进程连通性相关的**三种**；新鲜度另由 `Freshness` 表达」 |
 | N-13 | `display` 配置段已有 `device/alarm/interlock_poll_ms`、`alarm_page_size`、`min_publish_interval_ms`；`validate()` fail-fast | `mupc/deploy/config/mupc_core_config.production.yaml:46-73`；契约侧 `mupc/crates/display-proto/src/config.rs:218-226`（越界即 `Err`）、`:60`（`MIN_MERGE_WINDOW_MS = 250`） | 新增 `periph_poll_ms` / `periph_page_size`（§15.1.1 / §15.3.2） |
-| N-14 | 消防「钢瓶气压未配置」接缝已存在但 **core-bin 零调用** | `mupc/crates/mupc-southd/src/scheduler.rs:752-760`（`cylinder_pressure_configured`） | 需显式接线（§15.2.2 站级标志 + §15.11） |
+| N-14 | 消防「钢瓶气压未配置」接缝已存在但 **core-bin 零调用** | **`mupc/crates/mupc-southd/src/scheduler.rs:1187`**（`SouthScheduler::cylinder_pressure_configured(&self, station_index: usize) -> bool`；`station_index` = `cfg.stations` 下标）。**订正（H-4，2026-09-25）**：原写 `SouthStations::cylinder_pressure_configured` 且行号 `:752-760` —— **类型名与行号双错**（`:752-760` 是 `SouthScheduler::new` 体内构造 `PortRunner` 的一段） | 需显式接线（§15.2.2 站级标志 + §15.11） |
 | N-15 | `south_stations.pcs` **整段注释**；`intercore` 当前**仅**读 1010 / 1013 / 1022–1024 / 1029–1032 | `production.yaml:236-284`（注释段）；`mupc/crates/intercore/src/transport/modbus.rs:170-172`（**文件私有**常量 `REG_I_A=1022`（`:170`）/ `REG_P_A=1029`（`:171`）/ `REG_P_TOTAL=1032`（`:172`），同属一路 FC04 3 区读）；`mupc/crates/intercore/src/pcs.rs:20` / `:22`（`REG_SOC=1010` / `REG_RUN_STATE=1013`） | F24 真源 = **intercore**（非 southd 站）⇒ **写入方缺口**（§15.1.3 报告项 R-28 / R-29） |
 | N-16 | `slow_tick` 的内容比较函数**显式忽略 `ts_ms`**（如 `device_changed`） | `display_host.rs:105-131`（`device_changed` / `alarms_changed` / `interlock_changed`） | 外设段的比较函数须同样忽略 `ts_ms` / `last_ok_ms`（否则每次采样都"变更"⇒ 发布率打满 4 Hz） |
 | N-17 | 帧段的时间戳：`DisplayFrame.ts_ms` = **组帧时刻**；`DEFAULT_STALE_MS = 2000` 供渲染端判「通道卡住」 | `frame.rs:24`；`mupc/crates/local-display/src/state.rs:292-297` | 帧级判据**不得**外推到外设值新鲜度（§15.2.3 口径澄清） |
@@ -2196,13 +2196,21 @@ pub fn catalog_rev(cat: &PeripheralCatalog) -> u32;
 
 | 端点 | 方法 | 参数 | 返回 | 用途 |
 |------|------|------|------|------|
-| `/v1/console/peripherals/catalog` | GET | — | `PeripheralCatalog`（白名单 555 条；`CatalogPoint` 实测 **118–346 B/条** ⇒ **≈64–188 KiB**） | P4 / P6 首次进入、或 `catalog_rev` 变化时读取（**一次性**；**不进帧**，故不受 64 KiB 帧预算约束） |
+| `/v1/console/peripherals/catalog` | GET | — | `PeripheralCatalog`（**5 站** = role 全集；白名单 555 条；`CatalogPoint` 实测 **118–346 B/条** ⇒ **≈64–188 KiB**） | P4 / P6 首次进入、或 `catalog_rev` 变化时读取（**一次性**；**不进帧**，故不受 64 KiB 帧预算约束） |
 | `/v1/console/peripherals/fire_detectors` | GET | `page`（1-based，默认 1）、`page_size`（默认 20，**≤50**） | `FireDetectorPage` | P4 探测器明细分页（F21.4 的「登记数与明细一致、不静默裁剪」） |
 | `/v1/console/peripherals/bms_alarms` | GET | `page`（1-based，默认 1）、`page_size`（默认 50，**≤100**） | `BmsAlarmPage` | P6 电池段「查看全部 288 位」下钻（F22.3） |
 
 **放控制通道的三条理由**：① **不改 D6**「读侧只有一个端点」——读通道保持"小、快、无副作用、客户端简单"；② 复用 `ConsoleClient` 的**非阻塞状态机**与"GET 失败走 HTTP 状态码、不把错误体当数据解析"的既有口径（§3.4 两条补注）；③ 与 `/config`（`GET /v1/console/config`）、`/logs`、`/audit` 同属**"一次性 / 带参 / 有限额的受控读"**（§3.4）。
 
 **失败语义（与既有 GET 一致）**：非 2xx ⇒ `ConsoleError::HttpStatus`（`console.rs:185`）⇒ 按"该端点不可用"处理，**不阻断实时值显示**（值走读通道）。
+
+> **R-4 产品裁定（2026-09-25）—— 服务端错误体不上屏**：非 2xx 的响应体（400 的非法分页原因 /
+> 503 的装配原因）是**外部错误串**，含生成字体 cmap 外的字（`法/越/界/∈/`` ` ``/[ ]/_/,/e/g/i` 等）
+> ⇒ 一旦渲染成屏上文案就是**真机豆腐块**；且它是**运行期字符串**，码表覆盖率用例天生扫不到
+> （H-2 盲区）。**裁定：屏上只显本地固定文案**「**明细不可用**」+「**重试**」（§15.6.2 ⑥），
+> **服务端原因串只进日志 / 现场排障**（`console_host.rs` 的三处 `tracing::warn`）。
+> 同款既有先例 = `post_config_apply` 把外部错误串挡在回执 `message` 之外。
+> **不改**服务端文案内容、**不扩字库**。
 
 ```rust
 // crates/display-proto/src/peripherals.rs（续）
@@ -2220,7 +2228,18 @@ pub struct PeripheralCatalog {
 pub struct CatalogStation {
     pub id: String,
     pub role: PeriphRole,
-    /// 该站是否在 `south_stations` 中启用（false ⇒ 屏侧在 P6「装置」段的站状态表显「未启用」）
+    /// 该站是否在 `south_stations` 中启用。
+    ///
+    /// **口径（R-3 产品裁定 2026-09-25）**：`enabled` = **该 `role` 在 `south_stations` 中
+    /// 已配置**（判据的数据源与帧内站计划 `peripheral_plan` **同源** = `cfg.stations`，
+    /// **不另造第二份"哪些站已配置"的判断**）。`false` ⇒ 屏侧在 P6「装置」段的站状态表该行
+    /// 显「**未启用**」（与「**站离线**」互异，见 §15.6.2）；段内该站各段（空调 / 电池 /
+    /// 储能表 / PCS）显「**站点未启用**」。
+    ///
+    /// **站集合 = 5 个 role 全集**（`hvac` / `fire` / `bms` / `meter_batt` / `pcs`，顺序固定；
+    /// 不含 `meter_grid`）⇒ 装置段恒 **5 行**，**与在线状态无关**（F25.5）。缺席站（如生产配置里
+    /// 整段注释的 `pcs`）**仍有本行**、只是 `enabled = false`；而**帧内不含缺席站**
+    /// （`PeripheralStation` 无 `enabled` 字段、缺席站无任何数据可谈，见 §15.2.2）。
     pub enabled: bool,
     pub blocks: Vec<CatalogBlock>,
 }
@@ -2330,7 +2349,7 @@ pub struct FireDetectorItem {
     pub data1: PointValue,  // `+2 数据 1`（整字；拆解见 catalog `decompose`，F21.5）
     pub co: PointValue,     // `+3` CO ppm
     pub voc: PointValue,    // `+4` VOC ppm
-    pub h2: PointValue,     // `+5` H₂ ppm
+    pub h2: PointValue,     // `+5` H2 ppm（R-1 裁定：上屏取 ASCII `H2`；字库无 U+2082 字形）
 }
 
 /// BMS 告警位下钻分页（F22.3）。**名称由 catalog 按下标提供**，本 DTO 不重复携带。
@@ -2378,7 +2397,7 @@ pub struct BmsAlarmItem {
 
 **探测器点名的构造公式（catalog 构建器直接照做；`PointConf` 无 `name` ⇒ 位置式）**：
 
-| 探测器 | 地址 | 状态 | 数据 1 | CO | VOC | H₂ |
+| 探测器 | 地址 | 状态 | 数据 1 | CO | VOC | H2 |
 |--------|------|------|--------|----|-----|----|
 | **k = 1**（在 `fire_sys` 块内） | `fire_sys_8` | `fire_sys_9` | `fire_sys_10` | `fire_sys_11` | `fire_sys_12` | `fire_sys_13` |
 | **k ≥ 2**（在 `fire_det` 块内） | `fire_det_{6(k−2)+1}` | `fire_det_{6(k−2)+2}` | `fire_det_{6(k−2)+3}` | `…+4` | `…+5` | `…+6` |
@@ -2467,7 +2486,7 @@ decompose: vec![
 | `fire_sys_status` | 消防系统状态 | `fire_sys_1`（整字位图） | — | — | 24 px（标注） | **逐位 16 行**：已定义 6 位（主电故障 / 备电故障 / 驱动电路 / 压力传感器 / 电磁阀 / 喷洒标记）显「位名 + 活跃 / 非活跃」；**未定义位显「未定义位 n」**，不猜语义（F21.1 / EX-09） |
 | `fire_cylinder` | 灭火瓶压力 | `fire_sys_2` | `kPa` | 0 | 32 px（过程量） | `cylinder_configured == Some(false)` ⇒ 显「**未配置**」（**忽略 `v`**；断言不含 `0 kPa`）；否则显数值 + `kPa`；**该点不产告警条目**（EDGE-23 / EX-11） |
 | `fire_trigger` | 探测器触发 | `fire_sys_3` / `_4` / `_5` | — | — | 24 px | 各 3 位：bit0 干接点触发 / bit1 复合触发 / **bit2 预留 ⇒ 显「预留」**（不显 0/1 语义） |
-| `fire_detector` | 探测器 | 汇总：`fire_det_count`；明细：`fire_sys_8.._13`（第 1 只）+ `fire_det_{6(k−2)+1..+6}` | 见下 | 见下 | 24 px | ① 汇总行：「登记 **N** 只 / 可读 **M** 只 / 报警 **x** / 故障 **y** / 离线 **z**」；`N != M` ⇒ **显式提示不一致**（**不得静默裁剪**，F21.4 / EX-12）。② 「查看明细」⇒ **分页表**（`page_size = 20`，末页不足不补齐）：列 = 序号 │ 地址 │ 状态 │ 烟雾 `dB/M`(1) │ 温度 `℃`(0) │ CO `ppm`(0) │ VOC `ppm`(0) │ H₂ `ppm`(0)；「上一页 / 下一页」（`≥48×48 px`）＋「收起」（`≥48×48 px`，返回汇总行） |
+| `fire_detector` | 探测器 | 汇总：`fire_det_count`；明细：`fire_sys_8.._13`（第 1 只）+ `fire_det_{6(k−2)+1..+6}` | 见下 | 见下 | 24 px | ① 汇总行：「登记 **N** 只 / 可读 **M** 只 / 报警 **x** / 故障 **y** / 离线 **z**」；`N != M` ⇒ **显式提示不一致**（**不得静默裁剪**，F21.4 / EX-12）。② 「查看明细」⇒ **分页表**（`page_size = 20`，末页不足不补齐）：列 = 序号 │ 地址 │ 状态 │ 烟雾 `dB/M`(1) │ 温度 `℃`(0) │ CO `ppm`(0) │ VOC `ppm`(0) │ H2 `ppm`(0)；「上一页 / 下一页」（`≥48×48 px`）＋「收起」（`≥48×48 px`，返回汇总行） |
 
 **明细列的展示规则（逐条可测）**：
 
@@ -2476,7 +2495,7 @@ decompose: vec![
 | 地址 | `+0 地址`（`fire_sys_8` / `fire_det_{…+1}`） | 原值（1–254）；未取数 ⇒ `--` +「未取数」 |
 | 状态 | `+1 状态`（整字） | 按 catalog `bits` 渲染 **2 个已定义位**（**报警总状态** bit12 / **故障总状态** bit14）——每格 = `LedIndicator`（圆 16 px，色 + 文字双通道）+ 位名 24 px；其余 14 位**不展开**（明细表列宽有限）。**bit15 通信状态不在此列**：点表登记明确「不猜、不造判据」且 PRD F21 未要求 ⇒ 屏显依 A1 口径为「未定义位 15」（**待 R-41 追认后才可能启用**） |
 | 烟雾 / 温度 | `+2 数据 1`（整字） | **按 catalog `decompose` 拆解**（高字节 ×0.1 `dB/M`；低字节 ×1.0 −55 `℃`）；**拆解只发生在 HMI 展示层**，帧内 `v` 与 `latest_values` 里保持**整字**（F21.5 / EX-13） |
-| CO / VOC / H₂ | `+3` / `+4` / `+5` | 原值 + `ppm`（0 位小数） |
+| CO / VOC / H2 | `+3` / `+4` / `+5` | 原值 + `ppm`（0 位小数）。**H2 列名取 ASCII**（`H₂` 的 `₂` U+2082 在字库源 `NotoSansSC-Regular.otf` 无字形 ⇒ 真机豆腐块；R-1 产品裁定 2026-09-25 改为 `H2`，与 `point_table` 登记文本一致） |
 
 **与既有联锁区共存的三条不冲突保证**：① 联锁区**字段、文案、写操作、二次确认级别一律不动**（§6.4 原文有效；写操作条**位置也不动**，见上表）；② 新增区**全部只读**，不产生写操作 ⇒ 不触发 PL-1 审计与 §3.6 F14 二次确认（PRD §3.9.1 第 2 条）；③ 视觉分隔与触摸目标（**常量取自 `theme.rs` 单一真源，页面不得写裸值**）：
 
@@ -2546,7 +2565,7 @@ decompose: vec![
 
 | 分组键 | 分组标题 | 内容 |
 |--------|----------|------|
-| `station_status` | 外设站状态 | 5 行站状态条（`hvac` / `fire` / `bms` / `meter_batt` / `pcs`）：站 id │ role 中文名 │ **在线 / 站离线** │ **最后成功时刻** │ 最近更新（F25.4 的**结构化字段**，非告警文本；EX-28）。**字段来源**：在线 ← `latest_values::station_is_active()`（**已存在**）；最后成功时刻 ← `station_last_poll_ms()`（**新增接口要求 R-38**；未落地 ⇒ 该列显 `--`，**不臆造、不由本侧自维护**）；最近更新 ← 各块 `ts_ms`。**版面**：行高 48、字号 24 px、同一行四段（UI §6.6.1）；**行数与在线状态无关**（离线行**不消失、不折叠**，F25.5） |
+| `station_status` | 外设站状态 | 5 行站状态条（`hvac` / `fire` / `bms` / `meter_batt` / `pcs`）：站 id │ role 中文名 │ **在线 / 站离线 / 未启用** │ **最后成功时刻** │ 最近更新（F25.4 的**结构化字段**，非告警文本；EX-28）。**字段来源**：在线 ← `latest_values::station_is_active()`（**已存在**）；最后成功时刻 ← `station_last_poll_ms()`（**新增接口要求 R-38**；未落地 ⇒ 该列显 `--`，**不臆造、不由本侧自维护**）；最近更新 ← 各块 `ts_ms`。**版面**：行高 48、字号 24 px、同一行四段（UI §6.6.1）；**行集合由 catalog 驱动**（`CatalogStation.enabled`，= **5 个 role 全集**），**行数与在线状态无关**（离线行**不消失、不折叠**，F25.5）。**缺席站（`enabled=false`）⇒ 该行显「未启用」**——与「**站离线**」**互异**（前者 = 该 role **未配置**、无任何数据可谈；后者 = 已配置但**当前**不可达，§15.6.2 情形 ⑦）；该站**各段**（空调 / 电池 / 储能表 / PCS）显「**站点未启用**」（**不是**「外设数据不可用」，那是整段源不可得，§15.6.2 情形 ⑤） |
 | `device_info` | 装置信息 | F8 既有六行（固件版本 / 编译时间 / 装置型号 / 序列号 / 本机服务地址（仅回环）/ 设备管理 IP），**顺序、文案与 §6.6 逐字一致** |
 
 **段「空调」（F20；站 `hvac`，`interval_ms = 5000`）**
@@ -2683,7 +2702,7 @@ decompose: vec![
 
 **验证**：`display_host` 单测以**假时钟**推进（不 `sleep`），断言「`latest_values` 写入 → 段缓存更新 → 发布」间隔 < 合并窗口上限；集成测试（stub 服务端）注入一次外设值变化，断言 ≤1.5 s 内新帧含该值；真机以时间戳探针复核（§14 R-05 同法）。
 
-#### 15.6.2 四种情形的屏上表现（逐条）
+#### 15.6.2 七种情形的屏上表现（逐条）
 
 | # | 情形（PRD ID） | 数据侧（mupcd） | 屏上表现（**唯一文案**） | 不变量 |
 |---|----------------|------------------|--------------------------|--------|
@@ -2692,7 +2711,8 @@ decompose: vec![
 | **③** | **帧版本不匹配**（EDGE-21 / F26.3） | 帧 `version = 3`（单一真源）；两端同版本发布（部署口径） | **≤3 s** 进入「版本不匹配」降级画面：灰底 + 「**屏与主进程版本不匹配：屏 v3 / 主进程 v2，请刷同版本固件**」+ 「最后成功 12:03:44」；**不黑屏、不显示半帧 / 混版帧、不显示任何数值** | 文案与④**字符串不相等**（现场排障需区分：一个刷固件、一个查进程）；`Incompatible` 为**粘性**态，须**一次成功帧**才清除（避免与偶发超时之间抖动） |
 | **④** | **通道断开**（EDGE-03） | 读通道端口消失 / 连续失败 > 3 s | 既有整屏降级：暗化 + 「**与主进程数据通道断开（重试中）**」+ 冻结标（可保留最近帧）；外设段随**整屏**进入该态 | **外设段不得**在通道断开时单独显示「站离线」（避免把"通道断"误读为"站离线"）——整屏层**优先于**段级语义 |
 | **⑤** | **外设段缺失 / 未采集**（EDGE-22） | `peripherals.available = false`（句柄未接线 / 快照不可得） | P4 消防区与 P6 外设各段显「**外设数据不可用**」（`--`/「未提供」）；**不得**显 0 / 「正常」/「无告警」 | 与「无活跃告警位」互异（EDGE-24 同口径） |
-| **⑥** | **明细端点不可用**（`/fire_detectors`、`/bms_alarms` 非 2xx） | — | 下钻视图显「**明细不可用（`<message>`）**」+ 「重试」；汇总行仍按帧内数据展示 | **不阻断**实时值显示（值走读通道，与明细端点解耦） |
+| **⑥** | **明细端点不可用**（`/fire_detectors`、`/bms_alarms` 非 2xx） | — | 下钻视图显「**明细不可用**」+ 「**重试**」（= `ui_text::DETAIL_UNAVAILABLE` + `ui_text::RETRY`）；汇总行仍按帧内数据展示。**服务端 400/503 的原因串只进日志 / 现场排障，不上屏**（R-4 产品裁定 2026-09-25：它是外部错误串、含 cmap 外的字 ⇒ 上屏必出豆腐块；同款既有先例 = `post_config_apply` 的固定 `message` 口径） | **不阻断**实时值显示（值走读通道，与明细端点解耦） |
+| **⑦** | **站点未启用**（R-3 产品裁定 2026-09-25；`south_stations` 里无该 `role` 的站） | catalog `CatalogStation.enabled = false`（判据 = 该 role 是否已配置；**帧内不含该站**，§15.2.2） | **装置段**该行显「**未启用**」= `ui_text::STATION_DISABLED`；段内该站各段（空调 / 电池 / 储能表 / PCS）显「**站点未启用**」= `ui_text::SECTION_STATION_DISABLED` | ⚠️ **四条文案两两互异**（沿用 EDGE-24 同口径）：「未启用」≠「站离线」（未配置 vs 已配置但当前不可达）、「站点未启用」≠「外设数据不可用」（单站缺席 vs 整段源不可得）、亦 ≠「无活跃告警位」。**行数与在线状态无关**：装置段恒 5 行（F25.5），缺席站**不删行**、只改该行文案 |
 
 **HMI 侧的改动落点（§15.11 逐文件）**：
 
@@ -2782,7 +2802,7 @@ pub enum MissingReason {
 
 | 用途 | 文案 |
 |------|------|
-| 站位/取值降级 | 站离线 / 未取数 / 数据异常 / 未配置 / 名称未获取 / 明细不可用 / 不可用 |
+| 站位/取值降级 | 站离线 / 未取数 / 数据异常 / 未配置 / 名称未获取 / 明细不可用 / 不可用 / **未启用** / **站点未启用**（后两条 = R-3 裁定 2026-09-25，§15.6.2 情形 ⑦） |
 | 段级降级 | 外设数据不可用 / 消防源不可用 / 无活跃告警位 / BMS 告警源不可用 / 装置与外设 |
 | 位语义 | 未定义位 / 预留 / 活跃 / 非活跃 / 在线 / 离线 / 报警总状态 / 故障总状态 / 通信状态 |
 | 枚举文案 | 正常 / 一级报警 / 二级火警 / 未定义 / 紧急启动 / 紧急停止 / 未知 / 停止 / 运行 |
@@ -2894,7 +2914,7 @@ pub enum MissingReason {
 | 4 | `mupc/crates/display-proto/src/config.rs` | `DisplayConfig` 增 `periph_poll_ms`（默认 500，`[1,1000]`）/ `periph_page_size`（默认 20，≤50）；`validate()` 同步 | S |
 | 5 | `mupc/crates/data-processing/src/latest_values.rs` | **【他路设计负责】**本节只登记**消费契约**（§15.1.2 ①/③）与 **R-28 的第二写入方**、**R-38 的 `station_last_poll_ms` getter** 两项诉求 | — |
 | 6 | `mupc/crates/mupc-core-bin/src/display_host.rs` | 慢拍 D（`run_periph_sampler` / `sample_peripherals` / `peripherals_changed`）；`peripherals_cache`；`build_frame` 组装 + 预算守卫；`PeripheralSource` 注入接缝 | L |
-| 7 | `mupc/crates/mupc-core-bin/src/startup.rs` | `SouthSink` 写 `latest_values`（承 N-4）；`CylinderPressureQuery` 适配器（包 `SouthStations::cylinder_pressure_configured`，N-14）；display 装配注入 | M |
+| 7 | `mupc/crates/mupc-core-bin/src/startup.rs` | `SouthSink` 写 `latest_values`（承 N-4）；`CylinderPressureQuery` 适配器（包 **`SouthScheduler::cylinder_pressure_configured(station_index)`** —— 实位于 `mupc/crates/mupc-southd/src/scheduler.rs:1187`；原文写 `SouthStations::…` / `:752-760` 系**类型名与行号双错**，H-4 订正；N-14）；display 装配注入 | M |
 | 8 | `mupc/crates/mupc-core-bin/src/console_host.rs` | 三个只读 GET + catalog 构建器（白名单投影 + `rev`） | M |
 | 9 | `mupc/crates/local-display/src/state.rs` | `ChannelStatus::Incompatible{got,expected}` / `ScreenMode::VersionMismatch` / `MissingReason` 五态 / `PeriphView` 派生 | M |
 | 10 | `mupc/crates/local-display/src/channel.rs` | 把 `Error::ProtoVersion` 归一为 `Incompatible`（粘性） | S |
@@ -2925,6 +2945,7 @@ pub enum MissingReason {
 | v2.0-r2 | GUI 框架由 Slint 切换为 LVGL（Slint 闭源商用嵌入式交付必须付费商业许可） |
 | v2.0-r3 | LVGL spike 实测整改：字体链、体积预算、CJK 字形判据与构建硬知识按实测订正 |
 | v2.0-r4 | LVGL v9.5.0 API 事实订正；`LV_MEM_SIZE` 按实施期实测定稿 1 MB |
+| **v2.1-r6（2026-09-25）** | **T21b2「裁定落地 + 评审残留收口」（仅改文字 / 注释 + 契约文案取值；不构成重新评审）** —— 落 **T21a / T21b 评审**的 4 条**产品裁定**与 2 条残留，**为 T21c（HMI 显示面）清口径**（不落地则 HMI 会照错口径实现）：<br>① **R-1**：探测器第 6 位短标签由 `H₂` 改 **ASCII `H2`**（`₂` U+2082 在 `NotoSansSC-Regular.otf` **无字形** ⇒ 任何档位都渲染不出、真机必出豆腐块；且 `point_table` 登记文本本写 `H2`）⇒ §15.4 明细表列名 / §15.3.2 `FireDetectorItem.h2` 注释同步；`display-proto` 短标签表 + 字库码表（`464 → 463` 字）同批改；**原两条 `H₂` 豁免随之删除**（改 ASCII 后判据自然通过 ⇒ 设计点名豁免 `5 → 3`）。<br>② **R-2**：字库工具链加**护栏**（`fonts/extract_charset.py`）——重跑结果 ⊉ 入库码表 ⇒ **响亮失败**（防"静默丢字 ⇒ 屏上豆腐块"）；净增（当前 +22，来自 UI §3.6 单元格内叙述性文字）⇒ 打印但不失败；口径同见 `gen_fonts.sh` 头部。<br>③ **R-3**：**D6 站集合裁定为 5 个 role 全集**（`hvac` / `fire` / `bms` / `meter_batt` / `pcs`）⇒ §15.3.2 `CatalogStation.enabled` 写明**口径 = 该 role 在 `south_stations` 中已配置**（同源 = 帧内 `peripheral_plan`）；§15.5.2 装置段写明**缺席站 ⇒ 显「未启用」（与「站离线」互异）**；§15.6.2 **补情形 ⑦「站点未启用」**（含四条文案两两互异 + 行数与在线状态无关 F25.5），并据此把该节标题「四种情形」订正为**七种**；§15.7.3 新增「未启用 / 站点未启用」两条 UI 固定文案。**帧内不含缺席站**（`PeripheralStation` 无 `enabled`、缺席站无数据可谈 ⇒ 行集合由 catalog 驱动）。<br>④ **R-4**：§15.6.2 ⑥ 删去「（`<message>`）」⇒ 下钻失败**屏上只显本地固定文案**「明细不可用」+「重试」，**服务端 400/503 原因串只进日志**（含 cmap 外的字 ⇒ 上屏必出豆腐块；同款先例 = `post_config_apply`）；§15.3.2 补该裁定。<br>⑤ **H-1**：`display-proto/src/peripherals.rs` 段 `ts_ms` 的镜像注释由「本段**组帧**时刻」改为「本段**重建**时刻」（与 §15.2.2 / `display_host.rs` 一致；T21b 漏改的第三处）。<br>⑥ **H-4**：§15.11 #7 与 §15.0 的 N-14 错误 API 名 / 行号订正为 **`SouthScheduler::cylinder_pressure_configured(station_index: usize)`（`crates/mupc-southd/src/scheduler.rs:1187`）**（原文 `SouthStations::…` / `:752-760` 系类型名与行号双错）。<br>**同时**：**12-UI 设计文档** §3.6 用字表移除 `₂`、`464 → 463 字` 与缺口 `3 → 2` 如实登记，P4 明细列名改 `H2`，并加 R-2 护栏说明。**未改**：PRD（含 12 号 PRD §3.9 的 `H₂` 措辞 —— 属**设备通道语义**描述、非上屏文案，回写需求不在本任务授权内，**如实登记**）、01 / 02 / 03 号设计、任何既有门禁标记（文首 `[DESIGN_APPROVED: 2026-09-11]` / `[DESIGN_APPROVED: 2026-09-23]` **原文未动**，与 r4 / r5 先例一致） |
 | **v2.1-r5（2026-09-25）** | **勘误（仅一行；不构成重新评审）** —— §15.2.2 `PeripheralsSection.ts_ms` 的字面注由「本段**组帧**时刻」改为「本段**重建**时刻」。**依据**：T20 生产侧评审 **(B) D3** 实测——该字段在 `display_host.rs` 的**采样侧**取 `now_ms()`（与既有 `device` / `alarms` / `interlock` 三段**逐段同构**），组帧只克隆，故它不是"组帧时刻"；但**无消费者**（内容比较显式忽略时标，§15.2.3 亦只许块级时标作"信息性"、明令**不得据此判定**）⇒ **接受该口径、只订正措辞**，不重构、不改字段类型与语义、不改任何门禁标记。**同步**：`mupc/crates/mupc-core-bin/src/display_host.rs` 该段构造处的注释同款改字（**代码零行为改动**）。**未改**：本文件 §1–§14、§15 其它正文、PRD、01/02/03 号设计、`display-proto` 任何代码、任何既有门禁标记 |
 | **v2.1-r4（2026-09-24）** | **R-45 状态回写（仅一行；不构成重新评审）** —— 02 号「块级采集周期覆盖」能力 **T8–T10 已落地**（S3b-3：块级 `interval_ms` + 调度器读组化；首例 `hvac_di` 位块 1000 ms 已入生效配置 `mupc/deploy/config/mupc_core_config.production.yaml`）⇒ §15.9 **R-45** 那一行的状态由「**需求已立（02 PRD §10 / 02 设计 §12），实现待 S3b-3**」订正为「**02 号侧已实现**」，同格内两处随之订正的重述（「该能力尚未落地」/「能力"需求已立"但实现仍未落地」）。**该行原有的两条边界声明原样保留**（① 只承诺"告警位以更快周期被采集"、不承诺 F25.3 端到端 ≤2 s；② F25.4 判定下界 `stale_timeout_s` = 5 s 为阈值语义、与轮询节奏无关 ⇒ 口径 B 仍 6.35 s）；**降级口径与"不阻塞本次实现"结论不变**。**未改**：本文件 §1–§14、§15 其它正文（含 §15.6.1 约束 3 的"未落地"表述，属另一行、本轮未动）、PRD、01/02/03 号设计、任何代码、任何既有门禁标记 |
 | **门禁（2026-09-23）** | **`[DESIGN_APPROVED: 2026-09-23, 设计评审员]`（仅对 §15 增量）** —— **三审通过**。v2.1-r3 自述的 5 严重 + 6 中等**逐条独立复算 + 源码取证核实**：LVGL 四处行号与公式、`LV_DPI_DEF = 130 ⇒ 13 px`、净距 `pad_column − 2×min((pad_column/2)+1+(pad_column&1), 13)`（16→−2、≤24→−2、≥42→16）、`5×185 + 4×16 = 989` 几何等价；R-42 依据（`01 PRD :1042` / `:1279` / `:773`）；点表常量归属；容量表四格 + 上界四格 + 反证下界 + `k_max = 111`；P6 **428 + 11**、P4 n=100 **607**；口径 A **1.35 s** / B **6.35 s**；§15.7.3 去重 **31**；`file:line` 回源（含 `slow_tick :799`）全部相符。**4 项文字级订正不阻塞编码**（见评审报告）。 |
