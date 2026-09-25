@@ -4,7 +4,7 @@
 //!
 //! | 方向 | 入口 | 产出 |
 //! |------|------|------|
-//! | 网络 → 屏（**回执路由**） | [`route`] | [`RouteDecision`]：**哪个端点 ⇒ 调哪个页的哪个方法**（设计 §3.4 的 8 端点逐条对应） |
+//! | 网络 → 屏（**回执路由**） | [`route`] | [`RouteDecision`]：**哪个端点 ⇒ 调哪个页的哪个方法**（设计 §3.4 的 8 端点 + §15.3.2 的 3 个外设端点，逐条对应） |
 //! | 屏 → 网络（**意图 → 请求载荷**） | [`log_query_string`] / [`audit_query_string`] | §3.4 的查询串（多值一律**重复键**，2026-09-15 补充约定） |
 //!
 //! # 为什么要抽成纯函数（而不是直接写在 `app.rs` 的 `tick` 里）
@@ -31,8 +31,9 @@
 use std::fmt;
 
 use mupc_display_proto::{
-    AuditPage, ConfigPatch, ConfigView, ConsoleEndpoint, ControlCode, ControlResponse,
-    InterlockOpAck, InterlockOpPayload, LogPage, LogRange, OpOption,
+    AuditPage, BmsAlarmPage, ConfigPatch, ConfigView, ConsoleEndpoint, ControlCode,
+    ControlResponse, FireDetectorPage, InterlockOpAck, InterlockOpPayload, LogPage, LogRange,
+    OpOption, PeripheralCatalog,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -40,6 +41,7 @@ use serde_json::Value;
 use crate::console::{encode_query, ConsoleOutcome};
 use crate::ui::pages::p3_logs::LogQuery;
 use crate::ui::pages::p5_audit::AuditQuery;
+use crate::ui::shell::NavPage;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 线上载荷 + 路由决策
@@ -90,6 +92,33 @@ pub enum RouteDecision {
     /// （它保留给"客户端**本地能判定**状态变化"的场合，见该方法的文档与 `p4_interlock.rs` 的
     /// **IL12**）。**不得**为了"让那个入口有用"而在本层重新按 `code` 猜语义。
     InterlockResult(ControlResponse<InterlockOpAck>),
+
+    // ── U-73 外设（§15.3.2 的三个只读端点；T21c-3 接线）─────────────────────
+    /// `GET /v1/console/peripherals/catalog` 成功 ⇒ **同一份 catalog 供两页**：
+    /// `P4InterlockPage::set_catalog` **且** `P6SystemPage::set_catalog`
+    /// （§15.3.1：P4/P6 首次进入或 `catalog_rev` 变化时**一次性**读取）。
+    ///
+    /// **没有"失败"变体**（刻意的）：取值失败时**什么都不做**才是正确语义 ——
+    /// 页面保持既有态（从未取到 ⇒ 中文名位显「名称未获取」而**值照常显示**；
+    /// 重取失败 ⇒ 保留旧 catalog）。**不得**用 `clear_catalog()` 表达失败：
+    /// 那会把"已取到的名字"抹掉（§15.3.1 的「保留旧 catalog」）。
+    PeripheralCatalog(PeripheralCatalog),
+    /// `GET /v1/console/peripherals/fire_detectors` 成功 ⇒
+    /// `P4InterlockPage::set_fire_page(&FireDetectorPage)`（F21.4 探测器明细分页）。
+    FireDetectorPage(FireDetectorPage),
+    /// 探测器明细端点**不可用**（非 2xx / 连接 / 超时 / 解码）⇒
+    /// `P4InterlockPage::set_fire_page_failed()`：下钻视图显「明细不可用」+「重试」。
+    ///
+    /// **只传失败事实、不传错误串**（**R-4 产品裁定 2026-09-25**）：服务端 400/503 的原因串
+    /// 含生成字体 cmap 外的字（上屏必出豆腐块），**只进日志 / 现场排障**。同款既有先例 =
+    /// `post_config_apply` 的固定 `message` 口径。
+    FireDetectorUnavailable,
+    /// `GET /v1/console/peripherals/bms_alarms` 成功 ⇒
+    /// `P6SystemPage::set_bms_page(&BmsAlarmPage)`（F22.3 的 288 位下钻）。
+    BmsAlarmPage(BmsAlarmPage),
+    /// BMS 告警下钻端点**不可用** ⇒ `P6SystemPage::set_bms_page_failed()`
+    /// （文案与 R-4 口径同 [`RouteDecision::FireDetectorUnavailable`]）。
+    BmsAlarmUnavailable,
 }
 
 /// 路由失败（**响亮**，不静默丢弃）。
@@ -149,6 +178,16 @@ pub fn route(outcome: &ConsoleOutcome<RawPayload>) -> Result<RouteDecision, Rout
             ConsoleEndpoint::LogsTargets => Ok(RouteDecision::LogsTargets(decode(ep, payload)?)),
             ConsoleEndpoint::Audit => Ok(RouteDecision::Audit(decode(ep, payload)?)),
             ConsoleEndpoint::AuditOps => Ok(RouteDecision::AuditOps(decode(ep, payload)?)),
+            // U-73 §15.3.2 的三个只读端点（**失败**不在这里 —— 见 `page_failure_decision`）。
+            ConsoleEndpoint::PeripheralsCatalog => {
+                Ok(RouteDecision::PeripheralCatalog(decode(ep, payload)?))
+            }
+            ConsoleEndpoint::PeripheralsFireDetectors => {
+                Ok(RouteDecision::FireDetectorPage(decode(ep, payload)?))
+            }
+            ConsoleEndpoint::PeripheralsBmsAlarms => {
+                Ok(RouteDecision::BmsAlarmPage(decode(ep, payload)?))
+            }
             _ => Err(RouteError::Kind(ep)),
         }
     }
@@ -270,6 +309,78 @@ fn local_unavailable<T>(request_id: &str, message: &str, at_ms: u64) -> ControlR
         None,
         at_ms,
     )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1″. U-73 外设端点：**失败面** + **catalog 的读取时机**（T21c-3 接线）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **有页面就地失败面**的读端点：`endpoint` 失败（非 2xx / 连接 / 超时 / 解码）⇒
+/// 该端点的「不可用」决策；**无**页面失败面的端点 ⇒ `None`（走既有降级通道）。
+///
+/// # 为什么单开一条（而不是塞进 [`transport_failure_decision`]）
+///
+/// [`transport_failure_decision`] 是**写端点**的"本地合成回执"通道：它把失败包装成一条
+/// `ControlResponse` 送进页面的 `show_result`。而本函数服务的两条端点**没有回执入口**，
+/// 页面暴露的是**无参**的 `set_fire_page_failed()` / `set_bms_page_failed()`
+/// （§15.6.2 ⑥：屏上「明细不可用」+「重试」是**本地固定文案**）⇒ 决策本身就是"失败事实"
+/// 的全部，**不携带任何服务端串**（**R-4**：400/503 的原因串只进日志）。
+/// 两种"失败"的**载荷形态**不同（`ControlResponse` vs 无载荷），合并会把 R-4 的口径搞糊。
+///
+/// # 为什么 catalog **不在**此列（刻意的）
+///
+/// §15.3.1 给的降级是「**保留旧 catalog** + 中文名位显「名称未获取」而**值照常显示**」——
+/// 这是一个**什么都不做**即可达成的态（页面默认就没有 catalog）。若在这里返回一个
+/// "catalog 不可用"决策去调 `clear_catalog()`，反而会把**已经取到的名字抹掉**，
+/// 与「保留旧 catalog」相反。故 catalog 失败 ⇒ `None` + 一行 stderr（调用方记）。
+pub fn page_failure_decision(endpoint: ConsoleEndpoint) -> Option<RouteDecision> {
+    match endpoint {
+        ConsoleEndpoint::PeripheralsFireDetectors => Some(RouteDecision::FireDetectorUnavailable),
+        ConsoleEndpoint::PeripheralsBmsAlarms => Some(RouteDecision::BmsAlarmUnavailable),
+        _ => None,
+    }
+}
+
+/// 该页是否会用到外设元数据（catalog）——**首次进入即取**的判据（设计 §15.3.1）。
+///
+/// P4（`Interlock`，F21 消防）与 P6（`System`，F20/F22–F24「装置与外设」）**同一份 catalog**。
+pub fn periph_metadata_page(p: NavPage) -> bool {
+    matches!(p, NavPage::Interlock | NavPage::System)
+}
+
+/// catalog 的**读取时机**判据（设计 §15.3.1；**纯函数**，无 LVGL、无 I/O）。
+///
+/// 两个触发源（**只有**这两个）：
+/// 1. **首次进入** P4 / P6（`on_periph_page && !entered_before`）；
+/// 2. 帧内 `catalog_rev` 与本地持有的 `rev` **不等**（`frame_rev != held_rev`）。
+///
+/// # 「一次性」语义怎么成立（`held_rev` 的契约）
+///
+/// 本函数**只**看"本拍的两个 rev 是否相等"。接线层（`App::tick_periph`）在**发起请求时**
+/// 就把 `held_rev` 预置成当拍的 `frame_rev`（回执到达后再用响应里的 `cat.rev` 校正）⇒
+/// 同一 rev **不会**在 1 Hz 主拍上被反复取（这正是 §15.3.1 的「一次性」）。
+/// 相反，若接线层只在**回执到达后**才更新 `held_rev`，那么在飞期间的每一拍都会命中
+/// "rev 不等" ⇒ 反复发起（被 `is_busy()` 挡住 ⇒ 表现为"永远在取 catalog"）。
+///
+/// # 首次进入判据为何要求 `on_periph_page`
+///
+/// 帧从第 1 拍就有，而用户可能从头到尾不进 P4 / P6 ⇒ **不得**在开机时就取 catalog
+/// （那是"每次开机一次无用请求"，与"首次进入才取"的措辞相反）。
+pub fn catalog_due(
+    on_periph_page: bool,
+    entered_before: bool,
+    frame_rev: Option<u32>,
+    held_rev: Option<u32>,
+) -> bool {
+    if on_periph_page && !entered_before {
+        return true;
+    }
+    // 只在**两侧都知道**时比：`held_rev = None` = 还没拿到过任何 catalog（页面自会显
+    // 「名称未获取」），此时**不**把它当成"rev 变化"（否则每拍都会命中）。
+    match (frame_rev, held_rev) {
+        (Some(r), Some(h)) => r != h,
+        _ => false,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -438,6 +549,12 @@ pub enum ControlIntent {
     AuditQuery(AuditQuery),
     /// 读：审计「加载更多」（`page` = 当前页 + 1）。
     AuditLoadMore(AuditQuery),
+    /// 读：P4 消防「查看明细 / 上一页 / 下一页」（载荷 = 目标页码，1 起；§15.3.2
+    /// `GET /peripherals/fire_detectors`）。页大小由接线层按契约常量给（不由页面带）。
+    FireDetectorPage(u32),
+    /// 读：P6 电池段「查看全部 288 位」下钻的翻页（载荷 = 目标页码，1 起；§15.3.2
+    /// `GET /peripherals/bms_alarms`）。
+    BmsAlarmPage(u32),
 }
 
 impl ControlIntent {
@@ -492,10 +609,18 @@ mod tests {
     /// 一条最小 `AuditPage` 字面量。
     const AUDIT_PAGE: &str =
         r#"{"entries":[],"page":1,"page_size":20,"has_more":false,"newest_ts_ms":null,"available":true}"#;
+    /// 一条最小 `PeripheralCatalog` 字面量（`rev` 非 0 ⇒ 可判"解到的是本端点"）。
+    const CATALOG: &str = r#"{"rev":7,"generated_ms":1,"stations":[]}"#;
+    /// 一条最小 `FireDetectorPage` 字面量。
+    const FIRE_PAGE: &str = r#"{"page":2,"page_size":20,"total":null,"expanded":3,
+        "has_more":false,"available":true,"items":[]}"#;
+    /// 一条最小 `BmsAlarmPage` 字面量（含 1 条位项 ⇒ 可判载荷真的解开了）。
+    const BMS_PAGE: &str = r#"{"page":1,"page_size":50,"total":288,"active_total":4,
+        "has_more":true,"available":true,"items":[{"at":5,"active":true}]}"#;
 
-    // ── 路由表：8 个端点**逐条**钉死 ─────────────────────────────────────────
+    // ── 路由表：11 个端点**逐条**钉死（8 个 B3 端点 + U-73 的 3 个外设端点）─────
 
-    /// **本单元最关键的一条**：8 个端点 → 目标页面/方法，逐条断言。
+    /// **本单元最关键的一条**：B3 的 8 个端点 → 目标页面/方法，逐条断言。
     ///
     /// **改什么会让本条变红**（**实测**，见交付报告「破坏性探针清单」）：把 [`route`] 里
     /// `ConsoleEndpoint::Logs` 那一臂改成 `RouteDecision::Config(..)` ⇒ 第 3 条立刻红
@@ -719,6 +844,156 @@ mod tests {
         );
     }
 
+    // ── U-73 外设三端点：路由 / 失败面 / catalog 读取时机 ───────────────────
+
+    /// 三个外设端点各自路由到**自己的**决策（**不得**互相串台，也不得落进 8 端点里的任何一条）。
+    ///
+    /// **改什么会让本条变红**：把 `PeripheralsFireDetectors` 那一臂写成
+    /// `RouteDecision::PeripheralCatalog(..)` ⇒ 第 2 条红；把 `BmsAlarmPage` 与
+    /// `FireDetectorPage` 互换 ⇒ 第 2 / 3 条红；删掉任一臂（落进 `_ => Err(Kind)`）⇒ 该条红。
+    #[test]
+    fn peripheral_endpoints_route_to_their_own_decisions() {
+        // ① catalog（`rev` 真的解出来了 ⇒ 不是"随便一个 Default"）
+        assert!(
+            matches!(
+                route(&query(ConsoleEndpoint::PeripheralsCatalog, CATALOG)),
+                Ok(RouteDecision::PeripheralCatalog(c)) if c.rev == 7
+            ),
+            "catalog 必须路由到 PeripheralCatalog 决策（供 P4 + P6 两页）"
+        );
+        // ② 探测器分页
+        assert!(
+            matches!(
+                route(&query(ConsoleEndpoint::PeripheralsFireDetectors, FIRE_PAGE)),
+                Ok(RouteDecision::FireDetectorPage(p)) if p.page == 2 && p.expanded == 3
+            ),
+            "fire_detectors 必须路由到 P4 的 set_fire_page 决策"
+        );
+        // ③ BMS 告警分页（`items` 真的解开了）
+        assert!(
+            matches!(
+                route(&query(ConsoleEndpoint::PeripheralsBmsAlarms, BMS_PAGE)),
+                Ok(RouteDecision::BmsAlarmPage(p))
+                    if p.total == 288 && p.items.len() == 1 && p.items[0].at == 5
+            ),
+            "bms_alarms 必须路由到 P6 的 set_bms_page 决策"
+        );
+        // ④ 三个都是**读**端点 ⇒ 形态判据走 `query()`（收到控制信封 ⇒ 响亮 `Kind`）
+        for ep in [
+            ConsoleEndpoint::PeripheralsCatalog,
+            ConsoleEndpoint::PeripheralsFireDetectors,
+            ConsoleEndpoint::PeripheralsBmsAlarms,
+        ] {
+            assert!(
+                matches!(route(&resp(ep, rejected())), Err(RouteError::Kind(e)) if e == ep),
+                "{ep:?}：裸 DTO 端点收到控制信封必须响亮拒绝（不得静默）"
+            );
+            // 载荷形状不符也必须响亮。⚠️ 判据**不能**用"缺字段的对象"或"短数组"：
+            // 三个 DTO 都是 `#[serde(default)]`（§15.3.2）⇒ 空对象合法解析成 `Default`，
+            // 连**序列**形态的 `[]` 也会被 serde 的位置式 `visit_seq` + 容器级 default 补成
+            // `Default`（实测：本条第一版正是被这个坑判红）。取**标量**（既非 map 也非 seq）。
+            assert!(
+                matches!(route(&query(ep, "7")), Err(RouteError::Decode(e, _)) if e == ep),
+                "{ep:?}：载荷类型不符必须响亮，不得默认成「空数据」"
+            );
+        }
+    }
+
+    /// 失败面：**只有**两条"明细"端点有页面就地失败面（§15.6.2 ⑥）；
+    /// catalog 与其余读端点**不得**被塞失败决策（catalog 失败的正确动作 = 什么都不做）。
+    ///
+    /// **改什么会让本条变红**：给 catalog 也返回一个决策（例如
+    /// `RouteDecision::FireDetectorUnavailable`）⇒ 第 3 条红；把 `page_failure_decision`
+    /// 写成恒 `None` 或把判断写反（`_ => Some(..)`）⇒ 第 1 / 2 条红。
+    #[test]
+    fn only_the_two_drill_endpoints_have_a_page_failure_surface() {
+        assert_eq!(
+            page_failure_decision(ConsoleEndpoint::PeripheralsFireDetectors),
+            Some(RouteDecision::FireDetectorUnavailable),
+            "探测器明细失败 ⇒ P4 就地显「明细不可用」+「重试」"
+        );
+        assert_eq!(
+            page_failure_decision(ConsoleEndpoint::PeripheralsBmsAlarms),
+            Some(RouteDecision::BmsAlarmUnavailable),
+            "BMS 下钻失败 ⇒ P6 就地显「明细不可用」+「重试」"
+        );
+        for ep in ConsoleEndpoint::ALL {
+            if matches!(
+                ep,
+                ConsoleEndpoint::PeripheralsFireDetectors | ConsoleEndpoint::PeripheralsBmsAlarms
+            ) {
+                continue;
+            }
+            assert!(
+                page_failure_decision(ep).is_none(),
+                "{ep:?} 没有页面就地失败面 ⇒ 不得产出失败决策（catalog 失败的正确动作 = **什么都不做**，\
+                 否则会把已取到的名字抹掉，与 §15.3.1「保留旧 catalog」相反）"
+            );
+        }
+    }
+
+    /// 「哪些页用外设元数据」= P4（`Interlock`）/ P6（`System`）**两页**，其余四页不是。
+    #[test]
+    fn only_p4_and_p6_are_peripheral_metadata_pages() {
+        for p in NavPage::ALL {
+            assert_eq!(
+                periph_metadata_page(p),
+                matches!(p, NavPage::Interlock | NavPage::System),
+                "{p:?} 的「是否外设页」判据漂移（首次进入即取 catalog 的落点，§15.3.1）"
+            );
+        }
+    }
+
+    /// **catalog 读取时机**（§15.3.1）：首次进入 P4/P6 取一次；此后**只有** `rev` 变化才重取；
+    /// **不得**在 1 Hz 主拍上反复取。
+    ///
+    /// 本用例是**探针 ①②** 的靶子（见交付报告）：
+    /// ① 删掉 `on_periph_page && !entered_before` 那一支 ⇒ 第 1 / 2 条红；
+    /// ② 删掉 `(Some(r), Some(h)) => r != h` 那一支 ⇒ 第 3 条红。
+    #[test]
+    fn catalog_is_fetched_once_per_entry_and_then_only_on_rev_change() {
+        // ① **首次进入** P4 或 P6：即使**还没有帧**（`frame_rev = None`）也要取一次 ——
+        //    否则"进入页面时名称一片「名称未获取」、要等下一帧才补"（§15.3.1 的口径是进入即取）。
+        assert!(
+            catalog_due(true, false, None, None),
+            "首次进入 P4/P6 ⇒ 必须取一次"
+        );
+        assert!(
+            catalog_due(true, false, Some(7), Some(7)),
+            "首次进入优先于 rev 判据"
+        );
+        // ② **不在** P4/P6（P1/P2/P3/P5）⇒ 从不取（哪怕从未取过）
+        for p in [
+            NavPage::Main,
+            NavPage::Config,
+            NavPage::Logs,
+            NavPage::Audit,
+        ] {
+            assert!(
+                !periph_metadata_page(p)
+                    && !catalog_due(periph_metadata_page(p), false, Some(7), None),
+                "{p:?} 不是外设页 ⇒ 不得在开机时就取 catalog"
+            );
+        }
+        // ③ `rev` 变化 ⇒ 重取；`rev` 相同 ⇒ **不取**（这就是"一次性"的判据本体）
+        assert!(
+            catalog_due(true, true, Some(8), Some(7)),
+            "帧内 rev 变了 ⇒ 重取"
+        );
+        assert!(
+            !catalog_due(true, true, Some(7), Some(7)),
+            "rev 未变 ⇒ 不得重取（1 Hz 主拍上不许反复取）"
+        );
+        // ④ 还没拿到过 catalog（`held = None`）⇒ **不**把"没有"当成"变了"（否则每拍都命中）
+        assert!(
+            !catalog_due(true, true, Some(7), None),
+            "从未取到时不按 rev 变化反复发起"
+        );
+        // ⑤ 还没有帧（`frame = None`）且已进入过 ⇒ 不取（等帧到了再比）
+        assert!(!catalog_due(true, true, None, Some(7)));
+        assert!(!catalog_due(true, true, None, None));
+    }
+
     // ── P3 通道态 ─────────────────────────────────────────────────────────
 
     /// P3 通道态 = **控制通道**连续失败 ≥2 ⇒ 断开；成功一次即回绿。
@@ -853,6 +1128,9 @@ mod tests {
         assert!(!ControlIntent::LogBackToLatest.is_write());
         assert!(!ControlIntent::LogQuery(LogQuery::default()).is_write());
         assert!(!ControlIntent::AuditLoadMore(AuditQuery::default()).is_write());
+        // U-73：两个下钻翻页是**读**意图（`is_write` 的判据本体 —— 写意图在途时绝不被打断）
+        assert!(!ControlIntent::FireDetectorPage(1).is_write());
+        assert!(!ControlIntent::BmsAlarmPage(1).is_write());
         // 写意图的条数必须与契约的写端点条数一致（新增写端点却忘了加意图 ⇒ 红）
         assert_eq!(w.len(), ConsoleEndpoint::ALL.into_iter().filter(|e| e.is_write()).count());
     }

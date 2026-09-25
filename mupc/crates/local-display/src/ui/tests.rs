@@ -1719,12 +1719,14 @@ fn scanner_accepts_crlf_line_continuation_and_multi_line_strings() {
 /// 扫描面内**已知的原始串**清单：`(文件, 条数)`。由
 /// `grep -cE '(^|[^A-Za-z0-9_])r#*"'` 在 [`NON_THIN_LAYER_SOURCES`] + [`THIN_LAYER_SOURCES`]
 /// 上逐文件抄录（2026-09-18 实测：`src/control_route.rs` 13 / `src/channel.rs` 1 /
-/// `src/console.rs` 1，合计 **15**，薄层 0）。
+/// `src/console.rs` 1，合计 **15**，薄层 0；**2026-09-25 T21c-3 增量**：`control_route.rs`
+/// 13 → **16** —— U-73 三端点的路由用例新增 3 枚字面量 JSON（`CATALOG` / `FIRE_PAGE` /
+/// `BMS_PAGE`），实测 16，清单合计 **18**）。
 ///
 /// **未列出的文件隐含期望 0** —— 所以往任一扫描面文件里新增一枚原始串都会让本条变红：
 /// 那不是误报，是**清单需要显式登记**（这条判据的强度正来自"清单必须与源码同步"）。
 const EXPECTED_RAW_STRING_COUNTS: [(&str, usize); 3] = [
-    ("src/control_route.rs", 13),
+    ("src/control_route.rs", 16),
     ("src/channel.rs", 1),
     ("src/console.rs", 1),
 ];
@@ -9613,6 +9615,13 @@ pub(crate) fn pages_chain() {
         // —— 与 `ui_chain` / `pages_chain` 的既有做法同款。此处调用时上一批 6 页**已析构**，
         // 故外壳与它自己的 6 页是在"空堆"上装配的（这正是 R4 的严苛口径）。
         shell_chain(&mut disp, &screen);
+
+        // ── ⑦′ **U-73 外设接线**（T21c-3）──────────────────────────────────
+        //
+        // 同款挂钩（`pub(crate) fn`，非独立 `#[test]`）：`shell_chain` 已把它自己的外壳
+        // 析构掉 ⇒ 本链在自己的空堆上再建一个外壳，验"帧段 / catalog 回执**真的**到了
+        // P4 / P6 的屏上"（T21c-1/2 的入口此前**零生产调用点**）。
+        u73_wiring_chain(&mut disp, &screen);
     }
 
     drop(host);
@@ -11277,6 +11286,196 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         );
     }
 
+    drop(home);
+}
+
+/// **U-73 外设接线的离屏链路（T21c-3）**：两条生产入口 —— 帧段（[`apply_frame_sections`]）
+/// 与 catalog 回执（[`apply_catalog_to_pages`]）—— 各自"**真的把数据送到了页面上**"。
+///
+/// # 为什么必须是**行为**用例（而不是源码哨）
+///
+/// T21c-1 / T21c-2 交付的两页**已经**有 `set_periph` / `set_catalog` 入口，但它们此前
+/// **零生产调用点** ⇒ 屏上 P4 消防区与 P6 四个外设段**恒为「外设数据不可用」**、BMS 288 位
+/// 下钻永远打不开。这种"入口写好了但没接线"的缺陷在**源码哨**下完全隐形（两边都在），
+/// 只有**跨层的行为断言**能抓。
+///
+/// # 判据（三段）
+///
+/// | # | 注入 | 断言 |
+/// |---|------|------|
+/// | ① | **无帧**（`PageInput::init`） | 两页都显「外设数据不可用」（§15.6.2 ⑤）：P4 的段顶通告 + P6 段「空调」的段级文案行 |
+/// | ② | 有帧（`available = true`，含 hvac + fire 站） | 两页都出现**真值**：P6 段顶站状态条显在线 + 数据行**不是 `--`**；P4 的 A1 段顶通告收起、火警等级出帧值（1.0 ⇒ 「一级报警」）。**此时无 catalog** ⇒ 名位一律「名称未获取」/「未定义位 n」 |
+/// | ③ | `apply_catalog_to_pages`（**一次**调用） | **两页都**拿到同一份 catalog：P6 名位出**短标签**（不再是「名称未获取」）、P4 的 A1 位行出**位名**（不再是「未定义位 14」） |
+///
+/// **探针 ③ 的靶子**：把 [`apply_frame_sections`] 里的两行 `set_periph` 摘掉 ⇒ 第 ①② 段
+/// 立刻红（两页都回到「外设数据不可用」/ 名位恒「名称未获取」）。
+///
+/// **前提**：`lvgl::init()` 已由 [`pages_chain`] 调过（本函数**不**再 init/deinit）；
+/// `disp` 是同一会话的内存 display。
+pub(crate) fn u73_wiring_chain(disp: &mut Display, screen: &Obj) {
+    use crate::app::{apply_catalog_to_pages, apply_frame_sections};
+    use crate::ui::pages::p6_system::RowKind;
+    use crate::ui::pages::PageInput;
+    use crate::ui::shell::Shell;
+    use mupc_display_proto::peripherals_labels::ui_text;
+    use mupc_display_proto::PeripheralCatalog;
+
+    // 宿主与 [`shell_chain`] 同款（屏的忠实替身：清内边距 + 透明）。
+    let home = Obj::create(screen).expect("u73 host");
+    home.set_size(Dimens::SCREEN_W, Dimens::SCREEN_H);
+    home.set_pos(0, 0);
+    home.add_style(&theme::transparent(), StyleSelector::main());
+    let shell = Shell::new(&home).expect("Shell::new (u73)");
+
+    // 段「空调」（`SEGMENTS[1]`）—— P6 外设段的代表（P4 走消防片）。
+    const SEG_HVAC: usize = 1;
+
+    /// 段 `i` 里**第一个**指定种类的行的下标（行模型由页面给出 ⇒ 不依赖版式常量）。
+    fn find_row(shell: &Shell, seg: usize, want: RowKind) -> usize {
+        shell
+            .p6()
+            .segment_rows(seg)
+            .expect("段行模型")
+            .iter()
+            .position(|(k, _)| *k == want)
+            .unwrap_or_else(|| panic!("段 {seg} 里没有 {want:?} 行"))
+    }
+
+    shell.p6().select_segment(SEG_HVAC);
+
+    // ── ① 无帧 ⇒ 两页都显「外设数据不可用」（§15.6.2 ⑤；**不得**显 0 / 「正常」）──
+    apply_frame_sections(&shell, &PageInput::init());
+    assert!(
+        shell.p4().a1_notice_visible(),
+        "无帧时 P4 消防区必须显段顶通告（「外设数据不可用」）"
+    );
+    assert_eq!(
+        shell.p4().a1_notice_text().as_deref(),
+        Some(ui_text::PERIPH_UNAVAILABLE),
+        "P4 的不可用文案必须取 `ui_text`（不得自造串）"
+    );
+    let at = find_row(&shell, SEG_HVAC, RowKind::Notice);
+    let (n1, _, _, _) = shell
+        .p6()
+        .segment_row_text(SEG_HVAC, at)
+        .expect("段级文案行");
+    assert_eq!(
+        n1,
+        ui_text::PERIPH_UNAVAILABLE,
+        "无帧时 P6 各段必须显「外设数据不可用」（实得「{n1}」）"
+    );
+
+    // ── ② 有帧（available = true）⇒ **两页都拿到值**（但尚无 catalog）────────────
+    //
+    // 夹具与 P4 / P6 各自的既有用例同源（`u73_fire_fixture` / `p6_catalog` + `p6_section`）。
+    // **只造一次**：帧内段（第 ② 段）+ 同一份 catalog（第 ③ 段）。
+    let (fire_sec, fire_cat) = u73_fire_fixture(3, 3, None, 1.0);
+    let mut sec = p6_section(
+        &p6_catalog(&[(mupc_display_proto::PeriphRole::Hvac, true)]),
+        &[mupc_display_proto::PeriphRole::Hvac],
+        900,
+    );
+    // 把消防站并进同一帧（两页共用一帧 ⇒ 与生产一致）。
+    sec.stations.extend(fire_sec.stations);
+    sec.catalog_rev = 7;
+    let mut frame = frame_healthy();
+    frame.peripherals = sec;
+    apply_frame_sections(&shell, &PageInput::live(&frame));
+
+    assert!(
+        !shell.p4().a1_notice_visible(),
+        "有帧且站在线时 P4 的段顶通告必须收起（否则「外设数据不可用」会常驻）"
+    );
+    assert_eq!(
+        shell.p4().fire_value_text().as_deref(),
+        Some("一级报警"),
+        "P4 的火警等级必须取到**帧内值**（夹具 at6 = 1.0；无 catalog 时走 `fire_level_text_static` 回退）"
+    );
+    // P6：段顶站状态条 + 数据行**真值**。
+    let st_at = find_row(&shell, SEG_HVAC, RowKind::Station);
+    let (n2, st2, ok2, _) = shell
+        .p6()
+        .segment_row_text(SEG_HVAC, st_at)
+        .expect("段顶站状态条");
+    assert!(
+        n2.starts_with(ui_text::STATION_PREFIX),
+        "段顶站状态条第 1 列 = 「站 <角色>」（实得「{n2}」）"
+    );
+    assert_eq!(
+        st2,
+        ui_text::ONLINE,
+        "帧内 `online = true` ⇒ 站状态条显在线"
+    );
+    // 第 3 列 = 「成功 <时刻>」。**不锁具体时刻**（那是时区相关的另一条用例的判据）：
+    // 只锁"有**真值**时刻"（区别于帧内无该站时的 `–`）。
+    assert!(
+        ok2.starts_with(ui_text::LAST_OK_SHORT) && !ok2.contains(crate::ui::pages::PLACEHOLDER),
+        "第 3 列必须出**帧内**的成功时刻（实得「{ok2}」）"
+    );
+    let sc_at = find_row(&shell, SEG_HVAC, RowKind::Scalar);
+    let (lbl, val, _u, _) = shell
+        .p6()
+        .segment_row_text(SEG_HVAC, sc_at)
+        .expect("数值行");
+    assert_ne!(
+        val,
+        crate::ui::pages::PLACEHOLDER,
+        "帧内的值必须真的铺上屏（不得是 `--`）"
+    );
+    // **无 catalog** ⇒ 名位只能是「名称未获取」（**不臆造中文名**，§15.3.1）。
+    assert_eq!(
+        lbl,
+        ui_text::NAME_UNKNOWN,
+        "未注入 catalog 时名位必须显「名称未获取」（实得「{lbl}」）"
+    );
+    // P4 同理：无 catalog ⇒ 位名不可得 ⇒ A1 的 bit14 显「名称未获取」（§15.3.1 的"中文名位"；
+    // ⚠️ 与「未定义位 n」**互异** —— 后者是"catalog 在、但该位不在表内"，见 `refresh_fire`）。
+    let a1_14 = shell.p4().a1_row_text(14).unwrap_or_default();
+    assert_eq!(
+        a1_14,
+        ui_text::NAME_UNKNOWN,
+        "无 catalog 时 A1 位行必须显「名称未获取」（实得「{a1_14}」）"
+    );
+
+    // ── ③ catalog **同一份供两页**（一次调用 ⇒ 两页都必须变）──────────────
+    let cat: PeripheralCatalog = PeripheralCatalog {
+        stations: {
+            let mut s = p6_catalog(&[(mupc_display_proto::PeriphRole::Hvac, true)]).stations;
+            s.extend(fire_cat.stations);
+            s
+        },
+        ..p6_catalog(&[(mupc_display_proto::PeriphRole::Hvac, true)])
+    };
+    assert_eq!(cat.rev, 7, "夹具前提：与帧内 `catalog_rev` 同源同值");
+    apply_catalog_to_pages(&shell, &cat);
+    // ⚠️ **P6 的段重绘在"下一次帧驱动 render"上**（生产：catalog 回执当拍注入，下一帧的
+    // `render_pages_if_needed` 按新 catalog 重算行 —— `p6.set_catalog` 只存不重绘，
+    // 这是页面既有的 dirty 机制，**不另造第二条重绘路径**）。此处显式补一次同一帧的
+    // `apply_frame_sections` 来代表"下一帧"（生产上线后 ≤1 帧 = ≤1 s 内可见）。
+    apply_frame_sections(&shell, &PageInput::live(&frame));
+
+    // ③-a **P6**：名位出短标签（catalog 真的到了这一页）。
+    let sc_at = find_row(&shell, SEG_HVAC, RowKind::Scalar);
+    let (label, _, _, _) = shell
+        .p6()
+        .segment_row_text(SEG_HVAC, sc_at)
+        .expect("数值行");
+    assert_ne!(
+        label,
+        ui_text::NAME_UNKNOWN,
+        "catalog 注入后 P6 的名位必须出短标签（漏喂这一页只表现为「名称未获取」）"
+    );
+    assert!(!label.is_empty(), "短标签不得为空（实得「{label}」）");
+    // ③-b **P4**：A1 的 bit14 出位名（catalog 真的到了这一页）。
+    let a1_14 = shell.p4().a1_row_text(14).unwrap_or_default();
+    assert!(
+        a1_14.contains("主电故障"),
+        "catalog 注入后 P4 的 A1 位行必须出**位名**（实得「{a1_14}」）—— 两页都要拿到 catalog"
+    );
+
+    disp.refr_now_for_test();
+    drop(shell);
+    assert!(home.is_alive(), "外壳析构后宿主须仍存活（壳不得持有宿主）");
     drop(home);
 }
 

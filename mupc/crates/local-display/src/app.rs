@@ -54,14 +54,17 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mupc_display_proto::{ConfigPatch, ConsoleEndpoint, InterlockOpPayload};
+use mupc_display_proto::{
+    ConfigPatch, ConsoleEndpoint, InterlockOpPayload, DEFAULT_BMS_ALARM_PAGE_SIZE,
+    DEFAULT_PERIPH_PAGE_SIZE,
+};
 
 use crate::channel::{next_poll_at, poll_due, DisplayChannelClient, Progress};
 use crate::config::{CliConfig, Rotate};
 use crate::console::{ConsoleClient, ConsoleClock, ConsoleResult};
 use crate::control_route::{
-    audit_query_string, log_query_string, p3_connected, route, ControlIntent, RawPayload,
-    RouteDecision,
+    audit_query_string, catalog_due, log_query_string, p3_connected, page_failure_decision,
+    periph_metadata_page, route, ControlIntent, RawPayload, RouteDecision,
 };
 use crate::lvgl::display::{Display, Rotation};
 use crate::lvgl::indev::{Indev, TouchSnapshot};
@@ -420,6 +423,40 @@ pub fn sync_toast_view(toast: &Toast, view: Option<&str>) {
     }
 }
 
+/// U-73 的两条外设下钻读请求（[`App::begin_periph_intent`] 的输入；纯数据）。
+///
+/// 单独成一个类型（而不是两个 `String` 查询串）的理由：这两条端点各有**专属**的 `begin_*`
+/// 方法（它们自带 `page` / `page_size` 形参、并在发包前做越界校验），页大小由**接线层**按
+/// 契约常量给 ⇒ 载荷是"页码"而不是"查询串"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeriphRead {
+    /// P4 消防探测器明细（§15.3.2 `GET /peripherals/fire_detectors`）。
+    FireDetectors(u32),
+    /// P6 电池段 BMS 告警位下钻（§15.3.2 `GET /peripherals/bms_alarms`）。
+    BmsAlarms(u32),
+}
+
+/// 下钻意图 ⇒ **请求三元组**（端点 / 页码 / 页大小）——**纯函数**，可单测。
+///
+/// **这是页大小的唯一取值点**（两个契约默认档）；端点映射必须与 `console::begin_*` 内部
+/// 用的那个端点一致（`begin_fire_detectors` → `PeripheralsFireDetectors`、
+/// `begin_bms_alarms` → `PeripheralsBmsAlarms`）⇒ 两处漂移（如把 BMS 翻页发到探测器端点）
+/// 在纯逻辑用例上当场变红，不必起真进程。
+fn periph_request(req: PeriphRead) -> (ConsoleEndpoint, u32, u32) {
+    match req {
+        PeriphRead::FireDetectors(page) => (
+            ConsoleEndpoint::PeripheralsFireDetectors,
+            page.max(1),
+            DEFAULT_PERIPH_PAGE_SIZE,
+        ),
+        PeriphRead::BmsAlarms(page) => (
+            ConsoleEndpoint::PeripheralsBmsAlarms,
+            page.max(1),
+            DEFAULT_BMS_ALARM_PAGE_SIZE,
+        ),
+    }
+}
+
 /// 渲染进程装配体（事件循环宿主）。
 ///
 /// **字段声明顺序 = 析构顺序**（Rust 保证）：`screen` → `shell` → `indev` → `display`
@@ -507,6 +544,19 @@ pub struct App {
     next_increment_ms: Option<u64>,
     /// EDGE-19 的「补发一次 GET」生效次数（判据 = [`apply_refresh_request`]）。
     p4_refresh_forced: u64,
+    /// U-73：本地持有的**点表目录版本**（`PeripheralCatalog.rev`，真源 = 响应里的 `rev`，
+    /// 与帧内 [`mupc_display_proto::PeripheralsSection::catalog_rev`] **同源同值**）。
+    ///
+    /// ⚠️ **发起时预置**（取当拍帧内 rev）是**必需**的：若只在回执到达后才更新，那么在飞期间
+    /// 的每一拍都会命中"帧内 rev ≠ 本地 rev" ⇒ 反复发起（被 `is_busy()` 挡住 ⇒ 表现为
+    /// "屏幕上永远在取 catalog"）。预置 + 回执校正 = §15.3.1 的「**一次性**」语义
+    /// （见 `control_route::catalog_due` 的说明）。`None` = 尚未取到任何 catalog。
+    catalog_rev: Option<u32>,
+    /// U-73：P4 / P6 是否**已进入过**（「首次进入即取 catalog」的一次性判据）。
+    ///
+    /// 只在**真的发起**了那次取数之后置位 —— 让 `is_busy()` 挡下的那一拍**不消费**这个
+    /// 资格（否则开机时被启动期读清单占住，首次进入就永远不取）。
+    periph_page_entered: bool,
     /// 在途期间**被丢弃**的写意图数。
     ///
     /// ⚠️ **订正（B3-2c 整改 重要 2）**：此前本行（以及 [`App::begin_write_intent`] 的
@@ -660,6 +710,11 @@ impl App {
             Rc::new(RefCell::new(VecDeque::new()));
         Self::bind_intents(&shell, &intents);
 
+        // U-73：探测器下钻的分页大小 = 契约默认档（`display.periph_page_size` 的 HMI 侧取值，
+        // §15.11 第 12 行「接线层在装配时喂一次」）。**取契约常量**，不在这里写数值字面量；
+        // 只影响「第 X / Y 页」的分母（响应自带 `page_size` 时以响应为准）。
+        shell.p4().set_fire_page_size(DEFAULT_PERIPH_PAGE_SIZE);
+
         // **app 层 Toast**（B3-2c）：**装配期建一次**，挂顶层图层；`tick` 只切可见性 / 换文本。
         //
         // 建好即隐藏 —— 初始文案取既有通用兜底（`state::TRANSPORT_FAIL_TEXT`，**不自造串**），
@@ -710,6 +765,8 @@ impl App {
             p3_connected_injected: None,
             next_increment_ms: None,
             p4_refresh_forced: 0,
+            catalog_rev: None,
+            periph_page_entered: false,
             write_intents_dropped: 0,
             read_intents_dropped: 0,
             route_errors: 0,
@@ -786,6 +843,27 @@ impl App {
             let q = Rc::clone(intents);
             shell.p5().set_on_load_more(move |query: AuditQuery| {
                 q.borrow_mut().push_back(ControlIntent::AuditLoadMore(query));
+            });
+        }
+        // ── U-73 外设下钻的两条**读**意图（P4 消防明细 / P6 BMS 288 位）──────────────
+        //
+        // ⚠️ **回调纪律**：这两条回调**可能**在 LVGL 事件派发内被触发 —— P4 的
+        // `show_detail` / `goto_detail_page` 由下钻「查看明细 / 上一页 / 下一页」按钮**就地**
+        // 调 `request_fire_page`（`p4_interlock.rs` 的 `Core::request_fire_page` 同步 fire）；
+        // P6 的翻页请求则由 `render` 取走（`take_page_request`）后再 fire。两者在此都**只投意图**
+        // （push 进队列），真正的 `begin_*` 与页面回灌全部发生在 `Host::on_lv_events` / `tick`
+        // —— 在回调里回灌页面数据会删正在派发的对象（UAF 级，见本函数头与 `p3_logs::set_targets`）。
+        {
+            let q = Rc::clone(intents);
+            shell.p4().set_on_fire_page(move |page: u32| {
+                q.borrow_mut()
+                    .push_back(ControlIntent::FireDetectorPage(page));
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p6().set_on_bms_page(move |page: u32| {
+                q.borrow_mut().push_back(ControlIntent::BmsAlarmPage(page));
             });
         }
     }
@@ -1017,7 +1095,70 @@ impl App {
                     self.last_audit_query = Some(q);
                     self.begin_query_intent(ConsoleEndpoint::Audit, qs);
                 }
+                // ── U-73 两条外设下钻（读；**与 `begin_query_intent` 同一套在途裁决**）──
+                ControlIntent::FireDetectorPage(page) => {
+                    self.begin_periph_intent(PeriphRead::FireDetectors(page));
+                }
+                ControlIntent::BmsAlarmPage(page) => {
+                    self.begin_periph_intent(PeriphRead::BmsAlarms(page));
+                }
             }
+        }
+    }
+
+    /// **读**意图的**在途裁决**（`begin_query_intent` / [`App::begin_periph_intent`] 共用）。
+    ///
+    /// 返回 `true` = 可以让出 `ConsoleClient` 去发新请求：
+    /// - 在途的是**查询** ⇒ 旧查询已过期（用户换了筛选条件 / 翻了页）⇒ `cancel()` 作废后发新的
+    ///   （`ConsoleClient::cancel` 的登记用途即此）；
+    /// - 在途的是**写** ⇒ 写请求**绝不能被打断** ⇒ 丢弃本次读意图并计数（**不弹 Toast**：
+    ///   读意图密集，逐条弹会刷屏）。
+    ///
+    /// **抽出来的理由**（T21c-3）：U-73 的两个下钻端点有**专属**的 `begin_*`（它们自带
+    /// 分页参数），不能借道 `begin_query_intent(ep, query)`；若把上面这段在途裁决在第二处
+    /// 复写一遍，就会出现**两份会漂移的"读意图在途策略"**（本仓最忌讳的一类第二真源）。
+    fn read_slot_available(&mut self) -> bool {
+        if self.console.is_busy() {
+            if self.console.inflight_request_id().is_none() {
+                self.console.cancel();
+                self.control.finish();
+            } else {
+                self.read_intents_dropped += 1;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// U-73 外设下钻的发起（`begin_fire_detectors` / `begin_bms_alarms`）。
+    ///
+    /// 端点 / 页码 / 页大小由纯函数 [`periph_request`] 给出（页大小 = 契约默认档；
+    /// §15.3.2 的上限分别 50 / 100），本方法只做"在途裁决 + 发起 + 失败记账"。
+    fn begin_periph_intent(&mut self, req: PeriphRead) {
+        if !self.read_slot_available() {
+            return;
+        }
+        let (ep, page, page_size) = periph_request(req);
+        let clock = ConsoleClock::now();
+        // 分派按**意图**（穷尽），并就地断言纯函数给出的端点与 `begin_*` 内部用的那个一致
+        // —— 两处漂移（如把 BMS 翻页发到探测器端点）在 debug 构建下当场可见。
+        let res = match req {
+            PeriphRead::FireDetectors(_) => {
+                debug_assert_eq!(ep, ConsoleEndpoint::PeripheralsFireDetectors);
+                self.console.begin_fire_detectors(page, page_size, clock)
+            }
+            PeriphRead::BmsAlarms(_) => {
+                debug_assert_eq!(ep, ConsoleEndpoint::PeripheralsBmsAlarms);
+                self.console.begin_bms_alarms(page, page_size, clock)
+            }
+        };
+        if let Err(e) = res {
+            // 只可能是拼串 bug（页码 0 / 页大小越界）⇒ 响亮，不静默。
+            self.read_intents_dropped += 1;
+            eprintln!(
+                "[mupc-local-display] 外设下钻读请求发起失败（{}）：{e}",
+                ep.path()
+            );
         }
     }
 
@@ -1071,20 +1212,11 @@ impl App {
 
     /// **读**意图 → `begin_query`。
     ///
-    /// 在途处理（**写优先，绝不打断**）：
-    /// - 在途的是**查询** ⇒ 旧查询已过期（用户换了筛选条件）⇒ `cancel()` 作废后发新的
-    ///   （`ConsoleClient::cancel` 的登记用途即此）；
-    /// - 在途的是**写** ⇒ **丢掉**本次读意图并计数（写请求绝不能被打断；**不弹 Toast**：
-    ///   读意图密集，逐条弹会刷屏，见交付报告"选择"）。
+    /// 在途处理（**写优先，绝不打断**）见 [`App::read_slot_available`]（两处读意图**同一份**
+    /// 裁决，不各写一遍）。
     fn begin_query_intent(&mut self, ep: ConsoleEndpoint, query: String) {
-        if self.console.is_busy() {
-            if self.console.inflight_request_id().is_none() {
-                self.console.cancel();
-                self.control.finish();
-            } else {
-                self.read_intents_dropped += 1;
-                return;
-            }
+        if !self.read_slot_available() {
+            return;
         }
         if let Err(e) = self.console.begin_query(ep, &query, ConsoleClock::now()) {
             // 只可能是 `QueryTooLarge` / `BadQuery`（拼串 bug）⇒ 响亮，不静默。
@@ -1119,6 +1251,36 @@ impl App {
         }
     }
 
+    /// 控制通道**失败**的唯一收口（`absorb_console` 的传输失败与路由失败两条入口共用）。
+    ///
+    /// 三条出路，**各自恰好一条**上屏通道：
+    /// 1. **有页面就地失败面的读端点**（U-73 的两个明细端点）⇒ 记失败状态 + 交回
+    ///    「明细不可用」决策（§15.6.2 ⑥ 的**本地固定文案** + 「重试」；**R-4**：服务端
+    ///    400/503 的原因串只进日志 / 现场排障、**不上屏**）；
+    /// 2. **写端点** ⇒ 既有**本地合成回执**（走页面 `show_result`；B3-2b-2 裁定 3）；
+    /// 3. 其余（无页面出口的读端点 / 当时无在途）⇒ 回落 app 层兜底 Toast。
+    ///
+    /// 第 1 与第 2 条都**不压** app 层 Toast —— 它们各自在页面上已有失败面，再压一条通用的
+    /// 「操作失败」会违 UI §7.2「同一时刻仅 1 条」，且对"取数"动作是**误导**（不是用户发起的
+    /// 操作）。判据与既有写端点的口径同源，见
+    /// [`state::ControlState::record_transport_failure_with_receipt`] 与
+    /// [`state::ControlState::record_read_failure`]。
+    ///
+    /// ⚠️ 返回值**必须**被消费 —— 它带**显式** `#[must_use]`（**不要**指望 `Option` 自带该
+    /// 属性：本工具链实测**不成立**，裸调用不报任何告警，见 `state.rs` 该方法的注）：
+    /// 漏掉调用方的 `apply_route`，决策就"只造不送" —— 屏上依旧是"什么都不发生"。
+    #[must_use]
+    fn console_failure_decision(&mut self, epoch_ms: u64) -> Option<RouteDecision> {
+        // 真源 = `ConsoleClient` 的 `last` spec：走到这里时 `pending` 已被清空
+        // （`console::tick` 交出 `Progress::Done` 之前就 `take`/置 `None`），
+        // 只有它能回答"刚刚失败的是哪一条请求"。
+        if let Some(d) = self.console.last_endpoint().and_then(page_failure_decision) {
+            self.control.record_read_failure(epoch_ms);
+            return Some(d);
+        }
+        self.control.record_transport_failure_with_receipt(epoch_ms)
+    }
+
     /// 消化一次控制通道完成事件：**路由 / 失败**两条出路。
     fn absorb_console(&mut self, res: ConsoleResult<crate::console::ConsoleOutcome<RawPayload>>, epoch_ms: u64) {
         let outcome = match res {
@@ -1127,28 +1289,23 @@ impl App {
                 // 传输失败（连接 / 超时 / 非 200 / 解码）：记入 `ControlState`（清在途 +
                 // 失败时刻）；另把"提交中"复位，否则按钮永久禁用。
                 //
-                // **上屏只剩一条**（B3-2c 整改 重要 4）：写端点在途时**不**再压 app 层
-                // 「操作失败」Toast —— 该次失败已由下面那条合成回执经**页面**的
-                // `show_result` 上屏（页面 Toast），两条同拍会违 UI §7.2「同一时刻仅 1 条」；
-                // 无在途（读端点）时才由 app 层兜底 Toast 承担。判据见
-                // [`state::ControlState::record_transport_failure_with_receipt`]。
+                // **上屏只剩一条**（B3-2c 整改 重要 4 / T21c-3 扩到 U-73 的两个明细端点）：
+                // 一切**有页面就地失败面**的端点都**不**再压 app 层「操作失败」Toast ——
+                // 该次失败由**页面**承担（写端点 = 合成回执经 `show_result`；U-73 明细端点 =
+                // `set_fire_page_failed` / `set_bms_page_failed`），两条同拍会违 UI §7.2
+                //「同一时刻仅 1 条」；无页面出口（其余读端点 / 无在途）时才由 app 层兜底。
+                // 判据收口在 [`App::console_failure_decision`]（**唯一**一处）。
                 //
                 // **裁定 3（B3-2b-2 整改）**：那条兜底 Toast 的句柄归页面、而**没有任何页面
                 // 暴露通用 Toast 入口** ⇒ 光记账 = 用户按「保存」时**屏上什么都不发生**。
                 // 故对**写**端点再补一条**本地合成**的「不可用」回执，走页面**既有**的
-                // `show_result`（复用上屏路径；`src/ui/**` 零改动）。读端点不合成（它们的降级
-                // 出口是 P3 通道条态）。合成回执**不是**服务端回执，字段取值理由见
-                // `control_route::transport_failure_decision`。
+                // `show_result`（复用上屏路径；`src/ui/**` 零改动）。合成回执**不是**服务端
+                // 回执，字段取值理由见 `control_route::transport_failure_decision`。
                 //
-                // ⚠️ 返回值**必须**被消费 —— 它带**显式** `#[must_use]`（**不要**指望 `Option`
-                // 自带该属性：本工具链实测**不成立** —— 裸调用不报任何告警，见 `state.rs` 该方法的
-                // 注）：漏掉下面那句 `apply_route`，回执就"只造不送" —— 屏上依旧是"什么都不发生"，
-                // 而 `unused_must_use` 告警会在"零警告"判据上当场变红。
-                // 先取在途端点（`record_*` 会清掉在途）；在途信息由 `record_*_with_receipt`
-                // 自己取出，此处只为复位"提交中"。
+                // 先取在途端点（`record_*` 会清掉在途）；写端点的在途信息由
+                // `record_*_with_receipt` 自己取出，此处只为复位"提交中"。
                 let ep = self.control.inflight().map(|i| i.endpoint);
-                if let Some(decision) = self.control.record_transport_failure_with_receipt(epoch_ms)
-                {
+                if let Some(decision) = self.console_failure_decision(epoch_ms) {
                     self.apply_route(decision);
                 }
                 if let Some(ep) = ep {
@@ -1187,8 +1344,9 @@ impl App {
                 // `control_route::transport_failure_decision`）。
                 self.route_errors += 1;
                 let ep = self.control.inflight().map(|i| i.endpoint);
-                if let Some(decision) = self.control.record_transport_failure_with_receipt(epoch_ms)
-                {
+                // U-73 的两个明细端点在这里也走**页面就地失败面**（解码失败 = 该端点不可用，
+                // 与"非 2xx ⇒ 按不可用处理"同口径，§15.3.2）；其余端点行为逐字不变。
+                if let Some(decision) = self.console_failure_decision(epoch_ms) {
                     self.apply_route(decision);
                 }
                 if let Some(ep) = ep {
@@ -1237,6 +1395,33 @@ impl App {
                     Self::report_lvgl(e);
                 }
             }
+            // ── U-73 外设三端点（T21c-3）──────────────────────────────────────
+            //
+            // ① catalog **同一份供两页**（§15.3.1："P4 / P6 首次进入、或 `catalog_rev` 变化时
+            //    读取" ⇒ 一次读取服务两页）。先落 `catalog_rev`（= 响应 `rev`，与帧内
+            //    `catalog_rev` 同源同值），再分发 —— 这样"下一拍是否还欠一次取数"的判据
+            //    （`catalog_due`）立刻反映最新事实。
+            RouteDecision::PeripheralCatalog(cat) => {
+                self.catalog_rev = Some(cat.rev);
+                apply_catalog_to_pages(&self.shell, &cat);
+                // **catalog 变了 ⇒ 当前页的段重绘**（§15.3.1 的附带要求）：把语义键置空
+                // （= "欠一次渲染"），下一拍的 [`App::render_pages_if_needed`] 就会重跑
+                // P1/P6/P4 —— **不另造第二条重绘路径**（判据仍在 `needs_render` 那一个口）。
+                // 必要性：P6 的段在 `render` 里按 catalog 重算行，而 `render` 只在语义键
+                // 变化时跑；若帧恰好冻结（`seq` 不变，如通道刚断），不置空就会**一直**停在
+                // 旧的「名称未获取」上（值在、名不在 ⇒ 静默陈旧，本仓最忌讳的一类）。
+                self.render_key = None;
+            }
+            // ② P4 / P6 的**段重绘**走页面既有的 dirty 机制：`set_fire_page` 内部
+            //    `refresh_drill()`；`set_bms_page` 内部 `refresh_bms()`。catalog 触发的
+            //    段重绘则由 p4 的 `set_catalog → refresh_fire()` 就地完成、p6 在**下一拍**的
+            //    帧驱动 `render` 里按新 catalog 重算行（靠上面那句 `render_key = None` 兜住
+            //    "帧冻结"的情形）。
+            RouteDecision::FireDetectorPage(page) => self.shell.p4().set_fire_page(&page),
+            RouteDecision::BmsAlarmPage(page) => self.shell.p6().set_bms_page(&page),
+            // ③ 失败面：**只传失败事实**（R-4：服务端原因串只进日志、不上屏）。
+            RouteDecision::FireDetectorUnavailable => self.shell.p4().set_fire_page_failed(),
+            RouteDecision::BmsAlarmUnavailable => self.shell.p6().set_bms_page_failed(),
         }
     }
 
@@ -1269,6 +1454,11 @@ impl App {
                 }
             }
         }
+        // ②′ **U-73 catalog 的读取时机**（设计 §15.3.1：P4 / P6 首次进入、或 `catalog_rev`
+        //     变化时**一次性**读取）。**排在 ② 之后**：启动期 5 条读清单优先把控制通道排满，
+        //     本步在空闲拍才轮到（`is_busy()` 挡下的一拍**不消费**"首次进入"资格）。
+        //     判据本体是纯函数 [`catalog_due`]（可单测；本方法只做"状态搬运 + 发起"）。
+        self.tick_periph_catalog();
         // ③ P3 增量拉取节拍（设计 §6.3：「每 500 ms 拉 cursor 增量」）。
         //    只在**P3 在前台**且空闲时触发（后台页不空转请求）。
         if self.shell.current() == NavPage::Logs {
@@ -1289,6 +1479,66 @@ impl App {
         let refresh = self.shell.p4().take_refresh_request();
         if apply_refresh_request(refresh, &mut self.next_poll_ms) {
             self.p4_refresh_forced += 1;
+        }
+    }
+
+    /// U-73：catalog（点表目录）的**一次性**读取（设计 §15.3.1）。
+    ///
+    /// # 触发源（**只有**这两个；判据全在纯函数 [`catalog_due`]）
+    ///
+    /// 1. **首次进入** P4 / P6（`periph_metadata_page` 判页，`periph_page_entered` 记资格）；
+    /// 2. 帧内 `peripherals.catalog_rev` 与本地持有的 [`App::catalog_rev`] **不等**。
+    ///
+    /// # 为什么"不在 1 Hz 主拍上反复取"（**一次性**语义的落地）
+    ///
+    /// 发起成功时**立刻**把 [`App::catalog_rev`] 预置为当拍帧内 rev（回执到达后再由
+    /// `apply_route` 用响应里的 `cat.rev` 校正）。若只在回执到达后更新，则在飞期间
+    /// （连接 + 写 + 读要好几拍）每一拍都会命中"rev 不等" ⇒ 反复发起 —— 这正是
+    /// "屏上永远在取 catalog"的成因（判据说明见 [`catalog_due`]）。
+    ///
+    /// # 被 `is_busy()` 挡下时（**不消费**首进入资格）
+    ///
+    /// `ConsoleClient` 是**单条在飞**。本步在忙碌拍**直接返回、不改任何状态** ⇒
+    /// "首次进入"的资格与"rev 已变"的事实都**原样留到下一拍**（触发条件仍然成立），
+    /// 与"丢意图"是两回事 —— 这里**没有**丢任何东西（`read_intents_dropped` 也不动）。
+    /// 反过来，若在这里就置 `periph_page_entered = true`，开机时被 5 条启动期读清单占住的
+    /// 那几拍会把"首次进入"整个吞掉 ⇒ P4/P6 的名字永远取不到（**静默缺陷**）。
+    fn tick_periph_catalog(&mut self) {
+        let on_periph_page = periph_metadata_page(self.shell.current());
+        // `catalog_rev = 0` = **帧内没带目录信息**（`PeripheralsSection` 的 `#[serde(default)]`
+        // 缺省值；主进程未装配外设段时就是它）⇒ 归一成"无从比对"。**不得**把 0 当一版真实
+        // rev：那会让"帧内 0 vs 本地 CRC"每一拍都不等 ⇒ 控制通道一空闲就反复取 catalog。
+        let frame_rev = self
+            .state
+            .frame()
+            .map(|f| f.peripherals.catalog_rev)
+            .filter(|r| *r != 0);
+        let due = catalog_due(
+            on_periph_page,
+            self.periph_page_entered,
+            frame_rev,
+            self.catalog_rev,
+        );
+        if !due || self.console.is_busy() {
+            return;
+        }
+        match self.console.begin_catalog(ConsoleClock::now()) {
+            Ok(()) => {
+                // 资格只在**真的发起**之后消费（见函数头）。
+                if on_periph_page {
+                    self.periph_page_entered = true;
+                }
+                // 预置：同一 rev 在回执回来之前不会被反复取（`None` 帧 rev 时无从预置，
+                // 此时由"两侧都知道才比"的判据兜住，见 `catalog_due`）。
+                if let Some(r) = frame_rev {
+                    self.catalog_rev = Some(r);
+                }
+            }
+            // 结构上不可达（catalog 无参、非写端点）⇒ 出现即装配逻辑错位，必须看得见。
+            Err(e) => eprintln!(
+                "[mupc-local-display] catalog 读请求发起失败（{}）：{e}",
+                ConsoleEndpoint::PeripheralsCatalog.path()
+            ),
         }
     }
 
@@ -1338,16 +1588,74 @@ impl App {
         // **计数点在判据之后、渲染之前**：恒真退化 ⇒ 本计数 = 拍数（自检据此判红）。
         self.renders = self.renders.saturating_add(1);
         let input = PageInput::new(self.state.frame(), channel, freshness);
-        // 三页是**帧驱动**（契约 2）；P2/P3/P5 由控制通道驱动（契约 2′，接线属 B3-2b）。
-        self.shell.p1().render(&input);
-        self.shell.p6().render(&input);
-        self.shell.p4().render(&input);
+        // 三页是**帧驱动**（契约 2）；P2/P3/P5 由控制通道驱动（契约 2′）。
+        // U-73：帧内 `peripherals` 段与 device / alarms / interlock **同一条入口**
+        //（自由函数 ⇒ 离屏用例跑的是同一个体，见其文档）。
+        apply_frame_sections(&self.shell, &input);
     }
 
     /// 把单调毫秒换算成 `Instant`（与 [`Self::origin`] 同源）。
     fn instant_at(&self, now_ms: u64) -> Instant {
         self.origin + Duration::from_millis(now_ms)
     }
+}
+
+/// **帧段 → 页面**的**唯一**应用入口（帧驱动三页 P1 / P6 / P4 + U-73 外设段）。
+///
+/// # 为什么抽成自由函数（而不是留在 `App::render_pages_if_needed` 里）
+///
+/// 与 [`apply_touch_snapshot`] **完全同款**的理由：`App` 只有建起真 LVGL 会话才能构造
+/// （`App::new_offscreen` 会 `lv_init` + 建 display/indev/六页），进程内没有第二个 LVGL 线程
+/// 可跑"帧到达 ⇒ 页面拿到数据"的断言 ⇒ 若这段写在 `impl App` 里，它**只**能被"起真进程 +
+/// 桩服务端 + 读屏面像素"间接覆盖。抽出来后 `ui/tests.rs` 能在**离屏链路**里**直接调它**，
+/// 于是"把外设那一段摘掉"这类破坏（页面上只表现为"外设数据不可用"）当场变红
+/// （T21c-3 的探针 ③）。
+///
+/// # 为什么外设段挂在这条入口上（**不另造第二条帧应用路径**）
+///
+/// `device` / `alarms` / `interlock` 三段**全部**经 [`PageInput`] 从这一个函数流进页面
+/// （P1 / P6 / P4 的 `render`）⇒ 新增的 `peripherals` 段只能挂在**同一个**入口：
+/// 多一条"帧到达后应用外设"的旁路，会让两组段的**应用时机**（每帧 vs 每语义键）与
+/// **降级口径**（缺帧时取契约缺省）各自漂移。
+///
+/// # U-73：为什么 P4 **与** P6 都要显式 `set_periph`
+///
+/// - **P6** 的 `render` **不读** `input.frame.peripherals`（它的段内容由页面持有的
+///   `periph` 副本驱动）⇒ **必须**由本函数显式注入，否则四个外设段恒为「外设数据不可用」；
+/// - **P4** 的 `render` 内部已经消费了同一份 `input.frame.peripherals`（`apply_periph`），
+///   此处的显式分发**冗余但无害**（`apply_periph` 是幂等的：存副本 + 重排版，不建不删对象），
+///   保留它是为了让**接线层**对"两页都拿到外设段"负责，而不依赖 P4 内部实现的选择。
+///
+/// `frame = None`（尚无有效帧 / 通道未连上）⇒ 取契约缺省（`available = false`）⇒
+/// 页面显「**外设数据不可用**」（§15.6.2 ⑤：**不得**显 0 / 「正常」/「无告警」）。
+pub fn apply_frame_sections(shell: &Shell, input: &PageInput<'_>) {
+    let periph = input
+        .frame
+        .map(|f| f.peripherals.clone())
+        .unwrap_or_default();
+    shell.p4().set_periph(&periph);
+    shell.p6().set_periph(&periph);
+    // 帧驱动三页（契约 2）：P1 / P6 / P4。顺序与既有实现逐字一致（P4 的 `render` 会再
+    // 消费一次同一份外设段 —— 见上）。
+    shell.p1().render(input);
+    shell.p6().render(input);
+    shell.p4().render(input);
+}
+
+/// **catalog 回执 → 两页**（U-73 / §15.3.1：「P4 / P6 **同一份** catalog」）。
+///
+/// # 为什么是自由函数（与 [`apply_frame_sections`] / [`apply_touch_snapshot`] 同款）
+///
+/// "**一次读取服务两页**"是 §15.3.1 的口径，而**漏掉其中一页**在生产上只表现为"那一页的名字
+/// 全是「名称未获取」"（值照常显示 ⇒ 像素上几乎看不出来）。抽成自由函数后 `ui/tests.rs` 能在
+/// 离屏链路里**直接调它**并断言**两页都拿到**（T21c-3 的行为用例之一）。
+///
+/// **失败路径不走这里**：catalog 取值失败的正确动作是**什么都不做**（保留旧 catalog /
+/// 页面自显「名称未获取」），**不得**调 `clear_catalog()` 把已取到的名字抹掉（见
+/// [`crate::control_route::page_failure_decision`] 的说明）。
+pub fn apply_catalog_to_pages(shell: &Shell, cat: &mupc_display_proto::PeripheralCatalog) {
+    shell.p4().set_catalog(cat);
+    shell.p6().set_catalog(cat);
 }
 
 /// **把一次 evdev 快照投进输入管线**（TT-12「**任何**触摸事件重置计时」；UI §4.3 / 偏差 **SH5**）。
@@ -2323,8 +2631,20 @@ mod tests {
     /// `Option` 本身在本工具链**不触发**该告警）。
     ///
     /// **改什么会让本条变红**（**已实测**，见报告「探针 4」）：删掉
-    /// `self.apply_route(decision);` ⇒ 第 2 条断言红（同一改动还会报 `unused_must_use` 告警）；
+    /// `self.apply_route(decision);` ⇒ 就近断言红（同一改动还会报 `unused_must_use` 告警）；
     /// 把 `self.apply_route(decision);` **注释掉** ⇒ 去注释后同样红（B4b 整改「建议 3.4」）。
+    ///
+    /// # T21c-3 的形态变更（如实登记，不弱化判据）
+    ///
+    /// 失败收口原先**就地**写在两个分支里（`record_transport_failure_with_receipt(epoch_ms)`
+    /// 紧跟 `apply_route`）；U-73 引入"**有页面就地失败面的读端点**"后，两条分支共用同一个
+    /// 收口 [`App::console_failure_decision`]（**唯一一处**决定"失败该走哪条上屏通道"）。
+    /// 于是本条改为**两段**判据：
+    /// ① **调用侧**（原来那一段）：`console_failure_decision` 的返回值必须就近送进
+    ///    `apply_route`（`absorb_console` 的传输失败分支）；
+    /// ② **机制侧**（新增，防"把合成回执整条搬走"）：该收口内部**必须**仍然调用
+    ///    `record_transport_failure_with_receipt(epoch_ms)`（写端点的唯一上屏通道），
+    ///    且它带显式 `#[must_use]`（漏消费即编译告警 —— 这是"只造不送"的第二道网）。
     #[test]
     fn transport_failure_branch_dispatches_the_receipt_it_built() {
         const SRC: &str = include_str!("app.rs");
@@ -2343,17 +2663,33 @@ mod tests {
         // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把
         // `self.apply_route(decision);` **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
         let live = without_line_comments(prod);
-        // 判据必须**就近**：`self.apply_route(decision);` 在 `absorb_console` 的成功路径上
-        // 也有一处（同一行文本）—— 只查"全文含有"会被**那一处**满足，探测力归零
-        // （B3-2b-2 整改实测踩过：探针 4 第一版**没红**）。
+        // ① 调用侧：`console_failure_decision(epoch_ms)` 的返回值必须**就近**送进唯一分派点。
+        //    判据必须**就近**：`self.apply_route(decision);` 在 `absorb_console` 的成功路径上
+        //    也有一处（同一行文本）—— 只查"全文含有"会被**那一处**满足，探测力归零
+        //    （B3-2b-2 整改实测踩过：探针 4 第一版**没红**）。
         let at = live
-            .find("record_transport_failure_with_receipt(epoch_ms)")
-            .expect("失败分支必须取用本地合成回执（否则控制通道挂掉时屏上什么都不发生）");
+            .find("if let Some(decision) = self.console_failure_decision(epoch_ms) {")
+            .expect("失败分支必须取用统一失败收口（否则控制通道挂掉时屏上什么都不发生）");
         let tail = &live[at..];
         let near = &tail[..tail.len().min(NEAR_WINDOW)];
         assert!(
             near.contains("self.apply_route(decision)"),
-            "合成回执**只造不送**：取用点之后 {NEAR_WINDOW} 字符内没有送进唯一分派点 ⇒ 上屏路径没走到"
+            "失败决策**只造不送**：取用点之后 {NEAR_WINDOW} 字符内没有送进唯一分派点 ⇒ 上屏路径没走到"
+        );
+        // ② 机制侧：收口内部仍走既有的"本地合成回执"通道，且带 `#[must_use]`。
+        let fn_head = "#[must_use]\n    fn console_failure_decision(&mut self, epoch_ms: u64) -> Option<RouteDecision> {";
+        let f_at = live.find(fn_head).expect(
+            "失败收口必须带**显式** `#[must_use]`（`Option` 在本工具链不触发 unused_must_use）",
+        );
+        let f_body: String = live[f_at..].chars().take(1_200).collect();
+        assert!(
+            f_body.contains("record_transport_failure_with_receipt(epoch_ms)")
+                || f_body.contains("self.control.record_transport_failure_with_receipt(epoch_ms)"),
+            "收口必须保留**写端点**的本地合成回执（裁定 3）；删掉它 = 保存/释放失败时屏上什么都不发生"
+        );
+        assert!(
+            f_body.contains("page_failure_decision"),
+            "收口必须按端点分派页面失败面（U-73 明细端点；§15.6.2 ⑥）"
         );
     }
 
@@ -2405,9 +2741,13 @@ mod tests {
             near.contains("route_errors += 1"),
             "{WINDOW_CHARS} 字符的窗口没盖住 `route` 的 `Err` 分支 ⇒ 扫描器失真，后两条断言不可信"
         );
+        // T21c-3：收口搬到 `console_failure_decision`（两条失败分支**共用**同一处判据），
+        // 本支的判据随之改为"**必须**经那个收口"—— 收口内部仍走写端点的本地合成回执
+        // （由 `transport_failure_branch_dispatches_the_receipt_it_built` 的 ② 段守）。
         assert!(
-            near.contains("record_transport_failure_with_receipt(epoch_ms)"),
-            "`route` 的 `Err` 必须走**页面通道**（本地合成回执）—— 否则写端点的失败反馈落在被弹层遮住的 app Toast 上（SH20 / 违 §2.6）"
+            near.contains("self.console_failure_decision(epoch_ms)"),
+            "`route` 的 `Err` 必须走**统一失败收口**（写端点 ⇒ 本地合成回执；U-73 明细端点 ⇒ 页面失败面）\
+             —— 否则写端点的失败反馈落在被弹层遮住的 app Toast 上（SH20 / 违 §2.6）"
         );
         assert!(
             near.contains("self.apply_route(decision)"),
@@ -2477,4 +2817,226 @@ mod tests {
         assert_eq!(toast_view(&w, T0), None, "写端点 ⇒ 上屏只走页面 Toast（UI §7.2 同一时刻仅 1 条）");
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // T21c-3：U-73 外设接线的**存在性哨**（三条）
+    //
+    // 为什么这一批是**源码哨**：这些落点全在 `impl App` 上，而 `App` 只有建起真 LVGL 会话
+    // 才能构造（`App::new_offscreen`）⇒ 没有第二个 LVGL 线程可跑运行期断言。判据**本体**
+    // 已在别处以行为用例覆盖：
+    // - 路由表（哪个端点 ⇒ 哪个决策）：`control_route::tests::peripheral_endpoints_route_to_their_own_decisions`；
+    // - catalog 读取时机（首次进入 / rev 变化 / 不反复取）：`control_route::tests::catalog_is_fetched_once_per_entry_and_then_only_on_rev_change`；
+    // - 帧段与 catalog **真的到了两页**：`ui/tests.rs::u73_wiring_chain`（离屏行为用例）。
+    // 这一批只补"**这一行在源码里**"（删掉即红），口径与既有
+    // `transport_failure_branch_dispatches_the_receipt_it_built` 等哨一致。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 取 `app.rs` 的**生产段**（CRLF 归一化 + 去行注释）—— 三个新哨共用。
+    ///
+    /// ⚠️ 两个前提都在函数里**响亮自证**：切不出生产段（扫描器失真）⇒ 立刻失败；
+    /// 去注释后仍在（否则把要守的行**注释掉**照样通过 ⇒ 哨退化成摆设）。
+    fn app_prod_source() -> String {
+        const SRC: &str = include_str!("app.rs");
+        let src = SRC.replace("\r\n", "\n");
+        let prod = src
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("app.rs 应能切出生产段");
+        assert_ne!(
+            prod.len(),
+            src.len(),
+            "未切出生产段：扫描器失真，本用例必须响亮失败"
+        );
+        without_line_comments(prod)
+    }
+
+    /// 从 `reg`（回调注册处）起取**该闭包体**（到下一个 `});` 为止）—— 供"只投意图"判据。
+    fn closure_after(live: &str, reg: &str) -> String {
+        let at = live.find(reg).unwrap_or_else(|| {
+            panic!("生产段里必须注册 `{reg}`（否则页面的下钻按钮没有任何出口）")
+        });
+        let tail = &live[at..];
+        let start = tail.find("move |").expect("注册处以闭包为载荷");
+        let body = &tail[start..];
+        let end = body.find("});").expect("闭包以 `});` 收尾");
+        body[..end].to_string()
+    }
+
+    /// **⓪ 下钻意图 ⇒ 请求三元组**（端点 / 页码 / 页大小）——**纯逻辑**用例。
+    ///
+    /// 这三条就是"`begin_*` 会不会把请求发到对的端点、带对的页大小"的全部判据；页大小必须是
+    /// 契约默认档（且 ≤ 契约上限），页码必须被规整到 ≥1（页面的"上一页"在首页时给 0）。
+    ///
+    /// **改什么会让本条变红**：把两条 intent 的端点互换 ⇒ 第 1 / 2 条红（BMS 翻页发到探测器
+    /// 端点 = 屏上翻页看着"没反应"）；把页大小换成越界值 ⇒ 第 3 条红；去掉 `page.max(1)`
+    /// ⇒ 第 4 条红（服务端会以 400 拒，屏上显「明细不可用」—— 客户端本可避免）。
+    #[test]
+    fn peripheral_drill_intents_map_to_the_right_endpoint_and_page_size() {
+        assert_eq!(
+            periph_request(PeriphRead::FireDetectors(3)),
+            (
+                ConsoleEndpoint::PeripheralsFireDetectors,
+                3,
+                mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE
+            ),
+        );
+        assert_eq!(
+            periph_request(PeriphRead::BmsAlarms(2)),
+            (
+                ConsoleEndpoint::PeripheralsBmsAlarms,
+                2,
+                mupc_display_proto::DEFAULT_BMS_ALARM_PAGE_SIZE
+            ),
+        );
+        // 页大小落在契约区间内（§15.3.2：≤50 / ≤100）
+        for req in [PeriphRead::FireDetectors(1), PeriphRead::BmsAlarms(1)] {
+            let (ep, _, size) = periph_request(req);
+            let max = if ep == ConsoleEndpoint::PeripheralsFireDetectors {
+                mupc_display_proto::MAX_PERIPH_PAGE_SIZE
+            } else {
+                mupc_display_proto::MAX_BMS_ALARM_PAGE_SIZE
+            };
+            assert!(
+                (1..=max).contains(&size),
+                "{ep:?} 的页大小 {size} 越界（上限 {max}）"
+            );
+        }
+        // 页码规整：0（"上一页"在第一页时的结果）⇒ 1
+        assert_eq!(periph_request(PeriphRead::FireDetectors(0)).1, 1);
+        assert_eq!(periph_request(PeriphRead::BmsAlarms(0)).1, 1);
+    }
+
+    /// **① catalog 的读取时机接线在 tick 路径上**（设计 §15.3.1）。
+    ///
+    /// **改什么会让本条变红**：把 `self.tick_periph_catalog();` 从 `tick_console` 里删掉
+    /// （或注释掉）⇒ 第 1 条红；把 `catalog_due(` / `begin_catalog(` 从该函数体里摘掉
+    /// ⇒ 第 2 条红；把"发起成功才消费首进入资格"的顺序改反（先置 `periph_page_entered`
+    /// 再判 `is_busy`）⇒ 第 3 条红。
+    #[test]
+    fn peripheral_catalog_timing_is_wired_into_the_tick() {
+        let live = app_prod_source();
+        assert_eq!(
+            live.matches("self.tick_periph_catalog();").count(),
+            1,
+            "catalog 的读取时机必须在**生产** tick 路径上被调**恰好一次**（否则 P4/P6 永远取不到名字）"
+        );
+        // 该调用点必须在 `tick_console` 里（**不是**某个只被测试调到的角落）。
+        let tc = live
+            .find("fn tick_console(&mut self, now_ms: u64, epoch_ms: u64) {")
+            .expect("`tick_console` 是控制通道每拍的唯一推进点");
+        let tc_body: String = live[tc..].chars().take(1_800).collect();
+        assert!(
+            tc_body.contains("self.tick_periph_catalog();"),
+            "catalog 的读取时机必须挂在 `tick_console`（控制通道每拍）上"
+        );
+        // 函数体：判据用**纯函数**（可单测）+ 发起用既有的 `begin_catalog`。
+        let head = "fn tick_periph_catalog(&mut self) {";
+        let at = live.find(head).expect("`tick_periph_catalog` 必须存在");
+        let body: String = live[at..].chars().take(2_000).collect();
+        for needle in [
+            "catalog_due(",
+            "begin_catalog(ConsoleClock::now())",
+            "periph_metadata_page(",
+        ] {
+            assert!(
+                body.contains(needle),
+                "catalog 时机函数体必须含 `{needle}`（实得窗口内没有）"
+            );
+        }
+        // 「被 `is_busy()` 挡下的一拍**不消费**首进入资格」：`periph_page_entered = true`
+        // 必须出现在 `begin_catalog` **之后**（顺序写反 ⇒ 开机时被启动期读清单吞掉，静默缺陷）。
+        let busy_at = body
+            .find("if !due || self.console.is_busy()")
+            .expect("必须判在途");
+        let begin_at = body
+            .find("begin_catalog(ConsoleClock::now())")
+            .expect("必须发起");
+        let set_at = body
+            .find("self.periph_page_entered = true;")
+            .expect("必须消费首进入资格");
+        assert!(
+            busy_at < begin_at && begin_at < set_at,
+            "顺序必须是「判 due → 判在途 → 发起 → 才置 `periph_page_entered`」\
+             （提前置位会把「首次进入」吞掉）"
+        );
+    }
+
+    /// **② 两条下钻意图回调已注册，且回调里只投意图**（**回调纪律**）。
+    ///
+    /// 「禁止在 LVGL 回调里回灌页面数据」是本仓的成文教训（删正在派发的对象 = UAF 级，
+    /// 见 [`App::bind_intents`] 的函数头与 `p3_logs::set_targets` 的调用方约束）。
+    /// 两条 U-73 回调**可能**在事件派发内被触发（P4 的 `request_fire_page` 同步 fire）
+    /// ⇒ 必须在源码层把"只 push 队列"钉死。
+    ///
+    /// **改什么会让本条变红**：删掉任一注册 ⇒ 第 1 条红；在闭包里加任何页面调用
+    /// （如 `shell.p4().set_fire_page(..)`）⇒ 第 2 条红。
+    #[test]
+    fn peripheral_drill_intents_are_registered_and_only_queue_intents() {
+        let live = app_prod_source();
+        for (reg, intent) in [
+            (
+                "shell.p4().set_on_fire_page(",
+                "ControlIntent::FireDetectorPage",
+            ),
+            ("shell.p6().set_on_bms_page(", "ControlIntent::BmsAlarmPage"),
+        ] {
+            assert_eq!(
+                live.matches(reg).count(),
+                1,
+                "`{reg}` 必须在生产段注册**恰好一次**（否则 P4/P6 的下钻按钮点了没反应）"
+            );
+            let body = closure_after(&live, reg);
+            assert!(
+                body.contains("push_back(") && body.contains(intent),
+                "`{reg}` 的回调必须**只投意图**（`push_back({intent}(..))`）"
+            );
+            // **只投意图**：闭包体里不得出现任何页面/外壳调用（回灌 = UAF 级）。
+            for forbidden in ["shell.", ".set_", ".render(", ".refresh", ".tick("] {
+                assert!(
+                    !body.contains(forbidden),
+                    "`{reg}` 的回调里出现了 `{forbidden}` —— **回调里只许投意图**，\
+                     回灌页面数据会删正在派发的对象（UAF 级）；实得闭包体：{body}"
+                );
+            }
+        }
+    }
+
+    /// **③ 五个外设决策各自落到对的页面方法上**（`apply_route` 是**唯一**分派点）。
+    ///
+    /// **改什么会让本条变红**：把 `FireDetectorPage` 派到 `p6`（或 `BmsAlarmPage` 派到 `p4`）
+    /// ⇒ 对应条红；把 `PeripheralCatalog` 的 `apply_catalog_to_pages` 改成只喂一页
+    /// ⇒ 第 1 条红；把失败面改成 `clear_catalog` 一类 ⇒ 第 4 / 5 条红。
+    #[test]
+    fn peripheral_route_decisions_land_on_their_pages() {
+        let live = app_prod_source();
+        let at = live
+            .find("RouteDecision::PeripheralCatalog(cat) => {")
+            .expect("`apply_route` 必须有 catalog 臂");
+        let body: String = live[at..].chars().take(1_200).collect();
+        assert!(
+            body.contains("apply_catalog_to_pages(&self.shell, &cat)")
+                || (body.contains("self.shell.p4().set_catalog(&cat)")
+                    && body.contains("self.shell.p6().set_catalog(&cat)")),
+            "catalog 必须**同一份供两页**（§15.3.1）—— 只喂一页 = 另一页名字恒「名称未获取」"
+        );
+        assert!(
+            body.contains("self.catalog_rev = Some(cat.rev)"),
+            "catalog 的 `rev` 必须从**响应**取值（下一次 `catalog_due` 的去重判据靠它）"
+        );
+        // 「catalog 变了 ⇒ 段重绘」：**必须**把语义键置空（否则帧冻结时 P6 恒停在旧名上）。
+        assert!(
+            body.contains("self.render_key = None;"),
+            "catalog 到达后必须置空语义键 ⇒ 下一拍重渲染（帧冻结时也能把新名字铺上屏）"
+        );
+        for needle in [
+            "RouteDecision::FireDetectorPage(page) => self.shell.p4().set_fire_page(&page)",
+            "RouteDecision::BmsAlarmPage(page) => self.shell.p6().set_bms_page(&page)",
+            "RouteDecision::FireDetectorUnavailable => self.shell.p4().set_fire_page_failed()",
+            "RouteDecision::BmsAlarmUnavailable => self.shell.p6().set_bms_page_failed()",
+        ] {
+            assert!(
+                body.contains(needle),
+                "`apply_route` 必须含 `{needle}`（实得窗口内没有）"
+            );
+        }
+    }
 }

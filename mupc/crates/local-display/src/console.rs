@@ -672,6 +672,25 @@ impl ConsoleClient {
             .and_then(|p| p.spec.request_id.as_deref())
     }
 
+    /// **上一次真的发出过**的请求端点（`None` = 从未发起过任何请求）。
+    ///
+    /// 真源 = [`Self::retry`] 用的那份 `last` spec（**不另记一份**）；它在每次
+    /// [`Self::start`] 成功后更新，且全仓同时只允许一条在飞 ⇒ **在 `tick` 交出
+    /// `Progress::Done` 之后**读它，拿到的就是"刚刚完成的那一条"的端点。
+    ///
+    /// 用途（T21c-3 接线）：控制通道失败时，接线层要知道"**失败的是不是**外设那两个有页面
+    /// 就地失败面的端点"（§15.6.2 ⑥ 的「明细不可用」只能落在对应页上）—— 而此时 `pending`
+    /// **已被清空**（`tick`/`parse` 的收口路径先 `take`/置 `None` 再返回 `Done`），
+    /// `inflight_request_id()` / `is_busy()` 之类一律只能读到 `None`。
+    ///
+    /// ⚠️ 边界（如实）：`cancel()` 作废的那条**不会**更新本值（没跑完），故它反映的是
+    /// "最近一次真的开始过的请求"，不是"最近一次有结果返回的请求"。两者在本仓生产路径上一致：
+    /// `cancel` 只发生在"旧的读查询被新的读查询顶掉"时，而那条被顶掉的请求**不产生任何完成
+    /// 事件**（接线层拿不到它的 `Done`）。
+    pub fn last_endpoint(&self) -> Option<ConsoleEndpoint> {
+        self.last.as_ref().map(|spec| spec.endpoint)
+    }
+
     /// **最近一次**请求的信封 `issued_at_ms`（查询端点无信封 ⇒ `None`）。
     ///
     /// 与 [`Self::retry`] 判的是**同一份** spec ⇒ 接线层可用它预先决定"还值不值得重试"，

@@ -1153,6 +1153,23 @@ impl ControlState {
         self.last_transport_failure_ms = Some(now_ms);
     }
 
+    /// 读端点失败、**且该失败有页面就地出口**时用（T21c-3）：只记账、**不压 app Toast**。
+    ///
+    /// # 为什么需要它（与写端点同款"为何恰好一条"）
+    ///
+    /// U-73 的两个明细端点（`/peripherals/fire_detectors` / `/peripherals/bms_alarms`）
+    /// 失败时，**页面自己**就地显「明细不可用」+「重试」（§15.6.2 ⑥ 的**本地固定文案**，
+    /// R-4：服务端原因串只进日志）⇒ 若本层再压一条通用的「操作失败」Toast，
+    /// 同拍会出现**两个**失败面、且那条通用文案对一个"取数"动作是**误导**
+    /// （它不是用户发起的操作）。故与写端点走同一条口径：
+    /// **页面负责上屏、状态层只记账**（见 [`Self::record_failure_state`] 的说明）。
+    ///
+    /// **记账一个不少**：清在途 + `last_transport_failure_ms` 照记（与
+    /// [`Self::record_transport_failure_with_text`] 的状态部分**逐字相同**）。
+    pub fn record_read_failure(&mut self, now_ms: u64) {
+        self.record_failure_state(now_ms);
+    }
+
     /// 传输失败 + **给页面补一条本地合成的「不可用」回执**（B3-2b-2 整改 · PM 裁定 3）。
     ///
     /// # 为什么需要它（降级必须有**上屏**出口）
