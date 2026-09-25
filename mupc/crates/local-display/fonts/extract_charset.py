@@ -31,8 +31,14 @@ SECTION_RE = re.compile(r"^###\s*3\.6\s")
 CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 
 # 表末声明的非中文字形（逐条来自 UI §3.6 的说明段；下面会断言它们确实出现在文档中）
-DECLARED_LATIN = "MUPC PCS SOC BMS REG IEC IP CPU M1 DO ERROR WARN INFO DEBUG kW A B C MB s h"
-DECLARED_SYMBOLS = "0123456789.:–·/%Σ!?×≤≥→←+−⚠"
+# **T21a（2026-09-25）扩充**：U-73 外设上屏引入的单位/短标签需要 `ppm` / `kvar` / `Hz` /
+# `PACK` / `dB/M` / `A-B` 等拉丁字形（旧声明段只含 `kW` / `A B C` / `MB` 等）⇒
+# 声明段与本清单同步扩充，否则重跑本脚本会**静默丢掉**这些字（本仓已有的坑）。
+DECLARED_LATIN = (
+    "MUPC PCS SOC SOH SOE BMS REG IEC IP CPU M1 DO ERROR WARN INFO DEBUG "
+    "kW kWh kVA kvar kvarh kPa kΩ Hz ppm Ah VOC PACK pack dB/M A-B V A B C D H K MB s h"
+)
+DECLARED_SYMBOLS = "0123456789.:–·/%Σ!?×≤≥→←+−⚠（）℃Ω₂"
 DECLARED_GEOMETRY = "▲▼●○■❚✕✓"
 # 🔒 由几何锁形替代，不入码表
 EXCLUDED = "🔒"
@@ -71,10 +77,11 @@ def main():
     # 断言：表末声明的字形/字串确实出现在本节（防"文档改了脚本没跟"）
     # 数字是 `0–9` 的**区间**写法，按字面断言该区间描述而非逐个数字。
     must_literal = [
-        "MUPC", "PCS", "SOC", "BMS", "REG", "IEC", "IP", "CPU", "M1", "DO",
-        "ERROR", "WARN", "INFO", "DEBUG", "kW", "MB",
+        "MUPC", "PCS", "SOC", "SOH", "SOE", "BMS", "REG", "IEC", "IP", "CPU", "M1", "DO",
+        "ERROR", "WARN", "INFO", "DEBUG", "kW", "kWh", "kVA", "kvar", "kvarh", "kPa",
+        "kΩ", "Hz", "ppm", "Ah", "VOC", "PACK", "dB/M", "A-B", "MB",
         "0–9", ".", ":", "–", "·", "/", "%", "Σ", "!", "?", "×", "≤", "≥",
-        "→", "←", "+", "−", "⚠",
+        "→", "←", "+", "−", "⚠", "（", "）", "℃", "Ω", "₂",
         "▲", "▼", "●", "○", "■", "❚", "✕", "✓",
     ]
     for tok in must_literal:

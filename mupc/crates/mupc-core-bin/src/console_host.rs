@@ -900,65 +900,10 @@ pub fn bms_alarm_page(
 // catalog 构建器（设计 §15.3.2 / §15.11 #8：白名单投影 + `rev`）
 // ═══════════════════════════════════════════════════════════════
 
-/// `fire_det` 每只探测器的 6 个模板位的短标签（`+0 地址`…`+5 H₂`，§15.4 明细表列名）。
-const FIRE_DET_TEMPLATE_LABELS: [&str; 6] = ["地址", "状态", "数据 1", "CO", "VOC", "H₂"];
-
-/// `fire_sys_6`（火警等级）枚举文案：**唯一权威 = PRD §3.9 F21 展示表**
-/// （`0 正常 / 1 一级报警 / 2 二级火警 / 3 预留 ⇒ 显「未定义」 / 4 紧急启动 / 5 紧急停止`；
-/// **表外值 ⇒ 屏显「未知」**）。⚠️ **不得**引 `SIG_FIRE_LEVEL`（那只有 4 条事件值）。
-const FIRE_LEVEL_ENUM: [(u16, &str); 6] = [
-    (0, "正常"),
-    (1, "一级报警"),
-    (2, "二级火警"),
-    (3, "未定义"),
-    (4, "紧急启动"),
-    (5, "紧急停止"),
-];
-
-/// `fire_sys_1`（系统状态位图）的 6 个已定义位：`(位号, 短标签)`（§15.4 A1 组）。
-const FIRE_SYS_BITS: [(u8, &str); 6] = [
-    (14, "主电故障"),
-    (13, "备电故障"),
-    (11, "驱动电路"),
-    (10, "压力传感器"),
-    (9, "电磁阀"),
-    (8, "喷洒标记"),
-];
-
-/// `fire_sys_3/4/5`（烟感 / 温感 / 可燃状态）的 3 个位（§15.4 A3 组）。
-const FIRE_TRIGGER_BITS: [(u8, &str); 3] =
-    [(0, "干接点触发"), (1, "复合触发"), (2, "预留")];
-
-/// 探测器状态整字（`fire_sys_9` / `fire_det_{+1}`）的 2 个已定义位（§15.4 明细表）。
-/// **bit15「通信状态」不在此列**（点表登记明令"不猜、不造判据"，PRD F21 未要求 ⇒ 显
-/// 「未定义位 15」；R-41 追认后才可能启用）。
-const FIRE_DETECTOR_STATE_BITS: [(u8, &str); 2] = [(12, "报警总状态"), (14, "故障总状态")];
-
-/// 「数据 1」的拆解规格（高字节烟雾 0.1 dB/M；低字节温度 raw−55 ℃；§15.4 明细表）。
-fn data1_decompose() -> Vec<mupc_display_proto::Decompose> {
-    use mupc_display_proto::{DecodeFrom, Decompose};
-    vec![
-        Decompose {
-            label: "烟雾".into(),
-            unit: Some("dB/M".into()),
-            decimals: 1,
-            from: DecodeFrom::HighByte {
-                scale: 0.1,
-                offset: 0.0,
-            },
-        },
-        Decompose {
-            label: "温度".into(),
-            unit: Some("℃".into()),
-            decimals: 0,
-            from: DecodeFrom::LowByte {
-                scale: 1.0,
-                offset: -55.0,
-            },
-        },
-    ]
-}
-
+// ⚠️ **消防枚举 / 位语义 / 拆解的文案（`FIRE_*` / `data1_decompose`）已于 T21a 迁往
+// `mupc_display_proto::peripherals_labels`**（设计 §15.11 #3 / T20 评审 D1②）：它们此前住在
+// 本文件 ⇒ 以**运行时字符串**（catalog）到 HMI ⇒ `local-display` 的码表覆盖率用例
+// （H-2 / T-23）**看不见**（F-5 的覆盖盲区）。文案**一字未改**，只换了落点。
 /// 位语义投影（三种形态见 [`mupc_display_proto::BitMeta`] 的文档）。
 ///
 /// - **离散位块**的点（`hvac_di` / `bms_alarm`）：恰 1 项，`index = at − 1`，
@@ -973,6 +918,9 @@ fn bits_for(
     role: mupc_display_proto::PeriphRole,
     block: &str,
 ) -> Vec<mupc_display_proto::BitMeta> {
+    use mupc_display_proto::peripherals_labels::{
+        FIRE_DETECTOR_STATE_BITS, FIRE_SYS_BITS, FIRE_TRIGGER_BITS,
+    };
     use mupc_display_proto::{BitMeta, CatalogBitClass};
     let mut out = Vec::new();
     if is_bit {
@@ -1035,8 +983,13 @@ fn bits_for(
 ///
 /// 三条硬要求的落点：W-1 = 逐点取自 [`mupc_display_proto::PERIPH_WHITELIST`]（排除项结构性不在
 /// 表内）；W-2 = `decimals` 由 `point_table::lookup_in` 的登记 `scale` 经
-/// [`mupc_display_proto::decimals_from_scale`] 派生（**不另写数值字面表**）；W-3 的第二半
-/// （屏用短标签）见 `peripherals_labels.rs` 模块头登记的偏离。
+/// [`mupc_display_proto::decimals_from_scale`] 派生（**不另写数值字面表**）、`unit` 取自
+/// **短标签表的单位**（`peripherals_labels::unit_for`，**唯一真源**）；W-3 = `label` 取自
+/// **短标签表**（`peripherals_labels::label_for`，**可机械枚举** ⇒ 与白名单"行数相等"）。
+///
+/// ⚠️ **不得**用登记 `label` 兜底（F-4 / D22）：登记 label 是含全角括号的登记说明文本，
+/// 直上屏会引入字库缺口（设计阶段实测 189 码位）并造成界面噪音；`label_for` 返回 `None`
+/// 是 W-3 **契约破损**（两表不同序 / 漏项），按"debug 断言 + 跳过该点"处置（见下）。
 ///
 /// `rev` 由 [`mupc_display_proto::catalog_rev`] 自算 ⇒ 与帧内 `catalog_rev` **同源同值**。
 pub fn build_peripheral_catalog(
@@ -1044,6 +997,7 @@ pub fn build_peripheral_catalog(
     plan: &[crate::display_host::PeripheralStationPlan],
     generated_ms: u64,
 ) -> mupc_display_proto::PeripheralCatalog {
+    use mupc_display_proto::peripherals_labels::{label_for, unit_for};
     use mupc_display_proto::{
         CatalogBlock, CatalogBlockKind, CatalogPoint, CatalogStation, PeripheralCatalog,
     };
@@ -1068,15 +1022,25 @@ pub fn build_peripheral_catalog(
                     .and_then(|role| mupc_southd::point_table::lookup_in(role, space, addr));
                 let decimals = row.map(|r| mupc_display_proto::decimals_from_scale(r.scale)).unwrap_or(0);
                 let is_fire_det = bp.name == "fire_det";
-                // 短标签：`fire_det` 用模板名（6 个位语义在块内按 `at % 6` 循环）；
-                // 其余点取登记 `label`（**短标签表未就绪的临时来源，已登记偏离**）。
-                let label = if is_fire_det {
-                    FIRE_DET_TEMPLATE_LABELS[((*at as usize).saturating_sub(1)) % 6].to_string()
-                } else {
-                    row.map(|r| r.label.to_string()).unwrap_or_default()
+                // 屏用短标签（**唯一真源 = 短标签表**；`fire_det` 的展开行由 `label_for`
+                // 自带归约，故此处**不**再做 `at % 6` 的形状运算）。
+                let Some(label) = label_for(st.role, &bp.name, *at) else {
+                    // **W-3 契约破损**（短标签表与白名单不同序 / 漏项）。处置取
+                    // 「**debug 断言 + 跳过该点**」而不是 `expect`：catalog 是**只读端点**，
+                    // 单点契约破损不得打挂整个端点（§15.3.2 只允许"该端点不可用"），
+                    // 也不得静默用登记 `label` 兜底（F-4 / D22）。
+                    // 该分支在 CI 上由 `display-proto` 的 H-3 用例
+                    // （`short_label_table_is_row_aligned_with_whitelist`）
+                    // 结构性挡住 ⇒ debug 构建**响亮失败**、release 构建降级为"少一行"。
+                    debug_assert!(
+                        false,
+                        "短标签表白名单漏项：{}/{}（W-3 契约破损，见 peripherals_labels.rs）",
+                        bp.name, at
+                    );
+                    continue;
                 };
                 let enum_labels = if bp.name == "fire_sys" && *at == 6 {
-                    FIRE_LEVEL_ENUM
+                    mupc_display_proto::peripherals_labels::FIRE_LEVEL_ENUM
                         .iter()
                         .map(|(v, s)| (*v, (*s).to_string()))
                         .collect()
@@ -1086,14 +1050,15 @@ pub fn build_peripheral_catalog(
                 let decompose = if (bp.name == "fire_sys" && *at == 10)
                     || (is_fire_det && at % 6 == 3)
                 {
-                    data1_decompose()
+                    mupc_display_proto::peripherals_labels::data1_decompose()
                 } else {
                     Vec::new()
                 };
                 points.push(CatalogPoint {
                     at: *at,
-                    label,
-                    unit: None, // 单位真源 = 短标签表（未就绪，见偏离登记）
+                    label: label.to_string(),
+                    // 单位真源 = 短标签表（W-2）；`None` = 无量纲
+                    unit: unit_for(st.role, &bp.name, *at).map(str::to_string),
                     decimals,
                     bits: bits_for(row, bp.is_bit, *at, st.role, &bp.name),
                     enum_labels,
@@ -1101,6 +1066,7 @@ pub fn build_peripheral_catalog(
                     group: mupc_display_proto::group_of(st.role, &bp.name, *at).to_string(),
                 });
             }
+
             blocks.push(CatalogBlock {
                 name: bp.name.clone(),
                 kind: if bp.is_bit {
@@ -1335,13 +1301,15 @@ pub const GROUPS: [(&str, &str); 4] = [
 /// "自己造的缺陷"。故本组取**硬约束**：只用 cmap 内字符，并由
 /// [`config_receipt_messages_use_only_font_cmap_glyphs`] 逐字符兜底。
 ///
-/// **码表真源** = `local-display/fonts/lv_font_cmap.txt`（入库派生清单，324 码位）——
-/// **不在此处复制一份副本**（那会变成第二真源，清单漂移时两边静默不一致）。
+/// **码表真源** = `local-display/fonts/lv_font_cmap.txt`（入库派生清单，**461** 码位；
+/// T21a 扩字库前为 324）——**不在此处复制一份副本**（那会变成第二真源，清单漂移时两边静默不一致）。
 ///
 /// # 三条推导出的写法规则（与 `config_service` 模块头硬口径 4 同一条）
 ///
-/// a. 全角 `（ ）` `；` `：` `，` 与**半角逗号**都不在 cmap 内 ⇒ 分隔符**只**能用 `·`(U+00B7)，
-///    冒号用**半角** `:`(U+003A)。
+/// a. 全角 `；` `：` `，` 与**半角逗号**都不在 cmap 内 ⇒ 分隔符**只**能用 `·`(U+00B7)，
+///    冒号用**半角** `:`(U+003A)。（`（ ）` 自 T21a 扩字库起**已进** cmap —— 12 号设计
+///    §15.7.3 的分组标题 `告警位（20）` 等按字面量上屏把它们带进了码表 —— 但本条规则
+///    针对的是**回执文案**，仍按"只用 `·` / 半角 `:`"执行，不改既有措辞。）
 /// b. 机器键名（`gateway.listen_port`）**必然**含缺字形字符（小写 `t` / `_` 都不在）⇒
 ///    屏上点名一律用 [`ConfigFieldMeta::label`]，见 `config_service::restart_labels`。
 /// c. 外部错误串（`serde_yaml` / `std::io` / 契约 `ControlEnvelopeError` 的**全小写英文**）
@@ -1355,13 +1323,13 @@ pub const GROUPS: [(&str, &str); 4] = [
 ///
 /// **批的内容（范围已裁定）**：
 /// 1. **扩字库**：在生成字体的码表里补齐本模块 + `interlock_ops` 回执文案所缺的字形——
-///    **范围以 [`PINNED_MISSING`]（下面的钉死表）的并集为准**，当前并集 **23 个码位**：
-///    **11 个 ASCII**（`,` `a` `c` `d` `e` `i` `l` `o` `p` `r` `t`）+ **4 个全角**
-///    （`，`(U+FF0C) `（`/`）`(U+FF08/FF09) `：`(U+FF1A)）+ **8 个 CJK**
-///    （`候` `理` `稍` `丢` `句` `柄` `误` `错`）。
+///    **范围以 [`PINNED_MISSING`]（下面的钉死表）的并集为准**；T21a（U-73 外设上屏扩字库）
+///    已把码表从 324 扩到 **461** 码位（它同时修好 `a` `c` `d` `p` `r` 与全角 `（` `）`）
+///    ⇒ 本批并集由 **23 收窄到 16 个码位**：**6 个 ASCII**（`,` `e` `i` `l` `o` `t`）+ **2 个全角**
+///    （`，`(U+FF0C) `：`(U+FF1A)）+ **8 个 CJK**（`丢` `候` `句` `柄` `理` `稍` `误` `错`）。
 ///    ⚠️ **上面这三个计数是手抄的**，与 [`PINNED_MISSING`] **无机械约束**，表一变则本处可能
 ///    **静默过期**；**以表为准**（改表时须同步本处）。
-///    ⚠️ **ASCII 那一档不是样本产物**：`latch` 的 `l`/`c`、`io` 的 `i`/`o` 出自**固定文案**
+///    ⚠️ **ASCII 那一档不是样本产物**：`latch` 的 `l`、`io` 的 `i`/`o` 出自**固定文案**
 ///    （`处于 latch 态` / `内部错误：io 句柄丢失`）⇒ 必然缺、必然出豆腐块 ⇒ 只扩 "CJK / 全角"
 ///    会让这两串**仍留豆腐块**（该批作为 P4 硬门禁会验收不通过）。
 ///    补齐后同步重生成 `lv_font_cmap.txt`（10 档字号合计约 **+5–15 KB**，见 PM 裁定的体量估算）。
@@ -3191,7 +3159,8 @@ gateway:
 
         // ⓪ **自检探针**：网本身必须能判出缺字（否则整条用例是恒真的摆设）。
         //    取样覆盖本次修复前的**每一类**缺字：汉字 / 全角标点 / 小写 ASCII / 下划线。
-        for poison in ["项", "（", "）", "；", "：", "，", "m", "t", "_", "⇒"] {
+        //    ⚠️ T21a 扩字库后 `（` `）` `m` 已进 cmap ⇒ 换同类的仍在 cmap 外者（`q` `x`）。
+        for poison in ["项", "；", "：", "，", "q", "t", "x", "_", "⇒"] {
             assert!(
                 !missing_glyphs(poison, &cmap).is_empty(),
                 "探针 `{poison}` 被判成「cmap 内」⇒ 这条网认不出缺字，是恒真断言"
@@ -4438,12 +4407,13 @@ gateway:
         // 一并登记进字体/文案收口批（见 `receipt` 模块头的 P4 硬门禁）。
         const PINNED_MISSING: &[(&str, &[char])] = &[
             // 契约 `InterlockReject::SourcesNotReset`：全角冒号 + `join(", ")` 的**半角逗号**
-            // + 源 token 的小写 ASCII（`estop`/`door` 的 e,s,t,o,p,d,r —— `s` 恰好在 cmap 内）
-            ("触发源未复位", &['\u{2c}', 'd', 'e', 'o', 'p', 'r', 't', '\u{ff1a}']),
-            // 契约 `HoldNotElapsed`：全角逗号 + 全角括号
-            ("保持时间不足", &['\u{ff08}', '\u{ff09}', '\u{ff0c}']),
-            // 契约 `Latched`：全角逗号 + 小写 `latch`
-            ("处于 latch 态", &['a', 'c', 'l', 't', '\u{ff0c}']),
+            // + 源 token 的小写 ASCII（`estop`/`door` 的 e,s,t,o,p,d,r —— `s` 恰在 cmap 内；
+            // `d`/`p`/`r` 自 T21a 扩字库起亦进 cmap）
+            ("触发源未复位", &['\u{2c}', 'e', 'o', 't', '\u{ff1a}']),
+            // 契约 `HoldNotElapsed`：全角逗号（全角括号自 T21a 起已在 cmap 内 ⇒ 已收窄）
+            ("保持时间不足", &['\u{ff0c}']),
+            // 契约 `Latched`：全角逗号 + 小写 `latch`（`a`/`c` 自 T21a 起已在 cmap 内 ⇒ 已收窄）
+            ("处于 latch 态", &['l', 't', '\u{ff0c}']),
             // 契约 `StopPending`：全角逗号
             ("PCS 停机未确认", &['\u{ff0c}']),
             // 契约 `Busy`：全角逗号 + `理` / `稍` / `候`
@@ -4747,8 +4717,16 @@ stations:
         assert_eq!(p.decompose.len(), 2, "「数据 1」拆解（烟雾 + 温度，F21.5）");
         assert_eq!(p.decompose[0].label, "烟雾");
         assert_eq!(p.decompose[0].unit.as_deref(), Some("dB/M"));
-        // 火警等级枚举（唯一权威 = PRD F21 展示表）
+        // **W-2 的两半**：短标签取自短标签表（非登记 label）、`unit` 取自短标签表（不再是恒 `None`）
         let sys = fire.blocks.iter().find(|b| b.name == "fire_sys").unwrap();
+        let cyl = sys.points.iter().find(|p| p.at == 2).expect("fire_sys_2");
+        assert_eq!(cyl.label, "灭火瓶压力", "短标签表 §15.4");
+        assert_eq!(cyl.unit.as_deref(), Some("kPa"), "单位真源 = 短标签表（W-2）");
+        assert_eq!(cyl.group, "fire_cylinder");
+        let st = sys.points.iter().find(|p| p.at == 1).expect("fire_sys_1");
+        assert_eq!(st.label, "系统状态");
+        assert_eq!(st.unit, None, "位图点无量纲（`None` = 无量纲，**不是**缺单位）");
+        // 火警等级枚举（唯一权威 = PRD F21 展示表）
         let lvl = sys.points.iter().find(|p| p.at == 6).expect("fire_sys_6");
         assert_eq!(lvl.group, "fire_level");
         assert_eq!(lvl.enum_labels.len(), 6);
@@ -4770,6 +4748,9 @@ stations:
         assert_eq!(a2.bits.len(), 1);
         assert_eq!(a2.bits[0].index, 1);
         assert_eq!(a2.group, "bms_alarm");
+        // 离散位点的短标签同样取短标签表（288 位逐位有文案 ⇒ 不受"登记 label 直上屏"影响）
+        assert_eq!(a2.label, "簇端电压欠压·轻", "短标签表 §15.5.2「告警位（288）」");
+        assert_eq!(a2.unit, None);
         // 点位总数 = 外设段行数（屏侧行数与 catalog 行数恒等，F25）：114 + 13 + 288
         let total: usize = got
             .stations
@@ -5053,6 +5034,219 @@ stations:
         let alarm = bms.blocks.iter().find(|b| b.name == "bms_alarm").expect("bms_alarm");
         assert_eq!(alarm.points.len(), 288);
         assert_eq!(alarm.points[0].decimals, 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // W-2**后半**（设计 §15.3.2）+ 评审 (G)-1 收口：短标签表的键 → 登记行交叉校验
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// 短标签与登记文本之间的**语义包含**判据：短标签的字符集必须 ⊆ 登记 `label` 的字符集
+    /// （⇒ 登记行的措辞是短标签的**超集**）。
+    ///
+    /// **规范化（不是豁免）**：`储能表·` 是 §15.5.2 给储能电能表段加的**显示段前缀**
+    /// （`PERIPH_LABELS` 的 38 个 `MeterBatt` 行**全部**以它开头），登记 `label` 里没有这个
+    /// 前缀 ⇒ 比较前先剥掉它（连同 `·` 本身，U+00B7）。剥掉后仍是**逐字包含**关系，
+    /// 不是"放宽成模糊匹配"。
+    fn semantic_superset_after_normalization(short: &str, registered: &str) -> bool {
+        let short = short.strip_prefix("储能表·").unwrap_or(short);
+        short.chars().all(|c| registered.contains(c))
+    }
+
+    /// **W-2 后半落地（设计 §15.3.2「短标签表的键必须命中一个登记行或站配置点，否则红」）**
+    /// ＋ 评审 (G)-1 / (A)-1 的"逐行对齐断言零判别力"收口。
+    ///
+    /// # 为什么必须落在 `mupc-core-bin`（而不是 `display-proto`）
+    ///
+    /// 断言要查 `mupc_southd::point_table`，而依赖方向是 `core-bin` → `display-proto`
+    /// （`display-proto` **不能**反向依赖 `mupc-southd`）⇒ 只能落在本 crate（评审 (E)-22）。
+    ///
+    /// # 为什么需要它：同表内的"逐行同序"断言**恒真、零判别力**
+    ///
+    /// `display-proto` 的 `short_label_table_is_row_aligned_with_whitelist` 用的是
+    /// `label_for(白名单[i]) == PERIPH_LABELS[i]`，而 `label_for` 内部 = `PERIPH_LABELS
+    /// [index_of(白名单[i])]`，`index_of` 又就在**同一张**白名单里 `.position()` ⇒
+    /// **由构造恒真**：相邻两行互换、整表错位一格，它**照绿**（评审探针 P1a/P1b 实测）。
+    /// 本用例把 `PERIPH_WHITELIST` 投到**独立的第二真源**（`point_table` 登记行）上，
+    /// 才有"错位必红"的判别力。
+    ///
+    /// # 地址口径（复用 T20 的既有路径，**不新造第二套查询**）
+    ///
+    /// `addr = 块基址 + at − 1`（与 `build_peripheral_catalog` 及
+    /// `catalog_rows_hit_point_table_and_derive_decimals_from_scale` 同一条路径：基址取自
+    /// 站配置 `regs[].addr`，登记行取自 `point_table::lookup_in`）。`fire_det` 的模板行由
+    /// `lookup_in` 自带的 `(addr − 17) % 6` 归约命中（模板 6 行 vs 运行期展开）。
+    #[test]
+    fn short_label_keys_hit_registered_rows_and_registration_wording_is_superset() {
+        use mupc_display_proto::peripherals_labels::{label_for, PERIPH_WHITELIST};
+        use mupc_display_proto::PeriphRole;
+        use mupc_southd::config::Role as SouthRole;
+        use mupc_southd::point_table::{lookup_in, AddrSpace};
+
+        /// 生产配置里 `pcs` 站**整段被注释**（T20 D6；见 `peripheral_plan` 的说明）
+        /// ⇒ 配置解析**取不到**该块。此基址 = 该注释块自己声明的 `addr: 1000`
+        /// （`deploy/config/mupc_core_config.production.yaml:288`），并与 `point_table` 的
+        /// `Role::Pcs` 登记区间（1000–1075）一致。**只补这一处**，不建第二套查询。
+        const PCS_3ZONE_BASE_FROM_COMMENTED_CONFIG: u16 = 1000;
+
+        /// **设计点名豁免（恰 5 条）**：短标签的措辞**优先于**登记文本，故其用字允许不出现在
+        /// 登记 `label` 里。四元组 `(role, block, at, 短标签)`**逐字**锁定 ⇒ 少一条 / 多一条 /
+        /// 文案漂移都会红（防豁免表腐化成"忽略所有不匹配"）。
+        ///
+        /// ⚠️ 豁免**不是**"这条查不动就算了"：每条都会被下面的用例**反向验证**（判据确实
+        /// 拒绝它）⇒ 一旦登记文本改得能被接受，用例会要求把该条从白名单里删掉。
+        const DESIGN_EXEMPTIONS: &[(PeriphRole, &str, u16, &str)] = &[
+            // §15.4 P4 消防字段表「灭火瓶压力」（`fire_cylinder`）；登记文本为
+            // 「钢瓶气压 kPa（部分产品无此功能…）」——「灭火瓶」是设计锁定的展示措辞。
+            (PeriphRole::Fire, "fire_sys", 2, "灭火瓶压力"),
+            // §15.4 P4 总览带卡 + §15.7.3 分组标题「火警等级」；登记文本为
+            // 「火警状态（枚举：…）」——「等级」的权威是 PRD §3.9 F21 展示表（非登记文本）。
+            (PeriphRole::Fire, "fire_sys", 6, "火警等级"),
+            // §15.4 明细表列名 `+5 H₂`（＝ `FIRE_DET_TEMPLATE_LABELS[5]`，模板字面量锁定）；
+            // 登记文本写 ASCII `H2` ⇒ `₂`(U+2082) 不在登记文本内。
+            // ⚠️ 该字符在 NotoSansSC 里**无字形**（UI §3.6 补注 6 / 评审 G-2）⇒ 真机豆腐块
+            // 缺口（H-4 门禁项）。本用例**只记录**"设计字面量优先"，不掩盖该缺口。
+            (PeriphRole::Fire, "fire_sys", 13, "H₂"),
+            (PeriphRole::Fire, "fire_det", 6, "H₂"),
+            // §15.5.2 PCS 字段表「直流中点电压」（`pcs_3zone_13` ↔ 登记 1012「中点电压 V」）；
+            // 「直流」是设计写明的限定词。
+            (PeriphRole::Pcs, "pcs_3zone", 13, "直流中点电压"),
+        ];
+
+        let core: crate::core_config::CoreConfig = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/mupc_core_config.production.yaml"
+        ))
+        .expect("生产配置可解析");
+        let cfg = core.south_stations;
+
+        // 块 → (role, space, 基址)：**唯一来源 = 站配置**（与 catalog 构建器同源同路径）。
+        let mut blocks: Vec<(SouthRole, &str, AddrSpace, u16)> = Vec::new();
+        for st in &cfg.stations {
+            for b in &st.regs {
+                let space = match b.func {
+                    mupc_southd::config::RegFunc::Discrete => AddrSpace::Bit,
+                    _ => AddrSpace::Reg,
+                };
+                blocks.push((st.role, b.name.as_str(), space, b.addr));
+            }
+        }
+        // ⚠️ 合成基址**不并入** `blocks`（并入会让它被算成"站配置路径"，掩盖真实路径统计）；
+        // 白名单里的 `pcs_3zone` 落到下面的 `None` 分支，按**独立路径**计数。
+
+        // 白名单 `PeriphRole` → `mupc-southd` 的 `Role`（serde 名逐字对应，见
+        // `display-proto` 的 `periph_role_serde_names_match_southd` 用例）。
+        fn south_role(r: PeriphRole) -> SouthRole {
+            match r {
+                PeriphRole::Hvac => SouthRole::Hvac,
+                PeriphRole::Fire => SouthRole::Fire,
+                PeriphRole::Battery => SouthRole::Battery,
+                PeriphRole::MeterBatt => SouthRole::MeterBatt,
+                PeriphRole::Pcs => SouthRole::Pcs,
+                PeriphRole::Unknown => unreachable!("白名单不含 Unknown"),
+            }
+        }
+
+        assert_eq!(
+            PERIPH_WHITELIST.len(),
+            447,
+            "§15.2.4：441 非 fire_det + fire_det 模板 6"
+        );
+
+        let mut via_config = 0usize; // 基址取自**站配置**的块
+        let mut via_commented = 0usize; // 基址取自**被注释**的 pcs 块
+        let mut unregistered: Vec<String> = Vec::new(); // 钥匙没落到登记行
+        let mut deviations: Vec<String> = Vec::new(); // 登记文本不是短标签的超集
+        let mut exempted: Vec<String> = Vec::new();
+
+        for (role, block, at) in PERIPH_WHITELIST {
+            let sr = south_role(*role);
+            let (space, base) = match blocks.iter().find(|(r, b, _, _)| *r == sr && *b == *block) {
+                Some((_, _, s, a)) => {
+                    via_config += 1;
+                    (*s, *a)
+                }
+                None => {
+                    // 走到这里 = 该块不在站配置里。**只允许**"被注释的 pcs 块"这一条路径
+                    // （有设计出处）；否则就是配置与白名单脱节 ⇒ 响亮失败。
+                    assert_eq!(
+                        (*role, *block),
+                        (PeriphRole::Pcs, "pcs_3zone"),
+                        "白名单块 `{block}`（{role:?}）既不在站配置、也不是被注释的 pcs_3zone \
+                         —— 白名单与生产配置已脱节"
+                    );
+                    via_commented += 1;
+                    (AddrSpace::Reg, PCS_3ZONE_BASE_FROM_COMMENTED_CONFIG)
+                }
+            };
+            let addr = base.saturating_add(at.saturating_sub(1));
+            let Some(row) = lookup_in(sr, space, addr) else {
+                unregistered.push(format!("{role:?}/{block}_{at} (addr={addr})"));
+                continue;
+            };
+            let short = label_for(*role, block, *at)
+                .unwrap_or_else(|| panic!("W-3 漏项：{role:?}/{block}/{at}"));
+            if DESIGN_EXEMPTIONS
+                .iter()
+                .any(|(r, b, a, s)| r == role && b == block && a == at && *s == short)
+            {
+                // 豁免必须**真的必要**（判据确实拒绝它）——否则说明登记文本已能通过，
+                // 该条应被删除（防豁免表腐化）。
+                assert!(
+                    !semantic_superset_after_normalization(short, row.label),
+                    "豁免项 {role:?}/{block}_{at}（`{short}`）其实**能通过**判据 ⇒ \
+                     请从 DESIGN_EXEMPTIONS 删除该条（豁免表不得腐化）"
+                );
+                exempted.push(format!("{role:?}/{block}_{at}"));
+                continue;
+            }
+            if !semantic_superset_after_normalization(short, row.label) {
+                let missing: String = short
+                    .strip_prefix("储能表·")
+                    .unwrap_or(short)
+                    .chars()
+                    .filter(|c| !row.label.contains(*c))
+                    .collect();
+                deviations.push(format!(
+                    "{role:?}/{block}_{at} (addr={addr})：短标签 `{short}` 的 `{missing}` \
+                     不在登记 label `{}` 内",
+                    row.label
+                ));
+            }
+        }
+
+        // ① W-2 后半：447 行**每一行**都必须落到登记行（设计："否则红"）。
+        assert!(
+            unregistered.is_empty(),
+            "W-2 后半破：白名单键未命中 `point_table` 登记行（共 {} 行）——\n{}",
+            unregistered.len(),
+            unregistered.join("\n")
+        );
+        // ② 登记文本必须是短标签的**超集**；未登记的偏离即为错位 / 臆造。
+        assert!(
+            deviations.is_empty(),
+            "登记 label 不是短标签的超集（共 {} 处未登记偏离）——\n{}",
+            deviations.len(),
+            deviations.join("\n")
+        );
+        // ③ 豁免表：恰 5 条、且**每条都被真实命中**（没有"写了却不生效"的僵尸豁免）。
+        assert_eq!(exempted.len(), 5, "设计点名豁免恰 5 处，实测 {exempted:?}");
+        assert_eq!(exempted.len(), DESIGN_EXEMPTIONS.len(), "豁免必须全部生效");
+        // ④ 基址路径统计：27 行走"被注释的 pcs 块"，其余 420 行走站配置。
+        assert_eq!(
+            via_config + via_commented,
+            447,
+            "基址解析必须覆盖全部 447 行"
+        );
+        assert_eq!(
+            via_commented, 27,
+            "`pcs_3zone` 白名单 27 行（生产配置该站整段被注释，T20 D6）"
+        );
+        assert_eq!(via_config, 420, "其余 420 行的块基址取自站配置");
+
+        eprintln!(
+            "W-2 后半：447/447 命中登记行（基址路径：站配置 {via_config} 行 + 被注释 pcs 块 \
+             {via_commented} 行）；登记文本 ⊇ 短标签 442 行；设计豁免 {} 行（无未登记偏离）",
+            exempted.len()
+        );
     }
 
 }

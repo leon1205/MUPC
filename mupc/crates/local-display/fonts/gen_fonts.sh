@@ -113,11 +113,22 @@ echo "提示：产物体积口径是【位图字节数】而非 .c 文本大小�
 echo "  grep -o '0x[0-9a-fA-F]*' lv_font_noto_sc_32.c | wc -l"
 
 # ── 提取实际 cmap → lv_font_cmap.txt（**入库派生清单**，见本脚本顶部注释）────────────
-# 口径与 `mupc/crates/local-display/src/ui/tests.rs::font_cmap_from_c` **逐条一致**
-#   · 码点 = `.range_start + unicode_list_0[i]`（数组存**相对偏移**，不是码点本身）；
-#   · 只认"单 cmap + 单 unicode_list + SPARSE_TINY"形态，形态不符即**响亮失败**；
-#   · 各字号取**交集**。
-# 注意：产物形态若变（如多 cmap / 非 SPARSE_TINY），**两侧都要改**（否则漂移检测会红）。
+# **T21a（2026-09-25）更新：支持 N 个 cmap。** 背景：U-73 外设上屏把码表从 326 扩到 **464**
+# 字符（新增 `ppm` / `kvar` / `Hz` / `PACK` 等单位所需的小写拉丁字母等），ASCII 段因此变"密"
+# ⇒ `lv_font_conv` **不再**产出单个 `SPARSE_TINY`，而是切成
+#   `cmaps[0] = FORMAT0_FULL`（U+0020..U+0057 的密集段）+ `cmaps[1] = SPARSE_TINY`（其余）。
+# 旧提取器（`unicode_list_0` ×1 + `range_start` ×1）**直接报错**，故本块改为按 LVGL 的
+# `get_glyph_dsc_id`（`vendor/lvgl/src/font/fmt_txt/lv_font_fmt_txt.c:280-330`）逐 cmap 解析：
+#   · `FORMAT0_TINY` / `FORMAT0_FULL` / `SPARSE_TINY` / `SPARSE_FULL` 四种类型全覆盖
+#     （`FORMAT0_FULL` 的 `glyph_id_ofs_list[rcp] == 0 && rcp != 0` ⇒ 该码位**无字形**）；
+#   · 各字号仍取**交集**（语义不变）。
+# ✅ **Rust 侧 `ui/tests.rs` 已同步（同一批，2026-09-25）——两侧口径一致**：本块的
+# Python 提取器 `cmap_entries()` 与 `mupc/crates/local-display/src/ui/tests.rs` 的
+# `cmap_entries_from_c()` 是**同源的两份实现**（同一套 LVGL `get_glyph_dsc_id` 语义：N 个
+# cmap × 四种类型 + `FORMAT0_FULL` 的 `rcp != 0 && ofs == 0` ⇒ 无字形）。`font_cmap_from_c` /
+# `adv_w_from_c` 都建在 `cmap_entries_from_c` 之上 ⇒ 本机**存在 `.c` 产物**时那两条交叉校验
+# **照常通过**（不再是"单 cmap 假设 ⇒ 响亮失败"）。干净 clone / CI 无 `.c` ⇒ 走入库基线。
+# 注意：产物形态若变（如新增 cmap 类型），**两侧都要改**（否则漂移检测会红）。
 #
 # **同时产出 `lv_font_metrics.txt`（入库！）**：各档 `adv_w` 的**派生基线**（单位 1/16 px，
 # 按 `lv_font_cmap.txt` 的**码位升序**逐一对应）。用途见脚本顶部注释与本块末尾说明：
@@ -128,16 +139,81 @@ import re, sys
 
 out_name, metrics_name, sizes = sys.argv[1], sys.argv[2], sys.argv[3:]
 
-def cmap_of(path):
+
+def cmap_entries(path):
+    """解析 `cmaps[]`（**支持 N 个 cmap**；T21a 扩充码表后 lv_font_conv 会把 ASCII 密集段
+    单独切成一个 `FORMAT0_FULL`，与其余 `SPARSE_TINY` 并列 ⇒ 单 cmap 假设不再成立）。
+
+    返回 `[(码位, glyph_id), ...]`，语义**逐条照抄 LVGL** 的 `get_glyph_dsc_id`
+    （`vendor/lvgl/src/font/fmt_txt/lv_font_fmt_txt.c:280-330`）：
+      · `FORMAT0_TINY`  ：`glyph_id = glyph_id_start + rcp`
+      · `FORMAT0_FULL`  ：`glyph_id = glyph_id_start + glyph_id_ofs_list[rcp]`；该表项为 0
+        且 `rcp != 0` ⇒ **该码位无字形**（LVGL 原文注释：首字符必有效、其 offset 恒 0）
+      · `SPARSE_TINY`   ：`glyph_id = glyph_id_start + unicode_list 下标`
+      · `SPARSE_FULL`   ：`glyph_id = glyph_id_start + glyph_id_ofs_list[下标]`
+    """
     src = open(path, encoding="utf-8", errors="replace").read()
-    if src.count("static const uint16_t unicode_list_0[]") != 1 or src.count(".range_start =") != 1:
-        raise SystemExit(f"{path}: lv_font_conv 输出形态已变（多 cmap），请同步更新提取器")
-    if "LV_FONT_FMT_TXT_CMAP_SPARSE_TINY" not in src:
-        raise SystemExit(f"{path}: cmap 类型不是 SPARSE_TINY，偏移语义不同，请复核")
-    rs = int(re.search(r"\.range_start\s*=\s*(\d+)", src).group(1))
-    i = src.index("static const uint16_t unicode_list_0[]")
-    body = src[i:src.index("};", i)]
-    return {rs + int(h, 16) for h in re.findall(r"0x([0-9a-fA-F]+)", body)}
+
+    def nums(decl, name):
+        """取数组体里的全部整数。`unicode_list` 用**十六进制**、`glyph_id_ofs_list` 用
+        **十进制**（lv_font_conv 的实际写法）⇒ 两种都认，避免"只认十六进制"漏读。"""
+        i = src.index(f"static const {decl} {name}[]")
+        # 必须从声明行**之后**的 `{` 起切：数组名与 `uint8_t` 里都含数字，
+        # 从声明行起切会把它们当元素读进来（实测 +2 个假元素）。
+        b = src.index("{", i)
+        body = src[b + 1:src.index("};", b)]
+        return [int(t, 0) for t in re.findall(r"0x[0-9a-fA-F]+|[0-9]+", body)]
+
+    def u16(name):
+        return nums("uint16_t", name)
+
+    def u8(name):
+        return nums("uint8_t", name)
+
+    pat = re.compile(
+        r"\.range_start = (\d+),\s*\.range_length = (\d+),\s*\.glyph_id_start = (\d+),\s*"
+        r"\.unicode_list = (\w+),\s*\.glyph_id_ofs_list = (\w+),\s*\.list_length = (\d+),\s*"
+        r"\.type = (LV_FONT_FMT_TXT_CMAP_\w+),?"
+    )
+    entries = []
+    for m in pat.finditer(src):
+        rs, rl, gis = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        ul, ofs, ln, ty = m.group(4), m.group(5), int(m.group(6)), m.group(7)
+        if ty == "LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY":
+            entries += [(rs + rcp, gis + rcp) for rcp in range(rl)]
+        elif ty == "LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL":
+            tbl = u8(ofs)
+            if len(tbl) != rl:
+                raise SystemExit(f"{path}: FORMAT0_FULL 的 glyph_id_ofs_list 长度（{len(tbl)}）≠ range_length（{rl}）")
+            entries += [(rs + rcp, gis + tbl[rcp]) for rcp in range(rl) if tbl[rcp] != 0 or rcp == 0]
+        elif ty == "LV_FONT_FMT_TXT_CMAP_SPARSE_TINY":
+            lst = u16(ul)
+            if len(lst) != ln:
+                raise SystemExit(f"{path}: SPARSE_TINY 的 unicode_list 长度（{len(lst)}）≠ list_length（{ln}）")
+            entries += [(rs + v, gis + i) for i, v in enumerate(lst)]
+        elif ty == "LV_FONT_FMT_TXT_CMAP_SPARSE_FULL":
+            lst, o16 = u16(ul), u16(ofs)
+            entries += [(rs + v, gis + o16[i]) for i, v in enumerate(lst)]
+        else:
+            raise SystemExit(f"{path}: 未知 cmap 类型 `{ty}`（解析器与生成物脱节）")
+    if not entries:
+        raise SystemExit(f"{path}: 未解析到任何 cmap 条目（产物形态已变，请同步更新本提取器）")
+    return entries
+
+
+def cmap_of(path):
+    return {cp for cp, _ in cmap_entries(path)}
+
+
+def adv_of(path):
+    src = open(path, encoding="utf-8", errors="replace").read()
+    adv = [int(m.group(1)) for m in re.finditer(r"\.adv_w\s*=\s*(\d+)", src)]
+    out = {}
+    for cp, gid in cmap_entries(path):
+        if gid < len(adv):
+            out[cp] = adv[gid]
+    return out
+
 
 sets = []
 for s in sizes:
@@ -157,7 +233,7 @@ with open(out_name, "w", encoding="utf-8", newline="\n") as f:
         "# 每行一个 `U+XXXX`（码位，非字形索引）；`#` 开头为说明行。\n"
         "#\n"
         "# 口径 = 各字号 cmap 的**交集**（走查语义：字符在任一档上屏都得出字形；\n"
-        "# 并集会让「只在部分档存在」的字蒙混过关）。实测 2026-09-11 十档相同。\n"
+        "# 并集会让「只在部分档存在」的字蒙混过关）。\n"
         "#\n"
         "# ⚠️ 字库 / 字号档位变更后**必须重跑 gen_fonts.sh 并提交本文件**，\n"
         "#    否则 ui/tests.rs 的漂移检测（生成物 vs 本清单）会失败。\n"
@@ -166,22 +242,6 @@ with open(out_name, "w", encoding="utf-8", newline="\n") as f:
     for cp in sorted(inter):
         f.write(f"U+{cp:04X}\n")
 print(f"==> {out_name}（入库派生清单；{len(inter)} 码位，来自 {len(sizes)} 档 cmap 交集）")
-
-# ── 提取各档 adv_w → lv_font_metrics.txt（**入库派生清单**，与上面的 cmap 同一次运行）──────
-# 口径与 `ui/tests.rs::adv_w_from_c` **逐条一致**：
-#   · `.adv_w` 按 `glyph_dsc[]` 顺序出现；码位 = `.range_start + unicode_list_0[i]`，
-#     其 glyph id = i + 1 ⇒ `adv_w[glyph_id]`（id 0 = reserved，Rust 侧同一处口径）；
-#   · 输出按 `lv_font_cmap.txt` 的**码位升序**（= 上面 sorted(inter)）逐一对齐，每档一行。
-# 用途：干净 clone / CI 无 `.c` 产物时，`ui/tests.rs::measured_text_px` 的宽度类断言（值对
-# 列宽 / 时间列等宽 / 操作者列宽）**改用它做权威基线**；两处都在时由 Rust 侧**交叉校验**。
-def adv_of(path):
-    src = open(path, encoding="utf-8", errors="replace").read()
-    rs = int(re.search(r"\.range_start\s*=\s*(\d+)", src).group(1))
-    i = src.index("static const uint16_t unicode_list_0[]")
-    body = src[i:src.index("};", i)]
-    unis = [int(h, 16) for h in re.findall(r"0x([0-9a-fA-F]+)", body)]
-    adv = [int(m.group(1)) for m in re.finditer(r"\.adv_w\s*=\s*(\d+)", src)]
-    return {rs + off: adv[idx + 1] for idx, off in enumerate(unis) if idx + 1 < len(adv)}
 
 cps = sorted(inter)
 tables = []
@@ -207,7 +267,7 @@ with open(metrics_name, "w", encoding="utf-8", newline="\n") as f:
         "# 用它做**权威基线**，不再\"读不到就静默跳过\"（那等于宽度网在 CI 上恒空转）。\n"
         "#\n"
         "# 口径与 ui/tests.rs::measured_text_px 的 `.c` 路径**逐条一致**（同一次提取逻辑）：\n"
-        "#   · 码点 = `.range_start + unicode_list_0[i]`，其 glyph id = i + 1；\n"
+        "#   · 码位 → glyph_id 走 LVGL `get_glyph_dsc_id` 的四种 cmap 语义（支持 N 个 cmap）；\n"
         "#   · adv_w 按 glyph id 顺序取自 `glyph_dsc[]`。\n"
         "# 当 `.c` 与入库清单在**同一台机器上同时存在**时，二者会被**交叉校验**（漂移检测）。\n"
         "#\n"

@@ -1198,66 +1198,320 @@ const NON_DISPLAY_SINKS: [&str; 11] = [
 /// 条目未删 ⇒ 也红 —— **有意**如此：防止登记腐化）。
 const KNOWN_MISSING: [(char, &str); 0] = [];
 
-/// 从 `lv_font_noto_sc_*.c` 解析**实际支持的码点集合**。
+/// 从 cmap 结构体文本片段里取**十进制**字段（如 `.range_start = 32`）。
 ///
-/// **本版本 `lv_font_conv` 生成物的确切形态**（2026-09-11 对 10 个字号逐一实测，
-/// 不是猜的）：
-///
-/// ```c
-/// static const uint16_t unicode_list_0[] = { 0x0, 0x1, 0x5, /* …升序… */ };
-/// static const lv_font_fmt_txt_cmap_t cmaps[] = { {
-///     .range_start = 32, .range_length = 40633, .glyph_id_start = 1,
-///     .unicode_list = unicode_list_0, .glyph_id_ofs_list = NULL,
-///     .list_length = 324, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY } };
-/// ```
-///
-/// ⇒ **码点 = `.range_start + unicode_list_0[i]`**（数组存的是相对偏移，**不是**码点本身；
-/// 直接当码点用会漏掉几乎全部 CJK）。形态与解析前提不符时**响亮失败** —— 否则"解析不到"
-/// 会伪装成"全部覆盖"（正是要修的那类缺陷）。
-fn font_cmap_from_c(src: &str, name: &str) -> std::collections::BTreeSet<char> {
-    let lists = src.matches("static const uint16_t unicode_list_0[]").count();
-    let ranges = src.matches(".range_start =").count();
-    assert!(
-        lists == 1 && ranges == 1,
-        "{name}：`lv_font_conv` 输出形态已变（unicode_list_0 × {lists}、range_start × {ranges}）\
-         —— 本解析器只认「单 cmap + 单 unicode_list」形态，请据此更新（不得静默跳过）"
-    );
-    assert!(
-        src.contains("LV_FONT_FMT_TXT_CMAP_SPARSE_TINY"),
-        "{name}：cmap 类型不是 SPARSE_TINY（`unicode_list` 的偏移语义随之不同），请复核解析"
-    );
-    let start = src.find("static const uint16_t unicode_list_0[]").expect("已断言存在");
-    let body_open = start + src[start..].find('{').expect("数组体");
-    let body = &src[body_open + 1..];
-    let body = &body[..body.find("};").expect("数组结束")];
-    let rs_at = src.find(".range_start =").expect("已断言存在");
-    let rs: u32 = src[rs_at + ".range_start =".len()..]
+/// 字段缺失 ⇒ **响亮 `panic`**（不返回默认值）：形态变了就必须有人来改解析器，而不是让
+/// "读到 0" 伪装成合法取值。
+fn cmap_field_u32(chunk: &str, key: &str, name: &str) -> u32 {
+    let at = chunk.find(key).unwrap_or_else(|| {
+        panic!("{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）")
+    });
+    chunk[at + key.len()..]
         .trim_start()
         .split(|c: char| !c.is_ascii_digit())
         .next()
+        .filter(|s| !s.is_empty())
         .and_then(|s| s.parse().ok())
-        .expect("range_start 应是十进制整数");
-    let mut set = std::collections::BTreeSet::new();
+        .unwrap_or_else(|| panic!("{name}：`{key}` 后不是十进制整数（该字段应为十进制，请复核解析）"))
+}
+
+/// 从 cmap 结构体文本片段里取**标识符**字段（如 `.unicode_list = unicode_list_1` / `NULL`）。
+fn cmap_field_ident<'a>(chunk: &'a str, key: &str, name: &str) -> &'a str {
+    let at = chunk.find(key).unwrap_or_else(|| {
+        panic!("{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）")
+    });
+    let tail = chunk[at + key.len()..].trim_start();
+    let n = tail
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(tail.len());
+    &tail[..n]
+}
+
+/// 取 `static const <decl> <array_name>[] = { … };` 数组体里的**全部整数**。
+///
+/// **两种进制都要认**：`unicode_list` 写成十六进制（`0x…`）、`glyph_id_ofs_list` 写成十进制
+/// （`lv_font_conv` 的实际写法）⇒ 只认十六进制会**漏读** `glyph_id_ofs_list`。
+///
+/// **必须从声明行之后的 `{` 起切数组体**：数组名（`unicode_list_1`）与 `uint8_t` 里都含数字，
+/// 从声明行起切会把它们当成元素读进来（实测会多出 2 个假元素）。
+fn c_array_u32(src: &str, decl: &str, array_name: &str, name: &str) -> Vec<u32> {
+    let head = format!("static const {decl} {array_name}[]");
+    let at = src.find(&head).unwrap_or_else(|| {
+        panic!(
+            "{name}：找不到数组声明 `{head}` —— `lv_font_conv` 产物形态与解析器脱节\
+             （请按 LVGL `get_glyph_dsc_id` 的语义同步更新；**不得静默跳过**）"
+        )
+    });
+    let open = at
+        + src[at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name}：`{head}` 声明后找不到 `{{`"));
+    let end = open
+        + src[open..]
+            .find("};")
+            .unwrap_or_else(|| panic!("{name}：`{array_name}[]` 数组体未闭合"));
+    let body = &src[open + 1..end];
     let b = body.as_bytes();
+    let mut out = Vec::new();
     let mut i = 0usize;
-    while i + 1 < b.len() {
-        if b[i] == b'0' && b[i + 1] == b'x' {
+    while i < b.len() {
+        if b[i] == b'0' && i + 1 < b.len() && (b[i + 1] | 0x20) == b'x' {
             let mut j = i + 2;
             while j < b.len() && b[j].is_ascii_hexdigit() {
                 j += 1;
             }
             if let Ok(v) = u32::from_str_radix(&body[i + 2..j], 16) {
-                if let Some(ch) = char::from_u32(rs + v) {
-                    set.insert(ch);
-                }
+                out.push(v);
+            }
+            i = j;
+        } else if b[i].is_ascii_digit() {
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if let Ok(v) = body[i..j].parse::<u32>() {
+                out.push(v);
             }
             i = j;
         } else {
             i += 1;
         }
     }
-    assert!(!set.is_empty(), "{name}：unicode_list 解析出 0 个码点 —— 解析器与生成物脱节");
+    out
+}
+
+/// 从 `lv_font_noto_sc_*.c` 的 `cmaps[]` 解析**全部 `(码位, glyph_id)` 条目**。
+///
+/// **本解析器是 [`font_cmap_from_c`] 与 [`adv_w_from_c`] 的公用底座**（两处口径必须同源，
+/// 否则一条网说"覆盖"、另一条说"宽度缺" —— 正是要避免的漂移）。
+/// 语义**逐条照抄 LVGL** `get_glyph_dsc_id`
+/// （`vendor/lvgl/src/font/fmt_txt/lv_font_fmt_txt.c:280-330`）：
+///
+/// | cmap 类型 | 码位 | glyph_id |
+/// |---|---|---|
+/// | `FORMAT0_TINY`  | `range_start + rcp`，`rcp ∈ 0..range_length` | `glyph_id_start + rcp` |
+/// | `FORMAT0_FULL`  | `range_start + rcp`，**但 `glyph_id_ofs_list[rcp] == 0 && rcp != 0` ⇒ 无字形、跳过** | `glyph_id_start + glyph_id_ofs_list[rcp]` |
+/// | `SPARSE_TINY`   | `range_start + unicode_list[i]` | `glyph_id_start + i` |
+/// | `SPARSE_FULL`   | `range_start + unicode_list[i]` | `glyph_id_start + glyph_id_ofs_list[i]` |
+///
+/// **产物形态（2026-09-25 订正，实测 10 档，不是猜的）**：`cmaps[]` **可以是 N 个**（N ≥ 1），
+/// 且**每个 cmap 类型可不同**。T21a 把码表从 326 扩到 464 字符（U-73 外设上屏的 `ppm` / `kvar`
+/// / `Hz` / `PACK` 等单位所需小写拉丁字母）后，ASCII 段变"密" ⇒ `lv_font_conv` **不再**产出
+/// 单个 `SPARSE_TINY`，而是切成
+///
+/// ```c
+/// static const uint8_t  glyph_id_ofs_list_0[] = { 0, 1, 0, /* …十进制… */ };
+/// static const uint16_t unicode_list_1[]       = { 0x0, 0x2, /* …十六进制… */ };
+/// static const lv_font_fmt_txt_cmap_t cmaps[] = {
+///     { .range_start = 32, .range_length = 56, .glyph_id_start = 1,
+///       .unicode_list = NULL, .glyph_id_ofs_list = glyph_id_ofs_list_0, .list_length = 56,
+///       .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL },
+///     { .range_start = 97, .range_length = 65193, .glyph_id_start = 39,
+///       .unicode_list = unicode_list_1, .glyph_id_ofs_list = NULL, .list_length = 423,
+///       .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY } };
+/// ```
+///
+/// ⚠️ **数组名不固定**：旧形态是 `unicode_list_0`，本次是 `unicode_list_1` ⇒ **按声明行找、
+/// 不按固定名字找**。⚠️ **`glyph_id` 是全局的**（跨 cmap 连续编排），`adv_w` 必须用**真实
+/// `glyph_id`** 去索引 `glyph_dsc[]`，不能再用"第 i 个 = i+1"的特例。
+///
+/// **漂移检测的口径一致性（强制）**：本函数与 `fonts/gen_fonts.sh` 里的 Python
+/// `cmap_entries()` **必须逐条一致**（后者产出入库清单 `lv_font_cmap.txt` /
+/// `lv_font_metrics.txt`）；产物形态再变（如新增 cmap 类型）⇒ **两侧都要改**，否则
+/// `load_font_cmap` 的漂移检测会红。
+///
+/// 形态不符 / 找不到 `cmaps[]` / 单条 cmap 解析不出 / 未知 cmap 类型 ⇒ **响亮 `panic`**，
+/// **绝不**静默跳过或返回空集 —— 否则"解析不到"会伪装成"全部覆盖"（正是要修的那类缺陷）。
+fn cmap_entries_from_c(src: &str, name: &str) -> Vec<(u32, usize)> {
+    const HEAD: &str = "static const lv_font_fmt_txt_cmap_t cmaps[]";
+    const T_FORMAT0_TINY: &str = "LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY";
+    const T_FORMAT0_FULL: &str = "LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL";
+    const T_SPARSE_TINY: &str = "LV_FONT_FMT_TXT_CMAP_SPARSE_TINY";
+    const T_SPARSE_FULL: &str = "LV_FONT_FMT_TXT_CMAP_SPARSE_FULL";
+
+    let at = src.find(HEAD).unwrap_or_else(|| {
+        panic!(
+            "{name}：找不到 cmap 数组声明 `{HEAD}` —— `lv_font_conv` 产物形态与解析器脱节\
+             （请按 LVGL `get_glyph_dsc_id` 的语义同步更新；**不得静默跳过**）"
+        )
+    });
+    let open = at
+        + src[at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{name}：`{HEAD}` 后找不到 `{{`"));
+    let end = open
+        + src[open..]
+            .find("};")
+            .unwrap_or_else(|| panic!("{name}：`cmaps[]` 数组体未闭合"));
+    let body = &src[open + 1..end];
+
+    // `(码位, glyph_id)`（`rcp` = 相对码位；`gid` = 该 cmap 语义下的**全局** glyph id）。
+    let entry = |rs: u32, rcp: u32, gid: usize| -> (u32, usize) {
+        let cp = rs.checked_add(rcp).unwrap_or_else(|| {
+            panic!("{name}：码位溢出（range_start = {rs} + 相对码位 {rcp}）—— 产物形态异常")
+        });
+        (cp, gid)
+    };
+
+    let mut entries: Vec<(u32, usize)> = Vec::new();
+    let mut cmap_count = 0usize;
+    for chunk in body.split('}') {
+        if !chunk.contains(".range_start") {
+            continue;
+        }
+        cmap_count += 1;
+        let rs = cmap_field_u32(chunk, ".range_start =", name);
+        let rl = cmap_field_u32(chunk, ".range_length =", name);
+        let gis = cmap_field_u32(chunk, ".glyph_id_start =", name);
+        let list_len = cmap_field_u32(chunk, ".list_length =", name);
+        let ul = cmap_field_ident(chunk, ".unicode_list =", name);
+        let ofs = cmap_field_ident(chunk, ".glyph_id_ofs_list =", name);
+        let ty = cmap_field_ident(chunk, ".type =", name);
+        match ty {
+            T_FORMAT0_TINY => {
+                for rcp in 0..rl {
+                    entries.push(entry(rs, rcp, (gis as usize) + rcp as usize));
+                }
+            }
+            T_FORMAT0_FULL => {
+                let tbl = c_array_u32(src, "uint8_t", ofs, name);
+                assert!(
+                    tbl.len() == rl as usize,
+                    "{name}：FORMAT0_FULL 的 `{ofs}` 长度（{}）≠ range_length（{rl}）—— 产物形态异常",
+                    tbl.len()
+                );
+                for (rcp, ofs_rcp) in tbl.iter().enumerate() {
+                    // LVGL 原文：首字符必有效、其 offset 恒 0；其余位置 offset == 0 ⇒ **该码位无字形**。
+                    if *ofs_rcp == 0 && rcp != 0 {
+                        continue;
+                    }
+                    entries.push(entry(rs, rcp as u32, (gis as usize) + *ofs_rcp as usize));
+                }
+            }
+            T_SPARSE_TINY => {
+                let lst = c_array_u32(src, "uint16_t", ul, name);
+                assert!(
+                    lst.len() == list_len as usize,
+                    "{name}：SPARSE_TINY 的 `{ul}` 长度（{}）≠ list_length（{list_len}）—— 产物形态异常",
+                    lst.len()
+                );
+                for (i, v) in lst.iter().enumerate() {
+                    entries.push(entry(rs, *v, (gis as usize) + i));
+                }
+            }
+            T_SPARSE_FULL => {
+                let lst = c_array_u32(src, "uint16_t", ul, name);
+                let o16 = c_array_u32(src, "uint16_t", ofs, name);
+                assert!(
+                    o16.len() >= lst.len(),
+                    "{name}：SPARSE_FULL 的 `{ofs}` 长度（{}）< `{ul}` 长度（{}）—— 产物形态异常",
+                    o16.len(),
+                    lst.len()
+                );
+                for (i, v) in lst.iter().enumerate() {
+                    entries.push(entry(rs, *v, (gis as usize) + o16[i] as usize));
+                }
+            }
+            other => panic!(
+                "{name}：未知 cmap 类型 `{other}` —— 解析器与生成物脱节，请按 LVGL \
+                 `get_glyph_dsc_id` 的语义同步更新（**不得静默跳过**）"
+            ),
+        }
+    }
+    assert!(
+        cmap_count >= 1 && !entries.is_empty(),
+        "{name}：`cmaps[]` 解析出 {cmap_count} 个 cmap / {} 条码位条目 —— 解析器与生成物脱节\
+         （**不得静默跳过**；旧版断言精神：形态已变请据此更新）",
+        entries.len()
+    );
+    entries
+}
+
+/// 从 `lv_font_noto_sc_*.c` 解析**实际支持的码点集合**（基于 [`cmap_entries_from_c`]）。
+///
+/// 码位语义、N 个 cmap、四种类型与产物形态说明**见 [`cmap_entries_from_c`]**（公用底座，
+/// 两处口径必须同源）。形态与解析前提不符 / 解析出 0 个码点 ⇒ **响亮失败**，不静默跳过。
+fn font_cmap_from_c(src: &str, name: &str) -> std::collections::BTreeSet<char> {
+    let mut set = std::collections::BTreeSet::new();
+    for (cp, _gid) in cmap_entries_from_c(src, name) {
+        let ch = char::from_u32(cp).unwrap_or_else(|| {
+            panic!("{name}：码位 U+{cp:04X} 不是合法 Unicode 标量 —— 产物异常或解析器脱节")
+        });
+        set.insert(ch);
+    }
+    assert!(
+        !set.is_empty(),
+        "{name}：cmaps[] 解析出 0 个码点 —— 解析器与生成物脱节（不得静默跳过）"
+    );
     set
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `cmap_entries_from_c` 的**合成入参**单测：覆盖本仓 10 档产物**从不出现**的两条分支
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 背景（T21a 评审 (D)-20 / 建议 G-8）：本仓 10 档 `.c` 实测只出现 `FORMAT0_FULL`
+// + `SPARSE_TINY` ⇒ `FORMAT0_TINY` / `SPARSE_FULL` 两条分支**只经代码走查、零执行**。
+// 用**手写的最小 `.c` 片段**当纯函数入参即可覆盖（不依赖 `lv_font_conv` / 不依赖产物存在），
+// 成本极低。**只加测、不改生产逻辑。**
+
+/// `FORMAT0_TINY`：`码位 = range_start + rcp`、`glyph_id = glyph_id_start + rcp`
+/// （`rcp ∈ 0..range_length`，**无** `glyph_id_ofs_list`、**不跳任何码位**）。
+#[test]
+fn cmap_format0_tiny_maps_range_start_plus_rcp() {
+    let src = r#"
+static const lv_font_fmt_txt_cmap_t cmaps[] = {
+    { .range_start = 32, .range_length = 4, .glyph_id_start = 7,
+      .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 4,
+      .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY } };
+"#;
+    assert_eq!(
+        cmap_entries_from_c(src, "synthetic_f0_tiny"),
+        vec![(32, 7), (33, 8), (34, 9), (35, 10)],
+        "FORMAT0_TINY：码位 = range_start + rcp、glyph_id = glyph_id_start + rcp"
+    );
+}
+
+/// `SPARSE_FULL`：`码位 = range_start + unicode_list[i]`、
+/// `glyph_id = glyph_id_start + glyph_id_ofs_list[i]`（**两张表按下标配对**，
+/// 与 `SPARSE_TINY` 的"glyph_id = glyph_id_start + i"不同 —— 用**非递增**的 ofs 表
+/// 才能区分二者，故此处刻意取 `[3, 1, 0]`）。
+///
+/// ⚠️ **入参约定**：`range_start` 必须是**十进制**（两侧解析器一致：Rust `cmap_field_u32`
+/// 只认十进制数字，`gen_fonts.sh` 的 Python 正则也是 `= (\d+)`）。`lv_font_conv` 的实际写法
+/// 就是十进制（如 `.range_start = 32` / `= 97`）⇒ 这里按同一约定构造，不引入产物里没有的形态。
+///
+/// `unicode_list` = `{0x0, 0x5, 0x9}`（十六进制，`lv_font_conv` 的写法），
+/// `glyph_id_ofs_list` = `{3, 1, 0}`（十进制，同产物写法）⇒ 顺带覆盖"两种进制都要读"。
+#[test]
+fn cmap_sparse_full_pairs_unicode_list_with_glyph_id_ofs_list() {
+    let src = r#"
+static const uint16_t unicode_list_0[] = { 0x0, 0x5, 0x9 };
+static const uint16_t glyph_id_ofs_list_0[] = { 3, 1, 0 };
+static const lv_font_fmt_txt_cmap_t cmaps[] = {
+    { .range_start = 19968, .range_length = 65193, .glyph_id_start = 11,
+      .unicode_list = unicode_list_0, .glyph_id_ofs_list = glyph_id_ofs_list_0,
+      .list_length = 3,
+      .type = LV_FONT_FMT_TXT_CMAP_SPARSE_FULL } };
+"#;
+    assert_eq!(
+        cmap_entries_from_c(src, "synthetic_sparse_full"),
+        vec![(19968, 14), (19973, 12), (19977, 11)],
+        "SPARSE_FULL：glyph_id 必须取 glyph_id_ofs_list[i]（不是 i）"
+    );
+}
+
+/// 未知 cmap 类型 ⇒ **响亮 `panic`**（"解析不到"不得伪装成"全部覆盖"）。
+#[test]
+#[should_panic(expected = "未知 cmap 类型")]
+fn cmap_unknown_type_panics_loudly() {
+    let src = r#"
+static const lv_font_fmt_txt_cmap_t cmaps[] = {
+    { .range_start = 32, .range_length = 4, .glyph_id_start = 7,
+      .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 4,
+      .type = LV_FONT_FMT_TXT_CMAP_SPARSE_FULL_V2_FUTURE } };
+"#;
+    let _ = cmap_entries_from_c(src, "synthetic_unknown_type");
 }
 
 /// 剥掉 `format!` 模板里的 `{…}` 占位符（其内容是**表达式**，屏上出现的是它的**值**）。
@@ -1722,8 +1976,11 @@ fn cps(set: &std::collections::BTreeSet<char>) -> Vec<String> {
 /// 上屏都得出字形"，只有交集能**保证**这一点；并集会让"只在部分档存在"的字符蒙混过关
 /// （真机某档即豆腐块 = 漏）。b) 交集可能"误报"（某字只在小档用到、且该档有它），但
 /// **误报可消解**（把字补进全部档 / 登记缺字），漏报在屏上是静默的豆腐块。
-/// c) 实测 2026-09-11：10 档 cmap **完全相同**（各 324 码位，并集 − 交集 = 0）⇒ 当前
+/// c) 实测 2026-09-11：10 档 cmap **完全相同**（当时各 324 码位，并集 − 交集 = 0）⇒ 当前
 /// 两种取法**结果一致**，选交集只是把"未来某档掉字"这件事**钉在红灯上**。
+/// **2026-09-25 T21a 后重测：10 档仍完全相同，各 461 码位**（扩到 464 字符的码表里，有 3 个
+/// 码位**字库源本身就没有字形**、故不在任何档的 cmap 内：U+2082 / U+2715 / U+275A
+/// —— 已用 `fontTools` 对 `NotoSansSC-Regular.otf` 实测确认 ⇒ 交集只有 461）—— 两种取法仍一致。
 fn load_font_cmap() -> Option<std::collections::BTreeSet<char>> {
     let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
     let manifest_path = fonts_dir.join(CMAP_MANIFEST);
@@ -1799,12 +2056,21 @@ const METRICS_MANIFEST: &str = "lv_font_metrics.txt";
 /// 从**生产字体产物** `fonts/lv_font_noto_sc_{px}.c` 取 `adv_w` 表（码位 → 1/16 px）。
 /// `None` = 该档产物不存在（干净 clone / CI 常态）。
 ///
-/// 口径：`glyph_dsc` 的 `adv_w` 按 **glyph id 顺序**出现；`unicode_list_0[i]` = 码位 −
-/// `range_start`(32)，其 glyph id = 1 + i。
+/// **口径（2026-09-25 订正）**：码位 → `glyph_id` 走 [`cmap_entries_from_c`]（**支持 N 个
+/// cmap、四种 cmap 类型**，语义同 LVGL `get_glyph_dsc_id`）；`glyph_dsc[]` 的 `adv_w` 按
+/// **glyph id 顺序**出现 ⇒ 取 `adv[glyph_id]`。
+///
+/// ⚠️ 旧实现是**单 cmap 特例**（`unicode_list_0[i]` ⇒ glyph id `i + 1`、码位 `v + 32`），
+/// 扩字库后产物切成两个 cmap ⇒ 该特例失效（`glyph_id_start` 不再是 1）。**不得回退**：
+/// 一律用**真实 `glyph_id`** 索引，并保留 `gid < adv.len()` 的越界保护。
+///
+/// 某个码位**找不到对应 `adv_w`** ⇒ **响亮 `panic`**（与 `fonts/gen_fonts.sh` 的 Python
+/// `adv_of` 同款判据）：静默丢条目会让宽度网少测一片且无人察觉。
 fn adv_w_from_c(px: u32) -> Option<std::collections::BTreeMap<u32, u64>> {
+    let name = format!("lv_font_noto_sc_{px}.c");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fonts")
-        .join(format!("lv_font_noto_sc_{px}.c"));
+        .join(&name);
     let src = std::fs::read_to_string(path).ok()?;
     let adv: Vec<u64> = src
         .split(".adv_w = ")
@@ -1817,20 +2083,26 @@ fn adv_w_from_c(px: u32) -> Option<std::collections::BTreeMap<u32, u64>> {
                 .unwrap_or(0)
         })
         .collect();
-    let head = "unicode_list_0[] = {";
-    let start = src.find(head)? + head.len();
-    let end = src[start..].find("};")? + start;
     let mut map = std::collections::BTreeMap::new();
-    for (i, tok) in src[start..end].split(',').enumerate() {
-        let tok = tok.trim();
-        if let Some(hex) = tok.strip_prefix("0x") {
-            if let Ok(v) = u32::from_str_radix(hex, 16) {
-                if let Some(a) = adv.get(i + 1) {
-                    map.insert(v + 32, *a);
-                }
-            }
+    let mut missing: Vec<u32> = Vec::new();
+    for (cp, gid) in cmap_entries_from_c(&src, &name) {
+        if gid < adv.len() {
+            map.insert(cp, adv[gid]);
+        } else {
+            missing.push(cp);
         }
     }
+    assert!(
+        missing.is_empty(),
+        "{name}：cmap 里有 {} 个码位在 `glyph_dsc[]` 里没有对应 `adv_w`（最大码位 \
+         U+{:04X}）—— 解析器与生成物脱节（与 `fonts/gen_fonts.sh` 的 Python `adv_of` 同款判断）",
+        missing.len(),
+        missing.iter().copied().max().unwrap_or(0)
+    );
+    assert!(
+        !map.is_empty(),
+        "{name}：`adv_w` 表解析出 0 个码位 —— 解析器与生成物脱节（不得静默返回空表）"
+    );
     Some(map)
 }
 
