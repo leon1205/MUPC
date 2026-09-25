@@ -372,7 +372,7 @@ pub enum NavPage {
     Interlock,
     /// P5 审计页。
     Audit,
-    /// P6 系统 / 关于页。
+    /// P6「装置与外设」页（T21c-2 改名；**页数与路由项不变**）。
     System,
 }
 
@@ -420,7 +420,8 @@ impl NavPage {
             NavPage::Logs => "日志",
             NavPage::Interlock => "安全联锁",
             NavPage::Audit => "审计",
-            NavPage::System => "系统",
+            // T21c-2（T-8 裁定）：P6 由「系统 / 关于」改名为「装置与外设」——**页数不变**。
+            NavPage::System => mupc_display_proto::peripherals_labels::ui_text::PAGE_DEVICE_AND_PERIPH,
         }
     }
 
@@ -436,7 +437,7 @@ impl NavPage {
         }
     }
 
-    /// 页眉标题（UI §3.6 页眉行：`台区储能装置运行状态` / `运行参数配置` / `系统信息` …）。
+    /// 页眉标题（UI §3.6 页眉行；P6 的标题随 T21c-2 一并改为「装置与外设」，见 UI §6.6.1）。
     pub const fn title(self) -> &'static str {
         match self {
             NavPage::Main => "台区储能装置运行状态",
@@ -444,7 +445,7 @@ impl NavPage {
             NavPage::Logs => "日志",
             NavPage::Interlock => "安全联锁",
             NavPage::Audit => "审计",
-            NavPage::System => "系统信息",
+            NavPage::System => mupc_display_proto::peripherals_labels::ui_text::PAGE_DEVICE_AND_PERIPH,
         }
     }
 
@@ -751,7 +752,8 @@ struct Core {
     p3: p3_logs::P3LogsPage,
     p4: p4_interlock::P4InterlockPage,
     p5: p5_audit::P5AuditPage,
-    p6: p6_system::P6SystemPage,
+    /// P6（`Rc`：分段点击回调需要 `Weak<Self>` 捕获 —— 见 `P6SystemPage::wire_tabs`）。
+    p6: Rc<p6_system::P6SystemPage>,
     // ── 状态（全部 `Cell` / `RefCell`，回调经 `Weak` 写）──
     /// 当前页签下标。
     current: Cell<usize>,
@@ -878,7 +880,9 @@ impl Shell {
         let p3 = p3_logs::P3LogsPage::new(&page_host)?;
         let p4 = p4_interlock::P4InterlockPage::new(&page_host)?;
         let p5 = p5_audit::P5AuditPage::new(&page_host)?;
-        let p6 = p6_system::P6SystemPage::new(&page_host)?;
+        let p6 = Rc::new(p6_system::P6SystemPage::new(&page_host)?);
+        // 分段点击 ⇒ 建/刷该段内容（生产路径的**唯一**接线点；测试可省：`render` 会对账）。
+        p6.wire_tabs();
 
         // ── 未保存修改提示条（EDGE-11；`h48`）──
         let banner = layout_box(&root, Dimens::CONTENT_W, BANNER_H)?;
@@ -1531,6 +1535,12 @@ impl Core {
         let idx = page.index();
         let changed = self.current.get() != idx;
         self.current.set(idx);
+        // **离开 P6 必须收起它的段内下钻视图**（§15.5.3 的交互用例：进下钻 → 导航切走 →
+        // 再切回 P6 **不残留**下钻态）。下钻视图不是页面（不改 `current_page`），故它的
+        // "离开"语义只能由**页级切换**这一拍显式收口 —— 见 `p6_system.rs` 的偏差 **P6-7**。
+        if page != NavPage::System {
+            self.p6.close_drill();
+        }
 
         for (i, obj) in self.page_objs().iter().enumerate() {
             set_visible(obj, i == idx);

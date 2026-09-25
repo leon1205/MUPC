@@ -345,6 +345,79 @@ pub fn scrollbar_mode(obj: &Obj) -> ScrollMode {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Flex 行 / 列布局（T21c-2「`SegmentedTabs` 的容器」；UI §5.1 #21 / 设计 §15.5.1）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 主轴排列方向（`lv_flex_flow_t` 的镜像，LVGL v9.5.0 `src/layouts/flex/lv_flex.h`）。
+///
+/// **为什么只镜像"方向"这一族**：`lv_flex_flow_t` 是**开放**的位组合枚举
+/// （`LV_FLEX_FLOW_* = 方向位 | WRAP | REVERSE`）⇒ 用 newtype 原样带回，未被本层命名的
+/// 取值也照样能传（与 [`Dir`] / [`ScrollMode`] 同法）。
+///
+/// **本批的消费者只有一个**：`ui/pages/mod.rs::SegmentedTabs` 的 [`FlexFlow::ROW`]
+/// （5 段横向排布 + `pad_column` 段间隙）。其余变体随之镜像、不额外开封装。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlexFlow(sys::lv_flex_flow_t);
+
+impl FlexFlow {
+    /// 单行横排（不换行）—— `LV_FLEX_FLOW_ROW = 0x00`。
+    pub const ROW: Self = Self(sys::LV_FLEX_FLOW_ROW);
+    /// 单列纵排 —— `LV_FLEX_FLOW_COLUMN = 1 << 0`。
+    pub const COLUMN: Self = Self(sys::LV_FLEX_FLOW_COLUMN);
+    /// 横排 + 换行 —— `ROW | WRAP`。
+    pub const ROW_WRAP: Self = Self(sys::LV_FLEX_FLOW_ROW_WRAP);
+    /// 横排 + 反向 —— `ROW | REVERSE`。
+    pub const ROW_REVERSE: Self = Self(sys::LV_FLEX_FLOW_ROW_REVERSE);
+    /// 横排 + 换行 + 反向。
+    pub const ROW_WRAP_REVERSE: Self = Self(sys::LV_FLEX_FLOW_ROW_WRAP_REVERSE);
+    /// 纵排 + 换行。
+    pub const COLUMN_WRAP: Self = Self(sys::LV_FLEX_FLOW_COLUMN_WRAP);
+    /// 纵排 + 反向。
+    pub const COLUMN_REVERSE: Self = Self(sys::LV_FLEX_FLOW_COLUMN_REVERSE);
+    /// 纵排 + 换行 + 反向。
+    pub const COLUMN_WRAP_REVERSE: Self = Self(sys::LV_FLEX_FLOW_COLUMN_WRAP_REVERSE);
+
+    /// 原始枚举值（与 C 侧逐位相同）。
+    pub const fn raw(self) -> sys::lv_flex_flow_t {
+        self.0
+    }
+}
+
+/// 把 `obj` 变成 Flex 容器并设主轴方向（`lv_obj_set_flex_flow`）。
+///
+/// **副作用（LVGL 语义，不是本层的选择）**：该调用内部会
+/// `lv_obj_set_style_layout(obj, LV_LAYOUT_FLEX, 0)`（`lv_flex.c:112`）⇒ **同时**把布局
+/// 切到 Flex；调用方无须再调 `lv_obj_set_layout`。子对象的坐标因此**由布局算得**，
+/// 显式 `set_pos` 会被布局局覆盖（这正是 `SegmentedTabs` 要的：段位置由 Flex + `pad_column`
+/// 决定，而不是页面里手写坐标）。
+pub fn set_flex_flow(obj: &Obj, flow: FlexFlow) {
+    if !obj.is_alive() {
+        return;
+    }
+    // SAFETY: 刚校验存活；`flow.raw()` 是 C 侧同一枚举的值。
+    unsafe { sys::lv_obj_set_flex_flow(obj.raw(), flow.raw()) };
+}
+
+/// 设 Flex 容器的**主轴列间距**（`pad_column`；`lv_obj_set_style_pad_column`，选择器 =
+/// `LV_PART_MAIN` 默认态）。
+///
+/// **这是 `SegmentedTabs` 的 16 px 段间隙的落点**（UI §5.1 #21 / §6.6.1）：`lv_button` 的
+/// 命中区**即其自身边界**（LVGL 不对 `lv_button` 做 `lv_buttonmatrix` 那样的
+/// `pcol/2+1` 外扩）⇒ **段间净距 = 本值，精确成立**（设计 §15.5.1 ② / R-44）。
+///
+/// 与 [`super::style::Style`] 的关系：本函数改的是**对象上的局部属性**（不动任何共享
+/// `Style`）⇒ 适合"只有这一个容器要的间距"；色值 / 字号仍一律走 `theme`（本函数只吃像素数，
+/// 由调用方给 `theme::Dimens` 常量）。
+pub fn set_pad_column(obj: &Obj, px: i32) {
+    if !obj.is_alive() {
+        return;
+    }
+    // SAFETY: 刚校验存活；`selector = 0` 即 `LV_PART_MAIN | LV_STATE_DEFAULT`（与本层
+    // `StyleSelector::main()` 的取值同源）。
+    unsafe { sys::lv_obj_set_style_pad_column(obj.raw(), px, 0) };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 控件句柄（薄包装：`Deref` 到 `Obj` ⇒ 通用能力全部可用）
 // ═══════════════════════════════════════════════════════════════════════════
 

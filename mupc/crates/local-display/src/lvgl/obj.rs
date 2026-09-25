@@ -619,6 +619,40 @@ impl Obj {
         }
     }
 
+    /// 设文字色（`lv_obj_set_style_text_color` 的薄包装；选择器 = `LV_PART_MAIN` 默认态）。
+    ///
+    /// **与 [`Self::add_style`] 的分工（T21c-2 新增）**：
+    /// - 一次性、由 `theme` 给定的**完整外观**仍走 `add_style(&theme::text(槽, 色), ..)`；
+    /// - 本方法用于"**同一个对象要在两个角色间切换**"的场合 —— 典型 = **窗口化行池**：
+    ///   同一个标签行在滚动后被重新绑给另一行，其字号 / 颜色需按该行的角色改写
+    ///   （分组标题 28 px `text_primary` ↔ 数值行标签 28 px `text_second` ↔ 降级文案 24 px
+    ///   `text_weak`）。色值仍**必须**来自 `ui::theme::Palette`（页面不得写裸色值）。
+    ///
+    /// 语义：**覆盖**该对象在 `LV_PART_MAIN` 默认态下的文字色（局部属性优先于样式表）；
+    /// 与"只增不删的 `add_style`"不同，本方法**不增长**样式表 ⇒ 可在热路径反复调用。
+    pub fn set_text_color(&self, color: Color) {
+        if !self.is_alive() {
+            return;
+        }
+        // SAFETY: 刚校验存活；`selector = 0`（`LV_PART_MAIN | LV_STATE_DEFAULT`）与
+        // `StyleSelector::main()` 同源；`lv_obj_set_style_text_color` 是 v9.5.0 的**真函数**
+        // （`src/core/lv_obj_style_gen.c:630`，非 static inline ⇒ 已在 allowlist 内）。
+        unsafe { sys::lv_obj_set_style_text_color(self.raw, color.to_sys(), 0) };
+    }
+
+    /// 设文字字体（`lv_obj_set_style_text_font` 的薄包装；选择器 = `LV_PART_MAIN` 默认态）。
+    ///
+    /// 与 [`Self::set_text_color`] 同一条理由与同一条纪律：供**窗口化行池**在运行期切换字号槽，
+    /// 字体对象一律经 `ui::theme::font_of(槽)` 取得（页面不得自造 `Font`）。
+    pub fn set_text_font(&self, font: &Font) {
+        if !self.is_alive() {
+            return;
+        }
+        // SAFETY: 刚校验存活；`font` 是 `Font` 句柄管理的、LVGL 拥有的静态字体数据
+        // （生命周期 = 进程，见 `font.rs`）⇒ 指针不会在本对象存续期内失效。
+        unsafe { sys::lv_obj_set_style_text_font(self.raw, font.raw(), 0) };
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // G3「滚动位置」（B4a）—— 补齐 `mod.rs` 「薄层能力缺口登记」的 G3
     // ═══════════════════════════════════════════════════════════════════════

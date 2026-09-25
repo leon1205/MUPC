@@ -391,6 +391,17 @@ pub struct BitMeta {
     pub defined: bool,
     /// 该位的活跃语义（屏侧文案用）；`None` = 用通用「活跃 / 非活跃」。
     pub active_text: Option<String>,
+    /// 该位的**非活跃**语义（屏侧文案用）；`None` = 用通用「非活跃」。
+    ///
+    /// 与 [`BitMeta::active_text`] 成**一对**：两态词都**由 catalog 承载**（"屏侧不猜语义"，
+    /// D22）⇒ 需要双态词的位在此给全二者，例如 `hvac_di_8`（系统运行）：活跃
+    /// `"运行"` / 非活跃 `"停止"`（PRD **EX-06**）。只给 `active_text` 的位，非活跃侧
+    /// 仍取通用「非活跃」。
+    ///
+    /// **兼容性**：`#[serde(default)]`（`Option` 本身亦按缺省 `None` 解析）⇒ 既有 catalog
+    /// （无本字段）反序列化得到 `None`，行为与本字段引入前**逐字相同**。
+    #[serde(default)]
+    pub inactive_text: Option<String>,
     /// 与其余位**极性相反**的位（如探测器 bit15「0 = 离线」）。
     ///
     /// **R-41 裁定前无生产者**：catalog 构建器一律填 `false`；探测器 bit15 走
@@ -849,6 +860,7 @@ mod tests {
                             class: CatalogBitClass::Alarm,
                             defined: true,
                             active_text: Some("报警".into()),
+                            inactive_text: Some("未报警".into()),
                             inverted: false,
                         }],
                         enum_labels: vec![(0, "正常".into())],
@@ -870,13 +882,31 @@ mod tests {
         for key in [
             r#""rev":7"#,
             r#""generated_ms":1757412000000"#,
-            r#""stations":[{"id":"fire","role":"fire","enabled":true,"blocks":[{"name":"fire_sys","kind":"scalar","renames":[[7,"fire_det_count"]],"points":[{"at":6,"label":"火警等级","unit":null,"decimals":0,"bits":[{"index":12,"label":"报警总状态","class":"alarm","defined":true,"active_text":"报警","inverted":false}],"enum_labels":[[0,"正常"]],"decompose":[{"label":"烟雾","unit":"dB/M","decimals":1,"from":{"high_byte":{"scale":0.1,"offset":0.0}}}],"group":"fire_level"}]}]}]}"#,
+            r#""stations":[{"id":"fire","role":"fire","enabled":true,"blocks":[{"name":"fire_sys","kind":"scalar","renames":[[7,"fire_det_count"]],"points":[{"at":6,"label":"火警等级","unit":null,"decimals":0,"bits":[{"index":12,"label":"报警总状态","class":"alarm","defined":true,"active_text":"报警","inactive_text":"未报警","inverted":false}],"enum_labels":[[0,"正常"]],"decompose":[{"label":"烟雾","unit":"dB/M","decimals":1,"from":{"high_byte":{"scale":0.1,"offset":0.0}}}],"group":"fire_level"}]}]}]}"#,
         ] {
             assert!(j.contains(key), "catalog 线格式缺字段/形状不符：{key}\n实得 {j}");
         }
         // 往返稳定（对端解析回同值）
         let back: PeripheralCatalog = serde_json::from_str(&j).unwrap();
         assert_eq!(back, cat);
+
+        // **兼容性（T21c-2-r1 / F3）**：`BitMeta.inactive_text` 是本轮新增的可选字段
+        // ⇒ **旧端**（没有该键的 catalog）必须仍能解析出 `None`（`#[serde(default)]` 语义），
+        // 而不是解析失败；且**其余字段逐值不变**。
+        // **反证条件（2026-09-25 / 评审 N-3 订正 —— 原条件不实）**：本段原先写"去掉
+        // `#[serde(default)]` ⇒ 缺键解析 `Err`"，**实测不成立**：对 `Option<T>` 字段，
+        // serde **缺键本就按 `None` 解析** ⇒ 该属性在此是**冗余**的，去掉它本用例**仍全绿**
+        // （负向探针 P11 实测 `99 / 6 / 9 / 0`）。**真正能让本段变红的条件 = 把该字段从
+        // `Option` 改成非可选**（如 `String`：缺键即 `Err`）；那要多改被测类型、不在本用例
+        // 可及范围 ⇒ 此处**如实登记条件本身**，兼容性结论仍由本段三条**实测断言**承担
+        // （缺键解析**成功** + `inactive_text == None` + 其余字段逐值不变）。
+        let legacy = j.replace(r#","inactive_text":"未报警""#, "");
+        assert_ne!(legacy, j, "缺键替换必须命中（否则本段断言空转）");
+        let old: PeripheralCatalog =
+            serde_json::from_str(&legacy).expect("旧端 payload（无 inactive_text 键）必须解析成功");
+        let b = &old.stations[0].blocks[0].points[0].bits[0];
+        assert_eq!(b.active_text.as_deref(), Some("报警"), "其余字段逐值不变");
+        assert_eq!(b.inactive_text, None, "缺键 ⇒ `None`（不臆造、不解析失败）");
 
         // 分页 DTO 字段名 + `#[serde(default)]`（缺键 ⇒ 空页而不是解析失败）
         let fp = FireDetectorPage {

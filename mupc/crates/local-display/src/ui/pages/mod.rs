@@ -81,8 +81,12 @@
 //!     P3 的接法写在 `filters.rs` 的模块文档里（含"档位变化后必须用 `filters::body_h` 重摆
 //!     后续区块"这一条 —— 事件回调内读 `size()` 会拿到旧值）。
 //!   - **两处结构性发现（已逐条登记）**：`AuditPage` **没有** `range_too_large` 字段
-//!     （EDGE-15 在 P5 侧生产不可达，见 **AU5**）；薄层 `EventCode` **未镜像**
-//!     `LV_EVENT_SCROLL` ⇒「滚动加载」的触发点在本层不可得（见 **AU6**）。
+//!     （EDGE-15 在 P5 侧生产不可达，见 **AU5**）；~~薄层 `EventCode` **未镜像**
+//!     `LV_EVENT_SCROLL` ⇒「滚动加载」的触发点在本层不可得（见 **AU6**）~~ —— ❌ **订正
+//!     （T21c-2-r1，2026-09-25）：该句是**陈旧串**，`EventCode::SCROLL` 自 **B4b
+//!     （提交 `297b51b`，2026-09-16）** 起已镜像，P5 的 **AU6** 也早已消费并附探针实测
+//!     （见 `p5_audit.rs:40` / `ui/tests.rs` 的 `pages_chain` ⑦″ 段）。**该陈旧串是本批
+//!     `IL29⑥` 那处错误登记的上游依据**（本批一并订正）。
 //! - **B2c-2 补充（P3 日志页）**：与 P5 **同型**（契约 1 的页根 + 契约 2′ 的控制通道注入 +
 //!   只读 + 筛选意图回调），差异逐条：
 //!   - **超限条是常驻构件**（P3 的契约 `LogPage.range_too_large` 是**必需字段** ⇒ 该态
@@ -93,12 +97,15 @@
 //!     内容宽（见 `p3_logs.rs` **LG3**）；
 //!   - **增量拉取**以 [`p3_logs::P3LogsPage::request_increment`] 为触发入口（B3 的 500 ms
 //!     节拍），意图载荷 `cursor` = **已见最大 `seq`**（不是 `next_cursor`，见该文件文档）；
-//!   - **具名薄层缺口（R2，B4a 已收窄）**：`EventCode` **未镜像** `LV_EVENT_SCROLL` ⇒
-//!     §6.3 的「手动上滚 ⇒ 停止自动滚动 + 浮现"回到最新"」在本层**结构性不可实现**。
+//!   - **具名薄层缺口（R2，B4a 已收窄；T21c-2-r1 再订正）**：`EventCode::SCROLL`
+//!     **自 B4b（`297b51b`，2026-09-16）起已镜像**（见 `lvgl/mod.rs` 的 B4b 条目）⇒ 本行原文
+//!     「未镜像」**已过期**（**B4a 那一轮写的"剩余缺口只有输入侧事件"同样不成立**）；
+//!     P3 的「手动上滚 ⇒ 停止自动滚动 + 浮现"回到最新"」剩的只是**视口级浮动件**能力
+//!     （页根即滚动容器 ⇒ 页内浮动件随内容滚走；PM 已裁定维持"恒显 + 页内专属带"，
+//!     见 `p3_logs.rs` 的 **LG11**）。
 //!     **【B4a 订正】** 原文续写「`allowlist.txt` 无任何滚动位置读 / 写 API
 //!     （`lv_obj_get_scroll_y` / `lv_obj_scroll_to_y` 皆无）」—— **已过期**：两个符号均已放行
-//!     且已在薄层封装（`Obj::scroll_to_y` / `Obj::scroll_y`，`lvgl/mod.rs` 的 **G3**）
-//!     ⇒ 剩余缺口**只有输入侧事件**；
+//!     且已在薄层封装（`Obj::scroll_to_y` / `Obj::scroll_y`，`lvgl/mod.rs` 的 **G3**）；
 //!     本页只做恒显按钮 + 点击意图，缺口逐条列在 `p3_logs.rs` 的 **R2**。
 //! - **B2c-3 补充（应用外壳装配，`ui/shell.rs`）**：
 //!   - **页根摆放**：外壳把每个页根放在 `(Dimens::SIDE_PAD, Dimens::HEADER_H)`（相对外壳根），
@@ -134,6 +141,20 @@
 //! 码表走查的构造性漏判（评审 ③）、裸尺寸静态约束缺失（评审 ④）、SOC 阈值双份真源（评审 ⑤）。
 //! （评审 ⑥ 的「文案回改契约原文」已由 **D7 的 PM 裁定**取代 —— 状态词槽位回到 2 字。）
 //!
+//! ## 补充（**T21c-2**）：`SegmentedTabs` 与 P6 的窗口化
+//!
+//! - **`SegmentedTabs` 落点 = 本模块**（设计 §15.11 #14 只写了"导航标签"，而 UI §5.1 #21 的
+//!   控件本身需要一个落点）。放在这里而非 `ui/controls.rs` 的理由：它是**页面组合件**
+//!   （自带"段内容容器 + 惰性创建 + 只切可见性"的页面语义），与 `p3_logs` / `p5_audit` 的
+//!   分页 / 加载件同族；**`ui/controls.rs` 不动**（R-44：`SegmentedControl` 不迁移）。
+//! - **滚动事件通道已可用**（`EventCode::SCROLL` 自 B4b 起已镜像 + `Obj::scroll_y` + `Obj::on`）
+//!   ⇒ P6 的「含数据行驱动的段一律窗口化」**走真窗口化**（`p6_system.rs` 的 `SegmentList`：
+//!   行池 = 可视行 ×1.5 + 1，按 `scroll_y` 复用；**下钻视图同款** —— `BmsDrill::wire_scroll`，
+//!   T21c-2-r1 / F1）。⚠️ **P4 下钻的"结构性不可窗口化"结论（`p4_interlock.rs` **IL29⑥** /
+//!   设计 §15.5.3 的 T21c-1-r1 注）依据已不成立**（该注把 B4b 之后仍写"未镜像"）—— P4 侧是否
+//!   改走窗口化属**P4 的改动面**（本批任务书明令不改 P4），此处只登记事实：**一处无依据的降级，
+//!   已登记为待单独立项**。
+//!
 //! ## 与 `theme.rs` / `components.rs` 的分工（诚实标注）
 //!
 //! `components.rs` 的三个内部助手（`layout_box` / `decor` / `text_label`）是**私有**的，
@@ -141,14 +162,14 @@
 //! A1/B1 的交付物，故在本模块复刻了这三个 8 行助手（语义逐条对齐），并自建页级栅格常量。
 //! 建议后续把二者上收（见 B2a 报告「theme / 组件库缺口」）。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use mupc_display_proto::{ControlSource, DisplayFrame, LinkState};
 
 use crate::lvgl::obj::Obj;
 use crate::lvgl::style::{Color, Style, StyleSelector};
-use crate::lvgl::widgets::{Label, ScrollContainer};
+use crate::lvgl::widgets::{self, Group, Label, ScrollContainer, TextButton};
 use crate::lvgl::LvglError;
 use crate::state::{ChannelStatus, Freshness};
 use crate::ui::components::StatusChip;
@@ -949,6 +970,283 @@ pub const ALL_TEXTS: &[&str] = &[
     crate::ui::shell::TEXT_CHANNEL_OK,
     crate::ui::shell::TEXT_TOUCH_UNAVAILABLE,
 ];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6′. `SegmentedTabs` —— P6 的 5 段分段页签（T21c-2；UI §5.1 #21 / 设计 §15.5.1）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **分段页签**（UI §5.1 **#21**，v2.1-r1 新增；设计 §15.5.1 ③ / §15.5.3 容器策略）。
+///
+/// # 为什么是**新建**控件、而不是复用 `ui/controls.rs::SegmentedControl`
+///
+/// **R-44 裁定（架构侧，v2.1-r3）逐条**：
+///
+/// 1. **不合并为同一实现** —— 两者在 **F14.2**（相邻可点控件触摸目标间距 ≥ 16 px）上
+///    **不等价**：`lv_buttonmatrix` 的分段命中测试把命中区按 `pcol/2+1` **向两侧外扩**
+///    （上限 `BTN_EXTRA_CLICK_AREA_MAX = LV_DPI_DEF/10 = 13`，`lv_buttonmatrix.c:892-935`）
+///    ⇒ `pad_column = 16` 时**净距 −2 px**（目标区重叠）、**须 `≥42` 才够 16 px**；
+///    而 `lv_button` 的命中区**即其自身边界**（LVGL 不做外扩）⇒ 净距 = `pad_column`
+///    **精确成立**。**不存在"改用既有控件即可达标"的路径**。
+/// 2. **只合并视觉规格真源**：本控件**不新增任何色值**，四态样式逐条取
+///    [`theme::control_surface`] / [`theme::control_pressed`] / [`theme::control_selected`]
+///    （即 UI §5.2 的 `SegmentedControl` 行，与 #4 共用同一份真源）。
+/// 3. **P3 / P5 不迁移**（改的是已 `[DESIGN_APPROVED]` 的页面）⇒ 本文件**不动** #4。
+///
+/// # 结构（UI §5.1 #21 逐条）
+///
+/// **Flex 行容器**（[`widgets::set_flex_flow`]`(`[`FlexFlow::ROW`]`)` + `pad_column =
+/// `[`Dimens::SEG_GAP`]）**+ N× `lv_button`（`LV_OBJ_FLAG_CHECKABLE`）+ `lv_group` 单选**，
+/// **不是** `lv_buttonmatrix`。段 `185×48`（[`Dimens::TAB_W`] / [`Dimens::TAB_H`]）。
+///
+/// # 段内容（惰性创建、切换仅改可见性）
+///
+/// 每段一支**独立滚动容器**（[`ScrollContainer`]）—— **首次切到该段才创建**，此后只切
+/// `HIDDEN`（不销毁重建 ⇒ 避免 LVGL 内存池碎片；设计 §15.5.3「P6 容器策略」）。
+/// 段内容的**填充**由页面经 [`SegmentedTabs::with_panel`] 完成（本控件不猜页面内容）。
+///
+/// # 不构成页面（T-20）
+///
+/// 切换段**不改** `current_page`、**不经**任何导航路由 —— 本类型的代码里**没有**路由 / 页号
+/// API（结构性成立，用例按"剥掉注释与字面量后源码不含 `current_page`"断言）。
+pub struct SegmentedTabs {
+    /// Flex 行容器（**拥有型**）。
+    row: Obj,
+    /// 各段按钮（`Rc` 锚住：`TextButton` 的 `Drop` 会连带删除其标签）。
+    tabs: Vec<Rc<TextButton>>,
+    /// 单选语义的载体（v9.5.0 的 `lv_group`；**指针类 indev 下不产生键导航**，见
+    /// `lvgl::widgets::Group` 文档）—— 互斥由 [`SegmentedTabs::select`] 的显式
+    /// `set_checked` 保证，组只承载"这一段在同一个单选组里"的语义。
+    group: Group,
+    /// 当前段下标。
+    current: Cell<usize>,
+    /// 段切换回调（重入安全，走 [`CbSlot`]）。
+    on_change: CbSlot<usize>,
+    /// 段内容容器（`None` = 尚未创建 ⇒ 惰性）。
+    panels: RefCell<Vec<Option<Obj>>>,
+    /// 段内容容器在**页内**的 y（构造期由分段控件 y 推出，此后不变）。
+    panel_y: i32,
+    /// 非拥有句柄（建惰性面板时用作父）：`share_borrowed` ⇒ **不会**在 Drop 时删掉页面根。
+    host: Obj,
+}
+
+impl SegmentedTabs {
+    /// 建分段页签（`parent` = 页面根；`y` = 分段控件在页内的 y）。
+    ///
+    /// # 参数非法即响亮失败
+    ///
+    /// - `labels` 为空 ⇒ [`LvglError::InvalidArgument`]；
+    /// - `count × TAB_W + (count − 1) × SEG_GAP > CONTENT_W` ⇒ 装不进内容区（UI §3.5「有效宽
+    ///   992」）⇒ 同样响亮失败（P6 的 5 段实测 `989 ≤ 992`）。
+    ///
+    /// 段内容的 y = `y + TAB_H + GAP_GROUP`（UI §6.6.1：`128 + 16 = 144` 绝对 ⇒ 页内 72），
+    /// 尺寸 = `CONTENT_W × SECTION_VIEW_H`（UI §6.6.1：视口 992×528）。
+    pub fn new(parent: &Obj, labels: &[&str], y: i32) -> Result<Self, LvglError> {
+        if labels.is_empty() {
+            return Err(LvglError::InvalidArgument("SegmentedTabs: 段不得为空"));
+        }
+        let count = labels.len();
+        let count_i32 = i32::try_from(count)
+            .map_err(|_| LvglError::InvalidArgument("SegmentedTabs: 段数过多"))?;
+        let Some(width) = count_i32
+            .checked_mul(Dimens::TAB_W)
+            .and_then(|w| w.checked_add((count_i32 - 1) * Dimens::SEG_GAP))
+        else {
+            return Err(LvglError::InvalidArgument("SegmentedTabs: 段数过大"));
+        };
+        if width > Dimens::CONTENT_W {
+            return Err(LvglError::InvalidArgument(
+                "SegmentedTabs: 整控件宽超出内容区（每段 TAB_W + 段间隙 SEG_GAP）",
+            ));
+        }
+
+        let row = layout_box(parent, width, Dimens::TAB_H)?;
+        row.set_pos(0, y);
+        // ── Flex 行 + 段间隙（UI §5.1 #21 的两条结构性要求）──
+        widgets::set_flex_flow(&row, widgets::FlexFlow::ROW);
+        widgets::set_pad_column(&row, Dimens::SEG_GAP);
+
+        let group = Group::create()?;
+        let current = Cell::new(0usize);
+        let on_change: CbSlot<usize> = CbSlot::new();
+        let mut tabs: Vec<Rc<TextButton>> = Vec::with_capacity(count);
+        for text in labels.iter() {
+            let tab = Rc::new(TextButton::create(&row, text)?);
+            tab.set_size(Dimens::TAB_W, Dimens::TAB_H);
+            // 四态样式：与 #4 `SegmentedControl` **共用同一视觉规格真源**（R-44 ②）。
+            tab.add_style(&theme::control_surface(), StyleSelector::main());
+            tab.add_style(
+                &theme::control_pressed(),
+                StyleSelector::state_of(crate::lvgl::style::State::PRESSED),
+            );
+            tab.add_style(
+                &theme::control_selected(),
+                StyleSelector::state_of(crate::lvgl::style::State::CHECKED),
+            );
+            tab.set_checkable(true);
+            // 单选语义：入组（互斥由 [`SegmentedTabs::select`] 的显式 `set_checked` 保证）。
+            group.add(tab.button().obj());
+            tabs.push(tab);
+        }
+        // **点击回调不在构造期注册**：它要调 `self.select(i)`（`&Self`），而此刻 `Self` 还未
+        // 构造完。故由页面在持有 `Rc<SegmentedTabs>` 之后调 [`SegmentedTabs::wire_clicks`]
+        // 一次（`Weak` 捕获 ⇒ 不与"LVGL 对象 → 事件项 → 闭包"形成强引用环）。
+        let host = parent.share_borrowed();
+        let page = Self {
+            row,
+            tabs,
+            group,
+            current,
+            on_change,
+            panels: RefCell::new((0..count).map(|_| None).collect()),
+            panel_y: y + Dimens::TAB_H + Dimens::GAP_GROUP,
+            host,
+        };
+        Ok(page)
+    }
+
+    /// 段数。
+    pub fn count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// 当前段下标。
+    pub fn selected(&self) -> usize {
+        self.current.get()
+    }
+
+    /// 段按钮对象（几何断言用；越界 `None`）。
+    pub fn tab(&self, i: usize) -> Option<&Obj> {
+        self.tabs.get(i).map(|t| t.button().obj())
+    }
+
+    /// 段文字（读自按钮的子标签 ⇒ 选项文案只有一个真源）。
+    pub fn tab_text(&self, i: usize) -> Option<String> {
+        self.tabs.get(i).and_then(|t| t.text())
+    }
+
+    /// 分段控件本体（容器）。
+    pub fn obj(&self) -> &Obj {
+        &self.row
+    }
+
+    /// 段内容容器在页内的 y。（内容断言 / 版面断言用。）
+    pub fn panel_y(&self) -> i32 {
+        self.panel_y
+    }
+
+    /// 段内容容器**是否已创建**（惰性创建的读回口；供"切换只改可见性"的断言）。
+    pub fn panel_created(&self, i: usize) -> bool {
+        self.panels
+            .borrow()
+            .get(i)
+            .map(Option::is_some)
+            .unwrap_or(false)
+    }
+
+    /// 段内容容器**是否可见**（未创建 = 不可见）。
+    pub fn panel_visible(&self, i: usize) -> bool {
+        self.panels
+            .borrow()
+            .get(i)
+            .and_then(|p| p.as_ref())
+            .map(|o| !o.is_hidden())
+            .unwrap_or(false)
+    }
+
+    /// 取某段的段内容容器并交给 `f`（**不存在时先创建**）+ 置可见性。
+    ///
+    /// 返回 `None` = 下标越界。**这是"填充段内容"的唯一入口**：本控件不猜页面的段内结构，
+    /// 只保证"一支独立滚动容器、惰性创建、只切可见性"这三条结构性质。
+    ///
+    /// `visible = false` 时只切可见性、**不创建**（避免"关掉一个从未打开的段"顺手把它建出来）。
+    pub(crate) fn with_panel<R>(
+        &self,
+        i: usize,
+        visible: bool,
+        f: impl FnOnce(&Obj) -> R,
+    ) -> Option<R> {
+        let mut panels = self.panels.borrow_mut();
+        let slot = panels.get_mut(i)?;
+        if slot.is_none() {
+            if !visible {
+                return None;
+            }
+            // 段内容容器 = **普通容器**（不是滚动容器）：每段自带滚动视口
+            // （段「装置」= 页内自建 `ScrollContainer`；外设段 = `SegmentList` 的视口；
+            //  下钻段用**非滚动**宿主 ⇒ 下钻视图能固定占据整个段内容区）。
+            let panel = layout_box(&self.host, Dimens::CONTENT_W, Dimens::SECTION_VIEW_H).ok()?;
+            panel.set_pos(0, self.panel_y);
+            *slot = Some(panel);
+        }
+        let panel = slot.as_ref()?;
+        set_visible(panel, visible);
+        Some(f(panel))
+    }
+
+    /// 切换到第 `i` 段（越界 `clamp`；**不发** [`SegmentedTabs::set_on_change`] 通知 ——
+    /// 与 `SegmentedControl::set_selected` 的"程序化设值不回调"同口径）。
+    ///
+    /// 结构性质（T-20 / §15.5.3）：① 不改任何页面状态；② 已建的段内容**只切可见性**
+    /// （不销毁重建）；③ 首次进入的段经 [`SegmentedTabs::with_panel`] 惰性创建。
+    pub(crate) fn select(&self, i: usize) {
+        let last = self.tabs.len().saturating_sub(1);
+        let i = i.min(last);
+        // 互斥（v9.5.0 的 `lv_group` 只对 KEYPAD/ENCODER 生效 ⇒ 指针路径下手动保证）：
+        // ① `CHECKED` 状态位 = "选中态样式"的唯一触发源（构造期全部入组，见 `new`）；
+        // ② 组内**只保留选中段** —— 双通道表达"恰有一段被选中"（组在指针类 indev 下不产生
+        //    键导航，故这里是语义冗余而非交互路径）。
+        for (k, t) in self.tabs.iter().enumerate() {
+            t.set_checked(k == i);
+            if k == i {
+                self.group.add(t.button().obj());
+            } else {
+                self.group.remove(t.button().obj());
+            }
+        }
+        for k in 0..self.tabs.len() {
+            self.with_panel(k, k == i, |_| ());
+        }
+        self.current.set(i);
+    }
+
+    /// 注册段切换回调（载荷 = 新段下标；**重入安全**：语义同 [`CbSlot`] 的契约）。
+    ///
+    /// **触发点** = 用户**点击**某段（`CLICKED`），不是 [`SegmentedTabs::select`]
+    /// （程序化切换不回调，与 `SegmentedControl::set_selected` 同口径）。
+    pub fn set_on_change<F>(&self, f: F)
+    where
+        F: FnMut(usize) + 'static,
+    {
+        self.on_change.set(f);
+    }
+
+    /// 给每一段挂"点击 ⇒ 选中该段 + 通知外部"（**必须在 `Rc<SegmentedTabs>` 上调用**）。
+    ///
+    /// 由接线方（`p6_system.rs`）在持有 `Rc` 后调一次。**幂等性**：重复调用会再挂一条
+    /// 回调（LVGL 事件项只增不删）—— 本层靠"调用点唯一"约束，不做重复注册防护。
+    ///
+    /// **捕获 `Weak` 而非 `Rc`**：闭包的所有权在 LVGL 事件项上（对象删除时由事件桥回收），
+    /// 强捕获会与"对象 → 事件项 → 闭包"形成环 ⇒ 控件永不落地。
+    pub fn wire_clicks(self: &Rc<Self>) {
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let weak = Rc::downgrade(self);
+            tab.button().on_clicked(move |_| {
+                let Some(me) = weak.upgrade() else { return };
+                me.select(i);
+                me.on_change.fire(i);
+            });
+        }
+    }
+
+    /// **仅测试 / 接线**：把一次 `CLICKED` 送到第 `i` 段 —— 走 LVGL 事件派发路径
+    /// （过滤器 / 蹦床 / 回调回收与真实触摸**同源**）⇒ 用于离屏驱动"点段 ⇒ 切段"这条
+    /// 生产分支。**须先 [`SegmentedTabs::wire_clicks`]**，否则只有派发、没有处理。
+    #[cfg(test)]
+    pub(crate) fn click_tab(&self, i: usize) {
+        let Some(tab) = self.tabs.get(i) else { return };
+        tab.button().obj().send_event(crate::lvgl::event::EventCode::CLICKED);
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 6. 两页共享的小工具（B2a 代码质量评审 **M3**：此前 P1 / P6 **逐字重复 ~50 行**）

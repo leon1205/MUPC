@@ -2113,11 +2113,14 @@ mod tests {
     #[test]
     fn app_toast_is_built_once_and_synced_from_tick() {
         const SRC: &str = include_str!("app.rs");
-        let prod = SRC
+        // 归一化 CRLF：本机 `core.autocrlf=true` ⇒ 工作区是 CRLF、CI 上是 LF。切分/长度判据
+        // 一律取归一化后的文本，**不得**依赖换行符（否则守卫会因换行符而误触发）。
+        let src = SRC.replace("\r\n", "\n");
+        let prod = src
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
         // ⚠️ 判据在**去注释**后的文本上取（[`without_line_comments`]）：只数原始字符时，
         // 把 `let toast = Toast::new(` **注释掉**照样通过 —— 本哨会退化成摆设。
         let live = without_line_comments(prod);
@@ -2198,11 +2201,14 @@ mod tests {
     #[test]
     fn pump_routes_touch_snapshots_through_apply_touch_snapshot() {
         const SRC: &str = include_str!("app.rs");
-        let prod = SRC
+        // 归一化 CRLF：本机 `core.autocrlf=true` ⇒ 工作区是 CRLF、CI 上是 LF。切分/长度判据
+        // 一律取归一化后的文本，**不得**依赖换行符（否则守卫会因换行符而误触发）。
+        let src = SRC.replace("\r\n", "\n");
+        let prod = src
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
         // ⚠️ 判据一律在**去注释**后的文本上取（见 [`without_line_comments`]）：否则把要守的
         // 那些行**注释掉**照样通过 —— 本哨（及其同款的三个哨）会当场退化成摆设。
         let live = without_line_comments(prod);
@@ -2325,11 +2331,15 @@ mod tests {
         /// 「就近」的窗口宽度（字符）：取用点与送入口之间隔着的就是那个 `if let Some(..) {`。
         const NEAR_WINDOW: usize = 400;
         // 只扫**生产段**（测试段自身含同样的字面量，会自证失真 —— 本项目踩过"扫描器失真"）。
-        let prod = SRC
+        //
+        // 归一化 CRLF：本机 `core.autocrlf=true` ⇒ 工作区是 CRLF、CI 上是 LF。切分/长度判据
+        // 一律取归一化后的文本，**不得**依赖换行符（否则守卫会因换行符而误触发）。
+        let src = SRC.replace("\r\n", "\n");
+        let prod = src
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
         // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把
         // `self.apply_route(decision);` **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
         let live = without_line_comments(prod);
@@ -2373,11 +2383,14 @@ mod tests {
         /// 判据窗口（**按字符**取）：本文件是 UTF-8，`&s[..n]` 按**字节**切会切进多字节字符而
         /// panic（本项目"扫描器失真"的又一形态）；`route` 的 `Err` 分支实测 ≈1 985 字符。
         const WINDOW_CHARS: usize = 2_400;
-        let prod = SRC
+        // 归一化 CRLF：本机 `core.autocrlf=true` ⇒ 工作区是 CRLF、CI 上是 LF。切分/长度判据
+        // 一律取归一化后的文本，**不得**依赖换行符（否则守卫会因换行符而误触发）。
+        let src = SRC.replace("\r\n", "\n");
+        let prod = src
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), SRC.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
         // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把被守的那几行
         // **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
         let live = without_line_comments(prod);

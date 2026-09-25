@@ -1186,7 +1186,10 @@ const UI_ADJACENT_PROD_SOURCES: [(&str, &str); 1] = [("src/state.rs", include_st
 /// 与 `config_key(` / `source_key(` 同一条自证纪律：`p4_static_constraints` 钉死本文件里
 /// `group_title("…")`（恰 6 处）与 `block_key("…")`（恰 12 处）的**调用点计数**（防把**上屏串**
 /// 塞进这两个函数从而静默逃过码表网）。
-const NON_DISPLAY_SINKS: [&str; 13] = [
+/// ⚠️ **T21c-2 补一条**：`machine_key(`（`p6_system.rs` 的机器键豁免口，与 `block_key(` 同款）。
+/// 该函数的**实参必须纯 ASCII**（`[a-z0-9_]`）由 `p6_static_constraints` 钉住。
+const NON_DISPLAY_SINKS: [&str; 14] = [
+    "machine_key(",
     "InvalidArgument(",
     "debug_struct(",
     ".field(",
@@ -1993,6 +1996,12 @@ fn cps(set: &std::collections::BTreeSet<char>) -> Vec<String> {
 /// **2026-09-25 T21a 后重测：10 档仍完全相同，各 461 码位**（扩到 464 字符的码表里，有 3 个
 /// 码位**字库源本身就没有字形**、故不在任何档的 cmap 内：U+2082 / U+2715 / U+275A
 /// —— 已用 `fontTools` 对 `NotoSansSC-Regular.otf` 实测确认 ⇒ 交集只有 461）—— 两种取法仍一致。
+/// **2026-09-25 T21c-2-r1 后复测（口径订正，评审 N-4）**：入库 `font_subset_charset.txt`
+/// 实测 = **464 字符、单行无尾换行**（`\n` / `\r` 计数皆 0；**不是**"463 唯一字符 + 尾换行"
+/// —— 该说法对该产物不成立，唯一字符数同样是 **464**）。本批新增 `U+7A7A`（`空调` 用）、
+/// 且 `U+2082` 已随 R-1 移除 ⇒ 缺口降为 **2**（`U+2715` / `U+275A`，存量、生产未用）
+/// ⇒ 当前 10 档 cmap 交集 = **462**（= 464 − 2，与入库清单 `lv_font_cmap.txt` 的
+/// "本清单码位数：462" 一致），两种取法**仍一致**。
 fn load_font_cmap() -> Option<std::collections::BTreeSet<char>> {
     let fonts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
     let manifest_path = fonts_dir.join(CMAP_MANIFEST);
@@ -6938,6 +6947,561 @@ pub(crate) fn pages_chain() {
         drop(p4);
     }
 
+    // ═══ ⑰ T21c-2：P6「装置与外设」五段 + BMS 288 位下钻（T-18 / T-25 / 窗口化 / 惰性）═══
+    //
+    // 覆盖：**T-25 的实测几何**（段宽 185 / 段高 48 / 段间**净距** 16 —— 从 `coords()` 读出，
+    // 不看常量名）／站状态表（**恒 5 行** + 三态文案 + 降级不改行高行数）／**惰性创建**
+    // （未进入的段无对象）+ **切换只改可见性**（对象计数不增）／**窗口化**（行数 > 池大小；
+    // 滚动 ⇒ 窗口起点前移而**对象数不变**）／BMS 下钻（标题字面量 / 池大小 / 按钮尺寸 /
+    // 失败态只显本地文案 + 重试 / 翻页意图 / 收起）／**中文墨量密度**（T-18）／
+    // 全部段 + 下钻创建后的**对象预算**（实测值，见 `P6_ALL_SEGMENTS_BUDGET`）。
+    {
+        use crate::ui::pages::p6_system::{
+            self, RowKind, DRILL_ROW_POOL, SEG_BATTERY, SEG_DEVICE, SEG_ROW_POOL,
+        };
+        use mupc_display_proto::{BmsAlarmItem, BmsAlarmPage, PeriphRole};
+
+        // ── 夹具：5 个 role（fire 离线 / pcs 缺席）+ 帧内 3 站在线 + 一页 BMS 告警位 ──
+        let cat = p6_catalog(&[
+            (PeriphRole::Hvac, true),
+            (PeriphRole::Fire, true),
+            (PeriphRole::Battery, true),
+            (PeriphRole::MeterBatt, true),
+            (PeriphRole::Pcs, false),
+        ]);
+        // `last_ok_ms = 0` ⇒ 该列必须显 `–`（**不臆造**，R-38 未落地的口径）。
+        let sec = p6_section(&cat, &[PeriphRole::Hvac, PeriphRole::Battery, PeriphRole::MeterBatt], 0);
+        let bms_page = BmsAlarmPage {
+            page: 1,
+            page_size: 50,
+            total: 288,
+            active_total: 2,
+            has_more: true,
+            available: true,
+            items: (1..=50u16)
+                .map(|at| BmsAlarmItem {
+                    at,
+                    active: at <= 2,
+                })
+                .collect(),
+        };
+
+        // `Rc` + `wire_tabs()` = **生产路径**（`Shell::new` 的同款接线）：点段 ⇒ 立即建/刷该段。
+        let p6 = Rc::new(p6_system::P6SystemPage::new(&host).expect("P6SystemPage::new"));
+        p6.wire_tabs();
+        let base = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        p6.set_catalog(&cat);
+        p6.set_periph(&sec);
+        p6.set_bms_page(&bms_page);
+        let f = frame_healthy();
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+
+        // ── ① T-25 实测几何：段宽 / 段高 / **段间净距** / 总宽 / 段内容 y ───────────
+        let mut spans: Vec<(i32, i32)> = Vec::new();
+        for i in 0..Dimens::TAB_COUNT as usize {
+            let c = p6.tab_obj(i).expect("第 i 段按钮").coords();
+            assert_eq!(c.x2 - c.x1 + 1, Dimens::TAB_W, "段宽 = 185（UI §6.6.1）");
+            assert_eq!(c.y2 - c.y1 + 1, Dimens::TAB_H, "段高 = 48 ≥ TOUCH_MIN");
+            spans.push((c.x1, c.x2));
+        }
+        for w in spans.windows(2) {
+            assert_eq!(
+                w[1].0 - w[0].1 - 1,
+                Dimens::SEG_GAP,
+                "段间**净距**必须 = `SEG_GAP`(16) —— `lv_button` 命中区无外扩（R-44）"
+            );
+        }
+        assert_eq!(
+            spans[0].0,
+            Dimens::SIDE_PAD,
+            "分段控件自页根 x=0 起（页根已在 (SIDE_PAD, HEADER_H)）"
+        );
+        assert_eq!(spans.last().unwrap().1 - spans[0].0 + 1, 989, "五段总宽 989 ≤ 992");
+        assert_eq!(
+            p6.tabs_obj().size(),
+            (989, Dimens::TAB_H),
+            "分段控件本体 = 5×185 + 4×16（UI §15.5.1 的算式）"
+        );
+        assert_eq!(
+            p6.segment_content_y(),
+            Dimens::SECTION_Y,
+            "段内容 y = 128 + 16 − 72 = 72（UI §6.6.1）"
+        );
+        for (i, want) in [
+            "装置",
+            "空调",
+            "电池",
+            "储能表",
+            "PCS",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                p6.segment_label(i).as_deref(),
+                Some(*want),
+                "段名必须取自契约（`ui_text`）"
+            );
+        }
+
+        // ── ② 站状态表：恒 5 行 + 三态 + `–` 占位 ────────────────────────────────
+        assert_eq!(p6.station_row_count(), 5, "行集合 = 5 个 role 全集（F25.5）");
+        let r0 = p6.station_row_text(0).expect("第 0 行");
+        assert_eq!(r0.0, "站 空调", "站名 = 「站」+ role 中文名");
+        assert_eq!(r0.1, ui_text::ONLINE, "hvac 站在线");
+        // **四列**（UI §6.6.1 / F2 的四列返工）：第 3 / 4 列**各占一列**，标签取缩短形态。
+        assert!(
+            r0.2.starts_with(ui_text::LAST_OK_SHORT)
+                && r0.2.contains(crate::ui::pages::PLACEHOLDER),
+            "第 3 列 = 「成功 `–`」（`last_ok_ms = 0` ⇒ 不可得，**不臆造**）：{}",
+            r0.2
+        );
+        assert!(
+            r0.3.starts_with(ui_text::LAST_UPDATE_SHORT)
+                && !r0.3.contains(crate::ui::pages::PLACEHOLDER),
+            "第 4 列 = 「更新 `12:03:46`」（块时标有值 ⇒ **不是**占位符）：{}",
+            r0.3
+        );
+        let states: Vec<String> = (0..5)
+            .map(|i| p6.station_row_text(i).unwrap().1)
+            .collect();
+        assert!(states.contains(&ui_text::STATION_OFFLINE.to_string()), "fire 缺席帧内 ⇒ 站离线");
+        assert!(
+            states.contains(&ui_text::STATION_DISABLED.to_string()),
+            "pcs `enabled = false` ⇒ 「未启用」（情形⑦）"
+        );
+        assert!(
+            states.iter().all(|s| !s.is_empty()),
+            "每行都必须有状态词（不得留空）"
+        );
+        // 行高基线（降级前后必须相同）
+        let heights: Vec<Option<i32>> = (0..5).map(|i| p6.station_row_height(i)).collect();
+        // 注入「全部站离线」⇒ 行数 / 行高**不变**，只有文本变（PRD §4.2.4）
+        let sec_off = p6_section(&cat, &[], 0);
+        p6.set_periph(&sec_off);
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+        assert_eq!(p6.station_row_count(), 5, "站离线**不得**删行（F25.5）");
+        assert_eq!(
+            (0..5).map(|i| p6.station_row_height(i)).collect::<Vec<_>>(),
+            heights,
+            "降级行与在线时**同行高**"
+        );
+        assert_eq!(
+            p6.station_row_text(0).unwrap().1,
+            ui_text::STATION_OFFLINE,
+            "离线后该行取「站离线」"
+        );
+        assert_ne!(
+            p6.station_row_text(0).unwrap().1,
+            p6.station_row_text(4).unwrap().1,
+            "「站离线」≠「未启用」（四条文案两两互异）"
+        );
+        p6.set_periph(&sec);
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+
+        // ── ③ 惰性创建 + 切换只改可见性 ─────────────────────────────────────────
+        for i in 1..5 {
+            assert!(!p6.segment_built(i), "段 {i} 未进入过 ⇒ 不得有段内容对象");
+        }
+        assert_eq!(p6.selected_segment(), SEG_DEVICE, "默认段 = 装置");
+        assert!(p6.segment_built(SEG_DEVICE), "段「装置」（含 F8 三卡）随页装配");
+        let n_before_lazy =
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        p6.click_segment(1); // 用户点「空调」
+        let n_after_lazy =
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(p6.segment_built(1), "首次进入 ⇒ 惰性创建段内容");
+        assert_eq!(p6.selected_segment(), 1, "分段切换只改段下标（**不改 current_page**）");
+        assert!(p6.segment_visible(1) && !p6.segment_visible(SEG_DEVICE), "只切可见性");
+        assert!(
+            n_after_lazy > n_before_lazy,
+            "首次进入必须真的建出段内容（否则「惰性」名不副实）"
+        );
+
+        // 段「空调」行数 = 站状态行 1 + 4 个组头 + 33 个白名单点 = 38；池 = 19（**与行数无关**）
+        assert_eq!(p6.segment_row_count(1), Some(38), "段「空调」行数（白名单 33 + 4 组头 + 1 站行）");
+        assert_eq!(
+            p6.segment_pool_size(1),
+            Some(SEG_ROW_POOL),
+            "行池 = 可视行 ×1.5 + 1（与行数**无关**）"
+        );
+        assert!(
+            p6.segment_row_count(1).unwrap() > SEG_ROW_POOL,
+            "行数 > 池大小 ⇒ 窗口化确实在起作用（否则该段不会被窗口化）"
+        );
+        let vis = p6.segment_visible_rows(1).expect("可见行数");
+        assert!(vis <= SEG_ROW_POOL, "可见行数不得超过池（{vis} > {SEG_ROW_POOL}）");
+        assert!(vis >= 5, "视口内至少应有一屏行（实测 {vis}）");
+        // 段顶第 0 行 = 站状态行；其后是组头与数据行
+        let (l0, v0, _a0, u0) = p6.segment_row_text(1, 0).expect("段内第 0 行");
+        assert_eq!(l0, "站 空调", "段顶是站状态条（UI §6.6.1）");
+        assert_eq!(v0, ui_text::ONLINE);
+        assert!(
+            u0.starts_with(ui_text::LAST_UPDATE_SHORT),
+            "段顶第 4 列 = 「更新 …」（四列口径，与段「装置」同款）：{u0}"
+        );
+
+        // ── ③′ **F2：站状态条四列**（UI §6.6.1）—— 段「装置」5 行表与各段顶**同款判据** ──
+        // 判据只读**实测几何**（`coords()` + 生产字体的 `adv_w` 之和），不看常量名：
+        // ① 恰四列；② 相邻列不重叠；③ 每列文本 ≤ 该列槽宽。
+        // `last_ok_ms` 注入**真值**（= R-38 落地后的最长形态「成功 12:03:44」；
+        // 「最后成功 … · 最近更新 …」合并串 424 px 在旧实现里 > aux 槽 398 px ⇒ 必截断）。
+        let sec_real = p6_section(
+            &cat,
+            &[PeriphRole::Hvac, PeriphRole::Battery, PeriphRole::MeterBatt],
+            1_789_047_727_000,
+        );
+        p6.set_periph(&sec_real);
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+        // 第 3 列的两种**合法**形态：① 帧内**有**该站 ⇒ 真值 `hh:mm:ss`（= R-38 落地后的
+        // **最长形态**）；② 帧内**无**该站（`pcs` 未启用 ⇒ 不进帧）⇒ `last_ok_ms = 0` ⇒ `–`
+        // （**不臆造**，T-24 口径）。⚠️ **不能按"是否在线"分**：站离线仍可能带着上次成功的
+        // 时标（`last_ok_ms` 的语义 = 最后一次**成功**，不是"当前在线"）。
+        let want_ok = format!("{} 13:42:07", ui_text::LAST_OK_SHORT);
+        let want_none = format!(
+            "{} {}",
+            ui_text::LAST_OK_SHORT,
+            crate::ui::pages::PLACEHOLDER
+        );
+        let want_upd = format!("{} 00:00:01", ui_text::LAST_UPDATE_SHORT);
+        let want_none_upd = format!(
+            "{} {}",
+            ui_text::LAST_UPDATE_SHORT,
+            crate::ui::pages::PLACEHOLDER
+        );
+        let mut real_rows = 0usize;
+        for i in 0..5 {
+            let (name, st, ok, upd) = p6.station_row_text(i).expect("站状态行");
+            assert!(
+                ok == want_ok || ok == want_none,
+                "第 {i} 行第 3 列只允许「成功 <时刻>」或「成功 –」两种形态：{ok}"
+            );
+            assert!(
+                upd == want_upd || upd == want_none_upd,
+                "第 {i} 行第 4 列只允许「更新 <时刻>」或「更新 –」两种形态：{upd}"
+            );
+            real_rows += usize::from(ok == want_ok);
+            assert_station_four_columns(
+                &p6.station_row_col_spans(i).expect("列几何"),
+                &[name, st, ok, upd],
+                &format!("段「装置」站状态表第 {i} 行"),
+            );
+        }
+        assert!(real_rows >= 3, "帧内的 3 个站必须显真值时刻（实测 {real_rows} 行）");
+        let r4 = p6.station_row_text(4).unwrap();
+        assert_eq!(
+            (&r4.2, &r4.3),
+            (&want_none, &want_none_upd),
+            "`pcs`（未启用 ⇒ 不进帧）两列都为 `–`（**不臆造**）"
+        );
+        // 段顶（段「空调」第 0 行）—— **同款判据**（口径一致性由"同一条 `PoolRow::bind`"保证）
+        let (n1, s1, o1, up1) = p6.segment_row_text(1, 0).expect("段顶站状态行");
+        assert_station_four_columns(
+            &p6.segment_row_col_spans(1, 0).expect("列几何"),
+            &[n1, s1, o1, up1],
+            "段「空调」段顶站状态条",
+        );
+        // **R-38 的守门人**（不依赖注入值）：`hh:mm:ss` 的**上界形态**也必须放进槽里 ——
+        // 两个时刻列的槽宽从**实测几何**取（`spans[k].2`），故改长标签（如回到「最后成功」）
+        // 即红；把槽改窄（裁掉必要宽度）同样红。
+        for (k, label) in [
+            (2usize, ui_text::LAST_OK_SHORT),
+            (3usize, ui_text::LAST_UPDATE_SHORT),
+        ] {
+            let spans = p6.station_row_col_spans(0).expect("列几何");
+            let longest = format!("{label} 23:59:59");
+            let w = measured_text_px(&longest, crate::ui::theme::TextSlot::Body.px());
+            assert!(
+                w <= spans[k].2,
+                "「{longest}」实测 {w} px > 第 {k} 列槽宽 {} px —— 真值时刻会被 `DOTS` 截断\
+                 （改长标签 / 改窄槽都会让本条红）",
+                spans[k].2
+            );
+        }
+        p6.set_periph(&sec);
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+
+        let kinds = p6.segment_rows(1).expect("行模型");
+        assert_eq!(kinds[0].0, RowKind::Station);
+        assert_eq!(kinds[1].0, RowKind::Header, "第 1 行 = 首组组头（测量值）");
+        assert_eq!(kinds.iter().filter(|(k, _)| *k == RowKind::Header).count(), 4, "空调段 4 组");
+        // 位行（告警位 / 辅助状态位）必须是 `Bit` 且行高 40
+        assert!(
+            kinds.iter().any(|(k, h)| *k == RowKind::Bit && *h == Dimens::ROW_BIT_H),
+            "段「空调」含位行（行高 = ROW_BIT_H 40）"
+        );
+        // **窗口化**：滚到中段 ⇒ 窗口起点前移、对象数不变
+        let n_win = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        let w0 = p6.segment_window_start(1);
+        p6.scroll_segment(1, 600);
+        let w1 = p6.segment_window_start(1);
+        assert!(w1 > w0, "滚动后窗口起点必须前移（{w0:?} → {w1:?}）");
+        assert_eq!(
+            p6.segment_visible_rows(1),
+            Some(vis),
+            "滚动只**重绑**池行 ⇒ 可见行数不变"
+        );
+        assert_eq!(
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst),
+            n_win,
+            "滚动**不得**新建任何对象（窗口化 = 复用池行）"
+        );
+        // 切换段 ⇒ 只切可见性（不销毁重建、不新建）
+        p6.click_segment(0);
+        p6.click_segment(1);
+        assert_eq!(
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst),
+            n_win,
+            "已建段的切换只改可见性（设计 §15.5.3 的容器策略）"
+        );
+        assert!(p6.segment_visible(1) && !p6.segment_visible(0));
+
+        // ── ③″ **滚动注册点（W-a）**：4 个外设段**都**注册了 `SCROLL` ─────────────
+        // 判据 = **只发滚动、不另调重绑入口**（`scroll_segment` 已不含 `on_scroll()`）⇒
+        // 窗口起点前移**只能**由生产注册的回调驱动。**删掉任一注册点 ⇒ 该段红**。
+        // ⚠️ ② / ③ 的夹具里 `pcs` 是 `enabled=false` ⇒ **段 4 只有一条段级文案**（内容高 44 <
+        // 视口 528 ⇒ **不可滚动**，用"窗口前移"判别不出来）⇒ 本段临时换一份 **5 站全启用**
+        // 的夹具，使 4 段都可滚动；段 1–3 的行为不受影响（同一份白名单展开）。
+        let cat_all = p6_catalog(&[
+            (PeriphRole::Hvac, true),
+            (PeriphRole::Fire, true),
+            (PeriphRole::Battery, true),
+            (PeriphRole::MeterBatt, true),
+            (PeriphRole::Pcs, true),
+        ]);
+        let sec_all = p6_section(
+            &cat_all,
+            &[
+                PeriphRole::Hvac,
+                PeriphRole::Battery,
+                PeriphRole::MeterBatt,
+                PeriphRole::Pcs,
+            ],
+            0,
+        );
+        p6.set_catalog(&cat_all);
+        p6.set_periph(&sec_all);
+        for i in [1usize, 2, 3, 4] {
+            p6.click_segment(i); // 惰性建段（段 3 / 4 首次进入）
+            p6.render(&PageInput::live(&f));
+            disp.refr_now_for_test();
+            assert!(p6.segment_built(i), "段 {i} 已建");
+            assert!(
+                p6.segment_row_count(i).unwrap_or(0) > SEG_ROW_POOL,
+                "段 {i} 的行数必须 > 池（否则该段不可滚动 ⇒ 本段断言退化）"
+            );
+            // ⚠️ 先复位到 0：**位置不变 ⇒ LVGL 不发 `SCROLL`**（同值滚动是空操作）⇒ 必须
+            // 让两次滚动**真的改变位置**，否则本段会退化成"窗口本来就在原地"的恒真断言。
+            p6.scroll_segment(i, 0);
+            let before = p6.segment_window_start(i);
+            assert_eq!(before, Some(0), "段 {i} 滚回顶部 ⇒ 窗口起点 = 0");
+            p6.scroll_segment(i, 600);
+            let after = p6.segment_window_start(i);
+            assert!(
+                after > before,
+                "段 {i} 的窗口起点必须随滚动前移（{before:?} → {after:?}）—— \
+                 不动 ⇒ 该段**没有** `SCROLL` 注册（或 `rebind` 没被回调驱动）"
+            );
+            p6.scroll_segment(i, 0);
+            assert_eq!(
+                p6.segment_window_start(i),
+                Some(0),
+                "段 {i} 滚回顶部 ⇒ 窗口起点回 0"
+            );
+        }
+        // 复原 ② / ③ 的夹具（后续 ④ 的下钻断言按它给的口径）
+        p6.set_catalog(&cat);
+        p6.set_periph(&sec);
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+
+        // ── ③‴ **`lv_group` 单选不变量（W-c）**：任一时刻**恰有一段** CHECKED ──────
+        // `select()` 的互斥是**双通道**表达（`CHECKED` 状态位 + 组内只留选中段），
+        // 这里量的是**状态位**那一半（组通道在指针类 indev 下不产生键导航 ⇒ 语义冗余）。
+        use crate::lvgl::style::State;
+        use crate::lvgl::widgets::has_state;
+        for i in [1usize, 3, 0, 4, 2] {
+            p6.click_segment(i);
+            let checked = (0..Dimens::TAB_COUNT as usize)
+                .filter(|k| {
+                    let tab = p6.tab_obj(*k).expect("第 k 段按钮");
+                    has_state(&tab, State::CHECKED)
+                })
+                .count();
+            assert_eq!(
+                checked, 1,
+                "切到段 {i} 后必须**恰有一段**处于 `CHECKED`（实测 {checked}）—— \
+                 `select()` 的互斥逻辑回归（同时选中两段 = 单选不变量破）"
+            );
+        }
+        p6.click_segment(1);
+
+        // ── ④ 段「电池」+ BMS 288 位下钻 ────────────────────────────────────────
+        p6.click_segment(SEG_BATTERY);
+        assert!(p6.segment_built(SEG_BATTERY));
+        let b_rows = p6.segment_rows(SEG_BATTERY).expect("电池段行模型");
+        assert_eq!(
+            b_rows.iter().filter(|(k, _)| *k == RowKind::Special).count(),
+            1,
+            "288 位**不铺进段内**：段内只有 1 个特殊件（摘要卡）"
+        );
+        // 点摘要卡的「查看全部 288 位」⇒ 打开下钻（生产事件路径 ⇒ 意图 ⇒ render）
+        p6.click_bms_entry();
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+        assert!(p6.drill_open(), "入口按钮 ⇒ 打开下钻");
+        assert_eq!(
+            p6.selected_segment(),
+            SEG_BATTERY,
+            "下钻**不改**段下标（更不改 `current_page`）"
+        );
+        let title = p6.drill_title().expect("下钻标题");
+        assert!(title.contains(ui_text::BMS_ALARM_BITS_TITLE), "标题含「BMS 告警位」：{title}");
+        assert!(title.contains(ui_text::PAGE_PREFIX), "标题含「第」：{title}");
+        assert!(title.contains(ui_text::PAGE_SUFFIX), "标题含「页」：{title}");
+        assert!(title.contains(ui_text::BIT_ACTIVE), "标题含「活跃」：{title}");
+        assert!(title.contains(" / 288"), "标题含 `/ 288`（288 = 总数）：{title}");
+        assert_eq!(
+            p6.drill_collapse_size(),
+            Some((Dimens::DRILL_BTN_W, Dimens::TOUCH_MIN)),
+            "「收起」= 120×48（UI §6.6.1）"
+        );
+        assert_eq!(
+            p6.drill_page_button_sizes(),
+            Some((
+                (Dimens::DRILL_BTN_W, Dimens::TOUCH_MIN),
+                (Dimens::DRILL_BTN_W, Dimens::TOUCH_MIN)
+            )),
+            "上一页 / 下一页 = 120×48"
+        );
+        assert_eq!(p6.drill_pool_size(), DRILL_ROW_POOL, "下钻行池 = 可视行 ×1.5 + 1");
+        // 翻页意图（点击 ⇒ 回调载荷 = 目标页；**页面不自行发请求**）
+        let got: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        {
+            let got = Rc::clone(&got);
+            p6.set_on_bms_page(move |page| got.set(page));
+        }
+        p6.click_drill_page(true);
+        p6.render(&PageInput::live(&f));
+        assert_eq!(got.get(), 2, "「下一页」⇒ 意图载荷 = 当前页 + 1");
+        p6.click_drill_page(false);
+        p6.render(&PageInput::live(&f));
+        assert_eq!(got.get(), 1, "「上一页」⇒ 当前页 − 1（首页不为负）");
+        // 失败态：端点非 2xx ⇒ **只显本地固定文案**「明细不可用」+「重试」（R-4；服务端串只进日志）
+        p6.set_bms_page_failed();
+        disp.refr_now_for_test();
+        assert!(p6.drill_fail_visible(), "失败态可见（**不静默**）");
+        assert!(p6.drill_retry_visible(), "失败态给「重试」出路");
+        assert!(
+            p6.drill_title().expect("标题").contains(ui_text::BMS_ALARM_BITS_TITLE),
+            "失败态仍显示顶部条标题（分页口径不变）"
+        );
+        p6.set_bms_page(&bms_page);
+        assert!(p6.drill_open(), "重新注入一页后下钻仍打开");
+
+        // ── ④″ **F1：下钻窗口随滚动重绑**（池 16 行 vs 一页 **25** 行）───────────
+        // 一页 = `page_size 50` 位 = **25 行**（两位一行），池 = `DRILL_ROW_POOL` = 16
+        // ⇒ **池外 9 行**在"只在注入拍重绑"的实现里**永不建对象**（静默丢内容）。
+        // 判据用**滚动位置应有的行号**（`drill_window_start` = 0 基行号）：窗口起点必须
+        // 随滚动前移，且**页尾两位（49 / 50）**必须真的被绘到池内某行上。
+        // **改什么会让本段红**：① 去掉 `BmsDrill::wire_scroll()`（无非注册 ⇒ 窗口不动）；
+        // ② 把 `render()` 的窗口起点钉死为 0（`start = 0`）—— 两条都实测过（见报告）。
+        assert_eq!(
+            p6.drill_pool_size(),
+            DRILL_ROW_POOL,
+            "下钻行池 = 可视行 ×1.5 + 1（与页大小**无关**）"
+        );
+        let ws0 = p6.drill_window_start().expect("有页数据 ⇒ 窗口存在");
+        assert_eq!(ws0, 0, "未滚动 ⇒ 窗口起点 = 0");
+        let vis0 = p6.drill_visible_rows();
+        assert!(vis0 > 0, "未滚动 ⇒ 应有可见行（实测 {vis0}）");
+        p6.scroll_drill(600);
+        let ws1 = p6.drill_window_start().expect("窗口");
+        assert!(
+            ws1 > ws0,
+            "下钻窗口起点必须随滚动前移（{ws0} → {ws1}）—— 不动 ⇒ 池外行永不绘（F1）"
+        );
+        // 池内已绑行数 = 「页尾剩余行数」——即池**覆盖到页尾**（不是"可见行数不变"：
+        // 滚到尾部时页内剩余行本就少于池大小，那是**正确**的窗口内容）。
+        assert_eq!(
+            p6.drill_visible_rows(),
+            25 - ws1,
+            "滚到行 {ws1} 时池须覆盖到**页尾**（一页 50 位 = 25 行 ⇒ 剩余 {} 行）",
+            25 - ws1
+        );
+        // 滚到底（LVGL 自行 clamp）：窗口起点落在**页尾**，此时页尾两位必须可见。
+        p6.scroll_drill(10_000);
+        let ws_end = p6.drill_window_start().expect("窗口");
+        assert!(
+            ws_end > ws1,
+            "滚到底 ⇒ 窗口起点继续前移（{ws1} → {ws_end}）"
+        );
+        let mut drawn: Vec<String> = Vec::new();
+        for k in 0..p6.drill_pool_size() {
+            if let Some((a, b)) = p6.drill_row_names(k) {
+                drawn.extend(a.into_iter().chain(b));
+            }
+        }
+        for tail in [" 49", " 50"] {
+            assert!(
+                drawn.iter().any(|t| t.ends_with(tail)),
+                "滚到底后页尾位号 `{tail}` 必须在池内某行上被绘（**池外行不绘 = 静默丢内容**）：{drawn:?}"
+            );
+        }
+        assert!(
+            drawn.len() >= p6.drill_visible_rows() * 2 - 1,
+            "每可见行须绑两位（实测 {} 位 / {} 行）",
+            drawn.len(),
+            p6.drill_visible_rows()
+        );
+        // 回到顶部：窗口起点复位（同一条重绑通道的反向证据）
+        p6.scroll_drill(0);
+        assert_eq!(p6.drill_window_start(), Some(0), "滚回顶部 ⇒ 窗口起点回 0");
+
+        // 收起 ⇒ 回段「电池」（不构成子页 ⇒ 无"返回"语义，但必须可退出）
+        p6.click_drill_collapse();
+        p6.render(&PageInput::live(&f));
+        assert!(!p6.drill_open(), "「收起」⇒ 退出下钻（F11.3）");
+        assert!(p6.segment_visible(SEG_BATTERY), "收起后段内容恢复可见");
+
+        // ── ④′ 离开 P6 ⇒ 收起下钻（§15.5.3 的"不残留"用例；由外壳切页那一拍收口）──
+        p6.click_bms_entry();
+        p6.render(&PageInput::live(&f));
+        assert!(p6.drill_open(), "先打开下钻");
+        p6.close_drill(); // = `shell::Core::select` 在"切离 P6"那一拍做的事
+        assert!(!p6.drill_open(), "切离 P6 ⇒ 下钻**不得**残留打开态");
+        assert!(
+            p6.segment_visible(SEG_BATTERY),
+            "收起后段内容恢复（回来时看到的是摘要卡，不是残留的下钻）"
+        );
+
+        // ── ⑤ 中文墨量密度（T-18）─────────────────────────────────────────────
+        p6.render(&PageInput::live(&f));
+        disp.refr_now_for_test();
+        let painted = sink.borrow().iter().filter(|b| **b != 0).count();
+        assert!(
+            painted > 10_000,
+            "P6 渲染后 sink 应有成片非背景像素（实际 {painted}）—— \
+             分段控件 + 站状态表 + 段内 30+ 行文本件，墨量必须显著"
+        );
+
+        // ── ⑥ 对象预算（**全部段 + 下钻创建后**；`Shell::new` 区间只含段「装置」）────
+        let mounted =
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst) - base;
+        println!("[P6] 全部段 + 下钻创建后新增对象 = {mounted}");
+        assert!(
+            mounted <= P6_ALL_SEGMENTS_BUDGET,
+            "P6 的全部段内容 + 下钻视图新增了 {mounted} 个对象（预算 {P6_ALL_SEGMENTS_BUDGET}）\
+             —— 窗口化的意义就是**不让对象数随行数增长**；超预算先减池，再谈抬预算"
+        );
+        drop(p6);
+    }
+
     // ═══ P5 审计页（B2c-1；F19，**只读** + 共享时间范围筛选件）═══════════════════
     //
     // 覆盖：装配契约（契约 1：页根即滚动容器）／共享件（三档 + 自定义展开）／操作类型 chip 组
@@ -8550,11 +9114,12 @@ pub(crate) fn pages_chain() {
         p3.back_obj().send_event(EventCode::CLICKED);
         assert_eq!(*backs.borrow(), 1, "点击 ⇒ **恰一次**意图");
         assert!(p3.auto_follow(), "点击后复位自动跟随（B3 注入态的读回口径）");
-        // ⚠️ **R2 的能力缺口（B4a 订正后如实标注）**：剩余缺口**只有输入侧** ——
-        // 薄层**未镜像** `LV_EVENT_SCROLL` ⇒ 本层读不到"用户是否手动上滚"。
-        // **已不是**"无任何滚动位置读 / 写 API"：`Obj::scroll_to_y` / `Obj::scroll_y`
-        // 自 B4a 起已封装（`lvgl/mod.rs` 的 **G3**）⇒ 程序化回顶**已可做**
-        // （薄层侧回归锁见 `lvgl/tests_b4.rs`；**外壳**切回 P1 时是否真调，属 **B4b**）。
+        // ⚠️ **R2 的能力缺口（T21c-2-r1 订正后如实标注）**：本段**不断言**"手动上滚 ⇒ 停止
+        // 自动跟随"—— 缺口**不是**"读不到滚动事件或位置"（`EventCode::SCROLL` 自 **B4b
+        // `297b51b`** 起已镜像；`Obj::scroll_to_y` / `scroll_y` 自 **B4a** 起已封装，见
+        // `lvgl/mod.rs` 的 **G3** —— B4a 那一轮写的"剩余缺口只有输入侧事件"**同样不成立**），
+        // 而是**页内浮动件**（页根即滚动容器 ⇒ 按钮随内容滚走；见 `p3_logs.rs` 的 **LG11** /
+        // `ui/pages/mod.rs` 的 R2）。
         // 本段**不**断言"回到顶部"：那是**外壳行为**、不在本段（页面层）的断言范围，
         // 在此断言只会是恒真式。
 
@@ -9186,15 +9751,41 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **为什么是"确需新增"**：§A 四组（F21）与下钻视图（F21.4 的分页明细）都是
         // **本增量的交付物**，对象数与"逐位 16 行 / 逐只明细"的呈现规格**同构**（设计 §15.4）。
         // **未做窗口化**（设计 §15.5.3 的"可视行 ×1.5"）⇒ 下钻的 180 个格对象**一次性建齐**；
-        // 这是**已登记的偏差**（`p4_interlock.rs` **IL29⑥**）：薄层**无滚动事件**
-        // （`EventCode` 未镜像 `LV_SCROLL`，见 `pages/mod.rs` 的 R2）⇒ 窗口化在本层
-        // 结构性不可实现（要复用行对象必须先知道滚动位置）。**真机余量须复核**（设计 §15.9
-        // **R-34** / 真机档 D-5：`lv_mem_monitor`）。
+        // 这是**已登记的偏差**（`p4_interlock.rs` **IL29⑥**）。⚠️ **订正（T21c-2-r1）**：本段
+        // 原写"根因 = 薄层无滚动事件（`EventCode` 未镜像 `LV_SCROLL`）⇒ 结构性不可实现"——
+        // **不实**：该事件码自 **B4b（`297b51b`，2026-09-16）** 起已镜像，P6 的
+        // `SegmentList` / `BmsDrill` 与 P5 均已按它消费并各有探针实测 ⇒ 这是**一处无依据的
+        // 降级**（已登记为**待单独立项**；P6 已给出可复用的窗口化范式）。**真机余量须复核**
+        // （设计 §15.9 **R-34** / 真机档 D-5：`lv_mem_monitor`）。
         // **代价已量化**：981 个对象按 LVGL `lv_obj` 量级（≈150–200 B）≈ **150–200 KB**，
         // 在 `LV_MEM_SIZE = 1 MB` 池内（此前 256 KB 池建到第 4 页即失败的记录见上）。
-        // ⚠️ **余量 ~0.8 %**（账上推算：对象 ≈150–200 KB vs 1 MB 池；**非实测**）⇒ 真机
-        // `lv_mem_monitor` 复核为验收项（设计 §15.9 **R-34** / 真机档 D-5；见 **IL29⑥**）。
-        const SHELL_OBJECT_BUDGET: usize = 981;
+        // ⚠️ **余量（自洽口径；2026-09-25 / W-g 订正）**：按 LVGL `lv_obj` 量级（≈150–200 B）
+        // 与**当前**常驻预算 1021 件 ⇒ 常驻 ≈ **150–200 KB** / 1 MB 池 ⇒ **占用 ≈15–20 %、
+        // 余量 ≈80–85 %**（**不是 0.8 %** —— 此前同句的"余量 ~0.8 %"与它自己的算式
+        // 150–200 KB / 1 MB **差约两个数量级**，属单位 / 数量级笔误，已随本条与设计 §15.9
+        // **R-34** 同批订正）。再叠加"5 段都点过 + 开过一次下钻"的**惰性半区**
+        // （[`P6_ALL_SEGMENTS_BUDGET`] = 694，与本文件 1021 相加 = **稳态上界 1715 件**）
+        // ⇒ ≈ **257–343 KB** ⇒ 占用 ≈25–33 %、**余量 ≈67–75 %**。
+        // 上述均为**账上推算、非实测**（真机 `lv_mem_monitor` 复核为验收项：设计 §15.9
+        // **R-34** / 真机档 D-5；见 **IL29⑥**）。
+        // **T21c-2（2026-09-25）重新实测：1016** —— 981 → **1016** 的来源 = **P6 段「装置」的
+        // 新增件**（逐条可核，`p6_system.rs`），**零余量**地重钉在这里：
+        //
+        // | 构件 | 对象数 |
+        // |------|-------|
+        // | `SegmentedTabs`：行容器 1 + 5 段 ×（`lv_button` 1 + `lv_label` 1） | 11 |
+        // | 段「装置」的段内容容器 + 其滚动宿主（`ScrollContainer`） | 2 |
+        // | 站状态表：卡 1 + 卡头标题 1 + **5 行 × 5**（行容器 + **4 个文字槽** —— T21c-2-r1 / F2 的四列返工在每行加了第 4 槽） | 27 |
+        // | 合计 | **40** |
+        //
+        // **T21c-2-r1（2026-09-25）重新实测：1021** —— 1016 → **1021** 的来源 = 站状态表
+        // **每行 +1 个文字槽**（四列返工：站名 / 状态 / 成功 / 更新）⇒ 5 行 +5 件。
+        //
+        // ⚠️ **口径（必须与 P6 的另一半合读）**：本区间（`Shell::new`）**只含段「装置」**
+        // —— 4 个外设段与下钻视图都是**惰性创建**的（设计 §15.5.3 的容器策略）⇒ 它们的对象
+        // 不在本区间内，另由 `P6_ALL_SEGMENTS_BUDGET`（**实测 694**，见
+        // `ui/tests.rs` 的 T21c-2 段与 `pages_chain` 的 ⑰ 块）兜住。**稳态上界 ≈ 1715**。
+        const SHELL_OBJECT_BUDGET: usize = 1021;
         let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         let sh = Shell::new(&home).expect("外壳 + 6 页装配（LVGL_MEM 1 MB）");
         let mounted =
@@ -12351,7 +12942,7 @@ fn call_args(code: &str, at: usize, name_len: usize) -> Option<(usize, String)> 
 /// **为什么手工列**：H-2 / T-23 的待查集合必须包含「UI 固定文案常量表」（设计 §15.7.3 的
 /// 第 2–7 行），而 `ui_text` 是**扁平常量模块**（无 `ALL` 数组 ⇒ 无反射可枚举）。手工列表由
 /// **计数自证**（本表的长度钉死）兜住"新增常量忘了进表"的漏项。
-const UI_TEXT_CONSTANTS: [(&str, &str); 55] = [
+const UI_TEXT_CONSTANTS: [(&str, &str); 69] = [
     // 站位 / 取值降级（7）
     ("STATION_OFFLINE", ui_text::STATION_OFFLINE),
     ("NOT_READ", ui_text::NOT_READ),
@@ -12395,9 +12986,12 @@ const UI_TEXT_CONSTANTS: [(&str, &str); 55] = [
     ("ENUM_UNKNOWN", ui_text::ENUM_UNKNOWN),
     ("ENUM_STOPPED", ui_text::ENUM_STOPPED),
     ("ENUM_RUNNING", ui_text::ENUM_RUNNING),
-    // 时刻与提示（12；**含 T21c-1 补的三条**：COUNT_UNIT / REGISTERED_READABLE_MISMATCH / COL_SEQ）
+    // 时刻与提示（14；**含 T21c-1 补的三条**：COUNT_UNIT / REGISTERED_READABLE_MISMATCH / COL_SEQ
+    //  与 T21c-2-r1 补的两条缩短标签：LAST_OK_SHORT / LAST_UPDATE_SHORT）
     ("LAST_OK", ui_text::LAST_OK),
     ("LAST_UPDATE", ui_text::LAST_UPDATE),
+    ("LAST_OK_SHORT", ui_text::LAST_OK_SHORT),
+    ("LAST_UPDATE_SHORT", ui_text::LAST_UPDATE_SHORT),
     ("REGISTERED", ui_text::REGISTERED),
     ("READABLE", ui_text::READABLE),
     ("COUNT_ALARM", ui_text::COUNT_ALARM),
@@ -12424,6 +13018,19 @@ const UI_TEXT_CONSTANTS: [(&str, &str); 55] = [
     ("VERSION_MISMATCH", ui_text::VERSION_MISMATCH),
     ("FLASH_SAME_VERSION", ui_text::FLASH_SAME_VERSION),
     ("CHANNEL_DOWN_RETRYING", ui_text::CHANNEL_DOWN_RETRYING),
+    // T21c-2（P6「装置与外设」）补的 12 条（段名 / role 中文名 / 站前缀 / 下钻与摘要文案）
+    ("TAB_DEVICE", ui_text::TAB_DEVICE),
+    ("ROLE_HVAC", ui_text::ROLE_HVAC),
+    ("ROLE_FIRE", ui_text::ROLE_FIRE),
+    ("ROLE_BATTERY", ui_text::ROLE_BATTERY),
+    ("ROLE_METER_BATT", ui_text::ROLE_METER_BATT),
+    ("ROLE_PCS", ui_text::ROLE_PCS),
+    ("STATION_PREFIX", ui_text::STATION_PREFIX),
+    ("BMS_ALARM_BITS_TITLE", ui_text::BMS_ALARM_BITS_TITLE),
+    ("BMS_ACTIVE_BITS_PREFIX", ui_text::BMS_ACTIVE_BITS_PREFIX),
+    ("COUNT_SUFFIX", ui_text::COUNT_SUFFIX),
+    ("BITS_UNIT", ui_text::BITS_UNIT),
+    ("MODE_PREFIX", ui_text::MODE_PREFIX),
 ];
 
 /// **H-2 / T-23 覆盖率网**（设计 §15.7.2 H-2 / §15.8 T-23）。
@@ -12484,7 +13091,7 @@ fn h2_peripheral_texts_are_covered_by_font_cmap() {
     // ③ UI 固定文案常量表（含 T21c-1 补的三条）
     assert_eq!(
         UI_TEXT_CONSTANTS.len(),
-        55,
+        69,
         "`ui_text` 常量表长度自证：新增常量必须同步进本表（否则本条会漏扫它）"
     );
     // **常量表完备性自证**（比"长度 == 55"强得多）：`ui_text` 模块里**每一条** `pub const`
@@ -12599,6 +13206,7 @@ fn u73_fire_sys_bits() -> Vec<mupc_display_proto::BitMeta> {
                 },
                 defined: hit.is_some(),
                 active_text: None,
+                inactive_text: None,
                 // R-41 追认前**无生产者** ⇒ 一律 false（T-19b 的判据面）
                 inverted: false,
             }
@@ -12623,6 +13231,7 @@ fn u73_det_state_bits() -> Vec<mupc_display_proto::BitMeta> {
                 },
                 defined: hit.is_some(),
                 active_text: None,
+                inactive_text: None,
                 inverted: false,
             }
         })
@@ -12976,6 +13585,109 @@ fn t14_missing_reasons_are_pairwise_distinct_and_cylinder_ignores_value() {
     assert_eq!(no_cat.label_text(), ui_text::NAME_UNKNOWN);
 }
 
+/// **T-14 族 / F3（T21c-2-r1）**：`hvac_di_8`（系统运行位）的两态词**由 catalog 承载**
+/// ⇒ 屏侧逐位行显「**运行** / **停止**」（PRD **EX-06**；不再落通用「活跃 / 非活跃」）。
+///
+/// 三态判据（都在屏侧的生产构造点 `segment_model` → `state::bit_text` 上）：
+/// ① `inactive_text = 停止` 生效 ⇒ 非活跃侧显「停止」；
+/// ② `active_text = 运行` 生效 ⇒ 活跃侧显「运行」；
+/// ③ **回退**：只给 `active_text` 的位（catalog 未登记 `inactive_text`）非活跃侧仍显通用
+///    「非活跃」（**不臆造**，D22）。
+///
+/// **改什么会让本条红**：① 把 catalog 的 `inactive_text` 抹掉（改 `None`）⇒ ① / ③ 那条红
+/// （回退成「非活跃」）；② 让屏侧忽略 `inactive_text`（`bit_text` 只用 `active_text`）⇒ ① 红。
+#[test]
+fn t14_hvac_run_bit_renders_the_two_state_words_carried_by_catalog() {
+    use crate::ui::pages::p6_system::{segment_model, RowKind};
+    use mupc_display_proto::peripherals_labels::ui_text;
+    use mupc_display_proto::{FieldFlag, PeriphRole};
+
+    // 夹具 = 生产同源的白名单 catalog；再把 `hvac_di_8` 的位语义补成**生产者给的两态词**
+    // （`console_host::bit_state_words` 的同款值；两 crate 的契约面 = `BitMeta`）。
+    let mut cat = p6_catalog(&[(PeriphRole::Hvac, true)]);
+    let hvac = cat
+        .stations
+        .iter_mut()
+        .find(|s| s.role == PeriphRole::Hvac)
+        .expect("hvac 站");
+    let di = hvac
+        .blocks
+        .iter_mut()
+        .find(|b| b.name == "hvac_di")
+        .expect("hvac_di 块");
+    let p8 = di.points.iter_mut().find(|p| p.at == 8).expect("hvac_di_8");
+    assert_eq!(p8.bits.len(), 1, "离散位块的点恰 1 项位语义");
+    p8.bits[0].active_text = Some(ui_text::ENUM_RUNNING.to_string());
+    p8.bits[0].inactive_text = Some(ui_text::ENUM_STOPPED.to_string());
+
+    // 帧：把 `hvac_di` 块的值位 1 置 1 / 置 0（逐位块在帧内是**整字**，位 7 = 系统运行）。
+    // ⚠️ 两个助手都**显式收 `&cat` 实参**（不捕获）—— 本用例在 ③ 要改 `cat`（抹 `inactive_text`）。
+    let mk_sec = |cat: &mupc_display_proto::PeripheralCatalog, word: f64| {
+        let mut sec = p6_section(cat, &[PeriphRole::Hvac], 0);
+        let st = sec
+            .stations
+            .iter_mut()
+            .find(|s| s.role == PeriphRole::Hvac)
+            .expect("帧内 hvac 站");
+        let blk = st.blocks.iter_mut().find(|b| b.name == "hvac_di").expect("hvac_di");
+        blk.values.clear();
+        blk.values.push(mupc_display_proto::PointValue {
+            at: 8,
+            v: Some(word),
+            flag: FieldFlag::Valid,
+        });
+        sec
+    };
+    let bit_row = |cat: &mupc_display_proto::PeripheralCatalog,
+                   sec: &mupc_display_proto::PeripheralsSection| {
+        let m = segment_model(PeriphRole::Hvac, Some(cat), sec, None);
+        let r = m
+            .rows
+            .iter()
+            .find(|r| r.kind == RowKind::Bit && r.label == "系统运行")
+            .expect("`hvac_di_8` 的位行（短标签 = 「系统运行」，取自短标签表）");
+        (r.value.clone(), r.active)
+    };
+
+    // ① 位 = 1 ⇒ 「运行」；② 位 = 0 ⇒ 「停止」（两态词**逐字**来自 catalog）
+    let (v_on, a_on) = bit_row(&cat, &mk_sec(&cat, 128.0));
+    assert_eq!(v_on, ui_text::ENUM_RUNNING, "活跃侧 = 「运行」（EX-06）");
+    assert_eq!(a_on, Some(true), "活跃态进灯通道");
+    let (v_off, a_off) = bit_row(&cat, &mk_sec(&cat, 0.0));
+    assert_eq!(
+        v_off,
+        ui_text::ENUM_STOPPED,
+        "非活跃侧 = 「停止」（catalog 的 `inactive_text` 生效；抹掉它 ⇒ 回退「非活跃」⇒ 本条红）"
+    );
+    assert_eq!(a_off, Some(false));
+    assert_ne!(v_on, v_off, "两态词必须**互异**（EX-06）");
+    assert_ne!(
+        v_off,
+        ui_text::BIT_INACTIVE,
+        "「停止」**不得**等于通用「非活跃」（否则该位等于没登记语义）"
+    );
+
+    // ③ 回退：把 catalog 的 `inactive_text` 抹掉 ⇒ 非活跃侧回到通用「非活跃」
+    //   （**同一个构造点**的对照断言 ⇒ 「catalog 承载」不是自说自话）
+    let hvac = cat
+        .stations
+        .iter_mut()
+        .find(|s| s.role == PeriphRole::Hvac)
+        .unwrap();
+    let di = hvac
+        .blocks
+        .iter_mut()
+        .find(|b| b.name == "hvac_di")
+        .unwrap();
+    di.points.iter_mut().find(|p| p.at == 8).unwrap().bits[0].inactive_text = None;
+    let (v_fb, _) = bit_row(&cat, &mk_sec(&cat, 0.0));
+    assert_eq!(
+        v_fb,
+        ui_text::BIT_INACTIVE,
+        "缺 `inactive_text` ⇒ 回退通用「非活跃」（**不臆造**，D22）"
+    );
+}
+
 /// **T-15**：火警等级 6 值文案齐全（值域出处 = PRD F21 展示表）＋ **表外值 ⇒ 「未知」**
 /// （**绝不落「正常」**）＋ catalog 路径与回退路径**各断言一次** ＋ 语义色档（未知 ⇒ 中性）。
 #[test]
@@ -13214,7 +13926,7 @@ fn t19b_bit15_is_not_enabled_and_inverted_has_no_producer() {
     assert!(crate::state::fire_det_state_bit_defined(12));
     assert!(crate::state::fire_det_state_bit_defined(14));
     assert_eq!(
-        crate::state::bit_text(15, false, "", false, None, false),
+        crate::state::bit_text(15, false, "", false, None, None, false),
         "未定义位 15",
         "未定义位 ⇒ 「未定义位 n」（**不猜语义**，F21.1 / EX-09）"
     );
@@ -13225,14 +13937,14 @@ fn t19b_bit15_is_not_enabled_and_inverted_has_no_producer() {
         "屏侧不得设置 `inverted`：R-41 追认前**无生产者**（catalog 构建器一律填 false）"
     );
     // ④ 「不猜」纪律：未定义位的位名恒不参与文案（屏上不出现编造语义）
-    assert!(crate::state::bit_text(0, false, "", false, None, false).starts_with("未定义位"));
+    assert!(crate::state::bit_text(0, false, "", false, None, None, false).starts_with("未定义位"));
     // ⑤ 已定义位=「位名 + 活跃/非活跃」；`inverted` 位若被追认启用则走「在线 / 离线」
     assert_eq!(
-        crate::state::bit_text(12, true, "报警总状态", true, None, false),
+        crate::state::bit_text(12, true, "报警总状态", true, None, None, false),
         "报警总状态 活跃"
     );
     assert_eq!(
-        crate::state::bit_text(15, true, "通信状态", true, None, true),
+        crate::state::bit_text(15, true, "通信状态", true, None, None, true),
         "通信状态 在线",
         "`inverted` 位的文案通道（追认后才可能启用；**屏侧代码零改动**）"
     );
@@ -13260,4 +13972,549 @@ fn t20_page_count_is_six_and_the_drill_is_not_a_page() {
              （无独立页面状态、不经导航路由 ⇒ `current_page` 结构性不变）"
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T21c-2（P6「装置与外设」）用例：夹具 + 纯逻辑（T-19 / T-20 / 行不变量 / 版面常量 /
+// 源码哨）。离屏渲染类（T-18 的墨量 / T-25 的实测几何）落在 `pages_chain` 的 P6 段。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// **F2 的版面判据**（站状态条**四列**；T21c-2-r1 / UI §6.6.1）。
+///
+/// `spans` = 该行**可见列**的实测几何 `(x1, x2, 槽宽)`（`Obj::coords()` + `Label::size()`）；
+/// `texts` = 对应列的绑定文本。三条判据：
+/// ① **恰四列**；② **相邻列不重叠**（`前一列 x2 < 后一列 x1`）；③ **不越槽**
+/// （`measured_text_px(文本, 该列字号) ≤ 槽宽`，字号 = 列序 0 → 26 / 其余 24）。
+///
+/// **改什么会让它红**：① 把两个时刻列合并回一条（槽数 4 → 3）；② 把某一列的 x 摆到与相邻列
+/// 相交；③ 把某列标签改长（如 `LAST_OK_SHORT` 回退到「最后成功」⇒ 194 px > 152 槽）。
+fn assert_station_four_columns(spans: &[(i32, i32, i32)], texts: &[String], what: &str) {
+    use crate::ui::theme::TextSlot;
+    assert_eq!(
+        spans.len(),
+        4,
+        "{what}：站状态条必须恰**四列**（UI §6.6.1）"
+    );
+    assert_eq!(texts.len(), 4, "{what}：四列文本");
+    let fonts = [TextSlot::Label, TextSlot::Body, TextSlot::Body, TextSlot::Body];
+    let names = ["站名", "状态", "成功列", "更新列"];
+    for k in 0..4 {
+        assert!(!texts[k].is_empty(), "{what}：{} 不得为空", names[k]);
+        let w = measured_text_px(&texts[k], fonts[k].px());
+        assert!(
+            w <= spans[k].2,
+            "{what}：{} 的文本「{}」实测 {w} px > 槽宽 {} px（`DOTS` 会截断）",
+            names[k],
+            texts[k],
+            spans[k].2
+        );
+    }
+    for k in 1..4 {
+        assert!(
+            spans[k - 1].1 < spans[k].0,
+            "{what}：{} 与 {} **重叠**（前一列 x2 = {} ≥ 后一列 x1 = {}）",
+            names[k - 1],
+            names[k],
+            spans[k - 1].1,
+            spans[k].0
+        );
+    }
+}
+
+/// **W-b 的契约面**：P6 的 4 个 role 上，「`group_of` 有归键」的点**全部**在白名单内
+/// ⇒ 「白名单外的一律不产行」这半句在**屏侧过滤**之前就由**分组键**成立了
+/// （真正把关的是 catalog 生产者）。
+///
+/// **为什么必须这么写**（T21c-2 评审 W-5 的建议"夹具加一条白名单外的点"经实测**无判别力**）：
+/// 白名单外的点若其 `group_of` 落到 `GROUP_UNKNOWN`，`segment_model` 的 `group_order` 循环
+/// **本来就不会**给它产行 ⇒ 把过滤点改成 `if false` 该夹具**照样不产行**（探针全绿）。
+/// 穷举（本用例即穷举）表明：全部 P6 role 上都**不存在**"有分组键 ∧ 不在白名单"的点
+/// （唯一的例外形态是 Fire `fire_det` at ≥ 7，而 P6 **不承载 fire**，属 P4）。
+///
+/// **本用例的意义**：把该冗余关系**值化**。一旦它红，说明出现了"有归键但不在白名单"的点
+/// ⇒ **从那一刻起屏侧过滤是承载路径**，必须为它补一条**行为**用例（而不是只留本不变量）。
+/// 过滤点**存在性**另由 `t19_p6_negative_acceptance_and_shell_sentinels` 的源码计数网兜住。
+#[test]
+fn p6_whitelist_filter_is_redundant_with_group_keys_for_its_roles() {
+    use mupc_display_proto::{group_of, periph_whitelist_contains, PeriphRole, GROUP_UNKNOWN};
+    // 候选块名 = 白名单里出现过的全部块名（`group_of` 只认这些块；未登记的块恒 `unknown`）。
+    let mut blocks: Vec<&str> = mupc_display_proto::PERIPH_WHITELIST
+        .iter()
+        .map(|(_, b, _)| *b)
+        .collect();
+    blocks.sort_unstable();
+    blocks.dedup();
+    assert!(blocks.len() > 10, "块名枚举应覆盖白名单的全部块（实测 {}）", blocks.len());
+    for role in [
+        PeriphRole::Hvac,
+        PeriphRole::Battery,
+        PeriphRole::MeterBatt,
+        PeriphRole::Pcs,
+    ] {
+        for b in &blocks {
+            for at in 1..=300u16 {
+                if group_of(role, b, at) != GROUP_UNKNOWN {
+                    assert!(
+                        periph_whitelist_contains(role, b, at),
+                        "{role:?}/{b}/{at}：有分组键 `{}` 却**不在白名单** ⇒ \
+                         屏侧的白名单过滤从此是**承载路径**（本不变量失效）⇒ \
+                         必须补一条行为用例（见本用例文档）",
+                        group_of(role, b, at)
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// P6 夹具：按 role 造 catalog（点集**从白名单展开** —— 与生产构建器同源）。
+///
+/// `enabled` 逐站给出（`false` ⇒ 该站缺席 = 情形⑦「站点未启用」的判据面）。
+/// 块形态：`hvac_di` / `bms_alarm` 取 `Discrete`（逐位一点），其余 `Scalar`。
+fn p6_catalog(
+    enabled: &[(mupc_display_proto::PeriphRole, bool)],
+) -> mupc_display_proto::PeripheralCatalog {
+    use mupc_display_proto::peripherals_labels::{label_for, unit_for};
+    use mupc_display_proto::{
+        BitMeta, CatalogBitClass, CatalogBlock, CatalogBlockKind, CatalogPoint, CatalogStation,
+        PeripheralCatalog, PERIPH_WHITELIST,
+    };
+
+    let mut stations = Vec::new();
+    for (role, en) in enabled {
+        let mut blocks: Vec<CatalogBlock> = Vec::new();
+        for (r, block, at) in PERIPH_WHITELIST {
+            if r != role {
+                continue;
+            }
+            let label = label_for(*r, block, *at).unwrap_or_default().to_string();
+            let discrete = *block == "hvac_di" || *block == "bms_alarm";
+            let bits: Vec<BitMeta> = if discrete {
+                vec![BitMeta {
+                    index: u8::try_from(at.saturating_sub(1)).unwrap_or(0),
+                    label: label.clone(),
+                    class: CatalogBitClass::Alarm,
+                    defined: true,
+                    active_text: None,
+                    inactive_text: None,
+                    inverted: false,
+                }]
+            } else {
+                Vec::new()
+            };
+            let point = CatalogPoint {
+                at: *at,
+                label,
+                unit: unit_for(*r, block, *at).map(str::to_string),
+                decimals: 1,
+                bits,
+                enum_labels: Vec::new(),
+                decompose: Vec::new(),
+                group: mupc_display_proto::peripherals_labels::group_of(*r, block, *at).to_string(),
+            };
+            match blocks.iter_mut().find(|b| b.name == *block) {
+                Some(b) => b.points.push(point),
+                None => blocks.push(CatalogBlock {
+                    name: (*block).to_string(),
+                    kind: if discrete {
+                        CatalogBlockKind::Discrete
+                    } else {
+                        CatalogBlockKind::Scalar
+                    },
+                    renames: Vec::new(),
+                    points: vec![point],
+                }),
+            }
+        }
+        stations.push(CatalogStation {
+            id: role_name_for_fixture(*role).to_string(),
+            role: *role,
+            enabled: *en,
+            blocks,
+        });
+    }
+    PeripheralCatalog {
+        rev: 7,
+        generated_ms: 1_000,
+        stations,
+    }
+}
+
+/// 夹具用的站 id（ASCII，避免把中文带进 `id`）。
+fn role_name_for_fixture(role: mupc_display_proto::PeriphRole) -> &'static str {
+    match role {
+        mupc_display_proto::PeriphRole::Hvac => "hvac",
+        mupc_display_proto::PeriphRole::Fire => "fire",
+        mupc_display_proto::PeriphRole::Battery => "bms",
+        mupc_display_proto::PeriphRole::MeterBatt => "meter_batt",
+        mupc_display_proto::PeriphRole::Pcs => "pcs",
+        mupc_display_proto::PeriphRole::Unknown => "unknown",
+    }
+}
+
+/// P6 夹具：按 catalog 造帧内段（`value = 1.0`；`online` 里没列到的站取 `online = false`）。
+fn p6_section(
+    cat: &mupc_display_proto::PeripheralCatalog,
+    online: &[mupc_display_proto::PeriphRole],
+    last_ok_ms: u64,
+) -> mupc_display_proto::PeripheralsSection {
+    use mupc_display_proto::{
+        FieldFlag, PeripheralBlock, PeripheralStation, PeripheralsSection, PointValue,
+    };
+    let stations = cat
+        .stations
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| PeripheralStation {
+            id: s.id.clone(),
+            role: s.role,
+            online: online.contains(&s.role),
+            last_ok_ms,
+            cylinder_configured: None,
+            blocks: s
+                .blocks
+                .iter()
+                .map(|b| PeripheralBlock {
+                    name: b.name.clone(),
+                    ts_ms: 1_000,
+                    renames: Vec::new(),
+                    values: b
+                        .points
+                        .iter()
+                        .map(|p| PointValue {
+                            at: p.at,
+                            v: Some(1.0),
+                            flag: FieldFlag::Valid,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    PeripheralsSection {
+        ts_ms: 1_000,
+        available: true,
+        catalog_rev: 7,
+        truncated: Vec::new(),
+        stations,
+    }
+}
+
+/// **T-19 的 P6 半边（负向验收，结构性）** + **T-20** + **T-25 的常量半边** + 源码哨。
+#[test]
+fn t19_p6_negative_acceptance_and_shell_sentinels() {
+    use crate::ui::pages::p6_system;
+    use crate::ui::theme::Dimens;
+    use mupc_display_proto::{periph_whitelist_contains, PeriphRole};
+
+    let src = include_str!("pages/p6_system.rs");
+
+    // ① 误用禁止（负向验收**不配可见声明**，§15.7.3 的刻意决定）。
+    for bad in [
+        "PCS 输出",
+        "充放功率",
+        "台区负荷",
+        "柜外温度",
+        "柜外湿度",
+        "台区",
+        "关口",
+        "总表",
+    ] {
+        assert!(
+            !src.contains(bad),
+            "P6 源码不得出现 `{bad}`（EX-08 / EX-21 / EX-23 的误用禁止）"
+        );
+    }
+    // ② 1046–1065 整体不在白名单（含 1049）—— 屏上因此**无从**把它们标注成 PCS 输出。
+    for at in 47..=66u16 {
+        assert!(
+            !periph_whitelist_contains(PeriphRole::Pcs, "pcs_3zone", at),
+            "1046–1065（STS / 负载区）不得上屏：pcs_zone_{at}（PRD §7 #11）"
+        );
+    }
+    assert!(
+        !periph_whitelist_contains(PeriphRole::Pcs, "pcs_3zone", 50),
+        "1049 按本设计的选择不上屏（§15.5.2 选项 A / R-42）"
+    );
+    // ③ 页数不变 + 无新增路由项 + P6 代码面无路由 API（T-20）。
+    assert_eq!(crate::ui::shell::NavPage::ALL.len(), 6, "页数不增（T-8 裁定）");
+    assert_eq!(
+        mupc_display_proto::ConsoleEndpoint::ALL.len(),
+        11,
+        "端点清单不变（8 读 + 3 写；T21c-2 **不新增**端点）"
+    );
+    let code = strip_comments_and_literals(src, "ui/pages/p6_system.rs");
+    for bad in ["current_page", "set_act(", "tabview", "NavPage"] {
+        assert!(
+            !code.contains(bad),
+            "P6 的**代码**不得出现 `{bad}` —— 分段切换与下钻都**不构成页面**\
+             （无独立页面状态、不经导航路由 ⇒ `current_page` 结构性不变）"
+        );
+    }
+    // ③′ **白名单过滤点（W-b）**：`segment_model` 的两条分支（catalog / 帧）各一处，
+    // 且形态必须是 `if !periph_whitelist_contains(`。
+    //
+    // **改什么会让本条红**：把任一处改成 `if false`（评审探针 P11 的形态）、注释掉、或删掉
+    // ⇒ 计数 ≠ 2。**计数面 = 已剥注释与字面量的 `code`**（不是 raw `src`；2026-09-25 /
+    // 评审 W-f：原先数 `src` ⇒ 把过滤点**用行注释注释掉、文本仍在**时计数仍为 2 ⇒ 本网
+    // 对"注释掉"这一形态**静默失效**；换成 `code` 后同一改动**立刻红**，探针实测见报告）。
+    // **为什么只做存在性网而不加"白名单外的点"夹具**：那种夹具**无判别力**
+    // —— `group_of` 有归键的点**全部**在白名单内（穷举值化在
+    // `p6_whitelist_filter_is_redundant_with_group_keys_for_its_roles`）⇒ 白名单外的点
+    // 因 `group_order` 循环本就不产行，过滤点关掉也照样绿。真正把关的是 catalog 生产者。
+    let filters = code.matches("if !periph_whitelist_contains(").count();
+    assert_eq!(
+        filters, 2,
+        "`segment_model` 的 catalog / 帧两条分支**各须**一处白名单过滤（实测 {filters} 处）—— \
+         过滤点是「白名单 ⇒ 结构性不上屏」的最后一道保险（生产者之外的冗余面）"
+    );
+
+    // ④ 机器键豁免口的**双判据**（调用点计数 + 实参纯 ASCII）。
+    let calls = code.matches("machine_key(").count();
+    assert_eq!(
+        calls,
+        MACHINE_KEY_CALLS,
+        "`machine_key` 的调用点数变了（{calls} ≠ {MACHINE_KEY_CALLS}）—— \
+         本口是**码表网的豁免面**（`NON_DISPLAY_SINKS`）：加一处就要在此同步计数，\
+         否则新的豁免点会**静默扩大**（上屏中文可能借道逃过码表网）"
+    );
+    // ⚠️ 实参检查必须在**保留字面量**的文本上做（`strip_comments_and_literals` 会把字面量
+    // 内容剥空 ⇒ 那样只能数到 `machine_key()`，查不出实参）。这里自带一个"只剥行注释"的
+    // 轻量面（p6 不用块注释；`///` 亦属行注释）。
+    let raw_nc: String = src
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("
+");
+    let mut from = 0usize;
+    let mut checked = 0usize;
+    while let Some(rel) = raw_nc[from..].find("machine_key(\"") {
+        let at = from + rel + "machine_key(\"".len();
+        let endq = raw_nc[at..]
+            .find('"')
+            .unwrap_or_else(|| panic!("`machine_key(` 的实参引号未闭合"));
+        let lit = &raw_nc[at..at + endq];
+        assert!(
+            lit.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "`machine_key` 的实参 `{lit}` **必须**是纯 ASCII 机器键（`[a-z0-9_]`）——              上屏文案不得经本口逃过码表网（`ui_texts_covered_by_font_cmap`）"
+        );
+        checked += 1;
+        from = at + endq;
+    }
+    assert_eq!(
+        checked + 1,
+        calls,
+        "除定义处外每处 `machine_key(` 都应是带字符串实参的调用（实测 {checked} + 定义 1 ≠ {calls}）"
+    );
+    // ⑤ T-25 的常量半边（几何从 `theme` 的单一真源读出）。
+    assert_eq!(Dimens::TAB_COUNT, 5, "UI §6.6.1：5 段");
+    assert_eq!(Dimens::TAB_W, 185, "UI §6.6.1：每段 185 宽");
+    assert_eq!(Dimens::TAB_H, Dimens::TOUCH_MIN, "段高 = 触摸下限 48");
+    assert_eq!(Dimens::SEG_GAP, 16, "段间隙 16（F14.2）");
+    assert_eq!(Dimens::TAB_COUNT * Dimens::TAB_W + 4 * Dimens::SEG_GAP, 989);
+    assert_eq!(
+        Dimens::SECTION_Y,
+        Dimens::TABS_Y + Dimens::TAB_H + Dimens::GAP_GROUP
+    );
+    assert_eq!(Dimens::SECTION_VIEW_H, 528, "UI §6.6.1：段内容视口 992×528");
+    assert_eq!(Dimens::CARD_HEAD_H, 40, "UI §6.6.1：分组卡卡头 40");
+    assert_eq!(Dimens::ROW_DATA_H, 44, "UI §6.6.1：数值行 44");
+    assert_eq!(Dimens::ROW_BIT_H, 40, "UI §6.6.1：位行 40");
+    assert_eq!(Dimens::ROW_STATION_H, 48, "UI §6.6.1：站状态条行高 48");
+    assert_eq!(Dimens::DRILL_ROW_H, 44, "UI §6.6.1：下钻行高 44");
+    assert_eq!(Dimens::DRILL_BTN_W, 120, "UI §6.6.1：分页 / 收起 120×48");
+    assert_eq!(Dimens::DRILL_ENTRY_W, 200, "UI §6.6.1：入口按钮 200×48");
+    // 段名 / 组标题取自契约（不臆造）。
+    assert_eq!(p6_system::station_group_title(), "外设站状态");
+    assert_eq!(p6_system::bms_alarm_group_title(), "告警位（288）");
+    assert_eq!(p6_system::bms_entry_text(), "查看全部 288 位");
+}
+
+/// **P6 全部段（4 个外设段）+ 下钻视图创建后**新增的 LVGL 对象上界（**实测值**）。
+///
+/// **实测账（2026-09-25；T21c-2-r1 重测）**：`694`，逐项可核（构件件数由组件构造点给出）：
+///
+/// | 构件 | 对象数 |
+/// |------|-------|
+/// | 4 个外设段：每段 1 视口 + 1 内容占位 + 7 张卡框 | 4 × 9 = **36** |
+/// | 4 个外设段的**段内容容器**（`SegmentedTabs::with_panel` 的 `layout_box`，惰性创建 ⇒ 每段 1 件） | **4** |
+/// | 池行：`SEG_ROW_POOL` = **19 行/段**；空调段（含位行）每行 = 容器 1 + **4 个文字槽** + `LedIndicator` 4 = **9**；其余 3 段每行 = 1 + 4 = **5** | 19×9 + 3×19×5 = **456** |
+/// | 段「电池」的 BMS 摘要卡（卡 1 + 卡头 1 + 摘要 1 + 4 行清单 + 入口按钮 2） | **9** |
+/// | 下钻视图（根 1 + 标题 1 + 翻页/收起 3×2 + 行区视口 1 + 占位 1 + **16 个池行 × 11 件** + 失败文案 1 + 重试 2） | **189** |
+/// | 合计（实测值）：36 + 4 + 456 + 9 + 189 | **694** |
+///
+/// ⚠️ **两处订正（T21c-2 评审 F2 / W-e）**：① 池行是 **`DRILL_ROW_POOL` = 16**（原注释写
+/// 「15 个池行」**数字错**）；② **4 个外设段都真的被创建了**（原用例只点过段 1 / 段 2 ⇒
+/// 「全部段」名不副实；现在 ③″ 的滚动注册点网会把 4 段都点开）。
+///
+/// ⚠️ **第三处订正（T21c-2-r1 复核 N-1，2026-09-25）**：本台账原先**逐项相加 = 36 + 456 +
+/// 9 + 189 = 690 ≠ 694**（差额 **4**）—— 漏登的正是 **4 个段内容容器**（`with_panel` 的
+/// `layout_box`，每段 1 件，见上表新增行）。**总数 694 是实测**（`pages_chain` ⑥ 的
+/// `PROBE_MOUNTS` 增量 + 反向探针：预算 `694 → 693` 即红），故此处是**台账补全**、
+/// 断言不受影响。
+///
+/// **口径（与 `SHELL_OBJECT_BUDGET` 的差别必须说清）**：那个预算量的是 `Shell::new` 区间
+/// （**只有段「装置」** —— 4 个外设段与下钻都是**惰性创建**的，装配期不存在）；本常量量的是
+/// "用户把 5 段都点过 + 打开过一次下钻"之后的**上界**。两者相加才是稳态常驻量级。
+const P6_ALL_SEGMENTS_BUDGET: usize = 694;
+
+/// `machine_key` 在 `p6_system.rs` 代码面（**剥注释后**）的**出现次数** = 定义 1 处 + 调用 28 处。
+///
+/// 调用 28 = `group_order` 的 4 个常量数组共 **26** 个分组键 + 2 处块名比较（`bms_alarm`）。
+/// **加一处就要在此同步**（否则新豁免点静默扩大，见该用例的断言消息）。
+const MACHINE_KEY_CALLS: usize = 29;
+
+/// **T-18 的纯逻辑半边：行集合与行高与"取数成败"无关**（PRD §4.2.4 / F25.5）。
+#[test]
+fn t18_p6_row_set_and_row_heights_are_independent_of_fetch_outcome() {
+    use crate::ui::pages::p6_system::{segment_model, RowKind};
+    use mupc_display_proto::{FieldFlag, PeriphRole};
+
+    let cat = p6_catalog(&[
+        (PeriphRole::Hvac, true),
+        (PeriphRole::Battery, true),
+        (PeriphRole::MeterBatt, true),
+        (PeriphRole::Pcs, true),
+    ]);
+
+    for role in [
+        PeriphRole::Hvac,
+        PeriphRole::Battery,
+        PeriphRole::MeterBatt,
+        PeriphRole::Pcs,
+    ] {
+        let online = p6_section(&cat, &[role], 1_000);
+        let offline = p6_section(&cat, &[], 1_000);
+        let m_on = segment_model(role, Some(&cat), &online, None);
+        let m_off = segment_model(role, Some(&cat), &offline, None);
+        // ① 行数相同
+        assert_eq!(
+            m_on.rows.len(),
+            m_off.rows.len(),
+            "{role:?}：站离线**不得**改变行数（F25.5）"
+        );
+        assert!(m_on.rows.len() > 5, "{role:?}：夹具应有可观行数");
+        // ② 逐行高 / 种类相同
+        for (a, b) in m_on.rows.iter().zip(m_off.rows.iter()) {
+            assert_eq!(
+                (a.kind, a.h),
+                (b.kind, b.h),
+                "{role:?}：降级不得改行高 / 种类"
+            );
+        }
+        assert_eq!(m_on.total_h, m_off.total_h, "{role:?}：降级不得改内容总高");
+        // ③ 离线 ⇒ 数值行全降级（`–` + 「站离线」），**不补 0**
+        let mut degraded = 0usize;
+        for row in m_off.rows.iter().filter(|r| r.kind == RowKind::Scalar) {
+            assert!(row.degraded, "{role:?}：站离线 ⇒ 数值行必须降级");
+            assert_eq!(row.value, crate::ui::pages::PLACEHOLDER);
+            assert_eq!(row.aux, ui_text::STATION_OFFLINE, "三语义之一：站离线");
+            degraded += 1;
+        }
+        assert!(degraded > 0, "{role:?}：夹具应含数值行");
+        let shown = m_on
+            .rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Scalar && !r.degraded)
+            .count();
+        assert!(shown > 0, "{role:?}：在线时数值行可展示");
+
+        // ④ 点位「未取数」⇒ 该行 `–` + 「未取数」（与「站离线」互异）
+        let mut partial = p6_section(&cat, &[role], 1_000);
+        if let Some(st) = partial.stations.iter_mut().find(|s| s.role == role) {
+            if let Some(b) = st.blocks.first_mut() {
+                if let Some(p) = b.values.first_mut() {
+                    p.v = None;
+                    p.flag = FieldFlag::NotRead;
+                }
+            }
+        }
+        let m_part = segment_model(role, Some(&cat), &partial, None);
+        assert!(
+            m_part
+                .rows
+                .iter()
+                .any(|r| r.degraded && r.aux == ui_text::NOT_READ),
+            "{role:?}：点位未取数 ⇒ 该行显「未取数」（与「站离线」互异）"
+        );
+    }
+
+    // ⑤ 站**未启用**（catalog `enabled = false`）⇒ 段内**不产行**（站级文案承担，情形⑦）
+    let cat2 = p6_catalog(&[(PeriphRole::Pcs, false)]);
+    let sec2 = p6_section(&cat2, &[], 0);
+    let m_disabled = segment_model(PeriphRole::Pcs, Some(&cat2), &sec2, None);
+    assert_eq!(
+        m_disabled.rows.len(),
+        1,
+        "「站点未启用」⇒ 段内**只有段级文案行**（`StationState::Disabled` 无点级原因）"
+    );
+    assert_eq!(m_disabled.rows[0].label, ui_text::SECTION_STATION_DISABLED);
+    assert_ne!(
+        m_disabled.rows[0].label,
+        ui_text::PERIPH_UNAVAILABLE,
+        "「站点未启用」（单站未配置）≠「外设数据不可用」（整段源不可得）"
+    );
+    // ⑤′ 整段不可用（EDGE-22）⇒ 段顶声明 + **行照常列出**（R-40：不因取数成败隐藏）
+    let cat4 = p6_catalog(&[(PeriphRole::Hvac, true)]);
+    let mut sec_na = p6_section(&cat4, &[PeriphRole::Hvac], 0);
+    sec_na.available = false;
+    let m_na = segment_model(PeriphRole::Hvac, Some(&cat4), &sec_na, None);
+    assert_eq!(m_na.rows[0].label, ui_text::PERIPH_UNAVAILABLE);
+    assert!(
+        m_na.rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Scalar)
+            .count()
+            > 0,
+        "整段不可用也**不隐藏**数据行（R-40 的常显口径）"
+    );
+    // ⑥ catalog 缺 ⇒ 名位「名称未获取」但**值照常显示**（§15.3.1）
+    let cat3 = p6_catalog(&[(PeriphRole::Hvac, true)]);
+    let sec3 = p6_section(&cat3, &[PeriphRole::Hvac], 0);
+    let m_no_cat = segment_model(PeriphRole::Hvac, None, &sec3, None);
+    assert!(!m_no_cat.rows.is_empty(), "缺 catalog ⇒ 退到帧建行");
+    assert!(
+        m_no_cat.rows.iter().any(|r| r.label == ui_text::NAME_UNKNOWN),
+        "缺 catalog ⇒ 名位「名称未获取」（不臆造）"
+    );
+    assert!(
+        m_no_cat
+            .rows
+            .iter()
+            .any(|r| r.kind == RowKind::Scalar && !r.degraded),
+        "缺 catalog **不影响**值展示（§15.3.1）"
+    );
+}
+
+/// **BMS 摘要卡 / 下钻的三态文案两两互异**（EDGE-24 / EX-16）与分页口径。
+#[test]
+fn t18_p6_bms_three_states_are_distinct_and_page_count_follows_page_size() {
+    assert_ne!(
+        ui_text::NO_ACTIVE_ALARM_BIT,
+        ui_text::BMS_ALARM_SOURCE_UNAVAILABLE
+    );
+    assert_ne!(ui_text::NO_ACTIVE_ALARM_BIT, ui_text::STATION_OFFLINE);
+    assert_ne!(
+        ui_text::BMS_ALARM_SOURCE_UNAVAILABLE,
+        ui_text::STATION_OFFLINE
+    );
+    assert_ne!(ui_text::STATION_DISABLED, ui_text::STATION_OFFLINE);
+    assert_ne!(
+        ui_text::SECTION_STATION_DISABLED,
+        ui_text::PERIPH_UNAVAILABLE
+    );
+    assert_eq!(ui_text::BMS_ALARM_BITS_TITLE, "BMS 告警位");
+    assert_eq!(ui_text::BMS_ACTIVE_BITS_PREFIX, "活跃告警位");
+    assert_eq!(ui_text::COUNT_SUFFIX, "个");
+    assert_eq!(ui_text::BITS_UNIT, "位");
+    assert_eq!(
+        288u32.div_ceil(50),
+        6,
+        "288 位 / 50 位一页 ⇒ 6 页（第 X / 6 页）"
+    );
 }

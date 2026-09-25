@@ -470,16 +470,22 @@ impl PeriphView {
 ///
 /// - `defined == false` ⇒ 「未定义位 `index`」（其后接位号；**不猜语义**，**禁止**为凑满
 ///   16 位而编造）；
-/// - 已定义 ⇒ `"{位名} {活跃 / 非活跃}"`；`active_text`（catalog 给的活跃语义）优先于通用
-///   「活跃」；`inverted == true`（极性反转位，R-41 追认前**无生产者**）⇒ `在线 / 离线`。
+/// - 已定义 ⇒ `"{位名} {两态词}"`；`active_text` / `inactive_text`（catalog 给的**两态**语义）
+///   各自优先于通用「活跃」/「非活跃」；`inverted == true`（极性反转位，R-41 追认前
+///   **无生产者**）⇒ `在线 / 离线`（该支**不看**两态词）。
 ///
-/// 位名 / `active_text` **一律来自 catalog**（帧外元数据），本函数不产出中文。
+/// 位名 / `active_text` / `inactive_text` **一律来自 catalog**（帧外元数据），本函数不产出中文。
+///
+/// **两态词的来源（T21c-2-r1 / F3）**：双态词由 catalog 承载（[`BitMeta::inactive_text`]），
+/// 屏侧**不猜语义**（D22）。只给 `active_text` 的位，非活跃侧**回退**到通用「非活跃」
+/// （与 `inactive_text` 引入前的行为逐字相同）。
 pub fn bit_text(
     index: u8,
     defined: bool,
     label: &str,
     active: bool,
     active_text: Option<&str>,
+    inactive_text: Option<&str>,
     inverted: bool,
 ) -> String {
     if !defined {
@@ -494,7 +500,7 @@ pub fn bit_text(
     } else if active {
         active_text.unwrap_or(ui_text::BIT_ACTIVE)
     } else {
-        ui_text::BIT_INACTIVE
+        inactive_text.unwrap_or(ui_text::BIT_INACTIVE)
     };
     format!("{label} {state}")
 }

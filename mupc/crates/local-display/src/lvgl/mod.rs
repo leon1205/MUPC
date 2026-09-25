@@ -41,6 +41,15 @@
 //!   [`crate::app::apply_touch_snapshot`]）。`lv_indev_add_event_cb` 的 `allowlist.txt` 条目
 //!   **未动**（`event.rs` 的 `EventHost for *mut lv_indev_t` 仍以别的形式引用它）。
 //!   **本单元未动 `allowlist.txt`** ⇒ 不触发 LVGL 全量 C 重编。
+//! - **T21c-2「Flex 行容器」**（2026-09-25）：[`widgets::FlexFlow`] /
+//!   [`widgets::set_flex_flow`] / [`widgets::set_pad_column`] —— P6 的
+//!   [`crate::ui::pages::SegmentedTabs`] 需要「Flex 行 + 段间隙 `pad_column`」（UI §5.1 #21）。
+//!   **本批动了 `lvgl-sys/allowlist.txt`**（+2 `fn` / +1 `type`：`lv_obj_set_flex_flow` /
+//!   `lv_obj_set_style_pad_column` / `lv_flex_flow_t`）⇒ **触发一次 LVGL 全量 C 重编**
+//!   （双向一致性用例 `lvgl-sys/tests/allowlist_consistency.rs` 已复跑通过：150 fn / 62 type
+//!   / 11 var = 223 条）。另 [`obj::Obj::set_text_color`] / [`obj::Obj::set_text_font`]
+//!   两个**局部属性** setter 同批补上（窗口化行池要在运行期换字号/字色；两者用的是
+//!   `allowlist.txt` 里**早已放行**的两个符号 ⇒ 不新增条目）。
 //!
 //! `unsafe` 始终只在本目录内（设计 §1.1.1.2 纪律 1）。
 //!

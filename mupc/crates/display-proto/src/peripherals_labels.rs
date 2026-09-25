@@ -1364,6 +1364,12 @@ pub mod ui_text {
     pub const LAST_OK: &str = "最后成功";
     /// 最近更新（块级时标前缀，F25.2）。
     pub const LAST_UPDATE: &str = "最近更新";
+    /// 站状态条**第 3 列**的缩短标签（「成功 `hh:mm:ss`」；T21c-2-r1 / F2 的产品裁定
+    /// 2026-09-25：UI §6.6.1 的**四列口径不变**，缩的是标签 —— 四列并排时
+    /// 「最后成功 12:03:44」+「最近更新 12:03:46」的合并串 424 px 放不下）。
+    pub const LAST_OK_SHORT: &str = "成功";
+    /// 站状态条**第 4 列**的缩短标签（「更新 `hh:mm:ss`」；口径同 [`Self::LAST_OK_SHORT`]）。
+    pub const LAST_UPDATE_SHORT: &str = "更新";
     /// 登记（探测器汇总行「登记 N 只」，F21.4）。
     pub const REGISTERED: &str = "登记";
     /// 可读（探测器汇总行「可读 M 只」，F21.4）。
@@ -1411,6 +1417,50 @@ pub mod ui_text {
     pub const FLASH_SAME_VERSION: &str = "请刷同版本固件";
     /// 与主进程数据通道断开（重试中）。
     pub const CHANNEL_DOWN_RETRYING: &str = "与主进程数据通道断开（重试中）";
+
+    // ── T21c-2（P6「装置与外设」）补的 12 条（**契约层缺口登记**）──────────────
+    //
+    // §15.5.1 / §15.5.2 / §6.6.1 的**版面文字**用到了 §15.7.3「UI 固定文案」表里**没有**的
+    // 字面量，而 HMI 侧**不得自造中文串**（本模块的纪律）⇒ 按 §15.7.3 的收口口径补入本模块。
+    //
+    // | 常量 | 字面量 | 出处（**不是**新造词） |
+    // |------|--------|------------------------|
+    // | [`TAB_DEVICE`] | `装置` | UI §6.6.1 线框图段名 `[ 装置 ]`（§15.5.1 的分段控件行） |
+    // | [`ROLE_HVAC`] / [`ROLE_FIRE`] / [`ROLE_BATTERY`] / [`ROLE_METER_BATT`] / [`ROLE_PCS`] | `空调` / `消防` / `电池` / `储能表` / `PCS` | UI §6.6.1 段名 + §15.5.2「站 **`<role 中文名>`**」（= R-3 裁定的 5 个 role 全集）；`PeriphRole` 在契约层**无**中文名字段 ⇒ 名称落在这里而非新开函数（H-2 的待查集合只枚举 `ui_text` 常量） |
+    // | [`STATION_PREFIX`] | `站` | §15.5.1 / §15.6.2 ① 的站状态条原文「**站** `<角色>` │ …」 |
+    // | [`BMS_ALARM_BITS_TITLE`] | `BMS 告警位` | UI §6.6.1 下钻顶部条原文「`BMS 告警位 · 第 X / Y 页 · 活跃 N / 288`」 |
+    // | [`BMS_ACTIVE_BITS_PREFIX`] + [`COUNT_SUFFIX`] | `活跃告警位` + `个` | UI §6.6.1 摘要行原文「**活跃告警位 x 个**」 |
+    // | [`BITS_UNIT`] | `位` | UI §6.6.1 入口按钮原文「查看全部 288 **位**」 |
+    // | [`MODE_PREFIX`] | `模式` | §15.5.2 段「PCS」`pcs_3zone_67` 行原文「**模式** `<值>`」（§15.9 R-32） |
+    //
+    // **字符核验（2026-09-25，本批实测）**：上述字面量的全部字符**已在**生成字体 cmap 内
+    // —— **唯一例外 = `空`（U+7A7A，`空调` 用）**，本批据 §15.7 H-1 把它并入
+    // `fonts/font_subset_charset.txt` 并**重跑 `gen_fonts.sh`**（10 档，码表 `463 → 464` 字符、
+    // cmap `461 → 462` 码位；`lv_font_cmap.txt` / `lv_font_metrics.txt` **同批更新**）。
+    /// 段名「装置」（UI §6.6.1 线框图 `[ 装置 ]`）。
+    pub const TAB_DEVICE: &str = "装置";
+    /// role 中文名：空调（站 `hvac`）。
+    pub const ROLE_HVAC: &str = "空调";
+    /// role 中文名：消防（站 `fire`）。
+    pub const ROLE_FIRE: &str = "消防";
+    /// role 中文名：电池（站 `bms`）。
+    pub const ROLE_BATTERY: &str = "电池";
+    /// role 中文名：储能表（站 `meter_batt`）。
+    pub const ROLE_METER_BATT: &str = "储能表";
+    /// role 中文名：PCS（站 `pcs`）。
+    pub const ROLE_PCS: &str = "PCS";
+    /// 站状态条的「站」前缀（§15.5.1「站 `<role 中文名>` │ …」）。
+    pub const STATION_PREFIX: &str = "站";
+    /// 下钻视图顶部条标题前缀「BMS 告警位」。
+    pub const BMS_ALARM_BITS_TITLE: &str = "BMS 告警位";
+    /// BMS 告警摘要行前缀「活跃告警位」。
+    pub const BMS_ACTIVE_BITS_PREFIX: &str = "活跃告警位";
+    /// 摘要行量词「个」（「活跃告警位 x **个**」）。
+    pub const COUNT_SUFFIX: &str = "个";
+    /// 位量词「位」（「查看全部 288 **位**」）。
+    pub const BITS_UNIT: &str = "位";
+    /// 枚举文案未登记时的值前缀「模式」（§15.9 R-32：`pcs_3zone_67` 显「模式 `<值>`」）。
+    pub const MODE_PREFIX: &str = "模式";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

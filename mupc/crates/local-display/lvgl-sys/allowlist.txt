@@ -209,6 +209,19 @@ fn:lv_obj_set_scroll_dir
 fn:lv_obj_get_scroll_dir
 fn:lv_obj_set_scrollbar_mode
 fn:lv_obj_get_scrollbar_mode
+# ── T21c-2「`SegmentedTabs` 的 Flex 行容器」（UI §5.1 #21 / 设计 §15.5.1）──
+#
+# 用点：`ui/pages/mod.rs::SegmentedTabs`（P6 的 5 段切换）。**为什么必须新增符号**：
+# UI §5.1 #21 明令容器为「Flex 行 + N× `lv_button` + `lv_group` 单选」，段间隙由
+# `pad_column` 表达（`lv_button` 命中区无外扩 ⇒ 净距 16 px 精确成立，R-44）；而薄层此前
+# **既无 Flex 封装、也无该符号**。三者都是 v9.5.0 的**真函数**（非 `static inline`：
+# `lv_obj_set_flex_flow` 在 `src/layouts/flex/lv_flex.c:109`、`lv_obj_set_style_pad_column`
+# 在 `src/core/lv_obj_style_gen.c:230`），故可被 bindgen 生成。
+# `LV_USE_FLEX` 在 `lv_conf.h` **未显式定义** ⇒ 由 `lv_conf_internal.h` 给默认值 **1**
+# （无 `LV_KCONFIG_PRESENT`）⇒ flex 布局已编进 C 产物（无需改 `lv_conf.h`）。
+fn:lv_obj_set_flex_flow
+fn:lv_obj_set_style_pad_column
+type:lv_flex_flow_t
 fn:lv_group_create
 fn:lv_group_delete
 fn:lv_group_add_obj

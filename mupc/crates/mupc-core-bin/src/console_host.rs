@@ -964,6 +964,10 @@ pub fn bms_alarm_page(
 /// - **字内位图**的点：16 项，只有设计点名的位 `defined = true`（未定义位 `defined = false`
 ///   ⇒ 屏显「未定义位 n」，**禁止**为凑满 16 位编造语义 F21.1 / EX-09）；
 /// - 其余整字点：16 项全 `defined = false`（本增量无位语义登记）。
+///
+/// **两态词（T21c-2-r1 / F3）**：需要双态词的位在 [`bit_state_words`] 里逐点登记
+/// （`hvac_di_8` = 系统运行：`运行` / `停止`，PRD **EX-06**）。文案**一律取自
+/// `display_proto::ui_text` 的既有常量**——本文件**不新造中文字面量**（D22 / 码表网的纪律）。
 fn bits_for(
     row: Option<&mupc_southd::point_table::PointReg>,
     is_bit: bool,
@@ -985,12 +989,14 @@ fn bits_for(
             },
             _ => CatalogBitClass::Reserved,
         };
+        let (active_text, inactive_text) = bit_state_words(role, block, at);
         out.push(BitMeta {
             index: (at.saturating_sub(1)) as u8,
             label: row.map(|r| r.label.to_string()).unwrap_or_default(),
             class: cls,
             defined: cls != CatalogBitClass::Reserved,
-            active_text: None,
+            active_text,
+            inactive_text,
             inverted: false, // R-41 裁定前**无生产者**
         });
         return out;
@@ -1017,6 +1023,7 @@ fn bits_for(
                 class: CatalogBitClass::Alarm,
                 defined: true,
                 active_text: None,
+                inactive_text: None,
                 inverted: false,
             }),
             None => out.push(BitMeta {
@@ -1025,11 +1032,38 @@ fn bits_for(
                 class: CatalogBitClass::Reserved,
                 defined: false,
                 active_text: None,
+                inactive_text: None,
                 inverted: false,
             }),
         }
     }
     out
+}
+
+/// **位两态词登记**（`(active_text, inactive_text)`；`(None, None)` = 走屏侧通用「活跃 / 非活跃」）。
+///
+/// 判据 = `(role, block, at)`（与 `point_table` 的登记同键）；**文案取自
+/// [`mupc_display_proto::peripherals_labels::ui_text`] 的既有常量**（**本文件零中文字面量**）。
+///
+/// - `hvac_di_8`（位 7「系统运行状态（0 停止 / 1 运行）」）⇒ `运行` / `停止`
+///   —— PRD **EX-06**「HVAC 系统运行状态以「停止 / 运行」文字 + 语义色 + 图标三重冗余表达」。
+///   该位是设计 §15.5.2 段「空调」的 `hvac_run` 行（分组键 `hvac_run`，见 `group_of`）。
+/// - 其余位（含 20 个告警位、辅助状态位）**不登记** ⇒ 屏侧显通用「活跃 / 非活跃」
+///   （**不臆造**：厂方登记只写了"0 停止 / 1 运行"的位不止一个，本增量**只**按 EX-06 点名的
+///   系统运行位登记；扩面须逐条经产品 / 厂方确认，不得由本侧顺手推广）。
+fn bit_state_words(
+    role: mupc_display_proto::PeriphRole,
+    block: &str,
+    at: u16,
+) -> (Option<String>, Option<String>) {
+    use mupc_display_proto::peripherals_labels::ui_text;
+    match (role, block, at) {
+        (mupc_display_proto::PeriphRole::Hvac, "hvac_di", 8) => (
+            Some(ui_text::ENUM_RUNNING.to_string()),
+            Some(ui_text::ENUM_STOPPED.to_string()),
+        ),
+        _ => (None, None),
+    }
 }
 
 /// **构建点表目录**（设计 §15.3.2「catalog 是白名单投影」）。
@@ -5370,6 +5404,66 @@ stations:
         let alarm = bms.blocks.iter().find(|b| b.name == "bms_alarm").expect("bms_alarm");
         assert_eq!(alarm.points.len(), 288);
         assert_eq!(alarm.points[0].decimals, 0);
+    }
+
+    /// **F3（T21c-2-r1）**：`hvac_di_8`（系统运行位）的两态词**由 catalog 承载**
+    /// （PRD **EX-06**：活跃「运行」/ 非活跃「停止」，逐字取自 `ui_text`）。
+    ///
+    /// **改什么会让本条变红**：① 删掉 `bit_state_words` 的 `hvac_di_8` 支（或只填 `active_text`）
+    /// ⇒ 第 5 行红（屏侧缺 `inactive_text` 只能回退通用「非活跃」）；② 两态词对调 ⇒ 红；
+    /// ③ 顺手把它推广到别的位 ⇒ 末尾的"不过度登记"断言红。
+    #[test]
+    fn catalog_hvac_run_bit_carries_the_two_state_words() {
+        use mupc_display_proto::peripherals_labels::ui_text;
+        let core: crate::core_config::CoreConfig = serde_yaml::from_str(include_str!(
+            "../../../deploy/config/mupc_core_config.production.yaml"
+        ))
+        .expect("生产配置可解析");
+        let cfg = core.south_stations;
+        let plan = crate::display_host::peripheral_plan(&cfg);
+        let cat = build_peripheral_catalog(&cfg, &plan, 0);
+
+        let hvac = cat.stations.iter().find(|s| s.id == "hvac").expect("hvac 站");
+        let di = hvac.blocks.iter().find(|b| b.name == "hvac_di").expect("hvac_di 块");
+        let p8 = di.points.iter().find(|p| p.at == 8).expect("hvac_di_8 在白名单内");
+        assert_eq!(p8.bits.len(), 1, "离散位块的点恰 1 项位语义");
+        let b = &p8.bits[0];
+        assert_eq!(b.index, 7, "hvac_di_8 ↔ 位 7（at − 1）");
+        assert!(b.defined, "系统运行位是已定义位（`point_table` 登记为 State）");
+        assert_eq!(
+            b.active_text.as_deref(),
+            Some(ui_text::ENUM_RUNNING),
+            "活跃侧 = 「运行」（EX-06）"
+        );
+        assert_eq!(
+            b.inactive_text.as_deref(),
+            Some(ui_text::ENUM_STOPPED),
+            "非活跃侧 = 「停止」（EX-06；缺此字段 ⇒ 屏侧只能显通用「非活跃」）"
+        );
+        // **不过度登记**：本增量**只**给 EX-06 点名的这一位填两态词，其余位两态词俱 `None`
+        // （屏侧走通用「活跃 / 非活跃」，**不臆造**）。
+        let mut others = 0usize;
+        for st in &cat.stations {
+            for blk in &st.blocks {
+                for p in &blk.points {
+                    if st.id == "hvac" && blk.name == "hvac_di" && p.at == 8 {
+                        continue;
+                    }
+                    for bit in &p.bits {
+                        assert!(
+                            bit.active_text.is_none() && bit.inactive_text.is_none(),
+                            "两态词只登记 EX-06 点名的 `hvac_di_8`，实测 {}/{} at={} bit={} 也带了词",
+                            st.id,
+                            blk.name,
+                            p.at,
+                            bit.index
+                        );
+                        others += 1;
+                    }
+                }
+            }
+        }
+        assert!(others > 0, "夹具应覆盖到其余位（实测 {others} 项）");
     }
 
     /// **R-3（产品裁定 2026-09-25）**：catalog 的**站集合 = 5 个 role 全集**
