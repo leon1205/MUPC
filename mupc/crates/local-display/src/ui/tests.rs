@@ -5384,6 +5384,28 @@ pub(crate) fn pages_chain() {
         // ── ① 装配契约（**契约 1′**：页根容器 + 固定操作条；线框 `Y624`）───────────
         let p4 = p4_interlock::P4InterlockPage::new(&host).expect("P4InterlockPage::new");
         disp.refr_now_for_test();
+        // ── ①′ T21c-3-r1：提示条**构造完即默认为隐藏**（**必须**在构造之后、任何 drill 交互
+        //    之前求值）───────────────────────────────────────────────────────────────
+        //
+        // **为什么这一条必须放在这里**（评审 **W-2′**）：`Core::sync_stale_visibility` 只在
+        // `set_catalog_stale` / `set_drill_open` 时被调，而 `p4.show_detail()`（本段稍后）会经
+        // `set_drill_open(true)` 把它调一次 —— `stale == false` ⇒ `set_hidden(true)`。于是若把
+        // "默认不显"的断言放在本段**末尾**（drill 交互之后），它会被那次收起**提前满足**：
+        // 实测（评审探针 ⑦ / ⑬）摘掉 `P4InterlockPage::new` 里构造期那行
+        // `stale_banner.obj().set_hidden(true)` ⇒ 全套 395 个用例仍绿，而构造完实测
+        // `catalog_stale_visible() == true`（生产会**常亮琥珀条**）。零判别力的断言必须修。
+        // （P6 侧是**反证**：它的显隐只由 `P6SystemPage::set_catalog_stale` 驱动、没有 drill
+        // 交互会顺手收起它 ⇒ 同款断言**有牙** —— 评审探针 11 摘掉 `p6_system.rs:2218`
+        // 构造期那行即红。）
+        //
+        // **改什么会让本条变红**：删掉 `p4_interlock.rs` 构造期 `stale_banner.obj().set_hidden(true)`
+        // （或把 `WarnBanner::new` 之后的隐藏改成显示）⇒ 本条红。
+        assert!(
+            !p4.catalog_stale_visible(),
+            "**构造完**必须默认不显「名称表可能过期」提示条（常驻占位会让正常态也少一截视口）\
+             —— 本断言在**任何 drill 交互之前**求值：挪到段尾会被 `show_detail()` 的\
+             `sync_stale_visibility()` 提前满足、退化成零判别力（评审 W-2′）"
+        );
         assert_eq!(
             p4.obj().size(),
             (Dimens::CONTENT_W, Dimens::CONTENT_H),
@@ -6947,15 +6969,17 @@ pub(crate) fn pages_chain() {
 
             // ── T21c-3-r1：顶部「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句）──
             //
-            // 判据（全部取**实测 `coords()`**）：① 默认**不显**且滚动视口 = 既有版面；
+            // 判据（全部取**实测 `coords()`**）：① 默认态 = 既有版面（"默认**不显**提示条"那条
+            // 断言已**上移到构造期** —— 见本段开头 ①′与评审 **W-2′**：放在这里会被早先的
+            // `show_detail()` 提前满足、零判别力）；
             // ② `set_catalog_stale(true)` ⇒ 提示条可见 + 文案 = `ui_text::CATALOG_STALE`、
             //    落在滚动区**顶部**（底缘不动 ⇒ 与操作条的 24 px 缝不变）、滚动视口等量变矮；
             // ③ 「重试」= `TOUCH_MIN`(48)×48、与提示条净距 `GAP_MIN`(16)、**点击投出意图**；
             // ④ `set_catalog_stale(false)` ⇒ 逐像素复原（"无 catalog 时的既有布局"不破）。
             //
             // **改什么会让本条变红**：去掉 `Core::set_catalog_stale` 里的 `set_hidden` / 让位两行
-            // ⇒ ①②④ 红；把按钮尺寸改成 <48 或挪掉 `GAP_MIN` ⇒ ③ 红；删掉按钮的 `on_clicked`
-            // 接线（`fire_catalog_retry`）⇒ ③ 的意图计数恒 0 ⇒ 红。
+            // ⇒ ②④ 红；把按钮尺寸改成 <48 或挪掉 `GAP_MIN` ⇒ ③ 红；删掉按钮的 `on_clicked`
+            // 接线（`fire_catalog_retry`）⇒ ③ 的意图计数恒 0 ⇒ 红。（① 的靶子在 ①′。）
             {
                 let hits = Rc::new(Cell::new(0u32));
                 {
@@ -6965,10 +6989,6 @@ pub(crate) fn pages_chain() {
                 // ① 默认态 = 既有版面（滚动视口 y / 高与 T-25 判的那两个几何同源）
                 let sc_base = p4.scroll_obj().coords();
                 let band_c3 = p4.band_obj().coords();
-                assert!(
-                    !p4.catalog_stale_visible(),
-                    "默认**不显**提示条（常驻占位会让正常态也少一截视口）"
-                );
                 assert_eq!(
                     sc_base.y1 - (band_c3.y2 + 1),
                     Dimens::GAP_GROUP,

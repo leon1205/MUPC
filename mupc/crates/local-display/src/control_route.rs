@@ -330,15 +330,50 @@ fn local_unavailable<T>(request_id: &str, message: &str, at_ms: u64) -> ControlR
 /// # 为什么 catalog **不在**此列（刻意的）
 ///
 /// §15.3.1 给的降级是「**保留旧 catalog** + 中文名位显「名称未获取」而**值照常显示**」——
-/// 这是一个**什么都不做**即可达成的态（页面默认就没有 catalog）。若在这里返回一个
+/// 这是一个**不抹掉已有名字**即可达成的态（页面默认就没有 catalog）。若在这里返回一个
 /// "catalog 不可用"决策去调 `clear_catalog()`，反而会把**已经取到的名字抹掉**，
-/// 与「保留旧 catalog」相反。故 catalog 失败 ⇒ `None` + 一行 stderr（调用方记）。
+/// 与「保留旧 catalog」相反。故 catalog 失败 ⇒ **无决策**。
+///
+/// ⚠️ 「无决策」**不等于**「无页面失败面」（T21c-3-r1）：catalog 的下钻失败面是 §15.3.1 的
+/// 顶部「名称表可能过期」+「重试」，由 `App::on_catalog_read_failed` 直接落到两页
+/// （`set_catalog_stale`），**不经过** `RouteDecision`。判"要不要**交出**一条决策"与判
+/// "页面**有没有**自己的失败面"是**两问** ⇒ 后者见 [`page_owns_failure_surface`]。
 pub fn page_failure_decision(endpoint: ConsoleEndpoint) -> Option<RouteDecision> {
     match endpoint {
         ConsoleEndpoint::PeripheralsFireDetectors => Some(RouteDecision::FireDetectorUnavailable),
         ConsoleEndpoint::PeripheralsBmsAlarms => Some(RouteDecision::BmsAlarmUnavailable),
         _ => None,
     }
+}
+
+/// 该端点失败时，**页面是否已有就地失败面**（⇒ app 层**不得**再压一条通用「操作失败」Toast）。
+///
+/// # 为什么要与 [`page_failure_decision`] 分开（两问，不是一问）
+///
+/// - **问一**（[`page_failure_decision`]）：要不要给接线层**交一条 `RouteDecision`**？
+///   只有两个明细端点有（页面暴露的是**无参**的 `set_*_page_failed()`）；
+/// - **问二**（本函数）：页面**有没有**自己的失败面？—— catalog **有**（§15.3.1 的
+///   顶部提示条 + 「重试」，由 `App::on_catalog_read_failed` 上屏）但**没有**决策。
+///
+/// 若把两问合成一问，二者之一必然失真：catalog 要么被塞一条会 `clear_catalog` 的决策
+/// （违"保留旧 catalog"），要么被当成"没有页面失败面"而**同时**压一条通用 Toast
+/// （违 UI §7.2「同一时刻仅 1 条」，且通用「操作失败」对一个**取数**动作是**误导** —— 它不是
+/// 用户发起的操作；口径见 `App::absorb_console` 与 `state::ControlState::record_read_failure`）。
+///
+/// # 为什么**不得**放宽成"所有读端点"
+///
+/// 其余读端点（`Config` / `Logs` / `LogsTargets` / `Audit` / `AuditOps`）**没有**任何页面
+/// 失败面 ⇒ app 层兜底 Toast 是它们**唯一**的上屏通道（去掉 = 静默失败，违 §2.6「降级可见」）。
+/// 判据是**白名单**（恰好三条），不是"读端点"这一类。
+///
+/// **改什么会让本条变红**：把实现改成 `!endpoint.is_write()`（一刀切）⇒
+/// `failure_surface_roster_...` 用例红（其余读端点被误免）⇒ 那正是本仓最忌讳的
+/// "把有出路与没出路混为一谈"。
+pub fn page_owns_failure_surface(endpoint: ConsoleEndpoint) -> bool {
+    // 白名单**恰好**三条（两个明细端点 + catalog）；`page_failure_decision` 的 `Some` 集
+    // 合是本名单的**子集** —— 该包含关系由用例逐条钉住（防两处漂移）。
+    page_failure_decision(endpoint).is_some()
+        || matches!(endpoint, ConsoleEndpoint::PeripheralsCatalog)
 }
 
 /// 该页是否会用到外设元数据（catalog）——**首次进入即取**的判据（设计 §15.3.1）。
@@ -930,8 +965,13 @@ mod tests {
         }
     }
 
-    /// 失败面：**只有**两条"明细"端点有页面就地失败面（§15.6.2 ⑥）；
-    /// catalog 与其余读端点**不得**被塞失败决策（catalog 失败的正确动作 = 什么都不做）。
+    /// 失败**决策**：**只有**两条"明细"端点有（§15.6.2 ⑥，页面暴露的是无参
+    /// `set_*_page_failed()`）；catalog 与其余端点**不得**被塞决策。
+    ///
+    /// ⚠️ 本用例只管"**要不要交一条 `RouteDecision`**"这一问（T21c-3-r1 起它与"页面有没有
+    /// 失败面"是**两问**：catalog 有面而**无**决策，见 [`page_owns_failure_surface`]）——
+    /// 故此处**不**断言"catalog 失败 = 什么都不做"（那句在 T21c-3-r1 后不再准确：catalog
+    /// 失败要置顶部提示条 + 回滚预置，只是不经 `RouteDecision`）。
     ///
     /// **改什么会让本条变红**：给 catalog 也返回一个决策（例如
     /// `RouteDecision::FireDetectorUnavailable`）⇒ 第 3 条红；把 `page_failure_decision`
@@ -957,8 +997,8 @@ mod tests {
             }
             assert!(
                 page_failure_decision(ep).is_none(),
-                "{ep:?} 没有页面就地失败面 ⇒ 不得产出失败决策（catalog 失败的正确动作 = **什么都不做**，\
-                 否则会把已取到的名字抹掉，与 §15.3.1「保留旧 catalog」相反）"
+                "{ep:?} 没有失败**决策**（catalog 亦无：给它会调 `clear_catalog` ⇒ 把已取到的\
+                 名字抹掉，与 §15.3.1「保留旧 catalog」相反；它的页面面是**提示条**，不经决策）"
             );
         }
     }
@@ -972,6 +1012,64 @@ mod tests {
                 matches!(p, NavPage::Interlock | NavPage::System),
                 "{p:?} 的「是否外设页」判据漂移（首次进入即取 catalog 的落点，§15.3.1）"
             );
+        }
+    }
+
+    /// **W-3（T21c-3-r1）**：「页面已有就地失败面」的**白名单恰好三条** —— 两个明细端点 +
+    /// catalog；**其余读端点必须留在名单外**（它们唯一的降级通道就是 app 层兜底 Toast）。
+    ///
+    /// # 这条钉的正是"不得一刀切"
+    ///
+    /// `App::console_failure_decision` 用本函数决定"这一条失败要不要压通用「操作失败」Toast"。
+    /// 若把实现放宽成 `!endpoint.is_write()`（"读端点都不压"），catalog 之外的 5 个读端点
+    /// 会在失败时**屏上什么都不发生**（它们没有页面失败面）—— 违 §2.6「降级可见」，且是
+    /// 本仓反复中招的"把有出路和没出路混为一谈"。
+    ///
+    /// **改什么会让本条变红**：实现里 `matches!(endpoint, PeripheralsCatalog)` 改成
+    /// `!endpoint.is_write()`（或 `true`）⇒ 第 2 条红；漏掉 catalog ⇒ 第 1 条红；
+    /// 给某读端点新增页面失败面却忘了登记 ⇒ 第 2 条红（同一清单两处漂移的防线）。
+    #[test]
+    fn failure_surface_roster_covers_catalog_without_widening_to_every_read_endpoint() {
+        // ① 白名单**恰好**三条（枚举序取，便于对拍）
+        let roster: Vec<ConsoleEndpoint> = ConsoleEndpoint::ALL
+            .into_iter()
+            .filter(|e| page_owns_failure_surface(*e))
+            .collect();
+        assert_eq!(
+            roster,
+            vec![
+                ConsoleEndpoint::PeripheralsCatalog,
+                ConsoleEndpoint::PeripheralsFireDetectors,
+                ConsoleEndpoint::PeripheralsBmsAlarms,
+            ],
+            "「有页面就地失败面」的读端点必须**恰好**是 catalog + 两个明细端点"
+        );
+        // ② 其余读端点**一律不入列**（它们没有页面面 ⇒ app 层兜底 Toast 是唯一通道）
+        for ep in ConsoleEndpoint::ALL
+            .into_iter()
+            .filter(|e| !e.is_write() && !page_owns_failure_surface(*e))
+        {
+            assert!(
+                matches!(
+                    ep,
+                    ConsoleEndpoint::Config
+                        | ConsoleEndpoint::Logs
+                        | ConsoleEndpoint::LogsTargets
+                        | ConsoleEndpoint::Audit
+                        | ConsoleEndpoint::AuditOps
+                ),
+                "{ep:?} 不在白名单却也没有页面失败面 —— 白名单与端点清单漂移（新端点必须显式裁定）"
+            );
+        }
+        // ③ 两处判据的**包含关系**：有 `RouteDecision` ⇒ 必在"有页面失败面"名单里
+        //    （否则会出现"交了决策却仍压通用 Toast"这种自相矛盾的接线）。
+        for ep in ConsoleEndpoint::ALL {
+            if page_failure_decision(ep).is_some() {
+                assert!(
+                    page_owns_failure_surface(ep),
+                    "{ep:?} 有失败决策却不在「有页面失败面」名单里 ⇒ 接线会同时上屏两条（UI §7.2）"
+                );
+            }
         }
     }
 
