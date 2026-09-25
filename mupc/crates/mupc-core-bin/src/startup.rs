@@ -450,6 +450,10 @@ fn grid_sample_from_package(pkg: &mupc_data_processing::DataPackage) -> mupc_sto
 ///
 /// 落库失败语义沿用既有路径：`buffer_telemetry` 返回 `Err` 只 `warn`（与南向遥测、事件落库
 /// 同范式：丢点可观测、不 panic、不停采集）。
+/// ⚠️ **FLS-04 订正（2026-09-26）**：`buffer_telemetry` 自本批起**不再可能返回 `Err`**
+/// （容量触发只投一次非阻塞唤醒，不再在调用栈内提交）⇒ 本任务那几个 `if let Err(..)` 分支
+/// 退化为永不触发（保留不删：签名兼容）。真正的落库失败仍由 `flush_batch` 响亮化 + 计数，
+/// 并由 `storage_health_timer` 转成 `major` 告警。
 /// 聚合行的**生产者 → 入队者**通道（T15/T16 遗留③ 的修法，2026-09-24）。
 ///
 /// # 为什么是通道而不是 `tokio::spawn`（竞态消除的**结构性**理由）
@@ -1458,6 +1462,23 @@ pub async fn initialize_all(
     // 容量取 `ALERT_FEED_CAPACITY`(=64)，不再沿用迁出前那个 `new(256)` 的 256——
     // 设计 §4.7 对最小形态**写死 64**。
     let alert_feed = Arc::new(crate::alert_feed::AlertFeed::new());
+
+    // ── 03 设计 §9.3 缺口 1/2（FLS-03②）：遥测缓冲丢弃的**健康巡检** ──
+    // 依赖：`write_buffer`(步骤 3) + `alert_feed`(上一步) 均已就绪 ⇒ 只能在**这里**起（不能再早）。
+    // 职责：每 1 s 读 `dropped_points()/dropped_batches()` 的**增量**，增量 > 0 才投一条 `major`
+    // 告警（含增量条数与累计值）⇒ 无增量即静默（连续失败时段不产告警风暴，缺口 2 由同一判据闭合）。
+    // 分工理由（为什么不是 storage 自己发）：`storage` 无告警通道且**不应**依赖 core-bin
+    // （依赖方向），故落点是装配层的"读增量 → 投既有 `AlertFeed`"。
+    // 退出契约：与 `flush_timer`/`grid_agg_timer` **同名单**（`producers` 协作退出）——
+    // 收到停机信号即退出，收工时不会再往环里投告警。**不得**改放 abort 名单。
+    producers.0.push((
+        "storage_health_timer",
+        crate::storage_health::spawn_storage_health_timer(
+            write_buffer.clone(),
+            alert_feed.clone(),
+            stop_rx.clone(),
+        ),
+    ));
 
     // ── S2 §12.4 / Task7：安全联锁控制器（io.enabled 时装配）──
     // 依赖：intercore(步骤 4) + storage(步骤 3) + alert_feed 均已就绪。GPIO(sysfs) 打开失败由
