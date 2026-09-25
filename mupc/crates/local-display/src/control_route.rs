@@ -356,8 +356,8 @@ pub fn periph_metadata_page(p: NavPage) -> bool {
 ///
 /// # 「一次性」语义怎么成立（`held_rev` 的契约）
 ///
-/// 本函数**只**看"本拍的两个 rev 是否相等"。接线层（`App::tick_periph`）在**发起请求时**
-/// 就把 `held_rev` 预置成当拍的 `frame_rev`（回执到达后再用响应里的 `cat.rev` 校正）⇒
+/// 本函数**只**看"本拍的两个 rev 是否相等"。接线层（`App::tick_periph_catalog`）在**发起请求
+/// 时**就把 `held_rev` 预置成当拍的 `frame_rev`（回执到达后再用响应里的 `cat.rev` 校正）⇒
 /// 同一 rev **不会**在 1 Hz 主拍上被反复取（这正是 §15.3.1 的「一次性」）。
 /// 相反，若接线层只在**回执到达后**才更新 `held_rev`，那么在飞期间的每一拍都会命中
 /// "rev 不等" ⇒ 反复发起（被 `is_busy()` 挡住 ⇒ 表现为"永远在取 catalog"）。
@@ -366,18 +366,41 @@ pub fn periph_metadata_page(p: NavPage) -> bool {
 ///
 /// 帧从第 1 拍就有，而用户可能从头到尾不进 P4 / P6 ⇒ **不得**在开机时就取 catalog
 /// （那是"每次开机一次无用请求"，与"首次进入才取"的措辞相反）。
+///
+/// # `failed_rev`（**W-1 收口**）：失败过的那个 rev **不自动重发**
+///
+/// 回执**失败**时接线层会把预置的 `held_rev` **回滚**成"失败前的值"（W-1：`held_rev` 的语义
+/// 是"本地真实持有"，不该被在飞预置永久污染）。回滚的**代价**是：若回滚后的 `held_rev` 与
+/// 当拍 `frame_rev` 不同，第 2 支判据会**每拍都成立** ⇒ 被 `is_busy()` 挡成"永远在取 catalog"
+/// （**这正是本任务最容易踩的一脚**）。故接线层把"最近一次失败于哪个 rev"作为 `failed_rev`
+/// 传进来：
+///
+/// - `failed_rev == frame_rev` ⇒ **判否**（同一 rev 不自动重发；恢复路径 = §15.3.1 第 3 句给的
+///   「**重试**」按钮 —— 它把 `failed_rev` 与"首次进入资格"一起清掉即可强制重取一次）；
+/// - `failed_rev != frame_rev` ⇒ 照旧走第 2 支 ⇒ **帧内 rev 一变就自动重取**
+///   （"失败后不可自愈"的缺陷由此收口；评审 W-1 的原文要求）。
+///
+/// 比对用的"本地 rev"取 `held_rev.or(failed_rev)`：**"尝试过的 rev"也算两侧都知道**
+/// —— 否则"从未取到（`held_rev = None`）+ 重试失败"之后，帧内 rev 再怎么变都会落进
+/// `(Some, None) => false` 而**永不自动重取**。回滚本身**不会**造成重触发：`(Some(r), None)`
+/// 判否，抑制只由 `failed_rev` 承担（**两件事分开**，各有一条用例）。
 pub fn catalog_due(
     on_periph_page: bool,
     entered_before: bool,
     frame_rev: Option<u32>,
     held_rev: Option<u32>,
+    failed_rev: Option<u32>,
 ) -> bool {
     if on_periph_page && !entered_before {
         return true;
     }
-    // 只在**两侧都知道**时比：`held_rev = None` = 还没拿到过任何 catalog（页面自会显
+    // W-1：同一 rev 失败过 ⇒ 不自动重发（否则每次失败都会演成"每拍反复发起"）。
+    if failed_rev.is_some() && failed_rev == frame_rev {
+        return false;
+    }
+    // 只在**两侧都知道**时比：两者皆 `None` = 还没拿到过、也没试过任何 rev（页面自会显
     // 「名称未获取」），此时**不**把它当成"rev 变化"（否则每拍都会命中）。
-    match (frame_rev, held_rev) {
+    match (frame_rev, held_rev.or(failed_rev)) {
         (Some(r), Some(h)) => r != h,
         _ => false,
     }
@@ -555,6 +578,14 @@ pub enum ControlIntent {
     /// 读：P6 电池段「查看全部 288 位」下钻的翻页（载荷 = 目标页码，1 起；§15.3.2
     /// `GET /peripherals/bms_alarms`）。
     BmsAlarmPage(u32),
+    /// 读：**强制重取 catalog**（载荷 `()`；设计 §15.3.1 第 3 句的「重试」按钮；T21c-3-r1）。
+    ///
+    /// **为什么单开一条**：catalog 的读取**不走** `pending_reads` 查询队列 —— 它的时机判据是
+    /// [`catalog_due`]（"首次进入 / rev 变化 / 不反复取"），发起点在 `App::tick_periph_catalog`。
+    /// 故本意图的**处置**不是"发一条请求"，而是"把两个已消费的判据复位"（首次进入资格 +
+    /// "失败过的 rev"抑制）—— 让**下一拍**的 `catalog_due` 重新成立，发起仍在 tick 路径上
+    /// （与"页面回调只投意图、不在回调里发请求"同口径）。
+    CatalogRetry,
 }
 
 impl ControlIntent {
@@ -955,11 +986,11 @@ mod tests {
         // ① **首次进入** P4 或 P6：即使**还没有帧**（`frame_rev = None`）也要取一次 ——
         //    否则"进入页面时名称一片「名称未获取」、要等下一帧才补"（§15.3.1 的口径是进入即取）。
         assert!(
-            catalog_due(true, false, None, None),
+            catalog_due(true, false, None, None, None),
             "首次进入 P4/P6 ⇒ 必须取一次"
         );
         assert!(
-            catalog_due(true, false, Some(7), Some(7)),
+            catalog_due(true, false, Some(7), Some(7), None),
             "首次进入优先于 rev 判据"
         );
         // ② **不在** P4/P6（P1/P2/P3/P5）⇒ 从不取（哪怕从未取过）
@@ -971,27 +1002,74 @@ mod tests {
         ] {
             assert!(
                 !periph_metadata_page(p)
-                    && !catalog_due(periph_metadata_page(p), false, Some(7), None),
+                    && !catalog_due(periph_metadata_page(p), false, Some(7), None, None),
                 "{p:?} 不是外设页 ⇒ 不得在开机时就取 catalog"
             );
         }
         // ③ `rev` 变化 ⇒ 重取；`rev` 相同 ⇒ **不取**（这就是"一次性"的判据本体）
         assert!(
-            catalog_due(true, true, Some(8), Some(7)),
+            catalog_due(true, true, Some(8), Some(7), None),
             "帧内 rev 变了 ⇒ 重取"
         );
         assert!(
-            !catalog_due(true, true, Some(7), Some(7)),
+            !catalog_due(true, true, Some(7), Some(7), None),
             "rev 未变 ⇒ 不得重取（1 Hz 主拍上不许反复取）"
         );
         // ④ 还没拿到过 catalog（`held = None`）⇒ **不**把"没有"当成"变了"（否则每拍都命中）
         assert!(
-            !catalog_due(true, true, Some(7), None),
+            !catalog_due(true, true, Some(7), None, None),
             "从未取到时不按 rev 变化反复发起"
         );
         // ⑤ 还没有帧（`frame = None`）且已进入过 ⇒ 不取（等帧到了再比）
-        assert!(!catalog_due(true, true, None, Some(7)));
-        assert!(!catalog_due(true, true, None, None));
+        assert!(!catalog_due(true, true, None, Some(7), None));
+        assert!(!catalog_due(true, true, None, None, None));
+    }
+
+    /// **W-1 + 「重试」的时机语义**（T21c-3-r1；设计 §15.3.1 第 2 / 3 句）：
+    /// ① 失败过的那个 rev **不自动重发**（否则"回滚 ⇒ rev 不等"会每拍命中）；
+    /// ② 帧内 rev **一变**即恢复自动重取（含"从未取到"这一态 ⇒ 自动路径在该态也有效）；
+    /// ③ 「重试」= 复位资格 + 清抑制 ⇒ 立刻再 due **一次**，随后**不再**每拍 due。
+    ///
+    /// **改什么会让本条变红**：
+    /// ① 删掉 `failed_rev` 那一支 ⇒ 第 1 / 2 条红；
+    /// ② 把比对用的 `held_rev.or(failed_rev)` 改回 `held_rev` ⇒ 第 4 条红（"从未取到 + 重试失败"
+    ///    之后 rev 变化**永不**自动重取 —— 这正是回滚接 W-1 前的那半个坑）；
+    /// ③ 删掉首进入那一支 ⇒ 第 5 条红。
+    #[test]
+    fn catalog_failure_suppresses_the_same_rev_and_retry_forces_exactly_one_more_fetch() {
+        // ① `held` 已被 W-1 回滚成**旧值 5**（= 失败前的值），失败 rev = 7、帧内 rev 也是 7
+        //    ⇒ **不取**（抑制生效；无抑制时第 2 支会真 ⇒ 每拍命中）。
+        assert!(
+            !catalog_due(true, true, Some(7), Some(5), Some(7)),
+            "同一 rev 失败过 ⇒ 不得自动重发（否则回滚把'一次性'变成'每拍一次'）"
+        );
+        // ② **从未取到**（回滚成 `None`）+ 重试失败 ⇒ 同一 rev 同样不重发。
+        assert!(
+            !catalog_due(true, true, Some(7), None, Some(7)),
+            "从未取到时同 rev 也不得自动重发"
+        );
+        // ③ 帧内 rev **变了** ⇒ 自动重取恢复（两种 held 都成立）。
+        assert!(
+            catalog_due(true, true, Some(8), Some(5), Some(7)),
+            "帧内 rev 变化 ⇒ 自动路径仍有效（W-1 的诉求）"
+        );
+        assert!(
+            catalog_due(true, true, Some(8), None, Some(7)),
+            "从未取到 + 失败过 ⇒ 帧内 rev 一变仍要重取（比对取 `held.or(failed)`）"
+        );
+        // ④ 「重试」= 复位首进入资格 + 清失败抑制 ⇒ 立刻再 due。
+        assert!(
+            catalog_due(true, false, Some(7), None, None),
+            "「重试」必须能强制再取一次（否则提示条上的按钮点了没反应）"
+        );
+        // ⑤ 但**发起之后**（资格已消费 + `catalog_rev` 已预置成当拍 rev）⇒ 不再 due
+        //    —— 「重试」**不会**变成每拍重复发起。
+        assert!(
+            !catalog_due(true, true, Some(7), Some(7), None),
+            "重试发起后不得每拍反复发起（预置 + 资格消费把两支同时封住）"
+        );
+        // ⑥ 帧内没有目录信息（`frame = None`）⇒ 恒否（等帧到了再比）。
+        assert!(!catalog_due(true, true, None, Some(5), Some(7)));
     }
 
     // ── P3 通道态 ─────────────────────────────────────────────────────────

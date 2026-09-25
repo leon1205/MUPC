@@ -60,7 +60,7 @@
 //! | IL29③ | **总览带 / 视口栅格偏差**：单卡外缘高 **162**（UI §6.4.1 写 164，−2）；滚动视口高 **342**（UI 写 340，+2）；三卡行与 §A 各卡的页内 y 由前两项累积（如 §A 起 y 随视口底 +24 顺移） | **root cause = `theme` 缺 2 px 档**（与 `pages/mod.rs` **D3**、`p2_config.rs` **PD5**、本表 **IL3** 同族）⇒ 本页坚持「**不写裸规格值**」（`ui/tests.rs` 两张静态网明令禁止）。**关键不变量成立**：视口 **342 ≥ 340**，且 §B 既有全量 = `触发源卡 202 + GAP_GROUP 16 + 灯卡 106 = 324 ≤ 342` ⇒ **既有联锁区首屏全可见**（UI §6.4.1 的核心承诺不破） | 与 `theme` 缺口上收批同批（D3 / PD5 / IL3 / IL20 / IL29⑤）。**回写**：UI §6.4.1（T21c-1-r1） |
 //! | IL29④ | **火警等级卡图标取 `Dimens::ICON_SM`(28)**（UI §6.4.1 写 **72 px**） | **实际依据 = 主值槽余量 + 档位缺口**：取 28 档 ⇒ 主值槽 `FIRE_VALUE_W` = 454 − (28 + 16) = **410**（4 字枚举 × 64 = 256 ⇒ 余量 154）；取 72 档 ⇒ 366（余量 110）。且 `theme::icon_slot(72)` **本就降档渲染为 64**（该缺口与 IL3 / IL20 同族）。⚠️ **订正（T21c-1-r1 实测）**：本常量原注「64 / 72 档会**挤掉** 4 字枚举文案」**不成立** —— 按 64 px 档逐字复算 256 ≤ 366 仍有余量；该注已改为上述真实依据（余量 + 档位缺口），**不保留不实因果** | 与 `theme` 缺口（`icon_slot(72) ⇒ 64`）上收批同批（承评审 N-3）；届时统一裁定 64 / 72 档取值 |
 //! | IL29⑤ | **§A 四组行高一律取 `Dimens::ROW_LOG_H`(44)**（UI §6.4.1 写 A1 / A3 行高 **36**、A2 / A4 行 **40**） | `theme` **只有 44 一档「列表行」**（与 IL3 的「缺 2 px 档」同族：不为凑像素写裸值）。**连带后果（如实）**：A1 卡高 = 卡头 44 + **17 行 × 44** + 上下内边距 34 = **826**（UI 写 616；其中 **17 = 1 行段顶通告 + 16 位行**，见本文件 `A1_CARD_H`）；A 组总高随之变大 ⇒ 滚动更长 —— 属「滚动区已超首屏」的正常后果，**不破坏任何不变量**（§A 本就不承诺首屏可见，见 ⑦） | 与 `theme` 缺口上收批同批（D3 / PD5 / IL3 / IL20 / IL29③）。**回写**：UI §6.4.1（T21c-1-r1） |
-//! | IL29⑥ | **下钻明细未做「窗口化」**：**20 行 × 9 格 = 180 个格对象一次性建齐**（`DRILL_ROW_POOL` = 服务端 `page_size` 缺省 20），与设计 §15.5.3「含数据行驱动的段一律**窗口化**（可视行 ×1.5）」不符。**另**：探测器状态列的**两个位名上提到表头**（行内格位放不下两个位名 —— 位名 120 + 「非活跃」72 = 192 > 164 半槽）<br>❌ **订正（T21c-2-r1，2026-09-25）：本行原先写的"原因"是**错误依据**。** 原文：「**窗口化在本层结构性不可实现**：薄层的 `EventCode` **未镜像 `LV_SCROLL`**（`pages/mod.rs` 的 R2）⇒ 收不到滚动事件」。**事实**：`EventCode::SCROLL` **自 B4b（提交 `297b51b`，2026-09-16）起即已镜像**（`lvgl/event.rs:91` + `lvgl/mod.rs` 的 B4b 条目），`Obj::scroll_y` / `scroll_to_y` 更早（B4a 同日，`9251940`），且 **P5 的 `AU6` 早已消费并附探针实测**（`p5_audit.rs:40` / `ui/tests.rs` 的 `pages_chain` ⑦″ 段）⇒ 写下本行之日（T21c-1-r1，2026-09-25）该通道**已存在 9 天**。错误来源 = `ui/pages/mod.rs` 的 **R2** 陈旧串（B4b 之后未同步；该串本批已订正）。⇒ **本行的"结构性不可实现"判断不成立** | **P4 下钻的"不窗口化"= 一处无依据的降级**（T21b2 的 R-3 回写明写"本行**不缩小**对 P6 各段的要求"）。**范式已存在**：`p6_system.rs` 的「固定行池 + `SCROLL` 重绑（`wire_scroll`）+ `adopt_special`」就是本页可复用的同一范式（P6 的 `SegmentList` / `BmsDrill` 均已按它实现） | **待单独立项**：P4 下钻按 P6 同一范式窗口化（届时删 `DRILL_ROW_POOL` 的整池建齐与真机余量风险，见 **D-6 / R-34**）。⚠️ **本行属 P4 的改动面，T21c-2-r1 只订正陈述 + 立项登记，不动实现**。**残余（如实）**：对象预算因此 742 → **1021**（T21c-1 的 P4 消防区 +239 ⇒ 981；T21c-2 的 P6 段「装置」+40 ⇒ **1021**；逐项账见 `ui/tests.rs` 的 `SHELL_OBJECT_BUDGET`）。**余量（2026-09-25 / W-g 订正）**：按 `lv_obj` ≈150–200 B × 1021 ⇒ ≈**150–200 KB** vs `LV_MEM_SIZE` **1 MB** ⇒ 占用 ≈15–20 %、**余量 ≈80–85 %**（原写"~0.8 %"与**同一算式**差约两个数量级，属单位 / 数量级笔误；稳态上界 1021 + 694 = **1715 件 ≈257–343 KB** ⇒ 余量 ≈67–75 %）。均为**账上推算、非实测** ⇒ 真机 `lv_mem_monitor` 复核（设计 §15.9 **R-34**）为验收项 |
+//! | IL29⑥ | **下钻明细未做「窗口化」**：**20 行 × 9 格 = 180 个格对象一次性建齐**（`DRILL_ROW_POOL` = 服务端 `page_size` 缺省 20），与设计 §15.5.3「含数据行驱动的段一律**窗口化**（可视行 ×1.5）」不符。**另**：探测器状态列的**两个位名上提到表头**（行内格位放不下两个位名 —— 位名 120 + 「非活跃」72 = 192 > 164 半槽）<br>❌ **订正（T21c-2-r1，2026-09-25）：本行原先写的"原因"是**错误依据**。** 原文：「**窗口化在本层结构性不可实现**：薄层的 `EventCode` **未镜像 `LV_SCROLL`**（`pages/mod.rs` 的 R2）⇒ 收不到滚动事件」。**事实**：`EventCode::SCROLL` **自 B4b（提交 `297b51b`，2026-09-16）起即已镜像**（`lvgl/event.rs:91` + `lvgl/mod.rs` 的 B4b 条目），`Obj::scroll_y` / `scroll_to_y` 更早（B4a 同日，`9251940`），且 **P5 的 `AU6` 早已消费并附探针实测**（`p5_audit.rs:40` / `ui/tests.rs` 的 `pages_chain` ⑦″ 段）⇒ 写下本行之日（T21c-1-r1，2026-09-25）该通道**已存在 9 天**。错误来源 = `ui/pages/mod.rs` 的 **R2** 陈旧串（B4b 之后未同步；该串本批已订正）。⇒ **本行的"结构性不可实现"判断不成立** | **P4 下钻的"不窗口化"= 一处无依据的降级**（T21b2 的 R-3 回写明写"本行**不缩小**对 P6 各段的要求"）。**范式已存在**：`p6_system.rs` 的「固定行池 + `SCROLL` 重绑（`wire_scroll`）+ `adopt_special`」就是本页可复用的同一范式（P6 的 `SegmentList` / `BmsDrill` 均已按它实现） | **待单独立项**：P4 下钻按 P6 同一范式窗口化（届时删 `DRILL_ROW_POOL` 的整池建齐与真机余量风险，见 **D-6 / R-34**）。⚠️ **本行属 P4 的改动面，T21c-2-r1 只订正陈述 + 立项登记，不动实现**。**残余（如实）**：对象预算因此 742 → **1031**（T21c-1 的 P4 消防区 +239 ⇒ 981；T21c-2 的 P6 段「装置」+40 ⇒ 1021；T21c-3-r1 的两页「名称表可能过期」提示条 +10 ⇒ **1031**；逐项账见 `ui/tests.rs` 的 `SHELL_OBJECT_BUDGET`）。**余量（2026-09-25 / W-g 订正）**：按 `lv_obj` ≈150–200 B × 1031 ⇒ ≈**150–200 KB** vs `LV_MEM_SIZE` **1 MB** ⇒ 占用 ≈15–20 %、**余量 ≈80–85 %**（原写"~0.8 %"与**同一算式**差约两个数量级，属单位 / 数量级笔误；稳态上界 1031 + 694 = **1725 件 ≈259–345 KB** ⇒ 余量 ≈67–75 %）。均为**账上推算、非实测** ⇒ 真机 `lv_mem_monitor` 复核（设计 §15.9 **R-34**）为验收项 |
 //! | IL29⑦ | **§A 消防区在源数 = 4（触发源卡变高）时首屏不全可见** —— §B 全量仍 `202+16+106 = 324 ≤ 342` 首屏全可见，但 §A 的第一组会被推到视口外 | **与设计一致、无需回写**：UI §6.4.1 原文「新增 §A 只在**向下滚动后**出现」，只承诺 **§B** 首屏全可见（该承诺成立）；本页**不调整**视口或行高去凑 §A 的首屏可见（那会破坏 §B 的承诺或引入裸值） | **无**（有意）。如实登记以免被读成"§A 也应首屏可见" |
 //!
 //! ## 纪律（逐条对应设计要求）
@@ -111,7 +111,7 @@ use crate::lvgl::LvglError;
 use crate::state::{self, PeriphView, StationState};
 use crate::ui::components::{
     ConfirmDetail, ConfirmDialog, ConfirmSpec, EmptyState, LedIndicator, StatusChip, Toast,
-    ToastTone, UnavailableKind, UnavailableState,
+    ToastTone, UnavailableKind, UnavailableState, WarnBanner,
 };
 use crate::ui::pages::p2_config;
 use crate::ui::pages::{
@@ -545,6 +545,20 @@ const REASON_BAND_Y: i32 = VIEWPORT_Y + VIEWPORT_H;
 const ACTION_BAR_Y: i32 = REASON_BAND_Y + REASON_BAND_H;
 /// 操作条内按钮 y（垂直居中）。
 const ACTION_BTN_Y: i32 = theme::center_offset(ACTION_BAR_H, Dimens::BTN_H_PRIMARY);
+
+// ── ⓪″ 顶部「名称表可能过期」提示条（U-73 / 设计 §15.3.1 第 2 句；T21c-3-r1）───────
+//
+// **只在 `stale == true` 时占用空间**（默认 0 ⇒ "无 catalog 时的既有布局"逐像素不变，
+// 见 [`P4InterlockPage::set_catalog_stale`]）：`stale` ⇒ 滚动视口整体下移并等量变矮
+// （底缘不动 ⇒ 与操作条的 24 px 不变），`stale == false` ⇒ 复原。
+/// 提示条占用的**总让位高**（`WarnBanner` 全高 56 + 同组缝 16）。
+const STALE_BAND_H: i32 = Dimens::BANNER_H + Dimens::GAP_GROUP;
+/// 提示条本体宽（全宽 − 「重试」按钮槽 − 缝）—— 按钮与提示条**同行**，用满既有 56 px 行高。
+const STALE_BANNER_W: i32 = Dimens::CONTENT_W - Dimens::TOUCH_MIN - Dimens::GAP_MIN;
+/// 「重试」按钮 x（提示条右侧；净距 = `GAP_MIN`(16)，UI §5.1 #12 的缝口径）。
+const STALE_RETRY_X: i32 = STALE_BANNER_W + Dimens::GAP_MIN;
+/// 「重试」按钮 y（在 56 px 提示条内垂直居中）。
+const STALE_RETRY_Y: i32 = theme::center_offset(Dimens::BANNER_H, Dimens::TOUCH_MIN);
 
 // ── §B 联锁区在滚动区内的 y（**既有内容原样**，整体下移到滚动区坐标）────────────
 /// 触发源卡 y（滚动区首卡，y=0）。
@@ -1793,6 +1807,9 @@ type IntentSlot = RefCell<Option<Box<dyn FnMut(InterlockOpPayload)>>>;
 /// 分页意图回调槽（U-73 下钻：请求第 N 页探测器明细；语义同 [`IntentSlot`]）。
 type PageReqSlot = RefCell<Option<Box<dyn FnMut(u32)>>>;
 
+/// 「重试 catalog」意图回调槽（T21c-3-r1：无载荷；语义同 [`IntentSlot`]）。
+type CatalogRetrySlot = RefCell<Option<Box<dyn FnMut()>>>;
+
 /// 下钻明细表的**一行**（[`DRILL_CELLS`] 格；状态列占两格 —— 报警总状态 / 故障总状态）。
 struct DrillRow {
     /// 格子（序号 / 地址 / 报警总状态 / 故障总状态 / 烟雾 / 温度 / CO / VOC / H2）。
@@ -2082,6 +2099,15 @@ struct Core {
     on_ack_m1: IntentSlot,
     /// 探测器明细分页意图回调（U-73；**本页不发请求**）。
     on_fire_page: PageReqSlot,
+    // ── ⓪″ 顶部「名称表可能过期」提示条（U-73 / 设计 §15.3.1 第 2 / 3 句；T21c-3-r1）──
+    /// 提示条本体（[`WarnBanner`]：全宽 − 按钮槽 × 56、**非交互**；UI §5.1 #12）。
+    stale_banner: WarnBanner,
+    /// 「重试」按钮（`TOUCH_MIN`(48)×`TOUCH_MIN`(48)；**只投意图**）。
+    stale_retry: Rc<TextButton>,
+    /// catalog 处于「重取失败 ⇒ 名称表可能过期」态（`false` = 提示条不占位）。
+    catalog_stale: Cell<bool>,
+    /// 「重试 catalog」意图回调（**本页不发请求、不碰页面数据**）。
+    on_catalog_retry: CatalogRetrySlot,
     /// 弹层打开**失败**的累计次数（**节流用**，见 **IL25**：不节流则每次点击都写 stderr）。
     open_fail_logs: Cell<u32>,
 }
@@ -2465,6 +2491,9 @@ impl Core {
         set_visible(&self.drill, on);
         // 进入下钻：§B/§A 仍在滚动区里（下层），把整个滚动区隐掉以免穿透触摸
         set_visible(&self.scroll, !on);
+        // T21c-3-r1：提示条也被覆盖层盖住（同一片区域）⇒ 随下钻态**显式**收起 / 复原
+        // （判据单一，见 [`Core::sync_stale_visibility`]）。
+        self.sync_stale_visibility();
         if on {
             self.refresh_drill();
         }
@@ -2481,6 +2510,43 @@ impl Core {
             }
         }
         self.refresh_drill();
+    }
+
+    /// **⓪″ 提示条显隐 + 滚动视口让位**（T21c-3-r1；判据**只在本方法一处**）。
+    ///
+    /// 幂等：重复置同值**不动任何几何 / 可见性**（回调路径可能每拍被调一次）。
+    /// 只做 `set_hidden` / `set_pos` / `set_size`（**不建不删对象**）⇒ 可安全放在 tick / 回执路径。
+    fn set_catalog_stale(&self, stale: bool) {
+        if self.catalog_stale.replace(stale) == stale {
+            return;
+        }
+        self.sync_stale_visibility();
+        // 让位：`stale` ⇒ 视口下移并等量变矮（**底缘不动**）；`false` ⇒ 回到既有版面。
+        let inset = if stale { STALE_BAND_H } else { 0 };
+        self.scroll.set_pos(0, VIEWPORT_Y + inset);
+        self.scroll.set_size(Dimens::CONTENT_W, VIEWPORT_H - inset);
+    }
+
+    /// 提示条 + 「重试」的**显隐单一判据**：`stale` **且未开下钻**。
+    ///
+    /// 为什么要排除下钻：提示条落在**滚动区顶部**，而下钻是**盖在同一片区域**的覆盖层
+    /// （§15.5.3：下钻占满滚动区）⇒ 若在覆盖层打开时仍显提示条，其右侧「重试」（x 944–992）
+    /// 会与下钻顶部条的「收起」（x 872–992）**重叠** —— 两块可点区域叠在一起，触碰命中区
+    /// 只能靠 z 序裁决。故下钻打开时**显式收起**（收起下钻按当前 `stale` 态复原）。
+    fn sync_stale_visibility(&self) {
+        let show = self.catalog_stale.get() && !self.drill_open.get();
+        self.stale_banner.obj().set_hidden(!show);
+        self.stale_retry.set_hidden(!show);
+    }
+
+    /// 触发「重试 catalog」意图（**只调回调、不碰任何页面数据** —— 回调纪律见
+    /// [`P4InterlockPage::set_on_catalog_retry`]）。
+    fn fire_catalog_retry(&self) {
+        if let Ok(mut slot) = self.on_catalog_retry.try_borrow_mut() {
+            if let Some(f) = slot.as_mut() {
+                f();
+            }
+        }
     }
 
     fn apply_section(&self, s: &InterlockSection) {
@@ -2882,6 +2948,22 @@ impl P4InterlockPage {
             &theme::transparent(),
             crate::lvgl::style::StyleSelector::main(),
         );
+
+        // ── ⓪″ 顶部「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句）──────
+        //
+        // 落点 = **滚动区顶部**（总览带之下、滚动视口之上）：`stale` 时滚动视口下移
+        // `STALE_BAND_H` 并等量变矮（**底缘不动** ⇒ 与操作条的 24 px 缝不变、无遮挡）；
+        // 默认 `stale == false` ⇒ 两者皆隐、滚动视口**逐像素回到既有版面**。
+        // 建造序在下钻覆盖层之前 ⇒ 下钻打开时本行被覆盖层盖住（下钻自带失败 / 重试通道）。
+        let stale_banner = WarnBanner::new(&root, STALE_BANNER_W, ui_text::CATALOG_STALE, &[])?;
+        stale_banner.obj().set_pos(0, VIEWPORT_Y);
+        stale_banner.obj().set_hidden(true);
+        let stale_retry = Rc::new(TextButton::create(&root, ui_text::RETRY)?);
+        stale_retry.set_size(Dimens::TOUCH_MIN, Dimens::TOUCH_MIN);
+        stale_retry.set_pos(STALE_RETRY_X, VIEWPORT_Y + STALE_RETRY_Y);
+        stale_retry.label().center();
+        theme::button(theme::ButtonKind::Secondary).apply(&stale_retry);
+        stale_retry.set_hidden(true);
 
         // ── ⓪ 【安全总览带】（**常驻不滚动**；UI §6.4.1）──
         let band = layout_box(&root, Dimens::CONTENT_W, BAND_H)?;
@@ -3462,6 +3544,10 @@ impl P4InterlockPage {
             on_release: RefCell::new(None),
             on_ack_m1: RefCell::new(None),
             on_fire_page: RefCell::new(None),
+            stale_banner,
+            stale_retry,
+            catalog_stale: Cell::new(false),
+            on_catalog_retry: RefCell::new(None),
             open_fail_logs: Cell::new(0),
         });
 
@@ -3523,6 +3609,15 @@ impl P4InterlockPage {
                 let Some(c) = w.upgrade() else { return };
                 let p = c.fire_page_req.get();
                 c.request_fire_page(p);
+            });
+        }
+        // T21c-3-r1：提示条右侧的「重试」——**只投意图**（闭包体内不出现任何页面数据写入；
+        // 真正的重取与页面写入在接线层的 tick / `apply_route` 那一拍）。
+        {
+            let w = Rc::downgrade(&core);
+            core.stale_retry.on_clicked(move |_| {
+                let Some(c) = w.upgrade() else { return };
+                c.fire_catalog_retry();
             });
         }
 
@@ -3671,9 +3766,62 @@ impl P4InterlockPage {
 
     /// catalog **未取到 / 重取失败** ⇒ 清掉：中文名位显「名称未获取」（`ui_text::NAME_UNKNOWN`）、
     /// **值照常显示**（按点名）—— **不臆造中文名**（§15.3.1）。
+    ///
+    /// ⚠️ **重取失败不得调本方法**（§15.3.1「重取失败 ⇒ **保留旧 catalog**」）——失败面只置
+    /// [`P4InterlockPage::set_catalog_stale`]，本方法留给"确实没有 catalog"的显式清空。
     pub fn clear_catalog(&self) {
         *self.core.catalog.borrow_mut() = None;
         self.core.refresh_fire();
+    }
+
+    /// **【⓪″ 顶部提示】名称表可能过期**（U-73 / 设计 §15.3.1 第 2 句；**T21c-3-r1**）。
+    ///
+    /// `stale = true` ⇒ 显「名称表可能过期」提示条（[`WarnBanner`]）+「重试」按钮
+    /// （≥ `TOUCH_MIN`(48)×48，净距 `GAP_MIN`(16)），并把**滚动视口整体下移 `STALE_BAND_H`(72)
+    /// 且等量变矮** —— 落点在滚动区**顶部**、底缘不动 ⇒ 与固定操作条的 24 px 缝不变、
+    /// **不遮住既有内容**（提示条只在 `stale` 时占位，默认态逐像素回既有版面）。
+    /// `stale = false` ⇒ 两者皆隐 + 滚动视口复原。
+    ///
+    /// **谁调 / 何时调**：接线层（`app.rs`）在 catalog **重取失败**时置 `true`（**保留旧 catalog**
+    /// —— 不调 [`P4InterlockPage::clear_catalog`]）、**重取成功**时置 `false`。
+    /// **每次调用都直接落屏**（判据只在本方法一处，幂等；重复置同值不做事）。
+    pub fn set_catalog_stale(&self, stale: bool) {
+        self.core.set_catalog_stale(stale);
+    }
+
+    /// 注册「重试」意图回调（无载荷）—— 点提示条右侧的「重试」即触发；**本页不发请求**。
+    ///
+    /// **回调纪律**（本仓成文教训，见 `app.rs` 的 `bind_intents` 函数头）：闭包体内**只许投意图**
+    /// （`push_back(..)`），**不得**回灌页面数据 —— 该回调用在 LVGL 事件派发内被同步触发
+    /// （同 [`P4InterlockPage::set_on_fire_page`]），在里面删 / 建对象会 UAF。
+    /// 页面本体的写入发生在接线层的 tick / `apply_route` 那一拍。
+    pub fn set_on_catalog_retry<F>(&self, f: F)
+    where
+        F: FnMut() + 'static,
+    {
+        if let Ok(mut slot) = self.core.on_catalog_retry.try_borrow_mut() {
+            *slot = Some(Box::new(f));
+        }
+    }
+
+    /// 提示条**是否在显**（断言 / 装配口径；默认 `false`）。
+    pub fn catalog_stale_visible(&self) -> bool {
+        !self.core.stale_banner.obj().is_hidden()
+    }
+
+    /// 提示条文案（断言口径；恒 = `ui_text::CATALOG_STALE`）。
+    pub fn catalog_stale_text(&self) -> Option<String> {
+        self.core.stale_banner.text()
+    }
+
+    /// 「重试」按钮（尺寸 / 点位 / 点击投意图的断言用）。
+    pub fn catalog_retry_button(&self) -> &TextButton {
+        &self.core.stale_retry
+    }
+
+    /// 提示条本体对象（版面断言用：矩形 / 与滚动区、按钮的净距）。
+    pub fn catalog_stale_banner_obj(&self) -> &Obj {
+        self.core.stale_banner.obj()
     }
 
     /// 注入探测器明细页（`GET /v1/console/peripherals/fire_detectors` 的结果；F21.4）。
