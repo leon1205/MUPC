@@ -26,12 +26,38 @@
 //! 让进程真的走一遍「GET → 解析 → `DisplayState` → 页面 render」。**同步 std 实现**
 //! （crate 已无 tokio 依赖）。
 //!
+//! ## 桩判据史：`misses == 0` 为何**曾经偶发红**（本轮修复）
+//!
+//! **现象**：`cargo test -p local-display -j 2` 下本文件
+//! `assert_eq!(misses.load(..), 0, "不应请求错误路径")` **约 1/8 概率**变红。
+//!
+//! **根因（结构性推导，非实测复现）**：旧桩对每条连接**只做一次 `sock.read`**，再拿整串与
+//! `"GET /v1/display/latest "` 做前缀比 ⇒ 两类**根本没有请求任何路径**的连接被记进 `misses`：
+//! ① **短读**：一条请求跨 TCP 段到达 ⇒ 只读到前半段 ⇒ 前缀比不中；
+//! ② **空连接**：`read` 返 `Ok(0)` ⇒ 与 `""` 比 ⇒ 不中。
+//! **空连接的真实来源**在客户端（`src/channel.rs`，两条**已登记的设计偏差**）：连接交一次性
+//! 工作线程跑 `connect_timeout`（拿到 socket 即退出），以及关停路径**作废在途 GET**
+//! （`Pending::cancel`，**不发任何应用层字节**）⇒ "连上但未写"的 socket 会被桩 accept 到。
+//! **旁证**：客户端**自己**的测试桩（`src/channel.rs::read_request`）早已明写「**读到请求头结束**
+//! （GET 无 body），避免与服务端 read 相互等待」—— 即本仓已知"单次 `read` 不是正确的 HTTP
+//! 服务端"，只是本文件的桩没照做（判据与文案不符，与 T21c-3-r2 修掉的 W-2′ 同族）。
+//!
+//! **能力边界（如实声明）**：PM 侧 **26 次尝试未复现**（18 次单跑 `--test offscreen_smoke` 与
+//! 8 次全量）⇒ 上述根因是**推导**，本文件**没有**原偶发的实测复现记录；故本修复**不声称**
+//! 「偶发已 100% 归因」，它做的是两件可验证的事：
+//!
+//! 1. **判据与文案对齐** —— `misses` 语义收紧为「**收到完整请求行、但它不是契约路径**」，
+//!    而"短读 / 空连接"由**独立计数 `aborted`** 单列（照旧打印，**不掩盖**）；
+//! 2. **把不可复现的偶发变成可复现的回归** —— 桩的判定抽成纯函数
+//!    [`classify_request`]，并用**确定性**用例（分段写入 / 空连接 / 真错路径 / 请求行外干扰）
+//!    钉住两类判别（见文件末 `mod tests`）。实测：把读循环改回"单次 read"⇒ 分段用例**必红**。
+//!
 //! 时钟/环境：本用例全平台可跑（Windows 本机无 evdev/fb0 —— 用
 //! `--backend offscreen` + `--channel` 指向桩，正是不变量"不许把 poll(2)/evdev 做成唯一路径"
 //! 的可执行证据）。
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -60,44 +86,146 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 最小 HTTP 桩：对 `GET /v1/display/latest` 回 200 + 帧 JSON；其余路径 404。
+// ═══════════════════════════════════════════════════════════════════════════
+// 桩：按**完整请求行**判定（判据史见模块头）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 契约路径（与传给 bin 的 `--channel` 末尾同源）。
+const CONTRACT_PATH: &str = "/v1/display/latest";
+/// 单次 `read` 的字节上限。
+const READ_CHUNK: usize = 1024;
+/// 请求头**总上限**：读到就收手（HTTP 请求头远小于此；**有界 = 防挂死 / 防无限增长**）。
+const MAX_HEAD_BYTES: usize = 8 * 1024;
+
+/// 一条连接收到的请求所属类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReqClass {
+    /// 完整请求行 + 契约路径 ⇒ 回 200 + 帧。
+    Contract,
+    /// **完整请求行**、但不是契约路径 ⇒ 回 404、记 `misses`（**这条才是"请求了错误路径"**）。
+    OtherPath,
+    /// **没有完整请求行**（0 字节空连接 / 未见到 `\r\n` 就 EOF）⇒ **没有请求任何路径**：
+    /// 记 `aborted`、**不记 `misses`**。
+    Aborted,
+}
+
+/// **纯函数**：按**完整的第一行**（到第一个 `\r\n` 为止）判定请求类别。
 ///
-/// 返回 `(url, 命中数, 漏检数)`；桩线程随进程结束（`detach`）——用例不关心它的收尾。
-fn spawn_frame_stub() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+/// 用"完整第一行"而不是"整串前缀比"，正是为了让两类**非请求**情形不再被误判成
+/// "请求了错误路径"：
+/// - **短读 / 分段**：字节没到齐 ⇒ 取不出完整第一行 ⇒ [`ReqClass::Aborted`]（不是 `misses`）；
+/// - **请求行之后还跟着别的内容**（额外头 / 尾巴）：第一行已完整 ⇒ 判定不受后续字节影响。
+fn classify_request(head: &[u8]) -> ReqClass {
+    // 含 `head.is_empty()`：一次都没读到 ⇒ 空连接（对端连上就收手）。
+    let Some(crlf) = head.windows(2).position(|w| w == b"\r\n") else {
+        return ReqClass::Aborted;
+    };
+    let line = String::from_utf8_lossy(&head[..crlf]);
+    let mut parts = line.split(' ');
+    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    if method == "GET" && target == CONTRACT_PATH {
+        ReqClass::Contract
+    } else {
+        ReqClass::OtherPath
+    }
+}
+
+/// **有界**读到请求头结束（`\r\n\r\n`）或对端收手（EOF / 读错）为止。
+///
+/// 单次读上限 [`READ_CHUNK`]、总上限 [`MAX_HEAD_BYTES`] ⇒ 既不会与"只写了一半的对端"
+/// 相互等待（客户端测试桩 `channel.rs::read_request` 的同款做法），也不会被无界对端撑爆。
+fn read_request_head(sock: &mut TcpStream) -> Vec<u8> {
+    let mut head = Vec::new();
+    let mut chunk = [0u8; READ_CHUNK];
+    while head.len() < MAX_HEAD_BYTES {
+        match sock.read(&mut chunk) {
+            Ok(0) => break, // EOF：对端收手（含"连上就关"的空连接）
+            Ok(n) => {
+                head.extend_from_slice(&chunk[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break; // 请求头结束（GET 无 body）
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    head
+}
+
+/// 桩的三类计数（`Arc` 以便用例线程读；三量**必须分列** —— 合成一个计数就会重现旧误判）。
+#[derive(Clone, Default)]
+struct StubStats {
+    /// 命中契约路径的请求数。
+    hits: Arc<AtomicUsize>,
+    /// **完整请求行**但非契约路径 —— 真"请求了错误路径"。
+    misses: Arc<AtomicUsize>,
+    /// 无完整请求行的连接（空连接 / 截断）。**单列，不计入 `misses`**。
+    aborted: Arc<AtomicUsize>,
+}
+
+impl StubStats {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// `(hits, misses, aborted)`（便于断言与打印）。
+    fn counts(&self) -> (usize, usize, usize) {
+        (
+            self.hits.load(Ordering::SeqCst),
+            self.misses.load(Ordering::SeqCst),
+            self.aborted.load(Ordering::SeqCst),
+        )
+    }
+}
+
+/// 服务**一条**连接：有界读到请求头结束 → 判定 → 应答 / 记数。
+///
+/// 三类行为的差别就是本修复的核心：**只有 [`ReqClass::OtherPath`] 才记 `misses`**。
+fn serve_one_connection(mut sock: TcpStream, stats: &StubStats) {
+    let head = read_request_head(&mut sock);
+    let resp = match classify_request(&head) {
+        ReqClass::Contract => {
+            let seq = stats.hits.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+            let body = frame_json(seq);
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }
+        ReqClass::OtherPath => {
+            stats.misses.fetch_add(1, Ordering::SeqCst);
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        }
+        ReqClass::Aborted => {
+            stats.aborted.fetch_add(1, Ordering::SeqCst);
+            // **打印而不吞**：便于将来排查偶发（尤其真机/CI 上"连上未写"的出现频率）。
+            eprintln!(
+                "[stub] 连接未给出完整请求行（读到 {} 字节）⇒ 记 aborted、不计 misses",
+                head.len()
+            );
+            // 没有请求就没有响应可回（对端多半已 FIN；即便还开着，也不该回一个"应答"）。
+            return;
+        }
+    };
+    let _ = sock.write_all(resp.as_bytes());
+}
+
+/// 最小 HTTP 桩：对 `GET /v1/display/latest` 回 200 + 帧 JSON；**完整请求行的其它路径** 404。
+///
+/// 返回 `(url, 三类计数)`；桩线程随进程结束（`detach`）——用例不关心它的收尾。
+fn spawn_frame_stub() -> (String, StubStats) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
     let addr = listener.local_addr().expect("local_addr");
-    let hits = Arc::new(AtomicUsize::new(0));
-    let misses = Arc::new(AtomicUsize::new(0));
-    let (h, m) = (Arc::clone(&hits), Arc::clone(&misses));
+    let stats = StubStats::new();
+    let s = stats.clone();
     std::thread::spawn(move || {
         for sock in listener.incoming() {
-            let Ok(mut sock) = sock else { break };
-            let (h, m) = (Arc::clone(&h), Arc::clone(&m));
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 1024];
-                let n = sock.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
-                let resp = if req.starts_with("GET /v1/display/latest ") {
-                    h.fetch_add(1, Ordering::SeqCst);
-                    let body = frame_json(h.load(Ordering::SeqCst) as u64);
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                } else {
-                    m.fetch_add(1, Ordering::SeqCst);
-                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        .to_string()
-                };
-                let _ = sock.write_all(resp.as_bytes());
-            });
+            let Ok(sock) = sock else { break };
+            let s = s.clone();
+            std::thread::spawn(move || serve_one_connection(sock, &s));
         }
     });
-    (
-        format!("http://{addr}/v1/display/latest"),
-        hits,
-        misses,
-    )
+    (format!("http://{addr}{CONTRACT_PATH}"), stats)
 }
 
 /// 从 `[smoke] page=P1 active_px=1234` 里取第 `n` 页的像素数（缺行 ⇒ `None`）。
@@ -146,7 +274,7 @@ fn out_dir() -> PathBuf {
 /// - `smoke()` 里不切页（去掉 `shell.show`）⇒ 六页统计趋同/为空 ⇒ 第三段红。
 #[test]
 fn offscreen_smoke_renders_six_pages_and_exits_zero() {
-    let (url, hits, misses) = spawn_frame_stub();
+    let (url, stats) = spawn_frame_stub();
     let ppm = out_dir().join("smoke.ppm");
     let _ = std::fs::remove_file(&ppm);
 
@@ -190,8 +318,18 @@ fn offscreen_smoke_renders_six_pages_and_exits_zero() {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
     assert!(ticks >= 10, "事件循环应跑满 --smoke 的拍数，实得 {ticks}\n{stdout}");
-    assert!(hits.load(Ordering::SeqCst) >= 1, "读通道一次都没被命中：\n{stderr}");
-    assert_eq!(misses.load(Ordering::SeqCst), 0, "不应请求错误路径：\n{stderr}");
+    let (hits, misses, aborted) = stats.counts();
+    assert!(hits >= 1, "读通道一次都没被命中：\n{stderr}");
+    // **判据未放宽**（仍是 `== 0`）：`misses` 现在只统计「**收到完整请求行**但不是契约路径」
+    // ⇒ 它恢复了自己文案的语义。短读 / 空连接由 `aborted` 单列（不进这条断言、但打印出来）。
+    assert_eq!(
+        misses, 0,
+        "不应请求错误路径（misses = 完整请求行且非契约路径；本次 hits={hits} aborted={aborted}）：\n{stderr}"
+    );
+    // **不掩盖**：三类计数全打出来（`--nocapture` 可见；将来偶发时先看 aborted 是不是在涨）。
+    eprintln!(
+        "[stub] hits={hits} misses={misses} aborted={aborted}（aborted = 连上但未给出完整请求行，**不计** misses）"
+    );
     assert!(
         !stdout.contains("frames_ok=0 "),
         "自检期间应至少成功取到一帧：\n{stdout}"
@@ -432,4 +570,147 @@ fn startup_warns_deprecated_font_and_echoes_live_control_channel() {
         err.contains("B3-2b-2 已接线"),
         "控制通道启动行须如实标注已接线（B3-2b-2 之后「待接线」已失真）：\n{err}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 桩判据的**确定性**用例
+//
+// 为什么需要：原 `misses == 0` 偶发红**不可复现**（26 次尝试未复现，见模块头）⇒ 只能把
+// "短读 / 空连接 / 真错路径"三条判别抽成纯函数 + 起真 socket 的确定性用例，才能把
+// **不可复现的偶发**变成**可复现的回归**。本模块即"改前必红"的钉。
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Shutdown, SocketAddr};
+    use std::time::Duration;
+
+    /// 单连接桩：accept **一条**、**内联**服务（不起额外线程）后退出 ⇒ `join()` 返回时计数已终局
+    /// （**无 sleep、无轮询** ⇒ 确定性；不同于 [`spawn_frame_stub`] 的 `detach` 形态）。
+    fn one_shot_stub() -> (SocketAddr, StubStats, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind one-shot stub");
+        let addr = listener.local_addr().expect("addr");
+        let stats = StubStats::new();
+        let s = stats.clone();
+        let handle = std::thread::spawn(move || {
+            if let Ok((sock, _)) = listener.accept() {
+                serve_one_connection(sock, &s);
+            }
+        });
+        (addr, stats, handle)
+    }
+
+    /// 客户端：连上 → 按序**分段**写（可选段间间隔）→ 关写端 → 读完响应。
+    ///
+    /// 关写端是关键：它让服务端的读循环**确定性地**看到 EOF（而不是靠超时猜）。写/读的
+    /// 错误一律**故意忽略** —— 本模块断言的是**桩的计数**，不是客户端能不能写完
+    /// （旧单读实现在第一段后就回 404 并关连接，第二段写入可能失败，这正是"改前必红"的形态）。
+    fn drive(addr: SocketAddr, chunks: &[&[u8]], gap: Option<Duration>) -> String {
+        let mut sock = TcpStream::connect(addr).expect("connect one-shot stub");
+        for (i, c) in chunks.iter().enumerate() {
+            if i > 0 {
+                if let Some(g) = gap {
+                    std::thread::sleep(g);
+                }
+            }
+            let _ = sock.write_all(c);
+        }
+        let _ = sock.shutdown(Shutdown::Write);
+        let mut resp = Vec::new();
+        let _ = sock.read_to_end(&mut resp);
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// **① 分段（短读）仍判命中** —— 本修复"有牙"的正面证据。
+    ///
+    /// 一条完整请求分两次写（段间 250 ms ⇒ **第一段必然被单独读到**，不靠内核是否合并 TCP 段）。
+    /// 旧实现（单次 `read` + 整串前缀比）在这里**必红**（只读 `GET /v1/displ` ⇒ 记 `misses`）。
+    #[test]
+    fn split_reads_of_one_request_still_count_as_a_hit() {
+        let (addr, stats, handle) = one_shot_stub();
+        let resp = drive(
+            addr,
+            &[b"GET /v1/displ", b"ay/latest HTTP/1.1\r\n\r\n"],
+            Some(Duration::from_millis(250)),
+        );
+        handle.join().expect("one-shot stub thread");
+        assert_eq!(
+            stats.counts(),
+            (1, 0, 0),
+            "分段到达的同一条请求应判**命中**（旧单读实现会记 misses）"
+        );
+        assert!(resp.starts_with("HTTP/1.1 200"), "应回 200：{resp:?}");
+    }
+
+    /// **② 空连接不记 `misses`**（它没请求任何路径）⇒ 记 `aborted`。
+    ///
+    /// 空连接的真实来源是客户端已登记的两条设计偏差（`connect_timeout` 工作线程 / 作废在途 GET）。
+    #[test]
+    fn empty_connection_is_aborted_and_never_a_miss() {
+        let (addr, stats, handle) = one_shot_stub();
+        let resp = drive(addr, &[], None);
+        handle.join().expect("one-shot stub thread");
+        assert_eq!(
+            stats.counts(),
+            (0, 0, 1),
+            "连上但一个字节没写 ⇒ aborted=1、misses=0（**不是**「请求了错误路径」）"
+        );
+        assert!(resp.is_empty(), "无请求 ⇒ 无响应：{resp:?}");
+    }
+
+    /// **③ 真错路径必须记 `misses`** —— 证明主用例的 `misses == 0` **仍有牙**。
+    #[test]
+    fn a_complete_request_line_for_another_path_is_a_miss() {
+        let (addr, stats, handle) = one_shot_stub();
+        let resp = drive(addr, &[b"GET /wrong HTTP/1.1\r\n\r\n"], None);
+        handle.join().expect("one-shot stub thread");
+        assert_eq!(
+            stats.counts(),
+            (0, 1, 0),
+            "完整请求行且非契约路径 ⇒ 必须记 misses（否则断言被架空）"
+        );
+        assert!(resp.starts_with("HTTP/1.1 404"), "应回 404：{resp:?}");
+    }
+
+    /// **④ 请求行之外的干扰**（额外头 / 头部之后的尾巴）不影响命中判定。
+    #[test]
+    fn trailing_bytes_after_a_valid_request_line_do_not_break_the_hit() {
+        let (addr, stats, handle) = one_shot_stub();
+        let resp = drive(
+            addr,
+            &[b"GET /v1/display/latest HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Junk: aaa\r\n\r\nJUNK-AFTER-HEAD"],
+            None,
+        );
+        handle.join().expect("one-shot stub thread");
+        assert_eq!(stats.counts(), (1, 0, 0), "第一行完整即判命中：{resp:?}");
+        assert!(resp.starts_with("HTTP/1.1 200"), "应回 200：{resp:?}");
+    }
+
+    /// **纯函数**层面的两条边界（不起 socket ⇒ 覆盖"读到一半 EOF"这种 socket 用例不好构造的形态）。
+    #[test]
+    fn classify_request_needs_a_complete_request_line() {
+        // 没读到任何字节 / 没有完整第一行 ⇒ Aborted（**不是**"错误路径"）
+        assert_eq!(classify_request(b""), ReqClass::Aborted);
+        assert_eq!(classify_request(b"GET /v1/displ"), ReqClass::Aborted);
+        assert_eq!(classify_request(b"GET /wrong"), ReqClass::Aborted);
+        // 第一行完整就够了（后面的头/体不参与判定）
+        assert_eq!(
+            classify_request(b"GET /v1/display/latest HTTP/1.1\r\n"),
+            ReqClass::Contract
+        );
+        assert_eq!(
+            classify_request(b"GET /v1/display/latest HTTP/1.1\r\nHost: x\r\n\r\n"),
+            ReqClass::Contract
+        );
+        // 完整请求行 + 别的路径 / 别的方法 ⇒ OtherPath（有牙）
+        assert_eq!(
+            classify_request(b"GET /v1/display/latestx HTTP/1.1\r\n\r\n"),
+            ReqClass::OtherPath
+        );
+        assert_eq!(
+            classify_request(b"POST /v1/display/latest HTTP/1.1\r\n\r\n"),
+            ReqClass::OtherPath
+        );
+    }
 }
