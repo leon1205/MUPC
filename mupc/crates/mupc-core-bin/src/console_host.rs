@@ -264,6 +264,17 @@ pub struct ConsoleDeps {
     /// **只读、无副作用、不进 PL-1 审计**：三条路径都是 `GET`，不经过写管线
     /// （`ControlPipeline::validate_for`）⇒ 不产生审计条目、不需要 `request_id`。
     pub peripherals: PeripheralConsoleSource,
+    /// `fire_detectors` 的**默认页大小**（设计 §15.3.2 / §15.11 #4 的 `display.periph_page_size`）。
+    ///
+    /// **为什么必须由装配点注入**（评审 T20 (B) D5 的"静默空转"收口）：该键此前已进
+    /// `DisplayConfig::validate()` 与两份 YAML，但全仓**零消费点**——端点取的是编译期常量
+    /// `DEFAULT_PERIPH_PAGE_SIZE` ⇒ 现场改键**无效果且无报错**。本字段把它接到**消费点**
+    /// （`get_peripherals_fire_detectors` 的 `parse_page` 缺省值）。请求参数 `page_size` 仍按
+    /// **既有上限**（`MAX_PERIPH_PAGE_SIZE = 50`）覆盖缺省，两条口径不变。
+    ///
+    /// ⚠️ **`bms_alarms` 的默认页大小不在此列**：设计只给了 `periph_page_size` 一个键，
+    /// 公告页默认仍 = `DEFAULT_BMS_ALARM_PAGE_SIZE`（**不为它臆造第二个配置键**）。
+    pub periph_page_size: u32,
 }
 
 /// 外设三端点的数据源（设计 §15.3.2）。
@@ -393,6 +404,7 @@ impl ConsoleHost {
             audit: self.deps.audit.clone(),
             interlock: self.deps.interlock.clone(),
             peripherals: self.deps.peripherals.clone(),
+            periph_page_size: self.deps.periph_page_size,
         })
     }
 
@@ -447,6 +459,8 @@ struct HostState {
     audit: Arc<crate::console_audit::ConsoleAuditService>,
     interlock: InterlockOpsSource,
     peripherals: PeripheralConsoleSource,
+    /// `display.periph_page_size`（`fire_detectors` 的默认页大小；T20 (B) D5 的消费点）。
+    periph_page_size: u32,
 }
 
 impl Clone for PeripheralConsoleSource {
@@ -634,7 +648,8 @@ async fn get_peripherals_catalog(State(st): State<HostState>) -> Response {
 
 /// `GET /v1/console/peripherals/fire_detectors?page&page_size` → **裸 `FireDetectorPage`**。
 ///
-/// `page` 默认 1；`page_size` 默认 [`mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE`] = 20、
+/// `page` 默认 1；`page_size` 默认 [`ConsoleDeps::periph_page_size`]（= 配置键
+/// `display.periph_page_size`，契约默认 [`mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE`] = 20）、
 /// **上限 50**（超限 **400**，不静默截断——静默截断会让屏侧"登记数与明细一致"的判据失真）。
 async fn get_peripherals_fire_detectors(
     State(st): State<HostState>,
@@ -650,9 +665,20 @@ async fn get_peripherals_fire_detectors(
                 .into_response()
         }
     };
+    // 默认页大小 = **配置**（`display.periph_page_size`，装配期由 `startup` 注入
+    // `ConsoleDeps::periph_page_size`）；请求参数 `page_size` 仍按既有上限（≤50）覆盖它。
+    // ⚠️ **不得**改回编译期常量 `DEFAULT_PERIPH_PAGE_SIZE`——那会让该配置键重新变成
+    // "能改、无效果、无报错"的静默空转（评审 T20 (B) D5 的本条收口）。
+    //
+    // `clamp` 是**二次兜底**（与 `display_host` 对 `*_poll_ms` 的 `.max(50)` 同款既有范式）：
+    // `parse_page` 只对**显式传入**的 `page_size` 做上限校验，`default` 参数**不校验**
+    // ⇒ 若本字段被绕过配置校验的路径注入越界值，端点会静默返回超上限的页。
+    // 首选门禁仍是配制期 `DisplayConfig::validate()` 的 `∈[1,50]` fail-fast（错误点名键），
+    // 此处只保证"哪怕门禁被绕过，端点也不可能回超上限页"。
     let (page, page_size) = match parse_page(
         &pairs,
-        mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
+        st.periph_page_size
+            .clamp(1, mupc_display_proto::MAX_PERIPH_PAGE_SIZE),
         mupc_display_proto::MAX_PERIPH_PAGE_SIZE,
     ) {
         Ok(v) => v,
@@ -1026,12 +1052,22 @@ pub fn build_peripheral_catalog(
                 // 自带归约，故此处**不**再做 `at % 6` 的形状运算）。
                 let Some(label) = label_for(st.role, &bp.name, *at) else {
                     // **W-3 契约破损**（短标签表与白名单不同序 / 漏项）。处置取
-                    // 「**debug 断言 + 跳过该点**」而不是 `expect`：catalog 是**只读端点**，
-                    // 单点契约破损不得打挂整个端点（§15.3.2 只允许"该端点不可用"），
+                    // 「**warn 日志 + debug 断言 + 跳过该点**」而不是 `expect`：catalog 是
+                    // **只读端点**，单点契约破损不得打挂整个端点（§15.3.2 只允许"该端点不可用"），
                     // 也不得静默用登记 `label` 兜底（F-4 / D22）。
                     // 该分支在 CI 上由 `display-proto` 的 H-3 用例
                     // （`short_label_table_is_row_aligned_with_whitelist`）
                     // 结构性挡住 ⇒ debug 构建**响亮失败**、release 构建降级为"少一行"。
+                    // ⚠️ **`warn` 是 release 侧唯一的可观测性**（评审 T21a-r1 的 G-7）：`debug_assert`
+                    // 在 release 下是**空操作**，少掉的那一行恰好落在 §15.5.2「屏侧行数与 catalog
+                    // 行数恒等」的可检测面之外（HMI 依 catalog 建行 ⇒ 缺行无法自发现）⇒ 必须有
+                    // 日志兜底（零风险：不 panic、不改返回值、不新增依赖）。
+                    tracing::warn!(
+                        role = ?st.role,
+                        block = %bp.name,
+                        at = *at,
+                        "短标签表白名单漏项 ⇒ catalog 少一行（W-3 契约破损，见 display-proto/peripherals_labels.rs）"
+                    );
                     debug_assert!(
                         false,
                         "短标签表白名单漏项：{}/{}（W-3 契约破损，见 peripherals_labels.rs）",
@@ -2010,6 +2046,9 @@ mod tests {
     }
 
     /// 全量注入版（四个源都在参数里 ⇒ 用例显式声明它验哪一条通道）。
+    ///
+    /// 外设两条字段（`peripherals` / `periph_page_size`）取"本用例不验外设"的占位：
+    /// 需要验外设端点的用例走 [`spawn_periph_host`] / [`spawn_periph_host_ex`]。
     async fn spawn_host_full(
         config: ConfigSource,
         apply: ApplySource,
@@ -2026,6 +2065,7 @@ mod tests {
             interlock,
             audit,
             peripherals: PeripheralConsoleSource::Unavailable("测试未接线"),
+            periph_page_size: mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
         });
         let h = tokio::spawn(async move {
             let _ = host.serve(listener).await;
@@ -2185,6 +2225,7 @@ mod tests {
             interlock: interlock_unavailable(),
             audit: audit_at("unused-audit-dir"),
             peripherals: PeripheralConsoleSource::Unavailable("测试未接线"),
+            periph_page_size: mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
         });
         let got = match host.config_source() {
             ConfigSource::Ready(a) => a.clone(),
@@ -2486,6 +2527,7 @@ mod tests {
             interlock: interlock_unavailable(),
             audit: audit_at("unused-audit-dir"),
             peripherals: PeripheralConsoleSource::Unavailable("测试未接线"),
+            periph_page_size: mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
         });
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4664,9 +4706,30 @@ stations:
     }
 
     /// 起一个**已接线**外设端点的宿主（其余源用"本用例不验"占位）。
+    ///
+    /// 默认页大小 = 契约缺省（[`mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE`]），联锁写路径
+    /// 取"本用例不验"占位。要改这两者（D5 的配置接线 / D7 的正向对照）走
+    /// [`spawn_periph_host_ex`]。
     async fn spawn_periph_host(
         periph: PeripheralConsoleSource,
         audit_dir: impl Into<PathBuf>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        spawn_periph_host_ex(
+            periph,
+            audit_dir,
+            interlock_unavailable(),
+            mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
+        )
+        .await
+    }
+
+    /// 同 [`spawn_periph_host`]，但**显式注入**联锁写源与 `periph_page_size`
+    /// （宿主形态与前者**逐字段同款**，只这两项不同 ⇒ 对照实验的变量唯一）。
+    async fn spawn_periph_host_ex(
+        periph: PeripheralConsoleSource,
+        audit_dir: impl Into<PathBuf>,
+        interlock: InterlockOpsSource,
+        periph_page_size: u32,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4674,9 +4737,10 @@ stations:
             config: ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             apply: ApplySource::Unavailable("本用例只验外设只读端点"),
             logs: LogSource::Unavailable("本用例只验外设只读端点"),
-            interlock: interlock_unavailable(),
+            interlock,
             audit: audit_at(audit_dir),
             peripherals: periph,
+            periph_page_size,
         });
         let h = tokio::spawn(async move {
             let _ = host.serve(listener).await;
@@ -4929,9 +4993,215 @@ stations:
         assert!(parse_page(&p("x"), 20, 50).is_err());
     }
 
+    /// **D5（评审 T20 (B) D5）：`display.periph_page_size` 真的接到消费点**。
+    ///
+    /// 「**存在 ≠ 接线**」：本用例**不看**该键有没有被解析出来（那是 `display-proto` 的
+    /// `config.rs` 用例已经管的），而是**改配置 ⇒ 断言端点缺省分页真的变**。
+    /// 输入 = **生产配置文本**（与现场同源）里只把 `periph_page_size` 由 20 改成 7，
+    /// 其余**逐字不动**（`assert_ne!` 钉住替换确实命中，防配置文案漂移后本用例静默失效）。
+    ///
+    /// **改什么会让本条变红**：把 `get_peripherals_fire_detectors` 的 `parse_page` 缺省值
+    /// 改回编译期常量 `DEFAULT_PERIPH_PAGE_SIZE`（= 收口前的"能改、无效果、无报错"状态）
+    /// ⇒ ① 拿到 20 而非 7；去掉消费点的 `clamp` ⇒ ④ 拿到 999 而非 50。
+    #[tokio::test]
+    async fn periph_page_size_from_config_drives_fire_detectors_default_page_size() {
+        const PROD_YAML: &str =
+            include_str!("../../../deploy/config/mupc_core_config.production.yaml");
+        // 基线：生产配置就是契约默认值 20（若现场改了它，本基线也要同步——先如实钉住）
+        let base: crate::core_config::CoreConfig =
+            serde_yaml::from_str(PROD_YAML).expect("生产配置可解析");
+        assert_eq!(
+            base.display.periph_page_size, 20,
+            "生产配置的 periph_page_size = 契约默认 20"
+        );
+        // 「现场改键」：只动这一处
+        let patched = PROD_YAML.replace("periph_page_size: 20", "periph_page_size: 7");
+        assert_ne!(
+            patched, PROD_YAML,
+            "替换必须命中（配置文案变了就同步改本用例）"
+        );
+        let cfg: crate::core_config::CoreConfig =
+            serde_yaml::from_str(&patched).expect("改键后的配置可解析");
+        let configured = cfg.display.periph_page_size;
+        assert_eq!(configured, 7, "改的确实是那个键");
+
+        // 20 只探测器（1 fire_sys + 19 fire_det）：7/页 ⇒ 有下一页
+        let (periph, _l, _c) = peripherals_ready(Some(25.0), &[]);
+        let (addr, h) = spawn_periph_host_ex(
+            periph,
+            "unused-audit-dir",
+            interlock_unavailable(),
+            configured,
+        )
+        .await;
+
+        // ① 缺省（不带 `page_size`）⇒ 取**配置**值
+        let (status, body) = http(
+            addr,
+            "GET",
+            ConsoleEndpoint::PeripheralsFireDetectors.path(),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let got: mupc_display_proto::FireDetectorPage = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            got.page_size, 7,
+            "缺省页大小必须 = `display.periph_page_size`（写回编译期常量即红）"
+        );
+        assert_eq!(got.items.len(), 7, "条目数同样跟着变（这是真正的消费点）");
+        assert!(got.has_more, "20 只 / 每页 7 ⇒ 还有下一页");
+
+        // ② 显式 `page_size` 仍**覆盖**缺省（请求参数口径未变）
+        let (s2, b2) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/fire_detectors?page_size=5",
+            None,
+        )
+        .await;
+        assert_eq!(s2, 200);
+        let p2: mupc_display_proto::FireDetectorPage = serde_json::from_str(&b2).unwrap();
+        assert_eq!(p2.page_size, 5, "请求参数覆盖缺省");
+        assert_eq!(p2.items.len(), 5);
+
+        // ③ 上限仍是 50（与配置无关的既有口径不破）；超限仍 400、不静默截断
+        let (s3, _) = http(
+            addr,
+            "GET",
+            "/v1/console/peripherals/fire_detectors?page_size=51",
+            None,
+        )
+        .await;
+        assert_eq!(s3, 400, "上限 50 不变；超限 400（不得静默截断）");
+
+        // ④ 二次兜底：注入**越界**的配置值（首选门禁是配制期 `validate()` 的 fail-fast，
+        //    此处证"哪怕门禁被绕过，端点也不可能回超上限页"——`parse_page` 不校验 `default`）
+        let (periph2, _l2, _c2) = peripherals_ready(Some(25.0), &[]);
+        let (addr2, h2) =
+            spawn_periph_host_ex(periph2, "unused-audit-dir", interlock_unavailable(), 999).await;
+        let (s4, b4) = http(
+            addr2,
+            "GET",
+            ConsoleEndpoint::PeripheralsFireDetectors.path(),
+            None,
+        )
+        .await;
+        assert_eq!(s4, 200, "{b4}");
+        let capped: mupc_display_proto::FireDetectorPage = serde_json::from_str(&b4).unwrap();
+        assert_eq!(
+            capped.page_size,
+            mupc_display_proto::MAX_PERIPH_PAGE_SIZE,
+            "越界配置被钳到上限（不得静默回超上限页）"
+        );
+        h.abort();
+        h2.abort();
+    }
+
+    /// **D7（评审 T20 (B) D7）：只读用例「审计目录为空」半边的**正向对照**。
+    ///
+    /// 背景：`peripherals_endpoints_are_read_only_and_audited_never` 的 ② 半注入的是
+    /// `ConsoleAuditService`（**读**服务，`new(dir)` 零 I/O）⇒ 该宿主里**没有任何落点**会写
+    /// 那个目录 ⇒ 那条断言**不可能变红**（零判别力）。
+    ///
+    /// 本用例在同一**宿主形态**（`peripherals = Ready` / `config = Ready` / `logs =
+    /// Unavailable`、同一目录、同一 `spawn_periph_host_ex`）下把**写侧**接上真实
+    /// [`crate::console_audit::FileAuditSink`] 并触发**一次**写操作（联锁释放），断言
+    /// 目录**出现**控制台审计文件 ⇒ 「空」这半边才有对偶（先证明网能红，再证明它此刻绿）。
+    ///
+    /// **取证法要点**：`FileAuditSink::open` 会**立刻**经哈希链侧建出 `audit_<日期>.jsonl`
+    /// （`AuditLogger::new` 的 `open_current_file`）⇒ "写前目录为空"**不成立**，故本用例的
+    /// 对偶对象取**控制台 JSONL**（`console-audit-<日期>.jsonl`，只由 `record_outcome` 懒建）
+    /// —— 写前不存在、写后出现，这一对才是干净的。
+    ///
+    /// **改什么会让本条变红**：把联锁写路径换成 `AuditUnavailable`/桩 sink（不再落盘）⇒ 红。
+    #[tokio::test]
+    async fn periph_audit_dir_positive_control_would_see_a_write() {
+        use mupc_display_proto::{InterlockApi, InterlockOpPayload};
+
+        /// 只列"控制台审计"文件（哈希链文件名不含该前缀 ⇒ 不混淆两类落点）。
+        fn console_audit_files(dir: &std::path::Path) -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(dir)
+                .expect("审计目录可读")
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with("console-audit-"))
+                .collect();
+            v.sort();
+            v
+        }
+
+        let dir = TempDir::new("periph-audit-pos");
+        // **真实**写侧落点（不是 ConsoleAuditService 那个读服务）
+        let sink: Arc<dyn ConsoleAuditSink> =
+            Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"));
+        let backend = Arc::new(FakeBackend::new(view_latched()));
+        backend.flip_latched_on_write();
+        let b: Arc<dyn InterlockApi> = backend;
+
+        let (periph, _l, _c) = peripherals_ready(Some(20.0), &[]);
+        let (addr, h) = spawn_periph_host_ex(
+            periph,
+            dir.path(),
+            InterlockOpsSource::Ready(Arc::new(crate::interlock_ops::InterlockService::new(
+                Some(b),
+                sink,
+            ))),
+            mupc_display_proto::DEFAULT_PERIPH_PAGE_SIZE,
+        )
+        .await;
+
+        // ① 写前：只读地跑完三个外设 GET，控制台审计文件**一个都没有**
+        for path in [
+            ConsoleEndpoint::PeripheralsCatalog.path(),
+            ConsoleEndpoint::PeripheralsFireDetectors.path(),
+            ConsoleEndpoint::PeripheralsBmsAlarms.path(),
+        ] {
+            let (status, _) = http(addr, "GET", path, None).await;
+            assert_eq!(status, 200, "`{path}` GET 必须可用");
+        }
+        assert!(
+            console_audit_files(dir.path()).is_empty(),
+            "只读端点跑完不得有控制台审计落点（与只读用例 ② 同款断言）"
+        );
+
+        // ② 触发**一次**写操作（联锁释放；与只读三端点同宿主、同目录）
+        let payload: InterlockOpPayload = payload_of(&view_latched());
+        let body = serde_json::json!({
+            "request_id": "rid-periph-pos",
+            "issued_at_ms": now_ms(),
+            "op": ConsoleEndpoint::InterlockRelease.op_name().unwrap(),
+            "payload": payload,
+        })
+        .to_string();
+        let (status, resp) = http(
+            addr,
+            "POST",
+            ConsoleEndpoint::InterlockRelease.path(),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(status, 200, "写端点结局走信封: {resp}");
+        assert!(resp.contains("\"ok\":true"), "写必须真的成功: {resp}");
+
+        // ③ 写后：同一目录**出现**控制台审计文件 ⇒ 「目录为空」这半边有对偶
+        let files = console_audit_files(dir.path());
+        assert!(
+            !files.is_empty(),
+            "正向对照：真实 FileAuditSink + 一次写操作**必须**留下文件，\
+             否则「审计目录为空」这条断言不可能变红（零判别力）"
+        );
+        h.abort();
+    }
+
     /// **只读 + 不进 PL-1 审计**（设计 §15.3.2 的两条硬要求）：
     /// ① 三条路径**只有 GET**（POST ⇒ 405）⇒ 结构上无写操作、无审计条目；
     /// ② 三条 GET 跑完后审计目录**零文件**（审计只由写管线产生）。
+    ///
+    /// ⚠️ ② 半**单独看没有判别力**（本宿主注入的是 `ConsoleAuditService` **读**服务，
+    /// `new(dir)` 零 I/O ⇒ 没有落点会写它）；要求本身由「POST ⇒ 405」+ 契约层
+    /// `op_name() == None` + 三 handler 零 audit-sink 调用**结构性承载**，"有对偶"由
+    /// [`periph_audit_dir_positive_control_would_see_a_write`] 提供（评审 T20 (B) D7）。
     #[tokio::test]
     async fn peripherals_endpoints_are_read_only_and_audited_never() {
         let dir = TempDir::new("periph-audit");
@@ -5067,7 +5337,13 @@ stations:
     /// [index_of(白名单[i])]`，`index_of` 又就在**同一张**白名单里 `.position()` ⇒
     /// **由构造恒真**：相邻两行互换、整表错位一格，它**照绿**（评审探针 P1a/P1b 实测）。
     /// 本用例把 `PERIPH_WHITELIST` 投到**独立的第二真源**（`point_table` 登记行）上，
-    /// 才有"错位必红"的判别力。
+    /// 才有**字符集层面**"错位必红"的判别力。
+    ///
+    /// ⚠️ **判别力的残差（评审 T21a-r1 的 N-1 / G-10，实测）**：判据是**字符集包含**
+    /// （短标签字符集 ⊆ 登记 `label` 字符集）⇒ **同字符集内**的位序错位**照绿**：实测盲区 =
+    /// **29 组 / 65 行（≈14.5%）**（例 `簇从控 1 通讯失联` ↔ `簇从控 11 通讯失联`；复核员自选
+    /// 探针 C 实测：该错位下两 crate 五套用例**全绿**）。闭合它需要**位级比对**
+    /// （逐 `at` 对 `point_table` 的位号 / 文案），属 **T21c / 点表单元**，不在本用例内。
     ///
     /// # 地址口径（复用 T20 的既有路径，**不新造第二套查询**）
     ///

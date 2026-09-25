@@ -1568,7 +1568,9 @@ mod tests {
     /// 后者（"短标签表的键必须命中一个登记行或站配置点"，设计 §15.3.2 的 W-2 后半）需要
     /// **独立的第二真源**，落在 `mupc-core-bin` 的
     /// `console_host::tests::short_label_keys_hit_registered_rows_and_registration_wording_is_superset`
-    /// （投到 `mupc_southd::point_table` 的登记行）—— **那一条有牙**（错位必红）。
+    /// （投到 `mupc_southd::point_table` 的登记行）—— **那一条有牙**（**字符集层面**错位必红；
+    /// **同字符集内**的位序错位**不覆盖**：实测盲区 **29 组 / 65 行 ≈14.5%**，需**位级比对**
+    /// 才能闭合，属 T21c / 点表单元，见评审 T21a-r1 的 N-1 / G-10）。
     #[test]
     fn short_label_table_is_row_aligned_with_whitelist() {
         assert_eq!(
@@ -1585,7 +1587,9 @@ mod tests {
             assert!(!label.trim().is_empty(), "{block}_{at} 短标签不得为空");
             // 下标一致性（**由构造保证、本身零判别力**；实质的"逐行同序"校验见 core-bin 的
             // `short_label_keys_hit_registered_rows_and_registration_wording_is_superset`，
-            // 那里投到 `point_table` 这条独立真源上 ⇒ 错位必红）
+            // 那里投到 `point_table` 这条独立真源上 ⇒ **字符集层面**的错位必红；
+            // **同字符集内**的位序错位不在其覆盖内——盲区 29 组 / 65 行 ≈14.5%，
+            // 需位级比对才能闭合，见评审 T21a-r1 的 N-1 / G-10）
             assert_eq!(
                 label,
                 PERIPH_LABELS[i].0,

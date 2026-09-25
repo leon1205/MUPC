@@ -780,17 +780,43 @@ fn point_field(
     }
 }
 
+/// 消防钢瓶气压「是否配置」的**取数接缝**（设计 §15.2.2 的 `cylinder_configured`；
+/// 适配器落点 = §15.11 #7 的 `startup.rs`，本 trait 只定契约）。
+///
+/// 三态语义（**逐字锁定，不得改**——§15.2.2 明文）：
+/// - `None`        = **不可得**（非消防站 / 接缝未接线）⇒ 屏侧**按值正常展示**；
+/// - `Some(false)` = **未配置** ⇒ 屏显「**未配置**」（**忽略 `v`**、断言不含 `0 kPa`、不产告警）；
+/// - `Some(true)`  = 已配置 ⇒ 屏侧按值正常展示（此后恒 0 也按真实 0 展示）。
+///
+/// **实现侧不得臆造**：查不到权威结论时必须回 `None`（"不可得"），**不得**用"值为 0"之类的
+/// 启发式去猜 `Some(false)`——那会把「接缝未接线」伪装成「未配置」（EDGE-23 / EX-11）。
+pub trait CylinderPressureQuery: Send + Sync {
+    /// 该站的钢瓶气压配置态；`station_id` = 南向站 id（`south_stations.stations[].id`）。
+    ///
+    /// **实现方义务**：`role != Fire` 的站一律回 `None`（"非消防站"这一 `None` 成因由**本层**
+    /// 判定 —— 调用方 [`StationPeripheralSource`] 是**纯透传**，不做 role 过滤）；接缝还没接上时
+    /// 也回 `None`，**不得**回 `Some(false)`（那会把「不可得」伪装成「未配置」）。
+    fn cylinder_configured(&self, station_id: &str) -> Option<bool>;
+}
+
 /// 生产外设源：把 `latest_values` 的逐站快照投影成 [`PeripheralsSection`]。
 pub struct StationPeripheralSource {
     latest: Arc<latest_values::LatestValues>,
     plan: Vec<PeripheralStationPlan>,
     /// 帧内 `catalog_rev` = catalog 端点的 `rev`（**同源同值**，§15.3.1）。
     catalog_rev: u32,
+    /// 消防钢瓶气压取数接缝（§15.2.2 / §15.11 #7）。`None` = **接缝未接线**
+    /// ⇒ 消防站的 `cylinder_configured` 恒 `None`（"不可得"）⇒ 屏侧按值正常展示
+    /// （**不造假**：现场真"未配置"时会显数值或 `--`，属降级非错值）。
+    cylinder: Option<Arc<dyn CylinderPressureQuery>>,
 }
 
 impl StationPeripheralSource {
     /// `catalog_rev` 由装配点从**同一份** catalog 求出（`display_proto::catalog_rev`）；
     /// 未接线 catalog（如未启用控制通道）⇒ 传 0（屏侧按"从未取到名称表"处理，不臆造）。
+    ///
+    /// 钢瓶气压接缝**默认不接线**（`cylinder = None`）⇒ 消防站恒「不可得」；需要
+    /// EDGE-23「未配置」可达时用 [`Self::with_cylinder_query`] 注入（装配点 = `startup.rs`）。
     pub fn new(
         latest: Arc<latest_values::LatestValues>,
         plan: Vec<PeripheralStationPlan>,
@@ -800,7 +826,14 @@ impl StationPeripheralSource {
             latest,
             plan,
             catalog_rev,
+            cylinder: None,
         }
+    }
+
+    /// 注入消防钢瓶气压取数接缝（设计 §15.11 #7）。装配点在 `startup.rs`。
+    pub fn with_cylinder_query(mut self, q: Arc<dyn CylinderPressureQuery>) -> Self {
+        self.cylinder = Some(q);
+        self
     }
 
     /// **逐站重建**区间（读全量 → 重建整段；无状态 ⇒ 可重复调用、可丢通知）。
@@ -859,14 +892,22 @@ impl StationPeripheralSource {
                 // 站在线 = 采集侧结论（本节**不重判、不另立门限**）
                 online: active,
                 last_ok_ms,
-                // EDGE-23 的钢瓶气压接缝（`SouthStations::cylinder_pressure_configured`）**未接线**
-                // ⇒ `None` = 不可得 ⇒ 屏侧按值正常展示（设计 §15.2.2 的 `None` 语义）。
-                // ⚠️ 该接缝的适配器属设计 §15.11 #7（startup 侧），本任务**未做**（已登记）。
-                cylinder_configured: None,
+                // EDGE-23 的钢瓶气压接缝（§15.2.2 / §15.11 #7）：**纯透传**——接缝未接线
+                // （`cylinder == None`）时恒 `None`（本段不臆造、不猜），其余两态
+                // （`Some(false)` / `Some(true)`）由注入的 [`CylinderPressureQuery`] 给权威结论
+                // （"非消防站 ⇒ None" 的 role 判据在适配器内，与 southd 的 `Role` 同源，只写一处）。
+                // `Some(false)` ⇒ 屏显「未配置」（忽略 `v`、不得含 `0 kPa`、不产告警）。
+                cylinder_configured: self
+                    .cylinder
+                    .as_ref()
+                    .and_then(|q| q.cylinder_configured(&st.id)),
                 blocks,
             });
         }
         PeripheralsSection {
+            // 段级 `ts_ms` = 本段**重建**时刻（**非**严格"组帧时刻"；与 device / alarms /
+            // interlock 三段逐段同构——采样侧取 `now_ms()`、组帧只克隆）。评审 T20 (B) D3
+            // 已裁定：接受该口径、仅订正措辞（无消费者：内容比较显式忽略时标）。
             ts_ms: now_ms,
             // 段可用性：本源每次采样都**真的**重建了段（内存读，不可能失败）⇒ `true`；
             // 未接线（`DisplayDataProvider` 无源）时缓存保持 `Default` ⇒ `available=false`
@@ -3556,6 +3597,103 @@ stations:
                 }
             }
         }
+    }
+
+    /// **D2（§15.2.2 / §15.11 #7）钢瓶气压接缝**：`Some(false)` / `Some(true)` / `None`
+    /// 三态都在，且**未接线不得退化成 `Some(false)`**。
+    ///
+    /// 语义依据（§15.2.2 明文，**不得改**）：
+    /// - `Some(false)` = **未配置** ⇒ 屏显「未配置」（忽略 `v`、不得含 `0 kPa`）；
+    /// - `Some(true)`  = 正常按值展示；
+    /// - `None`        = **不可得**（非消防站 / 接缝未接线）⇒ 按值正常展示。
+    ///
+    /// 本用例证的是**帧侧**的两件事：① 源对注入的 query 是**纯透传**（role 过滤在适配器侧，
+    /// 由 `startup::SouthCylinderPressureQuery` 的用例覆盖）；② **未接线**（默认构造）时
+    /// **全部**站回 `None`——不得把"接缝没接"伪装成"未配置"。
+    ///
+    /// ⚠️ **帧内不得把 `v` 改掉**（`Some(false)` 仍带真实读数）：`v` 列在 §15.2.3 表里对
+    /// EDGE-23 是"任意（由数据侧给）"——「未配置」是**屏侧**语义（HMI 忽略 `v`），
+    /// 帧侧若把 `v` 清空，就与 EDGE-19「未取数」混为一谈（违反三语义互异）。
+    ///
+    /// **改什么会让本条变红**：把 `build_section` 的 `cylinder_configured` 写回常量 `None`
+    /// ⇒ 第一段断言红；把未接线缺省改成 `Some(false)` ⇒ 第二段红。
+    #[test]
+    fn periph_cylinder_configured_is_passthrough_and_defaults_to_none() {
+        use std::collections::HashMap;
+
+        /// 桩：按站 id 给答案（`None` = 本桩也不知道 ⇒ 透传后仍是 `None`）。
+        struct StubCylinder(HashMap<String, Option<bool>>);
+        impl CylinderPressureQuery for StubCylinder {
+            fn cylinder_configured(&self, station_id: &str) -> Option<bool> {
+                self.0.get(station_id).copied().flatten()
+            }
+        }
+
+        let cfg = test_south_cfg();
+        let plan = peripheral_plan(&cfg);
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_000_000u64;
+        latest.mark_station_polled("fire", now);
+        // 消防钢瓶气压的真实读数（`fire_sys_2`；未配置时"数据侧"照样会给 0.0）
+        fill(&latest, &[("fire", "fire_sys_2", Some(0.0), now, ok())]);
+
+        // ① 已接线 ⇒ 逐站透传（消防站 `Some(false)` = EDGE-23「未配置」可达；另一站 `None`）
+        let stub: Arc<dyn CylinderPressureQuery> = Arc::new(StubCylinder(
+            [
+                ("fire".to_string(), Some(false)),
+                ("bms".to_string(), Some(true)),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+        let sec = StationPeripheralSource::new(latest.clone(), plan.clone(), 7)
+            .with_cylinder_query(stub)
+            .build_section(now);
+        let cfg_of = |role: PeriphRole| {
+            sec.stations
+                .iter()
+                .find(|s| s.role == role)
+                .unwrap_or_else(|| panic!("{role:?} 站必须在段内"))
+                .cylinder_configured
+        };
+        assert_eq!(
+            cfg_of(PeriphRole::Fire),
+            Some(false),
+            "已接线 + 未配置 ⇒ Some(false)（屏侧据此显「未配置」）"
+        );
+        assert_eq!(
+            cfg_of(PeriphRole::Battery),
+            Some(true),
+            "透传（role 过滤不在本层）"
+        );
+        assert_eq!(
+            cfg_of(PeriphRole::MeterBatt),
+            None,
+            "桩未给答案 ⇒ 透传 None（不可得）"
+        );
+        // 帧内 `v` 不得被 EDGE-23 改写（「忽略 v」是屏侧动作，帧是值通道）
+        let cyl = at_of(&sec, PeriphRole::Fire, "fire_sys", 2);
+        assert_eq!(
+            (cyl.v, cyl.flag),
+            (Some(0.0), FieldFlag::Valid),
+            "Some(false) 时帧内仍带数据侧给的真实读数（≠ 把它清成 NotRead）"
+        );
+
+        // ② 未接线（默认构造）⇒ **全部**站 `None`（含消防站）⇒ 按值正常展示
+        let sec = StationPeripheralSource::new(latest, plan, 7).build_section(now);
+        for st in &sec.stations {
+            assert_eq!(
+                st.cylinder_configured, None,
+                "{}：接缝未接线 ⇒ 一律 None（不可得），**不得**退化成 Some(false)",
+                st.id
+            );
+        }
+        let cyl = at_of(&sec, PeriphRole::Fire, "fire_sys", 2);
+        assert_eq!(
+            (cyl.v, cyl.flag),
+            (Some(0.0), FieldFlag::Valid),
+            "未接线 ⇒ 按值正常展示（不因接缝缺失而改值或改 flag）"
+        );
     }
 
     /// `latest_values` **无该点** ⇒ `NotRead`（点缺 ≠ 0；同段其它点不受影响）。
