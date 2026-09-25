@@ -371,6 +371,12 @@ sudo systemctl restart mupcd
 - [ ] intercore 实时核心 IP 已配置（如需要）
 - [ ] systemd 服务已安装：`systemctl status mupcd`
 - [ ] 启动日志显示"所有子系统就绪，进入主循环"
+- [ ] **（`display.enabled: true` 时必查）本地屏两端同版本**：`mupcd` 与
+      `mupc-local-display` **同批替换、不得只换其一**（版本不一致 ⇒ 屏侧拒帧、无实时数据；
+      排障口径与"为什么不能用 `--version` 判"见 [`local-display.md` §9](local-display.md#9-两端必须同版本发布)）
+- [ ] **（改过屏上文案时必查）字库门禁 H-1…H-5 已过**：已重跑 `fonts/gen_fonts.sh`（10 档）并与
+      `lv_font_cmap.txt` / `lv_font_metrics.txt` **同批提交**
+      （见 [`local-display.md` §5.4](local-display.md#54-字库门禁-h-1h-5)）
 
 ## 九、BECG-3568 现场接线与配置核对（2026-09-08）
 
