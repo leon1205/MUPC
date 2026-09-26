@@ -48,10 +48,10 @@
 use mupc_data_processing::latest_values::{self, ChangeBatch};
 use mupc_display_proto::peripherals::PointValue as FramePoint;
 use mupc_display_proto::{
-    AlarmItem, AlarmLevel, AlarmsSection, ControlSource, DeviceSection, DisplayConfig, DisplayFrame,
-    DisplayRange, ExitGuardOutcome, Field, FieldFlag, InfoSection, InterlockSection, LinkState,
-    PeriphRole, PeripheralBlock, PeripheralStation, PeripheralsSection, RunState, ServiceScope,
-    SocSource, PROTO_VERSION,
+    AlarmItem, AlarmLevel, AlarmsSection, ControlSource, DeviceSection, DisplayConfig,
+    DisplayFrame, DisplayRange, ExitGuardOutcome, Field, FieldFlag, InfoSection, InterlockSection,
+    LinkState, PeriphRole, PeripheralBlock, PeripheralStation, PeripheralsSection, RunState,
+    ServiceScope, SocSource, PROTO_VERSION,
 };
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -196,10 +196,9 @@ pub fn interlock_wiring_for(
     release_hold_secs: u64,
 ) -> InterlockWiring {
     match (api, io_enabled) {
-        (Some(api), true) => InterlockWiring::Wired(Arc::new(InterlockApiSource::new(
-            api,
-            release_hold_secs,
-        ))),
+        (Some(api), true) => {
+            InterlockWiring::Wired(Arc::new(InterlockApiSource::new(api, release_hold_secs)))
+        }
         (None, true) => InterlockWiring::Unwired,
         (_, false) => InterlockWiring::Disabled,
     }
@@ -336,7 +335,10 @@ async fn read_mem_used_pct() -> Option<f64> {
     #[cfg(target_os = "linux")]
     {
         use mupc_system_monitor::MetricCollector;
-        let snap = mupc_system_monitor::MemoryCollector::new(0).collect().await.ok()?;
+        let snap = mupc_system_monitor::MemoryCollector::new(0)
+            .collect()
+            .await
+            .ok()?;
         let pct = snap.memory.usage_percent;
         if pct.is_finite() && (0.0..=100.0).contains(&pct) {
             // `usage_percent` 是 `f32`（system-monitor 侧口径），本函数对外口径是 `f64`
@@ -365,7 +367,14 @@ async fn read_mem_used_pct() -> Option<f64> {
 fn alarm_level_of(event_type: &str) -> AlarmLevel {
     let t = event_type.to_ascii_lowercase();
     const ERROR: [&str; 6] = ["triggered", "offline", "failed", "error", "fault", "trip"];
-    const INFO: [&str; 6] = ["cleared", "online", "restored", "stopped", "recovered", "ack"];
+    const INFO: [&str; 6] = [
+        "cleared",
+        "online",
+        "restored",
+        "stopped",
+        "recovered",
+        "ack",
+    ];
     if ERROR.iter().any(|k| t.contains(k)) {
         AlarmLevel::Error
     } else if INFO.iter().any(|k| t.contains(k)) {
@@ -474,10 +483,7 @@ pub struct InterlockApiSource {
 }
 
 impl InterlockApiSource {
-    pub fn new(
-        api: Arc<dyn mupc_display_proto::InterlockApi>,
-        release_hold_secs: u64,
-    ) -> Self {
+    pub fn new(api: Arc<dyn mupc_display_proto::InterlockApi>, release_hold_secs: u64) -> Self {
         Self {
             api,
             release_hold_secs,
@@ -492,7 +498,11 @@ impl InterlockSource for InterlockApiSource {
         // = `InterlockSection`，单一真源）⇒ 不再需要旧 DTO → 契约的字段搬运。字段就是 `Arc<dyn
         // mupc_display_proto::InterlockApi>`，`status()` 经 dyn 直接可调，无需再 `use` trait。
         let view = self.api.status().await;
-        Ok(interlock_section_of(&view, self.release_hold_secs, now_ms()))
+        Ok(interlock_section_of(
+            &view,
+            self.release_hold_secs,
+            now_ms(),
+        ))
     }
 }
 
@@ -754,7 +764,9 @@ pub fn catalog_station_plan(
 ///   与帧内块数比对即可发现——"BMS 告警源不可用"的判据在 catalog/屏侧，不在本层臆造）；
 /// - 白名单有、而**该块在配置内存在但某 `at` 未配**（如 `point_table` 未登记）⇒ 仍带该点，
 ///   值走 `NotRead`（§15.1.2 第 2 条：点缺 ⇒ `NotRead`，不补 0）。
-pub fn peripheral_plan(cfg: &mupc_southd::config::SouthStationsConfig) -> Vec<PeripheralStationPlan> {
+pub fn peripheral_plan(
+    cfg: &mupc_southd::config::SouthStationsConfig,
+) -> Vec<PeripheralStationPlan> {
     let mut out = Vec::new();
     for st in &cfg.stations {
         let role = periph_role_of(st.role);
@@ -933,11 +945,7 @@ impl StationPeripheralSource {
                         flag == FieldFlag::Valid || v.is_none(),
                         "不变量：flag != Valid ⇒ v 必须 None（不补 0）"
                     );
-                    values.push(FramePoint {
-                        at: *at,
-                        v,
-                        flag,
-                    });
+                    values.push(FramePoint { at: *at, v, flag });
                 }
                 blocks.push(PeripheralBlock {
                     name: b.name.clone(),
@@ -1474,15 +1482,27 @@ impl DisplayDataProvider {
                 let p = Self::phase_fields(tr.p_phase, self.range.phase_power_max_kw, missing);
                 let i = Self::phase_fields(tr.i_phase, self.range.current_max_a, missing);
                 let total = match tr.p_total {
-                    None => Field { v: None, flag: missing },
+                    None => Field {
+                        v: None,
+                        flag: missing,
+                    },
                     Some(v) => Self::scalar_field(v, self.range.total_power_max_kw),
                 };
                 (p, total, i)
             }
             None => (
-                [Field { v: None, flag: missing }; 3],
-                Field { v: None, flag: missing },
-                [Field { v: None, flag: missing }; 3],
+                [Field {
+                    v: None,
+                    flag: missing,
+                }; 3],
+                Field {
+                    v: None,
+                    flag: missing,
+                },
+                [Field {
+                    v: None,
+                    flag: missing,
+                }; 3],
             ),
         };
 
@@ -1564,9 +1584,17 @@ impl DisplayDataProvider {
     /// 越界 → RangeError（值 None，不补 0）。
     fn phase_fields(raw: Option<[f64; 3]>, max: f64, missing: FieldFlag) -> [Field; 3] {
         match raw {
-            None => [Field { v: None, flag: missing }; 3],
+            None => {
+                [Field {
+                    v: None,
+                    flag: missing,
+                }; 3]
+            }
             Some(arr) => {
-                let mut out = [Field { v: None, flag: missing }; 3];
+                let mut out = [Field {
+                    v: None,
+                    flag: missing,
+                }; 3];
                 for (i, v) in arr.iter().enumerate() {
                     out[i] = Self::scalar_field(*v, max);
                 }
@@ -1666,7 +1694,8 @@ impl LoopbackHttpPublisher {
     async fn handle(mut stream: TcpStream, latest: SharedLatest) -> std::io::Result<()> {
         // O3：整段请求头读取套**总时限**（非每字节各自计时）——慢速滴字节的对端同样无法长期
         // 占用本 task（每连接独立 task，accept 无并发上限，此超时是最廉价的兜底）。
-        let head = match tokio::time::timeout(HEAD_READ_TIMEOUT, Self::read_head(&mut stream)).await {
+        let head = match tokio::time::timeout(HEAD_READ_TIMEOUT, Self::read_head(&mut stream)).await
+        {
             Ok(Ok(h)) => h,
             Ok(Err(e)) => return Err(e),
             Err(_) => return Ok(()), // 超时：直接关闭连接（渲染端本就有 2s GET 超时）
@@ -1851,9 +1880,27 @@ mod tests {
         assert_eq!(f.soc_flag, FieldFlag::Valid);
         assert_eq!(f.run_state, Some(RunState::Discharge));
         assert!(f.pcs_online);
-        assert_eq!(f.p_phase[0], Field { v: Some(12.3), flag: FieldFlag::Valid });
-        assert_eq!(f.p_total, Field { v: Some(36.1), flag: FieldFlag::Valid });
-        assert_eq!(f.i_phase[2], Field { v: Some(22.3), flag: FieldFlag::Valid });
+        assert_eq!(
+            f.p_phase[0],
+            Field {
+                v: Some(12.3),
+                flag: FieldFlag::Valid
+            }
+        );
+        assert_eq!(
+            f.p_total,
+            Field {
+                v: Some(36.1),
+                flag: FieldFlag::Valid
+            }
+        );
+        assert_eq!(
+            f.i_phase[2],
+            Field {
+                v: Some(22.3),
+                flag: FieldFlag::Valid
+            }
+        );
         // 放(3) + Σp 显著为正 → 方向一致
         assert!(!f.inconsistency);
     }
@@ -1937,7 +1984,7 @@ mod tests {
         let three = mupc_intercore::transport::ThreePhaseRead {
             i_phase: Some([500.0, 22.1, 22.3]), // 500A > current_max 300 → RangeError
             p_phase: Some([1000.0, 11.8, 12.0]), // 1000kW > phase_power_max 100 → RangeError
-            p_total: Some(1000.0),               // 1000kW > total_power_max 300 → RangeError
+            p_total: Some(1000.0),              // 1000kW > total_power_max 300 → RangeError
         };
         let mut provider = DisplayDataProvider::new(
             ai.clone(),
@@ -1947,16 +1994,49 @@ mod tests {
             Arc::new(Mutex::new(None)),
         );
         let f = provider.sample_once().await;
-        assert_eq!(f.p_phase[0], Field { v: None, flag: FieldFlag::RangeError });
-        assert_eq!(f.p_phase[1], Field { v: Some(11.8), flag: FieldFlag::Valid });
-        assert_eq!(f.i_phase[0], Field { v: None, flag: FieldFlag::RangeError });
-        assert_eq!(f.i_phase[1], Field { v: Some(22.1), flag: FieldFlag::Valid });
-        assert_eq!(f.p_total, Field { v: None, flag: FieldFlag::RangeError });
+        assert_eq!(
+            f.p_phase[0],
+            Field {
+                v: None,
+                flag: FieldFlag::RangeError
+            }
+        );
+        assert_eq!(
+            f.p_phase[1],
+            Field {
+                v: Some(11.8),
+                flag: FieldFlag::Valid
+            }
+        );
+        assert_eq!(
+            f.i_phase[0],
+            Field {
+                v: None,
+                flag: FieldFlag::RangeError
+            }
+        );
+        assert_eq!(
+            f.i_phase[1],
+            Field {
+                v: Some(22.1),
+                flag: FieldFlag::Valid
+            }
+        );
+        assert_eq!(
+            f.p_total,
+            Field {
+                v: None,
+                flag: FieldFlag::RangeError
+            }
+        );
     }
 
     // ── 6.6 一致性纯函数（run 与 Σp 方向）──
     fn pf(v: f64) -> Field {
-        Field { v: Some(v), flag: FieldFlag::Valid }
+        Field {
+            v: Some(v),
+            flag: FieldFlag::Valid,
+        }
     }
 
     #[test]
@@ -1988,7 +2068,10 @@ mod tests {
             3.0
         ));
         // 任一相缺失 → 无佐证输入 → false（不妄断）
-        let miss = Field { v: None, flag: FieldFlag::Offline };
+        let miss = Field {
+            v: None,
+            flag: FieldFlag::Offline,
+        };
         assert!(!DisplayDataProvider::check_inconsistency(
             charge,
             &[pf(2.0), pf(2.0), miss],
@@ -1999,7 +2082,10 @@ mod tests {
     // ── LoopbackHttpPublisher：GET 最新帧 / 未就绪 503 / 错误路径 404 ──
 
     fn sample_frame(soc: Option<f64>) -> DisplayFrame {
-        let missing = Field { v: None, flag: FieldFlag::NotRead };
+        let missing = Field {
+            v: None,
+            flag: FieldFlag::NotRead,
+        };
         DisplayFrame {
             version: PROTO_VERSION,
             // v3 新增段（§15.2.2）：本用例不涉外设 ⇒ 取默认（available=false）
@@ -2007,8 +2093,16 @@ mod tests {
             seq: 7,
             ts_ms: 1_757_412_000_000,
             soc,
-            soc_source: if soc.is_some() { SocSource::Bms } else { SocSource::Lost },
-            soc_flag: if soc.is_some() { FieldFlag::Valid } else { FieldFlag::Offline },
+            soc_source: if soc.is_some() {
+                SocSource::Bms
+            } else {
+                SocSource::Lost
+            },
+            soc_flag: if soc.is_some() {
+                FieldFlag::Valid
+            } else {
+                FieldFlag::Offline
+            },
             run_state: Some(RunState::Charge),
             pcs_online: true,
             p_phase: [missing; 3],
@@ -2082,7 +2176,10 @@ mod tests {
         let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", LATEST_PATH);
         let resp = connect_and_get(addr, &req).await;
         let text = String::from_utf8_lossy(&resp);
-        assert!(text.starts_with("HTTP/1.1 200 OK"), "响应应为 200: {text:?}");
+        assert!(
+            text.starts_with("HTTP/1.1 200 OK"),
+            "响应应为 200: {text:?}"
+        );
         // 解析 body（header 与 body 以空行分隔）
         let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
         let frame: DisplayFrame = serde_json::from_str(body).unwrap();
@@ -2327,9 +2424,7 @@ mod tests {
         async fn status(&self) -> mupc_display_proto::interlock::InterlockView {
             self.0.clone()
         }
-        async fn request_release(
-            &self,
-        ) -> Result<(), mupc_display_proto::InterlockReject> {
+        async fn request_release(&self) -> Result<(), mupc_display_proto::InterlockReject> {
             Ok(())
         }
         async fn ack_m1(&self) -> Result<(), mupc_display_proto::InterlockReject> {
@@ -2391,7 +2486,8 @@ mod tests {
         async fn handle_command(
             &self,
             cmd: mupc_gateway::iec104::command::ControlCommand,
-        ) -> Result<mupc_gateway::iec104::command::CommandResponse, mupc_common::MupcError> {
+        ) -> Result<mupc_gateway::iec104::command::CommandResponse, mupc_common::MupcError>
+        {
             Ok(mupc_gateway::iec104::command::CommandResponse {
                 cmd_id: cmd.cmd_id,
                 success: false,
@@ -2432,12 +2528,22 @@ mod tests {
             LinkState::NotConfigured,
             "未装配 Iec104Server ⇒「未配置」（不得是 Unknown/Connected）"
         );
-        assert!(d.uptime_secs.is_some(), "uptime 真源存在（零点由调用方传入）");
-        assert_ne!(d.hmi_channel, LinkState::Connected, "缺省/不可得绝不落在已连接");
+        assert!(
+            d.uptime_secs.is_some(),
+            "uptime 真源存在（零点由调用方传入）"
+        );
+        assert_ne!(
+            d.hmi_channel,
+            LinkState::Connected,
+            "缺省/不可得绝不落在已连接"
+        );
 
         let offline =
             SystemDeviceSource::new(stub_client(None, false, None), ai, None, Instant::now());
-        assert_eq!(offline.read_device().await.intercore, LinkState::Disconnected);
+        assert_eq!(
+            offline.read_device().await.intercore,
+            LinkState::Disconnected
+        );
     }
 
     /// **IEC 104 链路状态接线**（U-59 / L-5）：装配了服务器即问它，枚举 1:1 映射，
@@ -2512,7 +2618,11 @@ mod tests {
         // 人工零点：1 小时前（模拟"进程已启动 1 h"）。绝不依赖真实进程起点。
         let zero = Instant::now() - Duration::from_secs(3600);
         let src = SystemDeviceSource::new(stub_client(None, true, None), ai, None, zero);
-        let up = src.read_device().await.uptime_secs.expect("uptime 真源存在");
+        let up = src
+            .read_device()
+            .await
+            .uptime_secs
+            .expect("uptime 真源存在");
         assert!(
             (3600..3600 + 60).contains(&up),
             "uptime 必须按**传入零点**计（1 h 前 ⇒ ≈3600 s）；按构造时刻计会得到 ~0。实际 {up}"
@@ -2552,8 +2662,14 @@ mod tests {
         let d = SystemDeviceSource::new(stub_client(None, true, None), ai, None, Instant::now())
             .read_device()
             .await;
-        assert_eq!(d.cpu_temp_c, None, "非 Linux 无真温度源 ⇒「未知」，不得上桩值");
-        assert_eq!(d.mem_used_pct, None, "非 Linux 无真内存源 ⇒「未知」，不得上桩值");
+        assert_eq!(
+            d.cpu_temp_c, None,
+            "非 Linux 无真温度源 ⇒「未知」，不得上桩值"
+        );
+        assert_eq!(
+            d.mem_used_pct, None,
+            "非 Linux 无真内存源 ⇒「未知」，不得上桩值"
+        );
     }
 
     // ── P6 装置信息（F8，来源分列）──
@@ -2577,7 +2693,8 @@ mod tests {
         );
         if let Some(ip) = &info.mgmt_ipv4 {
             assert!(
-                ip.parse::<std::net::Ipv4Addr>().is_ok_and(|a| !a.is_loopback()),
+                ip.parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|a| !a.is_loopback()),
                 "管理 IP 不得是回环地址: {ip}"
             );
         }
@@ -2635,7 +2752,10 @@ mod tests {
     /// 事件类型 → 级别的显式规则（设计未定义映射，故本表即实现依据）。
     #[test]
     fn alarm_level_mapping_is_explicit() {
-        assert_eq!(alarm_level_of("south_station.s1.offline"), AlarmLevel::Error);
+        assert_eq!(
+            alarm_level_of("south_station.s1.offline"),
+            AlarmLevel::Error
+        );
         assert_eq!(alarm_level_of("interlock.triggered"), AlarmLevel::Error);
         assert_eq!(alarm_level_of("interlock.stop_failed"), AlarmLevel::Error);
         assert_eq!(alarm_level_of("interlock.cleared"), AlarmLevel::Info);
@@ -2684,7 +2804,10 @@ mod tests {
         let now = chrono::Utc::now();
         repo.with_event(now - chrono::Duration::days(30), "old.event", "很久以前");
         repo.with_event(now - chrono::Duration::minutes(1), "new.event", "刚刚");
-        let items = StorageAlarmSource::new(repo, 10).read_alarms().await.unwrap();
+        let items = StorageAlarmSource::new(repo, 10)
+            .read_alarms()
+            .await
+            .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].message, "刚刚");
     }
@@ -2703,7 +2826,10 @@ mod tests {
         assert!(!unavail.available, "读失败 ⇒ 源不可用");
         assert!(unavail.items.is_empty());
         assert!(none.available, "真 0 条 ⇒ 源可用（「无告警」）");
-        assert!(none.items.is_empty(), "两者 items 同为空 ⇒ 唯有 available 能区分语义");
+        assert!(
+            none.items.is_empty(),
+            "两者 items 同为空 ⇒ 唯有 available 能区分语义"
+        );
         assert_ne!(unavail.available, none.available);
     }
 
@@ -2712,7 +2838,10 @@ mod tests {
     async fn frame_alarms_unwired_is_unavailable_not_empty() {
         let mut p = bare_provider(&cfg());
         let f = p.sample_once().await;
-        assert!(!f.alarms.available, "未接线 ⇒「告警源不可用」，不是「无告警」");
+        assert!(
+            !f.alarms.available,
+            "未接线 ⇒「告警源不可用」，不是「无告警」"
+        );
         assert!(f.alarms.items.is_empty());
         assert_eq!(f.alarms.ts_ms, 0, "未采集 ⇒ ts_ms=0（契约：0 = 未采集）");
     }
@@ -2806,7 +2935,10 @@ mod tests {
         assert!(out.len() <= mupc_display_proto::MAX_ALARM_MESSAGE_BYTES);
         assert!(out.ends_with(ALARM_TRUNCATION_MARK));
         let kept = &out[..out.len() - ALARM_TRUNCATION_MARK.len()];
-        assert!(kept.chars().all(|c| c == '台' || c == '区'), "不得截出半个汉字");
+        assert!(
+            kept.chars().all(|c| c == '台' || c == '区'),
+            "不得截出半个汉字"
+        );
         // 恰好等于上限 ⇒ 不动
         let exact = "x".repeat(mupc_display_proto::MAX_ALARM_MESSAGE_BYTES);
         assert_eq!(truncate_alarm_message(&exact), exact);
@@ -2835,9 +2967,15 @@ mod tests {
             }));
         let src = InterlockApiSource::new(api, 30);
         let sec = src.read_interlock().await.unwrap();
-        assert!(sec.available, "契约视图的 available 如实透传（不再硬编码 true）");
+        assert!(
+            sec.available,
+            "契约视图的 available 如实透传（不再硬编码 true）"
+        );
         assert!(sec.enabled && sec.latched && sec.stop_failed);
-        assert_eq!(sec.release_hold_secs, 30, "来自 io.release_hold_secs（覆写控制器自报的 999）");
+        assert_eq!(
+            sec.release_hold_secs, 30,
+            "来自 io.release_hold_secs（覆写控制器自报的 999）"
+        );
         assert_eq!(
             sec.sources,
             vec![InterlockSourceItem {
@@ -2848,7 +2986,10 @@ mod tests {
         assert_eq!(sec.fault_lamp, Some(true));
         assert_eq!(sec.run_lamp, Some(false));
         assert!(sec.ts_ms > 0, "ts_ms 为采集时刻");
-        assert_ne!(sec.ts_ms, 777, "必须换成本层采集时刻，不得沿用控制器自报时刻");
+        assert_ne!(
+            sec.ts_ms, 777,
+            "必须换成本层采集时刻，不得沿用控制器自报时刻"
+        );
     }
 
     /// **单元 K 交接项**：灯态 `None`（"未知"）必须**如实上屏**，不得被吞成"灯灭"。
@@ -2869,10 +3010,17 @@ mod tests {
                 run_lamp: None,
                 ..Default::default()
             }));
-        let sec = InterlockApiSource::new(api, 30).read_interlock().await.unwrap();
+        let sec = InterlockApiSource::new(api, 30)
+            .read_interlock()
+            .await
+            .unwrap();
         assert_eq!(sec.fault_lamp, None, "「灯未知」必须如实透传，不得臆造为灭");
         assert_eq!(sec.run_lamp, None, "同上");
-        assert_ne!(sec.fault_lamp, Some(false), "未知 ≠ 灭（IL-01.6 同族：语义不得互替）");
+        assert_ne!(
+            sec.fault_lamp,
+            Some(false),
+            "未知 ≠ 灭（IL-01.6 同族：语义不得互替）"
+        );
     }
 
     /// **本单元最重要的语义网之二**：联锁**状态不可用 ≠ 未联锁**。
@@ -2907,17 +3055,19 @@ mod tests {
     /// 也**不得**写成 `available=true, enabled=true, latched=false`（那是「未联锁」）。
     #[tokio::test]
     async fn interlock_disabled_is_known_state_not_unavailable() {
-        let mut p = bare_provider(&cfg()).with_slow_sources(
-            None,
-            None,
-            InterlockWiring::Disabled,
-        );
+        let mut p = bare_provider(&cfg()).with_slow_sources(None, None, InterlockWiring::Disabled);
         let f = p.sample_once().await;
-        assert!(f.interlock.available, "「功能未启用」是已知状态，不是「不可用」");
+        assert!(
+            f.interlock.available,
+            "「功能未启用」是已知状态，不是「不可用」"
+        );
         assert!(!f.interlock.enabled);
         assert!(!f.interlock.latched);
         assert_eq!(f.interlock.sources, Vec::<InterlockSourceItem>::new());
-        assert_eq!(f.interlock.fault_lamp, None, "未启用时灯态未知 → None，不臆造");
+        assert_eq!(
+            f.interlock.fault_lamp, None,
+            "未启用时灯态未知 → None，不臆造"
+        );
     }
 
     /// 装配点三态判定（[`interlock_wiring_for`]）：**三种「非已启用」语义必须互斥**。
@@ -2975,7 +3125,10 @@ mod tests {
     async fn interlock_unwired_is_unavailable_not_unlatched() {
         let mut p = bare_provider(&cfg());
         let f = p.sample_once().await;
-        assert!(!f.interlock.available, "未接线 ⇒「联锁状态不可用」，不是「未联锁」");
+        assert!(
+            !f.interlock.available,
+            "未接线 ⇒「联锁状态不可用」，不是「未联锁」"
+        );
         assert!(!f.interlock.latched);
         assert_eq!(f.interlock.ts_ms, 0, "未采集 ⇒ ts_ms=0");
     }
@@ -3068,11 +3221,7 @@ mod tests {
             true,
             latest.clone(),
         )
-        .with_slow_sources(
-            Some(slow.clone()),
-            None,
-            InterlockWiring::Unwired,
-        );
+        .with_slow_sources(Some(slow.clone()), None, InterlockWiring::Unwired);
         let h = tokio::spawn(provider.run());
 
         let f = wait_for_frame(&latest, Duration::from_millis(500))
@@ -3284,7 +3433,11 @@ mod tests {
         let f = wait_for_frame(&latest, Duration::from_millis(1200))
             .await
             .expect("慢拍变更应触发提前组帧（纯主拍下首帧要 3 s）");
-        assert_eq!(f.device.uptime_secs, Some(11), "提前组帧须带上新采到的装置段");
+        assert_eq!(
+            f.device.uptime_secs,
+            Some(11),
+            "提前组帧须带上新采到的装置段"
+        );
         assert!(dev.count() >= 1);
         h.abort();
     }
@@ -3330,7 +3483,11 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_millis(1500);
         let mut seen = None;
         while std::time::Instant::now() < deadline {
-            seen = latest.lock().unwrap().as_ref().map(|f| f.device.uptime_secs);
+            seen = latest
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|f| f.device.uptime_secs);
             if seen == Some(Some(6)) {
                 break;
             }
@@ -3429,7 +3586,10 @@ mod tests {
             "内容未变时不得额外组帧（ts_ms 变化不算内容变更），实际推进 {} 次",
             seq_now - seq_after_first
         );
-        assert!(dev.count() >= 10, "慢拍本身仍须按 50 ms 采集（只是不触发组帧）");
+        assert!(
+            dev.count() >= 10,
+            "慢拍本身仍须按 50 ms 采集（只是不触发组帧）"
+        );
         h.abort();
     }
 
@@ -3437,7 +3597,9 @@ mod tests {
     // U-73 外设段（慢拍 D 取数接线 + 组帧守卫；设计 §15.1 / §15.2.4 / §15.8.1 T-8..T-12/T-24）
     // ═══════════════════════════════════════════════════════════════════════════
 
-    use mupc_data_processing::latest_values::{LatestValues, PointId as PId, PointQuality, PointValue};
+    use mupc_data_processing::latest_values::{
+        LatestValues, PointId as PId, PointQuality, PointValue,
+    };
 
     /// 测试用南向配置（生产形状裁剪：bms 标量+位块 / meter_batt / fire / hvac + 台区总表）。
     /// 地址与生产同口径（`_k ↔ 起始 addr + k − 1`）⇒ `point_table::lookup_in` 能命中（W-2）。
@@ -3592,7 +3754,11 @@ stations:
         );
         let sec = StationPeripheralSource::new(latest, plan, 7).build_section(now);
 
-        let fire = sec.stations.iter().find(|s| s.role == PeriphRole::Fire).unwrap();
+        let fire = sec
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Fire)
+            .unwrap();
         assert!(!fire.online, "fire 站从未轮询成功 ⇒ 离线");
         assert_eq!(
             {
@@ -3766,7 +3932,11 @@ stations:
         latest.mark_station_polled("bms", now);
         // 一个点都没写 ⇒ 该站全部白名单点都是"点缺"
         let sec = StationPeripheralSource::new(latest, plan, 0).build_section(now);
-        let bms = sec.stations.iter().find(|s| s.role == PeriphRole::Battery).unwrap();
+        let bms = sec
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Battery)
+            .unwrap();
         assert!(bms.online, "站在采集窗口内");
         let bms_io = bms.blocks.iter().find(|b| b.name == "bms_io").unwrap();
         assert_eq!(
@@ -3800,12 +3970,26 @@ stations:
         latest.mark_station_offline("bms");
         fill(&latest, &[("hvac", "hvac_in_1", Some(24.5), now, ok())]);
         let sec = StationPeripheralSource::new(latest, plan, 0).build_section(now);
-        let bms = sec.stations.iter().find(|s| s.role == PeriphRole::Battery).unwrap();
-        let hvac = sec.stations.iter().find(|s| s.role == PeriphRole::Hvac).unwrap();
+        let bms = sec
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Battery)
+            .unwrap();
+        let hvac = sec
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Hvac)
+            .unwrap();
         assert!(!bms.online, "离线站 ⇒ online=false");
-        assert_eq!(bms.last_ok_ms, 0, "离线后 `station_poll_ms` 被清除 ⇒ 0（屏显 --）");
+        assert_eq!(
+            bms.last_ok_ms, 0,
+            "离线后 `station_poll_ms` 被清除 ⇒ 0（屏显 --）"
+        );
         assert!(
-            bms.blocks.iter().flat_map(|b| &b.values).all(|pv| pv.v.is_none()),
+            bms.blocks
+                .iter()
+                .flat_map(|b| &b.values)
+                .all(|pv| pv.v.is_none()),
             "站离线 ⇒ 该站全部点 v=None"
         );
         assert!(hvac.online, "其余站不受影响（站级隔离）");
@@ -3824,12 +4008,22 @@ stations:
         let latest = Arc::new(LatestValues::new(5));
         let now = 1_000_000u64;
         // 只写点、**不** `mark_station_polled`
-        fill(&latest, &[("bms", "bms_io_16", Some(650.0), now - 9_000, ok())]);
+        fill(
+            &latest,
+            &[("bms", "bms_io_16", Some(650.0), now - 9_000, ok())],
+        );
         let sec = StationPeripheralSource::new(latest, plan, 0).build_section(now);
-        let bms = sec.stations.iter().find(|s| s.role == PeriphRole::Battery).unwrap();
+        let bms = sec
+            .stations
+            .iter()
+            .find(|s| s.role == PeriphRole::Battery)
+            .unwrap();
         assert_eq!(bms.last_ok_ms, 0, "无「最后成功时刻」⇒ 0（显 --，不臆造）");
         assert!(
-            bms.blocks.iter().flat_map(|b| &b.values).all(|pv| pv.flag == FieldFlag::Offline),
+            bms.blocks
+                .iter()
+                .flat_map(|b| &b.values)
+                .all(|pv| pv.flag == FieldFlag::Offline),
             "从未成功轮询 ⇒ 站不 active ⇒ 全部 Offline"
         );
     }
@@ -3860,17 +4054,32 @@ stations:
         assert!(!ats("hvac", "hvac_di").contains(&26), "位 25 保留位不上屏");
         assert!(!ats("meter_batt", "mb_phase").contains(&7), "PT 对照不上屏");
         assert!(!ats("meter_batt", "mb_phase").contains(&8), "CT 对照不上屏");
-        assert_eq!(ats("bms", "bms_io").len(), 17, "bms_io 白名单 17 点（§15.5.2）");
-        assert_eq!(ats("bms", "bms_alarm").len(), 288, "告警位 288 点（位 200–487）");
+        assert_eq!(
+            ats("bms", "bms_io").len(),
+            17,
+            "bms_io 白名单 17 点（§15.5.2）"
+        );
+        assert_eq!(
+            ats("bms", "bms_alarm").len(),
+            288,
+            "告警位 288 点（位 200–487）"
+        );
         let bms_io = plan
             .iter()
             .find(|s| s.id == "bms")
             .and_then(|s| s.blocks.iter().find(|b| b.name == "bms_io"))
             .unwrap();
-        assert_eq!(bms_io.renames, vec![(19u16, "soc".to_string())], "点名覆盖投影");
+        assert_eq!(
+            bms_io.renames,
+            vec![(19u16, "soc".to_string())],
+            "点名覆盖投影"
+        );
         // `soc`（bms_io_19）**不在**本增量白名单内：§15.5.2 段「电池」未列它，且 330 = 17 + 8
         // + 9 + 4 + 4 + 288 的等式只有"bms_io 取 17 点"成立（SOC 仍由 P1 的 F1 展示）
-        assert!(!bms_io.ats.contains(&19), "SOC 不在外设白名单（P6 电池段不重复展示 F1）");
+        assert!(
+            !bms_io.ats.contains(&19),
+            "SOC 不在外设白名单（P6 电池段不重复展示 F1）"
+        );
         assert!(!bms_io.is_bit, "`input` 块 ⇒ 非位块");
         assert_eq!(ats("bms", "bms_alarm").len(), 288);
         let alarm_blk = plan
@@ -3878,7 +4087,10 @@ stations:
             .find(|s| s.id == "bms")
             .and_then(|s| s.blocks.iter().find(|b| b.name == "bms_alarm"))
             .unwrap();
-        assert!(alarm_blk.is_bit, "`discrete` 块 ⇒ is_bit（位点跳过「本轮未更新」判据）");
+        assert!(
+            alarm_blk.is_bit,
+            "`discrete` 块 ⇒ is_bit（位点跳过「本轮未更新」判据）"
+        );
     }
 
     /// **T-12：内容比较忽略 `ts_ms` / `last_ok_ms` / 块 `ts_ms`**（否则 500 ms 兜底 tick 会把
@@ -3895,9 +4107,15 @@ stations:
         let a = src.build_section(now);
         // 「同一轮成功轮询、值一字未改」——兜底 tick 每 500 ms 都会发生的事：时标前进、内容不变
         latest.mark_station_polled("bms", now + 500);
-        fill(&latest, &[("bms", "bms_io_16", Some(650.0), now + 500, ok())]);
+        fill(
+            &latest,
+            &[("bms", "bms_io_16", Some(650.0), now + 500, ok())],
+        );
         let b = src.build_section(now + 500);
-        assert_ne!(a.stations[0].last_ok_ms, b.stations[0].last_ok_ms, "前提：时标确实前进了");
+        assert_ne!(
+            a.stations[0].last_ok_ms, b.stations[0].last_ok_ms,
+            "前提：时标确实前进了"
+        );
         assert_eq!(
             at_of(&a, PeriphRole::Battery, "bms_io", 16).flag,
             FieldFlag::Valid
@@ -3907,7 +4125,10 @@ stations:
             "只前进时标（值不变）不得判为内容变更（否则发布率打满 4 Hz）"
         );
         // 值变 ⇒ 判变更
-        fill(&latest, &[("bms", "bms_io_16", Some(651.0), now + 500, ok())]);
+        fill(
+            &latest,
+            &[("bms", "bms_io_16", Some(651.0), now + 500, ok())],
+        );
         let c = src.build_section(now + 500);
         assert!(peripherals_changed(&a, &c), "值变化必须判为内容变更");
         // 在线态变 ⇒ 判变更（站离线要尽快上屏）
@@ -4038,7 +4259,10 @@ stations:
             *g = fire_det_section(119);
         }
         let frame = p.sample_once().await;
-        assert!(frame.peripherals.available, "裁剪 ≠ 段不可用（不得整段降级）");
+        assert!(
+            frame.peripherals.available,
+            "裁剪 ≠ 段不可用（不得整段降级）"
+        );
         assert_eq!(
             frame.peripherals.truncated,
             vec!["fire_det:119→111".to_string()],
@@ -4102,7 +4326,10 @@ stations:
             !frame.peripherals.available,
             "兜底 ⇒ 段置不可用（屏显「外设数据不可用」）"
         );
-        assert!(frame.peripherals.stations.is_empty(), "载荷已清空（仅翻布尔位不减字节）");
+        assert!(
+            frame.peripherals.stations.is_empty(),
+            "载荷已清空（仅翻布尔位不减字节）"
+        );
         assert!(frame.peripherals.truncated.is_empty());
         assert!(frame.to_json_slice().is_ok(), "既有段照常发布（不黑屏）");
         assert_eq!(frame.alarms.items.len(), 8, "既有告警段逐字段不受影响");
@@ -4123,7 +4350,10 @@ stations:
         let mut p = bare_provider(&cfg_slow(1000, 250, 500));
         assert!(!p.peripherals().available, "缓存缺省即「不可用」");
         let frame = p.sample_once().await;
-        assert!(!frame.peripherals.available, "EDGE-22：整段「外设数据不可用」");
+        assert!(
+            !frame.peripherals.available,
+            "EDGE-22：整段「外设数据不可用」"
+        );
         assert!(frame.peripherals.stations.is_empty(), "不得出空段伪装正常");
         assert!(frame.to_json_slice().is_ok(), "外设缺失不得拖垮既有段");
     }
@@ -4137,7 +4367,10 @@ stations:
         .expect("生产配置可解析");
         let prod = core.south_stations;
         let plan = peripheral_plan(&prod);
-        assert!(!plan.is_empty(), "生产配置必须投影出外设站（否则本用例无鉴别力）");
+        assert!(
+            !plan.is_empty(),
+            "生产配置必须投影出外设站（否则本用例无鉴别力）"
+        );
         let cat = crate::console_host::build_peripheral_catalog(&prod, &plan, 1);
         assert_eq!(cat.rev, mupc_display_proto::catalog_rev(&cat), "rev 自洽");
         assert_ne!(cat.rev, 0, "有内容的目录 rev 不得为 0（0 = 未取得）");
@@ -4149,7 +4382,10 @@ stations:
         ));
         // 段缓存的内容 = 采样器的产物；此处直接落缓存（等价于慢拍 D 跑过一拍，免 sleep）
         let seed = src_obj.snapshot(now_ms());
-        assert_eq!(seed.catalog_rev, cat.rev, "源产出的段必须带装配时的 catalog_rev");
+        assert_eq!(
+            seed.catalog_rev, cat.rev,
+            "源产出的段必须带装配时的 catalog_rev"
+        );
         let src: Arc<dyn PeripheralSource> = src_obj;
         let mut p = bare_provider(&cfg_slow(1000, 250, 500)).with_peripheral_source(src);
         {
@@ -4210,7 +4446,10 @@ stations:
             "首拍必须把初值带进段缓存"
         );
         // 值变化（**不发任何通知**）
-        fill(&latest, &[("hvac", "hvac_in_1", Some(25.5), now_ms(), ok())]);
+        fill(
+            &latest,
+            &[("hvac", "hvac_in_1", Some(25.5), now_ms(), ok())],
+        );
         // 兜底 tick：≤ 1 拍（这里给 2 拍余量，断言"收敛在上界量级内"）
         tokio::time::sleep(Duration::from_millis(period * 2)).await;
         assert_eq!(
@@ -4220,7 +4459,6 @@ stations:
         );
         h.abort();
     }
-
 
     /// **南向 role → 显示 role 的运行时映射**（T19 评审残留 ⑤③ 的落点，设计 §15.2.2 注）。
     ///
@@ -4244,5 +4482,4 @@ stations:
             .iter()
             .all(|(r, _, _)| *r != PeriphRole::Unknown));
     }
-
 }

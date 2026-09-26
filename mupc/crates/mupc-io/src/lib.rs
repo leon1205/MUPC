@@ -23,7 +23,9 @@ pub trait DigitalOut: Send + Sync {
 }
 
 /// sysfs 输入：export + direction in + 读 value
-pub struct SysfsIn { path: PathBuf }
+pub struct SysfsIn {
+    path: PathBuf,
+}
 impl SysfsIn {
     pub fn new(gpio: u32) -> Result<Self, IoError> {
         let gpio_dir = PathBuf::from(format!("/sys/class/gpio/gpio{gpio}"));
@@ -35,7 +37,9 @@ impl SysfsIn {
         }
         std::fs::write(gpio_dir.join("direction"), "in")
             .map_err(|e| IoError::Init(format!("dir gpio{gpio}"), e.to_string()))?;
-        Ok(Self { path: gpio_dir.join("value") })
+        Ok(Self {
+            path: gpio_dir.join("value"),
+        })
     }
 }
 impl DigitalIn for SysfsIn {
@@ -47,7 +51,9 @@ impl DigitalIn for SysfsIn {
 }
 
 /// sysfs 输出：export + direction out + 写 value（active 电平由上层换算）
-pub struct SysfsOut { path: PathBuf }
+pub struct SysfsOut {
+    path: PathBuf,
+}
 impl SysfsOut {
     pub fn new(gpio: u32) -> Result<Self, IoError> {
         let gpio_dir = PathBuf::from(format!("/sys/class/gpio/gpio{gpio}"));
@@ -58,7 +64,9 @@ impl SysfsOut {
         }
         std::fs::write(gpio_dir.join("direction"), "out")
             .map_err(|e| IoError::Init(format!("dir gpio{gpio}"), e.to_string()))?;
-        Ok(Self { path: gpio_dir.join("value") })
+        Ok(Self {
+            path: gpio_dir.join("value"),
+        })
     }
 }
 impl DigitalOut for SysfsOut {
@@ -69,28 +77,51 @@ impl DigitalOut for SysfsOut {
 }
 
 /// 测试 mock（内存电平）
-pub struct MockIn { level: std::sync::RwLock<bool> }
+pub struct MockIn {
+    level: std::sync::RwLock<bool>,
+}
 impl MockIn {
-    pub fn new() -> Self { Self::default() }
-    pub fn set(&self, high: bool) { *self.level.write().unwrap() = high; }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn set(&self, high: bool) {
+        *self.level.write().unwrap() = high;
+    }
 }
 impl Default for MockIn {
-    fn default() -> Self { Self { level: std::sync::RwLock::new(false) } }
+    fn default() -> Self {
+        Self {
+            level: std::sync::RwLock::new(false),
+        }
+    }
 }
 impl DigitalIn for MockIn {
-    fn read_level(&self) -> Result<bool, IoError> { Ok(*self.level.read().unwrap()) }
+    fn read_level(&self) -> Result<bool, IoError> {
+        Ok(*self.level.read().unwrap())
+    }
 }
-pub struct MockOut { level: std::sync::RwLock<bool> }
+pub struct MockOut {
+    level: std::sync::RwLock<bool>,
+}
 impl MockOut {
-    pub fn new() -> Self { Self::default() }
-    pub fn get(&self) -> bool { *self.level.read().unwrap() }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn get(&self) -> bool {
+        *self.level.read().unwrap()
+    }
 }
 impl Default for MockOut {
-    fn default() -> Self { Self { level: std::sync::RwLock::new(false) } }
+    fn default() -> Self {
+        Self {
+            level: std::sync::RwLock::new(false),
+        }
+    }
 }
 impl DigitalOut for MockOut {
     fn set_level(&self, high: bool) -> Result<(), IoError> {
-        *self.level.write().unwrap() = high; Ok(())
+        *self.level.write().unwrap() = high;
+        Ok(())
     }
 }
 
@@ -99,8 +130,14 @@ mod tests {
     use super::*;
     #[test]
     fn mock_in_out_roundtrip() {
-        let o = MockOut::new(); o.set_level(true).unwrap(); assert!(o.get());
-        o.set_level(false).unwrap(); assert!(!o.get());
-        let i = MockIn::new(); assert!(!i.read_level().unwrap()); i.set(true); assert!(i.read_level().unwrap());
+        let o = MockOut::new();
+        o.set_level(true).unwrap();
+        assert!(o.get());
+        o.set_level(false).unwrap();
+        assert!(!o.get());
+        let i = MockIn::new();
+        assert!(!i.read_level().unwrap());
+        i.set(true);
+        assert!(i.read_level().unwrap());
     }
 }

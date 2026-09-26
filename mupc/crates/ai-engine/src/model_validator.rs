@@ -84,12 +84,11 @@ pub fn validate_rknn_model(
     let path_str = model_path.display().to_string();
 
     // 1. 文件存在性检查
-    let metadata = std::fs::metadata(model_path).map_err(|e| {
-        AiEngineError::ModelValidationFailed {
+    let metadata =
+        std::fs::metadata(model_path).map_err(|e| AiEngineError::ModelValidationFailed {
             model_path: path_str.clone(),
             reason: format!("文件不存在或无法访问: {}", e),
-        }
-    })?;
+        })?;
 
     // 2. 文件大小检查
     if metadata.len() == 0 {
@@ -176,22 +175,20 @@ fn compute_sha256(path: &Path) -> Result<String, AiEngineError> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
-    let mut file = std::fs::File::open(path).map_err(|e| {
-        AiEngineError::ModelValidationFailed {
-            model_path: path.display().to_string(),
-            reason: format!("无法打开文件进行 SHA256 校验: {}", e),
-        }
+    let mut file = std::fs::File::open(path).map_err(|e| AiEngineError::ModelValidationFailed {
+        model_path: path.display().to_string(),
+        reason: format!("无法打开文件进行 SHA256 校验: {}", e),
     })?;
 
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 8192];
     loop {
-        let n = file.read(&mut buffer).map_err(|e| {
-            AiEngineError::ModelValidationFailed {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| AiEngineError::ModelValidationFailed {
                 model_path: path.display().to_string(),
                 reason: format!("读取文件失败: {}", e),
-            }
-        })?;
+            })?;
         if n == 0 {
             break;
         }
@@ -352,7 +349,13 @@ mod tests {
     #[test]
     fn test_model_type_names() {
         assert_eq!(PredictionModelType::LstmAttention.name(), "LSTM+Attention");
-        assert_eq!(PredictionModelType::BiLstmAttention.name(), "BiLSTM+Attention");
-        assert_eq!(PredictionModelType::ErrorCorrection.name(), "误差修正BiLSTM");
+        assert_eq!(
+            PredictionModelType::BiLstmAttention.name(),
+            "BiLSTM+Attention"
+        );
+        assert_eq!(
+            PredictionModelType::ErrorCorrection.name(),
+            "误差修正BiLSTM"
+        );
     }
 }

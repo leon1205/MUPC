@@ -68,7 +68,8 @@ fn blit(sink: &Rc<RefCell<Vec<u8>>>, area: Area, px: &[u8]) {
 
 /// 建一块显示 + 内存 sink（`Vec<u8>`）。
 fn harness() -> (Rc<RefCell<Vec<u8>>>, Display) {
-    let sink: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; (W * H) as usize * BYTES_PER_PIXEL]));
+    let sink: Rc<RefCell<Vec<u8>>> =
+        Rc::new(RefCell::new(vec![0u8; (W * H) as usize * BYTES_PER_PIXEL]));
     let mut disp = Display::create(W, H).expect("Display::create");
     let s = sink.clone();
     disp.set_flush_cb(move |area, px| blit(&s, area, px));

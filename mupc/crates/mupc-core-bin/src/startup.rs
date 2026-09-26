@@ -1221,9 +1221,9 @@ pub async fn initialize_all(
     //
     // `parking_lot::Mutex`（`observe` 需 `&mut`）：临界区**不含 await**（只做纯计算 + 取行），
     // 故不会跨 await 持锁（也就不用 `tokio::sync::Mutex`）。
-    let grid_aggregator = Arc::new(parking_lot::Mutex::new(
-        mupc_storage::GridAggregator::new(config.storage.grid_aggregate_period_ms),
-    ));
+    let grid_aggregator = Arc::new(parking_lot::Mutex::new(mupc_storage::GridAggregator::new(
+        config.storage.grid_aggregate_period_ms,
+    )));
     // 聚合行通道（T15/T16 遗留③）：生产端 = `SouthSink`（同步投递），消费端 = 下方
     // `grid_agg_timer`（**已注册的协作生产者**，也就是"唯一入队者"）。
     let (agg_tx, agg_rx) = aggregate_row_channel();
@@ -2873,7 +2873,11 @@ plugins: {}
         });
         assert_eq!(volt.value.value, Some(220.0));
         assert_eq!(volt.value.quality, PointQuality::Ok);
-        assert_eq!(latest.station_snapshot("meter_grid").len(), 6, "grid 6 个派生量照旧");
+        assert_eq!(
+            latest.station_snapshot("meter_grid").len(),
+            6,
+            "grid 6 个派生量照旧"
+        );
         // ② 样本**已转发**给聚合器（锚定到当前周期；跨周期才产行）
         assert!(
             agg.lock().current_start_ms().is_some(),
@@ -3016,7 +3020,11 @@ plugins: {}
             cos_phi: [Some(0.98), Some(0.97), Some(0.99)],
         };
         let s = grid_sample_from_package(&pkg(Some(full_phase.clone()), Some(50.0), Some(10.0)));
-        assert_eq!(s.u, [Some(220.0), None, Some(219.0)], "缺测相保持 None（不补 0）");
+        assert_eq!(
+            s.u,
+            [Some(220.0), None, Some(219.0)],
+            "缺测相保持 None（不补 0）"
+        );
         assert_eq!(s.i[0], Some(-10.0), "电流带符号原样透传");
         assert_eq!(s.p_total, Some(50.0), "顶层有功");
         assert_eq!(s.q_total, Some(10.0), "顶层无功");

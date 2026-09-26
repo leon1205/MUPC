@@ -5,7 +5,9 @@ pub mod repository;
 pub mod services;
 
 pub use errors::StorageError;
-pub use grid_aggregate::{AggregateRow, ChannelSpec, GridAggregator, GridSample, Quality, CHANNELS};
+pub use grid_aggregate::{
+    AggregateRow, ChannelSpec, GridAggregator, GridSample, Quality, CHANNELS,
+};
 pub use models::*;
 pub use repository::{
     init_pool, AssetRepository, DecisionRepository, EventRepository, FaultRepository,

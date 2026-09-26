@@ -88,8 +88,11 @@ pcs_profiles:
     /// 写临时档位 YAML，返回路径
     fn write_tmp(content: &str) -> std::path::PathBuf {
         let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("tai_cap_profile_{}_{}.yaml", std::process::id(), seq));
+        let path = std::env::temp_dir().join(format!(
+            "tai_cap_profile_{}_{}.yaml",
+            std::process::id(),
+            seq
+        ));
         std::fs::write(&path, content).unwrap();
         path
     }
@@ -105,23 +108,54 @@ pcs_profiles:
         let path = write_tmp(YAML_TOP_PCS80);
         let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), None).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(approx(cfg.i_rated, 133.0), "i_rated={} expect 133", cfg.i_rated);
-        assert!(approx(cfg.s_rated, 80.0), "s_rated={} expect 80", cfg.s_rated);
-        assert!(approx(cfg.dp_max, 26.7), "dp_max={} expect 26.7", cfg.dp_max);
-        assert!(approx(cfg.q_i_max, 26.7), "q_i_max={} expect 26.7", cfg.q_i_max);
+        assert!(
+            approx(cfg.i_rated, 133.0),
+            "i_rated={} expect 133",
+            cfg.i_rated
+        );
+        assert!(
+            approx(cfg.s_rated, 80.0),
+            "s_rated={} expect 80",
+            cfg.s_rated
+        );
+        assert!(
+            approx(cfg.dp_max, 26.7),
+            "dp_max={} expect 26.7",
+            cfg.dp_max
+        );
+        assert!(
+            approx(cfg.q_i_max, 26.7),
+            "q_i_max={} expect 26.7",
+            cfg.q_i_max
+        );
     }
 
     #[test]
     fn test_profile_key_cli_overrides_file_top() {
         // 文件顶行 pcs60_dual；CLI key=pcs80_kva 优先生效 → 80 档值
         let path = write_tmp(YAML_3_PROFILE);
-        let cfg =
-            load_tai_storage_config(Some(path.to_str().unwrap()), Some("pcs80_kva")).unwrap();
+        let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), Some("pcs80_kva")).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert!(approx(cfg.i_rated, 133.0), "i_rated={} expect 133", cfg.i_rated);
-        assert!(approx(cfg.s_rated, 80.0), "s_rated={} expect 80", cfg.s_rated);
-        assert!(approx(cfg.dp_max, 26.7), "dp_max={} expect 26.7", cfg.dp_max);
-        assert!(approx(cfg.q_i_max, 26.7), "q_i_max={} expect 26.7", cfg.q_i_max);
+        assert!(
+            approx(cfg.i_rated, 133.0),
+            "i_rated={} expect 133",
+            cfg.i_rated
+        );
+        assert!(
+            approx(cfg.s_rated, 80.0),
+            "s_rated={} expect 80",
+            cfg.s_rated
+        );
+        assert!(
+            approx(cfg.dp_max, 26.7),
+            "dp_max={} expect 26.7",
+            cfg.dp_max
+        );
+        assert!(
+            approx(cfg.q_i_max, 26.7),
+            "q_i_max={} expect 26.7",
+            cfg.q_i_max
+        );
     }
 
     #[test]
@@ -131,14 +165,34 @@ pcs_profiles:
         let cfg = load_tai_storage_config(Some(path.to_str().unwrap()), None).unwrap();
         let _ = std::fs::remove_file(&path);
         assert!(approx(cfg.dp_max, 20.0), "dp_max={} expect 20", cfg.dp_max);
-        assert!(approx(cfg.q_i_max, 18.0), "q_i_max={} expect 18", cfg.q_i_max);
-        assert!(approx(cfg.p_abs_trig, 1.5), "p_abs_trig={} expect 1.5", cfg.p_abs_trig);
-        assert!(approx(cfg.soc_cap_day, 0.8), "soc_cap_day={} expect 0.8", cfg.soc_cap_day);
+        assert!(
+            approx(cfg.q_i_max, 18.0),
+            "q_i_max={} expect 18",
+            cfg.q_i_max
+        );
+        assert!(
+            approx(cfg.p_abs_trig, 1.5),
+            "p_abs_trig={} expect 1.5",
+            cfg.p_abs_trig
+        );
+        assert!(
+            approx(cfg.soc_cap_day, 0.8),
+            "soc_cap_day={} expect 0.8",
+            cfg.soc_cap_day
+        );
         assert_eq!(cfg.window_size, 7);
         assert!(!cfg.s3_margin_limit);
         // L1 器件级不受 tuning 影响（恒取档位）
-        assert!(approx(cfg.i_rated, 110.0), "i_rated={} expect 110", cfg.i_rated);
-        assert!(approx(cfg.s_rated, 60.0), "s_rated={} expect 60", cfg.s_rated);
+        assert!(
+            approx(cfg.i_rated, 110.0),
+            "i_rated={} expect 110",
+            cfg.i_rated
+        );
+        assert!(
+            approx(cfg.s_rated, 60.0),
+            "s_rated={} expect 60",
+            cfg.s_rated
+        );
     }
 
     #[test]
@@ -312,8 +366,7 @@ pcs_profiles:
     #[test]
     fn test_missing_file_err() {
         // fail-fast：文件不存在 → Err（绝不静默落默认档）
-        let e = load_tai_storage_config(Some("/nonexistent/tai_profiles.yaml"), None)
-            .unwrap_err();
+        let e = load_tai_storage_config(Some("/nonexistent/tai_profiles.yaml"), None).unwrap_err();
         assert!(e.contains("读取档位文件"), "实际: {e}");
         assert!(
             e.contains("/nonexistent/tai_profiles.yaml"),

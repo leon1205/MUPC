@@ -63,7 +63,9 @@ use std::time::{Duration, Instant};
 use crate::lvgl::event::EventCode;
 use crate::lvgl::obj::{Obj, ObjFlag};
 use crate::lvgl::style::{Color, Part, State, Style, StyleSelector};
-use crate::lvgl::widgets::{self, Anim, Bar, Group, Label, Led, LongMode, ScrollContainer, TextButton};
+use crate::lvgl::widgets::{
+    self, Anim, Bar, Group, Label, Led, LongMode, ScrollContainer, TextButton,
+};
 use crate::lvgl::LvglError;
 use crate::ui::theme::{self, ChipSkin, ConfirmLevel, Dimens, Palette, TextSlot};
 
@@ -550,9 +552,7 @@ impl Stepper {
             return Err(LvglError::InvalidArgument("Stepper: 值区宽过大（溢出）"));
         };
         if total_w > Dimens::CONTENT_W {
-            return Err(LvglError::InvalidArgument(
-                "Stepper: 整件宽度超出内容区",
-            ));
+            return Err(LvglError::InvalidArgument("Stepper: 整件宽度超出内容区"));
         }
         let (lo, hi) = (min, max);
         let start = value.clamp(lo, hi);
@@ -835,7 +835,9 @@ impl MultiSelectChips {
         cell_w: i32,
     ) -> Result<Self, LvglError> {
         if columns == 0 {
-            return Err(LvglError::InvalidArgument("MultiSelectChips: columns 必须 ≥ 1"));
+            return Err(LvglError::InvalidArgument(
+                "MultiSelectChips: columns 必须 ≥ 1",
+            ));
         }
         if cell_w < Dimens::CHIP_MIN_W {
             return Err(LvglError::InvalidArgument(
@@ -847,16 +849,13 @@ impl MultiSelectChips {
         let Ok(cols_i32) = i32::try_from(columns) else {
             return Err(LvglError::InvalidArgument("MultiSelectChips: columns 过大"));
         };
-        let Some(row_w) = cols_i32
-            .checked_mul(cell_w)
-            .and_then(|w| {
-                // 列间呼吸缝：`(columns - 1) * GAP_GROUP`
-                cols_i32
-                    .saturating_sub(1)
-                    .checked_mul(Dimens::GAP_GROUP)
-                    .and_then(|g| w.checked_add(g))
-            })
-        else {
+        let Some(row_w) = cols_i32.checked_mul(cell_w).and_then(|w| {
+            // 列间呼吸缝：`(columns - 1) * GAP_GROUP`
+            cols_i32
+                .saturating_sub(1)
+                .checked_mul(Dimens::GAP_GROUP)
+                .and_then(|g| w.checked_add(g))
+        }) else {
             return Err(LvglError::InvalidArgument(
                 "MultiSelectChips: 行宽过大（溢出）",
             ));
@@ -1075,7 +1074,12 @@ impl WarnBanner {
         obj.add_style(&theme::warn_banner(), StyleSelector::main());
         obj.remove_flag(ObjFlag::CLICKABLE);
 
-        let icon = Rc::new(text_label(&obj, "⚠", TextSlot::SectionTitle, Palette::STALE)?);
+        let icon = Rc::new(text_label(
+            &obj,
+            "⚠",
+            TextSlot::SectionTitle,
+            Palette::STALE,
+        )?);
         icon.set_size(Dimens::ICON_SM, Dimens::ICON_SM);
         icon.set_pos(
             Dimens::BANNER_PAD,
@@ -1279,7 +1283,11 @@ pub struct ConfirmDialog {
 
 impl ConfirmDialog {
     /// 在 `parent`（通常 `lvgl::widgets::layer_top()`）下建模态弹层。
-    pub fn new(parent: &Obj, spec: &ConfirmSpec<'_>, level: ConfirmLevel) -> Result<Self, LvglError> {
+    pub fn new(
+        parent: &Obj,
+        spec: &ConfirmSpec<'_>,
+        level: ConfirmLevel,
+    ) -> Result<Self, LvglError> {
         // ── 遮罩：全屏、可点以拦截穿透；**不挂任何关闭回调** ⇒ 点击不关闭 ──
         let mask = Obj::create(parent)?;
         mask.set_size(Dimens::SCREEN_W, Dimens::SCREEN_H);
@@ -1311,20 +1319,39 @@ impl ConfirmDialog {
         let inner_w = Dimens::DIALOG_W - 2 * Dimens::DIALOG_PAD;
 
         // 顶部级别色条（4 px，与弹层上缘齐平 —— 弹层不带内边距，见 `theme::dialog_panel`）。
-        let _bar = decor(&panel, Dimens::DIALOG_W, BAR_H, &theme::dialog_level_bar(level))?;
+        let _bar = decor(
+            &panel,
+            Dimens::DIALOG_W,
+            BAR_H,
+            &theme::dialog_level_bar(level),
+        )?;
 
         // 标题。
-        let title = text_label(&panel, spec.title, TextSlot::PageTitle, Palette::TEXT_PRIMARY)?;
+        let title = text_label(
+            &panel,
+            spec.title,
+            TextSlot::PageTitle,
+            Palette::TEXT_PRIMARY,
+        )?;
         title.set_size(inner_w, TITLE_H);
         title.set_pos(x, TITLE_Y);
 
         // 分隔线。
-        let divider = decor(&panel, inner_w, theme::Stroke::THIN, &theme::card_head_bar(Palette::DIVIDER))?;
+        let divider = decor(
+            &panel,
+            inner_w,
+            theme::Stroke::THIN,
+            &theme::card_head_bar(Palette::DIVIDER),
+        )?;
         divider.set_pos(x, DIVIDER_Y);
 
         // 「影响范围」段。
-        let impact_head =
-            text_label(&panel, TEXT_IMPACT_HEADING, TextSlot::Label, Palette::TEXT_PRIMARY)?;
+        let impact_head = text_label(
+            &panel,
+            TEXT_IMPACT_HEADING,
+            TextSlot::Label,
+            Palette::TEXT_PRIMARY,
+        )?;
         impact_head.set_pos(x, IMPACT_HEAD_Y);
         let impact = text_label(&panel, spec.impact, TextSlot::Body, Palette::TEXT_SECOND)?;
         impact.set_size(inner_w, IMPACT_H);
@@ -1341,8 +1368,12 @@ impl ConfirmDialog {
         impact.set_pos(x, IMPACT_Y);
 
         // 「将修改的字段」+ 明细列表。
-        let detail_head =
-            text_label(&panel, TEXT_DETAILS_HEADING, TextSlot::Label, Palette::TEXT_PRIMARY)?;
+        let detail_head = text_label(
+            &panel,
+            TEXT_DETAILS_HEADING,
+            TextSlot::Label,
+            Palette::TEXT_PRIMARY,
+        )?;
         detail_head.set_pos(x, DETAILS_HEAD_Y);
         let list = ScrollContainer::create(&panel)?;
         list.set_size(inner_w, details_h.max(Dimens::DIALOG_ROW_H));
@@ -1433,7 +1464,10 @@ impl ConfirmDialog {
             bar.remove_flag(ObjFlag::CLICKABLE);
             bar.remove_flag(ObjFlag::SCROLLABLE);
             bar.add_style(&theme::progress_track(), StyleSelector::main());
-            bar.add_style(&theme::progress_indicator(), StyleSelector::part_of(Part::INDICATOR));
+            bar.add_style(
+                &theme::progress_indicator(),
+                StyleSelector::part_of(Part::INDICATOR),
+            );
             bar.set_hidden(true);
             Some(Rc::new(bar))
         } else {
@@ -1870,7 +1904,11 @@ impl EmptyState {
     /// 建空态（`icon` 由调用方给几何字形 —— 不同空态可有不同图形）。
     pub fn new(parent: &Obj, icon: &str, text: &str) -> Result<Self, LvglError> {
         let text_row_h = TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN;
-        let obj = layout_box(parent, Dimens::CONTENT_W, Dimens::ICON_LG + Dimens::GAP_MIN + text_row_h)?;
+        let obj = layout_box(
+            parent,
+            Dimens::CONTENT_W,
+            Dimens::ICON_LG + Dimens::GAP_MIN + text_row_h,
+        )?;
 
         // 水平居中用"等宽行容器 + `Obj::center`"两层结构（薄层没有对齐 API）。
         let icon_row = layout_box(&obj, Dimens::CONTENT_W, Dimens::ICON_LG)?;

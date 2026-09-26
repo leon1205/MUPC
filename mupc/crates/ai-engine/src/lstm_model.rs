@@ -94,7 +94,8 @@ impl LstmModel {
         }
 
         // v3.0: 计算输入步数 × 特征数
-        let input_steps = self.config.input_window_secs as usize / self.config.step_seconds as usize;
+        let input_steps =
+            self.config.input_window_secs as usize / self.config.step_seconds as usize;
         let input_features = self.config.input_features.max(1);
         let expected_len = input_steps * input_features;
 
@@ -110,7 +111,8 @@ impl LstmModel {
         let output = self.runtime.run(&input.history).await?;
 
         // v3.0: 输出步数取 output_horizon_secs / step_seconds (默认 15)
-        let output_steps = self.config.output_horizon_secs as usize / self.config.step_seconds as usize;
+        let output_steps =
+            self.config.output_horizon_secs as usize / self.config.step_seconds as usize;
 
         // v2.16: 输出维度校验（原静默 take 截断 → 显式报错）
         if output.len() < output_steps {
@@ -375,7 +377,7 @@ mod tests {
             step_seconds: 60,         // 测试用 1 分钟步长（小步长便于构造数据）
             quantization: crate::config::QuantizationType::INT8,
             expected_sha256: None,
-            input_features: 1,        // 测试用单变量模式（向后兼容）
+            input_features: 1, // 测试用单变量模式（向后兼容）
             yesterday_offset_steps: 96,
         }
     }

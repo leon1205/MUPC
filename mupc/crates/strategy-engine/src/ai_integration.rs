@@ -293,12 +293,10 @@ impl AiIntegrator {
         };
         let now = std::time::Instant::now();
         let value_pct = resolve_soc_source(bms, intercore, existing, now, Self::DATA_STALE_AFTER);
-        let bms_fresh = bms.is_some_and(|(_, ts)| {
-            now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER
-        });
-        let intercore_fresh = intercore.is_some_and(|(_, ts)| {
-            now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER
-        });
+        let bms_fresh =
+            bms.is_some_and(|(_, ts)| now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER);
+        let intercore_fresh = intercore
+            .is_some_and(|(_, ts)| now.saturating_duration_since(ts) <= Self::DATA_STALE_AFTER);
         let source = if bms_fresh {
             SocSourceKind::Bms
         } else if intercore_fresh {
@@ -395,10 +393,8 @@ impl AiIntegrator {
                             // 在块内结束（不跨 await 持有），否则破坏 run_fallback_strategies 经
                             // tokio::spawn 驱动的 Send 约束。
                             let is_same = {
-                                let mut last_sent = self
-                                    .last_sent_tai
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
+                                let mut last_sent =
+                                    self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner());
                                 if *last_sent == Some((p, q)) {
                                     true
                                 } else {
@@ -413,7 +409,8 @@ impl AiIntegrator {
                             if let Err(e) = client.send_tai_command(p, q, "fallback").await {
                                 // 遗留待办 A（2026-09-09）：核间断线 send 失败 → 清 last_sent_tai 缓存，
                                 // 重连后目标值不变也会下一拍重发（否则缓存误导节流跳过，PCS 停等）。
-                                *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    None;
                                 tracing::warn!("台区储能分相指令下发失败: {:?}", e);
                             } else {
                                 tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
@@ -916,12 +913,24 @@ mod tests {
         let stale = std::time::Duration::from_secs(5);
         // BMS fresh 优先于核间（双源皆 fresh 时 BMS 胜——安全排序，防 soc_protect 被更旧核间值主导）
         assert_eq!(
-            resolve_soc_source(Some((65.5, fresh_ts)), Some((42.0, fresh_ts)), None, now, stale),
+            resolve_soc_source(
+                Some((65.5, fresh_ts)),
+                Some((42.0, fresh_ts)),
+                None,
+                now,
+                stale
+            ),
             Some(65.5)
         );
         // BMS stale → 核间 fresh 接管（实时回落核心：BMS 掉线后活读核间生效）
         assert_eq!(
-            resolve_soc_source(Some((65.5, stale_ts)), Some((42.0, fresh_ts)), None, now, stale),
+            resolve_soc_source(
+                Some((65.5, stale_ts)),
+                Some((42.0, fresh_ts)),
+                None,
+                now,
+                stale
+            ),
             Some(42.0)
         );
         // 双 stale → 保留 existing（不置 None）
@@ -984,13 +993,7 @@ mod tests {
             stale
         ));
         // 双源从未注入（None）+ existing Some → 降级态
-        assert!(is_dual_source_lost(
-            None,
-            None,
-            Some(30.0),
-            now,
-            stale
-        ));
+        assert!(is_dual_source_lost(None, None, Some(30.0), now, stale));
         // 双超期 + existing None → 纯无 SOC 正常态，不 warn
         assert!(!is_dual_source_lost(
             Some((65.5, stale_ts)),
@@ -1022,7 +1025,11 @@ mod tests {
         // 场景 B：pkg 无 soc（None）→ 同覆盖为 BMS 值
         let mut pkg_none = create_test_pkg_with_soc(None);
         i.apply_soc_source(&mut pkg_none).await;
-        assert_eq!(pkg_none.battery.soc, Some(65.5), "BMS fresh 应写入 battery.soc");
+        assert_eq!(
+            pkg_none.battery.soc,
+            Some(65.5),
+            "BMS fresh 应写入 battery.soc"
+        );
     }
 
     /// S3b-1b SOC 双源（S3b-1d）：无 BMS 注入 → apply_soc_source 不误写。无 client 时 BMS 非 fresh
@@ -1038,7 +1045,11 @@ mod tests {
         // 已带核间/南向 soc 值 → 无 client 时不活读覆盖 → existing(Some(42.0)) 保持
         let mut pkg_have = create_test_pkg_with_soc(Some(42.0));
         i.apply_soc_source(&mut pkg_have).await;
-        assert_eq!(pkg_have.battery.soc, Some(42.0), "BMS 无注入不得覆盖既有 soc");
+        assert_eq!(
+            pkg_have.battery.soc,
+            Some(42.0),
+            "BMS 无注入不得覆盖既有 soc"
+        );
     }
 
     /// S3b-1b SOC 双源（S3b-1d）：BMS 超期 → 触发回落（无条件活读核间）；无 client 时活读返回
@@ -1057,7 +1068,10 @@ mod tests {
         i.apply_soc_source(&mut pkg).await;
         // 无 intercore_client → 活读分支返回 None → resolve(None, None, existing(None)) → None 保持
         // （有 client 时核间 fresh 接管的裁决已由 resolve_soc_source 纯函数测覆盖）
-        assert_eq!(pkg.battery.soc, None, "BMS 超期不得覆盖；无核间 client 时回落不写");
+        assert_eq!(
+            pkg.battery.soc, None,
+            "BMS 超期不得覆盖；无核间 client 时回落不写"
+        );
     }
 
     // ── 12-显示终端 Dev-B3：SOC 展示快照（soc_display_snapshot / resolve_soc_core）──
@@ -1153,7 +1167,11 @@ mod tests {
                 - std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS + 100),
         ));
         let r = i.soc_display_snapshot().await;
-        assert_eq!(r.value_pct, Some(42.0), "BMS 超期 → 核间 fresh 接管（实时回落）");
+        assert_eq!(
+            r.value_pct,
+            Some(42.0),
+            "BMS 超期 → 核间 fresh 接管（实时回落）"
+        );
         assert_eq!(r.source, SocSourceKind::PcsReg1010);
         assert!(!r.dual_lost);
     }
@@ -1163,7 +1181,8 @@ mod tests {
         // existing 冻结值（latest_data 保留旧 SOC 30.0）+ BMS 超期 + 无 client → 双源皆失：
         // resolve 沿用冻结 existing（控制内部），dual_lost=true、source=None（帧映射 Lost）
         let i = AiIntegrator::new();
-        i.set_latest_data(create_test_pkg_with_soc(Some(30.0))).await;
+        i.set_latest_data(create_test_pkg_with_soc(Some(30.0)))
+            .await;
         i.set_battery_soc(65.5).await;
         *i.bms_soc.write().await = Some((
             65.5,
@@ -1171,7 +1190,11 @@ mod tests {
                 - std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS + 100),
         ));
         let r = i.soc_display_snapshot().await;
-        assert_eq!(r.value_pct, Some(30.0), "resolve 沿用冻结 existing（仅控制内部）");
+        assert_eq!(
+            r.value_pct,
+            Some(30.0),
+            "resolve 沿用冻结 existing（仅控制内部）"
+        );
         assert!(r.dual_lost, "BMS 超期 + 核间无 fresh → 双源皆失降级态");
         assert_eq!(r.source, SocSourceKind::None, "无 fresh 源 → 帧映射 Lost");
     }
@@ -1184,8 +1207,10 @@ mod tests {
         let r1 = i.soc_display_snapshot().await;
         assert_eq!(r1.value_pct, Some(65.5));
         // 立刻把 BMS 回拨为超期（源不可达）——缓存 TTL 内仍应返回 r1（不重裁决、不活读）
-        *i.bms_soc.write().await =
-            Some((65.5, std::time::Instant::now() - std::time::Duration::from_secs(3600)));
+        *i.bms_soc.write().await = Some((
+            65.5,
+            std::time::Instant::now() - std::time::Duration::from_secs(3600),
+        ));
         let r2 = i.soc_display_snapshot().await;
         assert_eq!(r2, r1, "缓存 TTL 内直接返回，不重裁决");
     }
@@ -1193,8 +1218,8 @@ mod tests {
     #[tokio::test]
     async fn test_validator_data_injection() {
         // v2.23：校验器注入 + set_latest_data 联动（遥测注入到 validator，供基于模型的校验）
-        use async_trait::async_trait;
         use crate::strategies::{AiCommandValidator, ControlCommand, ValidationResult};
+        use async_trait::async_trait;
         use mupc_data_processing::telemetry::{
             BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
         };
@@ -1247,7 +1272,9 @@ mod tests {
         integrator.set_validator(validator.clone()).await;
         integrator.set_latest_data(pkg).await;
         assert_eq!(
-            validator.data_updates.load(std::sync::atomic::Ordering::Relaxed),
+            validator
+                .data_updates
+                .load(std::sync::atomic::Ordering::Relaxed),
             1,
             "set_latest_data 应将遥测注入校验器"
         );

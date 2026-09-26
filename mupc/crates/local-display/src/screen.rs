@@ -36,8 +36,8 @@
 //! Linux 图像工具可直接查看的等价替代。评审判定**可接受**。**如需 PNG，须引入依赖或自写编码器**
 //! （本轮不引依赖；需先走依赖评审）。
 
-use std::cell::RefCell;
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
@@ -288,20 +288,17 @@ impl<T: PixelSink> Blitter<T> {
     ///
     /// 纪律不变：闭包仍**只搬像素、不阻塞、不调 LVGL**；目标被外部借用时静默跳过本拍
     /// （见 `Rc<RefCell<S>>` 的 [`PixelSink`] 实现），**不会**在 flush 回调里 panic。
-    pub fn into_shared_flush_closure(
-        self,
-    ) -> (impl FnMut(Area, &[u8]) + 'static, Rc<RefCell<T>>)
+    pub fn into_shared_flush_closure(self) -> (impl FnMut(Area, &[u8]) + 'static, Rc<RefCell<T>>)
     where
         T: PixelSink + 'static,
     {
-        let Blitter { target, counters, .. } = self;
+        let Blitter {
+            target, counters, ..
+        } = self;
         let shared = Rc::new(RefCell::new(target));
         // 计数句柄**随闭包同源传递**：接线前取的 `counters()` 克隆，接线后读到的仍是同一份。
         let mut inner = Blitter::with_counters(Rc::clone(&shared), counters);
-        (
-            move |area: Area, px: &[u8]| inner.blit(area, px),
-            shared,
-        )
+        (move |area: Area, px: &[u8]| inner.blit(area, px), shared)
     }
 }
 
@@ -353,7 +350,9 @@ impl MemorySink {
         if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
             return None;
         }
-        self.buf.get(y as usize * self.w as usize + x as usize).copied()
+        self.buf
+            .get(y as usize * self.w as usize + x as usize)
+            .copied()
     }
 
     /// 全区像素（行主序，长度 = `w * h`）。
@@ -556,7 +555,11 @@ mod tests {
         // 空区域（x2 < x1 ⇒ width/height == 0）：**提前返回** —— 既不搬运、也不计 dropped，
         // 故 dropped 仍是上一次调用的 1（Minor 6：此前注释与断言口径自相矛盾）。
         b.blit(area(3, 3, 2, 2), &[]);
-        assert_eq!(b.dropped(), 1, "空区域直接返回：dropped 不增（仍为上一行的 1）");
+        assert_eq!(
+            b.dropped(),
+            1,
+            "空区域直接返回：dropped 不增（仍为上一行的 1）"
+        );
         assert_eq!(b.blits(), 0);
     }
 
@@ -655,7 +658,11 @@ mod tests {
         let guard = handle.borrow_mut();
         f(area(0, 1, 1, 1), &px_bytes(&[BLUE, BLUE]));
         drop(guard);
-        assert_eq!(counters.dropped(), 1, "丢帧必须被计数（否则屏上陈旧像素无人知道）");
+        assert_eq!(
+            counters.dropped(),
+            1,
+            "丢帧必须被计数（否则屏上陈旧像素无人知道）"
+        );
         assert_eq!(counters.blits(), 1, "被跳过的那一拍不计搬运");
 
         // 借用释放后恢复正常搬运（计数继续累加：丢帧哨没有把后续搬运一并"吃掉"）。
@@ -714,7 +721,11 @@ mod tests {
             b.blit(a, &px_bytes(&[RED; 10]));
         }
         assert_eq!(b.blits(), 5);
-        assert_eq!(b.scratch.len(), 10, "scratch 只增长到最大行宽，不随调用次数增长");
+        assert_eq!(
+            b.scratch.len(),
+            10,
+            "scratch 只增长到最大行宽，不随调用次数增长"
+        );
     }
 
     /// 写入日志（`(x, y, w, h)` 逐条）。

@@ -147,15 +147,15 @@ impl ControlCmdPayloadV2 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlCmdPayloadV3 {
     #[serde(rename = "frame_version")]
-    pub frame_version: Option<u8>,          // = 3
+    pub frame_version: Option<u8>, // = 3
     #[serde(rename = "p_ref")]
-    pub p_ref: Option<f64>,                 // 兼容 v2 双参数（分相模式可为 None）
+    pub p_ref: Option<f64>, // 兼容 v2 双参数（分相模式可为 None）
     #[serde(rename = "k_droop")]
     pub k_droop: Option<f64>,
     #[serde(rename = "phase_p_set")]
-    pub phase_p_set: Option<[f64; 3]>,      // 分相有功 (kW)，索引 0/1/2 = A/B/C 相
+    pub phase_p_set: Option<[f64; 3]>, // 分相有功 (kW)，索引 0/1/2 = A/B/C 相
     #[serde(rename = "phase_q_set")]
-    pub phase_q_set: Option<[f64; 3]>,      // 分相无功 (kVAr)，索引 0/1/2 = A/B/C 相
+    pub phase_q_set: Option<[f64; 3]>, // 分相无功 (kVAr)，索引 0/1/2 = A/B/C 相
     #[serde(rename = "ai_ready")]
     pub ai_ready: Option<bool>,
     #[serde(rename = "strategy_mode")]
@@ -679,7 +679,10 @@ impl IntercoreServer {
                                                             payload.phase_p_set, payload.phase_q_set, payload.strategy_mode
                                                         );
                                                     }
-                                                    Err(e) => warn!("Failed to parse ControlCmd V3 payload: {}", e),
+                                                    Err(e) => warn!(
+                                                        "Failed to parse ControlCmd V3 payload: {}",
+                                                        e
+                                                    ),
                                                 }
                                             }
                                             2 => {
@@ -690,20 +693,24 @@ impl IntercoreServer {
                                                             payload.p_ref, payload.k_droop, payload.ai_ready, payload.strategy_mode
                                                         );
                                                     }
-                                                    Err(e) => warn!("Failed to parse ControlCmd V2 payload: {}", e),
+                                                    Err(e) => warn!(
+                                                        "Failed to parse ControlCmd V2 payload: {}",
+                                                        e
+                                                    ),
                                                 }
                                             }
-                                            _ => {
-                                                match ControlCmdPayload::from_json(&frame.data) {
-                                                    Ok(payload) => {
-                                                        info!(
+                                            _ => match ControlCmdPayload::from_json(&frame.data) {
+                                                Ok(payload) => {
+                                                    info!(
                                                             "ControlCmd v1 parsed: p_batt_set={:?}, q_batt_set={:?}, ai_ready={:?}, strategy_mode={:?}",
                                                             payload.p_batt_set, payload.q_batt_set, payload.ai_ready, payload.strategy_mode
                                                         );
-                                                    }
-                                                    Err(e) => warn!("Failed to parse ControlCmd V1 payload: {}", e),
                                                 }
-                                            }
+                                                Err(e) => warn!(
+                                                    "Failed to parse ControlCmd V1 payload: {}",
+                                                    e
+                                                ),
+                                            },
                                         }
                                     }
                                 }
@@ -888,12 +895,7 @@ impl DualParamCommand {
     ///
     /// 注意：load_shedding 和 pv_limit 不通过核间通信发送，
     /// 它们通过 SouthCommandDispatcher 发送到南向设备。
-    pub fn new(
-        p_ref: f64,
-        k_droop: f64,
-        ai_ready: bool,
-        strategy_mode: &str,
-    ) -> Self {
+    pub fn new(p_ref: f64, k_droop: f64, ai_ready: bool, strategy_mode: &str) -> Self {
         Self {
             p_ref,
             k_droop,
@@ -1161,7 +1163,10 @@ mod tests {
         };
         let client = IntercoreClient::with_transport(Arc::new(ThreePhaseStub(Some(raw))));
         let got = client.read_three_phase().await.expect("有功段应有效");
-        assert!(got.i_phase.is_none(), "电流段失败 → None（上层打 Offline/NotRead）");
+        assert!(
+            got.i_phase.is_none(),
+            "电流段失败 → None（上层打 Offline/NotRead）"
+        );
         assert_eq!(got.p_total, Some(6.0));
     }
 }

@@ -115,7 +115,10 @@ mod tests {
         );
 
         let omitted = Cli::parse_from(["mupcd", "-c", "/tmp/x.yaml"]);
-        assert_eq!(omitted.effective_log_dir(cfg), PathBuf::from("/var/log/mupc"));
+        assert_eq!(
+            omitted.effective_log_dir(cfg),
+            PathBuf::from("/var/log/mupc")
+        );
 
         // 空值仍是**显式非法**（不得被当成"没给"而静默回落到配置值）
         let empty = Cli {
@@ -167,19 +170,13 @@ mod tests {
 
     #[test]
     fn test_cli_validate_config_flag() {
-        let args = Cli::parse_from([
-            "mupcd",
-            "--config",
-            "/tmp/test.yaml",
-            "--validate-config",
-        ]);
+        let args = Cli::parse_from(["mupcd", "--config", "/tmp/test.yaml", "--validate-config"]);
         assert!(args.validate_config);
     }
 
     #[test]
     fn test_cli_verbose_flag() {
-        let args =
-            Cli::parse_from(["mupcd", "--config", "/tmp/test.yaml", "-v"]);
+        let args = Cli::parse_from(["mupcd", "--config", "/tmp/test.yaml", "-v"]);
         assert!(args.verbose);
     }
 
@@ -194,7 +191,12 @@ mod tests {
         };
         assert!(cli.validate().is_ok());
         // 省略 `--log-dir` 也必须合法（= 用配置值）
-        assert!(Cli { log_dir: None, ..cli }.validate().is_ok());
+        assert!(Cli {
+            log_dir: None,
+            ..cli
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

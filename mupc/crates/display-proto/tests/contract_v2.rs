@@ -70,7 +70,8 @@ fn v2_legacy_json() -> String {
 
 #[test]
 fn v3_frame_wire_shape_is_pinned() {
-    let frame = DisplayFrame::from_json_slice(V3_FRAME_JSON.as_bytes()).expect("合法 v3 帧须可解码");
+    let frame =
+        DisplayFrame::from_json_slice(V3_FRAME_JSON.as_bytes()).expect("合法 v3 帧须可解码");
 
     // v1 段语义不变
     assert_eq!(frame.version, 3);
@@ -89,12 +90,21 @@ fn v3_frame_wire_shape_is_pinned() {
     assert_eq!(frame.device.intercore, LinkState::Connecting);
     assert_eq!(frame.device.hmi_channel, LinkState::Unknown);
     assert_eq!(frame.device.control_source, ControlSource::AiDisabled);
-    assert!(!frame.alarms.available, "available=false ≠ 无告警（EDGE-09）");
+    assert!(
+        !frame.alarms.available,
+        "available=false ≠ 无告警（EDGE-09）"
+    );
     assert_eq!(frame.info.firmware_version, "0.1.0");
-    assert_eq!(frame.info.build_time, None, "null → None → 「未提供」（EDGE-16）");
+    assert_eq!(
+        frame.info.build_time, None,
+        "null → None → 「未提供」（EDGE-16）"
+    );
     assert_eq!(frame.info.service_scope, ServiceScope::LoopbackOnly);
     assert_eq!(frame.info.mgmt_ipv4, None);
-    assert!(!frame.interlock.available, "available=false ≠ 未联锁（IL-01.6）");
+    assert!(
+        !frame.interlock.available,
+        "available=false ≠ 未联锁（IL-01.6）"
+    );
     assert_eq!(frame.interlock.fault_lamp, None, "null → 未知，不臆造为灭");
     // v3 外设段：本帧不含该段 ⇒ 取缺省 = 「外设数据不可用」（EDGE-22），不出"空段正常"
     assert!(!frame.peripherals.available);
@@ -149,12 +159,21 @@ fn v1_frame_into_v3_type_degrades_explicitly_and_version_is_rejected() {
     assert_eq!(frame.device.iec104, LinkState::Unknown);
     assert_eq!(frame.device.control_source, ControlSource::Unknown);
     assert_eq!(frame.info.firmware_version, "");
-    assert!(!frame.peripherals.available, "外设段缺失 ⇒ 不可用（EDGE-22）");
+    assert!(
+        !frame.peripherals.available,
+        "外设段缺失 ⇒ 不可用（EDGE-22）"
+    );
 
     // 2) 但版本校验**必须拒绝**——绝不允许静默按 v3 语义展示 v1 帧
     let err = DisplayFrame::from_json_slice(v1.as_bytes()).unwrap_err();
     assert!(
-        matches!(err, Error::ProtoVersionMismatch { got: 1, expected: 3 }),
+        matches!(
+            err,
+            Error::ProtoVersionMismatch {
+                got: 1,
+                expected: 3
+            }
+        ),
         "v1 帧必须被拒绝，实际: {err:?}"
     );
     assert!(err.to_string().contains("version mismatch"));
@@ -177,7 +196,10 @@ fn v1_frame_into_v3_type_degrades_explicitly_and_version_is_rejected() {
     let v4 = V3_FRAME_JSON.replace("\"version\": 3", "\"version\": 4");
     assert!(matches!(
         DisplayFrame::from_json_slice(v4.as_bytes()),
-        Err(Error::ProtoVersionMismatch { got: 4, expected: 3 })
+        Err(Error::ProtoVersionMismatch {
+            got: 4,
+            expected: 3
+        })
     ));
 }
 
@@ -211,7 +233,10 @@ fn control_envelope_write_path_is_pinned() {
     let req: ControlRequest<ConfigPatch> = serde_json::from_str(req_json).unwrap();
     assert_eq!(req.op, "apply");
     assert_eq!(req.payload.from, PatchSource::Edit);
-    assert_eq!(req.payload.changes["intercore.port"], serde_json::json!(502));
+    assert_eq!(
+        req.payload.changes["intercore.port"],
+        serde_json::json!(502)
+    );
     // 信封 + 路由校验通过
     assert!(req
         .validate_for(ConsoleEndpoint::ConfigApply, 1_757_412_000_000)
@@ -262,7 +287,10 @@ fn idempotency_and_audit_fail_closed_are_enforced_by_contract() {
     first.code = ControlCode::RejectedPrecondition;
     let mut replay_reject = first.clone();
     replay_reject.mark_duplicate();
-    assert!(!replay_reject.ok, "首次被拒 → 重放同样被拒（不得因重放变成功）");
+    assert!(
+        !replay_reject.ok,
+        "首次被拒 → 重放同样被拒（不得因重放变成功）"
+    );
 
     // 审计不可写 → fail-closed：未执行、无生效值、错误码钦定
     let fail_closed: bool = AUDIT_FAIL_CLOSED;
@@ -307,6 +335,11 @@ fn config_field_out_of_range_is_rejected_with_specific_reason() {
     ro.key = "display.bind_addr".into();
     ro.editable = false;
     ro.kind = ConfigKind::Ipv4;
-    let reason = ro.validate_value(&serde_json::json!("0.0.0.0")).unwrap_err();
-    assert!(reason.contains("只读"), "只读字段须被后端二次校验拒绝: {reason}");
+    let reason = ro
+        .validate_value(&serde_json::json!("0.0.0.0"))
+        .unwrap_err();
+    assert!(
+        reason.contains("只读"),
+        "只读字段须被后端二次校验拒绝: {reason}"
+    );
 }

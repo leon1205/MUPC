@@ -508,10 +508,8 @@ pub(crate) const UNAVAILABLE_H: i32 = EMPTY_H + TextSlot::Body.px() as i32 + Dim
 /// 单卡宽（`theme` 的 `CARD_STATUS_W` = 236）。
 const LAMP_CARD_W: i32 = Dimens::CARD_STATUS_W;
 /// 单卡外缘高 = 卡头 28 + 缝 16 + 值行 28 + 上下内边距 34（见 **IL3**，UI 写 108）。
-const LAMP_CARD_H: i32 = 2 * CARD_INSET
-    + TextSlot::SectionTitle.px() as i32
-    + Dimens::GAP_MIN
-    + Dimens::ICON_SM;
+const LAMP_CARD_H: i32 =
+    2 * CARD_INSET + TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN + Dimens::ICON_SM;
 /// 卡内值行 y。
 const LAMP_VALUE_Y: i32 = TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN;
 /// 卡内值行高（图标 28）。
@@ -1674,11 +1672,21 @@ impl SourceRow {
 
     /// 重建两支 `LedIndicator`（**只有上屏名变化时**才走这里）。
     fn build(&self, shown: &str) -> Result<(), LvglError> {
-        let tripped =
-            LedIndicator::new(&self.obj, SOURCE_NAME_W, ICON_FILLED, shown, Palette::LINK_DOWN)?;
+        let tripped = LedIndicator::new(
+            &self.obj,
+            SOURCE_NAME_W,
+            ICON_FILLED,
+            shown,
+            Palette::LINK_DOWN,
+        )?;
         tripped.set_pos(0, SOURCE_ROW_LED_Y);
-        let untripped =
-            LedIndicator::new(&self.obj, SOURCE_NAME_W, ICON_HOLLOW, shown, Palette::LINK_UNCONFIGURED)?;
+        let untripped = LedIndicator::new(
+            &self.obj,
+            SOURCE_NAME_W,
+            ICON_HOLLOW,
+            shown,
+            Palette::LINK_UNCONFIGURED,
+        )?;
         untripped.set_pos(0, SOURCE_ROW_LED_Y);
         untripped.set_lit(false);
         *self.tripped_led.borrow_mut() = Some(tripped);
@@ -1743,10 +1751,7 @@ impl SourceRow {
 
     /// 上屏名（读自当前形态的 `LedIndicator`）。
     fn shown_name(&self) -> Option<String> {
-        self.tripped_led
-            .borrow()
-            .as_ref()
-            .and_then(|l| l.text())
+        self.tripped_led.borrow().as_ref().and_then(|l| l.text())
     }
 }
 
@@ -2721,9 +2726,7 @@ impl Core {
             .set_pos(-CARD_INSET, theme::center_offset(body_h, UNAVAILABLE_H));
 
         // ③ 状态三卡（停机失败 / 故障灯 / 运行灯）—— `!available` ⇒ 三卡**同步转灰**（IL7）。
-        let lamps_y = SOURCE_CARD_Y
-            + (body_h + CARD_HEAD_H + 2 * CARD_INSET)
-            + Dimens::GAP_SECTION;
+        let lamps_y = SOURCE_CARD_Y + (body_h + CARD_HEAD_H + 2 * CARD_INSET) + Dimens::GAP_SECTION;
         for (i, card) in self.lamps.iter().enumerate() {
             card.set_pos(lamp_x(i as i32), lamps_y);
         }
@@ -2988,7 +2991,10 @@ const OPEN_FAIL_LOG_EVERY: u32 = 64;
 /// **调用点已节流**（[`Core::note_open_failure`]，**IL25**）：本函数自身不做判断。
 fn report_open_failure(op: &str, e: &LvglError) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "P4 安全联锁页：打开确认弹层失败（{op}）：{e}");
+    let _ = writeln!(
+        std::io::stderr(),
+        "P4 安全联锁页：打开确认弹层失败（{op}）：{e}"
+    );
 }
 
 /// 源行 `LedIndicator` 重建失败（上屏名变化时）—— 同样只写 stderr，**保留旧件**。
@@ -4826,8 +4832,14 @@ mod tests {
             assert_eq!(state_index(*v), i);
         }
         // 不可用态的胶囊图标也不得复用 `✓` / `⚠`。
-        assert_eq!(latch_chip_icon(StateView::Unavailable), ICON_STATE_UNAVAILABLE);
-        assert_ne!(latch_chip_icon(StateView::Unavailable), ICON_STATE_UNLATCHED);
+        assert_eq!(
+            latch_chip_icon(StateView::Unavailable),
+            ICON_STATE_UNAVAILABLE
+        );
+        assert_ne!(
+            latch_chip_icon(StateView::Unavailable),
+            ICON_STATE_UNLATCHED
+        );
     }
 
     // ── ④ 按钮可用性矩阵（UI §6.4「操作与拒绝原因」表逐行）──
@@ -4857,7 +4869,10 @@ mod tests {
 
         // §6.4「M1 处于 latch 态」行 ⇒ **只** M1 禁用 + **按钮正上方**原因；释放仍可用（IL18）。
         let la = op_state(&sect(true, true, true), false);
-        assert!(!la.release_disabled, "释放是安全正向操作，不得因 latch 置灰（IL18）");
+        assert!(
+            !la.release_disabled,
+            "释放是安全正向操作，不得因 latch 置灰（IL18）"
+        );
         assert_eq!(la.release_reason, None);
         assert!(la.restart_disabled);
         assert_eq!(la.restart_reason, Some(TEXT_REASON_LATCHED));
@@ -4870,7 +4885,10 @@ mod tests {
         sf.stop_failed = true;
         let sf = op_state(&sf, false);
         assert!(!sf.release_disabled);
-        assert!(!sf.restart_disabled, "`stop_failed` 不得本地预判置灰 M1（评审整改 ①）");
+        assert!(
+            !sf.restart_disabled,
+            "`stop_failed` 不得本地预判置灰 M1（评审整改 ①）"
+        );
         assert_eq!(
             sf.restart_reason, None,
             "`stop_failed` 不得产出本地原因（评审整改 ①）"
@@ -4899,7 +4917,10 @@ mod tests {
         assert_eq!(tri_view(Some(false)), TriView::Off);
         let (t, slot) = lamp_view(tri_view(None));
         assert_eq!(t, TEXT_LAMP_UNKNOWN);
-        assert_ne!(t, TEXT_LAMP_OFF, "灯态未知 ≠ 灯灭（契约 Option<bool> 的三态语义）");
+        assert_ne!(
+            t, TEXT_LAMP_OFF,
+            "灯态未知 ≠ 灯灭（契约 Option<bool> 的三态语义）"
+        );
         assert_eq!(slot, 2, "未知与不可用同走灰档（UI §6.4 色值）");
         // 亮 / 灭两态的文案与色（故障灯红 `#DC3545`、运行灯绿 `#28A745`、灭灰 `#5F6368`）。
         assert_eq!(lamp_view(TriView::On), (TEXT_LAMP_ON, 0));
@@ -4910,7 +4931,10 @@ mod tests {
         // 停机失败卡：`stop_failed = false` ⇒ `✓ 正常`（绿）；`true` ⇒ `× 停机失败`（红）。
         assert_eq!(stop_view(false), (TEXT_STOP_OK, 0));
         assert_eq!(stop_view(true), (TEXT_STOP_FAIL, 1));
-        assert!(!TEXT_STOP_OK.contains(ICON_STATE_LATCHED), "正常态不得复用 `⚠`");
+        assert!(
+            !TEXT_STOP_OK.contains(ICON_STATE_LATCHED),
+            "正常态不得复用 `⚠`"
+        );
     }
 
     // ── ⑥ 源名映射（含**未知名**的处置）──
@@ -4925,8 +4949,16 @@ mod tests {
         // ①′ **ASCII 大小写不敏感**（M2 / IL26）：`ESTOP` / `Door` 也是「急停 / 门禁」，
         // 不得因大小写之差落成「`E–sTOP`」这类机器名上屏（`_` 还会被 `display_safe` 改写成
         // 短破折）。敏感性：把 `eq_ignore_ascii_case` 改回 `==` ⇒ 本条两条立刻变红。
-        assert_eq!(source_label("ESTOP"), TEXT_SRC_ESTOP, "大写机器名仍须映射（M2/IL26）");
-        assert_eq!(source_label("Door"), TEXT_SRC_DOOR, "混合大小写仍须映射（M2/IL26）");
+        assert_eq!(
+            source_label("ESTOP"),
+            TEXT_SRC_ESTOP,
+            "大写机器名仍须映射（M2/IL26）"
+        );
+        assert_eq!(
+            source_label("Door"),
+            TEXT_SRC_DOOR,
+            "混合大小写仍须映射（M2/IL26）"
+        );
         // ①″ 残余（如实）：**分隔符变体**（`e_stop` / `e-stop`）**不在**映射表内 —— 大小写
         // 不敏感只管大小写，`_` 仍会落成 `E–STOP`（`_` → 短破折）。本页**不**猜。
         assert_eq!(source_label("e_stop"), display_safe("e_stop"));
@@ -4937,7 +4969,11 @@ mod tests {
             assert!(!shown.is_empty(), "{raw} 的上屏名不得为空");
             assert_ne!(shown, TEXT_SRC_ESTOP, "{raw} 不得被冒名成「急停」");
             assert_ne!(shown, TEXT_SRC_DOOR);
-            assert_eq!(shown, display_safe(raw), "未登记名必须与 display_safe 同口径（IL6）");
+            assert_eq!(
+                shown,
+                display_safe(raw),
+                "未登记名必须与 display_safe 同口径（IL6）"
+            );
         }
         // ③ `display_safe` 的产出 ⊆ cmap 安全字母表（ASCII 侧）—— 未知名的**豆腐块防线**。
         for raw in ["flood", "no_such_source", "ABC", "di-3"] {
@@ -4970,8 +5006,14 @@ mod tests {
             remaining: vec!["estop".into(), "door".into()],
         });
         assert!(t.starts_with(TEXT_REJECT_SOURCES));
-        assert!(t.contains(TEXT_SRC_ESTOP) && t.contains(TEXT_SRC_DOOR), "实际: {t}");
-        assert!(!t.contains("estop"), "不得上屏机器名（缺字形 + 现场不可读）: {t}");
+        assert!(
+            t.contains(TEXT_SRC_ESTOP) && t.contains(TEXT_SRC_DOOR),
+            "实际: {t}"
+        );
+        assert!(
+            !t.contains("estop"),
+            "不得上屏机器名（缺字形 + 现场不可读）: {t}"
+        );
         assert_eq!(t, "触发源未复位 · 急停/门禁");
         // 空 `remaining`（契约合法）⇒ 只报能确定的事实，不编造源名。
         assert_eq!(
@@ -5049,7 +5091,10 @@ mod tests {
         let s = sect_with_sources();
         let p = op_payload(&s);
         assert!(p.observed_latched, "观测到的 latch 态");
-        assert_eq!(p.observed_sources, vec!["estop".to_string(), "door".to_string()]);
+        assert_eq!(
+            p.observed_sources,
+            vec!["estop".to_string(), "door".to_string()]
+        );
         assert!(
             !p.observed_sources.iter().any(|n| n == TEXT_SRC_ESTOP),
             "载荷必须是**机器名**，不得是上屏中文标签"
@@ -5099,7 +5144,10 @@ mod tests {
             " · 还有 1 条",
             "5 源 ⇒ 第 5 条必须**在屏上**被说出来（不得静默）"
         );
-        assert!(sources_overflow_note(SOURCE_ROW_POOL + 3).contains('3'), "7 源 ⇒ 差额 3");
+        assert!(
+            sources_overflow_note(SOURCE_ROW_POOL + 3).contains('3'),
+            "7 源 ⇒ 差额 3"
+        );
         // 提示词与数字都在 cmap 内（`还`/`有`/`条` 逐字实测在 `fonts/lv_font_cmap.txt`）——
         // 逐字核对由 `runtime_texts_are_cmap_safe`（产出串 ⊆ 安全字母表）+ 码表网承担。
         // 行池上限**未被改动**（本处置是补偿，不是扩容）。
@@ -5127,7 +5175,10 @@ mod tests {
             sect(true, true, false),
         ] {
             c.ts_ms = 1_000;
-            assert!(!section_display_eq(&a, &c), "展示相关字段变了 ⇒ 必须判为「新帧」");
+            assert!(
+                !section_display_eq(&a, &c),
+                "展示相关字段变了 ⇒ 必须判为「新帧」"
+            );
         }
         let mut sf = a.clone();
         sf.stop_failed = true;
@@ -5160,20 +5211,29 @@ mod tests {
         assert_eq!(d[1].before, TEXT_LATCH_HELD, "当前已保持");
         assert_eq!(d[1].after, TEXT_LATCH_UNHELD, "释放后目标态 = 未保持");
         assert_eq!(d[2].field, TEXT_DETAIL_STOP);
-        assert_eq!(d[2].before, d[2].after, "本操作不改动停机确认态 ⇒ 如实表达为不变");
+        assert_eq!(
+            d[2].before, d[2].after,
+            "本操作不改动停机确认态 ⇒ 如实表达为不变"
+        );
         // 释放的目标态：触发源「无」（释放的**前提**就是全部复位）。
         assert_eq!(d[0].after, TEXT_NONE);
 
         let m = dialog_details(&s, OpKind::AckM1);
         assert_eq!(m.len(), 3);
-        assert_eq!(m[2].after, TEXT_STOP_OK, "授权后停机确认态成立 ⇒ 目标「正常」");
+        assert_eq!(
+            m[2].after, TEXT_STOP_OK,
+            "授权后停机确认态成立 ⇒ 目标「正常」"
+        );
         assert_eq!(m[0].before, m[0].after, "M1 不改动触发源 ⇒ 前后同值");
         // 弹层标题 / 影响范围（L2 必须为**具体副作用**，§7.3）。
         assert_eq!(OpKind::Release.dialog_title(), TEXT_DIALOG_TITLE_RELEASE);
         assert_eq!(OpKind::AckM1.dialog_title(), TEXT_DIALOG_TITLE_ACK_M1);
         assert_ne!(OpKind::Release.impact(), OpKind::AckM1.impact());
         for op in [OpKind::Release, OpKind::AckM1] {
-            assert!(op.impact().contains("装置"), "影响范围必须具体（含「装置」这一副作用对象）");
+            assert!(
+                op.impact().contains("装置"),
+                "影响范围必须具体（含「装置」这一副作用对象）"
+            );
         }
     }
 
@@ -5229,7 +5289,11 @@ mod tests {
                 }
             }
             // 固定文案还须**逐字**在 `display_safe` 下不变（= 全 ASCII 都在安全字母表内）。
-            assert_eq!(&display_safe(s), s, "文案 `{s}` 经 display_safe 被改写 ⇒ 含 cmap 外字符");
+            assert_eq!(
+                &display_safe(s),
+                s,
+                "文案 `{s}` 经 display_safe 被改写 ⇒ 含 cmap 外字符"
+            );
         }
     }
 

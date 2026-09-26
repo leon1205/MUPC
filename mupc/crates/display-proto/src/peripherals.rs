@@ -171,8 +171,8 @@ pub const PERIPH_NON_FIRE_DET_UPPER_BYTES: usize =
 ///
 /// **可机械校验的关键性质**：`k_max = 111 ≥ 99 只`（= n=100 时 `fire_det` 的只数）
 /// ⇒ **PRD 上限内不裁剪**（§15.2.4 结论 ②，T-4b）。
-pub const K_MAX_FIRE_DET: usize =
-    (MAX_PERIPH_BYTES - PERIPH_NON_FIRE_DET_UPPER_BYTES) / (FIRE_DET_POINTS_PER_UNIT * POINT_JSON_BYTES_UPPER);
+pub const K_MAX_FIRE_DET: usize = (MAX_PERIPH_BYTES - PERIPH_NON_FIRE_DET_UPPER_BYTES)
+    / (FIRE_DET_POINTS_PER_UNIT * POINT_JSON_BYTES_UPPER);
 
 /// **裁剪触发的最小 n**（每只探测器的寄存器数）：只数 = `n − 1 > K_MAX_FIRE_DET` ⇒ `n ≥ 113`
 /// （§15.2.4「裁剪触发条件」：超出 PRD 上限 100 达 13 只才裁）。
@@ -626,7 +626,11 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&role).unwrap(), name);
         }
-        assert_eq!(PeriphRole::default(), PeriphRole::Unknown, "缺省不臆造 role");
+        assert_eq!(
+            PeriphRole::default(),
+            PeriphRole::Unknown,
+            "缺省不臆造 role"
+        );
         // 范围外：台区总表（MeterGrid）不在本段内 —— 其 JSON 名必须解码失败
         assert!(serde_json::from_str::<PeriphRole>("\"meter_grid\"").is_err());
     }
@@ -728,7 +732,10 @@ mod tests {
         assert_eq!(FIRE_DET_TRUNCATE_MIN_N, 113);
         let trigger = FIRE_DET_TRUNCATE_MIN_N;
         assert_eq!(fire_det_keep_units(prd_limit_units), prd_limit_units);
-        assert!(trigger - 1 > k_max, "n=112 ⇒ 111 只 > k_max 不成立时说明触发点漂移");
+        assert!(
+            trigger - 1 > k_max,
+            "n=112 ⇒ 111 只 > k_max 不成立时说明触发点漂移"
+        );
         assert!(trigger - 2 <= k_max, "n=111 ⇒ 110 只 ≤ k_max");
     }
 
@@ -737,7 +744,11 @@ mod tests {
     fn keep_units_boundary_at_k_max() {
         assert_eq!(fire_det_keep_units(99), 99, "PRD 上限内不裁");
         assert_eq!(fire_det_keep_units(K_MAX_FIRE_DET), 111, "恰为 k_max 不裁");
-        assert_eq!(fire_det_keep_units(K_MAX_FIRE_DET + 1), 111, "112 只 ⇒ 裁到 111");
+        assert_eq!(
+            fire_det_keep_units(K_MAX_FIRE_DET + 1),
+            111,
+            "112 只 ⇒ 裁到 111"
+        );
         // n=112 ⇒ 111 只（不裁）；n=113 ⇒ 112 只（裁）
         assert_eq!(fire_det_keep_units(FIRE_DET_TRUNCATE_MIN_N - 2), 111);
         assert_eq!(fire_det_keep_units(FIRE_DET_TRUNCATE_MIN_N - 1), 111);
@@ -793,7 +804,10 @@ mod tests {
         assert_eq!(over.truncated, vec!["fire_det:119→111".to_string()]);
         assert_eq!(over.stations[0].blocks[0].values.len(), 666);
         assert_eq!(over.stations[0].blocks[0].fire_det_units(), 111);
-        assert_eq!(over.stations[0].blocks[0].values[0].at, 1, "前缀（地址升序）");
+        assert_eq!(
+            over.stations[0].blocks[0].values[0].at, 1,
+            "前缀（地址升序）"
+        );
         assert!(over.available, "裁剪不得改动 available（≠ 段不可用）");
 
         // 幂等：已裁过再调用不再 push
@@ -884,7 +898,10 @@ mod tests {
             r#""generated_ms":1757412000000"#,
             r#""stations":[{"id":"fire","role":"fire","enabled":true,"blocks":[{"name":"fire_sys","kind":"scalar","renames":[[7,"fire_det_count"]],"points":[{"at":6,"label":"火警等级","unit":null,"decimals":0,"bits":[{"index":12,"label":"报警总状态","class":"alarm","defined":true,"active_text":"报警","inactive_text":"未报警","inverted":false}],"enum_labels":[[0,"正常"]],"decompose":[{"label":"烟雾","unit":"dB/M","decimals":1,"from":{"high_byte":{"scale":0.1,"offset":0.0}}}],"group":"fire_level"}]}]}]}"#,
         ] {
-            assert!(j.contains(key), "catalog 线格式缺字段/形状不符：{key}\n实得 {j}");
+            assert!(
+                j.contains(key),
+                "catalog 线格式缺字段/形状不符：{key}\n实得 {j}"
+            );
         }
         // 往返稳定（对端解析回同值）
         let back: PeripheralCatalog = serde_json::from_str(&j).unwrap();
@@ -942,11 +959,17 @@ mod tests {
             r#""voc""#,
             r#""h2""#,
         ] {
-            assert!(j.contains(key), "fire_detectors 响应缺字段：{key}\n实得 {j}");
+            assert!(
+                j.contains(key),
+                "fire_detectors 响应缺字段：{key}\n实得 {j}"
+            );
         }
         // `expanded != total` **如实返回**（不静默裁剪，F21.4 / EX-12）
         assert_ne!(fp.expanded, fp.total.unwrap());
-        assert_eq!(serde_json::from_str::<FireDetectorPage>("{}").unwrap(), FireDetectorPage::default());
+        assert_eq!(
+            serde_json::from_str::<FireDetectorPage>("{}").unwrap(),
+            FireDetectorPage::default()
+        );
 
         let bp = BmsAlarmPage {
             page: 1,
@@ -972,7 +995,10 @@ mod tests {
         ] {
             assert!(j.contains(key), "bms_alarms 响应缺字段：{key}\n实得 {j}");
         }
-        assert_eq!(serde_json::from_str::<BmsAlarmPage>("{}").unwrap(), BmsAlarmPage::default());
+        assert_eq!(
+            serde_json::from_str::<BmsAlarmPage>("{}").unwrap(),
+            BmsAlarmPage::default()
+        );
     }
 
     /// `decimals_from_scale` 四值覆盖 + 越界保守 0（§15.3.2 映射表）。
@@ -1058,9 +1084,7 @@ mod tests {
     /// 本用例钉的是**判据只在 `FrameTooLarge` 上**（不得"张冠李戴"丢外设数据）。
     #[test]
     fn exit_guard_only_acts_on_frame_too_large() {
-        use crate::frame::{
-            AlarmItem, AlarmLevel, AlarmsSection, Field, SocSource, PROTO_VERSION,
-        };
+        use crate::frame::{AlarmItem, AlarmLevel, AlarmsSection, Field, SocSource, PROTO_VERSION};
         let missing = Field {
             v: None,
             flag: FieldFlag::Offline,

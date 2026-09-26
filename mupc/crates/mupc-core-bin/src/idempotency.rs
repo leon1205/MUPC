@@ -236,7 +236,10 @@ mod tests {
     fn capacity_is_bounded_and_evicts_oldest() {
         let t: IdempotencyTable<String> = IdempotencyTable::new(4, 30_000);
         for i in 0..10u32 {
-            assert_eq!(t.reserve(key(&format!("r{i}")), 1_000 + i as u64), Reserve::Fresh);
+            assert_eq!(
+                t.reserve(key(&format!("r{i}")), 1_000 + i as u64),
+                Reserve::Fresh
+            );
         }
         assert!(t.len() <= 4, "容量必须被界住，实得 {}", t.len());
         // 最旧的 r0 / r1 已被淘汰；最新的 r9 仍在
@@ -274,7 +277,10 @@ mod tests {
         for (i, k) in ["x", "y", "z"].iter().enumerate() {
             assert_eq!(t2.reserve(key(k), i as u64), Reserve::Fresh);
         }
-        assert!(!t2.complete(&key("x"), "late".to_string()), "`x` 已被淘汰 ⇒ 丢弃");
+        assert!(
+            !t2.complete(&key("x"), "late".to_string()),
+            "`x` 已被淘汰 ⇒ 丢弃"
+        );
         assert!(t2.len() <= 2, "容量必须仍被界住，实得 {}", t2.len());
     }
 

@@ -187,7 +187,10 @@ impl CalibBounds {
     pub fn parse(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
         if parts.len() != 4 {
-            return Err(format!("须为 `xmin,xmax,ymin,ymax` 四个整数，实得 {} 段", parts.len()));
+            return Err(format!(
+                "须为 `xmin,xmax,ymin,ymax` 四个整数，实得 {} 段",
+                parts.len()
+            ));
         }
         let mut v = [0i32; 4];
         for (i, p) in parts.iter().enumerate() {
@@ -493,7 +496,9 @@ pub enum FetchErrorKind {
 /// [`std::io::ErrorKind::WouldBlock`]。因此本判定在真机上等价于 `errno == EAGAIN`。
 pub fn classify_fetch_error(err: &std::io::Error) -> FetchErrorKind {
     match err.kind() {
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => FetchErrorKind::NoEvents,
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => {
+            FetchErrorKind::NoEvents
+        }
         _ => FetchErrorKind::Failed,
     }
 }
@@ -561,7 +566,10 @@ impl RawState {
 
     /// 活动 slot 数（诊断/测试用）。
     pub fn active_slots(&self) -> usize {
-        self.slots.iter().filter(|(_, (tid, _, _))| *tid >= 0).count()
+        self.slots
+            .iter()
+            .filter(|(_, (tid, _, _))| *tid >= 0)
+            .count()
     }
 
     /// 把帧内累计的原始状态换算并提交（`SYN_REPORT`）。返回快照是否有变化。
@@ -572,8 +580,7 @@ impl RawState {
         match source {
             TouchSource::MultiTouch => {
                 // 首个活动 slot（slot 号最小者，满足「多点只取第一个触点」）。
-                if let Some((_, (_, rx, ry))) =
-                    self.slots.iter().find(|(_, (tid, _, _))| *tid >= 0)
+                if let Some((_, (_, rx, ry))) = self.slots.iter().find(|(_, (tid, _, _))| *tid >= 0)
                 {
                     let (x, y) = calib.map(*rx, *ry);
                     self.snap.pressed = true;
@@ -795,7 +802,8 @@ mod linux {
             };
             let calib = build_calibration(device_bounds, &cfg.overrides, cfg.width, cfg.height)?;
             // 非阻塞读取：事件循环在 `poll` 判定可读后才 `pump`（设计 §5.2 不变量 1）。
-            dev.set_nonblocking(true).map_err(|e| TouchError::Io(e.to_string()))?;
+            dev.set_nonblocking(true)
+                .map_err(|e| TouchError::Io(e.to_string()))?;
             Ok(Self {
                 dev,
                 path,
@@ -1148,8 +1156,16 @@ mod tests {
     #[test]
     fn discovery_requires_explicit_choice_when_multiple_candidates() {
         let list = vec![
-            cand("/dev/input/event2", Some("Goodix TouchScreen"), TouchSource::MultiTouch),
-            cand("/dev/input/event5", Some("USB Touchscreen"), TouchSource::Single),
+            cand(
+                "/dev/input/event2",
+                Some("Goodix TouchScreen"),
+                TouchSource::MultiTouch,
+            ),
+            cand(
+                "/dev/input/event5",
+                Some("USB Touchscreen"),
+                TouchSource::Single,
+            ),
         ];
         let e = select_index(&list).unwrap_err();
         assert!(e.is_fatal(), "多候选 = 启动报错并列出（不猜第一个）");
@@ -1166,7 +1182,11 @@ mod tests {
 
     #[test]
     fn discovery_selects_single_candidate_and_reports_none() {
-        let one = vec![cand("/dev/mupc-touch", Some("MupcTouch"), TouchSource::MultiTouch)];
+        let one = vec![cand(
+            "/dev/mupc-touch",
+            Some("MupcTouch"),
+            TouchSource::MultiTouch,
+        )];
         assert_eq!(select_index(&one).unwrap(), 0);
 
         let e = select_index(&[]).unwrap_err();
@@ -1223,7 +1243,10 @@ mod tests {
     #[test]
     fn accelerometer_is_not_a_touch_candidate() {
         assert_eq!(detect_source_from_caps(CAPS_ACCELEROMETER), None);
-        assert_eq!(candidate_from_caps("/dev/input/event0", Some("accel"), CAPS_ACCELEROMETER), None);
+        assert_eq!(
+            candidate_from_caps("/dev/input/event0", Some("accel"), CAPS_ACCELEROMETER),
+            None
+        );
         // 即便它「碰巧」带 BTN_TOUCH，`ACCELEROMETER` 仍一票否决
         let weird = DeviceCaps {
             has_btn_touch: true,
@@ -1238,8 +1261,16 @@ mod tests {
     #[test]
     fn touchscreen_plus_accelerometer_selects_the_touchscreen_uniquely() {
         let enumerations: [(&str, Option<&str>, DeviceCaps); 2] = [
-            ("/dev/input/event1", Some("Goodix TouchScreen"), CAPS_TOUCH_MT),
-            ("/dev/input/event0", Some("rk3588-accel"), CAPS_ACCELEROMETER),
+            (
+                "/dev/input/event1",
+                Some("Goodix TouchScreen"),
+                CAPS_TOUCH_MT,
+            ),
+            (
+                "/dev/input/event0",
+                Some("rk3588-accel"),
+                CAPS_ACCELEROMETER,
+            ),
         ];
         let cands: Vec<Candidate> = enumerations
             .iter()
@@ -1253,9 +1284,7 @@ mod tests {
         // 反证：若按旧口径（只看坐标轴）两者都会入选 ⇒ 假 Ambiguous（这正是被修的 bug）。
         let legacy: Vec<Candidate> = enumerations
             .iter()
-            .filter_map(|(p, n, c)| {
-                detect_source_lenient(*c).map(|s| cand(p, *n, s))
-            })
+            .filter_map(|(p, n, c)| detect_source_lenient(*c).map(|s| cand(p, *n, s)))
             .collect();
         assert_eq!(legacy.len(), 2);
         let e = select_index(&legacy).unwrap_err();
@@ -1266,7 +1295,11 @@ mod tests {
     #[test]
     fn two_real_touchscreens_still_report_ambiguous() {
         let cands: Vec<Candidate> = [
-            ("/dev/input/event2", Some("Goodix TouchScreen"), CAPS_TOUCH_MT),
+            (
+                "/dev/input/event2",
+                Some("Goodix TouchScreen"),
+                CAPS_TOUCH_MT,
+            ),
             (
                 "/dev/input/event5",
                 Some("USB Touchscreen"),
@@ -1416,7 +1449,10 @@ mod tests {
     #[test]
     fn touch_config_defaults_are_auto_discover() {
         let c = TouchConfig::new(1024, 768);
-        assert!(c.device.is_none(), "默认自动发现；生产由 unit 固定 --touch-device");
+        assert!(
+            c.device.is_none(),
+            "默认自动发现；生产由 unit 固定 --touch-device"
+        );
         assert_eq!(c.overrides, TouchOverrides::default());
         assert!(!c.overrides.swap_xy);
     }
@@ -1453,7 +1489,11 @@ mod tests {
     fn eagain_errno_maps_to_no_events_on_linux() {
         for e in [libc::EAGAIN, libc::EWOULDBLOCK] {
             let err = IoError::from_raw_os_error(e);
-            assert_eq!(classify_fetch_error(&err), FetchErrorKind::NoEvents, "errno={e}");
+            assert_eq!(
+                classify_fetch_error(&err),
+                FetchErrorKind::NoEvents,
+                "errno={e}"
+            );
         }
         let eio = IoError::from_raw_os_error(libc::EIO);
         assert_eq!(classify_fetch_error(&eio), FetchErrorKind::Failed);
@@ -1471,17 +1511,28 @@ mod tests {
         for tick in 0..5 {
             let r = pump_with(
                 || -> std::io::Result<Vec<RawEvent>> {
-                    Err(IoError::new(ErrorKind::WouldBlock, "Resource temporarily unavailable"))
+                    Err(IoError::new(
+                        ErrorKind::WouldBlock,
+                        "Resource temporarily unavailable",
+                    ))
                 },
                 &mut st,
                 TouchSource::MultiTouch,
                 &c,
             );
-            assert_eq!(r, Ok(false), "空闲拍 #{tick} 必须是无事件 no-op，实得 {r:?}");
+            assert_eq!(
+                r,
+                Ok(false),
+                "空闲拍 #{tick} 必须是无事件 no-op，实得 {r:?}"
+            );
         }
         // 空批次（fd 可读但无完整事件）同样是 no-op
-        let r: Result<bool, TouchError> =
-            pump_with(|| Ok(Vec::<RawEvent>::new()), &mut st, TouchSource::MultiTouch, &c);
+        let r: Result<bool, TouchError> = pump_with(
+            || Ok(Vec::<RawEvent>::new()),
+            &mut st,
+            TouchSource::MultiTouch,
+            &c,
+        );
         assert_eq!(r, Ok(false));
         // 快照保持默认（未按下、坐标未被污染）
         assert_eq!(st.snapshot(), TouchSnapshot::default());
@@ -1499,7 +1550,10 @@ mod tests {
             &c,
         );
         let e = r.unwrap_err();
-        assert!(matches!(&e, TouchError::Io(m) if m.contains("ENODEV")), "{e:?}");
+        assert!(
+            matches!(&e, TouchError::Io(m) if m.contains("ENODEV")),
+            "{e:?}"
+        );
         assert!(!e.is_fatal(), "读失败可降级（触摸失效不影响数据刷新）");
     }
 
@@ -1516,12 +1570,7 @@ mod tests {
         ];
         // 无 SYN_REPORT ⇒ 不提交、无变化
         assert_eq!(
-            pump_with(
-                || Ok(batch.clone()),
-                &mut st,
-                TouchSource::MultiTouch,
-                &c
-            ),
+            pump_with(|| Ok(batch.clone()), &mut st, TouchSource::MultiTouch, &c),
             Ok(false)
         );
         assert!(!st.snapshot().pressed);
@@ -1530,7 +1579,10 @@ mod tests {
         // 补上 SYN_REPORT ⇒ 提交并报「有变化」
         let mut with_syn = batch.clone();
         with_syn.push(RawEvent::SynReport);
-        assert_eq!(pump_with(|| Ok(with_syn), &mut st, TouchSource::MultiTouch, &c), Ok(true));
+        assert_eq!(
+            pump_with(|| Ok(with_syn), &mut st, TouchSource::MultiTouch, &c),
+            Ok(true)
+        );
         assert_eq!(
             st.snapshot(),
             TouchSnapshot {
@@ -1543,7 +1595,10 @@ mod tests {
         // 同一帧重复提交 ⇒ 快照无变化 ⇒ Ok(false)（不触发无谓的 lv_indev_read）
         let mut again = batch.clone();
         again.push(RawEvent::SynReport);
-        assert_eq!(pump_with(|| Ok(again), &mut st, TouchSource::MultiTouch, &c), Ok(false));
+        assert_eq!(
+            pump_with(|| Ok(again), &mut st, TouchSource::MultiTouch, &c),
+            Ok(false)
+        );
     }
 
     // ---- ⑤ 原始状态机（Minor 4 整改：原先整段在 `cfg(linux)` 内 ⇒ 本机零测试） ----
@@ -1579,7 +1634,14 @@ mod tests {
             &mut st,
             &c,
         );
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: true, x: 0, y: 767 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: true,
+                x: 0,
+                y: 767
+            }
+        );
 
         // 再加触点 2（slot 1，坐标不同）⇒ 仍取**首个活动 slot**（slot 号最小）
         mt_frame(
@@ -1593,7 +1655,14 @@ mod tests {
             &c,
         );
         assert_eq!(st.active_slots(), 2);
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: true, x: 0, y: 767 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: true,
+                x: 0,
+                y: 767
+            }
+        );
 
         // slot 0 抬起（TRACKING_ID = -1）⇒ 回落到 slot 1
         mt_frame(
@@ -1605,7 +1674,14 @@ mod tests {
             &c,
         );
         assert_eq!(st.active_slots(), 1);
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: true, x: 1023, y: 0 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: true,
+                x: 1023,
+                y: 0
+            }
+        );
     }
 
     /// 全部抬手 ⇒ `pressed=false` 但**保留最后坐标**（避免抬起瞬间跳回 (0,0)）。
@@ -1672,7 +1748,10 @@ mod tests {
         assert_eq!(st.active_slots(), 1);
 
         let dropped = RawEvent::SynDropped;
-        assert!(!st.feed(dropped, TouchSource::MultiTouch), "SYN_DROPPED 不触提交");
+        assert!(
+            !st.feed(dropped, TouchSource::MultiTouch),
+            "SYN_DROPPED 不触提交"
+        );
         assert_eq!(st.active_slots(), 0, "状态不可信 ⇒ 清空 slot");
         assert!(!st.snapshot().pressed, "丢事件后必须视为未按下（不猜）");
         // 与 Linux `feed` 分支等价：单点模型的待提交量同样被清空
@@ -1693,7 +1772,14 @@ mod tests {
             &mut st,
             &c,
         );
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: true, x: 0, y: 0 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: true,
+                x: 0,
+                y: 0
+            }
+        );
     }
 
     /// 单点模型：`BTN_TOUCH` 决定按下；`ABS_X/Y` 决定坐标；抬手保留坐标。
@@ -1707,22 +1793,54 @@ mod tests {
         };
         frame(
             &mut st,
-            &[RawEvent::Abs(AbsAxis::X, 25), RawEvent::Abs(AbsAxis::Y, 75), RawEvent::Touch(true)],
+            &[
+                RawEvent::Abs(AbsAxis::X, 25),
+                RawEvent::Abs(AbsAxis::Y, 75),
+                RawEvent::Touch(true),
+            ],
         );
         // 0.25×1023 = 255.75 → 256；0.75×767 = 575.25 → 575
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: true, x: 256, y: 575 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: true,
+                x: 256,
+                y: 575
+            }
+        );
 
         // 拖动（仍按下）⇒ 坐标跟随
         frame(&mut st, &[RawEvent::Abs(AbsAxis::X, 100)]);
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: true, x: 1023, y: 575 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: true,
+                x: 1023,
+                y: 575
+            }
+        );
 
         // 抬手 ⇒ 不再更新坐标，但保留最后位置
         frame(&mut st, &[RawEvent::Touch(false)]);
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: false, x: 1023, y: 575 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: false,
+                x: 1023,
+                y: 575
+            }
+        );
 
         // 抬手后继续移动 ⇒ 坐标不得被改写（未按下时不 map）
         frame(&mut st, &[RawEvent::Abs(AbsAxis::X, 0)]);
-        assert_eq!(st.snapshot(), TouchSnapshot { pressed: false, x: 1023, y: 575 });
+        assert_eq!(
+            st.snapshot(),
+            TouchSnapshot {
+                pressed: false,
+                x: 1023,
+                y: 575
+            }
+        );
 
         // 单点模型**忽略** MT 轴；MT 模型忽略 BTN_TOUCH（源判别互不串台）
         st.feed(RawEvent::Abs(AbsAxis::MtTrackingId, 3), TouchSource::Single);

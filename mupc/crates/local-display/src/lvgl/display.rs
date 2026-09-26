@@ -228,7 +228,9 @@ impl Display {
         let buf_bytes = (rows as usize)
             .checked_mul(width as usize)
             .and_then(|n| n.checked_mul(BYTES_PER_PIXEL))
-            .ok_or(LvglError::InvalidArgument("display 缓冲尺寸溢出（width×rows×4）"))?;
+            .ok_or(LvglError::InvalidArgument(
+                "display 缓冲尺寸溢出（width×rows×4）",
+            ))?;
         // 下传给 LVGL 的是 `u32`（`lv_display_set_buffers` 的形参）⇒ 必须显式校验能装下，
         // 否则 `as u32` 会**静默截断**（与上一句"不静默缩小"的承诺自相矛盾）。
         let buf_bytes_u32 = u32::try_from(buf_bytes)

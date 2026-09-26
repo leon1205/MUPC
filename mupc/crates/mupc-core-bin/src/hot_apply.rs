@@ -137,7 +137,11 @@ trait TapWarn {
 impl TapWarn for ApplyOutcome {
     fn tap_warn(self, key: &str) -> Self {
         if let ApplyOutcome::RestartRequired { reason } = &self {
-            tracing::warn!(field = key, reason, "配置已保存但运行行为需重启才变（如实登记）");
+            tracing::warn!(
+                field = key,
+                reason,
+                "配置已保存但运行行为需重启才变（如实登记）"
+            );
         }
         self
     }
@@ -149,7 +153,10 @@ mod tests {
     use serde_json::json;
 
     /// 建一个**真实**的 reload handle（不初始化全局订阅者：handle 只是 layer 的遥控器）。
-    fn handle() -> (tracing_subscriber::reload::Layer<EnvFilter, Registry>, LogReloadHandle) {
+    fn handle() -> (
+        tracing_subscriber::reload::Layer<EnvFilter, Registry>,
+        LogReloadHandle,
+    ) {
         tracing_subscriber::reload::Layer::new(EnvFilter::new("info"))
     }
 
@@ -171,7 +178,10 @@ mod tests {
             "debug",
             "filter 必须真的被换成新级别（不是只返回 Ok）"
         );
-        assert_eq!(hot.apply("system.log_level", &json!("warn")), ApplyOutcome::Applied);
+        assert_eq!(
+            hot.apply("system.log_level", &json!("warn")),
+            ApplyOutcome::Applied
+        );
         assert_eq!(h.with_current(|f| f.to_string()).unwrap(), "warn");
     }
 
@@ -184,7 +194,10 @@ mod tests {
             matches!(out, ApplyOutcome::RestartRequired { .. }),
             "无 handle 时不得报 Applied（那是谎报生效），实得 {out:?}"
         );
-        assert!(hot.set_log_level("debug").is_err(), "无 handle 时 set 必须 Err");
+        assert!(
+            hot.set_log_level("debug").is_err(),
+            "无 handle 时 set 必须 Err"
+        );
     }
 
     /// 连接类**六项**（`intercore.*` 4 + `gateway.*` 2）+ 表外键：一律 `RestartRequired`
@@ -206,7 +219,10 @@ mod tests {
             match hot.apply(key, &json!(1)) {
                 ApplyOutcome::RestartRequired { reason } => {
                     assert!(!reason.is_empty(), "`{key}` 的原因不能是空串");
-                    assert!(reason.contains("重启"), "`{key}` 的原因须点明需重启: {reason}");
+                    assert!(
+                        reason.contains("重启"),
+                        "`{key}` 的原因须点明需重启: {reason}"
+                    );
                 }
                 ApplyOutcome::Applied => panic!("`{key}` 本轮**未接线**，不得报 Applied（谎报）"),
             }

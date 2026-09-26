@@ -303,7 +303,9 @@ impl<'a> PageInput<'a> {
 
 /// `PageInput` 里帧的四个 v2 分节（缺帧时取契约缺省 —— 与 `#[serde(default)]` 同语义，
 /// 即「不可用」，**不伪装成正常**）。
-pub(crate) fn sections(input: &PageInput<'_>) -> (
+pub(crate) fn sections(
+    input: &PageInput<'_>,
+) -> (
     mupc_display_proto::DeviceSection,
     mupc_display_proto::AlarmsSection,
     mupc_display_proto::InfoSection,
@@ -373,12 +375,7 @@ pub(crate) fn page_root(parent: &Obj) -> Result<ScrollContainer, LvglError> {
 /// 把 `styles[next]` 挂到对象上、摘掉上一次挂的那个 —— 用于「值变化只改颜色」这类
 /// **无界增长防护**（`Obj::add_style` 只增不删；1 Hz 每拍挂一条新样式必然把 LVGL 内存
 /// 吃光）。`cur` 由调用方持有，初值用 `usize::MAX`（表示"尚未挂过"）。
-pub(crate) fn set_style_index(
-    obj: &Obj,
-    styles: &[Rc<Style>],
-    cur: &Cell<usize>,
-    next: usize,
-) {
+pub(crate) fn set_style_index(obj: &Obj, styles: &[Rc<Style>], cur: &Cell<usize>, next: usize) {
     if styles.is_empty() {
         return;
     }
@@ -1244,7 +1241,9 @@ impl SegmentedTabs {
     #[cfg(test)]
     pub(crate) fn click_tab(&self, i: usize) {
         let Some(tab) = self.tabs.get(i) else { return };
-        tab.button().obj().send_event(crate::lvgl::event::EventCode::CLICKED);
+        tab.button()
+            .obj()
+            .send_event(crate::lvgl::event::EventCode::CLICKED);
     }
 }
 
@@ -1546,9 +1545,15 @@ mod tests {
             "2026/09/10 13:42:07"
         );
         // 闰日：2024-02-29T12:34:56Z = 1709210096 s
-        assert_eq!(format_epoch_ms_utc(1_709_210_096_000), "2024/02/29 12:34:56");
+        assert_eq!(
+            format_epoch_ms_utc(1_709_210_096_000),
+            "2024/02/29 12:34:56"
+        );
         // 亚秒截断（不进位）
-        assert_eq!(format_epoch_ms_utc(1_789_047_727_999), "2026/09/10 13:42:07");
+        assert_eq!(
+            format_epoch_ms_utc(1_789_047_727_999),
+            "2026/09/10 13:42:07"
+        );
     }
 
     #[test]
@@ -1557,7 +1562,10 @@ mod tests {
         assert_eq!(format_uptime(59), "00:00:59");
         assert_eq!(format_uptime(3600 + 4 * 60 + 5), "01:04:05");
         assert_eq!(format_uptime(86_400 + 3 * 3600), "1 日 03:00:00");
-        assert_eq!(format_uptime(2 * 86_400 + 23 * 3600 + 59 * 60 + 59), "2 日 23:59:59");
+        assert_eq!(
+            format_uptime(2 * 86_400 + 23 * 3600 + 59 * 60 + 59),
+            "2 日 23:59:59"
+        );
     }
 
     /// 占位符**必须是字符集内的字形**（`--` 会出豆腐块 —— 见 [`PLACEHOLDER`] 文档）。

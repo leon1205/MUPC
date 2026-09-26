@@ -83,11 +83,7 @@ impl TokioMessageBus {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(
-                        "消息总线 Topic {} 滞后，跳过 {} 条消息",
-                        topic_key,
-                        skipped
-                    );
+                    tracing::warn!("消息总线 Topic {} 滞后，跳过 {} 条消息", topic_key, skipped);
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     tracing::debug!("消息总线 Topic {} 已关闭", topic_key);
@@ -103,11 +99,7 @@ impl MessageBus for TokioMessageBus {
         let key = topic.as_ref().to_string();
         // 使用 try_write 避免在同步 trait 方法中阻塞
         let topics = self.topics.try_write().map_err(|_| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
-                "消息总线写锁冲突",
-                "core",
-            )
+            MupcError::new(mupc_common::ErrorCode::Unknown, "消息总线写锁冲突", "core")
         })?;
 
         if let Some(state) = topics.get(&key) {
@@ -123,18 +115,10 @@ impl MessageBus for TokioMessageBus {
         Ok(())
     }
 
-    fn subscribe(
-        &self,
-        topic: &Topic,
-        handler: Arc<dyn MessageHandler>,
-    ) -> Result<(), MupcError> {
+    fn subscribe(&self, topic: &Topic, handler: Arc<dyn MessageHandler>) -> Result<(), MupcError> {
         let key = topic.as_ref().to_string();
         let topics = self.topics.try_write().map_err(|_| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
-                "消息总线写锁冲突",
-                "core",
-            )
+            MupcError::new(mupc_common::ErrorCode::Unknown, "消息总线写锁冲突", "core")
         })?;
 
         // 需要在锁外操作，但 spawn_listener 需要 rx 和 handlers
@@ -144,19 +128,11 @@ impl MessageBus for TokioMessageBus {
 
         // 实际实现中，这里应该启动一个后台任务监听 broadcast channel
         // 并将消息分发给所有注册的 handler
-        tracing::info!(
-            "订阅 Topic: {}, handler: {}",
-            key,
-            handler.name()
-        );
+        tracing::info!("订阅 Topic: {}, handler: {}", key, handler.name());
 
         // 注册 handler
         let mut topics = self.topics.try_write().map_err(|_| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
-                "消息总线写锁冲突",
-                "core",
-            )
+            MupcError::new(mupc_common::ErrorCode::Unknown, "消息总线写锁冲突", "core")
         })?;
         if let Some(state) = topics.get_mut(&key) {
             state.handlers.push((handler.name().to_string(), handler));
@@ -167,11 +143,7 @@ impl MessageBus for TokioMessageBus {
     fn unsubscribe(&self, topic: &Topic, name: &str) -> Result<(), MupcError> {
         let key = topic.as_ref().to_string();
         let mut topics = self.topics.try_write().map_err(|_| {
-            MupcError::new(
-                mupc_common::ErrorCode::Unknown,
-                "消息总线写锁冲突",
-                "core",
-            )
+            MupcError::new(mupc_common::ErrorCode::Unknown, "消息总线写锁冲突", "core")
         })?;
 
         if let Some(state) = topics.get_mut(&key) {
@@ -248,8 +220,10 @@ mod tests {
         let t1 = Topic::new("topic/1");
         let t2 = Topic::new("topic/2");
 
-        bus.subscribe(&t1, Arc::new(TestHandler::new("h1"))).unwrap();
-        bus.subscribe(&t2, Arc::new(TestHandler::new("h2"))).unwrap();
+        bus.subscribe(&t1, Arc::new(TestHandler::new("h1")))
+            .unwrap();
+        bus.subscribe(&t2, Arc::new(TestHandler::new("h2")))
+            .unwrap();
 
         // 不应 panic
         bus.publish(&t1, &Message::new(t1.clone(), vec![])).unwrap();

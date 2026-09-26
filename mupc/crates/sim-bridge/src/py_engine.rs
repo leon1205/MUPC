@@ -55,12 +55,16 @@ impl PyEngine {
             .map_err(|e| SimBridgeError::PyEngine(format!("spawn 失败: {}", e)))?;
 
         let stdin = BufWriter::new(
-            child.stdin.take()
-                .ok_or_else(|| SimBridgeError::PyEngine("stdin 未 piped".into()))?
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| SimBridgeError::PyEngine("stdin 未 piped".into()))?,
         );
         let stdout = BufReader::new(
-            child.stdout.take()
-                .ok_or_else(|| SimBridgeError::PyEngine("stdout 未 piped".into()))?
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| SimBridgeError::PyEngine("stdout 未 piped".into()))?,
         );
         let stdout_lines = stdout.lines();
 
@@ -85,14 +89,11 @@ impl PyEngine {
             .await
             .map_err(|e| SimBridgeError::PyEngine(format!("stdin flush: {}", e)))?;
 
-        let response_line = timeout(
-            Duration::from_secs(5),
-            self.stdout_lines.next_line(),
-        )
-        .await
-        .map_err(|_| SimBridgeError::PyEngineTimeout)?
-        .map_err(|e| SimBridgeError::PyEngine(format!("stdout read: {}", e)))?
-        .ok_or(SimBridgeError::PyEngineEof)?;
+        let response_line = timeout(Duration::from_secs(5), self.stdout_lines.next_line())
+            .await
+            .map_err(|_| SimBridgeError::PyEngineTimeout)?
+            .map_err(|e| SimBridgeError::PyEngine(format!("stdout read: {}", e)))?
+            .ok_or(SimBridgeError::PyEngineEof)?;
 
         serde_json::from_str(&response_line).map_err(|e| {
             SimBridgeError::Protocol(format!("JSONL 解析失败: {} (raw: {})", e, response_line))
@@ -104,7 +105,8 @@ impl PyEngine {
         p_ref: f64,
         k_droop: f64,
     ) -> Result<SimResponse, SimBridgeError> {
-        self.send_request(&SimRequest::Step { p_ref, k_droop }).await
+        self.send_request(&SimRequest::Step { p_ref, k_droop })
+            .await
     }
 
     pub async fn send_reset(&mut self, scenario: &str) -> Result<SimResponse, SimBridgeError> {

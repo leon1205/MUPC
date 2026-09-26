@@ -168,7 +168,10 @@ mod tests {
         let got = rx.recv().await.expect("订阅者必须收到");
         assert_eq!(got.source, FeedOrigin::System);
         assert_eq!(got.subtype, "warning", "level 如实带走");
-        assert_eq!(got.message, "站 st-1 role=Grid 离线（采集失败）", "文案逐字不改写");
+        assert_eq!(
+            got.message, "站 st-1 role=Grid 离线（采集失败）",
+            "文案逐字不改写"
+        );
         assert!(got.ts_ms > 0, "时间戳为投递时刻");
     }
 

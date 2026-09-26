@@ -63,18 +63,14 @@ async fn main() {
     // 真源读不出来而 `<config>.bak` 在时用它恢复（见 config_service.rs 的窗口登记）。
     // 恢复是**重要事件**，必须响亮：本处 tracing 尚未初始化（Phase 2 才建），故用 `eprintln!`
     // （systemd/journald 会收进日志）。
-    let (mut config, recovered_from) = match config_service::load_config_with_backup_recovery(&cli.config)
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "FATAL: 配置文件加载失败 ({}): {}",
-                cli.config.display(),
-                e
-            );
-            process::exit(1);
-        }
-    };
+    let (mut config, recovered_from) =
+        match config_service::load_config_with_backup_recovery(&cli.config) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("FATAL: 配置文件加载失败 ({}): {}", cli.config.display(), e);
+                process::exit(1);
+            }
+        };
     if let Some(bak) = &recovered_from {
         eprintln!(
             "WARN: 真源 {} 不可读，已用备份 {} 恢复（上次落盘的崩溃窗口；请核对配置内容）",
@@ -148,8 +144,7 @@ async fn main() {
     // `hot_apply.rs` 调 `handle.reload(..)` **当场换掉过滤规则**（≤1 s，无需重启）。
     // 不用 reload 层的话，`EnvFilter` 一旦 `.init()` 就再也改不动——屏上改日志级别会变成
     // "写进文件了、装置还是按老级别打"，即静默失实。
-    let (filter_layer, log_reload) =
-        tracing_subscriber::reload::Layer::new(env_filter);
+    let (filter_layer, log_reload) = tracing_subscriber::reload::Layer::new(env_filter);
 
     if let Err(e) = tracing_subscriber::registry()
         .with(filter_layer)
@@ -211,15 +206,15 @@ async fn main() {
     // 信号处理已内建于 wait_for_shutdown (Phase 5)
 
     // ── Phase 5: 主循环 ──
-    tracing::info!(
-        "mupcd 运行中 (PID: {})，等待信号...",
-        std::process::id()
-    );
+    tracing::info!("mupcd 运行中 (PID: {})，等待信号...", std::process::id());
 
     signal_handler::wait_for_shutdown().await;
 
     // ── Phase 6: 优雅退出 ──
-    tracing::info!("Phase 6: 开始优雅退出 (超时 {} 秒)...", shutdown_timeout_sec);
+    tracing::info!(
+        "Phase 6: 开始优雅退出 (超时 {} 秒)...",
+        shutdown_timeout_sec
+    );
 
     let shutdown_result = tokio::time::timeout(
         std::time::Duration::from_secs(shutdown_timeout_sec),
@@ -243,10 +238,7 @@ async fn main() {
 ///
 /// `ctx` 取 `&mut`（U-64）：`StartupContext::shutdown` 要把协作任务句柄**取出来等待**
 /// （`std::mem::take`），故需要可变借用。
-async fn graceful_shutdown(
-    coord: &ServiceCoordinatorImpl,
-    ctx: &mut startup::StartupContext,
-) {
+async fn graceful_shutdown(coord: &ServiceCoordinatorImpl, ctx: &mut startup::StartupContext) {
     tracing::info!("停止所有子系统 (逆序)...");
     coord.stop_all().await;
     // P0-1 + U-64：`ctx.shutdown()` 内部顺序 = **通知协作生产者收工 → 等它们确认退出（有上限）

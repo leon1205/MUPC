@@ -40,7 +40,10 @@ fn main() {
     println!("cargo:rerun-if-changed=allowlist.txt");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", lvgl_src.display());
-    println!("cargo:rerun-if-changed={}", lvgl_root.join("lvgl.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        lvgl_root.join("lvgl.h").display()
+    );
 
     // ── 1. cc：编译 LVGL 核心 C 源码 ─────────────────────────────────
     let sources = collect_c_sources(&lvgl_src);
@@ -121,8 +124,8 @@ fn main() {
         builder = builder.clang_arg(format!("--target={target}"));
     }
 
-    let allowlist = std::fs::read_to_string(manifest_dir.join("allowlist.txt"))
-        .expect("allowlist.txt missing");
+    let allowlist =
+        std::fs::read_to_string(manifest_dir.join("allowlist.txt")).expect("allowlist.txt missing");
     let mut n_fn = 0usize;
     let mut n_ty = 0usize;
     let mut n_va = 0usize;

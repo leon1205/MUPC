@@ -1564,11 +1564,11 @@ mod tests {
 #[cfg(test)]
 mod runner_tests {
     use super::*;
+    use crate::alert_feed::AlertFeed;
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use mupc_io::{IoError, MockIn, MockOut};
     use mupc_storage::StorageError;
-    use crate::alert_feed::AlertFeed;
     use std::sync::{Arc, Mutex};
 
     use crate::core_config::{DiConf, DoConf, IoConfig};
@@ -2442,12 +2442,18 @@ mod runner_tests {
         ctl.tick_frame().await;
         pin.set(false);
 
-        let err = ctl.request_release().await.expect_err("transport 失败应 Err");
+        let err = ctl
+            .request_release()
+            .await
+            .expect_err("transport 失败应 Err");
         assert!(
             matches!(&err, InterlockReject::Internal(d) if d.contains("释放联锁失败")),
             "必须透传具体原因，实际 {err:?}"
         );
-        assert!(ctl.is_latched_now(), "transport 未成功 ⇒ 本地 latch 不得被清");
+        assert!(
+            ctl.is_latched_now(),
+            "transport 未成功 ⇒ 本地 latch 不得被清"
+        );
 
         // ack_m1 侧同款：停机已确认但授权写失败
         {
@@ -2664,7 +2670,10 @@ mod runner_tests {
         ));
         // 模拟 new() 的 any_pcs_failed 分支：预置本地 latch + 标记（transport/DB 尚未同步）
         ctl.preset_failsafe();
-        assert!(ctl.is_latched_now(), "fail-safe 预置应立即 latch（dispatch 抑制生效）");
+        assert!(
+            ctl.is_latched_now(),
+            "fail-safe 预置应立即 latch（dispatch 抑制生效）"
+        );
 
         // run_loop 首帧：sync 补 transport restore(true) + DB triggered（P2-1）
         ctl.sync_failsafe_latch().await;
@@ -2689,7 +2698,11 @@ mod runner_tests {
             before,
             "sync 幂等：不应重复 restore(true)"
         );
-        assert_eq!(events.count("interlock.triggered"), ev_before, "sync 幂等：不应重复 DB 事件");
+        assert_eq!(
+            events.count("interlock.triggered"),
+            ev_before,
+            "sync 幂等：不应重复 DB 事件"
+        );
     }
 
     /// **A-1（独立评审，安全相关）：`do_request_release` 的 TOCTOU —— 清态前的同锁内复检。**
@@ -2764,7 +2777,10 @@ mod runner_tests {
         let calls_before = { inner.lock().unwrap().calls.len() };
         pin.set(true);
         ctl.tick_frame().await;
-        assert!(ctl.is_latched_now(), "前提：窗口内 runner 帧不影响 latch（它本来就没被清）");
+        assert!(
+            ctl.is_latched_now(),
+            "前提：窗口内 runner 帧不影响 latch（它本来就没被清）"
+        );
         let window_calls = {
             let g = inner.lock().unwrap();
             g.calls[calls_before..].to_vec()

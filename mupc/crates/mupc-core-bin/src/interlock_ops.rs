@@ -154,7 +154,10 @@ impl InterlockService {
         // 备选修法（把 `reserve` 提到本判定之前）**不取**：那会让未启用部署上的重试回 `Busy`
         // ——用"上一操作正在处理中"盖掉"功能没开"这一更具体、更该先说的结构性事实。
         let Some(backend) = self.backend.as_ref() else {
-            tracing::warn!(path = ep.path(), "联锁功能未启用，写请求被拒（Unavailable）");
+            tracing::warn!(
+                path = ep.path(),
+                "联锁功能未启用，写请求被拒（Unavailable）"
+            );
             let audit_id = self.write_outcome(
                 Ep::of(ep),
                 None,
@@ -175,7 +178,10 @@ impl InterlockService {
         };
 
         // ── 步骤 3：幂等查表（键 = `(op, request_id)`）──────────────────────────────────
-        match self.table.reserve(IdempotencyKey::new(op, req.request_id.clone()), now) {
+        match self
+            .table
+            .reserve(IdempotencyKey::new(op, req.request_id.clone()), now)
+        {
             // 命中且已完成 ⇒ **首次的原始回执** + `duplicate=true`（`ok` / `code` 不变）
             Reserve::Done(mut first) => {
                 first.mark_duplicate();
@@ -206,7 +212,10 @@ impl InterlockService {
 
         let resp = self.execute(ep, req, now, backend).await;
         // 终态入表（**含失败态**：契约要求"首次失败的重放同样保持失败"）。
-        if !self.table.complete(&IdempotencyKey::new(op, req.request_id.clone()), resp.clone()) {
+        if !self.table.complete(
+            &IdempotencyKey::new(op, req.request_id.clone()),
+            resp.clone(),
+        ) {
             tracing::warn!(
                 request_id = %req.request_id,
                 "迟到 complete：本次请求耗时超过幂等 TTL，占位已过期 ⇒ 回执不入表"
@@ -770,7 +779,10 @@ mod tests {
         assert!(!resp.duplicate);
         let ack = resp.applied.expect("成功必须带 applied（UI 立即刷屏用）");
         assert!(!ack.latched, "applied 取**操作后**状态，不是照抄请求");
-        assert!(ack.stopped, "停机已确认 = true（UI 的 stop_failed := !stopped）");
+        assert!(
+            ack.stopped,
+            "停机已确认 = true（UI 的 stop_failed := !stopped）"
+        );
         assert!(resp.audit_id.is_some(), "成功回执带审计号（现场对拍）");
         assert_eq!(b.release_calls(), 1);
 
@@ -787,7 +799,11 @@ mod tests {
         assert_eq!(e.operator, CONSOLE_OPERATOR, "T-3：无登录 ⇒ 固定标识");
         assert_eq!(e.before, Some(Value::Bool(true)), "操作前 latch=开");
         assert_eq!(e.after, Some(Value::Bool(false)), "操作后 latch=关");
-        assert_eq!(e.id, resp.audit_id.clone().unwrap(), "回执带的就是这条的 id");
+        assert_eq!(
+            e.id,
+            resp.audit_id.clone().unwrap(),
+            "回执带的就是这条的 id"
+        );
     }
 
     /// ① 成功路径（M1 授权）：目标 / 操作类型与释放**不同**（防两臂串味）。
@@ -907,7 +923,11 @@ mod tests {
         assert_eq!(resp2.code, ControlCode::RejectedPrecondition);
         assert_eq!(resp2.message, receipt::INTERLOCK_CONFLICT);
 
-        assert_eq!(b.entered(), 0, "乐观并发不符 ⇒ 一个动作都不许发（EDGE-19 的全部意义）");
+        assert_eq!(
+            b.entered(),
+            0,
+            "乐观并发不符 ⇒ 一个动作都不许发（EDGE-19 的全部意义）"
+        );
         let es = f.entries();
         assert_eq!(es.len(), 2, "两次冲突各留一条 Failed 痕");
         assert!(es.iter().all(|e| e.result == AuditResult::Failed));
@@ -971,7 +991,10 @@ mod tests {
 
         // 不同 `request_id`（渲染端每次点击新 uuid）⇒ 是新操作（幂等键是 `(op, request_id)`）
         let third = svc
-            .handle(REL, &request(REL, "rid-other", payload_of(&view_unlatched())))
+            .handle(
+                REL,
+                &request(REL, "rid-other", payload_of(&view_unlatched())),
+            )
             .await;
         assert!(!third.duplicate);
     }
@@ -989,7 +1012,10 @@ mod tests {
         assert!(!resp.ok);
         assert_eq!(resp.code, ControlCode::AuditUnavailable, "EDGE-18");
         assert_eq!(resp.message, receipt::AUDIT_UNAVAILABLE);
-        assert!(resp.applied.is_none(), "审计不可写 ⇒ 操作未执行（applied 必须空）");
+        assert!(
+            resp.applied.is_none(),
+            "审计不可写 ⇒ 操作未执行（applied 必须空）"
+        );
         assert!(resp.audit_id.is_none(), "连审计号都没有 ⇒ 不得编一个");
         assert_eq!(b.entered(), 0, "一个动作都不许发（fail-closed 的全部意义）");
         // 排障信息不丢：原因由 `tracing::error!` 承载（P3 日志页可查）
@@ -1047,7 +1073,12 @@ mod tests {
         let f = Fixture::new("ilk-disabled");
         let svc = f.service_disabled();
         // ① 报文不合法 ⇒ 哪怕功能没开也先说"报文无效"（信封校验**先于**未启用判定）
-        let wrong = ControlRequest::new("rid-off-bad", now_ms(), "ack_m1", payload_of(&view_latched()));
+        let wrong = ControlRequest::new(
+            "rid-off-bad",
+            now_ms(),
+            "ack_m1",
+            payload_of(&view_latched()),
+        );
         let bad = svc.handle(REL, &wrong).await;
         assert_eq!(bad.code, ControlCode::RejectedValidation);
         assert!(
@@ -1065,9 +1096,15 @@ mod tests {
         assert!(resp.applied.is_none());
         let es = f.entries();
         assert_eq!(es.len(), 1);
-        assert_eq!(es[0].request_id, "rid-off", "审计条目带**可信**的 request_id");
+        assert_eq!(
+            es[0].request_id, "rid-off",
+            "审计条目带**可信**的 request_id"
+        );
         assert_eq!(es[0].result, AuditResult::Failed);
-        assert_eq!(es[0].reason.as_deref(), Some(receipt::INTERLOCK_NOT_ENABLED));
+        assert_eq!(
+            es[0].reason.as_deref(),
+            Some(receipt::INTERLOCK_NOT_ENABLED)
+        );
     }
 
     /// ⑥ 信封非法 ⇒ `RejectedValidation` + `BAD_ENVELOPE`，**不执行、不写审计**
@@ -1083,7 +1120,10 @@ mod tests {
         let r = svc.handle(REL, &wrong).await;
         assert_eq!(r.code, ControlCode::RejectedValidation);
         assert_eq!(r.message, receipt::BAD_ENVELOPE);
-        assert!(!r.field_errors.is_empty(), "误路由也要点名（结构化原因，只是不上屏）");
+        assert!(
+            !r.field_errors.is_empty(),
+            "误路由也要点名（结构化原因，只是不上屏）"
+        );
         assert!(r.field_errors[0].reason.contains("ack_m1"));
 
         // ② 空 `request_id`
@@ -1099,6 +1139,9 @@ mod tests {
         assert_eq!(r3.code, ControlCode::RejectedValidation);
 
         assert_eq!(b.entered(), 0, "信封非法 ⇒ 一个动作都不发");
-        assert!(f.entries().is_empty(), "信封非法 ⇒ 不写审计（请求身份不可信）");
+        assert!(
+            f.entries().is_empty(),
+            "信封非法 ⇒ 不写审计（请求身份不可信）"
+        );
     }
 }

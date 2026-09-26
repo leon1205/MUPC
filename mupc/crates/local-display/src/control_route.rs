@@ -514,7 +514,10 @@ fn log_range_wire(r: LogRange) -> &'static str {
 
 /// `(键, 值)` 序列 → 查询串（**多值用重复键**，值经百分号编码）。
 fn encode_pairs(pairs: &[(String, String)]) -> String {
-    let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     encode_query(&refs)
 }
 
@@ -673,8 +676,7 @@ mod tests {
     const LOG_PAGE: &str =
         r#"{"entries":[],"next_cursor":null,"has_more":false,"range_too_large":false}"#;
     /// 一条最小 `AuditPage` 字面量。
-    const AUDIT_PAGE: &str =
-        r#"{"entries":[],"page":1,"page_size":20,"has_more":false,"newest_ts_ms":null,"available":true}"#;
+    const AUDIT_PAGE: &str = r#"{"entries":[],"page":1,"page_size":20,"has_more":false,"newest_ts_ms":null,"available":true}"#;
     /// 一条最小 `PeripheralCatalog` 字面量（`rev` 非 0 ⇒ 可判"解到的是本端点"）。
     const CATALOG: &str = r#"{"rev":7,"generated_ms":1,"stations":[]}"#;
     /// 一条最小 `FireDetectorPage` 字面量。
@@ -710,7 +712,10 @@ mod tests {
         );
         // ③ Logs → P3.set_page
         assert!(
-            matches!(route(&query(ConsoleEndpoint::Logs, LOG_PAGE)), Ok(RouteDecision::Logs(_))),
+            matches!(
+                route(&query(ConsoleEndpoint::Logs, LOG_PAGE)),
+                Ok(RouteDecision::Logs(_))
+            ),
             "Logs 端点必须路由到 P3（set_page）"
         );
         // ④ LogsTargets → P3.set_targets
@@ -721,7 +726,10 @@ mod tests {
         );
         // ⑤ Audit → P5.set_page
         assert!(
-            matches!(route(&query(ConsoleEndpoint::Audit, AUDIT_PAGE)), Ok(RouteDecision::Audit(_))),
+            matches!(
+                route(&query(ConsoleEndpoint::Audit, AUDIT_PAGE)),
+                Ok(RouteDecision::Audit(_))
+            ),
             "Audit 端点必须路由到 P5（set_page）"
         );
         // ⑥ AuditOps → P5.set_ops
@@ -780,7 +788,10 @@ mod tests {
         let conflict = r#"{"request_id":"r4","ok":false,"code":"rejected_precondition",
             "message":"联锁状态已变化，请刷新后重试","applied":null,"field_errors":[],"audit_id":"a3",
             "duplicate":false,"at_ms":4}"#;
-        for ep in [ConsoleEndpoint::InterlockRelease, ConsoleEndpoint::InterlockAckM1] {
+        for ep in [
+            ConsoleEndpoint::InterlockRelease,
+            ConsoleEndpoint::InterlockAckM1,
+        ] {
             let Ok(RouteDecision::InterlockResult(r)) = route(&resp(ep, conflict)) else {
                 panic!("{ep:?} 的 RejectedPrecondition 必须与其它拒绝同路径（show_result）");
             };
@@ -833,8 +844,9 @@ mod tests {
             (ConsoleEndpoint::InterlockRelease, true),
             (ConsoleEndpoint::InterlockAckM1, true),
         ] {
-            let d = transport_failure_decision(ep, rid, msg, at)
-                .unwrap_or_else(|| panic!("{ep:?} 是写端点 ⇒ 必须有本地合成回执（否则屏上什么都不发生）"));
+            let d = transport_failure_decision(ep, rid, msg, at).unwrap_or_else(|| {
+                panic!("{ep:?} 是写端点 ⇒ 必须有本地合成回执（否则屏上什么都不发生）")
+            });
             let got = match (&d, interlock) {
                 (RouteDecision::ConfigApply(r), false) => facts(r),
                 (RouteDecision::InterlockResult(r), true) => facts(r),
@@ -864,7 +876,10 @@ mod tests {
     fn kind_and_decode_mismatches_are_loud() {
         // 查询端点收到控制信封
         let as_resp = resp(ConsoleEndpoint::Logs, rejected());
-        assert!(matches!(route(&as_resp), Err(RouteError::Kind(ConsoleEndpoint::Logs))));
+        assert!(matches!(
+            route(&as_resp),
+            Err(RouteError::Kind(ConsoleEndpoint::Logs))
+        ));
         // 写端点收到裸 DTO
         let as_query = query(ConsoleEndpoint::InterlockRelease, "{}");
         assert!(matches!(
@@ -874,7 +889,10 @@ mod tests {
         // 解码失败：合法 JSON 但不是 `LogPage`（缺必需字段）
         let bad = query(ConsoleEndpoint::Logs, r#"{"entries":[]}"#);
         assert!(
-            matches!(route(&bad), Err(RouteError::Decode(ConsoleEndpoint::Logs, _))),
+            matches!(
+                route(&bad),
+                Err(RouteError::Decode(ConsoleEndpoint::Logs, _))
+            ),
             "缺必需字段必须响亮失败，不得默认成「无日志」"
         );
         // 写回执的 `applied` 形状不对也要响亮
@@ -896,7 +914,8 @@ mod tests {
     fn duplicate_flag_is_carried_through_route() {
         let dup = r#"{"request_id":"r6","ok":true,"code":"ok","message":"m","applied":null,
             "field_errors":[{"field":"a.b","reason":"越界"}],"audit_id":"a4","duplicate":true,"at_ms":6}"#;
-        let Ok(RouteDecision::ConfigApply(r)) = route(&resp(ConsoleEndpoint::ConfigApply, dup)) else {
+        let Ok(RouteDecision::ConfigApply(r)) = route(&resp(ConsoleEndpoint::ConfigApply, dup))
+        else {
             panic!("应路由到 ConfigApply");
         };
         assert!(r.duplicate, "duplicate 是幂等命中的唯一标记，不得丢");
@@ -1181,8 +1200,14 @@ mod tests {
     /// 若驱动源被换成帧通道，那里就会打印 `down`，用例当场红。
     #[test]
     fn p3_channel_uses_control_fail_streak_with_threshold_two() {
-        assert!(p3_connected(0), "上电初值 = 已连接（断开是失败驱动的降级态）");
-        assert!(p3_connected(1), "单次失败不足以判死（设计 §6.3：连续 2 次）");
+        assert!(
+            p3_connected(0),
+            "上电初值 = 已连接（断开是失败驱动的降级态）"
+        );
+        assert!(
+            p3_connected(1),
+            "单次失败不足以判死（设计 §6.3：连续 2 次）"
+        );
         assert!(!p3_connected(2), "连续 2 次失败 ⇒ 断开");
         assert!(!p3_connected(u32::MAX), "长时间失败必须仍是断开");
         assert_eq!(P3_DOWN_FAIL_STREAK, 2, "阈值来源 = 设计 §6.3 原文");
@@ -1200,14 +1225,23 @@ mod tests {
             range: LogRange::H1,
             from_ms: None,
             to_ms: None,
-            levels: vec![mupc_display_proto::LogLevel::Error, mupc_display_proto::LogLevel::Warn],
+            levels: vec![
+                mupc_display_proto::LogLevel::Error,
+                mupc_display_proto::LogLevel::Warn,
+            ],
             targets: vec!["mupc::io".to_string()],
             cursor: None,
             limit: 20,
         };
         let s = log_query_string(&q);
-        assert_eq!(s, "range=1h&levels=error&levels=warn&targets=mupc%3A%3Aio&limit=20", "实得 {s}");
-        assert!(!s.contains("from="), "相对档位不得发 from（会把窗口钉死在 1970）");
+        assert_eq!(
+            s, "range=1h&levels=error&levels=warn&targets=mupc%3A%3Aio&limit=20",
+            "实得 {s}"
+        );
+        assert!(
+            !s.contains("from="),
+            "相对档位不得发 from（会把窗口钉死在 1970）"
+        );
         assert!(!s.contains("cursor="), "cursor = None 不发该键");
 
         // Custom 档：两侧齐全才发
@@ -1222,8 +1256,7 @@ mod tests {
         };
         let s = log_query_string(&custom);
         assert_eq!(
-            s,
-            "range=custom&from=1789000000000&to=1789003600000&cursor=77&limit=20",
+            s, "range=custom&from=1789000000000&to=1789003600000&cursor=77&limit=20",
             "实得 {s}"
         );
         assert!(!s.contains("levels="), "空级别集合 = 不筛，不得发该键");
@@ -1247,7 +1280,10 @@ mod tests {
             "ops=interlock_release&ops=interlock_ack_m1&page=3&page_size=20",
         );
         // 空 ops ⇒ 不筛（不发键）；page/page_size 仍在
-        let all = AuditQuery { ops: Vec::new(), ..q.clone() };
+        let all = AuditQuery {
+            ops: Vec::new(),
+            ..q.clone()
+        };
         assert_eq!(audit_query_string(&all), "page=3&page_size=20");
     }
 
@@ -1308,7 +1344,13 @@ mod tests {
         assert!(!ControlIntent::FireDetectorPage(1).is_write());
         assert!(!ControlIntent::BmsAlarmPage(1).is_write());
         // 写意图的条数必须与契约的写端点条数一致（新增写端点却忘了加意图 ⇒ 红）
-        assert_eq!(w.len(), ConsoleEndpoint::ALL.into_iter().filter(|e| e.is_write()).count());
+        assert_eq!(
+            w.len(),
+            ConsoleEndpoint::ALL
+                .into_iter()
+                .filter(|e| e.is_write())
+                .count()
+        );
     }
 
     // ⚠️ **已删除的恒真用例（B3-2b-2 整改 建议 4）**：

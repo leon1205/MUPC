@@ -76,10 +76,12 @@ impl EnvConfig {
     /// 当前由 DynamicConfigLoader 接管 YAML 加载职责。
     #[allow(dead_code)]
     pub fn from_file(path: &std::path::PathBuf) -> Result<Self, crate::error::AiEngineError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::error::AiEngineError::ConfigLoadFailed(format!("读取文件失败: {}", e)))?;
-        serde_yaml::from_str(&content)
-            .map_err(|e| crate::error::AiEngineError::ConfigLoadFailed(format!("YAML 解析失败: {}", e)))
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::error::AiEngineError::ConfigLoadFailed(format!("读取文件失败: {}", e))
+        })?;
+        serde_yaml::from_str(&content).map_err(|e| {
+            crate::error::AiEngineError::ConfigLoadFailed(format!("YAML 解析失败: {}", e))
+        })
     }
 
     /// 获取版本指纹

@@ -42,7 +42,7 @@ use crate::ui::components::{
     self, ConfirmDetail, ConfirmDialog, ConfirmSpec, Debounce, EmptyState, LedIndicator,
     MultiSelectChips, StateSemantics, StatusChip, Stepper, Toast, ToastTone, UnavailableKind,
     UnavailableState, WarnBanner, ALL_TEXTS, TEXT_CHECK_PREFIX, TEXT_WARN_BANNER,
-    TEXT_WARN_FIELD_SEP, TEXT_WARN_FIELDS_PREFIX,
+    TEXT_WARN_FIELDS_PREFIX, TEXT_WARN_FIELD_SEP,
 };
 use crate::ui::theme::{
     self, ChipSkin, ConfirmLevel, Dimens, Opacity, Palette, Radius, Stroke, TextSlot, Timing,
@@ -136,12 +136,32 @@ fn theme_matches_ui_spec() {
 fn palette_matches_ui_spec() {
     // 基础框架色
     assert_eq!(hex(Palette::BG), 0x0B_12_20, "bg 画布底");
-    assert_eq!(hex(Palette::SURFACE), 0x14_1F_33, "surface 卡 / 面板 / 导航底");
-    assert_eq!(hex(Palette::SURFACE_ALT), 0x1B_29_42, "surface_alt 卡内嵌区");
-    assert_eq!(hex(Palette::SURFACE_HIGH), 0x24_33_4F, "surface_high 控件底（新增）");
-    assert_eq!(hex(Palette::SURFACE_PRESS), 0x2E_40_66, "surface_press 按压底（新增）");
+    assert_eq!(
+        hex(Palette::SURFACE),
+        0x14_1F_33,
+        "surface 卡 / 面板 / 导航底"
+    );
+    assert_eq!(
+        hex(Palette::SURFACE_ALT),
+        0x1B_29_42,
+        "surface_alt 卡内嵌区"
+    );
+    assert_eq!(
+        hex(Palette::SURFACE_HIGH),
+        0x24_33_4F,
+        "surface_high 控件底（新增）"
+    );
+    assert_eq!(
+        hex(Palette::SURFACE_PRESS),
+        0x2E_40_66,
+        "surface_press 按压底（新增）"
+    );
     assert_eq!(hex(Palette::DIVIDER), 0x2A_3B_57, "divider 分隔线");
-    assert_eq!(hex(Palette::BORDER_CTRL), 0x3B_4A_6B, "border_ctrl 控件描边");
+    assert_eq!(
+        hex(Palette::BORDER_CTRL),
+        0x3B_4A_6B,
+        "border_ctrl 控件描边"
+    );
     assert_eq!(hex(Palette::TEXT_PRIMARY), 0xF4_F7_FF, "text_primary");
     assert_eq!(hex(Palette::TEXT_SECOND), 0xA6_B6_D6, "text_second");
     assert_eq!(hex(Palette::TEXT_WEAK), 0x6E_7F_A0, "text_weak");
@@ -154,10 +174,18 @@ fn palette_matches_ui_spec() {
     assert_eq!(hex(Palette::STOPPED), 0x8C_98_AC, "停机 / 不可用灰");
     assert_eq!(hex(Palette::STANDBY), 0xFF_D7_5E, "待机 / 警示文字");
     assert_eq!(hex(Palette::SOC_OK), 0x35_D0_C4, "SOC 正常");
-    assert_eq!(hex(Palette::DANGER), 0xFF_6B_6B, "SOC 低 / 数据异常 / 危险操作");
+    assert_eq!(
+        hex(Palette::DANGER),
+        0xFF_6B_6B,
+        "SOC 低 / 数据异常 / 危险操作"
+    );
     assert_eq!(hex(Palette::SOC_HIGH), 0xFF_A9_4D, "SOC 高");
     assert_eq!(hex(Palette::STALE), 0xFF_B0_20, "过期 / 警示");
-    assert_eq!(hex(Palette::INCONSISTENT), 0xFF_5C_D0, "方向不一致（唯一专属色）");
+    assert_eq!(
+        hex(Palette::INCONSISTENT),
+        0xFF_5C_D0,
+        "方向不一致（唯一专属色）"
+    );
     assert_eq!(hex(Palette::DANGER_BG), 0x3A_1F_26, "危险操作底（新增）");
     assert_eq!(hex(Palette::PRIMARY_BG), 0x1E_4E_8C, "主按钮底 / 选中段底");
     assert_eq!(hex(Palette::WARN_BG), 0x3A_2E_12, "警示行底");
@@ -208,11 +236,26 @@ fn font_ladder_matches_ui_spec() {
         );
     }
     // NF-04 下限：正文 / 弱注不得低于 24
-    assert!(TextSlot::Body.px() >= 24 && TextSlot::Weak.px() >= 24, "NF-04 下限 24 px");
+    assert!(
+        TextSlot::Body.px() >= 24 && TextSlot::Weak.px() >= 24,
+        "NF-04 下限 24 px"
+    );
     // 图标档位收敛（§3.3「图标 28–72」与 10 档的缺口，见 `theme::icon_slot` 文档）
-    assert_eq!(theme::icon_slot(28), TextSlot::SectionTitle, "28 px 图标 = 28 档");
-    assert_eq!(theme::icon_slot(64), TextSlot::PhasePower, "64 px 图标 = 64 档");
-    assert_eq!(theme::icon_slot(72), TextSlot::PhasePower, "72 px 图标收敛到 64 档（无 72 档）");
+    assert_eq!(
+        theme::icon_slot(28),
+        TextSlot::SectionTitle,
+        "28 px 图标 = 28 档"
+    );
+    assert_eq!(
+        theme::icon_slot(64),
+        TextSlot::PhasePower,
+        "64 px 图标 = 64 档"
+    );
+    assert_eq!(
+        theme::icon_slot(72),
+        TextSlot::PhasePower,
+        "72 px 图标收敛到 64 档（无 72 档）"
+    );
 }
 
 /// ③ `ChipSkin` 的四种文档化皮肤（UI §8.2 / §6.4）。
@@ -223,15 +266,41 @@ fn chip_skin_matches_ui_spec() {
         assert_eq!(hex(s.border), border, "{what} 描边");
         assert_eq!(hex(s.text), text, "{what} 字色");
     };
-    check(ChipSkin::MISSING_DATA, 0x2A_35_50, 0x3B_4A_6B, 0x96_A2_BC, "缺数据类");
-    check(ChipSkin::WARNING, 0x3A_2E_12, 0xFF_B0_20, 0xFF_D7_5E, "警示类");
-    check(ChipSkin::UNAVAILABLE, 0x2A_35_50, 0x2A_3B_57, 0x96_A2_BC, "不可用类");
+    check(
+        ChipSkin::MISSING_DATA,
+        0x2A_35_50,
+        0x3B_4A_6B,
+        0x96_A2_BC,
+        "缺数据类",
+    );
+    check(
+        ChipSkin::WARNING,
+        0x3A_2E_12,
+        0xFF_B0_20,
+        0xFF_D7_5E,
+        "警示类",
+    );
+    check(
+        ChipSkin::UNAVAILABLE,
+        0x2A_35_50,
+        0x2A_3B_57,
+        0x96_A2_BC,
+        "不可用类",
+    );
     // 「颜色通道」= `accent`（F14 断言口径）
-    assert_eq!(ChipSkin::WARNING.accent(), Palette::STANDBY, "警示类 accent = 文字色");
+    assert_eq!(
+        ChipSkin::WARNING.accent(),
+        Palette::STANDBY,
+        "警示类 accent = 文字色"
+    );
     assert_eq!(ChipSkin::SUCCESS.accent(), Palette::OK, "成功类 accent");
     assert_eq!(ChipSkin::FAILURE.accent(), Palette::DANGER, "失败类 accent");
     // 三色通道各自都来自 theme 常量（此处只需保证存在且互不相同的主张成立）
-    assert_ne!(hex(ChipSkin::NEUTRAL.bg), hex(ChipSkin::NEUTRAL.text), "中性类底色与字色不同");
+    assert_ne!(
+        hex(ChipSkin::NEUTRAL.bg),
+        hex(ChipSkin::NEUTRAL.text),
+        "中性类底色与字色不同"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -262,15 +331,30 @@ fn confirm_level_has_no_default() {
 
     assert!(!ConfirmLevel::L1.requires_warn_banner(), "L1 无 WarnBanner");
     assert!(!ConfirmLevel::L2.requires_warn_banner(), "L2 无 WarnBanner");
-    assert!(ConfirmLevel::L2Plus.requires_warn_banner(), "L2+ **必须**有 WarnBanner");
+    assert!(
+        ConfirmLevel::L2Plus.requires_warn_banner(),
+        "L2+ **必须**有 WarnBanner"
+    );
 
     assert_eq!(ConfirmLevel::L1.accent(), Palette::INFO, "L1 级别色 = 蓝");
-    assert_eq!(ConfirmLevel::L2.accent(), Palette::DANGER, "L2 级别色 = 危险红");
-    assert_eq!(ConfirmLevel::L2Plus.accent(), Palette::DANGER, "L2+ 级别色 = 危险红");
+    assert_eq!(
+        ConfirmLevel::L2.accent(),
+        Palette::DANGER,
+        "L2 级别色 = 危险红"
+    );
+    assert_eq!(
+        ConfirmLevel::L2Plus.accent(),
+        Palette::DANGER,
+        "L2+ 级别色 = 危险红"
+    );
 
     assert_eq!(ConfirmLevel::L1.confirm_text(), "确认执行", "L1 按钮文案");
     assert_eq!(ConfirmLevel::L2.confirm_text(), "按住确认", "L2 按钮文案");
-    assert_eq!(ConfirmLevel::L2Plus.confirm_text(), "按住确认", "L2+ 按钮文案");
+    assert_eq!(
+        ConfirmLevel::L2Plus.confirm_text(),
+        "按住确认",
+        "L2+ 按钮文案"
+    );
 }
 
 /// ④ 不可用态**不等价于**"确知没有"（UI §8.3 联锁专行 / EDGE-09 / EDGE-17）。
@@ -285,13 +369,25 @@ fn unavailable_is_not_empty() {
     assert_eq!(UnavailableState::SEMANTICS, StateSemantics::Unavailable);
 
     // 三种不可用场景的标题逐字对齐 §3.6 用字表，且两两不同
-    assert_eq!(UnavailableKind::AlertSource.title(), "告警源不可用", "EDGE-09");
+    assert_eq!(
+        UnavailableKind::AlertSource.title(),
+        "告警源不可用",
+        "EDGE-09"
+    );
     assert_eq!(UnavailableKind::Audit.title(), "审计记录不可用", "EDGE-17");
-    assert_eq!(UnavailableKind::Interlock.title(), "联锁状态不可用", "F16.6 / IL-01");
+    assert_eq!(
+        UnavailableKind::Interlock.title(),
+        "联锁状态不可用",
+        "F16.6 / IL-01"
+    );
     let mut titles: Vec<&str> = UnavailableKind::ALL.iter().map(|k| k.title()).collect();
     titles.sort_unstable();
     titles.dedup();
-    assert_eq!(titles.len(), UnavailableKind::ALL.len(), "三个场景标题互不相同");
+    assert_eq!(
+        titles.len(),
+        UnavailableKind::ALL.len(),
+        "三个场景标题互不相同"
+    );
 
     // **关键约束**：联锁「不可用」不得显示为「未联锁」（fail-closed）
     assert_ne!(
@@ -311,11 +407,18 @@ fn unavailable_is_not_empty() {
 #[test]
 fn debounce_window_is_500ms() {
     let d = Debounce::new(Timing::debounce());
-    assert_eq!(d.window(), Duration::from_millis(500), "TT-10 窗口 = 500 ms");
+    assert_eq!(
+        d.window(),
+        Duration::from_millis(500),
+        "TT-10 窗口 = 500 ms"
+    );
 
     let t0 = Instant::now();
     assert!(d.try_accept(t0), "首次触发放行");
-    assert!(!d.try_accept(t0 + Duration::from_millis(499)), "窗口内第二次拒绝");
+    assert!(
+        !d.try_accept(t0 + Duration::from_millis(499)),
+        "窗口内第二次拒绝"
+    );
     // 「拒绝**不刷新**窗口起点」由下一条**边界**断言证明：
     // 若 t0+499 的拒绝刷新了起点，窗口会顺延到 t0+999，t0+500 就该被拒；
     // 它被放行 ⇒ 起点仍是首次放行的 t0（否则"连点续命"会让按钮永不恢复）。
@@ -324,8 +427,14 @@ fn debounce_window_is_500ms() {
         "自**首次**放行起满 500 ms 后放行（同时证明拒绝未刷新窗口起点）"
     );
     d.reset();
-    assert!(d.try_accept(t0 + Duration::from_millis(500)), "重置后再触发放行");
-    assert!(Debounce::default().window() == Duration::from_millis(500), "默认窗口取 theme");
+    assert!(
+        d.try_accept(t0 + Duration::from_millis(500)),
+        "重置后再触发放行"
+    );
+    assert!(
+        Debounce::default().window() == Duration::from_millis(500),
+        "默认窗口取 theme"
+    );
 
     // Toast 存活窗口同源
     assert_eq!(Timing::toast(), Duration::from_millis(3000), "Toast 3 s");
@@ -466,7 +575,12 @@ fn strip_comments_and_literals(src: &str, name: &str) -> String {
 /// —— 见 [`scanner_recognizes_every_raw_string_on_the_scan_face`]。
 fn strip_comments_and_literals_audited(src: &str, name: &str) -> (String, Vec<(usize, usize)>) {
     let cs: Vec<char> = src.chars().collect();
-    let line_of = |at: usize| 1 + cs[..at.min(cs.len())].iter().filter(|&&c| c == '\n').count();
+    let line_of = |at: usize| {
+        1 + cs[..at.min(cs.len())]
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count()
+    };
     let mut out = String::with_capacity(src.len());
     // 每枚**被 `literal_prefix` 判为原始串**的字面量记一条 `(1 起行号, `#` 个数)`。
     let mut raw_opens: Vec<(usize, usize)> = Vec::new();
@@ -569,7 +683,11 @@ fn strip_comments_and_literals_audited(src: &str, name: &str) -> (String, Vec<(u
             }
             if !closed {
                 // **自证 ③a**
-                unclosed(name, line_of(open), "字符串字面量（起引号）扫到文件尾仍未闭合");
+                unclosed(
+                    name,
+                    line_of(open),
+                    "字符串字面量（起引号）扫到文件尾仍未闭合",
+                );
             }
             out.push(' ');
             continue;
@@ -885,7 +1003,10 @@ const NON_THIN_LAYER_SOURCES: [(&str, &str); 26] = [
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs")),
-    ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
+    (
+        "ui/pages/p4_interlock.rs",
+        include_str!("pages/p4_interlock.rs"),
+    ),
     ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
@@ -921,7 +1042,12 @@ const THIN_LAYER_SOURCES: [(&str, &str); 12] = [
 #[test]
 fn binding_crate_is_not_used_outside_the_thin_layer() {
     // 自证：清单必须真的含设计点名的四个模块（否则"扫了 26 个文件"里可能恰好漏了它们）。
-    for must in ["src/state.rs", "src/channel.rs", "src/console.rs", "ui/mod.rs"] {
+    for must in [
+        "src/state.rs",
+        "src/channel.rs",
+        "src/console.rs",
+        "ui/mod.rs",
+    ] {
         assert!(
             NON_THIN_LAYER_SOURCES.iter().any(|(n, _)| *n == must),
             "扫描面自证失败：`{must}` 不在 NON_THIN_LAYER_SOURCES 内"
@@ -970,7 +1096,10 @@ fn no_text_input_widget_symbol_anywhere_in_src() {
         concat!("lv_", "key", "board"),
         concat!("lv_", "spin", "box"),
     ];
-    for (name, src) in NON_THIN_LAYER_SOURCES.iter().chain(THIN_LAYER_SOURCES.iter()) {
+    for (name, src) in NON_THIN_LAYER_SOURCES
+        .iter()
+        .chain(THIN_LAYER_SOURCES.iter())
+    {
         let lower = strip_comments_and_literals(src, name).to_ascii_lowercase();
         for needle in forbidden {
             assert!(
@@ -1047,7 +1176,13 @@ fn local_display_manifest_has_no_direct_dependency_on_core_crates() {
             "Cargo.toml 依赖解析未读到 `{must}` —— 解析式失效（本条会构造性全绿）：{seen:?}"
         );
     }
-    for forbidden in ["mupc-intercore", "mupc-southd", "mupc-gateway", "intercore", "southd"] {
+    for forbidden in [
+        "mupc-intercore",
+        "mupc-southd",
+        "mupc-gateway",
+        "intercore",
+        "southd",
+    ] {
         assert!(
             !seen.iter().any(|k| k == forbidden),
             "`local-display` 不得直接依赖 `{forbidden}`（设计 §11.1 静态约束 ② / §4.4.6 禁直连；\
@@ -1103,7 +1238,10 @@ const UI_PROD_SOURCES: [(&str, &str); 13] = [
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs")),
-    ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
+    (
+        "ui/pages/p4_interlock.rs",
+        include_str!("pages/p4_interlock.rs"),
+    ),
     ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
@@ -1219,7 +1357,9 @@ const KNOWN_MISSING: [(char, &str); 0] = [];
 /// "读到 0" 伪装成合法取值。
 fn cmap_field_u32(chunk: &str, key: &str, name: &str) -> u32 {
     let at = chunk.find(key).unwrap_or_else(|| {
-        panic!("{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）")
+        panic!(
+            "{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）"
+        )
     });
     chunk[at + key.len()..]
         .trim_start()
@@ -1227,13 +1367,17 @@ fn cmap_field_u32(chunk: &str, key: &str, name: &str) -> u32 {
         .next()
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| panic!("{name}：`{key}` 后不是十进制整数（该字段应为十进制，请复核解析）"))
+        .unwrap_or_else(|| {
+            panic!("{name}：`{key}` 后不是十进制整数（该字段应为十进制，请复核解析）")
+        })
 }
 
 /// 从 cmap 结构体文本片段里取**标识符**字段（如 `.unicode_list = unicode_list_1` / `NULL`）。
 fn cmap_field_ident<'a>(chunk: &'a str, key: &str, name: &str) -> &'a str {
     let at = chunk.find(key).unwrap_or_else(|| {
-        panic!("{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）")
+        panic!(
+            "{name}：cmap 结构体缺字段 `{key}` —— 产物形态已变，请同步更新本解析器（不得静默跳过）"
+        )
     });
     let tail = chunk[at + key.len()..].trim_start();
     let n = tail
@@ -1634,9 +1778,8 @@ fn truncate_before_test_module_forms_are_accepted_or_loud() {
         );
     }
     // ② 访问器在前、测试模块在后 ⇒ 截断点必须是**后者**（访问器留在扫描面内）。
-    let src = format!(
-        "{keep}#[cfg(test)]\npub fn accessor() {{}}\n#[cfg(test)]\nmod tests {{\n}}\n"
-    );
+    let src =
+        format!("{keep}#[cfg(test)]\npub fn accessor() {{}}\n#[cfg(test)]\nmod tests {{\n}}\n");
     let kept = truncate_before_test_module(&src, "probe.rs");
     assert!(
         kept.contains("pub fn accessor() {}"),
@@ -1647,7 +1790,8 @@ fn truncate_before_test_module_forms_are_accepted_or_loud() {
         "截断点必须是**其后紧跟 `mod tests`** 的那个 `#[cfg(test)]`（测试模块不得留在扫描面内）"
     );
     // ③ 形态不符 ⇒ 响亮失败（严禁"截断点悄悄前移 / 文件整段漏扫"）。
-    let broken = format!("{keep}#[cfg(test)]\n// 注释夹在属性与 `mod tests` 之间\nmod tests {{}}\n");
+    let broken =
+        format!("{keep}#[cfg(test)]\n// 注释夹在属性与 `mod tests` 之间\nmod tests {{}}\n");
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         truncate_before_test_module(&broken, "probe.rs")
     }));
@@ -1676,7 +1820,8 @@ fn truncate_before_test_module_forms_are_accepted_or_loud() {
 #[test]
 fn scanner_accepts_crlf_line_continuation_and_multi_line_strings() {
     // 源码本身仍是 LF；被测的 CRLF 由**字面转义**给出 ⇒ 不依赖检出时的换行风格。
-    let crlf_src = "fn f() {\r\n    let s = \"a\\\r\nb\";\r\n    const SENTINEL: i32 = 48;\r\n}\r\n";
+    let crlf_src =
+        "fn f() {\r\n    let s = \"a\\\r\nb\";\r\n    const SENTINEL: i32 = 48;\r\n}\r\n";
     let out = strip_comments_and_literals(crlf_src, "crlf-probe.rs");
     assert!(
         out.contains("SENTINEL"),
@@ -1755,7 +1900,8 @@ const EXPECTED_RAW_STRING_COUNTS: [(&str, usize); 3] = [
 #[test]
 fn scanner_recognizes_every_raw_string_on_the_scan_face() {
     // ── ① 端到端：原始串**内含引号**（失认后泄漏面最大）⇒ 必须整枚剥空、不吞后续、行数守恒 ──
-    let inner_quote = "fn f() {\n    let j = r#\"{\"INNER_SENTINEL\":1}\"#;\n    const AFTER: i32 = 48;\n}\n";
+    let inner_quote =
+        "fn f() {\n    let j = r#\"{\"INNER_SENTINEL\":1}\"#;\n    const AFTER: i32 = 48;\n}\n";
     let out = strip_comments_and_literals(inner_quote, "raw-inner-quote-probe.rs");
     assert!(
         !out.contains("INNER_SENTINEL"),
@@ -1828,7 +1974,10 @@ fn scanner_recognizes_every_raw_string_on_the_scan_face() {
     }
     assert_eq!(
         total,
-        EXPECTED_RAW_STRING_COUNTS.iter().map(|(_, c)| *c).sum::<usize>(),
+        EXPECTED_RAW_STRING_COUNTS
+            .iter()
+            .map(|(_, c)| *c)
+            .sum::<usize>(),
         "扫描面原始串**总数**必须与清单一致（防『清单只对拍了几条、其余漂移没人管』）"
     );
 }
@@ -1956,12 +2105,15 @@ fn parse_cmap_manifest(src: &str, name: &str) -> std::collections::BTreeSet<char
             continue;
         }
         let hex = line.strip_prefix("U+").unwrap_or_else(|| {
-            panic!("{name}:{}：`{line}` 不是 `U+XXXX` 形态 —— 清单格式已变，请同步解析器", i + 1)
+            panic!(
+                "{name}:{}：`{line}` 不是 `U+XXXX` 形态 —— 清单格式已变，请同步解析器",
+                i + 1
+            )
         });
         let v = u32::from_str_radix(hex, 16)
             .unwrap_or_else(|_| panic!("{name}:{}：`{line}` 不是合法码位", i + 1));
-        let ch = char::from_u32(v)
-            .unwrap_or_else(|| panic!("{name}:{}：U+{v:04X} 不是合法字符", i + 1));
+        let ch =
+            char::from_u32(v).unwrap_or_else(|| panic!("{name}:{}：U+{v:04X} 不是合法字符", i + 1));
         set.insert(ch);
     }
     assert!(
@@ -2188,9 +2340,7 @@ fn metrics_tiers(src: &str) -> Vec<u32> {
         .trim_start_matches(METRICS_TIER_COUNT_PREFIX)
         .trim()
         .parse()
-        .unwrap_or_else(|_| {
-            panic!("{METRICS_MANIFEST} 的档位数自证行不是数字：`{count_line}`")
-        });
+        .unwrap_or_else(|_| panic!("{METRICS_MANIFEST} 的档位数自证行不是数字：`{count_line}`"));
     assert_eq!(
         n,
         tiers.len(),
@@ -2352,7 +2502,10 @@ fn ui_texts_covered_by_font_cmap() {
     let mut literals: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // 扫描面 = `ui/**`（13 个文件）+ `src/state.rs`（设计 §11.1 明写的 "+ state.rs"；
     // 理由见 [`UI_ADJACENT_PROD_SOURCES`]）。
-    for (name, src) in UI_PROD_SOURCES.iter().chain(UI_ADJACENT_PROD_SOURCES.iter()) {
+    for (name, src) in UI_PROD_SOURCES
+        .iter()
+        .chain(UI_ADJACENT_PROD_SOURCES.iter())
+    {
         for (ch, lit, line) in ui_source_chars(src, name) {
             literals.insert(lit.clone());
             if !cmap.contains(&ch) {
@@ -2409,7 +2562,9 @@ fn ui_texts_covered_by_font_cmap() {
     // 缺字出处**逐条点名**：`文件:行 ← 文案`（只报裸字形无法定位，是 B2a 收尾订正的内容）。
     let detail = missing
         .iter()
-        .map(|(c, lit, name, line)| format!("U+{:04X} `{c}` @ {name}:{line} ← 字面量 `{lit}`", *c as u32))
+        .map(|(c, lit, name, line)| {
+            format!("U+{:04X} `{c}` @ {name}:{line} ← 字面量 `{lit}`", *c as u32)
+        })
         .collect::<Vec<_>>()
         .join("\n          ");
     assert_eq!(
@@ -2480,7 +2635,13 @@ fn runtime_formatters_emit_only_cmap_glyphs() {
         u64::MAX,
     ];
     /// 秒数（运行时长）输入。
-    const RUNTIME_FMT_SECS_INPUTS: [u64; 5] = [0, 59, 86_400, 2 * 86_400 + 23 * 3600 + 59 * 60 + 59, u64::MAX];
+    const RUNTIME_FMT_SECS_INPUTS: [u64; 5] = [
+        0,
+        59,
+        86_400,
+        2 * 86_400 + 23 * 3600 + 59 * 60 + 59,
+        u64::MAX,
+    ];
 
     let Some(cmap) = load_font_cmap() else {
         return;
@@ -2505,7 +2666,10 @@ fn runtime_formatters_emit_only_cmap_glyphs() {
         cases.push((format!("fmt_decimals({v}, 2)"), pages::fmt_decimals(v, 2)));
     }
     for ms in RUNTIME_FMT_MS_INPUTS {
-        cases.push((format!("format_epoch_ms_utc({ms})"), pages::format_epoch_ms_utc(ms)));
+        cases.push((
+            format!("format_epoch_ms_utc({ms})"),
+            pages::format_epoch_ms_utc(ms),
+        ));
     }
     for s in RUNTIME_FMT_SECS_INPUTS {
         cases.push((format!("format_uptime({s})"), pages::format_uptime(s)));
@@ -2695,7 +2859,10 @@ fn component_texts_shape() {
     assert_eq!(TEXT_WARN_BANNER, "生效瞬间通信将短暂中断 ≤ 5 s");
     assert!(TEXT_WARN_FIELDS_PREFIX.starts_with("涉及"), "「涉及:」前缀");
     assert_eq!(TEXT_WARN_FIELD_SEP, "/", "字段分隔符");
-    assert!(ALL_TEXTS.contains(&TEXT_WARN_BANNER), "固定文案登记进 ALL_TEXTS");
+    assert!(
+        ALL_TEXTS.contains(&TEXT_WARN_BANNER),
+        "固定文案登记进 ALL_TEXTS"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2732,16 +2899,34 @@ pub(crate) fn ui_chain() {
         assert_eq!(card.size(), (100, 50), "卡片样式不得改写调用方设定的尺寸");
         assert!(card.is_alive(), "施加卡片样式后对象仍存活");
 
-        card.add_style(&theme::card_alert_left(Palette::DANGER), StyleSelector::main());
-        card.add_style(&theme::control_pressed(), StyleSelector::state_of(crate::lvgl::style::State::PRESSED));
-        card.add_style(&theme::focus_ring(), StyleSelector::state_of(crate::lvgl::style::State::FOCUSED));
+        card.add_style(
+            &theme::card_alert_left(Palette::DANGER),
+            StyleSelector::main(),
+        );
+        card.add_style(
+            &theme::control_pressed(),
+            StyleSelector::state_of(crate::lvgl::style::State::PRESSED),
+        );
+        card.add_style(
+            &theme::focus_ring(),
+            StyleSelector::state_of(crate::lvgl::style::State::FOCUSED),
+        );
         theme::button(theme::ButtonKind::Text).apply(&card);
 
         // 滚动条三色（§3.5 / §5.6-A）：能构造 + 能挂载即视为通道打通
         let sc = crate::lvgl::widgets::ScrollContainer::create(&screen).expect("ScrollContainer");
         sc.set_size(80, 40);
-        sc.add_style(&theme::scrollbar_idle(), StyleSelector::part_of(crate::lvgl::style::Part::SCROLLBAR));
-        sc.add_style(&theme::scrollbar_active(), StyleSelector::new(crate::lvgl::style::Part::SCROLLBAR, crate::lvgl::style::State::SCROLLED));
+        sc.add_style(
+            &theme::scrollbar_idle(),
+            StyleSelector::part_of(crate::lvgl::style::Part::SCROLLBAR),
+        );
+        sc.add_style(
+            &theme::scrollbar_active(),
+            StyleSelector::new(
+                crate::lvgl::style::Part::SCROLLBAR,
+                crate::lvgl::style::State::SCROLLED,
+            ),
+        );
         let _track = theme::scrollbar_track();
         assert!(sc.is_alive(), "滚动容器 + 滚动条样式可用");
         drop(sc);
@@ -2749,7 +2934,8 @@ pub(crate) fn ui_chain() {
 
     // ── ③ StatusChip：三通道（图标 / 文字 / 颜色）都能读回 ────────────────
     {
-        let chip = StatusChip::new(&screen, 240, "✓", "成功", ChipSkin::SUCCESS).expect("StatusChip");
+        let chip =
+            StatusChip::new(&screen, 240, "✓", "成功", ChipSkin::SUCCESS).expect("StatusChip");
         assert_eq!(chip.text().as_deref(), Some("成功"), "文字通道");
         assert_eq!(chip.icon_text().as_deref(), Some("✓"), "图标通道");
         assert_eq!(chip.accent(), Palette::OK, "颜色通道（skinc accent）");
@@ -2778,8 +2964,8 @@ pub(crate) fn ui_chain() {
 
     // ── ③ LedIndicator：灯 + 文字 + 图形三件并列 ─────────────────────────
     {
-        let led = LedIndicator::new(&screen, 300, "●", "已连接", Palette::LINK_OK)
-            .expect("LedIndicator");
+        let led =
+            LedIndicator::new(&screen, 300, "●", "已连接", Palette::LINK_OK).expect("LedIndicator");
         assert_eq!(led.icon_text().as_deref(), Some("●"), "图标通道");
         assert_eq!(led.text().as_deref(), Some("已连接"), "文字通道");
         assert_eq!(led.color(), Palette::LINK_OK, "颜色通道");
@@ -2805,10 +2991,16 @@ pub(crate) fn ui_chain() {
         disp.refr_now_for_test();
         assert_eq!(
             st.size(),
-            (Dimens::STEPPER_BTN_W * 2 + Dimens::STEPPER_VALUE_W, Dimens::STEPPER_H),
+            (
+                Dimens::STEPPER_BTN_W * 2 + Dimens::STEPPER_VALUE_W,
+                Dimens::STEPPER_H
+            ),
             "步进器口径 248×64（UI §5.1 #6）"
         );
-        assert!(!st.minus_disabled() && !st.plus_disabled(), "中值处两端可用");
+        assert!(
+            !st.minus_disabled() && !st.plus_disabled(),
+            "中值处两端可用"
+        );
 
         st.set_value(0);
         assert_eq!(st.value(), 1, "类型层 clamp 到 min（TT-03 越界不可达）");
@@ -2822,12 +3014,25 @@ pub(crate) fn ui_chain() {
         assert!(!st.minus_disabled());
 
         st.set_disabled(true);
-        assert!(st.minus_disabled() && st.plus_disabled(), "显式禁用两端都禁用");
+        assert!(
+            st.minus_disabled() && st.plus_disabled(),
+            "显式禁用两端都禁用"
+        );
         st.set_value(1000);
-        assert_eq!(st.value(), 1000, "禁用态下 set_value 仍生效（程序化设值不受限）");
-        assert!(st.minus_disabled() && st.plus_disabled(), "显式禁用优先于越界判定");
+        assert_eq!(
+            st.value(),
+            1000,
+            "禁用态下 set_value 仍生效（程序化设值不受限）"
+        );
+        assert!(
+            st.minus_disabled() && st.plus_disabled(),
+            "显式禁用优先于越界判定"
+        );
         st.set_disabled(false);
-        assert!(!st.minus_disabled() && !st.plus_disabled(), "恢复后按值重算");
+        assert!(
+            !st.minus_disabled() && !st.plus_disabled(),
+            "恢复后按值重算"
+        );
 
         // IPv4 段宽（UI §5.1 #7 的公式口径：4×(64+64+64) + 3×8）
         let seg = Stepper::with_value_width(&screen, 0, 255, 192, 1, Dimens::IPV4_VALUE_W)
@@ -2850,7 +3055,11 @@ pub(crate) fn ui_chain() {
         assert_eq!(ms.columns(), 2);
         assert_eq!(ms.option(1), Some("配置保存"));
         assert!(ms.selected().is_empty(), "默认全不选（P3 语义由页面决定）");
-        assert_eq!(ms.chip_display(1).as_deref(), Some("配置保存"), "未选中无前缀");
+        assert_eq!(
+            ms.chip_display(1).as_deref(),
+            Some("配置保存"),
+            "未选中无前缀"
+        );
 
         ms.set_selected(1, true);
         assert_eq!(ms.selected(), vec![1], "勾选态读回");
@@ -2870,8 +3079,16 @@ pub(crate) fn ui_chain() {
     // ── ②③④ ConfirmDialog：L1 / L2 / L2+ 三档形态 ────────────────────────
     {
         let details = [
-            ConfirmDetail { field: "端口", before: "2404", after: "2405" },
-            ConfirmDetail { field: "心跳间隔", before: "10", after: "15" },
+            ConfirmDetail {
+                field: "端口",
+                before: "2404",
+                after: "2405",
+            },
+            ConfirmDetail {
+                field: "心跳间隔",
+                before: "10",
+                after: "15",
+            },
         ];
 
         // L1：无进度条、无 WarnBanner、默认焦点「取消」、单击生效文案
@@ -2916,9 +3133,15 @@ pub(crate) fn ui_chain() {
             "级别色条 = 弹层宽 × 4（布局趟后落定）"
         );
         assert!(d1.divider().is_alive(), "分隔线仍在树上");
-        assert_eq!(d1.cancel_button().text().as_deref(), Some(components::TEXT_CANCEL));
+        assert_eq!(
+            d1.cancel_button().text().as_deref(),
+            Some(components::TEXT_CANCEL)
+        );
         assert!(!d1.confirm_disabled(), "未点击前不禁用");
-        assert!(d1.panel().is_alive() && d1.mask().is_alive(), "遮罩 + 弹层都在");
+        assert!(
+            d1.panel().is_alive() && d1.mask().is_alive(),
+            "遮罩 + 弹层都在"
+        );
 
         // ── Important 2：焦点环确实挂到 `FOCUSED` 态 ─────────────────────────
         // ⚠️ 薄层**没有样式读回 API**（`Obj` 不暴露"某选择器下挂了哪些样式"，`Style` 也
@@ -2940,7 +3163,10 @@ pub(crate) fn ui_chain() {
             "焦点环是独立 Style（不是复用 normal）"
         );
         // 「取消」/「确认」按钮都用这套样式装配 ⇒ 焦点环的施加对象正确。
-        assert!(d1.default_focus_is_cancel(), "TT-09：默认焦点落在「取消」上");
+        assert!(
+            d1.default_focus_is_cancel(),
+            "TT-09：默认焦点落在「取消」上"
+        );
 
         // ── Important 3：L1 单击 → 防重 → 通知（此前**从未被驱动**）──────────
         let hits = Rc::new(Cell::new(0u32));
@@ -2992,7 +3218,11 @@ pub(crate) fn ui_chain() {
         assert_eq!(d2.progress_value(), Some(100), "进度 clamp 到 100");
         d2.set_progress(-5);
         assert_eq!(d2.progress_value(), Some(0), "进度 clamp 到 0");
-        assert_eq!(d2.debounce().window(), Duration::from_millis(500), "TT-10 窗口");
+        assert_eq!(
+            d2.debounce().window(),
+            Duration::from_millis(500),
+            "TT-10 窗口"
+        );
 
         // ── Important 1/3：L2 长按状态机（PRESSED / RELEASED / PRESS_LOST /
         // LONG_PRESSED 四条分支此前**从未被驱动**）────────────────────────────
@@ -3032,8 +3262,8 @@ pub(crate) fn ui_chain() {
             details: &details,
             warn_fields: &["端口"],
         };
-        let d3 = ConfirmDialog::new(&screen, &spec3, ConfirmLevel::L2Plus)
-            .expect("ConfirmDialog L2+");
+        let d3 =
+            ConfirmDialog::new(&screen, &spec3, ConfirmLevel::L2Plus).expect("ConfirmDialog L2+");
         assert!(d3.has_warn_banner(), "L2+ **必须**出现 WarnBanner");
         assert!(d3.has_progress(), "L2+ 仍是长按确认");
         assert_eq!(d3.confirm_button().text().as_deref(), Some("按住确认"));
@@ -3043,7 +3273,10 @@ pub(crate) fn ui_chain() {
         assert!(wb.has_fields_line(), "「涉及:端口」第二行应出现");
         assert!(d3.default_focus_is_cancel(), "危险级别同样默认焦点「取消」");
         // 无瞬断字段时仍出 WarnBanner（级别强制），只是第二行隐藏
-        let spec4 = ConfirmSpec { warn_fields: &[], ..spec3 };
+        let spec4 = ConfirmSpec {
+            warn_fields: &[],
+            ..spec3
+        };
         let d4 = ConfirmDialog::new(&screen, &spec4, ConfirmLevel::L2Plus)
             .expect("ConfirmDialog L2+ (no fields)");
         assert!(d4.has_warn_banner());
@@ -3059,11 +3292,17 @@ pub(crate) fn ui_chain() {
     {
         // 反例（此前一律被静默"修正"成"正常"，把调用方的真 bug 粉饰掉）。
         assert!(
-            matches!(Stepper::new(&screen, 10, 1, 5, 1), Err(LvglError::InvalidArgument(_))),
+            matches!(
+                Stepper::new(&screen, 10, 1, 5, 1),
+                Err(LvglError::InvalidArgument(_))
+            ),
             "min > max 必须 Err，不得静默交换"
         );
         assert!(
-            matches!(Stepper::new(&screen, 0, 10, 5, 0), Err(LvglError::InvalidArgument(_))),
+            matches!(
+                Stepper::new(&screen, 0, 10, 5, 0),
+                Err(LvglError::InvalidArgument(_))
+            ),
             "step <= 0 必须 Err，不得静默当 1"
         );
         assert!(
@@ -3115,12 +3354,18 @@ pub(crate) fn ui_chain() {
 
     // ── ② WarnBanner 单独可用（P2 未保存提示 / P3 超限提示同款）───────────
     {
-        let b = WarnBanner::new(&screen, Dimens::CONTENT_W, "有未保存修改", &[]).expect("WarnBanner");
+        let b =
+            WarnBanner::new(&screen, Dimens::CONTENT_W, "有未保存修改", &[]).expect("WarnBanner");
         assert_eq!(b.text().as_deref(), Some("有未保存修改"));
         disp.refr_now_for_test();
         assert_eq!(b.size().1, Dimens::BANNER_H, "警示行高 56");
         assert!(!b.has_fields_line(), "无字段时不出第二行");
-        let b2 = WarnBanner::new(&screen, Dimens::CONTENT_W, "检索范围超限，请缩小时间范围", &[]);
+        let b2 = WarnBanner::new(
+            &screen,
+            Dimens::CONTENT_W,
+            "检索范围超限，请缩小时间范围",
+            &[],
+        );
         // ⚠️ 该文案含全角逗号，不在字符集内 —— 这里只断言**不 panic**（真机文案改半角即可）
         assert!(b2.is_ok());
         drop(b2);
@@ -3130,8 +3375,8 @@ pub(crate) fn ui_chain() {
     // ── ②④ Toast：3 s 生命周期（注入时钟）+ 语义色 ───────────────────────
     {
         let t0 = Instant::now();
-        let toast = Toast::new_at(&screen, ToastTone::Success, "✓", "已保存并生效", t0)
-            .expect("Toast");
+        let toast =
+            Toast::new_at(&screen, ToastTone::Success, "✓", "已保存并生效", t0).expect("Toast");
         assert_eq!(toast.tone(), ToastTone::Success);
         assert_eq!(toast.tone().accent(), Palette::OK, "成功 = 绿");
         assert_eq!(ToastTone::Failure.accent(), Palette::DANGER, "失败 = 红");
@@ -3157,7 +3402,10 @@ pub(crate) fn ui_chain() {
         // `size()`（= 4×60 的设定值）永远看不出这种错位 —— 这正是该缺陷此前被放过的原因。
         let tb = toast.obj().coords();
         let ab = toast.accent_bar().coords();
-        assert_eq!(ab.x1, tb.x1, "左缘色条须贴 Toast 左缘（不再内缩 pad+border）");
+        assert_eq!(
+            ab.x1, tb.x1,
+            "左缘色条须贴 Toast 左缘（不再内缩 pad+border）"
+        );
         assert_eq!(ab.y1, tb.y1, "左缘色条须贴 Toast 上缘");
         assert_eq!(ab.y2, tb.y2, "左缘色条须与 Toast **通高**（底部不被裁）");
         assert_eq!(
@@ -3170,10 +3418,19 @@ pub(crate) fn ui_chain() {
             t0 + Duration::from_millis(Timing::TOAST_MS),
             "过期时刻 = 起点 + 3 s"
         );
-        assert!(!toast.is_expired(t0 + Duration::from_millis(2999)), "未满 3 s 不过期");
-        assert!(toast.is_expired(t0 + Duration::from_millis(3000)), "满 3 s 过期");
+        assert!(
+            !toast.is_expired(t0 + Duration::from_millis(2999)),
+            "未满 3 s 不过期"
+        );
+        assert!(
+            toast.is_expired(t0 + Duration::from_millis(3000)),
+            "满 3 s 过期"
+        );
         assert_eq!(toast.remaining(t0), Duration::from_millis(3000));
-        assert_eq!(toast.remaining(t0 + Duration::from_secs(10)), Duration::ZERO);
+        assert_eq!(
+            toast.remaining(t0 + Duration::from_secs(10)),
+            Duration::ZERO
+        );
         drop(toast);
     }
 
@@ -3188,12 +3445,8 @@ pub(crate) fn ui_chain() {
         // ① 两行容器（图标行 / 文字行）都必须真的在树上（句柄被 Drop ⇒ 只剩空壳）。
         assert_eq!(empty.obj().child_count(), 2, "空态两行容器都在树上");
 
-        let unus = UnavailableState::new(
-            &screen,
-            UnavailableKind::Interlock,
-            "无法获知联锁状态",
-        )
-        .expect("UnavailableState");
+        let unus = UnavailableState::new(&screen, UnavailableKind::Interlock, "无法获知联锁状态")
+            .expect("UnavailableState");
         assert_eq!(unus.semantics(), StateSemantics::Unavailable);
         assert_ne!(
             unus.semantics(),
@@ -3201,8 +3454,16 @@ pub(crate) fn ui_chain() {
             "④ 二者语义必须不同（不可用 ≠ 空）"
         );
         assert_eq!(unus.title().as_deref(), Some("联锁状态不可用"));
-        assert_ne!(unus.title().as_deref(), Some("未联锁"), "F16.6：不得退化成「未联锁」");
-        assert_eq!(unus.icon_text().as_deref(), Some("?"), "问号图形，不复用 ✓ / ⚠");
+        assert_ne!(
+            unus.title().as_deref(),
+            Some("未联锁"),
+            "F16.6：不得退化成「未联锁」"
+        );
+        assert_eq!(
+            unus.icon_text().as_deref(),
+            Some("?"),
+            "问号图形，不复用 ✓ / ⚠"
+        );
         assert_eq!(unus.reason().as_deref(), Some("无法获知联锁状态"));
         // ① 三行容器（图标 / 标题 / 原因）都必须真的在树上。
         assert_eq!(unus.obj().child_count(), 3, "不可用态三行容器都在树上");
@@ -3224,8 +3485,8 @@ pub(crate) fn ui_chain() {
     // ── ⑦ B2b-1：三个**输入型**控件（SegmentedControl / Ipv4Stepper / DateTimeStepper）──
     {
         use crate::ui::controls::{
-            DateTimeStepper, DateTimeValue, Ipv4Stepper, SegmentedControl, DAY_MAX, DAY_MIN,
-            DATETIME_HEADERS, DATETIME_TOTAL_H, DATETIME_TOTAL_W, HOUR_MAX, IPV4_TOTAL_H,
+            DateTimeStepper, DateTimeValue, Ipv4Stepper, SegmentedControl, DATETIME_HEADERS,
+            DATETIME_TOTAL_H, DATETIME_TOTAL_W, DAY_MAX, DAY_MIN, HOUR_MAX, IPV4_TOTAL_H,
             IPV4_TOTAL_W, MINUTE_MAX, MONTH_MAX, MONTH_MIN, SEGMENT_H, SEGMENT_MIN_W, YEAR_MAX,
             YEAR_MIN,
         };
@@ -3238,7 +3499,11 @@ pub(crate) fn ui_chain() {
         // 若实现漏了构造期的 `bm.set_selected(start)`，"回退值"会让 selected() 仍是 0 ——
         // 故**必须**同时断 LVGL 侧原值（raw_selected），这条才是敏感的。
         assert_eq!(seg.selected(), 0, "构造给 0 ⇒ 选中 0");
-        assert_eq!(seg.raw_selected(), Some(0), "**LVGL 侧**确实是第 0 段（不是回退值）");
+        assert_eq!(
+            seg.raw_selected(),
+            Some(0),
+            "**LVGL 侧**确实是第 0 段（不是回退值）"
+        );
         // ── ⑦.0 控制位读回（**CD5 的回归锁**：分段控件"选中态"是否真的会产生）────────
         // 读回通道 = `ButtonMatrix::has_ctrl`（LVGL 侧真值，**不是** Rust 侧缓存/回退值）。
         use crate::lvgl::widgets::{CTRL_CHECKABLE, CTRL_CHECKED, CTRL_DISABLED};
@@ -3258,7 +3523,10 @@ pub(crate) fn ui_chain() {
             "初始选中段必须带 CHECKED 控制位（否则 §5.2 的选中样式永不绘制）"
         );
         for i in 1..4 {
-            assert!(!bm.has_ctrl(i, CTRL_CHECKED), "第 {i} 段不得 CHECKED（单选互斥）");
+            assert!(
+                !bm.has_ctrl(i, CTRL_CHECKED),
+                "第 {i} 段不得 CHECKED（单选互斥）"
+            );
         }
         // 段文本逐条核对：写错地图 / 少一段 / 顺序颠倒 ⇒ 红。
         for (i, want) in ["ERROR", "WARN", "INFO", "DEBUG"].iter().enumerate() {
@@ -3278,32 +3546,58 @@ pub(crate) fn ui_chain() {
         // LVGL 在 `one_check` 路径里自动清位（`lv_buttonmatrix.c:165–167`），故去掉
         // `set_selected` 里的 `clear_ctrl_all(CTRL_CHECKED)` ⇒ 本条**仍绿**（已实测；该行已删）。
         // 已实测：注释掉 `set_one_checked(true)` ⇒ 本条变红。
-        assert!(bm.has_ctrl(2, CTRL_CHECKED), "set_selected(2) ⇒ 第 2 段带 CHECKED");
+        assert!(
+            bm.has_ctrl(2, CTRL_CHECKED),
+            "set_selected(2) ⇒ 第 2 段带 CHECKED"
+        );
         assert!(
             !bm.has_ctrl(0, CTRL_CHECKED),
             "旧选中段（0）的 CHECKED 必须被清除 —— 否则界面上两段同时高亮"
         );
         seg.set_selected(99);
-        assert_eq!(seg.selected(), 3, "越界下标**夹取**到最后一 段（不得 panic）");
+        assert_eq!(
+            seg.selected(),
+            3,
+            "越界下标**夹取**到最后一 段（不得 panic）"
+        );
         assert_eq!(seg.raw_selected(), Some(3), "夹取后的值同样落到 LVGL");
         // 越界路径的**状态自洽**：夹到第 3 段带位、第 2 段已清、全局恰有一段亮。
-        assert!(bm.has_ctrl(3, CTRL_CHECKED), "越界夹到第 3 段 ⇒ 该段 CHECKED");
+        assert!(
+            bm.has_ctrl(3, CTRL_CHECKED),
+            "越界夹到第 3 段 ⇒ 该段 CHECKED"
+        );
         assert!(!bm.has_ctrl(2, CTRL_CHECKED), "越界切换后第 2 段必须已清");
         let checked_count = (0..4).filter(|&i| bm.has_ctrl(i, CTRL_CHECKED)).count();
-        assert_eq!(checked_count, 1, "任意时刻**恰有一段** CHECKED（单选不变量）");
+        assert_eq!(
+            checked_count, 1,
+            "任意时刻**恰有一段** CHECKED（单选不变量）"
+        );
         disp.refr_now_for_test();
-        assert_eq!(seg.size(), (seg_w, SEGMENT_H), "分段控件 = 调用方给定宽 × 高 48（§5.1 #4）");
+        assert_eq!(
+            seg.size(),
+            (seg_w, SEGMENT_H),
+            "分段控件 = 调用方给定宽 × 高 48（§5.1 #4）"
+        );
 
         // 禁用：读回口径是 **LVGL 的状态位**（输入路径据此拒发事件，见 `lv_indev.c`）
         assert!(!seg.is_disabled(), "默认可用");
         seg.set_disabled(true);
-        assert!(seg.is_disabled(), "set_disabled(true) ⇒ LV_STATE_DISABLED 置位");
+        assert!(
+            seg.is_disabled(),
+            "set_disabled(true) ⇒ LV_STATE_DISABLED 置位"
+        );
         // 逐段 DISABLED 控制位（§5.2「禁用 字 `#5A6780`」的**触发源**）。
         // 改什么会让本条变红：`set_disabled` 里去掉 `set_ctrl_all(CTRL_DISABLED)`。
-        assert!(bm.has_ctrl(0, CTRL_DISABLED), "禁用 ⇒ 每段带 DISABLED 控制位");
+        assert!(
+            bm.has_ctrl(0, CTRL_DISABLED),
+            "禁用 ⇒ 每段带 DISABLED 控制位"
+        );
         seg.set_disabled(false);
         assert!(!seg.is_disabled(), "恢复后状态位清掉");
-        assert!(!bm.has_ctrl(0, CTRL_DISABLED), "恢复 ⇒ DISABLED 控制位被清除");
+        assert!(
+            !bm.has_ctrl(0, CTRL_DISABLED),
+            "恢复 ⇒ DISABLED 控制位被清除"
+        );
 
         // `on_change` 接线：派发 `VALUE_CHANGED`（键矩阵类处理器在按下时派发的正是它）⇒
         // 回调查到的应当是**当前**下标。初值取 usize::MAX：回调若压根没接上，断言即红。
@@ -3313,7 +3607,11 @@ pub(crate) fn ui_chain() {
             seg.set_on_change(move |i| h.set(i));
         }
         seg.send_event(EventCode::VALUE_CHANGED);
-        assert_eq!(hits.get(), 3, "回调载荷 = 当前选中段（接线断了则仍是 usize::MAX）");
+        assert_eq!(
+            hits.get(),
+            3,
+            "回调载荷 = 当前选中段（接线断了则仍是 usize::MAX）"
+        );
         seg.set_selected(1);
         seg.send_event(EventCode::VALUE_CHANGED);
         assert_eq!(
@@ -3330,8 +3628,8 @@ pub(crate) fn ui_chain() {
         seg.set_selected(0); // current = 0、btn_id_sel = 0（点选前的状态）
         seg.matrix().set_selected(2); // 模拟"用户点选了段 2"（绕过本类型的 clamp）
         seg.send_event(EventCode::VALUE_CHANGED); // 触发回调 ⇒ 应把 2 写回共享 Cell
-        // 改什么会让本条变红：`current` 退回裸 `Cell<usize>` 且回调里写 `current.clone()`
-        // （`Cell` 的 clone 是**值拷贝** ⇒ 死写副本）—— 此时 `fallback_index()` 仍为 0。
+                                                  // 改什么会让本条变红：`current` 退回裸 `Cell<usize>` 且回调里写 `current.clone()`
+                                                  // （`Cell` 的 clone 是**值拷贝** ⇒ 死写副本）—— 此时 `fallback_index()` 仍为 0。
         assert_eq!(
             seg.fallback_index(),
             2,
@@ -3455,7 +3753,11 @@ pub(crate) fn ui_chain() {
 
         // ═══ Ipv4Stepper ════════════════════════════════════════════════════
         let ipv4 = Ipv4Stepper::new(&screen, [192, 168, 1, 10]).expect("Ipv4Stepper");
-        assert_eq!(ipv4.octets(), [192, 168, 1, 10], "四段值往返（读自四个 Stepper）");
+        assert_eq!(
+            ipv4.octets(),
+            [192, 168, 1, 10],
+            "四段值往返（读自四个 Stepper）"
+        );
         assert_eq!(ipv4.text().as_deref(), Some("192.168.1.10"), "汇总标签文本");
         disp.refr_now_for_test();
         assert_eq!(
@@ -3467,7 +3769,11 @@ pub(crate) fn ui_chain() {
         // 行容器应有 5 个子对象（4 段 + 1 汇总）、每段应有 3 个（`−` / 值区 / `＋`）。
         // 任何**拥有型句柄被构造器 Drop** ⇒ LVGL 级联删除它 ⇒ child_count 立刻变小；
         // 值区句柄若被 Drop，`display()` 同时变 `None`（本文件的 `_value_box` 同款缺陷）。
-        assert_eq!(ipv4.obj().child_count(), 5, "4 段 + 1 汇总标签都必须挂在行容器上");
+        assert_eq!(
+            ipv4.obj().child_count(),
+            5,
+            "4 段 + 1 汇总标签都必须挂在行容器上"
+        );
         for i in 0..4 {
             let s = ipv4.segment(i).expect("段");
             assert_eq!(s.obj().child_count(), 3, "第 {i} 段 = − / 值区 / ＋ 三件");
@@ -3477,14 +3783,23 @@ pub(crate) fn ui_chain() {
             );
         }
         assert!(ipv4.segment(4).is_none(), "越界段 ⇒ None（不得 panic）");
-        assert_eq!(ipv4.segment(0).expect("段 0").display().as_deref(), Some("192"));
-        assert_eq!(ipv4.segment(3).expect("段 3").display().as_deref(), Some("10"));
+        assert_eq!(
+            ipv4.segment(0).expect("段 0").display().as_deref(),
+            Some("192")
+        );
+        assert_eq!(
+            ipv4.segment(3).expect("段 3").display().as_deref(),
+            Some("10")
+        );
 
         // ── 段内封闭 0–255 + **跨段不进位** + 越界夹取 ──
         let s0 = ipv4.segment(0).expect("段 0");
         s0.set_value(255);
         assert_eq!(s0.value(), 255);
-        assert!(s0.plus_disabled(), "value == 255（段上界）⇒ ＋ 禁用（TT-03）");
+        assert!(
+            s0.plus_disabled(),
+            "value == 255（段上界）⇒ ＋ 禁用（TT-03）"
+        );
         assert!(!s0.minus_disabled(), "上界处 − 仍可用");
         assert_eq!(ipv4.octets()[0], 255, "`octets()` 读的确实是 LVGL 真值");
         assert_eq!(
@@ -3493,7 +3808,11 @@ pub(crate) fn ui_chain() {
             "**跨段不进位**：第 0 段到顶不得改动第 1 段（UI §5.3）"
         );
         s0.set_value(9999);
-        assert_eq!(s0.value(), 255, "越界输入被夹取（不得写进 9999 / 不得 panic）");
+        assert_eq!(
+            s0.value(),
+            255,
+            "越界输入被夹取（不得写进 9999 / 不得 panic）"
+        );
         s0.set_value(0);
         assert!(s0.minus_disabled(), "value == 0（段下界）⇒ − 禁用");
         assert!(!s0.plus_disabled(), "下界处 ＋ 仍可用");
@@ -3501,7 +3820,11 @@ pub(crate) fn ui_chain() {
         // 程序化设四段：值 + 汇总文本都要同步（汇总漏更新 ⇒ 红）
         ipv4.set_octets([10, 0, 0, 1]);
         assert_eq!(ipv4.octets(), [10, 0, 0, 1], "set_octets 落到四个段上");
-        assert_eq!(ipv4.text().as_deref(), Some("10.0.0.1"), "汇总文本随 set_octets 同步");
+        assert_eq!(
+            ipv4.text().as_deref(),
+            Some("10.0.0.1"),
+            "汇总文本随 set_octets 同步"
+        );
         assert_eq!(
             ipv4.segment(1).expect("段 1").display().as_deref(),
             Some("0"),
@@ -3549,7 +3872,10 @@ pub(crate) fn ui_chain() {
             10,
             "5 个列头 + 5 列步进；任一拥有型句柄被 Drop ⇒ 立刻小于 10"
         );
-        assert_eq!(dt.column(0).expect("年列").display().as_deref(), Some("2026"));
+        assert_eq!(
+            dt.column(0).expect("年列").display().as_deref(),
+            Some("2026")
+        );
         assert_eq!(dt.column(4).expect("分列").display().as_deref(), Some("42"));
         assert!(dt.column(5).is_none(), "越界列 ⇒ None（不得 panic）");
 
@@ -3604,7 +3930,10 @@ pub(crate) fn ui_chain() {
             "整件禁用 ⇒ 该列两端都禁用"
         );
         dt.set_disabled(false);
-        assert!(year.plus_disabled(), "恢复后按当前值（2100）重算 ⇒ ＋ 仍禁用");
+        assert!(
+            year.plus_disabled(),
+            "恢复后按当前值（2100）重算 ⇒ ＋ 仍禁用"
+        );
         drop(dt);
     }
 
@@ -3717,15 +4046,36 @@ pub(crate) fn frame_healthy() -> mupc_display_proto::DisplayFrame {
         run_state: Some(RunState::Charge),
         pcs_online: true,
         p_phase: [
-            Field { v: Some(12.5), flag: FieldFlag::Valid },
-            Field { v: Some(12.1), flag: FieldFlag::Valid },
-            Field { v: Some(12.3), flag: FieldFlag::Valid },
+            Field {
+                v: Some(12.5),
+                flag: FieldFlag::Valid,
+            },
+            Field {
+                v: Some(12.1),
+                flag: FieldFlag::Valid,
+            },
+            Field {
+                v: Some(12.3),
+                flag: FieldFlag::Valid,
+            },
         ],
-        p_total: Field { v: Some(36.9), flag: FieldFlag::Valid },
+        p_total: Field {
+            v: Some(36.9),
+            flag: FieldFlag::Valid,
+        },
         i_phase: [
-            Field { v: Some(45.6), flag: FieldFlag::Valid },
-            Field { v: Some(45.2), flag: FieldFlag::Valid },
-            Field { v: Some(45.4), flag: FieldFlag::Valid },
+            Field {
+                v: Some(45.6),
+                flag: FieldFlag::Valid,
+            },
+            Field {
+                v: Some(45.2),
+                flag: FieldFlag::Valid,
+            },
+            Field {
+                v: Some(45.4),
+                flag: FieldFlag::Valid,
+            },
         ],
         inconsistency: false,
         device: DeviceSection {
@@ -3770,11 +4120,26 @@ pub(crate) fn frame_healthy() -> mupc_display_proto::DisplayFrame {
 fn frame_degraded() -> mupc_display_proto::DisplayFrame {
     use mupc_display_proto::*;
     let mut f = frame_healthy();
-    f.p_phase[0] = Field { v: None, flag: FieldFlag::Offline };
-    f.p_phase[1] = Field { v: None, flag: FieldFlag::NotRead };
-    f.p_phase[2] = Field { v: None, flag: FieldFlag::RangeError };
-    f.p_total = Field { v: None, flag: FieldFlag::NotRead };
-    f.i_phase = [Field { v: None, flag: FieldFlag::Offline }; 3];
+    f.p_phase[0] = Field {
+        v: None,
+        flag: FieldFlag::Offline,
+    };
+    f.p_phase[1] = Field {
+        v: None,
+        flag: FieldFlag::NotRead,
+    };
+    f.p_phase[2] = Field {
+        v: None,
+        flag: FieldFlag::RangeError,
+    };
+    f.p_total = Field {
+        v: None,
+        flag: FieldFlag::NotRead,
+    };
+    f.i_phase = [Field {
+        v: None,
+        flag: FieldFlag::Offline,
+    }; 3];
     f.alarms.available = false;
     f.alarms.items.clear();
     f.info.mgmt_ipv4 = None;
@@ -3872,48 +4237,109 @@ pub(crate) fn pages_chain() {
         );
         assert!(p1.alarm_card().is_alive(), "告警卡已建");
         let painted = sink.borrow().iter().filter(|b| **b != 0).count();
-        assert!(painted > 10_000, "渲染后 sink 中应有成片非背景像素（实际 {painted}）");
+        assert!(
+            painted > 10_000,
+            "渲染后 sink 中应有成片非背景像素（实际 {painted}）"
+        );
 
         // ── 骨架无帧（Init）：全降级，且**不得**出现 0 ──
-        assert_eq!(p1.soc_text().as_deref(), Some(pages::PLACEHOLDER), "无帧 ⇒ 占位符");
+        assert_eq!(
+            p1.soc_text().as_deref(),
+            Some(pages::PLACEHOLDER),
+            "无帧 ⇒ 占位符"
+        );
         assert_eq!(
             p1.channel_text().as_deref(),
             Some(p1_status::TEXT_CHANNEL_CONNECTING),
             "无帧 ⇒ 「正在连接数据通道」"
         );
-        assert_eq!(p1.alarm_view(), p1_status::AlarmView::Unavailable, "无帧 ⇒ 告警不可用");
+        assert_eq!(
+            p1.alarm_view(),
+            p1_status::AlarmView::Unavailable,
+            "无帧 ⇒ 告警不可用"
+        );
 
         // ── ② 正常帧 ──
         let f = frame_healthy();
         p1.render(&PageInput::live(&f));
         assert_eq!(p1.channel_text(), None, "通道正常 ⇒ 无通道条");
         assert!(!p1.stale_visible(), "帧新鲜 ⇒ 无「数据过期」标");
-        assert_eq!(p1.soc_text().as_deref(), Some("62"), "SOC 整数位（PRD F1.1）");
+        assert_eq!(
+            p1.soc_text().as_deref(),
+            Some("62"),
+            "SOC 整数位（PRD F1.1）"
+        );
         assert_eq!(p1.soc_color(), Palette::SOC_OK, "62 % 落在 15–85 ⇒ 青色");
-        assert!(p1.soc_marker_visible() && !p1.soc_gray_visible(), "正常态有刻线、不灰化");
+        assert!(
+            p1.soc_marker_visible() && !p1.soc_gray_visible(),
+            "正常态有刻线、不灰化"
+        );
         assert_eq!(p1.soc_source_text().as_deref(), Some("BMS"), "F1.2 源标注");
         assert_eq!(p1.soc_source_skin(), Some(ChipSkin::NEUTRAL));
-        assert_eq!(p1.pcs_state_text().as_deref(), Some("充电"), "F2 主判据 REG 1013");
+        assert_eq!(
+            p1.pcs_state_text().as_deref(),
+            Some("充电"),
+            "F2 主判据 REG 1013"
+        );
         assert_eq!(p1.pcs_icon_text().as_deref(), Some("▼"));
         assert_eq!(p1.pcs_color(), Palette::OK, "充电 = 绿");
-        assert!(!p1.inconsistent_visible(), "方向一致 ⇒ 无「方向不一致」角标");
+        assert!(
+            !p1.inconsistent_visible(),
+            "方向一致 ⇒ 无「方向不一致」角标"
+        );
         assert_eq!(p1.sigma_text().as_deref(), Some("ΣP +36.9 kW"), "佐证行 ΣP");
-        assert_eq!(p1.phase_p_text(0).as_deref(), Some("12.5"), "F3 三相 P（1 位小数）");
+        assert_eq!(
+            p1.phase_p_text(0).as_deref(),
+            Some("12.5"),
+            "F3 三相 P（1 位小数）"
+        );
         assert_eq!(p1.phase_i_text(0).as_deref(), Some("45.6"), "F4 三相 I");
-        assert_eq!(p1.phase_arrow(0).as_deref(), Some("▼"), "方向取自 F2 状态机");
+        assert_eq!(
+            p1.phase_arrow(0).as_deref(),
+            Some("▼"),
+            "方向取自 F2 状态机"
+        );
         assert_eq!(p1.phase_reason(0), None, "正常相无降级角标");
         assert_eq!(p1.phase_dot_color(0), Palette::SOC_OK, "● 实时（UI §8.2）");
-        assert_eq!(p1.phase_p_text(3).as_deref(), Some("36.9"), "总卡 = 设备总有功 REG 1032");
-        assert_eq!(p1.phase_i_text(3).as_deref(), Some("–"), "总卡无电流行 ⇒ 占位符");
+        assert_eq!(
+            p1.phase_p_text(3).as_deref(),
+            Some("36.9"),
+            "总卡 = 设备总有功 REG 1032"
+        );
+        assert_eq!(
+            p1.phase_i_text(3).as_deref(),
+            Some("–"),
+            "总卡无电流行 ⇒ 占位符"
+        );
         assert_eq!(p1.device_card_count(), 8, "装置状态网格 8 卡（UI §6.1）");
         assert_eq!(p1.device_text(0).as_deref(), Some("0.1.0"), "固件版本");
-        assert_eq!(p1.device_text(1).as_deref(), Some(pages::MISSING), "编译时间缺失 ⇒ 未提供");
-        assert_eq!(p1.device_text(2).as_deref(), Some("1 日 01:00:00"), "运行时长（`日` 在 cmap 内）");
-        assert_eq!(p1.device_text(3).as_deref(), Some("48 C"), "CPU 温度（℃ 不在字符集 ⇒ C）");
+        assert_eq!(
+            p1.device_text(1).as_deref(),
+            Some(pages::MISSING),
+            "编译时间缺失 ⇒ 未提供"
+        );
+        assert_eq!(
+            p1.device_text(2).as_deref(),
+            Some("1 日 01:00:00"),
+            "运行时长（`日` 在 cmap 内）"
+        );
+        assert_eq!(
+            p1.device_text(3).as_deref(),
+            Some("48 C"),
+            "CPU 温度（℃ 不在字符集 ⇒ C）"
+        );
         assert_eq!(p1.device_text(4).as_deref(), Some("31 %"), "内存使用率");
-        assert_eq!(p1.device_text(5).as_deref(), Some("已连接"), "IEC 104 链路（灯 + 文字双通道）");
+        assert_eq!(
+            p1.device_text(5).as_deref(),
+            Some("已连接"),
+            "IEC 104 链路（灯 + 文字双通道）"
+        );
         assert_eq!(p1.device_text(6).as_deref(), Some("连接中"), "核间链路");
-        assert_eq!(p1.device_text(7).as_deref(), Some("本地策略引擎"), "当前控制源");
+        assert_eq!(
+            p1.device_text(7).as_deref(),
+            Some("本地策略引擎"),
+            "当前控制源"
+        );
         assert_eq!(p1.alarm_view(), p1_status::AlarmView::Rows);
         assert_eq!(p1.alarm_row_message(0).as_deref(), Some("核间链路抖动"));
         assert_eq!(
@@ -3964,8 +4390,14 @@ pub(crate) fn pages_chain() {
         //        `Area::width() = x2 - x1 + 1`。
         //    (b) **语义**断言（保留）：数值槽不压单位 / 箭头、不越相卡右缘。
         let mut fl = frame_healthy();
-        fl.p_phase[0] = Field { v: Some(123.4), flag: FieldFlag::Valid };
-        fl.p_phase[1] = Field { v: Some(-123.4), flag: FieldFlag::Valid };
+        fl.p_phase[0] = Field {
+            v: Some(123.4),
+            flag: FieldFlag::Valid,
+        };
+        fl.p_phase[1] = Field {
+            v: Some(-123.4),
+            flag: FieldFlag::Valid,
+        };
         p1.render(&PageInput::live(&fl));
         disp.refr_now_for_test();
         let pc_c = p1.phase_card_obj(0).expect("A 相卡").coords();
@@ -4020,10 +4452,26 @@ pub(crate) fn pages_chain() {
         let p1 = p1_status::P1StatusPage::new(&host).expect("P1StatusPage::new (degraded)");
         let bad = frame_degraded();
         p1.render(&PageInput::live(&bad));
-        assert_eq!(p1.phase_p_text(0).as_deref(), Some(pages::PLACEHOLDER), "A 相离线 ⇒ 占位符");
-        assert_eq!(p1.phase_reason(0).as_deref(), Some("源离线"), "降级原因（EDGE-01）");
-        assert_eq!(p1.phase_reason(1).as_deref(), Some("未取数"), "未取数（EDGE-04）");
-        assert_eq!(p1.phase_reason(2).as_deref(), Some("数据异常"), "数据异常（EDGE-05）");
+        assert_eq!(
+            p1.phase_p_text(0).as_deref(),
+            Some(pages::PLACEHOLDER),
+            "A 相离线 ⇒ 占位符"
+        );
+        assert_eq!(
+            p1.phase_reason(0).as_deref(),
+            Some("源离线"),
+            "降级原因（EDGE-01）"
+        );
+        assert_eq!(
+            p1.phase_reason(1).as_deref(),
+            Some("未取数"),
+            "未取数（EDGE-04）"
+        );
+        assert_eq!(
+            p1.phase_reason(2).as_deref(),
+            Some("数据异常"),
+            "数据异常（EDGE-05）"
+        );
         assert_eq!(p1.phase_dot_color(0), Palette::BORDER_CTRL, "降级 ⇒ 停更点");
         assert_eq!(p1.phase_arrow(0), None, "无有效值 ⇒ 不画方向箭头");
         for i in 0..4 {
@@ -4031,14 +4479,26 @@ pub(crate) fn pages_chain() {
             assert_ne!(t, "0.0", "**严禁补 0**（PRD F3.4）");
             assert_ne!(t, "0", "**严禁补 0**（PRD F3.4）");
         }
-        assert_eq!(p1.device_text(2).as_deref(), Some("未取数"), "uptime 不可得 ⇒ 未取数");
-        assert_eq!(p1.device_text(0).as_deref(), Some(pages::MISSING), "空版本串 ⇒ 未提供");
+        assert_eq!(
+            p1.device_text(2).as_deref(),
+            Some("未取数"),
+            "uptime 不可得 ⇒ 未取数"
+        );
+        assert_eq!(
+            p1.device_text(0).as_deref(),
+            Some(pages::MISSING),
+            "空版本串 ⇒ 未提供"
+        );
         // ⚠️ P1 的装置网格取 UI §6.1 的 **8 项**（固件版本 / 编译时间 / 运行时长 / CPU 温度 /
         // 内存使用率 / 调度主站连接 / 核间连接 / 当前控制源）—— **不含「数据通道」**：
         // 通道状态归页眉（B2c/B3），P1 只在通道条上体现断连（设计 §6.1 的布局行）。
         // 「数据通道」一行在 P6 的运行信息卡（见下方 P6 用例）。
         assert_eq!(p1.device_text(5).as_deref(), Some("已连接"), "调度主站连接");
-        assert_eq!(p1.device_text(7).as_deref(), Some("本地策略引擎"), "控制源不随其它字段降级");
+        assert_eq!(
+            p1.device_text(7).as_deref(),
+            Some("本地策略引擎"),
+            "控制源不随其它字段降级"
+        );
         assert_eq!(p1.alarm_view(), p1_status::AlarmView::Unavailable);
         assert_eq!(
             p1.alarm_unavailable_title().as_deref(),
@@ -4056,15 +4516,29 @@ pub(crate) fn pages_chain() {
         let mut f2 = frame_healthy();
         f2.soc_source = SocSource::PcsReg1010;
         p1.render(&PageInput::live(&f2));
-        assert_eq!(p1.soc_source_text().as_deref(), Some(p1_status::TEXT_SOC_SRC_PCS));
+        assert_eq!(
+            p1.soc_source_text().as_deref(),
+            Some(p1_status::TEXT_SOC_SRC_PCS)
+        );
         f2.soc = None;
         f2.soc_source = SocSource::Lost;
         p1.render(&PageInput::live(&f2));
-        assert_eq!(p1.soc_source_text().as_deref(), Some("SOC 源失效"), "EDGE-02 双源皆失");
-        assert_eq!(p1.soc_source_skin(), Some(ChipSkin::FAILURE), "源失效 = 红胶囊");
+        assert_eq!(
+            p1.soc_source_text().as_deref(),
+            Some("SOC 源失效"),
+            "EDGE-02 双源皆失"
+        );
+        assert_eq!(
+            p1.soc_source_skin(),
+            Some(ChipSkin::FAILURE),
+            "源失效 = 红胶囊"
+        );
         assert_eq!(p1.soc_text().as_deref(), Some(pages::PLACEHOLDER));
         assert_eq!(p1.soc_color(), Palette::PLACEHOLDER);
-        assert!(p1.soc_gray_visible() && !p1.soc_marker_visible(), "量程条灰化");
+        assert!(
+            p1.soc_gray_visible() && !p1.soc_marker_visible(),
+            "量程条灰化"
+        );
         for (v, expect, what) in [
             (10.0, Palette::DANGER, "≤15 % ⇒ 红"),
             (50.0, Palette::SOC_OK, "中段 ⇒ 青"),
@@ -4090,27 +4564,46 @@ pub(crate) fn pages_chain() {
             p1.render(&PageInput::live(&fx));
             assert_eq!(p1.pcs_state_text().as_deref(), Some(text), "F2.1 四态之一");
             assert_eq!(p1.pcs_color(), color, "F2.1 语义色（{text}）");
-            assert_eq!(p1.pcs_icon_text().as_deref(), Some(icon), "F2.1 图标（{text}）");
+            assert_eq!(
+                p1.pcs_icon_text().as_deref(),
+                Some(icon),
+                "F2.1 图标（{text}）"
+            );
             let want_arrow = match rs {
                 RunState::Charge | RunState::Discharge => Some(icon),
                 _ => None,
             };
-            assert_eq!(p1.phase_arrow(0).as_deref(), want_arrow, "方向随 F2；停 / 待不画（{text}）");
+            assert_eq!(
+                p1.phase_arrow(0).as_deref(),
+                want_arrow,
+                "方向随 F2；停 / 待不画（{text}）"
+            );
         }
         // 离线（EDGE-01）与无帧
         let mut fx = frame_healthy();
         fx.pcs_online = false;
         fx.run_state = None;
         p1.render(&PageInput::live(&fx));
-        assert_eq!(p1.pcs_state_text().as_deref(), Some(p1_status::TEXT_PCS_OFFLINE));
-        assert_eq!(p1.pcs_color(), Palette::STOPPED, "离线 = 灰（不得用语义色冒充）");
+        assert_eq!(
+            p1.pcs_state_text().as_deref(),
+            Some(p1_status::TEXT_PCS_OFFLINE)
+        );
+        assert_eq!(
+            p1.pcs_color(),
+            Palette::STOPPED,
+            "离线 = 灰（不得用语义色冒充）"
+        );
         assert_eq!(p1.pcs_icon_text().as_deref(), Some("?"));
         // 方向不一致角标（EDGE-06；唯一专属色）
         let mut fx = frame_healthy();
         fx.inconsistency = true;
         p1.render(&PageInput::live(&fx));
         assert!(p1.inconsistent_visible(), "EDGE-06 角标");
-        assert_eq!(p1.pcs_state_text().as_deref(), Some("充电"), "角标**不覆盖**主判据 1013");
+        assert_eq!(
+            p1.pcs_state_text().as_deref(),
+            Some("充电"),
+            "角标**不覆盖**主判据 1013"
+        );
         drop(p1);
 
         // ═══ ⑥ 通道断 / 过期（F5.3 / EDGE-03）══════════════════════════════
@@ -4127,22 +4620,39 @@ pub(crate) fn pages_chain() {
             ChannelStatus::Connected,
             Freshness::Stale,
         ));
-        assert!(p1.stale_visible(), "F5.3：>2 s ⇒ 「数据过期」标（保留数值）");
+        assert!(
+            p1.stale_visible(),
+            "F5.3：>2 s ⇒ 「数据过期」标（保留数值）"
+        );
         assert_eq!(p1.soc_text().as_deref(), Some("62"), "过期仍保留最近有效值");
         assert_eq!(p1.phase_dot_color(0), Palette::STALE, "过期 ⇒ 琥珀点");
         // 帧加载点字段仍降级（点级独立降级 —— PRD F5.5）
         let mut fx = frame_healthy();
-        fx.p_phase[1] = Field { v: None, flag: FieldFlag::NotRead };
+        fx.p_phase[1] = Field {
+            v: None,
+            flag: FieldFlag::NotRead,
+        };
         p1.render(&PageInput::live(&fx));
-        assert_eq!(p1.phase_p_text(0).as_deref(), Some("12.5"), "B 相失败不影响 A 相");
+        assert_eq!(
+            p1.phase_p_text(0).as_deref(),
+            Some("12.5"),
+            "B 相失败不影响 A 相"
+        );
         assert_eq!(p1.phase_reason(1).as_deref(), Some("未取数"));
 
         // ── ①【评审 ①】某相 **P 有效但 I 单独缺失**：状态点与降级角标必须反映
         //    「该相 P 与 I 的整体可用性」，不得仍显「实时」且无角标（PRD F5.5 各字段独立降级）──
         let mut fi = frame_healthy();
-        fi.i_phase[0] = Field { v: None, flag: FieldFlag::Offline };
+        fi.i_phase[0] = Field {
+            v: None,
+            flag: FieldFlag::Offline,
+        };
         p1.render(&PageInput::live(&fi));
-        assert_eq!(p1.phase_p_text(0).as_deref(), Some("12.5"), "P 有效 ⇒ 照常显示数值");
+        assert_eq!(
+            p1.phase_p_text(0).as_deref(),
+            Some("12.5"),
+            "P 有效 ⇒ 照常显示数值"
+        );
         assert_eq!(
             p1.phase_i_text(0).as_deref(),
             Some(pages::PLACEHOLDER),
@@ -4174,7 +4684,11 @@ pub(crate) fn pages_chain() {
         disp.refr_now_for_test();
         assert_eq!(p6.info_row_count(), 4, "装置信息 4 行（UI §6.6）");
         assert_eq!(p6.run_row_count(), 7, "运行信息 7 行（UI §6.6）");
-        assert_eq!(p6.about_row_count(), 3, "关于本屏 3 行（含服务地址 / 管理 IP 两行）");
+        assert_eq!(
+            p6.about_row_count(),
+            3,
+            "关于本屏 3 行（含服务地址 / 管理 IP 两行）"
+        );
 
         let f = frame_healthy();
         p6.render(&PageInput::live(&f));
@@ -4190,15 +4704,35 @@ pub(crate) fn pages_chain() {
             !p6.info_value(0).unwrap().contains('-'),
             "上屏文本里**不得**出现 cmap 外的 ASCII `-`（D9）"
         );
-        assert_eq!(p6.info_value(1).as_deref(), Some(pages::MISSING), "序列号无可靠真源 ⇒ 未提供");
+        assert_eq!(
+            p6.info_value(1).as_deref(),
+            Some(pages::MISSING),
+            "序列号无可靠真源 ⇒ 未提供"
+        );
         assert_eq!(p6.info_value(2).as_deref(), Some("0.1.0"), "固件版本");
-        assert_eq!(p6.info_value(3).as_deref(), Some(pages::MISSING), "编译时间缺失 ⇒ 未提供");
-        assert_eq!(p6.run_value(0).as_deref(), Some("1 日 01:00:00"), "系统运行时长");
+        assert_eq!(
+            p6.info_value(3).as_deref(),
+            Some(pages::MISSING),
+            "编译时间缺失 ⇒ 未提供"
+        );
+        assert_eq!(
+            p6.run_value(0).as_deref(),
+            Some("1 日 01:00:00"),
+            "系统运行时长"
+        );
         assert_eq!(p6.run_value(1).as_deref(), Some("48 C"), "CPU 温度");
         assert_eq!(p6.run_value(2).as_deref(), Some("31 %"), "内存使用率");
-        assert_eq!(p6.run_value(3).as_deref(), Some("已连接"), "调度主站连接（灯 + 文字）");
+        assert_eq!(
+            p6.run_value(3).as_deref(),
+            Some("已连接"),
+            "调度主站连接（灯 + 文字）"
+        );
         assert_eq!(p6.run_value(4).as_deref(), Some("连接中"), "核间连接");
-        assert_eq!(p6.run_value(6).as_deref(), Some("本地策略引擎"), "当前控制源");
+        assert_eq!(
+            p6.run_value(6).as_deref(),
+            Some("本地策略引擎"),
+            "当前控制源"
+        );
         assert_eq!(
             p6.local_version().as_deref(),
             Some(env!("CARGO_PKG_VERSION")),
@@ -4211,18 +4745,35 @@ pub(crate) fn pages_chain() {
             p6.mgmt_label(),
             "「本机服务地址」与「设备管理 IP」必须是两行、行名不同"
         );
-        assert_eq!(p6.service_label().as_deref(), Some(p6_system::TEXT_SERVICE_ADDR));
+        assert_eq!(
+            p6.service_label().as_deref(),
+            Some(p6_system::TEXT_SERVICE_ADDR)
+        );
         assert_eq!(p6.mgmt_label().as_deref(), Some(p6_system::TEXT_MGMT_IP));
         let svc = p6.service_address().expect("服务地址恒有值");
-        assert!(svc.contains("127.0.0.1"), "服务地址 = 回环端点（实际 {svc}）");
+        assert!(
+            svc.contains("127.0.0.1"),
+            "服务地址 = 回环端点（实际 {svc}）"
+        );
         assert_ne!(svc, pages::MISSING, "服务地址不适用「未提供」");
-        assert_eq!(p6.mgmt_ipv4().as_deref(), Some("192.168.3.118"), "设备管理 IP");
+        assert_eq!(
+            p6.mgmt_ipv4().as_deref(),
+            Some("192.168.3.118"),
+            "设备管理 IP"
+        );
         assert!(
             !svc.contains("192.168.3.118"),
             "不得把管理 IP 与服务端口并列成「访问地址」（EDGE-24）"
         );
-        assert!(p6_system::service_scope_text().contains("仅回环"), "口径来自契约枚举");
-        assert_eq!(p6.note_text().as_deref(), Some(p6_system::TEXT_NO_REMOTE), "说明行");
+        assert!(
+            p6_system::service_scope_text().contains("仅回环"),
+            "口径来自契约枚举"
+        );
+        assert_eq!(
+            p6.note_text().as_deref(),
+            Some(p6_system::TEXT_NO_REMOTE),
+            "说明行"
+        );
 
         // ── ⑥ 区块级「冻结 / 数据过期」打标（EDGE-03 / EDGE-20；B3-2c）──────────────
         // 判据 = `pages::frame_mark`（与 P1 的通道条 / `数据过期` 角标**同源**）。
@@ -4234,8 +4785,14 @@ pub(crate) fn pages_chain() {
             "实时（通道通 + 帧新鲜）⇒ 无角标"
         );
         p6.render(&PageInput::down(Some(&f)));
-        assert!(p6.info_frozen_visible(), "通道断 + 保留帧 ⇒ 装置信息卡打「冻结」");
-        assert!(p6.run_frozen_visible(), "运行信息卡同理（同一拍、同一判据）");
+        assert!(
+            p6.info_frozen_visible(),
+            "通道断 + 保留帧 ⇒ 装置信息卡打「冻结」"
+        );
+        assert!(
+            p6.run_frozen_visible(),
+            "运行信息卡同理（同一拍、同一判据）"
+        );
         assert_eq!(
             p6.info_frozen_text().as_deref(),
             Some(pages::TEXT_FROZEN),
@@ -4248,7 +4805,11 @@ pub(crate) fn pages_chain() {
             Some("BECG\u{2013}3568"),
             "通道断 ⇒ 装置信息**沿用冻结帧**（不得清成「未提供」）"
         );
-        assert_eq!(p6.run_value(1).as_deref(), Some("48 C"), "运行信息同样沿用冻结帧");
+        assert_eq!(
+            p6.run_value(1).as_deref(),
+            Some("48 C"),
+            "运行信息同样沿用冻结帧"
+        );
         // 通道恢复 ⇒ 标记**当拍撤除**。
         p6.render(&PageInput::live(&f));
         assert!(
@@ -4261,7 +4822,10 @@ pub(crate) fn pages_chain() {
             ChannelStatus::Connected,
             Freshness::Stale,
         ));
-        assert!(p6.info_frozen_visible(), "帧过期 ⇒ 仍要打标（§8.2 的可信度是逐区块属性）");
+        assert!(
+            p6.info_frozen_visible(),
+            "帧过期 ⇒ 仍要打标（§8.2 的可信度是逐区块属性）"
+        );
         assert_eq!(
             p6.info_frozen_text().as_deref(),
             Some(p1_status::TEXT_STALE),
@@ -4281,8 +4845,10 @@ pub(crate) fn pages_chain() {
         // **改什么会让本条变红**：改 `pages::frozen_chip` 的宽度 / 皮肤 ⇒ 本页两条红；
         // 改 P6 内联构造（绕开共享点）⇒ 本页仍绿、但 P4 那两条会与它**分叉**。
         disp.refr_now_for_test();
-        for (n, chip) in [("装置信息", p6.info_frozen_chip()), ("运行信息", p6.run_frozen_chip())]
-        {
+        for (n, chip) in [
+            ("装置信息", p6.info_frozen_chip()),
+            ("运行信息", p6.run_frozen_chip()),
+        ] {
             assert_eq!(
                 chip.size().0,
                 pages::FROZEN_CHIP_W,
@@ -4313,7 +4879,11 @@ pub(crate) fn pages_chain() {
             use std::sync::atomic::Ordering;
             for _ in 0..3 {
                 p6.render(&PageInput::down(Some(&f)));
-                p6.render(&PageInput::new(Some(&f), ChannelStatus::Connected, Freshness::Stale));
+                p6.render(&PageInput::new(
+                    Some(&f),
+                    ChannelStatus::Connected,
+                    Freshness::Stale,
+                ));
                 p6.render(&PageInput::live(&f));
             }
             let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst);
@@ -4358,7 +4928,8 @@ pub(crate) fn pages_chain() {
         p6.render(&PageInput::live(&bad));
         assert_eq!(p6.mgmt_ipv4().as_deref(), Some(pages::MISSING), "EDGE-16");
         assert!(
-            p6.service_address().is_some_and(|s| s.contains("127.0.0.1")),
+            p6.service_address()
+                .is_some_and(|s| s.contains("127.0.0.1")),
             "服务地址仍如实显示（恒有值）"
         );
         assert_eq!(p6.run_value(5).as_deref(), Some("断开"), "数据通道");
@@ -4538,13 +5109,19 @@ pub(crate) fn pages_chain() {
         // ── ② 未注入配置 ⇒ **不可用**（不是"空"）────────────────────────────
         assert_eq!(p2.group_count(), 0, "无配置 ⇒ 无分组卡");
         assert!(!p2.is_available());
-        assert!(p2.fail_visible() && !p2.note_visible(), "降级 ⇒ 原因行替换说明行");
+        assert!(
+            p2.fail_visible() && !p2.note_visible(),
+            "降级 ⇒ 原因行替换说明行"
+        );
         assert_eq!(
             p2.fail_text().as_deref(),
             Some(p2_config::TEXT_CONFIG_UNAVAILABLE),
             "降级标题（**不得**写成「无配置」）"
         );
-        assert!(p2.save_disabled() && p2.reset_disabled(), "不可用 ⇒ 两个按钮皆禁用");
+        assert!(
+            p2.save_disabled() && p2.reset_disabled(),
+            "不可用 ⇒ 两个按钮皆禁用"
+        );
 
         // ── ③ 注入视图 ⇒ 分组 / 字段 / 值文本 ────────────────────────────────
         let v = p2_view(false);
@@ -4555,7 +5132,10 @@ pub(crate) fn pages_chain() {
         assert_eq!(p2.group_count(), 3, "3 个分组卡");
         assert_eq!(p2.group_label(0).as_deref(), Some("IEC 104 连接参数"));
         assert_eq!(p2.group_label(2).as_deref(), Some("遥测与日志"));
-        assert_eq!((p2.field_count(0), p2.field_count(1), p2.field_count(2)), (2, 1, 3));
+        assert_eq!(
+            (p2.field_count(0), p2.field_count(1), p2.field_count(2)),
+            (2, 1, 3)
+        );
         // 字段标签：PM 裁定键**改写**；其余键**透传**契约标签（元数据驱动）。
         assert_eq!(
             p2.field_label(0, 0).as_deref(),
@@ -4592,15 +5172,27 @@ pub(crate) fn pages_chain() {
         );
 
         // ── ④ 只读字段：控件 disabled **且**说明行在（设计 §6.2 只读字段行）────
-        assert_eq!(p2.field_disabled("display.bind_addr"), Some(true), "只读 ⇒ 控件禁用");
-        assert_eq!(p2.field_disabled("gateway.port"), Some(false), "可编辑 ⇒ 不禁用");
+        assert_eq!(
+            p2.field_disabled("display.bind_addr"),
+            Some(true),
+            "只读 ⇒ 控件禁用"
+        );
+        assert_eq!(
+            p2.field_disabled("gateway.port"),
+            Some(false),
+            "可编辑 ⇒ 不禁用"
+        );
         assert_eq!(
             p2.field_note_text("display.bind_addr").as_deref(),
             Some(p2_config::TEXT_READONLY_NOTE),
             "只读字段必须带说明行（**可见性换现场可核查性**）"
         );
         assert_eq!(p2.field_note_visible("display.bind_addr"), Some(true));
-        assert_eq!(p2.field_note_text("gateway.port"), None, "可编辑字段无说明行");
+        assert_eq!(
+            p2.field_note_text("gateway.port"),
+            None,
+            "可编辑字段无说明行"
+        );
         assert_eq!(
             p2.field_label(2, 2).as_deref(),
             Some(p2_config::TEXT_LOOPBACK_ADDR),
@@ -4688,11 +5280,13 @@ pub(crate) fn pages_chain() {
             Some(p2_config::TEXT_DIALOG_TITLE_SAVE)
         );
         assert!(
-            p2.with_dialog(|d| d.default_focus_is_cancel()).unwrap_or(false),
+            p2.with_dialog(|d| d.default_focus_is_cancel())
+                .unwrap_or(false),
             "TT-09：默认焦点「取消」"
         );
         assert!(
-            p2.with_dialog(|d| !d.has_warn_banner() && !d.has_progress()).unwrap_or(false),
+            p2.with_dialog(|d| !d.has_warn_banner() && !d.has_progress())
+                .unwrap_or(false),
             "L1：无 WarnBanner、无长按进度"
         );
         // L1 = 单击生效。
@@ -4872,7 +5466,10 @@ pub(crate) fn pages_chain() {
             Some(p2_config::TEXT_SAVING),
             "保存中文案"
         );
-        assert!(p2.save_disabled() && p2.reset_disabled(), "提交中禁重复触发");
+        assert!(
+            p2.save_disabled() && p2.reset_disabled(),
+            "提交中禁重复触发"
+        );
         assert!(p2.is_submitting(), "提交态读回口径（F9.6）");
         p2.set_submitting(false);
 
@@ -4976,11 +5573,18 @@ pub(crate) fn pages_chain() {
         // **反面对照**：机器键名**不得**出现在屏上（后端已保证不点名它们；渲染层若哪天
         // 自己去拼键名，这条会红 —— 键名含缺字形的 `t` / `_`，真机即豆腐块）。
         assert!(
-            !p2.toast_text().as_deref().unwrap().contains("intercore.port"),
+            !p2.toast_text()
+                .as_deref()
+                .unwrap()
+                .contains("intercore.port"),
             "机器键名不得上屏（缺字形 ⇒ 豆腐块）：{:?}",
             p2.toast_text()
         );
-        assert_eq!(p2.field_error_visible("gateway.port"), Some(false), "成功清错误");
+        assert_eq!(
+            p2.field_error_visible("gateway.port"),
+            Some(false),
+            "成功清错误"
+        );
 
         // **反向判据**（PD24 ①）：只改热生效字段（`system.log_level`）的回执不含「需重启」
         // ⇒ 屏上**不得**冒出"需重启"（否则从"不说真话"翻到"谎报副作用"，同违 §2.6）。
@@ -5042,7 +5646,8 @@ pub(crate) fn pages_chain() {
                     }
                 }
             }
-            p2.set_config(&bad_enum).expect("set_config (非法 Enum 注入值)");
+            p2.set_config(&bad_enum)
+                .expect("set_config (非法 Enum 注入值)");
             assert_eq!(
                 p2.field_error_visible("system.log_level"),
                 Some(true),
@@ -5128,7 +5733,8 @@ pub(crate) fn pages_chain() {
                     }
                 }
             }
-            p2.set_config(&bad_u16).expect("set_config (非法 U16 注入值)");
+            p2.set_config(&bad_u16)
+                .expect("set_config (非法 U16 注入值)");
             assert_eq!(p2.field_error_visible("gateway.port"), Some(true));
             assert_eq!(p2.field_disabled("gateway.port"), Some(true));
             assert!(!p2.is_dirty(), "类型错配不得置脏");
@@ -5144,8 +5750,16 @@ pub(crate) fn pages_chain() {
             let ok = p2_view(false);
             p2.set_config(&ok).expect("set_config (合法值)");
             assert_eq!(p2.field_error_visible("gateway.port"), Some(false));
-            assert_eq!(p2.field_disabled("gateway.port"), Some(false), "合法 ⇒ 可编辑");
-            assert_eq!(p2.field_disabled("display.bind_addr"), Some(true), "只读仍禁用");
+            assert_eq!(
+                p2.field_disabled("gateway.port"),
+                Some(false),
+                "合法 ⇒ 可编辑"
+            );
+            assert_eq!(
+                p2.field_disabled("display.bind_addr"),
+                Some(true),
+                "只读仍禁用"
+            );
             assert!(!p2.is_dirty(), "注入 ⇒ 不脏");
             assert!(p2.draft().changes.is_empty());
             assert!(p2.save_disabled(), "无改动 ⇒ 保存置灰");
@@ -5174,7 +5788,8 @@ pub(crate) fn pages_chain() {
                     }
                 }
             }
-            p2.set_config(&wide).expect("set_config (合法但超出控件值域)");
+            p2.set_config(&wide)
+                .expect("set_config (合法但超出控件值域)");
             assert_eq!(
                 p2.field_error_visible("telemetry.period"),
                 Some(false),
@@ -5185,7 +5800,10 @@ pub(crate) fn pages_chain() {
                 p2.field_value_text("telemetry.period").as_deref() != Some("18446744073709551615"),
                 "自证：控件确实**表示不了**该值（渲染成 i64 侧的值）"
             );
-            assert!(!p2.is_dirty(), "**用户没碰过 ⇒ 不脏**（哪怕控件值与注入值不同）");
+            assert!(
+                !p2.is_dirty(),
+                "**用户没碰过 ⇒ 不脏**（哪怕控件值与注入值不同）"
+            );
             assert!(p2.draft().changes.is_empty());
             assert!(p2.save_disabled());
             p2.discard_draft();
@@ -5372,7 +5990,11 @@ pub(crate) fn pages_chain() {
         };
 
         /// 造联锁段（默认全 false = 契约缺省 = **不可用**）。
-        fn il(available: bool, enabled: bool, latched: bool) -> mupc_display_proto::InterlockSection {
+        fn il(
+            available: bool,
+            enabled: bool,
+            latched: bool,
+        ) -> mupc_display_proto::InterlockSection {
             mupc_display_proto::InterlockSection {
                 available,
                 enabled,
@@ -5431,7 +6053,11 @@ pub(crate) fn pages_chain() {
             (root_c.x1, root_c.y1 + 552),
             "固定操作条贴在页根底缘（不随滚动；绝对 y624 —— UI §6.4 线框逐像素一致）"
         );
-        assert_eq!(p4.action_bar_obj().size().1, 72, "操作条高 72（UI 线框 y624–696）");
+        assert_eq!(
+            p4.action_bar_obj().size().1,
+            72,
+            "操作条高 72（UI 线框 y624–696）"
+        );
         // 两个危险按钮：320×64、间距 ≥48（UI §6.4 固定操作条行逐字）。
         let rel_c = p4.release_button().button().obj().coords();
         let rst_c = p4.restart_button().button().obj().coords();
@@ -5482,7 +6108,10 @@ pub(crate) fn pages_chain() {
             (Dimens::BAND_CARD_W, 162),
             "联锁总态卡 = 488×162（UI §6.4.1 写 488×164；差 2 px 见 **IL29③**）"
         );
-        assert!(p4.state_card_obj().is_alive(), "总态卡必须存活（否则卡内全部子件被级联删除）");
+        assert!(
+            p4.state_card_obj().is_alive(),
+            "总态卡必须存活（否则卡内全部子件被级联删除）"
+        );
         assert!(p4.source_card_obj().is_alive(), "触发源卡必须存活");
 
         // ── ② 骨架态 = **无帧** ⇒ 不可用（**绝不**「未联锁」）─────────────────────
@@ -5529,8 +6158,16 @@ pub(crate) fn pages_chain() {
             Some(p4_interlock::TEXT_LATCH_UNHELD),
             "available = true 时才可显「未保持」"
         );
-        assert_eq!(p4.latch_chip_color(), Palette::TEXT_SECOND, "未保持胶囊字色 #A6B6D6");
-        assert_eq!(p4.latch_chip_visible_count(), 1, "三态胶囊互斥：恒有且仅有 1 个在显");
+        assert_eq!(
+            p4.latch_chip_color(),
+            Palette::TEXT_SECOND,
+            "未保持胶囊字色 #A6B6D6"
+        );
+        assert_eq!(
+            p4.latch_chip_visible_count(),
+            1,
+            "三态胶囊互斥：恒有且仅有 1 个在显"
+        );
         assert!(
             p4.source_empty_visible() && !p4.source_unavailable_visible(),
             "无触发源 ⇒ **空态**（不是不可用态）"
@@ -5553,7 +6190,10 @@ pub(crate) fn pages_chain() {
             !p4.reason_left_visible() && !p4.reason_right_visible(),
             "正常态无就地原因"
         );
-        assert_eq!(p4.stop_card_text().as_deref(), Some(p4_interlock::TEXT_STOP_OK));
+        assert_eq!(
+            p4.stop_card_text().as_deref(),
+            Some(p4_interlock::TEXT_STOP_OK)
+        );
         // `fault_lamp = None` / `run_lamp = None` ⇒ **「未知」**（**绝不**臆造「灯灭」！）
         // 「改什么会让本条变红」：把 `tri_view(None)` 改成 `TriView::Off` ⇒ 两条立刻变红。
         assert_eq!(
@@ -5609,8 +6249,15 @@ pub(crate) fn pages_chain() {
             Some(p4_interlock::TEXT_LATCH_UNHELD),
             "**不得**显示「未保持」"
         );
-        assert_eq!(p4.latch_chip_color(), Palette::PLACEHOLDER, "灰底灰字 #96A2BC");
-        assert!(p4.release_disabled() && p4.restart_disabled(), "两按钮均 disabled（fail-closed）");
+        assert_eq!(
+            p4.latch_chip_color(),
+            Palette::PLACEHOLDER,
+            "灰底灰字 #96A2BC"
+        );
+        assert!(
+            p4.release_disabled() && p4.restart_disabled(),
+            "两按钮均 disabled（fail-closed）"
+        );
         assert!(p4.reason_left_visible(), "就地原因可见");
         assert_eq!(
             p4.reason_left_text().as_deref(),
@@ -5638,11 +6285,11 @@ pub(crate) fn pages_chain() {
                 "第 {i} 张卡 unavailable=false 时转灰（**不臆造**灯态 / 停机结论）"
             );
         }
-        assert_ne!(p4.stop_card_text().as_deref(), Some(p4_interlock::TEXT_STOP_OK));
-        assert!(
-            !p4.take_refresh_request(),
-            "纯展示降级不置刷新标志"
+        assert_ne!(
+            p4.stop_card_text().as_deref(),
+            Some(p4_interlock::TEXT_STOP_OK)
         );
+        assert!(!p4.take_refresh_request(), "纯展示降级不置刷新标志");
 
         // ── ④′ **漏掉的自由度**：`available = false` **且** `latched = true` ───────────
         // （B2b-3 代码质量整改 ④：④ 段只测了 `latched = false`，而 `state_view` 若被改成
@@ -5670,13 +6317,19 @@ pub(crate) fn pages_chain() {
             Some(p4_interlock::TEXT_STATE_LATCHED),
             "**不可用 ≠ 已联锁**（fail-closed 的另一半：不得把「无法获知」报成「已联锁」）"
         );
-        assert_ne!(p4.state_icon_text().as_deref(), Some(p4_interlock::ICON_STATE_LATCHED));
+        assert_ne!(
+            p4.state_icon_text().as_deref(),
+            Some(p4_interlock::ICON_STATE_LATCHED)
+        );
         assert_ne!(
             p4.latch_chip_text().as_deref(),
             Some(p4_interlock::TEXT_LATCH_HELD),
             "latch 胶囊**不得**因 `latched = true` 显示「已保持」（§8.3）"
         );
-        assert!(p4.release_disabled() && p4.restart_disabled(), "两按钮仍 disabled");
+        assert!(
+            p4.release_disabled() && p4.restart_disabled(),
+            "两按钮仍 disabled"
+        );
         assert_eq!(
             p4.reason_left_text().as_deref(),
             Some(p4_interlock::TEXT_STATE_UNAVAILABLE)
@@ -5738,7 +6391,11 @@ pub(crate) fn pages_chain() {
         );
         // 卡高随源数自适应：2 行 ⇒ 卡头 44 + 空态高 124 + 上下内边距 34 = 202（UI 写 200，**IL3**）。
         disp.refr_now_for_test(); // 几何读回须先布局（`Obj::size()` 读的是 `coords`）
-        assert_eq!(p4.source_card_height(), 202, "触发源卡高（UI 线框 200，+2 见 IL3）");
+        assert_eq!(
+            p4.source_card_height(),
+            202,
+            "触发源卡高（UI 线框 200，+2 见 IL3）"
+        );
         // **漂移锁**：页内推导的两个卡体高常量必须与**组件实测高**一致
         //（`EMPTY_H` / `UNAVAILABLE_H` 是按组件构件算式推导的 —— 组件改版式 ⇒ 本条变红）。
         assert_eq!(
@@ -5789,7 +6446,11 @@ pub(crate) fn pages_chain() {
             4,
             "行池恒 4（IL9 上限不动）；第 5 条**不铺行**"
         );
-        assert_eq!(p4.source_row_tripped(4), None, "第 5 行不存在（`None` = 隐藏 / 未建）");
+        assert_eq!(
+            p4.source_row_tripped(4),
+            None,
+            "第 5 行不存在（`None` = 隐藏 / 未建）"
+        );
         // ② 卡头仍报**真实**总数（数量 ≠ 行数）。
         assert!(
             p4.sources_title_text()
@@ -5889,7 +6550,8 @@ pub(crate) fn pages_chain() {
             Some(p4_interlock::TEXT_DIALOG_TITLE_RELEASE)
         );
         assert!(
-            p4.with_dialog(|d| d.default_focus_is_cancel()).unwrap_or(false),
+            p4.with_dialog(|d| d.default_focus_is_cancel())
+                .unwrap_or(false),
             "TT-09：默认焦点「取消」"
         );
         assert!(
@@ -6022,7 +6684,8 @@ pub(crate) fn pages_chain() {
             Some("audit-long".into()),
             1_789_047_727_000,
         );
-        p4.show_result(&long_rejected).expect("show_result(长 message)");
+        p4.show_result(&long_rejected)
+            .expect("show_result(长 message)");
         assert_eq!(
             p4.reason_left_text().as_deref(),
             Some(long_msg),
@@ -6062,7 +6725,11 @@ pub(crate) fn pages_chain() {
             need_secs: 30,
             remaining_secs: 12,
         });
-        assert_eq!(p4.countdown_secs(), Some(12), "拒绝里的剩余秒数是**唯一**绝对量（IL14）");
+        assert_eq!(
+            p4.countdown_secs(),
+            Some(12),
+            "拒绝里的剩余秒数是**唯一**绝对量（IL14）"
+        );
         assert_eq!(
             p4.reason_left_text().as_deref(),
             Some("保持时间不足 · 还需 12 秒"),
@@ -6077,7 +6744,11 @@ pub(crate) fn pages_chain() {
             Some("保持时间不足 · 还需 9 秒")
         );
         p4.tick(t0 + Duration::from_secs(99));
-        assert_eq!(p4.countdown_secs(), Some(0), "下溢钳到 0（saturating，不 panic）");
+        assert_eq!(
+            p4.countdown_secs(),
+            Some(0),
+            "下溢钳到 0（saturating，不 panic）"
+        );
         assert_eq!(
             p4.reason_left_text().as_deref(),
             Some("保持时间不足 · 还需 0 秒"),
@@ -6136,7 +6807,10 @@ pub(crate) fn pages_chain() {
             Some(p4_interlock::TEXT_CONFLICT),
             "「联锁状态已变化 · 请刷新后重试」（EDGE-19）"
         );
-        assert!(p4.take_refresh_request(), "EDGE-19 ⇒ 自动触发一次状态刷新（取标志）");
+        assert!(
+            p4.take_refresh_request(),
+            "EDGE-19 ⇒ 自动触发一次状态刷新（取标志）"
+        );
 
         // ⑧⁗ EDGE-18：审计不可写（fail-closed ⇒ 操作未执行）。
         p4.show_audit_unavailable().expect("show_audit_unavailable");
@@ -6225,7 +6899,10 @@ pub(crate) fn pages_chain() {
         {
             let g = got_m1.borrow();
             assert_eq!(g[0].observed_sources.len(), 2);
-            assert!(!g[0].observed_latched, "上一步成功后 latch 已清 ⇒ 观测为 false");
+            assert!(
+                !g[0].observed_latched,
+                "上一步成功后 latch 已清 ⇒ 观测为 false"
+            );
         }
         assert_eq!(got_rel.borrow().len(), 1, "释放槽不得被 M1 的确认触发");
 
@@ -6259,7 +6936,10 @@ pub(crate) fn pages_chain() {
         assert!(p4.release_disabled() && p4.restart_disabled());
         // 渲染后确有像素（装配 → 布局 → 像素全链）。
         let painted4 = sink.borrow().iter().filter(|b| **b != 0).count();
-        assert!(painted4 > 10_000, "P4 渲染后 sink 中应有成片非背景像素（实际 {painted4}）");
+        assert!(
+            painted4 > 10_000,
+            "P4 渲染后 sink 中应有成片非背景像素（实际 {painted4}）"
+        );
 
         // ── ⑭ 区块级「冻结 / 数据过期」打标（EDGE-03 / EDGE-20；B3-2c）──────────────
         // 判据 = `pages::frame_mark`（与 P1 的通道条 / 数据过期角标**同源**）。
@@ -6297,7 +6977,10 @@ pub(crate) fn pages_chain() {
             Some("⚠"),
             "图标-only 形态的**唯一**标记通道 = 字形（此处 = `冻结` ⇒ ⚠，与 `p2_config::ICON_WARN` 同值）"
         );
-        assert!(p4.source_frozen_visible(), "触发源卡打「冻结」（同一拍、同一判据）");
+        assert!(
+            p4.source_frozen_visible(),
+            "触发源卡打「冻结」（同一拍、同一判据）"
+        );
         assert_eq!(p4.source_frozen_text().as_deref(), Some(pages::TEXT_FROZEN));
         // **打标 ≠ 清值**：联锁段的数据照常沿用冻结帧。
         assert_eq!(
@@ -6374,17 +7057,29 @@ pub(crate) fn pages_chain() {
             use crate::console::{ConsoleOutcome, OutcomeKind};
             use crate::control_route::{route, RawPayload, RouteDecision};
             use crate::state::ControlState;
-            use mupc_display_proto::{ConsoleEndpoint, ControlCode, ControlResponse, InterlockOpAck};
+            use mupc_display_proto::{
+                ConsoleEndpoint, ControlCode, ControlResponse, InterlockOpAck,
+            };
 
             const T0: u64 = 1_000;
             const MSG: &str = "联锁状态已变化";
             let typed: ControlResponse<InterlockOpAck> = ControlResponse::rejected(
-                "rid-1", ControlCode::RejectedPrecondition, MSG, Vec::new(), None, T0,
+                "rid-1",
+                ControlCode::RejectedPrecondition,
+                MSG,
+                Vec::new(),
+                None,
+                T0,
             );
             // 生产路径：`console.rs` 解出**裸 JSON 信封**（`RawPayload` = `Value`），
             // 由 `route()` 给出决策 + 类型化回执。本段照走这条链，不手搓 `RouteDecision`。
             let raw: ControlResponse<RawPayload> = ControlResponse::rejected(
-                "rid-1", ControlCode::RejectedPrecondition, MSG, Vec::new(), None, T0,
+                "rid-1",
+                ControlCode::RejectedPrecondition,
+                MSG,
+                Vec::new(),
+                None,
+                T0,
             );
             let outcome = ConsoleOutcome {
                 endpoint: ConsoleEndpoint::InterlockRelease,
@@ -6430,7 +7125,11 @@ pub(crate) fn pages_chain() {
             use std::sync::atomic::Ordering;
             for _ in 0..3 {
                 p4.render(&PageInput::down(Some(&fm)));
-                p4.render(&PageInput::new(Some(&fm), ChannelStatus::Connected, Freshness::Stale));
+                p4.render(&PageInput::new(
+                    Some(&fm),
+                    ChannelStatus::Connected,
+                    Freshness::Stale,
+                ));
                 p4.render(&PageInput::live(&fm));
             }
             let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(Ordering::SeqCst);
@@ -7287,7 +7986,11 @@ pub(crate) fn pages_chain() {
             (PeriphRole::Pcs, false),
         ]);
         // `last_ok_ms = 0` ⇒ 该列必须显 `–`（**不臆造**，R-38 未落地的口径）。
-        let sec = p6_section(&cat, &[PeriphRole::Hvac, PeriphRole::Battery, PeriphRole::MeterBatt], 0);
+        let sec = p6_section(
+            &cat,
+            &[PeriphRole::Hvac, PeriphRole::Battery, PeriphRole::MeterBatt],
+            0,
+        );
         let bms_page = BmsAlarmPage {
             page: 1,
             page_size: 50,
@@ -7334,7 +8037,11 @@ pub(crate) fn pages_chain() {
             Dimens::SIDE_PAD,
             "分段控件自页根 x=0 起（页根已在 (SIDE_PAD, HEADER_H)）"
         );
-        assert_eq!(spans.last().unwrap().1 - spans[0].0 + 1, 989, "五段总宽 989 ≤ 992");
+        assert_eq!(
+            spans.last().unwrap().1 - spans[0].0 + 1,
+            989,
+            "五段总宽 989 ≤ 992"
+        );
         assert_eq!(
             p6.tabs_obj().size(),
             (989, Dimens::TAB_H),
@@ -7345,16 +8052,7 @@ pub(crate) fn pages_chain() {
             Dimens::SECTION_Y,
             "段内容 y = 128 + 16 − 72 = 72（UI §6.6.1）"
         );
-        for (i, want) in [
-            "装置",
-            "空调",
-            "电池",
-            "储能表",
-            "PCS",
-        ]
-        .iter()
-        .enumerate()
-        {
+        for (i, want) in ["装置", "空调", "电池", "储能表", "PCS"].iter().enumerate() {
             assert_eq!(
                 p6.segment_label(i).as_deref(),
                 Some(*want),
@@ -7363,7 +8061,11 @@ pub(crate) fn pages_chain() {
         }
 
         // ── ② 站状态表：恒 5 行 + 三态 + `–` 占位 ────────────────────────────────
-        assert_eq!(p6.station_row_count(), 5, "行集合 = 5 个 role 全集（F25.5）");
+        assert_eq!(
+            p6.station_row_count(),
+            5,
+            "行集合 = 5 个 role 全集（F25.5）"
+        );
         let r0 = p6.station_row_text(0).expect("第 0 行");
         assert_eq!(r0.0, "站 空调", "站名 = 「站」+ role 中文名");
         assert_eq!(r0.1, ui_text::ONLINE, "hvac 站在线");
@@ -7380,10 +8082,11 @@ pub(crate) fn pages_chain() {
             "第 4 列 = 「更新 `12:03:46`」（块时标有值 ⇒ **不是**占位符）：{}",
             r0.3
         );
-        let states: Vec<String> = (0..5)
-            .map(|i| p6.station_row_text(i).unwrap().1)
-            .collect();
-        assert!(states.contains(&ui_text::STATION_OFFLINE.to_string()), "fire 缺席帧内 ⇒ 站离线");
+        let states: Vec<String> = (0..5).map(|i| p6.station_row_text(i).unwrap().1).collect();
+        assert!(
+            states.contains(&ui_text::STATION_OFFLINE.to_string()),
+            "fire 缺席帧内 ⇒ 站离线"
+        );
         assert!(
             states.contains(&ui_text::STATION_DISABLED.to_string()),
             "pcs `enabled = false` ⇒ 「未启用」（情形⑦）"
@@ -7424,22 +8127,35 @@ pub(crate) fn pages_chain() {
             assert!(!p6.segment_built(i), "段 {i} 未进入过 ⇒ 不得有段内容对象");
         }
         assert_eq!(p6.selected_segment(), SEG_DEVICE, "默认段 = 装置");
-        assert!(p6.segment_built(SEG_DEVICE), "段「装置」（含 F8 三卡）随页装配");
+        assert!(
+            p6.segment_built(SEG_DEVICE),
+            "段「装置」（含 F8 三卡）随页装配"
+        );
         let n_before_lazy =
             crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         p6.click_segment(1); // 用户点「空调」
-        let n_after_lazy =
-            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        let n_after_lazy = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         assert!(p6.segment_built(1), "首次进入 ⇒ 惰性创建段内容");
-        assert_eq!(p6.selected_segment(), 1, "分段切换只改段下标（**不改 current_page**）");
-        assert!(p6.segment_visible(1) && !p6.segment_visible(SEG_DEVICE), "只切可见性");
+        assert_eq!(
+            p6.selected_segment(),
+            1,
+            "分段切换只改段下标（**不改 current_page**）"
+        );
+        assert!(
+            p6.segment_visible(1) && !p6.segment_visible(SEG_DEVICE),
+            "只切可见性"
+        );
         assert!(
             n_after_lazy > n_before_lazy,
             "首次进入必须真的建出段内容（否则「惰性」名不副实）"
         );
 
         // 段「空调」行数 = 站状态行 1 + 4 个组头 + 33 个白名单点 = 38；池 = 19（**与行数无关**）
-        assert_eq!(p6.segment_row_count(1), Some(38), "段「空调」行数（白名单 33 + 4 组头 + 1 站行）");
+        assert_eq!(
+            p6.segment_row_count(1),
+            Some(38),
+            "段「空调」行数（白名单 33 + 4 组头 + 1 站行）"
+        );
         assert_eq!(
             p6.segment_pool_size(1),
             Some(SEG_ROW_POOL),
@@ -7450,7 +8166,10 @@ pub(crate) fn pages_chain() {
             "行数 > 池大小 ⇒ 窗口化确实在起作用（否则该段不会被窗口化）"
         );
         let vis = p6.segment_visible_rows(1).expect("可见行数");
-        assert!(vis <= SEG_ROW_POOL, "可见行数不得超过池（{vis} > {SEG_ROW_POOL}）");
+        assert!(
+            vis <= SEG_ROW_POOL,
+            "可见行数不得超过池（{vis} > {SEG_ROW_POOL}）"
+        );
         assert!(vis >= 5, "视口内至少应有一屏行（实测 {vis}）");
         // 段顶第 0 行 = 站状态行；其后是组头与数据行
         let (l0, v0, _a0, u0) = p6.segment_row_text(1, 0).expect("段内第 0 行");
@@ -7508,7 +8227,10 @@ pub(crate) fn pages_chain() {
                 &format!("段「装置」站状态表第 {i} 行"),
             );
         }
-        assert!(real_rows >= 3, "帧内的 3 个站必须显真值时刻（实测 {real_rows} 行）");
+        assert!(
+            real_rows >= 3,
+            "帧内的 3 个站必须显真值时刻（实测 {real_rows} 行）"
+        );
         let r4 = p6.station_row_text(4).unwrap();
         assert_eq!(
             (&r4.2, &r4.3),
@@ -7546,10 +8268,16 @@ pub(crate) fn pages_chain() {
         let kinds = p6.segment_rows(1).expect("行模型");
         assert_eq!(kinds[0].0, RowKind::Station);
         assert_eq!(kinds[1].0, RowKind::Header, "第 1 行 = 首组组头（测量值）");
-        assert_eq!(kinds.iter().filter(|(k, _)| *k == RowKind::Header).count(), 4, "空调段 4 组");
+        assert_eq!(
+            kinds.iter().filter(|(k, _)| *k == RowKind::Header).count(),
+            4,
+            "空调段 4 组"
+        );
         // 位行（告警位 / 辅助状态位）必须是 `Bit` 且行高 40
         assert!(
-            kinds.iter().any(|(k, h)| *k == RowKind::Bit && *h == Dimens::ROW_BIT_H),
+            kinds
+                .iter()
+                .any(|(k, h)| *k == RowKind::Bit && *h == Dimens::ROW_BIT_H),
             "段「空调」含位行（行高 = ROW_BIT_H 40）"
         );
         // **窗口化**：滚到中段 ⇒ 窗口起点前移、对象数不变
@@ -7663,7 +8391,10 @@ pub(crate) fn pages_chain() {
         assert!(p6.segment_built(SEG_BATTERY));
         let b_rows = p6.segment_rows(SEG_BATTERY).expect("电池段行模型");
         assert_eq!(
-            b_rows.iter().filter(|(k, _)| *k == RowKind::Special).count(),
+            b_rows
+                .iter()
+                .filter(|(k, _)| *k == RowKind::Special)
+                .count(),
             1,
             "288 位**不铺进段内**：段内只有 1 个特殊件（摘要卡）"
         );
@@ -7826,11 +8557,26 @@ pub(crate) fn pages_chain() {
             "下钻**不改**段下标（更不改 `current_page`）"
         );
         let title = p6.drill_title().expect("下钻标题");
-        assert!(title.contains(ui_text::BMS_ALARM_BITS_TITLE), "标题含「BMS 告警位」：{title}");
-        assert!(title.contains(ui_text::PAGE_PREFIX), "标题含「第」：{title}");
-        assert!(title.contains(ui_text::PAGE_SUFFIX), "标题含「页」：{title}");
-        assert!(title.contains(ui_text::BIT_ACTIVE), "标题含「活跃」：{title}");
-        assert!(title.contains(" / 288"), "标题含 `/ 288`（288 = 总数）：{title}");
+        assert!(
+            title.contains(ui_text::BMS_ALARM_BITS_TITLE),
+            "标题含「BMS 告警位」：{title}"
+        );
+        assert!(
+            title.contains(ui_text::PAGE_PREFIX),
+            "标题含「第」：{title}"
+        );
+        assert!(
+            title.contains(ui_text::PAGE_SUFFIX),
+            "标题含「页」：{title}"
+        );
+        assert!(
+            title.contains(ui_text::BIT_ACTIVE),
+            "标题含「活跃」：{title}"
+        );
+        assert!(
+            title.contains(" / 288"),
+            "标题含 `/ 288`（288 = 总数）：{title}"
+        );
         assert_eq!(
             p6.drill_collapse_size(),
             Some((Dimens::DRILL_BTN_W, Dimens::TOUCH_MIN)),
@@ -7844,7 +8590,11 @@ pub(crate) fn pages_chain() {
             )),
             "上一页 / 下一页 = 120×48"
         );
-        assert_eq!(p6.drill_pool_size(), DRILL_ROW_POOL, "下钻行池 = 可视行 ×1.5 + 1");
+        assert_eq!(
+            p6.drill_pool_size(),
+            DRILL_ROW_POOL,
+            "下钻行池 = 可视行 ×1.5 + 1"
+        );
         // 翻页意图（点击 ⇒ 回调载荷 = 目标页；**页面不自行发请求**）
         let got: Rc<Cell<u32>> = Rc::new(Cell::new(0));
         {
@@ -7863,7 +8613,9 @@ pub(crate) fn pages_chain() {
         assert!(p6.drill_fail_visible(), "失败态可见（**不静默**）");
         assert!(p6.drill_retry_visible(), "失败态给「重试」出路");
         assert!(
-            p6.drill_title().expect("标题").contains(ui_text::BMS_ALARM_BITS_TITLE),
+            p6.drill_title()
+                .expect("标题")
+                .contains(ui_text::BMS_ALARM_BITS_TITLE),
             "失败态仍显示顶部条标题（分页口径不变）"
         );
         p6.set_bms_page(&bms_page);
@@ -8058,7 +8810,10 @@ pub(crate) fn pages_chain() {
             Some(p5_audit::TEXT_LOCK_ICON),
             "锁形取几何块 ■（§3.6 明写『以几何锁形替代』）"
         );
-        assert!(p5.immutable_obj().is_alive(), "说明条必须存活（含色条与文案子树）");
+        assert!(
+            p5.immutable_obj().is_alive(),
+            "说明条必须存活（含色条与文案子树）"
+        );
         assert!(p5.immutable_bar_obj().is_alive());
         assert_eq!(
             p5.immutable_bar_obj().size(),
@@ -8094,8 +8849,16 @@ pub(crate) fn pages_chain() {
                 "取样点必须落在说明条内（coords = {c:?}）"
             );
             let off = (py as usize * W as usize + px as usize) * BPP;
-            let got = [sink.borrow()[off], sink.borrow()[off + 1], sink.borrow()[off + 2]];
-            let want = [Palette::AUDIT_BG.b, Palette::AUDIT_BG.g, Palette::AUDIT_BG.r];
+            let got = [
+                sink.borrow()[off],
+                sink.borrow()[off + 1],
+                sink.borrow()[off + 2],
+            ];
+            let want = [
+                Palette::AUDIT_BG.b,
+                Palette::AUDIT_BG.g,
+                Palette::AUDIT_BG.r,
+            ];
             assert_eq!(
                 got, want,
                 "说明条**实际渲染**的底色必须是 §6.5 的 #14231F（B,G,R = {want:?}）；\
@@ -8229,8 +8992,15 @@ pub(crate) fn pages_chain() {
         disp.refr_now_for_test();
         assert_eq!(p5.list_view(), p5_audit::ListView::Rows);
         assert_eq!(p5.visible_rows(), 3, "三条注入 ⇒ 三行在显");
-        assert_eq!(p5.rows_alive(), 3, "行对象**存活**（拥有型句柄的锚定回归锁）");
-        assert!(!p5.empty_visible() && !p5.unavailable_visible(), "有行时不显空/不可用态");
+        assert_eq!(
+            p5.rows_alive(),
+            3,
+            "行对象**存活**（拥有型句柄的锚定回归锁）"
+        );
+        assert!(
+            !p5.empty_visible() && !p5.unavailable_visible(),
+            "有行时不显空/不可用态"
+        );
         assert_eq!(
             p5.newest_text().as_deref(),
             Some("最近一条审计: 2026/09/10 13:42:07"),
@@ -8249,7 +9019,10 @@ pub(crate) fn pages_chain() {
             Some(Palette::OK),
             "成功胶囊的色通道（§3.6：`● 成功` 绿）"
         );
-        assert_eq!(p5.row_result(1).as_deref(), Some(p5_audit::TEXT_RESULT_FAIL));
+        assert_eq!(
+            p5.row_result(1).as_deref(),
+            Some(p5_audit::TEXT_RESULT_FAIL)
+        );
         assert_eq!(
             p5.row_result_accent(1),
             Some(Palette::DANGER),
@@ -8407,15 +9180,11 @@ pub(crate) fn pages_chain() {
                  （保头截断会让两者同形（实际：{shown} vs {shown2}））"
             );
             // **不臆造**：不得出现任何已登记键的中文标签。
-            for (_, label) in p5_audit::TARGET_LABELS
-                .iter()
-                .map(|(k, v)| (*k, *v))
-                .chain(
-                    p5_audit::INTERLOCK_TARGETS
-                        .iter()
-                        .map(|(k, op)| (*k, op.label())),
-                )
-            {
+            for (_, label) in p5_audit::TARGET_LABELS.iter().map(|(k, v)| (*k, *v)).chain(
+                p5_audit::INTERLOCK_TARGETS
+                    .iter()
+                    .map(|(k, op)| (*k, op.label())),
+            ) {
                 for s in [&shown, &shown2] {
                     assert!(
                         !s.contains(label),
@@ -8493,8 +9262,12 @@ pub(crate) fn pages_chain() {
         disp.refr_now_for_test();
 
         // 失败行有原因；成功行**无**（§6.5：`原因：…`（仅失败行））
-        assert!(p5.row_reason_visible(1), "失败行必须显原因（EDGE-12 同族：不得静默）");
-        assert!(p5.row_reason(1)
+        assert!(
+            p5.row_reason_visible(1),
+            "失败行必须显原因（EDGE-12 同族：不得静默）"
+        );
+        assert!(p5
+            .row_reason(1)
             .expect("原因文案")
             .starts_with(p5_audit::TEXT_REASON_PREFIX));
         assert!(
@@ -8512,7 +9285,10 @@ pub(crate) fn pages_chain() {
             Some((3, Dimens::ROW_AUDIT_H)),
             "左缘 3 px 竖条（每条都有）"
         );
-        assert_eq!(p5.row_pos(1).map(|(_, y)| y - p5.row_pos(0).unwrap().1), Some(60));
+        assert_eq!(
+            p5.row_pos(1).map(|(_, y)| y - p5.row_pos(0).unwrap().1),
+            Some(60)
+        );
         // 底部状态行（§3.6 P5 列表行：`加载中` / `已加载全部`）
         assert_eq!(
             p5.footer_text().as_deref(),
@@ -8586,7 +9362,11 @@ pub(crate) fn pages_chain() {
         // **未变化时不发意图**：重复点同一段（键矩阵照发 `VALUE_CHANGED`）⇒ 不得重发。
         // 「改什么会让本条变红」：去掉 `Core::fire_query` 里的去重判断 ⇒ 本条立刻红。
         p5.filter().seg().send_event(EventCode::VALUE_CHANGED);
-        assert_eq!(fires.borrow().len(), 1, "同一筛选条件**不重复**发意图（去重）");
+        assert_eq!(
+            fires.borrow().len(),
+            1,
+            "同一筛选条件**不重复**发意图（去重）"
+        );
         // 切到「自定义」⇒ 展开两个步进器 + 意图携带起止（**页面不读时钟**，故起止为
         // 可表示全区间；见 filters.rs **FR1**）。
         p5.filter().seg().set_selected(2);
@@ -8606,8 +9386,14 @@ pub(crate) fn pages_chain() {
             filters::body_h(LogRange::Custom),
             "展开后体高 48 → 284（其下区块由 layout() 重摆）"
         );
-        assert_eq!(p5.filter().stepper(0).map(|s| s.column_headers().len()), Some(5));
-        assert_eq!(p5.filter().stepper(1).map(|s| s.column_headers().len()), Some(5));
+        assert_eq!(
+            p5.filter().stepper(0).map(|s| s.column_headers().len()),
+            Some(5)
+        );
+        assert_eq!(
+            p5.filter().stepper(1).map(|s| s.column_headers().len()),
+            Some(5)
+        );
         // 回到「最近 1 小时」（复原，避免影响后续断言）。
         p5.filter().seg().set_selected(0);
         p5.filter().seg().send_event(EventCode::VALUE_CHANGED);
@@ -8695,7 +9481,11 @@ pub(crate) fn pages_chain() {
                  删掉 `P5AuditPage::new` 里那条 `EventCode::SCROLL` 注册、或删掉\
                  `Core::on_scroll` 的 `fire_load_more()`）"
             );
-            assert_eq!(seen.borrow()[0].page, 2, "page = 最近一次注入的 page(1) + 1");
+            assert_eq!(
+                seen.borrow()[0].page,
+                2,
+                "page = 最近一次注入的 page(1) + 1"
+            );
             assert_eq!(seen.borrow()[0].range, LogRange::H1, "筛选态随意图带出");
 
             // ── 闩的语义（**边沿触发**）：一次拖动会连发上百个 SCROLL 事件 ⇒ 进区间只发一次 ──
@@ -8770,7 +9560,11 @@ pub(crate) fn pages_chain() {
         disp.refr_now_for_test();
         assert_eq!(p5.list_view(), p5_audit::ListView::Unavailable);
         assert!(p5.unavailable_visible() && !p5.empty_visible());
-        assert_eq!(p5.visible_rows(), 0, "不可用时**不得**显行（entries 不可信）");
+        assert_eq!(
+            p5.visible_rows(),
+            0,
+            "不可用时**不得**显行（entries 不可信）"
+        );
         assert_ne!(
             p5.unavailable_title().as_deref(),
             Some(p5_audit::TEXT_EMPTY),
@@ -8785,7 +9579,10 @@ pub(crate) fn pages_chain() {
         );
 
         // ── ⑩ 超限（EDGE-15）：**AU5** —— 契约无该字段 ⇒ 显式注入入口 ────────────────
-        assert!(!p5.warn_visible(), "缺省不显（`AuditPage` 推不出该标志 —— 见 AU5）");
+        assert!(
+            !p5.warn_visible(),
+            "缺省不显（`AuditPage` 推不出该标志 —— 见 AU5）"
+        );
         p5.set_range_too_large(true);
         disp.refr_now_for_test();
         assert!(p5.warn_visible(), "注入 true ⇒ 列表区上方出现 WarnBanner");
@@ -8846,7 +9643,11 @@ pub(crate) fn pages_chain() {
                 AUDIT_PAGE_SIZE,
                 "注入契约规定的每页条数（{AUDIT_PAGE_SIZE}）⇒ 整页可见（不 OOM）"
             );
-            assert_eq!(p5.rows_alive(), AUDIT_PAGE_SIZE, "行对象全部存活（非「有行但空白」）");
+            assert_eq!(
+                p5.rows_alive(),
+                AUDIT_PAGE_SIZE,
+                "行对象全部存活（非「有行但空白」）"
+            );
             // 超过上界 ⇒ **只渲染上界条**（有界，不增长；`apply_page` 是"整体替换窗口"语义）。
             let over: Vec<_> = (0..AUDIT_PAGE_SIZE * 3)
                 .map(|i| {
@@ -8874,7 +9675,10 @@ pub(crate) fn pages_chain() {
 
         // 渲染后确有像素（装配 → 布局 → 像素全链）。
         let painted5 = sink.borrow().iter().filter(|b| **b != 0).count();
-        assert!(painted5 > 10_000, "P5 渲染后 sink 中应有成片非背景像素（实际 {painted5}）");
+        assert!(
+            painted5 > 10_000,
+            "P5 渲染后 sink 中应有成片非背景像素（实际 {painted5}）"
+        );
 
         // ── ⑬ **`drop(P5AuditPage)` 必须释放整页**（**C1**：`Rc<Core>` 强引用环的回归网）─────
         // 「改什么会让本条变红」：把 chip 回调槽里的 `Weak<Core>` 改回 `Rc<Core>` ——
@@ -8934,7 +9738,11 @@ pub(crate) fn pages_chain() {
                 AUDIT_PAGE_SIZE,
                 "第 {round} 轮：满行（{AUDIT_PAGE_SIZE} 条）必须建成"
             );
-            assert_eq!(p.rows_alive(), AUDIT_PAGE_SIZE, "第 {round} 轮：行对象全部存活");
+            assert_eq!(
+                p.rows_alive(),
+                AUDIT_PAGE_SIZE,
+                "第 {round} 轮：行对象全部存活"
+            );
             drop(p);
         }
 
@@ -9060,11 +9868,7 @@ pub(crate) fn pages_chain() {
         }
 
         /// 造一页日志。
-        fn log_page(
-            entries: Vec<LogEntry>,
-            has_more: bool,
-            range_too_large: bool,
-        ) -> LogPage {
+        fn log_page(entries: Vec<LogEntry>, has_more: bool, range_too_large: bool) -> LogPage {
             LogPage {
                 entries,
                 next_cursor: None,
@@ -9100,7 +9904,10 @@ pub(crate) fn pages_chain() {
         );
 
         // ── ② 通道条（两态；缺省 = **断开**，fail-closed，见 LG8）─────────────────────
-        assert!(!p3.channel_connected(), "未注入通道态 ⇒ 按未连接（不臆造「已连接」）");
+        assert!(
+            !p3.channel_connected(),
+            "未注入通道态 ⇒ 按未连接（不臆造「已连接」）"
+        );
         assert_eq!(
             p3.channel_text().as_deref(),
             Some(p3_logs::TEXT_CHANNEL_DOWN),
@@ -9149,7 +9956,11 @@ pub(crate) fn pages_chain() {
             "② 模块首位固定「全部」且**缺省勾选**（§6.3 ②）"
         );
         assert_eq!(p3.module_selected(), vec![0], "缺省 = 不按模块筛");
-        assert_eq!(p3.module_grid_rows(), 1, "仅 1 项 ⇒ 1 行（§6.3：仅 1 行时高 48 px）");
+        assert_eq!(
+            p3.module_grid_rows(),
+            1,
+            "仅 1 项 ⇒ 1 行（§6.3：仅 1 行时高 48 px）"
+        );
         assert_eq!(
             p3.module_grid_size(),
             (Dimens::CONTENT_W, Dimens::CHIP_H),
@@ -9252,21 +10063,21 @@ pub(crate) fn pages_chain() {
         disp.refr_now_for_test();
         assert_eq!(p3.list_view(), p3_logs::ListView::Rows);
         assert_eq!(p3.visible_rows(), 3, "三条注入 ⇒ 三行在显");
-        assert_eq!(p3.rows_alive(), 3, "行对象**存活**（拥有型句柄的锚定回归锁）");
+        assert_eq!(
+            p3.rows_alive(),
+            3,
+            "行对象**存活**（拥有型句柄的锚定回归锁）"
+        );
         assert!(!p3.empty_visible() && !p3.warn_visible());
         // **新行插入顶部**：`seq` 最大者（103）在第 0 行，最小者（101）在末行。
         assert_eq!(
             p3.row_time(0).as_deref(),
-            Some(
-                crate::ui::pages::format_epoch_ms_utc(1_789_047_727_103).as_str()
-            ),
+            Some(crate::ui::pages::format_epoch_ms_utc(1_789_047_727_103).as_str()),
             "第 0 行 = `seq` 最大的那条（§6.3 实时追加：新行插入顶部）"
         );
         assert_eq!(
             p3.row_time(2).as_deref(),
-            Some(
-                crate::ui::pages::format_epoch_ms_utc(1_789_047_727_101).as_str()
-            ),
+            Some(crate::ui::pages::format_epoch_ms_utc(1_789_047_727_101).as_str()),
             "末行 = 最旧的一条"
         );
         assert_eq!(p3.row_level(0).as_deref(), Some(p3_logs::TEXT_LEVEL_INFO));
@@ -9417,15 +10228,18 @@ pub(crate) fn pages_chain() {
             chip4.starts_with("..."),
             "超预算的 chip 文案**必须**带可见省略标记（LG4；退回纯保尾 ⇒ 本条红）"
         );
-        assert_eq!(chip4.chars().count(), 4, "产物 = `...`（3 字）+ 尾 1 字（LG4）");
+        assert_eq!(
+            chip4.chars().count(),
+            4,
+            "产物 = `...`（3 字）+ 尾 1 字（LG4）"
+        );
         // 选项文案清册（读回）：首位恒「全部」、逐项不超预算（**原样预算 + 标记**）、数量与注入一致。
         let opts = p3.module_option_texts();
         assert_eq!(opts.len(), 21);
         assert_eq!(opts[0], p3_logs::TEXT_ALL);
         for o in &opts {
             assert!(
-                o.chars().count()
-                    <= p3_logs::MODULE_CHIP_MAX_CHARS + "...".chars().count(),
+                o.chars().count() <= p3_logs::MODULE_CHIP_MAX_CHARS + "...".chars().count(),
                 "chip 文案 `{o}` 超预算（LG4）"
             );
             // 逐项自证：**超预算的项一律以标记开头**（"不完整"必须可见）。
@@ -9445,9 +10259,8 @@ pub(crate) fn pages_chain() {
             let rb = p3_logs::clip_row_label(&p3_logs::module_label("mupc_gateway::rs485"));
             assert_ne!(ra, rb, "尾字不同的两个长名 ⇒ 行产物必须可区分");
             // 已知残余（**LG12**，如实锁定）：头尾都相同、只差中段 ⇒ 仍同形。
-            let ca = p3_logs::clip_chip_label(&p3_logs::module_label(
-                "mupc_data_processing::iec104",
-            ));
+            let ca =
+                p3_logs::clip_chip_label(&p3_logs::module_label("mupc_data_processing::iec104"));
             assert_eq!(
                 a, ca,
                 "**已登记的撞形残余（LG12）**：`mupc_gateway::iec104` 与 \
@@ -9529,7 +10342,11 @@ pub(crate) fn pages_chain() {
         assert_eq!(inc.borrow().len(), 1, "有游标 ⇒ 发一次增量意图");
         {
             let q = &inc.borrow()[0];
-            assert_eq!(q.cursor, Some(103), "游标不是 `next_cursor`（契约语义不同）");
+            assert_eq!(
+                q.cursor,
+                Some(103),
+                "游标不是 `next_cursor`（契约语义不同）"
+            );
             assert_eq!(q.range, LogRange::H1, "增量沿用当前筛选");
             assert_eq!(q.levels, vec![LogLevel::Error], "级别筛选沿用当前态");
             assert_eq!(q.limit, p3_logs::ROW_MAX);
@@ -9542,7 +10359,10 @@ pub(crate) fn pages_chain() {
         // 停摆反向锁死了，本批已改为正向断言）。
         p3.dispatch_level_selection(vec![]);
         assert_eq!(p3.last_seq(), 0, "筛选变化 ⇒ 游标清零");
-        assert!(p3.increment_active(), "筛选意图已发出 ⇒ 增量路径激活（LG13）");
+        assert!(
+            p3.increment_active(),
+            "筛选意图已发出 ⇒ 增量路径激活（LG13）"
+        );
         p3.request_increment();
         assert_eq!(
             inc.borrow().len(),
@@ -9551,7 +10371,10 @@ pub(crate) fn pages_chain() {
         );
         {
             let q = &inc.borrow()[1];
-            assert_eq!(q.cursor, None, "无游标 ⇒ `cursor = None`（重新拉首页，不是停摆）");
+            assert_eq!(
+                q.cursor, None,
+                "无游标 ⇒ `cursor = None`（重新拉首页，不是停摆）"
+            );
             assert_eq!(q.range, LogRange::H1, "沿用当前筛选档位");
             assert!(q.levels.is_empty(), "沿用当前级别筛选（已全部取消）");
             assert_eq!(q.limit, p3_logs::ROW_MAX);
@@ -9560,13 +10383,21 @@ pub(crate) fn pages_chain() {
         // 不再出现"空窗口之后永久沉默"）。
         p3.request_increment();
         assert_eq!(inc.borrow().len(), 3);
-        assert_eq!(inc.borrow()[2].cursor, None, "窗口仍空 ⇒ 仍为 None（直到注入新窗口）");
+        assert_eq!(
+            inc.borrow()[2].cursor,
+            None,
+            "窗口仍空 ⇒ 仍为 None（直到注入新窗口）"
+        );
         // 注入新窗口 ⇒ 游标回到 `max(seq)`，增量恢复"真增量"形态（`Some(..)`）。
         p3.set_page(&log_page(entries.clone(), true, false));
         assert_eq!(p3.last_seq(), 103);
         p3.request_increment();
         assert_eq!(inc.borrow().len(), 4);
-        assert_eq!(inc.borrow()[3].cursor, Some(103), "有游标 ⇒ 回到 max(seq) 增量语义");
+        assert_eq!(
+            inc.borrow()[3].cursor,
+            Some(103),
+            "有游标 ⇒ 回到 max(seq) 增量语义"
+        );
 
         // ── ⑬ 「回到最新」（**R2** 的可实现部分：点击 ⇒ 意图 + 复位 auto_follow）────────
         let backs = Rc::new(RefCell::new(0usize));
@@ -9578,7 +10409,10 @@ pub(crate) fn pages_chain() {
         assert!(!p3.auto_follow());
         p3.back_obj().send_event(EventCode::CLICKED);
         assert_eq!(*backs.borrow(), 1, "点击 ⇒ **恰一次**意图");
-        assert!(p3.auto_follow(), "点击后复位自动跟随（B3 注入态的读回口径）");
+        assert!(
+            p3.auto_follow(),
+            "点击后复位自动跟随（B3 注入态的读回口径）"
+        );
         // ⚠️ **R2 的能力缺口（T21c-2-r1 订正后如实标注）**：本段**不断言**"手动上滚 ⇒ 停止
         // 自动跟随"—— 缺口**不是**"读不到滚动事件或位置"（`EventCode::SCROLL` 自 **B4b
         // `297b51b`** 起已镜像；`Obj::scroll_to_y` / `scroll_y` 自 **B4a** 起已封装，见
@@ -9591,14 +10425,24 @@ pub(crate) fn pages_chain() {
         // ── ⑭ 超限（EDGE-15）：契约字段 ⇒ **生产可达**（与 P5 的 AU5 相反）─────────────
         p3.set_page(&log_page(entries.clone(), false, true));
         disp.refr_now_for_test();
-        assert!(p3.warn_visible(), "`range_too_large = true` ⇒ 列表区上方出现 WarnBanner");
+        assert!(
+            p3.warn_visible(),
+            "`range_too_large = true` ⇒ 列表区上方出现 WarnBanner"
+        );
         assert_eq!(
             p3.warn_text().as_deref(),
             Some(p3_logs::TEXT_RANGE_TOO_LARGE)
         );
-        assert_eq!(p3.visible_rows(), 3, "超限**不隐藏**已返回的条目（契约：`entries` 不代表完整结果）");
+        assert_eq!(
+            p3.visible_rows(),
+            3,
+            "超限**不隐藏**已返回的条目（契约：`entries` 不代表完整结果）"
+        );
         p3.set_page(&log_page(entries.clone(), false, false));
-        assert!(!p3.warn_visible(), "标志复位 ⇒ 条隐（**常驻构件**，只改可见性）");
+        assert!(
+            !p3.warn_visible(),
+            "标志复位 ⇒ 条隐（**常驻构件**，只改可见性）"
+        );
 
         // ── ⑮ 空态（EDGE-08）：`entries` 空 + `range_too_large = false` ────────────────
         p3.set_page(&log_page(Vec::new(), false, false));
@@ -9764,14 +10608,7 @@ pub(crate) fn pages_chain() {
             assert_eq!(p3.rows_alive(), p3_logs::ROW_MAX, "行对象全部存活");
             // 超过上界 ⇒ **只渲染上界条**（有界，不增长；`set_page` 是"整体替换窗口"语义）。
             let over: Vec<LogEntry> = (0..p3_logs::ROW_MAX * 3)
-                .map(|i| {
-                    log_entry(
-                        1_800_000_000_000 + i as u64,
-                        LogLevel::Info,
-                        "hplc",
-                        "y",
-                    )
-                })
+                .map(|i| log_entry(1_800_000_000_000 + i as u64, LogLevel::Info, "hplc", "y"))
                 .collect();
             p3.set_page(&log_page(over, false, false));
             disp.refr_now_for_test();
@@ -9823,9 +10660,7 @@ pub(crate) fn pages_chain() {
         for round in 0..3 {
             let p = p3_logs::P3LogsPage::new(&host).expect("第 N 轮建 P3 页（环存在时这里 OOM）");
             let full: Vec<LogEntry> = (0..p3_logs::ROW_MAX)
-                .map(|i| {
-                    log_entry(1_700_000_000_000 + i as u64, LogLevel::Info, "audit", "z")
-                })
+                .map(|i| log_entry(1_700_000_000_000 + i as u64, LogLevel::Info, "audit", "z"))
                 .collect();
             p.set_page(&log_page(full, true, false));
             disp.refr_now_for_test();
@@ -9835,7 +10670,11 @@ pub(crate) fn pages_chain() {
                 "第 {round} 轮：满行（{} 条）必须建成",
                 p3_logs::ROW_MAX
             );
-            assert_eq!(p.rows_alive(), p3_logs::ROW_MAX, "第 {round} 轮：行对象全部存活");
+            assert_eq!(
+                p.rows_alive(),
+                p3_logs::ROW_MAX,
+                "第 {round} 轮：行对象全部存活"
+            );
             drop(p);
         }
 
@@ -9975,9 +10814,7 @@ pub(crate) fn pages_chain() {
                         fields: vec![ConfigField {
                             key: "system.log_level".into(),
                             label: "日志级别".into(),
-                            kind: ConfigKind::Enum {
-                                options: vec![],
-                            },
+                            kind: ConfigKind::Enum { options: vec![] },
                             default: Value::from("info"),
                             value: Value::from("info"),
                             unit: None,
@@ -10478,7 +11315,9 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             );
         }
         // 点第 3 个页签 ⇒ 显 P3（任务书逐条点名的那一条）。
-        sh.tab(NavPage::Logs).expect("页签").send_event(EventCode::CLICKED);
+        sh.tab(NavPage::Logs)
+            .expect("页签")
+            .send_event(EventCode::CLICKED);
         assert_eq!(sh.current(), NavPage::Logs);
         assert_eq!(sh.visible_pages(), vec![NavPage::Logs]);
         // 返回 ⇒ P1。
@@ -10593,7 +11432,9 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
 
         // ═══ ④ 超时回归（**注入时钟** ⇒ 逐拍可断言）═══════════════════════════
         // 先切到 P4（非 P1，才有"回归"可言），并重置活动时刻 = base。
-        sh.tab(NavPage::Interlock).expect("页签").send_event(EventCode::CLICKED);
+        sh.tab(NavPage::Interlock)
+            .expect("页签")
+            .send_event(EventCode::CLICKED);
         sh.tick(at(0), CLOCK); // 消费上述按压 ⇒ last_activity = base
         assert_eq!(sh.current(), NavPage::Interlock);
         // t=49：还剩 11 s ⇒ 无胶囊。
@@ -10606,7 +11447,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **改什么会让本条变红**：把 `shows_countdown` 的窗口从 10 改小（如 5）⇒ 这里不显；
         // 把 `countdown_text` 的措辞改掉 ⇒ 文案断言红。
         sh.tick(at(50), CLOCK);
-        assert!(sh.countdown_visible(), "超时前 10 s 出现倒计时胶囊（UI §4.3）");
+        assert!(
+            sh.countdown_visible(),
+            "超时前 10 s 出现倒计时胶囊（UI §4.3）"
+        );
         assert_eq!(
             sh.countdown_text_value().as_deref(),
             Some("10 秒后返回主状态页"),
@@ -10620,7 +11464,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         );
         // t=55.5：向上取整 ⇒ 仍显示 5 秒（若改向下取整会显示 4 ⇒ 红）。
         sh.tick(at(55) + Duration::from_millis(500), CLOCK);
-        assert_eq!(sh.countdown_text_value().as_deref(), Some("5 秒后返回主状态页"));
+        assert_eq!(
+            sh.countdown_text_value().as_deref(),
+            Some("5 秒后返回主状态页")
+        );
         // 中途派发 `PRESSED`（**全屏输入对象**）⇒ 计时重置 ⇒ 胶囊消失。
         // **改什么会让本条变红**：把 `Core::tick` 里的 `pending_activity.replace(false)` 删掉、
         // 或把 `Shell::wire` 的根 `PRESSED` 挂钩删掉 ⇒ 这里胶囊仍在、且 t=60 会切页。
@@ -10651,7 +11498,11 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         );
         // 回归后计时从**满时长**重算（不是"又立刻超时"）。
         sh.tick(at(116) + Duration::from_millis(500), CLOCK);
-        assert_eq!(sh.current(), NavPage::Main, "回归后计时已重置，不得连续切页");
+        assert_eq!(
+            sh.current(),
+            NavPage::Main,
+            "回归后计时已重置，不得连续切页"
+        );
 
         // ═══ ④″ **计时重置的完整语义**（原"覆盖边界"节；B4b 整改改写，偏差 **SH5**）════
         //
@@ -10684,7 +11535,11 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             // 算出，而不是拍一个"大概在页面里"的坐标。
             let card = sh.p1().soc_card().coords();
             let (px, py) = ((card.x1 + card.x2) / 2, (card.y1 + card.y2) / 2);
-            assert_eq!(sh.current(), NavPage::Main, "④″ 前置：P1 可见（卡片坐标才有意义）");
+            assert_eq!(
+                sh.current(),
+                NavPage::Main,
+                "④″ 前置：P1 可见（卡片坐标才有意义）"
+            );
 
             // 接近超时（剩 10 s ⇒ 胶囊在）—— 与既有 ④ 段同款时间口径。
             sh.note_activity();
@@ -10739,8 +11594,9 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             // ⇒ 证明这个坐标确实命中该控件；② **置禁用**后对象级回调消失（LVGL 的 `is_enabled`
             // 门），而**计时照旧重置** ⇒ 证明机制确实与命中无关。
             let hits = Rc::new(Cell::new(0u32));
-            let probe_btn = crate::lvgl::widgets::TextButton::create(sh.page_obj(NavPage::Main), "禁用")
-                .expect("④″：造一个可禁用的可点控件");
+            let probe_btn =
+                crate::lvgl::widgets::TextButton::create(sh.page_obj(NavPage::Main), "禁用")
+                    .expect("④″：造一个可禁用的可点控件");
             probe_btn.set_pos(8, 8);
             probe_btn.set_size(160, Dimens::TOUCH_MIN);
             {
@@ -10925,7 +11781,14 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             /// **每次手势用一枚全新 Indev**（与 ④′ 段同法）：LVGL 的 indev 在抬手后会留下
             /// 抛掷 / 方向锁状态，复用同一枚会让两次手势的增量不同（L 单元实测：同 x 连投三次
             /// 会得到 ≈拖动量与 ≈2 倍拖动量两族值 —— 该现象**与 x 无关**，见 ② 的口径说明）。
-            fn swipe_y(disp: &Display, root: &Obj, x: i32, y: i32, drag_px: i32, steps: i32) -> i32 {
+            fn swipe_y(
+                disp: &Display,
+                root: &Obj,
+                x: i32,
+                y: i32,
+                drag_px: i32,
+                steps: i32,
+            ) -> i32 {
                 let indev = Indev::create_pointer(disp).expect("④⁗：建真实 indev");
                 let before = root.scroll_y();
                 indev.feed(TouchSnapshot {
@@ -11046,7 +11909,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // ═══ ④′ 触摸不可用角标（EDGE-13）+ 通道断（EDGE-20 的"两状态同显"）══════
         sh.set_touch_available(false);
         assert!(sh.touch_badge_visible(), "EDGE-13：触摸不可用角标常驻");
-        assert_eq!(sh.touch_badge_text().as_deref(), Some(shell::TEXT_TOUCH_UNAVAILABLE));
+        assert_eq!(
+            sh.touch_badge_text().as_deref(),
+            Some(shell::TEXT_TOUCH_UNAVAILABLE)
+        );
         assert!(
             sh.channel_text().is_some(),
             "角标与通道胶囊**可同显**（二者槽位不相交，见 shell.rs 的栅格自洽用例）"
@@ -11060,7 +11926,11 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             Some(crate::ui::pages::p1_status::TEXT_CHANNEL_DOWN),
             "EDGE-20：页眉红通道胶囊"
         );
-        assert_eq!(sh.clock_text().as_deref(), Some(CLOCK), "时钟不受通道态影响");
+        assert_eq!(
+            sh.clock_text().as_deref(),
+            Some(CLOCK),
+            "时钟不受通道态影响"
+        );
         sh.set_channel(ChannelStatus::Connected);
         assert_eq!(sh.channel_text().as_deref(), Some(shell::TEXT_CHANNEL_OK));
 
@@ -11118,7 +11988,11 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         assert_eq!(sh.current(), NavPage::Config, "弹层打开 ⇒ 不强制切页");
         sh.set_modal_open(false);
         sh.tick(at(301), CLOCK);
-        assert_eq!(sh.current(), NavPage::Config, "弹层关闭 ⇒ 恢复计时（从满时长）");
+        assert_eq!(
+            sh.current(),
+            NavPage::Config,
+            "弹层关闭 ⇒ 恢复计时（从满时长）"
+        );
 
         // ═══ ⑤″ **生产可见的**弹层查询口（B3-2c：闭合 SH2 的「页侧拿不到」）═══════════
         //
@@ -11135,10 +12009,12 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             "无弹层 ⇒ 两个查询口都为 false"
         );
         // 改一个可编辑字段（走与控件回调同一条簿记）⇒ 有草稿可保存。
-        assert!(sh.p2().set_field_value("gateway.port", &serde_json::Value::from(2405)));
+        assert!(sh
+            .p2()
+            .set_field_value("gateway.port", &serde_json::Value::from(2405)));
         sh.note_activity();
         sh.tick(at(305), CLOCK); // 消费活动 ⇒ 计时基线 = at(305)
-        // 「保存」= 真实派发路径（向保存按钮派 `CLICKED`），弹层由页面自己开。
+                                 // 「保存」= 真实派发路径（向保存按钮派 `CLICKED`），弹层由页面自己开。
         sh.p2()
             .save_button()
             .button()
@@ -11148,12 +12024,18 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             sh.p2().dialog_open(),
             "点「保存」⇒ 弹层已在屏上，**生产可见的**查询口必须为真（恒 false ⇒ 红）"
         );
-        assert!(!sh.p4().dialog_open(), "P4 的弹层没打开（两页各持自己的口，互不借光）");
+        assert!(
+            !sh.p4().dialog_open(),
+            "P4 的弹层没打开（两页各持自己的口，互不借光）"
+        );
 
         // 接线层每拍的喂入值 = 两页取或 ⇒ 弹层打开期间计时**暂停**。
         sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
         sh.tick(at(395), CLOCK); // 距基线 90 s ≫ 60 s 的超时 ⇒ 未暂停的话早已切回 P1
-        assert!(!sh.countdown_visible(), "弹层打开 ⇒ 不倒计时（TT-13 / UI §4.3）");
+        assert!(
+            !sh.countdown_visible(),
+            "弹层打开 ⇒ 不倒计时（TT-13 / UI §4.3）"
+        );
         assert_eq!(sh.current(), NavPage::Config, "弹层打开 ⇒ 不强制切页");
 
         // 关弹层：走**真实取消路径**（事件回调内不关，延迟到下一拍 —— 见 `P2ConfigPage::tick`）。
@@ -11165,7 +12047,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             "取消点击发生在 LVGL 回调内 ⇒ 弹层**此刻仍在屏上**，查询口必须如实为真"
         );
         sh.tick(at(396), CLOCK);
-        assert!(!sh.p2().dialog_open(), "下一拍的延迟关闭已执行 ⇒ 查询口变假");
+        assert!(
+            !sh.p2().dialog_open(),
+            "下一拍的延迟关闭已执行 ⇒ 查询口变假"
+        );
         // 脏草稿也会暂停计时（EDGE-11）⇒ 先放弃修改，才能观察"弹层关 ⇒ 恢复计时"。
         sh.p2().discard_draft();
         assert!(!sh.p2().is_dirty(), "前置：脏态已清（否则暂停判据仍为真）");
@@ -11176,7 +12061,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             NavPage::Config,
             "弹层关闭且无脏草稿 ⇒ 暂停解除（计时从满时长重算，此刻不切页）"
         );
-        assert!(!sh.countdown_visible(), "恢复计时 ⇒ 距超时还有 60 s，无胶囊");
+        assert!(
+            !sh.countdown_visible(),
+            "恢复计时 ⇒ 距超时还有 60 s，无胶囊"
+        );
         sh.show(NavPage::Main); // 复位：后续 ③ 段从主状态页起
         sh.note_activity();
         sh.tick(at(398), CLOCK);
@@ -11216,7 +12104,7 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             assert!(!sh.p2().dialog_open(), "P2 的弹层此刻也不该在（互不借光）");
             sh.note_activity();
             sh.tick(at(600), CLOCK); // 消费活动 ⇒ 计时基线 = at(600)
-            // 真实派发路径：向「人工释放联锁」按钮派 `CLICKED`，弹层由页面自己开。
+                                     // 真实派发路径：向「人工释放联锁」按钮派 `CLICKED`，弹层由页面自己开。
             sh.p4()
                 .release_button()
                 .button()
@@ -11234,7 +12122,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             // 接线层每拍的喂入值 = 两页取或 ⇒ P4 弹层打开期间**同样暂停计时**（P4 侧也守一次 TT-13）。
             sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
             sh.tick(at(690), CLOCK); // 距基线 90 s ≫ 60 s 的超时 ⇒ 未暂停的话早已切回 P1
-            assert!(!sh.countdown_visible(), "P4 弹层打开 ⇒ 不倒计时（TT-13 / UI §4.3）");
+            assert!(
+                !sh.countdown_visible(),
+                "P4 弹层打开 ⇒ 不倒计时（TT-13 / UI §4.3）"
+            );
             assert_eq!(sh.current(), NavPage::Interlock, "P4 弹层打开 ⇒ 不强制切页");
             // 关弹层：走**真实取消路径**（事件回调内不关，延迟到下一拍 —— 同 `P2ConfigPage::tick`）。
             sh.p4().with_dialog(|d| {
@@ -11245,7 +12136,10 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
                 "取消点击发生在 LVGL 回调内 ⇒ 弹层**此刻仍在屏上**，查询口必须如实为真"
             );
             sh.tick(at(691), CLOCK);
-            assert!(!sh.p4().dialog_open(), "下一拍延迟关闭已执行 ⇒ P4 查询口变假（恒 true ⇒ 红）");
+            assert!(
+                !sh.p4().dialog_open(),
+                "下一拍延迟关闭已执行 ⇒ P4 查询口变假（恒 true ⇒ 红）"
+            );
             sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
             sh.tick(at(692), CLOCK);
             assert_eq!(
@@ -11253,12 +12147,18 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
                 NavPage::Interlock,
                 "P4 弹层关闭（本页无草稿概念）⇒ 暂停解除（计时从满时长重算，此刻不切页）"
             );
-            assert!(!sh.countdown_visible(), "恢复计时 ⇒ 距超时还有 60 s，无胶囊");
+            assert!(
+                !sh.countdown_visible(),
+                "恢复计时 ⇒ 距超时还有 60 s，无胶囊"
+            );
             // **基线复位**：后面的 ③′ 段仍以 `at(400)` 为独立时间基。
             // `note_activity()` 的消费分支**无条件**把 `last_activity` 覆盖为 `now`
             // （见 `Shell::tick` ①），故这里能把基线拉回到 at(399)。
             sh.show(NavPage::Main);
-            assert!(!sh.p4().dialog_open() && !sh.p2().dialog_open(), "复位前：两页弹层都已关");
+            assert!(
+                !sh.p4().dialog_open() && !sh.p2().dialog_open(),
+                "复位前：两页弹层都已关"
+            );
             sh.set_modal_open(sh.p2().dialog_open() || sh.p4().dialog_open());
             sh.note_activity();
             sh.tick(at(399), CLOCK);
@@ -11295,7 +12195,8 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             "整屏层必须常驻（装配期建好、只切可见性）—— 写成本地变量会在这里红"
         );
         assert!(
-            !sh.overlay_obj().has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE),
+            !sh.overlay_obj()
+                .has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE),
             "整屏遮罩**不得**带 CLICKABLE（**可穿透输入**：EDGE-20 要求 P2/P4 写操作仍可用）"
         );
 
@@ -11470,13 +12371,24 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **改什么会让本条变红**：把 `Core::apply_overlay` 的 `!= Some(secs)` 判据删掉
         // （无条件 `set_text`）⇒ 下面每一条 `overlay_text_writes()` 断言都红。
         sh.tick(t_down + Duration::from_millis(500), CLOCK);
-        assert_eq!(sh.overlay_text_writes(), 1, "半秒拍：整秒未变 ⇒ 不得重写文本");
+        assert_eq!(
+            sh.overlay_text_writes(),
+            1,
+            "半秒拍：整秒未变 ⇒ 不得重写文本"
+        );
         assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("0 秒"));
         sh.tick(t_down + Duration::from_secs(1), CLOCK);
-        assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("1 秒"), "整秒拍 ⇒ 时长 +1");
+        assert_eq!(
+            sh.overlay_elapsed_text().as_deref(),
+            Some("1 秒"),
+            "整秒拍 ⇒ 时长 +1"
+        );
         assert_eq!(sh.overlay_text_writes(), 2);
         for i in 2..=5u64 {
-            sh.tick(t_down + Duration::from_secs(i) + Duration::from_millis(300), CLOCK);
+            sh.tick(
+                t_down + Duration::from_secs(i) + Duration::from_millis(300),
+                CLOCK,
+            );
         }
         assert_eq!(sh.overlay_elapsed_secs(), Some(5));
         assert_eq!(sh.overlay_elapsed_text().as_deref(), Some("5 秒"));
@@ -11526,11 +12438,7 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             let hits_elapsed = Rc::new(Cell::new(0u32));
             let hits_overlay = Rc::new(Cell::new(0u32));
             {
-                let tab = sh
-                    .tab(NavPage::Config)
-                    .expect("第 2 个页签")
-                    .button()
-                    .obj();
+                let tab = sh.tab(NavPage::Config).expect("第 2 个页签").button().obj();
                 let c = Rc::clone(&hits_tab);
                 let _keep = tab.on(EventCode::PRESSED, move |_e| c.set(c.get() + 1));
             }
@@ -11547,12 +12455,7 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
                 ((c.x1 + c.x2) / 2, (c.y1 + c.y2) / 2)
             };
             // ── A：页签中心 ──
-            let (ax, ay) = centre(
-                sh.tab(NavPage::Config)
-                    .expect("第 2 个页签")
-                    .button()
-                    .obj(),
-            );
+            let (ax, ay) = centre(sh.tab(NavPage::Config).expect("第 2 个页签").button().obj());
             assert!(
                 (0..Dimens::SCREEN_W).contains(&ax) && (0..Dimens::SCREEN_H).contains(&ay),
                 "前置：页签中心 ({ax},{ay}) 须在屏内（否则本条测的不是「屏上被遮罩盖住的点」）"
@@ -11597,7 +12500,11 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         }
         // **不影响后续**：全程只投 `pressed`、**不**投抬手 ⇒ 无 `CLICKED` ⇒ 不切页
         // （页签的切页挂钩在 `on_clicked` 上）。
-        assert_eq!(sh.current(), NavPage::Main, "行为级用例不得切页（只按下、未抬手）");
+        assert_eq!(
+            sh.current(),
+            NavPage::Main,
+            "行为级用例不得切页（只按下、未抬手）"
+        );
 
         // ═══ ③⁗ `Init` 态**不显**整屏降级层（B3-2b-1 代码质量评审 建议 3）════════════
         //
@@ -11637,7 +12544,8 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // `Core::apply_overlay` 写分支插一次 `add_style` ⇒ 原 335 条全绿）。故本段**同时**
         // 断言 `PROBE_STYLE_ATTACHES` **零增长** —— 与对象数**同款口径**（同为测试专用
         // 静态计数器、同为区间增量、自增点同为薄层唯一入口）。
-        let mounts_before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        let mounts_before =
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         let attaches_before =
             crate::lvgl::obj::PROBE_STYLE_ATTACHES.load(std::sync::atomic::Ordering::SeqCst);
         for i in 0..50u64 {
@@ -11649,7 +12557,8 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
             sh.tick(t_down + Duration::from_secs(6 + i), CLOCK);
         }
         assert_eq!(
-            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst) - mounts_before,
+            crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst)
+                - mounts_before,
             0,
             "断态连推 50 拍（逐拍跨整秒 + 显隐交替）不得新建任何 LVGL 对象（层建一次、只切可见性）"
         );
@@ -12046,7 +12955,12 @@ fn controls_static_constraints() {
         );
         // ④ **自证本扫描真的覆盖到了输入控件**（若 `include_str!` 指错文件 / 文件被清空，
         //    上面三条会**构造性全绿** —— 这正是"看着在把关、实则没把住"的典型形态）。
-        for must in ["SegmentedControl", "Ipv4Stepper", "DateTimeStepper", "set_one_checked"] {
+        for must in [
+            "SegmentedControl",
+            "Ipv4Stepper",
+            "DateTimeStepper",
+            "set_one_checked",
+        ] {
             assert!(
                 code.contains(must),
                 "{name} 未包含 `{must}` —— 本用例的扫描面与预期不符（先修用例再谈实现）"
@@ -12105,7 +13019,12 @@ fn shell_static_constraints() {
         "{SHELL} 不得出现 `unsafe`（设计 §1.1.1.2 纪律 1）"
     );
     // ④ 自证扫描面未指错文件（`include_str!` 指到别的文件 ⇒ 上面三条构造性全绿）。
-    for must in ["NavPage", "Shell", "COUNTDOWN_WINDOW_SECS", "set_on_page_change"] {
+    for must in [
+        "NavPage",
+        "Shell",
+        "COUNTDOWN_WINDOW_SECS",
+        "set_on_page_change",
+    ] {
         assert!(
             code.contains(must),
             "{SHELL} 未包含 `{must}` —— 扫描面与预期不符（先修用例再谈实现）"
@@ -12180,7 +13099,8 @@ fn p2_static_constraints() {
         );
     }
 
-    let sources: [(&str, &str); 1] = [("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs"))];
+    let sources: [(&str, &str); 1] =
+        [("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs"))];
     for (name, src) in sources {
         let code = strip_comments_and_literals(src, name);
         let lower = code.to_ascii_lowercase();
@@ -12485,11 +13405,11 @@ fn p5_static_constraints() {
         let (name, src) = ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs"));
         let code = strip_comments_and_literals(src, name);
         for needle in [
-            "TextButton",      // 按钮（唯一可点控件的构造点在筛选区的组合控件内部）
-            "ConfirmDialog",   // 确认弹层（写操作的前置）
-            "Toast",           // 操作结果提示（写操作的反馈）
-            "ButtonMatrix",    // 键矩阵（分段控件内部件 —— 本页不得直造）
-            "Obj::delete",     // 删对象（唯一合法的删除是 `Drop` 级联）
+            "TextButton",    // 按钮（唯一可点控件的构造点在筛选区的组合控件内部）
+            "ConfirmDialog", // 确认弹层（写操作的前置）
+            "Toast",         // 操作结果提示（写操作的反馈）
+            "ButtonMatrix",  // 键矩阵（分段控件内部件 —— 本页不得直造）
+            "Obj::delete",   // 删对象（唯一合法的删除是 `Drop` 级联）
         ] {
             assert!(
                 !code.contains(needle),
@@ -12541,7 +13461,10 @@ fn p5_static_constraints() {
             "RANGE_ORDER",
             "LogRange",
         ] {
-            assert!(code.contains(must), "{name} 未包含 `{must}`（共享件接口缺失）");
+            assert!(
+                code.contains(must),
+                "{name} 未包含 `{must}`（共享件接口缺失）"
+            );
         }
     }
 }
@@ -12590,10 +13513,7 @@ fn p3_static_constraints() {
     //    误用的后门**：谁把**上屏串**写成 `module_key("…")`，那条串就**静默逃过**码表网。
     //    ⇒ 把"恰好 3 处"钉死（= `MODULE_LABELS` 的三个机器名 token）。
     {
-        let (name, src) = (
-            "ui/pages/p3_logs.rs",
-            include_str!("pages/p3_logs.rs"),
-        );
+        let (name, src) = ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs"));
         let prod = truncate_before_test_module(src, name);
         assert_eq!(
             prod.matches("module_key(\"").count(),
@@ -12609,10 +13529,7 @@ fn p3_static_constraints() {
         );
     }
 
-    let sources: [(&str, &str); 1] = [(
-        "ui/pages/p3_logs.rs",
-        include_str!("pages/p3_logs.rs"),
-    )];
+    let sources: [(&str, &str); 1] = [("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs"))];
     for (name, src) in sources {
         let code = strip_comments_and_literals(src, name);
         let lower = code.to_ascii_lowercase();
@@ -12646,11 +13563,11 @@ fn p3_static_constraints() {
         //    ⚠️ `TextButton` **不在**禁用列（「回到最新」是**只读交互**、不是写操作 —— 见 R2），
         //    这正是本条与 `p5_static_constraints` 的唯一差别。
         for needle in [
-            "ConfirmDialog",   // 确认弹层（写操作的前置）
-            "Toast",           // 操作结果提示（写操作的反馈）
-            "Obj::delete",     // 删对象（唯一合法的删除是 `Drop` 级联）
-            "export",          // 导出入口的代码标识符（T-2：**不存在**任何导出入口）
-            "delete_all",      // 清空入口
+            "ConfirmDialog", // 确认弹层（写操作的前置）
+            "Toast",         // 操作结果提示（写操作的反馈）
+            "Obj::delete",   // 删对象（唯一合法的删除是 `Drop` 级联）
+            "export",        // 导出入口的代码标识符（T-2：**不存在**任何导出入口）
+            "delete_all",    // 清空入口
         ] {
             assert!(
                 !code.contains(needle),
@@ -13020,27 +13937,15 @@ fn p5_runtime_texts_emit_only_cmap_glyphs() {
             "gateway.port",
         ),
         (None, None, "gateway.port"),
-        (
-            Some(serde_json::json!(true)),
-            None,
-            "interlock.release",
-        ),
-        (
-            Some(serde_json::json!(true)),
-            None,
-            "interlock.ack_m1",
-        ),
+        (Some(serde_json::json!(true)), None, "interlock.release"),
+        (Some(serde_json::json!(true)), None, "interlock.ack_m1"),
         // **未登记键**（评审 ③ 整改）：`display_safe(键)` 的产物必须逐字在 cmap 内。
         (
             Some(serde_json::json!(1)),
             Some(serde_json::json!(2)),
             "interlock.flood",
         ),
-        (
-            None,
-            None,
-            "display.publish_ms",
-        ),
+        (None, None, "display.publish_ms"),
         (
             Some(serde_json::json!("a".repeat(80))),
             Some(serde_json::json!([1])),
@@ -13178,10 +14083,12 @@ fn font_metrics_baseline_is_present_and_meaningful() {
     // ①′ 交叉核对 = **代码侧的字体阶梯**（`FontSize::ALL`，即真正编译进来的 10 档）：
     //     这才是"基线是否覆盖了全部字号"的判据（比硬编码 10 个数字强 —— 扩档位时只改
     //     `fonts/gen_fonts.sh` 的 `SIZES` 而忘重跑 ⇒ 这里**红**）。
-    let ladder: std::collections::BTreeSet<u32> =
-        FontSize::ALL.iter().map(|f| f.px()).collect();
+    let ladder: std::collections::BTreeSet<u32> = FontSize::ALL.iter().map(|f| f.px()).collect();
     assert_eq!(
-        tiers.iter().copied().collect::<std::collections::BTreeSet<u32>>(),
+        tiers
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<u32>>(),
         ladder,
         "基线档位自证表必须与字体阶梯 `FontSize::ALL` **逐个相等**（{METRICS_MANIFEST}）"
     );
@@ -13205,15 +14112,24 @@ fn font_metrics_baseline_is_present_and_meaningful() {
         // ②′ 抽查"汉字必须比 ASCII 宽"（`时` U+65F6 在码表内；`汉` **不在** —— 它只在用例里
         //    当"典型汉字宽度"的探针，缺字时走整字宽兜底，不得拿来查基线）。
         let uniq: std::collections::BTreeSet<u64> = map.values().copied().collect();
-        assert!(uniq.len() > 3, "`{px}` 档的 adv_w 几乎全同 ⇒ 基线不像真实字形表");
+        assert!(
+            uniq.len() > 3,
+            "`{px}` 档的 adv_w 几乎全同 ⇒ 基线不像真实字形表"
+        );
         let cjk = map[&('时' as u32)];
         let ascii = map[&('1' as u32)];
-        assert!(cjk > ascii, "汉字 `时` 的步进宽必须大于数字 `1`（{cjk} vs {ascii}）");
+        assert!(
+            cjk > ascii,
+            "汉字 `时` 的步进宽必须大于数字 `1`（{cjk} vs {ascii}）"
+        );
     }
     // ③ 不同档的字号**必须**给出不同的宽度（否则说明值是按档复制的）。
     let a = adv_w_from_baseline(24).expect("24 档");
     let b = adv_w_from_baseline(48).expect("48 档");
-    assert_ne!(a, b, "24 档与 48 档的 adv_w 表不得相同（字号不同 ⇒ 步进宽不同）");
+    assert_ne!(
+        a, b,
+        "24 档与 48 档的 adv_w 表不得相同（字号不同 ⇒ 步进宽不同）"
+    );
     assert!(
         b[&('时' as u32)] > a[&('时' as u32)],
         "48 档汉字步进宽必须大于 24 档"
@@ -13244,7 +14160,10 @@ const CONST_I32_SCAN_SOURCES: [(&str, &str); 12] = [
     ("ui/pages/p1_status.rs", include_str!("pages/p1_status.rs")),
     ("ui/pages/p2_config.rs", include_str!("pages/p2_config.rs")),
     ("ui/pages/p3_logs.rs", include_str!("pages/p3_logs.rs")),
-    ("ui/pages/p4_interlock.rs", include_str!("pages/p4_interlock.rs")),
+    (
+        "ui/pages/p4_interlock.rs",
+        include_str!("pages/p4_interlock.rs"),
+    ),
     ("ui/pages/p5_audit.rs", include_str!("pages/p5_audit.rs")),
     ("ui/pages/p6_system.rs", include_str!("pages/p6_system.rs")),
 ];
@@ -13375,12 +14294,18 @@ fn ui_const_i32_definitions_derive_from_theme() {
         None,
         "负对照：非 i32 不查（语义量，不是栅格值）"
     );
-    assert_eq!(bare_i32_const("const STEP: i64 = 1;"), None, "负对照：非 i32 不查");
+    assert_eq!(
+        bare_i32_const("const STEP: i64 = 1;"),
+        None,
+        "负对照：非 i32 不查"
+    );
 
     // ② **扫描面自证**：清单必须真的含 `controls.rs`（若 `include_str!` 指错文件 / 文件被
     //    清空，下面的逐行循环会构造性全绿）。
     assert!(
-        CONST_I32_SCAN_SOURCES.iter().any(|(n, _)| *n == "ui/controls.rs"),
+        CONST_I32_SCAN_SOURCES
+            .iter()
+            .any(|(n, _)| *n == "ui/controls.rs"),
         "扫描面必须覆盖 ui/controls.rs（否则本用例对 B2b-1 无意义）"
     );
     let controls_src = CONST_I32_SCAN_SOURCES
@@ -14320,7 +15245,11 @@ fn t14_hvac_run_bit_renders_the_two_state_words_carried_by_catalog() {
             .iter_mut()
             .find(|s| s.role == PeriphRole::Hvac)
             .expect("帧内 hvac 站");
-        let blk = st.blocks.iter_mut().find(|b| b.name == "hvac_di").expect("hvac_di");
+        let blk = st
+            .blocks
+            .iter_mut()
+            .find(|b| b.name == "hvac_di")
+            .expect("hvac_di");
         blk.values.clear();
         blk.values.push(mupc_display_proto::PointValue {
             at: 8,
@@ -14687,7 +15616,12 @@ fn assert_station_four_columns(spans: &[(i32, i32, i32)], texts: &[String], what
         "{what}：站状态条必须恰**四列**（UI §6.6.1）"
     );
     assert_eq!(texts.len(), 4, "{what}：四列文本");
-    let fonts = [TextSlot::Label, TextSlot::Body, TextSlot::Body, TextSlot::Body];
+    let fonts = [
+        TextSlot::Label,
+        TextSlot::Body,
+        TextSlot::Body,
+        TextSlot::Body,
+    ];
     let names = ["站名", "状态", "成功列", "更新列"];
     for k in 0..4 {
         assert!(!texts[k].is_empty(), "{what}：{} 不得为空", names[k]);
@@ -14735,7 +15669,11 @@ fn p6_whitelist_filter_is_redundant_with_group_keys_for_its_roles() {
         .collect();
     blocks.sort_unstable();
     blocks.dedup();
-    assert!(blocks.len() > 10, "块名枚举应覆盖白名单的全部块（实测 {}）", blocks.len());
+    assert!(
+        blocks.len() > 10,
+        "块名枚举应覆盖白名单的全部块（实测 {}）",
+        blocks.len()
+    );
     for role in [
         PeriphRole::Hvac,
         PeriphRole::Battery,
@@ -14928,7 +15866,11 @@ fn t19_p6_negative_acceptance_and_shell_sentinels() {
         "1049 按本设计的选择不上屏（§15.5.2 选项 A / R-42）"
     );
     // ③ 页数不变 + 无新增路由项 + P6 代码面无路由 API（T-20）。
-    assert_eq!(crate::ui::shell::NavPage::ALL.len(), 6, "页数不增（T-8 裁定）");
+    assert_eq!(
+        crate::ui::shell::NavPage::ALL.len(),
+        6,
+        "页数不增（T-8 裁定）"
+    );
     assert_eq!(
         mupc_display_proto::ConsoleEndpoint::ALL.len(),
         11,
@@ -14963,8 +15905,7 @@ fn t19_p6_negative_acceptance_and_shell_sentinels() {
     // ④ 机器键豁免口的**双判据**（调用点计数 + 实参纯 ASCII）。
     let calls = code.matches("machine_key(").count();
     assert_eq!(
-        calls,
-        MACHINE_KEY_CALLS,
+        calls, MACHINE_KEY_CALLS,
         "`machine_key` 的调用点数变了（{calls} ≠ {MACHINE_KEY_CALLS}）—— \
          本口是**码表网的豁免面**（`NON_DISPLAY_SINKS`）：加一处就要在此同步计数，\
          否则新的豁免点会**静默扩大**（上屏中文可能借道逃过码表网）"
@@ -14979,8 +15920,10 @@ fn t19_p6_negative_acceptance_and_shell_sentinels() {
             None => l,
         })
         .collect::<Vec<_>>()
-        .join("
-");
+        .join(
+            "
+",
+        );
     let mut from = 0usize;
     let mut checked = 0usize;
     while let Some(rel) = raw_nc[from..].find("machine_key(\"") {
@@ -15170,7 +16113,10 @@ fn t18_p6_row_set_and_row_heights_are_independent_of_fetch_outcome() {
     let m_no_cat = segment_model(PeriphRole::Hvac, None, &sec3, None);
     assert!(!m_no_cat.rows.is_empty(), "缺 catalog ⇒ 退到帧建行");
     assert!(
-        m_no_cat.rows.iter().any(|r| r.label == ui_text::NAME_UNKNOWN),
+        m_no_cat
+            .rows
+            .iter()
+            .any(|r| r.label == ui_text::NAME_UNKNOWN),
         "缺 catalog ⇒ 名位「名称未获取」（不臆造）"
     );
     assert!(

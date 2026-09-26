@@ -1334,7 +1334,11 @@ mod tests {
         // v2.12 归一化后：make_state 含 transformer_load=0.9（过载预警 -0.5）、ramp=0.5kW 步（*10 → 1.0，w4=0.5 扣 -0.5）、
         // 电池 C-rate 0.5 损耗标准化满格（w1=0.5 扣 -0.5）、过载 0.9 段惩罚（w2=2 扣 -0.2），pv_norm 仅 +0.909，
         // 故"全消纳"净值为负。方向性断言 + 精确实测值锁定语义。
-        assert!(r < 0.0, "v2.12 后塑造/SOC 干扰项使全消纳场景净值为负，实测 {}", r);
+        assert!(
+            r < 0.0,
+            "v2.12 后塑造/SOC 干扰项使全消纳场景净值为负，实测 {}",
+            r
+        );
         assert!((r - (-0.790909099)).abs() < 1e-6);
     }
 
@@ -1534,8 +1538,8 @@ mod tests {
         state.q_realtime_margin = 0.5; // > 10%
 
         let r = calc.calc_pq_coordination(&state, 0.0); // p_ref near 0
-        // v2.13 Sigmoid 平滑化后精确 50 不可达：v_dev=0.08 → dead_zone_factor=(0.08-0.05)/0.05=0.6，
-        // r = (w_save≈1.0*50 + w_support≈0*(-30)) * 0.6 ≈ 30.0。容差断言（连续值）。
+                                                        // v2.13 Sigmoid 平滑化后精确 50 不可达：v_dev=0.08 → dead_zone_factor=(0.08-0.05)/0.05=0.6，
+                                                        // r = (w_save≈1.0*50 + w_support≈0*(-30)) * 0.6 ≈ 30.0。容差断言（连续值）。
         assert!((r - 30.0).abs() < 0.5, "Sigmoid 平滑值应约 30，实测 {}", r);
     }
 
@@ -1550,9 +1554,13 @@ mod tests {
         state.q_realtime_margin = 0.05; // <= 10%
 
         let r = calc.calc_pq_coordination(&state, -10.0); // p_ref < 0 (discharge)
-        // v2.13 Sigmoid 平滑化后精确 50 不可达：q_margin=0.05 略低于阈值，w_save=0.076 残留，w_support=0.924，
-        // r = (0.076*(-5) + 0.924*50) * dead_zone(0.6) ≈ 27.5。容差断言（连续值）。
-        assert!((r - 27.496680059).abs() < 0.5, "低电压放电 Sigmoid 平滑值应约 27.5，实测 {}", r);
+                                                          // v2.13 Sigmoid 平滑化后精确 50 不可达：q_margin=0.05 略低于阈值，w_save=0.076 残留，w_support=0.924，
+                                                          // r = (0.076*(-5) + 0.924*50) * dead_zone(0.6) ≈ 27.5。容差断言（连续值）。
+        assert!(
+            (r - 27.496680059).abs() < 0.5,
+            "低电压放电 Sigmoid 平滑值应约 27.5，实测 {}",
+            r
+        );
     }
 
     #[test]
@@ -1721,7 +1729,11 @@ mod tests {
 
         // 即时奖励应正常计算；v2.12 归一化后该 make_state 净值为负（见 test_agri_full_pv_reward 注释）
         let immediate = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
-        assert!(immediate < 0.0, "v2.12 后全消纳场景净值为负，实测 {}", immediate);
+        assert!(
+            immediate < 0.0,
+            "v2.12 后全消纳场景净值为负，实测 {}",
+            immediate
+        );
 
         // 折扣奖励不影响即时奖励
         calc.calculate_discounted(1.0);
@@ -1738,7 +1750,11 @@ mod tests {
 
         // 即时奖励；v2.12 归一化后该 make_state 净值为负（见 test_agri_full_pv_reward 注释）
         let immediate = calc.calculate(RunningMode::SeasonalLoadManagement, &action, &state);
-        assert!(immediate < 0.0, "v2.12 后全消纳场景净值为负，实测 {}", immediate);
+        assert!(
+            immediate < 0.0,
+            "v2.12 后全消纳场景净值为负，实测 {}",
+            immediate
+        );
 
         // 折扣累积奖励独立累积（正交于即时奖励）：gamma=0.99，两次 push 1.0 → 1.0 + 0.99*1.0 = 1.99
         calc.calculate_discounted(1.0);
@@ -1885,7 +1901,11 @@ mod tests {
         // 但同场景 ramp（|−10−0|/100*10=1.0，w4=0.5 → −0.5）与电压斜率惩罚
         // （|0.92−1.0|=0.08，norm 0.8，w6_dynamic=0.58 → −0.464）一次性干扰项使净值为负。
         // 方向性断言 + 实测值：验证 r_pq_norm 分量已按 [-1,1] 归一而非追求总值为正。
-        assert!(r < 0.0, "v2.12 ramp/voltage-slope 一次性项压制 PQ 正贡献，实测 {}", r);
+        assert!(
+            r < 0.0,
+            "v2.12 ramp/voltage-slope 一次性项压制 PQ 正贡献，实测 {}",
+            r
+        );
         assert!((r - (-0.414066399)).abs() < 1e-6);
     }
 
@@ -2071,7 +2091,11 @@ mod tests {
         // 低电压 + 放电（正确）；v2.13 Sigmoid 平滑化后精确 50 不可达，
         // 与 test_v2_8_pq_coordination_q_margin_exhausted_low_voltage_discharge 同构 ≈ 27.5
         let r = calc.calc_pq_coordination(&state, -10.0);
-        assert!((r - 27.496680059).abs() < 0.5, "Sigmoid 平滑值应约 27.5，实测 {}", r);
+        assert!(
+            (r - 27.496680059).abs() < 0.5,
+            "Sigmoid 平滑值应约 27.5，实测 {}",
+            r
+        );
     }
 
     #[test]
@@ -2103,6 +2127,10 @@ mod tests {
         // 低电压 + 不放电（错误）；v2.13 Sigmoid 平滑化后精确 -30 不可达：
         // w_save=0.076*(-5) + w_support=0.924*(-30)，再乘 dead_zone_factor=0.6 ≈ -16.9
         let r = calc.calc_pq_coordination(&state, 10.0);
-        assert!((r - (-16.862127300)).abs() < 0.5, "错误动作 Sigmoid 惩罚应约 -16.9，实测 {}", r);
+        assert!(
+            (r - (-16.862127300)).abs() < 0.5,
+            "错误动作 Sigmoid 惩罚应约 -16.9，实测 {}",
+            r
+        );
     }
 }

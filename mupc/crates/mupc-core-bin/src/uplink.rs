@@ -411,9 +411,7 @@ pub(crate) fn north_client_config(
 }
 
 /// YAML(`mqtt_bridge.local`) → `mqtt-bridge::LocalMqttConfig`（§9.3.2）。
-pub(crate) fn local_client_config(
-    cfg: &crate::core_config::LocalCfg,
-) -> LocalMqttConfig {
+pub(crate) fn local_client_config(cfg: &crate::core_config::LocalCfg) -> LocalMqttConfig {
     LocalMqttConfig {
         enabled: cfg.enabled,
         broker_addr: cfg.broker.clone(),
@@ -450,10 +448,7 @@ pub(crate) fn plan_mqtt_launch(cfg: &MqttBridgeConfig) -> MqttLaunch {
     }
     MqttLaunch {
         north: cfg.north.enabled.then(|| north_client_config(&cfg.north)),
-        local: cfg
-            .local
-            .enabled
-            .then(|| local_client_config(&cfg.local)),
+        local: cfg.local.enabled.then(|| local_client_config(&cfg.local)),
     }
 }
 
@@ -877,7 +872,9 @@ impl StationPlan {
 ///
 /// 取 `mupc_southd::config::Role` 的 serde 表示作**唯一真源**（不手写第二份映射表）：
 /// `serde_json::to_value(Role::Battery)` = `"battery"`。
-pub(crate) fn station_roles(cfg: &mupc_southd::config::SouthStationsConfig) -> HashMap<String, String> {
+pub(crate) fn station_roles(
+    cfg: &mupc_southd::config::SouthStationsConfig,
+) -> HashMap<String, String> {
     cfg.stations
         .iter()
         .map(|s| {
@@ -891,22 +888,21 @@ pub(crate) fn station_roles(cfg: &mupc_southd::config::SouthStationsConfig) -> H
 }
 
 /// 按站/档建立发布计划（**只取 `channels.has(MQTT)`**，§9.2.1.0 / C-16）。
-pub fn plan_stations(
-    points: &[UplinkPoint],
-    roles: &HashMap<String, String>,
-) -> Vec<StationPlan> {
+pub fn plan_stations(points: &[UplinkPoint], roles: &HashMap<String, String>) -> Vec<StationPlan> {
     let mut plan: HashMap<String, StationPlan> = HashMap::new();
     for (i, p) in points.iter().enumerate() {
         if !p.channels.has(ChannelMask::MQTT) {
             continue;
         }
-        let e = plan.entry(p.station.clone()).or_insert_with(|| StationPlan {
-            id: p.station.clone(),
-            role: roles.get(&p.station).cloned().unwrap_or_default(),
-            a: Vec::new(),
-            b: Vec::new(),
-            c: Vec::new(),
-        });
+        let e = plan
+            .entry(p.station.clone())
+            .or_insert_with(|| StationPlan {
+                id: p.station.clone(),
+                role: roles.get(&p.station).cloned().unwrap_or_default(),
+                a: Vec::new(),
+                b: Vec::new(),
+                c: Vec::new(),
+            });
         match p.class {
             SouthDataClass::A => e.a.push(i),
             SouthDataClass::B => e.b.push(i),
@@ -921,9 +917,7 @@ pub fn plan_stations(
 
 /// 全量一轮（A+B+C）的 MQTT 点数（AC-U74-02 判据：== 624 / 552）。
 pub fn mqtt_point_count(plan: &[StationPlan]) -> usize {
-    plan.iter()
-        .map(|s| s.a.len() + s.b.len() + s.c.len())
-        .sum()
+    plan.iter().map(|s| s.a.len() + s.b.len() + s.c.len()).sum()
 }
 
 // ───────────────────────────── 载荷（§9.3.4） ─────────────────────────────
@@ -1385,8 +1379,12 @@ impl MqttUplinkPublisher {
         if self.is_connected() {
             match self.publish_raw(&topic, &payload, self.cfg.qos).await {
                 Ok(()) => {
-                    self.counters.published_total.fetch_add(1, Ordering::Relaxed);
-                    self.counters.consecutive_failures.store(0, Ordering::Relaxed);
+                    self.counters
+                        .published_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.counters
+                        .consecutive_failures
+                        .store(0, Ordering::Relaxed);
                     return;
                 }
                 Err(e) => {
@@ -1417,7 +1415,11 @@ impl MqttUplinkPublisher {
     /// 发布失败记账（§9.3.6：**不得静默**；连续 ≥10 ⇒ 一条 major 事件 + 5 min 限频）。
     async fn note_failure(&self, err: &str) {
         let total = self.counters.failed_total.fetch_add(1, Ordering::Relaxed) + 1;
-        let consecutive = self.counters.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        let consecutive = self
+            .counters
+            .consecutive_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         self.set_last_error(err);
         tracing::warn!(failed_total = total, consecutive, "MQTT 发布失败: {err}");
         if consecutive < MQTT_FAILURE_ALERT_THRESHOLD {
@@ -1493,7 +1495,10 @@ impl MqttUplinkPublisher {
     }
 
     fn set_last_error(&self, err: &str) {
-        let mut g = self.last_error_buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self
+            .last_error_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *g = Some(err.to_string());
     }
 
@@ -2063,7 +2068,9 @@ mod tests {
     }
 
     /// 北向配置助手（**显式给全字段**，不复用 `::default()` 兜底——C-11 的同一口径）。
-    fn north_cfg_with(f: impl FnOnce(&mut crate::core_config::NorthCfg)) -> crate::core_config::NorthCfg {
+    fn north_cfg_with(
+        f: impl FnOnce(&mut crate::core_config::NorthCfg),
+    ) -> crate::core_config::NorthCfg {
         let mut c = crate::core_config::NorthCfg {
             enabled: true,
             broker: "127.0.0.1:1".into(), // 无监听者：`is_connected()` 恒 false ⇒ 走缓存路径
@@ -2182,12 +2189,17 @@ mod tests {
         assert_eq!(pick("hvac", SouthDataClass::B), 3);
         assert_eq!(pick("hvac", SouthDataClass::C), 31);
         assert_eq!(pick("pcs", SouthDataClass::A), 3);
-        assert_eq!(pick("pcs", SouthDataClass::B), 69, "PCS B 档实测（§9.3.7 表的 65 为按站估读，实测以点表为准）");
+        assert_eq!(
+            pick("pcs", SouthDataClass::B),
+            69,
+            "PCS B 档实测（§9.3.7 表的 65 为按站估读，实测以点表为准）"
+        );
         assert_eq!(pick("pcs", SouthDataClass::C), 0);
 
         // 去掉 pcs 站 ⇒ 552（PCS 未启用）
         let mut cfg5 = cfg();
-        cfg5.stations.retain(|s| s.role != mupc_southd::config::Role::Pcs);
+        cfg5.stations
+            .retain(|s| s.role != mupc_southd::config::Role::Pcs);
         let pts5 = build_uplink_points(&cfg5).expect("点表（无 PCS）");
         let plan5 = plan_stations(&pts5, &station_roles(&cfg5));
         assert_eq!(
@@ -2211,7 +2223,10 @@ mod tests {
             .iter()
             .filter(|p| p.channels.has(ChannelMask::MQTT) && p.metric.starts_with("bms_aggr_"))
             .count();
-        assert_eq!(n, 0, "15 个 BMS 聚合是 IEC104-only（物联平台订原始 288 位）");
+        assert_eq!(
+            n, 0,
+            "15 个 BMS 聚合是 IEC104-only（物联平台订原始 288 位）"
+        );
     }
 
     // ── ② 主题与载荷逐字（§9.3.4） ──
@@ -2249,7 +2264,12 @@ mod tests {
             Arc::new(RecordingEvents::default()),
         );
 
-        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let st = pubr
+            .plan()
+            .iter()
+            .find(|s| s.id == "grid_meter")
+            .unwrap()
+            .clone();
         let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
         let (topic, body, ts_ms, seq) = pubr
             .build_message(&st, &idx, now)
@@ -2265,7 +2285,10 @@ mod tests {
         );
         assert_eq!(v["dev"], "MUPC-0001", "装置标识来自装配入参");
         assert_eq!(v["station"], "grid_meter");
-        assert_eq!(v["role"], "meter_grid", "role 取 YAML role 的 snake_case 表示");
+        assert_eq!(
+            v["role"], "meter_grid",
+            "role 取 YAML role 的 snake_case 表示"
+        );
         assert_eq!(v["seq"], 1);
         let points = v["points"].as_array().expect("points 数组");
         assert_eq!(points.len(), 6, "grid A 档 6 点（不含分相 15 点）");
@@ -2320,7 +2343,12 @@ mod tests {
             north_cfg_with(|_| {}),
             Arc::new(RecordingEvents::default()),
         );
-        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let st = pubr
+            .plan()
+            .iter()
+            .find(|s| s.id == "grid_meter")
+            .unwrap()
+            .clone();
         let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
 
         // ① 合法 0 采样 ⇒ q=ok, v=0
@@ -2372,7 +2400,12 @@ mod tests {
             north_cfg_with(|_| {}),
             Arc::new(RecordingEvents::default()),
         );
-        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let st = pubr
+            .plan()
+            .iter()
+            .find(|s| s.id == "grid_meter")
+            .unwrap()
+            .clone();
         let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
         latest.mark_station_polled("grid_meter", now);
         latest.apply(vec![(
@@ -2448,7 +2481,11 @@ mod tests {
         // 未连接 ⇒ 发布全部走离线缓存（本用例的"抓包"位置）
         pubr.publish_round(SouthDataClass::A, None).await;
         let got = pop_cached(&pubr);
-        assert_eq!(got.len(), 4, "A 档 = grid_meter/meter_batt/bms/pcs 各一条（不合并）");
+        assert_eq!(
+            got.len(),
+            4,
+            "A 档 = grid_meter/meter_batt/bms/pcs 各一条（不合并）"
+        );
         let mut seen: Vec<String> = Vec::new();
         for m in &got {
             let v: serde_json::Value = serde_json::from_slice(&m.payload).unwrap();
@@ -2623,10 +2660,7 @@ mod tests {
             .iter()
             .filter(|e| e.event_type == "mqtt_cache_overflow")
             .collect();
-        assert!(
-            !overflow.is_empty(),
-            "缓存溢出必须留证（一条 major 事件）"
-        );
+        assert!(!overflow.is_empty(), "缓存溢出必须留证（一条 major 事件）");
         assert!(
             overflow.len() <= 1,
             "WARN/事件按 1 min 聚合（不风暴）：{:?}",
@@ -2803,7 +2837,10 @@ mod tests {
         // 打开**再比对；直接对缺省段断言 true 与合同相反。
         m.north.tls.allow_plaintext = true;
         let p = plan_mqtt_launch(&m);
-        assert!(p.north.is_some() && p.local.is_none(), "只开 north ⇒ 只装 north");
+        assert!(
+            p.north.is_some() && p.local.is_none(),
+            "只开 north ⇒ 只装 north"
+        );
         let n = p.north.unwrap();
         assert_eq!(n.broker_addr, m.north.broker);
         assert!(n.allow_plaintext, "allow_plaintext 逐字段搬运");
@@ -2880,7 +2917,10 @@ mod tests {
         for (name, path) in [
             (
                 "开发模板",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/config/mupc_core_config.yaml"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../deploy/config/mupc_core_config.yaml"
+                ),
             ),
             (
                 "生产模板",
@@ -2903,7 +2943,10 @@ mod tests {
             // 解析后确认缺省 disabled + broker 空串（不残留任何假地址）
             let cfg: CoreConfig = serde_yaml::from_str(&text)
                 .unwrap_or_else(|e| panic!("{name} 必须可被 CoreConfig 解析: {e}"));
-            assert!(!cfg.mqtt_bridge.enabled, "{name}：缺省必须 disabled（CFG-2）");
+            assert!(
+                !cfg.mqtt_bridge.enabled,
+                "{name}：缺省必须 disabled（CFG-2）"
+            );
             assert!(
                 cfg.mqtt_bridge.north.broker.is_empty(),
                 "{name}：broker 不得留占位地址（CFG-3）"

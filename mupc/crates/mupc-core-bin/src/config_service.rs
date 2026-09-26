@@ -703,11 +703,7 @@ fn restart_labels(keys: &[&str]) -> String {
 }
 
 /// `AuditUnavailable` 回执（fail-closed 的唯一出口；`applied=None` ⇒ 操作未生效）。
-fn audit_unavailable(
-    request_id: &str,
-    now: u64,
-    reason: &str,
-) -> ControlResponse<ConfigView> {
+fn audit_unavailable(request_id: &str, now: u64, reason: &str) -> ControlResponse<ConfigView> {
     // 契约（`display-proto`，**冻结禁改**）的固定文案含 `写` / 全角括号 / 逗号，**都不在 cmap 内**
     // ⇒ 在它后面接 `({reason})` 只会让豆腐块更长。这里**整条换掉**：
     // - 屏上：P2 / `state.rs` 对 `AuditUnavailable` **按 `code` 覆盖**成 EDGE-18 固定串，
@@ -806,8 +802,7 @@ fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
             std::fs::remove_file(&bak)
                 .map_err(|e| format!("清理旧备份 {} 失败: {e}", bak.display()))?;
         }
-        std::fs::rename(path, &bak)
-            .map_err(|e| format!("备份 {} 失败: {e}", path.display()))?;
+        std::fs::rename(path, &bak).map_err(|e| format!("备份 {} 失败: {e}", path.display()))?;
     }
 
     // ③ rename 顶替（同目录内 rename 是原子的；失败则把备份还原回去）
@@ -844,7 +839,9 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 ///
 /// 返回 `(配置, Some(备份路径))` 表示**本次发生了恢复**，调用方**必须**响亮记录（`main.rs`
 /// Phase 1 的 tracing 尚未初始化，故用 `eprintln!`：现场 `journalctl` 可见）。
-pub fn load_config_with_backup_recovery(path: &Path) -> Result<(CoreConfig, Option<PathBuf>), String> {
+pub fn load_config_with_backup_recovery(
+    path: &Path,
+) -> Result<(CoreConfig, Option<PathBuf>), String> {
     // 正常路径走 `CoreConfig::load`（与 Phase 1 历史行为逐字一致：真源在 ⇒ 行为不变）
     match CoreConfig::load(path) {
         Ok(c) => Ok((c, None)),
@@ -1015,8 +1012,7 @@ gateway:
                 // 最多等 5 s：若用例逻辑坏了也不**挂死**（挂死的用例在 CI 上表现为整体超时，
                 // 定位成本远高于一条失败断言——与 `console_host` 的守卫同款理由）。
                 let t0 = std::time::Instant::now();
-                while !self.release.load(Ordering::SeqCst)
-                    && t0.elapsed() < Duration::from_secs(5)
+                while !self.release.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(5)
                 {
                     std::thread::sleep(Duration::from_millis(2));
                 }
@@ -1060,7 +1056,12 @@ gateway:
         let path = dir.write("mupc_core_config.yaml", yaml);
         let cfg: CoreConfig = serde_yaml::from_str(yaml).expect("样例 yaml 必须可解析");
         let core = Arc::new(RwLock::new(cfg));
-        let svc = Arc::new(ConfigService::new(path.clone(), core.clone(), sink.clone(), hot));
+        let svc = Arc::new(ConfigService::new(
+            path.clone(),
+            core.clone(),
+            sink.clone(),
+            hot,
+        ));
         Harness {
             _dir: dir,
             path,
@@ -1087,7 +1088,11 @@ gateway:
         harness_with(Arc::new(ProbeSink::default()), YAML)
     }
 
-    fn request(rid: &str, changes: &[(&str, Value)], from: PatchSource) -> ControlRequest<ConfigPatch> {
+    fn request(
+        rid: &str,
+        changes: &[(&str, Value)],
+        from: PatchSource,
+    ) -> ControlRequest<ConfigPatch> {
         let mut map = serde_json::Map::new();
         for (k, v) in changes {
             map.insert(k.to_string(), v.clone());
@@ -1119,7 +1124,10 @@ gateway:
         let before_text = disk(&h);
         let resp = h
             .svc
-            .apply(&ok_request("rid-1", &[("intercore.port", serde_json::json!(2405))]))
+            .apply(&ok_request(
+                "rid-1",
+                &[("intercore.port", serde_json::json!(2405))],
+            ))
             .await;
 
         assert!(resp.ok, "正常保存必须成功: {resp:?}");
@@ -1134,7 +1142,11 @@ gateway:
             .flat_map(|g| g.fields.iter())
             .find(|f| f.key == "intercore.port")
             .unwrap();
-        assert_eq!(port.value, serde_json::json!(2405), "回执须带**新**值（供 UI 立即刷新）");
+        assert_eq!(
+            port.value,
+            serde_json::json!(2405),
+            "回执须带**新**值（供 UI 立即刷新）"
+        );
         assert!(resp.audit_id.is_some(), "成功回执必须带 audit_id");
 
         // 文件：只有目标行变化，其余**逐字节**不变
@@ -1189,7 +1201,10 @@ gateway:
 
         let resp = h
             .svc
-            .apply(&ok_request("rid-legacy", &[("intercore.port", serde_json::json!(2405))]))
+            .apply(&ok_request(
+                "rid-legacy",
+                &[("intercore.port", serde_json::json!(2405))],
+            ))
             .await;
         assert!(resp.ok, "保存必须成功: {resp:?}");
         assert_eq!(
@@ -1205,14 +1220,15 @@ gateway:
             "legacy `web_api:` 段（含行内注释）必须**逐字节**保留——不得被抹掉、不得被重排"
         );
         // 逐行比：恰有目标行不同（其余含注释 / 未建模段 / 行尾全不动）
-        let (a, b): (Vec<&str>, Vec<&str>) =
-            (before.split_inclusive('\n').collect(), after.split_inclusive('\n').collect());
+        let (a, b): (Vec<&str>, Vec<&str>) = (
+            before.split_inclusive('\n').collect(),
+            after.split_inclusive('\n').collect(),
+        );
         assert_eq!(a.len(), b.len(), "行数不得变化");
         let diff: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
         assert_eq!(diff.len(), 1, "恰有 1 行被替换，实得 {diff:?}");
         assert_eq!(
-            b[diff[0]],
-            "  port: 2405   # PCS 端口\n",
+            b[diff[0]], "  port: 2405   # PCS 端口\n",
             "且被替换的就是目标行（行内注释与空格原样）"
         );
         // 内存副本同步（写 A 读 B 的静默失实在此不适用）
@@ -1224,7 +1240,8 @@ gateway:
         let mut out = String::new();
         let mut inside = false;
         for line in text.split_inclusive('\n') {
-            let top_level = !line.starts_with(' ') && !line.starts_with('\t') && !line.starts_with('#');
+            let top_level =
+                !line.starts_with(' ') && !line.starts_with('\t') && !line.starts_with('#');
             if top_level {
                 if line.starts_with("web_api:") {
                     inside = true;
@@ -1246,13 +1263,20 @@ gateway:
         let before_text = disk(&h);
         let resp = h
             .svc
-            .apply(&ok_request("rid-same", &[("intercore.port", serde_json::json!(9100))]))
+            .apply(&ok_request(
+                "rid-same",
+                &[("intercore.port", serde_json::json!(9100))],
+            ))
             .await;
         assert!(resp.ok);
         assert_eq!(resp.applied.unwrap().revision, 0, "没写盘 ⇒ revision 不动");
         assert_eq!(disk(&h), before_text);
         assert!(!sibling(&h.path, ".tmp").exists());
-        assert_eq!(h.sink.intents.load(Ordering::SeqCst), 0, "无改动 ⇒ 连 intent 都不该写");
+        assert_eq!(
+            h.sink.intents.load(Ordering::SeqCst),
+            0,
+            "无改动 ⇒ 连 intent 都不该写"
+        );
     }
 
     // ═══ ② fail-closed ════════════════════════════════════════════════════════
@@ -1269,13 +1293,19 @@ gateway:
 
         let resp = h
             .svc
-            .apply(&ok_request("rid-audit", &[("intercore.port", serde_json::json!(2405))]))
+            .apply(&ok_request(
+                "rid-audit",
+                &[("intercore.port", serde_json::json!(2405))],
+            ))
             .await;
 
         assert!(!resp.ok, "审计不可写 ⇒ 不得 ok=true");
         assert_eq!(resp.code, ControlCode::AuditUnavailable);
         assert!(resp.code.is_rejection());
-        assert!(resp.applied.is_none(), "fail-closed ⇒ applied 必须为 None（操作未生效）");
+        assert!(
+            resp.applied.is_none(),
+            "fail-closed ⇒ applied 必须为 None（操作未生效）"
+        );
         assert!(resp.audit_id.is_none(), "连审计号都没有 ⇒ 不得编一个");
         // ⚠️ **口径变更（回执用字网）**：`message` 固定为 `receipt::AUDIT_UNAVAILABLE`
         // （与渲染端 EDGE-18 上屏文案同义）。**原因串不再进 `message`** —— 它是外部装配错误串
@@ -1294,7 +1324,11 @@ gateway:
 
         // 三重证据
         assert_eq!(disk(&h), before_text, "文件不得被改动");
-        assert_eq!(h.core.read().await.intercore.port, before_port, "内存副本不得被改动");
+        assert_eq!(
+            h.core.read().await.intercore.port,
+            before_port,
+            "内存副本不得被改动"
+        );
         assert_eq!(h.svc.revision(), 0, "revision 不得递增");
         assert!(!sibling(&h.path, ".tmp").exists(), "连临时文件都不该产生");
     }
@@ -1311,17 +1345,28 @@ gateway:
         sink.fail_outcome.store(true, Ordering::SeqCst);
         let resp = h
             .svc
-            .apply(&ok_request("rid-o1", &[("intercore.port", serde_json::json!(2405))]))
+            .apply(&ok_request(
+                "rid-o1",
+                &[("intercore.port", serde_json::json!(2405))],
+            ))
             .await;
         assert!(resp.ok, "改动已发生 ⇒ 不得谎报失败");
         assert_eq!(resp.code, ControlCode::Ok);
         assert!(resp.applied.is_some(), "已生效 ⇒ 必须带新视图");
         assert!(resp.audit_id.is_none(), "**没有**审计条目 ⇒ 不得编一个 id");
-        assert_eq!(h.core.read().await.intercore.port, 2405, "改动必须已生效（不回滚）");
+        assert_eq!(
+            h.core.read().await.intercore.port,
+            2405,
+            "改动必须已生效（不回滚）"
+        );
         assert_eq!(h.svc.revision(), 1);
         assert!(disk(&h).contains("port: 2405"), "文件也已落盘");
         assert_eq!(sink.intents.load(Ordering::SeqCst), 1, "intent 是写成了的");
-        assert_eq!(sink.outcomes.load(Ordering::SeqCst), 0, "outcome 写不成（本用例前提）");
+        assert_eq!(
+            sink.outcomes.load(Ordering::SeqCst),
+            0,
+            "outcome 写不成（本用例前提）"
+        );
     }
 
     // ═══ ③ 幂等 ═══════════════════════════════════════════════════════════════
@@ -1339,9 +1384,15 @@ gateway:
         // 第二次：**同一个 request_id**（模拟渲染端 5 s 超时后的 `retry` 原样重发）
         let second = h.svc.apply(&req).await;
 
-        assert!(second.ok && second.duplicate, "重复请求必须 duplicate=true 且 ok 不变");
+        assert!(
+            second.ok && second.duplicate,
+            "重复请求必须 duplicate=true 且 ok 不变"
+        );
         assert_eq!(second.code, first.code);
-        assert_eq!(second.audit_id, first.audit_id, "复用首次审计记录，不重复留痕");
+        assert_eq!(
+            second.audit_id, first.audit_id,
+            "复用首次审计记录，不重复留痕"
+        );
         assert_eq!(
             second.applied.unwrap().revision,
             first.applied.unwrap().revision,
@@ -1388,7 +1439,12 @@ gateway:
         }
         // 此刻 A 已占位（`InFlight`）且未完成 ⇒ 第二个同键请求必须 Busy
         let b = h.svc.apply(&req).await;
-        assert_eq!(b.code, ControlCode::Busy, "处理中必须回 Busy，实得 {:?}", b.code);
+        assert_eq!(
+            b.code,
+            ControlCode::Busy,
+            "处理中必须回 Busy，实得 {:?}",
+            b.code
+        );
         assert!(!b.ok && b.applied.is_none(), "Busy 不得带生效值");
         assert!(!b.duplicate, "Busy 不是幂等命中（首次还没完成）");
         sink.release.store(true, Ordering::SeqCst);
@@ -1414,7 +1470,10 @@ gateway:
         let mut stale = ok_request("rid-old", &[("intercore.port", serde_json::json!(2405))]);
         stale.issued_at_ms = now - REPLAY_WINDOW_MS - 5_000;
         let r = h.svc.apply(&stale).await;
-        assert!(!r.ok && r.code == ControlCode::RejectedValidation, "过期请求必须拒");
+        assert!(
+            !r.ok && r.code == ControlCode::RejectedValidation,
+            "过期请求必须拒"
+        );
         // 原因**换个渠道但一个字没少**：`message` 只给 `receipt::BAD_ENVELOPE`（cmap 内），
         // 契约的英文原因串（含小写字母 ⇒ cmap 外）落在 `field_errors`（结构化渠道）。
         assert_eq!(r.message, crate::console_host::receipt::BAD_ENVELOPE);
@@ -1435,7 +1494,10 @@ gateway:
         let mut inside = ok_request("rid-in", &[("intercore.port", serde_json::json!(2405))]);
         inside.issued_at_ms = now_ms().saturating_sub(REPLAY_WINDOW_MS - 5_000);
         let ri = h.svc.apply(&inside).await;
-        assert!(ri.ok, "窗口内必须放行（否则渲染端 5 s 超时重试会被误杀）: {ri:?}");
+        assert!(
+            ri.ok,
+            "窗口内必须放行（否则渲染端 5 s 超时重试会被误杀）: {ri:?}"
+        );
         assert_eq!(disk(&h).matches("port: 2405").count(), 1);
     }
 
@@ -1483,16 +1545,29 @@ gateway:
             ))
             .await;
         assert!(!resp.ok && resp.code == ControlCode::RejectedValidation);
-        assert_eq!(resp.field_errors.len(), 1, "只标红**非法**字段: {:?}", resp.field_errors);
+        assert_eq!(
+            resp.field_errors.len(),
+            1,
+            "只标红**非法**字段: {:?}",
+            resp.field_errors
+        );
         assert_eq!(resp.field_errors[0].field, "intercore.port");
         assert!(resp.field_errors[0].reason.contains("越界"));
         assert!(resp.applied.is_none(), "整批拒绝 ⇒ 不得带生效值");
         // 合法字段也**没有**生效
-        assert_eq!(h.core.read().await.system.log_level, "info", "合法字段不得被单独应用");
+        assert_eq!(
+            h.core.read().await.system.log_level,
+            "info",
+            "合法字段不得被单独应用"
+        );
         assert_eq!(disk(&h), before_text, "文件不得被改动");
         assert_eq!(h.svc.revision(), 0);
         // 失败留痕（PL-1：成功与失败均写）
-        assert_eq!(h.sink.outcomes.load(Ordering::SeqCst), 1, "失败也要写一条审计");
+        assert_eq!(
+            h.sink.outcomes.load(Ordering::SeqCst),
+            1,
+            "失败也要写一条审计"
+        );
     }
 
     /// 逐类非法值：未知键 / 只读键 / 非法 IP / 非法枚举 —— **逐条**都要有 field_errors。
@@ -1501,8 +1576,16 @@ gateway:
         let cases: Vec<(&str, Value, &str)> = vec![
             ("no.such.key", serde_json::json!(1), "未知字段"),
             ("display.bind_addr", serde_json::json!("0.0.0.0"), "只读"),
-            ("gateway.listen_addr", serde_json::json!("999.1.1.1"), "IPv4"),
-            ("system.log_level", serde_json::json!("trace"), "不在允许选项内"),
+            (
+                "gateway.listen_addr",
+                serde_json::json!("999.1.1.1"),
+                "IPv4",
+            ),
+            (
+                "system.log_level",
+                serde_json::json!("trace"),
+                "不在允许选项内",
+            ),
             ("intercore.host", serde_json::json!(7), "IPv4"),
         ];
         for (key, value, want) in cases {
@@ -1510,7 +1593,11 @@ gateway:
             let resp = h.svc.apply(&ok_request("rid-inv", &[(key, value)])).await;
             assert!(!resp.ok, "`{key}` 非法值必须拒");
             assert_eq!(resp.code, ControlCode::RejectedValidation, "`{key}`");
-            assert_eq!(resp.field_errors.len(), 1, "`{key}` 逐字段原因缺失: {resp:?}");
+            assert_eq!(
+                resp.field_errors.len(),
+                1,
+                "`{key}` 逐字段原因缺失: {resp:?}"
+            );
             assert_eq!(resp.field_errors[0].field, key);
             assert!(
                 resp.field_errors[0].reason.contains(want),
@@ -1554,7 +1641,10 @@ gateway:
         );
         let text = disk(&h);
         assert!(text.contains("listen_port: 2405"), "目标键必须真的写进去");
-        assert!(!text.contains("# 注释会丢"), "整体回写 ⇒ 注释确实丢失（降级有测试断言）");
+        assert!(
+            !text.contains("# 注释会丢"),
+            "整体回写 ⇒ 注释确实丢失（降级有测试断言）"
+        );
         // 内存副本与落盘一致
         assert_eq!(h.core.read().await.gateway.listen_port, 2405);
         // 下一次 GET 会看到 FullRewrite（写模式真源）
@@ -1600,10 +1690,18 @@ gateway:
         // ② 逐字段相等（用 `Serialize` 的 JSON 形态比对：字段级、可定位到具体键）
         let a = serde_json::to_value(&cfg).unwrap();
         let b = serde_json::to_value(&back).unwrap();
-        assert_eq!(a, b, "CoreConfig 序列化往返必须逐字段相等（丢字段会在这里暴露）");
+        assert_eq!(
+            a, b,
+            "CoreConfig 序列化往返必须逐字段相等（丢字段会在这里暴露）"
+        );
         // ③ 对照：只比较 FIELDS 的 9 个键也全部相等（更强的可读断言）
         for m in FIELDS {
-            assert_eq!((m.current)(&cfg), (m.current)(&back), "字段 `{}` 往返丢失", m.key);
+            assert_eq!(
+                (m.current)(&cfg),
+                (m.current)(&back),
+                "字段 `{}` 往返丢失",
+                m.key
+            );
         }
         // ④ 二次序列化稳定（幂等）
         assert_eq!(serde_yaml::to_string(&back).unwrap(), text);
@@ -1617,8 +1715,14 @@ gateway:
         assert!(self_post_check(&text, &cfg).is_ok(), "同源文本必须通过自检");
         let mut other = cfg.clone();
         other.intercore.port = 1;
-        assert!(self_post_check(&text, &other).is_err(), "字段不符必须被自检拦住");
-        assert!(self_post_check("这不是 yaml: [", &cfg).is_err(), "不可解析必须被拦住");
+        assert!(
+            self_post_check(&text, &other).is_err(),
+            "字段不符必须被自检拦住"
+        );
+        assert!(
+            self_post_check("这不是 yaml: [", &cfg).is_err(),
+            "不可解析必须被拦住"
+        );
     }
 
     // ═══ ⑦ 视图口径（GET / 回执共用）════════════════════════════════════════════
@@ -1629,11 +1733,17 @@ gateway:
         let h = harness();
         assert_eq!(view_now(&h).await.revision, 0);
         h.svc
-            .apply(&ok_request("v1", &[("intercore.port", serde_json::json!(2405))]))
+            .apply(&ok_request(
+                "v1",
+                &[("intercore.port", serde_json::json!(2405))],
+            ))
             .await;
         assert_eq!(view_now(&h).await.revision, 1);
         h.svc
-            .apply(&ok_request("v2", &[("intercore.port", serde_json::json!(2406))]))
+            .apply(&ok_request(
+                "v2",
+                &[("intercore.port", serde_json::json!(2406))],
+            ))
             .await;
         assert_eq!(view_now(&h).await.revision, 2);
         assert_eq!(view_now(&h).await.write_mode, WriteMode::TextPreserve);
@@ -1699,15 +1809,15 @@ gateway:
         // ② 审计条目（本次整改的核心：修复前这里恒 None）
         let entries = sink.entries();
         let find = |k: &str| {
-            entries
-                .iter()
-                .find(|e| e.target == k)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "审计缺 `{k}` 条目（实得 targets={:?}）",
-                        entries.iter().map(|e| e.target.as_str()).collect::<Vec<_>>()
-                    )
-                })
+            entries.iter().find(|e| e.target == k).unwrap_or_else(|| {
+                panic!(
+                    "审计缺 `{k}` 条目（实得 targets={:?}）",
+                    entries
+                        .iter()
+                        .map(|e| e.target.as_str())
+                        .collect::<Vec<_>>()
+                )
+            })
         };
         let gl = find("gateway.listen_port");
         let reason = gl.reason.as_deref().unwrap_or("");
@@ -1718,7 +1828,11 @@ gateway:
         );
         assert!(reason.contains("IEC 104"), "原因须可定位到该键: {reason}");
         assert_eq!(gl.result, AuditResult::Ok);
-        assert_eq!(gl.before, Some(serde_json::json!(2404)), "before/after 仍是**标量**（P5 AU12）");
+        assert_eq!(
+            gl.before,
+            Some(serde_json::json!(2404)),
+            "before/after 仍是**标量**（P5 AU12）"
+        );
         assert_eq!(gl.after, Some(serde_json::json!(2405)));
 
         let ll = find("system.log_level");
@@ -1742,13 +1856,19 @@ gateway:
         // 第一次：`gateway:` 段缺失 ⇒ 整体回写
         let r1 = h
             .svc
-            .apply(&ok_request("rid-wm-1", &[("gateway.listen_port", serde_json::json!(2405))]))
+            .apply(&ok_request(
+                "rid-wm-1",
+                &[("gateway.listen_port", serde_json::json!(2405))],
+            ))
             .await;
         assert_eq!(r1.applied.unwrap().write_mode, WriteMode::FullRewrite);
         // 第二次：整体回写后的文件已含 `gateway:` ⇒ 回到保留式编辑
         let r2 = h
             .svc
-            .apply(&ok_request("rid-wm-2", &[("intercore.port", serde_json::json!(2406))]))
+            .apply(&ok_request(
+                "rid-wm-2",
+                &[("intercore.port", serde_json::json!(2406))],
+            ))
             .await;
         assert_eq!(r2.applied.unwrap().write_mode, WriteMode::TextPreserve);
 
@@ -1853,7 +1973,10 @@ gateway:
                 .iter()
                 .find(|e| e.target == key)
                 .unwrap_or_else(|| panic!("审计缺 `{key}` 条目"));
-            assert!(e.before.is_some() && e.after.is_some(), "`{key}` 须有前后值");
+            assert!(
+                e.before.is_some() && e.after.is_some(),
+                "`{key}` 须有前后值"
+            );
             assert_ne!(e.before, e.after, "`{key}` 的前后值必须不同");
         }
 
@@ -1874,7 +1997,11 @@ gateway:
         assert!(!r2.ok && r2.code == ControlCode::AuditUnavailable);
         assert!(r2.applied.is_none(), "未执行 ⇒ 不得带生效值");
         assert_eq!(disk(&h2), before2, "文件一个字节都不改（不得部分应用）");
-        assert_eq!(h2.core.read().await.gateway.listen_port, 2405, "内存副本不得改");
+        assert_eq!(
+            h2.core.read().await.gateway.listen_port,
+            2405,
+            "内存副本不得改"
+        );
         assert_eq!(h2.svc.revision(), 0);
     }
 
@@ -1904,9 +2031,15 @@ gateway:
             // 真实现场输入的前提：必须能解析并通过校验（否则 mupcd 启动期就会失败）
             let cfg: CoreConfig = serde_yaml::from_str(text)
                 .unwrap_or_else(|e| panic!("`{name}` 必须能解析为 CoreConfig: {e}"));
-            assert!(cfg.validate().is_ok(), "`{name}` 必须过 validate(): {:?}", cfg.validate());
+            assert!(
+                cfg.validate().is_ok(),
+                "`{name}` 必须过 validate(): {:?}",
+                cfg.validate()
+            );
             let comments = |s: &str| {
-                s.lines().filter(|l| l.trim_start().starts_with('#')).count()
+                s.lines()
+                    .filter(|l| l.trim_start().starts_with('#'))
+                    .count()
             };
             let src_lines: Vec<&str> = text.split_inclusive('\n').collect();
 
@@ -1943,11 +2076,15 @@ gateway:
                     "`{name}`/`{}`：恰有 1 行被替换，实得 {diff:?}",
                     m.key
                 );
-                assert_eq!(comments(text), comments(&out), "`{name}`/`{}`：注释行数必须守恒", m.key);
+                assert_eq!(
+                    comments(text),
+                    comments(&out),
+                    "`{name}`/`{}`：注释行数必须守恒",
+                    m.key
+                );
                 // ③ 编辑结果仍可解析，且**只有该键**变化（防"改一个值顺带改坏别人"）
-                let back: CoreConfig = serde_yaml::from_str(&out).unwrap_or_else(|e| {
-                    panic!("`{name}`/`{}`：编辑后不可解析: {e}", m.key)
-                });
+                let back: CoreConfig = serde_yaml::from_str(&out)
+                    .unwrap_or_else(|e| panic!("`{name}`/`{}`：编辑后不可解析: {e}", m.key));
                 for mm in FIELDS {
                     let got = (mm.current)(&back);
                     if mm.key == m.key {
@@ -2004,8 +2141,16 @@ gateway:
         let (cfg, recovered) =
             load_config_with_backup_recovery(&path).expect("真源缺失而 .bak 在 ⇒ 必须能恢复");
         assert_eq!(cfg.intercore.port, 9100);
-        assert_eq!(recovered.as_deref(), Some(bak.as_path()), "须报告恢复来源（调用方要响亮记录）");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), YAML, "真源须被恢复成 .bak 的内容");
+        assert_eq!(
+            recovered.as_deref(),
+            Some(bak.as_path()),
+            "须报告恢复来源（调用方要响亮记录）"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            YAML,
+            "真源须被恢复成 .bak 的内容"
+        );
         assert!(!sibling(&path, ".tmp").exists(), "不得残留 .tmp");
 
         // 正常路径：真源在 ⇒ 用真源、**不碰** .bak（现场手工改回的配置不得被悄悄回退）

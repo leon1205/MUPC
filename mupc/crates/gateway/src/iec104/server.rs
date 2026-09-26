@@ -380,7 +380,8 @@ impl Iec104Server {
                     Err(_elapsed) => {
                         warn!(
                             "Connection {} idle timeout after {}ms",
-                            read_conn.read().await.addr, timeout_ms
+                            read_conn.read().await.addr,
+                            timeout_ms
                         );
                         read_conn.write().await.state = ConnectionState::Disconnected;
                         break;
@@ -545,8 +546,8 @@ impl Iec104Server {
 mod tests {
     use super::*;
     // `FrameType` 只被测试用到（删掉 T12 过渡壳后，生产路径不再解析入向帧）
-    use crate::iec104::protocol::FrameType;
     use crate::iec104::command::{CommandResponse, ControlCommand};
+    use crate::iec104::protocol::FrameType;
 
     struct StubHandler;
 

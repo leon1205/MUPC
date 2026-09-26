@@ -196,7 +196,13 @@ fn t2_v3_pin_and_any_other_version_is_rejected() {
     let json = minimal_frame_json(4);
     let err = DisplayFrame::from_json_slice(json.as_bytes()).unwrap_err();
     assert!(
-        matches!(err, Error::ProtoVersionMismatch { got: 4, expected: 3 }),
+        matches!(
+            err,
+            Error::ProtoVersionMismatch {
+                got: 4,
+                expected: 3
+            }
+        ),
         "version=4 必须被拒绝，实际: {err:?}"
     );
 }
@@ -303,14 +309,26 @@ fn synth_frame(n: usize, v: f64, flag: FieldFlag) -> DisplayFrame {
         }
         out
     };
-    let bms = mk_station("bms", PeriphRole::Battery, take(PeriphRole::Battery, &mut by_role));
-    let mb = mk_station("meter_batt", PeriphRole::MeterBatt, take(PeriphRole::MeterBatt, &mut by_role));
+    let bms = mk_station(
+        "bms",
+        PeriphRole::Battery,
+        take(PeriphRole::Battery, &mut by_role),
+    );
+    let mb = mk_station(
+        "meter_batt",
+        PeriphRole::MeterBatt,
+        take(PeriphRole::MeterBatt, &mut by_role),
+    );
     let mut fire_blocks = take(PeriphRole::Fire, &mut by_role);
     if fire_det_points > 0 {
         fire_blocks.push(mk_block("fire_det", fire_det_points, v, flag));
     }
     let fire = mk_station("fire", PeriphRole::Fire, fire_blocks);
-    let hvac = mk_station("hvac", PeriphRole::Hvac, take(PeriphRole::Hvac, &mut by_role));
+    let hvac = mk_station(
+        "hvac",
+        PeriphRole::Hvac,
+        take(PeriphRole::Hvac, &mut by_role),
+    );
     let pcs = mk_station("pcs", PeriphRole::Pcs, take(PeriphRole::Pcs, &mut by_role));
 
     let ok_field = Field {
@@ -394,7 +412,11 @@ fn peripherals_points(f: &DisplayFrame) -> usize {
 
 /// 既有 5 段 + v2 四段的 JSON 投影（**排除** `peripherals`），用于"既有段逐字段不变"断言。
 fn existing_segments_projection(f: &DisplayFrame) -> serde_json::Value {
-    let mut obj = serde_json::to_value(f).unwrap().as_object().unwrap().clone();
+    let mut obj = serde_json::to_value(f)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
     obj.remove("peripherals");
     serde_json::Value::Object(obj)
 }
@@ -409,7 +431,9 @@ fn t4a_typical_encoding_n20_and_n100_stay_within_frame_limit() {
     let b20 = n20.to_json_slice().expect("n=20 必须可编码");
     let n100 = synth_frame(100, 1.0, FieldFlag::Valid);
     assert_eq!(peripherals_points(&n100), 1035, "白名单 1035 点（n=100）");
-    let b100 = n100.to_json_slice().expect("n=100（PRD 上限）必须可编码且不触发裁剪");
+    let b100 = n100
+        .to_json_slice()
+        .expect("n=100（PRD 上限）必须可编码且不触发裁剪");
     // 段级预算：典型口径下 段 ≤ 点数×33 + 固定开销（远在 56 KiB 之内 ⇒ 不触发裁剪）
     let sec_bytes = serde_json::to_vec(&n100.peripherals).unwrap().len();
     assert!(
@@ -499,7 +523,10 @@ fn t4c_f64_abs_max_form_triggers_exit_guard_and_frame_still_publishes() {
     );
 
     // 出口守卫：既有段照发、不黑屏
-    assert_eq!(enforce_exit_guard(&mut f), ExitGuardOutcome::PeripheralsDowngraded);
+    assert_eq!(
+        enforce_exit_guard(&mut f),
+        ExitGuardOutcome::PeripheralsDowngraded
+    );
     assert!(
         !f.peripherals.available,
         "超预算 ⇒ 整段置不可用（不得静默发超限帧）"
@@ -528,9 +555,19 @@ fn t4d_budget_truncation_keeps_frame_publishable() {
         enforce_fire_det_budget(&mut f.peripherals),
         "119 只必须触发裁剪"
     );
-    assert_eq!(f.peripherals.truncated, vec!["fire_det:119→111".to_string()]);
-    assert_eq!(peripherals_points(&f), 441 + 666, "裁到前 111 只（前缀，地址升序）");
-    assert!(f.peripherals.available, "裁剪 ≠ 段不可用（F21.4 显式提示而非静默）");
+    assert_eq!(
+        f.peripherals.truncated,
+        vec!["fire_det:119→111".to_string()]
+    );
+    assert_eq!(
+        peripherals_points(&f),
+        441 + 666,
+        "裁到前 111 只（前缀，地址升序）"
+    );
+    assert!(
+        f.peripherals.available,
+        "裁剪 ≠ 段不可用（F21.4 显式提示而非静默）"
+    );
     let body = f.to_json_slice().expect("裁剪后必须 ≤ 帧上限");
     assert!(body.len() <= MAX_FRAME_BYTES);
     let back = DisplayFrame::from_json_slice(&body).unwrap();
@@ -553,15 +590,10 @@ fn t4b_guard_constants_are_self_consistent_and_recomputable() {
     );
     assert_eq!(MAX_PERIPH_BYTES, 56 * 1024);
     assert_eq!(EXISTING_SEGMENTS_RESERVE, 8 * 1024);
-    assert_eq!(
-        POINT_JSON_BYTES_TYPICAL,
-        33,
-        "容量陈述口径（TYPICAL）"
-    );
+    assert_eq!(POINT_JSON_BYTES_TYPICAL, 33, "容量陈述口径（TYPICAL）");
     assert_eq!(POINT_JSON_BYTES_UPPER, 48, "守卫预检口径（UPPER）");
     assert_eq!(
-        POINT_JSON_BYTES_F64_ABS_MAX,
-        60,
+        POINT_JSON_BYTES_F64_ABS_MAX, 60,
         "兜底说明口径（仅失效边界）"
     );
     let (typical, upper, abs_max) = (
@@ -586,8 +618,16 @@ fn t4b_guard_constants_are_self_consistent_and_recomputable() {
     assert_eq!(FIRE_DET_TRUNCATE_MIN_N, 113);
     assert_eq!(fire_det_keep_units(99), 99, "n=100 ⇒ 99 只不裁（PRD 上限）");
     assert_eq!(fire_det_keep_units(110), 110, "n=111 ⇒ 110 只不裁");
-    assert_eq!(fire_det_keep_units(111), 111, "n=112 ⇒ 111 只 = k_max，不裁");
-    assert_eq!(fire_det_keep_units(112), 111, "n=113 ⇒ 112 只裁到 111（首个触发点）");
+    assert_eq!(
+        fire_det_keep_units(111),
+        111,
+        "n=112 ⇒ 111 只 = k_max，不裁"
+    );
+    assert_eq!(
+        fire_det_keep_units(112),
+        111,
+        "n=113 ⇒ 112 只裁到 111（首个触发点）"
+    );
     assert_eq!(FIRE_DET_POINTS_PER_UNIT, 6);
     assert_eq!(FIRE_DET_BLOCK_NAME, "fire_det");
     assert_eq!(fire_det_truncated_note(119, 111), "fire_det:119→111");

@@ -299,7 +299,10 @@ impl CliConfig {
             let mut take = |flag: &str| -> Result<String, ConfigError> {
                 match &inline {
                     Some(v) => Ok(v.clone()),
-                    None => it.next().cloned().ok_or_else(|| ConfigError::MissingValue(flag.into())),
+                    None => it
+                        .next()
+                        .cloned()
+                        .ok_or_else(|| ConfigError::MissingValue(flag.into())),
                 }
             };
             match flag {
@@ -344,13 +347,21 @@ impl CliConfig {
                 }
                 "--backend" => {
                     let v = take(flag)?;
-                    let b = Backend::parse(&v)
-                        .ok_or_else(|| ConfigError::Invalid(flag.into(), v.clone(), "取值须为 offscreen|fbdev|drm".into()))?;
+                    let b = Backend::parse(&v).ok_or_else(|| {
+                        ConfigError::Invalid(
+                            flag.into(),
+                            v.clone(),
+                            "取值须为 offscreen|fbdev|drm".into(),
+                        )
+                    })?;
                     if !b.available_on_this_platform() {
                         return Err(ConfigError::Invalid(
                             flag.into(),
                             v,
-                            format!("后端 `{}` 仅 Linux 支持（本机请用 --backend offscreen）", b.as_str()),
+                            format!(
+                                "后端 `{}` 仅 Linux 支持（本机请用 --backend offscreen）",
+                                b.as_str()
+                            ),
                         ));
                     }
                     cfg.backend = b;
@@ -372,7 +383,11 @@ impl CliConfig {
                 }
                 "--font" => {
                     let v = take(flag)?;
-                    cfg.font = if v.is_empty() { None } else { Some(PathBuf::from(v)) };
+                    cfg.font = if v.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(v))
+                    };
                 }
                 "--touch-device" => {
                     let v = take(flag)?;
@@ -419,8 +434,7 @@ impl CliConfig {
                 }
                 "--idle-timeout-secs" => {
                     let v = take(flag)?;
-                    cfg.idle_timeout_secs =
-                        parse_u64_range(flag, &v, 0, MAX_IDLE_TIMEOUT_SECS)?;
+                    cfg.idle_timeout_secs = parse_u64_range(flag, &v, 0, MAX_IDLE_TIMEOUT_SECS)?;
                 }
                 "--smoke" => cfg.smoke = parse_switch(flag, &inline)?,
                 "--smoke-out" => {
@@ -755,8 +769,8 @@ mod tests {
     #[test]
     fn out_of_range_values_rejected() {
         for (flag, val) in [
-            ("--interval", "10"),       // < MIN
-            ("--interval", "60000"),    // > MAX
+            ("--interval", "10"),    // < MIN
+            ("--interval", "60000"), // > MAX
             ("--interval", "abc"),
             ("--stale-ms", "0"),
             ("--stale-ms", "99999999"),
@@ -802,8 +816,14 @@ mod tests {
 
     #[test]
     fn help_and_version_are_early_signals() {
-        assert_eq!(CliConfig::parse(&args(&["--help"])).unwrap_err(), ConfigError::Help);
-        assert_eq!(CliConfig::parse(&args(&["-h"])).unwrap_err(), ConfigError::Help);
+        assert_eq!(
+            CliConfig::parse(&args(&["--help"])).unwrap_err(),
+            ConfigError::Help
+        );
+        assert_eq!(
+            CliConfig::parse(&args(&["-h"])).unwrap_err(),
+            ConfigError::Help
+        );
         assert_eq!(
             CliConfig::parse(&args(&["--version"])).unwrap_err(),
             ConfigError::Version
@@ -838,7 +858,10 @@ mod tests {
     fn v2_defaults_match_design() {
         let c = CliConfig::default();
         assert_eq!(c.control_channel, "http://127.0.0.1:9811");
-        assert_eq!(c.touch_device, None, "缺省自动发现（生产 unit 固定 --touch-device）");
+        assert_eq!(
+            c.touch_device, None,
+            "缺省自动发现（生产 unit 固定 --touch-device）"
+        );
         assert_eq!(c.touch, crate::touch::TouchOverrides::default());
         assert_eq!(c.rotate, Rotate::Deg0);
         assert_eq!(c.idle_timeout_secs, 60, "TT-12 默认 60 s");
@@ -863,7 +886,10 @@ mod tests {
         .unwrap();
         assert_eq!(c.interval_ms, 250);
         assert_eq!(c.control_channel, "http://127.0.0.1:9811");
-        assert_eq!(c.touch_device.as_deref(), Some(std::path::Path::new("/dev/mupc-touch")));
+        assert_eq!(
+            c.touch_device.as_deref(),
+            Some(std::path::Path::new("/dev/mupc-touch"))
+        );
         assert_eq!(
             c.touch.calib,
             Some(crate::touch::CalibBounds {
@@ -900,11 +926,7 @@ mod tests {
             CliConfig::parse(&args(&["--rotate=deg0"])).unwrap().rotate,
             Rotate::Deg0
         );
-        assert_eq!(
-            CliConfig::default().rotate,
-            Rotate::Deg0,
-            "默认仍是不旋转"
-        );
+        assert_eq!(CliConfig::default().rotate, Rotate::Deg0, "默认仍是不旋转");
         for v in ["90", "180", "270", "deg90", "DEG270", " 90 "] {
             assert!(
                 CliConfig::parse(&args(&["--rotate", v])).is_err(),
@@ -955,10 +977,7 @@ mod tests {
                 ConfigError::Invalid(f, val, why) => {
                     assert_eq!(f, "--rotate");
                     assert_eq!(val, v);
-                    assert!(
-                        why.contains("0|90|180|270"),
-                        "须点名合法取值集合：{why}"
-                    );
+                    assert!(why.contains("0|90|180|270"), "须点名合法取值集合：{why}");
                 }
                 other => panic!("--rotate {v:?} 应响亮失败，实得 {other:?}"),
             }
@@ -994,13 +1013,20 @@ mod tests {
         let b = CliConfig::parse(&args(&["--poll-ms", "300"])).unwrap();
         assert_eq!(a.interval_ms, b.interval_ms);
         // 设计 §5.5 红线：>500 报错（既有 --interval 一并收紧到同一区间）
-        for (flag, val) in [("--poll-ms", "501"), ("--interval", "501"), ("--poll-ms", "99")] {
+        for (flag, val) in [
+            ("--poll-ms", "501"),
+            ("--interval", "501"),
+            ("--poll-ms", "99"),
+        ] {
             let e = CliConfig::parse(&args(&[flag, val])).unwrap_err();
             match e {
                 ConfigError::Invalid(f, v, why) => {
                     assert_eq!(f, flag);
                     assert_eq!(v, val);
-                    assert!(why.contains("500") && why.contains("§5.5"), "须指向设计依据：{why}");
+                    assert!(
+                        why.contains("500") && why.contains("§5.5"),
+                        "须指向设计依据：{why}"
+                    );
                 }
                 other => panic!("{flag} {val} 应判非法，实得 {other:?}"),
             }
@@ -1016,8 +1042,8 @@ mod tests {
             ("--rotate", "x"),
             ("--idle-timeout-secs", "3601"),
             ("--idle-timeout-secs", "-1"),
-            ("--touch-calib", "0,100,0"),        // 段数不足
-            ("--touch-calib", "100,100,0,100"),  // max<=min
+            ("--touch-calib", "0,100,0"),       // 段数不足
+            ("--touch-calib", "100,100,0,100"), // max<=min
             ("--touch-calib", "a,100,0,100"),
             ("--control-channel", "https://127.0.0.1:9811"), // 非回环 http
             ("--control-channel", "127.0.0.1:9811"),
@@ -1110,7 +1136,9 @@ mod tests {
     fn help_marks_font_as_deprecated() {
         let h = help_text();
         // 该参数的 help 段 = `--font` 行 + 其续行（缩进对齐的后续行，直到下一个选项/空行）。
-        let mut lines = h.lines().skip_while(|l| !l.trim_start().starts_with("--font"));
+        let mut lines = h
+            .lines()
+            .skip_while(|l| !l.trim_start().starts_with("--font"));
         let head = lines
             .next()
             .unwrap_or_else(|| panic!("help 仍须列 --font（防部署脚本踩空）：\n{h}"));
@@ -1127,7 +1155,10 @@ mod tests {
         // 文案本身也要一致（启动告警与 help 讲同一件事）
         let w = font_ignored_warning(std::path::Path::new("/nope/x.otf"));
         assert!(w.contains("/nope/x.otf"), "告警须回显实际取值：{w}");
-        assert!(w.contains("不生效") && w.contains("忽略"), "告警须说明不生效：{w}");
+        assert!(
+            w.contains("不生效") && w.contains("忽略"),
+            "告警须说明不生效：{w}"
+        );
         assert!(
             w.contains("noto-font"),
             "告警须指向真正生效的路径（构建期字库）：{w}"
@@ -1195,9 +1226,15 @@ mod tests {
         ]))
         .unwrap();
         let t = c.touch_config();
-        assert_eq!(t.device.as_deref(), Some(std::path::Path::new("/dev/mupc-touch")));
+        assert_eq!(
+            t.device.as_deref(),
+            Some(std::path::Path::new("/dev/mupc-touch"))
+        );
         assert_eq!((t.width, t.height), (800, 600));
         assert!(t.overrides.swap_xy);
-        assert_eq!(c.idle_timeout_secs, 30, "`--idle-timeout-secs` 仍被解析（注入 `Shell::set_idle_timeout`）");
+        assert_eq!(
+            c.idle_timeout_secs, 30,
+            "`--idle-timeout-secs` 仍被解析（注入 `Shell::set_idle_timeout`）"
+        );
     }
 }

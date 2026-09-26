@@ -33,7 +33,8 @@ pub trait IntercoreTransport: Send + Sync {
     /// 下发 AI 双参数（p_ref/k_droop）
     async fn send_dual_param(&self, cmd: &DualParamCommand) -> Result<(), MupcError>;
     /// 下发台区储能分相 P/Q
-    async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], mode: &str) -> Result<(), MupcError>;
+    async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], mode: &str)
+        -> Result<(), MupcError>;
     /// 连接状态
     async fn is_connected(&self) -> bool;
     async fn shutdown(&self) -> Result<(), MupcError>;
@@ -76,14 +77,22 @@ pub(crate) fn v2_control_frame_bytes(cmd: &DualParamCommand) -> Result<Vec<u8>, 
         frame_version: Some(ControlCmdPayloadV2::FRAME_VERSION),
     };
     let bytes = payload.to_json().map_err(|e| {
-        MupcError::new(mupc_common::ErrorCode::SerializeError, format!("serialize V2: {}", e), "intercore")
+        MupcError::new(
+            mupc_common::ErrorCode::SerializeError,
+            format!("serialize V2: {}", e),
+            "intercore",
+        )
     })?;
     // to_bytes() 已返回 Result<_, MupcError>，直接作为尾表达式
     IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()
 }
 
 /// 构造 V3 分相帧字节
-pub(crate) fn v3_control_frame_bytes(p: [f64; 3], q: [f64; 3], mode: &str) -> Result<Vec<u8>, MupcError> {
+pub(crate) fn v3_control_frame_bytes(
+    p: [f64; 3],
+    q: [f64; 3],
+    mode: &str,
+) -> Result<Vec<u8>, MupcError> {
     let payload = ControlCmdPayloadV3 {
         frame_version: Some(ControlCmdPayloadV3::FRAME_VERSION),
         p_ref: None,
@@ -95,7 +104,11 @@ pub(crate) fn v3_control_frame_bytes(p: [f64; 3], q: [f64; 3], mode: &str) -> Re
         timestamp_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
     };
     let bytes = payload.to_json().map_err(|e| {
-        MupcError::new(mupc_common::ErrorCode::SerializeError, format!("serialize V3: {}", e), "intercore")
+        MupcError::new(
+            mupc_common::ErrorCode::SerializeError,
+            format!("serialize V3: {}", e),
+            "intercore",
+        )
     })?;
     // to_bytes() 已返回 Result<_, MupcError>，直接作为尾表达式
     IntercoreFrame::new(IntercoreFrameType::ControlCmd, 0, bytes).to_bytes()

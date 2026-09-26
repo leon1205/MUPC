@@ -35,21 +35,23 @@ pub mod log;
 pub mod peripherals;
 pub mod peripherals_labels;
 
-pub use crate::audit::{AuditPage, AuditResult, ConsoleAuditEntry, ConsoleOp, OpOption, AUDIT_PAGE_SIZE};
+pub use crate::audit::{
+    AuditPage, AuditResult, ConsoleAuditEntry, ConsoleOp, OpOption, AUDIT_PAGE_SIZE,
+};
 pub use crate::config::{
     DisplayConfig, DisplayRange, LogLimits, DEFAULT_ALARM_PAGE_SIZE, DEFAULT_ALARM_POLL_MS,
-    DEFAULT_BIND, DEFAULT_CHANNEL_URL, DEFAULT_CONTROL_BASE_URL, DEFAULT_CONTROL_BIND,
-    DEFAULT_BMS_ALARM_PAGE_SIZE, DEFAULT_DEVICE_POLL_MS, DEFAULT_INTERLOCK_POLL_MS,
+    DEFAULT_BIND, DEFAULT_BMS_ALARM_PAGE_SIZE, DEFAULT_CHANNEL_URL, DEFAULT_CONTROL_BASE_URL,
+    DEFAULT_CONTROL_BIND, DEFAULT_DEVICE_POLL_MS, DEFAULT_INTERLOCK_POLL_MS,
     DEFAULT_MIN_PUBLISH_INTERVAL_MS, DEFAULT_PERIPH_PAGE_SIZE, DEFAULT_PERIPH_POLL_MS,
     DEFAULT_PUBLISH_MS, MAX_BMS_ALARM_PAGE_SIZE, MAX_DEVICE_POLL_MS, MAX_PERIPH_PAGE_SIZE,
-    MAX_PERIPH_POLL_MS, MAX_PUBLISH_MS, MAX_SLOW_POLL_MS, MIN_LIVE_RING,
-    MIN_MERGE_WINDOW_MS, MIN_PUBLISH_MS,
+    MAX_PERIPH_POLL_MS, MAX_PUBLISH_MS, MAX_SLOW_POLL_MS, MIN_LIVE_RING, MIN_MERGE_WINDOW_MS,
+    MIN_PUBLISH_MS,
 };
 pub use crate::control::{
     ConfigField, ConfigGroup, ConfigKind, ConfigPatch, ConfigView, ConsoleEndpoint, ConsoleMethod,
-    ControlCode, ControlEnvelopeError, ControlRequest, ControlResponse, FieldError,
-    IdempotencyKey, OptionItem, PatchSource, WriteMode, AUDIT_FAIL_CLOSED, CONSOLE_OPERATOR,
-    IDEMPOTENCY_CAPACITY, IDEMPOTENCY_TTL_MS, REPLAY_WINDOW_MS,
+    ControlCode, ControlEnvelopeError, ControlRequest, ControlResponse, FieldError, IdempotencyKey,
+    OptionItem, PatchSource, WriteMode, AUDIT_FAIL_CLOSED, CONSOLE_OPERATOR, IDEMPOTENCY_CAPACITY,
+    IDEMPOTENCY_TTL_MS, REPLAY_WINDOW_MS,
 };
 pub use crate::error::{Error, Result};
 pub use crate::frame::{
@@ -63,6 +65,7 @@ pub use crate::interlock::{
     InterlockApi, InterlockOpAck, InterlockOpPayload, InterlockReject, InterlockSourceStatus,
     InterlockStatus, InterlockView,
 };
+pub use crate::log::{LogEntry, LogLevel, LogPage, LogRange};
 pub use crate::peripherals::{
     catalog_rev, crc32_ieee, decimals_from_scale, enforce_exit_guard, enforce_fire_det_budget,
     fire_det_keep_units, fire_det_truncated_note, truncate_fire_det_prefix, BitMeta, BmsAlarmItem,
@@ -72,6 +75,7 @@ pub use crate::peripherals::{
     FIRE_DET_BLOCK_NAME, FIRE_DET_POINTS_PER_UNIT, FIRE_DET_TRUNCATE_MIN_N, K_MAX_FIRE_DET,
     PERIPH_NON_FIRE_DET_POINTS, PERIPH_NON_FIRE_DET_UPPER_BYTES,
 };
-pub use crate::peripherals_labels::{contains as periph_whitelist_contains, group_of, GROUP_UNKNOWN};
 pub use crate::peripherals_labels::PERIPH_WHITELIST;
-pub use crate::log::{LogEntry, LogLevel, LogPage, LogRange};
+pub use crate::peripherals_labels::{
+    contains as periph_whitelist_contains, group_of, GROUP_UNKNOWN,
+};

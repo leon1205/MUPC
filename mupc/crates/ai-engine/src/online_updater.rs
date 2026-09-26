@@ -117,12 +117,8 @@ impl OnlineUpdater {
 
     /// v3.1: 估算 TD-error（推理侧无 Q 网络，用输出幅值近似）
     fn estimate_td_error(&self, data: &DataPoint) -> f32 {
-        let output_mean = data
-            .output
-            .iter()
-            .map(|v| v.abs())
-            .sum::<f32>()
-            / data.output.len().max(1) as f32;
+        let output_mean =
+            data.output.iter().map(|v| v.abs()).sum::<f32>() / data.output.len().max(1) as f32;
         // 输出幅值越大 = 策略探索越远 = TD-error 近似越大
         output_mean.clamp(0.0, 10.0)
     }

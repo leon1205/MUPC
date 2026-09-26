@@ -147,8 +147,7 @@ const HEADER_TITLE_X: i32 = Dimens::SIDE_PAD;
 /// 页眉：P2–P6 标题 x（UI §4.1「x 96 起」= 返回键 64 + 左右各 16）。
 const HEADER_TITLE_X_PAGED: i32 = Dimens::TOUCH_CRITICAL + 2 * Dimens::SIDE_PAD;
 /// 页眉：标题 y（72 − 32 后居中 → 20）。
-const HEADER_TITLE_Y: i32 =
-    theme::center_offset(Dimens::HEADER_H, TextSlot::PageTitle.px() as i32);
+const HEADER_TITLE_Y: i32 = theme::center_offset(Dimens::HEADER_H, TextSlot::PageTitle.px() as i32);
 /// 页眉：时钟宽（UI §4.1「时钟 26 px 等宽」，`HH:MM:SS` 八字符）。
 const HEADER_CLOCK_W: i32 = Dimens::BTN_MIN_W;
 /// 页眉：时钟 x（贴右安全边）。
@@ -421,7 +420,9 @@ impl NavPage {
             NavPage::Interlock => "安全联锁",
             NavPage::Audit => "审计",
             // T21c-2（T-8 裁定）：P6 由「系统 / 关于」改名为「装置与外设」——**页数不变**。
-            NavPage::System => mupc_display_proto::peripherals_labels::ui_text::PAGE_DEVICE_AND_PERIPH,
+            NavPage::System => {
+                mupc_display_proto::peripherals_labels::ui_text::PAGE_DEVICE_AND_PERIPH
+            }
         }
     }
 
@@ -445,7 +446,9 @@ impl NavPage {
             NavPage::Logs => "日志",
             NavPage::Interlock => "安全联锁",
             NavPage::Audit => "审计",
-            NavPage::System => mupc_display_proto::peripherals_labels::ui_text::PAGE_DEVICE_AND_PERIPH,
+            NavPage::System => {
+                mupc_display_proto::peripherals_labels::ui_text::PAGE_DEVICE_AND_PERIPH
+            }
         }
     }
 
@@ -945,7 +948,11 @@ impl Shell {
         overlay_title.set_size(overlay_title_w(), OVERLAY_TITLE_SLOT.px() as i32);
         overlay_title.set_pos(overlay_title_x(), OVERLAY_TITLE_Y);
         overlay_title.set_long_mode(LongMode::CLIP);
-        let overlay_elapsed = Rc::new(label(&overlay, OVERLAY_ELAPSED_SLOT, OVERLAY_ELAPSED_COLOR)?);
+        let overlay_elapsed = Rc::new(label(
+            &overlay,
+            OVERLAY_ELAPSED_SLOT,
+            OVERLAY_ELAPSED_COLOR,
+        )?);
         overlay_elapsed.set_text(&disconnect_elapsed_text(0));
         overlay_elapsed.set_size(
             overlay_elapsed_w(&disconnect_elapsed_text(0)),
@@ -1443,10 +1450,7 @@ impl Shell {
 
     /// 第 `i` 个页签的顶部选中条是否可见（**选中态双通道之一**）。
     pub fn tab_bar_visible(&self, page: NavPage) -> Option<bool> {
-        self.core
-            .tabs
-            .get(page.index())
-            .map(|t| !t.bar.is_hidden())
+        self.core.tabs.get(page.index()).map(|t| !t.bar.is_hidden())
     }
 
     /// 第 `i` 个页签的左缘竖分隔线（**第 1 项无 ⇒ `None`**；UI §4.2）。
@@ -1486,18 +1490,12 @@ impl Shell {
 
     /// 第 `i` 个页签的图标字形。
     pub fn tab_icon_text(&self, page: NavPage) -> Option<String> {
-        self.core
-            .tabs
-            .get(page.index())
-            .and_then(|t| t.icon.text())
+        self.core.tabs.get(page.index()).and_then(|t| t.icon.text())
     }
 
     /// 第 `i` 个页签的文案。
     pub fn tab_text(&self, page: NavPage) -> Option<String> {
-        self.core
-            .tabs
-            .get(page.index())
-            .and_then(|t| t.text.text())
+        self.core.tabs.get(page.index()).and_then(|t| t.text.text())
     }
 
     /// 6 页中当前可见的页根对象（**唯一**一个；用于"任一时刻只显一页"的离屏断言）。
@@ -1548,8 +1546,18 @@ impl Core {
         for (i, tab) in self.tabs.iter().enumerate() {
             let on = i == idx;
             tab.btn.set_checked(on);
-            set_style_index(tab.icon.obj(), &tab.icon_styles, &tab.icon_idx, usize::from(on));
-            set_style_index(tab.text.obj(), &tab.text_styles, &tab.text_idx, usize::from(on));
+            set_style_index(
+                tab.icon.obj(),
+                &tab.icon_styles,
+                &tab.icon_idx,
+                usize::from(on),
+            );
+            set_style_index(
+                tab.text.obj(),
+                &tab.text_styles,
+                &tab.text_idx,
+                usize::from(on),
+            );
             set_visible(&tab.bar, on);
         }
 
@@ -1557,10 +1565,12 @@ impl Core {
         self.title.set_text(page.title());
         if page.shows_back() {
             self.title.set_pos(HEADER_TITLE_X_PAGED, HEADER_TITLE_Y);
-            self.title.set_size(HEADER_TITLE_W, TextSlot::PageTitle.px() as i32);
+            self.title
+                .set_size(HEADER_TITLE_W, TextSlot::PageTitle.px() as i32);
         } else {
             self.title.set_pos(HEADER_TITLE_X, HEADER_TITLE_Y);
-            self.title.set_size(HEADER_TITLE_W_P1, TextSlot::PageTitle.px() as i32);
+            self.title
+                .set_size(HEADER_TITLE_W_P1, TextSlot::PageTitle.px() as i32);
         }
 
         if changed && notify {
@@ -1811,7 +1821,12 @@ fn build_tab(parent: &Obj, page: NavPage, item_skins: &[NavSkin; 3]) -> Result<N
     let divider = if page.index() == 0 {
         None
     } else {
-        let d = decor(&btn, NAV_DIVIDER_W, Dimens::NAV_ITEM_H, &theme::card_head_bar(Palette::DIVIDER))?;
+        let d = decor(
+            &btn,
+            NAV_DIVIDER_W,
+            Dimens::NAV_ITEM_H,
+            &theme::card_head_bar(Palette::DIVIDER),
+        )?;
         d.set_pos(0, 0);
         Some(d)
     };
@@ -2033,7 +2048,10 @@ mod tests {
             Dimens::SCREEN_H - OVERLAY_ELAPSED_Y - TextSlot::Body.px() as i32,
             "整块须在画布内垂直居中（上留白 == 下留白）"
         );
-        assert_eq!(OVERLAY_ELAPSED_Y, OVERLAY_TITLE_Y + 64 + Dimens::GAP_SECTION);
+        assert_eq!(
+            OVERLAY_ELAPSED_Y,
+            OVERLAY_TITLE_Y + 64 + Dimens::GAP_SECTION
+        );
         assert_eq!(
             2 * OVERLAY_TITLE_Y + OVERLAY_BLOCK_H,
             Dimens::SCREEN_H,
@@ -2099,7 +2117,11 @@ mod tests {
             "EDGE-20 的红通道文案（与 P1 页内通道条**同一份字面量**）"
         );
         assert_eq!(HeaderChannel::Down.skin(), ChipSkin::FAILURE, "断 = 红");
-        assert_eq!(HeaderChannel::Connected.skin(), ChipSkin::SUCCESS, "通 = 绿");
+        assert_eq!(
+            HeaderChannel::Connected.skin(),
+            ChipSkin::SUCCESS,
+            "通 = 绿"
+        );
         assert_ne!(
             HeaderChannel::Connected.icon(),
             HeaderChannel::Down.icon(),
@@ -2152,7 +2174,10 @@ mod tests {
         // ④ 整组贴右安全边（时钟右缘 + 安全边 == 画布宽）。
         assert_eq!(clock.1 + Dimens::SIDE_PAD, Dimens::SCREEN_W);
         // ── 互斥（Title vs 右端组）──
-        assert!(p1_title.1 <= badge.0, "P1 标题不得压到右端组最左成员（触摸角标）");
+        assert!(
+            p1_title.1 <= badge.0,
+            "P1 标题不得压到右端组最左成员（触摸角标）"
+        );
         assert!(paged_title.1 <= badge.0, "分页标题不得压到右端组最左成员");
         assert!(
             paged_title.0 > HEADER_BACK_X + Dimens::TOUCH_CRITICAL,
@@ -2227,6 +2252,9 @@ mod tests {
     fn nav_items_fit_canvas() {
         let total = Dimens::NAV_ITEM_W * NavPage::ALL.len() as i32;
         assert!(total <= Dimens::SCREEN_W, "6 项合计 {total} 必须 ≤ 画布宽");
-        assert_eq!(Dimens::HEADER_H + Dimens::CONTENT_H + Dimens::NAV_H, Dimens::SCREEN_H);
+        assert_eq!(
+            Dimens::HEADER_H + Dimens::CONTENT_H + Dimens::NAV_H,
+            Dimens::SCREEN_H
+        );
     }
 }

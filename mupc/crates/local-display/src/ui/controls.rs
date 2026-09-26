@@ -143,13 +143,7 @@ const TEXT_MINUTE: &str = "分";
 ///
 /// **谁在用（M5）**：保留 `pub` —— `ui/tests.rs::ui_chain` 的 `DateTimeStepper` 段
 /// **直接引用本表**核对列头顺序（不再是硬编码的第二真源，见 I3）。
-pub const DATETIME_HEADERS: [&str; 5] = [
-    TEXT_YEAR,
-    TEXT_MONTH,
-    TEXT_DAY,
-    TEXT_HOUR,
-    TEXT_MINUTE,
-];
+pub const DATETIME_HEADERS: [&str; 5] = [TEXT_YEAR, TEXT_MONTH, TEXT_DAY, TEXT_HOUR, TEXT_MINUTE];
 
 /// IPv4 四段之间的分隔符（`.`, U+002E —— 在 cmap 内；**不是** cmap 外的 `:`）。
 const IPV4_SEP: char = '.';
@@ -1152,7 +1146,9 @@ impl DateTimeStepper {
             })
             .collect::<Result<Vec<_>, _>>()?
             .try_into()
-            .map_err(|_| LvglError::InvalidArgument("DateTimeStepper: 列数与 DATETIME_COLS 不符"))?;
+            .map_err(|_| {
+                LvglError::InvalidArgument("DateTimeStepper: 列数与 DATETIME_COLS 不符")
+            })?;
 
         // ── 五个列头（单字盒 + 居中定位；薄层无文本对齐通道 —— CD6）──
         let headers: [Rc<Label>; DATETIME_COLS as usize] = DATETIME_HEADERS
@@ -1165,7 +1161,9 @@ impl DateTimeStepper {
             })
             .collect::<Result<Vec<_>, _>>()?
             .try_into()
-            .map_err(|_| LvglError::InvalidArgument("DateTimeStepper: 列头数与 DATETIME_COLS 不符"))?;
+            .map_err(|_| {
+                LvglError::InvalidArgument("DateTimeStepper: 列头数与 DATETIME_COLS 不符")
+            })?;
 
         // 逐个摆位（列 x 由常量推导，不写裸坐标）。
         for (i, (col, head)) in columns.iter().zip(headers.iter()).enumerate() {
@@ -1351,7 +1349,11 @@ mod tests {
         assert_eq!(ipv4_text([0, 0, 0, 0]), "0.0.0.0");
         assert_eq!(ipv4_text([255, 255, 255, 255]), "255.255.255.255");
         // 分段数 = 3 个分隔符（写成 `:` 或漏一段会立刻变红）。
-        assert_eq!(ipv4_text([1, 2, 3, 4]).matches(IPV4_SEP).count(), 3, "四段三个点");
+        assert_eq!(
+            ipv4_text([1, 2, 3, 4]).matches(IPV4_SEP).count(),
+            3,
+            "四段三个点"
+        );
     }
 
     /// [`DateTimeValue`] 的分量封闭（**越界被夹而非 panic**）+ 各边界。
@@ -1455,19 +1457,38 @@ mod tests {
 
         // ── Ipv4Stepper（UI §5.1 #7 的分项：`[−][值 64][＋]`、缝 8）──
         assert_eq!(IPV4_SEG_W, 192, "§5.1 #7 单段 = 64 + 64 + 64");
-        assert_eq!(IPV4_SEGMENTS_W, 792, "§5.1 #7 四段 = 4×192 + 3×8（文档正文 856 ⇒ CD1）");
-        assert_eq!(IPV4_SUMMARY_W, 184, "CD2：汇总标签 = 内容区余量 992 − 792 − 8");
-        assert_eq!(IPV4_TOTAL_W, 992, "CD1/CD2：整件 = 内容区有效宽（§3.5「有效宽 992」）");
+        assert_eq!(
+            IPV4_SEGMENTS_W, 792,
+            "§5.1 #7 四段 = 4×192 + 3×8（文档正文 856 ⇒ CD1）"
+        );
+        assert_eq!(
+            IPV4_SUMMARY_W, 184,
+            "CD2：汇总标签 = 内容区余量 992 − 792 − 8"
+        );
+        assert_eq!(
+            IPV4_TOTAL_W, 992,
+            "CD1/CD2：整件 = 内容区有效宽（§3.5「有效宽 992」）"
+        );
         assert_eq!(IPV4_TOTAL_H, 64, "§5.1 #7「…×64」");
         // 同源性恒等（定义式展开即成立，**不构成回归锁**，仅记录设计口径）：
-        assert_eq!(IPV4_TOTAL_W, Dimens::CONTENT_W, "口径：整件宽 == 内容区有效宽（CD2）");
+        assert_eq!(
+            IPV4_TOTAL_W,
+            Dimens::CONTENT_W,
+            "口径：整件宽 == 内容区有效宽（CD2）"
+        );
         // （"汇总标签分到正宽"是**编译期**不变量，见 `IPV4_SUMMARY_W` 下方的 `const _` 断言。）
 
         // ── DateTimeStepper（UI §5.1 #8；CD3/CD4）──
-        assert_eq!(DATETIME_VALUE_W, 64, "CD3：值区宽 = 内容区均分五列（文档 112 两重不成立）");
+        assert_eq!(
+            DATETIME_VALUE_W, 64,
+            "CD3：值区宽 = 内容区均分五列（文档 112 两重不成立）"
+        );
         assert_eq!(DATETIME_COL_STEPPER_W, 192, "单列 = 64 + 64 + 64");
         assert_eq!(DATETIME_TOTAL_W, 992, "CD3：五列铺满内容区有效宽");
-        assert_eq!(DATETIME_TOTAL_H, 106, "CD4：列头 26 + 缝 16 + 步进 64（§5.1 #8 只写 64）");
+        assert_eq!(
+            DATETIME_TOTAL_H, 106,
+            "CD4：列头 26 + 缝 16 + 步进 64（§5.1 #8 只写 64）"
+        );
         // 列头行 / 步进行（§3.3 控件文字档 Label = 26 px）
         assert_eq!(DATETIME_HEADER_W, 26, "§3.3 Label 档 26 px（单字盒）");
         assert_eq!(DATETIME_HEADER_H, 26, "§3.3 Label 档 26 px");
@@ -1501,10 +1522,7 @@ mod tests {
                 Box::new(move |v: usize| {
                     // **回调内自替换**（旧实现：此处 panic，被 event.rs 的 catch_unwind 吞掉）
                     let seen2 = Rc::clone(&seen);
-                    replace_index(
-                        &slot_in_cb,
-                        Box::new(move |v2: usize| seen2.set(Some(v2))),
-                    );
+                    replace_index(&slot_in_cb, Box::new(move |v2: usize| seen2.set(Some(v2))));
                     assert_eq!(v, 7, "本次通知的载荷 = 触发时传的值");
                     done.set(true); // 回调体**末尾**哨兵
                 }),
@@ -1574,15 +1592,23 @@ mod tests {
         // ── 第一次触发：回调 panic ⇒ 测试自身必须不红（故用 catch_unwind 包住）──
         let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fire_index(&slot, 1)));
         assert!(first.is_err(), "前提：第一次触发确实把 panic 抛出来了");
-        assert_eq!(calls.get(), 1, "第一次通知到达了回调（panic 发生在回调体内）");
+        assert_eq!(
+            calls.get(),
+            1,
+            "第一次通知到达了回调（panic 发生在回调体内）"
+        );
         assert!(
             slot.borrow().is_some(),
             "**panic 之后槽必须已被放回**（旧写法：展开跳过放回 ⇒ 槽为 None）"
         );
 
         // ── 关键断言：第二次通知仍必须到达（这正是缺陷的后果面）──
-        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fire_index(&slot, 2)));
-        assert!(second.is_ok(), "第二次触发不得再 panic（本次回调不再 panic）");
+        let second =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fire_index(&slot, 2)));
+        assert!(
+            second.is_ok(),
+            "第二次触发不得再 panic（本次回调不再 panic）"
+        );
         assert_eq!(
             calls.get(),
             2,

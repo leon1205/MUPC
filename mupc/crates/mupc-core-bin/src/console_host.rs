@@ -341,20 +341,14 @@ impl ConsoleHost {
                 mupc_display_proto::ConsoleMethod::Get if ep == ConsoleEndpoint::Logs => {
                     router.route(path, get(get_logs))
                 }
-                mupc_display_proto::ConsoleMethod::Get
-                    if ep == ConsoleEndpoint::LogsTargets =>
-                {
+                mupc_display_proto::ConsoleMethod::Get if ep == ConsoleEndpoint::LogsTargets => {
                     router.route(path, get(get_logs_targets))
                 }
                 // 单元 I：审计两条 GET（设计 §3.4 / §4.5）
-                mupc_display_proto::ConsoleMethod::Get
-                    if ep == ConsoleEndpoint::Audit =>
-                {
+                mupc_display_proto::ConsoleMethod::Get if ep == ConsoleEndpoint::Audit => {
                     router.route(path, get(get_audit))
                 }
-                mupc_display_proto::ConsoleMethod::Get
-                    if ep == ConsoleEndpoint::AuditOps =>
-                {
+                mupc_display_proto::ConsoleMethod::Get if ep == ConsoleEndpoint::AuditOps => {
                     router.route(path, get(get_audit_ops))
                 }
                 // U-73 §15.3.2：外设元数据 + 两条明细下钻（**全只读 GET，不进 PL-1 审计**）
@@ -374,9 +368,7 @@ impl ConsoleHost {
                     router.route(path, get(get_peripherals_bms_alarms))
                 }
                 mupc_display_proto::ConsoleMethod::Get => router.route(path, get(not_implemented)),
-                mupc_display_proto::ConsoleMethod::Post
-                    if ep == ConsoleEndpoint::ConfigApply =>
-                {
+                mupc_display_proto::ConsoleMethod::Post if ep == ConsoleEndpoint::ConfigApply => {
                     router.route(path, axum::routing::post(post_config_apply))
                 }
                 // 单元 J：联锁两条写端点（设计 §3.4 / §4.6）。两条**各自成臂**（不合并成一个
@@ -493,12 +485,17 @@ async fn get_config(State(st): State<HostState>) -> Response {
             let guard = cfg.read().await;
             let view = match &st.apply {
                 ApplySource::Ready(svc) => svc.view(&guard),
-                ApplySource::Unavailable(_) => config_view(&guard, REVISION_INITIAL, WriteMode::TextPreserve),
+                ApplySource::Unavailable(_) => {
+                    config_view(&guard, REVISION_INITIAL, WriteMode::TextPreserve)
+                }
             };
             Json(view).into_response()
         }
         ConfigSource::Unavailable(reason) => {
-            tracing::error!(reason, "控制通道配置源不可用，GET /v1/console/config 回 503");
+            tracing::error!(
+                reason,
+                "控制通道配置源不可用，GET /v1/console/config 回 503"
+            );
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("config source unavailable: {reason}"),
@@ -662,7 +659,7 @@ async fn get_peripherals_fire_detectors(
     State(st): State<HostState>,
     Query(pairs): Query<Vec<(String, String)>>,
 ) -> Response {
-    let (source, ) = match &st.peripherals {
+    let (source,) = match &st.peripherals {
         PeripheralConsoleSource::Ready { source, .. } => (source.clone(),),
         PeripheralConsoleSource::Unavailable(reason) => {
             // R-4：body **仅供日志 / 排障**（外部错误串，含 cmap 外的字）⇒ **不得上屏**；
@@ -675,7 +672,7 @@ async fn get_peripherals_fire_detectors(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("peripherals source unavailable: {reason}"),
             )
-                .into_response()
+                .into_response();
         }
     };
     // 默认页大小 = **配置**（`display.periph_page_size`，装配期由 `startup` 注入
@@ -726,7 +723,7 @@ async fn get_peripherals_bms_alarms(
                 StatusCode::SERVICE_UNAVAILABLE,
                 format!("peripherals source unavailable: {reason}"),
             )
-                .into_response()
+                .into_response();
         }
     };
     let (page, page_size) = match parse_page(
@@ -753,7 +750,12 @@ pub fn parse_page(
     default: u32,
     max: u32,
 ) -> Result<(u32, u32), String> {
-    let get = |k: &str| pairs.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+    let get = |k: &str| {
+        pairs
+            .iter()
+            .find(|(kk, _)| kk == k)
+            .map(|(_, v)| v.as_str())
+    };
     let page = match get("page") {
         None => 1,
         Some(v) => v
@@ -927,8 +929,9 @@ pub fn bms_alarm_page(
         };
     };
     let total = blk.values.len() as u32;
-    let is_active =
-        |pv: &mupc_display_proto::PointValue| pv.flag == FieldFlag::Valid && pv.v.is_some_and(|v| v != 0.0);
+    let is_active = |pv: &mupc_display_proto::PointValue| {
+        pv.flag == FieldFlag::Valid && pv.v.is_some_and(|v| v != 0.0)
+    };
     let active_total = blk.values.iter().filter(|pv| is_active(pv)).count() as u32;
     let (start, end) = page_slice(blk.values.len(), page, page_size);
     let items = blk.values[start..end]
@@ -1122,7 +1125,9 @@ pub fn build_peripheral_catalog(
                 let row = conf
                     .map(|c| c.role)
                     .and_then(|role| mupc_southd::point_table::lookup_in(role, space, addr));
-                let decimals = row.map(|r| mupc_display_proto::decimals_from_scale(r.scale)).unwrap_or(0);
+                let decimals = row
+                    .map(|r| mupc_display_proto::decimals_from_scale(r.scale))
+                    .unwrap_or(0);
                 let is_fire_det = bp.name == "fire_det";
                 // 屏用短标签（**唯一真源 = 短标签表**；`fire_det` 的展开行由 `label_for`
                 // 自带归约，故此处**不**再做 `at % 6` 的形状运算）。
@@ -1159,13 +1164,12 @@ pub fn build_peripheral_catalog(
                 } else {
                     Vec::new()
                 };
-                let decompose = if (bp.name == "fire_sys" && *at == 10)
-                    || (is_fire_det && at % 6 == 3)
-                {
-                    mupc_display_proto::peripherals_labels::data1_decompose()
-                } else {
-                    Vec::new()
-                };
+                let decompose =
+                    if (bp.name == "fire_sys" && *at == 10) || (is_fire_det && at % 6 == 3) {
+                        mupc_display_proto::peripherals_labels::data1_decompose()
+                    } else {
+                        Vec::new()
+                    };
                 points.push(CatalogPoint {
                     at: *at,
                     label: label.to_string(),
@@ -1238,7 +1242,10 @@ async fn post_config_apply(State(st): State<HostState>, body: Bytes) -> Response
         // （`p2_config.rs:1854`）⇒ 同一件事在两侧各叫一个名字，屏上落到通用"操作失败"，
         // 现场看到的原因反而比事实**更模糊**。统一后：屏上直接落到既有固定文案，
         // 无需为 `Unavailable` 再加一条文案（二选一，取"少改一端 + 语义更准"的那个）。
-        tracing::error!(reason, "控制通道写路径未装配（审计不可用），apply 回 AuditUnavailable 信封");
+        tracing::error!(
+            reason,
+            "控制通道写路径未装配（审计不可用），apply 回 AuditUnavailable 信封"
+        );
         // ⚠️ 原因串**不进** `message`（它是外部装配错误串，含 cmap 外的字 ⇒ 真机豆腐块）：
         // 屏上这条按 `code` 走 EDGE-18 固定文案，`message` 只用于日志 / 现场对拍，
         // 故这里给**固定且 cmap 内**的一条；详情在上面的 `tracing::error!` 里。
@@ -1305,11 +1312,7 @@ async fn post_interlock_ack_m1(State(st): State<HostState>, body: Bytes) -> Resp
 
 /// 两条联锁写端点的**共用实体**（差异只有 `ep`；分派 / 审计 `target` / `op` 名全在
 /// [`crate::interlock_ops::InterlockService`] 内按 `ep` 查表，**不在此处复述**）。
-async fn handle_interlock_op(
-    st: HostState,
-    ep: ConsoleEndpoint,
-    body: Bytes,
-) -> Response {
+async fn handle_interlock_op(st: HostState, ep: ConsoleEndpoint, body: Bytes) -> Response {
     let now = now_ms();
     let svc = match &st.interlock {
         InterlockOpsSource::Ready(svc) => svc,
@@ -1317,8 +1320,11 @@ async fn handle_interlock_op(
             // 与 `post_config_apply` 的装配侧不可用**完全同款**：审计是唯一操作凭据（T-3）
             // ⇒ 不执行、回 `AuditUnavailable`，让屏上落到 EDGE-18 的既有固定文案。
             // 原因串（外部装配错误串，含 cmap 外的字）**只进** `tracing`，不进 `message`。
-            tracing::error!(reason, path = ep.path(),
-                "联锁写路径未装配（审计不可用）⇒ 回 AuditUnavailable 信封，操作未执行");
+            tracing::error!(
+                reason,
+                path = ep.path(),
+                "联锁写路径未装配（审计不可用）⇒ 回 AuditUnavailable 信封，操作未执行"
+            );
             return Json(ControlResponse::<InterlockOpAck>::rejected(
                 "",
                 ControlCode::AuditUnavailable,
@@ -2044,9 +2050,7 @@ mod tests {
     }
 
     /// 同上，但注入日志源（单元 H 用例）。
-    async fn spawn_log_host(
-        logs: LogSource,
-    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn spawn_log_host(logs: LogSource) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         spawn_host_full(
             ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
             ApplySource::Unavailable("本用例不验写路径"),
@@ -2103,11 +2107,14 @@ mod tests {
     async fn spawn_interlock_host_audited(
         backend: std::sync::Arc<crate::interlock_ops::testkit::FakeBackend>,
         tag: &str,
-    ) -> (SocketAddr, tokio::task::JoinHandle<()>, crate::testutil::TempDir) {
+    ) -> (
+        SocketAddr,
+        tokio::task::JoinHandle<()>,
+        crate::testutil::TempDir,
+    ) {
         let dir = crate::testutil::TempDir::new(tag);
-        let sink: Arc<dyn ConsoleAuditSink> = Arc::new(
-            crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"),
-        );
+        let sink: Arc<dyn ConsoleAuditSink> =
+            Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"));
         let b: Arc<dyn mupc_display_proto::InterlockApi> = backend;
         let (addr, h) = spawn_host_full(
             ConfigSource::Ready(Arc::new(RwLock::new(test_config()))),
@@ -2230,7 +2237,12 @@ mod tests {
         let ids: Vec<&str> = view.groups.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![GROUP_IEC104, GROUP_INTERCORE, GROUP_TELEMETRY_LOG, GROUP_LOCAL_ADDR]
+            vec![
+                GROUP_IEC104,
+                GROUP_INTERCORE,
+                GROUP_TELEMETRY_LOG,
+                GROUP_LOCAL_ADDR
+            ]
         );
         assert_eq!(view.groups[0].label, "IEC 104 连接参数");
         assert_eq!(view.groups[1].label, "核间通信参数");
@@ -2247,13 +2259,25 @@ mod tests {
         assert_eq!(field(&view, "system.log_level").value, json!("debug"));
         assert_eq!(field(&view, "intercore.host").value, json!("10.0.0.7"));
         assert_eq!(field(&view, "intercore.port").value, json!(9999));
-        assert_eq!(field(&view, "intercore.heartbeat_interval_sec").value, json!(7));
-        assert_eq!(field(&view, "intercore.reconnect_interval_sec").value, json!(11));
-        assert_eq!(field(&view, "gateway.listen_addr").value, json!("192.168.3.10"));
+        assert_eq!(
+            field(&view, "intercore.heartbeat_interval_sec").value,
+            json!(7)
+        );
+        assert_eq!(
+            field(&view, "intercore.reconnect_interval_sec").value,
+            json!(11)
+        );
+        assert_eq!(
+            field(&view, "gateway.listen_addr").value,
+            json!("192.168.3.10")
+        );
         assert_eq!(field(&view, "gateway.listen_port").value, json!(2405));
         // 只读字段取 **host 部分**（yaml 真值是 host:port，见 `loopback_host_of` 的契约缺口说明）
         assert_eq!(field(&view, "display.bind_addr").value, json!("127.0.0.1"));
-        assert_eq!(field(&view, "display.control_bind_addr").value, json!("127.0.0.1"));
+        assert_eq!(
+            field(&view, "display.control_bind_addr").value,
+            json!("127.0.0.1")
+        );
 
         // 视图自身：本进程尚无写入 ⇒ revision=0、write_mode=正常路径
         assert_eq!(view.revision, REVISION_INITIAL);
@@ -2268,7 +2292,10 @@ mod tests {
     async fn get_config_reflects_memory_copy_not_yaml_file() {
         let shared = Arc::new(RwLock::new(test_config()));
         let (addr, h) = spawn_host(ConfigSource::Ready(shared.clone())).await;
-        assert_eq!(field(&view_from(addr).await, "intercore.port").value, json!(9999));
+        assert_eq!(
+            field(&view_from(addr).await, "intercore.port").value,
+            json!(9999)
+        );
         // 就地改内存副本（模拟 G-2 写入后的内存生效）⇒ 视图随之变化
         shared.write().await.intercore.port = 9101;
         assert_eq!(
@@ -2362,8 +2389,17 @@ mod tests {
             r#"{{"request_id":"0f7a3e10-1111-4222-8333-444455556666","issued_at_ms":{issued},
             "op":"apply","payload":{{"changes":{{"intercore.port":2405}},"from":"edit"}}}}"#
         );
-        let (status, resp) = http(addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(&body)).await;
-        assert_eq!(status, 200, "写端点的结局**一律**走信封（非 2xx 会让渲染端丢掉具体原因）");
+        let (status, resp) = http(
+            addr,
+            "POST",
+            ConsoleEndpoint::ConfigApply.path(),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "写端点的结局**一律**走信封（非 2xx 会让渲染端丢掉具体原因）"
+        );
         let r: mupc_display_proto::ControlResponse<ConfigView> =
             serde_json::from_str(&resp).expect("必须是可解析的信封（渲染端同款路径）");
         assert!(!r.ok, "未装配写路径 ⇒ 不得 ok=true");
@@ -2582,7 +2618,10 @@ mod tests {
     async fn unavailable_config_source_is_non_2xx_not_empty_view() {
         let (addr, h) = spawn_host(ConfigSource::Unavailable("配置内存副本未装配")).await;
         let (status, body) = http(addr, "GET", ConsoleEndpoint::Config.path(), None).await;
-        assert!(!(200..300).contains(&status), "不可用不得回 2xx，实际 {status}");
+        assert!(
+            !(200..300).contains(&status),
+            "不可用不得回 2xx，实际 {status}"
+        );
         assert_eq!(status, 503, "配置源不可用应 503，实际 {status}");
         assert!(
             serde_json::from_str::<ConfigView>(&body).is_err(),
@@ -2590,8 +2629,14 @@ mod tests {
         );
         // 反面对照：同一路径在 Ready 态确实回 200 —— 证明上面的 503 是"不可用"而非"路由坏了"
         h.abort();
-        let (addr2, h2) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
-        assert_eq!(http(addr2, "GET", ConsoleEndpoint::Config.path(), None).await.0, 200);
+        let (addr2, h2) =
+            spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
+        assert_eq!(
+            http(addr2, "GET", ConsoleEndpoint::Config.path(), None)
+                .await
+                .0,
+            200
+        );
         h2.abort();
     }
 
@@ -2617,10 +2662,19 @@ mod tests {
             .expect("非回环 listener 必须被立即拒绝：serve 不得进入服务循环")
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("PL-4"), "原因须可定位安全红线: {err}");
+        assert!(
+            err.to_string().contains("PL-4"),
+            "原因须可定位安全红线: {err}"
+        );
         // 正例：回环 listener 正常服务（同一路径、同一构造）
-        let (addr2, h2) = spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
-        assert_eq!(http(addr2, "GET", ConsoleEndpoint::Config.path(), None).await.0, 200);
+        let (addr2, h2) =
+            spawn_host(ConfigSource::Ready(Arc::new(RwLock::new(test_config())))).await;
+        assert_eq!(
+            http(addr2, "GET", ConsoleEndpoint::Config.path(), None)
+                .await
+                .0,
+            200
+        );
         h2.abort();
     }
 
@@ -2656,15 +2710,29 @@ mod tests {
 
         // 读通道：未发布过帧 ⇒ 503（其自身语义）
         assert_eq!(
-            http(a1, "GET", mupc_display_proto::LATEST_PATH, None).await.0,
+            http(a1, "GET", mupc_display_proto::LATEST_PATH, None)
+                .await
+                .0,
             503
         );
         // 控制通道同时正常服务（互不干扰）
-        assert_eq!(http(a2, "GET", ConsoleEndpoint::Config.path(), None).await.0, 200);
-        // 路径集不相交：控制路径在读通道上 404，读路径在控制通道上 404
-        assert_eq!(http(a1, "GET", ConsoleEndpoint::Config.path(), None).await.0, 404);
         assert_eq!(
-            http(a2, "GET", mupc_display_proto::LATEST_PATH, None).await.0,
+            http(a2, "GET", ConsoleEndpoint::Config.path(), None)
+                .await
+                .0,
+            200
+        );
+        // 路径集不相交：控制路径在读通道上 404，读路径在控制通道上 404
+        assert_eq!(
+            http(a1, "GET", ConsoleEndpoint::Config.path(), None)
+                .await
+                .0,
+            404
+        );
+        assert_eq!(
+            http(a2, "GET", mupc_display_proto::LATEST_PATH, None)
+                .await
+                .0,
             404
         );
         h1.abort();
@@ -2978,9 +3046,15 @@ gateway:
         // 内存副本 **由同一份文本解析**（与生产一致：启动期读的同一文件）
         let cfg: CoreConfig = serde_yaml::from_str(text).expect("写用例样例 yaml 必须可解析");
         let core = Arc::new(RwLock::new(cfg));
-        let audit: Arc<dyn ConsoleAuditSink> =
-            sink.unwrap_or_else(|| Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).unwrap()));
-        let svc = Arc::new(ConfigService::new(yaml_path.clone(), core.clone(), audit, hot));
+        let audit: Arc<dyn ConsoleAuditSink> = sink.unwrap_or_else(|| {
+            Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).unwrap())
+        });
+        let svc = Arc::new(ConfigService::new(
+            yaml_path.clone(),
+            core.clone(),
+            audit,
+            hot,
+        ));
         let (addr, task) = spawn_host_with_apply(
             crate::startup::console_config_source(&core),
             ApplySource::Ready(svc.clone()),
@@ -3022,8 +3096,13 @@ gateway:
             "payload": {"changes": changes, "from": from},
         })
         .to_string();
-        let (status, resp) =
-            http(addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(&body)).await;
+        let (status, resp) = http(
+            addr,
+            "POST",
+            ConsoleEndpoint::ConfigApply.path(),
+            Some(&body),
+        )
+        .await;
         let parsed = serde_json::from_str::<ControlResponse<ConfigView>>(&resp)
             .unwrap_or_else(|e| panic!("回执必须是合法信封（渲染端同款路径）: {e}\n{resp}"));
         (status, parsed)
@@ -3046,7 +3125,11 @@ gateway:
         let applied = resp.applied.expect("成功必须带新视图");
         assert_eq!(field(&applied, "intercore.port").value, json!(2405));
         assert_eq!(applied.revision, 1);
-        assert_eq!(applied.write_mode, WriteMode::TextPreserve, "正常路径 = 保留式编辑");
+        assert_eq!(
+            applied.write_mode,
+            WriteMode::TextPreserve,
+            "正常路径 = 保留式编辑"
+        );
         assert!(resp.audit_id.is_some(), "成功回执带审计号（现场对拍）");
 
         // 文件：只改目标行，注释与未建模键逐字保留
@@ -3056,7 +3139,10 @@ gateway:
         // GET 立刻反映（**同一份内存副本**）：这是 UI「保存后不等下一帧就刷新」的依据
         let view = view_from(w.addr).await;
         assert_eq!(field(&view, "intercore.port").value, json!(2405));
-        assert_eq!(view.revision, 1, "GET 的 revision 必须来自写服务（不是常量 0）");
+        assert_eq!(
+            view.revision, 1,
+            "GET 的 revision 必须来自写服务（不是常量 0）"
+        );
     }
 
     /// 幂等端到端：同一个 `request_id` 再发一次（渲染端超时重试的真实形态）⇒ `duplicate=true`，
@@ -3064,12 +3150,16 @@ gateway:
     #[tokio::test]
     async fn post_apply_duplicate_over_the_wire_is_flagged_and_not_re_executed() {
         let w = spawn_write_host("apply-dup", None, None).await;
-        let (_, first) = post_apply(w.addr, "rid-dup", json!({"intercore.port": 2405}), "apply").await;
+        let (_, first) =
+            post_apply(w.addr, "rid-dup", json!({"intercore.port": 2405}), "apply").await;
         let text = w.disk();
         let (status, second) =
             post_apply(w.addr, "rid-dup", json!({"intercore.port": 2405}), "apply").await;
         assert_eq!(status, 200);
-        assert!(second.duplicate, "重复请求必须带 duplicate=true（幂等命中标记）");
+        assert!(
+            second.duplicate,
+            "重复请求必须带 duplicate=true（幂等命中标记）"
+        );
         assert_eq!(second.code, first.code);
         assert_eq!(second.audit_id, first.audit_id, "复用首次审计记录");
         assert_eq!(w.disk(), text, "不得被第二次请求再写一遍");
@@ -3088,7 +3178,10 @@ gateway:
             "apply",
         )
         .await;
-        assert_eq!(status, 200, "业务拒绝也走 200 + 信封（渲染端才有「具体原因」可显示）");
+        assert_eq!(
+            status, 200,
+            "业务拒绝也走 200 + 信封（渲染端才有「具体原因」可显示）"
+        );
         assert!(!resp.ok);
         assert_eq!(resp.code, ControlCode::RejectedValidation);
         assert_eq!(resp.field_errors.len(), 1, "逐字段标红的数据源");
@@ -3104,12 +3197,20 @@ gateway:
     async fn malformed_body_still_gets_a_readable_receipt() {
         let w = spawn_write_host("apply-bad-body", None, None).await;
         for bad in ["", "not json at all", r#"{"request_id":"r1"}"#] {
-            let (status, body) =
-                http(w.addr, "POST", ConsoleEndpoint::ConfigApply.path(), Some(bad)).await;
+            let (status, body) = http(
+                w.addr,
+                "POST",
+                ConsoleEndpoint::ConfigApply.path(),
+                Some(bad),
+            )
+            .await;
             assert_eq!(status, 200, "畸形 body 也不得回非 2xx（`{bad}`）");
             let r: ControlResponse<ConfigView> = serde_json::from_str(&body)
                 .unwrap_or_else(|e| panic!("必须是可解析信封（`{bad}`）: {e}\n{body}"));
-            assert!(!r.ok && r.code == ControlCode::RejectedValidation, "`{bad}` → {r:?}");
+            assert!(
+                !r.ok && r.code == ControlCode::RejectedValidation,
+                "`{bad}` → {r:?}"
+            );
             assert!(!r.message.is_empty(), "必须给得出具体原因");
         }
     }
@@ -3119,8 +3220,13 @@ gateway:
     async fn audit_unavailable_is_fail_closed_over_the_wire() {
         let w = spawn_write_host("apply-nofailclosed", None, Some(Arc::new(BrokenSink))).await;
         let before = w.disk();
-        let (status, resp) =
-            post_apply(w.addr, "rid-audit", json!({"intercore.port": 2405}), "apply").await;
+        let (status, resp) = post_apply(
+            w.addr,
+            "rid-audit",
+            json!({"intercore.port": 2405}),
+            "apply",
+        )
+        .await;
         assert_eq!(status, 200);
         assert!(!resp.ok && resp.code == ControlCode::AuditUnavailable);
         assert!(resp.applied.is_none(), "操作未生效");
@@ -3139,11 +3245,20 @@ gateway:
                     web_api:\n  tls_cert: null\n  tls_key: null\n\
                     ai_engine: {}\nplugins: {}\n";
         let w = spawn_write_host("apply-fallback", Some(yaml), None).await;
-        let (_, resp) =
-            post_apply(w.addr, "rid-fb", json!({"gateway.listen_port": 2405}), "apply").await;
+        let (_, resp) = post_apply(
+            w.addr,
+            "rid-fb",
+            json!({"gateway.listen_port": 2405}),
+            "apply",
+        )
+        .await;
         assert!(resp.ok, "{resp:?}");
         let applied = resp.applied.unwrap();
-        assert_eq!(applied.write_mode, WriteMode::FullRewrite, "回执必须显式声明整体重写");
+        assert_eq!(
+            applied.write_mode,
+            WriteMode::FullRewrite,
+            "回执必须显式声明整体重写"
+        );
         // 明示降级的话术取 `receipt::FULL_REWRITE_UNLOCATABLE`（`整`/`体`/`写` 都不在 cmap 内
         // ⇒ 不能写"整体重写"）；与渲染端 `p2_config::TEXT_TOAST_FULL_REWRITE` 同款措辞。
         // **逐字**比整条串（比原来的 `contains("整体重写")` 更严）：`gateway.listen_port`
@@ -3603,9 +3718,7 @@ gateway:
             addr,
             &log_qs(
                 "custom",
-                &format!(
-                    "&from={from}&to={to}&cursor={max_seq}&limit=10&levels=error&levels=warn"
-                ),
+                &format!("&from={from}&to={to}&cursor={max_seq}&limit=10&levels=error&levels=warn"),
             ),
         )
         .await;
@@ -3642,12 +3755,24 @@ gateway:
         // 重复键 ⇒ 200，且**两个级别都被解析出来**（命中内容为证）
         let qs = log_qs(
             "custom",
-            &format!("&from={base}&to={}&limit=20&levels=error&levels=info", base + 60_000),
+            &format!(
+                "&from={base}&to={}&limit=20&levels=error&levels=info",
+                base + 60_000
+            ),
         );
         let (ok, page) = logs_from(addr, &qs).await;
         assert_eq!(ok, 200, "{page:?}");
-        assert_eq!(page.entries.len(), 2, "两种级别的重复键都必须解析出来：{:?}", page.entries);
-        let mut levels: Vec<String> = page.entries.iter().map(|e| format!("{:?}", e.level)).collect();
+        assert_eq!(
+            page.entries.len(),
+            2,
+            "两种级别的重复键都必须解析出来：{:?}",
+            page.entries
+        );
+        let mut levels: Vec<String> = page
+            .entries
+            .iter()
+            .map(|e| format!("{:?}", e.level))
+            .collect();
         levels.sort();
         assert_eq!(
             levels,
@@ -3663,7 +3788,10 @@ gateway:
             "GET",
             &log_qs(
                 "custom",
-                &format!("&from={base}&to={}&limit=20&levels=error,info", base + 60_000),
+                &format!(
+                    "&from={base}&to={}&limit=20&levels=error,info",
+                    base + 60_000
+                ),
             ),
             None,
         )
@@ -3700,9 +3828,17 @@ gateway:
         // ⚠️ A 组裁定（本用例原断言 `entries.is_empty()`）：超限页**带回已收集的条目**，
         // 否则渲染端 `p3_logs.rs::apply_page` 见空 ⇒ `shown=0` ⇒ 列表被清空（1h 已是最小档，
         // "再缩也没用"）。这里钉死**具体内容**：3 行里超限发生在第 3 行 ⇒ 交付最新的 2 条。
-        assert_eq!(page.entries.len(), 2, "已收集的 2 条必须带上：{:?}", page.entries);
         assert_eq!(
-            page.entries.iter().map(|e| e.message.as_str()).collect::<Vec<_>>(),
+            page.entries.len(),
+            2,
+            "已收集的 2 条必须带上：{:?}",
+            page.entries
+        );
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
             vec!["msg-2", "msg-1"],
             "必须是**最新**的两条且倒序"
         );
@@ -3723,9 +3859,19 @@ gateway:
             mupc_display_proto::config::LogLimits::default(),
         );
         let (a2, h2) = spawn_log_host(LogSource::Ready(Arc::new(svc2))).await;
-        let (s, empty) = logs_from(a2, &log_qs("custom", &format!("&from={base}&to={}&limit=20", base + 60_000))).await;
+        let (s, empty) = logs_from(
+            a2,
+            &log_qs(
+                "custom",
+                &format!("&from={base}&to={}&limit=20", base + 60_000),
+            ),
+        )
+        .await;
         assert_eq!(s, 200);
-        assert!(empty.entries.is_empty() && !empty.range_too_large, "无日志 ≠ 超限");
+        assert!(
+            empty.entries.is_empty() && !empty.range_too_large,
+            "无日志 ≠ 超限"
+        );
         h2.abort();
     }
 
@@ -3775,10 +3921,17 @@ gateway:
         );
         let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
 
-        let qs = log_qs("custom", &format!("&from={base}&to={}&limit=20", base + 60_000));
+        let qs = log_qs(
+            "custom",
+            &format!("&from={base}&to={}&limit=20", base + 60_000),
+        );
         let (_, before) = logs_from(addr, &qs).await;
-        let (_, before_targets) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
-        assert!(!before.entries.is_empty(), "写前必须是**非空页**（否则下面的比对是恒真的）");
+        let (_, before_targets) =
+            http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
+        assert!(
+            !before.entries.is_empty(),
+            "写前必须是**非空页**（否则下面的比对是恒真的）"
+        );
 
         for path in [
             ConsoleEndpoint::Logs.path(),
@@ -3792,9 +3945,15 @@ gateway:
 
         // 只读的**实测**证据：8 次写尝试后，两个端点读到的内容与写前**逐字段一致**（无副作用）
         let (_, after) = logs_from(addr, &qs).await;
-        assert_eq!(after, before, "`/logs` 的整页（含 entries 五个字段）必须与写前逐字段一致");
+        assert_eq!(
+            after, before,
+            "`/logs` 的整页（含 entries 五个字段）必须与写前逐字段一致"
+        );
         let (_, after_targets) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
-        assert_eq!(after_targets, before_targets, "`/logs/targets` 的裸 Vec 必须与写前一致");
+        assert_eq!(
+            after_targets, before_targets,
+            "`/logs/targets` 的裸 Vec 必须与写前一致"
+        );
         h.abort();
     }
 
@@ -3820,7 +3979,10 @@ gateway:
         ] {
             let (s, b) = http(addr, "GET", qs, None).await;
             assert_eq!(s, 400, "{qs} 应 400，实际 {s}: {b}");
-            assert!(serde_json::from_str::<LogPage>(&b).is_err(), "{qs} 错误体: {b}");
+            assert!(
+                serde_json::from_str::<LogPage>(&b).is_err(),
+                "{qs} 错误体: {b}"
+            );
         }
         h.abort();
     }
@@ -3868,7 +4030,10 @@ gateway:
         // `/logs/targets` 回的也是**原始键**（不是编码形态）
         let (_, b) = http(addr, "GET", ConsoleEndpoint::LogsTargets.path(), None).await;
         let targets: Vec<String> = serde_json::from_str(&b).unwrap();
-        assert_eq!(targets, vec!["mupc_gateway".to_string(), "核间/gateway".to_string()]);
+        assert_eq!(
+            targets,
+            vec!["mupc_gateway".to_string(), "核间/gateway".to_string()]
+        );
         h.abort();
     }
 
@@ -3883,11 +4048,17 @@ gateway:
             mupc_display_proto::config::LogLimits::default(),
         );
         let (addr, h) = spawn_log_host(LogSource::Ready(Arc::new(svc))).await;
-        let qs = log_qs("custom", &format!("&from={base}&to={}&limit=20", base + 1000));
+        let qs = log_qs(
+            "custom",
+            &format!("&from={base}&to={}&limit=20", base + 1000),
+        );
         let (_, body) = http(addr, "GET", &qs, None).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         for k in ["entries", "next_cursor", "has_more", "range_too_large"] {
-            assert!(v.get(k).is_some(), "回包缺 `{k}`（渲染端会整帧 Err）: {body}");
+            assert!(
+                v.get(k).is_some(),
+                "回包缺 `{k}`（渲染端会整帧 Err）: {body}"
+            );
         }
         // 单条日志的五个字段同样齐全（`LogEntry`）
         let e = &v["entries"][0];
@@ -3925,8 +4096,15 @@ gateway:
         assert_eq!(status, 200);
         assert_eq!(page.entries.len(), 1, "夹具恰好一条");
         let m = &page.entries[0].message;
-        assert!(m.len() <= crate::log_service::MESSAGE_MAX_BYTES, "超长必须截断: {}", m.len());
-        assert!(m.ends_with(crate::log_service::TRUNCATION_MARKER), "截断必须可见");
+        assert!(
+            m.len() <= crate::log_service::MESSAGE_MAX_BYTES,
+            "超长必须截断: {}",
+            m.len()
+        );
+        assert!(
+            m.ends_with(crate::log_service::TRUNCATION_MARKER),
+            "截断必须可见"
+        );
         h.abort();
     }
 
@@ -4047,7 +4225,10 @@ gateway:
         let blocker = t.write("blocker", "i am a file, not a dir");
         let (addr, h) = spawn_audit_host(audit_at(blocker.join("audit"))).await;
         let (s, b) = http(addr, "GET", ConsoleEndpoint::Audit.path(), None).await;
-        assert_ne!(s, 503, "**不得**用 503：非 2xx 到不了屏上的「审计记录不可用」态");
+        assert_ne!(
+            s, 503,
+            "**不得**用 503：非 2xx 到不了屏上的「审计记录不可用」态"
+        );
         assert_eq!(s, 200);
         let un: mupc_display_proto::AuditPage = serde_json::from_str(&b).unwrap();
         assert!(!un.available, "源不可用必须显式打招呼");
@@ -4074,13 +4255,13 @@ gateway:
         let t = crate::testutil::TempDir::new("i-400");
         let (addr, h) = spawn_audit_host(audit_at(t.path())).await;
         for q in [
-            "?page=0",                       // 1-based
-            "?page_size=50",                 // 契约固定 20
-            "?from=5",                       // 半截窗口
-            "?from=9&to=5",                  // 倒置窗口
-            "?ops=mode_switch",              // 非本期操作集
+            "?page=0",                             // 1-based
+            "?page_size=50",                       // 契约固定 20
+            "?from=5",                             // 半截窗口
+            "?from=9&to=5",                        // 倒置窗口
+            "?ops=mode_switch",                    // 非本期操作集
             "?ops=config_apply,interlock_release", // 逗号拼多值
-            "?unknown=1",                    // 未知键
+            "?unknown=1",                          // 未知键
         ] {
             let (s, b) = http(
                 addr,
@@ -4096,7 +4277,13 @@ gateway:
             );
         }
         // 反面对照：同一路径在合法参数下确实回 200 —— 证明上面的 400 是"参数非法"而非"路由坏了"
-        let (s_ok, _) = http(addr, "GET", &format!("{}?page=1", ConsoleEndpoint::Audit.path()), None).await;
+        let (s_ok, _) = http(
+            addr,
+            "GET",
+            &format!("{}?page=1", ConsoleEndpoint::Audit.path()),
+            None,
+        )
+        .await;
         assert_eq!(s_ok, 200);
         h.abort();
     }
@@ -4111,9 +4298,19 @@ gateway:
         let (addr, h) = spawn_audit_host(audit_at(t.path())).await;
         for ep in [ConsoleEndpoint::Audit, ConsoleEndpoint::AuditOps] {
             let (s, b) = http(addr, "POST", ep.path(), Some("{}")).await;
-            assert_eq!(s, 405, "`{}` 只读 ⇒ POST 必须 405，实际 {s}: {b}", ep.path());
+            assert_eq!(
+                s,
+                405,
+                "`{}` 只读 ⇒ POST 必须 405，实际 {s}: {b}",
+                ep.path()
+            );
             let (s2, _) = http(addr, "GET", ep.path(), None).await;
-            assert_eq!(s2, 200, "`{}` 的 GET 必须照常可用（证明 405 不是路由坏了）", ep.path());
+            assert_eq!(
+                s2,
+                200,
+                "`{}` 的 GET 必须照常可用（证明 405 不是路由坏了）",
+                ep.path()
+            );
         }
         h.abort();
     }
@@ -4130,7 +4327,10 @@ gateway:
         let (s, b) = http(addr, "GET", &q, None).await;
         assert_eq!(s, 200, "重复键必须被接受: {b}");
         let page: mupc_display_proto::AuditPage = serde_json::from_str(&b).unwrap();
-        assert!(page.available && page.entries.is_empty(), "空目录 + 合法筛选 = 空态");
+        assert!(
+            page.available && page.entries.is_empty(),
+            "空目录 + 合法筛选 = 空态"
+        );
         h.abort();
     }
 
@@ -4138,9 +4338,7 @@ gateway:
     // 单元 J：联锁两条写端点（渲染端同款线协议）
     // ═══════════════════════════════════════════════════════════════════════
 
-    use crate::interlock_ops::testkit::{
-        payload_of, view_latched, view_unlatched, FakeBackend,
-    };
+    use crate::interlock_ops::testkit::{payload_of, view_latched, view_unlatched, FakeBackend};
     use mupc_display_proto::{InterlockOpAck, InterlockOpPayload, InterlockReject};
 
     /// 发一次联锁写请求（渲染端 `ConsoleClient::begin_write` 同款线格式）。
@@ -4258,7 +4456,10 @@ gateway:
                 &payload_of(&view_latched()),
             )
             .await;
-            assert_eq!(status, 200, "{r:?}：拒绝也走信封（非 2xx 会让屏上丢掉具体原因）");
+            assert_eq!(
+                status, 200,
+                "{r:?}：拒绝也走信封（非 2xx 会让屏上丢掉具体原因）"
+            );
             assert!(!resp.ok, "{r:?} 不得 ok=true");
             assert_eq!(resp.code, ControlCode::RejectedPrecondition, "{r:?}");
             assert_eq!(
@@ -4272,7 +4473,9 @@ gateway:
         // 七条拒绝 ⇒ 七条 Failed 审计（`after` 必须为 None = 未生效）
         let entries = crate::interlock_ops::testkit::read_entries(dir.path());
         assert_eq!(entries.len(), 7);
-        assert!(entries.iter().all(|e| e.result == mupc_display_proto::AuditResult::Failed));
+        assert!(entries
+            .iter()
+            .all(|e| e.result == mupc_display_proto::AuditResult::Failed));
         assert!(entries.iter().all(|e| e.after.is_none()));
         h.abort();
     }
@@ -4287,23 +4490,23 @@ gateway:
         // 画面以为"未联锁"，装置此刻"已联锁"
         let mut stale = payload_of(&view_latched());
         stale.observed_latched = false;
-        let (status, resp) = post_interlock(
-            addr,
-            ConsoleEndpoint::InterlockRelease,
-            "rid-j-cf",
-            &stale,
-        )
-        .await;
+        let (status, resp) =
+            post_interlock(addr, ConsoleEndpoint::InterlockRelease, "rid-j-cf", &stale).await;
         assert_eq!(status, 200);
         assert!(!resp.ok);
         assert_eq!(resp.code, ControlCode::RejectedPrecondition);
         assert_eq!(
-            resp.message, receipt::INTERLOCK_CONFLICT,
+            resp.message,
+            receipt::INTERLOCK_CONFLICT,
             "EDGE-19 文案逐字取设计原文（客户端不按 `code` 猜语义 ⇒ 服务端必须说这句话）"
         );
         assert!(resp.applied.is_none());
         assert_eq!(b.entered(), 0, "乐观并发不符 ⇒ 一个动作都不许发");
-        assert_eq!(crate::interlock_ops::testkit::read_entries(dir.path()).len(), 1, "冲突也留痕");
+        assert_eq!(
+            crate::interlock_ops::testkit::read_entries(dir.path()).len(),
+            1,
+            "冲突也留痕"
+        );
         h.abort();
     }
 
@@ -4316,27 +4519,20 @@ gateway:
         let (addr, h, dir) = spawn_interlock_host_audited(b.clone(), "j-dup").await;
         let p = payload_of(&view_latched());
 
-        let (_, first) = post_interlock(
-            addr,
-            ConsoleEndpoint::InterlockRelease,
-            "rid-j-dup",
-            &p,
-        )
-        .await;
+        let (_, first) =
+            post_interlock(addr, ConsoleEndpoint::InterlockRelease, "rid-j-dup", &p).await;
         assert!(first.ok && !first.duplicate);
         // 第二次：同一份报文（渲染端 `retry` 原样重发）——**同一 request_id**
-        let (status, second) = post_interlock(
-            addr,
-            ConsoleEndpoint::InterlockRelease,
-            "rid-j-dup",
-            &p,
-        )
-        .await;
+        let (status, second) =
+            post_interlock(addr, ConsoleEndpoint::InterlockRelease, "rid-j-dup", &p).await;
         assert_eq!(status, 200);
         assert!(second.duplicate, "同 `(op, request_id)` ⇒ duplicate=true");
         assert_eq!(second.audit_id, first.audit_id, "复用首次审计，不重复留痕");
         assert_eq!(b.release_calls(), 1, "**不得**第二次生效");
-        assert_eq!(crate::interlock_ops::testkit::read_entries(dir.path()).len(), 1);
+        assert_eq!(
+            crate::interlock_ops::testkit::read_entries(dir.path()).len(),
+            1
+        );
         h.abort();
     }
 
@@ -4359,7 +4555,13 @@ gateway:
         // 第一条：在途（后端停在 await 点）
         let p_first = p.clone();
         let a = tokio::spawn(async move {
-            post_interlock(addr, ConsoleEndpoint::InterlockRelease, "rid-j-busy", &p_first).await
+            post_interlock(
+                addr,
+                ConsoleEndpoint::InterlockRelease,
+                "rid-j-busy",
+                &p_first,
+            )
+            .await
         });
         // 等"已进入后端"的**确定性**唤醒点（`Notify`；改前是 `sleep(2ms)` 轮询 500 次——
         // 既慢又在极端负载下会假红/假绿。范式同 `interlock.rs` 的并发用例。见建议 8。）
@@ -4367,13 +4569,8 @@ gateway:
         assert_eq!(b.entered(), 1, "前提：第一条已进入后端且在途");
 
         // 第二条：**同一 request_id** ⇒ Busy（幂等表命中"处理中"）
-        let (status, resp) = post_interlock(
-            addr,
-            ConsoleEndpoint::InterlockRelease,
-            "rid-j-busy",
-            &p,
-        )
-        .await;
+        let (status, resp) =
+            post_interlock(addr, ConsoleEndpoint::InterlockRelease, "rid-j-busy", &p).await;
         assert_eq!(status, 200);
         assert!(!resp.ok);
         assert_eq!(resp.code, ControlCode::Busy);
@@ -4416,9 +4613,8 @@ gateway:
     async fn interlock_not_enabled_reports_unavailable_not_fake_success() {
         // `io.enabled=false` 的装配形态：**后端 None**、审计照旧就绪（该次尝试仍要留痕）
         let dir = crate::testutil::TempDir::new("j-off");
-        let sink: Arc<dyn ConsoleAuditSink> = Arc::new(
-            crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"),
-        );
+        let sink: Arc<dyn ConsoleAuditSink> =
+            Arc::new(crate::console_audit::FileAuditSink::open(dir.path()).expect("审计落点可建"));
         let (addr, h) = spawn_interlock_host(InterlockOpsSource::Ready(Arc::new(
             crate::interlock_ops::InterlockService::new(None, sink),
         )))
@@ -4469,7 +4665,11 @@ gateway:
         let r: ControlResponse<InterlockOpAck> = serde_json::from_str(&body).unwrap();
         assert!(!r.ok);
         assert_eq!(r.code, ControlCode::RejectedValidation);
-        assert_eq!(r.message, receipt::BAD_ENVELOPE, "屏上只给固定文案（原因进 field_errors）");
+        assert_eq!(
+            r.message,
+            receipt::BAD_ENVELOPE,
+            "屏上只给固定文案（原因进 field_errors）"
+        );
 
         // `op` 是别的端点 ⇒ 同一信封拒绝（防误路由）
         let body = serde_json::json!({
@@ -4537,11 +4737,17 @@ gateway:
             // 契约 `StopPending`：全角逗号
             ("PCS 停机未确认", &['\u{ff0c}']),
             // 契约 `Busy`：全角逗号 + `理` / `稍` / `候`
-            ("上一操作正在处理中", &['\u{5019}', '\u{7406}', '\u{7a0d}', '\u{ff0c}']),
+            (
+                "上一操作正在处理中",
+                &['\u{5019}', '\u{7406}', '\u{7a0d}', '\u{ff0c}'],
+            ),
             // 契约 `Internal`：全角冒号 + `错`/`误`/`句`/`柄`/`丢` + 小写 `io`
             (
                 "内部错误",
-                &['i', 'o', '\u{4e22}', '\u{53e5}', '\u{67c4}', '\u{8bef}', '\u{9519}', '\u{ff1a}'],
+                &[
+                    'i', 'o', '\u{4e22}', '\u{53e5}', '\u{67c4}', '\u{8bef}', '\u{9519}',
+                    '\u{ff1a}',
+                ],
             ),
             // 设计原文（EDGE-19）：全角逗号
             ("联锁状态已变化", &['\u{ff0c}']),
@@ -4588,7 +4794,11 @@ gateway:
                 .unwrap_or_default()
         };
         let mut contract_texts = crate::interlock_ops::reject_messages();
-        assert_eq!(contract_texts.len(), 7, "契约 `InterlockReject` 七个变体全在内");
+        assert_eq!(
+            contract_texts.len(),
+            7,
+            "契约 `InterlockReject` 七个变体全在内"
+        );
         contract_texts.push(receipt::INTERLOCK_CONFLICT.to_string());
         for s in &contract_texts {
             assert_eq!(
@@ -4604,7 +4814,9 @@ gateway:
             "`联锁功能未启用` 不得进钉死表（进去就等于承认一个不存在的缺口）"
         );
         assert!(
-            PINNED_MISSING.iter().any(|(p, _)| p.starts_with("PCS 停机未确认")),
+            PINNED_MISSING
+                .iter()
+                .any(|(p, _)| p.starts_with("PCS 停机未确认")),
             "表里须有 StopPending 的条目"
         );
 
@@ -4733,7 +4945,9 @@ stations:
         let cfg: mupc_southd::config::SouthStationsConfig =
             serde_yaml::from_str(PERIPH_TEST_YAML).unwrap();
         let plan = crate::display_host::peripheral_plan(&cfg);
-        let cat = Arc::new(crate::console_host::build_peripheral_catalog(&cfg, &plan, 42));
+        let cat = Arc::new(crate::console_host::build_peripheral_catalog(
+            &cfg, &plan, 42,
+        ));
         let latest = Arc::new(LatestValues::new(5));
         // ⚠️ 用**真实时钟**：端点侧 `snapshot(now_ms())` 判站活性，假时标会让整段变 Offline
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
@@ -4767,12 +4981,9 @@ stations:
             ));
         }
         latest.apply(samples);
-        let src: Arc<dyn crate::display_host::PeripheralSource> =
-            Arc::new(crate::display_host::StationPeripheralSource::new(
-                latest.clone(),
-                plan,
-                cat.rev,
-            ));
+        let src: Arc<dyn crate::display_host::PeripheralSource> = Arc::new(
+            crate::display_host::StationPeripheralSource::new(latest.clone(), plan, cat.rev),
+        );
         (
             PeripheralConsoleSource::Ready {
                 source: src,
@@ -4841,20 +5052,38 @@ stations:
         assert_eq!(status, 200, "已接线 ⇒ 200 + 裸 PeripheralCatalog：{body}");
         let got: mupc_display_proto::PeripheralCatalog = serde_json::from_str(&body)
             .unwrap_or_else(|e| panic!("catalog 必须是可解析的裸 PeripheralCatalog: {e}\n{body}"));
-        assert_eq!(got.rev, cat.rev, "rev 必须与装配的目录同值（帧内 catalog_rev 的唯一真源）");
+        assert_eq!(
+            got.rev, cat.rev,
+            "rev 必须与装配的目录同值（帧内 catalog_rev 的唯一真源）"
+        );
         assert_eq!(got.generated_ms, 42);
         // 站点：id / role / enabled / blocks；块：name / kind / renames / points
-        let fire = got.stations.iter().find(|s| s.id == "fire").expect("fire 站");
+        let fire = got
+            .stations
+            .iter()
+            .find(|s| s.id == "fire")
+            .expect("fire 站");
         assert_eq!(fire.role, mupc_display_proto::PeriphRole::Fire);
         assert!(fire.enabled);
-        let det = fire.blocks.iter().find(|b| b.name == "fire_det").expect("fire_det 块");
+        let det = fire
+            .blocks
+            .iter()
+            .find(|b| b.name == "fire_det")
+            .expect("fire_det 块");
         assert_eq!(det.kind, mupc_display_proto::CatalogBlockKind::Scalar);
-        assert_eq!(det.points.len(), 114, "fire_det 按配置 count 展开（6×(n−1)）");
+        assert_eq!(
+            det.points.len(),
+            114,
+            "fire_det 按配置 count 展开（6×(n−1)）"
+        );
         // 点：at / label / unit / decimals / bits / enum_labels / decompose / group
         let p = &det.points[2]; // at = 3 → 「数据 1」（模板第 3 位）
         assert_eq!(p.at, 3);
         assert_eq!(p.label, "数据 1", "模板短标签来自 §15.4 明细列名");
-        assert_eq!(p.decimals, 0, "登记 scale = 1.0 ⇒ 0 位（W-2：由 lookup_in 派生）");
+        assert_eq!(
+            p.decimals, 0,
+            "登记 scale = 1.0 ⇒ 0 位（W-2：由 lookup_in 派生）"
+        );
         assert_eq!(p.group, "fire_detector");
         assert_eq!(p.decompose.len(), 2, "「数据 1」拆解（烟雾 + 温度，F21.5）");
         assert_eq!(p.decompose[0].label, "烟雾");
@@ -4863,11 +5092,18 @@ stations:
         let sys = fire.blocks.iter().find(|b| b.name == "fire_sys").unwrap();
         let cyl = sys.points.iter().find(|p| p.at == 2).expect("fire_sys_2");
         assert_eq!(cyl.label, "灭火瓶压力", "短标签表 §15.4");
-        assert_eq!(cyl.unit.as_deref(), Some("kPa"), "单位真源 = 短标签表（W-2）");
+        assert_eq!(
+            cyl.unit.as_deref(),
+            Some("kPa"),
+            "单位真源 = 短标签表（W-2）"
+        );
         assert_eq!(cyl.group, "fire_cylinder");
         let st = sys.points.iter().find(|p| p.at == 1).expect("fire_sys_1");
         assert_eq!(st.label, "系统状态");
-        assert_eq!(st.unit, None, "位图点无量纲（`None` = 无量纲，**不是**缺单位）");
+        assert_eq!(
+            st.unit, None,
+            "位图点无量纲（`None` = 无量纲，**不是**缺单位）"
+        );
         // 火警等级枚举（唯一权威 = PRD F21 展示表）
         let lvl = sys.points.iter().find(|p| p.at == 6).expect("fire_sys_6");
         assert_eq!(lvl.group, "fire_level");
@@ -4878,7 +5114,10 @@ stations:
         let st1 = sys.points.iter().find(|p| p.at == 1).expect("fire_sys_1");
         assert_eq!(st1.bits.len(), 16);
         assert_eq!(st1.bits.iter().filter(|b| b.defined).count(), 6);
-        assert!(st1.bits.iter().all(|b| !b.inverted), "R-41 追认前 inverted 无生产者");
+        assert!(
+            st1.bits.iter().all(|b| !b.inverted),
+            "R-41 追认前 inverted 无生产者"
+        );
         assert!(st1.bits[14].defined && st1.bits[14].label == "主电故障");
         assert!(!st1.bits[0].defined && st1.bits[0].label.is_empty());
         // 位块（discrete）⇒ kind = discrete；离散位点恰 1 项 bits、index = at−1
@@ -4891,7 +5130,10 @@ stations:
         assert_eq!(a2.bits[0].index, 1);
         assert_eq!(a2.group, "bms_alarm");
         // 离散位点的短标签同样取短标签表（288 位逐位有文案 ⇒ 不受"登记 label 直上屏"影响）
-        assert_eq!(a2.label, "簇端电压欠压·轻", "短标签表 §15.5.2「告警位（288）」");
+        assert_eq!(
+            a2.label, "簇端电压欠压·轻",
+            "短标签表 §15.5.2「告警位（288）」"
+        );
         assert_eq!(a2.unit, None);
         // 点位总数 = 外设段行数（屏侧行数与 catalog 行数恒等，F25）：114 + 13 + 288
         let total: usize = got
@@ -4920,8 +5162,15 @@ stations:
         let got: mupc_display_proto::FireDetectorPage = serde_json::from_str(&body).unwrap();
         assert_eq!((got.page, got.page_size), (1, 5), "回显请求分页");
         assert_eq!(got.total, Some(25), "登记数 = `fire_det_count`");
-        assert_eq!(got.expanded, 20, "实际可读只数 = 1（fire_sys）+ 19（fire_det）");
-        assert_ne!(got.expanded, got.total.unwrap(), "不一致必须如实返回，不得静默裁剪");
+        assert_eq!(
+            got.expanded, 20,
+            "实际可读只数 = 1（fire_sys）+ 19（fire_det）"
+        );
+        assert_ne!(
+            got.expanded,
+            got.total.unwrap(),
+            "不一致必须如实返回，不得静默裁剪"
+        );
         assert!(got.available, "消防站已配置 ⇒ available");
         assert_eq!(got.items.len(), 5, "默认页大小 20 被显式 5 覆盖");
         assert!(got.has_more, "25 只 / 每页 5 ⇒ 还有下一页");
@@ -4957,7 +5206,10 @@ stations:
         )
         .await;
         let empty: mupc_display_proto::FireDetectorPage = serde_json::from_str(&b3).unwrap();
-        assert!(empty.items.is_empty() && !empty.has_more, "越界页 = 空页，不报错");
+        assert!(
+            empty.items.is_empty() && !empty.has_more,
+            "越界页 = 空页，不报错"
+        );
         // 未接线 ⇒ 503（不谎报 200 + 空页）
         let (addr2, h2) = spawn_periph_host(
             PeripheralConsoleSource::Unavailable("本用例验 503"),
@@ -4997,7 +5249,10 @@ stations:
         assert_eq!(got.items.len(), 10);
         assert_eq!(got.items[0].at, 21, "第 3 页起点 = (3−1)×10 + 1");
         assert!(got.has_more);
-        assert!(got.items.iter().all(|i| i.at != 2 && i.at != 5 && i.at != 288));
+        assert!(got
+            .items
+            .iter()
+            .all(|i| i.at != 2 && i.at != 5 && i.at != 288));
         // 活跃位在第 1 页可见且 active=true
         let (_, b1) = http(
             addr,
@@ -5036,10 +5291,7 @@ stations:
                 "/v1/console/peripherals/bms_alarms?page_size=101",
                 "告警位上限 100",
             ),
-            (
-                "/v1/console/peripherals/bms_alarms?page_size=abc",
-                "非数字",
-            ),
+            ("/v1/console/peripherals/bms_alarms?page_size=abc", "非数字"),
         ] {
             let (status, _) = http(addr, "GET", path, None).await;
             assert_eq!(status, 400, "`{path}` 必须 400（{bad}）——不得静默截断");
@@ -5059,7 +5311,11 @@ stations:
     #[test]
     fn parse_page_defaults_and_bounds() {
         let d = |v: &str| vec![("page_size".to_string(), v.to_string())];
-        assert_eq!(parse_page(&[], 20, 50).unwrap(), (1, 20), "全缺省 ⇒ (1, 设计默认)");
+        assert_eq!(
+            parse_page(&[], 20, 50).unwrap(),
+            (1, 20),
+            "全缺省 ⇒ (1, 设计默认)"
+        );
         assert_eq!(parse_page(&d("50"), 20, 50).unwrap(), (1, 50));
         assert!(parse_page(&d("51"), 20, 50).is_err());
         assert!(parse_page(&d("0"), 20, 50).is_err());
@@ -5067,7 +5323,11 @@ stations:
         assert!(parse_page(&d("1.5"), 20, 50).is_err());
         let p = |v: &str| vec![("page".to_string(), v.to_string())];
         assert_eq!(parse_page(&p("3"), 20, 50).unwrap(), (3, 20));
-        assert_eq!(parse_page(&p("0"), 20, 50).unwrap(), (1, 20), "第 0 页按第 1 页");
+        assert_eq!(
+            parse_page(&p("0"), 20, 50).unwrap(),
+            (1, 20),
+            "第 0 页按第 1 页"
+        );
         assert!(parse_page(&p("x"), 20, 50).is_err());
     }
 
@@ -5312,7 +5572,6 @@ stations:
         h.abort();
     }
 
-
     /// **W-2（设计 §15.3.2）：量纲投影一致性** —— catalog 的每一行都必须在
     /// `point_table::lookup_in` **命中**，且 `decimals` 恰等于
     /// `decimals_from_scale(登记 scale)`（**不得**另写数值字面表）。
@@ -5339,7 +5598,11 @@ stations:
         for st in &cat.stations {
             let Some(conf) = cfg.stations.iter().find(|c| c.id == st.id) else {
                 // 缺席站（R-3）：catalog 有行、但是 `enabled=false` 且**零块**
-                assert!(!st.enabled, "不在站配置里的站必须 enabled=false（{}）", st.id);
+                assert!(
+                    !st.enabled,
+                    "不在站配置里的站必须 enabled=false（{}）",
+                    st.id
+                );
                 assert!(
                     st.blocks.is_empty(),
                     "缺席站不得携带任何块（{}：无站配置 ⇒ 不存在白名单投影）",
@@ -5391,17 +5654,35 @@ stations:
         }
         // 生产配置的外设行数（白名单内有配置的块）—— 与 §15.2.4 的容量分子同口径；
         // 生产 yaml 里 `pcs` 站整段被注释、`bms_alarm`/`fire_det` 按 count 展开 ⇒ 非 0 且规模量级正确
-        assert!(checked > 500, "应覆盖 5 站白名单的主要部分，实测 {checked} 行");
+        assert!(
+            checked > 500,
+            "应覆盖 5 站白名单的主要部分，实测 {checked} 行"
+        );
         // R-3：生产配置里只有 1 个 role 缺席（`pcs`，整段被注释）⇒ 恰 1 行 enabled=false
-        assert_eq!(disabled, 1, "生产配置缺席 role 应恰为 1（pcs），实测 {disabled}");
+        assert_eq!(
+            disabled, 1,
+            "生产配置缺席 role 应恰为 1（pcs），实测 {disabled}"
+        );
         // 抽样：mb_ui（scale 0.1 ⇒ 1 位）、mb_power（0.001 ⇒ 3 位）、bms_alarm（位点 0 位）
-        let mb = cat.stations.iter().find(|s| s.id == "meter_batt").expect("meter_batt");
+        let mb = cat
+            .stations
+            .iter()
+            .find(|s| s.id == "meter_batt")
+            .expect("meter_batt");
         let ui = mb.blocks.iter().find(|b| b.name == "mb_ui").expect("mb_ui");
         assert_eq!(ui.points[0].decimals, 1);
-        let pw = mb.blocks.iter().find(|b| b.name == "mb_power").expect("mb_power");
+        let pw = mb
+            .blocks
+            .iter()
+            .find(|b| b.name == "mb_power")
+            .expect("mb_power");
         assert_eq!(pw.points[0].decimals, 3);
         let bms = cat.stations.iter().find(|s| s.id == "bms").expect("bms");
-        let alarm = bms.blocks.iter().find(|b| b.name == "bms_alarm").expect("bms_alarm");
+        let alarm = bms
+            .blocks
+            .iter()
+            .find(|b| b.name == "bms_alarm")
+            .expect("bms_alarm");
         assert_eq!(alarm.points.len(), 288);
         assert_eq!(alarm.points[0].decimals, 0);
     }
@@ -5423,13 +5704,28 @@ stations:
         let plan = crate::display_host::peripheral_plan(&cfg);
         let cat = build_peripheral_catalog(&cfg, &plan, 0);
 
-        let hvac = cat.stations.iter().find(|s| s.id == "hvac").expect("hvac 站");
-        let di = hvac.blocks.iter().find(|b| b.name == "hvac_di").expect("hvac_di 块");
-        let p8 = di.points.iter().find(|p| p.at == 8).expect("hvac_di_8 在白名单内");
+        let hvac = cat
+            .stations
+            .iter()
+            .find(|s| s.id == "hvac")
+            .expect("hvac 站");
+        let di = hvac
+            .blocks
+            .iter()
+            .find(|b| b.name == "hvac_di")
+            .expect("hvac_di 块");
+        let p8 = di
+            .points
+            .iter()
+            .find(|p| p.at == 8)
+            .expect("hvac_di_8 在白名单内");
         assert_eq!(p8.bits.len(), 1, "离散位块的点恰 1 项位语义");
         let b = &p8.bits[0];
         assert_eq!(b.index, 7, "hvac_di_8 ↔ 位 7（at − 1）");
-        assert!(b.defined, "系统运行位是已定义位（`point_table` 登记为 State）");
+        assert!(
+            b.defined,
+            "系统运行位是已定义位（`point_table` 登记为 State）"
+        );
         assert_eq!(
             b.active_text.as_deref(),
             Some(ui_text::ENUM_RUNNING),
@@ -5819,5 +6115,4 @@ stations:
             exempted.len()
         );
     }
-
 }

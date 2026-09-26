@@ -119,7 +119,11 @@ impl Opa {
 
     /// 由百分比构造（`>100` 收敛到 `100`）。
     pub const fn percent(percent: u8) -> Self {
-        let p = if percent > 100 { 100u32 } else { percent as u32 };
+        let p = if percent > 100 {
+            100u32
+        } else {
+            percent as u32
+        };
         Self((p * 255 / 100) as u8)
     }
 
@@ -461,7 +465,9 @@ impl Style {
             return;
         }
         // SAFETY: 同上。
-        unsafe { sys::lv_style_set_border_side(&mut *self.raw, side.raw() as sys::lv_border_side_t) };
+        unsafe {
+            sys::lv_style_set_border_side(&mut *self.raw, side.raw() as sys::lv_border_side_t)
+        };
     }
 
     /// 文字色。
@@ -508,6 +514,8 @@ impl Drop for Style {
 
 impl std::fmt::Debug for Style {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Style").field("alive", &self.is_live()).finish()
+        f.debug_struct("Style")
+            .field("alive", &self.is_live())
+            .finish()
     }
 }

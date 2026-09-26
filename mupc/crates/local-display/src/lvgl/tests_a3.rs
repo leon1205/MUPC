@@ -295,8 +295,14 @@ pub(super) fn widgets_chain() {
         assert_eq!(label_text(&t1), "P", "首次标题文本应正确");
         drop(t1); // 非拥有 ⇒ 不得删除底层标题对象（UAF 的触发前置）
 
-        let t2 = mbox.add_title("P").expect("add_title #2（评审 UAF 复现点）");
-        assert_eq!(t2.raw(), raw1, "LVGL 缓存标题：两次 add_title 应返回同一对象");
+        let t2 = mbox
+            .add_title("P")
+            .expect("add_title #2（评审 UAF 复现点）");
+        assert_eq!(
+            t2.raw(),
+            raw1,
+            "LVGL 缓存标题：两次 add_title 应返回同一对象"
+        );
         assert!(t2.is_alive(), "第二次 add_title 后标题应存活（未挂/未崩）");
         assert_eq!(label_text(&t2), "P", "第二次 add_title 文本应正确落定");
 

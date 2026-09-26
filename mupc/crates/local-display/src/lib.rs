@@ -66,26 +66,23 @@ pub mod ui;
 // B3-2b-1 收敛：`OffscreenCanvas` / `blend_over` / `hex` / `rgb` 已删（v1.0 自绘链路的残留，
 // 无生产消费者）；逐项落点映射见 `canvas.rs` 文件头「死代码清理（开发单元 B3-2b-1）」表。
 pub use crate::canvas::{Canvas, Color, Rect};
-pub use crate::channel::{
-    poll_due, ChannelEndpoint, DisplayChannelClient, Progress, GET_TIMEOUT,
-};
+pub use crate::channel::{poll_due, ChannelEndpoint, DisplayChannelClient, Progress, GET_TIMEOUT};
 pub use crate::error::{Error, Result};
 pub use crate::screen::{BlitCounters, Blitter, MemorySink, PixelSink};
 pub use crate::state::{
     ChannelStatus, DisplayState, Freshness, LiveDot, NumView, ScreenMode, SocView, UiSnapshot,
     CHANNEL_DOWN_MS,
 };
-pub use crate::timing::{
-    apply_zero_timeout_clamp, compute_timeout_ms, install_stop_signals, poll_wait_target,
-    remaining_ms, stop_requested_flag, timeout_ms_to_c_int, wait_with_retry, Clock, Host,
-    LoopConfig, LoopStats, LvglTicker, PollFailure, PollOutcome, PollWait, Poller,
-    RawPollResult, SleepPoller, Stop, StopAfter, SystemClock, Ticker, MAX_POLL_TIMEOUT_MS,
-    POLL_FAIL_ABORT_AFTER, POLL_FAIL_FALLBACK_AFTER, STOP_FLAG, ZERO_CLAMP_LADDER_MS,
-    ZERO_TIMEOUT_BURST_LIMIT,
-};
 /// 生产 `Poller`（Linux `poll(2)`；工作单元 C 评审 C-① 整改）。
 #[cfg(target_os = "linux")]
 pub use crate::timing::FdPoller;
+pub use crate::timing::{
+    apply_zero_timeout_clamp, compute_timeout_ms, install_stop_signals, poll_wait_target,
+    remaining_ms, stop_requested_flag, timeout_ms_to_c_int, wait_with_retry, Clock, Host,
+    LoopConfig, LoopStats, LvglTicker, PollFailure, PollOutcome, PollWait, Poller, RawPollResult,
+    SleepPoller, Stop, StopAfter, SystemClock, Ticker, MAX_POLL_TIMEOUT_MS, POLL_FAIL_ABORT_AFTER,
+    POLL_FAIL_FALLBACK_AFTER, STOP_FLAG, ZERO_CLAMP_LADDER_MS, ZERO_TIMEOUT_BURST_LIMIT,
+};
 pub use crate::touch::{
     AbsAxis, CalibBounds, Calibration, Candidate, DeviceCaps, RawEvent, RawState, TouchConfig,
     TouchError, TouchOverrides, TouchSource,

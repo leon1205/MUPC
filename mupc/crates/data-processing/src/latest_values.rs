@@ -192,12 +192,7 @@ impl LatestValues {
 
     /// 单点读（不可得 ⇒ `value: None` + 显式 `quality`，**不返回 `Option`**）。
     pub fn get(&self, id: &PointId) -> PointView {
-        let value = self
-            .map
-            .read()
-            .get(id)
-            .cloned()
-            .unwrap_or_else(unavailable);
+        let value = self.map.read().get(id).cloned().unwrap_or_else(unavailable);
         PointView {
             id: id.clone(),
             value,

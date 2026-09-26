@@ -42,7 +42,10 @@ mod tests {
         assert_eq!(LOCAL_AI_READY, "mupc/local/ai/ready");
 
         // 北向 Topic（§9.3.4：遥测/事件**函数化**；状态/故障/策略常量不变）
-        assert_eq!(north_telemetry("grid_meter"), "mupc/north/telemetry/grid_meter");
+        assert_eq!(
+            north_telemetry("grid_meter"),
+            "mupc/north/telemetry/grid_meter"
+        );
         assert_eq!(north_event("fire"), "mupc/north/event/fire");
         assert_eq!(NORTH_FAULT, "mupc/north/fault");
         assert_eq!(NORTH_STRATEGY_COMMAND, "mupc/north/strategy/command");

@@ -133,7 +133,9 @@ impl ConsoleEndpoint {
             | Self::PeripheralsCatalog
             | Self::PeripheralsFireDetectors
             | Self::PeripheralsBmsAlarms => ConsoleMethod::Get,
-            Self::ConfigApply | Self::InterlockRelease | Self::InterlockAckM1 => ConsoleMethod::Post,
+            Self::ConfigApply | Self::InterlockRelease | Self::InterlockAckM1 => {
+                ConsoleMethod::Post
+            }
         }
     }
 
@@ -225,7 +227,12 @@ pub struct ControlRequest<T> {
 
 impl<T> ControlRequest<T> {
     /// 构造。
-    pub fn new(request_id: impl Into<String>, issued_at_ms: u64, op: impl Into<String>, payload: T) -> Self {
+    pub fn new(
+        request_id: impl Into<String>,
+        issued_at_ms: u64,
+        op: impl Into<String>,
+        payload: T,
+    ) -> Self {
         Self {
             request_id: request_id.into(),
             issued_at_ms,
@@ -627,25 +634,83 @@ mod tests {
     #[test]
     fn endpoint_paths_and_methods_match_design() {
         let cases = [
-            (ConsoleEndpoint::Config, "/v1/console/config", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::ConfigApply, "/v1/console/config/apply", ConsoleMethod::Post, Some("apply")),
-            (ConsoleEndpoint::Logs, "/v1/console/logs", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::LogsTargets, "/v1/console/logs/targets", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::Audit, "/v1/console/audit", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::AuditOps, "/v1/console/audit/ops", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::InterlockRelease, "/v1/console/interlock/release", ConsoleMethod::Post, Some("release")),
-            (ConsoleEndpoint::InterlockAckM1, "/v1/console/interlock/ack_m1", ConsoleMethod::Post, Some("ack_m1")),
+            (
+                ConsoleEndpoint::Config,
+                "/v1/console/config",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::ConfigApply,
+                "/v1/console/config/apply",
+                ConsoleMethod::Post,
+                Some("apply"),
+            ),
+            (
+                ConsoleEndpoint::Logs,
+                "/v1/console/logs",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::LogsTargets,
+                "/v1/console/logs/targets",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::Audit,
+                "/v1/console/audit",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::AuditOps,
+                "/v1/console/audit/ops",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::InterlockRelease,
+                "/v1/console/interlock/release",
+                ConsoleMethod::Post,
+                Some("release"),
+            ),
+            (
+                ConsoleEndpoint::InterlockAckM1,
+                "/v1/console/interlock/ack_m1",
+                ConsoleMethod::Post,
+                Some("ack_m1"),
+            ),
             // U-73 §15.3.2：三只读端点（op = None ⇒ **无信封 op、不进 PL-1 审计**）
-            (ConsoleEndpoint::PeripheralsCatalog, "/v1/console/peripherals/catalog", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::PeripheralsFireDetectors, "/v1/console/peripherals/fire_detectors", ConsoleMethod::Get, None),
-            (ConsoleEndpoint::PeripheralsBmsAlarms, "/v1/console/peripherals/bms_alarms", ConsoleMethod::Get, None),
+            (
+                ConsoleEndpoint::PeripheralsCatalog,
+                "/v1/console/peripherals/catalog",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::PeripheralsFireDetectors,
+                "/v1/console/peripherals/fire_detectors",
+                ConsoleMethod::Get,
+                None,
+            ),
+            (
+                ConsoleEndpoint::PeripheralsBmsAlarms,
+                "/v1/console/peripherals/bms_alarms",
+                ConsoleMethod::Get,
+                None,
+            ),
         ];
         assert_eq!(cases.len(), ConsoleEndpoint::ALL.len());
         for (ep, path, method, op) in cases {
             assert_eq!(ep.path(), path, "路径漂移");
             assert_eq!(ep.method(), method, "方法漂移");
             assert_eq!(ep.op_name(), op, "op 名（= 路径末段）漂移");
-            assert!(path.starts_with(CONSOLE_PATH_PREFIX), "端点须在 /v1/console 下");
+            assert!(
+                path.starts_with(CONSOLE_PATH_PREFIX),
+                "端点须在 /v1/console 下"
+            );
             assert_eq!(ConsoleEndpoint::from_path(path), Some(ep), "路径反查失败");
         }
         assert!(!ConsoleEndpoint::Config.is_write(), "查询端点非写");
@@ -714,7 +779,10 @@ mod tests {
         // 错误码 JSON 词表（两端共用，防拼写漂移）
         for (code, literal) in [
             (ControlCode::Ok, "\"ok\""),
-            (ControlCode::RejectedPrecondition, "\"rejected_precondition\""),
+            (
+                ControlCode::RejectedPrecondition,
+                "\"rejected_precondition\"",
+            ),
             (ControlCode::RejectedValidation, "\"rejected_validation\""),
             (ControlCode::ApplyFailed, "\"apply_failed\""),
             (ControlCode::AuditUnavailable, "\"audit_unavailable\""),
@@ -770,7 +838,11 @@ mod tests {
                 "\"interlock_release\"",
                 "release",
             ),
-            (ConsoleEndpoint::InterlockAckM1, "\"interlock_ack_m1\"", "ack_m1"),
+            (
+                ConsoleEndpoint::InterlockAckM1,
+                "\"interlock_ack_m1\"",
+                "ack_m1",
+            ),
         ] {
             // serde 名（枚举判别名，用于路由枚举本体）
             assert_eq!(serde_json::to_string(&ep).unwrap(), serde_literal);
@@ -816,8 +888,12 @@ mod tests {
     fn envelope_replay_window_boundary() {
         let now = 1_000_000;
         // 窗口内（恰为 ±30 s 边界 → 允许）
-        assert!(req("apply", now - REPLAY_WINDOW_MS).validate_envelope(now).is_ok());
-        assert!(req("apply", now + REPLAY_WINDOW_MS).validate_envelope(now).is_ok());
+        assert!(req("apply", now - REPLAY_WINDOW_MS)
+            .validate_envelope(now)
+            .is_ok());
+        assert!(req("apply", now + REPLAY_WINDOW_MS)
+            .validate_envelope(now)
+            .is_ok());
         // 越界 → 拒绝（不得静默接受过期/超前请求）
         let err = req("apply", now - REPLAY_WINDOW_MS - 1)
             .validate_envelope(now)
@@ -832,7 +908,9 @@ mod tests {
                 && now_ms == now
                 && window_ms == REPLAY_WINDOW_MS
         ));
-        assert!(req("apply", now + REPLAY_WINDOW_MS + 1).validate_envelope(now).is_err());
+        assert!(req("apply", now + REPLAY_WINDOW_MS + 1)
+            .validate_envelope(now)
+            .is_err());
     }
 
     #[test]
@@ -856,7 +934,9 @@ mod tests {
         // 对 GET 查询端点提交写信封 → 拒绝
         assert_eq!(
             req("apply", now).validate_for(ConsoleEndpoint::Config, now),
-            Err(ControlEnvelopeError::NotAWriteEndpoint(ConsoleEndpoint::Config))
+            Err(ControlEnvelopeError::NotAWriteEndpoint(
+                ConsoleEndpoint::Config
+            ))
         );
         // 时间窗越界优先于 op 校验（信封解析在路由校验之前，§3.3 管线顺序）
         assert!(matches!(
@@ -876,7 +956,10 @@ mod tests {
         other.request_id = key.request_id.clone();
         assert_ne!(other, key);
         // 同 (op, request_id) → 相等（幂等命中判据）
-        assert_eq!(key, IdempotencyKey::new("apply", "0f7a3e10-1111-4222-8333-444455556666"));
+        assert_eq!(
+            key,
+            IdempotencyKey::new("apply", "0f7a3e10-1111-4222-8333-444455556666")
+        );
         assert_eq!(IDEMPOTENCY_CAPACITY, 256);
     }
 
@@ -897,10 +980,16 @@ mod tests {
         // 重放同 request_id → 回首次结果，仅 duplicate 置位（真幂等）
         let mut replay = first.clone();
         replay.mark_duplicate();
-        assert!(replay.duplicate && replay.ok, "重复请求的结果必须与首次一致");
+        assert!(
+            replay.duplicate && replay.ok,
+            "重复请求的结果必须与首次一致"
+        );
         assert_eq!(replay.code, first.code);
         assert_eq!(replay.applied.as_ref().unwrap().revision, 7);
-        assert_eq!(replay.audit_id, first.audit_id, "重复请求复用首次审计记录，不重复留痕");
+        assert_eq!(
+            replay.audit_id, first.audit_id,
+            "重复请求复用首次审计记录，不重复留痕"
+        );
         // 首次失败的重放同样保持失败（不得因重放变为成功）
         first.ok = false;
         first.code = ControlCode::ApplyFailed;
@@ -919,7 +1008,10 @@ mod tests {
         assert!(!resp.ok, "审计不可写 → 不得 ok=true");
         assert_eq!(resp.code, ControlCode::AuditUnavailable);
         assert!(resp.code.is_rejection(), "fail-closed 属拒绝类（未执行）");
-        assert_eq!(resp.applied, None, "审计失败 → 操作必须未生效（applied=None）");
+        assert_eq!(
+            resp.applied, None,
+            "审计失败 → 操作必须未生效（applied=None）"
+        );
         assert_eq!(resp.audit_id, None);
         assert!(!resp.duplicate);
         assert_eq!(resp.at_ms, 42);
@@ -935,17 +1027,36 @@ mod tests {
     // ---- 配置字段校验：越界 / 非法值 / 只读 一律拒绝（不静默接受）----
     #[test]
     fn config_kind_u16_rejects_out_of_range_and_bad_step() {
-        let kind = ConfigKind::U16 { min: 1, max: 61, step: 5 };
+        let kind = ConfigKind::U16 {
+            min: 1,
+            max: 61,
+            step: 5,
+        };
         assert!(kind.validate_value(&Value::from(1)).is_ok());
         assert!(kind.validate_value(&Value::from(61)).is_ok());
         // 越界
-        assert!(kind.validate_value(&Value::from(0)).unwrap_err().contains("越界"));
-        assert!(kind.validate_value(&Value::from(62)).unwrap_err().contains("越界"));
+        assert!(kind
+            .validate_value(&Value::from(0))
+            .unwrap_err()
+            .contains("越界"));
+        assert!(kind
+            .validate_value(&Value::from(62))
+            .unwrap_err()
+            .contains("越界"));
         // 非步长倍数
-        assert!(kind.validate_value(&Value::from(7)).unwrap_err().contains("步长"));
+        assert!(kind
+            .validate_value(&Value::from(7))
+            .unwrap_err()
+            .contains("步长"));
         // 类型非法
-        assert!(kind.validate_value(&Value::from("30")).unwrap_err().contains("非负整数"));
-        assert!(kind.validate_value(&Value::from(30.5)).unwrap_err().contains("非负整数"));
+        assert!(kind
+            .validate_value(&Value::from("30"))
+            .unwrap_err()
+            .contains("非负整数"));
+        assert!(kind
+            .validate_value(&Value::from(30.5))
+            .unwrap_err()
+            .contains("非负整数"));
         assert!(kind
             .validate_value(&Value::from(-1))
             .unwrap_err()
@@ -956,10 +1067,20 @@ mod tests {
 
     #[test]
     fn config_kind_u64_and_ipv4_and_enum_validation() {
-        let u64k = ConfigKind::U64 { min: 100, max: 2000, step: 100 };
+        let u64k = ConfigKind::U64 {
+            min: 100,
+            max: 2000,
+            step: 100,
+        };
         assert!(u64k.validate_value(&Value::from(1000)).is_ok());
-        assert!(u64k.validate_value(&Value::from(50)).unwrap_err().contains("越界"));
-        assert!(u64k.validate_value(&Value::from(1001)).unwrap_err().contains("步长"));
+        assert!(u64k
+            .validate_value(&Value::from(50))
+            .unwrap_err()
+            .contains("越界"));
+        assert!(u64k
+            .validate_value(&Value::from(1001))
+            .unwrap_err()
+            .contains("步长"));
 
         let ip = ConfigKind::Ipv4;
         assert!(ip.validate_value(&Value::from("127.0.0.1")).is_ok());
@@ -971,8 +1092,14 @@ mod tests {
 
         let enumk = ConfigKind::Enum {
             options: vec![
-                OptionItem { value: "info".into(), label: "信息".into() },
-                OptionItem { value: "debug".into(), label: "调试".into() },
+                OptionItem {
+                    value: "info".into(),
+                    label: "信息".into(),
+                },
+                OptionItem {
+                    value: "debug".into(),
+                    label: "调试".into(),
+                },
             ],
         };
         assert!(enumk.validate_value(&Value::from("debug")).is_ok());
@@ -996,7 +1123,10 @@ mod tests {
             editable: false,
         };
         let err = f.validate_value(&Value::from("0.0.0.0")).unwrap_err();
-        assert!(err.contains("只读"), "只读字段改动必须被后端二次校验拒绝: {err}");
+        assert!(
+            err.contains("只读"),
+            "只读字段改动必须被后端二次校验拒绝: {err}"
+        );
         // 可编辑字段正常放行
         let mut ok_field = f.clone();
         ok_field.editable = true;
@@ -1008,14 +1138,24 @@ mod tests {
         // 字面量 JSON：kind 判别式 + 约束随体传输（UI 据此生成步进器，无需硬编码）
         let json = r#"{"kind":"u16","min":1,"max":65535,"step":1}"#;
         let k: ConfigKind = serde_json::from_str(json).unwrap();
-        assert_eq!(k, ConfigKind::U16 { min: 1, max: 65535, step: 1 });
+        assert_eq!(
+            k,
+            ConfigKind::U16 {
+                min: 1,
+                max: 65535,
+                step: 1
+            }
+        );
         assert_eq!(serde_json::to_string(&k).unwrap(), json);
         assert_eq!(
             serde_json::to_string(&ConfigKind::Ipv4).unwrap(),
             r#"{"kind":"ipv4"}"#
         );
         let e = ConfigKind::Enum {
-            options: vec![OptionItem { value: "x".into(), label: "X".into() }],
+            options: vec![OptionItem {
+                value: "x".into(),
+                label: "X".into(),
+            }],
         };
         let round: ConfigKind = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(round, e);
@@ -1025,7 +1165,11 @@ mod tests {
     fn config_view_write_mode_literal() {
         let json = r#"{"groups":[],"revision":3,"write_mode":"full_rewrite"}"#;
         let v: ConfigView = serde_json::from_str(json).unwrap();
-        assert_eq!(v.write_mode, WriteMode::FullRewrite, "EDGE-23：UI 须据此 Toast 明示");
+        assert_eq!(
+            v.write_mode,
+            WriteMode::FullRewrite,
+            "EDGE-23：UI 须据此 Toast 明示"
+        );
         assert_eq!(v.revision, 3);
         assert_eq!(
             serde_json::to_string(&WriteMode::TextPreserve).unwrap(),

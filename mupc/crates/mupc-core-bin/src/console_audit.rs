@@ -86,13 +86,10 @@ fn console_audit_day(name: &str) -> Option<&str> {
     if b.len() != 10 {
         return None;
     }
-    let shape_ok = b
-        .iter()
-        .enumerate()
-        .all(|(i, c)| match i {
-            4 | 7 => *c == b'-',
-            _ => c.is_ascii_digit(),
-        });
+    let shape_ok = b.iter().enumerate().all(|(i, c)| match i {
+        4 | 7 => *c == b'-',
+        _ => c.is_ascii_digit(),
+    });
     shape_ok.then_some(day)
 }
 
@@ -240,8 +237,7 @@ impl ConsoleAuditSink for FileAuditSink {
     }
 
     fn record_outcome(&self, entry: &ConsoleAuditEntry) -> Result<(), AuditError> {
-        let line = serde_json::to_string(entry)
-            .map_err(|e| format!("序列化审计条目失败: {e}"))?;
+        let line = serde_json::to_string(entry).map_err(|e| format!("序列化审计条目失败: {e}"))?;
         // ① 控制台 JSONL（F19 查询真源）
         Self::append_line(&self.console_file(entry.ts_ms), &line)?;
         // ② 既有哈希链（统一合规凭据）——失败视为整体失败（上抛，由调用方按"结果审计失败"处置）
@@ -528,9 +524,7 @@ pub fn parse_query(pairs: &[(String, String)]) -> Result<AuditQuery, String> {
                 q.ops.push(parse_op(v)?);
             }
             "page" => {
-                let n: u32 = v
-                    .parse()
-                    .map_err(|_| format!("page 不是正整数: {v}"))?;
+                let n: u32 = v.parse().map_err(|_| format!("page 不是正整数: {v}"))?;
                 if n == 0 {
                     // `0` 与"缺省"不同：缺省 = 第一页（1-based），显式 0 是**非法**取值（不是"第 0 页"）。
                     return Err("page 从 1 开始（1-based），0 非法".to_string());
@@ -564,7 +558,8 @@ pub fn parse_query(pairs: &[(String, String)]) -> Result<AuditQuery, String> {
         }
         _ => {
             return Err(
-                "from / to 必须同时给出（半截窗口无意义：只给一端时窗口的另一端无处可取）".to_string(),
+                "from / to 必须同时给出（半截窗口无意义：只给一端时窗口的另一端无处可取）"
+                    .to_string(),
             )
         }
     }
@@ -677,7 +672,9 @@ impl ConsoleAuditService {
         // debug 下 `attempt to subtract with overflow` **panic**，release 下回绕成 `u64::MAX`
         // ⇒ `start`/`need` 极大 ⇒ 早停恒不成立 ⇒ 白扫到闸耗尽（静默落空）。
         // 饱和后 `page = 0` 退化成"第 1 页"（确定且不 panic，用例 ⑰ 末尾钉住）。
-        let start = u64::from(q.page).saturating_sub(1).saturating_mul(page_size);
+        let start = u64::from(q.page)
+            .saturating_sub(1)
+            .saturating_mul(page_size);
         let need = start.saturating_add(page_size).saturating_add(1); // 多要 1 条判 has_more
         let mut acc = ScanState::default();
 
@@ -916,7 +913,8 @@ mod tests {
             summary: "changes=1 from=edit".into(),
         })
         .unwrap();
-        sink.record_outcome(&entry("a1", AuditResult::Ok, None)).unwrap();
+        sink.record_outcome(&entry("a1", AuditResult::Ok, None))
+            .unwrap();
 
         // 控制台 JSONL：**一行**，且能按契约类型解回来（G-3 查询端同款路径）
         let p = t.join("console-audit-2025-09-09.jsonl");
@@ -940,11 +938,20 @@ mod tests {
         let chain_text = std::fs::read_to_string(&chain_files[0]).unwrap();
         let chain_lines: Vec<&str> = chain_text.lines().collect();
         assert_eq!(chain_lines.len(), 2, "intent 与 outcome 各一条链上记录");
-        assert!(chain_lines[0].contains("\"sequence\":1"), "intent 是链上第一条");
+        assert!(
+            chain_lines[0].contains("\"sequence\":1"),
+            "intent 是链上第一条"
+        );
         assert!(chain_lines[0].contains("intent"), "intent 记录须可辨认");
-        assert!(chain_lines[1].contains("\"sequence\":2"), "outcome 是链上第二条");
+        assert!(
+            chain_lines[1].contains("\"sequence\":2"),
+            "outcome 是链上第二条"
+        );
         assert!(chain_lines[1].contains("outcome"));
-        assert!(chain_lines[1].contains("rid-1"), "链上记录须带 request_id（现场对拍）");
+        assert!(
+            chain_lines[1].contains("rid-1"),
+            "链上记录须带 request_id（现场对拍）"
+        );
     }
 
     /// append-only：第二次写不得截断第一次的内容（PL-02「仅追加、不可删改」）。
@@ -952,14 +959,17 @@ mod tests {
     fn outcomes_are_appended_never_truncated() {
         let t = TempDir::new("audit-append");
         let sink = FileAuditSink::open(t.path()).unwrap();
-        sink.record_outcome(&entry("a1", AuditResult::Ok, None)).unwrap();
+        sink.record_outcome(&entry("a1", AuditResult::Ok, None))
+            .unwrap();
         sink.record_outcome(&entry("a2", AuditResult::Failed, Some("越界")))
             .unwrap();
         let text = std::fs::read_to_string(t.join("console-audit-2025-09-09.jsonl")).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(
-            serde_json::from_str::<ConsoleAuditEntry>(lines[0]).unwrap().id,
+            serde_json::from_str::<ConsoleAuditEntry>(lines[0])
+                .unwrap()
+                .id,
             "a1",
             "先写的那条必须还在（且未被改动）"
         );
@@ -986,7 +996,8 @@ mod tests {
                 summary: "changes=1".into(),
             })
             .unwrap();
-            s.record_outcome(&entry("a1", AuditResult::Ok, None)).unwrap();
+            s.record_outcome(&entry("a1", AuditResult::Ok, None))
+                .unwrap();
         }
         // 控制台 JSONL 已在目录里（跨重启复用场景的真实形态）
         assert!(t.join("console-audit-2025-09-09.jsonl").exists());
@@ -1013,14 +1024,19 @@ mod tests {
         .unwrap();
         let lines: Vec<&str> = chain_text.lines().collect();
         assert_eq!(lines.len(), 3, "重启后新增的 intent 是第 3 条（链续上了）");
-        assert!(lines[2].contains("\"sequence\":3"), "序列号必须续接: {}", lines[2]);
+        assert!(
+            lines[2].contains("\"sequence\":3"),
+            "序列号必须续接: {}",
+            lines[2]
+        );
         assert!(lines[2].contains("rid-2"));
         // 控制台文件没被链的写入污染（仍是 1 行，且仍是 ConsoleAuditEntry）
-        let console =
-            std::fs::read_to_string(t.join("console-audit-2025-09-09.jsonl")).unwrap();
+        let console = std::fs::read_to_string(t.join("console-audit-2025-09-09.jsonl")).unwrap();
         assert_eq!(console.lines().count(), 1);
         assert_eq!(
-            serde_json::from_str::<ConsoleAuditEntry>(console.trim()).unwrap().id,
+            serde_json::from_str::<ConsoleAuditEntry>(console.trim())
+                .unwrap()
+                .id,
             "a1"
         );
     }
@@ -1034,8 +1050,8 @@ mod tests {
         let t = TempDir::new("audit-bad");
         let blocker = t.write("blocker", "i am a file, not a dir");
         let bad_dir = blocker.join("audit"); // 父是文件 ⇒ 无法建目录
-        // 不用 `expect_err`：`FileAuditSink` 没有 `Debug`（它持有文件句柄与 `Mutex`），
-        // 而 `expect_err` 要求 `T: Debug`。
+                                             // 不用 `expect_err`：`FileAuditSink` 没有 `Debug`（它持有文件句柄与 `Mutex`），
+                                             // 而 `expect_err` 要求 `T: Debug`。
         let err = match FileAuditSink::open(&bad_dir) {
             Ok(_) => panic!("审计目录不可建时必须失败（父路径是普通文件）"),
             Err(e) => e,
@@ -1129,7 +1145,10 @@ mod tests {
 
         let p3 = s.page(&q(3), T0).await;
         assert_eq!(p3.entries.len(), 5, "45 = 20 + 20 + 5");
-        assert!(!p3.has_more, "最后一页必须 has_more=false（否则屏上会一直转「加载中」）");
+        assert!(
+            !p3.has_more,
+            "最后一页必须 has_more=false（否则屏上会一直转「加载中」）"
+        );
         assert_eq!(p3.entries[4].ts_ms, T0 - 2 * DAY, "末条是最旧的");
         // 三页拼起来 **不重不漏**（分页若在"过滤之前"做，这里就会少条或重条）
         let mut seen: Vec<u64> = p1
@@ -1158,8 +1177,11 @@ mod tests {
             vec![ConsoleOp::ConfigApply, ConsoleOp::InterlockRelease]
         );
         assert!(
-            parse_query(&[("ops".to_string(), "config_apply,interlock_release".to_string())])
-                .is_err(),
+            parse_query(&[(
+                "ops".to_string(),
+                "config_apply,interlock_release".to_string()
+            )])
+            .is_err(),
             "逗号拼接必须被拒（§3.4 补注：多值一律重复键）"
         );
 
@@ -1172,10 +1194,7 @@ mod tests {
             .collect();
         write_entries(t.path(), &all);
         let s = svc(t.path());
-        let with = |ops: Vec<ConsoleOp>| AuditQuery {
-            ops,
-            ..q_day()
-        };
+        let with = |ops: Vec<ConsoleOp>| AuditQuery { ops, ..q_day() };
 
         let got = s
             .page(
@@ -1223,7 +1242,10 @@ mod tests {
         // (a) 目录存在、可读，**确实没有记录** ⇒ available=true ∧ entries=[]
         let t = TempDir::new("audit-empty");
         let empty = svc(t.path()).page(&AuditQuery::default(), T0).await;
-        assert!(empty.available, "空目录读得出来 ⇒ 是「确实没有」，不是「不可用」");
+        assert!(
+            empty.available,
+            "空目录读得出来 ⇒ 是「确实没有」，不是「不可用」"
+        );
         assert!(empty.entries.is_empty() && !empty.has_more && empty.newest_ts_ms.is_none());
         assert_eq!(empty.page, 1);
         assert_eq!(empty.page_size, 20);
@@ -1499,14 +1521,20 @@ mod tests {
     #[test]
     fn query_validation_rejects_what_it_cannot_honour() {
         let p = |k: &str, v: &str| parse_query(&[(k.to_string(), v.to_string())]);
-        assert!(p("nope", "1").is_err(), "未知键必须拒（静默忽略 = 给未筛的数据）");
+        assert!(
+            p("nope", "1").is_err(),
+            "未知键必须拒（静默忽略 = 给未筛的数据）"
+        );
         assert!(p("page", "0").is_err(), "page 从 1 开始");
         assert!(p("page", "-1").is_err());
         assert!(p("page", "1.5").is_err());
         assert!(p("page_size", "50").is_err(), "page_size 恒 = 20");
         assert!(p("page_size", "0").is_err());
         assert!(p("ops", "").is_err(), "空值必须拒（空集应不发该键）");
-        assert!(p("ops", "mode_switch").is_err(), "非本期操作集（模式切换为暂停项）");
+        assert!(
+            p("ops", "mode_switch").is_err(),
+            "非本期操作集（模式切换为暂停项）"
+        );
         assert!(p("from", "5").is_err(), "半截窗口必须拒");
         assert!(p("to", "5").is_err());
         assert!(p("from", "1.5").is_err(), "非整毫秒");
@@ -1539,11 +1567,14 @@ mod tests {
         // `page_size=20` 是**唯一**合法值 ⇒ 解析成功即证明它被接受（值本身不入 `AuditQuery`）；
         // 非法值的拒绝由上一条 `p("page_size", "50")` 钉住。
         assert!(parse_query(&[("page_size".to_string(), "20".to_string())]).is_ok());
-        assert!(parse_query(&[
-            ("from".to_string(), "7".to_string()),
-            ("to".to_string(), "7".to_string())
-        ])
-        .is_ok(), "from == to 合法（1 ms 窗口，结果自然是空）");
+        assert!(
+            parse_query(&[
+                ("from".to_string(), "7".to_string()),
+                ("to".to_string(), "7".to_string())
+            ])
+            .is_ok(),
+            "from == to 合法（1 ms 窗口，结果自然是空）"
+        );
     }
 
     /// ⑪ `/audit/ops` 的选项 = **契约常量**（4 类），且**不读存储** ⇒ 审计源不可用时照旧可得。
@@ -1561,8 +1592,7 @@ mod tests {
     fn op_options_are_the_contract_vocabulary_and_need_no_store() {
         let svc = ConsoleAuditService::new("no-such-dir-and-that-is-fine");
         let opts = svc.op_options();
-        let got: Vec<(ConsoleOp, &str)> =
-            opts.iter().map(|o| (o.op, o.label.as_str())).collect();
+        let got: Vec<(ConsoleOp, &str)> = opts.iter().map(|o| (o.op, o.label.as_str())).collect();
         assert_eq!(
             got,
             vec![
@@ -1605,16 +1635,25 @@ mod tests {
         );
 
         let t2 = TempDir::new("audit-default-2");
-        write_entries(t2.path(), &[ent(T0 - 25 * 3_600_000, ConsoleOp::ConfigApply)]); // 25 小时前
+        write_entries(
+            t2.path(),
+            &[ent(T0 - 25 * 3_600_000, ConsoleOp::ConfigApply)],
+        ); // 25 小时前
         let p2 = svc(t2.path()).page(&AuditQuery::default(), T0).await;
-        assert!(p2.available, "窗口外的记录**不是**不可用：这是有界窗口下的「确实没有」");
+        assert!(
+            p2.available,
+            "窗口外的记录**不是**不可用：这是有界窗口下的「确实没有」"
+        );
         assert!(p2.entries.is_empty() && p2.newest_ts_ms.is_none());
     }
 
     /// 一条**恰好 `want` 字节**的合法条目 JSON（`}` 前补空格 —— JSON 允许 token 之间的空白）。
     fn entry_json_of_len(want: usize) -> String {
         let base = serde_json::to_string(&ent(T0, ConsoleOp::ConfigApply)).unwrap();
-        assert!(base.len() < want, "基准 JSON 比目标长度还长，用例前提不成立");
+        assert!(
+            base.len() < want,
+            "基准 JSON 比目标长度还长，用例前提不成立"
+        );
         let pad = want - base.len();
         format!("{}{}{}", &base[..base.len() - 1], " ".repeat(pad), "}")
     }
@@ -1667,7 +1706,10 @@ mod tests {
         let dir = t.join("audit-that-must-not-be-created");
         let before = std::fs::read_dir(t.path()).unwrap().count();
         let p = svc(&dir).page(&q_day(), T0).await;
-        assert!(!p.available, "目录不存在 ⇒ 不可用（**不是**建一个空目录后回空态）");
+        assert!(
+            !p.available,
+            "目录不存在 ⇒ 不可用（**不是**建一个空目录后回空态）"
+        );
         assert!(!dir.exists(), "查询路径**不得**创建目录（只读铁律）");
         assert_eq!(
             std::fs::read_dir(t.path()).unwrap().count(),

@@ -369,7 +369,10 @@ fn main() {
 
     let pct = |x: f64| x / total_secs * 100.0;
     println!("=== 台区储能治理策略回放报告 ===");
-    println!("数据源: {}  样本数: {}  控制周期: {}", path, n_samples, n_control);
+    println!(
+        "数据源: {}  样本数: {}  控制周期: {}",
+        path, n_samples, n_control
+    );
     println!();
     println!("── 返送时长 ──");
     println!(
@@ -395,10 +398,7 @@ fn main() {
         "峰值(kW):  基线 {:.1} → 控制后 {:.1}",
         reverse_base_peak, reverse_ctrl_peak
     );
-    println!(
-        "平均(kW):  基线 {:.1} → 控制后 {:.1}",
-        base_avg, ctrl_avg
-    );
+    println!("平均(kW):  基线 {:.1} → 控制后 {:.1}", base_avg, ctrl_avg);
     println!();
     println!("── 返送总量 ──");
     println!(

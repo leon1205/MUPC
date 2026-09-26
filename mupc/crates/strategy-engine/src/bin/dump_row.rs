@@ -4,9 +4,7 @@
 use calamine::{open_workbook, Data, DataType, Reader, Xlsx};
 
 fn f(row: &[Data], i: usize) -> f64 {
-    row.get(i)
-        .and_then(|d| d.get_float())
-        .unwrap_or(f64::NAN)
+    row.get(i).and_then(|d| d.get_float()).unwrap_or(f64::NAN)
 }
 
 fn tstr(row: &[Data]) -> String {
@@ -43,19 +41,66 @@ fn main() {
             let pa = f(row, 8);
             let pb = f(row, 9);
             let pc = f(row, 10);
-            println!("P_A/B/C (8-10)= {:.3} / {:.3} / {:.3}   sum={:.3}", pa, pb, pc, pa + pb + pc);
+            println!(
+                "P_A/B/C (8-10)= {:.3} / {:.3} / {:.3}   sum={:.3}",
+                pa,
+                pb,
+                pc,
+                pa + pb + pc
+            );
             let qa = f(row, 12);
             let qb = f(row, 13);
             let qc = f(row, 14);
-            println!("Q_A/B/C (12-14)= {:.3} / {:.3} / {:.3}   sum={:.3}", qa, qb, qc, qa + qb + qc);
-            println!("U_A/B/C (1-3) = {:.1} / {:.1} / {:.1}", f(row, 1), f(row, 2), f(row, 3));
-            println!("I_A/B/C (4-6) = {:.1} / {:.1} / {:.1}", f(row, 4), f(row, 5), f(row, 6));
-            println!("PF_A/B/C(20-22) = {:.3} / {:.3} / {:.3}", f(row, 20), f(row, 21), f(row, 22));
-            println!("PF_总 (col19) = {:.3}   Q_总(col11)={:.3}", f(row, 19), f(row, 11));
-            println!("SOC(col30) = {:.2}   unbal(col39)={:.2}", f(row, 30), f(row, 39));
-            println!("相角_A/B/C(27-29) = {:.1} / {:.1} / {:.1}", f(row, 27), f(row, 28), f(row, 29));
-            println!("P调控值(33-35) = {:.3} / {:.3} / {:.3}   Q调控值(36-38) = {:.3} / {:.3} / {:.3}",
-                f(row, 33), f(row, 34), f(row, 35), f(row, 36), f(row, 37), f(row, 38));
+            println!(
+                "Q_A/B/C (12-14)= {:.3} / {:.3} / {:.3}   sum={:.3}",
+                qa,
+                qb,
+                qc,
+                qa + qb + qc
+            );
+            println!(
+                "U_A/B/C (1-3) = {:.1} / {:.1} / {:.1}",
+                f(row, 1),
+                f(row, 2),
+                f(row, 3)
+            );
+            println!(
+                "I_A/B/C (4-6) = {:.1} / {:.1} / {:.1}",
+                f(row, 4),
+                f(row, 5),
+                f(row, 6)
+            );
+            println!(
+                "PF_A/B/C(20-22) = {:.3} / {:.3} / {:.3}",
+                f(row, 20),
+                f(row, 21),
+                f(row, 22)
+            );
+            println!(
+                "PF_总 (col19) = {:.3}   Q_总(col11)={:.3}",
+                f(row, 19),
+                f(row, 11)
+            );
+            println!(
+                "SOC(col30) = {:.2}   unbal(col39)={:.2}",
+                f(row, 30),
+                f(row, 39)
+            );
+            println!(
+                "相角_A/B/C(27-29) = {:.1} / {:.1} / {:.1}",
+                f(row, 27),
+                f(row, 28),
+                f(row, 29)
+            );
+            println!(
+                "P调控值(33-35) = {:.3} / {:.3} / {:.3}   Q调控值(36-38) = {:.3} / {:.3} / {:.3}",
+                f(row, 33),
+                f(row, 34),
+                f(row, 35),
+                f(row, 36),
+                f(row, 37),
+                f(row, 38)
+            );
         }
     }
 }

@@ -261,10 +261,7 @@ impl SouthStationsConfig {
                 ));
             }
             if s.interval_ms == 0 {
-                return Err(format!(
-                    "south_stations: 站 {} interval_ms 须 > 0",
-                    s.id
-                ));
+                return Err(format!("south_stations: 站 {} interval_ms 须 > 0", s.id));
             }
             // 口波特率下界/上界：0 会静默穿透同口一致性检查（整口皆 0 时放行），
             // 到 open 才报错；>4_000_000 亦为异常值，一并在此拒。
@@ -312,7 +309,8 @@ impl SouthStationsConfig {
                 Role::MeterGrid => {
                     if grid_seen {
                         return Err(
-                            "south_stations: 至多一个 meter_grid 站（AiIntegrator 单写方约束）".into(),
+                            "south_stations: 至多一个 meter_grid 站（AiIntegrator 单写方约束）"
+                                .into(),
                         );
                     }
                     grid_seen = true;
@@ -372,9 +370,7 @@ impl SouthStationsConfig {
 
     /// role=grid 站（策略 phase 真源站；唯一 grid 形态——master_meter 段已删收敛，S3b-1c）。
     pub fn grid_station(&self) -> Option<&StationConf> {
-        self.stations
-            .iter()
-            .find(|s| s.role == Role::MeterGrid)
+        self.stations.iter().find(|s| s.role == Role::MeterGrid)
     }
 }
 
@@ -513,8 +509,14 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
         validate_anchoring(&prefix, b, &pts)?;
         for p in &pts {
             if let PointKind::Scalar { offset, decode } = p.kind {
-                check_symbolicity(s.role, &p.metric, b.addr + offset, decode.format, decode.offset)
-                    .map_err(|e| format!("{prefix}{e}"))?;
+                check_symbolicity(
+                    s.role,
+                    &p.metric,
+                    b.addr + offset,
+                    decode.format,
+                    decode.offset,
+                )
+                .map_err(|e| format!("{prefix}{e}"))?;
             }
         }
         metrics.extend(pts.into_iter().map(|p| p.metric));
@@ -586,7 +588,10 @@ fn validate_anchoring(prefix: &str, b: &RegBlockConf, pts: &[PointSpec]) -> Resu
     if b.func == RegFunc::Discrete || b.points.is_empty() {
         return Ok(());
     }
-    let mut spans: Vec<(u16, u16)> = pts.iter().map(|p| (p.kind.offset(), p.kind.width())).collect();
+    let mut spans: Vec<(u16, u16)> = pts
+        .iter()
+        .map(|p| (p.kind.offset(), p.kind.width()))
+        .collect();
     spans.sort_unstable();
     let first = spans[0].0;
     let last_end = spans.iter().map(|(o, w)| *o + *w).max().unwrap_or(0);
@@ -636,7 +641,16 @@ fn validate_block_spans(prefix: &str, regs: &[RegBlockConf]) -> Result<(), Strin
             if ai < bi + bw && bi < ai + aw {
                 return Err(format!(
                     "{}regs 块 {} 与 {} 寄存器区间重叠（{:?} 空间 {}@{:#x}+{} 与 {}@{:#x}+{}）",
-                    prefix, a.name, b.name, a.func, a.name, a.addr, a.count, b.name, b.addr, b.count
+                    prefix,
+                    a.name,
+                    b.name,
+                    a.func,
+                    a.name,
+                    a.addr,
+                    a.count,
+                    b.name,
+                    b.addr,
+                    b.count
                 ));
             }
         }
@@ -655,7 +669,13 @@ fn check_symbolicity(
     format: RegFormat,
     offset: f64,
 ) -> Result<(), String> {
-    check_symbolicity_row(metric, addr, format, offset, crate::point_table::lookup(role, addr))
+    check_symbolicity_row(
+        metric,
+        addr,
+        format,
+        offset,
+        crate::point_table::lookup(role, addr),
+    )
 }
 
 /// 规则 6 的判定核心（纯函数，供单测直接注入登记行）：
@@ -1488,10 +1508,7 @@ south_stations:
                 BATTERY_SOC_REGS
             );
             let w: Wrapper = serde_yaml::from_str(&yaml).expect("解析失败");
-            assert!(
-                w.south_stations.validate().is_err(),
-                "slave={bad} 应被拒绝"
-            );
+            assert!(w.south_stations.validate().is_err(), "slave={bad} 应被拒绝");
         }
     }
 
@@ -1597,9 +1614,8 @@ south_stations:
     /// S3b-1c：完整 p/q/pf/u/i + p_total（addr 非 0 不重叠）→ validate Ok
     #[test]
     fn validate_accepts_meter_grid_complete_regs() {
-        let w: Wrapper =
-            serde_yaml::from_str(&meter_grid_only_yaml(meter_grid_full_regs_yaml()))
-                .expect("解析失败");
+        let w: Wrapper = serde_yaml::from_str(&meter_grid_only_yaml(meter_grid_full_regs_yaml()))
+            .expect("解析失败");
         assert!(
             w.south_stations.validate().is_ok(),
             "完整 meter_grid regs 应通过: {:?}",
@@ -1702,7 +1718,8 @@ south_stations:
     #[test]
     fn symbolicity_rejects_untraceable_offset() {
         let r = row(-1600.0, None);
-        let err = check_symbolicity_row("x", 116, RegFormat::Uint16, -1600.0, Some(&r)).unwrap_err();
+        let err =
+            check_symbolicity_row("x", 116, RegFormat::Uint16, -1600.0, Some(&r)).unwrap_err();
         assert!(err.contains("未登记符号性来源"), "实际: {err}");
         // 同值但已登记来源 → 放行
         let r = row(-1600.0, Some(SymSrc::VendorTypo));

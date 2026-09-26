@@ -36,22 +36,42 @@ pub struct SimBridgeConfig {
     pub max_episode_steps: u32,
 }
 
-fn default_scenario() -> String { "MODE-01".into() }
-fn default_mqtt_broker() -> String { "192.168.3.118:1884".into() }
-fn default_mqtt_topic() -> String { "mupc/sim/observation".into() }
-fn default_mqtt_client_id() -> String { "mupc-sim-bridge".into() }
-fn default_action_listen_addr() -> String { "0.0.0.0:9100".into() }
-fn default_python_cmd() -> String { "sim-env/venv/bin/python3".into() }
-fn default_engine_script() -> String { "sim-env/engine.py".into() }
-fn default_step_interval_ms() -> u64 { 200 }
-fn default_max_episode_steps() -> u32 { 96 }
+fn default_scenario() -> String {
+    "MODE-01".into()
+}
+fn default_mqtt_broker() -> String {
+    "192.168.3.118:1884".into()
+}
+fn default_mqtt_topic() -> String {
+    "mupc/sim/observation".into()
+}
+fn default_mqtt_client_id() -> String {
+    "mupc-sim-bridge".into()
+}
+fn default_action_listen_addr() -> String {
+    "0.0.0.0:9100".into()
+}
+fn default_python_cmd() -> String {
+    "sim-env/venv/bin/python3".into()
+}
+fn default_engine_script() -> String {
+    "sim-env/engine.py".into()
+}
+fn default_step_interval_ms() -> u64 {
+    200
+}
+fn default_max_episode_steps() -> u32 {
+    96
+}
 
 /// Parse "host:port" from broker address string.
 /// Note: IPv4 only (`192.168.3.118:1884`). IPv6 not supported in current simulation topology.
 pub fn parse_broker_addr(addr: &str) -> Result<(&str, u16), SimBridgeError> {
-    let (host, port_str) = addr.rsplit_once(':')
-        .ok_or_else(|| SimBridgeError::Config(format!("Broker 地址格式错误 (需 host:port): {}", addr)))?;
-    let port: u16 = port_str.parse()
+    let (host, port_str) = addr.rsplit_once(':').ok_or_else(|| {
+        SimBridgeError::Config(format!("Broker 地址格式错误 (需 host:port): {}", addr))
+    })?;
+    let port: u16 = port_str
+        .parse()
         .map_err(|_| SimBridgeError::Config(format!("Broker 端口无效: {}", port_str)))?;
     Ok((host, port))
 }
@@ -62,12 +82,17 @@ pub async fn validate_environment(config: &SimBridgeConfig) -> Result<(), SimBri
         .arg("--version")
         .output()
         .await
-        .map_err(|e| SimBridgeError::Config(format!("Python 不可用 ({}): {}", config.python_cmd, e)))?;
+        .map_err(|e| {
+            SimBridgeError::Config(format!("Python 不可用 ({}): {}", config.python_cmd, e))
+        })?;
     tracing::info!("Python: {}", String::from_utf8_lossy(&output.stdout).trim());
 
     let script = Path::new(&config.engine_script);
     if !script.exists() {
-        return Err(SimBridgeError::Config(format!("engine.py 不存在: {}", config.engine_script)));
+        return Err(SimBridgeError::Config(format!(
+            "engine.py 不存在: {}",
+            config.engine_script
+        )));
     }
 
     tracing::warn!("══════════════════════════════════════════════");

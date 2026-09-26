@@ -52,11 +52,10 @@ async fn main() {
         tracing::warn!("配置文件 {} 不存在，使用默认配置", config_path.display());
         "{}".to_string()
     });
-    let mut config: SimBridgeConfig =
-        serde_yaml::from_str(&config_str).unwrap_or_else(|e| {
-            tracing::warn!("配置解析失败: {}，使用默认值", e);
-            serde_yaml::from_str("{}").unwrap()
-        });
+    let mut config: SimBridgeConfig = serde_yaml::from_str(&config_str).unwrap_or_else(|e| {
+        tracing::warn!("配置解析失败: {}，使用默认值", e);
+        serde_yaml::from_str("{}").unwrap()
+    });
 
     // CLI overrides
     if let Some(ref s) = cli.scenario {
@@ -80,7 +79,14 @@ async fn main() {
     }
 
     tracing::info!("场景: {}", config.scenario);
-    tracing::info!("Grid2Op: {}", if cli.grid2op { "启用" } else { "禁用 (VoltageSimulator)" });
+    tracing::info!(
+        "Grid2Op: {}",
+        if cli.grid2op {
+            "启用"
+        } else {
+            "禁用 (VoltageSimulator)"
+        }
+    );
 
     // Initialize components
     let mut mqtt = MqttPublisher::connect(&config).await.unwrap_or_else(|e| {
@@ -103,10 +109,13 @@ async fn main() {
     let mut metrics = MetricsCollector::new(&config.scenario);
 
     // Initial reset and publish
-    let initial_obs = engine.send_reset(&config.scenario).await.unwrap_or_else(|e| {
-        tracing::error!("初始 reset 失败: {}", e);
-        std::process::exit(1);
-    });
+    let initial_obs = engine
+        .send_reset(&config.scenario)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("初始 reset 失败: {}", e);
+            std::process::exit(1);
+        });
     let initial_data = match &initial_obs {
         SimResponse::Observation { data, .. } => data.clone(),
         _ => {
@@ -114,9 +123,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    mqtt.publish_observation(&initial_data).await.unwrap_or_else(|e| {
-        tracing::error!("初始 MQTT 发布失败: {}", e);
-    });
+    mqtt.publish_observation(&initial_data)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("初始 MQTT 发布失败: {}", e);
+        });
 
     let mut current_obs = initial_data.clone();
 

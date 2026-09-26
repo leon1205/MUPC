@@ -61,9 +61,9 @@ use std::rc::Rc;
 
 use mupc_display_proto::peripherals_labels::{ui_text, GROUP_TITLES};
 use mupc_display_proto::{
-    periph_whitelist_contains, CatalogBlockKind, CatalogPoint, CatalogStation, LinkState,
-    PeriphRole, PeripheralCatalog, PeripheralStation, PeripheralsSection, PointValue,
-    ServiceScope, BmsAlarmPage, DEFAULT_BIND, DEFAULT_CONTROL_BIND,
+    periph_whitelist_contains, BmsAlarmPage, CatalogBlockKind, CatalogPoint, CatalogStation,
+    LinkState, PeriphRole, PeripheralCatalog, PeripheralStation, PeripheralsSection, PointValue,
+    ServiceScope, DEFAULT_BIND, DEFAULT_CONTROL_BIND,
 };
 
 use crate::lvgl::display::Area;
@@ -77,8 +77,8 @@ use crate::ui::components::{LedIndicator, StatusChip, WarnBanner};
 use crate::ui::pages::{
     control_source_text, decor, display_safe, fmt_decimals, fmt_int0, format_epoch_ms_utc,
     format_uptime, frame_mark, label, layout_box, link_color, link_icon, page_root, sections,
-    set_style_index, set_visible, text_label, CbSlot, PageInput, SegmentedTabs, LED_STATES, MISSING,
-    PLACEHOLDER,
+    set_style_index, set_visible, text_label, CbSlot, PageInput, SegmentedTabs, LED_STATES,
+    MISSING, PLACEHOLDER,
 };
 use crate::ui::theme::{self, Dimens, Palette, TextSlot};
 
@@ -294,9 +294,9 @@ const VISIBLE_ROWS: i32 = Dimens::SECTION_VIEW_H / Dimens::ROW_DATA_H;
 /// （T-18 / T-25 的"行数上界"断言即锚在这里）。
 pub(crate) const SEG_ROW_POOL: usize = (VISIBLE_ROWS * 3 / 2 + 1) as usize;
 /// 分组卡框池大小（最小卡高 = 卡头 + 一行 + 组缝 ⇒ 可视区内最多几张卡；+2 余量）。
-const SEG_CARD_POOL: usize =
-    (Dimens::SECTION_VIEW_H / (Dimens::CARD_HEAD_H + Dimens::ROW_DATA_H + Dimens::GAP_GROUP) + 2)
-        as usize;
+const SEG_CARD_POOL: usize = (Dimens::SECTION_VIEW_H
+    / (Dimens::CARD_HEAD_H + Dimens::ROW_DATA_H + Dimens::GAP_GROUP)
+    + 2) as usize;
 
 /// 下钻顶部条高（按钮高）。
 const DRILL_TOP_H: i32 = Dimens::TOUCH_MIN;
@@ -553,7 +553,10 @@ fn row_of_point(
                 degraded: false,
             };
         }
-        let active = view.value.map(|raw| bit_active(raw, index)).unwrap_or(false);
+        let active = view
+            .value
+            .map(|raw| bit_active(raw, index))
+            .unwrap_or(false);
         let active_text = bit.and_then(|b| b.active_text.as_deref());
         let inactive_text = bit.and_then(|b| b.inactive_text.as_deref());
         let inverted = bit.map(|b| b.inverted).unwrap_or(false);
@@ -598,7 +601,10 @@ fn row_of_point(
     }
 
     // 枚举：catalog 给了值域 ⇒ 逐字照抄；**表外值 ⇒ 「未知」**（绝不落「正常」）。
-    if let Some(labels) = meta.map(|m| m.enum_labels.as_slice()).filter(|l| !l.is_empty()) {
+    if let Some(labels) = meta
+        .map(|m| m.enum_labels.as_slice())
+        .filter(|l| !l.is_empty())
+    {
         return RowData {
             kind: RowKind::Enum,
             h: Dimens::ROW_DATA_H,
@@ -685,7 +691,9 @@ fn clock_hms(ms: u64) -> String {
         return PLACEHOLDER.to_string();
     }
     let t = format_epoch_ms_utc(ms);
-    t.split_once(' ').map(|(_, time)| time.to_string()).unwrap_or(t)
+    t.split_once(' ')
+        .map(|(_, time)| time.to_string())
+        .unwrap_or(t)
 }
 
 /// role → 中文名（取自 `ui_text`；`Unknown` ⇒ 「未知」，**不臆造**）。
@@ -824,7 +832,9 @@ pub(crate) fn segment_model(
             continue;
         }
         mine.sort_by(|a, b| (a.block.as_str(), a.at).cmp(&(b.block.as_str(), b.at)));
-        let Some(title) = group_title(key) else { continue };
+        let Some(title) = group_title(key) else {
+            continue;
+        };
         // `bms_alarm`：段内只放**摘要卡**（288 位走下钻，§15.5.2 的硬要求）。
         if *key == machine_key("bms_alarm") {
             rows.push(RowData::header(title));
@@ -1169,7 +1179,14 @@ impl PoolRow {
     }
 
     /// 本行的**四**槽文本（隐藏槽 ⇒ `None`；断言口径）。
-    fn texts(&self) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    fn texts(
+        &self,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
         let pick = |l: &Label| if l.is_hidden() { None } else { l.text() };
         (
             pick(&self.l1),
@@ -1242,7 +1259,12 @@ impl SegmentList {
         // **卡框先建、池行后建** ⇒ LVGL 按创建序绘制 ⇒ 池行绘在卡框之上（偏差 P6-1）。
         let mut cards = Vec::with_capacity(SEG_CARD_POOL);
         for _ in 0..SEG_CARD_POOL {
-            let card = decor(&spacer, Dimens::CONTENT_W, Dimens::CARD_HEAD_H, &theme::card())?;
+            let card = decor(
+                &spacer,
+                Dimens::CONTENT_W,
+                Dimens::CARD_HEAD_H,
+                &theme::card(),
+            )?;
             set_visible(&card, false);
             cards.push(card);
         }
@@ -1449,9 +1471,19 @@ impl BmsAlarmCard {
             Self::height(0),
             &theme::card(),
         )?;
-        let title = Rc::new(text_label(&card, "", TextSlot::SectionTitle, Palette::TEXT_PRIMARY)?);
+        let title = Rc::new(text_label(
+            &card,
+            "",
+            TextSlot::SectionTitle,
+            Palette::TEXT_PRIMARY,
+        )?);
         title.set_pos(0, 0);
-        let summary = Rc::new(text_label(&card, "", TextSlot::CardValue, Palette::TEXT_PRIMARY)?);
+        let summary = Rc::new(text_label(
+            &card,
+            "",
+            TextSlot::CardValue,
+            Palette::TEXT_PRIMARY,
+        )?);
         summary.set_pos(0, Dimens::CARD_HEAD_H);
         let mut list = Vec::with_capacity(BMS_SUMMARY_LIST_ROWS);
         for i in 0..BMS_SUMMARY_LIST_ROWS {
@@ -1588,7 +1620,8 @@ impl BmsAlarmCard {
                 None => set_visible(l, false),
             }
         }
-        self.card.set_size(Dimens::CONTENT_W - 2 * CARD_INSET, Self::height(rows.len()));
+        self.card
+            .set_size(Dimens::CONTENT_W - 2 * CARD_INSET, Self::height(rows.len()));
         self.place_entry(rows.len());
     }
 }
@@ -1645,7 +1678,12 @@ impl BmsDrill {
     fn new(parent: &Obj) -> Result<Self, LvglError> {
         let root = layout_box(parent, Dimens::CONTENT_W, Dimens::SECTION_VIEW_H)?;
         root.set_pos(0, 0);
-        let title = Rc::new(text_label(&root, "", TextSlot::SectionTitle, Palette::TEXT_PRIMARY)?);
+        let title = Rc::new(text_label(
+            &root,
+            "",
+            TextSlot::SectionTitle,
+            Palette::TEXT_PRIMARY,
+        )?);
         title.set_size(
             Dimens::CONTENT_W - 3 * Dimens::DRILL_BTN_W - 4 * Dimens::GAP_MIN,
             TextSlot::SectionTitle.px() as i32,
@@ -1735,16 +1773,14 @@ impl BmsDrill {
 
     /// 翻页 / 重试的意图接线（与 [`BmsDrill::page`] 的当前页一起算目标页）。
     fn wire_page_buttons(&self) {
-        for (btn, req) in [
-            (&self.prev, DRILL_REQ_PREV),
-            (&self.next, DRILL_REQ_NEXT),
-        ] {
+        for (btn, req) in [(&self.prev, DRILL_REQ_PREV), (&self.next, DRILL_REQ_NEXT)] {
             let flag = Rc::clone(&self.page_req);
             btn.on_clicked(move |_| flag.set(Some(req)));
         }
         // 重试 = 重发**当前页**（哨兵由页面换成当前页）。
         let flag = Rc::clone(&self.page_req);
-        self.retry.on_clicked(move |_| flag.set(Some(DRILL_REQ_RETRY)));
+        self.retry
+            .on_clicked(move |_| flag.set(Some(DRILL_REQ_RETRY)));
     }
 
     /// 建一行（两位）。
@@ -2045,7 +2081,10 @@ impl SysRow {
         link: bool,
     ) -> Result<Self, LvglError> {
         let name_l = text_label(parent, name, TextSlot::Label, Palette::TEXT_SECOND)?;
-        name_l.set_pos(0, y + theme::center_offset(ROW_H, TextSlot::Label.px() as i32));
+        name_l.set_pos(
+            0,
+            y + theme::center_offset(ROW_H, TextSlot::Label.px() as i32),
+        );
         let value = Rc::new(label(parent, TextSlot::CardValue, Palette::TEXT_PRIMARY)?);
         value.set_text(PLACEHOLDER);
         value.set_size(VALUE_W, TextSlot::CardValue.px() as i32);
@@ -2064,8 +2103,10 @@ impl SysRow {
                     st.display_name(),
                     link_color(st),
                 )?);
-                led.obj()
-                    .set_pos(VALUE_COL_X, y + theme::center_offset(ROW_H, Dimens::ICON_SM));
+                led.obj().set_pos(
+                    VALUE_COL_X,
+                    y + theme::center_offset(ROW_H, Dimens::ICON_SM),
+                );
                 set_visible(led.obj(), false);
                 arr.push(led);
             }
@@ -2256,7 +2297,10 @@ impl P6SystemPage {
     }
 
     /// 建段「装置」的内容（站状态表 + F8 三卡；**逐字保留** B2a 的版面）。
-    fn build_device_segment(parent: &Obj, value_styles: &[Rc<Style>; 2]) -> Result<DeviceSegment, LvglError> {
+    fn build_device_segment(
+        parent: &Obj,
+        value_styles: &[Rc<Style>; 2],
+    ) -> Result<DeviceSegment, LvglError> {
         let host = ScrollContainer::create(parent)?;
         host.set_size(Dimens::CONTENT_W, Dimens::SECTION_VIEW_H);
         host.set_pos(0, 0);
@@ -2364,7 +2408,12 @@ impl P6SystemPage {
                 false,
             )?);
         }
-        let note = text_label(&about_card, TEXT_NO_REMOTE, TextSlot::Body, Palette::TEXT_WEAK)?;
+        let note = text_label(
+            &about_card,
+            TEXT_NO_REMOTE,
+            TextSlot::Body,
+            Palette::TEXT_WEAK,
+        )?;
         note.set_pos(0, CARD_HEAD_H + ABOUT_ROWS as i32 * ROW_H);
         // 段内容总高自证（改任一卡的版面常量 ⇒ 在此响亮失败）。
         debug_assert_eq!(ABOUT_CARD_Y + ABOUT_CARD_H, DEVICE_TOTAL_H);
@@ -2465,8 +2514,10 @@ impl P6SystemPage {
         self.device.info[3].set_text(build_time.as_deref(), &self.value_styles);
 
         // ③ 运行信息（与 P1 同源）。
-        self.device.run[0]
-            .set_text(device.uptime_secs.map(format_uptime).as_deref(), &self.value_styles);
+        self.device.run[0].set_text(
+            device.uptime_secs.map(format_uptime).as_deref(),
+            &self.value_styles,
+        );
         self.device.run[1].set_text(
             device
                 .cpu_temp_c
@@ -2484,7 +2535,10 @@ impl P6SystemPage {
         self.device.run[3].set_link(device.iec104);
         self.device.run[4].set_link(device.intercore);
         self.device.run[5].set_link(device.hmi_channel);
-        self.device.run[6].set_text(Some(control_source_text(device.control_source)), &self.value_styles);
+        self.device.run[6].set_text(
+            Some(control_source_text(device.control_source)),
+            &self.value_styles,
+        );
 
         // ④ 关于本屏。
         self.device.about[0].set_text(Some(env!("CARGO_PKG_VERSION")), &self.value_styles);
@@ -2873,7 +2927,10 @@ impl P6SystemPage {
 
     /// 收起按钮对象（`(宽, 高)` 版面断言用；未创建 ⇒ `None`）。
     pub fn drill_collapse_size(&self) -> Option<(i32, i32)> {
-        self.drill.borrow().as_ref().map(|d| d.collapse_button().size())
+        self.drill
+            .borrow()
+            .as_ref()
+            .map(|d| d.collapse_button().size())
     }
 
     /// 上一页 / 下一页按钮尺寸。
@@ -2891,7 +2948,11 @@ impl P6SystemPage {
 
     /// 下钻失败带是否可见（R-4：**只显本地固定文案**）。
     pub fn drill_fail_visible(&self) -> bool {
-        self.drill.borrow().as_ref().map(|d| d.fail_visible()).unwrap_or(false)
+        self.drill
+            .borrow()
+            .as_ref()
+            .map(|d| d.fail_visible())
+            .unwrap_or(false)
     }
 
     /// 下钻「重试」是否可见。
@@ -2905,7 +2966,11 @@ impl P6SystemPage {
 
     /// 下钻行池大小（**行数上界断言的读口**）。
     pub fn drill_pool_size(&self) -> usize {
-        self.drill.borrow().as_ref().map(|d| d.pool_size()).unwrap_or(0)
+        self.drill
+            .borrow()
+            .as_ref()
+            .map(|d| d.pool_size())
+            .unwrap_or(0)
     }
 
     /// **仅测试**：把下钻行区滚到 `y`（**只发滚动** —— 与生产 `SCROLL` 事件同源；
@@ -2974,7 +3039,11 @@ impl P6SystemPage {
         if i == SEG_DEVICE {
             return true;
         }
-        self.segs.borrow().get(i).map(Option::is_some).unwrap_or(false)
+        self.segs
+            .borrow()
+            .get(i)
+            .map(Option::is_some)
+            .unwrap_or(false)
     }
 
     /// 段 `i` 的行模型（`(kind, 行高)`；未创建 ⇒ `None`）。

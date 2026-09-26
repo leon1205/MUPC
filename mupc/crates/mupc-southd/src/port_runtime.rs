@@ -67,10 +67,7 @@ impl Rs485PortBus {
         let c = bus_config(conf);
         let handler = rs485_plugin::handlers::ProtocolHandlerRegistry::get(&conf.protocol, &c)
             .ok_or_else(|| {
-                BusError::Open(
-                    conf.port.clone(),
-                    format!("无 {} handler", conf.protocol),
-                )
+                BusError::Open(conf.port.clone(), format!("无 {} handler", conf.protocol))
             })?;
         let device = rs485_plugin::device::Rs485Device::new(
             format!("port_{}", conf.port),
@@ -102,10 +99,20 @@ impl StationBus for Rs485PortBus {
         tokio::task::spawn_blocking(move || {
             tracing::debug!(port = %port, slave, addr, count, "southd 口读保持寄存器");
             dev.read_holding_registers_from(slave, addr, count)
-                .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })
+                .map_err(|e| BusError::Read {
+                    slave,
+                    addr,
+                    count,
+                    reason: e.to_string(),
+                })
         })
         .await
-        .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
+        .map_err(|e| BusError::Read {
+            slave,
+            addr,
+            count,
+            reason: e.to_string(),
+        })?
     }
 
     async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError> {
@@ -117,10 +124,20 @@ impl StationBus for Rs485PortBus {
         tokio::task::spawn_blocking(move || {
             tracing::debug!(port = %port, slave, addr, count, "southd 口读输入寄存器");
             dev.read_input_registers_from(slave, addr, count)
-                .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })
+                .map_err(|e| BusError::Read {
+                    slave,
+                    addr,
+                    count,
+                    reason: e.to_string(),
+                })
         })
         .await
-        .map_err(|e| BusError::Read { slave, addr, count, reason: e.to_string() })?
+        .map_err(|e| BusError::Read {
+            slave,
+            addr,
+            count,
+            reason: e.to_string(),
+        })?
     }
 
     async fn read_discrete(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<bool>, BusError> {
@@ -230,7 +247,10 @@ impl MockBus {
 
     /// 预置 FC04 input 读响应。
     pub fn put_input(&self, slave: u8, addr: u16, regs: Vec<u16>) {
-        self.input_responses.lock().unwrap().insert((slave, addr), regs);
+        self.input_responses
+            .lock()
+            .unwrap()
+            .insert((slave, addr), regs);
     }
 
     /// 下次该 (slave, addr) 读抛 Err（模拟超时/CRC）——多次调用排队逐次抛错。
@@ -398,7 +418,7 @@ impl StationBus for MockBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{StationParity, DEFAULT_BAUD_RATE, Role, StationConf};
+    use crate::config::{Role, StationConf, StationParity, DEFAULT_BAUD_RATE};
 
     fn conf(port: &str, protocol: &str) -> StationConf {
         StationConf {
@@ -432,7 +452,15 @@ mod tests {
         let bus = MockBus::new();
         let r = bus.read_holding(9, 0x200, 2).await;
         assert!(
-            matches!(r, Err(BusError::Read { slave: 9, addr: 0x200, count: 2, .. })),
+            matches!(
+                r,
+                Err(BusError::Read {
+                    slave: 9,
+                    addr: 0x200,
+                    count: 2,
+                    ..
+                })
+            ),
             "未预置 addr 应报 Err，实际 {r:?}"
         );
         assert_eq!(bus.call_count(9, 0x200), 1);
@@ -477,7 +505,10 @@ mod tests {
     async fn mock_put_input_then_read_input_returns_preset() {
         let bus = MockBus::new();
         bus.put_input(2, 0x100, vec![9, 8]);
-        let r = bus.read_input(2, 0x100, 2).await.expect("input 读应返回预置");
+        let r = bus
+            .read_input(2, 0x100, 2)
+            .await
+            .expect("input 读应返回预置");
         assert_eq!(r, vec![9, 8]);
         assert_eq!(bus.input_call_count(2, 0x100), 1);
         // 与 holding 键独立：同 (slave,addr) 的 holding 未预置仍 Err

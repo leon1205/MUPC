@@ -63,11 +63,18 @@ const FLOW_REGS: &str = "regs: [{ name: z, addr: 10, count: 2, format: uint16, s
 
 fn assert_err_contains(cfg: &SouthStationsConfig, needle: &str, what: &str) {
     let err = cfg.validate().expect_err(&format!("{what} 应被拒"));
-    assert!(err.contains(needle), "{what}：Err 应含 {needle:?}，实际 {err}");
+    assert!(
+        err.contains(needle),
+        "{what}：Err 应含 {needle:?}，实际 {err}"
+    );
 }
 
 fn assert_ok(cfg: &SouthStationsConfig, what: &str) {
-    assert!(cfg.validate().is_ok(), "{what} 应通过：{:?}", cfg.validate());
+    assert!(
+        cfg.validate().is_ok(),
+        "{what} 应通过：{:?}",
+        cfg.validate()
+    );
 }
 
 // ═══════════════════════════ AC-1 ② 完整 6 站 ═══════════════════════════
@@ -87,19 +94,32 @@ fn ac1_full_reference_config_parses_and_passes() {
     assert_eq!(bms_io.points.len(), 19, "bms_io 逐点声明 19 条");
     let i116 = bms_io.points.iter().find(|p| p.at == 17).unwrap();
     assert_eq!(i116.offset, Some(-1600.0), "116（at 17）簇组电流零点平移");
-    assert_eq!(i116.format, Some(RegFormat::Uint16), "原文 UNIT → UINT 的推断订正");
-    let soc_pt = bms_io.points.iter().find(|p| p.name.as_deref() == Some("soc")).unwrap();
+    assert_eq!(
+        i116.format,
+        Some(RegFormat::Uint16),
+        "原文 UNIT → UINT 的推断订正"
+    );
+    let soc_pt = bms_io
+        .points
+        .iter()
+        .find(|p| p.name.as_deref() == Some("soc"))
+        .unwrap();
     assert_eq!(soc_pt.at, 19, "寄存器 118 = addr 100 + (19−1)");
 
     let pcs = cfg.stations.iter().find(|s| s.id == "pcs").unwrap();
     assert_eq!(pcs.role, Role::Pcs);
     assert!(pcs.regs[0].byte_swap, "pcs_3zone 字节低-高互换");
     assert_eq!(pcs.regs[0].points.len(), 31);
-    assert!(pcs.regs[0].points.iter().any(|p| p.word_order
-        == mupc_data_processing::meter_regs::WordOrder::LoHi));
+    assert!(pcs.regs[0]
+        .points
+        .iter()
+        .any(|p| p.word_order == mupc_data_processing::meter_regs::WordOrder::LoHi));
 
     let fire = cfg.stations.iter().find(|s| s.id == "fire").unwrap();
-    assert!(fire.regs[0].points.iter().any(|p| p.name.as_deref() == Some("fire_det_count")));
+    assert!(fire.regs[0]
+        .points
+        .iter()
+        .any(|p| p.name.as_deref() == Some("fire_det_count")));
 
     let hvac = cfg.stations.iter().find(|s| s.id == "hvac").unwrap();
     assert_eq!(hvac.parity, StationParity::Even, "空调出厂偶校验");
@@ -117,7 +137,10 @@ fn ac1_grid_meter_only_passes() {
     cfg.stations.retain(|s| s.role == Role::MeterGrid);
     assert_eq!(cfg.stations.len(), 1);
     assert_eq!(cfg.stations[0].regs.len(), 6);
-    assert_ok(&cfg, "仅 grid_meter 六相量块（6 块地址严格相邻但均无 points）");
+    assert_ok(
+        &cfg,
+        "仅 grid_meter 六相量块（6 块地址严格相邻但均无 points）",
+    );
 }
 
 // ═══════════════════════════ AC-1 ① 既有字段子集 ═══════════════════════════
@@ -219,7 +242,12 @@ fn ac1_legacy_field_subset_parses_and_legacy_conditions_do_not_fire() {
 
     // ① 剥离生效：既有形制里不含任何新增字段/取值
     for s in &cfg.stations {
-        assert_eq!(s.parity, StationParity::None, "站 {} 的 parity 已剥离", s.id);
+        assert_eq!(
+            s.parity,
+            StationParity::None,
+            "站 {} 的 parity 已剥离",
+            s.id
+        );
         for b in &s.regs {
             assert!(b.points.is_empty(), "块 {} 的 points 已剥离", b.name);
             assert_eq!(b.offset, 0.0);
@@ -231,7 +259,10 @@ fn ac1_legacy_field_subset_parses_and_legacy_conditions_do_not_fire() {
 
     // ② grid_meter 站与生效配置取值逐字一致（`deploy/config/mupc_core_config.yaml`）
     let g = cfg.grid_station().expect("meter_grid 站在");
-    assert_eq!(g.id, "grid_meter", "站 id 是 grid_meter（meter_grid 只是 role 名）");
+    assert_eq!(
+        g.id, "grid_meter",
+        "站 id 是 grid_meter（meter_grid 只是 role 名）"
+    );
     assert_eq!(g.slave, 3);
     assert_eq!(g.interval_ms, 1000);
     let want = [
@@ -244,14 +275,20 @@ fn ac1_legacy_field_subset_parses_and_legacy_conditions_do_not_fire() {
     ];
     for (name, addr, format, scale, count) in want {
         let b = g.regs.iter().find(|b| b.name == name).expect("相量块齐备");
-        assert_eq!((b.addr, b.format, b.scale, b.count), (addr, format, scale, count));
+        assert_eq!(
+            (b.addr, b.format, b.scale, b.count),
+            (addr, format, scale, count)
+        );
     }
 
     // ③ 除 battery 站以外的 5 站：既有拒绝条件逐条不触发
     let mut without_battery = parse(LEGACY_SUBSET);
     without_battery.stations.retain(|s| s.role != Role::Battery);
     assert_eq!(without_battery.stations.len(), 5);
-    assert_ok(&without_battery, "既有字段子集（grid_meter/pcs/meter_batt/fire/hvac）");
+    assert_ok(
+        &without_battery,
+        "既有字段子集（grid_meter/pcs/meter_batt/fire/hvac）",
+    );
 
     // ④ battery 站：唯一被触发的拒绝是**本轮新增**的规则 4（`soc` 点契约）或规则 19
     //   （无 `points` 的 32 位块宽度护栏——`bms_energy` 的 `count: 19` 在 `points` 被剥离后
@@ -271,15 +308,13 @@ fn ac1_legacy_field_subset_parses_and_legacy_conditions_do_not_fire() {
 /// 规则 1（新 role 合法性）：未知取值由 serde 拒；`pcs` 解析通过。
 #[test]
 fn ac1_rule1_unknown_role_rejected_by_serde() {
-    let yaml = "south_stations:\n  stations:\n    - { id: s1, role: nonsense, port: ttyS1, slave: 1 }";
+    let yaml =
+        "south_stations:\n  stations:\n    - { id: s1, role: nonsense, port: ttyS1, slave: 1 }";
     assert!(
         serde_yaml::from_str::<Wrapper>(yaml).is_err(),
         "未知名 role 应在反序列化期被拒（无静默 fallback）"
     );
-    let cfg = one_station(
-        "pcs",
-        &regs_of(&plain_block("z", 10, 2)),
-    );
+    let cfg = one_station("pcs", &regs_of(&plain_block("z", 10, 2)));
     assert_eq!(cfg.stations[0].role, Role::Pcs, "role: pcs 应解析通过");
 }
 
@@ -335,11 +370,17 @@ fn ac1_rule5_zero_scale_rejected() {
         assert_err_contains(&one_station("hvac", &regs_of(body)), "scale", body);
     }
     assert_ok(
-        &one_station("hvac", &regs_of("- { name: z, addr: 10, count: 4, format: float32 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: z, addr: 10, count: 4, format: float32 }"),
+        ),
         "float32 块缺 scale（既有语义：float32 不乘 scale）",
     );
     assert_ok(
-        &one_station("hvac", &regs_of("- { name: d, func: discrete, addr: 10, count: 8 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: d, func: discrete, addr: 10, count: 8 }"),
+        ),
         "discrete 块不适用 scale 规则（位值恒 0/1）",
     );
 }
@@ -494,7 +535,11 @@ fn ac1_rule10_duplicate_metric_rejected() {
         "- { name: a_blk, addr: 10, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: dup }] }",
         "- { name: b_blk, addr: 20, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: dup }] }"
     );
-    assert_err_contains(&one_station("hvac", &regs_of(&body)), "点名重复", "两块各自点名 dup");
+    assert_err_contains(
+        &one_station("hvac", &regs_of(&body)),
+        "点名重复",
+        "两块各自点名 dup",
+    );
 }
 
 /// 规则 11（空洞上限 + 窗口首尾锚定，仅作用于声明了 `points` 的标量块）。
@@ -524,17 +569,26 @@ fn ac1_rule11_hole_cap_and_anchoring() {
 #[test]
 fn ac1_rule12_discrete_bit_cap() {
     assert_err_contains(
-        &one_station("hvac", &regs_of("- { name: d, func: discrete, addr: 10, count: 2001 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: d, func: discrete, addr: 10, count: 2001 }"),
+        ),
         "位块上限",
         "discrete count=2001",
     );
     assert_err_contains(
-        &one_station("hvac", &regs_of("- { name: d, func: discrete, addr: 10, count: 0 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: d, func: discrete, addr: 10, count: 0 }"),
+        ),
         "count 须 > 0",
         "discrete count=0",
     );
     assert_ok(
-        &one_station("hvac", &regs_of("- { name: d, func: discrete, addr: 10, count: 2000 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: d, func: discrete, addr: 10, count: 2000 }"),
+        ),
         "discrete count=2000（上界内）",
     );
 }
@@ -551,11 +605,17 @@ fn ac1_rule13_addr_zero_by_role() {
         assert_err_contains(&one_station(role, &regs_of(extra)), "addr 不能为 0", role);
     }
     assert_ok(
-        &one_station("meter_batt", &regs_of("- { name: z, addr: 0, count: 2, format: int32_scaled, scale: 0.01 }")),
+        &one_station(
+            "meter_batt",
+            &regs_of("- { name: z, addr: 0, count: 2, format: int32_scaled, scale: 0.01 }"),
+        ),
         "ADL400 电能块首址即 0",
     );
     assert_ok(
-        &one_station("hvac", &regs_of("- { name: z, addr: 0, count: 2, format: int16, scale: 0.1 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: z, addr: 0, count: 2, format: int16, scale: 0.1 }"),
+        ),
         "空调 FC04 首址亦为 0",
     );
 }
@@ -567,7 +627,11 @@ fn ac1_rule14_overlap_by_func_space() {
     assert_err_contains(
         &one_station(
             "hvac",
-            &regs_of(&format!("{}\n{}", plain_block("a", 10, 4), plain_block("b", 12, 4))),
+            &regs_of(&format!(
+                "{}\n{}",
+                plain_block("a", 10, 4),
+                plain_block("b", 12, 4)
+            )),
         ),
         "区间重叠",
         "同 holding 空间 [10,14) 与 [12,16)",
@@ -585,7 +649,11 @@ fn ac1_rule15_maximality_forms() {
     // 反向：两块**均声明 points**、地址严格相邻、合并 4 ≤ 120、无 read_slice → Err
     let bad = one_station(
         "hvac",
-        &regs_of(&format!("{}\n{}", pts_block("a", 10, 2, 2), pts_block("b", 12, 2, 2))),
+        &regs_of(&format!(
+            "{}\n{}",
+            pts_block("a", 10, 2, 2),
+            pts_block("b", 12, 2, 2)
+        )),
     );
     assert_err_contains(&bad, "应合并", "两块均声明 points 且可一次读回");
 
@@ -627,16 +695,27 @@ fn ac1_rule15_maximality_forms() {
     // 相邻的一方未声明 points（grid_meter / fire 形态）→ Ok
     let one_side = one_station(
         "hvac",
-        &regs_of(&format!("{}\n{}", pts_block("a", 10, 2, 2), plain_block("b", 12, 2))),
+        &regs_of(&format!(
+            "{}\n{}",
+            pts_block("a", 10, 2, 2),
+            plain_block("b", 12, 2)
+        )),
     );
     assert_ok(&one_side, "相邻一方未声明 points ⇒ 不参与判定");
 
     // 两块均未声明 points 且严格相邻（grid_meter 形态）→ Ok
     let legacy_pair = one_station(
         "hvac",
-        &regs_of(&format!("{}\n{}", plain_block("a", 10, 6), plain_block("b", 16, 6))),
+        &regs_of(&format!(
+            "{}\n{}",
+            plain_block("a", 10, 6),
+            plain_block("b", 16, 6)
+        )),
     );
-    assert_ok(&legacy_pair, "两块均未声明 points 且严格相邻（既有 meter_grid 形态）");
+    assert_ok(
+        &legacy_pair,
+        "两块均未声明 points 且严格相邻（既有 meter_grid 形态）",
+    );
 
     // `discrete` 块相邻（保守读法 Δ-8：一律不参与）→ Ok
     let bits = one_station(
@@ -726,16 +805,25 @@ fn ac1_rule18_pcs_interval_lower_bound() {
 #[test]
 fn ac1_rule19_width_guard_without_points() {
     assert_err_contains(
-        &one_station("hvac", &regs_of("- { name: z, addr: 10, count: 3, format: int32_scaled, scale: 1.0 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: z, addr: 10, count: 3, format: int32_scaled, scale: 1.0 }"),
+        ),
         "整数倍",
         "32 位块 count=3（尾槽静默少产点）",
     );
     assert_ok(
-        &one_station("hvac", &regs_of("- { name: z, addr: 10, count: 4, format: int32_scaled, scale: 1.0 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: z, addr: 10, count: 4, format: int32_scaled, scale: 1.0 }"),
+        ),
         "32 位块 count=4",
     );
     assert_ok(
-        &one_station("hvac", &regs_of("- { name: d, func: discrete, addr: 10, count: 31 }")),
+        &one_station(
+            "hvac",
+            &regs_of("- { name: d, func: discrete, addr: 10, count: 31 }"),
+        ),
         "discrete 块 count=31（位数无宽度概念，31 非 8 倍数亦合法）",
     );
     // 声明了 `points` 的块不适用本条：count=3 非 32 位宽度整数倍，但逐点声明后由

@@ -1032,7 +1032,9 @@ fn index_of(role: PeriphRole, block: &str, at: u16) -> Option<usize> {
 /// 与 `point_table::FIRE_DET_TEMPLATE_START(17)` / `FIRE_DET_STRIDE(6)` 的组内口径同源：
 /// 第 `k` 只探测器的第 `j` 个寄存器 ↔ 模板位 `j`（`j ∈ 1..=6`）。
 fn normalize_fire_det_at(block: &str, at: u16) -> u16 {
-    if block == crate::peripherals::FIRE_DET_BLOCK_NAME && at > crate::peripherals::FIRE_DET_POINTS_PER_UNIT as u16 {
+    if block == crate::peripherals::FIRE_DET_BLOCK_NAME
+        && at > crate::peripherals::FIRE_DET_POINTS_PER_UNIT as u16
+    {
         (at - 1) % crate::peripherals::FIRE_DET_POINTS_PER_UNIT as u16 + 1
     } else {
         at
@@ -1546,13 +1548,21 @@ mod tests {
     /// - 逐 role：`hvac` 33 / `battery` 330 / `meter_batt` 38 / `pcs` 27 / `fire` 19。
     #[test]
     fn whitelist_counts_match_design_capacity_numerator() {
-        assert_eq!(PERIPH_WHITELIST.len(), 447, "§15.2.4：白名单 447 行（441 + 6 模板）");
+        assert_eq!(
+            PERIPH_WHITELIST.len(),
+            447,
+            "§15.2.4：白名单 447 行（441 + 6 模板）"
+        );
         let per_role = |r: PeriphRole| PERIPH_WHITELIST.iter().filter(|(x, _, _)| *x == r).count();
         assert_eq!(per_role(PeriphRole::Hvac), 33, "§15.5.2 段「空调」");
         assert_eq!(per_role(PeriphRole::Battery), 330, "§15.5.2 段「电池」");
         assert_eq!(per_role(PeriphRole::MeterBatt), 38, "§15.5.2 段「储能表」");
         assert_eq!(per_role(PeriphRole::Pcs), 27, "§15.5.2 段「PCS」");
-        assert_eq!(per_role(PeriphRole::Fire), 19, "§15.5.2：fire_sys 13 + fire_det 模板 6");
+        assert_eq!(
+            per_role(PeriphRole::Fire),
+            19,
+            "§15.5.2：fire_sys 13 + fire_det 模板 6"
+        );
         let fire_det = PERIPH_WHITELIST
             .iter()
             .filter(|(_, b, _)| *b == "fire_det")
@@ -1575,10 +1585,19 @@ mod tests {
     #[test]
     fn structurally_excluded_points_are_absent() {
         // 位 25 保留位（`BitClass::Reserved`）
-        assert!(!contains(PeriphRole::Hvac, "hvac_di", 26), "hvac_di_26（位 25 保留）不得上屏");
+        assert!(
+            !contains(PeriphRole::Hvac, "hvac_di", 26),
+            "hvac_di_26（位 25 保留）不得上屏"
+        );
         // 储能表 PT / CT 只读对照
-        assert!(!contains(PeriphRole::MeterBatt, "mb_phase", 7), "PT 对照不上屏");
-        assert!(!contains(PeriphRole::MeterBatt, "mb_phase", 8), "CT 对照不上屏");
+        assert!(
+            !contains(PeriphRole::MeterBatt, "mb_phase", 7),
+            "PT 对照不上屏"
+        );
+        assert!(
+            !contains(PeriphRole::MeterBatt, "mb_phase", 8),
+            "CT 对照不上屏"
+        );
         // PCS 1046–1065（STS / 负载区，含 1049 = `pcs_3zone_50`）—— 依据 = PRD §7 #11
         for at in 47..=66u16 {
             assert!(
@@ -1588,7 +1607,10 @@ mod tests {
         }
         // BMS `bms_io` 的未列入项（簇状态枚举 / 允许充放电压电流 / DI 位 / SOC 之外的未列项）
         for at in [1u16, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19] {
-            assert!(!contains(PeriphRole::Battery, "bms_io", at), "bms_io_{at} 未列入白名单");
+            assert!(
+                !contains(PeriphRole::Battery, "bms_io", at),
+                "bms_io_{at} 未列入白名单"
+            );
         }
         // `bms_meta` 的 8 = 「主控程序版本号」等在表内；`bms_energy` 的 15（最高单体最高电压变化）
         // 不在 §15.5.2 的「累计量」清单内 ⇒ 结构性不上屏
@@ -1598,9 +1620,7 @@ mod tests {
         assert!(!contains(PeriphRole::Fire, "fire_det", 7));
         // 台区总表（`meter_grid`）不在本增量内（§15 范围外 #3）
         assert!(
-            !PERIPH_WHITELIST
-                .iter()
-                .any(|(_, b, _)| b.contains("grid")),
+            !PERIPH_WHITELIST.iter().any(|(_, b, _)| b.contains("grid")),
             "台区关口总表不得进白名单"
         );
     }
@@ -1611,18 +1631,49 @@ mod tests {
     fn every_whitelisted_point_has_a_design_group_key() {
         const DESIGN_KEYS: &[&str] = &[
             // P4（§15.4）
-            "fire_level", "fire_sys_status", "fire_cylinder", "fire_trigger", "fire_detector",
+            "fire_level",
+            "fire_sys_status",
+            "fire_cylinder",
+            "fire_trigger",
+            "fire_detector",
             // P6 段「空调」/「电池」/「储能表」/「PCS」（§15.5.2）
-            "hvac_measure", "hvac_run", "hvac_alarm", "hvac_state",
-            "bms_core", "bms_health", "bms_cell_extreme", "bms_delta", "bms_power", "bms_term",
-            "bms_energy", "bms_pole_temp", "bms_device", "bms_alarm",
-            "mb_u_i", "mb_freq", "mb_power", "mb_pf", "mb_energy", "mb_quality",
-            "pcs_ac_u_f", "pcs_ac_power", "pcs_dc", "pcs_temp", "pcs_energy", "pcs_mode",
+            "hvac_measure",
+            "hvac_run",
+            "hvac_alarm",
+            "hvac_state",
+            "bms_core",
+            "bms_health",
+            "bms_cell_extreme",
+            "bms_delta",
+            "bms_power",
+            "bms_term",
+            "bms_energy",
+            "bms_pole_temp",
+            "bms_device",
+            "bms_alarm",
+            "mb_u_i",
+            "mb_freq",
+            "mb_power",
+            "mb_pf",
+            "mb_energy",
+            "mb_quality",
+            "pcs_ac_u_f",
+            "pcs_ac_power",
+            "pcs_dc",
+            "pcs_temp",
+            "pcs_energy",
+            "pcs_mode",
         ];
         for (role, block, at) in PERIPH_WHITELIST {
             let g = group_of(*role, block, *at);
-            assert_ne!(g, GROUP_UNKNOWN, "白名单点 {role:?}/{block}/{at} 必须有分组键");
-            assert!(DESIGN_KEYS.contains(&g), "{block}_{at} 的分组键 `{g}` 不在设计分组表内");
+            assert_ne!(
+                g, GROUP_UNKNOWN,
+                "白名单点 {role:?}/{block}/{at} 必须有分组键"
+            );
+            assert!(
+                DESIGN_KEYS.contains(&g),
+                "{block}_{at} 的分组键 `{g}` 不在设计分组表内"
+            );
         }
         // 反例：不在白名单的点、未知块 ⇒ 显式 `unknown`（不臆造分组）
         assert_eq!(group_of(PeriphRole::Hvac, "hvac_di", 26), GROUP_UNKNOWN);
@@ -1634,7 +1685,10 @@ mod tests {
         assert_eq!(group_of(PeriphRole::Battery, "bms_meta", 3), "bms_health");
         assert_eq!(group_of(PeriphRole::Battery, "bms_meta", 4), "bms_delta");
         assert_eq!(group_of(PeriphRole::Battery, "bms_meta", 6), "bms_power");
-        assert_eq!(group_of(PeriphRole::MeterBatt, "mb_freq_line", 1), "mb_freq");
+        assert_eq!(
+            group_of(PeriphRole::MeterBatt, "mb_freq_line", 1),
+            "mb_freq"
+        );
         assert_eq!(group_of(PeriphRole::MeterBatt, "mb_freq_line", 2), "mb_u_i");
         assert_eq!(group_of(PeriphRole::MeterBatt, "mb_power", 25), "mb_pf");
         assert_eq!(group_of(PeriphRole::Pcs, "pcs_3zone", 67), "pcs_mode");
@@ -1668,7 +1722,11 @@ mod tests {
             PERIPH_WHITELIST.len(),
             "H-3：短标签表与白名单必须行数相等（447）"
         );
-        assert_eq!(PERIPH_LABELS.len(), 447, "§15.2.4：441 非 fire_det + fire_det 模板 6");
+        assert_eq!(
+            PERIPH_LABELS.len(),
+            447,
+            "§15.2.4：441 非 fire_det + fire_det 模板 6"
+        );
         assert_eq!(PERIPH_WHITELIST.len(), 447);
         for (i, (role, block, at)) in PERIPH_WHITELIST.iter().enumerate() {
             // W-3：白名单**每一项**都有短标签（防"上了帧却没有屏上文案"）
@@ -1681,8 +1739,7 @@ mod tests {
             // **同字符集内**的位序错位不在其覆盖内——盲区 29 组 / 65 行 ≈14.5%，
             // 需位级比对才能闭合，见评审 T21a-r1 的 N-1 / G-10）
             assert_eq!(
-                label,
-                PERIPH_LABELS[i].0,
+                label, PERIPH_LABELS[i].0,
                 "两表下标必须一致（下标 {i}：{block}_{at}）"
             );
             assert_eq!(
@@ -1691,7 +1748,10 @@ mod tests {
                 "单位真源（W-2）：unit_for 必须等于同下标表项（下标 {i}）"
             );
             if let Some(unit) = PERIPH_LABELS[i].1 {
-                assert!(!unit.trim().is_empty(), "{block}_{at} 单位不得为空串（无量纲用 None）");
+                assert!(
+                    !unit.trim().is_empty(),
+                    "{block}_{at} 单位不得为空串（无量纲用 None）"
+                );
             }
         }
     }
@@ -1708,7 +1768,10 @@ mod tests {
                 );
             }
             if let Some(unit) = unit {
-                assert!(!unit.contains('（') && !unit.contains('）'), "单位 `{unit}` 不得含全角括号");
+                assert!(
+                    !unit.contains('（') && !unit.contains('）'),
+                    "单位 `{unit}` 不得含全角括号"
+                );
             }
         }
         // 反例锚点：登记 label 确实含全角括号 ⇒ 本断言有鉴别力（不是恒真的空断言）
@@ -1719,9 +1782,14 @@ mod tests {
     /// （两处字面量必须一致：一处是 run-time 模板常量，一处是短标签表本体）。
     #[test]
     fn fire_det_template_rows_match_locked_literals() {
-        assert_eq!(FIRE_DET_TEMPLATE_LABELS, ["地址", "状态", "数据 1", "CO", "VOC", "H2"]);
+        assert_eq!(
+            FIRE_DET_TEMPLATE_LABELS,
+            ["地址", "状态", "数据 1", "CO", "VOC", "H2"]
+        );
         let rows: Vec<&str> = (1..=6u16)
-            .map(|at| label_for(PeriphRole::Fire, "fire_det", at).expect("fire_det 模板行必须有短标签"))
+            .map(|at| {
+                label_for(PeriphRole::Fire, "fire_det", at).expect("fire_det 模板行必须有短标签")
+            })
             .collect();
         assert_eq!(rows, FIRE_DET_TEMPLATE_LABELS.to_vec());
         // 单位：CO / VOC / H2 为 ppm，前三列无量纲
@@ -1729,7 +1797,11 @@ mod tests {
         assert_eq!(unit_for(PeriphRole::Fire, "fire_det", 2), None);
         assert_eq!(unit_for(PeriphRole::Fire, "fire_det", 3), None);
         for at in 4..=6u16 {
-            assert_eq!(unit_for(PeriphRole::Fire, "fire_det", at), Some("ppm"), "at={at}");
+            assert_eq!(
+                unit_for(PeriphRole::Fire, "fire_det", at),
+                Some("ppm"),
+                "at={at}"
+            );
         }
     }
 
@@ -1751,9 +1823,17 @@ mod tests {
         // 非 fire_det 块不归约（at 越界即 None）
         assert_eq!(label_for(PeriphRole::Hvac, "hvac_in", 7), None);
         // 不在白名单的键 ⇒ None（既有排除项的短标签同样不得存在）
-        assert_eq!(label_for(PeriphRole::Hvac, "hvac_di", 26), None, "hvac_di_26 保留位");
+        assert_eq!(
+            label_for(PeriphRole::Hvac, "hvac_di", 26),
+            None,
+            "hvac_di_26 保留位"
+        );
         assert_eq!(unit_for(PeriphRole::Hvac, "hvac_di", 26), None);
-        assert_eq!(label_for(PeriphRole::Pcs, "pcs_3zone", 50), None, "1049 STS 电压幅值不上屏");
+        assert_eq!(
+            label_for(PeriphRole::Pcs, "pcs_3zone", 50),
+            None,
+            "1049 STS 电压幅值不上屏"
+        );
         assert_eq!(label_for(PeriphRole::Unknown, "nope", 1), None);
     }
 
@@ -1781,7 +1861,9 @@ mod tests {
         // ② 表内**没有**多余键（除了两个页面级分组）
         for (key, _) in GROUP_TITLES {
             assert!(
-                keys_from_group_of.contains(key) || *key == "station_status" || *key == "device_info",
+                keys_from_group_of.contains(key)
+                    || *key == "station_status"
+                    || *key == "device_info",
                 "GROUP_TITLES 的键 `{key}` 既不在 group_of 键集内，也不是 §15.5.2 装置段的页面级键"
             );
         }
@@ -1799,14 +1881,26 @@ mod tests {
         assert_eq!(titles.len(), 31, "去重后 31（§15.7.3 订正 v2.1-r3 ③）");
 
         // ④ 括号与数字是**字面量的一部分**（§15.7.3 明令不得剥掉；`告警位（20）` ≠ `告警位（288）`）
-        for literal in ["告警位（20）", "告警位（288）", "辅助状态位（10）", "电能（累计量）", "火警等级"] {
+        for literal in [
+            "告警位（20）",
+            "告警位（288）",
+            "辅助状态位（10）",
+            "电能（累计量）",
+            "火警等级",
+        ] {
             assert!(
                 GROUP_TITLES.iter().any(|(_, t)| *t == literal),
                 "分组标题 `{literal}` 必须**逐字面量**存在（含全角括号与数字）"
             );
         }
-        assert!(!GROUP_TITLES.iter().any(|(_, t)| *t == "告警位"), "不得剥掉括号 ⇒ 不得出现 `告警位`");
-        assert!(!GROUP_TITLES.iter().any(|(_, t)| *t == "电能"), "不得剥掉括号 ⇒ 不得出现 `电能`");
+        assert!(
+            !GROUP_TITLES.iter().any(|(_, t)| *t == "告警位"),
+            "不得剥掉括号 ⇒ 不得出现 `告警位`"
+        );
+        assert!(
+            !GROUP_TITLES.iter().any(|(_, t)| *t == "电能"),
+            "不得剥掉括号 ⇒ 不得出现 `电能`"
+        );
         // 键不得重复（重复会让"标题完备"断言失真）
         let mut keys: Vec<&str> = GROUP_TITLES.iter().map(|(k, _)| *k).collect();
         keys.sort_unstable();
@@ -1820,25 +1914,58 @@ mod tests {
     #[test]
     fn ui_text_constants_cover_table_and_keep_mandatory_distinctions() {
         let all: &[&str] = &[
-            ui_text::STATION_OFFLINE, ui_text::NOT_READ, ui_text::RANGE_ERROR,
-            ui_text::NOT_CONFIGURED, ui_text::NAME_UNKNOWN, ui_text::DETAIL_UNAVAILABLE,
+            ui_text::STATION_OFFLINE,
+            ui_text::NOT_READ,
+            ui_text::RANGE_ERROR,
+            ui_text::NOT_CONFIGURED,
+            ui_text::NAME_UNKNOWN,
+            ui_text::DETAIL_UNAVAILABLE,
             ui_text::UNAVAILABLE,
-            ui_text::STATION_DISABLED, ui_text::SECTION_STATION_DISABLED,
-            ui_text::PERIPH_UNAVAILABLE, ui_text::FIRE_SOURCE_UNAVAILABLE,
-            ui_text::NO_ACTIVE_ALARM_BIT, ui_text::BMS_ALARM_SOURCE_UNAVAILABLE,
+            ui_text::STATION_DISABLED,
+            ui_text::SECTION_STATION_DISABLED,
+            ui_text::PERIPH_UNAVAILABLE,
+            ui_text::FIRE_SOURCE_UNAVAILABLE,
+            ui_text::NO_ACTIVE_ALARM_BIT,
+            ui_text::BMS_ALARM_SOURCE_UNAVAILABLE,
             ui_text::PAGE_DEVICE_AND_PERIPH,
-            ui_text::BIT_UNDEFINED, ui_text::BIT_RESERVED, ui_text::BIT_ACTIVE,
-            ui_text::BIT_INACTIVE, ui_text::ONLINE, ui_text::OFFLINE,
-            ui_text::BIT_ALARM_TOTAL, ui_text::BIT_FAULT_TOTAL, ui_text::BIT_COMM_STATE,
-            ui_text::ENUM_NORMAL, ui_text::ENUM_FIRE_LEVEL1, ui_text::ENUM_FIRE_LEVEL2,
-            ui_text::ENUM_FIRE_UNDEFINED, ui_text::ENUM_FIRE_EMG_START, ui_text::ENUM_FIRE_EMG_STOP,
-            ui_text::ENUM_UNKNOWN, ui_text::ENUM_STOPPED, ui_text::ENUM_RUNNING,
-            ui_text::LAST_OK, ui_text::LAST_UPDATE, ui_text::REGISTERED, ui_text::READABLE,
-            ui_text::COUNT_ALARM, ui_text::COUNT_FAULT, ui_text::CATALOG_STALE,
-            ui_text::TRUNCATED_TO, ui_text::ENUM_PENDING_VENDOR,
-            ui_text::VIEW_DETAIL, ui_text::VIEW_ALL, ui_text::PREV_PAGE, ui_text::NEXT_PAGE,
-            ui_text::COLLAPSE, ui_text::RETRY, ui_text::PAGE_PREFIX, ui_text::PAGE_SUFFIX,
-            ui_text::VERSION_MISMATCH, ui_text::FLASH_SAME_VERSION, ui_text::CHANNEL_DOWN_RETRYING,
+            ui_text::BIT_UNDEFINED,
+            ui_text::BIT_RESERVED,
+            ui_text::BIT_ACTIVE,
+            ui_text::BIT_INACTIVE,
+            ui_text::ONLINE,
+            ui_text::OFFLINE,
+            ui_text::BIT_ALARM_TOTAL,
+            ui_text::BIT_FAULT_TOTAL,
+            ui_text::BIT_COMM_STATE,
+            ui_text::ENUM_NORMAL,
+            ui_text::ENUM_FIRE_LEVEL1,
+            ui_text::ENUM_FIRE_LEVEL2,
+            ui_text::ENUM_FIRE_UNDEFINED,
+            ui_text::ENUM_FIRE_EMG_START,
+            ui_text::ENUM_FIRE_EMG_STOP,
+            ui_text::ENUM_UNKNOWN,
+            ui_text::ENUM_STOPPED,
+            ui_text::ENUM_RUNNING,
+            ui_text::LAST_OK,
+            ui_text::LAST_UPDATE,
+            ui_text::REGISTERED,
+            ui_text::READABLE,
+            ui_text::COUNT_ALARM,
+            ui_text::COUNT_FAULT,
+            ui_text::CATALOG_STALE,
+            ui_text::TRUNCATED_TO,
+            ui_text::ENUM_PENDING_VENDOR,
+            ui_text::VIEW_DETAIL,
+            ui_text::VIEW_ALL,
+            ui_text::PREV_PAGE,
+            ui_text::NEXT_PAGE,
+            ui_text::COLLAPSE,
+            ui_text::RETRY,
+            ui_text::PAGE_PREFIX,
+            ui_text::PAGE_SUFFIX,
+            ui_text::VERSION_MISMATCH,
+            ui_text::FLASH_SAME_VERSION,
+            ui_text::CHANNEL_DOWN_RETRYING,
         ];
         // `50 → 52` = R-3（2026-09-25）：新增「未启用」/「站点未启用」两条（§15.6.2 新情形）。
         assert_eq!(all.len(), 52, "§15.7.3「UI 固定文案」表逐条 = 52 条");
@@ -1846,14 +1973,25 @@ mod tests {
             assert!(!s.trim().is_empty(), "固定文案不得为空");
         }
         // BMS 告警三态（EDGE-24 / EX-16）**两两不相等**
-        assert_ne!(ui_text::NO_ACTIVE_ALARM_BIT, ui_text::BMS_ALARM_SOURCE_UNAVAILABLE);
+        assert_ne!(
+            ui_text::NO_ACTIVE_ALARM_BIT,
+            ui_text::BMS_ALARM_SOURCE_UNAVAILABLE
+        );
         assert_ne!(ui_text::NO_ACTIVE_ALARM_BIT, ui_text::STATION_OFFLINE);
-        assert_ne!(ui_text::BMS_ALARM_SOURCE_UNAVAILABLE, ui_text::STATION_OFFLINE);
+        assert_ne!(
+            ui_text::BMS_ALARM_SOURCE_UNAVAILABLE,
+            ui_text::STATION_OFFLINE
+        );
         // 版本不匹配 vs 通道断开（EX-29 的屏侧一半）
         assert_ne!(ui_text::VERSION_MISMATCH, ui_text::CHANNEL_DOWN_RETRYING);
         // 取值降级五语义（T-14）两两互异（`不可用` 是通用兜底、不在五语义内）
-        let five = [ui_text::STATION_OFFLINE, ui_text::NOT_READ, ui_text::RANGE_ERROR,
-                    ui_text::NOT_CONFIGURED, ui_text::PERIPH_UNAVAILABLE];
+        let five = [
+            ui_text::STATION_OFFLINE,
+            ui_text::NOT_READ,
+            ui_text::RANGE_ERROR,
+            ui_text::NOT_CONFIGURED,
+            ui_text::PERIPH_UNAVAILABLE,
+        ];
         for (i, a) in five.iter().enumerate() {
             for b in &five[i + 1..] {
                 assert_ne!(a, b, "取值降级语义 `{a}` / `{b}` 不得同串");
@@ -1882,14 +2020,41 @@ mod tests {
     fn fire_enum_bits_and_decompose_are_locked() {
         assert_eq!(
             FIRE_LEVEL_ENUM,
-            [(0, "正常"), (1, "一级报警"), (2, "二级火警"), (3, "未定义"), (4, "紧急启动"), (5, "紧急停止")]
+            [
+                (0, "正常"),
+                (1, "一级报警"),
+                (2, "二级火警"),
+                (3, "未定义"),
+                (4, "紧急启动"),
+                (5, "紧急停止")
+            ]
         );
-        assert_eq!(FIRE_SYS_BITS, [(14, "主电故障"), (13, "备电故障"), (11, "驱动电路"), (10, "压力传感器"), (9, "电磁阀"), (8, "喷洒标记")]);
-        assert_eq!(FIRE_TRIGGER_BITS, [(0, "干接点触发"), (1, "复合触发"), (2, "预留")]);
-        assert_eq!(FIRE_DETECTOR_STATE_BITS, [(12, "报警总状态"), (14, "故障总状态")]);
+        assert_eq!(
+            FIRE_SYS_BITS,
+            [
+                (14, "主电故障"),
+                (13, "备电故障"),
+                (11, "驱动电路"),
+                (10, "压力传感器"),
+                (9, "电磁阀"),
+                (8, "喷洒标记")
+            ]
+        );
+        assert_eq!(
+            FIRE_TRIGGER_BITS,
+            [(0, "干接点触发"), (1, "复合触发"), (2, "预留")]
+        );
+        assert_eq!(
+            FIRE_DETECTOR_STATE_BITS,
+            [(12, "报警总状态"), (14, "故障总状态")]
+        );
         // **bit15「通信状态」不得默默启用**（R-41 追认前无生产者）
         assert!(!FIRE_DETECTOR_STATE_BITS.iter().any(|(i, _)| *i == 15));
-        assert_eq!(ui_text::BIT_COMM_STATE, "通信状态", "常量保留以便 R-41 追认后启用");
+        assert_eq!(
+            ui_text::BIT_COMM_STATE,
+            "通信状态",
+            "常量保留以便 R-41 追认后启用"
+        );
 
         let dec = data1_decompose();
         assert_eq!(dec.len(), 2);
@@ -1898,14 +2063,20 @@ mod tests {
         assert_eq!(dec[0].decimals, 1);
         assert_eq!(
             dec[0].from,
-            crate::peripherals::DecodeFrom::HighByte { scale: 0.1, offset: 0.0 }
+            crate::peripherals::DecodeFrom::HighByte {
+                scale: 0.1,
+                offset: 0.0
+            }
         );
         assert_eq!(dec[1].label, "温度");
         assert_eq!(dec[1].unit.as_deref(), Some("℃"));
         assert_eq!(dec[1].decimals, 0);
         assert_eq!(
             dec[1].from,
-            crate::peripherals::DecodeFrom::LowByte { scale: 1.0, offset: -55.0 }
+            crate::peripherals::DecodeFrom::LowByte {
+                scale: 1.0,
+                offset: -55.0
+            }
         );
     }
 }

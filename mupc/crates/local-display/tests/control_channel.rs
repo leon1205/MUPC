@@ -357,7 +357,11 @@ fn p3_channel_goes_down_when_the_control_channel_is_dead() {
 }
 
 /// 帧通道桩（只要一个「活得下去」的 GET 对端；载荷用最小 v2 帧字面量）。
-fn spawn_frame_stub_url() -> (String, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
+fn spawn_frame_stub_url() -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
     use std::sync::atomic::AtomicUsize;
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind frame stub");
     let addr = listener.local_addr().expect("addr");

@@ -60,8 +60,10 @@ impl ResidualBuffer {
     /// 自动维护 FIFO 窗口：超出容量时丢弃最旧残差。
     /// 若 actual 或 predicted 含 NaN/Inf，替换为零值并记录 WARN。
     pub fn push(&mut self, actual: f32, predicted: f32) {
-        let residual = if actual.is_nan() || actual.is_infinite()
-            || predicted.is_nan() || predicted.is_infinite()
+        let residual = if actual.is_nan()
+            || actual.is_infinite()
+            || predicted.is_nan()
+            || predicted.is_infinite()
         {
             tracing::warn!(
                 "残差缓冲: 检测到 NaN/Inf (actual={}, predicted={})，替换为零值",
@@ -93,7 +95,13 @@ impl ResidualBuffer {
         if len >= window_size {
             // 取最近 window_size 步
             let start = len - window_size;
-            let window: Vec<f32> = self.buffer.iter().skip(start).take(window_size).copied().collect();
+            let window: Vec<f32> = self
+                .buffer
+                .iter()
+                .skip(start)
+                .take(window_size)
+                .copied()
+                .collect();
             Some(window)
         } else if self.zero_init {
             // 冷启动零填充：生成 window_size 长度的零向量
@@ -261,9 +269,9 @@ mod tests {
 
         // 正常值
         buf.push(10.0, 8.0); // residual = 2.0
-        // NaN
+                             // NaN
         buf.push(f32::NAN, 8.0); // residual = 0.0（替换）
-        // 正常值
+                                 // 正常值
         buf.push(12.0, 10.0); // residual = 2.0
 
         let window = buf.get_window(5).unwrap();

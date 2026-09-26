@@ -263,8 +263,7 @@ impl SafetyRLWrapper {
 
         // 0. 计算上一周期实际 P_output（用于 ΔP 计算）
         let last = self.last_safe_action.read().await;
-        let v_avg =
-            (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
+        let v_avg = (state.voltage_phase_a + state.voltage_phase_b + state.voltage_phase_c) / 3.0;
         let p_cur = last.p_ref - last.k_droop * (v_avg - 1.0);
         drop(last);
 

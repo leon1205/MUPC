@@ -349,10 +349,8 @@ impl ModelRegistry {
 
         // 1. 加载新模型到 standby 槽
         //    严格遵守锁顺序：先 standby 后 active
-        let new_runtime =
-            RknnRuntime::new(&model_path, Some(expected_sha256)).map_err(|e| {
-                AiEngineError::ModelLoadFailed(format!("热切换模型初始化失败: {}", e))
-            })?;
+        let new_runtime = RknnRuntime::new(&model_path, Some(expected_sha256))
+            .map_err(|e| AiEngineError::ModelLoadFailed(format!("热切换模型初始化失败: {}", e)))?;
 
         new_runtime.load().await.map_err(|e| {
             AiEngineError::ModelLoadFailed(format!("热切换模型 NPU 加载失败: {}", e))
@@ -376,8 +374,7 @@ impl ModelRegistry {
         {
             let mut standby = self.standby.write().await;
             let mut active = self.active.write().await;
-            let old_runtime =
-                std::mem::replace(&mut active.1, new_runtime);
+            let old_runtime = std::mem::replace(&mut active.1, new_runtime);
             *standby = Some((current_mode, old_runtime));
 
             tracing::info!(
