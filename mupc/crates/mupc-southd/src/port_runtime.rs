@@ -25,6 +25,14 @@ pub enum BusError {
         count: u16,
         reason: String,
     },
+    /// 写单个寄存器失败（超时/CRC/回显不符/异常响应）。
+    #[error("站 slave={slave} 写 {addr:#06x}={value:#06x} 失败: {reason}")]
+    Write {
+        slave: u8,
+        addr: u16,
+        value: u16,
+        reason: String,
+    },
 }
 
 /// 口级总线：读保持寄存器（口内串行；调用方按站 slave 传参）。
@@ -41,6 +49,13 @@ pub trait StationBus: Send + Sync {
     /// （`bit k` = 响应字节第 `k%8` 位，bit0 = LSB —— 见 `rs485_plugin::unpack_bits`）。
     /// S3b-2 T5（设计 §11.4.5）：位块（`RegFunc::Discrete`）的通路，与既有两方法同构。
     async fn read_discrete(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<bool>, BusError>;
+    /// 写单个保持寄存器（FC06），显式从站地址。
+    ///
+    /// **为什么只加这一个写方法**（设计 §13.3/§13.4）：PCS 控制序列全部落在 4 区单寄存器写
+    /// （模式 1000 / 启停 500 / 恒功率 1001-1002 / 分相 1006-1011），逐写即协议要求（FC06 无批量）。
+    /// 不提供批量写 / 任意地址范围写 —— 写能力的**门只开一条缝**，把"能写什么"交给调用方
+    /// `PcsHandle` 的受限入口，而非把写权限摊开在 bus 层。
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError>;
 }
 
 /// 真机：每 port 单 `Rs485Device`。构造 open 失败 → Err（该口全站 offline，不阻断启动，§10.7）。
@@ -164,6 +179,31 @@ impl StationBus for Rs485PortBus {
             reason: e.to_string(),
         })?
     }
+
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+        // 与读路径同款：per-port `bus_lock` 强制口内串行（读与写在同一条物理总线上，
+        // 交错即帧污染），阻塞 IO 交给 spawn_blocking。`_g` 须**具名绑定**：`let _ =` 会立刻放锁。
+        let _g = self.bus_lock.lock().await;
+        let dev = self.device.clone();
+        let port = self.port.clone();
+        tokio::task::spawn_blocking(move || {
+            tracing::debug!(port = %port, slave, addr, value, "southd 口写单寄存器");
+            dev.write_single_register_from(slave, addr, value)
+                .map_err(|e| BusError::Write {
+                    slave,
+                    addr,
+                    value,
+                    reason: e.to_string(),
+                })
+        })
+        .await
+        .map_err(|e| BusError::Write {
+            slave,
+            addr,
+            value,
+            reason: e.to_string(),
+        })?
+    }
 }
 
 /// 参数 → rs485 口配置（纯函数，可测接缝：**不必触碰真串口**即可断言透传结果）。
@@ -224,6 +264,10 @@ pub struct MockBus {
     bits_fail_next: std::sync::Mutex<Vec<(u8, u16)>>,
     /// FC02 读调用清单（(slave, addr, count)，测试断言）。
     pub bit_calls: std::sync::Mutex<Vec<(u8, u16, u16)>>,
+    /// 待抛错写（模拟超时/回显不符），消费即清；多次调用排队逐次抛错。
+    write_fail_next: std::sync::Mutex<Vec<(u8, u16)>>,
+    /// 已发生写调用清单（(slave, addr, value)，测试断言）。
+    pub write_calls: std::sync::Mutex<Vec<(u8, u16, u16)>>,
 }
 
 impl MockBus {
@@ -238,6 +282,8 @@ impl MockBus {
             bits_responses: std::sync::Mutex::new(std::collections::HashMap::new()),
             bits_fail_next: std::sync::Mutex::new(Vec::new()),
             bit_calls: std::sync::Mutex::new(Vec::new()),
+            write_fail_next: std::sync::Mutex::new(Vec::new()),
+            write_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
     /// 预置 (slave, addr) → 返回寄存器。
@@ -299,6 +345,21 @@ impl MockBus {
     /// FC02 读调用次数。
     pub fn bit_call_count(&self, slave: u8, addr: u16) -> usize {
         self.bit_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&(s, a, _)| s == slave && a == addr)
+            .count()
+    }
+
+    /// 下次该 (slave, addr) 写抛 Err（消费即清）。
+    pub fn fail_write_once(&self, slave: u8, addr: u16) {
+        self.write_fail_next.lock().unwrap().push((slave, addr));
+    }
+
+    /// 某 (slave, addr) 的写调用次数。
+    pub fn write_call_count(&self, slave: u8, addr: u16) -> usize {
+        self.write_calls
             .lock()
             .unwrap()
             .iter()
@@ -412,6 +473,29 @@ impl StationBus for MockBus {
                 count,
                 reason: "mock 位读未预置".into(),
             })
+    }
+
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+        self.write_calls.lock().unwrap().push((slave, addr, value));
+        // 与读路径同构：同一 guard 内查 + 删（消费即清），guard 出块即释放，避免重入死锁。
+        let to_fail = {
+            let mut q = self.write_fail_next.lock().unwrap();
+            if let Some(pos) = q.iter().position(|&(s, a)| s == slave && a == addr) {
+                q.remove(pos);
+                true
+            } else {
+                false
+            }
+        };
+        if to_fail {
+            return Err(BusError::Write {
+                slave,
+                addr,
+                value,
+                reason: "mock 写失败".into(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -659,5 +743,29 @@ mod tests {
         assert_eq!(cfg.port, "/dev/ttyS4");
         assert_eq!(cfg.baud_rate, 19200);
         assert_eq!(cfg.device_addr, 7);
+    }
+}
+
+#[cfg(test)]
+mod write_single_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mock_bus_write_single_records_and_returns_ok() {
+        let bus = MockBus::new();
+        bus.write_single(3, 500, 0).await.unwrap();
+        assert_eq!(
+            bus.write_calls.lock().unwrap().clone(),
+            vec![(3u8, 500u16, 0u16)]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_bus_write_single_can_fail_once() {
+        let bus = MockBus::new();
+        bus.fail_write_once(3, 500);
+        assert!(bus.write_single(3, 500, 0).await.is_err());
+        // 消费即清：第二次成功
+        assert!(bus.write_single(3, 500, 0).await.is_ok());
     }
 }
