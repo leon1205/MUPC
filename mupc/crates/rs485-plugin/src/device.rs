@@ -788,17 +788,22 @@ impl Rs485Device {
         // 期望从站号取自**请求帧首字节**（与读侧 `expected_slave_of` 同一取向：
         // "请求谁就校验谁"是构造关系，不是调用点约定）。
         let expected_slave = expected_slave_of(&cmd)?;
+
+        // Modbus 异常响应必须**先于长度检查**：标准 FC06 异常帧仅 **5 字节**
+        // （slave + func|0x80 + 异常码 + CRC16[2]）。若先判 `len < 8`，真实异常会被
+        // 误报成"响应过短"，异常码永远看不到 —— 运维会去查线缆/成帧而不是"从站为何拒绝"。
+        // 读侧 `validate_read_response` 走 `Frame::parse`（接受 ≥5 字节）能正确报异常，
+        // 本处与读侧对齐。
+        if response.len() >= 3 && response[1] == (FUNC | 0x80) {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x} 被从站 {} 拒绝，异常码={:#04x}",
+                response[0], response[2]
+            )));
+        }
         if response.len() < 8 {
             return Err(Rs485Error::ConfigFailed(format!(
                 "写响应过短：{} 字节（FC06 回显应为 8）",
                 response.len()
-            )));
-        }
-        // Modbus 异常响应：功能码置 bit7（0x86），第 3 字节为异常码
-        if response[1] == (FUNC | 0x80) {
-            return Err(Rs485Error::ConfigFailed(format!(
-                "写 reg {addr:#06x} 被从站 {} 拒绝，异常码={:#04x}",
-                response[0], response[2]
             )));
         }
         if response[0] != expected_slave {
@@ -1391,6 +1396,32 @@ mod frame_validation_tests {
         };
         *device.test_response.lock() = Some(ok);
         assert!(device.write_single_register_from(2, 0x01F4, 0x0000).is_ok());
+    }
+
+    #[test]
+    fn write_single_register_from_reports_exception_code_not_short_frame() {
+        // 标准 FC06 异常帧 = **5 字节**（slave=2, func=0x86, 异常码=0x03, CRC16）。
+        // 必须报"异常码 0x03"，**不得**误报成"响应过短" —— 后者会把运维的诊断方向
+        // 从"从站为什么拒绝"带偏到"线缆/成帧有没有问题"。
+        let device = create_test_device();
+        let exc = {
+            let mut v = vec![0x02, 0x86, 0x03];
+            let crc = Frame::calculate_crc(0x02, 0x86, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        assert_eq!(exc.len(), 5, "前提：标准 Modbus 异常帧长度为 5");
+        *device.test_response.lock() = Some(exc);
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("异常码") && msg.contains("0x03"),
+            "须报出异常码，实际: {msg}"
+        );
+        assert!(!msg.contains("过短"), "不得误报成响应过短，实际: {msg}");
     }
 }
 
