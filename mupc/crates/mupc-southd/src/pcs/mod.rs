@@ -151,6 +151,12 @@ impl PcsHandle {
     pub(crate) async fn debug_started(&self) -> bool {
         *self.inner.started.read().await
     }
+    /// 测试用造态：直接置 `started`（原文 `test_authorize_restart_gated` 的
+    /// `*tr.started.write().await = true` 同等动作）。
+    #[cfg(test)]
+    pub(crate) async fn debug_set_started(&self, v: bool) {
+        *self.inner.started.write().await = v;
+    }
     #[cfg(test)]
     pub(crate) fn debug_mode(&self) -> u8 {
         self.inner.mode.load(Ordering::Relaxed)
@@ -287,6 +293,9 @@ impl PcsHandle {
     // ── 内部原语（**不取锁**，由入口持锁；与迁移前纪律一致，防嵌套死锁）──
     async fn check_latched(&self) -> Result<(), PcsError> {
         if *self.inner.stopped_latched.read().await {
+            // 逐字迁回原文两处入口的日志措辞（`send_tai_command` / `send_dual_param` 各有一条
+            // 同文 `tracing::warn!`；本函数为两入口共用 ⇒ 一条即可）。
+            tracing::warn!("interlock stopped：拒绝下行（含启动/功率写）");
             return Err(PcsError::Latched("联锁锁存禁止下发".into()));
         }
         Ok(())
@@ -437,8 +446,69 @@ mod control_tests {
         }
     }
 
-    fn handle(bus: Arc<MockBus>) -> Arc<PcsHandle> {
+    fn handle(bus: Arc<dyn StationBus>) -> Arc<PcsHandle> {
         PcsHandle::new(cfg_for_tests(), bus, Arc::new(NullSink))
+    }
+
+    /// 读后置位 latch 的总线装饰器（**仅测试**）。
+    ///
+    /// **为什么需要它**：I-4 是"读 `RUN_STATE(1013)` 之后、写 `500=1` 之前 latch 被置位 ⇒
+    /// 放弃启动"的**窄窗口**防御。`MockBus` 的 `read_input` 是被动返回，无法在窗口内造态；
+    /// 给 `MockBus` 加钩子要动 `port_runtime.rs`（不在本 Task 授权范围）。故在测试模块内
+    /// 用装饰器包一层 —— **生产代码零改动**（`MockBus` / `StationBus` 一字未动）。
+    ///
+    /// 钩子在 `inner.read_input` **返回之后**触发 —— 即"读已完成、写尚未发出"，正是 I-4
+    /// 复查要拦的那个窗口；一次性（`take()`）避免多条读路径重复触发。
+    struct LatchOnReadBus {
+        inner: Arc<MockBus>,
+        on_input: std::sync::Mutex<Option<Box<dyn FnOnce() -> PinnedFuture + Send>>>,
+    }
+
+    type PinnedFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+    impl LatchOnReadBus {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(MockBus::new()),
+                on_input: std::sync::Mutex::new(None),
+            }
+        }
+        /// 登记一次性"读后"钩子。
+        fn set_input_hook(&self, hook: impl FnOnce() -> PinnedFuture + Send + 'static) {
+            *self.on_input.lock().unwrap() = Some(Box::new(hook));
+        }
+    }
+
+    #[async_trait]
+    impl StationBus for LatchOnReadBus {
+        async fn read_holding(
+            &self,
+            slave: u8,
+            addr: u16,
+            count: u16,
+        ) -> Result<Vec<u16>, BusError> {
+            self.inner.read_holding(slave, addr, count).await
+        }
+        async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError> {
+            let r = self.inner.read_input(slave, addr, count).await;
+            // 先取走钩子再 await（不留 std MutexGuard 跨 await 点）。
+            let hook = self.on_input.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+            r
+        }
+        async fn read_discrete(
+            &self,
+            slave: u8,
+            addr: u16,
+            count: u16,
+        ) -> Result<Vec<bool>, BusError> {
+            self.inner.read_discrete(slave, addr, count).await
+        }
+        async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+            self.inner.write_single(slave, addr, value).await
+        }
     }
 
     #[tokio::test]
@@ -455,6 +525,12 @@ mod control_tests {
         assert!(
             bus.write_calls.lock().unwrap().is_empty(),
             "latch 期间不得有任何写"
+        );
+        // I-1 要求"**一次总线调用都不发生**"（不只有写）。此断言此前缺失：评审探针 P2 实证
+        // 在 `check_latched` 之前插一次读，本用例仍全绿 ⇒ 读半边零判别力。
+        assert!(
+            bus.input_calls.lock().unwrap().is_empty(),
+            "latch 期间不得有任何读（I-1 要求一次总线调用都不发生）"
         );
     }
 
@@ -531,6 +607,33 @@ mod control_tests {
         );
     }
 
+    /// 原文 `intercore::transport::modbus` 的同名用例**逐字迁入**（断言未改，仅
+    /// `*tr.started.write().await = true` → `debug_set_started(true)`、
+    /// `*tr.started.read().await` → `debug_started()`）。此前**未被列入迁移清单** ⇒
+    /// `authorize_restart` 的 latch 门禁零覆盖（评审探针 P10：删掉门禁，旧用例仍全绿）。
+    #[tokio::test]
+    async fn test_authorize_restart_gated() {
+        // I-1/ack_m1：!stopped_latched 时 authorize 复位 started（下个 send 经 ensure_started
+        // 重发 500=1）；stopped_latched 时拒绝（须先 release 清 latch）
+        let bus = Arc::new(MockBus::new());
+        let h = handle(bus);
+        // !latch：复位 started
+        h.debug_set_started(true).await;
+        h.authorize_restart().await.unwrap();
+        assert!(
+            !h.debug_started().await,
+            "authorize 应复位 started，允许下次 send 重发 500=1"
+        );
+        // latch：authorize 拒绝且不改 started
+        h.restore_interlock_latched(true).await.unwrap();
+        h.debug_set_started(true).await;
+        assert!(h.authorize_restart().await.is_err());
+        assert!(
+            h.debug_started().await,
+            "latch 期间 authorize 不得复位 started"
+        );
+    }
+
     #[tokio::test]
     async fn authorize_restart_grants_single_shot() {
         // I-3：人工授权**单次** —— 授权后放行一次启动，授权即被消费。
@@ -545,5 +648,88 @@ mod control_tests {
             !h.debug_restart_authorized(),
             "授权必须已被消费（单次语义）"
         );
+        // 授权不只是"返回 Ok + 消费授权位"，线上必须**真的**写出 500=1 —— 否则 M1 人工
+        // 确认后 PCS 永远不会重启。判据值必须**同源编码** `to_pcs_reg(1.0)`（线上字 0x0100，
+        // 不是字面量 1）；评审探针 P3 实证：删掉 ensure_started 正路的这次写，旧用例仍全绿。
+        assert!(
+            bus.write_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(_, a, v)| a == 500 && v == to_pcs_reg(1.0)),
+            "授权后必须真的写了 500=1（线上字 {:#06x}）",
+            to_pcs_reg(1.0)
+        );
+    }
+
+    /// I-4：S-4 前置读 `RUN_STATE` 之后、写 `500=1` 之前 latch 被置位 ⇒ **放弃启动**。
+    ///
+    /// 这条窄窗口防御此前**零覆盖**（评审注入探针 P5：删掉 `ensure_started` 写前复查，
+    /// 旧用例仍全绿）。构造：`LatchOnReadBus` 的读后钩子恰好落在该窗口内（读已返回、
+    /// 写未发出），钩子把一个**新的**联锁停机事件置位。
+    #[tokio::test]
+    async fn latch_set_between_s4_read_and_start_write_aborts() {
+        let bus = Arc::new(LatchOnReadBus::new());
+        // RUN_STATE=1 待机 ⇒ 本可正常通过 S-4（非 0 不触发 M1 守卫）
+        bus.inner.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let h = handle(bus.clone());
+        let h_hook = h.clone();
+        bus.set_input_hook(move || {
+            Box::pin(async move {
+                h_hook.restore_interlock_latched(true).await.unwrap();
+            })
+        });
+        let e = h
+            .send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
+            .await
+            .unwrap_err();
+        assert!(
+            h.is_interlock_stopped().await,
+            "前提：钩子确实在窗口内置位了 latch（否则本用例空转）"
+        );
+        assert_eq!(
+            bus.inner.input_call_count(1, 1013),
+            1,
+            "证明确实走到了 S-4 前置读（否则根本没进入 I-4 的窗口）"
+        );
+        assert!(matches!(e, PcsError::Latched(_)), "实际: {e}");
+        assert_eq!(
+            bus.inner.write_call_count(1, 500),
+            0,
+            "I-4：写前复查发现 latch 置位必须放弃启动（不得写 500）"
+        );
+    }
+}
+
+/// PCS 点表解码（SOC / RUN_STATE）域校验 —— 由 `intercore::transport::modbus`
+/// 同名用例**逐字迁入**（断言未改，仅把 `ModbusRtuTransport` 方法调用换成模块内
+/// 私有 fn `decode_soc` / `decode_run_state`）。
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_run_state() {
+        // 0 停机 / 1 待机 / 2 充电 / 3 放电 合法；越界（如乱码/错位帧）判无效
+        for st in [0.0, 1.0, 2.0, 3.0] {
+            assert_eq!(decode_run_state(to_pcs_reg(st)), Some(st as u16));
+        }
+        assert_eq!(decode_run_state(to_pcs_reg(-1.0)), None);
+        assert_eq!(decode_run_state(to_pcs_reg(4.0)), None);
+        // 0xFFFF 原样（未解互换）解码 → -1 → 无效
+        assert_eq!(decode_run_state(0xFFFF), None);
+    }
+
+    #[test]
+    fn test_decode_soc_valid() {
+        // 66% → to_pcs_reg(66) 字节互换，回解须还原 66
+        assert_eq!(decode_soc(to_pcs_reg(66.0)), Some(66.0));
+    }
+
+    #[test]
+    fn test_decode_soc_rejects_out_of_range() {
+        // 负数与 >100 均视为无效读数
+        assert_eq!(decode_soc(to_pcs_reg(-1.0)), None);
+        assert_eq!(decode_soc(to_pcs_reg(101.0)), None);
     }
 }
