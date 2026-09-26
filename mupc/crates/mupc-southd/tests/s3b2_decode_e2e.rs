@@ -50,22 +50,15 @@ fn station(id: &str) -> StationConf {
 /// 由 `south_pcs` 段**合成** `Role::Pcs` 的站形态（**仅本测试**用）：`read_station` /
 /// `offset_of` / `telemetry_points` 的入参形态是 `StationConf`，而生产侧 `south_pcs`
 /// 自 Task 6 起是独立顶层段（消费方为 `PcsHandle`，不合成 `StationConf`）。
-/// 合成的只是**外壳**（`id`/`role`），`port`/`slave`/`regs` 等逐字段取自新段
+///
+/// **合成走共用函数** [`SouthPcsConfig::station_shell`]（设计 §13.9 末要求③：生产与测试
+/// 共用同一函数）—— 此前本处手写、与 `mupc-southd` / `mupc-core-bin` 单测两处各一份，
+/// 会与生产漂移。合成的只是**外壳**（`id`/`role`），`port`/`slave`/`regs` 逐字段取自新段
 /// ⇒ 解码路径的输入与迁移前**逐字相同**。
 fn pcs_station() -> StationConf {
     let pcs: SouthPcsConfig = serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
     assert!(pcs.enabled, "参考 PCS 段须 enabled");
-    StationConf {
-        id: "pcs".into(),
-        role: Role::Pcs,
-        port: pcs.port,
-        protocol: pcs.protocol,
-        slave: pcs.slave,
-        baud_rate: pcs.baud_rate,
-        parity: pcs.parity,
-        interval_ms: pcs.interval_ms,
-        regs: pcs.regs,
-    }
+    pcs.station_shell()
 }
 
 /// 某块的 `(块内偏移 0 基)` —— 由**绝对寄存器地址**反推（`at`/点位名都不可靠时用它定位）。

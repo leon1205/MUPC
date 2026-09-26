@@ -954,8 +954,11 @@ mod tests {
     ///
     /// 合成理由：`build_uplink_points` 的入参仍是 `&SouthStationsConfig`（`south_pcs` → 上云
     /// 的接线属后续 Task；§13.9 声明上云契约零变化），而本组用例要钉的正是"**PCS 启用**时
-    /// 的三通道 / 档位点数"（639 点口径）。合成的只是**外壳**（`id`/`role`），
-    /// `port`/`slave`/`regs` 逐字段取自新段 ⇒ 点数口径与迁移前逐字相同。
+    /// 的三通道 / 档位点数"（639 点口径）。
+    ///
+    /// **合成走共用函数** [`SouthPcsConfig::station_shell`]（设计 §13.9 末要求③：生产与测试
+    /// 共用同一函数）—— 此前本处手写、与 `mupc-core-bin` / `s3b2_decode_e2e` 两处各写一份，
+    /// 会与生产漂移。
     fn cfg_ref() -> SouthStationsConfig {
         let mut cfg: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_STATIONS)
             .expect("参考配置解析失败")
@@ -963,17 +966,7 @@ mod tests {
         let pcs: crate::config::SouthPcsConfig =
             serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
         assert!(pcs.enabled, "参考 PCS 段须 enabled");
-        cfg.stations.push(StationConf {
-            id: "pcs".into(),
-            role: Role::Pcs,
-            port: pcs.port,
-            protocol: pcs.protocol,
-            slave: pcs.slave,
-            baud_rate: pcs.baud_rate,
-            parity: pcs.parity,
-            interval_ms: pcs.interval_ms,
-            regs: pcs.regs,
-        });
+        cfg.stations.push(pcs.station_shell());
         cfg
     }
 

@@ -268,18 +268,24 @@ impl SouthPcsConfig {
     /// 段内校验（跨段规则 **P-1/P-2** 在 core-bin —— 需同时看 `south_stations` 与
     /// `intercore`；**P-3** 在本文件 [`SouthStationsConfig::validate`]）。
     ///
-    /// **P-4 的覆盖范围（设计 §13.8 订正行后的实际口径，勿夸大）**：
+    /// **P-4 的覆盖范围（设计 §13.8 的 P-4 行订正后的实际口径，勿夸大；三处口径已于
+    /// 2026-09-26 统一到此处，正文注释不再另立副本）**：
     /// - **点级**：`points::expand` —— `count/at ≥ 1`、`name`×`count>1` 护栏、
     ///   规则 7（点位越界）/ 8（块内点位重叠）/ 9（32 位点 `count == 1` 且不跨窗口末尾）。
-    /// - **块级**：规则 5 [`validate_scale`]（`scale == 0`）/ 规则 12
-    ///   [`validate_count_and_discrete_bits`] / 规则 19 [`validate_width_multiple`] /
-    ///   规则 11 [`validate_anchoring`]（空洞 ≤ 4 + 首尾锚定）/ 规则 14
-    ///   [`validate_block_spans`]（跨块区间重叠，须吃整段切片）。
-    /// - **明确不覆盖（如实登记，不假装覆盖）**：规则 15（极大性，[`validate_maximality`]
-    ///   真需 `&[StationConf]`）/ 规则 6（符号性）与规则 13（`addr == 0` 按 role）——
-    ///   后两条依赖 `Role` 口径，而 `south_pcs` 段无 `role` 字段；规则 10（点**名**唯一）
-    ///   也不在此（它在 [`validate_station_regs`] 的**汇聚**阶段跨块判，`expand` 只查
-    ///   地址重叠、不查点名 —— 参考形态是单块段，此时与规则 8 等价走 `expand`）。
+    /// - **块级**：规则 5 [`validate_scale`]（`scale == 0`）/ 规则 11 [`validate_anchoring`]
+    ///   （空洞 ≤ 4 + 首尾锚定）/ 规则 12 [`validate_count_and_discrete_bits`] /
+    ///   规则 14 [`validate_block_spans`]（跨块区间重叠，须吃整段切片）/ 规则 19
+    ///   [`validate_width_multiple`]。
+    /// - **段级**：规则 10 [`check_metric_uniqueness`]（点**名**唯一）—— 其判据是纯
+    ///   `metrics` 去重、**与 `role` 无关**（站级也在**汇聚**阶段判），故与站级**共用**同一
+    ///   函数；漏掉它则"同名异址"两点静默生成两个同名遥测键、值互相覆盖。
+    /// - **明确不复用（如实登记，不假装覆盖）**：规则 15（块落地极大性，[`validate_maximality`]
+    ///   真需 `&[StationConf]`）/ 规则 6（符号性）与规则 13（`addr == 0` 按 `role`）—— 后两条
+    ///   依赖 `Role` 口径，而 `south_pcs` 段无 `role` 字段。
+    /// - **本段特有（站级无此二项）**：`regs[].interval_ms` **一律拒**（本段无"块级周期覆盖"
+    ///   语义 —— 段级 `interval_ms` 已是采集兼心跳周期，单块段不存在"某块提速"的诉求；
+    ///   探测到即拒是 fail-closed，否则它是可写出但永不执行的**死配置**）；`baud_rate`
+    ///   越界拒（同站级 —— `0` 会静默穿透到 `open()` 才报错）。
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
@@ -289,6 +295,12 @@ impl SouthPcsConfig {
         }
         if !(1..=247).contains(&self.slave) {
             return Err(format!("south_pcs: slave 越界: {}", self.slave));
+        }
+        if self.baud_rate == 0 || self.baud_rate > 4_000_000 {
+            return Err(format!(
+                "south_pcs: baud_rate 越界: {}（须 1..=4000000）",
+                self.baud_rate
+            ));
         }
         if self.interval_ms < PCS_MIN_INTERVAL_MS {
             return Err(format!(
@@ -302,36 +314,75 @@ impl SouthPcsConfig {
         if self.regs.is_empty() {
             return Err("south_pcs: regs 为空（必填点表 —— 空点表 = 采集恒空转的静默死配）".into());
         }
-        // 规则 P-4（设计 §13.8 订正行）：块的**结构规则**与站级**同一批函数**（§11.4.3 的
-        // "校验期与运行期同一函数"不变量；不另起一套）。
+        // 规则 P-4（设计 §13.8 P-4 行）：块的**结构规则**与站级**同一批函数**（§11.4.3 的
+        // "校验期与运行期同一函数"不变量；不另起一套）。**覆盖范围见本函数文档**
+        // （`interval_ms` 死配置拒 / 点级 `expand` / 块级 5·11·12·14·19 / 段级 10=点名唯一；
+        // 不复用 15·6·13）—— 不在正文注释里另立第二份，防三处口径再度漂移。
         //
-        // **顺序**：先 `expand`（点级：规则 7/8/9 + `count/at` 护栏），再逐块块级
-        // （5/12/19/11），最后 `validate_block_spans` 吃**整段切片**（规则 14 跨块区间重叠）。
+        // **顺序**：先逐块 `interval_ms` 死配置判 + `expand`（点级：规则 7/8/9 +
+        // `count/at` 护栏），再逐块块级（5/12/19/11），最后 `validate_block_spans` 吃
+        // **整段切片**（规则 14 跨块区间重叠）+ [`check_metric_uniqueness`] 吃本次循环
+        // 累积的点名（规则 10 —— 与站级同样是**汇聚**阶段判）。
         //
-        // ⚠️ **覆盖范围如实登记（2026-09-26 按实测重写；勿夸大）**：
-        // - `points::expand` 只落"把点映射到寄存器的那一刻才能判"的**点位级**规则
-        //   （7 越界 / 8 块内重叠 / 9 32 位对齐）+ 点级 `count/at`、`name`×`count` 护栏；
-        //   **不含**规则 10（点**名**唯一——它在 `validate_station_regs` 的**汇聚**阶段判，
-        //   须跨块收集展开结果；`expand` 只查**地址**重叠）。
-        // - 5（零 scale，**最尖**：漏写 `scale` ⇒ serde 缺省 0.0 ⇒ 整块 raw×0 静默全 0）/
-        //   11（空洞 ≤ 4 + 首尾锚定）/ 12（`count>0` + 位块上限）/ 14（跨块区间重叠）/
-        //   19（无 points 块的宽度整数倍）**均已接线**（5/11/14 直接调用站级既有函数；
-        //   12/19 原为 `validate_station_regs` 的**内联体**，已抽出为
-        //   [`validate_count_and_discrete_bits`] / [`validate_width_multiple`] 后两处共用）。
-        // - **明确不覆盖**（差异如实登记，不假装覆盖）：**15**（块落地极大性 ——
-        //   [`validate_maximality`] 真需 `&[StationConf]`）/ **6**（符号性）/ **13**
-        //   （`addr == 0` 按 role）—— 6/13 依赖 `Role` 口径，`south_pcs` 段无 `role` 字段。
+        // ⚠️ **求值粒度与站级不同**：本段**按「块」**逐块交错求值，站级**按「批」**
+        // （批次序 12/13 → 5/19 → 14 → expand/11/6/10）⇒ 同一块同时含点级与块级缺陷时，
+        // 两段报出的**首条可能不同**。本段**刻意不逐条对齐**站级顺序（无测试锚、也不构成
+        // 缺陷）—— 后来者勿"顺手对齐"，那只会把一处真缺陷换成另一处。
+        //
         // - `prefix` 用段名占位（无站 id —— 本段是单值段），使错误文案可定位。
         let prefix = "south_pcs: ";
+        let mut metrics: Vec<String> = Vec::new();
         for blk in &self.regs {
+            // 块级周期覆盖在本段**无对象**：段级 `interval_ms` 就是"采集兼心跳"周期，
+            // 单块段没有"某一块另提速"的诉求 ⇒ 一律拒（fail-closed）。若放行，它是一个
+            // 被解析、被校验器完全无视、调度器也永不执行的**死配置**（静默形态）。
+            if blk.interval_ms.is_some() {
+                return Err(format!(
+                    "{prefix}块 {} 不支持块级周期覆盖 `interval_ms`（本段单块采集兼心跳，无「覆盖」语义）",
+                    blk.name
+                ));
+            }
             let pts = crate::points::expand(blk).map_err(|e| format!("{prefix}{e}"))?;
             validate_scale(prefix, blk)?;
             validate_count_and_discrete_bits(prefix, blk)?;
             validate_width_multiple(prefix, blk)?;
             validate_anchoring(prefix, blk, &pts)?;
+            metrics.extend(pts.into_iter().map(|p| p.metric));
         }
         validate_block_spans(prefix, &self.regs)?;
+        // 规则 10（点名唯一）—— 跨块汇聚后判（`expand` 只查地址重叠、不查点名）
+        check_metric_uniqueness(prefix, &metrics)?;
         Ok(())
+    }
+
+    /// 由本段合成**上云所需的站壳**（`StationConf` 形态）—— 设计 §13.9 末段要求③：
+    /// "由 `south_pcs` 段合成上云所需站壳的逻辑，**生产与测试共用同一函数**"。
+    ///
+    /// **为什么需要它**：`uplink::build_uplink_points` 的入参是 `&SouthStationsConfig`，
+    /// 而 PCS 迁出后不再在 `south_stations` 里 ⇒ 调用点必须把本段**折成站形态**喂进去，
+    /// 否则 PCS 的 72 个 IOA 会**静默**从 IEC104/MQTT 点表消失（Δ-19）。此前三处
+    /// （`mupc-southd` 单测 / `mupc-core-bin` 单测 / `s3b2_decode_e2e`）各自手写合成，
+    /// 会与生产漂移 —— 统一收敛到本函数。
+    ///
+    /// **只合成外壳**：`id` 恒为 `"pcs"`（= 落库 `device_id` 与 12 号显示帧的既有契约值，
+    /// 见 §13.9「落库 `device_id = "pcs"`」行）、`role` 恒为 [`Role::Pcs`]；其余字段
+    /// **逐字段**取自本段 ⇒ 上云点数/通道/档位口径与迁移前逐字相同（§13.7 的 72 点）。
+    ///
+    /// `data_bits` / `stop_bits` / `response_timeout_ms` 是**控制面**参数：`StationConf`
+    /// 无对应落点、采集/上云路径也不消费 ⇒ 不参与合成（不静默丢语义 —— 它们仍由
+    /// `PcsHandle` 从本段直接读）。
+    pub fn station_shell(&self) -> StationConf {
+        StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: self.port.clone(),
+            protocol: self.protocol.clone(),
+            slave: self.slave,
+            baud_rate: self.baud_rate,
+            parity: self.parity,
+            interval_ms: self.interval_ms,
+            regs: self.regs.clone(),
+        }
     }
 }
 
@@ -656,8 +707,22 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
         ));
     }
     // 规则 10（点名唯一：含自动位置点名与显式 `name` 相撞；meter_grid 的同名**块**由①先拒，文案不同）
+    check_metric_uniqueness(&prefix, &metrics)
+}
+
+/// 规则 10（**点名唯一**）：`metrics` 内任一重复 ⇒ `Err`（遥测键冲突，指标相互覆盖）。
+///
+/// **为何抽成独立函数**：本条的判据是**纯 `metrics` 去重** —— 与 `role` 无关、也与"点从哪些
+/// 块来"无关（只看展开后的点名集合）⇒ 站级（[`validate_station_regs`] 的**汇聚**阶段）与
+/// `south_pcs` 段（[`SouthPcsConfig::validate`]）**共用同一判定**，符合规则 P-4 的
+/// "同一批函数"不变量。
+///
+/// **与规则 8 的分工**：规则 8（块内**地址**重叠）由 [`points::expand`] 判；本函数只看
+/// **点名** —— 同名**异址**（如一块的显式 `name` 撞另一块的自动位置点名，或两块各显式声明
+/// 同一个 `name`）**只有本条能拒**，漏掉即静默生成两个同名遥测键、值互相覆盖。
+fn check_metric_uniqueness(prefix: &str, metrics: &[String]) -> Result<(), String> {
     let mut seen: Vec<&str> = Vec::new();
-    for m in &metrics {
+    for m in metrics {
         if seen.contains(&m.as_str()) {
             return Err(format!(
                 "{}regs 点名重复: {}（遥测键冲突，指标相互覆盖）",
@@ -2965,6 +3030,19 @@ mod south_pcs_tests {
                 &format!("slave={slave}"),
             );
         }
+        // 波特率越界（与站级同款判据）：`0` 会静默穿透到 `open()` 才报错 ⇒ 配置期拒
+        for baud in [0u32, 4_000_001] {
+            reject(
+                SouthPcsConfig {
+                    enabled: true,
+                    baud_rate: baud,
+                    regs: vec![pcs_block()],
+                    ..SouthPcsConfig::default()
+                },
+                "baud_rate 越界",
+                &format!("baud_rate={baud}"),
+            );
+        }
         reject(
             SouthPcsConfig {
                 enabled: true,
@@ -2974,6 +3052,20 @@ mod south_pcs_tests {
             },
             "port 为空",
             "空 port",
+        );
+        // 块级周期覆盖 = **死配置**（本段无"覆盖"语义；段级 `interval_ms` 已是采集兼心跳
+        // 周期，`validate_block_intervals` 规则 20–24 只吃 `&SouthStationsConfig` ⇒ 此前
+        // 它被解析、无校验、调度器也永不执行）⇒ fail-closed 拒
+        let mut dead_iv = pcs_block();
+        dead_iv.interval_ms = Some(2000);
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                regs: vec![dead_iv],
+                ..SouthPcsConfig::default()
+            },
+            "不支持块级周期覆盖",
+            "regs[].interval_ms=Some(2000)",
         );
         reject(
             SouthPcsConfig {
@@ -3081,5 +3173,71 @@ mod south_pcs_tests {
             interval_ms: None,
         };
         reject(vec![wide], "整数倍", "count 非宽度整数倍");
+    }
+
+    /// **规则 10（点名唯一）在 `south_pcs` 段的常驻锚**（2026-09-26 质量评审 Important #1）。
+    ///
+    /// 此前本段只接线 `points::expand` + 块级规则，而 `expand` **只查地址重叠、不查点名**
+    /// ⇒ "同名异址"两点静默通过、生成两个同名遥测键、**值互相覆盖**；而本段的消费侧
+    /// （`uplink` 的 `class_ab(role, &p.metric)` 与遥测键）**正是按点名走** ⇒ 与刚修掉的
+    /// 规则 5 同属"静默形态"。判据是**纯 `metrics` 去重、与 `role` 无关**（站级也在汇聚
+    /// 阶段判），故两处共用 [`check_metric_uniqueness`]。
+    ///
+    /// **本用例的判别力**：修复（接线规则 10）**前必绿**、修复**后必红** —— 故**常驻**，
+    /// 不作一次性探针（活体对照见提交说明）。
+    #[test]
+    fn south_pcs_validate_rejects_duplicate_metric_names() {
+        let cfg = |regs: Vec<RegBlockConf>| SouthPcsConfig {
+            enabled: true,
+            regs,
+            ..SouthPcsConfig::default()
+        };
+        let named = |at: u16, name: &str| PointConf {
+            name: Some(name.into()),
+            ..pt(at, 1)
+        };
+        let reject = |regs: Vec<RegBlockConf>, needle: &str, what: &str| {
+            let err = cfg(regs).validate().expect_err(&format!("{what} 应被拒"));
+            assert!(
+                err.contains(needle) && err.contains("south_pcs"),
+                "{what}：Err 应含 {needle:?}（且带段名），实际 {err}"
+            );
+        };
+
+        // ① 块内：显式 `name` 撞**自动位置点名**（评审给的原形态：`at: 1` 显式命名
+        //    `pcs_3zone_2`，`at: 2` 的位置点名恰也是 `pcs_3zone_2`）。
+        //    `at: 1`(1 槽) + `at: 2`(75 槽) = 76 ⇒ 首尾锚定亦满足（只让规则 10 能拒）
+        let mut in_block = pcs_block();
+        in_block.points = vec![named(1, "pcs_3zone_2"), pt(2, 75)];
+        reject(vec![in_block], "点名重复: pcs_3zone_2", "块内同名异址");
+
+        // ② 跨块：块 a 的**位置点名**恰为块 b **显式声明**的 `name`（两块各自地址不重叠、
+        //    各自锚定覆盖满窗口 ⇒ 修复前必然绿）
+        let blk = |name: &str, addr: u16, count: u16, points: Vec<PointConf>| RegBlockConf {
+            name: name.into(),
+            addr,
+            count,
+            points,
+            ..pcs_block()
+        };
+        reject(
+            vec![
+                blk("blk_a", 1000, 2, vec![pt(1, 2)]), // → blk_a_1 / blk_a_2
+                blk("blk_b", 1010, 1, vec![named(1, "blk_a_1")]), // 撞块 a 的首个位置点名
+            ],
+            "点名重复: blk_a_1",
+            "跨块同名异址",
+        );
+
+        // ③ 反向：两块的点名**互不相同** ⇒ 放行（证明拒绝来自"重复"，不是"跨界/跨块"本身）
+        assert_eq!(
+            cfg(vec![
+                blk("blk_a", 1000, 2, vec![pt(1, 2)]), // blk_a_1 / blk_a_2
+                blk("blk_b", 1010, 1, vec![pt(1, 1)]), // blk_b_1
+            ])
+            .validate(),
+            Ok(()),
+            "两块各自唯一命名 ⇒ 应放行"
+        );
     }
 }

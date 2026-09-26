@@ -356,13 +356,17 @@ fn ac1_rule_p3_station_level_pcs_rejected_points_to_south_pcs() {
         err.contains("south_pcs") && err.contains("role: pcs") && err.contains("s1"),
         "P-3 文案须指向 south_pcs + 含站名，实际: {err}"
     );
-    // ② 单台、`regs` **空**：同样拒（原 rule3 的真实判据是"空点表"，与 P-3 无关 ⇒
-    //    P-3 先命中，文案是 P-3 而非"空 regs"—— 这正是该规则已迁移的证明）
+    // ② 单台、`regs` **空**：同样拒，且拒因是 **P-3 文案**（正向标记与 ① 同源：
+    //    `role: pcs`）—— 证明"空点表"判据已不在站级路径（它随 P-3 单段化迁至
+    //    `south_pcs` 段的 `regs 为空` 分支）。
+    //    ⚠️ 此处原为负向断言 `!err.contains("regs 为空")`（2026-09-26 质量评审 Minor #4）：
+    //    站级路径已无该文案，它实际只证明"P-3 文案里不含这 4 个字"，一旦为帮配置者把 P-3
+    //    文案补上"（regs 为空也会被拒）"就会**误红** ⇒ 改用与 ① 同源的正向标记。
     let empty = one_station("pcs", "");
     let err = empty.validate().unwrap_err();
     assert!(
-        err.contains("south_pcs") && !err.contains("regs 为空"),
-        "空 regs 的 pcs 站须先被 P-3 拒（空点表判据已迁至 south_pcs 段），实际: {err}"
+        err.contains("south_pcs") && err.contains("role: pcs"),
+        "空 regs 的 pcs 站须先被 P-3 拒（正向标记：P-3 文案含 `role: pcs`），实际: {err}"
     );
     // ③ 两台：首台即被 P-3 拒（"至多一个 pcs 站"结构性不可达）
     let cfg = parse(&format!(
@@ -830,11 +834,22 @@ fn ac1_rule16_same_port_parity_consistency() {
 }
 
 /// 规则 18（`pcs` 周期下界，设计补落点）：`499` → Err、`500` → Ok；
-/// `pcs` **无** `< 5000` 上界（与 meter_grid/battery 不同）。
+/// **上界有意不设**（与 meter_grid/battery 的 `< 5000` 不同）。
 ///
 /// **Task 6（ADR-016）起落点迁移**：站级 `role: pcs` 已被 P-3 拒，周期下界随段迁入
 /// `SouthPcsConfig::validate`（设计 §13.7/§13.8）—— 本条改用 `south_pcs` 段入口，
 /// 边界值（499/500/30000）与断言文案逐条不变。
+///
+/// **"无上界"的当前真实口径（2026-09-26 质量评审 Minor #5 改写 —— 原理由"pcs 不参与控制
+/// 决策"在迁移后**已失效**）**：本段 `interval_ms` 自 Task 6 起是**采集兼心跳**周期，
+/// SOC 由这一拍产出并**参与 SOC 双源裁决**（设计 §13.4 / Δ-18），不再有独立心跳路径。
+/// 故 `interval_ms ≥ 5000`（= `DATA_FRESHNESS_MS`）时，PCS 侧 SOC 会被
+/// `AiIntegrator::DATA_STALE_AFTER`（同取 5s）**判过期**、长期由 **BMS 侧 SOC 兜底**
+/// （`resolve_soc_source` 的优先级本就 BMS 优先、PCS 侧只作回落）。
+/// **明知情而保留无上界**，两条理由：① 无上界是原 `intercore.modbus_rtu.heartbeat_poll_ms`
+/// 的既有行为（该字段同样只有 0→1000ms 回退、无上界），本轮**迁移不引入新语义**；
+/// ② 加下界/上界会改变既有配置的**可接受域** ⇒ 属**产品裁定**，非代码自选。
+/// **兜底依赖登记**：BMS 侧 SOC 优先 + 5s 过期判定（二者都在 `ai_integration.rs`）。
 #[test]
 fn ac1_rule18_pcs_interval_lower_bound() {
     let mk = |iv: u64| {
@@ -851,7 +866,7 @@ fn ac1_rule18_pcs_interval_lower_bound() {
     assert_eq!(
         mk(30000).validate(),
         Ok(()),
-        "pcs 无 <5000 上界（不参与控制决策）"
+        "pcs 无 <5000 上界（有意保留：原 intercore 行为；PCS 侧 SOC ≥5s 即过期、由 BMS 侧兜底，见上）"
     );
 }
 

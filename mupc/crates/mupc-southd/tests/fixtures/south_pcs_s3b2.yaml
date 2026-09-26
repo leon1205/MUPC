@@ -22,9 +22,12 @@ baud_rate: 19200
 parity: none
 interval_ms: 1000            # 段内下界 500ms（PCS_MIN_INTERVAL_MS）
 response_timeout_ms: 200     # = 原 `intercore.modbus_rtu.response_timeout_ms` 的真实默认值
-                             # （`default_pcs_response_timeout_ms() == 200`，有依据的功能值）。
-                             # 设计 §13.7 示例里的 1000 是**笔误**（已另在文档订正）；
-                             # 以本值为准，**不改代码默认值**。
+                             # （`default_pcs_response_timeout_ms() == 200`）**且**两份生效配置
+                             # （`deploy/config/mupc_core_config{,.production}.yaml`）均取 200
+                             # ⇒ 以本值为准，**不改代码默认值**。
+                             # ⚠️ 设计 §13.7 的示例写的是 `1000`，与上述默认值不一致
+                             # —— 该示例**尚未订正**（Δ 表只到 Δ-20，无对应条目），
+                             # 此处**如实登记**，勿写成"已订正"。
 regs:
   - name: pcs_3zone          # 1000–1075；_k ↔ 寄存器 999+k
     func: input
