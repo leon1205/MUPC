@@ -936,18 +936,45 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// 6 站参考配置（`tests/fixtures/south_stations_s3b2.yaml`，含 PCS）——
-    /// 与 `tests/point_table_vs_reference_config.rs` 同一输入（不新建第二份点表真源）。
+    /// 参考配置（`tests/fixtures/south_stations_s3b2.yaml`）—— 与
+    /// `tests/point_table_vs_reference_config.rs` 同一输入（不新建第二份点表真源）。
+    /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 迁至独立顶层段 [`REF_PCS`]
+    /// （72 点）⇒ 合计仍 618 点、上云契约零变化（设计 §13.9）。
     const REF_6_STATIONS: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
+
+    /// PCS 独立顶层段（Task 6）。
+    const REF_PCS: &str = include_str!("../tests/fixtures/south_pcs_s3b2.yaml");
 
     #[derive(serde::Deserialize)]
     struct Wrapper {
         south_stations: SouthStationsConfig,
     }
 
+    /// 参考配置 = 站级段 5 站 **+ 由 `south_pcs` 段合成的 `Role::Pcs` 站**。
+    ///
+    /// 合成理由：`build_uplink_points` 的入参仍是 `&SouthStationsConfig`（`south_pcs` → 上云
+    /// 的接线属后续 Task；§13.9 声明上云契约零变化），而本组用例要钉的正是"**PCS 启用**时
+    /// 的三通道 / 档位点数"（639 点口径）。合成的只是**外壳**（`id`/`role`），
+    /// `port`/`slave`/`regs` 逐字段取自新段 ⇒ 点数口径与迁移前逐字相同。
     fn cfg_ref() -> SouthStationsConfig {
-        let w: Wrapper = serde_yaml::from_str(REF_6_STATIONS).expect("6 站参考配置解析失败");
-        w.south_stations
+        let mut cfg: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_6_STATIONS)
+            .expect("参考配置解析失败")
+            .south_stations;
+        let pcs: crate::config::SouthPcsConfig =
+            serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
+        assert!(pcs.enabled, "参考 PCS 段须 enabled");
+        cfg.stations.push(StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: pcs.port,
+            protocol: pcs.protocol,
+            slave: pcs.slave,
+            baud_rate: pcs.baud_rate,
+            parity: pcs.parity,
+            interval_ms: pcs.interval_ms,
+            regs: pcs.regs,
+        });
+        cfg
     }
 
     /// 去掉 PCS 站（EX-7：站未启用 ⇒ 72 点不产条目）。

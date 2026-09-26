@@ -1618,20 +1618,44 @@ mod tests {
     use super::*;
     use crate::core_config::CoreConfig;
     use mupc_data_processing::latest_values::{PointId, PointQuality, PointValue};
-    use mupc_southd::config::SouthStationsConfig;
+    use mupc_southd::config::Role;
+    use mupc_southd::config::{SouthPcsConfig, SouthStationsConfig, StationConf};
     use mupc_southd::uplink::build_uplink_points;
 
-    /// 6 站参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
+    /// 参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
+    /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 在独立顶层段 [`REF_PCS`]（72 点）。
     const REF_6: &str = include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
+
+    /// PCS 独立顶层段（Task 6）。
+    const REF_PCS: &str = include_str!("../../mupc-southd/tests/fixtures/south_pcs_s3b2.yaml");
 
     #[derive(serde::Deserialize)]
     struct Wrapper {
         south_stations: SouthStationsConfig,
     }
 
+    /// 参考配置 = 站级段 5 站 **+ 由 `south_pcs` 段合成的 `Role::Pcs` 站**
+    /// （合成理由与 `mupc-southd::uplink::tests::cfg_ref` 同源：本组用例钉的是"**PCS 启用**"
+    /// 的通道/档位口径，而 `build_uplink_points` 的入参形态仍是站表；§13.9 契约零变化）。
     fn cfg() -> SouthStationsConfig {
-        let w: Wrapper = serde_yaml::from_str(REF_6).expect("6 站参考配置解析失败");
-        w.south_stations
+        let mut stations: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_6)
+            .expect("参考配置解析失败")
+            .south_stations;
+        let pcs: SouthPcsConfig =
+            serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
+        assert!(pcs.enabled, "参考 PCS 段须 enabled");
+        stations.stations.push(StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: pcs.port,
+            protocol: pcs.protocol,
+            slave: pcs.slave,
+            baud_rate: pcs.baud_rate,
+            parity: pcs.parity,
+            interval_ms: pcs.interval_ms,
+            regs: pcs.regs,
+        });
+        stations
     }
 
     fn points() -> Vec<UplinkPoint> {
