@@ -288,8 +288,20 @@ impl SouthPcsConfig {
         if self.regs.is_empty() {
             return Err("south_pcs: regs 为空（必填点表 —— 空点表 = 采集恒空转的静默死配）".into());
         }
-        // 规则 P-4：块的**结构规则**复用与采集同一个 `points::expand`（含点展开校验）。
-        // 注意它只做"结构合法性"（宽度/空洞/点名唯一等），不做跨段比对 —— 后者在 core-bin。
+        // 规则 P-4：块的**结构规则**复用与采集同一个 `points::expand`（§11.4.3 的
+        // "校验期与运行期同一函数"不变量；不另起一套）。
+        //
+        // ⚠️ **覆盖范围如实登记（勿夸大）**：`expand` 只落"把点映射到寄存器的那一刻才能判"
+        // 的**点位级**规则 —— 7（点位越界）/ 8（点位重叠）/ 9（32 位对齐）/ 10（点名唯一）
+        // + 点级 `name`×`count` 护栏。
+        // **未**覆盖：5（零 scale）/ 6（符号性对照点表）/ 11（空洞 ≤ 4 + 首尾锚定）/
+        // 12（位块上限）/ 13（`addr == 0` 按 role）/ 14（区间重叠）/ 15（块落地极大性）/
+        // 19（无 points 块的宽度整数倍）—— 这八条落在**站级**函数
+        // （`validate_station_regs` / `validate_block_spans` / `validate_maximality` /
+        // `validate_meter_grid_regs`）里，其入参是 `StationConf` 且按 role 查点表，
+        // 故对 `south_pcs` **当前不生效**。设计 §13.8 的 P-4 行把"空洞 ≤ 4 / 单块 ≤ 120"
+        // 也算作"复用"，与 `expand` 的实际覆盖面**不一致** —— 是否补齐由该行口径裁定，
+        // 落地接线见 Task 7（`PcsHandle`）/ Task 10（core-bin 跨段规则）。
         for blk in &self.regs {
             crate::points::expand(blk)?;
         }
