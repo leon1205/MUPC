@@ -1361,8 +1361,8 @@ pub async fn initialize_all(
         "tcp" => {
             let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
             let transport = Arc::new(mupc_intercore::TcpTransport::new(remote_addr));
-            // N3: 启动回读接收（实时模块 DataUpload 上送 battery_soc → SOC 数据源）
-            transport.spawn_receive();
+            // 原 N3 回读接收（`spawn_receive` → `battery_soc`）已随 intercore 的 PCS 面删除
+            // （Task 11 / 02 设计 §13.9）：SOC 真源现为 `south_stations.battery`。
             Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
         }
         other => {

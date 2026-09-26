@@ -12,7 +12,7 @@ use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
 use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType};
-use crate::transport::{IntercoreTransport, TcpTransport, ThreePhaseRead};
+use crate::transport::{IntercoreTransport, TcpTransport};
 
 /// 安全覆盖触发原因的默认值
 const SAFETY_OVERRIDE_REASON_UNKNOWN: &str = "unknown";
@@ -994,45 +994,6 @@ impl IntercoreClient {
         self.transport.is_connected().await
     }
 
-    /// 实时模块上送的最近 SOC（%，含上送时刻；N3，Tcp 通道有接收时有效）
-    pub async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
-        self.transport.latest_soc().await
-    }
-
-    /// 停机原语（委托底层 transport：Modbus 写 REG_START_STOP=0；Tcp 通道降级 no-op）
-    pub async fn stop(&self) -> Result<(), String> {
-        self.transport.stop().await
-    }
-
-    /// 联锁锁存查询（transport 运行期兜底是否挡启动）
-    pub async fn is_interlock_stopped(&self) -> bool {
-        self.transport.is_interlock_stopped().await
-    }
-
-    /// 置/清联锁 latch（触发沿 restore(true)；release/启动 DB 读回 restore(false)）
-    pub async fn restore_interlock_latched(&self, latched: bool) -> Result<(), String> {
-        self.transport.restore_interlock_latched(latched).await
-    }
-
-    /// 最新解码的 RUN_STATE(1013)（Modbus 心跳维护；离线为 None；Tcp 通道恒 None）
-    pub fn last_run_state(&self) -> Option<u16> {
-        self.transport.last_run_state()
-    }
-
-    /// 三相展示读数（PCS 3 区输入寄存器 1022-1032，FC04；12-显示终端 §4.1 转发）。Modbus 实现
-    /// 有效；Tcp/sim 无 PCS 3 区点表 → None（上层打 NotRead）。由 DisplayDataProvider 独立 1s
-    /// 采集任务调用，与心跳同走 bus 锁（半双工互斥），不进联锁抑制链。
-    pub async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
-        self.transport.read_three_phase().await
-    }
-
-    /// M1 保护跳闸/停机人工授权重启（ack_m1 语义，**单次**）：!stopped_latched 时复位 started 并
-    /// 授权 transport 放行 RUN_STATE=0 停机稳态下重写 500=1（S-4 守卫旁路，Modbus）；latch 期间
-    /// Err 提示先 release。PCS 停机后 run_state=0 稳态下重启 = 人工授权后 S-4 放行一次（§11.11 待确认）。
-    pub async fn authorize_restart(&self) -> Result<(), String> {
-        self.transport.authorize_restart().await
-    }
-
     /// 获取传输描述（TCP 目标地址或通道名，如 modbus_rtu）
     pub fn remote_addr(&self) -> &str {
         &self.remote_addr
@@ -1077,96 +1038,5 @@ mod tests {
         let bytes = p.to_json().unwrap();
         let parsed = ControlCmdPayloadV3::from_json(&bytes).unwrap();
         assert!(parsed.phase_p_set.is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // 12-本地显示终端 §4.1：IntercoreClient 门面 `read_three_phase` 转发收口
-    // -----------------------------------------------------------------------
-
-    /// 仅实现 `read_three_phase` 的桩传输（其余方法在本组测试中不被调用）。
-    struct ThreePhaseStub(Option<ThreePhaseRead>);
-
-    #[async_trait::async_trait]
-    impl IntercoreTransport for ThreePhaseStub {
-        async fn send_dual_param(&self, _cmd: &DualParamCommand) -> Result<(), MupcError> {
-            unimplemented!("stub 不实现下行")
-        }
-        async fn send_tai_command(
-            &self,
-            _p: [f64; 3],
-            _q: [f64; 3],
-            _mode: &str,
-        ) -> Result<(), MupcError> {
-            unimplemented!("stub 不实现下行")
-        }
-        async fn is_connected(&self) -> bool {
-            true
-        }
-        async fn shutdown(&self) -> Result<(), MupcError> {
-            Ok(())
-        }
-        async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
-            None
-        }
-        async fn stop(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn is_interlock_stopped(&self) -> bool {
-            false
-        }
-        async fn restore_interlock_latched(&self, _latched: bool) -> Result<(), String> {
-            Ok(())
-        }
-        fn last_run_state(&self) -> Option<u16> {
-            None
-        }
-        async fn authorize_restart(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
-            self.0
-        }
-    }
-
-    /// 门面应把调用**原样转发**给注入的 transport（B2 只加到 trait/Modbus impl，门面转发 B5 收口）。
-    #[tokio::test]
-    async fn client_forwards_read_three_phase_to_transport() {
-        let raw = ThreePhaseRead {
-            i_phase: Some([22.5, 22.1, 22.3]),
-            p_phase: Some([12.3, 11.8, 12.0]),
-            p_total: Some(36.1),
-        };
-        let client = IntercoreClient::with_transport(Arc::new(ThreePhaseStub(Some(raw))));
-        assert_eq!(client.read_three_phase().await, Some(raw));
-        assert_eq!(client.remote_addr(), "modbus_rtu");
-    }
-
-    /// 降级路径：transport 不支持/读失败 → `None`（上层 DisplayDataProvider 据此打 NotRead/Offline），
-    /// 门面**不得** panic、不得造 0 值。
-    #[tokio::test]
-    async fn client_read_three_phase_degrades_to_none() {
-        // ① 桩返回 None（读失败/无点表）
-        let client = IntercoreClient::with_transport(Arc::new(ThreePhaseStub(None)));
-        assert!(client.read_three_phase().await.is_none());
-        // ② 默认 TCP 门面（sim / 无 PCS 3 区点表）走 trait 默认实现 → 恒 None
-        let tcp = IntercoreClient::new("127.0.0.1:1".to_string());
-        assert!(tcp.read_three_phase().await.is_none());
-    }
-
-    /// 单段缺失的逐字段降级语义（§3.4 F5.5 点级独立降级）：仅电流段失败时其余字段仍可取值。
-    #[tokio::test]
-    async fn client_read_three_phase_partial_fields_survive() {
-        let raw = ThreePhaseRead {
-            i_phase: None,
-            p_phase: Some([1.0, 2.0, 3.0]),
-            p_total: Some(6.0),
-        };
-        let client = IntercoreClient::with_transport(Arc::new(ThreePhaseStub(Some(raw))));
-        let got = client.read_three_phase().await.expect("有功段应有效");
-        assert!(
-            got.i_phase.is_none(),
-            "电流段失败 → None（上层打 Offline/NotRead）"
-        );
-        assert_eq!(got.p_total, Some(6.0));
     }
 }
