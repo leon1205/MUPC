@@ -60,7 +60,7 @@
 //! | IL29③ | **总览带 / 视口栅格偏差**：单卡外缘高 **162**（UI §6.4.1 写 164，−2）；滚动视口高 **342**（UI 写 340，+2）；三卡行与 §A 各卡的页内 y 由前两项累积（如 §A 起 y 随视口底 +24 顺移） | **root cause = `theme` 缺 2 px 档**（与 `pages/mod.rs` **D3**、`p2_config.rs` **PD5**、本表 **IL3** 同族）⇒ 本页坚持「**不写裸规格值**」（`ui/tests.rs` 两张静态网明令禁止）。**关键不变量成立**：视口 **342 ≥ 340**，且 §B 既有全量 = `触发源卡 202 + GAP_GROUP 16 + 灯卡 106 = 324 ≤ 342` ⇒ **既有联锁区首屏全可见**（UI §6.4.1 的核心承诺不破） | 与 `theme` 缺口上收批同批（D3 / PD5 / IL3 / IL20 / IL29⑤）。**回写**：UI §6.4.1（T21c-1-r1） |
 //! | IL29④ | **火警等级卡图标取 `Dimens::ICON_SM`(28)**（UI §6.4.1 写 **72 px**） | **实际依据 = 主值槽余量 + 档位缺口**：取 28 档 ⇒ 主值槽 `FIRE_VALUE_W` = 454 − (28 + 16) = **410**（4 字枚举 × 64 = 256 ⇒ 余量 154）；取 72 档 ⇒ 366（余量 110）。且 `theme::icon_slot(72)` **本就降档渲染为 64**（该缺口与 IL3 / IL20 同族）。⚠️ **订正（T21c-1-r1 实测）**：本常量原注「64 / 72 档会**挤掉** 4 字枚举文案」**不成立** —— 按 64 px 档逐字复算 256 ≤ 366 仍有余量；该注已改为上述真实依据（余量 + 档位缺口），**不保留不实因果** | 与 `theme` 缺口（`icon_slot(72) ⇒ 64`）上收批同批（承评审 N-3）；届时统一裁定 64 / 72 档取值 |
 //! | IL29⑤ | **§A 四组行高一律取 `Dimens::ROW_LOG_H`(44)**（UI §6.4.1 写 A1 / A3 行高 **36**、A2 / A4 行 **40**） | `theme` **只有 44 一档「列表行」**（与 IL3 的「缺 2 px 档」同族：不为凑像素写裸值）。**连带后果（如实）**：A1 卡高 = 卡头 44 + **17 行 × 44** + 上下内边距 34 = **826**（UI 写 616；其中 **17 = 1 行段顶通告 + 16 位行**，见本文件 `A1_CARD_H`）；A 组总高随之变大 ⇒ 滚动更长 —— 属「滚动区已超首屏」的正常后果，**不破坏任何不变量**（§A 本就不承诺首屏可见，见 ⑦） | 与 `theme` 缺口上收批同批（D3 / PD5 / IL3 / IL20 / IL29③）。**回写**：UI §6.4.1（T21c-1-r1） |
-//! | IL29⑥ | **下钻明细未做「窗口化」**：**20 行 × 9 格 = 180 个格对象一次性建齐**（`DRILL_ROW_POOL` = 服务端 `page_size` 缺省 20），与设计 §15.5.3「含数据行驱动的段一律**窗口化**（可视行 ×1.5）」不符。**另**：探测器状态列的**两个位名上提到表头**（行内格位放不下两个位名 —— 位名 120 + 「非活跃」72 = 192 > 164 半槽）<br>❌ **订正（T21c-2-r1，2026-09-25）：本行原先写的"原因"是**错误依据**。** 原文：「**窗口化在本层结构性不可实现**：薄层的 `EventCode` **未镜像 `LV_SCROLL`**（`pages/mod.rs` 的 R2）⇒ 收不到滚动事件」。**事实**：`EventCode::SCROLL` **自 B4b（提交 `297b51b`，2026-09-16）起即已镜像**（`lvgl/event.rs:91` + `lvgl/mod.rs` 的 B4b 条目），`Obj::scroll_y` / `scroll_to_y` 更早（B4a 同日，`9251940`），且 **P5 的 `AU6` 早已消费并附探针实测**（`p5_audit.rs:40` / `ui/tests.rs` 的 `pages_chain` ⑦″ 段）⇒ 写下本行之日（T21c-1-r1，2026-09-25）该通道**已存在 9 天**。错误来源 = `ui/pages/mod.rs` 的 **R2** 陈旧串（B4b 之后未同步；该串本批已订正）。⇒ **本行的"结构性不可实现"判断不成立** | **P4 下钻的"不窗口化"= 一处无依据的降级**（T21b2 的 R-3 回写明写"本行**不缩小**对 P6 各段的要求"）。**范式已存在**：`p6_system.rs` 的「固定行池 + `SCROLL` 重绑（`wire_scroll`）+ `adopt_special`」就是本页可复用的同一范式（P6 的 `SegmentList` / `BmsDrill` 均已按它实现） | **待单独立项**：P4 下钻按 P6 同一范式窗口化（届时删 `DRILL_ROW_POOL` 的整池建齐与真机余量风险，见 **D-6 / R-34**）。⚠️ **本行属 P4 的改动面，T21c-2-r1 只订正陈述 + 立项登记，不动实现**。**残余（如实）**：对象预算因此 742 → **1021**（T21c-1 的 P4 消防区 +239 ⇒ 981；T21c-2 的 P6 段「装置」+40 ⇒ **1021**；逐项账见 `ui/tests.rs` 的 `SHELL_OBJECT_BUDGET`）。**余量（2026-09-25 / W-g 订正）**：按 `lv_obj` ≈150–200 B × 1021 ⇒ ≈**150–200 KB** vs `LV_MEM_SIZE` **1 MB** ⇒ 占用 ≈15–20 %、**余量 ≈80–85 %**（原写"~0.8 %"与**同一算式**差约两个数量级，属单位 / 数量级笔误；稳态上界 1021 + 694 = **1715 件 ≈257–343 KB** ⇒ 余量 ≈67–75 %）。均为**账上推算、非实测** ⇒ 真机 `lv_mem_monitor` 复核（设计 §15.9 **R-34**）为验收项 |
+//! | IL29⑥ | ❌ **〔历史陈述 —— 已由 T21e（2026-09-26）收口为「**已窗口化**」，见本行末 ✅〕** **下钻明细未做「窗口化」**：**20 行 × 9 格 = 180 个格对象一次性建齐**（`DRILL_ROW_POOL` = 服务端 `page_size` 缺省 20），与设计 §15.5.3「含数据行驱动的段一律**窗口化**（可视行 ×1.5）」不符。**另**：探测器状态列的**两个位名上提到表头**（行内格位放不下两个位名 —— 位名 120 + 「非活跃」72 = 192 > 164 半槽）<br>❌ **订正（T21c-2-r1，2026-09-25）：本行原先写的"原因"是**错误依据**。** 原文：「**窗口化在本层结构性不可实现**：薄层的 `EventCode` **未镜像 `LV_SCROLL`**（`pages/mod.rs` 的 R2）⇒ 收不到滚动事件」。**事实**：`EventCode::SCROLL` **自 B4b（提交 `297b51b`，2026-09-16）起即已镜像**（`lvgl/event.rs:91` + `lvgl/mod.rs` 的 B4b 条目），`Obj::scroll_y` / `scroll_to_y` 更早（B4a 同日，`9251940`），且 **P5 的 `AU6` 早已消费并附探针实测**（`p5_audit.rs:40` / `ui/tests.rs` 的 `pages_chain` ⑦″ 段）⇒ 写下本行之日（T21c-1-r1，2026-09-25）该通道**已存在 9 天**。错误来源 = `ui/pages/mod.rs` 的 **R2** 陈旧串（B4b 之后未同步；该串本批已订正）。⇒ **本行的"结构性不可实现"判断不成立** | **P4 下钻的"不窗口化"= 一处无依据的降级**（T21b2 的 R-3 回写明写"本行**不缩小**对 P6 各段的要求"）。**范式已存在**：`p6_system.rs` 的「固定行池 + `SCROLL` 重绑（`wire_scroll`）+ `adopt_special`」就是本页可复用的同一范式（P6 的 `SegmentList` / `BmsDrill` 均已按它实现） | **（T21c-2-r1，2026-09-25）立项登记为「待单独立项」**：P4 下钻按 P6 同一范式窗口化（届时删 `DRILL_ROW_POOL` 的整池建齐与真机余量风险，见 **D-6 / R-34**）。⚠️ 当时**本行属 P4 的改动面，T21c-2-r1 只订正陈述 + 立项登记，不动实现**。<br>✅ **已落地（T21e，2026-09-26）**：P4 下钻已按 **P6 同一范式**补窗口化 —— [`Core::wire_scroll`]（`SCROLL` 的唯一注册点）+ [`Core::refresh_drill`] 按 `scroll_y` **重绑窗口**，池 = **可视行 ×1.5 + 1 = 7 行**（`DRILL_ROW_POOL` 由常量 `20`（= 页大小）改为该式），行区新增**高度占位器**（`drill_spacer`：滚动范围覆盖整页 ⇒ 页尾行**可滚到**，不是"顺手加件"而是窗口化的**必要条件**）。**对象数与页行数解耦**：注入 20 行页 → **50 行页**（`page_size` 上限）时**新建 LVGL 对象 = 0 件**（用例实测）。**残余（如实）**：对象预算 1031 → **922**（**−109 是窗口化的直接结果**，**不是"调数凑绿"**：下钻视图 201 → 92 = `20 行 × 9 格`(180) 改为 `7 行 ×(行容器 + 9 格)`(70) + 占位器 1；逐项账见 `ui/tests.rs` 的 `SHELL_OBJECT_BUDGET` —— **同批该预算是降的**）。**余量（2026-09-26 随实测同步）**：按 `lv_obj` ≈150–200 B × 922 ⇒ ≈**138–184 KB** vs `LV_MEM_SIZE` **1 MB** ⇒ 占用 ≈14–18 %、**余量 ≈82–86 %**（稳态上界 922 + 694 = **1616 件 ≈237–316 KB** ⇒ 余量 ≈69–77 %）。均为**账上推算、非实测** ⇒ 真机 `lv_mem_monitor` 复核（设计 §15.9 **R-34**）为验收项。<br>⚠️ **同源陈旧串（未随本批改，如实登记）**：`p6_system.rs` 的 **P6-6** 行与 `ui/pages/mod.rs` 的补充段仍写"**登记为待单独立项**（属 P4 的改动面，本批未动 P4）"—— 那是**当时**的口径，**已过期**；因本批任务书**明令只改 `p4_interlock.rs` / `ui/tests.rs` + 文档**（不得动 P6 与 `pages/mod.rs`），故**未一并订正**，留待 P6 / `mod.rs` 的改动面收口 |
 //! | IL29⑦ | **§A 消防区在源数 = 4（触发源卡变高）时首屏不全可见** —— §B 全量仍 `202+16+106 = 324 ≤ 342` 首屏全可见，但 §A 的第一组会被推到视口外 | **与设计一致、无需回写**：UI §6.4.1 原文「新增 §A 只在**向下滚动后**出现」，只承诺 **§B** 首屏全可见（该承诺成立）；本页**不调整**视口或行高去凑 §A 的首屏可见（那会破坏 §B 的承诺或引入裸值） | **无**（有意）。如实登记以免被读成"§A 也应首屏可见" |
 //!
 //! ## 纪律（逐条对应设计要求）
@@ -104,6 +104,7 @@ use mupc_display_proto::{
     FIRE_DET_POINTS_PER_UNIT,
 };
 
+use crate::lvgl::event::EventCode;
 use crate::lvgl::obj::Obj;
 use crate::lvgl::style::{Color, Style};
 use crate::lvgl::widgets::{self, Label, LongMode, ScrollContainer, TextButton};
@@ -111,7 +112,7 @@ use crate::lvgl::LvglError;
 use crate::state::{self, PeriphView, StationState};
 use crate::ui::components::{
     ConfirmDetail, ConfirmDialog, ConfirmSpec, EmptyState, LedIndicator, StatusChip, Toast,
-    ToastTone, UnavailableKind, UnavailableState,
+    ToastTone, UnavailableKind, UnavailableState, WarnBanner,
 };
 use crate::ui::pages::p2_config;
 use crate::ui::pages::{
@@ -546,6 +547,20 @@ const ACTION_BAR_Y: i32 = REASON_BAND_Y + REASON_BAND_H;
 /// 操作条内按钮 y（垂直居中）。
 const ACTION_BTN_Y: i32 = theme::center_offset(ACTION_BAR_H, Dimens::BTN_H_PRIMARY);
 
+// ── ⓪″ 顶部「名称表可能过期」提示条（U-73 / 设计 §15.3.1 第 2 句；T21c-3-r1）───────
+//
+// **只在 `stale == true` 时占用空间**（默认 0 ⇒ "无 catalog 时的既有布局"逐像素不变，
+// 见 [`P4InterlockPage::set_catalog_stale`]）：`stale` ⇒ 滚动视口整体下移并等量变矮
+// （底缘不动 ⇒ 与操作条的 24 px 不变），`stale == false` ⇒ 复原。
+/// 提示条占用的**总让位高**（`WarnBanner` 全高 56 + 同组缝 16）。
+const STALE_BAND_H: i32 = Dimens::BANNER_H + Dimens::GAP_GROUP;
+/// 提示条本体宽（全宽 − 「重试」按钮槽 − 缝）—— 按钮与提示条**同行**，用满既有 56 px 行高。
+const STALE_BANNER_W: i32 = Dimens::CONTENT_W - Dimens::TOUCH_MIN - Dimens::GAP_MIN;
+/// 「重试」按钮 x（提示条右侧；净距 = `GAP_MIN`(16)，UI §5.1 #12 的缝口径）。
+const STALE_RETRY_X: i32 = STALE_BANNER_W + Dimens::GAP_MIN;
+/// 「重试」按钮 y（在 56 px 提示条内垂直居中）。
+const STALE_RETRY_Y: i32 = theme::center_offset(Dimens::BANNER_H, Dimens::TOUCH_MIN);
+
 // ── §B 联锁区在滚动区内的 y（**既有内容原样**，整体下移到滚动区坐标）────────────
 /// 触发源卡 y（滚动区首卡，y=0）。
 const SOURCE_CARD_Y: i32 = 0;
@@ -619,8 +634,16 @@ const DRILL_PAGE_H: i32 = Dimens::TOUCH_MIN;
 const DRILL_ROWS_H: i32 = VIEWPORT_H - DRILL_TOP_H - DRILL_HEAD_H - DRILL_PAGE_H;
 /// 下钻行高（UI 写 44 = `ROW_LOG_H`）。
 const DRILL_ROW_H: i32 = Dimens::ROW_LOG_H;
-/// 下钻行池（= 服务端 `page_size` 缺省 20；**>20 的行不建对象** ⇒ 见 **IL29⑥**）。
-const DRILL_ROW_POOL: usize = 20;
+/// 下钻行区**可视行数**（行区高 214 / 行高 44 = **4 行**；UI §6.4.1 的「可视 4 行 × 44」）。
+const DRILL_VISIBLE_ROWS: i32 = DRILL_ROWS_H / DRILL_ROW_H;
+/// 下钻**行池**大小（**可视行 ×1.5 + 1** = **7**）。
+///
+/// **只由视口几何钉死，与明细页的行数（`page_size` 缺省 20、上限 50）无关** —— 这正是窗口化
+/// 的全部意义（`IL29⑥` 的收口）。池行按当前 `scroll_y` 复用到页内行
+/// `[start, start + POOL)` ⇒ **任何滚动位置的行都被绘**、"池外行永不绘"的静默丢内容不再存在。
+///
+/// **范式同源**：`p6_system.rs` 的 `DRILL_ROW_POOL`（= 可视行 ×1.5 + 1，`BmsDrill` 消费）。
+pub(crate) const DRILL_ROW_POOL: usize = (DRILL_VISIBLE_ROWS * 3 / 2 + 1) as usize;
 /// 「收起」/「上一页」/「下一页」按钮宽（`BTN_MIN_W` 120）。
 const DRILL_BTN_W: i32 = Dimens::BTN_MIN_W;
 /// 「收起」按钮 x（**视图顶部右端**，UI §6.4.1 / §15.5.3 F11.3）。
@@ -1793,8 +1816,17 @@ type IntentSlot = RefCell<Option<Box<dyn FnMut(InterlockOpPayload)>>>;
 /// 分页意图回调槽（U-73 下钻：请求第 N 页探测器明细；语义同 [`IntentSlot`]）。
 type PageReqSlot = RefCell<Option<Box<dyn FnMut(u32)>>>;
 
+/// 「重试 catalog」意图回调槽（T21c-3-r1：无载荷；语义同 [`IntentSlot`]）。
+type CatalogRetrySlot = RefCell<Option<Box<dyn FnMut()>>>;
+
 /// 下钻明细表的**一行**（[`DRILL_CELLS`] 格；状态列占两格 —— 报警总状态 / 故障总状态）。
+///
+/// `obj` = 行容器（[`DRILL_CELLS`] 格的**唯一父件**）：窗口重绑时只需移它**一件**
+/// （`set_pos`），9 格保持行内相对坐标不动 —— 与 `p6_system.rs::DrillRow.obj` 同款
+/// （不这么做就得在每次滚动事件里逐格 `set_pos` 63 次）。
 struct DrillRow {
+    /// 行容器（透明、不可滚；**不含任何可见样式**，视觉全在格子上）。
+    obj: Obj,
     /// 格子（序号 / 地址 / 报警总状态 / 故障总状态 / 烟雾 / 温度 / CO / VOC / H2）。
     cells: Vec<Label>,
     /// 每格当前样式下标（避免每拍重复挂样式 —— 与 `set_style_index` 的短路口径一致）。
@@ -1802,11 +1834,14 @@ struct DrillRow {
 }
 
 impl DrillRow {
-    /// 整行显隐（**不新建 / 不删除对象**）。
+    /// 整行显隐（**不新建 / 不删除对象**）。父件一隐即整行不参与布局、不耗绘制。
     fn set_visible(&self, on: bool) {
-        for c in &self.cells {
-            c.set_hidden(!on);
-        }
+        self.obj.set_hidden(!on);
+    }
+
+    /// 本行是否在显（窗口读口用；判据与 [`DrillRow::set_visible`] **同源**）。
+    fn visible(&self) -> bool {
+        !self.obj.is_hidden()
     }
 
     /// 置某格文本 + 样式档。
@@ -1990,8 +2025,19 @@ struct Core {
     drill_head: Vec<Label>,
     /// 行区（**独立滚动容器**）。
     drill_rows_box: ScrollContainer,
-    /// 行池（[`DRILL_ROW_POOL`]）。
+    /// 行池的**高度载体**（占位器；`p6_system.rs::BmsDrill::spacer` 同款）。
+    ///
+    /// **为什么必须有它**：行池按窗口**复用** ⇒ 池行在容器里的 y 会随窗口移动；若没有一件
+    /// 「高度恒 = 整页行数 × 行高」的占位件，容器的内容高度会在滚动时**缩回视口高** ⇒
+    /// **滚不到页尾**（页尾行永不进窗口）。构造期一次建齐、只 `set_size`（**不随数据新增对象**）。
+    drill_spacer: Obj,
+    /// 行池（[`DRILL_ROW_POOL`]；**与页行数无关**）。
     drill_rows: Vec<DrillRow>,
+    /// 最近一次绑定的**窗口起点**（0 基行号；`None` = 无页数据 / 失败态 ⇒ 无窗口）。
+    ///
+    /// 断言读口（"窗口真的随滚动前移"）；与 `p6_system.rs::BmsDrill::window_start` **同款
+    /// 同口径**（同一个范式）。
+    drill_window_start: Cell<Option<usize>>,
     drill_prev: Rc<TextButton>,
     drill_next: Rc<TextButton>,
     /// 「收起」（**视图顶部右端**，F11.3 的固定出口）。
@@ -2082,6 +2128,15 @@ struct Core {
     on_ack_m1: IntentSlot,
     /// 探测器明细分页意图回调（U-73；**本页不发请求**）。
     on_fire_page: PageReqSlot,
+    // ── ⓪″ 顶部「名称表可能过期」提示条（U-73 / 设计 §15.3.1 第 2 / 3 句；T21c-3-r1）──
+    /// 提示条本体（[`WarnBanner`]：全宽 − 按钮槽 × 56、**非交互**；UI §5.1 #12）。
+    stale_banner: WarnBanner,
+    /// 「重试」按钮（`TOUCH_MIN`(48)×`TOUCH_MIN`(48)；**只投意图**）。
+    stale_retry: Rc<TextButton>,
+    /// catalog 处于「重取失败 ⇒ 名称表可能过期」态（`false` = 提示条不占位）。
+    catalog_stale: Cell<bool>,
+    /// 「重试 catalog」意图回调（**本页不发请求、不碰页面数据**）。
+    on_catalog_retry: CatalogRetrySlot,
     /// 弹层打开**失败**的累计次数（**节流用**，见 **IL25**：不节流则每次点击都写 stderr）。
     open_fail_logs: Cell<u32>,
 }
@@ -2398,11 +2453,39 @@ impl Core {
 
         // 「数据 1」的拆解规格（catalog 优先；缺则用 `display-proto` 的锁定模板 —— 单一真源）
         let specs = data1_specs(self.catalog.borrow().as_ref());
-        let items = page.map(|p| p.items.as_slice()).unwrap_or(&[]);
-        for (r, row) in self.drill_rows.iter().enumerate() {
-            match items.get(r) {
+        // ── 窗口化（**IL29⑥ 的收口**；范式 = `p6_system.rs::BmsDrill::render`）──────────
+        //
+        // 池大小 `DRILL_ROW_POOL` 由**视口几何**钉死、与页行数**无关**；这里只把**当前滚动
+        // 位置**应显的那 `POOL` 行绑到页内行 `[start, start + POOL)`。
+        //
+        // 改前的两处缺陷（逐条可核）：① **池 = 服务端 `page_size`** ⇒ 对象数随页大小走
+        // （页 20 行 = 180 格对象一次性建齐；而 `page_size` 上限是 50 ⇒ 更差）；② **行号钉死
+        // 在池下标上**（`items.get(r)`，`r` 即池下标）⇒ 一旦池 < 页行数，`items[POOL..]` 这些
+        // **页内行没有任何池行与之对应** ⇒ **静默丢内容**。本实现两处一齐修掉。
+        let items = page.map(|p| p.items.as_slice());
+        let row_count = if show_fail {
+            0
+        } else {
+            items.map_or(0, <[mupc_display_proto::FireDetectorItem]>::len)
+        };
+        // 占位器高 = `max(行数, 可视行数) × 行高` ⇒ 滚动范围覆盖**整页**（页尾行可滚到），
+        // 不足一屏时不出滚动条（= 改前的观感）。
+        let total_h = (row_count as i32 * DRILL_ROW_H).max(DRILL_ROWS_H);
+        self.drill_spacer.set_size(Dimens::CONTENT_W, total_h);
+        let start = if row_count == 0 {
+            None
+        } else {
+            Some((self.drill_rows_box.scroll_y().max(0) / DRILL_ROW_H) as usize)
+        };
+        self.drill_window_start.set(start);
+        let start = start.unwrap_or(0);
+        for (k, row) in self.drill_rows.iter().enumerate() {
+            let row_idx = start + k;
+            match items.and_then(|s| s.get(row_idx)) {
                 Some(it) => {
                     row.set_visible(true);
+                    // 行容器移到**页内行 `row_idx`** 的位置（格子在容器内保持相对坐标 ⇒ 视觉不变）
+                    row.obj.set_pos(0, row_idx as i32 * DRILL_ROW_H);
                     row.set_cell(
                         0,
                         &format!("{}", it.index),
@@ -2465,9 +2548,36 @@ impl Core {
         set_visible(&self.drill, on);
         // 进入下钻：§B/§A 仍在滚动区里（下层），把整个滚动区隐掉以免穿透触摸
         set_visible(&self.scroll, !on);
+        // T21c-3-r1：提示条也被覆盖层盖住（同一片区域）⇒ 随下钻态**显式**收起 / 复原
+        // （判据单一，见 [`Core::sync_stale_visibility`]）。
+        self.sync_stale_visibility();
         if on {
             self.refresh_drill();
+        } else {
+            // 退出下钻 ⇒ 行区**回到顶部**（与 `BmsDrill::set_open(false)` 同款）：否则重入时
+            // 会停在上次的滚动位置、窗口起点残留在半途（`refresh_drill` 会照旧把它算对，
+            // 但"每次进入都从第 1 行起"才是分页表的正常语义）。
+            self.drill_rows_box.scroll_to_y(0);
         }
+    }
+
+    /// **滚动事件入口**（生产路径：下钻行区的 `SCROLL` ⇒ 按当前位置重绑窗口）。
+    ///
+    /// **`IL29⑥` 的收口**：与 `p6_system.rs::BmsDrill::on_scroll` **同一范式** —— 下钻的窗口
+    /// 不只在注入拍重绑，而是随滚动位置重绑 ⇒ 池外（`DRILL_ROW_POOL` = 7 行）的行滚到哪儿
+    /// 都被绑上，不再"池外行永不绘"。
+    fn on_scroll(&self) {
+        self.refresh_drill();
+    }
+
+    /// 注册"滚动 ⇒ 重绑"（**下钻的 `SCROLL` 唯一注册点**；`Weak` 避免与事件项构成引用环）。
+    fn wire_scroll(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.drill_rows_box.on(EventCode::SCROLL, move |_| {
+            if let Some(c) = weak.upgrade() {
+                c.on_scroll();
+            }
+        });
     }
 
     /// 请求某一页探测器明细（**本页不发请求** —— 经意图回调交回接线层，与 P2/P4 同口径）。
@@ -2481,6 +2591,43 @@ impl Core {
             }
         }
         self.refresh_drill();
+    }
+
+    /// **⓪″ 提示条显隐 + 滚动视口让位**（T21c-3-r1；判据**只在本方法一处**）。
+    ///
+    /// 幂等：重复置同值**不动任何几何 / 可见性**（回调路径可能每拍被调一次）。
+    /// 只做 `set_hidden` / `set_pos` / `set_size`（**不建不删对象**）⇒ 可安全放在 tick / 回执路径。
+    fn set_catalog_stale(&self, stale: bool) {
+        if self.catalog_stale.replace(stale) == stale {
+            return;
+        }
+        self.sync_stale_visibility();
+        // 让位：`stale` ⇒ 视口下移并等量变矮（**底缘不动**）；`false` ⇒ 回到既有版面。
+        let inset = if stale { STALE_BAND_H } else { 0 };
+        self.scroll.set_pos(0, VIEWPORT_Y + inset);
+        self.scroll.set_size(Dimens::CONTENT_W, VIEWPORT_H - inset);
+    }
+
+    /// 提示条 + 「重试」的**显隐单一判据**：`stale` **且未开下钻**。
+    ///
+    /// 为什么要排除下钻：提示条落在**滚动区顶部**，而下钻是**盖在同一片区域**的覆盖层
+    /// （§15.5.3：下钻占满滚动区）⇒ 若在覆盖层打开时仍显提示条，其右侧「重试」（x 944–992）
+    /// 会与下钻顶部条的「收起」（x 872–992）**重叠** —— 两块可点区域叠在一起，触碰命中区
+    /// 只能靠 z 序裁决。故下钻打开时**显式收起**（收起下钻按当前 `stale` 态复原）。
+    fn sync_stale_visibility(&self) {
+        let show = self.catalog_stale.get() && !self.drill_open.get();
+        self.stale_banner.obj().set_hidden(!show);
+        self.stale_retry.set_hidden(!show);
+    }
+
+    /// 触发「重试 catalog」意图（**只调回调、不碰任何页面数据** —— 回调纪律见
+    /// [`P4InterlockPage::set_on_catalog_retry`]）。
+    fn fire_catalog_retry(&self) {
+        if let Ok(mut slot) = self.on_catalog_retry.try_borrow_mut() {
+            if let Some(f) = slot.as_mut() {
+                f();
+            }
+        }
     }
 
     fn apply_section(&self, s: &InterlockSection) {
@@ -2883,6 +3030,22 @@ impl P4InterlockPage {
             crate::lvgl::style::StyleSelector::main(),
         );
 
+        // ── ⓪″ 顶部「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句）──────
+        //
+        // 落点 = **滚动区顶部**（总览带之下、滚动视口之上）：`stale` 时滚动视口下移
+        // `STALE_BAND_H` 并等量变矮（**底缘不动** ⇒ 与操作条的 24 px 缝不变、无遮挡）；
+        // 默认 `stale == false` ⇒ 两者皆隐、滚动视口**逐像素回到既有版面**。
+        // 建造序在下钻覆盖层之前 ⇒ 下钻打开时本行被覆盖层盖住（下钻自带失败 / 重试通道）。
+        let stale_banner = WarnBanner::new(&root, STALE_BANNER_W, ui_text::CATALOG_STALE, &[])?;
+        stale_banner.obj().set_pos(0, VIEWPORT_Y);
+        stale_banner.obj().set_hidden(true);
+        let stale_retry = Rc::new(TextButton::create(&root, ui_text::RETRY)?);
+        stale_retry.set_size(Dimens::TOUCH_MIN, Dimens::TOUCH_MIN);
+        stale_retry.set_pos(STALE_RETRY_X, VIEWPORT_Y + STALE_RETRY_Y);
+        stale_retry.label().center();
+        theme::button(theme::ButtonKind::Secondary).apply(&stale_retry);
+        stale_retry.set_hidden(true);
+
         // ── ⓪ 【安全总览带】（**常驻不滚动**；UI §6.4.1）──
         let band = layout_box(&root, Dimens::CONTENT_W, BAND_H)?;
         band.set_pos(0, BAND_Y);
@@ -3191,7 +3354,7 @@ impl P4InterlockPage {
             drill_head.push(l);
         }
 
-        // 行区（**独立滚动容器**；行池 = 服务端页大小缺省 20）
+        // 行区（**独立滚动容器**；行池 = **可视行 ×1.5 + 1**，与页行数无关 —— 见 `DRILL_ROW_POOL`）
         let drill_rows_box = ScrollContainer::create(&drill)?;
         drill_rows_box.set_size(Dimens::CONTENT_W, DRILL_ROWS_H);
         drill_rows_box.set_pos(0, DRILL_TOP_H + DRILL_HEAD_H);
@@ -3199,19 +3362,28 @@ impl P4InterlockPage {
             &theme::transparent(),
             crate::lvgl::style::StyleSelector::main(),
         );
+        // 占位器（高度在 `refresh_drill` 里按**整页行数**设；构造期先给视口高 ⇒ 与改前同观感）
+        let drill_spacer = layout_box(&drill_rows_box, Dimens::CONTENT_W, DRILL_ROWS_H)?;
+        drill_spacer.set_pos(0, 0);
         let mut drill_rows = Vec::with_capacity(DRILL_ROW_POOL);
-        for r in 0..DRILL_ROW_POOL {
+        for _ in 0..DRILL_ROW_POOL {
+            let row_obj = layout_box(&drill_spacer, Dimens::CONTENT_W, DRILL_ROW_H)?;
+            row_obj.set_pos(0, 0);
             let mut cells = Vec::with_capacity(DRILL_CELLS);
             let mut cell_style = Vec::with_capacity(DRILL_CELLS);
             for c in 0..DRILL_CELLS {
-                let l = label(&drill_rows_box, TextSlot::Body, Palette::TEXT_PRIMARY)?;
+                let l = label(&row_obj, TextSlot::Body, Palette::TEXT_PRIMARY)?;
                 l.set_size(drill_cell_w(c), DRILL_ROW_H);
                 l.set_long_mode(LongMode::DOTS);
-                l.set_pos(drill_cell_x(c), r as i32 * DRILL_ROW_H);
+                l.set_pos(drill_cell_x(c), 0);
                 cells.push(l);
                 cell_style.push(Cell::new(usize::MAX));
             }
-            drill_rows.push(DrillRow { cells, cell_style });
+            drill_rows.push(DrillRow {
+                obj: row_obj,
+                cells,
+                cell_style,
+            });
         }
 
         // 分页条：「上一页」/「下一页」（各 120×48，**间距 = `GAP_MIN`(16)**） + 页码
@@ -3413,7 +3585,9 @@ impl P4InterlockPage {
             drill_title,
             drill_head,
             drill_rows_box,
+            drill_spacer,
             drill_rows,
+            drill_window_start: Cell::new(None),
             drill_prev,
             drill_next,
             drill_collapse,
@@ -3462,8 +3636,16 @@ impl P4InterlockPage {
             on_release: RefCell::new(None),
             on_ack_m1: RefCell::new(None),
             on_fire_page: RefCell::new(None),
+            stale_banner,
+            stale_retry,
+            catalog_stale: Cell::new(false),
+            on_catalog_retry: RefCell::new(None),
             open_fail_logs: Cell::new(0),
         });
+
+        // 下钻行区的 `SCROLL` ⇒ 按当前位置**重绑窗口**（`IL29⑥` 的收口；范式 = `BmsDrill`）。
+        // **唯一**注册点：删掉它窗口就永不前移（探针 ① 实测红）。
+        core.wire_scroll();
 
         // 按钮：只**开弹层**（确认完成前不发任何请求）。
         {
@@ -3523,6 +3705,15 @@ impl P4InterlockPage {
                 let Some(c) = w.upgrade() else { return };
                 let p = c.fire_page_req.get();
                 c.request_fire_page(p);
+            });
+        }
+        // T21c-3-r1：提示条右侧的「重试」——**只投意图**（闭包体内不出现任何页面数据写入；
+        // 真正的重取与页面写入在接线层的 tick / `apply_route` 那一拍）。
+        {
+            let w = Rc::downgrade(&core);
+            core.stale_retry.on_clicked(move |_| {
+                let Some(c) = w.upgrade() else { return };
+                c.fire_catalog_retry();
             });
         }
 
@@ -3671,9 +3862,62 @@ impl P4InterlockPage {
 
     /// catalog **未取到 / 重取失败** ⇒ 清掉：中文名位显「名称未获取」（`ui_text::NAME_UNKNOWN`）、
     /// **值照常显示**（按点名）—— **不臆造中文名**（§15.3.1）。
+    ///
+    /// ⚠️ **重取失败不得调本方法**（§15.3.1「重取失败 ⇒ **保留旧 catalog**」）——失败面只置
+    /// [`P4InterlockPage::set_catalog_stale`]，本方法留给"确实没有 catalog"的显式清空。
     pub fn clear_catalog(&self) {
         *self.core.catalog.borrow_mut() = None;
         self.core.refresh_fire();
+    }
+
+    /// **【⓪″ 顶部提示】名称表可能过期**（U-73 / 设计 §15.3.1 第 2 句；**T21c-3-r1**）。
+    ///
+    /// `stale = true` ⇒ 显「名称表可能过期」提示条（[`WarnBanner`]）+「重试」按钮
+    /// （≥ `TOUCH_MIN`(48)×48，净距 `GAP_MIN`(16)），并把**滚动视口整体下移 `STALE_BAND_H`(72)
+    /// 且等量变矮** —— 落点在滚动区**顶部**、底缘不动 ⇒ 与固定操作条的 24 px 缝不变、
+    /// **不遮住既有内容**（提示条只在 `stale` 时占位，默认态逐像素回既有版面）。
+    /// `stale = false` ⇒ 两者皆隐 + 滚动视口复原。
+    ///
+    /// **谁调 / 何时调**：接线层（`app.rs`）在 catalog **重取失败**时置 `true`（**保留旧 catalog**
+    /// —— 不调 [`P4InterlockPage::clear_catalog`]）、**重取成功**时置 `false`。
+    /// **每次调用都直接落屏**（判据只在本方法一处，幂等；重复置同值不做事）。
+    pub fn set_catalog_stale(&self, stale: bool) {
+        self.core.set_catalog_stale(stale);
+    }
+
+    /// 注册「重试」意图回调（无载荷）—— 点提示条右侧的「重试」即触发；**本页不发请求**。
+    ///
+    /// **回调纪律**（本仓成文教训，见 `app.rs` 的 `bind_intents` 函数头）：闭包体内**只许投意图**
+    /// （`push_back(..)`），**不得**回灌页面数据 —— 该回调用在 LVGL 事件派发内被同步触发
+    /// （同 [`P4InterlockPage::set_on_fire_page`]），在里面删 / 建对象会 UAF。
+    /// 页面本体的写入发生在接线层的 tick / `apply_route` 那一拍。
+    pub fn set_on_catalog_retry<F>(&self, f: F)
+    where
+        F: FnMut() + 'static,
+    {
+        if let Ok(mut slot) = self.core.on_catalog_retry.try_borrow_mut() {
+            *slot = Some(Box::new(f));
+        }
+    }
+
+    /// 提示条**是否在显**（断言 / 装配口径；默认 `false`）。
+    pub fn catalog_stale_visible(&self) -> bool {
+        !self.core.stale_banner.obj().is_hidden()
+    }
+
+    /// 提示条文案（断言口径；恒 = `ui_text::CATALOG_STALE`）。
+    pub fn catalog_stale_text(&self) -> Option<String> {
+        self.core.stale_banner.text()
+    }
+
+    /// 「重试」按钮（尺寸 / 点位 / 点击投意图的断言用）。
+    pub fn catalog_retry_button(&self) -> &TextButton {
+        &self.core.stale_retry
+    }
+
+    /// 提示条本体对象（版面断言用：矩形 / 与滚动区、按钮的净距）。
+    pub fn catalog_stale_banner_obj(&self) -> &Obj {
+        self.core.stale_banner.obj()
     }
 
     /// 注入探测器明细页（`GET /v1/console/peripherals/fire_detectors` 的结果；F21.4）。
@@ -3867,13 +4111,62 @@ impl P4InterlockPage {
             .and_then(Label::text)
     }
 
-    /// 下钻第 `r` 行是否可见。
+    /// 下钻第 `r` **池行**是否可见（`r` = **池下标**，非页内行号 —— 窗口化后两者不同，
+    /// 见 [`P4InterlockPage::drill_window_start`]）。
+    ///
+    /// 判据与 [`DrillRow::set_visible`] **同源**（父件一隐即整行不显）。
     pub fn drill_row_visible(&self, r: usize) -> bool {
-        self.core
-            .drill_rows
-            .get(r)
-            .and_then(|row| row.cells.first())
-            .is_some_and(|l| !l.obj().is_hidden())
+        self.core.drill_rows.get(r).is_some_and(DrillRow::visible)
+    }
+
+    /// 下钻**行池大小**（`DRILL_ROW_POOL` = 可视行 ×1.5 + 1 = **7**）。
+    ///
+    /// **"对象数与页行数无关"的读口**（范式 = `p6_system.rs::P6SystemPage::drill_pool_size`）：
+    /// 该值只由**视口几何**决定，页内 3 行 / 20 行 / 50 行时**一律相同**。
+    pub fn drill_pool_size(&self) -> usize {
+        self.core.drill_rows.len()
+    }
+
+    /// 下钻行区**可视行数**（布局常量，`DRILL_ROWS_H / DRILL_ROW_H` = 4）。
+    pub fn drill_visible_row_count(&self) -> usize {
+        DRILL_VISIBLE_ROWS as usize
+    }
+
+    /// 下钻当前**窗口起点**（0 基**页内行号**；`None` = 无页数据 / 失败态 ⇒ 无窗口）。
+    ///
+    /// 这是"窗口真的随滚动前移"的断言读口（范式 = `p6_system.rs::P6SystemPage::drill_window_start`）。
+    pub fn drill_window_start(&self) -> Option<usize> {
+        self.core.drill_window_start.get()
+    }
+
+    /// 下钻池内**已绑且在显**的行数（= 页内剩余行数，上限 = [`Self::drill_pool_size`]）。
+    pub fn drill_bound_rows(&self) -> usize {
+        self.core.drill_rows.iter().filter(|r| r.visible()).count()
+    }
+
+    /// 下钻池行 `r` 的**行容器屏内绝对** `y1`（像素；`None` = 该池下标不存在）。
+    ///
+    /// **几何读回**（T21e 评审 W-2）：把"窗口绑对了行"从**数据面**（逐格文本）扩到**像素面** ——
+    /// 配合 [`Self::drill_viewport_top`] 可判"**视口顶**几何上落在哪个池行内"。
+    /// ⚠️ `coords` 由**布局趟**写入（见 [`Obj::coords`]）⇒ 调用前须先强制渲染一趟
+    /// （测试 = `Display::refr_now_for_test`）。
+    pub fn drill_row_y(&self, r: usize) -> Option<i32> {
+        self.core.drill_rows.get(r).map(|row| row.obj.coords().y1)
+    }
+
+    /// 下钻行区（滚动宿主）的**屏内绝对** `y1`（像素）—— 即**视口顶**。
+    ///
+    /// 与 [`Self::drill_row_y`] 配合做几何读回（T21e 评审 W-2）；同 `coords` 的布局趟要求。
+    pub fn drill_viewport_top(&self) -> i32 {
+        self.core.drill_rows_box.coords().y1
+    }
+
+    /// **只发滚动**（`y` = 像素）：与生产 `SCROLL` 事件**同源** —— 不另调任何重绑入口。
+    ///
+    /// ⇒ 删掉 `Core::wire_scroll` 的注册，本条驱动的断言**即红**（"窗口不随滚动动"）。
+    /// 范式 = `p6_system.rs::P6SystemPage::scroll_drill`。
+    pub fn scroll_drill(&self, y: i32) {
+        self.core.drill_rows_box.scroll_to_y(y);
     }
 
     /// 下钻失败态文案（「明细不可用」/「消防源不可用」；R-4）。

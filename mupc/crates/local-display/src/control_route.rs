@@ -330,15 +330,50 @@ fn local_unavailable<T>(request_id: &str, message: &str, at_ms: u64) -> ControlR
 /// # 为什么 catalog **不在**此列（刻意的）
 ///
 /// §15.3.1 给的降级是「**保留旧 catalog** + 中文名位显「名称未获取」而**值照常显示**」——
-/// 这是一个**什么都不做**即可达成的态（页面默认就没有 catalog）。若在这里返回一个
+/// 这是一个**不抹掉已有名字**即可达成的态（页面默认就没有 catalog）。若在这里返回一个
 /// "catalog 不可用"决策去调 `clear_catalog()`，反而会把**已经取到的名字抹掉**，
-/// 与「保留旧 catalog」相反。故 catalog 失败 ⇒ `None` + 一行 stderr（调用方记）。
+/// 与「保留旧 catalog」相反。故 catalog 失败 ⇒ **无决策**。
+///
+/// ⚠️ 「无决策」**不等于**「无页面失败面」（T21c-3-r1）：catalog 的下钻失败面是 §15.3.1 的
+/// 顶部「名称表可能过期」+「重试」，由 `App::on_catalog_read_failed` 直接落到两页
+/// （`set_catalog_stale`），**不经过** `RouteDecision`。判"要不要**交出**一条决策"与判
+/// "页面**有没有**自己的失败面"是**两问** ⇒ 后者见 [`page_owns_failure_surface`]。
 pub fn page_failure_decision(endpoint: ConsoleEndpoint) -> Option<RouteDecision> {
     match endpoint {
         ConsoleEndpoint::PeripheralsFireDetectors => Some(RouteDecision::FireDetectorUnavailable),
         ConsoleEndpoint::PeripheralsBmsAlarms => Some(RouteDecision::BmsAlarmUnavailable),
         _ => None,
     }
+}
+
+/// 该端点失败时，**页面是否已有就地失败面**（⇒ app 层**不得**再压一条通用「操作失败」Toast）。
+///
+/// # 为什么要与 [`page_failure_decision`] 分开（两问，不是一问）
+///
+/// - **问一**（[`page_failure_decision`]）：要不要给接线层**交一条 `RouteDecision`**？
+///   只有两个明细端点有（页面暴露的是**无参**的 `set_*_page_failed()`）；
+/// - **问二**（本函数）：页面**有没有**自己的失败面？—— catalog **有**（§15.3.1 的
+///   顶部提示条 + 「重试」，由 `App::on_catalog_read_failed` 上屏）但**没有**决策。
+///
+/// 若把两问合成一问，二者之一必然失真：catalog 要么被塞一条会 `clear_catalog` 的决策
+/// （违"保留旧 catalog"），要么被当成"没有页面失败面"而**同时**压一条通用 Toast
+/// （违 UI §7.2「同一时刻仅 1 条」，且通用「操作失败」对一个**取数**动作是**误导** —— 它不是
+/// 用户发起的操作；口径见 `App::absorb_console` 与 `state::ControlState::record_read_failure`）。
+///
+/// # 为什么**不得**放宽成"所有读端点"
+///
+/// 其余读端点（`Config` / `Logs` / `LogsTargets` / `Audit` / `AuditOps`）**没有**任何页面
+/// 失败面 ⇒ app 层兜底 Toast 是它们**唯一**的上屏通道（去掉 = 静默失败，违 §2.6「降级可见」）。
+/// 判据是**白名单**（恰好三条），不是"读端点"这一类。
+///
+/// **改什么会让本条变红**：把实现改成 `!endpoint.is_write()`（一刀切）⇒
+/// `failure_surface_roster_...` 用例红（其余读端点被误免）⇒ 那正是本仓最忌讳的
+/// "把有出路与没出路混为一谈"。
+pub fn page_owns_failure_surface(endpoint: ConsoleEndpoint) -> bool {
+    // 白名单**恰好**三条（两个明细端点 + catalog）；`page_failure_decision` 的 `Some` 集
+    // 合是本名单的**子集** —— 该包含关系由用例逐条钉住（防两处漂移）。
+    page_failure_decision(endpoint).is_some()
+        || matches!(endpoint, ConsoleEndpoint::PeripheralsCatalog)
 }
 
 /// 该页是否会用到外设元数据（catalog）——**首次进入即取**的判据（设计 §15.3.1）。
@@ -356,8 +391,8 @@ pub fn periph_metadata_page(p: NavPage) -> bool {
 ///
 /// # 「一次性」语义怎么成立（`held_rev` 的契约）
 ///
-/// 本函数**只**看"本拍的两个 rev 是否相等"。接线层（`App::tick_periph`）在**发起请求时**
-/// 就把 `held_rev` 预置成当拍的 `frame_rev`（回执到达后再用响应里的 `cat.rev` 校正）⇒
+/// 本函数**只**看"本拍的两个 rev 是否相等"。接线层（`App::tick_periph_catalog`）在**发起请求
+/// 时**就把 `held_rev` 预置成当拍的 `frame_rev`（回执到达后再用响应里的 `cat.rev` 校正）⇒
 /// 同一 rev **不会**在 1 Hz 主拍上被反复取（这正是 §15.3.1 的「一次性」）。
 /// 相反，若接线层只在**回执到达后**才更新 `held_rev`，那么在飞期间的每一拍都会命中
 /// "rev 不等" ⇒ 反复发起（被 `is_busy()` 挡住 ⇒ 表现为"永远在取 catalog"）。
@@ -366,18 +401,41 @@ pub fn periph_metadata_page(p: NavPage) -> bool {
 ///
 /// 帧从第 1 拍就有，而用户可能从头到尾不进 P4 / P6 ⇒ **不得**在开机时就取 catalog
 /// （那是"每次开机一次无用请求"，与"首次进入才取"的措辞相反）。
+///
+/// # `failed_rev`（**W-1 收口**）：失败过的那个 rev **不自动重发**
+///
+/// 回执**失败**时接线层会把预置的 `held_rev` **回滚**成"失败前的值"（W-1：`held_rev` 的语义
+/// 是"本地真实持有"，不该被在飞预置永久污染）。回滚的**代价**是：若回滚后的 `held_rev` 与
+/// 当拍 `frame_rev` 不同，第 2 支判据会**每拍都成立** ⇒ 被 `is_busy()` 挡成"永远在取 catalog"
+/// （**这正是本任务最容易踩的一脚**）。故接线层把"最近一次失败于哪个 rev"作为 `failed_rev`
+/// 传进来：
+///
+/// - `failed_rev == frame_rev` ⇒ **判否**（同一 rev 不自动重发；恢复路径 = §15.3.1 第 3 句给的
+///   「**重试**」按钮 —— 它把 `failed_rev` 与"首次进入资格"一起清掉即可强制重取一次）；
+/// - `failed_rev != frame_rev` ⇒ 照旧走第 2 支 ⇒ **帧内 rev 一变就自动重取**
+///   （"失败后不可自愈"的缺陷由此收口；评审 W-1 的原文要求）。
+///
+/// 比对用的"本地 rev"取 `held_rev.or(failed_rev)`：**"尝试过的 rev"也算两侧都知道**
+/// —— 否则"从未取到（`held_rev = None`）+ 重试失败"之后，帧内 rev 再怎么变都会落进
+/// `(Some, None) => false` 而**永不自动重取**。回滚本身**不会**造成重触发：`(Some(r), None)`
+/// 判否，抑制只由 `failed_rev` 承担（**两件事分开**，各有一条用例）。
 pub fn catalog_due(
     on_periph_page: bool,
     entered_before: bool,
     frame_rev: Option<u32>,
     held_rev: Option<u32>,
+    failed_rev: Option<u32>,
 ) -> bool {
     if on_periph_page && !entered_before {
         return true;
     }
-    // 只在**两侧都知道**时比：`held_rev = None` = 还没拿到过任何 catalog（页面自会显
+    // W-1：同一 rev 失败过 ⇒ 不自动重发（否则每次失败都会演成"每拍反复发起"）。
+    if failed_rev.is_some() && failed_rev == frame_rev {
+        return false;
+    }
+    // 只在**两侧都知道**时比：两者皆 `None` = 还没拿到过、也没试过任何 rev（页面自会显
     // 「名称未获取」），此时**不**把它当成"rev 变化"（否则每拍都会命中）。
-    match (frame_rev, held_rev) {
+    match (frame_rev, held_rev.or(failed_rev)) {
         (Some(r), Some(h)) => r != h,
         _ => false,
     }
@@ -555,6 +613,14 @@ pub enum ControlIntent {
     /// 读：P6 电池段「查看全部 288 位」下钻的翻页（载荷 = 目标页码，1 起；§15.3.2
     /// `GET /peripherals/bms_alarms`）。
     BmsAlarmPage(u32),
+    /// 读：**强制重取 catalog**（载荷 `()`；设计 §15.3.1 第 3 句的「重试」按钮；T21c-3-r1）。
+    ///
+    /// **为什么单开一条**：catalog 的读取**不走** `pending_reads` 查询队列 —— 它的时机判据是
+    /// [`catalog_due`]（"首次进入 / rev 变化 / 不反复取"），发起点在 `App::tick_periph_catalog`。
+    /// 故本意图的**处置**不是"发一条请求"，而是"把两个已消费的判据复位"（首次进入资格 +
+    /// "失败过的 rev"抑制）—— 让**下一拍**的 `catalog_due` 重新成立，发起仍在 tick 路径上
+    /// （与"页面回调只投意图、不在回调里发请求"同口径）。
+    CatalogRetry,
 }
 
 impl ControlIntent {
@@ -899,8 +965,13 @@ mod tests {
         }
     }
 
-    /// 失败面：**只有**两条"明细"端点有页面就地失败面（§15.6.2 ⑥）；
-    /// catalog 与其余读端点**不得**被塞失败决策（catalog 失败的正确动作 = 什么都不做）。
+    /// 失败**决策**：**只有**两条"明细"端点有（§15.6.2 ⑥，页面暴露的是无参
+    /// `set_*_page_failed()`）；catalog 与其余端点**不得**被塞决策。
+    ///
+    /// ⚠️ 本用例只管"**要不要交一条 `RouteDecision`**"这一问（T21c-3-r1 起它与"页面有没有
+    /// 失败面"是**两问**：catalog 有面而**无**决策，见 [`page_owns_failure_surface`]）——
+    /// 故此处**不**断言"catalog 失败 = 什么都不做"（那句在 T21c-3-r1 后不再准确：catalog
+    /// 失败要置顶部提示条 + 回滚预置，只是不经 `RouteDecision`）。
     ///
     /// **改什么会让本条变红**：给 catalog 也返回一个决策（例如
     /// `RouteDecision::FireDetectorUnavailable`）⇒ 第 3 条红；把 `page_failure_decision`
@@ -926,8 +997,8 @@ mod tests {
             }
             assert!(
                 page_failure_decision(ep).is_none(),
-                "{ep:?} 没有页面就地失败面 ⇒ 不得产出失败决策（catalog 失败的正确动作 = **什么都不做**，\
-                 否则会把已取到的名字抹掉，与 §15.3.1「保留旧 catalog」相反）"
+                "{ep:?} 没有失败**决策**（catalog 亦无：给它会调 `clear_catalog` ⇒ 把已取到的\
+                 名字抹掉，与 §15.3.1「保留旧 catalog」相反；它的页面面是**提示条**，不经决策）"
             );
         }
     }
@@ -944,6 +1015,64 @@ mod tests {
         }
     }
 
+    /// **W-3（T21c-3-r1）**：「页面已有就地失败面」的**白名单恰好三条** —— 两个明细端点 +
+    /// catalog；**其余读端点必须留在名单外**（它们唯一的降级通道就是 app 层兜底 Toast）。
+    ///
+    /// # 这条钉的正是"不得一刀切"
+    ///
+    /// `App::console_failure_decision` 用本函数决定"这一条失败要不要压通用「操作失败」Toast"。
+    /// 若把实现放宽成 `!endpoint.is_write()`（"读端点都不压"），catalog 之外的 5 个读端点
+    /// 会在失败时**屏上什么都不发生**（它们没有页面失败面）—— 违 §2.6「降级可见」，且是
+    /// 本仓反复中招的"把有出路和没出路混为一谈"。
+    ///
+    /// **改什么会让本条变红**：实现里 `matches!(endpoint, PeripheralsCatalog)` 改成
+    /// `!endpoint.is_write()`（或 `true`）⇒ 第 2 条红；漏掉 catalog ⇒ 第 1 条红；
+    /// 给某读端点新增页面失败面却忘了登记 ⇒ 第 2 条红（同一清单两处漂移的防线）。
+    #[test]
+    fn failure_surface_roster_covers_catalog_without_widening_to_every_read_endpoint() {
+        // ① 白名单**恰好**三条（枚举序取，便于对拍）
+        let roster: Vec<ConsoleEndpoint> = ConsoleEndpoint::ALL
+            .into_iter()
+            .filter(|e| page_owns_failure_surface(*e))
+            .collect();
+        assert_eq!(
+            roster,
+            vec![
+                ConsoleEndpoint::PeripheralsCatalog,
+                ConsoleEndpoint::PeripheralsFireDetectors,
+                ConsoleEndpoint::PeripheralsBmsAlarms,
+            ],
+            "「有页面就地失败面」的读端点必须**恰好**是 catalog + 两个明细端点"
+        );
+        // ② 其余读端点**一律不入列**（它们没有页面面 ⇒ app 层兜底 Toast 是唯一通道）
+        for ep in ConsoleEndpoint::ALL
+            .into_iter()
+            .filter(|e| !e.is_write() && !page_owns_failure_surface(*e))
+        {
+            assert!(
+                matches!(
+                    ep,
+                    ConsoleEndpoint::Config
+                        | ConsoleEndpoint::Logs
+                        | ConsoleEndpoint::LogsTargets
+                        | ConsoleEndpoint::Audit
+                        | ConsoleEndpoint::AuditOps
+                ),
+                "{ep:?} 不在白名单却也没有页面失败面 —— 白名单与端点清单漂移（新端点必须显式裁定）"
+            );
+        }
+        // ③ 两处判据的**包含关系**：有 `RouteDecision` ⇒ 必在"有页面失败面"名单里
+        //    （否则会出现"交了决策却仍压通用 Toast"这种自相矛盾的接线）。
+        for ep in ConsoleEndpoint::ALL {
+            if page_failure_decision(ep).is_some() {
+                assert!(
+                    page_owns_failure_surface(ep),
+                    "{ep:?} 有失败决策却不在「有页面失败面」名单里 ⇒ 接线会同时上屏两条（UI §7.2）"
+                );
+            }
+        }
+    }
+
     /// **catalog 读取时机**（§15.3.1）：首次进入 P4/P6 取一次；此后**只有** `rev` 变化才重取；
     /// **不得**在 1 Hz 主拍上反复取。
     ///
@@ -955,11 +1084,11 @@ mod tests {
         // ① **首次进入** P4 或 P6：即使**还没有帧**（`frame_rev = None`）也要取一次 ——
         //    否则"进入页面时名称一片「名称未获取」、要等下一帧才补"（§15.3.1 的口径是进入即取）。
         assert!(
-            catalog_due(true, false, None, None),
+            catalog_due(true, false, None, None, None),
             "首次进入 P4/P6 ⇒ 必须取一次"
         );
         assert!(
-            catalog_due(true, false, Some(7), Some(7)),
+            catalog_due(true, false, Some(7), Some(7), None),
             "首次进入优先于 rev 判据"
         );
         // ② **不在** P4/P6（P1/P2/P3/P5）⇒ 从不取（哪怕从未取过）
@@ -971,27 +1100,74 @@ mod tests {
         ] {
             assert!(
                 !periph_metadata_page(p)
-                    && !catalog_due(periph_metadata_page(p), false, Some(7), None),
+                    && !catalog_due(periph_metadata_page(p), false, Some(7), None, None),
                 "{p:?} 不是外设页 ⇒ 不得在开机时就取 catalog"
             );
         }
         // ③ `rev` 变化 ⇒ 重取；`rev` 相同 ⇒ **不取**（这就是"一次性"的判据本体）
         assert!(
-            catalog_due(true, true, Some(8), Some(7)),
+            catalog_due(true, true, Some(8), Some(7), None),
             "帧内 rev 变了 ⇒ 重取"
         );
         assert!(
-            !catalog_due(true, true, Some(7), Some(7)),
+            !catalog_due(true, true, Some(7), Some(7), None),
             "rev 未变 ⇒ 不得重取（1 Hz 主拍上不许反复取）"
         );
         // ④ 还没拿到过 catalog（`held = None`）⇒ **不**把"没有"当成"变了"（否则每拍都命中）
         assert!(
-            !catalog_due(true, true, Some(7), None),
+            !catalog_due(true, true, Some(7), None, None),
             "从未取到时不按 rev 变化反复发起"
         );
         // ⑤ 还没有帧（`frame = None`）且已进入过 ⇒ 不取（等帧到了再比）
-        assert!(!catalog_due(true, true, None, Some(7)));
-        assert!(!catalog_due(true, true, None, None));
+        assert!(!catalog_due(true, true, None, Some(7), None));
+        assert!(!catalog_due(true, true, None, None, None));
+    }
+
+    /// **W-1 + 「重试」的时机语义**（T21c-3-r1；设计 §15.3.1 第 2 / 3 句）：
+    /// ① 失败过的那个 rev **不自动重发**（否则"回滚 ⇒ rev 不等"会每拍命中）；
+    /// ② 帧内 rev **一变**即恢复自动重取（含"从未取到"这一态 ⇒ 自动路径在该态也有效）；
+    /// ③ 「重试」= 复位资格 + 清抑制 ⇒ 立刻再 due **一次**，随后**不再**每拍 due。
+    ///
+    /// **改什么会让本条变红**：
+    /// ① 删掉 `failed_rev` 那一支 ⇒ 第 1 / 2 条红；
+    /// ② 把比对用的 `held_rev.or(failed_rev)` 改回 `held_rev` ⇒ 第 4 条红（"从未取到 + 重试失败"
+    ///    之后 rev 变化**永不**自动重取 —— 这正是回滚接 W-1 前的那半个坑）；
+    /// ③ 删掉首进入那一支 ⇒ 第 5 条红。
+    #[test]
+    fn catalog_failure_suppresses_the_same_rev_and_retry_forces_exactly_one_more_fetch() {
+        // ① `held` 已被 W-1 回滚成**旧值 5**（= 失败前的值），失败 rev = 7、帧内 rev 也是 7
+        //    ⇒ **不取**（抑制生效；无抑制时第 2 支会真 ⇒ 每拍命中）。
+        assert!(
+            !catalog_due(true, true, Some(7), Some(5), Some(7)),
+            "同一 rev 失败过 ⇒ 不得自动重发（否则回滚把'一次性'变成'每拍一次'）"
+        );
+        // ② **从未取到**（回滚成 `None`）+ 重试失败 ⇒ 同一 rev 同样不重发。
+        assert!(
+            !catalog_due(true, true, Some(7), None, Some(7)),
+            "从未取到时同 rev 也不得自动重发"
+        );
+        // ③ 帧内 rev **变了** ⇒ 自动重取恢复（两种 held 都成立）。
+        assert!(
+            catalog_due(true, true, Some(8), Some(5), Some(7)),
+            "帧内 rev 变化 ⇒ 自动路径仍有效（W-1 的诉求）"
+        );
+        assert!(
+            catalog_due(true, true, Some(8), None, Some(7)),
+            "从未取到 + 失败过 ⇒ 帧内 rev 一变仍要重取（比对取 `held.or(failed)`）"
+        );
+        // ④ 「重试」= 复位首进入资格 + 清失败抑制 ⇒ 立刻再 due。
+        assert!(
+            catalog_due(true, false, Some(7), None, None),
+            "「重试」必须能强制再取一次（否则提示条上的按钮点了没反应）"
+        );
+        // ⑤ 但**发起之后**（资格已消费 + `catalog_rev` 已预置成当拍 rev）⇒ 不再 due
+        //    —— 「重试」**不会**变成每拍重复发起。
+        assert!(
+            !catalog_due(true, true, Some(7), Some(7), None),
+            "重试发起后不得每拍反复发起（预置 + 资格消费把两支同时封住）"
+        );
+        // ⑥ 帧内没有目录信息（`frame = None`）⇒ 恒否（等帧到了再比）。
+        assert!(!catalog_due(true, true, None, Some(5), Some(7)));
     }
 
     // ── P3 通道态 ─────────────────────────────────────────────────────────

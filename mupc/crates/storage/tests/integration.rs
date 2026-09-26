@@ -404,26 +404,102 @@ async fn asset_list_all() {
 
 // ── WriteBuffer ──
 
+/// **容量触发 ≠ 采集栈内提交（FLS-04）**：容量到点后，落库由**已注册**的 flush 任务执行。
+///
+/// 本用例**只**给一件事作证：**容量触发确实把落库带到了已注册的 flush 任务里**（判据：
+/// `flush_interval_ms = 60_000`，周期触发在本用例期间不可能到点 ⇒ 库里出现行只可能是那次唤醒
+/// 驱动的；断言 = 轮询到**恰好 5 行** + `dropped_points() == 0`）。
+///
+/// ⚠️ **订正（评审 W-6）**：本条原先还把"按下这几次 push 的瞬间库里**还是 0 行**"记作本用例的
+/// 作证内容 —— **该断言不在本用例**，它在**兄弟用例**
+/// [`capacity_trigger_does_not_touch_db_in_caller_stack`]（那里才在不起 flush 任务的前提下读库
+/// 并断言 0 行，用于证明"调用栈里没有 DB 提交点"）。本用例**没有**读"push 瞬间的库行数"这一步。
+///
+/// 改什么会让本条红：把 `buffer_telemetry` 的容量分支改回 `self.flush_batch(batch).await`。
 #[tokio::test]
 async fn writebuffer_flush_on_capacity() {
     let (pool, svc) = setup().await;
-    let wb = WriteBuffer::new(3, 1000, pool);
+    let wb = Arc::new(WriteBuffer::new(3, 60_000, pool));
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let timer = wb.clone().spawn_flush_timer(stop_rx);
+
     for i in 0..5 {
         wb.buffer_telemetry(make_telemetry("dev-wb", "v", i as f64))
             .await
             .unwrap();
     }
 
-    let results = svc
+    // 等待唤醒被那个已注册任务接走并提交（最多 2 s；Windows CI 上也有充足余量）
+    let mut ok = false;
+    for _ in 0..40 {
+        if rows_of(&svc, "dev-wb").await.len() == 5 {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    timer.abort();
+    assert!(
+        ok,
+        "容量触发必须经**已注册的 flush 任务**落库（60 s 周期未到点 ⇒ 只能是唤醒驱动）；实得 {} 行",
+        rows_of(&svc, "dev-wb").await.len()
+    );
+    assert_eq!(wb.dropped_points(), 0, "正常路径不得丢点");
+}
+
+/// **FLS-04 主证据**：容量触发路径上**没有任何 DB 调用点**（采集不再被落库阻塞）。
+///
+/// 手法（行为级、不用 mock）：先在一个**正常**库上连续 push 到容量触发 —— 修复前此刻已经
+/// 落库（库里 3 行），修复后应**一行都没有**（点留在缓冲里等已注册任务）。随后**把连接池关掉**
+/// （此后 `begin()` 必失败）再继续 push：修复前 DB 错误会沿调用栈上抛成 `Err`，修复后采集侧
+/// 拿不到任何错误（恒 `Ok`）——因为调用栈里根本没有 DB 调用点可失败。
+///
+/// 改什么会让本条红：容量分支改回 `self.flush_batch(batch).await?`（第 1 条断言 3 行 ≠ 0；
+/// 第 2 条 `expect` 直接红）。
+#[tokio::test]
+async fn capacity_trigger_does_not_touch_db_in_caller_stack() {
+    let (pool, path) = bare_file_pool("noawait").await;
+    run_migrations(&pool).await.unwrap();
+    let svc = StorageService::new(pool.clone());
+    // capacity=3、flush_interval=60 s ⇒ 只有容量触发一条路径；**不起** flush 任务
+    // ⇒ 任何落库都必须来自采集调用栈（修复前）——本用例要证的正是"它不再来自那里"。
+    let wb = WriteBuffer::new(3, 60_000, pool.clone());
+
+    for i in 0..5 {
+        wb.buffer_telemetry(make_telemetry("dev-noawait", "v", i as f64))
+            .await
+            .unwrap();
+    }
+    let rows = svc
         .telemetry
         .query_range(
-            "dev-wb",
+            "dev-noawait",
             Utc::now() - Duration::minutes(1),
             Utc::now() + Duration::minutes(1),
         )
         .await
         .unwrap();
-    assert!(!results.is_empty());
+    assert_eq!(
+        rows.len(),
+        0,
+        "容量触发不得在采集调用栈里落库（FLS-04）：点应留在缓冲里等已注册任务"
+    );
+    assert_eq!(wb.buffered_points(), 5, "5 点全在缓冲（不丢）");
+
+    // 池关掉 ⇒ 任何 DB 操作立即失败。采集侧此时仍必须拿不到 Err（调用栈里没有 DB 点）。
+    pool.close().await;
+    for i in 5..8 {
+        wb.buffer_telemetry(make_telemetry("dev-noawait", "v", i as f64))
+            .await
+            .expect("DB 关掉后采集侧仍不得拿到 Err（FLS-04：采集不再被落库阻塞/牵连）");
+    }
+    assert_eq!(
+        wb.buffered_points(),
+        8,
+        "点全部留在缓冲，等退出路径/flush 任务"
+    );
+    assert_eq!(wb.dropped_points(), 0, "未超上限 ⇒ 不得丢点");
+    let _ = std::fs::remove_file(path);
 }
 
 /// P0-1 ①（时间触发半边）：**未凑满容量**，仅靠时间窗口到期即提交。
@@ -576,6 +652,18 @@ fn values_of(rows: &[TelemetryPoint]) -> Vec<f64> {
     v
 }
 
+/// 查某设备的全部遥测行（时间窗放宽到 ±1 min）。
+async fn rows_of(svc: &StorageService, device: &str) -> Vec<TelemetryPoint> {
+    svc.telemetry
+        .query_range(
+            device,
+            Utc::now() - Duration::minutes(1),
+            Utc::now() + Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+}
+
 /// **U-68③ ①**：写失败 ⇒ 该批**不丢**。故障排除后，**同一批**（而非重采的新点）被写入。
 ///
 /// 改什么会让本条红：把 `flush_batch` 的失败分支改回"整批丢弃"（drain 走掉就不还）⇒
@@ -680,17 +768,22 @@ async fn writebuffer_drops_oldest_and_counts_when_over_limit() {
     let _ = std::fs::remove_file(path);
 }
 
-/// **U-68③（边界次序）**：容量触发那一刻**不得**因为上限而先裁——那批马上要尝试提交，
+/// **U-68③（边界次序）**：容量触发那一刻**不得**因为上限而先裁——那批马上要被提交，
 /// 裁掉等于"丢掉本可以入库的点"（正常库上就会无谓丢最旧一条）。
 ///
-/// 判据：`max_points=2`、`capacity=3`、**库正常**。第 3 个 push 触发提交 ⇒ 3 条都该入库、
-/// 丢弃计数为 0。（若实现改成"先 trim 再 drain"，则第 1 条被无谓丢掉 ⇒ 库里只有 2 条。）
+/// 判据：`max_points=2`、`capacity=3`、**库正常**。第 3 个 push 触发 ⇒ 3 条都该留在缓冲、
+/// 丢弃计数为 0；随后显式 `flush()`（等价于已注册任务醒来做的那次提交）⇒ 3 条全部入库。
+/// （若实现改成触发时也走 `trim_oldest`，则第 1 条被无谓丢掉 ⇒ `dropped_points()==1`、
+/// 库里只有 2 条。）
+///
+/// ⚠️ **FLS-04 后的口径变化（如实登记）**：提交点从"采集调用栈"搬到"已注册的 flush 任务"，
+/// 故本用例的库内断言改为**显式 `flush()` 之后**做——触发那一刻只保证"点未被裁剪"。
 #[tokio::test]
 async fn writebuffer_healthy_commit_is_not_preempted_by_limit_trim() {
     let (pool, path) = bare_file_pool("order").await;
     run_migrations(&pool).await.unwrap();
     let svc = StorageService::new(pool.clone());
-    let wb = WriteBuffer::new_with_max_points(3, 1000, pool, 2);
+    let wb = WriteBuffer::new_with_max_points(3, 60_000, pool, 2);
 
     for v in 1..=3 {
         wb.buffer_telemetry(make_telemetry("dev-order", "v", v as f64))
@@ -699,15 +792,14 @@ async fn writebuffer_healthy_commit_is_not_preempted_by_limit_trim() {
     }
 
     assert_eq!(wb.dropped_points(), 0, "这批正要提交 ⇒ 不得裁剪丢弃");
-    let rows = svc
-        .telemetry
-        .query_range(
-            "dev-order",
-            Utc::now() - Duration::minutes(1),
-            Utc::now() + Duration::minutes(1),
-        )
-        .await
-        .unwrap();
+    assert_eq!(
+        wb.buffered_points(),
+        3,
+        "触发点不 drain ⇒ 3 点仍在缓冲等提交"
+    );
+
+    assert_eq!(wb.flush().await.unwrap(), 3, "提交必须带走全部 3 条");
+    let rows = rows_of(&svc, "dev-order").await;
     assert_eq!(values_of(&rows), vec![1.0, 2.0, 3.0], "3 条全部入库");
     let _ = std::fs::remove_file(path);
 }
@@ -717,18 +809,42 @@ async fn writebuffer_healthy_commit_is_not_preempted_by_limit_trim() {
 ///
 /// 判据：capacity=2、落库持续失败。4 次 push 只应产生 **2 次**提交尝试
 /// （第 2、4 次 push 各一次），而不是每 push 一次；同时**没有任何点被丢**（还在等重试）。
+///
+/// ⚠️ **FLS-04 后的口径变化（如实登记）**：提交点搬到**已注册的 flush 任务**里，故这里为
+/// 两次容量触发各起一次真实的 wake→flush 周期（用 `requeued_batches` 作为"尝试了几次"的
+/// 可观测计数器）。`flush_interval_ms = 60_000` ⇒ 周期触发不可能参与计数。
 #[tokio::test]
 async fn writebuffer_failed_commit_is_not_retried_on_every_push() {
     let (pool, path) = bare_file_pool("backoff").await;
-    let wb = WriteBuffer::new_with_max_points(2, 1000, pool, 1000);
+    let wb = Arc::new(WriteBuffer::new_with_max_points(2, 60_000, pool, 1000));
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let timer = wb.clone().spawn_flush_timer(stop_rx);
 
-    // 容量触发的那两次 push 会把提交失败**上抛**（既有 API 语义不变：调用方据 Err 记 warn）；
-    // 点不会因此丢（回填）⇒ 本用例只看缓冲状态与"尝试了几次"。
-    for v in 1..=4 {
-        let _ = wb
-            .buffer_telemetry(make_telemetry("dev-bo", "v", v as f64))
-            .await;
+    // 第一波：第 2 次 push 触发一次唤醒 ⇒ 一次注定失败的提交（点回填，不丢）
+    for v in 1..=2 {
+        wb.buffer_telemetry(make_telemetry("dev-bo", "v", v as f64))
+            .await
+            .unwrap();
     }
+    assert!(
+        wait_for_requeue(&wb, 1).await,
+        "容量唤醒必须驱动一次提交尝试（失败后回填，实 requeued={}）",
+        wb.requeued_batches()
+    );
+
+    // 第二波：再来 2 个新点（回填的老点**不**重复计入）⇒ 只应再多一次尝试
+    for v in 3..=4 {
+        wb.buffer_telemetry(make_telemetry("dev-bo", "v", v as f64))
+            .await
+            .unwrap();
+    }
+    assert!(
+        wait_for_requeue(&wb, 2).await,
+        "第 2 波同样只应触发一次（实 requeued={}）",
+        wb.requeued_batches()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    timer.abort();
 
     assert_eq!(
         wb.requeued_batches(),
@@ -738,6 +854,17 @@ async fn writebuffer_failed_commit_is_not_retried_on_every_push() {
     assert_eq!(wb.buffered_points(), 4, "失败的点全部留着等重试");
     assert_eq!(wb.dropped_points(), 0);
     let _ = std::fs::remove_file(path);
+}
+
+/// 有上限地等 `requeued_batches` 达到 `n`（最多 2 s）。返回是否达到。
+async fn wait_for_requeue(wb: &WriteBuffer, n: u64) -> bool {
+    for _ in 0..40 {
+        if wb.requeued_batches() >= n {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
 }
 
 /// **U-64 子情形**（"生产者正卡在写库中途"）：`flush` 已 `drain` 出缓冲、卡在提交 await 上时

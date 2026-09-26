@@ -5384,6 +5384,28 @@ pub(crate) fn pages_chain() {
         // ── ① 装配契约（**契约 1′**：页根容器 + 固定操作条；线框 `Y624`）───────────
         let p4 = p4_interlock::P4InterlockPage::new(&host).expect("P4InterlockPage::new");
         disp.refr_now_for_test();
+        // ── ①′ T21c-3-r1：提示条**构造完即默认为隐藏**（**必须**在构造之后、任何 drill 交互
+        //    之前求值）───────────────────────────────────────────────────────────────
+        //
+        // **为什么这一条必须放在这里**（评审 **W-2′**）：`Core::sync_stale_visibility` 只在
+        // `set_catalog_stale` / `set_drill_open` 时被调，而 `p4.show_detail()`（本段稍后）会经
+        // `set_drill_open(true)` 把它调一次 —— `stale == false` ⇒ `set_hidden(true)`。于是若把
+        // "默认不显"的断言放在本段**末尾**（drill 交互之后），它会被那次收起**提前满足**：
+        // 实测（评审探针 ⑦ / ⑬）摘掉 `P4InterlockPage::new` 里构造期那行
+        // `stale_banner.obj().set_hidden(true)` ⇒ 全套 395 个用例仍绿，而构造完实测
+        // `catalog_stale_visible() == true`（生产会**常亮琥珀条**）。零判别力的断言必须修。
+        // （P6 侧是**反证**：它的显隐只由 `P6SystemPage::set_catalog_stale` 驱动、没有 drill
+        // 交互会顺手收起它 ⇒ 同款断言**有牙** —— 评审探针 11 摘掉 `p6_system.rs:2218`
+        // 构造期那行即红。）
+        //
+        // **改什么会让本条变红**：删掉 `p4_interlock.rs` 构造期 `stale_banner.obj().set_hidden(true)`
+        // （或把 `WarnBanner::new` 之后的隐藏改成显示）⇒ 本条红。
+        assert!(
+            !p4.catalog_stale_visible(),
+            "**构造完**必须默认不显「名称表可能过期」提示条（常驻占位会让正常态也少一截视口）\
+             —— 本断言在**任何 drill 交互之前**求值：挪到段尾会被 `show_detail()` 的\
+             `sync_stale_visibility()` 提前满足、退化成零判别力（评审 W-2′）"
+        );
         assert_eq!(
             p4.obj().size(),
             (Dimens::CONTENT_W, Dimens::CONTENT_H),
@@ -6937,6 +6959,181 @@ pub(crate) fn pages_chain() {
             p4.set_fire_page(&page);
             disp.refr_now_for_test();
 
+            // ── ④‴ **IL29⑥ 收口：P4 下钻窗口化**（池 7 行 vs 页 **20 / 50** 行）──────────
+            //
+            // **背景**：T21c-1 曾以「薄层 `EventCode` 未镜像 `LV_SCROLL` ⇒ 窗口化结构性不可
+            // 实现」为由**整池建齐** `page_size`(20) 行 × 9 格 = **180 个对象**。该依据**不实**
+            // （该事件码自 **B4b `297b51b`，2026-09-16** 起已镜像；P5 的 `AU6` 早已消费）⇒
+            // 本批按 **`p6_system.rs::BmsDrill` 的同一范式**补窗口化：池 = **可视行 ×1.5 + 1**
+            // （4 × 1.5 + 1 = **7** 行），只绑「当前 `scroll_y` 应有的那 7 行」。
+            //
+            // 判据用**滚动位置应有的页内行号**（`drill_window_start` = 0 基行号）：窗口起点必须
+            // 随滚动前移、池须**覆盖到页尾**、**滚到底后页尾行必须真的被绘**。
+            // **改什么会让本段红**：① 去掉 `Core::wire_scroll()` 的 `SCROLL` 注册（无非注册 ⇒
+            // 窗口不动）；② 把窗口起点钉死为 0；③ 让池"整池建齐"（= 退化成改前）。三条均**探针
+            // 实测过**（见交付报告）。
+            assert_eq!(
+                p4.drill_pool_size(),
+                p4_interlock::DRILL_ROW_POOL,
+                "下钻行池 = 可视行 ×1.5 + 1（常量）"
+            );
+            assert_eq!(
+                p4.drill_pool_size(),
+                p4.drill_visible_row_count() * 3 / 2 + 1,
+                "下钻行池 = **可视行 ×1.5 + 1**（与 `BmsDrill` 同口径）"
+            );
+            assert_eq!(
+                p4.drill_visible_row_count(),
+                4,
+                "可视行数 = 行区 214 / 行高 44 = 4（UI §6.4.1「可视 4 行 × 44」）"
+            );
+            assert_eq!(
+                p4.drill_window_start(),
+                Some(0),
+                "未滚动 ⇒ 窗口起点 = 0（3 行页）"
+            );
+            assert_eq!(p4.drill_bound_rows(), 3, "3 行页 ⇒ 池内恰绑 3 行");
+            // 失败态 / 源不可用 ⇒ **无窗口**（`None`；行区本就整体让位给失败面）
+            p4.set_fire_page_failed();
+            assert_eq!(
+                p4.drill_window_start(),
+                None,
+                "失败态 ⇒ 无窗口（`None`，不是 0 —— 0 会谎报「页首有数据」）"
+            );
+            p4.set_fire_page(&page);
+
+            // 一页 20 行（`page_size` 缺省）——池 7 行 ⇒ **池外 13 行**在"只在注入拍绑前 20 行"
+            // 的实现里滚到哪儿都不入池（静默空白的镜像问题）；本实现按 `scroll_y` 重绑。
+            let page20 = u73_fire_page(20, 20, 1, true, 20);
+            p4.set_fire_page(&page20);
+            disp.refr_now_for_test();
+            assert_eq!(p4.drill_window_start(), Some(0), "未滚动 ⇒ 窗口起点 = 0");
+            assert_eq!(
+                p4.drill_bound_rows(),
+                p4.drill_pool_size(),
+                "首页且页行数 > 池 ⇒ 池**满载**（绑满 7 行）"
+            );
+            p4.scroll_drill(600);
+            let ws1 = p4.drill_window_start().expect("有页数据 ⇒ 窗口存在");
+            assert!(
+                ws1 > 0,
+                "下钻窗口起点必须随滚动**前移**（0 → {ws1}）—— 不动 ⇒ 池外行永不绘（IL29⑥）"
+            );
+            assert_eq!(
+                p4.drill_bound_rows(),
+                20 - ws1,
+                "滚到页内行 {ws1} 时池须**覆盖到页尾**（一页 20 行 ⇒ 剩余 {} 行）",
+                20 - ws1
+            );
+            // 滚到底（LVGL 自行 clamp）：窗口起点落在页尾区，**页尾行必须真的被绘**
+            p4.scroll_drill(10_000);
+            let ws_end = p4.drill_window_start().expect("窗口");
+            assert!(
+                ws_end > ws1,
+                "滚到底 ⇒ 窗口起点继续前移（{ws1} → {ws_end}）"
+            );
+            assert_eq!(
+                p4.drill_bound_rows(),
+                20 - ws_end,
+                "滚到底 ⇒ 池覆盖到页尾（剩余 {} 行）",
+                20 - ws_end
+            );
+            // 页尾行（页内行 19 ⇒ 序号「20」）必须在池内某行上**真的被绘**
+            let tail_k = 19usize
+                .checked_sub(ws_end)
+                .expect("页尾行必须落在池内（否则池覆盖不到页尾）");
+            assert_eq!(
+                p4.drill_cell_text(tail_k, 0).as_deref(),
+                Some("20"),
+                "滚到底后页尾行（序号 20）必须在池行 {tail_k} 上被绘 —— \
+                 **池外行不绘 = 静默丢内容**"
+            );
+            // ── **几何读回（T21e 评审 W-2）**：上面 `bound == 页行数 − start` 的两侧**同源于
+            //    同一个 `start`**（孤立即"自比"）。此处补一条**像素面**判据，把断言从数据面
+            //    扩到几何面：**视口顶**几何上落在哪个池行内，该池行的**页内行号**（由**逐格
+            //    文本**读出 —— 不来自 `start`）必须 = 窗口起点 ⇒ 证明池行被摆到**页内行号**
+            //    的槽位，而不只是"计数对得上"。**改什么会让本段红**：把 `refresh_drill` 的
+            //    `set_pos(0, row_idx * DRILL_ROW_H)` 改成按**池下标**摆位（行号与槽位错位）。
+            disp.refr_now_for_test(); // `coords` 由布局趟写入（见 `Obj::coords`）
+            let top_y = p4.drill_viewport_top();
+            let top_row = (0..p4.drill_pool_size())
+                .find(|&k| {
+                    p4.drill_row_visible(k)
+                        && p4
+                            .drill_row_y(k)
+                            .is_some_and(|y| y <= top_y && top_y < y + Dimens::DRILL_ROW_H)
+                })
+                .expect("视口顶必须落在某个**在显**池行内（几何读回）");
+            let top_row_text = p4.drill_cell_text(top_row, 0);
+            let top_idx = top_row_text
+                .as_deref()
+                .and_then(|t| t.trim().parse::<usize>().ok())
+                .map(|n| n - 1);
+            assert_eq!(
+                top_idx,
+                p4.drill_window_start(),
+                "几何读回：视口顶所在池行（池下标 {top_row}，文本 {top_row_text:?}）的**页内行号** \
+                 必须 = 窗口起点 —— 像素面证明窗口绑的是**页内行号**槽位"
+            );
+            p4.scroll_drill(0);
+            assert_eq!(
+                p4.drill_window_start(),
+                Some(0),
+                "滚回顶部 ⇒ 窗口起点回 0（同一条重绑通道的反向证据）"
+            );
+
+            // ── **对象数与行数无关**（窗口化的定义）：页行数 20 → **50**（`page_size` 上限）
+            //    时**不得新建任何 LVGL 对象**，池大小也不得变。
+            let page50 = u73_fire_page(50, 50, 1, true, 50);
+            let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
+            p4.set_fire_page(&page50);
+            disp.refr_now_for_test();
+            let created =
+                crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst) - before;
+            assert_eq!(
+                created, 0,
+                "注入 **50 行**页（`page_size` 上限）**不得新建任何 LVGL 对象** —— \
+                 窗口化的定义就是「对象数不随行数增长」（实测新建 {created} 件）"
+            );
+            assert_eq!(
+                p4.drill_pool_size(),
+                p4_interlock::DRILL_ROW_POOL,
+                "50 行页 ⇒ 池仍 = 7 行（与页行数**无关**）"
+            );
+            assert_eq!(
+                p4.drill_bound_rows(),
+                p4.drill_pool_size(),
+                "50 行页首页 ⇒ 池仍满载 7 行（多出的 43 行**不建对象**，靠滚动换入）"
+            );
+            p4.scroll_drill(10_000);
+            let ws50 = p4.drill_window_start().expect("窗口");
+            assert!(
+                ws50 > 40,
+                "50 行页滚到底 ⇒ 窗口起点须落在页尾区（实测 {ws50}）"
+            );
+            assert_eq!(
+                p4.drill_bound_rows(),
+                50 - ws50,
+                "50 行页滚到底 ⇒ 池覆盖到页尾（剩余 {} 行）",
+                50 - ws50
+            );
+            let tail50 = 49usize.checked_sub(ws50).expect("页尾行在池内");
+            assert_eq!(
+                p4.drill_cell_text(tail50, 0).as_deref(),
+                Some("50"),
+                "50 行页的**页尾行（序号 50）**同样必须被绘（换页大小不改变这条要求）"
+            );
+
+            // 复原：回到顶部 + 换回 3 行页（后续段依赖"下钻开着且 3 行页"）
+            p4.scroll_drill(0);
+            p4.set_fire_page(&page);
+            disp.refr_now_for_test();
+            assert_eq!(
+                p4.drill_window_start(),
+                Some(0),
+                "复原后窗口起点回 0（后续段的判据基线）"
+            );
+
             // ── 中文墨量密度（T-18；§11.1 判据：成片非背景像素）──
             let painted = sink.borrow().iter().filter(|b| **b != 0).count();
             assert!(
@@ -6944,6 +7141,124 @@ pub(crate) fn pages_chain() {
                 "P4 消防区渲染后 sink 应有成片非背景像素（实际 {painted}）—— \
                  总览带 + 四组 + 下钻共 200+ 个文本件，墨量必须显著"
             );
+
+            // ── T21c-3-r1：顶部「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句）──
+            //
+            // 判据（全部取**实测 `coords()`**）：① 默认态 = 既有版面（"默认**不显**提示条"那条
+            // 断言已**上移到构造期** —— 见本段开头 ①′与评审 **W-2′**：放在这里会被早先的
+            // `show_detail()` 提前满足、零判别力）；
+            // ② `set_catalog_stale(true)` ⇒ 提示条可见 + 文案 = `ui_text::CATALOG_STALE`、
+            //    落在滚动区**顶部**（底缘不动 ⇒ 与操作条的 24 px 缝不变）、滚动视口等量变矮；
+            // ③ 「重试」= `TOUCH_MIN`(48)×48、与提示条净距 `GAP_MIN`(16)、**点击投出意图**；
+            // ④ `set_catalog_stale(false)` ⇒ 逐像素复原（"无 catalog 时的既有布局"不破）。
+            //
+            // **改什么会让本条变红**：去掉 `Core::set_catalog_stale` 里的 `set_hidden` / 让位两行
+            // ⇒ ②④ 红；把按钮尺寸改成 <48 或挪掉 `GAP_MIN` ⇒ ③ 红；删掉按钮的 `on_clicked`
+            // 接线（`fire_catalog_retry`）⇒ ③ 的意图计数恒 0 ⇒ 红。（① 的靶子在 ①′。）
+            {
+                let hits = Rc::new(Cell::new(0u32));
+                {
+                    let h = Rc::clone(&hits);
+                    p4.set_on_catalog_retry(move || h.set(h.get() + 1));
+                }
+                // ① 默认态 = 既有版面（滚动视口 y / 高与 T-25 判的那两个几何同源）
+                let sc_base = p4.scroll_obj().coords();
+                let band_c3 = p4.band_obj().coords();
+                assert_eq!(
+                    sc_base.y1 - (band_c3.y2 + 1),
+                    Dimens::GAP_GROUP,
+                    "默认态：总览带 ↔ 滚动区 = `GAP_GROUP`（与 T-25 同一条几何）"
+                );
+                // ② stale ⇒ 提示条在滚动区顶部，视口让位（**底缘不动**）
+                p4.set_catalog_stale(true);
+                disp.refr_now_for_test();
+                assert!(p4.catalog_stale_visible(), "stale ⇒ 提示条可见");
+                assert_eq!(
+                    p4.catalog_stale_text().as_deref(),
+                    Some(ui_text::CATALOG_STALE),
+                    "提示条文案必须取契约常量（不得自造串）"
+                );
+                let ban_c = p4.catalog_stale_banner_obj().coords();
+                let sc_stale = p4.scroll_obj().coords();
+                let bar_c4 = p4.action_bar_obj().coords();
+                assert_eq!(
+                    ban_c.y1, sc_base.y1,
+                    "提示条落在**滚动区原位**（= 顶部），不是别处"
+                );
+                assert_eq!(
+                    ban_c.y2 - ban_c.y1 + 1,
+                    Dimens::BANNER_H,
+                    "提示条高 = `Dimens::BANNER_H`(56)（UI §5.1 #12）"
+                );
+                assert_eq!(
+                    sc_stale.y1 - (ban_c.y2 + 1),
+                    Dimens::GAP_GROUP,
+                    "提示条 ↔ 滚动区 = `GAP_GROUP`(16)"
+                );
+                assert_eq!(
+                    sc_stale.y1 - sc_base.y1,
+                    Dimens::BANNER_H + Dimens::GAP_GROUP,
+                    "stale ⇒ 滚动视口**下移** 72 px（提示条 + 缝）"
+                );
+                assert_eq!(
+                    sc_stale.y2, sc_base.y2,
+                    "**底缘不动** ⇒ 与固定操作条的缝不变（避免遮住操作条 / 越出页根）"
+                );
+                assert_eq!(
+                    bar_c4.y1 - (sc_stale.y2 + 1),
+                    Dimens::GAP_SECTION,
+                    "stale 态下「滚动区 ↔ 操作条」仍 = `GAP_SECTION`(24)（T-25 的同一几何）"
+                );
+                // ③ 「重试」：48×48 + 与提示条净距 16 + 点击投意图
+                let rt_c = p4.catalog_retry_button().button().obj().coords();
+                assert_eq!(
+                    (rt_c.x2 - rt_c.x1 + 1, rt_c.y2 - rt_c.y1 + 1),
+                    (Dimens::TOUCH_MIN, Dimens::TOUCH_MIN),
+                    "「重试」必须 ≥ `TOUCH_MIN`(48)×48（UI §5.1 触摸目标）"
+                );
+                assert_eq!(
+                    rt_c.x1 - ban_c.x2 - 1,
+                    Dimens::GAP_MIN,
+                    "「重试」↔ 提示条净距 = `GAP_MIN`(16)"
+                );
+                assert!(
+                    rt_c.y1 >= ban_c.y1 && rt_c.y2 <= ban_c.y2,
+                    "「重试」与提示条**同行**（不额外占高 —— 逐字：右侧或下一行）"
+                );
+                p4.catalog_retry_button()
+                    .button()
+                    .obj()
+                    .send_event(EventCode::CLICKED);
+                assert_eq!(
+                    hits.get(),
+                    1,
+                    "点「重试」必须**投出恰好一次**意图（回调只投意图、不发请求）"
+                );
+                // ③′ 下钻覆盖层打开 ⇒ **显式收起**提示条与「重试」（否则「重试」x944–992 与
+                //     下钻「收起」x872–992 **重叠** ⇒ 两块可点区域叠在一起）；收起 ⇒ 复原。
+                p4.show_detail();
+                disp.refr_now_for_test();
+                assert!(p4.drill_open(), "先进入下钻");
+                assert!(
+                    !p4.catalog_stale_visible(),
+                    "下钻覆盖层占同一片区域 ⇒ 提示条必须收起（不得与「收起」重叠）"
+                );
+                p4.collapse_detail();
+                disp.refr_now_for_test();
+                assert!(
+                    p4.catalog_stale_visible(),
+                    "收起下钻 ⇒ 提示条按当前 stale 态**复原**"
+                );
+                // ④ 复原（逐像素）
+                p4.set_catalog_stale(false);
+                disp.refr_now_for_test();
+                assert!(!p4.catalog_stale_visible(), "stale 解除 ⇒ 提示条收起");
+                assert_eq!(
+                    p4.scroll_obj().coords(),
+                    sc_base,
+                    "解除后滚动视口必须**逐像素**回到既有版面（`set_catalog_stale(false)` 幂等 + 复原）"
+                );
+            }
         }
 
         drop(p4);
@@ -7352,6 +7667,154 @@ pub(crate) fn pages_chain() {
             1,
             "288 位**不铺进段内**：段内只有 1 个特殊件（摘要卡）"
         );
+        // ── ④″ T21c-3-r1：段顶「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句）──
+        //
+        // 判定同 P4 段（显隐 / 文案 / 按钮 48×48 / 净距 16 / 点击只投意图），**差别在落点**：
+        // 提示条在**段内容区最顶部**（页内 y = `Dimens::SECTION_Y`，页签之下），让位落在
+        // **该段的滚动视口**（段「装置」= `host`；外设段 = `SegmentList` 视口；下钻 = 根容器）。
+        // 全部几何取**实测 `coords()`**（页根屏幕坐标 + 页内偏移比对，不看常量名）。
+        //
+        // **改什么会让本条变红**：去掉 `apply_stale_inset` 的 `set_pos` / `set_size` ⇒ ②③ 红；
+        // 去掉 `ensure_segment` 里的补落 ⇒ ③（切段）红；去掉 `open_drill` 里的补落 ⇒ ④ 红；
+        // 去掉按钮 `on_clicked` 接线 ⇒ ⑤ 的计数恒 0 ⇒ 红。
+        {
+            const SEG_HVAC: usize = 1;
+            let hits = Rc::new(Cell::new(0u32));
+            {
+                let h = Rc::clone(&hits);
+                p6.set_on_catalog_retry(move || h.set(h.get() + 1));
+            }
+            // ① 默认态：不显 + 零让位 + 段「装置」视口贴段内容区顶部
+            p6.select_segment(SEG_DEVICE);
+            p6.render(&PageInput::live(&f));
+            disp.refr_now_for_test();
+            assert!(
+                !p6.catalog_stale_visible(),
+                "默认**不显**提示条（常驻占位会让正常态也行高少一截）"
+            );
+            assert_eq!(p6.stale_inset(), 0, "默认零让位");
+            let page_y = p6.obj().coords().y1;
+            let host_base = p6
+                .segment_viewport_obj(SEG_DEVICE)
+                .expect("段「装置」宿主")
+                .coords();
+            assert_eq!(
+                host_base.y1,
+                page_y + Dimens::SECTION_Y,
+                "段「装置」视口默认贴段内容区顶部（页内 y = `SECTION_Y`）"
+            );
+            // ② stale ⇒ 提示条在段内容区顶部 + 段视口下移 72（**底缘不动**）
+            p6.set_catalog_stale(true);
+            disp.refr_now_for_test();
+            assert!(p6.catalog_stale_visible(), "stale ⇒ 提示条可见");
+            assert_eq!(
+                p6.catalog_stale_text().as_deref(),
+                Some(ui_text::CATALOG_STALE),
+                "提示条文案必须取契约常量（不得自造串）"
+            );
+            let ban = p6.catalog_stale_banner_obj().coords();
+            let host_stale = p6
+                .segment_viewport_obj(SEG_DEVICE)
+                .expect("段「装置」宿主")
+                .coords();
+            assert_eq!(
+                ban.y1, host_base.y1,
+                "提示条落在**段内容区最顶部**（原视口位）"
+            );
+            assert_eq!(
+                ban.y2 - ban.y1 + 1,
+                Dimens::BANNER_H,
+                "提示条高 = `Dimens::BANNER_H`(56)（UI §5.1 #12）"
+            );
+            assert_eq!(
+                host_stale.y1 - (ban.y2 + 1),
+                Dimens::GAP_GROUP,
+                "提示条 ↔ 段内容 = `GAP_GROUP`(16)"
+            );
+            assert_eq!(
+                host_stale.y1 - host_base.y1,
+                Dimens::BANNER_H + Dimens::GAP_GROUP,
+                "stale ⇒ 段内容视口下移 72 px"
+            );
+            assert_eq!(
+                host_stale.y2, host_base.y2,
+                "**底缘不动**（不越出段面板、不把页根撑出滚动条）"
+            );
+            assert_eq!(
+                p6.stale_inset(),
+                Dimens::BANNER_H + Dimens::GAP_GROUP,
+                "让位读口 = 72"
+            );
+            // ③ 切段 ⇒ **新段**的视口同样让位（`ensure_segment` 补落）
+            p6.select_segment(SEG_HVAC);
+            p6.render(&PageInput::live(&f));
+            disp.refr_now_for_test();
+            let hv = p6
+                .segment_viewport_obj(SEG_HVAC)
+                .expect("段「空调」视口")
+                .coords();
+            assert_eq!(
+                hv.y1,
+                page_y + Dimens::SECTION_Y + Dimens::BANNER_H + Dimens::GAP_GROUP,
+                "切段后新段视口也必须让位（否则新段的顶行被提示条压住）"
+            );
+            // ④ 下钻在 stale 态打开 ⇒ 根容器同样让位（**不与提示条 / 重试按钮重叠**）
+            p6.open_drill();
+            p6.render(&PageInput::live(&f));
+            disp.refr_now_for_test();
+            let dr = p6.drill_root_coords().expect("下钻根容器");
+            assert_eq!(
+                dr.y1,
+                page_y + Dimens::SECTION_Y + Dimens::BANNER_H + Dimens::GAP_GROUP,
+                "下钻整体让位（顶部条不得与提示条 / 「重试」叠在一起 —— 命中区歧义）"
+            );
+            p6.close_drill();
+            p6.select_segment(SEG_DEVICE);
+            p6.render(&PageInput::live(&f));
+            disp.refr_now_for_test();
+            // ⑤ 「重试」：48×48 + 净距 16 + 点击**投出恰好一次**意图
+            let rt = p6.catalog_retry_button().button().obj().coords();
+            assert_eq!(
+                (rt.x2 - rt.x1 + 1, rt.y2 - rt.y1 + 1),
+                (Dimens::TOUCH_MIN, Dimens::TOUCH_MIN),
+                "「重试」必须 ≥ `TOUCH_MIN`(48)×48"
+            );
+            assert_eq!(
+                rt.x1 - ban.x2 - 1,
+                Dimens::GAP_MIN,
+                "「重试」↔ 提示条净距 = `GAP_MIN`(16)"
+            );
+            assert!(
+                rt.x1 > ban.x2,
+                "「重试」在提示条**右侧**（横向不重叠：重叠 = 触碰命中区歧义）"
+            );
+            assert!(
+                rt.y1 >= ban.y1 && rt.y2 <= ban.y2,
+                "「重试」与提示条**同行**（不额外占高 —— §15.3.1 的「右侧或下一行」取右侧）"
+            );
+            p6.catalog_retry_button()
+                .button()
+                .obj()
+                .send_event(EventCode::CLICKED);
+            assert_eq!(
+                hits.get(),
+                1,
+                "点「重试」必须投出恰好一次意图（回调只投意图、不发请求）"
+            );
+            // ⑥ 复原（逐像素）
+            p6.set_catalog_stale(false);
+            disp.refr_now_for_test();
+            assert!(!p6.catalog_stale_visible(), "解除 ⇒ 提示条收起");
+            assert_eq!(p6.stale_inset(), 0, "解除 ⇒ 让位归零");
+            assert_eq!(
+                p6.segment_viewport_obj(SEG_DEVICE)
+                    .expect("段「装置」宿主")
+                    .coords(),
+                host_base,
+                "解除后段内容视口必须**逐像素**回到既有版面"
+            );
+        }
+
         // 点摘要卡的「查看全部 288 位」⇒ 打开下钻（生产事件路径 ⇒ 意图 ⇒ render）
         p6.click_bms_entry();
         p6.render(&PageInput::live(&f));
@@ -9753,28 +10216,30 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // | §A2 灭火瓶压力（卡 + 标题 + 主值） | 3 |
         // | §A3 探测器触发（卡 + 标题 + 3 行） | 5 |
         // | §A4 探测器汇总（卡 + 标题 + 汇总行 + 不一致提示 + 「查看明细」按钮 2） | 7 |
-        // | 下钻视图（容器 1 + 标题 1 + 表头 8 + 行区容器 1 + **20 行 × 9 格** 180
-        //   + 上一页/下一页/收起 6 + 页码 1 + 失败文案 1 + 重试 2） | 201 |
-        // | 合计 | **≈243**（其中 §B 联锁区变动件 = 0；其余为既有外壳 + 6 页基线） |
+        // | 下钻视图（容器 1 + 标题 1 + 表头 8 + 行区容器 1 + **占位器 1**
+        //   + **7 行 × (行容器 1 + 9 格)** 70 + 上一页/下一页/收起 6 + 页码 1 + 失败文案 1
+        //   + 重试 2） | **92**（T21e 窗口化前 = **201**：`20 行 × 9 格` 180，见下） |
+        // | 合计 | **≈134**（其中 §B 联锁区变动件 = 0；其余为既有外壳 + 6 页基线） |
         //
         // **为什么是"确需新增"**：§A 四组（F21）与下钻视图（F21.4 的分页明细）都是
         // **本增量的交付物**，对象数与"逐位 16 行 / 逐只明细"的呈现规格**同构**（设计 §15.4）。
-        // **未做窗口化**（设计 §15.5.3 的"可视行 ×1.5"）⇒ 下钻的 180 个格对象**一次性建齐**；
-        // 这是**已登记的偏差**（`p4_interlock.rs` **IL29⑥**）。⚠️ **订正（T21c-2-r1）**：本段
-        // 原写"根因 = 薄层无滚动事件（`EventCode` 未镜像 `LV_SCROLL`）⇒ 结构性不可实现"——
-        // **不实**：该事件码自 **B4b（`297b51b`，2026-09-16）** 起已镜像，P6 的
-        // `SegmentList` / `BmsDrill` 与 P5 均已按它消费并各有探针实测 ⇒ 这是**一处无依据的
-        // 降级**（已登记为**待单独立项**；P6 已给出可复用的窗口化范式）。**真机余量须复核**
-        // （设计 §15.9 **R-34** / 真机档 D-5：`lv_mem_monitor`）。
-        // **代价已量化**：981 个对象按 LVGL `lv_obj` 量级（≈150–200 B）≈ **150–200 KB**，
-        // 在 `LV_MEM_SIZE = 1 MB` 池内（此前 256 KB 池建到第 4 页即失败的记录见上）。
-        // ⚠️ **余量（自洽口径；2026-09-25 / W-g 订正）**：按 LVGL `lv_obj` 量级（≈150–200 B）
-        // 与**当前**常驻预算 1021 件 ⇒ 常驻 ≈ **150–200 KB** / 1 MB 池 ⇒ **占用 ≈15–20 %、
-        // 余量 ≈80–85 %**（**不是 0.8 %** —— 此前同句的"余量 ~0.8 %"与它自己的算式
-        // 150–200 KB / 1 MB **差约两个数量级**，属单位 / 数量级笔误，已随本条与设计 §15.9
-        // **R-34** 同批订正）。再叠加"5 段都点过 + 开过一次下钻"的**惰性半区**
-        // （[`P6_ALL_SEGMENTS_BUDGET`] = 694，与本文件 1021 相加 = **稳态上界 1715 件**）
-        // ⇒ ≈ **257–343 KB** ⇒ 占用 ≈25–33 %、**余量 ≈67–75 %**。
+        // **下钻曾未做窗口化**（设计 §15.5.3 的"可视行 ×1.5"）⇒ 当时 180 个格对象**一次性建齐**，
+        // 记为**已登记偏差**（`p4_interlock.rs` **IL29⑥**）。⚠️ **订正（T21c-2-r1）**：原写"根因
+        // = 薄层无滚动事件（`EventCode` 未镜像 `LV_SCROLL`）⇒ 结构性不可实现"——**不实**：该
+        // 事件码自 **B4b（`297b51b`，2026-09-16）** 起已镜像，P6 的 `SegmentList` / `BmsDrill`
+        // 与 P5 均已按它消费并各有探针实测 ⇒ 那是**一处无依据的降级**。✅ **收口（T21e，
+        // 2026-09-26）**：P4 下钻已按 **`BmsDrill` 同一范式**补窗口化（池 = 可视行 ×1.5 + 1
+        // = **7** 行 + `SCROLL` 重绑 + 高度占位器）⇒ **对象数与页行数解耦**（见下方 T21e 段）。
+        // **真机余量须复核**（设计 §15.9 **R-34** / 真机档 D-5：`lv_mem_monitor`）。
+        // **代价已量化**：按 LVGL `lv_obj` 量级（≈150–200 B）在 `LV_MEM_SIZE = 1 MB` 池内
+        // （此前 256 KB 池建到第 4 页即失败的记录见上）。
+        // ⚠️ **余量（自洽口径；2026-09-25 / W-g 订正；2026-09-26 / T21e 随实测数字同步）**：
+        // 按 LVGL `lv_obj` 量级（≈150–200 B）与**当前**常驻预算 **922** 件 ⇒ 常驻
+        // ≈ **138–184 KB** / 1 MB 池 ⇒ **占用 ≈14–18 %、余量 ≈82–86 %**（**不是 0.8 %** ——
+        // 此前同句的"余量 ~0.8 %"与它自己的算式 150–200 KB / 1 MB **差约两个数量级**，属单位 /
+        // 数量级笔误，已随本条与设计 §15.9 **R-34** 同批订正）。再叠加"5 段都点过 + 开过一次
+        // 下钻"的**惰性半区**（[`P6_ALL_SEGMENTS_BUDGET`] = 694，与本文件 922 相加 =
+        // **稳态上界 1616 件 ≈237–316 KB**）⇒ 占用 ≈23–31 %、**余量 ≈69–77 %**。
         // 上述均为**账上推算、非实测**（真机 `lv_mem_monitor` 复核为验收项：设计 §15.9
         // **R-34** / 真机档 D-5；见 **IL29⑥**）。
         // **T21c-2（2026-09-25）重新实测：1016** —— 981 → **1016** 的来源 = **P6 段「装置」的
@@ -9790,11 +10255,38 @@ pub(crate) fn shell_chain(disp: &mut Display, screen: &Obj) {
         // **T21c-2-r1（2026-09-25）重新实测：1021** —— 1016 → **1021** 的来源 = 站状态表
         // **每行 +1 个文字槽**（四列返工：站名 / 状态 / 成功 / 更新）⇒ 5 行 +5 件。
         //
+        // **T21c-3-r1（2026-09-25）重新实测：1031** —— 1021 → **1031** 的来源 = **两页各一枚**
+        // 「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句；本批交付）：
+        //
+        // | 构件 | 对象数 |
+        // |------|-------|
+        // | P4：`WarnBanner`（容器 1 + ⚠ 图标标签 1 + 文案标签 1）+ `TextButton`（按钮 1 + 标签 1） | 5 |
+        // | P6：同上（页级单件，落在段内容区顶部） | 5 |
+        // | 合计 | **+10** |
+        //
+        // **T21e（2026-09-26）重新实测：922** —— 1031 → **922** 的来源 = **P4 下钻的窗口化**
+        // （`p4_interlock.rs`；**本批交付**，收口 **IL29⑥**）。**这一处是"降"，且降的直接原因
+        // 就是窗口化本身**（不是"调数凑绿"）：
+        //
+        // | 构件 | 改前 | 改后 |
+        // |------|-----:|-----:|
+        // | 下钻行池：`20 行 × 9 格`（= `page_size`） | 180 | — |
+        // | 下钻行池：**7 行 ×（行容器 1 + 9 格）**（= 可视行 4 ×1.5 + 1） | — | 70 |
+        // | 行区**高度占位器**（新增；让滚动范围覆盖整页 ⇒ 页尾行可滚到） | — | 1 |
+        // | 合计（下钻视图） | **201** | **92** |
+        //
+        // ⇒ **−109**。**为什么必须新增占位器**（如实登记）：行池改为"按窗口复用 + 行容器移动"
+        // 后，若没有一件"高度恒 = 整页行数 × 行高"的占位件，容器内容高度会在滚动时缩回视口高
+        // ⇒ **滚不到页尾**（页尾行永不进窗口）。占位器是窗口化的**必要条件**，不是顺手加件。
         // ⚠️ **口径（必须与 P6 的另一半合读）**：本区间（`Shell::new`）**只含段「装置」**
         // —— 4 个外设段与下钻视图都是**惰性创建**的（设计 §15.5.3 的容器策略）⇒ 它们的对象
         // 不在本区间内，另由 `P6_ALL_SEGMENTS_BUDGET`（**实测 694**，见
-        // `ui/tests.rs` 的 T21c-2 段与 `pages_chain` 的 ⑰ 块）兜住。**稳态上界 ≈ 1715**。
-        const SHELL_OBJECT_BUDGET: usize = 1021;
+        // `ui/tests.rs` 的 T21c-2 段与 `pages_chain` 的 ⑰ 块）兜住。**稳态上界 ≈ 1616**。
+        // （P6 的提示条落在 `P6SystemPage::new` 里 ⇒ 计入本区间、**不**计入那一半。）
+        // ⚠️ **本区间的 P4 下钻对象名不副实之处（如实）**：P4 的下钻视图是**构造期创建**
+        // 的（不是惰性）⇒ 它**计入本区间**；P6 的下钻（`BmsDrill`，189 件）才是惰性的、
+        // 计入另一半。两处的下钻**已用同一范式**（窗口化），故这一半也**不再**随页大小增长。
+        const SHELL_OBJECT_BUDGET: usize = 922;
         let before = crate::lvgl::obj::PROBE_MOUNTS.load(std::sync::atomic::Ordering::SeqCst);
         let sh = Shell::new(&home).expect("外壳 + 6 页装配（LVGL_MEM 1 MB）");
         let mounted =

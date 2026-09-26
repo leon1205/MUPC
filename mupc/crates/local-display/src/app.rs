@@ -64,7 +64,8 @@ use crate::config::{CliConfig, Rotate};
 use crate::console::{ConsoleClient, ConsoleClock, ConsoleResult};
 use crate::control_route::{
     audit_query_string, catalog_due, log_query_string, p3_connected, page_failure_decision,
-    periph_metadata_page, route, ControlIntent, RawPayload, RouteDecision,
+    page_owns_failure_surface, periph_metadata_page, route, ControlIntent, RawPayload,
+    RouteDecision,
 };
 use crate::lvgl::display::{Display, Rotation};
 use crate::lvgl::indev::{Indev, TouchSnapshot};
@@ -457,6 +458,15 @@ fn periph_request(req: PeriphRead) -> (ConsoleEndpoint, u32, u32) {
     }
 }
 
+/// catalog 请求发起时的**预置**记录（**W-1**：回执失败要回滚到 `prev`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CatalogPreset {
+    /// 预置**之前**的 [`App::catalog_rev`]（= "失败前的值"，回滚目标）。
+    prev: Option<u32>,
+    /// 本次请求携带的帧内 rev（失败后进 [`App::catalog_failed_rev`]，作同 rev 抑制）。
+    rev: u32,
+}
+
 /// 渲染进程装配体（事件循环宿主）。
 ///
 /// **字段声明顺序 = 析构顺序**（Rust 保证）：`screen` → `shell` → `indev` → `display`
@@ -551,7 +561,25 @@ pub struct App {
     /// 的每一拍都会命中"帧内 rev ≠ 本地 rev" ⇒ 反复发起（被 `is_busy()` 挡住 ⇒ 表现为
     /// "屏幕上永远在取 catalog"）。预置 + 回执校正 = §15.3.1 的「**一次性**」语义
     /// （见 `control_route::catalog_due` 的说明）。`None` = 尚未取到任何 catalog。
+    ///
+    /// ⚠️ **失败要回滚**（**W-1 收口**）：预置是"在飞去重"的中间态，回执**失败**时必须恢复
+    /// 失败前的值（[`App::catalog_preset`]），否则本字段从此"两边都等于"、`catalog_due` 恒假
+    /// ⇒ 名字缺失直到帧内 rev 变化或进程重启（评审 W-1 原文）。
     catalog_rev: Option<u32>,
+    /// **W-1 收口**：catalog 请求**发起时**预置 [`App::catalog_rev`] 之前的原值（回滚目标），
+    /// 与本次请求携带的帧内 rev。
+    ///
+    /// 回执**成功** ⇒ 直接丢弃（`catalog_rev` 已由响应 `rev` 校正）；回执**失败** ⇒ 用 `prev`
+    /// **回滚** `catalog_rev`（"本地真实持有"不该被在飞预置永久污染），并把 `rev` 记进
+    /// [`App::catalog_failed_rev`] 作同 rev 抑制。`None` = 当前无在途预置（或无帧内 rev 可预置）。
+    catalog_preset: Option<CatalogPreset>,
+    /// **W-1 收口**：最近一次 catalog 请求**失败**时的帧内 rev。
+    ///
+    /// 用途 = 抑制"同一 rev 自动重发"：回滚之后 `held_rev` 可能与当拍 `frame_rev` 不同
+    /// ⇒ 若不抑制，`catalog_due` 的第 2 支会**每拍**成立（被 `is_busy()` 挡成"永远在取
+    /// catalog"）。帧内 rev **一变**即不再抑制 ⇒ 自动重取路径照旧有效（判据与用例见
+    /// `control_route::catalog_due`）。「重试」按钮把它清成 `None`（用户显式要求重取）。
+    catalog_failed_rev: Option<u32>,
     /// U-73：P4 / P6 是否**已进入过**（「首次进入即取 catalog」的一次性判据）。
     ///
     /// 只在**真的发起**了那次取数之后置位 —— 让 `is_busy()` 挡下的那一拍**不消费**这个
@@ -766,6 +794,8 @@ impl App {
             next_increment_ms: None,
             p4_refresh_forced: 0,
             catalog_rev: None,
+            catalog_preset: None,
+            catalog_failed_rev: None,
             periph_page_entered: false,
             write_intents_dropped: 0,
             read_intents_dropped: 0,
@@ -864,6 +894,23 @@ impl App {
             let q = Rc::clone(intents);
             shell.p6().set_on_bms_page(move |page: u32| {
                 q.borrow_mut().push_back(ControlIntent::BmsAlarmPage(page));
+            });
+        }
+        // ── T21c-3-r1：「名称表可能过期」提示条上的「重试」（两页各一枚）─────────────
+        //
+        // 与上面两条同款纪律：**只投意图**（闭包体内零页面调用）。与它们唯一的差别是本意图
+        // **不立即发请求** —— 它复位 catalog 的时机判据（`App::handle_control_intents`），
+        // 真正的发起仍在 tick 路径的 `tick_periph_catalog`（口径见 `ControlIntent::CatalogRetry`）。
+        {
+            let q = Rc::clone(intents);
+            shell.p4().set_on_catalog_retry(move || {
+                q.borrow_mut().push_back(ControlIntent::CatalogRetry);
+            });
+        }
+        {
+            let q = Rc::clone(intents);
+            shell.p6().set_on_catalog_retry(move || {
+                q.borrow_mut().push_back(ControlIntent::CatalogRetry);
             });
         }
     }
@@ -1102,6 +1149,16 @@ impl App {
                 ControlIntent::BmsAlarmPage(page) => {
                     self.begin_periph_intent(PeriphRead::BmsAlarms(page));
                 }
+                // T21c-3-r1：**强制重取 catalog** —— 复位"一次性"判据的两处已消费状态，
+                // **本函数不发请求**（发起仍在 tick 路径，见 `ControlIntent::CatalogRetry`）：
+                // ① `periph_page_entered = false` ⇒ `catalog_due` 首支（首次进入）重新成立；
+                // ② `catalog_failed_rev = None` ⇒ W-1 的"同 rev 不自动重发"抑制解除。
+                // **为什么不会每拍反复发起**：下一拍发起成功后立刻把 ① 置回 `true`、把
+                // `catalog_rev` 预置成当拍帧内 rev ⇒ `catalog_due` 两支**同时**不成立。
+                ControlIntent::CatalogRetry => {
+                    self.periph_page_entered = false;
+                    self.catalog_failed_rev = None;
+                }
             }
         }
     }
@@ -1117,11 +1174,34 @@ impl App {
     /// **抽出来的理由**（T21c-3）：U-73 的两个下钻端点有**专属**的 `begin_*`（它们自带
     /// 分页参数），不能借道 `begin_query_intent(ep, query)`；若把上面这段在途裁决在第二处
     /// 复写一遍，就会出现**两份会漂移的"读意图在途策略"**（本仓最忌讳的一类第二真源）。
+    ///
+    /// # 被取消的那条若是 catalog（**W-1′**，T21c-3-r1）
+    ///
+    /// `ConsoleClient::cancel`（`console.rs`）只清 `pending` —— **不更新 `last`、不产生任何
+    /// 完成事件** ⇒ 被顶掉的 catalog **两条失败面都进不去**（`absorb_console` 收不到 `Done`）。
+    /// 若不在这里补一次收口，后果就是 W-1 的**同一个故障类**、只是触发源不同：① 预置的
+    /// `catalog_rev` **不回滚**（明明没取到却记成"已持有该 rev"）⇒ 不再自动重取；
+    /// ② 页面**不置 stale** ⇒ 屏上名字缺失却**没有任何提示**。
+    ///
+    /// 故在取消支**原样复用失败面的处置口径** [`App::on_catalog_read_failed`]（回滚预置 +
+    /// 两页置「名称表可能过期」；**不新造第二套判据**）。判据取 `last_endpoint()`——
+    /// `last` 在 `start` 成功时更新（`console.rs`）且全仓同时只允许一条在飞 ⇒ 在飞期间它就是
+    /// **被取消那条**的端点（该口径与 [`App::console_failure_decision`] 同源）。
+    ///
+    /// **为什么不会连带误伤**：只有"被取消的是 catalog"才收口；被顶掉的**查询**（`Logs` /
+    /// `Audit`）照旧**什么都不做**（用户换了筛选条件，旧查询作废是预期行为，不该报错）。
     fn read_slot_available(&mut self) -> bool {
         if self.console.is_busy() {
             if self.console.inflight_request_id().is_none() {
+                // 判据必须在 `cancel()` **之前**取：`cancel` 虽不改 `last`，但把"在飞"这件事
+                // 抹掉了 —— 先取后清，读代码的人不必去 `console.rs` 求证这条边界。
+                let cancelled_catalog =
+                    self.console.last_endpoint() == Some(ConsoleEndpoint::PeripheralsCatalog);
                 self.console.cancel();
                 self.control.finish();
+                if cancelled_catalog {
+                    self.on_catalog_read_failed();
+                }
             } else {
                 self.read_intents_dropped += 1;
                 return false;
@@ -1254,29 +1334,37 @@ impl App {
     /// 控制通道**失败**的唯一收口（`absorb_console` 的传输失败与路由失败两条入口共用）。
     ///
     /// 三条出路，**各自恰好一条**上屏通道：
-    /// 1. **有页面就地失败面的读端点**（U-73 的两个明细端点）⇒ 记失败状态 + 交回
-    ///    「明细不可用」决策（§15.6.2 ⑥ 的**本地固定文案** + 「重试」；**R-4**：服务端
-    ///    400/503 的原因串只进日志 / 现场排障、**不上屏**）；
+    /// 1. **有页面就地失败面的读端点** ⇒ 记失败状态 +（有决策者）交回页面决策：
+    ///    a. U-73 两个明细端点 ⇒ 「明细不可用」决策（§15.6.2 ⑥ 的**本地固定文案** + 「重试」；
+    ///    **R-4**：服务端 400/503 的原因串只进日志 / 现场排障、**不上屏**）；
+    ///    b. catalog ⇒ **无决策**（T21c-3-r1 / **W-3**）：它的页面面是 §15.3.1 的顶部
+    ///    「名称表可能过期」+「重试」，已由 `absorb_console` 的 `on_catalog_read_failed()`
+    ///    直接落到两页（`set_catalog_stale`）⇒ 本收口只**记失败状态**并返回 `None`；
     /// 2. **写端点** ⇒ 既有**本地合成回执**（走页面 `show_result`；B3-2b-2 裁定 3）；
-    /// 3. 其余（无页面出口的读端点 / 当时无在途）⇒ 回落 app 层兜底 Toast。
+    /// 3. 其余（**没有**页面出口的读端点 / 当时无在途）⇒ 回落 app 层兜底 Toast。
     ///
-    /// 第 1 与第 2 条都**不压** app 层 Toast —— 它们各自在页面上已有失败面，再压一条通用的
-    /// 「操作失败」会违 UI §7.2「同一时刻仅 1 条」，且对"取数"动作是**误导**（不是用户发起的
-    /// 操作）。判据与既有写端点的口径同源，见
-    /// [`state::ControlState::record_transport_failure_with_receipt`] 与
+    /// 第 1（a、b）与第 2 条都**不压** app 层 Toast —— 它们各自在页面上已有失败面，再压一条
+    /// 通用的「操作失败」会违 UI §7.2「同一时刻仅 1 条」，且对"取数"动作是**误导**（不是用户
+    /// 发起的操作）。判据是**白名单** [`page_owns_failure_surface`]（**不得**放宽成"所有读
+    /// 端点"：第 3 条那 5 个读端点**没有**页面面，兜底 Toast 是它们唯一的上屏通道）；口径与
+    /// 既有写端点同源，见 [`state::ControlState::record_transport_failure_with_receipt`] 与
     /// [`state::ControlState::record_read_failure`]。
     ///
     /// ⚠️ 返回值**必须**被消费 —— 它带**显式** `#[must_use]`（**不要**指望 `Option` 自带该
     /// 属性：本工具链实测**不成立**，裸调用不报任何告警，见 `state.rs` 该方法的注）：
     /// 漏掉调用方的 `apply_route`，决策就"只造不送" —— 屏上依旧是"什么都不发生"。
+    /// （`None` 是**合法**返回：catalog 与"无页面出口"两条都走它，区别在**有没有记账**。）
     #[must_use]
     fn console_failure_decision(&mut self, epoch_ms: u64) -> Option<RouteDecision> {
         // 真源 = `ConsoleClient` 的 `last` spec：走到这里时 `pending` 已被清空
         // （`console::tick` 交出 `Progress::Done` 之前就 `take`/置 `None`），
         // 只有它能回答"刚刚失败的是哪一条请求"。
-        if let Some(d) = self.console.last_endpoint().and_then(page_failure_decision) {
+        let ep = self.console.last_endpoint();
+        if ep.is_some_and(page_owns_failure_surface) {
+            // 页面自己上屏 ⇒ 本层**只记账**（`record_read_failure` 不碰 `toast` 格；
+            // 状态部分与写端点逐字相同）。决策则有则交、无则 `None`（catalog）。
             self.control.record_read_failure(epoch_ms);
-            return Some(d);
+            return ep.and_then(page_failure_decision);
         }
         self.control.record_transport_failure_with_receipt(epoch_ms)
     }
@@ -1289,12 +1377,14 @@ impl App {
                 // 传输失败（连接 / 超时 / 非 200 / 解码）：记入 `ControlState`（清在途 +
                 // 失败时刻）；另把"提交中"复位，否则按钮永久禁用。
                 //
-                // **上屏只剩一条**（B3-2c 整改 重要 4 / T21c-3 扩到 U-73 的两个明细端点）：
-                // 一切**有页面就地失败面**的端点都**不**再压 app 层「操作失败」Toast ——
-                // 该次失败由**页面**承担（写端点 = 合成回执经 `show_result`；U-73 明细端点 =
-                // `set_fire_page_failed` / `set_bms_page_failed`），两条同拍会违 UI §7.2
-                //「同一时刻仅 1 条」；无页面出口（其余读端点 / 无在途）时才由 app 层兜底。
-                // 判据收口在 [`App::console_failure_decision`]（**唯一**一处）。
+                // **上屏只剩一条**（B3-2c 整改 重要 4 / T21c-3 扩到 U-73 的两个明细端点 /
+                // T21c-3-r1 **W-3** 再扩到 catalog）：一切**有页面就地失败面**的端点都**不**再压
+                // app 层「操作失败」Toast —— 该次失败由**页面**承担（写端点 = 合成回执经
+                // `show_result`；U-73 明细端点 = `set_fire_page_failed` / `set_bms_page_failed`；
+                // catalog = 两页顶部「名称表可能过期」+「重试」，见下一条 T21c-3-r1 注释），
+                // 两条同拍会违 UI §7.2「同一时刻仅 1 条」；无页面出口（**其余**读端点 / 无在途）
+                // 时才由 app 层兜底。判据 = 白名单 [`page_owns_failure_surface`]，收口在
+                // [`App::console_failure_decision`]（**唯一**一处）。
                 //
                 // **裁定 3（B3-2b-2 整改）**：那条兜底 Toast 的句柄归页面、而**没有任何页面
                 // 暴露通用 Toast 入口** ⇒ 光记账 = 用户按「保存」时**屏上什么都不发生**。
@@ -1304,6 +1394,14 @@ impl App {
                 //
                 // 先取在途端点（`record_*` 会清掉在途）；写端点的在途信息由
                 // `record_*_with_receipt` 自己取出，此处只为复位"提交中"。
+                //
+                // T21c-3-r1：catalog 的**传输 / 非 2xx / 超时失败**走页面面
+                // （§15.3.1 第 2 句：保留旧 catalog + 两页顶部提示「名称表可能过期」+ W-1 回滚）。
+                // 判据取 `console.last_endpoint()` —— 此刻 `pending` 已被清空，只有它能回答
+                // "刚刚失败的是哪一条"（同 [`App::console_failure_decision`] 的函数头）。
+                if self.console.last_endpoint() == Some(ConsoleEndpoint::PeripheralsCatalog) {
+                    self.on_catalog_read_failed();
+                }
                 let ep = self.control.inflight().map(|i| i.endpoint);
                 if let Some(decision) = self.console_failure_decision(epoch_ms) {
                     self.apply_route(decision);
@@ -1343,6 +1441,13 @@ impl App {
                 // ⚠️ 合成回执是**本地合成、非服务端回执**（不得冒充服务端判决，理由逐条见
                 // `control_route::transport_failure_decision`）。
                 self.route_errors += 1;
+                // T21c-3-r1：catalog 的**路由失败也是"重取失败"**（解码不符 = 本次重取没拿到
+                // 表）⇒ 与传输失败同一条失败面（保留旧 catalog + 顶部提示 + W-1 回滚）。
+                // 判据取 `console.last_endpoint()`（**唯一**能回答"刚刚失败的是哪一条"的口，
+                // 同 [`App::console_failure_decision`] 的函数头）。
+                if self.console.last_endpoint() == Some(ConsoleEndpoint::PeripheralsCatalog) {
+                    self.on_catalog_read_failed();
+                }
                 let ep = self.control.inflight().map(|i| i.endpoint);
                 // U-73 的两个明细端点在这里也走**页面就地失败面**（解码失败 = 该端点不可用，
                 // 与"非 2xx ⇒ 按不可用处理"同口径，§15.3.2）；其余端点行为逐字不变。
@@ -1403,6 +1508,9 @@ impl App {
             //    （`catalog_due`）立刻反映最新事实。
             RouteDecision::PeripheralCatalog(cat) => {
                 self.catalog_rev = Some(cat.rev);
+                // T21c-3-r1 / §15.3.1 第 2 句：**重取成功 ⇒ 取消「名称表可能过期」提示**
+                // （清预置 + 清"失败 rev"抑制；两页提示条幂等收起）。
+                self.on_catalog_read_ok();
                 apply_catalog_to_pages(&self.shell, &cat);
                 // **catalog 变了 ⇒ 当前页的段重绘**（§15.3.1 的附带要求）：把语义键置空
                 // （= "欠一次渲染"），下一拍的 [`App::render_pages_if_needed`] 就会重跑
@@ -1518,6 +1626,7 @@ impl App {
             self.periph_page_entered,
             frame_rev,
             self.catalog_rev,
+            self.catalog_failed_rev,
         );
         if !due || self.console.is_busy() {
             return;
@@ -1529,8 +1638,13 @@ impl App {
                     self.periph_page_entered = true;
                 }
                 // 预置：同一 rev 在回执回来之前不会被反复取（`None` 帧 rev 时无从预置，
-                // 此时由"两侧都知道才比"的判据兜住，见 `catalog_due`）。
+                // 此时由"两侧都知道才比"的判据兜住，见 `catalog_due`）。**W-1**：同时记下
+                // 回滚目标（失败面用它恢复"失败前的值"）。
                 if let Some(r) = frame_rev {
+                    self.catalog_preset = Some(CatalogPreset {
+                        prev: self.catalog_rev,
+                        rev: r,
+                    });
                     self.catalog_rev = Some(r);
                 }
             }
@@ -1540,6 +1654,47 @@ impl App {
                 ConsoleEndpoint::PeripheralsCatalog.path()
             ),
         }
+    }
+
+    /// **catalog 回执成功**（设计 §15.3.1 第 2 句的"重取成功"面；T21c-3-r1）。
+    ///
+    /// 两件事：① 清掉预置与"失败 rev"抑制（`catalog_rev` 由 `apply_route` 用响应 `rev` 校正）；
+    /// ② 两页**取消**「名称表可能过期」提示（幂等 —— 从未 stale 过时是 no-op）。
+    fn on_catalog_read_ok(&mut self) {
+        self.catalog_preset = None;
+        self.catalog_failed_rev = None;
+        self.shell.p4().set_catalog_stale(false);
+        self.shell.p6().set_catalog_stale(false);
+    }
+
+    /// **catalog 取表未成**（设计 §15.3.1 第 2 句："重取失败 ⇒ **保留旧 catalog** + 顶部提示
+    /// 「名称表可能过期」"；T21c-3-r1）。
+    ///
+    /// **两个调用点，同一套处置**（**W-1′** 起）：
+    /// 1. `absorb_console` 的传输 / 路由失败出口（catalog 回执失败）；
+    /// 2. [`App::read_slot_available`] 的取消支（catalog **在飞**时被新的读意图顶掉 ——
+    ///    `cancel` 不产生完成事件 ⇒ 只能在那里补收口）。
+    ///
+    /// 三件事：
+    /// 1. **W-1 回滚**：把预置的 [`App::catalog_rev`] 恢复成**失败前的值**（`prev`），并把本次
+    ///    失败的帧内 rev 记进 [`App::catalog_failed_rev`]；
+    /// 2. 两页 `set_catalog_stale(true)` —— 提示条 + 「重试」出现；
+    /// 3. **保留旧 catalog**（**不调** `clear_catalog()`）：§15.3.1 明写"重取失败 ⇒ 保留旧
+    ///    catalog"，页面已取到的中文名照旧显示（`clear_catalog` 会把它们抹掉）。
+    ///
+    /// # 回滚**不会**引入每拍反复发起
+    ///
+    /// 回滚把 `held_rev` 换回 `prev`；若 `prev != frame_rev`，`catalog_due` 的第 2 支会成立
+    /// —— **但**当拍 `frame_rev` 恰是刚失败的那个 rev ⇒ `catalog_due` 的 `failed_rev` 抑制
+    /// 直接判否（那正是第 2 项记录的用途）。⇒ 下一拍不发；只有"帧内 rev 变化"或"用户点重试"
+    /// 才会再发（`catalog_due` 的用例逐条钉住这两条）。
+    fn on_catalog_read_failed(&mut self) {
+        if let Some(p) = self.catalog_preset.take() {
+            self.catalog_rev = p.prev;
+            self.catalog_failed_rev = Some(p.rev);
+        }
+        self.shell.p4().set_catalog_stale(true);
+        self.shell.p6().set_catalog_stale(true);
     }
 
     /// 把 [`state::ControlState`] 的 Toast 记录**落到屏上**（B3-2c；三条失败路径的出口）。
@@ -2691,6 +2846,17 @@ mod tests {
             f_body.contains("page_failure_decision"),
             "收口必须按端点分派页面失败面（U-73 明细端点；§15.6.2 ⑥）"
         );
+        // ③ **W-3（T21c-3-r1）**：收口必须先按白名单 `page_owns_failure_surface` 判"页面有没有
+        //    就地失败面"，命中者**只记账**（`record_read_failure`，不压通用 Toast）。catalog 走
+        //    这支（它有顶部提示条但**无** `RouteDecision` ⇒ 返回 `None`）。
+        //    **改什么会让本条变红**：把这支改回"直接 `record_transport_failure_with_receipt(epoch_ms)`"
+        //    （catalog 会**同时**出现提示条 + 通用「操作失败」Toast）⇒ 本条红。
+        assert!(
+            f_body.contains("page_owns_failure_surface")
+                && f_body.contains("record_read_failure(epoch_ms)"),
+            "收口必须按白名单把'有页面就地失败面'的端点（含 **catalog**）交给 `record_read_failure`\
+             —— 否则 catalog 失败会**同时**压一条通用「操作失败」Toast（违 UI §7.2 / 对取数动作误导）"
+        );
     }
 
     /// **SH20 裁定 2**：`route` 的 `Err`（回执**形态 / 解码**不符）对**写端点**必须走**页面
@@ -3038,5 +3204,145 @@ mod tests {
                 "`apply_route` 必须含 `{needle}`（实得窗口内没有）"
             );
         }
+    }
+
+    /// **④ 「名称表可能过期」提示条 + 「重试」的接线**（T21c-3-r1；设计 §15.3.1 第 2 / 3 句）。
+    ///
+    /// 为什么是源码哨：见本批文件头的口径（`App` 建不起来 —— 需要真 LVGL 会话 + 控制通道客户端）；
+    /// 判据**本体**在别处已各有行为用例：
+    ///
+    /// - **纯逻辑**（失败抑制 / rev 变化仍有效 / 重试只再取一次）：
+    ///   `control_route::tests::catalog_failure_suppresses_the_same_rev_and_retry_forces_exactly_one_more_fetch`；
+    /// - **页面侧**（显隐 / 文案 / 48×48 / 净距 16 / 点击投意图）：
+    ///   `ui/tests.rs::pages_chain` 的 ⑯（P4）/ ⑰（P6）两块。
+    ///
+    /// 本哨只补"**这几行在源码里**"（删掉即红），口径同既有
+    /// `peripheral_drill_intents_are_registered_and_only_queue_intents`。
+    ///
+    /// **改什么会让本条变红**：删掉任一 `set_on_catalog_retry` 注册 ⇒ 第 1 条红；在闭包里加任何
+    /// 页面调用 ⇒ 第 2 条红；删掉失败面的回滚 / 记失败 rev ⇒ 第 3 条红；删掉两页
+    /// `set_catalog_stale(true)` ⇒ 第 4 条红（**探针①的靶子**）；把失败面改成
+    /// `clear_catalog()` ⇒ 第 5 条红（违"保留旧 catalog"）；删掉成功面收口 ⇒ 第 6 条红；
+    /// 删掉 `CatalogRetry` 臂的两行复位 ⇒ 第 7 条红（**探针②的靶子**，见交付报告）。
+    #[test]
+    fn catalog_stale_banner_and_retry_are_wired_through_the_intent_queue() {
+        let live = app_prod_source();
+        // ①② 两条「重试」回调：注册一次 + **只投意图**
+        for reg in [
+            "shell.p4().set_on_catalog_retry(",
+            "shell.p6().set_on_catalog_retry(",
+        ] {
+            assert_eq!(
+                live.matches(reg).count(),
+                1,
+                "`{reg}` 必须在生产段注册**恰好一次**（否则提示条上的「重试」点了没反应）"
+            );
+            let body = closure_after(&live, reg);
+            assert!(
+                body.contains("push_back(ControlIntent::CatalogRetry)"),
+                "`{reg}` 的回调必须**只投意图**（`push_back(ControlIntent::CatalogRetry)`）—— \
+                 实得闭包体：{body}"
+            );
+            for forbidden in ["shell.", ".set_", ".render(", ".refresh", ".tick("] {
+                assert!(
+                    !body.contains(forbidden),
+                    "`{reg}` 的回调里出现了 `{forbidden}` —— **回调里只许投意图**，\
+                     回灌页面数据会删正在派发的对象（UAF 级）；实得闭包体：{body}"
+                );
+            }
+        }
+        // ③④⑤ 失败面：W-1 回滚 + 两页置 stale + **保留旧 catalog**
+        let at = live
+            .find("fn on_catalog_read_failed(&mut self) {")
+            .expect("catalog 失败必须有唯一收口");
+        let body: String = live[at..].chars().take(700).collect();
+        assert!(
+            body.contains("self.catalog_rev = p.prev"),
+            "**W-1**：失败必须把预置的 `catalog_rev` 回滚成**失败前的值**（否则该 rev 从此\
+             「两边都等于」、不再自动重取）"
+        );
+        assert!(
+            body.contains("self.catalog_failed_rev = Some(p.rev)"),
+            "**W-1**：失败必须记下失败的帧内 rev（同 rev 不自动重发 —— 否则回滚会每拍命中）"
+        );
+        assert!(
+            body.contains("self.shell.p4().set_catalog_stale(true)")
+                && body.contains("self.shell.p6().set_catalog_stale(true)"),
+            "失败面必须**两页都**置「名称表可能过期」（§15.3.1 第 2 句）"
+        );
+        assert!(
+            !body.contains("clear_catalog"),
+            "失败**不得**清 catalog —— §15.3.1 明写「重取失败 ⇒ **保留旧 catalog**」，\
+             清掉会把已取到的中文名抹成「名称未获取」"
+        );
+        assert_eq!(
+            live.matches("self.on_catalog_read_failed();").count(),
+            3,
+            "catalog 的三条「取表未成」路径（传输失败 + 路由失败 + **在飞被取消**）都要接到\
+             这条唯一收口（T21c-3-r1 的 **W-1′**）"
+        );
+        // ⑤′ **落点**（只数总数会被"三处挤在同一个分支里"满足）——
+        //     取消支必须在 `read_slot_available` 里，且必须**先判被取消的是不是 catalog**。
+        //     **改什么会让本条变红**：删掉取消支那次 `on_catalog_read_failed()`（W-1′ 的靶子）
+        //     /删掉 `PeripheralsCatalog` 判据（退化成"任何读查询被顶掉都置 stale"）⇒ 本条红。
+        let rs = live
+            .find("fn read_slot_available(&mut self) -> bool {")
+            .expect("读意图的在途裁决必须收口在一处（否则会出现第二份会漂移的在途策略）");
+        let rs_body: String = live[rs..].chars().take(1_200).collect();
+        assert_eq!(
+            rs_body.matches("self.on_catalog_read_failed();").count(),
+            1,
+            "**W-1′**：`cancel` 不产生完成事件 ⇒ 被顶掉的 catalog 只能在 `read_slot_available` \
+             的取消支补收口（回滚预置 + 置 stale）；否则预置不回滚、页面也不置 stale（名字静默缺失）"
+        );
+        assert!(
+            rs_body.contains("ConsoleEndpoint::PeripheralsCatalog"),
+            "**W-1′**：取消支必须**先判**「被取消的是不是 catalog」再收口 —— 无条件收口会让\
+             被顶掉的普通查询（`Logs` / `Audit`）也置「名称表可能过期」（误报）"
+        );
+        //     两条失败出口仍须在 `absorb_console` 里（窗口须盖住 route 的 `Err` 支 ⇒ 用
+        //     `self.route_errors += 1;` 自证窗口够宽，否则"没数到"会伪装成"数量不对"）。
+        let ab = live
+            .find("fn absorb_console(")
+            .expect("控制通道完成事件的唯一消化点必须仍在");
+        let ab_body: String = live[ab..].chars().take(5_000).collect();
+        assert!(
+            ab_body.contains("self.route_errors += 1;"),
+            "5 000 字符窗口没盖住 `absorb_console` 的 route-`Err` 支 ⇒ 扫描器失真，下一条不可信"
+        );
+        assert_eq!(
+            ab_body.matches("self.on_catalog_read_failed();").count(),
+            2,
+            "catalog 的两条**失败**入口（传输失败 + 路由失败）仍须都在 `absorb_console` 里"
+        );
+        // ⑥ 成功面：收口到 `on_catalog_read_ok`（= 清预置/抑制 + 两页收起提示）
+        assert!(
+            live.contains("self.on_catalog_read_ok();"),
+            "catalog 成功臂必须收口到成功面（否则重取成功后提示条永远不消失）"
+        );
+        let at = live
+            .find("fn on_catalog_read_ok(&mut self) {")
+            .expect("catalog 成功必须有唯一收口");
+        let ok_body: String = live[at..].chars().take(600).collect();
+        assert!(
+            ok_body.contains("self.shell.p4().set_catalog_stale(false)")
+                && ok_body.contains("self.shell.p6().set_catalog_stale(false)"),
+            "成功面必须两页都**收起**提示条（§15.3.1 第 2 句的「重取成功」面）"
+        );
+        // ⑦ 「重试」意图臂：复位两处已消费状态，**不自行发起**
+        let at = live
+            .find("ControlIntent::CatalogRetry => {")
+            .expect("必须有 `CatalogRetry` 臂（否则点了「重试」什么都不发生）");
+        let arm: String = live[at..].chars().take(500).collect();
+        assert!(
+            arm.contains("self.periph_page_entered = false;")
+                && arm.contains("self.catalog_failed_rev = None;"),
+            "「重试」= 复位**首次进入资格** + 清**失败 rev 抑制**（两者缺一，重取就不再发生）"
+        );
+        assert!(
+            !arm.contains("begin_catalog("),
+            "「重试」臂**不得**自行发起请求（发起仍在 tick 路径的 `tick_periph_catalog` —— \
+             与「页面回调只投意图」同口径）"
+        );
     }
 }

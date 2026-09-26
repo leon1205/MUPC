@@ -66,13 +66,14 @@ use mupc_display_proto::{
     ServiceScope, BmsAlarmPage, DEFAULT_BIND, DEFAULT_CONTROL_BIND,
 };
 
+use crate::lvgl::display::Area;
 use crate::lvgl::event::EventCode;
 use crate::lvgl::obj::Obj;
 use crate::lvgl::style::{Color, Style, StyleSelector};
 use crate::lvgl::widgets::{Label, LongMode, ScrollContainer, TextButton};
 use crate::lvgl::LvglError;
 use crate::state::{bit_active, bit_text, station_state, MissingReason, PeriphView, StationState};
-use crate::ui::components::{LedIndicator, StatusChip};
+use crate::ui::components::{LedIndicator, StatusChip, WarnBanner};
 use crate::ui::pages::{
     control_source_text, decor, display_safe, fmt_decimals, fmt_int0, format_epoch_ms_utc,
     format_uptime, frame_mark, label, layout_box, link_color, link_icon, page_root, sections,
@@ -201,6 +202,30 @@ const LED_W: i32 = VALUE_W;
 const NOTE_H: i32 = TextSlot::Body.px() as i32 + Dimens::GAP_MIN;
 /// 角标 x（贴卡内容区右缘）。
 const FROZEN_CHIP_X: i32 = INNER_W - crate::ui::pages::FROZEN_CHIP_W;
+
+// ── ⓪″ 段顶「名称表可能过期」提示条（U-73 / 设计 §15.3.1 第 2 / 3 句；T21c-3-r1）────
+//
+// 落点 = **段内容区最顶部**（分段页签之下 —— `Dimens::SECTION_Y`）：`stale` 时**各段的自带
+// 滚动视口**（段「装置」的 `host` / 外设段的 `SegmentList::viewport` / 下钻的 `viewport`）
+// 整体下移并等量变矮（**底缘不动** ⇒ 不越出段面板、不遮住既有内容、页面根不产生滚动条）；
+// 默认 `stale == false` ⇒ 提示条不占位、各视口 `set_inset(0)` **逐像素回到既有版面**。
+/// 提示条占用的**总让位高**（`WarnBanner` 全高 56 + 同组缝 16）。
+const STALE_BAND_H: i32 = Dimens::BANNER_H + Dimens::GAP_GROUP;
+/// 提示条本体宽（全宽 − 「重试」按钮槽 − 缝）。
+const STALE_BANNER_W: i32 = Dimens::CONTENT_W - Dimens::TOUCH_MIN - Dimens::GAP_MIN;
+/// 「重试」按钮 x（提示条右侧；净距 = `GAP_MIN`(16)）。
+const STALE_RETRY_X: i32 = STALE_BANNER_W + Dimens::GAP_MIN;
+/// 「重试」按钮 y（在 56 px 提示条内垂直居中）。
+const STALE_RETRY_Y: i32 = theme::center_offset(Dimens::BANNER_H, Dimens::TOUCH_MIN);
+/// `stale` ⇒ 让位高，否则 `0`（**让位判据只有这一处**；顺带避开 rustfmt 的
+/// `single_line_if_else_max_width` 单行阈值）。
+const fn stale_inset(stale: bool) -> i32 {
+    if stale {
+        STALE_BAND_H
+    } else {
+        0
+    }
+}
 
 /// 装置信息卡行数（型号 / 序列号 / 固件版本 / 编译时间）。
 const INFO_ROWS: usize = 4;
@@ -1841,9 +1866,31 @@ impl BmsDrill {
         v
     }
 
+    /// **段顶提示条的让位**（T21c-3-r1）：`inset` = `0` / `STALE_BAND_H` —— 本视图整体下移
+    /// 并等量变矮（顶部条「收起 / 上一页 / 下一页」与失败带随之整体平移；**行区视口同减**
+    /// ⇒ 其滚动范围照旧覆盖全部行，池外行仍可滚到）。
+    ///
+    /// **为什么整视图平移 + 两次 `set_size`**：视图占满整个段内容区（**P6-7**），
+    /// 只移行区会让顶部条压在提示条上（且「收起」与提示条右侧的「重试」会**重叠** ⇒
+    /// 触碰命中区歧义）；只移视图不缩行区则行区底缘越出段面板、进而把页根撑出滚动条。
+    /// `inset = 0` 即构造期几何（本方法**只改几何、不建不删对象**）。
+    pub(crate) fn set_inset(&self, inset: i32) {
+        let inset = inset.max(0);
+        self.root.set_pos(0, inset);
+        self.root
+            .set_size(Dimens::CONTENT_W, Dimens::SECTION_VIEW_H - inset);
+        self.viewport
+            .set_size(Dimens::CONTENT_W, DRILL_BODY_H - inset);
+    }
+
     /// 收起键对象（版面 / 触摸断言用）。
     pub(crate) fn collapse_button(&self) -> &Obj {
         &self.collapse
+    }
+
+    /// 根容器矩形（提示条让位断言用）。
+    pub(crate) fn root_coords(&self) -> Area {
+        self.root.coords()
     }
 
     /// 上一页 / 下一页按钮。
@@ -2116,6 +2163,17 @@ pub struct P6SystemPage {
     bms_failed: Cell<bool>,
     /// 下钻「翻页」意图的出口（交回接线层发请求）。
     on_bms_page: CbSlot<u32>,
+    // ── ⓪″ 段顶「名称表可能过期」提示条（U-73 / 设计 §15.3.1 第 2 / 3 句；T21c-3-r1）──
+    /// 提示条本体（[`WarnBanner`]：全宽 − 按钮槽 × 56、**非交互**；UI §5.1 #12）。
+    stale_banner: WarnBanner,
+    /// 「重试」按钮（`TOUCH_MIN`(48)×`TOUCH_MIN`(48)；**只投意图**）。
+    stale_retry: Rc<TextButton>,
+    /// catalog 处于「重取失败 ⇒ 名称表可能过期」态（`false` = 提示条不占位）。
+    catalog_stale: Cell<bool>,
+    /// 「重试 catalog」意图槽（`Rc` 共享给按钮闭包；**只投意图**）。
+    on_catalog_retry: Rc<CbSlot<()>>,
+    /// 已应用的让位（幂等对账用；`0` / `STALE_BAND_H`）。
+    stale_inset: Cell<i32>,
     /// 值样式（F8 三卡）。
     value_styles: [Rc<Style>; 2],
     /// 存活锚点（页面根下的固定件句柄）。
@@ -2151,6 +2209,26 @@ impl P6SystemPage {
             return Err(LvglError::InvalidArgument("P6: 段「装置」内容构建失败"));
         };
 
+        // ── ⓪″ 段顶「名称表可能过期」提示条 + 「重试」（设计 §15.3.1 第 2 / 3 句）──────
+        // 建在**页根**、落在**段内容区最顶部**（`Dimens::SECTION_Y`）：不重叠任何既有件
+        // （`stale` 时各段的滚动视口让位 72 px，见 [`Self::apply_stale_inset`]），
+        // 默认 `stale == false` ⇒ 两者皆隐、几何零差异。
+        let stale_banner = WarnBanner::new(&root, STALE_BANNER_W, ui_text::CATALOG_STALE, &[])?;
+        stale_banner.obj().set_pos(0, Dimens::SECTION_Y);
+        stale_banner.obj().set_hidden(true);
+        let stale_retry = Rc::new(TextButton::create(&root, ui_text::RETRY)?);
+        stale_retry.set_size(Dimens::TOUCH_MIN, Dimens::TOUCH_MIN);
+        stale_retry.set_pos(STALE_RETRY_X, Dimens::SECTION_Y + STALE_RETRY_Y);
+        stale_retry.label().center();
+        theme::button(theme::ButtonKind::Secondary).apply(&stale_retry);
+        set_visible(&stale_retry, false);
+        // 按钮**只投意图**（闭包体内零页面调用 —— 回调纪律见 [`Self::set_on_catalog_retry`]）。
+        let retry_slot: Rc<CbSlot<()>> = Rc::new(CbSlot::new());
+        {
+            let slot = Rc::clone(&retry_slot);
+            stale_retry.on_clicked(move |_| slot.fire(()));
+        }
+
         let page = Self {
             root,
             tabs: Rc::clone(&tabs),
@@ -2164,6 +2242,11 @@ impl P6SystemPage {
             bms_page: RefCell::new(None),
             bms_failed: Cell::new(false),
             on_bms_page: CbSlot::new(),
+            stale_banner,
+            stale_retry,
+            catalog_stale: Cell::new(false),
+            on_catalog_retry: retry_slot,
+            stale_inset: Cell::new(0),
             value_styles,
             _keep: Vec::new(),
         };
@@ -2452,8 +2535,87 @@ impl P6SystemPage {
     }
 
     /// catalog 失效 / 未取到 ⇒ 显「名称未获取」（**值照常显示**，§15.3.1）。
+    ///
+    /// ⚠️ **重取失败不得调本方法**（§15.3.1「重取失败 ⇒ **保留旧 catalog**」）——失败面只置
+    /// [`P6SystemPage::set_catalog_stale`]。
     pub fn clear_catalog(&self) {
         *self.catalog.borrow_mut() = None;
+    }
+
+    /// **【⓪″ 段顶提示】名称表可能过期**（U-73 / 设计 §15.3.1 第 2 句；**T21c-3-r1**）。
+    ///
+    /// `stale = true` ⇒ 显「名称表可能过期」提示条（[`WarnBanner`]）+「重试」按钮
+    /// （≥ `TOUCH_MIN`(48)×48，净距 `GAP_MIN`(16)），并把**当前段的滚动视口**下移
+    /// `STALE_BAND_H`(72) 且等量变矮 —— 落点在**段内容区最顶部**、底缘不动 ⇒ 不遮住既有内容、
+    /// 段外框与页面根几何不变；默认 `stale == false` ⇒ 两者皆隐 + 几何**逐像素回既有版面**。
+    ///
+    /// **谁调 / 何时调**：接线层（`app.rs`）在 catalog **重取失败**时置 `true`（**保留旧 catalog**
+    /// —— 不调 [`P6SystemPage::clear_catalog`]）、**重取成功**时置 `false`。
+    /// **每次调用都直接落屏**（幂等；重复置同值不做事）；切段时的让位由
+    /// [`P6SystemPage::ensure_segment`] 对**新段**补落一次。
+    pub fn set_catalog_stale(&self, stale: bool) {
+        if self.catalog_stale.replace(stale) == stale {
+            return;
+        }
+        set_visible(self.stale_banner.obj(), stale);
+        set_visible(&self.stale_retry, stale);
+        self.apply_stale_inset(self.tabs.selected());
+    }
+
+    /// 注册「重试」意图回调（无载荷）—— 点段顶提示条右侧的「重试」即触发；**本页不发请求**。
+    ///
+    /// **回调纪律**（本仓成文教训，见 `app.rs` 的 `bind_intents` 函数头）：闭包体内**只许投意图**
+    /// （`push_back(..)`），**不得**回灌页面数据 —— 该回调用在 LVGL 事件派发内被同步触发，
+    /// 在里面删 / 建对象会 UAF。页面本体的写入发生在接线层的 tick / `apply_route` 那一拍。
+    pub fn set_on_catalog_retry<F>(&self, mut f: F)
+    where
+        F: FnMut() + 'static,
+    {
+        // `CbSlot` 的载荷恒有类型（此处 `()`）⇒ 无参回调包一层（**不**改共享槽的契约）。
+        self.on_catalog_retry.set(move |()| f());
+    }
+
+    /// 提示条**是否在显**（断言 / 装配口径；默认 `false`）。
+    pub fn catalog_stale_visible(&self) -> bool {
+        !self.stale_banner.obj().is_hidden()
+    }
+
+    /// 提示条文案（断言口径；恒 = `ui_text::CATALOG_STALE`）。
+    pub fn catalog_stale_text(&self) -> Option<String> {
+        self.stale_banner.text()
+    }
+
+    /// 「重试」按钮（尺寸 / 点位 / 点击投意图的断言用）。
+    pub fn catalog_retry_button(&self) -> &TextButton {
+        &self.stale_retry
+    }
+
+    /// 提示条本体对象（版面断言用：矩形 / 与段内容、按钮的净距）。
+    pub fn catalog_stale_banner_obj(&self) -> &Obj {
+        self.stale_banner.obj()
+    }
+
+    /// 段 `i` 的**内容滚动视口**对象（提示条让位 / 版面断言用；未创建 ⇒ `None`）。
+    /// 段「装置」= 其 `host`；外设段 = `SegmentList` 的视口（**非拥有句柄** ⇒ 不增对象计数）。
+    pub fn segment_viewport_obj(&self, i: usize) -> Option<Obj> {
+        if i == SEG_DEVICE {
+            return Some(self.device.host.share_borrowed());
+        }
+        self.segs
+            .borrow()
+            .get(i)
+            .and_then(|s| s.as_ref())
+            .map(|l| l.obj().share_borrowed())
+    }
+
+    /// 下钻视图**根容器**矩形（提示条让位断言用；未创建 ⇒ `None`）。
+    pub fn drill_root_coords(&self) -> Option<Area> {
+        self.drill.borrow().as_ref().map(|d| d.root_coords())
+    }
+
+    /// 当前生效的让位（`0` / `STALE_BAND_H`；版面断言读口）。
+    pub fn stale_inset(&self) -> i32 {
+        self.stale_inset.get()
     }
 
     /// 注册下钻「翻页」意图回调（载荷 = 目标页码，1 起）。
@@ -2525,6 +2687,8 @@ impl P6SystemPage {
     /// 确保段 `i` 的内容已建（**首次进入才建**）并刷新。
     fn ensure_segment(&self, i: usize) {
         if i == SEG_DEVICE {
+            // 段「装置」在 `new()` 里已建 ⇒ 只需把当前让位状态落一次（切回本段时）。
+            self.apply_stale_inset(SEG_DEVICE);
             return;
         }
         let Some(role) = SEGMENTS.get(i).and_then(|(_, r)| *r) else {
@@ -2532,6 +2696,7 @@ impl P6SystemPage {
         };
         if let Some(list) = self.segs.borrow().get(i).and_then(|s| s.as_ref()).cloned() {
             self.refresh_with(role, &list);
+            self.apply_stale_inset(i);
             return;
         }
         let mut created: Option<Rc<SegmentList>> = None;
@@ -2557,7 +2722,37 @@ impl P6SystemPage {
             if let Some(slot) = self.segs.borrow_mut().get_mut(i) {
                 *slot = Some(list);
             }
+            self.apply_stale_inset(i);
         }
+    }
+
+    /// **段顶提示条的让位**（T21c-3-r1）：`stale` 时把段 `i` 的自带滚动视口下移 `STALE_BAND_H`
+    /// 并等量变矮（**底缘不动**）；否则 `set_inset(0)` 复原。只动几何（`set_pos` / `set_size`），
+    /// **不建不删对象**（页面在 `render` 里"只改不改建"的纪律）。
+    ///
+    /// **为什么只在"当前段"落地**：同一时刻只有一个段面板可见 —— 切段时
+    /// [`Self::ensure_segment`] 会对新段补落一次（含段「装置」的早退支）；被隐藏的段保持
+    /// 旧几何不影响任何可见像素，切回时同样经 `ensure_segment` 归位。
+    fn apply_stale_inset(&self, i: usize) {
+        let inset = stale_inset(self.catalog_stale.get());
+        if i == SEG_DEVICE {
+            self.device.host.set_pos(0, inset);
+            self.device
+                .host
+                .set_size(Dimens::CONTENT_W, Dimens::SECTION_VIEW_H - inset);
+        }
+        if let Some(list) = self.segs.borrow().get(i).and_then(|s| s.as_ref()) {
+            list.obj().set_pos(0, inset);
+            list.obj()
+                .set_size(Dimens::CONTENT_W, Dimens::SECTION_VIEW_H - inset);
+        }
+        // 下钻是段「电池」面板里的覆盖视图（同一个段内容区）⇒ 一并让位。
+        if i == SEG_BATTERY {
+            if let Some(d) = self.drill.borrow().as_ref() {
+                d.set_inset(inset);
+            }
+        }
+        self.stale_inset.set(inset);
     }
 
     /// 用当前注入数据刷新段 `i`。
@@ -2637,6 +2832,10 @@ impl P6SystemPage {
         let page = self.bms_page.borrow().clone();
         drill.set_page(page, self.bms_failed.get());
         drill.set_open(true);
+        // **首次打开时下钻刚被建出来**（构造默认几何 = 无让位）⇒ 必须在建之后补落一次
+        // 段顶提示条的让位，否则下钻顶部条的「收起」会与提示条右侧的「重试」**重叠**
+        // （两块可点区域叠在一起 ⇒ 触碰命中区歧义；T21c-3-r1）。
+        self.apply_stale_inset(SEG_BATTERY);
         // 段「电池」的段内容让位（下钻占满整个段内容区；摘要卡是段内容的子对象 ⇒ 随之一并隐藏）。
         if let Some(list) = self.segs.borrow().get(SEG_BATTERY).and_then(|s| s.as_ref()) {
             set_visible(list.obj(), false);

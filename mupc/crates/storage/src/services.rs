@@ -4,6 +4,7 @@ use crate::repository::*;
 use parking_lot::Mutex;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// 存储服务 — 统一入口
 pub struct StorageService {
@@ -217,6 +218,20 @@ pub const DEFAULT_MAX_BUFFERED_POINTS: usize = 10_000;
 ///
 /// 原语义的残留窗口也由同一机制兜住：任务在 `commit_batch` 的 await 上被 `abort`/panic 时，
 /// future 被丢弃、连 `Err` 分支都走不到 ⇒ 由 [`BatchGuard::drop`] 回填（见 U-64）。
+///
+/// # 采集路径不再 await DB（S-5 / FLS-04，2026-09-26 起）
+///
+/// 容量触发**不再在本调用栈里提交**（旧形态 `self.flush_batch(batch).await?` 已删除），改为
+/// 向[**已注册**的 `spawn_flush_timer` 任务](Self::spawn_flush_timer)投一次**非阻塞**唤醒
+/// （[`Self::request_flush`]，`mpsc::Sender::try_send`）——DB 活（`begin/INSERT/commit`）
+/// **只在那个任务里**发生。于是采集侧写入路径上没有任何 DB 调用点，采集不再被落库耗时阻塞。
+///
+/// **为什么不是 `tokio::spawn(flush_batch(batch))`**（03 设计 §9.3 缺口 3 的"最小改法"）：
+/// 那会造出一个**不登记在退出编排里**的游离任务（`flush_batch` 需要 `'static`，而
+/// `&self` 拿不到 `Arc`），正是 T15/T16 刚修掉的"退出期窄竞态"形态（`mupc-core-bin` 侧
+/// `AggregateRowSender` 的文档记了同一条裁决）。本实现的取舍：**批次一律留在缓冲里**，
+/// 唤醒只是"请那个已注册任务现在来取"；退出序列（`stop_producers` → 最后一次 `flush()`）
+/// 对所有写者仍**完全可见**，且数据在任何时刻都还在受 `max_points` 约束的缓冲内。
 pub struct WriteBuffer {
     capacity: usize,
     flush_interval_ms: u64,
@@ -235,6 +250,19 @@ pub struct WriteBuffer {
     dropped_batches: std::sync::atomic::AtomicU64,
     requeued_batches: std::sync::atomic::AtomicU64,
     pool: Arc<SqlitePool>,
+    /// 容量触发的**唤醒信号（发送端）**——S-5/FLS-04 的实现要点：
+    ///
+    /// - `try_send`：**非阻塞**（容量 1，满即合并）⇒ 采集调用栈里不出现任何等待；
+    /// - 接收端由 [`Self::spawn_flush_timer`] 起的那个任务持有 ⇒ 真正干 DB 活的地方是一个
+    ///   **已在退出编排里的**任务（`mupc-core-bin` 的 `producers` 名单），不是游离 spawn。
+    flush_wake: mpsc::Sender<()>,
+    /// 唤醒信号（接收端）。**唯一持有者** = `spawn_flush_timer` 的任务（构造后 `take()` 走）。
+    ///
+    /// **未被取走时不是"丢弃"**（订正措辞）：接收端仍**活着**（只是没人 `recv()`）⇒ 第一条
+    /// 唤醒会**留在容量 1 的通道里**，其后各条因"满"被**合并**掉（`TrySendError::Full`，见
+    /// [`Self::request_flush`]）。无论哪种，点都仍在缓冲里、不会因"没人接唤醒"而丢；真丢唤醒
+    /// 只发生在 `Closed`（flush 任务已收工/未装配）时，语义见 [`Self::request_flush`]。
+    flush_wake_rx: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 impl WriteBuffer {
@@ -254,6 +282,9 @@ impl WriteBuffer {
         pool: Arc<SqlitePool>,
         max_points: usize,
     ) -> Self {
+        // 容量 1：唤醒是"信号"不是"数据"⇒ 只保留"至少有一次待处理的唤醒"这一位信息即可
+        // （多次触发合并不影响正确性：醒来那次 `flush()` 会把**整个**缓冲带走）。
+        let (flush_wake, flush_wake_rx) = mpsc::channel(1);
         Self {
             capacity,
             flush_interval_ms,
@@ -266,12 +297,24 @@ impl WriteBuffer {
             dropped_batches: std::sync::atomic::AtomicU64::new(0),
             requeued_batches: std::sync::atomic::AtomicU64::new(0),
             pool,
+            flush_wake,
+            flush_wake_rx: Mutex::new(Some(flush_wake_rx)),
         }
     }
 
-    /// 入缓冲（满 `capacity` 触发一次批量提交；失败上抛但点**不丢**，见类型文档）。
+    /// 入缓冲（满 `capacity` 触发一次批量提交；**采集调用栈里不 await DB**，见类型文档）。
+    ///
+    /// # 返回值口径（FLS-04 之后的**如实**说明）
+    ///
+    /// 本函数**不再可能失败** ⇒ 恒返回 `Ok(())`：容量触发只做一次 `try_send`（不阻塞、不可失败
+    /// 到调用方），点先入缓冲、由已注册的 flush 任务提交。签名保留 `async`/`Result` 是**刻意**的
+    /// （零调用点改动，且这是采集侧唯一入口）；**落库失败不再经此上抛**，而是由 `flush_batch`
+    /// 统一响亮化（`error!` 日志 + `dropped_points/dropped_batches/requeued_batches` 计数），
+    /// 并由 core-bin 的健康巡检（03 设计 §9.3 缺口 1）转成 `major` 告警。
+    ///
+    /// 调用点的 `if let Err(..)` 分支因此**退化为永不触发**（保留不删：签名兼容）。
     pub async fn buffer_telemetry(&self, point: TelemetryPoint) -> Result<(), StorageError> {
-        let (maybe_batch, dropped) = {
+        let (trigger, dropped) = {
             let mut buf = self.buffer.lock();
             buf.push(point);
             // 容量触发按**自上次尝试以来新 push 的点数**计（失败回填的老点不重复计入）——
@@ -283,24 +326,52 @@ impl WriteBuffer {
             if since >= self.capacity {
                 self.since_attempt
                     .store(0, std::sync::atomic::Ordering::Relaxed);
-                // 先 drain 再谈裁剪：这批马上要**尝试提交**，此刻裁掉就等于"丢掉本可以入库的点"。
-                // drain 后缓冲已空 ⇒ 有界性自动成立；真提交失败时由 `requeue_front` 裁剪并计数
-                // （那一刻才确认这些点没进库，丢最旧才是正确的）。
-                let batch: Vec<TelemetryPoint> = buf.drain(..).collect();
-                buf.reserve(self.capacity);
-                (Some(batch), 0)
+                // **不 drain**（FLS-04）：这批不再由本调用栈提交，而是留在缓冲里等已注册的
+                // flush 任务来取。同时**本 push 不裁剪**——同旧「先谈提交、再谈裁剪」的理由
+                // （这批马上要被提交，此刻裁掉等于丢掉本可以入库的点）。越过上限至多 1 点，
+                // 由下一次非触发 push 的 `trim_oldest` 收回 ⇒ **`capacity ≥ 2` 时**上界仍是
+                // `max_points + 1`。⚠️ **前提（capacity ≥ 2）不可省**：`capacity = 1` 时每次
+                // push 都落本分支（`since_attempt` 每 push 归零）⇒ **不存在"下一次非触发
+                // push"**，采集路径永不 `trim_oldest`（缓冲只由 flush 吞吐 / 失败回填裁剪
+                // 约束）—— 该退化配置已在配置校验层被拒
+                // （`core_config::validate_storage` 的范围 `2..=100_000`）。
+                (true, 0)
             } else {
                 // 无提交可试 ⇒ 就在这里守住上限（`Vec` 尾插头删 ⇒ 头部就是"最旧"）。
-                (None, self.trim_oldest(&mut buf))
+                (false, self.trim_oldest(&mut buf))
             }
         };
         if dropped > 0 {
             self.log_dropped(dropped, "buffer_telemetry 入缓冲时超上限");
         }
-        if let Some(batch) = maybe_batch {
-            self.flush_batch(batch).await?;
+        if trigger {
+            self.request_flush();
         }
         Ok(())
+    }
+
+    /// 容量触发的**非阻塞**唤醒：请已注册的 flush 任务现在来提交（FLS-04 的唯一实现点）。
+    ///
+    /// 三种结果都**不是**调用方的错误，故不返回 `Result`：
+    /// - `Ok`：唤醒已入队（那个任务会在下一次 `select!` 醒来 `flush()`）；
+    /// - `Full`：已有一次待处理的唤醒 ⇒ **合并**（醒来那次会把整个缓冲带走，不需要第二条信号）。
+    ///   这是 DAU 抖动期最常见的形态，属正常态；
+    /// - `Closed`：flush 任务已收工（停机中/未装配）⇒ **什么也不做**：点仍在缓冲里，
+    ///   由退出路径的最后一次 `flush()` 落盘（`mupc-core-bin::StartupContext::shutdown`）。
+    ///   若该部署**从未**起过 flush 任务，则数据只受 `max_points` 约束（超限丢弃会进
+    ///   `dropped_points` 并触发健康巡检告警）—— 这是"时间触发半边未装配"的既有语义，不新增。
+    fn request_flush(&self) {
+        match self.flush_wake.try_send(()) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::debug!("容量触发：已有一次待处理的 flush 唤醒 ⇒ 合并（无需第二条信号）");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    "容量触发：flush 任务已收工（停机中/未装配）⇒ 剩余缓冲由退出路径的最后一次 flush 落盘"
+                );
+            }
+        }
     }
 
     /// 按 [`Self::max_points`] 裁掉**最旧**的溢出点（调用方须持 `buffer` 锁）。
@@ -400,10 +471,16 @@ impl WriteBuffer {
     /// 与 `flush()` 的**失败语义同源**：提交失败 ⇒ 本批**回填**缓冲待下次重试（U-68③），
     /// 故本任务只需在成功时记一条 debug；失败已由 `flush_batch` 统一响亮化，不重复打第二条。
     ///
-    /// **收工（U-64）**：`stop` 收到停机信号即退出（`select!` 与 tick 二选一）。这一步是必须的：
-    /// 本任务是**唯一会在运行期 drain 缓冲**的常驻者，若被 `abort` 在半路（已 drain、未提交），
-    /// 即便有 `BatchGuard` 兜底也仍会与退出路径的 flush 抢时序 ⇒ 优雅退出的顺序是
-    /// "先让它确认收工，再做最后一次 flush"（见 `mupc-core-bin` 的 `StartupContext::shutdown`）。
+    /// **第三条触发源（S-5 / FLS-04）**：`select!` 同时等**容量唤醒**
+    /// （[`Self::request_flush`] 的另一端，由 `WriteBuffer` 自己持有发送端）。DB 活因此只在
+    /// **本任务**里发生 —— 采集调用栈里不再有 `begin/INSERT/commit`（旧形态见类型文档）。
+    /// 唤醒是"位"语义（容量 1，满即合并）：醒来那次 `flush()` 把**整个**缓冲带走，故合并无损。
+    ///
+    /// **收工（U-64）**：`stop` 收到停机信号即退出（`select!` 与 tick/唤醒三选一）。这一步是
+    /// 必须的：本任务是**唯一会在运行期 drain 缓冲**的常驻者，若被 `abort` 在半路
+    /// （已 drain、未提交），即便有 `BatchGuard` 兜底也仍会与退出路径的 flush 抢时序 ⇒ 优雅
+    /// 退出的顺序是"先让它确认收工，再做最后一次 flush"（见 `mupc-core-bin` 的
+    /// `StartupContext::shutdown`）。
     pub fn spawn_flush_timer(
         self: Arc<Self>,
         mut stop: tokio::sync::watch::Receiver<bool>,
@@ -411,6 +488,9 @@ impl WriteBuffer {
         // `interval(0)` 会 panic；0 视为"每个 tick 立即到点"的最小正周期（1ms），
         // 不静默退化成"永不触发"。
         let period = std::time::Duration::from_millis(self.flush_interval_ms.max(1));
+        // 唤醒接收端的**唯一持有者**就是本任务（`take` 走；重复 spawn / 直接调
+        // `buffer_telemetry` 不起任务时拿到 `None` ⇒ 退化为"仅定时 + 停机"，不 panic）。
+        let mut wake = self.flush_wake_rx.lock().take();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(period);
             // 落后时按"顺延"而不是"追赶补打"：补打只会连续产生空批（数据早已被上一批带走），
@@ -426,6 +506,8 @@ impl WriteBuffer {
                         break;
                     }
                     _ = ticker.tick() => {}
+                    // 容量唤醒（FLS-04）：本任务是它唯一的接走者 ⇒ DB 活只在这里发生。
+                    _ = flush_wake_once(&mut wake) => {}
                 }
                 match self.flush().await {
                     Ok(0) => {}
@@ -535,6 +617,25 @@ impl WriteBuffer {
 
     pub fn flush_interval_ms(&self) -> u64 {
         self.flush_interval_ms
+    }
+}
+
+/// 等一次**容量唤醒**（[`WriteBuffer::request_flush`] 的另一端）。
+///
+/// `None` = 本进程没有 flush 任务持有接收端（单测直接调 `buffer_telemetry`、或本 `WriteBuffer`
+/// 起过两次任务）⇒ 该 `select!` 分支**永不就绪**（`pending()`），退化成"仅定时 + 停机"。
+/// 不用 `Option::expect` 是刻意的：这条路径在测试与异常装配下都会走到，panic 不可接受
+/// （`buffer_telemetry` 的 `Closed` 分支已覆盖"没人接唤醒"的数据去向）。
+async fn flush_wake_once(wake: &mut Option<mpsc::Receiver<()>>) {
+    let Some(rx) = wake.as_mut() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if rx.recv().await.is_none() {
+        // 发送端已 drop（正常情况下发生不了：它由本任务自己持有的 `Arc<WriteBuffer>` 活着）
+        // ⇒ 置 `None` 让本分支此后**永久 pending**，避免"`recv()` 立即返回 `None` ⇒ 每拍空转
+        // 一次 flush"的忙循环（那是 CPU 白烧，不是功能错误，但不可接受）。
+        *wake = None;
     }
 }
 
@@ -924,6 +1025,73 @@ mod tests {
         assert!(
             production.contains("dropped_points") && production.contains("requeued_batches"),
             "丢弃/回填必须可计数（U-68③ 要求计数器可读）"
+        );
+    }
+
+    /// `buffer_telemetry` 的函数体（从签名起到 `fn request_flush(` 之前的源文本）。
+    ///
+    /// 同 `production_src()` 的分段理由：本网要断言"体内**不出现**某些串"，若把断言自己
+    /// 写进来的串一起算进去就成自指坏网。锚点缺失即 panic（不静默退化成空串）。
+    fn buffer_telemetry_body() -> String {
+        let production = production_src();
+        let start = production
+            .find("pub async fn buffer_telemetry")
+            .expect("`buffer_telemetry` 必须存在（采集侧唯一入口）");
+        let end = production[start..]
+            .find("\n    fn request_flush(")
+            .expect("`request_flush` 必须紧跟在 `buffer_telemetry` 之后（本网的分段锚点）");
+        assert!(end > 400, "分段锚点必须真的切出函数体，实得 {end} 字节");
+        production[start..start + end].to_string()
+    }
+
+    /// **FLS-04 结构网（S-5）**：采集入口 `buffer_telemetry` 的**调用栈里不得再有 DB 活**。
+    ///
+    /// 三条判据（源文本级：**"没有 DB 调用点"这件事无法从行为层反证**，行为级证据在
+    /// `tests/integration.rs` 的 `capacity_trigger_does_not_touch_db_in_caller_stack`）：
+    /// 1. 函数体内**没有任何 `.await`** —— 旧形态的 `self.flush_batch(batch).await?` 必带 await；
+    /// 2. 函数体内**不出现 `flush_batch`**（DB 提交的唯一入口）；
+    /// 3. 容量分支改为向已注册任务投递**非阻塞**唤醒（`request_flush()`）。
+    ///
+    /// **改什么会让本条变红**：把容量触发改回 `self.flush_batch(batch).await?`，或在
+    /// `buffer_telemetry` 里塞回任何 `.await`。
+    #[test]
+    fn telemetry_ingest_path_has_no_db_call_in_its_call_stack() {
+        let body = buffer_telemetry_body();
+        assert!(
+            !body.contains(".await"),
+            "采集入口不得有**任何** await 点（FLS-04：DB 活必须在已注册的 flush 任务里干）"
+        );
+        assert!(
+            !body.contains("flush_batch"),
+            "采集入口不得直接碰 DB 提交（FLS-04）"
+        );
+        assert!(
+            body.contains("request_flush()"),
+            "容量触发必须为「非阻塞投递唤醒」——否则容量到点无人提交，数据要等到下一个 tick"
+        );
+    }
+
+    /// **FLS-04 接线网**：那个"唯一的接走者"必须是**已注册的 flush 任务** ——
+    /// 它的 `select!` 要等唤醒接收端，且接收端是**从缓冲自己身上 take 走的**
+    /// （`WriteBuffer` 持有发送端 ⇒ 唤醒不会被投到没人接的地方）。
+    ///
+    /// **改什么会让本条变红**：删掉 `select!` 的唤醒臂（唤醒投出去没人接 ⇒ 容量触发的落库
+    /// 延迟退化成"下一个 tick"，高负载下缓冲会被顶到上限而丢点）；或改成在 `buffer_telemetry`
+    /// 里 `tokio::spawn(flush_batch(..))`（游离任务，退出编排看不见 —— T15/T16 的坑）。
+    #[test]
+    fn flush_timer_takes_the_capacity_wakeup() {
+        let production = production_src();
+        assert!(
+            production.contains("flush_wake_once(&mut wake)"),
+            "flush 任务必须 select! 等容量唤醒（否则唤醒无人接）"
+        );
+        assert!(
+            production.contains("self.flush_wake_rx.lock().take()"),
+            "唤醒接收端必须由 flush 任务自己 take 走（接收端与任务是同一个持有者）"
+        );
+        assert!(
+            !production.contains("tokio::spawn(self.flush_batch"),
+            "不得用游离 spawn 承担容量触发的提交（退出编排看不见 ⇒ T15/T16 的窄竞态回归）"
         );
     }
 }

@@ -26,6 +26,7 @@ mod log_service;
 mod quality_map;
 mod signal_handler;
 mod startup;
+mod storage_health;
 #[cfg(test)]
 mod testutil;
 mod uplink;

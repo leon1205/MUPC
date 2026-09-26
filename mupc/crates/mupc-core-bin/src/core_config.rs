@@ -928,9 +928,16 @@ impl CoreConfig {
     /// 由结构保证（分属 `WriteBuffer` / `GridAggregator` 两个类型，互不引用，STG-05）。
     fn validate_storage(&self) -> Result<(), String> {
         let s = &self.storage;
-        if !(1..=100_000).contains(&s.batch_capacity) {
+        // 下界 **2**（不是 1）：容量触发的"上界 = max_points + 1"论证要求触发后**下一次 push
+        // 必落非触发分支**（由那次 push 的 `trim_oldest` 收回越界点）。`capacity = 1` 时
+        // `since_attempt` 每 push 都被重置 ⇒ **每次 push 都是触发分支** ⇒ 采集路径上
+        // `trim_oldest` 永不执行：缓冲只由 flush 吞吐（非失败回填路径）约束，`max_points`
+        // 形同虚设（见 `mupc_storage::services::WriteBuffer::buffer_telemetry` 的容量分支）。
+        // 这不是"退化配置"而是**采集侧的有界性保证失效** ⇒ 直接拒启动（03 设计 §9.3 缺口 3③）。
+        if !(2..=100_000).contains(&s.batch_capacity) {
             return Err(format!(
-                "storage.batch_capacity={} 须在 1..=100000（遥测写缓冲批量提交容量，条）",
+                "storage.batch_capacity={} 须在 2..=100000（遥测写缓冲批量提交容量，条；\
+                 取 1 会让每次 push 都触发容量分支 ⇒ 采集路径永不按 max_points 裁剪，有界性失效）",
                 s.batch_capacity
             ));
         }
@@ -2782,12 +2789,21 @@ storage:
             apply(&mut c.storage);
             c
         }
-        // batch_capacity：0 / 100001 拒；1 / 100000 过
+        // batch_capacity：0 / 1 / 100001 拒；2 / 100000 过
+        // 下界 = 2：capacity = 1 时每次 push 都触发容量分支 ⇒ 采集路径永不 `trim_oldest`
+        // ⇒ `max_points + 1` 的上界论证失效（03 设计 §9.3 缺口 3③ / 评审 W-1）。
+        // **改什么会让本条红**：把 `validate_storage` 的范围改回 `1..=100_000` ⇒ 下面
+        // `batch_capacity = 1` 的 `unwrap_err()` 直接 panic（探针实测）。
         let err = with(|s| s.batch_capacity = 0).validate().unwrap_err();
         assert!(err.contains("storage.batch_capacity"), "错误必须点名键: {err}");
         let err = with(|s| s.batch_capacity = 100_001).validate().unwrap_err();
         assert!(err.contains("storage.batch_capacity"));
-        assert!(with(|s| s.batch_capacity = 1).validate().is_ok());
+        let err = with(|s| s.batch_capacity = 1).validate().unwrap_err();
+        assert!(
+            err.contains("storage.batch_capacity") && err.contains("2..=100000"),
+            "capacity = 1 必须点名键并给出新下界（拒绝理由须在文案里）: {err}"
+        );
+        assert!(with(|s| s.batch_capacity = 2).validate().is_ok());
         assert!(with(|s| s.batch_capacity = 100_000).validate().is_ok());
         // flush_interval_ms：禁 0；99 / 600001 拒；100 / 600000 过
         let err = with(|s| s.flush_interval_ms = 0).validate().unwrap_err();
