@@ -1,6 +1,16 @@
 # MUPC Web 管理与 AI 可视化模块 — 设计文档
 
-**目标 crate：** `web-api`
+> **[SUPERSEDED: 2026-09-10]** 本模块的 **`web-api` crate 已整体移除**（不在 workspace 成员内）；Web 访问机制（REST / SSE / WebSocket / 静态资源 / Session 登录）与外向 HTTP 监听一并取消。
+>
+> **本文件不再作为实施依据，仅为历史追溯保留原文，全文未作删改。** 本文所载路由表 / SSE 通道 / RBAC 鉴权（`RequireRole`）等**均已随 crate 删除**，**不得据本文实施或验收**。
+>
+> 取代关系：
+> - **需求侧**：并入 **12-MUPC 本地显示终端 PRD**（见该文 §3.7 平台整合与 `08-MUPC-Web管理与AI可视化-PRD.md` 文首的并入映射表；AI 类章节标**暂停**）。
+> - **设计侧**：由 **12-MUPC 本地显示终端设计文档** 承接 —— **出口迁移逐条表见 §7**、**既有资产复用 / 废弃清单见 §8**。
+>
+> 权威来源：`docs/superpowers/plans/modules/12-MUPC-本地显示终端-设计文档.md`
+
+**目标 crate：** `web-api`（已移除）
 **关联 crate：** `ai-engine`、`strategy-engine`、`data-processing`
 
 ---
