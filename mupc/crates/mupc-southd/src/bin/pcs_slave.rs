@@ -10,8 +10,9 @@
 //! 告警字、高 8/低 8 字节互换）详见 `mupc_southd::pcs::sim` 模块文档。
 //!
 //! 用途：无 PCS 实机时经虚拟串口对（Linux socat / Windows com0com）或 USB-RS485 回环与
-//! `PcsHandle`（南向 PCS master）做**双进程**端到端联调（方案 §6.0 备选手段；主手段为
-//! 上述帧级 e2e）。本 bin 由 feature `pcs-slave-bin` 门控，**不进产线默认构建**。
+//! `PcsHandle`（**Task 7 建**，届时取代 intercore 的 `ModbusRtuTransport`）做**双进程**
+//! 端到端联调（方案 §6.0 备选手段；主手段为上述帧级 e2e）。本 bin 由 feature
+//! `pcs-slave-bin` 门控，**不进产线默认构建**。
 //!
 //! 用法：`pcs_slave <serial_port> [baud] [slave_addr]`
 //! 例：`cargo run -p mupc-southd --features pcs-slave-bin --bin pcs_slave -- /dev/ttyS0 19200 1`
