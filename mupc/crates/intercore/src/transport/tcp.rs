@@ -9,7 +9,6 @@ use crate::tcp_server::DualParamCommand;
 use crate::transport::{v2_control_frame_bytes, v3_control_frame_bytes, IntercoreTransport};
 use async_trait::async_trait;
 use mupc_common::{ErrorCode, MupcError};
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
@@ -19,7 +18,10 @@ pub struct TcpTransport {
     remote_addr: String,
     timeout_ms: u64,
     connected: RwLock<bool>,
-    stream: Arc<Mutex<Option<TcpStream>>>,
+    /// 连接句柄。内层 Arc 已移除：其唯一用途是已删除的 `spawn_receive`
+    /// （`self: &Arc<Self>` 后台回读循环）里的 `self.clone()`；现全仓无 TcpTransport 克隆。
+    /// 若将来复现后台任务需 `Arc<Self>`，请在结构体层持 Arc，而非在此处包一层。
+    stream: Mutex<Option<TcpStream>>,
 }
 
 impl TcpTransport {
@@ -28,7 +30,7 @@ impl TcpTransport {
             remote_addr,
             timeout_ms: 5000,
             connected: RwLock::new(false),
-            stream: Arc::new(Mutex::new(None)),
+            stream: Mutex::new(None),
         }
     }
 

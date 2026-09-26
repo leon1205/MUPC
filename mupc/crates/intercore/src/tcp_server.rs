@@ -911,11 +911,12 @@ impl DualParamCommand {
 /// 并发送 AI 引擎输出的 p_ref 和 k_droop 双参数。
 ///
 /// 本类型为传输门面：不直接持有 TcpStream，而是委托给
-/// `Arc<dyn IntercoreTransport>`（默认 TcpTransport，Modbus RTU 等可注入）。
+/// `Arc<dyn IntercoreTransport>`（默认 TcpTransport，其他实现可注入）。
 pub struct IntercoreClient {
-    /// 底层传输通道（Tcp / Modbus RTU，可插拔）
+    /// 底层传输通道（可插拔；当前唯一实现为 TcpTransport）
     transport: Arc<dyn IntercoreTransport>,
-    /// 传输描述（TCP 目标地址或通道名，供 remote_addr() 查询）
+    /// 传输描述（供 remote_addr() 查询）：new()/with_config() 为真实 TCP 目标地址；
+    /// with_transport() 因 IntercoreTransport 未暴露自描述接口，只能填传输类型占位 "tcp"
     remote_addr: String,
     /// 最后发送的 p_ref（用于通信中断检测）
     last_p_ref: RwLock<Option<f64>>,
@@ -939,11 +940,12 @@ impl IntercoreClient {
         Self::new(remote_addr)
     }
 
-    /// 注入自定义传输（Modbus RTU 等）
+    /// 注入自定义传输（生产注入点为 TcpTransport）
     pub fn with_transport(transport: Arc<dyn IntercoreTransport>) -> Self {
         Self {
             transport,
-            remote_addr: "modbus_rtu".to_string(),
+            // 传输类型占位：IntercoreTransport 未暴露自描述接口，此处不作具体通道名假设
+            remote_addr: "tcp".to_string(),
             last_p_ref: RwLock::new(None),
             last_k_droop: RwLock::new(None),
         }
@@ -994,7 +996,11 @@ impl IntercoreClient {
         self.transport.is_connected().await
     }
 
-    /// 获取传输描述（TCP 目标地址或通道名，如 modbus_rtu）
+    /// 获取传输描述：new()/with_config() 为真实 TCP 目标地址，with_transport() 为
+    /// 传输类型占位 "tcp"（见字段说明）。
+    ///
+    /// ⚠️ 当前**零调用方**（旧调用者随 PCS 面删除）；保留仅为兼容既有 API 面，
+    /// 「是否删除该字段+访问器」登记为待裁定项。
     pub fn remote_addr(&self) -> &str {
         &self.remote_addr
     }
