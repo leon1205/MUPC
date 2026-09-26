@@ -794,10 +794,21 @@ impl Rs485Device {
         // 误报成"响应过短"，异常码永远看不到 —— 运维会去查线缆/成帧而不是"从站为何拒绝"。
         // 读侧 `validate_read_response` 走 `Frame::parse`（接受 ≥5 字节）能正确报异常，
         // 本处与读侧对齐。
-        if response.len() >= 3 && response[1] == (FUNC | 0x80) {
+        // 取值一律走 `get()`（本文件 device.rs:126/170/227 已登记的"不裸索引"约定）：
+        // 旧写法把"长度 ≥3"与"下标 1/0/2 的顺序"耦合在一起，重排/短路即 panic（本 Task 已咬过一次）。
+        // 异常帧成立的**最小**条件是"func|0x80 与异常码两字节都在"（标准异常帧 5 字节）：
+        // 只判 func 位会把 2 字节残帧/噪声凭空说成"被从站拒绝，异常码=0x00（未知异常码）"——
+        // 把"没收到成帧"误诊成"从站拒绝"（安全动作 500=0 的现场诊断方向完全不同）。
+        // 故用两个 `get()` 同时表达"字段在不在"与"值对不对"，不足则落下方长度检查报"过短"。
+        if matches!(
+            (response.get(1), response.get(2)),
+            (Some(&f), Some(_)) if f == (FUNC | 0x80)
+        ) {
+            let code = response.get(2).copied().unwrap_or(0);
             return Err(Rs485Error::ConfigFailed(format!(
-                "写 reg {addr:#06x} 被从站 {} 拒绝，异常码={:#04x}",
-                response[0], response[2]
+                "写 reg {addr:#06x}（请求 slave={expected_slave}）被从站 {} 拒绝，异常码={code:#04x}（{}）",
+                response.first().copied().unwrap_or(0),
+                modbus_exception_desc(code)
             )));
         }
         if response.len() < 8 {
@@ -1360,9 +1371,13 @@ mod frame_validation_tests {
         let err = device
             .write_single_register_from(2, 0x01F4, 0x0000)
             .unwrap_err();
+        // 断言与读侧三个同源用例同款（`&&` 双向）：报文必须**同时**出现请求从站与响应从站。
+        // 旧写法 `contains("slave=2") || contains("从站")` 把后半句（"两侧从站号都要出现"）
+        // 掏空 —— 只要报文里出现"从站"二字即绿，断言名承诺的判别力并不存在。
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("slave=2") || err.to_string().contains("从站"),
-            "回他站帧必须拒且报文点明从站号，实际: {err}"
+            msg.contains("slave=2") && msg.contains("slave=1"),
+            "报文必须同时点明请求从站与响应从站（两侧都要出现），实际: {msg}"
         );
     }
 
@@ -1387,6 +1402,13 @@ mod frame_validation_tests {
     fn write_single_register_from_accepts_correct_echo() {
         // 正对照：从站号、功能码、地址、值全对 ⇒ 放行（防"改坏成恒 Err"式的假绿）。
         let device = create_test_device();
+        // 前提断言（与读侧同源用例 device.rs:1298 同款）：请求从站号 2 必须 != config.device_addr，
+        // 否则"期望从站取自请求帧首字节"与"误取 config.device_addr"两种实现皆绿，
+        // 本用例对该缺陷失去判别力 —— 而 config 默认值一变即会静默发生。
+        assert_eq!(
+            device.config.device_addr, 0x01,
+            "前提：config 从站号必须与请求从站号（2）不同，否则本用例对'误把 config.device_addr 当期望从站'失去判别力"
+        );
         let ok = {
             let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x00, 0x00];
             let crc = Frame::calculate_crc(0x02, 0x06, &v[2..], CrcMode::Crc16Modbus);
@@ -1422,6 +1444,38 @@ mod frame_validation_tests {
             "须报出异常码，实际: {msg}"
         );
         assert!(!msg.contains("过短"), "不得误报成响应过短，实际: {msg}");
+    }
+
+    #[test]
+    fn write_single_register_from_reports_short_frame_without_panic() {
+        // 零字节响应 = 串口读超时（VMIN=0/VTIME 语义下 recv_frame 返回 Ok(vec![])）。
+        // 用途有二：① 钉住"不裸索引"取值（无守卫则 response[1] 直接 panic，而南向采集
+        // task 内 panic 会静默终止整口采集）；② 钉住"超时"这条运维最常见的失败形态
+        // 能给出可读报文（而非 panic 或空错误）。
+        let device = create_test_device();
+        *device.test_response.lock() = Some(Vec::new());
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("过短") || msg.contains("0 字节"),
+            "空响应须给出可读的'过短/0 字节'报文而非 panic，实际: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_single_register_from_does_not_panic_on_two_byte_response() {
+        // 2 字节响应（噪声/残帧）：`get()` 取值必须挡住 response[2] 越界，且**不得**把它
+        // 当异常帧（凭空报"被从站拒绝，异常码=0x00"）—— 它是"没收到成帧"，不是"从站拒绝"。
+        // 判别力：把取值写成 `response.len() >= 2 && response[1] == (FUNC | 0x80)` 再读
+        // `response[2]` ⇒ 本用例 panic；只判 func 位不判异常码字段在不在 ⇒ 本用例断言红。
+        let device = create_test_device();
+        *device.test_response.lock() = Some(vec![0x02, 0x86]);
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        assert!(err.to_string().contains("过短"), "实际: {err}");
     }
 }
 
