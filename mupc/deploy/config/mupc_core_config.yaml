@@ -285,55 +285,6 @@ south_stations:
           func: discrete
           addr: 200
           count: 288
-#    # ================= 2) 两级式 PCS（只读 3 区，FC04）=================
-#    - id: pcs
-#      role: pcs
-#      port: "/dev/ttyS7"           # 建议值，待现场校准（§9.10 Q-15）
-#      protocol: modbus
-#      slave: 1                     # 拨码默认
-#      baud_rate: 19200
-#      parity: none
-#      interval_ms: 1000            # 配置期下界 500ms
-#      regs:
-#        - name: pcs_3zone          # 1000–1075；_k ↔ 寄存器 999+k
-#          func: input
-#          addr: 1000
-#          count: 76
-#          byte_swap: true          # 「高 8 位和低 8 位互换」（§9.7.3）
-#          format: uint16
-#          scale: 1.0
-#          points:
-#            - { at: 1,  count: 6 }                                   # 1000–1005 告警1–5/BMS 工作状态
-#            - { at: 7,  format: int16, scale: 0.1, count: 2 }        # 1006–1007 可接受充/放电流 A
-#            - { at: 9,  scale: 0.1 }                                 # 1008 BMS 系统总电压 V
-#            - { at: 10, format: int16, scale: 0.1 }                  # 1009 BMS 系统总电流 A
-#            - { at: 11 }                                             # 1010 BMS 系统 SOC %（不得作控制源）
-#            - { at: 12, format: int16, scale: 0.1, count: 2 }        # 1011–1012 直流母线/中点电压 V
-#            - { at: 14, count: 5 }                                   # 1013–1017 运行/故障/降额/并离网/故障码
-#            - { at: 19, format: int16, scale: 0.1, count: 3 }        # 1018–1020 电网 A/B/C 相电压 V
-#            - { at: 22, format: int16, scale: 0.01 }                  # 1021 交流母线频率 Hz
-#            - { at: 23, format: int16, scale: 0.1, count: 3 }        # 1022–1024 输出电流 A/B/C A
-#            - { at: 26, format: int16, scale: 0.1, count: 4 }        # 1025–1028 视在功率 A/B/C/总 kVA
-#            - { at: 30, format: int16, scale: 0.1, count: 4 }        # 1029–1032 有功功率 A/B/C/总 kW
-#            - { at: 34, format: int16, scale: 0.1, count: 4 }        # 1033–1036 无功功率 A/B/C/总 kvar
-#            - { at: 38, format: int16, scale: 0.001, count: 4 }      # 1037–1040 A/B/C/总功率因数
-#            - { at: 42, format: int16, scale: 1.0 }                  # 1041 PCS 温度 ℃
-#            - { at: 43, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1042–1043 交流累计充电电量
-#            - { at: 45, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1044–1045 交流累计放电电量
-#            - { at: 47, format: int16, scale: 0.1, count: 3 }        # 1046–1048 STS 网侧电压 A/B/C V
-#            - { at: 50, format: int16, scale: 0.1 }                  # 1049 STS 电网电压幅值 V
-#            - { at: 51, format: int16, scale: 0.01 }                 # 1050 STS 电网电压频率 Hz
-#            - { at: 52, format: int16, scale: 0.1, count: 3 }        # 1051–1053 负载电流 A/B/C A
-#            - { at: 55, format: int16, scale: 0.1, count: 3 }        # 1054–1056 负载视在功率 kVA
-#            - { at: 58, format: int16, scale: 0.1, count: 3 }        # 1057–1059 负载有功功率 kW
-#            - { at: 61, format: int16, scale: 0.1, count: 3 }        # 1060–1062 负载无功功率 kvar
-#            - { at: 64, format: int16, scale: 0.001, count: 3 }      # 1063–1065 负载功率因数
-#            - { at: 67 }                                             # 1066 工作模式判断（枚举）
-#            - { at: 68, format: int16, scale: 0.1, count: 3 }        # 1067–1069 低压/高压总电流、低压外总压
-#            - { at: 71, format: int16, scale: 0.1 }                  # 1070 低压总功率 kW
-#            - { at: 72, format: int16, scale: 1.0 }                  # 1071 DCDC 温度 ℃
-#            - { at: 73, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1072–1073 直流累计充电电量
-#            - { at: 75, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1074–1075 直流累计放电电量
     # ================= 3) 储能电能表 ADL400（FC03）=================
     - id: meter_batt
       role: meter_batt

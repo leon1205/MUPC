@@ -3416,7 +3416,7 @@ PCS 4 区写入口**收敛为 4 条**，全部来自既有链路，无"采集站
 |---|------|------|
 | **R-1** | 新增 `write_single_register_from(slave, addr, value)` | 读侧三方法均有 `_from`（`device.rs:695/711/731`），写侧**只有** `write_single_register(addr,value)` 且写死 `self.config.device_addr`（`device.rs:757-761`）⇒ 多从站下不可用 |
 | **R-2** | 写响应**补校验**：从站地址 + 功能码 + **回显值** | 现实现**只判 `len >= 8`**（`device.rs:779-783`）⇒ "写发出去了但被别的从站/错帧应答"**检测不出来**。停机写 500=0 是**安全动作**，必须校验回显 |
-| **R-3** | 新增 `#[cfg(test)]` 字节流工厂缝 | `Rs485Device::open()`（`device.rs:271`）直连串口、**无注入点** ⇒ 不补缝则 T-L0 的 E1–E6（真实 RTU 栈进程内 e2e，59/59）**无法搬迁**。缝与 `intercore::transport::modbus::test_seam`（`modbus.rs:159-187`）**同构**（进程级单例 + `clear()` + 生产构建编译期消除） |
+| **R-3** | 新增 `#[cfg(test)]` 字节流工厂缝 | `Rs485Device::open()`（`device.rs:271`）直连串口、**无注入点** ⇒ 不补缝则 T-L0 的 E1–E6（真实 RTU 栈进程内 e2e，59/59）**无法搬迁**。缝与 `intercore::transport::modbus::test_seam`（`modbus.rs:159-187`；**该参照实现已随 T4 删除**）**同构**（进程级单例 + `clear()` + 生产构建编译期消除）。⚠️ **落地形态（2026-09-26 登记，见 Δ-25）**：**改用 Cargo feature `test-seam`**（`rs485-plugin/Cargo.toml` 的 `test-seam = []`，**默认关闭**；仅 `mupc-southd` 的 `[dev-dependencies]` 开启 ⇒ **产线构建仍编译期消除**）—— 因 `#[cfg(test)]` **不随下游 crate 的测试构建传播**，下游集成测试看不到缝 |
 
 **注**：`write_single_register` 的既有调用方（`send_pv_limit` / `send_load_shedding` 所在的逆变器/柔荷路径）**不受影响**；R-1 只**新增**方法，R-2 的校验对合法设备是**恒真**的（回显本就是 Modbus 规范行为）。
 
@@ -3486,7 +3486,7 @@ south_pcs:
 > 3. 由 `south_pcs` 段合成上云所需站壳的逻辑，**生产与测试共用同一函数**（现测试内两处手写合成会与生产漂移）；
 > 4. `has_pcs` 与 `south_pcs.enabled` 不一致时 **`Err`（fail-closed）**，不得 fail-open 放行。
 >
-> ⇒ **T3 的装配注入点由 5 个变为 6 个**（第 6 个 = 上云点表调用点）。
+> ⇒ **装配接线点：计划原定 5 个**；落地时评审查出 **第 6 个**（上云点表调用点 —— 本注 / Δ-19）**与第 7 个**（`mqtt_station_roles` 的角色表接线 —— T10 规格评审查出）⇒ **最终 7 个**（逐点清单见 `docs/technical-debt.md` U-81 与 §13.11）。
 
 ### 13.10 迁移分期
 
@@ -3496,7 +3496,7 @@ south_pcs:
 |------|------|----------|
 | **T1** | `rs485-plugin` R-1/R-2/R-3；`StationBus::write_single`（+ `MockBus` 补实现） | 不碰 core-bin；`rs485-plugin` 既有测试须全绿 |
 | **T2** | `southd`：`pcs/`（regs + 状态机 + 采集循环 + `PcsHandle`）+ `PcsSnapshot` + `SouthPcsConfig` + `south_pcs` 解析；`pcs_sim` 迁入（**类型换本地**，去 tokio-modbus）；E1–E6 搬迁 + 新增采集循环用例 | 此阶段 intercore 的 PCS 面**仍在**，两套并存但**均未接入 core-bin** |
-| **T3** | `core-bin` 装配**一次性换型**：5 个注入点 + `InterlockPort` 适配器 + `core_config`（删 `intercore.modbus_rtu`、加 `SouthPcsConfig` + P-1…P-4）+ 两个 yaml | ⚠️ **必须是原子提交**：这是安全链的**唯一切换点**，使 `stopped_latched` 与 S-4 守卫在任何中间态**都是单一实现**，不存在"半搬"窗口 |
+| **T3** | `core-bin` 装配**一次性换型**：**原定 5 个**注入点（**最终 7 个 —— 评审查出第 6 个上云点表调用点与第 7 个 `mqtt_station_roles`，见 §13.9 注**）+ `InterlockPort` 适配器 + `core_config`（删 `intercore.modbus_rtu`、加 `SouthPcsConfig` + P-1…P-4）+ 两个 yaml | ⚠️ **必须是原子提交**：这是安全链的**唯一切换点**，使 `stopped_latched` 与 S-4 守卫在任何中间态**都是单一实现**，不存在"半搬"窗口 |
 | **T4** | 删 `intercore` 的 PCS 面（`pcs.rs`/`transport/modbus.rs`/`pcs_sim.rs`/`modbus_rtu.rs`/两个 bin）+ 移除 `tokio-modbus`/`tokio-serial` + 跨文档回写（§13.12） | 收尾清理 |
 
 **T3 之前不得删除 intercore 的任何 PCS 代码** —— 这是对"一次做完"（Q4=②）风险的具体处置：分期的**目的不是减小总改动量，而是保证任一时刻安全语义只有一份实现**。
@@ -3515,6 +3515,7 @@ south_pcs:
 | **Δ-22** | **M9a 口径收敛（落地中暴露的未登记语义差）**：原文心跳对"总线读**成功**但 `RUN_STATE(1013)` **域外**"的处理是 **`bad += 1` 且不置在线**（M9a，`modbus.rs:563-565` / `:596-599`）；迁移后 `tick_once` 只要总线 `Ok` 就 `bad = 0` + 置在线，域外仅体现为 `snapshot.run_state = None` | ★**裁定：接受该收敛并登记**（**不**回归原文）。**理由**：能走到"读成功 + 域外"意味着 **CRC 已过 ⇒ 帧完整**，域外说明**值不对**（设备型号/固件/点表映射不符或配置错），而非**链路坏** ⇒ 判离线会把"在线但值异常"误报成"离线"，**遮蔽真实的映射问题**。**代价（如实登记）**：原文 M9a 想防的"CRC 合法但错位帧"不再计入离线判据 —— 但这类帧既已过 CRC，属**值语义**问题，应由域校验面承担（`snapshot` 各字段独立 `None` 正是该面）。**须在 §8.7 真机项随 PCS 联调复核**：若真机出现"值恒域外且无人察觉"，回看本条 |
 | **Δ-23** | **`intercore` 的 TCP 通道保留但生产路径无消费者；且 `IntercoreClient` 现为"只发不收"** —— 删 PCS 面后客户端的接收能力（原 `TcpTransport` 的回读接收循环）随之消失，**接收原语仅存于 `IntercoreServer` 服务端角色** | ★**落地评审查出的差异**（Task 11 收口 `22fed56`）。§13.2 ADR-014 的"`mupc-intercore` 收敛为纯核间 TCP 帧协议**供后续演进**"仍成立，但**"供后续演进"须先新增客户端接收原语**，否则该通道只能单向下发。代码注释（`intercore/src/lib.rs` 模块文档）与 `technical-debt.md` §6.13 均已如实指向本处 |
 | **Δ-24** | **`south_pcs.enabled=false` 时两条下行链路的降级口径不对称**：IEC104 `p_set` 路径**如实回 `success:false` + 告警**（`startup.rs` 的 `StrategyCommandHandler`）；而 AI 侧的双参数 / 台区储能分相下发是**静默 no-op（仅 `tracing::debug!`）** | ★**登记备裁**。两者都**不越权写**（安全），但**可观测性不同**：静默臂在"部署忘开 `south_pcs.enabled`"时**无告警**。处置建议（本增量不改）：AI 侧 no-op 至少升为 `warn!` 或投一条事件。**落点已登记于 `technical-debt.md` §6.13** |
+| **Δ-25** | **§13.6 R-3 的门控形态**：设计写 `#[cfg(test)]` 字节流工厂缝，**实现改用 Cargo feature `test-seam`（默认关闭）** | ★**登记（形态偏离，非缺陷）**。**理由**：`#[cfg(test)]` 只对**本 crate 自身**的 test 目标开启（`rs485-plugin/Cargo.toml` 亦已写明），**不随下游 crate 的测试构建传播** ⇒ `mupc-southd` 的集成测试（以及 T-L0 的 E1–E6 进程内 e2e）编译的是普通依赖产物、看不到缝，**e2e 无法搬迁**。改用 feature `test-seam`（`rs485-plugin/Cargo.toml` 的 `test-seam = []`；**仅 `mupc-southd` 的 `[dev-dependencies]` 开启**）⇒ **产线构建（`cargo build` 不开 feature）仍是编译期消除**，与设计意图等价（落点见实施计划 Task 2）。**判据**：不开 feature 的构建里 `set_test_exchange` / `clear_test_exchange` 不存在 |
 
 ### 13.12 一致性声明
 
@@ -3526,6 +3527,7 @@ south_pcs:
 | 02 PRD | **N-4**（`pcs` 站不得写）须由"类型系统保证"改为"`PcsHandle` 独占 + §13.5.3 审计"；**N-1/N-2**（`pcs` 不触发 `on_battery_soc`/`on_grid_package`）**不变**（`PcsHandle` 只投 `on_station_telemetry` + `on_station_offline`）。**PRD 回写与代码同批（T4）**，避免文档先于事实 |
 | `10-MUPC-核间通信-设计文档.md` | §11 全章须标注"PCS 通道已迁出至 02 §13"；§1.1 架构图与 §11.9 的"实时控制模块 = 两级式 PCS、`transport=modbus_rtu`"表述须收窄为"历史"/"已迁出"；**ADR-011 加交叉引用行指向 ADR-015**。**同批 T4 执行** |
 | `03-MUPC-数据处理与存储` / `12-MUPC-本地显示终端` | 涉及"PCS 数据源 = intercore"的引用改指 southd `PcsHandle`（12 号 §4.1 的 `ThreePhaseRead` 来源注、§2.1 数据流图）。**同批 T4 执行** |
+| `01-MUPC-通信网关-设计文档.md` §9.2.1 / §9.4 | `build_uplink_points` 签名与调用点**随 PCS 迁入扩为显式收 PCS 段**（2026-09-26）—— 签名由单参扩为 `(cfg: &SouthStationsConfig, pcs: Option<&SouthPcsConfig>)`，§9.1.8 装配表与 §9.4 序 2 两处调用点补 `Some(&config.south_pcs)`（Δ-19；避免 72 个 PCS IOA 静默丢失）。**已回写**（01 号设计 v1.4-r6） |
 | `docs/technical-debt.md` | 本章落地后登记迁移项与 §8.7 的真机复核项（SOC 链路 / 三相 / 联锁停机 / 采集循环时延）。**同批 T4 执行** |
 | 项目 CLAUDE.md | 无硬编码密钥；无新增 `unsafe`；错误类型实现 `std::error::Error`；不新增独立设计文档；**不新增 crate**（ADR-014 已排除） |
 

@@ -1009,11 +1009,6 @@ mod tests {
         pcs
     }
 
-    /// 参考配置（PCS 启用）= 站级 5 站 + PCS 段（639 点口径）。
-    fn cfg_pcs_enabled() -> (SouthStationsConfig, SouthPcsConfig) {
-        (cfg_ref(), pcs_ref())
-    }
-
     fn count(points: &[UplinkPoint], mask: ChannelMask) -> usize {
         points.iter().filter(|p| p.channels.has(mask)).count()
     }

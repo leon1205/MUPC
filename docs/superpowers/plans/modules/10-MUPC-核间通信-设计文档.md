@@ -977,7 +977,7 @@ mupc/crates/intercore/
     └── watchdog.rs             # 看门狗（Watchdog、WatchdogConfig、WatchdogState）
 ```
 
-**说明**：上表为 TCP 仿真栈文件结构（IntercoreServer）。Modbus/PCS 生产通道文件：`src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）、`src/transport/modbus.rs`（PCS 驱动）、`src/transport/tcp.rs`（TcpTransport）、`src/pcs.rs`（PCS 点表/编解码），PCS 协议从站仿真为 `src/bin/pcs_slave.rs`；历史假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。
+**说明**：上表为 TCP 仿真栈文件结构（IntercoreServer）。Modbus/PCS 生产通道文件：`src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）、`src/transport/modbus.rs`（PCS 驱动）、`src/transport/tcp.rs`（TcpTransport）、`src/pcs.rs`（PCS 点表/编解码），PCS 协议从站仿真为 `src/bin/pcs_slave.rs`；历史假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。⚠️ **2026-09-26 改注（本节 T4 标注遗漏，补）**：上列 **Modbus/PCS 生产通道文件**（`src/transport/modbus.rs`、`src/pcs.rs`、`src/bin/pcs_slave.rs`、`src/modbus_rtu.rs`、`src/bin/modbus_slave.rs`）**已随 PCS 通信与控制整体迁入南向（02 号设计 §13 / ADR-014）删除** —— 寄存器表现址 = `mupc-southd/src/pcs/regs.rs`、采集循环与三相读现址 = `mupc-southd/src/pcs/collect.rs`、`PcsHandle` 在 `mupc-southd/src/pcs/`；本段保留为**历史**（§11 全章的"已迁出"横幅未覆盖本节）。
 
 ### 9.2 文件职责说明
 
