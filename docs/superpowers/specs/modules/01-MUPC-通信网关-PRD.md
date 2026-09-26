@@ -701,7 +701,7 @@ pub enum BusError {
 
 | # | 现状 | 证据 |
 |---|------|------|
-| 1 | IEC 104 只上送**总表 6 点**（IOA 1–6），**无外设** | `mupc/crates/mupc-core-bin/src/startup.rs:316-405`（`broadcast_grid_iec104`）；IOA 表出处 `plans/2026-09-09-修复批次-审查P1P2-R1R2R3.md:276`，原文标注「**占位常量、现场追认**」 |
+| 1 | IEC 104 只上送**总表 6 点**（IOA 1–6），**无外设** | `mupc/crates/mupc-core-bin/src/startup.rs:316-405`（`broadcast_grid_iec104`）；IOA 表出处 `plans/2026-09-09-修复批次-审查P1P2-R1R2R3.md:276`〔注：该文件已于 2026-09-27 归档至 docs/superpowers/plans/archive/〕，原文标注「**占位常量、现场追认**」 |
 | 2 | IEC 104 **无总召**：主站没有"需要时取数"的手段 | `gateway/src/iec104/connection.rs:242-274` 只解析遥控/调节；`protocol.rs:398` 断言 `TypeId::from_u8(100) == None`（**C_IC_NA_1 当前不认识**） |
 | 3 | IEC 104 **连接前缓存无快照** | `gateway/src/iec104/server.rs:298-303`（`broadcast_telemetry` 只向已连接的 `tx` 发送） |
 | 4 | MQTT 北向/本地**两条链路全链空转，无生产者** | `mqtt-bridge/src/north_client.rs:143`、`local_client.rs:147` 的 `publish` **无任何调用方**；`mqtt-plugin/src/lib.rs:75` 的 `start()` 为**空实现** |
