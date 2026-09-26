@@ -753,33 +753,73 @@ impl Rs485Device {
         parse_regs_response(&response, expected_slave_of(&cmd)?, self.config.crc_mode)
     }
 
-    /// 写入单个寄存器（Modbus 功能码 0x06）
+    /// 写入单个寄存器（Modbus 功能码 0x06），用 `config.device_addr` 作从站。
     pub fn write_single_register(&self, addr: u16, value: u16) -> Result<(), Rs485Error> {
-        let func_code: u8 = 0x06;
+        self.write_single_register_from(self.config.device_addr, addr, value)
+    }
+
+    /// 写入单个寄存器（FC06），**显式从站地址**（同口多从站；与读侧 `_from` 家族对称）。
+    ///
+    /// 与旧实现（只判 `len < 8`）的差别：本函数**校验响应回显** —— 从站号、功能码、
+    /// 地址、值四项必须与请求逐字一致。停机写 `REG_START_STOP=0` 属**安全动作**，
+    /// "发出去了但被别的从站/错帧应答"必须能被检出。
+    /// 回显不符按 `Rs485Error::ConfigFailed` 报出，报文中含两侧从站号便于定位。
+    pub fn write_single_register_from(
+        &self,
+        slave: u8,
+        addr: u16,
+        value: u16,
+    ) -> Result<(), Rs485Error> {
+        const FUNC: u8 = 0x06;
         let mut cmd = vec![
-            self.config.device_addr,
-            func_code,
+            slave,
+            FUNC,
             (addr >> 8) as u8,
             addr as u8,
             (value >> 8) as u8,
             value as u8,
         ];
-
-        let crc = Frame::calculate_crc(
-            self.config.device_addr,
-            func_code,
-            &cmd[2..],
-            self.config.crc_mode,
-        );
+        let crc = Frame::calculate_crc(slave, FUNC, &cmd[2..], self.config.crc_mode);
         cmd.push(crc as u8);
         cmd.push((crc >> 8) as u8);
 
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
 
+        // 期望从站号取自**请求帧首字节**（与读侧 `expected_slave_of` 同一取向：
+        // "请求谁就校验谁"是构造关系，不是调用点约定）。
+        let expected_slave = expected_slave_of(&cmd)?;
         if response.len() < 8 {
-            return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写响应过短：{} 字节（FC06 回显应为 8）",
+                response.len()
+            )));
         }
-
+        // Modbus 异常响应：功能码置 bit7（0x86），第 3 字节为异常码
+        if response[1] == (FUNC | 0x80) {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x} 被从站 {} 拒绝，异常码={:#04x}",
+                response[0], response[2]
+            )));
+        }
+        if response[0] != expected_slave {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}：响应从站号 slave={} 与请求 slave={expected_slave} 不符（他站帧）",
+                response[0]
+            )));
+        }
+        if response[1] != FUNC {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}：响应功能码 {:#04x} 与请求 {FUNC:#04x} 不符",
+                response[1]
+            )));
+        }
+        let echo_addr = u16::from_be_bytes([response[2], response[3]]);
+        let echo_value = u16::from_be_bytes([response[4], response[5]]);
+        if echo_addr != addr || echo_value != value {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}={value:#06x}：回显为 {echo_addr:#06x}={echo_value:#06x}，与请求不符"
+            )));
+        }
         Ok(())
     }
 }
@@ -1296,6 +1336,61 @@ mod frame_validation_tests {
             err.to_string().contains("slave=2") && err.to_string().contains("slave=1"),
             "FC02 回 config.device_addr 的帧必须拒，实际: {err}"
         );
+    }
+
+    // ── 写路径（FC06）回显校验：与读侧同一取向 ─────────────────────────
+
+    #[test]
+    fn write_single_register_from_rejects_wrong_slave_echo() {
+        // 请求 slave=2；回帧从站号 = 1（= config.device_addr）⇒ 必须拒，且报文两侧从站号都要出现。
+        let device = create_test_device(); // config.device_addr = 0x01
+        let bad = {
+            let mut v = vec![0x01, 0x06, 0x01, 0xF4, 0x00, 0x00];
+            let crc = Frame::calculate_crc(0x01, 0x06, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        *device.test_response.lock() = Some(bad);
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("slave=2") || err.to_string().contains("从站"),
+            "回他站帧必须拒且报文点明从站号，实际: {err}"
+        );
+    }
+
+    #[test]
+    fn write_single_register_from_rejects_value_echo_mismatch() {
+        // 从站号对、功能码对，但回显值不同 ⇒ 必须拒。
+        let device = create_test_device();
+        let bad = {
+            let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x00, 0x01]; // 回显 1，请求 0
+            let crc = Frame::calculate_crc(0x02, 0x06, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        *device.test_response.lock() = Some(bad);
+        assert!(device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .is_err());
+    }
+
+    #[test]
+    fn write_single_register_from_accepts_correct_echo() {
+        // 正对照：从站号、功能码、地址、值全对 ⇒ 放行（防"改坏成恒 Err"式的假绿）。
+        let device = create_test_device();
+        let ok = {
+            let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x00, 0x00];
+            let crc = Frame::calculate_crc(0x02, 0x06, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        *device.test_response.lock() = Some(ok);
+        assert!(device.write_single_register_from(2, 0x01F4, 0x0000).is_ok());
     }
 }
 
