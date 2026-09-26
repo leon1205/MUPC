@@ -2449,19 +2449,24 @@ south_stations:
     - { id: battery_1, role: battery, port: "/dev/ttyS0", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        // 该 yaml 的 `south_pcs.regs` 为空 ⇒ 段内校验会先报 regs；为**只**验 P-2，
-        // 这里直接用 `validate_south_stations()`（P-2 的落点），不去碰段内校验顺序。
-        let err = config.validate_south_stations().unwrap_err();
+        // ⚠️ **订正（2026-09-26 规格评审）**：原注释称"该 yaml 的 `south_pcs.regs` 为空 ⇒
+        // 段内校验会先报 regs，故直接用 `validate_south_stations()`"——**事实相反**。
+        // 真实调用序（见 `CoreConfig::validate`）：`validate_io()` 在 `io.enabled=false` 时
+        // 早退 ⇒ 接着 `validate_south_stations()`（P-2 的落点，本 yaml 站级非空故必走）
+        // ⇒ **之后**才是 `south_pcs.validate()`（那里才有"regs 为空"）。
+        // 故本用例改回经 `validate()` —— 拿到的**正是** P-2，且与生产门禁同一入口
+        // （比只调私有落点更强：顺带覆盖了"P-2 在 validate 链路上真能被抵达"）。
+        let err = config.validate().unwrap_err();
         assert!(
             err.contains("同口") && err.contains("P-2"),
             "期望提示 PCS 口与站口同节点重复（全路径归一），实际: {}",
             err
         );
-        // 关闭 PCS ⇒ 同一份站级配置不再因该口被判死
+        // 关闭 PCS ⇒ 同一份站级配置不再因该口被判死（同经 `validate()` 全链）
         let mut off = config.clone();
         off.south_pcs.enabled = false;
         assert!(
-            off.validate_south_stations().is_ok(),
+            off.validate().is_ok(),
             "south_pcs.enabled=false 时 P-2 不适用: {:?}",
             off.validate_south_stations()
         );

@@ -35,6 +35,39 @@ pub enum BusError {
     },
 }
 
+/// 口层**控制面参数**：`StationConf` **无落点**、而 `rs485_plugin::config::Config` 需要三项
+/// （单次事务超时 / 数据位 / 停止位）。
+///
+/// **为什么单列而不给 `StationConf` 加字段**：站级段的语义是"一口多站的口/从站/点表"，
+/// 不含控制面；只有 `south_pcs`（PCS 独占口的单值段）带这三项 ⇒ 由调用方显式传入，
+/// **不为 PCS 改站级结构语义**。
+///
+/// **默认值 = `rs485_plugin::config::Config::default()` 的同三项**（超时 1000ms / 8N1）
+/// ⇒ 站级路径经 [`Rs485PortBus::open`] 调用时与改动前**逐字段等价**（`bus_config` 原先直接
+/// `..Config::default()` 兜底）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortParams {
+    /// 单次读写事务超时（毫秒）。⚠️ 落进 `termios` 的 `VTIME = timeout_ms / 100`
+    /// （**100ms 粒度**，见 `rs485-plugin/src/device.rs` 的 `configure_port`）。
+    pub timeout_ms: u64,
+    /// 数据位（5..=8；越界由 [`Rs485PortBus::open_with_port_params`] fail-closed 拒）。
+    pub data_bits: u8,
+    /// 停止位（1..=2；越界同上）。
+    pub stop_bits: u8,
+}
+
+impl Default for PortParams {
+    fn default() -> Self {
+        // 单一真源：不手写 1000/8/1 三个字面量（rs485 侧改默认值时本处必须同向跟随）
+        let d = rs485_plugin::config::Config::default();
+        Self {
+            timeout_ms: d.timeout_ms,
+            data_bits: d.data_bits,
+            stop_bits: d.stop_bits,
+        }
+    }
+}
+
 /// 口级总线：按站读写寄存器 / 位（口内串行；调用方按站 slave 传参）。
 ///
 /// 真实 = [`Rs485PortBus`]（包单 `Rs485Device` + per-port async Mutex + spawn_blocking）；
@@ -71,16 +104,54 @@ pub struct Rs485PortBus {
 }
 
 impl Rs485PortBus {
-    /// 用站配置建 device 并 open。
+    /// 用站配置建 device 并 open（**站级路径**：口层控制面参数取 [`PortParams::default()`]）。
     ///
     /// port 归一：不以 `/` 开头则补 `/dev/`（兼容 §10.3 两种写法：`ttyS4` / `/dev/ttyS4`）。
     /// 串口参数：baud_rate 透传 `conf.baud_rate`（per-station baud，同口一致性由段内
-    /// validate 保证，Task 1），**parity 透传 `conf.parity`**（S3b-2 T5，见 [`bus_config`]），
-    /// 余 8N1/timeout1000/Crc16Modbus 用 rs485 `Config::default()`。
+    /// validate 保证，Task 1），**parity 透传 `conf.parity`**（S3b-2 T5，见 [`bus_config`]）；
+    /// **超时/数据位/停止位**取 [`PortParams::default()`]（= 改动前的
+    /// `Config::default()`：timeout1000 / 8N1 ⇒ 站级行为逐字段不变）；
+    /// Crc16Modbus/DE-RE 仍用 rs485 `Config::default()`。
     /// device_addr = 该口首个站的 slave（仅作 handler/委托缺省；southd 读走 `*_from`
     /// 显式 slave，不受影响）。
     pub fn open(conf: &crate::config::StationConf) -> Result<Self, BusError> {
-        let c = bus_config(conf);
+        Self::open_with_port_params(conf, PortParams::default())
+    }
+
+    /// 与 [`Self::open`] 同，另收**口层控制面参数**（`StationConf` 无落点的三项；见 [`PortParams`]）。
+    ///
+    /// **当前唯一生产消费者**：`mupc-core-bin` 的 PCS 装配段（`south_pcs.response_timeout_ms`
+    /// / `data_bits` / `stop_bits`）。迁移前这三项走 `intercore.modbus_rtu`；迁入南向后若没有
+    /// 落点就是**死配置** —— 尤以 `response_timeout_ms` 有实害：yaml 写 200 而实际取
+    /// `Config::default()` 的 1000ms，会拖慢 `stop()` 这类安全动作的失败检测（Task 10 评审项 2）。
+    ///
+    /// **fail-closed 边界**（与 `rs485_plugin::config::Config::validate()` 同源）：`data_bits`
+    /// 须 5..=8、`stop_bits` 须 1..=2、`timeout_ms` 须 > 0 —— 越界即 `Err`。原因：rs485 侧
+    /// `configure_port` 对越界值是 `_ =>` **静默**落到 8/1 ⇒ 不拦就是拿一种静默降级换另一种。
+    /// 站级路径不受影响：`PortParams::default()` 恒在界内，永不触发本守卫。
+    pub fn open_with_port_params(
+        conf: &crate::config::StationConf,
+        params: PortParams,
+    ) -> Result<Self, BusError> {
+        if !(5..=8).contains(&params.data_bits) {
+            return Err(BusError::Open(
+                conf.port.clone(),
+                format!("data_bits={} 越界（须 5..=8）", params.data_bits),
+            ));
+        }
+        if !(1..=2).contains(&params.stop_bits) {
+            return Err(BusError::Open(
+                conf.port.clone(),
+                format!("stop_bits={} 越界（须 1..=2）", params.stop_bits),
+            ));
+        }
+        if params.timeout_ms == 0 {
+            return Err(BusError::Open(
+                conf.port.clone(),
+                "timeout_ms=0 非法（VTIME 会落 0 ⇒ 读恒即时返回）".to_string(),
+            ));
+        }
+        let c = bus_config(conf, params);
         let handler = rs485_plugin::handlers::ProtocolHandlerRegistry::get(&conf.protocol, &c)
             .ok_or_else(|| {
                 BusError::Open(conf.port.clone(), format!("无 {} handler", conf.protocol))
@@ -219,8 +290,16 @@ impl StationBus for Rs485PortBus {
 /// 且现象是 "offline" 而非"配置错"）。该透传是 **D-1 空调校验位裁定（RC-6）的代码侧前置**：
 /// 现场一旦裁定为 `even`，**只改配置即可生效、无需改代码**。
 ///
-/// 其余参数（`timeout_ms`/`crc_mode`/8N1/DE-RE）仍取 `Config::default()`（本轮不改）。
-fn bus_config(conf: &crate::config::StationConf) -> rs485_plugin::config::Config {
+/// **Task 10 评审项 2 新增 `PortParams` 透传**（超时/数据位/停止位）：站级段没有这三项，
+/// 原先一律 `..Config::default()`（timeout1000 / 8N1）⇒ `south_pcs` 段写了也**不生效**
+/// （YAML 写 200ms、实际 1000ms）。现由调用方经 [`PortParams`] 显式传入；站级路径传
+/// `PortParams::default()` ⇒ 与改动前逐字段等价。
+///
+/// 其余参数（`crc_mode`/DE-RE）仍取 `Config::default()`。
+fn bus_config(
+    conf: &crate::config::StationConf,
+    params: PortParams,
+) -> rs485_plugin::config::Config {
     use crate::config::StationParity;
     rs485_plugin::config::Config {
         port: normalize_port(&conf.port),
@@ -231,6 +310,10 @@ fn bus_config(conf: &crate::config::StationConf) -> rs485_plugin::config::Config
             StationParity::Even => rs485_plugin::Parity::Even,
             StationParity::Odd => rs485_plugin::Parity::Odd,
         },
+        // 口层控制面三项（见 `PortParams`）：缺省即 rs485 默认 ⇒ 站级路径行为不变
+        timeout_ms: params.timeout_ms,
+        data_bits: params.data_bits,
+        stop_bits: params.stop_bits,
         ..rs485_plugin::config::Config::default()
     }
 }
@@ -727,14 +810,20 @@ mod tests {
     fn bus_config_passes_station_parity_through() {
         let mut c = conf("ttyS4", "modbus");
         assert_eq!(
-            bus_config(&c).parity,
+            bus_config(&c, PortParams::default()).parity,
             rs485_plugin::Parity::None,
             "缺省 none"
         );
         c.parity = StationParity::Even;
-        assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::Even);
+        assert_eq!(
+            bus_config(&c, PortParams::default()).parity,
+            rs485_plugin::Parity::Even
+        );
         c.parity = StationParity::Odd;
-        assert_eq!(bus_config(&c).parity, rs485_plugin::Parity::Odd);
+        assert_eq!(
+            bus_config(&c, PortParams::default()).parity,
+            rs485_plugin::Parity::Odd
+        );
     }
 
     /// 透传的同时**不得**改动既有透传项（port 归一 / baud_rate / device_addr）。
@@ -744,10 +833,87 @@ mod tests {
         c.baud_rate = 19200;
         c.slave = 7;
         c.parity = StationParity::Even;
-        let cfg = bus_config(&c);
+        let cfg = bus_config(&c, PortParams::default());
         assert_eq!(cfg.port, "/dev/ttyS4");
         assert_eq!(cfg.baud_rate, 19200);
         assert_eq!(cfg.device_addr, 7);
+    }
+
+    // ---------- bus_config：口层控制面三项透传（Task 10 评审项 2）----------
+
+    /// **超时/数据位/停止位必须真透传**（此前是死配置：`south_pcs` 段写了不生效）。
+    ///
+    /// **改什么会让本条变红**：把 `bus_config` 里三项回填改成不读 `params`（走
+    /// `..Config::default()` 兜底）⇒ 本条红（正是评审指出的形态：yaml 写 200ms 实际 1000ms）。
+    ///
+    /// 判别力：三项各取一个**非默认**值（200 / 7 / 2），任何一个漏透传都会被单独抓住。
+    #[test]
+    fn bus_config_passes_port_params_through() {
+        let c = conf("ttyS4", "modbus");
+        let cfg = bus_config(
+            &c,
+            PortParams {
+                timeout_ms: 200,
+                data_bits: 7,
+                stop_bits: 2,
+            },
+        );
+        assert_eq!(
+            cfg.timeout_ms, 200,
+            "response_timeout_ms 须落到 Config.timeout_ms"
+        );
+        assert_eq!(cfg.data_bits, 7, "data_bits 须落到 Config.data_bits");
+        assert_eq!(cfg.stop_bits, 2, "stop_bits 须落到 Config.stop_bits");
+
+        // 站级路径等价性锚：默认参数 == `rs485_plugin::config::Config::default()` 的同三项
+        //（`open(conf)` 走的就是这一档 ⇒ 站级行为逐字段不变）
+        let d = bus_config(&c, PortParams::default());
+        let rd = rs485_plugin::config::Config::default();
+        assert_eq!(
+            (d.timeout_ms, d.data_bits, d.stop_bits),
+            (rd.timeout_ms, rd.data_bits, rd.stop_bits),
+            "PortParams::default() 必须等于 rs485 默认三项（否则站级路径语义被改）"
+        );
+    }
+
+    /// `open_with_port_params` 对越界控制面参数 **fail-closed**。
+    ///
+    /// 理由：rs485 侧 `configure_port` 对越界 `data_bits`/`stop_bits` 是 `_ =>` 静默落到 8/1
+    /// ⇒ 不拦就是"配错了却不报"。故三态各拦一条。
+    #[test]
+    fn open_with_port_params_rejects_out_of_range_bits() {
+        let c = conf("southd_ut_no_such_tty", "modbus");
+        let bad = [
+            PortParams {
+                timeout_ms: 200,
+                data_bits: 9,
+                stop_bits: 1,
+            },
+            PortParams {
+                timeout_ms: 200,
+                data_bits: 4,
+                stop_bits: 1,
+            },
+            PortParams {
+                timeout_ms: 200,
+                data_bits: 8,
+                stop_bits: 3,
+            },
+            PortParams {
+                timeout_ms: 0,
+                data_bits: 8,
+                stop_bits: 1,
+            },
+        ];
+        for pp in bad {
+            assert!(
+                matches!(
+                    Rs485PortBus::open_with_port_params(&c, pp),
+                    Err(BusError::Open(..))
+                ),
+                "越界控制面参数须 Open Err（fail-closed），实得 Ok：{pp:?}"
+            );
+        }
     }
 }
 

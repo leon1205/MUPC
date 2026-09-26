@@ -339,6 +339,10 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
 /// （port/baud_rate/parity），带上 `regs` 只会让"配置 × 上云"两条路径在读取点表时被误接。
 /// 故此处把 `regs` 置空、role 记 `Pcs`（只为日志可读），**且本函数不参与任何配置校验路径**
 /// （P-2/P-3/P-4/P-5 全在 `CoreConfig::validate` 与 `SouthPcsConfig::validate`）。
+///
+/// **口层控制面三项（超时/数据位/停止位）不在这里**：`StationConf` 无对应字段，故单列
+/// [`south_pcs_port_params`] 交给 `open_with_port_params`（Task 10 评审项 2 —— 这三项曾因
+/// 只有站壳路径而**全部不生效**）。
 fn south_pcs_bus_conf(
     cfg: &mupc_southd::config::SouthPcsConfig,
 ) -> mupc_southd::config::StationConf {
@@ -353,6 +357,46 @@ fn south_pcs_bus_conf(
         interval_ms: cfg.interval_ms,
         regs: Vec::new(),
     }
+}
+
+/// `south_pcs` 段的**口层控制面参数** → [`mupc_southd::port_runtime::PortParams`]
+/// （**生产调用形态的唯一收敛点**）。
+///
+/// 三项的落点：`response_timeout_ms` → `Rs485Device` 的 `Config.timeout_ms`
+/// （迁移前由 `intercore.modbus_rtu.response_timeout_ms` 提供，缺省 200ms ⇒ 若不接线就
+/// 静默变 1000ms，`stop()` 这类安全动作的失败检测随之变慢）；`data_bits`/`stop_bits`
+/// → 同结构体的对应字段。
+///
+/// 回归网：`task10_south_pcs_port_params_read_all_three_control_fields`
+/// （把本函数改成 `PortParams::default()` ⇒ 该用例红）。
+fn south_pcs_port_params(
+    cfg: &mupc_southd::config::SouthPcsConfig,
+) -> mupc_southd::port_runtime::PortParams {
+    mupc_southd::port_runtime::PortParams {
+        timeout_ms: cfg.response_timeout_ms,
+        data_bits: cfg.data_bits,
+        stop_bits: cfg.stop_bits,
+    }
+}
+
+/// MQTT 上送的角色表（**Task 10 第 7 接线点的唯一收敛处**，设计 §9.3 / §13.9）。
+///
+/// 站级段（`south_stations`，5 站）**不含** PCS 站 —— PCS 已按 ADR-016 迁到顶层段
+/// `south_pcs`，其站壳由 [`mupc_southd::config::SouthPcsConfig::station_shell`] 合成
+/// ⇒ 此处**必须**传 `Some(&config.south_pcs)`：退化为 `None` 时
+/// `uplink::plan_stations` 查不到 `"pcs"`，MQTT 遥测/事件载荷的 `role` 会落**空串**
+/// （`roles.get(..).unwrap_or_default()`）——**静默降级**，无日志、无告警。
+///
+/// 回归网：`task10_station_roles_wiring_carries_pcs_role_into_publish_plan`
+/// （把本函数的 `Some` 改成 `None` ⇒ 该用例红；改写前把它改回 `None` 则全绿，
+/// 因为既有用例都是自己带上 `Some` 直接调 `uplink::station_roles`，绕开了本生产调用点）。
+fn mqtt_station_roles(
+    config: &CoreConfig,
+) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+    std::sync::Arc::new(crate::uplink::station_roles(
+        &config.south_stations,
+        Some(&config.south_pcs),
+    ))
 }
 
 /// 创建并打开一个 RS485 南向设备；无硬件（串口不存在）时返回 None
@@ -1306,7 +1350,11 @@ pub async fn initialize_all(
     // ⚠️ 本变量在 PCS 迁入南向后**生产路径无消费者**（6 个注入点已全部改持 `PcsHandle`）；
     // 它只经 `StartupContext.intercore` 移交（该字段现无读取方）。保留 TCP 装配的理由：
     // ① 保留"核间通道"的演进起点（设计 ADR-014）；② tcp 本就是仿真/联调通道，删掉会让
-    // sim-bridge 侧无从对接。**已登记为技术债**，不是遗漏。
+    // sim-bridge 侧无从对接。
+    // ⚠️ **本轮（2026-09-26）措辞订正**：原文写"**已登记为技术债**"，但技术债台账
+    // `docs/technical-debt.md` **查无本条**（该说法当时只落在实施计划里）⇒ 现如实指向：
+    // 详见实施计划 §待裁定 **P-2**（`intercore` TCP 装配保留但无消费者），**Task 12 统一
+    // 回写技术债**。本条不是"已闭环"，也不是"已登记"。
     #[allow(unused_variables)]
     let intercore: Arc<mupc_intercore::IntercoreClient> = match config.intercore.transport.as_str()
     {
@@ -1554,7 +1602,13 @@ pub async fn initialize_all(
         // 安全链的执行端，静默降级为"永远离线"会让联锁停机无原语、AI/策略下发无处可去。
         let bus: Arc<dyn mupc_southd::port_runtime::StationBus> = {
             let conf = south_pcs_bus_conf(&config.south_pcs);
-            let b = mupc_southd::port_runtime::Rs485PortBus::open(&conf).map_err(|e| {
+            // 口层控制面三项（超时/数据位/停止位）经 `PortParams` 显式传给口层 —— 它们
+            // **不在** `StationConf` 里（见 `south_pcs_port_params` 文档）；不接线就是死配置。
+            let b = mupc_southd::port_runtime::Rs485PortBus::open_with_port_params(
+                &conf,
+                south_pcs_port_params(&config.south_pcs),
+            )
+            .map_err(|e| {
                 MupcError::new(
                     ErrorCode::ConfigError,
                     format!("south_pcs 口 {} 打开失败: {e}", config.south_pcs.port),
@@ -2205,10 +2259,9 @@ pub async fn initialize_all(
     // ② 缺省 `enabled=false` ⇒ `plan_mqtt_launch` 返回全 `None` ⇒ **一行连接代码都不执行**；
     // ③ `NorthMqttConfig::default()` 的假域名/dummy 证书已改空串（C-11）。
     // 角色表须同时含 `south_pcs` 段合成的 `pcs` 站（否则 MQTT 载荷 `role` 落空串）
-    let mqtt_roles = Arc::new(crate::uplink::station_roles(
-        &config.south_stations,
-        Some(&config.south_pcs),
-    ));
+    // ⇒ 收敛到 `mqtt_station_roles`（**唯一接线点**，回归网见该函数文档与
+    // `task10_station_roles_wiring_carries_pcs_role_into_publish_plan`）。
+    let mqtt_roles = mqtt_station_roles(config);
     let mqtt_outcome = crate::uplink::assemble_mqtt_bridge(
         &config.mqtt_bridge,
         latest.clone(),
@@ -3495,5 +3548,145 @@ stations:
         );
         assert_eq!(q.cylinder_configured("bms"), None, "接线后非消防站仍不可得");
         assert_eq!(q.cylinder_configured("no-such-station"), None);
+    }
+
+    /// **Task 10 第 7 接线点的回归网**（规格评审 2026-09-26 指出：把 `mqtt_station_roles`
+    /// 里的 `Some(&config.south_pcs)` 改回 `None`，**全部既有用例仍绿** —— 因为既有用例
+    /// （`core-bin/src/uplink.rs` 的 `roles_of`）自己带上 `Some` 直接调
+    /// `uplink::station_roles`，**绕开了生产调用点**）。
+    ///
+    /// 后果（不接线时）：MQTT 载荷里 pcs 站的 `role` 落**空串**，且无用例会响。
+    ///
+    /// 两条断言缺一不可：
+    /// ① **生产形态**（`mqtt_station_roles(&cfg)` = `initialize_all` 的调用形态）下，`pcs` 站
+    ///    在发布计划里的 `role == "pcs"` —— `StationPlan.role` 正是遥测载荷 `role` 的来源
+    ///    （`uplink.rs` 的 `TelemetryPayload { role: st.role }`）；
+    /// ② `station_roles(.., None)` 与 `(.., Some(&pcs))` **确实不同**、且退化后落空串
+    ///    —— 钉住"传 None 会退化"这件事本身（这是防"接线点被改回 None 仍绿"的关键）。
+    ///
+    /// **改什么会让本条变红**：① `mqtt_station_roles` 的 `Some(..)` → `None` ⇒ 运行时断言红；
+    /// ② 把生产段改成**绕过** `mqtt_station_roles` 直接调 `crate::uplink::station_roles`
+    /// （哪怕硬编码 `Some(..)`）⇒ 源文本断言红（否则"换个地方退化成 None"会绕开 ①）。
+    #[test]
+    fn task10_station_roles_wiring_carries_pcs_role_into_publish_plan() {
+        // 与 `core-bin/src/uplink.rs` 用例**同一份 fixture**（不新建第二份点表真源）
+        const REF_STATIONS: &str =
+            include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
+        const REF_PCS: &str = include_str!("../../mupc-southd/tests/fixtures/south_pcs_s3b2.yaml");
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            south_stations: mupc_southd::config::SouthStationsConfig,
+        }
+
+        // ⓪ 生产段接线形状：角色表**只能**经 `mqtt_station_roles` 收敛（堵"绕过包装函数"的改法）
+        let production = production_src();
+        assert!(
+            production.contains("let mqtt_roles = mqtt_station_roles(config);"),
+            "生产段必须以 `mqtt_station_roles(config)` 收敛角色表（不得在装配点就地调 station_roles）"
+        );
+        assert_eq!(
+            production.matches("crate::uplink::station_roles(").count(),
+            1,
+            "生产段只允许 `mqtt_station_roles` 内部调用一次 `station_roles` —— 在装配点**再就地**\
+             调一次（比如退化成 None）会把 `Some/None` 的选择挪出被用例钉住的收敛点"
+        );
+
+        let mut cfg: CoreConfig = serde_yaml::from_str(MIN_YAML).expect("min yaml 必须可解析");
+        cfg.south_stations = serde_yaml::from_str::<Wrapper>(REF_STATIONS)
+            .expect("站级段解析失败")
+            .south_stations;
+        cfg.south_pcs = serde_yaml::from_str(REF_PCS).expect("south_pcs 段解析失败");
+        assert!(cfg.south_pcs.enabled, "参考 PCS 段须 enabled");
+
+        let points =
+            mupc_southd::uplink::build_uplink_points(&cfg.south_stations, Some(&cfg.south_pcs))
+                .expect("参考点表（5 站 + south_pcs）必须可生成");
+
+        // ① 生产形态 → 发布计划里 pcs 站的 role（= 载荷 role 的来源）
+        let plan = crate::uplink::plan_stations(&points, &mqtt_station_roles(&cfg));
+        let pcs = plan
+            .iter()
+            .find(|s| s.id == "pcs")
+            .expect("pcs 站必须在发布计划里（south_pcs.enabled=true）");
+        assert_eq!(
+            pcs.role, "pcs",
+            "生产装配形态下 pcs 站载荷 role 必须是 \"pcs\"（空串 = 静默降级）"
+        );
+
+        // ② 传 None 会退化（证明"改回 None 仍绿"是**缺陷**，而非两种写法等价）
+        let with_none = crate::uplink::station_roles(&cfg.south_stations, None);
+        let with_pcs = crate::uplink::station_roles(&cfg.south_stations, Some(&cfg.south_pcs));
+        assert_ne!(
+            with_none, with_pcs,
+            "传 None 必须与传 Some 不同（否则本条断言无判别力）"
+        );
+        assert!(
+            !with_none.contains_key("pcs"),
+            "传 None ⇒ 角色表里查无 pcs 站（`unwrap_or_default` 落空串的成因）"
+        );
+        let plan_none = crate::uplink::plan_stations(&points, &with_none);
+        assert_eq!(
+            plan_none
+                .iter()
+                .find(|s| s.id == "pcs")
+                .expect("pcs 站仍在计划里，只是 role 查不到")
+                .role,
+            "",
+            "传 None ⇒ pcs 站载荷 role 落空串（正是评审指出的静默退化形态）"
+        );
+    }
+
+    /// **Task 10 评审项 2 的回归网**：`south_pcs` 的 `response_timeout_ms` / `data_bits` /
+    /// `stop_bits` 是 `StationConf` **无落点**的控制面三项，`PcsHandle` 也不读它们
+    /// ⇒ 若不显式接线到口层，就是**死配置**（YAML 写 `response_timeout_ms: 200`，
+    /// 实际 `Rs485Device` 取 `Config::default()` 的 **1000ms**，`stop()` 这类安全动作的
+    /// 失败检测随之变慢）。
+    ///
+    /// 本用例钉住**生产形态的收敛点** `south_pcs_port_params`（口层侧的透传由
+    /// `mupc-southd` 的 `bus_config_passes_port_params_through` 钉住 ⇒ 两段合起来才是全链）。
+    ///
+    /// **改什么会让本条变红**：把 `south_pcs_port_params` 改成返回 `PortParams::default()`
+    /// （或任一字段硬编码）⇒ 本条红；把装配点的调用改成绕过它（就地 `PortParams::default()`、
+    /// 或退回 `Rs485PortBus::open`）⇒ 源文本断言红。
+    #[test]
+    fn task10_south_pcs_port_params_read_all_three_control_fields() {
+        // ⓪ 生产段接线形状：PCS 口必须以 `open_with_port_params` + `south_pcs_port_params` 打开
+        let production = production_src();
+        assert!(
+            production.contains("Rs485PortBus::open_with_port_params("),
+            "PCS 口必须走 `open_with_port_params`（退回 `Rs485PortBus::open` ⇒ 三项又成死配置）"
+        );
+        assert!(
+            production.contains("south_pcs_port_params(&config.south_pcs)"),
+            "口层参数的唯一来源必须是 `south_pcs_port_params(&config.south_pcs)`（不得就地取默认）"
+        );
+
+        let pcs = mupc_southd::config::SouthPcsConfig::default();
+        // 段缺省形态：`response_timeout_ms=200`（原 `intercore.modbus_rtu` 默认值）/
+        // `data_bits=8` / `stop_bits=1` ⇒ 三项都取自本段（**不得**是口层默认 1000ms）
+        let d = south_pcs_port_params(&pcs);
+        assert_eq!(
+            (d.timeout_ms, d.data_bits, d.stop_bits),
+            (200, 8, 1),
+            "段缺省必须取自 `south_pcs` 段（尤其 timeout：口层默认是 1000ms，取错即回落）"
+        );
+        assert_ne!(
+            d.timeout_ms,
+            mupc_southd::port_runtime::PortParams::default().timeout_ms,
+            "判别力锚：`south_pcs` 段默认 200ms **不同于**口层默认 1000ms ⇒ 本条不可能是\"两边都取默认\"的巧合"
+        );
+        // 三个字段各改成一个**非默认**值（注意 timeout 取 350 而非 200：200 恰是段默认值，
+        // 用它无法区分"真读字段"与"写死段默认"）⇒ 改配置后生效路径上的取值必须随动
+        let mut pcs = pcs;
+        pcs.response_timeout_ms = 350;
+        pcs.data_bits = 7;
+        pcs.stop_bits = 2;
+        let pp = south_pcs_port_params(&pcs);
+        assert_eq!(
+            pp.timeout_ms, 350,
+            "response_timeout_ms 必须透传（不得回落 `Config::default()` 的 1000ms）"
+        );
+        assert_eq!(pp.data_bits, 7, "data_bits 必须透传（不得静默用默认 8）");
+        assert_eq!(pp.stop_bits, 2, "stop_bits 必须透传（不得静默用默认 1）");
     }
 }
