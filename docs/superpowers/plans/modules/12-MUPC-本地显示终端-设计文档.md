@@ -301,12 +301,12 @@ crates/local-display/
 │                                                                                                  │
 │  进程 P0 = mupcd（主进程 / 数据 + 控制后端）                                                       │
 │  ┌────────────────────────────────────────────────────────────────────────────────────────┐   │
-│  │ 既有：核间 modbus(FC04/FC06) · gateway(IEC104) · 策略引擎 · AI(停用) · storage · sys-monitor │   │
+│  │ 既有：PCS modbus(FC04/FC06) · gateway(IEC104) · 策略引擎 · AI(停用) · storage · sys-monitor │   │
 │  └───────────┬────────────────────────────────────────────────────────────────────────────┘   │
 │              │                                                                                  │
 │  ┌───────────▼───────────────────── display_host（既有，扩展）──────────────────────┐  │
 │  │ DisplayDataProvider                                                                        │  │
-│  │  快拍 1 Hz：SOC 裁决快照 · run_state/三相(intercore) ────────────────────┐                  │  │
+│  │  快拍 1 Hz：SOC 裁决快照 · run_state/三相(PcsHandle) ────────────────────┐                  │  │
 │  │  慢拍 3 s：uptime/CPU 温度/内存(system-monitor) · IEC104 连接态(gateway)  ├→ 缓存(Arc<RwLock>)│  │
 │  │  快拍 0.5 s：告警(storage.events) · 联锁态(InterlockController) ─────────┘                  │  │
 │  │  组帧 v2（含 device / alarms / info / interlock）→ SharedLatest（变更即组帧）               │  │
@@ -342,6 +342,11 @@ crates/local-display/
 
 **边界要点（对应 PRD）**：
 - HMI 进程**只读展示通道 + 只写控制通道**；**无任何直连核间/南向/北向的代码路径**（PRD §4.4.6）。
+- ⚠️ **2026-09-26（PCS 通道迁址注）**：图中 `run_state/三相(PcsHandle)` 的
+  `PcsHandle` = **`mupc-southd::pcs::PcsHandle`**（02 号设计 §13 / ADR-014）。PCS 的通信与控制已由
+  `mupc-intercore` 整体迁至 `mupc-southd`，故 `display_host` 持有的真源类型随之**由 `intercore`
+  改指 `southd::pcs::PcsHandle`** —— **类型迁址、契约未变**（`read_three_phase` / `last_run_state` /
+  `is_connected` 的签名、返回的 `Option` 语义与 `ThreePhaseRead` 字段形状**均不变**）。
 - 写操作**永不**经读通道（PRD §4.4.4 / PL-8）。
 - 两个监听均强制回环（`validate()` 拒绝非 127.0.0.1）。
 - HMI 可先于 mupcd 启动（显示「初始化中」占位）；mupcd 上线 ≤1 s 转实时（PRD §4.3）。
@@ -649,7 +654,7 @@ pub struct OptionItem { pub value: String, pub label: String }
 | # | PRD 待确认项 | 核对结论（代码事实） | 设计落点 | 风险 |
 |---|--------------|----------------------|----------|------|
 | **1** | **IEC 104 连接状态真源** | 现状 `web-api::StatusHandler` 硬编码 `"unknown"`（占位）。真实状态在 `mupc_gateway::iec104::connection::Connection::state`（`Disconnected/Connecting/WaitingStartDt/Connected/Stopped`），但 `Iec104Server` **对外只暴露 `connection_count()`**，无状态查询 | **gateway crate 新增** `Iec104Server::link_state() -> LinkState`：聚合内部连接表（任一连 `Connected` → `Connected`；有连接但均未 `Connected` → `Connecting`；已启动且无连接 → `Disconnected`；未配置/未启动 → `NotConfigured`）。改动**局限在 `gateway/src/iec104/server.rs`**（+1 方法与枚举），不触碰协议逻辑 | 低 |
-| **2** | **intercore 连接状态真源** | ✅ **已可得**：`IntercoreClient::is_connected()` 已被 `display_host` 使用 | 直接复用，写 `DeviceSection.intercore` | 无 |
+| **2** | **intercore 连接状态真源** | ✅ **已可得**：`IntercoreClient::is_connected()` 已被 `display_host` 使用。⚠️ **2026-09-26 改注**：PCS 迁至南向后（02 号设计 §13 / ADR-014），`display_host` 持有的真源**由 `intercore` 改为 `mupc-southd::pcs::PcsHandle`** ⇒ 本行的 **`DeviceSection.intercore` 字段名与类型（`LinkState`）不变**，但其取值现为 **PCS 通道的在线态**（`PcsHandle::is_connected()`），**不再是核间 TCP 链路态**（核间客户端已无生产消费者）。**类型迁址、契约未变** | 直接复用，写 `DeviceSection.intercore`（语义 = PCS 通道在线态） | 无 |
 | **3** | **告警汇聚点** | ⚠️ **诚实结论：PRD 假设的 `AlertManager` 不可用。** `mupc_security::alarm::AlertManager` 在全仓库**没有任何实例化点**（仅 `security/src/lib.rs` re-export）；其 `AlertType` 全为安全类（证书/隧道/合规/安全启动），**不含运行类告警**；且无任何模块向其 `raise()`。**它是死代码。** 真实运行告警的现有载体是 `mupc_storage::EventRepository` 的 `SystemEvent`（`core-bin/src/startup.rs` 已在写：`south_station.<id>.offline/online` 等） | **本期以 `storage.events`（SystemEvent）为 F7 唯一真源**：mupcd 新增 **0.5 s** 采集任务查最近 10 条（倒序）写入缓存，并在内容变化时立即唤醒组帧（F7.3 ≤2 s 的前提，见 §4.2.1）；查询失败 → `alarms.available=false` → 屏显「告警源不可用」（EDGE-09 精确落地）。**可选增强（不在本期承诺）**：新增 mupcd 内 `AlertFeed`（有界 ring + `tracing` WARN/ERROR 层 + 南向事件双写）以覆盖"未落库也上屏" | **中**（需 PM 知悉：原 08 的告警源是空壳；本模块上屏的告警仅是"已落库的系统事件"） |
 | **4** | **配置真实落点与生效链路** | ⚠️ **诚实结论：现状不存在任何可用的配置读写链路。** `web-api::routes::config::AppConfig` 是**进程内内存值**（`Arc<RwLock<>>`，启动时构造 `Default`），**既未落盘、也未被任何模块消费**；真实参数在 `mupc_core_config.yaml` → `CoreConfig`，在 `startup.rs` 启动时读取一次并分发，**全仓无热重载机制**（`grep reload/watch` 在 core-bin 无命中） | **新建 `ConfigService` 子系统**，详见 §4.3（本模块**最大**的净新增工作） | **高** |
 | **5** | **编译时间戳** | 现状 `web-api::StatusHandler` 的 `build_time` 与 `firmware_version` **取同一常量** `env!("CARGO_PKG_VERSION")`（占位） | `mupc-core-bin/build.rs` 发出 `cargo:rustc-env=BUILD_TIMESTAMP=<RFC3339>`（取 `SOURCE_DATE_EPOCH` 优先，保证可复现构建），代码用 `option_env!("BUILD_TIMESTAMP")`；`InfoSection.build_time: Option<String>`，取不到即 `None` → 「未提供」 | 低 |
@@ -1417,7 +1422,7 @@ Step 6  清理残余：yaml 段、部署文档、注释性引用（无害但应�
 | 1 Hz 采集与发布循环 | `display_host::{sample_once, build_frame}` | **保留并扩段** | 核心复用 |
 | 读通道 HTTP 发布 | `display_host::LoopbackHttpPublisher`（含头读超时、毒化不 panic、序列化失败 500） | **原样保留** | 已过评审；仅新增第二监听 |
 | SOC 裁决快照 | `strategy-engine::AiIntegrator::{soc_display_snapshot, resolve_soc_core}` | **原样保留（不改）** | 唯一裁决入口，控制/展示不分叉 |
-| 三相读 | `intercore::read_three_phase` / `last_run_state` / `is_connected` | **原样保留（不改）** | 点表读取与在线副作用已落地 |
+| 三相读 | `mupc_southd::pcs::PcsHandle::{read_three_phase, last_run_state, is_connected}`（**原 `intercore::*`**；2026-09-26 类型迁址） | **原样保留（不改）** | 点表读取与在线副作用已落地。**类型迁址、契约未变**：方法签名、`Option` 语义与 `ThreePhaseRead` 字段形状逐字不变（02 号设计 §13.9 零变化清单） |
 | 回环 HTTP 客户端 | `local-display::channel::DisplayChannelClient`（裸 tokio + 手写 HTTP，无 reqwest） | **保留并泛化**为通用客户端（GET + POST），供控制通道复用 | 依赖面最小、可 mock |
 | 三态归一 / 新鲜度 / 通道态 | `local-display::state::{NumView, Freshness, ChannelStatus, ScreenMode, SocView, LiveDot}` | **保留**（纯逻辑，可单测）并扩展新段视图 | 已过评审；是「不造假值」在前端的落点 |
 | fbdev 像素后端 | `local-display::canvas::FbCanvas`（`/dev/fb0` mmap + bpp/位偏移格式探测 + 区域写） | **保留**：作为 `lv_display` 的 `flush_cb` **像素 sink**（§1.1.1.1 P-1）；仅其**绘制原语契约**与 `OffscreenCanvas` 布局用途废弃 | 以自控的 flush 路径规避驱动对像素格式的约束；真机像素格式处理逻辑已写且已过评审 |

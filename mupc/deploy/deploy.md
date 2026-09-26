@@ -386,7 +386,7 @@ sudo systemctl restart mupcd
 
 | RS485 口 | 端子/节点 | 设备 | config 字段（示例） |
 |---|---|---|---|
-| RS485-1 | COM1 / `ttyS0` | PCS 储能变流器（A2/B2） | `intercore.modbus_rtu.serial_port: /dev/ttyS0`（19200 N-8-1，从站拨码） |
+| RS485-1 | COM1 / `ttyS0` | PCS 储能变流器（A2/B2） | `south_pcs.port: "/dev/ttyS0"`（19200 N-8-1，从站拨码） —— ⚠️ **2026-09-26 订正**：原写 `intercore.modbus_rtu.serial_port`，该键**已随 PCS 迁入南向删除**（02 号设计 §13 / ADR-016；`intercore` 段不再有 `modbus_rtu` 子段） |
 | RS485-2 | COM2 / `ttyS2` | BMS | `south_stations` 站 `port: ttyS2`（role=battery） |
 | RS485-3 | COM3 / `ttyS3` | 空调 | `south_stations` 站 `port: ttyS3`（role=hvac） |
 | RS485-4 | COM4 / `ttyS4` | 关口表 / 台区总表 | `south_stations` 站 `port: ttyS4`（role=meter_grid；总表唯一形态——master_meter 段已删收敛，S3b-1c） |
@@ -412,7 +412,7 @@ sudo systemctl restart mupcd
 
 ### 9.3 现场配置核对清单
 
-- [ ] 生产模板 `intercore.modbus_rtu.serial_port` 已填现场口（PCS=ttyS0）
+- [ ] 生产模板 **`south_pcs.port`** 已填现场口（PCS=ttyS0）—— ⚠️ **2026-09-26 订正**：原写 `intercore.modbus_rtu.serial_port`，该键已随 PCS 迁入南向**删除**（改为顶层段 `south_pcs`；`intercore` 段不得再含 `modbus_rtu`，写了会拒启动）
 - [ ] 总表源启用唯一：`south_stations` 的 `meter_grid` 站 `port: ttyS4`（master_meter 段已删收敛，唯一总表源；须与 PCS 口 ttyS0 不同）
 - [ ] `south_stations` 各站 port/type/slave 与上表一致、点表已填
 - [ ] `io:` 段 DI/DO gpio 编号已按板端校准；急停 action=pcs_stop、active_low=true
