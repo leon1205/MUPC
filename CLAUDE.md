@@ -147,7 +147,7 @@ cargo build -p mupc-sim-bridge --release
 | 文档 | 说明 |
 |------|------|
 | `docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` | 仿真环境 PRD `[REVIEWED: PASS]` |
-| `docs/superpowers/plans/2026-07-10-MUPC-仿真测试环境-DESIGN.md` | 仿真环境设计 `[DESIGN_APPROVED]` |
+| `docs/superpowers/plans/modules/11-MUPC-仿真测试环境-设计文档.md` | 仿真环境设计 `[DESIGN_APPROVED]` |
 
 ## 项目协作配置
 

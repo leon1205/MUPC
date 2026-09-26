@@ -439,4 +439,4 @@ cd .. && ./mupc/target/release/mupc-sim-bridge \
     --scenario MODE-01
 ```
 
-> 详细设计见 `docs/superpowers/plans/2026-07-10-MUPC-仿真测试环境-DESIGN.md`
+> 详细设计见 `docs/superpowers/plans/modules/11-MUPC-仿真测试环境-设计文档.md`

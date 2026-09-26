@@ -128,7 +128,7 @@ cargo build --workspace --release --target aarch64-unknown-linux-gnu \
 
 # 详细文档
 #   PRD:  docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md
-#   设计: docs/superpowers/plans/2026-07-10-MUPC-仿真测试环境-DESIGN.md
+#   设计: docs/superpowers/plans/modules/11-MUPC-仿真测试环境-设计文档.md
 ```
 
 产物：`target/aarch64-unknown-linux-gnu/release/mupcd`
