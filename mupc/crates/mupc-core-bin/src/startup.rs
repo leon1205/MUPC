@@ -481,7 +481,7 @@ fn datapackage_to_telemetry_points(
                 device_id: device_id.to_string(),
                 timestamp: ts,
                 metric_name: name.to_string(),
-                // `value` 自 03 设计 §9.1.4 起可空：本路径**只在有值**时建点（`Option::map`）
+                // `value` 自 03 设计 §4.4.4.4 起可空：本路径**只在有值**时建点（`Option::map`）
                 // ⇒ 恒为 `Some`；缺测字段的既有行为不变（不建点、不落库）。
                 value: Some(v),
                 quality: 0,
@@ -490,22 +490,22 @@ fn datapackage_to_telemetry_points(
         .collect()
 }
 
-/// 从 `DataPackage` 抽取一个 [`mupc_storage::GridSample`]（**唯一抽取点**，03 设计 §9.6 末段）。
+/// 从 `DataPackage` 抽取一个 [`mupc_storage::GridSample`]（**唯一抽取点**，03 设计 §7.3.1 末段）。
 ///
 /// # 为什么在装配层（而不是 `storage`）
 ///
-/// 设计 §9.6 末段写「映射函数落 `storage`」，但 §9.8 D-8 的**依赖边裁定**（v1.3 新增，专门为
+/// 设计 §7.3.1 末段写「映射函数落 `storage`」，但 §4.2.3（原 D-8）的**依赖边裁定**（v1.3 新增，专门为
 /// 同类问题立的规矩）明确：`storage` **不依赖** `data-processing`，把不认识 `DataPackage` 的
 /// 转换塞进去会**新增 `storage → data-processing` 依赖边**。两处冲突时以 D-8 为准（依赖边是
 /// 硬约束，落点只是代码组织），故抽取同 `quality_map.rs` 一起落装配层 —— `core-bin` 同时依赖
 /// 两者，**零新增边**。
 ///
-/// 语义（§9.1.3 / §9.6 末段）：
+/// 语义（§4.4.4.3 / §7.3.1 末段）：
 /// - `electrical.phase` **缺块** ⇒ 15 个分相通道（u/i/p/q/pf）全 `None`，其中 `pf_total` 是
 ///   A 相值（`pf[0]`，与 mapper 的 `electrical.cos_phi = pf[0]` 同源）⇒ 一并 `None`；
 /// - `electrical.active_power` / `reactive_power` **缺块** ⇒ `p_total` / `q_total` 为 `None`；
 /// - **`frequency` 不抽取**（点表无频率寄存器、mapper 恒 50.0 常量，常量入库会污染统计，
-///   §9.1.3 明文「不落」）；视在功率 / 电能同属"无点表来源"，**不抽取、不造数**。
+///   §4.4.4.3 明文「不落」）；视在功率 / 电能同属"无点表来源"，**不抽取、不造数**。
 fn grid_sample_from_package(pkg: &mupc_data_processing::DataPackage) -> mupc_storage::GridSample {
     let el = &pkg.electrical;
     let mut s = mupc_storage::GridSample {
@@ -524,7 +524,7 @@ fn grid_sample_from_package(pkg: &mupc_data_processing::DataPackage) -> mupc_sto
     s
 }
 
-/// 总表聚合的定时 tick 任务（03 设计 §9.1.5 / §9.6 序 6）。
+/// 总表聚合的定时 tick 任务（03 设计 §4.4.4.5 / §7.3.1 序 6）。
 ///
 /// 周期 **1000 ms**（聚合周期最小 10 s ⇒ 1 s 粒度足够把「已走完的周期」及时闭合）。
 /// 收工契约（U-64 的**协作生产者**）：收到 `stop` ⇒ `flush(now)` 入队 ⇒ 退出；剩余缓冲由
@@ -580,7 +580,7 @@ fn drain_aggregate_rows(rx: &mut AggregateRowReceiver) -> Vec<mupc_storage::Aggr
     out
 }
 
-/// 总表聚合的**唯一**入队者（§9.2.3 末 / §9.6 序 6；U-64 协作退出名单成员）。
+/// 总表聚合的**唯一**入队者（§4.4.2.3 末 / §7.3.1 序 6；U-64 协作退出名单成员）。
 ///
 /// 见 [`AggregateRowSender`] 的"结构性理由"：本任务同时是 ① 周期闭合者（`tick`）与
 /// ② 聚合行入队者（drain 通道），收工时 ③ drain + `flush(now)` 关闭最后一段 + 再 drain。
@@ -675,7 +675,7 @@ struct SouthSink {
     /// **不改**，§9.1.1），故在装配期从 `south_stations.grid_station()` 解析一次。
     /// `None` = 未配 meter_grid ⇒ 该回调不写快照（**不臆造站 id**）。
     grid_station_id: Option<String>,
-    /// **总表电气量聚合器**（U-69 / 03 设计 §9.1）。本 sink 只做「转发样本」（`observe`）；
+    /// **总表电气量聚合器**（U-69 / 03 设计 §4.4.4）。本 sink 只做「转发样本」（`observe`）；
     /// 聚合算法本身在 `mupc_storage::GridAggregator`（纯逻辑、可单测），**周期闭合由 tick 任务
     /// 驱动**（`spawn_grid_aggregate_timer`），二者共用同一个 `Arc`。
     grid_aggregator: Arc<parking_lot::Mutex<mupc_storage::GridAggregator>>,
@@ -714,7 +714,7 @@ impl SouthSink {
         }
     }
 
-    /// U-69（03 设计 §9.1.4 / §9.6 序 5）：把 grid 包的电气量**样本转发**给聚合器，把**已闭合
+    /// U-69（03 设计 §4.4.4.4 / §7.3.1 序 5）：把 grid 包的电气量**样本转发**给聚合器，把**已闭合
     /// 周期**的行**投递**给聚合行通道。本函数**只做转发 + 投递**，不做任何聚合计算
     /// （周期边界/均值/极值全在 `mupc_storage::GridAggregator` 内，可单测）。
     ///
@@ -912,7 +912,7 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
         // 旧 `broadcast_grid_iec104`（R2-A2，TI=13 无时标）已删除（§9.4 序 4），grid 6 点
         // 由 `Iec104UplinkDriver` 的 A 档任务统一上送（TI=36 带时标，§9.2.4 方案 A）。
         self.apply_grid_snapshot(&pkg);
-        // U-69（03 设计 §9.6 序 5）：同包电气量**转发样本**给聚合器（周期边界由 tick 驱动）。
+        // U-69（03 设计 §7.3.1 序 5）：同包电气量**转发样本**给聚合器（周期边界由 tick 驱动）。
         // 刻意放在两条既有路径**之后**：既有行为逐字不动（PRD GRD-07）。
         self.forward_grid_sample(&pkg);
     }
@@ -970,7 +970,7 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
                     metric_name: metric,
                     // `Some(v)`：非事件点必**有采集事实**（`is_event == false`）⇒ 有值。
                     value: Some(value),
-                    // 跨域转换走装配层唯一映射点（03 设计 §9.6 序 10 / D-8）：
+                    // 跨域转换走装配层唯一映射点（03 设计 §7.3.1 序 10 / §4.2.3）：
                     // 本分支的点质量与上面快照同源（`PointQuality::Ok`）⇒ 落库值仍为 **0**
                     // （`Quality::Good`，零行为变化）。
                     quality: crate::quality_map::quality_from_point_quality(PointQuality::Ok),
@@ -1287,7 +1287,7 @@ pub async fn initialize_all(
         )
     })?;
     let storage = Arc::new(mupc_storage::StorageService::new(Arc::new(pool)));
-    // U-67（03 设计 §9.2.3）：`WriteBuffer::new` 的容量/间隔改读 `storage:` 段配置。
+    // U-67（03 设计 §4.4.2.3）：`WriteBuffer::new` 的容量/间隔改读 `storage:` 段配置。
     // **缺省 = 现实现**（1000 / 5000，`StorageSectionConfig::default()`）⇒ 零行为变化
     // （PRD R-11.3-C / STG-01）；非法值已在 `CoreConfig::validate_storage` 拒启动（STG-04）。
     // ⚠️ 容量口径沿革：设计 03:1321 曾写"100ms 或积累 100 条"，现以 `storage.batch_capacity`
@@ -1297,9 +1297,9 @@ pub async fn initialize_all(
         config.storage.flush_interval_ms,
         storage.pool().clone(),
     ));
-    // ── U-69（03 设计 §9.1 / §9.2.3）：总表电气量 1 分钟聚合落库 ──
+    // ── U-69（03 设计 §4.4.4 / §4.4.2.3）：总表电气量 1 分钟聚合落库 ──
     // 聚合器实例**在此创建**（而非 `SouthSink` 构造处）：故障 tick 任务要在下面与 `flush_timer`
-    // 同处 spawn（§9.6 序 6），而 tick 需要同一个 `Arc` ⇒ 先建、后两处共用。
+    // 同处 spawn（§7.3.1 序 6），而 tick 需要同一个 `Arc` ⇒ 先建、后两处共用。
     //
     // `parking_lot::Mutex`（`observe` 需 `&mut`）：临界区**不含 await**（只做纯计算 + 取行），
     // 故不会跨 await 持锁（也就不用 `tokio::sync::Mutex`）。
@@ -1309,7 +1309,7 @@ pub async fn initialize_all(
     // 聚合行通道（T15/T16 遗留③）：生产端 = `SouthSink`（同步投递），消费端 = 下方
     // `grid_agg_timer`（**已注册的协作生产者**，也就是"唯一入队者"）。
     let (agg_tx, agg_rx) = aggregate_row_channel();
-    // 总表聚合记录的 `device_id`（§9.1.4：= 生效配置的 grid 站 id；未配 meter_grid 的部署
+    // 总表聚合记录的 `device_id`（§4.4.4.4：= 生效配置的 grid 站 id；未配 meter_grid 的部署
     // 用设计明文的常量 `grid_meter` 兜底 —— 与 `mupc_core_config.yaml` 的站 id 一致）。
     let grid_device_id: String = config
         .south_stations
@@ -1324,7 +1324,7 @@ pub async fn initialize_all(
         "flush_timer",
         write_buffer.clone().spawn_flush_timer(stop_rx.clone()),
     ));
-    // U-69 的 tick 任务：**与 `flush_timer` 同范式、同名单**（§9.2.3 末 / §9.6 序 6）——
+    // U-69 的 tick 任务：**与 `flush_timer` 同范式、同名单**（§4.4.2.3 末 / §7.3.1 序 6）——
     // 它也是"会往 `WriteBuffer` 里写点"的协作生产者：收到停机信号后**先 `flush(now)` 入队**
     // （把当前未闭合周期闭合并落库，不丢最后一段）再收工；随后由**既有退出序列**最后 flush
     // 遥测缓冲（U-64 的顺序契约：通知生产者收工 → 等确认 → 最后 flush）。
@@ -1532,7 +1532,7 @@ pub async fn initialize_all(
     // 设计 §4.7 对最小形态**写死 64**。
     let alert_feed = Arc::new(crate::alert_feed::AlertFeed::new());
 
-    // ── 03 设计 §9.3 缺口 1/2（FLS-03②）：遥测缓冲丢弃的**健康巡检** ──
+    // ── 03 设计 §4.4.5 缺口 1/2（FLS-03②）：遥测缓冲丢弃的**健康巡检** ──
     // 依赖：`write_buffer`(步骤 3) + `alert_feed`(上一步) 均已就绪 ⇒ 只能在**这里**起（不能再早）。
     // 职责：每 1 s 读 `dropped_points()/dropped_batches()` 的**增量**，按**边沿触发**投 `major`
     // 告警 —— **进入**"丢弃中"发一条（含本拍增量与累计值）、**持续丢弃期间一条都不再发**、
@@ -3059,7 +3059,7 @@ plugins: {}
         );
     }
 
-    /// **STG-02 / STG-03 / §9.6 序 3/4/6**：`storage:` 段 → 装配点的接线（**源文本静态断言**）。
+    /// **STG-02 / STG-03 / §7.3.1 序 3/4/6**：`storage:` 段 → 装配点的接线（**源文本静态断言**）。
     ///
     /// 为什么用源文本：`initialize_all` 需要 DB / intercore / 串口全套真环境，本机单测起不来；
     /// 而本用例要证的恰恰是「装配源码里这两个构造取自 `config.storage.*`、tick 任务进了
@@ -3127,7 +3127,7 @@ plugins: {}
         );
     }
 
-    /// **§9.6 末段 + §9.8 D-8**：`DataPackage → GridSample` 的抽取语义（缺块 ⇒ `None`，不造数）。
+    /// **§7.3.1 末段 + §4.2.3**：`DataPackage → GridSample` 的抽取语义（缺块 ⇒ `None`，不造数）。
     #[test]
     fn grid_sample_from_package_maps_blocks_and_keeps_missing_as_none() {
         let pkg = |phase: Option<mupc_data_processing::telemetry::PhaseElectricalData>,

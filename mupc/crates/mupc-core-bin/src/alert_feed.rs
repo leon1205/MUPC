@@ -55,7 +55,7 @@ pub struct FeedItem {
     /// 来源分类。
     pub source: FeedOrigin,
     /// 来源内的子类型：`System` 取级别（`info` / `warning` / **`major`** —— `major` 由
-    /// 03 设计 §9.3 缺口 1 的健康巡检（`storage_health::DROP_ALERT_LEVEL`）投递）；
+    /// 03 设计 §4.4.5 缺口 1 的健康巡检（`storage_health::DROP_ALERT_LEVEL`）投递）；
     /// `Interlock` 取事件名（`triggered` / `cleared` / `stop_failed` / `ack_m1`）；
     /// `Strategy` 为空串。
     ///

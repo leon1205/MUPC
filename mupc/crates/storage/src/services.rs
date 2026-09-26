@@ -226,7 +226,7 @@ pub const DEFAULT_MAX_BUFFERED_POINTS: usize = 10_000;
 /// （[`Self::request_flush`]，`mpsc::Sender::try_send`）——DB 活（`begin/INSERT/commit`）
 /// **只在那个任务里**发生。于是采集侧写入路径上没有任何 DB 调用点，采集不再被落库耗时阻塞。
 ///
-/// **为什么不是 `tokio::spawn(flush_batch(batch))`**（03 设计 §9.3 缺口 3 的"最小改法"）：
+/// **为什么不是 `tokio::spawn(flush_batch(batch))`**（03 设计 §4.4.5 缺口 3 的"最小改法"）：
 /// 那会造出一个**不登记在退出编排里**的游离任务（`flush_batch` 需要 `'static`，而
 /// `&self` 拿不到 `Arc`），正是 T15/T16 刚修掉的"退出期窄竞态"形态（`mupc-core-bin` 侧
 /// `AggregateRowSender` 的文档记了同一条裁决）。本实现的取舍：**批次一律留在缓冲里**，
@@ -310,7 +310,7 @@ impl WriteBuffer {
     /// 到调用方），点先入缓冲、由已注册的 flush 任务提交。签名保留 `async`/`Result` 是**刻意**的
     /// （零调用点改动，且这是采集侧唯一入口）；**落库失败不再经此上抛**，而是由 `flush_batch`
     /// 统一响亮化（`error!` 日志 + `dropped_points/dropped_batches/requeued_batches` 计数），
-    /// 并由 core-bin 的健康巡检（03 设计 §9.3 缺口 1）转成 `major` 告警。
+    /// 并由 core-bin 的健康巡检（03 设计 §4.4.5 缺口 1）转成 `major` 告警。
     ///
     /// 调用点的 `if let Err(..)` 分支因此**退化为永不触发**（保留不删：签名兼容）。
     pub async fn buffer_telemetry(&self, point: TelemetryPoint) -> Result<(), StorageError> {
@@ -744,7 +744,7 @@ pub struct RetentionReport {
     pub events_deleted: usize,
 }
 
-/// `telemetry` 建表 DDL（**新库的形态**：`value REAL` 可空，03 设计 §9.1.4）。
+/// `telemetry` 建表 DDL（**新库的形态**：`value REAL` 可空，03 设计 §4.4.4.4）。
 ///
 /// 只此一处持有 DDL 文本：`run_migrations` 的建表语句与「可空化重建」共用它 ⇒ 重建后的表结构
 /// 与新建的表**逐字一致**（否则重建产物与现场新装产物会漂移）。
@@ -770,7 +770,7 @@ const TELEMETRY_INDEX_DDL: [&str; 2] = [
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
     let statements = [
         // 遥测表 — 按月分区建议用外部脚本，这里建基础表
-        // ⚠️ `value REAL`（**可空**）：缺测行落**真 NULL**（03 设计 §9.1.4 / PRD R-11.2-E）。
+        // ⚠️ `value REAL`（**可空**）：缺测行落**真 NULL**（03 设计 §4.4.4.4 / PRD R-11.2-E）。
         // 老库（`value REAL NOT NULL`）由本函数末尾的幂等「可空化重建」就地升级。
         TELEMETRY_DDL,
         TELEMETRY_INDEX_DDL[0],
@@ -866,7 +866,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
         }
     }
 
-    // ── `telemetry.value` 可空化（03 设计 §9.1.4；本增量唯一的**结构变更**）──
+    // ── `telemetry.value` 可空化（03 设计 §4.4.4.4；本增量唯一的**结构变更**）──
     ensure_telemetry_value_nullable(pool).await?;
 
     Ok(())
@@ -891,7 +891,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
 /// `RENAME TO` 后索引仍挂在旧表上、随 `DROP TABLE telemetry_old` 一并消失 ⇒ 不重放就会让
 /// `query_range`（走 `idx_telemetry_device_ts`）与按 `metric_name` 的查询
 /// （走 `idx_telemetry_metric_ts`）直到**下次启动**（`CREATE INDEX IF NOT EXISTS`）才恢复索引
-/// （03 设计 §9.1.4 的勘误 ②：原稿只列一个索引，实际**两个都要重建**）。
+/// （03 设计 §4.4.4.4 的勘误 ②：原稿只列一个索引，实际**两个都要重建**）。
 async fn ensure_telemetry_value_nullable(pool: &SqlitePool) -> Result<(), StorageError> {
     // `notnull` 是 SQLite 关键字 ⇒ 取列时加双引号。`pragma_table_info` 是表值函数，可显式选列。
     let cols: Vec<(String, i64)> =

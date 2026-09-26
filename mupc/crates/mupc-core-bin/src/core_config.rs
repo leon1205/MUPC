@@ -72,14 +72,14 @@ pub struct CoreConfig {
     /// 段部署行为不变，不启屏）
     #[serde(default)]
     pub display: DisplayConfig,
-    /// 存储运行参数（03 设计 §9.2 / PRD §6.2，U-67）。**整段缺省 ⇒ 取 `Default`
+    /// 存储运行参数（03 设计 §4.4.2 / PRD §6.2，U-67）。**整段缺省 ⇒ 取 `Default`
     /// （= 现实现常量 1000 / 5000 / 60000）⇒ 零行为变化**（PRD R-11.3-C / STG-01）。
     /// **只含三键**（PRD R-11.3-A 明文）：不含保留期字段、不含 `max_retained_points`。
     #[serde(default)]
     pub storage: StorageSectionConfig,
 }
 
-/// 03 设计 §9.2.1（U-67）：`storage:` 段的三个键 —— **进 YAML、不进 DB**，**重启生效**
+/// 03 设计 §4.4.2.1（U-67）：`storage:` 段的三个键 —— **进 YAML、不进 DB**，**重启生效**
 /// （不引入 DB 覆写层，不做运行时热更新）。
 ///
 /// ```yaml
@@ -687,7 +687,7 @@ impl CoreConfig {
         // `enabled: false`（缺省）整段跳过 ⇒ 既有部署零行为变化；跨段规则 P-1（本机资源）/ P-2
         // （口独占）见下方 `validate_io` 与 `validate_south_stations` 的对应处。
         self.south_pcs.validate()?;
-        // 03 设计 §9.2.2（U-67）：storage 段校验（**无 enabled 门控** —— PRD R-11.1-A 明文
+        // 03 设计 §4.4.2.2（U-67）：storage 段校验（**无 enabled 门控** —— PRD R-11.1-A 明文
         // 「总表落库不设关闭开关」⇒ 本段任何取值都必须合法，不存在"整段跳过"）。
         self.validate_storage()?;
         // 12-本地显示终端 §7.3：display 段校验（enabled 时 bind_addr 强制仅回环 127.0.0.1；
@@ -827,7 +827,7 @@ impl CoreConfig {
         Ok(())
     }
 
-    /// 03 设计 §9.2.2（U-67 / PRD R-11.3-E）：`storage:` 段合法性 —— **违规即拒启动**
+    /// 03 设计 §4.4.2.2（U-67 / PRD R-11.3-E）：`storage:` 段合法性 —— **违规即拒启动**
     /// （fail-fast，错误信息**点名违规键**）。
     ///
     /// 为什么拒启动而不是"告警 + 降级取默认"：三项均**仅在启动期读取一次**（重启生效，
@@ -845,7 +845,7 @@ impl CoreConfig {
         // `since_attempt` 每 push 都被重置 ⇒ **每次 push 都是触发分支** ⇒ 采集路径上
         // `trim_oldest` 永不执行：缓冲只由 flush 吞吐（非失败回填路径）约束，`max_points`
         // 形同虚设（见 `mupc_storage::services::WriteBuffer::buffer_telemetry` 的容量分支）。
-        // 这不是"退化配置"而是**采集侧的有界性保证失效** ⇒ 直接拒启动（03 设计 §9.3 缺口 3③）。
+        // 这不是"退化配置"而是**采集侧的有界性保证失效** ⇒ 直接拒启动（03 设计 §4.4.5 缺口 3③）。
         if !(2..=100_000).contains(&s.batch_capacity) {
             return Err(format!(
                 "storage.batch_capacity={} 须在 2..=100000（遥测写缓冲批量提交容量，条；\
@@ -2625,7 +2625,7 @@ south_stations:
         );
     }
 
-    // ── 03 设计 §9.2 / PRD §6.2（U-67）：`storage:` 段 ──
+    // ── 03 设计 §4.4.2 / PRD §6.2（U-67）：`storage:` 段 ──
 
     /// **STG-01**：`storage:` 段**整段缺省** ⇒ 三值 = 变更前的现实现常量（零行为变化）。
     ///
@@ -2669,7 +2669,7 @@ plugins: {}
     }
 
     /// **STG-01（真文件）**：两份部署 yaml 的 `storage:` 段**显式写出**且取值 = 默认
-    /// （§9.6 序 2：注释态或显式默认值等效，本仓选显式写出以便现场可见）。
+    /// （§7.3.1 序 2：注释态或显式默认值等效，本仓选显式写出以便现场可见）。
     #[test]
     fn stg01_deploy_configs_storage_section_is_present_and_is_the_default() {
         for (name, text) in [
@@ -2698,7 +2698,7 @@ plugins: {}
             );
             assert!(
                 text.contains("\nstorage:"),
-                "`{name}` 必须**显式**写出 storage: 段（现场可见；§9.6 序 2）"
+                "`{name}` 必须**显式**写出 storage: 段（现场可见；§7.3.1 序 2）"
             );
             assert!(
                 cfg.validate().is_ok(),
@@ -2708,7 +2708,7 @@ plugins: {}
     }
 
     /// **STG-02 / STG-03**：显式配置生效（装配点是**启动期读一次** ⇒ 「重启生效」由
-    /// 「值从 YAML 来、不来自硬编码」体现；热改 YAML 不生效属预期，见 §9.2.1「不进 DB」）。
+    /// 「值从 YAML 来、不来自硬编码」体现；热改 YAML 不生效属预期，见 §4.4.2.1「不进 DB」）。
     #[test]
     fn stg02_stg03_explicit_storage_values_are_taken() {
         let yaml = r#"
@@ -2749,7 +2749,7 @@ storage:
         }
         // batch_capacity：0 / 1 / 100001 拒；2 / 100000 过
         // 下界 = 2：capacity = 1 时每次 push 都触发容量分支 ⇒ 采集路径永不 `trim_oldest`
-        // ⇒ `max_points + 1` 的上界论证失效（03 设计 §9.3 缺口 3③ / 评审 W-1）。
+        // ⇒ `max_points + 1` 的上界论证失效（03 设计 §4.4.5 缺口 3③ / 评审 W-1）。
         // **改什么会让本条红**：把 `validate_storage` 的范围改回 `1..=100_000` ⇒ 下面
         // `batch_capacity = 1` 的 `unwrap_err()` 直接 panic（探针实测）。
         let err = with(|s| s.batch_capacity = 0).validate().unwrap_err();
