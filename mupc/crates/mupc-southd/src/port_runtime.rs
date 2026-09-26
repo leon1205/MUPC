@@ -1,17 +1,17 @@
-//! 口级总线抽象：每 port 一个 master，请求级 slave 读（§10.2/§10.7）。
+//! 口级总线抽象：每 port 一个 master，请求级 slave 读写（§10.2/§10.7）。
 //!
 //! 同口多从站不能各建 Rs485Device（各持独立 tx_lock 互不排斥、double-open 冲突），故
-//! `scheduler`（Task 5）不直接持 Rs485Device，而是经 [`StationBus`] 读：
+//! `scheduler`（Task 5）不直接持 Rs485Device，而是经 [`StationBus`] 读写：
 //!
 //! - 真实实现 [`Rs485PortBus`]：每口一个 `Rs485Device`（open 一次），内带 per-port
 //!   async `bus_lock` 强制"口内串行"（读路径本身无 tx_lock 保证，见 [`Rs485PortBus`]）；
 //!   阻塞 libc IO 用 `spawn_blocking` 承载。
-//! - 测试实现 [`MockBus`]：脚本化串口（按 (slave,addr) 预置寄存器 / 注入超时），
+//! - 测试实现 [`MockBus`]：脚本化串口（按 (slave,addr) 预置寄存器 / 注入超时、记录写调用），
 //!   供本模块单测与 Task 5 scheduler 集成测使用。
 
 use async_trait::async_trait;
 
-/// 口级读错误（[`StationBus::read_holding`] 返回）。
+/// 口级总线错误（[`StationBus`] 的读/写方法返回）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BusError {
     /// 口打开失败：该口全站 offline（不阻断启动，§10.7）。
@@ -35,7 +35,7 @@ pub enum BusError {
     },
 }
 
-/// 口级总线：读保持寄存器（口内串行；调用方按站 slave 传参）。
+/// 口级总线：按站读写寄存器 / 位（口内串行；调用方按站 slave 传参）。
 ///
 /// 真实 = [`Rs485PortBus`]（包单 `Rs485Device` + per-port async Mutex + spawn_blocking）；
 /// 测试 = [`MockBus`]（脚本化串口）。scheduler 只依赖本 trait，纯逻辑可 mock 测。
@@ -54,7 +54,8 @@ pub trait StationBus: Send + Sync {
     /// **为什么只加这一个写方法**（设计 §13.3/§13.4）：PCS 控制序列全部落在 4 区单寄存器写
     /// （模式 1000 / 启停 500 / 恒功率 1001-1002 / 分相 1006-1011），逐写即协议要求（FC06 无批量）。
     /// 不提供批量写 / 任意地址范围写 —— 写能力的**门只开一条缝**，把"能写什么"交给调用方
-    /// `PcsHandle` 的受限入口，而非把写权限摊开在 bus 层。
+    /// `PcsHandle` 的 **4 个受限入口**（设计 §13.5.3：`send_dual_param` / `send_tai_command`
+    /// / `stop` / `restore_interlock_latched`），而非把写权限摊开在 bus 层。
     async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError>;
 }
 
@@ -197,6 +198,10 @@ impl StationBus for Rs485PortBus {
                 })
         })
         .await
+        // join 失败沿用读侧同款格式（`e.to_string()`），**有意为之**：
+        // `JoinError` 自身 Display 已含 "task N panicked/was cancelled"，
+        // 与设备侧 Rs485Error 文案（"写响应过短"/"被从站拒绝"）天然可分；
+        // 四方法保持同构优于再加一层"join 失败"前缀。请勿"顺手修正"成不对称写法。
         .map_err(|e| BusError::Write {
             slave,
             addr,
@@ -752,11 +757,16 @@ mod write_single_tests {
 
     #[tokio::test]
     async fn mock_bus_write_single_records_and_returns_ok() {
+        // ⚠️ 必须包含一次 **非零 value**：只写 value=0 时"第三元是否真透传"不具判别力
+        //（把 `value` 换成硬编码 `0` 仍会全绿）—— 而下游 PcsHandle 的测试要靠
+        // `write_calls` 验证控制序列写了哪些**值**（如 500=0 停机、1001=P 设定）。
         let bus = MockBus::new();
         bus.write_single(3, 500, 0).await.unwrap();
+        bus.write_single(3, 500, 7).await.unwrap();
         assert_eq!(
             bus.write_calls.lock().unwrap().clone(),
-            vec![(3u8, 500u16, 0u16)]
+            vec![(3u8, 500u16, 0u16), (3u8, 500u16, 7u16)],
+            "记录必须按序累积，且 value 必须真透传（非零值可判别）"
         );
     }
 
