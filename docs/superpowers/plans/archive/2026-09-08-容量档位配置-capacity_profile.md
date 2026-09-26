@@ -1,3 +1,9 @@
+> **[已实施完成（2026-09-27 核验）]** 设计归属：`docs/superpowers/plans/modules/04-MUPC-策略引擎-设计文档.md` §2.10.2（`[DESIGN_APPROVED: 2026-09-08]`）。
+>
+> 实现证据：提交 `97ddead`；`mupc/crates/strategy-engine/src/pcs_profile.rs` + `pcs_profile_test.rs`、`src/lib.rs`（`pub mod pcs_profile`）、`mupc/crates/mupc-core-bin/src/core_config.rs`（`strategy.tai_config_file`）。
+>
+> ⚠️ 本文档复选框未逐项勾选，完成度系按代码取证整体判定。
+
 # 容量档位配置（capacity_profile v2.24）实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

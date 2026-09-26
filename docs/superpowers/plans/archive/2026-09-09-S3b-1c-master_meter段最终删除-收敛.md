@@ -1,3 +1,9 @@
+> **[已实施完成（2026-09-27 核验）]** 设计归属：`docs/superpowers/plans/modules/02-MUPC-南向通信-设计文档.md` §10.3（R-H）/§10.9。
+>
+> 实现证据：提交 `98e0afd`/`13efc89`/`c261fb3`/`2227727`；`mupc/deploy/deploy.md:392/416` 记 master_meter 段已删收敛；`mupc/crates/mupc-southd/tests/grid_convergence.rs` 为收敛回归锚。
+>
+> ⚠️ 本文档复选框未逐项勾选，完成度系按代码/提交取证整体判定。
+
 # S3b-1c · master_meter 段最终删除 — 收敛到 south_stations.meter_grid 实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
