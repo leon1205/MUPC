@@ -1451,7 +1451,7 @@ gateway ──✗→ mupc-southd / data-processing    （本章**不新增**该�
 
 | 维度 | 结论 | 理由 |
 |------|------|------|
-| **类型与所有权** | `mupc-data-processing::latest_values` | ① 03 PRD §11.6.2 R-11.6-D1 明文「**本模块**须提供…最新值快照」，而 03 模块的 crate 即 `data-processing`（03 设计 §1.2/§7.1）⇒ PRD 口径**字面成立**，无需改需求；② 依赖图上 `southd → data-processing` 与 `core-bin → data-processing` **均已存在**，**零新增边、零反向依赖、零循环**；③ 不新建 crate（KISS），且该 crate 在 CI 测试面内（`device-trait` 被 `cargo test --workspace --exclude` 排除，不适合作承载） |
+| **类型与所有权** | `mupc-data-processing::latest_values` | ① 03 PRD §1.3 R-11.6-D1 明文「**本模块**须提供…最新值快照」，而 03 模块的 crate 即 `data-processing`（03 设计 §1.2/§7.1）⇒ PRD 口径**字面成立**，无需改需求；② 依赖图上 `southd → data-processing` 与 `core-bin → data-processing` **均已存在**，**零新增边、零反向依赖、零循环**；③ 不新建 crate（KISS），且该 crate 在 CI 测试面内（`device-trait` 被 `cargo test --workspace --exclude` 排除，不适合作承载） |
 | **写入方** | `mupc-core-bin` 的 `SouthSink`（实现体 `startup.rs:400-522`；`StationSink` 三个回调 `:526` / `:535` / `:583`） | 采集回调的**消费端**在装配层：southd 只负责把 `(metric, value, is_event)` 交出来（既有 `StationSink` 契约，**本增量不改 southd 的 trait**）。southd 不得依赖 strategy-engine（既有约束），也不应认识"快照"这一数据面职责 |
 | **读取方** | core-bin 的 IEC 104 驱动器 / MQTT 发布器（§9.2/§9.3）、`display_host`（同进程）、策略引擎（可选，后续） | 全部满足依赖方向；**跨进程**消费（12 号 HMI 渲染进程）**不**直连本入口，仍走 12 号既有的回环 HTTP 帧通道（`display_host.rs:1114` `LoopbackHttpPublisher::serve`）——本入口在 `mupcd` 进程内，是那条通道的**上游取数点**。该"间接读"**显式登记为 LV-1 的唯一例外**，见 §9.8 C-17 |
 | **不放入何处** | ❌ `mupc-southd`（会让 display/上送反向依赖南向）、❌ `mupc-gateway`（北向 crate 不应承载南向点值）、❌ `mupc-common`（基础设施 crate 不放领域类型）、❌ `device-trait`（被 CI 排除） | |

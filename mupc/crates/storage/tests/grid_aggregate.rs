@@ -1,4 +1,4 @@
-//! 总表电气量「1 分钟聚合落库」的**集成/库内**验收（03 设计 §9.1 / §9.7；PRD §11.2 / §11.7.1，U-69）。
+//! 总表电气量「1 分钟聚合落库」的**集成/库内**验收（03 设计 §9.1 / §9.7；PRD §4.1.4 / §9.3，U-69）。
 //!
 //! 纯逻辑单测（GRD-02/03/05 表断言、断连/重启/flush 等）在 `src/grid_aggregate.rs` 的
 //! `#[cfg(test)] mod tests`；**本文件只放需要真库的断言**（GRD-01/04/05 库内/06/09、STG-05 结构）。
@@ -237,7 +237,7 @@ async fn grd05_persisted_channel_set_equals_table_and_missing_is_nodata() {
 /// 下降 98.3% ≥ 95%），不引入墙钟依赖。实机外推项留给联调。
 #[test]
 fn grd06_row_count_reduction_is_at_least_95_percent() {
-    let per_point_rows_per_minute = 21 * 60; // 21 通道 × 60 次/分钟（PRD §11.2-F 口径）
+    let per_point_rows_per_minute = 21 * 60; // 21 通道 × 60 次/分钟（PRD §4.1.4 R-11.2-F 口径）
     let aggregated_rows_per_minute = GridAggregator::new(60_000).rows_per_period();
     assert_eq!(aggregated_rows_per_minute, 22);
     let drop = 1.0 - (aggregated_rows_per_minute as f64) / (per_point_rows_per_minute as f64);

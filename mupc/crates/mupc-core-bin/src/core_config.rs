@@ -72,7 +72,7 @@ pub struct CoreConfig {
     /// 段部署行为不变，不启屏）
     #[serde(default)]
     pub display: DisplayConfig,
-    /// 存储运行参数（03 设计 §9.2 / PRD §11.3，U-67）。**整段缺省 ⇒ 取 `Default`
+    /// 存储运行参数（03 设计 §9.2 / PRD §6.2，U-67）。**整段缺省 ⇒ 取 `Default`
     /// （= 现实现常量 1000 / 5000 / 60000）⇒ 零行为变化**（PRD R-11.3-C / STG-01）。
     /// **只含三键**（PRD R-11.3-A 明文）：不含保留期字段、不含 `max_retained_points`。
     #[serde(default)]
@@ -2625,7 +2625,7 @@ south_stations:
         );
     }
 
-    // ── 03 设计 §9.2 / PRD §11.3（U-67）：`storage:` 段 ──
+    // ── 03 设计 §9.2 / PRD §6.2（U-67）：`storage:` 段 ──
 
     /// **STG-01**：`storage:` 段**整段缺省** ⇒ 三值 = 变更前的现实现常量（零行为变化）。
     ///
