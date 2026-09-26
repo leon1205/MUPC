@@ -2,7 +2,7 @@
 //!
 //! 原 `bin/pcs_slave.rs` 的从站服务与状态沉到本模块（迁自 `mupc-intercore::pcs_sim`，
 //! 设计 §13 / ADR-015）：bin 变薄壳（解析参数 → 开串口 → [`serve_rtu`]），帧级 e2e
-//! 测试（`tests/pcs_e2e.rs`）经 `rs485-plugin` 的字节流交换缝
+//! 测试（`tests/pcs_e2e.rs`，**Task 9 建**）经 `rs485-plugin` 的字节流交换缝
 //! （`Rs485Device::set_test_exchange`，同步闭包）驱动
 //! [`PcsSlaveService::serve_frame_sync`]——**无需任何串口硬件/驱动**即可回归 PCS
 //! 链路。纯仿真：无 unsafe、无文件/网络副作用。
@@ -15,7 +15,8 @@
 //!   [`PcsSimState::set_alarm`] 置位**——R2 边界消除：急停故障位 = 告警1 bit2 可仿真）、
 //!   BMS/故障/输出（恒 0）。
 //! - ⚠️ 字节互换：收/发均经 `from_pcs_reg`/`to_pcs_reg`（PCS 端序），与生产 Master
-//!   （southd `PcsHandle` / `crate::pcs::regs`）线格式一致。
+//!   （southd `PcsHandle`（**Task 7 建**，届时取代 intercore 的 `ModbusRtuTransport`）/
+//!   `crate::pcs::regs`）线格式一致。
 //!
 //! [`serve_rtu`] 为自实现 RTU 成帧（原 tokio-modbus 实现）：帧提取（地址+PDU+CRC16，
 //! CRC 低字节在前，线序与 tokio-modbus codec 核对一致）、坏帧静默丢弃逐字节重同步、
@@ -194,9 +195,7 @@ impl PcsSlaveService {
     pub fn new(state: Arc<PcsSimState>) -> Self {
         Self { state }
     }
-}
 
-impl PcsSlaveService {
     /// **同步**服务体（帧 → 响应帧）。抽为同步是为了让测试缝能直接驱动它：
     /// `rs485-plugin` 的交换缝（`Rs485Device::set_test_exchange`）是同步闭包，
     /// 而本服务的原始实现不含任何 await —— 原 `Service::call` 返回 boxed future 属
@@ -219,9 +218,6 @@ where
         // 先排干缓冲区内所有完整帧（一次 read 可能带多帧），再等下一段字节
         while let Some(frame) = take_rtu_frame(&mut buf) {
             let rsp = handle_frame_sync(&svc, &frame);
-            if rsp.is_empty() {
-                continue; // 坏帧：静默丢弃、不写回（保持原 handle_frame 的空响应语义）
-            }
             wr.write_all(&rsp).await?;
         }
         match rd.read(&mut tmp).await {
@@ -530,5 +526,58 @@ mod tests {
             PcsRequest::WriteMultipleRegisters(1001, vec![5, 0xFFF6])
         );
         assert_eq!(parse_request(0x07, &[]), PcsRequest::Custom(0x07, vec![]));
+    }
+
+    /// 造一帧请求 ADU（addr + fc + payload + CRC16 低字节在前）。
+    fn req_adu(slave: u8, fc: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![slave, fc];
+        v.extend_from_slice(payload);
+        let crc = crc16_modbus(&v);
+        v.push(crc as u8);
+        v.push((crc >> 8) as u8);
+        v
+    }
+
+    /// 钉住 `handle_frame_sync` 的**读输入臂**（迁移中最高风险面：逐臂搬迁 + ADU 编码）——
+    /// 这是「服务体动态零覆盖」的补网：此前把 `REG_SOC => to_pcs_reg(SIM_SOC)` 变异为
+    /// `to_pcs_reg(0.0)` 令全仓测试**零红**（评审实证）。同时钉住应答帧的偏移形状。
+    #[test]
+    fn serve_frame_sync_reads_soc_from_input_area() {
+        let svc = PcsSlaveService::new(Arc::new(PcsSimState::new()));
+        // FC04 读 1010（=0x03F2）起 1 字，slave=1
+        let rsp = svc.serve_frame_sync(&req_adu(1, 0x04, &[0x03, 0xF2, 0x00, 0x01]));
+        assert_eq!(rsp[0], 1, "响应从站号回显");
+        assert_eq!(rsp[1], 0x04, "功能码回显");
+        assert_eq!(rsp[2], 2, "字节数 = 2（1 个寄存器）");
+        let word = u16::from_be_bytes([rsp[3], rsp[4]]);
+        assert_eq!(from_pcs_reg(word), 66.0, "SOC 必须为仿真固定值 66");
+    }
+
+    /// 钉住 **写单（FC06）→ 状态镜像 → 运行状态推演**整链，并钉 FC06 应答的回显形状
+    /// （应答 = addr + 线上原值，非回解后的真实值）。
+    #[test]
+    fn serve_frame_sync_write_single_then_run_state_reflects_it() {
+        let svc = PcsSlaveService::new(Arc::new(PcsSimState::new()));
+        // 写 500（=0x01F4）值为 PCS 线值 to_pcs_reg(1.0)
+        let wv = to_pcs_reg(1.0);
+        let w = svc.serve_frame_sync(&req_adu(1, 0x06, &[0x01, 0xF4, (wv >> 8) as u8, wv as u8]));
+        assert_eq!(w[1], 0x06);
+        assert_eq!(u16::from_be_bytes([w[2], w[3]]), 500, "FC06 应答回显地址");
+        assert_eq!(u16::from_be_bytes([w[4], w[5]]), wv, "FC06 应答回显值");
+        // 读 1013（=0x03F5）运行状态：500=1 且 P=0 ⇒ 待机(1)
+        let r = svc.serve_frame_sync(&req_adu(1, 0x04, &[0x03, 0xF5, 0x00, 0x01]));
+        let st = from_pcs_reg(u16::from_be_bytes([r[3], r[4]]));
+        assert_eq!(st, 1.0, "500=1 且总有功 0 ⇒ 待机");
+    }
+
+    /// 钉住 `encode_adu` 的**异常臂**（原 tokio-modbus 版的 `Ok(_)` 兜底臂已被删除，
+    /// 本地位枚举穷尽 —— 这条防止将来有人把异常臂写错或漏编 `func|0x80`）。
+    #[test]
+    fn serve_frame_sync_unknown_function_returns_illegal_function_exception() {
+        let svc = PcsSlaveService::new(Arc::new(PcsSimState::new()));
+        let rsp = svc.serve_frame_sync(&req_adu(1, 0x07, &[0x00, 0x00]));
+        assert_eq!(rsp[0], 1, "异常响应从站号仍回显");
+        assert_eq!(rsp[1], 0x07 | 0x80, "异常响应功能码须置 bit7");
+        assert_eq!(rsp[2], 0x01, "异常码 = IllegalFunction(0x01)");
     }
 }
