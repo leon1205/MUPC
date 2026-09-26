@@ -1,8 +1,6 @@
 # MUPC 仿真测试环境 — PRD
 
-| 版本 | 日期 | 作者 | 状态 |
-|------|------|------|------|
-| v1.1 | 2026-07-10 | LEON | `[REVIEWED: PASS]` — 修复 PRD Reviewer 6 项反馈 |
+> `[REVIEWED: PASS]` — 2026-07-10 / 评审员 / 摘要：修复 PRD Reviewer 6 项反馈。
 
 ---
 
@@ -308,3 +306,13 @@ cat sim_metrics.json
 - `sim-env/` — Python 仿真引擎
 - `mupc/config/sim_config.yaml` — 仿真配置文件
 - MUPC-AI2 `mupc_env/` — 训练环境（仿真环境的数据来源）
+
+---
+
+## 附录：版本演进
+
+> 正文已整合全部历史补丁，本表仅作演进追溯。
+
+| 版本 | 主要变更 |
+|------|----------|
+| v1.1 | 2026-07-10（LEON）：修复 PRD Reviewer 6 项反馈，评审通过 `[REVIEWED: PASS]` |
