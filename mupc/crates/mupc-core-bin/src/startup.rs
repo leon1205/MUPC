@@ -1534,8 +1534,10 @@ pub async fn initialize_all(
 
     // ── 03 设计 §9.3 缺口 1/2（FLS-03②）：遥测缓冲丢弃的**健康巡检** ──
     // 依赖：`write_buffer`(步骤 3) + `alert_feed`(上一步) 均已就绪 ⇒ 只能在**这里**起（不能再早）。
-    // 职责：每 1 s 读 `dropped_points()/dropped_batches()` 的**增量**，增量 > 0 才投一条 `major`
-    // 告警（含增量条数与累计值）⇒ 无增量即静默（连续失败时段不产告警风暴，缺口 2 由同一判据闭合）。
+    // 职责：每 1 s 读 `dropped_points()/dropped_batches()` 的**增量**，按**边沿触发**投 `major`
+    // 告警 —— **进入**"丢弃中"发一条（含本拍增量与累计值）、**持续丢弃期间一条都不再发**、
+    // 恢复只记日志（口径与理由见 `storage_health.rs` 模块头）⇒ 连续丢弃 10 周期仍恰 1 条
+    // （缺口 2 = PRD R-11.5-A4 的字面口径）。
     // 分工理由（为什么不是 storage 自己发）：`storage` 无告警通道且**不应**依赖 core-bin
     // （依赖方向），故落点是装配层的"读增量 → 投既有 `AlertFeed`"。
     // 退出契约：与 `flush_timer`/`grid_agg_timer` **同名单**（`producers` 协作退出）——
