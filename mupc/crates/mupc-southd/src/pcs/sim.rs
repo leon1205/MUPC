@@ -1,11 +1,13 @@
 //! PCS V1.3 协议 Modbus 从站**仿真库**——模拟两级式 PCS（=实时控制模块）
 //!
-//! 原 `bin/pcs_slave.rs` 的从站服务与状态沉到本模块（T-L0）：bin 变薄壳（解析参数 →
-//! 开串口 → [`serve_rtu`]），进程内 e2e 测试（`transport::modbus::e2e_pcs_sim`）经
-//! `#[cfg(test)]` 测试缝以 `tokio::io::DuplexStream` 对接同一服务——**无需任何串口
-//! 硬件/驱动**即可回归 PCS 链路。纯仿真：无 unsafe、无文件/网络副作用。
+//! 原 `bin/pcs_slave.rs` 的从站服务与状态沉到本模块（迁自 `mupc-intercore::pcs_sim`，
+//! 设计 §13 / ADR-015）：bin 变薄壳（解析参数 → 开串口 → [`serve_rtu`]），帧级 e2e
+//! 测试（`tests/pcs_e2e.rs`，**Task 9 建**）经 `rs485-plugin` 的字节流交换缝
+//! （`Rs485Device::set_test_exchange`，同步闭包）驱动
+//! [`PcsSlaveService::serve_frame_sync`]——**无需任何串口硬件/驱动**即可回归 PCS
+//! 链路。纯仿真：无 unsafe、无文件/网络副作用。
 //!
-//! 协议语义（与协议 V1.3 / `crate::pcs` 一致）：
+//! 协议语义（与协议 V1.3 / `crate::pcs::regs` 一致）：
 //! - 4 区保持寄存器（FC03 读 / FC06 单写 / FC16 多写）：启停 500、有功模式 1000、
 //!   恒功率 1001/1002、分相 P/Q 1006-1011；
 //! - 3 区输入寄存器（FC04 读）：SOC=1010（固定 66%）、运行状态 1013（按启停+有功
@@ -13,27 +15,62 @@
 //!   [`PcsSimState::set_alarm`] 置位**——R2 边界消除：急停故障位 = 告警1 bit2 可仿真）、
 //!   BMS/故障/输出（恒 0）。
 //! - ⚠️ 字节互换：收/发均经 `from_pcs_reg`/`to_pcs_reg`（PCS 端序），与生产 Master
-//!   （`ModbusRtuTransport` / `crate::pcs`）线格式一致。
+//!   （southd `PcsHandle`（**Task 7 建**，届时取代 intercore 的 `ModbusRtuTransport`）/
+//!   `crate::pcs::regs`）线格式一致。
 //!
-//! [`serve_rtu`] 为自实现 RTU 成帧（tokio-modbus 0.13.1 的 `server::rtu::Server`
-//! 硬编码 `SerialStream`，无法服务进程内流）：帧提取（地址+PDU+CRC16，CRC 低字节在
-//! 前，线序与 tokio-modbus codec 核对一致）、坏帧静默丢弃逐字节重同步、不过滤从站
-//! 地址（应答回显请求地址，与 tokio-modbus server 行为一致）；支持 FC03/04/06/16，
-//! 其余功能码解码为 `Request::Custom` ⇒ 服务层回 `IllegalFunction` 异常（与原 bin
-//! 的 `_ =>` 分支语义一致）。
-use crate::pcs::{
-    from_pcs_reg, to_pcs_reg, MODE_CONST_POWER, MODE_PHASE_SPLIT, REG_CONST_P_SET, REG_CONST_Q_SET,
-    REG_MODE, REG_PHASE_P_A, REG_PHASE_Q_A, REG_RUN_STATE, REG_SOC, REG_START_STOP,
-};
-use std::borrow::Cow;
+//! [`serve_rtu`] 为自实现 RTU 成帧（原 tokio-modbus 实现）：帧提取（地址+PDU+CRC16，
+//! CRC 低字节在前，线序与 tokio-modbus codec 核对一致）、坏帧静默丢弃逐字节重同步、
+//! 不过滤从站地址（应答回显请求地址，与 tokio-modbus server 行为一致）；支持
+//! FC03/04/06/16，其余功能码解码为 `PcsRequest::Custom` ⇒ 服务层回 `IllegalFunction`
+//! 异常（与原 bin 的 `_ =>` 分支语义一致）。
+use super::regs::*;
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio_modbus::prelude::*;
-use tokio_modbus::server::Service;
+
+/// 从站侧请求（替代 `tokio_modbus::Request`；只覆盖 PCS 用到的 4 个功能码）。
+///
+/// 为什么不继续用 tokio-modbus 的类型：`pcs_sim` 的成帧**本已自实现**（见模块文档），
+/// 借的只是数据模型 ⇒ 保留该依赖无实益（设计 ADR-015：Modbus 栈统一到 `rs485-plugin`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PcsRequest {
+    ReadHoldingRegisters(u16, u16),
+    ReadInputRegisters(u16, u16),
+    WriteSingleRegister(u16, u16),
+    WriteMultipleRegisters(u16, Vec<u16>),
+    /// 其它功能码（服务层回 `PcsException::IllegalFunction`）
+    Custom(u8, Vec<u8>),
+}
+
+/// 从站侧响应。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PcsResponse {
+    ReadHoldingRegisters(Vec<u16>),
+    ReadInputRegisters(Vec<u16>),
+    WriteSingleRegister(u16, u16),
+    /// FC16 应答须回显**起始地址 + 字数**两个字段（与 Modbus 规范 / 原 tokio-modbus
+    /// 的 `Response::WriteMultipleRegisters(addr, qty)` 一致）。
+    WriteMultipleRegisters(u16, u16),
+}
+
+/// 从站异常（`u8::from` 给线码，与 Modbus 规范一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PcsException {
+    IllegalFunction,
+    /// 预留：本地枚举下服务层不再产生该异常（原 tokio-modbus 兜底臂用），
+    /// 保留以维持线码完整性（Modbus 规范 0x04）。
+    ServerDeviceFailure,
+}
+
+impl From<PcsException> for u8 {
+    fn from(e: PcsException) -> u8 {
+        match e {
+            PcsException::IllegalFunction => 0x01,
+            PcsException::ServerDeviceFailure => 0x04,
+        }
+    }
+}
 
 /// 仿真固定 BMS SOC（%）
 const SIM_SOC: f64 = 66.0;
@@ -158,55 +195,18 @@ impl PcsSlaveService {
     pub fn new(state: Arc<PcsSimState>) -> Self {
         Self { state }
     }
-}
 
-impl Service for PcsSlaveService {
-    type Request = Request<'static>;
-    type Future = Pin<Box<dyn Future<Output = Result<Response, Exception>> + Send>>;
-
-    fn call(&self, req: Self::Request) -> Self::Future {
-        let state = Arc::clone(&self.state);
-        Box::pin(async move {
-            match req {
-                Request::ReadHoldingRegisters(addr, cnt) => {
-                    let map = state.hold.lock().unwrap_or_else(|e| e.into_inner());
-                    let out: Vec<u16> = (0..cnt)
-                        .map(|i| to_pcs_reg(map.get(&addr.wrapping_add(i)).copied().unwrap_or(0.0)))
-                        .collect();
-                    Ok(Response::ReadHoldingRegisters(out))
-                }
-                Request::ReadInputRegisters(addr, cnt) => {
-                    let map = state.hold.lock().unwrap_or_else(|e| e.into_inner());
-                    let out: Vec<u16> = (0..cnt)
-                        .map(|i| match addr.wrapping_add(i) {
-                            REG_SOC => to_pcs_reg(SIM_SOC),
-                            REG_RUN_STATE => to_pcs_reg(PcsSimState::run_state(&map)),
-                            // 告警 1000-1004：读可置位告警字（R2 消除，急停位可仿真）
-                            r @ REG_ALARM_BASE..=REG_ALARM_LAST => state.alarm_wire(r),
-                            // BMS 1005 / 故障 1014 / 输出 1029-1036：恒 0
-                            _ => to_pcs_reg(0.0),
-                        })
-                        .collect();
-                    Ok(Response::ReadInputRegisters(out))
-                }
-                Request::WriteSingleRegister(addr, value) => {
-                    state.write_hold(addr, value);
-                    Ok(Response::WriteSingleRegister(addr, value))
-                }
-                Request::WriteMultipleRegisters(addr, words) => {
-                    for (i, w) in words.iter().copied().enumerate() {
-                        state.write_hold(addr.wrapping_add(i as u16), w);
-                    }
-                    Ok(Response::WriteMultipleRegisters(addr, words.len() as u16))
-                }
-                _ => Err(Exception::IllegalFunction),
-            }
-        })
+    /// **同步**服务体（帧 → 响应帧）。抽为同步是为了让测试缝能直接驱动它：
+    /// `rs485-plugin` 的交换缝（`Rs485Device::set_test_exchange`）是同步闭包，
+    /// 而本服务的原始实现不含任何 await —— 原 `Service::call` 返回 boxed future 属
+    /// 框架约束，非真实异步（设计 §13.6 R-3 的落点）。
+    pub fn serve_frame_sync(&self, frame: &[u8]) -> Vec<u8> {
+        handle_frame_sync(self, frame)
     }
 }
 
 /// 对任意字节流 serve Modbus RTU 从站协议（服务到对端 EOF 为止）。bin（串口）与
-/// 进程内 e2e（DuplexStream）共用。成帧/CRC/异常语义见模块头注释。
+/// 帧级 e2e（`rs485-plugin` 交换缝）共用。成帧/CRC/异常语义见模块头注释。
 pub async fn serve_rtu<S>(stream: S, svc: PcsSlaveService) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -217,7 +217,7 @@ where
     loop {
         // 先排干缓冲区内所有完整帧（一次 read 可能带多帧），再等下一段字节
         while let Some(frame) = take_rtu_frame(&mut buf) {
-            let rsp = handle_frame(&svc, &frame).await;
+            let rsp = handle_frame_sync(&svc, &frame);
             wr.write_all(&rsp).await?;
         }
         match rd.read(&mut tmp).await {
@@ -247,7 +247,7 @@ fn crc16_modbus(data: &[u8]) -> u16 {
 
 /// 按功能码推断请求帧总长（含地址与 CRC）。FC16(0x10) 为变长帧，长度由第 7 字节
 /// byte_count 决定（9 + byte_count），不足 7 字节时返回 None（还需继续读）；
-/// FC03/04/06 定长 8 字节；其余功能码按定长 8 处理（解为 `Request::Custom` ⇒
+/// FC03/04/06 定长 8 字节；其余功能码按定长 8 处理（解为 `PcsRequest::Custom` ⇒
 /// 服务层回 `IllegalFunction`，本仿真不赌未知变长帧）。
 fn request_frame_len(buf: &[u8]) -> Option<usize> {
     match buf[1] {
@@ -288,24 +288,61 @@ fn take_rtu_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     }
 }
 
-/// 处理一条已校验帧：解析 → 派发服务 → 编码应答 ADU（回显从站地址）
-async fn handle_frame(svc: &PcsSlaveService, frame: &[u8]) -> Vec<u8> {
-    // frame 长度 ≥8（take_rtu_frame 保证）：[slave][fc][data..][crc_lo][crc_hi]
+/// 解析一帧请求 → 就地求值 → 编码一帧响应（同步；坏帧返回空 Vec，由调用方静默丢弃）。
+pub fn handle_frame_sync(svc: &PcsSlaveService, frame: &[u8]) -> Vec<u8> {
+    // 帧长至少 4（addr + func + 2 CRC）；不足直接丢弃
+    if frame.len() < 4 {
+        return Vec::new();
+    }
     let slave = frame[0];
     let fc = frame[1];
-    let data = &frame[2..frame.len() - 2];
-    let rsp = svc.call(parse_request(fc, data)).await;
+    let req = parse_request(fc, &frame[2..frame.len() - 2]);
+    let rsp = match req {
+        PcsRequest::ReadHoldingRegisters(addr, cnt) => {
+            let map = svc.state.hold.lock().unwrap_or_else(|e| e.into_inner());
+            let out: Vec<u16> = (0..cnt)
+                .map(|i| to_pcs_reg(map.get(&addr.wrapping_add(i)).copied().unwrap_or(0.0)))
+                .collect();
+            Ok(PcsResponse::ReadHoldingRegisters(out))
+        }
+        PcsRequest::ReadInputRegisters(addr, cnt) => {
+            let map = svc.state.hold.lock().unwrap_or_else(|e| e.into_inner());
+            let out: Vec<u16> = (0..cnt)
+                .map(|i| match addr.wrapping_add(i) {
+                    REG_SOC => to_pcs_reg(SIM_SOC),
+                    REG_RUN_STATE => to_pcs_reg(PcsSimState::run_state(&map)),
+                    // 告警 1000-1004：读可置位告警字（R2 消除，急停位可仿真）
+                    r @ REG_ALARM_BASE..=REG_ALARM_LAST => svc.state.alarm_wire(r),
+                    // BMS 1005 / 故障 1014 / 输出 1029-1036：恒 0
+                    _ => to_pcs_reg(0.0),
+                })
+                .collect();
+            Ok(PcsResponse::ReadInputRegisters(out))
+        }
+        PcsRequest::WriteSingleRegister(addr, value) => {
+            svc.state.write_hold(addr, value);
+            Ok(PcsResponse::WriteSingleRegister(addr, value))
+        }
+        PcsRequest::WriteMultipleRegisters(addr, words) => {
+            for (i, w) in words.iter().copied().enumerate() {
+                svc.state.write_hold(addr.wrapping_add(i as u16), w);
+            }
+            let n = words.len() as u16;
+            Ok(PcsResponse::WriteMultipleRegisters(addr, n))
+        }
+        PcsRequest::Custom(..) => Err(PcsException::IllegalFunction),
+    };
     encode_adu(slave, fc, rsp)
 }
 
-/// 请求 PDU 数据段（功能码后、CRC 前）→ `Request`。仅支持 FC03/04/06/16；
+/// 请求 PDU 数据段（功能码后、CRC 前）→ `PcsRequest`。仅支持 FC03/04/06/16；
 /// 其余（含长度不符的畸形帧）解为 `Custom` ⇒ 服务层 `IllegalFunction`。
-fn parse_request(fc: u8, data: &[u8]) -> Request<'static> {
+fn parse_request(fc: u8, data: &[u8]) -> PcsRequest {
     let be16 = |i: usize| u16::from_be_bytes([data[i], data[i + 1]]);
     match fc {
-        0x03 if data.len() >= 4 => Request::ReadHoldingRegisters(be16(0), be16(2)),
-        0x04 if data.len() >= 4 => Request::ReadInputRegisters(be16(0), be16(2)),
-        0x06 if data.len() >= 4 => Request::WriteSingleRegister(be16(0), be16(2)),
+        0x03 if data.len() >= 4 => PcsRequest::ReadHoldingRegisters(be16(0), be16(2)),
+        0x04 if data.len() >= 4 => PcsRequest::ReadInputRegisters(be16(0), be16(2)),
+        0x06 if data.len() >= 4 => PcsRequest::WriteSingleRegister(be16(0), be16(2)),
         0x10 if data.len() >= 5 => {
             let addr = be16(0);
             let byte_count = usize::from(data[4]);
@@ -314,37 +351,33 @@ fn parse_request(fc: u8, data: &[u8]) -> Request<'static> {
                 .filter(|i| data.len() >= 5 + 2 * (i + 1))
                 .map(|i| u16::from_be_bytes([data[5 + 2 * i], data[6 + 2 * i]]))
                 .collect();
-            Request::WriteMultipleRegisters(addr, Cow::Owned(words))
+            PcsRequest::WriteMultipleRegisters(addr, words)
         }
-        other => Request::Custom(other, Cow::Owned(data.to_vec())),
+        other => PcsRequest::Custom(other, data.to_vec()),
     }
 }
 
 /// 服务结果 → 完整应答 ADU（[slave][pdu][crc_lo][crc_hi]）。服务层仅产生
-/// 读字/写单/写多应答与 `IllegalFunction`；其余 Response 变体理论不可达，
-/// 兜底编码为 ServerDeviceFailure 异常（不 panic）。
-fn encode_adu(slave: u8, req_fc: u8, rsp: Result<Response, Exception>) -> Vec<u8> {
+/// 读字/写单/写多应答与 `IllegalFunction`；本地位枚举已穷尽，无兜底臂（原
+/// tokio-modbus 版的 `Ok(_) => ServerDeviceFailure` 兜底随类型本地化而删除）。
+fn encode_adu(slave: u8, req_fc: u8, rsp: Result<PcsResponse, PcsException>) -> Vec<u8> {
     let mut pdu: Vec<u8> = Vec::new();
     match rsp {
-        Ok(Response::ReadHoldingRegisters(words)) => encode_read_registers(&mut pdu, 0x03, &words),
-        Ok(Response::ReadInputRegisters(words)) => encode_read_registers(&mut pdu, 0x04, &words),
-        Ok(Response::WriteSingleRegister(addr, word)) => {
+        Ok(PcsResponse::ReadHoldingRegisters(w)) => encode_read_registers(&mut pdu, 0x03, &w),
+        Ok(PcsResponse::ReadInputRegisters(w)) => encode_read_registers(&mut pdu, 0x04, &w),
+        Ok(PcsResponse::WriteSingleRegister(a, v)) => {
             pdu.push(0x06);
-            pdu.extend_from_slice(&addr.to_be_bytes());
-            pdu.extend_from_slice(&word.to_be_bytes());
+            pdu.extend_from_slice(&a.to_be_bytes());
+            pdu.extend_from_slice(&v.to_be_bytes());
         }
-        Ok(Response::WriteMultipleRegisters(addr, qty)) => {
+        Ok(PcsResponse::WriteMultipleRegisters(a, n)) => {
             pdu.push(0x10);
-            pdu.extend_from_slice(&addr.to_be_bytes());
-            pdu.extend_from_slice(&qty.to_be_bytes());
+            pdu.extend_from_slice(&a.to_be_bytes());
+            pdu.extend_from_slice(&n.to_be_bytes());
         }
         Err(e) => {
             pdu.push(req_fc | 0x80);
             pdu.push(u8::from(e));
-        }
-        Ok(_) => {
-            pdu.push(req_fc | 0x80);
-            pdu.push(u8::from(Exception::ServerDeviceFailure));
         }
     }
     let mut adu = Vec::with_capacity(pdu.len() + 3);
@@ -470,31 +503,81 @@ mod tests {
         assert_eq!(take_rtu_frame(&mut buf), Some(req));
     }
 
-    /// 请求解析：FC03/04/06/16 映射对应 Request；未知功能码 → Custom（服务层回异常）
+    /// 请求解析：FC03/04/06/16 映射对应 PcsRequest；未知功能码 → Custom（服务层回异常）
     #[test]
     fn parse_request_maps_supported_fcs() {
         assert_eq!(
             parse_request(0x04, &[0x03, 0xF5, 0x00, 0x01]),
-            Request::ReadInputRegisters(1013, 1)
+            PcsRequest::ReadInputRegisters(1013, 1)
         );
         assert_eq!(
             parse_request(0x03, &[0x03, 0xE9, 0x00, 0x02]),
-            Request::ReadHoldingRegisters(1001, 2)
+            PcsRequest::ReadHoldingRegisters(1001, 2)
         );
         assert_eq!(
             parse_request(0x06, &[0x01, 0xF4, 0x00, 0x01]),
-            Request::WriteSingleRegister(500, 1)
+            PcsRequest::WriteSingleRegister(500, 1)
         );
         assert_eq!(
             parse_request(
                 0x10,
                 &[0x03, 0xE9, 0x00, 0x02, 0x04, 0x00, 0x05, 0xFF, 0xF6]
             ),
-            Request::WriteMultipleRegisters(1001, Cow::Owned(vec![5, 0xFFF6]))
+            PcsRequest::WriteMultipleRegisters(1001, vec![5, 0xFFF6])
         );
-        assert_eq!(
-            parse_request(0x07, &[]),
-            Request::Custom(0x07, Cow::Owned(vec![]))
-        );
+        assert_eq!(parse_request(0x07, &[]), PcsRequest::Custom(0x07, vec![]));
+    }
+
+    /// 造一帧请求 ADU（addr + fc + payload + CRC16 低字节在前）。
+    fn req_adu(slave: u8, fc: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![slave, fc];
+        v.extend_from_slice(payload);
+        let crc = crc16_modbus(&v);
+        v.push(crc as u8);
+        v.push((crc >> 8) as u8);
+        v
+    }
+
+    /// 钉住 `handle_frame_sync` 的**读输入臂**（迁移中最高风险面：逐臂搬迁 + ADU 编码）——
+    /// 这是「服务体动态零覆盖」的补网：此前把 `REG_SOC => to_pcs_reg(SIM_SOC)` 变异为
+    /// `to_pcs_reg(0.0)` 令全仓测试**零红**（评审实证）。同时钉住应答帧的偏移形状。
+    #[test]
+    fn serve_frame_sync_reads_soc_from_input_area() {
+        let svc = PcsSlaveService::new(Arc::new(PcsSimState::new()));
+        // FC04 读 1010（=0x03F2）起 1 字，slave=1
+        let rsp = svc.serve_frame_sync(&req_adu(1, 0x04, &[0x03, 0xF2, 0x00, 0x01]));
+        assert_eq!(rsp[0], 1, "响应从站号回显");
+        assert_eq!(rsp[1], 0x04, "功能码回显");
+        assert_eq!(rsp[2], 2, "字节数 = 2（1 个寄存器）");
+        let word = u16::from_be_bytes([rsp[3], rsp[4]]);
+        assert_eq!(from_pcs_reg(word), 66.0, "SOC 必须为仿真固定值 66");
+    }
+
+    /// 钉住 **写单（FC06）→ 状态镜像 → 运行状态推演**整链，并钉 FC06 应答的回显形状
+    /// （应答 = addr + 线上原值，非回解后的真实值）。
+    #[test]
+    fn serve_frame_sync_write_single_then_run_state_reflects_it() {
+        let svc = PcsSlaveService::new(Arc::new(PcsSimState::new()));
+        // 写 500（=0x01F4）值为 PCS 线值 to_pcs_reg(1.0)
+        let wv = to_pcs_reg(1.0);
+        let w = svc.serve_frame_sync(&req_adu(1, 0x06, &[0x01, 0xF4, (wv >> 8) as u8, wv as u8]));
+        assert_eq!(w[1], 0x06);
+        assert_eq!(u16::from_be_bytes([w[2], w[3]]), 500, "FC06 应答回显地址");
+        assert_eq!(u16::from_be_bytes([w[4], w[5]]), wv, "FC06 应答回显值");
+        // 读 1013（=0x03F5）运行状态：500=1 且 P=0 ⇒ 待机(1)
+        let r = svc.serve_frame_sync(&req_adu(1, 0x04, &[0x03, 0xF5, 0x00, 0x01]));
+        let st = from_pcs_reg(u16::from_be_bytes([r[3], r[4]]));
+        assert_eq!(st, 1.0, "500=1 且总有功 0 ⇒ 待机");
+    }
+
+    /// 钉住 `encode_adu` 的**异常臂**（原 tokio-modbus 版的 `Ok(_)` 兜底臂已被删除，
+    /// 本地位枚举穷尽 —— 这条防止将来有人把异常臂写错或漏编 `func|0x80`）。
+    #[test]
+    fn serve_frame_sync_unknown_function_returns_illegal_function_exception() {
+        let svc = PcsSlaveService::new(Arc::new(PcsSimState::new()));
+        let rsp = svc.serve_frame_sync(&req_adu(1, 0x07, &[0x00, 0x00]));
+        assert_eq!(rsp[0], 1, "异常响应从站号仍回显");
+        assert_eq!(rsp[1], 0x07 | 0x80, "异常响应功能码须置 bit7");
+        assert_eq!(rsp[2], 0x01, "异常码 = IllegalFunction(0x01)");
     }
 }

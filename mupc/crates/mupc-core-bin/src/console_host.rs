@@ -1889,8 +1889,8 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
 ///    （`core_config.rs:281-288`）只有 `listen_addr` / `listen_port`，**没有**心跳间隔。
 ///    造一个键 = 屏上能改、装置里不存在。
 /// 2. `intercore.local_port`（设计 §4.3.3「核间『本地端口』」行）——`InterCoreConfig`
-///    （`core_config.rs:152-171`）只有 `host` / `port`（**对端**地址与端口）/ `heartbeat_interval_sec`
-///    / `reconnect_interval_sec` / `transport` / `modbus_rtu`，**没有**本地绑定端口。
+///    只有 `host` / `port`（**对端**地址与端口）/ `heartbeat_interval_sec` /
+///    `reconnect_interval_sec` / `transport`，**没有**本地绑定端口。
 /// 3. `telemetry.report_interval_sec`（设计 §4.3.3「遥测上报周期」行）——上送节拍在 `startup.rs`
 ///    是**硬编码常量**，`CoreConfig` 无对应项（该行"现网真实 key"一栏写的是一句**代码位置描述**，
 ///    不是配置键——这本身就是该项无配置承载的证据）。

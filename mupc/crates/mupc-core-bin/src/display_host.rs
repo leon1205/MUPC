@@ -4,8 +4,9 @@
 //! - [`DisplayDataProvider`]：采样 + 组帧 + 发布。
 //!   - **主拍** `publish_ms`（默认 1 s，`display-proto` `DEFAULT_PUBLISH_MS`）：读**内存缓存**
 //!     组一帧 [`DisplayFrame`]——SOC 取 AiIntegrator 裁决快照（§4.3 唯一裁决入口）、
-//!     run_state/pcs_online/三相取 intercore（`read_three_phase`/`last_run_state`/
-//!     `is_connected`），原子写入共享 `latest`（`Arc<Mutex<Option<DisplayFrame>>>`，§3.5）。
+//!     run_state/pcs_online/三相取 PCS 通道（`southd::pcs::PcsHandle` 的
+//!     `read_three_phase`/`last_run_state`/`is_connected`；Task 10 由 intercore 迁来），
+//!     原子写入共享 `latest`（`Arc<Mutex<Option<DisplayFrame>>>`，§3.5）。
 //!   - **慢拍四段**（§4.2，独立任务、互不阻塞、各自失败各自降级）：`device`（3 s）/
 //!     `alarms`（0.5 s）/ `interlock`（0.5 s）写入 [`SlowCaches`]，`info` 启动时一次性；
 //!     **内容变化**即 `Notify` 唤醒主拍提前组帧（合并窗口 `min_publish_interval_ms`）。
@@ -213,7 +214,9 @@ pub struct SystemDeviceSource {
     /// 装配**之后**（约数百 ms~数 s）⇒ 屏上 uptime **系统性偏小**。故零点上移到进程入口，
     /// 由调用方传入；构造签名保留**显式零点形参**，测试可注入人工零点，不依赖真实进程起点。
     started_at: Instant,
-    intercore: Arc<mupc_intercore::IntercoreClient>,
+    /// PCS 通道（`south_pcs` 段装配的 `PcsHandle`；`None` = 未启用 PCS 通道 ⇒ 链路态报
+    /// `Disconnected`，与迁移前"未接 PCS 的 TCP 通道"同款呈现）。
+    pcs: Option<Arc<mupc_southd::pcs::PcsHandle>>,
     ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
     /// IEC 104 服务器句柄（设计 §4.1 #1）：`link_state()` 即 F6「IEC 104 连接状态」真源。
     ///
@@ -225,14 +228,14 @@ pub struct SystemDeviceSource {
 impl SystemDeviceSource {
     /// `started_at` = 进程启动零点（生产取 `main()` 最顶部的 `Instant::now()`，见字段注释）。
     pub fn new(
-        intercore: Arc<mupc_intercore::IntercoreClient>,
+        pcs: Option<Arc<mupc_southd::pcs::PcsHandle>>,
         ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
         iec104: Option<Arc<mupc_gateway::iec104::server::Iec104Server>>,
         started_at: Instant,
     ) -> Self {
         Self {
             started_at,
-            intercore,
+            pcs,
             ai_integrator,
             iec104,
         }
@@ -264,11 +267,17 @@ fn map_iec104_link_state(s: mupc_gateway::iec104::server::LinkState) -> LinkStat
 #[async_trait::async_trait]
 impl DeviceSource for SystemDeviceSource {
     async fn read_device(&self) -> DeviceSection {
-        // 核间链路：有心跳连接即 Connected，否则 Disconnected（**不**写 Unknown——本项真源存在）
-        let intercore = if self.intercore.is_connected().await {
-            LinkState::Connected
-        } else {
-            LinkState::Disconnected
+        // PCS 链路：连接即 Connected，否则（含未启用 PCS 通道）Disconnected
+        // （**不**写 Unknown——本项真源存在）
+        let intercore = match &self.pcs {
+            Some(p) => {
+                if p.is_connected().await {
+                    LinkState::Connected
+                } else {
+                    LinkState::Disconnected
+                }
+            }
+            None => LinkState::Disconnected,
         };
         DeviceSection {
             ts_ms: now_ms(),
@@ -1100,14 +1109,17 @@ impl PublishPacer {
 pub struct DisplayDataProvider {
     /// AiIntegrator（SOC 唯一裁决入口，只读快照，不参与控制态）。
     ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
-    /// IntercoreClient（三相展示读 + run_state/连接态查询）。
-    intercore: Arc<mupc_intercore::IntercoreClient>,
+    /// PCS 通道（三相展示读 + run_state/连接态查询；`None` = 未启用 PCS 通道）。
+    pcs: Option<Arc<mupc_southd::pcs::PcsHandle>>,
     /// 域值化量程（设计 §4.4：越界 → RangeError）。
     range: DisplayRange,
     /// 采集/组帧/发布周期 ms（设计 §3.5，标称 1Hz）。
     publish_ms: u64,
-    /// transport==modbus_rtu 时三相缺段读 = `Offline`（PCS 离线/读失败）；否则（tcp/sim
-    /// 无 PCS 3 区点表）transport 不支持 = `NotRead`（设计 §4.1/§4.4）。
+    /// **有 PCS 3 区通道**时三相缺段读 = `Offline`（PCS 离线/读失败）；否则（无 PCS 通道，
+    /// 读不到 3 区点表）不支持 = `NotRead`（设计 §4.1/§4.4）。
+    ///
+    /// ⚠️ Task 10：真源由 `intercore.transport == "modbus_rtu"` 改为 **`south_pcs.enabled`**
+    /// （PCS 迁入南向后，该字段即"有无 PCS 3 区通道"的唯一真源）；装配侧照此传参。
     modbus_transport: bool,
     /// 单调发布序号（重启清零；渲染端判连续/重排，§3.3）。
     seq: u64,
@@ -1140,18 +1152,18 @@ pub struct DisplayDataProvider {
 }
 
 impl DisplayDataProvider {
-    /// 创建提供层（`modbus_transport` = `config.intercore.transport=="modbus_rtu"`，
-    /// 启动侧从 core_config 判定传入，用于 Offline/NotRead 区分）。
+    /// 创建提供层（`modbus_transport` = `config.south_pcs.enabled`，启动侧从 core_config 判定
+    /// 传入，用于 Offline/NotRead 区分）。
     pub fn new(
         ai_integrator: Arc<mupc_strategy_engine::AiIntegrator>,
-        intercore: Arc<mupc_intercore::IntercoreClient>,
+        pcs: Option<Arc<mupc_southd::pcs::PcsHandle>>,
         cfg: &DisplayConfig,
         modbus_transport: bool,
         latest: SharedLatest,
     ) -> Self {
         Self {
             ai_integrator,
-            intercore,
+            pcs,
             range: cfg.range.clone(),
             publish_ms: cfg.publish_ms.max(50), // 防 0/极小周期空耗（KISS 下限 50ms）
             modbus_transport,
@@ -1464,13 +1476,20 @@ impl DisplayDataProvider {
             (snap.value_pct, source, FieldFlag::Valid)
         };
 
-        // ── F2 run_state（1013 心跳维护）+ 核间链路在线 ──
-        let run_state = self.intercore.last_run_state().and_then(RunState::from_raw);
-        let online = self.intercore.is_connected().await;
+        // ── F2 run_state（1013 采集拍维护）+ PCS 链路在线 ──
+        let run_state = self.pcs.as_ref().and_then(|p| p.last_run_state());
+        let run_state = run_state.and_then(RunState::from_raw);
+        let online = match &self.pcs {
+            Some(p) => p.is_connected().await,
+            None => false,
+        };
         let pcs_online = online && run_state.is_some();
 
-        // ── F3/F4 三相（1022-1032 已 ×0.1 工程值，intercore 侧解码；量程校验在本层）──
-        let three = self.intercore.read_three_phase().await;
+        // ── F3/F4 三相（1022-1032 已 ×0.1 工程值，PCS 采集侧解码；量程校验在本层）──
+        let three = match &self.pcs {
+            Some(p) => p.read_three_phase().await,
+            None => None,
+        };
         // transport 缺 PCS 3 区点表 → NotRead；modbus 读失败 → Offline（§4.4）
         let missing = if self.modbus_transport {
             FieldFlag::Offline
@@ -1777,73 +1796,94 @@ mod tests {
     };
     use std::time::Instant;
 
-    // ── 测试桩：核间 transport（可控三相/run_state/连接态），下行接口返回默认 ──
-    #[derive(Clone)]
-    struct StubIntercore {
-        soc: Option<(f64, Instant)>,
-        run: Option<u16>,
-        connected: bool,
-        three: Option<mupc_intercore::transport::ThreePhaseRead>,
-    }
+    /// 采集出口空实现（本组用例只关心帧取数，不关心遥测落点）。
+    struct NullSink;
 
     #[async_trait::async_trait]
-    impl mupc_intercore::IntercoreTransport for StubIntercore {
-        async fn send_dual_param(
+    impl mupc_southd::scheduler::StationSink for NullSink {
+        async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+        async fn on_station_telemetry(
             &self,
-            _c: &mupc_intercore::DualParamCommand,
-        ) -> Result<(), mupc_common::MupcError> {
-            Ok(())
+            _id: &str,
+            _role: mupc_southd::config::Role,
+            _pts: Vec<(String, f64, bool)>,
+        ) {
         }
-        async fn send_tai_command(
-            &self,
-            _p: [f64; 3],
-            _q: [f64; 3],
-            _m: &str,
-        ) -> Result<(), mupc_common::MupcError> {
-            Ok(())
-        }
-        async fn is_connected(&self) -> bool {
-            self.connected
-        }
-        async fn shutdown(&self) -> Result<(), mupc_common::MupcError> {
-            Ok(())
-        }
-        async fn latest_soc(&self) -> Option<(f64, Instant)> {
-            self.soc
-        }
-        async fn stop(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn is_interlock_stopped(&self) -> bool {
-            false
-        }
-        async fn restore_interlock_latched(&self, _b: bool) -> Result<(), String> {
-            Ok(())
-        }
-        fn last_run_state(&self) -> Option<u16> {
-            self.run
-        }
-        async fn authorize_restart(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn read_three_phase(&self) -> Option<mupc_intercore::transport::ThreePhaseRead> {
-            self.three
-        }
+        async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
     }
 
-    fn stub_client(
+    /// 测试用 PCS 句柄 = **真 `PcsHandle` + `MockBus`**（Task 10：不再有 transport 桩）。
+    ///
+    /// 消费侧三个按需读的**快照口径**：
+    /// - `run` ⇒ 运行态字 1013（`None` 写域外字 `0xFFFF` ⇒ 解码 `None`，**不是** 0/停机）；
+    /// - `three` ⇒ 三相段 1022-1032（`None` ⇒ 窗口只到 1013，三相段整体缺失 ⇒ 三个
+    ///   按需读字段全 `None`；`read_three_phase` 本身仍 `Some`，与迁移前 `Some(空三段)`
+    ///   在**字段级**逐字等价）；
+    /// - `connected=false` ⇒ **不采**（快照 `Default` ⇒ run/三相皆 `None`、`is_connected()`=false
+    ///   —— 与迁移前 `StubIntercore{connected:false}` 的消费侧效果逐字等价）。
+    ///
+    /// 寄存器口径：3 区窗口基址 1000、量纲 `SCALE_3PH = 0.1` ⇒ 寄存器 raw = 物理值 / 0.1。
+    async fn stub_pcs(
         run: Option<u16>,
         connected: bool,
-        three: Option<mupc_intercore::transport::ThreePhaseRead>,
-    ) -> Arc<mupc_intercore::IntercoreClient> {
-        Arc::new(mupc_intercore::IntercoreClient::with_transport(Arc::new(
-            StubIntercore {
-                soc: None,
-                run,
-                connected,
-                three,
-            },
-        )))
+        three: Option<mupc_southd::pcs::ThreePhaseRead>,
+    ) -> Arc<mupc_southd::pcs::PcsHandle> {
+        use mupc_southd::config::{RegBlockConf, RegFunc, SouthPcsConfig};
+        use mupc_southd::pcs::to_pcs_reg;
+        use mupc_southd::port_runtime::MockBus;
+
+        // 窗口宽度：有三相 ⇒ 覆盖到 1032（33 寄存器）；无三相 ⇒ 只到运行态 1013（14）。
+        let count: u16 = if three.is_some() { 33 } else { 14 };
+        let cfg = SouthPcsConfig {
+            enabled: true,
+            regs: vec![RegBlockConf {
+                name: "pcs_3zone".into(),
+                addr: 1000,
+                func: RegFunc::Input,
+                format: mupc_data_processing::meter_regs::RegFormat::Uint16,
+                scale: 1.0,
+                count,
+                offset: 0.0,
+                byte_swap: true,
+                points: Vec::new(),
+                read_slice: false,
+                interval_ms: None,
+            }],
+            ..Default::default()
+        };
+        let bus = Arc::new(MockBus::new());
+        if connected {
+            let mut words = vec![0u16; count as usize];
+            // SOC 恒留域外（本组用例的 SOC 全部走 BMS/AiIntegrator 裁决，与 PCS 快照无关）
+            words[(1010 - 1000) as usize] = 0xFFFF;
+            words[(1013 - 1000) as usize] = run.map_or(0xFFFF, |r| to_pcs_reg(r as f64));
+            let mut put = |addr: u16, v: f64| words[(addr - 1000) as usize] = to_pcs_reg(v / 0.1);
+            if let Some(t) = three {
+                if let Some(i) = t.i_phase {
+                    for (k, v) in i.iter().enumerate() {
+                        put(1022 + k as u16, *v);
+                    }
+                }
+                if let Some(p) = t.p_phase {
+                    for (k, v) in p.iter().enumerate() {
+                        put(1029 + k as u16, *v);
+                    }
+                }
+                if let Some(total) = t.p_total {
+                    put(1032, total);
+                }
+            }
+            bus.put_input(1, 1000, words);
+        }
+        let h = mupc_southd::pcs::PcsHandle::new(cfg, bus, Arc::new(NullSink));
+        if connected {
+            h.tick_once().await; // 采一拍 ⇒ 快照 valid + 在线
+            assert!(
+                h.is_connected().await,
+                "前提：stub 采集须成功（否则用例空转）"
+            );
+        }
+        h
     }
 
     fn cfg() -> DisplayConfig {
@@ -1852,8 +1892,8 @@ mod tests {
         c
     }
 
-    fn valid_three() -> mupc_intercore::transport::ThreePhaseRead {
-        mupc_intercore::transport::ThreePhaseRead {
+    fn valid_three() -> mupc_southd::pcs::ThreePhaseRead {
+        mupc_southd::pcs::ThreePhaseRead {
             i_phase: Some([22.5, 22.1, 22.3]),
             p_phase: Some([12.3, 11.8, 12.0]),
             p_total: Some(36.1),
@@ -1867,7 +1907,7 @@ mod tests {
         ai.set_battery_soc(65.5).await; // fresh BMS → snapshot=Bms
         let mut provider = DisplayDataProvider::new(
             ai.clone(),
-            stub_client(Some(3), true, Some(valid_three())),
+            Some(stub_pcs(Some(3), true, Some(valid_three())).await),
             &cfg(),
             true,
             Arc::new(Mutex::new(None)),
@@ -1912,11 +1952,11 @@ mod tests {
         use mupc_data_processing::telemetry::{
             BatteryData, DataPackage, DeviceStatus, ElectricalData, InverterStatus,
         };
-        // 复用同一 intercore 桩：作为 AiIntegrator 的活读 client（latest_soc=None → 无 fresh）
+        // 复用同一 PCS 句柄：作为 AiIntegrator 的活读通道（无快照 → latest_soc=None → 无 fresh）
         // 与 provider 的三相/run_state/连接源（PCS 离线）。BMS 未注入 + existing 冻结 30 → 双源皆失
-        let shared_client = stub_client(None, false, None);
-        let mut ai = mupc_strategy_engine::AiIntegrator::new();
-        ai.set_intercore_client(shared_client.clone());
+        let shared_client = stub_pcs(None, false, None).await;
+        let ai = mupc_strategy_engine::AiIntegrator::new();
+        ai.set_pcs_client(shared_client.clone());
         ai.set_latest_data(DataPackage {
             timestamp: 0,
             electrical: ElectricalData::default(),
@@ -1936,9 +1976,9 @@ mod tests {
 
         let mut provider = DisplayDataProvider::new(
             Arc::new(ai),
-            shared_client,
+            Some(shared_client),
             &cfg(),
-            true, // modbus_rtu
+            true, // 有 PCS 3 区通道
             Arc::new(Mutex::new(None)),
         );
         let f = provider.sample_once().await;
@@ -1961,7 +2001,7 @@ mod tests {
         ai.set_battery_soc(50.0).await;
         let mut provider = DisplayDataProvider::new(
             ai.clone(),
-            stub_client(None, true, None), // tcp 通道：无 run_state、无三相点表
+            Some(stub_pcs(None, true, None).await), // tcp 通道：无 run_state、无三相点表
             &cfg(),
             false, // 非 modbus → NotRead
             Arc::new(Mutex::new(None)),
@@ -1981,14 +2021,14 @@ mod tests {
     async fn frame_range_error_on_out_of_range_phase() {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
         ai.set_battery_soc(50.0).await;
-        let three = mupc_intercore::transport::ThreePhaseRead {
+        let three = mupc_southd::pcs::ThreePhaseRead {
             i_phase: Some([500.0, 22.1, 22.3]), // 500A > current_max 300 → RangeError
             p_phase: Some([1000.0, 11.8, 12.0]), // 1000kW > phase_power_max 100 → RangeError
             p_total: Some(1000.0),              // 1000kW > total_power_max 300 → RangeError
         };
         let mut provider = DisplayDataProvider::new(
             ai.clone(),
-            stub_client(Some(0), true, Some(three)),
+            Some(stub_pcs(Some(0), true, Some(three)).await),
             &cfg(),
             true,
             Arc::new(Mutex::new(None)),
@@ -2447,10 +2487,10 @@ mod tests {
     }
 
     /// 空载 provider（三相/run_state 全缺，四段未接线）。
-    fn bare_provider(c: &DisplayConfig) -> DisplayDataProvider {
+    async fn bare_provider(c: &DisplayConfig) -> DisplayDataProvider {
         DisplayDataProvider::new(
             Arc::new(mupc_strategy_engine::AiIntegrator::new()),
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             c,
             true,
             Arc::new(Mutex::new(None)),
@@ -2511,7 +2551,7 @@ mod tests {
     async fn device_source_links_and_hmi_channel_never_faked() {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
         let online = SystemDeviceSource::new(
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             ai.clone(),
             None,
             Instant::now(),
@@ -2538,8 +2578,12 @@ mod tests {
             "缺省/不可得绝不落在已连接"
         );
 
-        let offline =
-            SystemDeviceSource::new(stub_client(None, false, None), ai, None, Instant::now());
+        let offline = SystemDeviceSource::new(
+            Some(stub_pcs(None, false, None).await),
+            ai,
+            None,
+            Instant::now(),
+        );
         assert_eq!(
             offline.read_device().await.intercore,
             LinkState::Disconnected
@@ -2559,7 +2603,7 @@ mod tests {
             },
         ));
         let src = SystemDeviceSource::new(
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             ai,
             Some(server.clone()),
             Instant::now(),
@@ -2617,7 +2661,7 @@ mod tests {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
         // 人工零点：1 小时前（模拟"进程已启动 1 h"）。绝不依赖真实进程起点。
         let zero = Instant::now() - Duration::from_secs(3600);
-        let src = SystemDeviceSource::new(stub_client(None, true, None), ai, None, zero);
+        let src = SystemDeviceSource::new(Some(stub_pcs(None, true, None).await), ai, None, zero);
         let up = src
             .read_device()
             .await
@@ -2635,7 +2679,7 @@ mod tests {
     async fn device_source_control_source_never_invents() {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
         let src = SystemDeviceSource::new(
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             ai.clone(),
             None,
             Instant::now(),
@@ -2659,9 +2703,14 @@ mod tests {
     #[tokio::test]
     async fn device_source_no_stub_metrics_on_non_linux() {
         let ai = Arc::new(mupc_strategy_engine::AiIntegrator::new());
-        let d = SystemDeviceSource::new(stub_client(None, true, None), ai, None, Instant::now())
-            .read_device()
-            .await;
+        let d = SystemDeviceSource::new(
+            Some(stub_pcs(None, true, None).await),
+            ai,
+            None,
+            Instant::now(),
+        )
+        .read_device()
+        .await;
         assert_eq!(
             d.cpu_temp_c, None,
             "非 Linux 无真温度源 ⇒「未知」，不得上桩值"
@@ -2836,7 +2885,7 @@ mod tests {
     /// 组帧级：未接线（无告警源）时帧内 `alarms.available=false`，**绝不**退化成「无告警」。
     #[tokio::test]
     async fn frame_alarms_unwired_is_unavailable_not_empty() {
-        let mut p = bare_provider(&cfg());
+        let mut p = bare_provider(&cfg()).await;
         let f = p.sample_once().await;
         assert!(
             !f.alarms.available,
@@ -3055,7 +3104,10 @@ mod tests {
     /// 也**不得**写成 `available=true, enabled=true, latched=false`（那是「未联锁」）。
     #[tokio::test]
     async fn interlock_disabled_is_known_state_not_unavailable() {
-        let mut p = bare_provider(&cfg()).with_slow_sources(None, None, InterlockWiring::Disabled);
+        let mut p =
+            bare_provider(&cfg())
+                .await
+                .with_slow_sources(None, None, InterlockWiring::Disabled);
         let f = p.sample_once().await;
         assert!(
             f.interlock.available,
@@ -3123,7 +3175,7 @@ mod tests {
     /// 未接线 ⇒ `available=false`（「联锁状态不可用」），**绝不**退化成「未联锁」。
     #[tokio::test]
     async fn interlock_unwired_is_unavailable_not_unlatched() {
-        let mut p = bare_provider(&cfg());
+        let mut p = bare_provider(&cfg()).await;
         let f = p.sample_once().await;
         assert!(
             !f.interlock.available,
@@ -3153,7 +3205,7 @@ mod tests {
             latched: true,
             ..Default::default()
         }));
-        let mut p = bare_provider(&cfg()).with_slow_sources(
+        let mut p = bare_provider(&cfg()).await.with_slow_sources(
             Some(dev.clone()),
             Some(alm.clone()),
             InterlockWiring::Wired(ilk.clone()),
@@ -3216,7 +3268,7 @@ mod tests {
         ));
         let provider = DisplayDataProvider::new(
             Arc::new(mupc_strategy_engine::AiIntegrator::new()),
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             &cfg_slow(50, 250, 50),
             true,
             latest.clone(),
@@ -3422,7 +3474,7 @@ mod tests {
         }));
         let provider = DisplayDataProvider::new(
             Arc::new(mupc_strategy_engine::AiIntegrator::new()),
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             &cfg_slow(3000, 250, 50), // 主拍 3 s，慢拍 50 ms
             true,
             latest.clone(),
@@ -3459,7 +3511,7 @@ mod tests {
         // 主拍 3 s、合并窗口 250 ms、慢拍 20 ms —— 突发全落在主拍之间，只能靠"变更即组帧"上屏
         let provider = DisplayDataProvider::new(
             Arc::new(mupc_strategy_engine::AiIntegrator::new()),
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             &cfg_slow(3000, 250, 20),
             true,
             latest.clone(),
@@ -3560,7 +3612,7 @@ mod tests {
         }));
         let provider = DisplayDataProvider::new(
             Arc::new(mupc_strategy_engine::AiIntegrator::new()),
-            stub_client(None, true, None),
+            Some(stub_pcs(None, true, None).await),
             &cfg_slow(600, 250, 50),
             true,
             latest.clone(),
@@ -4253,7 +4305,7 @@ stations:
     /// 唯一对应"先裁后守"。
     #[tokio::test]
     async fn build_frame_truncates_before_exit_guard() {
-        let mut p = bare_provider(&cfg_slow(1000, 250, 500));
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500)).await;
         {
             let mut g = p.caches.peripherals.write().unwrap();
             *g = fire_det_section(119);
@@ -4287,7 +4339,7 @@ stations:
     /// 逐字段不受影响**、帧照常发布（不黑屏）。
     #[tokio::test]
     async fn build_frame_exit_guard_downgrades_section_and_keeps_existing_segments() {
-        let mut p = bare_provider(&cfg_slow(1000, 250, 500));
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500)).await;
         // 人为把段与告警一起做大：1035 点 × f64 极值形态（≈64 KiB）+ 8 条 1 KiB 告警（≈8 KiB）
         // ⇒ 整帧必然 > MAX_FRAME_BYTES（§15.2.4 的 R-43 失效模式）
         {
@@ -4335,7 +4387,7 @@ stations:
         assert_eq!(frame.alarms.items.len(), 8, "既有告警段逐字段不受影响");
         assert!(frame.alarms.available);
         // 既有段与"无外设段"的基线帧逐字段一致
-        let mut q = bare_provider(&cfg_slow(1000, 250, 500));
+        let mut q = bare_provider(&cfg_slow(1000, 250, 500)).await;
         let baseline = q.sample_once().await;
         assert_eq!(frame.device, baseline.device);
         assert_eq!(frame.info, baseline.info);
@@ -4347,7 +4399,7 @@ stations:
     /// **T-8：未接线 ⇒ `available=false`**（「外设数据不可用」，**不得**出空段伪装正常）。
     #[tokio::test]
     async fn periph_unwired_keeps_section_unavailable() {
-        let mut p = bare_provider(&cfg_slow(1000, 250, 500));
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500)).await;
         assert!(!p.peripherals().available, "缓存缺省即「不可用」");
         let frame = p.sample_once().await;
         assert!(
@@ -4387,7 +4439,9 @@ stations:
             "源产出的段必须带装配时的 catalog_rev"
         );
         let src: Arc<dyn PeripheralSource> = src_obj;
-        let mut p = bare_provider(&cfg_slow(1000, 250, 500)).with_peripheral_source(src);
+        let mut p = bare_provider(&cfg_slow(1000, 250, 500))
+            .await
+            .with_peripheral_source(src);
         {
             let mut g = p.caches.peripherals.write().unwrap();
             *g = seed;

@@ -7,7 +7,8 @@
 //! ② 块内**偏移**（`at` 是 1 基、偏移是 0 基）与**绝对寄存器地址**的对齐；
 //! ③ 块读结果的**形态**（FC03/FC04 → `BlockData::Regs`、FC02 → `BlockData::Bits`）。
 //! 本文件把三者一起走通：**用参考配置的真实块划分**（`fixtures/south_stations_s3b2.yaml`
-//! = PRD §9.4.1 的 6 站）经 [`MockBus`] 注入 canned 寄存器，再断言点位值 == §11.6 的期望值。
+//! = PRD §9.4.1 的参考配置；Task 6 起站级段 5 站，PCS 在 `fixtures/south_pcs_s3b2.yaml`）
+//! 经 [`MockBus`] 注入 canned 寄存器，再断言点位值 == §11.6 的期望值。
 //!
 //! **期望值的真源 = 设计 §11.6 的换算表**（全部已回厂方原文复算），逐设备抽样。其中两条是
 //! **判别性**用例（"必须不等"）：BMS 116 `uint16` raw=65535 → **+4953.5 A**（若误配 `int16`
@@ -19,7 +20,7 @@
 //! 用"点绝对地址 == 块 addr + at"会红）。
 
 use mupc_data_processing::meter_regs::WordOrder;
-use mupc_southd::config::{RegFunc, Role, SouthStationsConfig, StationConf};
+use mupc_southd::config::{RegFunc, Role, SouthPcsConfig, SouthStationsConfig, StationConf};
 use mupc_southd::mapper::{self, BlockData, SampleKind, TelemetrySample};
 use mupc_southd::port_runtime::{MockBus, StationBus};
 use serde::Deserialize;
@@ -29,9 +30,12 @@ struct Wrapper {
     south_stations: SouthStationsConfig,
 }
 
-/// PRD §9.4.1 的 6 站参考配置（与 `s3b2_config.rs` / `point_table_vs_reference_config.rs`
-/// 同一份 fixture —— **同一份配置**才谈得上"配置 → 解码"的端到端）。
+/// PRD §9.4.1 的参考配置（与 `s3b2_config.rs` / `point_table_vs_reference_config.rs`
+/// 同一份 fixture —— **同一份配置**才谈得上"配置 → 解码"的端到端）；Task 6 起为 5 站。
 const REF: &str = include_str!("fixtures/south_stations_s3b2.yaml");
+
+/// PCS 独立顶层段（Task 6 / ADR-016；与站级段同源的 `pcs_3zone` 块）。
+const REF_PCS: &str = include_str!("fixtures/south_pcs_s3b2.yaml");
 
 fn station(id: &str) -> StationConf {
     serde_yaml::from_str::<Wrapper>(REF)
@@ -41,6 +45,20 @@ fn station(id: &str) -> StationConf {
         .into_iter()
         .find(|s| s.id == id)
         .unwrap_or_else(|| panic!("参考配置里没有站 {id}"))
+}
+
+/// 由 `south_pcs` 段**合成** `Role::Pcs` 的站形态（**仅本测试**用）：`read_station` /
+/// `offset_of` / `telemetry_points` 的入参形态是 `StationConf`，而生产侧 `south_pcs`
+/// 自 Task 6 起是独立顶层段（消费方为 `PcsHandle`，不合成 `StationConf`）。
+///
+/// **合成走共用函数** [`SouthPcsConfig::station_shell`]（设计 §13.9 末要求③：生产与测试
+/// 共用同一函数）—— 此前本处手写、与 `mupc-southd` / `mupc-core-bin` 单测两处各一份，
+/// 会与生产漂移。合成的只是**外壳**（`id`/`role`），`port`/`slave`/`regs` 逐字段取自新段
+/// ⇒ 解码路径的输入与迁移前**逐字相同**。
+fn pcs_station() -> StationConf {
+    let pcs: SouthPcsConfig = serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
+    assert!(pcs.enabled, "参考 PCS 段须 enabled");
+    pcs.station_shell()
 }
 
 /// 某块的 `(块内偏移 0 基)` —— 由**绝对寄存器地址**反推（`at`/点位名都不可靠时用它定位）。
@@ -213,7 +231,7 @@ async fn ac2_bms_current_uint16_beats_int16_at_high_raw() {
 /// → swap 后 65.0）与**32 位电量 1042–1043**（`int32_scaled`/`0.1`/`byte_swap`/`lo_hi`）。
 #[tokio::test]
 async fn ac2_pcs_byte_swap_and_32bit_lo_hi_decode_end_to_end() {
-    let pcs = station("pcs");
+    let pcs = pcs_station();
     let bus = MockBus::new();
     // `pcs_3zone`（addr 1000，count 76，byte_swap: true）
     let regs = window(
@@ -371,7 +389,7 @@ async fn ac2_hvac_int16_uint16_and_fc02_bits() {
 }
 
 /// 参考配置的**每站**都经 FC 读通路能读到块（未预置即 Err）——保证上面的用例不是"只对某一站
-/// 的块划分有效"；顺带钉住"6 站里除 `grid_meter` 外都有逐点产出"（grid 走分相语义，
+/// 的块划分有效"；顺带钉住"站级 5 站里除 `grid_meter` 外都有逐点产出"（grid 走分相语义，
 /// 不经 `telemetry_points`，见 §11.4.6 的只读断言）。
 #[tokio::test]
 async fn ac2_reference_config_every_collected_station_produces_points() {

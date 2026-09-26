@@ -13,20 +13,32 @@ system:
   shutdown_timeout_sec: 30
 
 intercore:
-  transport: "tcp"              # "tcp" | "modbus_rtu"（生产 PCS 主链路=modbus_rtu；tcp 仅供仿真/联调）
+  transport: "tcp"              # 仅 "tcp"（仿真/联调；sim-bridge 作 TCP 服务端）。
+                                # 原 "modbus_rtu"（生产 PCS 主链路）档已删除 —— PCS 迁至下方
+                                # `south_pcs:` 段（02 设计 §13 / ADR-016）。写该值 ⇒ 启动即报错。
   host: "192.168.1.2"           # 实时核心 IP（tcp 通道）
   port: 9100
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
-  modbus_rtu:                   # modbus_rtu 通道参数
-    serial_port: "/dev/ttyS0"   # BECG COM1(ttyS0) ↔ PCS（§12.1；无 ttyS1）
-    baud_rate: 19200
-    data_bits: 8
-    stop_bits: 1
-    parity: "none"              # none / even / odd
-    slave_addr: 1
-    response_timeout_ms: 200
-    heartbeat_poll_ms: 1000
+
+# PCS（两级式 PCS = 实时控制模块）通道 —— 生产启用；本默认文件保持关闭
+# （`enabled: false` ⇒ 不构造 PcsHandle、不开该口 ⇒ 行为与升级前一致）。
+# ⚠️ `enabled: true` 时：`port` 须**独占**（不得与任何 south_stations 站同口，规则 P-2）、
+#    `regs` 必填且须恰 1 块 / 基址 1000 / 覆盖到 1032（规则 P-5）；
+#    `io.enabled: true` 也要求本段启用（联锁停机原语经 PcsHandle）。
+# 生产模板见 `mupc_core_config.production.yaml` 的 `pcs_3zone`。
+south_pcs:
+  enabled: false
+  port: "/dev/ttyS0"
+  protocol: modbus
+  slave: 1
+  baud_rate: 19200
+  data_bits: 8
+  stop_bits: 1
+  parity: none
+  interval_ms: 1000
+  response_timeout_ms: 200
+  regs: []          # enabled: true 时必填（见 production 模板的 pcs_3zone）
 
 # 【单元 K 已删除 `web_api:` 段】对外 HTTP 面（0.0.0.0:8080）随 `mupc-web-api` crate 整体移除，
 # 由本地触摸屏 HMI 取代（见 12-本地显示终端 设计 §7）。现场**既有**的带 `web_api:` 段的 yaml
@@ -34,7 +46,7 @@ intercore:
 
 # 本地显示终端（12-本地显示终端 设计 §4.9 / §7.3 `display:` 段；mupcd 装配读通道 +
 # 控制通道 + `hmi_backend` 服务注册）。**字段真源 = 契约** `display-proto::DisplayConfig`。
-# 【本份 enabled=false 的理由】本文件是仓库默认（intercore.transport=tcp，供仿真/联调）；
+# 【本份 enabled=false 的理由】本文件是仓库默认（intercore.transport=tcp 且无 PCS 通道，供仿真/联调）；
 #   设计 §7.3 只要求**生产模板**开启（`.production.yaml` 已置 true），故此处保持 false——
 #   整段跳过，部署行为与升级前一致（本份用途不是屏上机）。
 #   ⚠️ 现场屏上机：置 true。**置 true 后**下列字段**全量**过契约 `validate()`，任一项不合规
@@ -139,7 +151,7 @@ plugins:
 # 换 PCS 规格：改档位 YAML 顶行 capacity_profile key 或直接换文件，不需改代码。
 strategy:
   tai_config_file: ""
-  # ⚠️ 非 60kW 档（如 125kVA）放行须与 intercore transport 驱动点表型号同批变更
+  # ⚠️ 非 60kW 档（如 125kVA）放行须与 south_pcs 驱动点表型号同批变更
   #    并装配期核对（§2.10.2 M-1）；has_neutral=true 档当前在档位加载侧被拦截。
 
 # 数字 IO / 安全联锁（§12.4；BECG-3568 板载 DI/DO，GPIO 编号按规格书、现场校准）
@@ -150,7 +162,7 @@ strategy:
 #   poll_ms: 100
 #   auto_release: false          # false = 须本地屏（P4）人工解除（K 后无 Web 面）
 #   release_hold_secs: 5
-#   stop_confirm_ms: 5000        # ⚠️ 须 ≥ 2× intercore.modbus_rtu.heartbeat_poll_ms（停机确认依赖心跳报 1013）
+#   stop_confirm_ms: 5000        # ⚠️ 须 ≥ 2× south_pcs.interval_ms（停机确认依赖采集拍报 1013）
 #   di:
 #     - { name: "急停",     gpio: 124, active_low: true,  debounce: 1, action: pcs_stop }   # NC 断线触发
 #     - { name: "水浸",     gpio: 125, active_low: false, debounce: 1, action: pcs_stop }
@@ -169,16 +181,16 @@ strategy:
 # 读到错寄存器喂策略 / phase 断供才离线发现）。
 # 【S3b-2 站级语义点表】已按 PRD §9.4.1 的 6 站参考配置落位（块 = 一次 Modbus 读事务，
 # 只承载传输口径与缺省换算；points = 逐点换算口径；站 id 以 §9.4.1 为准）：bms /
-# meter_batt / fire / hvac 四站**已启用**；**`pcs` 站保持注释**，待 §9.10 Q-15（PCS 的
-# A1/B1 与 A2/B2 是否电气隔离）由现场 RC-8 裁定后再启用（若为同一总线则本站不得启用
-# ——禁双 master 共总线）。同类的现场前置还有 RC-11（消防/空调若实际并接在 BMS 的
-# 485-2 总线上 ⇒ 该站不得启用，须改由储能侧转发或重新布线）与 RC-4（BMS 主从方向，
-# §9.10 Q-1：本配置按"MUPC 为主机、BMS 主控为从机、slave = 簇号"落位）。
+# meter_batt / fire / hvac 四站**已启用**。**`pcs` 站已迁出本段**（Task 10 / ADR-016）：
+# 它现由顶层段 `south_pcs:` 承担（本份 `enabled: false`）；站级段写 `role: pcs` 已被规则 P-3 拒绝。
+# 同类的现场前置还有 RC-11（消防/空调若实际并接在 BMS 的 485-2 总线上 ⇒ 该站不得启用，
+# 须改由储能侧转发或重新布线）与 RC-4（BMS 主从方向，§9.10 Q-1：本配置按"MUPC 为主机、
+# BMS 主控为从机、slave = 簇号"落位）。
 # 【现场校准】下列各站 port/slave/baud_rate/parity 均为**预留值或示例值**，投运前须按现场
 # 接线与设备实际核对/回写（RC-1 逐点比对含 BMS 116/186、ADL400 0x0092、BMS 2991–2994；
 # RC-5/RC-10 消防登记数与探测器地址序；RC-6 空调校验位）。各站 addr 基准亦须现场裁定
-# （RC-3，PCS 站尤甚）。
-# ⚠️ 各站串口不得与 intercore（PCS 主链路）同口（RS485 总线仲裁未实现）。
+# （RC-3）。
+# ⚠️ 各站串口不得与 `south_pcs.port`（PCS 主链路）同口（规则 P-2：PCS 独占该口）。
 south_stations:
   poll_ms: 1000
   stale_timeout_s: 5
@@ -273,55 +285,6 @@ south_stations:
           func: discrete
           addr: 200
           count: 288
-#    # ================= 2) 两级式 PCS（只读 3 区，FC04）=================
-#    - id: pcs
-#      role: pcs
-#      port: "/dev/ttyS7"           # 建议值，待现场校准（§9.10 Q-15）
-#      protocol: modbus
-#      slave: 1                     # 拨码默认
-#      baud_rate: 19200
-#      parity: none
-#      interval_ms: 1000            # 配置期下界 500ms
-#      regs:
-#        - name: pcs_3zone          # 1000–1075；_k ↔ 寄存器 999+k
-#          func: input
-#          addr: 1000
-#          count: 76
-#          byte_swap: true          # 「高 8 位和低 8 位互换」（§9.7.3）
-#          format: uint16
-#          scale: 1.0
-#          points:
-#            - { at: 1,  count: 6 }                                   # 1000–1005 告警1–5/BMS 工作状态
-#            - { at: 7,  format: int16, scale: 0.1, count: 2 }        # 1006–1007 可接受充/放电流 A
-#            - { at: 9,  scale: 0.1 }                                 # 1008 BMS 系统总电压 V
-#            - { at: 10, format: int16, scale: 0.1 }                  # 1009 BMS 系统总电流 A
-#            - { at: 11 }                                             # 1010 BMS 系统 SOC %（不得作控制源）
-#            - { at: 12, format: int16, scale: 0.1, count: 2 }        # 1011–1012 直流母线/中点电压 V
-#            - { at: 14, count: 5 }                                   # 1013–1017 运行/故障/降额/并离网/故障码
-#            - { at: 19, format: int16, scale: 0.1, count: 3 }        # 1018–1020 电网 A/B/C 相电压 V
-#            - { at: 22, format: int16, scale: 0.01 }                  # 1021 交流母线频率 Hz
-#            - { at: 23, format: int16, scale: 0.1, count: 3 }        # 1022–1024 输出电流 A/B/C A
-#            - { at: 26, format: int16, scale: 0.1, count: 4 }        # 1025–1028 视在功率 A/B/C/总 kVA
-#            - { at: 30, format: int16, scale: 0.1, count: 4 }        # 1029–1032 有功功率 A/B/C/总 kW
-#            - { at: 34, format: int16, scale: 0.1, count: 4 }        # 1033–1036 无功功率 A/B/C/总 kvar
-#            - { at: 38, format: int16, scale: 0.001, count: 4 }      # 1037–1040 A/B/C/总功率因数
-#            - { at: 42, format: int16, scale: 1.0 }                  # 1041 PCS 温度 ℃
-#            - { at: 43, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1042–1043 交流累计充电电量
-#            - { at: 45, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1044–1045 交流累计放电电量
-#            - { at: 47, format: int16, scale: 0.1, count: 3 }        # 1046–1048 STS 网侧电压 A/B/C V
-#            - { at: 50, format: int16, scale: 0.1 }                  # 1049 STS 电网电压幅值 V
-#            - { at: 51, format: int16, scale: 0.01 }                 # 1050 STS 电网电压频率 Hz
-#            - { at: 52, format: int16, scale: 0.1, count: 3 }        # 1051–1053 负载电流 A/B/C A
-#            - { at: 55, format: int16, scale: 0.1, count: 3 }        # 1054–1056 负载视在功率 kVA
-#            - { at: 58, format: int16, scale: 0.1, count: 3 }        # 1057–1059 负载有功功率 kW
-#            - { at: 61, format: int16, scale: 0.1, count: 3 }        # 1060–1062 负载无功功率 kvar
-#            - { at: 64, format: int16, scale: 0.001, count: 3 }      # 1063–1065 负载功率因数
-#            - { at: 67 }                                             # 1066 工作模式判断（枚举）
-#            - { at: 68, format: int16, scale: 0.1, count: 3 }        # 1067–1069 低压/高压总电流、低压外总压
-#            - { at: 71, format: int16, scale: 0.1 }                  # 1070 低压总功率 kW
-#            - { at: 72, format: int16, scale: 1.0 }                  # 1071 DCDC 温度 ℃
-#            - { at: 73, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1072–1073 直流累计充电电量
-#            - { at: 75, format: int32_scaled, scale: 0.1, word_order: lo_hi }  # 1074–1075 直流累计放电电量
     # ================= 3) 储能电能表 ADL400（FC03）=================
     - id: meter_batt
       role: meter_batt

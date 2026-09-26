@@ -1,17 +1,20 @@
 //! S3b-2 T3 —— **AC-1**（配置解析与校验）验收用例（PRD §9.9.1 / 设计 §11.11.2）。
 //!
-//! 输入 = `tests/fixtures/south_stations_s3b2.yaml`（= PRD §9.4.1 的 6 站参考配置，逐字照录）。
+//! 输入 = `tests/fixtures/south_stations_s3b2.yaml`（= PRD §9.4.1 的参考配置，逐字照录；
+//! **Task 6 起站级段为 5 站** —— PCS 已按 ADR-016 迁至 `tests/fixtures/south_pcs_s3b2.yaml`，
+//! 局部门禁见 [`REF_PCS`] 与 `ac1_rule18_pcs_interval_lower_bound`）。
 //!
 //! 三级断言（AC-1 ①/②/③）：
-//! - **②** 完整 6 站 YAML 解析通过 + 除 §9.4.3 明列条件外无拒绝（`validate` → `Ok`）；
+//! - **②** 完整参考 YAML 解析通过 + 除 §9.4.3 明列条件外无拒绝（`validate` → `Ok`）；
 //! - **①** 剥离本轮新增字段/取值后的**既有字段子集**仍解析通过，且既有 `validate()` 的
 //!   拒绝条件逐条不触发；
 //! - **③** §9.4.3 的 17 条 + 设计补落点的 2 条（规则 18/19）逐条各一个最小坏配置 → `Err`，
 //!   并含 §11.11.2 点名的边界用例（规则 15 的 6 种形态 / 规则 6 无行放行 / 规则 18 的
-//!   499·500 边界 / 规则 19 的 count 3·4·discrete）。
+//!   499·500 边界（Task 6 起在 `south_pcs` 段）/ 规则 19 的 count 3·4·discrete）；
+//!   另加 Task 6 的新增拒绝：**规则 P-3**（站级段不收 `role: pcs`，文案指向 `south_pcs`）。
 
 use mupc_data_processing::meter_regs::RegFormat;
-use mupc_southd::config::{RegFunc, Role, SouthStationsConfig, StationParity};
+use mupc_southd::config::{RegFunc, Role, SouthPcsConfig, SouthStationsConfig, StationParity};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -25,8 +28,16 @@ fn parse(yaml: &str) -> SouthStationsConfig {
         .south_stations
 }
 
-/// PRD §9.4.1 的 6 站参考配置（AC-1 的验收输入）
+/// `south_pcs` 段解析（裸结构，无外层键——见该 fixture 头部注释）
+fn parse_pcs(yaml: &str) -> SouthPcsConfig {
+    serde_yaml::from_str::<SouthPcsConfig>(yaml).expect("south_pcs 解析失败")
+}
+
+/// PRD §9.4.1 的参考配置（AC-1 的验收输入；Task 6 起站级段为 5 站，PCS 见 [`REF_PCS`]）
 const REF: &str = include_str!("fixtures/south_stations_s3b2.yaml");
+
+/// PCS 独立顶层段（Task 6 / ADR-016）
+const REF_PCS: &str = include_str!("fixtures/south_pcs_s3b2.yaml");
 
 /// 单站 YAML 构造（`body` 为 6 空格缩进的附加行，通常是 [`regs_of`] 的产物）
 fn one_station(role: &str, body: &str) -> SouthStationsConfig {
@@ -77,12 +88,18 @@ fn assert_ok(cfg: &SouthStationsConfig, what: &str) {
     );
 }
 
-// ═══════════════════════════ AC-1 ② 完整 6 站 ═══════════════════════════
+// ═══════════════════════════ AC-1 ② 完整 5 站 ═══════════════════════════
 
 #[test]
 fn ac1_full_reference_config_parses_and_passes() {
     let cfg = parse(REF);
-    assert_eq!(cfg.stations.len(), 6, "§9.4.1 为 6 站");
+    // Task 6（ADR-016 / 设计 §13.7）：站级段由 6 站变为 5 站 —— PCS 已迁至顶层段
+    // `south_pcs`（下方单独断言），站级段**不再接受** `role: pcs`（规则 P-3）。
+    assert_eq!(
+        cfg.stations.len(),
+        5,
+        "Task 6 起站级段为 5 站（PCS 已迁出）"
+    );
     assert_eq!(cfg.poll_ms, 1000);
     assert_eq!(cfg.stale_timeout_s, 5);
 
@@ -106,8 +123,10 @@ fn ac1_full_reference_config_parses_and_passes() {
         .unwrap();
     assert_eq!(soc_pt.at, 19, "寄存器 118 = addr 100 + (19−1)");
 
-    let pcs = cfg.stations.iter().find(|s| s.id == "pcs").unwrap();
-    assert_eq!(pcs.role, Role::Pcs);
+    // PCS 段（独立顶层段）：`pcs_3zone` 的字节低-高互换 + 4 个 `lo_hi` 电量点
+    let pcs = parse_pcs(REF_PCS);
+    assert!(pcs.enabled, "参考 PCS 段须 enabled（否则段内校验整体短路）");
+    assert_eq!(pcs.validate(), Ok(()), "参考 PCS 段须通过段内校验");
     assert!(pcs.regs[0].byte_swap, "pcs_3zone 字节低-高互换");
     assert_eq!(pcs.regs[0].points.len(), 31);
     assert!(pcs.regs[0]
@@ -125,8 +144,8 @@ fn ac1_full_reference_config_parses_and_passes() {
     assert_eq!(hvac.parity, StationParity::Even, "空调出厂偶校验");
     assert_eq!(hvac.regs[1].func, RegFunc::Discrete, "hvac_di = FC02 位块");
 
-    // 除 §9.4.3 明列条件外不触发任何既有/新增拒绝（含规则 15 的"六站必然通过"）
-    assert_ok(&cfg, "完整 6 站参考配置");
+    // 除 §9.4.3 明列条件外不触发任何既有/新增拒绝（含规则 15 的"五站必然通过"）
+    assert_ok(&cfg, "完整 5 站参考配置");
 }
 
 /// 仅 `grid_meter` 六相量块（既有形态，无 `points`）→ Ok
@@ -145,9 +164,9 @@ fn ac1_grid_meter_only_passes() {
 
 // ═══════════════════════════ AC-1 ① 既有字段子集 ═══════════════════════════
 
-/// §9.4.1 的 6 站**剥离本轮新增字段/取值**后的既有形制：
-/// 去掉 `parity`、`byte_swap`、`offset`、`points`、`word_order`、`func: discrete` 块
-/// 与所有站级新增取值；`grid_meter` 站保持生效配置取值**逐字不变**。
+/// §9.4.1 的**剥离本轮新增字段/取值**后的既有形制（Task 6 起为 5 站 —— PCS 站已按
+/// ADR-016 迁出站级段）：去掉 `parity`、`byte_swap`、`offset`、`points`、`word_order`、
+/// `func: discrete` 块与所有站级新增取值；`grid_meter` 站保持生效配置取值**逐字不变**。
 const LEGACY_SUBSET: &str = r#"
 south_stations:
   poll_ms: 1000
@@ -166,15 +185,6 @@ south_stations:
         - { name: bms_meta,   func: input, addr: 181,  count: 9,  format: uint16,       scale: 1.0 }
         - { name: bms_term,   func: input, addr: 2991, count: 4,  format: uint16,       scale: 1.0 }
         - { name: bms_cap,    func: input, addr: 4000, count: 6,  format: uint16,       scale: 1.0 }
-    - id: pcs
-      role: pcs
-      port: "/dev/ttyS7"
-      protocol: modbus
-      slave: 1
-      baud_rate: 19200
-      interval_ms: 1000
-      regs:
-        - { name: pcs_3zone, func: input, addr: 1000, count: 76, format: uint16, scale: 1.0 }
     - id: meter_batt
       role: meter_batt
       port: "/dev/ttyS5"
@@ -238,7 +248,11 @@ south_stations:
 #[test]
 fn ac1_legacy_field_subset_parses_and_legacy_conditions_do_not_fire() {
     let cfg = parse(LEGACY_SUBSET);
-    assert_eq!(cfg.stations.len(), 6);
+    assert_eq!(
+        cfg.stations.len(),
+        5,
+        "Task 6 起既有形制为 5 站（PCS 已迁出）"
+    );
 
     // ① 剥离生效：既有形制里不含任何新增字段/取值
     for s in &cfg.stations {
@@ -281,13 +295,13 @@ fn ac1_legacy_field_subset_parses_and_legacy_conditions_do_not_fire() {
         );
     }
 
-    // ③ 除 battery 站以外的 5 站：既有拒绝条件逐条不触发
+    // ③ 除 battery 站以外的 4 站：既有拒绝条件逐条不触发
     let mut without_battery = parse(LEGACY_SUBSET);
     without_battery.stations.retain(|s| s.role != Role::Battery);
-    assert_eq!(without_battery.stations.len(), 5);
+    assert_eq!(without_battery.stations.len(), 4);
     assert_ok(
         &without_battery,
-        "既有字段子集（grid_meter/pcs/meter_batt/fire/hvac）",
+        "既有字段子集（grid_meter/meter_batt/fire/hvac）",
     );
 
     // ④ battery 站：唯一被触发的拒绝是**本轮新增**的规则 4（`soc` 点契约）或规则 19
@@ -318,19 +332,47 @@ fn ac1_rule1_unknown_role_rejected_by_serde() {
     assert_eq!(cfg.stations[0].role, Role::Pcs, "role: pcs 应解析通过");
 }
 
-/// 规则 2（单站约束）：`pcs` 站 > 1 → Err。
+/// **规则 P-3**（ADR-016 / 设计 §13.7）：站级段**不再接受** `role: pcs`，拒并指向
+/// `south_pcs` 段。
+///
+/// **本条合并了原 `ac1_rule2_multiple_pcs_rejected` 与 `ac1_rule3_pcs_empty_regs_rejected`**
+/// （2026-09-26 规格评审处置）：P-3 落地后，两条原用例都只断言 `Err` 含 `south_pcs`，
+/// 而**实测**把 rule2 缩成**一个** pcs 站、把 rule3 的 `regs` **填满**，两条**仍全绿**
+/// ⇒ 对"至多一个 pcs 站"与"空 regs"**零判别力**（名不副实），且与
+/// `config::south_pcs_tests::south_stations_rejects_pcs_role` 完全重复。
+/// 故按 P-3 语义合并重命名为本条：钉住"**只要**站级出现 `role: pcs`（不论几台、
+/// 不论 `regs` 空否）即被拒，且文案含站 id + 指向 `south_pcs`"。
+///
+/// 原两条规则的新落点（见 `SouthStationsConfig::validate` 注释）：
+/// - 规则 2「至多一个 pcs 站」⇒ 由 P-3 **单段化**天然满足（`south_pcs` 是单值段）；
+/// - 规则 3「pcs `regs` 非空」⇒ 迁入 [`SouthPcsConfig::validate`] 的 `regs 为空` 分支，
+///   单测覆盖见 `config::south_pcs_tests::south_pcs_validate_rejects_dead_or_illegal_configs`。
 #[test]
-fn ac1_rule2_multiple_pcs_rejected() {
+fn ac1_rule_p3_station_level_pcs_rejected_points_to_south_pcs() {
+    // ① 单台、`regs` 非空：仍拒（原 rule2 的真实判据是"至多一个"，与台数无关）
+    let one = one_station("pcs", &regs_of(&plain_block("z", 10, 2)));
+    let err = one.validate().unwrap_err();
+    assert!(
+        err.contains("south_pcs") && err.contains("role: pcs") && err.contains("s1"),
+        "P-3 文案须指向 south_pcs + 含站名，实际: {err}"
+    );
+    // ② 单台、`regs` **空**：同样拒，且拒因是 **P-3 文案**（正向标记与 ① 同源：
+    //    `role: pcs`）—— 证明"空点表"判据已不在站级路径（它随 P-3 单段化迁至
+    //    `south_pcs` 段的 `regs 为空` 分支）。
+    //    ⚠️ 此处原为负向断言 `!err.contains("regs 为空")`（2026-09-26 质量评审 Minor #4）：
+    //    站级路径已无该文案，它实际只证明"P-3 文案里不含这 4 个字"，一旦为帮配置者把 P-3
+    //    文案补上"（regs 为空也会被拒）"就会**误红** ⇒ 改用与 ① 同源的正向标记。
+    let empty = one_station("pcs", "");
+    let err = empty.validate().unwrap_err();
+    assert!(
+        err.contains("south_pcs") && err.contains("role: pcs"),
+        "空 regs 的 pcs 站须先被 P-3 拒（正向标记：P-3 文案含 `role: pcs`），实际: {err}"
+    );
+    // ③ 两台：首台即被 P-3 拒（"至多一个 pcs 站"结构性不可达）
     let cfg = parse(&format!(
         "south_stations:\n  stations:\n    - {{ id: a, role: pcs, port: t1, slave: 1, interval_ms: 1000, {FLOW_REGS} }}\n    - {{ id: b, role: pcs, port: t2, slave: 1, interval_ms: 1000, {FLOW_REGS} }}"
     ));
-    assert_err_contains(&cfg, "至多一个 pcs", "两个 pcs 站");
-}
-
-/// 规则 3（必填点表）：`pcs` 站 regs 为空 → Err。
-#[test]
-fn ac1_rule3_pcs_empty_regs_rejected() {
-    assert_err_contains(&one_station("pcs", ""), "regs 为空", "pcs 站空 regs");
+    assert_err_contains(&cfg, "south_pcs", "两个 pcs 站（首个即被 P-3 拒）");
 }
 
 /// 规则 4（`soc` 点契约）：battery 站点名集合无 `soc` → Err；
@@ -471,13 +513,14 @@ fn ac1_rule6_registry_offset_drift_rejected() {
 ///   的全表不变量共同钉住（配置级无法构造出该形态 —— 这本身就是"表已自洽"的证明）。
 #[test]
 fn ac1_rule6_scope_boundaries() {
-    // ① role 隔离：BMS 的 116 在 Pcs 站上无登记行
+    // ① role 隔离：BMS 的 116 在**别的 role** 上无登记行
+    //    （Task 6 起改用 `hvac`：站级段已不收 `role: pcs`，而"查表按 role 隔离"与具体 role 无关）
     assert_ok(
         &one_station(
-            "pcs",
-            &regs_of("- { name: pcs_x, addr: 100, count: 17, format: uint16, scale: 1.0, points: [ { at: 1, count: 16 }, { at: 17, offset: -1600.0 } ] }"),
+            "hvac",
+            &regs_of("- { name: hvac_x, addr: 100, count: 17, format: uint16, scale: 1.0, points: [ { at: 1, count: 16 }, { at: 17, offset: -1600.0 } ] }"),
         ),
-        "Pcs/116 无登记行（查表按 role 隔离）",
+        "Hvac/116 无登记行（查表按 role 隔离）",
     );
     // ② int32_scaled 覆盖 116 时整块不参与符号性判定
     assert_ok(
@@ -594,9 +637,11 @@ fn ac1_rule12_discrete_bit_cap() {
 }
 
 /// 规则 13（地址有效性）：`addr == 0` 仅 `meter_batt`/`hvac` 合法。
+///
+/// Task 6 起 `pcs` 不再列入被拒 role（站级段已不收 `role: pcs`，P-3 先命中）。
 #[test]
 fn ac1_rule13_addr_zero_by_role() {
-    for role in ["fire", "pcs", "battery"] {
+    for role in ["fire", "battery"] {
         let extra = if role == "battery" {
             "- { name: z, addr: 0, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }"
         } else {
@@ -621,7 +666,10 @@ fn ac1_rule13_addr_zero_by_role() {
 }
 
 /// 规则 14（区间与重叠，按 `func` 空间分别判）：同 func 重叠 → Err；
-/// 同址不同 func（PCS 3 区/4 区形态）→ Ok。
+/// 同址不同 func（PCS 3 区/4 区的形态）→ Ok。
+///
+/// Task 6 起"同址不同 func ⇒ 不重叠"改用 `hvac` 表达（站级段已不收 `role: pcs`）；
+/// 该规则本身与 role 无关，断言效力不变。
 #[test]
 fn ac1_rule14_overlap_by_func_space() {
     assert_err_contains(
@@ -636,11 +684,11 @@ fn ac1_rule14_overlap_by_func_space() {
         "区间重叠",
         "同 holding 空间 [10,14) 与 [12,16)",
     );
-    let pcs = one_station(
-        "pcs",
+    let same_addr_diff_func = one_station(
+        "hvac",
         &regs_of("- { name: a, func: holding, addr: 10, count: 4, format: uint16, scale: 1.0 }\n- { name: b, func: input, addr: 10, count: 4, format: uint16, scale: 1.0 }"),
     );
-    assert_ok(&pcs, "同址不同 func（三套地址空间独立）");
+    assert_ok(&same_addr_diff_func, "同址不同 func（三套地址空间独立）");
 }
 
 /// **规则 15（块落地极大性）** —— AC-1 ③ 点名的 6 种形态 + 判据 ③ 的等价性钉子。
@@ -785,19 +833,41 @@ fn ac1_rule16_same_port_parity_consistency() {
     assert_ok(&ok, "同口同 parity");
 }
 
-/// 规则 18（`pcs` 站周期下界，设计补落点）：`499` → Err、`500` → Ok；
-/// `pcs` **无** `< 5000` 上界（与 meter_grid/battery 不同）。
+/// 规则 18（`pcs` 周期下界，设计补落点）：`499` → Err、`500` → Ok；
+/// **上界有意不设**（与 meter_grid/battery 的 `< 5000` 不同）。
+///
+/// **Task 6（ADR-016）起落点迁移**：站级 `role: pcs` 已被 P-3 拒，周期下界随段迁入
+/// `SouthPcsConfig::validate`（设计 §13.7/§13.8）—— 本条改用 `south_pcs` 段入口，
+/// 边界值（499/500/30000）与断言文案逐条不变。
+///
+/// **"无上界"的当前真实口径（2026-09-26 质量评审 Minor #5 改写 —— 原理由"pcs 不参与控制
+/// 决策"在迁移后**已失效**）**：本段 `interval_ms` 自 Task 6 起是**采集兼心跳**周期，
+/// SOC 由这一拍产出并**参与 SOC 双源裁决**（设计 §13.4 / Δ-18），不再有独立心跳路径。
+/// 故 `interval_ms ≥ 5000`（= `DATA_FRESHNESS_MS`）时，PCS 侧 SOC 会被
+/// `AiIntegrator::DATA_STALE_AFTER`（同取 5s）**判过期**、长期由 **BMS 侧 SOC 兜底**
+/// （`resolve_soc_source` 的优先级本就 BMS 优先、PCS 侧只作回落）。
+/// **明知情而保留无上界**，两条理由：① 无上界是原 `intercore.modbus_rtu.heartbeat_poll_ms`
+/// 的既有行为（该字段同样只有 0→1000ms 回退、无上界），本轮**迁移不引入新语义**；
+/// ② 加下界/上界会改变既有配置的**可接受域** ⇒ 属**产品裁定**，非代码自选。
+/// **兜底依赖登记**：BMS 侧 SOC 优先 + 5s 过期判定（二者都在 `ai_integration.rs`）。
 #[test]
 fn ac1_rule18_pcs_interval_lower_bound() {
     let mk = |iv: u64| {
-        parse(&format!(
-            "south_stations:\n  stations:\n    - id: s1\n      role: pcs\n      port: ttyS1\n      slave: 1\n      interval_ms: {iv}\n{}",
-            regs_of(&plain_block("z", 10, 2))
+        parse_pcs(&format!(
+            "enabled: true\nport: /dev/ttyS7\nslave: 1\ninterval_ms: {iv}\nregs:\n  - {{ name: pcs_3zone, func: input, addr: 1000, count: 76, format: uint16, scale: 1.0, byte_swap: true }}\n"
         ))
     };
-    assert_err_contains(&mk(499), "须 ≥ 500ms", "pcs interval=499");
-    assert_ok(&mk(500), "pcs interval=500（下界）");
-    assert_ok(&mk(30000), "pcs 无 <5000 上界（不参与控制决策）");
+    let err = mk(499).validate().unwrap_err();
+    assert!(
+        err.contains("须 ≥ 500ms"),
+        "pcs interval=499 应被拒，实际: {err}"
+    );
+    assert_eq!(mk(500).validate(), Ok(()), "pcs interval=500（下界）");
+    assert_eq!(
+        mk(30000).validate(),
+        Ok(()),
+        "pcs 无 <5000 上界（有意保留：原 intercore 行为；PCS 侧 SOC ≥5s 即过期、由 BMS 侧兜底，见上）"
+    );
 }
 
 /// 规则 19（无 `points` 块的宽度护栏，设计补落点）：32 位块 `count` 非宽度整数倍 → Err；

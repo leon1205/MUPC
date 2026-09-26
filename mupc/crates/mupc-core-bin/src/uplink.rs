@@ -872,19 +872,31 @@ impl StationPlan {
 ///
 /// 取 `mupc_southd::config::Role` 的 serde 表示作**唯一真源**（不手写第二份映射表）：
 /// `serde_json::to_value(Role::Battery)` = `"battery"`。
+///
+/// **`pcs` 入参（Task 10 / 设计 §13.9）**：PCS 迁出站级段后其站壳不在 `cfg.stations` 里，
+/// 若不在此补入 ⇒ `plan_stations` 查不到 `"pcs"` ⇒ MQTT 载荷 `role` 落**空串**（静默降级、
+/// 现有用例不响）。故与 `build_uplink_points` 同源：由 `south_pcs` 段经
+/// [`SouthPcsConfig::station_shell`] 合成。
 pub(crate) fn station_roles(
     cfg: &mupc_southd::config::SouthStationsConfig,
+    pcs: Option<&mupc_southd::config::SouthPcsConfig>,
 ) -> HashMap<String, String> {
-    cfg.stations
+    let role_of = |r: mupc_southd::config::Role| -> String {
+        serde_json::to_value(r)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+    let mut m: HashMap<String, String> = cfg
+        .stations
         .iter()
-        .map(|s| {
-            let role = serde_json::to_value(s.role)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default();
-            (s.id.clone(), role)
-        })
-        .collect()
+        .map(|s| (s.id.clone(), role_of(s.role)))
+        .collect();
+    if let Some(p) = pcs.filter(|p| p.enabled) {
+        let shell = p.station_shell();
+        m.insert(shell.id, role_of(shell.role));
+    }
+    m
 }
 
 /// 按站/档建立发布计划（**只取 `channels.has(MQTT)`**，§9.2.1.0 / C-16）。
@@ -1618,24 +1630,45 @@ mod tests {
     use super::*;
     use crate::core_config::CoreConfig;
     use mupc_data_processing::latest_values::{PointId, PointQuality, PointValue};
-    use mupc_southd::config::SouthStationsConfig;
+    use mupc_southd::config::{SouthPcsConfig, SouthStationsConfig};
     use mupc_southd::uplink::build_uplink_points;
 
-    /// 6 站参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
-    const REF_6: &str = include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
+    /// 参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
+    /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 在独立顶层段 [`REF_PCS`]（72 点）。
+    const REF_STATIONS: &str =
+        include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
+
+    /// PCS 独立顶层段（Task 6）。
+    const REF_PCS: &str = include_str!("../../mupc-southd/tests/fixtures/south_pcs_s3b2.yaml");
 
     #[derive(serde::Deserialize)]
     struct Wrapper {
         south_stations: SouthStationsConfig,
     }
 
+    /// 参考站级段 = **5 站**（PCS 已迁出到独立顶层段，见 [`pcs_ref`]）。
+    ///
+    /// Task 10 起 `build_uplink_points` **显式收 PCS 段**（设计 §13.9 末要求①②）⇒ 本组
+    /// 用例不再把 `station_shell()` 塞进 `stations`，而是走 [`pcs_ref`] 入参 —— 与生产装配
+    /// （`startup.rs` 传 `Some(&config.south_pcs)`）**同一调用形态**。
     fn cfg() -> SouthStationsConfig {
-        let w: Wrapper = serde_yaml::from_str(REF_6).expect("6 站参考配置解析失败");
-        w.south_stations
+        serde_yaml::from_str::<Wrapper>(REF_STATIONS)
+            .expect("参考配置解析失败")
+            .south_stations
     }
 
+    /// 参考 PCS 顶层段（`enabled: true`）。
+    fn pcs_ref() -> SouthPcsConfig {
+        let pcs: SouthPcsConfig =
+            serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
+        assert!(pcs.enabled, "参考 PCS 段须 enabled");
+        pcs
+    }
+
+    /// 参考点表（PCS 启用）：站级 5 站 + `south_pcs` 段。
     fn points() -> Vec<UplinkPoint> {
-        build_uplink_points(&cfg()).expect("build_uplink_points 必须成功（6 站参考配置）")
+        build_uplink_points(&cfg(), Some(&pcs_ref()))
+            .expect("build_uplink_points 必须成功（参考配置：站级 5 站 + south_pcs 段）")
     }
 
     fn id(station: &str, metric: &str) -> PointId {
@@ -2063,8 +2096,9 @@ mod tests {
         }
     }
 
+    /// 站 → 角色串（**与生产同源**：站级段 + `south_pcs` 段；见 `station_roles` 文档）。
     fn roles_of(cfg: &SouthStationsConfig) -> Arc<HashMap<String, String>> {
-        Arc::new(station_roles(cfg))
+        Arc::new(station_roles(cfg, Some(&pcs_ref())))
     }
 
     /// 北向配置助手（**显式给全字段**，不复用 `::default()` 兜底——C-11 的同一口径）。
@@ -2161,8 +2195,8 @@ mod tests {
     #[test]
     fn mqtt_plan_point_count_is_624_with_pcs_and_552_without() {
         let cfg6 = cfg();
-        let pts = build_uplink_points(&cfg6).expect("点表");
-        let plan = plan_stations(&pts, &station_roles(&cfg6));
+        let pts = build_uplink_points(&cfg6, Some(&pcs_ref())).expect("点表");
+        let plan = plan_stations(&pts, &station_roles(&cfg6, Some(&pcs_ref())));
         assert_eq!(
             mqtt_point_count(&plan),
             MQTT_POINTS_WITH_PCS,
@@ -2196,12 +2230,10 @@ mod tests {
         );
         assert_eq!(pick("pcs", SouthDataClass::C), 0);
 
-        // 去掉 pcs 站 ⇒ 552（PCS 未启用）
-        let mut cfg5 = cfg();
-        cfg5.stations
-            .retain(|s| s.role != mupc_southd::config::Role::Pcs);
-        let pts5 = build_uplink_points(&cfg5).expect("点表（无 PCS）");
-        let plan5 = plan_stations(&pts5, &station_roles(&cfg5));
+        // 不传 PCS 段 ⇒ 552（PCS 未启用）
+        let cfg5 = cfg();
+        let pts5 = build_uplink_points(&cfg5, None).expect("点表（无 PCS）");
+        let plan5 = plan_stations(&pts5, &station_roles(&cfg5, None));
         assert_eq!(
             mqtt_point_count(&plan5),
             MQTT_POINTS_WITHOUT_PCS,

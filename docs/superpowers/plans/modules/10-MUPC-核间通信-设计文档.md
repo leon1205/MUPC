@@ -1,5 +1,14 @@
 # MUPC 核间通信模块设计文档
 
+> **[登记块 · 2026-09-26（PCS 迁出）]** 本文档本轮**只做 PCS 迁出后的连带标注与交叉引用**，逐处如下：
+> ① **§1.1** 架构图下加注（PCS 通信与控制已迁出；核间图仅指 TCP 帧协议；客户端**只发不收**）；
+> ② **§11 全章标题下加注**（§11 的 Modbus RTU 通道已整体迁出，本章降为历史与设计依据）；
+> ③ **§10.1 ADR-011** 行末追加交叉引用（**已被 ADR-015 取代**）；
+> ④ 附录版本表加 **v2.6** 一行。**改动来源** = 02 号设计 **§13**（ADR-014 / ADR-015 / ADR-016）落地，
+> 见 02 号设计 **§13.12** 的一致性声明与 **§13.13** 的实现状态。
+> **⚠️ 本文档本轮未获任何门禁标记**（**不自行添加 `[DESIGN_APPROVED]` / `[REVIEWED: PASS]`**）；
+> **§1–§12 的既有结论一字未改**，只加注与交叉引用（**未改任何代码/配置/PRD/其它模块文档**）。
+
 ---
 
 ## 目录
@@ -34,6 +43,11 @@
     - ai-engine                        - 功率变换
     - intercore  ←── 本模块 ──→        - 保护逻辑
 ```
+
+> ⚠️ **2026-09-26**：PCS（两级式 PCS = 实时控制模块）的通信与控制**已迁出至南向**（02 号设计
+> **§13** / **ADR-014**）。本图描述的"intercore ↔ 实时控制模块"**仅指核间 TCP 帧协议**；且**客户端
+> 现为"只发不收"**（接收能力仅存于 `IntercoreServer` 服务端角色），未来演进**须新增客户端接收原语**
+> （02 号设计 **Δ-23**；`technical-debt.md` §6.13）。
 
 ### 1.2 边界说明
 
@@ -963,7 +977,7 @@ mupc/crates/intercore/
     └── watchdog.rs             # 看门狗（Watchdog、WatchdogConfig、WatchdogState）
 ```
 
-**说明**：上表为 TCP 仿真栈文件结构（IntercoreServer）。Modbus/PCS 生产通道文件：`src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）、`src/transport/modbus.rs`（PCS 驱动）、`src/transport/tcp.rs`（TcpTransport）、`src/pcs.rs`（PCS 点表/编解码），PCS 协议从站仿真为 `src/bin/pcs_slave.rs`；历史假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。
+**说明**：上表为 TCP 仿真栈文件结构（IntercoreServer）。Modbus/PCS 生产通道文件：`src/transport.rs`（IntercoreTransport trait + V2/V3 帧字节）、`src/transport/modbus.rs`（PCS 驱动）、`src/transport/tcp.rs`（TcpTransport）、`src/pcs.rs`（PCS 点表/编解码），PCS 协议从站仿真为 `src/bin/pcs_slave.rs`；历史假设表 `src/modbus_rtu.rs` 与 `src/bin/modbus_slave.rs` 标注旧路径/仿真专用。`tcp_server.rs`/`heartbeat.rs`/`watchdog.rs` 属 TCP server 栈（IntercoreServer），PCS 生产通道由 `IntercoreClient` + transport 承载。⚠️ **2026-09-26 改注（本节 T4 标注遗漏，补）**：上列 **Modbus/PCS 生产通道文件**（`src/transport/modbus.rs`、`src/pcs.rs`、`src/bin/pcs_slave.rs`、`src/modbus_rtu.rs`、`src/bin/modbus_slave.rs`）**已随 PCS 通信与控制整体迁入南向（02 号设计 §13 / ADR-014）删除** —— 寄存器表现址 = `mupc-southd/src/pcs/regs.rs`、采集循环与三相读现址 = `mupc-southd/src/pcs/collect.rs`、`PcsHandle` 在 `mupc-southd/src/pcs/`；本段保留为**历史**（§11 全章的"已迁出"横幅未覆盖本节）。
 
 ### 9.2 文件职责说明
 
@@ -1010,7 +1024,7 @@ tokio-test = "0.4"              # Tokio 测试工具
 | ADR-008 | CRC 算法选择 | ① MODBUS CRC16；② CRC32；③ Adler-32 | **MODBUS CRC16** | 2 字节校验满足帧传输错误检测需求；CRC16 计算开销低（每帧计算量小）；工业协议广泛采用 |
 | ADR-009 | 传输通道抽象层级（新增 Modbus RTU 备选） | ① intercore 内部 `IntercoreTransport` trait，IntercoreClient 作门面；② 上层双客户端（AiIntegrator 按配置选）；③ 独立 transport crate | **intercore 内部 trait（方案①）** | 改动集中在 intercore 内部，上层（AiIntegrator/strategy-engine/web-api）接口不变、零改动；最符合"通信选择"定位（对控制逻辑透明） |
 | ADR-010 | Modbus 寄存器数值编码 | ① int32 有符号缩放（2 寄存器/值）；② IEEE754 f64（4 寄存器/值） | **int32 缩放（方案①）** | 工业 Modbus 惯例、无端序歧义、寄存器占用减半；功率 ±60kW 精度 0.01kW 足够；`k_droop` 用 0.001 缩放 |
-| ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16 |
+| ADR-011 | Modbus RTU 栈选型 | ① tokio-modbus（async master+server）；② 复用 rs485-plugin；③ serialport+自写帧 | **tokio-modbus（方案①）** | 纯 Rust async、同时提供 master 与 server（slave）、支持 FC03/06/16，与项目 tokio 栈契合；rs485-plugin 语义偏南向且缺 FC16。**⚠️ 已被 ADR-015（02 号设计 §13.2）取代：Modbus 栈统一到 `rs485-plugin`，理由"rs485-plugin 缺 FC16"实测不成立**（该 crate 具备 FC02/03/04/06，FC16 全仓零使用点） |
 | ADR-012 | Modbus 通道数据面边界 | ① 控制备选（控制下行+执行确认+心跳，遥测/SafetyOverride 仍走 TCP）；② 全量对等承载 | **控制备选（方案①）** | 本系统遥测主数据流来自南向采集，RS485 带宽有限不适合大块遥测轮询；SafetyOverride 为安全即时事件，Modbus 轮询无法保证及时性；边界明确后控制链路可经 Modbus 独立承载。**PCS 架构修正**：PCS=实时模块仅 RS485、无 TCP 上送，遥测真实源转台区总表 master_meter（U-26）；SafetyOverride 概念废弃，由 PCS 内部保护 + AiValidator 承接；边界更新为 **Modbus 承载控制+SOC+健康，遥测转总表**（详见 ADR-013 / §11.9） |
 | ADR-013 | Modbus 通道真实协议 | ① 自定义假设点表（cmd_valid/exec 确认区，早期实现）；② **PCS 真实协议 V1.3**（FC06 写即生效、分相模式、int16 缩放+字节互换） | **PCS 真实协议（方案②）** | 实时控制模块=两级式 PCS，经现场协议资料确认点表；假设表无法对接真实设备，PCS 为标准 Modbus 从站无自建确认区 |
 
@@ -1032,6 +1046,8 @@ tokio-test = "0.4"              # Tokio 测试工具
 ---
 
 ## 11. 传输通道抽象与 Modbus RTU 备选链路
+
+> ⚠️ **本章的 Modbus RTU 通道（PCS 真实协议 V1.3）已于 2026-09-26 整体迁出至 `mupc-southd`（02 号设计 §13）。本章作为历史与设计依据保留，不再反映现网实现。**
 
 > **注**：早期自定义 Modbus 假设点表与 Slave 从站参考实现已被 PCS 真实协议取代，降为文末「附录 B：历史 Modbus 假设点表（框架参考）」仅供框架参考；生产 Modbus 通道点表以 §11.9 PCS 真实协议 V1.3 为准。
 
@@ -1367,6 +1383,7 @@ io:
 
 | 版本 | 主要变更 |
 |------|----------|
+| **v2.6（2026-09-26，PCS 迁出后的连带标注；**未加任何门禁标记**）** | **只加注与交叉引用，§1–§12 既有结论一字未改**。来源 = 02 号设计 **§13**（ADR-014 PCS 通信与控制归属 `mupc-southd` / ADR-015 Modbus 栈统一到 `rs485-plugin`、删 `tokio-modbus` / ADR-016 新增顶层段 `south_pcs`）落地（T1–T12，见 02 号设计 §13.13）。**①** §1.1 架构图下加注：PCS 通信与控制已迁出，本图"intercore ↔ 实时控制模块"**仅指核间 TCP 帧协议**，且**客户端只发不收**（接收能力仅存于 `IntercoreServer`），未来演进**须新增客户端接收原语**（02 号设计 **Δ-23**）；**②** §11 全章标题下加注：**本章的 Modbus RTU 通道（PCS 真实协议 V1.3）已于 2026-09-26 整体迁出至 `mupc-southd`**，本章作为**历史与设计依据保留、不再反映现网实现**；**③** §10.1 **ADR-011** 行末追加交叉引用：**已被 ADR-015 取代**（原理由"`rs485-plugin` 缺 FC16"**实测不成立**）；**④** 文首加登记块说明本轮改动范围与"未加任何门禁标记"。**未改**：§1–§12 的正文与结论、任何代码/配置/PRD/其它模块文档；**本文档原无门禁标记，本轮亦未新增**。 |
 | v1.0 | 从 PRD v1.0、技术设计 v1.1 和代码库 intercore 实现合并整理 |
 | v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |
 | v2.1 | TCP 回读 SOC（N3，U-26 延伸）：TcpTransport 加回读接收循环（独立连接读实时模块 DataUpload 帧 → battery_soc），`IntercoreTransport.latest_soc()` 查询，AiIntegrator 在总表模式（battery 无 SOC）时以核间 SOC 注入；Modbus 备选不承载（None） |

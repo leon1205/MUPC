@@ -26,6 +26,17 @@ pub enum Rs485Dir {
     Send,
 }
 
+/// 测试交换缝的闭包类型（抽具名别名以避免 `clippy::type_complexity`；
+/// 与 `strategy-engine/src/ai_integration.rs` 同款做法，调用处签名同样受益）。
+///
+/// 门控 = `any(test, feature = "test-seam")`：`test_exchange` 字段与两个 setter 的
+/// 签名都引用本别名，故必须与它们**同一门控**（否则 feature-only 构建下别名不存在）。
+///
+/// 用 `Arc`（而非 `Box`）是为了 [`Rs485Device::send_recv`] 能先把闭包**克隆出锁**
+/// 再在锁外调用 —— 详见那里关于自死锁的注释。
+#[cfg(any(test, feature = "test-seam"))]
+type TestExchangeFn = std::sync::Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
 /// RS485 设备驱动
 ///
 /// 实现南向 RS485 设备通信，支持 TTU、光伏逆变器、充电桩等设备
@@ -52,6 +63,12 @@ pub struct Rs485Device {
     /// `#[cfg(test)]` ⇒ 产线构建**不含此字段**、`send_recv` 也不含对应分支，语义零影响。
     #[cfg(test)]
     test_response: Mutex<Option<Vec<u8>>>,
+    /// **测试专用**交换缝（与 `test_response` 的差别见 `send_recv` 注释）：拿到**请求帧原文**，
+    /// 返回**响应帧原文**。门控 = `any(test, feature = "test-seam")` ⇒ 默认（产线）构建
+    /// 不含此字段与分支；`feature = "test-seam"` 由下游 crate 的 **dev-dependencies** 开启，
+    /// 使其 `tests/*.rs` 也能驱动本缝（`cfg(test)` 不向下游传播，故不能只用它）。
+    #[cfg(any(test, feature = "test-seam"))]
+    test_exchange: Mutex<Option<TestExchangeFn>>,
 }
 
 /// 平台无关的文件描述符类型
@@ -260,6 +277,8 @@ impl Rs485Device {
             tx_lock: StdMutex::new(()),
             #[cfg(test)]
             test_response: Mutex::new(None),
+            #[cfg(any(test, feature = "test-seam"))]
+            test_exchange: Mutex::new(None),
         }
     }
 
@@ -602,10 +621,48 @@ impl Rs485Device {
         self.handler.name()
     }
 
-    /// 发送并接收数据
+    /// 装测试交换缝（门控 = `any(test, feature = "test-seam")`，见字段注释）。设置后
+    /// [`Self::send_recv`] 走本缝，**优先于** `test_response`（后者仅本 crate 测试构建存在，
+    /// 故此处不用 rustdoc 链接语法）；`clear_test_exchange` 可撤销（每条 e2e 结束必须清，防串扰）。
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn set_test_exchange(&self, f: TestExchangeFn) {
+        *self.test_exchange.lock() = Some(f);
+    }
+
+    /// 清测试交换缝。
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn clear_test_exchange(&self) {
+        *self.test_exchange.lock() = None;
+    }
+
+    /// 发送并接收数据。
+    ///
+    /// 默认（产线）构建下无任何捷径，直落真 IO。两条零 IO 捷径的**门控刻意不同**：
+    /// 1. `test_exchange`（`any(test, feature = "test-seam")`）：拿请求帧原文、返回响应帧原文
+    ///    —— 使「成帧 → 线路 → 解析」整链在无串口环境可被断言（PCS 帧级 e2e 用，设计 §13.6 R-3）。
+    ///    用 feature 门控是因为它要给**下游 crate 的集成测试**用（`cfg(test)` 不向下游传播）。
+    /// 2. `test_response`（仅 `#[cfg(test)]`）：直接返回整段响应字节（既有缝，本 crate 内
+    ///    帧级校验用例用）。**不能**并入上面的 feature 门控 —— feature-only 构建（下游测试）
+    ///    下 `test_response` 字段不存在。
+    ///
+    /// 顺序固定为 1 → 2 → 真 IO：缝未设置时行为与改动前**逐字节相同**。
+    ///
+    /// **约定**：缝闭包内**禁止回调本设备的 `send_recv` / `set_test_exchange` /
+    /// `clear_test_exchange`**（下面用 `Arc` 克隆已结构性消除自死锁，但避免此类重入仍是约定）。
     pub fn send_recv(&self, frame: &[u8], recv_timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
-        // 测试注入缝（仅 `#[cfg(test)]` 编译进来；产线分支与语义逐字节不变）：
-        // 让「请求 → 响应 → 校验/解析」整链可在无串口环境（Windows/CI）下被断言。
+        #[cfg(any(test, feature = "test-seam"))]
+        {
+            // ★ 先把闭包**克隆出锁**再调用（`Arc::clone` 只动引用计数，锁即刻释放）。
+            //   **不得**写成 `if let Some(f) = self.test_exchange.lock().as_ref()`：scrutinee
+            //   产生的 `MutexGuard` 临时量会存活到 then 分支结束 ⇒ 闭包执行期间仍持锁；
+            //   若闭包内回调本设备的 `send_recv` / `set_test_exchange` / `clear_test_exchange`
+            //   （例如"回一帧就撤缝"），`parking_lot::Mutex` 不自证中毒 ⇒ **静默死锁**
+            //   （已实测复现：重入 lock 挂死，无报错无 panic）。
+            let f = self.test_exchange.lock().clone();
+            if let Some(f) = f {
+                return Ok(f(frame));
+            }
+        }
         #[cfg(test)]
         {
             if let Some(injected) = self.test_response.lock().clone() {
@@ -753,33 +810,89 @@ impl Rs485Device {
         parse_regs_response(&response, expected_slave_of(&cmd)?, self.config.crc_mode)
     }
 
-    /// 写入单个寄存器（Modbus 功能码 0x06）
+    /// 写入单个寄存器（Modbus 功能码 0x06），用 `config.device_addr` 作从站。
     pub fn write_single_register(&self, addr: u16, value: u16) -> Result<(), Rs485Error> {
-        let func_code: u8 = 0x06;
+        self.write_single_register_from(self.config.device_addr, addr, value)
+    }
+
+    /// 写入单个寄存器（FC06），**显式从站地址**（同口多从站；与读侧 `_from` 家族对称）。
+    ///
+    /// 与旧实现（只判 `len < 8`）的差别：本函数**校验响应回显** —— 从站号、功能码、
+    /// 地址、值四项必须与请求逐字一致。停机写 `REG_START_STOP=0` 属**安全动作**，
+    /// "发出去了但被别的从站/错帧应答"必须能被检出。
+    /// 回显不符按 `Rs485Error::ConfigFailed` 报出，报文中含两侧从站号便于定位。
+    pub fn write_single_register_from(
+        &self,
+        slave: u8,
+        addr: u16,
+        value: u16,
+    ) -> Result<(), Rs485Error> {
+        const FUNC: u8 = 0x06;
         let mut cmd = vec![
-            self.config.device_addr,
-            func_code,
+            slave,
+            FUNC,
             (addr >> 8) as u8,
             addr as u8,
             (value >> 8) as u8,
             value as u8,
         ];
-
-        let crc = Frame::calculate_crc(
-            self.config.device_addr,
-            func_code,
-            &cmd[2..],
-            self.config.crc_mode,
-        );
+        let crc = Frame::calculate_crc(slave, FUNC, &cmd[2..], self.config.crc_mode);
         cmd.push(crc as u8);
         cmd.push((crc >> 8) as u8);
 
         let response = self.send_recv(&cmd, self.config.timeout_ms)?;
 
-        if response.len() < 8 {
-            return Err(Rs485Error::ConfigFailed("响应数据太短".to_string()));
-        }
+        // 期望从站号取自**请求帧首字节**（与读侧 `expected_slave_of` 同一取向：
+        // "请求谁就校验谁"是构造关系，不是调用点约定）。
+        let expected_slave = expected_slave_of(&cmd)?;
 
+        // Modbus 异常响应必须**先于长度检查**：标准 FC06 异常帧仅 **5 字节**
+        // （slave + func|0x80 + 异常码 + CRC16[2]）。若先判 `len < 8`，真实异常会被
+        // 误报成"响应过短"，异常码永远看不到 —— 运维会去查线缆/成帧而不是"从站为何拒绝"。
+        // 读侧 `validate_read_response` 走 `Frame::parse`（接受 ≥5 字节）能正确报异常，
+        // 本处与读侧对齐。
+        // 取值一律走 `get()`（本文件 device.rs:126/170/227 已登记的"不裸索引"约定）：
+        // 旧写法把"长度 ≥3"与"下标 1/0/2 的顺序"耦合在一起，重排/短路即 panic（本 Task 已咬过一次）。
+        // 异常帧成立的**最小**条件是"func|0x80 与异常码两字节都在"（标准异常帧 5 字节）：
+        // 只判 func 位会把 2 字节残帧/噪声凭空说成"被从站拒绝，异常码=0x00（未知异常码）"——
+        // 把"没收到成帧"误诊成"从站拒绝"（安全动作 500=0 的现场诊断方向完全不同）。
+        // 故用两个 `get()` 同时表达"字段在不在"与"值对不对"，不足则落下方长度检查报"过短"。
+        if matches!(
+            (response.get(1), response.get(2)),
+            (Some(&f), Some(_)) if f == (FUNC | 0x80)
+        ) {
+            let code = response.get(2).copied().unwrap_or(0);
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}（请求 slave={expected_slave}）被从站 {} 拒绝，异常码={code:#04x}（{}）",
+                response.first().copied().unwrap_or(0),
+                modbus_exception_desc(code)
+            )));
+        }
+        if response.len() < 8 {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写响应过短：{} 字节（FC06 回显应为 8）",
+                response.len()
+            )));
+        }
+        if response[0] != expected_slave {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}：响应从站号 slave={} 与请求 slave={expected_slave} 不符（他站帧）",
+                response[0]
+            )));
+        }
+        if response[1] != FUNC {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}：响应功能码 {:#04x} 与请求 {FUNC:#04x} 不符",
+                response[1]
+            )));
+        }
+        let echo_addr = u16::from_be_bytes([response[2], response[3]]);
+        let echo_value = u16::from_be_bytes([response[4], response[5]]);
+        if echo_addr != addr || echo_value != value {
+            return Err(Rs485Error::ConfigFailed(format!(
+                "写 reg {addr:#06x}={value:#06x}：回显为 {echo_addr:#06x}={echo_value:#06x}，与请求不符"
+            )));
+        }
         Ok(())
     }
 }
@@ -1295,6 +1408,205 @@ mod frame_validation_tests {
         assert!(
             err.to_string().contains("slave=2") && err.to_string().contains("slave=1"),
             "FC02 回 config.device_addr 的帧必须拒，实际: {err}"
+        );
+    }
+
+    // ── 写路径（FC06）回显校验：与读侧同一取向 ─────────────────────────
+
+    #[test]
+    fn write_single_register_from_rejects_wrong_slave_echo() {
+        // 请求 slave=2；回帧从站号 = 1（= config.device_addr）⇒ 必须拒，且报文两侧从站号都要出现。
+        let device = create_test_device(); // config.device_addr = 0x01
+        let bad = {
+            let mut v = vec![0x01, 0x06, 0x01, 0xF4, 0x00, 0x00];
+            let crc = Frame::calculate_crc(0x01, 0x06, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        *device.test_response.lock() = Some(bad);
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        // 断言与读侧三个同源用例同款（`&&` 双向）：报文必须**同时**出现请求从站与响应从站。
+        // 旧写法 `contains("slave=2") || contains("从站")` 把后半句（"两侧从站号都要出现"）
+        // 掏空 —— 只要报文里出现"从站"二字即绿，断言名承诺的判别力并不存在。
+        let msg = err.to_string();
+        assert!(
+            msg.contains("slave=2") && msg.contains("slave=1"),
+            "报文必须同时点明请求从站与响应从站（两侧都要出现），实际: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_single_register_from_rejects_value_echo_mismatch() {
+        // 从站号对、功能码对，但回显值不同 ⇒ 必须拒。
+        let device = create_test_device();
+        let bad = {
+            let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x00, 0x01]; // 回显 1，请求 0
+            let crc = Frame::calculate_crc(0x02, 0x06, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        *device.test_response.lock() = Some(bad);
+        assert!(device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .is_err());
+    }
+
+    #[test]
+    fn write_single_register_from_accepts_correct_echo() {
+        // 正对照：从站号、功能码、地址、值全对 ⇒ 放行（防"改坏成恒 Err"式的假绿）。
+        let device = create_test_device();
+        // 前提断言（与读侧同源用例 device.rs:1298 同款）：请求从站号 2 必须 != config.device_addr，
+        // 否则"期望从站取自请求帧首字节"与"误取 config.device_addr"两种实现皆绿，
+        // 本用例对该缺陷失去判别力 —— 而 config 默认值一变即会静默发生。
+        assert_eq!(
+            device.config.device_addr, 0x01,
+            "前提：config 从站号必须与请求从站号（2）不同，否则本用例对'误把 config.device_addr 当期望从站'失去判别力"
+        );
+        let ok = {
+            let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x00, 0x00];
+            let crc = Frame::calculate_crc(0x02, 0x06, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        *device.test_response.lock() = Some(ok);
+        assert!(device.write_single_register_from(2, 0x01F4, 0x0000).is_ok());
+    }
+
+    #[test]
+    fn write_single_register_from_reports_exception_code_not_short_frame() {
+        // 标准 FC06 异常帧 = **5 字节**（slave=2, func=0x86, 异常码=0x03, CRC16）。
+        // 必须报"异常码 0x03"，**不得**误报成"响应过短" —— 后者会把运维的诊断方向
+        // 从"从站为什么拒绝"带偏到"线缆/成帧有没有问题"。
+        let device = create_test_device();
+        let exc = {
+            let mut v = vec![0x02, 0x86, 0x03];
+            let crc = Frame::calculate_crc(0x02, 0x86, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        };
+        assert_eq!(exc.len(), 5, "前提：标准 Modbus 异常帧长度为 5");
+        *device.test_response.lock() = Some(exc);
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("异常码") && msg.contains("0x03"),
+            "须报出异常码，实际: {msg}"
+        );
+        assert!(!msg.contains("过短"), "不得误报成响应过短，实际: {msg}");
+    }
+
+    #[test]
+    fn write_single_register_from_reports_short_frame_without_panic() {
+        // 零字节响应 = 串口读超时（VMIN=0/VTIME 语义下 recv_frame 返回 Ok(vec![])）。
+        // 用途有二：① 钉住"不裸索引"取值（无守卫则 response[1] 直接 panic，而南向采集
+        // task 内 panic 会静默终止整口采集）；② 钉住"超时"这条运维最常见的失败形态
+        // 能给出可读报文（而非 panic 或空错误）。
+        let device = create_test_device();
+        *device.test_response.lock() = Some(Vec::new());
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("过短") || msg.contains("0 字节"),
+            "空响应须给出可读的'过短/0 字节'报文而非 panic，实际: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_single_register_from_does_not_panic_on_two_byte_response() {
+        // 2 字节响应（噪声/残帧）：`get()` 取值必须挡住 response[2] 越界，且**不得**把它
+        // 当异常帧（凭空报"被从站拒绝，异常码=0x00"）—— 它是"没收到成帧"，不是"从站拒绝"。
+        // 判别力：把取值写成 `response.len() >= 2 && response[1] == (FUNC | 0x80)` 再读
+        // `response[2]` ⇒ 本用例 panic；只判 func 位不判异常码字段在不在 ⇒ 本用例断言红。
+        let device = create_test_device();
+        *device.test_response.lock() = Some(vec![0x02, 0x86]);
+        let err = device
+            .write_single_register_from(2, 0x01F4, 0x0000)
+            .unwrap_err();
+        assert!(err.to_string().contains("过短"), "实际: {err}");
+    }
+
+    // ── 交换缝（`send_recv` 层：请求原文 → 响应原文）─────────────────────
+
+    #[test]
+    fn test_exchange_seam_sees_request_and_returns_response() {
+        // 缝拿到的必须是**请求帧原文**（含 CRC），不是解析后的结构：
+        // 用 FC03 请求 slave=2 addr=0x0100 count=2，断言首字节/功能码/地址/CRC 自洽。
+        let device = create_test_device();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let seen2 = seen.clone();
+        device.set_test_exchange(Arc::new(move |req: &[u8]| {
+            *seen2.lock().unwrap() = req.to_vec();
+            // 回一个合法响应：slave=2, FC03, 字节数 4, 值 0x0102/0xFFFE
+            let mut v = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE];
+            let crc = Frame::calculate_crc(0x02, 0x03, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        }));
+        let out = device.read_holding_registers_from(2, 0x0100, 2).unwrap();
+        assert_eq!(out, vec![0x0102, 0xFFFE], "缝合法的响应必须被正常解析");
+        let req = seen.lock().unwrap().clone();
+        assert_eq!(req[0], 0x02, "请求帧首字节 = 目标从站");
+        assert_eq!(req[1], 0x03, "功能码 FC03");
+        assert_eq!(&req[2..4], &[0x01, 0x00], "起始地址 0x0100");
+        assert_eq!(&req[4..6], &[0x00, 0x02], "寄存器数 2");
+        let crc = Frame::calculate_crc(0x02, 0x03, &req[2..6], CrcMode::Crc16Modbus);
+        assert_eq!(&req[6..8], &[crc as u8, (crc >> 8) as u8], "CRC 低字节在前");
+    }
+
+    #[test]
+    fn test_exchange_seam_takes_precedence_and_is_clearable() {
+        // 三条优先级语义逐条钉住（两条通道返回**不同值**，否则无法区分走了哪条）：
+        //   ① 缝在 ⇒ 缝赢（test_response 被遮蔽）
+        //   ② 清缝 ⇒ 回落到 test_response（此前未被走到：旧写法在断言前就把它置 None 了）
+        //   ③ 清缝且无 test_response ⇒ 未打开 ⇒ NotConnected（既有语义不变）
+        fn fc03_frame(slave: u8, value: u16) -> Vec<u8> {
+            let mut v = vec![slave, 0x03, 0x02, (value >> 8) as u8, value as u8];
+            let crc = Frame::calculate_crc(slave, 0x03, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        }
+
+        let device = create_test_device();
+        // test_response 通道回 0x2A
+        *device.test_response.lock() = Some(fc03_frame(2, 0x2A));
+        // 缝通道回 0x99 —— 与 test_response 不同，故"谁赢"可判
+        device.set_test_exchange(Arc::new(|_req: &[u8]| fc03_frame(2, 0x99)));
+
+        // ① 缝赢
+        assert_eq!(
+            device.read_holding_registers_from(2, 0, 1).unwrap(),
+            vec![0x99],
+            "缝在时必须走缝（test_response 被遮蔽）"
+        );
+
+        // ② 清缝 ⇒ 回落 test_response
+        device.clear_test_exchange();
+        assert_eq!(
+            device.read_holding_registers_from(2, 0, 1).unwrap(),
+            vec![0x2A],
+            "清缝后必须回落到 test_response"
+        );
+
+        // ③ 两条都无 ⇒ 未打开 ⇒ NotConnected
+        *device.test_response.lock() = None;
+        assert!(
+            matches!(
+                device.read_holding_registers_from(2, 0, 1),
+                Err(Rs485Error::NotConnected(_))
+            ),
+            "两条通道都无 ⇒ 回到未打开的 NotConnected（不改变既有语义）"
         );
     }
 }

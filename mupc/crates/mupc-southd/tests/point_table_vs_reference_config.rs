@@ -2,7 +2,8 @@
 //! 风险 R-2；PRD §9.4.3 明文要求"点表登记值常量表"）。
 //!
 //! **为什么必须有它**（§11.4.4）：`POINT_REGS`（510 静态行 + 探测器区 6 条模板）与
-//! `south_stations_s3b2.yaml`（= PRD §9.4.1 的 6 站）是**同一份点表的两次转录**，
+//! 参考配置（= PRD §9.4.1 的 YAML；**Task 6 起为两段**：`south_stations_s3b2.yaml`
+//! 5 站 546 点 + `south_pcs_s3b2.yaml` 72 点）是**同一份点表的两次转录**，
 //! 任一侧单独改动都会造成"校验器拿旧表判新配置"的漂移。本用例把两侧逐行对齐：
 //!
 //! 1. **展开侧 → 表**：配置的每一块经 `points::expand`（**校验期与运行期同一函数**）
@@ -20,7 +21,7 @@
 //! ①的 `kind` 断言失败；整行漏抄 ⇒ ①报缺行且②报未命中。
 
 use mupc_data_processing::meter_regs::RegFormat;
-use mupc_southd::config::{RegFunc, Role, SouthStationsConfig};
+use mupc_southd::config::{RegBlockConf, RegFunc, Role, SouthPcsConfig, SouthStationsConfig};
 use mupc_southd::point_table::{self, AddrSpace, RegPointKind, SymSrc};
 use mupc_southd::points::{self, PointKind};
 use serde::Deserialize;
@@ -30,13 +31,21 @@ struct Wrapper {
     south_stations: SouthStationsConfig,
 }
 
-/// PRD §9.4.1 的 6 站参考配置（与 `s3b2_config.rs` 同一份 fixture）
+/// PRD §9.4.1 的参考配置——**站级段**（Task 6 起 5 站 546 点；PCS 已迁至 `south_pcs`）
 const REF: &str = include_str!("fixtures/south_stations_s3b2.yaml");
+
+/// PCS 独立顶层段（Task 6 / ADR-016；72 点）—— 与站级段**同一份点表的另一次转录**
+const REF_PCS: &str = include_str!("fixtures/south_pcs_s3b2.yaml");
 
 fn stations() -> SouthStationsConfig {
     serde_yaml::from_str::<Wrapper>(REF)
         .expect("参考配置解析失败")
         .south_stations
+}
+
+/// `south_pcs` 段（裸结构，无外层键——见该 fixture 头部注释）
+fn pcs_segment() -> SouthPcsConfig {
+    serde_yaml::from_str::<SouthPcsConfig>(REF_PCS).expect("south_pcs 参考配置解析失败")
 }
 
 /// PRD §9.8.3 / §9.5 的分设备点数（n=20 展开后）
@@ -83,6 +92,38 @@ impl Expanded {
     }
 }
 
+/// 把一批块经 `points::expand` 展开为 `Expanded`（**站级段与 `south_pcs` 段共用**，
+/// 保证两段走的是同一条展开路径）。
+fn expand_blocks(owner: &str, role: Role, regs: &[RegBlockConf], out: &mut Vec<Expanded>) {
+    for blk in regs {
+        let pts =
+            points::expand(blk).unwrap_or_else(|e| panic!("{owner} 块 {} 展开失败: {e}", blk.name));
+        for p in pts {
+            let (fmt, scale, offset) = match p.kind {
+                PointKind::Scalar { decode, .. } => {
+                    (Some(decode.format), decode.scale, decode.offset)
+                }
+                PointKind::Bit { .. } => (None, 0.0, 0.0),
+            };
+            let space = match blk.func {
+                RegFunc::Discrete => AddrSpace::Bit,
+                RegFunc::Holding | RegFunc::Input => AddrSpace::Reg,
+            };
+            out.push(Expanded {
+                role,
+                metric: p.metric,
+                space,
+                addr: blk.addr + p.kind.offset(),
+                fmt,
+                scale,
+                offset,
+                block: blk.name.clone(),
+            });
+        }
+    }
+}
+
+/// 两段合并展开：`south_stations`（5 站 546 点）+ `south_pcs`（3 区 72 点）= **618**。
 fn expand_reference() -> Vec<Expanded> {
     let mut out = Vec::new();
     for st in &stations().stations {
@@ -95,33 +136,11 @@ fn expand_reference() -> Vec<Expanded> {
             );
             continue;
         }
-        for blk in &st.regs {
-            let pts = points::expand(blk)
-                .unwrap_or_else(|e| panic!("站 {} 块 {} 展开失败: {e}", st.id, blk.name));
-            for p in pts {
-                let (fmt, scale, offset) = match p.kind {
-                    PointKind::Scalar { decode, .. } => {
-                        (Some(decode.format), decode.scale, decode.offset)
-                    }
-                    PointKind::Bit { .. } => (None, 0.0, 0.0),
-                };
-                let space = match blk.func {
-                    RegFunc::Discrete => AddrSpace::Bit,
-                    RegFunc::Holding | RegFunc::Input => AddrSpace::Reg,
-                };
-                out.push(Expanded {
-                    role: st.role,
-                    metric: p.metric,
-                    space,
-                    addr: blk.addr + p.kind.offset(),
-                    fmt,
-                    scale,
-                    offset,
-                    block: blk.name.clone(),
-                });
-            }
-        }
+        expand_blocks(&format!("站 {}", st.id), st.role, &st.regs, &mut out);
     }
+    // PCS 段（Task 6 / ADR-016）：独立顶层段，但点表角色仍是 `Role::Pcs`
+    let pcs = pcs_segment();
+    expand_blocks("south_pcs", Role::Pcs, &pcs.regs, &mut out);
     out
 }
 
@@ -207,6 +226,28 @@ fn expanded_point_counts_match_prd() {
         pts.len(),
         618,
         "全站点数须 == 618（PRD §9.8.3；探测器区按 n=20 展开）"
+    );
+    // **段级口径**（Task 6 / 设计 §13.7）：618 的归属由"6 站"变为
+    // 「`south_stations` 5 站 = **546** + `south_pcs` = **72**」，总数不变。
+    // 两段分别展开再相加 —— 防"合计对得上但归属错"（如 PCS 72 点被误搬到站级段）。
+    let mut st_part = Vec::new();
+    for st in &stations().stations {
+        if is_collected(st.role) {
+            expand_blocks(&format!("站 {}", st.id), st.role, &st.regs, &mut st_part);
+        }
+    }
+    let mut pcs_part = Vec::new();
+    expand_blocks("south_pcs", Role::Pcs, &pcs_segment().regs, &mut pcs_part);
+    assert_eq!(
+        st_part.len(),
+        546,
+        "south_stations 段展开 546 点（设计 §13.7）"
+    );
+    assert_eq!(pcs_part.len(), 72, "south_pcs 段展开 72 点（设计 §13.7）");
+    assert_eq!(
+        st_part.len() + pcs_part.len(),
+        pts.len(),
+        "两段之和须 == 全量展开（否则合并侧对数口径与分写侧不一致）"
     );
     // 第 20 只（n=20 的最后一只）= (20−1)*6+11 = 125 ⇒ 末寄存器 130，须可由模板命中
     assert!(

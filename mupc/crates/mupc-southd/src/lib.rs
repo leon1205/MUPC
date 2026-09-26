@@ -7,6 +7,7 @@
 //! role 分发到 StationSink——core-bin 实现）。
 pub mod config;
 pub mod mapper;
+pub mod pcs;
 pub mod point_table;
 pub mod points;
 pub mod port_runtime;

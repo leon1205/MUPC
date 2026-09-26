@@ -200,6 +200,268 @@ fn is_default_word_order(w: &WordOrder) -> bool {
     *w == WordOrder::HiLo
 }
 
+/// PCS（两级式 PCS = 实时控制模块）配置段（设计 §13.7，ADR-016）。
+///
+/// **独立顶层段**而非并入 `south_stations`：`StationConf` 是纯采集语义（`regs` 只有读数），
+/// 无处安放控制面参数（响应超时 / 采集兼心跳周期）；且 PCS 由 `PcsHandle` **独占该口**
+/// （校验规则 P-2），与站级调度器的"一口多站"模型不同。
+///
+/// 缺省 `enabled: false` ⇒ 既有部署 yaml **零改动即零行为变化**。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SouthPcsConfig {
+    /// 是否启用 PCS 通道。`false` ⇒ 不构造 `PcsHandle`、不开该口。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 串口设备（**须独占**，不得与任何 `south_stations` 站同口 —— 校验规则 P-2）。
+    #[serde(default = "default_serial_port_pcs")]
+    pub port: String,
+    /// 协议处理器名（与站级同源，缺省 `modbus`）。
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    /// PCS 从站地址（拨码，默认 1；有效 1..=247）。
+    #[serde(default = "default_slave_addr_pcs")]
+    pub slave: u8,
+    /// 波特率（PCS 线格式 V1.3：19200 N-8-1）。
+    #[serde(default = "default_pcs_baud_rate")]
+    pub baud_rate: u32,
+    /// 数据位。
+    #[serde(default = "default_data_bits_pcs")]
+    pub data_bits: u8,
+    /// 停止位。
+    #[serde(default = "default_stop_bits_pcs")]
+    pub stop_bits: u8,
+    /// 校验位（缺省 none）。
+    #[serde(default)]
+    pub parity: StationParity,
+    /// **采集周期（兼心跳职能）**：每拍 FC04 读一次 3 区块，同时产出 SOC / 运行态 / 三相 /
+    /// 全部点（设计 §13.4 —— 三条读路径合并为一条）。下界 `PCS_MIN_INTERVAL_MS`。
+    #[serde(default = "default_interval_ms")]
+    pub interval_ms: u64,
+    /// 单次读写响应超时（毫秒）。缺省 200（原 `intercore.modbus_rtu.response_timeout_ms` 默认值）。
+    #[serde(default = "default_pcs_response_timeout_ms")]
+    pub response_timeout_ms: u64,
+    /// 3 区只读点表（`pcs_3zone` 等）—— 与站级 `regs` **同一类型、同一批校验函数**
+    /// （规则 P-4；实际覆盖项见 [`SouthPcsConfig::validate`] 的文档）。
+    #[serde(default)]
+    pub regs: Vec<RegBlockConf>,
+}
+
+impl Default for SouthPcsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_serial_port_pcs(),
+            protocol: default_protocol(),
+            slave: default_slave_addr_pcs(),
+            baud_rate: default_pcs_baud_rate(),
+            data_bits: default_data_bits_pcs(),
+            stop_bits: default_stop_bits_pcs(),
+            parity: StationParity::None,
+            interval_ms: DEFAULT_INTERVAL_MS,
+            response_timeout_ms: default_pcs_response_timeout_ms(),
+            regs: Vec::new(),
+        }
+    }
+}
+
+impl SouthPcsConfig {
+    /// 段内校验（跨段规则 **P-1/P-2** 在 core-bin —— 需同时看 `south_stations` 与
+    /// `intercore`；**P-3** 在本文件 [`SouthStationsConfig::validate`]）。
+    ///
+    /// **P-4 的覆盖范围（设计 §13.8 的 P-4 行订正后的实际口径，勿夸大；三处口径已于
+    /// 2026-09-26 统一到此处，正文注释不再另立副本）**：
+    /// - **点级**：`points::expand` —— `count/at ≥ 1`、`name`×`count>1` 护栏、
+    ///   规则 7（点位越界）/ 8（块内点位重叠）/ 9（32 位点 `count == 1` 且不跨窗口末尾）。
+    /// - **块级**：规则 5 [`validate_scale`]（`scale == 0`）/ 规则 11 [`validate_anchoring`]
+    ///   （空洞 ≤ 4 + 首尾锚定）/ 规则 12 [`validate_count_and_discrete_bits`] /
+    ///   规则 14 [`validate_block_spans`]（跨块区间重叠，须吃整段切片）/ 规则 19
+    ///   [`validate_width_multiple`]。
+    /// - **段级**：规则 10 [`check_metric_uniqueness`]（点**名**唯一）—— 其判据是纯
+    ///   `metrics` 去重、**与 `role` 无关**（站级也在**汇聚**阶段判），故与站级**共用**同一
+    ///   函数；漏掉它则"同名异址"两点静默生成两个同名遥测键、值互相覆盖。
+    /// - **明确不复用（如实登记，不假装覆盖）**：规则 15（块落地极大性，[`validate_maximality`]
+    ///   真需 `&[StationConf]`）/ 规则 6（符号性）与规则 13（`addr == 0` 按 `role`）—— 后两条
+    ///   依赖 `Role` 口径，而 `south_pcs` 段无 `role` 字段。
+    /// - **本段特有（站级无此二项）**：`regs[].interval_ms` **一律拒**（本段无"块级周期覆盖"
+    ///   语义 —— 段级 `interval_ms` 已是采集兼心跳周期，单块段不存在"某块提速"的诉求；
+    ///   探测到即拒是 fail-closed，否则它是可写出但永不执行的**死配置**）；`baud_rate`
+    ///   越界拒（同站级 —— `0` 会静默穿透到 `open()` 才报错）。
+    /// - **控制面值域（2026-09-26 补）**：`response_timeout_ms > 0` / `data_bits ∈ 5..=8` /
+    ///   `stop_bits ∈ 1..=2` —— 前者的落点本就在此；后两者原先**只在口层**
+    ///   `open_with_port_params` 的 fail-closed 守卫，配置期会放行（门禁后移一层）⇒ 补入此处。
+    ///   口层守卫**保留**（纵深防御，判据同源）。
+    ///
+    /// **另有规则 P-5（2026-09-26）**：`regs` 须恰 1 块、块基址须 == `regs::REG_MODE`、
+    /// 窗口须覆盖到 `REG_P_TOTAL` —— 理由（`build_snapshot` 与块基址的隐式耦合、
+    /// 失配时"在线但快照恒空且无日志"）见函数末尾该规则的注释。
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.port.trim().is_empty() {
+            return Err("south_pcs: port 为空".into());
+        }
+        if !(1..=247).contains(&self.slave) {
+            return Err(format!("south_pcs: slave 越界: {}", self.slave));
+        }
+        if self.baud_rate == 0 || self.baud_rate > 4_000_000 {
+            return Err(format!(
+                "south_pcs: baud_rate 越界: {}（须 1..=4000000）",
+                self.baud_rate
+            ));
+        }
+        if self.interval_ms < PCS_MIN_INTERVAL_MS {
+            return Err(format!(
+                "south_pcs: interval_ms={} 须 ≥ {}ms（防超短周期打满总线）",
+                self.interval_ms, PCS_MIN_INTERVAL_MS
+            ));
+        }
+        if self.response_timeout_ms == 0 {
+            return Err("south_pcs: response_timeout_ms 须 > 0".into());
+        }
+        // 控制面三项的**值域**（2026-09-26 补）：此前 `data_bits` / `stop_bits` 的越界只在
+        // **口层** `open_with_port_params` 的 fail-closed 守卫里拒（⇒ 门禁点比配置期**后移一层**，
+        // 配置错误要到打开串口时才暴露）。此处补进段内 `validate()`，与段内其它规则**同处**；
+        // **口层守卫保留**（纵深防御，两层判据同源、不冲突）。判据与 `port_runtime.rs` 一致。
+        if !(5..=8).contains(&self.data_bits) {
+            return Err(format!(
+                "south_pcs: data_bits={} 越界（须 5..=8）",
+                self.data_bits
+            ));
+        }
+        if !(1..=2).contains(&self.stop_bits) {
+            return Err(format!(
+                "south_pcs: stop_bits={} 越界（须 1..=2）",
+                self.stop_bits
+            ));
+        }
+        if self.regs.is_empty() {
+            return Err("south_pcs: regs 为空（必填点表 —— 空点表 = 采集恒空转的静默死配）".into());
+        }
+        // 规则 P-4（设计 §13.8 P-4 行）：块的**结构规则**与站级**同一批函数**（§11.4.3 的
+        // "校验期与运行期同一函数"不变量；不另起一套）。**覆盖范围见本函数文档**
+        // （`interval_ms` 死配置拒 / 点级 `expand` / 块级 5·11·12·14·19 / 段级 10=点名唯一；
+        // 不复用 15·6·13）—— 不在正文注释里另立第二份，防三处口径再度漂移。
+        //
+        // **顺序**：先逐块 `interval_ms` 死配置判 + `expand`（点级：规则 7/8/9 +
+        // `count/at` 护栏），再逐块块级（5/12/19/11），最后 `validate_block_spans` 吃
+        // **整段切片**（规则 14 跨块区间重叠）+ [`check_metric_uniqueness`] 吃本次循环
+        // 累积的点名（规则 10 —— 与站级同样是**汇聚**阶段判）。
+        //
+        // ⚠️ **求值粒度与站级不同**：本段**按「块」**逐块交错求值，站级**按「批」**
+        // （批次序 12/13 → 5/19 → 14 → expand/11/6/10）⇒ 同一块同时含点级与块级缺陷时，
+        // 两段报出的**首条可能不同**。本段**刻意不逐条对齐**站级顺序（无测试锚、也不构成
+        // 缺陷）—— 后来者勿"顺手对齐"，那只会把一处真缺陷换成另一处。
+        //
+        // - `prefix` 用段名占位（无站 id —— 本段是单值段），使错误文案可定位。
+        let prefix = "south_pcs: ";
+        let mut metrics: Vec<String> = Vec::new();
+        for blk in &self.regs {
+            // 块级周期覆盖在本段**无对象**：段级 `interval_ms` 就是"采集兼心跳"周期，
+            // 单块段没有"某一块另提速"的诉求 ⇒ 一律拒（fail-closed）。若放行，它是一个
+            // 被解析、被校验器完全无视、调度器也永不执行的**死配置**（静默形态）。
+            if blk.interval_ms.is_some() {
+                return Err(format!(
+                    "{prefix}块 {} 不支持块级周期覆盖 `interval_ms`（本段单块采集兼心跳，无「覆盖」语义）",
+                    blk.name
+                ));
+            }
+            let pts = crate::points::expand(blk).map_err(|e| format!("{prefix}{e}"))?;
+            validate_scale(prefix, blk)?;
+            validate_count_and_discrete_bits(prefix, blk)?;
+            validate_width_multiple(prefix, blk)?;
+            validate_anchoring(prefix, blk, &pts)?;
+            metrics.extend(pts.into_iter().map(|p| p.metric));
+        }
+        validate_block_spans(prefix, &self.regs)?;
+        // 规则 10（点名唯一）—— 跨块汇聚后判（`expand` 只查地址重叠、不查点名）
+        check_metric_uniqueness(prefix, &metrics)?;
+        // 规则 P-5（2026-09-26 质量评审查出）：采集循环（`PcsHandle::tick_once`）只读
+        // `regs.first()`，且 `build_snapshot` 用**块基址 + 偏移**索引、再按 `regs::REG_*`
+        // 的**绝对地址**常量取数 —— 两者是**隐式耦合**：若块的窗口不覆盖 1000..=1032，
+        // 快照五字段会**全为 None 而 `valid` 仍为 true**，且总线读成功 ⇒ `bad=0`、
+        // `connected=true`、**无任何日志**（现象："PCS 在线、点表有值，但 SOC/三相/
+        // 运行态恒空"）。故此处 fail-closed 把该形态挡在配置期。
+        if self.regs.len() != 1 {
+            return Err(format!(
+                "south_pcs: regs 须恰 1 块（采集循环只读首块，多块为死配置），实际 {} 块",
+                self.regs.len()
+            ));
+        }
+        let blk = &self.regs[0];
+        if blk.addr != crate::pcs::regs::REG_MODE {
+            return Err(format!(
+                "south_pcs: regs[0].addr={} 须 == {}（PCS 3 区窗口基址 = 有功模式寄存器；\
+                 快照按 REG_* 绝对地址取数，基址不符会让 SOC/三相/运行态恒空）",
+                blk.addr,
+                crate::pcs::regs::REG_MODE
+            ));
+        }
+        let need_end = crate::pcs::regs::REG_P_TOTAL + 1;
+        if blk.addr.saturating_add(blk.count) < need_end {
+            return Err(format!(
+                "south_pcs: regs[0] 窗口 {:#06x}..{:#06x} 未覆盖到 {:#06x}（须含 REG_P_TOTAL 总有功）",
+                blk.addr,
+                blk.addr.saturating_add(blk.count),
+                need_end
+            ));
+        }
+        Ok(())
+    }
+
+    /// 由本段合成**上云所需的站壳**（`StationConf` 形态）—— 设计 §13.9 末段要求③：
+    /// "由 `south_pcs` 段合成上云所需站壳的逻辑，**生产与测试共用同一函数**"。
+    ///
+    /// **为什么需要它**：`uplink::build_uplink_points` 的入参是 `&SouthStationsConfig`，
+    /// 而 PCS 迁出后不再在 `south_stations` 里 ⇒ 调用点必须把本段**折成站形态**喂进去，
+    /// 否则 PCS 的 72 个 IOA 会**静默**从 IEC104/MQTT 点表消失（Δ-19）。此前三处
+    /// （`mupc-southd` 单测 / `mupc-core-bin` 单测 / `s3b2_decode_e2e`）各自手写合成，
+    /// 会与生产漂移 —— 统一收敛到本函数。
+    ///
+    /// **只合成外壳**：`id` 恒为 `"pcs"`（= 落库 `device_id` 与 12 号显示帧的既有契约值，
+    /// 见 §13.9「落库 `device_id = "pcs"`」行）、`role` 恒为 [`Role::Pcs`]；其余字段
+    /// **逐字段**取自本段 ⇒ 上云点数/通道/档位口径与迁移前逐字相同（§13.7 的 72 点）。
+    ///
+    /// `data_bits` / `stop_bits` / `response_timeout_ms` 是**控制面**参数：`StationConf`
+    /// 无对应落点、采集/上云路径也不消费 ⇒ 不参与合成。它们**不经 `PcsHandle`**
+    /// （`PcsHandle` 只吃 `regs` / `interval_ms` / `slave`），实际消费方是**装配层**：
+    /// `mupc-core-bin/src/startup.rs` 的 `south_pcs_port_params(&config.south_pcs)`
+    /// → `Rs485PortBus::open_with_port_params`（口层 `PortParams` ⇒ `Rs485Device`）。
+    /// （订正 2026-09-26：此处曾称三项"仍由 `PcsHandle` 从本段直接读"，该陈述**从未成立**。）
+    pub fn station_shell(&self) -> StationConf {
+        StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: self.port.clone(),
+            protocol: self.protocol.clone(),
+            slave: self.slave,
+            baud_rate: self.baud_rate,
+            parity: self.parity,
+            interval_ms: self.interval_ms,
+            regs: self.regs.clone(),
+        }
+    }
+}
+
+fn default_serial_port_pcs() -> String {
+    "/dev/ttyS0".into()
+}
+fn default_slave_addr_pcs() -> u8 {
+    1
+}
+fn default_pcs_baud_rate() -> u32 {
+    19200
+}
+fn default_data_bits_pcs() -> u8 {
+    8
+}
+fn default_stop_bits_pcs() -> u8 {
+    1
+}
+fn default_pcs_response_timeout_ms() -> u64 {
+    200
+}
+
 /// 顶层配置段：轮询周期、数据过期门限与站表
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SouthStationsConfig {
@@ -226,12 +488,13 @@ impl SouthStationsConfig {
     ///
     /// **判定顺序（设计 §11.5.1「顺序」+ §11.5.3.4.1 实现约束，不得调整）**：
     /// ① 站级基础校验（id 非空唯一 / port / slave / interval_ms / baud_rate /
-    ///    `pcs` 周期下界（规则 18）/ meter_grid·battery 新鲜度上界）
+    ///    **规则 P-3（`role: pcs` 拒，指向 `south_pcs` 段）** / meter_grid·battery 新鲜度上界）
     ///    **+ 既有 `meter_grid` 整组校验**（缺相量块 / `count ≥ 6` / `int32_scaled` 显式
     ///    `scale > 0` / **块名唯一** / `addr > 0` / 区间不重叠——**原地不动，不得后移**）；
     /// ② [`validate_station_regs`]（通用规则 4/5/7/8/9/10/11/12/13/14/19，含点展开）；
     /// **②′** [`validate_block_intervals`]（S3b-3 规则 20–24，按口聚合，**须在②之后、③之前**）；
-    /// ③ 跨站（单站约束计数（规则 2/3）、同口一致性（规则 16）、块落地极大性（规则 15））。
+    /// ③ 跨站（单站约束计数（规则 2/3，`pcs` 两条随 P-3 不可达）、同口一致性（规则 16）、
+    ///    块落地极大性（规则 15））。
     ///
     /// **为什么②′必须排在②之后（设计 §12.7 落点表注）**：②（含点展开）先给出**更具体**的文案
     ///（点位越界/重叠/点名重复等）；若先跑②′的"判据完整性"检查，可能对同一份坏配置先报出
@@ -271,14 +534,18 @@ impl SouthStationsConfig {
                     s.id, s.baud_rate
                 ));
             }
-            // 规则 18：pcs 站周期下界（PRD §9.3.2.2(2) + §9.8.1 末条；未进 §9.4.3 表，
-            // 设计 §11.5.1 #18 补落点）。pcs 无 <5000 上界（不参与控制决策）。
-            if s.role == Role::Pcs && s.interval_ms < PCS_MIN_INTERVAL_MS {
+            // 规则 P-3（设计 §13.8 / ADR-016）：PCS 走独立顶层段 `south_pcs`，
+            // 站级段**不再接受** role: pcs —— 否则两处都能配同一台 PCS（双 master）。
+            // ⚠️ 本注入点必须在既有 pcs 规则之前，否则旧文案先命中、误导配置者。
+            if s.role == Role::Pcs {
                 return Err(format!(
-                    "south_stations: pcs 站 {} interval_ms={} 须 ≥ {}ms（防超短周期打满总线）",
-                    s.id, s.interval_ms, PCS_MIN_INTERVAL_MS
+                    "south_stations: 站 {} 的 role: pcs 已迁移 —— PCS 请配到顶层段 south_pcs（设计 §13.7/ADR-016）",
+                    s.id
                 ));
             }
+            // 规则 18（`pcs` 周期下界，PRD §9.3.2.2(2) + §9.8.1 末条）随 P-3 迁移：
+            // 站级 pcs 站已不可达，该下界改由 [`SouthPcsConfig::validate`] 承担
+            // （`PCS_MIN_INTERVAL_MS` 常量保留复用）。
             if s.role == Role::MeterGrid && s.interval_ms >= DATA_FRESHNESS_MS {
                 return Err(format!(
                     "south_stations: meter_grid 站 {} interval_ms 须 < {}ms",
@@ -300,10 +567,9 @@ impl SouthStationsConfig {
         }
         // ②′ 块级采集周期覆盖（S3b-3 §12.7 规则 20–24；**须在②之后、③之前**——见本方法文档）
         validate_block_intervals(self)?;
-        // ③ 跨站：单站约束计数（规则 2/3——pcs 必填点表）
+        // ③ 跨站：单站约束计数（规则 2/3）
         let mut grid_seen = false;
         let mut battery_seen = false;
-        let mut pcs_seen = false;
         for s in &self.stations {
             match s.role {
                 Role::MeterGrid => {
@@ -324,20 +590,10 @@ impl SouthStationsConfig {
                     }
                     battery_seen = true;
                 }
-                Role::Pcs => {
-                    if pcs_seen {
-                        return Err(
-                            "south_stations: 至多一个 pcs 站（同设备双站双读、点表冲突）".into(),
-                        );
-                    }
-                    pcs_seen = true;
-                    if s.regs.is_empty() {
-                        return Err(format!(
-                            "south_stations: pcs 站 {} regs 为空（必填点表——空 regs = 站永久 offline 的静默死配）",
-                            s.id
-                        ));
-                    }
-                }
+                // `Role::Pcs` 分支随 P-3 一并删除：站级 pcs 站在 ① 即被拒（规则 2「至多一个
+                // pcs 站」与规则 3「pcs regs 非空」随之不可达）。两条规则的新落点：前者由
+                // P-3 单段化天然满足（`south_pcs` 是单值段，不可能配两台）；后者迁入
+                // [`SouthPcsConfig::validate`] 的 `regs 为空` 分支。
                 _ => {}
             }
         }
@@ -463,21 +719,7 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
     let prefix = format!("south_stations: 站 {} ", s.id);
     // 规则 12（`count` 有效性 + `discrete` 位块上限）
     for b in &s.regs {
-        if b.count == 0 {
-            return Err(format!(
-                "{}regs 块 {} count 须 > 0（显式取值须为正；serde 层不拦截 0）",
-                prefix, b.name
-            ));
-        }
-        if b.func == RegFunc::Discrete && b.count > points::MAX_DISCRETE_BITS {
-            return Err(format!(
-                "{}discrete 块 {} count={} 超位块上限 {}（PRD §9.4.3 规则 12）",
-                prefix,
-                b.name,
-                b.count,
-                points::MAX_DISCRETE_BITS
-            ));
-        }
+        validate_count_and_discrete_bits(&prefix, b)?;
         // 规则 13（地址有效性：addr == 0 仅 meter_batt / hvac 合法；meter_grid 的
         // addr>0 已由①的既有整组校验先判，行为不变）
         if b.addr == 0 && !matches!(s.role, Role::MeterBatt | Role::Hvac) {
@@ -490,15 +732,7 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
     // 规则 5（格式与标度）+ 规则 19（无 points 块的宽度护栏）
     for b in &s.regs {
         validate_scale(&prefix, b)?;
-        if b.func != RegFunc::Discrete && b.points.is_empty() {
-            let width = b.format.reg_width() as u16;
-            if b.count % width != 0 {
-                return Err(format!(
-                    "{}regs 块 {} count={} 非 format={:?} 宽度 {} 的整数倍——步进的尾槽装不下一个完整值，会**静默少产点**（设计补落点规则 19）",
-                    prefix, b.name, b.count, b.format, width
-                ));
-            }
-        }
+        validate_width_multiple(&prefix, b)?;
     }
     // 规则 14（区间与重叠，按 func 空间分别判）
     validate_block_spans(&prefix, &s.regs)?;
@@ -530,8 +764,22 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
         ));
     }
     // 规则 10（点名唯一：含自动位置点名与显式 `name` 相撞；meter_grid 的同名**块**由①先拒，文案不同）
+    check_metric_uniqueness(&prefix, &metrics)
+}
+
+/// 规则 10（**点名唯一**）：`metrics` 内任一重复 ⇒ `Err`（遥测键冲突，指标相互覆盖）。
+///
+/// **为何抽成独立函数**：本条的判据是**纯 `metrics` 去重** —— 与 `role` 无关、也与"点从哪些
+/// 块来"无关（只看展开后的点名集合）⇒ 站级（[`validate_station_regs`] 的**汇聚**阶段）与
+/// `south_pcs` 段（[`SouthPcsConfig::validate`]）**共用同一判定**，符合规则 P-4 的
+/// "同一批函数"不变量。
+///
+/// **与规则 8 的分工**：规则 8（块内**地址**重叠）由 [`points::expand`] 判；本函数只看
+/// **点名** —— 同名**异址**（如一块的显式 `name` 撞另一块的自动位置点名，或两块各显式声明
+/// 同一个 `name`）**只有本条能拒**，漏掉即静默生成两个同名遥测键、值互相覆盖。
+fn check_metric_uniqueness(prefix: &str, metrics: &[String]) -> Result<(), String> {
     let mut seen: Vec<&str> = Vec::new();
-    for m in &metrics {
+    for m in metrics {
         if seen.contains(&m.as_str()) {
             return Err(format!(
                 "{}regs 点名重复: {}（遥测键冲突，指标相互覆盖）",
@@ -576,6 +824,49 @@ fn is_integer_format(f: RegFormat) -> bool {
         f,
         RegFormat::Int32Scaled | RegFormat::Uint16 | RegFormat::Int16
     )
+}
+
+/// 规则 12（`count` 有效性 + `discrete` 位块上限）。
+///
+/// **为何抽成独立函数（2026-09-26，Task 6 返工的 P-4）**：原为 [`validate_station_regs`] 的
+/// 内联检查；`south_pcs` 段（[`SouthPcsConfig::validate`]）须复用**同一判定**（规则 P-4
+/// "不另起一套"）。本条与 `role` 无关，故只取 `prefix`（站名占位）即可两处共用 ——
+/// 复制粘贴会立刻产生两份口径。
+fn validate_count_and_discrete_bits(prefix: &str, b: &RegBlockConf) -> Result<(), String> {
+    if b.count == 0 {
+        return Err(format!(
+            "{}regs 块 {} count 须 > 0（显式取值须为正；serde 层不拦截 0）",
+            prefix, b.name
+        ));
+    }
+    if b.func == RegFunc::Discrete && b.count > points::MAX_DISCRETE_BITS {
+        return Err(format!(
+            "{}discrete 块 {} count={} 超位块上限 {}（PRD §9.4.3 规则 12）",
+            prefix,
+            b.name,
+            b.count,
+            points::MAX_DISCRETE_BITS
+        ));
+    }
+    Ok(())
+}
+
+/// 规则 19（无 `points` 块的宽度护栏）：`count` 须为 `format` 宽度的整数倍 —— 否则步进的
+/// 尾槽装不下一个完整值，运行期**静默少产点**。`discrete` 位块不适用（位宽恒 1）；
+/// 声明了 `points` 的块由规则 11 的锚定判（不重复判）。
+///
+/// **为何抽成独立函数**：同 [`validate_count_and_discrete_bits`] —— `south_pcs` 段复用同一判定。
+fn validate_width_multiple(prefix: &str, b: &RegBlockConf) -> Result<(), String> {
+    if b.func != RegFunc::Discrete && b.points.is_empty() {
+        let width = b.format.reg_width() as u16;
+        if b.count % width != 0 {
+            return Err(format!(
+                "{}regs 块 {} count={} 非 format={:?} 宽度 {} 的整数倍——步进的尾槽装不下一个完整值，会**静默少产点**（设计补落点规则 19）",
+                prefix, b.name, b.count, b.format, width
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 规则 11（空洞上限，仅作用于**声明了 `points` 的标量块**）。
@@ -1958,9 +2249,23 @@ south_stations:
 
     // ═════ S3b-3（T8）：块级采集周期覆盖的配置期校验（设计 §12.7 / §12.8 的 4 条用例）═════
 
-    /// 现网 6 站参考配置（PRD §9.4.1 / §10.5 的现网复核输入；CRLF 逐字，故下方 `.replace`
-    /// 的锚串须带 `\r\n`）。
-    const FIELD_6_STATION_YAML: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
+    /// 现网参考配置（**Task 6 起站级段 5 站** —— 原第 2 站 `pcs` 已按 ADR-016 迁至独立顶层段
+    /// `south_pcs`；PRD §9.4.1 / §10.5 的现网复核输入；CRLF 逐字，故下方 `.replace` 的锚串
+    /// 须带 `\r\n`）。常量名**不带站数**（原 `FIELD_6_STATION_YAML` 的"6"随拆分失效）。
+    ///
+    /// **PCS 站迁出对本组（规则 20–24）的影响：无关**（2026-09-26 逐条核对）。理由：
+    /// ① 规则 20–22（块级周期覆盖）**只判显式声明了 `interval_ms` 的块** —— 原 `pcs` 站
+    ///    的 `pcs_3zone` 块**未声明**块级周期（逐字见 cca8a20^ 的 fixture），故本来就"不判"；
+    /// ② 规则 23/24（口预算）按 `port` 聚合，原 `pcs` 站独占 `/dev/ttyS7`（规则 P-2 要求），
+    ///    其单块/单站形态的口占用率天然极小（U ≈ 0.1、Σ T_组 ≈ 97ms），对"通过"断言无判别力
+    ///    —— 该形态由 `probe_free_hvac_first_case`（单站独占口）真实承担；
+    /// ③ 故本组的 `Ok` 断言**不因少一个 pcs 站而变弱**（少扫一个恒过的口）。
+    /// PCS 段自身的连接/周期/块结构校验另有独立锚：`tests/s3b2_config.rs` 的
+    /// `ac1_rule18_pcs_interval_lower_bound` 与单测 `south_pcs_validate_applies_block_level_rules`。
+    /// ⚠️ **残留（结构性的，非缺陷）**：`validate_block_intervals` 的入参是 `&SouthStationsConfig`
+    /// ⇒ PCS 段**不参与**规则 20–24 的口预算扫描；其独占口 + 单块使其预算天然远低于阈值，
+    /// 是否接线属 Task 7（`PcsHandle`）/ Task 10（core-bin 跨段规则）范畴。
+    const FIELD_REF_STATION_YAML: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
 
     /// 解析 + 段内校验（本组用例的统一入口）。`Wrapper` = 模拟 core_config 的外层嵌入键。
     fn validated(yaml: &str) -> Result<(), String> {
@@ -2171,7 +2476,7 @@ south_stations:
     }
 
     /// **AC-8-6（PRD §10.7）**：口预算与单轮最坏耗时可复算 ——
-    /// ① 现网 6 站（含改造后的 hvac）⇒ `Ok`（**零新增拒绝**）；
+    /// ① 现网参考配置（Task 6 起 5 站，含改造后的 hvac）⇒ `Ok`（**零新增拒绝**）；
     /// ② 构造 `U_口 > 0.5` ⇒ `Err`（规则 23）；
     /// ③ **规则 24 的正反两例**：通过例 = hvac 首例（`Σ T_组 = 47.52ms ≤ 1500ms`）；
     ///    拒绝例 = 设计 §12.7 的 W-1 构造（同口两组，`U = 0.447 ≤ 0.5` **但**
@@ -2179,14 +2484,14 @@ south_stations:
     /// **该例在只有规则 23 时必然 `Ok`** ⇒ 是本条存在的**判别锚**（规则 24 ≠ C9 的推论）。
     #[test]
     fn bus_budget_accepts_field_config_and_rejects_overload() {
-        // ①-a 现网 6 站（fixture 逐字；hvac 尚未含 S3b-3 的新增行）
+        // ①-a 现网参考配置（fixture 逐字；hvac 尚未含 S3b-3 的新增行）
         assert_eq!(
-            validated(FIELD_6_STATION_YAML),
+            validated(FIELD_REF_STATION_YAML),
             Ok(()),
-            "现网 6 站不得被规则 20–24 新增拒绝"
+            "现网 5 站不得被规则 20–24 新增拒绝"
         );
         // ①-b 改造后的 hvac（`hvac_di` 加 `interval_ms: 1000`；§12.6 的迁移行）⇒ 仍 `Ok`
-        let fast = FIELD_6_STATION_YAML.replace(
+        let fast = FIELD_REF_STATION_YAML.replace(
             "          func: discrete\r\n          addr: 0\r\n          count: 31\r\n",
             "          func: discrete\r\n          addr: 0\r\n          count: 31\r\n          interval_ms: 1000   # S3b-3 首例（测试注入）\r\n",
         );
@@ -2198,7 +2503,7 @@ south_stations:
         assert_eq!(
             validated(&fast),
             Ok(()),
-            "改造后的现网 6 站（hvac 位块 1000ms）不得被规则 20–24 拒"
+            "改造后的现网 5 站（hvac 位块 1000ms）不得被规则 20–24 拒"
         );
 
         // ② `U_口 > 0.5`：组周期夹到 ≈`T_组`（两个 FC04 count 120 块声明 1000 同组）
@@ -2626,6 +2931,459 @@ south_stations:
         assert!(
             !err.contains("C6"),
             "不得由 C6（判据块异周期）拒 —— 它先于 C7 求值，出现即说明本用例构造失效，实际: {err}"
+        );
+    }
+}
+
+// ═══════════ Task 6（设计 §13.7/§13.8，ADR-016）：`south_pcs` 顶层段 ═══════════
+
+#[cfg(test)]
+mod south_pcs_tests {
+    use super::*;
+
+    /// `PointConf` 的紧凑构造（只给 `at`/`count`，其余缺省）—— 供本模块 fixture 用。
+    fn pt(at: u16, count: u16) -> PointConf {
+        PointConf {
+            at,
+            count,
+            name: None,
+            format: None,
+            scale: None,
+            offset: None,
+            word_order: Default::default(),
+        }
+    }
+
+    /// 合法块：`pcs_3zone` **76 寄存器**，`points` **锚定覆盖满窗口**（首偏移 0、末末端 = count）。
+    ///
+    /// ⚠️ **本 fixture 曾被写成"76 寄存器块只声明 `{at:1, count:6}`"—— 那是不真实的形态**
+    /// （活体证据，2026-09-26 返工）：在规则 11（首尾锚定，`last_end = 6 ≠ count = 76`）下
+    /// **必被拒**，而旧版本恰把它断言为 `Ok` —— 正因当时的覆盖只有 `points::expand`（不含
+    /// 规则 11）才没爆。真实参考形态见 `tests/fixtures/south_pcs_s3b2.yaml`（31 条 `points`
+    /// 恰好覆盖 76 寄存器），本 fixture 取其**等价简化形**（够锚定 + 够触发规则 5/9/11 的
+    /// 判定路径）。
+    fn pcs_block() -> RegBlockConf {
+        RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 1000,
+            func: RegFunc::Input,
+            format: RegFormat::Uint16,
+            scale: 1.0,
+            count: 76,
+            offset: 0.0,
+            byte_swap: true,
+            points: vec![
+                pt(1, 6), // 1000–1005 告警/工作状态
+                PointConf {
+                    at: 7,
+                    format: Some(RegFormat::Int32Scaled),
+                    scale: Some(0.1),
+                    word_order: WordOrder::LoHi,
+                    ..pt(7, 1)
+                }, // 1006–1007 32 位点（lo_hi）
+                pt(9, 68), // 1008–1075 余下窗口（68 个 16 位槽）
+            ],
+            read_slice: false,
+            interval_ms: None,
+        }
+    }
+
+    #[test]
+    fn south_pcs_config_defaults_are_disabled() {
+        let c = SouthPcsConfig::default();
+        assert!(
+            !c.enabled,
+            "缺省必须 disabled —— 既有部署 yaml 零改动即零行为变化"
+        );
+        assert_eq!(c.interval_ms, DEFAULT_INTERVAL_MS);
+    }
+
+    #[test]
+    fn south_stations_rejects_pcs_role() {
+        let mut c = SouthStationsConfig::default();
+        c.stations.push(StationConf {
+            id: "pcs".into(),
+            role: Role::Pcs,
+            port: "/dev/ttyS7".into(),
+            protocol: "modbus".into(),
+            slave: 1,
+            baud_rate: 19200,
+            parity: StationParity::None,
+            interval_ms: 1000,
+            regs: vec![pcs_block()],
+        });
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("south_pcs"), "必须明确指向新段，实际: {err}");
+    }
+
+    /// 启用后的段内校验：空 `regs` / `interval_ms` 下界 / `slave` 越界 / 空 `port` /
+    /// 零超时 / 块结构非法（规则 P-4：`points::expand` 的**点级**规则）逐条拒绝；合法配置放行。
+    /// **块级**规则（5/11/12/14/19）的覆盖见 [`south_pcs_validate_applies_block_level_rules`]。
+    #[test]
+    fn south_pcs_validate_rejects_dead_or_illegal_configs() {
+        let ok = SouthPcsConfig {
+            enabled: true,
+            regs: vec![pcs_block()],
+            ..SouthPcsConfig::default()
+        };
+        assert_eq!(ok.validate(), Ok(()), "合法 south_pcs 段");
+
+        // `enabled: false` ⇒ 段内一律放行（既有部署零改动的前提）
+        let disabled = SouthPcsConfig {
+            enabled: false,
+            regs: Vec::new(),
+            ..SouthPcsConfig::default()
+        };
+        assert_eq!(disabled.validate(), Ok(()), "未启用则不校验内容");
+
+        let reject = |c: SouthPcsConfig, needle: &str, what: &str| {
+            let err = c.validate().expect_err(&format!("{what} 应被拒"));
+            assert!(
+                err.contains(needle),
+                "{what}：Err 应含 {needle:?}，实际 {err}"
+            );
+        };
+        // 空点表 = 采集恒空转的静默死配（原站级规则 3 的落点）
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                ..SouthPcsConfig::default()
+            },
+            "regs 为空",
+            "空 regs",
+        );
+        // 周期下界（原站级规则 18 的落点）：499 → Err、500 → Ok
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                interval_ms: 499,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "须 ≥ 500ms",
+            "interval_ms=499",
+        );
+        assert_eq!(
+            SouthPcsConfig {
+                enabled: true,
+                interval_ms: 500,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            }
+            .validate(),
+            Ok(()),
+            "interval_ms=500（下界内）"
+        );
+        // 地址空间：0 / 248 均越界（1..=247）
+        for slave in [0u8, 248] {
+            reject(
+                SouthPcsConfig {
+                    enabled: true,
+                    slave,
+                    regs: vec![pcs_block()],
+                    ..SouthPcsConfig::default()
+                },
+                "slave 越界",
+                &format!("slave={slave}"),
+            );
+        }
+        // 波特率越界（与站级同款判据）：`0` 会静默穿透到 `open()` 才报错 ⇒ 配置期拒
+        for baud in [0u32, 4_000_001] {
+            reject(
+                SouthPcsConfig {
+                    enabled: true,
+                    baud_rate: baud,
+                    regs: vec![pcs_block()],
+                    ..SouthPcsConfig::default()
+                },
+                "baud_rate 越界",
+                &format!("baud_rate={baud}"),
+            );
+        }
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                port: "  ".into(),
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "port 为空",
+            "空 port",
+        );
+        // 块级周期覆盖 = **死配置**（本段无"覆盖"语义；段级 `interval_ms` 已是采集兼心跳
+        // 周期，`validate_block_intervals` 规则 20–24 只吃 `&SouthStationsConfig` ⇒ 此前
+        // 它被解析、无校验、调度器也永不执行）⇒ fail-closed 拒
+        let mut dead_iv = pcs_block();
+        dead_iv.interval_ms = Some(2000);
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                regs: vec![dead_iv],
+                ..SouthPcsConfig::default()
+            },
+            "不支持块级周期覆盖",
+            "regs[].interval_ms=Some(2000)",
+        );
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                response_timeout_ms: 0,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "response_timeout_ms 须 > 0",
+            "零超时",
+        );
+        // 控制面值域（2026-09-26 补）：`data_bits: 9` 曾**通过**段内 `validate()`、要到口层
+        // `open_with_port_params` 的 fail-closed 守卫才拒（门禁点后移一层）⇒ 此处钉住配置期即拒。
+        // 文案带 `south_pcs` 前缀，故 `needle` 取段名（同时证"指向本段"）。
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                data_bits: 9,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "south_pcs",
+            "data_bits=9（越界）",
+        );
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                stop_bits: 3,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "south_pcs",
+            "stop_bits=3（越界）",
+        );
+        // 规则 P-4（点级）：块结构非法由 `points::expand`（与采集同一函数）拒 —— 点越界
+        let mut bad_blk = pcs_block();
+        bad_blk.points[0].at = 78; // 点 at=78（块内偏移 77）起算 6 个 → 越出 count=76
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                regs: vec![bad_blk],
+                ..SouthPcsConfig::default()
+            },
+            "越界",
+            "点越界块",
+        );
+    }
+
+    /// **规则 P-4（块级）的常驻锚**（2026-09-26 扩覆盖）：逐条证 5 / 11 / 12 / 14 / 19 在
+    /// `south_pcs` 段**真能红**。其中**规则 5 与规则 11 最尖**：
+    ///
+    /// - 规则 5：YAML 漏写 `scale` ⇒ serde 缺省 `0.0` ⇒ 整块 `raw × 0` **静默全 0**
+    ///   （旧覆盖下 `expand` 完全不看 scale ⇒ 本形态会**绿**）；
+    /// - 规则 11：`points` 未覆盖满 `count` ⇒ 旧覆盖下同样**绿**（这正是原 fixture 的活体证据）。
+    ///
+    /// 本用例即"扩覆盖前必绿、扩覆盖后必红"的对照锚，故**常驻**（不止一次性探针）。
+    /// 明确不覆盖的两条（15 极大性 / 6·13 依赖 role）**不在此**，见 `validate` 的文档。
+    #[test]
+    fn south_pcs_validate_applies_block_level_rules() {
+        let cfg = |regs: Vec<RegBlockConf>| SouthPcsConfig {
+            enabled: true,
+            regs,
+            ..SouthPcsConfig::default()
+        };
+        let reject = |regs: Vec<RegBlockConf>, needle: &str, what: &str| {
+            let err = cfg(regs).validate().expect_err(&format!("{what} 应被拒"));
+            assert!(
+                err.contains(needle),
+                "{what}：Err 应含 {needle:?}，实际 {err}"
+            );
+            assert!(
+                err.contains("south_pcs") && err.contains("pcs_3zone"),
+                "{what}：文案须可定位（段名 + 块名），实际 {err}"
+            );
+        };
+
+        // 规则 5：块级 `scale: 0.0`（= YAML 漏写 scale 的 serde 缺省）⇒ 拒
+        let mut scale0 = pcs_block();
+        scale0.scale = 0.0;
+        reject(vec![scale0], "须显式 scale>0", "块级 scale=0.0");
+        // 规则 5：点级显式 `scale: 0.0`（不被块级掩盖）⇒ 拒
+        let mut pt0 = pcs_block();
+        pt0.points[1].scale = Some(0.0);
+        reject(vec![pt0], "点 at=7", "点级 scale=0.0");
+
+        // 规则 11：`points` 未覆盖满 `count`（76 寄存器只声明 6 点）⇒ 拒（原 fixture 的形态）
+        let mut unanchored = pcs_block();
+        unanchored.points = vec![pt(1, 6)];
+        reject(
+            vec![unanchored],
+            "首尾锚定",
+            "points 未锚定（末末端 ≠ count）",
+        );
+
+        // 规则 12：位块位数超上限（2001 > MAX_DISCRETE_BITS=2000）⇒ 拒
+        let bits = RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 0,
+            func: RegFunc::Discrete,
+            format: RegFormat::Uint16,
+            scale: 1.0,
+            count: 2001,
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        };
+        reject(vec![bits], "超位块上限", "discrete count=2001");
+
+        // 规则 14：同 func 空间跨块区间重叠 ⇒ 拒
+        let mut overlap = pcs_block();
+        overlap.addr = 1050; // 与 pcs_3zone（1000..1076）重叠
+        reject(vec![pcs_block(), overlap], "寄存器区间重叠", "跨块区间重叠");
+
+        // 规则 19：无 `points` 块的 `count` 非 format 宽度整数倍 ⇒ 拒
+        let wide = RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 1000,
+            func: RegFunc::Input,
+            format: RegFormat::Int32Scaled,
+            scale: 0.1,
+            count: 3, // 3 % 2 != 0
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        };
+        reject(vec![wide], "整数倍", "count 非宽度整数倍");
+    }
+
+    /// **规则 10（点名唯一）在 `south_pcs` 段的常驻锚**（2026-09-26 质量评审 Important #1）。
+    ///
+    /// 此前本段只接线 `points::expand` + 块级规则，而 `expand` **只查地址重叠、不查点名**
+    /// ⇒ "同名异址"两点静默通过、生成两个同名遥测键、**值互相覆盖**；而本段的消费侧
+    /// （`uplink` 的 `class_ab(role, &p.metric)` 与遥测键）**正是按点名走** ⇒ 与刚修掉的
+    /// 规则 5 同属"静默形态"。判据是**纯 `metrics` 去重、与 `role` 无关**（站级也在汇聚
+    /// 阶段判），故两处共用 [`check_metric_uniqueness`]。
+    ///
+    /// **本用例的判别力**：修复（接线规则 10）**前必绿**、修复**后必红** —— 故**常驻**，
+    /// 不作一次性探针（活体对照见提交说明）。
+    #[test]
+    fn south_pcs_validate_rejects_duplicate_metric_names() {
+        let cfg = |regs: Vec<RegBlockConf>| SouthPcsConfig {
+            enabled: true,
+            regs,
+            ..SouthPcsConfig::default()
+        };
+        let named = |at: u16, name: &str| PointConf {
+            name: Some(name.into()),
+            ..pt(at, 1)
+        };
+        let reject = |regs: Vec<RegBlockConf>, needle: &str, what: &str| {
+            let err = cfg(regs).validate().expect_err(&format!("{what} 应被拒"));
+            assert!(
+                err.contains(needle) && err.contains("south_pcs"),
+                "{what}：Err 应含 {needle:?}（且带段名），实际 {err}"
+            );
+        };
+
+        // ① 块内：显式 `name` 撞**自动位置点名**（评审给的原形态：`at: 1` 显式命名
+        //    `pcs_3zone_2`，`at: 2` 的位置点名恰也是 `pcs_3zone_2`）。
+        //    `at: 1`(1 槽) + `at: 2`(75 槽) = 76 ⇒ 首尾锚定亦满足（只让规则 10 能拒）
+        let mut in_block = pcs_block();
+        in_block.points = vec![named(1, "pcs_3zone_2"), pt(2, 75)];
+        reject(vec![in_block], "点名重复: pcs_3zone_2", "块内同名异址");
+
+        // ② 跨块：块 a 的**位置点名**恰为块 b **显式声明**的 `name`（两块各自地址不重叠、
+        //    各自锚定覆盖满窗口 ⇒ 修复前必然绿）
+        let blk = |name: &str, addr: u16, count: u16, points: Vec<PointConf>| RegBlockConf {
+            name: name.into(),
+            addr,
+            count,
+            points,
+            ..pcs_block()
+        };
+        reject(
+            vec![
+                blk("blk_a", 1000, 2, vec![pt(1, 2)]), // → blk_a_1 / blk_a_2
+                blk("blk_b", 1010, 1, vec![named(1, "blk_a_1")]), // 撞块 a 的首个位置点名
+            ],
+            "点名重复: blk_a_1",
+            "跨块同名异址",
+        );
+
+        // ③ 反向：两块的点名**互不相同** ⇒ 规则 10 本身放行（证明 ② 的拒绝来自"重复"，
+        //    不是"跨块"本身）。
+        //
+        //    ⚠️ **规则 P-5（2026-09-26）起本反向对照不再走 `validate`**：`validate` 现已要求
+        //    `regs` **恰 1 块**（采集循环只读首块）⇒ 任何多块配置都会**先**被 P-5 拒，
+        //    无法再用 `validate() == Ok(())` 表达这个反向形态。故**下沉到规则函数本身** ——
+        //    判据（"唯一命名 ⇒ 放行"）一字未变，只换了调用面（② 仍在位，仍由 `validate` 拒）。
+        assert_eq!(
+            check_metric_uniqueness(
+                "south_pcs: ",
+                &[
+                    "blk_a_1".to_string(),
+                    "blk_a_2".to_string(),
+                    "blk_b_1".to_string(),
+                ]
+            ),
+            Ok(()),
+            "两块各自唯一命名 ⇒ 规则 10 应放行"
+        );
+    }
+
+    /// **规则 P-5 的常驻锚**（2026-09-26 质量评审 Important）：块基址/窗口与 `regs::REG_*`
+    /// **绝对地址**常量的隐式耦合，在配置期 fail-closed 拦下。
+    ///
+    /// **判别力**：三条形态在**修复前全部绿**（旧 `validate` 只看点级/块级结构，与"快照按
+    /// 绝对地址取数"无关）⇒ 每条断言在删掉对应校验后**必红**（探针实测见提交说明）。
+    /// 失效现象（三条共同的后果）：总线读成功 ⇒ `bad=0`、`connected=true`、**无任何日志**，
+    /// 而快照五字段全 `None` 且 `valid == true` ⇒ "PCS 在线、点表有值，但 SOC/三相/运行态恒空"。
+    #[test]
+    fn south_pcs_validate_rejects_block_base_outside_snapshot_addressing() {
+        let cfg = |regs: Vec<RegBlockConf>| SouthPcsConfig {
+            enabled: true,
+            regs,
+            ..SouthPcsConfig::default()
+        };
+        let reject = |regs: Vec<RegBlockConf>, needle: &str, what: &str| {
+            let err = cfg(regs)
+                .validate()
+                .expect_err(&format!("{what} 应被拒（P-5）"));
+            assert!(
+                err.contains(needle) && err.contains("south_pcs"),
+                "{what}：Err 应含 {needle:?}（且带段名），实际 {err}"
+            );
+        };
+
+        // ① 多块 = 死配置（采集循环只读 `regs.first()`，第 2 块起永不执行）
+        let mut b2 = pcs_block();
+        b2.name = "pcs_3zone_b".into();
+        b2.addr = 1100; // 不与 1000..1076 重叠 ⇒ 旧校验全绿，只有 P-5 能拒
+        b2.count = 8;
+        b2.points = vec![pt(1, 8)];
+        reject(vec![pcs_block(), b2], "须恰 1 块", "regs 两块");
+
+        // ② 基址错（点表 `at` 是**块内偏移** ⇒ 规则 11 首尾锚定照样通过；`addr: 2000` 是
+        //    评审给的真实误配形态）：快照按 REG_* 绝对地址取数 ⇒ `at(REG_SOC)` 因 `addr < base`
+        //    恒 `None`。`count` 仍 76 ⇒ 窗口校验也过。
+        let mut wrong_base = pcs_block();
+        wrong_base.addr = 2000;
+        reject(vec![wrong_base], "须 == 1000", "块基址 2000");
+
+        // ③ 窗口太短（基址对但未覆盖到 REG_P_TOTAL=1032）：1000..1003 ⇒ 总有功恒 None
+        let mut short_win = pcs_block();
+        short_win.count = 3;
+        short_win.points = vec![pt(1, 3)];
+        reject(vec![short_win], "未覆盖到 0x0409", "窗口 1000..1003");
+
+        // ④ 边界：恰覆盖到 REG_P_TOTAL（1000..1033，count = 33）⇒ 放行（证明 ③ 拒的是
+        //    "没到 REG_P_TOTAL"而不是"count 太小"本身）
+        let mut just_enough = pcs_block();
+        just_enough.count = 33;
+        just_enough.points = vec![pt(1, 33)];
+        assert_eq!(
+            cfg(vec![just_enough]).validate(),
+            Ok(()),
+            "窗口恰含 REG_P_TOTAL 须放行"
         );
     }
 }

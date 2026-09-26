@@ -198,9 +198,11 @@ impl StartupContext {
     }
 }
 
-/// IEC 104 命令处理器：转发主站控制命令到实时控制模块
+/// IEC 104 命令处理器：转发主站控制命令到实时控制模块（PCS）
 struct StrategyCommandHandler {
-    intercore: Arc<mupc_intercore::IntercoreClient>,
+    /// PCS 通道（`south_pcs.enabled=false` ⇒ `None` ⇒ 主站指令**明确不下发**并告警，
+    /// 不静默吞掉）。
+    pcs: Option<Arc<mupc_southd::pcs::PcsHandle>>,
     /// 安全联锁控制器（io.enabled 时注入；latch 期间抑制主站下发，避免绕过联锁启停 PCS）
     interlock: Option<Arc<crate::interlock::InterlockController>>,
     /// 额定有功上限 (kW)：IEC104 主站外部指令 p_set clamp 用（审查 R1-A1，2026-09-09），
@@ -273,19 +275,32 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
                             p_raw
                         );
                     }
-                    let dual = mupc_intercore::DualParamCommand::new(
-                        p_set,
-                        cmd.k_value.unwrap_or(0.0),
-                        true,
-                        "intelligent",
-                    );
-                    self.intercore.send_dual_param(&dual).await.map_err(|e| {
-                        MupcError::new(
-                            ErrorCode::Unknown,
-                            format!("命令下发失败: {}", e),
-                            "gateway",
-                        )
-                    })?;
+                    if let Some(pcs) = &self.pcs {
+                        let dual = mupc_southd::pcs::PcsDualParam::new(
+                            p_set,
+                            cmd.k_value.unwrap_or(0.0),
+                            true,
+                            "intelligent",
+                        );
+                        pcs.send_dual_param(&dual).await.map_err(|e| {
+                            MupcError::new(
+                                ErrorCode::SendFailed,
+                                format!("PCS 下发失败: {e}"),
+                                "startup",
+                            )
+                        })?;
+                    } else {
+                        // 无 PCS 通道 ⇒ 指令**不可能**到达执行端：如实回失败，不谎报"命令已下发"
+                        tracing::warn!(
+                            "south_pcs.enabled=false ⇒ IEC104 p_set={p_set} 无法下发（无 PCS 通道）"
+                        );
+                        return Ok(mupc_gateway::iec104::command::CommandResponse {
+                            cmd_id: cmd.cmd_id,
+                            success: false,
+                            message: "无 PCS 通道（south_pcs.enabled=false），指令未下发".into(),
+                            timestamp: chrono::Utc::now().timestamp() as u64,
+                        });
+                    }
                 }
             }
             mupc_gateway::iec104::command::CommandType::SwitchControl => {
@@ -315,6 +330,73 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
         let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
         crate::uplink::interrogation_items(&self.latest, &self.points, now_ms)
     }
+}
+
+/// `south_pcs` 段 → 口打开所需的最小 `StationConf`（**仅**给 `Rs485PortBus::open` 用）。
+///
+/// **为什么不直接复用 [`mupc_southd::config::SouthPcsConfig::station_shell`]**：那个函数是
+/// **上云站壳**（`regs` 必须随壳一起走，供点表生成用）；而 `open` 只看**口层**字段
+/// （port/baud_rate/parity），带上 `regs` 只会让"配置 × 上云"两条路径在读取点表时被误接。
+/// 故此处把 `regs` 置空、role 记 `Pcs`（只为日志可读），**且本函数不参与任何配置校验路径**
+/// （P-2/P-3/P-4/P-5 全在 `CoreConfig::validate` 与 `SouthPcsConfig::validate`）。
+///
+/// **口层控制面三项（超时/数据位/停止位）不在这里**：`StationConf` 无对应字段，故单列
+/// [`south_pcs_port_params`] 交给 `open_with_port_params`（Task 10 评审项 2 —— 这三项曾因
+/// 只有站壳路径而**全部不生效**）。
+fn south_pcs_bus_conf(
+    cfg: &mupc_southd::config::SouthPcsConfig,
+) -> mupc_southd::config::StationConf {
+    mupc_southd::config::StationConf {
+        id: "pcs".into(),
+        role: mupc_southd::config::Role::Pcs,
+        port: cfg.port.clone(),
+        protocol: cfg.protocol.clone(),
+        slave: cfg.slave,
+        baud_rate: cfg.baud_rate,
+        parity: cfg.parity,
+        interval_ms: cfg.interval_ms,
+        regs: Vec::new(),
+    }
+}
+
+/// `south_pcs` 段的**口层控制面参数** → [`mupc_southd::port_runtime::PortParams`]
+/// （**生产调用形态的唯一收敛点**）。
+///
+/// 三项的落点：`response_timeout_ms` → `Rs485Device` 的 `Config.timeout_ms`
+/// （迁移前由 `intercore.modbus_rtu.response_timeout_ms` 提供，缺省 200ms ⇒ 若不接线就
+/// 静默变 1000ms，`stop()` 这类安全动作的失败检测随之变慢）；`data_bits`/`stop_bits`
+/// → 同结构体的对应字段。
+///
+/// 回归网：`task10_south_pcs_port_params_read_all_three_control_fields`
+/// （把本函数改成 `PortParams::default()` ⇒ 该用例红）。
+fn south_pcs_port_params(
+    cfg: &mupc_southd::config::SouthPcsConfig,
+) -> mupc_southd::port_runtime::PortParams {
+    mupc_southd::port_runtime::PortParams {
+        timeout_ms: cfg.response_timeout_ms,
+        data_bits: cfg.data_bits,
+        stop_bits: cfg.stop_bits,
+    }
+}
+
+/// MQTT 上送的角色表（**Task 10 第 7 接线点的唯一收敛处**，设计 §9.3 / §13.9）。
+///
+/// 站级段（`south_stations`，5 站）**不含** PCS 站 —— PCS 已按 ADR-016 迁到顶层段
+/// `south_pcs`，其站壳由 [`mupc_southd::config::SouthPcsConfig::station_shell`] 合成
+/// ⇒ 此处**必须**传 `Some(&config.south_pcs)`：退化为 `None` 时
+/// `uplink::plan_stations` 查不到 `"pcs"`，MQTT 遥测/事件载荷的 `role` 会落**空串**
+/// （`roles.get(..).unwrap_or_default()`）——**静默降级**，无日志、无告警。
+///
+/// 回归网：`task10_station_roles_wiring_carries_pcs_role_into_publish_plan`
+/// （把本函数的 `Some` 改成 `None` ⇒ 该用例红；改写前把它改回 `None` 则全绿，
+/// 因为既有用例都是自己带上 `Some` 直接调 `uplink::station_roles`，绕开了本生产调用点）。
+fn mqtt_station_roles(
+    config: &CoreConfig,
+) -> std::sync::Arc<std::collections::HashMap<String, String>> {
+    std::sync::Arc::new(crate::uplink::station_roles(
+        &config.south_stations,
+        Some(&config.south_pcs),
+    ))
 }
 
 /// 创建并打开一个 RS485 南向设备；无硬件（串口不存在）时返回 None
@@ -1261,49 +1343,34 @@ pub async fn initialize_all(
 
     // ── 4. 核间通信 ──
     tracing::info!("[04/14] 初始化核间通信...");
-    // 传输通道由 intercore.transport 决定：modbus_rtu=生产主链路(PCS 真实协议)，
-    // tcp=仿真/联调（sim-bridge 作 TCP 服务端）。未知值启动即报错（M3），避免
-    // 配置手误静默落到仿真通道、生产 PCS 空转不被控。
+    // 传输通道由 intercore.transport 决定：**迁入南向后仅剩 `tcp`（仿真/联调，sim-bridge 作
+    // TCP 服务端）**；PCS 主链路（原 modbus_rtu）已由顶层段 `south_pcs` 承担（下文 4′ 段）。
+    // 未知值/`modbus_rtu` 一律启动即报错（M3），避免配置手误静默落到仿真通道、生产 PCS 空转不被控。
+    //
+    // ⚠️ 本变量在 PCS 迁入南向后**生产路径无消费者**（6 个注入点已全部改持 `PcsHandle`）；
+    // 它只经 `StartupContext.intercore` 移交（该字段现无读取方）。保留 TCP 装配的理由：
+    // ① 保留"核间通道"的演进起点（设计 ADR-014）；② tcp 本就是仿真/联调通道，删掉会让
+    // sim-bridge 侧无从对接。
+    // ⚠️ **本轮（2026-09-26）措辞订正**：原文写"**已登记为技术债**"，但技术债台账
+    // `docs/technical-debt.md` **查无本条**（该说法当时只落在实施计划里）⇒ 现如实指向：
+    // 详见实施计划 §待裁定 **P-2**（`intercore` TCP 装配保留但无消费者），**Task 12 统一
+    // 回写技术债**。本条不是"已闭环"，也不是"已登记"。
+    #[allow(unused_variables)]
     let intercore: Arc<mupc_intercore::IntercoreClient> = match config.intercore.transport.as_str()
     {
-        "modbus_rtu" => {
-            let mb = &config.intercore.modbus_rtu;
-            tracing::info!(
-                "intercore transport = modbus_rtu: {} @{}",
-                mb.serial_port,
-                mb.baud_rate
-            );
-            let transport = Arc::new(mupc_intercore::ModbusRtuTransport::new(
-                mupc_intercore::ModbusRtuSettings {
-                    serial_port: mb.serial_port.clone(),
-                    baud_rate: mb.baud_rate,
-                    data_bits: mb.data_bits,
-                    stop_bits: mb.stop_bits,
-                    parity: mb.parity.clone(),
-                    slave_addr: mb.slave_addr,
-                    response_timeout_ms: mb.response_timeout_ms,
-                    heartbeat_poll_ms: mb.heartbeat_poll_ms,
-                },
-            ));
-            // Modbus 无主动心跳：后台轮询读 PCS 3 区 REG_RUN_STATE(1013) 判在线/离线。
-            // 句柄入 guard（M8）：优雅退出时随其它后台任务一并 abort，而非只靠 runtime drop
-            guard
-                .0
-                .push(tokio::spawn(transport.clone().run_heartbeat_loop()));
-            Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
-        }
         "tcp" => {
             let remote_addr = format!("{}:{}", config.intercore.host, config.intercore.port);
             let transport = Arc::new(mupc_intercore::TcpTransport::new(remote_addr));
-            // N3: 启动回读接收（实时模块 DataUpload 上送 battery_soc → SOC 数据源）
-            transport.spawn_receive();
+            // 原 N3 回读接收（`spawn_receive` → `battery_soc`）已随 intercore 的 PCS 面删除
+            // （Task 11 / 02 设计 §13.9）：SOC 真源现为 `south_stations.battery`。
             Arc::new(mupc_intercore::IntercoreClient::with_transport(transport))
         }
         other => {
             return Err(MupcError::new(
                 ErrorCode::ConfigError,
                 format!(
-                    "intercore.transport='{other}' 非法：仅支持 \"tcp\"（仿真/联调）或 \"modbus_rtu\"（生产 PCS 主链路）"
+                    "intercore.transport='{other}' 非法：仅支持 \"tcp\"（仿真/联调）；\
+                     生产 PCS 主链路已迁至南向，见 south_pcs 段（02 设计 §13）"
                 ),
                 "startup",
             ));
@@ -1382,7 +1449,9 @@ pub async fn initialize_all(
     // ── 8. 策略引擎 ──
     tracing::info!("[08/14] 初始化策略引擎...");
     let mut ai_integrator = mupc_strategy_engine::AiIntegrator::new();
-    ai_integrator.set_intercore_client(intercore.clone());
+    // ⚠️ PCS 通道的注入点**不在这里**：`PcsHandle` 的采集出口是站级同一个 `SouthSink`，
+    // 而 sink 持 `Arc<AiIntegrator>` ⇒ 句柄必然晚于本结构体的 `Arc::new`（Task 10 装配顺序
+    // 约束，详见 `AiIntegrator::set_pcs_client` 的文档）。注入发生在下文 **4′. PCS 装配段**。
     // 南向设备（上行遥测采集共享）
     let pv_device = create_rs485_device("inverter", 0x01, "pv_inverter_001");
     let load_device = create_rs485_device("modbus", 0x02, "load_ctrl_001");
@@ -1482,14 +1551,107 @@ pub async fn initialize_all(
         ),
     ));
 
+    // ── IEC 104 服务器**实例提前构造**（步骤 9 只做 `start()`；Task 10 起**提前到本处**）──
+    // HMI 的装置状态源（`SystemDeviceSource`）与 **PCS 采集出口**（`SouthSink`）都要它，而两者
+    // 都在本行之后装配。实例构造**无 I/O**（只建连接表/通道），提前无副作用（原注释同款理由）。
+    let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+        mupc_gateway::iec104::server::Iec104Config {
+            listen_addr: config.gateway.listen_addr.clone(),
+            listen_port: config.gateway.listen_port,
+            ..Default::default()
+        },
+    ));
+
+    // ── 01 设计 §9.1.8：外设遥测最新值快照（**在此提前构造**；Task 10 起再上移到本处）──
+    //   U-73（12 号设计 §15.1.1）把 `latest_values` 定为外设段（慢拍 D）的**唯一取数面**，
+    //   而外设源必须随 `DisplayDataProvider` 一同装配 ⇒ 快照的构造点须早于 HMI 装配；
+    //   Task 10 起还须早于 **PCS 装配段**（PCS 采集出口即它的写入方之一）。
+    //   **语义不变**：本项仍是 §9.4 序 1 的"第一步构造"，早于其全部读取方
+    //   （HMI 慢拍 D / IEC104 上送驱动器 / 总召 / `SouthSink` 写入方）。
+    //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）。
+    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+        config.south_stations.stale_timeout_s,
+    ));
+
+    // ── 4′. PCS（南向，设计 §13 / ADR-016；PCS 的**完整所有者** = `southd::pcs::PcsHandle`）──
+    //   ⚠️ **位置约束（两条须同时成立）**：① 在 `SouthSink` 构造**之后**（PCS 采集出口与站级
+    //   同源 —— 故 sink 的构造上提到本段，站级调度器下文改为克隆同一 `Arc`）；② 在
+    //   `display.enabled` 装配块**之前**（HMI 的 `DisplayDataProvider`/`SystemDeviceSource`
+    //   要持同一个 `Arc<PcsHandle>`）。sink 无自身可变状态（全是下游依赖的 `Arc` 克隆）⇒
+    //   "一个实例两处用"与"两处各建一个"行为等价，取前者以免下游被注册两次。
+    let south_sink: Arc<SouthSink> = Arc::new(SouthSink::new(
+        ai_integrator.clone(),
+        write_buffer.clone(),
+        storage.events.clone(),
+        alert_feed.clone(),
+        iec104_server.clone(),
+        latest.clone(),
+        // `on_grid_package(pkg)` 契约不含站 id ⇒ 装配期解析 grid 站 id（未配则 None）
+        config.south_stations.grid_station().map(|s| s.id.clone()),
+        grid_aggregator.clone(),
+        agg_tx.clone(),
+    ));
+    let pcs: Option<Arc<mupc_southd::pcs::PcsHandle>> = if config.south_pcs.enabled {
+        tracing::info!(
+            "[04′] 初始化 PCS 通道: {} @{} slave={}（采集周期 {} ms）",
+            config.south_pcs.port,
+            config.south_pcs.baud_rate,
+            config.south_pcs.slave,
+            config.south_pcs.interval_ms
+        );
+        // 口打开：PCS **独占**该口（规则 P-2），故不走站级 `buses` 去重表。
+        // ⚠️ 打开失败 = **拒启动**（与站级"失败口 offline 隔离、不阻断启动"不同）：PCS 是
+        // 安全链的执行端，静默降级为"永远离线"会让联锁停机无原语、AI/策略下发无处可去。
+        let bus: Arc<dyn mupc_southd::port_runtime::StationBus> = {
+            let conf = south_pcs_bus_conf(&config.south_pcs);
+            // 口层控制面三项（超时/数据位/停止位）经 `PortParams` 显式传给口层 —— 它们
+            // **不在** `StationConf` 里（见 `south_pcs_port_params` 文档）；不接线就是死配置。
+            let b = mupc_southd::port_runtime::Rs485PortBus::open_with_port_params(
+                &conf,
+                south_pcs_port_params(&config.south_pcs),
+            )
+            .map_err(|e| {
+                MupcError::new(
+                    ErrorCode::ConfigError,
+                    format!("south_pcs 口 {} 打开失败: {e}", config.south_pcs.port),
+                    "startup",
+                )
+            })?;
+            Arc::new(b)
+        };
+        let h = mupc_southd::pcs::PcsHandle::new(config.south_pcs.clone(), bus, south_sink.clone());
+        // 采集循环句柄入 guard（abort 名单；无停机钩子，与站级采集 task 同范式）
+        guard.0.push(h.spawn_collection_loop());
+        coord.register_service("pcs", ServiceStatus::Running);
+        // 策略引擎持同一句柄（双参数 / 分相下发 / SOC 回落活读）
+        ai_integrator.set_pcs_client(h.clone());
+        Some(h)
+    } else {
+        tracing::info!(
+            "[04′] south_pcs.enabled=false ⇒ 不启用 PCS 通道（行为与迁移前同：无 PCS 主链路）"
+        );
+        None
+    };
+
     // ── S2 §12.4 / Task7：安全联锁控制器（io.enabled 时装配）──
-    // 依赖：intercore(步骤 4) + storage(步骤 3) + alert_feed 均已就绪。GPIO(sysfs) 打开失败由
-    // InterlockController::new 内部 fail-safe（预置 latch，绝不静默无 latch 运行）。disabled 时
-    // 不装配 → 读通道走 `InterlockWiring::Disabled`（未启用部署行为不变）。
+    // 依赖：**PCS 通道(4′ 段)** + storage(步骤 3) + alert_feed 均已就绪（Task 10 起停机原语
+    // 由 `intercore` 改经 `PcsHandle`）。GPIO(sysfs) 打开失败由 `InterlockController::new`
+    // 内部 fail-safe（预置 latch，绝不静默无 latch 运行）。disabled 时不装配 → 读通道走
+    // `InterlockWiring::Disabled`（未启用部署行为不变）。
     let interlock_ctl: Option<Arc<crate::interlock::InterlockController>> = if config.io.enabled {
+        // ⚠️ fail-fast：io.enabled 的全部停机原语（stop / restore_latched / last_run_state /
+        // authorize_restart）都经 `PcsHandle`。`south_pcs.enabled=false` ⇒ **无停机原语**，
+        // 联锁会退化成"能触发却停不了机"的假安全形态 ⇒ 启动即报错，绝不放行。
+        let port: Arc<mupc_southd::pcs::PcsHandle> = pcs.clone().ok_or_else(|| {
+            MupcError::new(
+                ErrorCode::ConfigError,
+                "io.enabled 需要 south_pcs.enabled=true（联锁停机原语经 PcsHandle；无 PCS 通道时停机无执行端）",
+                "startup",
+            )
+        })?;
         let il = Arc::new(crate::interlock::InterlockController::new(
             config.io.clone(),
-            Box::new(intercore.clone()), // Arc<IntercoreClient> → InterlockPort
+            Box::new(port), // Arc<PcsHandle> → InterlockPort
             storage.events.clone(),
             alert_feed.clone(),
         ));
@@ -1549,29 +1711,11 @@ pub async fn initialize_all(
 
     // ── 12-本地显示终端数据提供层（12-显示终端 设计 §4.2 装配点：策略引擎(第8步)+决策循环之后）──
     // config.display.enabled 时：先起 DisplayDataProvider（1s 采集组帧，SOC 取 AiIntegrator 裁决
-    // 快照、三相/run_state 取 intercore），再起 LoopbackHttpPublisher（127.0.0.1 GET 最新帧）。
+    // 快照、三相/run_state 取 **PCS 通道**），再起 LoopbackHttpPublisher（127.0.0.1 GET 最新帧）。
     // 两 handle 都入 guard（优雅退出随其它后台任务 abort）；主进程不 spawn/不管理渲染子进程
     // （渲染生命周期归 systemd，§4.2/§11）。disabled 不装配（warn）。
-    // IEC 104 服务器**实例提前构造**（步骤 9 只做 `start()`）：HMI 的装置状态源要读它的
-    // 链路状态（`Iec104Server::link_state()`，U-59 / L-5），而 HMI 装配在步骤 8 末尾、
-    // 早于步骤 9。实例构造**无 I/O**（只建连接表/通道），提前无副作用。
-    let iec104_server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
-        mupc_gateway::iec104::server::Iec104Config {
-            listen_addr: config.gateway.listen_addr.clone(),
-            listen_port: config.gateway.listen_port,
-            ..Default::default()
-        },
-    ));
-
-    // ── 01 设计 §9.1.8：外设遥测最新值快照（**在此提前构造**）──
-    //   U-73（12 号设计 §15.1.1）把 `latest_values` 定为外设段（慢拍 D）的**唯一取数面**，
-    //   而外设源必须随 `DisplayDataProvider` 一同装配（本函数下方）⇒ 快照的构造点随之
-    //   上移到 HMI 装配**之前**。**语义不变**：本项仍是 §9.4 序 1 的"第一步构造"，
-    //   仍早于其全部读取方（HMI 慢拍 D / IEC104 上送驱动器 / 总召 / `SouthSink` 写入方）。
-    //   `stale_timeout_s` 由配置注入 ⇒ 过期判据单一真源（消费方不得另立门限，LV-3）。
-    let latest = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
-        config.south_stations.stale_timeout_s,
-    ));
+    // （IEC 104 服务器实例与 `latest` 快照已在**上文 PCS 装配段之前**构造 —— PCS 采集出口
+    //   与 HMI 装置状态源都要用它们，见那两处的注释。）
 
     // ── U-73 §15.11 #7 / §15.2.2：消防钢瓶气压取数接缝（EDGE-23 / EX-11）──
     //   在本文件的**HMI 装配之前**建空壳（`attach` 前恒 `None` = "接缝未接线"），
@@ -1587,11 +1731,12 @@ pub async fn initialize_all(
         // （`[10/14]` 现为 OTA 管理器）⇒ 带号会与现行 14 步编号体系冲突（登记见
         // `docs/technical-debt.md` U-38）。
         tracing::info!("初始化本地 HMI 后端（读通道 + 控制通道）...");
-        // §7.3 warn：非 modbus_rtu（tcp 仿真/联调）可看 SOC/通道，三相 1022-1032 将 NotRead
-        if config.intercore.transport != "modbus_rtu" {
+        // §7.3 warn：无 PCS 3 区通道（`south_pcs.enabled=false`）时可看 SOC/通道，三相
+        // 1022-1032 将 NotRead。Task 10：判据真源由 `intercore.transport` 改为 `south_pcs.enabled`
+        // （PCS 迁入南向后它才是"有无 PCS 3 区点表"的唯一真源）。
+        if !config.south_pcs.enabled {
             tracing::warn!(
-                "display.enabled=true 但 intercore.transport={}（非 modbus_rtu）：仿真/联调可看 SOC/通道，三相 1022-1032 将 NotRead（12-显示终端 §7.3）",
-                config.intercore.transport
+                "display.enabled=true 但 south_pcs.enabled=false（无 PCS 通道）：可看 SOC/通道，三相 1022-1032 将 NotRead（12-显示终端 §7.3）"
             );
         }
         // ⚠️ 命名：本变量是**帧共享存储**，与上面的 `latest`（`latest_values` 快照）**不同物**
@@ -1644,16 +1789,18 @@ pub async fn initialize_all(
         );
         let provider = crate::display_host::DisplayDataProvider::new(
             ai_integrator.clone(),
-            intercore.clone(),
+            // 三相/run_state/连接态取数面 = PCS 通道（`south_pcs.enabled=false` ⇒ `None`）
+            pcs.clone(),
             &config.display,
-            config.intercore.transport == "modbus_rtu",
+            // `modbus_transport`（三相缺段读 `Offline` 而非 `NotRead`）的真源 = 有无 PCS 通道
+            config.south_pcs.enabled,
             shared_frame.clone(),
         )
         .with_slow_sources(
             Some(Arc::new(crate::display_host::SystemDeviceSource::new(
-                intercore.clone(),
+                pcs.clone(),
                 ai_integrator.clone(),
-                // IEC 104 链路真源（U-59 / L-5）：实例已在下方提前构造（**尚未** start()，
+                // IEC 104 链路真源（U-59 / L-5）：实例已在上文提前构造（**尚未** start()，
                 // 故此刻读得「未配置」，start() 后自动转「断开/连接中/已连接」）。
                 Some(iec104_server.clone()),
                 process_started_at,
@@ -1778,8 +1925,13 @@ pub async fn initialize_all(
     // `latest` 已在**本地 HMI 装配之前**构造（上文；U-73 慢拍 D 需要同一实例），此处不再重建。
     // §9.4 序 2：上送点表机械生成（`build_uplink_points`），失败 ⇒ **拒启动**（配置/点表
     // 漂移的 fail-fast，与 `validate_south_stations` 同范式，§9.2.1）。
+    // ⚠️ Task 10：**显式传入 PCS 段**（`Some(&config.south_pcs)`）。PCS 迁出站级段后若不喂它，
+    // 72 个 PCS IOA 会**静默**从 IEC104/MQTT 点表消失，且生成期自检不会响（`has_pcs == false`
+    // 时期的期望值恰为 567 = 5 站并集，与"5 站本就无 PCS"的合法形态不可分）——签名扩成
+    // 显式入参就是让**编译器**强制每个调用点表态（设计 §13.9 末要求①②）。
     let uplink_points = Arc::new(
-        mupc_southd::uplink::build_uplink_points(&config.south_stations).map_err(|e| {
+        mupc_southd::uplink::build_uplink_points(&config.south_stations, Some(&config.south_pcs))
+            .map_err(|e| {
             MupcError::new(
                 ErrorCode::Unknown,
                 format!("上送点表生成失败（拒启动）: {e}"),
@@ -1824,7 +1976,7 @@ pub async fn initialize_all(
         config.gateway.listen_port
     );
     let cmd_handler = Arc::new(StrategyCommandHandler {
-        intercore: intercore.clone(),
+        pcs: pcs.clone(),
         interlock: interlock_ctl.clone(),
         p_max_kw,
         // §9.4 序 6：总召 / 连接初始快照数据源（与上送驱动器同一份快照 + 点表）
@@ -1886,22 +2038,8 @@ pub async fn initialize_all(
         for h in mupc_southd::config::block_interval_hints(&config.south_stations) {
             tracing::debug!("{}", h);
         }
-        let sink = Arc::new(SouthSink::new(
-            ai_integrator.clone(),
-            write_buffer.clone(),
-            storage.events.clone(),
-            alert_feed.clone(),
-            // 审查 R2-A2：meter_grid 真值上送 IEC104 的接收句柄（已在步骤 9 创建）
-            iec104_server.clone(),
-            // 01 设计 §9.1.8：最新值快照句柄（写入方 = 本 sink）
-            latest.clone(),
-            // `on_grid_package(pkg)` 契约不含站 id ⇒ 装配期解析 grid 站 id（未配则 None）
-            config.south_stations.grid_station().map(|s| s.id.clone()),
-            // U-69（03 设计 §9.2.3）：聚合器实例（与上面 tick 任务共用同一个 Arc）
-            grid_aggregator.clone(),
-            // T15/T16 遗留③：聚合行**投递通道**（消费端 = 上面已注册的 grid_agg_timer）
-            agg_tx.clone(),
-        ));
+        // sink 与 PCS 通道**共用同一实例**（构造已上提到 PCS 装配段；见那处的注释）
+        let sink = south_sink.clone();
         // 每口 open 一次 Rs485PortBus：按 port 去重。open 失败口不入 map → 该口全站走
         // offline 事件隔离（§10.7 不阻断启动）。口单 poller、站级隔离由 scheduler 负责。
         let mut buses: HashMap<String, Arc<dyn mupc_southd::port_runtime::StationBus>> =
@@ -2122,7 +2260,10 @@ pub async fn initialize_all(
     // 现在：① 客户端配置**逐字段来自 `config.mqtt_bridge.north`**（C-12 分层映射）；
     // ② 缺省 `enabled=false` ⇒ `plan_mqtt_launch` 返回全 `None` ⇒ **一行连接代码都不执行**；
     // ③ `NorthMqttConfig::default()` 的假域名/dummy 证书已改空串（C-11）。
-    let mqtt_roles = Arc::new(crate::uplink::station_roles(&config.south_stations));
+    // 角色表须同时含 `south_pcs` 段合成的 `pcs` 站（否则 MQTT 载荷 `role` 落空串）
+    // ⇒ 收敛到 `mqtt_station_roles`（**唯一接线点**，回归网见该函数文档与
+    // `task10_station_roles_wiring_carries_pcs_role_into_publish_plan`）。
+    let mqtt_roles = mqtt_station_roles(config);
     let mqtt_outcome = crate::uplink::assemble_mqtt_bridge(
         &config.mqtt_bridge,
         latest.clone(),
@@ -3409,5 +3550,192 @@ stations:
         );
         assert_eq!(q.cylinder_configured("bms"), None, "接线后非消防站仍不可得");
         assert_eq!(q.cylinder_configured("no-such-station"), None);
+    }
+
+    /// **Task 10 第 7 接线点的回归网**（规格评审 2026-09-26 指出：把 `mqtt_station_roles`
+    /// 里的 `Some(&config.south_pcs)` 改回 `None`，**全部既有用例仍绿** —— 因为既有用例
+    /// （`core-bin/src/uplink.rs` 的 `roles_of`）自己带上 `Some` 直接调
+    /// `uplink::station_roles`，**绕开了生产调用点**）。
+    ///
+    /// 后果（不接线时）：MQTT 载荷里 pcs 站的 `role` 落**空串**，且无用例会响。
+    ///
+    /// 两条断言缺一不可：
+    /// ① **生产形态**（`mqtt_station_roles(&cfg)` = `initialize_all` 的调用形态）下，`pcs` 站
+    ///    在发布计划里的 `role == "pcs"` —— `StationPlan.role` 正是遥测载荷 `role` 的来源
+    ///    （`uplink.rs` 的 `TelemetryPayload { role: st.role }`）；
+    /// ② `station_roles(.., None)` 与 `(.., Some(&pcs))` **确实不同**、且退化后落空串
+    ///    —— 钉住"传 None 会退化"这件事本身（这是防"接线点被改回 None 仍绿"的关键）。
+    ///
+    /// **改什么会让本条变红**：① `mqtt_station_roles` 的 `Some(..)` → `None` ⇒ 运行时断言红；
+    /// ② 把生产段改成**绕过** `mqtt_station_roles` 直接调 `crate::uplink::station_roles`
+    /// （哪怕硬编码 `Some(..)`）⇒ 源文本断言红（否则"换个地方退化成 None"会绕开 ①）。
+    #[test]
+    fn task10_station_roles_wiring_carries_pcs_role_into_publish_plan() {
+        // 与 `core-bin/src/uplink.rs` 用例**同一份 fixture**（不新建第二份点表真源）
+        const REF_STATIONS: &str =
+            include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
+        const REF_PCS: &str = include_str!("../../mupc-southd/tests/fixtures/south_pcs_s3b2.yaml");
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            south_stations: mupc_southd::config::SouthStationsConfig,
+        }
+
+        // ⓪ 生产段接线形状：角色表**只能**经 `mqtt_station_roles` 收敛（堵"绕过包装函数"的改法）
+        let production = production_src();
+        assert!(
+            production.contains("let mqtt_roles = mqtt_station_roles(config);"),
+            "生产段必须以 `mqtt_station_roles(config)` 收敛角色表（不得在装配点就地调 station_roles）"
+        );
+        assert_eq!(
+            production.matches("crate::uplink::station_roles(").count(),
+            1,
+            "生产段只允许 `mqtt_station_roles` 内部调用一次 `station_roles` —— 在装配点**再就地**\
+             调一次（比如退化成 None）会把 `Some/None` 的选择挪出被用例钉住的收敛点"
+        );
+
+        let mut cfg: CoreConfig = serde_yaml::from_str(MIN_YAML).expect("min yaml 必须可解析");
+        cfg.south_stations = serde_yaml::from_str::<Wrapper>(REF_STATIONS)
+            .expect("站级段解析失败")
+            .south_stations;
+        cfg.south_pcs = serde_yaml::from_str(REF_PCS).expect("south_pcs 段解析失败");
+        assert!(cfg.south_pcs.enabled, "参考 PCS 段须 enabled");
+
+        let points =
+            mupc_southd::uplink::build_uplink_points(&cfg.south_stations, Some(&cfg.south_pcs))
+                .expect("参考点表（5 站 + south_pcs）必须可生成");
+
+        // ① 生产形态 → 发布计划里 pcs 站的 role（= 载荷 role 的来源）
+        let plan = crate::uplink::plan_stations(&points, &mqtt_station_roles(&cfg));
+        let pcs = plan
+            .iter()
+            .find(|s| s.id == "pcs")
+            .expect("pcs 站必须在发布计划里（south_pcs.enabled=true）");
+        assert_eq!(
+            pcs.role, "pcs",
+            "生产装配形态下 pcs 站载荷 role 必须是 \"pcs\"（空串 = 静默降级）"
+        );
+
+        // ② 传 None 会退化（证明"改回 None 仍绿"是**缺陷**，而非两种写法等价）
+        let with_none = crate::uplink::station_roles(&cfg.south_stations, None);
+        let with_pcs = crate::uplink::station_roles(&cfg.south_stations, Some(&cfg.south_pcs));
+        assert_ne!(
+            with_none, with_pcs,
+            "传 None 必须与传 Some 不同（否则本条断言无判别力）"
+        );
+        assert!(
+            !with_none.contains_key("pcs"),
+            "传 None ⇒ 角色表里查无 pcs 站（`unwrap_or_default` 落空串的成因）"
+        );
+        let plan_none = crate::uplink::plan_stations(&points, &with_none);
+        assert_eq!(
+            plan_none
+                .iter()
+                .find(|s| s.id == "pcs")
+                .expect("pcs 站仍在计划里，只是 role 查不到")
+                .role,
+            "",
+            "传 None ⇒ pcs 站载荷 role 落空串（正是评审指出的静默退化形态）"
+        );
+    }
+
+    /// **Task 10 评审项 2 的回归网**：`south_pcs` 的 `response_timeout_ms` / `data_bits` /
+    /// `stop_bits` 是 `StationConf` **无落点**的控制面三项，`PcsHandle` 也不读它们
+    /// ⇒ 若不显式接线到口层，就是**死配置**（YAML 写 `response_timeout_ms: 200`，
+    /// 实际 `Rs485Device` 取 `Config::default()` 的 **1000ms**，`stop()` 这类安全动作的
+    /// 失败检测随之变慢）。
+    ///
+    /// 本用例钉住**生产形态的收敛点** `south_pcs_port_params`（口层侧的透传由
+    /// `mupc-southd` 的 `bus_config_passes_port_params_through` 钉住 ⇒ 两段合起来才是全链）。
+    ///
+    /// **改什么会让本条变红**：把 `south_pcs_port_params` 改成返回 `PortParams::default()`
+    /// （或任一字段硬编码）⇒ 本条红；把装配点的调用改成绕过它（就地 `PortParams::default()`、
+    /// 或退回 `Rs485PortBus::open`）⇒ 源文本断言红。
+    #[test]
+    fn task10_south_pcs_port_params_read_all_three_control_fields() {
+        // ⓪ 生产段接线形状：PCS 口必须以 `open_with_port_params` + `south_pcs_port_params` 打开
+        let production = production_src();
+        assert!(
+            production.contains("Rs485PortBus::open_with_port_params("),
+            "PCS 口必须走 `open_with_port_params`（退回 `Rs485PortBus::open` ⇒ 三项又成死配置）"
+        );
+        assert!(
+            production.contains("south_pcs_port_params(&config.south_pcs)"),
+            "口层参数的唯一来源必须是 `south_pcs_port_params(&config.south_pcs)`（不得就地取默认）"
+        );
+
+        let pcs = mupc_southd::config::SouthPcsConfig::default();
+        // 段缺省形态：`response_timeout_ms=200`（原 `intercore.modbus_rtu` 默认值）/
+        // `data_bits=8` / `stop_bits=1` ⇒ 三项都取自本段（**不得**是口层默认 1000ms）
+        let d = south_pcs_port_params(&pcs);
+        assert_eq!(
+            (d.timeout_ms, d.data_bits, d.stop_bits),
+            (200, 8, 1),
+            "段缺省必须取自 `south_pcs` 段（尤其 timeout：口层默认是 1000ms，取错即回落）"
+        );
+        assert_ne!(
+            d.timeout_ms,
+            mupc_southd::port_runtime::PortParams::default().timeout_ms,
+            "判别力锚：`south_pcs` 段默认 200ms **不同于**口层默认 1000ms ⇒ 本条不可能是\"两边都取默认\"的巧合"
+        );
+        // 三个字段各改成一个**非默认**值（注意 timeout 取 350 而非 200：200 恰是段默认值，
+        // 用它无法区分"真读字段"与"写死段默认"）⇒ 改配置后生效路径上的取值必须随动
+        let mut pcs = pcs;
+        pcs.response_timeout_ms = 350;
+        pcs.data_bits = 7;
+        pcs.stop_bits = 2;
+        let pp = south_pcs_port_params(&pcs);
+        assert_eq!(
+            pp.timeout_ms, 350,
+            "response_timeout_ms 必须透传（不得回落 `Config::default()` 的 1000ms）"
+        );
+        assert_eq!(pp.data_bits, 7, "data_bits 必须透传（不得静默用默认 8）");
+        assert_eq!(pp.stop_bits, 2, "stop_bits 必须透传（不得静默用默认 1）");
+    }
+
+    /// **Task 11 的 fail-fast 常驻锚**（Task 12 补；此前**零自动化覆盖**）。
+    ///
+    /// 被钉住的契约：`io.enabled && !south_pcs.enabled` ⇒ **拒启动**（`ok_or_else` 映射为
+    /// `MupcError`，**不是** `unwrap` 的 panic、也不是静默降级）。理由：`io.enabled` 的全部
+    /// 停机原语（stop / restore_latched / last_run_state / authorize_restart）都经 `PcsHandle`，
+    /// 无 PCS 通道时联锁会退化成"能触发却停不了机"的**假安全**形态。
+    ///
+    /// **为什么用源文本静态断言**：`initialize_all` 需 DB / 串口 / sysfs 真环境，本机单测起不来
+    /// （与 `ota_manager_is_still_constructed_and_registered` / `telemetry_buffer_timer_and_shutdown_flush_are_wired`
+    /// 同款手法）；而本节要证的恰恰是"装配源码里这条拒启动还在、且走的是**可失败**路径"。
+    /// ⚠️ **局限**：它只证装配形态，不证运行期返回值 —— 运行期需真环境，落在真机验收清单
+    /// （technical-debt §8.7）。
+    ///
+    /// **改什么会让本条变红**：① 把 `.ok_or_else(..)` 改成 `.unwrap()`（⇒ 无 PCS 通道时 panic
+    /// 而非启动报错）或任何兜底写法（`unwrap_or_default` / `?` 吞错）；② 删掉该分支或抹掉
+    /// 文案要点 `south_pcs.enabled=true`；③ 上云/角色表的 PCS 段接线退化（去掉
+    /// `Some(&config.south_pcs)`）⇒ 后半段红。
+    #[test]
+    fn task11_interlock_fail_fast_and_pcs_uplink_wiring_are_pinned() {
+        let production = production_src();
+        // ① 联锁装配以 `io.enabled` 为门（否则 fail-fast 的触发条件都不存在）
+        assert!(
+            production.contains("if config.io.enabled {"),
+            "联锁装配必须以 `config.io.enabled` 为门（否则本条钉的 fail-fast 触发条件都不存在）"
+        );
+        // ① 取 PCS 通道必须 fallible：`ok_or_else`（拒启动），不得 `unwrap()`（panic）
+        assert!(
+            production.contains("pcs.clone().ok_or_else(|| {"),
+            "io.enabled 的停机原语须经 `PcsHandle`，取通道必须 fallible（`ok_or_else`）；\
+             改成 `.unwrap()` = 无 PCS 时 panic 而非拒启动；改成兜底 = 假安全"
+        );
+        assert!(
+            production.contains("io.enabled 需要 south_pcs.enabled=true"),
+            "fail-fast 文案必须点明前提 `south_pcs.enabled=true`（运行期排障的唯一线索）"
+        );
+        // ② 上云点表确实显式收 PCS 段（迁移后 72 个 IOA 不得静默消失）
+        assert!(
+            production
+                .contains("build_uplink_points(&config.south_stations, Some(&config.south_pcs))"),
+            "上送点表必须显式收 PCS 段（`Some(&config.south_pcs)`）—— 退化为 None ⇒ 72 个 IOA 静默消失"
+        );
+        assert!(
+            production.contains("let mqtt_roles = mqtt_station_roles(config);"),
+            "MQTT 角色表必须经 `mqtt_station_roles(config)` 收敛（含 PCS 段合成的 pcs 站，否则 role 落空串）"
+        );
     }
 }
