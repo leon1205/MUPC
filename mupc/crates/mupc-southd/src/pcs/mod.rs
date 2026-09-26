@@ -67,7 +67,11 @@ pub struct ThreePhaseRead {
     pub p_total: Option<f64>,
 }
 
-pub struct PcsInner {
+/// 私有共享态（`PcsHandle` 的内部）。`pub(crate)` 而非 `pub`：本类型**可达但不可构造**
+/// （无 `pub` 构造函数，`PcsHandle::inner` 字段私有），全仓仅在**本文件内**被引用
+/// （`PcsHandle::inner` 字段类型 + `PcsHandle::new` 构造）；对外契约是 [`PcsHandle`]
+/// 与 [`PcsSnapshot`]，不需要把内部态暴露到 crate 外。
+pub(crate) struct PcsInner {
     cfg: SouthPcsConfig,
     bus: Arc<dyn StationBus>,
     /// **采集与控制共用的唯一一把锁**（设计 §13.3/§13.4）。入口持锁使整条控制序列
@@ -194,7 +198,9 @@ impl PcsHandle {
                      交由联锁流程周期重试",
                     e
                 );
-                Err(format!("PCS 停机写 500=0 失败: {e}"))
+                // 文案：`BusError::Write` 的 Display 已含 slave+地址+线上值+原因，再写"失败"
+                // 会成"失败: …失败"三连；此处只给结论（停机未确认）+ 包装错误原文。
+                Err(format!("PCS 停机写 500=0 未确认: {e}"))
             }
         }
     }
@@ -233,6 +239,11 @@ impl PcsHandle {
     }
 
     /// 最新 `RUN_STATE(1013)`（**同步** getter，读采集快照）。
+    ///
+    /// ⚠️ 本方法**当前恒返回 `None`**：快照由采集循环（Task 8）写入，消费者在 Task 10
+    /// 接线（经适配器供 DO1/联锁）—— 在 Task 8 落地前 `PcsSnapshot::valid` 恒 `false`。
+    /// 故"值为 `None`"**不是采集故障**，别按"值不对"去查采集侧。
+    /// 保持 `pub`：Task 10 在**另一个 crate** 经适配器调用。
     pub fn last_run_state(&self) -> Option<u16> {
         let s = self
             .inner
@@ -265,6 +276,21 @@ impl PcsHandle {
 
     /// 下发台区储能分相 P/Q：写 `REG_MODE=2` → `ensure_started` → 写 1006-1011
     /// （逐相 `clamp ±25`，与迁移前 `clamp_phase` 同源）。
+    ///
+    /// ⚠️ **写序偏离原文（登记，经评审判定不回退）**：本实现逐相**交错**写
+    /// `P_i → Q_i`（线上序 1006,1009,1007,1010,1008,1011）；原文
+    /// `intercore::transport::modbus::send_tai_command`（约 :649-660）是**分组**写
+    /// （P 三相 1006-1008 → Q 三相 1009-1011）。正常完成时末态相同 ⇒ **非功能回归**；
+    /// 差异只在**中断残留态** —— 6 次 FC06 是独立事务，中途超时/CRC/异常真实可发生：
+    ///
+    /// - 原文中断：三相都有**新 P**、仅 A 相有新 Q ⇒ B/C = 新有功 + 旧无功
+    ///   （**非预期功率因数**）
+    /// - 交错中断：A 相完整更新、B/C 保持**上一周期自洽的 (P,Q) 对**
+    ///
+    /// 交错残留态的相位自洽优先 ⇒ **保留交错**。此偏离此前既未登记也无覆盖（两个方向的
+    /// 写序都无法被任何探针判红）⇒ 现用
+    /// `send_tai_command_writes_phase_regs_clamped_and_interleaved` 的写序断言钉住。
+    /// 若将来要改回分组写序，须同时改该用例并复核上面的残留态论证。
     pub async fn send_tai_command(
         &self,
         p: [f64; 3],
@@ -459,6 +485,14 @@ mod control_tests {
     ///
     /// 钩子在 `inner.read_input` **返回之后**触发 —— 即"读已完成、写尚未发出"，正是 I-4
     /// 复查要拦的那个窗口；一次性（`take()`）避免多条读路径重复触发。
+    ///
+    /// ⚠️ **使用约束（钩子内不得取锁）**：本装饰器的钩子在**调用方仍持有
+    /// `PcsInner::lock` 期间**执行（`send_*` 持总线锁跑完整条序列，`read_input` 只是其中
+    /// 一步）。当前成立的前提是钩子只调 `restore_interlock_latched`（**不取总线锁**的纯
+    /// 内存状态写入）。**一旦钩子内走任何取锁路径**（尤其调用会取 `PcsInner::lock` 的
+    /// `PcsHandle` 方法，如 `stop()` / `send_*` / `ensure_*`），`#[tokio::test]` 默认
+    /// current-thread 且**无超时** ⇒ 自锁**挂死**（不是失败、不是 panic）—— 排障时别往
+    /// 逻辑断言上找。
     struct LatchOnReadBus {
         inner: Arc<MockBus>,
         on_input: std::sync::Mutex<Option<Box<dyn FnOnce() -> PinnedFuture + Send>>>,
@@ -697,6 +731,103 @@ mod control_tests {
             bus.inner.write_call_count(1, 500),
             0,
             "I-4：写前复查发现 latch 置位必须放弃启动（不得写 500）"
+        );
+    }
+
+    /// 正向断言（质量评审 Important）：`send_dual_param` 的功率寄存器写此前**零正向覆盖**
+    /// —— grep 实测 `1000`(REG_MODE)/`1001`/`1002` 在测试里一次都没出现过（只有生产代码
+    /// 引用）⇒ 模式字写错、设定值写错、乃至整条写序消失都不会红。
+    ///
+    /// 本用例钉住**整条写序**（值 + 先后）。判据值一律**同源编码** `to_pcs_reg`（含高/低 8 位
+    /// 互换）：`to_pcs_reg(0.0)` = 0x0000、`to_pcs_reg(10.0)` = 0x0A00 —— **不是字面量**。
+    #[tokio::test]
+    async fn send_dual_param_writes_power_regs_in_order() {
+        let bus = Arc::new(MockBus::new());
+        // 前置：S-4 守卫会先 FC04 读 RUN_STATE(1013)；造"待机"使守卫放行（否则落 StoppedGuard）
+        bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let h = handle(bus.clone());
+        h.send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
+            .await
+            .unwrap();
+        assert_eq!(
+            bus.write_calls.lock().unwrap().clone(),
+            vec![
+                // ① 首条指令必写模式字（`mode` 初值 0xFF 哨兵 ⇒ 缓存不可能命中）⇒ 恒功率 0
+                (1, regs::REG_MODE, to_pcs_reg(regs::MODE_CONST_POWER as f64)),
+                // ② 首条指令必写启停 ⇒ 运行
+                (1, regs::REG_START_STOP, to_pcs_reg(1.0)),
+                // ③ 恒功率有功设定 = p_ref（`k_droop`/`ai_ready`/`strategy_mode` 不入 PCS 点表）
+                (1, regs::REG_CONST_P_SET, to_pcs_reg(10.0)),
+                // ④ 恒功率无功设定恒 0（PCS 恒功率无下垂）
+                (1, regs::REG_CONST_Q_SET, to_pcs_reg(0.0)),
+            ],
+            "恒功率写序与线上字（全部同源编码 to_pcs_reg，含字节互换）"
+        );
+    }
+
+    /// 正向断言（质量评审 Important）：`send_tai_command` 此前**连快乐路径都没有**
+    /// （原文也只从 latch 拒绝用例里碰过一次）⇒ `REG_MODE` 的分相写、`1006-1011` 六次写、
+    /// `clamp_phase` 接线**全部零覆盖**。本用例钉住三者 + **写序**。
+    ///
+    /// 越界构造：`p = [30, -30, 0]` ⇒ 1006/1007/1008 的**线上字**须为
+    /// `to_pcs_reg(±25)` / `to_pcs_reg(0)`（钳位发生在编码前）。
+    ///
+    /// ⚠️ 附带作用是 §2 的**可判红锚点**：`send_tai_command` 的写序是逐相**交错**
+    /// （`P_i → Q_i`），与原文（P 三相后 Q 三相）不同（理由见该方法的 doc 注释）——
+    /// 改回分组写序 ⇒ 本用例的写序专锚必红（判据是"P/Q 逐相配对相邻"而非"P_i 在 Q_i 之前"，
+    /// 后者**判不出**分组，见 ① 处注释；该锚排在值断言之前，正是为了能单独观测）。
+    #[tokio::test]
+    async fn send_tai_command_writes_phase_regs_clamped_and_interleaved() {
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let h = handle(bus.clone());
+        h.send_tai_command([30.0, -30.0, 0.0], [1.0, -2.0, 3.0], "fallback")
+            .await
+            .unwrap();
+
+        let writes = bus.write_calls.lock().unwrap().clone();
+        // ① 写序专锚：逐相**配对且相邻**（每相的 P 紧跟其后就是同相 Q，A→B→C），而非原文的
+        //    "P 三相后 Q 三相"。置于值断言**之前**，让两条断言各有**独立**判别力：值改坏
+        //    （如 clamp 拿掉）由 ② 抓（① 不受影响），顺序改回分组由本条抓。
+        //
+        //    ⚠️ 判据**不能**写成 `pos(P_i) < pos(Q_i)`（评审原建议的"1006 出现在 1009 之前"）：
+        //    分组写序（1006,1007,1008,1009,1010,1011）**同样**满足它（所有 P 都在所有 Q 之前）
+        //    ⇒ 那条断言对"交错 vs 分组"**零判别力**。实测已证：改成分组写序时它仍绿，只有 ②
+        //    报红。故此处改判**相邻性** `pos(Q_i) == pos(P_i) + 1` —— 分组写序下 Q_A 远在
+        //    P_A 之后 3 位，必红。
+        let pos = |addr: u16| {
+            writes
+                .iter()
+                .position(|&(_, a, _)| a == addr)
+                .unwrap_or_else(|| panic!("写序中缺寄存器 {addr}（写序断言前提不成立）"))
+        };
+        for (ph, p_addr, q_addr) in [
+            ("A", regs::REG_PHASE_P_A, regs::REG_PHASE_Q_A),
+            ("B", regs::REG_PHASE_P_A + 1, regs::REG_PHASE_Q_A + 1),
+            ("C", regs::REG_PHASE_P_A + 2, regs::REG_PHASE_Q_A + 2),
+        ] {
+            assert_eq!(
+                pos(q_addr),
+                pos(p_addr) + 1,
+                "{ph} 相须**逐相配对**：Q({q_addr}) 紧邻其 P({p_addr}) 之后 —— \
+                 原文 intercore 为 P 三相后 Q 三相；偏离理由见 send_tai_command doc。\
+                 （只用 pos(P_i)<pos(Q_i) 判不出分组，故此处判相邻）"
+            );
+        }
+        // ② 整条写序的**值**：模式字（分相 2）→ 启停 → 逐相交错 P/Q（越界已 clamp ±25）
+        assert_eq!(
+            writes,
+            vec![
+                (1, regs::REG_MODE, to_pcs_reg(regs::MODE_PHASE_SPLIT as f64)),
+                (1, regs::REG_START_STOP, to_pcs_reg(1.0)),
+                (1, regs::REG_PHASE_P_A, to_pcs_reg(25.0)), // 30 → clamp 25
+                (1, regs::REG_PHASE_Q_A, to_pcs_reg(1.0)),
+                (1, regs::REG_PHASE_P_A + 1, to_pcs_reg(-25.0)), // -30 → clamp -25
+                (1, regs::REG_PHASE_Q_A + 1, to_pcs_reg(-2.0)),
+                (1, regs::REG_PHASE_P_A + 2, to_pcs_reg(0.0)), // 0 → 原样
+                (1, regs::REG_PHASE_Q_A + 2, to_pcs_reg(3.0)),
+            ],
+            "分相写序（逐相交错）与 clamp 后线上字（同源编码 to_pcs_reg）"
         );
     }
 }
