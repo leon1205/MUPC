@@ -5,5 +5,6 @@
 //! "写与读共用同一总线仲裁"的更强形式。PCS **独占一路 RS485**（`south_pcs` 段）。
 
 pub mod regs;
+pub mod sim;
 
 pub use regs::*;

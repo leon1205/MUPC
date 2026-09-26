@@ -6,6 +6,16 @@ authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# PCS 从站仿真 bin 的依赖开关：联调工具（虚拟串口对 / USB-RS485 回环），
+# **默认不构建** —— 产线 `cargo build -p mupc-southd` 不编它、不拉 tokio-serial。
+# 用法：cargo run -p mupc-southd --features pcs-slave-bin --bin pcs_slave -- <port> [baud] [slave]
+#
+# 为什么不放 [dev-dependencies]：Cargo 的 dev-dependencies **只对 tests / examples /
+# benches 生效，`[[bin]]` 拿不到**（实测 `cargo build --bin pcs_slave` 报
+# `unresolved import tokio_serial`，E0432）⇒ 只能 feature 门控 + optional 依赖。
+pcs-slave-bin = ["dep:tokio-serial"]
+
 [dependencies]
 serde.workspace = true
 tokio.workspace = true
@@ -15,6 +25,14 @@ async-trait = "0.1"
 chrono.workspace = true
 rs485-plugin = { path = "../rs485-plugin" }
 mupc-data-processing = { path = "../data-processing" }
+# 仅 bin/pcs_slave（feature `pcs-slave-bin`）需要；产线构建不引入。
+tokio-serial = { version = "5.4", optional = true }
+
+[[bin]]
+name = "pcs_slave"
+path = "src/bin/pcs_slave.rs"
+# 联调工具不进产线默认构建（与 bin 内 tokio-serial 的可选依赖同一开关）
+required-features = ["pcs-slave-bin"]
 
 [dev-dependencies]
 # YAML 解析仅测试用：lib 不做配置解析（真实解析在 mupc-core-bin）
