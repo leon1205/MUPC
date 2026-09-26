@@ -286,6 +286,10 @@ impl SouthPcsConfig {
     ///   语义 —— 段级 `interval_ms` 已是采集兼心跳周期，单块段不存在"某块提速"的诉求；
     ///   探测到即拒是 fail-closed，否则它是可写出但永不执行的**死配置**）；`baud_rate`
     ///   越界拒（同站级 —— `0` 会静默穿透到 `open()` 才报错）。
+    /// - **控制面值域（2026-09-26 补）**：`response_timeout_ms > 0` / `data_bits ∈ 5..=8` /
+    ///   `stop_bits ∈ 1..=2` —— 前者的落点本就在此；后两者原先**只在口层**
+    ///   `open_with_port_params` 的 fail-closed 守卫，配置期会放行（门禁后移一层）⇒ 补入此处。
+    ///   口层守卫**保留**（纵深防御，判据同源）。
     ///
     /// **另有规则 P-5（2026-09-26）**：`regs` 须恰 1 块、块基址须 == `regs::REG_MODE`、
     /// 窗口须覆盖到 `REG_P_TOTAL` —— 理由（`build_snapshot` 与块基址的隐式耦合、
@@ -314,6 +318,22 @@ impl SouthPcsConfig {
         }
         if self.response_timeout_ms == 0 {
             return Err("south_pcs: response_timeout_ms 须 > 0".into());
+        }
+        // 控制面三项的**值域**（2026-09-26 补）：此前 `data_bits` / `stop_bits` 的越界只在
+        // **口层** `open_with_port_params` 的 fail-closed 守卫里拒（⇒ 门禁点比配置期**后移一层**，
+        // 配置错误要到打开串口时才暴露）。此处补进段内 `validate()`，与段内其它规则**同处**；
+        // **口层守卫保留**（纵深防御，两层判据同源、不冲突）。判据与 `port_runtime.rs` 一致。
+        if !(5..=8).contains(&self.data_bits) {
+            return Err(format!(
+                "south_pcs: data_bits={} 越界（须 5..=8）",
+                self.data_bits
+            ));
+        }
+        if !(1..=2).contains(&self.stop_bits) {
+            return Err(format!(
+                "south_pcs: stop_bits={} 越界（须 1..=2）",
+                self.stop_bits
+            ));
         }
         if self.regs.is_empty() {
             return Err("south_pcs: regs 为空（必填点表 —— 空点表 = 采集恒空转的静默死配）".into());
@@ -403,8 +423,11 @@ impl SouthPcsConfig {
     /// **逐字段**取自本段 ⇒ 上云点数/通道/档位口径与迁移前逐字相同（§13.7 的 72 点）。
     ///
     /// `data_bits` / `stop_bits` / `response_timeout_ms` 是**控制面**参数：`StationConf`
-    /// 无对应落点、采集/上云路径也不消费 ⇒ 不参与合成（不静默丢语义 —— 它们仍由
-    /// `PcsHandle` 从本段直接读）。
+    /// 无对应落点、采集/上云路径也不消费 ⇒ 不参与合成。它们**不经 `PcsHandle`**
+    /// （`PcsHandle` 只吃 `regs` / `interval_ms` / `slave`），实际消费方是**装配层**：
+    /// `mupc-core-bin/src/startup.rs` 的 `south_pcs_port_params(&config.south_pcs)`
+    /// → `Rs485PortBus::open_with_port_params`（口层 `PortParams` ⇒ `Rs485Device`）。
+    /// （订正 2026-09-26：此处曾称三项"仍由 `PcsHandle` 从本段直接读"，该陈述**从未成立**。）
     pub fn station_shell(&self) -> StationConf {
         StationConf {
             id: "pcs".into(),
@@ -3110,6 +3133,29 @@ mod south_pcs_tests {
             },
             "response_timeout_ms 须 > 0",
             "零超时",
+        );
+        // 控制面值域（2026-09-26 补）：`data_bits: 9` 曾**通过**段内 `validate()`、要到口层
+        // `open_with_port_params` 的 fail-closed 守卫才拒（门禁点后移一层）⇒ 此处钉住配置期即拒。
+        // 文案带 `south_pcs` 前缀，故 `needle` 取段名（同时证"指向本段"）。
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                data_bits: 9,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "south_pcs",
+            "data_bits=9（越界）",
+        );
+        reject(
+            SouthPcsConfig {
+                enabled: true,
+                stop_bits: 3,
+                regs: vec![pcs_block()],
+                ..SouthPcsConfig::default()
+            },
+            "south_pcs",
+            "stop_bits=3（越界）",
         );
         // 规则 P-4（点级）：块结构非法由 `points::expand`（与采集同一函数）拒 —— 点越界
         let mut bad_blk = pcs_block();

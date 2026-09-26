@@ -3689,4 +3689,51 @@ stations:
         assert_eq!(pp.data_bits, 7, "data_bits 必须透传（不得静默用默认 8）");
         assert_eq!(pp.stop_bits, 2, "stop_bits 必须透传（不得静默用默认 1）");
     }
+
+    /// **Task 11 的 fail-fast 常驻锚**（Task 12 补；此前**零自动化覆盖**）。
+    ///
+    /// 被钉住的契约：`io.enabled && !south_pcs.enabled` ⇒ **拒启动**（`ok_or_else` 映射为
+    /// `MupcError`，**不是** `unwrap` 的 panic、也不是静默降级）。理由：`io.enabled` 的全部
+    /// 停机原语（stop / restore_latched / last_run_state / authorize_restart）都经 `PcsHandle`，
+    /// 无 PCS 通道时联锁会退化成"能触发却停不了机"的**假安全**形态。
+    ///
+    /// **为什么用源文本静态断言**：`initialize_all` 需 DB / 串口 / sysfs 真环境，本机单测起不来
+    /// （与 `ota_manager_is_still_constructed_and_registered` / `telemetry_buffer_timer_and_shutdown_flush_are_wired`
+    /// 同款手法）；而本节要证的恰恰是"装配源码里这条拒启动还在、且走的是**可失败**路径"。
+    /// ⚠️ **局限**：它只证装配形态，不证运行期返回值 —— 运行期需真环境，落在真机验收清单
+    /// （technical-debt §8.7）。
+    ///
+    /// **改什么会让本条变红**：① 把 `.ok_or_else(..)` 改成 `.unwrap()`（⇒ 无 PCS 通道时 panic
+    /// 而非启动报错）或任何兜底写法（`unwrap_or_default` / `?` 吞错）；② 删掉该分支或抹掉
+    /// 文案要点 `south_pcs.enabled=true`；③ 上云/角色表的 PCS 段接线退化（去掉
+    /// `Some(&config.south_pcs)`）⇒ 后半段红。
+    #[test]
+    fn task11_interlock_fail_fast_and_pcs_uplink_wiring_are_pinned() {
+        let production = production_src();
+        // ① 联锁装配以 `io.enabled` 为门（否则 fail-fast 的触发条件都不存在）
+        assert!(
+            production.contains("if config.io.enabled {"),
+            "联锁装配必须以 `config.io.enabled` 为门（否则本条钉的 fail-fast 触发条件都不存在）"
+        );
+        // ① 取 PCS 通道必须 fallible：`ok_or_else`（拒启动），不得 `unwrap()`（panic）
+        assert!(
+            production.contains("pcs.clone().ok_or_else(|| {"),
+            "io.enabled 的停机原语须经 `PcsHandle`，取通道必须 fallible（`ok_or_else`）；\
+             改成 `.unwrap()` = 无 PCS 时 panic 而非拒启动；改成兜底 = 假安全"
+        );
+        assert!(
+            production.contains("io.enabled 需要 south_pcs.enabled=true"),
+            "fail-fast 文案必须点明前提 `south_pcs.enabled=true`（运行期排障的唯一线索）"
+        );
+        // ② 上云点表确实显式收 PCS 段（迁移后 72 个 IOA 不得静默消失）
+        assert!(
+            production
+                .contains("build_uplink_points(&config.south_stations, Some(&config.south_pcs))"),
+            "上送点表必须显式收 PCS 段（`Some(&config.south_pcs)`）—— 退化为 None ⇒ 72 个 IOA 静默消失"
+        );
+        assert!(
+            production.contains("let mqtt_roles = mqtt_station_roles(config);"),
+            "MQTT 角色表必须经 `mqtt_station_roles(config)` 收敛（含 PCS 段合成的 pcs 站，否则 role 落空串）"
+        );
+    }
 }
