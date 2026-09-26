@@ -286,6 +286,10 @@ impl SouthPcsConfig {
     ///   语义 —— 段级 `interval_ms` 已是采集兼心跳周期，单块段不存在"某块提速"的诉求；
     ///   探测到即拒是 fail-closed，否则它是可写出但永不执行的**死配置**）；`baud_rate`
     ///   越界拒（同站级 —— `0` 会静默穿透到 `open()` 才报错）。
+    ///
+    /// **另有规则 P-5（2026-09-26）**：`regs` 须恰 1 块、块基址须 == `regs::REG_MODE`、
+    /// 窗口须覆盖到 `REG_P_TOTAL` —— 理由（`build_snapshot` 与块基址的隐式耦合、
+    /// 失配时"在线但快照恒空且无日志"）见函数末尾该规则的注释。
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
@@ -352,6 +356,36 @@ impl SouthPcsConfig {
         validate_block_spans(prefix, &self.regs)?;
         // 规则 10（点名唯一）—— 跨块汇聚后判（`expand` 只查地址重叠、不查点名）
         check_metric_uniqueness(prefix, &metrics)?;
+        // 规则 P-5（2026-09-26 质量评审查出）：采集循环（`PcsHandle::tick_once`）只读
+        // `regs.first()`，且 `build_snapshot` 用**块基址 + 偏移**索引、再按 `regs::REG_*`
+        // 的**绝对地址**常量取数 —— 两者是**隐式耦合**：若块的窗口不覆盖 1000..=1032，
+        // 快照五字段会**全为 None 而 `valid` 仍为 true**，且总线读成功 ⇒ `bad=0`、
+        // `connected=true`、**无任何日志**（现象："PCS 在线、点表有值，但 SOC/三相/
+        // 运行态恒空"）。故此处 fail-closed 把该形态挡在配置期。
+        if self.regs.len() != 1 {
+            return Err(format!(
+                "south_pcs: regs 须恰 1 块（采集循环只读首块，多块为死配置），实际 {} 块",
+                self.regs.len()
+            ));
+        }
+        let blk = &self.regs[0];
+        if blk.addr != crate::pcs::regs::REG_MODE {
+            return Err(format!(
+                "south_pcs: regs[0].addr={} 须 == {}（PCS 3 区窗口基址 = 有功模式寄存器；\
+                 快照按 REG_* 绝对地址取数，基址不符会让 SOC/三相/运行态恒空）",
+                blk.addr,
+                crate::pcs::regs::REG_MODE
+            ));
+        }
+        let need_end = crate::pcs::regs::REG_P_TOTAL + 1;
+        if blk.addr.saturating_add(blk.count) < need_end {
+            return Err(format!(
+                "south_pcs: regs[0] 窗口 {:#06x}..{:#06x} 未覆盖到 {:#06x}（须含 REG_P_TOTAL 总有功）",
+                blk.addr,
+                blk.addr.saturating_add(blk.count),
+                need_end
+            ));
+        }
         Ok(())
     }
 
@@ -3229,15 +3263,81 @@ mod south_pcs_tests {
             "跨块同名异址",
         );
 
-        // ③ 反向：两块的点名**互不相同** ⇒ 放行（证明拒绝来自"重复"，不是"跨界/跨块"本身）
+        // ③ 反向：两块的点名**互不相同** ⇒ 规则 10 本身放行（证明 ② 的拒绝来自"重复"，
+        //    不是"跨块"本身）。
+        //
+        //    ⚠️ **规则 P-5（2026-09-26）起本反向对照不再走 `validate`**：`validate` 现已要求
+        //    `regs` **恰 1 块**（采集循环只读首块）⇒ 任何多块配置都会**先**被 P-5 拒，
+        //    无法再用 `validate() == Ok(())` 表达这个反向形态。故**下沉到规则函数本身** ——
+        //    判据（"唯一命名 ⇒ 放行"）一字未变，只换了调用面（② 仍在位，仍由 `validate` 拒）。
         assert_eq!(
-            cfg(vec![
-                blk("blk_a", 1000, 2, vec![pt(1, 2)]), // blk_a_1 / blk_a_2
-                blk("blk_b", 1010, 1, vec![pt(1, 1)]), // blk_b_1
-            ])
-            .validate(),
+            check_metric_uniqueness(
+                "south_pcs: ",
+                &[
+                    "blk_a_1".to_string(),
+                    "blk_a_2".to_string(),
+                    "blk_b_1".to_string(),
+                ]
+            ),
             Ok(()),
-            "两块各自唯一命名 ⇒ 应放行"
+            "两块各自唯一命名 ⇒ 规则 10 应放行"
+        );
+    }
+
+    /// **规则 P-5 的常驻锚**（2026-09-26 质量评审 Important）：块基址/窗口与 `regs::REG_*`
+    /// **绝对地址**常量的隐式耦合，在配置期 fail-closed 拦下。
+    ///
+    /// **判别力**：三条形态在**修复前全部绿**（旧 `validate` 只看点级/块级结构，与"快照按
+    /// 绝对地址取数"无关）⇒ 每条断言在删掉对应校验后**必红**（探针实测见提交说明）。
+    /// 失效现象（三条共同的后果）：总线读成功 ⇒ `bad=0`、`connected=true`、**无任何日志**，
+    /// 而快照五字段全 `None` 且 `valid == true` ⇒ "PCS 在线、点表有值，但 SOC/三相/运行态恒空"。
+    #[test]
+    fn south_pcs_validate_rejects_block_base_outside_snapshot_addressing() {
+        let cfg = |regs: Vec<RegBlockConf>| SouthPcsConfig {
+            enabled: true,
+            regs,
+            ..SouthPcsConfig::default()
+        };
+        let reject = |regs: Vec<RegBlockConf>, needle: &str, what: &str| {
+            let err = cfg(regs)
+                .validate()
+                .expect_err(&format!("{what} 应被拒（P-5）"));
+            assert!(
+                err.contains(needle) && err.contains("south_pcs"),
+                "{what}：Err 应含 {needle:?}（且带段名），实际 {err}"
+            );
+        };
+
+        // ① 多块 = 死配置（采集循环只读 `regs.first()`，第 2 块起永不执行）
+        let mut b2 = pcs_block();
+        b2.name = "pcs_3zone_b".into();
+        b2.addr = 1100; // 不与 1000..1076 重叠 ⇒ 旧校验全绿，只有 P-5 能拒
+        b2.count = 8;
+        b2.points = vec![pt(1, 8)];
+        reject(vec![pcs_block(), b2], "须恰 1 块", "regs 两块");
+
+        // ② 基址错（点表 `at` 是**块内偏移** ⇒ 规则 11 首尾锚定照样通过；`addr: 2000` 是
+        //    评审给的真实误配形态）：快照按 REG_* 绝对地址取数 ⇒ `at(REG_SOC)` 因 `addr < base`
+        //    恒 `None`。`count` 仍 76 ⇒ 窗口校验也过。
+        let mut wrong_base = pcs_block();
+        wrong_base.addr = 2000;
+        reject(vec![wrong_base], "须 == 1000", "块基址 2000");
+
+        // ③ 窗口太短（基址对但未覆盖到 REG_P_TOTAL=1032）：1000..1003 ⇒ 总有功恒 None
+        let mut short_win = pcs_block();
+        short_win.count = 3;
+        short_win.points = vec![pt(1, 3)];
+        reject(vec![short_win], "未覆盖到 0x0409", "窗口 1000..1003");
+
+        // ④ 边界：恰覆盖到 REG_P_TOTAL（1000..1033，count = 33）⇒ 放行（证明 ③ 拒的是
+        //    "没到 REG_P_TOTAL"而不是"count 太小"本身）
+        let mut just_enough = pcs_block();
+        just_enough.count = 33;
+        just_enough.points = vec![pt(1, 33)];
+        assert_eq!(
+            cfg(vec![just_enough]).validate(),
+            Ok(()),
+            "窗口恰含 REG_P_TOTAL 须放行"
         );
     }
 }

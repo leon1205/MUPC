@@ -93,6 +93,9 @@ pub(crate) struct PcsInner {
     /// M1 停机告警的**跨拍去抖**记忆（"非停机→停机"跃迁告警一次；恢复非停机态时复位）。
     /// 与 `intercore::ModbusRtuTransport` 的 `stopped_warned` 局部变量语义等价（此处提升为字段）。
     stopped_warned: AtomicBool,
+    /// "空 `regs`"告警的一次性记忆（`tick_once` 的早退路径**只记一次** —— 否则每拍一条，
+    /// `interval_ms` 周期无限刷屏；与 M1 告警同款理由，见 `warn_stopped_once`）。
+    empty_cfg_warned: AtomicBool,
     /// 采集快照（`last_run_state` 为**同步** getter ⇒ 用 std RwLock —— tokio 的
     /// `blocking_read` 在异步执行上下文内会 panic，与迁移前同一取向）。
     snapshot: StdRwLock<PcsSnapshot>,
@@ -140,6 +143,7 @@ impl PcsHandle {
                 stopped_latched: RwLock::new(false),
                 restart_authorized: AtomicBool::new(false),
                 stopped_warned: AtomicBool::new(false),
+                empty_cfg_warned: AtomicBool::new(false),
                 snapshot: StdRwLock::new(PcsSnapshot::default()),
                 sink,
                 bad: AtomicU32::new(0),
@@ -169,6 +173,29 @@ impl PcsHandle {
     #[cfg(test)]
     pub(crate) fn debug_restart_authorized(&self) -> bool {
         self.inner.restart_authorized.load(Ordering::Relaxed)
+    }
+
+    // ── 快照存取（`StdRwLock` 的 poison 惯用法**集中于此**）────────────────
+    // `unwrap_or_else(|e| e.into_inner())` 的"取毒"取向全仓仅此两处：快照是**纯展示/
+    // 按需读**数据，poison 时取最后一个完整值比 panic 掉采集线程更可取（与迁移前一致）。
+    // 集中一处免得 5 个调用点各写一份、各自漂移。
+
+    /// 读快照。
+    fn snapshot(&self) -> PcsSnapshot {
+        *self
+            .inner
+            .snapshot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 写快照。
+    fn set_snapshot(&self, s: PcsSnapshot) {
+        *self
+            .inner
+            .snapshot
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = s;
     }
 }
 
@@ -247,28 +274,29 @@ impl PcsHandle {
     /// Task 10 接线（经适配器供 DO1/联锁）。
     /// 保持 `pub`：Task 10 在**另一个 crate** 经适配器调用。
     pub fn last_run_state(&self) -> Option<u16> {
-        let s = self
-            .inner
-            .snapshot
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if s.valid {
-            s.run_state
-        } else {
-            None
+        let s = self.snapshot();
+        if !s.valid {
+            return None;
         }
+        s.run_state
     }
 }
 
 /// 连续失败上限（判离线）—— 对齐迁移前心跳的 `BAD_LIMIT = 3`
-/// （`intercore/src/transport/modbus.rs:553`）。
+/// （迁移前 `intercore::transport::modbus::run_heartbeat_loop` 的 `BAD_LIMIT`，该模块 T4 删除）。
 const BAD_LIMIT: u32 = 3;
-/// 采集循环最小 tick（防 `interval(0)` panic）。
+/// 采集循环的 **tick 非零兜底**（防 `interval(0)` panic）。
 ///
-/// **策略下界不在此**：`interval_ms` 的段内下界由 `config::PCS_MIN_INTERVAL_MS`（500ms，
-/// `SouthPcsConfig::validate`）承担；本常量只是**非零兜底** —— `PcsHandle::new` 不校验配置，
-/// 绕过 validate 构造（或将来容错路径）时 `interval(0)` 会 panic，故此处再夹一层。
-const MIN_PCS_TICK_MS: u64 = 100;
+/// **命名与语义**：与配置层的 `PCS_MIN_INTERVAL_MS`（500ms，**策略下界**）刻意区分 ——
+/// 二者是"错位近义"（都像周期下界）而语义**相反**：那个是"防超短周期打满总线"的**策略**
+/// 下界（`SouthPcsConfig::validate` 强制），本常量只是**非零兜底**。`PcsHandle::new`
+/// **不校验配置** ⇒ 绕过 validate 构造（或将来容错路径）时 `interval(0)` 会 panic，
+/// 故此处再夹一层。
+///
+/// **取值理由**：tokio 仅在**周期为 0** 时 panic（非零任意值都合法）⇒ 本兜底只需"非零"；
+/// 取 100 只是留余量（明显高于任何真实周期预算的探测下限，又远低于策略下界 500 ——
+/// 一旦真有人靠这个值在跑，说明已绕过 validate，那是配置路径问题、不是本值该兜的）。
+const PCS_TICK_FLOOR_MS: u64 = 100;
 
 impl PcsHandle {
     /// 链路在线态（由采集循环维护；设计 §13.4 的"累积 3 拍"口径）。
@@ -278,11 +306,7 @@ impl PcsHandle {
 
     /// SOC（%）。**读采集快照**（非现读）—— 时间戳为本拍采集时刻（设计 Δ-18）。
     pub async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
-        let s = *self
-            .inner
-            .snapshot
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let s = self.snapshot();
         if !s.valid {
             return None;
         }
@@ -291,11 +315,7 @@ impl PcsHandle {
 
     /// 三相展示读数（读采集快照；设计 Δ-17：粒度为**单块**，块读失败即整体 `None`）。
     pub async fn read_three_phase(&self) -> Option<ThreePhaseRead> {
-        let s = *self
-            .inner
-            .snapshot
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let s = self.snapshot();
         if !s.valid {
             return None;
         }
@@ -317,9 +337,26 @@ impl PcsHandle {
     ///   mark_offline 的"单次失败即离线"属迁移前的不一致，本 Task 收敛掉）。
     pub async fn tick_once(&self) {
         let _g = self.inner.lock.lock().await;
+        // 共享借用（非 `clone`）：`blk` 在 `.await` 上存活合法，借用检查无 clone 需求。
+        // 下方 `BlockReads` 那处的 `blk.clone()` 则**必须保留**（`Vec<(RegBlockConf, ..)>`
+        // 要所有权，`&RegBlockConf` 无法满足）。
         let blk = match self.inner.cfg.regs.first() {
-            Some(b) => b.clone(),
-            None => return,
+            Some(b) => b,
+            None => {
+                // 空 `regs` 早退此前**完全静默** ⇒ 采集循环以 `connected=false` 空转、无线索。
+                // 规则 P-5 后该形态在配置期已被拒，但 `PcsHandle::new` **不校验**配置 ⇒
+                // 单测/未来路径仍可构造。
+                //
+                // **只记一次**（不是每拍）：本函数每 `interval_ms` 走一遍，逐拍记 ⇒
+                // ≈86400 条/日刷屏 —— 与 M1 告警（`warn_stopped_once`）同款理由，故用
+                // `empty_cfg_warned` 做一次性记忆（空配置不会自愈，一条足够定位）。
+                if !self.inner.empty_cfg_warned.swap(true, Ordering::Relaxed) {
+                    tracing::error!(
+                        "south_pcs.regs 为空 —— 采集恒空转（PcsHandle::new 不校验配置）"
+                    );
+                }
+                return;
+            }
         };
         let res = self
             .inner
@@ -331,11 +368,7 @@ impl PcsHandle {
             Ok(words) => {
                 let ts = std::time::Instant::now();
                 let snap = build_snapshot(&words, blk.addr, ts);
-                *self
-                    .inner
-                    .snapshot
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner()) = snap;
+                self.set_snapshot(snap);
                 self.inner.bad.store(0, Ordering::Relaxed);
                 {
                     let mut c = self.inner.connected.write().await;
@@ -346,7 +379,7 @@ impl PcsHandle {
                 }
                 // ③ 停机观测（M1 告警**去抖**）：仅在"非停机 → 停机"跃迁时告警一次。
                 //    去抖靠 `stopped_warned` 跨拍记忆（不是"每拍判一次"——见该函数的注释）。
-                if should_warn_stopped(
+                if warn_stopped_once(
                     &self.inner.stopped_warned,
                     snap.run_state,
                     *self.inner.started.read().await,
@@ -381,11 +414,7 @@ impl PcsHandle {
             }
             Err(e) => {
                 // 快照**立即失效**（单拍语义）—— 与迁移前"读失败即 None"逐字等价（设计 §13.4）
-                *self
-                    .inner
-                    .snapshot
-                    .write()
-                    .unwrap_or_else(|x| x.into_inner()) = PcsSnapshot::default();
+                self.set_snapshot(PcsSnapshot::default());
                 let bad = self.inner.bad.fetch_add(1, Ordering::Relaxed) + 1;
                 tracing::debug!(error = %e, bad, "PCS 3 区采集失败");
                 if bad >= BAD_LIMIT {
@@ -396,8 +425,9 @@ impl PcsHandle {
                         prev
                     };
                     // ★★ 判离线时**必须同时复位控制侧缓存**（= 迁移前 mark_offline 的语义）★★
-                    // 理由（W1，intercore/src/transport/modbus.rs:361-370）：断线期间 PCS **可能
-                    // 掉电/复位** ⇒ started/mode 缓存**不可信**；不复位则恢复后
+                    // 理由（W1：迁移前 `intercore::transport::modbus` 的 `mark_offline`，
+                    // 该模块 T4 删除）：断线期间 PCS **可能掉电/复位** ⇒ started/mode
+                    // 缓存**不可信**；不复位则恢复后
                     // ① ensure_mode 见缓存命中 ⇒ 跳过 REG_MODE 重写；
                     // ② ensure_started 见 started==true ⇒ 命中缓存直接 Ok（连 S-4 的 1013 读都不发生）
                     // ⇒ 在**未知实际模式**下直接写 1006-1011 功率寄存器。这是 fail-open，必须复位。
@@ -416,11 +446,21 @@ impl PcsHandle {
 
     /// 启动采集循环（每 `interval_ms` 一拍；**不做退避** —— 与迁移前心跳的固定周期一致）。
     ///
+    /// **`MissedTickBehavior` 契约（未披露项，2026-09-26 质量评审补记）**：本函数用裸
+    /// `tokio::time::interval` ⇒ 取 tokio 缺省的 **`Burst`**：某拍耗时超过周期时，**连续
+    /// 补跑多拍**（直到追上进度），可能挤住总线与 `inner.lock`（调度器侧的 `SouthScheduler`
+    /// 另有其自身的节奏纪律）。同时**首次 `tick()` 立即完成**（不等一个周期）⇒ 启动后
+    /// 立刻采一拍。两点均与迁移前 `run_heartbeat_loop`（同样裸 `interval`）**行为一致**，
+    /// **不是回归** —— 但此前未披露，故在此写明。
+    ///
+    /// **不改行为**（保持与迁移前一致；改 `Delay`/`Skip` 属独立议题）。这一点由计划 Task 9
+    /// 的用例 **E7** 钉住（E7 是唯一落点）。
+    ///
     /// 返回的 `JoinHandle` 调用方**必须持有并观测**（task 内 panic 会静默终止采集，
     /// 与 `SouthScheduler::spawn` 同一观测契约）。
     pub fn spawn_collection_loop(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = Arc::clone(self);
-        let period = me.inner.cfg.interval_ms.max(MIN_PCS_TICK_MS);
+        let period = me.inner.cfg.interval_ms.max(PCS_TICK_FLOOR_MS);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(period));
             loop {
@@ -436,6 +476,18 @@ impl PcsHandle {
 /// `base` = 块起始地址（`pcs_3zone` 为 1000）；寄存器按 `addr - base` 索引。
 /// 各段**独立** `Option`：域外读数为 `None`（保留迁移前的域校验 —— SOC ∈ [0,100]、
 /// `RUN_STATE` ∈ 0..=3）；三相段须 3 字齐备（缺任一字 ⇒ 该段 `None`）。
+///
+/// ⚠️ **与 `regs::REG_*` 绝对地址常量的隐式耦合（改动前必读）**：本函数用**块基址 +
+/// 偏移**索引，而下方各字段一律按 `regs::REG_SOC` / `REG_RUN_STATE` / `REG_I_A` /
+/// `REG_P_A` / `REG_P_TOTAL` 这组**绝对地址**常量取数（`at(REG_SOC)` 之类）。故 `base`
+/// **必须**是 `regs::REG_MODE`（= 1000，3 区窗口基址）且窗口须覆盖到 `REG_P_TOTAL` ——
+/// 否则 `at()` 因 `addr < base` 或越界返 `None` ⇒ **五字段全 `None` 而 `valid` 仍 `true`**，
+/// 且总线读成功 ⇒ `bad=0`、`connected=true`、**无任何日志**（现象："PCS 在线、点表有值，
+/// 但 SOC/三相/运行态恒空"）。该形态现由配置期规则 **P-5**
+/// （[`SouthPcsConfig::validate`]）fail-closed 拦截；`PcsHandle::new` 不校验配置 ⇒
+/// 绕过 validate 直接构造仍会落入上述静默形态（本函数不设防、也不该设：它是纯解码）。
+///
+/// [`SouthPcsConfig::validate`]: crate::config::SouthPcsConfig::validate
 fn build_snapshot(words: &[u16], base: u16, ts: std::time::Instant) -> PcsSnapshot {
     let at = |addr: u16| -> Option<u16> {
         if addr < base {
@@ -482,7 +534,7 @@ impl PcsHandle {
     ///
     /// ⚠️ **写序偏离原文（登记，经评审判定不回退）**：本实现逐相**交错**写
     /// `P_i → Q_i`（线上序 1006,1009,1007,1010,1008,1011）；原文
-    /// `intercore::transport::modbus::send_tai_command`（约 :649-660）是**分组**写
+    /// `intercore::transport::modbus::send_tai_command`（该模块 T4 删除）是**分组**写
     /// （P 三相 1006-1008 → Q 三相 1009-1011）。正常完成时末态相同 ⇒ **非功能回归**；
     /// 差异只在**中断残留态** —— 6 次 FC06 是独立事务，中途超时/CRC/异常真实可发生：
     ///
@@ -624,18 +676,25 @@ fn decode_run_state(word: u16) -> Option<u16> {
     }
 }
 
-/// M1 停机告警的**去抖决策**（纯函数，便于直接单测）：
+/// M1 停机告警的**去抖决策**（**不依赖 `&self`**，便于直接单测；**有副作用：写 `warned`**）：
 /// 仅当"RUN_STATE=0 且已下发运行 且 非 latch"**且**本拍是**首次**进入该状态时返回 `true`
 /// （即"非停机 → 停机"**跃迁**告警一次）；其余情形返回 `false`。
 ///
+/// **名称里的 `once` 即副作用**（2026-09-26 质量评审订正）：本函数**不是纯函数** —— 它
+/// `swap`/`store` 入参 `warned`。签名刻意收 `&AtomicBool`（而非 `&mut bool`）并把写入
+/// 留在函数内，是为保住 `swap` 的**原子读-改-写**（改成外部先读再写会让"两拍并发都判首次"
+/// 的竞态重新打开）。改名 `warn_stopped_once` 让副作用进入名字，取代原首句"（纯函数…）"
+/// 与事实矛盾的自称。
+///
 /// `warned` 是**跨拍记忆**（调用方持的 `AtomicBool`）：
 /// - 进入告警态：`swap(true)` ⇒ 首次返回 `true`，其后同一段停机内恒 `false`（**去抖**）
-/// - 离开告警态（含 latch / 非停机 / 未下发运行）：复位为 `false` ⇒ 下次跃迁仍能告警
+/// - 离开告警态（含 latch / 非停机 / 未下发运行 / 域外 `None`）：复位为 `false`
+///   ⇒ 下次跃迁仍能告警
 ///
 /// ⚠️ 为什么必须有跨拍记忆：M1 语义下 `started` **刻意不复位**（见 `ensure_started` 注释），
 /// 故"停机"条件一旦成立就**长期为真**；无记忆则逐拍告警 ⇒ `interval_ms` 周期无限刷屏
 ///（≈86400 条/日），正是迁移前注释点名要防的"停机期间每秒刷屏"。
-fn should_warn_stopped(
+fn warn_stopped_once(
     warned: &AtomicBool,
     run_state: Option<u16>,
     started: bool,
@@ -1063,39 +1122,74 @@ mod control_tests {
         // 判据：M1 停机告警必须**跃迁触发**（每段停机恰一次），而非逐拍。
         // 判别力：把实现改成 `run_state == Some(0) && started && !latched`（无记忆）
         // ⇒ 第二次调用会返回 true ⇒ 本用例必红。
+        //
+        // ⚠️ **2026-09-26 质量评审补判别力**：原版把"latch 臂复位""未下发运行臂复位"
+        // "`None`（域外）臂复位"三条塞在同一串断言里，而相邻的**非停机**断言（它会复位记忆）
+        // 恰好把前提冲掉 ⇒ 这三条复位**零独立判别力**；`run_state == None` 分支更是完全未测。
+        // 下面按"先造 warned=true → 再调目标臂 → **紧接着**断言下一个跃迁仍能告警"的
+        // 三段式补齐（每段的自检前提都在其上一行刚建立，故删掉对应复位**必红**）。
         let w = AtomicBool::new(false);
-        // 前提：未下发运行 ⇒ 不告警
+        // 前提：未下发运行 ⇒ 不告警（进入时 warned 本就是 false ⇒ 此断言只测"返回值"，不测复位）
         assert!(
-            !should_warn_stopped(&w, Some(0), false, false),
+            !warn_stopped_once(&w, Some(0), false, false),
             "未下发运行不得告警"
         );
-        // 跃迁：停机 + 已下发运行 + 非 latch ⇒ 首次告警
+        // 跃迁：停机 + 已下发运行 + 非 latch ⇒ 首次告警（同时把 warned 置 true）
         assert!(
-            should_warn_stopped(&w, Some(0), true, false),
+            warn_stopped_once(&w, Some(0), true, false),
             "跃迁必须告警一次"
         );
         // 同一段停机内（相邻拍）⇒ 必须**不再**告警（去抖）
         assert!(
-            !should_warn_stopped(&w, Some(0), true, false),
+            !warn_stopped_once(&w, Some(0), true, false),
             "同一段停机内不得重复告警"
         );
         assert!(
-            !should_warn_stopped(&w, Some(0), true, false),
+            !warn_stopped_once(&w, Some(0), true, false),
             "第三拍同样不得告警"
         );
-        // latch 期间不告警（S-1 豁免），且应复位记忆
+
+        // ── latch 臂的复位（独立判别力）────────────────────────────────
+        // 第 ⑤ 步调用时 warned=true；**紧接着**再调非 latch 停机态：
+        // 若 latch 臂没复位记忆 ⇒ swap(true) 见旧 true ⇒ 返回 false ⇒ 本断言必红。
         assert!(
-            !should_warn_stopped(&w, Some(0), true, true),
+            !warn_stopped_once(&w, Some(0), true, true),
             "latch 期间不得告警"
         );
-        // 恢复非停机 ⇒ 记忆复位；下次再停机应能再次告警（跃迁可重现）
         assert!(
-            !should_warn_stopped(&w, Some(1), true, false),
-            "非停机不告警"
+            warn_stopped_once(&w, Some(0), true, false),
+            "latch 臂必须复位记忆（否则 latch 解除后的首次停机告警被吞）"
+        );
+
+        // ── 非停机臂的复位 ─────────────────────────────────────────────
+        // 前提：上一行刚把 warned 置 true。非停机 ⇒ 复位；下一拍停机须能再告警。
+        assert!(!warn_stopped_once(&w, Some(1), true, false), "非停机不告警");
+        assert!(
+            warn_stopped_once(&w, Some(0), true, false),
+            "非停机臂必须复位记忆（否则「恢复后再次停机」不再告警）"
+        );
+
+        // ── 未下发运行臂的复位 ─────────────────────────────────────────
+        // 前提：上一行刚把 warned 置 true。
+        assert!(
+            !warn_stopped_once(&w, Some(0), false, false),
+            "未下发运行不告警"
         );
         assert!(
-            should_warn_stopped(&w, Some(0), true, false),
-            "再次跃迁应能重新告警"
+            warn_stopped_once(&w, Some(0), true, false),
+            "未下发运行臂必须复位记忆（否则重启后的首次停机不再告警）"
+        );
+
+        // ── `None`（域外/乱码/错位帧）臂的复位 ─────────────────────────
+        // 前提：上一行刚把 warned 置 true。域外读数既不是"停机"、也不该保留旧记忆 ——
+        // 否则一段乱码之后再真停机，告警会被静默吞掉。
+        assert!(
+            !warn_stopped_once(&w, None, true, false),
+            "域外运行态不得告警"
+        );
+        assert!(
+            warn_stopped_once(&w, Some(0), true, false),
+            "None 臂必须复位记忆（否则乱码后的首次停机不再告警）"
         );
     }
 }
@@ -1223,6 +1317,8 @@ mod collection_tests {
         h.tick_once().await;
         assert!(h.is_connected().await, "基线：成功一拍 ⇒ 在线");
         assert!(h.latest_soc().await.is_some(), "基线：快照有效");
+        let telem_after_ok = sink.telemetry.lock().unwrap().len();
+        assert_eq!(telem_after_ok, 1, "基线：成功一拍恰投 1 批遥测");
 
         bus.fail_input_once(1, 1000);
         h.tick_once().await;
@@ -1234,15 +1330,53 @@ mod collection_tests {
             "1 拍失败不得判离线（对齐既有心跳 3 拍口径）"
         );
         assert!(sink.offline.lock().unwrap().is_empty());
+        // 失败拍**不得投遥测**：`telemetry` 的长度须恒等于"成功拍数"。
+        // 判别力：让 Err 臂也走一遍上送 ⇒ 下面两条断言必红（失败读数进遥测 = 假数据）。
+        assert_eq!(
+            sink.telemetry.lock().unwrap().len(),
+            telem_after_ok,
+            "失败拍不得投遥测（1 拍失败后仍应恰 {} 批）",
+            telem_after_ok
+        );
 
         bus.fail_input_once(1, 1000);
         h.tick_once().await;
         assert!(h.is_connected().await, "2 拍仍不得判离线");
+        assert_eq!(
+            sink.telemetry.lock().unwrap().len(),
+            telem_after_ok,
+            "失败拍不得投遥测（2 拍失败后仍应恰 {} 批）",
+            telem_after_ok
+        );
 
         bus.fail_input_once(1, 1000);
         h.tick_once().await;
         assert!(!h.is_connected().await, "连续 3 拍失败 ⇒ 离线");
         assert_eq!(sink.offline.lock().unwrap().len(), 1, "离线事件恰一次");
+        assert_eq!(
+            sink.telemetry.lock().unwrap().len(),
+            telem_after_ok,
+            "失败拍不得投遥测（3 拍失败后仍应恰 {} 批）",
+            telem_after_ok
+        );
+
+        // 已离线后**续拍**再失败：离线事件**不得重复投**（判据是 `was_online` 跃迁，
+        // 不是"每拍失败即投"）。原用例只测到第 3 拍 ⇒ 该契约零覆盖。
+        for _ in 0..2 {
+            bus.fail_input_once(1, 1000);
+            h.tick_once().await;
+        }
+        assert!(!h.is_connected().await, "续拍失败仍离线");
+        assert_eq!(
+            sink.offline.lock().unwrap().len(),
+            1,
+            "离线后连续失败不得重复投离线事件"
+        );
+        assert_eq!(
+            sink.telemetry.lock().unwrap().len(),
+            telem_after_ok,
+            "离线段同样不得投遥测"
+        );
     }
 
     #[tokio::test]
