@@ -197,9 +197,8 @@ PCS 为 **RS485 Modbus 从站**，其通信与控制已整体迁入南向（02 �
 | `k_droop` | 下垂系数 (kW/V)，用于下垂控制公式 |
 | `ai_ready` | AI 引擎就绪状态 |
 | `strategy_mode` | 当前策略模式 |
-| `q_realtime_margin` | 无功裕度 [0,1]（0x0030 DataUpload 帧） |
-| `voltage_phase_*` | 三相电压标幺值（0x0030 DataUpload 帧） |
-| `SafetyOverride` | 安全覆盖触发事件（0x0040 帧） |
+
+另有 `q_realtime_margin` / `voltage_phase_*`（属 AI 引擎观测空间 `ai-engine/src/data_fusion.rs`，PRD 记为来源于核间 DataUpload 帧；**AI 停用期间停采**）与 `SafetyOverride`（帧类型 0x0040，`intercore/src/protocol.rs`）。
 
 > ⚠️ 02 号设计 §13 **未获门禁标记**（待独立设计评审）；`intercore` 侧的 `pcs` / `pcs_sim` / `modbus_rtu` 模块与 `transport::modbus` 已删除（`mupc/crates/intercore/src/lib.rs` 头注）。
 
