@@ -34,14 +34,63 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 采集块窗口基址（= fixture `pcs_3zone` 的 `regs[0].addr`，亦 = `regs::REG_MODE`）。
+/// `input_calls` **只统计落在该地址的 FC04 读**（见 `read_input`）—— 否则将来往链路上
+/// 插一次 S-4 运行态读（addr 1013）就会让 E7 的"拍数"静默失真。
+/// 本常量若与 fixture 漂移 ⇒ E7 计数恒 0 ⇒ 用例**响亮失败**（不会静默变空断言）。
+const COLLECT_ADDR: u16 = 1000;
+/// 采集从站号（fixture `slave: 1`）。
+const COLLECT_SLAVE: u8 = 1;
+/// 采集循环的 **tick 非零兜底**（生产常量 `pcs::collect::PCS_TICK_FLOOR_MS`，模块私有
+/// ⇒ 此处镜像一份常量值）。**契约**：`spawn_collection_loop` 的实际周期 =
+/// `max(interval_ms, 本兜底)` —— 本文件原先把该隐式契约的 `max` 抄了一遍，现改为
+/// **显式断言** `interval_ms >= 兜底`（fixture 为 1000 ⇒ 实际周期 == `interval_ms`；
+/// 若将来有人把 fixture 调到 < 100，下面的断言会响，而不是静默用错周期）。
+const PCS_TICK_FLOOR_MS: u64 = 100;
+
+/// 总线重叠探测器守卫：构造时对 `flag` 做 CAS 置位（**已置位 ⇒ panic**），
+/// 析构复位（含 `Err` 早退与 panic 展开路径 ⇒ 不会把探测器卡在"已置位"）。
+///
+/// **为什么需要它**（2026-09-26 质量评审）：本缝是**同步闭包**（请求原文 → 响应原文
+/// 在一个同步调用内完成、中间无 await）⇒ **帧级交错结构上不可能**，E6 原 doc 声称的
+/// "交错必报错"是空话（评审判实证：把四处 `PcsInner::lock` 全删，E6 仍绿）。
+/// 真正要钉的不变量是 **`PcsInner::lock` 的互斥语义**（设计 §13.3/§13.4："采集与控制
+/// 共用同一把锁"）——有锁 ⇒ 读/写不可能同时进入总线；无锁 ⇒ 两个并发任务必同时进。
+/// 本守卫把该不变量变成一条**不依赖时序**的断言。
+struct OverlapProbe<'a>(&'a AtomicBool);
+
+impl<'a> OverlapProbe<'a> {
+    /// 进入总线：CAS 置位。**已置位 = 读/写重叠** ⇒ panic（信息直接指向被破的不变量）。
+    fn enter(flag: &'a AtomicBool) -> Self {
+        if flag
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            panic!("总线重叠：read/write 同时进入 —— PcsInner::lock 未生效");
+        }
+        Self(flag)
+    }
+}
+
+impl Drop for OverlapProbe<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// 帧级 bus：把 `StationBus` 的寄存器读写落到 `Rs485Device` 的 `_from` 家族
 /// （后者经同步交换缝转入从站仿真）。**不调用 `open()`** —— 缝已短路真实 IO。
 struct SeamBus {
     dev: Rs485Device,
-    /// E7：FC04 采集读的**尝试**次数（失败拍也计 —— 不退避/不降频才可辨）。
-    input_calls: Arc<AtomicUsize>,
+    /// E7：**采集块那次** FC04 读（`(slave, addr) == (COLLECT_SLAVE, COLLECT_ADDR)`）的
+    /// **尝试**次数（失败拍也计 —— 不退避/不降频才可辨）。按 `(slave, addr)` 过滤，
+    /// 与 `MockBus::input_call_count(slave, addr)` 口径对齐（见 `COLLECT_ADDR` 的注释）。
+    input_calls: AtomicUsize,
     /// E7：置位后 FC04 一律回 `Err`（验证失败拍仍按原周期推进）。
     fail_input: AtomicBool,
+    /// **总线重叠探测器**（E6 的互斥断言）：`read_input` / `write_single` 共用。
+    /// 两侧都要盖 —— E6 的并发是 `send_dual_param`（写）与 `tick_once`（读）交叉。
+    busy: AtomicBool,
 }
 
 impl SeamBus {
@@ -72,8 +121,9 @@ impl SeamBus {
         (
             Arc::new(SeamBus {
                 dev,
-                input_calls: Arc::new(AtomicUsize::new(0)),
+                input_calls: AtomicUsize::new(0),
                 fail_input: AtomicBool::new(false),
+                busy: AtomicBool::new(false),
             }),
             state,
         )
@@ -93,8 +143,18 @@ impl StationBus for SeamBus {
             })
     }
     async fn read_input(&self, slave: u8, addr: u16, count: u16) -> Result<Vec<u16>, BusError> {
-        // 计数先于失败判定：失败拍必须同样被数到（E7 判"不退避"的前提）。
-        self.input_calls.fetch_add(1, Ordering::Relaxed);
+        let _probe = OverlapProbe::enter(&self.busy);
+        // 让出一个调度点（**探测器的一部分，不是填充**）：本缝全程同步、且 tokio 的
+        // `Mutex/RwLock` 在无竞争时不消耗协作预算 ⇒ 在单线程 runtime 上两个任务默认
+        // 根本不会在一个事务中途交错，探测器会永远等不到第二个进入者（= 零判别力）。
+        // 有了这一点让步，"若两任务可并发进入 ⇒ 必被观测到并发"成为确定事实；
+        // **有 `inner.lock` 时它照不出重叠** —— 第二个任务被锁挡在入口，见 E6 注释。
+        tokio::task::yield_now().await;
+        // 计数**只统计采集块那次读**（按 (slave, addr) 过滤，与 `MockBus::input_call_count`
+        // 口径对齐）；计数先于失败判定：失败拍必须同样被数到（E7 判"不退避"的前提）。
+        if (slave, addr) == (COLLECT_SLAVE, COLLECT_ADDR) {
+            self.input_calls.fetch_add(1, Ordering::Relaxed);
+        }
         if self.fail_input.load(Ordering::Relaxed) {
             return Err(BusError::Read {
                 slave,
@@ -123,6 +183,10 @@ impl StationBus for SeamBus {
             })
     }
     async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+        // 探测器**盖写侧**：E6 的并发是 `send_dual_param`（写）与 `tick_once`（读）交叉
+        // ⇒ 只有读侧盖住就抓不到"写事务期间采集插进来"。让步理由同 `read_input`。
+        let _probe = OverlapProbe::enter(&self.busy);
+        tokio::task::yield_now().await;
         self.dev
             .write_single_register_from(slave, addr, value)
             .map_err(|e| BusError::Write {
@@ -230,13 +294,17 @@ async fn e3_holding_write_readback_signed() {
         .await
         .expect("下发应成功");
 
-    let hold = state.hold.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(
-        hold.get(&REG_CONST_P_SET).copied(),
-        Some(-12.0),
-        "−12.0 必须原样落从站镜像（写侧 encode + 从站侧 from_pcs_reg 双向互换都对）"
-    );
-    drop(hold);
+    // 块作用域（而非 `drop(hold)`）：clippy 的 `await_holding_lock` 只认**词法作用域**，
+    // `drop` 消不掉该警告（评审判已实证）。锁在下面 `read_holding(...).await` 之前必须
+    // 已释放，否则告警 + 真把 std 锁持过 await 点。
+    {
+        let hold = state.hold.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            hold.get(&REG_CONST_P_SET).copied(),
+            Some(-12.0),
+            "−12.0 必须原样落从站镜像（写侧 encode + 从站侧 from_pcs_reg 双向互换都对）"
+        );
+    }
 
     let wire = bus
         .read_holding(1, REG_CONST_P_SET, 1)
@@ -328,11 +396,24 @@ async fn e5_alarm_estop_bit_readable() {
     );
 }
 
-/// E6 并发不串线（对应 e6_concurrent_write_read_no_crosstalk）：
+/// E6 并发完成性（对应 e6_concurrent_write_read_no_crosstalk）：
 /// 写方 N 次 `send_dual_param` 与读方 N 次 `tick_once` 并发。判据：
-/// ① 两侧都不得报错 —— FC06 的**回显校验**要求从站号/功能码/地址/值四项与请求逐字一致，
-///    两帧若交错（请求配到别人的响应）必报错；
+/// ① 两侧都不得报错（含 FC06 的**回显校验**逐笔通过）；
 /// ② 所有写都真的到达从站：末次写（i=49 为奇 ⇒ −5）原样落在镜像 `hold[1001]`。
+///
+/// **本用例覆盖什么（2026-09-26 质量评审判后收窄）**：**多事务序列与采集读的并发
+/// 完成性** —— 50 笔控制写在 50 拍采集读交叉推进下不丢失、不报错。
+///
+/// **本用例不覆盖什么**：**帧级交错**（请求配到别人的响应）。本缝是同步闭包（请求原文
+/// → 响应原文在一个同步调用内完成、中间无 await）⇒ 交错**结构上不可能**发生，
+/// 原 doc 的"两帧若交错必报错"对实现**零判别力**（评审判实证：删掉全部四处
+/// `PcsInner::lock` 后本用例仍绿）。故该句已删除。
+///
+/// **互斥语义由谁承担**：`PcsInner::lock`（设计 §13.3/§13.4，"采集与控制共用同一把锁"，
+/// 设计称其为 §11.8② 的更强形式）由本文件 `SeamBus` 的**总线重叠探测器**
+/// （`read_input`/`write_single` 入口 CAS 同一 `AtomicBool`、重叠即 panic）承担。
+/// 该断言**不依赖时序**：有锁 ⇒ 第二个进入者被锁挡在探测器之前；无锁 ⇒ 两任务同时进
+/// 必然 CAS 失败（删除四处 `inner.lock.lock().await` 的探针即红，见提交信息）。
 #[tokio::test]
 async fn e6_concurrent_write_read_no_crosstalk() {
     const N: u16 = 50;
@@ -396,8 +477,21 @@ async fn wait_ticks(bus: &Arc<SeamBus>, want: usize) {
 #[tokio::test(start_paused = true)]
 async fn e7_collection_loop_ticks_at_interval_no_backoff_and_abort() {
     let (bus, _state) = SeamBus::new();
-    let h = PcsHandle::new(pcs_cfg(), bus.clone(), Arc::new(NullSink));
-    let period = Duration::from_millis(pcs_cfg().interval_ms);
+    // 单次解析 fixture（原先 `PcsHandle::new(pcs_cfg(), …)` 与 `pcs_cfg().interval_ms`
+    // 各解析一次 ⇒ 每用例 YAML 解析 3 次）。
+    let cfg = pcs_cfg();
+    // **显式 interval 契约**（原先只是隐式约定）：`spawn_collection_loop` 的实际周期 =
+    // `max(interval_ms, PCS_TICK_FLOOR_MS)`。fixture 取 1000 > 100 ⇒ 实际周期 ==
+    // `interval_ms`；断言钉住这个前提，将来 fixture 调到 < 100 时**响亮失败**。
+    assert!(
+        cfg.interval_ms >= PCS_TICK_FLOOR_MS,
+        "fixture interval_ms={} 低于采集循环 non-zero 兜底 {PCS_TICK_FLOOR_MS} ⇒ \
+         本用例的 period 与实现实际周期不再一致（须改用 max 口径或调 fixture）",
+        cfg.interval_ms
+    );
+    let interval_ms = cfg.interval_ms;
+    let h = PcsHandle::new(cfg, bus.clone(), Arc::new(NullSink));
+    let period = Duration::from_millis(interval_ms);
     let count = || bus.input_calls.load(Ordering::Relaxed);
 
     let task = h.spawn_collection_loop();
@@ -432,12 +526,18 @@ async fn e7_collection_loop_ticks_at_interval_no_backoff_and_abort() {
         "连续 3 拍失败 ⇒ 判离线（证明失败真的生效，上面的计数不是空转）"
     );
 
-    // ⑤ abort 后不再采（含 Burst 补跑判定）
+    // ⑤ abort 后不再采（含 Burst 补跑判定）。
+    //    终止判定**改确定性**：原先靠 8 次 `yield_now` + `task.is_finished()` 的启发式
+    //    （让步次数是猜的）；现在直接 `await` 该句柄 —— abort 后必以
+    //    `Err(JoinError::Cancelled)` 结束，顺带把**取消原因**也断言掉。
     task.abort();
     tokio::time::advance(period * 5).await;
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
     assert_eq!(count(), 9, "abort 后不得再采");
-    assert!(task.is_finished(), "abort 后任务须已终止");
+    let err = task
+        .await
+        .expect_err("abort 后 JoinHandle 须以 Err 结束（任务应已被取消）");
+    assert!(
+        err.is_cancelled(),
+        "abort ⇒ JoinError::Cancelled，实得 {err:?}"
+    );
 }

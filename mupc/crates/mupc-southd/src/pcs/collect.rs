@@ -5,7 +5,17 @@
 //!
 //! **机制**：本模块是 `pcs` 的**子模块**，Rust 隐私规则下子模块可见祖先模块的私有项 ⇒
 //! 可直接访问 [`PcsHandle::inner`]（私有字段）与 `PcsInner` 的私有字段，
-//! **无需任何 `pub(crate)` 扩权、无 API 变化**。类型、控制面、`decode_*` 仍留在 `pcs/mod.rs`。
+//! **无需任何 `pub(crate)` 扩权、无 API 变化**（唯一例外见 [`warn_stopped_once`] 的
+//! 可见性说明 —— 它从 `fn` 放宽到 `pub(super)`，因为其判别力用例留在兄弟模块
+//! `control_tests`，而兄弟模块互相看不到私有项）。
+//! 类型、控制面、`decode_*` 仍留在 `pcs/mod.rs`。
+//!
+//! **锁纪律（本模块必须遵守；2026-09-26 质量评审补记）**：`PcsInner::lock` 的取用**只允许
+//! 在入口**（`send_dual_param` / `send_tai_command` / `stop` / [`PcsHandle::tick_once`]），
+//! **内部原语与本模块其余函数一律不取**（`snapshot` / `set_snapshot` / 三个 getter /
+//! `build_snapshot` / [`warn_stopped_once`] 都不取）—— 与迁移前纪律一致，防嵌套死锁。
+//! 本模块当前**唯一取锁入口是 [`PcsHandle::tick_once`]**（无症状）；往里新增任何会发起
+//! 总线 IO 的函数前，请先复核该纪律 —— 它被 `tests/pcs_e2e.rs` 的总线重叠探测器钉住。
 //!
 //! [`PcsHandle::inner`]: super::PcsHandle
 
