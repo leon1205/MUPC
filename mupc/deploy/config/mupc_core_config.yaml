@@ -78,7 +78,7 @@ display:
     pcs_total_rated_kw: 60.0
     inconsistency_threshold_kw: 3.0     # 须 <= pcs_total_rated_kw（超额定 ⇒ 角标恒灭）
 
-# 存储运行参数（03 设计 §9.2 / PRD §6.2，U-67）。**进 YAML、不进 DB**，**重启生效**。
+# 存储运行参数（03 设计 §4.4.2 / PRD §6.2，U-67）。**进 YAML、不进 DB**，**重启生效**。
 # 三值即本段**全部**内容（PRD R-11.3-A：本段只含三键，不含保留期 / max_retained_points）。
 # ⚠️ 合法范围（越界**拒启动**，错误信息点名键，PRD R-11.3-E）：
 #   batch_capacity            ∈ [2, 100000]（**禁 1**：每次 push 都会触发容量分支 ⇒ 采集路径永不按 max_points 裁剪）
