@@ -1377,7 +1377,7 @@ io:
 
 | 版本 | 主要变更 |
 |------|----------|
-| **v2.6（2026-09-26，PCS 迁出后的连带标注；未加任何门禁标记）** | 只加注与交叉引用，**§1–§12 既有结论一字未改**。来源 = 02 号设计 **§13**（ADR-014 PCS 通信与控制归属 `mupc-southd` / ADR-015 Modbus 栈统一到 `rs485-plugin`、删 `tokio-modbus` / ADR-016 新增顶层段 `south_pcs`）落地（T1–T12，见 `docs/technical-debt.md` §6.13）。受影响处：§1.1（PCS 已迁出、客户端只发不收、未来演进须新增客户端接收原语 —— 02 号设计 **Δ-23**）、§11（Modbus RTU 通道已整体迁出，本章降为历史与设计依据）、§10.1 ADR-011（已被 ADR-015 取代 —— 原"`rs485-plugin` 缺 FC16"理由**实测不成立**）。**本文档原无门禁标记，亦未新增。** |
+| **v2.6（2026-09-26，PCS 迁出后的连带标注；未加任何门禁标记）** | 只加注与交叉引用，**§1–§12 既有结论一字未改**。来源 = 02 号设计 **§13**（ADR-014 PCS 通信与控制归属 `mupc-southd` / ADR-015 Modbus 栈统一到 `rs485-plugin`、删 `tokio-modbus` / ADR-016 新增顶层段 `south_pcs`）落地（T1–T12，见 `docs/technical-debt.md` §6.13；02 号设计的 **§13.11** 一致性声明）。受影响处：§1.1（PCS 已迁出、客户端只发不收、未来演进须新增客户端接收原语 —— 02 号设计 **Δ-23**）、§11（Modbus RTU 通道已整体迁出，本章降为历史与设计依据）、§10.1 ADR-011（已被 ADR-015 取代 —— 原"`rs485-plugin` 缺 FC16"理由**实测不成立**）。**本文档原无门禁标记，亦未新增。** |
 | v1.0 | 从 PRD v1.0、技术设计 v1.1 和代码库 intercore 实现合并整理 |
 | v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |
 | v2.1 | TCP 回读 SOC（N3，U-26 延伸）：TcpTransport 加回读接收循环（独立连接读实时模块 DataUpload 帧 → battery_soc），`IntercoreTransport.latest_soc()` 查询，AiIntegrator 在总表模式（battery 无 SOC）时以核间 SOC 注入；Modbus 备选不承载（None） |
