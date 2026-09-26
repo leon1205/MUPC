@@ -40,11 +40,11 @@ use std::time::Instant;
 use mupc_local_display::app::{self, App, StartupError};
 use mupc_local_display::channel::DisplayChannelClient;
 use mupc_local_display::config::{self, Backend, CliConfig, ConfigError};
-use mupc_local_display::timing::{self, Clock, LoopConfig, LoopStats, Stop, StopAfter};
 #[cfg(target_os = "linux")]
 use mupc_local_display::timing::FdPoller;
 #[cfg(not(target_os = "linux"))]
 use mupc_local_display::timing::SleepPoller;
+use mupc_local_display::timing::{self, Clock, LoopConfig, LoopStats, Stop, StopAfter};
 
 /// 参数错误退出码（与「运行期失败」区分，便于部署脚本诊断）。
 const EXIT_USAGE: u8 = 2;
@@ -264,7 +264,11 @@ fn run_smoke(app: &mut App, cfg: &CliConfig, stats: &LoopStats) -> ExitCode {
         report.mem.max_used,
         report.mem.used_pct,
         report.mem.frag_pct,
-        if report.mem.has_headroom() { "ok" } else { "tight" },
+        if report.mem.has_headroom() {
+            "ok"
+        } else {
+            "tight"
+        },
     );
     match &report.export {
         Some((path, bytes)) => {
@@ -348,7 +352,11 @@ fn report_exit(cfg: &CliConfig, app: &App, s: &LoopStats) {
         cfg.control_channel,
         ctl.addr(),
         app.console_fail_streak(),
-        if app.p3_channel_connected() { "up" } else { "down" },
+        if app.p3_channel_connected() {
+            "up"
+        } else {
+            "down"
+        },
         app.write_intents_dropped(),
         app.read_intents_dropped(),
         app.route_errors(),

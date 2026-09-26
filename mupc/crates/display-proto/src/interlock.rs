@@ -145,7 +145,10 @@ mod tests {
             (InterlockReject::StopPending, &["停机未确认"]),
             (InterlockReject::NotEnabled, &["未启用"]),
             (InterlockReject::Busy, &["处理中"]),
-            (InterlockReject::Internal("io 句柄丢失".into()), &["内部错误", "io 句柄丢失"]),
+            (
+                InterlockReject::Internal("io 句柄丢失".into()),
+                &["内部错误", "io 句柄丢失"],
+            ),
         ];
         assert_eq!(cases.len(), 7, "全部 7 个变体均须有对应用例");
         for (reject, needles) in cases {
@@ -168,7 +171,10 @@ mod tests {
                 remaining: vec!["estop".into(), "door".into()]
             }
         );
-        let h = InterlockReject::HoldNotElapsed { need_secs: 30, remaining_secs: 12 };
+        let h = InterlockReject::HoldNotElapsed {
+            need_secs: 30,
+            remaining_secs: 12,
+        };
         assert_eq!(
             serde_json::to_string(&h).unwrap(),
             r#"{"hold_not_elapsed":{"need_secs":30,"remaining_secs":12}}"#
@@ -177,13 +183,13 @@ mod tests {
 
     #[test]
     fn op_payload_and_ack_literal_json() {
-        let p: InterlockOpPayload = serde_json::from_str(
-            r#"{"observed_latched":false,"observed_sources":["estop"]}"#,
-        )
-        .unwrap();
+        let p: InterlockOpPayload =
+            serde_json::from_str(r#"{"observed_latched":false,"observed_sources":["estop"]}"#)
+                .unwrap();
         assert!(!p.observed_latched);
         assert_eq!(p.observed_sources, vec!["estop".to_string()]);
-        let a: InterlockOpAck = serde_json::from_str(r#"{"latched":false,"stopped":true}"#).unwrap();
+        let a: InterlockOpAck =
+            serde_json::from_str(r#"{"latched":false,"stopped":true}"#).unwrap();
         assert!(!a.latched && a.stopped);
     }
 
@@ -213,9 +219,13 @@ mod tests {
         };
         let s: InterlockStatus = v.clone();
         assert_eq!(v, s, "视图与迁移名必须同型同值");
-        assert!(s.available && s.enabled, "View 必含 available/enabled（设计 §4.6）");
+        assert!(
+            s.available && s.enabled,
+            "View 必含 available/enabled（设计 §4.6）"
+        );
         // 经 serde 往返后仍是同一形态（契约跨进程一致性）
-        let back: InterlockView = serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
+        let back: InterlockView =
+            serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
         assert_eq!(back, v);
     }
 

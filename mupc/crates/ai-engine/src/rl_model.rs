@@ -313,7 +313,10 @@ mod tests {
         // p_norm=-0.6 → p_ref=-0.6*50=-30kW (充电)
         let raw = vec![-0.6_f32, 0.0];
         let action = parse_action_output(&raw, &cfg).unwrap();
-        assert!((action.p_ref + 30.0).abs() < 0.01, "negative tanh should give negative kW");
+        assert!(
+            (action.p_ref + 30.0).abs() < 0.01,
+            "negative tanh should give negative kW"
+        );
     }
 
     #[test]
@@ -334,7 +337,7 @@ mod tests {
     #[test]
     fn test_parse_action_output_insufficient_dims() {
         let cfg = default_action_space_config();
-        assert!(parse_action_output(&[1.0], &cfg).is_none());  // 1 < 2
+        assert!(parse_action_output(&[1.0], &cfg).is_none()); // 1 < 2
     }
 
     #[test]

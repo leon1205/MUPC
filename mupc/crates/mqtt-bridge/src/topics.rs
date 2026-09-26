@@ -79,14 +79,7 @@ mod tests {
         assert_eq!(NORTH_STATUS, "mupc/north/status");
         assert_eq!(NORTH_FAULT, "mupc/north/fault");
         // 六个站 id 都可用（PRD §8.3.3 的 station_id 取值域）
-        for s in [
-            "grid_meter",
-            "bms",
-            "pcs",
-            "meter_batt",
-            "fire",
-            "hvac",
-        ] {
+        for s in ["grid_meter", "bms", "pcs", "meter_batt", "fire", "hvac"] {
             assert_eq!(north_telemetry(s), format!("mupc/north/telemetry/{s}"));
         }
     }

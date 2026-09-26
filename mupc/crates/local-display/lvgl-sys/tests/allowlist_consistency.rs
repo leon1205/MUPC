@@ -188,8 +188,8 @@ fn strip_comments_and_strings(src: &str) -> String {
         }
         // 字符字面量（`'x'` / `'\n'` / `'\''`）；生命周期（`'a`）保持原样。
         if c == '\'' {
-            let is_char_lit = (i + 1 < b.len() && b[i + 1] == '\\')
-                || (i + 2 < b.len() && b[i + 2] == '\'');
+            let is_char_lit =
+                (i + 1 < b.len() && b[i + 1] == '\\') || (i + 2 < b.len() && b[i + 2] == '\'');
             if is_char_lit {
                 i += 1;
                 while i < b.len() {
@@ -353,10 +353,14 @@ fn allowlist_is_bidirectionally_consistent() {
     // ① 的"⊆"与存在性同时成立 ⇒ fn/var/type 三类的导出集与清单集**逐类相等**。
     let mut problems: Vec<String> = Vec::new();
     if !fn_leak.is_empty() {
-        problems.push(format!("① 越界: 以下 fn 已导出但未登记在 allowlist.txt: {fn_leak:?}"));
+        problems.push(format!(
+            "① 越界: 以下 fn 已导出但未登记在 allowlist.txt: {fn_leak:?}"
+        ));
     }
     if !var_leak.is_empty() {
-        problems.push(format!("① 越界: 以下 var 已导出但未登记在 allowlist.txt: {var_leak:?}"));
+        problems.push(format!(
+            "① 越界: 以下 var 已导出但未登记在 allowlist.txt: {var_leak:?}"
+        ));
     }
     if !ty_leak.is_empty() {
         problems.push(format!(
@@ -365,10 +369,14 @@ fn allowlist_is_bidirectionally_consistent() {
         ));
     }
     if !fn_missing.is_empty() {
-        problems.push(format!("allowlist 声明的 fn 在 bindings 里不存在（拼写错误？）: {fn_missing:?}"));
+        problems.push(format!(
+            "allowlist 声明的 fn 在 bindings 里不存在（拼写错误？）: {fn_missing:?}"
+        ));
     }
     if !var_missing.is_empty() {
-        problems.push(format!("allowlist 声明的 var 在 bindings 里不存在（拼写错误？）: {var_missing:?}"));
+        problems.push(format!(
+            "allowlist 声明的 var 在 bindings 里不存在（拼写错误？）: {var_missing:?}"
+        ));
     }
     if !ty_missing.is_empty() {
         problems.push(format!(
@@ -377,9 +385,15 @@ fn allowlist_is_bidirectionally_consistent() {
         ));
     }
     if !dead.is_empty() {
-        problems.push(format!("② allowlist 里的死符号（无任何 Rust 引用）: {dead:?}"));
+        problems.push(format!(
+            "② allowlist 里的死符号（无任何 Rust 引用）: {dead:?}"
+        ));
     }
-    assert!(problems.is_empty(), "allowlist 一致性校验失败:\n{}", problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "allowlist 一致性校验失败:\n{}",
+        problems.join("\n")
+    );
 
     let _: HashSet<&str> = HashSet::new();
     println!("PASS: allowlist 双向一致（fn/var/type 三类集合相等）");

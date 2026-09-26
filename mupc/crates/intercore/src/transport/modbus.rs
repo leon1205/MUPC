@@ -301,7 +301,10 @@ fn decode_3phase_array(words: &[u16]) -> Option<[f64; 3]> {
 /// 组合两段 FC04 读结果（电流段 1022 起 3 字、有功+总段 1029 起 4 字）→ [`ThreePhaseRead`]。
 /// 纯函数（无 IO）便于单测。**点级独立降级**（12-设计文档 §3.4 F5.5）：单段失败只置该段
 /// `None`，成功段照常返回；两段皆空 → None（整体读失败）。
-fn compose_three_phase(i_words: Option<Vec<u16>>, p_words: Option<Vec<u16>>) -> Option<ThreePhaseRead> {
+fn compose_three_phase(
+    i_words: Option<Vec<u16>>,
+    p_words: Option<Vec<u16>>,
+) -> Option<ThreePhaseRead> {
     let i_phase = i_words.as_deref().and_then(decode_3phase_array);
     // 有功+总段 4 字：前 3 相 + 第 4 字(1032) 设备总有功（段长 <4 时 p_total=None）
     let p_phase = p_words.as_deref().and_then(decode_3phase_array);
@@ -360,7 +363,8 @@ impl ModbusRtuTransport {
         *self.started.write().await = false;
         self.mode.store(0xFF, Ordering::Relaxed);
         // B3：离线清 last_run_state（None → DO1 灭），防离线期 DO1/DO2 同亮矛盾
-        *self.last_run_state
+        *self
+            .last_run_state
             .write()
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -563,7 +567,8 @@ impl ModbusRtuTransport {
                             self.mark_online().await;
                             // 维护 last_run_state：读到合法 0..=3 后更新（DO1 运行灯数据源；
                             // 越界/坏读数按 M9a 判无效、不更新）。std RwLock 写不跨 await，安全。
-                            *self.last_run_state
+                            *self
+                                .last_run_state
                                 .write()
                                 .unwrap_or_else(|e| e.into_inner()) = Some(st);
                             // M1 停机观测：PCS 停机（1013=0）而 MUPC 此前已下发运行 →
@@ -769,7 +774,8 @@ impl IntercoreTransport for ModbusRtuTransport {
 
     fn last_run_state(&self) -> Option<u16> {
         // std RwLock：同步 getter 供上层/DO 驱动在异步上下文外安全读取
-        *self.last_run_state
+        *self
+            .last_run_state
             .read()
             .unwrap_or_else(|e| e.into_inner())
     }
@@ -961,15 +967,31 @@ mod tests {
         let words = [to_pcs_reg(220.0), to_pcs_reg(330.0), to_pcs_reg(-150.0)];
         assert_eq!(decode_3phase_array(&words), Some([22.0, 33.0, -15.0]));
         assert_eq!(decode_3phase_array(&[]), None, "空段应判无效");
-        assert_eq!(decode_3phase_array(&[to_pcs_reg(1.0)]), None, "不足 3 字应判无效");
-        assert_eq!(decode_3phase_array(&[to_pcs_reg(1.0), to_pcs_reg(2.0)]), None);
+        assert_eq!(
+            decode_3phase_array(&[to_pcs_reg(1.0)]),
+            None,
+            "不足 3 字应判无效"
+        );
+        assert_eq!(
+            decode_3phase_array(&[to_pcs_reg(1.0), to_pcs_reg(2.0)]),
+            None
+        );
     }
 
     #[test]
     fn test_compose_three_phase_full() {
         // 电流段 3 字 + 有功/总段 4 字 → 全字段；第 4 字(1032) 映射设备总有功
-        let i_words = Some(vec![to_pcs_reg(220.0), to_pcs_reg(330.0), to_pcs_reg(-150.0)]);
-        let p_words = Some(vec![to_pcs_reg(1000.0), to_pcs_reg(2000.0), to_pcs_reg(-3000.0), to_pcs_reg(3610.0)]);
+        let i_words = Some(vec![
+            to_pcs_reg(220.0),
+            to_pcs_reg(330.0),
+            to_pcs_reg(-150.0),
+        ]);
+        let p_words = Some(vec![
+            to_pcs_reg(1000.0),
+            to_pcs_reg(2000.0),
+            to_pcs_reg(-3000.0),
+            to_pcs_reg(3610.0),
+        ]);
         let r = compose_three_phase(i_words, p_words);
         let r = r.expect("两段皆成功应返回 Some");
         assert_eq!(r.i_phase, Some([22.0, 33.0, -15.0]));
@@ -980,20 +1002,40 @@ mod tests {
     #[test]
     fn test_compose_three_phase_point_level_degradation() {
         // F5.5 点级独立降级：电流段失败（None）时，有功+总段成功仍返回；两段皆失败 → None
-        let p_words = Some(vec![to_pcs_reg(1000.0), to_pcs_reg(2000.0), to_pcs_reg(3000.0), to_pcs_reg(6000.0)]);
+        let p_words = Some(vec![
+            to_pcs_reg(1000.0),
+            to_pcs_reg(2000.0),
+            to_pcs_reg(3000.0),
+            to_pcs_reg(6000.0),
+        ]);
         let r = compose_three_phase(None, p_words.clone()).expect("有功段成功应返回 Some");
         assert_eq!(r.i_phase, None, "电流段失败只清该段");
         assert_eq!(r.p_phase, Some([100.0, 200.0, 300.0]));
         assert_eq!(r.p_total, Some(600.0));
 
         // 有功+总段不足 4 字 → p_total=None，但三相 p_phase 仍保留（4 字段中前 3 可用）
-        let short_p = Some(vec![to_pcs_reg(1000.0), to_pcs_reg(2000.0), to_pcs_reg(3000.0)]);
-        let r2 = compose_three_phase(Some(vec![to_pcs_reg(220.0), to_pcs_reg(220.0), to_pcs_reg(220.0)]), short_p)
-            .expect("两段均有读数应返回 Some");
+        let short_p = Some(vec![
+            to_pcs_reg(1000.0),
+            to_pcs_reg(2000.0),
+            to_pcs_reg(3000.0),
+        ]);
+        let r2 = compose_three_phase(
+            Some(vec![
+                to_pcs_reg(220.0),
+                to_pcs_reg(220.0),
+                to_pcs_reg(220.0),
+            ]),
+            short_p,
+        )
+        .expect("两段均有读数应返回 Some");
         assert_eq!(r2.p_phase, Some([100.0, 200.0, 300.0]));
         assert_eq!(r2.p_total, None, "第 4 字缺失 → 总有功 None");
 
-        assert_eq!(compose_three_phase(None, None), None, "两段皆失败 → 整体 None");
+        assert_eq!(
+            compose_three_phase(None, None),
+            None,
+            "两段皆失败 → 整体 None"
+        );
     }
 }
 

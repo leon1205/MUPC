@@ -462,10 +462,7 @@ impl GridAggregator {
     /// 「重启后从当前周期开始、空档表现为时间戳跳变」相反。
     pub fn tick(&mut self, now_ms: u64) -> Vec<AggregateRow> {
         if self.cur.is_none() {
-            self.cur = Some(PeriodAcc::new(
-                self.period_start(now_ms),
-                self.specs.len(),
-            ));
+            self.cur = Some(PeriodAcc::new(self.period_start(now_ms), self.specs.len()));
             return Vec::new();
         }
         let mut rows = Vec::new();
@@ -540,10 +537,7 @@ impl GridAggregator {
         let mut rows = Vec::with_capacity(self.rows_per_period());
         for (i, spec) in self.specs.iter().enumerate() {
             let (value, quality) = if acc.count[i] > 0 {
-                (
-                    Some(acc.sum[i] / f64::from(acc.count[i])),
-                    Quality::Good,
-                )
+                (Some(acc.sum[i] / f64::from(acc.count[i])), Quality::Good)
             } else {
                 // 本周期该通道**无有效采样** ⇒ 真 NULL + NoData（**不得写 0 冒充**）。
                 (None, Quality::NoData)
@@ -557,8 +551,10 @@ impl GridAggregator {
             if spec.extremes {
                 // 极值行与均值行**同时间戳**（§9.1.4），仅 `metric_name` 不同。
                 let (max_name, min_name) = (
-                    spec.max_metric.expect("extremes=true 的通道必须给 max_metric"),
-                    spec.min_metric.expect("extremes=true 的通道必须给 min_metric"),
+                    spec.max_metric
+                        .expect("extremes=true 的通道必须给 max_metric"),
+                    spec.min_metric
+                        .expect("extremes=true 的通道必须给 min_metric"),
                 );
                 for name in [max_name, min_name] {
                     let (value, quality) = if acc.count[i] > 0 {
@@ -589,7 +585,10 @@ impl GridAggregator {
 /// （同 `repository::ts_to_datetime` 的范式：不静默）。
 fn ms_to_utc(ms: u64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms.min(i64::MAX as u64) as i64).unwrap_or_else(|| {
-        tracing::error!(timestamp_ms = ms, "聚合周期起点非法的毫秒时间戳，使用 epoch 兜底");
+        tracing::error!(
+            timestamp_ms = ms,
+            "聚合周期起点非法的毫秒时间戳，使用 epoch 兜底"
+        );
         DateTime::default()
     })
 }
@@ -720,7 +719,11 @@ mod tests {
         assert_eq!(rows.len(), 22);
         for r in &rows {
             assert_eq!(r.timestamp.timestamp_millis(), 999_960_000);
-            assert_eq!(r.timestamp.timestamp_millis() % 60_000, 0, "必为 period 的整数倍");
+            assert_eq!(
+                r.timestamp.timestamp_millis() % 60_000,
+                0,
+                "必为 period 的整数倍"
+            );
         }
         // 极值行与均值行**同时间戳**
         assert_eq!(
@@ -778,8 +781,15 @@ mod tests {
         agg.tick(0);
         // 30 min 无人调用 tick（例如采集任务饿死）⇒ 一次 tick 补齐 30 个周期
         let rows = agg.tick(30 * 60_000);
-        assert_eq!(rows.len(), 30 * 22, "30 周期 × 22 行 = 660 行（§9.1.5 的容量口径）");
-        let mut starts: Vec<i64> = rows.iter().map(|r| r.timestamp.timestamp_millis()).collect();
+        assert_eq!(
+            rows.len(),
+            30 * 22,
+            "30 周期 × 22 行 = 660 行（§9.1.5 的容量口径）"
+        );
+        let mut starts: Vec<i64> = rows
+            .iter()
+            .map(|r| r.timestamp.timestamp_millis())
+            .collect();
         starts.dedup();
         assert_eq!(starts.len(), 30, "每周期一个时间戳");
         assert_eq!(starts[0], 0);
@@ -794,7 +804,10 @@ mod tests {
         let mut agg = GridAggregator::new(60_000);
         // 重启时刻 = 2 h 之后：首个 tick 只锚定当前周期、**不产行**
         let boot_ms = 2 * 3_600_000;
-        assert!(agg.tick(boot_ms).is_empty(), "重启后不得为历史空档补产 NoData 行");
+        assert!(
+            agg.tick(boot_ms).is_empty(),
+            "重启后不得为历史空档补产 NoData 行"
+        );
         assert_eq!(agg.current_start_ms(), Some(boot_ms));
         // 下一周期才产行，且时间戳从 boot 起（跳变 —— 空档可识别）
         let rows = agg.tick(boot_ms + 60_000);
@@ -843,7 +856,9 @@ mod tests {
         anchored.tick(0);
         let rows = anchored.flush(30_000);
         assert_eq!(rows.len(), 22);
-        assert!(rows.iter().all(|r| r.value.is_none() && r.quality == Quality::NoData));
+        assert!(rows
+            .iter()
+            .all(|r| r.value.is_none() && r.quality == Quality::NoData));
     }
 
     /// **部分缺测**：均值分母 = 本通道**有效采样数**（不是周期总采样数）；缺测通道 NoData。

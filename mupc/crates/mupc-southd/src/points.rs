@@ -196,7 +196,10 @@ fn expand_scalar(block: &RegBlockConf) -> Result<Vec<PointSpec>, String> {
             let metric = positional(&block.name, off);
             out.push(PointSpec {
                 metric: metric.clone(),
-                kind: PointKind::Scalar { offset: off, decode },
+                kind: PointKind::Scalar {
+                    offset: off,
+                    decode,
+                },
             });
             spans.push((off, width, metric));
             off += width;
@@ -247,7 +250,10 @@ fn expand_scalar(block: &RegBlockConf) -> Result<Vec<PointSpec>, String> {
             };
             out.push(PointSpec {
                 metric: metric.clone(),
-                kind: PointKind::Scalar { offset: off, decode },
+                kind: PointKind::Scalar {
+                    offset: off,
+                    decode,
+                },
             });
             spans.push((off, width as u16, metric));
         }
@@ -343,7 +349,10 @@ mod tests {
     fn scalar_block_without_points_is_every_value_slot() {
         let b = blk("bms_term", 2991, 4);
         let pts = expand(&b).unwrap();
-        assert_eq!(metrics(&pts), ["bms_term_1", "bms_term_2", "bms_term_3", "bms_term_4"]);
+        assert_eq!(
+            metrics(&pts),
+            ["bms_term_1", "bms_term_2", "bms_term_3", "bms_term_4"]
+        );
         assert_eq!(pts[0].kind.width(), 1);
     }
 
@@ -354,7 +363,11 @@ mod tests {
         b.format = RegFormat::Int32Scaled;
         b.scale = 0.01;
         let pts = expand(&b).unwrap();
-        assert_eq!(metrics(&pts), ["p_1", "p_3", "p_5"], "序号锚定低地址寄存器偏移 + 1");
+        assert_eq!(
+            metrics(&pts),
+            ["p_1", "p_3", "p_5"],
+            "序号锚定低地址寄存器偏移 + 1"
+        );
     }
 
     /// 有 `points`：只产出列出的点（bms_meta 的 8 条 → 8 点，188 不产）
@@ -374,7 +387,16 @@ mod tests {
         let pts = expand(&b).unwrap();
         assert_eq!(
             metrics(&pts),
-            ["bms_io_8", "bms_io_9", "bms_io_10", "bms_io_11", "bms_io_12", "bms_io_13", "bms_io_14", "bms_io_15"]
+            [
+                "bms_io_8",
+                "bms_io_9",
+                "bms_io_10",
+                "bms_io_11",
+                "bms_io_12",
+                "bms_io_13",
+                "bms_io_14",
+                "bms_io_15"
+            ]
         );
     }
 
@@ -385,7 +407,11 @@ mod tests {
         b.points = vec![pt(19, 1, Some("soc"))];
         let pts = expand(&b).unwrap();
         assert_eq!(metrics(&pts), ["soc"]);
-        assert_eq!(pts[0].kind.offset(), 18, "at 1 起 → 块内偏移 18（寄存器 118）");
+        assert_eq!(
+            pts[0].kind.offset(),
+            18,
+            "at 1 起 → 块内偏移 18（寄存器 118）"
+        );
     }
 
     /// 32 位点占 2 寄存器、产 1 点，且 `count` 必须 1
@@ -438,11 +464,18 @@ mod tests {
     #[test]
     fn overlapping_points_rejected() {
         let mut b = blk("x", 100, 4);
-        b.points = vec![PointConf {
-            at: 1, count: 1, name: None,
-            format: Some(RegFormat::Int32Scaled), scale: Some(1.0), offset: None,
-            word_order: WordOrder::HiLo,
-        }, pt(2, 1, None)];
+        b.points = vec![
+            PointConf {
+                at: 1,
+                count: 1,
+                name: None,
+                format: Some(RegFormat::Int32Scaled),
+                scale: Some(1.0),
+                offset: None,
+                word_order: WordOrder::HiLo,
+            },
+            pt(2, 1, None),
+        ];
         let e = expand(&b).unwrap_err();
         assert!(e.contains("点位重叠") && e.contains("x"), "实际: {e}");
     }
@@ -494,11 +527,18 @@ mod tests {
     #[test]
     fn footprint_matches_expand() {
         let mut b = blk("pcs_3zone", 1000, 4);
-        b.points = vec![PointConf {
-            at: 1, count: 1, name: None,
-            format: Some(RegFormat::Int32Scaled), scale: Some(0.1), offset: None,
-            word_order: WordOrder::LoHi,
-        }, pt(3, 2, None)];
+        b.points = vec![
+            PointConf {
+                at: 1,
+                count: 1,
+                name: None,
+                format: Some(RegFormat::Int32Scaled),
+                scale: Some(0.1),
+                offset: None,
+                word_order: WordOrder::LoHi,
+            },
+            pt(3, 2, None),
+        ];
         assert_eq!(footprint(&b).unwrap(), vec![(0, 2), (2, 1), (3, 1)]);
     }
 }

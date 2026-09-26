@@ -24,9 +24,9 @@ impl Default for LoadCovariates {
     fn default() -> Self {
         Self {
             temperature: 25.0,
-            date_type: 0,   // 工作日
+            date_type: 0, // 工作日
             is_irrigation_season: false,
-            hour: 12,       // 正午
+            hour: 12, // 正午
         }
     }
 }

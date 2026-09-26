@@ -655,7 +655,9 @@ impl AuditLogger {
                 continue; // 跳过当前文件
             }
             let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let date_str = name.strip_prefix("audit_").and_then(|s| s.strip_suffix(".jsonl"));
+            let date_str = name
+                .strip_prefix("audit_")
+                .and_then(|s| s.strip_suffix(".jsonl"));
             if let Some(date_str) = date_str {
                 if let Ok(naive) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
                     if let Some(file_date) = naive.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc()) {

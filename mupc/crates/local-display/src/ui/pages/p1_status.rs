@@ -220,8 +220,7 @@ const SOC_CHIP_W: i32 = 2 * Dimens::CHIP_MIN_W;
 ///
 /// ⚠️ 刻度行的**实际行高**是 26（= 24 + 2，见 [`MAIN_CARD_BODY_H`] 的实测定标）⇒ 其底缘落在
 /// 内容区下缘**之下 2 px**（内容区 286 → 288），距卡**外缘**仍余 15 px，**不裁切、不重叠**。
-const SOC_BAR_Y: i32 =
-    MAIN_CARD_BODY_H - SOC_BAR_H - TIGHT_GAP - TextSlot::Body.px() as i32;
+const SOC_BAR_Y: i32 = MAIN_CARD_BODY_H - SOC_BAR_H - TIGHT_GAP - TextSlot::Body.px() as i32;
 /// 量程条当前值竖刻线宽（UI §6.1「4 px 高亮」）。
 const SOC_MARKER_W: i32 = Dimens::ACCENT_BAR;
 /// 刻度行 y。
@@ -507,14 +506,14 @@ impl P1StatusPage {
 
         // ── 样式缓存（只建一次）──
         let soc_styles = vec![
-            theme::text(TextSlot::SocValue, Palette::DANGER),      // 0 = ≤15 %
-            theme::text(TextSlot::SocValue, Palette::SOC_OK),      // 1 = 15–85 %
-            theme::text(TextSlot::SocValue, Palette::SOC_HIGH),    // 2 = ≥85 %
+            theme::text(TextSlot::SocValue, Palette::DANGER), // 0 = ≤15 %
+            theme::text(TextSlot::SocValue, Palette::SOC_OK), // 1 = 15–85 %
+            theme::text(TextSlot::SocValue, Palette::SOC_HIGH), // 2 = ≥85 %
             theme::text(TextSlot::SocValue, Palette::PLACEHOLDER), // 3 = 降级
         ];
         let pcs_state_styles = vec![
-            theme::text(TextSlot::PcsState, Palette::OK),      // 0 = 充电
-            theme::text(TextSlot::PcsState, Palette::INFO),    // 1 = 放电
+            theme::text(TextSlot::PcsState, Palette::OK), // 0 = 充电
+            theme::text(TextSlot::PcsState, Palette::INFO), // 1 = 放电
             theme::text(TextSlot::PcsState, Palette::STOPPED), // 2 = 停机 / 离线 / 未知
             theme::text(TextSlot::PcsState, Palette::STANDBY), // 3 = 待机
         ];
@@ -531,9 +530,9 @@ impl P1StatusPage {
             theme::card_head_bar(Palette::STANDBY),
         ];
         let dot_styles = vec![
-            theme::card_head_bar(Palette::SOC_OK),        // 0 = 实时
-            theme::card_head_bar(Palette::BORDER_CTRL),   // 1 = 停更
-            theme::card_head_bar(Palette::STALE),         // 2 = 过期
+            theme::card_head_bar(Palette::SOC_OK),      // 0 = 实时
+            theme::card_head_bar(Palette::BORDER_CTRL), // 1 = 停更
+            theme::card_head_bar(Palette::STALE),       // 2 = 过期
         ];
         let arrow_styles = vec![
             theme::icon(PHASE_ARROW_PX, Palette::OK),
@@ -635,10 +634,19 @@ impl P1StatusPage {
         value_row.set_pos(0, SOC_VALUE_Y);
         let value_slot = layout_box(&value_row, SOC_VALUE_SLOT_W, TextSlot::SocValue.px() as i32)?;
         value_slot.center();
-        let soc_value = Rc::new(label(&value_slot, TextSlot::SocValue, Palette::PLACEHOLDER)?);
+        let soc_value = Rc::new(label(
+            &value_slot,
+            TextSlot::SocValue,
+            Palette::PLACEHOLDER,
+        )?);
         soc_value.set_text(PLACEHOLDER);
         soc_value.center();
-        let soc_unit = text_label(&value_row, TEXT_SOC_UNIT, TextSlot::Unit, Palette::TEXT_SECOND)?;
+        let soc_unit = text_label(
+            &value_row,
+            TEXT_SOC_UNIT,
+            TextSlot::Unit,
+            Palette::TEXT_SECOND,
+        )?;
         // 单位紧贴数值槽右缘（槽已水平居中于行内）。
         soc_unit.set_pos(
             (MAIN_CARD_INNER_W - SOC_VALUE_SLOT_W) / 2 + SOC_VALUE_SLOT_W + Dimens::GAP_MIN,
@@ -652,11 +660,26 @@ impl P1StatusPage {
         let seg_low_w = MAIN_CARD_INNER_W * state::SOC_LOW_PCT / 100;
         let seg_high_w = MAIN_CARD_INNER_W * (100 - state::SOC_HIGH_PCT) / 100;
         let seg_mid_w = MAIN_CARD_INNER_W - seg_low_w - seg_high_w;
-        let seg_low = decor(&soc_card, seg_low_w, SOC_BAR_H, &theme::card_head_bar(Palette::DANGER))?;
+        let seg_low = decor(
+            &soc_card,
+            seg_low_w,
+            SOC_BAR_H,
+            &theme::card_head_bar(Palette::DANGER),
+        )?;
         seg_low.set_pos(0, SOC_BAR_Y);
-        let seg_mid = decor(&soc_card, seg_mid_w, SOC_BAR_H, &theme::card_head_bar(Palette::SOC_OK))?;
+        let seg_mid = decor(
+            &soc_card,
+            seg_mid_w,
+            SOC_BAR_H,
+            &theme::card_head_bar(Palette::SOC_OK),
+        )?;
         seg_mid.set_pos(seg_low_w, SOC_BAR_Y);
-        let seg_high = decor(&soc_card, seg_high_w, SOC_BAR_H, &theme::card_head_bar(Palette::SOC_HIGH))?;
+        let seg_high = decor(
+            &soc_card,
+            seg_high_w,
+            SOC_BAR_H,
+            &theme::card_head_bar(Palette::SOC_HIGH),
+        )?;
         seg_high.set_pos(seg_low_w + seg_mid_w, SOC_BAR_Y);
         // 灰化覆盖（EDGE-02：SOC 双源皆失 ⇒ 量程条整体灰化）。**最后建** ⇒ 覆盖在三段之上。
         let soc_gray = decor(
@@ -676,9 +699,19 @@ impl P1StatusPage {
         soc_marker.set_pos(0, SOC_BAR_Y);
         set_visible(&soc_marker, false);
 
-        let scale_low = text_label(&soc_card, TEXT_SOC_SCALE_LOW, TextSlot::Weak, Palette::TEXT_WEAK)?;
+        let scale_low = text_label(
+            &soc_card,
+            TEXT_SOC_SCALE_LOW,
+            TextSlot::Weak,
+            Palette::TEXT_WEAK,
+        )?;
         scale_low.set_pos(0, SOC_SCALE_Y);
-        let scale_high = text_label(&soc_card, TEXT_SOC_SCALE_HIGH, TextSlot::Weak, Palette::TEXT_WEAK)?;
+        let scale_high = text_label(
+            &soc_card,
+            TEXT_SOC_SCALE_HIGH,
+            TextSlot::Weak,
+            Palette::TEXT_WEAK,
+        )?;
         scale_high.set_pos(MAIN_CARD_INNER_W - SOC_SCALE_LABEL_W, SOC_SCALE_Y);
         let soc_scale = scale_low.into_obj();
         keep.push(scale_high.into_obj());
@@ -696,7 +729,12 @@ impl P1StatusPage {
             0,
             theme::center_offset(STRIP_H, TextSlot::SectionTitle.px() as i32),
         );
-        let pcs_judge = text_label(&pcs_card, TEXT_PCS_JUDGE, TextSlot::Weak, Palette::TEXT_WEAK)?;
+        let pcs_judge = text_label(
+            &pcs_card,
+            TEXT_PCS_JUDGE,
+            TextSlot::Weak,
+            Palette::TEXT_WEAK,
+        )?;
         pcs_judge.set_size(PCS_JUDGE_W, TextSlot::Body.px() as i32);
         pcs_judge.set_long_mode(LongMode::DOTS);
         pcs_judge.set_pos(MAIN_CARD_INNER_W - PCS_JUDGE_W, TIGHT_GAP);
@@ -721,7 +759,11 @@ impl P1StatusPage {
         )?;
         pcs_bar_left.set_pos(-CARD_INSET, -CARD_INSET + theme::Stroke::ALERT);
 
-        let pcs_icon = Rc::new(label(&pcs_card, theme::icon_slot(PCS_ICON), Palette::STOPPED)?);
+        let pcs_icon = Rc::new(label(
+            &pcs_card,
+            theme::icon_slot(PCS_ICON),
+            Palette::STOPPED,
+        )?);
         pcs_icon.set_size(PCS_ICON, PCS_ICON);
         pcs_icon.set_text("?");
         pcs_icon.set_pos(0, PCS_STATE_Y + theme::center_offset(PCS_STATE_H, PCS_ICON));
@@ -764,12 +806,22 @@ impl P1StatusPage {
                 2 => TEXT_PHASE_C,
                 _ => TEXT_PHASE_TOTAL,
             };
-            let head = text_label(&card, head_text, TextSlot::SectionTitle, Palette::TEXT_PRIMARY)?;
+            let head = text_label(
+                &card,
+                head_text,
+                TextSlot::SectionTitle,
+                Palette::TEXT_PRIMARY,
+            )?;
             head.set_pos(
                 0,
                 theme::center_offset(PHASE_HEAD_H, TextSlot::SectionTitle.px() as i32),
             );
-            let dot = decor(&card, Dimens::STATUS_DOT, Dimens::STATUS_DOT, &dot_styles[1])?;
+            let dot = decor(
+                &card,
+                Dimens::STATUS_DOT,
+                Dimens::STATUS_DOT,
+                &dot_styles[1],
+            )?;
             dot.set_pos(
                 PHASE_INNER_W - Dimens::STATUS_DOT,
                 theme::center_offset(PHASE_HEAD_H, Dimens::STATUS_DOT),
@@ -785,7 +837,12 @@ impl P1StatusPage {
             reason_chip.obj().set_pos(PHASE_INNER_W - PHASE_CHIP_W, 0);
             set_visible(reason_chip.obj(), false);
 
-            let p_label = text_label(&card, TEXT_ACTIVE_POWER, TextSlot::Body, Palette::TEXT_SECOND)?;
+            let p_label = text_label(
+                &card,
+                TEXT_ACTIVE_POWER,
+                TextSlot::Body,
+                Palette::TEXT_SECOND,
+            )?;
             p_label.set_pos(0, PHASE_P_LABEL_Y);
             let p_value = Rc::new(label(&card, TextSlot::PhasePower, Palette::PLACEHOLDER)?);
             p_value.set_text(PLACEHOLDER);
@@ -812,8 +869,7 @@ impl P1StatusPage {
             arrow.set_size(PHASE_ARROW_PX, PHASE_ARROW_PX);
             arrow.set_pos(
                 PHASE_ARROW_X,
-                PHASE_P_Y
-                    + theme::center_offset(TextSlot::PhasePower.px() as i32, PHASE_ARROW_PX),
+                PHASE_P_Y + theme::center_offset(TextSlot::PhasePower.px() as i32, PHASE_ARROW_PX),
             );
             set_visible(&arrow, false);
 
@@ -877,9 +933,19 @@ impl P1StatusPage {
         for (i, name) in device_names.iter().enumerate() {
             let x = (i % 4) as i32 * (Dimens::CARD_STATUS_W + Dimens::GAP_GROUP);
             let y = if i < 4 { DEVICE_ROW1_Y } else { DEVICE_ROW2_Y };
-            let card = decor(&root, Dimens::CARD_STATUS_W, Dimens::CARD_STATUS_H, &theme::card())?;
+            let card = decor(
+                &root,
+                Dimens::CARD_STATUS_W,
+                Dimens::CARD_STATUS_H,
+                &theme::card(),
+            )?;
             card.set_pos(x, y);
-            let icon = text_label(&card, "●", theme::icon_slot(Dimens::ICON_SM), Palette::TEXT_WEAK)?;
+            let icon = text_label(
+                &card,
+                "●",
+                theme::icon_slot(Dimens::ICON_SM),
+                Palette::TEXT_WEAK,
+            )?;
             icon.set_size(Dimens::ICON_SM, Dimens::ICON_SM);
             icon.set_pos(0, theme::center_offset(DEVICE_INNER_H, Dimens::ICON_SM));
             let name_l = text_label(&card, name, TextSlot::Body, Palette::TEXT_SECOND)?;
@@ -892,7 +958,10 @@ impl P1StatusPage {
             keep.push(name_l.into_obj());
             let value = Rc::new(label(&card, TextSlot::CardValue, Palette::TEXT_PRIMARY)?);
             value.set_text(PLACEHOLDER);
-            value.set_size(DEVICE_INNER_W - DEVICE_TEXT_X, TextSlot::CardValue.px() as i32);
+            value.set_size(
+                DEVICE_INNER_W - DEVICE_TEXT_X,
+                TextSlot::CardValue.px() as i32,
+            );
             value.set_long_mode(LongMode::DOTS);
             value.set_pos(DEVICE_TEXT_X, TextSlot::Body.px() as i32 + TIGHT_GAP);
             // 连接类卡片（调度主站 / 核间）：五态各一个 `LedIndicator`，只显示其一
@@ -911,8 +980,10 @@ impl P1StatusPage {
                         st.display_name(),
                         link_color(st),
                     )?);
-                    led.obj()
-                        .set_pos(DEVICE_TEXT_X, theme::center_offset(DEVICE_INNER_H, Dimens::ICON_SM));
+                    led.obj().set_pos(
+                        DEVICE_TEXT_X,
+                        theme::center_offset(DEVICE_INNER_H, Dimens::ICON_SM),
+                    );
                     set_visible(led.obj(), false);
                     arr.push(led);
                 }
@@ -940,11 +1011,26 @@ impl P1StatusPage {
         let alarm_card = decor(&root, Dimens::CONTENT_W, ALARM_CARD_H, &theme::card())?;
         alarm_card.set_pos(0, ALARM_CARD_Y);
         let head_y = theme::center_offset(ALARM_HEAD_H, TextSlot::Body.px() as i32);
-        let head_time = text_label(&alarm_card, TEXT_ALARM_TIME, TextSlot::Body, Palette::TEXT_SECOND)?;
+        let head_time = text_label(
+            &alarm_card,
+            TEXT_ALARM_TIME,
+            TextSlot::Body,
+            Palette::TEXT_SECOND,
+        )?;
         head_time.set_pos(0, head_y);
-        let head_level = text_label(&alarm_card, TEXT_ALARM_LEVEL, TextSlot::Body, Palette::TEXT_SECOND)?;
+        let head_level = text_label(
+            &alarm_card,
+            TEXT_ALARM_LEVEL,
+            TextSlot::Body,
+            Palette::TEXT_SECOND,
+        )?;
         head_level.set_pos(ALARM_TIME_COL_W, head_y);
-        let head_msg = text_label(&alarm_card, TEXT_ALARM_MESSAGE, TextSlot::Body, Palette::TEXT_SECOND)?;
+        let head_msg = text_label(
+            &alarm_card,
+            TEXT_ALARM_MESSAGE,
+            TextSlot::Body,
+            Palette::TEXT_SECOND,
+        )?;
         head_msg.set_pos(ALARM_MSG_COL_X, head_y);
         keep.push(head_time.into_obj());
         keep.push(head_level.into_obj());
@@ -957,7 +1043,10 @@ impl P1StatusPage {
             row.set_pos(0, y);
             let text_y = theme::center_offset(Dimens::ROW_LOG_H, TextSlot::Body.px() as i32);
             let time = Rc::new(text_label(&row, "", TextSlot::Body, Palette::TEXT_WEAK)?);
-            time.set_size(ALARM_TIME_COL_W - Dimens::GAP_MIN, TextSlot::Body.px() as i32);
+            time.set_size(
+                ALARM_TIME_COL_W - Dimens::GAP_MIN,
+                TextSlot::Body.px() as i32,
+            );
             time.set_long_mode(LongMode::DOTS);
             time.set_pos(0, text_y);
             let level_block = decor(
@@ -1335,7 +1424,11 @@ impl P1StatusPage {
         for (i, card) in self.devices.iter().enumerate() {
             match &card.leds {
                 Some(leds) => {
-                    let st = if i == 5 { device.iec104 } else { device.intercore };
+                    let st = if i == 5 {
+                        device.iec104
+                    } else {
+                        device.intercore
+                    };
                     let idx = LED_STATES.iter().position(|s| *s == st).unwrap_or(4);
                     let visible: Vec<&Obj> = leds.iter().map(|l| l.obj()).collect();
                     show_only(&visible, Some(idx));

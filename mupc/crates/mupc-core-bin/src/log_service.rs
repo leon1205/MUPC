@@ -399,10 +399,7 @@ impl LogQuery {
         match self.range {
             LogRange::H1 => (now_ms.saturating_sub(3_600_000), now_ms),
             LogRange::H24 => (now_ms.saturating_sub(86_400_000), now_ms),
-            LogRange::Custom => (
-                self.from_ms.unwrap_or(0),
-                self.to_ms.unwrap_or(u64::MAX),
-            ),
+            LogRange::Custom => (self.from_ms.unwrap_or(0), self.to_ms.unwrap_or(u64::MAX)),
         }
     }
 }
@@ -456,9 +453,7 @@ pub fn parse_query(pairs: &[(String, String)]) -> Result<LogQuery, String> {
             "to" => to = Some(parse_ms(v, "to")?),
             "cursor" => q.cursor = Some(parse_ms(v, "cursor")?),
             "limit" => {
-                let n: usize = v
-                    .parse()
-                    .map_err(|_| format!("limit 不是非负整数: {v}"))?;
+                let n: usize = v.parse().map_err(|_| format!("limit 不是非负整数: {v}"))?;
                 limit = Some(n);
             }
             other => return Err(format!("未知查询参数: {other}")),
@@ -746,7 +741,9 @@ impl ScanState<'_> {
         if !self.q.targets.is_empty() && !self.q.targets.iter().any(|t| t == &target) {
             return Step::Continue;
         }
-        let seq = ts_ms.saturating_mul(1000).saturating_add(u64::from(k.min(999)));
+        let seq = ts_ms
+            .saturating_mul(1000)
+            .saturating_add(u64::from(k.min(999)));
         if let Some(c) = self.q.cursor {
             if seq <= c {
                 return Step::Continue; // 增量：只要"更新的"（契约 §4.4）
@@ -1120,7 +1117,10 @@ impl LogService {
         }
         // R3-③：把**实际择向**记进统计（否则"尾部窗口走倒读"这条主路径承诺无人在守：
         // 把 `choose_direction` 写死 `Forward` 时，全部语义类用例仍然全绿）。
-        match self.choose_direction(&mut f, len, st.start, st.end, path).await? {
+        match self
+            .choose_direction(&mut f, len, st.start, st.end, path)
+            .await?
+        {
             ScanDirection::Backward => {
                 st.stats.backward_files += 1;
                 read_backward(&mut f, len, st, file_rank, path).await
@@ -1209,7 +1209,8 @@ impl LogService {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // 同 R7
                 Err(e) => return Err(format!("打开日志文件 {} 失败: {e}", path.display())),
             };
-            let mut r = BoundedLineReader::new(&mut f, TARGETS_READ_CHUNK_BYTES, TARGETS_LINE_MAX_BYTES);
+            let mut r =
+                BoundedLineReader::new(&mut f, TARGETS_READ_CHUNK_BYTES, TARGETS_LINE_MAX_BYTES);
             loop {
                 let item = match r.next_line().await {
                     Ok(item) => item,
@@ -1530,18 +1531,18 @@ async fn read_backward(
             break;
         }
         let next = off + start as u64; // = 块内第一个 '\n' 之后 ⇒ 行首（下一轮的右端）
-        // B-1 进度守卫：`pos` 必须**严格减小**。
-        //
-        // ⚠️ **`else` 分支代数上不可达（整改三订正，评审要求"不许把死代码说成兜底能救"）**：
-        // 执行到这里的前提是上面 `if step != Step::Continue || off == 0 { break; }` **没** break
-        // ⇒ `off > 0`（且 `step == Continue`）⇒ 本轮走的是"正常分支"（`_` 分支只 `continue` 或
-        // `break` 到不了这里）。正常分支下 `next = off + start` 且 `start < buf.len()`：
-        //   · `off > 0` 时 `buf.len() = pos - off = chunk` ⇒ `next < off + chunk = pos`；
-        //   · `off == 0` 已 break（`next = start < buf.len() = pos` 其实也成立，只是走不到）。
-        // 实测：复核实测把本 `else` 换成 `panic!` 后跑全部 225 条 **0 红**；整改三的实施者又跑了一遍
-        // `log_service::` 全部 **38 条**（含本轮新增的 4 条）同样 **0 红** ⇒ 不可达得证。
-        // 真正的收敛保证来自**代数**（上式）与下面 `chunk` 的倍增上限；本守卫是**纯防御**保留，
-        // 不是"出错时还能救回来"的机制 —— 将来若有人改动上面的分支结构，它才会重新有意义。
+                                       // B-1 进度守卫：`pos` 必须**严格减小**。
+                                       //
+                                       // ⚠️ **`else` 分支代数上不可达（整改三订正，评审要求"不许把死代码说成兜底能救"）**：
+                                       // 执行到这里的前提是上面 `if step != Step::Continue || off == 0 { break; }` **没** break
+                                       // ⇒ `off > 0`（且 `step == Continue`）⇒ 本轮走的是"正常分支"（`_` 分支只 `continue` 或
+                                       // `break` 到不了这里）。正常分支下 `next = off + start` 且 `start < buf.len()`：
+                                       //   · `off > 0` 时 `buf.len() = pos - off = chunk` ⇒ `next < off + chunk = pos`；
+                                       //   · `off == 0` 已 break（`next = start < buf.len() = pos` 其实也成立，只是走不到）。
+                                       // 实测：复核实测把本 `else` 换成 `panic!` 后跑全部 225 条 **0 红**；整改三的实施者又跑了一遍
+                                       // `log_service::` 全部 **38 条**（含本轮新增的 4 条）同样 **0 红** ⇒ 不可达得证。
+                                       // 真正的收敛保证来自**代数**（上式）与下面 `chunk` 的倍增上限；本守卫是**纯防御**保留，
+                                       // 不是"出错时还能救回来"的机制 —— 将来若有人改动上面的分支结构，它才会重新有意义。
         pos = if next < pos { next } else { off };
         chunk = REVERSE_CHUNK_BYTES;
     }
@@ -1605,7 +1606,9 @@ fn first_parsable_ts(buf: &[u8]) -> Option<u64> {
 /// 采样块里**末个**可解析行的时间戳（块尾同理可能是半行）。
 fn last_parsable_ts(buf: &[u8]) -> Option<u64> {
     let s = String::from_utf8_lossy(buf);
-    s.lines().rev().find_map(|l| parse_json_log_line(l).map(|t| t.0))
+    s.lines()
+        .rev()
+        .find_map(|l| parse_json_log_line(l).map(|t| t.0))
 }
 
 /// R4：读到了行但**一行都解析不出来** ⇒ 响亮告警（**机器细节只进 `tracing`，不上屏**）。
@@ -1712,7 +1715,9 @@ pub fn truncate_message(msg: &str) -> String {
 fn parse_json_log_line(line: &str) -> Option<(u64, LogLevel, String, String)> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let ts = v.get("timestamp")?.as_str()?;
-    let ts_ms = chrono::DateTime::parse_from_rfc3339(ts).ok()?.timestamp_millis();
+    let ts_ms = chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()?
+        .timestamp_millis();
     if ts_ms < 0 {
         return None;
     }
@@ -1802,7 +1807,9 @@ mod tests {
     }
 
     fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
-        v.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect()
+        v.iter()
+            .map(|(k, s)| (k.to_string(), s.to_string()))
+            .collect()
     }
 
     /// **挂死护栏**（B-1）：本项目多次遇到"循环类失败表现为**挂死**而不是报错"（B-1 就是活例：
@@ -1853,10 +1860,16 @@ mod tests {
             ("limit=0", vec![("limit", "0")]),
             ("limit>200", vec![("limit", "201")]),
             ("limit 非数", vec![("limit", "x")]),
-            ("from 非数", vec![("range", "custom"), ("from", "x"), ("to", "1")]),
+            (
+                "from 非数",
+                vec![("range", "custom"), ("from", "x"), ("to", "1")],
+            ),
             ("custom 缺 to", vec![("range", "custom"), ("from", "1")]),
             ("custom 缺 from", vec![("range", "custom"), ("to", "2")]),
-            ("custom from>to", vec![("range", "custom"), ("from", "9"), ("to", "1")]),
+            (
+                "custom from>to",
+                vec![("range", "custom"), ("from", "9"), ("to", "1")],
+            ),
             ("相对档给 from", vec![("range", "1h"), ("from", "1")]),
             ("相对档给 to", vec![("range", "24h"), ("to", "1")]),
         ] {
@@ -1873,9 +1886,15 @@ mod tests {
     #[test]
     fn window_is_relative_for_presets_and_explicit_for_custom() {
         let now = BASE_MS;
-        let h1 = LogQuery { range: LogRange::H1, ..Default::default() };
+        let h1 = LogQuery {
+            range: LogRange::H1,
+            ..Default::default()
+        };
         assert_eq!(h1.window(now), (now - 3_600_000, now));
-        let h24 = LogQuery { range: LogRange::H24, ..Default::default() };
+        let h24 = LogQuery {
+            range: LogRange::H24,
+            ..Default::default()
+        };
         assert_eq!(h24.window(now), (now - 86_400_000, now));
         assert_eq!(q_default().window(now), (BASE_MS - 1, BASE_MS + 600_000));
     }
@@ -1885,14 +1904,21 @@ mod tests {
     /// 超 1 KiB ⇒ 截断且**标注可见**；恰好 1 KiB ⇒ **原样**（一个字节不动）；多字节字符不劈开。
     #[test]
     fn message_over_1kib_is_truncated_with_visible_marker() {
-        assert_eq!(MESSAGE_MAX_BYTES, 1024, "跨侧约定（渲染端 ASSUMED_MAX_MESSAGE_BYTES）");
+        assert_eq!(
+            MESSAGE_MAX_BYTES, 1024,
+            "跨侧约定（渲染端 ASSUMED_MAX_MESSAGE_BYTES）"
+        );
 
         let exact = "a".repeat(MESSAGE_MAX_BYTES);
         assert_eq!(truncate_message(&exact), exact, "恰好 1 KiB 不得截断");
 
         let long = "a".repeat(MESSAGE_MAX_BYTES + 1);
         let t = truncate_message(&long);
-        assert!(t.len() <= MESSAGE_MAX_BYTES, "字节数必须 ≤1 KiB：{}", t.len());
+        assert!(
+            t.len() <= MESSAGE_MAX_BYTES,
+            "字节数必须 ≤1 KiB：{}",
+            t.len()
+        );
         assert!(t.ends_with(TRUNCATION_MARKER), "截断必须可见（尾部标注）");
         assert_eq!(t.len(), MESSAGE_MAX_BYTES);
 
@@ -1939,7 +1965,10 @@ mod tests {
         // 6 个**都在窗口内**的候选文件（日期 09-04..09-09；窗口取这 6 天 ⇒ 日剪枝不会提前 break）
         for d in 4..=9 {
             let name = format!("mupc.log.2025-09-{d:02}");
-            t.write(&name, &format!("{}\n", json_line(&iso_of(BASE_MS), "INFO", "m", "x")));
+            t.write(
+                &name,
+                &format!("{}\n", json_line(&iso_of(BASE_MS), "INFO", "m", "x")),
+            );
         }
 
         let q = LogQuery {
@@ -1948,11 +1977,23 @@ mod tests {
             to_ms: Some(day_ms(2025, 9, 9) + 86_400_000 - 1),
             ..Default::default()
         };
-        let (page, stats) = svc(&t).page_with_stats(&q, BASE_MS).await.expect("不得 Err");
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q, BASE_MS)
+            .await
+            .expect("不得 Err");
         assert!(page.range_too_large, "6 个文件 > 5 ⇒ 必须判超限");
         // A 组裁定后：超限**带回已收集条目**（5 个文件各 1 条，第 6 个根本没打开）
-        assert_eq!(page.entries.len(), 5, "已扫到的 5 条必须返回：{:?}", page.entries);
-        assert!(page.entries.iter().all(|e| e.message == "x"), "{:?}", page.entries);
+        assert_eq!(
+            page.entries.len(),
+            5,
+            "已扫到的 5 条必须返回：{:?}",
+            page.entries
+        );
+        assert!(
+            page.entries.iter().all(|e| e.message == "x"),
+            "{:?}",
+            page.entries
+        );
         assert!(!page.has_more, "5 条 < limit ⇒ 无'更多'");
         assert_eq!(page.next_cursor, None);
         assert_eq!(stats.files_scanned, 5, "只准打开 5 个文件：{stats:?}");
@@ -1979,7 +2020,10 @@ mod tests {
         dense_file(&t, N);
         // 窗口**覆盖整份文件**：窗口内 60 000 行 > 50 000 ⇒ 必须判超限
         let q = win(BASE_MS, BASE_MS + N - 1);
-        let (page, stats) = svc(&t).page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert!(page.range_too_large, "窗口内容超限必须判超限：{stats:?}");
         assert_eq!(stats.window_lines, LOG_SCAN_MAX_LINES + 1, "{stats:?}");
         assert_eq!(
@@ -1989,7 +2033,10 @@ mod tests {
         );
 
         // ── A 组裁定：超限回**已收集的最新 `limit` 条**（不再是空页）──────────────
-        assert_eq!(stats.forward_files, 1, "本夹具的择向应为正读（贴着文件头）：{stats:?}");
+        assert_eq!(
+            stats.forward_files, 1,
+            "本夹具的择向应为正读（贴着文件头）：{stats:?}"
+        );
         assert_eq!(
             page.entries.len(),
             LOG_PAGE_LIMIT_MAX,
@@ -2006,7 +2053,9 @@ mod tests {
             assert!(w[0].seq > w[1].seq, "交付内容必须 seq 严格降序");
         }
         assert!(
-            page.entries.iter().all(|e| e.ts_ms >= BASE_MS && e.ts_ms < BASE_MS + N),
+            page.entries
+                .iter()
+                .all(|e| e.ts_ms >= BASE_MS && e.ts_ms < BASE_MS + N),
             "交付内容必须全在窗口内"
         );
         // `kept` 留了 `limit+1` 条 ⇒ 本页之外**还有**更早的 ⇒ `has_more`（与正常路径同算法）
@@ -2029,8 +2078,14 @@ mod tests {
         dense_file(&t, N);
         // 渲染端 `fire_increment` 的形态：cursor = 已见最大 `seq`（取文件倒数第 3 行的 seq）
         let cursor = (BASE_MS + N - 3) * 1000;
-        let q = LogQuery { cursor: Some(cursor), ..win(BASE_MS, BASE_MS + N - 1) };
-        let (page, stats) = svc(&t).page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
+        let q = LogQuery {
+            cursor: Some(cursor),
+            ..win(BASE_MS, BASE_MS + N - 1)
+        };
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert!(
             !page.range_too_large,
             "增量轮询不得被判超限（否则 HMI 每 500 ms 清空一次列表）：{stats:?}"
@@ -2039,8 +2094,17 @@ mod tests {
             stats.window_lines, 2,
             "只有 2 条通过 cursor 筛选 ⇒ 计数**只算这 2 条**（计数位置 = 全部筛选之后）：{stats:?}"
         );
-        assert_eq!(page.entries.len(), 2, "增量条目必须返回：{:?}", page.entries);
-        assert!(page.entries.iter().all(|e| e.seq > cursor), "{:?}", page.entries);
+        assert_eq!(
+            page.entries.len(),
+            2,
+            "增量条目必须返回：{:?}",
+            page.entries
+        );
+        assert!(
+            page.entries.iter().all(|e| e.seq > cursor),
+            "{:?}",
+            page.entries
+        );
         assert_eq!(page.entries[0].ts_ms, BASE_MS + N - 1, "最新一条在前");
         assert_eq!(page.entries[1].ts_ms, BASE_MS + N - 2);
     }
@@ -2055,12 +2119,32 @@ mod tests {
         const N: u64 = 60_000;
         let t = TempDir::new("logs-over-cap-newest");
         dense_file(&t, N);
-        let q = LogQuery { limit: 10, ..win(BASE_MS + 5_000, BASE_MS + N - 1) };
-        let (page, stats) = svc(&t).page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
-        assert!(page.range_too_large, "55 000 行 > 50 000 ⇒ 必须判超限：{stats:?}");
-        assert_eq!(stats.backward_files, 1, "窗口贴文件尾 ⇒ 必须倒读：{stats:?}");
-        assert_eq!(page.entries.len(), 10, "恰好 `limit` 条（不是 0、也不是半截）");
-        assert_eq!(page.entries[0].ts_ms, BASE_MS + N - 1, "首条 = 全局最新那条");
+        let q = LogQuery {
+            limit: 10,
+            ..win(BASE_MS + 5_000, BASE_MS + N - 1)
+        };
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
+        assert!(
+            page.range_too_large,
+            "55 000 行 > 50 000 ⇒ 必须判超限：{stats:?}"
+        );
+        assert_eq!(
+            stats.backward_files, 1,
+            "窗口贴文件尾 ⇒ 必须倒读：{stats:?}"
+        );
+        assert_eq!(
+            page.entries.len(),
+            10,
+            "恰好 `limit` 条（不是 0、也不是半截）"
+        );
+        assert_eq!(
+            page.entries[0].ts_ms,
+            BASE_MS + N - 1,
+            "首条 = 全局最新那条"
+        );
         assert_eq!(
             page.entries[0].seq,
             (BASE_MS + N - 1) * 1000,
@@ -2074,7 +2158,10 @@ mod tests {
             );
         }
         assert!(stats.window_lines > LOG_SCAN_MAX_LINES, "{stats:?}");
-        assert!(page.has_more, "`kept` 留了 `limit+1` 条 ⇒ 还有更早的：{stats:?}");
+        assert!(
+            page.has_more,
+            "`kept` 留了 `limit+1` 条 ⇒ 还有更早的：{stats:?}"
+        );
         assert_eq!(page.next_cursor, page.entries.last().map(|e| e.seq));
     }
 
@@ -2089,7 +2176,10 @@ mod tests {
         let t = TempDir::new("logs-cap-vs-filter");
         dense_file(&t, N); // 全是 INFO
         let q_all = win(BASE_MS, BASE_MS + N - 1);
-        let (page_all, stats_all) = svc(&t).page_with_stats(&q_all, BASE_MS + 600_000).await.unwrap();
+        let (page_all, stats_all) = svc(&t)
+            .page_with_stats(&q_all, BASE_MS + 600_000)
+            .await
+            .unwrap();
         assert!(page_all.range_too_large, "对照：不筛 ⇒ 超限 {stats_all:?}");
 
         // 同一个窗口、同一份文件，只加 `levels=[ERROR]`（本文件一行 ERROR 都没有）
@@ -2097,7 +2187,10 @@ mod tests {
             levels: vec![LogLevel::Error],
             ..win(BASE_MS, BASE_MS + N - 1)
         };
-        let (page_err, stats_err) = svc(&t).page_with_stats(&q_err, BASE_MS + 600_000).await.unwrap();
+        let (page_err, stats_err) = svc(&t)
+            .page_with_stats(&q_err, BASE_MS + 600_000)
+            .await
+            .unwrap();
         assert!(
             !page_err.range_too_large,
             "筛选后的交付规模 = 0 ⇒ 不得判超限：{stats_err:?}"
@@ -2106,7 +2199,10 @@ mod tests {
             stats_err.window_lines, 0,
             "`window_lines` 必须在**全部筛选之后**计数：{stats_err:?}"
         );
-        assert!(page_err.entries.is_empty() && !page_err.has_more, "没有 ERROR 行 ≠ 超限");
+        assert!(
+            page_err.entries.is_empty() && !page_err.has_more,
+            "没有 ERROR 行 ≠ 超限"
+        );
     }
 
     /// **B 组**：同一毫秒的巨量行（写者卡顿后一次性刷出 / 外部工具批量追加）**不得**让倒读的
@@ -2128,40 +2224,74 @@ mod tests {
         let t = TempDir::new("logs-burst");
         let mut body = String::with_capacity(BURST * 120 + 64 * 1024);
         // ① 极旧的一行（窗口外）⇒ 令 `choose_direction` 的 `forward_span` 远大于 `backward_span`
-        body.push_str(&json_line(&iso_of(BASE_MS - 1_000_000), "INFO", "m", "ancient"));
+        body.push_str(&json_line(
+            &iso_of(BASE_MS - 1_000_000),
+            "INFO",
+            "m",
+            "ancient",
+        ));
         body.push('\n');
         // ② 同毫秒爆发（窗口内、比 `max_lines` 大 50 倍）
         for i in 0..BURST {
-            body.push_str(&json_line(&iso_of(BASE_MS), "INFO", "m", &format!("burst{i}")));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS),
+                "INFO",
+                "m",
+                &format!("burst{i}"),
+            ));
             body.push('\n');
         }
         // ③ 尾巴：500 行各自独立毫秒（倒读先收尾它们 ⇒ `kept` 非空）
         for i in 0..500u64 {
-            body.push_str(&json_line(&iso_of(BASE_MS + 1_000 + i), "INFO", "m", &format!("tail{i}")));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS + 1_000 + i),
+                "INFO",
+                "m",
+                &format!("tail{i}"),
+            ));
             body.push('\n');
         }
         t.write("mupc.log.2025-09-09", &body);
 
-        let limits = mupc_display_proto::config::LogLimits { max_lines: CAP, ..Default::default() };
+        let limits = mupc_display_proto::config::LogLimits {
+            max_lines: CAP,
+            ..Default::default()
+        };
         let s = LogService::new(t.path(), limits);
         let q = win(BASE_MS, BASE_MS + 600_000);
-        let (page, stats) = with_watchdog("同一毫秒爆发", s.page_with_stats(&q, BASE_MS + 7_200_000))
-            .await
-            .expect("不得 Err");
+        let (page, stats) =
+            with_watchdog("同一毫秒爆发", s.page_with_stats(&q, BASE_MS + 7_200_000))
+                .await
+                .expect("不得 Err");
 
         assert_eq!(stats.backward_files, 1, "夹具必须把择向扳到倒读：{stats:?}");
-        assert!(page.range_too_large, "组超上限必须**可见拒绝**（不得静默丢条）：{stats:?}");
+        assert!(
+            page.range_too_large,
+            "组超上限必须**可见拒绝**（不得静默丢条）：{stats:?}"
+        );
         assert!(
             stats.lines_read <= CAP + 512,
             "必须**早停**（不得把 50 000 行爆发读完）：{stats:?}"
         );
         // A 组裁定：超限页带回**已收集**的条目 ⇒ 尾巴那批照常交付
-        assert_eq!(page.entries.len(), LOG_PAGE_LIMIT_MAX, "limit 默认 200：{stats:?}");
-        assert_eq!(page.entries[0].ts_ms, BASE_MS + 1_499, "首条 = 全局最新那条");
+        assert_eq!(
+            page.entries.len(),
+            LOG_PAGE_LIMIT_MAX,
+            "limit 默认 200：{stats:?}"
+        );
+        assert_eq!(
+            page.entries[0].ts_ms,
+            BASE_MS + 1_499,
+            "首条 = 全局最新那条"
+        );
         assert!(
             page.entries.iter().all(|e| e.message.starts_with("tail")),
             "交付内容不得混入爆发组的行：{:?}",
-            page.entries.iter().map(|e| &e.message).take(3).collect::<Vec<_>>()
+            page.entries
+                .iter()
+                .map(|e| &e.message)
+                .take(3)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2180,7 +2310,10 @@ mod tests {
 
         // ① 窗口在文件**中部**（文件尾/头两侧距离相当）⇒ 择向把代价压到约一半
         let q = win(BASE_MS + 30_000, BASE_MS + 30_000);
-        let (page, stats) = s.page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
+        let (page, stats) = s
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert!(
             !page.range_too_large,
             "窄窗口不得被判超限（EDGE-15 判的是窗口内容，不是文件长度）：{stats:?}"
@@ -2192,12 +2325,17 @@ mod tests {
             stats.lines_read < LOG_SCAN_MAX_LINES,
             "不得读满 5 万行：{stats:?}"
         );
-        assert!(stats.lines_read <= 31_000, "择向应把读入量压到约一半：{stats:?}");
+        assert!(
+            stats.lines_read <= 31_000,
+            "择向应把读入量压到约一半：{stats:?}"
+        );
 
         // ② 窗口在文件**头部** ⇒ 择向改走"正读"，代价 ≈ 窗口右端之前的行数
         let q_head = win(BASE_MS + 1_000, BASE_MS + 1_000);
-        let (page_head, stats_head) =
-            s.page_with_stats(&q_head, BASE_MS + 600_000).await.expect("不得 Err");
+        let (page_head, stats_head) = s
+            .page_with_stats(&q_head, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert!(!page_head.range_too_large, "{stats_head:?}");
         assert_eq!(page_head.entries.len(), 1);
         // ⚠️ **语义变更（B-3，评审要求）**：整改前是 `<= 1_100`（读到窗口右端就停）。B-3 给
@@ -2208,7 +2346,10 @@ mod tests {
             stats_head.lines_read <= 2_000,
             "窗口靠文件头时应正读，读入量 ≈ 1 000 行 + 一个迟滞块：{stats_head:?}"
         );
-        assert_eq!(stats_head.forward_files, 1, "该窗口在文件头 ⇒ 必须正读：{stats_head:?}");
+        assert_eq!(
+            stats_head.forward_files, 1,
+            "该窗口在文件头 ⇒ 必须正读：{stats_head:?}"
+        );
     }
 
     /// **R3-③（覆盖缺口）**：择向逻辑**零覆盖** ⇒ "尾部窗口要便宜"这条**主路径承诺**无人守。
@@ -2254,7 +2395,11 @@ mod tests {
             "贴尾窗口的代价必须是**一个块**量级（正向全读 = 60 000 行）：{stats:?}"
         );
         assert_eq!(page.entries.len(), 100, "{stats:?}");
-        assert_eq!(page.entries[0].ts_ms, BASE_MS + N - 1, "首条 = 文件最后一行");
+        assert_eq!(
+            page.entries[0].ts_ms,
+            BASE_MS + N - 1,
+            "首条 = 文件最后一行"
+        );
         assert!(!page.range_too_large);
     }
 
@@ -2276,14 +2421,23 @@ mod tests {
         let s = LogService::new(t.path(), limits);
 
         let q = win(BASE_MS, BASE_MS + 1_000_000); // 远宽于文件 ⇒ 择向 = 倒读
-        let (page, stats) = s.page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
+        let (page, stats) = s
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert_eq!(stats.lines_read, N as usize, "每行恰读一次：{stats:?}");
-        assert_eq!(stats.window_lines, N as usize, "窗口覆盖整份文件 ⇒ 一行不少：{stats:?}");
+        assert_eq!(
+            stats.window_lines, N as usize,
+            "窗口覆盖整份文件 ⇒ 一行不少：{stats:?}"
+        );
         assert_eq!(
             stats.parsed_lines, N as usize,
             "块首的半行不得被当垃圾丢掉（它必须在下一轮连同前半段一起被读到）：{stats:?}"
         );
-        assert!(!page.range_too_large && page.entries.len() == LOG_PAGE_LIMIT_MAX, "{stats:?}");
+        assert!(
+            !page.range_too_large && page.entries.len() == LOG_PAGE_LIMIT_MAX,
+            "{stats:?}"
+        );
         // 屏上第一条 = 文件最后一行（时间跨度 60 s 的末端）
         assert_eq!(page.entries[0].ts_ms, BASE_MS + N - 1);
     }
@@ -2306,10 +2460,20 @@ mod tests {
         let huge_msg = "H".repeat(80 * 1024); // 单行 ≈ 82 KiB > 一个 64 KiB 块
         let mut body = String::new();
         for i in 0..3u64 {
-            body.push_str(&json_line(&iso_of(BASE_MS + i * 1000), "INFO", "m", &format!("head-{i}")));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS + i * 1000),
+                "INFO",
+                "m",
+                &format!("head-{i}"),
+            ));
             body.push('\n');
         }
-        body.push_str(&json_line(&iso_of(BASE_MS + 100_000), "ERROR", "mupc_big", &huge_msg));
+        body.push_str(&json_line(
+            &iso_of(BASE_MS + 100_000),
+            "ERROR",
+            "mupc_big",
+            &huge_msg,
+        ));
         body.push('\n');
         for i in 0..3u64 {
             let ts = BASE_MS + 200_000 + i * 1000;
@@ -2327,9 +2491,15 @@ mod tests {
         .await
         .expect("不得 Err");
 
-        assert_eq!(stats.backward_files, 1, "本用例必须跑在**倒读**路径上：{stats:?}");
+        assert_eq!(
+            stats.backward_files, 1,
+            "本用例必须跑在**倒读**路径上：{stats:?}"
+        );
         assert!(!page.range_too_large, "{stats:?}");
-        assert_eq!(stats.lines_read, 7, "每行恰读一次（含那条超长行）：{stats:?}");
+        assert_eq!(
+            stats.lines_read, 7,
+            "每行恰读一次（含那条超长行）：{stats:?}"
+        );
         assert_eq!(
             stats.parsed_lines, 7,
             "超长行必须被**完整**读出并解析（整改前它会让倒读空转，屏上永远拿不到日志）：{stats:?}"
@@ -2342,7 +2512,11 @@ mod tests {
         assert_eq!(huge.ts_ms, BASE_MS + 100_000);
         assert_eq!(huge.message.len(), MESSAGE_MAX_BYTES, "按 1 KiB 截断上屏");
         assert!(huge.message.ends_with(TRUNCATION_MARKER), "截断必须可见");
-        assert_eq!(page.entries.len(), 4, "窗口内 = 超长行 + 尾部 3 条：{stats:?}");
+        assert_eq!(
+            page.entries.len(),
+            4,
+            "窗口内 = 超长行 + 尾部 3 条：{stats:?}"
+        );
     }
 
     /// **R3 的判据网（把"窗口内容"与"扫描行数"两个判据分开）**：`range_too_large`
@@ -2375,7 +2549,10 @@ mod tests {
         let s = LogService::new(t.path(), limits);
 
         let q = win(BASE_MS + 30_000, BASE_MS + 30_000); // 窗口内恰 1 行
-        let (page, stats) = s.page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
+        let (page, stats) = s
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert!(
             stats.lines_read > TIGHT,
             "本用例的前置：扫描行数必须**远超**限额（否则两个判据不分歧，用例失去区分度）：{stats:?}"
@@ -2447,12 +2624,18 @@ mod tests {
         // 正对照：同样不可解析、但**行数在闸门以内**的小文件 ⇒ 仍按 R4 的口径走"空态 + 告警"
         // （不是超限）⇒ 本条断言不是恒真（证明超限真的由**预算耗尽**引起，而不是"纯文本即超限"）。
         let t2 = TempDir::new("logs-hard-budget-small");
-        t2.write("mupc.log.2025-09-09", "plain text line 1\nplain text line 2\n");
+        t2.write(
+            "mupc.log.2025-09-09",
+            "plain text line 1\nplain text line 2\n",
+        );
         let (small, st2) = svc(&t2)
             .page_with_stats(&q_default(), BASE_MS + 600_000)
             .await
             .expect("不得 Err");
-        assert!(!small.range_too_large && small.entries.is_empty(), "{st2:?}");
+        assert!(
+            !small.range_too_large && small.entries.is_empty(),
+            "{st2:?}"
+        );
     }
 
     /// **重要-2（整改三，评审实测）· ① ≥ 1 MiB 的单个行**：代价必须有上界，且结果**不得**是
@@ -2472,7 +2655,10 @@ mod tests {
         let huge = "H".repeat(2 * 1024 * 1024); // 单行 ≈ 2 MiB（> MAX_REVERSE_WINDOW_BYTES）
         t.write(
             "mupc.log.2025-09-09",
-            &format!("{}\n", json_line(&iso_of(BASE_MS), "ERROR", "mupc_big", &huge)),
+            &format!(
+                "{}\n",
+                json_line(&iso_of(BASE_MS), "ERROR", "mupc_big", &huge)
+            ),
         );
 
         let (page, stats) = with_watchdog(
@@ -2490,7 +2676,10 @@ mod tests {
             stats.skipped_bytes <= SCAN_READ_BUDGET_BYTES + MAX_REVERSE_WINDOW_BYTES,
             "字节代价必须有上界（闸 = {SCAN_READ_BUDGET_BYTES}）：{stats:?}"
         );
-        assert!(stats.lines_read <= 8, "行数也必须是有界的（不是整份读）：{stats:?}");
+        assert!(
+            stats.lines_read <= 8,
+            "行数也必须是有界的（不是整份读）：{stats:?}"
+        );
         // 硬红线：不得把"没查完"说成"确实没有"
         assert!(
             !page.entries.is_empty() || page.range_too_large,
@@ -2573,7 +2762,10 @@ mod tests {
             stats.lines_read > SCAN_READ_BUDGET_LINES,
             "本用例的前置：读入量必须**超过**行数闸阈值（否则测不出'闸挂错了判据'）：{stats:?}"
         );
-        assert_eq!(stats.unparsable_lines, 0, "夹具全部可解析 ⇒ 硬闸的运行判据为 0：{stats:?}");
+        assert_eq!(
+            stats.unparsable_lines, 0,
+            "夹具全部可解析 ⇒ 硬闸的运行判据为 0：{stats:?}"
+        );
         assert_eq!(stats.skipped_bytes, 0, "{stats:?}");
         assert_eq!(stats.window_lines, 1, "窗口内恰 1 行：{stats:?}");
         assert!(
@@ -2582,7 +2774,10 @@ mod tests {
         );
         assert_eq!(page.entries.len(), 1, "窗口内那一条必须返回：{stats:?}");
         assert_eq!(page.entries[0].ts_ms, BASE_MS + 250_000);
-        assert!(stats.lines_read < N as usize, "择向应把读入量压到约一半：{stats:?}");
+        assert!(
+            stats.lines_read < N as usize,
+            "择向应把读入量压到约一半：{stats:?}"
+        );
     }
 
     /// 回归网：**"文件长"本身永远不构成 `range_too_large`**。
@@ -2595,7 +2790,10 @@ mod tests {
         let t = TempDir::new("logs-long-only");
         dense_file(&t, N);
         let q = win(BASE_MS - 10_000, BASE_MS - 5_000); // 窗口里什么都没有
-        let (page, stats) = svc(&t).page_with_stats(&q, BASE_MS + 600_000).await.expect("不得 Err");
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q, BASE_MS + 600_000)
+            .await
+            .expect("不得 Err");
         assert!(!page.range_too_large, "文件长 ≠ 超限：{stats:?}");
         assert!(page.entries.is_empty());
         assert_eq!(stats.window_lines, 0, "{stats:?}");
@@ -2608,7 +2806,10 @@ mod tests {
             stats.lines_read <= 1_000,
             "窗口在文件之外 ⇒ 读一个迟滞块即可判定（≤64 KiB ≈ 690 行）：{stats:?}"
         );
-        assert!(stats.forward_files == 1, "该窗口在文件头侧 ⇒ 必须正读：{stats:?}");
+        assert!(
+            stats.forward_files == 1,
+            "该窗口在文件头侧 ⇒ 必须正读：{stats:?}"
+        );
     }
 
     // ── ③' R1 / R6 / R7（迁移回退、跨文件同 ms、删改竞态）──────────────────
@@ -2642,7 +2843,10 @@ mod tests {
             .expect("同名目录不得让端点 503");
         assert_eq!(page.entries.len(), 1, "{stats:?}");
         assert!(!page.range_too_large);
-        assert_eq!(stats.files_scanned, 1, "同名目录不是候选文件，也不占文件预算：{stats:?}");
+        assert_eq!(
+            stats.files_scanned, 1,
+            "同名目录不是候选文件，也不占文件预算：{stats:?}"
+        );
     }
 
     /// **R6**：两个文件里各有一条**同一毫秒**的日志 ⇒ **两条都要在**，且**新文件那条在前**。
@@ -2655,11 +2859,17 @@ mod tests {
         let t = TempDir::new("logs-xfile-ms");
         t.write(
             "mupc.log.2025-09-08",
-            &format!("{}\n", json_line(&iso_of(BASE_MS), "INFO", "m", "older-file")),
+            &format!(
+                "{}\n",
+                json_line(&iso_of(BASE_MS), "INFO", "m", "older-file")
+            ),
         );
         t.write(
             "mupc.log.2025-09-09",
-            &format!("{}\n", json_line(&iso_of(BASE_MS), "INFO", "m", "newer-file")),
+            &format!(
+                "{}\n",
+                json_line(&iso_of(BASE_MS), "INFO", "m", "newer-file")
+            ),
         );
         let page = svc(&t).page(&q_default(), BASE_MS + 60_000).await.unwrap();
         let msgs: Vec<&str> = page.entries.iter().map(|e| e.message.as_str()).collect();
@@ -2690,7 +2900,11 @@ mod tests {
             s.scan_file(&missing, &mut st, 0).await.is_ok(),
             "轮转竞态必须跳过而不是 Err（否则一次轮转 = 整个日志页 503）"
         );
-        assert_eq!(st.stats.files_scanned, 0, "没打开成的文件不计入：{:?}", st.stats);
+        assert_eq!(
+            st.stats.files_scanned, 0,
+            "没打开成的文件不计入：{:?}",
+            st.stats
+        );
 
         // ② 其它 IO 错误仍 `Err`（拿一个**目录**当文件路径：Windows=PermissionDenied，
         //    Linux=打开后 read 得 EISDIR ⇒ 两种都不是 NotFound）
@@ -2713,7 +2927,10 @@ mod tests {
             &format!("{}\n", json_line(&iso_of(BASE_MS), "ERROR", "m", "boom")),
         );
         // 级别筛到 INFO ⇒ 0 条命中，但**没有**超限
-        let q = LogQuery { levels: vec![LogLevel::Info], ..q_default() };
+        let q = LogQuery {
+            levels: vec![LogLevel::Info],
+            ..q_default()
+        };
         let page = svc(&t).page(&q, BASE_MS).await.unwrap();
         assert!(page.entries.is_empty());
         assert!(!page.range_too_large, "无日志 ≠ 超限（硬口径）");
@@ -2728,7 +2945,10 @@ mod tests {
         // 目录**不存在** ⇒ Err（handler 落 503），不得回空页冒充"无日志"
         let missing = t.path().join("nope");
         let svc3 = LogService::new(&missing, LogLimits::default());
-        assert!(svc3.page(&q_default(), BASE_MS).await.is_err(), "源不可用必须 Err");
+        assert!(
+            svc3.page(&q_default(), BASE_MS).await.is_err(),
+            "源不可用必须 Err"
+        );
     }
 
     // ── ⑤ 排序 / 分页 / 增量游标 ──────────────────────────────────────────
@@ -2738,7 +2958,12 @@ mod tests {
         let mut body = String::new();
         for i in 0..30u64 {
             let lvl = if i % 2 == 0 { "ERROR" } else { "INFO" };
-            body.push_str(&json_line(&iso_of(BASE_MS + i * 1000), lvl, "mupc_gateway", "m"));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS + i * 1000),
+                lvl,
+                "mupc_gateway",
+                "m",
+            ));
             body.push('\n');
         }
         t.write("mupc.log.2025-09-09", &body);
@@ -2753,7 +2978,10 @@ mod tests {
         let s = svc(&t);
 
         // 侧 A：范围内 30 条、limit=10 ⇒ 最新 10 条、has_more=true、next_cursor=本页最小 seq
-        let q = LogQuery { limit: 10, ..q_default() };
+        let q = LogQuery {
+            limit: 10,
+            ..q_default()
+        };
         let page = s.page(&q, BASE_MS + 60_000).await.unwrap();
         assert_eq!(page.entries.len(), 10);
         assert!(page.has_more);
@@ -2763,7 +2991,11 @@ mod tests {
         }
         assert_eq!(page.entries[0].ts_ms, BASE_MS + 29_000);
         assert_eq!(page.entries[9].ts_ms, BASE_MS + 20_000);
-        assert_eq!(page.next_cursor, Some(page.entries[9].seq), "下一頁游标 = 本页最小 seq");
+        assert_eq!(
+            page.next_cursor,
+            Some(page.entries[9].seq),
+            "下一頁游标 = 本页最小 seq"
+        );
         assert!(!page.range_too_large);
 
         // 侧 B：范围内只有 5 条、limit=10 ⇒ has_more=false、next_cursor=None（已到最早）
@@ -2794,7 +3026,13 @@ mod tests {
 
         // 已到最新：cursor = 最大 seq ⇒ 空页、无更多、**未超限**
         let page = s
-            .page(&LogQuery { cursor: Some(max_seq), ..q_default() }, BASE_MS + 60_000)
+            .page(
+                &LogQuery {
+                    cursor: Some(max_seq),
+                    ..q_default()
+                },
+                BASE_MS + 60_000,
+            )
             .await
             .unwrap();
         assert!(page.entries.is_empty(), "seq > cursor 无命中 ⇒ 空页");
@@ -2803,13 +3041,24 @@ mod tests {
         // 追加 3 条新日志 ⇒ 只有这 3 条被返回（**不重复**既有 30 条）
         let mut body = std::fs::read_to_string(t.join("mupc.log.2025-09-09")).unwrap();
         for i in 30..33u64 {
-            body.push_str(&json_line(&iso_of(BASE_MS + i * 1000), "INFO", "mupc_gateway", "new"));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS + i * 1000),
+                "INFO",
+                "mupc_gateway",
+                "new",
+            ));
             body.push('\n');
         }
         std::fs::write(t.join("mupc.log.2025-09-09"), body).unwrap();
 
         let inc = s
-            .page(&LogQuery { cursor: Some(max_seq), ..q_default() }, BASE_MS + 60_000)
+            .page(
+                &LogQuery {
+                    cursor: Some(max_seq),
+                    ..q_default()
+                },
+                BASE_MS + 60_000,
+            )
             .await
             .unwrap();
         assert_eq!(inc.entries.len(), 3, "只回更新的 3 条");
@@ -2850,22 +3099,34 @@ mod tests {
         const OLD_NAME: &str = "mupc.log.2025-09-08";
         let mut old_body = String::new();
         for i in 0..4u64 {
-            old_body
-                .push_str(&json_line(&iso_of(BASE_MS - 300_000 + i * 1000), "WARN", "mupc_old", "old"));
+            old_body.push_str(&json_line(
+                &iso_of(BASE_MS - 300_000 + i * 1000),
+                "WARN",
+                "mupc_old",
+                "old",
+            ));
             old_body.push('\n');
         }
         t.write(OLD_NAME, &old_body);
         let c = s.page(&q, BASE_MS + 60_000).await.unwrap();
         // **先证明旧文件真的被扫到了**（否则下面那条断言还是恒真的）
-        assert_eq!(c.entries.len(), 34, "窗口内的旧文件 ⇒ 它的 4 条必须出现：{}", c.entries.len());
+        assert_eq!(
+            c.entries.len(),
+            34,
+            "窗口内的旧文件 ⇒ 它的 4 条必须出现：{}",
+            c.entries.len()
+        );
         assert_eq!(
             c.entries.iter().filter(|e| e.target == "mupc_old").count(),
             4,
             "旧文件的 4 条必须在结果里"
         );
         // 既有 30 条**逐条**比对 `seq`（不是只比条数、也不是只比集合相等）
-        let seq_of: std::collections::HashMap<(u64, String), u64> =
-            c.entries.iter().map(|e| ((e.ts_ms, e.message.clone()), e.seq)).collect();
+        let seq_of: std::collections::HashMap<(u64, String), u64> = c
+            .entries
+            .iter()
+            .map(|e| ((e.ts_ms, e.message.clone()), e.seq))
+            .collect();
         for e in &a.entries {
             assert_eq!(
                 seq_of.get(&(e.ts_ms, e.message.clone())),
@@ -2877,12 +3138,19 @@ mod tests {
         }
         // 新旧条目不得撞 `seq`（`seq` 是 cursor 的高水位 ⇒ 撞车会漏条）
         let all: BTreeSet<u64> = c.entries.iter().map(|e| e.seq).collect();
-        assert_eq!(all.len(), c.entries.len(), "seq 必须互不相同（不得因跨文件而撞车）");
+        assert_eq!(
+            all.len(),
+            c.entries.len(),
+            "seq 必须互不相同（不得因跨文件而撞车）"
+        );
 
         // ② 再把旧文件**删掉** ⇒ 必须回到与 `a` **逐字段一致**（增 / 删都不动既有 seq）
         std::fs::remove_file(t.path().join(OLD_NAME)).expect("删掉旧文件");
         let d = s.page(&q, BASE_MS + 60_000).await.unwrap();
-        assert_eq!(d.entries, a.entries, "删掉旧文件后必须回到原样（逐字段，含 seq）");
+        assert_eq!(
+            d.entries, a.entries,
+            "删掉旧文件后必须回到原样（逐字段，含 seq）"
+        );
     }
 
     /// 同毫秒多条的 `k` 递增（`seq` 不撞车 ⇒ `cursor` 增量不漏条）。
@@ -2896,7 +3164,11 @@ mod tests {
         }
         t.write("mupc.log.2025-09-09", &body);
         let page = svc(&t).page(&q_default(), BASE_MS + 60_000).await.unwrap();
-        assert_eq!(page.entries.len(), 5, "同毫秒 5 条必须都在（不得按 seq 去重掉）");
+        assert_eq!(
+            page.entries.len(),
+            5,
+            "同毫秒 5 条必须都在（不得按 seq 去重掉）"
+        );
         let seqs: BTreeSet<u64> = page.entries.iter().map(|e| e.seq).collect();
         assert_eq!(seqs.len(), 5, "seq 必须互不相同");
         assert_eq!(page.entries[0].message, "m4", "同一毫秒内后写的 seq 更大");
@@ -2915,14 +3187,26 @@ mod tests {
         let s = svc(&t);
 
         let only_err = s
-            .page(&LogQuery { levels: vec![LogLevel::Error], ..q_default() }, BASE_MS + 60_000)
+            .page(
+                &LogQuery {
+                    levels: vec![LogLevel::Error],
+                    ..q_default()
+                },
+                BASE_MS + 60_000,
+            )
             .await
             .unwrap();
         assert_eq!(only_err.entries.len(), 1);
         assert_eq!(only_err.entries[0].message, "g-err");
 
         let only_tgt = s
-            .page(&LogQuery { targets: vec!["mupc_intercore".into()], ..q_default() }, BASE_MS + 60_000)
+            .page(
+                &LogQuery {
+                    targets: vec!["mupc_intercore".into()],
+                    ..q_default()
+                },
+                BASE_MS + 60_000,
+            )
             .await
             .unwrap();
         assert_eq!(only_tgt.entries.len(), 1);
@@ -2984,7 +3268,12 @@ mod tests {
             ));
             a.push('\n');
         }
-        a.push_str(&json_line(&iso_of(BASE_MS + 1_000), "INFO", "m", "in-newer-file"));
+        a.push_str(&json_line(
+            &iso_of(BASE_MS + 1_000),
+            "INFO",
+            "m",
+            "in-newer-file",
+        ));
         a.push('\n');
         t.write("mupc.log.2025-09-09", &a);
 
@@ -2994,7 +3283,12 @@ mod tests {
             &format!(
                 "{}\n{}\n",
                 json_line(&iso_of(BASE_MS + 2_000), "INFO", "m", "in-older-file"),
-                json_line(&iso_of(BASE_MS - 9_000_000), "INFO", "m", "stray-before-window"),
+                json_line(
+                    &iso_of(BASE_MS - 9_000_000),
+                    "INFO",
+                    "m",
+                    "stray-before-window"
+                ),
             ),
         );
 
@@ -3006,7 +3300,10 @@ mod tests {
         .await
         .expect("不得 Err");
 
-        assert_eq!(stats.backward_files, 2, "两个文件都该走倒读（窗口贴尾）：{stats:?}");
+        assert_eq!(
+            stats.backward_files, 2,
+            "两个文件都该走倒读（窗口贴尾）：{stats:?}"
+        );
         let msgs: Vec<&str> = page.entries.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(
             msgs,
@@ -3045,7 +3342,12 @@ mod tests {
             &format!(
                 "{}\n{}\n",
                 json_line(&iso_of(BASE_MS + 1_000), "INFO", "m", "in-newer-file"),
-                json_line(&iso_of(BASE_MS - 9_000_000), "INFO", "m", "clock-rolled-back"),
+                json_line(
+                    &iso_of(BASE_MS - 9_000_000),
+                    "INFO",
+                    "m",
+                    "clock-rolled-back"
+                ),
             ),
         );
         // 更旧的文件：里面**也有**一条窗口内的行 —— 整改前（EndOfScan）它连看都不会被看到
@@ -3065,7 +3367,10 @@ mod tests {
         .await
         .expect("不得 Err");
 
-        assert_eq!(stats.backward_files, 2, "两个文件都该走倒读（窗口贴尾）：{stats:?}");
+        assert_eq!(
+            stats.backward_files, 2,
+            "两个文件都该走倒读（窗口贴尾）：{stats:?}"
+        );
         let msgs: Vec<&str> = page.entries.iter().map(|e| e.message.as_str()).collect();
         assert!(
             msgs.contains(&"in-newer-file"),
@@ -3094,7 +3399,12 @@ mod tests {
             &format!(
                 "{}\n{}\n{}\n",
                 json_line(&iso_of(BASE_MS + 1_000), "INFO", "m", "first-in-window"),
-                json_line(&iso_of(BASE_MS + 10_000_000), "INFO", "m", "clock-jumped-forward"),
+                json_line(
+                    &iso_of(BASE_MS + 10_000_000),
+                    "INFO",
+                    "m",
+                    "clock-jumped-forward"
+                ),
                 json_line(&iso_of(BASE_MS + 1_500), "INFO", "m", "second-in-window"),
             ),
         );
@@ -3107,7 +3417,10 @@ mod tests {
         .await
         .expect("不得 Err");
 
-        assert_eq!(stats.forward_files, 1, "该窗口贴文件头 ⇒ 必须正读：{stats:?}");
+        assert_eq!(
+            stats.forward_files, 1,
+            "该窗口贴文件头 ⇒ 必须正读：{stats:?}"
+        );
         let msgs: Vec<&str> = page.entries.iter().map(|e| e.message.as_str()).collect();
         assert!(
             msgs.contains(&"first-in-window") && msgs.contains(&"second-in-window"),
@@ -3165,7 +3478,10 @@ mod tests {
         .await
         .expect("不得 Err");
 
-        assert_eq!(stats.forward_files, 1, "夹具必须把择向扳到**正读**：{stats:?}");
+        assert_eq!(
+            stats.forward_files, 1,
+            "夹具必须把择向扳到**正读**：{stats:?}"
+        );
         let targets: Vec<&str> = page.entries.iter().map(|e| e.target.as_str()).collect();
         assert!(
             !targets.contains(&"huge_target"),
@@ -3173,8 +3489,14 @@ mod tests {
              `BufReader::lines()` 会把它解析出来，本条即红：{targets:?}"
         );
         // 正对照：**邻居行必须照常交付** —— 否则上一条会因"整页为空"而**假通过**
-        assert!(targets.contains(&"first_target"), "超长行之前的那一行丢了：{targets:?}");
-        assert!(targets.contains(&"third_target"), "超长行**之后**的那一行丢了：{targets:?}");
+        assert!(
+            targets.contains(&"first_target"),
+            "超长行之前的那一行丢了：{targets:?}"
+        );
+        assert!(
+            targets.contains(&"third_target"),
+            "超长行**之后**的那一行丢了：{targets:?}"
+        );
         assert!(
             !page.range_too_large,
             "行长（≈1 MiB + 8 KiB）≤ 字节闸（{SCAN_READ_BUDGET_BYTES}）⇒ 不得判超限：{stats:?}"
@@ -3212,7 +3534,10 @@ mod tests {
         .await
         .expect("不得 Err");
 
-        assert_eq!(stats.forward_files, 1, "夹具必须把择向扳到**正读**：{stats:?}");
+        assert_eq!(
+            stats.forward_files, 1,
+            "夹具必须把择向扳到**正读**：{stats:?}"
+        );
         assert!(
             stats.skipped_bytes >= 2 * 1024 * 1024,
             "跳过的那条 2 MiB 行必须**按字节计入**字节闸（整改前这里恒为 0 —— 代价无人管）：{stats:?}"
@@ -3243,7 +3568,10 @@ mod tests {
                 json_line(&iso_of(BASE_MS), "INFO", "m", "good"),
             ),
         );
-        let (page, stats) = svc(&t).page_with_stats(&q_default(), BASE_MS + 600_000).await.unwrap();
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q_default(), BASE_MS + 600_000)
+            .await
+            .unwrap();
         assert_eq!(page.entries.len(), 1, "只有一行可表达");
         assert_eq!(page.entries[0].message, "good");
         assert_eq!(stats.lines_read, 4, "读入的行都计数");
@@ -3298,17 +3626,26 @@ mod tests {
     async fn a_fully_unparsable_log_file_is_warned_loudly() {
         let t = TempDir::new("logs-blind");
         // 模拟"JSON 层被换成纯文本"：全是行，但一行都不是契约形状
-        t.write("mupc.log.2025-09-09", "plain text line 1\nplain text line 2\n");
+        t.write(
+            "mupc.log.2025-09-09",
+            "plain text line 1\nplain text line 2\n",
+        );
 
         let counter = WarnCounter::default();
         let _guard = tracing::subscriber::set_default(counter.clone());
-        let (page, stats) = svc(&t).page_with_stats(&q_default(), BASE_MS).await.unwrap();
+        let (page, stats) = svc(&t)
+            .page_with_stats(&q_default(), BASE_MS)
+            .await
+            .unwrap();
 
         // 屏上确实是"无日志"（契约没有"格式漂移"位，这一点改不了）……
         assert!(page.entries.is_empty() && !page.range_too_large);
         // ……但**运维侧**必须能看见：读到了行、一行都没解析出来、且真的喊了
         assert!(stats.lines_read > 0, "{stats:?}");
-        assert_eq!(stats.parsed_lines, 0, "告警条件 lines_read>0 ∧ parsed_lines==0 必须成立：{stats:?}");
+        assert_eq!(
+            stats.parsed_lines, 0,
+            "告警条件 lines_read>0 ∧ parsed_lines==0 必须成立：{stats:?}"
+        );
         assert!(
             counter.warns() >= 1,
             "日志格式整体漂移必须 WARN（否则屏上「无日志」无从排障）"
@@ -3322,7 +3659,10 @@ mod tests {
         );
         let counter2 = WarnCounter::default();
         let _g2 = tracing::subscriber::set_default(counter2.clone());
-        let _ = svc(&t2).page_with_stats(&q_default(), BASE_MS).await.unwrap();
+        let _ = svc(&t2)
+            .page_with_stats(&q_default(), BASE_MS)
+            .await
+            .unwrap();
         assert_eq!(counter2.warns(), 0, "能解析的日志不得触发'格式漂移'告警");
     }
 
@@ -3335,9 +3675,19 @@ mod tests {
         let mut body = String::new();
         // 60 个不同 target + 大量重复
         for i in 0..60 {
-            body.push_str(&json_line(&iso_of(BASE_MS + i as u64), "INFO", &format!("t{i:02}"), "m"));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS + i as u64),
+                "INFO",
+                &format!("t{i:02}"),
+                "m",
+            ));
             body.push('\n');
-            body.push_str(&json_line(&iso_of(BASE_MS + i as u64), "INFO", &format!("t{i:02}"), "m"));
+            body.push_str(&json_line(
+                &iso_of(BASE_MS + i as u64),
+                "INFO",
+                &format!("t{i:02}"),
+                "m",
+            ));
             body.push('\n');
         }
         t.write("mupc.log.2025-09-09", &body);
@@ -3348,10 +3698,14 @@ mod tests {
         // **自引用 `out.len()`** ⇒ 截断一旦坏掉（60 项全返回）它仍然自洽通过（弱断言）。
         // 现按**该用例的真实语义**钉死下标：字典序排完 t00..t59 截到第 50 个 ⇒ 末项 = `t49`。
         assert_eq!(
-            out[LOG_TARGETS_MAX - 1], "t49",
+            out[LOG_TARGETS_MAX - 1],
+            "t49",
             "截断后末项必须是字典序第 {LOG_TARGETS_MAX} 项（t49），不是 t59"
         );
-        assert_eq!(out[49], "t49", "同上（字面下标版，防止 LOG_TARGETS_MAX 被改动时失去判别力）");
+        assert_eq!(
+            out[49], "t49",
+            "同上（字面下标版，防止 LOG_TARGETS_MAX 被改动时失去判别力）"
+        );
         let mut sorted = out.clone();
         sorted.sort();
         assert_eq!(out, sorted, "必须字典序升序");
@@ -3425,10 +3779,15 @@ mod tests {
         // ③ 最新的文件：正常一行 ⇒ 采样结果里必须**只有**它的 target
         t.write(
             "mupc.log.2025-09-10",
-            &format!("{}\n", json_line(&iso_of(BASE_MS), "INFO", "mupc_gateway", "m")),
+            &format!(
+                "{}\n",
+                json_line(&iso_of(BASE_MS), "INFO", "mupc_gateway", "m")
+            ),
         );
 
-        let out = with_watchdog("targets 无换行/超长行", svc(&t).targets()).await.expect("不得 Err");
+        let out = with_watchdog("targets 无换行/超长行", svc(&t).targets())
+            .await
+            .expect("不得 Err");
         assert_eq!(
             out,
             vec!["mupc_gateway".to_string()],
@@ -3541,11 +3900,11 @@ mod tests {
         let long = "A".repeat(MESSAGE_MAX_BYTES * 2); // `A` 在 cmap 内（U+0041）
         let cut = truncate_message(&long);
         assert!(cut.ends_with(TRUNCATION_MARKER));
-        let missing: Vec<char> = cut
-            .chars()
-            .filter(|c| !cmap.contains(c))
-            .collect();
-        assert!(missing.is_empty(), "截断后的上屏串含 cmap 外字符 {missing:?}");
+        let missing: Vec<char> = cut.chars().filter(|c| !cmap.contains(c)).collect();
+        assert!(
+            missing.is_empty(),
+            "截断后的上屏串含 cmap 外字符 {missing:?}"
+        );
     }
 
     /// 契约常量与配置默认值必须同源（跨 crate 的"两份抄写"由本用例钉死）。

@@ -637,10 +637,7 @@ fn read_step(p: &mut Pending) -> Result<bool> {
                             // W2：**分配之前**的上限判定（`body` 是追加读入的、
                             // 不是按 `Content-Length` 预分配的 ⇒ 结构上不可能巨额预分配）。
                             if p.body.len() > MAX_BODY_BYTES {
-                                return Err(Error::BodyTooLarge(
-                                    p.addr.clone(),
-                                    p.body.len(),
-                                ));
+                                return Err(Error::BodyTooLarge(p.addr.clone(), p.body.len()));
                             }
                             if let Some(len) = p.content_length {
                                 if p.body.len() >= len {
@@ -651,10 +648,7 @@ fn read_step(p: &mut Pending) -> Result<bool> {
                         }
                         None => {
                             if p.head.len() > MAX_HEAD_BYTES {
-                                return Err(Error::HeadTooLarge(
-                                    p.addr.clone(),
-                                    p.head.len(),
-                                ));
+                                return Err(Error::HeadTooLarge(p.addr.clone(), p.head.len()));
                             }
                         }
                     }
@@ -767,8 +761,8 @@ mod tests {
     /// （如 `new()` 的静默回退）⇒ 这里拿到 `Ok` ⇒ 断言失败。
     #[test]
     fn client_rejects_non_ip_literal_host() {
-        let e = DisplayChannelClient::try_new("http://localhost:9810/v1/display/latest")
-            .unwrap_err();
+        let e =
+            DisplayChannelClient::try_new("http://localhost:9810/v1/display/latest").unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("localhost"), "错误须点名非法 host：{msg}");
         assert!(msg.contains("DNS"), "错误须给出原因：{msg}");
@@ -944,7 +938,10 @@ mod tests {
         assert_eq!(c.fail_streak(), 0);
         // 请求行 / Host / 连接关闭语义（回环契约）
         let req = stub.requests().join("");
-        assert!(req.starts_with("GET /v1/display/latest HTTP/1.1\r\n"), "{req}");
+        assert!(
+            req.starts_with("GET /v1/display/latest HTTP/1.1\r\n"),
+            "{req}"
+        );
         assert!(req.contains("Host: 127.0.0.1:"), "{req}");
         assert!(req.contains("Connection: close"), "{req}");
         assert!(req.ends_with("\r\n\r\n"), "{req}");
@@ -1133,8 +1130,8 @@ mod tests {
                     .to_string()
             })
         });
-        let mut c = DisplayChannelClient::try_new(&stub.url.replace("/latest", "/wrong"))
-            .expect("client");
+        let mut c =
+            DisplayChannelClient::try_new(&stub.url.replace("/latest", "/wrong")).expect("client");
         let t0 = Instant::now();
         c.begin(t0).expect("begin");
         let r = drive(&mut c, t0).expect("should finish");
@@ -1195,8 +1192,8 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Type: {JSON_CONTENT_TYPE}\r\nContent-Length: {huge}\r\nConnection: close\r\n\r\n"
             ))
         });
-        let mut c = DisplayChannelClient::with_timeout(&stub.url, Duration::from_secs(5))
-            .expect("client");
+        let mut c =
+            DisplayChannelClient::with_timeout(&stub.url, Duration::from_secs(5)).expect("client");
         let t0 = Instant::now();
         c.begin(t0).expect("begin");
         let r = drive(&mut c, t0).expect("should finish");
@@ -1265,7 +1262,10 @@ mod tests {
         let stub = Stub::spawn(|_i, _req| {
             let body = sample_frame_json();
             Some(raw_response(
-                &format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()),
+                &format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                ),
                 &body,
             ))
         });

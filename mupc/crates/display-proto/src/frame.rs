@@ -600,7 +600,10 @@ mod tests {
     // ---- FieldFlag：JSON snake_case ----
     #[test]
     fn field_flag_json_snake_case() {
-        assert_eq!(serde_json::to_string(&FieldFlag::Valid).unwrap(), "\"valid\"");
+        assert_eq!(
+            serde_json::to_string(&FieldFlag::Valid).unwrap(),
+            "\"valid\""
+        );
         assert_eq!(
             serde_json::to_string(&FieldFlag::NotRead).unwrap(),
             "\"not_read\""
@@ -711,7 +714,10 @@ mod tests {
         assert_eq!(f.info.service_scope, ServiceScope::LoopbackOnly);
         assert_eq!(f.info.mgmt_ipv4.as_deref(), Some("192.168.3.118"));
         assert!(f.interlock.available && f.interlock.enabled);
-        assert_eq!(f.interlock.fault_lamp, None, "fault_lamp null → None（未知）");
+        assert_eq!(
+            f.interlock.fault_lamp, None,
+            "fault_lamp null → None（未知）"
+        );
         assert_eq!(f.interlock.run_lamp, Some(true));
         assert_eq!(f.interlock.release_hold_secs, 30);
         assert_eq!(f.interlock.sources[0].name, "estop");
@@ -744,7 +750,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::Error::ProtoVersionMismatch { got: 1, expected: 3 }
+                crate::Error::ProtoVersionMismatch {
+                    got: 1,
+                    expected: 3
+                }
             ),
             "版本不一致必须 Err(ProtoVersionMismatch)，实际: {err:?}"
         );
@@ -901,7 +910,11 @@ mod tests {
         assert!(f.alarms.items.is_empty());
         assert!(!f.interlock.available, "联锁态缺失 → 不可用（IL-01.6）");
         assert!(!f.interlock.latched, "缺失绝不等于「未联锁」被误读为真值");
-        assert_eq!(f.device.iec104, LinkState::Unknown, "链路缺失 → 未知（F6.5）");
+        assert_eq!(
+            f.device.iec104,
+            LinkState::Unknown,
+            "链路缺失 → 未知（F6.5）"
+        );
         assert_eq!(f.device.control_source, ControlSource::Unknown);
         assert_eq!(f.info.firmware_version, "");
         assert_eq!(f.info.mgmt_ipv4, None);
@@ -987,7 +1000,10 @@ mod tests {
             serde_json::to_string(&LinkState::NotConfigured).unwrap(),
             "\"not_configured\""
         );
-        assert_eq!(serde_json::to_string(&LinkState::Connected).unwrap(), "\"connected\"");
+        assert_eq!(
+            serde_json::to_string(&LinkState::Connected).unwrap(),
+            "\"connected\""
+        );
         // F6.5：缺省/不可得绝不落在「已连接」
         assert_eq!(LinkState::default(), LinkState::Unknown);
         assert_eq!(LinkState::default().display_name(), "未知");
@@ -1026,9 +1042,18 @@ mod tests {
 
     #[test]
     fn alarm_level_json_and_text() {
-        assert_eq!(serde_json::to_string(&AlarmLevel::Error).unwrap(), "\"error\"");
-        assert_eq!(serde_json::to_string(&AlarmLevel::Warn).unwrap(), "\"warn\"");
-        assert_eq!(serde_json::to_string(&AlarmLevel::Info).unwrap(), "\"info\"");
+        assert_eq!(
+            serde_json::to_string(&AlarmLevel::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AlarmLevel::Warn).unwrap(),
+            "\"warn\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AlarmLevel::Info).unwrap(),
+            "\"info\""
+        );
         assert_eq!(AlarmLevel::Error.display_name(), "ERROR");
         assert_eq!(AlarmLevel::Warn.display_name(), "WARN");
         assert_eq!(AlarmLevel::Info.display_name(), "INFO");

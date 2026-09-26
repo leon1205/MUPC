@@ -611,7 +611,9 @@ mod tests {
         );
         // 闰日（2024-02-29）
         assert_eq!(
-            crate::ui::pages::format_epoch_ms_utc(datetime_to_epoch_ms(DateTimeValue::from_parts(2024, 2, 29, 12, 34))),
+            crate::ui::pages::format_epoch_ms_utc(datetime_to_epoch_ms(DateTimeValue::from_parts(
+                2024, 2, 29, 12, 34
+            ))),
             "2024/02/29 12:34:00"
         );
         // 上界（2100/12/31 23:59）

@@ -668,7 +668,10 @@ pub(crate) const TARGET_LABELS: [(&str, &str); 4] = [
     (audit_key("gateway.port"), TEXT_FIELD_PORT),
     (audit_key("system.log_level"), TEXT_FIELD_LOG_LEVEL),
     (audit_key("telemetry.interval"), TEXT_FIELD_TELEMETRY),
-    (audit_key("gateway.listen_addr"), p2_config::TEXT_LISTEN_ADDR),
+    (
+        audit_key("gateway.listen_addr"),
+        p2_config::TEXT_LISTEN_ADDR,
+    ),
 ];
 
 /// **契约点名的联锁 `target` 键** → 联锁 `ConsoleOp`（**已知键**，标签由 `label()` 转出）。
@@ -1108,8 +1111,11 @@ impl Row {
         let objs: Vec<&Obj> = self.results.iter().map(|c| c.obj()).collect();
         show_only(&objs, Some(idx));
         self.op.set_text(op_text);
-        self.summary
-            .set_text(&summary_text(e.before.as_ref(), e.after.as_ref(), &e.target));
+        self.summary.set_text(&summary_text(
+            e.before.as_ref(),
+            e.after.as_ref(),
+            &e.target,
+        ));
         match reason_text(e.result, e.reason.as_deref()) {
             Some(t) => {
                 self.reason.set_text(&t);
@@ -1306,8 +1312,10 @@ impl Core {
         self.immutable_bar.set_pos(0, 0);
         self.immutable_icon
             .set_size(IMMUTABLE_ICON_W, IMMUTABLE_ICON_W);
-        self.immutable_icon
-            .set_pos(IMMUTABLE_ICON_X, theme::center_offset(IMMUTABLE_H, IMMUTABLE_ICON_W));
+        self.immutable_icon.set_pos(
+            IMMUTABLE_ICON_X,
+            theme::center_offset(IMMUTABLE_H, IMMUTABLE_ICON_W),
+        );
         self.immutable_text.set_pos(
             IMMUTABLE_TEXT_X,
             theme::center_offset(IMMUTABLE_H, TextSlot::Body.px() as i32),
@@ -1340,7 +1348,10 @@ impl Core {
         }
         let view = self.view();
         set_visible(self.empty.obj(), view == ListView::Empty);
-        set_visible(self.unavailable.borrow().obj(), view == ListView::Unavailable);
+        set_visible(
+            self.unavailable.borrow().obj(),
+            view == ListView::Unavailable,
+        );
         // 列表容器高（行 + 状态行 + 说明行）；空 / 不可用态各占其自身构件高。
         let list_h = match view {
             ListView::Rows => shown as i32 * Dimens::ROW_AUDIT_H + 2 * NOTE_H,
@@ -1595,7 +1606,6 @@ impl Core {
 
     /// 重建不可用态（原因文案在构造期固定 ⇒ 原因变化时换一个组件实例）。
     fn set_unavailable_reason(&self, reason: &str) {
-
         if *self.unav_reason.borrow() == reason {
             return;
         }
@@ -1610,10 +1620,8 @@ impl Core {
 /// 空 / 不可用态占位高（两者的**构件算式**与 `components.rs` 内一致；页面构造期读不到实测高，
 /// 与 `p4_interlock.rs` 的 `EMPTY_H` / `UNAVAILABLE_H` 同法，并由 `ui/tests.rs` 钉住）。
 fn unavailable_h() -> i32 {
-    let empty_h = Dimens::ICON_LG
-        + Dimens::GAP_MIN
-        + TextSlot::SectionTitle.px() as i32
-        + Dimens::GAP_MIN;
+    let empty_h =
+        Dimens::ICON_LG + Dimens::GAP_MIN + TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN;
     empty_h + TextSlot::Body.px() as i32 + Dimens::GAP_MIN
 }
 
@@ -1736,7 +1744,12 @@ impl P5AuditPage {
         let root = page_root(parent)?;
 
         // ── ① 头部三条 ──
-        let newest = text_label(&root, &newest_text(None), TextSlot::Body, Palette::TEXT_SECOND)?;
+        let newest = text_label(
+            &root,
+            &newest_text(None),
+            TextSlot::Body,
+            Palette::TEXT_SECOND,
+        )?;
         newest.set_size(Dimens::CONTENT_W, TextSlot::Body.px() as i32);
         newest.set_long_mode(LongMode::DOTS);
 
@@ -1798,7 +1811,10 @@ impl P5AuditPage {
             let l = text_label(&head, t, TextSlot::Body, Palette::TEXT_WEAK)?;
             l.set_size(Dimens::CHIP_MIN_W, TextSlot::Body.px() as i32);
             l.set_long_mode(LongMode::DOTS);
-            l.set_pos(x, theme::center_offset(TABLE_HEAD_H, TextSlot::Body.px() as i32));
+            l.set_pos(
+                x,
+                theme::center_offset(TABLE_HEAD_H, TextSlot::Body.px() as i32),
+            );
             head_cols.push(l);
         }
         // 竖分隔线 = **列间**分隔（列数 − 1 条），x 取"右邻列的列首 x"（同一张 [`HEAD_COL_X`]）。
@@ -1998,11 +2014,7 @@ impl P5AuditPage {
     /// 存活的表头竖分隔线数（锚定回归锁；恒 4）。
     #[cfg(test)]
     pub(crate) fn head_divs_alive(&self) -> usize {
-        self.core
-            .head_divs
-            .iter()
-            .filter(|o| o.is_alive())
-            .count()
+        self.core.head_divs.iter().filter(|o| o.is_alive()).count()
     }
 
     /// 表头底线是否存活（锚定回归锁）。
@@ -2031,7 +2043,12 @@ impl P5AuditPage {
     /// chip 数（`0` = 尚未建 / 建失败）。
     #[cfg(test)]
     pub(crate) fn ops_chip_count(&self) -> usize {
-        self.core.ops.borrow().as_ref().map(|c| c.len()).unwrap_or(0)
+        self.core
+            .ops
+            .borrow()
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0)
     }
 
     /// 第 `i` 个 chip 的**当前显示文本**（含选中前缀 `✓ `）。
@@ -2421,7 +2438,11 @@ mod tests {
         // 有记录 ⇒ 行态。
         let with_rows = AuditPage {
             available: true,
-            entries: vec![entry(ConsoleOp::ConfigApply, AuditResult::Ok, "gateway.port")],
+            entries: vec![entry(
+                ConsoleOp::ConfigApply,
+                AuditResult::Ok,
+                "gateway.port",
+            )],
             newest_ts_ms: Some(1),
             ..base.clone()
         };
@@ -2675,7 +2696,11 @@ mod tests {
             SUMMARY_MAX_CHARS,
             "下限 + 分隔 + 现实值对 恰为摘要上限（值对完整存活）"
         );
-        assert_eq!(UNKNOWN_TARGET_MIN_CHARS, TEXT_ELLIPSIS.chars().count() + 2, "`...` + 2 字尾部");
+        assert_eq!(
+            UNKNOWN_TARGET_MIN_CHARS,
+            TEXT_ELLIPSIS.chars().count() + 2,
+            "`...` + 2 字尾部"
+        );
         // 极长值对：键**不再**往里挤（停在 MIN），值对自身走既有截断口径。
         assert_eq!(unknown_key_budget(10_000), UNKNOWN_TARGET_MIN_CHARS);
         // `MIN < MAX` 由**常量区**的 `const _: () = assert!(..)`（`UNKNOWN_TARGET_MIN_CHARS`
@@ -2714,7 +2739,10 @@ mod tests {
         // 4 字上限 = `...` + **1** 字（省略标记占 3）。
         assert_eq!(clip("一二三四五", 4), format!("一{TEXT_ELLIPSIS}"));
         assert_eq!(clip_tail("一二三四五", 4), format!("{TEXT_ELLIPSIS}五"));
-        assert_eq!(clip_tail("一二三四五六七八", 6), format!("{TEXT_ELLIPSIS}六七八"));
+        assert_eq!(
+            clip_tail("一二三四五六七八", 6),
+            format!("{TEXT_ELLIPSIS}六七八")
+        );
         // 多字节按**字符**截断（不切半个汉字）。
         assert!(clip_tail(long, 4).is_char_boundary(clip_tail(long, 4).len()));
     }
@@ -2766,7 +2794,10 @@ mod tests {
             "两页共存的实测总行数上界：2 页 × 5 行成功 / 2 页 × 6 行 OOM 挂死 \
              （前提：LV_MEM_SIZE=256KB、两页同时存活；见 AU8 —— 改此值前必须重跑测量）"
         );
-        assert_eq!(COEXIST_ROWS_PER_PAGE, 4, "共存时每页 4 行（对挂死点 6 留 ≥33% 余量）");
+        assert_eq!(
+            COEXIST_ROWS_PER_PAGE, 4,
+            "共存时每页 4 行（对挂死点 6 留 ≥33% 余量）"
+        );
         // 下面两条**上界关系**由常量区的 `const _: () = assert!(..)` 给出（见 `COEXIST_ROWS_PER_PAGE`
         // 附近的四条编译期断言）：
         //   · `2 * COEXIST_ROWS_PER_PAGE <= MEASURED_COEXIST_TOTAL_ROWS`（预算不超实测总上界）；
@@ -2786,7 +2817,10 @@ mod tests {
         assert_eq!(banner_skin_of(Palette::SURFACE), BannerSkin::Surface);
         assert_eq!(banner_skin_of(Palette::BG), BannerSkin::Other);
         // 判定必须**能把 WARN_BG 与 AUDIT_BG 分开**（否则"页面确实用了 audit 那一档"是空转）。
-        assert_ne!(banner_skin_of(Palette::AUDIT_BG), banner_skin_of(Palette::WARN_BG));
+        assert_ne!(
+            banner_skin_of(Palette::AUDIT_BG),
+            banner_skin_of(Palette::WARN_BG)
+        );
     }
 
     /// 表头子件数常量 = 实际建出的子件数（5 列名 + 4 竖线 + 1 底线）—— 纯逻辑侧的定点，
@@ -2836,8 +2870,14 @@ mod tests {
         );
         assert_eq!(value_text(&json!(true)), TEXT_VALUE_ON);
         assert_eq!(value_text(&json!(false)), TEXT_VALUE_OFF);
-        assert_eq!(value_text(&json!([1, 2, 3])), format!("3 {TEXT_UNIT_ITEMS}"));
-        assert_eq!(value_text(&json!({"a": 1})), format!("1 {TEXT_UNIT_FIELDS}"));
+        assert_eq!(
+            value_text(&json!([1, 2, 3])),
+            format!("3 {TEXT_UNIT_ITEMS}")
+        );
+        assert_eq!(
+            value_text(&json!({"a": 1})),
+            format!("1 {TEXT_UNIT_FIELDS}")
+        );
         assert_eq!(value_text(&Value::Null), PLACEHOLDER);
         // 复合值**只报规模**（不把 `[1,2]` 渲染成一串 `?`）。
         let arr = value_text(&json!([1, 2]));
@@ -2866,7 +2906,11 @@ mod tests {
         assert_eq!(short, "端口: 2404 → 2405", "与 §6.5 的行内容示例同形");
         assert!(!short.contains(TEXT_ELLIPSIS));
         // 多字节（中文）按**字符**而非字节截断：不得把某个汉字切一半。
-        let zh = summary_text(Some(&Value::from("一二三四五六七八九十".repeat(3))), None, "");
+        let zh = summary_text(
+            Some(&Value::from("一二三四五六七八九十".repeat(3))),
+            None,
+            "",
+        );
         assert!(zh.chars().count() <= SUMMARY_MAX_CHARS);
         assert!(zh.is_char_boundary(zh.len()));
     }
@@ -2946,7 +2990,10 @@ mod tests {
         // 本行的值对（两侧都缺）—— `summary_text` 内部按它的实长给键分配预算。
         let pair = format!("{PLACEHOLDER}{TEXT_PAIR_ARROW}{PLACEHOLDER}");
         let shown = summary_text(e.before.as_ref(), e.after.as_ref(), raw);
-        assert!(!shown.contains(raw), "原始小写机器键不上屏（实际：{shown}）");
+        assert!(
+            !shown.contains(raw),
+            "原始小写机器键不上屏（实际：{shown}）"
+        );
         assert!(
             shown.starts_with(&unknown_key_label(raw, pair.chars().count())),
             "未登记键上屏的是 display_safe 归一的**保尾**形态（实际：{shown}）"

@@ -236,7 +236,13 @@ pub mod fbdev {
             //    `size_of::<FbFixScreenInfo>()`，不会越过 `fix` 所在栈帧 → 无缓冲区溢出。
             //    此「布局一致」是**人证而非机器校验**（libc 未绑定该结构体，无编译期断言）：
             //    若内核头文件改版，需重新比对（属设计 §13 前置项 1 真机首验范畴）。
-            let rc = unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix as *mut FbFixScreenInfo) };
+            let rc = unsafe {
+                libc::ioctl(
+                    fd,
+                    FBIOGET_FSCREENINFO as _,
+                    &mut fix as *mut FbFixScreenInfo,
+                )
+            };
             if rc < 0 {
                 let e = std::io::Error::last_os_error();
                 // SAFETY: `fd` 有效，且此错误分支是它唯一的所有者/唯一一次 close，之后立即
@@ -409,8 +415,16 @@ mod tests {
             Some(Rect::new(10, 10, 16, 16)),
             "越界部分按画布尺寸裁剪"
         );
-        assert_eq!(r.clipped_to(5, 64), None, "完全在画布外 ⇒ None（不得返回空矩形）");
-        assert_eq!(Rect::new(3, 3, 3, 3).clipped_to(64, 64), None, "零面积 ⇒ None");
+        assert_eq!(
+            r.clipped_to(5, 64),
+            None,
+            "完全在画布外 ⇒ None（不得返回空矩形）"
+        );
+        assert_eq!(
+            Rect::new(3, 3, 3, 3).clipped_to(64, 64),
+            None,
+            "零面积 ⇒ None"
+        );
         // **两维分别退化**（`x0 == x1` / `y0 == y1`，另一维非空）—— 这两条把两处判据
         // **各自**钉住：缺了它们，`x0 < x1` 单独写成 `<=` 会返回"零宽矩形"而不被察觉。
         assert_eq!(
@@ -423,6 +437,9 @@ mod tests {
             None,
             "零高（`y0 == y1`）⇒ None —— 不得因 `x0 < x1` 成立就返回 0 高矩形"
         );
-        assert_eq!(Rect::new(-5, -5, 5, 5).clipped_to(64, 64), Some(Rect::new(0, 0, 5, 5)));
+        assert_eq!(
+            Rect::new(-5, -5, 5, 5).clipped_to(64, 64),
+            Some(Rect::new(0, 0, 5, 5))
+        );
     }
 }

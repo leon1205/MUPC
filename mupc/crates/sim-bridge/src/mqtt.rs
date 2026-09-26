@@ -60,10 +60,7 @@ impl MqttPublisher {
 
     pub fn record_failure(&mut self) {
         self.consecutive_failures += 1;
-        tracing::warn!(
-            "MQTT publish 失败 ({}/{})",
-            self.consecutive_failures, 3
-        );
+        tracing::warn!("MQTT publish 失败 ({}/{})", self.consecutive_failures, 3);
     }
 
     pub fn should_exit(&self) -> bool {

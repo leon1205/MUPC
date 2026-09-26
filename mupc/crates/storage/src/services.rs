@@ -843,12 +843,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), StorageError> {
     }
 
     // v2.6 扩展字段（幂等: 先检查列是否存在再 ALTER TABLE）
-    let existing_cols: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('action_space_config')",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| StorageError::MigrationError(e.to_string()))?;
+    let existing_cols: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('action_space_config')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| StorageError::MigrationError(e.to_string()))?;
 
     let alter_stmts = [
         ("transformer_kva",     "ALTER TABLE action_space_config ADD COLUMN transformer_kva REAL NOT NULL DEFAULT 0.0"),

@@ -466,8 +466,7 @@ attention:
     #[test]
     fn test_enhancement_level_ordering() {
         assert!(
-            EnhancementLevel::FullVmdAttentionCorrection
-                < EnhancementLevel::BiLstmVmdAttention
+            EnhancementLevel::FullVmdAttentionCorrection < EnhancementLevel::BiLstmVmdAttention
         );
         assert!(EnhancementLevel::BiLstmVmdAttention < EnhancementLevel::VmdAttention);
         assert!(EnhancementLevel::VmdAttention < EnhancementLevel::AttentionOnly);

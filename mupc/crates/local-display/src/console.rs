@@ -753,7 +753,8 @@ impl ConsoleClient {
         payload: &P,
         clock: ConsoleClock,
     ) -> ConsoleResult<String> {
-        let endpoint = endpoint_for_op(op).ok_or_else(|| ConsoleError::UnknownOp(op.to_string()))?;
+        let endpoint =
+            endpoint_for_op(op).ok_or_else(|| ConsoleError::UnknownOp(op.to_string()))?;
         if !endpoint.is_write() {
             // 结构性防线：`op_name()` 只对写端点返回 `Some` ⇒ 此处恒假；若将来其语义被改宽，
             // 这里立刻响亮失败，而不是发出「GET + body」这种四不像请求。
@@ -761,8 +762,8 @@ impl ConsoleClient {
         }
         let request_id = uuid::Uuid::new_v4().to_string();
         let request = ControlRequest::new(request_id.clone(), clock.wall_ms, op, payload);
-        let body = serde_json::to_vec(&request)
-            .map_err(|e| ConsoleError::Encode(self.addr(), e))?;
+        let body =
+            serde_json::to_vec(&request).map_err(|e| ConsoleError::Encode(self.addr(), e))?;
         let mut raw = self.head_bytes(endpoint, None, Some(body.len()));
         raw.extend_from_slice(&body);
         self.start(
@@ -796,10 +797,7 @@ impl ConsoleClient {
         if query.len() > MAX_QUERY_BYTES {
             return Err(ConsoleError::QueryTooLarge(query.len()));
         }
-        if query
-            .bytes()
-            .any(|b| b <= 0x20 || b == 0x7f || b == b'#')
-        {
+        if query.bytes().any(|b| b <= 0x20 || b == 0x7f || b == b'#') {
             return Err(ConsoleError::BadQuery(query.to_string()));
         }
         let raw = self.head_bytes(endpoint, (!query.is_empty()).then_some(query), None);
@@ -872,7 +870,9 @@ impl ConsoleClient {
     /// 逐字节不变 —— 那是幂等的前提）。本方法**不做任何自动重发**。
     pub fn retry(&mut self, clock: ConsoleClock) -> ConsoleResult<()> {
         if let Some(p) = self.pending.as_ref() {
-            return Err(ConsoleError::Busy(p.spec.endpoint.op_name().unwrap_or("query").into()));
+            return Err(ConsoleError::Busy(
+                p.spec.endpoint.op_name().unwrap_or("query").into(),
+            ));
         }
         let spec = self.last.clone().ok_or(ConsoleError::Idle)?;
         // 查询端点无信封（`issued_at_ms = None`）⇒ 服务端没有窗口可判 ⇒ 不做本校验。
@@ -1015,7 +1015,9 @@ impl ConsoleClient {
     /// 起一条在途请求（连接工作线程 + 状态机初值）。
     fn start(&mut self, spec: RequestSpec, clock: ConsoleClock) -> ConsoleResult<()> {
         if let Some(p) = self.pending.as_ref() {
-            return Err(ConsoleError::Busy(p.spec.endpoint.op_name().unwrap_or("query").into()));
+            return Err(ConsoleError::Busy(
+                p.spec.endpoint.op_name().unwrap_or("query").into(),
+            ));
         }
         let addr = self.addr();
         let deadline = clock.start + self.timeout;
@@ -1243,9 +1245,9 @@ fn parse_head(p: &mut Pending, pos: usize) -> ConsoleResult<()> {
         };
         let (k, v) = (k.trim(), v.trim());
         if k.eq_ignore_ascii_case("content-length") {
-            let n = v.parse::<usize>().map_err(|_| {
-                io_err(&p.addr, &format!("bad Content-Length header `{v}`"))
-            })?;
+            let n = v
+                .parse::<usize>()
+                .map_err(|_| io_err(&p.addr, &format!("bad Content-Length header `{v}`")))?;
             if n > MAX_BODY_BYTES {
                 return Err(ConsoleError::BodyTooLarge(p.addr.clone(), n));
             }
@@ -1738,7 +1740,9 @@ mod tests {
 
         // 每次生成的都是**新** id（弱 id / 复用会把两次不同操作判成同一请求 ⇒ 静默丢操作）
         let mut c2 = ConsoleClient::new(&stub.base_url).expect("client");
-        let id2 = c2.begin_write("release", &payload(), clock()).expect("begin");
+        let id2 = c2
+            .begin_write("release", &payload(), clock())
+            .expect("begin");
         assert_ne!(id, id2, "两个请求不得共用同一 `request_id`");
     }
 
@@ -1757,7 +1761,8 @@ mod tests {
     fn phases_advance_from_connecting_to_done() {
         let stub = Stub::echoing(false, "ok", true);
         let mut c = ConsoleClient::new(&stub.base_url).expect("client");
-        c.begin_write("release", &payload(), clock()).expect("begin");
+        c.begin_write("release", &payload(), clock())
+            .expect("begin");
         assert_eq!(c.phase_name(), "connecting", "首拍前处于连接阶段");
         assert!(c.is_busy());
         let out = match wait_for_stage(&mut c, |c| c.phase_name() == "reading", HANG_GUARD) {
@@ -1798,7 +1803,8 @@ mod tests {
         let stub = Stub::echoing(false, "ok", true);
         let mut c =
             ConsoleClient::with_timeout(&stub.base_url, Duration::from_nanos(1)).expect("client");
-        c.begin_write("release", &payload(), clock()).expect("begin");
+        c.begin_write("release", &payload(), clock())
+            .expect("begin");
         drive_until(&mut c, |c| c.phase_name() == "reading", HANG_GUARD);
     }
 
@@ -1811,7 +1817,8 @@ mod tests {
     fn stage_wait_hands_back_result_when_request_completes_first() {
         let stub = Stub::echoing(false, "ok", true);
         let mut c = ConsoleClient::new(&stub.base_url).expect("client");
-        c.begin_write("release", &payload(), clock()).expect("begin");
+        c.begin_write("release", &payload(), clock())
+            .expect("begin");
         let StageWait::Finished(Ok(out)) = wait_for_stage(&mut c, |_| false, HANG_GUARD) else {
             panic!("请求先结束时必须交回结果，而不是空转到预算");
         };
@@ -1834,7 +1841,11 @@ mod tests {
             assert_eq!(resp.code, mupc_display_proto::ControlCode::Ok);
             assert_eq!(resp.request_id, id);
             assert_eq!(resp.duplicate, duplicate, "`duplicate` 必须原样上抛");
-            assert_eq!(resp.audit_id.as_deref(), Some("aud-1"), "审计 id 两种结果都返回");
+            assert_eq!(
+                resp.audit_id.as_deref(),
+                Some("aud-1"),
+                "审计 id 两种结果都返回"
+            );
         }
     }
 
@@ -1842,7 +1853,8 @@ mod tests {
     fn audit_unavailable_is_decoded_as_rejection_without_applied() {
         let stub = Stub::echoing(false, "audit_unavailable", false);
         let mut c = ConsoleClient::new(&stub.base_url).expect("client");
-        c.begin_write("apply", &serde_json::json!({}), clock()).expect("begin");
+        c.begin_write("apply", &serde_json::json!({}), clock())
+            .expect("begin");
         let out = drive_to_done(&mut c, HANG_GUARD).expect("HTTP 200 ⇒ 传输层 Ok");
         let resp = out.response().expect("回执");
         assert!(!resp.ok, "审计不可写 ⇒ ok=false");
@@ -1862,7 +1874,8 @@ mod tests {
             "null",
         )))]);
         let mut c = ConsoleClient::new(&stub.base_url).expect("client");
-        c.begin_write("release", &payload(), clock()).expect("begin");
+        c.begin_write("release", &payload(), clock())
+            .expect("begin");
         let err = drive_to_done(&mut c, HANG_GUARD).expect_err("错位必须 Err");
         assert!(
             matches!(err, ConsoleError::RequestIdMismatch { .. }),
@@ -2055,7 +2068,8 @@ mod tests {
         let line = format!("X-Pad: {}\r\n", "A".repeat(1024));
         let lines = MAX_HEAD_BYTES / 1024 + 8;
         let stub = Stub::spawn(move |_i, _req| {
-            let mut resp = String::from("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n");
+            let mut resp =
+                String::from("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n");
             for _ in 0..lines {
                 resp.push_str(&line);
             }
@@ -2122,7 +2136,9 @@ mod tests {
     #[test]
     fn chunked_transfer_encoding_fails_loudly() {
         let stub = Stub::spawn(|_i, _req| {
-            Some("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".into())
+            Some(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".into(),
+            )
         });
         let mut c = ConsoleClient::new(&stub.base_url).expect("client");
         c.begin_query(ConsoleEndpoint::Config, "", clock())
@@ -2146,7 +2162,11 @@ mod tests {
         ));
         let c = ConsoleClient::default();
         assert_eq!(c.addr(), "127.0.0.1:9811");
-        assert_eq!(c.timeout(), CONTROL_TIMEOUT, "生产超时恒为 5 s（设计 §5.5）");
+        assert_eq!(
+            c.timeout(),
+            CONTROL_TIMEOUT,
+            "生产超时恒为 5 s（设计 §5.5）"
+        );
     }
 
     /// **host 必须是 IP 字面量**（设计 §3.3「host 为字面量、不做 DNS」）。
@@ -2217,13 +2237,10 @@ mod tests {
         let stub = Stub::scripted(vec![None]); // 收下请求后静默（永不回包）
         let mut c = ConsoleClient::with_timeout(&stub.base_url, Duration::from_millis(120))
             .expect("client");
-        c.begin_write("release", &payload(), clock()).expect("begin");
+        c.begin_write("release", &payload(), clock())
+            .expect("begin");
         // 先推进到「已连上、正在等响应」——证明超时**不是**因为连不上。
-        drive_until(
-            &mut c,
-            |c| c.phase_name() == "reading",
-            HANG_GUARD,
-        );
+        drive_until(&mut c, |c| c.phase_name() == "reading", HANG_GUARD);
         let budget = Instant::now() + HANG_GUARD;
         let out = loop {
             match c.tick::<serde_json::Value>(Instant::now()) {
@@ -2233,10 +2250,7 @@ mod tests {
             assert!(Instant::now() < budget, "超时未被强制（5 s 截止失效）");
             std::thread::yield_now();
         };
-        assert!(
-            matches!(out, Err(ConsoleError::Timeout(_))),
-            "got {out:?}"
-        );
+        assert!(matches!(out, Err(ConsoleError::Timeout(_))), "got {out:?}");
         assert!(!c.is_busy(), "超时后立刻作废在途请求");
         assert_eq!(c.fail_streak(), 1, "超时记一次失败");
         // 作废后再 tick 不再产出（不重复计失败、不重复报错）
@@ -2259,12 +2273,9 @@ mod tests {
     fn tick_never_blocks_on_a_silent_peer() {
         let stub = Stub::scripted(vec![None]);
         let mut c = ConsoleClient::new(&stub.base_url).expect("client");
-        c.begin_query(ConsoleEndpoint::Audit, "", clock()).expect("begin");
-        drive_until(
-            &mut c,
-            |c| c.phase_name() == "reading",
-            HANG_GUARD,
-        );
+        c.begin_query(ConsoleEndpoint::Audit, "", clock())
+            .expect("begin");
+        drive_until(&mut c, |c| c.phase_name() == "reading", HANG_GUARD);
 
         let t0 = Instant::now();
         for _ in 0..200 {
@@ -2279,7 +2290,10 @@ mod tests {
             "对端静默时 200 拍耗时 {elapsed:?} —— `tick` 内出现了等待（设计 §5.2 不变量 3）；\
              失败模式应为「第一拍耗掉整个 5 s 超时」或直接挂死，裕度 ≥ 5×"
         );
-        assert!(c.is_busy(), "静默对端不改变在途状态（只有截止到期才 abort）");
+        assert!(
+            c.is_busy(),
+            "静默对端不改变在途状态（只有截止到期才 abort）"
+        );
     }
 
     /// **首个 tick 也不阻塞**（连接尚未完成时）：连续 200 拍立即返回。
@@ -2302,7 +2316,8 @@ mod tests {
             Duration::from_millis(300),
         )
         .expect("client");
-        c.begin_write("apply", &serde_json::json!({}), clock()).expect("begin");
+        c.begin_write("apply", &serde_json::json!({}), clock())
+            .expect("begin");
         let t0 = Instant::now();
         for _ in 0..200 {
             let _ = c.tick::<serde_json::Value>(Instant::now());
@@ -2336,7 +2351,9 @@ mod tests {
         });
         let mut c = ConsoleClient::with_timeout(&stub.base_url, Duration::from_millis(150))
             .expect("client");
-        let id = c.begin_write("release", &payload(), clock()).expect("begin");
+        let id = c
+            .begin_write("release", &payload(), clock())
+            .expect("begin");
 
         let budget = Instant::now() + HANG_GUARD;
         loop {
@@ -2368,7 +2385,10 @@ mod tests {
             extract_request_id(&b),
             "重试的 `request_id` 必须与首次**逐字相同**"
         );
-        assert!(b.contains("\"issued_at_ms\":1757412000000"), "重发放**原样**信封（含 issued_at_ms）");
+        assert!(
+            b.contains("\"issued_at_ms\":1757412000000"),
+            "重发放**原样**信封（含 issued_at_ms）"
+        );
         // 首次超时后 `fail_streak` 记 1；重试成功 ⇒ 清零
         assert_eq!(c.fail_streak(), 0, "成功清零失败计数");
     }
@@ -2376,11 +2396,7 @@ mod tests {
     /// 静默桩下推进到**超时收口**，返回该错误（测试自身不 sleep）。
     fn drive_to_timeout(c: &mut ConsoleClient) -> ConsoleError {
         // 先到读阶段：证明超时**不是**因为连不上（也保证桩已 accept 到连接）。
-        drive_until(
-            c,
-            |c| c.phase_name() == "reading",
-            HANG_GUARD,
-        );
+        drive_until(c, |c| c.phase_name() == "reading", HANG_GUARD);
         let budget = Instant::now() + HANG_GUARD;
         loop {
             if let Progress::Done(r) = c.tick::<serde_json::Value>(Instant::now()) {
@@ -2442,7 +2458,10 @@ mod tests {
         assert_eq!(stub.request_count(), 1, "桩只该收到首次那一条");
         // 读口（B3-1 评审阻塞 2 要求暴露）：接线层可据此预先判定"还值不值得重试"
         assert_eq!(c.issued_at_ms(), Some(t0.wall_ms));
-        assert_eq!(c.request_age_ms(t0.wall_ms + REPLAY_WINDOW_MS), Some(REPLAY_WINDOW_MS));
+        assert_eq!(
+            c.request_age_ms(t0.wall_ms + REPLAY_WINDOW_MS),
+            Some(REPLAY_WINDOW_MS)
+        );
         assert_eq!(c.request_age_ms(t0.wall_ms - 7), Some(0), "时钟回拨按 0 计");
     }
 
@@ -2460,11 +2479,14 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}");
         let t0 = clock();
 
-        let mut c =
-            ConsoleClient::with_timeout(&base, Duration::from_millis(150)).expect("client");
+        let mut c = ConsoleClient::with_timeout(&base, Duration::from_millis(150)).expect("client");
         c.begin_write("release", &payload(), t0).expect("begin");
         assert_eq!(c.issued_at_ms(), Some(t0.wall_ms), "写请求有信封");
-        assert_eq!(c.request_age_ms(t0.wall_ms + 1), Some(1), "读口按注入时刻算年龄");
+        assert_eq!(
+            c.request_age_ms(t0.wall_ms + 1),
+            Some(1),
+            "读口按注入时刻算年龄"
+        );
         assert_eq!(c.request_age_ms(t0.wall_ms - 7), Some(0), "时钟回拨按 0 计");
         c.cancel();
 
@@ -2478,8 +2500,7 @@ mod tests {
         c.cancel();
 
         // 查询（GET）：无信封 ⇒ 无 `issued_at_ms`，重放窗口**不适用** ⇒ 任意晚都可重发
-        let mut q =
-            ConsoleClient::with_timeout(&base, Duration::from_millis(150)).expect("client");
+        let mut q = ConsoleClient::with_timeout(&base, Duration::from_millis(150)).expect("client");
         q.begin_query(ConsoleEndpoint::Logs, "", t0).expect("begin");
         assert_eq!(q.issued_at_ms(), None, "查询端点无信封");
         assert_eq!(q.request_age_ms(t0.wall_ms + REPLAY_WINDOW_MS * 10), None);
@@ -2559,7 +2580,10 @@ mod tests {
         assert!(note_written(&mut once, 10, 10), "一次写完");
         assert_eq!(once, 10);
         let mut zero = 0usize;
-        assert!(note_written(&mut zero, 0, 0), "空报文 ⇒ 立即完成（不会卡在写阶段）");
+        assert!(
+            note_written(&mut zero, 0, 0),
+            "空报文 ⇒ 立即完成（不会卡在写阶段）"
+        );
 
         // 形态 4：内核报出比剩余更多（不可能）⇒ `saturating_add` 兜住，不 panic 不倒绕
         let mut over = usize::MAX - 1;
@@ -2638,7 +2662,10 @@ mod tests {
     fn lf_only_response_is_diagnosed_as_incomplete_head_not_timeout() {
         let stub = Stub::spawn_raw_hold(|_i, _req| {
             // 合法的状态行与 Content-Length，但**行结束符全是 LF**（无 CR）
-            Some(b"HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: 2\n\n{}".to_vec())
+            Some(
+                b"HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Length: 2\n\n{}"
+                    .to_vec(),
+            )
         });
         let mut c = ConsoleClient::with_timeout(&stub.base_url, Duration::from_millis(150))
             .expect("client");

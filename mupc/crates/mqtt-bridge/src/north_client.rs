@@ -121,7 +121,8 @@ impl NorthMqttClient {
         let Some(path) = self.client_cert_path.as_ref() else {
             return Ok(None);
         };
-        let pem = std::fs::read(path).map_err(|e| format!("读取客户端证书失败({}): {e}", path.display()))?;
+        let pem = std::fs::read(path)
+            .map_err(|e| format!("读取客户端证书失败({}): {e}", path.display()))?;
         let not_after_unix = parse_cert_not_after(&pem)?;
         Ok(Some(CertExpiry {
             not_after_unix,
@@ -287,8 +288,8 @@ fn read_cert(path: &std::path::Path, what: &str) -> Result<Vec<u8>, MqttBridgeEr
 /// 依赖 `x509-parser`（workspace 既有 **0.16**，与 `security` 同版本，避免重复版本树）。
 /// 解析失败 ⇒ `Err(String)`（**调用方 WARN 后继续**，不阻断连接）。
 pub fn parse_cert_not_after(pem_bytes: &[u8]) -> Result<i64, String> {
-    let (_, pem) = x509_parser::pem::parse_x509_pem(pem_bytes)
-        .map_err(|e| format!("PEM 解析失败: {e:?}"))?;
+    let (_, pem) =
+        x509_parser::pem::parse_x509_pem(pem_bytes).map_err(|e| format!("PEM 解析失败: {e:?}"))?;
     let cert = pem
         .parse_x509()
         .map_err(|e| format!("X.509 解析失败: {e:?}"))?;
@@ -361,7 +362,10 @@ mod tests {
             };
             match NorthMqttClient::new(&cfg) {
                 Err(MqttBridgeError::CertificateError(_)) => {}
-                other => panic!("{label}：必须 CertificateError（fail-closed），实得 {:?}", other.map(|_| "Ok")),
+                other => panic!(
+                    "{label}：必须 CertificateError（fail-closed），实得 {:?}",
+                    other.map(|_| "Ok")
+                ),
             }
         }
     }
@@ -398,7 +402,10 @@ mod tests {
             parse_broker("mqtt.example.com:8883"),
             Some(("mqtt.example.com".to_string(), 8883))
         );
-        assert_eq!(parse_broker("127.0.0.1:1883"), Some(("127.0.0.1".into(), 1883)));
+        assert_eq!(
+            parse_broker("127.0.0.1:1883"),
+            Some(("127.0.0.1".into(), 1883))
+        );
         assert_eq!(parse_broker("[::1]:1883"), Some(("[::1]".into(), 1883)));
         // 非空但不可解析 ⇒ None（调用方拒）
         assert_eq!(parse_broker(""), None);
@@ -413,7 +420,10 @@ mod tests {
     #[test]
     fn cert_expiry_is_parsed_from_real_pem() {
         let not_after = parse_cert_not_after(TEST_CERT_PEM.as_bytes()).expect("自签证书须可解析");
-        assert!(not_after > 1_700_000_000, "notAfter 应是合理的时间戳: {not_after}");
+        assert!(
+            not_after > 1_700_000_000,
+            "notAfter 应是合理的时间戳: {not_after}"
+        );
 
         let dir = std::env::temp_dir().join(format!("mupc-cert-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -438,7 +448,10 @@ mod tests {
         assert!(!exp.should_warn(), "剩余 90 天 ≥ 30 ⇒ 不告警");
         let exp2 = c.cert_expiry(not_after - 86_400 * 29).unwrap().unwrap();
         assert_eq!(exp2.remaining_days, 29);
-        assert!(exp2.should_warn(), "剩余 29 天 < 30 ⇒ 告警（Q8 门限 30 天）");
+        assert!(
+            exp2.should_warn(),
+            "剩余 29 天 < 30 ⇒ 告警（Q8 门限 30 天）"
+        );
         let exp3 = c.cert_expiry(not_after + 86_400).unwrap().unwrap();
         assert_eq!(exp3.remaining_days, -1);
         assert!(exp3.should_warn(), "已过期 ⇒ 必须告警");

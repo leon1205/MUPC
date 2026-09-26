@@ -135,8 +135,16 @@ mod tests {
     fn console_op_vocabulary_and_labels() {
         for (op, literal, label) in [
             (ConsoleOp::ConfigApply, "\"config_apply\"", "配置保存"),
-            (ConsoleOp::ConfigResetDefault, "\"config_reset_default\"", "恢复默认值"),
-            (ConsoleOp::InterlockRelease, "\"interlock_release\"", "联锁释放"),
+            (
+                ConsoleOp::ConfigResetDefault,
+                "\"config_reset_default\"",
+                "恢复默认值",
+            ),
+            (
+                ConsoleOp::InterlockRelease,
+                "\"interlock_release\"",
+                "联锁释放",
+            ),
             (ConsoleOp::InterlockAckM1, "\"interlock_ack_m1\"", "M1 授权"),
         ] {
             assert_eq!(serde_json::to_string(&op).unwrap(), literal);

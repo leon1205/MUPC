@@ -132,8 +132,14 @@ mod tests {
     fn log_range_json_presets() {
         assert_eq!(serde_json::to_string(&LogRange::H1).unwrap(), "\"1h\"");
         assert_eq!(serde_json::to_string(&LogRange::H24).unwrap(), "\"24h\"");
-        assert_eq!(serde_json::to_string(&LogRange::Custom).unwrap(), "\"custom\"");
-        assert_eq!(serde_json::from_str::<LogRange>("\"24h\"").unwrap(), LogRange::H24);
+        assert_eq!(
+            serde_json::to_string(&LogRange::Custom).unwrap(),
+            "\"custom\""
+        );
+        assert_eq!(
+            serde_json::from_str::<LogRange>("\"24h\"").unwrap(),
+            LogRange::H24
+        );
     }
 
     #[test]

@@ -720,7 +720,11 @@ impl SouthScheduler {
         sink: Arc<dyn StationSink>,
     ) -> Arc<Self> {
         let state = Arc::new(std::sync::RwLock::new(
-            cfg.stations.iter().cloned().map(Station::from_conf).collect(),
+            cfg.stations
+                .iter()
+                .cloned()
+                .map(Station::from_conf)
+                .collect(),
         ));
         // 按 port 分组（保留 cfg 首现序；state 下标 = cfg 序）
         let mut port_order: Vec<String> = Vec::new();
@@ -1206,7 +1210,7 @@ impl SouthScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PointConf, StationParity, DEFAULT_BAUD_RATE, RegBlockConf, RegFunc};
+    use crate::config::{PointConf, RegBlockConf, RegFunc, StationParity, DEFAULT_BAUD_RATE};
     use crate::port_runtime::MockBus;
     use mupc_data_processing::meter_regs::{RegFormat, WordOrder};
 
@@ -1408,7 +1412,12 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|(id, _, pts)| id == station_id && pts.iter().any(|&(_, _, ev)| !ev))
-                .flat_map(|(_, _, pts)| pts.iter().filter(|&&(_, _, ev)| !ev).map(|(m, v, _)| (m.clone(), *v)).collect::<Vec<_>>())
+                .flat_map(|(_, _, pts)| {
+                    pts.iter()
+                        .filter(|&&(_, _, ev)| !ev)
+                        .map(|(m, v, _)| (m.clone(), *v))
+                        .collect::<Vec<_>>()
+                })
                 .collect()
         }
         /// battery 站最近一次 on_battery_soc 推的 soc（无推送 → None）
@@ -1560,10 +1569,17 @@ mod tests {
         assert_eq!(bus.call_count(1, 0), 3, "grid 应每轮到期");
         assert_eq!(bus.call_count(1, 26), 3);
         // hvac：仅首轮（next_due=0 启动即采）；1000/2000 未到期
-        assert_eq!(bus.call_count(3, 100), 1, "hvac interval=5000 首轮后应隔 5000 才到期");
+        assert_eq!(
+            bus.call_count(3, 100),
+            1,
+            "hvac interval=5000 首轮后应隔 5000 才到期"
+        );
         // sink：grid 每轮 on_grid_package；hvac 一次 telemetry（非事件）
         assert_eq!(sink.grid_count(), 3);
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
+        assert_eq!(
+            sink.telemetry_of("hvac"),
+            vec![("temp_1".to_string(), 23.5)]
+        );
         assert_eq!(sink.event_count("grid", "offline"), 0);
         assert_eq!(sink.event_count("hvac", "offline"), 0);
         assert_eq!(sink.event_count("grid", "online"), 0);
@@ -1593,7 +1609,10 @@ mod tests {
         assert_eq!(sink.grid_count(), 0);
         // 同口 hvac 不受隔离影响：仍读到并上送普通遥测
         assert_eq!(bus.call_count(3, 100), 1);
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
+        assert_eq!(
+            sink.telemetry_of("hvac"),
+            vec![("temp_1".to_string(), 23.5)]
+        );
         assert_eq!(sink.event_count("hvac", "offline"), 0);
     }
 
@@ -1616,7 +1635,10 @@ mod tests {
 
         sched.tick_once(1000).await; // 恢复（fail 已消费）
         assert_eq!(sink.event_count("hvac", "online"), 1);
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
+        assert_eq!(
+            sink.telemetry_of("hvac"),
+            vec![("temp_1".to_string(), 23.5)]
+        );
     }
 
     /// 多轮退避（oc≥3，next_due 已推远）后恢复：probe 在退避到期点成功 → oc 归零、
@@ -1627,7 +1649,11 @@ mod tests {
     async fn station_recovers_after_extended_backoff() {
         let bus = Arc::new(MockBus::new());
         let sink = Arc::new(FakeSink::default());
-        let sched = build(vec![hvac_conf("hvac", "ttyS1", 3, 1000)], bus.clone(), sink.clone());
+        let sched = build(
+            vec![hvac_conf("hvac", "ttyS1", 3, 1000)],
+            bus.clone(),
+            sink.clone(),
+        );
         // 三轮失败：0 → oc=1 next_due 1000；1000 → oc=2 next_due 3000；3000 → oc=3 next_due 7000
         sched.tick_once(0).await;
         sched.tick_once(1000).await;
@@ -1642,7 +1668,7 @@ mod tests {
         // cadence：7000 恢复读 + 8000 正常到期读 = 2；若退避残留把 next_due 推过 8000，
         // 则 8000 轮不读 → 增量仅 1，断言区分成立。
         let baseline = bus.call_count(3, 100); // = 3（三轮失败尝试）
-        // 恢复：put 预置 → 7000 到期 probe 成功
+                                               // 恢复：put 预置 → 7000 到期 probe 成功
         bus.put(3, 100, f32_regs(23.5));
         sched.tick_once(7000).await;
         {
@@ -1650,7 +1676,10 @@ mod tests {
             assert_eq!(st[0].offline_count, 0, "恢复后 oc 归零");
             assert_eq!(sink.event_count("hvac", "online"), 1);
         }
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
+        assert_eq!(
+            sink.telemetry_of("hvac"),
+            vec![("temp_1".to_string(), 23.5)]
+        );
         // 恢复后 cadence 正常：next_due=8000，8000 到期再采一次（不因退避残留再跳）
         sched.tick_once(8000).await;
         assert_eq!(
@@ -1783,15 +1812,27 @@ mod tests {
 
         // 读序：holding temp 先读到（FC03）→ input alarm_in 读 1 次即失败（FC04）
         assert_eq!(bus.call_count(3, 100), 1, "holding 块应先被 FC03 读");
-        assert_eq!(bus.input_call_count(3, 200), 1, "input 块应被 FC04 读 1 次后失败");
+        assert_eq!(
+            bus.input_call_count(3, 200),
+            1,
+            "input 块应被 FC04 读 1 次后失败"
+        );
         // 任一块读失败 → 整站 offline（事件一次）；已读 Ok 块整体弃用——无部分交付
-        assert_eq!(sink.event_count("mix", "offline"), 1, "input 块失败应隔离整站");
+        assert_eq!(
+            sink.event_count("mix", "offline"),
+            1,
+            "input 块失败应隔离整站"
+        );
         assert!(
             sink.telemetry_of("mix").is_empty(),
             "holding 已读但不部分交付——本轮无 telemetry"
         );
         // early-break：input 块失败即 break → 其后的第三块 temp2(300) 不应被读
-        assert_eq!(bus.call_count(3, 300), 0, "early-break 应钳制读序，不再读后续块");
+        assert_eq!(
+            bus.call_count(3, 300),
+            0,
+            "early-break 应钳制读序，不再读后续块"
+        );
     }
 
     /// 纯 FC04 站（全 input 块、无 holding）：读走 read_input 可正常采集（telemetry 非事件）。
@@ -1845,7 +1886,11 @@ mod tests {
 
         assert_eq!(bus.input_call_count(3, 200), 1, "全 input 块站应走 FC04");
         assert_eq!(bus.input_call_count(3, 202), 1);
-        assert_eq!(bus.call_count(3, 200), 0, "纯 input 块站不应发 FC03 holding 读");
+        assert_eq!(
+            bus.call_count(3, 200),
+            0,
+            "纯 input 块站不应发 FC03 holding 读"
+        );
         let tel = sink.telemetry_of("pure_in");
         assert!(tel.iter().any(|(m, v)| m == "alarm_in_1" && *v == 0.5));
         assert!(tel.iter().any(|(m, v)| m == "status_in_1" && *v == 1.5));
@@ -1862,7 +1907,11 @@ mod tests {
         let sink = Arc::new(FakeSink::default());
         let sched = build(vec![battery_conf()], bus.clone(), sink.clone());
         sched.tick_once(0).await;
-        assert_eq!(sink.soc_of("bms"), Some(65.5), "battery 站 soc 应经 on_battery_soc 推送");
+        assert_eq!(
+            sink.soc_of("bms"),
+            Some(65.5),
+            "battery 站 soc 应经 on_battery_soc 推送"
+        );
         assert_eq!(sink.event_count("bms", "offline"), 0);
         // telemetry 落库照旧（soc 点仍进 telemetry）
         assert!(sink.telemetry_of("bms").iter().any(|(m, _)| m == "soc"));
@@ -2000,7 +2049,10 @@ mod tests {
         assert_eq!(sink.event_count("bms", "offline"), 0);
         assert_eq!(sink.event_count("bms", "online"), 0);
         // 关键断言：无 soc 块 → battery.soc None → 不误触 on_battery_soc
-        assert!(sink.soc_of("bms").is_none(), "无 soc 块不应误推 on_battery_soc");
+        assert!(
+            sink.soc_of("bms").is_none(),
+            "无 soc 块不应误推 on_battery_soc"
+        );
     }
 
     /// 负面 gating：非 battery role（hvac）站正常采遥测 → 不触发 battery soc 分支（role
@@ -2017,10 +2069,16 @@ mod tests {
         );
         sched.tick_once(0).await;
         // 正常采遥测（temp 点落库，无 offline 事件）——证明站本身健康
-        assert_eq!(sink.telemetry_of("hvac"), vec![("temp_1".to_string(), 23.5)]);
+        assert_eq!(
+            sink.telemetry_of("hvac"),
+            vec![("temp_1".to_string(), 23.5)]
+        );
         assert_eq!(sink.event_count("hvac", "offline"), 0);
         // 关键断言：hvac（非 Battery）不走 on_battery_soc 通道
-        assert!(sink.soc_of("hvac").is_none(), "非 battery role 不应触发 soc 推送");
+        assert!(
+            sink.soc_of("hvac").is_none(),
+            "非 battery role 不应触发 soc 推送"
+        );
     }
 
     /// S3b-2 T5：`func: discrete` 块按 **FC02** 读（`StationBus::read_discrete`），
@@ -3132,7 +3190,11 @@ mod tests {
         assert_eq!(backoff_extra(1000, 3), 4000);
         assert_eq!(backoff_extra(1000, 5), 16000);
         assert_eq!(backoff_extra(1000, 6), 32000, "oc=6 封顶 32×");
-        assert_eq!(backoff_extra(1000, u32::MAX), 32000, "极端 oc saturating 后封顶");
+        assert_eq!(
+            backoff_extra(1000, u32::MAX),
+            32000,
+            "极端 oc saturating 后封顶"
+        );
         assert_eq!(backoff_extra(60000, 6), 1_920_000); // 60s×32
     }
 
@@ -3155,7 +3217,11 @@ mod tests {
         for now in [0u64, 1000, 2000, 3000] {
             sched.tick_once(now).await;
         }
-        assert_eq!(sink.event_count("hvac", "offline"), 1, "窗口内防刷屏只应告警一次");
+        assert_eq!(
+            sink.event_count("hvac", "offline"),
+            1,
+            "窗口内防刷屏只应告警一次"
+        );
         // offline_count 逐失败轮累加（0/1000/3000 三失败轮；2000 轮退避跳过未试，调度态独立于事件去抖）
         {
             let st = sched.state.read().unwrap();
@@ -3182,7 +3248,7 @@ mod tests {
         sched.tick_once(1000).await; // hvac 到期再失败 oc=2 → extra=2000 → next_due=3000
         sched.tick_once(2000).await; // hvac next_due=3000 未到期 → 不试
         sched.tick_once(3000).await; // hvac 到期再失败 oc=3 → extra=4000 → next_due=7000
-        // grid：0/1000/2000/3000 全采（4 次）；hvac：0/1000/3000 失败试 3 次（2000 被退避跳过）
+                                     // grid：0/1000/2000/3000 全采（4 次）；hvac：0/1000/3000 失败试 3 次（2000 被退避跳过）
         assert_eq!(bus.call_count(1, 0), 4, "grid 不应被 hvac 退避拖累");
         assert_eq!(bus.call_count(3, 100), 3, "hvac 2000 轮应被退避跳过");
         // 事件：stale_timeout_s=5（build 默认 cfg(stations,5)），3000-0=3s<5s → 一次 offline
@@ -3869,7 +3935,11 @@ mod tests {
         // t=0：承载组（2000 组）+ 快组（1000 组）都到期（承载组恒排最前）⇒ 承载组读失败
         bus.fail_input_once(1, 0);
         sched.tick_once(0).await; // oc=1 ⇒ extra = 1×2000 = 2000（与 due_round 的推进同值 ⇒ 不可判）
-        assert_eq!(sink.event_count("hvac", "offline"), 1, "承载组失败 ⇒ offline 一次");
+        assert_eq!(
+            sink.event_count("hvac", "offline"),
+            1,
+            "承载组失败 ⇒ offline 一次"
+        );
         assert_eq!(bus.input_call_count(1, 0), 1, "承载组 t=0 采一轮（失败）");
 
         // t=1000：只有快组到期（承载组 next_due = 2000）
@@ -3879,7 +3949,11 @@ mod tests {
         // t=2000：承载组第 2 次到期 ⇒ 再失败（oc=2 ⇒ extra = 2×2000 = 4000）
         bus.fail_input_once(1, 0);
         sched.tick_once(2000).await;
-        assert_eq!(bus.input_call_count(1, 0), 2, "承载组 t=2000 再采一轮（失败）");
+        assert_eq!(
+            bus.input_call_count(1, 0),
+            2,
+            "承载组 t=2000 再采一轮（失败）"
+        );
         {
             let st = sched.state.read().unwrap();
             assert_eq!(st[0].offline_count, 2, "offline_count 逐失败轮累加 = 2");
@@ -3996,7 +4070,11 @@ mod tests {
         // t=0：承载组（5000）读失败 ⇒ 站离线；快组（2000）同 tick 首采 ⇒ 只建基线（31 位快照）
         bus.fail_input_once(1, 0);
         sched.tick_once(0).await;
-        assert_eq!(sink.event_count("hvac", "offline"), 1, "承载组失败 ⇒ offline 一次");
+        assert_eq!(
+            sink.event_count("hvac", "offline"),
+            1,
+            "承载组失败 ⇒ offline 一次"
+        );
         {
             let st = sched.state.read().unwrap();
             assert_eq!(st[0].offline_count, 1, "offline_count = 1（站离线）");
@@ -4006,7 +4084,11 @@ mod tests {
         sched.tick_once(2000).await;
         sched.tick_once(4000).await;
         assert_eq!(bus.bit_call_count(1, 0), 3, "快组 0/2000/4000 各一轮");
-        assert_eq!(bus.input_call_count(1, 0), 1, "承载组仅 t=0 一轮（退避到 5000）");
+        assert_eq!(
+            bus.input_call_count(1, 0),
+            1,
+            "承载组仅 t=0 一轮（退避到 5000）"
+        );
         assert_eq!(
             sink.events_since("hvac", 1),
             Vec::<(String, f64)>::new(),

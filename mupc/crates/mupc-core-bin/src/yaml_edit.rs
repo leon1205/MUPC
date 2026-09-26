@@ -91,7 +91,10 @@ impl std::fmt::Display for EditError {
             Self::SectionMissing { section } => write!(f, "yaml 中不存在顶层段 `{section}:`"),
             Self::KeyMissing { path } => write!(f, "yaml 中不存在键 `{path}`（无行可替换）"),
             Self::NotScalar { path, found } => {
-                write!(f, "键 `{path}` 的值不是标量（`{found}`）⇒ 行级替换语义不适用")
+                write!(
+                    f,
+                    "键 `{path}` 的值不是标量（`{found}`）⇒ 行级替换语义不适用"
+                )
             }
             Self::DuplicateKey { path } => write!(f, "键 `{path}` 在段内重复出现 ⇒ 定位有歧义"),
             Self::DuplicateSection { section } => {
@@ -395,7 +398,10 @@ plugins:
         let src = field_sample("\n");
         let out = apply_edits(&src, &[edit("intercore.port", json!(2405))]).unwrap();
         let want = src.replace("  port: 9100   # PCS 端口", "  port: 2405   # PCS 端口");
-        assert_eq!(out, want, "除目标标量外**逐字节**必须不变（行内注释与空格原样保留）");
+        assert_eq!(
+            out, want,
+            "除目标标量外**逐字节**必须不变（行内注释与空格原样保留）"
+        );
         // 负对照：确认期望串确实与源不同（否则本用例是恒真）
         assert_ne!(want, src);
         // 其余关键字节**逐条**复核（不靠"整体相等"一条兜着）
@@ -440,7 +446,10 @@ plugins:
         let diff: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
         assert_eq!(diff.len(), 4, "恰有 4 行被替换，实得 {diff:?}");
         // 逐行核对（按文件出现顺序，不是按 edits 顺序）
-        assert_eq!(b[diff[0]], "  log_level: debug        # 现场调过：默认 info");
+        assert_eq!(
+            b[diff[0]],
+            "  log_level: debug        # 现场调过：默认 info"
+        );
         assert_eq!(b[diff[1]], "  host: 192.168.3.21");
         assert_eq!(b[diff[2]], "  heartbeat_interval_sec: 9");
         assert_eq!(b[diff[3]], "  listen_port: 2405");
@@ -460,14 +469,20 @@ plugins:
         let src = field_sample("\n");
         // 段缺失
         assert_eq!(
-            apply_edits(src.as_str(), &[edit("telemetry.report_interval_sec", json!(5))]),
+            apply_edits(
+                src.as_str(),
+                &[edit("telemetry.report_interval_sec", json!(5))]
+            ),
             Err(EditError::SectionMissing {
                 section: "telemetry".into()
             })
         );
         // 段在、键缺失
         assert_eq!(
-            apply_edits(src.as_str(), &[edit("intercore.reconnect_interval_s", json!(5))]),
+            apply_edits(
+                src.as_str(),
+                &[edit("intercore.reconnect_interval_s", json!(5))]
+            ),
             Err(EditError::KeyMissing {
                 path: "intercore.reconnect_interval_s".into()
             })
@@ -512,7 +527,10 @@ plugins:
     fn section_block_does_not_leak_into_the_next_section() {
         let src = "intercore:\n  host: 10.0.0.7\ngateway:\n  host: 0.0.0.0\n";
         let out = apply_edits(src, &[edit("intercore.host", json!("10.0.0.8"))]).unwrap();
-        assert_eq!(out, "intercore:\n  host: 10.0.0.8\ngateway:\n  host: 0.0.0.0\n");
+        assert_eq!(
+            out,
+            "intercore:\n  host: 10.0.0.8\ngateway:\n  host: 0.0.0.0\n"
+        );
     }
 
     /// 顶层注释**不**结束段块（现场常见"段内小标题注释"写法）。
@@ -520,20 +538,29 @@ plugins:
     fn top_level_comment_does_not_end_a_section_block() {
         let src = "intercore:\n  host: 10.0.0.7\n# 下面是端口\n  port: 9100\n";
         let out = apply_edits(src, &[edit("intercore.port", json!(9101))]).unwrap();
-        assert_eq!(out, "intercore:\n  host: 10.0.0.7\n# 下面是端口\n  port: 9101\n");
+        assert_eq!(
+            out,
+            "intercore:\n  host: 10.0.0.7\n# 下面是端口\n  port: 9101\n"
+        );
     }
 
     /// 标量文本生成：裸写安全值不加引号；含特殊字符的值加引号（防造坏 yaml）。
     #[test]
     fn scalar_text_never_produces_a_multi_line_or_ambiguous_scalar() {
         assert_eq!(scalar_text(&json!(2404), QuoteStyle::Plain), "2404");
-        assert_eq!(scalar_text(&json!("192.168.3.10"), QuoteStyle::Plain), "192.168.3.10");
+        assert_eq!(
+            scalar_text(&json!("192.168.3.10"), QuoteStyle::Plain),
+            "192.168.3.10"
+        );
         assert_eq!(scalar_text(&json!("info"), QuoteStyle::Plain), "info");
         assert_eq!(scalar_text(&json!("0.0.0.0"), QuoteStyle::Plain), "0.0.0.0");
         // 含 `#` / 空格 / `:` ⇒ 必须加引号（否则解析出注释或坏结构）
         for bad in ["a #b", "a b", "a: b", ""] {
             let t = scalar_text(&json!(bad), QuoteStyle::Plain);
-            assert!(t.starts_with('"') && t.ends_with('"'), "`{bad}` 应被引号包裹，实得 {t}");
+            assert!(
+                t.starts_with('"') && t.ends_with('"'),
+                "`{bad}` 应被引号包裹，实得 {t}"
+            );
             assert!(!t.contains('\n'));
         }
         // 单引号继承且值内无 `'` ⇒ 用单引号

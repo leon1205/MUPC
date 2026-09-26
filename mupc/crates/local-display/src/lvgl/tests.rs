@@ -266,8 +266,16 @@ fn lvgl_core_bridge_chain() {
             let _keep_alive = &spy_b;
         });
     }
-    assert_eq!(sink_a_drops.get(), 0, "仅挂载 flush sink 不应 drop（display 尚存活）");
-    assert_eq!(sink_b_drops.get(), 0, "仅挂载 flush sink 不应 drop（display 尚存活）");
+    assert_eq!(
+        sink_a_drops.get(),
+        0,
+        "仅挂载 flush sink 不应 drop（display 尚存活）"
+    );
+    assert_eq!(
+        sink_b_drops.get(),
+        0,
+        "仅挂载 flush sink 不应 drop（display 尚存活）"
+    );
 
     // ── 场景 ⑥ indev 快照：indev 删除时回收路径恰好执行一次 ──────────────
     // 快照是 `Copy` 无 `Drop`，`DropSpy` 手法不适用；改由 `indev.rs` 的
@@ -285,7 +293,11 @@ fn lvgl_core_bridge_chain() {
     //   - DELETE 到达时探针计数必须仍为 0（闭包还活着）；
     //   - 外层回调退出后计数恰好为 1（不泄漏、不 double free）。
     // 用静态计数才能"在回调执行中"读数（见 `CB_SELF_DELETE_DROPS` 注释）。
-    assert_eq!(CB_SELF_DELETE_DROPS.load(Ordering::SeqCst), 0, "前置：静态探针应为 0");
+    assert_eq!(
+        CB_SELF_DELETE_DROPS.load(Ordering::SeqCst),
+        0,
+        "前置：静态探针应为 0"
+    );
     let host7 = unsafe { sys::lv_obj_create(screen) };
     let spy7 = StaticSpy;
     let cb7 = move |_e| {
@@ -294,8 +306,10 @@ fn lvgl_core_bridge_chain() {
         // SAFETY: `host7` 此刻仍存活（首次删除）。
         unsafe { sys::lv_obj_delete(host7) };
         // 删除之后闭包仍须存活才能执行到这里：延迟回收成立 ⇒ 探针尚未 drop。
-        CB_SELF_DELETE_DROPS_AT_DELETE
-            .store(CB_SELF_DELETE_DROPS.load(Ordering::SeqCst), Ordering::SeqCst);
+        CB_SELF_DELETE_DROPS_AT_DELETE.store(
+            CB_SELF_DELETE_DROPS.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
     };
     // SAFETY: `host7` 是刚 `lv_obj_create` 的活对象。
     let _h7 = unsafe { event::on(host7, EventCode::CLICKED, cb7) };
@@ -314,7 +328,11 @@ fn lvgl_core_bridge_chain() {
 
     // ── 场景 ⑧ **回调内 `detach`**：同样不得 UAF、恰好回收一次 ───────────
     // `detach` 是 A2/A3 会暴露的常规 API；在回调内摘除自己时，释放必须延迟到回调退出。
-    assert_eq!(CB_DETACH_DROPS.load(Ordering::SeqCst), 0, "前置：静态探针应为 0");
+    assert_eq!(
+        CB_DETACH_DROPS.load(Ordering::SeqCst),
+        0,
+        "前置：静态探针应为 0"
+    );
     let host8 = unsafe { sys::lv_obj_create(screen) };
     let slot: Rc<RefCell<Option<event::CallbackHandle<*mut sys::lv_obj_t>>>> =
         Rc::new(RefCell::new(None));

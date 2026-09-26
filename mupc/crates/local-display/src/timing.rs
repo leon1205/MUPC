@@ -1171,8 +1171,14 @@ mod tests {
         let st = h.run().unwrap();
         assert_eq!(*h.timeouts.borrow(), vec![0, 0]);
         assert_eq!(st.zero_timeout_iters, 2);
-        assert_eq!(st.poll_calls, 2, "0 超时也只 poll 一次/迭代（由宿主消除积压）");
-        assert_eq!(st.zero_timeout_clamps, 0, "仅两拍连 0，未超阈值 ⇒ 不触发钳制");
+        assert_eq!(
+            st.poll_calls, 2,
+            "0 超时也只 poll 一次/迭代（由宿主消除积压）"
+        );
+        assert_eq!(
+            st.zero_timeout_clamps, 0,
+            "仅两拍连 0，未超阈值 ⇒ 不触发钳制"
+        );
     }
 
     /// 停止标志：置位后不再迭代（停机延迟 ≤ 1 个 poll 周期）。
@@ -1249,7 +1255,10 @@ mod tests {
         assert_eq!(top, MAX_POLL_TIMEOUT_MS, "阶梯末端 = poll 硬上界");
         assert_eq!(apply_zero_timeout_clamp(0, 12), top);
         assert_eq!(apply_zero_timeout_clamp(0, u32::MAX), top);
-        assert!(ZERO_CLAMP_LADDER_MS.windows(2).all(|w| w[0] < w[1]), "阶梯单调递增");
+        assert!(
+            ZERO_CLAMP_LADDER_MS.windows(2).all(|w| w[0] < w[1]),
+            "阶梯单调递增"
+        );
         // 非 0：一律原样（钳制不得改写 `min(...)` 的正常结果）
         for t in [1u64, 7, 500] {
             assert_eq!(apply_zero_timeout_clamp(t, 1), t);
@@ -1272,7 +1281,10 @@ mod tests {
         );
         assert_eq!(st.zero_timeout_iters, 6);
         assert_eq!(st.zero_timeout_clamps, 4, "第 3~6 拍被钳制");
-        assert_eq!(st.max_zero_clamp_streak, 4, "诊断：最长连续钳制 4 拍（持续病态）");
+        assert_eq!(
+            st.max_zero_clamp_streak, 4,
+            "诊断：最长连续钳制 4 拍（持续病态）"
+        );
         assert_eq!(st.poll_calls, st.iterations);
         assert_eq!(st.poll_fallback_iters, 0, "无 poll 失败 ⇒ 恒不走兜底");
     }
@@ -1298,22 +1310,27 @@ mod tests {
             "已过期宿主截止 ⇒ 前两拍 0、第三拍起沿阶梯升级（与 LVGL 连 0 同一条链路）"
         );
         assert_eq!(st.zero_timeout_iters, 8, "每拍都算得 0（截止一直已过期）");
-        assert_eq!(st.zero_timeout_clamps, 6, "第 3~8 拍被钳制（**正常**在途形态）");
+        assert_eq!(
+            st.zero_timeout_clamps, 6,
+            "第 3~8 拍被钳制（**正常**在途形态）"
+        );
         assert_eq!(st.lv_next_ms, 500, "病根在宿主截止，不在 LVGL");
-        assert_eq!(st.poll_calls, st.iterations, "每拍仍只阻塞一次（钳制不等于自旋）");
+        assert_eq!(
+            st.poll_calls, st.iterations,
+            "每拍仍只阻塞一次（钳制不等于自旋）"
+        );
     }
 
     /// 非 0 拍**重置**连续计数（偶发 0 抖动不累积成钳制 / 不升级）。
     #[test]
     fn zero_clamp_counter_resets_after_nonzero_timeout() {
-        let mut h = harness(
-            vec![0, 0, 0, 0, 500, 500, 0, 0, 0, 0, 0, 0, 0, 0],
-            None,
-            7,
-        );
+        let mut h = harness(vec![0, 0, 0, 0, 500, 500, 0, 0, 0, 0, 0, 0, 0, 0], None, 7);
         let st = h.run().unwrap();
         assert_eq!(*h.timeouts.borrow(), vec![0, 0, 500, 0, 0, 1, 2]);
-        assert_eq!(st.zero_timeout_clamps, 2, "非 0 拍把连续计数清零 ⇒ 只钳制后两拍");
+        assert_eq!(
+            st.zero_timeout_clamps, 2,
+            "非 0 拍把连续计数清零 ⇒ 只钳制后两拍"
+        );
         assert_eq!(st.zero_timeout_iters, 6);
         assert_eq!(st.max_zero_clamp_streak, 2, "偶发 0 抖动后的最长连续钳制");
     }
@@ -1515,7 +1532,11 @@ mod tests {
             4,
         )
         .unwrap();
-        assert_eq!(out, PollOutcome::Timeout, "剩余耗尽 ⇒ 按超时返回（POSIX 语义）");
+        assert_eq!(
+            out,
+            PollOutcome::Timeout,
+            "剩余耗尽 ⇒ 按超时返回（POSIX 语义）"
+        );
         assert!(
             calls <= 4,
             "重试次数受原 timeout 约束（实得 {calls} 次；无限重试即本条要根治的 bug）"
@@ -1592,8 +1613,15 @@ mod tests {
             &LoopConfig::default(),
         )
         .unwrap();
-        assert_eq!(st.iterations, 3, "stop 每拍都被检查到（旧实现会卡死在 poll 内）");
-        assert!(retries.get() <= 12, "重试次数有界（实得 {}）", retries.get());
+        assert_eq!(
+            st.iterations, 3,
+            "stop 每拍都被检查到（旧实现会卡死在 poll 内）"
+        );
+        assert!(
+            retries.get() <= 12,
+            "重试次数有界（实得 {}）",
+            retries.get()
+        );
     }
 
     // ---- ④-e `poll` 失败：不紧循环 / 有界终止（Critical 2 整改） ----
@@ -1613,12 +1641,8 @@ mod tests {
     fn persistent_poll_failure_does_not_spin_and_aborts() {
         // stop 永不置位 ⇒ 只能靠 abort 结束（另设 150 拍保险丝：若被误判为"正常退出"，
         // `unwrap_err` 会失败而不是挂死）。
-        let mut h = harness_with_outcomes(
-            vec![500; 400],
-            None,
-            150,
-            vec![PollOutcome::Failed(9); 400],
-        );
+        let mut h =
+            harness_with_outcomes(vec![500; 400], None, 150, vec![PollOutcome::Failed(9); 400]);
         let err = h.run().unwrap_err();
         assert_eq!(err.errno, 9);
         assert_eq!(err.consecutive, POLL_FAIL_ABORT_AFTER as u64);
@@ -1646,7 +1670,10 @@ mod tests {
         let polls = log.iter().filter(|e| **e == "poll").count();
         let fallbacks = log.iter().filter(|e| **e == "poll_fallback").count();
         assert_eq!(polls, POLL_FAIL_FALLBACK_AFTER as usize);
-        assert_eq!(fallbacks, (POLL_FAIL_ABORT_AFTER - POLL_FAIL_FALLBACK_AFTER) as usize);
+        assert_eq!(
+            fallbacks,
+            (POLL_FAIL_ABORT_AFTER - POLL_FAIL_FALLBACK_AFTER) as usize
+        );
         assert_eq!(
             h.outcomes.borrow().len(),
             400 - POLL_FAIL_FALLBACK_AFTER as usize,

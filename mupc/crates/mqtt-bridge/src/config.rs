@@ -93,10 +93,7 @@ impl std::fmt::Debug for NorthMqttConfig {
             .field("broker_addr", &self.broker_addr)
             .field("client_id", &self.client_id)
             .field("username", &self.username)
-            .field(
-                "password",
-                &self.password.as_ref().map(|_| "***"),
-            )
+            .field("password", &self.password.as_ref().map(|_| "***"))
             .field("allow_plaintext", &self.allow_plaintext)
             .field("keepalive_secs", &self.keepalive_secs)
             .field("tls", &self.tls)

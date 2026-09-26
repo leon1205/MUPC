@@ -36,7 +36,9 @@ use crate::control_route::RouteDecision;
 // 上屏字面量 —— 码表覆盖率的基线在 `ui/tests.rs`，只扫 `ui/**`；若在此自造新串，既有的
 // 豆腐块静态网**照不到**它）。逐个出处见 [`control_code_text`] / [`TRANSPORT_FAIL_TEXT`]。
 use crate::ui::pages::p2_config::TEXT_AUDIT_UNAVAILABLE;
-use crate::ui::pages::p4_interlock::{TEXT_INTERNAL, TEXT_OP_BUSY, TEXT_RETRY_EXPIRED, TEXT_TOAST_FAIL};
+use crate::ui::pages::p4_interlock::{
+    TEXT_INTERNAL, TEXT_OP_BUSY, TEXT_RETRY_EXPIRED, TEXT_TOAST_FAIL,
+};
 
 /// 通道断判定阈值：无成功 GET 超过该时长 → 切「与主进程数据通道断开」整屏态（UI §7.5 / PRD 6.3）。
 pub const CHANNEL_DOWN_MS: u64 = 3000;
@@ -1343,9 +1345,18 @@ mod tests {
             soc_flag: FieldFlag::Valid,
             run_state: Some(RunState::Charge),
             pcs_online: true,
-            p_phase: [Field { v: Some(12.3), flag: FieldFlag::Valid }; 3],
-            p_total: Field { v: Some(36.1), flag: FieldFlag::Valid },
-            i_phase: [Field { v: Some(22.5), flag: FieldFlag::Valid }; 3],
+            p_phase: [Field {
+                v: Some(12.3),
+                flag: FieldFlag::Valid,
+            }; 3],
+            p_total: Field {
+                v: Some(36.1),
+                flag: FieldFlag::Valid,
+            },
+            i_phase: [Field {
+                v: Some(22.5),
+                flag: FieldFlag::Valid,
+            }; 3],
             inconsistency: false,
             // v2 契约新增的四段：本测试桩只关心 v1 字段，四段一律取契约缺省
             // （`DeviceSection` 等均 `#[serde(default)]` + `Default`，语义 = 「未提供」）。
@@ -1359,7 +1370,10 @@ mod tests {
     // ---- 三态归一 ----
     #[test]
     fn num_view_valid_value() {
-        let f = Field { v: Some(12.3), flag: FieldFlag::Valid };
+        let f = Field {
+            v: Some(12.3),
+            flag: FieldFlag::Valid,
+        };
         assert_eq!(NumView::from_field(&f), NumView::Value(12.3));
     }
 
@@ -1374,8 +1388,14 @@ mod tests {
             assert_eq!(NumView::from_field(&f), NumView::Dash(flag));
         }
         // Valid 但无值 → RangeError 兜底（不补 0）
-        let f = Field { v: None, flag: FieldFlag::Valid };
-        assert_eq!(NumView::from_field(&f), NumView::Dash(FieldFlag::RangeError));
+        let f = Field {
+            v: None,
+            flag: FieldFlag::Valid,
+        };
+        assert_eq!(
+            NumView::from_field(&f),
+            NumView::Dash(FieldFlag::RangeError)
+        );
     }
 
     #[test]
@@ -1418,7 +1438,10 @@ mod tests {
         st.record_success(frame(1, 500), 500);
         assert_eq!(st.channel_status(2500), ChannelStatus::Connected);
         // 超过 3s 无成功 → Down（即使最后一次是成功的，只要没再来成功）
-        assert_eq!(st.channel_status(500 + CHANNEL_DOWN_MS), ChannelStatus::Down);
+        assert_eq!(
+            st.channel_status(500 + CHANNEL_DOWN_MS),
+            ChannelStatus::Down
+        );
     }
 
     #[test]
@@ -1486,7 +1509,10 @@ mod tests {
         assert_eq!(st.fail_streak(), 3);
         // 帧保留（冻结展示用），通道断但不清数值
         assert_eq!(st.frame().unwrap().seq, 5);
-        assert_eq!(st.screen_mode(1010 + CHANNEL_DOWN_MS), ScreenMode::ChannelDown);
+        assert_eq!(
+            st.screen_mode(1010 + CHANNEL_DOWN_MS),
+            ScreenMode::ChannelDown
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1497,7 +1523,10 @@ mod tests {
     #[test]
     fn hmi_link_state_never_falls_into_connected() {
         assert_eq!(hmi_link_state(ChannelStatus::Init), LinkState::Connecting);
-        assert_eq!(hmi_link_state(ChannelStatus::Connected), LinkState::Connected);
+        assert_eq!(
+            hmi_link_state(ChannelStatus::Connected),
+            LinkState::Connected
+        );
         assert_eq!(hmi_link_state(ChannelStatus::Down), LinkState::Disconnected);
         assert_ne!(hmi_link_state(ChannelStatus::Init), LinkState::Connected);
         assert_ne!(hmi_link_state(ChannelStatus::Down), LinkState::Connected);
@@ -1604,7 +1633,10 @@ mod tests {
         // ④ 文案点明出路
         assert!(text.contains("重新确认"), "必须点明 T-3 的出路：{text}");
         // ⑤ 对偶：**其余** ConsoleError 没有专属文案（回落通用兜底，不得乱套专属串）
-        assert_eq!(console_error_text(&crate::console::ConsoleError::Idle), None);
+        assert_eq!(
+            console_error_text(&crate::console::ConsoleError::Idle),
+            None
+        );
         assert_eq!(
             console_error_text(&crate::console::ConsoleError::Busy("apply".into())),
             None
@@ -1614,7 +1646,8 @@ mod tests {
     /// EDGE-18：审计不可写 → **固定串**「审计不可用 · 操作未执行」（**不取**服务端 `message`）。
     #[test]
     fn audit_unavailable_maps_to_the_edge18_fixed_string() {
-        let resp: ControlResponse<serde_json::Value> = ControlResponse::audit_unavailable("rid-1", 42);
+        let resp: ControlResponse<serde_json::Value> =
+            ControlResponse::audit_unavailable("rid-1", 42);
         let last = LastControlResult::from_response(&resp);
         let text = last.toast_text().expect("EDGE-18 必须给出上屏文案");
         assert_eq!(text, "审计不可用 · 操作未执行");
@@ -1654,16 +1687,12 @@ mod tests {
         assert!(text.contains('\u{2013}'), "应改写为 U+2013：{text}");
 
         // message 为空 ⇒ 回落按码兜底
-        let empty: ControlResponse<serde_json::Value> = ControlResponse::rejected(
-            "rid-3",
-            ControlCode::Busy,
-            "   ",
-            vec![],
-            None,
-            8,
-        );
+        let empty: ControlResponse<serde_json::Value> =
+            ControlResponse::rejected("rid-3", ControlCode::Busy, "   ", vec![], None, 8);
         assert_eq!(
-            LastControlResult::from_response(&empty).toast_text().as_deref(),
+            LastControlResult::from_response(&empty)
+                .toast_text()
+                .as_deref(),
             Some(crate::ui::pages::p4_interlock::TEXT_OP_BUSY)
         );
     }
@@ -1671,8 +1700,12 @@ mod tests {
     /// `duplicate=true` **原样保留**，且**不**被当成错误（成功路径照走）。
     #[test]
     fn duplicate_flag_is_preserved_and_is_not_an_error() {
-        let mut resp: ControlResponse<serde_json::Value> =
-            ControlResponse::ok("rid-4", Some(serde_json::json!({"latched": false})), Some("aud-4".into()), 9);
+        let mut resp: ControlResponse<serde_json::Value> = ControlResponse::ok(
+            "rid-4",
+            Some(serde_json::json!({"latched": false})),
+            Some("aud-4".into()),
+            9,
+        );
         resp.mark_duplicate();
         let mut st = ControlState::new();
         st.begin(ConsoleEndpoint::InterlockRelease, Some("rid-4"));
@@ -1732,7 +1765,9 @@ mod tests {
             Some(TRANSPORT_FAIL_TEXT),
             "传输失败必须给出上屏兜底文案（不静默）"
         );
-        assert!(st.toast().is_some_and(|t| t.until_ms() == 500 + TOAST_TTL_MS));
+        assert!(st
+            .toast()
+            .is_some_and(|t| t.until_ms() == 500 + TOAST_TTL_MS));
     }
 
     /// 裁定 3：传输失败时**给页面补一条本地合成的「不可用」回执**（写端点才补）。
@@ -1762,8 +1797,14 @@ mod tests {
         };
         assert_eq!(r.code, ControlCode::Unavailable);
         assert!(!r.ok && r.applied.is_none(), "操作未生效");
-        assert_eq!(r.request_id, "rid-9", "回显该次在途请求（同一次操作对得上）");
-        assert_eq!(r.message, TRANSPORT_FAIL_TEXT, "message = 本地错误文案（不编原因）");
+        assert_eq!(
+            r.request_id, "rid-9",
+            "回显该次在途请求（同一次操作对得上）"
+        );
+        assert_eq!(
+            r.message, TRANSPORT_FAIL_TEXT,
+            "message = 本地错误文案（不编原因）"
+        );
         assert_eq!(r.at_ms, 700, "at_ms 取本地时钟");
         assert!(r.audit_id.is_none() && !r.duplicate && r.field_errors.is_empty());
         // ② 既有记账**不许**被本整改削弱（同一事件只记一份）。
@@ -1805,9 +1846,20 @@ mod tests {
         st.begin(ConsoleEndpoint::Audit, None);
         assert!(st.is_busy());
         st.finish();
-        assert!(!st.is_busy(), "查询完成 ⇒ 在途必须清掉（否则后续写操作恒被判在途）");
-        assert_eq!(st.last_transport_failure_ms(), None, "查询成功**不得**记成传输失败");
-        assert_eq!(st.toast_text(), None, "查询成功不得弹任何 Toast（尤其不是「操作失败」）");
+        assert!(
+            !st.is_busy(),
+            "查询完成 ⇒ 在途必须清掉（否则后续写操作恒被判在途）"
+        );
+        assert_eq!(
+            st.last_transport_failure_ms(),
+            None,
+            "查询成功**不得**记成传输失败"
+        );
+        assert_eq!(
+            st.toast_text(),
+            None,
+            "查询成功不得弹任何 Toast（尤其不是「操作失败」）"
+        );
         assert!(st.last().is_none(), "查询载荷不是信封 ⇒ 不产生回执摘要");
         // 对偶：清完之后**可以**再起一条（否则连接池被卡死）
         st.begin(ConsoleEndpoint::ConfigApply, Some("rid-fin"));
@@ -1843,7 +1895,10 @@ mod tests {
         let mut st = ControlState::new();
         assert!(!st.confirm_open() && st.confirm().is_none());
         st.set_confirm(Some(ConsoleEndpoint::InterlockRelease));
-        assert!(st.confirm_open(), "弹层打开 ⇒ 空闲计时暂停（TT-12 / TT-13）");
+        assert!(
+            st.confirm_open(),
+            "弹层打开 ⇒ 空闲计时暂停（TT-12 / TT-13）"
+        );
         assert_eq!(st.confirm(), Some(ConsoleEndpoint::InterlockRelease));
         st.set_confirm(None);
         assert!(!st.confirm_open());

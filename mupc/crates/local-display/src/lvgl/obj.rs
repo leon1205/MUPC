@@ -144,13 +144,13 @@ impl SingletonSeed {
             return Err(LvglError::NotInitialized);
         }
         let mut slot = self.0.borrow_mut();
-        if !slot.as_ref().is_some_and(|o| o.is_alive() && o.raw == raw_now) {
+        if !slot
+            .as_ref()
+            .is_some_and(|o| o.is_alive() && o.raw == raw_now)
+        {
             *slot = Some(Obj::adopt_borrowed(raw_now)?);
         }
-        Ok(slot
-            .as_ref()
-            .expect("上方刚确保已填充")
-            .share_borrowed())
+        Ok(slot.as_ref().expect("上方刚确保已填充").share_borrowed())
     }
 }
 
@@ -267,7 +267,9 @@ impl Obj {
         // SAFETY: `parent.is_alive()` ⇒ LVGL 已 `init()` 且父对象指针有效。
         let raw = unsafe { sys::lv_obj_create(parent.raw()) };
         if raw.is_null() {
-            return Err(LvglError::OutOfMemory("lv_obj_create（LV_MEM_SIZE 不足？）"));
+            return Err(LvglError::OutOfMemory(
+                "lv_obj_create（LV_MEM_SIZE 不足？）",
+            ));
         }
         Ok(Self::from_raw(raw, true))
     }
@@ -420,7 +422,12 @@ impl Obj {
             return (0, 0);
         }
         // SAFETY: 刚校验存活。
-        unsafe { (sys::lv_obj_get_width(self.raw), sys::lv_obj_get_height(self.raw)) }
+        unsafe {
+            (
+                sys::lv_obj_get_width(self.raw),
+                sys::lv_obj_get_height(self.raw),
+            )
+        }
     }
 
     /// 当前**屏内绝对**坐标矩形（闭区间，与 LVGL 的 `lv_area_t` 一致）。
@@ -535,11 +542,7 @@ impl Obj {
         // SAFETY: 刚校验存活 ⇒ `self.raw` 指向活对象；`prop` 只取自 `sys::LV_STYLE_*`
         // （与 C 侧 `enum _lv_style_id_t` 同源），`part` 取自 `Part::MAIN`（同为 C 侧枚举）。
         Some(unsafe {
-            sys::lv_obj_get_style_prop(
-                self.raw,
-                Part::MAIN.raw() as sys::lv_part_t,
-                prop,
-            )
+            sys::lv_obj_get_style_prop(self.raw, Part::MAIN.raw() as sys::lv_part_t, prop)
         })
     }
 

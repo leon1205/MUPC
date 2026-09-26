@@ -49,11 +49,8 @@ mod tests {
     async fn test_wait_for_shutdown_can_be_called() {
         // 验证函数可被调用且不会立即返回（会一直等待信号）
         // 使用 timeout 确保测试不会永远挂起
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            wait_for_shutdown(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), wait_for_shutdown()).await;
         assert!(result.is_err()); // timeout 表示函数正在等待信号
     }
 }

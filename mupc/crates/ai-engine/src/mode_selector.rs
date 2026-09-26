@@ -912,7 +912,10 @@ mod tests {
         // 无上冲：全程单调不增（缓动路径）
         assert!(monotone_decreasing, "过渡路径不应上冲/震荡");
         // 末步精确归零 target
-        assert!((prev_weight - 0.0).abs() < 1e-6, "过渡结束应精确到达 target");
+        assert!(
+            (prev_weight - 0.0).abs() < 1e-6,
+            "过渡结束应精确到达 target"
+        );
         // 单拍绝对跳变不超过全量程的 25%（实测峰值 ≈14.5%）
         assert!(
             max_jump < 0.25,

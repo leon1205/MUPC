@@ -68,11 +68,46 @@ fn unwrap_data(res: PollResult) -> mupc_data_processing::DataPackage {
 #[test]
 fn meter_grid_phase_matches_legacy_semantics_canned() {
     let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
-        block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(1.0, 2.0, 3.0)),
-        block("q", 0x0006, RegFormat::Float32, 1.0, 6, phase_regs(0.5, 0.25, 0.125)),
-        block("pf", 0x000C, RegFormat::Float32, 1.0, 6, phase_regs(0.75, 0.875, 0.9375)),
-        block("u", 0x0012, RegFormat::Float32, 1.0, 6, phase_regs(220.0, 221.0, 222.0)),
-        block("i", 0x0018, RegFormat::Float32, 1.0, 6, phase_regs(10.0, 11.0, 12.0)),
+        block(
+            "p",
+            0x0000,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(1.0, 2.0, 3.0),
+        ),
+        block(
+            "q",
+            0x0006,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(0.5, 0.25, 0.125),
+        ),
+        block(
+            "pf",
+            0x000C,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(0.75, 0.875, 0.9375),
+        ),
+        block(
+            "u",
+            0x0012,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(220.0, 221.0, 222.0),
+        ),
+        block(
+            "i",
+            0x0018,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(10.0, 11.0, 12.0),
+        ),
         // p_total 块故意缺——验证降级 Σp
     ];
     let pkg = unwrap_data(poll_to_result(Role::MeterGrid, &reads));
@@ -82,7 +117,7 @@ fn meter_grid_phase_matches_legacy_semantics_canned() {
     assert_eq!(ph.reactive_power, [Some(0.5), Some(0.25), Some(0.125)]);
     assert_eq!(ph.cos_phi, [Some(0.75), Some(0.875), Some(0.9375)]);
     assert_eq!(ph.current, [Some(10.0), Some(11.0), Some(12.0)]); // p≥0 → +幅值
-    // 顶层量（总表收敛后唯一语义——master_meter 已删，逐字段形状由此锚钉住）
+                                                                  // 顶层量（总表收敛后唯一语义——master_meter 已删，逐字段形状由此锚钉住）
     assert_eq!(pkg.electrical.active_power, Some(6.0)); // Σp（p_total 缺失降级）
     assert_eq!(pkg.electrical.reactive_power, Some(0.875)); // Σq=0.5+0.25+0.125
     assert_eq!(pkg.electrical.voltage, Some(220.0));
@@ -95,12 +130,54 @@ fn meter_grid_phase_matches_legacy_semantics_canned() {
 #[test]
 fn meter_grid_p_total_raw_when_present() {
     let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
-        block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(1.0, 2.0, 3.0)),
-        block("q", 0x0006, RegFormat::Float32, 1.0, 6, phase_regs(0.5, 0.25, 0.125)),
-        block("pf", 0x000C, RegFormat::Float32, 1.0, 6, phase_regs(0.75, 0.875, 0.9375)),
-        block("u", 0x0012, RegFormat::Float32, 1.0, 6, phase_regs(220.0, 221.0, 222.0)),
-        block("i", 0x0018, RegFormat::Float32, 1.0, 6, phase_regs(10.0, 11.0, 12.0)),
-        block("p_total", 0x001E, RegFormat::Float32, 1.0, 2, f32_regs(5.5).to_vec()),
+        block(
+            "p",
+            0x0000,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(1.0, 2.0, 3.0),
+        ),
+        block(
+            "q",
+            0x0006,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(0.5, 0.25, 0.125),
+        ),
+        block(
+            "pf",
+            0x000C,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(0.75, 0.875, 0.9375),
+        ),
+        block(
+            "u",
+            0x0012,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(220.0, 221.0, 222.0),
+        ),
+        block(
+            "i",
+            0x0018,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(10.0, 11.0, 12.0),
+        ),
+        block(
+            "p_total",
+            0x001E,
+            RegFormat::Float32,
+            1.0,
+            2,
+            f32_regs(5.5).to_vec(),
+        ),
     ];
     let pkg = unwrap_data(poll_to_result(Role::MeterGrid, &reads));
     assert_eq!(pkg.electrical.active_power, Some(5.5));
@@ -110,23 +187,82 @@ fn meter_grid_p_total_raw_when_present() {
 #[test]
 fn meter_grid_missing_phase_block_returns_failed() {
     let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
-        block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(1.0, 2.0, 3.0)),
-        block("u", 0x0012, RegFormat::Float32, 1.0, 6, phase_regs(220.0, 221.0, 222.0)),
-        block("i", 0x0018, RegFormat::Float32, 1.0, 6, phase_regs(10.0, 11.0, 12.0)),
+        block(
+            "p",
+            0x0000,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(1.0, 2.0, 3.0),
+        ),
+        block(
+            "u",
+            0x0012,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(220.0, 221.0, 222.0),
+        ),
+        block(
+            "i",
+            0x0018,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(10.0, 11.0, 12.0),
+        ),
         // 缺 q/pf
     ];
-    assert!(matches!(poll_to_result(Role::MeterGrid, &reads), PollResult::Failed(_)));
+    assert!(matches!(
+        poll_to_result(Role::MeterGrid, &reads),
+        PollResult::Failed(_)
+    ));
 }
 
 /// 负 p → 电流方向取负（带符号电流差模判据；p≈0 相取正——P2-3）
 #[test]
 fn meter_grid_negative_p_direction_signs_current() {
     let reads: Vec<(RegBlockConf, Result<BlockData, String>)> = vec![
-        block("p", 0x0000, RegFormat::Float32, 1.0, 6, phase_regs(-1.0, 2.0, 0.0)),
-        block("q", 0x0006, RegFormat::Float32, 1.0, 6, phase_regs(0.5, 0.25, 0.125)),
-        block("pf", 0x000C, RegFormat::Float32, 1.0, 6, phase_regs(0.75, 0.875, 0.9375)),
-        block("u", 0x0012, RegFormat::Float32, 1.0, 6, phase_regs(220.0, 221.0, 222.0)),
-        block("i", 0x0018, RegFormat::Float32, 1.0, 6, phase_regs(10.0, 11.0, 12.0)),
+        block(
+            "p",
+            0x0000,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(-1.0, 2.0, 0.0),
+        ),
+        block(
+            "q",
+            0x0006,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(0.5, 0.25, 0.125),
+        ),
+        block(
+            "pf",
+            0x000C,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(0.75, 0.875, 0.9375),
+        ),
+        block(
+            "u",
+            0x0012,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(220.0, 221.0, 222.0),
+        ),
+        block(
+            "i",
+            0x0018,
+            RegFormat::Float32,
+            1.0,
+            6,
+            phase_regs(10.0, 11.0, 12.0),
+        ),
     ];
     let pkg = unwrap_data(poll_to_result(Role::MeterGrid, &reads));
     let ph = pkg.electrical.phase.unwrap();

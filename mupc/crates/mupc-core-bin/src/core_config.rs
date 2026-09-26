@@ -5,9 +5,9 @@
 //! （原「Web API」段已随 `mupc-web-api` crate 删除——单元 K；现场遗留的 `web_api:` 段按
 //! **未建模段**容忍并逐字保留，见 [`CoreConfig`] 顶部说明。）
 
+use mupc_display_proto::DisplayConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use mupc_display_proto::DisplayConfig;
 
 /// 主配置文件顶层结构
 ///
@@ -1131,9 +1131,8 @@ impl CoreConfig {
         let mut seen: Vec<(String, String, String)> = Vec::new();
         for s in &ss.stations {
             let node = port_node(&s.port).to_string();
-            if let Some((_prev_node, prev_raw, prev_id)) = seen
-                .iter()
-                .find(|(n, raw, _)| *n == node && *raw != s.port)
+            if let Some((_prev_node, prev_raw, prev_id)) =
+                seen.iter().find(|(n, raw, _)| *n == node && *raw != s.port)
             {
                 return Err(format!(
                     "south_stations 站 {} port {} 与站 {} port {} 为同节点 {} 的别名端口——同物理口禁双拼写并站（统一写 /dev/ttyX 或 ttyX），否则该口被 open 两次 / 双 runner 并发双 master 帧交错",
@@ -1155,7 +1154,6 @@ impl CoreConfig {
         }
         Ok(())
     }
-
 }
 
 /// 串口节点名归一："/dev/ttyS0" 与 "ttyS0" 都取 "ttyS0"（跨段串口重复比较基准；
@@ -1333,7 +1331,10 @@ mqtt_bridge:
         assert_eq!(config.mqtt_bridge.north.broker, "mqtt.example.org:8883");
         assert_eq!(config.mqtt_bridge.north.client_id, "mupc-north-01");
         assert_eq!(config.mqtt_bridge.north.username.as_deref(), Some("user1"));
-        assert_eq!(config.mqtt_bridge.north.tls.client_cert, "/etc/mupc/certs/client.crt");
+        assert_eq!(
+            config.mqtt_bridge.north.tls.client_cert,
+            "/etc/mupc/certs/client.crt"
+        );
         assert!(!config.mqtt_bridge.north.tls.allow_plaintext);
         assert_eq!(config.mqtt_bridge.north.periods.cos_merge_ms, 200);
         assert_eq!(config.mqtt_bridge.north.cache.max_messages, 10000);
@@ -1353,8 +1354,14 @@ mqtt_bridge:
             format!("{:?}", cfg2.mqtt_bridge.north),
             format!("{:?}", config.mqtt_bridge.north)
         );
-        assert_eq!(cfg2.mqtt_bridge.north.broker, config.mqtt_bridge.north.broker);
-        assert_eq!(cfg2.mqtt_bridge.north.password, config.mqtt_bridge.north.password);
+        assert_eq!(
+            cfg2.mqtt_bridge.north.broker,
+            config.mqtt_bridge.north.broker
+        );
+        assert_eq!(
+            cfg2.mqtt_bridge.north.password,
+            config.mqtt_bridge.north.password
+        );
     }
 
     /// §9.3.2 validate：**缺省整段 ⇒ 零行为 + 零连接**（enabled 缺省 false，不校验后续）。
@@ -1522,7 +1529,10 @@ mqtt_bridge:
                 .expect("debug 构建 + 显式 allow_plaintext ⇒ 放行（Q9 的明文例外）");
         } else {
             let e = config.validate().expect_err("生产构建必须拒明文");
-            assert!(e.contains("allow_plaintext"), "文案须点名 allow_plaintext: {e}");
+            assert!(
+                e.contains("allow_plaintext"),
+                "文案须点名 allow_plaintext: {e}"
+            );
         }
     }
 
@@ -1729,7 +1739,10 @@ display:
                 cfg.display.validate()
             );
             // 地址取值本身（防"复制粘贴换名"式错配：两址须各占一端点、均为字面量回环）
-            assert_eq!(cfg.display.bind_addr, "127.0.0.1:9810", "`{name}` 读通道端点");
+            assert_eq!(
+                cfg.display.bind_addr, "127.0.0.1:9810",
+                "`{name}` 读通道端点"
+            );
             assert_eq!(
                 cfg.display.control_bind_addr, "127.0.0.1:9811",
                 "`{name}` 控制通道端点"
@@ -1826,7 +1839,8 @@ display:
             )
         };
         // ① 控制通道非回环 ⇒ 拒（就是这条修复的主要动因）
-        let c: CoreConfig = serde_yaml::from_str(&with_both("127.0.0.1:9810", "0.0.0.0:9811")).unwrap();
+        let c: CoreConfig =
+            serde_yaml::from_str(&with_both("127.0.0.1:9810", "0.0.0.0:9811")).unwrap();
         let e = c.validate().unwrap_err();
         assert!(
             e.contains("display.control_bind_addr") && e.contains("PL-4"),
@@ -1840,7 +1854,11 @@ display:
         // ③ 两条都回环且不同 ⇒ 通过（防"一刀切拒绝"）
         let c: CoreConfig =
             serde_yaml::from_str(&with_both("127.0.0.1:9810", "127.0.0.1:9811")).unwrap();
-        assert!(c.validate().is_ok(), "两条均回环且不同应通过: {:?}", c.validate());
+        assert!(
+            c.validate().is_ok(),
+            "两条均回环且不同应通过: {:?}",
+            c.validate()
+        );
     }
 
     /// **重要-4 网**：转发的 `DisplayConfig::validate()` 是**全集**校验 ⇒ 原先"只查地址"时
@@ -1879,7 +1897,11 @@ display:
         };
         // 基准自证：不带 extra 时必须通过（否则下面的红分不清是"改坏了"还是"本来就不合规"）
         let base: CoreConfig = serde_yaml::from_str(&with_display("")).unwrap();
-        assert!(base.validate().is_ok(), "基准配置应通过: {:?}", base.validate());
+        assert!(
+            base.validate().is_ok(),
+            "基准配置应通过: {:?}",
+            base.validate()
+        );
 
         for (key, extra) in [
             ("display.publish_ms", "  publish_ms: 50"),
@@ -1890,10 +1912,7 @@ display:
                 "display.publish_ms",
                 "  publish_ms: 4001\n  min_publish_interval_ms: 4001",
             ),
-            (
-                "display.log.live_ring",
-                "  log:\n    live_ring: 50",
-            ),
+            ("display.log.live_ring", "  log:\n    live_ring: 50"),
             ("display.alarm_page_size", "  alarm_page_size: 0"),
             (
                 "display.range.current_max_a",
@@ -2700,9 +2719,15 @@ ai_engine: {}
 plugins: {}
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.storage.batch_capacity, 1000, "= 变更前 startup.rs 的硬编码");
+        assert_eq!(
+            config.storage.batch_capacity, 1000,
+            "= 变更前 startup.rs 的硬编码"
+        );
         assert_eq!(config.storage.flush_interval_ms, 5000);
-        assert_eq!(config.storage.grid_aggregate_period_ms, 60_000, "§4.1.1 默认 1 分钟");
+        assert_eq!(
+            config.storage.grid_aggregate_period_ms, 60_000,
+            "§4.1.1 默认 1 分钟"
+        );
         assert!(config.validate().is_ok());
 
         // 显式空段 / 部分键：其余键同样落到默认（serde 容器级 default）
@@ -2735,8 +2760,14 @@ plugins: {}
         ] {
             let cfg: CoreConfig = serde_yaml::from_str(text)
                 .unwrap_or_else(|e| panic!("`{name}` 必须能解析为 CoreConfig: {e}"));
-            assert_eq!(cfg.storage.batch_capacity, 1000, "`{name}` 的 storage.batch_capacity");
-            assert_eq!(cfg.storage.flush_interval_ms, 5000, "`{name}` 的 storage.flush_interval_ms");
+            assert_eq!(
+                cfg.storage.batch_capacity, 1000,
+                "`{name}` 的 storage.batch_capacity"
+            );
+            assert_eq!(
+                cfg.storage.flush_interval_ms, 5000,
+                "`{name}` 的 storage.flush_interval_ms"
+            );
             assert_eq!(
                 cfg.storage.grid_aggregate_period_ms, 60_000,
                 "`{name}` 的 storage.grid_aggregate_period_ms"
@@ -2745,7 +2776,10 @@ plugins: {}
                 text.contains("\nstorage:"),
                 "`{name}` 必须**显式**写出 storage: 段（现场可见；§9.6 序 2）"
             );
-            assert!(cfg.validate().is_ok(), "`{name}` 的 storage 段必须过 validate_storage");
+            assert!(
+                cfg.validate().is_ok(),
+                "`{name}` 的 storage 段必须过 validate_storage"
+            );
         }
     }
 
@@ -2795,7 +2829,10 @@ storage:
         // **改什么会让本条红**：把 `validate_storage` 的范围改回 `1..=100_000` ⇒ 下面
         // `batch_capacity = 1` 的 `unwrap_err()` 直接 panic（探针实测）。
         let err = with(|s| s.batch_capacity = 0).validate().unwrap_err();
-        assert!(err.contains("storage.batch_capacity"), "错误必须点名键: {err}");
+        assert!(
+            err.contains("storage.batch_capacity"),
+            "错误必须点名键: {err}"
+        );
         let err = with(|s| s.batch_capacity = 100_001).validate().unwrap_err();
         assert!(err.contains("storage.batch_capacity"));
         let err = with(|s| s.batch_capacity = 1).validate().unwrap_err();
@@ -2807,31 +2844,48 @@ storage:
         assert!(with(|s| s.batch_capacity = 100_000).validate().is_ok());
         // flush_interval_ms：禁 0；99 / 600001 拒；100 / 600000 过
         let err = with(|s| s.flush_interval_ms = 0).validate().unwrap_err();
-        assert!(err.contains("storage.flush_interval_ms"), "错误必须点名键: {err}");
+        assert!(
+            err.contains("storage.flush_interval_ms"),
+            "错误必须点名键: {err}"
+        );
         let err = with(|s| s.flush_interval_ms = 99).validate().unwrap_err();
         assert!(err.contains("storage.flush_interval_ms"));
-        let err = with(|s| s.flush_interval_ms = 600_001).validate().unwrap_err();
+        let err = with(|s| s.flush_interval_ms = 600_001)
+            .validate()
+            .unwrap_err();
         assert!(err.contains("storage.flush_interval_ms"));
         assert!(with(|s| s.flush_interval_ms = 100).validate().is_ok());
         assert!(with(|s| s.flush_interval_ms = 600_000).validate().is_ok());
         // grid_aggregate_period_ms：9999 / 3600001 拒；10000 / 3600000 过
-        let err = with(|s| s.grid_aggregate_period_ms = 9_999).validate().unwrap_err();
+        let err = with(|s| s.grid_aggregate_period_ms = 9_999)
+            .validate()
+            .unwrap_err();
         assert!(err.contains("storage.grid_aggregate_period_ms"));
         let err = with(|s| s.grid_aggregate_period_ms = 3_600_001)
             .validate()
             .unwrap_err();
         assert!(err.contains("storage.grid_aggregate_period_ms"));
-        assert!(with(|s| s.grid_aggregate_period_ms = 10_000).validate().is_ok());
-        assert!(with(|s| s.grid_aggregate_period_ms = 3_600_000).validate().is_ok());
+        assert!(with(|s| s.grid_aggregate_period_ms = 10_000)
+            .validate()
+            .is_ok());
+        assert!(with(|s| s.grid_aggregate_period_ms = 3_600_000)
+            .validate()
+            .is_ok());
         // 须为 1000 的整数倍（时间戳按整秒对齐）：60001 拒、61000 过
-        let err = with(|s| s.grid_aggregate_period_ms = 60_001).validate().unwrap_err();
+        let err = with(|s| s.grid_aggregate_period_ms = 60_001)
+            .validate()
+            .unwrap_err();
         assert!(
             err.contains("storage.grid_aggregate_period_ms") && err.contains("1000"),
             "整倍约束的错误文案须点名键 + 说明整倍: {err}"
         );
-        let err = with(|s| s.grid_aggregate_period_ms = 60_500).validate().unwrap_err();
+        let err = with(|s| s.grid_aggregate_period_ms = 60_500)
+            .validate()
+            .unwrap_err();
         assert!(err.contains("storage.grid_aggregate_period_ms"));
-        assert!(with(|s| s.grid_aggregate_period_ms = 15_000).validate().is_ok());
+        assert!(with(|s| s.grid_aggregate_period_ms = 15_000)
+            .validate()
+            .is_ok());
     }
 
     /// **GRD-08**：`storage:` 段**无任何「关闭」语义**（PRD R-11.1-A / R-11.3-A：本段**只含三键**）。
@@ -2849,7 +2903,11 @@ storage:
             .collect();
         assert_eq!(
             keys,
-            vec!["batch_capacity", "flush_interval_ms", "grid_aggregate_period_ms"],
+            vec![
+                "batch_capacity",
+                "flush_interval_ms",
+                "grid_aggregate_period_ms"
+            ],
             "storage 段只含三键（不含 enabled / 保留期 / max_retained_points）"
         );
         // ② 行为：塞未建模键不生效（三值仍默认、validate 仍过）
@@ -2867,6 +2925,9 @@ storage:
         assert_eq!(c.storage.batch_capacity, 1000);
         assert_eq!(c.storage.flush_interval_ms, 5000);
         assert_eq!(c.storage.grid_aggregate_period_ms, 60_000);
-        assert!(c.validate().is_ok(), "未建模键被忽略而非报错（与 CoreConfig 既有兼容性口径一致）");
+        assert!(
+            c.validate().is_ok(),
+            "未建模键被忽略而非报错（与 CoreConfig 既有兼容性口径一致）"
+        );
     }
 }

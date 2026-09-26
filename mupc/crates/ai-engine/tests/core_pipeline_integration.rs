@@ -92,12 +92,7 @@ mod tests {
     fn test_action_denormalization_p_ref() {
         // p_ref: tanh ∈ [-1, 1] → p_ref ∈ [-50, 50] kW
         let max_power = 50.0_f64;
-        let test_cases: Vec<(f64, f64)> = vec![
-            (0.0, 0.0),
-            (1.0, 50.0),
-            (-1.0, -50.0),
-            (0.5, 25.0),
-        ];
+        let test_cases: Vec<(f64, f64)> = vec![(0.0, 0.0), (1.0, 50.0), (-1.0, -50.0), (0.5, 25.0)];
         for (tanh_val, expected_kw) in test_cases {
             let p_ref = tanh_val * max_power;
             assert!(
@@ -115,12 +110,8 @@ mod tests {
         // k_droop: tanh ∈ [-1, 1] → [k_min, k_max] = [-100, 100] kW/V
         let k_min = -100.0_f64;
         let k_max = 100.0_f64;
-        let test_cases: Vec<(f64, f64)> = vec![
-            (0.0, 0.0),
-            (1.0, 100.0),
-            (-1.0, -100.0),
-            (0.5, 50.0),
-        ];
+        let test_cases: Vec<(f64, f64)> =
+            vec![(0.0, 0.0), (1.0, 100.0), (-1.0, -100.0), (0.5, 50.0)];
         for (tanh_val, expected) in test_cases {
             let k_droop = tanh_val * (k_max - k_min) / 2.0 + (k_max + k_min) / 2.0;
             assert!(
@@ -209,7 +200,10 @@ mod tests {
         // dispatch_p_set: None 合法语义为"无调度"
         let dispatch: Option<f64> = None;
         let dispatch_filled = dispatch.unwrap_or(0.0);
-        assert_eq!(dispatch_filled, 0.0, "dispatch_p_set=None 合法语义为 0.0（无调度）");
+        assert_eq!(
+            dispatch_filled, 0.0,
+            "dispatch_p_set=None 合法语义为 0.0（无调度）"
+        );
     }
 
     // ========================================================================
@@ -234,9 +228,9 @@ mod tests {
         let budget_ms = 1000.0; // 1s 硬上限
 
         // 各路径 WCET 应在预算内
-        let go_path = 430.0;    // BiLSTM + VMD + EC
-        let nogo_a = 350.0;     // LSTM + VMD + EC
-        let baseline = 60.0;    // 纯 LSTM
+        let go_path = 430.0; // BiLSTM + VMD + EC
+        let nogo_a = 350.0; // LSTM + VMD + EC
+        let baseline = 60.0; // 纯 LSTM
 
         assert!(go_path < budget_ms, "Go 路径需在 1s 内");
         assert!(nogo_a < budget_ms, "No-Go A 路径需在 1s 内");

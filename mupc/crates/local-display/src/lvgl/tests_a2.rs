@@ -213,7 +213,11 @@ pub(super) fn obj_style_font_chain() {
             | (State::CHECKED.raw() as sys::lv_style_selector_t),
         "选择器 = 部件 | 状态"
     );
-    assert_eq!(StyleSelector::main().to_sys(), 0, "MAIN|DEFAULT 即 C 侧的 0");
+    assert_eq!(
+        StyleSelector::main().to_sys(),
+        0,
+        "MAIN|DEFAULT 即 C 侧的 0"
+    );
 
     refr();
     {
@@ -328,7 +332,11 @@ pub(super) fn obj_style_font_chain() {
     );
 
     // detach 路径（**安全** API，无 unsafe）：摘除即释放，且对象删除时不得二次回收。
-    assert_eq!(DETACH_DROPS.load(Ordering::SeqCst), 0, "前置：静态探针应为 0");
+    assert_eq!(
+        DETACH_DROPS.load(Ordering::SeqCst),
+        0,
+        "前置：静态探针应为 0"
+    );
     let target2 = Obj::create(&screen).expect("Obj::create target2");
     {
         let spy = DetachSpy;
@@ -352,7 +360,11 @@ pub(super) fn obj_style_font_chain() {
     // ── ⑮ **回调内删除宿主 Obj**：延迟回收（A1 的机制在 `Obj` 层仍然成立）──
     // 宿主由 `Rc<RefCell<Option<Obj>>>` 持有，回调里把它取出并 `delete()` —— 这正是
     // A3/B 页面"点一下就把自己拆掉"的常态路径。
-    assert_eq!(SELF_DELETE_DROPS.load(Ordering::SeqCst), 0, "前置：静态探针应为 0");
+    assert_eq!(
+        SELF_DELETE_DROPS.load(Ordering::SeqCst),
+        0,
+        "前置：静态探针应为 0"
+    );
     let slot: Rc<RefCell<Option<Obj>>> = Rc::new(RefCell::new(None));
     let host = Obj::create(&screen).expect("Obj::create host");
     // 显式派发事件需要一个句柄：`Obj` 把它自己移进 `slot`，这里先留一份裸指针
@@ -403,7 +415,10 @@ pub(super) fn obj_style_font_chain() {
     #[cfg(feature = "noto-font")]
     {
         for size in FontSize::ALL {
-            assert!(Font::of(size).is_some(), "{size:?} 档应可取到（noto-font 已启用）");
+            assert!(
+                Font::of(size).is_some(),
+                "{size:?} 档应可取到（noto-font 已启用）"
+            );
         }
     }
     #[cfg(not(feature = "noto-font"))]
@@ -464,7 +479,11 @@ pub(super) fn obj_style_font_chain() {
         );
         // 移动③：进 `Rc`（共享所有权载体，`add_style` 的入参）。
         let mv_rc = Rc::new(*mv_boxed);
-        assert_eq!(mv_rc.raw() as usize, mv_addr, "反例②：进 `Rc` 后地址仍须不变");
+        assert_eq!(
+            mv_rc.raw() as usize,
+            mv_addr,
+            "反例②：进 `Rc` 后地址仍须不变"
+        );
         let mv_obj = Obj::create(&screen).expect("Obj::create (move proof)");
         mv_obj.set_pos(0, 0);
         mv_obj.set_size(60, 60);
@@ -531,7 +550,11 @@ pub(super) fn obj_style_font_chain() {
     // 末尾的 `reclaim` + `CallbackHandle::detach` 内部的 `reclaim`。这里刻意走**裸**
     // `event::on`（`CallbackHandle::detach` 不做存活判定，不依赖 `Obj` 存活探针那条
     // 注册顺序）⇒ "幂等去重"是唯一保障。
-    assert_eq!(DELETE_DETACH_DROPS.load(Ordering::SeqCst), 0, "前置：静态探针应为 0");
+    assert_eq!(
+        DELETE_DETACH_DROPS.load(Ordering::SeqCst),
+        0,
+        "前置：静态探针应为 0"
+    );
     let host9 = Obj::create(&screen).expect("Obj::create (delete-detach)");
     let host9_raw = host9.raw();
     let slot9: Rc<RefCell<Option<super::event::CallbackHandle<*mut sys::lv_obj_t>>>> =
@@ -608,7 +631,11 @@ pub(super) fn obj_style_font_chain() {
         let stale_rc = Rc::new(stale_style);
         let stale_weak = Rc::downgrade(&stale_rc);
         assert!(!stale_rc.is_live(), "上一世代样式应判失效（世代令牌）");
-        assert_eq!(stale_weak.strong_count(), 1, "前置：只有用户句柄这一份强引用");
+        assert_eq!(
+            stale_weak.strong_count(),
+            1,
+            "前置：只有用户句柄这一份强引用"
+        );
         o2.add_style(&stale_rc, StyleSelector::main());
         assert_eq!(
             stale_weak.strong_count(),

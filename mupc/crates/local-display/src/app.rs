@@ -72,8 +72,8 @@ use crate::lvgl::indev::{Indev, TouchSnapshot};
 use crate::lvgl::obj::Obj;
 use crate::screen::{Blitter, MemorySink, PixelSink};
 use crate::state::{self, ChannelStatus, ControlState, DisplayState, Freshness};
-use crate::ui::components::{Toast, ToastTone};
 use crate::timing::Host;
+use crate::ui::components::{Toast, ToastTone};
 use crate::ui::pages::p3_logs::LogQuery;
 use crate::ui::pages::p5_audit::AuditQuery;
 use crate::ui::pages::{self, PageInput};
@@ -697,8 +697,8 @@ impl App {
         let blit_counters = blitter.counters();
         display.set_flush_cb(blitter.into_flush_closure());
 
-        let indev = Indev::create_pointer(&display)
-            .map_err(|e| StartupError::Lvgl(e.to_string()))?;
+        let indev =
+            Indev::create_pointer(&display).map_err(|e| StartupError::Lvgl(e.to_string()))?;
         // 长按阈值：**逐 indev**（v9 语义），值取自 `ui/theme.rs` 单一真源（不得硬编码 1000）。
         indev.set_long_press_time(Timing::long_press_u16());
 
@@ -734,8 +734,7 @@ impl App {
         state.set_stale_ms(cfg.stale_ms);
 
         // 意图队列 + 六页的意图回调接线（**唯一的意图生产者**）。
-        let intents: Rc<RefCell<VecDeque<ControlIntent>>> =
-            Rc::new(RefCell::new(VecDeque::new()));
+        let intents: Rc<RefCell<VecDeque<ControlIntent>>> = Rc::new(RefCell::new(VecDeque::new()));
         Self::bind_intents(&shell, &intents);
 
         // U-73：探测器下钻的分页大小 = 契约默认档（`display.periph_page_size` 的 HMI 侧取值，
@@ -872,7 +871,8 @@ impl App {
         {
             let q = Rc::clone(intents);
             shell.p5().set_on_load_more(move |query: AuditQuery| {
-                q.borrow_mut().push_back(ControlIntent::AuditLoadMore(query));
+                q.borrow_mut()
+                    .push_back(ControlIntent::AuditLoadMore(query));
             });
         }
         // ── U-73 外设下钻的两条**读**意图（P4 消防明细 / P6 BMS 288 位）──────────────
@@ -1008,7 +1008,11 @@ impl App {
     ///
     /// 日志节奏与 v1.0 一致：**首失败与每 10 次**各一条（通道长期不通时不刷屏，
     /// 设计 §9 的断连 CPU/日志友好）。
-    fn absorb(&mut self, res: Result<mupc_display_proto::DisplayFrame, crate::Error>, epoch_ms: u64) {
+    fn absorb(
+        &mut self,
+        res: Result<mupc_display_proto::DisplayFrame, crate::Error>,
+        epoch_ms: u64,
+    ) {
         match res {
             Ok(frame) => {
                 self.frames_ok += 1;
@@ -1096,24 +1100,18 @@ impl App {
                 return;
             };
             match intent {
-                ControlIntent::ConfigApply(patch) => self.begin_write_intent(
-                    ConsoleEndpoint::ConfigApply,
-                    "apply",
-                    &patch,
-                    epoch_ms,
-                ),
+                ControlIntent::ConfigApply(patch) => {
+                    self.begin_write_intent(ConsoleEndpoint::ConfigApply, "apply", &patch, epoch_ms)
+                }
                 ControlIntent::InterlockRelease(p) => self.begin_write_intent(
                     ConsoleEndpoint::InterlockRelease,
                     "release",
                     &p,
                     epoch_ms,
                 ),
-                ControlIntent::InterlockAckM1(p) => self.begin_write_intent(
-                    ConsoleEndpoint::InterlockAckM1,
-                    "ack_m1",
-                    &p,
-                    epoch_ms,
-                ),
+                ControlIntent::InterlockAckM1(p) => {
+                    self.begin_write_intent(ConsoleEndpoint::InterlockAckM1, "ack_m1", &p, epoch_ms)
+                }
                 ControlIntent::LogQuery(q) => {
                     let qs = log_query_string(&q);
                     self.last_log_query = Some(q);
@@ -1128,7 +1126,10 @@ impl App {
                     // 「回到最新」= 用**上一次**查询（游标归零）重取首屏；页面载荷是 `()`，
                     // 拉不到筛选态 ⇒ 以接线层留存的上一次查询为准（`None` ⇒ 契约默认档）。
                     let q = self.last_log_query.clone().unwrap_or_default();
-                    let qs = log_query_string(&LogQuery { cursor: None, ..q.clone() });
+                    let qs = log_query_string(&LogQuery {
+                        cursor: None,
+                        ..q.clone()
+                    });
                     self.last_log_query = Some(LogQuery { cursor: None, ..q });
                     self.begin_query_intent(ConsoleEndpoint::Logs, qs);
                 }
@@ -1285,7 +1286,10 @@ impl App {
                 self.set_submitting(ep, false);
                 self.control
                     .record_transport_failure_with_text(epoch_ms, transport_failure_text(&e));
-                eprintln!("[mupc-local-display] 控制通道写请求发起失败（{}）：{e}", ep.path());
+                eprintln!(
+                    "[mupc-local-display] 控制通道写请求发起失败（{}）：{e}",
+                    ep.path()
+                );
             }
         }
     }
@@ -1322,7 +1326,9 @@ impl App {
     /// 某读端点的查询串（GET 参数在 query；写端点不可达）。
     fn query_for(&self, ep: ConsoleEndpoint) -> String {
         match ep {
-            ConsoleEndpoint::Logs => log_query_string(&self.last_log_query.clone().unwrap_or_default()),
+            ConsoleEndpoint::Logs => {
+                log_query_string(&self.last_log_query.clone().unwrap_or_default())
+            }
             ConsoleEndpoint::Audit => {
                 audit_query_string(&self.last_audit_query.clone().unwrap_or_default())
             }
@@ -1370,7 +1376,11 @@ impl App {
     }
 
     /// 消化一次控制通道完成事件：**路由 / 失败**两条出路。
-    fn absorb_console(&mut self, res: ConsoleResult<crate::console::ConsoleOutcome<RawPayload>>, epoch_ms: u64) {
+    fn absorb_console(
+        &mut self,
+        res: ConsoleResult<crate::console::ConsoleOutcome<RawPayload>>,
+        epoch_ms: u64,
+    ) {
         let outcome = match res {
             Ok(o) => o,
             Err(e) => {
@@ -2038,7 +2048,9 @@ impl App {
         let mut n = 0usize;
         for y in y0..y1 {
             for x in 0..w {
-                if g.pixel(x as i32, y as i32).is_some_and(|p| !is_screen_bg(p)) {
+                if g.pixel(x as i32, y as i32)
+                    .is_some_and(|p| !is_screen_bg(p))
+                {
                     n += 1;
                 }
             }
@@ -2304,11 +2316,20 @@ mod tests {
         // ② 丢帧：`dropped == 0` 才算通过（目标被借走 ⇒ 该拍像素没画上而 LVGL 不知道）。
         assert!(base.no_dropped_frames());
         assert!(base.flush_observed(), "100 次搬运 ⇒ flush 路径确实在计数");
-        let lost = SmokeReport { dropped: 1, ..base.clone() };
-        assert!(!lost.no_dropped_frames(), "丢帧必须判失败（屏上留永久陈旧像素）");
+        let lost = SmokeReport {
+            dropped: 1,
+            ..base.clone()
+        };
+        assert!(
+            !lost.no_dropped_frames(),
+            "丢帧必须判失败（屏上留永久陈旧像素）"
+        );
         // ②′ 对偶哨：**一次搬运都没有** ⇒ 计数根本没接线（此时 `dropped == 0` 是假象）。
         let unwired = SmokeReport { blits: 0, ..base };
-        assert!(unwired.no_dropped_frames(), "（假象：没接线时 dropped 也是 0）");
+        assert!(
+            unwired.no_dropped_frames(),
+            "（假象：没接线时 dropped 也是 0）"
+        );
         assert!(
             !unwired.flush_observed(),
             "blits == 0 必须判失败：自检走查必然产生搬运，否则说明读口没接上"
@@ -2369,9 +2390,11 @@ mod tests {
             max_used: 1024 * 1024 * 951 / 1000,
             ..ok
         };
-        assert!(!just_over.has_headroom(), "峰值 > 95 % 即判失败（给新增对象留 5 %）");
+        assert!(
+            !just_over.has_headroom(),
+            "峰值 > 95 % 即判失败（给新增对象留 5 %）"
+        );
     }
-
 
     /// 语义键节流 ①：**同键连推两拍 ⇒ 只渲染 1 次**（首拍渲染 + 第二拍跳过）。
     ///
@@ -2412,7 +2435,10 @@ mod tests {
         assert_eq!(due, Some(12_345), "未请求刷新时下一次轮询时刻不得被改写");
         // ② 请求刷新 ⇒ 下一次轮询提前到**下一拍**（`poll_due(_, None)` 恒真）
         assert!(apply_refresh_request(true, &mut due), "请求 ⇒ 生效");
-        assert_eq!(due, None, "必须把 next_poll_ms 置 None，否则「补发 GET」是空话");
+        assert_eq!(
+            due, None,
+            "必须把 next_poll_ms 置 None，否则「补发 GET」是空话"
+        );
         // ③ 已经是 None（首拍 / 已在途）⇒ 仍然报告"生效"（调用点可计数），且不改语义
         let mut already = None;
         assert!(apply_refresh_request(true, &mut already));
@@ -2442,7 +2468,11 @@ mod tests {
         // ① 写意图在途被丢弃（`begin_write_intent` 的 `is_busy()` 分支）
         let mut st = ControlState::new();
         st.push_toast(TEXT_OP_BUSY, T0);
-        assert_eq!(toast_view(&st, T0), Some(TEXT_OP_BUSY), "①「操作进行中」必须上屏");
+        assert_eq!(
+            toast_view(&st, T0),
+            Some(TEXT_OP_BUSY),
+            "①「操作进行中」必须上屏"
+        );
 
         // ② `begin_write` 自身失败 —— 文案分派见 [`transport_failure_text`]
         let mut st = ControlState::new();
@@ -2476,7 +2506,10 @@ mod tests {
         );
 
         // 生命周期：3 s 内可见、到期即隐（UI §7.2 / `TOAST_TTL_MS`）
-        assert!(toast_view(&st, T0 + state::TOAST_TTL_MS - 1).is_some(), "3 s 内仍显示");
+        assert!(
+            toast_view(&st, T0 + state::TOAST_TTL_MS - 1).is_some(),
+            "3 s 内仍显示"
+        );
         assert_eq!(
             toast_view(&st, T0 + state::TOAST_TTL_MS),
             None,
@@ -2543,7 +2576,11 @@ mod tests {
             st.last().is_some(),
             "记账一个不少：最近回执摘要照记（页面 `show_result` 与诊断都用它）"
         );
-        assert_eq!(st.toast_text(), None, "（同上，取文案的那个口子也必须为空）");
+        assert_eq!(
+            st.toast_text(),
+            None,
+            "（同上，取文案的那个口子也必须为空）"
+        );
 
         // ② 对照（**证明①不是恒真**）：同一份回执走**无页面上屏通道**的决策 ⇒ 保留兜底 Toast。
         let mut st_read = ControlState::new();
@@ -2583,7 +2620,11 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(
+            prod.len(),
+            src.len(),
+            "未切出生产段：扫描器失真，本用例必须响亮失败"
+        );
         // ⚠️ 判据在**去注释**后的文本上取（[`without_line_comments`]）：只数原始字符时，
         // 把 `let toast = Toast::new(` **注释掉**照样通过 —— 本哨会退化成摆设。
         let live = without_line_comments(prod);
@@ -2597,7 +2638,9 @@ mod tests {
         // ⚠️ 窗口按**字符**取（本文件是 UTF-8，`&s[..n]` 会切在多字节字符中间而 panic ——
         // 本项目"扫描器失真"的又一形态）。
         const FN_HEAD: &str = "fn tick(&mut self, now_ms: u64) {";
-        let at = live.find(FN_HEAD).expect("`App::tick` 必须存在（唯一更新点）");
+        let at = live
+            .find(FN_HEAD)
+            .expect("`App::tick` 必须存在（唯一更新点）");
         let body: String = live[at + FN_HEAD.len()..].chars().take(4_000).collect();
         assert!(
             body.contains("self.sync_toast("),
@@ -2671,7 +2714,11 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(
+            prod.len(),
+            src.len(),
+            "未切出生产段：扫描器失真，本用例必须响亮失败"
+        );
         // ⚠️ 判据一律在**去注释**后的文本上取（见 [`without_line_comments`]）：否则把要守的
         // 那些行**注释掉**照样通过 —— 本哨（及其同款的三个哨）会当场退化成摆设。
         let live = without_line_comments(prod);
@@ -2732,7 +2779,10 @@ mod tests {
             "过期重发的出路指引必须上屏（不得落到通用「操作失败」）"
         );
         // ② 与通用兜底**不同**（否则本条退化成恒真）
-        assert_ne!(transport_failure_text(&expired), crate::state::TRANSPORT_FAIL_TEXT);
+        assert_ne!(
+            transport_failure_text(&expired),
+            crate::state::TRANSPORT_FAIL_TEXT
+        );
         // ③ 其余错误（超时 / 忙 / 无在途）⇒ **回落**通用兜底，不得乱套专属串
         assert_eq!(
             transport_failure_text(&crate::console::ConsoleError::Idle),
@@ -2766,7 +2816,10 @@ mod tests {
         // ④ 帧从有到无（首帧前 / 状态复位）也是一种变化（`Option<u64>` 的 `None` 侧）
         let no: RenderKey = (ChannelStatus::Init, Freshness::Stale, None);
         assert!(needs_render(Some(base), no), "seq 消失（None）必须渲染");
-        assert!(needs_render(None, no), "首拍即无帧也要渲染（初始化中/断连态文案）");
+        assert!(
+            needs_render(None, no),
+            "首拍即无帧也要渲染（初始化中/断连态文案）"
+        );
     }
 
     /// 裁定 3 的**调用点**哨：失败分支必须把本地合成回执**送进**唯一分派点（只造不送 = 屏上
@@ -2814,7 +2867,11 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(
+            prod.len(),
+            src.len(),
+            "未切出生产段：扫描器失真，本用例必须响亮失败"
+        );
         // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把
         // `self.apply_route(decision);` **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
         let live = without_line_comments(prod);
@@ -2892,7 +2949,11 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("app.rs 应能切出生产段");
-        assert_ne!(prod.len(), src.len(), "未切出生产段：扫描器失真，本用例必须响亮失败");
+        assert_ne!(
+            prod.len(),
+            src.len(),
+            "未切出生产段：扫描器失真，本用例必须响亮失败"
+        );
         // ⚠️ 窗口取在**去注释**后的文本上（[`without_line_comments`]）：否则把被守的那几行
         // **注释掉**照样满足 `contains` ⇒ 哨退化成摆设。
         let live = without_line_comments(prod);
@@ -2980,7 +3041,11 @@ mod tests {
             w.record_transport_failure_with_receipt(T0).is_some(),
             "写端点 ⇒ 必须交回合成回执（送页面 `show_result`）"
         );
-        assert_eq!(toast_view(&w, T0), None, "写端点 ⇒ 上屏只走页面 Toast（UI §7.2 同一时刻仅 1 条）");
+        assert_eq!(
+            toast_view(&w, T0),
+            None,
+            "写端点 ⇒ 上屏只走页面 Toast（UI §7.2 同一时刻仅 1 条）"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════

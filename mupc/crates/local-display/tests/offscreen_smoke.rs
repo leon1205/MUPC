@@ -308,7 +308,10 @@ fn offscreen_smoke_renders_six_pages_and_exits_zero() {
         stdout.contains("[smoke] ticks="),
         "应打印时序行：\n{stdout}"
     );
-    assert!(stdout.contains("[smoke] result=OK"), "自检结论行缺失：\n{stdout}");
+    assert!(
+        stdout.contains("[smoke] result=OK"),
+        "自检结论行缺失：\n{stdout}"
+    );
 
     // ② 真的按节拍从读通道取到了帧（端点契约：只打 /v1/display/latest）
     let ticks = stdout
@@ -317,7 +320,10 @@ fn offscreen_smoke_renders_six_pages_and_exits_zero() {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    assert!(ticks >= 10, "事件循环应跑满 --smoke 的拍数，实得 {ticks}\n{stdout}");
+    assert!(
+        ticks >= 10,
+        "事件循环应跑满 --smoke 的拍数，实得 {ticks}\n{stdout}"
+    );
     let (hits, misses, aborted) = stats.counts();
     assert!(hits >= 1, "读通道一次都没被命中：\n{stderr}");
     // **判据未放宽**（仍是 `== 0`）：`misses` 现在只统计「**收到完整请求行**但不是契约路径」
@@ -340,7 +346,8 @@ fn offscreen_smoke_renders_six_pages_and_exits_zero() {
     //    语义键（通道态/新鲜度/帧序号）不变就不该调页面 `render`（标脏 ⇒ 整屏重绘）。
     //    `--smoke` 只跑 20 拍、而 `--poll-ms` 节拍是 500 ms ⇒ 实测渲染次数应远小于拍数；
     //    恒真退化 ⇒ 两者相等 ⇒ 本断言红。
-    let renders = smoke_stat(&stdout, "renders").unwrap_or_else(|| panic!("缺 renders= 字段：\n{stdout}"));
+    let renders =
+        smoke_stat(&stdout, "renders").unwrap_or_else(|| panic!("缺 renders= 字段：\n{stdout}"));
     assert!(
         renders < ticks,
         "帧驱动页渲染次数 {renders} 不少于拍数 {ticks} —— 节流没生效（每拍都标脏 = 永远整屏重绘）\n{stdout}"
@@ -348,14 +355,16 @@ fn offscreen_smoke_renders_six_pages_and_exits_zero() {
 
     // ②″ **没有整拍被静默跳过**（I-4：`dropped` 是"该画的像素没画上"的唯一观测哨；
     //     此前 `Blitter` 被 move 进 flush 闭包 ⇒ 该计数在生产与自检路径都读不到）。
-    let dropped = smoke_stat(&stdout, "dropped").unwrap_or_else(|| panic!("缺 dropped= 字段：\n{stdout}"));
+    let dropped =
+        smoke_stat(&stdout, "dropped").unwrap_or_else(|| panic!("缺 dropped= 字段：\n{stdout}"));
     assert_eq!(
         dropped, 0,
         "自检期间有 {dropped} 个脏区被丢弃（目标被借走 ⇒ 屏上留永久陈旧像素而 LVGL 不知道）\n{stdout}"
     );
     // ②‴ 对偶哨：**必须真的记到过搬运**。少了这条，`dropped == 0` 可能只是"计数没接线"
     //     （游离句柄恒 0）—— 两条合起来才既证明"读口接上了"、又证明"没丢帧"。
-    let blits = smoke_stat(&stdout, "blits").unwrap_or_else(|| panic!("缺 blits= 字段：\n{stdout}"));
+    let blits =
+        smoke_stat(&stdout, "blits").unwrap_or_else(|| panic!("缺 blits= 字段：\n{stdout}"));
     assert!(
         blits > 0,
         "自检走查期间一次 flush 都没记到（blits=0）—— 计数句柄没接到真闭包上\n{stdout}"
@@ -364,8 +373,7 @@ fn offscreen_smoke_renders_six_pages_and_exits_zero() {
     // ③ **六页都非空壳**（内容区真的有像素；白屏/级联删除在此现形）
     let mut counts = Vec::new();
     for n in 1..=6 {
-        let px = page_pixels(&stdout, n)
-            .unwrap_or_else(|| panic!("缺第 {n} 页统计行：\n{stdout}"));
+        let px = page_pixels(&stdout, n).unwrap_or_else(|| panic!("缺第 {n} 页统计行：\n{stdout}"));
         counts.push(px);
     }
     for (i, px) in counts.iter().enumerate() {
@@ -454,17 +462,17 @@ fn poll_ms_above_red_line_is_rejected() {
         .expect("spawn");
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("--poll-ms") || err.contains("轮询"), "错误须点名参数：{err}");
+    assert!(
+        err.contains("--poll-ms") || err.contains("轮询"),
+        "错误须点名参数：{err}"
+    );
 }
 
 /// `--help` / `--version` 早退（退出码 0，不装配 LVGL）。
 #[test]
 fn help_and_version_exit_zero_without_starting_the_loop() {
     for flag in ["--help", "--version"] {
-        let out = Command::new(bin())
-            .arg(flag)
-            .output()
-            .expect("spawn");
+        let out = Command::new(bin()).arg(flag).output().expect("spawn");
         assert_eq!(out.status.code(), Some(0), "{flag} 应以 0 退出");
         assert!(!out.stdout.is_empty(), "{flag} 应有输出");
     }
@@ -504,7 +512,10 @@ fn smoke_without_channel_still_renders_pages() {
     );
     for n in 1..=6 {
         let px = page_pixels(&stdout, n).unwrap_or(0);
-        assert!(px > 0, "通道不通时第 {n} 页也应非空壳（降级态本身要上屏）：\n{stdout}");
+        assert!(
+            px > 0,
+            "通道不通时第 {n} 页也应非空壳（降级态本身要上屏）：\n{stdout}"
+        );
     }
 }
 
@@ -560,7 +571,10 @@ fn startup_warns_deprecated_font_and_echoes_live_control_channel() {
         "两个参数都只是告警、进程须照常跑完（退出码 0）；实得 {:?}\n{err}",
         out.status.code()
     );
-    assert!(err.contains("--font /nope/x.otf"), "字体告警缺失或未回显取值：\n{err}");
+    assert!(
+        err.contains("--font /nope/x.otf"),
+        "字体告警缺失或未回显取值：\n{err}"
+    );
     assert!(err.contains("不生效"), "字体告警须说明不生效：\n{err}");
     assert!(
         err.contains("--control-channel http://127.0.0.1:9811"),

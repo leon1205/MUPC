@@ -161,13 +161,23 @@ fn main() {
 
     println!("── S-2 离屏渲染 proof ───────────────────────────────");
     println!("画布 {W}x{H} / PARTIAL 双缓冲 2 x {BUF_PIXELS} px ({BUF_PIXELS}*{BPP} B)");
-    println!("字体: {}", if using_noto { "lv_font_noto_sc_32 (lv_font_conv 子集)" } else { "默认 lv_font_montserrat_14（ASCII，中文将是缺字占位）" });
+    println!(
+        "字体: {}",
+        if using_noto {
+            "lv_font_noto_sc_32 (lv_font_conv 子集)"
+        } else {
+            "默认 lv_font_montserrat_14（ASCII，中文将是缺字占位）"
+        }
+    );
     println!("flush_cb 调用次数: {}", FLUSH_CALLS.load(Ordering::Relaxed));
     println!("耗时: {elapsed:?}");
     println!("非背景像素: {non_bg} / {total}");
     println!("不同颜色数: {distinct}");
     println!("全屏连通域数: {blobs_screen}");
-    println!("label 文本区: {}x{} @ ({},{})", tw, th, label_area.x1, label_area.y1);
+    println!(
+        "label 文本区: {}x{} @ ({},{})",
+        tw, th, label_area.x1, label_area.y1
+    );
     println!("文本区前景像素: {ink_text}");
     println!("文本区连通域数: {blobs_text}（期望 >= 字数 {text_n}）");
     dump_art(&sink, label_area);
@@ -321,12 +331,7 @@ fn text_region_stats(sink: &[u8], a: lv_area_t) -> (i32, i32, usize, usize) {
     };
     let ink = count_non_bg_in(sink, &region, CARD_BG);
     let blobs = count_blobs(sink, region, 0, CARD_BG);
-    (
-        a.x2 - a.x1 + 1,
-        a.y2 - a.y1 + 1,
-        blobs,
-        ink as usize,
-    )
+    (a.x2 - a.x1 + 1, a.y2 - a.y1 + 1, blobs, ink as usize)
 }
 
 fn count_non_bg_in(sink: &[u8], region: &Region, bg: [u8; 4]) -> u32 {

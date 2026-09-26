@@ -34,9 +34,7 @@ pub enum Error {
 
     /// 单条告警消息超过长度上限（编码侧自检；防止 10 条长文把整帧顶出 [`crate::MAX_FRAME_BYTES`]
     /// 后被对端静默丢弃，且发布方无法定位责任字段）。
-    #[error(
-        "display-proto alarm message too long: item {index} is {len} bytes > limit {limit}"
-    )]
+    #[error("display-proto alarm message too long: item {index} is {len} bytes > limit {limit}")]
     AlarmMessageTooLong {
         /// 越界条目在 `alarms.items` 中的下标（发布方据此定位）。
         index: usize,

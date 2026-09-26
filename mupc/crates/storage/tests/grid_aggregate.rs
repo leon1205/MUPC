@@ -299,22 +299,32 @@ async fn grd09_value_nullable_migration_is_idempotent() {
     .await
     .unwrap();
     assert_eq!(rows.len(), 2, "既有行全部保留");
-    assert_eq!(rows[0], (1, 1234, Some(42.5), 0), "既有行数值不变（数据语义不变）");
-    assert_eq!(rows[1], (2, 1235, Some(0.0), 0), "真 0 值仍是 0.0（不是 NULL）");
+    assert_eq!(
+        rows[0],
+        (1, 1234, Some(42.5), 0),
+        "既有行数值不变（数据语义不变）"
+    );
+    assert_eq!(
+        rows[1],
+        (2, 1235, Some(0.0), 0),
+        "真 0 值仍是 0.0（不是 NULL）"
+    );
 
     // ② 幂等：二次迁移必须通过且不改变行数/数值
     //    判别判据：`rootpage` 不变 ⇒ 没有发生"搬数据重建"（抹掉 PRAGMA 守卫会换页 ⇒ 本断言红）
-    let rootpage_before: i64 =
-        sqlx::query_scalar("SELECT rootpage FROM sqlite_master WHERE type='table' AND name='telemetry'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let rootpage_before: i64 = sqlx::query_scalar(
+        "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='telemetry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     run_migrations(&pool).await.expect("二次迁移必须幂等通过");
-    let rootpage_after: i64 =
-        sqlx::query_scalar("SELECT rootpage FROM sqlite_master WHERE type='table' AND name='telemetry'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let rootpage_after: i64 = sqlx::query_scalar(
+        "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='telemetry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         rootpage_before, rootpage_after,
         "二次迁移不得重建 telemetry（rootpage 换页即说明又搬了一次数据）"
@@ -336,7 +346,10 @@ async fn grd09_value_nullable_migration_is_idempotent() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(max_id, 3, "可空化重建后 AUTOINCREMENT 序列必须接着既有最大 id（不得从 1 重来）");
+    assert_eq!(
+        max_id, 3,
+        "可空化重建后 AUTOINCREMENT 序列必须接着既有最大 id（不得从 1 重来）"
+    );
 
     // ③ 两个索引都在（03 设计 §9.1.4 勘误 ②：只重建一个会让 device_id+timestamp 路径丢索引）
     let idx: Vec<String> = sqlx::query_scalar(
@@ -397,7 +410,11 @@ async fn grd09b_sequence_preserved_when_old_table_emptied() {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(value_notnull(&pool).await, 1, "前提：老库 value 仍为 NOT NULL");
+    assert_eq!(
+        value_notnull(&pool).await,
+        1,
+        "前提：老库 value 仍为 NOT NULL"
+    );
 
     run_migrations(&pool).await.expect("迁移（空表路径）");
     assert_eq!(value_notnull(&pool).await, 0, "迁移后 value 可空");

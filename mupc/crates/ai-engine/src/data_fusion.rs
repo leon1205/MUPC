@@ -242,15 +242,15 @@ pub fn normalize_observation(v: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0_f32; 78];
 
     // D1 [0..8] 9 维实时数据
-    out[0] = minmax(v[0], 0.0, 1.0);       // SOC
-    out[1] = minmax(v[1], 0.0, 150.0);     // PV power
-    out[2] = minmax(v[2], 0.0, 60.0);      // Load power
-    out[3] = minmax(v[3], -200.0, 200.0);  // Grid power
-    out[4] = v[4];                         // Transformer load: identity [0,1]
-    out[5] = minmax(v[5], -50.0, 50.0);    // Battery power
-    out[6] = minmax(v[6], 0.85, 1.15);     // V_a
-    out[7] = minmax(v[7], 0.85, 1.15);     // V_b
-    out[8] = minmax(v[8], 0.85, 1.15);     // V_c
+    out[0] = minmax(v[0], 0.0, 1.0); // SOC
+    out[1] = minmax(v[1], 0.0, 150.0); // PV power
+    out[2] = minmax(v[2], 0.0, 60.0); // Load power
+    out[3] = minmax(v[3], -200.0, 200.0); // Grid power
+    out[4] = v[4]; // Transformer load: identity [0,1]
+    out[5] = minmax(v[5], -50.0, 50.0); // Battery power
+    out[6] = minmax(v[6], 0.85, 1.15); // V_a
+    out[7] = minmax(v[7], 0.85, 1.15); // V_b
+    out[8] = minmax(v[8], 0.85, 1.15); // V_c
 
     // D2 [9..23] pv_forecast 15 维
     for i in 0..15 {
@@ -263,9 +263,9 @@ pub fn normalize_observation(v: &[f32]) -> Vec<f32> {
     }
 
     // D3 [39..41] 3 维电价
-    out[39] = minmax(v[39], 0.0, 1.5);     // current_price
-    out[40] = minmax(v[40], 0.0, 1.5);     // next_price
-    out[41] = minmax(v[41], 0.0, 3.0);     // tariff_id
+    out[39] = minmax(v[39], 0.0, 1.5); // current_price
+    out[40] = minmax(v[40], 0.0, 1.5); // next_price
+    out[41] = minmax(v[41], 0.0, 3.0); // tariff_id
 
     // D4 [42..44] 3 维需量
     out[42] = minmax(v[42], 0.0, 500.0);
@@ -273,8 +273,8 @@ pub fn normalize_observation(v: &[f32]) -> Vec<f32> {
     out[44] = minmax(v[44], 0.0, 500.0);
 
     // D5 [45..46] 2 维气象
-    out[45] = minmax(v[45], 0.0, 1500.0);  // solar_irradiance
-    out[46] = minmax(v[46], -20.0, 60.0);  // temperature
+    out[45] = minmax(v[45], 0.0, 1500.0); // solar_irradiance
+    out[46] = minmax(v[46], -20.0, 60.0); // temperature
 
     // D6 [47] dispatch_p_set
     out[47] = minmax(v[47], -200.0, 200.0);
@@ -841,7 +841,7 @@ mod tests {
         state.load_forecast_15min = vec![0.2; 15];
         let v = state.to_input_vector();
         assert_eq!(v.len(), 78); // v2.14: 78 维
-        // D7 q_realtime_margin [48]
+                                 // D7 q_realtime_margin [48]
         assert!((v[48] - 0.5_f32).abs() < 1e-6);
         // D8 season_encoding[0] [49]
         assert!((v[49] - 0.0_f32).abs() < 1e-6);
@@ -850,9 +850,9 @@ mod tests {
         assert!((v[58] - 0.0_f32).abs() < 1e-6); // 默认 None → 0.0
         assert!((v[59] - 0.0_f32).abs() < 1e-6); // 默认 consecutive → 0.0
         assert!((v[60] - 0.0_f32).abs() < 1e-6); // 默认 ratio → 0.0
-        // D10 shock_load_probability [76]
+                                                 // D10 shock_load_probability [76]
         assert!((v[76] - 0.0_f32).abs() < 1e-6); // 默认 0.0
-        // D10 base_load [77]
+                                                 // D10 base_load [77]
         assert!((v[77] - 0.0_f32).abs() < 1e-6); // 默认 0.0
     }
 }

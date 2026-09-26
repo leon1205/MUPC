@@ -300,7 +300,8 @@ impl AdaptiveWeightOptimizer {
     /// v3.1: 设置基线性能快照（首次优化前调用）
     pub async fn set_baseline(&self, perf: PerformanceFeatures) {
         *self.baseline_performance.write().await = Some(perf);
-        self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.consecutive_degradation_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// v3.1: 检查优化器是否已冻结
@@ -310,8 +311,10 @@ impl AdaptiveWeightOptimizer {
 
     /// v3.1: 手动解冻优化器（运维确认后调用）
     pub fn unfreeze(&self) {
-        self.frozen.store(false, std::sync::atomic::Ordering::SeqCst);
-        self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.frozen
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.consecutive_degradation_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         tracing::warn!("AdaptiveWeightOptimizer 已手动解冻");
     }
 
@@ -349,10 +352,16 @@ impl AdaptiveWeightOptimizer {
         };
 
         if degraded {
-            let count = self.consecutive_degradation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let count = self
+                .consecutive_degradation_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
             tracing::warn!(
                 "权重健康度退化: 连续 {} 周期劣于基线 (overload={}, voltage={}, reward={})",
-                count, overload_worse, voltage_violation_worse, reward_worse
+                count,
+                overload_worse,
+                voltage_violation_worse,
+                reward_worse
             );
 
             // 连续 N 个周期退化 → 自动冻结
@@ -366,7 +375,8 @@ impl AdaptiveWeightOptimizer {
             }
             WeightHealthStatus::Degraded { consecutive: count }
         } else {
-            self.consecutive_degradation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+            self.consecutive_degradation_count
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             WeightHealthStatus::Healthy
         }
     }

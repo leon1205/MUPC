@@ -97,7 +97,8 @@ impl Dimens {
     /// **推导而非抄数**：`(CONTENT_W − (TAB_COUNT − 1) × SEG_GAP) / TAB_COUNT`
     /// = `(992 − 64) / 5 = 185`（向下取整）⇒ `5×185 + 4×16 = 989 ≤ 992`（余 3 px 不收尾，
     /// 与 §15.5.1 的算式**逐字一致**；T-25 断言段宽 == 185、段间隙 == `SEG_GAP`）。
-    pub const TAB_W: i32 = (Self::CONTENT_W - (Self::TAB_COUNT - 1) * Self::SEG_GAP) / Self::TAB_COUNT;
+    pub const TAB_W: i32 =
+        (Self::CONTENT_W - (Self::TAB_COUNT - 1) * Self::SEG_GAP) / Self::TAB_COUNT;
     /// 分段页签高 48（UI §6.6.1「每段 185×**48**」；取 `TOUCH_MIN` = 触摸目标下限）。
     pub const TAB_H: i32 = Self::TOUCH_MIN;
     /// 分段控件在**页内**的 y（绝对 y80 − 页顶 y72 = 8 = 内容区上内边距）。
@@ -766,14 +767,7 @@ impl ButtonStyles {
     }
 }
 
-fn btn_style(
-    bg: Color,
-    border: Color,
-    border_w: i32,
-    text: Color,
-    radius: i32,
-    pad: i32,
-) -> Style {
+fn btn_style(bg: Color, border: Color, border_w: i32, text: Color, radius: i32, pad: i32) -> Style {
     let mut s = Style::new();
     s.set_bg_color(bg);
     s.set_bg_opa(Opa::COVER);

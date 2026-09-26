@@ -42,12 +42,17 @@ fn apply_then_get_returns_value_and_ts() {
     let lv = LatestValues::new(STALE_S);
     let id = pid("meter_grid", "active_power");
 
-    assert!(lv.apply(vec![(id.clone(), pv(12.5, 1_000, PointQuality::Ok))]).is_some());
+    assert!(lv
+        .apply(vec![(id.clone(), pv(12.5, 1_000, PointQuality::Ok))])
+        .is_some());
 
     let got: PointView = lv.get(&id);
     assert_eq!(got.id, id, "读结果必须回带主键（消费方按站分片用）");
     assert_eq!(got.value.value, Some(12.5), "值必须逐字读回");
-    assert_eq!(got.value.ts_ms, 1_000, "时标 = 采集时刻（不得用读取时刻顶替）");
+    assert_eq!(
+        got.value.ts_ms, 1_000,
+        "时标 = 采集时刻（不得用读取时刻顶替）"
+    );
     assert_eq!(got.value.quality, PointQuality::Ok);
 }
 
@@ -164,7 +169,9 @@ async fn unchanged_value_is_not_broadcast() {
     let id = pid("meter_grid", "voltage");
     let mut rx = lv.subscribe();
 
-    assert!(lv.apply(vec![(id.clone(), pv(220.0, 100, PointQuality::Ok))]).is_some());
+    assert!(lv
+        .apply(vec![(id.clone(), pv(220.0, 100, PointQuality::Ok))])
+        .is_some());
     let _ = rx.recv().await.expect("首轮变更必须广播");
 
     assert_eq!(
@@ -207,7 +214,10 @@ async fn lagged_subscriber_does_not_panic_and_can_full_reload() {
 
     // 远超广播容量（64）的连续变更，且全程不读 ⇒ 必然落后
     for i in 0..200u64 {
-        lv.apply(vec![(id.clone(), pv(i as f64, 1_000 + i, PointQuality::Ok))]);
+        lv.apply(vec![(
+            id.clone(),
+            pv(i as f64, 1_000 + i, PointQuality::Ok),
+        )]);
     }
 
     let err = rx.recv().await.expect_err("落后 200 批必须报 Lagged");
@@ -235,7 +245,9 @@ fn change_list_is_deduped_and_grouped_by_station() {
             (pid("bms", "soh"), pv(4.0, 10, PointQuality::Ok)),
         ])
         .expect("有变更");
-    let batch: ChangeBatch = rx.try_recv().expect("变更批必须入队（无运行时下用 try_recv）");
+    let batch: ChangeBatch = rx
+        .try_recv()
+        .expect("变更批必须入队（无运行时下用 try_recv）");
     assert_eq!(batch.seq, seq);
 
     let stations: Vec<&str> = batch.changed.iter().map(|p| p.station.as_str()).collect();
@@ -261,8 +273,14 @@ fn mark_station_polled_does_not_produce_change_batch() {
     // 只刷新「站在采」这一事实：不改点值、不改时标 ⇒ 无变更批
     lv.mark_station_polled("bms", 5_000);
     assert!(lv.station_is_active("bms", 5_000));
-    assert!(lv.station_is_active("bms", 10_000), "边界 = 恰好 5 s 仍在窗内");
-    assert!(!lv.station_is_active("bms", 10_001), "超过 stale_timeout_s ⇒ 不在窗内");
+    assert!(
+        lv.station_is_active("bms", 10_000),
+        "边界 = 恰好 5 s 仍在窗内"
+    );
+    assert!(
+        !lv.station_is_active("bms", 10_001),
+        "超过 stale_timeout_s ⇒ 不在窗内"
+    );
 }
 
 #[test]
@@ -308,7 +326,11 @@ fn mark_station_offline_keeps_value_and_ts_but_flags_invalid() {
 
     let got = lv.get(&soc);
     assert_eq!(got.value.quality, PointQuality::Invalid, "全站置 Invalid");
-    assert_eq!(got.value.value, Some(55.0), "**保原值**（EX-1，不清空、不补 0）");
+    assert_eq!(
+        got.value.value,
+        Some(55.0),
+        "**保原值**（EX-1，不清空、不补 0）"
+    );
     assert_eq!(got.value.ts_ms, 100, "**保原始时标**（EX-1）");
 
     assert_eq!(lv.station_last_poll_ms("bms"), None, "清站活性");

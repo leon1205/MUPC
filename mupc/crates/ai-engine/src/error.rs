@@ -84,7 +84,6 @@ pub enum AiEngineError {
     PipelineError(String),
 
     // --- v2.0 第二轮 (BiLSTM + 误差修正) 错误变体 ---
-
     /// 模型文件校验失败（metadata / SHA256 / 维度不匹配）
     #[error("模型校验失败: model={model_path}, reason={reason}")]
     ModelValidationFailed { model_path: String, reason: String },

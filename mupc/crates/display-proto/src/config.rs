@@ -306,9 +306,18 @@ impl DisplayConfig {
         // 故此处逐字段 `is_finite() && > 0.0`，**启动即拒**。
         for (field, value) in [
             ("display.range.current_max_a", self.range.current_max_a),
-            ("display.range.phase_power_max_kw", self.range.phase_power_max_kw),
-            ("display.range.total_power_max_kw", self.range.total_power_max_kw),
-            ("display.range.pcs_total_rated_kw", self.range.pcs_total_rated_kw),
+            (
+                "display.range.phase_power_max_kw",
+                self.range.phase_power_max_kw,
+            ),
+            (
+                "display.range.total_power_max_kw",
+                self.range.total_power_max_kw,
+            ),
+            (
+                "display.range.pcs_total_rated_kw",
+                self.range.pcs_total_rated_kw,
+            ),
             (
                 "display.range.inconsistency_threshold_kw",
                 self.range.inconsistency_threshold_kw,
@@ -477,7 +486,10 @@ mod tests {
         for ok in [1u64, 1000] {
             let mut c = base.clone();
             c.periph_poll_ms = ok;
-            assert!(c.validate().is_ok(), "periph_poll_ms={ok} 在 [1,1000] 内应放行");
+            assert!(
+                c.validate().is_ok(),
+                "periph_poll_ms={ok} 在 [1,1000] 内应放行"
+            );
         }
 
         for bad in [0u32, 51, 1000] {
@@ -493,7 +505,10 @@ mod tests {
         for ok in [1u32, 50] {
             let mut c = base.clone();
             c.periph_page_size = ok;
-            assert!(c.validate().is_ok(), "periph_page_size={ok} 在 [1,50] 内应放行");
+            assert!(
+                c.validate().is_ok(),
+                "periph_page_size={ok} 在 [1,50] 内应放行"
+            );
         }
     }
 
@@ -504,7 +519,11 @@ mod tests {
     #[test]
     fn display_range_every_numeric_field_rejects_non_finite_or_non_positive() {
         // 各字段的 (名, getter, setter)：逐字段构造反例 / 正例
-        type RangeField = (&'static str, fn(&DisplayRange) -> f64, fn(&mut DisplayRange, f64));
+        type RangeField = (
+            &'static str,
+            fn(&DisplayRange) -> f64,
+            fn(&mut DisplayRange, f64),
+        );
         let fields: [RangeField; 5] = [
             (
                 "current_max_a",
@@ -636,7 +655,10 @@ mod tests {
     fn display_config_v2_defaults_match_design() {
         let c = DisplayConfig::default();
         assert_eq!(c.control_bind_addr, "127.0.0.1:9811");
-        assert_eq!(c.min_publish_interval_ms, 250, "合并窗口 ≥250 ms（设计 §3.1）");
+        assert_eq!(
+            c.min_publish_interval_ms, 250,
+            "合并窗口 ≥250 ms（设计 §3.1）"
+        );
         assert_eq!(c.device_poll_ms, 3000, "慢拍 A = 3 s");
         assert_eq!(c.alarm_poll_ms, 500, "慢拍 B = 0.5 s");
         assert_eq!(c.interlock_poll_ms, 500, "慢拍 C = 0.5 s");
@@ -648,7 +670,11 @@ mod tests {
         assert_eq!(c.log.page_limit_max, 200);
         assert_eq!(c.log.audit_page_size, 20);
         // 默认配置自洽（逐条落设计 §11.1 的约束）
-        assert!(c.validate().is_ok(), "默认配置须通过校验: {:?}", c.validate());
+        assert!(
+            c.validate().is_ok(),
+            "默认配置须通过校验: {:?}",
+            c.validate()
+        );
         // 读通道 URL 路径与本 crate 的 LATEST_PATH 常量同源
         assert!(DEFAULT_CHANNEL_URL.ends_with(crate::frame::LATEST_PATH));
         assert!(DEFAULT_CONTROL_BASE_URL.ends_with(":9811"));
@@ -711,12 +737,20 @@ mod tests {
             bind_addr: "0.0.0.0:9810".to_string(),
             ..Default::default()
         };
-        assert!(bad_read.validate().unwrap_err().to_string().contains("回环"));
+        assert!(bad_read
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("回环"));
         let bad_control = DisplayConfig {
             control_bind_addr: "0.0.0.0:9811".to_string(),
             ..Default::default()
         };
-        assert!(bad_control.validate().unwrap_err().to_string().contains("回环"));
+        assert!(bad_control
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("回环"));
     }
 
     /// PL-4 回环判据必须**真正解析 host:port**：旧的 `starts_with("127.0.0.1:")`
@@ -725,7 +759,12 @@ mod tests {
     fn loopback_check_parses_host_and_port_not_prefix_match() {
         let err = |c: DisplayConfig| c.validate().unwrap_err().to_string();
         // 反例：前缀对但端口非法
-        for bad in ["127.0.0.1:0", "127.0.0.1:notaport", "127.0.0.1:", "127.0.0.1:65536"] {
+        for bad in [
+            "127.0.0.1:0",
+            "127.0.0.1:notaport",
+            "127.0.0.1:",
+            "127.0.0.1:65536",
+        ] {
             let c = DisplayConfig {
                 bind_addr: bad.to_string(),
                 ..Default::default()
@@ -747,7 +786,11 @@ mod tests {
                 bind_addr: good.to_string(),
                 ..Default::default()
             };
-            assert!(c.validate().is_ok(), "合法回环 `{good}` 须放行: {:?}", c.validate());
+            assert!(
+                c.validate().is_ok(),
+                "合法回环 `{good}` 须放行: {:?}",
+                c.validate()
+            );
         }
         // 同端点不同写法（前导 0）必须判为相同
         let c = DisplayConfig {
@@ -763,7 +806,8 @@ mod tests {
     #[test]
     fn log_limits_partial_deserialize_uses_defaults() {
         // 现场 yaml 仅写 log.live_ring → 其余取默认
-        let json = r#"{"enabled":true,"control_bind_addr":"127.0.0.1:9811","log":{"live_ring":512}}"#;
+        let json =
+            r#"{"enabled":true,"control_bind_addr":"127.0.0.1:9811","log":{"live_ring":512}}"#;
         let c: DisplayConfig = serde_json::from_str(json).unwrap();
         assert!(c.enabled);
         assert_eq!(c.log.live_ring, 512);
@@ -785,13 +829,22 @@ mod tests {
         assert_eq!(c.log.max_lines, 1000);
         // 序列化输出同样用设计键名（不能被改回 ring_capacity）
         let out = serde_json::to_string(&c).unwrap();
-        assert!(out.contains("\"live_ring\":321"), "编码须用 live_ring：{out}");
-        assert!(!out.contains("ring_capacity"), "旧键名不得再出现在线格式：{out}");
+        assert!(
+            out.contains("\"live_ring\":321"),
+            "编码须用 live_ring：{out}"
+        );
+        assert!(
+            !out.contains("ring_capacity"),
+            "旧键名不得再出现在线格式：{out}"
+        );
         // 旧键名 `ring_capacity` 属未知键 → 被忽略，取默认 2000（正是「静默失效」的机理，
         // 此处显式固化该机理，防止有人"顺手"加回 alias 而掩盖设计键名）
         let legacy = r#"{"log":{"ring_capacity":321}}"#;
         let c2: DisplayConfig = serde_json::from_str(legacy).unwrap();
-        assert_eq!(c2.log.live_ring, 2000, "旧键名不得生效（否则双键名混淆真源）");
+        assert_eq!(
+            c2.log.live_ring, 2000,
+            "旧键名不得生效（否则双键名混淆真源）"
+        );
     }
 
     /// 设计 §4.9 的 `alarm_page_size` 键名与默认值（F7「items ≤10」的配置源）。
@@ -806,7 +859,11 @@ mod tests {
             alarm_page_size: 0,
             ..Default::default()
         };
-        assert!(bad.validate().unwrap_err().to_string().contains("alarm_page_size"));
+        assert!(bad
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("alarm_page_size"));
     }
 
     /// validate 的每一项：正例放行 + 越界反例拒绝（设计 §4.9 新增项逐条）。
@@ -875,7 +932,10 @@ mod tests {
         // ③ live_ring >= 100（旧实现完全缺失该约束）
         let mut small_ring = DisplayConfig::default();
         small_ring.log.live_ring = 99;
-        assert!(err(small_ring).contains("live_ring"), "live_ring=99 必须拒绝");
+        assert!(
+            err(small_ring).contains("live_ring"),
+            "live_ring=99 必须拒绝"
+        );
         let mut ok_ring = DisplayConfig::default();
         ok_ring.log.live_ring = MIN_LIVE_RING;
         assert!(ok_ring.validate().is_ok(), "live_ring=100 须放行");
@@ -1027,6 +1087,10 @@ mod tests {
         assert_eq!(c.log.max_files, 5);
         assert_eq!(c.log.max_lines, 50_000);
         assert_eq!(c.log.live_ring, 2000);
-        assert!(c.validate().is_ok(), "设计 §4.9 样例配置须自洽: {:?}", c.validate());
+        assert!(
+            c.validate().is_ok(),
+            "设计 §4.9 样例配置须自洽: {:?}",
+            c.validate()
+        );
     }
 }

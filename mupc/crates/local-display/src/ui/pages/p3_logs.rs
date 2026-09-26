@@ -265,7 +265,8 @@ pub(crate) const LEVEL_CHIP_W: i32 =
     (Dimens::CONTENT_W - filters::CTRL_X - (LEVEL_COLS as i32 - 1) * Dimens::GAP_MIN)
         / LEVEL_COLS as i32;
 /// 级别 chip 组容器宽。
-const LEVEL_BOX_W: i32 = LEVEL_COLS as i32 * LEVEL_CHIP_W + (LEVEL_COLS as i32 - 1) * Dimens::GAP_MIN;
+const LEVEL_BOX_W: i32 =
+    LEVEL_COLS as i32 * LEVEL_CHIP_W + (LEVEL_COLS as i32 - 1) * Dimens::GAP_MIN;
 /// 模块维度名行高（**LG3**：维度名独占一行）。
 const MODULE_LABEL_H: i32 = TextSlot::SectionTitle.px() as i32;
 /// 模块 chip 网格列数（§6.3 ② 的"保守 8 项/行"；**LG3** 的推导保证 ≤51 项 = 7 行）。
@@ -298,7 +299,8 @@ const FOOTER_H: i32 = TABLE_HEAD_H;
 /// 只读说明行高（§6.3「不支持导出」节：列表区底部固定一行 36 px）。
 const NOTE_H: i32 = TABLE_HEAD_H;
 /// 空态高（与 `components.rs::EmptyState` 的构件算式**逐项一致**：图标 64 + 缝 + 文字行）。
-const EMPTY_H: i32 = Dimens::ICON_LG + Dimens::GAP_MIN + TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN;
+const EMPTY_H: i32 =
+    Dimens::ICON_LG + Dimens::GAP_MIN + TextSlot::SectionTitle.px() as i32 + Dimens::GAP_MIN;
 /// 不完整态（**LG9**）占位高 —— 取 [`EMPTY_H`]：单行中性文案垂直居中于同一块面积，
 /// 空态 / 不完整态切换时**其下的说明行不跳动**（避免"态切换 = 版面抖动"）。
 const INCOMPLETE_H: i32 = EMPTY_H;
@@ -388,9 +390,7 @@ const _: () = assert!(MODULE_BOX_W == Dimens::CONTENT_W);
 /// 编译期自证（**LG3**）：`MODULE_COLS` 列 × `MODULE_CHIP_W` 不小于 chip 最小宽 96。
 const _: () = assert!(MODULE_CHIP_W >= Dimens::CHIP_MIN_W);
 /// 编译期自证（**LG3 / §6.3 ②**）：契约上限的项数（「全部」+ 50）在 `MODULE_ROWS_MAX` 行内装得下。
-const _: () = assert!(
-    MODULE_ITEMS_MAX.div_ceil(MODULE_COLS) <= MODULE_ROWS_MAX
-);
+const _: () = assert!(MODULE_ITEMS_MAX.div_ceil(MODULE_COLS) <= MODULE_ROWS_MAX);
 /// 编译期自证：行内四列互不重叠且消息列非空。
 const _: () = assert!(ROW_MSG_W > 0);
 const _: () = assert!(ROW_MODULE_X + ROW_MODULE_W < ROW_MSG_X);
@@ -861,12 +861,7 @@ impl Row {
         obj.set_pos(0, index as i32 * Dimens::ROW_LOG_H);
 
         // 级别色块（先挂透明样式建对象，再把级别样式经 `set_style_index` 挂上 ⇒ 样式唯一）。
-        let level_block = decor(
-            &obj,
-            ROW_LEVEL_W,
-            ROW_LEVEL_H,
-            &theme::transparent(),
-        )?;
+        let level_block = decor(&obj, ROW_LEVEL_W, ROW_LEVEL_H, &theme::transparent())?;
         level_block.set_pos(ROW_LEVEL_X, ROW_LEVEL_Y);
         let level_style = Cell::new(usize::MAX);
         let level_color = Cell::new(level_color(LogLevel::Error));
@@ -941,7 +936,10 @@ impl Row {
             self.module.obj(),
             self.message.obj(),
         ];
-        parts.iter().filter(|o| o.has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE)).count()
+        parts
+            .iter()
+            .filter(|o| o.has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE))
+            .count()
     }
 }
 
@@ -1106,7 +1104,10 @@ impl Core {
         for t in [&self.channel_ok, &self.channel_down] {
             t.set_pos(CHANNEL_TEXT_X, text_y);
         }
-        show_only(&[&self.dot_ok, &self.dot_down], Some(if connected { 0 } else { 1 }));
+        show_only(
+            &[&self.dot_ok, &self.dot_down],
+            Some(if connected { 0 } else { 1 }),
+        );
         show_only(
             &[self.channel_ok.obj(), self.channel_down.obj()],
             Some(if connected { 0 } else { 1 }),
@@ -1149,7 +1150,11 @@ impl Core {
             ListView::Incomplete => INCOMPLETE_H,
         };
         let list_h = shown as i32 * Dimens::ROW_LOG_H
-            + if view == ListView::Rows { FOOTER_H } else { zero_h }
+            + if view == ListView::Rows {
+                FOOTER_H
+            } else {
+                zero_h
+            }
             + NOTE_H;
         self.list_box.set_size(Dimens::CONTENT_W, list_h);
         // 底部状态行（无行时不显；**LG7**）/ 只读说明行（**常驻**）。
@@ -1174,8 +1179,10 @@ impl Core {
                 ListView::Empty => EMPTY_H,
                 ListView::Incomplete => INCOMPLETE_H,
             };
-        self.note
-            .set_pos(0, note_y + theme::center_offset(NOTE_H, TextSlot::Body.px() as i32));
+        self.note.set_pos(
+            0,
+            note_y + theme::center_offset(NOTE_H, TextSlot::Body.px() as i32),
+        );
         self.empty.set_pos(0, 0);
         // 中性文案垂直居中于 `INCOMPLETE_H` 块（水平居中由 `center()` 的**对齐**语义承担，
         // 布局重算时自动跟随 —— 同 `components.rs::EmptyState` 的做法）。
@@ -1190,8 +1197,7 @@ impl Core {
         // 故其 y = 带顶 + (带高 − 按钮高)。**显式用该常量**而不是手写 `+ GAP_MIN`
         // —— 否则常量会退化成"只在注释里存在"的装饰（B2c-2 验证整改 M2）。
         let band_top = y_list + list_h;
-        self.back
-            .set_pos(BACK_X, band_top + (BACK_BAND_H - BACK_W));
+        self.back.set_pos(BACK_X, band_top + (BACK_BAND_H - BACK_W));
         set_visible(&self.back, view == ListView::Rows);
     }
 
@@ -1209,7 +1215,12 @@ impl Core {
         {
             let mut rows = self.rows.borrow_mut();
             while rows.len() < want {
-                match Row::new(&self.list_box, rows.len(), &self.level_styles, &self.stripe_styles) {
+                match Row::new(
+                    &self.list_box,
+                    rows.len(),
+                    &self.level_styles,
+                    &self.stripe_styles,
+                ) {
                     Ok(r) => rows.push(r),
                     Err(_) => break, // 建不出即停（**不 panic**）
                 }
@@ -1485,8 +1496,16 @@ impl P3LogsPage {
             CHANNEL_DOT,
             &solid_style(channel_dot_color(true), theme::Radius::CHIP),
         )?;
-        let channel_ok = text_label(&root, channel_text(true), TextSlot::Body, channel_text_color(true))?;
-        channel_ok.set_size(Dimens::CONTENT_W - CHANNEL_TEXT_X, TextSlot::Body.px() as i32);
+        let channel_ok = text_label(
+            &root,
+            channel_text(true),
+            TextSlot::Body,
+            channel_text_color(true),
+        )?;
+        channel_ok.set_size(
+            Dimens::CONTENT_W - CHANNEL_TEXT_X,
+            TextSlot::Body.px() as i32,
+        );
         channel_ok.set_long_mode(LongMode::DOTS);
         let dot_down = decor(
             &root,
@@ -1494,17 +1513,34 @@ impl P3LogsPage {
             CHANNEL_DOT,
             &solid_style(channel_dot_color(false), theme::Radius::CHIP),
         )?;
-        let channel_down =
-            text_label(&root, channel_text(false), TextSlot::Body, channel_text_color(false))?;
-        channel_down.set_size(Dimens::CONTENT_W - CHANNEL_TEXT_X, TextSlot::Body.px() as i32);
+        let channel_down = text_label(
+            &root,
+            channel_text(false),
+            TextSlot::Body,
+            channel_text_color(false),
+        )?;
+        channel_down.set_size(
+            Dimens::CONTENT_W - CHANNEL_TEXT_X,
+            TextSlot::Body.px() as i32,
+        );
         channel_down.set_long_mode(LongMode::DOTS);
 
         // ── ② 筛选区：级别（4 项一排）+ 模块（换行网格，首位「全部」）+ 时间范围（共享件）──
-        let level_label = text_label(&root, TEXT_LEVEL_LABEL, TextSlot::Label, Palette::TEXT_SECOND)?;
+        let level_label = text_label(
+            &root,
+            TEXT_LEVEL_LABEL,
+            TextSlot::Label,
+            Palette::TEXT_SECOND,
+        )?;
         level_label.set_size(filters::LABEL_W, TextSlot::Label.px() as i32);
         level_label.set_long_mode(LongMode::DOTS);
         let level_box = layout_box(&root, LEVEL_BOX_W, LEVEL_ROW_H)?;
-        let module_label = text_label(&root, TEXT_MODULE_LABEL, TextSlot::Label, Palette::TEXT_SECOND)?;
+        let module_label = text_label(
+            &root,
+            TEXT_MODULE_LABEL,
+            TextSlot::Label,
+            Palette::TEXT_SECOND,
+        )?;
         module_label.set_size(filters::LABEL_W, TextSlot::Label.px() as i32);
         module_label.set_long_mode(LongMode::DOTS);
         let module_box = layout_box(&root, MODULE_BOX_W, Dimens::CHIP_H)?;
@@ -1536,24 +1572,41 @@ impl P3LogsPage {
             let l = text_label(&head, t, TextSlot::Body, Palette::TEXT_WEAK)?;
             l.set_size(Dimens::CHIP_MIN_W, TextSlot::Body.px() as i32);
             l.set_long_mode(LongMode::DOTS);
-            l.set_pos(x, theme::center_offset(TABLE_HEAD_H, TextSlot::Body.px() as i32));
+            l.set_pos(
+                x,
+                theme::center_offset(TABLE_HEAD_H, TextSlot::Body.px() as i32),
+            );
             head_cols.push(l);
         }
         let mut head_divs: Vec<Obj> = Vec::with_capacity(head_specs.len() - 1);
         for (x, _) in head_specs.iter().skip(1) {
-            let d = decor(&head, HEAD_DIV_W, HEAD_DIV_H, &theme::card_head_bar(Palette::DIVIDER))?;
+            let d = decor(
+                &head,
+                HEAD_DIV_W,
+                HEAD_DIV_H,
+                &theme::card_head_bar(Palette::DIVIDER),
+            )?;
             d.set_pos(x - TIGHT_GAP, TIGHT_GAP);
             head_divs.push(d);
         }
-        let head_rule = decor(&head, Dimens::CONTENT_W, HEAD_DIV_W, &theme::card_head_bar(Palette::DIVIDER))?;
+        let head_rule = decor(
+            &head,
+            Dimens::CONTENT_W,
+            HEAD_DIV_W,
+            &theme::card_head_bar(Palette::DIVIDER),
+        )?;
         head_rule.set_pos(0, TABLE_HEAD_H - HEAD_DIV_W);
 
         // ── ⑤ 列表区（行池 + 空态 + 状态行 + **常驻**说明行）──
         let list_box = layout_box(&root, Dimens::CONTENT_W, EMPTY_H + NOTE_H)?;
         let empty = Rc::new(EmptyState::new(&list_box, TEXT_EMPTY_ICON, TEXT_EMPTY)?);
         // 超限下的中性文案（**LG9**）：与空态**互斥**，由 `layout()` 按形态显隐。
-        let incomplete =
-            text_label(&list_box, TEXT_INCOMPLETE, TextSlot::Body, Palette::TEXT_SECOND)?;
+        let incomplete = text_label(
+            &list_box,
+            TEXT_INCOMPLETE,
+            TextSlot::Body,
+            Palette::TEXT_SECOND,
+        )?;
         set_visible(incomplete.obj(), false);
         let footer = label(&list_box, TextSlot::Body, Palette::TEXT_WEAK)?;
         footer.set_size(Dimens::CONTENT_W, TextSlot::Body.px() as i32);
@@ -1572,10 +1625,8 @@ impl P3LogsPage {
         back.set_size(BACK_W, BACK_W);
         back.add_style(&theme::control_surface(), StyleSelector::main());
         theme::button(theme::ButtonKind::Text).apply(&back);
-        back.label().set_size(
-            BACK_W - 2 * Dimens::GAP_MIN,
-            BACK_W - 2 * Dimens::GAP_MIN,
-        );
+        back.label()
+            .set_size(BACK_W - 2 * Dimens::GAP_MIN, BACK_W - 2 * Dimens::GAP_MIN);
         back.label().set_long_mode(LongMode::WRAP);
         back.label().set_pos(
             Dimens::GAP_MIN,
@@ -1736,10 +1787,7 @@ impl P3LogsPage {
     /// 通道条两个灯点的**颜色**（应用标记：`(已连接, 断开)`）。
     #[cfg(test)]
     pub(crate) fn channel_dot_colors(&self) -> (Color, Color) {
-        (
-            channel_dot_color(true),
-            channel_dot_color(false),
-        )
+        (channel_dot_color(true), channel_dot_color(false))
     }
 
     /// 通道条断开的文案对象是否在显（LG-07 的"内容仍在"断言用）。
@@ -1757,7 +1805,12 @@ impl P3LogsPage {
     /// 级别 chip 数（恒 4；建失败 ⇒ 0）。
     #[cfg(test)]
     pub(crate) fn level_chip_count(&self) -> usize {
-        self.core.levels.borrow().as_ref().map(|c| c.len()).unwrap_or(0)
+        self.core
+            .levels
+            .borrow()
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0)
     }
 
     /// 第 `i` 个级别 chip 的**当前显示文本**（含选中前缀 `✓ `）。
@@ -1773,7 +1826,12 @@ impl P3LogsPage {
     /// 级别 chip 组的列数（= 4，§6.3 ① 一排四项）。
     #[cfg(test)]
     pub(crate) fn level_chip_columns(&self) -> u32 {
-        self.core.levels.borrow().as_ref().map(|c| c.columns()).unwrap_or(0)
+        self.core
+            .levels
+            .borrow()
+            .as_ref()
+            .map(|c| c.columns())
+            .unwrap_or(0)
     }
 
     /// 当前级别勾选集合。
@@ -1791,7 +1849,12 @@ impl P3LogsPage {
     /// 模块 chip 数（= 「全部」+ 注入项数）。
     #[cfg(test)]
     pub(crate) fn module_chip_count(&self) -> usize {
-        self.core.modules.borrow().as_ref().map(|c| c.len()).unwrap_or(0)
+        self.core
+            .modules
+            .borrow()
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0)
     }
 
     /// 第 `i` 个模块 chip 的当前显示文本。
@@ -1807,7 +1870,12 @@ impl P3LogsPage {
     /// 模块 chip 组的**列数**（§6.3 ② 的 8 项/行）。
     #[cfg(test)]
     pub(crate) fn module_chip_columns(&self) -> u32 {
-        self.core.modules.borrow().as_ref().map(|c| c.columns()).unwrap_or(0)
+        self.core
+            .modules
+            .borrow()
+            .as_ref()
+            .map(|c| c.columns())
+            .unwrap_or(0)
     }
 
     /// 模块 chip 组的**实际体高**（多行 ⇒ 大于 48；**R3 / §6.3 ② 的换行断言**用）。
@@ -1931,7 +1999,12 @@ impl P3LogsPage {
     /// 存活的**行对象**数（**所有权锚定回归锁**：行句柄退化成局部变量 ⇒ 小于池长）。
     #[cfg(test)]
     pub(crate) fn rows_alive(&self) -> usize {
-        self.core.rows.borrow().iter().filter(|r| r.obj.is_alive()).count()
+        self.core
+            .rows
+            .borrow()
+            .iter()
+            .filter(|r| r.obj.is_alive())
+            .count()
     }
 
     /// 第 `i` 行尺寸。
@@ -1956,7 +2029,11 @@ impl P3LogsPage {
     /// 第 `i` 行级别文字。
     #[cfg(test)]
     pub(crate) fn row_level(&self, i: usize) -> Option<String> {
-        self.core.rows.borrow().get(i).and_then(|r| r.level_text.text())
+        self.core
+            .rows
+            .borrow()
+            .get(i)
+            .and_then(|r| r.level_text.text())
     }
 
     /// 第 `i` 行级别色块**应用标记**（实际写入样式的色值）。
@@ -1980,7 +2057,11 @@ impl P3LogsPage {
     /// 第 `i` 行消息列文本。
     #[cfg(test)]
     pub(crate) fn row_message(&self, i: usize) -> Option<String> {
-        self.core.rows.borrow().get(i).and_then(|r| r.message.text())
+        self.core
+            .rows
+            .borrow()
+            .get(i)
+            .and_then(|r| r.message.text())
     }
 
     /// 第 `i` 行级别色块的尺寸（装配断言口径）。
@@ -1992,7 +2073,12 @@ impl P3LogsPage {
     /// **只读回归锁**：行内**可点子对象计数**（恒 `0`）。
     #[cfg(test)]
     pub(crate) fn rows_clickable_parts(&self) -> usize {
-        self.core.rows.borrow().iter().map(|r| r.clickable_parts()).sum()
+        self.core
+            .rows
+            .borrow()
+            .iter()
+            .map(|r| r.clickable_parts())
+            .sum()
     }
 
     /// 列表区形态。
@@ -2089,7 +2175,9 @@ impl P3LogsPage {
     /// 「回到最新」按钮是否**可点**（读 LVGL 的 `CLICKABLE` 真值 —— 正向控制：它必须可点）。
     #[cfg(test)]
     pub(crate) fn back_clickable(&self) -> bool {
-        self.core.back.has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE)
+        self.core
+            .back
+            .has_flag(crate::lvgl::obj::ObjFlag::CLICKABLE)
     }
 
     /// 「回到最新」按钮的尺寸（§6.3：92×92 —— 触摸目标 ≥64 ✓）。
@@ -2302,7 +2390,10 @@ mod tests {
             "任一级别被勾选时 `Trace` 不在查询集合内"
         );
         assert_eq!(selected_levels(&[0]), vec![LogLevel::Error]);
-        assert_eq!(selected_levels(&[3, 0]), vec![LogLevel::Debug, LogLevel::Error]);
+        assert_eq!(
+            selected_levels(&[3, 0]),
+            vec![LogLevel::Debug, LogLevel::Error]
+        );
         // 越界下标丢弃（不 panic）。
         assert!(selected_levels(&[9, 42]).is_empty());
     }
@@ -2321,10 +2412,18 @@ mod tests {
             Some(TEXT_MODULE_INTERCORE),
             "契约示例给的是 `mupc_` 前缀形态（同归一表）"
         );
-        assert_eq!(target_label("GATEWAY"), Some(TEXT_MODULE_GATEWAY), "大小写不敏感");
+        assert_eq!(
+            target_label("GATEWAY"),
+            Some(TEXT_MODULE_GATEWAY),
+            "大小写不敏感"
+        );
         assert_eq!(target_label("audit"), Some(TEXT_MODULE_AUDIT));
         for unknown in ["hplc", "meter_grid", "southd", "ota", "core-bin", ""] {
-            assert_eq!(target_label(unknown), None, "未登记键 ⇒ 不显中文标签（不臆造）");
+            assert_eq!(
+                target_label(unknown),
+                None,
+                "未登记键 ⇒ 不显中文标签（不臆造）"
+            );
         }
         // 表内键唯一（只增不改的前提）。
         let mut keys: Vec<&str> = MODULE_LABELS.iter().map(|(k, _)| *k).collect();
@@ -2374,11 +2473,8 @@ mod tests {
     /// 的旧方案（`opts[2]` 不再以 `...` 开头 ⇒ 第 3 组断言红 —— 见 **LG4 / LG12**）。
     #[test]
     fn module_chip_options_start_with_all_and_are_bounded() {
-        let targets: Vec<String> = vec![
-            "mupc_intercore".into(),
-            "hplc".into(),
-            "meter_grid".into(),
-        ];
+        let targets: Vec<String> =
+            vec!["mupc_intercore".into(), "hplc".into(), "meter_grid".into()];
         let opts = module_options(&targets);
         assert_eq!(opts.len(), targets.len() + 1);
         assert_eq!(opts[0], TEXT_ALL);
@@ -2391,7 +2487,10 @@ mod tests {
             );
             assert!(!o.is_empty());
         }
-        assert_eq!(opts[1], TEXT_MODULE_INTERCORE, "已知键取中文（2 字，恰在预算内）");
+        assert_eq!(
+            opts[1], TEXT_MODULE_INTERCORE,
+            "已知键取中文（2 字，恰在预算内）"
+        );
         // 未登记 / 超长项：**可见省略标记 + 保尾**（区分位在尾部；标记让"不完整"可见）。
         assert_eq!(module_label("hplc"), "hP?C", "归一形态 4 字（> 预算 2）");
         assert_eq!(opts[2], format!("{TEXT_ELLIPSIS}C"));
@@ -2448,13 +2547,19 @@ mod tests {
     #[test]
     fn selected_targets_skips_all_chip() {
         let targets: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        assert!(selected_targets(&[0], &targets).is_empty(), "「全部」不产键");
+        assert!(
+            selected_targets(&[0], &targets).is_empty(),
+            "「全部」不产键"
+        );
         assert_eq!(selected_targets(&[0, 2], &targets), vec!["b".to_string()]);
         assert_eq!(
             selected_targets(&[3, 1], &targets),
             vec!["c".to_string(), "a".to_string()]
         );
-        assert!(selected_targets(&[9], &targets).is_empty(), "越界丢弃（不 panic）");
+        assert!(
+            selected_targets(&[9], &targets).is_empty(),
+            "越界丢弃（不 panic）"
+        );
     }
 
     // ── 查询组装 ───────────────────────────────────────────────────────────
@@ -2574,7 +2679,11 @@ mod tests {
     #[test]
     fn module_grid_rows_are_bounded() {
         assert_eq!(module_grid_h(0), 0);
-        assert_eq!(module_grid_h(1), Dimens::CHIP_H, "仅 1 行时高 48 px（§6.3 线框）");
+        assert_eq!(
+            module_grid_h(1),
+            Dimens::CHIP_H,
+            "仅 1 行时高 48 px（§6.3 线框）"
+        );
         assert_eq!(module_grid_h(MODULE_COLS as usize), Dimens::CHIP_H);
         assert_eq!(
             module_grid_h(MODULE_COLS as usize + 1),
@@ -2587,7 +2696,9 @@ mod tests {
                 rows <= MODULE_ROWS_MAX,
                 "{items} 项需 {rows} 行 > 上限 {MODULE_ROWS_MAX}"
             );
-            assert!(module_grid_h(items) <= 7 * (Dimens::CHIP_H + Dimens::GAP_MIN) - Dimens::GAP_MIN);
+            assert!(
+                module_grid_h(items) <= 7 * (Dimens::CHIP_H + Dimens::GAP_MIN) - Dimens::GAP_MIN
+            );
         }
         // 上限口径：契约「≤50 模块」+「全部」。
         assert_eq!(MODULE_ITEMS_MAX, 51);
@@ -2613,7 +2724,10 @@ mod tests {
         assert!(row_max <= measured);
         assert!(row_max < page_limit, "LG6：本页上限低于契约的请求上限");
         assert!(coexist < row_max);
-        assert!(row_max >= 20, "至少装得下 P5 的同一页条数（两列表页口径一致）");
+        assert!(
+            row_max >= 20,
+            "至少装得下 P5 的同一页条数（两列表页口径一致）"
+        );
         // 实测余量：`ROW_MAX` 对单页挂死点（44）留 ≥50%；共存预算对挂死点（18）留 ≥33%。
         assert!(row_max * 2 <= measured, "单页余量 < 50%");
         assert!(coexist * 3 <= 2 * 18, "共存余量 < 33%");

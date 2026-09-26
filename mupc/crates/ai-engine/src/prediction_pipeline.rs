@@ -176,10 +176,7 @@ impl PredictionPipeline {
                 .unwrap_or_else(|| Path::new("/etc/mupc/models/error_correction.rknn"));
             match RknnRuntime::new(ec_model_path, None) {
                 Ok(rt) => {
-                    tracing::info!(
-                        "误差修正 Runtime 已创建: path={}",
-                        ec_model_path.display()
-                    );
+                    tracing::info!("误差修正 Runtime 已创建: path={}", ec_model_path.display());
                     Some(rt)
                 }
                 Err(e) => {
@@ -206,10 +203,10 @@ impl PredictionPipeline {
 
         // --- 初始等级确定（R2 扩展：BiLSTM + 误差修正，v3.0: VMD 受 input_features 约束） ---
         let initial_level = {
-            let bilstm_go = enhancement_config.bilstm.enabled
-                && enhancement_config.bilstm.gate_passed;
-            let ec_enabled = enhancement_config.error_correction.enabled
-                && error_correction_runtime.is_some();
+            let bilstm_go =
+                enhancement_config.bilstm.enabled && enhancement_config.bilstm.gate_passed;
+            let ec_enabled =
+                enhancement_config.error_correction.enabled && error_correction_runtime.is_some();
             let vmd_enabled = vmd_pv.is_some() && vmd_compatible;
 
             if bilstm_go && vmd_enabled && ec_enabled {
@@ -384,35 +381,33 @@ impl PredictionPipeline {
             }
 
             // --- Level 2: VMD + LSTM/Attention ---
-            EnhancementLevel::VmdAttention => {
-                match self.execute_vmd_attention().await {
-                    Ok(r) => {
-                        let mut health = self.health.write().await;
-                        if r.vmd_degraded {
-                            health.on_failure_vmd();
-                            if health.vmd_consecutive_failures >= 3 {
-                                tracing::warn!(
-                                    "VMD 连续 {} 次内部失败/未收敛，降级至 AttentionOnly",
-                                    health.vmd_consecutive_failures
-                                );
-                                health.current_level = EnhancementLevel::AttentionOnly;
-                            }
-                        } else {
-                            health.on_success_vmd();
-                            self.try_promote(&mut health);
-                        }
-                        Ok(r)
-                    }
-                    Err(e) => {
-                        tracing::warn!("VMD+Attention 失败: {}, 降级至 Attention", e);
-                        let mut health = self.health.write().await;
+            EnhancementLevel::VmdAttention => match self.execute_vmd_attention().await {
+                Ok(r) => {
+                    let mut health = self.health.write().await;
+                    if r.vmd_degraded {
                         health.on_failure_vmd();
-                        health.current_level = EnhancementLevel::AttentionOnly;
-                        drop(health);
-                        self.execute_attention_only().await
+                        if health.vmd_consecutive_failures >= 3 {
+                            tracing::warn!(
+                                "VMD 连续 {} 次内部失败/未收敛，降级至 AttentionOnly",
+                                health.vmd_consecutive_failures
+                            );
+                            health.current_level = EnhancementLevel::AttentionOnly;
+                        }
+                    } else {
+                        health.on_success_vmd();
+                        self.try_promote(&mut health);
                     }
+                    Ok(r)
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("VMD+Attention 失败: {}, 降级至 Attention", e);
+                    let mut health = self.health.write().await;
+                    health.on_failure_vmd();
+                    health.current_level = EnhancementLevel::AttentionOnly;
+                    drop(health);
+                    self.execute_attention_only().await
+                }
+            },
 
             // --- Level 3: Attention Only ---
             EnhancementLevel::AttentionOnly => match self.execute_attention_only().await {
@@ -571,9 +566,7 @@ impl PredictionPipeline {
     ///
     /// Level 0 Go 路径。先执行主预测，再执行误差修正。
     /// 误差修正依赖主预测结果，必须串行执行。
-    async fn execute_full_with_correction(
-        &self,
-    ) -> Result<EnhancedForecastResult, AiEngineError> {
+    async fn execute_full_with_correction(&self) -> Result<EnhancedForecastResult, AiEngineError> {
         // Step 1: 主预测（使用 BiLSTM 或单向 LSTM，取决于配置）
         let mut result = if self.config.bilstm.enabled && self.config.bilstm.gate_passed {
             self.execute_bilstm_vmd_attention().await?
@@ -606,9 +599,7 @@ impl PredictionPipeline {
             // v3.1 P5 修复：EC 未配置或 Runtime 已卸载时静默降级，避免升级-降级振荡
             result.error_correction_applied = false;
             result.enhancement_level = EnhancementLevel::BiLstmVmdAttention;
-            tracing::warn!(
-                "误差修正未配置或 Runtime 不可用，静默降级至 BiLstmVmdAttention，"
-            );
+            tracing::warn!("误差修正未配置或 Runtime 不可用，静默降级至 BiLstmVmdAttention，");
             let mut health = self.health.write().await;
             health.current_level = EnhancementLevel::BiLstmVmdAttention;
             health.ec_consecutive_successes = 0;
@@ -661,11 +652,12 @@ impl PredictionPipeline {
                     capacity: window_size,
                 });
             }
-            buf.get_window(window_size)
-                .ok_or_else(|| AiEngineError::ResidualBufferInsufficient {
+            buf.get_window(window_size).ok_or_else(|| {
+                AiEngineError::ResidualBufferInsufficient {
                     filled: buf.len(),
                     capacity: window_size,
-                })?
+                }
+            })?
         } else if zero_init {
             vec![0.0_f32; window_size]
         } else {
@@ -683,11 +675,12 @@ impl PredictionPipeline {
                     capacity: window_size,
                 });
             }
-            buf.get_window(window_size)
-                .ok_or_else(|| AiEngineError::ResidualBufferInsufficient {
+            buf.get_window(window_size).ok_or_else(|| {
+                AiEngineError::ResidualBufferInsufficient {
                     filled: buf.len(),
                     capacity: window_size,
-                })?
+                }
+            })?
         } else if zero_init {
             vec![0.0_f32; window_size]
         } else {
@@ -854,9 +847,18 @@ impl PredictionPipeline {
                 // 构建 QuantilePrediction 列表 (15步 × 3 分位数)
                 let mut quantiles: Vec<QuantilePrediction> = Vec::with_capacity(45);
                 for i in 0..15 {
-                    quantiles.push(QuantilePrediction { quantile: 0.10, value: predictions[45 + i] }); // Load P10
-                    quantiles.push(QuantilePrediction { quantile: 0.50, value: predictions[60 + i] }); // Load P50
-                    quantiles.push(QuantilePrediction { quantile: 0.90, value: predictions[75 + i] }); // Load P90
+                    quantiles.push(QuantilePrediction {
+                        quantile: 0.10,
+                        value: predictions[45 + i],
+                    }); // Load P10
+                    quantiles.push(QuantilePrediction {
+                        quantile: 0.50,
+                        value: predictions[60 + i],
+                    }); // Load P50
+                    quantiles.push(QuantilePrediction {
+                        quantile: 0.90,
+                        value: predictions[75 + i],
+                    }); // Load P90
                 }
 
                 let p50_first = *predictions.get(60).unwrap_or(&0.0);
@@ -882,9 +884,18 @@ impl PredictionPipeline {
                     let p50 = *predictions.get(15 + i).unwrap_or(&0.0);
                     let p90 = *predictions.get(30 + i).unwrap_or(&p50);
                     let p10 = (p50 * 0.7).max(0.0); // 启发式 P10
-                    quantiles.push(QuantilePrediction { quantile: 0.10, value: p10 });
-                    quantiles.push(QuantilePrediction { quantile: 0.50, value: p50 });
-                    quantiles.push(QuantilePrediction { quantile: 0.90, value: p90 });
+                    quantiles.push(QuantilePrediction {
+                        quantile: 0.10,
+                        value: p10,
+                    });
+                    quantiles.push(QuantilePrediction {
+                        quantile: 0.50,
+                        value: p50,
+                    });
+                    quantiles.push(QuantilePrediction {
+                        quantile: 0.90,
+                        value: p90,
+                    });
                 }
 
                 let p50_first = *predictions.get(15).unwrap_or(&base_load);
@@ -925,7 +936,9 @@ impl PredictionPipeline {
     /// erfc 近似
     fn erfc_static(x: f32) -> f32 {
         let abs_x = x.abs();
-        if abs_x > 8.0 { return 0.0; }
+        if abs_x > 8.0 {
+            return 0.0;
+        }
         let exp_term = (-x * x).exp();
         let denom = std::f32::consts::PI * abs_x + (std::f32::consts::PI * x * x + 4.0).sqrt();
         exp_term / denom

@@ -260,7 +260,8 @@ const ROW_A_TEXT_Y: i32 = theme::center_offset(
 /// 行型 A 控件 y（行内垂直居中）。
 const ROW_A_CTRL_Y: i32 = theme::center_offset(ROW_A_H, Dimens::STEPPER_H);
 /// 行型 B 高（UI §6.2「行型 B … 120 px」；实算 122，见 **PD5**）。
-const ROW_B_H: i32 = Dimens::GAP_MIN + TextSlot::Label.px() as i32 + Dimens::GAP_MIN + Dimens::STEPPER_H;
+const ROW_B_H: i32 =
+    Dimens::GAP_MIN + TextSlot::Label.px() as i32 + Dimens::GAP_MIN + Dimens::STEPPER_H;
 /// 行型 B 字段名 y（UI §6.2「字段名 26 px (x36, y+16)」）。
 const ROW_B_LABEL_Y: i32 = Dimens::GAP_MIN;
 /// 行型 B 控件 y（字段名行 + 同组缝）。
@@ -862,11 +863,7 @@ impl FieldControl {
         match self {
             Self::Ipv4(s) => s.set_octets(octets_of_value(kind, v)),
             Self::Int(s) => s.set_value(int_of(v).unwrap_or_default()),
-            Self::Enum {
-                ctrl,
-                start,
-                shown,
-            } => {
+            Self::Enum { ctrl, start, shown } => {
                 if let Some(local) = enum_index(kind, v)
                     .checked_sub(*start)
                     .filter(|l| *l < *shown)
@@ -952,7 +949,12 @@ impl FieldRow {
             Some(r) => {
                 self.error_bar.set_hidden(false);
                 set_style_index(self.label.obj(), &self.label_styles, &self.label_style, 1);
-                set_style_index(self.status.obj(), &self.status_styles, &self.status_style, 1);
+                set_style_index(
+                    self.status.obj(),
+                    &self.status_styles,
+                    &self.status_style,
+                    1,
+                );
                 self.status.set_text(r);
                 set_visible(self.status.obj(), true);
                 if let Some(n) = &self.note {
@@ -962,7 +964,12 @@ impl FieldRow {
             None => {
                 self.error_bar.set_hidden(true);
                 set_style_index(self.label.obj(), &self.label_styles, &self.label_style, 0);
-                set_style_index(self.status.obj(), &self.status_styles, &self.status_style, 0);
+                set_style_index(
+                    self.status.obj(),
+                    &self.status_styles,
+                    &self.status_style,
+                    0,
+                );
                 // 无错误 ⇒ 恢复"提示 / 只读说明 / 都不显示"三取一。
                 if let Some(n) = &self.note {
                     n.set_text(TEXT_READONLY_NOTE);
@@ -1221,7 +1228,8 @@ impl Core {
     /// 刷新操作条（保存 / 恢复默认值的可用态 + 保存文案）。
     fn refresh_actions(&self) {
         let submitting = self.submitting.get();
-        self.save.set_text(if submitting { TEXT_SAVING } else { TEXT_SAVE });
+        self.save
+            .set_text(if submitting { TEXT_SAVING } else { TEXT_SAVE });
         let usable = self.available.get() && !submitting;
         // 无改动 / 有字段错误 ⇒ 保存置灰（EDGE-10 / CF-02 的"保存按钮置灰"）。
         let can_save = usable && self.is_dirty() && self.errors.borrow().is_empty();
@@ -1338,7 +1346,12 @@ fn build_card(
     status_styles: &[Rc<Style>; 2],
     invalid: &mut BTreeSet<String>,
 ) -> Result<GroupCard, LvglError> {
-    let obj = decor(&core.scroll, Dimens::CONTENT_W, card_height(group), &theme::card())?;
+    let obj = decor(
+        &core.scroll,
+        Dimens::CONTENT_W,
+        card_height(group),
+        &theme::card(),
+    )?;
     obj.set_pos(0, y);
 
     // 卡头：4 px 强调竖条 + 分组名 28 px（UI §6.2「卡头 44 px」）。
@@ -1419,7 +1432,12 @@ fn build_row(
     let mut hint = range_hint(&f.kind, f.unit.as_deref());
 
     // 字段名。
-    let name_l = text_label(card, &field_label_text(f), TextSlot::Label, Palette::TEXT_PRIMARY)?;
+    let name_l = text_label(
+        card,
+        &field_label_text(f),
+        TextSlot::Label,
+        Palette::TEXT_PRIMARY,
+    )?;
     let label_y = if ipv4 {
         y + ROW_B_LABEL_Y
     } else {
@@ -1474,8 +1492,7 @@ fn build_row(
         ConfigKind::U16 { .. } | ConfigKind::U64 { .. } => {
             let (lo, hi, step) = int_bounds(&f.kind);
             let s = Rc::new(Stepper::new(card, lo, hi, initial_int(f), step)?);
-            s.obj()
-                .set_pos(INNER_W - STEPPER_TOTAL_W, y + ROW_A_CTRL_Y);
+            s.obj().set_pos(INNER_W - STEPPER_TOTAL_W, y + ROW_A_CTRL_Y);
             FieldControl::Int(s)
         }
         ConfigKind::Enum { options } => {
@@ -1494,7 +1511,8 @@ fn build_row(
                 enum_width(view.options.len()),
                 view.selected,
             )?);
-            s.obj().set_pos(INNER_W - enum_width(view.options.len()), y + ROW_A_CTRL_Y);
+            s.obj()
+                .set_pos(INNER_W - enum_width(view.options.len()), y + ROW_A_CTRL_Y);
             if let Some(hidden) = view.hidden_note {
                 // 截断这一降级必须**上屏**（不得与"选项本来就这么几个"不可分）。
                 hint = Some(hidden);
@@ -1638,11 +1656,9 @@ fn clamp_index(i: usize, count: usize) -> usize {
 /// 二次校验打回的中间值（**可见失败**，非静默写入）。
 fn int_bounds(kind: &ConfigKind) -> (i64, i64, i64) {
     match kind {
-        ConfigKind::U16 { min, max, step } => (
-            i64::from(*min),
-            i64::from(*max),
-            int_step(i64::from(*step)),
-        ),
+        ConfigKind::U16 { min, max, step } => {
+            (i64::from(*min), i64::from(*max), int_step(i64::from(*step)))
+        }
         ConfigKind::U64 { min, max, step } => (
             i64::try_from(*min).unwrap_or(i64::MAX),
             i64::try_from(*max).unwrap_or(i64::MAX),
@@ -1713,7 +1729,10 @@ impl P2ConfigPage {
         let scroll = ScrollContainer::create(&root)?;
         scroll.set_size(Dimens::CONTENT_W, SCROLL_H);
         scroll.set_pos(0, 0);
-        scroll.add_style(&theme::transparent(), crate::lvgl::style::StyleSelector::main());
+        scroll.add_style(
+            &theme::transparent(),
+            crate::lvgl::style::StyleSelector::main(),
+        );
 
         // 固定操作条（不随滚动；UI §6.2 线框 `Y624`）。
         //
@@ -1790,7 +1809,10 @@ impl P2ConfigPage {
                 let Some(c) = w.upgrade() else { return };
                 if let Err(e) = open_dialog(&c, DialogKind::Reset) {
                     use std::io::Write;
-                    let _ = writeln!(std::io::stderr(), "P2 配置页：打开恢复默认值确认弹层失败：{e}");
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "P2 配置页：打开恢复默认值确认弹层失败：{e}"
+                    );
                 }
             });
         }
@@ -1921,11 +1943,8 @@ impl P2ConfigPage {
             // `full_rewrite` 的信息量更大（数据损失提示），此时 `set_config` 已弹警示 Toast
             // —— 不再叠加"保存成功"（UI §7.2：同一时刻仅 1 条）。见 PD10。
             if !full_rewrite {
-                self.core.show_toast(
-                    ToastTone::Success,
-                    ICON_OK,
-                    &success_toast_text(resp),
-                )?;
+                self.core
+                    .show_toast(ToastTone::Success, ICON_OK, &success_toast_text(resp))?;
             }
         } else {
             self.core.apply_field_errors(&resp.field_errors);
@@ -2031,7 +2050,11 @@ impl P2ConfigPage {
 
     /// 第 `gi` 组的分组名。
     pub fn group_label(&self, gi: usize) -> Option<String> {
-        self.core.cards.borrow().get(gi).and_then(|c| c.label.text())
+        self.core
+            .cards
+            .borrow()
+            .get(gi)
+            .and_then(|c| c.label.text())
     }
 
     /// 第 `gi` 组的字段数。
@@ -2083,14 +2106,12 @@ impl P2ConfigPage {
     /// **M5 取证**：本文件外零引用 ⇒ 收成测试期读回口径（同 [`P2ConfigPage::field_disabled`]）。
     #[cfg(test)]
     pub(crate) fn field_status_visible(&self, key: &str) -> Option<bool> {
-        self.core
-            .with_row(key, |r| !r.status.obj().is_hidden())
+        self.core.with_row(key, |r| !r.status.obj().is_hidden())
     }
 
     /// 某字段的错误竖条是否显形（**字段级标红**的读回口径）。
     pub fn field_error_visible(&self, key: &str) -> Option<bool> {
-        self.core
-            .with_row(key, |r| !r.error_bar.is_hidden())
+        self.core.with_row(key, |r| !r.error_bar.is_hidden())
     }
 
     /// 保存按钮。
@@ -2110,12 +2131,18 @@ impl P2ConfigPage {
 
     /// 保存按钮当前是否禁用（读自 LVGL 状态位）。
     pub fn save_disabled(&self) -> bool {
-        widgets::has_state(self.core.save.button().obj(), crate::lvgl::style::State::DISABLED)
+        widgets::has_state(
+            self.core.save.button().obj(),
+            crate::lvgl::style::State::DISABLED,
+        )
     }
 
     /// 恢复默认值按钮当前是否禁用。
     pub fn reset_disabled(&self) -> bool {
-        widgets::has_state(self.core.reset.button().obj(), crate::lvgl::style::State::DISABLED)
+        widgets::has_state(
+            self.core.reset.button().obj(),
+            crate::lvgl::style::State::DISABLED,
+        )
     }
 
     /// 当前 Toast 文案（无 Toast ⇒ `None`）。
@@ -2444,17 +2471,29 @@ mod tests {
         // ① **没碰过** ⇒ 不脏、草稿为空（**注入/渲染差异永不置脏**）。
         assert!(!is_dirty(&v, &cur, &touched(&[])), "值有差异 ≠ 用户改过");
         assert!(draft_patch(&v, &cur, &touched(&[])).changes.is_empty());
-        assert!(save_details(&v, &cur, &touched(&[])).is_empty(), "明细也不得凭空冒出一行");
+        assert!(
+            save_details(&v, &cur, &touched(&[])).is_empty(),
+            "明细也不得凭空冒出一行"
+        );
 
         // ② **碰过** ⇒ 才进草稿（且只进这一个键）。
         let p = draft_patch(&v, &cur, &touched(&["system.log_level"]));
         assert_eq!(p.changes.len(), 1);
-        assert_eq!(p.changes.get("system.log_level"), Some(&Value::from("error")));
+        assert_eq!(
+            p.changes.get("system.log_level"),
+            Some(&Value::from("error"))
+        );
 
         // ③ **注入值非法** ⇒ 即便 `touched` 里**有**它（异常路径 / 竞态），也**不得**进草稿。
         let scoped = DraftScope {
-            touched: ["system.log_level"].iter().map(|k| (*k).to_string()).collect(),
-            invalid: ["system.log_level"].iter().map(|k| (*k).to_string()).collect(),
+            touched: ["system.log_level"]
+                .iter()
+                .map(|k| (*k).to_string())
+                .collect(),
+            invalid: ["system.log_level"]
+                .iter()
+                .map(|k| (*k).to_string())
+                .collect(),
         };
         assert!(!scoped.admits("system.log_level"), "invalid 是**否决**票");
         assert!(
@@ -2544,7 +2583,10 @@ mod tests {
         let v = view();
         let p = defaults_patch_of(&v);
         assert_eq!(p.from, PatchSource::ResetDefault);
-        let editable: Vec<&str> = iter_fields(&v).filter(|f| f.editable).map(|f| f.key.as_str()).collect();
+        let editable: Vec<&str> = iter_fields(&v)
+            .filter(|f| f.editable)
+            .map(|f| f.key.as_str())
+            .collect();
         assert_eq!(p.changes.len(), editable.len(), "覆盖全部可编辑字段");
         for k in &editable {
             assert!(p.changes.contains_key(*k), "缺字段 {k}");
@@ -2567,7 +2609,11 @@ mod tests {
     #[test]
     fn save_level_follows_requires_reconnect() {
         let mut v = view();
-        assert_eq!(save_level(&v, ["gateway.port"]), ConfirmLevel::L1, "无瞬断字段 ⇒ L1");
+        assert_eq!(
+            save_level(&v, ["gateway.port"]),
+            ConfirmLevel::L1,
+            "无瞬断字段 ⇒ L1"
+        );
         mark_reconnect(&mut v, "telemetry.interval");
         assert_eq!(
             save_level(&v, ["telemetry.interval"]),
@@ -2687,8 +2733,14 @@ mod tests {
     fn reset_level_is_at_least_l2() {
         let v = view();
         let keys: Vec<String> = defaults_patch_of(&v).changes.keys().cloned().collect();
-        assert_eq!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L2);
-        assert_ne!(reset_level(&v, keys.iter().map(String::as_str)), ConfirmLevel::L1);
+        assert_eq!(
+            reset_level(&v, keys.iter().map(String::as_str)),
+            ConfirmLevel::L2
+        );
+        assert_ne!(
+            reset_level(&v, keys.iter().map(String::as_str)),
+            ConfirmLevel::L1
+        );
     }
 
     /// 字段标签口径（**PM 裁定**，设计 §6.2 / UI 附录 B U-1）：
@@ -2700,14 +2752,31 @@ mod tests {
     #[test]
     fn field_labels_follow_pm_ruling() {
         let v = view();
-        let listen = iter_fields(&v).find(|f| f.key == "gateway.listen_addr").expect("字段");
+        let listen = iter_fields(&v)
+            .find(|f| f.key == "gateway.listen_addr")
+            .expect("字段");
         assert_eq!(field_label_text(listen), TEXT_LISTEN_ADDR);
-        assert_ne!(field_label_text(listen), "对端 IP 地址", "不得表述为「对端 IP」");
-        assert!(field_label_text(listen).contains("监听"), "口径 = 本机监听地址");
-        let bind = iter_fields(&v).find(|f| f.key == "display.bind_addr").expect("字段");
+        assert_ne!(
+            field_label_text(listen),
+            "对端 IP 地址",
+            "不得表述为「对端 IP」"
+        );
+        assert!(
+            field_label_text(listen).contains("监听"),
+            "口径 = 本机监听地址"
+        );
+        let bind = iter_fields(&v)
+            .find(|f| f.key == "display.bind_addr")
+            .expect("字段");
         assert_eq!(field_label_text(bind), TEXT_LOOPBACK_ADDR);
-        assert_ne!(field_label_text(bind), TEXT_LISTEN_ADDR, "回环绑定地址与 IEC 104 监听地址**分列**");
-        let port = iter_fields(&v).find(|f| f.key == "gateway.port").expect("字段");
+        assert_ne!(
+            field_label_text(bind),
+            TEXT_LISTEN_ADDR,
+            "回环绑定地址与 IEC 104 监听地址**分列**"
+        );
+        let port = iter_fields(&v)
+            .find(|f| f.key == "gateway.port")
+            .expect("字段");
         assert_eq!(field_label_text(port), "端口", "非裁定键**透传**契约标签");
     }
 
@@ -2739,7 +2808,10 @@ mod tests {
         assert_ne!(TEXT_LOOPBACK_ADDR, TEXT_LISTEN_ADDR);
         // ③ 两条语义必须保留：**本机** + **仅本机可达**。
         assert!(TEXT_LOOPBACK_ADDR.contains("本机"));
-        assert!(TEXT_LOOPBACK_ADDR.contains("仅本机"), "「仅本机可达」是 PL-4 回环红线的屏上表达");
+        assert!(
+            TEXT_LOOPBACK_ADDR.contains("仅本机"),
+            "「仅本机可达」是 PL-4 回环红线的屏上表达"
+        );
     }
 
     /// **PD13（②）**：注入侧 `group.label` / `field.label` 与 `Enum` 选项**同一处理**
@@ -2776,7 +2848,6 @@ mod tests {
         );
         assert_eq!(field_label_text(&l), TEXT_LISTEN_ADDR);
     }
-
 
     /// 值格式化：整数带单位 / 枚举取**选项标签** / IPv4 原样。
     ///
@@ -2815,7 +2886,10 @@ mod tests {
         // ③ 越界（合法类型、非法值域）⇒ 同样是占位符。
         assert_eq!(format_value(&u16k, &Value::from(65535), None), PLACEHOLDER);
         // ④ `Ipv4` 类型错配 ⇒ 占位符（旧实现回显空串）。
-        assert_eq!(format_value(&ConfigKind::Ipv4, &Value::from(7), None), PLACEHOLDER);
+        assert_eq!(
+            format_value(&ConfigKind::Ipv4, &Value::from(7), None),
+            PLACEHOLDER
+        );
     }
 
     /// **I3**：`format_value` 的出口过了 [`display_safe`] —— 且对**合法值恒等**。
@@ -2842,19 +2916,23 @@ mod tests {
 
         // ② 合法值经 display_safe **逐字不变**（这是"过一遍不改花合法值"的断言）。
         let legal = [
-            "127.0.0.1",   // IPv4 点分十进制
+            "127.0.0.1", // IPv4 点分十进制
             "0.0.0.0",
-            "30",          // 无单位整数
-            "30 秒",       // 带单位（空格 + cmap 内的 `秒`）
-            "1 – 300 秒",  // 约束提示口径（`–` U+2013）
-            "ERROR",       // 大写选项标签
+            "30",         // 无单位整数
+            "30 秒",      // 带单位（空格 + cmap 内的 `秒`）
+            "1 – 300 秒", // 约束提示口径（`–` U+2013）
+            "ERROR",      // 大写选项标签
             "INFO",
             "信息",
-            "100%",        // `%` 在 ASCII_DISPLAY_ALPHABET 内
+            "100%",                   // `%` 在 ASCII_DISPLAY_ALPHABET 内
             "本机监听地址 · IEC 104", // `·` U+00B7
         ];
         for s in legal {
-            assert_eq!(display_safe(s), s, "合法路径上 display_safe 必须恒等：`{s}`");
+            assert_eq!(
+                display_safe(s),
+                s,
+                "合法路径上 display_safe 必须恒等：`{s}`"
+            );
         }
         // ③ 端到端：三类合法值经 `format_value` 后与"手写期望串"逐字相等（= 未被改花）。
         let u16k = ConfigKind::U16 {
@@ -2900,7 +2978,11 @@ mod tests {
             max: 65535,
             step: 0,
         };
-        assert_eq!(int_bounds(&z16), (1, 65535, 1), "step==0 ⇒ 1（不是 0、也不报错）");
+        assert_eq!(
+            int_bounds(&z16),
+            (1, 65535, 1),
+            "step==0 ⇒ 1（不是 0、也不报错）"
+        );
         let z64 = ConfigKind::U64 {
             min: 0,
             max: 100,
@@ -2947,7 +3029,11 @@ mod tests {
             let last = enum_view(options, 9); // 当前值在最后一个
             assert_eq!(last.shown, ENUM_MAX_SEGMENTS);
             assert!(last.start + last.shown > 9, "窗口必须覆盖下标 9");
-            assert_eq!(last.start + last.selected, 9, "窗口内选中段映射回契约下标 9");
+            assert_eq!(
+                last.start + last.selected,
+                9,
+                "窗口内选中段映射回契约下标 9"
+            );
             assert!(last.hidden_note.is_some(), "截断必须**上屏**说明（不静默）");
 
             let first = enum_view(options, 0);
@@ -2981,12 +3067,7 @@ mod tests {
         assert_eq!(range_hint(&u64k, Some("秒")).as_deref(), Some("1 – 300 秒"));
         assert_eq!(range_hint(&ConfigKind::Ipv4, None), None);
         assert_eq!(
-            range_hint(
-                &ConfigKind::Enum {
-                    options: vec![]
-                },
-                None
-            ),
+            range_hint(&ConfigKind::Enum { options: vec![] }, None),
             None
         );
     }
@@ -3029,12 +3110,7 @@ mod tests {
     #[test]
     fn success_toast_merges_backend_message_and_names_restart_keys() {
         let ok = |msg: &str| {
-            let mut r = ControlResponse::ok(
-                "rid",
-                Some(view()),
-                None::<String>,
-                0,
-            );
+            let mut r = ControlResponse::ok("rid", Some(view()), None::<String>, 0);
             r.message = msg.to_string();
             r
         };
@@ -3104,7 +3180,10 @@ mod tests {
     fn change_details_shapes() {
         let v = view();
         let mut cur = initial_values(&v);
-        assert!(save_details(&v, &cur, &touched(&[])).is_empty(), "无改动 ⇒ 明细为空");
+        assert!(
+            save_details(&v, &cur, &touched(&[])).is_empty(),
+            "无改动 ⇒ 明细为空"
+        );
         cur.insert("gateway.port".into(), Value::from(2405));
         let d = save_details(&v, &cur, &touched(&["gateway.port"]));
         assert_eq!(d.len(), 1);
@@ -3114,7 +3193,11 @@ mod tests {
 
         let r = reset_details(&v);
         let editable = iter_fields(&v).filter(|f| f.editable).count();
-        assert_eq!(r.len(), editable, "恢复默认值列出全部可编辑字段（此处 default 全合法）");
+        assert_eq!(
+            r.len(),
+            editable,
+            "恢复默认值列出全部可编辑字段（此处 default 全合法）"
+        );
         assert!(
             r.iter().all(|d| d.key != "display.bind_addr"),
             "只读字段不进明细"
@@ -3141,7 +3224,10 @@ mod tests {
             }
         }
         let d = reset_details(&v);
-        let row = d.iter().find(|x| x.key == "intercore.port").expect("明细含该字段");
+        let row = d
+            .iter()
+            .find(|x| x.key == "intercore.port")
+            .expect("明细含该字段");
         assert_eq!(row.before, PLACEHOLDER, "无法格式化 ⇒ 占位符");
         assert_ne!(row.before, "0", "**不得**把类型错配伪装成合法值 0");
         assert_eq!(row.after, "2500", "`after` 取合法的 default（不是占位符）");

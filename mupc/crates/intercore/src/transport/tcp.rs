@@ -91,14 +91,44 @@ impl TcpTransport {
         if guard.is_none() {
             match TcpStream::connect(&self.remote_addr).await {
                 Ok(s) => *guard = Some(s),
-                Err(e) => return Err(MupcError::new(ErrorCode::ConnectionFailed, format!("connect {}: {}", self.remote_addr, e), "intercore")),
+                Err(e) => {
+                    return Err(MupcError::new(
+                        ErrorCode::ConnectionFailed,
+                        format!("connect {}: {}", self.remote_addr, e),
+                        "intercore",
+                    ))
+                }
             }
         }
-        let stream = guard.as_mut().ok_or_else(|| MupcError::new(ErrorCode::ConnectionFailed, "连接未建立", "intercore"))?;
-        match timeout(Duration::from_millis(self.timeout_ms), stream.write_all(bytes)).await {
-            Ok(Ok(())) => { *self.connected.write().await = true; Ok(()) }
-            Ok(Err(e)) => { *guard = None; Err(MupcError::new(ErrorCode::SendFailed, format!("send: {}", e), "intercore")) }
-            Err(_) => { *guard = None; Err(MupcError::new(ErrorCode::IntercoreTimeout, format!("timeout {}ms", self.timeout_ms), "intercore")) }
+        let stream = guard.as_mut().ok_or_else(|| {
+            MupcError::new(ErrorCode::ConnectionFailed, "连接未建立", "intercore")
+        })?;
+        match timeout(
+            Duration::from_millis(self.timeout_ms),
+            stream.write_all(bytes),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                *self.connected.write().await = true;
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                Err(MupcError::new(
+                    ErrorCode::SendFailed,
+                    format!("send: {}", e),
+                    "intercore",
+                ))
+            }
+            Err(_) => {
+                *guard = None;
+                Err(MupcError::new(
+                    ErrorCode::IntercoreTimeout,
+                    format!("timeout {}ms", self.timeout_ms),
+                    "intercore",
+                ))
+            }
         }
     }
 }
@@ -110,12 +140,19 @@ impl IntercoreTransport for TcpTransport {
         self.send_bytes(&bytes).await
     }
 
-    async fn send_tai_command(&self, p: [f64; 3], q: [f64; 3], mode: &str) -> Result<(), MupcError> {
+    async fn send_tai_command(
+        &self,
+        p: [f64; 3],
+        q: [f64; 3],
+        mode: &str,
+    ) -> Result<(), MupcError> {
         let bytes = v3_control_frame_bytes(p, q, mode)?;
         self.send_bytes(&bytes).await
     }
 
-    async fn is_connected(&self) -> bool { *self.connected.read().await }
+    async fn is_connected(&self) -> bool {
+        *self.connected.read().await
+    }
 
     async fn shutdown(&self) -> Result<(), MupcError> {
         *self.stream.lock().await = None;
@@ -200,14 +237,26 @@ mod tests {
         // restore 置/清驱动 is_interlock_stopped；latch 期间 authorize_restart 拒绝、清后放行。
         let tr = TcpTransport::new("127.0.0.1:1".into());
         assert!(!tr.is_interlock_stopped().await);
-        assert!(tr.authorize_restart().await.is_ok(), "!latch 时 authorize 应放行");
+        assert!(
+            tr.authorize_restart().await.is_ok(),
+            "!latch 时 authorize 应放行"
+        );
 
         tr.restore_interlock_latched(true).await.unwrap();
         assert!(tr.is_interlock_stopped().await, "restore(true) 应置 latch");
-        assert!(tr.authorize_restart().await.is_err(), "latch 期间 authorize 应拒绝");
+        assert!(
+            tr.authorize_restart().await.is_err(),
+            "latch 期间 authorize 应拒绝"
+        );
 
         tr.restore_interlock_latched(false).await.unwrap();
-        assert!(!tr.is_interlock_stopped().await, "restore(false) 应清 latch");
-        assert!(tr.authorize_restart().await.is_ok(), "清 latch 后 authorize 应放行");
+        assert!(
+            !tr.is_interlock_stopped().await,
+            "restore(false) 应清 latch"
+        );
+        assert!(
+            tr.authorize_restart().await.is_ok(),
+            "清 latch 后 authorize 应放行"
+        );
     }
 }

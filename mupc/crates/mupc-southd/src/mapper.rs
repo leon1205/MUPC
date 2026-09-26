@@ -465,9 +465,7 @@ pub fn poll_to_result(role: Role, reads: &BlockReads) -> PollResult {
             }
             PollResult::Data(pkg)
         }
-        Role::MeterBatt | Role::Hvac | Role::Fire | Role::Pcs => {
-            PollResult::Data(empty_package())
-        }
+        Role::MeterBatt | Role::Hvac | Role::Fire | Role::Pcs => PollResult::Data(empty_package()),
     }
 }
 

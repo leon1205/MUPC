@@ -71,11 +71,7 @@ mod tai_storage_test {
         );
         // 净功率 = 基线(-50) - 储能输出(-52) = +2 = 目标进口
         let net = -50.0 - st.p_st;
-        assert!(
-            (net - cfg.p_tgt_s1).abs() < 1.0,
-            "净功率应到 +2: {}",
-            net
-        );
+        assert!((net - cfg.p_tgt_s1).abs() < 1.0, "净功率应到 +2: {}", net);
     }
 
     #[test]
@@ -86,14 +82,8 @@ mod tai_storage_test {
         let mut st = TaiControllerState::default();
         st.st = TaiState::S1PvAbsorb;
         st.p_st = -60.0; // 深度充电（p_cap 上限）
-        // 基线返送降到 −53.7，储能 −60 超吸收 → 净 = +6.3（从电网取电 6.3）
-        let m = meter(
-            6.3,
-            [2.1, 2.1, 2.1],
-            [0.0; 3],
-            [220.0; 3],
-            [0.99; 3],
-        );
+                         // 基线返送降到 −53.7，储能 −60 超吸收 → 净 = +6.3（从电网取电 6.3）
+        let m = meter(6.3, [2.1, 2.1, 2.1], [0.0; 3], [220.0; 3], [0.99; 3]);
         let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
         // p_base_est = 6.3 + (-60) = -53.7 < s1_exit=4 → S1 保持
         assert_eq!(st.st, TaiState::S1PvAbsorb, "基线仍返送，S1 应保持");
@@ -118,22 +108,12 @@ mod tai_storage_test {
         let mut st = TaiControllerState::default();
         st.st = TaiState::S1PvAbsorb;
         st.p_st = -30.0; // 之前充电吸收返送
-        // 基线骤转受电 +20（净 = 20 - (-30) = 50）
-        let m = meter(
-            50.0,
-            [17.0, 17.0, 16.0],
-            [0.0; 3],
-            [220.0; 3],
-            [0.99; 3],
-        );
+                         // 基线骤转受电 +20（净 = 20 - (-30) = 50）
+        let m = meter(50.0, [17.0, 17.0, 16.0], [0.0; 3], [220.0; 3], [0.99; 3]);
         let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
         // 储能未回归（p_st=-30）→ S1 保持，大步斜坡回 0
         assert_eq!(st.st, TaiState::S1PvAbsorb);
-        assert!(
-            st.p_st.abs() < 1.0,
-            "基线受电应大步停充回 0: {}",
-            st.p_st
-        );
+        assert!(st.p_st.abs() < 1.0, "基线受电应大步停充回 0: {}", st.p_st);
     }
 
     #[test]
@@ -166,7 +146,8 @@ mod tai_storage_test {
         assert!(
             (st.p_st - p_st1).abs() < 1.0,
             "持续返送目标稳定，p_st 不应振荡: {} → {}",
-            p_st1, st.p_st
+            p_st1,
+            st.p_st
         );
         let net = -40.0 - st.p_st;
         assert!(
