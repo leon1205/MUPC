@@ -105,6 +105,18 @@ mupc-storage (存储 crate，新增)
 | data-processing → mupc-storage | 遥测/告警/事件持久化 | 通过 WriteBuffer 异步写入 |
 | mupc-storage → web-api | 历史数据、台账、告警查询 | REST API 查询接口 |
 
+#### 1.3.1 最新值入口：归属确认与引用（U-70）
+
+**U-70 的消费方改判与数据可用性要求已由 [01 设计 §9.1](01-MUPC-通信网关-设计文档.md) 完整设计**（01/03/12 三份共用件）。本节只做两件事：
+
+| 项 | 本节口径 |
+|----|----------|
+| **归属确认** | 03 PRD §1.3 R-11.6-D1 的「**本模块**须提供」由 `mupc-data-processing::latest_values` 满足——该 crate 即 03 模块的 crate（§1.2/§7.1）。**类型与所有权在 03，写入调用方在 core-bin（装配层）**；依赖方向 `southd → data-processing`、`core-bin → data-processing` 均已存在，**零新增边** |
+| **不重复定义** | 数据结构（`PointValue/PointQuality/PointId/ChangeBatch`）、刷新活性（R-11.6-D2）、陈旧表达（R-11.6-D3）、变更通知 ≤1 s（R-11.6-D4）、禁轮询 `telemetry`（R-11.6-D5）**一律以 01 设计 §9.1 为准**，本节不复制、不另立门限 |
+| **过期判据单一真源** | `stale_timeout_s = 5 s`（`SouthStationsConfig.stale_timeout_s`，`mupc-southd/src/config.rs:177`）由 `LatestValues::new` **注入**，`is_fresh` 是唯一实现 |
+| 消费方分层（R-11.6-A） | `telemetry` 历史表 ⇒ **历史查询类**（报表/导出/复盘；本期无已实现消费方）；实时值 ⇒ 内存快照（上云/屏/策略）。**不得互相替代** |
+| 已知设计余量 | `telemetry` 表**只写不读**（R-11.6-B）——§4.4.4 的总表聚合**同样只写**；**不得**据此宣称"历史查询已实现"（CNS-03 为评审项） |
+
 ### 1.4 数据流架构
 
 ```
@@ -1124,6 +1136,8 @@ csv = "1.3"; parking_lot.workspace = true
 mupc-common = { path = "../common", optional = true }
 ```
 
+> **依赖边边界（原 §9.8 D-8）**：上表**无 `mupc-data-processing`**，且反向亦无 ⇒ `storage` 与 `data-processing` **互不依赖**。因此**不得**为一次枚举映射把跨域转换放进 `storage`（会新增 `storage → data-processing` 依赖边，纯为一次枚举映射、代价不成比例）。该转换落**装配层**：`mupc-core-bin/src/quality_map.rs` 的 `quality_from_point_quality(PointQuality) -> i32`（`core-bin` 同时依赖两者，**零新增边**）。`storage` 只拥有 `Quality` 枚举（落库记录形态的唯一所有者），**不认识** `PointQuality`；`data-processing` 只拥有 `PointQuality`，**不认识** `Quality`；转换只在装配层发生（与"装配层是跨域转换点"的既有口径一致）。
+
 #### 4.2.4 核心接口
 
 ```rust
@@ -1442,6 +1456,8 @@ StorageService::init():
 
 64GB eMMC 分区规划：系统 20GB + 数据 44GB。
 数据分区分配：时序 5GB + 告警事件 200MB + 故障录波 18GB + 导出 5GB + WAL 512MB + 预留 15GB。
+
+> **两种容量口径不可互推（原 §9.8 D-6）**：本节按**"每设备每周期 1 条"的逻辑记录口径**（1 条 ≈ 200 B）推算；台区总表聚合落库（§4.4.4）按**窄表物理行口径**（22 行/周期/设备）。**两口径不可互推**（[03 PRD](../specs/modules/03-MUPC-数据处理与存储-PRD.md) §4.1.4 R-11.2-F 的口径提示已明示相差约 27×）。总表聚合的容量结论**只以 §4.4.4.3 的物理行为准**；本节是否按物理行重算**属另立需求**（PRD §4.1.4 同款登记，见 `docs/technical-debt.md` §6.14 U-82），本文档**不改本节数字**。
 
 ---
 
@@ -2317,6 +2333,13 @@ impl WriteBuffer {
 | `good` | 数据有效 | 数据采集正常，质量可靠 |
 | `invalid` | 数据无效 | 采集异常，数据不可用 |
 | `reserved` | 保留 | 备用 |
+| `no_data`（取值 1） | 无数据 | **缺测**：该通道本周期无有效采样 ⇒ 落库 `value` 写 `NULL`（真 NULL），**严禁写 0**（§4.4.4.4） |
+| `stale`（取值 3） | 数据陈旧 | 采样已超期未刷新 |
+| `unconfigured`（取值 4） | 未配置 | 通道未配置取数来源 |
+
+> **枚举扩展与落点（原 §9.8 D-7 / 原 §9.10 同步项）**：本表在既有三值之外新增 **`NoData` / `Stale` / `Unconfigured`** 三个取值 —— `Good = 0` **保持既有写入值 0 不变**（零行为变化）；`Reserved` 在本表中**未定义取值** ⇒ 不占用其语义，新增三值取**更大取值**。落库侧的机读枚举为 `storage::Quality { Good = 0, NoData = 1, Invalid = 2, Stale = 3, Unconfigured = 4 }`（§4.4.4.4）。
+>
+> **与 [01 设计 §9.1.2](01-MUPC-通信网关-设计文档.md) 的 `PointQuality` 一一映射**（同一语义、两处命名）；**映射函数 `quality_from_point_quality(PointQuality) -> i32` 落在装配层 `mupc-core-bin/src/quality_map.rs`**，不落 `storage`（落 `storage` 会新增 `storage → data-processing` 依赖边，见 §4.2.3）。
 
 ---
 
