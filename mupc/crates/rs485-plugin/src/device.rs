@@ -28,7 +28,10 @@ pub enum Rs485Dir {
 
 /// 测试交换缝的闭包类型（抽具名别名以避免 `clippy::type_complexity`；
 /// 与 `strategy-engine/src/ai_integration.rs` 同款做法，调用处签名同样受益）。
-#[cfg(test)]
+///
+/// 门控 = `any(test, feature = "test-seam")`：`test_exchange` 字段与两个 setter 的
+/// 签名都引用本别名，故必须与它们**同一门控**（否则 feature-only 构建下别名不存在）。
+#[cfg(any(test, feature = "test-seam"))]
 type TestExchangeFn = Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 /// RS485 设备驱动
@@ -58,8 +61,10 @@ pub struct Rs485Device {
     #[cfg(test)]
     test_response: Mutex<Option<Vec<u8>>>,
     /// **测试专用**交换缝（与 `test_response` 的差别见 `send_recv` 注释）：拿到**请求帧原文**，
-    /// 返回**响应帧原文**。`#[cfg(test)]` ⇒ 产线构建不含此字段与分支。
-    #[cfg(test)]
+    /// 返回**响应帧原文**。门控 = `any(test, feature = "test-seam")` ⇒ 默认（产线）构建
+    /// 不含此字段与分支；`feature = "test-seam"` 由下游 crate 的 **dev-dependencies** 开启，
+    /// 使其 `tests/*.rs` 也能驱动本缝（`cfg(test)` 不向下游传播，故不能只用它）。
+    #[cfg(any(test, feature = "test-seam"))]
     test_exchange: Mutex<Option<TestExchangeFn>>,
 }
 
@@ -269,7 +274,7 @@ impl Rs485Device {
             tx_lock: StdMutex::new(()),
             #[cfg(test)]
             test_response: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-seam"))]
             test_exchange: Mutex::new(None),
         }
     }
@@ -613,33 +618,40 @@ impl Rs485Device {
         self.handler.name()
     }
 
-    /// 装测试交换缝（仅测试构建存在）。设置后 [`Self::send_recv`] 走本缝，**优先于**
-    /// [`Self::test_response`]；`clear_test_exchange` 可撤销（每条 e2e 结束必须清，防串扰）。
-    #[cfg(test)]
+    /// 装测试交换缝（门控 = `any(test, feature = "test-seam")`，见字段注释）。设置后
+    /// [`Self::send_recv`] 走本缝，**优先于** [`Self::test_response`]；`clear_test_exchange`
+    /// 可撤销（每条 e2e 结束必须清，防串扰）。
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn set_test_exchange(&self, f: TestExchangeFn) {
         *self.test_exchange.lock() = Some(f);
     }
 
     /// 清测试交换缝。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn clear_test_exchange(&self) {
         *self.test_exchange.lock() = None;
     }
 
     /// 发送并接收数据。
     ///
-    /// 测试构建下两条零 IO 捷径（产线构建均不存在）：
-    /// 1. `test_exchange`：拿请求帧原文、返回响应帧原文 —— 使「成帧 → 线路 → 解析」整链
-    ///    在无串口环境可被断言（PCS 帧级 e2e 用，设计 §13.6 R-3）。
-    /// 2. `test_response`：直接返回整段响应字节（既有缝，帧级校验用例用）。
+    /// 默认（产线）构建下无任何捷径，直落真 IO。两条零 IO 捷径的**门控刻意不同**：
+    /// 1. `test_exchange`（`any(test, feature = "test-seam")`）：拿请求帧原文、返回响应帧原文
+    ///    —— 使「成帧 → 线路 → 解析」整链在无串口环境可被断言（PCS 帧级 e2e 用，设计 §13.6 R-3）。
+    ///    用 feature 门控是因为它要给**下游 crate 的集成测试**用（`cfg(test)` 不向下游传播）。
+    /// 2. `test_response`（仅 `#[cfg(test)]`）：直接返回整段响应字节（既有缝，本 crate 内
+    ///    帧级校验用例用）。**不能**并入上面的 feature 门控 —— feature-only 构建（下游测试）
+    ///    下 `test_response` 字段不存在。
     ///
     /// 顺序固定为 1 → 2 → 真 IO：缝未设置时行为与改动前**逐字节相同**。
     pub fn send_recv(&self, frame: &[u8], recv_timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-seam"))]
         {
             if let Some(f) = self.test_exchange.lock().as_ref() {
                 return Ok(f(frame));
             }
+        }
+        #[cfg(test)]
+        {
             if let Some(injected) = self.test_response.lock().clone() {
                 return Ok(injected);
             }

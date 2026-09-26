@@ -23,5 +23,14 @@ libc = "0.2"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 chrono = { workspace = true }
 
+[features]
+# 测试缝开关：开启后 `Rs485Device` 暴露 `set_test_exchange`/`clear_test_exchange`
+# 及 `send_recv` 的交换分支，使**下游 crate 的集成测试**（`tests/*.rs`）能驱动
+# 「成帧 → 线路 → 解析」整链而无需真实串口。
+# ⚠️ 必须用 feature 而非 `#[cfg(test)]`：`cfg(test)` 只对**本 crate 自身**的 test
+# 目标开启，不随下游 crate 的测试构建传播 ⇒ 下游测试看不到这些 API。
+# **默认关闭**：产线构建与仅在 `src/` 内使用的 `test_response` 一样编译期消除。
+test-seam = []
+
 [lib]
 crate-type = ["lib", "cdylib"]

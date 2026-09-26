@@ -19,3 +19,7 @@ mupc-data-processing = { path = "../data-processing" }
 [dev-dependencies]
 # YAML 解析仅测试用：lib 不做配置解析（真实解析在 mupc-core-bin）
 serde_yaml = "0.9"
+# 测试缝：southd 的集成测试（tests/*.rs）需要驱动 rs485-plugin 的
+# 帧级交换缝（见 rs485-plugin 的 `test-seam` feature 注释）。
+# 仅 dev-dependencies ⇒ 生产构建（cargo build）不开此 feature。
+rs485-plugin = { path = "../rs485-plugin", features = ["test-seam"] }
