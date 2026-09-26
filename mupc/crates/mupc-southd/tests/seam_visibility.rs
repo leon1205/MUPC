@@ -9,6 +9,9 @@
 //! 本文件是一道**编译期护栏**：任何人把门控改回 `#[cfg(test)]`、或从
 //! dev-dependencies 撤掉 `test-seam`，本文件立即编译失败。
 //!
+//! 生效条件：`cargo test -p mupc-southd`（或带 `--all-targets` 的 check/clippy）。
+//! ⚠️ 裸 `cargo check -p mupc-southd` **不编译** `tests/*.rs` ⇒ 它兜不住本护栏。
+//!
 //! 依赖面刻意收窄：`device-trait` **不在** mupc-southd 的依赖里，故此处一律经
 //! `rs485-plugin` 的 re-export 取类型（`Config` / `Parity` / `CrcMode` /
 //! `handlers::ModbusHandler`），不新引 `device-trait`。
@@ -38,15 +41,11 @@ fn dev() -> Rs485Device {
 fn rs485_exchange_seam_is_visible_from_downstream_crate_test() {
     let d = dev();
     // 缝：拿请求帧原文，回一个合法的 FC03 响应（slave=2, 1 寄存器 = 0x002A）
-    d.set_test_exchange(Box::new(|req: &[u8]| {
+    d.set_test_exchange(std::sync::Arc::new(|req: &[u8]| {
         assert_eq!(req[0], 2, "缝必须拿到请求帧原文（首字节 = 目标从站）");
         let mut v = vec![2u8, 0x03, 0x02, 0x00, 0x2A];
-        let crc = rs485_plugin::protocol::Frame::calculate_crc(
-            2,
-            0x03,
-            &v[2..],
-            CrcMode::Crc16Modbus,
-        );
+        let crc =
+            rs485_plugin::protocol::Frame::calculate_crc(2, 0x03, &v[2..], CrcMode::Crc16Modbus);
         v.push(crc as u8);
         v.push((crc >> 8) as u8);
         v

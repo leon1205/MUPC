@@ -31,8 +31,11 @@ pub enum Rs485Dir {
 ///
 /// 门控 = `any(test, feature = "test-seam")`：`test_exchange` 字段与两个 setter 的
 /// 签名都引用本别名，故必须与它们**同一门控**（否则 feature-only 构建下别名不存在）。
+///
+/// 用 `Arc`（而非 `Box`）是为了 [`Rs485Device::send_recv`] 能先把闭包**克隆出锁**
+/// 再在锁外调用 —— 详见那里关于自死锁的注释。
 #[cfg(any(test, feature = "test-seam"))]
-type TestExchangeFn = Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+type TestExchangeFn = std::sync::Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 /// RS485 设备驱动
 ///
@@ -619,8 +622,8 @@ impl Rs485Device {
     }
 
     /// 装测试交换缝（门控 = `any(test, feature = "test-seam")`，见字段注释）。设置后
-    /// [`Self::send_recv`] 走本缝，**优先于** [`Self::test_response`]；`clear_test_exchange`
-    /// 可撤销（每条 e2e 结束必须清，防串扰）。
+    /// [`Self::send_recv`] 走本缝，**优先于** `test_response`（后者仅本 crate 测试构建存在，
+    /// 故此处不用 rustdoc 链接语法）；`clear_test_exchange` 可撤销（每条 e2e 结束必须清，防串扰）。
     #[cfg(any(test, feature = "test-seam"))]
     pub fn set_test_exchange(&self, f: TestExchangeFn) {
         *self.test_exchange.lock() = Some(f);
@@ -643,10 +646,20 @@ impl Rs485Device {
     ///    下 `test_response` 字段不存在。
     ///
     /// 顺序固定为 1 → 2 → 真 IO：缝未设置时行为与改动前**逐字节相同**。
+    ///
+    /// **约定**：缝闭包内**禁止回调本设备的 `send_recv` / `set_test_exchange` /
+    /// `clear_test_exchange`**（下面用 `Arc` 克隆已结构性消除自死锁，但避免此类重入仍是约定）。
     pub fn send_recv(&self, frame: &[u8], recv_timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
         #[cfg(any(test, feature = "test-seam"))]
         {
-            if let Some(f) = self.test_exchange.lock().as_ref() {
+            // ★ 先把闭包**克隆出锁**再调用（`Arc::clone` 只动引用计数，锁即刻释放）。
+            //   **不得**写成 `if let Some(f) = self.test_exchange.lock().as_ref()`：scrutinee
+            //   产生的 `MutexGuard` 临时量会存活到 then 分支结束 ⇒ 闭包执行期间仍持锁；
+            //   若闭包内回调本设备的 `send_recv` / `set_test_exchange` / `clear_test_exchange`
+            //   （例如"回一帧就撤缝"），`parking_lot::Mutex` 不自证中毒 ⇒ **静默死锁**
+            //   （已实测复现：重入 lock 挂死，无报错无 panic）。
+            let f = self.test_exchange.lock().clone();
+            if let Some(f) = f {
                 return Ok(f(frame));
             }
         }
@@ -1531,7 +1544,7 @@ mod frame_validation_tests {
         let device = create_test_device();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
         let seen2 = seen.clone();
-        device.set_test_exchange(Box::new(move |req: &[u8]| {
+        device.set_test_exchange(Arc::new(move |req: &[u8]| {
             *seen2.lock().unwrap() = req.to_vec();
             // 回一个合法响应：slave=2, FC03, 字节数 4, 值 0x0102/0xFFFE
             let mut v = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE];
@@ -1553,26 +1566,47 @@ mod frame_validation_tests {
 
     #[test]
     fn test_exchange_seam_takes_precedence_and_is_clearable() {
-        // 缝设置后**优先于** test_response；clear 之后回到 test_response（默认 None → NotConnected）。
-        let device = create_test_device();
-        *device.test_response.lock() = Some(vec![0xEE; 8]); // 会被缝遮蔽
-        device.set_test_exchange(Box::new(|_req: &[u8]| {
-            let mut v = vec![0x02, 0x03, 0x02, 0x00, 0x2A];
-            let crc = Frame::calculate_crc(0x02, 0x03, &v[2..], CrcMode::Crc16Modbus);
+        // 三条优先级语义逐条钉住（两条通道返回**不同值**，否则无法区分走了哪条）：
+        //   ① 缝在 ⇒ 缝赢（test_response 被遮蔽）
+        //   ② 清缝 ⇒ 回落到 test_response（此前未被走到：旧写法在断言前就把它置 None 了）
+        //   ③ 清缝且无 test_response ⇒ 未打开 ⇒ NotConnected（既有语义不变）
+        fn fc03_frame(slave: u8, value: u16) -> Vec<u8> {
+            let mut v = vec![slave, 0x03, 0x02, (value >> 8) as u8, value as u8];
+            let crc = Frame::calculate_crc(slave, 0x03, &v[2..], CrcMode::Crc16Modbus);
             v.push(crc as u8);
             v.push((crc >> 8) as u8);
             v
-        }));
-        assert_eq!(device.read_holding_registers_from(2, 0, 1).unwrap(), vec![0x2A]);
+        }
 
+        let device = create_test_device();
+        // test_response 通道回 0x2A
+        *device.test_response.lock() = Some(fc03_frame(2, 0x2A));
+        // 缝通道回 0x99 —— 与 test_response 不同，故"谁赢"可判
+        device.set_test_exchange(Arc::new(|_req: &[u8]| fc03_frame(2, 0x99)));
+
+        // ① 缝赢
+        assert_eq!(
+            device.read_holding_registers_from(2, 0, 1).unwrap(),
+            vec![0x99],
+            "缝在时必须走缝（test_response 被遮蔽）"
+        );
+
+        // ② 清缝 ⇒ 回落 test_response
         device.clear_test_exchange();
+        assert_eq!(
+            device.read_holding_registers_from(2, 0, 1).unwrap(),
+            vec![0x2A],
+            "清缝后必须回落到 test_response"
+        );
+
+        // ③ 两条都无 ⇒ 未打开 ⇒ NotConnected
         *device.test_response.lock() = None;
         assert!(
             matches!(
                 device.read_holding_registers_from(2, 0, 1),
                 Err(Rs485Error::NotConnected(_))
             ),
-            "清缝且无 test_response ⇒ 回到未打开的 NotConnected（不改变既有语义）"
+            "两条通道都无 ⇒ 回到未打开的 NotConnected（不改变既有语义）"
         );
     }
 }
