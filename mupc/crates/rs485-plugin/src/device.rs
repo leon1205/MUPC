@@ -26,6 +26,11 @@ pub enum Rs485Dir {
     Send,
 }
 
+/// 测试交换缝的闭包类型（抽具名别名以避免 `clippy::type_complexity`；
+/// 与 `strategy-engine/src/ai_integration.rs` 同款做法，调用处签名同样受益）。
+#[cfg(test)]
+type TestExchangeFn = Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
 /// RS485 设备驱动
 ///
 /// 实现南向 RS485 设备通信，支持 TTU、光伏逆变器、充电桩等设备
@@ -52,6 +57,10 @@ pub struct Rs485Device {
     /// `#[cfg(test)]` ⇒ 产线构建**不含此字段**、`send_recv` 也不含对应分支，语义零影响。
     #[cfg(test)]
     test_response: Mutex<Option<Vec<u8>>>,
+    /// **测试专用**交换缝（与 `test_response` 的差别见 `send_recv` 注释）：拿到**请求帧原文**，
+    /// 返回**响应帧原文**。`#[cfg(test)]` ⇒ 产线构建不含此字段与分支。
+    #[cfg(test)]
+    test_exchange: Mutex<Option<TestExchangeFn>>,
 }
 
 /// 平台无关的文件描述符类型
@@ -260,6 +269,8 @@ impl Rs485Device {
             tx_lock: StdMutex::new(()),
             #[cfg(test)]
             test_response: Mutex::new(None),
+            #[cfg(test)]
+            test_exchange: Mutex::new(None),
         }
     }
 
@@ -602,12 +613,33 @@ impl Rs485Device {
         self.handler.name()
     }
 
-    /// 发送并接收数据
+    /// 装测试交换缝（仅测试构建存在）。设置后 [`Self::send_recv`] 走本缝，**优先于**
+    /// [`Self::test_response`]；`clear_test_exchange` 可撤销（每条 e2e 结束必须清，防串扰）。
+    #[cfg(test)]
+    pub fn set_test_exchange(&self, f: TestExchangeFn) {
+        *self.test_exchange.lock() = Some(f);
+    }
+
+    /// 清测试交换缝。
+    #[cfg(test)]
+    pub fn clear_test_exchange(&self) {
+        *self.test_exchange.lock() = None;
+    }
+
+    /// 发送并接收数据。
+    ///
+    /// 测试构建下两条零 IO 捷径（产线构建均不存在）：
+    /// 1. `test_exchange`：拿请求帧原文、返回响应帧原文 —— 使「成帧 → 线路 → 解析」整链
+    ///    在无串口环境可被断言（PCS 帧级 e2e 用，设计 §13.6 R-3）。
+    /// 2. `test_response`：直接返回整段响应字节（既有缝，帧级校验用例用）。
+    ///
+    /// 顺序固定为 1 → 2 → 真 IO：缝未设置时行为与改动前**逐字节相同**。
     pub fn send_recv(&self, frame: &[u8], recv_timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
-        // 测试注入缝（仅 `#[cfg(test)]` 编译进来；产线分支与语义逐字节不变）：
-        // 让「请求 → 响应 → 校验/解析」整链可在无串口环境（Windows/CI）下被断言。
         #[cfg(test)]
         {
+            if let Some(f) = self.test_exchange.lock().as_ref() {
+                return Ok(f(frame));
+            }
             if let Some(injected) = self.test_response.lock().clone() {
                 return Ok(injected);
             }
@@ -1476,6 +1508,60 @@ mod frame_validation_tests {
             .write_single_register_from(2, 0x01F4, 0x0000)
             .unwrap_err();
         assert!(err.to_string().contains("过短"), "实际: {err}");
+    }
+
+    // ── 交换缝（`send_recv` 层：请求原文 → 响应原文）─────────────────────
+
+    #[test]
+    fn test_exchange_seam_sees_request_and_returns_response() {
+        // 缝拿到的必须是**请求帧原文**（含 CRC），不是解析后的结构：
+        // 用 FC03 请求 slave=2 addr=0x0100 count=2，断言首字节/功能码/地址/CRC 自洽。
+        let device = create_test_device();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let seen2 = seen.clone();
+        device.set_test_exchange(Box::new(move |req: &[u8]| {
+            *seen2.lock().unwrap() = req.to_vec();
+            // 回一个合法响应：slave=2, FC03, 字节数 4, 值 0x0102/0xFFFE
+            let mut v = vec![0x02, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE];
+            let crc = Frame::calculate_crc(0x02, 0x03, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        }));
+        let out = device.read_holding_registers_from(2, 0x0100, 2).unwrap();
+        assert_eq!(out, vec![0x0102, 0xFFFE], "缝合法的响应必须被正常解析");
+        let req = seen.lock().unwrap().clone();
+        assert_eq!(req[0], 0x02, "请求帧首字节 = 目标从站");
+        assert_eq!(req[1], 0x03, "功能码 FC03");
+        assert_eq!(&req[2..4], &[0x01, 0x00], "起始地址 0x0100");
+        assert_eq!(&req[4..6], &[0x00, 0x02], "寄存器数 2");
+        let crc = Frame::calculate_crc(0x02, 0x03, &req[2..6], CrcMode::Crc16Modbus);
+        assert_eq!(&req[6..8], &[crc as u8, (crc >> 8) as u8], "CRC 低字节在前");
+    }
+
+    #[test]
+    fn test_exchange_seam_takes_precedence_and_is_clearable() {
+        // 缝设置后**优先于** test_response；clear 之后回到 test_response（默认 None → NotConnected）。
+        let device = create_test_device();
+        *device.test_response.lock() = Some(vec![0xEE; 8]); // 会被缝遮蔽
+        device.set_test_exchange(Box::new(|_req: &[u8]| {
+            let mut v = vec![0x02, 0x03, 0x02, 0x00, 0x2A];
+            let crc = Frame::calculate_crc(0x02, 0x03, &v[2..], CrcMode::Crc16Modbus);
+            v.push(crc as u8);
+            v.push((crc >> 8) as u8);
+            v
+        }));
+        assert_eq!(device.read_holding_registers_from(2, 0, 1).unwrap(), vec![0x2A]);
+
+        device.clear_test_exchange();
+        *device.test_response.lock() = None;
+        assert!(
+            matches!(
+                device.read_holding_registers_from(2, 0, 1),
+                Err(Rs485Error::NotConnected(_))
+            ),
+            "清缝且无 test_response ⇒ 回到未打开的 NotConnected（不改变既有语义）"
+        );
     }
 }
 
