@@ -7048,6 +7048,33 @@ pub(crate) fn pages_chain() {
                 "滚到底后页尾行（序号 20）必须在池行 {tail_k} 上被绘 —— \
                  **池外行不绘 = 静默丢内容**"
             );
+            // ── **几何读回（T21e 评审 W-2）**：上面 `bound == 页行数 − start` 的两侧**同源于
+            //    同一个 `start`**（孤立即"自比"）。此处补一条**像素面**判据，把断言从数据面
+            //    扩到几何面：**视口顶**几何上落在哪个池行内，该池行的**页内行号**（由**逐格
+            //    文本**读出 —— 不来自 `start`）必须 = 窗口起点 ⇒ 证明池行被摆到**页内行号**
+            //    的槽位，而不只是"计数对得上"。**改什么会让本段红**：把 `refresh_drill` 的
+            //    `set_pos(0, row_idx * DRILL_ROW_H)` 改成按**池下标**摆位（行号与槽位错位）。
+            disp.refr_now_for_test(); // `coords` 由布局趟写入（见 `Obj::coords`）
+            let top_y = p4.drill_viewport_top();
+            let top_row = (0..p4.drill_pool_size())
+                .find(|&k| {
+                    p4.drill_row_visible(k)
+                        && p4
+                            .drill_row_y(k)
+                            .is_some_and(|y| y <= top_y && top_y < y + Dimens::DRILL_ROW_H)
+                })
+                .expect("视口顶必须落在某个**在显**池行内（几何读回）");
+            let top_row_text = p4.drill_cell_text(top_row, 0);
+            let top_idx = top_row_text
+                .as_deref()
+                .and_then(|t| t.trim().parse::<usize>().ok())
+                .map(|n| n - 1);
+            assert_eq!(
+                top_idx,
+                p4.drill_window_start(),
+                "几何读回：视口顶所在池行（池下标 {top_row}，文本 {top_row_text:?}）的**页内行号** \
+                 必须 = 窗口起点 —— 像素面证明窗口绑的是**页内行号**槽位"
+            );
             p4.scroll_drill(0);
             assert_eq!(
                 p4.drill_window_start(),

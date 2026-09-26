@@ -4144,6 +4144,23 @@ impl P4InterlockPage {
         self.core.drill_rows.iter().filter(|r| r.visible()).count()
     }
 
+    /// 下钻池行 `r` 的**行容器屏内绝对** `y1`（像素；`None` = 该池下标不存在）。
+    ///
+    /// **几何读回**（T21e 评审 W-2）：把"窗口绑对了行"从**数据面**（逐格文本）扩到**像素面** ——
+    /// 配合 [`Self::drill_viewport_top`] 可判"**视口顶**几何上落在哪个池行内"。
+    /// ⚠️ `coords` 由**布局趟**写入（见 [`Obj::coords`]）⇒ 调用前须先强制渲染一趟
+    /// （测试 = `Display::refr_now_for_test`）。
+    pub fn drill_row_y(&self, r: usize) -> Option<i32> {
+        self.core.drill_rows.get(r).map(|row| row.obj.coords().y1)
+    }
+
+    /// 下钻行区（滚动宿主）的**屏内绝对** `y1`（像素）—— 即**视口顶**。
+    ///
+    /// 与 [`Self::drill_row_y`] 配合做几何读回（T21e 评审 W-2）；同 `coords` 的布局趟要求。
+    pub fn drill_viewport_top(&self) -> i32 {
+        self.core.drill_rows_box.coords().y1
+    }
+
     /// **只发滚动**（`y` = 像素）：与生产 `SCROLL` 事件**同源** —— 不另调任何重绑入口。
     ///
     /// ⇒ 删掉 `Core::wire_scroll` 的注册，本条驱动的断言**即红**（"窗口不随滚动动"）。

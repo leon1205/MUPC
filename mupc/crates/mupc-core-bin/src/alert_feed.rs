@@ -54,8 +54,10 @@ pub struct FeedItem {
     pub ts_ms: u64,
     /// 来源分类。
     pub source: FeedOrigin,
-    /// 来源内的子类型：`System` 取级别（`info` / `warning`）；`Interlock` 取事件名
-    /// （`triggered` / `cleared` / `stop_failed` / `ack_m1`）；`Strategy` 为空串。
+    /// 来源内的子类型：`System` 取级别（`info` / `warning` / **`major`** —— `major` 由
+    /// 03 设计 §9.3 缺口 1 的健康巡检（`storage_health::DROP_ALERT_LEVEL`）投递）；
+    /// `Interlock` 取事件名（`triggered` / `cleared` / `stop_failed` / `ack_m1`）；
+    /// `Strategy` 为空串。
     ///
     /// **为什么保留它**：迁出前的 `SsePushService::push_interlock(event, msg)` 把事件名放在
     /// payload 里；本结构不消费它，但**不静默丢字段**——将来接 F7 增强时才不必回头改生产侧。

@@ -25,7 +25,14 @@
 //! 与 `flush_timer` / `grid_agg_timer` **同范式、同名单**：spawn 后句柄交 `producers`
 //! （协作退出名单），收到停机信号即退出。本任务**不持有任何数据、不碰 `WriteBuffer` 本体**
 //! （只读两个原子计数），故收工分支无需额外 flush —— 收工时刻也不会产生"落在最后一次 flush
-//! 之后"的写者。**不得**把它塞进 abort 名单：那会让它在停机瞬间仍可能投出告警。
+//! 之后"的写者。
+//!
+//! **为什么必须走协作名单而不是 abort 名单（措辞订正，评审 W-2）**：真差别**不是**"abort 名单
+//! 会在停机瞬间仍投出告警" —— 两个名单都在 `stop_tx.send(true)` **之后**处理，且 `select!` 的
+//! tick 臂与 stop 臂本就随机竞争，"停机瞬间恰好多投一条"在**两个名单下都可能**。真差别是：
+//! 协作名单会 **join、确认它已收工**（`stop_producers` 有上限地等每个任务回执）⇒ 只有它能
+//! 保证 **`shutdown()` 返回后没有本任务在跑**；abort 名单只发 abort 请求、不 join ⇒ 无法给出
+//! 这一保证（本任务虽无数据要落盘，但"退出后仍在跑"本身即该名单要排除的形态）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -359,9 +366,16 @@ mod tests {
     /// 同 `startup.rs` 里 `telemetry_buffer_timer_and_shutdown_flush_are_wired` 的手法与理由
     /// （装配期起不来真环境；这里要证的恰恰是"装配源码里这几件事还在"）。
     ///
-    /// 改什么会让本条红：删掉 `producers.0.push(("storage_health_timer"`（→ 丢弃再无人告警，
-    /// FLS-03② 回归）；把它塞进 `guard.0`（abort 名单，退出瞬间仍可能投告警）；
-    /// 或删掉 `startup.rs` 里对 `dropped_points/dropped_batches` 的读取。
+    /// 改什么会让本条红：删掉 `spawn_storage_health_timer(`（任务不再起）、删掉标签字面量
+    /// `"storage_health_timer"`（不再带标签登记）、或删掉 `startup.rs` 里对
+    /// `dropped_points/dropped_batches` 的读取。
+    ///
+    /// ⚠️ **"把它塞进 `guard.0`（abort 名单）"不再列为红因（评审 W-8）**：该变异
+    /// **不可编译** —— `guard` 是 `TaskGuard(Vec<JoinHandle<()>>)`、`producers` 是
+    /// `ProducerGuard(Vec<(&'static str, JoinHandle<()>)>)`（`startup.rs:1127` / `:1140`）
+    /// ⇒ 带标签的元组塞不进 `guard.0`（实测 `E0308`）。**该属性由类型系统保证**，
+    /// 故原先那条"标签之前不得夹 `guard.0.push(`"的静态断言**不可达、无判别力**，已删除
+    /// （详见函数体内注）。
     #[test]
     fn startup_wires_the_health_timer_into_the_cooperative_list() {
         let src = include_str!("startup.rs").replace("\r\n", "\n");
@@ -374,20 +388,21 @@ mod tests {
         );
         assert!(
             production.contains("\"storage_health_timer\""),
-            "必须带标签登记（否则退出期日志无法指认是谁；标签同时是下面那条定位锚点）"
+            "必须带标签登记（否则退出期日志无法指认是谁）"
         );
-        let push_at = production
-            .find("\"storage_health_timer\"")
-            .expect("巡检任务的登记点必须存在");
-        let producers_at = production[..push_at]
-            .rfind("producers.0.push(")
-            .expect("必须经 `producers` 登记（协作退出名单）");
-        // 登记点与 `producers.0.push(` 之间不得夹别的名单（如 `guard.0.push(`）
-        let between = &production[producers_at..push_at];
-        assert!(
-            !between.contains("guard.0.push("),
-            "巡检任务不得混进 abort 名单（退出瞬间仍会投告警）"
-        );
+        // ── **已删除：原先那条"标签之前不得夹 `guard.0.push(`"的静态断言（评审 W-8）** ──
+        //
+        // 它**不可达、无判别力**：`guard` = `TaskGuard(Vec<JoinHandle<()>>)`、
+        // `producers` = `ProducerGuard(Vec<(&'static str, JoinHandle<()>)>)`
+        // （`startup.rs:1127` / `:1140`）⇒ **把带标签的元组塞进 `guard.0` 是类型错误**，
+        // 该变异**不可编译**（探针实测 `E0308`），故"混进 abort 名单"这一形态在本仓
+        // **根本构造不出来** —— 该属性由**类型系统**保证，不需要（也不可能有）一条有牙的
+        // 源文本断言。要证的自始至终只是"**登记还在**"：由本文件上方两条
+        // （`spawn_storage_health_timer(` + 标签字面量）与下面的 `AlertFeed` 同一实例断言覆盖。
+        //
+        // 另：`producers.0.push((&'static str, JoinHandle<()>))` 是**唯一**能接收该元组的
+        // 名单 ⇒ 标签所在的这次登记**只能是**它（`guard.0` 装不下）。原实现里那条
+        // `rfind("producers.0.push(")` 的 `expect` 因此也只是同义反复，一并删除。
         assert!(
             production.contains("alert_feed.clone(),") || production.contains("alert_feed.clone()"),
             "巡检必须拿到同一个 `AlertFeed` 实例（新造一个环 = 无人订阅、告警凭空消失）"

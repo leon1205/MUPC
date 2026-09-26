@@ -256,9 +256,12 @@ pub struct WriteBuffer {
     /// - 接收端由 [`Self::spawn_flush_timer`] 起的那个任务持有 ⇒ 真正干 DB 活的地方是一个
     ///   **已在退出编排里的**任务（`mupc-core-bin` 的 `producers` 名单），不是游离 spawn。
     flush_wake: mpsc::Sender<()>,
-    /// 唤醒信号（接收端）。**唯一持有者** = `spawn_flush_timer` 的任务（构造后 `take()` 走）；
-    /// 未被取走时（单测直接调 `buffer_telemetry`、不起任务）唤醒只是被丢弃 —— 点仍在缓冲里，
-    /// 不会因"没人接唤醒"而丢，见 [`Self::request_flush`] 的 `Closed` 分支。
+    /// 唤醒信号（接收端）。**唯一持有者** = `spawn_flush_timer` 的任务（构造后 `take()` 走）。
+    ///
+    /// **未被取走时不是"丢弃"**（订正措辞）：接收端仍**活着**（只是没人 `recv()`）⇒ 第一条
+    /// 唤醒会**留在容量 1 的通道里**，其后各条因"满"被**合并**掉（`TrySendError::Full`，见
+    /// [`Self::request_flush`]）。无论哪种，点都仍在缓冲里、不会因"没人接唤醒"而丢；真丢唤醒
+    /// 只发生在 `Closed`（flush 任务已收工/未装配）时，语义见 [`Self::request_flush`]。
     flush_wake_rx: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
@@ -326,7 +329,12 @@ impl WriteBuffer {
                 // **不 drain**（FLS-04）：这批不再由本调用栈提交，而是留在缓冲里等已注册的
                 // flush 任务来取。同时**本 push 不裁剪**——同旧「先谈提交、再谈裁剪」的理由
                 // （这批马上要被提交，此刻裁掉等于丢掉本可以入库的点）。越过上限至多 1 点，
-                // 由下一次非触发 push 的 `trim_oldest` 收回 ⇒ 上界仍是 `max_points + 1`。
+                // 由下一次非触发 push 的 `trim_oldest` 收回 ⇒ **`capacity ≥ 2` 时**上界仍是
+                // `max_points + 1`。⚠️ **前提（capacity ≥ 2）不可省**：`capacity = 1` 时每次
+                // push 都落本分支（`since_attempt` 每 push 归零）⇒ **不存在"下一次非触发
+                // push"**，采集路径永不 `trim_oldest`（缓冲只由 flush 吞吐 / 失败回填裁剪
+                // 约束）—— 该退化配置已在配置校验层被拒
+                // （`core_config::validate_storage` 的范围 `2..=100_000`）。
                 (true, 0)
             } else {
                 // 无提交可试 ⇒ 就在这里守住上限（`Vec` 尾插头删 ⇒ 头部就是"最旧"）。
