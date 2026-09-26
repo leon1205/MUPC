@@ -16,7 +16,7 @@
 //!            按 role 施加子集规则（下表）：
 //!              Battery   → 标量全量(BOTH) + 位点 MQTT-only + 15 聚合(IEC104-only，段 4)
 //!              MeterBatt → 标量全量(BOTH)
-//!              Pcs       → 标量全量(BOTH)（站不在 cfg ⇒ 整段不产条目）
+//!              Pcs       → 标量全量(BOTH)（**来自 `south_pcs` 段的合成站壳**，见入参说明）
 //!              Fire      → fire_sys 13 点(BOTH) + 其余块 MQTT-only
 //!              Hvac      → discrete 块 31 点(BOTH) + 其余块 MQTT-only
 //!     IEC104 段内序号 = 1..n（标量在前、位点在后；段 4 的 15 聚合即段内序 1..15）
@@ -45,7 +45,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::config::{RegFunc, Role, SouthStationsConfig, StationConf};
+use crate::config::{RegFunc, Role, SouthPcsConfig, SouthStationsConfig, StationConf};
 use crate::point_table::{self, BitClass, RegPointKind};
 use crate::points::{self, PointKind};
 use mupc_data_processing::latest_values::PointQuality;
@@ -481,14 +481,44 @@ fn bits_sorted(pts: &[StationPoint]) -> Vec<&StationPoint> {
 /// 生成**并集**上送条目（含 15 个 IEC104 独有聚合）。**失败即拒启动**（配置/点表漂移的
 /// fail-fast 点，与 `validate_south_stations` 同范式）。
 ///
+/// **入参 `pcs`（设计 §13.9 末要求①②）**：PCS 顶层段 `south_pcs`（§13.7 / ADR-016）。PCS
+/// 迁出站级段后**必须显式传入**才产 72 个 PCS 条目 —— 否则 72 个 IOA 会**静默**从
+/// IEC104/MQTT 点表消失，且生成期自检**不会响**（`has_pcs == false` 时期的期望值恰为
+/// 567 = 5 站并集，与"5 站本就无 PCS"的合法形态**不可分** ⇒ 原实现是 fail-open 的）。
+/// `None` 与 `Some(enabled: false)` 同义（= 无 PCS 通道）。
+///
+/// **合成**走 [`SouthPcsConfig::station_shell`]（要求③：生产与测试共用同一函数）。
+///
+/// **fail-closed（要求④）**：① `south_stations` 里若仍含 `role: pcs` 站 ⇒ `Err`（该形态
+/// 已被配置期规则 P-3 拒，本函数再兜一道 —— 绕过 `validate` 的构造路径不得静默产出"两份
+/// PCS 点"）；② 产出物里 PCS 条目的有无须与 `has_pcs`（**唯一取自显式入参**）一致，否则
+/// `Err`。两条判据都落在"实际产出"上，不依赖期望值代数巧合。
+///
 /// **确定性**：同一输入多次调用产出**逐字节相同**的列表（按 `cfg.stations` 顺序 + 站内
-/// `(块 addr, 块内偏移)` / 位地址升序，全程无 `HashMap` 迭代）。
-pub fn build_uplink_points(cfg: &SouthStationsConfig) -> Result<Vec<UplinkPoint>, String> {
+/// `(块 addr, 块内偏移)` / 位地址升序，全程无 `HashMap` 迭代；PCS 段合成站排在其后）。
+pub fn build_uplink_points(
+    cfg: &SouthStationsConfig,
+    pcs: Option<&SouthPcsConfig>,
+) -> Result<Vec<UplinkPoint>, String> {
+    // `has_pcs` 的**唯一真源是显式入参**，绝不从"站表里有没有 Pcs 站"推导（那正是原
+    // fail-open 的成因：PCS 段被漏传时站表也没有 ⇒ 两个错误互相印证、自检恒绿）。
+    let has_pcs = pcs.is_some_and(|p| p.enabled);
+    // fail-closed ①：站级段不得再含 role: pcs（规则 P-3 / ADR-016）。
+    if let Some(st) = cfg.stations.iter().find(|s| s.role == Role::Pcs) {
+        return Err(format!(
+            "south_stations 站 {} 仍为 role: pcs —— PCS 已迁至顶层段 south_pcs（规则 P-3 / ADR-016）；\
+             站级 PCS 站与 south_pcs.enabled={} 并存会让 PCS 点上云**双重或缺失**，拒绝生成点表",
+            st.id, has_pcs
+        ));
+    }
+    // PCS 段 → 站壳（仅在启用时合成；`None`/`enabled:false` ⇒ 不产任何 PCS 条目）
+    let pcs_shell: Option<StationConf> = pcs.filter(|p| p.enabled).map(|p| p.station_shell());
+
     let mut out: Vec<UplinkPoint> = Vec::new();
     // 站内位地址宇宙（仅用于 G-1 的"引用存在"判据；无 battery 站 ⇒ `None` ⇒ 跳过该半条）
     let mut bit_universe: Option<BTreeSet<u16>> = None;
 
-    for st in &cfg.stations {
+    for st in cfg.stations.iter().chain(pcs_shell.iter()) {
         let pts = expand_station(st)?;
         match st.role {
             Role::MeterGrid => {
@@ -582,7 +612,17 @@ pub fn build_uplink_points(cfg: &SouthStationsConfig) -> Result<Vec<UplinkPoint>
     }
 
     check_aggr_consistency(BMS_AGGR_GROUPS, BMS_AGGR_EXCLUDED, bit_universe.as_ref())?;
-    check_channel_counts(&out, cfg.stations.iter().any(|s| s.role == Role::Pcs))?;
+    // fail-closed ②：`has_pcs`（显式入参）与**实际产出**须一致。上面按它合成站壳 ⇒ 二者
+    // 必然一致；此处显式复核是把"将来有人改回从站表推导 has_pcs"这类回归钉成当场红，
+    // 而不是靠 `check_channel_counts` 的期望值巧合（567 恰是 5 站并集，判不出漏传）。
+    let produced_pcs = out.iter().any(|p| p.station == "pcs");
+    if produced_pcs != has_pcs {
+        return Err(format!(
+            "south_pcs.enabled={has_pcs} 与点表实际产出（PCS 条目{}）不一致 —— 拒绝生成点表（fail-closed，设计 §13.9）",
+            if produced_pcs { "有" } else { "无" }
+        ));
+    }
+    check_channel_counts(&out, has_pcs)?;
     Ok(out)
 }
 
@@ -950,31 +990,28 @@ mod tests {
         south_stations: SouthStationsConfig,
     }
 
-    /// 参考配置 = 站级段 5 站 **+ 由 `south_pcs` 段合成的 `Role::Pcs` 站**。
+    /// 参考站级段 = **5 站**（`south_pcs` 段已迁出，见 [`pcs_ref`]）。
     ///
-    /// 合成理由：`build_uplink_points` 的入参仍是 `&SouthStationsConfig`（`south_pcs` → 上云
-    /// 的接线属后续 Task；§13.9 声明上云契约零变化），而本组用例要钉的正是"**PCS 启用**时
-    /// 的三通道 / 档位点数"（639 点口径）。
-    ///
-    /// **合成走共用函数** [`SouthPcsConfig::station_shell`]（设计 §13.9 末要求③：生产与测试
-    /// 共用同一函数）—— 此前本处手写、与 `mupc-core-bin` / `s3b2_decode_e2e` 两处各写一份，
-    /// 会与生产漂移。
+    /// Task 10 起 `build_uplink_points` **显式收 PCS 段**（设计 §13.9 末要求①②）⇒ 本组用例
+    /// 不再把 `station_shell()` 塞进 `stations`，而是走 [`pcs_ref`] 入参 —— 与生产装配
+    /// （`startup.rs` 传 `Some(&config.south_pcs)`）**同一调用形态**。
     fn cfg_ref() -> SouthStationsConfig {
-        let mut cfg: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_STATIONS)
+        serde_yaml::from_str::<Wrapper>(REF_STATIONS)
             .expect("参考配置解析失败")
-            .south_stations;
-        let pcs: crate::config::SouthPcsConfig =
-            serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
-        assert!(pcs.enabled, "参考 PCS 段须 enabled");
-        cfg.stations.push(pcs.station_shell());
-        cfg
+            .south_stations
     }
 
-    /// 去掉 PCS 站（EX-7：站未启用 ⇒ 72 点不产条目）。
-    fn cfg_ref_no_pcs() -> SouthStationsConfig {
-        let mut cfg = cfg_ref();
-        cfg.stations.retain(|s| s.role != Role::Pcs);
-        cfg
+    /// 参考 PCS 顶层段（`enabled: true`）。
+    fn pcs_ref() -> SouthPcsConfig {
+        let pcs: SouthPcsConfig =
+            serde_yaml::from_str(REF_PCS).expect("south_pcs 参考配置解析失败");
+        assert!(pcs.enabled, "参考 PCS 段须 enabled");
+        pcs
+    }
+
+    /// 参考配置（PCS 启用）= 站级 5 站 + PCS 段（639 点口径）。
+    fn cfg_pcs_enabled() -> (SouthStationsConfig, SouthPcsConfig) {
+        (cfg_ref(), pcs_ref())
     }
 
     fn count(points: &[UplinkPoint], mask: ChannelMask) -> usize {
@@ -992,8 +1029,8 @@ mod tests {
 
     #[test]
     fn reference_config_pcs_enabled_matches_design_channel_counts() {
-        let pts = build_uplink_points(&cfg_ref())
-            .expect("参考配置（站级 5 站 + 合成 PCS 段）应通过全部生成期自检");
+        let pts = build_uplink_points(&cfg_ref(), Some(&pcs_ref()))
+            .expect("参考配置（站级 5 站 + south_pcs 段）应通过全部生成期自检");
         assert_eq!(
             count(&pts, ChannelMask::IEC104),
             234,
@@ -1043,7 +1080,7 @@ mod tests {
     #[test]
     fn reference_config_without_pcs_matches_design_channel_counts() {
         let pts =
-            build_uplink_points(&cfg_ref_no_pcs()).expect("5 站（无 PCS）应通过全部生成期自检");
+            build_uplink_points(&cfg_ref(), None).expect("5 站（无 PCS）应通过全部生成期自检");
         assert_eq!(
             count(&pts, ChannelMask::IEC104),
             162,
@@ -1076,7 +1113,7 @@ mod tests {
 
     #[test]
     fn segment_bases_and_in_segment_order_follow_design() {
-        let pts = build_uplink_points(&cfg_ref()).unwrap();
+        let pts = build_uplink_points(&cfg_ref(), Some(&pcs_ref())).unwrap();
 
         // 段 1：grid 固定派生 6 点（IOA 1–6，现场追认、不得改号）
         for (ioa, metric, _) in GRID_DERIVED_6 {
@@ -1150,7 +1187,7 @@ mod tests {
 
     #[test]
     fn iec104_points_have_nonzero_ioa_and_mqtt_only_are_zero() {
-        let pts = build_uplink_points(&cfg_ref()).unwrap();
+        let pts = build_uplink_points(&cfg_ref(), Some(&pcs_ref())).unwrap();
         for p in &pts {
             if p.channels.has(ChannelMask::IEC104) {
                 assert!(
@@ -1182,7 +1219,7 @@ mod tests {
 
     #[test]
     fn subset_rules_exclude_fire_det_hvac_in_and_battery_bits_from_iec104() {
-        let pts = build_uplink_points(&cfg_ref()).unwrap();
+        let pts = build_uplink_points(&cfg_ref(), Some(&pcs_ref())).unwrap();
 
         // fire：仅 fire_sys 13 点进 IEC104；fire_det 114 点为 MQTT-only
         let fire_iec: Vec<&UplinkPoint> = pts
@@ -1247,7 +1284,7 @@ mod tests {
 
     #[test]
     fn aggregates_are_iec104_only_on_ioa_301_to_315_in_group_order() {
-        let pts = build_uplink_points(&cfg_ref()).unwrap();
+        let pts = build_uplink_points(&cfg_ref(), Some(&pcs_ref())).unwrap();
         let expected = [
             "bms_aggr_cluster_voltage",
             "bms_aggr_cluster_current",
@@ -1469,7 +1506,7 @@ mod tests {
             .unwrap();
         let blk = bms.regs.iter_mut().find(|b| b.name == "bms_alarm").unwrap();
         blk.addr = 100; // 位地址宇宙变成 100..387 ⇒ 聚合引用的 388..460 落空
-        let e = build_uplink_points(&cfg).expect_err("配置漂移应拒启动");
+        let e = build_uplink_points(&cfg, Some(&pcs_ref())).expect_err("配置漂移应拒启动");
         assert!(e.contains("G-1"), "实际: {e}");
     }
 
@@ -1477,7 +1514,7 @@ mod tests {
     fn g5_rejects_config_with_missing_station() {
         let mut cfg = cfg_ref();
         cfg.stations.retain(|s| s.role != Role::Hvac);
-        let e = build_uplink_points(&cfg).expect_err("缺 hvac 站应拒启动");
+        let e = build_uplink_points(&cfg, Some(&pcs_ref())).expect_err("缺 hvac 站应拒启动");
         // 缺 hvac（31 位 + 3 温湿度）⇒ IEC104 234−31 = 203、MQTT 624−34 = 590、并集 605
         assert!(
             e.contains("G-5") && e.contains("203") && e.contains("590") && e.contains("605"),
@@ -1496,7 +1533,7 @@ mod tests {
             .unwrap();
         let blk = bms.regs.iter_mut().find(|b| b.name == "bms_cap").unwrap();
         blk.points.pop();
-        let e = build_uplink_points(&cfg).expect_err("点数漂移应拒");
+        let e = build_uplink_points(&cfg, Some(&pcs_ref())).expect_err("点数漂移应拒");
         assert!(
             e.contains("段 3") && e.contains("实测 56") && e.contains("期望 57"),
             "实际: {e}"
@@ -1520,7 +1557,7 @@ mod tests {
             .find(|b| b.name == "mb_freq_line")
             .unwrap();
         blk.addr = 0x0040; // 原 0x0077（在 mb_ui 0x0061 之后）
-        let pts = build_uplink_points(&cfg).expect("点数未变，仍应通过自检");
+        let pts = build_uplink_points(&cfg, Some(&pcs_ref())).expect("点数未变，仍应通过自检");
         assert_eq!(
             get(&pts, "meter_batt", "mb_freq_line_1").ioa,
             107,
@@ -1530,13 +1567,34 @@ mod tests {
         assert_eq!(count(&pts, ChannelMask::IEC104), 234, "总点数不因块序变化");
     }
 
+    // ── fail-closed：站级段不得再含 `role: pcs`（设计 §13.9 末要求④） ──
+
+    /// 站级段里塞一个 `role: pcs` 站 ⇒ **拒生成**（而非静默产出两份 PCS 点）。
+    ///
+    /// 判别力：本形态在 Task 10 之前是**合法输入**（那时 PCS 就在站表里）；改回"从站表推导
+    /// has_pcs、不检查 role"⇒ 本用例必红。站壳由 [`SouthPcsConfig::station_shell`] 合成，
+    /// 与生产/测试共用的那一份同源。
+    #[test]
+    fn station_level_role_pcs_is_rejected_fail_closed() {
+        let mut cfg = cfg_ref();
+        cfg.stations.push(pcs_ref().station_shell());
+        let e = build_uplink_points(&cfg, Some(&pcs_ref())).expect_err("站级 role: pcs 须拒");
+        assert!(
+            e.contains("role: pcs") && e.contains("south_pcs"),
+            "期望点名 P-3 迁移与 south_pcs 段，实际: {e}"
+        );
+        // 不传 PCS 段也须拒（同一 fail-closed 判据，与 has_pcs 无关）
+        let e2 = build_uplink_points(&cfg, None).expect_err("站级 role: pcs 须拒（无 PCS 段亦然）");
+        assert!(e2.contains("role: pcs"), "实际: {e2}");
+    }
+
     // ── 确定性 ──
 
     #[test]
     fn build_uplink_points_is_deterministic() {
         let cfg = cfg_ref();
-        let a = build_uplink_points(&cfg).unwrap();
-        let b = build_uplink_points(&cfg).unwrap();
+        let a = build_uplink_points(&cfg, Some(&pcs_ref())).unwrap();
+        let b = build_uplink_points(&cfg, Some(&pcs_ref())).unwrap();
         assert_eq!(a, b, "同一输入两次调用须相等");
         assert_eq!(
             format!("{a:?}"),

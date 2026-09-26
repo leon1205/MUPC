@@ -15,8 +15,8 @@
 //! | 字段 | 设计 §4.3.3 的生效方式 | 本单元实测 |
 //! |------|------------------------|------------|
 //! | `system.log_level` | `tracing_subscriber::reload` handle | ✅ **真接线**（[`HotApply::new`] 注入 handle；`main.rs` 在 Phase 2 建 handle） |
-//! | `intercore.host` / `intercore.port` | `watch` → 断开重连 | ❌ **未接线**：核间传输在 `startup.rs:484-520` **构造期**固定（TCP `remote_addr` 写入 transport，Modbus 口/波特率写入 `ModbusRtuSettings`），全仓**无**该参数的 `watch` 通道；改它需要动 `crates/intercore` 的重连路径（**含用户 dirty 红线 `transport/modbus.rs`**）⇒ 本轮**不碰**，如实登记 |
-//! | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | `watch` → 心跳循环读新值 | ❌ **未接线**：无消费方（TCP 传输无心跳循环；Modbus 心跳循环的周期取 `modbus_rtu.heartbeat_poll_ms`，与本二键无关） |
+//! | `intercore.host` / `intercore.port` | `watch` → 断开重连 | ❌ **未接线**：核间传输在 `startup.rs` **构造期**固定（TCP `remote_addr` 写入 transport；原 Modbus 口/波特率档已随 PCS 迁至 `south_pcs`，Task 10），全仓**无**该参数的 `watch` 通道；改它需要动 `crates/intercore` 的重连路径 ⇒ 本轮**不碰**，如实登记 |
+//! | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | `watch` → 心跳循环读新值 | ❌ **未接线**：无消费方（TCP 传输无心跳循环；PCS 采集兼心跳的周期取 `south_pcs.interval_ms`，与本二键无关） |
 //! | `gateway.listen_addr` / `gateway.listen_port` | `stop()` → `start()` 重绑定 | ❌ **未接线**：`Iec104Server` 的 listen 配置**构造期固定**（`Iec104Server::new(config)`，无 setter），且该实例还被南向上送（`SouthSink` 的 `iec104_server.clone()`）共享 ⇒ 原地重建会让上送句柄指向**已停止**的旧实例（半生效，EDGE-10 明禁） |
 //!
 //! ⚠️ **这 6 项"未接线"是设计 §4.3.5 的降级方案**（「本期仅支持 HotApply 子集，连接类参数

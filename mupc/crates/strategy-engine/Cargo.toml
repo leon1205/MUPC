@@ -18,7 +18,9 @@ async-trait = "0.1"
 mupc-common = { path = "../common" }
 mupc-data-processing = { path = "../data-processing" }
 mupc-ai-engine = { path = "../ai-engine", default-features = false }
-mupc-intercore = { path = "../intercore" }
+# PCS 通信与控制已由 `mupc-intercore` 迁至 `mupc-southd`（Task 10 / 设计 §13.5.1）：
+# 本 crate 只消费 PCS 能力（`pcs::PcsHandle`），不再依赖核间 crate。
+mupc-southd = { path = "../mupc-southd" }
 chrono.workspace = true
 calamine.workspace = true
 

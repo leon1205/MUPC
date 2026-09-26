@@ -6,6 +6,7 @@
 //! **未建模段**容忍并逐字保留，见 [`CoreConfig`] 顶部说明。）
 
 use mupc_display_proto::DisplayConfig;
+use mupc_southd::config::SouthPcsConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -50,6 +51,13 @@ pub struct CoreConfig {
     /// 策略 phase 由 pv/load 南向模拟兜底，部署行为不变。master_meter 段已删除收敛，S3b-1c）
     #[serde(default)]
     pub south_stations: mupc_southd::config::SouthStationsConfig,
+    /// PCS 通信与控制段（设计 §13.7 / ADR-016）。缺省 `enabled: false` ⇒ 行为零变化。
+    ///
+    /// ⚠️ `CoreConfig` **未设** `deny_unknown_fields`（见本结构体顶部说明）：现场 yaml 若已
+    /// 写上 `south_pcs:` 段，本字段被**正确解析**（`#[serde(default)]` 只在整段缺失时取
+    /// `Default`）；反过来，未知键仍按"未建模段"被忽略（与 `web_api:` / `legacy_top:` 同类）。
+    #[serde(default)]
+    pub south_pcs: SouthPcsConfig,
     /// IEC 104 网关配置（S2 §12.3 gateway 段；缺省 0.0.0.0:2404——未配置 gateway 段
     /// 部署行为不变，仅端口不再硬编码 2404、可经 config 指定。审查 R2-A2）
     #[serde(default)]
@@ -236,59 +244,13 @@ pub struct InterCoreConfig {
     /// 重连间隔（秒），默认 3
     #[serde(default = "default_reconnect_interval")]
     pub reconnect_interval_sec: u64,
-    /// 传输通道：tcp | modbus_rtu（部署二选一）
+    /// 传输通道：仅 `tcp`（仿真/联调；设计 §13 / ADR-016）。
+    ///
+    /// ⚠️ **原 `modbus_rtu` 档已随 PCS 迁入南向而删除**：PCS 主链路现由顶层段
+    /// [`CoreConfig::south_pcs`]（`southd::pcs::PcsHandle`）承担；本项取值非法/`modbus_rtu`
+    /// 一律在 `startup` 装配期**拒启动**（不再静默落仿真通道）。
     #[serde(default = "default_intercore_transport")]
     pub transport: String,
-    /// Modbus RTU 通道参数（transport=modbus_rtu 时生效）
-    #[serde(default)]
-    pub modbus_rtu: ModbusRtuConfig,
-}
-
-/// Modbus RTU 核间传输配置（transport=modbus_rtu 时生效）
-///
-/// 注意：手动实现 `Default`（不走 derive），使 `#[serde(default)]` 缺省整段
-/// 配置时也落到下方默认函数，而非空/零值。
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModbusRtuConfig {
-    /// 串口设备，默认 /dev/ttyS0（BECG-3568 板载 COM1 ↔ PCS，19200 N-8-1；无 ttyS1）
-    #[serde(default = "default_serial_port")]
-    pub serial_port: String,
-    /// 波特率，默认 19200（PCS 线格式 V1.3：N-8-1 @19200）
-    #[serde(default = "default_baud_rate")]
-    pub baud_rate: u32,
-    /// 数据位，默认 8
-    #[serde(default = "default_data_bits")]
-    pub data_bits: u8,
-    /// 停止位，默认 1
-    #[serde(default = "default_stop_bits")]
-    pub stop_bits: u8,
-    /// 校验位: none/even/odd，默认 none
-    #[serde(default = "default_parity")]
-    pub parity: String,
-    /// 从站地址（有效 1..=247），默认 1
-    #[serde(default = "default_slave_addr")]
-    pub slave_addr: u8,
-    /// 响应超时（毫秒），默认 200
-    #[serde(default = "default_response_timeout_ms")]
-    pub response_timeout_ms: u64,
-    /// 心跳轮询间隔（毫秒），默认 1000
-    #[serde(default = "default_heartbeat_poll_ms")]
-    pub heartbeat_poll_ms: u64,
-}
-
-impl Default for ModbusRtuConfig {
-    fn default() -> Self {
-        Self {
-            serial_port: default_serial_port(),
-            baud_rate: default_baud_rate(),
-            data_bits: default_data_bits(),
-            stop_bits: default_stop_bits(),
-            parity: default_parity(),
-            slave_addr: default_slave_addr(),
-            response_timeout_ms: default_response_timeout_ms(),
-            heartbeat_poll_ms: default_heartbeat_poll_ms(),
-        }
-    }
 }
 
 /// AI 引擎配置
@@ -623,39 +585,6 @@ fn default_intercore_transport() -> String {
     "tcp".to_string()
 }
 
-// BECG-3568 板载隔离 RS485 COM1(ttyS0) ↔ PCS（核间 10 §12.1）；无 ttyS1
-fn default_serial_port() -> String {
-    "/dev/ttyS0".to_string()
-}
-
-fn default_baud_rate() -> u32 {
-    19200
-}
-
-fn default_data_bits() -> u8 {
-    8
-}
-
-fn default_stop_bits() -> u8 {
-    1
-}
-
-fn default_parity() -> String {
-    "none".to_string()
-}
-
-fn default_slave_addr() -> u8 {
-    1
-}
-
-fn default_response_timeout_ms() -> u64 {
-    200
-}
-
-fn default_heartbeat_poll_ms() -> u64 {
-    1000
-}
-
 // S2 §12.4: io 段默认值
 fn default_io_poll_ms() -> u64 {
     100
@@ -740,31 +669,10 @@ impl CoreConfig {
         if self.intercore.port == 0 {
             return Err("intercore.port 不能为 0".to_string());
         }
-        // M7/生产安全：transport=modbus_rtu（PCS 主链路）时，串口/从站/波特率须合法。
-        // 非法值启动即报错，避免运行时 open_ctx 才暴露。
-        if self.intercore.transport == "modbus_rtu" {
-            let mb = &self.intercore.modbus_rtu;
-            if mb.serial_port.trim().is_empty() {
-                return Err(
-                    "intercore.modbus_rtu.serial_port 不能为空（transport=modbus_rtu）".to_string(),
-                );
-            }
-            if !(1..=247).contains(&mb.slave_addr) {
-                return Err(format!(
-                    "intercore.modbus_rtu.slave_addr={} 须在 1..=247（transport=modbus_rtu）",
-                    mb.slave_addr
-                ));
-            }
-            if mb.baud_rate == 0 {
-                return Err(
-                    "intercore.modbus_rtu.baud_rate 不能为 0（transport=modbus_rtu）".to_string(),
-                );
-            }
-        }
         // TODO(v2.24 M-1)：v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
-        // q_i_max）与 intercore transport 驱动点表型号不自动联动——放行任一非
+        // q_i_max）与 PCS 驱动点表型号不自动联动——放行任一非
         // 60kW 无中线档时须与驱动点表同批变更并在此核对（当前 60kW 档与
-        // modbus_rtu V1.3 驱动天然匹配；has_neutral=true 档已在档位加载侧拦截）。
+        // south_pcs 的 PCS V1.3 驱动天然匹配；has_neutral=true 档已在档位加载侧拦截）。
         // 注：档位 YAML 的实际加载/校验发生在 startup 装配（fail-fast），此处仅
         // 保留位注释，不读文件、不加逻辑。
         // 实际档位加载/校验在 startup.rs 装配（load_tai_storage_config）处执行（Task 5 落点）。
@@ -775,6 +683,10 @@ impl CoreConfig {
         if !self.south_stations.stations.is_empty() {
             self.validate_south_stations()?;
         }
+        // 设计 §13.7 / §13.8（ADR-016）：PCS 顶层段段内校验（规则 P-4 / P-5 + 基础项）。
+        // `enabled: false`（缺省）整段跳过 ⇒ 既有部署零行为变化；跨段规则 P-1（本机资源）/ P-2
+        // （口独占）见下方 `validate_io` 与 `validate_south_stations` 的对应处。
+        self.south_pcs.validate()?;
         // 03 设计 §9.2.2（U-67）：storage 段校验（**无 enabled 门控** —— PRD R-11.1-A 明文
         // 「总表落库不设关闭开关」⇒ 本段任何取值都必须合法，不存在"整段跳过"）。
         self.validate_storage()?;
@@ -1089,22 +1001,16 @@ impl CoreConfig {
                 ));
             }
         }
-        // S2 Task7 Important：transport=modbus_rtu（PCS 主链路）时 io.stop_confirm_ms 须 ≥ 2×心跳
-        // 轮询周期。原因：interlock 无主动读路径，last_run_state 由心跳缓存刷新（modbus.rs
-        // run_heartbeat_loop 按 heartbeat_poll_ms 周期更新）；若停机确认窗口 < 心跳周期，PCS 已停但
-        // 缓存要下个心跳才报 0 → 确认自旋/帧检查会误判超时置**假 stop_failed**。取 2× 给缓存刷新留
-        // 余量（含坏读/丢拍）。heartbeat_poll_ms=0 回退 1000ms（与 modbus.rs run_heartbeat_loop 的
-        // 退避常量一致）。io.enabled 已在上方早退保证非空。
-        if self.intercore.transport == "modbus_rtu" {
-            let hb = self.intercore.modbus_rtu.heartbeat_poll_ms;
-            let hb_effective = if hb == 0 { 1000 } else { hb };
-            if io.stop_confirm_ms < 2 * hb_effective {
+        // 联锁停机确认窗口须 ≥ 2 × PCS 采集周期（否则停机下发后可能来不及被观察到）。
+        // 迁移前此约束挂在 intercore.modbus_rtu.heartbeat_poll_ms；PCS 迁入南向后，
+        // 采集周期（兼心跳职能）的真源是 south_pcs.interval_ms（设计 §13.4）。
+        // south_pcs.enabled == false（无 PCS 通道）⇒ 该约束不适用，跳过。
+        if self.south_pcs.enabled {
+            let period = self.south_pcs.interval_ms;
+            if io.stop_confirm_ms < 2 * period {
                 return Err(format!(
-                    "io.stop_confirm_ms={} 须 >= 2×intercore.modbus_rtu.heartbeat_poll_ms={} \
-                     （heartbeat_poll_ms=0 回退 1000；transport=modbus_rtu）——停机确认窗口须覆盖≥2个心跳\
-                     周期，否则 PCS 已停而心跳缓存未刷新时误判停机超时（假 stop_failed）",
-                    io.stop_confirm_ms,
-                    2 * hb_effective
+                    "io.stop_confirm_ms={} 须 ≥ 2 × south_pcs.interval_ms={}（否则联锁停机来不及被观察）",
+                    io.stop_confirm_ms, period
                 ));
             }
         }
@@ -1114,9 +1020,9 @@ impl CoreConfig {
     /// S3 §10.3 跨段校验（south_stations.stations 非空时由 validate() 调用）：
     /// ① south_stations.validate()（段内，mupc-southd 实现：id 唯一非空、meter_grid 至多一站、
     ///    port 非空、slave 1..=247、interval_ms>0、meter_grid interval_ms < DATA_FRESHNESS_MS）失败传播；
-    /// ② transport=="modbus_rtu"（PCS ttyS0 主链路）时任一 station.port 与 modbus_rtu.serial_port
-    ///    同串口 → Err（RS485 总线仲裁未实现，禁双 master 共总线；串口节点名归一比较）。
-    ///    总表收敛 south_stations.meter_grid 后，master_meter 段删除（S3b-1c），无 legacy 占口可排他；
+    /// ② 规则 P-2（Task 10 / 设计 §13.8）：`south_pcs.enabled` 时任一站 `port` 与
+    ///    `south_pcs.port` 同串口（节点名归一比较）→ Err —— PCS 采集循环自持该口，
+    ///    共口会绕过站级口级仲裁（RS485 禁双 master 共总线）；
     /// ③ 站内同节点别名端口互斥：两站 port_node 相同（同物理口）但原始 port 字符串不同
     ///    （"ttyS4" vs "/dev/ttyS4"）→ Err。原因见 Rs485PortBus::normalize_port 双写法支持——
     ///    startup seen_ports 与 scheduler runner 分组均按**原始串**去重/分口，别名拼写会让同物理口
@@ -1141,15 +1047,17 @@ impl CoreConfig {
             }
             seen.push((node, s.port.clone(), s.id.clone()));
         }
-        // ② transport=modbus_rtu（PCS 主链路 ttyS0）时站串口不得与其同总线（tcp 部署时不生效）。
-        for s in &ss.stations {
-            if self.intercore.transport == "modbus_rtu"
-                && port_node(&s.port) == port_node(&self.intercore.modbus_rtu.serial_port)
-            {
-                return Err(format!(
-                    "south_stations 站 {} port {} 与 intercore.modbus_rtu.serial_port {} 重复（PCS 主链路 RS485 总线仲裁未实现，禁双 master 共总线）",
-                    s.id, s.port, self.intercore.modbus_rtu.serial_port
-                ));
+        // 规则 P-2（设计 §13.8）：`south_pcs.port` 须**独占** —— PCS 采集循环自持、
+        // 不与站级调度器共口（共口会绕过 south_stations 的口级仲裁）。
+        if self.south_pcs.enabled {
+            let pcs_node = port_node(&self.south_pcs.port);
+            for s in &ss.stations {
+                if port_node(&s.port) == pcs_node {
+                    return Err(format!(
+                        "south_pcs.port {} 与 south_stations 站 {} port {} 同口 —— PCS 须独占该串口（设计 §13.8 P-2）",
+                        self.south_pcs.port, s.id, s.port
+                    ));
+                }
             }
         }
         Ok(())
@@ -1157,7 +1065,7 @@ impl CoreConfig {
 }
 
 /// 串口节点名归一："/dev/ttyS0" 与 "ttyS0" 都取 "ttyS0"（跨段串口重复比较基准；
-/// BECG ttySx/COMx，站 port 可能写短名，modbus_rtu.serial_port 写全路径）。
+/// BECG ttySx/COMx，站 port 可能写短名，`south_pcs.port` 写全路径 —— 规则 P-2）。
 fn port_node(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
@@ -1203,17 +1111,16 @@ plugins: {}
             PathBuf::from("/opt/mupc/models")
         );
         assert_eq!(config.intercore.heartbeat_interval_sec, 5);
-        // 未配置 intercore.transport 时默认 tcp
+        // 未配置 intercore.transport 时默认 tcp（modbus_rtu 档已随 PCS 迁入南向删除）
         assert_eq!(config.intercore.transport, "tcp");
-        // 未配置 intercore.modbus_rtu 时默认参数
-        assert_eq!(config.intercore.modbus_rtu.serial_port, "/dev/ttyS0");
-        assert_eq!(config.intercore.modbus_rtu.baud_rate, 19200);
-        assert_eq!(config.intercore.modbus_rtu.data_bits, 8);
-        assert_eq!(config.intercore.modbus_rtu.stop_bits, 1);
-        assert_eq!(config.intercore.modbus_rtu.parity, "none");
-        assert_eq!(config.intercore.modbus_rtu.slave_addr, 1);
-        assert_eq!(config.intercore.modbus_rtu.response_timeout_ms, 200);
-        assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
+        // 未配置 south_pcs 段时缺省参数（Task 10 / 设计 §13.7）：`enabled: false` ⇒ 行为零变化
+        assert!(!config.south_pcs.enabled, "south_pcs 缺省必须为关闭");
+        assert_eq!(config.south_pcs.port, "/dev/ttyS0");
+        assert_eq!(config.south_pcs.baud_rate, 19200);
+        assert_eq!(config.south_pcs.slave, 1);
+        assert_eq!(config.south_pcs.interval_ms, 1000);
+        assert_eq!(config.south_pcs.response_timeout_ms, 200);
+        assert!(config.south_pcs.regs.is_empty());
         assert!(config.ai_engine.local_priority, "本地优先应为部署默认");
         // 未配置 gateway 段时缺省 0.0.0.0:2404（审查 R2-A2：端口读 config 且向后兼容）
         assert_eq!(config.gateway.listen_addr, "0.0.0.0");
@@ -1565,7 +1472,6 @@ mqtt_bridge:
                 heartbeat_interval_sec: 5,
                 reconnect_interval_sec: 3,
                 transport: "tcp".into(),
-                modbus_rtu: ModbusRtuConfig::default(),
             },
             ai_engine: AiEngineConfig {
                 model_dir: PathBuf::from("/tmp/models"),
@@ -1581,6 +1487,7 @@ mqtt_bridge:
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
+            south_pcs: SouthPcsConfig::default(),
             gateway: GatewayConfig::default(),
             mqtt_bridge: MqttBridgeConfig::default(),
             display: DisplayConfig::default(),
@@ -1607,7 +1514,6 @@ mqtt_bridge:
                 heartbeat_interval_sec: 5,
                 reconnect_interval_sec: 3,
                 transport: "tcp".into(),
-                modbus_rtu: ModbusRtuConfig::default(),
             },
             ai_engine: AiEngineConfig {
                 model_dir: PathBuf::from("/tmp"),
@@ -1623,6 +1529,7 @@ mqtt_bridge:
             strategy: StrategyConfig::default(),
             io: IoConfig::default(),
             south_stations: mupc_southd::config::SouthStationsConfig::default(),
+            south_pcs: SouthPcsConfig::default(),
             gateway: GatewayConfig::default(),
             mqtt_bridge: MqttBridgeConfig::default(),
             display: DisplayConfig::default(),
@@ -1961,9 +1868,14 @@ display:
         );
     }
 
-    /// M7: transport=modbus_rtu（PCS 生产链路）时 slave_addr 越界 → validate Err
+    /// Task 10（设计 §13.8 P-4）：`south_pcs.slave` 越界 → validate Err。
+    ///
+    /// 迁移前同一判据挂在 `intercore.modbus_rtu.slave_addr`（该字段已随 PCS 迁入南向删除）；
+    /// 本用例把判据搬到**新真源** `south_pcs.slave` —— 它断的不只是段内校验本身，还是
+    /// "`CoreConfig::validate` 确实调用了 `SouthPcsConfig::validate`"这条**接线事实**
+    /// （删掉那行调用 ⇒ 本用例必红）。
     #[test]
-    fn test_validate_modbus_rtu_slave_addr_range() {
+    fn test_validate_south_pcs_slave_addr_range() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -1971,25 +1883,27 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
-  modbus_rtu:
-    slave_addr: 0
 ai_engine: {}
 plugins: {}
+south_pcs:
+  enabled: true
+  slave: 0
+  regs:
+    - { name: pcs_3zone, func: input, addr: 1000, count: 33, byte_swap: true, format: uint16, scale: 1.0 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(
-            err.contains("slave_addr"),
-            "期望提示从站地址越界（transport=modbus_rtu），实际: {}",
+            err.contains("slave") && err.contains("south_pcs"),
+            "期望提示 PCS 从站地址越界，实际: {}",
             err
         );
     }
 
-    /// M7: transport=modbus_rtu 时 serial_port 为空 → validate Err（master_meter 段删除后，
-    /// 保留纯 modbus_rtu 串口自校验覆盖；原与总表同串口跨判随 master_meter 收敛删除）
+    /// Task 10（设计 §13.8 P-4）：`south_pcs.port` 为空 → validate Err
+    /// （迁移前对应 `intercore.modbus_rtu.serial_port` 为空那条）。
     #[test]
-    fn test_validate_modbus_rtu_serial_empty_rejected() {
+    fn test_validate_south_pcs_port_empty_rejected() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -1997,18 +1911,19 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
-  modbus_rtu:
-    serial_port: ""
-    slave_addr: 1
 ai_engine: {}
 plugins: {}
+south_pcs:
+  enabled: true
+  port: ""
+  regs:
+    - { name: pcs_3zone, func: input, addr: 1000, count: 33, byte_swap: true, format: uint16, scale: 1.0 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(
-            err.contains("serial_port"),
-            "期望提示 modbus_rtu.serial_port 不能为空，实际: {}",
+            err.contains("port") && err.contains("south_pcs"),
+            "期望提示 south_pcs.port 不能为空，实际: {}",
             err
         );
     }
@@ -2308,10 +2223,12 @@ io:
         );
     }
 
-    /// S2 Task7 Important: transport=modbus_rtu（PCS 主链路）时，stop_confirm_ms < 2×心跳 → Err
-    /// （停机确认窗口须覆盖≥2个心跳周期，防 PCS 已停但心跳缓存未刷新时误判超时/假 stop_failed）
+    /// Task 10（设计 §13.4）：`stop_confirm_ms < 2 × south_pcs.interval_ms` → Err
+    /// （停机确认窗口须覆盖 ≥2 个采集拍，否则 PCS 已停而快照未刷新时误判超时/假 stop_failed）。
+    ///
+    /// 迁移前同名判据挂在 `intercore.modbus_rtu.heartbeat_poll_ms`（该段已删除）。
     #[test]
-    fn test_io_modbus_rtu_stop_confirm_too_small_rejected() {
+    fn test_io_south_pcs_stop_confirm_too_small_rejected() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -2319,25 +2236,29 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
 ai_engine: {}
 plugins: {}
 io:
   enabled: true
   stop_confirm_ms: 1000
+south_pcs:
+  enabled: true
+  interval_ms: 1000
+  regs:
+    - { name: pcs_3zone, func: input, addr: 1000, count: 33, byte_swap: true, format: uint16, scale: 1.0 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(
-            err.contains("stop_confirm_ms") && err.contains("heartbeat_poll_ms"),
-            "期望提示 stop_confirm_ms 与心跳窗口交叉校验，实际: {}",
+            err.contains("stop_confirm_ms") && err.contains("south_pcs.interval_ms"),
+            "期望提示 stop_confirm_ms 与 PCS 采集周期交叉校验，实际: {}",
             err
         );
     }
 
-    /// S2 Task7 Important: 边界 stop_confirm_ms == 2×心跳 → 通过
+    /// Task 10：边界 `stop_confirm_ms == 2 × south_pcs.interval_ms` → 通过
     #[test]
-    fn test_io_modbus_rtu_stop_confirm_boundary_ok() {
+    fn test_io_south_pcs_stop_confirm_boundary_ok() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -2345,53 +2266,31 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
 ai_engine: {}
 plugins: {}
 io:
   enabled: true
   stop_confirm_ms: 2000
+south_pcs:
+  enabled: true
+  interval_ms: 1000
+  regs:
+    - { name: pcs_3zone, func: input, addr: 1000, count: 33, byte_swap: true, format: uint16, scale: 1.0 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
-            "stop_confirm_ms==2×心跳 应通过: {:?}",
+            "stop_confirm_ms==2×采集周期 应通过: {:?}",
             config.validate()
         );
     }
 
-    /// S2 Task7 Important: heartbeat_poll_ms=0 回退 1000ms（与 modbus.rs run_heartbeat_loop 一致）→
-    /// stop_confirm_ms=1500（< 2×1000）仍 Err
+    /// Task 10：**无 PCS 通道（`south_pcs.enabled=false`）时该交叉约束不适用** ——
+    /// `stop_confirm_ms` 取小值也不得误伤（与原 `transport=tcp` 跳过的语义等价）。
+    ///
+    /// 判别力：把判据写成"不看 `enabled` 一律比 2×`interval_ms`"⇒ 本用例必红。
     #[test]
-    fn test_io_modbus_rtu_heartbeat_zero_fallback_rejected() {
-        let yaml = r#"
-version: "1.0"
-system:
-  log_level: "info"
-intercore:
-  host: "127.0.0.1"
-  port: 9100
-  transport: "modbus_rtu"
-  modbus_rtu:
-    heartbeat_poll_ms: 0
-ai_engine: {}
-plugins: {}
-io:
-  enabled: true
-  stop_confirm_ms: 1500
-"#;
-        let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.contains("heartbeat_poll_ms") && err.contains("回退"),
-            "期望按 heartbeat_poll_ms=0 回退 1000 判定，实际: {}",
-            err
-        );
-    }
-
-    /// S2 Task7 Important: transport=tcp 时不作交叉校验（stop_confirm_ms 小不误伤）
-    #[test]
-    fn test_io_tcp_does_not_cross_validate_stop_confirm() {
+    fn test_io_south_pcs_disabled_does_not_cross_validate_stop_confirm() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -2408,15 +2307,15 @@ io:
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(
             config.validate().is_ok(),
-            "transport=tcp 不应做 modbus 心跳交叉校验: {:?}",
+            "无 PCS 通道不应做采集周期交叉校验: {:?}",
             config.validate()
         );
     }
 
-    /// S2 Task7 Important: transport=modbus_rtu + io.enabled 且 stop_confirm_ms 走默认 5000 →
-    /// 默认配置（5000 ≥ 2×1000=2000）仍合法，不得误伤既有合法默认
+    /// Task 10：`south_pcs.enabled` + `io.enabled` 且 `stop_confirm_ms` 走默认 5000、
+    /// `interval_ms` 走默认 1000（5000 ≥ 2×1000=2000）⇒ 合法，不得误伤既有合法默认。
     #[test]
-    fn test_io_modbus_rtu_default_stop_confirm_legal() {
+    fn test_io_south_pcs_default_stop_confirm_legal() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -2424,7 +2323,6 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
 ai_engine: {}
 plugins: {}
 io:
@@ -2435,13 +2333,17 @@ io:
   do:
     - { name: "运行灯", gpio: 8 }
     - { name: "故障灯", gpio: 9 }
+south_pcs:
+  enabled: true
+  regs:
+    - { name: pcs_3zone, func: input, addr: 1000, count: 33, byte_swap: true, format: uint16, scale: 1.0 }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.io.stop_confirm_ms, 5000);
-        assert_eq!(config.intercore.modbus_rtu.heartbeat_poll_ms, 1000);
+        assert_eq!(config.south_pcs.interval_ms, 1000);
         assert!(
             config.validate().is_ok(),
-            "modbus_rtu 合法默认（stop_confirm_ms=5000 ≥ 2×1000）应通过: {:?}",
+            "PCS 合法默认（stop_confirm_ms=5000 ≥ 2×1000）应通过: {:?}",
             config.validate()
         );
     }
@@ -2488,10 +2390,15 @@ south_stations:
         );
     }
 
-    /// S3 §10.3 跨段 ②: transport=modbus_rtu（PCS 主链路）时，站 port 与 modbus_rtu.serial_port
-    /// 同串口（站写短名 "ttyS0"，归一后与 "/dev/ttyS0" 同）→ validate Err（禁双 master 共总线）
+    /// Task 10（设计 §13.8 规则 **P-2**）：`south_pcs.port` 与站 `port` 同口（站写短名
+    /// "ttyS0"，归一后与 `south_pcs.port` 的 "/dev/ttyS0" 同节点）→ validate Err
+    /// （PCS 采集循环自持该口，共口会绕过 south_stations 的口级仲裁）。
+    ///
+    /// 迁移前同一形态的判据是"站口与 `intercore.modbus_rtu.serial_port` 重复 → 禁双 master
+    /// 共总线"（该段已删除）。判据搬到新真源 `south_pcs.port`，**串口节点名归一**的比较口径
+    /// 不变（`port_node`）。
     #[test]
-    fn test_south_stations_shared_serial_with_pcs_short_rejected() {
+    fn test_south_pcs_shared_serial_with_station_short_rejected() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -2499,12 +2406,13 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
-  modbus_rtu:
-    serial_port: "/dev/ttyS0"
-    slave_addr: 1
 ai_engine: {}
 plugins: {}
+south_pcs:
+  enabled: true
+  port: "/dev/ttyS0"
+  regs:
+    - { name: pcs_3zone, func: input, addr: 1000, count: 33, byte_swap: true, format: uint16, scale: 1.0 }
 south_stations:
   stations:
     - { id: battery_1, role: battery, port: "ttyS0", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
@@ -2512,16 +2420,18 @@ south_stations:
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(
-            err.contains("重复") && err.contains("仲裁"),
-            "期望提示站与 PCS 主链路串口重复（总线仲裁未实现），实际: {}",
+            err.contains("同口") && err.contains("P-2"),
+            "期望提示 PCS 口与站口重复（P-2 独占），实际: {}",
             err
         );
     }
 
-    /// S3 §10.3 跨段 ②: 站 port 与 modbus_rtu.serial_port 均写全路径 "/dev/ttyS0"
-    /// → 节点名归一后仍重复 → Err
+    /// Task 10（规则 P-2）：两侧都写全路径 "/dev/ttyS0" → 节点名归一后仍相同 → Err。
+    ///
+    /// 判别力补充：`south_pcs.enabled=false`（同 yaml 去掉 enabled）⇒ 该规则**不适用**，
+    /// 同口不报错（避免"未启用 PCS 也把站级配置判死"）。
     #[test]
-    fn test_south_stations_shared_serial_with_pcs_fullpath_rejected() {
+    fn test_south_pcs_shared_serial_with_station_fullpath_rejected() {
         let yaml = r#"
 version: "1.0"
 system:
@@ -2529,22 +2439,31 @@ system:
 intercore:
   host: "127.0.0.1"
   port: 9100
-  transport: "modbus_rtu"
-  modbus_rtu:
-    serial_port: "/dev/ttyS0"
-    slave_addr: 1
 ai_engine: {}
 plugins: {}
+south_pcs:
+  enabled: true
+  port: "/dev/ttyS0"
 south_stations:
   stations:
     - { id: battery_1, role: battery, port: "/dev/ttyS0", slave: 1, interval_ms: 1000, regs: [{ name: bms_io, addr: 118, count: 1, format: uint16, scale: 1.0, points: [{ at: 1, name: soc }] }] }
 "#;
         let config: CoreConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = config.validate().unwrap_err();
+        // 该 yaml 的 `south_pcs.regs` 为空 ⇒ 段内校验会先报 regs；为**只**验 P-2，
+        // 这里直接用 `validate_south_stations()`（P-2 的落点），不去碰段内校验顺序。
+        let err = config.validate_south_stations().unwrap_err();
         assert!(
-            err.contains("重复") && err.contains("仲裁"),
-            "期望提示站与 PCS 主链路串口重复（全路径归一），实际: {}",
+            err.contains("同口") && err.contains("P-2"),
+            "期望提示 PCS 口与站口同节点重复（全路径归一），实际: {}",
             err
+        );
+        // 关闭 PCS ⇒ 同一份站级配置不再因该口被判死
+        let mut off = config.clone();
+        off.south_pcs.enabled = false;
+        assert!(
+            off.validate_south_stations().is_ok(),
+            "south_pcs.enabled=false 时 P-2 不适用: {:?}",
+            off.validate_south_stations()
         );
     }
 

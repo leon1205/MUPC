@@ -10,7 +10,7 @@ use mupc_ai_engine::{
     AiEngineError, ModelManager, ModelStatus, RobustnessManager, RunningMode, SwitchSource,
 };
 use mupc_data_processing::telemetry::DataPackage;
-use mupc_intercore::{DualParamCommand, IntercoreClient};
+use mupc_southd::pcs::{PcsDualParam, PcsHandle};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -27,8 +27,15 @@ pub type DecisionSink = Arc<dyn Fn([f64; 3], [f64; 3]) + Send + Sync>;
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
-    /// v2.7 核间通信客户端（用于发送双参数 p_ref + k_droop 到实时控制模块）
-    intercore_client: Option<Arc<IntercoreClient>>,
+    /// PCS 通道（PCS 的**完整所有者** `PcsHandle`，南向；设计 §13.5.1 / ADR-016）：
+    /// 双参数下发（`p_ref` + `k_droop`）、分相下发、以及 SOC 活读（回落源）都经它。
+    ///
+    /// **为什么是 `std::sync::RwLock` 而非裸 `Option`**（Task 10 装配期约束，如实登记）：
+    /// `PcsHandle` 的构造需要 `Arc<AiIntegrator>`（其采集出口 = 站级同一个 `SouthSink`，
+    /// 而 sink 持本集成器）⇒ 句柄**必然晚于**本结构体的 `Arc::new`，故注入点无法再拿
+    /// `&mut self`。锁只在装配期写一次、运行期每 dispatch 拍读一次（clone 出 `Arc` 后
+    /// 立即释放 guard，**不跨 await 持锁**）。
+    pcs: std::sync::RwLock<Option<Arc<PcsHandle>>>,
     /// v2.6 双参数模式：最后有效的 p_ref（通信中断时使用）
     last_valid_p_ref: RwLock<Option<f64>>,
     /// v2.6 双参数模式：最后有效的 k_droop（通信中断时使用）
@@ -120,7 +127,7 @@ impl AiIntegrator {
         Self {
             model_manager: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(ModelStatus::Unloaded)),
-            intercore_client: None,
+            pcs: std::sync::RwLock::new(None),
             last_valid_p_ref: RwLock::new(None),
             last_valid_k_droop: RwLock::new(None),
             fallback_active: RwLock::new(false),
@@ -199,7 +206,7 @@ impl AiIntegrator {
         // N3: 仍缺 SOC（meter-on 模式总表 pkg 恒无 battery）时，从核间实时模块上送补
         // （DataUpload.battery_soc，实时模块为储能 PCS/BMS 侧，SOC 真值所在）。
         if pkg.battery.soc.is_none() {
-            if let Some(client) = &self.intercore_client {
+            if let Some(client) = self.pcs_client() {
                 if let Some((soc, ts)) = client.latest_soc().await {
                     if ts.elapsed() <= Self::DATA_STALE_AFTER {
                         pkg.battery.soc = Some(soc);
@@ -283,7 +290,7 @@ impl AiIntegrator {
         let bms = *self.bms_soc.read().await;
         // BMS 非 fresh（或无）→ 无条件读核间（活读；不 gate on existing.is_none()）
         let intercore = if bms.map_or(true, |(_, ts)| ts.elapsed() > Self::DATA_STALE_AFTER) {
-            if let Some(client) = &self.intercore_client {
+            if let Some(client) = self.pcs_client() {
                 client.latest_soc().await
             } else {
                 None
@@ -385,7 +392,7 @@ impl AiIntegrator {
             match tai.evaluate(&data).await {
                 Ok(cmd) => match (cmd.phase_p_set, cmd.phase_q_set) {
                     (Some(p), Some(q)) => {
-                        if let Some(ref client) = self.intercore_client {
+                        if let Some(client) = self.pcs_client() {
                             // 审查 R1-B6 2026-09-09：TaiStorage evaluate 命中 60s 节流（返回缓存
                             // cmd）时分相值必与上拍相同——跳过重发，消除每 dispatch 拍对相同指令
                             // 的 RS485 空耗与抖动窗口放大。值不变不 send、不触发 decision_sink。
@@ -527,9 +534,15 @@ impl AiIntegrator {
         manager.as_ref().map(|m| m.mode_selector_arc())
     }
 
-    /// v2.7: 设置核间通信客户端（用于发送双参数到实时控制模块）
-    pub fn set_intercore_client(&mut self, client: Arc<IntercoreClient>) {
-        self.intercore_client = Some(client);
+    /// Task 10：注入 PCS 通道（`Arc<PcsHandle>`，南向；原 `set_intercore_client` + TCP 核间
+    /// 客户端）。**签名由 `&mut self` 放宽为 `&self`** —— 理由见字段 `pcs` 的文档。
+    pub fn set_pcs_client(&self, client: Arc<PcsHandle>) {
+        *self.pcs.write().unwrap_or_else(|e| e.into_inner()) = Some(client);
+    }
+
+    /// PCS 通道快照（`Arc` 克隆后**立即释放 guard** ⇒ 调用方可安全跨 await 使用）。
+    fn pcs_client(&self) -> Option<Arc<PcsHandle>> {
+        self.pcs.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 注入台区储能治理策略
@@ -641,12 +654,12 @@ impl AiIntegrator {
             }
         }
 
-        // v2.7: 发送双参数到实时控制模块
-        if let Some(ref client) = self.intercore_client {
+        // v2.7: 发送双参数到实时控制模块（Task 10：经南向 `PcsHandle`）
+        if let Some(client) = self.pcs_client() {
             // strategy_mode：策略模式（基础/智能/兜底），此处为正常 AI 决策 = 智能
             let strategy_mode = "intelligent".to_string();
 
-            let cmd = DualParamCommand::new(
+            let cmd = PcsDualParam::new(
                 action.p_ref,
                 action.k_droop,
                 self.is_ready().await, // ai_ready：反映 AI 引擎真实就绪状态
@@ -671,7 +684,7 @@ impl AiIntegrator {
             *self.last_valid_p_ref.write().await = Some(action.p_ref);
             *self.last_valid_k_droop.write().await = Some(action.k_droop);
         } else {
-            tracing::debug!("Intercore client not set, skipping dual-param send");
+            tracing::debug!("PCS 通道未注入（south_pcs.enabled=false），跳过双参数下发");
         }
 
         Ok(())
@@ -692,8 +705,8 @@ impl AiIntegrator {
         self.set_fallback_active(true).await;
 
         // 发送双参数到实时控制模块
-        if let Some(ref client) = self.intercore_client {
-            let cmd = DualParamCommand::new(action.p_ref, action.k_droop, true, "fallback");
+        if let Some(client) = self.pcs_client() {
+            let cmd = PcsDualParam::new(action.p_ref, action.k_droop, true, "fallback");
             match client.send_dual_param(&cmd).await {
                 Ok(_) => {
                     tracing::debug!(
@@ -1012,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn bms_soc_overrides_when_fresh() {
         let i = AiIntegrator::new();
-        // 无 intercore_client；BMS fresh → apply_soc_source 短路不读核间（仅 BMS 覆盖路径）
+        // 无 PCS 通道；BMS fresh → apply_soc_source 短路不活读（仅 BMS 覆盖路径）
         i.set_battery_soc(65.5).await;
         // 场景 A：pkg 已带核间值 Some(42.0) → BMS fresh 覆盖（BMS 优先于核间，最关键排序）
         let mut pkg_have = create_test_pkg_with_soc(Some(42.0));
@@ -1066,7 +1079,7 @@ mod tests {
         ));
         let mut pkg = create_test_pkg_with_soc(None);
         i.apply_soc_source(&mut pkg).await;
-        // 无 intercore_client → 活读分支返回 None → resolve(None, None, existing(None)) → None 保持
+        // 无 PCS 通道 → 活读分支返回 None → resolve(None, None, existing(None)) → None 保持
         // （有 client 时核间 fresh 接管的裁决已由 resolve_soc_source 纯函数测覆盖）
         assert_eq!(
             pkg.battery.soc, None,
@@ -1076,55 +1089,71 @@ mod tests {
 
     // ── 12-显示终端 Dev-B3：SOC 展示快照（soc_display_snapshot / resolve_soc_core）──
 
-    /// 测试桩 transport（AiIntegrator 活读核间 latest_soc 用）。仅承载测试所需读接口；
-    /// 下行/联锁方法返回默认（provider 帧组装测试不需要真实 PCS 写）。
-    #[derive(Clone)]
-    struct StubIntercore {
-        soc: Option<(f64, std::time::Instant)>,
-        run: Option<u16>,
-        connected: bool,
-    }
+    /// 采集出口空实现（本组用例只关心 SOC 活读，不关心遥测落点）。
+    struct NullSink;
 
     #[async_trait::async_trait]
-    impl mupc_intercore::IntercoreTransport for StubIntercore {
-        async fn send_dual_param(
+    impl mupc_southd::scheduler::StationSink for NullSink {
+        async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+        async fn on_station_telemetry(
             &self,
-            _cmd: &mupc_intercore::DualParamCommand,
-        ) -> Result<(), mupc_common::MupcError> {
-            Ok(())
+            _id: &str,
+            _role: mupc_southd::config::Role,
+            _pts: Vec<(String, f64, bool)>,
+        ) {
         }
-        async fn send_tai_command(
-            &self,
-            _p: [f64; 3],
-            _q: [f64; 3],
-            _mode: &str,
-        ) -> Result<(), mupc_common::MupcError> {
-            Ok(())
-        }
-        async fn is_connected(&self) -> bool {
-            self.connected
-        }
-        async fn shutdown(&self) -> Result<(), mupc_common::MupcError> {
-            Ok(())
-        }
-        async fn latest_soc(&self) -> Option<(f64, std::time::Instant)> {
-            self.soc
-        }
-        async fn stop(&self) -> Result<(), String> {
-            Ok(())
-        }
-        async fn is_interlock_stopped(&self) -> bool {
-            false
-        }
-        async fn restore_interlock_latched(&self, _latched: bool) -> Result<(), String> {
-            Ok(())
-        }
-        fn last_run_state(&self) -> Option<u16> {
-            self.run
-        }
-        async fn authorize_restart(&self) -> Result<(), String> {
-            Ok(())
-        }
+        async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+    }
+
+    /// 测试用 PCS 句柄 = **真 `PcsHandle` + `MockBus`**（Task 10：不再有 transport 桩）。
+    ///
+    /// `PcsHandle` 的 SOC 是**采集快照**（非现读）⇒ 先把 3 区块预置进 `MockBus`、同步采一拍
+    /// （`tick_once`）把快照点亮，再交给 `AiIntegrator` 活读。
+    ///
+    /// ⚠️ 寄存器取数口径（与 `pcs::collect` 同源）：3 区窗口基址 1000、量纲 `SCALE_3PH = 0.1`
+    /// ⇒ 寄存器 raw = 物理值 / 0.1；SOC(1010) / 运行态(1013) 量纲为 1，直接给物理值
+    /// （`to_pcs_reg` = `round() as i16` + 高/低 8 位互换，**无小数位**）。
+    ///
+    /// 预置窗口按 `SouthPcsConfig::default()` 的 `regs` 为空 ⇒ 本 helper 显式给一块
+    /// `count = 76` 的 `pcs_3zone`（与生产段同形），使快照五字段全部可得。
+    async fn stub_pcs_with_soc(soc: Option<f64>) -> Arc<PcsHandle> {
+        use mupc_southd::config::{RegBlockConf, RegFunc, SouthPcsConfig};
+        use mupc_southd::port_runtime::MockBus;
+
+        let mut cfg = SouthPcsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        cfg.regs = vec![RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 1000,
+            func: RegFunc::Input,
+            format: mupc_data_processing::meter_regs::RegFormat::Uint16,
+            scale: 1.0,
+            count: 76,
+            offset: 0.0,
+            byte_swap: true,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        }];
+        let mut words = vec![0u16; 76];
+        // SOC 域校验（0..=100）⇒ 不给值时写域外字 `0xFFFF`（解码 = -1 ⇒ `None`），
+        // 而不是留 0（那会被解成 SOC = 0.0，是个**合法读数** ⇒ 双源裁决判它 fresh）。
+        words[(1010 - 1000) as usize] = match soc {
+            Some(v) => mupc_southd::pcs::to_pcs_reg(v),
+            None => 0xFFFF,
+        };
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1000, words);
+        let h = PcsHandle::new(cfg, bus, Arc::new(NullSink));
+        h.tick_once().await; // 采一拍 ⇒ 快照 valid、ts 有效
+        assert_eq!(
+            h.latest_soc().await.map(|(v, _)| v),
+            soc,
+            "前提：stub 快照 SOC 须与用例期望一致（否则本组断言空转）"
+        );
+        h
     }
 
     #[tokio::test]
@@ -1150,16 +1179,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn soc_snapshot_intercore_fallback_when_bms_stale() {
-        // 有 client：核间 latest_soc fresh 42.0；BMS 超期 → 无条件活读核间 → PcsReg1010 接管
-        let mut i = AiIntegrator::new();
-        i.set_intercore_client(Arc::new(mupc_intercore::IntercoreClient::with_transport(
-            Arc::new(StubIntercore {
-                soc: Some((42.0, std::time::Instant::now())),
-                run: Some(1),
-                connected: true,
-            }),
-        )));
+    async fn soc_snapshot_pcs_fallback_when_bms_stale() {
+        // 有 PCS 通道：快照 SOC fresh 42.0；BMS 超期 → 无条件活读 PCS → PcsReg1010 接管
+        let i = AiIntegrator::new();
+        i.set_pcs_client(stub_pcs_with_soc(Some(42.0)).await);
         i.set_battery_soc(65.5).await;
         *i.bms_soc.write().await = Some((
             65.5,
@@ -1178,7 +1201,7 @@ mod tests {
 
     #[tokio::test]
     async fn soc_snapshot_dual_lost_flags_frozen_existing() {
-        // existing 冻结值（latest_data 保留旧 SOC 30.0）+ BMS 超期 + 无 client → 双源皆失：
+        // existing 冻结值（latest_data 保留旧 SOC 30.0）+ BMS 超期 + 无 PCS 通道 → 双源皆失：
         // resolve 沿用冻结 existing（控制内部），dual_lost=true、source=None（帧映射 Lost）
         let i = AiIntegrator::new();
         i.set_latest_data(create_test_pkg_with_soc(Some(30.0)))

@@ -27,8 +27,8 @@
 //! 各方法注释（配置层 vs 状态机的差异、name→source 启发式、fail-safe 处理均记录在此）。
 
 use async_trait::async_trait;
-use mupc_intercore::IntercoreClient;
 use mupc_io::{DigitalIn, DigitalOut, IoError, SysfsIn, SysfsOut};
+use mupc_southd::pcs::PcsHandle;
 use mupc_storage::{EventRepository, SystemEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -274,7 +274,7 @@ impl StateMachine {
 //    表示停机未确认，post_stop_maintenance 会补发停机并确认）。
 //
 // 测试性取舍：GPIO 用 `Box<dyn DigitalIn/Out>` 注入（mupc_io::MockIn/Out 或本地 stub）；
-// transport 用薄 trait `InterlockPort`（Arc<IntercoreClient> 真机转发，测试注入 fake 记调用）；
+// transport 用薄 trait `InterlockPort`（Arc<PcsHandle> 真机转发，测试注入 fake 记调用）；
 // DB/告警投递用真实 trait 对象 `Arc<dyn EventRepository>` / `Arc<AlertFeed>`（测试注入内存 fake）。
 // ⚠️ 单元 K：原 `Arc<SsePushService>`（web-api）已换成 `crate::alert_feed::AlertFeed`
 //    ——事件名与文案**逐字不变**，只是换了承载（设计 §4.7）。
@@ -328,8 +328,12 @@ fn now_secs() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64
 }
 
-/// runner 依赖薄 trait（可测）：由装配方把 `Arc<IntercoreClient>` 适配进来。
-/// 真机实现见 `impl InterlockPort for Arc<IntercoreClient>`；测试注入 fake 记调用序列。
+/// runner 依赖薄 trait（可测）：由装配方把 `Arc<PcsHandle>` 适配进来。
+/// 真机实现见 `impl InterlockPort for Arc<PcsHandle>`；测试注入 fake 记调用序列。
+///
+/// ⚠️ **trait 的 4 个方法签名与状态机本体零改动**（Task 10 / 设计 §13.5.2）：适配器只换了
+/// 被适配的门面类型（`intercore::IntercoreClient` → `southd::pcs::PcsHandle`），方法名/语义
+/// 一一对应（`stop` / `restore_interlock_latched` / `last_run_state` / `authorize_restart`）。
 #[async_trait]
 pub trait InterlockPort: Send + Sync {
     /// PCS 停机（Modbus 写 REG_START_STOP=0；Tcp no-op）
@@ -343,7 +347,7 @@ pub trait InterlockPort: Send + Sync {
 }
 
 #[async_trait]
-impl InterlockPort for Arc<IntercoreClient> {
+impl InterlockPort for Arc<PcsHandle> {
     async fn stop(&self) -> Result<(), String> {
         (**self).stop().await
     }
@@ -402,7 +406,7 @@ pub struct InterlockController {
     ins: Vec<Box<dyn DigitalIn>>,
     /// 各 DO（与 cfg.do_out 对齐；含 no-op stub）
     outs: Vec<Box<dyn DigitalOut>>,
-    /// PCS 停机/锁存/重启授权（真机 Arc<IntercoreClient>，测试 fake）
+    /// PCS 停机/锁存/重启授权（真机 `Arc<PcsHandle>`，测试 fake）
     port: Box<dyn InterlockPort>,
     /// 事件落库（DB；测试注入内存 fake）
     events: Arc<dyn EventRepository>,
