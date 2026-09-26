@@ -90,6 +90,9 @@ pub(crate) struct PcsInner {
     stopped_latched: RwLock<bool>,
     /// 人工授权重启位（M1，**单次**）：授权后放行 `ensure_started` 的 S-4 守卫一次，消费即弃。
     restart_authorized: AtomicBool,
+    /// M1 停机告警的**跨拍去抖**记忆（"非停机→停机"跃迁告警一次；恢复非停机态时复位）。
+    /// 与 `intercore::ModbusRtuTransport` 的 `stopped_warned` 局部变量语义等价（此处提升为字段）。
+    stopped_warned: AtomicBool,
     /// 采集快照（`last_run_state` 为**同步** getter ⇒ 用 std RwLock —— tokio 的
     /// `blocking_read` 在异步执行上下文内会 panic，与迁移前同一取向）。
     snapshot: StdRwLock<PcsSnapshot>,
@@ -136,6 +139,7 @@ impl PcsHandle {
                 started: RwLock::new(false),
                 stopped_latched: RwLock::new(false),
                 restart_authorized: AtomicBool::new(false),
+                stopped_warned: AtomicBool::new(false),
                 snapshot: StdRwLock::new(PcsSnapshot::default()),
                 sink,
                 bad: AtomicU32::new(0),
@@ -340,11 +344,14 @@ impl PcsHandle {
                     }
                     *c = true;
                 }
-                // 停机观测（M1 告警去抖）：条件与迁移前逐字相同；本拍只判一次 ⇒ 天然去抖。
-                if snap.run_state == Some(0)
-                    && *self.inner.started.read().await
-                    && !*self.inner.stopped_latched.read().await
-                {
+                // ③ 停机观测（M1 告警**去抖**）：仅在"非停机 → 停机"跃迁时告警一次。
+                //    去抖靠 `stopped_warned` 跨拍记忆（不是"每拍判一次"——见该函数的注释）。
+                if should_warn_stopped(
+                    &self.inner.stopped_warned,
+                    snap.run_state,
+                    *self.inner.started.read().await,
+                    *self.inner.stopped_latched.read().await,
+                ) {
                     tracing::warn!(
                         "PCS 运行状态=0(停机)但 MUPC 此前已下发启动——疑似保护跳闸/人工停机；\
                          链路在线，MUPC 不自动重启，请上层/运维确认后处理"
@@ -614,6 +621,31 @@ fn decode_run_state(word: u16) -> Option<u16> {
         Some(st as u16)
     } else {
         None
+    }
+}
+
+/// M1 停机告警的**去抖决策**（纯函数，便于直接单测）：
+/// 仅当"RUN_STATE=0 且已下发运行 且 非 latch"**且**本拍是**首次**进入该状态时返回 `true`
+/// （即"非停机 → 停机"**跃迁**告警一次）；其余情形返回 `false`。
+///
+/// `warned` 是**跨拍记忆**（调用方持的 `AtomicBool`）：
+/// - 进入告警态：`swap(true)` ⇒ 首次返回 `true`，其后同一段停机内恒 `false`（**去抖**）
+/// - 离开告警态（含 latch / 非停机 / 未下发运行）：复位为 `false` ⇒ 下次跃迁仍能告警
+///
+/// ⚠️ 为什么必须有跨拍记忆：M1 语义下 `started` **刻意不复位**（见 `ensure_started` 注释），
+/// 故"停机"条件一旦成立就**长期为真**；无记忆则逐拍告警 ⇒ `interval_ms` 周期无限刷屏
+///（≈86400 条/日），正是迁移前注释点名要防的"停机期间每秒刷屏"。
+fn should_warn_stopped(
+    warned: &AtomicBool,
+    run_state: Option<u16>,
+    started: bool,
+    latched: bool,
+) -> bool {
+    if run_state == Some(0) && started && !latched {
+        !warned.swap(true, Ordering::Relaxed)
+    } else {
+        warned.store(false, Ordering::Relaxed);
+        false
     }
 }
 
@@ -1023,6 +1055,47 @@ mod control_tests {
                 (1, regs::REG_PHASE_Q_A + 2, to_pcs_reg(3.0)),
             ],
             "分相写序（逐相交错）与 clamp 后线上字（同源编码 to_pcs_reg）"
+        );
+    }
+
+    #[test]
+    fn stopped_warn_is_edge_triggered_not_per_tick() {
+        // 判据：M1 停机告警必须**跃迁触发**（每段停机恰一次），而非逐拍。
+        // 判别力：把实现改成 `run_state == Some(0) && started && !latched`（无记忆）
+        // ⇒ 第二次调用会返回 true ⇒ 本用例必红。
+        let w = AtomicBool::new(false);
+        // 前提：未下发运行 ⇒ 不告警
+        assert!(
+            !should_warn_stopped(&w, Some(0), false, false),
+            "未下发运行不得告警"
+        );
+        // 跃迁：停机 + 已下发运行 + 非 latch ⇒ 首次告警
+        assert!(
+            should_warn_stopped(&w, Some(0), true, false),
+            "跃迁必须告警一次"
+        );
+        // 同一段停机内（相邻拍）⇒ 必须**不再**告警（去抖）
+        assert!(
+            !should_warn_stopped(&w, Some(0), true, false),
+            "同一段停机内不得重复告警"
+        );
+        assert!(
+            !should_warn_stopped(&w, Some(0), true, false),
+            "第三拍同样不得告警"
+        );
+        // latch 期间不告警（S-1 豁免），且应复位记忆
+        assert!(
+            !should_warn_stopped(&w, Some(0), true, true),
+            "latch 期间不得告警"
+        );
+        // 恢复非停机 ⇒ 记忆复位；下次再停机应能再次告警（跃迁可重现）
+        assert!(
+            !should_warn_stopped(&w, Some(1), true, false),
+            "非停机不告警"
+        );
+        assert!(
+            should_warn_stopped(&w, Some(0), true, false),
+            "再次跃迁应能重新告警"
         );
     }
 }
