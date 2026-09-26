@@ -940,7 +940,7 @@ mod tests {
     /// `tests/point_table_vs_reference_config.rs` 同一输入（不新建第二份点表真源）。
     /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 迁至独立顶层段 [`REF_PCS`]
     /// （72 点）⇒ 合计仍 618 点、上云契约零变化（设计 §13.9）。
-    const REF_6_STATIONS: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
+    const REF_STATIONS: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
 
     /// PCS 独立顶层段（Task 6）。
     const REF_PCS: &str = include_str!("../tests/fixtures/south_pcs_s3b2.yaml");
@@ -957,7 +957,7 @@ mod tests {
     /// 的三通道 / 档位点数"（639 点口径）。合成的只是**外壳**（`id`/`role`），
     /// `port`/`slave`/`regs` 逐字段取自新段 ⇒ 点数口径与迁移前逐字相同。
     fn cfg_ref() -> SouthStationsConfig {
-        let mut cfg: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_6_STATIONS)
+        let mut cfg: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_STATIONS)
             .expect("参考配置解析失败")
             .south_stations;
         let pcs: crate::config::SouthPcsConfig =
@@ -999,7 +999,8 @@ mod tests {
 
     #[test]
     fn reference_config_pcs_enabled_matches_design_channel_counts() {
-        let pts = build_uplink_points(&cfg_ref()).expect("6 站参考配置应通过全部生成期自检");
+        let pts = build_uplink_points(&cfg_ref())
+            .expect("参考配置（站级 5 站 + 合成 PCS 段）应通过全部生成期自检");
         assert_eq!(
             count(&pts, ChannelMask::IEC104),
             234,

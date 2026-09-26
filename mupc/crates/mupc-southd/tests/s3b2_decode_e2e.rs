@@ -396,7 +396,7 @@ async fn ac2_hvac_int16_uint16_and_fc02_bits() {
 }
 
 /// 参考配置的**每站**都经 FC 读通路能读到块（未预置即 Err）——保证上面的用例不是"只对某一站
-/// 的块划分有效"；顺带钉住"6 站里除 `grid_meter` 外都有逐点产出"（grid 走分相语义，
+/// 的块划分有效"；顺带钉住"站级 5 站里除 `grid_meter` 外都有逐点产出"（grid 走分相语义，
 /// 不经 `telemetry_points`，见 §11.4.6 的只读断言）。
 #[tokio::test]
 async fn ac2_reference_config_every_collected_station_produces_points() {

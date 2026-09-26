@@ -88,7 +88,7 @@ fn assert_ok(cfg: &SouthStationsConfig, what: &str) {
     );
 }
 
-// ═══════════════════════════ AC-1 ② 完整 6 站 ═══════════════════════════
+// ═══════════════════════════ AC-1 ② 完整 5 站 ═══════════════════════════
 
 #[test]
 fn ac1_full_reference_config_parses_and_passes() {
@@ -144,8 +144,8 @@ fn ac1_full_reference_config_parses_and_passes() {
     assert_eq!(hvac.parity, StationParity::Even, "空调出厂偶校验");
     assert_eq!(hvac.regs[1].func, RegFunc::Discrete, "hvac_di = FC02 位块");
 
-    // 除 §9.4.3 明列条件外不触发任何既有/新增拒绝（含规则 15 的"六站必然通过"）
-    assert_ok(&cfg, "完整 6 站参考配置");
+    // 除 §9.4.3 明列条件外不触发任何既有/新增拒绝（含规则 15 的"五站必然通过"）
+    assert_ok(&cfg, "完整 5 站参考配置");
 }
 
 /// 仅 `grid_meter` 六相量块（既有形态，无 `points`）→ Ok
@@ -332,28 +332,43 @@ fn ac1_rule1_unknown_role_rejected_by_serde() {
     assert_eq!(cfg.stations[0].role, Role::Pcs, "role: pcs 应解析通过");
 }
 
-/// 规则 2（单站约束）：`pcs` 站 > 1 → Err。
+/// **规则 P-3**（ADR-016 / 设计 §13.7）：站级段**不再接受** `role: pcs`，拒并指向
+/// `south_pcs` 段。
 ///
-/// **Task 6（ADR-016）起语义变更**：站级段的 `pcs` 站在 ① 就被规则 P-3 拒（首个即命中），
-/// "至多一个 pcs 站"因此**结构性不可达** —— 原断言随之改为钉住 P-3（多配一台 PCS 的
-/// 真实后果就是"配到 `south_pcs` 段"，而该段是单值段、天然只有一台）。
+/// **本条合并了原 `ac1_rule2_multiple_pcs_rejected` 与 `ac1_rule3_pcs_empty_regs_rejected`**
+/// （2026-09-26 规格评审处置）：P-3 落地后，两条原用例都只断言 `Err` 含 `south_pcs`，
+/// 而**实测**把 rule2 缩成**一个** pcs 站、把 rule3 的 `regs` **填满**，两条**仍全绿**
+/// ⇒ 对"至多一个 pcs 站"与"空 regs"**零判别力**（名不副实），且与
+/// `config::south_pcs_tests::south_stations_rejects_pcs_role` 完全重复。
+/// 故按 P-3 语义合并重命名为本条：钉住"**只要**站级出现 `role: pcs`（不论几台、
+/// 不论 `regs` 空否）即被拒，且文案含站 id + 指向 `south_pcs`"。
+///
+/// 原两条规则的新落点（见 `SouthStationsConfig::validate` 注释）：
+/// - 规则 2「至多一个 pcs 站」⇒ 由 P-3 **单段化**天然满足（`south_pcs` 是单值段）；
+/// - 规则 3「pcs `regs` 非空」⇒ 迁入 [`SouthPcsConfig::validate`] 的 `regs 为空` 分支，
+///   单测覆盖见 `config::south_pcs_tests::south_pcs_validate_rejects_dead_or_illegal_configs`。
 #[test]
-fn ac1_rule2_multiple_pcs_rejected() {
+fn ac1_rule_p3_station_level_pcs_rejected_points_to_south_pcs() {
+    // ① 单台、`regs` 非空：仍拒（原 rule2 的真实判据是"至多一个"，与台数无关）
+    let one = one_station("pcs", &regs_of(&plain_block("z", 10, 2)));
+    let err = one.validate().unwrap_err();
+    assert!(
+        err.contains("south_pcs") && err.contains("role: pcs") && err.contains("s1"),
+        "P-3 文案须指向 south_pcs + 含站名，实际: {err}"
+    );
+    // ② 单台、`regs` **空**：同样拒（原 rule3 的真实判据是"空点表"，与 P-3 无关 ⇒
+    //    P-3 先命中，文案是 P-3 而非"空 regs"—— 这正是该规则已迁移的证明）
+    let empty = one_station("pcs", "");
+    let err = empty.validate().unwrap_err();
+    assert!(
+        err.contains("south_pcs") && !err.contains("regs 为空"),
+        "空 regs 的 pcs 站须先被 P-3 拒（空点表判据已迁至 south_pcs 段），实际: {err}"
+    );
+    // ③ 两台：首台即被 P-3 拒（"至多一个 pcs 站"结构性不可达）
     let cfg = parse(&format!(
         "south_stations:\n  stations:\n    - {{ id: a, role: pcs, port: t1, slave: 1, interval_ms: 1000, {FLOW_REGS} }}\n    - {{ id: b, role: pcs, port: t2, slave: 1, interval_ms: 1000, {FLOW_REGS} }}"
     ));
     assert_err_contains(&cfg, "south_pcs", "两个 pcs 站（首个即被 P-3 拒）");
-}
-
-/// 规则 3（必填点表）：`pcs` 站 regs 为空 → Err。
-///
-/// **Task 6（ADR-016）起语义变更**：站级段一律由 P-3 拒（文案指向新段）；"空点表"这条
-/// 规则迁入 `SouthPcsConfig::validate`，其覆盖见本 crate 单测
-/// `config::south_pcs_tests::south_pcs_validate_rejects_dead_or_illegal_configs`
-/// 与本文件 [`ac1_rule18_pcs_interval_lower_bound`] 的 PCS 段入口。
-#[test]
-fn ac1_rule3_pcs_empty_regs_rejected() {
-    assert_err_contains(&one_station("pcs", ""), "south_pcs", "pcs 站（含空 regs）");
 }
 
 /// 规则 4（`soc` 点契约）：battery 站点名集合无 `soc` → Err；

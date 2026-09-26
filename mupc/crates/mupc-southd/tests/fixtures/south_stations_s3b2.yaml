@@ -6,8 +6,9 @@
 #   ② 点表 `POINT_REGS`（§11.4.4，T4 落 618 行）与配置的双向漂移核对输入
 #      （`tests/point_table_vs_reference_config.rs`：本文件 546 点 + `south_pcs` 72 点 = 618）。
 #
-# 原第 6 站 `grid_meter` 与生效配置 `deploy/config/mupc_core_config.yaml` **取值逐字一致**
-# （站 id 是 `grid_meter`；`meter_grid` 是 role 名，二者不同），仅行内注释按本文体例改写。
+# 第 5 站 `grid_meter` 与生效配置 `deploy/config/mupc_core_config.yaml` **取值逐字一致**
+# （站 id 是 `grid_meter`；`meter_grid` 是 role 名，二者不同），仅行内注释按本文体例改写
+# ——序号随 PCS 迁出由"6"变"5"（本文件顺序：bms / meter_batt / fire / hvac / grid_meter）。
 # 其余各站在生效配置中仍是注释占位（启用以本文件为准）。
 south_stations:
   poll_ms: 1000            # 缺省轮询周期

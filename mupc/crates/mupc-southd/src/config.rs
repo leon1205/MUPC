@@ -240,7 +240,8 @@ pub struct SouthPcsConfig {
     /// 单次读写响应超时（毫秒）。缺省 200（原 `intercore.modbus_rtu.response_timeout_ms` 默认值）。
     #[serde(default = "default_pcs_response_timeout_ms")]
     pub response_timeout_ms: u64,
-    /// 3 区只读点表（`pcs_3zone` 等）—— 与站级 `regs` **同一类型、同一校验函数**（规则 P-4）。
+    /// 3 区只读点表（`pcs_3zone` 等）—— 与站级 `regs` **同一类型、同一批校验函数**
+    /// （规则 P-4；实际覆盖项见 [`SouthPcsConfig::validate`] 的文档）。
     #[serde(default)]
     pub regs: Vec<RegBlockConf>,
 }
@@ -266,6 +267,19 @@ impl Default for SouthPcsConfig {
 impl SouthPcsConfig {
     /// 段内校验（跨段规则 **P-1/P-2** 在 core-bin —— 需同时看 `south_stations` 与
     /// `intercore`；**P-3** 在本文件 [`SouthStationsConfig::validate`]）。
+    ///
+    /// **P-4 的覆盖范围（设计 §13.8 订正行后的实际口径，勿夸大）**：
+    /// - **点级**：`points::expand` —— `count/at ≥ 1`、`name`×`count>1` 护栏、
+    ///   规则 7（点位越界）/ 8（块内点位重叠）/ 9（32 位点 `count == 1` 且不跨窗口末尾）。
+    /// - **块级**：规则 5 [`validate_scale`]（`scale == 0`）/ 规则 12
+    ///   [`validate_count_and_discrete_bits`] / 规则 19 [`validate_width_multiple`] /
+    ///   规则 11 [`validate_anchoring`]（空洞 ≤ 4 + 首尾锚定）/ 规则 14
+    ///   [`validate_block_spans`]（跨块区间重叠，须吃整段切片）。
+    /// - **明确不覆盖（如实登记，不假装覆盖）**：规则 15（极大性，[`validate_maximality`]
+    ///   真需 `&[StationConf]`）/ 规则 6（符号性）与规则 13（`addr == 0` 按 role）——
+    ///   后两条依赖 `Role` 口径，而 `south_pcs` 段无 `role` 字段；规则 10（点**名**唯一）
+    ///   也不在此（它在 [`validate_station_regs`] 的**汇聚**阶段跨块判，`expand` 只查
+    ///   地址重叠、不查点名 —— 参考形态是单块段，此时与规则 8 等价走 `expand`）。
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
@@ -288,23 +302,35 @@ impl SouthPcsConfig {
         if self.regs.is_empty() {
             return Err("south_pcs: regs 为空（必填点表 —— 空点表 = 采集恒空转的静默死配）".into());
         }
-        // 规则 P-4：块的**结构规则**复用与采集同一个 `points::expand`（§11.4.3 的
+        // 规则 P-4（设计 §13.8 订正行）：块的**结构规则**与站级**同一批函数**（§11.4.3 的
         // "校验期与运行期同一函数"不变量；不另起一套）。
         //
-        // ⚠️ **覆盖范围如实登记（勿夸大）**：`expand` 只落"把点映射到寄存器的那一刻才能判"
-        // 的**点位级**规则 —— 7（点位越界）/ 8（点位重叠）/ 9（32 位对齐）/ 10（点名唯一）
-        // + 点级 `name`×`count` 护栏。
-        // **未**覆盖：5（零 scale）/ 6（符号性对照点表）/ 11（空洞 ≤ 4 + 首尾锚定）/
-        // 12（位块上限）/ 13（`addr == 0` 按 role）/ 14（区间重叠）/ 15（块落地极大性）/
-        // 19（无 points 块的宽度整数倍）—— 这八条落在**站级**函数
-        // （`validate_station_regs` / `validate_block_spans` / `validate_maximality` /
-        // `validate_meter_grid_regs`）里，其入参是 `StationConf` 且按 role 查点表，
-        // 故对 `south_pcs` **当前不生效**。设计 §13.8 的 P-4 行把"空洞 ≤ 4 / 单块 ≤ 120"
-        // 也算作"复用"，与 `expand` 的实际覆盖面**不一致** —— 是否补齐由该行口径裁定，
-        // 落地接线见 Task 7（`PcsHandle`）/ Task 10（core-bin 跨段规则）。
+        // **顺序**：先 `expand`（点级：规则 7/8/9 + `count/at` 护栏），再逐块块级
+        // （5/12/19/11），最后 `validate_block_spans` 吃**整段切片**（规则 14 跨块区间重叠）。
+        //
+        // ⚠️ **覆盖范围如实登记（2026-09-26 按实测重写；勿夸大）**：
+        // - `points::expand` 只落"把点映射到寄存器的那一刻才能判"的**点位级**规则
+        //   （7 越界 / 8 块内重叠 / 9 32 位对齐）+ 点级 `count/at`、`name`×`count` 护栏；
+        //   **不含**规则 10（点**名**唯一——它在 `validate_station_regs` 的**汇聚**阶段判，
+        //   须跨块收集展开结果；`expand` 只查**地址**重叠）。
+        // - 5（零 scale，**最尖**：漏写 `scale` ⇒ serde 缺省 0.0 ⇒ 整块 raw×0 静默全 0）/
+        //   11（空洞 ≤ 4 + 首尾锚定）/ 12（`count>0` + 位块上限）/ 14（跨块区间重叠）/
+        //   19（无 points 块的宽度整数倍）**均已接线**（5/11/14 直接调用站级既有函数；
+        //   12/19 原为 `validate_station_regs` 的**内联体**，已抽出为
+        //   [`validate_count_and_discrete_bits`] / [`validate_width_multiple`] 后两处共用）。
+        // - **明确不覆盖**（差异如实登记，不假装覆盖）：**15**（块落地极大性 ——
+        //   [`validate_maximality`] 真需 `&[StationConf]`）/ **6**（符号性）/ **13**
+        //   （`addr == 0` 按 role）—— 6/13 依赖 `Role` 口径，`south_pcs` 段无 `role` 字段。
+        // - `prefix` 用段名占位（无站 id —— 本段是单值段），使错误文案可定位。
+        let prefix = "south_pcs: ";
         for blk in &self.regs {
-            crate::points::expand(blk)?;
+            let pts = crate::points::expand(blk).map_err(|e| format!("{prefix}{e}"))?;
+            validate_scale(prefix, blk)?;
+            validate_count_and_discrete_bits(prefix, blk)?;
+            validate_width_multiple(prefix, blk)?;
+            validate_anchoring(prefix, blk, &pts)?;
         }
+        validate_block_spans(prefix, &self.regs)?;
         Ok(())
     }
 }
@@ -585,21 +611,7 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
     let prefix = format!("south_stations: 站 {} ", s.id);
     // 规则 12（`count` 有效性 + `discrete` 位块上限）
     for b in &s.regs {
-        if b.count == 0 {
-            return Err(format!(
-                "{}regs 块 {} count 须 > 0（显式取值须为正；serde 层不拦截 0）",
-                prefix, b.name
-            ));
-        }
-        if b.func == RegFunc::Discrete && b.count > points::MAX_DISCRETE_BITS {
-            return Err(format!(
-                "{}discrete 块 {} count={} 超位块上限 {}（PRD §9.4.3 规则 12）",
-                prefix,
-                b.name,
-                b.count,
-                points::MAX_DISCRETE_BITS
-            ));
-        }
+        validate_count_and_discrete_bits(&prefix, b)?;
         // 规则 13（地址有效性：addr == 0 仅 meter_batt / hvac 合法；meter_grid 的
         // addr>0 已由①的既有整组校验先判，行为不变）
         if b.addr == 0 && !matches!(s.role, Role::MeterBatt | Role::Hvac) {
@@ -612,15 +624,7 @@ fn validate_station_regs(s: &StationConf) -> Result<(), String> {
     // 规则 5（格式与标度）+ 规则 19（无 points 块的宽度护栏）
     for b in &s.regs {
         validate_scale(&prefix, b)?;
-        if b.func != RegFunc::Discrete && b.points.is_empty() {
-            let width = b.format.reg_width() as u16;
-            if b.count % width != 0 {
-                return Err(format!(
-                    "{}regs 块 {} count={} 非 format={:?} 宽度 {} 的整数倍——步进的尾槽装不下一个完整值，会**静默少产点**（设计补落点规则 19）",
-                    prefix, b.name, b.count, b.format, width
-                ));
-            }
-        }
+        validate_width_multiple(&prefix, b)?;
     }
     // 规则 14（区间与重叠，按 func 空间分别判）
     validate_block_spans(&prefix, &s.regs)?;
@@ -698,6 +702,49 @@ fn is_integer_format(f: RegFormat) -> bool {
         f,
         RegFormat::Int32Scaled | RegFormat::Uint16 | RegFormat::Int16
     )
+}
+
+/// 规则 12（`count` 有效性 + `discrete` 位块上限）。
+///
+/// **为何抽成独立函数（2026-09-26，Task 6 返工的 P-4）**：原为 [`validate_station_regs`] 的
+/// 内联检查；`south_pcs` 段（[`SouthPcsConfig::validate`]）须复用**同一判定**（规则 P-4
+/// "不另起一套"）。本条与 `role` 无关，故只取 `prefix`（站名占位）即可两处共用 ——
+/// 复制粘贴会立刻产生两份口径。
+fn validate_count_and_discrete_bits(prefix: &str, b: &RegBlockConf) -> Result<(), String> {
+    if b.count == 0 {
+        return Err(format!(
+            "{}regs 块 {} count 须 > 0（显式取值须为正；serde 层不拦截 0）",
+            prefix, b.name
+        ));
+    }
+    if b.func == RegFunc::Discrete && b.count > points::MAX_DISCRETE_BITS {
+        return Err(format!(
+            "{}discrete 块 {} count={} 超位块上限 {}（PRD §9.4.3 规则 12）",
+            prefix,
+            b.name,
+            b.count,
+            points::MAX_DISCRETE_BITS
+        ));
+    }
+    Ok(())
+}
+
+/// 规则 19（无 `points` 块的宽度护栏）：`count` 须为 `format` 宽度的整数倍 —— 否则步进的
+/// 尾槽装不下一个完整值，运行期**静默少产点**。`discrete` 位块不适用（位宽恒 1）；
+/// 声明了 `points` 的块由规则 11 的锚定判（不重复判）。
+///
+/// **为何抽成独立函数**：同 [`validate_count_and_discrete_bits`] —— `south_pcs` 段复用同一判定。
+fn validate_width_multiple(prefix: &str, b: &RegBlockConf) -> Result<(), String> {
+    if b.func != RegFunc::Discrete && b.points.is_empty() {
+        let width = b.format.reg_width() as u16;
+        if b.count % width != 0 {
+            return Err(format!(
+                "{}regs 块 {} count={} 非 format={:?} 宽度 {} 的整数倍——步进的尾槽装不下一个完整值，会**静默少产点**（设计补落点规则 19）",
+                prefix, b.name, b.count, b.format, width
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 规则 11（空洞上限，仅作用于**声明了 `points` 的标量块**）。
@@ -2080,9 +2127,23 @@ south_stations:
 
     // ═════ S3b-3（T8）：块级采集周期覆盖的配置期校验（设计 §12.7 / §12.8 的 4 条用例）═════
 
-    /// 现网 6 站参考配置（PRD §9.4.1 / §10.5 的现网复核输入；CRLF 逐字，故下方 `.replace`
-    /// 的锚串须带 `\r\n`）。
-    const FIELD_6_STATION_YAML: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
+    /// 现网参考配置（**Task 6 起站级段 5 站** —— 原第 2 站 `pcs` 已按 ADR-016 迁至独立顶层段
+    /// `south_pcs`；PRD §9.4.1 / §10.5 的现网复核输入；CRLF 逐字，故下方 `.replace` 的锚串
+    /// 须带 `\r\n`）。常量名**不带站数**（原 `FIELD_6_STATION_YAML` 的"6"随拆分失效）。
+    ///
+    /// **PCS 站迁出对本组（规则 20–24）的影响：无关**（2026-09-26 逐条核对）。理由：
+    /// ① 规则 20–22（块级周期覆盖）**只判显式声明了 `interval_ms` 的块** —— 原 `pcs` 站
+    ///    的 `pcs_3zone` 块**未声明**块级周期（逐字见 cca8a20^ 的 fixture），故本来就"不判"；
+    /// ② 规则 23/24（口预算）按 `port` 聚合，原 `pcs` 站独占 `/dev/ttyS7`（规则 P-2 要求），
+    ///    其单块/单站形态的口占用率天然极小（U ≈ 0.1、Σ T_组 ≈ 97ms），对"通过"断言无判别力
+    ///    —— 该形态由 `probe_free_hvac_first_case`（单站独占口）真实承担；
+    /// ③ 故本组的 `Ok` 断言**不因少一个 pcs 站而变弱**（少扫一个恒过的口）。
+    /// PCS 段自身的连接/周期/块结构校验另有独立锚：`tests/s3b2_config.rs` 的
+    /// `ac1_rule18_pcs_interval_lower_bound` 与单测 `south_pcs_validate_applies_block_level_rules`。
+    /// ⚠️ **残留（结构性的，非缺陷）**：`validate_block_intervals` 的入参是 `&SouthStationsConfig`
+    /// ⇒ PCS 段**不参与**规则 20–24 的口预算扫描；其独占口 + 单块使其预算天然远低于阈值，
+    /// 是否接线属 Task 7（`PcsHandle`）/ Task 10（core-bin 跨段规则）范畴。
+    const FIELD_REF_STATION_YAML: &str = include_str!("../tests/fixtures/south_stations_s3b2.yaml");
 
     /// 解析 + 段内校验（本组用例的统一入口）。`Wrapper` = 模拟 core_config 的外层嵌入键。
     fn validated(yaml: &str) -> Result<(), String> {
@@ -2293,7 +2354,7 @@ south_stations:
     }
 
     /// **AC-8-6（PRD §10.7）**：口预算与单轮最坏耗时可复算 ——
-    /// ① 现网 6 站（含改造后的 hvac）⇒ `Ok`（**零新增拒绝**）；
+    /// ① 现网参考配置（Task 6 起 5 站，含改造后的 hvac）⇒ `Ok`（**零新增拒绝**）；
     /// ② 构造 `U_口 > 0.5` ⇒ `Err`（规则 23）；
     /// ③ **规则 24 的正反两例**：通过例 = hvac 首例（`Σ T_组 = 47.52ms ≤ 1500ms`）；
     ///    拒绝例 = 设计 §12.7 的 W-1 构造（同口两组，`U = 0.447 ≤ 0.5` **但**
@@ -2301,14 +2362,14 @@ south_stations:
     /// **该例在只有规则 23 时必然 `Ok`** ⇒ 是本条存在的**判别锚**（规则 24 ≠ C9 的推论）。
     #[test]
     fn bus_budget_accepts_field_config_and_rejects_overload() {
-        // ①-a 现网 6 站（fixture 逐字；hvac 尚未含 S3b-3 的新增行）
+        // ①-a 现网参考配置（fixture 逐字；hvac 尚未含 S3b-3 的新增行）
         assert_eq!(
-            validated(FIELD_6_STATION_YAML),
+            validated(FIELD_REF_STATION_YAML),
             Ok(()),
-            "现网 6 站不得被规则 20–24 新增拒绝"
+            "现网 5 站不得被规则 20–24 新增拒绝"
         );
         // ①-b 改造后的 hvac（`hvac_di` 加 `interval_ms: 1000`；§12.6 的迁移行）⇒ 仍 `Ok`
-        let fast = FIELD_6_STATION_YAML.replace(
+        let fast = FIELD_REF_STATION_YAML.replace(
             "          func: discrete\r\n          addr: 0\r\n          count: 31\r\n",
             "          func: discrete\r\n          addr: 0\r\n          count: 31\r\n          interval_ms: 1000   # S3b-3 首例（测试注入）\r\n",
         );
@@ -2320,7 +2381,7 @@ south_stations:
         assert_eq!(
             validated(&fast),
             Ok(()),
-            "改造后的现网 6 站（hvac 位块 1000ms）不得被规则 20–24 拒"
+            "改造后的现网 5 站（hvac 位块 1000ms）不得被规则 20–24 拒"
         );
 
         // ② `U_口 > 0.5`：组周期夹到 ≈`T_组`（两个 FC04 count 120 块声明 1000 同组）
@@ -2758,25 +2819,48 @@ south_stations:
 mod south_pcs_tests {
     use super::*;
 
+    /// `PointConf` 的紧凑构造（只给 `at`/`count`，其余缺省）—— 供本模块 fixture 用。
+    fn pt(at: u16, count: u16) -> PointConf {
+        PointConf {
+            at,
+            count,
+            name: None,
+            format: None,
+            scale: None,
+            offset: None,
+            word_order: Default::default(),
+        }
+    }
+
+    /// 合法块：`pcs_3zone` **76 寄存器**，`points` **锚定覆盖满窗口**（首偏移 0、末末端 = count）。
+    ///
+    /// ⚠️ **本 fixture 曾被写成"76 寄存器块只声明 `{at:1, count:6}`"—— 那是不真实的形态**
+    /// （活体证据，2026-09-26 返工）：在规则 11（首尾锚定，`last_end = 6 ≠ count = 76`）下
+    /// **必被拒**，而旧版本恰把它断言为 `Ok` —— 正因当时的覆盖只有 `points::expand`（不含
+    /// 规则 11）才没爆。真实参考形态见 `tests/fixtures/south_pcs_s3b2.yaml`（31 条 `points`
+    /// 恰好覆盖 76 寄存器），本 fixture 取其**等价简化形**（够锚定 + 够触发规则 5/9/11 的
+    /// 判定路径）。
     fn pcs_block() -> RegBlockConf {
         RegBlockConf {
             name: "pcs_3zone".into(),
             addr: 1000,
             func: RegFunc::Input,
-            format: mupc_data_processing::meter_regs::RegFormat::Uint16,
+            format: RegFormat::Uint16,
             scale: 1.0,
             count: 76,
             offset: 0.0,
             byte_swap: true,
-            points: vec![PointConf {
-                at: 1,
-                count: 6,
-                name: None,
-                format: None,
-                scale: None,
-                offset: None,
-                word_order: Default::default(),
-            }],
+            points: vec![
+                pt(1, 6), // 1000–1005 告警/工作状态
+                PointConf {
+                    at: 7,
+                    format: Some(RegFormat::Int32Scaled),
+                    scale: Some(0.1),
+                    word_order: WordOrder::LoHi,
+                    ..pt(7, 1)
+                }, // 1006–1007 32 位点（lo_hi）
+                pt(9, 68), // 1008–1075 余下窗口（68 个 16 位槽）
+            ],
             read_slice: false,
             interval_ms: None,
         }
@@ -2811,7 +2895,8 @@ mod south_pcs_tests {
     }
 
     /// 启用后的段内校验：空 `regs` / `interval_ms` 下界 / `slave` 越界 / 空 `port` /
-    /// 零超时 / 块结构非法（规则 P-4 经 `points::expand`）逐条拒绝；合法配置放行。
+    /// 零超时 / 块结构非法（规则 P-4：`points::expand` 的**点级**规则）逐条拒绝；合法配置放行。
+    /// **块级**规则（5/11/12/14/19）的覆盖见 [`south_pcs_validate_applies_block_level_rules`]。
     #[test]
     fn south_pcs_validate_rejects_dead_or_illegal_configs() {
         let ok = SouthPcsConfig {
@@ -2900,9 +2985,9 @@ mod south_pcs_tests {
             "response_timeout_ms 须 > 0",
             "零超时",
         );
-        // 规则 P-4：块结构非法由 `points::expand`（与采集同一函数）拒
+        // 规则 P-4（点级）：块结构非法由 `points::expand`（与采集同一函数）拒 —— 点越界
         let mut bad_blk = pcs_block();
-        bad_blk.points[0].at = 78; // 点 at=78 超出 count=76
+        bad_blk.points[0].at = 78; // 点 at=78（块内偏移 77）起算 6 个 → 越出 count=76
         reject(
             SouthPcsConfig {
                 enabled: true,
@@ -2912,5 +2997,89 @@ mod south_pcs_tests {
             "越界",
             "点越界块",
         );
+    }
+
+    /// **规则 P-4（块级）的常驻锚**（2026-09-26 扩覆盖）：逐条证 5 / 11 / 12 / 14 / 19 在
+    /// `south_pcs` 段**真能红**。其中**规则 5 与规则 11 最尖**：
+    ///
+    /// - 规则 5：YAML 漏写 `scale` ⇒ serde 缺省 `0.0` ⇒ 整块 `raw × 0` **静默全 0**
+    ///   （旧覆盖下 `expand` 完全不看 scale ⇒ 本形态会**绿**）；
+    /// - 规则 11：`points` 未覆盖满 `count` ⇒ 旧覆盖下同样**绿**（这正是原 fixture 的活体证据）。
+    ///
+    /// 本用例即"扩覆盖前必绿、扩覆盖后必红"的对照锚，故**常驻**（不止一次性探针）。
+    /// 明确不覆盖的两条（15 极大性 / 6·13 依赖 role）**不在此**，见 `validate` 的文档。
+    #[test]
+    fn south_pcs_validate_applies_block_level_rules() {
+        let cfg = |regs: Vec<RegBlockConf>| SouthPcsConfig {
+            enabled: true,
+            regs,
+            ..SouthPcsConfig::default()
+        };
+        let reject = |regs: Vec<RegBlockConf>, needle: &str, what: &str| {
+            let err = cfg(regs).validate().expect_err(&format!("{what} 应被拒"));
+            assert!(
+                err.contains(needle),
+                "{what}：Err 应含 {needle:?}，实际 {err}"
+            );
+            assert!(
+                err.contains("south_pcs") && err.contains("pcs_3zone"),
+                "{what}：文案须可定位（段名 + 块名），实际 {err}"
+            );
+        };
+
+        // 规则 5：块级 `scale: 0.0`（= YAML 漏写 scale 的 serde 缺省）⇒ 拒
+        let mut scale0 = pcs_block();
+        scale0.scale = 0.0;
+        reject(vec![scale0], "须显式 scale>0", "块级 scale=0.0");
+        // 规则 5：点级显式 `scale: 0.0`（不被块级掩盖）⇒ 拒
+        let mut pt0 = pcs_block();
+        pt0.points[1].scale = Some(0.0);
+        reject(vec![pt0], "点 at=7", "点级 scale=0.0");
+
+        // 规则 11：`points` 未覆盖满 `count`（76 寄存器只声明 6 点）⇒ 拒（原 fixture 的形态）
+        let mut unanchored = pcs_block();
+        unanchored.points = vec![pt(1, 6)];
+        reject(
+            vec![unanchored],
+            "首尾锚定",
+            "points 未锚定（末末端 ≠ count）",
+        );
+
+        // 规则 12：位块位数超上限（2001 > MAX_DISCRETE_BITS=2000）⇒ 拒
+        let bits = RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 0,
+            func: RegFunc::Discrete,
+            format: RegFormat::Uint16,
+            scale: 1.0,
+            count: 2001,
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        };
+        reject(vec![bits], "超位块上限", "discrete count=2001");
+
+        // 规则 14：同 func 空间跨块区间重叠 ⇒ 拒
+        let mut overlap = pcs_block();
+        overlap.addr = 1050; // 与 pcs_3zone（1000..1076）重叠
+        reject(vec![pcs_block(), overlap], "寄存器区间重叠", "跨块区间重叠");
+
+        // 规则 19：无 `points` 块的 `count` 非 format 宽度整数倍 ⇒ 拒
+        let wide = RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 1000,
+            func: RegFunc::Input,
+            format: RegFormat::Int32Scaled,
+            scale: 0.1,
+            count: 3, // 3 % 2 != 0
+            offset: 0.0,
+            byte_swap: false,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        };
+        reject(vec![wide], "整数倍", "count 非宽度整数倍");
     }
 }

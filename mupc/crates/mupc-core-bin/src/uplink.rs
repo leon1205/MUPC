@@ -1624,7 +1624,8 @@ mod tests {
 
     /// 参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
     /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 在独立顶层段 [`REF_PCS`]（72 点）。
-    const REF_6: &str = include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
+    const REF_STATIONS: &str =
+        include_str!("../../mupc-southd/tests/fixtures/south_stations_s3b2.yaml");
 
     /// PCS 独立顶层段（Task 6）。
     const REF_PCS: &str = include_str!("../../mupc-southd/tests/fixtures/south_pcs_s3b2.yaml");
@@ -1638,7 +1639,7 @@ mod tests {
     /// （合成理由与 `mupc-southd::uplink::tests::cfg_ref` 同源：本组用例钉的是"**PCS 启用**"
     /// 的通道/档位口径，而 `build_uplink_points` 的入参形态仍是站表；§13.9 契约零变化）。
     fn cfg() -> SouthStationsConfig {
-        let mut stations: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_6)
+        let mut stations: SouthStationsConfig = serde_yaml::from_str::<Wrapper>(REF_STATIONS)
             .expect("参考配置解析失败")
             .south_stations;
         let pcs: SouthPcsConfig =
@@ -1659,7 +1660,8 @@ mod tests {
     }
 
     fn points() -> Vec<UplinkPoint> {
-        build_uplink_points(&cfg()).expect("build_uplink_points 必须成功（6 站参考配置）")
+        build_uplink_points(&cfg())
+            .expect("build_uplink_points 必须成功（参考配置：站级 5 站 + 合成 PCS 段）")
     }
 
     fn id(station: &str, metric: &str) -> PointId {
