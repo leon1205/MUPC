@@ -573,6 +573,15 @@ let key = Zeroizing::new(sensitive_data);
 | LEA-39 | 解密失败、验签失败、序列号重复的指令被拒绝执行并记录告警 | 分别构造异常指令验证 |
 | LEA-40 | 全链路延迟增量 ≤ 10ms（不含网络传输） | 测量从 gateway 接收到 intercore 发出加密指令的时延 |
 
+> **⚠️ 载体订正（2026-09-27）**：上表 LEA-36 / LEA-37 / LEA-40 中「指令下发至实时控制模块」这一段的**物理载体已变更**，但**条款原文与 ID 一律保留**（本节为历史目标，不作删除）。2026-09-26 PCS（= 实时控制模块）的通信与控制由 `mupc-intercore` **整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014·015·016）：
+>
+> - **现行控制路径**：`mupc-southd::pcs::PcsHandle`，四个受限入口 `send_dual_param` / `send_tai_command` / `stop` / `tick_once`；由 `strategy-engine::AiIntegrator::set_pcs_client(Arc<PcsHandle>)` 注入（原 `set_intercore_client` 已删）
+> - **物理介质**：**RS485 / Modbus RTU**（BECG-3568 板载隔离 485 口），**不是 RJ45 TCP**
+> - **`mupc-intercore` 现状**：仅剩核间 TCP 帧协议（`protocol.rs` / `tcp_server.rs` / `transport.rs` / `heartbeat.rs`），生产路径**无消费者**；现存真实消费者只有 `sim-bridge`（11 号仿真测试环境复用帧编解码）
+> - 叠加**国密框架态**（2026-09-09：SM4-GCM 为未实现的框架占位）
+>
+> ⇒ **LEA-36 / LEA-37 / LEA-40 当前无实现载体**；「经 intercore / RJ45 TCP 下发加密指令」在现行架构下**没有实现**（历史 / 待接，不得按已实现计）。LEA-38 / LEA-39（序列号防重放、异常指令拒绝并告警）是算法与逻辑要求，不随载体变更失效。
+
 ### 7.2 加密审计日志（LEA-41 ~ LEA-44）
 
 **User Story：**
@@ -812,6 +821,8 @@ mupc/crates/security/src/
 实时控制模块
 ```
 
+> **⚠️ 载体订正（2026-09-27）**：上图中 `intercore` 箱体与 `RJ45 TCP（SM4 加密密文）` 一段**为历史架构，已不成立**（保留作设计记录）——PCS（= 实时控制模块）的控制路径 2026-09-26 已迁至南向 `mupc-southd::pcs::PcsHandle`，物理介质 **RS485 / Modbus RTU**；`intercore` 生产路径无消费者。完整的现状口径见 §7.1 表下注。
+
 ### 11.3 外部依赖
 
 | 依赖 | 用途 | 建议库 | 说明 |
@@ -833,6 +844,8 @@ mupc/crates/security/src/
 | **intercore** | TCP 会话 SM4-GCM 加密、共享密钥管理 |
 | **web-api** | 安全启动状态查询（`GET /api/security/boot-status`）、安全日志查询、告警事件上报 |
 | **ota-update** | 固件更新签名验证、防回滚计数器检查、恢复模式触发、完整性自检 |
+
+> **⚠️ 载体订正（2026-09-27）**：上表 `intercore` 行的「TCP 会话 SM4-GCM 加密、共享密钥管理」**不再是控制下行的落地方式**。控制下行载体为南向 RS485 / Modbus RTU（`mupc-southd::pcs::PcsHandle`）；核间 TCP 通道生产路径无消费者。该行作**历史集成点**保留。
 
 ---
 
@@ -996,6 +1009,8 @@ mupc/crates/security/src/
 | LEA-62 | 吊销审计日志 | 记录吊销时间/操作人/序列号 | 查询验证 | P1 |
 | LEA-63 | 吊销不影响已有连接 | 已有连接维持，新连接拒绝 | 功能验证 | P1 |
 
+> **⚠️ 载体订正（2026-09-27）**：本表 LEA-36（内部转发至 intercore）/ LEA-37（RJ45 TCP 物理层加密）/ LEA-40（到 intercore 的时延）三行中「实时控制模块侧载体」已变更为南向 RS485 / Modbus RTU（`mupc-southd::pcs::PcsHandle`）；`mupc-intercore` 生产路径无消费者，叠加 SM4-GCM 未实现的国密框架态 ⇒ 该三条**当前无实现载体**。详细口径见 §7.1 表下注。
+
 ### 13.4 安全验收
 
 | ID | 安全点 | 验收条件 |
@@ -1050,6 +1065,8 @@ mupc/crates/security/src/
 | MQTT 插件 | 支持 TLS 的 MQTT 客户端 | 已具备（需扩展国密套件支持） |
 | intercore 通信 | 与实时控制模块的 TCP 会话 | 已具备（需增加加密层） |
 
+> **⚠️ 载体订正（2026-09-27）**：上表 `intercore 通信` 行的前置条件**已不成立** —— 与实时控制模块（PCS）的通道 2026-09-26 已随 PCS 迁入南向，为 `mupc-southd::pcs::PcsHandle`（**RS485 / Modbus RTU**），非 TCP 会话；`CoreConfig::validate` 亦只接受 `intercore.transport == "tcp"`（`modbus_rtu` 档随 PCS 迁出删除），而该 TCP 通道生产路径无消费者。本行作**历史前置条件**保留。
+
 ### 15.2 外部依赖风险评估
 
 | 依赖项 | 风险等级 | 应对策略 |
@@ -1073,6 +1090,8 @@ mupc/crates/security/src/
 ## 16. 实施建议
 
 > framework-only（2026-09-09 平台目标调整）：国密套件未实现部分（SM2 签名/SM4-GCM/HKDF/ECDH）与安全启动链（§6，BootROM→U-Boot→FIT→dm-verity 全链验签）按框架占位，不推进实现；本实施优先级/顺序仅作历史规划。已实现的 SM3/SM4-CBC 真国密保留。
+>
+> 载体订正（2026-09-27）：§16.2 **Phase 2** 中「intercore 集成 TCP 会话加密」一步的**载体已不成立**——控制下行现为南向 RS485 / Modbus RTU（`mupc-southd::pcs::PcsHandle`），核间 TCP 通道生产路径无消费者。该步骤与 §7.1 的 LEA-36/37/40 一并作**历史规划**保留。
 
 ### 16.1 优先级分组
 
