@@ -4147,6 +4147,28 @@ pub use pipeline_config::{VmdEnhancementConfig, AttentionConfig, BiLstmConfig, E
 pub use residual_buffer::ResidualBuffer;
 ```
 
+### 10.2 跨项目动态配置系统文件清单【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**
+>
+> - 末行 `docs/superpowers/specs/2026-06-11-跨项目动态配置系统-PRD.md` **在仓内不存在**（源文另在 :318 以「详见」形式自引用同一路径），属悬空自引用。
+> - `crates/ai-engine/src/config_loader.rs` 存在（`mupc/crates/ai-engine/src/config_loader.rs:1-25`），但内容是**另一套** `ConfigLoader`（DB 优先 + 内存缓存），并非「实现 DynamicConfigLoader 集成」；该结构体在仓内亦无调用点。
+> - `model_manager.rs` 集成现状：仅 `set_dynamic_config_loader()`（`model_manager.rs:1046-1049`）与 `validate_config_fingerprint()`（`:1051-1061`）两个入口，`full_decision_cycle()` 内未见消费。
+> - 前三行（yaml / safety_config.rs / env_config.rs / dynamic_config_loader.rs）与 `action_space.rs` 均已存在，与源文一致。
+> - 本节为「已落地文件清单」，与 §10 主树（未列这几个文件）互补；是否合并进主树留待后续重构，本次按原样搬迁以保零丢失。
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `mupc/config/mupc_env_config.yaml` | 创建 | 与训练管线对称的配置文件 |
+| `crates/ai-engine/src/safety_config.rs` | 创建 | SafetyConfig 结构体 |
+| `crates/ai-engine/src/env_config.rs` | 创建 | EnvConfig / EnvConfigMetadata 结构体 |
+| `crates/ai-engine/src/dynamic_config_loader.rs` | 创建 | DynamicConfigLoader 核心组件 |
+| `crates/ai-engine/src/action_space.rs` | 修改 | 扩展 ActionSpaceConfig 字段 |
+| `crates/ai-engine/src/config_loader.rs` | 修改 | 实现 DynamicConfigLoader 集成 |
+| `crates/ai-engine/src/model_manager.rs` | 修改 | 集成 DynamicConfigLoader |
+| `crates/storage/src/services.rs` | 修改 | 扩展 action_space_config 表迁移 |
+| `docs/superpowers/specs/2026-06-11-跨项目动态配置系统-PRD.md` | 创建 | PRD 文档 |
+
 ## 11. 配置结构
 
 ### 11.1 AiEngineConfig
@@ -4408,6 +4430,362 @@ pub enum ModelType { LSTM, MADDPG, PPO }
 pub enum RlAlgorithm { MADDPG, PPO }
 ```
 
+### 11.6 跨项目动态配置系统 —— 背景与目标【暂停：观测空间重构后接入，2026-09-09】
+
+> **停用状态（沿用 §5 / §7 / §8 口径，2026-09-09）**：本节及 §11.7–§11.13 所述「跨项目动态配置系统」随 AI 引擎一并暂停（平台目标调整 2026-09-09：AI 引擎暂停，本地策略引擎为唯一默认下发引擎）。`DynamicConfigLoader` 在 `mupc-core-bin` 生产启动路径中**无实例化/调用点**，分层加载与版本指纹校验不生效；接入后重新追认。
+>
+> **来源与编号说明（2026-09-27）**：本节内容自 `docs/superpowers/specs/archive/2026-06-11-跨项目动态配置系统-design.md`（v1.0，2026-06-11，源文状态为设计已批准）并入，正文逐字保留（仅清掉源文的 `---` 分节线）。源文 `## N.` 与 `### N.M` 标题已按其在本章的落点重编号为 `### 11.6`–`### 11.13` / `#### 11.x.y`，**标题文字未改**。
+>
+> **查重结论（2026-09-27）**：目标文档 §11.1–§11.5 无本节任何等价内容；§11.3 描述的是同一 YAML 文件的 `prediction_enhancement` 段（预测增强），与本节（顶层 `version`/`physical`/`safety`/`operational` 四段）不重叠，故本节全文搬迁，无副本。
+
+#### 11.6.1 问题陈述
+
+RL 训练环境与部署环境之间的物理参数差异（Sim-to-Real Gap）会导致模型在训练阶段学到的策略在真实环境中失效。训练管线 v2.6 已将物理参数外置到 YAML 配置文件（`config/mupc_env_config.yaml`），AI 引擎需要对齐该配置源。
+
+#### 11.6.2 目标
+
+1. 建立与训练管线对称的配置加载系统
+2. 保证 RL 核心参数（p_batt_max, load_shed_max, transformer_kva, battery_capacity_kwh）与训练环境完全一致
+3. 提供操作调优参数的运行时可调能力
+4. 启动时版本指纹校验，防止配置漂移
+
+#### 11.6.3 配置分类
+
+| 类别 | 参数 | 加载优先级 | 说明 |
+|---|---|---|---|
+| **RL 核心参数** | p_batt_max_kw, load_shed_max_kw, transformer_kva, battery_capacity_kwh | YAML 锁定 | 训练依据，偏差则拒绝启动 |
+| **安全约束** | soc_min, soc_max, overload_threshold | YAML 锁定，DB 可覆盖 | 电池/SOC 保护 |
+| **操作调优参数** | p_batt_ramp_limit_kw, q_batt_ramp_limit_kvar, pv_limit_min | DB 优先，无则用 YAML | 运行时可调 |
+
+### 11.7 动态配置文件结构（mupc_env_config.yaml）【暂停：观测空间重构后接入，2026-09-09】
+
+> 注：本节描述 `mupc/config/mupc_env_config.yaml` 的**顶层** `version` / `physical` / `safety` / `operational` 四段；同一文件的 `prediction_enhancement` 段见 §11.3。
+>
+> **⚠️ 口径差异（2026-09-27 核）**：仓内实际文件 `mupc/config/mupc_env_config.yaml` 在源文四段之外**另有 `reward_thresholds` 段**（`q_margin_threshold: 0.10`、`p_threshold_kw: 5.0`）；且实际文件未用源文的 `# ═══` 分节注释，文件头为 3 行说明注释。重叠段落的键值完全一致。
+
+**mupc/config/mupc_env_config.yaml**
+
+```yaml
+# ═══════════════════════════════════════════════════════════════
+# 版本指纹（用于启动校验）
+# ═══════════════════════════════════════════════════════════════
+version:
+  fingerprint: "v2.6-20260611"
+  source: "mupc-ai2"
+
+# ═══════════════════════════════════════════════════════════════
+# 物理常量 (RL 核心参数)
+# ═══════════════════════════════════════════════════════════════
+physical:
+  transformer_kva: 200.0
+  battery_capacity_kwh: 100.0
+  p_batt_max_kw: 50.0
+  load_shed_max_kw: 60.0
+
+# ═══════════════════════════════════════════════════════════════
+# 安全约束
+# ═══════════════════════════════════════════════════════════════
+safety:
+  soc_min: 0.10
+  soc_max: 0.90
+  overload_threshold: 0.85
+
+# ═══════════════════════════════════════════════════════════════
+# 操作调优参数（部署侧可调）
+# ═══════════════════════════════════════════════════════════════
+operational:
+  p_batt_ramp_limit_kw: 50.0
+  q_batt_ramp_limit_kvar: 30.0
+  pv_limit_min: 0.10
+```
+
+### 11.8 动态配置数据结构【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）—— 源为 2026-06-11 快照，下列为代码现状（源文不改）**
+>
+> - `4.2 ActionSpaceConfig`：代码在源列 v2.6 字段之外，另有 `k_droop_min: Option<f64>` / `k_droop_max: Option<f64>`（`mupc/crates/ai-engine/src/action_space.rs:44-47`）。二者默认值在代码内**不自洽**：`default_config()` 给 `Some(0.0)/Some(30.0)`（`action_space.rs:118-119`），`DynamicConfigLoader::merge_config` 给 `Some(-100.0)/Some(100.0)`（`dynamic_config_loader.rs:124-125`、`:157-158`）。
+> - `4.2`：代码另实现 ASC-01~05 校验（`asc_01()`–`asc_05()` + `validate()`，`action_space.rs:53-108`）；源文仅在 `## 10. 错误处理` 以 `VALIDATION_FAILED（ASC-01~05）` 提及。
+> - `4.2`：代码给 `max_load_shedding` / `pv_limit_min` 标注「v2.15 已下沉至 strategy-engine，本字段保留向后兼容，新代码不应依赖」（`action_space.rs:19-20`、`:30-31`），源文无此注记。
+> - `4.1 SafetyConfig`：代码另有 `validate()`（`safety_config.rs:32-48`），源未列。
+> - `4.3 EnvConfig`：代码为 `EnvConfigMetadata` / `PhysicalConfig` / `OperationalConfig` / `EnvConfig` 均实现 `Default`（`env_config.rs:15-23`、`:36-44`、`:56-64`、`:67-68`）；源文只给 `SafetyConfig` 写了 `Default`。另有 `EnvConfig::from_file()` 标 `#[allow(dead_code)]`（`env_config.rs:71-80`），源未列。
+
+#### 11.8.1 SafetyConfig（新增）
+
+```rust
+/// 安全约束配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyConfig {
+    /// SOC 下限硬约束
+    pub soc_min: f64,  // 默认 0.10
+    /// SOC 上限硬约束
+    pub soc_max: f64,   // 默认 0.90
+    /// 变压器过载阈值（额定容量百分比）
+    pub overload_threshold: f64, // 默认 0.85
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            soc_min: 0.10,
+            soc_max: 0.90,
+            overload_threshold: 0.85,
+        }
+    }
+}
+```
+
+#### 11.8.2 ActionSpaceConfig 扩展字段
+
+```rust
+/// 动作空间配置（可配置化）
+///
+/// v2.6 扩展：从 YAML 锁定 transformer_kva, battery_capacity_kwh，
+/// soc_min/soc_max/overload_threshold 从 YAML 锁定但可被 DB 覆盖。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionSpaceConfig {
+    /// 台区 ID
+    pub transformer_id: String,
+    /// 正值，电池充电功率上限 (kW)
+    pub max_batt_charge_power: f64,
+    /// 正值，电池放电功率上限 (kW)
+    pub max_batt_discharge_power: f64,
+    /// 非负，切负荷上限 (kW)
+    pub max_load_shedding: f64,
+    /// 视在功率上限 (kVA)
+    pub max_apparent_power_kva: f64,
+    /// 有功变化率限制 (kW/s)
+    pub p_batt_ramp_limit_kw: f64,
+    /// 无功变化率限制 (kVar/s)
+    pub q_batt_ramp_limit_kvar: f64,
+    /// 光伏限功率下限
+    pub pv_limit_min: f64,
+
+    // === v2.6 新增字段 ===
+
+    /// 变压器额定容量 (kVA)，从 YAML 锁定
+    pub transformer_kva: f64,
+    /// 电池总容量 (kWh)，从 YAML 锁定
+    pub battery_capacity_kwh: f64,
+    /// SOC 下限，从 YAML 锁定但可被 DB 覆盖
+    pub soc_min: f64,
+    /// SOC 上限，从 YAML 锁定但可被 DB 覆盖
+    pub soc_max: f64,
+    /// 变压器过载阈值，从 YAML 锁定但可被 DB 覆盖
+    pub overload_threshold: f64,
+}
+
+impl ActionSpaceConfig {
+    /// 默认配置
+    pub fn default_config() -> Self {
+        Self {
+            transformer_id: String::new(),
+            max_batt_charge_power: 50.0,
+            max_batt_discharge_power: 50.0,
+            max_load_shedding: 60.0,
+            max_apparent_power_kva: 200.0,
+            p_batt_ramp_limit_kw: 50.0,
+            q_batt_ramp_limit_kvar: 30.0,
+            pv_limit_min: 0.1,
+            // v2.6 新增默认值
+            transformer_kva: 200.0,
+            battery_capacity_kwh: 100.0,
+            soc_min: 0.10,
+            soc_max: 0.90,
+            overload_threshold: 0.85,
+        }
+    }
+}
+```
+
+#### 11.8.3 EnvConfig（元数据）
+
+```rust
+/// 配置文件元数据（版本指纹）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvConfigMetadata {
+    pub fingerprint: String,
+    pub source: String,
+}
+
+/// 完整环境配置（YAML 结构）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvConfig {
+    pub version: EnvConfigMetadata,
+    pub physical: PhysicalConfig,
+    pub safety: SafetyConfig,
+    pub operational: OperationalConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhysicalConfig {
+    pub transformer_kva: f64,
+    pub battery_capacity_kwh: f64,
+    pub p_batt_max_kw: f64,
+    pub load_shed_max_kw: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationalConfig {
+    pub p_batt_ramp_limit_kw: f64,
+    pub q_batt_ramp_limit_kvar: f64,
+    pub pv_limit_min: f64,
+}
+```
+
+### 11.9 核心组件 —— DynamicConfigLoader 与启动流程【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**
+>
+> - 结构体字段：代码比源文多 `base_config: Arc<RwLock<Option<EnvConfig>>>`（`mupc/crates/ai-engine/src/dynamic_config_loader.rs:28`）。
+> - 方法集：源文列出的 `reload_all()`（源 :239）与 `get_metadata()`（源 :245）**在代码中不存在**（全仓 grep 无命中）。代码另有 `validate_fingerprint(&self, expected: &str)`（`:210`）、`get_config()`（`:238`）、`clear_cache()`（`:244`）及私有 `load_yaml()`/`load_from_db()`/`merge_config()`。
+> - 签名：`reload_operational()` 代码返回 `Result<ActionSpaceConfig, AiEngineError>`（`dynamic_config_loader.rs:230-235`），源文为 `Result<(), AiEngineError>`。
+> - 启动流程第 2 步（指纹校验 + 拒绝启动）：`load()` 实际**不调用** `validate_fingerprint`（`dynamic_config_loader.rs:49-66`，只做 load_yaml → load_from_db → merge）；校验改由外部显式触发 —— `ModelManager::validate_config_fingerprint()`（`model_manager.rs:1051-1061`）。
+> - 接线：`DynamicConfigLoader` 仅在 `ai-engine/src/lib.rs:66` 导出、在 `ModelManager` 留注入位（`model_manager.rs:111`、`:1046-1049`）；全仓非 ai-engine 侧无调用点，故上述启动流程在图示意义上未执行。
+
+#### 11.9.1 DynamicConfigLoader
+
+```rust
+/// 动态配置加载器
+///
+/// 分层加载策略：
+/// 1. YAML 加载 → 基准配置（RL 核心参数锁定）
+/// 2. DB 查询 → 操作参数覆盖（6 个开放参数）
+/// 3. 版本指纹校验 → 启动时校验对齐
+pub struct DynamicConfigLoader {
+    config_path: PathBuf,
+    storage: Arc<StorageService>,
+    /// 内存缓存
+    configs: Arc<RwLock<HashMap<String, ActionSpaceConfig>>>,
+    /// YAML 元数据（指纹等）
+    metadata: Arc<RwLock<Option<EnvConfigMetadata>>>,
+}
+
+impl DynamicConfigLoader {
+    /// 创建加载器
+    pub fn new(config_path: PathBuf, storage: Arc<StorageService>) -> Self;
+
+    /// 加载配置（分层加载 + 版本校验）
+    pub async fn load(&self, transformer_id: &str) -> Result<ActionSpaceConfig, AiEngineError>;
+
+    /// 重载操作参数（运行时，不影响 RL 模型）
+    pub async fn reload_operational(&self, transformer_id: &str) -> Result<(), AiEngineError>;
+
+    /// 强制重载所有配置（含 RL 核心参数，需重载模型）
+    pub async fn reload_all(&self) -> Result<(), AiEngineError>;
+
+    /// 获取配置指纹
+    pub async fn get_fingerprint(&self) -> Option<String>;
+
+    /// 获取 YAML 元数据
+    pub async fn get_metadata(&self) -> Option<EnvConfigMetadata>;
+}
+```
+
+#### 11.9.2 启动流程
+
+```
+DynamicConfigLoader::new()
+    │
+    ├── 1. load_yaml()
+    │       └── 文件不存在 → 告警 + 使用内置默认值（软校验）
+    │
+    ├── 2. validate_fingerprint(model_fingerprint)
+    │       ├── 比对 YAML 指纹与 RL 模型元数据
+    │       └── 不匹配 → AiEngineError::ConfigMismatch + 拒绝启动
+    │
+    ├── 3. load_from_db(transformer_id)
+    │       ├── 有记录 → 用 DB 值覆盖 operational 参数
+    │       └── 无记录 → 用 YAML 值写入 DB（首次部署同步）
+    │
+    └── 4. 返回合并后的 ActionSpaceConfig
+```
+
+### 11.10 数据库扩展 —— action_space_config 表【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**
+>
+> - DEFAULT 值不同：实际迁移语句为 `transformer_kva 0.0` / `battery_capacity_kwh 0.0` / `soc_min 0.0` / `soc_max 1.0` / `overload_threshold 1.2`（`mupc/crates/storage/src/services.rs:853-857`），源文为 `200.0 / 100.0 / 0.10 / 0.90 / 0.85`。
+> - 实现形态不同：代码迁移为**幂等**（先 `pragma_table_info('action_space_config')` 查列再 ALTER，`services.rs:846-869`）；源文的裸 5 条 `ALTER TABLE` 未体现该保护。
+> - 基表另含 `max_apparent_power_kva` 等 v2.5 列（`services.rs:823-835`），与源文增量列合并后共 13 个写入列（`update_action_space_config_full`，`services.rs:118-180`）。
+
+#### 11.10.1 action_space_config 表扩展
+
+```sql
+ALTER TABLE action_space_config ADD COLUMN transformer_kva REAL NOT NULL DEFAULT 200.0;
+ALTER TABLE action_space_config ADD COLUMN battery_capacity_kwh REAL NOT NULL DEFAULT 100.0;
+ALTER TABLE action_space_config ADD COLUMN soc_min REAL NOT NULL DEFAULT 0.10;
+ALTER TABLE action_space_config ADD COLUMN soc_max REAL NOT NULL DEFAULT 0.90;
+ALTER TABLE action_space_config ADD COLUMN overload_threshold REAL NOT NULL DEFAULT 0.85;
+```
+
+### 11.11 版本指纹校验【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**：见 §11.9 —— 代码中「AI 引擎启动」与「模型切换」两处校验时机均无自动调用点；仅提供显式的 `validate_fingerprint()`（`dynamic_config_loader.rs:209-221`）与 `ModelManager::validate_config_fingerprint()`（`model_manager.rs:1051-1061`）。指纹格式三处（训练管线 / RL 模型元数据 / 配置文件）与代码一致。
+
+#### 11.11.1 校验时机
+
+| 时机 | 校验内容 | 失败处理 |
+|---|---|---|
+| AI 引擎启动 | YAML 指纹 vs RL 模型元数据 | 拒绝启动 + 错误日志 |
+| 模型切换 | 新模型指纹 vs 当前 YAML 指纹 | 拒绝切换 + 错误日志 |
+
+#### 11.11.2 指纹格式
+
+| 来源 | 格式 | 示例 |
+|---|---|---|
+| 训练管线 | `v2.6-YYYYMMDD` | `v2.6-20260611` |
+| RL 模型元数据 | `fingerprint` 字段 | `v2.6-20260611` |
+| 配置文件 | `version.fingerprint` | `v2.6-20260611` |
+
+### 11.12 热重载机制【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**：表中 `reload_all()` 在代码中不存在（见 §11.9 核对）；
+> 现存热重载入口仅 `reload_operational()`（`dynamic_config_loader.rs:229-235`，实现即 `load()`），
+> 「重新校验指纹」部分在代码中无对应调用点。
+
+| 操作 | 影响范围 | 说明 |
+|---|---|---|
+| `reload_operational()` | 操作参数（ramp, pv_limit, soc, overload） | 实时生效，无需重载模型 |
+| `reload_all()` | 所有参数 + RL 核心参数 | 需重载 RL 模型，重新校验指纹 |
+
+### 11.13 跨项目动态配置验收标准【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**
+>
+> - 「操作调优参数（6 个开放参数）可调范围」在代码中**无对应范围校验**：`ActionSpaceConfig::validate()` 只做 ASC-01~05（`action_space.rs:86-108`），未覆盖源列 6 组区间；`SafetyConfig::validate()` 只校验 `(0,1)` 开区间与 `soc_min < soc_max`（`safety_config.rs:33-47`），亦非源列区间。
+> - 「启动时校验 YAML 指纹与模型元数据一致性」「模型切换时重新校验指纹」：代码 `load()` 不触发校验，模型切换路径亦未见调用（见 §11.9 核对）。
+> - 「首次部署时 YAML 值自动写入 DB」：已实现（`dynamic_config_loader.rs:141-183`，`tokio::spawn` 调 `update_action_space_config_full`）。
+> - 「热重载操作参数无需重载 RL 模型」：已满足（`reload_operational` 只走 YAML+DB 合并，不触及模型，`dynamic_config_loader.rs:229-235`）。
+
+#### 硬件规格（RL 核心参数）
+- [ ] 变压器容量 = 200 kVA（`physical.transformer_kva`）
+- [ ] 电池最大充放电功率 = 50 kW（`physical.p_batt_max_kw`）
+- [ ] 电池总容量 = 100 kWh（`physical.battery_capacity_kwh`）
+- [ ] 最大切负荷 = 60 kW（`physical.load_shed_max_kw`）
+
+#### 安全约束
+- [ ] SOC 下限 = 0.10（`safety.soc_min`）
+- [ ] SOC 上限 = 0.90（`safety.soc_max`）
+- [ ] 过载阈值 = 0.85（`safety.overload_threshold`）
+
+#### 操作调优参数（6 个开放参数）
+- [ ] `p_batt_ramp_limit_kw` 可调范围：10 ~ 100（默认 50）
+- [ ] `q_batt_ramp_limit_kvar` 可调范围：5 ~ 60（默认 30）
+- [ ] `pv_limit_min` 可调范围：0.0 ~ 0.3（默认 0.1）
+- [ ] `soc_min` 可调范围：0.05 ~ 0.20（默认 0.10）
+- [ ] `soc_max` 可调范围：0.80 ~ 0.95（默认 0.90）
+- [ ] `overload_threshold` 可调范围：0.70 ~ 0.95（默认 0.85）
+
+#### 版本指纹
+- [ ] 启动时校验 YAML 指纹与 RL 模型元数据一致性
+- [ ] 指纹不匹配时拒绝启动并记录错误
+- [ ] 模型切换时重新校验指纹
+
+#### 配置同步
+- [ ] 首次部署时 YAML 值自动写入 DB
+- [ ] 运行时 DB 值可覆盖 YAML 的 operational 参数
+- [ ] 热重载操作参数无需重载 RL 模型
+
 ## 12. 错误类型
 
 ### 12.1 AiEngineError 枚举
@@ -4497,6 +4875,22 @@ pub enum AiEngineError {
 | 运维操作 | `ModeSwitchFailed`, `ActionValidationFailed`, `OnlineUpdateFailed` | 记录 WARN，操作回滚 |
 | 硬件异常 | `NpuOverheating` | 降频保护，连续 5 周期正常后恢复 |
 | **预测增强** | `VmdFailed`, `VmdNotConverged`, `AttentionDegraded`, `ErrorCorrectionFailed` | VMD 失败自动降级至无 VMD 模式；连续 5 次成功后自动升级；误差修正失败跳过修正、主预测值直出、连续 3 次失败自动禁用 |
+
+### 12.3 动态配置错误处理【暂停：观测空间重构后接入，2026-09-09】
+
+> **⚠️ 口径差异（2026-09-27 核）**
+>
+> - 源表用字符串错误码；代码对应 `AiEngineError` 变体为 `ConfigLoadFailed(String)`（`mupc/crates/ai-engine/src/error.rs:44-45`）与 `ConfigMismatch(String)`（`error.rs:47-48`）。
+> - `DB_QUERY_FAILED` **无独立变体**：DB 查询失败复用 `ConfigLoadFailed`，文案为「数据库查询失败: …」（`dynamic_config_loader.rs:108`）。
+> - `VALIDATION_FAILED（ASC-01~05）` 在代码中由 `ActionSpaceConfig::validate()` 返回 `Result<(), String>`（`action_space.rs:86-108`），未映射为错误枚举变体。
+> - `ConfigLoadFailed` / `ConfigMismatch` 两个变体**未列入本章 §12.1 的枚举快照**（该快照为更早版本，本次不追改）。
+
+| 错误类型 | 说明 | 处理方式 |
+|---|---|---|
+| `YAML_NOT_FOUND` | 配置文件不存在 | 告警 + 使用内置默认值（软校验） |
+| `FINGERPRINT_MISMATCH` | 指纹不匹配 | 拒绝启动 + 错误日志 + 上报监控 |
+| `DB_QUERY_FAILED` | 数据库查询失败 | 返回 AiEngineError |
+| `VALIDATION_FAILED` | 参数校验失败（ASC-01~05） | 拒绝加载 + 详细错误信息 |
 
 ## 13. 消息总线集成
 
@@ -4741,6 +5135,7 @@ These are the most critical files that need to be created or significantly modif
 |------|----------|
 | v2.3 | 恢复 SCENE-01 电压质量惩罚（P/Q 协同控制可主动调节电压幅值） |
 | v2.5 | FusedSystemState 新增 q_realtime_margin 与季节/时段编码，输入向量扩展至 56 维 |
+| v2.6 | 跨项目动态配置系统（分层加载 YAML→DB、版本指纹校验、DB 可覆盖 operational/safety 参数）；2026-09-27 自 2026-06-11 独立设计文档并入正文 §11.6–§11.13 / §10.2 / §12.3 |
 | v2.7 | 双参数动作空间（p_ref + k_droop），时间尺度解耦 |
 | v2.8 | P-Q 协同度奖励替代电压硬惩罚，新增下垂系数平滑惩罚 |
 | v2.10 | 安全覆盖惩罚 + 影子模型验证/折扣累积奖励/场景平滑过渡 |
@@ -4752,3 +5147,9 @@ These are the most critical files that need to be created or significantly modif
 | v2.17 | 安全 RL 包装器（物理模型事前预测拒绝 + 线路阻抗配置化，独立成章 §8） |
 | v3.0 | 合并预测增强分层混合架构（VMD+Attention+BiLSTM+误差修正+MSSA） |
 | v3.1 | 正文收敛整合（v2.16/v3.0/安全包装器统一描述；MinMax 观测归一化与 2 维动作反归一化修正） |
+
+**附：跨项目动态配置系统原文版本历史（逐字保留 · 2026-06-11 设计文档 §12）**
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v1.0 | 2026-06-11 | 初始版本，对齐训练管线 v2.6 配置系统 |
