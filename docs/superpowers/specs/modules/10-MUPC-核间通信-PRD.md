@@ -1,5 +1,15 @@
 # MUPC 核间通信模块产品需求文档（PRD）
 
+> **⚠️ 现状订正（2026-09-27）**：PCS（= 实时控制模块）的**通信与控制已于 2026-09-26 整体迁出至南向**
+> （02 号设计 **§13** / **ADR-014·015·016**），现由 `mupc-southd::pcs::PcsHandle` 承载
+> （下发入口 `send_dual_param` / `send_tai_command` / `stop` / `tick_once`；注入点
+> `strategy-engine::AiIntegrator::set_pcs_client`）。本文档中「经核间/经 intercore 向实时控制模块
+> 下发指令、读取实时数据、同步 `ai_ready`/`strategy_mode`」等表述**均为历史设计原文**：
+> ① 生产路径的控制下发**改经南向 `PcsHandle`**；② 核间 TCP 通道在生产路径**无消费者**
+> （技术债 **U-76**：客户端只发不收、不发心跳、不发 Connect 帧），其真实消费者现为仿真测试环境的
+> `sim-bridge`（11 号）；③ 配置 `intercore.transport` **现仅接受 `tcp`**（`modbus_rtu` 档随 PCS
+> 迁出已删除），PCS 串口改由顶层段 `south_pcs` 承载。逐处就地加注见下。
+
 ---
 
 ## 1. 产品概述
@@ -41,8 +51,8 @@
 |---------|---------|
 | mupc-common | 错误类型、日志 |
 | mupc-core | 核心基础设施（可选的 ServiceCoordinator 集成） |
-| strategy-engine（调用方） | 通过 intercore 下发控制指令 |
-| data-processing（消费方） | 通过 intercore 读取的实时数据 |
+| strategy-engine（调用方） | 通过 intercore 下发控制指令（**历史设计原文**；生产路径现经南向 `mupc-southd::pcs::PcsHandle` 下发至 PCS，见文首现状订正） |
+| data-processing（消费方） | 通过 intercore 读取的实时数据（**历史设计原文**；核间 TCP 通道生产路径无消费者） |
 
 ---
 
@@ -105,6 +115,14 @@
 
 ### 2.4 PCS 通道（RS485 Modbus RTU；生产主链路）
 
+> ⚠️ **现状订正（2026-09-27）**：本节描述的 PCS 生产主链路**已于 2026-09-26 整体迁出至
+> `mupc-southd::pcs`（02 号设计 §13 / ADR-014）**，不再是 intercore 的一部分。随之失效的点：
+> ① 配置键 `intercore.transport` 现**仅接受 `tcp`**（`modbus_rtu` 档已删除，写入即启动报错），
+> PCS 串口改由顶层段 `south_pcs.serial_port` 承载；② 点表/编解码/`pcs_slave` 联调工具现位于
+> `mupc/crates/mupc-southd/`；③ 本节下面的验收条目（§8.2 IC-AC-33~39）同理。下列协议语义
+> （V1.3 点表、FC06 逐写、字节互换、模式字）**作为历史与设计依据保留**，实现归属以 `mupc-southd`
+> 为准。
+
 **需求描述：**
 实时控制模块 = **两级式 PCS 设备**（小脑集成于 PCS）。生产主链路以 **Modbus RTU（RS485）** 直连 PCS（部署配置 `transport=modbus_rtu`）下发控制、读取状态/SOC/健康——通信管理模块为 **Modbus Master**，PCS 为 **Slave**。早期「TCP Socket + 自定义实时控制模块」帧协议（本章其余 §2.1~§6.8）仅保留作**仿真/联调**链路（`transport=tcp`，sim-bridge 作 TCP 服务端）。部署时经 `intercore.transport` 二选一，非运行时热备。
 
@@ -139,7 +157,7 @@
 ### 3.1 指令下发
 
 **需求描述：**
-通信管理模块将经过策略引擎校验的控制指令，通过核间通信通道下发至实时控制模块执行。
+通信管理模块将经过策略引擎校验的控制指令，通过核间通信通道下发至实时控制模块执行（**历史设计原文**——生产路径现经南向 `mupc-southd::pcs::PcsHandle::send_dual_param` / `send_tai_command` 下发至 PCS，见文首现状订正）。
 
 **指令类型（双参数模式）：**
 
@@ -195,6 +213,10 @@
 - 支持按需请求特定数据（通过 ControlCmd 方式）
 
 ### 3.3 关键信号
+
+> ⚠️ **现状订正（2026-09-27）**：下列 `ai_ready` / `strategy_mode` / `control_cmd` 信号**生产路径
+> 现由南向 `mupc-southd::pcs::PcsDualParam` 承载**（随 `PcsHandle` 下发），**不经核间通道**；
+> 核间侧无发送方（技术债 U-76）。下列定义保留为历史设计原文。
 
 以下关键信号通过核间通信通道传输，用于表达通信管理模块与实时控制模块之间的协同状态：
 
@@ -565,9 +587,13 @@ Payload 格式（JSON 编码）：
 
 ### 8.2 PCS 通道
 
+> ⚠️ **现状订正（2026-09-27）**：本组 7 条验收项（IC-AC-33~39）描述的 PCS 生产链路**已迁出至
+> `mupc-southd::pcs`**（02 号设计 §13 / ADR-014），其中「配置 `intercore.transport` 可选
+> `modbus_rtu`」（IC-AC-33）**已失效**（现仅接受 `tcp`）。条目内容保留为历史设计原文，编号不动。
+
 | 编号 | 验收项 | 验证方式 |
 |------|-------|---------|
-| IC-AC-33 | 配置 `intercore.transport` 可选择 `modbus_rtu`（生产→PCS）/ `tcp`（仿真/联调） | 功能测试 |
+| IC-AC-33 | 配置 `intercore.transport` 可选择 `modbus_rtu`（生产→PCS）/ `tcp`（仿真/联调）（**已失效**，见上） | 功能测试 |
 | IC-AC-34 | FC06 逐寄存器写下发控制：恒功率（1000=0 → 1001/1002）与分相（1000=2 → 1006-1011，单相 clamp ±25） | 单元测试 |
 | IC-AC-35 | 指令确认 = **PCS 写响应即确认**（无 exec 区读回）；读 3 区 1013 运行状态验证生效 | 单元测试 |
 | IC-AC-36 | 写指令超时 5s 标记失败，可选重试（最多 2 次） | 单元测试 |
@@ -646,6 +672,10 @@ Payload 格式（JSON 编码）：
 | `get_heartbeat_status() -> HashMap<Addr, HeartbeatStatus>` | Web UI / 监控 | 获取心跳统计 |
 
 ### 9.2 数据流集成
+
+> ⚠️ **现状订正（2026-09-27）**：下图中 `strategy-engine ──→ intercore ──→ 实时控制模块` 一段
+> **为历史设计原文**，生产路径现为 `strategy-engine ──→ mupc-southd::pcs::PcsHandle ──→ PCS`
+> （见文首现状订正）。
 
 ```
 gateway (调度指令)

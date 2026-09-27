@@ -385,6 +385,12 @@ Wi-Fi AP 和 Station 同时运行的能力取决于无线模组。分三种情�
 
 ### 4.5 设备状态特征数据格式
 
+> **⚠️ `module_status.intercore` 的语义订正（2026-09-27）**：键名沿旧，但取值表达的**不是核间 TCP 链路态** ——
+> PCS 通信与控制已于 2026-09-26 迁入南向（02 号设计 §13 / ADR-014），核间 TCP 通道在生产路径无消费者；
+> 该位实为 **PCS 通道在线态**（真源 `mupc-southd::pcs::PcsHandle::is_connected()`）。
+> 另 `module_status.rs485` 与 PRD §4.2 的「IEC 104、intercore」两项并不完全对应 —— **键集以本文为准，
+> PRD 侧口径订正见 09 PRD §4.2 表下注**。**正名待后续评审**。
+
 ```json
 {
   "serial": "MUPC202605280001",

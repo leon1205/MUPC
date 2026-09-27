@@ -1,6 +1,6 @@
 # MUPC 策略引擎模块设计文档
 
-> 平台目标调整（2026-09-09）：台区储能治理（本地策略引擎 TaiStorage）升级为默认策略下发引擎（AI 暂停期唯一出口）；原"AI 失效兜底"定位保留——AI 恢复后回兜底位。核间 strategy_mode 对 TaiStorage 的命名（basic/local vs fallback）待产品追认。
+> 平台目标调整（2026-09-09）：台区储能治理（本地策略引擎 TaiStorage）升级为默认策略下发引擎（AI 暂停期唯一出口）；原"AI 失效兜底"定位保留——AI 恢复后回兜底位。南向 `strategy_mode` 对 TaiStorage 的命名（basic/local vs fallback）待产品追认。
 
 > **文档定位：** 本文档记录实现级设计决策（架构、Rust 结构体/trait、状态机、配置结构、测试策略、文件组织）。需求级内容（功能描述、验收标准、性能指标）请参考 [04-MUPC-策略引擎-PRD](../specs/modules/04-MUPC-策略引擎-PRD.md)。
 
@@ -29,7 +29,7 @@
 策略引擎（Strategy Engine）是 MUPC 通信管理模块的**本地决策核心**，对应 workspace crate `mupc-strategy-engine`。
 
 **核心职责：**
-- 提供单一兜底策略：台区储能治理（AI 失效时经核间下发分相 P/Q）
+- 提供单一兜底策略：台区储能治理（AI 失效时经南向 `PcsHandle` 下发分相 P/Q）
 - 对 AI 引擎输出的指令进行安全校验（`AiCommandValidator`）
 - 管理策略模式切换（AI 模式 / 本地兜底模式 / 基础模式）
 - 通过消息总线接收遥测数据，输出控制指令
@@ -56,7 +56,7 @@ AI 引擎失效:
 
 > 表内「Web API 切换 / 可切换」为历史原文（保留以述原文），时效见下方注。
 
-**本地优先模式（部署默认）**：`ai_engine.local_priority` 默认 `true`（代码 serde 默认 + 部署配置显式声明），开机即生效；也可经 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。（2026-09-09 平台调整：AI 引擎暂停，模型不加载、决策循环仅本地策略——本句「仍加载/仍运行决策循环」为暂停前旧表述，保留以述原文）需 AI 智能控制时置 `local_priority=false`。（2026-09-09 平台调整：现为默认策略；AI 恢复后回兜底位）
+**本地优先模式（部署默认）**：`ai_engine.local_priority` 默认 `true`（代码 serde 默认 + 部署配置显式声明），开机即生效；也可经 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经南向 `PcsHandle` 下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发 PCS 指令）。（2026-09-09 平台调整：AI 引擎暂停，模型不加载、决策循环仅本地策略——本句「仍加载/仍运行决策循环」为暂停前旧表述，保留以述原文）需 AI 智能控制时置 `local_priority=false`。（2026-09-09 平台调整：现为默认策略；AI 恢复后回兜底位）
 
 〔注（2026-09-27）：`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`——`CoreConfig.ai_engine.local_priority` 启动期读取一次（§8 装配段 `set_local_priority`）。另：该字段现被 `CoreConfig::validate` **拒绝取 `false`**（AI 停用期置 false ⇒ `dispatch_ai_decision` 恒 `ModelNotLoaded` 而本地兜底不执行 = 静默零控制输出）。〕
 
@@ -72,7 +72,7 @@ mupc-strategy-engine
 ### 1.4 整体数据流
 
 ```
-intercore (TCP/RJ45)
+mupc-southd（南向采集：south_stations.meter_grid / grid 遥测）
     │
     ▼
 DataCollector → HighFrequencyTelemetry (1Hz)
@@ -88,18 +88,20 @@ AiCommandValidator (可插拔 AI 模型)
     │
     ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  AI→  p_ref + k_droop → IntercoreClient → 实时控制模块     │
-│  本地策略→ 台区储能分相 P/Q → IntercoreClient → 实时控制模块 │
+│  AI→  p_ref + k_droop → PcsHandle → PCS（南向）            │
+│  本地策略→ 台区储能分相 P/Q → PcsHandle → PCS（南向）        │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-> **分发路径：** p_ref + k_droop 由 AI 引擎输出并通过核间通信下发至实时控制模块；台区储能治理策略（AI 失效兜底）经核间 V3 帧下发分相 P/Q 至实时控制模块。
+> **分发路径：** p_ref + k_droop 由 AI 引擎输出并经南向 `PcsHandle::send_dual_param` 下发至 PCS；台区储能治理策略（AI 失效兜底）经 `PcsHandle::send_tai_command` 下发分相 P/Q 至 PCS。
+>
+> 〔注（2026-09-27）：原「经核间通信 / 核间 V3 帧下发至实时控制模块」为 PCS 迁出前的表述。PCS 通信与控制已于 2026-09-26 由 `mupc-intercore` 整体迁入 `mupc-southd::pcs::PcsHandle`（02 号设计 §13 / ADR-014·015·016），生产下发路径 = 南向 `PcsHandle`（RS485 / Modbus RTU）；「V3 帧」现仅存于 `sim-bridge` TCP 仿真通道。〕
 
 ### 1.5 策略 ID 分配
 
 | 策略 | cmd_id | 说明 |
 |------|--------|------|
-| 台区储能治理 | 4 | 固定 ID（AI 失效兜底，经核间 V3 帧下发分相 P/Q） |
+| 台区储能治理 | 4 | 固定 ID（AI 失效兜底，经南向 `PcsHandle` 下发分相 P/Q） |
 | 保留 | 5-10 | 供后续扩展策略使用 |
 
 ### 1.6 性能与可靠性
@@ -161,12 +163,12 @@ TaiStorageStrategy (兜底策略，持 Arc<Mutex<TaiControllerState>>)
         · 4 状态机 S1/S2/S3/S4 + 积分器(共模P/差模P/分相Q)
         · 每 60s 一个控制周期 → ControlCommand(phase_p_set/phase_q_set)
         ↓
-IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P/Q)
+PcsHandle::send_tai_command()                   ← 南向分相 P/Q 下发
         ↓
-实时控制模块 → 台区储能 PCS(分相 P/Q 设定)
+台区储能 PCS(分相 P/Q 设定，FC06 写 4 区 1006-1011)
 ```
 
-**单一兜底策略**：策略引擎现仅保留台区储能治理策略作为本地兜底。AI 失效或指令校验不通过时，降级由该策略生成台区储能分相 P/Q，经核间 V3 帧下发至实时控制模块。原削峰填谷/需量控制/防逆流三策略已废弃（代码保留不编译）。
+**单一兜底策略**：策略引擎现仅保留台区储能治理策略作为本地兜底。AI 失效或指令校验不通过时，降级由该策略生成台区储能分相 P/Q，经南向 `PcsHandle::send_tai_command` 下发至 PCS。原削峰填谷/需量控制/防逆流三策略已废弃（代码保留不编译）。
 
 ### 2.4 状态机（4 状态）
 
@@ -210,7 +212,7 @@ IntercoreClient.send_tai_command()              ← 新增核间 V3 帧(分相 P
 - **差模 P**（三相之间微调）：三相电流不平衡时，把充电/放电往电流大的相多分一点、电流小的相少分一点。三相之间倒来倒去，**总量不变、不额外耗电池**；
 - **分相 Q**（无功）：哪相功率因数低了，就发/收无功把它补回接近 1。
 
-所以每个周期最终下发的是**六个数字**：A/B/C 三相各自的有功设定 + 三相各自的无功设定（`phase_p_set` / `phase_q_set`）。**下发路径（v2.2 PCS 架构）**：上层接口 `IntercoreClient::send_tai_command` 不变；生产通道（transport=modbus_rtu）PCS 即实时控制模块，ModbusRtuTransport 以 FC06 直写 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，正放负充）；文中「V3 帧下发」表述仅指 TCP 仿真通道（sim-bridge），参见 10 核间 §11.9。
+所以每个周期最终下发的是**六个数字**：A/B/C 三相各自的有功设定 + 三相各自的无功设定（`phase_p_set` / `phase_q_set`）。**下发路径（PCS 已于 2026-09-26 迁入南向）**：上层接口为 `mupc-southd::pcs::PcsHandle::send_tai_command`；生产通道经 `PcsHandle` 以 FC06 逐相交错写 PCS 4 区 1006-1011（迁移前 intercore 为分组写，写序偏离见该函数文档；模式字 2 分相前置，单相 clamp ±25，正放负充）；「V3 帧下发」表述仅指 TCP 仿真通道（sim-bridge），参见 10 核间 §11.9。
 
 ### 2.5 控制律（三通道）
 
@@ -266,9 +268,11 @@ pub struct ElectricalData {
 - 分相数据缺失时：策略按 failsafe 处理（积分冻结、斜坡回归 0）；
 - `DataPackage` 构造处（`dataframe_to_datapackage` 等）同步更新，未填分相字段时 `phase=None`，不破坏现有调用方。**投产前提**：填真实总表点表（`reg_map` 各量起始寄存器）+ 现场 Q 相序核验（`s_q_sign`）。
 
-### 2.8 执行路径（核间协议 V3）
+### 2.8 执行路径（南向 PCS 通道）
 
-核间协议新增分相下发通道（`mupc-intercore`）：
+> 〔注（2026-09-27）：PCS 通信与控制已于 2026-09-26 由 `mupc-intercore` 迁入 `mupc-southd::pcs::PcsHandle`（02 号设计 §13 / ADR-014·015·016）。**生产下发路径 = `PcsHandle::send_tai_command`**（RS485 / Modbus RTU，FC06 写 4 区 1006-1011）。下方「核间协议新增分相下发通道」「`IntercoreClient`」描述为**迁出前的核间设计记录**，现仅 `sim-bridge` 的 TCP 仿真通道使用，不再承载生产下发。〕
+
+核间协议新增分相下发通道（`mupc-intercore`，现仅 TCP 仿真通道）：
 
 ```rust
 // tcp_server.rs
@@ -536,8 +540,8 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 #### 2.10.2 容量档位配置
 
 **目标**：策略参数不与某台 PCS 容量（如 60kW 双级式）绑定为单一硬编码默认——按**当前 PCS 档位**（60kW / 125kVA 等）在启动时动态派生整套硬件相关参数。换 PCS 规格**只改档位 key 或 YAML 加档，不改代码**。
-**使用形态**：启动时档位选择（部署配置，与 transport 二选一同模式；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`intercore` clamp ±25、125kVA 点表）仍按 10 核间 §11.9 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
-**档位放行与驱动能力耦合**：策略档位（i_rated/s_rated/dp_max/q_i_max）与 PCS 驱动侧 clamp/点表**不自动联动**——放行任一无中线非 60kW 档时，须与 `transport` 驱动点表型号**同批变更**并做装配期一致性核对（部署模板注释显式警告；`CoreConfig::validate` 预留装配期校验位）。`has_neutral=true` 校验闸同时充当"驱动/仲裁能力就绪"门：解除需**仲裁恢复中线判据 + 10 核间驱动点表确认**双就绪，防止假参数进闭环。
+**使用形态**：启动时档位选择（部署配置，与 `south_pcs` 段同为**启动期**配置；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。〔订正（2026-09-27）：原文为「与 transport 二选一同模式」——`intercore.transport` 现仅接受 `"tcp"`，其 `modbus_rtu` 档已随 PCS 迁入南向删除（02 设计 §13 / ADR-016）；「档位选择与 PCS 通道参数同属部署期配置」这一**语义**不变。〕**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`mupc-southd::pcs` clamp ±25、125kVA 点表）仍按 10 核间 §11.9 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
+**档位放行与驱动能力耦合**：策略档位（i_rated/s_rated/dp_max/q_i_max）与 PCS 驱动侧 clamp/点表**不自动联动**——放行任一无中线非 60kW 档时，须与 `south_pcs` 驱动点表型号**同批变更**并做装配期一致性核对（部署模板注释显式警告；`CoreConfig::validate` 预留装配期校验位）。`has_neutral=true` 校验闸同时充当"驱动/仲裁能力就绪"门：解除需**仲裁恢复中线判据 + 10 核间驱动点表确认**双就绪，防止假参数进闭环。
 
 **参数分层（来源与覆盖规则）**
 
@@ -638,7 +642,7 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
   字段类型 `String`、serde 默认空；startup 归一化：`let path = config.strategy.tai_config_file.trim(); let opt = if path.is_empty() { None } else { Some(path) };`
 - **startup.rs**：`let tai_cfg = mupc_strategy_engine::load_tai_storage_config(opt, None).map_err(|e| MupcError::new(ErrorCode::ConfigError, format!("tai 档位加载失败: {e}"), "startup"))?;` 再 `TaiStorageStrategy::new(tai_cfg)`。**档位加载失败 = 启动中止（fail-fast）**，不静默落默认档。
 - **`tai_replay` bin**：`--config-file <path>` + 可选 `--capacity-profile <key>`（CLI 优先于文件顶行 key）；与既有位置参数扫参共存——**覆盖顺序 = 代码默认 → 档位派生(L1/L2) → tuning(L3) → CLI 位置参数**，使标定扫参可在任意档基础上叠加执行。
-- 部署模板（mupc_core_config.yaml 与 production 模板）并入 `strategy.tai_config_file` 示例；`pcs125_kva` 等非 60 档放行须与 `transport` 驱动点表型号同批变更并装配期核对（顶部注）。
+- 部署模板（mupc_core_config.yaml 与 production 模板）并入 `strategy.tai_config_file` 示例；`pcs125_kva` 等非 60 档放行须与 `south_pcs` 驱动点表型号同批变更并装配期核对（顶部注）。
 
 **测试**（`pcs_profile_test.rs`）：
 - 样例 YAML 双档解析 → L1/L2 合并正确（i_rated/s_rated/dp_max/q_i_max 落值）；`tuning` L3 覆盖生效
@@ -652,14 +656,16 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
 
 - `AiIntegrator` 新增字段 `tai_storage: Arc<Mutex<TaiStorageStrategy>>`；
 - `set_tai_storage_strategy()` 注入（startup 装配时创建并注入）；
-- `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经 `intercore_client.send_tai_command()` 下发（若未注入核间客户端则跳过并记录警告）。
+- `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经南向 `PcsHandle::send_tai_command()` 下发（若未注入 PCS 客户端则跳过并记录警告）。
 #### 2.11.1 SOC 源优先级（BECG 站级 BMS）
 
-02 南向 §10 统一调度接入 BMS 站后，SOC 源优先级：**BMS 站（role=battery）在线 → 其 SOC 优先；掉线回落 intercore `latest_soc`（核间回读）**；可配。AiIntegrator 数据注入（§2.11）在总表模式以核间 SOC 补 battery，本增补将最高优先级让给 BMS 站。生效于实施 S3 后；S3 前维持现状。
+02 南向 §10 统一调度接入 BMS 站后，SOC 源优先级：**BMS 站（role=battery）在线 → 其 SOC 优先；掉线回落 `PcsHandle::latest_soc`**；可配。AiIntegrator 数据注入（§2.11）在总表模式以 PCS SOC 补 battery，本增补将最高优先级让给 BMS 站。生效于实施 S3 后；S3 前维持现状。
+
+> 〔订正（2026-09-27）：原文两处写「回落 intercore `latest_soc`（核间回读）」。PCS 通信与控制已于 2026-09-26 迁入南向（02 设计 §13 / ADR-014），`latest_soc()` 现为 **`mupc-southd::pcs::PcsHandle` 的采集快照**（`southd/src/pcs/collect.rs:72`），**不经核间**。返回值与故障态与迁移前**逐字等价**，唯一差异是时间戳来源由「调用时刻」变为「本拍采集时刻」（02 设计 §13.9）。**代码侧注释（`ai_integration.rs:51/241/251/300/402`）仍沿用「核间」措辞，属未跟改的注释，不影响行为。**〕
 
 **源选择状态机（可编码）**：切离当前源仅由 stale 触发（当前源超期 → 立即用备用源，差值不参与）；回切原源（BMS 恢复）需原源连续 N 拍有效**且**两源差值在滞回带（如 3%）内才回切，防保护降额阈值附近来回抖动；（SOC 88/90/12/10 线性带，§2.6）附近来回切换导致共模 P 抖；两源为同一电池组的不同计源，差异需现场校准（对齐 §2.12 回放 SOC ±3% 用例）。
 
-**落点与回落机制**：两源逐源时间戳在 southd mapper 维护、注入时携带源信息；**回落须修改 `set_latest_data` 的字段级保留语义**（现 `merge_battery_missing` 以 `.or()` 保留旧 SOC，BMS 曾写入则掉线后核间回落被永久压住、5s 整体新鲜度也识别不到 SOC 单源过期）——BMS 源超期即置 SOC=None/过期标记，使核间回落可触发；滞回判定放 AiIntegrator evaluate 侧（BMS 在线时仍周期读核间 SOC 维持两源差值样本）。交叉引用 02 §10.5。
+**落点与回落机制**：两源逐源时间戳在 southd mapper 维护、注入时携带源信息；**回落须修改 `set_latest_data` 的字段级保留语义**（现 `merge_battery_missing` 以 `.or()` 保留旧 SOC，BMS 曾写入则掉线后 PCS 回落被永久压住、5s 整体新鲜度也识别不到 SOC 单源过期）——BMS 源超期即置 SOC=None/过期标记，使 PCS 回落可触发；滞回判定放 AiIntegrator evaluate 侧（BMS 在线时仍周期读 PCS SOC 维持两源差值样本）。交叉引用 02 §10.5。（本节「核间」一律按上一段的〔订正〕理解为 **`PcsHandle` 快照**。）
 
 **phase 真源闸门**：控制数据新鲜度闸门（`last_data_ts`）推进仅由 meter_grid（phase 真源）更新触发（02 §10.5）；phase 逐源过期标记与 SOC 同构（防活性 BMS 掩盖死总表 → 陈旧 phase 驱动）。
 
@@ -707,12 +713,12 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
 |----------|--------|----------|
 | `tai_storage_test.rs` | ~15 | 状态机切换（S1~S4 进入/退出/滞回）、积分收敛（共模/差模/Q）、零净能量 ΣΔP=0、容量仲裁裁剪顺序、failsafe 数据超时、控制周期节流 |
 | `mupc-tai-replay` | 集成 | 6-27/7-04 回放 KPI 断言（不平衡 <20% 达标时长 ≥80% 等） |
-| 核间 V3 帧 | ~4 | `ControlCmdPayloadV3` 序列化/反序列化、版本检测（v1/v2/v3）、`send_tai_command` 帧组装 |
+| 核间 V3 帧（TCP 仿真通道） | ~4 | `ControlCmdPayloadV3` 序列化/反序列化、版本检测（v1/v2/v3）、`send_tai_command` 帧组装 |
 
 ### 2.14 依赖清单（实现前确认）
 
 1. 台区总表实时接口提供分相 Q（含符号）与分相 PF（data_rule 字段已确认）；
-2. PCS（=实时控制模块）通信接受分相 P/Q 设定值（已确认，Modbus 协议 V1.3：分相模式 2 + 4 区 1006-1011 逐寄存器 FC06 写）；生产通道由 ModbusRtuTransport 直写，**不依赖 V3 帧转发**（V3 帧仅 TCP 仿真通道使用）；
+2. PCS（=实时控制模块）通信接受分相 P/Q 设定值（已确认，Modbus 协议 V1.3：分相模式 2 + 4 区 1006-1011 逐寄存器 FC06 写）；生产通道经 `mupc-southd::pcs::PcsHandle` 直写（FC06 写 4 区 1006-1011），**不依赖 V3 帧转发**（V3 帧仅 TCP 仿真通道使用；`ModbusRtuTransport` 与 `tokio-modbus` 已随迁移整删）；
 3. PCS 容量限值（已确认按 **60kW 两级式 PCS**：单相 ±25kW/kVAr ≈ 110A@230V、总视在 60kVA；原 125kW/190A 四桥臂型号点表待厂方确认方可对接，见 10 核间 §11.9「范围与投运前提」）；
 4. 状态机时段参数初值（已用 6-27/7-04 data_rule 负荷曲线标定，P_dis_trig=30kW、T_清空 21:00/23:30）；
 5. 电池充/放电功率限值 60kW（已确认）；
@@ -874,8 +880,8 @@ AiCommandValidator.validate(cmd)
 pub struct AiIntegrator {
     model_manager: Arc<RwLock<Option<Arc<ModelManager>>>>,
     status: Arc<RwLock<ModelStatus>>,
-    /// 核间通信客户端（p_ref/k_droop 双参数 + 台区储能分相 V3 帧下发）
-    intercore_client: Option<Arc<IntercoreClient>>,
+    /// PCS 通道（南向完整所有者 `PcsHandle`：p_ref/k_droop 双参数 + 台区储能分相 P/Q 下发）
+    pcs: std::sync::RwLock<Option<Arc<PcsHandle>>>,
     /// 双参数降级缓存（通信中断时使用）
     last_valid_p_ref: RwLock<Option<f64>>,
     last_valid_k_droop: RwLock<Option<f64>>,
@@ -896,7 +902,7 @@ pub struct AiIntegrator {
 |------|------|------|
 | `new()` | 创建 AI 集成器，初始状态为 Unloaded | 否 |
 | `initialize(config)` / `set_model_manager()` | 加载/注入 AI 模型 | 是 |
-| `set_intercore_client()` | 注入核间通信客户端 | 否 |
+| `set_pcs_client()` | 注入 PCS 通道（南向 `Arc<PcsHandle>`；原 `set_intercore_client` 已删除） | 否 |
 | `set_tai_storage_strategy()` | 注入台区储能治理策略 | 否 |
 | `set_local_priority()` / `is_local_priority()` | 设置/查询本地优先模式 | 是 |
 | `set_latest_data()` | 写入最新遥测（南向采集循环调用） | 是 |
@@ -925,15 +931,17 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 2. MADDPG/PPO 基于预测结果决策，输出 2 维动作（p_ref, k_droop）
 3. AiCommandValidator 校验 AI 指令安全性
 4. AI 指令分发：
-   - p_ref + k_droop → IntercoreClient → 实时控制模块（闭环下垂控制）
+   - p_ref + k_droop → 南向 `PcsHandle::send_dual_param` → PCS（闭环下垂控制）
 5. AI 失效/校验不通过 → 降级本地兜底：
-   - 台区储能治理(TaiStorageStrategy) → IntercoreClient.send_tai_command()（核间 V3 帧）→ 实时控制模块 → 台区储能 PCS（分相 P/Q）
+   - 台区储能治理(TaiStorageStrategy) → `PcsHandle::send_tai_command()`（南向分相 P/Q）→ 台区储能 PCS（分相 P/Q）
 
 本地优先模式（`local_priority=true`）：
-- `dispatch_ai_decision` 开头判断 `local_priority`，为 true 时直接走本地台区储能治理策略（分相 P/Q 经核间下发）
+- `dispatch_ai_decision` 开头判断 `local_priority`，为 true 时直接走本地台区储能治理策略（分相 P/Q 经南向 `PcsHandle` 下发）
 - AI 引擎已暂停（平台目标调整 2026-09-09 修正本句）：模型不加载、不再运行 `full_decision_cycle()` 旁路参考——`dispatch_ai_decision` 在 `local_priority=true` 下直达本地台区储能治理下发（上方 "AI 失效降级本地兜底" 表述现为默认路径）；AI 决策分支代码保留为框架，观测空间数据维度重构 + 模型恢复加载后启用
 - 通过 YAML 配置 `ai_engine.local_priority` 或 Web API `/api/v1/strategy-mode` 运行时切换
 ```
+
+〔注（2026-09-27）：上方代码块内「Web API `/api/v1/strategy-mode` 运行时切换」为历史原文——`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`（`CoreConfig.ai_engine.local_priority` 启动期读取一次），且该字段现被 `CoreConfig::validate` **拒绝取 `false`**（AI 停用期置 false = 静默零控制输出）。〕
 
 ---
 
@@ -966,9 +974,9 @@ pub enum StrategyType {
 
 〔注（2026-09-27）：本表末行「Web API `PUT /api/v1/strategy-mode`」为历史原文——`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`（`CoreConfig.ai_engine.local_priority` 启动期读取一次）。且该字段现被 `CoreConfig::validate` **拒绝取 `false`**（AI 停用期置 false = 静默零控制输出），故该行实际不可达。〕
 
-### 5.3 核间通信信号
+### 5.3 南向 PCS 通信信号
 
-策略模式通过 TCP 帧中的 `strategy_mode` 字段同步给实时控制模块：
+策略模式通过南向 `PcsDualParam` 的 `strategy_mode` 字段同步给 PCS（原核间 TCP 帧 `strategy_mode` 字段，随 PCS 迁入南向，2026-09-26）：
 
 | 值 | 模式 | 说明 |
 |----|------|------|
@@ -1020,7 +1028,7 @@ pub struct ControlCommand {
 }
 ```
 
-> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置，单位 kW/kVAr、索引 A/B/C、**正放负充**。下发路径：**生产通道（transport=modbus_rtu）**——PCS 即实时控制模块，经 `IntercoreClient::send_tai_command` → ModbusRtuTransport FC06 逐写 PCS 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，见 10 核间 §11.9）；**TCP 仿真通道**才走 V3 帧（sim-bridge）。目标设备为 60kW 两级式 PCS，三相分相 PQ 独立可控、无中线。
+> **分相设定字段：** `phase_p_set` / `phase_q_set` 为台区储能分相有功/无功设定，仅由台区储能治理策略（`TaiStorageStrategy`，见 §2）设置，单位 kW/kVAr、索引 A/B/C、**正放负充**。下发路径：**生产通道**——经 `mupc-southd::pcs::PcsHandle::send_tai_command` 以 FC06 逐相交错写 PCS 4 区 1006-1011（模式字 2 分相前置，单相 clamp ±25，见 10 核间 §11.9；迁出前 intercore 为 `ModbusRtuTransport` 分组写，写序偏离见该函数文档）；**TCP 仿真通道**才走 V3 帧（sim-bridge）。目标设备为 60kW 两级式 PCS，三相分相 PQ 独立可控、无中线。
 
 ### 6.3 CommandType 枚举
 
@@ -1251,7 +1259,7 @@ tokio-test = "0.4"
 | FallbackStrategy | 兜底策略 trait，所有策略实现此接口 |
 | SOC | 电池荷电状态（%） |
 | PV | 光伏（Photovoltaic） |
-| 台区储能治理 | 单一兜底策略，AI 失效时经核间 V3 帧下发台区储能分相 P/Q |
+| 台区储能治理 | 单一兜底策略，AI 失效时经南向 `PcsHandle` 下发台区储能分相 P/Q |
 | DataPackage | 遥测数据包结构体（定义于 mupc-data-processing） |
 
 ---

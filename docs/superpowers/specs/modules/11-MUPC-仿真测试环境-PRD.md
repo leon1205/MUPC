@@ -17,6 +17,8 @@ MUPC 已完成嵌入式设备部署（RK3588, mupcd 可执行），但缺乏系�
 
 搭建一套**硬件在环（HIL）仿真测试环境**，使嵌入式 MUPC 能够在模拟电网场景下运行完整的决策闭环，验证 LSTM 预测 → RL 决策 → 动作输出的全链路正确性。
 
+> ⚠️ **现状裁定（2026-09-27）：本目标中的「完整决策闭环」当前未实现；已裁定「判为未实现、不重建」。详见 §1.1 下方的裁定块。**
+
 ### 1.3 范围
 
 | 包含 | 不包含 |
@@ -28,6 +30,29 @@ MUPC 已完成嵌入式设备部署（RK3588, mupcd 可执行），但缺乏系�
 | Episode 指标收集与报告 | 仿真环境的分布式部署 |
 
 > **MUPC 侧适配说明**：MUPC 通过 YAML 配置文件切换仿真模式（`mupc_core_config.yaml` 中修改 `intercore.host` 指向仿真 PC IP、`mqtt-plugin` 订阅 `mupc/sim/observation` topic），**不要求修改 Rust 源码**。这些配置变更属于运维操作范畴。
+
+---
+
+### 1.4 现状裁定（2026-09-27）——闭环**未实现**，且**不重建**
+
+> **裁定来源**：2026-09-27 文档现状对齐（`mupc-southd` / `intercore` 全量检查）查出 U-163，经产品/架构裁定取「**A：正式判为未实现、不重建**」。技术债登记见 `docs/technical-debt.md` §6.19 **U-163**。
+
+**上一条「MUPC 侧适配说明」的「不要求修改 Rust 源码」前提不成立。** 事实是三处皆断，**每一处都只能靠改 Rust / Python 代码解决，配置解决不了**：
+
+| # | 断点 | 代码事实 | 靠配置能解决吗 |
+|---|------|----------|----------------|
+| ① | **动作下行无客户端** | 全仓 `IntercoreClient::send_*` **零调用点**（`grep` 仅 2 处文档注释）；`startup.rs:1393` 构造的 client 只经 `StartupContext.intercore` 移交且**该字段无读取方**。改 `intercore.host` 只是把「无人使用的 client」指向仿真 PC | ❌ 配置改不了「有没有人调用」 |
+| ② | **观测回程无订阅方** | sim-bridge 把观测发布到 MQTT 主题 `mupc/sim/observation`（`config.rs:45`），而**全仓无任何代码引用该主题**；`mqtt-plugin` 亦无把该 topic 接进数据融合的实现 | ❌ 「订阅」不是配置项，是缺失的代码 |
+| ③ | **动作语义已过期** | 动作帧只有 `{p_ref, k_droop}`（`action_server.rs:23`，**AI 引擎时代的 2 维动作空间**）；而 AI 自 **2026-09-09 停用**后，**唯一下发者是台区储能治理（分相 P/Q）**，与 `engine.py:58` 的 `[p_ref, k_droop]` 对不上 | ❌ schema 对不上是代码问题 |
+
+**为何出现**：本 PRD 成文于 2026-07（AI 引擎为主控决策者时期）。此后两件事使闭环的**两端失去对象**——① 2026-09-09 **AI 引擎停用**，§1.2 要验的「LSTM → RL → 动作」链路本身不再运行；② **2026-09-26 PCS 迁入南向**，策略出口由 `IntercoreClient`（TCP）改为 `PcsHandle`（RS485），sim-bridge 作为「伪装实时控制模块的 TCP 对端」不再是任何人的对端。
+
+**裁定内容（A 方案）**：
+1. **不重建**该闭环。理由：① 闭环要验的 AI 决策链已停用，重建等于给一条不运行的链路配套；② 重建需**三处新代码**（含**从零新建** MUPC 侧的 MQTT 消费面），而收益是把一条仿真链路接回一条已停用的决策链；③ 同等预算投在**真机验收**（`technical-debt.md` §8.7 的 M1–M10）上收益更大。
+2. **本 PRD 的闭环类需求（§2.2 / §3.1 SB-03~SB-06 / §4.2 / §4.3）一律保留原文**——不删、不改验收标准 ID，其「未实现」由本节声明。
+3. **sim-bridge 的现行定位**：`sim-bridge` + `engine.py` 仍是**可用的仿真观测发生器**（起 Grid2Op、产出 78 维观测、按 `sim_config.yaml` 发布到 `mupc/sim/observation`）；但**当前 MUPC 侧无消费者**，故本工具对 MUPC **暂无实际作用**，保留它是为了「将来要用时工具还在」。⚠️ **依赖 AI 引擎观测空间的场景（附录 A 的 78 维数据生成）同样随 AI 停用而不适用**。
+4. **与「协议链验证」的分工**：HIL 闭环**未实现**≠协议链无人验证。PCS / 南向的协议链验证**另有手段且已落地**：`mupc-southd/tests/pcs_e2e.rs` **8 例**（e1–e7）经 `rs485-plugin` 的 `set_test_exchange` 字节流缝驱动 `PcsSlaveService`，**无需串口硬件**覆盖上线 / 输入区+字节序 / 保持写读 / 启停方向状态机 / 急停告警位 / 并发无串扰 / 采集节拍；`pcs_slave` bin（feature `pcs-slave-bin` 门控）可在虚拟串口对（`socat` / `com0com`）上跑**独立进程**端到端联调。⇒ **本 PRD 的缺口只是「Grid2Op 电网模型在环」这一层**。
+5. **若将来恢复 HIL**：推荐路线是 **PTY + Modbus 从站**（复用 `pcs_slave`，MUPC 走**完整生产链路**），而非重建 TCP 出口——后者测不到串口时序/分帧/DE-RE/字节序，且需在生产码里加「仅仿真时活」的旁路出口。届时须新立项（走需求/设计流程），本 PRD 不再单方面承诺。
 
 ---
 
@@ -69,6 +94,11 @@ MUPC IntercoreClient ──TCP:9100──→ ActionServer (sim-bridge)
                                     ↓
                          78 维观测 ← 回到循环起点
 ```
+
+> ⚠️ **本图两处标注为「未实现」（2026-09-27，详见 §1.4 现状裁定）**：
+> ① `MUPC IntercoreClient ──TCP:9100──→ ActionServer` —— MUPC 侧**无任何调用点**（sim-bridge 会一直阻塞在 `accept()`）；
+> ② `MQTTPublisher ──78维观测──→ MUPC DataFusion` —— MUPC 侧**无任何订阅方**。
+> 且本图的动作语义 `{p_ref, k_droop}` 属 **AI 引擎时代**（AI 自 2026-09-09 停用）。
 
 ### 2.3 场景模式
 
@@ -164,29 +194,42 @@ MUPC IntercoreClient ──TCP:9100──→ ActionServer (sim-bridge)
 
 sim-bridge 监听 TCP 9100 端口，伪装为实时控制模块。MUPC IntercoreClient 通过 TCP 连接发送控制指令帧。
 
-**帧格式**（复用 intercore `ControlCommand` 结构体二进制序列化）：
+**帧格式**（复用 intercore `IntercoreFrame` 定长 64 字节帧 + `ActionPayload` 二进制载荷；见《10-MUPC-核间通信-设计文档》§3.2/§3.4 与本模块设计文档 §3.3）：
 
 ```
 字节偏移  | 长度  | 字段        | 类型   | 说明
 ---------|-------|-------------|--------|------------------
-0        | 4     | frame_id    | u32    | 帧序号 (大端)
-4        | 1     | cmd_type    | u8     | 0x01 = 控制指令
-5        | 1     | reserved    | u8     | 保留 (0x00)
-6        | 2     | payload_len | u16    | 载荷长度 = 16 (大端)
-8        | 8     | p_ref       | f64    | 有功基准点 kW (大端, IEEE 754)
-16       | 8     | k_droop     | f64    | 下垂系数 kW/V (大端, IEEE 754)
-24       | 2     | crc16       | u16    | CRC-16/MODBUS (大端)
+0        | 2     | magic       | u16    | 固定 0xAA55 (大端)
+2        | 2     | length      | u16    | 帧总长度 = 64 (大端)
+4        | 2     | frame_type  | u16    | 0x0010 = ControlCmd (大端)
+6        | 2     | seq_no      | u16    | 序列号 (大端)
+8        | 16    | payload     | —      | `ActionPayload`：p_ref f64 BE ‖ k_droop f64 BE（二进制）
+24       | 2     | crc16       | u16    | CRC-16/MODBUS (大端)，覆盖 magic..payload
+26       | 38    | padding     | —      | 0x00 补齐到 64 字节
 ```
 
-**总帧长**：26 字节。
+**总帧长**：64 字节（定长，与 intercore `FRAME_FIXED_LENGTH` 同源）。
 
 **sim-bridge 解析逻辑**：
-1. 读取前 4 字节 → frame_id (u32 BE)
-2. 读取 cmd_type (1 byte) → 仅处理 0x01
-3. 读取 payload_len (2 bytes BE) → 验证 = 16
-4. 读取 p_ref (8 bytes BE, f64) + k_droop (8 bytes BE, f64)
-5. 读取 crc16 (2 bytes BE) → 验证 CRC-16/MODBUS
-6. CRC 验证失败 → WARN 日志 + 丢弃帧
+1. 校验 magic = 0xAA55
+2. 校验 frame_type = 0x0010（ControlCmd）
+3. 由 intercore 编解码器 `IntercoreFrame::from_bytes()` 解帧并校验 CRC-16/MODBUS
+4. 由 `ActionPayload::from_frame()` 取 p_ref / k_droop（各 8 字节 f64 BE）
+5. 物理约束 clamp：p_ref ∈ [-50, 50]、k_droop ∈ [0, 30]
+6. CRC 校验失败 / 非 ControlCmd 帧 → WARN 日志 + 丢弃帧
+
+> ⚠️ **2026-09-27 订正**：原文记载的 **26 字节自定义帧**（frame_id / cmd_type / reserved /
+> payload_len）**已作废**——现实现复用 intercore 的定长帧 + `ActionPayload`，
+> 见 `mupc/crates/sim-bridge/src/action_server.rs` 与本模块设计文档 §3.3 的订正。
+> 注：sim-bridge 是 intercore 帧类型的**真实复用方**（`sim-bridge` 依赖 `mupc-intercore`），
+> 此处归属 intercore 正确。
+>
+> ⚠️ **本节接口在 MUPC 侧未接线（2026-09-27，详见 §1.4）**：sim-bridge 侧的 `ActionServer`
+> 已就位（`bind` + `parse_frame` + 64B 帧 + `ActionPayload`，E-01 已修），但
+> **MUPC 侧无任何客户端调用**（`IntercoreClient::send_*` 全仓零调用点）⇒ 本接口
+> **只有服务端、没有发起端**，`accept()` 会永久阻塞。**同理 §4.2 的 MQTT 观测接口
+> 只有发布端、没有订阅端。** 两条接口的需求（§3.1 SB-03 / SB-04）**保留原文**，
+> 「未实现」由 §1.4 声明。
 
 ---
 
@@ -278,6 +321,8 @@ cat sim_metrics.json
 
 ## 9. 测试策略
 
+> ⚠️ **2026-09-27 现状**：下表的**单元测试**行已落地；**系统测试**行的「5 场景 × 96 步全闭环」**不可达**（闭环未实现，见 §1.4）；**集成测试**行只覆盖 sim-bridge ↔ engine.py 一侧（MUPC 不在环内）。
+
 | 测试类型 | 覆盖范围 | 方法 |
 |---------|---------|------|
 | 单元测试 | MQTT 发布/订阅、TCP Server/Client、JSONL 编解码 | `cargo test -p mupc-sim-bridge` |
@@ -285,9 +330,14 @@ cat sim_metrics.json
 | 系统测试 | 5 场景 × 96 步全闭环 | 手动启动 MUPC + sim-bridge |
 | 压力测试 | 1000 步连续运行，无内存泄漏、无 panic | 循环测试脚本 |
 
+> **补注**：**本章的「全链路 / 系统」两级测试当前不成立** —— 它们的定义都要求 MUPC 在环（TCP 动作下行 + MQTT 观测回传），而 U-163 裁定这两端均未实现（§1.4）。
+> **PCS / 南向协议链的测试不依赖本环境**，另有已落地的无硬件手段：`mupc-southd/tests/pcs_e2e.rs`（8 例，经 `rs485-plugin` 的 `set_test_exchange` 字节流缝）。
+
 ---
 
 ## 10. 里程碑
+
+> ⚠️ **2026-09-27 现状**：Phase 1–3、5 **已交付**（代码在 `mupc/crates/sim-bridge/` 与 `sim-env/engine.py`）；**Phase 4 的「5 场景闭环调通」未达成**，且经 U-163 裁定 A **不再作为目标**（见 §1.4）。本表保留为历史计划，不反映当前状态。
 
 | Phase | 内容 | 预计工期 |
 |:--:|------|:--:|
@@ -316,3 +366,4 @@ cat sim_metrics.json
 | 版本 | 主要变更 |
 |------|----------|
 | v1.1 | 2026-07-10（LEON）：修复 PRD Reviewer 6 项反馈，评审通过 `[REVIEWED: PASS]` |
+| v1.2 | 2026-09-27：**现状裁定 —— 闭环未实现，且不重建**（U-163 裁定 A）。新增 **§1.4 现状裁定**（三处断点的代码事实 + 「不要求修改 Rust 源码」前提不成立 + 五条裁定内容）；§1.2 加指针；§2.2 数据闭环图加「两处未实现」注；§4.3 加「本节接口在 MUPC 侧未接线」注（含 §4.2 同理）。**需求条款与验收标准 ID 一律未改、未删**，其「未实现」由 §1.4 声明。原门禁标记 `[REVIEWED: PASS]` 保持原位（本次为内容订正，未经评审，未新增门禁标记） |

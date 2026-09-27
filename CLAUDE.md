@@ -257,12 +257,15 @@ cargo build -p mupc-sim-bridge --release
 
 ```
 调度主站 ←→ gateway (IEC 104) ←→ data-processing ←→ strategy-engine
-                                              ↓              ↑
-                              intercore (TCP/RJ45) ←→ 实时控制模块
-                                              ↑
-南向设备 ←→ rs485-plugin/hplc-plugin/mupc-southd ←─ ProtocolHandler 注入
-                    ↑
-        PCS 通信与控制（mupc-southd::pcs，2026-09-26 由 intercore 迁入）
+                                        ▲                     │
+                              采集结果  │                     │ 控制指令
+                                        │                     ▼
+南向设备 ←→ rs485-plugin/hplc-plugin/mupc-southd ──▶ PCS（= 实时控制模块）
+                    │           └ mupc-southd::pcs::PcsHandle
+                    │             （2026-09-26 由 intercore 迁入，走 RS485 Modbus RTU）
+                    └─ 四条通路：插件化单设备 / 站级多从站调度 / PCS 通信与控制 / 数字 IO（mupc-io）
+
+  intercore（核间 TCP 帧协议）┈┈  保留待接：生产路径暂无消费者（现存消费者只有 sim-bridge）
 
   主控进程 (mupcd) ──display-proto(TCP 回环)──▶ local-display（12 号本地屏）
 ```

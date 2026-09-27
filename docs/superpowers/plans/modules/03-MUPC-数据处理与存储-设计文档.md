@@ -24,11 +24,16 @@
 
 数据处理与存储模块是 MUPC "异构双核心模块主控架构"中**非实时处理核心（大脑）**的核心数据处理组件，承担以下职责：
 
-- **数据采集**：从 intercore 模块接收实时控制模块的高频采样数据，汇聚为统一数据源
-  > ⚠️ **2026-09-26：PCS 通道已迁至南向（02 §13）；本节所述的核间数据面在生产路径未启用。**
-  > PCS（= 实时控制模块）的通信与控制现由 `mupc-southd::pcs::PcsHandle` 承担（02 号设计 §13），
-  > 原 `intercore` 的 Modbus RTU 通道已整体迁出；核间 TCP 帧协议仅作后续演进保留（客户端**只发不收**，
-  > 且**生产路径暂无消费者**，02 号设计 Δ-23 / `technical-debt.md` §6.13）。下文同类表述同此注。
+- **数据采集**：由南向采集入口提供数据源，汇聚为统一数据源
+  > **⚠️ 数据面口径（2026-09-26 起，全文同此）**：本模块的采集输入**不是核间通道**。
+  > 站级设备与 PCS（= 实时控制模块）的采集现全部由南向 `mupc-southd` 承担
+  > （站级多从站调度 + `mupc-southd::pcs::PcsHandle` 采集循环；02 号设计 §10 / §13），
+  > 经**装配层 `mupc-core-bin` 的 `SouthSink`** 投递到本模块。
+  > **`mupc-data-processing` 不依赖 `mupc-intercore`**（`Cargo.toml` 无此依赖边）；
+  > `intercore` 的 Modbus RTU 通道已随 PCS 整体迁出，现存核间 TCP 帧协议
+  > **生产路径无消费者**（02 号设计 §1.1.1 / `technical-debt.md` §6.13）。
+  > 下文若出现「从 intercore 接收」类表述，均属**迁移前**的历史设计意图，
+  > 对应实现为「南向采集 → 装配层 `SouthSink` → 本模块」（见 §1.2 / §1.4 / §2.4 各处的现状注）。
 - **遥测上送**：以 >= 1Hz 频率将遥测数据通过消息总线分发给消费者（gateway、strategy-engine 等）
 - **故障录波**：检测故障条件时录制故障前后波形，支持波形数据的存储、查询、导出和北向上报
 - **历史数据存储**：持久化存储周期性电气量数据、电池运行数据、告警日志和系统事件记录
@@ -38,12 +43,17 @@
 ### 1.2 模块关系图
 
 ```
-实时控制模块 (小核 ADC)
+【数据来源（现状）】南向设备：BMS / 空调 / 关口表 / 储能表 / 消防状态 / PCS …
+     │  RS485 Modbus RTU（BECG-3568 板载 8 路隔离，每路独立 master）
+     ▼
+mupc-southd（02 号设计）
+     ├── scheduler / port_runtime / station / mapper   ← 站级多从站轮询（02 §10–§12）
+     └── pcs::PcsHandle                                ← PCS 采集循环（02 §13）
      │
-     ▼ (TCP/RJ45 10ms 周期数据帧)
-intercore (核间通信)
+     ▼  StationSink（采集出口 trait）
+mupc-core-bin 装配层（SouthSink）
      │
-     ▼ (DataCollector 接收)
+     ▼  DataPackage / 最新值快照（latest_values）
 data-processing (数据处理 crate)
      ├── collector        → DataCollector（数据采集）
      ├── high_freq_telemetry → 高频遥测 1Hz 上报
@@ -57,7 +67,7 @@ data-processing (数据处理 crate)
      └── database         → SQLite 数据库操作
           │
           ▼
-mupc-storage (存储 crate，新增)
+mupc-storage (存储 crate)
      ├── StorageService   → 统一存储入口
      ├── AssetService     → 设备台账管理
      ├── TelemetryService → 遥测历史数据管理
@@ -75,23 +85,35 @@ mupc-storage (存储 crate，新增)
                ▼
           gateway (IEC 104 / MQTT 北向上报)
           strategy-engine (策略决策)
-          web-api (REST API 查询)
+          mupc-core-bin 装配层（storage_health 水位自检 / display_host 告警事件读 / interlock 事件读）
+          ai-engine（动态配置加载器的 DB 覆盖，引擎停用期间不加载）
 ```
+
+> **历史设计意图（保留以述原文）**：本图上游原为
+> `实时控制模块 (小核 ADC) → (TCP/RJ45 10ms 周期数据帧) → intercore (核间通信) → DataCollector`。
+> 该核间数据面**在生产路径从未启用**（§1.4 末段的 2026-08-14 实现说明已述），且 PCS 已于 2026-09-26 迁至南向（§1.1 数据面口径）。
+> 原图尾部的 `web-api (REST API 查询)` 则随 `web-api` crate 整删而作废（§1.3 / §6.1）。
 
 ### 1.3 与上下游模块的关系
 
+**上游（数据来源）**
+
 | 上游模块 | 数据流向 | 说明 |
 |----------|----------|------|
-| intercore | → data-processing | TCP/RJ45 高频采样数据（10ms 间隔瞬时值帧）—— ⚠️ **2026-09-26：PCS 通道已迁至南向（02 §13）；本行所述的核间数据面在生产路径未启用** |
-| rs485-plugin / hplc-plugin | → data-processing | 南向设备数据采集（Phase 2+ 预留） |
-| rs485-plugin / hplc-plugin | → mupc-storage | 设备自动注册（初始化时注册台账） |
+| **`mupc-southd`**（站级多从站调度 + `pcs::PcsHandle`） | → 装配层 `SouthSink` → data-processing | **现行数据来源**。站级设备与 PCS 的采集结果（02 号设计 §10 / §13）。投递经 `mupc-core-bin` 的 `SouthSink`（`SouthSink::on_grid_package` 等），**本模块不直接依赖 `mupc-southd`** |
+| `rs485-plugin`（插件化单设备通路） | →（经装配层）→ data-processing | 一设备一 `SouthDevice` 的采集（02 §2–§6）。**本模块不直接依赖 `rs485-plugin`**；实测依赖方为 `mupc-southd` / `mupc-core-bin` / `local-display` |
+| `hplc-plugin` | →（经插件加载器）→ data-processing | 运行期以 cdylib 由 `plugin-loader` 加载。**注意：workspace 内无 crate 依赖它**（仅运行时加载） |
+| ~~`intercore`~~ | ~~→ data-processing~~ | **已作废**（2026-09-26）。原写「TCP/RJ45 高频采样数据（10ms 间隔瞬时值帧）」：PCS 已迁至南向（02 §13），且 `mupc-data-processing` **不依赖 `mupc-intercore`**（`Cargo.toml` 无此边）⇒ 该核间数据面在生产路径**从未启用**（§1.1 数据面口径） |
+
+**下游（数据去向）**
 
 | 下游模块 | 数据流向 | 说明 |
 |----------|----------|------|
 | data-processing → gateway | 遥测、故障、台账上送 | 通过消息总线 + 直接调用 |
 | data-processing → strategy-engine | 遥测数据 | 通过消息总线 |
 | data-processing → mupc-storage | 遥测/告警/事件持久化 | 通过 WriteBuffer 异步写入 |
-| mupc-storage → web-api | 历史数据、台账、告警查询 | REST API 查询接口 |
+| data-processing → display-proto / local-display | 上屏数据 | 经装配层与 `display-proto` 帧（12 号） |
+| ~~mupc-storage → web-api~~ | ~~历史数据、台账、告警查询~~ | **已作废**：`web-api` crate 整删（08 号 SUPERSEDED）。现行的**已实现**读出口 = **12 号本地显示终端**（`mupc-core-bin/src/display_host.rs` 经 `EventRepository` 出告警/事件列表）；**台账 CRUD / 遥测历史查询 / 导出下载无实现出口**（03 PRD §R-11.6-A/B） |
 
 #### 1.3.1 最新值入口：归属确认与引用（U-70）
 
@@ -109,25 +131,34 @@ mupc-storage (存储 crate，新增)
 
 ```
 遥测数据流（高频）:
-  intercore → DataCollector → HighFrequencyTelemetry → 消息总线(telemetry.high_freq)
-                                                          ├── gateway (北向上送)
-                                                          └── strategy-engine (策略决策)
+  mupc-southd（站级调度 / PcsHandle）→ 装配层 SouthSink → DataCollector
+      → HighFrequencyTelemetry → 消息总线(telemetry.high_freq)
+                                   ├── gateway (北向上送)
+                                   └── strategy-engine (策略决策)
 
 遥测数据流（持久化）:
   DataCollector → WriteBuffer → 批量事务(容量1000条 或 间隔5000ms，先到先执行) → SQLite WAL (按月分区)
 
-故障录波数据流:
-  intercore(WaveformSample帧) → DualBufferManager(环形缓冲区)
+总表聚合数据流:
+  SouthSink::on_grid_package → GridAggregator(observe/tick) → AggregateRow
+      → to_telemetry_point("grid_meter") → WriteBuffer → SQLite (telemetry)
+
+故障录波数据流【当前无生产触发源，见下方现状注】:
+  （原）intercore(WaveformSample帧) → DualBufferManager(环形缓冲区)
       → TriggerEngine(触发判定) → capture_waveform() → .wave文件 + SQLite元数据
       → WaveformReporter → MQTT/IEC 104 北向上报
 
 设备台账数据流:
-  web-api REST → AssetService → DeviceRepo → SQLite
   plugins → auto_register() → AssetService → DeviceRepo → SQLite
   SQLite → gateway → IEC 104/MQTT 北向上送(定时/变更触发)
+  （原 `web-api REST → AssetService` 入口随 `web-api` crate 整删作废，见 §6.1）
 ```
 
-> **实现说明（2026-08-14）**：当前 Phase 1 实现中，遥测数据流为**南向设备直接采集**（`rs485-plugin` 的 `Rs485Device.read()` → 采集循环 → `DataPackage` → WriteBuffer + gateway 北向上送 + AI 融合引擎），尚未经 intercore 中转。`intercore → DataCollector` 数据源为 Phase 2+ 演进方向（接入实时控制模块后切换）。DataCollector/DataReporter/MessageBus 组件保留作为 Phase 2+ 组件化改造基础。
+> **实现说明（2026-08-14，原文保留）**：当前 Phase 1 实现中，遥测数据流为**南向设备直接采集**（`rs485-plugin` 的 `Rs485Device.read()` → 采集循环 → `DataPackage` → WriteBuffer + gateway 北向上送 + AI 融合引擎），尚未经 intercore 中转。`intercore → DataCollector` 数据源为 Phase 2+ 演进方向（接入实时控制模块后切换）。DataCollector/DataReporter/MessageBus 组件保留作为 Phase 2+ 组件化改造基础。
+
+> **订正（2026-09-27）**：上段中「`intercore → DataCollector` 为 Phase 2+ 演进方向」的**前提已不成立** —— PCS（= 实时控制模块）径由**南向**（02 号设计 §13）接入，不存在「经 intercore 中转」的将来态。现行数据源见 §1.3 上游表。
+>
+> **故障录波的现状（据实登记）**：上图「原型」中 `WaveformSample` 帧的**生产发送方不存在** —— `DualBufferManager` / `TriggerEngine` / `FaultRecorderImpl` 唯一定义与导出于 `data-processing` 内部，全仓**无生产调用点**（`FaultRecorder::record` 仅由 `fault_recorder_impl.rs` 内部 `record_sync` 调用）；`FaultRecorderImpl` 虽在 `startup.rs` 装配进 `SystemHandles`，但**无驱动者**。⇒ 故障录波当前**未接线**，属**预留接口**（设计保留、待接入采样源），**不得**据此宣称"故障录波功能已实现"。
 
 ---
 
@@ -135,9 +166,9 @@ mupc-storage (存储 crate，新增)
 
 ### 2.1 DataCollector — 数据采集
 
-**职责**：从 intercore 模块接收实时控制模块的数据，汇聚为统一数据源。
+**职责**：接收**南向采集结果**（站级设备与 PCS，02 号设计 §10 / §13，经装配层 `SouthSink` 投递），汇聚为统一数据源。
 
-> ⚠️ **2026-09-26：PCS 通道已迁至南向（02 §13）；本节所述的核间数据面在生产路径未启用。**
+> ⚠️ **订正（2026-09-26/27）**：原文为「从 **intercore** 模块接收实时控制模块的数据」。PCS 通道已迁至南向（02 §13），且 `mupc-data-processing` **不依赖 `mupc-intercore`** ⇒ 该核间数据面在生产路径未启用（§1.1 数据面口径）。下方「数据接收通道（从 intercore）」等表述同此订正：**通道承载的是南向 `DataPackage`，与 intercore 无依赖关系**。
 
 #### 接口定义
 
@@ -153,7 +184,7 @@ pub trait DataCollector {
 
 ```rust
 pub struct DataCollectorImpl {
-    /// 数据接收通道（从 intercore）
+    /// 数据接收通道（南向采集结果，经装配层投递；原文误标「从 intercore」）
     receiver: Option<mpsc::Receiver<DataPackage>>,
     /// 最新数据缓存
     latest_data: Arc<std::sync::Mutex<Option<DataPackage>>>,
@@ -171,9 +202,9 @@ impl DataCollectorImpl {
 
 #### 数据来源与采集类型
 
-数据来源：intercore 模块（TCP/RJ45），10ms 周期数据帧。
+数据来源：**南向站级设备与 PCS**（`mupc-southd` 调度器 / `PcsHandle`），经装配层 `SouthSink` 投递的 `DataPackage`；采集周期由各站 `interval_ms` 决定（缺省 1000ms，告警位可单独快采，见 02 §12）。
 
-> ⚠️ **2026-09-26：PCS 通道已迁至南向（02 §13）；本节所述的核间数据面在生产路径未启用。**
+> ⚠️ **订正（2026-09-26/27）**：原文为「intercore 模块（TCP/RJ45），10ms 周期数据帧」。PCS 通道已迁至南向（02 §13）；且**现行南向采集周期为 `interval_ms` 量级（缺省 1s），并不存在 10ms 核间数据帧**。
 
 | 数据类型 | 说明 | 单位 |
 |----------|------|------|
@@ -232,7 +263,9 @@ pub struct HighFreqTelemetryImpl {
 | 主题 | 生产者 | 消费者 | 说明 |
 |------|--------|--------|------|
 | `telemetry.high_freq` | DataCollector | strategy-engine, gateway | 高频遥测数据 |
-| `strategy.decision` | strategy-engine | gateway, intercore | 策略决策结果 |
+| `strategy.decision` | strategy-engine | gateway | 策略决策结果。**订正（2026-09-27）**：原消费者列含 `intercore`，随 PCS 迁至南向（02 §13）作废；且该主题全仓**只有文档注释、无生产订阅方**（`reporter.rs:11`）⇒ 属**未接线** |
+
+> **注（2026-09-27）**：`strategy.decision` 的**控制下发**并不经消息总线 —— 现行路径是 `AiIntegrator` 直接调 `PcsHandle::{send_dual_param, send_tai_command}`（02 号设计 §13.5）。消息总线在本项目承担的是**数据分发**，不是控制面。
 
 #### 验收标准
 
@@ -264,9 +297,20 @@ pub trait DataReporter {
 
 ### 2.4 与 intercore 集成
 
+> **⚠️ 本节整体为历史设计意图，当前无对应实现；且帧号提案与现有协议冲突（2026-09-27 据实登记）**
+>
+> 四条事实（均可在仓库内逐条核对）：
+> 1. **`mupc-data-processing` 不依赖 `mupc-intercore`** —— `data-processing/Cargo.toml` 无此依赖边 ⇒ 本节所述「集成」在当前形态下**不可能成立**。
+> 2. **`FrameType::WaveformSample` 全仓不存在**（`grep -rn WaveformSample crates/` 零命中）。
+> 3. **帧号 `0x0040` 已被占用** —— `intercore/src/protocol.rs:31` 的 `FrameType::SafetyOverride = 0x0040`（v2.10 新增）⇒ 本节「增加新的帧类型 `WaveformSample = 0x0040`」是**撞码提案，直接落地会与 `SafetyOverride` 冲突**。若将来接入波形采样，须另选空闲帧号（`FrameType` 现占 `0x0001/0002/0003/0010/0011/0020/0030/0040`，`0xFFFF` 为 `Unknown`）。
+> 4. **波形录波侧无驱动者** —— `DualBufferManager` / `TriggerEngine` / `FaultRecorderImpl` 全仓无生产调用点（§1.4 末段现状注）。
+>
+> **现状落点**：核心/波形数据面改由**南向**承载（02 号设计 §10 / §13），经装配层 `SouthSink` 投递（§1.3 上游表）。
+> **保留本节的理由**：波形帧的**载荷定义**（10 通道 + 时标 + CRC + f32 选型理由）仍是待接入采样源时的设计依据，属**预留设计**；但**帧号须重选**。**不得**据此宣称"核间波形集成已实现"。
+
 #### 2.4.1 高频采样数据帧格式
 
-当前 intercore 协议使用定长 64 字节帧。为传输 10 通道高频采样数据，增加新的帧类型 `WaveformSample = 0x0040`。
+（历史设计）当前 intercore 协议使用定长 64 字节帧（`FRAME_FIXED_LENGTH = 64`）。为传输 10 通道高频采样数据，增加新的帧类型 `WaveformSample = 0x0040`（**帧号与 `SafetyOverride` 撞码，见上方第 3 条**）。
 
 **波形采样数据帧格式（FrameType = 0x0040）：**
 
@@ -308,17 +352,26 @@ pub trait DataReporter {
 
 #### 2.4.2 intercore 帧类型扩展
 
+> **⚠️ 本码块的两处错误（2026-09-27 订正，勿照抄）**：
+> ① `WaveformSample = 0x0040` **与现有 `SafetyOverride = 0x0040` 撞码**（`protocol.rs:31`）⇒ 须另选空闲帧号；
+> ② 码块中「`DataUpload = 0x0030`」后直接列举，**遗漏了既有的 `HeartbeatRsp 0x0003` / `ControlRsp 0x0011` / `StatusReport 0x0020`**。现网 `FrameType` 的**权威定义**见 `intercore/src/protocol.rs:22-33`。
+
 ```rust
+// 现状权威定义（intercore/src/protocol.rs:22-33）
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u16)]
 pub enum FrameType {
-    // ... 已有类型 ...
-    Connect         = 0x0001,
-    HeartbeatReq    = 0x0002,
-    ControlCmd      = 0x0010,
-    DataUpload      = 0x0030,
-    // === 新增 ===
-    WaveformSample  = 0x0040,  // 高频采样数据帧
+    Connect        = 0x0001,
+    HeartbeatReq   = 0x0002,
+    HeartbeatRsp   = 0x0003,
+    ControlCmd     = 0x0010,
+    ControlRsp     = 0x0011,
+    StatusReport   = 0x0020,
+    DataUpload     = 0x0030,
+    SafetyOverride = 0x0040,  // v2.10 新增
+    Unknown        = 0xFFFF,
+    // === 历史提案（未实现，且帧号与 SafetyOverride 冲突）===
+    // WaveformSample = 0x0040,
 }
 ```
 
@@ -347,7 +400,9 @@ impl IntercoreSampleSource {
 
 ### 3.1 总体架构
 
-故障录波模块归属于 `data-processing` crate，作为该 crate 的 `waveform` 子模块存在。数据来源为 intercore 核间通信模块提供的 10ms 周期高频采样数据帧，输出到本地文件系统（波形文件）和 SQLite（元数据），并通过 gateway 的 IEC 104 和 MQTT 通道上报北向。
+故障录波模块归属于 `data-processing` crate，作为该 crate 的 `waveform` 子模块存在。输出到本地文件系统（波形文件）和 SQLite（元数据），并通过 gateway 的 IEC 104 和 MQTT 通道上报北向。
+
+> ⚠️ **订正（2026-09-27）**：原文的「数据来源为 intercore 核间通信模块提供的 10ms 周期高频采样数据帧」**不成立** —— 本 crate 不依赖 `mupc-intercore`，且 `DualBufferManager` / `TriggerEngine` **全仓无生产调用点**（§1.4 末段现状注）。⇒ 本章描述的录波链路**当前未接线**（设计保留、待接入采样源）。**不得**据此宣称"故障录波功能已实现"。
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -1077,7 +1132,7 @@ PRAGMA temp_store=MEMORY;        -- 临时表在内存
 #### 4.2.1 新建 crate 理由
 
 1. storage 是一个独立的内聚模块，有自己的清晰职责边界
-2. 被多个上层模块依赖(data-processing, web-api, gateway)，放在 data-processing 中会导致循环依赖
+2. 被多个上层模块依赖，放在 data-processing 中会导致循环依赖（**订正 2026-09-27**：原文写「(data-processing, web-api, gateway)」——`web-api` 已整删，而 **`data-processing` 与 `gateway` 实测均不依赖 `mupc-storage`**（`data-processing` 自带 `rusqlite`）。实测依赖方为 **`ai-engine` / `mupc-core-bin`**）
 3. 独立的 crate 便于单测、维护、后续替换存储引擎
 
 #### 4.2.2 模块划分
@@ -1818,7 +1873,24 @@ pub enum DeviceType {
 
 ### 6.1 REST API 总览
 
-所有路由挂载在 `/api/v1` 前缀下。
+> **⚠️ 整表已作废：无实现出口（2026-09-27 订正）**
+>
+> 下表全部路由的集成点列为 `web-api → storage` / `web-api → static`，而 **`web-api` crate 已整删**（不在 `mupc/Cargo.toml` 的 `members` 内，目录不存在；08 号模块标 **SUPERSEDED**，Web 访问机制取消）⇒ **下表所有端点均无实现，`/api/v1` 前缀在仓库内不存在**。
+>
+> **现行（已实现）的存储读出口**：
+>
+> | 出口 | 实现 | 覆盖 |
+> |------|------|------|
+> | **12 号本地显示终端**（读通道） | `mupc-core-bin/src/display_host.rs` 经 `mupc_storage::EventRepository` 出**告警 / 事件列表**；数据经 `display-proto` 帧 + TCP 回环 `GET /v1/display/latest` | 告警查询、事件查询（只读） |
+> | **12 号本地显示终端**（写通道） | `mupc-core-bin/src/console_host.rs`（Axum 0.7 `/v1/console/*`）：配置读写、日志、审计、外设目录、联锁释放 / M1 授权 | 配置 / 日志 / 审计 / 联锁（**非**存储查询） |
+>
+> **仍无实现出口的**（03 PRD §R-11.6-A/B 已登记）：设备台账 CRUD、遥测历史查询、电池趋势、数据导出、导出文件下载、存储管理（状态 / 保留策略 / 手动清理）。
+>
+> **保留本表的理由**：路由与字段的划分仍是**将来落地查询面时的设计依据**（属**预留设计**）。**不得**据此宣称"REST 查询接口已实现"。
+>
+> **实现载体缺失已登记**：见 `technical-debt.md`（U-09 表族 / 审查报告「实现载体缺失」项）。
+
+所有路由挂载在 `/api/v1` 前缀下。（**历史原文，见上方作废说明**）
 
 | 路由 | 方法 | 功能 | 集成点 |
 |------|------|------|--------|
@@ -2041,13 +2113,13 @@ mupc/crates/storage/
 
 ### 7.3 扩展的既有文件清单
 
-| 文件 | 改动内容 |
-|------|----------|
-| `device-trait/src/types.rs` | DeviceType 增加 Battery, GridConnection, Other 变体 |
-| `intercore/src/protocol.rs` | 增加 FrameType::WaveformSample(0x0040) 及解析方法 |
-| `gateway/src/iec104/protocol.rs` | 增加 TypeId::FaultEventReport(130) 等自定义 TI |
-| `mqtt-bridge/src/topics.rs` | 增加 NORTH_FAULT_EVENT 等 Topic 定义 |
-| `web-api/src/router.rs` | 挂载 StorageService 的路由 |
+| 文件 | 改动内容 | 现状（2026-09-27 核对） |
+|------|----------|------------------------|
+| `device-trait/src/types.rs` | DeviceType 增加 Battery, GridConnection, Other 变体 | 已存在 |
+| ~~`intercore/src/protocol.rs`~~ | ~~增加 FrameType::WaveformSample(0x0040) 及解析方法~~ | **未落地，且帧号与 `FrameType::SafetyOverride = 0x0040` 撞码**（`protocol.rs:31`）⇒ 须另选帧号（§2.4 第 3 条） |
+| `gateway/src/iec104/protocol.rs` | 增加 TypeId::FaultEventReport(130) 等自定义 TI | 待核（录波未接线，暂无触发方） |
+| `mqtt-bridge/src/topics.rs` | 增加 NORTH_FAULT_EVENT 等 Topic 定义 | 同上 |
+| ~~`web-api/src/router.rs`~~ | ~~挂载 StorageService 的路由~~ | **crate 已整删**（08 号 SUPERSEDED）⇒ 该行作废；现行读出口见 §6.1 |
 
 #### 7.3.1 装配点汇总（core-bin）
 
@@ -2130,7 +2202,7 @@ mupc/crates/storage/
 
 **理由：**
 - storage 是一个独立的内聚模块，有清晰职责边界
-- 被多个上层模块依赖（data-processing, web-api, gateway），放在 data-processing 中会导致循环依赖
+- 被多个上层模块依赖，放在 data-processing 中会导致循环依赖（**订正 2026-09-27**：原文写「（data-processing, web-api, gateway）」——`web-api` 已整删，而 **`data-processing` 与 `gateway` 实测均不依赖 `mupc-storage`**。实测依赖方为 **`ai-engine` / `mupc-core-bin`**）
 - 独立 crate 便于单测、维护、后续替换存储引擎
 - 遵循现有架构模式（每个功能域一个 crate）
 
@@ -2264,3 +2336,4 @@ mupc/crates/storage/
 | v1.3-r3 | 评审收尾：`batch_capacity` 下界 1 → 2（有界性真缺陷）、行号口径统一、容量触发提交延迟至多顺延一拍的订正、`AlertFeed` 消费侧如实登记。 |
 | v1.3-r4 | FLS-03② 的告警聚合按 PRD R-11.5-A4 字面改为**边沿触发**（连续丢弃 10 周期 = 恰好 1 条）。 |
 | v1.3-r5 | PCS 通信与控制整体迁入南向（02 设计 §13 / ADR-014）后的连带标注：四处核间数据面表述加注，未改任何裁定与数字。 |
+| v1.4 | **§1 数据面口径改判 + web-api 残留清理**（据实订正，不改需求与数字）：§1.1 补「本模块的采集输入不是核间通道」口径（`mupc-data-processing` **不依赖 `mupc-intercore`**，`Cargo.toml` 无此边；数据源为南向 `mupc-southd`，经装配层 `SouthSink` 投递）；§1.2 模块关系图上游由「实时控制模块 → intercore → DataCollector」改为**南向采集链路**，尾部 `web-api` 出口改判；§1.3 上下游表 intercore 行标作废、`mupc-storage → web-api` 行标作废并给出**已实现/未实现**读出口清单；§1.4 数据流按现状重写并**据实登记故障录波无生产触发源**（`DualBufferManager`/`TriggerEngine`/`FaultRecorderImpl` 全仓无调用点）；§2.1/§2.3 采集来源订正（南向 `interval_ms` 量级，非「10ms 核间帧」）；§2.4 加整体作废横幅，**并查出帧号 `0x0040` 与既有 `FrameType::SafetyOverride` 撞码**、码块遗漏三个既有变体；§3.1 录波数据来源订正；§6.1 整表（REST API 35 行）加**作废横幅**并给出现行出口对照；§7.3 两行（`intercore/src/protocol.rs` / `web-api/src/router.rs`）标作废；§4.2/§8.5 crate 拆分理由订正（`data-processing`/`gateway` 实测**不依赖** `mupc-storage`，实测依赖方为 `ai-engine`/`mupc-core-bin`）。 |

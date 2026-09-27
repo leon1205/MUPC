@@ -108,6 +108,23 @@ MUPC 微电网特种调控装置当前已支持 Web UI 浏览器访问和北向�
 - 配置写入响应时间 <= 2 秒
 - 每次配置写入记录审计日志
 
+> **⚠️ 与实现的差异（2026-09-27，逐条核过；**需求原文与验收标准保留不动**，口径以本注为准）**
+>
+> 本节的「Web UI 可读的配置项」随 `web-api` crate 删除已无对应物（08 号 SUPERSEDED，需求并入 12 号本地显示终端）。控制台字段的**唯一真源**为 `mupc/crates/mupc-core-bin/src/console_host.rs` 的 `FIELDS`，实测：
+>
+> | 本节所列 | 实现现状 |
+> |----------|----------|
+> | IEC 104「IP、端口」 | ✅ 有承载：`gateway.listen_addr` / `gateway.listen_port`（**可写；需重启 `mupcd` 生效**，非「立即生效」） |
+> | IEC 104「**心跳间隔**」 | ❌ **无承载**：`GatewayConfig` 只有 listen 两项 |
+> | intercore「**本地端口**」 | ❌ **无承载**：`InterCoreConfig` 只有 `host` / `port`，**二者均为对端**，无本地绑定端口 |
+> | intercore「对端端口」 | ✅ 有承载：`intercore.port`（可写；需重启） |
+> | **遥测上报周期** | ❌ **无承载**：上送节拍在 `startup.rs` 是硬编码常量，`CoreConfig` 无对应项 |
+> | 日志级别 | ✅ `system.log_level`（**唯一真热生效项**，走 tracing reload handle） |
+> | 南向「RS485 波特率、Modbus 地址」 | ⚠️ 随 PCS 迁入南向，改由 `south_pcs` / `south_stations` 段承载；**未进控制台字段表** |
+>
+> ⇒ **「配置写入后立即生效，无需重启装置」这条与实现不符**：实测 7 键中真热生效仅 **1** 项（`system.log_level`），**4** 项需重启 `mupcd`（`intercore.host` / `intercore.port` / `gateway.listen_addr` / `gateway.listen_port`）。该降级已由 PM 于 2026-09-16 裁定接受并回写 12 号 PRD §3.2 F9 与设计 §4.3.3（**字段级 4/7** 口径，**注意该口径已随 2026-09-27 的 E-13 变更**，见 12 号文档）。
+> **原「`intercore.heartbeat_interval_sec` / `reconnect_interval_sec`」二键已随 E-13 删除**（零消费点）。
+
 ### 2.3 NearLink 日志导出
 
 **User Story：**
@@ -278,6 +295,13 @@ MUPC 微电网特种调控装置当前已支持 Web UI 浏览器访问和北向�
   - 当前告警数量
 - 读取响应时间 <= 500 ms
 - 数据格式：JSON 字符串，UTF-8 编码
+
+> **⚠️ 「intercore 连接状态」的语义订正（2026-09-27）**：该状态位的**字段名沿旧**，但取值已不是「核间 TCP 链路态」——
+> PCS（= 实时控制模块）的通信与控制已于 2026-09-26 迁入南向（02 号设计 §13 / ADR-014），
+> 核间 TCP 通道**在生产路径无消费者**，现该位表达的是 **PCS 通道在线态**
+> （真源 `mupc-southd::pcs::PcsHandle::is_connected()`，落 `display-proto` 的
+> `DeviceSection.intercore`）。**正名待后续评审**（技术债已登记该语义漂移）。
+> 同注见 12 号设计 §4.3.5 与设计文档 §（BLE 设备状态 JSON）示例。
 
 ### 4.3 蓝牙配置读写
 

@@ -45,8 +45,8 @@
           └────────────────────┼────────────────────┘
                                ▼
                         ┌──────────────┐
-                        │  intercore   │
-                        │  (TCP/RJ45)  │
+                        │  mupc-southd │
+                        │  (PcsHandle) │
                         └──────┬───────┘
                                │
                                ▼
@@ -54,6 +54,8 @@
                         │ 实时控制模块  │
                         └──────────────┘
 ```
+
+> 〔时效订正（2026-09-27）：图中本框原文为 `intercore (TCP/RJ45)`，**已过期** —— PCS（= 实时控制模块）的通信与控制于 2026-09-26 **整体由 `mupc-intercore` 迁入 `mupc-southd`**（02 号设计 §13 / ADR-014）；下行走南向 `mupc-southd::pcs::PcsHandle`（物理链路 RS485 / Modbus RTU，非核间 TCP）。`mupc-intercore` 已收敛为**纯核间 TCP 帧协议**且**生产路径无消费者**（现存真实消费者仅 11 号 `sim-bridge`）。另：上行的 `data-processing` / `mqtt-bridge` 两框为原设计环节，现状见 §5.7 与 §9.3。原文保留为历史口径。〕
 
 ### 1.3 Crate 职责与状态
 
@@ -1060,6 +1062,8 @@ intercore → DataCollector → LocalMqttClient → mosquitto (本地)
                                             物联平台
 ```
 
+> 〔时效订正（2026-09-27）：首环节 `intercore` **已过期**。PCS（实时控制模块）的采集**不再经核间通道** —— 其通信与控制已于 2026-09-26 整体迁入南向 `mupc-southd`（02 号设计 §13 / ADR-014），现行载体是顶层配置段 `south_pcs` 的 `PcsHandle` 采集循环；`intercore` 现仅剩纯核间 TCP 帧协议且**生产路径无消费者**。上行遥测的现行真源 = 南向站级采集（`south_stations`）与 `south_pcs` 汇入的 `LatestValues` 快照（§9.1），**不是** `DataCollector`（生产装配不构造它）。原文保留为历史口径。〕
+
 #### 策略指令流
 
 ```
@@ -1069,6 +1073,8 @@ intercore → DataCollector → LocalMqttClient → mosquitto (本地)
                                                             ↓
                                                   intercore → 实时控制模块
 ```
+
+> 〔时效订正（2026-09-27）：末段 `intercore → 实时控制模块` **已过期** —— 校验通过后的下行走南向 `PcsHandle`（`send_dual_param` / `send_tai_command`），见 §1.2 的注与 02 号设计 §13。原文保留为历史口径。〕
 
 ### 5.8 消息持久化策略
 
@@ -1633,7 +1639,7 @@ loop {
 | `AiIntegrator::set_latest_data`（`strategy-engine/src/ai_integration.rs:186`） | 承载 **grid 的 `DataPackage`（含分相）**，用途是**策略 phase 输入**（`on_grid_package` 是唯一写方，M-4 防双写）。**保留不动**。快照中的 grid 6 点是**同一 `DataPackage` 的派生子集**，在同一次 `on_grid_package` 内写入 ⇒ **同一写方、同一时刻，不构成双源** |
 | `AiIntegrator::set_battery_soc`（`:218`） | SOC 双源裁决（04 §2.11.1）**保留不动**；快照里 `soc` 点是**另一用途**（上送/上屏），其值取自同轮 `on_station_telemetry` 的 `soc` 点（`mapper` 解码后同值） |
 | `display_host` 的 `latest: SharedLatest` + `SlowCaches`（`display_host.rs:681/697`） | 是**消费端派生视图**（显示帧 + 慢拍段缓存），**不是**第二份点值真源。本章**不改** 12 号帧契约；U-73（外设上屏）落地时**必须**读本快照，不得自建缓存 |
-| `DataCollectorImpl::latest_data`（`data-processing/src/collector.rs:19`） | 只覆盖 **intercore 侧**（核间）数据，与南向外设**不同域**（03 PRD §8.5 口径）。**保留不动**，本快照**不并入**它（并入会把两个生命周期混成一个） |
+| `DataCollectorImpl::latest_data`（`data-processing/src/collector.rs:19`） | 只覆盖 **intercore 侧**（核间）数据〔时效订正（2026-09-27）："来源 = intercore"已过期 —— `DataCollectorImpl` 现为**测试专用骨架**（生产装配不构造它，`data-processing/tests/collector_tests.rs` 是唯一调用方）；核间通道生产路径**无消费者**（02 号设计 §13 / ADR-014）。**但本行的边界结论仍成立且更强**：该缓存与南向外设**不同域**，本快照**不并入**它〕，与南向外设**不同域**（03 PRD §8.5 口径）。**保留不动**（并入会把两个生命周期混成一个）。 |
 | `WriteBuffer` / `telemetry` 表 | **历史**通道，与实时值**不是一回事、不得互相替代**（01 PRD §8.5 / 03 PRD R-11.6-A）。本章上送路径 **LV-2 禁轮询 DB** |
 
 #### 9.1.8 装配点（core-bin）

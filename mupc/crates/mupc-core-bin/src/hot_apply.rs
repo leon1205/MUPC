@@ -19,10 +19,14 @@
 //! | ~~`intercore.heartbeat_interval_sec` / `reconnect_interval_sec`~~ | ~~`watch` → 心跳循环读新值~~ | **已删除（E-13，2026-09-27）**：无消费方（TCP 传输无心跳循环；PCS 采集兼心跳的周期取 `south_pcs.interval_ms`，与本二键无关）⇒ 连同 `CoreConfig` 字段与屏上可写项一并移除 |
 //! | `gateway.listen_addr` / `gateway.listen_port` | `stop()` → `start()` 重绑定 | ❌ **未接线**：`Iec104Server` 的 listen 配置**构造期固定**（`Iec104Server::new(config)`，无 setter），且该实例还被南向上送（`SouthSink` 的 `iec104_server.clone()`）共享 ⇒ 原地重建会让上送句柄指向**已停止**的旧实例（半生效，EDGE-10 明禁） |
 //!
-//! ⚠️ **这 6 项"未接线"是设计 §4.3.5 的降级方案**（「本期仅支持 HotApply 子集，连接类参数
-//! 只落盘 + 提示需重启」）。**计数口径**（评审重要 5 已更正，全文统一为 **9 / 7 / 1 / 6**）：
-//! 字段表 [`crate::console_host::FIELDS`] 共 **9** 键 ⇒ 其中 `editable=true` **7 个**可写
-//! ⇒ 真热生效 **1 个**（`system.log_level`）⇒ 需重启 **6 个**（上表 `intercore.*` 4 + `gateway.*` 2）。
+//! ⚠️ **这 4 项"未接线"是设计 §4.3.5 的降级方案**（「本期仅支持 HotApply 子集，连接类参数
+//! 只落盘 + 提示需重启」）。**计数口径**（**2026-09-27 按 E-13 后重算，原为 9 / 7 / 1 / 6**）：
+//! 字段表 [`crate::console_host::FIELDS`] 共 **7** 键 ⇒ 其中 `editable=true` **5 个**可写
+//! ⇒ 真热生效 **1 个**（`system.log_level`）⇒ 需重启 **4 个**（上表 `intercore.host` /
+//! `intercore.port` + `gateway.listen_addr` / `gateway.listen_port`）。
+//! **原口径 9 / 7 / 1 / 6 已作废**：E-13 删除了 `intercore.heartbeat_interval_sec` /
+//! `reconnect_interval_sec` 二键（见上表划线行），字段表与可写数同减 2。另 `display.bind_addr` /
+//! `display.control_bind_addr` 为 `editable=false` 只读，不参与本口径。
 //! 设计原文要求该降级**须 PM 裁决并回写 PRD（CF-04 降级）**，**不得静默实施**——本单元按
 //! "诚实优先"落地（不谎报生效）。
 //! **✅ 已裁定（2026-09-16）：PM 接受本降级**（不投入"把 6 个字段做成真热生效"的改造），

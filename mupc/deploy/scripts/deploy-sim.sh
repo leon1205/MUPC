@@ -232,6 +232,11 @@ if $DO_START; then
     info "  Broker:   $TARGET_IP:$SIM_BROKER_PORT"
     info "  TCP:      0.0.0.0:9100"
     info "=============================================="
+    # U-163（2026-09-27 裁定 A：判为未实现、不重建）：上面这个 9100 端口在 MUPC 侧没有客户端，
+    # sim-bridge 会一直阻塞在 accept()，只发过一次初始观测；观测 topic 也没有订阅方。
+    # 详见 11 PRD §1.4 / 11 设计 §0 / docs/technical-debt.md §6.19 U-163。
+    warn "动作闭环未实现：MUPC 侧无 TCP 客户端（sim-bridge 将阻塞在 accept()），"
+    warn "且 mupc/sim/observation 无订阅方 => 本环境当前只产出仿真观测，不构成闭环。"
 
     # 确保 engine.py 路径正确
     cd "$WORKSPACE_DIR"

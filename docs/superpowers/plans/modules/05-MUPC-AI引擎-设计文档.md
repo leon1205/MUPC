@@ -1027,8 +1027,8 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 - 执行器按下垂公式 `P_output = P_ref - k_droop × ΔV` 执行毫秒级暂态调节
 
 **上层（RL决策）**— 现行，2 维动作空间
-- `p_ref`（有功基准点，[-50.0, 50.0] kW）：AI 负责稳态全局优化，通过核间 TCP 下发
-- `k_droop`（电压-有功下垂系数，[0.0, 30.0] kW/V）：AI 设置暂态调节灵敏度，通过核间 TCP 下发
+- `p_ref`（有功基准点，[-50.0, 50.0] kW）：AI 负责稳态全局优化，通过南向 `PcsHandle::send_dual_param` 下发至 PCS
+- `k_droop`（电压-有功下垂系数，[0.0, 30.0] kW/V）：AI 设置暂态调节灵敏度，通过南向 `PcsHandle::send_dual_param` 下发至 PCS
 - `load_shedding`（可中断负荷切除量）：下沉至 strategy-engine（需量控制策略独立执行）
 - `pv_limit`（光伏限功率比例）：下沉至 strategy-engine（防逆流策略独立执行）
 - `confidence`（决策置信度）：保留在 ModelOutput 中（action_validator 内部校验使用）
@@ -1122,10 +1122,12 @@ RLModel 使用 MADDPG（多智能体深度确定性策略梯度）或 PPO（近�
 
 | 维度 | 字段名 | 类型 | 取值范围 | 单位 | 说明 | 分发路径 |
 |------|--------|------|----------|------|------|----------|
-| A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负=充电，正=放电） | 核间→实时控制模块 |
-| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数 | 核间→实时控制模块 |
+| A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负=充电，正=放电） | 南向 `PcsHandle`→PCS |
+| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数 | 南向 `PcsHandle`→PCS |
 
-> **下沉说明：** load_shedding 下沉至 strategy-engine（需量控制策略独立执行），pv_limit 下沉至 strategy-engine（防逆流策略独立执行），confidence 保留在 ModelOutput 中（action_validator 内部校验使用）。AI 引擎仅通过核间通信下发 p_ref + k_droop 至实时控制模块。
+> **下沉说明：** load_shedding 下沉至 strategy-engine（需量控制策略独立执行），pv_limit 下沉至 strategy-engine（防逆流策略独立执行），confidence 保留在 ModelOutput 中（action_validator 内部校验使用）。AI 引擎仅通过南向 `PcsHandle::send_dual_param` 下发 p_ref + k_droop 至 PCS。
+
+> 〔注（2026-09-27）：原「核间 TCP 下发 / 核间→实时控制模块 / 通过核间通信下发」为 PCS 迁出前的表述。PCS 通信与控制已于 2026-09-26 由 `mupc-intercore` 整体迁入 `mupc-southd::pcs::PcsHandle`（02 号设计 §13 / ADR-014·015·016），生产下发路径 = 南向 `PcsHandle`；核间 TCP 通道在生产路径**无消费者**，「V3 帧」现仅存于 `sim-bridge` TCP 仿真通道。〕
 
 ### 4.6 ActionOutput 结构体
 
@@ -3647,6 +3649,8 @@ alert_rejection_rate = 0.20     # 拒绝率告警阈值
 
 ### 8.6 Web API 设计（SSE 推送为主，HTTP API 仅用于状态查询）
 
+> ⚠️ **本节已作废（2026-09-27）**：`crates/web-api` 已**整 crate 删除**（12-本地显示终端 设计 §7.2/§7.3），Web 访问机制取消（08 号模块 **SUPERSEDED**）。本节描述的 SSE 推送、HTTP 路由、`AppState` 订阅**均无实现载体**；**运行时切换端点不复存在**，人机交互现并入 **12 号本地显示终端**。本节（含 §8.7 / §8.10 中同源的 `crates/web-api/**` 路径）**保留为设计记录**，不作现行实现依据。另：§8 整体自 2026-09-09 起**暂停**（观测空间重构后接入）。
+
 **架构变更**：
 - 实时违规通知通过 **SSE 推送**（基于 broadcast channel）
 - HTTP API 仅用于：状态查询、统计查询（冷路径）
@@ -3945,7 +3949,7 @@ fn test_predict_inner_low_voltage_risk() {
 
 ### 9.2 AiIntegrator 扩展
 
-AiIntegrator 是 web-api 访问 ai-engine 的服务门面，增加以下接口：
+AiIntegrator 是 web-api 访问 ai-engine 的服务门面（〔注（2026-09-27）：`web-api` crate 已整删、Web 访问机制取消，现门面调用方为 strategy-engine〕），增加以下接口：
 
 ```rust
 /// AI 集成器（strategy-engine -> ai-engine 门面）

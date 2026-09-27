@@ -250,7 +250,7 @@ crates/local-display/
 
 **进程拓扑保持两进程分离**（数据与控制集中在 `mupcd`，HMI 只做渲染与输入）：
 
-- 理由 1（PRD 硬约束）：PRD §4.4 第 6 条「显示进程**任何情况下**不得直连核间 modbus / PCS 总线」；PRD §1.4「写操作经 mupcd 提供的受控接口完成」。**单进程（把取数/写入搬进 HMI）直接违反 PRD**。
+- 理由 1（PRD 硬约束）：PRD §4.4 第 6 条「显示进程**任何情况下**不得直连 **PCS / 南向总线（RS485 / Modbus RTU）**」（⚠️ 2026-09-27 改注：原文写「核间 modbus / PCS 总线」；PCS 通信与控制已迁入南向，02 号设计 §13 / ADR-014）；PRD §1.4「写操作经 mupcd 提供的受控接口完成」。**单进程（把取数/写入搬进 HMI）直接违反 PRD**。
 - 理由 2（可靠性）：PRD §4.3「显示进程崩溃/重启不得影响 mupcd」——同进程则 `panic` 即全灭。
 - 理由 3（复用）：既有 `DisplayDataProvider`（域值化/量程/一致性）与 `AiIntegrator::soc_display_snapshot` 已在 mupcd 侧正确落地，迁移成本为零。
 
@@ -411,7 +411,7 @@ pub struct DeviceSection {
     pub cpu_temp_c: Option<f64>,
     pub mem_used_pct: Option<f64>,
     pub iec104: LinkState,          // 调度主站链路
-    pub intercore: LinkState,       // 核间链路
+    pub intercore: LinkState,       // PCS 通道在线态（**字段名沿旧**；真源 mupc-southd::pcs::PcsHandle，见 §4.1 #2）
     pub hmi_channel: LinkState,     // 跨进程数据通道（HMI 侧自判，见 §5.5；服务端给 Unknown）
     pub control_source: ControlSource,
 }
@@ -779,7 +779,7 @@ DisplayDataProvider（主拍 publish_ms=1 s，已有逻辑；新增「内容变�
 
 #### 4.3.3 ApplyMode 分发表（决定「自动生效」的达成度）
 
-> ⚠️ **订正（2026-09-19）**：下表原有两行（**遥测上报周期**、**IEC 104 心跳间隔**）写了 `watch` 热生效方式，而**现网 `CoreConfig` 根本没有对应配置键** ⇒ 该两行的"生效方式"是**零实现**（不是"实现了但慢"）。本表按**代码事实**重写为"**无承载**"，与 §4.3.5 的计数口径（`FIELDS` 9 键 / 可写 7 / 热生效 1 / 需重启 6）**对齐**。对应的 PRD 字段级降级已由 PM 于 2026-09-19 裁定（见 PRD §3.2 F9 第二处补注块）。
+> ⚠️ **订正（2026-09-19）**：下表原有两行（**遥测上报周期**、**IEC 104 心跳间隔**）写了 `watch` 热生效方式，而**现网 `CoreConfig` 根本没有对应配置键** ⇒ 该两行的"生效方式"是**零实现**（不是"实现了但慢"）。本表按**代码事实**重写为"**无承载**"，与 §4.3.5 的计数口径（**现值：`FIELDS` 7 键 / 可写 5 / 热生效 1 / 需重启 4**；⏳ 2026-09-27 订正，原记 9 / 7 / 1 / 6 已随 **E-13** 删除核间心跳 / 重连二键而作废）**对齐**。对应的 PRD 字段级降级已由 PM 于 2026-09-19 裁定（见 PRD §3.2 F9 第二处补注块）。
 
 | F9 配置项（PRD §3.2 表） | 现网真实 key | 生效方式 | 时效 | 副作用 |
 |-----------|--------------|----------|------|--------|
@@ -788,15 +788,15 @@ DisplayDataProvider（主拍 publish_ms=1 s，已有逻辑；新增「内容变�
 | 核间「对端端口」 | `intercore.port` | 落盘 + 内存副本；**需重启 `mupcd` 进程生效**（`hot_apply.rs` 判 `RestartRequired`） | 重启 | 弹层须提示**链路瞬断**（`requires_reconnect=true`） |
 | 核间「对端地址」（**PRD 未列**，实现多出；UI §6.2 标签 = 「对端地址」） | `intercore.host` | 同上一行：**需重启进程生效** | 重启 | 同上（`requires_reconnect=true`） |
 | 核间「本地端口」 | ⚠️ **无对应配置项**（`InterCoreConfig` 只有 `host` / `port`——均为**对端**——无本地绑定端口）⇒ **本期不可读写** | — | — | **见 §4.3.5 与 PRD F9 补注** |
-| 核间心跳/重连间隔（**PRD 未列**，实现多出） | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | 落盘 + 内存副本；**需重启进程生效** | 重启 | 无 |
+| ~~核间心跳/重连间隔~~（**PRD 未列**，实现多出） | ⚠️ **已删除（E-13，2026-09-27）**：`intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键**全仓零消费点**（TCP 传输侧无心跳 / 重连循环；PCS 采集兼心跳的周期取 `south_pcs.interval_ms`）⇒ 屏上"可写 + 需重启生效"是**谎报**。已连同 `InterCoreConfig` 字段与两份部署 YAML 一并移除 ⇒ **本行不再上屏** | — | — |
 | **IEC 104 心跳间隔** | ⚠️ **无对应配置项**（`GatewayConfig` 只有 `listen_addr` / `listen_port`，无心跳字段；`Iec104Config.heartbeat_interval_secs` 恒取默认 10 s）⇒ **本期不可读写** | — | — | **见 §4.3.5 与 PRD F9 补注** |
 | IEC 104 监听地址 | ⚠️ **无对应配置项**（现网是服务端模型，「对端 IP」不存在）⇒ 按 §4.3.4 落为 `gateway.listen_addr`（**本机监听地址**） | 落盘 + 内存副本；**需重启进程生效** | 重启 | 弹层须提示**调度通道瞬断**（`requires_reconnect=true`，高风险须明示） |
 | IEC 104 端口 | `gateway.listen_port` | 同上一行 | 重启 | 同上（`requires_reconnect=true`） |
 
-> **本表与实现的对账（2026-09-19，逐字段核 `mupc/crates/mupc-core-bin/src/console_host.rs` 的 `FIELDS`）**：
-> 实现侧 **9 键**（7 可写 + 2 只读），与上表的关系是 **−3 / +3**：
+> **本表与实现的对账（2026-09-19 首记 / 2026-09-27 按 E-13 重算，逐字段核 `mupc/crates/mupc-core-bin/src/console_host.rs` 的 `FIELDS`）**：
+> 实现侧 **7 键**（5 可写 + 2 只读；⏳ 原记 9 键 = 7 可写 + 2 只读，二键已随 **E-13** 删除），与上表的关系是 **−3 / +1**（⏳ 原记 −3 / +3）：
 > **少 3**（PRD 有、实现无承载）＝ 遥测上报周期、核间本地端口、IEC 104 心跳间隔；
-> **多 3**（实现可写、PRD 未列）＝ `intercore.host`、`intercore.heartbeat_interval_sec`、`intercore.reconnect_interval_sec`。
+> **多 1**（实现可写、PRD 未列）＝ `intercore.host`（⏳ 原「多 3」中的 `intercore.heartbeat_interval_sec` / `intercore.reconnect_interval_sec` 已随 E-13 删除）。
 > 另有 2 键只读（`display.bind_addr` / `display.control_bind_addr`，`editable=false`，见 §6.2）。
 
 #### 4.3.4 两个必须让 PM 拍板的口径问题（诚实标注）
@@ -810,8 +810,8 @@ DisplayDataProvider（主拍 publish_ms=1 s，已有逻辑；新增「内容变�
 
 - 本项是**独立子系统的净新增**（配置写 + 原子落盘 + 元数据表 + 多模块 `watch` 接线 + 校验 + 审计 + 测试），是全模块**最大的工作量单元**（见 §13.4 工作量表，标记为 **L**）。
 - **若工期不足的降级方案（须 PM 裁决，因它偏离 CF-04）**：本期仅支持 **HotApply 子集**（`system.log_level` / 遥测周期 / 心跳类），连接类参数**只落盘 + 提示「需重启 mupcd 生效」**。此方案必须回写 PRD（CF-04 降级）并获 PM 同意，**不得静默实施**。
-  - **✅ 已裁定（2026-09-16，PM）：接受本降级**（**不投入**"把 6 个字段做成真热生效"的改造）。**实测计数口径**（G-2 交付；逐字段依据见 `mupc/crates/mupc-core-bin/src/hot_apply.rs` 的结论表）：字段表 **9** 键 ⇒ `editable=true` 可写 **7** ⇒ **真热生效 1**（`system.log_level`）⇒ **需重启 6**（`intercore.host` / `intercore.port` / `intercore.heartbeat_interval_sec` / `intercore.reconnect_interval_sec` / `gateway.listen_addr` / `gateway.listen_port`）。
-    > ⚠️ **口径澄清（2026-09-19）**：这里的「字段表 9 键」指**实现侧 `FIELDS`**（`console_host.rs`），它**不等于** PRD §3.2 F9 的 7 个配置项 —— 二者差 **−3 / +2**：**缺** IEC 104 心跳间隔 / 核间本地端口 / 遥测上报周期（**无配置承载**，见 §4.3.3 订正），**多** `intercore.heartbeat_interval_sec` / `reconnect_interval_sec`（PRD 未列）。因此"可写 7"与"PRD 的 7 项"是**两个不同的 7**，不可互相印证；PRD 侧的真实达成度见 PRD §3.2 F9 的第二处补注块（**字段级 4/7**）。
+  - **✅ 已裁定（2026-09-16，PM）：接受本降级**（**不投入**"把连接类字段做成真热生效"的改造）。**实测计数口径**（G-2 交付；逐字段依据见 `mupc/crates/mupc-core-bin/src/hot_apply.rs` 的结论表）：字段表 **7** 键 ⇒ `editable=true` 可写 **5** ⇒ **真热生效 1**（`system.log_level`）⇒ **需重启 4**（`intercore.host` / `intercore.port` / `gateway.listen_addr` / `gateway.listen_port`）。⏳ **2026-09-27 订正**：原记「9 / 7 / 1 / 6」**已作废** —— **E-13** 删除了 `intercore.heartbeat_interval_sec` / `intercore.reconnect_interval_sec` 二键（零消费点，屏上可写属谎报），原「需重启 6」中的二键随之下表移除。
+    > ⚠️ **口径澄清（2026-09-19 首记 / 2026-09-27 重算）**：这里的「字段表 7 键」指**实现侧 `FIELDS`**（`console_host.rs`），它**不等于** PRD §3.2 F9 的 7 个配置项 —— 二者差 **−3 / +1**（⏳ 原记 −3 / +2）：**缺** IEC 104 心跳间隔 / 核间本地端口 / 遥测上报周期（**无配置承载**，见 §4.3.3 订正），**多** `intercore.host`（PRD 未列）。因此"可写 5"与"PRD 的 7 项"是**两个不同的数**，不可互相印证；PRD 侧的真实达成度见 PRD §3.2 F9 的第二处补注块（**字段级 4/7**，**该 4/7 不因 E-13 改变**——E-13 删的是 PRD 未列的二键）。
   - **回写落点**：PRD（头部补注 + §3.2 F9 补注块，标 CF-04 降级）与 UI 设计文档（§3.6 P2 行 / §6.2 线框 `Y80` 行 / §6.2 流程 3「影响范围」/ §6.2 流程 5 / §7.3 弹层线框；版本表补注 4）。**屏上口径**：页面说明行与弹层「影响范围」改为分级口径「**日志级别立即生效 · 连接类参数需重启进程生效**」；保存成功 Toast **并入后端回执 `message`**（后端逐字点名需重启的键），不再统一写「已生效」。实现落点 = `local-display/src/ui/pages/p2_config.rs`（其偏差登记 **PD24**）。
   - **⚠️ 残余（如实登记）**：`Toast` 文本区 400 px（≈16 字，`DOTS` 截断）⇒ 长回执的**具体键名可能被截掉**；回执 `message` 的用字（`项` / 全角括号等）**不在字体码表控制面内**（真机豆腐块）。两条同属既有「自由文本不受码表约束」口径，收口批见 PD24。
 
@@ -938,7 +938,9 @@ tracing::info!("[10/14] 初始化本地 HMI 后端...");
 if config.display.enabled {
     // 10.1 读通道（既有）
     let latest: SharedLatest = Arc::new(Mutex::new(None));
-    tokio::spawn(DisplayDataProvider::new(ai_integrator.clone(), intercore.clone(),
+    // 三相 / run_state / 连接态取数面 = PCS 通道（`south_pcs.enabled=false` ⇒ `None`；
+    // 2026-09-26 由 `intercore` 换型为 `mupc-southd::pcs::PcsHandle`，02 号设计 §13 / ADR-014）
+    tokio::spawn(DisplayDataProvider::new(ai_integrator.clone(), pcs.clone(),
                  &config.display, modbus, latest.clone(),
                  /* 新增：*/ device_sampler, alarm_sampler, interlock_sampler).run());
     let l1 = TcpListener::bind(&config.display.bind_addr).await?;   // 强制回环（validate）
@@ -1237,7 +1239,7 @@ pub struct UiState {
 | F2 PCS 状态 | 四态文字+语义色+图标；「方向不一致」角标 | 帧 `run_state`/`inconsistency`（主判据 REG1013） | 只读 |
 | F3/F4 三相 P/I | 四卡横排（A/B/C/总，上 P 下 I），1 位小数 | 帧 `p_phase`/`p_total`/`i_phase` | 只读 |
 | F5 刷新/新鲜度 | 「数据过期」角标（>2 s）；通道断整屏降级 | 帧 `ts_ms`/`seq` + `ChannelStatus` | 只读 |
-| F6 装置状态 | 状态卡网格：版本、编译时间、uptime、CPU 温度、内存、IEC104 / 核间 / 通道、控制源 | 帧 `device` + `info` | 只读 |
+| F6 装置状态 | 状态卡网格：版本、编译时间、uptime、CPU 温度、内存、IEC104 / **核间连接（= PCS 通道在线态，标签沿旧）** / 通道、控制源 | 帧 `device`（`intercore` 字段取值 = `PcsHandle::is_connected()`）+ `info` | 只读 |
 | F7 告警 | 最多 10 条，倒序，级别色+文字；空态/源不可用分别显式 | 帧 `alarms` | 只读 |
 
 - 布局（1024×768，**主读数区不横滚**，整页为 LVGL 纵向滚动容器（`lv_obj` + `LV_OBJ_FLAG_SCROLLABLE` + `lv_obj_set_scroll_dir(LV_DIR_VER)`），PRD T-6/B8）：页眉（时钟 + 通道状态）→ SOC 卡 | PCS 卡 → 三相四卡 → 装置状态网格 → 告警列表。
@@ -1248,7 +1250,7 @@ pub struct UiState {
 
 | 环节 | 设计 |
 |------|------|
-| 进入 | 触摸导航「配置」→ `GET /v1/console/config` → 按 `groups` 渲染分组（IEC 104 / 核间 / 遥测与日志），组内字段纵向排列 |
+| 进入 | 触摸导航「配置」→ `GET /v1/console/config` → 按 `groups` 渲染分组（**4 组**：`IEC 104 连接参数` / `核间通信参数` / `遥测与日志` / `本机地址`（**只读**，2 个回环服务地址；⚠️ 2026-09-27 补注：原枚举 3 组，遗漏只读组）），组内字段纵向排列。⚠️ 组名 / 行数以契约返回的 `groups[].label` / `fields` 为准（由 `console_host.rs` 的 `GROUPS` / `FIELDS` 生成；E-13 后 `FIELDS` **7 键 = 5 可写 + 2 只读**） |
 | 控件生成 | 由 `ConfigField.kind` 驱动：`Ipv4` → 四段数字步进（每段 0–255）；`U16/U64{min,max,step}` → 受约束步进器 —— **此二者均为 `lv_btn` + `lv_label` 组合（`−` / 值 / `＋`），弃 `lv_spinbox`（§5.6 F12 行）**，`−` 在 `value==min` / `＋` 在 `value==max` 时 `LV_STATE_DISABLED`，**越界值在控件层不可达**（TT-03）；`Enum{options}` → 选项列表（`lv_dropdown` / `lv_buttonmatrix`） |
 | **只读字段**（`editable=false`） | 本地 HMI 自身的服务地址（`display.bind_addr` / `display.control_bind_addr`）**只读展示**：控件 `disabled` + 附「仅本机回环，不可修改」说明行。理由：回环是 PL-4 安全红线，经屏可改即等于把"只回环"变成可撤销的约定（§3.4 / §4.9）；字段仍出现在列表中以**可见性**换取现场可核查性 |
 | 监听地址字段口径 | `gateway.listen_addr` 的标签为「**本机监听地址（IEC 104）**」，**不得**表述为「对端 IP / 远程主站地址」；`Ipv4` 步进的语义是**本机绑定地址**。同页若出现回环服务地址，须按「本机服务地址（仅回环 127.0.0.1）」独立成行标注，与设备管理 IP 区分（§6.6） |
@@ -1861,16 +1863,16 @@ point.quality != Ok                        → NotRead   (v = None)   ← 01 已
 
 #### 15.1.3 ⚠️ 报告项：F24（PCS）缺第二写入方 + 10 号模块动作
 
-PRD F24 明确「该站当前未启用；若本项上屏，PCS 增量读数的真源为 **`intercore` 的 3 区读通道**，而非 `south_stations.pcs` 站——两者不得同时启用」。而 `latest_values` 的写入方限定为 `SouthSink`（南向站回调）⇒ **`pcs_3zone_*` 键在 `latest_values` 中不会被写入**。
+PRD F24 明确「该站当前未启用；若本项上屏，PCS 增量读数的真源为 **`mupc-southd::pcs::PcsHandle`（南向）的 3 区读通道**，而非 `south_stations.pcs` 站——两者不得同时启用」（⚠️ 2026-09-27 改注：原文写 **`intercore` 的 3 区读通道**；PCS 通信与控制已整体迁入南向，02 号设计 §13 / ADR-014）。而 `latest_values` 的写入方限定为 `SouthSink`（南向站回调）⇒ **`pcs_3zone_*` 键在 `latest_values` 中不会被写入**。
 
 | 处置 | 说明 | 取舍 |
 |------|------|------|
-| **处置 1（本节采用）** | `latest_values` 增加**第二条写入路径**：core-bin 既有的 intercore 采集环（`read_three_phase` / `last_run_state` 同源）把 PCS 3 区扩展点表按点名写入**同一份**快照 | 守住 RQ-9.0-3「单一真源」（上云若也要 PCS 增量则共用同一份）；代价 = `latest_values` 写入方由 1 个变 2 个，**须其设计明文接纳** |
-| **处置 2** | `display_host` 直读 intercore 扩展点表（不经 `latest_values`） | 不触及 `latest_values` 边界；但若 01 号也要求 PCS 增量上云，会出现**第二真源** ⇒ 违反 RQ-9.0-3 |
+| **处置 1（本节采用）** | `latest_values` 增加**第二条写入路径**：core-bin 既有的 **PCS 采集环**（`mupc-southd::pcs::PcsHandle` 的 `read_three_phase` / `last_run_state` 同源；原 `intercore` 采集环，2026-09-26 换型）把 PCS 3 区扩展点表按点名写入**同一份**快照 | 守住 RQ-9.0-3「单一真源」（上云若也要 PCS 增量则共用同一份）；代价 = `latest_values` 写入方由 1 个变 2 个，**须其设计明文接纳** |
+| **处置 2** | `display_host` 直读 **PCS 通道**扩展点表（不经 `latest_values`） | 不触及 `latest_values` 边界；但若 01 号也要求 PCS 增量上云，会出现**第二真源** ⇒ 违反 RQ-9.0-3 |
 
 **本节的落地口径（按处置 1）**：`display_host` 对 `pcs_3zone_*` 与其余外设**一视同仁**地从段内取键。若该键缺失（处置 1 未落地）⇒ 按 §15.1.2 规则置 `NotRead` ⇒ 屏显「未取数」；**PCS 段仍可渲染**（不崩、不补 0），但 **EX-22「常显」不达成**。⚠️ 「常显」本身另有一条**独立于本节的**需求冲突（分段控件同屏仅 1 段可见），见 §15.9 **R-40**。
 
-**另需 10 号（核间通信）配合**：F24 的 6 组新增量（1018–1021 / 1025–1040 / 1008–1012 / 1041 / 1042–1045 / 1066 / 1071 / 1072–1075）需 `intercore` **扩展读取**（当前仅读 5 个量，N-15）。该动作**不在 12 号范围**，且 PRD 的 **T-12 只登记了 01 / 03 号** ⇒ **本节据此报告：T-12 需增补 10 号**（§15.9 R-29）。
+**另需 PCS 通道侧配合**（⚠️ 2026-09-27 改注：原写「**另需 10 号（核间通信）配合**」；PCS 通信与控制已整体迁入**南向**，02 号设计 §13 / ADR-014 ⇒ 该扩展读的**落点由 10 号改为 02 号（`mupc-southd::pcs`）**）：F24 的 6 组新增量（1018–1021 / 1025–1040 / 1008–1012 / 1041 / 1042–1045 / 1066 / 1071 / 1072–1075）需 **`PcsHandle` 扩展读取**（当前仅读 5 个量，N-15）。该动作**不在 12 号范围**，且 PRD 的 **T-12 只登记了 01 / 03 号** ⇒ **本节据此报告：T-12 需增补 02 号（原记「增补 10 号」，见 R-29）**。
 
 ---
 
@@ -2660,7 +2662,7 @@ decompose: vec![
 
 **误用防护（硬约束，可与测试机械对齐）**：① 本段**只列上述白名单键**；② 屏上**不存在**任何以「台区 / 关口 / 总表」命名且取自 `meter_batt` 的字段（标签由 catalog 给定，含「台区/关口/总表」的键**不在白名单**⇒ 结构性成立，EX-21）；③ 每行**标签前缀「储能表·」**由 catalog 提供（屏侧不拼接）；④ 台区关口总表数值**不在本增量内**（U-69 / U-74）。
 
-**段「PCS」（F24；站 `pcs`；真源 = **`intercore` 3 区读通道**，见 §15.1.3）**
+**段「PCS」（F24；站 `pcs`；真源 = **南向 `mupc-southd::pcs::PcsHandle` 的 3 区读通道**，见 §15.1.3。⚠️ 2026-09-27 改注：原写 `intercore`）**
 
 | 分组键 | 分组标题 | 显示项（短标签） | 点名（键） | 单位 | 小数位 |
 |--------|----------|------------------|-----------|------|--------|
@@ -2932,8 +2934,8 @@ pub enum MissingReason {
 
 | ID | 项 | 类型 | 影响 | 本设计的默认处置 |
 |----|----|------|------|------------------|
-| **R-28** | **F24（PCS）缺第二写入方**：`latest_values` 写入方限定为 `SouthSink`，而 F24 真源是 `intercore` | **跨设计 + PM** | 高：决定 EX-22 能否达成 | 按 §15.1.3 处置 1（`latest_values` 接纳第二条写入路径）；若其设计不接纳 ⇒ PCS 段显「未取数」，**EX-22 不达成** |
-| **R-29** | **T-12 需增补 10 号（核间通信）**：F24 的 6 组新增量需 `intercore` 扩展读取（现仅读 5 个量） | **跨文档（10 号）** | 高：F24 前置 | 登记为 12 号之外的**独立动作**；PRD 的 T-12 只覆盖 01 / 03，**本节报告补 10** |
+| **R-28** | **F24（PCS）缺第二写入方**：`latest_values` 写入方限定为 `SouthSink`，而 F24 真源是 **`mupc-southd::pcs::PcsHandle`**（⚠️ 2026-09-27 改注：原写 `intercore`；PCS 已迁南向，02 号设计 §13 / ADR-014） | **跨设计 + PM** | 高：决定 EX-22 能否达成 | 按 §15.1.3 处置 1（`latest_values` 接纳第二条写入路径）；若其设计不接纳 ⇒ PCS 段显「未取数」，**EX-22 不达成** |
+| **R-29** | **T-12 需增补 02 号（南向，原记 10 号核间通信）**：F24 的 6 组新增量需 **`PcsHandle`** 扩展读取（现仅读 5 个量）（⚠️ 2026-09-27 改注：原写「需 `intercore` 扩展读取」，PCS 已迁南向） | **跨文档（02 号；⏳原记 10 号）** | 高：F24 前置 | 登记为 12 号之外的**独立动作**；PRD 的 T-12 只覆盖 01 / 03，**本节报告补 02**（原记「补 10」） |
 | **R-30** | `latest_values` **不提供**「站级最后成功时刻」的公开读口 ⇒ 点级「本轮未更新」**不可判**（详见 R-38） | **跨设计** | 中：mapper 滤除越界点时**会把陈旧值显示为实时值**（该点 `ts_ms` 停在上一轮、`quality` 仍为 `Ok`） | 退化为「点存在且 `quality == Ok` 即按 `Valid` 展示」，**如实登记**；**屏侧不得用时间阈值补**（补了即第二套新鲜度判据，违反 F25.1）。**撤销 v2.1-r1 的 `round_seq` 表述**（01 中无此概念，N-19） |
 | **R-31** | **PRD F22 的 `Ah` 容量声明"1 位小数"与登记不符**：`bms_cap_*` 四行 `scale = 1.0` | **需求 vs 登记** | 低 | **以登记为准（整数）**；请产品确认或由现场 RC 一并核对（Q-16「16/32 位未明确」） |
 | **R-32** | `pcs_3zone_67`（工作模式）**枚举文案未登记**（`point_table.rs:744` 仅写"（枚举）"） | **厂方追认** | 低 | 屏显「模式 `<值>`」+「（枚举文案待厂方追认）」；**不臆造**；F24 的"枚举外值显「未知」"因无值域**暂不可判** ⇒ 需厂方补值表 |
@@ -3007,7 +3009,7 @@ pub enum MissingReason {
 | v2.0-r2 | GUI 框架由 Slint 切换为 LVGL（Slint 闭源商用嵌入式交付必须付费商业许可） |
 | v2.0-r3 | LVGL spike 实测整改：字体链、体积预算、CJK 字形判据与构建硬知识按实测订正 |
 | v2.0-r4 | LVGL v9.5.0 API 事实订正；`LV_MEM_SIZE` 按实施期实测定稿 1 MB |
-| **v2.1-r14（2026-09-26，未加门禁标记）** | PCS 真源迁址订正：只改文首「权威点表」行、§15 三审结论注、§15.1.2 的 N-15 行三处文件引用（`intercore/src/pcs.rs` 与 `intercore/src/transport/modbus.rs` 已随 PCS 迁入南向删除 ⇒ 改指 `mupc-southd/src/pcs/regs.rs` 与 `mupc-southd/src/pcs/collect.rs`）；不改任何视觉规格 / 容量数字 / 判据。 |
+| **v2.1-r15（2026-09-27，未加门禁标记）** | 过期表述订正（不改视觉规格 / 容量数字 / 判据 / 编号）：① `DeviceSection.intercore` 语义订正为「**PCS 通道在线态**（字段名沿旧）」（§2.1 代码块 / §4.1 #2 / §6.1 F6 行）；② §15.1.3 / §15.5.2 段「PCS」/ §15.9 R-28·R-29 的 PCS 真源由 `intercore` 改指南向 `mupc-southd::pcs::PcsHandle`，R-29 的扩展读落点由 10 号改记 02 号；③ **E-13（2026-09-27）删除 `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键** ⇒ §4.3.3 表该行改为「已删除 · 不上屏」，计数口径**重算为 `FIELDS` 7 键 / 可写 5 / 热生效 1 / 需重启 4**（原 9 / 7 / 1 / 6 作废）、差集改 **−3 / +1**（原「多 3」作废）；④ §4.9 装配代码块 `intercore.clone()` → `pcs.clone()`；⑤ §6.2 上屏分组补第 4 组「本机地址（只读）」。 |
 | **v2.1-r13（2026-09-26）** | T21e 评审 W-1 / W-2 收尾：§15.5.3 规范句收口为「行池 = 可视行 ×1.5 + 1」（明确「×1.5」是下界、`+1` 为边界行余量）；测试侧补像素面几何读回；§4.7 补 `AlertFeed` 落地现状注（「投得进环、无生产消费者」）。 |
 | **v2.1-r12（2026-09-26）** | T21e：P4 探测器下钻窗口化收口（§15.4 / §15.5.3 / §15.9 R-34）——池 = 可视行 ×1.5 + 1 = 7 行 + `SCROLL` 重绑 + 高度占位器；常驻对象 1031 → 922、稳态上界 1616；`page_size = 20` 契约与视觉规格不变。**留痕**：`p6_system.rs` 的 P6-6 行与 `ui/pages/mod.rs` 的补充段仍留「待单独立项」过期串（本批未改，待各自改动面收口）。 |
 | **v2.1-r11（2026-09-25）** | §12.3 字体「326 字符」口径标注（只加注；T21d 评审曾把该值登记为「陈旧值」，核查后改判）：该值是本节全部体积实测的历史前提、不是笔误；现码表已扩至 464 字符（10 档 cmap 交集 462、缺口 2）而体积数字未按新码表重测 ⇒ 不把未重测数字挂到新前提上（新口径外推见 §15.6.3）。 |

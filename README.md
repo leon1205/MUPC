@@ -127,6 +127,12 @@ cargo build --workspace --release --features npu --target aarch64-unknown-linux-
 
 ### 仿真测试环境 (HIL)
 
+> ⚠️ **动作闭环未实现（2026-09-27 裁定：不重建）**：`deploy-sim.sh` 拉起的 sim-bridge 会
+> **阻塞在 `accept()`**（MUPC 侧无 TCP 客户端），且 `mupc/sim/observation` **无订阅方**
+> ⇒ 当前只产出仿真观测、**不构成闭环**。详见 11 PRD §1.4 / 11 设计 §0 /
+> `docs/technical-debt.md` §6.19 U-163。协议链（PCS / 南向）的验证不走这里，
+> 见 `mupc-southd/tests/pcs_e2e.rs`。
+
 ```bash
 # 一键部署: PC(仿真) + 嵌入式(MUPC) 全栈
 ./deploy/scripts/deploy-sim.sh 192.168.3.118 --build --generate-data --start
@@ -166,12 +172,15 @@ cargo clippy        # 静态检查
 
 ```
 调度主站 ←→ gateway (IEC 104) ←→ data-processing ←→ strategy-engine
-                                              ↓              ↑
-                              intercore (TCP/RJ45) ←→ 实时控制模块
-                                              ↑
-南向设备 ←→ rs485-plugin/hplc-plugin/mupc-southd ←─ ProtocolHandler 注入
-                    ↑
-        PCS 通信与控制（mupc-southd::pcs，2026-09-26 由 intercore 迁入）
+                                        ▲                     │
+                              采集结果  │                     │ 控制指令
+                                        │                     ▼
+南向设备 ←→ rs485-plugin/hplc-plugin/mupc-southd ──▶ PCS（= 实时控制模块）
+                    │           └ mupc-southd::pcs::PcsHandle
+                    │             （2026-09-26 由 intercore 迁入，走 RS485 Modbus RTU）
+                    └─ 四条通路：插件化单设备 / 站级多从站调度 / PCS 通信与控制 / 数字 IO（mupc-io）
+
+  intercore（核间 TCP 帧协议）┈┈  保留待接：生产路径暂无消费者（现存消费者只有 sim-bridge）
 
   主控进程 (mupcd) ──display-proto(TCP 回环)──▶ local-display（12 号本地屏）
 ```

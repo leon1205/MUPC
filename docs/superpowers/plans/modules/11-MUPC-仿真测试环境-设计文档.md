@@ -3,8 +3,32 @@
 | 版本 | 日期 | 作者 | 状态 |
 |------|------|------|------|
 | v1.3 | 2026-07-10 | 架构师 | `[DESIGN_APPROVED]` — 四轮审查全通过 |
+| v1.3-r1 | 2026-09-27 | LEON | 待评审 — **现状裁定：闭环未实现，且不重建**（U-163 裁定 A）。新增 §0 裁定块；§3.3 / §4.1 / §4.3 加「MUPC 侧无对端」注。**设计条款与门禁标记 `[DESIGN_APPROVED]` 原文未动**（本次为内容订正，未经评审，不新增门禁标记） |
 
-> **关联 PRD**：`docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` `[REVIEWED: PASS]`
+> **关联 PRD**：`docs/superpowers/specs/modules/11-MUPC-仿真测试环境-PRD.md` `[REVIEWED: PASS]`（+ 2026-09-27 §1.4 现状裁定）
+
+---
+
+## 0. 现状裁定（2026-09-27）——闭环**未实现**，且**不重建**
+
+> **裁定**：U-163 取方案 **A「正式判为未实现、不重建」**。技术债登记见 `docs/technical-debt.md` §6.19 **U-163**；PRD 侧对应 **11 PRD §1.4**。
+
+**三处断点（均代码实测）**：
+
+| # | 断点 | 事实 |
+|---|------|------|
+| ① | **动作下行无客户端** | 全仓 `IntercoreClient::send_*` **零调用点**；`startup.rs:1393` 构造的 client 只经 `StartupContext.intercore` 移交、**该字段无读取方** |
+| ② | **观测回程无订阅方** | 本模块发布到 MQTT 主题 `mupc/sim/observation`，而**全仓无任何代码引用该主题** |
+| ③ | **动作 schema 已过期** | 动作帧仅 `{p_ref, k_droop}`（AI 时代 2 维动作）；AI 自 2026-09-09 停用后唯一下发者是台区储能治理（分相 P/Q） |
+
+**为何出现**：本设计成文于 2026-07；此后 ① **AI 引擎停用**（2026-09-09）使要验的决策链本身不再运行；② **PCS 迁入南向**（2026-09-26）使策略出口由 `IntercoreClient`（TCP）改为 `PcsHandle`（RS485），sim-bridge 不再是任何人的对端。
+
+**本文档的处置**：
+1. **sim-bridge 侧的实现是真的，保留** —— `ActionServer`（`bind` + `parse_frame` + intercore 64B 帧 + `ActionPayload`）与 `MqttPublisher` 均已落地；E-01 已把帧格式从 26B 私有帧统一为 intercore 定长帧。**§3.3 / §4.1 / §4.3 的正文描述与代码一致，不改。**
+2. **但对 MUPC 无对端** —— `ActionServer` 只有服务端、没有发起端（`accept()` 永久阻塞）；`MqttPublisher` 只有发布端、没有订阅端。⇒ 本模块**对 MUPC 暂无实际作用**，保留为「将来要用时工具还在」。
+3. **不重建**。若将来恢复 HIL，推荐 **PTY + Modbus 从站**路线（复用 `mupc-southd` 的 `pcs_slave` bin 与 `PcsSimState`，MUPC 走**完整生产链路** `PcsHandle` → `rs485-plugin` → Modbus RTU），而非重建 TCP 出口 —— 后者测不到串口时序/分帧/DE-RE/字节序，且须在生产码里加「仅仿真时活」的旁路出口。**届时须新立项，本设计不单方面承诺。**
+4. **协议链验证另有手段且已落地**（与本节不冲突）：`mupc-southd/tests/pcs_e2e.rs` **8 例**（e1–e7）经 `rs485-plugin` 的 `set_test_exchange` 字节流缝驱动 `PcsSlaveService`，无需串口硬件。
+5. **附录 A（78 维状态空间数据生成）随 AI 引擎停用而不适用**。
 
 ---
 
@@ -160,8 +184,8 @@ pub struct ActionFrame {
     pub length: u16,       // bytes 2..4,  BE, = 64
     pub frame_type: u16,   // bytes 4..6,  BE, = 0x0010 (ControlCmd)
     pub seq_no: u16,       // bytes 6..8,  BE
-    pub p_ref: f64,        // 从 JSON payload 反序列化
-    pub k_droop: f64,      // 从 JSON payload 反序列化
+    pub p_ref: f64,        // 从 ActionPayload 二进制载荷解出（f64 BE）
+    pub k_droop: f64,      // 从 ActionPayload 二进制载荷解出（f64 BE）
     pub crc16: u16,        // CRC-16/MODBUS (BE)
 }
 ```
@@ -174,9 +198,15 @@ pub struct ActionFrame {
 | 2..4 | length | 2B | 帧总长度 = 64 |
 | 4..6 | frame_type | 2B | 0x0010 = ControlCmd |
 | 6..8 | seq_no | 2B | 序列号 |
-| 8..8+N | payload | N B | JSON：`{"p_ref": f64, "k_droop": f64}`（`ControlCmdPayloadV2`） |
-| 8+N..8+N+2 | crc16 | 2B | CRC-16/MODBUS，覆盖 header + payload |
-| 其余 | padding | — | 0x00 补齐到 64 字节 |
+| 8..24 | payload | 16B | `ActionPayload`：`p_ref` f64 BE ‖ `k_droop` f64 BE（**二进制**，非 JSON） |
+| 24..26 | crc16 | 2B | CRC-16/MODBUS（大端），覆盖 magic..payload |
+| 26..64 | padding | — | 0x00 补齐到 64 字节 |
+
+> ⚠️ **2026-09-27 订正**：载荷**不是** JSON `ControlCmdPayloadV2`，而是 intercore 的
+> `ActionPayload`（**16 字节二进制**：`p_ref` f64 BE ‖ `k_droop` f64 BE）。当前实现直接复用
+> intercore 的编解码器 —— `IntercoreFrame::from_bytes()` + `ActionPayload::from_frame()`
+> （`mupc/crates/sim-bridge/src/action_server.rs`），故 CRC 位于 **24..26** 而非载荷末尾。
+> 解析后 `p_ref` clamp 到 ±50、`k_droop` clamp 到 0~30。
 
 ### 3.4 Episode 指标 — `EpisodeMetrics`
 
@@ -203,6 +233,8 @@ pub struct EpisodeMetrics {
 ## 4. 模块详细设计
 
 ### 4.1 `main.rs` — 主循环
+
+> ⚠️ **本节流程的「等待 MUPC 连接」一段当前永远等不到（2026-09-27，详见 §0）**：主循环在发布首次观测后 `accept()` 阻塞（`main.rs:134` 的 `// Accept MUPC connection`），而 MUPC 侧**无任何客户端**（`IntercoreClient::send_*` 全仓零调用点）⇒ 进程**会一直停在 `accept()`**，只发过一次初始观测。以下流程描述的是**设计形态**，不是当前运行形态。
 
 ```
 main():
@@ -351,6 +383,10 @@ impl MqttPublisher {
 
 ### 4.3 `action_server.rs` — TCP 动作服务器
 
+> ⚠️ **本模块只有服务端、没有发起端（2026-09-27，详见 §0）**：`ActionServer` 的 `bind` / `parse_frame` / 64B 帧解码（E-01 已修）**均已实现且自洽**，但 **MUPC 侧无任何调用点**连它。另有两点须记：
+> ① 帧内载荷语义 `{p_ref, k_droop}` 是 **AI 引擎时代的 2 维动作空间**，而 AI 自 2026-09-09 停用后唯一下发者是台区储能治理（**分相 P/Q**）⇒ 即便连上，语义也对不上；
+> ② 本模块**不是** PCS 从站仿真器。真正的 PCS V1.3 Modbus 从站仿真在 `mupc-southd::pcs::sim`（bin `pcs_slave`）——**将来若要恢复 HIL，应从那边走**（§0 第 3 条）。
+
 ```rust
 pub struct ActionServer {
     listener: TcpListener,
@@ -410,9 +446,10 @@ impl ActionFrame {
         if frame_type != 0x0010 { return Err(SimBridgeError::UnexpectedFrameType); }
         let seq_no = u16::from_be_bytes([buf[6], buf[7]]);
 
-        // 2. 提取 JSON payload，反序列化 p_ref / k_droop
-        //    payload 位于 header 之后、CRC 之前，实际长度由 length 字段界定
-        let v: ControlCmdPayloadV2 = serde_json::from_slice(payload)?;
+        // 2. 解出 16 字节二进制载荷（`ActionPayload`），取 p_ref / k_droop
+        //    现实现直接复用 intercore 编解码：IntercoreFrame::from_bytes()
+        //    ActionPayload::from_frame()，CRC 位于 24..26
+        let v = ActionPayload::from_frame(&frame)?;
 
         // 3. CRC-16/MODBUS 校验（覆盖 header + payload）
         let computed = crc16_modbus(covered_bytes);
@@ -613,6 +650,8 @@ mupc/Cargo.toml                             # workspace members: + "crates/sim-b
 
 ## 8. 测试策略
 
+> ⚠️ **2026-09-27 现状（详见 §0）**：下表各行的 **Mock 方式** 成立（本模块内部自洽，测试用 mock 客户端/mock broker 即可），但**「全链路 / 系统」行不成立** —— 它要求 MUPC 在环（TCP 动作下行 + MQTT 观测回传），而 U-163 裁定两端均未实现。**本模块的测试只能覆盖「sim-bridge 自身」，覆盖不了「MUPC ↔ sim-bridge 闭环」。**
+
 | 模块 | 测试类型 | Mock 方式 | 覆盖目标 |
 |------|---------|---------|---------|
 | `config.rs` | 单元 | 提供 valid/invalid YAML 文件 | 必填字段检测 / 默认值 / 路径解析 |
@@ -621,7 +660,7 @@ mupc/Cargo.toml                             # workspace members: + "crates/sim-b
 | `mqtt.rs` | 单元 | 用 `rumqttc` 连接本地 mosquitto (CI 中安装) | connect / publish / EventLoop 健康检查 / 连续失败计数 |
 | `metrics.rs` | 单元 | 构造 Snapshot 数组 | min/max/avg/p99 计算 / JSON 导出 / reset_episode 清零 |
 | `main.rs` | 集成 | 启动 mock engine.py + mock MQTT broker + mock TCP client | 完整主循环：reset → 3步 step → done → reset / Ctrl+C 退出 |
-| 全链路 | 系统 | 真实 engine.py (VoltageSimulator) + 真实 mosquitto + 真实 TCP | 96 步 episode 完整闭环 |
+| 全链路 | 系统 | 真实 engine.py (VoltageSimulator) + 真实 mosquitto + 真实 TCP | 96 步 episode 完整闭环（**⚠️ 当前不成立：MUPC 侧无对端，见 §0**） |
 
 **Mock Python 脚本示例** (`tests/mock_engine.py`)：
 ```python

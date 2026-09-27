@@ -1,7 +1,7 @@
 # MUPC 核间通信模块设计文档
 
 > **⚠️ 本文档无门禁标记**（**不自行添加 `[DESIGN_APPROVED]` / `[REVIEWED: PASS]`**）。
-> **现状**：PCS 通信与控制已于 2026-09-26 整体迁出至 `mupc-southd`（来源 = 02 号设计 **§13**，ADR-014 / ADR-015 / ADR-016；T1–T12 见 `docs/technical-debt.md` **§6.13**）。本文档受此影响处以**就地加注**标出，**§1–§12 的既有结论未改**：§1.1（核间图仅指 TCP 帧协议，客户端只发不收）、§10.1（ADR-011 已被 ADR-015 取代）、§11（Modbus RTU 通道已迁出，本章降为历史与设计依据）、§12（PCS 接线契约章的文件归属/测试数/配置键已就地订正，见章首迁出横幅）、§6（心跳与看门狗：核间 TCP 通道无消费者 U-76 ⇒ 待接入设计，见章首时效注）。
+> **现状**：PCS 通信与控制已于 2026-09-26 整体迁出至 `mupc-southd`（来源 = 02 号设计 **§13**，ADR-014 / ADR-015 / ADR-016；T1–T12 见 `docs/technical-debt.md` **§6.13**）。本文档受此影响处以**就地加注**标出，**§1–§12 的既有结论未改**：§1.1（核间图仅指 TCP 帧协议，客户端只发不收）、§1.3/§1.4（依赖表与架构图的控制下发路径：现经南向 `PcsHandle`）、§5（关键信号现由南向 `PcsDualParam` 承载）、§9.1/§9.2（文件结构：`watchdog.rs` 已删、`transport*` 现存）、§10.1（ADR-011 已被 ADR-015 取代）、§11（Modbus RTU 通道已迁出，本章降为历史与设计依据）、§12（PCS 接线契约章的文件归属/测试数/配置键已就地订正，见章首迁出横幅）、§6（心跳与看门狗：核间 TCP 通道无消费者 U-76 ⇒ 待接入设计，见章首时效注）。
 
 ---
 
@@ -59,8 +59,8 @@
 |---------|---------|
 | mupc-common | 错误类型（MupcError、ErrorCode）、日志（tracing） |
 | mupc-core | 核心基础设施（可选的 ServiceCoordinator 集成） |
-| strategy-engine（调用方） | 通过 intercore 下发控制指令 |
-| data-processing（消费方） | 通过 intercore 读取的实时数据 |
+| strategy-engine（调用方） | 通过 intercore 下发控制指令（**历史设计原文**；生产路径现经南向 `mupc-southd::pcs::PcsHandle::send_dual_param` / `send_tai_command` 下发至 PCS，注入点 `AiIntegrator::set_pcs_client`，见文首现状条目） |
+| data-processing（消费方） | 通过 intercore 读取的实时数据（**历史设计原文**；核间 TCP 通道生产路径无消费者，U-76） |
 | byteorder | 大端/小端字节序编解码 |
 | chrono | 时间戳处理（心跳管理） |
 | serde / serde_json | Payload JSON 编解码（控制指令、状态报告） |
@@ -80,6 +80,10 @@ strategy-engine ──→ intercore ──→ 实时控制模块
                     ▼               ▼
                 gateway (IEC 104)   Web UI (状态展示)
 ```
+
+> ⚠️ **2026-09-27 就地加注**：上图中 `strategy-engine ──→ intercore ──→ 实时控制模块` 一段为
+> **历史设计原文**；生产路径现为 `strategy-engine ──→ mupc-southd::pcs::PcsHandle ──→ PCS`
+> （§13 / ADR-016），核间 TCP 链路在其上**无消费者**（U-76）。同款订正另见 §1.3 依赖表。
 
 ---
 
@@ -512,6 +516,11 @@ data-processing (数据汇聚)
 ---
 
 ## 5. 关键信号设计
+
+> ⚠️ **2026-09-27 就地加注**：本章 §5.1–§5.3 定义的关键信号**生产路径现由南向
+> `mupc-southd::pcs::PcsDualParam` 承载**（随 `PcsHandle` 下发），**不经核间通道**；核间侧
+> 无发送方（U-76）。本章保留为历史设计原文（PCS 亦无 StatusReport 回显，其健康由 PcsHandle
+> 采集循环判在线）。
 
 ### 5.1 信号定义
 
@@ -991,6 +1000,13 @@ mupc/crates/intercore/
 | `heartbeat.rs` | 连接心跳状态管理、周期性超时检测 | `HeartbeatStatus`, `HeartbeatManager` |
 | `watchdog.rs` | 看门狗超时检测、复位触发 | `WatchdogConfig`, `WatchdogState`, `Watchdog` |
 
+> ⚠️ **2026-09-27 就地加注**：上表与 §9.1 目录树中 **`watchdog.rs` 已不存在**（`3fa84f8` 删死代码
+> 空壳；`Watchdog`/`WatchdogConfig`/`WatchdogState` 亦未在 `lib.rs` 重导出，§6 的看门狗描述见该章
+> 首 E-02 时效注）。**现存实现**为 `protocol.rs` / `tcp_server.rs` / `heartbeat.rs` /
+> `transport.rs` + `transport/tcp.rs`（`transport.rs` 与 `transport/tcp.rs` 未列入上表，是
+> `IntercoreClient` 的传输门面，导出 `IntercoreTransport` / `TcpTransport`）。帧载荷常量除
+> `FRAME_FIXED_LENGTH`（定长 64）外另有 `MAX_PAYLOAD_LEN`（超限 `to_bytes` 报错）。
+
 ### 9.3 依赖关系
 
 ```toml
@@ -1257,7 +1273,7 @@ intercore:
 
 | RS485 口 | 端子/节点 | 设备 | 数据归属 |
 |---|---|---|---|
-| RS485-1 | COM1/`ttyS0` | PCS 储能变流器（A2/B2，19200 N-8-1） | 本模块 `modbus_rtu`（§11.9 V1.3） |
+| RS485-1 | COM1/`ttyS0` | PCS 储能变流器（A2/B2，19200 N-8-1） | **`mupc-southd::pcs`（原 `intercore.modbus_rtu`，2026-09-26 迁出；配置项 `south_pcs.serial_port`）** |
 | RS485-2 | COM2/`ttyS2` | BMS | 02 §10（role=battery，SOC 融合见 §12.6 交叉注） |
 | RS485-3 | COM3/`ttyS3` | 空调 | 02 §10（role=hvac，本版遥测） |
 | RS485-4 | COM4/`ttyS4` | 关口表/台区总表 | `master_meter` → 02 §10（role=meter_grid，策略 phase 源） |

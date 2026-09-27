@@ -2,11 +2,13 @@
 
 > 平台目标调整（2026-09-09）：AI 引擎暂停（本地策略引擎为唯一默认下发引擎）。模型不加载、观测空间数据停采（rt_source 停写）；观测空间数据维度重构为 AI 重启前置。D9/q_realtime_margin/SafetyOverride/online update/ab_test 等生产数据源相关节当前不生效，接入后重新追认。
 
+> **现状订正（2026-09-27）**：① **PCS（= 实时控制模块）通信与控制已于 2026-09-26 由 `mupc-intercore` 整体迁入南向 `mupc-southd::pcs::PcsHandle`**（02 号设计 §13 / ADR-014·015·016）；正文「通过核间 TCP 下发 / 核间→实时控制模块 / 经 intercore（TCP/RJ45）发送到实时控制模块」等表述为**历史设计原文**，生产下发路径现为南向 `PcsHandle::send_dual_param`（双参数）、`PcsHandle::send_tai_command`（台区储能分相 P/Q），装配注入点 `strategy-engine::AiIntegrator::set_pcs_client`；② 核间 TCP 通道在**生产路径无消费者**（现存真实消费者仅仿真测试环境 `sim-bridge`），「V3 帧」只存在于该 TCP 仿真通道；③ `web-api` crate 已**整 crate 删除**，Web 访问机制取消（08 号 **SUPERSEDED**），**运行时切换端点不复存在**——§6.10.6 / §6.10.7 / §6.10.12 中 `crates/web-api/**` 路径及相关验收项保留为**设计记录**、无实现载体；④ 观测空间各维度「来源 = intercore」为历史设计原文（2026-09-09 起引擎停用、观测空间数据停采，接入前不生效）。
+
 ## 1. 产品概述
 
 ### 1.1 产品定位
 
-AI 优化引擎是 MUPC 通信管理模块（"大脑"）的核心智能决策组件，负责根据实时运行数据和外部信息进行时序预测、场景识别与强化学习决策，生成最优控制指令下发给实时控制模块（"小脑"）执行。
+AI 优化引擎是 MUPC 通信管理模块（"大脑"）的核心智能决策组件，负责根据实时运行数据和外部信息进行时序预测、场景识别与强化学习决策，生成最优控制指令（经南向 `PcsHandle`）下发给 PCS（实时控制模块，"小脑"）执行。
 
 AI 引擎遵循 **"AI 优先，本地兜底"** 策略：正常时 AI 引擎主导决策，AI 失效时自动、无缝地降级至本地策略引擎（strategy-engine）接管控制。
 
@@ -134,7 +136,7 @@ flowchart TD
     I --> J[ActionValidator 约束校验]
     J --> K[strategy-engine]
     
-    K --> L[实时控制模块 执行]
+    K --> L[PCS 执行（南向 PcsHandle）]
     L --> M[反馈]
     M --> F
     
@@ -420,6 +422,8 @@ Level 0-4 由 `PredictionPipeline` 内部管理，Level 5 由 `ModelManager` 调
 | BiLSTM 降级 | BiLSTM 推理失败 | 降级至单向 LSTM，保留 VMD + 误差修正 |
 
 升降级状态记录在 `PipelineHealth` 结构体中，通过 Web API 端点暴露供运维人员监控。
+
+〔注（2026-09-27）：本句「通过 Web API 端点暴露」为**历史原文**——`web-api` crate 已整删、Web 访问机制取消，该端点不复存在；现行可观测出口为日志 / 12 号本地显示终端。〕
 
 ### 3.8 超参自动优化（MSSA）
 
@@ -944,8 +948,10 @@ RLModel 使用 MADDPG 或 PPO 算法，基于融合状态、LSTM 预测值和场
 
 | 维度 | 字段名 | 数据类型 | 取值范围 | 单位 | 说明 | 分发路径 |
 |------|--------|----------|----------|------|------|----------|
-| A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负值=充电，正值=放电）| 核间→实时控制模块 |
-| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数，范围由实时控制模块提供 | 核间→实时控制模块 |
+| A1 | p_ref | f64 | [-50.0, 50.0] | kW | 有功基准点（负值=充电，正值=放电）| 南向 `PcsHandle`→PCS |
+| A2 | k_droop | f64 | [0.0, 30.0] | kW/V | 电压-有功下垂系数，范围由实时控制模块提供 | 南向 `PcsHandle`→PCS |
+
+> 〔注（2026-09-27）：原「核间→实时控制模块」为 PCS 迁出前的表述；PCS 通信与控制已于 2026-09-26 迁入 `mupc-southd::pcs::PcsHandle`（02 号设计 §13 / ADR-014·015·016），双参数经 `PcsHandle::send_dual_param` 下发至 PCS。〕
 
 > **精简说明：** 原 A3(load_shedding)、A4(pv_limit)、A5(confidence) 已从动作空间移除：
 > - **load_shedding（可中断负荷切除）**：属于南向设备直控，由策略引擎的需量控制策略独立执行，不作为 AI 引擎输出维度
@@ -1027,11 +1033,11 @@ pub struct ActionOutput {
 | `ai/reward_value` | RewardCalculator | OnlineUpdater, Web UI | RewardValue JSON | 1Hz |
 | `ai/model_status` | ModelManager | Web UI, 告警模块 | ModelStatus JSON | 1Hz |
 | `ai/mode_switch` | ModeSelector | RewardCalculator, strategy-engine | ModeSwitchEvent JSON | 事件驱动 |
-| `ai/droop_range` | intercore | ActionValidator | {k_min, k_max} JSON | 按需更新 |
+| `ai/droop_range` | PCS（南向，原 intercore） | ActionValidator | {k_min, k_max} JSON | 按需更新 |
 | `ai/current_mode` | ModeSelector | Web UI（心跳查询）| RunningMode JSON | 按需查询 |
 
 **指令分发说明：** ActionOutput 的 2 个控制维度按以下路径分发：
-- `p_ref` + `k_droop` → 通过 intercore（TCP/RJ45）发送到**实时控制模块**，用于下垂控制公式
+- `p_ref` + `k_droop` → 经南向 `PcsHandle::send_dual_param` 下发至 **PCS（实时控制模块）**，用于下垂控制公式（原表述「通过 intercore（TCP/RJ45）发送到实时控制模块」为 PCS 迁出前原文，见文首现状订正①）
 
 **下沉至策略引擎执行的功能：**
 - `load_shedding`（可中断负荷切除）→ 策略引擎的需量控制策略通过南向 RS485/HPLC 发送到负荷控制装置，AI 引擎不再直接输出
@@ -1060,7 +1066,7 @@ pub struct ActionOutput {
 | DUAL-01 | RL 模型输出包含 P_ref 和 k_droop 两个参数 | 单元测试 |
 | DUAL-02 | P_ref 取值范围符合 ActionSpaceConfig 约束 | 单元测试（边界值验证）|
 | DUAL-03 | k_droop 取值范围符合实时控制模块提供的 [k_min, k_max] | 集成测试 |
-| DUAL-04 | 双参数通过 intercore 同时下发（TCP 帧 v2.0）| 集成测试（抓包验证）|
+| DUAL-04 | 双参数经南向 `PcsHandle::send_dual_param` 同时下发（原：intercore TCP 帧 v2.0）| 集成测试（抓包验证）|
 | DUAL-05 | 下垂公式 P = P_ref + k_droop × ΔV 在执行器端正确执行 | 集成测试（模拟 ΔV）|
 | DUAL-06 | k_droop 管理权归 AI 引擎，实时控制模块不得修改 | 代码审查 |
 | DUAL-07 | 通信中断时执行器保持最后有效的 P_ref 和 k_droop | 集成测试 |
@@ -1278,6 +1284,8 @@ Web UI EventSource（自动接收）
 ```
 
 #### 6.10.6 Web API 状态端点
+
+> ⚠️ **本节已作废（2026-09-27）**：`crates/web-api` 已**整 crate 删除**，Web 访问机制取消（08 号 **SUPERSEDED**）。本节及 §6.10.7（Web UI 监控面板）、§6.10.9 相关验收项、§6.10.12 中 `crates/web-api/**` 路径**均无实现载体**；**运行时切换端点不复存在**，人机交互现并入 **12 号本地显示终端**。上述内容**保留为设计记录**，不作现行实现依据。
 
 **新增端点**（`crates/web-api/src/routes/ai/safety_wrapper.rs`）：
 

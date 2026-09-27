@@ -9,6 +9,8 @@
 > - **设计侧**：由 **12-MUPC 本地显示终端设计文档** 承接 —— **出口迁移逐条表见 §7**、**既有资产复用 / 废弃清单见 §8**。
 >
 > 权威来源：`docs/superpowers/plans/modules/12-MUPC-本地显示终端-设计文档.md`
+>
+> ⚠️ **整体时效注（2026-09-27，随 12 号文档订正批次补记）**：**本文所载与「核间链路 / intercore 连接状态 / intercore 通信参数（本地端口 / 对端端口 / 心跳间隔 / 重连间隔）」相关的描述已不适用** —— ① PCS（= 实时控制模块）的通信与控制已于 **2026-09-26 整体迁入南向 `mupc-southd`**（物理介质 **RS485 / Modbus RTU**，02 号设计 **§13 / ADR-014**），`mupc-intercore` 的 TCP 通道**在生产路径已无消费者**（现存真实消费者仅 `sim-bridge`，11 号）；`DeviceSection.intercore` 的取值语义现为「**PCS 通道在线态**」（字段名沿旧）。② `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键已于 **2026-09-27（E-13）**删除（零消费点，屏上可写属谎报）。③ 控制台配置字段表现状 = **7 键 / 可写 5 / 真热生效 1 / 需重启 4**（12 号设计 §4.3.3 与其末注）。此外，本文所载 **`web-api` crate 已整体删除** ⇒ 路由表 / SSE / RBAC（`RequireRole` / `X-Session-Id`）等**均不得据本文实施或验收**。**现行口径一律以 12 号 PRD / 设计文档与 02 号设计 §13 为准**；本文**保留原文仅为历史追溯，不逐条重写**。
 
 **目标 crate：** `web-api`（已移除）
 **关联 crate：** `ai-engine`、`strategy-engine`、`data-processing`
