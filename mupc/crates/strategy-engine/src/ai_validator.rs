@@ -361,10 +361,15 @@ mod tests {
             phase_q_set: None,
         };
         let result = validator.validate_sync(&cmd);
-        // Mock 模型默认 confidence=0.5，小于阈值 0.7，且差异可能大于 10kW
-        // SOC=85% 高 → AI 推荐放电 = 20kW，cmd=10kW，差异=10kW 刚好在边界
-        // 实际应根据具体场景调整
-        assert!(!result.valid || result.valid); // 占位，实际逻辑见上
+        // 实算：SOC=85% ≥0.8 ⇒ MockAiModel 推荐放电 = pv−load = 50−30 = 20kW；cmd=10kW
+        // ⇒ diff = 10.0，判据是 `diff > 10.0`（严格大于）⇒ 恰好不触发 invalid ⇒ valid。
+        // （原为 `assert!(!result.valid || result.valid)` 的零判别力占位断言，同时被 clippy 的
+        // `overly_complex_bool_expr`（deny-by-default）判为 logic bug，一并订正。）
+        assert!(
+            result.valid,
+            "diff=10.0 未越严格阈值 ⇒ 应通过，实得 invalid: {}",
+            result.message
+        );
     }
 
     #[test]
