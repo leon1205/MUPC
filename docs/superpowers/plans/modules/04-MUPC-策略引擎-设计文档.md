@@ -540,7 +540,7 @@ def control(meter, soc, t_now, st, P_st, Q_pcs, dP, Q_active, dP_active, Q_last,
 #### 2.10.2 容量档位配置
 
 **目标**：策略参数不与某台 PCS 容量（如 60kW 双级式）绑定为单一硬编码默认——按**当前 PCS 档位**（60kW / 125kVA 等）在启动时动态派生整套硬件相关参数。换 PCS 规格**只改档位 key 或 YAML 加档，不改代码**。
-**使用形态**：启动时档位选择（部署配置，与 transport 二选一同模式；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`mupc-southd::pcs` clamp ±25、125kVA 点表）仍按 10 核间 §11.9 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
+**使用形态**：启动时档位选择（部署配置，与 `south_pcs` 段同为**启动期**配置；**不支持运行热切换**——策略参数与控制器跨周期状态绑定）。〔订正（2026-09-27）：原文为「与 transport 二选一同模式」——`intercore.transport` 现仅接受 `"tcp"`，其 `modbus_rtu` 档已随 PCS 迁入南向删除（02 设计 §13 / ADR-016）；「档位选择与 PCS 通道参数同属部署期配置」这一**语义**不变。〕**作用域**：策略引擎层（TaiStorageConfig 器件级参数）。PCS 驱动/点表侧（`mupc-southd::pcs` clamp ±25、125kVA 点表）仍按 10 核间 §11.9 以 60kW V1.3 固化，125kVA 型号点表待厂方确认后另行接入驱动。
 **档位放行与驱动能力耦合**：策略档位（i_rated/s_rated/dp_max/q_i_max）与 PCS 驱动侧 clamp/点表**不自动联动**——放行任一无中线非 60kW 档时，须与 `south_pcs` 驱动点表型号**同批变更**并做装配期一致性核对（部署模板注释显式警告；`CoreConfig::validate` 预留装配期校验位）。`has_neutral=true` 校验闸同时充当"驱动/仲裁能力就绪"门：解除需**仲裁恢复中线判据 + 10 核间驱动点表确认**双就绪，防止假参数进闭环。
 
 **参数分层（来源与覆盖规则）**
@@ -659,11 +659,13 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
 - `run_fallback_strategies()` 中追加：调用 `tai_storage.evaluate(&data)`，产出分相指令 → 经南向 `PcsHandle::send_tai_command()` 下发（若未注入 PCS 客户端则跳过并记录警告）。
 #### 2.11.1 SOC 源优先级（BECG 站级 BMS）
 
-02 南向 §10 统一调度接入 BMS 站后，SOC 源优先级：**BMS 站（role=battery）在线 → 其 SOC 优先；掉线回落 intercore `latest_soc`（核间回读）**；可配。AiIntegrator 数据注入（§2.11）在总表模式以核间 SOC 补 battery，本增补将最高优先级让给 BMS 站。生效于实施 S3 后；S3 前维持现状。
+02 南向 §10 统一调度接入 BMS 站后，SOC 源优先级：**BMS 站（role=battery）在线 → 其 SOC 优先；掉线回落 `PcsHandle::latest_soc`**；可配。AiIntegrator 数据注入（§2.11）在总表模式以 PCS SOC 补 battery，本增补将最高优先级让给 BMS 站。生效于实施 S3 后；S3 前维持现状。
+
+> 〔订正（2026-09-27）：原文两处写「回落 intercore `latest_soc`（核间回读）」。PCS 通信与控制已于 2026-09-26 迁入南向（02 设计 §13 / ADR-014），`latest_soc()` 现为 **`mupc-southd::pcs::PcsHandle` 的采集快照**（`southd/src/pcs/collect.rs:72`），**不经核间**。返回值与故障态与迁移前**逐字等价**，唯一差异是时间戳来源由「调用时刻」变为「本拍采集时刻」（02 设计 §13.9）。**代码侧注释（`ai_integration.rs:51/241/251/300/402`）仍沿用「核间」措辞，属未跟改的注释，不影响行为。**〕
 
 **源选择状态机（可编码）**：切离当前源仅由 stale 触发（当前源超期 → 立即用备用源，差值不参与）；回切原源（BMS 恢复）需原源连续 N 拍有效**且**两源差值在滞回带（如 3%）内才回切，防保护降额阈值附近来回抖动；（SOC 88/90/12/10 线性带，§2.6）附近来回切换导致共模 P 抖；两源为同一电池组的不同计源，差异需现场校准（对齐 §2.12 回放 SOC ±3% 用例）。
 
-**落点与回落机制**：两源逐源时间戳在 southd mapper 维护、注入时携带源信息；**回落须修改 `set_latest_data` 的字段级保留语义**（现 `merge_battery_missing` 以 `.or()` 保留旧 SOC，BMS 曾写入则掉线后核间回落被永久压住、5s 整体新鲜度也识别不到 SOC 单源过期）——BMS 源超期即置 SOC=None/过期标记，使核间回落可触发；滞回判定放 AiIntegrator evaluate 侧（BMS 在线时仍周期读核间 SOC 维持两源差值样本）。交叉引用 02 §10.5。
+**落点与回落机制**：两源逐源时间戳在 southd mapper 维护、注入时携带源信息；**回落须修改 `set_latest_data` 的字段级保留语义**（现 `merge_battery_missing` 以 `.or()` 保留旧 SOC，BMS 曾写入则掉线后 PCS 回落被永久压住、5s 整体新鲜度也识别不到 SOC 单源过期）——BMS 源超期即置 SOC=None/过期标记，使 PCS 回落可触发；滞回判定放 AiIntegrator evaluate 侧（BMS 在线时仍周期读 PCS SOC 维持两源差值样本）。交叉引用 02 §10.5。（本节「核间」一律按上一段的〔订正〕理解为 **`PcsHandle` 快照**。）
 
 **phase 真源闸门**：控制数据新鲜度闸门（`last_data_ts`）推进仅由 meter_grid（phase 真源）更新触发（02 §10.5）；phase 逐源过期标记与 SOC 同构（防活性 BMS 掩盖死总表 → 陈旧 phase 驱动）。
 
