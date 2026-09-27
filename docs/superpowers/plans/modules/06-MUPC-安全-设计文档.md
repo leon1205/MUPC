@@ -64,6 +64,8 @@ MUPC 安全模块覆盖三大安全防线，作为整个系统的密码学基础
 实时控制模块
 ```
 
+> ⚠️ **载体订正（2026-09-27）**：上图中 `intercore` 箱体与 `RJ45 TCP（SM4 加密密文）→ 实时控制模块` 一段**为历史架构，已不成立**，保留作设计记录。2026-09-26 PCS（= 实时控制模块）的通信与控制由 `mupc-intercore` **整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014·015·016）：现行控制路径为 `mupc-southd::pcs::PcsHandle`（`send_dual_param` / `send_tai_command` / `stop` / `tick_once` 四个受限入口，`strategy-engine::AiIntegrator::set_pcs_client` 注入），物理介质为 **RS485 / Modbus RTU**，**不是 RJ45 TCP**；`mupc-intercore` 收敛为纯核间 TCP 帧协议，生产路径**无消费者**（现存真实消费者仅 `sim-bridge`）。详见 **§7.4** 作废横幅。
+
 ### 1.3 security crate 模块结构
 
 ```
@@ -102,6 +104,8 @@ mupc/crates/security/                  ← security crate（所有安全功能�
 | mqtt-plugin | tls_sm2（CryptoProvider）、sm4（载荷加密） | API 调用 |
 | web-api | secure_boot::status、alarm、compliance、cert_mgr | REST API |
 | ota-update | sm2（固件验签）、secure_boot::rollback | API 调用 |
+
+> ⚠️ **载体订正（2026-09-27）**：上表 `intercore` 行的集成点「sm2（密钥交换）、sm4（TCP 会话加密）」**已无实现载体** —— 控制下行 2026-09-26 起由南向 `mupc-southd::pcs::PcsHandle`（RS485 / Modbus RTU）承担，核间 TCP 通道生产路径无消费者；且 SM4-GCM / SM2 密钥交换在国密框架态（2026-09-09）下均未实现。该行作**历史集成点**保留。
 
 ---
 
@@ -1286,6 +1290,8 @@ intercore
 实时控制模块 — 解密 TCP 帧 → 执行
 ```
 
+> ⚠️ **载体订正（2026-09-27）**：上图 `strategy-engine` 第 5 步「用 intercore 密钥重新加密 + 签名」及其后的 `intercore` / `实时控制模块` 两段**为历史流程，已不成立**（保留作设计记录）。现行控制下行不经 intercore 密钥与 TCP 会话，而是 `strategy-engine::AiIntegrator` 经南向 `mupc-southd::pcs::PcsHandle`（**RS485 / Modbus RTU**）落寄存器；`mupc-intercore` 生产路径无消费者。核间 TCP 帧承载控制指令在现行架构下**没有实现**。参见 **§7.4** 作废横幅。
+
 ### 7.2 加密上下文
 
 ```rust
@@ -1318,6 +1324,13 @@ pub struct EncryptedControlCommand {
 ```
 
 ### 7.4 TCP 会话级加密（intercore）
+
+> ⚠️ **本节已作废（2026-09-27）**：**控制下行的载体已迁至南向 RS485，TCP 会话级加密对本链路不再适用**。
+>
+> - 2026-09-26，PCS（= 实时控制模块）的通信与控制由 `mupc-intercore` **整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014·015·016）。现行控制路径为 `mupc-southd::pcs::PcsHandle`（`send_dual_param` / `send_tai_command` / `stop` / `tick_once`；`strategy-engine::AiIntegrator::set_pcs_client(Arc<PcsHandle>)` 注入），物理介质 **RS485 / Modbus RTU**（BECG-3568 板载隔离 485 口）—— 这是一条**点对点串行总线，不存在 TCP 会话**，故「TCP 会话级 SM4-GCM 加密」**没有可作用的对象**。
+> - `mupc/crates/intercore/` 现仅剩核间 TCP 帧协议（`protocol.rs` / `tcp_server.rs` / `transport.rs` / `heartbeat.rs`），**生产路径无消费者**（`mupc-core-bin/src/startup.rs` 的 TCP 装配只经 `StartupContext.intercore` 移交，该字段无读取方；`CoreConfig::validate` 只接受 `intercore.transport == "tcp"`）。现存真实消费者仅 `sim-bridge`（11 号仿真测试环境复用帧编解码）。
+> - 叠加**国密框架态**（2026-09-09）：`Sm4GcmSessionEncryptor` 依赖的 SM4-GCM 与 SM2 密钥交换**均为未实现的框架占位**。⇒ 本节连同 §7.1 流转图、§7.7 的 LEA-36/37/40，**当前无实现载体**。
+> - 本节结构定义（`Sm4GcmSessionEncryptor`）**保留为设计记录**，不作现行实现依据；若将来核间 TCP 通道恢复生产用途，须连同容器（`PcsHandle` ↔ intercore 的职责边界）一并重新评审。
 
 ```rust
 /// TCP 会话级 SM4-GCM 加密器
@@ -1424,6 +1437,8 @@ pub struct LogChainEntry {
 | LEA-42 | SM3 哈希链防篡改（每 5 分钟校验） | P1 |
 | LEA-43 | 多维度审计查询和导出 | P1 |
 | LEA-44 | 日志 ≥ 1GB，30 天在线 + 归档 | P1 |
+
+> ⚠️ **载体订正（2026-09-27）**：上表 **LEA-36**（全链路加密的下游 intercore 段）、**LEA-37**（RJ45 TCP 报文 SM4-GCM 加密）、**LEA-40**（全链路时延含到 intercore 段）三行的**载体已不成立** —— 控制下行现为南向 RS485 / Modbus RTU（`mupc-southd::pcs::PcsHandle`），核间 TCP 生产路径无消费者，SM4-GCM 亦未实现 ⇒ 该三条**当前无实现载体**，保留 ID 与原文。LEA-38/39（防重放、异常指令拒绝）为算法与逻辑要求，不随载体变更失效。详见 §7.4。
 
 ---
 
@@ -1823,6 +1838,8 @@ mupc/crates/web-api/
 ├── src/routes/compliance.rs            # [新增] 合规仪表盘接口
 └── src/routes/certificate.rs           # [新增] 证书管理接口
 ```
+
+> ⚠️ **载体订正（2026-09-27）**：上面 `mupc/crates/intercore/` 清单中「集成会话加密 / 加密帧扩展 / `src/secure_session.rs`（[新增] TCP 会话加密层）」**均无实现载体** —— `mupc/crates/intercore/` 现无 `secure_session.rs`（仅剩 `protocol.rs` / `tcp_server.rs` / `transport.rs` / `heartbeat.rs`），且控制下行载体 2026-09-26 起为南向 `mupc-southd::pcs::PcsHandle`（**RS485 / Modbus RTU**）。若确需给控制链路加密，落点应是**南向 PCS 通道**而非核间 TCP。本清单作**历史文件规划**保留，详见 §7.4。
 
 ### 10.4 新增配置文件
 
