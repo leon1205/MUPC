@@ -129,8 +129,8 @@ mod tests {
     /// E-01 判别力测试：**用 intercore 的真实编码器产帧 → sim-bridge 必须能解析**。
     ///
     /// 改坏方式（必须变红）：把 `ACTION_FRAME_LEN` 改回 26、或把 `parse_frame` 换回
-    /// sim-bridge 私有的 26 字节 [`crc16_modbus`](自算) 版本 ⇒ 64 B 帧在偏移 24..26
-    /// 读到的是 padding 而非 CRC ⇒ `CrcMismatch`。
+    /// sim-bridge 私有的 26 字节自算 CRC 版本（该版本已随 E-01 删除）⇒ 64 B 帧在偏移
+    /// 24..26 读到的是 padding 而非 CRC ⇒ `CrcMismatch`。
     #[test]
     fn test_intercore_encoded_action_frame_is_parsed() {
         let encoded = ActionPayload::new(-12.5, 3.25).to_frame(7).unwrap();
