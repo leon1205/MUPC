@@ -94,8 +94,10 @@ impl EcdhKeyPair {
 
     /// 从对方公钥派生共享密钥
     ///
-    /// ⚠️ 占位实现 - 非加密安全：当前使用 XOR 混淆替代真实 ECDH 计算。
-    /// Phase 2+ 必须替换为 `p256::ecdh::diffie_hellman()` 实际调用。
+    /// 真实实现：`p256::ecdh::diffie_hellman()` + HKDF-SHA256（非占位）。
+    /// ⚠️ 与设计口径不一致，见 `docs/technical-debt.md` **U-100**：设计 §5.1/§5.2 写
+    /// X25519 / 公钥 32 B / `info = mupc-wireless-aes-gcm`；本实现是
+    /// P-256 / 65 B / `info = mupc-wireless-aes-key`。三处均待裁定统一。
     ///
     /// 使用己方私钥与对方公钥进行 ECDH 计算，
     /// 得到双方一致的共享密钥。
@@ -127,10 +129,9 @@ impl EcdhKeyPair {
         Ok(shared.raw_secret_bytes().to_vec())
     }
 
-    /// 从私钥计算公钥（P-256 未压缩格式）
+    /// 从私钥计算公钥（P-256 未压缩格式，65 字节）
     ///
-    /// ⚠️ 占位实现 - 非加密安全：当前使用简单的线性映射替代真实椭圆曲线点乘。
-    /// Phase 2+ 必须替换为实际 `p256::SecretKey` + `p256::PublicKey` 计算。
+    /// 真实实现：`p256::SecretKey::public_key()`，非占位。
     fn derive_public_key_from_private(private_key: &[u8]) -> Result<Vec<u8>, WirelessError> {
         let secret = SecretKey::from_slice(private_key)
             .map_err(|e| WirelessError::EncryptionError(format!("私钥无效: {}", e)))?;

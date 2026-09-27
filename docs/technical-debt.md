@@ -191,7 +191,7 @@
 | F-04 | 02 南向通信 | `DeviceType` 枚举缺 `Hplc` 变体 | 代码：新增 Hplc |
 | F-05 | 03 数据处理 | `FaultRecorder` trait 缺 `update_trigger_config()`/`get_trigger_config()` | 代码：新增默认实现 |
 | F-06 | 06 安全 | 文档声称 SmCryptoProvider/CertManager/安全启动已实现，实际为存根 | 文档：添加 Phase 2+ 状态说明 |
-| F-07 | 09 运维通信 | 文档描述 WiFi/NearLink/BLE/ECDH 为已实现，实际为 NoOp 占位 | 文档：添加 Phase 2+ 状态说明 |
+| F-07 | 09 运维通信 | 文档描述 WiFi/NearLink/BLE/ECDH 为已实现，实际为 NoOp 占位 | ✅ **已修复（2026-09-27 补做）** — 原标"已修复"但两份文档查无落点（台账失真）。现已在 `09-…-PRD.md` 与 `09-…-设计文档.md` 文首各补**现状横幅**（Phase 1 骨架 / Phase 2+ 待硬件；NoOp 驱动如实标注；ECDH 已非占位） |
 | F-08 | 07 OTA | 文档描述 A/B分区切换/cgroup v2/硬件看门狗/OOM 为已实现，实际未实现 | 文档：添加 Phase 2+ 状态说明 |
 | F-09 | 03 存储 | 文档描述 alarm_log/event_log/TELEMETRY_HISTORY 分区表存在，实际不存在 | 文档：记录实际 schema |
 | F-10 | 08 Web | SSE 缺 `RewardsUpdate`/`FinetuningUpdate` 事件类型 | 代码：添加 TODO |
@@ -206,10 +206,10 @@
 | U-03 | 06 安全 | **P0** | SM2 签名/SM4 GCM/SM3 HKDF/SM2 ECDH 实际使用 ring 模拟，非真国密 | 需 gmsm crate 升级至 0.14（当前 0.1.0 缺少签名/GCM/HKDF/ECDH API） |
 | U-04 | 06 安全 | **P0** | `SmCryptoProvider` 未实现 `rustls::CryptoProvider` trait，无法用于 TLS | 需完成 SM2/SM3/SM4 的 rustls 密码学套件适配 |
 | U-05 | 06 安全 | **P0** | 安全启动全部为存根 — `verify_boot_chain()` 直接返回 `Verified` | 需 RK3588 硬件信任根（OTP/eFuse）驱动支持 |
-| U-06 | 09 运维通信 | **P0** | WiFi/NearLink/BLE 全部 NoOp 驱动，ECDH 为 XOR 占位 | 需 Hi2821 硬件 + hostapd/wpa_supplicant 集成 |
+| U-06 | 09 运维通信 | **P0** | WiFi/NearLink/BLE 全部 NoOp 驱动（~~ECDH 为 XOR 占位~~ — **该部分已不适用，见右**） | 需 Hi2821 硬件 + hostapd/wpa_supplicant 集成。⚠️ **2026-09-27 复核**：**ECDH 部分已闭合** —— `wireless/src/ecdh.rs:108-139` 是 `p256::ecdh::diffie_hellman()` + HKDF-SHA256 **真实现**（原"XOR 占位"描述系台账过时，且该文件 `:97`/`:132` 的文档注释与代码相反，**已同步订正**）。**但新增 1 条待裁定**：设计 §5.1/§5.2 写 **X25519 / 公钥 32 B / info=`mupc-wireless-aes-gcm`**，代码用 **P-256 / 65 B / info=`mupc-wireless-aes-key`** —— 见 **U-100** |
 | U-07 | 07 OTA | **P1** | 固件 OTA — A/B 分区 `switch_to_standby()` 仅打印日志，SM2 验签返回 `SignatureInvalid` | 需 bootloader 环境变量写入权限 + SM2 验签就绪 |
 | U-08 | 07 监控 | **P1** | cgroup v2 管理、网络 I/O 监控、硬件看门狗、OOM score_adj 均未实现 | 需内核配置验证 + 硬件看门狗驱动 |
-| U-09 | 03 存储 | **P1** | SQLite schema 与 PRD 不符 — 缺 alarm_log/event_log/device_nameplate/maintenance_record 表，遥测无按月分区 | ✅ 已修复 — 新增 5 张表（含索引）+ 遥测按月分区函数 |
+| U-09 | 03 存储 | **P1** | SQLite schema 与 PRD 不符 — 缺 alarm_log/event_log/device_nameplate/maintenance_record 表，遥测无按月分区 | ❌ **未修复（2026-09-27 复核；原标"✅ 已修复"系台账失真）** — `storage/src/services.rs:751-823` 的 `run_migrations` **仅建 6 表**（telemetry / faults / decisions / events / assets / action_space_config）；全仓 `grep alarm_log\|device_nameplate\|maintenance_record\|battery_history` **零命中**（无表、无仓储、无接线）；`AssetRepository` 零生产消费者。03 PRD §4.3（告警日志 HST-ALM）/§5.2/§5.4/§5.5（铭牌/维护/台账上送）亦**无实现载体** ⇒ **需重立**，并明确这些需求在窄表形态（`telemetry` 已承载电池/外设点）下的归属 |
 | U-10 | 03 数据 | **P1** | `TriggerConfig` 仅单个 `enabled: bool`，设计文档要求 7 个独立启用标志 | ✅ 已修复 — 新增 `TriggerEnableMask`（7 位独立使能） |
 | U-11 | 06 安全 | **P1** | `CertManager` API 与设计文档对齐 — 缺 import_cert/import_crl/reload/list_certs | ✅ 已修复 — 新增 4 个方法 + CertType 枚举 |
 | U-12 | 08 Web | **P1** | SSE 基于 query 的过滤 (`types=`) 未实现 | ✅ 已修复 — sse_handler 支持 ?types= 参数过滤 |
@@ -268,7 +268,7 @@
 
 | # | 类别 | 严重程度 | 问题 | 依据/处置 |
 |---|------|----------|------|-----------|
-| U-26 | 数据接线 | **P1** | `ElectricalData.phase` 无生产代码填充——startup.rs/collector.rs/reporter.rs 均设 `phase: None`，仅测试与 `tai_replay` bin 填充分相数据 → 运行时 `data_to_meter` 恒全零，三目标（降返送/降不平衡/提 PF）现网零达成 | 需接通台区总表分相数据源（设计 04 文档 §15.7 待接依赖）；安全（零设定不误动作），但投运必办 |
+| U-26 | 数据接线 | ~~**P1**~~ **已闭合** | **（原描述，已过期）** `ElectricalData.phase` 无生产代码填充——startup.rs/collector.rs/reporter.rs 均设 `phase: None`，仅测试与 `tai_replay` bin 填充分相数据 → 运行时 `data_to_meter` 恒全零 | ✅ **已闭合（2026-09-27 复核）** — 分相数据源已由 **`grid_meter` 站**接通：`mupc-southd/src/mapper.rs:150` 构造 `PhaseElectricalData`（`decode_phase_block`/`phase_block` 逐寄存器对解码）；生产 YAML 配 `role: meter_grid` 且 `interval_ms: 1000 < 5000`（`deploy/config/mupc_core_config.production.yaml:465`，该文件 `:218/:460` 明注「总表 phase 真源唯一走 grid_meter 站，master_meter 段已删除（S3b-1c）」）→ `build_grid_package` → `on_grid_package` → `set_latest_data`。**原描述与代码不符，系台账未销账** |
 | U-27 | 现场验证 | **P1** | Q 通道方向符号 `s_q_sign=1.0` 未经验证——若 PCS 无功符号约定相反，Q 积分器正反馈发散至 ±q_i_max 并恶化 PF | 设计 §11 第 6 条「现场核相」为强制前置（小幅 Q 阶跃 + 分相注流验证符号），投运必办 |
 | U-28 | 协议语义 | **P2** | AI 恢复后无分相设定清零——兜底期间下发的 V3 分相 P/Q 在智能路径只发 V2 双参数、从不发 V3 零设定复位，若实时控制模块按帧序后者覆盖前者则无碍，否则残留分相设定与 AI `p_ref/k_droop` 并存冲突 | 需与实时控制模块确认 V3/V2 帧优先级语义；必要时 AI 恢复时显式下发 `[0,0,0]` 清零 |
 
@@ -479,6 +479,19 @@
 
 ---
 
+### 6.16 全项目三方审查带出的登记（2026-09-27）
+
+> 来源：`docs/superpowers/reports/全项目需求-设计-实现三方审查报告-2026-09-27.md`。本节只登记**该报告 §五 中未在别处登记**的项；报告内的其余 P1/P2/P3 清单**尚未逐条并入台账**（待项目经理决定是否全量登记）。
+
+| # | 模块 | 严重程度 | 问题 | 依据/处置 |
+|---|------|----------|------|----------|
+| U-100 | 09 运维通信 | **P1** | **密钥协商口径设计 ↔ 代码不一致**：设计 §5.1/§5.2（`09-…-设计文档.md:429/435/437`）写 **KEM = X25519**、**公钥 32 B**、HKDF `info = mupc-wireless-aes-gcm` / `salt = channel_id‖session_id`；代码 `wireless/src/ecdh.rs:21-29` 用 **P-256**、**公钥 65 B**、`Hkdf::new(None, …)` + `info = mupc-wireless-aes-key` ⇒ **三处均不同**。⚠️ 二者都是合法选择，**不存在"哪个对"的客观答案** | **待产品/设计裁定**：① 统一到 X25519（改代码，与设计一致）或 ② 统一到 P-256（改设计，与代码一致，无需改代码）。裁定后同批订正另一方 |
+| U-101 | 03 存储 | **P1** | **磁盘水位分级未联动落库**：03 PRD §8.1 要求 ≥85% WARN / ≥90% minor / ≥95% critical + 停时序写入 / ≥98% 停全部写入；`storage` 与 `mupc-core-bin` **无任何磁盘水位判据**（`system-monitor/src/analyzers.rs:182-191` 有分析器，但其消费方已登记为不可采信 U-29） | **待排期**：属 03 号未实现需求（非文档问题）。建议与 U-29 同批收口（先让 `system-monitor` 的采集值可信） |
+
+> ⚠️ **统计口径**：本节新增 **U-100 ~ U-101 共 2 条**（P1 × 2，P0 级 0 条）。**不并入 §6.15 的 U-91…U-99 计数**（那批属 02 号文档重构，来源不同）。
+
+---
+
 ## 7. 技术债统计
 
 | 类别 | 数量 | 已修复 | 待修复 | 状态 |
@@ -495,7 +508,7 @@
 | v3.0 新增 — P1 存根/TODO | 2 | 2 | 0 | ✅ 全部修复 |
 | v3.0 新增 — P2 存根/TODO | 5 | 4 | 1 | 🔵 1 项被依赖阻塞 |
 | 流程改进教训 (第二轮 2026-08-14) | 3 | 0 | 3 | 🟡 待落地 |
-| 台区储能投运前置项 (2026-08-31) | 3 | 0 | 3 | 🔵 投运前必办（U-26/U-27/U-28） |
+| 台区储能投运前置项 (2026-08-31) | 3 | 1 | 2 | 🔵 **U-26 已于 2026-09-27 复核闭合**（`grid_meter` 站接通分相真源，见 §6.1 该行）；余 2 项投运前必办（U-27 现场核相 / U-28 V3-V2 帧优先级） |
 | 跨模块缺陷 (2026-09-16) | 1 | 0 | 1 | 🟡 待排期（U-29） |
 | G-2 整改登记 (2026-09-16) | 6 | 0 | 6 | 🟡 待排期/PM 裁定（U-30 ~ U-35） |
 | 单元 K 整改登记 (2026-09-18) | 4 | 1 | 3 | ✅ 1 项已订正（U-37）/ 🟡 3 项待排期/后续单元（U-36、U-38 残余、U-39）——计数口径：按条目**本轮是否闭环**计，已就地订正的计入「已修复」 |
