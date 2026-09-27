@@ -669,6 +669,20 @@ impl CoreConfig {
         if self.intercore.port == 0 {
             return Err("intercore.port 不能为 0".to_string());
         }
+        // D-6：`ai_engine.local_priority=false` 在 AI 未接线时 = **静默零控制输出**。
+        // 链条：AI 引擎停用（startup 不 load_models，model_manager 恒 None）⇒
+        // `dispatch_ai_decision` 的 AI 分支 `ok_or(AiEngineError::ModelNotLoaded)?` 恒 Err
+        // ⇒ 该 Err 在决策循环里只被 `tracing::debug!` 记录，本地兜底
+        // （`run_fallback_strategies`）**不执行** ⇒ 既不双参下发也不分相下发，对下零控制。
+        // 「AI 是否已接线」没有可靠的**配置期**判据（模型加载在运行期，且需观测空间重构），
+        // 故此处拒绝一切 `local_priority=false`，并把恢复条件写进错误文案。
+        if !self.ai_engine.local_priority {
+            return Err("ai_engine.local_priority=false 被拒绝：AI 引擎当前停用（启动不加载\
+                 模型、观测空间未接线），该取值会让 dispatch_ai_decision 恒返回 \
+                 ModelNotLoaded，而本地兜底分支不执行 ⇒ 静默零控制输出。\
+                 恢复 AI 控制需先重新接线模型加载（load_models + 观测注入）再放开本校验"
+                .to_string());
+        }
         // TODO(v2.24 M-1)：v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
         // q_i_max）与 PCS 驱动点表型号不自动联动——放行任一非
         // 60kW 无中线档时须与驱动点表同批变更并在此核对（当前 60kW 档与
@@ -1478,7 +1492,8 @@ mqtt_bridge:
                 config_file: PathBuf::from("/tmp/config.yaml"),
                 enable_npu: true,
                 inference_timeout_ms: 500,
-                local_priority: false,
+                // D-6 后 `false` 一律被 validate 拒绝 ⇒ 合法基线 fixture 取部署默认 true
+                local_priority: true,
             },
             plugins: PluginsConfig {
                 search_paths: vec![PathBuf::from("/tmp/plugins")],
@@ -1494,6 +1509,46 @@ mqtt_bridge:
             storage: StorageSectionConfig::default(),
         };
         assert!(config.validate().is_ok());
+    }
+
+    /// **D-6 判别力锚点**：`ai_engine.local_priority=false` 必须被 `validate` **拒绝**，且文案
+    /// 点名字段与后果。AI 停用期该取值 ⇒ AI 分支恒 `ModelNotLoaded` + 本地兜底不执行 =
+    /// 静默零控制输出（不是"少一个功能"，而是装置彻底不控制）。
+    ///
+    /// 改坏实现会怎样红：删掉该校验（或降级为 warn）⇒ `expect_err` 直接红；
+    /// 只写"不允许"而不点明原因 ⇒ 文案断言红。
+    #[test]
+    fn test_core_config_validate_rejects_local_priority_false() {
+        // 各段子字段均有 serde 默认 ⇒ 只需给必填段头 + 要测的字段
+        let yaml = r#"
+version: "1.0"
+system: {}
+intercore: {}
+ai_engine: { local_priority: false }
+plugins: {}
+"#;
+        let cfg: CoreConfig = serde_yaml::from_str(yaml).expect("fixture 须可解析");
+        assert!(
+            !cfg.ai_engine.local_priority,
+            "前提：fixture 确实解析出 local_priority=false（否则本条空转）"
+        );
+        let err = cfg
+            .validate()
+            .expect_err("local_priority=false 必须被拒（否则静默零控制输出）");
+        assert!(err.contains("local_priority"), "文案须点名字段：{err}");
+        assert!(
+            err.contains("静默零控制输出"),
+            "文案须写明后果（供运维定位）：{err}"
+        );
+        // 对照：同一 fixture 仅改 true ⇒ 通过（证明被拒的正是该字段，而非其他配置项）
+        let ok: CoreConfig =
+            serde_yaml::from_str(&yaml.replace("local_priority: false", "local_priority: true"))
+                .unwrap();
+        assert!(
+            ok.validate().is_ok(),
+            "其余配置项合法时 true 必须放行：{:?}",
+            ok.validate()
+        );
     }
 
     #[test]
@@ -1520,7 +1575,7 @@ mqtt_bridge:
                 config_file: PathBuf::from("/tmp"),
                 enable_npu: false,
                 inference_timeout_ms: 500,
-                local_priority: false,
+                local_priority: true,
             },
             plugins: PluginsConfig {
                 search_paths: vec![],

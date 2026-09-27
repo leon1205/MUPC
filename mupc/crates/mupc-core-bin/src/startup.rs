@@ -1450,7 +1450,10 @@ pub async fn initialize_all(
         );
     }
     let ai_engine = Arc::new(ai_engine);
-    coord.register_service("ai_engine", ServiceStatus::Running);
+    // D-16：**注册 `Stopped`**，与 `ota_update`/`security`/`wireless` 同口径——AI 引擎已停用
+    // （模型不加载、无服务面在跑），注册 `Running` 即"谎报已运行"（CFG-4 禁止形态）。
+    // `ModelManager` 实例仍随 StartupContext 保留：状态查询如实返回 unloaded（不谎报 ready）。
+    coord.register_service("ai_engine", ServiceStatus::Stopped);
 
     // ── 8. 策略引擎 ──
     tracing::info!("[08/14] 初始化策略引擎...");
@@ -2513,6 +2516,24 @@ plugins: {}
         assert!(
             production.contains("mupc_ota_update::OtaConfig::default()"),
             "OTA 配置构造在，能力未删"
+        );
+    }
+
+    /// **D-16 网：`ai_engine` 服务注册状态必须是 `Stopped`。**
+    ///
+    /// 依据：AI 引擎已停用（本步骤上下文明确"不加载模型，ModelStatus 保持 Unloaded"），
+    /// 与 `ota_update`/`security`/`wireless` 同一形态 ⇒ 注册 `Running` 是**谎报服务面在跑**
+    /// （CFG-4 禁止"注册为 Running 但无行为"）。
+    ///
+    /// 改什么会让本条变红：把注册状态改回 `Running`，或删掉 `ai_engine` 注册。
+    /// ⚠️ 断言必须**钉住状态本身**：只 `contains("register_service(\"ai_engine\"")` 时，
+    /// 把 `Stopped` 改回 `Running` 仍全绿（对"状态"零判别力）。
+    #[test]
+    fn ai_engine_registered_stopped() {
+        let production = production_src();
+        assert!(
+            production.contains("register_service(\"ai_engine\", ServiceStatus::Stopped)"),
+            "ai_engine 必须以 Stopped 注册（AI 停用期无服务面在跑；改回 Running = 谎报）"
         );
     }
 
