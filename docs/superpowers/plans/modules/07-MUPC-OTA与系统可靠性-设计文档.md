@@ -926,6 +926,27 @@ pub enum FwOtaState {
 
 ## 4. 系统监控设计
 
+> **⚠️ 部署形态订正（2026-09-27）—— 本章及 §6 的「进程」口径与实现不符，务必先读本块**
+>
+> 本章与 §6 多处按「一个模块 = 一个独立进程」表述（关键进程列表、按角色 RSS、`oom_score_adj`、
+> 重启优先级、`restart_priority` 配置等）。**实际部署只有两个生产进程**：
+>
+> | 生产进程 | 载体 | systemd 单元 |
+> |----------|------|--------------|
+> | `mupcd` | `mupc-core-bin`；**`gateway` / `intercore` / `strategy-engine` / `data-processing` / `ai-engine` / `mupc-storage` / `system-monitor` / `ota-update` / `mupc-southd` / `mupc-io` / `mupc-wireless` 全部是它内部的库**，不是独立进程 | `deploy/systemd/mupcd.service` |
+> | `mupc-local-display` | `local-display`（12 号渲染端） | `deploy/systemd/mupc-display.service` |
+>
+> 另有**非生产** bin：`pcs_slave`（feature `pcs-slave-bin` 门控，**默认不构建**）、`mupc-sim-bridge`（11 号仿真/HIL 工具）。
+> `rs485-plugin` / `hplc-plugin` 以 **cdylib 由 `plugin-loader` 运行期加载**，也不是进程。
+>
+> ⇒ 因此：
+> 1. **「关键进程列表」中的 `intercore` 不存在对应进程** —— `mupc-intercore` 是 `mupcd` 内的库（其 PCS 面已于 2026-09-26 迁出，见 02 号设计 §13）。
+> 2. 列表中的 **`web-api` 已整删**（08 号 SUPERSEDED）。
+> 3. **按角色 RSS / 按进程 `oom_score_adj` / 按进程重启优先级 / `restart_priority` 配置**：在当前部署形态下**无对应对象**；这些是**多进程假设下的预留设计**。
+> 4. `system-monitor` 的**进程守护与自愈动作当前未实现** —— 自愈动作**如实返回 `success:false` 与「【未实现】」标记**（`system-monitor/src/self_healing.rs`，2026-09-27 修复前为谎报 `success:true`）。相关缺陷见技术债台账。
+>
+> 下文各处的「进程」**保留原文以述原设计**，阅读时按上表换算为「`mupcd` 内的模块」。
+
 ### 4.1 整体架构
 
 system-monitor crate 采用**采集器-分析器-自愈**三层架构：

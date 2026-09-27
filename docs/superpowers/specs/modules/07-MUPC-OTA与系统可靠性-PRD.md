@@ -628,9 +628,27 @@ OTA 服务器向设备下发升级指令，设备执行过程中持续上报状�
 
 ### 4.2 进程健康监控
 
+> **⚠️ 时效订正（2026-09-27）—— 本节的「关键进程」前提与实现不符，需求待产品裁定**
+>
+> 本节（及 §5.2 / §6.2 / §6.3 的相关表述）建立在**「一个模块 = 一个独立进程」**假设上。实际部署
+> **只有两个生产进程**：`mupcd`（`deploy/systemd/mupcd.service`）与 `mupc-local-display`
+> （`mupc-display.service`）。`gateway` / `intercore` / `strategy-engine` / `data-processing` /
+> `ai-engine` / `storage` / `system-monitor` / `ota-update` / `mupc-southd` 等**全部是 `mupcd`
+> 内部的库**；`rs485-plugin` / `hplc-plugin` 是运行期加载的 cdylib；`mqtt-plugin` 同理。
+>
+> ⇒ 具体失配：① **`intercore` 无对应进程**（其 PCS 面已于 2026-09-26 迁出，见 02 号设计 §13）；
+> ② **`web-api` 已整删**（08 号 SUPERSEDED）；③ 其余条目**不是进程**。
+>
+> **本条不改动需求原文**（需求条款的增删须走需求流程）。**待产品裁定**该项是：改为**进程级**
+> （只监控 `mupcd` / `mupc-local-display`）、还是改为**模块级存活**（`mupcd` 内部心跳/健康上报），
+> 抑或保留多进程形态作为将来拆分的目标态。已登记技术债台账。
+>
+> 另：`system-monitor` 的**进程守护与自愈动作当前未实现**（自愈动作如实返回 `success:false` +
+> 「【未实现】」，`system-monitor/src/self_healing.rs`）。
+
 #### 4.2.1 进程存活检测
 
-系统守护进程每 **15 秒**检查一组关键进程的运行状态。关键进程列表：gateway、intercore、strategy-engine、data-processing、web-api、ai-engine（如启用）、rs485-plugin（如启用）、mqtt-plugin（如启用）。
+系统守护进程每 **15 秒**检查一组关键进程的运行状态。关键进程列表：gateway、intercore、strategy-engine、data-processing、web-api、ai-engine（如启用）、rs485-plugin（如启用）、mqtt-plugin（如启用）。（**原文保留；列表与部署形态的失配见上方时效订正**）
 
 **验收标准**：
 - 每个关键进程存活检查时间 <= 200ms
