@@ -292,6 +292,15 @@ pub enum Rs485Error {
 
 ### 2.8 南向控制指令分发（SouthCommandSender）
 
+> 〔注（2026-09-27）：**本节两类指令已随 2026-08-31 策略精简撤回** —— `pv_limit` /
+> `load_shedding` 随三策略一并移除（动作空间精简 5→2 维，见 CLAUDE.md「v2.15」与
+> `docs/technical-debt.md` v3.5），`Rs485SouthSender`（`strategy-engine/src/south_command_sender.rs`）
+> 因此在**生产路径上零构造点**（仅测试构造）。本节保留为**历史设计原文**，不代表当前
+> 生产接线；南向写能力的现行入口只有 `mupc-southd` 的 `PcsHandle` 四个受限入口。〕
+>
+> 另注（2026-09-27，B-4）：`Rs485Device::set_dir` 的**生产可达**调用点现为 `send_recv`
+> （站级读/写路径）与 `transaction*`；`de_gpio`/`re_gpio` 缺省留空 = 不驱动方向脚。
+
 **来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
 
 **设计目标：**
