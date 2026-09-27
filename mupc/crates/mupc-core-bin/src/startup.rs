@@ -2248,20 +2248,31 @@ pub async fn initialize_all(
             match collector.collect().await {
                 Ok(snapshot) => {
                     tracing::debug!(
-                        "系统指标: CPU={:.1}% MEM={:.1}% DISK={:.1}% TEMP={:.1}°C",
+                        "系统指标: CPU={:.1}% MEM={:.1}% DISK={} TEMP={:.1}°C",
                         snapshot.cpu.usage_percent,
                         snapshot.memory.usage_percent,
-                        snapshot.disk.usage_percent,
+                        // 磁盘不可用（采集失败）时**显式**打印 n/a —— 绝不用 0/50% 冒充
+                        match &snapshot.disk {
+                            Some(d) => format!("{:.1}%", d.usage_percent),
+                            None => "n/a".to_string(),
+                        },
                         snapshot.temperature.cpu_temp_c,
                     );
                     if let Err(e) = metrics_bg.store(&snapshot).await {
                         tracing::warn!("保存系统指标失败: {}", e);
                     }
-                    // 自愈：分析指标 + 执行自愈动作
+                    // 自愈：分析指标 + 登记自愈动作
                     if let Ok(analysis) = threshold_analyzer.analyze(&snapshot) {
                         if let Ok(Some(healing)) = healing_engine.lock().await.auto_heal(&analysis)
                         {
-                            tracing::info!("自愈动作已执行: {:?}", healing.action);
+                            // ⚠️ 不得写"已执行"：自愈动作当前**全部未实现**，`success` 恒 false
+                            //（见 `mupc_system_monitor::SelfHealingEngine::execute`）。
+                            tracing::warn!(
+                                action = ?healing.action,
+                                success = healing.success,
+                                message = %healing.message,
+                                "自愈动作已登记（未实现，未执行）"
+                            );
                         }
                     }
                 }

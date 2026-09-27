@@ -13,7 +13,13 @@ pub struct SystemSnapshot {
     pub timestamp: DateTime<Utc>,
     pub cpu: CpuMetrics,
     pub memory: MemoryMetrics,
-    pub disk: DiskMetrics,
+    /// 磁盘指标：`None` = **不可用**（采集失败）。
+    ///
+    /// ⚠️ 是 `Option` 而不是"填个默认值"：旧实现在 `df` 失败/解析失败时回退成
+    /// `32768 MB / 16384 MB / 50%` 这类**硬编码数字**，屏上与告警分析会把它们当真实用量
+    /// （技术债 U-29 只覆盖了"采集值不可采信"的一般面，**未**覆盖这几处磁盘假值回退）。
+    /// 消费侧（`analyzers.rs` / `startup.rs` 日志）遇到 `None` 必须**不展示 / 不判定**。
+    pub disk: Option<DiskMetrics>,
     pub temperature: TemperatureMetrics,
     pub processes: Vec<ProcessInfo>,
 }
@@ -213,67 +219,96 @@ fn read_cpu_temp() -> Option<f32> {
         .map(|v| v / 1000.0)
 }
 
-fn read_disk_metrics() -> Result<DiskMetrics, MonitorError> {
+/// 采集磁盘指标（Linux：根分区）。
+///
+/// 返回 `Ok(None)` = **不可用**（见 [`SystemSnapshot::disk`]）。
+///
+/// TODO(D-15b)：`df` 子进程应改为直读 `statvfs(3)`（免 fork、免解析本地化输出）。本轮**未做**：
+/// 那需要 `libc`/`nix` 依赖或 `unsafe` FFI，而本仓库的变更自查清单明写"无新增 `unsafe` 块"
+/// ⇒ 记 TODO 并在报告中说明边界（本轮已消除的是"失败返回假值"这一更危险的问题）。
+fn read_disk_metrics() -> Result<Option<DiskMetrics>, MonitorError> {
     #[cfg(target_os = "linux")]
     {
-        // 通过 df 命令获取根分区磁盘使用情况
-        if let Ok(output) = std::process::Command::new("df")
-            .arg("-BM")
-            .arg("/")
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(line) = stdout.lines().nth(1) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 5 {
-                        let total = parts[1]
-                            .trim_end_matches('M')
-                            .parse::<u64>()
-                            .unwrap_or(32768);
-                        let used = parts[2].trim_end_matches('M').parse::<u64>().unwrap_or(0);
-                        let available = parts[3]
-                            .trim_end_matches('M')
-                            .parse::<u64>()
-                            .unwrap_or(total);
-                        let usage_pct = parts[4]
-                            .trim_end_matches('%')
-                            .parse::<f32>()
-                            .unwrap_or(50.0);
-                        return Ok(DiskMetrics {
-                            total_mb: total,
-                            used_mb: used,
-                            available_mb: available,
-                            usage_percent: usage_pct,
-                            read_iops: 0,
-                            write_iops: 0,
-                        });
-                    }
-                }
-            }
-        }
-        // fallback
-        Ok(DiskMetrics {
-            total_mb: 32768,
-            used_mb: 16384,
-            available_mb: 16384,
-            usage_percent: 50.0,
-            read_iops: 0,
-            write_iops: 0,
-        })
+        read_disk_metrics_at("/")
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(DiskMetrics {
+        // 非 Linux 是**开发平台**：保留模拟值（**不是**失败兜底 —— Linux 路径失败返回 None）。
+        Ok(Some(DiskMetrics {
             total_mb: 65536,
             used_mb: 32768,
             available_mb: 32768,
             usage_percent: 50.0,
             read_iops: 1200,
             write_iops: 800,
-        })
+        }))
     }
+}
+
+/// 采集指定挂载点的磁盘指标；**采不到就 `Ok(None)`，绝不返回假值**。
+///
+/// `mount_point` 是**失败注入点**（生产传 `/`）：传一个不存在的路径 ⇒ `df` 非零退出 ⇒
+/// `Ok(None)`，用例 `disk_collection_failure_is_unavailable_not_a_fake_number` 据此钉住语义。
+fn read_disk_metrics_at(mount_point: &str) -> Result<Option<DiskMetrics>, MonitorError> {
+    let output = std::process::Command::new("df")
+        .arg("-BM")
+        .arg(mount_point)
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::warn!(
+                mount_point,
+                status = ?o.status,
+                "df 非零退出 ⇒ 磁盘指标不可用（不回退假值）"
+            );
+            return Ok(None);
+        }
+        Err(e) => {
+            tracing::warn!(mount_point, error = %e, "df 无法执行 ⇒ 磁盘指标不可用（不回退假值）");
+            return Ok(None);
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match parse_df_output(&stdout) {
+        Some(metrics) => Ok(Some(metrics)),
+        None => {
+            tracing::warn!(
+                mount_point,
+                "df 输出无法解析 ⇒ 磁盘指标不可用（不回退假值）"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// `df -BM` 输出 ⇒ [`DiskMetrics`]；**任何字段解析失败即 `None`**（不逐字段填默认值）。
+///
+/// 抽成纯函数 ⇒ 可直接用"合法行 / 畸形行"钉住判别力（不必依赖本机真有 `df`）。
+/// `df` 的表头行（`Filesystem 1M-blocks Used Available Use% Mounted on`）会被跳过。
+fn parse_df_output(stdout: &str) -> Option<DiskMetrics> {
+    let line = stdout.lines().skip(1).find(|l| !l.trim().is_empty())?;
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 5 {
+        return None;
+    }
+
+    let total = parts[1].trim_end_matches('M').parse::<u64>().ok()?;
+    let used = parts[2].trim_end_matches('M').parse::<u64>().ok()?;
+    let available = parts[3].trim_end_matches('M').parse::<u64>().ok()?;
+    let usage_pct = parts[4].trim_end_matches('%').parse::<f32>().ok()?;
+
+    Some(DiskMetrics {
+        total_mb: total,
+        used_mb: used,
+        available_mb: available,
+        usage_percent: usage_pct,
+        read_iops: 0,
+        write_iops: 0,
+    })
 }
 
 fn read_temperature_metrics() -> Result<TemperatureMetrics, MonitorError> {
@@ -327,14 +362,8 @@ impl MetricCollector for CpuCollector {
                 swap_used_mb: 0,
                 usage_percent: 0.0,
             },
-            disk: DiskMetrics {
-                total_mb: 0,
-                used_mb: 0,
-                available_mb: 0,
-                usage_percent: 0.0,
-                read_iops: 0,
-                write_iops: 0,
-            },
+            // 单指标采集器不采集磁盘 ⇒ `None`（**不是** 0，0 会被读成"磁盘用量 0%"）
+            disk: None,
             temperature: TemperatureMetrics {
                 cpu_temp_c: 0.0,
                 npu_temp_c: None,
@@ -376,14 +405,8 @@ impl MetricCollector for MemoryCollector {
                 temperature_c: None,
             },
             memory: read_memory_metrics()?,
-            disk: DiskMetrics {
-                total_mb: 0,
-                used_mb: 0,
-                available_mb: 0,
-                usage_percent: 0.0,
-                read_iops: 0,
-                write_iops: 0,
-            },
+            // 单指标采集器不采集磁盘 ⇒ `None`（**不是** 0，0 会被读成"磁盘用量 0%"）
+            disk: None,
             temperature: TemperatureMetrics {
                 cpu_temp_c: 0.0,
                 npu_temp_c: None,
@@ -481,14 +504,8 @@ impl MetricCollector for TemperatureCollector {
                 swap_used_mb: 0,
                 usage_percent: 0.0,
             },
-            disk: DiskMetrics {
-                total_mb: 0,
-                used_mb: 0,
-                available_mb: 0,
-                usage_percent: 0.0,
-                read_iops: 0,
-                write_iops: 0,
-            },
+            // 单指标采集器不采集磁盘 ⇒ `None`（**不是** 0，0 会被读成"磁盘用量 0%"）
+            disk: None,
             temperature: read_temperature_metrics()?,
             processes: vec![],
         })
@@ -559,14 +576,8 @@ impl MetricCollector for ProcessCollector {
                 swap_used_mb: 0,
                 usage_percent: 0.0,
             },
-            disk: DiskMetrics {
-                total_mb: 0,
-                used_mb: 0,
-                available_mb: 0,
-                usage_percent: 0.0,
-                read_iops: 0,
-                write_iops: 0,
-            },
+            // 单指标采集器不采集磁盘 ⇒ `None`（**不是** 0，0 会被读成"磁盘用量 0%"）
+            disk: None,
             temperature: TemperatureMetrics {
                 cpu_temp_c: 0.0,
                 npu_temp_c: None,
@@ -637,8 +648,54 @@ mod tests {
 
     #[test]
     fn test_disk_metrics_read() {
+        // 只断言"不报错"：磁盘**可不可用**取决于本机环境（Windows 开发机就没有 df），
+        // 旧断言 `is_ok()` 本身没有判别力 —— 真正的判别力在下一条用例。
         let result = read_disk_metrics();
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "采集本身不得报错（不可用应表达为 Ok(None)）");
+    }
+
+    /// 判别力：**采集失败必须是"不可用"（`None`），不是某个数字**。
+    ///
+    /// 旧实现在失败时返回 `32768 MB / 16384 MB / 50%` 的硬编码值 ⇒ 本用例红。
+    #[test]
+    fn disk_collection_failure_is_unavailable_not_a_fake_number() {
+        // 不存在的挂载点 —— Windows 上 `df` 根本不存在，Linux 上 df 会非零退出；
+        // 两条路都必须落 `Ok(None)`（这正是"失败"）。
+        let r = read_disk_metrics_at("/definitely/not/a/mount/point/mupc-d15-probe")
+            .expect("采集失败不是 Result::Err —— 不可用是 Ok(None) 这一**正常**取值");
+        assert!(
+            r.is_none(),
+            "采集失败必须表达为不可用（None），不得回退成假值: {r:?}"
+        );
+    }
+
+    /// 判别力：`df` 输出**任何**字段解析不了 ⇒ `None`（旧实现逐字段 `unwrap_or(默认值)` ⇒ 红）。
+    #[test]
+    fn malformed_df_output_is_unavailable_never_partially_defaulted() {
+        // 合法行（`df -BM` 第 2 行）
+        let ok = parse_df_output(
+            "Filesystem     1M-blocks  Used Available Use% Mounted on\n\
+             /dev/mmcblk0p3      57632 12345     42109  23% /\n",
+        )
+        .expect("合法输出必须解析出指标");
+        assert_eq!(ok.total_mb, 57632);
+        assert_eq!(ok.used_mb, 12345);
+        assert_eq!(ok.available_mb, 42109);
+        assert_eq!(ok.usage_percent, 23.0);
+
+        // 畸形行（Used 不是数字）⇒ 必须整体不可用，**不得**给 total=32768/used=0/50% 的拼凑值
+        assert!(
+            parse_df_output(
+                "Filesystem     1M-blocks  Used Available Use% Mounted on\n\
+                 /dev/mmcblk0p3      57632  ???     42109  23% /\n"
+            )
+            .is_none(),
+            "任一字段解析失败即不可用（旧实现会给 32768/0/50% 这类假值）"
+        );
+        // 字段数不足
+        assert!(parse_df_output("Filesystem\n/dev/x 1 2\n").is_none());
+        // 只有表头
+        assert!(parse_df_output("Filesystem 1M-blocks Used Available Use% Mounted on\n").is_none());
     }
 
     #[test]
@@ -653,5 +710,23 @@ mod tests {
         let snapshot = collector.collect().await.unwrap();
         assert!(snapshot.cpu.usage_percent >= 0.0);
         assert!(snapshot.memory.total_mb > 0);
+    }
+
+    /// 判别力：单指标采集器**不采集**磁盘 ⇒ `disk` 必须是 `None`（旧实现填全 0 ⇒ 红）。
+    #[tokio::test]
+    async fn single_metric_collectors_report_no_disk_rather_than_zeros() {
+        for collector in [
+            Box::new(CpuCollector::new(1000)) as Box<dyn MetricCollector>,
+            Box::new(MemoryCollector::new(1000)),
+            Box::new(TemperatureCollector::new(1000)),
+            Box::new(ProcessCollector::new(1000)),
+        ] {
+            let snap = collector.collect().await.unwrap();
+            assert!(
+                snap.disk.is_none(),
+                "{} 不采集磁盘 ⇒ disk 必须 None（0% 会被读成真实空盘）",
+                collector.name()
+            );
+        }
     }
 }

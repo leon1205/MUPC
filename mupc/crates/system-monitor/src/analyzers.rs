@@ -179,16 +179,24 @@ impl ThresholdAnalyzer {
             ));
         }
 
-        // 磁盘检查
-        if snapshot.disk.usage_percent >= self.disk_critical {
-            severity = AnalysisSeverity::Critical;
-            findings.push(format!("磁盘使用率达到 {}%", snapshot.disk.usage_percent));
-            recommendations.push("立即清理磁盘空间".into());
-        } else if snapshot.disk.usage_percent >= self.disk_warning {
-            if severity != AnalysisSeverity::Critical {
-                severity = AnalysisSeverity::Warning;
+        // 磁盘检查 —— `disk == None` = **采集不可用**（D-15）：此时**不得**判定、不得告警
+        // （拿不到数据就说"正常"或"异常"都是编造），也不得回退成假值再判。
+        match &snapshot.disk {
+            Some(disk) if disk.usage_percent >= self.disk_critical => {
+                severity = AnalysisSeverity::Critical;
+                findings.push(format!("磁盘使用率达到 {}%", disk.usage_percent));
+                recommendations.push("立即清理磁盘空间".into());
             }
-            findings.push(format!("磁盘使用率偏高: {}%", snapshot.disk.usage_percent));
+            Some(disk) if disk.usage_percent >= self.disk_warning => {
+                if severity != AnalysisSeverity::Critical {
+                    severity = AnalysisSeverity::Warning;
+                }
+                findings.push(format!("磁盘使用率偏高: {}%", disk.usage_percent));
+            }
+            Some(_) => {}
+            None => {
+                tracing::debug!("磁盘指标不可用（采集失败）⇒ 本周期不做磁盘判定");
+            }
         }
 
         // 温度检查
@@ -303,14 +311,14 @@ mod tests {
                 swap_used_mb: 0,
                 usage_percent: mem_pct,
             },
-            disk: DiskMetrics {
+            disk: Some(DiskMetrics {
                 total_mb: 65536,
                 used_mb: (65536.0 * disk_pct / 100.0) as u64,
                 available_mb: 32768,
                 usage_percent: disk_pct,
                 read_iops: 0,
                 write_iops: 0,
-            },
+            }),
             temperature: TemperatureMetrics {
                 cpu_temp_c: temp,
                 npu_temp_c: None,
@@ -343,6 +351,34 @@ mod tests {
         let snapshot = create_snapshot(96.0, 50.0, 40.0, 50.0);
         let result = analyzer.analyze(&snapshot).unwrap();
         assert_eq!(result.severity, AnalysisSeverity::Critical);
+    }
+
+    /// 判别力：磁盘**不可用**时不得做磁盘判定（既不得报"磁盘告警"，也不得拿假值凑数）。
+    ///
+    /// 旧实现里磁盘是必填结构 ⇒ 采不到就会被填成 50%（既不告警也看不出异常）⇒ 本用例红。
+    #[test]
+    fn unavailable_disk_contributes_no_disk_finding() {
+        let analyzer = ThresholdAnalyzer::default();
+        let mut snapshot = create_snapshot(30.0, 50.0, 99.0, 50.0); // 先来一个"磁盘爆表"
+        let crit = analyzer.analyze(&snapshot).unwrap();
+        assert!(
+            crit.findings.iter().any(|f| f.contains("磁盘")),
+            "前提：99% 必须触发磁盘结论（否则本用例无判别力）: {:?}",
+            crit.findings
+        );
+
+        snapshot.disk = None; // 采集不可用
+        let none = analyzer.analyze(&snapshot).unwrap();
+        assert!(
+            !none.findings.iter().any(|f| f.contains("磁盘")),
+            "磁盘不可用时不得产出磁盘结论（不得当作正常，也不得当作异常）: {:?}",
+            none.findings
+        );
+        assert_eq!(
+            none.severity,
+            AnalysisSeverity::Normal,
+            "其余指标正常 ⇒ 不得因磁盘不可用而报异常"
+        );
     }
 
     #[test]
