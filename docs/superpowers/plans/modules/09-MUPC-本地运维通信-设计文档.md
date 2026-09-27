@@ -11,7 +11,7 @@
 > | 设计条目 | 现状 |
 > |---|---|
 > | §2/§3/§4 三模组驱动 | **NoOp 占位** —— 返回 `Err(UnsupportedDevice)`，如实拒绝（不谎报成功）；阻断 = 模组选型未定 |
-> | §5.1/§5.2 密钥协商 | **已实现但口径不一致**：设计写 X25519 / 公钥 32 B / `info=mupc-wireless-aes-gcm`+`salt=channel_id‖session_id`；代码 `ecdh.rs:21-29` 是 **P-256 / 65 B / `Hkdf::new(None,…)` + `info=mupc-wireless-aes-key`** ⇒ 见 `docs/technical-debt.md` **U-100**（待裁定统一） |
+> | §5.1/§5.2 密钥协商 | **已实现**。⚠️ **口径已裁定统一到代码（U-100 已闭合，2026-09-27）**：曲线 = **P-256（secp256r1）**、公钥 = **65 B 未压缩（`04‖x‖y`）**、HKDF-**无 salt**（`Hkdf::new(None, shared_secret)`）+ `info = "mupc-wireless-aes-key"` —— 本节原文（X25519 / 32 B / 带 salt / `-gcm` 后缀）已按裁定**就地订正**，与 `mupc/crates/wireless/src/ecdh.rs` 逐字对齐 |
 > | §5.3 AES-256-GCM 帧封装 | **未实现**（crate 无 `aes-gcm` 依赖） |
 > | §6.4/§6.6 通道管理与认证锁定、§8.3 审计字段 | **未实现** |
 > | §6.3 Web API / REST 面 | **已失效** —— 依赖的 `web-api` crate **已整体删除**（08 号模块 SUPERSEDED）；相关条目须改挂 12 号本地显示终端的本机回环控制通道或改判作废 |
@@ -440,19 +440,21 @@ Wi-Fi AP 和 Station 同时运行的能力取决于无线模组。分三种情�
 
 ### 5.1 加密方案总览
 
-PRD 要求配置数据传输使用端到端应用层加密。本设计基于 **ECDH (X25519) + AES-256-GCM** 实现所有无线通道的传输加密。
+PRD 要求配置数据传输使用端到端应用层加密。本设计基于 **ECDH (P-256 / secp256r1) + AES-256-GCM** 实现所有无线通道的传输加密。
+
+> ⚠️ **口径订正（U-100，2026-09-27 裁定：以代码为准，改设计）**：原写 X25519 / 公钥 32 B，与已实现的 `mupc/crates/wireless/src/ecdh.rs`（P-256 / 65 B 未压缩）不一致，且 X25519 侧无任何实现。**实测代码**：`p256::ecdh::diffie_hellman()` + `Hkdf::<Sha256>::new(None, shared_secret)` + `expand(b"mupc-wireless-aes-key")`。本节及 §5.2/§5.5/§8.1.5/§10 的引用已同步订正为 P-256 口径。
 
 | 参数 | 值 | 说明 |
 |------|----|------|
-| KEM | X25519 (Curve25519 ECDH) | 椭圆曲线密钥交换，RFC 7748 |
-| KDF | HKDF-SHA256 | RFC 5869 密钥派生函数 |
+| KEM | **P-256 (secp256r1) ECDH** | 椭圆曲线密钥交换，NIST SP 800-56A / SEC 1 v2 |
+| KDF | HKDF-SHA256（**无 salt**，`Hkdf::new(None, shared_secret)`） | RFC 5869 密钥派生函数 |
 | 加密算法 | AES-256-GCM | 认证加密 (AEAD)，NIST SP 800-38D |
 | AES Key 长度 | 32 字节 (256-bit) | |
 | Nonce 长度 | 12 字节 (96-bit) | 随机 per-message |
 | Auth Tag 长度 | 16 字节 (128-bit) | GCM 认证标签 |
-| 公钥长度 | 32 字节 (256-bit) | X25519 原始格式 |
+| 公钥长度 | **65 字节** | **未压缩点格式 `04 ‖ x ‖ y`**（SEC 1 v2）；私钥 32 字节 |
 
-### 5.2 密钥协商流程（ECDH X25519）
+### 5.2 密钥协商流程（ECDH P-256）
 
 ```
 MUPC (Server)                          Client (App/Tool)
@@ -462,13 +464,13 @@ MUPC (Server)                          Client (App/Tool)
     │  ◄── 客户端公钥 PubKey_Client ─────────  │   (连接建立后交换)
     │                                        │
     │  计算共享密钥:                          │   计算共享密钥:
-    │  SharedSecret = X25519(               │   SharedSecret = X25519(
+    │  SharedSecret = P-256 ECDH(           │   SharedSecret = P-256 ECDH(
     │    PrivKey_MUPC, PubKey_Client         │     PrivKey_Client, PubKey_MUPC
     │  )                                     │   )
     │                                        │
     │  派生会话密钥 (HKDF-SHA256):            │   派生会话密钥 (HKDF-SHA256):
-    │  salt = channel_id || session_id       │   salt = channel_id || session_id
-    │  info = "mupc-wireless-aes-gcm"       │   info = "mupc-wireless-aes-gcm"
+    │  salt = (无 / None)                    │   salt = (无 / None)
+    │  info = "mupc-wireless-aes-key"       │   info = "mupc-wireless-aes-key"
     │                                        │
     │  AES_Key = HKDF-Expand(salt, info, 32) │   (同上)
     │  AES_Nonce_Base = HKDF-Expand(...)     │   (同上)
@@ -533,8 +535,10 @@ Wi-Fi 链路层已通过 WPA2/WPA3-SAE 提供链路加密，在此基础上叠�
 BLE 链路层加密（LESC/Passkey Entry）仅保护配对阶段，不保护配对完成后的 GATT 数据交换。所有 GATT Characteristic 的读写操作必须在应用层加密。
 
 密钥协商在 `0000FAC0` 特征中完成：
-- **Write**: 客户端写入 `session_id(16B UUID bytes) || pubkey(32B)`
-- **Indicate**: 服务端回复 `session_id(16B) || pubkey(32B) || encrypted_test_frame`
+- **Write**: 客户端写入 `session_id(16B UUID bytes) || pubkey(65B)`
+- **Indicate**: 服务端回复 `session_id(16B) || pubkey(65B) || encrypted_test_frame`
+
+> ⚠️ **口径订正（U-100）**：公钥 `32B → 65B`（P-256 未压缩），同 §5.1。
 
 密钥协商完成前所有特征返回操作拒绝；协商完成后特征值自动进入加密模式。
 
@@ -608,6 +612,8 @@ BLE 链路层加密（LESC/Passkey Entry）仅保护配对阶段，不保护配�
 
 ### 6.3 状态监控
 
+> ⚠️ **E-04 时效注（2026-09-27）**：本节条目的消费方原为 `web-api` crate（REST + Web UI 页面），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。**原文保留为历史**，现状改判：① 涉及**本机**配置/日志/固件的读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
+
 通过 Web UI 无线状态页面展示：
 - 各通道开关状态（开启/关闭）
 - 各通道连接状态（已连接/等待连接/未启用）
@@ -665,6 +671,8 @@ impl AuthManager {
 ## 7. 与 OTA/日志/配置系统集成
 
 ### 7.1 与 web-api 的集成
+
+> ⚠️ **E-04 时效注（2026-09-27）**：本节条目的消费方原为 `web-api` crate（REST + Web UI 页面），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。**原文保留为历史**，现状改判：① 涉及**本机**配置/日志/固件的读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
 
 web-api 在启动时调用 `wireless::register_routes(router)` 注册路由：
 
@@ -921,10 +929,10 @@ POST /api/v1/wireless/key-exchange
 
 ```json
 // 请求
-{ "pubkey": "base64-encoded-x25519-public-key", "algorithm": "X25519", "session_id": "uuid" }
+{ "pubkey": "base64-encoded-p256-public-key", "algorithm": "P-256", "session_id": "uuid" }
 
 // 响应
-{ "pubkey": "base64-encoded-x25519-public-key", "algorithm": "X25519", "session_id": "uuid", "encrypted_test": "base64-encrypted-test" }
+{ "pubkey": "base64-encoded-p256-public-key", "algorithm": "P-256", "session_id": "uuid", "encrypted_test": "base64-encrypted-test" }
 ```
 
 ### 8.2 BLE GATT 接口
@@ -1017,8 +1025,8 @@ crates/wireless/
 
 | 文件路径 | 变更类型 | 说明 |
 |---------|---------|------|
-| `crates/web-api/src/router.rs` | 修改 | 注册 `/api/v1/wireless/*` 路由 |
-| `crates/web-api/Cargo.toml` | 修改 | 添加 `wireless` 依赖 |
+| `crates/web-api/src/router.rs` | 修改 | 注册 `/api/v1/wireless/*` 路由 —— ⚠️ **已作废（E-04，2026-09-27）**：`web-api` crate 已整体删除（08 号 SUPERSEDED）⇒ 本行无处落地；本机读写改挂 12 号本地显示终端的本机回环控制通道 |
+| `crates/web-api/Cargo.toml` | 修改 | 添加 `wireless` 依赖 —— ⚠️ **已作废（E-04，2026-09-27）**：同上，crate 已删除 |
 | `mupc/Cargo.toml` | 修改 | 添加 `crates/wireless` 到 workspace members |
 | `/etc/mupc/mupc.toml` | 新增配置节 | 添加 `[wireless]` 配置节 |
 
@@ -1087,7 +1095,7 @@ tempfile.workspace = true
 | D-02 | NearLink SDK 绑定 | FFI 绑定（方案 A），C 守护进程（方案 B 降级） | 纯 Rust 实现 | 开发效率高，性能优；降级策略保证 SDK 不可用时的可替代性 |
 | D-03 | Wi-Fi 控制方式 | `hostapd` + `wpa_supplicant` 子进程 | `nl80211` netlink | 稳定成熟，openEuler 标准包，控制接口 socket 支持动态管理 |
 | D-04 | BLE 库选型 | `bluer` crate | `btleplug` / `zbus` | 原生 async/await，GATT Server 支持，openEuler 预装 BlueZ |
-| D-05 | 端到端加密 | ECDH X25519 + AES-256-GCM | TLS 1.3 单独使用 | 统一各通道加密协议栈；无证书场景安全保障；防御 TLS MITM |
+| D-05 | 端到端加密 | ECDH **P-256 (secp256r1)** + AES-256-GCM | TLS 1.3 单独使用 | 统一各通道加密协议栈；无证书场景安全保障；防御 TLS MITM（曲线口径见 §5.1 的 U-100 订正） |
 | D-06 | UUID 合规 | Bluetooth Base UUID 格式自定义区间 | 随机 UUID | 标准兼容，避免 SIG 冲突，客户端 SDK 友好 |
 | D-07 | 密钥轮换 | 24h/1GB 周期轮换 + 事件驱动 + 客户端主动 | 仅连接建立时协商 | 满足安全余量，支持自动重连无缝切换 |
 | D-08 | Wi-Fi 并发双模式 | 运行时检测硬件能力 + 配置文件策略 | 假设硬件支持 | 三种情形（并发/单模式/双物理）统一接口，不依赖特定芯片 |
