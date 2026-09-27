@@ -650,6 +650,8 @@ mupc/Cargo.toml                             # workspace members: + "crates/sim-b
 
 ## 8. 测试策略
 
+> ⚠️ **2026-09-27 现状（详见 §0）**：下表各行的 **Mock 方式** 成立（本模块内部自洽，测试用 mock 客户端/mock broker 即可），但**「全链路 / 系统」行不成立** —— 它要求 MUPC 在环（TCP 动作下行 + MQTT 观测回传），而 U-163 裁定两端均未实现。**本模块的测试只能覆盖「sim-bridge 自身」，覆盖不了「MUPC ↔ sim-bridge 闭环」。**
+
 | 模块 | 测试类型 | Mock 方式 | 覆盖目标 |
 |------|---------|---------|---------|
 | `config.rs` | 单元 | 提供 valid/invalid YAML 文件 | 必填字段检测 / 默认值 / 路径解析 |
@@ -658,7 +660,7 @@ mupc/Cargo.toml                             # workspace members: + "crates/sim-b
 | `mqtt.rs` | 单元 | 用 `rumqttc` 连接本地 mosquitto (CI 中安装) | connect / publish / EventLoop 健康检查 / 连续失败计数 |
 | `metrics.rs` | 单元 | 构造 Snapshot 数组 | min/max/avg/p99 计算 / JSON 导出 / reset_episode 清零 |
 | `main.rs` | 集成 | 启动 mock engine.py + mock MQTT broker + mock TCP client | 完整主循环：reset → 3步 step → done → reset / Ctrl+C 退出 |
-| 全链路 | 系统 | 真实 engine.py (VoltageSimulator) + 真实 mosquitto + 真实 TCP | 96 步 episode 完整闭环 |
+| 全链路 | 系统 | 真实 engine.py (VoltageSimulator) + 真实 mosquitto + 真实 TCP | 96 步 episode 完整闭环（**⚠️ 当前不成立：MUPC 侧无对端，见 §0**） |
 
 **Mock Python 脚本示例** (`tests/mock_engine.py`)：
 ```python
