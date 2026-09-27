@@ -101,6 +101,13 @@ mod ffi {
     #[no_mangle]
     pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
         let plugin = HplcPlugin::new();
+        // SAFETY: 本函数为 `unsafe fn`，**契约由调用方（loader）承担**，本体内不 deref
+        // 任何外来指针：`Box::into_raw` 交出堆实例所有权（不 drop），返回的 fat pointer
+        // （数据指针 + vtable 指针）恒非空、对齐、指向有效对象。调用方须保证：
+        // ① 只经 [`destroy_hplc_plugin`] 归还（类型须为 `*mut HplcPlugin`，用 `dyn` 释放
+        //    会因 vtable/尺寸不符而 UB —— 故"导出与加载两端都是 Rust、同编译器/同 target"
+        //    是本项目插件 ABI 的前提）；② 不跨进程/不跨动态库边界传递；
+        // ③ 同一指针不同时被多线程使用。
         Box::into_raw(Box::new(plugin)) as *mut dyn Plugin
     }
 
@@ -113,6 +120,10 @@ mod ffi {
     #[no_mangle]
     pub unsafe extern "C" fn destroy_hplc_plugin(ptr: *mut dyn Plugin) {
         if !ptr.is_null() {
+            // SAFETY: 前置条件（调用方保证）—— `ptr` 必须是 [`create_plugin`] 返回、
+            // 且**尚未销毁过**的指针（双重销毁 UB），类型确为 `HplcPlugin`。后置：
+            // `Box::from_raw` 取回所有权后立即 drop，堆内存释放、vtable 槽位失效。
+            // 空指针分支已先行挡掉（`Box::from_raw(null)` 是 UB）。
             let _ = Box::from_raw(ptr);
         }
     }
@@ -125,6 +136,10 @@ mod ffi {
     #[allow(improper_ctypes_definitions)]
     #[no_mangle]
     pub unsafe extern "C" fn plugin_meta() -> PluginMeta {
+        // SAFETY: 无指针入参、无别名/对齐要求，本体内不 deref 任何外部内存 —— 标 `unsafe`
+        // 仅为与同模块其余 FFI 入口点保持**同一签名口径**。调用方须保证的是返回值语义：
+        // `PluginMeta` 按值返回（含 `String` 堆字段），所有权随返回值移交；跨 ABI 成立同样
+        // 以"两端都是 Rust、同编译器/同 target"为前提。
         HplcPlugin::new().meta()
     }
 }
