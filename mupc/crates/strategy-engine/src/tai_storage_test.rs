@@ -457,7 +457,8 @@ mod tai_storage_test {
     #[test]
     fn test_strategy_missing_phase_failsafe() {
         let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
-        // phase=None → data_to_meter 返回默认（零输出），命令为 no-op 零设定
+        // phase=None ⇒ D-9 failsafe 路径（积分冻结 + 斜坡回零 + 复位 Q 积分）；
+        // 冷启动（p_st/d_p/q_last 全 0）下产出分相零设定。
         let data = DataPackage {
             timestamp: 3600 * 10,
             electrical: ElectricalData {
@@ -483,5 +484,292 @@ mod tai_storage_test {
         };
         let cmd = tokio_test::block_on(strategy.evaluate(&data)).unwrap();
         assert_eq!(cmd.phase_p_set, Some([0.0; 3]));
+        // 见 d9_missing_phase_runs_failsafe_and_resets_q：热态下的 failsafe 全语义判别力用例
+    }
+
+    // ══════════════ 全项目审查 WP2 判别力用例（D-1/D-2/D-8/D-9/D-10）══════════════
+
+    /// 构造可控分相包（功率因数/分相无功/分相电流/分相有功逐相给定）。
+    /// D-9 需要 Q 通道**真实累积**（qi≠0 且 |pf|<0.95），既有 `create_phase_data` 给不出。
+    fn package_phase(ts: u64, pf: f64, q_per_phase: f64, i: [f64; 3], p_i: [f64; 3]) -> DataPackage {
+        DataPackage {
+            timestamp: ts,
+            electrical: ElectricalData {
+                voltage: Some(220.0),
+                current: Some(i.iter().sum::<f64>()),
+                active_power: Some(p_i.iter().sum()),
+                reactive_power: Some(q_per_phase * 3.0),
+                cos_phi: Some(pf),
+                frequency: Some(50.0),
+                phase: Some(PhaseElectricalData {
+                    voltage: [Some(220.0); 3],
+                    current: [Some(i[0]), Some(i[1]), Some(i[2])],
+                    active_power: [Some(p_i[0]), Some(p_i[1]), Some(p_i[2])],
+                    reactive_power: [Some(q_per_phase); 3],
+                    cos_phi: [Some(pf); 3],
+                }),
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: Some(50.0),
+                soh: None,
+                temperature: None,
+            },
+        }
+    }
+
+    /// **D-1（口径）**：不平衡度必须按**幅值**（设计 04 §2.1 / 台区储能设计 §2.9.1 电网公司口径
+    /// `(1 − MIN|Ii|/MAX|Ii|) × 100`），不得用带符号电流。
+    ///
+    /// 期望值推导：
+    /// - ① `[-10,-10,-10]`（三相同向返送、平衡）：MAX=MIN=10 ⇒ 0%（两种口径一致，防误活化）；
+    /// - ①' `[-4,-12,-4]`（三相同向返送、**幅值不平衡**）：MAX=12、MIN=4 ⇒ (1−4/12)×100 = **66.67%**。
+    ///   带符号实现 `max(0,−4,−12,−4)=0` ⇒ 判 0 ⇒ 差模通道**静默关闭**（本条即红）。
+    /// - ② `[-10,8,8]`（A 相返送 10A、B/C 受电 8A ⇒ "单相返送"）：MAX=10、MIN=8
+    ///   ⇒ (1−8/10)×100 = **20%**。带符号实现 MAX=8、MIN=−10 ⇒ (1+10/8)×100 = **225%**
+    ///   （夸大到 >100%，虚越 25% 差模激活死区）。
+    #[test]
+    fn d1_unbalance_uses_current_magnitude() {
+        use crate::tai_storage::unbalance_pct;
+        // ① 三相同向返送、三相平衡 ⇒ 0
+        assert_eq!(unbalance_pct(&[-10.0, -10.0, -10.0]), 0.0);
+        // ①' 三相同向返送、幅值不平衡 ⇒ 66.67%（带符号实现会静默判 0）
+        let got_a = unbalance_pct(&[-4.0, -12.0, -4.0]);
+        assert!(
+            (got_a - (1.0 - 4.0 / 12.0) * 100.0).abs() < 1e-9,
+            "三相同向返送的幅值不平衡须 = 66.67%，实得 {got_a}"
+        );
+        // ② 单相返送 ⇒ 幅值口径 20%（带符号实现 225%）
+        let got_b = unbalance_pct(&[-10.0, 8.0, 8.0]);
+        assert!(
+            (got_b - 20.0).abs() < 1e-9,
+            "单相返送须按幅值口径 = (1−8/10)×100 = 20%，实得 {got_b}"
+        );
+        assert!(got_b <= 100.0, "幅值口径恒 ≤100%，实得 {got_b}");
+        // 除零/极小电流守卫（MAX<1A 判 0）
+        assert_eq!(unbalance_pct(&[0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(unbalance_pct(&[-0.5, -0.2, -0.1]), 0.0);
+    }
+
+    /// **D-1（端到端）**：三相同向返送 + 幅值不平衡（66.67% > 25% 死区）⇒ 差模通道必须激活。
+    /// 带符号实现判 0%（< 15%）⇒ `d_p_active` 保持 false ⇒ 本条红。
+    #[test]
+    fn d1_three_phase_reverse_imbalance_activates_diff_channel() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        // 全部返送（同向、全负）但幅值不平衡：i=[-4,-12,-4]
+        let m = meter(
+            -20.0,
+            [-4.0, -12.0, -4.0],
+            [0.0; 3],
+            [220.0; 3],
+            [0.99; 3],
+        );
+        let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
+        assert!(
+            st.d_p_active,
+            "三相同向返送的幅值不平衡（66.67% > 25%）须激活差模；带符号口径判 0 ⇒ 静默关闭"
+        );
+    }
+
+    /// **D-8**：容量仲裁的末步（共模 clamp + ΣΔP 重归一）之后必须**复检**约束——
+    /// 重归一会把 `move_toward` 削掉的差模量摊回相邻相 ⇒ 复超 `i_rated`。
+    ///
+    /// 构造（默认档 60kW：p_cap=60、i_rated=110A、s_rated=60kVA、slope=6、dp_max=25、q_i_max=25）：
+    /// - 播种 `d_p=[0,-12,-12]`（ΣΔP=−24≠0，与 step6 的独立斜坡分支产生的形态同源）；
+    /// - step6 积分后 `d_p=[-6,-6,-18]`（inc 三相 = −6/+6/−6，钳 ±slope）；
+    /// - `q_pcs=[13,0,0]`（|pf|=0.90 保持 Q 通道激活，qi=0 使 q_pcs 不增）；
+    /// - `p_st=60` 经 S2 斜坡 → 54 ⇒ 共模分摊 18kW/相。
+    ///
+    /// 重归一：mean = (−6−6−18)/3 = −10 ⇒ `d_p=[4,4,−8]` ⇒ A 相 P = 18+4 = 22kW，
+    /// `s_A = √(22²+13²) = 25.6kVA > 24.2kVA(=110A@220V)` ⇒ **旧实现**（重归一侧在 break 之后、
+    /// 无复检）终态 A 相 **116.1A**，被留给 PCS 静默 clamp；修复后 q_A 先被裁 0、A 相回到 100A。
+    #[test]
+    fn d8_arbitrate_rechecks_after_renormalization() {
+        let cfg = TaiStorageConfig::default();
+        let mut st = TaiControllerState::default();
+        st.st = TaiState::S2Flat;
+        st.p_st = 60.0;
+        st.d_p = [0.0, -12.0, -12.0];
+        st.q_pcs = [13.0, 0.0, 0.0];
+        let m = meter(10.0, [2.0, 6.0, 2.0], [0.0; 3], [220.0; 3], [0.90; 3]);
+        let (p, q) = control(&mut st, &cfg, &m, 0.5, 3600 * 10);
+
+        for i in 0..3 {
+            let s = (p[i].powi(2) + q[i].powi(2)).sqrt();
+            let i_phase = s * 1000.0 / 220.0;
+            assert!(
+                i_phase <= cfg.i_rated + 1e-6,
+                "相{i} 终态仍超 i_rated: {i_phase:.1}A (P={:.1}, Q={:.1})——重归一侧后无复检",
+                p[i],
+                q[i]
+            );
+        }
+        let dsum: f64 = st.d_p.iter().sum();
+        assert!(dsum.abs() < 1e-6, "ΣΔP 须=0: {dsum}");
+        let psum: f64 = p.iter().sum();
+        assert!(
+            (psum - st.p_st).abs() < 1e-6,
+            "Σp 须=p_st: {psum} vs {}",
+            st.p_st
+        );
+    }
+
+    /// **D-9**：分相测量缺失 ⇒ 设计 §2.7 failsafe（积分冻结 + 斜坡回零 + **复位 Q 积分**），
+    /// 不得当成"有效零测量"喂进状态机。
+    ///
+    /// 改坏实现会怎样红（旧 `data_to_meter → MeterData::default()`，p=0/u=220/pf=1.0/i=0）：
+    /// ① 状态机用假 p=0 重建基线（`p_base_est = 0 + p_st = −60 < s1_exit`）⇒ S1 保持目标 −60、
+    ///    **不按 slope 回零**；② pf=1.0 ⇒ Q 通道惰化、输出归零（≠ 保持 `q_last`）；
+    /// ③ 失效拍被推入滤波窗（`meter_buf` 非空）。
+    #[test]
+    fn d9_missing_phase_runs_failsafe_and_resets_q() {
+        let cfg = TaiStorageConfig::default();
+        let strategy = TaiStorageStrategy::new(cfg.clone());
+        // 前置：两拍有效分相测量（返送 + 低 PF 无功）⇒ 建立非零 p_st / q_pcs / q_last
+        let pkg = |ts: u64| package_phase(ts, 0.90, 5.0, [-10.0; 3], [-10.0; 3]);
+        let _ = tokio_test::block_on(strategy.evaluate(&pkg(3600 * 10))).unwrap();
+        let _ = tokio_test::block_on(strategy.evaluate(&pkg(3600 * 10 + 60))).unwrap();
+        let before = strategy.state_snapshot();
+        assert!(
+            before.p_st < -1.0,
+            "前提：须先建立非零共模出力，实得 {}",
+            before.p_st
+        );
+        assert!(
+            before.q_pcs.iter().all(|v| *v > 0.5),
+            "前提：Q 积分须已累积: {:?}",
+            before.q_pcs
+        );
+        assert!(!before.meter_buf.is_empty(), "前提：滤波窗已入窗");
+        let q_last_before = before.q_last;
+        assert!(
+            q_last_before.iter().any(|v| v.abs() > 0.5),
+            "前提：q_last 须非零: {q_last_before:?}"
+        );
+
+        // 分相缺失包（总表电压/电流仍在，但无 phase 段）
+        let mut no_phase = pkg(3600 * 10 + 120);
+        no_phase.electrical.phase = None;
+        let cmd = tokio_test::block_on(strategy.evaluate(&no_phase)).unwrap();
+        let after = strategy.state_snapshot();
+
+        assert_eq!(
+            after.q_pcs, [0.0; 3],
+            "failsafe 须复位 Q 积分（设计 §2.4：恢复后从 0 重新积分）"
+        );
+        assert!(
+            after.meter_buf.is_empty(),
+            "failsafe 须清滤波窗（不得把失效拍混入恢复后均值）"
+        );
+        assert!(
+            (after.p_st - (before.p_st + cfg.slope)).abs() < 1e-9,
+            "共模须按 slope 斜坡回 0：{} → {}（期望 {}）",
+            before.p_st,
+            after.p_st,
+            before.p_st + cfg.slope
+        );
+        assert_eq!(
+            cmd.phase_q_set,
+            Some(q_last_before),
+            "failsafe 须保持最后有效 Q（不得归零）"
+        );
+    }
+
+    /// **D-10**：1 Hz 决策路径不得因内部锁中毒 panic（本 crate 既有口径
+    /// `unwrap_or_else(|e| e.into_inner())`）。
+    /// 改回 `.lock().unwrap()` ⇒ 中毒后 `evaluate_sync` 直接 panic ⇒ 本条红。
+    #[test]
+    fn d10_poisoned_locks_still_complete_a_tick() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        strategy.poison_locks_for_test();
+        assert!(
+            strategy.locks_are_poisoned(),
+            "前提：两把锁须真的中毒（否则本条空转）"
+        );
+        // 中毒后仍须完成一拍且**真的重算**（返送包 ⇒ 非零充电指令，而非返回缓存零指令）
+        let cmd = tokio_test::block_on(strategy.evaluate(&create_package(3600 * 10, -30.0, 0.5))).unwrap();
+        let sum: f64 = cmd.phase_p_set.unwrap().iter().sum();
+        assert!(
+            sum < 0.0,
+            "中毒锁须被容忍并完成重算（不得 panic、不得返回缓存零指令）: {sum}"
+        );
+    }
+
+    /// **D-2**：无任何 fresh SOC 源且无可用冻结值 ⇒ **拒绝下发**（分相 P/Q 全 0）+ 节流告警一次。
+    /// 改坏实现会怎样红：`data.battery.soc.unwrap_or(50.0)` ⇒ 返送包在 50% 假 SOC 下照常充电（P≠0）。
+    #[test]
+    fn d2_no_soc_refuses_dispatch_and_warns_once() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        let no_soc = |ts: u64| {
+            let mut d = create_package(ts, -30.0, 0.5);
+            d.battery.soc = None;
+            d
+        };
+        let cmd1 = tokio_test::block_on(strategy.evaluate(&no_soc(3600 * 10))).unwrap();
+        assert_eq!(
+            cmd1.phase_p_set,
+            Some([0.0; 3]),
+            "无 SOC 必须拒绝下发（旧实现以假值 50% 给出非零充电指令）"
+        );
+        assert_eq!(cmd1.phase_q_set, Some([0.0; 3]));
+        assert_eq!(
+            strategy.state_snapshot().last_control_ts,
+            0,
+            "拒绝拍不得消耗控制周期（SOC 恢复后须立即接管）"
+        );
+        assert_eq!(strategy.soc_missing_warn_count(), 1, "首发须告警一次");
+        // 后续两拍（时间戳递进，绕过 60s 控制节流）仍拒绝；30s 节流内**不再**告警
+        let _ = tokio_test::block_on(strategy.evaluate(&no_soc(3600 * 10 + 60))).unwrap();
+        let _ = tokio_test::block_on(strategy.evaluate(&no_soc(3600 * 10 + 120))).unwrap();
+        assert_eq!(
+            strategy.soc_missing_warn_count(),
+            1,
+            "告警须按 30s 节流（每拍刷屏 = 红）"
+        );
+        // 回拨节流计时 ⇒ 到期后须再次告警（非"一次性永不告警"）
+        strategy.backdate_soc_missing_warn(std::time::Duration::from_secs(31));
+        let _ = tokio_test::block_on(strategy.evaluate(&no_soc(3600 * 10 + 180))).unwrap();
+        assert_eq!(
+            strategy.soc_missing_warn_count(),
+            2,
+            "节流到期后须再次告警"
+        );
+    }
+
+    /// **D-2（不得误伤冻结值）**：有可用 SOC（`apply_soc_source` 在双源皆失时写回的冻结
+    /// existing，或 fresh 源）⇒ 仍按该值驱动；且拒绝**不粘滞**——fresh 源恢复立即正常下发。
+    ///
+    /// 改坏实现会怎样红：若"非 fresh 即拒绝"（把冻结值也拒掉）⇒ ① 全零 ⇒ 红；
+    /// 若拒绝路径消耗了控制周期 ⇒ ② 的 1s 后恢复被 60s 节流挡住、返回缓存零指令 ⇒ 红。
+    #[test]
+    fn d2_available_soc_still_drives_and_recovers() {
+        // ① 冻结值路径（tai 层只见 Some/None，源新鲜度由 apply_soc_source 在上层裁决并写回）
+        let s1 = TaiStorageStrategy::new(TaiStorageConfig::default());
+        let cmd = tokio_test::block_on(s1.evaluate(&create_package(3600 * 10, -30.0, 0.20))).unwrap();
+        let sum: f64 = cmd.phase_p_set.unwrap().iter().sum();
+        assert!(
+            sum < 0.0,
+            "有可用 SOC（冻结或 fresh）须照常驱动 S1 充电: {sum}"
+        );
+
+        // ② 拒绝 → fresh 恢复：拒绝拍不消耗周期 ⇒ 下一拍（+1s）立即接管
+        let s2 = TaiStorageStrategy::new(TaiStorageConfig::default());
+        let mut absent = create_package(3600 * 10, -30.0, 0.5);
+        absent.battery.soc = None;
+        let refused = tokio_test::block_on(s2.evaluate(&absent)).unwrap();
+        assert_eq!(refused.phase_p_set, Some([0.0; 3]));
+        let cmd2 =
+            tokio_test::block_on(s2.evaluate(&create_package(3600 * 10 + 1, -30.0, 0.5))).unwrap();
+        let sum2: f64 = cmd2.phase_p_set.unwrap().iter().sum();
+        assert!(
+            sum2 < 0.0,
+            "fresh SOC 恢复须立即正常下发（不得粘滞在拒绝态）: {sum2}"
+        );
     }
 }

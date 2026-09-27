@@ -2684,7 +2684,9 @@ mod tests {
             None,
             Instant::now(),
         );
-        // 默认：local_priority=false 且 ModelStatus::Unloaded（AI 停用期实态）
+        // 显式置 false（D-20 起 `AiIntegrator::new()` 默认 = 部署默认 true）以进入
+        // 「AI 未接线」分支：local_priority=false 且 ModelStatus::Unloaded（AI 停用期实态）
+        ai.set_local_priority(false).await;
         assert_eq!(
             src.read_device().await.control_source,
             ControlSource::AiDisabled

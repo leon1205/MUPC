@@ -120,6 +120,25 @@ fn sliding_avg(
     avg
 }
 
+/// 三相电流不平衡度（**幅值式**，电网公司口径，设计 04 §2.1 / 台区储能设计 §2.9.1）：
+/// `(1 − min|Ii| / max|Ii|) × 100`，`max|Ii| < 1A` 判 0（除零/极小电流守卫）。
+///
+/// ⚠️ **必须取幅值** `|Ii|`，不得用带符号电流：
+/// - 三相同向返送（全负）时带符号 `max` 取到 0 ⇒ 恒判 0、**差模通道静默关闭**；
+/// - 单相返送（其余相受电）时带符号 `min` 取到负值 ⇒ 不平衡度**被夸大到 >100%**
+///   （如 `[-10, 8, 8]`：带符号 225%，幅值口径 20%）。
+///
+/// 注：`imean`（差模积分输入）仍保留**带符号**语义（见 [`control`] 步骤 6），二者不可混用。
+pub(crate) fn unbalance_pct(ii: &[f64; 3]) -> f64 {
+    let i_max = ii.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let i_min = ii.iter().fold(f64::MAX, |m, v| m.min(v.abs()));
+    if i_max < 1.0 {
+        0.0
+    } else {
+        (1.0 - i_min / i_max) * 100.0
+    }
+}
+
 /// SOC 保护：充电 ≥90% 剪 0 / 88% 线性降额；放电 ≤10% 剪 0 / 12% 线性降额
 fn soc_protect(p_st: f64, soc: f64) -> f64 {
     if p_st < 0.0 {
@@ -147,10 +166,14 @@ fn soc_protect(p_st: f64, soc: f64) -> f64 {
 
 /// 容量仲裁：每相电流 / 总视在 / 总有功约束 + ΔP 重归一
 ///
-/// 迭代裁剪：每轮顶格从当前 state 重算 pcmd，避免用陈旧值导致
-/// （a）过限后整轮 8 次重复裁剪（差模最多 8×slope 过剪）或
-/// （b）s_rated 分支对同一尺度反复缩放（×scale⁸）；
-/// 当本轮无违规即 break（多数场景 1~2 轮收敛）。
+/// 迭代裁剪：每轮先做**收敛步**（共模 clamp + 差模零净重归一 + 由当前 state 重算 pcmd），
+/// 再由该轮终态**复检** i_rated / s_rated 并裁剪；无违规则收敛退出（多数场景 1~2 轮）。
+///
+/// ⚠️ **收敛步必须在环内、复检必须在收敛步之后**（D-8）：
+/// 旧实现把 clamp + 重归一放在循环**之后** ⇒ `break` 的检验对象是重归一**前**的状态，
+/// 而重归一会把 `move_toward` 削掉的差模量**摊回**相邻相 ⇒ 复超 `i_rated`
+/// （`config.rs` 自述 slope=8 标定期遗留 0.9A 过限，当时靠回调 slope 规避而非补复检）。
+/// 重算 pcmd 也放在检验前，避免用陈旧值导致 8×slope 过剪或 ×scale⁸ 反复缩放。
 fn arbitrate(
     pcmd: &mut [f64; 3],
     q: &mut [f64; 3],
@@ -159,10 +182,12 @@ fn arbitrate(
     u: &[f64; 3],
 ) {
     for _ in 0..8 {
-        // 每轮重算当前指令，避免用陈旧值
+        // 收敛步（幂等）：共模 ±p_cap；差模 ΣΔP=0 重归一；随后按 state 重算分相指令
+        converge_step(state, config);
         for (i, v) in pcmd.iter_mut().enumerate() {
             *v = state.p_st / 3.0 + state.d_p[i];
         }
+        // 复检 + 裁剪（顺序 ①Q ②差模 P；s_rated 超限则等比缩放差模）
         let mut s_total = 0.0;
         let mut violated = false;
         for i in 0..3 {
@@ -187,19 +212,54 @@ fn arbitrate(
             }
         }
         if !violated {
-            break;
+            return; // 收敛：pcmd 与 state 一致且约束满足
         }
     }
-    // 总有功 ≤ p_cap（共模限制；差模零净）
+    // 8 轮未收敛（几何不可行：如共模顶格 + 强单相差模时「单相限 ∧ ΣΔP=0」无解）：
+    // 再走一次收敛步保证 pcmd 与 state 一致，并**显式告警**——不把残限留给 PCS 静默 clamp。
+    converge_step(state, config);
+    for (i, v) in pcmd.iter_mut().enumerate() {
+        *v = state.p_st / 3.0 + state.d_p[i];
+    }
+    let i_peak = (0..3)
+        .map(|i| (pcmd[i].powi(2) + q[i].powi(2)).sqrt() * 1000.0 / u[i].max(1.0))
+        .fold(0.0f64, f64::max);
+    tracing::warn!(
+        i_peak,
+        i_rated = config.i_rated,
+        "容量仲裁 8 轮未收敛（约束几何不可行：单相电流限与 ΣΔP=0 零净冲突），残留过限已显式告警"
+    );
+}
+
+/// 仲裁收敛步（幂等）：共模 ±p_cap 钳位 + 差模 ΣΔP=0 重归一。
+/// pcmd 由调用方在收敛步之后按 `state` 重算，保证「检验对象 = 终态」。
+fn converge_step(state: &mut TaiControllerState, config: &TaiStorageConfig) {
     state.p_st = state.p_st.clamp(-config.p_cap, config.p_cap);
-    // 差模重归一 ΣΔP=0
     let d_sum = state.d_p.iter().sum::<f64>() / 3.0;
     for v in state.d_p.iter_mut() {
         *v -= d_sum;
     }
-    for (i, v) in pcmd.iter_mut().enumerate() {
-        *v = state.p_st / 3.0 + state.d_p[i];
+}
+
+/// failsafe（设计 §2.7/§4）：测量不可用（总表分相缺失或校验失败）→ **冻结积分、斜坡回归 0**、
+/// 保持最后有效 Q（无功补偿相对安全），并**复位 Q 积分状态**（§2.4「恢复后从 0 重新积分」）。
+///
+/// 返回 `(分相 P, 分相 Q)`：P 为共模按 slope 向 0 逼近后的分相分摊，Q 为 `q_last` 保持。
+fn failsafe(state: &mut TaiControllerState, config: &TaiStorageConfig) -> ([f64; 3], [f64; 3]) {
+    state.p_st = move_toward(state.p_st, 0.0, config.slope);
+    for i in 0..3 {
+        state.d_p[i] = move_toward(state.d_p[i], 0.0, config.slope);
     }
+    // 复位积分状态：否则恢复后 Q 从旧积分值续算（设计 §2.4 要求「从 0 重新积分」）
+    state.q_pcs = [0.0; 3];
+    // 清滤波窗：不得把失效拍的测量混入恢复后的滑动均值
+    state.meter_buf.clear();
+    let pcmd = [
+        state.p_st / 3.0 + state.d_p[0],
+        state.p_st / 3.0 + state.d_p[1],
+        state.p_st / 3.0 + state.d_p[2],
+    ];
+    (pcmd, state.q_last)
 }
 
 /// 核心控制器：单周期控制（纯函数，跨周期状态由 state 承载）
@@ -223,19 +283,9 @@ pub fn control(
     let pfi = f.pf;
     let ii = f.i;
 
-    // 2. failsafe：数据异常 → 斜坡回归 0，保持最近有效 Q
+    // 2. failsafe：数据异常 → 积分冻结 + 斜坡回归 0，保持最近有效 Q（并复位 Q 积分）
     if !p.is_finite() || pi.iter().any(|x| !x.is_finite()) {
-        state.p_st = move_toward(state.p_st, 0.0, config.slope);
-        for i in 0..3 {
-            state.d_p[i] = move_toward(state.d_p[i], 0.0, config.slope);
-        }
-        state.meter_buf.clear();
-        let pcmd = [
-            state.p_st / 3.0 + state.d_p[0],
-            state.p_st / 3.0 + state.d_p[1],
-            state.p_st / 3.0 + state.d_p[2],
-        ];
-        return (pcmd, state.q_last);
+        return failsafe(state, config);
     }
 
     // 3. 状态机（优先级 S4 > S1 > S3 > S2；滞回）
@@ -339,14 +389,10 @@ pub fn control(
     state.p_st = soc_protect(state.p_st, soc);
 
     // 6. 差模 P（积分式，零净能量；I_i 带符号）
+    // imean 保留**带符号**：它是差模积分的参考量（离开自身均值的带符号偏差）。
     let imean = ii.iter().sum::<f64>() / 3.0;
-    let i_max = ii.iter().cloned().fold(0.0f64, f64::max);
-    let i_min = ii.iter().cloned().fold(f64::MAX, f64::min);
-    let unbal = if i_max < 1.0 {
-        0.0
-    } else {
-        (1.0 - i_min / i_max) * 100.0
-    };
+    // 不平衡度按**幅值**口径（D-1，见 unbalance_pct 文档）
+    let unbal = unbalance_pct(&ii);
     if unbal < 15.0 {
         state.d_p_active = false;
     } else if unbal > 25.0 {
@@ -384,42 +430,109 @@ pub struct TaiStorageStrategy {
     config: TaiStorageConfig,
     state: Arc<Mutex<TaiControllerState>>,
     last_cmd: Arc<Mutex<ControlCommand>>,
+    /// D-2：SOC 全缺告警节流时刻（每 30s 一次，防每拍刷屏；有可用 SOC 时不写）
+    soc_missing_warned: Mutex<Option<std::time::Instant>>,
+    /// D-2：SOC 全缺告警**实际发射**次数（判别力用例观测「告警一次」；无生产消费者）
+    soc_missing_warn_count: std::sync::atomic::AtomicU64,
 }
 
 impl TaiStorageStrategy {
     /// 命令 ID（与调度约定）
     const CMD_ID: u16 = 4;
+    /// D-2：SOC 全缺告警节流间隔（防每 dispatch 拍刷屏，与 SOC 双源告警同量级）
+    const SOC_MISSING_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-    pub fn new(config: TaiStorageConfig) -> Self {
-        let last_cmd = ControlCommand {
+    /// 「不下发设定」指令：分相 P/Q 全 0（SOC 全缺时下发，等效取消储能出力设定）。
+    fn zero_command() -> ControlCommand {
+        ControlCommand {
             cmd_id: Self::CMD_ID,
             cmd_type: CommandType::ChargeDischarge,
-            p_batt_set: None,
+            p_batt_set: Some(0.0),
             q_batt_set: None,
             phase_compensation: None,
             start_stop: Some(true),
             priority: 3,
             phase_p_set: Some([0.0; 3]),
             phase_q_set: Some([0.0; 3]),
-        };
+        }
+    }
+
+    pub fn new(config: TaiStorageConfig) -> Self {
+        let last_cmd = Self::zero_command();
         Self {
             config,
             state: Arc::new(Mutex::new(TaiControllerState::default())),
             last_cmd: Arc::new(Mutex::new(last_cmd)),
+            soc_missing_warned: Mutex::new(None),
+            soc_missing_warn_count: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// D-2：SOC 全缺（无任何 fresh 源且无可用冻结值）⇒ **拒绝下发设定**（分相 P/Q 全 0）
+    /// + 节流告警；**不得**用 50% 这类假值驱动 [`soc_protect`]（假 SOC 会把充放电保护带
+    /// 剪到错误档位，比不控制更危险）。
+    ///
+    /// 内部状态一并归零（共模/差模/Q 积分与滤波窗）：无 SOC 时不得保留力指令，恢复后从 0 起算。
+    /// 本函数不更新 `last_control_ts` —— 保护性拒绝**不得消耗控制周期**，SOC 恢复后立即接管。
+    fn refuse_missing_soc(&self, state: &mut TaiControllerState) -> ControlCommand {
+        state.p_st = 0.0;
+        state.d_p = [0.0; 3];
+        state.q_pcs = [0.0; 3];
+        state.meter_buf.clear();
+        let cmd = Self::zero_command();
+        *self.last_cmd.lock().unwrap_or_else(|e| e.into_inner()) = cmd.clone();
+
+        let now = std::time::Instant::now();
+        let due = {
+            let mut w = self
+                .soc_missing_warned
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let due = w.map_or(true, |t| {
+                now.saturating_duration_since(t) > Self::SOC_MISSING_WARN_INTERVAL
+            });
+            if due {
+                *w = Some(now);
+            }
+            due
+        };
+        if due {
+            self.soc_missing_warn_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                "SOC 全缺（无 fresh 源且无可用冻结值）：台区储能拒绝下发设定（分相 P/Q=0）——\
+                 请检查 BMS 站与核间 SOC 通路（不得以假值驱动充放电保护）"
+            );
+        }
+        cmd
     }
 
     /// 同步评估（用于测试与回放）：内部执行控制周期
     pub fn evaluate_sync(&self, data: &DataPackage) -> ControlCommand {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // D-2：SOC 全缺 ⇒ 拒绝下发 + 告警。置于控制周期节流**之前**：保护性拒绝不被 60s
+        // 节流拖延，且不消耗控制周期（SOC 恢复后立即接管）。
+        let Some(soc_pct) = data.battery.soc else {
+            return self.refuse_missing_soc(&mut state);
+        };
         if data.timestamp.saturating_sub(state.last_control_ts) < self.config.control_period_s {
-            return self.last_cmd.lock().unwrap().clone();
+            return self.last_cmd.lock().unwrap_or_else(|e| e.into_inner()).clone();
         }
         state.last_control_ts = data.timestamp;
 
-        let meter = data_to_meter(data);
-        let soc = data.battery.soc.unwrap_or(50.0) / 100.0; // 百分比 → 0~1 小数
-        let (p, q) = control(&mut state, &self.config, &meter, soc, data.timestamp);
+        // D-9：总表分相测量缺失 ⇒ 设计 §2.7 failsafe（积分冻结 + 斜坡回零 + 复位 Q 积分），
+        // **不得**当作「有效零测量」喂进状态机（旧实现 MeterData::default() 的
+        // p=0/u=220/pf=1.0 会令 S1 态被 p_base_est = p_st < −2 长期驻留 ≈ 持续充电）。
+        let (p, q) = match data_to_meter(data) {
+            Some(meter) => control(
+                &mut state,
+                &self.config,
+                &meter,
+                soc_pct / 100.0, // 百分比 → 0~1 小数
+                data.timestamp,
+            ),
+            None => failsafe(&mut state, &self.config),
+        };
 
         let cmd = ControlCommand {
             cmd_id: Self::CMD_ID,
@@ -432,17 +545,62 @@ impl TaiStorageStrategy {
             phase_p_set: Some(p),
             phase_q_set: Some(q),
         };
-        *self.last_cmd.lock().unwrap() = cmd.clone();
+        *self.last_cmd.lock().unwrap_or_else(|e| e.into_inner()) = cmd.clone();
         cmd
+    }
+
+    /// 测试观测口（D-2/D-9/D-10 判别力用例）：跨周期状态快照；生产构建不编入。
+    #[cfg(test)]
+    pub(crate) fn state_snapshot(&self) -> TaiControllerState {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 测试观测口（D-2）：SOC 全缺告警的**实际发射**次数。
+    #[cfg(test)]
+    pub(crate) fn soc_missing_warn_count(&self) -> u64 {
+        self.soc_missing_warn_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 测试观测口（D-2）：把节流计时回拨，验证「节流到期后会再次告警」（非一次性）。
+    #[cfg(test)]
+    pub(crate) fn backdate_soc_missing_warn(&self, d: std::time::Duration) {
+        let mut w = self
+            .soc_missing_warned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *w = Some(std::time::Instant::now() - d);
+    }
+
+    /// 测试观测口（D-10）：在持有内部锁时 panic，令两把锁中毒（1 Hz 决策路径不得因中毒 panic）。
+    #[cfg(test)]
+    pub(crate) fn poison_locks_for_test(&self) {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let s = self.state.clone();
+        let _ = catch_unwind(AssertUnwindSafe(move || {
+            let _g = s.lock().unwrap_or_else(|e| e.into_inner());
+            panic!("poison TaiStorageStrategy::state（测试注入）");
+        }));
+        let c = self.last_cmd.clone();
+        let _ = catch_unwind(AssertUnwindSafe(move || {
+            let _g = c.lock().unwrap_or_else(|e| e.into_inner());
+            panic!("poison TaiStorageStrategy::last_cmd（测试注入）");
+        }));
+    }
+
+    /// 测试观测口（D-10）：两把锁确已中毒（前提守护——中毒失败则本组用例空转）。
+    #[cfg(test)]
+    pub(crate) fn locks_are_poisoned(&self) -> bool {
+        self.state.is_poisoned() && self.last_cmd.is_poisoned()
     }
 }
 
-/// DataPackage → MeterData（分相字段缺失时按 failsafe：全零）
-fn data_to_meter(data: &DataPackage) -> MeterData {
-    let phase = match data.electrical.phase.as_ref() {
-        Some(ph) => ph,
-        None => return MeterData::default(),
-    };
+/// DataPackage → MeterData；**无分相测量 ⇒ `None`**（调用方走设计 §2.7 failsafe）。
+///
+/// 旧实现返回 `MeterData::default()`（p=0/u=220/pf=1.0/i=0）——那是**假测量**，会被
+/// 状态机当成"三相平衡的零功率"从而进入 S1/S2 并维持力指令（D-9 缺陷）。
+fn data_to_meter(data: &DataPackage) -> Option<MeterData> {
+    let phase = data.electrical.phase.as_ref()?;
     let get = |a: &[Option<f64>; 3]| {
         [
             a[0].unwrap_or(0.0),
@@ -455,7 +613,7 @@ fn data_to_meter(data: &DataPackage) -> MeterData {
     let u = get(&phase.voltage);
     let i = get(&phase.current);
     let pf = get(&phase.cos_phi);
-    MeterData {
+    Some(MeterData {
         p: p_i.iter().sum(),
         q: q_i.iter().sum(),
         pf,
@@ -463,7 +621,7 @@ fn data_to_meter(data: &DataPackage) -> MeterData {
         i,
         p_i,
         q_i,
-    }
+    })
 }
 
 #[async_trait]

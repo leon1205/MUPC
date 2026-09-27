@@ -62,6 +62,11 @@ pub struct AiIntegrator {
     tai_storage: Option<Arc<TaiStorageStrategy>>,
     /// 本地策略优先开关（生产唯一模式，AI 引擎暂停 2026-09-09）：true = dispatch 直达本地台区
     /// 储能治理下发，AI 分支不可达。
+    ///
+    /// **默认值必须与部署默认一致 = `true`**（D-20）：`CoreConfig::ai_engine.local_priority`
+    /// 的 serde 默认同样是 `true`（`core_config.rs::default_local_priority`）。旧实现此处
+    /// 默认 `false`，与部署默认相反 ⇒ 任何未显式注入的实例（含测试与旁路装配）会走 AI 分支，
+    /// 而 AI 停用期模型不加载 ⇒ `dispatch_ai_decision` 恒 `Err(ModelNotLoaded)` = 零控制输出。
     local_priority: RwLock<bool>,
     /// AI 指令安全校验器（安全闸门）：dispatch 前校验 AI 指令，不通过降级本地兜底（PRD §1.2/§6）
     validator: RwLock<Option<Arc<dyn AiCommandValidator>>>,
@@ -136,7 +141,8 @@ impl AiIntegrator {
             bms_soc: RwLock::new(None),
             soc_stale_warned: std::sync::Mutex::new(None),
             tai_storage: None,
-            local_priority: RwLock::new(false),
+            // D-20：与部署默认一致（`CoreConfig` 缺省 true）；见字段文档
+            local_priority: RwLock::new(true),
             validator: RwLock::new(None),
             decision_sink: RwLock::new(None),
             last_sent_tai: std::sync::Mutex::new(None),
@@ -245,37 +251,47 @@ impl AiIntegrator {
         // S3b-1d 实时回落完全一致：BMS fresh → Bms；BMS 非 fresh → 无条件活读核间 latest_soc
         // fresh → PcsReg1010；双失 → 沿用冻结 existing（不置 None，避免落默认 50）。
         let r = self.resolve_soc_core(data.battery.soc).await;
-        if r.dual_lost {
-            // 双源皆失：resolve 沿用冻结 existing（非实时 SOC），soc_protect 剪带基于旧值。
-            // 节流 warn（每 30s 一拍）让运维可见"控制正基于非实时 SOC"，避免全程静默降级。
-            // 锁内仅判时 + 更新计时，guard 出块即释放；warn 在锁外发射（避免持锁发射期间
-            // panic → Mutex 中毒 → 每周期 .unwrap() 硬崩溃）。unwrap_or_else 容忍中毒恢复。
-            let now_i = std::time::Instant::now();
-            let should_warn = {
-                let mut w = self
+        // D-2：告警面覆盖**两类**非实时态——
+        // ① `dual_lost`：双源皆失但有冻结值（沿用旧值驱动保护，非实时）；
+        // ② `value_pct == None`：连冻结值都没有 ⇒ 下游 `TaiStorageStrategy` 将**拒绝下发**。
+        // 旧实现把 ② 归为"正常无 SOC 态（不告警）"，于是零控制输出全程静默。
+        // 节流复用同一个 `soc_stale_warned` 槽（30s 一拍）：同一 SOC 通路故障不重复刷屏。
+        // 锁内仅判时 + 更新计时，guard 出块即释放；warn 在锁外发射（避免持锁发射期间
+        // panic → Mutex 中毒 → 每周期 .unwrap() 硬崩溃）。unwrap_or_else 容忍中毒恢复。
+        let alert: Option<&'static str> = if r.dual_lost {
+            Some("SOC 双源皆失（BMS 超期 + 核间不可达/超期），沿用冻结值驱动保护——请检查 BMS 站与核间 SOC 通路")
+        } else if r.value_pct.is_none() {
+            Some("SOC 全缺（BMS/核间皆非 fresh 且无可用冻结值）⇒ 台区储能拒绝下发设定（分相 P/Q=0）——请检查 BMS 站与核间 SOC 通路")
+        } else {
+            None
+        };
+        match alert {
+            Some(msg) => {
+                let now_i = std::time::Instant::now();
+                let should_warn = {
+                    let mut w = self
+                        .soc_stale_warned
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let due = w.map_or(true, |t| {
+                        now_i.saturating_duration_since(t) > Self::SOC_STALE_WARN_INTERVAL
+                    });
+                    if due {
+                        *w = Some(now_i);
+                    }
+                    due
+                };
+                if should_warn {
+                    tracing::warn!(soc = ?r.value_pct, "{msg}");
+                }
+            }
+            None => {
+                // 任一源 fresh：降级态解除——复位节流计时（正常源接管后立即恢复可观测性）
+                *self
                     .soc_stale_warned
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let due = w.map_or(true, |t| {
-                    now_i.saturating_duration_since(t) > Self::SOC_STALE_WARN_INTERVAL
-                });
-                if due {
-                    *w = Some(now_i);
-                }
-                due
-            };
-            if should_warn {
-                tracing::warn!(
-                    soc = ?r.value_pct,
-                    "SOC 双源皆失（BMS 超期 + 核间不可达/超期），沿用冻结值驱动保护——请检查 BMS 站与核间 SOC 通路"
-                );
+                    .unwrap_or_else(|e| e.into_inner()) = None;
             }
-        } else {
-            // 任一源 fresh（或纯无 SOC 态）：降级态解除——复位节流计时（正常源接管后立即恢复可观测性）
-            *self
-                .soc_stale_warned
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
         }
         data.battery.soc = r.value_pct;
     }
@@ -769,7 +785,11 @@ fn resolve_soc_source(
 
 /// 双源皆失降级态判定（纯逻辑，可单测，S3b-1d）：BMS 与核间均非 fresh（无/超期）时 resolve 将
 /// 回落 existing 冻结值；此时若 existing 非 None（有旧 SOC 在驱动保护）→ 降级态成立，应节流 warn。
-/// existing 为 None 是正常无 SOC 态（启动早期/纯无 SOC 场景），非降级残留，不 warn。
+///
+/// `existing` 为 None 是**「无 SOC 可驱动」**（无新鲜源且无冻结值）——它不再是"静默正常态"：
+/// 该情形由 [`AiIntegrator::apply_soc_source`] 的**另一条**告警分支覆盖，且下游
+/// `TaiStorageStrategy` 会据此**拒绝下发**（D-2）。本函数仍只表达"冻结值在驱动保护"这一
+/// 单一语义（展示侧 `SocResolved::dual_lost` 亦以此为准，故不改）。
 fn is_dual_source_lost(
     bms: Option<(f64, std::time::Instant)>,
     intercore: Option<(f64, std::time::Instant)>,
@@ -813,6 +833,60 @@ mod tests {
     fn test_ai_integrator_creation() {
         let integrator = AiIntegrator::new();
         assert!(!integrator.is_ready_blocking());
+    }
+
+    /// **D-20**：`AiIntegrator::new()` 的 `local_priority` 默认值必须与部署默认一致（`true`）。
+    ///
+    /// 改坏实现会怎样红：默认改回 `false` ⇒ 任何未显式注入的实例走 AI 分支，而 AI 停用期
+    /// 模型不加载 ⇒ `dispatch_ai_decision` 恒 `Err(ModelNotLoaded)` ⇒ 本地兜底不执行 =
+    /// 零控制输出（这正是两处默认值相反所掩盖的缺陷）。
+    #[tokio::test]
+    async fn new_defaults_local_priority_true() {
+        let i = AiIntegrator::new();
+        assert!(
+            i.is_local_priority().await,
+            "new() 默认须 = 部署默认（CoreConfig 缺省 true）：本地策略优先"
+        );
+        assert_eq!(
+            i.raw_status().await,
+            ModelStatus::Unloaded,
+            "前提：AI 停用期模型未加载（default 为 true 才是唯一安全默认）"
+        );
+    }
+
+    /// **D-2（冻结值写回）**：`apply_soc_source` 必须在包上留下**裁决后**的 SOC——
+    /// ① 双源皆失**但有冻结 existing** ⇒ 写回冻结值（`Some`）⇒ 下游照常驱动；
+    /// ② 无新鲜源**且无冻结值** ⇒ 保持 `None` ⇒ 下游拒绝下发 + 告警。
+    ///
+    /// 改坏实现会怎样红：把 ① 也置 `None`（"非 fresh 即拒"）⇒ 冻结值被丢弃、控制归零；
+    /// 把 ② 填默认 50.0 ⇒ 又是假值驱动 `soc_protect`（两种改法各让一条断言红）。
+    #[tokio::test]
+    async fn apply_soc_source_writes_back_frozen_or_none() {
+        // ① 冻结路径：latest_data 已带旧 SOC 30.0；BMS 超期；无 PCS 通道（核间不可达）
+        let i = AiIntegrator::new();
+        i.set_latest_data(create_test_pkg_with_soc(Some(30.0))).await;
+        i.set_battery_soc(65.5).await;
+        *i.bms_soc.write().await = Some((
+            65.5,
+            std::time::Instant::now()
+                - std::time::Duration::from_millis(mupc_data_processing::DATA_FRESHNESS_MS + 100),
+        ));
+        let mut pkg = create_test_pkg_with_soc(Some(30.0));
+        i.apply_soc_source(&mut pkg).await;
+        assert_eq!(
+            pkg.battery.soc,
+            Some(30.0),
+            "双源皆失但有冻结值：须写回冻结值供下游驱动（置 None 会让控制归零）"
+        );
+
+        // ② 全缺路径：无任何源、无冻结值
+        let j = AiIntegrator::new();
+        let mut pkg2 = create_test_pkg_with_soc(None);
+        j.apply_soc_source(&mut pkg2).await;
+        assert_eq!(
+            pkg2.battery.soc, None,
+            "无 fresh 源且无冻结值 ⇒ 保持 None（下游据此拒绝下发；不得填假值 50.0）"
+        );
     }
 
     #[test]
