@@ -459,6 +459,8 @@ mod control_tests {
                 read_slice: false,
                 interval_ms: None,
             }],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 

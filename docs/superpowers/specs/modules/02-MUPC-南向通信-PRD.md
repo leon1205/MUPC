@@ -353,6 +353,13 @@ impl ProtocolHandlerRegistry {
 
 ### 3.6 RS485 半双工控制（DE/RE GPIO）
 
+> 〔注（2026-09-27）：方向控制仅在配置 `de_gpio`/`re_gpio` 时生效；若现场收发器为自动换向，留空即可 —— 真机须确认。〕
+>
+> 落点（B-4 修复后）：`south_stations[].de_gpio|re_gpio`（站级）与 `south_pcs.de_gpio|re_gpio`
+> （PCS 独占口）→ `bus_config` → `rs485::Config` → `Rs485Device::set_dir`；调用点 =
+> `send_recv`（站级读/写路径）与 `transaction*`。两键**缺省留空 = 不驱动方向脚**
+> （自动换向收发器，也是既有部署现状）。
+
 RS485 为半双工通信，需要通过 GPIO 控制发送使能（DE）和接收使能（RE）。
 
 ```rust

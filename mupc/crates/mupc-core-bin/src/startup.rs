@@ -343,6 +343,10 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
 /// **口层控制面三项（超时/数据位/停止位）不在这里**：`StationConf` 无对应字段，故单列
 /// [`south_pcs_port_params`] 交给 `open_with_port_params`（Task 10 评审项 2 —— 这三项曾因
 /// 只有站壳路径而**全部不生效**）。
+///
+/// **`de_gpio` / `re_gpio` 在这里**（B-4，2026-09-27）：它们是**口线换向**参数、与波特率
+/// 同类（都在"报文字节级"之前生效），故随站壳透传，由 `bus_config` 落进 `rs485::Config`
+/// → `Rs485Device::set_dir`。缺省 `None` ⇒ 不驱动方向脚（自动换向收发器）。
 fn south_pcs_bus_conf(
     cfg: &mupc_southd::config::SouthPcsConfig,
 ) -> mupc_southd::config::StationConf {
@@ -356,6 +360,8 @@ fn south_pcs_bus_conf(
         parity: cfg.parity,
         interval_ms: cfg.interval_ms,
         regs: Vec::new(),
+        de_gpio: cfg.de_gpio,
+        re_gpio: cfg.re_gpio,
     }
 }
 

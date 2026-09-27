@@ -194,6 +194,15 @@ fn configure_port(&self, fd: RawFd) -> Result<(), Rs485Error> {
 
 ### 2.4 DE/RE GPIO 控制
 
+> 〔注（2026-09-27）：方向控制仅在配置 `de_gpio`/`re_gpio` 时生效；若现场收发器为自动换向，留空即可 —— 真机须确认。〕
+>
+> B-4 修复（2026-09-27 全项目审查 P2）后本节已可落地：配置键新增
+> `south_stations[].de_gpio|re_gpio` 与 `south_pcs.de_gpio|re_gpio`（均 `Option<u32>`，
+> 缺省留空），经 `port_runtime::bus_config` 落进 `rs485::Config`；`set_dir` 的调用点除
+> `transaction*` 外**新增 `send_recv`**（站级读/写实际路径 —— 此前它不经方向控制，
+> 属"配了也不生效"）。两键缺省 `None` ⇒ 不驱动方向脚（自动换向收发器）⇒ 既有部署
+> 行为零变化。**仍未验真机**：sysfs 写失败的表现是该口恒定无响应。
+
 RS485 为半双工通信，需要通过 GPIO 控制发送使能（DE）和接收使能（RE）。
 
 ```rust

@@ -102,6 +102,22 @@ pub struct StationConf {
     pub interval_ms: u64,
     #[serde(default)]
     pub regs: Vec<RegBlockConf>,
+    // ── B-4（2026-09-27 全项目审查 P2）：半双工方向控制引脚 ──
+    /// DE（Driver Enable，发送使能）GPIO 编号（sysfs 编号）。
+    ///
+    /// **默认留空 = 不驱动方向脚**（现场收发器为**自动换向**时的正确配置，也是既有部署的
+    /// 现状 ⇒ 缺省零行为变化）。仅在"手工换向收发器"板型下才需填：`Rs485Device::set_dir`
+    /// 会在每次收发事务前把 DE 置高、收发后把 RE 置低。
+    ///
+    /// ⚠️ 板型差异见两份 `deploy/config/*.yaml` 的同名注（BECG 板若为自动换向则留空）。
+    /// ⚠️ 同口各站物理共享一条总线 ⇒ 本字段应按口统一填写（不做跨站一致性校验：与
+    /// `baud_rate`/`parity` 的规则 16 不同，方向脚填错**不会**静默降级，而是表现为该口
+    /// 恒定无响应 —— 配置期无从判别，只能现场核对）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub de_gpio: Option<u32>,
+    /// RE（Receiver Enable，接收使能）GPIO 编号。语义见 [`StationConf::de_gpio`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_gpio: Option<u32>,
 }
 
 /// 寄存器块读取功能码（YAML: `holding` / `input` / `discrete`）。
@@ -258,6 +274,13 @@ pub struct SouthPcsConfig {
     /// （规则 P-4；实际覆盖项见 [`SouthPcsConfig::validate`] 的文档）。
     #[serde(default)]
     pub regs: Vec<RegBlockConf>,
+    /// DE（发送使能）GPIO —— 语义/缺省口径同 [`StationConf::de_gpio`]（B-4）。
+    /// 本段是**独占口**（规则 P-2），故该字段无"同口多站一致性"问题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub de_gpio: Option<u32>,
+    /// RE（接收使能）GPIO —— 语义/缺省口径同 [`StationConf::de_gpio`]（B-4）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re_gpio: Option<u32>,
 }
 
 impl Default for SouthPcsConfig {
@@ -274,6 +297,8 @@ impl Default for SouthPcsConfig {
             interval_ms: DEFAULT_INTERVAL_MS,
             response_timeout_ms: default_pcs_response_timeout_ms(),
             regs: Vec::new(),
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 }
@@ -461,6 +486,8 @@ impl SouthPcsConfig {
             parity: self.parity,
             interval_ms: self.interval_ms,
             regs: self.regs.clone(),
+            de_gpio: self.de_gpio,
+            re_gpio: self.re_gpio,
         }
     }
 }
@@ -3033,6 +3060,8 @@ mod south_pcs_tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![pcs_block()],
+            de_gpio: None,
+            re_gpio: None,
         });
         let err = c.validate().unwrap_err();
         assert!(err.contains("south_pcs"), "必须明确指向新段，实际: {err}");

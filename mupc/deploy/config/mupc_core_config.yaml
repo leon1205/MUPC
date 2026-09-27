@@ -37,7 +37,13 @@ south_pcs:
   stop_bits: 1
   parity: none
   interval_ms: 1000
-  response_timeout_ms: 200
+  response_timeout_ms: 200   # 下界 100ms（B-2：VTIME = 该值/100 向下取整，<100 会落 0 ⇒ read 立即返回）
+  # 半双工方向控制引脚（B-4，2026-09-27）。**BECG 板若为自动换向收发器则留空**（缺省即留空，
+  # 也是既有部署现状 ⇒ 零行为变化）。仅在"手工换向收发器"板型下才按板端 /sys/class/gpio 编号填：
+  # de_gpio 会在每次收发事务前被置高（发送使能），re_gpio 在收发后置低（接收使能）。
+  # ⚠️ 填错的表现是"该口恒定无响应"（不是静默降级），配置期无从判别 ⇒ 必须真机核对。
+  # de_gpio: 23
+  # re_gpio: 24
   regs: []          # enabled: true 时必填（见 production 模板的 pcs_3zone）
 
 # 【单元 K 已删除 `web_api:` 段】对外 HTTP 面（0.0.0.0:8080）随 `mupc-web-api` crate 整体移除，
@@ -191,6 +197,13 @@ strategy:
 # RC-5/RC-10 消防登记数与探测器地址序；RC-6 空调校验位）。各站 addr 基准亦须现场裁定
 # （RC-3）。
 # ⚠️ 各站串口不得与 `south_pcs.port`（PCS 主链路）同口（规则 P-2：PCS 独占该口）。
+# 【半双工方向控制 de_gpio/re_gpio（B-4，2026-09-27）】每站可填，**BECG 板若为自动换向
+# 收发器则留空**（缺省即留空 = 不驱动方向脚，既有部署现状 ⇒ 零行为变化）。仅"手工换向
+# 收发器"板型需按板端 /sys/class/gpio 编号填 de_gpio（发送使能，事务前置高）/ re_gpio
+# （接收使能，事务后置低）。⚠️ **同一口各站应统一填**（物理共享同一条总线）；填错的表现是
+# 该口恒定无响应（非静默降级），配置期无从判别 ⇒ 必须真机核对。示例：
+#     de_gpio: 23
+#     re_gpio: 24
 south_stations:
   poll_ms: 1000
   stale_timeout_s: 5

@@ -1261,6 +1261,8 @@ mod tests {
                 blk("u", 20, 6),
                 blk("i", 26, 6),
             ],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -1298,6 +1300,8 @@ mod tests {
                 read_slice: false,
                 interval_ms: None,
             }],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -1335,6 +1339,8 @@ mod tests {
                 read_slice: false,
                 interval_ms: None,
             }],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -1366,6 +1372,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms,
             regs: vec![blk("temp", 100, 2)],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -1734,6 +1742,8 @@ mod tests {
                     interval_ms: None,
                 },
             ],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -1806,6 +1816,8 @@ mod tests {
                     interval_ms: None,
                 },
             ],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -1880,6 +1892,8 @@ mod tests {
                     interval_ms: None,
                 },
             ],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -2042,6 +2056,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -2098,6 +2114,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![dblk("hvac_di", 0, 31)],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -2131,6 +2149,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![dblk("hvac_di", 0, 31)],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -2157,6 +2177,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![dblk("hvac_di", 0, 31)],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
 
@@ -2309,6 +2331,8 @@ mod tests {
                     interval_ms: None,
                 },
             ],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -2833,6 +2857,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![dblk("bms_alarm", 200, 288)],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         let with_bit = |k: usize| {
@@ -2878,6 +2904,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: vec![dblk("hvac_di", 0, 31)],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![st], bus.clone(), sink.clone());
         let with_bits = |ks: &[usize]| {
@@ -2962,6 +2990,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 500,
             regs: vec![blk("pcs_3zone", 0, 6)],
+            de_gpio: None,
+            re_gpio: None,
         };
         put_grid(&bus, 1);
         bus.put(5, 0, phase_regs(1.0, 2.0, 3.0));
@@ -3007,6 +3037,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 500,
             regs: vec![blk("pcs_3zone", 0, 6)],
+            de_gpio: None,
+            re_gpio: None,
         };
         bus.put(3, 100, f32_regs(23.5));
         let sched = build(
@@ -3079,6 +3111,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 500,
             regs: vec![blk("pcs_3zone", 0, 6)],
+            de_gpio: None,
+            re_gpio: None,
         };
         let sched = build(vec![pcs], bus.clone(), sink.clone());
         sched.tick_once(0).await;
@@ -3455,6 +3489,8 @@ mod tests {
                     interval_ms: fast.then_some(1000),
                 },
             ],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -3555,6 +3591,8 @@ mod tests {
                     interval_ms: None,
                 },
             ],
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -4235,6 +4273,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 500,
             regs: vec![blk("pcs_3zone", 0, 6)],
+            de_gpio: None,
+            re_gpio: None,
         };
         // cfg 序 = [hvac(prio 2), pcs(prio 1), grid(prio 0)] ⇒ 到期序须为 grid → pcs → hvac
         let stations = [
