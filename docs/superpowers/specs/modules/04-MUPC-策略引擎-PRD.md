@@ -1,10 +1,10 @@
 # MUPC 策略引擎模块产品需求文档（PRD）
 
-> 平台目标调整（2026-09-09）：台区储能治理（本地策略引擎 TaiStorage）升级为默认策略下发引擎（AI 暂停期唯一出口）；原"AI 失效兜底"定位保留——AI 恢复后回兜底位。核间 strategy_mode 对 TaiStorage 的命名（basic/local vs fallback）待产品追认。
+> 平台目标调整（2026-09-09）：台区储能治理（本地策略引擎 TaiStorage）升级为默认策略下发引擎（AI 暂停期唯一出口）；原"AI 失效兜底"定位保留——AI 恢复后回兜底位。南向 `strategy_mode` 对 TaiStorage 的命名（basic/local vs fallback）待产品追认。
 
 > 本文档为策略引擎模块的权威需求文档。
 
-> **文档当前范围：** 策略引擎已精简为**单一兜底策略「台区储能治理」**（AI 失效时经核间 V3 帧下发台区储能分相 P/Q）。原三策略——削峰填谷（§2）、需量控制（§3）、防逆流（§4）——已**废弃**，代码保留但不再编译；`pv_limit`/`load_shedding` 不再作为控制指令维度。以下 §2~§4 及对应验收标准（§11.1~§11.3）仅作历史追溯。
+> **文档当前范围：** 策略引擎已精简为**单一兜底策略「台区储能治理」**（AI 失效时经南向 `PcsHandle` 下发台区储能分相 P/Q）。原三策略——削峰填谷（§2）、需量控制（§3）、防逆流（§4）——已**废弃**，代码保留但不再编译；`pv_limit`/`load_shedding` 不再作为控制指令维度。以下 §2~§4 及对应验收标准（§11.1~§11.3）仅作历史追溯。
 
 ---
 
@@ -15,14 +15,14 @@
 策略引擎（Strategy Engine）是 MUPC 通信管理模块的**本地决策核心**，负责在 AI 引擎正常工作时担任"安全校验闸门"，在 AI 引擎失效时无缝接管控制，保障台区基本安全与运行。（2026-09-09 平台调整：现为默认策略；AI 恢复后回兜底位）
 
 **核心职责：**
-- 提供单一兜底策略：台区储能治理（AI 失效时经核间下发分相 P/Q）
+- 提供单一兜底策略：台区储能治理（AI 失效时经南向 `PcsHandle` 下发分相 P/Q）
 - 对 AI 引擎输出的指令进行安全校验（AiValidator）
 - 管理策略模式切换（AI 模式 / 本地兜底模式 / 基础模式）
 - 通过消息总线接收遥测数据，输出控制指令
 
 ### 1.2 策略模式（部署默认本地优先）
 
-**部署默认 = 本地优先模式**（`ai_engine.local_priority` 默认 true）：本地台区储能治理策略控制（分相 P/Q 经核间 V3 帧下发），AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考、**不下发核间指令**。需 AI 智能控制时置 `local_priority=false`（配置或 Web API 运行时切换）。
+**部署默认 = 本地优先模式**（`ai_engine.local_priority` 默认 true）：本地台区储能治理策略控制（分相 P/Q 经南向 `PcsHandle` 下发），AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考、**不下发 PCS 指令**。需 AI 智能控制时置 `local_priority=false`（配置或 Web API 运行时切换）。
 
 ```
 AI 控制模式（local_priority=false）下:
@@ -40,6 +40,8 @@ AI 引擎失效（AI 控制模式下）:
 | AI 智能模式 | LSTM/TCN + MADDPG/PPO | AiValidator 安全校验 | 配置 `local_priority=false` / Web API 切换 |
 | 本地兜底模式 | 台区储能治理 | 策略内置边界检查 | AI 失效/指令校验不通过（AI 控制模式下） |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
+
+〔注（2026-09-27）：本节首段与表内「Web API 切换 / 运行时切换」为**历史原文**——`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`（`CoreConfig.ai_engine.local_priority` 启动期读取一次），且该字段现被 `CoreConfig::validate` **拒绝取 `false`**（AI 停用期置 false = 静默零控制输出）。〕
 
 ### 1.3 目标平台
 
@@ -401,6 +403,8 @@ pub enum StrategyType {
 | Basic | 运维人员手动切换 | Intelligent / Fallback |
 | 本地优先 | Web API `PUT /api/v1/strategy-mode`（local_priority=false）或配置 false 重启 | AI 智能（恢复 AI 控制） |
 
+〔注（2026-09-27）：上表末行「Web API `PUT /api/v1/strategy-mode`」为**历史原文**——`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`（启动期读取 `CoreConfig.ai_engine.local_priority` 一次）。且该字段现被 `CoreConfig::validate` **拒绝取 `false`**，故该行实际不可达。〕
+
 ### 7.3 AI 集成器（AiIntegrator）
 
 负责管理 AI 模型生命周期，提供 AI 决策接口：
@@ -464,7 +468,7 @@ pub enum StrategyError {
 ### 9.1 整体数据流
 
 ```
-intercore (TCP/RJ45)
+mupc-southd（南向采集：grid 遥测）
     │
     ▼
 DataCollector → HighFrequencyTelemetry (1Hz)
@@ -485,12 +489,14 @@ AiCommandValidator (可插拔 AI 模型)
 ┌─────────────────────────────────────────────────────────────────┐
 │                    指令分发层（dispatch）                         │
 ├─────────────────────────────────────────────────────────────────┤
-│  AI: p_ref + k_droop    →  IntercoreClient  →  实时控制模块        │
-│  兜底: 台区储能分相 P/Q →  IntercoreClient  →  实时控制模块（V3 帧）│
+│  AI: p_ref + k_droop    →  PcsHandle  →  PCS（南向）               │
+│  兜底: 台区储能分相 P/Q →  PcsHandle  →  PCS（FC06 写 1006-1011）   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-> **说明**：AI 指令 `p_ref`/`k_droop` 与本地兜底指令（台区储能分相 `phase_p_set`/`phase_q_set`）均通过 `IntercoreClient` 下发至实时控制模块；兜底分相指令经核间 V3 帧转发至台区储能 PCS（60kW 双级式三相独立桥臂、无中线，分相 PQ 独立可控）。原 `pv_limit`/`load_shedding` 经 `SouthCommandDispatcher` 下发南向设备的分发通道随三策略废弃而移除。
+> **说明**：AI 指令 `p_ref`/`k_droop` 与本地兜底指令（台区储能分相 `phase_p_set`/`phase_q_set`）均通过南向 `mupc-southd::pcs::PcsHandle` 下发至 PCS（RS485 / Modbus RTU，FC06 写 4 区 1006-1011）；60kW 双级式三相独立桥臂、无中线，分相 PQ 独立可控。原 `pv_limit`/`load_shedding` 经 `SouthCommandDispatcher` 下发南向设备的分发通道随三策略废弃而移除。
+>
+> 〔注（2026-09-27）：原「均通过 `IntercoreClient` 下发至实时控制模块 / 经核间 V3 帧转发」为 PCS 迁出前的表述。PCS 通信与控制已于 2026-09-26 整体迁入南向（02 号设计 §13 / ADR-014·015·016），「V3 帧」现仅存于 `sim-bridge` TCP 仿真通道。〕
 
 ### 9.2 消息主题
 
@@ -498,7 +504,7 @@ AiCommandValidator (可插拔 AI 模型)
 |------|--------|--------|------|
 | `telemetry.high_freq` | DataCollector | strategy-engine | 高频遥测数据 |
 | `telemetry.fault` | FaultRecorder | 外部 | 故障事件 |
-| `strategy.command` | strategy-engine | intercore | 控制指令（p_ref/k_droop / 台区储能分相 P/Q） |
+| `strategy.command` | strategy-engine | 南向 `PcsHandle`（原 intercore） | 控制指令（p_ref/k_droop / 台区储能分相 P/Q） |
 | `strategy.decision` | strategy-engine | DataReporter | 策略决策结果 |
 
 ### 9.3 模块依赖
@@ -646,7 +652,7 @@ pub struct ControlCommand {
     pub phase_q_set: Option<[f64; 3]>,       // 台区储能分相无功设定 (kVAr)，仅由台区储能治理策略设置
 }
 
-> **说明**：AI 决策动作（`p_ref`/`k_droop`）经核间 `DualParamCommand` 下发，不写入 `ControlCommand`；`ControlCommand.p_batt_set` 供 AI 指令校验（AiCommandValidator）与台区储能策略共模输出使用。
+> **说明**：AI 决策动作（`p_ref`/`k_droop`）经南向 `PcsHandle::send_dual_param`（`DualParamCommand`）下发，不写入 `ControlCommand`；`ControlCommand.p_batt_set` 供 AI 指令校验（AiCommandValidator）与台区储能策略共模输出使用。
 
 pub enum CommandType {
     SwitchControl,      // 开关控制
@@ -659,7 +665,7 @@ pub enum CommandType {
 
 | 策略 | cmd_id | 说明 |
 |------|--------|------|
-| 台区储能治理 | 4 | 固定 ID（AI 失效兜底，经核间 V3 帧下发分相 P/Q） |
+| 台区储能治理 | 4 | 固定 ID（AI 失效兜底，经南向 `PcsHandle` 下发分相 P/Q） |
 | 保留 | 5-10 | 供 Phase 2+ 扩展策略使用 |
 
 ## 附录 C：术语表
@@ -671,7 +677,7 @@ pub enum CommandType {
 | FallbackStrategy | 兜底策略 trait，所有策略实现此接口 |
 | SOC | 电池荷电状态（%） |
 | PV | 光伏（Photovoltaic） |
-| 台区储能治理 | 单一兜底策略，AI 失效时经核间 V3 帧下发台区储能分相 P/Q |
+| 台区储能治理 | 单一兜底策略，AI 失效时经南向 `PcsHandle` 下发台区储能分相 P/Q |
 
 ---
 ## 附录：版本演进
