@@ -926,26 +926,35 @@ pub enum FwOtaState {
 
 ## 4. 系统监控设计
 
-> **⚠️ 部署形态订正（2026-09-27）—— 本章及 §6 的「进程」口径与实现不符，务必先读本块**
+> **⚠️ 口径改造（2026-09-27 裁定，U-164）—— 本章及 §6 的「进程」表述按本块换算**
 >
-> 本章与 §6 多处按「一个模块 = 一个独立进程」表述（关键进程列表、按角色 RSS、`oom_score_adj`、
-> 重启优先级、`restart_priority` 配置等）。**实际部署只有两个生产进程**：
+> 本章与 §6 原文多处按「一个模块 = 一个独立进程」表述（关键进程列表、按角色 RSS、`oom_score_adj`、重启优先级、`restart_priority` 配置等）。**实际部署只有两个生产进程**：
 >
 > | 生产进程 | 载体 | systemd 单元 |
 > |----------|------|--------------|
 > | `mupcd` | `mupc-core-bin`；**`gateway` / `intercore` / `strategy-engine` / `data-processing` / `ai-engine` / `mupc-storage` / `system-monitor` / `ota-update` / `mupc-southd` / `mupc-io` / `mupc-wireless` 全部是它内部的库**，不是独立进程 | `deploy/systemd/mupcd.service` |
 > | `mupc-local-display` | `local-display`（12 号渲染端） | `deploy/systemd/mupc-display.service` |
 >
-> 另有**非生产** bin：`pcs_slave`（feature `pcs-slave-bin` 门控，**默认不构建**）、`mupc-sim-bridge`（11 号仿真/HIL 工具）。
-> `rs485-plugin` / `hplc-plugin` 以 **cdylib 由 `plugin-loader` 运行期加载**，也不是进程。
+> 另有**非生产** bin：`pcs_slave`（feature `pcs-slave-bin` 门控，**默认不构建**）、`mupc-sim-bridge`（11 号仿真/HIL 工具）。`rs485-plugin` / `hplc-plugin` 以 **cdylib 由 `plugin-loader` 运行期加载**，也不是进程。
 >
-> ⇒ 因此：
-> 1. **「关键进程列表」中的 `intercore` 不存在对应进程** —— `mupc-intercore` 是 `mupcd` 内的库（其 PCS 面已于 2026-09-26 迁出，见 02 号设计 §13）。
+> **改判为三层分工**（PRD 侧见 07 PRD §4.2）：
+>
+> | 层 | 监控对象 | 承担者 | 实现落点 |
+> |----|---------|--------|---------|
+> | **进程级** | `mupcd` / `mupc-local-display` | **systemd** | `deploy/systemd/`（`Restart` / `RestartSec` / `StartLimitBurst` / `MemoryMax`），**已就位；`mupcd` 内不重复实现** |
+> | **服务级** | `mupcd` 内的子系统 | **`ServiceCoordinator`** | `mupc-core/src/service_coord{,_impl}.rs`（注册表 + 状态位）+ **装配层巡检任务**（`mupc-core-bin/src/service_health.rs`，周期 15 s） |
+> | **跨进程** | `mupc-local-display` | `mupcd` | display 通道连接态（12 号已声明进程隔离） |
+>
+> **改判根因**：`system-monitor` 是 `mupcd` **内部的库**，监控/重启 `mupcd` 自己会随之一同消失 ⇒ 原「关键进程存活检测 / 自动重启 / 按优先级重启」在本架构下**结构性不可实现**（不是"没做"）。
+>
+> **细节更正**：
+> 1. **「关键进程列表」中的 `intercore` 不存在对应进程** —— `mupc-intercore` 是 `mupcd` 内的库（其 PCS 面已于 2026-09-26 迁出，见 02 号设计 §13）；它**仍作为服务注册**，但**不列入巡检判据集合**（无「可用/不可用」可言）。
 > 2. 列表中的 **`web-api` 已整删**（08 号 SUPERSEDED）。
-> 3. **按角色 RSS / 按进程 `oom_score_adj` / 按进程重启优先级 / `restart_priority` 配置**：在当前部署形态下**无对应对象**；这些是**多进程假设下的预留设计**。
+> 3. **按角色 RSS / 按进程 `oom_score_adj` / 按进程重启优先级 / `restart_priority` 配置**：在当前部署形态下**无对应对象** —— 只能 **per-unit**（`MemoryMax` / `oom_score_adj`），进程**内**的角色只能**测量**不能单独处置。这些是**多进程假设下的预留设计**。
 > 4. `system-monitor` 的**进程守护与自愈动作当前未实现** —— 自愈动作**如实返回 `success:false` 与「【未实现】」标记**（`system-monitor/src/self_healing.rs`，2026-09-27 修复前为谎报 `success:true`）。相关缺陷见技术债台账。
+> 5. **停用/框架态服务不参与告警（硬约束）**：`security` / `ai_engine` / `ota_update` / `wireless` 注册时状态即 `Stopped`，而健康判据**只把 `Failed` 计为不健康** ⇒ `Stopped` 天然不告警；**不得**把 `Stopped` 当 `Failed`。
 >
-> 下文各处的「进程」**保留原文以述原设计**，阅读时按上表换算为「`mupcd` 内的模块」。
+> 下文各处的「进程」**保留原文以述原设计**，阅读时按上表换算为「`mupcd` 内的模块」或「单元」。
 
 ### 4.1 整体架构
 
@@ -1102,12 +1111,43 @@ CREATE INDEX idx_metric_timestamp ON metrics(metric_name, timestamp);
 | 数据类型 | 保留期限 | 清理策略 |
 |---------|---------|---------|
 | 内存/CPU/磁盘监控历史 | **30 天** | 每日凌晨清理 |
-| 进程重启记录 | **90 天** | 按时间戳轮转 |
+| ~~进程重启记录~~ → **服务异常 / 单元重启记录** | **90 天** | 按时间戳轮转（**单元**重启记录来源 = **systemd journal**；**服务**异常记录由 §4.7 的服务级巡检产生） |
 | 模型 OTA 更新历史 | **30 天** | 按记录数轮转 |
 | 固件升级历史 | **3 年** | 最多保留 1000 条 |
 | 告警记录 | **1 年** | 按日期分文件 |
 | 运行日志（tracing） | **90 天** | 每日轮转，压缩后保留 |
 | B 分区保留（回滚前） | **7 天**或到下次升级 | 空间回收 |
+
+### 4.7 服务级健康巡检（新增，2026-09-27 / U-164）
+
+**落点**：`mupc-core-bin/src/service_health.rs`（装配层）。**镜像 `storage_health.rs` 的形状**：周期任务 + **纯函数判据**（可单测）+ **边沿触发告警**。
+
+**为什么在装配层而不是 `system-monitor`**（与 `storage_health.rs` 同款依赖方向理由）：判据来源（`PcsHandle` / `WriteGate` / `Iec104Server` / display 通道 / `LatestValues`）**全部在装配层可见**；让 `system-monitor` 依赖 `mupc-southd` / `mupc_storage` 是**倒向边**。
+
+**周期** `15_000 ms`（对齐 07 PRD §4.2.1「每 15 秒」；与 `storage_health` 的 1 s **刻意不同**——那是 03 号的需求数值）。
+
+**探针清单**（服务 → 判据来源）：
+
+| 服务 | 判据来源 | 位置 |
+|---|---|---|
+| `pcs` | `PcsHandle::is_connected()` | `mupc-southd/src/pcs/collect.rs:67` |
+| `storage` | `WriteGate::{is_degraded, disk_known}` | `storage/src/write_gate.rs:146,156` |
+| `gateway` | `Iec104Server::connection_count()` | `gateway/src/iec104/server.rs:514` |
+| `hmi_backend` | display 通道连接态（同 `display_host.rs` 的 `iec104_link_state` 模式） | `mupc-core-bin/src/display_host.rs:266` |
+| `data_processing` | `LatestValues::station_is_active("grid_meter", now_ms)` —— 即 **03 PRD R-11.6-D2 的「刷新活性」** | `data-processing/src/latest_values.rs:229` |
+| `intercore` | **显式排除出巡检集合**（生产路径无消费者，无「可用/不可用」可言） | — |
+| `ai_engine` / `security` / `ota_update` / `wireless` | 不做探针，保持注册时的 `Stopped` ⇒ **天然不告警** | — |
+| `message_bus` / `strategy_engine` / `plugin_loader` / `system_monitor` | 进程内组件，无独立失败面 ⇒ 保持 `Running` | — |
+
+**三条硬不变量（实现时不得违反）**：
+
+1. **`Stopped` 不得当 `Failed`** —— 否则四个停用/框架态服务**恒告警**
+2. **持续态不投告警** —— 同一服务连续不健康只在**进入边沿**投**恰好 1 条**（`AlertFeed` **只有入、没有 ack/清除面**，每拍投即告警风暴；口径与理由同 `storage_health.rs` 模块头）
+3. **恢复只记日志** —— 退出边沿不投告警（否则与「又发生一次」无法区分）
+
+**退出契约**：句柄入 **`cooperative_tasks`**（协作退出名单），与 `storage_health_timer` / `flush_timer` / `grid_agg_timer` **同名单**；**不得**放 `background_tasks`（abort 名单）。
+
+**状态写者唯一**：巡检任务是 `ServiceCoordinator` 服务状态的**唯一写者**（`update_service_status`），覆盖装配期 `register_service` 登记的初值。
 
 ---
 
@@ -1226,31 +1266,38 @@ cgroup 配置路径: /sys/fs/cgroup/mupc/
 
 | 资源类型 | 限制 | 超限处置 |
 |---------|------|---------|
-| 进程 RSS（按角色） | gateway: 256MB, intercore: 128MB, strategy-engine: 512MB, data-processing: 256MB, ai-engine: 1024MB, web-api: 128MB | 打印堆栈后重启该进程 |
-| 文件描述符数（单进程） | 4096 | 记录 WARNING 告警 |
+| ~~进程 RSS（按角色）~~ → **单元内存**（`MemoryMax`） | `mupcd`: **512MB** / `mupc-display`: **128MB**（`deploy/systemd/` 已配） | **由 systemd / cgroup 处置**（重启归 systemd） |
+| **子系统内存/队列水位**（进程内**测量**） | 各子系统自报（`WriteBuffer` 缓冲上界 10000 条等） | **告警 + 拒绝新增负载**（**不得**写「重启该进程」——单进程下重启即整个 `mupcd`） |
+| 文件描述符数（单元） | 4096 | 记录 WARNING 告警 |
 | 打开文件数（全系统） | 65536 | 记录 CRITICAL 告警 |
 | /tmp 占用 | 1GB | 清理 24 小时前临时文件 |
 | /var/log 单文件大小 | 100MB | 自动轮转 |
 
-- 所有资源限制通过 cgroup v2 在守护进程启动时设置
+- 所有资源限制通过 **systemd cgroup v2（per-unit）** 设置
 - 超限处置在检测到时间点 **10 秒内**执行
 
 ### 6.3 OOM 保护
 
-配置 `oom_score_adj` 确保守护进程和关键网络进程在 OOM 时不被优先杀死。
+配置 `oom_score_adj` 确保关键**单元**在 OOM 时不被优先杀死。
 
-| 进程角色 | oom_score_adj | 说明 |
+| 单元 | oom_score_adj | 说明 |
 |---------|--------------|------|
-| gateway, intercore | **-500** | 最低被杀概率 |
-| strategy-engine, ai-engine | **-200** | 重要决策进程 |
-| data-processing, web-api | **0** | 中等优先级 |
-| 辅助进程（日志轮转等） | **500** | 优先被杀 |
+| `mupcd` | **-500** | 最低被杀概率；承载实时控制与全部通信 |
+| `mupc-local-display` | **0** | 展示进程；崩溃可容忍，由 systemd `Restart=always` 拉起 |
 
-- OOM 事件发生后 **30 秒内**产生告警，记录被杀死进程名、RSS 使用量、系统可用内存
+- OOM 事件发生后 **30 秒内**产生告警，记录**被杀单元名**、RSS 使用量、系统可用内存
+- ~~`gateway` / `intercore` / `strategy-engine` / `ai-engine` / `data-processing` / `web-api` 的**分角色** `oom_score_adj`~~（**已作废**：OOM Killer 杀的是单元整体，无"只杀非关键角色"的粒度）
+- ~~辅助进程（日志轮转等）= 500~~（**已作废**：这些是 `mupcd` 内的**组件**，不是独立进程）
 
-### 6.4 进程自动重启
+### 6.4 进程自动重启（**委托 systemd**）
+
+> ⚠️ **本节原设计的 `ProcessRestarter` 不在 `mupcd` 内实现**（2026-09-27 裁定，U-164）：`system-monitor` 在 `mupcd` **内部**，重启 `mupcd` 自己会随之一同消失 ⇒ **结构性不可实现**。进程重启**由 systemd 执行**（`mupcd.service`: `Restart=on-failure` / `RestartSec=5` / `StartLimitInterval=60` + `StartLimitBurst=3`；`mupc-display.service`: `Restart=always` / `RestartSec=1` / `StartLimitBurst=10`）。MUPC 侧只做**记录与告警**。
+>
+> **服务级**的异常处置见 §4 的巡检任务（**告警 + 该服务降级**，**不重启进程**）。
 
 ```rust
+// 原设计（多进程假设）——保留以述原设计，**不实现**。
+// 单进程形态下的等价物 = systemd 的 Restart 策略 + 服务级告警。
 pub struct ProcessRestarter {
     processes: RwLock<HashMap<String, ProcessEntry>>,
     alert_dispatcher: AlertDispatcher,
@@ -1265,7 +1312,7 @@ pub struct ProcessRestarter {
 5. 确认存活
 6. 更新计数器
 
-**批量重启优先级：** gateway（最高）> intercore > strategy-engine > data-processing > web-api
+**~~批量重启优先级~~（已作废，2026-09-27）**：~~gateway（最高）> intercore > strategy-engine > data-processing > web-api~~ —— 该排序建立在多进程假设上；实际只有一个 `mupcd` 单元，**没有"按角色排序重启"这个操作**。若 `mupcd` 崩溃，systemd 拉起的是整个单元（其内部子系统由 §4 的巡检任务做**服务级**告警，不重启）。
 
 ### 6.5 磁盘自动清理
 
@@ -1279,12 +1326,12 @@ pub struct ProcessRestarter {
 
 | 场景 | 系统行为 |
 |------|---------|
-| 内存泄漏累积 72 小时未重启 | 进程 RSS 超限触发自动重启；ai-engine 先热切换至兜底策略再重启 |
-| 同时 3 个进程崩溃 | 守护进程按优先级排序重启（gateway 最高），全部在 120 秒内恢复 |
+| 内存泄漏累积 72 小时未重启 | **单元**内存超 `MemoryMax` ⇒ systemd/cgroup 处置、由 systemd 重启；若可归因到某子系统，经**服务级巡检**告警并令其**拒绝新增负载** |
+| ~~同时 3 个进程崩溃~~ → **`mupcd` 崩溃 / 服务级失败** | ① `mupcd` 崩溃 ⇒ systemd `Restart=on-failure` 拉起（`RestartSec=5`）；② 服务级失败（`mupcd` 存活但子系统不健康）⇒ **告警 + 该服务降级**（§4 巡检任务），**不重启进程** |
 | 磁盘写入失败（设备故障） | 降级运行：停止日志写入（降级为 stderr），继续执行控制指令 |
 | PCS 通道中断 | PCS 由 `mupc-southd::pcs::PcsHandle` 承载，连续采集失败判离线并告警。原「经核间心跳未回复后发送复位信号至实时控制模块」**未接线**（核间 TCP 通道生产路径无消费者） |
-| 多次自动重启仍失败 | 单进程连续 5 次重启失败后，转为 CRITICAL 告警，等待管理员介入 |
-| 守护进程自身崩溃 | 硬件看门狗在 60 秒后复位系统 |
+| 多次自动重启仍失败 | 由 **systemd** `StartLimitInterval` + `StartLimitBurst` 判定放弃（`mupcd`：60 秒内 3 次），单元进入 `failed`，等待管理员介入 |
+| 守护进程自身崩溃 | 硬件看门狗在 60 秒后复位系统（喂狗者在 `mupcd` 内 ⇒ 崩溃即无人喂狗） |
 | /var 分区只读 | 守护进程降级输出至 syslog，核心控制功能不中断 |
 
 ---
@@ -2142,3 +2189,4 @@ db_path = "/var/lib/mupc/monitor/timeseries.db"
 | 版本 | 主要变更 |
 |------|----------|
 | v1.0 | 从历史来源文档合并为统一设计文档 |
+| v1.1 | **进程→三层分工口径改造**（U-164 裁定，2026-09-27）：§4 章首的部署形态订正块**升级**为三层分工表（进程级 systemd / 服务级 `ServiceCoordinator` / 跨进程仅 display）+ 改判根因 + 五条细节更正；**新增 §4.7 服务级健康巡检**（落点 `mupc-core-bin/src/service_health.rs`、周期 15 s、探针清单、三条硬不变量、协作退出契约、状态写者唯一）；§4.6 数据保留表「进程重启记录」改为「服务异常 / 单元重启记录」；§6.2 RSS 表改 per-unit `MemoryMax` + 子系统水位；§6.3 `oom_score_adj` 整表改 per-unit；§6.4 `ProcessRestarter` 标注**不在 `mupcd` 内实现**（委托 systemd）并保留原设计以述原文；§6.4「批量重启优先级」标作废；§6.6 边界条件表同步。**未新增门禁标记** |
