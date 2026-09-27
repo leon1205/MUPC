@@ -1292,16 +1292,44 @@ pub async fn initialize_all(
             "startup",
         )
     })?;
-    let storage = Arc::new(mupc_storage::StorageService::new(Arc::new(pool)));
+    // ── U-74 审查 A-7 + B-1：写入闸门（DB 完整性降级 + 磁盘水位）──
+    //   闸门在 `storage` 内被 **5 个写入口 + 遥测缓冲**共用（判据与执行同侧）；本处只负责
+    //   ① 造闸门、② 跑 **启动期完整性自检**、③（下方步骤 12 的采集任务里）喂磁盘水位。
+    let write_gate = Arc::new(mupc_storage::WriteGate::new());
+    // A-7：`PRAGMA quick_check`（**只读**）。三分支：通过 / 检出损坏 / 自检本身跑不起来。
+    //   - 检出损坏 ⇒ **进入降级态**（此后拒一切写入）+ 告警 + error 日志，**不静默带病运行**；
+    //   - 自检跑不起来（连接/权限问题）⇒ 只 warn（**不降级**：无法区分"环境问题"与"库坏了"，
+    //     按"检出损坏"处理会把一次权限故障升级成整个存储停写）；
+    //   - **不做自动修复**（WAL 重建/备份恢复）—— 属独立立项。
+    match mupc_storage::integrity_check(&pool).await {
+        Ok(Ok(())) => tracing::info!("[DB 自检] PRAGMA quick_check 通过"),
+        Ok(Err(violations)) => {
+            write_gate.enter_degraded();
+            tracing::error!(
+                violations = %violations,
+                "DB 完整性自检失败 ⇒ **进入降级模式**（拒一切写入；本轮不做自动修复，须人工处置后重启）"
+            );
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "DB 完整性自检**无法执行**（连接/权限层问题）—— 不据此进入降级模式（无法区分环境问题与库损坏）"
+        ),
+    }
+    let storage = Arc::new(mupc_storage::StorageService::new_with_gate(
+        Arc::new(pool),
+        write_gate.clone(),
+    ));
     // U-67（03 设计 §4.4.2.3）：`WriteBuffer::new` 的容量/间隔改读 `storage:` 段配置。
     // **缺省 = 现实现**（1000 / 5000，`StorageSectionConfig::default()`）⇒ 零行为变化
     // （PRD R-11.3-C / STG-01）；非法值已在 `CoreConfig::validate_storage` 拒启动（STG-04）。
     // ⚠️ 容量口径沿革：设计 03:1321 曾写"100ms 或积累 100 条"，现以 `storage.batch_capacity`
     // 为准（默认 1000 = 变更前的硬编码值）。
-    let write_buffer = Arc::new(mupc_storage::WriteBuffer::new(
+    let write_buffer = Arc::new(mupc_storage::WriteBuffer::new_with_gate(
         config.storage.batch_capacity as usize,
         config.storage.flush_interval_ms,
         storage.pool().clone(),
+        mupc_storage::services::DEFAULT_MAX_BUFFERED_POINTS,
+        write_gate.clone(),
     ));
     // ── U-69（03 设计 §4.4.4 / §4.4.2.3）：总表电气量 1 分钟聚合落库 ──
     // 聚合器实例**在此创建**（而非 `SouthSink` 构造处）：故障 tick 任务要在下面与 `flush_timer`
@@ -2243,7 +2271,16 @@ pub async fn initialize_all(
     ));
     let threshold_analyzer = mupc_system_monitor::ThresholdAnalyzer::default();
     let metrics_bg = metrics_store.clone();
+    // ── U-74 审查 B-1：把磁盘水位喂给写入闸门 + 档位升级告警 ──
+    //   数据源 = 本任务采集的 `SystemSnapshot.disk`（**可信源**：WP3 已把它改成 `Option`，
+    //   采集失败即 `None`）。`None` ⇒ **不判定、不告警**（保持上一档）—— 不得按 0% 处理，
+    //   否则高水位保护会在采集链路自身出问题时失效（那正是最需要它的时候）。
+    let gate_for_metrics = write_gate.clone();
+    let alert_feed_for_metrics = alert_feed.clone();
     guard.0.push(tokio::spawn(async move {
+        // `None` = **尚未定档**（与"已定档为 Normal"区分：首次读到正常水位不必告警，
+        // 首次就读到 ≥85% 则必须告警）
+        let mut last_disk_level: Option<mupc_storage::DiskLevel> = None;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
             match collector.collect().await {
@@ -2261,6 +2298,36 @@ pub async fn initialize_all(
                     );
                     if let Err(e) = metrics_bg.store(&snapshot).await {
                         tracing::warn!("保存系统指标失败: {}", e);
+                    }
+                    // B-1：喂水位（`None` ⇒ `set_disk_usage` 返回 `None` ⇒ 本节整块跳过）
+                    if let Some(now_level) = gate_for_metrics
+                        .set_disk_usage(snapshot.disk.as_ref().map(|d| d.usage_percent))
+                    {
+                        match crate::storage_health::disk_level_transition_alert(
+                            last_disk_level,
+                            now_level,
+                        ) {
+                            Some((level, msg)) => {
+                                tracing::warn!(
+                                    disk_level = now_level.as_str(),
+                                    gate = %gate_for_metrics.status_line(),
+                                    "{msg}"
+                                );
+                                alert_feed_for_metrics.push_system_alert(level, &msg);
+                            }
+                            None if last_disk_level.is_some_and(|p| now_level < p) => {
+                                // 回落：**只记日志不投告警**（同 `StorageHealthWatch` 的恢复口径 ——
+                                // `AlertFeed` 只有入、没有清除面，投一条会被读成"又发生了一次"）
+                                tracing::info!(
+                                    disk_level = now_level.as_str(),
+                                    "磁盘水位回落 ⇒ 写入闸门自动恢复"
+                                );
+                            }
+                            None => {}
+                        }
+                        last_disk_level = Some(now_level);
+                    } else {
+                        tracing::debug!("磁盘指标不可用 ⇒ 本拍不做水位判定（保持上一档，不按 0% 处理）");
                     }
                     // 自愈：分析指标 + 登记自愈动作
                     if let Ok(analysis) = threshold_analyzer.analyze(&snapshot) {
@@ -3878,6 +3945,44 @@ stations:
         assert!(
             production.contains("mqtt: mqtt_outcome.publisher.clone()"),
             "MQTT 源须接装配交回的 publisher（A-5；未启用时该字段为 None ⇒ 打 n/a 而非 0）"
+        );
+    }
+
+    /// **U-74 审查 A-7 + B-1：写入闸门必须在装配段真的被造、被喂、被接线。**
+    ///
+    /// 三条合起来才是"降级/停写不是死码"：
+    /// ① 启动期跑 `integrity_check` 且失败即 `enter_degraded`；
+    /// ② `StorageService` / `WriteBuffer` 都拿**同一个**闸门实例（新造一个 = 判据与执行分家）；
+    /// ③ 系统指标采集任务把 `snapshot.disk`（`Option`）**逐拍喂**给闸门。
+    ///
+    /// **改什么会变红**：删掉 `integrity_check` 调用、把 `new_with_gate` 换回 `new`
+    /// （闸门不生效 ⇒ B-1/A-7 全成死码）、或不再喂水位。
+    #[test]
+    fn write_gate_is_created_fed_and_wired() {
+        let production = production_src();
+        assert!(
+            production.contains("mupc_storage::integrity_check(&pool)"),
+            "启动期须跑 DB 完整性自检（A-7）"
+        );
+        assert!(
+            production.contains("write_gate.enter_degraded();"),
+            "自检检出损坏须**进入降级态**（否则降级模式是死码）"
+        );
+        assert!(
+            production.contains("mupc_storage::StorageService::new_with_gate("),
+            "StorageService 须带闸门（否则事件/故障/决策/台账 4 个入口不受 ≥98% 与降级约束）"
+        );
+        assert!(
+            production.contains("mupc_storage::WriteBuffer::new_with_gate("),
+            "WriteBuffer 须带闸门（时序写入的停写点）"
+        );
+        assert!(
+            production.contains(".set_disk_usage(snapshot.disk.as_ref().map(|d| d.usage_percent))"),
+            "磁盘水位须逐拍喂闸门（B-1；`Option` ⇒ 采集失败不判定、不按 0% 处理）"
+        );
+        assert!(
+            production.contains("crate::storage_health::disk_level_transition_alert("),
+            "档位升级须投告警（不静默）"
         );
     }
 
