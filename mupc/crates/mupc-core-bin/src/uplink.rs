@@ -313,6 +313,8 @@ struct UplinkPointJson {
     /// 通道掩码原值（`0b01`=IEC104 / `0b10`=MQTT / `0b11`=BOTH）
     channels: u8,
     label: String,
+    /// 工程单位（与上送载荷 `u` 同源；空串 = 无量纲/位点）
+    unit: &'static str,
 }
 
 impl From<&UplinkPoint> for UplinkPointJson {
@@ -332,6 +334,7 @@ impl From<&UplinkPoint> for UplinkPointJson {
             },
             channels: p.channels.0,
             label: p.label.to_string(),
+            unit: p.unit,
         }
     }
 }
@@ -960,43 +963,23 @@ pub fn mqtt_point_count(plan: &[StationPlan]) -> usize {
 
 // ───────────────────────────── 载荷（§9.3.4） ─────────────────────────────
 
-/// 单位解析（§9.3.4 的 `u`）。
+/// 上送单位（§9.3.4 的 `u`）——**取点表逐点登记的字段，不做任何 label 解析**。
 ///
-/// **口径**：位点恒为 `"bool"`；标量点取点表 `label` 的**尾 token 白名单**（如
-/// `"簇累计充电电量 kWh"` ⇒ `kWh`）。**未识别 ⇒ 空串**（如实表达"点表未登记单位"，
-/// **不臆造**）。登记为已知边界：02 PRD §9.7.5 是**设备级**单位表、无点级机读表，
-/// 故机械来源只能是 label 尾 token；观测量级的覆盖率见单测。
-pub fn unit_of(kind: UplinkKind, label: &str) -> &'static str {
-    if matches!(kind, UplinkKind::Bit) {
+/// **口径（U-74 审查 A-1 订正）**：位点恒 `"bool"`（上送形态，非点表属性）；标量点直接返回
+/// [`UplinkPoint::unit`]（由 `mupc-southd::point_table::PointReg::unit` 逐点显式登记，
+/// 与 02 PRD §9.7.5 同源）。空串的语义 = **"本点无工程单位 / 无量纲"**（枚举、位图、PF、
+/// 位置编号、计数），**不是**"解析失败"—— 不再存在"解析失败"这一态。
+///
+/// **为什么废掉"`label` 尾 token 白名单"**（原实现，缺陷实证）：点表 `label` 的尾部普遍是
+/// 括注（`"簇组 SOC %（控制输入；点名 \`soc\`）"`）或单位写在括注之前 ⇒ 尾 token 落到
+/// `"…（控制输入；点名 \`soc\`）"`，白名单恒不中 ⇒ A 档 1 s 点的 `u` 落空串而
+/// PRD §8.3.3 标其必填。`grid` 6 点原走本文件的另一张 `grid_unit` 表（同一事实两处维护）
+/// ⇒ 已并入 `mupc-southd::uplink::GRID_DERIVED_6` 第 4 元。
+pub fn unit_of(p: &UplinkPoint) -> &'static str {
+    if matches!(p.kind, UplinkKind::Bit) {
         return "bool";
     }
-    unit_from_label(label).unwrap_or("")
-}
-
-/// 已知单位白名单（**02 PRD §9.7.5 出现的全部单位**；大小写敏感）。
-const KNOWN_UNITS: &[&str] = &[
-    "V", "A", "kW", "kvar", "kVA", "kWh", "kvarh", "Ah", "Hz", "%", "℃", "kPa", "ppm", "dB/M",
-];
-
-/// 取 label 的尾 token 并在白名单内匹配。
-fn unit_from_label(label: &str) -> Option<&'static str> {
-    let tail = label.split_whitespace().last()?;
-    KNOWN_UNITS.iter().copied().find(|u| *u == tail)
-}
-
-/// grid 6 点（§9.7 C-17 ② 的派生名）——**label 不含单位** ⇒ 显式单位表
-/// （依据 02 PRD §9.7.5：ADL400/meter_grid 电压 V、电流 A、功率 kW/kvar、PF 无量纲、频率 Hz）。
-fn grid_unit(metric: &str) -> Option<&'static str> {
-    match metric {
-        "active_power" => Some("kW"),
-        "reactive_power" => Some("kvar"),
-        "voltage" => Some("V"),
-        "current" => Some("A"),
-        // PF 无量纲：按 02 PRD §9.7.5 的分辨率口径（0.001）不带单位 ⇒ 空串，不臆造 "1"
-        "cos_phi" => Some(""),
-        "frequency" => Some("Hz"),
-        _ => None,
-    }
+    p.unit
 }
 
 /// 载荷点位（字段名/顺序 = §9.3.4 逐字）。
@@ -1370,13 +1353,9 @@ impl MqttUplinkPublisher {
                 any_configured = true;
             }
             ts_max = ts_max.max(ts_ms);
-            // grid 6 点用**显式单位表**（它们的 label 是"总有功功率（来源 …）"形态、无尾 token）；
-            // 其余站取点表 label 的尾 token（未识别 ⇒ 空串，不臆造）
-            let unit = if p.station == "grid_meter" {
-                grid_unit(&p.metric).unwrap_or_else(|| unit_of(p.kind, p.label))
-            } else {
-                unit_of(p.kind, p.label)
-            };
+            // 单位 = 点表逐点登记的字段（含 grid 6 点，见 GRID_DERIVED_6 第 4 元）——
+            // **全站同一条路径**，不再对 grid 站特判（那正是"同一事实两处维护"的成因，A-1）
+            let unit = unit_of(p);
             pts.push(PayloadPoint {
                 n: p.metric.clone(),
                 v: value,
@@ -1658,6 +1637,148 @@ mod tests {
     use mupc_data_processing::latest_values::{PointId, PointQuality, PointValue};
     use mupc_southd::config::{SouthPcsConfig, SouthStationsConfig};
     use mupc_southd::uplink::build_uplink_points;
+
+    /// A-1 判别力①：**A 档 22 点**（PCS 启用）的 `u` **逐点钉死**，且不得有任何一点空着
+    /// —— 值全部取自 `mupc-southd::point_table` 的显式 `unit` 字段（不由 `label` 尾 token 解析）。
+    ///
+    /// **改坏实现即红**（本轮实证）：把 `unit_of` 改回"label 尾 token 白名单"后，
+    /// `bms.soc`（label 以 `（控制输入；点名 \`soc\`）` 结尾）、`bms.bms_io_17`（单位写在括注
+    /// **之前**）、`bms.bms_meta_6` 三点落空串 ⇒ 本用例在第一条断言处失败。
+    #[test]
+    fn a_class_units_are_point_table_fields_not_label_tails() {
+        let pts = points();
+        // (station, metric, 期望单位) —— 22 项 == A 档点数（PCS 启用）
+        let expect: &[(&str, &str, &str)] = &[
+            // ② meter_batt（9）
+            ("meter_batt", "mb_power_7", "kW"),
+            ("meter_batt", "mb_power_15", "kvar"),
+            ("meter_batt", "mb_ui_1", "V"),
+            ("meter_batt", "mb_ui_2", "V"),
+            ("meter_batt", "mb_ui_3", "V"),
+            ("meter_batt", "mb_ui_4", "A"),
+            ("meter_batt", "mb_ui_5", "A"),
+            ("meter_batt", "mb_ui_6", "A"),
+            ("meter_batt", "mb_freq_line_1", "Hz"),
+            // ③ bms（4）—— 前 3 项是 A-1 的**原缺陷命中点**（改回尾 token 解析必红）
+            ("bms", "soc", "%"),
+            ("bms", "bms_io_16", "V"),
+            ("bms", "bms_io_17", "A"),
+            ("bms", "bms_meta_6", "kW"),
+            // ④ PCS（3）
+            ("pcs", "pcs_3zone_14", ""),
+            ("pcs", "pcs_3zone_33", "kW"),
+            ("pcs", "pcs_3zone_37", "kvar"),
+            // ① grid 6（派生名，单位随 `GRID_DERIVED_6` 第 4 元）
+            ("grid_meter", "active_power", "kW"),
+            ("grid_meter", "reactive_power", "kvar"),
+            ("grid_meter", "voltage", "V"),
+            ("grid_meter", "current", "A"),
+            ("grid_meter", "cos_phi", ""),
+            ("grid_meter", "frequency", "Hz"),
+        ];
+        // 期望表本身必须**恰好覆盖** A 档点集（防"漏断言某点"= 零判别力的半边）
+        let a_points: Vec<&UplinkPoint> = pts
+            .iter()
+            .filter(|p| p.class == SouthDataClass::A && p.channels.has(ChannelMask::MQTT))
+            .collect();
+        assert_eq!(a_points.len(), expect.len(), "A 档 MQTT 点数须与期望表等长");
+        for (station, metric, unit) in expect {
+            let p = pts
+                .iter()
+                .find(|p| p.station == *station && p.metric == *metric)
+                .unwrap_or_else(|| panic!("A 档点 {station}.{metric} 不在点表里"));
+            assert_eq!(
+                unit_of(p),
+                *unit,
+                "A 档点 {station}.{metric} 的 u 须为点表显式登记值（label=`{}`）",
+                p.label
+            );
+        }
+        // 除可数上例外，A 档**只允许两处**空单位：无量纲 PF 与枚举运行状态
+        let empty: Vec<String> = a_points
+            .iter()
+            .filter(|p| unit_of(p).is_empty())
+            .map(|p| format!("{}.{}", p.station, p.metric))
+            .collect();
+        assert_eq!(
+            empty,
+            vec!["grid_meter.cos_phi".to_string(), "pcs.pcs_3zone_14".to_string()],
+            "A 档空单位点须恰为「无量纲 PF + 枚举状态」两处"
+        );
+    }
+
+    /// A-1 判别力①（扩展）：**非 A 档**标量同样吃点表 `unit` 字段 —— 尤其覆盖三类
+    /// 原实现必失的点：单位**写在括注之前**、单位**写在括注之后**、括注里含假单位 token。
+    #[test]
+    fn scalar_units_come_from_point_table_across_all_stations() {
+        let pts = points();
+        let expect: &[(&str, &str, &str, &str)] = &[
+            // (station, metric, 期望单位, 该点的形态说明)
+            ("bms", "bms_io_21", "kΩ", "单位紧跟 label 末尾（原实现白名单**未收录** kΩ）"),
+            ("bms", "bms_term_1", "℃", "单位在**括注之后**：`簇端子温度 001（箱体 T1）℃`"),
+            ("bms", "bms_io_20", "%", "SOH（addr 119），同 `soc` 的括注形态"),
+            ("bms", "bms_cap_1", "Ah", "单位在括注之前：`簇累计充电容量 Ah（Q-16…）`"),
+            ("meter_batt", "mb_phase_12", "A", "零序电流，单位在括注之前"),
+            ("hvac", "hvac_in_1", "℃", "空调温度，单位在括注之前"),
+            ("hvac", "hvac_in_4", "%", "空调湿度"),
+            ("fire", "fire_det_4", "ppm", "探测器模板 +3（CO 浓度），单位在括注之前"),
+            ("fire", "fire_sys_2", "kPa", "消防钢瓶气压（addr 5）"),
+            ("pcs", "pcs_3zone_9", "V", "PCS BMS 系统总电压"),
+            ("pcs", "pcs_3zone_10", "A", "PCS BMS 系统总电流"),
+            ("pcs", "pcs_3zone_30", "kW", "PCS 输出有功功率 A 相"),
+            ("pcs", "pcs_3zone_43", "kWh", "PCS 交流累计充电电量"),
+            ("pcs", "pcs_3zone_75", "kWh", "PCS 直流累计放电电量"),
+        ];
+        for (station, metric, unit, why) in expect {
+            let p = match pts.iter().find(|p| p.station == *station && p.metric == *metric) {
+                Some(p) => p,
+                // 参考配置里没有该点名（如消防气压点），跳过而非静默通过
+                None => panic!("点 {station}.{metric} 不在参考点表里（{why}）—— 期望表写错了"),
+            };
+            assert_eq!(unit_of(p), *unit, "{station}.{metric}：{why}（label=`{}`）", p.label);
+        }
+    }
+
+    /// A-1 判别力②：**无单位的点 `u` 必须为空**（而不是被尾 token 猜成错值）；位点恒 `"bool"`。
+    #[test]
+    fn unitless_points_report_empty_and_bits_are_bool() {
+        let pts = points();
+        let empty_expect = [
+            ("grid_meter", "cos_phi", "PF 无量纲"),
+            ("pcs", "pcs_3zone_14", "运行状态枚举"),
+            ("pcs", "pcs_3zone_38", "A 相功率因数（label 含字母 A，**不是**单位安培）"),
+            ("bms", "bms_io_1", "簇状态枚举"),
+            ("bms", "bms_io_25", "最高单体电压**对应点**（位置编号，量纲无意义）"),
+            ("bms", "bms_meta_1", "程序版本号"),
+            ("bms", "bms_meta_2", "从控数量（计数，非物理单位）"),
+            ("meter_batt", "mb_phase_7", "PT 变比"),
+            ("fire", "fire_sys_6", "火警状态枚举"),
+            ("fire", "fire_det_3", "探测器数据 1（整字位域打包，无单一单位）"),
+        ];
+        for (station, metric, why) in empty_expect {
+            let p = pts
+                .iter()
+                .find(|p| p.station == *station && p.metric == *metric)
+                .unwrap_or_else(|| panic!("点 {station}.{metric} 不在参考点表里"));
+            assert_eq!(
+                unit_of(p),
+                "",
+                "{station}.{metric} 无工程单位（{why}）⇒ u 须为空串，不得臆造（label=`{}`）",
+                p.label
+            );
+        }
+        // 位点（含 BMS 告警位 / 聚合点）恒 `"bool"`，与点表 `unit` 空串无冲突
+        let bits: Vec<&UplinkPoint> = pts
+            .iter()
+            .filter(|p| p.kind == UplinkKind::Bit && p.channels.has(ChannelMask::MQTT))
+            .take(5)
+            .collect();
+        assert!(!bits.is_empty());
+        for p in bits {
+            assert_eq!(unit_of(p), "bool", "位点 {}.{} 须恒为 bool", p.station, p.metric);
+            assert_eq!(p.unit, "", "位点在点表侧须登记为空串（`bool` 是上送形态不是点属性）");
+        }
+    }
 
     /// 参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
     /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 在独立顶层段 [`REF_PCS`]（72 点）。

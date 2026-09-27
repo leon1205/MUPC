@@ -2050,6 +2050,7 @@ south_stations:
             offset,
             sym_src,
             label: "簇组电流 A",
+            unit: "A",
             signals: &[],
         }
     }
