@@ -77,6 +77,28 @@ pub const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// 依据不同、服务不同端点。
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// **编译期门禁（WP5 P2-B）**：读通道的体上限**必须**放得下协议能编出的最大帧。
+///
+/// # 为什么需要它（"静默不一致"的典型形态，不会自己暴露）
+///
+/// `display-proto` 的编 / 解码共用**单一**常量 `MAX_FRAME_BYTES`（`display-proto/src/frame.rs:38`），
+/// 而本模块的 `MAX_BODY_BYTES` 是**另一处**独立字面量 —— 两者此前靠**人工**保持一致。一旦上游
+/// 把帧上限调大（例如为容纳新的外设段），而此处未同步，故障形态是：
+///
+/// - **发布侧**（`mupcd`）按新上限编帧、**发得出去**；
+/// - **渲染侧**（本模块）把**完全合法**的帧判成 [`Error::BodyTooLarge`] —— 通道恒"失败"，
+///   屏上表现为「与主进程数据通道断开」，真因却是两侧常量漂移，日志里只有 body too large，
+///   **指向不了根因**。
+///
+/// 断言用 `>=`（而非 `==`）是**有意**的：本通道（帧）与控制通道（`console.rs` 的 256 KiB 回包）
+/// 服务不同端点、依据不同（见上方 `MAX_BODY_BYTES` 文档），两数**不必相等**；但读通道
+/// **至少**要装得下帧 —— 这条下界是硬契约。先例：`console.rs:132-134` 的同型门禁。
+///
+/// **改什么会让它变红**（编译期，实测）：把本文件的 `MAX_BODY_BYTES` 调小到
+/// `mupc_display_proto::MAX_FRAME_BYTES - 1`，或把上游 `MAX_FRAME_BYTES` 调大
+/// ⇒ `error[E0080]: evaluation of constant value failed`（证据见本轮报告）。
+const _: () = assert!(MAX_BODY_BYTES >= mupc_display_proto::MAX_FRAME_BYTES);
+
 /// 单拍内状态机最多推进的步数（防「对端持续可写 / 可读」把事件循环饿死）。
 /// 耗尽即收工、下一拍续推 —— **进度不丢**（已写字节 / 已读字节都留在 `Pending` 里）。
 const MAX_STEPS_PER_TICK: u32 = 64;
@@ -1217,6 +1239,57 @@ mod tests {
         c.begin(t0).expect("begin");
         let r = drive(&mut c, t0).expect("should finish");
         assert!(matches!(r, Err(Error::BodyTooLarge(_, _))), "got {r:?}");
+    }
+
+    /// **WP5 P2-B 的行为侧判别力用例**：`MAX_FRAME_BYTES` **整**（协议能编出的最大帧）必须
+    /// 被读通道**接受**；`+1` 必须被拒。
+    ///
+    /// 上方 `const _` 门禁只在**编译期**钉住"体上限 ≥ 帧上限"这条**数值**关系；本用例钉的是
+    /// **边界方向**本身 —— 即实现用的比较是 `>`（恰等于上限放行）而非 `>=`（恰等于上限被误杀）。
+    /// 二者互补：数值漂移由 `const _` 捕获，差一错（off-by-one）只能由本用例捕获。
+    ///
+    /// 体是**合法帧 JSON + 尾随空格**（JSON 允许尾随空白）⇒ 恰好 `MAX_FRAME_BYTES` 字节。
+    /// 若实现把边界写成 `>=`，本条会以 `BodyTooLarge` 失败；若 `MAX_BODY_BYTES` 被调到
+    /// 低于 `MAX_FRAME_BYTES`，本条同样失败（且 `const _` 先一步编译失败）。
+    ///
+    /// **改什么会让本条变红**（实测）：把 `parse_head` 的 `if n > MAX_BODY_BYTES` 改成
+    /// `>=` ⇒ 第一条结论由「解析成功」变成 `Err(BodyTooLarge(.., 65536))`。
+    #[test]
+    fn frame_at_protocol_max_is_accepted_but_one_byte_over_is_rejected() {
+        use mupc_display_proto::MAX_FRAME_BYTES;
+
+        // ① 恰好 MAX_FRAME_BYTES：合法 JSON（尾随空白）⇒ 必须解析成功（不是"超限"）。
+        let mut body = sample_frame_json();
+        assert!(
+            body.len() < MAX_FRAME_BYTES,
+            "样本帧应远小于上限（否则本用例的填充逻辑失效）：{}",
+            body.len()
+        );
+        body.push_str(&" ".repeat(MAX_FRAME_BYTES - body.len()));
+        assert_eq!(body.len(), MAX_FRAME_BYTES, "填充应精确命中上限");
+        let stub = Stub::spawn(move |_i, _req| Some(ok_response(&body)));
+        let mut c =
+            DisplayChannelClient::with_timeout(&stub.url, Duration::from_secs(5)).expect("client");
+        let t0 = Instant::now();
+        c.begin(t0).expect("begin");
+        let r = drive(&mut c, t0).expect("should finish");
+        assert!(
+            r.is_ok(),
+            "恰好 MAX_FRAME_BYTES（{MAX_FRAME_BYTES} B）的合法帧必须被接受，实际: {r:?}"
+        );
+
+        // ② MAX_FRAME_BYTES + 1 ⇒ 必须拒（否则"上限"名不副实）。
+        let over = " ".repeat(MAX_FRAME_BYTES + 1);
+        let stub2 = Stub::spawn(move |_i, _req| Some(ok_response(&over)));
+        let mut c2 =
+            DisplayChannelClient::with_timeout(&stub2.url, Duration::from_secs(5)).expect("client");
+        let t02 = Instant::now();
+        c2.begin(t02).expect("begin");
+        let r2 = drive(&mut c2, t02).expect("should finish");
+        assert!(
+            matches!(r2, Err(Error::BodyTooLarge(_, n)) if n == MAX_FRAME_BYTES + 1),
+            "超上限 1 字节必须 Err(BodyTooLarge)，实际: {r2:?}"
+        );
     }
 
     /// 响应头超限 ⇒ `HeadTooLarge`（防对端用无穷头撑爆内存）。

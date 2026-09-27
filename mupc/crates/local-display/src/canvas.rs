@@ -149,6 +149,38 @@ pub mod fbdev {
 
     /// `struct fb_fix_screeninfo`（`<linux/fb.h>` 内核 ABI 逐字段对齐；`c_ulong` 保 32/64 位
     /// 布局一致）。本实现只消费 `smem_len`，其余字段仅供 ioctl 写满结构体。
+    ///
+    /// # 布局的编译期网（WP5 P3-E 新增；此前**仅人证**）
+    ///
+    /// 下方 `const _` 断言把「字段序 / 字段宽 / 填充」钉死在**内核头文件推导出的期望值**上。
+    /// 推导来源 = `<linux/fb.h>` 的 `struct fb_fix_screeninfo`（字段序与本结构体**逐字段同序**）：
+    /// `char id[16]` → `unsigned long smem_start` → `u32 smem_len` → `u32 type` → `u32 type_aux`
+    /// → `u32 visual` → `u16 xpanstep` → `u16 ypanstep` → `u16 ywrapstep` → `u32 line_length`
+    /// → `unsigned long mmio_start` → `u32 mmio_len` → `u32 accel` → `u16 capabilities`
+    /// → `u16 reserved[2]`。
+    ///
+    /// **LP64**（`c_ulong` = 8 B，本项目唯一目标 `x86_64-linux` / `aarch64-linux`）逐字段推：
+    /// `id` 0..16、`smem_start` 16..24、`smem_len` 24..28、`type` 28..32、`type_aux` 32..36、
+    /// `visual` 36..40、`xpanstep` 40..42、`ypanstep` 42..44、`ywrapstep` 44..46、
+    /// `line_length` **对齐到 48**..52、`mmio_start` **对齐到 56**..64、`mmio_len` 64..68、
+    /// `accel` 68..72、`capabilities` 72..74、`reserved` 74..78；结构体对齐 = 8（`c_ulong`）
+    /// ⇒ **总长 78 → 80**。
+    ///
+    /// **ILP32**（`c_ulong` = 4 B）逐字段推：`smem_len` 20..24、`line_length` 44..48、
+    /// `mmio_start` 48..52、`capabilities` 60..62、`reserved` 62..66、对齐 = 4 ⇒ **总长 68**。
+    /// ⚠️ **ILP32 分支未在本仓编译验证**（无 32 位 Linux 目标；仅以"把 `c_ulong` 换成 `u32`
+    /// 的同类型代换"在宿主机上算出上述数字）。分支保留的理由 = 让 32 位构建**当场红**而不是
+    /// 静默按错的布局走 ioctl（本仓无 32 位 Linux 目标 ⇒ 本断言在该目标上必然拦下**首次**迁移）。
+    ///
+    /// **能抓住什么**：字段宽度改错（如把 `smem_len` 写成 `u64`）、漏掉 / 改短 `reserved`、
+    /// 把 `c_ulong` 换成 `u32`（LP64 下）、以及**任何会改变被锚字段偏移**的换序
+    /// —— 任一都会让下面的 `offset_of!` / `size_of` 断言在**编译期**失败（`error[E0080]`），
+    /// 而不是等真机 ioctl 越界写。
+    /// **抓不住什么（如实登记）**：① 内核头文件**改版**（字段增删）需人工比对后**同步改本表**，
+    /// 断言本身不会自动跟随（这正是设计 §13 前置项 1 的残留面，已登记台账 **U-103**）；
+    /// ② **相邻同宽字段互换**（如 `type_aux` ↔ `visual`，都是 `u32`）在布局上**不可判**
+    /// —— 但这类互换对 ioctl 的字节语义**也无影响**（同宽同序写入），故不构成缺口；
+    /// ③ 真机像素格式 / `smem_len` 是否够用等**运行期**事实不在本网内。
     #[repr(C)]
     #[derive(Clone, Copy)]
     #[allow(dead_code)] // 内核 ABI 结构体：仅 smem_len 被消费，其余字段为布局占位
@@ -169,6 +201,36 @@ pub mod fbdev {
         capabilities: u16,
         reserved: [u16; 2],
     }
+
+    /// 内核 ABI 布局门禁（**LP64**，见上「布局的编译期网」）。
+    ///
+    /// `offset_of!` 锚住**每个受填充影响的字段**与两侧端点（首字段 / 尾字段），而不只是
+    /// "总尺寸相等" —— 只钉总尺寸时，两处字段互换仍可能是同长结构体（例：`type_aux` 与
+    /// `visual` 互换），断言抓不到。
+    #[cfg(target_pointer_width = "64")]
+    const _: () = {
+        assert!(core::mem::size_of::<FbFixScreenInfo>() == 80);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, id) == 0);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, smem_start) == 16);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, smem_len) == 24);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, line_length) == 48);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, mmio_start) == 56);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, capabilities) == 72);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, reserved) == 74);
+    };
+
+    /// 内核 ABI 布局门禁（**ILP32**；数字来源与"未编译验证"的边界见上「布局的编译期网」）。
+    #[cfg(target_pointer_width = "32")]
+    const _: () = {
+        assert!(core::mem::size_of::<FbFixScreenInfo>() == 68);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, id) == 0);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, smem_start) == 16);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, smem_len) == 20);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, line_length) == 44);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, mmio_start) == 48);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, capabilities) == 60);
+        assert!(core::mem::offset_of!(FbFixScreenInfo, reserved) == 62);
+    };
 
     pub struct FbCanvas {
         w: u32,
@@ -234,8 +296,11 @@ pub mod fbdev {
             // 4) 结构体字段顺序与宽度逐字段对应内核 `linux/fb.h` 的 `struct fb_fix_screeninfo`
             //    （`c_ulong` 保证 32/64 位布局一致），故内核按内核布局写入的字节数不超过
             //    `size_of::<FbFixScreenInfo>()`，不会越过 `fix` 所在栈帧 → 无缓冲区溢出。
-            //    此「布局一致」是**人证而非机器校验**（libc 未绑定该结构体，无编译期断言）：
-            //    若内核头文件改版，需重新比对（属设计 §13 前置项 1 真机首验范畴）。
+            //    此「布局一致」**已由编译期断言上锁**（WP5 P3-E：`FbFixScreenInfo` 之后的
+            //    `const _` 用 `size_of` + 逐关键字段 `offset_of!` 钉住 LP64/ILP32 两种布局；
+            //    见该结构体文档的「布局的编译期网」）。⚠️ 残留（如实登记）：内核头文件**改版**
+            //    仍需人工重新比对并同步改那张期望值表 —— 断言不会自动跟随（属设计 §13 前置项 1
+            //    真机首验范畴，已登记台账 U-103）。
             let rc = unsafe {
                 libc::ioctl(
                     fd,
