@@ -436,23 +436,21 @@ plugins:
                 edit("system.log_level", json!("debug")),
                 edit("intercore.host", json!("192.168.3.21")),
                 edit("gateway.listen_port", json!(2405)),
-                edit("intercore.heartbeat_interval_sec", json!(9)),
             ],
         )
         .unwrap();
-        // 逐行比对：只有 4 行不同，且都是目标行
+        // 逐行比对：只有 3 行不同，且都是目标行
         let (a, b): (Vec<&str>, Vec<&str>) = (src.lines().collect(), out.lines().collect());
         assert_eq!(a.len(), b.len());
         let diff: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
-        assert_eq!(diff.len(), 4, "恰有 4 行被替换，实得 {diff:?}");
+        assert_eq!(diff.len(), 3, "恰有 3 行被替换，实得 {diff:?}");
         // 逐行核对（按文件出现顺序，不是按 edits 顺序）
         assert_eq!(
             b[diff[0]],
             "  log_level: debug        # 现场调过：默认 info"
         );
         assert_eq!(b[diff[1]], "  host: 192.168.3.21");
-        assert_eq!(b[diff[2]], "  heartbeat_interval_sec: 9");
-        assert_eq!(b[diff[3]], "  listen_port: 2405");
+        assert_eq!(b[diff[2]], "  listen_port: 2405");
     }
 
     /// 引号风格**继承**：原来带引号的值改完仍带引号（不制造"改一个值顺带改了风格"的噪声）。

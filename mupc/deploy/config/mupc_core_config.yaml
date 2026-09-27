@@ -18,8 +18,8 @@ intercore:
                                 # `south_pcs:` 段（02 设计 §13 / ADR-016）。写该值 ⇒ 启动即报错。
   host: "192.168.1.2"           # 实时核心 IP（tcp 通道）
   port: 9100
-  heartbeat_interval_sec: 5
-  reconnect_interval_sec: 3
+  # ⚠️ heartbeat_interval_sec / reconnect_interval_sec 二键已于 2026-09-27 删除（审查 E-13）：
+  # 本进程无消费点（TCP 传输侧无心跳/重连循环）⇒ 写上也不生效，故不再提供。
 
 # PCS（两级式 PCS = 实时控制模块）通道 —— 生产启用；本默认文件保持关闭
 # （`enabled: false` ⇒ 不构造 PcsHandle、不开该口 ⇒ 行为与升级前一致）。

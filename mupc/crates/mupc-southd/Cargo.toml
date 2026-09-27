@@ -1,3 +1,7 @@
+# ⚠️ crate 名带 `d` 但**没有自有守护进程入口**：本 crate 是**库形态，内嵌在 mupcd 主控进程**里
+# （站级南向调度 + PCS 通信与控制由主控进程装配，见 02 号设计 §13 / ADR-014）。唯一的 bin
+# `pcs_slave` 是 feature 门控（`pcs-slave-bin`）、默认不构建的**联调工具**，不是产线进程。
+# 命名沿革：早期曾按「独立 southd 守护进程」规划，迁入方案落地后改为内嵌形态（审查 E-14）。
 [package]
 name = "mupc-southd"
 version.workspace = true

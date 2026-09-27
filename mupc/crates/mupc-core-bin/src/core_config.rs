@@ -238,12 +238,12 @@ pub struct InterCoreConfig {
     /// 实时核心端口，默认 9100
     #[serde(default = "default_intercore_port")]
     pub port: u16,
-    /// 心跳间隔（秒），默认 5
-    #[serde(default = "default_heartbeat_interval")]
-    pub heartbeat_interval_sec: u64,
-    /// 重连间隔（秒），默认 3
-    #[serde(default = "default_reconnect_interval")]
-    pub reconnect_interval_sec: u64,
+    // ⚠️ **原 `heartbeat_interval_sec` / `reconnect_interval_sec` 二键已删除（审查 E-13，2026-09-27）**：
+    // 本进程**无任何消费点**（TCP 传输侧无心跳/重连循环；PCS 采集兼心跳的周期取
+    // `south_pcs.interval_ms`，与本二键无关），而 12 号本地屏曾把它们列为可写项并提示
+    // 「需重启生效」⇒ 操作员改完无任何效果（谎报）。已一并从 editable 字段表、两份部署
+    // YAML 移除；现场 legacy YAML 里的同名键作为**未建模键**原样保留（不解析、不生效）。
+    // 若核间 TCP 通道将来接回消费者，须连同消费点一起恢复本二键。
     /// 传输通道：仅 `tcp`（仿真/联调；设计 §13 / ADR-016）。
     ///
     /// ⚠️ **原 `modbus_rtu` 档已随 PCS 迁入南向而删除**：PCS 主链路现由顶层段
@@ -618,14 +618,6 @@ fn default_intercore_host() -> String {
 
 fn default_intercore_port() -> u16 {
     9100
-}
-
-fn default_heartbeat_interval() -> u64 {
-    5
-}
-
-fn default_reconnect_interval() -> u64 {
-    3
 }
 
 fn default_intercore_transport() -> String {
@@ -1199,7 +1191,7 @@ plugins: {}
             config.ai_engine.model_dir,
             PathBuf::from("/opt/mupc/models")
         );
-        assert_eq!(config.intercore.heartbeat_interval_sec, 5);
+        // E-13：heartbeat_interval_sec / reconnect_interval_sec 二键已删除（无消费点）
         // 未配置 intercore.transport 时默认 tcp（modbus_rtu 档已随 PCS 迁入南向删除）
         assert_eq!(config.intercore.transport, "tcp");
         // 未配置 south_pcs 段时缺省参数（Task 10 / 设计 §13.7）：`enabled: false` ⇒ 行为零变化
@@ -1561,8 +1553,6 @@ mqtt_bridge:
             intercore: InterCoreConfig {
                 host: "127.0.0.1".into(),
                 port: 9100,
-                heartbeat_interval_sec: 5,
-                reconnect_interval_sec: 3,
                 transport: "tcp".into(),
             },
             ai_engine: AiEngineConfig {
@@ -1644,8 +1634,6 @@ plugins: {}
             intercore: InterCoreConfig {
                 host: "127.0.0.1".into(),
                 port: 9100,
-                heartbeat_interval_sec: 5,
-                reconnect_interval_sec: 3,
                 transport: "tcp".into(),
             },
             ai_engine: AiEngineConfig {

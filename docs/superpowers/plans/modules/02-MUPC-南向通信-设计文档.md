@@ -3180,6 +3180,11 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
 ### 13.3 架构
 
+> **形态注（E-14，2026-09-27 加注）**：`mupc-southd` 是**库形态，内嵌在 `mupcd` 主控进程**内，
+> **不是独立守护进程**（crate 名的 `d` 系历史沿革 ⇒ 易误读）。唯一 bin `pcs_slave` 是 feature
+> 门控（`pcs-slave-bin`，**默认不构建**）的联调工具，非产线进程。同款说明见
+> `mupc/crates/mupc-southd/Cargo.toml` 首行注释。
+
 ```
                 PcsHandle（PCS 的完整所有者，居 southd）
    ┌──────────────────────────────────────────────────────────┐
