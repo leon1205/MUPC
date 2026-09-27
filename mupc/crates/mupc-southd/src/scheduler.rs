@@ -738,7 +738,23 @@ impl SouthScheduler {
         }
         let mut runners = Vec::with_capacity(port_order.len());
         for port in &port_order {
-            let group = groups.remove(port).expect("port_order/group 键应一致");
+            // 键必在（`port_order` 与 `groups` 由**同一个循环**同序构造），但**不以 panic
+            // 表达**（B-9，2026-09-27 全项目审查 P3；取向同本章对 `DueCalc` / `group_of` 的
+            // 查表失败：§12.4.1/§12.4.2 一律 `Option` 退化、不 panic —— 装配期 panic 会让
+            // **整机起不来**，而缺一个口的组只是"该口不采"）。`debug_assert!` 保留 debug
+            // 构建下的即刻可见性；release 走空组（该口 runner 仍占位 ⇒ `port_i` 与
+            // `runners` 下标对齐不受影响、其余各口不受牵连）。
+            let group = match groups.remove(port) {
+                Some(g) => g,
+                None => {
+                    debug_assert!(false, "port_order/group 键不一致（二者应同源同序构造）");
+                    tracing::error!(
+                        port = %port,
+                        "southd 分组表缺该口键 ⇒ 该口按空组装配（不 panic，其余口不受影响）"
+                    );
+                    Vec::new()
+                }
+            };
             // 分组表（组键 → 组内块下标；站 → 全部组键）**构造期一次算好**（§12.2.2）：
             // 与 `DueCalc::from_group` 共用同一个 `read_groups_of` ⇒ "块 → 组"与"组 → 块"
             // 两处不可能漂移（也是"免每轮重新分组"的落点）。
@@ -837,7 +853,7 @@ impl SouthScheduler {
         //   的下标构造）⇒ `p.station_index` 必在；仍**不以 panic 表达**（取向同 §12.4.1/§12.4.2
         //   的 `Option` 查表）。
         let station_oc: Vec<u32> = {
-            let st = self.state.read().unwrap();
+            let st = self.state.read().unwrap_or_else(|e| e.into_inner());
             st.iter().map(|s| s.offline_count).collect()
         };
         let mut calc = runner.calc.lock().unwrap();
@@ -894,7 +910,7 @@ impl SouthScheduler {
             anchor_blk: poll.anchor_blk,
         };
         let (station_id, role, slave, blk_indices) = {
-            let st = self.state.read().unwrap();
+            let st = self.state.read().unwrap_or_else(|e| e.into_inner());
             let s = &st[si];
             // 构造期算好的「组 → 组内块下标」表（免每轮重新分组；空 `regs` 站 ⇒ 空块集）。
             //
@@ -918,7 +934,8 @@ impl SouthScheduler {
         };
         // **读前**的站离线态 —— 必须在 `mark_success` 清 `offline_count` **之前**取（既有约定）：
         // 站恢复后（该站**全部组**）变化沿基线必须重建，否则"恢复即刷一屏事件"（§12.4.4 连带项 a）。
-        let station_was_offline = { self.state.read().unwrap()[si].offline_count > 0 };
+        let station_was_offline =
+            { self.state.read().unwrap_or_else(|e| e.into_inner())[si].offline_count > 0 };
 
         // 逐**组内块**读（阻塞 IO 由 StationBus 内 spawn_blocking 承载——全 async 无阻塞）。
         let mut reads: BlockReads = Vec::with_capacity(blk_indices.len());
@@ -1137,7 +1154,7 @@ impl SouthScheduler {
     /// 窗口去抖（防刷屏；首次失败立即告警一次）。返回前已释放锁；事件经 sink 异步上送。
     async fn handle_failure(&self, station_index: usize, reason: &str) {
         let (emit, id, role) = {
-            let mut st = self.state.write().unwrap();
+            let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
             let s = &mut st[station_index];
             // saturating：防 u32 极端回绕归零误判恢复（漏 online 事件，§10.7 状态机不破）
             s.offline_count = s.offline_count.saturating_add(1);
@@ -1166,7 +1183,7 @@ impl SouthScheduler {
     /// → 恢复（online 事件一次），并复位 last_offline_event（下次 offline 重新即时告警）。
     async fn mark_success(&self, station_index: usize) {
         let (recovered, id, role) = {
-            let mut st = self.state.write().unwrap();
+            let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
             let s = &mut st[station_index];
             let recovered = s.offline_count > 0;
             s.offline_count = 0;
@@ -4423,6 +4440,39 @@ mod tests {
                 i
             );
         }
+    }
+
+    /// **B-9（P3，2026-09-27 全项目审查）**：`state` 锁**中毒**后，采集轮次**不得 panic**。
+    ///
+    /// 改动前 `state.read()/write().unwrap()` 在中毒（某线程持锁 panic）后必 panic ——
+    /// 而本 task 的 panic 会**静默终止该口采集**（这正是 B-9 的另一半：panic 无人观测）。
+    /// 现按本 crate 既有口径 `unwrap_or_else(|e| e.into_inner())` 取毒继续（`offline_count`
+    /// 是纯计数，取最后一次完整值时语义完好）。
+    ///
+    /// 判别力：把 `poll_group`/`handle_failure` 的取锁改回 `.unwrap()` ⇒ 本用例 panic 失败。
+    #[tokio::test]
+    async fn poisoned_state_lock_does_not_panic_the_poll_round() {
+        let bus = Arc::new(MockBus::new()); // 无预置 ⇒ 读必失败（走 handle_failure）
+        let sink = Arc::new(FakeSink::default());
+        let sched = build(vec![hvac_conf("hvac", "ttyS1", 3, 1000)], bus, sink.clone());
+
+        // 另一线程持写锁 panic ⇒ 毒化 state 锁
+        let st = sched.state.clone();
+        let poisoner = std::thread::spawn(move || {
+            let _g = st.write().expect("前提：首次取锁不应失败");
+            panic!("故意毒化 state 锁");
+        });
+        assert!(poisoner.join().is_err(), "前提：毒化线程须 panic");
+        assert!(sched.state.read().is_err(), "前提：state 锁已中毒");
+
+        // 中毒后仍要走完一个失败轮次：读失败 → handle_failure 记账 + 投 offline 事件
+        sched.tick_once(0).await;
+        assert_eq!(
+            sched.state.read().unwrap_or_else(|e| e.into_inner())[0].offline_count,
+            1,
+            "中毒后必须「取毒」继续记账（改前 .unwrap() 直接 panic ⇒ 该口静默停摆）"
+        );
+        assert_eq!(sink.event_count("hvac", "offline"), 1, "事件仍须投出");
     }
 
     /// 由配置造一个"指定的块**全部读成功**"的读集（**不触 IO**，只服务运行期守卫的单测）：

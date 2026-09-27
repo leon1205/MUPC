@@ -1626,8 +1626,21 @@ pub async fn initialize_all(
             Arc::new(b)
         };
         let h = mupc_southd::pcs::PcsHandle::new(config.south_pcs.clone(), bus, south_sink.clone());
-        // 采集循环句柄入 guard（abort 名单；无停机钩子，与站级采集 task 同范式）
-        guard.0.push(h.spawn_collection_loop());
+        // 采集循环句柄入 guard（abort 名单；无停机钩子，与站级采集 task 同范式）。
+        //
+        // **B-9（2026-09-27 全项目审查 P3）：经 `observe_task` 包装后再入 guard。**
+        // 此前句柄只被"持有 + 退出时 abort"，**从不被观测** ⇒ task 内 panic 只会以
+        // `JoinError` 的形态静默留在句柄里，现象是"PCS 从此不再采集，而进程/日志/服务状态
+        // 一切正常"——而 PCS 采集是联锁 `last_run_state`（停机确认）的唯一数据源。
+        // 包装后：panic / 异常返回均落一条 `error!` 并置 `TaskWatch` 标志位；**abort 语义不变**
+        // （观测句柄被 abort ⇒ 采集 task 一并 abort，见 `task_watch` 模块头）。
+        // 观测标志暂只写日志（`watch` 保留在本段作用域内，供后续 supervisor/健康面上报）。
+        let pcs_collect_watch = std::sync::Arc::new(mupc_southd::task_watch::TaskWatch::new());
+        guard.0.push(mupc_southd::task_watch::observe_task(
+            "pcs_collect",
+            h.spawn_collection_loop(),
+            pcs_collect_watch,
+        ));
         coord.register_service("pcs", ServiceStatus::Running);
         // 策略引擎持同一句柄（双参数 / 分相下发 / SOC 回落活读）
         ai_integrator.set_pcs_client(h.clone());

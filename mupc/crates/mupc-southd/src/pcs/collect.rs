@@ -106,8 +106,19 @@ impl PcsHandle {
     }
 
     /// **一拍采集**（测试可直接驱动，不含 sleep）：FC04 读一次 3 区块 → 解码 →
-    /// 更新快照 → 投 sink → 记账。持**与采集/控制共用的同一把锁**（设计 §13.3）：
+    /// 更新快照 → （锁外）投 sink → 记账。持**与采集/控制共用的同一把锁**（设计 §13.3）：
     /// 本函数运行期间控制序列无法插进物理线路。
+    ///
+    /// **锁的边界（B-3，2026-09-27 全项目审查 P2）**：锁只覆盖**物理线路的原子性**
+    /// （读事务 + 由它派生的控制侧缓存复位），**不覆盖 sink 投递**。此前 `on_station_telemetry`
+    /// / `on_station_offline` 都在锁内 `.await` —— 后者经 `startup.rs` 的 `record_event` 落
+    /// **SQLite**（写盘可达毫秒级甚至更久），其间联锁安全动作 `stop()` 在 `inner.lock` 上排队
+    /// ⇒ **安全动作被遥测落库拖延**。现改为：锁内只算出"待投递内容"，锁释放后再投递。
+    ///
+    /// 锁内/锁外**分界**（改动只动分界，不动任何一条控制语义）：
+    /// - 锁内：总线读、快照写入、`bad` 计数、`connected` 读写、**判离线时的控制侧缓存复位
+    ///   （W1）**、`warn_stopped_once` 的去抖状态机、遥测点展开（纯计算、无 IO）。
+    /// - 锁外：`sink.on_station_telemetry` / `sink.on_station_offline`。
     ///
     /// **读失败的两级语义**（设计 §13.4 的注，刻意不统一）：
     /// - **快照失效 = 单拍**：立即 `valid = false` ⇒ 三个按需读全 `None`
@@ -115,75 +126,126 @@ impl PcsHandle {
     /// - **在线态 = 累积 `BAD_LIMIT` 拍**：对齐迁移前心跳口径（`latest_soc` 走
     ///   mark_offline 的"单次失败即离线"属迁移前的不一致，本 Task 收敛掉）。
     pub async fn tick_once(&self) {
-        let _g = self.inner.lock.lock().await;
-        // 共享借用（非 `clone`）：`blk` 在 `.await` 上存活合法，借用检查无 clone 需求。
-        // 下方 `BlockReads` 那处的 `blk.clone()` 则**必须保留**（`Vec<(RegBlockConf, ..)>`
-        // 要所有权，`&RegBlockConf` 无法满足）。
-        let blk = match self.inner.cfg.regs.first() {
-            Some(b) => b,
-            None => {
-                // 空 `regs` 早退此前**完全静默** ⇒ 采集循环以 `connected=false` 空转、无线索。
-                // 规则 P-5 后该形态在配置期已被拒，但 `PcsHandle::new` **不校验**配置 ⇒
-                // 单测/未来路径仍可构造。
-                //
-                // **只记一次**（不是每拍）：本函数每 `interval_ms` 走一遍，逐拍记 ⇒
-                // ≈86400 条/日刷屏 —— 与 M1 告警（`warn_stopped_once`）同款理由，故用
-                // `empty_cfg_warned` 做一次性记忆（空配置不会自愈，一条足够定位）。
-                if !self.inner.empty_cfg_warned.swap(true, Ordering::Relaxed) {
-                    tracing::error!(
-                        "south_pcs.regs 为空 —— 采集恒空转（PcsHandle::new 不校验配置）"
-                    );
-                }
-                return;
-            }
-        };
-        let res = self
-            .inner
-            .bus
-            .read_input(self.slave(), blk.addr, blk.count)
-            .await;
+        // 锁内产出 → 锁外投递。用**具名枚举**而不是在锁内直接 `return`，是为了让"锁作用域"
+        // 在类型层面一眼可见（`scope` 块一结束锁即释放，编译器保证）。
+        enum TickOutcome {
+            /// 空 `regs` 早退（本拍无事可投）
+            EmptyCfg,
+            /// 本拍成功：待投遥测（空 vec = 无点可投，不必调 sink）
+            Telemetry(Vec<(String, f64, bool)>),
+            /// 本拍失败：`Some(reason)` = **本拍刚判离线**（需投离线事件），`None` = 尚未判离线
+            Failure(Option<String>),
+        }
 
-        match res {
-            Ok(words) => {
-                let ts = std::time::Instant::now();
-                let snap = build_snapshot(&words, blk.addr, ts);
-                self.set_snapshot(snap);
-                self.inner.bad.store(0, Ordering::Relaxed);
-                {
-                    let mut c = self.inner.connected.write().await;
-                    if !*c {
-                        tracing::info!(station = "pcs", "PCS 链路恢复在线");
+        let outcome = {
+            let _g = self.inner.lock.lock().await;
+            // 共享借用（非 `clone`）：`blk` 在 `.await` 上存活合法，借用检查无 clone 需求。
+            // 下方 `BlockReads` 那处的 `blk.clone()` 则**必须保留**（`Vec<(RegBlockConf, ..)>`
+            // 要所有权，`&RegBlockConf` 无法满足）。
+            let blk = match self.inner.cfg.regs.first() {
+                Some(b) => b,
+                None => {
+                    // 空 `regs` 早退此前**完全静默** ⇒ 采集循环以 `connected=false` 空转、无线索。
+                    // 规则 P-5 后该形态在配置期已被拒，但 `PcsHandle::new` **不校验**配置 ⇒
+                    // 单测/未来路径仍可构造。
+                    //
+                    // **只记一次**（不是每拍）：本函数每 `interval_ms` 走一遍，逐拍记 ⇒
+                    // ≈86400 条/日刷屏 —— 与 M1 告警（`warn_stopped_once`）同款理由，故用
+                    // `empty_cfg_warned` 做一次性记忆（空配置不会自愈，一条足够定位）。
+                    if !self.inner.empty_cfg_warned.swap(true, Ordering::Relaxed) {
+                        tracing::error!(
+                            "south_pcs.regs 为空 —— 采集恒空转（PcsHandle::new 不校验配置）"
+                        );
                     }
-                    *c = true;
+                    return; // 锁随作用域释放；无事可投
                 }
-                // ③ 停机观测（M1 告警**去抖**）：仅在"非停机 → 停机"跃迁时告警一次。
-                //    去抖靠 `stopped_warned` 跨拍记忆（不是"每拍判一次"——见该函数的注释）。
-                if warn_stopped_once(
-                    &self.inner.stopped_warned,
-                    snap.run_state,
-                    *self.inner.started.read().await,
-                    *self.inner.stopped_latched.read().await,
-                ) {
-                    tracing::warn!(
-                        "PCS 运行状态=0(停机)但 MUPC 此前已下发启动——疑似保护跳闸/人工停机；\
-                         链路在线，MUPC 不自动重启，请上层/运维确认后处理"
-                    );
+            };
+            let res = self
+                .inner
+                .bus
+                .read_input(self.slave(), blk.addr, blk.count)
+                .await;
+
+            match res {
+                Ok(words) => {
+                    let ts = std::time::Instant::now();
+                    let snap = build_snapshot(&words, blk.addr, ts);
+                    self.set_snapshot(snap);
+                    self.inner.bad.store(0, Ordering::Relaxed);
+                    {
+                        let mut c = self.inner.connected.write().await;
+                        if !*c {
+                            tracing::info!(station = "pcs", "PCS 链路恢复在线");
+                        }
+                        *c = true;
+                    }
+                    // ③ 停机观测（M1 告警**去抖**）：仅在"非停机 → 停机"跃迁时告警一次。
+                    //    去抖靠 `stopped_warned` 跨拍记忆（不是"每拍判一次"——见该函数的注释）。
+                    if warn_stopped_once(
+                        &self.inner.stopped_warned,
+                        snap.run_state,
+                        *self.inner.started.read().await,
+                        *self.inner.stopped_latched.read().await,
+                    ) {
+                        tracing::warn!(
+                            "PCS 运行状态=0(停机)但 MUPC 此前已下发启动——疑似保护跳闸/人工停机；\
+                             链路在线，MUPC 不自动重启，请上层/运维确认后处理"
+                        );
+                    }
+                    // 遥测点上送（块级：成功即全量，与站级调度器"标量每轮全量"口径一致）。
+                    //
+                    // **计划 Step 4 分叉的定论（实测，非推断）**：`mapper::telemetry_points`
+                    // **不按 `role` 过滤**（仅一条 `debug_assert_ne!(role, MeterGrid)` 只读断言），
+                    // 内部即 `points::expand` + 逐点 `RegDecode::decode` ⇒ `Role::Pcs` 经它产出
+                    // 与 `points::expand` **完全一致**的 72 点（`total == 72` 实测通过）。
+                    // 故**不**改走 `points::expand` 直连（备选分支不成立）；沿用本函数还与站级
+                    // scheduler 同一入口，展开口径天然统一。
+                    let reads: crate::mapper::BlockReads =
+                        vec![(blk.clone(), Ok(crate::mapper::BlockData::Regs(words)))];
+                    let pts: Vec<(String, f64, bool)> =
+                        crate::mapper::telemetry_points(crate::config::Role::Pcs, &reads)
+                            .into_iter()
+                            .map(|s| (s.metric, s.value, false))
+                            .collect();
+                    TickOutcome::Telemetry(pts)
                 }
-                // 遥测点上送（块级：成功即全量，与站级调度器"标量每轮全量"口径一致）。
-                //
-                // **计划 Step 4 分叉的定论（实测，非推断）**：`mapper::telemetry_points`
-                // **不按 `role` 过滤**（仅一条 `debug_assert_ne!(role, MeterGrid)` 只读断言），
-                // 内部即 `points::expand` + 逐点 `RegDecode::decode` ⇒ `Role::Pcs` 经它产出
-                // 与 `points::expand` **完全一致**的 72 点（`total == 72` 实测通过）。
-                // 故**不**改走 `points::expand` 直连（备选分支不成立）；沿用本函数还与站级
-                // scheduler 同一入口，展开口径天然统一。
-                let reads: crate::mapper::BlockReads =
-                    vec![(blk.clone(), Ok(crate::mapper::BlockData::Regs(words)))];
-                let pts: Vec<(String, f64, bool)> =
-                    crate::mapper::telemetry_points(crate::config::Role::Pcs, &reads)
-                        .into_iter()
-                        .map(|s| (s.metric, s.value, false))
-                        .collect();
+                Err(e) => {
+                    // 快照**立即失效**（单拍语义）—— 与迁移前"读失败即 None"逐字等价（设计 §13.4）
+                    self.set_snapshot(PcsSnapshot::default());
+                    let bad = self.inner.bad.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::debug!(error = %e, bad, "PCS 3 区采集失败");
+                    if bad >= BAD_LIMIT {
+                        let was_online = {
+                            let mut c = self.inner.connected.write().await;
+                            let prev = *c;
+                            *c = false;
+                            prev
+                        };
+                        // ★★ 判离线时**必须同时复位控制侧缓存**（= 迁移前 mark_offline 的语义）★★
+                        // 理由（W1：迁移前 `intercore::transport::modbus` 的 `mark_offline`，
+                        // 该模块 T4 删除）：断线期间 PCS **可能掉电/复位** ⇒ started/mode
+                        // 缓存**不可信**；不复位则恢复后
+                        // ① ensure_mode 见缓存命中 ⇒ 跳过 REG_MODE 重写；
+                        // ② ensure_started 见 started==true ⇒ 命中缓存直接 Ok（连 S-4 的 1013 读都不发生）
+                        // ⇒ 在**未知实际模式**下直接写 1006-1011 功率寄存器。这是 fail-open，必须复位。
+                        //
+                        // ⚠️ 本复位**必须留在锁内**（B-3 只搬 sink 投递）：它是控制侧状态，
+                        // 与"判离线"这一跃迁原子；搬到锁外会让控制序列在"已判离线但缓存未复位"
+                        // 的窗口内命中脏缓存（正是 W1 要防的 fail-open）。
+                        *self.inner.started.write().await = false;
+                        self.inner.mode.store(0xFF, Ordering::Relaxed);
+                        TickOutcome::Failure(was_online.then(|| e.to_string()))
+                    } else {
+                        TickOutcome::Failure(None)
+                    }
+                }
+            }
+        }; // ← 锁在此释放（`_g` 随作用域 drop）
+
+        // ── 以下全在**锁外**：sink 可能落 SQLite（`record_event`）⇒ 不得阻塞联锁安全动作 ──
+        match outcome {
+            TickOutcome::EmptyCfg => {}
+            TickOutcome::Telemetry(pts) => {
                 if !pts.is_empty() {
                     self.inner
                         .sink
@@ -191,35 +253,13 @@ impl PcsHandle {
                         .await;
                 }
             }
-            Err(e) => {
-                // 快照**立即失效**（单拍语义）—— 与迁移前"读失败即 None"逐字等价（设计 §13.4）
-                self.set_snapshot(PcsSnapshot::default());
-                let bad = self.inner.bad.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::debug!(error = %e, bad, "PCS 3 区采集失败");
-                if bad >= BAD_LIMIT {
-                    let was_online = {
-                        let mut c = self.inner.connected.write().await;
-                        let prev = *c;
-                        *c = false;
-                        prev
-                    };
-                    // ★★ 判离线时**必须同时复位控制侧缓存**（= 迁移前 mark_offline 的语义）★★
-                    // 理由（W1：迁移前 `intercore::transport::modbus` 的 `mark_offline`，
-                    // 该模块 T4 删除）：断线期间 PCS **可能掉电/复位** ⇒ started/mode
-                    // 缓存**不可信**；不复位则恢复后
-                    // ① ensure_mode 见缓存命中 ⇒ 跳过 REG_MODE 重写；
-                    // ② ensure_started 见 started==true ⇒ 命中缓存直接 Ok（连 S-4 的 1013 读都不发生）
-                    // ⇒ 在**未知实际模式**下直接写 1006-1011 功率寄存器。这是 fail-open，必须复位。
-                    *self.inner.started.write().await = false;
-                    self.inner.mode.store(0xFF, Ordering::Relaxed);
-                    if was_online {
-                        self.inner
-                            .sink
-                            .on_station_offline("pcs", crate::config::Role::Pcs, &e.to_string())
-                            .await;
-                    }
-                }
+            TickOutcome::Failure(Some(reason)) => {
+                self.inner
+                    .sink
+                    .on_station_offline("pcs", crate::config::Role::Pcs, &reason)
+                    .await;
             }
+            TickOutcome::Failure(None) => {}
         }
     }
 
@@ -344,6 +384,52 @@ mod collection_tests {
         pub offline: StdMutex<Vec<String>>,
     }
 
+    /// **B-3 探针 sink**：每次投递时尝试 `try_lock` 控制锁（`PcsInner.lock`），记录"当时
+    /// 是否**有人持锁**"。用途 = 证明 sink 投递发生在**锁外**。
+    ///
+    /// 为什么需要它：`on_station_offline` 经 `startup.rs` 的 `record_event` 落 SQLite（写盘
+    /// 可达毫秒级），若投递仍在锁内，联锁安全动作 `stop()` 会在锁上排队 —— 这是**只有并发
+    /// 时序才能暴露**的缺陷，普通断言（投递内容/次数）对它完全无判别力。
+    ///
+    /// `me` 用 `Weak` 是为了打破"句柄持有 sink、sink 又要查句柄"的循环引用。
+    #[derive(Default)]
+    struct LockProbeSink {
+        pub me: StdMutex<std::sync::Weak<PcsHandle>>,
+        /// 每次 `on_station_telemetry` 时"锁被别人持有"的观测序列
+        pub telemetry_locked: StdMutex<Vec<bool>>,
+        /// 每次 `on_station_offline` 时同上
+        pub offline_locked: StdMutex<Vec<bool>>,
+    }
+
+    impl LockProbeSink {
+        /// `Weak::upgrade` 后 `try_lock`：**取不到 ⇒ 有人持锁**（tokio Mutex 非重入）。
+        fn lock_held(&self) -> bool {
+            match self.me.lock().unwrap().upgrade() {
+                Some(h) => h.inner.lock.try_lock().is_err(),
+                None => panic!("探针前提：构造后必须先把 Weak 指向句柄"),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StationSink for LockProbeSink {
+        async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+        async fn on_station_telemetry(
+            &self,
+            _id: &str,
+            _role: crate::config::Role,
+            _pts: Vec<(String, f64, bool)>,
+        ) {
+            let held = self.lock_held();
+            self.telemetry_locked.lock().unwrap().push(held);
+        }
+        async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_station_offline(&self, _id: &str, _role: crate::config::Role, _reason: &str) {
+            let held = self.lock_held();
+            self.offline_locked.lock().unwrap().push(held);
+        }
+    }
+
     #[async_trait]
     impl StationSink for RecSink {
         async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
@@ -436,6 +522,53 @@ mod collection_tests {
         let batches = sink.telemetry.lock().unwrap();
         let total: usize = batches.iter().map(|b| b.len()).sum();
         assert_eq!(total, 72, "pcs_3zone 展开应为 72 点（PRD §9.8.3）");
+    }
+
+    /// **B-3 主判据**：遥测与离线事件的 sink 投递都发生在**控制锁之外**
+    /// （锁只护"物理线路原子性"，不护"落库投递"）。
+    ///
+    /// 判别力：把投递搬回锁内（= 改动前形态，`on_station_offline().await` 在 `inner.lock`
+    /// 作用域内）⇒ 两条 `… == vec![false]` 断言皆红。**探针自检**（持锁时须报 true，
+    /// 见下）保证"恒 false"不是"探针失灵"造成的假绿。
+    #[tokio::test]
+    async fn sink_delivery_happens_outside_control_lock() {
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1000, block_words());
+        let sink = Arc::new(LockProbeSink::default());
+        let h = PcsHandle::new(cfg_with_points(), bus.clone(), sink.clone());
+        *sink.me.lock().unwrap() = Arc::downgrade(&h);
+
+        // ① 成功拍 ⇒ 投遥测，且投递时无人持锁
+        h.tick_once().await;
+        assert_eq!(
+            *sink.telemetry_locked.lock().unwrap(),
+            vec![false],
+            "成功拍的遥测投递必须在锁外（锁内投递会让 stop() 排队等落库）"
+        );
+
+        // ② 连续 3 拍失败 ⇒ 投离线事件（`on_station_offline` 会落 SQLite，最需要锁外）
+        for _ in 0..3 {
+            bus.fail_input_once(1, 1000);
+            h.tick_once().await;
+        }
+        assert_eq!(
+            *sink.offline_locked.lock().unwrap(),
+            vec![false],
+            "离线事件投递必须在锁外（其为 DB 写路径，锁内投递会拖延联锁安全动作）"
+        );
+
+        // ③ **探针自检**：持锁时投一次，探针必须报 true。
+        //    没有这条，"探针恒返回 false"（例如 try_lock 用法写错）会让 ①② 变成假绿。
+        {
+            let _g = h.inner.lock.lock().await;
+            sink.on_station_telemetry("pcs", crate::config::Role::Pcs, Vec::new())
+                .await;
+        }
+        assert_eq!(
+            *sink.telemetry_locked.lock().unwrap(),
+            vec![false, true],
+            "探针自检：持锁投递须报 true（证明 try_lock 真能识别持锁态）"
+        );
     }
 
     #[tokio::test]
