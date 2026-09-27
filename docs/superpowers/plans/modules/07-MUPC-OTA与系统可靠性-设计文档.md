@@ -1126,18 +1126,28 @@ CREATE INDEX idx_metric_timestamp ON metrics(metric_name, timestamp);
 
 **周期** `15_000 ms`（对齐 07 PRD §4.2.1「每 15 秒」；与 `storage_health` 的 1 s **刻意不同**——那是 03 号的需求数值）。
 
-**探针清单**（服务 → 判据来源）：
+**探针清单**（服务 → 判据来源）。**只做"子系统挂了"语义的探针**：
 
 | 服务 | 判据来源 | 位置 |
 |---|---|---|
-| `pcs` | `PcsHandle::is_connected()` | `mupc-southd/src/pcs/collect.rs:67` |
-| `storage` | `WriteGate::{is_degraded, disk_known}` | `storage/src/write_gate.rs:146,156` |
-| `gateway` | `Iec104Server::connection_count()` | `gateway/src/iec104/server.rs:514` |
-| `hmi_backend` | display 通道连接态（同 `display_host.rs` 的 `iec104_link_state` 模式） | `mupc-core-bin/src/display_host.rs:266` |
-| `data_processing` | `LatestValues::station_is_active("grid_meter", now_ms)` —— 即 **03 PRD R-11.6-D2 的「刷新活性」** | `data-processing/src/latest_values.rs:229` |
-| `intercore` | **显式排除出巡检集合**（生产路径无消费者，无「可用/不可用」可言） | — |
-| `ai_engine` / `security` / `ota_update` / `wireless` | 不做探针，保持注册时的 `Stopped` ⇒ **天然不告警** | — |
-| `message_bus` / `strategy_engine` / `plugin_loader` / `system_monitor` | 进程内组件，无独立失败面 ⇒ 保持 `Running` | — |
+| `pcs` | `pcs_collect_watch.{finished(), panicked()}` —— B-9 的 `TaskWatch`（采集 task 结束/panic） | `mupc-southd/src/task_watch.rs:42,47`；装配点 `startup.rs` 的 `pcs_collect_watch` |
+| `storage` | `WriteGate::is_degraded()` —— DB 完整性失败或磁盘水位触发停写 | `storage/src/write_gate.rs:146` |
+
+**显式不做探针**（登记于 `service_health::NOT_PROBED`，各附理由）：
+
+| 服务 | 为什么没有探针 |
+|---|---|
+| `gateway` | `connection_count()==0` 是**常态**（主站未连），不能当服务故障 |
+| `hmi_backend` | display 通道未连是**常态**（屏可关），不能当服务故障 |
+| `data_processing` | `station_is_active` 反映**现场设备**离线 —— **外部事件**（已有独立告警通道），不是 `mupcd` 子系统故障 |
+| `intercore` | 生产路径**无消费者**，无「可用/不可用」可言 |
+| `ai_engine` / `security` / `ota_update` / `wireless` | 注册时即 `Stopped` ⇒ **天然不告警** |
+| `message_bus` / `strategy_engine` / `plugin_loader` / `system_monitor` | 进程内组件，无独立失败面 |
+
+> ⚠️ **判据边界（本设计最易做错的一点）**：**「子系统挂了」≠「外部设备/对端不在线」**。
+> 后者在现场**大多数时间是常态**（主站没连、屏没开、现场设备离线），拿它当 `Failed` 会
+> **恒告警**，把真故障淹没 —— 比"不实现"更坏。故本模块**只采信**"进程内这个子系统不转了"
+> 的信号；将来要加探针，须先找到该语义的真信号，**不得**拿在线态顶替。
 
 **三条硬不变量（实现时不得违反）**：
 
@@ -2189,4 +2199,4 @@ db_path = "/var/lib/mupc/monitor/timeseries.db"
 | 版本 | 主要变更 |
 |------|----------|
 | v1.0 | 从历史来源文档合并为统一设计文档 |
-| v1.1 | **进程→三层分工口径改造**（U-164 裁定，2026-09-27）：§4 章首的部署形态订正块**升级**为三层分工表（进程级 systemd / 服务级 `ServiceCoordinator` / 跨进程仅 display）+ 改判根因 + 五条细节更正；**新增 §4.7 服务级健康巡检**（落点 `mupc-core-bin/src/service_health.rs`、周期 15 s、探针清单、三条硬不变量、协作退出契约、状态写者唯一）；§4.6 数据保留表「进程重启记录」改为「服务异常 / 单元重启记录」；§6.2 RSS 表改 per-unit `MemoryMax` + 子系统水位；§6.3 `oom_score_adj` 整表改 per-unit；§6.4 `ProcessRestarter` 标注**不在 `mupcd` 内实现**（委托 systemd）并保留原设计以述原文；§6.4「批量重启优先级」标作废；§6.6 边界条件表同步。**未新增门禁标记** |
+| v1.1 | **进程→三层分工口径改造**（U-164 裁定，2026-09-27）：§4 章首的部署形态订正块**升级**为三层分工表（进程级 systemd / 服务级 `ServiceCoordinator` / 跨进程仅 display）+ 改判根因 + 五条细节更正；**新增 §4.7 服务级健康巡检**（落点 `mupc-core-bin/src/service_health.rs`、周期 15 s、探针清单、三条硬不变量、协作退出契约、状态写者唯一）。**实现时纠正探针口径**：初版列了 `gateway.connection_count()` / display 通道态 / `station_is_active` 三条，均属"外部设备/对端**在线态**"——现场**多数时间是常态**，当 `Failed` 会**恒告警**（比"不实现"更坏）⇒ 剔除；落地只留 `pcs`（采集 task 结束/panic）与 `storage`（写闸门降级）两个"子系统挂了"语义的探针，其余 10 个服务显式登记于 `NOT_PROBED` 并附理由；§4.6 数据保留表「进程重启记录」改为「服务异常 / 单元重启记录」；§6.2 RSS 表改 per-unit `MemoryMax` + 子系统水位；§6.3 `oom_score_adj` 整表改 per-unit；§6.4 `ProcessRestarter` 标注**不在 `mupcd` 内实现**（委托 systemd）并保留原设计以述原文；§6.4「批量重启优先级」标作废；§6.6 边界条件表同步。**未新增门禁标记** |
