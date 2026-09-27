@@ -37,6 +37,10 @@ impl std::fmt::Debug for Sm2KeyPair {
 }
 
 /// 从 PEM 文件加载 SM2 私钥
+///
+/// `#[allow(dead_code)]`：签名/验签已改为显式 `Unsupported`（D-7）⇒ 本函数当前**无调用者**。
+/// 保留它是为真国密路径（gmsm 0.14+）接线时使用，**不是**给 ring ECDSA 兜底当输入。
+#[allow(dead_code)]
 pub fn load_sm2_private_key(path: &str) -> Result<Vec<u8>> {
     let pem_data = fs::read_to_string(path)
         .map_err(|e| GmError::KeyLoadFailed(format!("读取私钥文件失败: {}", e)))?;
@@ -51,6 +55,9 @@ pub fn load_sm2_private_key(path: &str) -> Result<Vec<u8>> {
 }
 
 /// 从 PEM 文件加载 SM2 公钥
+///
+/// `#[allow(dead_code)]`：同 [`load_sm2_private_key`]（D-7 之后无调用者，供真国密路径接线用）。
+#[allow(dead_code)]
 pub fn load_sm2_public_key(path: &str) -> Result<Vec<u8>> {
     let pem_data = fs::read_to_string(path)
         .map_err(|e| GmError::KeyLoadFailed(format!("读取公钥文件失败: {}", e)))?;

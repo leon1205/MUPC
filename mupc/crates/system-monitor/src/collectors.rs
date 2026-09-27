@@ -250,6 +250,10 @@ fn read_disk_metrics() -> Result<Option<DiskMetrics>, MonitorError> {
 ///
 /// `mount_point` 是**失败注入点**（生产传 `/`）：传一个不存在的路径 ⇒ `df` 非零退出 ⇒
 /// `Ok(None)`，用例 `disk_collection_failure_is_unavailable_not_a_fake_number` 据此钉住语义。
+///
+/// `cfg(any(target_os = "linux", test))`：生产仅在 Linux 上调用它（非 Linux 是开发平台、走
+/// 模拟值），但用例要在**任何**平台上都能实例化失败路径 ⇒ 测试构建下保留。
+#[cfg(any(target_os = "linux", test))]
 fn read_disk_metrics_at(mount_point: &str) -> Result<Option<DiskMetrics>, MonitorError> {
     let output = std::process::Command::new("df")
         .arg("-BM")
@@ -289,6 +293,8 @@ fn read_disk_metrics_at(mount_point: &str) -> Result<Option<DiskMetrics>, Monito
 ///
 /// 抽成纯函数 ⇒ 可直接用"合法行 / 畸形行"钉住判别力（不必依赖本机真有 `df`）。
 /// `df` 的表头行（`Filesystem 1M-blocks Used Available Use% Mounted on`）会被跳过。
+/// 可见性口径同 [`read_disk_metrics_at`]。
+#[cfg(any(target_os = "linux", test))]
 fn parse_df_output(stdout: &str) -> Option<DiskMetrics> {
     let line = stdout.lines().skip(1).find(|l| !l.trim().is_empty())?;
     let parts: Vec<&str> = line.split_whitespace().collect();
