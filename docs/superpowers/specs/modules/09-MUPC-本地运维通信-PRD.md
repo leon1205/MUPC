@@ -10,11 +10,11 @@
 > | 能力 | 现状 |
 > |------|------|
 > | NearLink / Wi-Fi / BLE 驱动 | **NoOp 占位** —— 调用返回 `Err(UnsupportedDevice)`（**如实拒绝，不谎报成功**）；阻断原因 = 模组选型未定，见 §11 待澄清 1/2/3 |
-> | ECDH 密钥协商 | **已实现**（`wireless/src/ecdh.rs` 用 `p256::ecdh::diffie_hellman()` + HKDF-SHA256）⚠️ 但与设计口径不一致，见 `docs/technical-debt.md` **U-100** |
+> | ECDH 密钥协商 | **已实现**（`wireless/src/ecdh.rs` 用 `p256::ecdh::diffie_hellman()` + HKDF-SHA256）。⚠️ 设计原写 X25519/32B 与本实现不符，已于 2026-09-27 裁定**统一到代码（P-256 / 65B）**并订正设计，见 `docs/technical-debt.md` **U-100（已闭合）** |
 > | AES-256-GCM 帧封装 | **未实现**（无 `aes-gcm` 依赖） |
 > | 认证 / 审计 / 通道管理 / REST 接口 | **未实现**；其中 Wi-Fi REST 相关条目原指向已删除的 `web-api` crate |
 >
-> **本文件的其余内容为需求设计（待硬件到位后实施）**，不是现网能力描述。台账：`docs/technical-debt.md` **U-06**（P0）/ **U-100**（P1）。
+> **本文件的其余内容为需求设计（待硬件到位后实施）**，不是现网能力描述。台账：`docs/technical-debt.md` **U-06**（P0）/ **U-100**（已闭合）。
 
 ---
 
