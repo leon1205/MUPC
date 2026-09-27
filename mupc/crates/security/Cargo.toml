@@ -25,6 +25,9 @@ chrono.workspace = true
 sha2 = "0.10"
 sm3 = "0.5"
 getrandom = "0.2"
+# `Sm4Key` 的 Zeroize/ZeroizeOnDrop 需要**正式依赖**（此前只在 dev-dependencies 里，生产代码
+# 无法引用 ⇒ 密钥残留内存无从清零）。`derive` feature 提供 `#[derive(Zeroize, ZeroizeOnDrop)]`。
+zeroize = { version = "1", features = ["derive"] }
 uuid.workspace = true
 tracing.workspace = true
 
