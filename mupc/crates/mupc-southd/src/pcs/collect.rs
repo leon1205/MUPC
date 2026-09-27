@@ -129,8 +129,6 @@ impl PcsHandle {
         // 锁内产出 → 锁外投递。用**具名枚举**而不是在锁内直接 `return`，是为了让"锁作用域"
         // 在类型层面一眼可见（`scope` 块一结束锁即释放，编译器保证）。
         enum TickOutcome {
-            /// 空 `regs` 早退（本拍无事可投）
-            EmptyCfg,
             /// 本拍成功：待投遥测（空 vec = 无点可投，不必调 sink）
             Telemetry(Vec<(String, f64, bool)>),
             /// 本拍失败：`Some(reason)` = **本拍刚判离线**（需投离线事件），`None` = 尚未判离线
@@ -244,7 +242,6 @@ impl PcsHandle {
 
         // ── 以下全在**锁外**：sink 可能落 SQLite（`record_event`）⇒ 不得阻塞联锁安全动作 ──
         match outcome {
-            TickOutcome::EmptyCfg => {}
             TickOutcome::Telemetry(pts) => {
                 if !pts.is_empty() {
                     self.inner
