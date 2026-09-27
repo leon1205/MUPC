@@ -50,6 +50,12 @@
 //!   / 11 var = 223 条）。另 [`obj::Obj::set_text_color`] / [`obj::Obj::set_text_font`]
 //!   两个**局部属性** setter 同批补上（窗口化行池要在运行期换字号/字色；两者用的是
 //!   `allowlist.txt` 里**早已放行**的两个符号 ⇒ 不新增条目）。
+//! - **WP5 P2-A「LVGL 日志转发」（2026-09-27）**：`lv_conf.h` 把 `LV_LOG_PRINTF` 置 **0**，
+//!   `init()` 把 [`log_bridge`] 注册为 LVGL 的日志出口 ⇒ **LVGL 日志 → Rust `tracing`**
+//!   （设计 §1.1.1.2 的口径落地）；`tracing` 未启用时桥内回落 [`diag`]（**不把观测性改差**）。
+//!   **本批动了 `lvgl-sys/allowlist.txt`**（+1 `fn` / +2 `type`）⇒ **触发一次 LVGL 全量 C 重编**
+//!   （双向一致性用例已复跑通过：151 fn / 64 type / 11 var = 226 条）。判别力用例见
+//!   `tests_log.rs`（8 条）；其**边界**（未做 C→Rust 端到端断言的理由）写在该文件头部。
 //!
 //! `unsafe` 始终只在本目录内（设计 §1.1.1.2 纪律 1）。
 //!
@@ -91,7 +97,10 @@ mod tests_a2;
 mod tests_a3;
 #[cfg(test)]
 mod tests_b4;
+#[cfg(test)]
+mod tests_log;
 
+use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -159,9 +168,117 @@ unsafe extern "C" fn tick_cb() -> u32 {
     tick_ms()
 }
 
+/// LVGL 日志转发到 Rust `tracing` 时使用的 `target`（现场过滤用：
+/// `RUST_LOG=mupc_local_display::lvgl=warn` 一类；`base` 名由模块路径决定）。
+pub const LOG_TARGET: &str = "mupc_local_display::lvgl";
+
+/// 本进程是否已把 [`log_bridge`] 注册给 LVGL（[`init`] 内注册一次）。
+///
+/// 只作**可观测的簿记**：LVGL 不提供 callback 的读回口，故这里记的是
+/// "**我们已经调用了注册 API**"，不是"LVGL 已受理"。判别力边界见 `tests_log.rs`。
+static LOG_CB_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// `lv_log_register_print_cb` 的 C 侧回调：把 LVGL 的日志**转发到 Rust `tracing`**
+/// （设计 §1.1.1.2；WP5 P2-A）。
+///
+/// # SAFETY（FFI 契约，逐条对应实参）
+///
+/// 1. **`level`**：`lv_log_level_t` = `int8_t`，**按值**传入。`lv_log_add` 自己先用
+///    `if(level >= LV_LOG_LEVEL_NUM) return;`（`lv_log.c:74`）挡掉越界值；`lv_log()` 恒传
+///    `LV_LOG_LEVEL_USER`（`:134`）⇒ 正常路径的取值域是 `0..=4`。本函数对**任何** `i8`
+///    都安全：级别只用于**查表**（`match` 的兜底臂），不做算术、不做索引、不 panic。
+/// 2. **`buf`**：指向 LVGL **自己栈帧**上、以 NUL 结尾的 C 字符串，**只保证在本回调返回前
+///    有效**（`lv_log_add` 的 `char buf[512]`（`lv_log.c:100`）与 `lv_log()` 的
+///    `char msg[256]`（`:132`），两者都由 `lv_snprintf`/`lv_vsnprintf` 定长写法保证有终止符）。
+///    实参恒非 NULL（LVGL 仅在 `custom_print_cb` 非空时调用，且只传上述两个栈数组）。
+///    本函数**不保存**该指针（不写 static、不写堆），返回后不再触碰 ⇒ 无悬垂。
+///    仍显式判 `is_null()` 兜底（比"依赖上游恒定成立"更省心，且零成本）。
+/// 3. **不 panic**：`CStr::from_ptr` + `to_str()` 都不 panic（不合法 UTF-8 走 `Err`）；
+///    级别走 `match` 兜底臂。**本函数内没有 panic 点**，故无需 `catch_unwind`
+///    （跨 FFI 展开 = UB，见本模块纪律 3）。
+/// 4. **不在回调内做分配 / 阻塞 / 加锁**：本函数只做
+///    ① 级别 → 名称/`tracing::Level` 的 `match`；② `tracing` 宏（`message` 字段按
+///    `Display` **惰性**记录，宏本身不分配、不取锁）；③ 未启用时回落 [`diag`]（一次
+///    `write_fmt`，零分配、忽略错误）。**没有** `format!` / `to_string_lossy` /
+///    `String` 分配（后者在 `to_str()` 失败时本会分配，故该分支只报"内容不可解码"）。
+///    ⚠️ **边界（如实登记）**：`tracing` **已启用**时，真正的 I/O 由**订阅者**实现承担
+///    （`tracing-subscriber` 的 fmt/文件层会取它自己的锁）—— 那是订阅者的既定行为，
+///    不在本函数可控范围内；本函数自身不引入锁。
+unsafe extern "C" fn log_bridge(level: sys::lv_log_level_t, buf: *const c_char) {
+    if buf.is_null() {
+        forward_log(level, "(LVGL 传入了空日志缓冲)");
+        return;
+    }
+    // SAFETY: 依上面第 2 条契约，`buf` 指向以 NUL 结尾、在本调用期间有效的 C 字符串。
+    let cstr = unsafe { CStr::from_ptr(buf) };
+    match cstr.to_str() {
+        Ok(s) => forward_log(level, s),
+        // LVGL 源码全为 ASCII；走到这里说明缓冲被写坏。**不分配**（`to_string_lossy`
+        // 会分配）⇒ 只报"内容不可解码"，但"发生过一条日志"这个事实不丢。
+        Err(_) => forward_log(level, "(LVGL 日志含非 UTF-8 字节，内容已丢弃)"),
+    }
+}
+
+/// `lv_log_level_t` → 名字（`lv_log.h` 的 `LV_LOG_LEVEL_*`：TRACE=0 / INFO=1 / WARN=2 /
+/// ERROR=3 / USER=4 / NONE=5）。**纯函数**：任何输入都有返回值（不 panic、不索引）。
+///
+/// `tracing` 与回落 `diag` **共用**这张表 ⇒ 两条路径的级别字样在一个地方定义。
+pub(crate) fn level_name(level: sys::lv_log_level_t) -> &'static str {
+    match level {
+        0 => "TRACE",
+        1 => "INFO",
+        2 => "WARN",
+        3 => "ERROR",
+        4 => "USER",
+        // 5 = LV_LOG_LEVEL_NONE（正常不会到达：`:74` 的 `level >= LV_LOG_LEVEL_NUM` 已挡），
+        // 以及其余越界值 —— 一律标 "?"，且**不 panic**。
+        _ => "?",
+    }
+}
+
+/// 按级别把一行 LVGL 日志交给 Rust 侧诊断出口（**零分配**；见 [`log_bridge`] 的 SAFETY 第 4 条）。
+///
+/// **出口选择**：`tracing` 启用（进程装了 subscriber 且该级别未被过滤）→ `tracing` 宏；
+/// 否则 → [`diag`]（stderr）。回落分支存在的理由：`lv_conf.h` 把 `LV_LOG_PRINTF` 置 **0**
+/// ⇒ C 侧**没有**任何 stdout 出口，若不回落，未装配 subscriber 的进程会**静默丢光** LVGL
+/// 日志（比改之前更差）。
+fn forward_log(level: sys::lv_log_level_t, msg: &str) {
+    use tracing::{enabled, error, info, trace, warn};
+    /// 让"是否启用"的判定与"用哪个宏"写在同一条臂上（级别名与 `level_name` 同源）。
+    macro_rules! emit {
+        ($guard:expr, $mac:ident) => {
+            if enabled!(target: LOG_TARGET, $guard) {
+                $mac!(target: LOG_TARGET, "{}", msg);
+            } else {
+                // 零分配：`format_args!` 不分配，`diag` 一次 `write_fmt` 且忽略写错误。
+                diag(format_args!("[lvgl {}] {}", level_name(level), msg));
+            }
+        };
+    }
+    match level {
+        0 => emit!(tracing::Level::TRACE, trace),
+        1 => emit!(tracing::Level::INFO, info),
+        2 => emit!(tracing::Level::WARN, warn),
+        3 => emit!(tracing::Level::ERROR, error),
+        // USER（`LV_LOG_USER` / `lv_log()`）：信息性，按 INFO 转（无对应 tracing 级别）。
+        4 => emit!(tracing::Level::INFO, info),
+        // 越界级别：LVGL 已挡过一遍，这里按 WARN 报并带上原值（**不索引、不 panic**）。
+        _ => {
+            if enabled!(target: LOG_TARGET, tracing::Level::WARN) {
+                warn!(target: LOG_TARGET, "level={} {}", level, msg);
+            } else {
+                diag(format_args!("[lvgl {}] {}", level_name(level), msg));
+            }
+        }
+    }
+}
+
 /// 初始化 LVGL 并挂上 Rust 单调 tick。**幂等**。
 ///
 /// 必须在事件循环线程调用，且早于本层任何其他 API（设计 §5.2 不变量 4）。
+///
+/// 同时把 LVGL 的日志出口接到 [`log_bridge`]（WP5 P2-A）：`lv_conf.h` 的 `LV_LOG_PRINTF`
+/// 为 **0** ⇒ 本回调是**唯一**出口。
 pub fn init() -> Result<(), LvglError> {
     if INITIALIZED.load(Ordering::SeqCst) {
         return Ok(());
@@ -169,10 +286,19 @@ pub fn init() -> Result<(), LvglError> {
     let _ = TICK0.set(Instant::now());
     // SAFETY: `lv_init()` 只允许被调用一次（LVGL 自带 `lv_initialized` 守卫），
     // 且此处在事件循环线程内、早于任何 display/indev 创建。
+    // `lv_log_register_print_cb` 只写 `lv_global.custom_log_print_cb` 这一个**普通静态字段**
+    // （`lv_log.c:20` 的 `#define custom_print_cb LV_GLOBAL_DEFAULT()->...`；
+    // `LV_ENABLE_GLOBAL_CUSTOM` 未启用 ⇒ `LV_GLOBAL_DEFAULT()` = `&lv_global`），不取锁、
+    // 不分配、无前置状态；放在 `lv_init()` **之后**是刻意的 —— 若 `lv_init()` 将来重置
+    // `lv_global`，先注册会被静默抹掉（放后面则必然生效，且不丢任何日志：
+    // `lv_init()` 自己的两条日志分别是 INFO（被 `LV_LOG_LEVEL_WARN` 编译期滤掉）与
+    // "already initialized"（本函数上方已挡））。
     unsafe {
         sys::lv_init();
         sys::lv_tick_set_cb(Some(tick_cb));
+        sys::lv_log_register_print_cb(Some(log_bridge));
     }
+    LOG_CB_REGISTERED.store(true, Ordering::SeqCst);
     // 先推进世代再置位：此后创建的句柄都归属新世代；上一世代残留句柄就此失效。
     GENERATION.fetch_add(1, Ordering::SeqCst);
     INITIALIZED.store(true, Ordering::SeqCst);
@@ -317,6 +443,19 @@ pub fn mem_monitor() -> MemStats {
 /// 接受理由：本函数只在**已发生并已被拦截的 panic**这条已退化路径上被调用
 /// （不是稳态路径），且其替代品（`eprintln!`）会引入 UB。稳态的 panic 观测性
 /// 由 `catch_unwind` 的返回值与各调用方的计数承担，不依赖本函数。
+///
+/// # 第二个调用方（WP5 P2-A 追加；口径同步）
+///
+/// [`forward_log`] 在 `tracing` **未启用**时也走本函数（LVGL 日志的回落出口）。
+/// ⚠️ **这不是"已退化路径"**，而是**未装配 subscriber 时的稳态路径** ⇒ 上面那句
+/// "只在已退化路径上被调用"**不再成立**。为什么仍然接受：
+///
+/// - `lv_conf.h` 的 `LV_LOG_PRINTF = 0` 已把 C 侧 stdout 出口**编译期关死**，回落必须存在，
+///   否则未装 subscriber 的进程会**静默丢光** LVGL 日志（比不改更差）；
+/// - 触发频率由 LVGL 自己限流：`LV_LOG_LEVEL = LV_LOG_LEVEL_WARN` ⇒ 只有 WARN/ERROR/USER
+///   到达这里（TRACE/INFO 在 C 侧就被编译期滤掉），不是每帧路径；
+/// - 本函数的性质（零分配、单次写、忽略错误、**不 panic**）正是 C 回调内需要的，
+///   与 [`log_bridge`] 的 SAFETY 第 4 条一致。
 pub fn diag(args: std::fmt::Arguments<'_>) {
     use std::io::Write;
     // 单次写入（而不是"正文 + 换行"两次）：两次之间若混入其它输出，会得到**半行交错**

@@ -491,8 +491,10 @@
 
 | U-103 | 12 本地显示终端 | **P3** | **内核 ABI 布局此前"仅人证"**（WP5 P3-E；承 12 号设计 §13 前置项 1 口径）：`local-display/src/canvas.rs` 的 `FbFixScreenInfo` 逐字段对应 `<linux/fb.h>` 的 `struct fb_fix_screeninfo`，但 `lvgl-sys/build.rs:113` 设 `layout_tests(false)`（关闭 bindgen 布局断言），libc 亦未绑定该结构体 ⇒ 「C/Rust 结构体尺寸 / 字段序」**无任何编译期网**。后果：若字段序/宽写错，`FBIOGET_FSCREENINFO` 写入字节数与 Rust 侧解读错位 —— 轻则 `smem_len` 读到垃圾、重则越界写（SIGBUS），且**只在真机首验才暴露** | **本轮已加编译期网（P3-E）**：`FbFixScreenInfo` 之后新增 `const _` 断言（`size_of` + 逐关键字段 `offset_of!`），LP64 = 80 B / ILP32 = 68 B（推导见该结构体文档的「布局的编译期网」；LP64 分支已对 `x86_64-unknown-linux-gnu` 目标编译验证）。**残留（如实登记，故仍留号）**：① 断言表是**人手抄**的内核期望值 ⇒ 内核头文件改版时**不会自动跟随**，需人工重比对；② ILP32 分支仅由"同类型代换"推导、**未在 32 位 Linux 目标上编译验证**（本仓无该目标）；③ 该 `cfg(target_os = "linux")` 块**在本机（Windows）不参与编译** ⇒ 本机 `cargo check` 验不到，唯一编译判据是交叉/真机构建。**真机首验仍为设计 §13 前置项 1** |
 
-> ⚠️ **统计口径**：本节新增 **U-100 ~ U-103 共 4 条**（P1 × 2 + P2 × 1 + P3 × 1，P0 级 0 条）。**不并入 §6.15 的 U-91…U-99 计数**（那批属 02 号文档重构，来源不同）。
-> 来源补充：U-102 / U-103 出自 `docs/superpowers/reports/全项目需求-设计-实现三方审查报告-2026-09-27.md`（其 §五 的 WP5 / 条目 18 与 21）—— 该报告 §五 其余 P1/P2/P3 清单**仍待项目经理决定是否全量并账**（见本节引言）。
+| U-104 | 12 本地显示终端 | **P3** | **`mupc-local-display` 进程未装配任何 `tracing` subscriber**（WP5 P2-A 修复过程中发现并如实登记）：设计 §1.1.1.2 要求「`LV_USE_LOG 1`（**转发到 Rust `tracing`**）」，本轮已把转发链落地（`lvgl/mod.rs::log_bridge` + `LV_LOG_PRINTF 0`），但渲染进程的 `main.rs` / `app.rs` **没有任何 `tracing-subscriber` 装配**（`grep -n tracing crates/local-display/src/` 零命中；本 crate 的依赖表也刻意不含 `tracing-subscriber`）⇒ 转发到 `tracing` 的宏在**当前装箱产物上恒为 no-op**，日志实际由桥内**回落分支**写 stderr（**故未造成观测性倒退**，但也没进结构化日志通道） | **待部署/日志装配侧裁定（非阻塞）**：① 在 `mupc-local-display` 里装配一个最小 fmt/journad 层（含 `RUST_LOG` 过滤；`target = mupc_local_display::lvgl` 便于按模块筛 —— 与 12 号 P3 日志页的 `targets` 过滤口径一致）；或 ② **明文接受**"LVGL 日志走 stderr 回落"并在部署文档写死该口径。在裁定前，桥内的 `enabled!` 回落分支是**保观测性的必需件**，不得因"没装 subscriber"而删。**判据**：`crates/local-display/src/lvgl/tests_log.rs` 已把该边界写在文件头（第 3 条），改动该分支须同步该处 |
+
+> ⚠️ **统计口径**：本节新增 **U-100 ~ U-104 共 5 条**（P1 × 2 + P2 × 1 + P3 × 2，P0 级 0 条）。**不并入 §6.15 的 U-91…U-99 计数**（那批属 02 号文档重构，来源不同）。
+> 来源补充：U-102 / U-103 出自 `docs/superpowers/reports/全项目需求-设计-实现三方审查报告-2026-09-27.md`（其 §五 的 WP5 / 条目 18 与 21）；U-104 为本轮修复过程中**新发现**（不在该报告清单内）。该报告 §五 其余 P1/P2/P3 清单**仍待项目经理决定是否全量并账**（见本节引言）。
 
 ---
 

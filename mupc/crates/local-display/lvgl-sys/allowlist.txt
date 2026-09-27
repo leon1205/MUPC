@@ -19,6 +19,13 @@ fn:lv_tick_set_cb
 fn:lv_timer_handler
 type:lv_tick_get_cb_t
 
+# ── 日志转发（WP5 P2-A：`LV_USE_LOG 1` + `LV_LOG_PRINTF 0`，出口收敛到
+#    `src/lvgl/mod.rs` 的 `log_bridge` → Rust `tracing`）──
+# 薄层用点：`lvgl/mod.rs::init()` 注册回调；`log_bridge` 是回调本体。
+fn:lv_log_register_print_cb
+type:lv_log_level_t
+type:lv_log_print_g_cb_t
+
 # ── display 注册（P-1：自研 lv_display + PARTIAL 双缓冲 + flush_cb）──
 fn:lv_display_create
 fn:lv_display_set_buffers
@@ -337,6 +344,14 @@ var:lv_font_noto_sc_148
 # `lv_anim_exec_xcb_t`，理由见上面 indev 分节的注释块；修复对象是 ASAN 实测到的
 # indev 惯性抛掷动画 UAF，见 `docs/technical-debt.md` U-58）。重跑双向断言三个集合均为空。
 # 全量：**148 fn / 61 type / 11 var = 220 条**（与 `lvgl-sys` 构建脚本打印的 "220 entries" 一致）。
+#
+# ⚠️ **上句的 220 在 WP5 P2-A 开工前**已过期：T21c-2 加过条目但**未同步本处**
+# （实测开工前 = **150 fn / 62 type / 11 var = 223 条**，与 `src/lvgl/mod.rs` 文档头记的
+# "150 fn / 62 type / 11 var = 223 条" 一致）。
+# 【WP5 P2-A 复核（2026-09-27）】+1 fn / +2 type（`lv_log_register_print_cb` 与其形参类型
+# `lv_log_level_t` / `lv_log_print_g_cb_t`，理由见顶部"日志转发"分节）。重跑双向断言
+# `cargo test -p lvgl-sys --test allowlist_consistency`：越界 / 缺失 / 死符号三个集合均为空。
+# 全量：**151 fn / 64 type / 11 var = 226 条**。
 #
 # ⚠️ 本分节由 `tests/allowlist_consistency.rs` 的"越界/缺失"断言机械核对；
 # 新增直接声明的 type 请写在上面对应用点分节内，不要混进这里。
