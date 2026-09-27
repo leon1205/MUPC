@@ -93,6 +93,13 @@ system-monitor (新增)
 └── security (OOM 事件签名验证 -- 预留)
 ```
 
+> ⚠️ **现状订正（2026-09-27）**：上面 §1.2 架构图、本依赖清单与 §1.4 数据流中「intercore 承载
+> 升级/恢复信号、向实时控制模块下发」的表述为**设计意图，当前未接线**。PCS（= 实时控制模块）的
+> 通信与控制已于 **2026-09-26 整体迁出至南向**（02 号设计 **§13** / **ADR-014·015·016**），由
+> `mupc-southd::pcs::PcsHandle` 承载；核间 TCP 通道在生产路径**无消费者**（技术债 **U-76**）。
+> 代码侧核实：`mupc/crates/ota-update/src/` 全仓**无 `intercore` 引用**（`mupc-intercore` 仅出现在
+> §9.3 的 Cargo.toml 示例清单中）。详见 **§7 章首现状订正**。
+
 ### 1.4 数据流关系
 
 ```
@@ -853,7 +860,7 @@ pub enum FwOtaState {
 | 电池/电源状态 | 非电池供电或电池电量 >= 30% | 终止升级并上报 |
 | CPU 负载 | <= 80% | 等待并重试，超时 5 分钟后终止 |
 | 系统进程健康 | 所有关键进程运行正常 | 终止升级 |
-| 实时控制模块状态 | 心跳正常 | 终止升级 |
+| 实时控制模块状态 | PCS 通道在线（经 `mupc-southd::pcs::PcsHandle` 快照查询） | 终止升级 |
 | 固件兼容性 | 平台字段匹配 `rk3588-openeuler` | 终止升级 |
 | 升级窗口 | 当前时间在配置的升级窗口内 | 等待至窗口时间 |
 
@@ -867,7 +874,7 @@ pub enum FwOtaState {
 |--------|---------|
 | 固件版本 | `cat /etc/mupc-version` 输出的版本号等于目标版本 |
 | 关键进程存活 | gateway、intercore、strategy-engine、data-processing 四进程运行中 |
-| 核间通信 | 与实时控制模块的心跳回复在 3 秒内 |
+| PCS 通道 | `mupc-southd::pcs::PcsHandle` 采集循环（每 `interval_ms` 一拍）正常 |
 | 北向连接 | IEC 104 网关 TCP 连接建立成功 |
 | 日志系统 | tracing 日志正常输出至 `/var/log/mupc/` |
 | AI 引擎 | ai-engine 进程（如存在）运行中，推理接口正常 |
@@ -1254,7 +1261,7 @@ pub struct ProcessRestarter {
 | 内存泄漏累积 72 小时未重启 | 进程 RSS 超限触发自动重启；ai-engine 先热切换至兜底策略再重启 |
 | 同时 3 个进程崩溃 | 守护进程按优先级排序重启（gateway 最高），全部在 120 秒内恢复 |
 | 磁盘写入失败（设备故障） | 降级运行：停止日志写入（降级为 stderr），继续执行控制指令 |
-| 核间通信中断 | 守护进程连续 3 次心跳未回复后，发送复位信号至实时控制模块 |
+| PCS 通道中断 | PCS 由 `mupc-southd::pcs::PcsHandle` 承载，连续采集失败判离线并告警。原「经核间心跳未回复后发送复位信号至实时控制模块」**未接线**（核间 TCP 通道生产路径无消费者） |
 | 多次自动重启仍失败 | 单进程连续 5 次重启失败后，转为 CRITICAL 告警，等待管理员介入 |
 | 守护进程自身崩溃 | 硬件看门狗在 60 秒后复位系统 |
 | /var 分区只读 | 守护进程降级输出至 syslog，核心控制功能不中断 |
@@ -1263,9 +1270,18 @@ pub struct ProcessRestarter {
 
 ## 7. 与 intercore 协同设计
 
+> ⚠️ **现状订正（2026-09-27）**：本章为**设计意图，当前未接线**——§7.1–§7.4 描述的「ota-update 经
+> 核间向实时控制模块发送降级/恢复信号」**没有实现**。依据：① PCS（= 实时控制模块）的通信与控制已于
+> **2026-09-26 整体迁出至南向**（02 号设计 **§13** / **ADR-014·015·016**），由
+> `mupc-southd::pcs::PcsHandle` 承载（下发入口 `send_dual_param` / `send_tai_command` / `stop` /
+> `tick_once`，注入点 `strategy-engine::AiIntegrator::set_pcs_client`），其在线态可经快照查询；
+> ② 核间 TCP 通道在生产路径**无消费者**（技术债 **U-76**：客户端只发不收、不发心跳、不发 Connect 帧）；
+> ③ 代码侧核实 `mupc/crates/ota-update/src/` 全仓**无 `intercore` 引用**。
+> 故本章各条**据实标为设计意图/待接**，待接回消费者时方生效（届时须重走评审）。
+
 ### 7.1 升级前信号发送
 
-固件升级开始前，ota-update 通过 intercore 向实时控制模块发送降级信号：
+固件升级开始前，ota-update 通过 intercore 向实时控制模块发送降级信号（**设计意图，当前未接线**——见本章首现状订正）：
 
 ```rust
 pub struct UpgradeSignalManager {
@@ -1312,13 +1328,15 @@ impl UpgradeSignalManager {
 
 | 阶段 | 发送信号 | 说明 |
 |------|---------|------|
-| 升级前检查 | 查询 intercore 心跳 | 确认实时控制模块在线 |
+| 升级前检查 | 查询 intercore 心跳 | 确认实时控制模块在线（**未接线**；PCS 在线态现经 `mupc-southd::pcs::PcsHandle` 快照查询） |
 | 升级开始 | strategy_mode = basic | 切换至兜底策略 |
 | 升级开始 | ai_ready = false | 停止 AI 决策 |
 | 等待确认 | - | 等待实时控制模块 ACK（10s 超时） |
-| 升级后验证 | 查询 intercore 心跳 | 确认核间通信恢复 |
+| 升级后验证 | 查询 intercore 心跳 | 确认核间通信恢复（**未接线**，同上） |
 | 升级完成 | ai_ready = true | 恢复 AI 决策 |
 | 升级完成 | strategy_mode = smart | 恢复智能模式 |
+
+> 上表与 §7.1/§7.2 均为**设计意图，当前未接线**（见本章首现状订正）。
 
 ### 7.4 与现有系统集成点总览
 
@@ -1327,8 +1345,8 @@ impl UpgradeSignalManager {
 | SM2 签名验证 | 固件 OTA 复用 security crate 的 SM2 签名验证能力 |
 | 公钥管理 | 独立 SM2 密钥对，公钥路径 `/etc/mupc/security/ota_public_key.pem` |
 | 审计日志 | 所有固件升级操作写入安全审计日志 |
-| intercore 升级前通知 | 发送 `strategy_mode = basic` + `ai_ready = false` |
-| intercore 升级后恢复 | 发送 `ai_ready = true` + `strategy_mode = smart` |
+| intercore 升级前通知 | 发送 `strategy_mode = basic` + `ai_ready = false`（**设计意图，当前未接线**） |
+| intercore 升级后恢复 | 发送 `ai_ready = true` + `strategy_mode = smart`（**设计意图，当前未接线**） |
 | web-api REST API | 升级状态、资源监控、MTBF 报告 |
 | OTA 服务器 HTTP API | 版本查询、下载、状态上报、灰度指令 |
 
