@@ -14,7 +14,10 @@ pub mod tcp_server;
 pub mod transport;
 
 pub use heartbeat::HeartbeatManager;
-pub use protocol::{FrameHeader, FrameType as IntercoreFrameType, IntercoreFrame};
+pub use protocol::{
+    ActionPayload, FrameHeader, FrameType as IntercoreFrameType, IntercoreFrame,
+    FRAME_FIXED_LENGTH, MAX_PAYLOAD_LEN,
+};
 pub use tcp_server::{
     CommandConfig, CommandQueue, ControlCmdPayload, ControlCmdPayloadV2, ControlCmdPayloadV3,
     DualParamCommand, IntercoreClient, IntercoreConfig, IntercoreServer,

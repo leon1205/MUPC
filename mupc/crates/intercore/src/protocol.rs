@@ -10,6 +10,12 @@ use std::io::Cursor;
 /// 帧目标长度（定长）
 pub const FRAME_FIXED_LENGTH: usize = 64;
 
+/// 单帧最大载荷长度（PRD 10 §2.2：64 - 8 帧头 - 2 CRC = 54）
+///
+/// 载荷超过本上限时 [`IntercoreFrame::to_bytes`] **返回 `Err`**，不得静默截断、
+/// 也不得写出超过 [`FRAME_FIXED_LENGTH`] 的帧（否则接收侧 64 B 定长缓冲必判 CRC 错）。
+pub const MAX_PAYLOAD_LEN: usize = FRAME_FIXED_LENGTH - FrameHeader::FIXED_LENGTH - 2;
+
 /// 帧类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u16)]
@@ -151,7 +157,26 @@ impl IntercoreFrame {
     }
 
     /// 转换为字节流（定长 64 字节）
+    ///
+    /// # 载荷长度上限（E-11）
+    ///
+    /// 载荷长度超过 [`MAX_PAYLOAD_LEN`] ⇒ 返回 [`ErrorCode::SerializeError`]。
+    /// **不得**静默截断，也**不得**写出超过 [`FRAME_FIXED_LENGTH`] 的帧：接收侧以
+    /// 64 B 定长缓冲读取，超长帧会被判「Invalid frame length」并导致流永久失步。
     pub fn to_bytes(&self) -> Result<Vec<u8>, MupcError> {
+        if self.data.len() > MAX_PAYLOAD_LEN {
+            return Err(MupcError::new(
+                ErrorCode::SerializeError,
+                format!(
+                    "Payload {} bytes exceeds max {} bytes for fixed {}-byte frame",
+                    self.data.len(),
+                    MAX_PAYLOAD_LEN,
+                    FRAME_FIXED_LENGTH
+                ),
+                "intercore",
+            ));
+        }
+
         let mut result = Vec::new();
 
         // Magic
@@ -165,9 +190,10 @@ impl IntercoreFrame {
                 )
             })?;
 
-        // Length
+        // Length —— 以实际载荷为准重算，避免 header.length 与 data 不一致时写出"说的和写的不同"的帧
+        let length = (FrameHeader::FIXED_LENGTH + self.data.len() + 2) as u16;
         result
-            .write_u16::<BigEndian>(self.header.length)
+            .write_u16::<BigEndian>(length)
             .map_err(|_| {
                 MupcError::new(
                     ErrorCode::SerializeError,
@@ -289,6 +315,84 @@ impl IntercoreFrame {
             }
         }
         crc
+    }
+}
+
+/// HIL 动作载荷 —— `ControlCmd` 帧的**二进制**载荷（E-01/E-11 统一口径）
+///
+/// 布局（16 字节，大端），与 11 号 PRD §4.3 原表的字段口径一致（该表把 p_ref 放在
+/// 偏移 8、k_droop 放在偏移 16，扣掉 8 字节帧头后即本布局）：
+///
+/// ```text
+/// 偏移 0..8   p_ref   f64 IEEE754 BE  (kW)
+/// 偏移 8..16  k_droop f64 IEEE754 BE  (kW/V)
+/// ```
+///
+/// **为什么用二进制而非 JSON**：定长帧载荷预算仅 54 B，`ControlCmdPayloadV2` 的
+/// 完整 JSON（含 `ai_ready` / `strategy_mode` / `timestamp_ms` / `frame_version`）
+/// 光字段名就 ≈50 B、整体 ≈120 B ⇒ 必然超限（E-11）。动作链路只需要两个数值，
+/// 二进制 16 B 是**同源可校验**的编码：写侧 `to_frame()`、读侧 `from_frame()` 共用
+/// 本类型，不另立第二套帧格式。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActionPayload {
+    /// 有功基准点 (kW)
+    pub p_ref: f64,
+    /// 电压-有功下垂系数 (kW/V)
+    pub k_droop: f64,
+}
+
+impl ActionPayload {
+    /// 载荷固定长度（字节）
+    pub const LEN: usize = 16;
+
+    pub fn new(p_ref: f64, k_droop: f64) -> Self {
+        Self { p_ref, k_droop }
+    }
+
+    /// 编码为 16 字节大端载荷
+    pub fn to_bytes(&self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[..8].copy_from_slice(&self.p_ref.to_be_bytes());
+        out[8..].copy_from_slice(&self.k_droop.to_be_bytes());
+        out
+    }
+
+    /// 从载荷字节解码（长度必须恰为 [`Self::LEN`]）
+    pub fn from_bytes(data: &[u8]) -> Result<Self, MupcError> {
+        if data.len() != Self::LEN {
+            return Err(MupcError::new(
+                ErrorCode::FrameParseError,
+                format!(
+                    "Action payload length {} != expected {}",
+                    data.len(),
+                    Self::LEN
+                ),
+                "intercore",
+            ));
+        }
+        let p_ref = f64::from_be_bytes(data[..8].try_into().expect("8 bytes"));
+        let k_droop = f64::from_be_bytes(data[8..].try_into().expect("8 bytes"));
+        Ok(Self { p_ref, k_droop })
+    }
+
+    /// 编码为完整的 `ControlCmd` 定长帧字节（64 B）
+    pub fn to_frame(&self, seq_no: u16) -> Result<Vec<u8>, MupcError> {
+        IntercoreFrame::new(FrameType::ControlCmd, seq_no, self.to_bytes().to_vec()).to_bytes()
+    }
+
+    /// 从已解析的 `ControlCmd` 帧取载荷
+    pub fn from_frame(frame: &IntercoreFrame) -> Result<Self, MupcError> {
+        if frame.header.frame_type != FrameType::ControlCmd {
+            return Err(MupcError::new(
+                ErrorCode::InvalidFrame,
+                format!(
+                    "Expected ControlCmd frame, got {:?}",
+                    frame.header.frame_type
+                ),
+                "intercore",
+            ));
+        }
+        Self::from_bytes(&frame.data)
     }
 }
 
@@ -511,5 +615,88 @@ mod tests {
         assert_eq!(parsed.header.frame_type, FrameType::ControlCmd);
         assert_eq!(parsed.header.seq_no, 42);
         assert_eq!(parsed.data, data);
+    }
+
+    // ========== E-11: 载荷长度上限 ==========
+
+    #[test]
+    fn test_to_bytes_rejects_payload_over_fixed_frame_budget() {
+        // 前提：预算 = 64 - 8(帧头) - 2(CRC) = 54
+        assert_eq!(MAX_PAYLOAD_LEN, 54);
+
+        // 边界内：恰好 54 字节可编码，且整帧正好 64 字节（无 padding 需求）
+        let ok = IntercoreFrame::new(FrameType::ControlCmd, 1, vec![0xAB; MAX_PAYLOAD_LEN])
+            .to_bytes()
+            .expect("54 字节载荷应可编码");
+        assert_eq!(ok.len(), FRAME_FIXED_LENGTH);
+
+        // 超限：必须返回 Err —— 不得静默截断、不得写出超长帧
+        let over = IntercoreFrame::new(FrameType::ControlCmd, 1, vec![0xAB; MAX_PAYLOAD_LEN + 1])
+            .to_bytes();
+        let err = over.expect_err("55 字节载荷必须被拒绝");
+        assert_eq!(err.code, ErrorCode::SerializeError);
+    }
+
+    #[test]
+    fn test_oversized_json_control_cmd_is_rejected_not_silently_sent() {
+        // 残留登记（U-76）：V2/V3 的**完整** JSON ControlCmd 载荷本就超过定长帧预算，
+        // 修前是"写出 130 字节超长帧 ⇒ 接收侧报 Invalid frame length ⇒ 流失步"，
+        // 修后是"调用即 Err"。此处固定这一事实，防止有人把校验退回静默。
+        let payload =
+            crate::tcp_server::ControlCmdPayloadV2 {
+                p_ref: Some(10.0),
+                k_droop: Some(5.0),
+                ai_ready: Some(false),
+                strategy_mode: Some("fallback".into()),
+                timestamp_ms: Some(1_700_000_000_000),
+                frame_version: Some(2),
+            }
+            .to_json()
+            .unwrap();
+        assert!(
+            payload.len() > MAX_PAYLOAD_LEN,
+            "前提：完整 V2 JSON 载荷 {} 字节应超过预算 {}",
+            payload.len(),
+            MAX_PAYLOAD_LEN
+        );
+        assert!(IntercoreFrame::new(FrameType::ControlCmd, 0, payload)
+            .to_bytes()
+            .is_err());
+    }
+
+    // ========== E-01: HIL 动作载荷（sim-bridge 同源编解码）==========
+
+    #[test]
+    fn test_action_payload_roundtrip_in_fixed_frame() {
+        let payload = ActionPayload::new(-25.5, 0.125);
+        let frame_bytes = payload.to_frame(7).unwrap();
+
+        assert_eq!(frame_bytes.len(), FRAME_FIXED_LENGTH);
+        // 帧头按 PRD 10 §2.2：magic + length + type + seq
+        assert_eq!(frame_bytes[0..2], [0xAA, 0x55]);
+        assert_eq!(
+            u16::from_be_bytes([frame_bytes[2], frame_bytes[3]]) as usize,
+            FrameHeader::FIXED_LENGTH + ActionPayload::LEN + 2
+        );
+        assert_eq!(
+            u16::from_be_bytes([frame_bytes[4], frame_bytes[5]]),
+            0x0010
+        );
+
+        let parsed = IntercoreFrame::from_bytes(&frame_bytes).unwrap();
+        let back = ActionPayload::from_frame(&parsed).unwrap();
+        assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn test_action_payload_rejects_wrong_length_and_type() {
+        // 长度必须恰为 16
+        assert!(ActionPayload::from_bytes(&[0u8; 15]).is_err());
+        assert!(ActionPayload::from_bytes(&[0u8; 17]).is_err());
+
+        // 帧类型必须是 ControlCmd
+        let not_cmd = IntercoreFrame::new(FrameType::StatusReport, 0, vec![0u8; 16]);
+        let err = ActionPayload::from_frame(&not_cmd).expect_err("非 ControlCmd 帧必须拒绝");
+        assert_eq!(err.code, ErrorCode::InvalidFrame);
     }
 }
