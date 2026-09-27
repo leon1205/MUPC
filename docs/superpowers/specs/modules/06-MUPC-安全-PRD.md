@@ -102,6 +102,8 @@ MUPC 微电网特种调控装置作为电力调度与配电自动化的核心边
 | 许可 | Apache-2.0 / MIT |
 | Cargo Feature | `default = ["real_gmsm"]`，通过 `fake_gmsm` feature 支持 CI 测试（使用 ring 模拟） |
 
+> **⚠️ 版本订正（2026-09-27）**：本表「gmsm 0.14」是**选定目标版本**。**实际依赖为 `gmsm 0.1.0`**（`mupc/crates/security/Cargo.toml`），`0.14` 上游尚未发布。**实际可用能力以 06 设计文档 §2.10（0.1.0 实测可用 API）与 §2.12（版本差距与升级路线）为准**：SM3 / SM4-CBC 为真国密；**SM2 签名 / SM4-GCM / HKDF / ECDH / x509 在 0.1.0 不可用**。另据 **2026-09-09「国密只留框架」** 裁定，本模块为 **framework-only**，**不可作国密合规交付**。同注见 §11.3。
+
 ### 3.3 SM2 签名与验签
 
 #### 功能 3.3.1：SM2 签名/验签
@@ -827,7 +829,7 @@ mupc/crates/security/src/
 
 | 依赖 | 用途 | 建议库 | 说明 |
 |------|------|--------|------|
-| gmsm | SM2/SM3/SM4 国密算法 | gmsm 0.14 | 纯 Rust，无外部依赖 |
+| gmsm | SM2/SM3/SM4 国密算法 | ~~gmsm 0.14~~ → **实际 0.1.0** | 纯 Rust，无外部依赖。**「0.14」为选定目标版本，上游未发布**；实际依赖 `gmsm 0.1.0`，能力缺口见 06 设计 §2.12（SM2 签名 / SM4-GCM / HKDF / ECDH / x509 均不可用，`ring` 兜底） |
 | strongSwan | IPSec IKEv2 实现 | 系统进程调用 | 备用：轻量级 Rust IPSec 库 |
 | x509-parser | CRL 解析 | x509-parser + gmsm::x509 | CRL 格式解析 |
 | cryptoki | HSM 接口 | cryptoki | 可选，用于硬件加密模块 |
