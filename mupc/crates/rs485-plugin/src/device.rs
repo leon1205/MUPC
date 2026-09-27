@@ -90,6 +90,7 @@ type RawFd = i32;
 /// 单帧接收的**字节上界**（防御性，非协议值）：Modbus RTU 单帧最长 256 字节
 /// （从站号 1 + 功能码 1 + 数据 252 + CRC 2），取 512 留一倍余量。
 /// 用于 `recv_frame` 的循环读上限与读缓冲长度（B-8）。
+#[cfg(any(unix, test))] // 产线只由 unix 的 `recv_frame` 使用；test 门控让单测在 Windows 也能跑
 const MAX_FRAME_BYTES: usize = 512;
 
 /// 由**已收前缀**推断本帧的**期望总长度**（纯函数，无 IO ⇒ 可单测；B-8）。
@@ -101,6 +102,7 @@ const MAX_FRAME_BYTES: usize = 512;
 /// - **回显类**（`0x05` / `0x06` / `0x0F` / `0x10`）：固定 **8** 字节；
 /// - **前缀不足**（拿不到第 2 字节 / 读类拿不到第 3 字节）或**未知功能码** ⇒ `None`
 ///   （判不出；调用方按"至少再收 3 字节保底"处理，不无限等）。
+#[cfg(any(unix, test))]
 fn expected_frame_len(prefix: &[u8]) -> Option<usize> {
     let func = *prefix.get(1)?;
     if func & 0x80 != 0 {
@@ -131,6 +133,7 @@ fn expected_frame_len(prefix: &[u8]) -> Option<usize> {
 ///
 /// `read_chunk(scratch) -> usize`：把新到的字节写进 `scratch` 前缀并返回**字节数**。
 /// 实现方须保证返回值 ≤ `scratch.len()`。
+#[cfg(any(unix, test))]
 fn read_frame_loop<F>(buf: &mut Vec<u8>, mut read_chunk: F) -> usize
 where
     F: FnMut(&mut [u8]) -> usize,

@@ -37,6 +37,20 @@ pub const MIN_POLL_INTERVAL_MS: u64 = 500;
 /// **既有名保留为别名**（设计 §12.7：「**不得删除**：既有单测与文档引用它」）。
 pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 
+/// `south_pcs.response_timeout_ms` 的**下界**（B-2，2026-09-27 全项目审查 P2）。
+///
+/// **为什么不是 `> 0`**：该值落进串口 `termios` 的 `VTIME = timeout_ms / 100`
+/// （**整数除法，向下取整**；见 `rs485-plugin/src/device.rs` 的 `build_port_termios`）。
+/// 取 `1..=99` 时 `VTIME` 落 **0** ⇒ `VMIN=0` + `VTIME=0` 是**完全非阻塞读**
+/// ⇒ `read` 无数据立刻返回 0 ⇒ 每次请求都"响应为空" ⇒ **全站恒 offline**
+/// （不是慢，是绝无可能成功）。故下界必须 ≥ 100ms（1 个 VTIME 刻度）。
+///
+/// **取值口径：向上取整到 100ms 的整数倍中的最小者** —— 即"至少 1 个 VTIME 刻度"；
+/// 本常量只设**下界**，不强制 `timeout_ms` 必须为 100 的整数倍（余数被整数除法丢弃，
+/// 例如 250ms 与 200ms 等价，属可接受的量化而非静默错误）。**口层
+/// `Rs485PortBus::open_with_port_params` 复用同一常量**（纵深防御，两层判据同源）。
+pub const MIN_PCS_RESPONSE_TIMEOUT_MS: u64 = 100;
+
 /// 站级串口校验位（PRD §9.4.1 `parity`；YAML: `none` 缺省 / `even` / `odd`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -286,7 +300,8 @@ impl SouthPcsConfig {
     ///   语义 —— 段级 `interval_ms` 已是采集兼心跳周期，单块段不存在"某块提速"的诉求；
     ///   探测到即拒是 fail-closed，否则它是可写出但永不执行的**死配置**）；`baud_rate`
     ///   越界拒（同站级 —— `0` 会静默穿透到 `open()` 才报错）。
-    /// - **控制面值域（2026-09-26 补）**：`response_timeout_ms > 0` / `data_bits ∈ 5..=8` /
+    /// - **控制面值域（2026-09-26 补）**：`response_timeout_ms ≥` [`MIN_PCS_RESPONSE_TIMEOUT_MS`]
+    ///   （= 100ms，2026-09-27 B-2 由 `> 0` 收口 —— 理由见该常量）/ `data_bits ∈ 5..=8` /
     ///   `stop_bits ∈ 1..=2` —— 前者的落点本就在此；后两者原先**只在口层**
     ///   `open_with_port_params` 的 fail-closed 守卫，配置期会放行（门禁后移一层）⇒ 补入此处。
     ///   口层守卫**保留**（纵深防御，判据同源）。
@@ -316,8 +331,15 @@ impl SouthPcsConfig {
                 self.interval_ms, PCS_MIN_INTERVAL_MS
             ));
         }
-        if self.response_timeout_ms == 0 {
-            return Err("south_pcs: response_timeout_ms 须 > 0".into());
+        // 下界收口到"VTIME 至少 1 个刻度"（B-2，2026-09-27 全项目审查 P2）：此前只拦 `== 0`，
+        // 而拦截理由（`port_runtime.rs` 的 "VTIME 会落 0"）对 `1..=99` **同样成立** ——
+        // `VTIME = timeout/100` 向下取整落 0 ⇒ 完全非阻塞读 ⇒ 全站恒 offline。判据与文案同源。
+        if self.response_timeout_ms < MIN_PCS_RESPONSE_TIMEOUT_MS {
+            return Err(format!(
+                "south_pcs: response_timeout_ms={} 须 ≥ {}ms（VTIME = timeout/100 向下取整 ⇒ \
+                 1..=99 会落 0 ⇒ read 立即返回、全站恒 offline）",
+                self.response_timeout_ms, MIN_PCS_RESPONSE_TIMEOUT_MS
+            ));
         }
         // 控制面三项的**值域**（2026-09-26 补）：此前 `data_bits` / `stop_bits` 的越界只在
         // **口层** `open_with_port_params` 的 fail-closed 守卫里拒（⇒ 门禁点比配置期**后移一层**，
@@ -3124,15 +3146,32 @@ mod south_pcs_tests {
             "不支持块级周期覆盖",
             "regs[].interval_ms=Some(2000)",
         );
-        reject(
-            SouthPcsConfig {
-                enabled: true,
-                response_timeout_ms: 0,
-                regs: vec![pcs_block()],
-                ..SouthPcsConfig::default()
-            },
-            "response_timeout_ms 须 > 0",
-            "零超时",
+        // B-2（2026-09-27 全项目审查 P2）：下界由 `> 0` 收口到 `≥ 100` ——
+        // `VTIME = timeout/100` 向下取整，`1..=99` 落 0 ⇒ read 立即返回 ⇒ **全站恒 offline**。
+        // 判别力：把判据退回 `== 0` ⇒ 下面 1 / 50 / 99 三条**全红**（0 那条仍绿）。
+        for bad in [0u64, 1, 50, 99] {
+            reject(
+                SouthPcsConfig {
+                    enabled: true,
+                    response_timeout_ms: bad,
+                    regs: vec![pcs_block()],
+                    ..SouthPcsConfig::default()
+                },
+                "response_timeout_ms",
+                &format!("response_timeout_ms={bad}（< 100 ⇒ VTIME 落 0）"),
+            );
+        }
+        // 正对照：恰在下界（100 ⇒ VTIME=1）**必须放行**，防"改成恒拒"式的假绿。
+        let ok = SouthPcsConfig {
+            enabled: true,
+            response_timeout_ms: MIN_PCS_RESPONSE_TIMEOUT_MS,
+            regs: vec![pcs_block()],
+            ..SouthPcsConfig::default()
+        };
+        assert!(
+            ok.validate().is_ok(),
+            "response_timeout_ms={MIN_PCS_RESPONSE_TIMEOUT_MS} 是下界本身 ⇒ 必须通过，实际: {:?}",
+            ok.validate()
         );
         // 控制面值域（2026-09-26 补）：`data_bits: 9` 曾**通过**段内 `validate()`、要到口层
         // `open_with_port_params` 的 fail-closed 守卫才拒（门禁点后移一层）⇒ 此处钉住配置期即拒。

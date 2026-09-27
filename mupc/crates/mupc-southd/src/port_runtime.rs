@@ -145,10 +145,18 @@ impl Rs485PortBus {
                 format!("stop_bits={} 越界（须 1..=2）", params.stop_bits),
             ));
         }
-        if params.timeout_ms == 0 {
+        // 下界 ≥ 100ms（B-2）：`VTIME = timeout_ms / 100` **向下取整** ⇒ `1..=99` 与 `0` 同病
+        // ——落 0 即"完全非阻塞读"，read 无数据立刻返回 ⇒ 每次请求都判"响应为空" ⇒ **全站恒
+        // offline**。判据/文案与配置期 `SouthPcsConfig::validate` **同源**（同一常量），
+        // 本层保留为**纵深防御**（`PortParams` 可不经 validate 直接构造）。
+        if params.timeout_ms < crate::config::MIN_PCS_RESPONSE_TIMEOUT_MS {
             return Err(BusError::Open(
                 conf.port.clone(),
-                "timeout_ms=0 非法（VTIME 会落 0 ⇒ 读恒即时返回）".to_string(),
+                format!(
+                    "timeout_ms={} 非法（须 ≥ {}ms：VTIME = timeout/100 向下取整 ⇒ 1..=99 会落 0 ⇒ 读恒即时返回）",
+                    params.timeout_ms,
+                    crate::config::MIN_PCS_RESPONSE_TIMEOUT_MS
+                ),
             ));
         }
         let c = bus_config(conf, params);
@@ -904,6 +912,19 @@ mod tests {
                 data_bits: 8,
                 stop_bits: 1,
             },
+            // B-2（2026-09-27 全项目审查 P2）：`1..=99` 与 `0` 同病 ——
+            // `VTIME = timeout/100` 向下取整落 0 ⇒ 非阻塞读 ⇒ 全站恒 offline。
+            // 判别力：口层判据退回 `== 0` ⇒ 下面两条红。
+            PortParams {
+                timeout_ms: 1,
+                data_bits: 8,
+                stop_bits: 1,
+            },
+            PortParams {
+                timeout_ms: 99,
+                data_bits: 8,
+                stop_bits: 1,
+            },
         ];
         for pp in bad {
             assert!(
@@ -914,6 +935,12 @@ mod tests {
                 "越界控制面参数须 Open Err（fail-closed），实得 Ok：{pp:?}"
             );
         }
+        // 口层与配置期的**同一常量**（防两处下界各自漂移）
+        assert_eq!(
+            crate::config::MIN_PCS_RESPONSE_TIMEOUT_MS,
+            100,
+            "下界口径：1 个 VTIME 刻度 = 100ms"
+        );
     }
 }
 
