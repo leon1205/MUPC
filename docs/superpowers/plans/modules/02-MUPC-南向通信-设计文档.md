@@ -30,60 +30,108 @@
 
 ### 1.1 架构概览
 
-南向通信模块采用**分层+插件化**架构，自底向上分为四层：
+南向通信模块承担**两项职责**：**站级设备采集**（§10、§11、§12）与 **PCS（= 实时控制模块）通信与控制**（§13，2026-09-26 由 `mupc-intercore` 迁入）。两者按**接入形态**分为四条并列通路，共用 `device-trait` 抽象与 `rs485-plugin` 的串口 / Modbus 栈：
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                         上层使用者                                 │
-│            strategy-engine / data-processing / gateway            │
-└──────────────────────────────┬───────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────┐
-│                   统一设备抽象层 (device-trait)                     │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  SouthDevice trait  │  DeviceRegistry trait  │  MessageBus │  │
-│  │  ProtocolHandler    │  HplcDriver trait     │  Plugin      │  │
-│  │  DataFrame / DeviceError / DeviceStatus     │  PluginLoader│  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────┬───────────────────────────────────┘
-                               │
-          ┌────────────────────┼────────────────────┐
-          ▼                    ▼                    ▼
-┌───────────────────┐ ┌──────────────────┐ ┌───────────────────┐
-│   rs485-plugin    │ │   hplc-plugin    │ │   其他插件         │
-│  ┌─────────────┐  │ │ ┌──────────────┐ │ │  (未来扩展)       │
-│  │ Rs485Device │  │ │ │ HplcDevice   │ │ │                   │
-│  │ Modbus      │  │ │ │ MockDriver   │ │ │                   │
-│  │ TTU         │  │ │ │ SdkDriver(预留)│ │                   │
-│  │ Inverter    │  │ │ └──────────────┘ │ │                   │
-│  │ Charger     │  │ └──────────────────┘ │                   │
-│  └─────────────┘  │                      │                   │
-└───────────────────┘                      └───────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────┐
-│                     物理层 (Physical Layer)                       │
-│     RS485 总线 (DE/RE GPIO)   /   HPLC 电力线载波 (FFI)          │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          上层使用者                                       │
+│      strategy-engine ／ data-processing ／ gateway ／ mupc-core-bin       │
+│      （mupc-core-bin = 装配层，四条通路的注入与编排均在此）                 │
+└─────────────────────────────────┬────────────────────────────────────────┘
+                                  │
+┌─────────────────────────────────▼────────────────────────────────────────┐
+│                    统一设备抽象层（device-trait）                          │
+│   SouthDevice ／ DeviceRegistry ／ MessageBus ／ ProtocolHandler           │
+│   HplcDriver ／ Plugin ／ PluginLoader                                     │
+└─────────────────────────────────┬────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            南向四条通路                                   │
+│                                                                          │
+│  ① rs485-plugin   Rs485Device + 4 个协议处理器（Modbus / TTU /            │
+│                   逆变器 / 充电桩）；编译为 cdylib 供动态加载             │
+│  ② hplc-plugin    HplcDevice（Mock 开发 / Sdk 预留）；cdylib              │
+│  ③ mupc-southd    §10 站级多从站调度（Scheduler / PortRuntime /           │
+│                   Station / mapper）                                     │
+│                   §13 PCS 通信与控制（PcsHandle：控制状态机 + 采集循环）  │
+│  ④ mupc-io        sysfs 后端（BECG-3568 DI/DO，含 DI3 消防干接点）        │
+└─────────────────────────────────┬────────────────────────────────────────┘
+                                  │
+┌─────────────────────────────────▼────────────────────────────────────────┐
+│                              物理层                                      │
+│   RS485（BECG-3568 板载 8 路隔离，每路独立 master；DE/RE 可选）           │
+│   HPLC 电力线载波（芯片 SDK FFI，预留）　／　GPIO sysfs（DI/DO）          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+**四条通路的分工**（同一份「通路」口径，全文引用）：
+
+| 通路 | Crate / 模块 | 接入形态 | 设计章节 | 现状 |
+|------|-------------|----------|----------|------|
+| **插件化单设备** | `rs485-plugin`、`hplc-plugin`、`plugin-loader` | 一设备一 `SouthDevice` 实例，`ProtocolHandler` 注入 | §2–§6 | 已实现（`Rs485Device` + 4 个处理器；HPLC 为 Mock） |
+| **站级多从站调度** | `mupc-southd` 的 `scheduler` / `port_runtime` / `station` / `mapper` | **配置驱动**：一口一 master、口内多从站串行轮询 | **§10**（点表集成见 §11、块级周期覆盖见 §12） | 已实现（BECG-3568 板载 8 路隔离 RS485） |
+| **PCS 通信与控制** | `mupc-southd::pcs`（`PcsHandle`） | RS485 / Modbus RTU **从站**定长点表，采集与控制共用一把锁 | **§13** | 已实现（2026-09-26 由 `mupc-intercore` 迁入） |
+| **数字 IO** | `mupc-io` | sysfs 读写 GPIO（BECG-3568 DI/DO） | 见 §13.5.2（S2 联锁经 `InterlockPort` 薄 trait 适配） | 已实现 |
+
+> **`mupc-southd` 的形态（E-14）**：`mupc-southd` 是**库形态，内嵌在 `mupcd` 主控进程内**，**不是独立守护进程**（crate 名带 `d` 系历史沿革 ⇒ 易误读）。唯一 bin `pcs_slave` 受 feature `pcs-slave-bin` 门控（**默认不构建**），是联调工具、非产线进程。
+
+#### 1.1.1 与 10 号（核间通信）的边界
+
+`mupc-intercore` 在 PCS 迁出后**收敛为纯核间 TCP 帧协议**（帧类型 + 编解码 + TCP 服务端 + 传输门面 + 心跳，`intercore/src/{protocol,tcp_server,transport,transport/tcp,heartbeat}.rs`）。它**不再是南向设备的通路**：
+
+| 项 | 口径 |
+|----|------|
+| intercore 是否承载 PCS | **否**。PCS 的读、写、回读、审计现全部在南向 `PcsHandle` 内（§13.4 / §13.5） |
+| intercore 的生产消费者 | **无**。`mupc-core-bin/src/startup.rs` 的 TCP 装配只经 `StartupContext.intercore` 移交，该字段**无读取方**；`CoreConfig::validate` 只接受 `transport: "tcp"`（`modbus_rtu` 档已随 PCS 迁出删除） |
+| intercore 的现存真实消费者 | **`sim-bridge`**（11 号仿真测试环境）：复用其定长帧编解码（`IntercoreFrame` / `ActionPayload` / `FRAME_FIXED_LENGTH = 64`）作 TCP 服务端，用于 HIL 联调 |
+| 依赖边（实测 `Cargo.toml`） | `sim-bridge → mupc-intercore`；`mupc-core-bin → mupc-intercore`。**南向各 crate 与 `data-processing` 均不依赖 intercore** |
+| 后续演进 | 核间通道保留为**演进起点**（ADR-014）；「核间心跳 / 看门狗 / Connect 帧」在生产路径暂无调用者 |
 
 ### 1.2 核心概念
 
-| 概念 | 说明 |
-|------|------|
-| **SouthDevice** | 所有南向设备的统一接口 abstraction |
-| **ProtocolHandler** | RS485 协议处理器，通过依赖注入支持多种协议 |
-| **HplcDriver** | HPLC 芯片驱动抽象，支持 Mock 和 SDK 接入 |
-| **Plugin** | 动态插件接口，所有南向插件必须实现 |
-| **PluginLoader** | 动态插件加载器，管理插件生命周期 |
-| **DeviceRegistry** | 设备注册表，管理设备注册/注销/查询 |
-| **MessageBus** | 消息总线，设备数据发布/订阅 |
+| 概念 | 说明 | 所属通路 |
+|------|------|----------|
+| **SouthDevice** | 所有南向设备的统一接口 abstraction | 通用 |
+| **ProtocolHandler** | RS485 协议处理器，通过依赖注入支持多种协议 | 插件化单设备 |
+| **HplcDriver** | HPLC 芯片驱动抽象，支持 Mock 和 SDK 接入 | 插件化单设备 |
+| **Plugin** | 动态插件接口，所有南向插件必须实现 | 插件化单设备 |
+| **PluginLoader** | 动态插件加载器，管理插件生命周期 | 插件化单设备 |
+| **DeviceRegistry** | 设备注册表，管理设备注册/注销/查询 | 通用 |
+| **MessageBus** | 消息总线，设备数据发布/订阅 | 通用 |
+| **SouthScheduler** | 站级调度器：每 `port` 一条采集 task，口内多从站串行轮询 | 站级多从站调度（§10） |
+| **Station** | 配置驱动的从站模型：`port` + `protocol` + `slave` + `interval_ms` + `regs` + `role` | 站级多从站调度（§10） |
+| **StationSink** | 采集出口 trait（`southd::scheduler`）：站级结果投递到落库 / 上云 / 策略 / 屏 | 站级多从站调度（§10） |
+| **PcsHandle** | **PCS 的完整所有者**：控制面状态机 + 采集循环，共用一把 `Mutex<()>`；4 个受限入口（`send_dual_param` / `send_tai_command` / `stop` / `tick_once`） | PCS 通信与控制（§13） |
+| **PcsSnapshot** | PCS 采集快照（SOC / `RUN_STATE` / 三相），供按需读取 | PCS 通信与控制（§13） |
 
 ### 1.3 数据流
 
+南向有**两条相反方向的数据流**，分别对应「采集」（设备 → 上层）与「控制」（上层 → 设备）：
+
 ```
-策略引擎 → SouthDevice::write() → Rs485Device/HplcDevice → 物理层
-物理层 → SouthDevice::read() → DataFrame → MessageBus → 策略引擎/数据处理
+【采集上行】站级设备与 PCS
+  物理层
+    → SouthScheduler（每 port 一条 task，口内从站串行）  ──┐
+    → PcsHandle 采集循环（每 interval_ms 一拍，FC04）    ─┤
+        → StationSink（统一采集出口）                    │
+            ├→ storage（telemetry 落库 + events 告警）
+            ├→ 上云点表（IEC 104 / MQTT 北向，经 gateway）
+            ├→ 策略（AiIntegrator 最新值：meter_grid phase / battery SOC）
+            └→ 本地显示（12 号，经 DisplayFrame）
+
+【控制下行】PCS
+  strategy-engine（AI 双参数 / 台区储能分相 P/Q）
+    → AiIntegrator::set_pcs_client(Arc<PcsHandle>) 注入
+    → PcsHandle::{send_dual_param, send_tai_command}（控制序列：切模式 → 启停 → 写功率 → 回读 → 审计）
+    → Rs485Device（常开，独占该口）→ 物理层 → PCS
+
+【插件化单设备的旧通路】（仍有效，与站级通路并存）
+ 策略引擎 → SouthDevice::write() → Rs485Device/HplcDevice → 物理层
+ 物理层 → SouthDevice::read() → DataFrame → MessageBus → 策略引擎/数据处理
 ```
+
+> **口径**：PCS 的**读**与**写**都经 `PcsHandle`，**不经核间 TCP**。原「经核间下发至实时控制模块」的表述随 2026-09-26 迁移作废（§13）；`intercore` 现仅存核间 TCP 帧协议且生产路径无消费者（§1.1.1）。
 
 ### 1.4 设备类型支持
 
@@ -105,7 +153,21 @@ plugin-loader → device-trait
     ↓
 rs485-plugin → device-trait (编译为 cdylib 供动态加载)
 hplc-plugin  → device-trait (编译为 cdylib 供动态加载)
+
+mupc-southd → rs485-plugin（**静态库依赖**：串口 / ModbusRTU handler，避免与 cdylib 双实例）
+            → data-processing（meter_regs 解码）
+            → mupc_storage（telemetry / events 落库）
+            → mupc-io（S2 联锁经 InterlockPort 薄 trait 适配）
+
+依赖本模块的（**实测 `Cargo.toml`**）：
+  strategy-engine → mupc-southd（控制下发：AiIntegrator::set_pcs_client）
+  mupc-core-bin   → mupc-southd（装配层：调度器 / PcsHandle / SouthSink 注入）
+
+**不依赖 mupc-intercore**：南向各 crate 与 data-processing 均无此依赖边。
+intercore 的依赖方只有 `sim-bridge`（帧编解码复用）与 `mupc-core-bin`（TCP 装配，无消费者）。
 ```
+
+> **与 10 号的关系**：`mupc-intercore` **不构成南向的依赖**，也不承载南向设备数据。二者的唯一交点是 **sim-bridge 复用 intercore 的定长帧编解码**（11 号仿真测试环境）。
 
 ---
 
@@ -1250,6 +1312,15 @@ tracing = { workspace = true }
 ## 10. 站级多从站统一调度框架
 
 > **目标平台**：BECG-3568（RK3568，后续 RK3588 接口一致），板载 **8 路隔离 RS485（每路独立 Modbus master）**。接线分配见 **核间 10 §12.1** 与 deploy/deploy.md §九（现场接线与配置核对）。
+
+> **时效注（2026-09-26，§13 迁移后）**：本章为 S3a 原设计（v1.1），其**结论全部仍成立**（PCS 仍不在本调度器内）。但下列三处涉及的**载体名与配置段**已随 §13（ADR-014 / ADR-015 / ADR-016）变更，**正文保留以述原设计，此处给出落点**：
+>
+> | 本章原文 | 现落点 |
+> |----------|--------|
+> | §10.1 范围：「PCS(RS485-1/ttyS0) 走 intercore `modbus_rtu`（核间 10）」 | PCS 现由**顶层段 `south_pcs`** 承载、驱动在南向（§13.7）；**「PCS 不在本调度器内」这一结论不变**（§13.8 P-3 显式拒绝 `south_stations` 中的 `role: pcs`） |
+> | §10.3「跨段校验」：「`south_stations.port` 与 `intercore.modbus_rtu.serial_port` 不得重复」 | `intercore.modbus_rtu` 子段**已整删**；跨段互斥改由 **P-1**（`south_pcs.enabled` ⇒ 禁止 `intercore.transport == "modbus_rtu"`）与 **P-3** 承载（§13.8）。原「只比串口节点名、不认设备」的空档随之不可达 |
+> | §10.5：「BMS 站在线时其 SOC 优先于 intercore `latest_soc`（核间回读）」 | 「核间回读」现为 **`PcsHandle` 的采集快照**（§13.4）；`latest_soc()` 的返回值与故障态**逐字等价**，仅时间戳来源由「调用时刻」变为「本拍采集时刻」（§13.9 表） |
+> | §11.5 规则 17（跨段互斥，`intercore.modbus_rtu.serial_port`） | 同 §10.3 行；规则 17 的落点改为 P-1 / P-3 |
 
 ### 10.1 背景与目标（Why）
 
@@ -3445,3 +3516,4 @@ south_pcs:
 | v1.3–v1.11 | §11 的三轮设计评审（`[DESIGN_APPROVED: 2026-09-21]`）与 `[CODE_REVIEWED: PASS: 2026-09-22]` 后的最小修订：第 15 条适用域与判据重写并给出"六站必然通过"的证明、取"查不到行不拒"、统一事件模型与消防信号清单、`AddrSpace` 维度的查表键、状态翻转制事件口径（`@recovered`）、消防登记数容量式 `1 + Σ/6`、站级 `parity`（D-1 裁定）、fmt 行级判据（§11.11.2.1）与格式债基线清单 |
 | v1.12–v1.13-r4 | 新增 §12「块级采集周期覆盖（告警位单独快采，S3b-3）」：`interval_ms` + 读组化调度、分组不变量 V-1…V-6、规则 20–24、AC-8-* 用例映射；经 `[DESIGN_APPROVED: 2026-09-23]`，随后依 T8/T9 实测证伪回写合同勘误（`meter_grid` 支路补 `p_total`、`edge_memory_is_per_group` 构造改 2000/5000、承载组到期 tick 到 `t=4000` 止、字节耗时 2 位小数取整追认为口径） |
 | v1.14 / v1.14-r1 | 新增 §13「PCS 控制面归属」：**PCS 通信与控制整体迁入南向**（ADR-014）、Modbus 栈统一到 `rs485-plugin` 并删 `tokio-modbus`（ADR-015，**取代 ADR-011**）、新增顶层段 `south_pcs`（ADR-016，`south_stations` 不再接受 `role: pcs`）；三条读路径合并为一条采集循环（4 次/秒 → 1 次/秒）、采集与控制共用一把锁、`rs485-plugin` 三处配套（含 `test-seam` feature）、618 点归属拆为 546 + 72、校验规则 P-1…P-4；r1 为 T1–T12 落地中的勘误与差异汇总（示例值 / P-4 覆盖面 / 上云调用点 / M9a 口径收敛）。**未获门禁标记**（待独立设计评审） |
+| v1.15 | §1 全书对齐现状（**仅内容对齐，未改任何裁定与数字，未新增门禁标记**）：§1.1 架构概览重画为**四条通路**（插件化单设备 / 站级多从站调度 §10 / PCS 通信与控制 §13 / 数字 IO），新增 **§1.1.1 与 10 号（核间通信）的边界**（`mupc-intercore` 收敛后**不再是南向设备的通路**；生产路径无消费者；现存真实消费者只有 `sim-bridge`；`Cargo.toml` 依赖边实测）；§1.2 补 `SouthScheduler` / `Station` / `StationSink` / `PcsHandle` / `PcsSnapshot` 五个概念并加「所属通路」列；§1.3 数据流按**采集上行 / 控制下行**两条重写（控制下行 = `AiIntegrator::set_pcs_client` → `PcsHandle` → `Rs485Device`）；§1.5 依赖关系补 `mupc-southd` 的依赖边与「南向各 crate 与 `data-processing` **均不依赖 `mupc-intercore`**」的实测结论 |
