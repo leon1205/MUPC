@@ -127,6 +127,12 @@ cargo build --workspace --release --features npu --target aarch64-unknown-linux-
 
 ### 仿真测试环境 (HIL)
 
+> ⚠️ **动作闭环未实现（2026-09-27 裁定：不重建）**：`deploy-sim.sh` 拉起的 sim-bridge 会
+> **阻塞在 `accept()`**（MUPC 侧无 TCP 客户端），且 `mupc/sim/observation` **无订阅方**
+> ⇒ 当前只产出仿真观测、**不构成闭环**。详见 11 PRD §1.4 / 11 设计 §0 /
+> `docs/technical-debt.md` §6.19 U-163。协议链（PCS / 南向）的验证不走这里，
+> 见 `mupc-southd/tests/pcs_e2e.rs`。
+
 ```bash
 # 一键部署: PC(仿真) + 嵌入式(MUPC) 全栈
 ./deploy/scripts/deploy-sim.sh 192.168.3.118 --build --generate-data --start

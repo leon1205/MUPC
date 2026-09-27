@@ -84,7 +84,7 @@
 |----|------|
 | intercore 是否承载 PCS | **否**。PCS 的读、写、回读、审计现全部在南向 `PcsHandle` 内（§13.4 / §13.5） |
 | intercore 的生产消费者 | **无**。`mupc-core-bin/src/startup.rs` 的 TCP 装配只经 `StartupContext.intercore` 移交，该字段**无读取方**；`CoreConfig::validate` 只接受 `transport: "tcp"`（`modbus_rtu` 档已随 PCS 迁出删除） |
-| intercore 的现存真实消费者 | **`sim-bridge`**（11 号仿真测试环境）：复用其定长帧编解码（`IntercoreFrame` / `ActionPayload` / `FRAME_FIXED_LENGTH = 64`）作 TCP 服务端，用于 HIL 联调 |
+| intercore 的现存真实消费者 | **`sim-bridge`**（11 号仿真测试环境）：复用其定长帧编解码（`IntercoreFrame` / `ActionPayload` / `FRAME_FIXED_LENGTH = 64`）作 TCP 服务端。⚠️ **该「消费」只是编解码复用，不等于链路可用** —— 11 号的动作闭环经裁定**未实现且不重建**（U-163 裁定 A，2026-09-27）：既无发起端（`IntercoreClient::send_*` 零调用点），也无观测订阅端 |
 | 依赖边（实测 `Cargo.toml`） | `sim-bridge → mupc-intercore`；`mupc-core-bin → mupc-intercore`。**南向各 crate 与 `data-processing` 均不依赖 intercore** |
 | 后续演进 | 核间通道保留为**演进起点**（ADR-014）；「核间心跳 / 看门狗 / Connect 帧」在生产路径暂无调用者 |
 
