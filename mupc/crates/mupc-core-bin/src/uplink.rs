@@ -62,8 +62,9 @@ pub struct Iec104UplinkDriver {
 
 impl Iec104UplinkDriver {
     /// 构造。`class_a_interval` / `class_b_interval` 为 A/B 档周期（§9.2.2「周期须可配置」
-    /// ⇒ 由调用方注入；装配层传 [`DEFAULT_CLASS_A_INTERVAL`] / [`DEFAULT_CLASS_B_INTERVAL`]，
-    /// 后续可改读配置）。C 档为 COS（变更驱动），无周期。构造**无 I/O**。
+    /// ⇒ 由调用方注入；**装配层自 U-74 审查 A-2 起传 `config.gateway.periods.{a_ms,b_ms}`
+    /// （缺省即 [`DEFAULT_CLASS_A_INTERVAL`] / [`DEFAULT_CLASS_B_INTERVAL`]，见
+    /// `core_config::Iec104PeriodsCfg`）**）。C 档为 COS（变更驱动），无周期。构造**无 I/O**。
     pub fn new(
         latest: Arc<LatestValues>,
         points: Arc<Vec<UplinkPoint>>,
@@ -78,6 +79,12 @@ impl Iec104UplinkDriver {
             class_a_interval,
             class_b_interval,
         }
+    }
+
+    /// 用例尺子：注入的 A/B 档周期（**不被 `new` 丢弃**的判据；生产无消费方 ⇒ 仅 `cfg(test)`）。
+    #[cfg(test)]
+    pub(crate) fn class_intervals(&self) -> (Duration, Duration) {
+        (self.class_a_interval, self.class_b_interval)
     }
 
     /// spawn A/B/C 三条任务，返回句柄（装配层入 abort 名单）。
@@ -407,6 +414,13 @@ pub const MQTT_POINTS_WITH_PCS: usize = 624;
 pub const MQTT_FAILURE_ALERT_THRESHOLD: u64 = 10;
 /// 连续失败告警的**最小间隔**（§9.3.6：之后每 5 min 最多一条，不风暴）。
 pub const MQTT_FAILURE_ALERT_MIN_INTERVAL_MS: u64 = 300_000;
+
+/// **事件类 topic 的 QoS**（§9.3.3 的 `{prefix}/event/{station}` 行 = QoS2；§9.3.4 表同口径）。
+///
+/// **钉死常量而非取 `mqtt_bridge.north.qos`**：事件是"故障/状态迁移"这类**不可丢**的上报
+/// （§9.3.4 的故障类事件），配置项 `north.qos`（缺省 1）服务的是周期遥测；让事件跟随它
+/// 会让"调低遥测 QoS 省带宽"顺手降级事件可靠性。设计未给事件 QoS 的配置面 ⇒ 不臆造。
+pub const EVENT_QOS: u8 = 2;
 /// 缓存淘汰 WARN 的聚合窗（§9.3.3：按 1 min 聚合，不风暴）。
 pub const MQTT_CACHE_WARN_INTERVAL_MS: u64 = 60_000;
 /// 证书到期检查周期（§9.3.5 TLS-3：启动期 + 每日）。
@@ -506,6 +520,10 @@ pub struct MqttAssemblyOutcome {
     pub status: MqttServiceStatus,
     /// 失败原因（`Failed` 时非空；**不得含凭据**）。
     pub detail: Option<String>,
+    /// **北向上送器实例**（未启用 / 装配失败 ⇒ `None`）—— A-5（PRD BF-6「累计失败/丢弃
+    /// 计数须**可查询**」）的出口所需：装配层据此起 [`crate::link_counters`] 的周期上报。
+    /// `None` 与"已启用但计数全 0"**不可混同**（后者是真实态，前者是"无此通道"）。
+    pub publisher: Option<Arc<MqttUplinkPublisher>>,
 }
 
 /// MQTT 装配（**唯一**的 `NorthMqttClient`/`LocalMqttClient` 构造点，§9.4 序 7）。
@@ -530,6 +548,7 @@ pub async fn assemble_mqtt_bridge(
         tasks: Vec::new(),
         status: MqttServiceStatus::Disabled,
         detail: None,
+        publisher: None,
     };
     if launch.is_empty() {
         // **零连接尝试**：没有客户端对象、没有任务、没有连接（CFG-2）
@@ -625,6 +644,9 @@ pub async fn assemble_mqtt_bridge(
                 for (label, h) in publisher.spawn() {
                     out.tasks.push((label, h));
                 }
+                // A-5：把实例交回装配层 —— PRD BF-6 的计数出口（`link_counters` 周期上报）
+                // 需要它；装配失败的早退路径不设（保持 `None`）
+                out.publisher = Some(publisher);
                 tracing::info!(
                     broker = %north_cfg.broker_addr,
                     client_id = %north_cfg.client_id,
@@ -1124,8 +1146,9 @@ impl MqttUplinkPublisher {
 
     /// 统计快照（§9.3.6：BF-6 **不得静默丢弃**）。
     ///
-    /// 无生产消费方（§9.3.3 留证③："供后续管理面/屏显示"）⇒ `#[allow(dead_code)]` 如实登记。
-    #[allow(dead_code)]
+    /// **生产消费方**（U-74 审查 A-5 补齐）：`crate::link_counters::BothCounters` 每
+    /// [`crate::link_counters::LINK_COUNTER_TICK_MS`] 取一次并打一行（`stats()` 之前
+    /// 带 `#[allow(dead_code)]`，注释自认"无生产消费方"—— 那是 BF-6 落空的直接证据）。
     pub fn stats(&self) -> MqttUplinkStatsSnapshot {
         MqttUplinkStatsSnapshot {
             published_total: self.counters.published_total.load(Ordering::Relaxed),
@@ -1307,7 +1330,9 @@ impl MqttUplinkPublisher {
             let Some((topic, payload, ts_ms, seq)) = msg else {
                 continue;
             };
-            self.publish_or_cache(topic, payload, ts_ms, seq).await;
+            // 遥测：QoS 取配置（§9.3.2 `mqtt_bridge.north.qos`）
+            self.publish_or_cache(topic, payload, ts_ms, seq, self.cfg.qos)
+                .await;
         }
     }
 
@@ -1391,10 +1416,23 @@ impl MqttUplinkPublisher {
         ))
     }
 
-    /// 发布（QoS1）；**未连接或发布失败 ⇒ 入离线缓存**（§9.3.3）。
-    async fn publish_or_cache(&self, topic: String, payload: Vec<u8>, ts_ms: u64, seq: u64) {
+    /// 发布并按需缓存；**未连接或发布失败 ⇒ 入离线缓存**（§9.3.3）。
+    ///
+    /// **`qos` 由调用方按 topic 分档**（U-74 审查 A-3 订正）：原实现恒用 `self.cfg.qos`
+    /// （缺省 1），与设计 §9.3.3「`event/{station}`（QoS2）」及本文件 `publish_station_edges`
+    /// 的注释"故障类事件走 QoS2（§9.3.4 表）"**自相矛盾** —— 事件实际以 QoS1 发出。
+    /// 现在：遥测类传 [`MqttPublishCfg::qos`]（可配），事件类传 [`EVENT_QOS`]（设计钉死 2）。
+    /// **缓存项一并保存 `qos`**（`Pending.qos`）⇒ 补送路径不降级。
+    async fn publish_or_cache(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        ts_ms: u64,
+        seq: u64,
+        qos: u8,
+    ) {
         if self.is_connected() {
-            match self.publish_raw(&topic, &payload, self.cfg.qos).await {
+            match self.publish_raw(&topic, &payload, qos).await {
                 Ok(()) => {
                     self.counters
                         .published_total
@@ -1412,7 +1450,7 @@ impl MqttUplinkPublisher {
         let p = Pending {
             topic,
             payload,
-            qos: self.cfg.qos,
+            qos,
             seq,
             ts_ms,
         };
@@ -1620,8 +1658,10 @@ impl MqttUplinkPublisher {
                         }
                     };
                     let topic = format!("{}/event/{}", self.cfg.topic_prefix, st.id);
-                    // 故障类事件走 QoS2（§9.3.4 表）
-                    self.publish_or_cache(topic, body, now, seq).await;
+                    // 事件类走 QoS2（§9.3.3 的 `event/{station}` 行 / §9.3.4 表）——
+                    // **设计钉死，不取 `cfg.qos`**（A-3 订正：原实现注释写 QoS2 而实发 QoS1）
+                    self.publish_or_cache(topic, body, now, seq, EVENT_QOS)
+                        .await;
                 }
             }
         }
@@ -1637,6 +1677,39 @@ mod tests {
     use mupc_data_processing::latest_values::{PointId, PointQuality, PointValue};
     use mupc_southd::config::{SouthPcsConfig, SouthStationsConfig};
     use mupc_southd::uplink::build_uplink_points;
+
+    /// A-2 判别力：**注入的 A/B 档周期必须真被驱动器持住**（而不是被 `new` 丢掉后另取常量）。
+    ///
+    /// **改坏实现即红**：把 `Iec104UplinkDriver::new` 改成忽略 `class_a_interval` 形参、
+    /// 内部写死 `DEFAULT_CLASS_A_INTERVAL` ⇒ 首条断言红。
+    #[test]
+    fn iec104_driver_keeps_injected_class_intervals() {
+        let pool = Arc::new(mupc_data_processing::latest_values::LatestValues::new(5_000));
+        let server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+            mupc_gateway::iec104::server::Iec104Config::default(),
+        ));
+        let d = Iec104UplinkDriver::new(
+            pool,
+            Arc::new(points()),
+            server,
+            Duration::from_millis(2_500),
+            Duration::from_millis(8_000),
+        );
+        assert_eq!(
+            d.class_intervals(),
+            (Duration::from_millis(2_500), Duration::from_millis(8_000)),
+            "驱动器须持住注入的周期（A-2：配了值必须生效）"
+        );
+        // 缺省构造（= 装配层未配 gateway.periods 时的取值）仍与旧编译期常量一致
+        assert_eq!(
+            crate::core_config::Iec104PeriodsCfg::default().a_ms,
+            DEFAULT_CLASS_A_INTERVAL.as_millis() as u64
+        );
+        assert_eq!(
+            crate::core_config::Iec104PeriodsCfg::default().b_ms,
+            DEFAULT_CLASS_B_INTERVAL.as_millis() as u64
+        );
+    }
 
     /// A-1 判别力①：**A 档 22 点**（PCS 启用）的 `u` **逐点钉死**，且不得有任何一点空着
     /// —— 值全部取自 `mupc-southd::point_table` 的显式 `unit` 字段（不由 `label` 尾 token 解析）。
@@ -2404,6 +2477,44 @@ mod tests {
         );
     }
 
+    /// **B-4 / PRD 01 EX-10**：`dev` 未提供 ⇒ 载荷里**出现 `"dev":null`**（而不是把字段整条
+    /// 省掉）。这是"显式标注未提供"在**线缆上**的判据 —— 云端可据此区分「未提供」与
+    /// 「这套报文根本没这个字段」。
+    ///
+    /// **改坏实现即红**：给 `TelemetryPayload::dev` 加 `#[serde(skip_serializing_if =
+    /// "Option::is_none")]`（字段消失）或改成空串（"臆造一个空标识"）⇒ 两条断言各自红。
+    #[test]
+    fn dev_absent_is_serialized_as_explicit_null_not_omitted() {
+        let pts = points();
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_758_697_600_123u64;
+        latest.mark_station_polled("grid_meter", now);
+        latest.apply(vec![(id("grid_meter", "active_power"), ok_val(1.0, now))]);
+        // 显式传 `None`（= 生产 `startup.rs` 的 `dev_id`）
+        let pubr = MqttUplinkPublisher::new(
+            latest,
+            Arc::new(pts.clone()),
+            test_client(),
+            roles_of(&cfg()),
+            None,
+            north_cfg_with(|_| {}),
+            Arc::new(RecordingEvents::default()),
+        )
+        .expect("上送器装配");
+        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
+        let (_topic, body, _ts, _seq) = pubr.build_message(&st, &idx, now).expect("必产消息");
+        let text = String::from_utf8(body).expect("载荷是 UTF-8 JSON");
+        assert!(
+            text.contains("\"dev\":null"),
+            "dev 未提供须显式上送 null（EX-10），实得：{text}"
+        );
+        assert!(
+            !text.contains("\"dev\":\"\""),
+            "不得臆造空串标识（EX-10「不得臆造」）：{text}"
+        );
+    }
+
     /// **D-1/D-2 性能改造的语义锚（位点 / 未登记点大户）**：BMS 站 288 个位点只有 1 个登记，
     /// 其余 287 个走「未登记」取数路径 ⇒ 必须仍**出现在载荷里**且为 `v=null`/`q=unconfigured`
     /// （§9.5 AC-U74-05：不得按 `quality == Ok` 丢点——否则"站失败"与"该站无此点"云端不可分）。
@@ -3047,7 +3158,7 @@ mod tests {
         );
         assert!(!pubr.is_connected(), "测试客户端不跑事件循环 ⇒ 恒未连接");
         for _ in 0..130 {
-            pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now, 1)
+            pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now, 1, 1)
                 .await;
         }
         let s = pubr.stats();
@@ -3066,6 +3177,119 @@ mod tests {
             overflow.len()
         );
         assert!(overflow[0].message.contains("100") || overflow[0].message.contains("30"));
+    }
+
+    /// **A-3 判别力：事件 topic 走 QoS2，遥测 topic 走 `cfg.qos`。**
+    ///
+    /// 夹具把 `north.qos` 故意设为 **0**（≠ 事件 QoS2）—— 原实现（恒用 `self.cfg.qos`）
+    /// 会让两条断言的第一条变红（事件 qos 落 0），第二条同时钉住"遥测**没有**被顺手改成 2"。
+    #[tokio::test]
+    async fn event_topic_uses_qos2_while_telemetry_uses_configured_qos() {
+        let pts = points();
+        let latest = Arc::new(LatestValues::new(5));
+        let events = Arc::new(RecordingEvents::default());
+        let pubr = test_publisher(
+            latest.clone(),
+            Arc::new(pts.clone()),
+            north_cfg_with(|c| c.qos = 0),
+            events,
+        );
+        assert_eq!(pubr.cfg.qos, 0, "夹具前提：遥测 QoS 配成 0（与事件 2 可区分）");
+        assert!(!pubr.is_connected());
+
+        // 事件边沿：把某站在**本轮之前**记为 online，而 latest 里无任何新鲜值（= 现已失活）
+        // ⇒ `online → offline` 迁移，产出 `{prefix}/event/{station}`。
+        let mut state: HashMap<String, bool> = HashMap::new();
+        for st in pubr.plan.iter() {
+            state.insert(st.id.clone(), true);
+        }
+        pubr.publish_station_edges(&mut state).await;
+
+        let mut got: Vec<(String, u8)> = Vec::new();
+        {
+            let mut c = pubr.cache.lock().unwrap_or_else(|e| e.into_inner());
+            while let Some(p) = c.pop_front() {
+                got.push((p.topic.clone(), p.qos));
+            }
+        }
+        assert!(!got.is_empty(), "每个站都应产出 offline 边沿事件");
+        for (topic, qos) in &got {
+            assert!(
+                topic.contains("/event/"),
+                "离线缓存里应只有事件类 topic，实得 {topic}"
+            );
+            assert_eq!(
+                *qos, EVENT_QOS,
+                "事件 topic {topic} 须走 QoS{EVENT_QOS}（§9.3.3 的 event 行；原实现落 cfg.qos=0）"
+            );
+            assert_ne!(
+                *qos, pubr.cfg.qos,
+                "事件 QoS 不得跟随 north.qos（否则调低遥测 QoS 会顺手降级事件可靠性）"
+            );
+        }
+
+        // 遥测路径仍取配置（同一夹具下 = 0）—— 证明 A-3 没有把两条路径一并改成 2
+        pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now_millis(), 1, pubr.cfg.qos)
+            .await;
+        let (topic, qos) = {
+            let mut c = pubr.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let p = c.pop_front().expect("遥测消息应入缓存");
+            (p.topic.clone(), p.qos)
+        };
+        assert!(topic.contains("/telemetry/"));
+        assert_eq!(qos, 0, "遥测 QoS 须取 north.qos（本夹具 = 0）");
+    }
+
+    /// **A-5 判别力：BF-6 的计数出口真的读 `MqttUplinkPublisher::stats()`**（不是另立一份
+    /// 影子计数、也不是构造期抓的快照）。
+    ///
+    /// **改坏实现即红**：让 `BothCounters::snapshot` 对 MQTT 侧返回常量 0（或把
+    /// `mqtt_cached_len` 与 `mqtt_dropped_total` 互换）⇒ 断言红。
+    #[tokio::test]
+    async fn link_counter_source_reads_live_mqtt_stats() {
+        let pts = points();
+        let latest = Arc::new(LatestValues::new(5));
+        let events = Arc::new(RecordingEvents::default());
+        let pubr = Arc::new(test_publisher(
+            latest,
+            Arc::new(pts.clone()),
+            north_cfg_with(|c| {
+                c.cache.max_messages = 100;
+            }),
+            events,
+        ));
+        let server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+            mupc_gateway::iec104::server::Iec104Config::default(),
+        ));
+        let src = crate::link_counters::BothCounters {
+            iec104: server,
+            mqtt: Some(pubr.clone()),
+        };
+        let before = <crate::link_counters::BothCounters as crate::link_counters::LinkCounterSource>::snapshot(&src);
+        assert!(before.mqtt_enabled);
+        assert_eq!(before.mqtt_cached_len, 0);
+
+        // 未连接 ⇒ 两条入缓存（不改计数语义，只让计数**动起来**）
+        let now = now_millis();
+        for _ in 0..2 {
+            pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now, 1, 1)
+                .await;
+        }
+        let after = crate::link_counters::report_once(&src);
+        assert_eq!(
+            after.mqtt_cached_len, 2,
+            "出口须读到 MQTT 侧的当拍 cached_len（A-5 / BF-6）"
+        );
+        assert_eq!(
+            after.mqtt_cached_len,
+            pubr.stats().cached_len,
+            "出口值与 stats() 同源"
+        );
+        assert_eq!(
+            after.mqtt_dropped_total, 0,
+            "缓存未溢出 ⇒ dropped 仍 0（两字段不得互换）"
+        );
+        assert!(after.log_line().contains("mqtt_cached_len=2"));
     }
 
     // ── ⑤ 装配缝：零连接尝试 / fail-closed（§9.4 序 7 / CFG-2 / TLS-2） ──

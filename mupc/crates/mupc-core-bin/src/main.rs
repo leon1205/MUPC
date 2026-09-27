@@ -22,6 +22,7 @@ mod hot_apply;
 mod idempotency;
 mod interlock;
 mod interlock_ops;
+mod link_counters;
 mod log_service;
 mod quality_map;
 mod signal_handler;

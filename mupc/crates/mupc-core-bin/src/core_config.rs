@@ -298,6 +298,13 @@ pub struct StrategyConfig {
 /// IEC 104 网关配置（S2 §12.3 gateway 段；审查 R2-A2：北向监听地址/端口读 config，
 /// 不再于 startup 硬编码 2404）。手动实现 `Default`（不走 derive），使 `#[serde(default)]`
 /// 缺省整段配置时落到下方默认函数（0.0.0.0:2404，与历史硬编码一致）。
+///
+/// ```yaml
+/// gateway:
+///   listen_addr: "0.0.0.0"
+///   listen_port: 2404
+///   periods: { a_ms: 1000, b_ms: 5000 }   # A/B 档上送周期（U-74 审查 A-2）
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GatewayConfig {
     /// IEC 104 监听地址，默认 0.0.0.0
@@ -306,6 +313,13 @@ pub struct GatewayConfig {
     /// IEC 104 监听端口，默认 2404
     #[serde(default = "default_gateway_port")]
     pub listen_port: u16,
+    /// **A/B 档周期上送周期**（01 PRD §8.7「周期须可配置」/ 01 设计 §9.2.2 括注「可配」）。
+    ///
+    /// 该段缺省 ⇒ 取 [`Iec104PeriodsCfg::default`]（1000 / 5000 ms，**与改造前的编译期常量
+    /// [`crate::uplink::DEFAULT_CLASS_A_INTERVAL`] / [`crate::uplink::DEFAULT_CLASS_B_INTERVAL`]
+    /// 逐字相同**）⇒ 未写该段的部署**零行为变化**。
+    #[serde(default = "default_gateway_periods")]
+    pub periods: Iec104PeriodsCfg,
 }
 
 impl Default for GatewayConfig {
@@ -313,8 +327,41 @@ impl Default for GatewayConfig {
         Self {
             listen_addr: default_gateway_addr(),
             listen_port: default_gateway_port(),
+            periods: default_gateway_periods(),
         }
     }
+}
+
+/// IEC 104 侧 A/B 档周期（01 PRD §8.7 / 设计 §9.2.2）。
+///
+/// **为什么与 `mqtt_bridge.north.periods` 分开而不复用 `PeriodsCfg`**：§9.2.2 的 A/B 档是
+/// **IEC 104 侧**的周期遥测节拍，MQTT 侧另有自己的 A/B 节拍（§9.3.3）——两条通道**独立**，
+/// 把两者绑成同一组键会让「只调 MQTT 周期」变成隐式改 IEC104 行为。`cos_merge_ms` 属 MQTT
+/// 专有（IEC104 侧 C 档是变位直发、无合并窗）⇒ 本结构**只含两键**。
+///
+/// 校验范围与 MQTT 侧同源（`validate_mqtt_bridge` 第 5 条）：`a_ms ∈ 100..=60000`、
+/// `b_ms ∈ a_ms..=600000` —— 后者保证 B 档不密于 A 档（否则分档失去意义）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Iec104PeriodsCfg {
+    /// A 档周期（ms，100..=60000）。
+    pub a_ms: u64,
+    /// B 档周期（ms，a_ms..=600000）。
+    pub b_ms: u64,
+}
+
+impl Default for Iec104PeriodsCfg {
+    fn default() -> Self {
+        Self {
+            // 与旧编译期常量**同源**（同一缺省不得各写一份字面量）
+            a_ms: crate::uplink::DEFAULT_CLASS_A_INTERVAL.as_millis() as u64,
+            b_ms: crate::uplink::DEFAULT_CLASS_B_INTERVAL.as_millis() as u64,
+        }
+    }
+}
+
+fn default_gateway_periods() -> Iec104PeriodsCfg {
+    Iec104PeriodsCfg::default()
 }
 
 /// 北向 + 本地 MQTT 桥接配置（01 设计 §9.3.2；**替换**原 2-bool 结构）。
@@ -701,6 +748,9 @@ impl CoreConfig {
         // `enabled: false`（缺省）整段跳过 ⇒ 既有部署零行为变化；跨段规则 P-1（本机资源）/ P-2
         // （口独占）见下方 `validate_io` 与 `validate_south_stations` 的对应处。
         self.south_pcs.validate()?;
+        // 01 PRD §8.7 / 设计 §9.2.2（U-74 审查 A-2）：IEC 104 A/B 档周期范围校验。
+        // **无 enabled 门控**（网关恒在，周期恒有值）。
+        self.validate_gateway()?;
         // 03 设计 §4.4.2.2（U-67）：storage 段校验（**无 enabled 门控** —— PRD R-11.1-A 明文
         // 「总表落库不设关闭开关」⇒ 本段任何取值都必须合法，不存在"整段跳过"）。
         self.validate_storage()?;
@@ -836,6 +886,31 @@ impl CoreConfig {
             return Err(format!(
                 "mqtt_bridge.north.cache.max_messages={} 须 ≥100（断线缓存条数上限）",
                 n.cache.max_messages
+            ));
+        }
+        Ok(())
+    }
+
+    /// 01 PRD §8.7 / 01 设计 §9.2.2（U-74 审查 A-2）：IEC 104 侧 A/B 档周期的取值域。
+    ///
+    /// 与 `validate_mqtt_bridge` 第 5 条**同源范围**（`a_ms ∈ 100..=60000`、
+    /// `b_ms ∈ a_ms..=600000`），但**不复用同一函数**：两条通道的周期是独立配置（见
+    /// [`Iec104PeriodsCfg`] 的说明），错误文案须**点名各自键**（`gateway.periods.*`
+    /// vs `mqtt_bridge.north.periods.*`），否则现场无法判断改哪个键。
+    ///
+    /// **无 `enabled` 门控**：IEC 104 网关恒装配（`gateway.listen_*` 亦无开关）⇒ 周期恒有值。
+    fn validate_gateway(&self) -> Result<(), String> {
+        let p = &self.gateway.periods;
+        if !(100..=60_000).contains(&p.a_ms) {
+            return Err(format!(
+                "gateway.periods.a_ms={} 须在 100..=60000（IEC 104 A 档上送周期，01 PRD §8.7）",
+                p.a_ms
+            ));
+        }
+        if p.b_ms < p.a_ms || p.b_ms > 600_000 {
+            return Err(format!(
+                "gateway.periods.b_ms={} 须在 a_ms..=600000（a_ms={}；B 档不得密于 A 档）",
+                p.b_ms, p.a_ms
             ));
         }
         Ok(())
@@ -1139,6 +1214,9 @@ plugins: {}
         // 未配置 gateway 段时缺省 0.0.0.0:2404（审查 R2-A2：端口读 config 且向后兼容）
         assert_eq!(config.gateway.listen_addr, "0.0.0.0");
         assert_eq!(config.gateway.listen_port, 2404);
+        // U-74 A-2：未配置 gateway.periods ⇒ 缺省 = 旧编译期常量（零行为变化）
+        assert_eq!(config.gateway.periods.a_ms, 1000);
+        assert_eq!(config.gateway.periods.b_ms, 5000);
         // 未配置 mqtt_bridge 段 ⇒ 全 false / broker 空串（§9.3.2：零连接尝试，不连假域名）
         assert!(!config.mqtt_bridge.enabled);
         assert!(!config.mqtt_bridge.north.enabled);
@@ -2211,6 +2289,56 @@ io:
 
     /// S2 §12.4: io.enabled=false 时 di/do 含非法内容（bad action/gpio=0）仍放行——
     /// disabled 整段跳过校验的行为契约（未启用联锁的部署不被误拦）
+    /// **U-74 审查 A-2：`gateway.periods` 必须真的进 schema、真的被校验。**
+    ///
+    /// 判别力：① 解析 —— 夹具取**非默认值**（2500 / 8000 ≠ 1000 / 5000），"字段没接线"
+    /// 时断言即红（写法与 `intercore.port=9101` 那条同款，避免恒真网）；
+    /// ② 校验 —— 三条注入各命中不同分支。
+    #[test]
+    fn gateway_periods_parse_and_validate() {
+        let base = |periods: &str| {
+            format!(
+                "version: \"1.0\"\nsystem:\n  log_level: \"info\"\nintercore:\n  host: \"127.0.0.1\"\n  \
+                 port: 9100\nai_engine: {{}}\nplugins: {{}}\ngateway:\n  listen_port: 2405\n  periods: {periods}\n"
+            )
+        };
+
+        // ① 解析生效（非默认值）
+        let config: CoreConfig =
+            serde_yaml::from_str(&base("{ a_ms: 2500, b_ms: 8000 }")).unwrap();
+        assert_eq!(config.gateway.periods.a_ms, 2500);
+        assert_eq!(config.gateway.periods.b_ms, 8000);
+        // 同段其余键不受影响（不是"整段被忽略"）
+        assert_eq!(config.gateway.listen_port, 2405);
+        assert!(config.validate().is_ok(), "合法周期应通过: {:?}", config.validate());
+
+        // ② a_ms 下界
+        let c: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 99, b_ms: 5000 }")).unwrap();
+        let e = c.validate().unwrap_err();
+        assert!(e.contains("gateway.periods.a_ms"), "实际: {e}");
+
+        // ③ a_ms 上界
+        let c: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 60001, b_ms: 60001 }")).unwrap();
+        let e = c.validate().unwrap_err();
+        assert!(e.contains("gateway.periods.a_ms"), "实际: {e}");
+
+        // ④ b_ms 不得密于 a_ms（分档语义）
+        let c: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 1000, b_ms: 999 }")).unwrap();
+        let e = c.validate().unwrap_err();
+        assert!(e.contains("gateway.periods.b_ms"), "实际: {e}");
+
+        // ⑤ b_ms 上界
+        let c: CoreConfig =
+            serde_yaml::from_str(&base("{ a_ms: 1000, b_ms: 600001 }")).unwrap();
+        let e = c.validate().unwrap_err();
+        assert!(e.contains("gateway.periods.b_ms"), "实际: {e}");
+
+        // ⑥ 只写 a_ms ⇒ b_ms 取缺省 5000（与原行为一致的"部分覆盖"）
+        let c: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 2000 }")).unwrap();
+        assert_eq!(c.gateway.periods.a_ms, 2000);
+        assert_eq!(c.gateway.periods.b_ms, 5000);
+    }
+
     #[test]
     fn test_io_disabled_bypasses_validation() {
         let yaml = r#"

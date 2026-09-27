@@ -2020,10 +2020,11 @@ pub async fn initialize_all(
         latest.clone(),
         uplink_points.clone(),
         iec104_server.clone(),
-        // A/B 档周期（§9.2.2「周期须可配置」的注入点；当前用缺省 1000/5000 ms，
-        // 后续可改读 config——本任务不动 core_config schema）。
-        crate::uplink::DEFAULT_CLASS_A_INTERVAL,
-        crate::uplink::DEFAULT_CLASS_B_INTERVAL,
+        // A/B 档周期（§9.2.2「周期须可配置」的注入点）—— U-74 审查 A-2 起**读配置**
+        // `gateway.periods.{a_ms,b_ms}`（缺省 = 旧编译期常量 1000 / 5000 ms，零行为变化；
+        // 范围由 `CoreConfig::validate_gateway` 在启动前 fail-fast 门禁）。
+        std::time::Duration::from_millis(config.gateway.periods.a_ms),
+        std::time::Duration::from_millis(config.gateway.periods.b_ms),
     ));
     for h in uplink_driver.spawn() {
         guard.0.push(h);
@@ -2297,14 +2298,28 @@ pub async fn initialize_all(
     // ⇒ 收敛到 `mqtt_station_roles`（**唯一接线点**，回归网见该函数文档与
     // `task10_station_roles_wiring_carries_pcs_role_into_publish_plan`）。
     let mqtt_roles = mqtt_station_roles(config);
+    // ── 01 PRD EX-10：装置标识缺失须**显式标注"未提供"**，不得臆造 ──
+    //   本仓**无** `system.dev_id` 键（`core_config` 已就此 fail-fast，见
+    //   `validate_mqtt_bridge` 第 ③ 条），PRD Q10 的来源亦未定 ⇒ `dev` 恒无值。
+    //   **行为**：载荷 `dev` 字段**出现在 JSON 里且为 `null`**（`Option<String>` 未加
+    //   `skip_serializing_if`）—— 不是"字段缺失"，云端可据此区分"未提供"与"没这个字段"。
+    //   启动期再打一条 WARN：让现场在日志里**直接看到**"未提供"这一事实（无需抓包）。
+    let dev_id: Option<String> = None;
+    if dev_id.is_none() {
+        tracing::warn!(
+            "装置标识（dev）未提供：本仓无 system.dev_id 键且 PRD Q10 来源未定 ⇒ 北向 MQTT \
+             载荷的 dev 字段上送 JSON null（01 PRD EX-10 的「显式标注未提供」由 null 承担），\
+             不臆造装置标识"
+        );
+    }
     let mqtt_outcome = crate::uplink::assemble_mqtt_bridge(
         &config.mqtt_bridge,
         latest.clone(),
         uplink_points.clone(),
         mqtt_roles,
-        // 装置标识（§9.3.4：PRD Q10 来源未定 ⇒ 本仓无权威来源 ⇒ 载荷 `dev` 写 `null`，不臆造）。
-        // 待产品裁定后：`client_id` 缺省时取该值，仍在配置层。
-        None,
+        // 装置标识（§9.3.4 / PRD Q10 / EX-10）—— 见上方 WARN；待产品裁定后：
+        // `client_id` 缺省时取该值，仍在配置层。
+        dev_id,
         storage.events.clone(),
     )
     .await;
@@ -2325,6 +2340,28 @@ pub async fn initialize_all(
             crate::uplink::MqttServiceStatus::Disabled => ServiceStatus::Stopped,
             crate::uplink::MqttServiceStatus::Failed => ServiceStatus::Failed,
         },
+    );
+
+    // ── U-74 审查 A-4 + A-5：北向上送链路计数的**出口**（60 s 一行 + 启动首拍）──
+    //   两个计数在改造前都"只有计数器、没有出口"：
+    //   ① A-4 `Iec104Server::dropped_total()`（设计 §9.2.2 的 `iec104_dropped_total`）——
+    //      生产零调用；② A-5 `MqttUplinkPublisher::stats()`（PRD §8.6.5 BF-6）—— 带
+    //      `#[allow(dead_code)]`、注释自认"无生产消费方"。
+    //   MQTT 未启用 ⇒ `mqtt_outcome.publisher` 为 `None` ⇒ 对应 4 个计数打 `n/a`（不打 0）。
+    //   **无停机钩子**（不写数据、无在途批次）⇒ 入 abort 名单 `guard`。
+    let link_counters_src: std::sync::Arc<dyn crate::link_counters::LinkCounterSource> =
+        std::sync::Arc::new(crate::link_counters::BothCounters {
+            iec104: iec104_server.clone(),
+            mqtt: mqtt_outcome.publisher.clone(),
+        });
+    guard.0.push(crate::link_counters::spawn_link_counter_reporter(
+        link_counters_src,
+        std::time::Duration::from_millis(crate::link_counters::LINK_COUNTER_TICK_MS),
+    ));
+    tracing::debug!(
+        mqtt_enabled = mqtt_outcome.publisher.is_some(),
+        "链路计数上报任务已登记（abort 名单；周期 {} ms）",
+        crate::link_counters::LINK_COUNTER_TICK_MS
     );
 
     // ── 14. 近场无线 ──
@@ -3787,6 +3824,79 @@ stations:
         assert!(
             production.contains("let mqtt_roles = mqtt_station_roles(config);"),
             "MQTT 角色表必须经 `mqtt_station_roles(config)` 收敛（含 PCS 段合成的 pcs 站，否则 role 落空串）"
+        );
+    }
+
+    /// **U-74 审查 A-2：IEC 104 的 A/B 档周期必须来自配置**（01 PRD §8.7「周期须可配置」/
+    /// 设计 §9.2.2 括注「可配」）。
+    ///
+    /// 为什么用**源文本静态断言**（与 `ota_manager` 那条同款手法）：`initialize_all` 要 DB /
+    /// intercore / gateway 全套真环境，本机单测起不来；而本单元要证的恰恰是"装配源码把哪个
+    /// 表达式喂给了驱动器"。
+    ///
+    /// **改什么会变红**：把两个实参改回 `crate::uplink::DEFAULT_CLASS_A_INTERVAL` /
+    /// `DEFAULT_CLASS_B_INTERVAL`（或任何不走 `config.gateway.periods` 的写法）⇒ 红。
+    #[test]
+    fn iec104_ab_intervals_are_wired_from_config() {
+        let production = production_src();
+        assert!(
+            production.contains("Duration::from_millis(config.gateway.periods.a_ms)"),
+            "IEC104 A 档周期须读 `config.gateway.periods.a_ms`（A-2；写死常量 ⇒ PRD §8.7 的\
+             「周期须可配置」落空）"
+        );
+        assert!(
+            production.contains("Duration::from_millis(config.gateway.periods.b_ms)"),
+            "IEC104 B 档周期须读 `config.gateway.periods.b_ms`"
+        );
+        // 反向：驱动器装配点**不得**再直接引用旧的编译期常量（常量只应出现在 core_config 的
+        // 缺省函数里 —— 那里是本段的 `Default`，不是装配）
+        assert!(
+            !production.contains("crate::uplink::DEFAULT_CLASS_A_INTERVAL,"),
+            "驱动器装配点不得再用编译期常量喂 A 档周期"
+        );
+    }
+
+    /// **U-74 审查 A-4 + A-5：链路计数的出口必须在装配段真的被起任务**，且 MQTT 未启用时
+    /// 交 `None`（而不是缩成 0）。
+    ///
+    /// 为什么用源文本断言：`initialize_all` 需 DB / intercore / gateway 全套真环境。
+    /// 计数本身的读取语义由 `link_counters` 的单测钉住，本用例只钉**接线在不在**。
+    ///
+    /// **改什么会变红**：删掉 `spawn_link_counter_reporter` 的调用（A-4/A-5 回到"有计数无
+    /// 出口"）⇒ 红。
+    #[test]
+    fn link_counter_outlet_is_spawned_with_both_sources() {
+        let production = production_src();
+        assert!(
+            production.contains("crate::link_counters::spawn_link_counter_reporter("),
+            "装配段须起链路计数上报任务（A-4 iec104_dropped_total / A-5 BF-6）"
+        );
+        assert!(
+            production.contains("iec104: iec104_server.clone()"),
+            "IEC104 源须接到真实服务器实例（A-4）"
+        );
+        assert!(
+            production.contains("mqtt: mqtt_outcome.publisher.clone()"),
+            "MQTT 源须接装配交回的 publisher（A-5；未启用时该字段为 None ⇒ 打 n/a 而非 0）"
+        );
+    }
+
+    /// **U-74 审查 B-4：`dev` 未提供必须在启动期被**显式**告知**（PRD 01 EX-10）。
+    ///
+    /// 两条断言合起来才完整：① 生产段有 WARN；② 传给装配层的是**显式命名的 `None` 变量**
+    /// （`dev_id`）而不是裸字面量 —— 后者让"未提供"在源码里无处可查。
+    ///
+    /// **改什么会变红**：删掉那条 `tracing::warn!`（回到裸 `None`）⇒ 红。
+    #[test]
+    fn dev_absent_is_announced_at_startup() {
+        let production = production_src();
+        assert!(
+            production.contains("装置标识（dev）未提供"),
+            "启动期须 WARN 说明 dev 未提供（EX-10 的「显式标注」）"
+        );
+        assert!(
+            production.contains("let dev_id: Option<String> = None;"),
+            "dev 须取显式命名的变量（便于『未提供』在源码里可查）"
         );
     }
 }
