@@ -164,29 +164,35 @@ MUPC IntercoreClient ──TCP:9100──→ ActionServer (sim-bridge)
 
 sim-bridge 监听 TCP 9100 端口，伪装为实时控制模块。MUPC IntercoreClient 通过 TCP 连接发送控制指令帧。
 
-**帧格式**（复用 intercore `ControlCommand` 结构体二进制序列化）：
+**帧格式**（复用 intercore `IntercoreFrame` 定长 64 字节帧 + `ActionPayload` 二进制载荷；见《10-MUPC-核间通信-设计文档》§3.2/§3.4 与本模块设计文档 §3.3）：
 
 ```
 字节偏移  | 长度  | 字段        | 类型   | 说明
 ---------|-------|-------------|--------|------------------
-0        | 4     | frame_id    | u32    | 帧序号 (大端)
-4        | 1     | cmd_type    | u8     | 0x01 = 控制指令
-5        | 1     | reserved    | u8     | 保留 (0x00)
-6        | 2     | payload_len | u16    | 载荷长度 = 16 (大端)
-8        | 8     | p_ref       | f64    | 有功基准点 kW (大端, IEEE 754)
-16       | 8     | k_droop     | f64    | 下垂系数 kW/V (大端, IEEE 754)
-24       | 2     | crc16       | u16    | CRC-16/MODBUS (大端)
+0        | 2     | magic       | u16    | 固定 0xAA55 (大端)
+2        | 2     | length      | u16    | 帧总长度 = 64 (大端)
+4        | 2     | frame_type  | u16    | 0x0010 = ControlCmd (大端)
+6        | 2     | seq_no      | u16    | 序列号 (大端)
+8        | 16    | payload     | —      | `ActionPayload`：p_ref f64 BE ‖ k_droop f64 BE（二进制）
+24       | 2     | crc16       | u16    | CRC-16/MODBUS (大端)，覆盖 magic..payload
+26       | 38    | padding     | —      | 0x00 补齐到 64 字节
 ```
 
-**总帧长**：26 字节。
+**总帧长**：64 字节（定长，与 intercore `FRAME_FIXED_LENGTH` 同源）。
 
 **sim-bridge 解析逻辑**：
-1. 读取前 4 字节 → frame_id (u32 BE)
-2. 读取 cmd_type (1 byte) → 仅处理 0x01
-3. 读取 payload_len (2 bytes BE) → 验证 = 16
-4. 读取 p_ref (8 bytes BE, f64) + k_droop (8 bytes BE, f64)
-5. 读取 crc16 (2 bytes BE) → 验证 CRC-16/MODBUS
-6. CRC 验证失败 → WARN 日志 + 丢弃帧
+1. 校验 magic = 0xAA55
+2. 校验 frame_type = 0x0010（ControlCmd）
+3. 由 intercore 编解码器 `IntercoreFrame::from_bytes()` 解帧并校验 CRC-16/MODBUS
+4. 由 `ActionPayload::from_frame()` 取 p_ref / k_droop（各 8 字节 f64 BE）
+5. 物理约束 clamp：p_ref ∈ [-50, 50]、k_droop ∈ [0, 30]
+6. CRC 校验失败 / 非 ControlCmd 帧 → WARN 日志 + 丢弃帧
+
+> ⚠️ **2026-09-27 订正**：原文记载的 **26 字节自定义帧**（frame_id / cmd_type / reserved /
+> payload_len）**已作废**——现实现复用 intercore 的定长帧 + `ActionPayload`，
+> 见 `mupc/crates/sim-bridge/src/action_server.rs` 与本模块设计文档 §3.3 的订正。
+> 注：sim-bridge 是 intercore 帧类型的**真实复用方**（`sim-bridge` 依赖 `mupc-intercore`），
+> 此处归属 intercore 正确。
 
 ---
 
