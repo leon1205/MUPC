@@ -38,6 +38,22 @@ const RKNN_MODEL_MAGIC_ALT: &[u8] = b"RKNM"; // 某些变体可能使用此标�
 const MIN_RKNN_SIZE: u64 = 1_048_576; // 1MB
 const MAX_RKNN_SIZE: u64 = 524_288_000; // 500MB
 
+/// 包大小上界校验（**在整文件入内存之前**执行；D-18）。
+///
+/// # 为什么是"读取前校验"而不是"流式验签"
+/// 上游 `ed25519-dalek` / `sm2` 的验签 API 都要求**完整消息** `&[u8]`；要流式必须改成
+/// "先算摘要再对摘要验签"（hash-then-sign）——那是**协议层变更**（签名侧与线上包格式都要
+/// 跟着改），不属本次缺陷修复范围。故这里取**上界校验**：签名验证发生在信任建立**之前**，
+/// 一个超大"模型包"就是一次内存打满（`tokio::fs::read` 会按文件长度一次分配）。
+fn ensure_within_size_bound(len: u64) -> Result<(), OtaError> {
+    if len > MAX_RKNN_SIZE {
+        return Err(OtaError::VerificationFailed(format!(
+            "模型包大小 {len} 字节超过上界 {MAX_RKNN_SIZE} 字节（读取前拒绝，避免整文件入内存）"
+        )));
+    }
+    Ok(())
+}
+
 /// 平台最低版本要求（platform_version -> 最低版本号）
 const PLATFORM_MIN_VERSION: &[(&str, u32)] =
     &[("RK3588", 8), ("RK3588S", 8), ("RK3568", 6), ("RK3568S", 6)];
@@ -188,7 +204,13 @@ impl Verifier {
         file_path: &Path,
         signature: &[u8],
     ) -> Result<(), OtaError> {
-        // 读取文件数据
+        // ① **先**校包大小上界（此时还没把任何字节读进内存；D-18）
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .map_err(|e| OtaError::VerificationFailed(format!("读取文件元数据失败: {}", e)))?;
+        ensure_within_size_bound(metadata.len())?;
+
+        // ② 再读文件数据
         let data = tokio::fs::read(file_path)
             .await
             .map_err(|e| OtaError::VerificationFailed(format!("读取文件失败: {}", e)))?;
@@ -650,6 +672,53 @@ mod tests {
 
         assert!(debug_str.contains("Verifier"));
         assert!(debug_str.contains("public_key_path"));
+    }
+
+    // ========== 包大小上界测试（D-18） ==========
+
+    /// 判别力：上界判据本身必须**能红**（旧实现没有这道闸 ⇒ 本用例不存在/编译不过）。
+    #[test]
+    fn size_bound_rejects_only_above_the_limit() {
+        assert!(ensure_within_size_bound(0).is_ok());
+        assert!(
+            ensure_within_size_bound(MAX_RKNN_SIZE).is_ok(),
+            "恰好等于上界必须放行（含端点）"
+        );
+        let err = ensure_within_size_bound(MAX_RKNN_SIZE + 1).expect_err("超上界必须拒绝");
+        assert!(
+            err.to_string().contains("超过上界"),
+            "拒绝原因须点明上界: {err}"
+        );
+    }
+
+    /// 判别力（端到端）：**超上界的包在读取前就被拒**（用稀疏文件造一个 500MB+ 的包，
+    /// 不实际占用磁盘）。旧实现会把整文件读进内存后才走到"无可用算法"的错误 ⇒
+    /// 本用例断言错误文案属于"大小上界" ⇒ 红。
+    #[tokio::test]
+    async fn oversized_package_is_rejected_before_being_read_into_memory() {
+        let temp_dir = TempDir::new().unwrap().into_path();
+        let key_path = temp_dir.join("public_key.pem");
+        std::fs::write(&key_path, b"test key").unwrap();
+        let verifier = Verifier::new(key_path).unwrap();
+
+        let big = temp_dir.join("huge.rknn");
+        {
+            let f = std::fs::File::create(&big).unwrap();
+            f.set_len(MAX_RKNN_SIZE + 1).unwrap(); // 稀疏文件：只声明长度，不写满
+        }
+
+        let err = verifier
+            .verify_signature(&big, &[])
+            .await
+            .expect_err("超上界包必须被拒");
+        assert!(
+            err.to_string().contains("超过上界"),
+            "必须是**读取前**的大小上界拒绝（而不是读完之后的别的原因）: {err}"
+        );
+        assert!(
+            !err.to_string().contains("签名验证算法"),
+            "不得走到「读完文件才判算法」的旧路径: {err}"
+        );
     }
 
     // ========== 集成场景测试 ==========

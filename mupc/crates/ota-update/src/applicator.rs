@@ -26,6 +26,15 @@ const MODEL_FILENAME: &str = "model.rknn";
 static VERSION_PATTERN: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"v?(\d+\.\d+\.\d+)").unwrap());
 
+/// `fsync` 一个目录（`rename` 的持久化面）。
+///
+/// Windows 不允许以只读方式打开目录 ⇒ 该平台返回 `Err`，由调用方**降级为告警**
+/// （见 [`ModelApplicator::copy_to_current`] 第 ④ 步）。
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    let d = std::fs::File::open(dir)?;
+    d.sync_all()
+}
+
 /// 策略引擎通知回调类型
 type StrategyEngineNotifyFn = Box<dyn Fn(ModelType) + Send + Sync>;
 
@@ -398,7 +407,15 @@ impl ModelApplicator {
         None
     }
 
-    /// 复制模型到 current 目录
+    /// 把新模型**原子地**替换进 `current/`
+    ///
+    /// 顺序：**同目录**临时文件 → 内容 `fsync` → `rename` 覆盖 → 目录 `fsync`。
+    ///
+    /// # 为什么不能"先删后拷"（D-17）
+    /// 旧实现是 `remove_file(dest)` → `fs::copy(source, dest)`：两步之间进程崩溃 / 复制失败
+    /// ⇒ `current/` 里**没有模型**，且没有任何自动恢复（策略引擎与 AI 侧下一次加载直接失败）。
+    /// `rename` 在**同一文件系统内是原子的**：`dest` 任何时刻要么是旧模型、要么是完整新模型。
+    /// 判别力用例：`failed_replacement_keeps_the_old_model`（复制失败后旧模型必须原样在位）。
     async fn copy_to_current(&self, model_type: ModelType, source: &Path) -> Result<(), OtaError> {
         let current_dir = self.current_dir(model_type);
 
@@ -408,22 +425,53 @@ impl ModelApplicator {
             .map_err(|e| OtaError::VerificationFailed(format!("创建模型目录失败: {}", e)))?;
 
         let dest_path = current_dir.join(MODEL_FILENAME);
+        // 临时文件与目标**同目录**（跨文件系统的 rename 会退化成"拷贝+删除"，不再原子）。
+        let tmp_path = current_dir.join(format!(".{MODEL_FILENAME}.tmp-{}", uuid::Uuid::new_v4()));
 
-        // 如果目标已存在，先删除
-        if dest_path.exists() {
-            fs::remove_file(&dest_path)
-                .await
-                .map_err(|e| OtaError::VerificationFailed(format!("删除旧模型文件失败: {}", e)))?;
+        // ① 暂存 + ② 内容 fsync：失败即清理临时文件并上抛（**目标文件一个字节都没动**）
+        if let Err(e) = self.stage_and_sync(source, &tmp_path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(e);
         }
 
-        // 复制新模型
-        fs::copy(source, &dest_path)
-            .await
-            .map_err(|e| OtaError::VerificationFailed(format!("复制模型文件失败: {}", e)))?;
+        // ③ 原子替换
+        if let Err(e) = fs::rename(&tmp_path, &dest_path).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(OtaError::VerificationFailed(format!(
+                "原子替换模型文件失败（旧模型仍应在位）: {}",
+                e
+            )));
+        }
 
-        tracing::info!("已复制模型到: {}", dest_path.display());
+        // ④ 目录 fsync：让 rename 本身也持久。失败只告警 —— 内容已 fsync，
+        //    最坏情形是断电后丢"目录项指向新文件"这一步（旧模型仍在，属可接受降级）。
+        if let Err(e) = fsync_dir(&current_dir) {
+            tracing::warn!("模型目录 fsync 失败（rename 可能未持久到介质）: {}", e);
+        }
+
+        tracing::info!("已原子替换模型到: {}", dest_path.display());
 
         Ok(())
+    }
+
+    /// 暂存到临时文件并把**内容**刷到介质（`rename` 之前完成，见 [`Self::copy_to_current`]）。
+    async fn stage_and_sync(&self, source: &Path, tmp_path: &Path) -> Result<(), OtaError> {
+        fs::copy(source, tmp_path)
+            .await
+            .map_err(|e| OtaError::VerificationFailed(format!("复制模型文件失败: {}", e)))?;
+        // ⚠️ 必须**带写权限**打开再 fsync：Windows 的 `FlushFileBuffers` 要求句柄可写，
+        // 只读句柄会 `ERROR_ACCESS_DENIED`（os error 5）—— 而"刚写进去的字节要刷盘"这件事
+        // 本来就该在写句柄上做。
+        let staged = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_path)
+            .await
+            .map_err(|e| OtaError::VerificationFailed(format!("打开暂存模型失败: {}", e)))?;
+        staged
+            .sync_all()
+            .await
+            .map_err(|e| OtaError::VerificationFailed(format!("暂存模型 fsync 失败: {}", e)))
     }
 
     /// 预热模型（执行一次推理）
@@ -656,6 +704,92 @@ mod tests {
 
         let result = ModelApplicator::new(nonexistent_path, verifier, None);
         assert!(result.is_err());
+    }
+
+    // ========== copy_to_current 原子性测试（D-17） ==========
+
+    /// 造一个 applicator（模型根目录已存在）。
+    async fn make_applicator(root: &Path) -> ModelApplicator {
+        let key_path = root.join("public_key.pem");
+        fs::write(&key_path, b"test key").await.unwrap();
+        let verifier = Arc::new(Verifier::new(key_path).unwrap());
+        ModelApplicator::new(root.to_path_buf(), verifier, None).unwrap()
+    }
+
+    /// 判别力：替换**失败**时旧模型必须**原样在位**。
+    ///
+    /// 旧实现是"先 `remove_file` 再 `copy`"：复制一失败，`current/model.rknn` 已经没了 ⇒
+    /// 本用例红（断言"旧内容仍在"）。新实现先写临时文件再 `rename` ⇒ 旧文件从未被删。
+    #[tokio::test]
+    async fn failed_replacement_keeps_the_old_model() {
+        let temp_dir = TempDir::new().unwrap().into_path();
+        let root = temp_dir.join("models");
+        fs::create_dir_all(&root).await.unwrap();
+        let applicator = make_applicator(&root).await;
+
+        // 布置"旧模型"
+        let current_dir = root.join("current").join(ModelType::Lstm.to_string());
+        fs::create_dir_all(&current_dir).await.unwrap();
+        let dest = current_dir.join(MODEL_FILENAME);
+        fs::write(&dest, b"OLD-MODEL-BYTES").await.unwrap();
+
+        // 源文件不存在 ⇒ 复制必失败（这就是"中断/失败"）
+        let missing = temp_dir.join("no-such-update.rknn");
+        let err = applicator
+            .copy_to_current(ModelType::Lstm, &missing)
+            .await
+            .expect_err("源不存在时替换必须失败");
+        assert!(
+            err.to_string().contains("复制") || err.to_string().contains("文件"),
+            "失败原因须可定位: {err}"
+        );
+
+        // 关键断言：旧模型**仍在且未变**
+        assert!(dest.exists(), "替换失败后旧模型必须仍在（旧实现此处已被删除）");
+        assert_eq!(
+            fs::read(&dest).await.unwrap(),
+            b"OLD-MODEL-BYTES",
+            "旧模型内容必须逐字节不变"
+        );
+        // 且不留下任何暂存文件（半截状态）
+        let leftovers: Vec<String> = std::fs::read_dir(&current_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "失败后不得残留暂存文件: {leftovers:?}");
+    }
+
+    /// 成功路径：内容被替换成新模型，且不残留暂存文件。
+    #[tokio::test]
+    async fn successful_replacement_swaps_content_atomically() {
+        let temp_dir = TempDir::new().unwrap().into_path();
+        let root = temp_dir.join("models");
+        fs::create_dir_all(&root).await.unwrap();
+        let applicator = make_applicator(&root).await;
+
+        let current_dir = root.join("current").join(ModelType::Maddpg.to_string());
+        fs::create_dir_all(&current_dir).await.unwrap();
+        let dest = current_dir.join(MODEL_FILENAME);
+        fs::write(&dest, b"OLD").await.unwrap();
+
+        let src = temp_dir.join("v9.9.9.rknn");
+        fs::write(&src, b"NEW-MODEL-BYTES").await.unwrap();
+
+        applicator
+            .copy_to_current(ModelType::Maddpg, &src)
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read(&dest).await.unwrap(), b"NEW-MODEL-BYTES");
+        let leftovers: Vec<String> = std::fs::read_dir(&current_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "不得残留暂存文件: {leftovers:?}");
     }
 
     // ========== calculate_checksum 测试 ==========

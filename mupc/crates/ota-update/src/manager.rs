@@ -223,6 +223,55 @@ impl OtaManagerImpl {
             progress: 0,
             created_at: now,
             updated_at: now,
+            // 下载产物尚未登记（下载成功后由 `record_download_artifact` 填入）
+            package_path: None,
+            expected_hash: None,
+        }
+    }
+
+    /// 从任务登记处取回"应用更新"所需的**真**输入（包路径 + 期望哈希）（D-19）。
+    ///
+    /// 缺失即 `Err(`[`OtaError::Unsupported`]`)`：旧实现在 `apply_update` 里写死
+    /// `model_storage_path/update/{task_id}.rknn` 并传 `expected_hash = ""` ——
+    /// 那既让 `verify_integrity` **必失败**（应用路径结构性不可成功），又用一个"看起来
+    /// 在做事"的空值掩盖了"下载产物根本没被登记"这一真问题。
+    fn resolve_apply_inputs(task: &OtaTask) -> Result<(PathBuf, String), OtaError> {
+        let (Some(package), Some(hash)) = (task.package_path.as_ref(), task.expected_hash.as_ref())
+        else {
+            return Err(OtaError::Unsupported(format!(
+                "任务 {} 未登记更新包路径/期望哈希（下载未完成或产物未登记）⇒ 拒绝应用；\
+                 不得用猜出的路径与空哈希走过场",
+                task.task_id
+            )));
+        };
+        if !package.exists() {
+            return Err(OtaError::Unsupported(format!(
+                "任务 {} 登记的更新包不存在: {}",
+                task.task_id,
+                package.display()
+            )));
+        }
+        Ok((package.clone(), hash.clone()))
+    }
+
+    /// 把下载产物（**真**路径 + **真**哈希）登记到任务（D-19）。
+    async fn record_download_artifact(&self, task_id: &TaskId, download: &DownloadResult) {
+        let mut tasks = self.tasks.write().await;
+        match tasks.get_mut(task_id) {
+            Some(task) => {
+                task.package_path = Some(download.path.clone());
+                task.expected_hash = Some(download.hash.clone());
+                task.updated_at = Utc::now();
+                tracing::info!(
+                    task_id = %task_id,
+                    path = %download.path.display(),
+                    "已登记下载产物（路径 + 期望哈希）"
+                );
+            }
+            None => tracing::warn!(
+                task_id = %task_id,
+                "任务已不存在 ⇒ 下载产物未登记（后续 apply 会显式拒绝）"
+            ),
         }
     }
 
@@ -524,7 +573,10 @@ impl OtaManager for OtaManagerImpl {
         let result = self.execute_download(&task_id, update_info).await;
 
         match result {
-            Ok(_) => {
+            Ok(download) => {
+                // 登记**真实**产物（路径 + 校验通过的哈希）：`apply_update` 只认这份登记，
+                // 不再自造路径/空哈希（D-19）。
+                self.record_download_artifact(&task_id, &download).await;
                 // 下载成功，转换到 Verifying 状态
                 self.update_task_state(&task_id, OtaState::Verifying, None)
                     .await?;
@@ -618,26 +670,20 @@ impl OtaManager for OtaManagerImpl {
 
         tracing::info!("应用更新任务: {}", task_id);
 
+        // ⚠️ **在推进任何状态之前**先解析应用输入（D-19）：缺登记/产物不在 ⇒ 显式
+        // `Unsupported` 上抛，状态机**不动**（旧实现无论缺什么都先转 Applying，再拿
+        // "猜的路径 + 空哈希"走一个必失败的过场）。
+        let (update_package, expected_hash) = Self::resolve_apply_inputs(&task)?;
+
         // 转换到 Applying 状态
         self.transition_state(OtaState::Applying).await?;
         self.update_task_state(&task_id, OtaState::Applying, None)
             .await?;
 
-        // 执行模型应用
-        // 这里需要从下载结果获取文件路径，简化处理
-        let update_package = PathBuf::from(&self.config.model_storage_path)
-            .join("update")
-            .join(format!("{}.rknn", task.task_id));
-
-        // 注意：实际应该使用下载完成后的文件路径
-        // 这里简化处理，假设文件已下载
+        // 执行模型应用（用登记处的**真**路径与**真**哈希）
         let result = self
             .applicator
-            .apply(
-                task.model_type,
-                &update_package,
-                "", // checksum 应该从任务中获取
-            )
+            .apply(task.model_type, &update_package, &expected_hash)
             .await;
 
         match result {
@@ -850,6 +896,71 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].model_type, ModelType::Lstm);
         assert_eq!(updates[0].available_version, "1.2.0");
+    }
+
+    // ========== 应用输入解析（D-19） ==========
+
+    fn task_fixture() -> OtaTask {
+        let now = Utc::now();
+        OtaTask {
+            task_id: "t-d19".to_string(),
+            model_type: ModelType::Lstm,
+            from_version: "1.0.0".to_string(),
+            to_version: "1.1.0".to_string(),
+            state: OtaState::Verifying,
+            progress: 100,
+            created_at: now,
+            updated_at: now,
+            package_path: None,
+            expected_hash: None,
+        }
+    }
+
+    /// 判别力：任务**未登记**产物时必须显式 `Unsupported` 拒绝，且错误文案点明"未登记"。
+    ///
+    /// 旧实现的对照面：`apply_update` 自造路径 `…/update/{task_id}.rknn` + `expected_hash=""`，
+    /// 于是失败原因永远表现为"完整性校验失败"（必失败的空值走过场），把真问题藏起来。
+    #[test]
+    fn apply_inputs_missing_artifact_is_explicitly_unsupported() {
+        let task = task_fixture();
+        match OtaManagerImpl::resolve_apply_inputs(&task) {
+            Err(OtaError::Unsupported(msg)) => {
+                assert!(msg.contains("未登记"), "拒绝理由须可定位: {msg}");
+                assert!(msg.contains("t-d19"), "须带上 task_id: {msg}");
+            }
+            other => panic!("未登记产物必须 Unsupported，实际: {other:?}"),
+        }
+    }
+
+    /// 判别力：登记了路径但文件不在 ⇒ 也必须显式拒绝（不得继续走到校验阶段）。
+    #[test]
+    fn apply_inputs_missing_file_on_disk_is_explicitly_unsupported() {
+        let mut task = task_fixture();
+        task.package_path = Some(PathBuf::from("/definitely/not/here/model.rknn"));
+        task.expected_hash = Some("abc123".to_string());
+        match OtaManagerImpl::resolve_apply_inputs(&task) {
+            Err(OtaError::Unsupported(msg)) => assert!(
+                msg.contains("不存在"),
+                "须点明产物不存在: {msg}"
+            ),
+            other => panic!("产物不存在必须 Unsupported，实际: {other:?}"),
+        }
+    }
+
+    /// 正例：登记齐备 ⇒ 取回**真**路径与**真**哈希（不是空串、不是猜的路径）。
+    #[test]
+    fn apply_inputs_returns_the_registered_path_and_hash() {
+        let dir = TempDir::new().unwrap();
+        let pkg = dir.path().join("v1.1.0.rknn");
+        std::fs::write(&pkg, b"model").unwrap();
+
+        let mut task = task_fixture();
+        task.package_path = Some(pkg.clone());
+        task.expected_hash = Some("deadbeef".to_string());
+
+        let (path, hash) = OtaManagerImpl::resolve_apply_inputs(&task).expect("登记齐备必须可取回");
+        assert_eq!(path, pkg, "必须是登记的**真**路径");
+        assert_eq!(hash, "deadbeef", "必须是登记的**真**哈希（不得回落空串）");
     }
 
     // ========== 状态转换测试 ==========
