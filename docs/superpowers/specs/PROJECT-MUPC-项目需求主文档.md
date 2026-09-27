@@ -4,6 +4,9 @@
 |------|------|------|------|
 | v1.0 | 2026-05-29 | 项目经理 | **[REVIEWED: PASS]** |
 | v3.1 | 2026-07-05 | LEON | **[REVIEWED: PASS]** — v3.1 构建体系/部署/子系统初始化更新 |
+| v3.2 | 2026-09-27 | LEON | 待评审 — 内容与现状对齐（08 号 SUPERSEDED / 补 12 号 / 模块编号订正 / crate 归属按 workspace 26 成员订正）；本笔为内容对齐，未经评审，故不沿用门禁标记 |
+
+> v3.2 更新依据（均可在仓库内逐条核对）：**模块编号以 `docs/superpowers/specs/modules/XX-…-PRD.md` 的文件编号为准**；crate 归属以 `mupc/Cargo.toml` 的 `members`（**26 个成员**，含 `crates/local-display/lvgl-sys` 子 crate）为准；各模块门禁标记以对应 PRD 头部原文为准。
 
 ---
 
@@ -15,19 +18,21 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 
 - **北向通信**：与调度主站（IEC 104）、配电自动化（IEC 61850）、物联平台（MQTT）通信
 - **南向通信**：与台区设备（TTU、光伏逆变器、充电桩、柔性负荷）通信
-- **本地策略引擎**（AI 失效时的兜底）
-- **AI 边缘优化引擎**（预测、强化学习决策）
+- **本地策略引擎**（台区储能治理；**2026-09-09 起为唯一默认下发引擎**）
+- **AI 边缘优化引擎**（预测、强化学习决策）——**框架保留、引擎停用**（2026-09-09「平台目标调整」，见 `docs/superpowers/plans/archive/2026-09-09-平台目标调整-AI引擎停用与国密框架化.md`）
 - **OTA 升级**与远程维护
+- **本地显示终端**（触摸式本地 HMI，12 号模块）
 
 ### 目标平台
 
 | 项目 | 要求 |
 |------|------|
-| 硬件 | RK3588 (NPU: 6 TOPS) |
-| 操作系统 | Linux (openEuler) |
-| 编程语言 | Rust >= 1.75 |
+| 硬件（主控 / AI 推理） | RK3588 (NPU: 6 TOPS) |
+| 硬件（本地显示 / 南向站级） | BECG-3568（RK3568，aarch64 Linux），HDMI 外接 8 寸 1024×768 触摸屏，无显示服务器（无 X11 / Wayland）——见 `plans/modules/12-MUPC-本地显示终端-设计文档.md` 目标平台行 |
+| 操作系统 | Linux（openEuler 22.03+ / Ubuntu 20.04+） |
+| 编程语言 | Rust >= 1.88（交叉编译）；>= 1.75（本机）。workspace `rust-version = "1.75"`（`mupc/Cargo.toml:37`） |
 | 异步运行时 | Tokio |
-| 网络框架 | Tower + tokio-net |
+| 网络框架 | Axum 0.7（**仅本地 HMI 控制通道**，`mupc-core-bin/src/console_host.rs`）；Web 访问栈（Tower/tower-http/hyper/hyper-util）随 `web-api` crate 删除 |
 
 ---
 
@@ -35,45 +40,60 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 
 ### 2.1 构建方式
 
+> 以下路径均为**仓库 `mupc/` 目录下**的相对路径（脚本实际位于 `mupc/deploy/scripts/`，仓库根无 `deploy/` 目录）。
+
 | 方式 | 命令 | 适用场景 |
 |------|------|---------|
 | Cargo 本机 | `cargo build -p mupc-core-bin --release` | x86_64 开发 |
-| Cargo 交叉 | `cargo build --target aarch64-unknown-linux-gnu` | ARM64 交叉编译 |
+| Cargo 交叉 | `cargo build --workspace --release --features npu --target aarch64-unknown-linux-gnu` | ARM64 交叉编译（**`npu` 为显式开关**） |
 | CMake 编排 | `cmake -B build && cmake --build build` | CI/CD |
-| 一键脚本 | `./deploy/scripts/build-for-rk3588.sh --cross` | 开发者 |
+| 一键脚本 | `./deploy/scripts/build-for-rk3588.sh --cross` | 开发者（实测存在：`mupc/deploy/scripts/build-for-rk3588.sh`） |
 
 ### 2.2 外部依赖
 
 | 依赖 | 用途 | 自动安装 |
 |------|------|:--:|
-| `gcc-aarch64-linux-gnu` | ARM64 交叉编译器 | `scripts/setup-deps.sh` |
-| `external/openssl-4.0.1` | SSL/TLS ARM64 静态库 | `scripts/setup-deps.sh --all` |
-| `external/liblzma-master` | XZ 压缩 ARM64 库 | `scripts/setup-deps.sh --all` |
-| `rknn-toolkit2-2.3.2` | RK3588 NPU 运行时 | 手动下载 + 解压 |
+| `gcc-aarch64-linux-gnu` | ARM64 交叉编译器 | `./scripts/setup-deps.sh`（实测存在：`mupc/scripts/setup-deps.sh`） |
+| `external/openssl-4.0.1` | SSL/TLS ARM64 静态库 | `./scripts/setup-deps.sh --all` |
+| `external/liblzma-master` | XZ 压缩 ARM64 库 | `./scripts/setup-deps.sh --all` |
+| `rknn-toolkit2-2.3.2` | RK3588 NPU 运行时 | 手动下载 + 解压（**AI 引擎停用期间 `npu` 开关仅供框架保留**） |
 
 ### 2.3 部署方式
 
-- **一键脚本**: `./deploy/scripts/deploy.sh <target_ip> --full`
-- **systemd 服务**: `deploy/systemd/mupcd.service`
-- **部署文档**: `deploy/deploy.md`
+- **一键脚本**: `./deploy/scripts/deploy.sh <target_ip> --full`（实测存在：`mupc/deploy/scripts/deploy.sh`）
+- **仿真部署**: `./deploy/scripts/deploy-sim.sh <target_ip> --build --generate-data --start`（实测存在）
+- **systemd 服务**: `mupc/deploy/systemd/mupcd.service`
+- **部署文档**: `mupc/deploy/deploy.md`（实测存在；仓库根无 `deploy/deploy.md`）
+- **bin 产物**: `mupcd`（`mupc-core-bin`）、`mupc-local-display`（`local-display`）、`pcs_slave`（`mupc-southd`，feature `pcs-slave-bin` 门控）、`mupc-sim-bridge`（`sim-bridge`，`src/main.rs`）
 
 ## 3. 模块需求索引
 
 本主文档为 MUPC 项目的需求入口。每个模块的详细需求请参见对应的模块需求文档。
 
-| 编号 | 模块名称 | 对应 Crate | 模块 PRD | 状态 |
+> **编号口径**：**模块编号 = 其 PRD 文件编号**（`specs/modules/XX-…-PRD.md`）。
+
+| 编号 | 模块名称 | 对应 Crate | 模块 PRD | 状态（按 PRD 头部门禁标记原文） |
 |------|----------|-----------|---------|------|
-| 01 | 通信网关（北向） | gateway, iec61850-plugin, mqtt-plugin | [01-MUPC-通信网关-PRD.md](modules/01-MUPC-通信网关-PRD.md) | [REVIEWED: PASS] |
-| 02 | 南向通信 | rs485-plugin, hplc-plugin, device-trait | [02-MUPC-南向通信-PRD.md](modules/02-MUPC-南向通信-PRD.md) | [REVIEWED: PASS] |
-| 03 | 数据处理与存储 | data-processing, storage | [03-MUPC-数据处理与存储-PRD.md](modules/03-MUPC-数据处理与存储-PRD.md) | [REVIEWED: PASS] |
-| 04 | 策略引擎 | strategy-engine | [04-MUPC-策略引擎-PRD.md](modules/04-MUPC-策略引擎-PRD.md) | [REVIEWED: PASS] |
-| 05 | AI 优化引擎 | ai-engine | [05-MUPC-AI引擎-PRD.md](modules/05-MUPC-AI引擎-PRD.md) | v2.0 |
-| 06 | 安全模块 | security | [06-MUPC-安全-PRD.md](modules/06-MUPC-安全-PRD.md) | [REVIEWED: PASS] |
-| 07 | OTA 与系统可靠性 | ota-update, system-monitor | [07-MUPC-OTA与系统可靠性-PRD.md](modules/07-MUPC-OTA与系统可靠性-PRD.md) | [REVIEWED: PASS] |
-| 08 | Web 管理与 AI 可视化 | web-api | [08-MUPC-Web管理与AI可视化-PRD.md](modules/08-MUPC-Web管理与AI可视化-PRD.md) | v1.1 |
-| 09 | 本地运维通信 | wireless | [09-MUPC-本地运维通信-PRD.md](modules/09-MUPC-本地运维通信-PRD.md) | 草稿 |
-| 10 | 核间通信 | intercore | [10-MUPC-核间通信-PRD.md](modules/10-MUPC-核间通信-PRD.md) | v1.0 |
-| 11 | 主控进程 | mupc-core-bin | — | v3.1 |
+| 01 | 通信网关（北向） | gateway, iec61850-plugin, mqtt-plugin | [01-MUPC-通信网关-PRD.md](modules/01-MUPC-通信网关-PRD.md) | `[REVIEWED: PASS]`（2026-09-23 §8 增量） |
+| 02 | 南向通信 | rs485-plugin, hplc-plugin, device-trait, **mupc-southd**, **mupc-io** | [02-MUPC-南向通信-PRD.md](modules/02-MUPC-南向通信-PRD.md) | `[REVIEWED: PASS]`（2026-09-21 终审）+ `[REVIEWED: PASS]`（2026-09-23 §10） |
+| 03 | 数据处理与存储 | data-processing, storage | [03-MUPC-数据处理与存储-PRD.md](modules/03-MUPC-数据处理与存储-PRD.md) | `[REVIEWED: PASS]`（2026-09-23 增量） |
+| 04 | 策略引擎 | strategy-engine | [04-MUPC-策略引擎-PRD.md](modules/04-MUPC-策略引擎-PRD.md) | 无门禁标记；头部标注「2026-09-09 台区储能治理为默认下发引擎（AI 暂停期唯一出口）」 |
+| 05 | AI 优化引擎 | ai-engine（**框架保留、引擎停用**） | [05-MUPC-AI引擎-PRD.md](modules/05-MUPC-AI引擎-PRD.md) | 无门禁标记；头部标注「2026-09-09 AI 引擎暂停，本地策略引擎为唯一默认下发引擎」 |
+| 06 | 安全模块 | security（**国密只留框架**） | [06-MUPC-安全-PRD.md](modules/06-MUPC-安全-PRD.md) | 无门禁标记 |
+| 07 | OTA 与系统可靠性 | ota-update, system-monitor | [07-MUPC-OTA与系统可靠性-PRD.md](modules/07-MUPC-OTA与系统可靠性-PRD.md) | 无门禁标记 |
+| 08 | ~~Web 管理与 AI 可视化~~ | ~~web-api~~（**crate 已删除**，不在 workspace `members` 内） | [08-MUPC-Web管理与AI可视化-PRD.md](modules/08-MUPC-Web管理与AI可视化-PRD.md) | **`[SUPERSEDED: 2026-09-10]`** —— 需求并入 12 号本地显示终端；本文件不再作为实施依据 |
+| 09 | 本地运维通信 | wireless | [09-MUPC-本地运维通信-PRD.md](modules/09-MUPC-本地运维通信-PRD.md) | 无门禁标记（草稿） |
+| 10 | 核间通信 | intercore（**仅核间 TCP 帧协议**；PCS 语义面已于 2026-09-26 迁出） | [10-MUPC-核间通信-PRD.md](modules/10-MUPC-核间通信-PRD.md) | 无门禁标记 |
+| 11 | 仿真测试环境 | sim-bridge | [11-MUPC-仿真测试环境-PRD.md](modules/11-MUPC-仿真测试环境-PRD.md) | `[REVIEWED: PASS]`（2026-07-10） |
+| 12 | 本地显示终端（触摸式本地 HMI） | display-proto, local-display | [12-MUPC-本地显示终端-PRD.md](modules/12-MUPC-本地显示终端-PRD.md) | `[REVIEWED: PASS]`（2026-09-10，v2.0）+ `[REVIEWED: PASS]`（2026-09-23，v2.1 增量） |
+
+**不带模块编号的条目（无对应 PRD，按 crate 归属登记）：**
+
+| 条目 | 对应 Crate | 模块文档 | 状态 |
+|------|-----------|---------|------|
+| 主控进程 / 装配层 | mupc-core-bin（bin `mupcd`） | —（编排见 `mupc/crates/mupc-core-bin/src/startup.rs`、`console_host.rs`） | 无 PRD、无门禁标记 |
+
+> 原 v3.1 表将「主控进程」编为 **11 号**，与 `11-MUPC-仿真测试环境-PRD.md` 的 11 号冲突；本版按「编号 = PRD 文件编号」订正，主控进程退回**不带编号**条目。
 
 ---
 
@@ -86,7 +106,12 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
                                               ↓              ↑
                               10-核间通信 (TCP/RJ45) ←→ 实时控制模块
                                               ↑
-南向设备 ←→ 02-南向通信 ←─── ProtocolHandler 注入
+南向设备 ←→ 02-南向通信 (rs485/hplc/mupc-southd) ←─── ProtocolHandler 注入
+                    ↑
+        PCS 通信与控制（mupc-southd，2026-09-26 由 intercore 迁入）
+
+  主控进程 (mupc-core-bin / mupcd) ──display-proto(TCP 回环)──▶ 12-本地显示终端
+                                    └── mqtt-bridge ──▶ 物联平台（外设数据上云）
 ```
 
 ### 4.2 关键跨模块接口
@@ -94,11 +119,14 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 | 接口 | 生产方 | 消费方 | 说明 |
 |------|--------|--------|------|
 | 控制指令下发 | 04-策略引擎 | 02-南向通信 | 策略决策 → 设备控制 |
-| AI 决策输入 | 03-数据处理 | 05-AI引擎 | 融合数据供 AI 推理 |
-| AI 决策输出 | 05-AI引擎 | 04-策略引擎 | AI 决策经安全校验后执行 |
+| AI 决策输入 | 03-数据处理 | 05-AI引擎 | 融合数据供 AI 推理（**AI 引擎停用期间观测空间停采**，见 05 号 PRD 头部） |
+| AI 决策输出 | 05-AI引擎 | 04-策略引擎 | AI 决策经安全校验后执行（**AI 引擎停用期间不生效**；默认 `ai_engine.local_priority = true` ⇒ 本地策略优先） |
 | 核间通信 | 10-核间通信 | 03-数据处理 | 与实时控制模块数据交换 |
-| 运行模式切换 | 01-通信网关 / 08-Web管理 | 05-AI引擎 | 远程/本地切换运行场景 |
-| **子系统编排** | **11-主控进程** | **全部** | **14 步依赖顺序初始化，级联清理** |
+| **PCS 通信与控制** | **02-南向通信（`mupc-southd::pcs`）** | **04-策略引擎 / 主控进程** | PCS 三相读数 / SOC 采集 + 启停 / 联锁 / 重启授权（2026-09-26 由 `intercore` 迁入；见 02 号设计 §13 / ADR-014） |
+| **本地显示帧** | **主控进程（mupcd）** | **12-本地显示终端（`local-display`）** | `display-proto` 帧模型 v3，TCP 回环 `GET /v1/display/latest`（无 TLS） |
+| **本地控制通道** | **12-本地显示终端** | **主控进程** | Axum `/v1/console/*`（`mupc-core-bin/src/console_host.rs`）；写操作须二次确认 + 审计 |
+| 运行模式切换 | ~~01-通信网关 / 08-Web管理~~ | 05-AI引擎 | **需求已收敛**：Web 出口随 `web-api` crate 删除；12 号 PRD §0 B5 规定「模式切换=暂停项、本期无界面入口」 |
+| **子系统编排** | **主控进程（`mupc-core-bin`，无模块编号）** | **全部** | **14 步依赖顺序初始化，级联清理**（`mupc/crates/mupc-core-bin/src/startup.rs:3`） |
 
 ### 4.3 文档更新规则
 
@@ -115,6 +143,7 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 |------|------|----------|
 | 2026-07-05 | v3.1 | 新增构建与部署章节；新增模块 11 主控进程；跨模块接口新增子系统编排 |
 | 2026-05-29 | v1.0 | 文档体系重构：建立主文档+模块文档二级结构，删除 29 份重复文档 |
+| 2026-09-27 | v3.2 | 内容与现状对齐：① 模块编号口径订正为「编号 = PRD 文件编号」，「主控进程」由 11 号改为**不带编号**条目（11 号归还 `11-MUPC-仿真测试环境`）；② 08 号（Web 管理与 AI 可视化）标 **SUPERSEDED**、`web-api` crate 已删；③ 补 **12 号本地显示终端**（PRD + 设计 + UI 三份）；④ §3 各模块「状态」列按 PRD 头部门禁标记原文订正；⑤ crate 归属补 `mupc-southd` / `mupc-io` / `display-proto` / `local-display` / `sim-bridge`，按 workspace **26 成员**口径；⑥ §1 目标平台补 BECG-3568、Rust 版本与网络框架据实订正；⑦ §2 构建/部署路径订正为仓库 `mupc/` 下的真实路径；⑧ §4 数据流与接口表补 12 号、PCS 迁出、AI 停用；⑨ 核心职责补 AI「框架保留、引擎停用」与本地显示终端 |
 
 ---
 

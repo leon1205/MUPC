@@ -25,7 +25,7 @@ fn make_telemetry(device: &str, metric: &str, value: f64) -> TelemetryPoint {
         device_id: device.to_string(),
         timestamp: Utc::now(),
         metric_name: metric.to_string(),
-        // `value` 自 03 设计 §9.1.4 起可空（`None` = 缺测）；本文件的写入方一律**有值**。
+        // `value` 自 03 设计 §4.4.4.4 起可空（`None` = 缺测）；本文件的写入方一律**有值**。
         value: Some(value),
         quality: 0,
     }
@@ -645,7 +645,7 @@ async fn bare_file_pool(tag: &str) -> (Arc<SqlitePool>, std::path::PathBuf) {
 }
 
 fn values_of(rows: &[TelemetryPoint]) -> Vec<f64> {
-    // `value` 自 03 设计 §9.1.4 起可空：本文件的写入方**全部有值** ⇒ `filter_map` 与旧行为
+    // `value` 自 03 设计 §4.4.4.4 起可空：本文件的写入方**全部有值** ⇒ `filter_map` 与旧行为
     // 等价（若哪天写了 `None`，下面的 `assert_eq!(values_of(..), vec![..])` 会因条数少而红）。
     let mut v: Vec<f64> = rows.iter().filter_map(|p| p.value).collect();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());

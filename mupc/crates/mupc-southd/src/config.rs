@@ -1039,7 +1039,7 @@ fn validate_maximality(stations: &[StationConf]) -> Result<(), String> {
                     continue;
                 }
                 if a.func == RegFunc::Discrete || b.func == RegFunc::Discrete {
-                    continue; // 保守读法（§11.12.2 Δ-8）：discrete 块一律不参与
+                    continue; // 保守读法（见 technical-debt.md U-93）：discrete 块一律不参与
                 }
                 // ① func / byte_swap 相同（func 同空间 + 显式同 swap）
                 if a.func != b.func || a.byte_swap != b.byte_swap {

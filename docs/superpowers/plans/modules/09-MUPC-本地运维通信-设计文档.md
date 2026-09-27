@@ -1,8 +1,26 @@
 # MUPC 本地运维通信 - 模块设计文档
 
+> **⚠️ 现状横幅（2026-09-27 补，对齐代码事实）**
+>
+> **本文件尚无门禁标记**（未过设计评审）。
+>
+> **落地状态 = Phase 1 骨架 —— 本设计绝大部分「未实现」，不是现网实现描述。**
+> 代码实况：`mupc/crates/wireless` 仅 **6 个文件 / 约 817 行**（驱动 trait + NoOp 占位 + ECDH 工具）；
+> 而本设计 §1.4 `WirelessManager` 与 §9.1 声明的 **30 个文件 / 约 4050 行**结构（`near_link/*`、`wifi/*`、`ble/*`、`config`、`state`、`auth`、`audit`、`scheduler`、`web_api`）**均未创建**。
+>
+> | 设计条目 | 现状 |
+> |---|---|
+> | §2/§3/§4 三模组驱动 | **NoOp 占位** —— 返回 `Err(UnsupportedDevice)`，如实拒绝（不谎报成功）；阻断 = 模组选型未定 |
+> | §5.1/§5.2 密钥协商 | **已实现但口径不一致**：设计写 X25519 / 公钥 32 B / `info=mupc-wireless-aes-gcm`+`salt=channel_id‖session_id`；代码 `ecdh.rs:21-29` 是 **P-256 / 65 B / `Hkdf::new(None,…)` + `info=mupc-wireless-aes-key`** ⇒ 见 `docs/technical-debt.md` **U-100**（待裁定统一） |
+> | §5.3 AES-256-GCM 帧封装 | **未实现**（crate 无 `aes-gcm` 依赖） |
+> | §6.4/§6.6 通道管理与认证锁定、§8.3 审计字段 | **未实现** |
+> | §6.3 Web API / REST 面 | **已失效** —— 依赖的 `web-api` crate **已整体删除**（08 号模块 SUPERSEDED）；相关条目须改挂 12 号本地显示终端的本机回环控制通道或改判作废 |
+>
+> 台账：`docs/technical-debt.md` **U-06**（P0）/ **U-100**（P1）/ **F-07**。
+
 **对应模块：** `wireless` crate（新建）
 
-**前置依赖：** OTA模块、Web UI、日志系统、security crate
+**前置依赖：** OTA模块、~~Web UI~~（**已失效：`web-api` crate 已删除，须改挂 12 号本地显示终端**）、日志系统、security crate
 
 ---
 

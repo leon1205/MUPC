@@ -4,6 +4,9 @@
 |------|------|------|------|
 | v1.0 | 2026-05-29 | 项目经理 | **[DESIGN_APPROVED]** |
 | v3.1 | 2026-07-05 | LEON | **[DESIGN_APPROVED]** — v3.1 构建体系/主控进程/子系统初始化更新 |
+| v3.2 | 2026-09-27 | LEON | 待评审 — 内容与现状对齐（架构图去 08-Web / 补 12 号与 `mupc-southd` / crate 映射按 workspace 26 成员 / 跨模块决策按 web-api 删除与 AI 停用订正）；本笔为内容对齐，未经评审，故不沿用门禁标记 |
+
+> v3.2 更新依据（均可在仓库内逐条核对）：`mupc/Cargo.toml` 的 `members`（**26 个成员**）；`mupc/crates/web-api` **不存在**（`ls` 报 No such file or directory）；模块编号以 `specs/modules/XX-…-PRD.md` 文件编号为准。
 
 ---
 
@@ -28,52 +31,68 @@
 │                  ┌──────────────────────────────┐ ┌──────────┐  │
 │                  │  10-核间通信 (intercore)     │ │ 05-AI引擎│  │
 │                  │  TCP/RJ45 ↔ 实时控制模块      │ │ (ai-eng) │  │
+│                  │ （仅核间帧协议；PCS 已迁出）  │ │ 引擎停用  │  │
 │                  └──────────────────────────────┘ └──────────┘  │
 │                                                                    │
 │  南向通信层                                                        │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │ 02-南向通信 (rs485/hplc/device-trait)                      │  │
+│  │ 02-南向通信 (rs485 / hplc / device-trait /                 │  │
+│  │              mupc-southd / mupc-io)                        │  │
 │  │ Modbus/TTU/逆变器/充电桩 ← ProtocolHandler 注入              │  │
+│  │ 站级南向调度 + PCS 通信与控制（2026-09-26 由 intercore 迁入）│  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                    │
-│  基础设施层                                                        │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────────┐ │
-│  │ 06-安全  │ │ 07-OTA   │ │ 08-Web   │ │ 09-本地运维通信    │ │
-│  │(security)│ │(ota-upd) │ │(web-api) │ │(wireless)         │ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────────────┘ │
+│  人机与基础设施层                                                  │
+│  ┌──────────┐ ┌──────────────────┐ ┌────────────────────┐      │
+│  │ 06-安全  │ │ 07-OTA与可靠性   │ │ 09-本地运维通信    │      │
+│  │(security)│ │(ota-update,      │ │(wireless)          │      │
+│  │framework │ │ system-monitor)  │ │                    │      │
+│  │-only     │ │                  │ │                    │      │
+│  └──────────┘ └──────────────────┘ └────────────────────┘      │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ 12-本地显示终端 (display-proto, local-display) — 触摸式 HMI │  │
+│  │ 六页 IA；写操作须二次确认 + 审计（无登录 / 无 RBAC）        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│  （08-Web 管理与 AI 可视化 **已 SUPERSEDED**：`web-api` crate   │
+│    已删除，Web 访问机制取消，需求并入 12 号本地显示终端）        │
 │                                                                    │
-│  主控进程层                                                        │
+│  主控进程层（**无模块编号**，无对应 PRD）                          │
 │  ┌──────────────────────────────────────────────────────────────┐ │
-│  │ 11-主控进程 (mupc-core-bin) — 14 步依赖顺序初始化，级联清理  │ │
+│  │ 主控进程 / 装配层 (mupc-core-bin, bin `mupcd`)                │ │
+│  │ 14 步依赖顺序初始化，级联清理                                 │ │
 │  └──────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 1.2 Crate 映射
 
-| 模块 | Crate | 设计文档 |
+| 模块（编号 = PRD 文件编号） | Crate | 设计文档 |
 |------|-------|---------|
 | 01-通信网关 | gateway, iec61850-plugin, mqtt-plugin | [01-MUPC-通信网关-设计文档.md](modules/01-MUPC-通信网关-设计文档.md) |
-| 02-南向通信 | rs485-plugin, hplc-plugin, device-trait | [02-MUPC-南向通信-设计文档.md](modules/02-MUPC-南向通信-设计文档.md) |
+| 02-南向通信 | rs485-plugin, hplc-plugin, device-trait, **mupc-southd**, **mupc-io** | [02-MUPC-南向通信-设计文档.md](modules/02-MUPC-南向通信-设计文档.md)（PCS 控制面归属见 §13 / ADR-014·015·016，该章**未获门禁标记**） |
 | 03-数据处理与存储 | data-processing, storage | [03-MUPC-数据处理与存储-设计文档.md](modules/03-MUPC-数据处理与存储-设计文档.md) |
 | 04-策略引擎 | strategy-engine | [04-MUPC-策略引擎-设计文档.md](modules/04-MUPC-策略引擎-设计文档.md) |
-| 05-AI引擎 | ai-engine | [05-MUPC-AI引擎-设计文档.md](modules/05-MUPC-AI引擎-设计文档.md) |
-| 06-安全 | security | [06-MUPC-安全-设计文档.md](modules/06-MUPC-安全-设计文档.md) |
+| 05-AI引擎 | ai-engine（**框架保留、引擎停用**） | [05-MUPC-AI引擎-设计文档.md](modules/05-MUPC-AI引擎-设计文档.md) |
+| 06-安全 | security（**国密只留框架**） | [06-MUPC-安全-设计文档.md](modules/06-MUPC-安全-设计文档.md) |
 | 07-OTA与可靠性 | ota-update, system-monitor | [07-MUPC-OTA与系统可靠性-设计文档.md](modules/07-MUPC-OTA与系统可靠性-设计文档.md) |
-| 08-Web管理 | web-api | [08-MUPC-Web管理与AI可视化-设计文档.md](modules/08-MUPC-Web管理与AI可视化-设计文档.md) |
+| ~~08-Web管理与AI可视化~~ | ~~web-api~~（**crate 已删除**） | [08-MUPC-Web管理与AI可视化-设计文档.md](modules/08-MUPC-Web管理与AI可视化-设计文档.md) **SUPERSEDED** |
 | 09-本地运维通信 | wireless | [09-MUPC-本地运维通信-设计文档.md](modules/09-MUPC-本地运维通信-设计文档.md) |
-| 10-核间通信 | intercore | [10-MUPC-核间通信-设计文档.md](modules/10-MUPC-核间通信-设计文档.md) |
-| 11-主控进程 | mupc-core-bin | — (设计见启动编排器 startup.rs) |
+| 10-核间通信 | intercore（**仅核间 TCP 帧协议**） | [10-MUPC-核间通信-设计文档.md](modules/10-MUPC-核间通信-设计文档.md) |
+| 11-仿真测试环境 | sim-bridge | [11-MUPC-仿真测试环境-设计文档.md](modules/11-MUPC-仿真测试环境-设计文档.md) |
+| 12-本地显示终端 | display-proto, local-display | [12-MUPC-本地显示终端-设计文档.md](modules/12-MUPC-本地显示终端-设计文档.md) + [12-MUPC-本地显示终端-UI设计文档.md](modules/12-MUPC-本地显示终端-UI设计文档.md) |
+| （无编号）主控进程 / 装配层 | mupc-core-bin（bin `mupcd`） | —（编排见 `mupc/crates/mupc-core-bin/src/startup.rs`、`console_host.rs`） |
 
 ### 1.3 跨模块设计决策
 
 | 决策 | 涉及模块 | 说明 |
 |------|---------|------|
-| 消息总线方案 | 01, 03, 05, 08 | Tokio broadcast channel 进程内总线 |
-| 运行模式互斥 | 01, 04, 05, 08 | ModeSelector 互斥保护，远程优先 |
-| 审计日志方案 | 06, 08 | JSONL + SHA-256 哈希链（security crate） |
-| 认证授权 | 06, 08 | Session 登录 + 四角色权限 |
-| **子系统启动编排** | **11, 全部** | **14 步依赖顺序初始化，任意步骤失败时级联清理已启动服务** |
+| 消息总线方案 | 01, 03, 05 | Tokio broadcast channel 进程内总线（`mupc-core::message_bus`；实测使用者含 data-processing / ai-engine）。**原列的 08 随 `web-api` 删除而移除** |
+| 运行模式互斥 | 01, 04, 05 | `ModeSelector` 互斥保护（实现在 `ai-engine::mode_selector`，**AI 引擎停用期间不生效**）；12 号 PRD §0 B5 规定「模式切换=暂停项、本期无界面入口」 |
+| 审计日志方案 | 06, 12 | JSONL + SHA-256 哈希链（security crate）；12 号的 `ConsoleAuditService` 追加 JSONL 并与既有审计链双写（12 号设计 §5.5） |
+| 认证授权 | 06, 12 | **原「Session 登录 + 四角色权限」随 `web-api` crate 删除而不复存在**（`RequireRole` / `X-Session-Id` 实现已不在仓库内）；12 号现行口径 = **无登录 + 审计 + 二次确认**（12 号 PRD §0 B5） |
+| **PCS 控制面归属** | **02, 10** | **PCS 通信与控制整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014）；`intercore` 收敛为纯核间 TCP 帧协议。⚠️ 02 号设计 §13 **未获门禁标记**（待独立设计评审） |
+| **本地显示通道** | **12, 主控进程** | 读通道：`display-proto` 帧 + TCP 回环 `GET /v1/display/latest`；写通道：Axum `/v1/console/*`（`console_host.rs`） |
+| **子系统启动编排** | **主控进程（`mupc-core-bin`，无模块编号）, 全部** | **14 步依赖顺序初始化，任意步骤失败时级联清理已启动服务** |
 | **构建体系** | **全部** | **Cargo/CMake/一键脚本三种构建方式，aarch64 交叉编译** |
 
 ---
@@ -93,6 +112,7 @@
 |------|------|----------|
 | 2026-07-05 | v3.1 | 新增主控进程层；跨模块决策新增子系统编排和构建体系 |
 | 2026-05-29 | v1.0 | 文档体系重构：建立主文档+模块文档二级结构 |
+| 2026-09-27 | v3.2 | 内容与现状对齐：① §1.1 架构图**去掉 08-Web 框**、补 **12 号本地显示终端**、南向层补 `mupc-southd` / `mupc-io`（PCS 通信与控制）；② §1.2 crate 映射表补 12 号（设计 + UI 两份）与新 crate、08 号标 SUPERSEDED、11 号归还仿真测试环境、主控进程退回**不带编号**条目；③ §1.3 跨模块决策：删 08 行、认证授权据实改为「无登录 + 审计 + 二次确认」、新增 PCS 控制面归属与本地显示通道两行 |
 
 ---
 

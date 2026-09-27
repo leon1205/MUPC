@@ -126,7 +126,7 @@ fn role_priority(r: Role) -> u8 {
 
 /// 空块集（`regs` 为空）退化组的**哨兵锚**。取 `usize::MAX`：任何真实块下标（`< regs.len()`）
 /// 都不可能与之相等 ⇒ 「锚 → 组」仍是**单射**，`(station_index, anchor_blk)` 仍可作稳定
-/// `HashMap` 键（设计 §12.4.1 的注；§12.10.1 第 7 项）。
+/// `HashMap` 键（设计 §12.4.1 的注；退化组哨兵见 §12.2.2）。
 pub const EMPTY_GROUP_ANCHOR: usize = usize::MAX;
 
 /// 站内一个「读组」：**有效周期相同**的块合为一组；一组一次轮询读齐组内全部块。
@@ -2504,7 +2504,7 @@ mod tests {
     }
 
     /// 探测器总状态（addr 12 / 探测器区 `+1`）：只 `alarm`(bit12) / `fault`(bit14) 产事件；
-    /// bit0–4 的传感器细分**不产独立事件**（设计取舍，§11.12.1 项 6）。
+    /// bit0–4 的传感器细分**不产独立事件**（设计取舍，见设计 §11.4.7.1）。
     #[tokio::test]
     async fn fire_detector_state_emits_alarm_and_fault_only() {
         let bus = Arc::new(MockBus::new());

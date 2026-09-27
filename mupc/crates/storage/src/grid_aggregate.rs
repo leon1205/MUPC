@@ -1,23 +1,23 @@
 //! 台区总表（`role: meter_grid`）电气量「1 分钟聚合落库」—— **纯逻辑、无 IO**
-//! （03 设计 §9.1 / 03 PRD §11.2，U-69）。
+//! （03 设计 §4.4.4 / 03 PRD §4.1.4，U-69）。
 //!
 //! # 为什么在 `storage`
 //!
 //! 聚合的**输入**（`DataPackage` 的电气量语义）在 `mupc-southd::mapper`，但聚合的**输出形态**
 //! （落库记录：通道名 / 时间戳 / quality）是**存储语义**（03 设计 §4.1.1 / 附录 C 的 `quality`）。
 //! 放本 crate 与「落库记录形态的唯一所有者」一致；且 `core-bin` 已依赖 `storage`，**零新增依赖边**
-//! （§9.1.1 的裁定 B；A 案「在 core-bin 接收闭包内实现」被否，理由是 core-bin 无单测环境 ⇒
+//! （§4.4.4.1 的裁定 B；A 案「在 core-bin 接收闭包内实现」被否，理由是 core-bin 无单测环境 ⇒
 //! 周期边界 / 无采样产行 / 极值这类时序逻辑**无法被单测钉住**）。
 //!
 //! # 唯一落库形态
 //!
 //! 复用 `telemetry` 窄表（**不新建表**）：每个通道 1 行 ⇒ 每周期 **18 均值 + 2 通道 × 2 极值
-//! = 22 行**（§9.1.3）。缺测行 `value = None` ⇒ 库内为**真 NULL**（`telemetry.value` 自本批起
-//! 可空，见 §9.1.4 与 `services.rs` 的 `run_migrations`），**严禁写 0**（PRD R-11.2-E）。
+//! = 22 行**（§4.4.4.3）。缺测行 `value = None` ⇒ 库内为**真 NULL**（`telemetry.value` 自本批起
+//! 可空，见 §4.4.4.4 与 `services.rs` 的 `run_migrations`），**严禁写 0**（PRD R-11.2-E）。
 //!
 //! # 本模块**不认识** `PointQuality`
 //!
-//! `storage` 不依赖 `data-processing`（§9.8 D-8 的依赖边裁定）⇒ 跨域转换（`PointQuality → i32`）
+//! `storage` 不依赖 `data-processing`（§4.2.3 的依赖边裁定）⇒ 跨域转换（`PointQuality → i32`）
 //! 落装配层 `mupc-core-bin/src/quality_map.rs`；从 `DataPackage` 抽取 [`GridSample`] 同样落装配层。
 //! 本模块只拥有 [`Quality`] 枚举（落库记录形态的一部分）。
 //!
@@ -25,19 +25,19 @@
 //!
 //! 记录时间戳 = 聚合周期**起点**，即 `ts_ms - (ts_ms % period_ms)`，必为 `period_ms` 的整数倍
 //! （PRD R-11.2-C）。极值行与均值行**同时间戳**，靠 `metric_name`（`p_total_max` / `p_total_min`）
-//! 区分（§9.1.4）。
+//! 区分（§4.4.4.4）。
 //!
 //! # 不做「回溯补产」
 //!
 //! [`GridAggregator::observe`] 只闭合**当前**周期：`ts_ms` 直接跳到 N 个周期之后时，中间周期
 //! **不补产**（防长断连后一次补出大量行）；跨**重启**的空档同理表现为**时间戳跳变**（可查、可识别），
-//! 而非 `NoData` 行 —— 这是本设计的**已知边界**（§9.1.5 / §9.9 C-2）。
+//! 而非 `NoData` 行 —— 这是本设计的**已知边界**（§4.4.4.5 / technical-debt.md §6.14 U-83）。
 //! [`GridAggregator::tick`] 则**逐周期推进**（无采样周期照样产 [`Quality::NoData`] 行，
 //! **不设补产上限** —— PRD R-11.2-E 的「不得静默少行」优先，上限会制造不可区分的空洞）。
 
 use chrono::{DateTime, Utc};
 
-/// 落库记录的**数据质量**（§9.1.4 / §9.8 D-7）。
+/// 落库记录的**数据质量**（§4.4.4.4 / 附录 C）。
 ///
 /// 与 `mupc-data-processing::latest_values::PointQuality` **一一映射**（同一语义、两处命名）；
 /// 映射函数在装配层（`mupc-core-bin/src/quality_map.rs`，D-8），本 crate **不认识** `PointQuality`。
@@ -68,8 +68,8 @@ impl Quality {
 
 /// 落库通道规格（**表驱动**：增删通道 / 开关极值 = 改本表，不改算法）。
 ///
-/// ⚠️ **与设计 §9.1.2 的两处「表驱动补充字段」**（`max_metric` / `min_metric`）：设计的结构体只列了
-/// `metric`，而极值行的通道名（§9.1.4 明文 `p_total_max` / `p_total_min`）必须是 `&'static str`
+/// ⚠️ **与设计 §4.4.4.2 的两处「表驱动补充字段」**（`max_metric` / `min_metric`）：设计的结构体只列了
+/// `metric`，而极值行的通道名（§4.4.4.4 明文 `p_total_max` / `p_total_min`）必须是 `&'static str`
 /// （[`AggregateRow::metric_name`] 的类型不改成 `String`/`Cow` ⇒ 不引入每行分配）。
 /// 故把两个极值名也放进本表 ⇒ 增删极值通道仍然**只改本表、不改算法**，与设计意图一致。
 pub struct ChannelSpec {
@@ -90,7 +90,7 @@ pub struct ChannelSpec {
 /// 一个采样点（core-bin 从 `DataPackage` 抽取后传入；**已换算工程值**）。
 ///
 /// `None` = 不可得（**严禁以 0 顶替**，PRD R-11.2-E）。**缺相量块** ⇒ 全部分相通道 `None`；
-/// 顶层缺块 ⇒ `p_total` / `q_total` 为 `None`（§9.6 末段）。
+/// 顶层缺块 ⇒ `p_total` / `q_total` 为 `None`（§7.3.1 末段）。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GridSample {
     /// 三相电压（V）
@@ -189,14 +189,14 @@ fn pick_q_total(s: &GridSample) -> Option<f64> {
     s.q_total
 }
 
-/// 落库通道清单（§9.1.3 的表驱动形态）：**18 均值通道 + 2 通道极值 = 22 行/周期**。
+/// 落库通道清单（§4.4.4.3 的表驱动形态）：**18 均值通道 + 2 通道极值 = 22 行/周期**。
 ///
 /// | 组 | 通道 |
 /// |----|------|
 /// | 电压 / 电流 / 分相有功 / 分相无功 / 分相功率因数 | `u_a..u_c` `i_a..i_c` `p_a..p_c` `q_a..q_c` `pf_a..pf_c`（15） |
 /// | 总 | `p_total`（+max/min）`q_total`（+max/min）`pf_total`（3） |
 ///
-/// **不落**（§9.1.3 / §9.9 Q-4/Q-5）：频率（点表无频率寄存器，mapper 恒 `50.0` 常量 ⇒ 常量入库
+/// **不落**（§4.4.4.3 / technical-debt.md §6.14 U-84）：频率（点表无频率寄存器，mapper 恒 `50.0` 常量 ⇒ 常量入库
 /// 会污染统计）、视在功率 S（无点表来源）、电能（进/出，点表无电能块）。**不得**为凑维度造数据。
 pub const CHANNELS: &[ChannelSpec] = &[
     ChannelSpec {
@@ -367,7 +367,7 @@ impl PeriodAcc {
     }
 
     /// 喂入一个样本：仅对**该通道取数成功**的通道累加 ⇒ 均值分母是**本通道有效采样数**
-    /// （不是周期总采样数，§9.1.4「部分缺测」行）。
+    /// （不是周期总采样数，§4.4.4.4「部分缺测」行）。
     fn feed(&mut self, specs: &[ChannelSpec], s: &GridSample) {
         for (i, spec) in specs.iter().enumerate() {
             let Some(v) = (spec.pick)(s) else { continue };
@@ -414,7 +414,7 @@ impl GridAggregator {
 
     /// 喂入一个采样：若跨过周期边界，返回**已闭合周期**的全部行（0 或 1 个周期）。
     /// ⚠️ **只闭合、不回溯**：`ts_ms` 直接跳到 N 个周期之后时，中间周期**不补产**
-    /// （防长断连后一次补出大量行；口径见 §9.1.5）。
+    /// （防长断连后一次补出大量行；口径见 §4.4.4.5）。
     ///
     /// 迟到样本（所属周期**已闭合**）直接丢弃：设计未要求乱序重排，且重开已闭合周期会
     /// 产**第二条同时间戳**的周期记录（与「一个周期恰有 N 条记录」的口径冲突）。
@@ -458,7 +458,7 @@ impl GridAggregator {
     /// 补齐这 N 个周期各 22 行 `NoData` ——「不得静默少行」优先于「省行数」。
     ///
     /// 无锚点（启动后尚未收到任何样本、也尚未 tick 过）时**只锚定当前周期、不产行**：
-    /// 若在此**回溯**补产，「跨重启空档」就会变成一大堆 `NoData` 行，与 §9.1.5 的
+    /// 若在此**回溯**补产，「跨重启空档」就会变成一大堆 `NoData` 行，与 §4.4.4.5 的
     /// 「重启后从当前周期开始、空档表现为时间戳跳变」相反。
     pub fn tick(&mut self, now_ms: u64) -> Vec<AggregateRow> {
         if self.cur.is_none() {
@@ -488,7 +488,7 @@ impl GridAggregator {
     ///
     /// **无未闭合周期时无产出**（`cur == None`：进程从未采到样本，或刚 flush 过）——
     /// 不得凭空锚一个周期出来产行：那既是「造行」（没有任何采集事实），也会让「重启后不补产」
-    /// （§9.1.5）在退出路径上被绕过。`now_ms` 只入日志（退出时刻，供排障对时间轴）。
+    /// （§4.4.4.5）在退出路径上被绕过。`now_ms` 只入日志（退出时刻，供排障对时间轴）。
     pub fn flush(&mut self, now_ms: u64) -> Vec<AggregateRow> {
         match self.cur.as_ref().map(|a| a.start_ms) {
             None => {
@@ -507,7 +507,7 @@ impl GridAggregator {
         self.cur.as_ref().map(|a| a.start_ms)
     }
 
-    /// 每周期产出行数（18 均值 + 2×2 极值 = 22，§9.1.3）。由表算出，不写死常量。
+    /// 每周期产出行数（18 均值 + 2×2 极值 = 22，§4.4.4.3）。由表算出，不写死常量。
     pub fn rows_per_period(&self) -> usize {
         self.specs
             .iter()
@@ -549,7 +549,7 @@ impl GridAggregator {
                 quality,
             });
             if spec.extremes {
-                // 极值行与均值行**同时间戳**（§9.1.4），仅 `metric_name` 不同。
+                // 极值行与均值行**同时间戳**（§4.4.4.4），仅 `metric_name` 不同。
                 let (max_name, min_name) = (
                     spec.max_metric
                         .expect("extremes=true 的通道必须给 max_metric"),
@@ -633,7 +633,7 @@ mod tests {
             "u_a", "u_b", "u_c", "i_a", "i_b", "i_c", "p_a", "p_b", "p_c", "q_a", "q_b", "q_c",
             "pf_a", "pf_b", "pf_c", "p_total", "q_total", "pf_total",
         ];
-        assert_eq!(names, expected.to_vec(), "通道名集合与设计 §9.1.3 逐条一致");
+        assert_eq!(names, expected.to_vec(), "通道名集合与设计 §4.4.4.3 逐条一致");
         // 极值只覆盖 p_total / q_total（Q-2 裁定 (b)；频率因「无源」被排除）。
         let extreme_bases: Vec<&str> = CHANNELS
             .iter()
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(row(&rows, "i_a").quality, Quality::NoData);
     }
 
-    /// **§9.1.5 断连**：长断连期间 tick 逐周期补齐（**不设上限**），时间戳严格连续。
+    /// **§4.4.4.5 断连**：长断连期间 tick 逐周期补齐（**不设上限**），时间戳严格连续。
     #[test]
     fn long_disconnect_tick_backfills_every_period_with_nodata() {
         let mut agg = GridAggregator::new(60_000);
@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             30 * 22,
-            "30 周期 × 22 行 = 660 行（§9.1.5 的容量口径）"
+            "30 周期 × 22 行 = 660 行（§4.4.4.5 的容量口径）"
         );
         let mut starts: Vec<i64> = rows
             .iter()
@@ -797,7 +797,7 @@ mod tests {
         assert!(rows.iter().all(|r| r.value.is_none()));
     }
 
-    /// **§9.1.5 跨重启**：重启后从**当前**周期开始，不回溯补产历史空档
+    /// **§4.4.4.5 跨重启**：重启后从**当前**周期开始，不回溯补产历史空档
     /// （空档表现为时间戳跳变，而非 `NoData` 行）。
     #[test]
     fn restart_does_not_backfill_gap_with_nodata_rows() {
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(rows[0].timestamp.timestamp_millis(), boot_ms as i64);
     }
 
-    /// **§9.1.5 观察跨多个周期/迟到样本**：`observe` 只闭合当前周期，不补中间周期；
+    /// **§4.4.4.5 观察跨多个周期/迟到样本**：`observe` 只闭合当前周期，不补中间周期；
     /// 已闭合周期的迟到样本被丢弃（不重开、不产第二条同时间戳记录）。
     #[test]
     fn observe_closes_only_current_period_and_drops_late_samples() {

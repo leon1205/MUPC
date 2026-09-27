@@ -117,6 +117,8 @@ mupc/crates/security/                  ← security crate（所有安全功能�
 | 许可证 | Apache-2.0 / MIT |
 | Feature 开关 | `default = ["real_gmsm"]`；`fake_gmsm` = 使用 ring 模拟（仅 CI/开发） |
 
+> **⚠️ 版本订正（2026-09-27）**：上表「gmsm 0.14」是**选定目标版本**。**实际依赖为 `gmsm 0.1.0`**（见 `mupc/crates/security/Cargo.toml`），`0.14` 上游尚未发布 —— 能力缺口与升级路线见 **§2.12**，**0.1.0 实测可用 API 见 §2.10**。读者勿据上表推断生产可直接使用 0.14 的 sign / verify / GCM / HKDF / ECDH / x509。
+
 ### 2.2 Cargo 依赖配置
 
 ```toml
@@ -1871,6 +1873,8 @@ mupc/crates/web-api/
 | 备选 | ring（模拟）、GmSSL C FFI、自研 |
 | 理由 | 纯 Rust、无外部 C 依赖、支持 SM2/SM3/SM4/x509、Apache-2.0/MIT 许可 |
 | 状态 | 已采纳 |
+
+> **⚠️ 注（2026-09-27）**：本条「使用 gmsm 0.14」中的 **0.14 是选定目标版本**；落地时**实际取 0.1.0**，能力缺口见 §2.12、实测可用 API 见 §2.10。选型结论（用 gmsm 而非 GmSSL C FFI / 自研）不受影响。
 
 ### ADR-002：安全启动方案 — U-Boot Verified Boot
 

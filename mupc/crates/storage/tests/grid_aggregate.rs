@@ -1,9 +1,9 @@
-//! 总表电气量「1 分钟聚合落库」的**集成/库内**验收（03 设计 §9.1 / §9.7；PRD §11.2 / §11.7.1，U-69）。
+//! 总表电气量「1 分钟聚合落库」的**集成/库内**验收（03 设计 §4.4.4 / §9；PRD §4.1.4 / §9.3，U-69）。
 //!
 //! 纯逻辑单测（GRD-02/03/05 表断言、断连/重启/flush 等）在 `src/grid_aggregate.rs` 的
 //! `#[cfg(test)] mod tests`；**本文件只放需要真库的断言**（GRD-01/04/05 库内/06/09、STG-05 结构）。
 //!
-//! `telemetry.value` 自 03 设计 §9.1.4 起**可空**：缺测行落**真 NULL**（不是 0），
+//! `telemetry.value` 自 03 设计 §4.4.4.4 起**可空**：缺测行落**真 NULL**（不是 0），
 //! 与「真 0 值」（`value = 0.0` + `quality = 0`）在库内可区分 —— 这正是 PRD R-11.2-E 的机械判据。
 
 use mupc_storage::grid_aggregate::{GridAggregator, GridSample, Quality, CHANNELS};
@@ -237,7 +237,7 @@ async fn grd05_persisted_channel_set_equals_table_and_missing_is_nodata() {
 /// 下降 98.3% ≥ 95%），不引入墙钟依赖。实机外推项留给联调。
 #[test]
 fn grd06_row_count_reduction_is_at_least_95_percent() {
-    let per_point_rows_per_minute = 21 * 60; // 21 通道 × 60 次/分钟（PRD §11.2-F 口径）
+    let per_point_rows_per_minute = 21 * 60; // 21 通道 × 60 次/分钟（PRD §4.1.4 R-11.2-F 口径）
     let aggregated_rows_per_minute = GridAggregator::new(60_000).rows_per_period();
     assert_eq!(aggregated_rows_per_minute, 22);
     let drop = 1.0 - (aggregated_rows_per_minute as f64) / (per_point_rows_per_minute as f64);
@@ -351,7 +351,7 @@ async fn grd09_value_nullable_migration_is_idempotent() {
         "可空化重建后 AUTOINCREMENT 序列必须接着既有最大 id（不得从 1 重来）"
     );
 
-    // ③ 两个索引都在（03 设计 §9.1.4 勘误 ②：只重建一个会让 device_id+timestamp 路径丢索引）
+    // ③ 两个索引都在（03 设计 §4.4.4.4 勘误 ②：只重建一个会让 device_id+timestamp 路径丢索引）
     let idx: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'telemetry'
          AND name LIKE 'idx_%' ORDER BY name",
@@ -375,7 +375,7 @@ async fn grd09_value_nullable_migration_is_idempotent() {
 
 /// **GRD-09b**：老库**行已全被清空**时，可空化重建后的 AUTOINCREMENT 序列**仍不得倒退**。
 ///
-/// 这正是 §9.1.4 那条"序列不倒退"断言的**边界**（T15/T16 评审残留②）：`RENAME` + 重建
+/// 这正是 §4.4.4.4 那条"序列不倒退"断言的**边界**（T15/T16 评审残留②）：`RENAME` + 重建
 /// 会把 `sqlite_sequence` 一并带走，而旧表无行可搬 ⇒ 若不显式恢复序列，新表 id 会从 1 重发。
 /// 本用例先删空老表再迁移，插一行断言 id > 旧最大 id ⇒ **无"取旧序列并单调恢复"的实现必红**。
 #[tokio::test]
@@ -442,7 +442,7 @@ async fn value_notnull(pool: &SqlitePool) -> i64 {
 }
 
 /// **STG-06**：`storage:` 段**不进 DB** —— 库里没有为此新增表 / 覆写项，聚合记录仍落既有
-/// `telemetry` 窄表（靠 `device_id` 区分，§9.1.4「不新建表、不加迁移」）。
+/// `telemetry` 窄表（靠 `device_id` 区分，§4.4.4.4「不新建表、不加迁移」）。
 #[tokio::test]
 async fn stg06_storage_section_creates_no_new_table_or_db_override() {
     let (pool, _) = setup().await;
@@ -506,10 +506,10 @@ async fn stg05_commit_tempo_and_record_granularity_are_independent() {
     let svc_src = include_str!("../src/services.rs");
     assert!(
         !agg_src.contains("WriteBuffer"),
-        "聚合器不得引用提交节拍类型（两量正交由结构保证，03 设计 §9.2.2 末）"
+        "聚合器不得引用提交节拍类型（两量正交由结构保证，03 设计 §4.4.2.2 末）"
     );
     assert!(
         !svc_src.contains("GridAggregator"),
-        "提交缓冲不得引用聚合器（两量正交由结构保证，03 设计 §9.2.2 末）"
+        "提交缓冲不得引用聚合器（两量正交由结构保证，03 设计 §4.4.2.2 末）"
     );
 }
