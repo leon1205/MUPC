@@ -59,8 +59,13 @@ const GENESIS_SEED: &[u8] = b"MUPC_AUDIT_GENESIS_SEED_V1";
 /// 未设置 / 格式非法 ⇒ **显式降级**（不 panic、不静默装成已锚定）。
 pub const AUDIT_CHAIN_KEY_ENV: &str = "MUPC_AUDIT_CHAIN_KEY";
 
-/// 链头/清理水位元数据文件名（扩展名 `.json` ⇒ `list_audit_files` 不会把它当审计日志）。
-const CHAIN_META_FILENAME: &str = "audit_chain.meta.json";
+/// 链头/清理水位元数据文件名。
+///
+/// ⚠️ **刻意不用 `audit_` 前缀**：多个消费方（如 `console_audit.rs` 的用例与装配）按
+/// `audit_` **前缀**识别"哈希链当日文件"，本文件若叫 `audit_chain.meta.json` 就会被误计入
+/// （实测把 `intent_goes_to_the_hash_chain_and_outcome_to_the_console_jsonl` 打红）。
+/// 用连字符后既不属于 `audit_*` 前缀，也不匹配 `console-audit-*`。
+const CHAIN_META_FILENAME: &str = "audit-chain-meta.json";
 
 /// 链头与清理水位（`audit_chain.meta.json`）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1260,8 +1265,19 @@ mod tests {
         drop(logger);
 
         // 篡改日志文件
-        let mut files = fs::read_dir(log_dir).unwrap();
-        let first_file = files.next().unwrap().unwrap().path();
+        //
+        // ⚠️ 必须**显式挑**审计日志文件：审计目录里除 `audit_YYYY-MM-DD.jsonl` 外还有
+        // 链头元数据（[`CHAIN_META_FILENAME`]）。原先取 `read_dir().next()`（目录项顺序未定义）
+        // ⇒ 可能读到元数据文件、篡改变成空操作，用例随即失去判别力。
+        let files = fs::read_dir(log_dir).unwrap();
+        let first_file = files
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                n.starts_with("audit_") && n.ends_with(".jsonl")
+            })
+            .expect("审计日志文件必须存在");
         let mut content = fs::read_to_string(&first_file).unwrap();
         content = content.replace("原始消息", "篡改消息");
         let mut f = File::create(&first_file).unwrap();
