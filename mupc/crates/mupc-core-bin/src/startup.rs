@@ -1192,7 +1192,10 @@ impl crate::display_host::CylinderPressureQuery for SouthCylinderPressureQuery {
 
 pub async fn initialize_all(
     core_config: &std::sync::Arc<tokio::sync::RwLock<CoreConfig>>,
-    coord: &ServiceCoordinatorImpl,
+    // **2026-09-27（U-164）**：`&Arc<_>` 而非 `&_` —— 服务级健康巡检任务要**持有**一份克隆
+    // （它用 `update_service_status` 做状态回写，生命周期长于本函数的借用）。
+    // 调用方传 `&Arc<_>` 即可，借用形态对函数体其余部分不变（自动解引用）。
+    coord: &std::sync::Arc<ServiceCoordinatorImpl>,
     process_started_at: std::time::Instant,
     // ── G-2 新增两个入参（都是**数据**，不是全局单例：装配点与单测能注入不同的值）──────
     //
@@ -1628,6 +1631,10 @@ pub async fn initialize_all(
         grid_aggregator.clone(),
         agg_tx.clone(),
     ));
+    // PCS 采集 task 的观测句柄（B-9 的 `TaskWatch`）——**提升到 if 之外**，供本段之后的
+    // 服务级健康巡检读取（U-164：`pcs` 服务"挂了"的唯一可靠信号就是它，见
+    // `crate::service_health` 模块头第 2 条）。未启用 PCS 时为 `None`，巡检**不判** `pcs`。
+    let mut pcs_collect_watch: Option<Arc<mupc_southd::task_watch::TaskWatch>> = None;
     let pcs: Option<Arc<mupc_southd::pcs::PcsHandle>> = if config.south_pcs.enabled {
         tracing::info!(
             "[04′] 初始化 PCS 通道: {} @{} slave={}（采集周期 {} ms）",
@@ -1665,13 +1672,17 @@ pub async fn initialize_all(
         // 一切正常"——而 PCS 采集是联锁 `last_run_state`（停机确认）的唯一数据源。
         // 包装后：panic / 异常返回均落一条 `error!` 并置 `TaskWatch` 标志位；**abort 语义不变**
         // （观测句柄被 abort ⇒ 采集 task 一并 abort，见 `task_watch` 模块头）。
-        // 观测标志暂只写日志（`watch` 保留在本段作用域内，供后续 supervisor/健康面上报）。
-        let pcs_collect_watch = std::sync::Arc::new(mupc_southd::task_watch::TaskWatch::new());
+        // 观测标志**已接线到服务级健康巡检**（2026-09-27 / U-164）：`watch` 不再"只写日志"，
+        // 而是交给本段之后 spawn 的 `service_health_timer` 上报 —— 采集 task 一旦结束/panic
+        // 即被巡检判为 `pcs` 服务不健康并投告警。这正是上面那句"供后续 supervisor/健康面上报"
+        // 所留的落点。
+        let w = std::sync::Arc::new(mupc_southd::task_watch::TaskWatch::new());
         guard.0.push(mupc_southd::task_watch::observe_task(
             "pcs_collect",
             h.spawn_collection_loop(),
-            pcs_collect_watch,
+            w.clone(),
         ));
+        pcs_collect_watch = Some(w);
         coord.register_service("pcs", ServiceStatus::Running);
         // 策略引擎持同一句柄（双参数 / 分相下发 / SOC 回落活读）
         ai_integrator.set_pcs_client(h.clone());
@@ -1682,6 +1693,31 @@ pub async fn initialize_all(
         );
         None
     };
+
+    // ── 服务级健康巡检（07 PRD §4.2.1 / 07 设计 §4.7；U-164 裁定）──
+    // **依赖顺序（必须在本行之前）**：`write_gate`（步骤 3）+ `pcs_collect_watch`（4′ 段）。
+    //
+    // 与 `storage_health_timer` / `flush_timer` / `grid_agg_timer` **同名单**（`producers`
+    // 协作退出）—— 收到停机信号即退出。**不得**改放 abort 名单（协作名单会 join 并确认收工）。
+    //
+    // **为什么在装配层而不是 `system-monitor`**：判据来源（`TaskWatch` / `WriteGate`）都在
+    // 本层可见；让 `system-monitor` 依赖 `mupc-southd` / `mupc_storage` 是**倒向边**
+    // （同 `storage_health.rs` 的依赖方向理由）。
+    //
+    // 探针口径与"为什么大部分服务不设探针"见 `crate::service_health` 模块头 —— 一句话：
+    // **判据 = "子系统挂了"，不是"外部设备/对端不在线"**（后者会恒告警）。
+    producers.0.push((
+        "service_health_timer",
+        crate::service_health::spawn_service_health_timer(
+            coord.clone(),
+            crate::service_health::ServiceHealthProbes {
+                pcs_collect_watch: pcs_collect_watch.clone(),
+                write_gate: write_gate.clone(),
+            },
+            alert_feed.clone(),
+            stop_rx.clone(),
+        ),
+    ));
 
     // ── S2 §12.4 / Task7：安全联锁控制器（io.enabled 时装配）──
     // 依赖：**PCS 通道(4′ 段)** + storage(步骤 3) + alert_feed 均已就绪（Task 10 起停机原语

@@ -25,6 +25,7 @@ mod interlock_ops;
 mod link_counters;
 mod log_service;
 mod quality_map;
+mod service_health;
 mod signal_handler;
 mod startup;
 mod storage_health;
@@ -173,7 +174,11 @@ async fn main() {
     // ── Phase 3: 子系统初始化 ──
     // S-5：`coord` 只被 `&` 借用（`initialize_all(&coord, …)` / `graceful_shutdown(&coord, …)`），
     // `stop_all()` 的接收者是 `&self` ⇒ 不需要 `mut`（`-D warnings` 的 CI 会红）。
-    let coord = ServiceCoordinatorImpl::new();
+    //
+    // **2026-09-27（U-164）**：改用 `Arc` —— 服务级健康巡检任务（`service_health.rs`）要**持有**
+    // 它做状态回写（`update_service_status`），而任务的生命周期长于 `initialize_all` 的借用。
+    // 借用的形态不变（`&Arc<T>` 自动解引用为 `&T`），`Arc` 只是让任务能取一份克隆。
+    let coord = std::sync::Arc::new(ServiceCoordinatorImpl::new());
 
     // 12-显示终端 §4.3.2：`CoreConfig` **内存副本**（`Arc<RwLock<…>>`）是写入生效后的
     // 「进程内唯一权威读源」。**在这里**（Phase 2 tracing 之后、装配之前）就地建立并**移入**
