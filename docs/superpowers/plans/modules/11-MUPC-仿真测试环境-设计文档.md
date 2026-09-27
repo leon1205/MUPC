@@ -160,8 +160,8 @@ pub struct ActionFrame {
     pub length: u16,       // bytes 2..4,  BE, = 64
     pub frame_type: u16,   // bytes 4..6,  BE, = 0x0010 (ControlCmd)
     pub seq_no: u16,       // bytes 6..8,  BE
-    pub p_ref: f64,        // 从 JSON payload 反序列化
-    pub k_droop: f64,      // 从 JSON payload 反序列化
+    pub p_ref: f64,        // 从 ActionPayload 二进制载荷解出（f64 BE）
+    pub k_droop: f64,      // 从 ActionPayload 二进制载荷解出（f64 BE）
     pub crc16: u16,        // CRC-16/MODBUS (BE)
 }
 ```
@@ -174,9 +174,15 @@ pub struct ActionFrame {
 | 2..4 | length | 2B | 帧总长度 = 64 |
 | 4..6 | frame_type | 2B | 0x0010 = ControlCmd |
 | 6..8 | seq_no | 2B | 序列号 |
-| 8..8+N | payload | N B | JSON：`{"p_ref": f64, "k_droop": f64}`（`ControlCmdPayloadV2`） |
-| 8+N..8+N+2 | crc16 | 2B | CRC-16/MODBUS，覆盖 header + payload |
-| 其余 | padding | — | 0x00 补齐到 64 字节 |
+| 8..24 | payload | 16B | `ActionPayload`：`p_ref` f64 BE ‖ `k_droop` f64 BE（**二进制**，非 JSON） |
+| 24..26 | crc16 | 2B | CRC-16/MODBUS（大端），覆盖 magic..payload |
+| 26..64 | padding | — | 0x00 补齐到 64 字节 |
+
+> ⚠️ **2026-09-27 订正**：载荷**不是** JSON `ControlCmdPayloadV2`，而是 intercore 的
+> `ActionPayload`（**16 字节二进制**：`p_ref` f64 BE ‖ `k_droop` f64 BE）。当前实现直接复用
+> intercore 的编解码器 —— `IntercoreFrame::from_bytes()` + `ActionPayload::from_frame()`
+> （`mupc/crates/sim-bridge/src/action_server.rs`），故 CRC 位于 **24..26** 而非载荷末尾。
+> 解析后 `p_ref` clamp 到 ±50、`k_droop` clamp 到 0~30。
 
 ### 3.4 Episode 指标 — `EpisodeMetrics`
 
@@ -410,9 +416,10 @@ impl ActionFrame {
         if frame_type != 0x0010 { return Err(SimBridgeError::UnexpectedFrameType); }
         let seq_no = u16::from_be_bytes([buf[6], buf[7]]);
 
-        // 2. 提取 JSON payload，反序列化 p_ref / k_droop
-        //    payload 位于 header 之后、CRC 之前，实际长度由 length 字段界定
-        let v: ControlCmdPayloadV2 = serde_json::from_slice(payload)?;
+        // 2. 解出 16 字节二进制载荷（`ActionPayload`），取 p_ref / k_droop
+        //    现实现直接复用 intercore 编解码：IntercoreFrame::from_bytes()
+        //    ActionPayload::from_frame()，CRC 位于 24..26
+        let v = ActionPayload::from_frame(&frame)?;
 
         // 3. CRC-16/MODBUS 校验（覆盖 header + payload）
         let computed = crc16_modbus(covered_bytes);
