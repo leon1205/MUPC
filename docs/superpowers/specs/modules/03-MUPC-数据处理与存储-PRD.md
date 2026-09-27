@@ -870,6 +870,8 @@ BATTERY_HISTORY:
 
 ### 4.3 告警日志存储与查询
 
+> **实现载体缺失（2026-09-27 加注，U-74 审查 A-6 / 技术债 U-09）**：本节所述**表结构尚未建立**（`run_migrations` 仅建 telemetry / faults / decisions / events / assets / action_space_config 六表）⇒ **需重立**；`telemetry` 窄表形态已承载电池/外设点，本节需求在该形态下的**归属待定**。**本节原文未改动**，仅作此登记。
+
 #### 4.3.1 功能描述
 
 系统自动记录所有产生的告警事件并持久化存储。
@@ -1029,6 +1031,8 @@ DEVICE_ASSET:
 
 ### 5.2 铭牌参数管理
 
+> **实现载体缺失（2026-09-27 加注，U-74 审查 A-6 / 技术债 U-09）**：本节所述**表结构尚未建立**（`run_migrations` 仅建 telemetry / faults / decisions / events / assets / action_space_config 六表）⇒ **需重立**；`telemetry` 窄表形态已承载电池/外设点，本节需求在该形态下的**归属待定**。**本节原文未改动**，仅作此登记。
+
 #### 5.2.1 功能描述
 
 系统支持对铭牌额定参数进行管理，铭牌参数与设备资产信息关联。
@@ -1115,6 +1119,8 @@ NAME_PLATE_CHANGE_LOG:
 
 ### 5.4 维护记录管理
 
+> **实现载体缺失（2026-09-27 加注，U-74 审查 A-6 / 技术债 U-09）**：本节所述**表结构尚未建立**（`run_migrations` 仅建 telemetry / faults / decisions / events / assets / action_space_config 六表）⇒ **需重立**；`telemetry` 窄表形态已承载电池/外设点，本节需求在该形态下的**归属待定**。**本节原文未改动**，仅作此登记。
+
 #### 5.4.1 功能描述
 
 系统支持对维护记录进行创建和查询操作。
@@ -1152,6 +1158,8 @@ MAINTENANCE_RECORD:
 | AST-MT-05 | 单设备 100 条以内响应时间不超过 300ms | 性能测试：单设备 100 条记录，查询确认响应时间 |
 
 ### 5.5 台账数据北向上送
+
+> **实现载体缺失（2026-09-27 加注，U-74 审查 A-6 / 技术债 U-09）**：本节所述**表结构尚未建立**（`run_migrations` 仅建 telemetry / faults / decisions / events / assets / action_space_config 六表）⇒ **需重立**；`telemetry` 窄表形态已承载电池/外设点，本节需求在该形态下的**归属待定**。**本节原文未改动**，仅作此登记。
 
 #### 5.5.1 功能描述
 

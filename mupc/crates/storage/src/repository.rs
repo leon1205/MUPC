@@ -1,10 +1,62 @@
 use crate::errors::StorageError;
 use crate::models::*;
+use crate::write_gate::WriteGate;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::sync::Arc;
+
+/// **DB 完整性自检**（03 PRD §7.6 / 03 设计 §4.5.5，U-74 审查 A-7）。
+///
+/// 返回 `Ok(())` = 自检通过（`PRAGMA quick_check` 回一行 `ok`）；
+/// `Ok(Some(violations))` = **库已损坏**，`violations` 是 SQLite 给出的第一行违规描述；
+/// `Err(_)` = 自检**本身跑不起来**（连接/权限/库文件不可读）—— 调用方须把它与"损坏"分开
+/// 处置（前者可能是环境问题，后者确定要降级）。
+///
+/// **为什么用 `quick_check` 而不是 `integrity_check`**（03 设计 §4.5.5 的降级链
+/// `integrity_check → quick_check → 降级`）：`integrity_check` 会**全表逐页校验**，在
+/// BECG-3568 的 eMMC 上于启动路径不可接受（可能数十秒）；`quick_check` 做同一套结构性校验
+/// 但**跳过索引与 UNIQUE 约束的逐行比对**，是启动期自检的通行取舍。设计给的链是"先重后轻"，
+/// 本实现**直接取轻档**并在此登记该取舍（未做 `integrity_check` 的一轮）。
+///
+/// **只读**：不写任何东西 ⇒ 可在"疑似损坏"的库上安全调用（自动修复属独立立项，本函数不做）。
+pub async fn integrity_check(pool: &SqlitePool) -> Result<Result<(), String>, StorageError> {
+    let rows = sqlx::query("PRAGMA quick_check")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+    // `quick_check` 正常时恰好返回一行 "ok"；损坏时返回若干行违规描述
+    let mut violations = Vec::new();
+    for row in rows {
+        let text: String = row.try_get(0).unwrap_or_default();
+        if text != "ok" {
+            violations.push(text);
+        }
+    }
+    if violations.is_empty() {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(violations.join("; ")))
+    }
+}
+
+/// 闸门拒绝的统一文案 + 计数（5 个写入口共用，避免五处各写一遍措辞）。
+fn gated_error(gate: &WriteGate, what: &str) -> StorageError {
+    let n = gate.note_rejected_write();
+    let reason = if gate.is_degraded() {
+        "DB 完整性降级（03 设计 §4.5.5）".to_string()
+    } else {
+        format!("磁盘水位 {}（03 PRD §8.1）", gate.disk_level().as_str())
+    };
+    tracing::error!(
+        what,
+        reason = %reason,
+        rejected_writes_total = n,
+        "写入被闸门拒绝（不静默：本条即留证）"
+    );
+    StorageError::WriteGated(format!("{what} 被拒：{reason}（累计被拒 {n} 次）"))
+}
 
 /// 将毫秒时间戳转为 DateTime<Utc>，异常值时记录 ERROR 日志
 fn ts_to_datetime(raw: i64, context: &str) -> DateTime<Utc> {
@@ -114,17 +166,33 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, StorageError> {
 
 pub struct SqliteTelemetryRepo {
     pool: Arc<SqlitePool>,
+    /// 写入闸门（U-74 审查 A-7/B-1）；`None` = 不设闸（既有调用形态 / 同 crate 单测）
+    gate: Option<Arc<WriteGate>>,
 }
 
 impl SqliteTelemetryRepo {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self { pool, gate: None }
+    }
+
+    /// 带闸门构造（生产装配用；闸门决定磁盘高水位 / 完整性降级时**拒写**）
+    pub fn with_gate(pool: Arc<SqlitePool>, gate: Arc<WriteGate>) -> Self {
+        Self {
+            pool,
+            gate: Some(gate),
+        }
     }
 }
 
 #[async_trait]
 impl TelemetryRepository for SqliteTelemetryRepo {
     async fn insert(&self, point: &TelemetryPoint) -> Result<i64, StorageError> {
+        // 闸门（A-7 完整性降级 / B-1 磁盘 ≥98%）：**先拒写、再碰 DB**
+        if let Some(g) = &self.gate {
+            if !g.allows_any_write() {
+                return Err(gated_error(g, "telemetry 写入"));
+            }
+        }
         let row = sqlx::query(
             "INSERT INTO telemetry (device_id, timestamp, metric_name, value, quality)
              VALUES (?, ?, ?, ?, ?) RETURNING id",
@@ -194,17 +262,33 @@ impl TelemetryRepository for SqliteTelemetryRepo {
 
 pub struct SqliteFaultRepo {
     pool: Arc<SqlitePool>,
+    /// 写入闸门（U-74 审查 A-7/B-1）；`None` = 不设闸（既有调用形态 / 同 crate 单测）
+    gate: Option<Arc<WriteGate>>,
 }
 
 impl SqliteFaultRepo {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self { pool, gate: None }
+    }
+
+    /// 带闸门构造（生产装配用；闸门决定磁盘高水位 / 完整性降级时**拒写**）
+    pub fn with_gate(pool: Arc<SqlitePool>, gate: Arc<WriteGate>) -> Self {
+        Self {
+            pool,
+            gate: Some(gate),
+        }
     }
 }
 
 #[async_trait]
 impl FaultRepository for SqliteFaultRepo {
     async fn insert(&self, event: &FaultEvent) -> Result<i64, StorageError> {
+        // 闸门（A-7 完整性降级 / B-1 磁盘 ≥98%）：**先拒写、再碰 DB**
+        if let Some(g) = &self.gate {
+            if !g.allows_any_write() {
+                return Err(gated_error(g, "faults 写入"));
+            }
+        }
         let row = sqlx::query(
             "INSERT INTO faults (device_id, timestamp, fault_type, severity, waveform_path, acknowledged)
              VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
@@ -256,17 +340,33 @@ impl FaultRepository for SqliteFaultRepo {
 
 pub struct SqliteDecisionRepo {
     pool: Arc<SqlitePool>,
+    /// 写入闸门（U-74 审查 A-7/B-1）；`None` = 不设闸（既有调用形态 / 同 crate 单测）
+    gate: Option<Arc<WriteGate>>,
 }
 
 impl SqliteDecisionRepo {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self { pool, gate: None }
+    }
+
+    /// 带闸门构造（生产装配用；闸门决定磁盘高水位 / 完整性降级时**拒写**）
+    pub fn with_gate(pool: Arc<SqlitePool>, gate: Arc<WriteGate>) -> Self {
+        Self {
+            pool,
+            gate: Some(gate),
+        }
     }
 }
 
 #[async_trait]
 impl DecisionRepository for SqliteDecisionRepo {
     async fn insert(&self, record: &AiDecisionRecord) -> Result<i64, StorageError> {
+        // 闸门（A-7 完整性降级 / B-1 磁盘 ≥98%）：**先拒写、再碰 DB**
+        if let Some(g) = &self.gate {
+            if !g.allows_any_write() {
+                return Err(gated_error(g, "decisions 写入"));
+            }
+        }
         let row = sqlx::query(
             "INSERT INTO decisions (timestamp, scene_type, action_json, confidence, model_version)
              VALUES (?, ?, ?, ?, ?) RETURNING id",
@@ -331,17 +431,33 @@ impl DecisionRepository for SqliteDecisionRepo {
 
 pub struct SqliteEventRepo {
     pool: Arc<SqlitePool>,
+    /// 写入闸门（U-74 审查 A-7/B-1）；`None` = 不设闸（既有调用形态 / 同 crate 单测）
+    gate: Option<Arc<WriteGate>>,
 }
 
 impl SqliteEventRepo {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self { pool, gate: None }
+    }
+
+    /// 带闸门构造（生产装配用；闸门决定磁盘高水位 / 完整性降级时**拒写**）
+    pub fn with_gate(pool: Arc<SqlitePool>, gate: Arc<WriteGate>) -> Self {
+        Self {
+            pool,
+            gate: Some(gate),
+        }
     }
 }
 
 #[async_trait]
 impl EventRepository for SqliteEventRepo {
     async fn insert(&self, event: &SystemEvent) -> Result<i64, StorageError> {
+        // 闸门（A-7 完整性降级 / B-1 磁盘 ≥98%）：**先拒写、再碰 DB**
+        if let Some(g) = &self.gate {
+            if !g.allows_any_write() {
+                return Err(gated_error(g, "events 写入"));
+            }
+        }
         let row = sqlx::query(
             "INSERT INTO events (timestamp, event_type, source, message)
              VALUES (?, ?, ?, ?) RETURNING id",
@@ -403,17 +519,33 @@ impl EventRepository for SqliteEventRepo {
 
 pub struct SqliteAssetRepo {
     pool: Arc<SqlitePool>,
+    /// 写入闸门（U-74 审查 A-7/B-1）；`None` = 不设闸（既有调用形态 / 同 crate 单测）
+    gate: Option<Arc<WriteGate>>,
 }
 
 impl SqliteAssetRepo {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self { pool, gate: None }
+    }
+
+    /// 带闸门构造（生产装配用；闸门决定磁盘高水位 / 完整性降级时**拒写**）
+    pub fn with_gate(pool: Arc<SqlitePool>, gate: Arc<WriteGate>) -> Self {
+        Self {
+            pool,
+            gate: Some(gate),
+        }
     }
 }
 
 #[async_trait]
 impl AssetRepository for SqliteAssetRepo {
     async fn upsert(&self, asset: &AssetRecord) -> Result<i64, StorageError> {
+        // 闸门（A-7 完整性降级 / B-1 磁盘 ≥98%）：**先拒写、再碰 DB**
+        if let Some(g) = &self.gate {
+            if !g.allows_any_write() {
+                return Err(gated_error(g, "assets 写入"));
+            }
+        }
         let row = sqlx::query(
             "INSERT INTO assets (device_id, device_type, manufacturer, model, firmware_version, installed_at, last_maintenance)
              VALUES (?, ?, ?, ?, ?, ?, ?)

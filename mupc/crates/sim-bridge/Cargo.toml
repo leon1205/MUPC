@@ -5,6 +5,11 @@ edition = "2021"
 description = "MUPC HIL 仿真桥接代理 — MQTT 发布 + TCP 动作接收 + Python 引擎管理"
 
 [dependencies]
+# 帧编解码与 MUPC 侧**同源**：动作帧复用 intercore 的定长帧 + ActionPayload，
+# 不另立第二套帧格式（11 号设计 §3.3 / 审查 E-01）。intercore 不依赖 sim-bridge ⇒ 无循环。
+mupc-intercore = { path = "../intercore" }
+# 仅为 action_server 的错误码归类（FrameChecksumError → CrcMismatch）
+mupc-common = { path = "../common" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

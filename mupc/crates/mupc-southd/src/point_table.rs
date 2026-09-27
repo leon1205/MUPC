@@ -153,8 +153,30 @@ pub struct PointReg {
     pub sym_src: Option<SymSrc>,
     /// 中文名（事件 message / 展示 / RC-1 逐点核对清单用）
     pub label: &'static str,
+    /// **逐点工程单位**（02 PRD §9.7.5 的单位词表；无单位/无量纲 = 空串）。
+    ///
+    /// **为什么是独立字段而不是从 `label` 尾 token 解析**（U-74 审查 A-1）：点表 `label` 的
+    /// 尾部普遍是**括注**（`"簇组 SOC %（控制输入；点名 \`soc\`）"`）或把单位写在括注**之前**，
+    /// 尾 token 于是落到 `"…（控制输入；点名 \`soc\`）"` 而非 `"%"` ⇒ 上送载荷 `u` 落空串
+    /// （PRD §8.3.3 标 `u` 必填）。单位是**点的属性**，故与 `label` 同源、同表登记，
+    /// 由 [`PointReg::u`] 在行构造处**显式**给出。
+    pub unit: &'static str,
     /// 字级信号（**入表即产事件**；无信号 = 空切片）
     pub signals: &'static [SignalSpec],
+}
+
+impl PointReg {
+    /// 给已构造的行**显式补单位**（本表 510 行里只有约 1/4 有工程单位，让其余行保持
+    /// `unit: ""` 的缺省书写，避免为每行都多写一个空串参数）。
+    ///
+    /// `const fn` + `..self` ⇒ 仍是编译期常量，表本身**不引入运行期成本**。
+    ///
+    /// 单位词表 = 02 PRD §9.7.5 出现者：`V / A / kW / kvar / kVA / kWh / kvarh / Ah / Hz /
+    /// % / ℃ / kPa / ppm / dB/M / kΩ`（`kΩ` 为 §9.7.5 未逐字列出、但点表 `label` 明写的扩展；
+    /// **不收录**计数类 `个` —— 非物理单位，其 `unit` 保持空串并登记于 `docs/technical-debt.md`）。
+    pub const fn u(self, unit: &'static str) -> PointReg {
+        PointReg { unit, ..self }
+    }
 }
 
 // ───────────────────────────── 行构造子（让 510 行的表可读、可核对） ─────────────────────────────
@@ -177,6 +199,7 @@ const fn sc(
         offset,
         sym_src: Some(sym_src),
         label,
+        unit: "",
         signals: &[],
     }
 }
@@ -192,6 +215,7 @@ const fn fire_sig(addr: u16, label: &'static str, signals: &'static [SignalSpec]
         offset: 0.0,
         sym_src: Some(SymSrc::Engineer),
         label,
+        unit: "",
         signals,
     }
 }
@@ -206,6 +230,7 @@ const fn fire(addr: u16, label: &'static str) -> PointReg {
         offset: 0.0,
         sym_src: Some(SymSrc::Engineer),
         label,
+        unit: "",
         signals: &[],
     }
 }
@@ -220,6 +245,7 @@ const fn bit(role: Role, addr: u16, class: BitClass, label: &'static str) -> Poi
         offset: 0.0,
         sym_src: None,
         label,
+        unit: "",
         signals: &[],
     }
 }
@@ -323,12 +349,12 @@ pub const POINT_REGS: &[PointReg] = &[
     // ══════════════ 1) 储能主控模块 BMS（`Role::Battery`，345 点）══════════════
     // ── A. 输入寄存器 FC04：`bms_io`（100–130，31 点）──
     sc(Role::Battery, 100, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇电池簇状态（枚举：0x00 初始/0x01 充电/0x02 放电/0x03 待机/0x08 故障）"),
-    sc(Role::Battery, 101, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许充电最大功率 kW"),
-    sc(Role::Battery, 102, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许放电最大功率 kW"),
-    sc(Role::Battery, 103, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许充电最大电压 V"),
-    sc(Role::Battery, 104, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许放电最大电压 V"),
-    sc(Role::Battery, 105, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许充电最大电流 A"),
-    sc(Role::Battery, 106, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许放电最大电流 A"),
+    sc(Role::Battery, 101, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许充电最大功率 kW").u("kW"),
+    sc(Role::Battery, 102, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许放电最大功率 kW").u("kW"),
+    sc(Role::Battery, 103, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许充电最大电压 V").u("V"),
+    sc(Role::Battery, 104, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许放电最大电压 V").u("V"),
+    sc(Role::Battery, 105, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许充电最大电流 A").u("A"),
+    sc(Role::Battery, 106, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇允许放电最大电流 A").u("A"),
     sc(Role::Battery, 107, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控 DI1（主正继电器反馈）"),
     sc(Role::Battery, 108, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控 DI2（主负继电器反馈）"),
     sc(Role::Battery, 109, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控 DI3（预充继电器反馈）"),
@@ -337,52 +363,52 @@ pub const POINT_REGS: &[PointReg] = &[
     sc(Role::Battery, 112, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控 DI6（预留）"),
     sc(Role::Battery, 113, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控 DI7（预留）"),
     sc(Role::Battery, 114, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控 DI8（预留）"),
-    sc(Role::Battery, 115, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇组电压 V"),
-    sc(Role::Battery, 116, RegFormat::Uint16, 0.1, -1600.0, SymSrc::VendorTypo, "簇组电流 A（无符号编码 + 负偏移平移；Q-20 现场判别）"),
-    sc(Role::Battery, 117, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇组模块温度 ℃"),
-    sc(Role::Battery, 118, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组 SOC %（控制输入；点名 `soc`）"),
-    sc(Role::Battery, 119, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组 SOH %"),
-    sc(Role::Battery, 120, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组绝缘电阻 kΩ"),
-    sc(Role::Battery, 121, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇平均单体电压 V"),
-    sc(Role::Battery, 122, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇平均单体温度 ℃"),
-    sc(Role::Battery, 123, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇最高单体电压 V"),
+    sc(Role::Battery, 115, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇组电压 V").u("V"),
+    sc(Role::Battery, 116, RegFormat::Uint16, 0.1, -1600.0, SymSrc::VendorTypo, "簇组电流 A（无符号编码 + 负偏移平移；Q-20 现场判别）").u("A"),
+    sc(Role::Battery, 117, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇组模块温度 ℃").u("℃"),
+    sc(Role::Battery, 118, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组 SOC %（控制输入；点名 `soc`）").u("%"),
+    sc(Role::Battery, 119, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组 SOH %").u("%"),
+    sc(Role::Battery, 120, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组绝缘电阻 kΩ").u("kΩ"),
+    sc(Role::Battery, 121, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇平均单体电压 V").u("V"),
+    sc(Role::Battery, 122, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇平均单体温度 ℃").u("℃"),
+    sc(Role::Battery, 123, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇最高单体电压 V").u("V"),
     sc(Role::Battery, 124, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇最高单体电压对应点（整字，Q-18）"),
-    sc(Role::Battery, 125, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇最低单体电压 V"),
+    sc(Role::Battery, 125, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇最低单体电压 V").u("V"),
     sc(Role::Battery, 126, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇最低单体电压对应点（整字，Q-18）"),
-    sc(Role::Battery, 127, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最高单体温度 ℃"),
+    sc(Role::Battery, 127, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最高单体温度 ℃").u("℃"),
     sc(Role::Battery, 128, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇最高单体温度对应点（整字，Q-18）"),
-    sc(Role::Battery, 129, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最低单体温度 ℃"),
+    sc(Role::Battery, 129, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最低单体温度 ℃").u("℃"),
     sc(Role::Battery, 130, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇最低单体温度对应点（整字，Q-18）"),
     // ── `bms_energy`（139–157，10 点；140/142/…/156 为 32 位高半字，非点）──
-    sc(Role::Battery, 139, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇累计充电电量 kWh"),
-    sc(Role::Battery, 141, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇累计放电电量 kWh"),
-    sc(Role::Battery, 143, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇单次累计充电电量 kWh"),
-    sc(Role::Battery, 145, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇单次累计放电电量 kWh"),
-    sc(Role::Battery, 147, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇可充电量 kWh"),
-    sc(Role::Battery, 149, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇可放电量 kWh"),
-    sc(Role::Battery, 151, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇最高单体温升 ℃"),
-    sc(Role::Battery, 153, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇最高单体最高电压变化 V"),
-    sc(Role::Battery, 155, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最高单体极柱温度 ℃"),
-    sc(Role::Battery, 157, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最低单体极柱温度 ℃"),
+    sc(Role::Battery, 139, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇累计充电电量 kWh").u("kWh"),
+    sc(Role::Battery, 141, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇累计放电电量 kWh").u("kWh"),
+    sc(Role::Battery, 143, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇单次累计充电电量 kWh").u("kWh"),
+    sc(Role::Battery, 145, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇单次累计放电电量 kWh").u("kWh"),
+    sc(Role::Battery, 147, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇可充电量 kWh").u("kWh"),
+    sc(Role::Battery, 149, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::VendorTypo, "簇可放电量 kWh").u("kWh"),
+    sc(Role::Battery, 151, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇最高单体温升 ℃").u("℃"),
+    sc(Role::Battery, 153, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "簇最高单体最高电压变化 V").u("V"),
+    sc(Role::Battery, 155, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最高单体极柱温度 ℃").u("℃"),
+    sc(Role::Battery, 157, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇最低单体极柱温度 ℃").u("℃"),
     // ── `bms_meta`（181–189，8 点；188 为对应点，不采）──
     sc(Role::Battery, 181, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "主控程序版本号（RC-12 核对依据）"),
     sc(Role::Battery, 182, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "从控数量 个"),
-    sc(Role::Battery, 183, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组 SOE %"),
-    sc(Role::Battery, 184, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "单体温度极差 ℃"),
-    sc(Role::Battery, 185, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "单体电压极差 V"),
-    sc(Role::Battery, 186, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇实时充放电功率 kW（残余风险最高项，Q-20 首日核对）"),
-    sc(Role::Battery, 187, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "PACK 组压最高电压 V"),
-    sc(Role::Battery, 189, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "PACK 组压最低电压 V"),
+    sc(Role::Battery, 183, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇组 SOE %").u("%"),
+    sc(Role::Battery, 184, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "单体温度极差 ℃").u("℃"),
+    sc(Role::Battery, 185, RegFormat::Uint16, 0.001, 0.0, SymSrc::VendorTypo, "单体电压极差 V").u("V"),
+    sc(Role::Battery, 186, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "簇实时充放电功率 kW（残余风险最高项，Q-20 首日核对）").u("kW"),
+    sc(Role::Battery, 187, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "PACK 组压最高电压 V").u("V"),
+    sc(Role::Battery, 189, RegFormat::Uint16, 0.1, 0.0, SymSrc::VendorTypo, "PACK 组压最低电压 V").u("V"),
     // ── `bms_term`（2991–2994，4 点；块级 offset −40）──
-    sc(Role::Battery, 2991, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 001（箱体 T1）℃"),
-    sc(Role::Battery, 2992, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 002（箱体 T2）℃"),
-    sc(Role::Battery, 2993, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 003（箱体 T3）℃"),
-    sc(Role::Battery, 2994, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 004（箱体 T4）℃"),
+    sc(Role::Battery, 2991, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 001（箱体 T1）℃").u("℃"),
+    sc(Role::Battery, 2992, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 002（箱体 T2）℃").u("℃"),
+    sc(Role::Battery, 2993, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 003（箱体 T3）℃").u("℃"),
+    sc(Role::Battery, 2994, RegFormat::Uint16, 1.0, -40.0, SymSrc::VendorTypo, "簇端子温度 004（箱体 T4）℃").u("℃"),
     // ── `bms_cap`（4000–4005，4 点；4001/4003 不采，Q-16 现场裁定）──
-    sc(Role::Battery, 4000, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇累计充电容量 Ah（Q-16：16/32 位未明确）"),
-    sc(Role::Battery, 4002, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇累计放电容量 Ah"),
-    sc(Role::Battery, 4004, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇单次累计充电容量 Ah"),
-    sc(Role::Battery, 4005, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇单次累计放电容量 Ah"),
+    sc(Role::Battery, 4000, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇累计充电容量 Ah（Q-16：16/32 位未明确）").u("Ah"),
+    sc(Role::Battery, 4002, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇累计放电容量 Ah").u("Ah"),
+    sc(Role::Battery, 4004, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇单次累计充电容量 Ah").u("Ah"),
+    sc(Role::Battery, 4005, RegFormat::Uint16, 1.0, 0.0, SymSrc::VendorTypo, "簇单次累计放电容量 Ah").u("Ah"),
     // ── B. 离散输入 FC02：`bms_alarm`（位 200–487，288 点）──
     bit(Role::Battery, 200, BitClass::Reserved, "簇主控通讯失联（保留）"),
     bit(Role::Battery, 201, BitClass::Alarm, "簇端电压欠压·轻"),
@@ -683,117 +709,117 @@ pub const POINT_REGS: &[PointReg] = &[
     sc(Role::Pcs, 1003, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "模块故障告警 4（位图）"),
     sc(Role::Pcs, 1004, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "模块故障告警 5（位图；bit0–7 文档未明确 Q-5）"),
     sc(Role::Pcs, 1005, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "BMS 工作状态（枚举）"),
-    sc(Role::Pcs, 1006, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "BMS 可接受的最大充电电流 A"),
-    sc(Role::Pcs, 1007, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "BMS 可接受的最大放电电流 A"),
-    sc(Role::Pcs, 1008, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "BMS 系统总电压 V（转述值）"),
-    sc(Role::Pcs, 1009, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "BMS 系统总电流 A（方向文档未注明 Q-3）"),
-    sc(Role::Pcs, 1010, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "BMS 系统 SOC %（转述值，不得作控制源 N-1）"),
-    sc(Role::Pcs, 1011, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "直流母线电压 V"),
-    sc(Role::Pcs, 1012, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "中点电压 V"),
+    sc(Role::Pcs, 1006, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "BMS 可接受的最大充电电流 A").u("A"),
+    sc(Role::Pcs, 1007, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "BMS 可接受的最大放电电流 A").u("A"),
+    sc(Role::Pcs, 1008, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "BMS 系统总电压 V（转述值）").u("V"),
+    sc(Role::Pcs, 1009, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "BMS 系统总电流 A（方向文档未注明 Q-3）").u("A"),
+    sc(Role::Pcs, 1010, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "BMS 系统 SOC %（转述值，不得作控制源 N-1）").u("%"),
+    sc(Role::Pcs, 1011, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "直流母线电压 V").u("V"),
+    sc(Role::Pcs, 1012, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "中点电压 V").u("V"),
     sc(Role::Pcs, 1013, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "模块运行状态（枚举；与 intercore 心跳同含义）"),
     sc(Role::Pcs, 1014, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "模块故障状态（枚举）"),
     sc(Role::Pcs, 1015, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "模块降额状态（枚举）"),
     sc(Role::Pcs, 1016, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "并离网状态（枚举）"),
     sc(Role::Pcs, 1017, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "故障告警代码（1–68；**不是**版本号 RC-12）"),
-    sc(Role::Pcs, 1018, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "电网 A 相电压 V"),
-    sc(Role::Pcs, 1019, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "电网 B 相电压 V"),
-    sc(Role::Pcs, 1020, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "电网 C 相电压 V"),
-    sc(Role::Pcs, 1021, RegFormat::Int16, 0.01, 0.0, SymSrc::Vendor, "交流母线频率 Hz"),
-    sc(Role::Pcs, 1022, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出电流 A 相 A"),
-    sc(Role::Pcs, 1023, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出电流 B 相 A"),
-    sc(Role::Pcs, 1024, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出电流 C 相 A"),
-    sc(Role::Pcs, 1025, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出视在功率 A 相 kVA"),
-    sc(Role::Pcs, 1026, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出视在功率 B 相 kVA"),
-    sc(Role::Pcs, 1027, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出视在功率 C 相 kVA"),
-    sc(Role::Pcs, 1028, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "设备总视在功率输出 kVA"),
-    sc(Role::Pcs, 1029, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出有功功率 A 相 kW（正放负充）"),
-    sc(Role::Pcs, 1030, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出有功功率 B 相 kW"),
-    sc(Role::Pcs, 1031, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出有功功率 C 相 kW"),
-    sc(Role::Pcs, 1032, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "设备总有功功率输出 kW"),
-    sc(Role::Pcs, 1033, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出无功功率 A 相 kvar"),
-    sc(Role::Pcs, 1034, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出无功功率 B 相 kvar"),
-    sc(Role::Pcs, 1035, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出无功功率 C 相 kvar"),
-    sc(Role::Pcs, 1036, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "设备总无功功率输出 kvar"),
+    sc(Role::Pcs, 1018, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "电网 A 相电压 V").u("V"),
+    sc(Role::Pcs, 1019, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "电网 B 相电压 V").u("V"),
+    sc(Role::Pcs, 1020, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "电网 C 相电压 V").u("V"),
+    sc(Role::Pcs, 1021, RegFormat::Int16, 0.01, 0.0, SymSrc::Vendor, "交流母线频率 Hz").u("Hz"),
+    sc(Role::Pcs, 1022, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出电流 A 相 A").u("A"),
+    sc(Role::Pcs, 1023, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出电流 B 相 A").u("A"),
+    sc(Role::Pcs, 1024, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出电流 C 相 A").u("A"),
+    sc(Role::Pcs, 1025, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出视在功率 A 相 kVA").u("kVA"),
+    sc(Role::Pcs, 1026, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出视在功率 B 相 kVA").u("kVA"),
+    sc(Role::Pcs, 1027, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出视在功率 C 相 kVA").u("kVA"),
+    sc(Role::Pcs, 1028, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "设备总视在功率输出 kVA").u("kVA"),
+    sc(Role::Pcs, 1029, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出有功功率 A 相 kW（正放负充）").u("kW"),
+    sc(Role::Pcs, 1030, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出有功功率 B 相 kW").u("kW"),
+    sc(Role::Pcs, 1031, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出有功功率 C 相 kW").u("kW"),
+    sc(Role::Pcs, 1032, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "设备总有功功率输出 kW").u("kW"),
+    sc(Role::Pcs, 1033, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出无功功率 A 相 kvar").u("kvar"),
+    sc(Role::Pcs, 1034, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出无功功率 B 相 kvar").u("kvar"),
+    sc(Role::Pcs, 1035, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "输出无功功率 C 相 kvar").u("kvar"),
+    sc(Role::Pcs, 1036, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "设备总无功功率输出 kvar").u("kvar"),
     sc(Role::Pcs, 1037, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "A 相功率因数"),
     sc(Role::Pcs, 1038, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "B 相功率因数"),
     sc(Role::Pcs, 1039, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "C 相功率因数"),
     sc(Role::Pcs, 1040, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "总功率因数"),
-    sc(Role::Pcs, 1041, RegFormat::Int16, 1.0, 0.0, SymSrc::Vendor, "PCS 温度 ℃"),
-    sc(Role::Pcs, 1042, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "交流累计充电电量 kWh（低字在低地址，word_order lo_hi）"),
-    sc(Role::Pcs, 1044, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "交流累计放电电量 kWh（word_order lo_hi）"),
-    sc(Role::Pcs, 1046, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 网侧电压 A 相 V"),
-    sc(Role::Pcs, 1047, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 网侧电压 B 相 V"),
-    sc(Role::Pcs, 1048, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 网侧电压 C 相 V"),
-    sc(Role::Pcs, 1049, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 电网电压幅值 V"),
-    sc(Role::Pcs, 1050, RegFormat::Int16, 0.01, 0.0, SymSrc::Vendor, "STS 电网电压频率 Hz"),
-    sc(Role::Pcs, 1051, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载电流 A 相 A"),
-    sc(Role::Pcs, 1052, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载电流 B 相 A"),
-    sc(Role::Pcs, 1053, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载电流 C 相 A"),
-    sc(Role::Pcs, 1054, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载视在功率 A 相 kVA"),
-    sc(Role::Pcs, 1055, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载视在功率 B 相 kVA"),
-    sc(Role::Pcs, 1056, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载视在功率 C 相 kVA"),
-    sc(Role::Pcs, 1057, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载有功功率 A 相 kW"),
-    sc(Role::Pcs, 1058, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载有功功率 B 相 kW"),
-    sc(Role::Pcs, 1059, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载有功功率 C 相 kW"),
-    sc(Role::Pcs, 1060, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载无功功率 A 相 kvar"),
-    sc(Role::Pcs, 1061, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载无功功率 B 相 kvar"),
-    sc(Role::Pcs, 1062, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载无功功率 C 相 kvar"),
+    sc(Role::Pcs, 1041, RegFormat::Int16, 1.0, 0.0, SymSrc::Vendor, "PCS 温度 ℃").u("℃"),
+    sc(Role::Pcs, 1042, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "交流累计充电电量 kWh（低字在低地址，word_order lo_hi）").u("kWh"),
+    sc(Role::Pcs, 1044, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "交流累计放电电量 kWh（word_order lo_hi）").u("kWh"),
+    sc(Role::Pcs, 1046, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 网侧电压 A 相 V").u("V"),
+    sc(Role::Pcs, 1047, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 网侧电压 B 相 V").u("V"),
+    sc(Role::Pcs, 1048, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 网侧电压 C 相 V").u("V"),
+    sc(Role::Pcs, 1049, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "STS 电网电压幅值 V").u("V"),
+    sc(Role::Pcs, 1050, RegFormat::Int16, 0.01, 0.0, SymSrc::Vendor, "STS 电网电压频率 Hz").u("Hz"),
+    sc(Role::Pcs, 1051, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载电流 A 相 A").u("A"),
+    sc(Role::Pcs, 1052, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载电流 B 相 A").u("A"),
+    sc(Role::Pcs, 1053, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载电流 C 相 A").u("A"),
+    sc(Role::Pcs, 1054, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载视在功率 A 相 kVA").u("kVA"),
+    sc(Role::Pcs, 1055, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载视在功率 B 相 kVA").u("kVA"),
+    sc(Role::Pcs, 1056, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载视在功率 C 相 kVA").u("kVA"),
+    sc(Role::Pcs, 1057, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载有功功率 A 相 kW").u("kW"),
+    sc(Role::Pcs, 1058, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载有功功率 B 相 kW").u("kW"),
+    sc(Role::Pcs, 1059, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载有功功率 C 相 kW").u("kW"),
+    sc(Role::Pcs, 1060, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载无功功率 A 相 kvar").u("kvar"),
+    sc(Role::Pcs, 1061, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载无功功率 B 相 kvar").u("kvar"),
+    sc(Role::Pcs, 1062, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "负载无功功率 C 相 kvar").u("kvar"),
     sc(Role::Pcs, 1063, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "负载功率因数 A 相"),
     sc(Role::Pcs, 1064, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "负载功率因数 B 相"),
     sc(Role::Pcs, 1065, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "负载功率因数 C 相"),
     sc(Role::Pcs, 1066, RegFormat::Uint16, 1.0, 0.0, SymSrc::Vendor, "工作模式判断（枚举）"),
-    sc(Role::Pcs, 1067, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "低压总电流 A"),
-    sc(Role::Pcs, 1068, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "高压总电流 A"),
-    sc(Role::Pcs, 1069, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "低压外部总电压 V"),
-    sc(Role::Pcs, 1070, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "低压总功率 kW"),
-    sc(Role::Pcs, 1071, RegFormat::Int16, 1.0, 0.0, SymSrc::Vendor, "DCDC 温度 ℃"),
-    sc(Role::Pcs, 1072, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "直流累计充电电量 kWh（word_order lo_hi）"),
-    sc(Role::Pcs, 1074, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "直流累计放电电量 kWh（word_order lo_hi）"),
+    sc(Role::Pcs, 1067, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "低压总电流 A").u("A"),
+    sc(Role::Pcs, 1068, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "高压总电流 A").u("A"),
+    sc(Role::Pcs, 1069, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "低压外部总电压 V").u("V"),
+    sc(Role::Pcs, 1070, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "低压总功率 kW").u("kW"),
+    sc(Role::Pcs, 1071, RegFormat::Int16, 1.0, 0.0, SymSrc::Vendor, "DCDC 温度 ℃").u("℃"),
+    sc(Role::Pcs, 1072, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "直流累计充电电量 kWh（word_order lo_hi）").u("kWh"),
+    sc(Role::Pcs, 1074, RegFormat::Int32Scaled, 0.1, 0.0, SymSrc::Vendor, "直流累计放电电量 kWh（word_order lo_hi）").u("kWh"),
 
     // ══════════════ 3) 储能电能表 ADL400（`Role::MeterBatt`，FC03，40 点）══════════════
     // 来源混合（**逐点判定，见 PRD §9.5.3 的逐点来源表**）：
     //   · Vendor    —— 6 个总电能 + 3 个分相电能（原文备注「整形」）、4 字节功率类/PF
     //                  （原文备注「有符号整形」）、不平衡度 0x0093/0x0094（原文备注「整型」）；
     //   · Engineer  —— 其余 2 字节点（电压/电流/频率/线电压/零序/PT/CT），原文**无任何类型字样**。
-    sc(Role::MeterBatt, 0x0000, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前组合有功总电能 kWh"),
-    sc(Role::MeterBatt, 0x000A, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前正向总有功电能 kWh"),
-    sc(Role::MeterBatt, 0x0014, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前反向总有功电能 kWh"),
-    sc(Role::MeterBatt, 0x001E, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前组合无功总电能 kvarh"),
-    sc(Role::MeterBatt, 0x0028, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前正向总无功电能 kvarh"),
-    sc(Role::MeterBatt, 0x0032, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前反向总无功电能 kvarh"),
-    sc(Role::MeterBatt, 0x0061, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "A 相电压 V"),
-    sc(Role::MeterBatt, 0x0062, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "B 相电压 V"),
-    sc(Role::MeterBatt, 0x0063, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "C 相电压 V"),
-    sc(Role::MeterBatt, 0x0064, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "A 相电流 A"),
-    sc(Role::MeterBatt, 0x0065, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "B 相电流 A"),
-    sc(Role::MeterBatt, 0x0066, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "C 相电流 A"),
-    sc(Role::MeterBatt, 0x0077, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "频率 Hz"),
-    sc(Role::MeterBatt, 0x0078, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "A-B 线电压 V"),
-    sc(Role::MeterBatt, 0x0079, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "C-B 线电压 V"),
-    sc(Role::MeterBatt, 0x007A, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "A-C 线电压 V"),
-    sc(Role::MeterBatt, 0x0087, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "A 相正向有功电能 kWh"),
-    sc(Role::MeterBatt, 0x0089, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "B 相正向有功电能 kWh"),
-    sc(Role::MeterBatt, 0x008B, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "C 相正向有功电能 kWh"),
+    sc(Role::MeterBatt, 0x0000, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前组合有功总电能 kWh").u("kWh"),
+    sc(Role::MeterBatt, 0x000A, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前正向总有功电能 kWh").u("kWh"),
+    sc(Role::MeterBatt, 0x0014, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前反向总有功电能 kWh").u("kWh"),
+    sc(Role::MeterBatt, 0x001E, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前组合无功总电能 kvarh").u("kvarh"),
+    sc(Role::MeterBatt, 0x0028, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前正向总无功电能 kvarh").u("kvarh"),
+    sc(Role::MeterBatt, 0x0032, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "当前反向总无功电能 kvarh").u("kvarh"),
+    sc(Role::MeterBatt, 0x0061, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "A 相电压 V").u("V"),
+    sc(Role::MeterBatt, 0x0062, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "B 相电压 V").u("V"),
+    sc(Role::MeterBatt, 0x0063, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "C 相电压 V").u("V"),
+    sc(Role::MeterBatt, 0x0064, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "A 相电流 A").u("A"),
+    sc(Role::MeterBatt, 0x0065, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "B 相电流 A").u("A"),
+    sc(Role::MeterBatt, 0x0066, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "C 相电流 A").u("A"),
+    sc(Role::MeterBatt, 0x0077, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "频率 Hz").u("Hz"),
+    sc(Role::MeterBatt, 0x0078, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "A-B 线电压 V").u("V"),
+    sc(Role::MeterBatt, 0x0079, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "C-B 线电压 V").u("V"),
+    sc(Role::MeterBatt, 0x007A, RegFormat::Uint16, 0.1, 0.0, SymSrc::Engineer, "A-C 线电压 V").u("V"),
+    sc(Role::MeterBatt, 0x0087, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "A 相正向有功电能 kWh").u("kWh"),
+    sc(Role::MeterBatt, 0x0089, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "B 相正向有功电能 kWh").u("kWh"),
+    sc(Role::MeterBatt, 0x008B, RegFormat::Int32Scaled, 0.01, 0.0, SymSrc::Vendor, "C 相正向有功电能 kWh").u("kWh"),
     sc(Role::MeterBatt, 0x008D, RegFormat::Uint16, 1.0, 0.0, SymSrc::Engineer, "电压变比 PT（只读对照，写侧归写 Task）"),
     sc(Role::MeterBatt, 0x008E, RegFormat::Uint16, 1.0, 0.0, SymSrc::Engineer, "电流变比 CT（只读对照）"),
-    sc(Role::MeterBatt, 0x0092, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "零序电流 A（可为负的疑点，同 Q-20 判别）"),
+    sc(Role::MeterBatt, 0x0092, RegFormat::Uint16, 0.01, 0.0, SymSrc::Engineer, "零序电流 A（可为负的疑点，同 Q-20 判别）").u("A"),
     // 0x0093/0x0094：PRD §9.5.3 逐点来源表明确其来源为「**厂方标「整型」**」（0x0093 备注
     // 「整型 单位0.1%」、0x0094 无备注承前）⇒ `Vendor`，**不是**工程判断（§9.5 前言的
     // "工程判断"行 ADL400 清单只列电压/电流/频率/线电压/零序/PT/CT，不含不平衡度）。
-    sc(Role::MeterBatt, 0x0093, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "电压不平衡度 %"),
-    sc(Role::MeterBatt, 0x0094, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "电流不平衡度 %"),
-    sc(Role::MeterBatt, 0x0164, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相有功功率 kW"),
-    sc(Role::MeterBatt, 0x0166, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相有功功率 kW"),
-    sc(Role::MeterBatt, 0x0168, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相有功功率 kW"),
-    sc(Role::MeterBatt, 0x016A, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "总有功功率 kW"),
-    sc(Role::MeterBatt, 0x016C, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相无功功率 kvar"),
-    sc(Role::MeterBatt, 0x016E, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相无功功率 kvar"),
-    sc(Role::MeterBatt, 0x0170, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相无功功率 kvar"),
-    sc(Role::MeterBatt, 0x0172, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "总无功功率 kvar"),
-    sc(Role::MeterBatt, 0x0174, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相视在功率 kVA"),
-    sc(Role::MeterBatt, 0x0176, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相视在功率 kVA"),
-    sc(Role::MeterBatt, 0x0178, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相视在功率 kVA"),
-    sc(Role::MeterBatt, 0x017A, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "总视在功率 kVA"),
+    sc(Role::MeterBatt, 0x0093, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "电压不平衡度 %").u("%"),
+    sc(Role::MeterBatt, 0x0094, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "电流不平衡度 %").u("%"),
+    sc(Role::MeterBatt, 0x0164, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相有功功率 kW").u("kW"),
+    sc(Role::MeterBatt, 0x0166, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相有功功率 kW").u("kW"),
+    sc(Role::MeterBatt, 0x0168, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相有功功率 kW").u("kW"),
+    sc(Role::MeterBatt, 0x016A, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "总有功功率 kW").u("kW"),
+    sc(Role::MeterBatt, 0x016C, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相无功功率 kvar").u("kvar"),
+    sc(Role::MeterBatt, 0x016E, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相无功功率 kvar").u("kvar"),
+    sc(Role::MeterBatt, 0x0170, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相无功功率 kvar").u("kvar"),
+    sc(Role::MeterBatt, 0x0172, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "总无功功率 kvar").u("kvar"),
+    sc(Role::MeterBatt, 0x0174, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "A 相视在功率 kVA").u("kVA"),
+    sc(Role::MeterBatt, 0x0176, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "B 相视在功率 kVA").u("kVA"),
+    sc(Role::MeterBatt, 0x0178, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "C 相视在功率 kVA").u("kVA"),
+    sc(Role::MeterBatt, 0x017A, RegFormat::Int32Scaled, 0.001, 0.0, SymSrc::Vendor, "总视在功率 kVA").u("kVA"),
     sc(Role::MeterBatt, 0x017C, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "A 相功率因数"),
     sc(Role::MeterBatt, 0x017D, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "B 相功率因数"),
     sc(Role::MeterBatt, 0x017E, RegFormat::Int16, 0.001, 0.0, SymSrc::Vendor, "C 相功率因数"),
@@ -803,7 +829,7 @@ pub const POINT_REGS: &[PointReg] = &[
     // 全部 16 位点为 `uint16`，来源 = **工程判断**（厂方无类型列，取值范围全非负，§9.5.4）。
     // ── `fire_sys`（4–16，13 点；含第 1 只探测器 11–16）──
     fire_sig(4, "系统状态（位图；bit14 主电故障/bit13 备电故障/bit11 驱动电路/bit10 压力传感器/bit9 电磁阀/bit8 喷洒标记）", &SIG_FIRE_SYS_STATUS),
-    fire(5, "钢瓶气压 kPa（部分产品无此功能：恒 0 不得判异常，**不产事件**）"),
+    fire(5, "钢瓶气压 kPa（部分产品无此功能：恒 0 不得判异常，**不产事件**）").u("kPa"),
     fire_sig(6, "烟感状态（位图；bit1 复合探测器触发/bit0 干接点触发；bit2 预留不产事件）", &SIG_FIRE_SMOKE),
     fire_sig(7, "温感状态（位图；bit1 复合/bit0 干接点；bit2 预留不产事件）", &SIG_FIRE_TEMP),
     fire_sig(8, "可燃状态（位图；bit1 复合/bit0 干接点；bit2 预留不产事件）", &SIG_FIRE_COMBUSTIBLE),
@@ -812,23 +838,23 @@ pub const POINT_REGS: &[PointReg] = &[
     fire(11, "探测器 1：地址（1–254，Q-9 地址序核对源）"),
     fire_sig(12, "探测器 1：状态（位图；bit12 报警总状态/bit14 故障总状态）", &SIG_FIRE_DETECTOR),
     fire(13, "探测器 1：数据 1（整字；高字节烟雾 0.1 dB/M、低字节温度 raw−55 ℃，拆解在展示层 G-6）"),
-    fire(14, "探测器 1：数据 2 CO 浓度 ppm"),
-    fire(15, "探测器 1：数据 3 VOC 浓度 ppm"),
-    fire(16, "探测器 1：数据 4 H2 浓度 ppm"),
+    fire(14, "探测器 1：数据 2 CO 浓度 ppm").u("ppm"),
+    fire(15, "探测器 1：数据 3 VOC 浓度 ppm").u("ppm"),
+    fire(16, "探测器 1：数据 4 H2 浓度 ppm").u("ppm"),
     // ── `fire_det` 组内语义模板（6 条；运行期按 `(addr − 17) % 6` 取，n=20 时展开 114 点）──
     // 第 n 只探测器首地址 = (n−1)*6+11（PRD §9.5.4 块寻址规则；探测器按地址号升序排列）。
     fire(17, "探测器 n：地址（模板 +0；Q-9 地址序核对源）"),
     fire_sig(18, "探测器 n：状态（模板 +1；bit12 报警总状态/bit14 故障总状态）", &SIG_FIRE_DETECTOR),
     fire(19, "探测器 n：数据 1（模板 +2；整字，拆解在展示层 G-6，**不产事件**）"),
-    fire(20, "探测器 n：数据 2 CO 浓度 ppm（模板 +3）"),
-    fire(21, "探测器 n：数据 3 VOC 浓度 ppm（模板 +4）"),
-    fire(22, "探测器 n：数据 4 H2 浓度 ppm（模板 +5）"),
+    fire(20, "探测器 n：数据 2 CO 浓度 ppm（模板 +3）").u("ppm"),
+    fire(21, "探测器 n：数据 3 VOC 浓度 ppm（模板 +4）").u("ppm"),
+    fire(22, "探测器 n：数据 4 H2 浓度 ppm（模板 +5）").u("ppm"),
 
     // ══════════════ 5) 风冷空调机组（`Role::Hvac`，34 点）══════════════
     // FC04 温湿度：`format` 逐字照抄厂方（`16位有符号`/`16位无符号`）⇒ 来源 = Vendor。
-    sc(Role::Hvac, 0, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "柜内测量温度 ℃（厂方明写 16 位有符号）"),
-    sc(Role::Hvac, 2, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "内盘管测量温度 ℃（文档自相矛盾 Q-10，投运须比对）"),
-    sc(Role::Hvac, 3, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "柜内测量湿度 %（厂方明写 16 位无符号）"),
+    sc(Role::Hvac, 0, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "柜内测量温度 ℃（厂方明写 16 位有符号）").u("℃"),
+    sc(Role::Hvac, 2, RegFormat::Int16, 0.1, 0.0, SymSrc::Vendor, "内盘管测量温度 ℃（文档自相矛盾 Q-10，投运须比对）").u("℃"),
+    sc(Role::Hvac, 3, RegFormat::Uint16, 0.1, 0.0, SymSrc::Vendor, "柜内测量湿度 %（厂方明写 16 位无符号）").u("%"),
     // FC02 位块 `hvac_di`（位 0–30）：`Alarm` = 告警/故障类；`State` = 运行状态与输出；`Reserved` = 保留位。
     bit(Role::Hvac, 0, BitClass::State, "内风机（0 停止/1 运行）"),
     bit(Role::Hvac, 1, BitClass::State, "应急风机（0 停止/1 运行）"),
@@ -1079,14 +1105,15 @@ const EXPLICIT_NAMES: &[(Role, &str, u16)] = &[
     (Role::Fire, "fire_det_count", 10),
 ];
 
-/// 点位名 → 中文名（事件 message 补名用；查不到 → `None`，调用方用原名）。
+/// 点名 → **登记行**（`label` / `unit` 的**唯一**反查实现，防两处各写一份解析规则漂移）。
 ///
-/// 例：`label(Role::Battery, "bms_alarm_225")` = `"簇一级告警"`（点名序号 225 = 位地址 424，
-/// **勿**与位地址 225「簇 SOC 低·轻」（点名 `bms_alarm_26`）混淆，§11.7.2 第 4 条）。
-pub fn label(role: Role, metric: &str) -> Option<&'static str> {
+/// 两级：① [`EXPLICIT_NAMES`] 的跨文档契约点（显式 `name` 优先，§9.4.2.2）；
+/// ② [`BLOCK_SPANS`] 的**位置式**命名 `<块名>_<块内偏移 + 1>`。
+/// 查不到（未登记点名 / 越块范围）→ `None`，调用方按"无登记"处理，**不臆造**。
+pub fn resolve(role: Role, metric: &str) -> Option<&'static PointReg> {
     for (r, m, addr) in EXPLICIT_NAMES {
         if *r == role && *m == metric {
-            return lookup(role, *addr).map(|row| row.label);
+            return lookup(role, *addr);
         }
     }
     for b in BLOCK_SPANS {
@@ -1110,10 +1137,28 @@ pub fn label(role: Role, metric: &str) -> Option<&'static str> {
             continue;
         }
         if let Some(row) = lookup_in(role, b.space, addr) {
-            return Some(row.label);
+            return Some(row);
         }
     }
     None
+}
+
+/// 点位名 → 中文名（事件 message 补名用；查不到 → `None`，调用方用原名）。
+///
+/// 例：`label(Role::Battery, "bms_alarm_225")` = `"簇一级告警"`（点名序号 225 = 位地址 424，
+/// **勿**与位地址 225「簇 SOC 低·轻」（点名 `bms_alarm_26`）混淆，§11.7.2 第 4 条）。
+pub fn label(role: Role, metric: &str) -> Option<&'static str> {
+    resolve(role, metric).map(|row| row.label)
+}
+
+/// 点位名 → **工程单位**（[`PointReg::unit`] 的反查；查不到 / 无单位 → `""`）。
+///
+/// **口径**：`""` = "本点无工程单位或无量纲"（如枚举、位图、PF、位置编号），**不是**
+/// "查不到所以空着" —— 两者在本表里都归 `""`，且**都不臆造**单位（01 PRD §8.3.3 的 `u`
+/// 字段用空串如实表达）。位点的 `"bool"` **不由本函数**给出（那是上送形态而非点表属性），
+/// 在 `mupc-core-bin::uplink::unit_of` 按 `UplinkKind::Bit` 处理。
+pub fn unit(role: Role, metric: &str) -> &'static str {
+    resolve(role, metric).map_or("", |row| row.unit)
 }
 
 #[cfg(test)]
@@ -1212,6 +1257,56 @@ mod tests {
             label(Role::Fire, "fire_sys_7"),
             label(Role::Fire, "fire_det_count"),
             "位置式别名与契约名指向同一行"
+        );
+    }
+
+    /// A-1：`unit` 是**点的显式属性**（不是从 `label` 尾 token 现算）——逐点反查与登记行一致。
+    ///
+    /// **改坏实现即红**：若把 `unit()` 退回 `label` 尾 token 白名单，则
+    /// `unit(Role::Battery, "soc")` 落空串（label 末尾是括注）⇒ 首条断言失败。
+    #[test]
+    fn unit_is_explicit_per_point_not_derived_from_label_tail() {
+        // ① 单位写在括注**之前**（尾 token 规则够不着）
+        assert_eq!(unit(Role::Battery, "soc"), "%");
+        assert_eq!(unit(Role::Battery, "bms_io_17"), "A"); // 簇组电流
+        assert_eq!(unit(Role::Battery, "bms_meta_6"), "kW"); // 实时充放电功率
+        // ② 单位写在括注**之后**
+        assert_eq!(unit(Role::Battery, "bms_term_1"), "℃");
+        // ③ 白名单曾漏收录的单位（点表 label 明写 `kΩ`）
+        assert_eq!(unit(Role::Battery, "bms_io_21"), "kΩ");
+        // ④ 位置式（模板）命名与显式 name 走**同一条**反查（`resolve` 是唯一实现）
+        assert_eq!(unit(Role::Fire, "fire_det_4"), "ppm");
+        assert_eq!(unit(Role::Fire, "fire_sys_2"), "kPa");
+        // ⑤ 无量纲 / 无单位 / 计数 ⇒ 空串（不臆造）
+        assert_eq!(unit(Role::Battery, "bms_io_1"), "", "簇状态枚举");
+        assert_eq!(unit(Role::Battery, "bms_io_25"), "", "位置编号（对应点）");
+        assert_eq!(unit(Role::Battery, "bms_meta_2"), "", "计数（非物理单位）");
+        assert_eq!(unit(Role::Hvac, "hvac_di_1"), "", "位点无工程单位");
+        // ⑥ 查不到的点名 ⇒ 空串（与 `label` 的 `None` 口径区分：`unit` 只返回字符串）
+        assert_eq!(unit(Role::Fire, "no_such_metric"), "");
+    }
+
+    /// A-1 表自洽：**位行的 `unit` 必须为空**（`bool` 是上送形态、不是点表属性）；有单位的行
+    /// 必须是非位标量。防"把单位挂到位行上"这类静默不一致。
+    #[test]
+    fn only_scalar_rows_carry_units() {
+        let mut with_unit = 0usize;
+        for row in POINT_REGS {
+            if row.unit.is_empty() {
+                continue;
+            }
+            with_unit += 1;
+            assert!(
+                matches!(row.kind, RegPointKind::Scalar(_)),
+                "{} addr={} 是位行却登记了单位 `{}`",
+                row.label,
+                row.addr,
+                row.unit
+            );
+        }
+        assert!(
+            with_unit >= 100,
+            "有单位的行数 {with_unit} 与点表实测（139）量级不符 —— 防 `.u()` 被成批误删"
         );
     }
 

@@ -104,6 +104,13 @@ pub struct OtaTask {
     pub progress: u8,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 下载产物的**真实**落盘路径（下载成功时登记，D-19）。
+    ///
+    /// `None` = 尚无下载产物 ⇒ 应用路径必须**显式拒绝**（[`crate::error::OtaError::Unsupported`]），
+    /// 而不是像旧实现那样用一个"猜出来的路径 + 空哈希"走个必失败过场。
+    pub package_path: Option<std::path::PathBuf>,
+    /// 下载产物登记时的**真实**期望哈希（与 [`OtaTask::package_path`] 同时登记）。
+    pub expected_hash: Option<String>,
 }
 
 /// 更新记录
@@ -344,6 +351,8 @@ mod tests {
             progress: 30,
             created_at: Utc.with_ymd_and_hms(2026, 5, 28, 10, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 5, 28, 10, 5, 0).unwrap(),
+            package_path: None,
+            expected_hash: None,
         };
 
         let debug_str = format!("{:?}", task);

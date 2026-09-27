@@ -343,6 +343,10 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
 /// **口层控制面三项（超时/数据位/停止位）不在这里**：`StationConf` 无对应字段，故单列
 /// [`south_pcs_port_params`] 交给 `open_with_port_params`（Task 10 评审项 2 —— 这三项曾因
 /// 只有站壳路径而**全部不生效**）。
+///
+/// **`de_gpio` / `re_gpio` 在这里**（B-4，2026-09-27）：它们是**口线换向**参数、与波特率
+/// 同类（都在"报文字节级"之前生效），故随站壳透传，由 `bus_config` 落进 `rs485::Config`
+/// → `Rs485Device::set_dir`。缺省 `None` ⇒ 不驱动方向脚（自动换向收发器）。
 fn south_pcs_bus_conf(
     cfg: &mupc_southd::config::SouthPcsConfig,
 ) -> mupc_southd::config::StationConf {
@@ -356,6 +360,8 @@ fn south_pcs_bus_conf(
         parity: cfg.parity,
         interval_ms: cfg.interval_ms,
         regs: Vec::new(),
+        de_gpio: cfg.de_gpio,
+        re_gpio: cfg.re_gpio,
     }
 }
 
@@ -1286,16 +1292,44 @@ pub async fn initialize_all(
             "startup",
         )
     })?;
-    let storage = Arc::new(mupc_storage::StorageService::new(Arc::new(pool)));
+    // ── U-74 审查 A-7 + B-1：写入闸门（DB 完整性降级 + 磁盘水位）──
+    //   闸门在 `storage` 内被 **5 个写入口 + 遥测缓冲**共用（判据与执行同侧）；本处只负责
+    //   ① 造闸门、② 跑 **启动期完整性自检**、③（下方步骤 12 的采集任务里）喂磁盘水位。
+    let write_gate = Arc::new(mupc_storage::WriteGate::new());
+    // A-7：`PRAGMA quick_check`（**只读**）。三分支：通过 / 检出损坏 / 自检本身跑不起来。
+    //   - 检出损坏 ⇒ **进入降级态**（此后拒一切写入）+ 告警 + error 日志，**不静默带病运行**；
+    //   - 自检跑不起来（连接/权限问题）⇒ 只 warn（**不降级**：无法区分"环境问题"与"库坏了"，
+    //     按"检出损坏"处理会把一次权限故障升级成整个存储停写）；
+    //   - **不做自动修复**（WAL 重建/备份恢复）—— 属独立立项。
+    match mupc_storage::integrity_check(&pool).await {
+        Ok(Ok(())) => tracing::info!("[DB 自检] PRAGMA quick_check 通过"),
+        Ok(Err(violations)) => {
+            write_gate.enter_degraded();
+            tracing::error!(
+                violations = %violations,
+                "DB 完整性自检失败 ⇒ **进入降级模式**（拒一切写入；本轮不做自动修复，须人工处置后重启）"
+            );
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "DB 完整性自检**无法执行**（连接/权限层问题）—— 不据此进入降级模式（无法区分环境问题与库损坏）"
+        ),
+    }
+    let storage = Arc::new(mupc_storage::StorageService::new_with_gate(
+        Arc::new(pool),
+        write_gate.clone(),
+    ));
     // U-67（03 设计 §4.4.2.3）：`WriteBuffer::new` 的容量/间隔改读 `storage:` 段配置。
     // **缺省 = 现实现**（1000 / 5000，`StorageSectionConfig::default()`）⇒ 零行为变化
     // （PRD R-11.3-C / STG-01）；非法值已在 `CoreConfig::validate_storage` 拒启动（STG-04）。
     // ⚠️ 容量口径沿革：设计 03:1321 曾写"100ms 或积累 100 条"，现以 `storage.batch_capacity`
     // 为准（默认 1000 = 变更前的硬编码值）。
-    let write_buffer = Arc::new(mupc_storage::WriteBuffer::new(
+    let write_buffer = Arc::new(mupc_storage::WriteBuffer::new_with_gate(
         config.storage.batch_capacity as usize,
         config.storage.flush_interval_ms,
         storage.pool().clone(),
+        mupc_storage::services::DEFAULT_MAX_BUFFERED_POINTS,
+        write_gate.clone(),
     ));
     // ── U-69（03 设计 §4.4.4 / §4.4.2.3）：总表电气量 1 分钟聚合落库 ──
     // 聚合器实例**在此创建**（而非 `SouthSink` 构造处）：故障 tick 任务要在下面与 `flush_timer`
@@ -1444,7 +1478,10 @@ pub async fn initialize_all(
         );
     }
     let ai_engine = Arc::new(ai_engine);
-    coord.register_service("ai_engine", ServiceStatus::Running);
+    // D-16：**注册 `Stopped`**，与 `ota_update`/`security`/`wireless` 同口径——AI 引擎已停用
+    // （模型不加载、无服务面在跑），注册 `Running` 即"谎报已运行"（CFG-4 禁止形态）。
+    // `ModelManager` 实例仍随 StartupContext 保留：状态查询如实返回 unloaded（不谎报 ready）。
+    coord.register_service("ai_engine", ServiceStatus::Stopped);
 
     // ── 8. 策略引擎 ──
     tracing::info!("[08/14] 初始化策略引擎...");
@@ -1620,8 +1657,21 @@ pub async fn initialize_all(
             Arc::new(b)
         };
         let h = mupc_southd::pcs::PcsHandle::new(config.south_pcs.clone(), bus, south_sink.clone());
-        // 采集循环句柄入 guard（abort 名单；无停机钩子，与站级采集 task 同范式）
-        guard.0.push(h.spawn_collection_loop());
+        // 采集循环句柄入 guard（abort 名单；无停机钩子，与站级采集 task 同范式）。
+        //
+        // **B-9（2026-09-27 全项目审查 P3）：经 `observe_task` 包装后再入 guard。**
+        // 此前句柄只被"持有 + 退出时 abort"，**从不被观测** ⇒ task 内 panic 只会以
+        // `JoinError` 的形态静默留在句柄里，现象是"PCS 从此不再采集，而进程/日志/服务状态
+        // 一切正常"——而 PCS 采集是联锁 `last_run_state`（停机确认）的唯一数据源。
+        // 包装后：panic / 异常返回均落一条 `error!` 并置 `TaskWatch` 标志位；**abort 语义不变**
+        // （观测句柄被 abort ⇒ 采集 task 一并 abort，见 `task_watch` 模块头）。
+        // 观测标志暂只写日志（`watch` 保留在本段作用域内，供后续 supervisor/健康面上报）。
+        let pcs_collect_watch = std::sync::Arc::new(mupc_southd::task_watch::TaskWatch::new());
+        guard.0.push(mupc_southd::task_watch::observe_task(
+            "pcs_collect",
+            h.spawn_collection_loop(),
+            pcs_collect_watch,
+        ));
         coord.register_service("pcs", ServiceStatus::Running);
         // 策略引擎持同一句柄（双参数 / 分相下发 / SOC 回落活读）
         ai_integrator.set_pcs_client(h.clone());
@@ -1998,10 +2048,11 @@ pub async fn initialize_all(
         latest.clone(),
         uplink_points.clone(),
         iec104_server.clone(),
-        // A/B 档周期（§9.2.2「周期须可配置」的注入点；当前用缺省 1000/5000 ms，
-        // 后续可改读 config——本任务不动 core_config schema）。
-        crate::uplink::DEFAULT_CLASS_A_INTERVAL,
-        crate::uplink::DEFAULT_CLASS_B_INTERVAL,
+        // A/B 档周期（§9.2.2「周期须可配置」的注入点）—— U-74 审查 A-2 起**读配置**
+        // `gateway.periods.{a_ms,b_ms}`（缺省 = 旧编译期常量 1000 / 5000 ms，零行为变化；
+        // 范围由 `CoreConfig::validate_gateway` 在启动前 fail-fast 门禁）。
+        std::time::Duration::from_millis(config.gateway.periods.a_ms),
+        std::time::Duration::from_millis(config.gateway.periods.b_ms),
     ));
     for h in uplink_driver.spawn() {
         guard.0.push(h);
@@ -2220,26 +2271,76 @@ pub async fn initialize_all(
     ));
     let threshold_analyzer = mupc_system_monitor::ThresholdAnalyzer::default();
     let metrics_bg = metrics_store.clone();
+    // ── U-74 审查 B-1：把磁盘水位喂给写入闸门 + 档位升级告警 ──
+    //   数据源 = 本任务采集的 `SystemSnapshot.disk`（**可信源**：WP3 已把它改成 `Option`，
+    //   采集失败即 `None`）。`None` ⇒ **不判定、不告警**（保持上一档）—— 不得按 0% 处理，
+    //   否则高水位保护会在采集链路自身出问题时失效（那正是最需要它的时候）。
+    let gate_for_metrics = write_gate.clone();
+    let alert_feed_for_metrics = alert_feed.clone();
     guard.0.push(tokio::spawn(async move {
+        // `None` = **尚未定档**（与"已定档为 Normal"区分：首次读到正常水位不必告警，
+        // 首次就读到 ≥85% 则必须告警）
+        let mut last_disk_level: Option<mupc_storage::DiskLevel> = None;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
             match collector.collect().await {
                 Ok(snapshot) => {
                     tracing::debug!(
-                        "系统指标: CPU={:.1}% MEM={:.1}% DISK={:.1}% TEMP={:.1}°C",
+                        "系统指标: CPU={:.1}% MEM={:.1}% DISK={} TEMP={:.1}°C",
                         snapshot.cpu.usage_percent,
                         snapshot.memory.usage_percent,
-                        snapshot.disk.usage_percent,
+                        // 磁盘不可用（采集失败）时**显式**打印 n/a —— 绝不用 0/50% 冒充
+                        match &snapshot.disk {
+                            Some(d) => format!("{:.1}%", d.usage_percent),
+                            None => "n/a".to_string(),
+                        },
                         snapshot.temperature.cpu_temp_c,
                     );
                     if let Err(e) = metrics_bg.store(&snapshot).await {
                         tracing::warn!("保存系统指标失败: {}", e);
                     }
-                    // 自愈：分析指标 + 执行自愈动作
+                    // B-1：喂水位（`None` ⇒ `set_disk_usage` 返回 `None` ⇒ 本节整块跳过）
+                    if let Some(now_level) = gate_for_metrics
+                        .set_disk_usage(snapshot.disk.as_ref().map(|d| d.usage_percent))
+                    {
+                        match crate::storage_health::disk_level_transition_alert(
+                            last_disk_level,
+                            now_level,
+                        ) {
+                            Some((level, msg)) => {
+                                tracing::warn!(
+                                    disk_level = now_level.as_str(),
+                                    gate = %gate_for_metrics.status_line(),
+                                    "{msg}"
+                                );
+                                alert_feed_for_metrics.push_system_alert(level, &msg);
+                            }
+                            None if last_disk_level.is_some_and(|p| now_level < p) => {
+                                // 回落：**只记日志不投告警**（同 `StorageHealthWatch` 的恢复口径 ——
+                                // `AlertFeed` 只有入、没有清除面，投一条会被读成"又发生了一次"）
+                                tracing::info!(
+                                    disk_level = now_level.as_str(),
+                                    "磁盘水位回落 ⇒ 写入闸门自动恢复"
+                                );
+                            }
+                            None => {}
+                        }
+                        last_disk_level = Some(now_level);
+                    } else {
+                        tracing::debug!("磁盘指标不可用 ⇒ 本拍不做水位判定（保持上一档，不按 0% 处理）");
+                    }
+                    // 自愈：分析指标 + 登记自愈动作
                     if let Ok(analysis) = threshold_analyzer.analyze(&snapshot) {
                         if let Ok(Some(healing)) = healing_engine.lock().await.auto_heal(&analysis)
                         {
-                            tracing::info!("自愈动作已执行: {:?}", healing.action);
+                            // ⚠️ 不得写"已执行"：自愈动作当前**全部未实现**，`success` 恒 false
+                            //（见 `mupc_system_monitor::SelfHealingEngine::execute`）。
+                            tracing::warn!(
+                                action = ?healing.action,
+                                success = healing.success,
+                                message = %healing.message,
+                                "自愈动作已登记（未实现，未执行）"
+                            );
                         }
                     }
                 }
@@ -2264,14 +2365,28 @@ pub async fn initialize_all(
     // ⇒ 收敛到 `mqtt_station_roles`（**唯一接线点**，回归网见该函数文档与
     // `task10_station_roles_wiring_carries_pcs_role_into_publish_plan`）。
     let mqtt_roles = mqtt_station_roles(config);
+    // ── 01 PRD EX-10：装置标识缺失须**显式标注"未提供"**，不得臆造 ──
+    //   本仓**无** `system.dev_id` 键（`core_config` 已就此 fail-fast，见
+    //   `validate_mqtt_bridge` 第 ③ 条），PRD Q10 的来源亦未定 ⇒ `dev` 恒无值。
+    //   **行为**：载荷 `dev` 字段**出现在 JSON 里且为 `null`**（`Option<String>` 未加
+    //   `skip_serializing_if`）—— 不是"字段缺失"，云端可据此区分"未提供"与"没这个字段"。
+    //   启动期再打一条 WARN：让现场在日志里**直接看到**"未提供"这一事实（无需抓包）。
+    let dev_id: Option<String> = None;
+    if dev_id.is_none() {
+        tracing::warn!(
+            "装置标识（dev）未提供：本仓无 system.dev_id 键且 PRD Q10 来源未定 ⇒ 北向 MQTT \
+             载荷的 dev 字段上送 JSON null（01 PRD EX-10 的「显式标注未提供」由 null 承担），\
+             不臆造装置标识"
+        );
+    }
     let mqtt_outcome = crate::uplink::assemble_mqtt_bridge(
         &config.mqtt_bridge,
         latest.clone(),
         uplink_points.clone(),
         mqtt_roles,
-        // 装置标识（§9.3.4：PRD Q10 来源未定 ⇒ 本仓无权威来源 ⇒ 载荷 `dev` 写 `null`，不臆造）。
-        // 待产品裁定后：`client_id` 缺省时取该值，仍在配置层。
-        None,
+        // 装置标识（§9.3.4 / PRD Q10 / EX-10）—— 见上方 WARN；待产品裁定后：
+        // `client_id` 缺省时取该值，仍在配置层。
+        dev_id,
         storage.events.clone(),
     )
     .await;
@@ -2292,6 +2407,28 @@ pub async fn initialize_all(
             crate::uplink::MqttServiceStatus::Disabled => ServiceStatus::Stopped,
             crate::uplink::MqttServiceStatus::Failed => ServiceStatus::Failed,
         },
+    );
+
+    // ── U-74 审查 A-4 + A-5：北向上送链路计数的**出口**（60 s 一行 + 启动首拍）──
+    //   两个计数在改造前都"只有计数器、没有出口"：
+    //   ① A-4 `Iec104Server::dropped_total()`（设计 §9.2.2 的 `iec104_dropped_total`）——
+    //      生产零调用；② A-5 `MqttUplinkPublisher::stats()`（PRD §8.6.5 BF-6）—— 带
+    //      `#[allow(dead_code)]`、注释自认"无生产消费方"。
+    //   MQTT 未启用 ⇒ `mqtt_outcome.publisher` 为 `None` ⇒ 对应 4 个计数打 `n/a`（不打 0）。
+    //   **无停机钩子**（不写数据、无在途批次）⇒ 入 abort 名单 `guard`。
+    let link_counters_src: std::sync::Arc<dyn crate::link_counters::LinkCounterSource> =
+        std::sync::Arc::new(crate::link_counters::BothCounters {
+            iec104: iec104_server.clone(),
+            mqtt: mqtt_outcome.publisher.clone(),
+        });
+    guard.0.push(crate::link_counters::spawn_link_counter_reporter(
+        link_counters_src,
+        std::time::Duration::from_millis(crate::link_counters::LINK_COUNTER_TICK_MS),
+    ));
+    tracing::debug!(
+        mqtt_enabled = mqtt_outcome.publisher.is_some(),
+        "链路计数上报任务已登记（abort 名单；周期 {} ms）",
+        crate::link_counters::LINK_COUNTER_TICK_MS
     );
 
     // ── 14. 近场无线 ──
@@ -2494,6 +2631,24 @@ plugins: {}
         assert!(
             production.contains("mupc_ota_update::OtaConfig::default()"),
             "OTA 配置构造在，能力未删"
+        );
+    }
+
+    /// **D-16 网：`ai_engine` 服务注册状态必须是 `Stopped`。**
+    ///
+    /// 依据：AI 引擎已停用（本步骤上下文明确"不加载模型，ModelStatus 保持 Unloaded"），
+    /// 与 `ota_update`/`security`/`wireless` 同一形态 ⇒ 注册 `Running` 是**谎报服务面在跑**
+    /// （CFG-4 禁止"注册为 Running 但无行为"）。
+    ///
+    /// 改什么会让本条变红：把注册状态改回 `Running`，或删掉 `ai_engine` 注册。
+    /// ⚠️ 断言必须**钉住状态本身**：只 `contains("register_service(\"ai_engine\"")` 时，
+    /// 把 `Stopped` 改回 `Running` 仍全绿（对"状态"零判别力）。
+    #[test]
+    fn ai_engine_registered_stopped() {
+        let production = production_src();
+        assert!(
+            production.contains("register_service(\"ai_engine\", ServiceStatus::Stopped)"),
+            "ai_engine 必须以 Stopped 注册（AI 停用期无服务面在跑；改回 Running = 谎报）"
         );
     }
 
@@ -3736,6 +3891,117 @@ stations:
         assert!(
             production.contains("let mqtt_roles = mqtt_station_roles(config);"),
             "MQTT 角色表必须经 `mqtt_station_roles(config)` 收敛（含 PCS 段合成的 pcs 站，否则 role 落空串）"
+        );
+    }
+
+    /// **U-74 审查 A-2：IEC 104 的 A/B 档周期必须来自配置**（01 PRD §8.7「周期须可配置」/
+    /// 设计 §9.2.2 括注「可配」）。
+    ///
+    /// 为什么用**源文本静态断言**（与 `ota_manager` 那条同款手法）：`initialize_all` 要 DB /
+    /// intercore / gateway 全套真环境，本机单测起不来；而本单元要证的恰恰是"装配源码把哪个
+    /// 表达式喂给了驱动器"。
+    ///
+    /// **改什么会变红**：把两个实参改回 `crate::uplink::DEFAULT_CLASS_A_INTERVAL` /
+    /// `DEFAULT_CLASS_B_INTERVAL`（或任何不走 `config.gateway.periods` 的写法）⇒ 红。
+    #[test]
+    fn iec104_ab_intervals_are_wired_from_config() {
+        let production = production_src();
+        assert!(
+            production.contains("Duration::from_millis(config.gateway.periods.a_ms)"),
+            "IEC104 A 档周期须读 `config.gateway.periods.a_ms`（A-2；写死常量 ⇒ PRD §8.7 的\
+             「周期须可配置」落空）"
+        );
+        assert!(
+            production.contains("Duration::from_millis(config.gateway.periods.b_ms)"),
+            "IEC104 B 档周期须读 `config.gateway.periods.b_ms`"
+        );
+        // 反向：驱动器装配点**不得**再直接引用旧的编译期常量（常量只应出现在 core_config 的
+        // 缺省函数里 —— 那里是本段的 `Default`，不是装配）
+        assert!(
+            !production.contains("crate::uplink::DEFAULT_CLASS_A_INTERVAL,"),
+            "驱动器装配点不得再用编译期常量喂 A 档周期"
+        );
+    }
+
+    /// **U-74 审查 A-4 + A-5：链路计数的出口必须在装配段真的被起任务**，且 MQTT 未启用时
+    /// 交 `None`（而不是缩成 0）。
+    ///
+    /// 为什么用源文本断言：`initialize_all` 需 DB / intercore / gateway 全套真环境。
+    /// 计数本身的读取语义由 `link_counters` 的单测钉住，本用例只钉**接线在不在**。
+    ///
+    /// **改什么会变红**：删掉 `spawn_link_counter_reporter` 的调用（A-4/A-5 回到"有计数无
+    /// 出口"）⇒ 红。
+    #[test]
+    fn link_counter_outlet_is_spawned_with_both_sources() {
+        let production = production_src();
+        assert!(
+            production.contains("crate::link_counters::spawn_link_counter_reporter("),
+            "装配段须起链路计数上报任务（A-4 iec104_dropped_total / A-5 BF-6）"
+        );
+        assert!(
+            production.contains("iec104: iec104_server.clone()"),
+            "IEC104 源须接到真实服务器实例（A-4）"
+        );
+        assert!(
+            production.contains("mqtt: mqtt_outcome.publisher.clone()"),
+            "MQTT 源须接装配交回的 publisher（A-5；未启用时该字段为 None ⇒ 打 n/a 而非 0）"
+        );
+    }
+
+    /// **U-74 审查 A-7 + B-1：写入闸门必须在装配段真的被造、被喂、被接线。**
+    ///
+    /// 三条合起来才是"降级/停写不是死码"：
+    /// ① 启动期跑 `integrity_check` 且失败即 `enter_degraded`；
+    /// ② `StorageService` / `WriteBuffer` 都拿**同一个**闸门实例（新造一个 = 判据与执行分家）；
+    /// ③ 系统指标采集任务把 `snapshot.disk`（`Option`）**逐拍喂**给闸门。
+    ///
+    /// **改什么会变红**：删掉 `integrity_check` 调用、把 `new_with_gate` 换回 `new`
+    /// （闸门不生效 ⇒ B-1/A-7 全成死码）、或不再喂水位。
+    #[test]
+    fn write_gate_is_created_fed_and_wired() {
+        let production = production_src();
+        assert!(
+            production.contains("mupc_storage::integrity_check(&pool)"),
+            "启动期须跑 DB 完整性自检（A-7）"
+        );
+        assert!(
+            production.contains("write_gate.enter_degraded();"),
+            "自检检出损坏须**进入降级态**（否则降级模式是死码）"
+        );
+        assert!(
+            production.contains("mupc_storage::StorageService::new_with_gate("),
+            "StorageService 须带闸门（否则事件/故障/决策/台账 4 个入口不受 ≥98% 与降级约束）"
+        );
+        assert!(
+            production.contains("mupc_storage::WriteBuffer::new_with_gate("),
+            "WriteBuffer 须带闸门（时序写入的停写点）"
+        );
+        assert!(
+            production.contains(".set_disk_usage(snapshot.disk.as_ref().map(|d| d.usage_percent))"),
+            "磁盘水位须逐拍喂闸门（B-1；`Option` ⇒ 采集失败不判定、不按 0% 处理）"
+        );
+        assert!(
+            production.contains("crate::storage_health::disk_level_transition_alert("),
+            "档位升级须投告警（不静默）"
+        );
+    }
+
+    /// **U-74 审查 B-4：`dev` 未提供必须在启动期被**显式**告知**（PRD 01 EX-10）。
+    ///
+    /// 两条断言合起来才完整：① 生产段有 WARN；② 传给装配层的是**显式命名的 `None` 变量**
+    /// （`dev_id`）而不是裸字面量 —— 后者让"未提供"在源码里无处可查。
+    ///
+    /// **改什么会变红**：删掉那条 `tracing::warn!`（回到裸 `None`）⇒ 红。
+    #[test]
+    fn dev_absent_is_announced_at_startup() {
+        let production = production_src();
+        assert!(
+            production.contains("装置标识（dev）未提供"),
+            "启动期须 WARN 说明 dev 未提供（EX-10 的「显式标注」）"
+        );
+        assert!(
+            production.contains("let dev_id: Option<String> = None;"),
+            "dev 须取显式命名的变量（便于『未提供』在源码里可查）"
         );
     }
 }

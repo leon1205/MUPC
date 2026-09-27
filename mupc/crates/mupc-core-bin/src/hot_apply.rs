@@ -16,7 +16,7 @@
 //! |------|------------------------|------------|
 //! | `system.log_level` | `tracing_subscriber::reload` handle | ✅ **真接线**（[`HotApply::new`] 注入 handle；`main.rs` 在 Phase 2 建 handle） |
 //! | `intercore.host` / `intercore.port` | `watch` → 断开重连 | ❌ **未接线**：核间传输在 `startup.rs` **构造期**固定（TCP `remote_addr` 写入 transport；原 Modbus 口/波特率档已随 PCS 迁至 `south_pcs`，Task 10），全仓**无**该参数的 `watch` 通道；改它需要动 `crates/intercore` 的重连路径 ⇒ 本轮**不碰**，如实登记 |
-//! | `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` | `watch` → 心跳循环读新值 | ❌ **未接线**：无消费方（TCP 传输无心跳循环；PCS 采集兼心跳的周期取 `south_pcs.interval_ms`，与本二键无关） |
+//! | ~~`intercore.heartbeat_interval_sec` / `reconnect_interval_sec`~~ | ~~`watch` → 心跳循环读新值~~ | **已删除（E-13，2026-09-27）**：无消费方（TCP 传输无心跳循环；PCS 采集兼心跳的周期取 `south_pcs.interval_ms`，与本二键无关）⇒ 连同 `CoreConfig` 字段与屏上可写项一并移除 |
 //! | `gateway.listen_addr` / `gateway.listen_port` | `stop()` → `start()` 重绑定 | ❌ **未接线**：`Iec104Server` 的 listen 配置**构造期固定**（`Iec104Server::new(config)`，无 setter），且该实例还被南向上送（`SouthSink` 的 `iec104_server.clone()`）共享 ⇒ 原地重建会让上送句柄指向**已停止**的旧实例（半生效，EDGE-10 明禁） |
 //!
 //! ⚠️ **这 6 项"未接线"是设计 §4.3.5 的降级方案**（「本期仅支持 HotApply 子集，连接类参数
@@ -100,11 +100,6 @@ impl HotApply {
             "intercore.host" | "intercore.port" => ApplyOutcome::RestartRequired {
                 reason: "核间传输在启动期构造（无 watch 通道）⇒ 需重启 mupcd 生效",
             },
-            "intercore.heartbeat_interval_sec" | "intercore.reconnect_interval_sec" => {
-                ApplyOutcome::RestartRequired {
-                    reason: "核间心跳/重连参数的消费方尚未接线（无 watch）⇒ 需重启 mupcd 生效",
-                }
-            }
             "gateway.listen_addr" | "gateway.listen_port" => ApplyOutcome::RestartRequired {
                 reason: "IEC 104 监听地址在构造期固定且实例与南向上送共享 ⇒ 需重启 mupcd 生效",
             },
@@ -200,7 +195,7 @@ mod tests {
         );
     }
 
-    /// 连接类**六项**（`intercore.*` 4 + `gateway.*` 2）+ 表外键：一律 `RestartRequired`
+    /// 连接类**四项**（`intercore.*` 2 + `gateway.*` 2）+ 表外键：一律 `RestartRequired`
     /// 且**带可读原因**（原因要能上报告 / 日志）。
     ///
     /// 逐键断言（不是"数个数"）：将来接线了其中一项，本用例应当**变红**，提醒把它的结论
@@ -211,8 +206,6 @@ mod tests {
         for key in [
             "intercore.host",
             "intercore.port",
-            "intercore.heartbeat_interval_sec",
-            "intercore.reconnect_interval_sec",
             "gateway.listen_addr",
             "gateway.listen_port",
         ] {

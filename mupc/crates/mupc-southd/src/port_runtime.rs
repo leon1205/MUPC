@@ -145,10 +145,18 @@ impl Rs485PortBus {
                 format!("stop_bits={} 越界（须 1..=2）", params.stop_bits),
             ));
         }
-        if params.timeout_ms == 0 {
+        // 下界 ≥ 100ms（B-2）：`VTIME = timeout_ms / 100` **向下取整** ⇒ `1..=99` 与 `0` 同病
+        // ——落 0 即"完全非阻塞读"，read 无数据立刻返回 ⇒ 每次请求都判"响应为空" ⇒ **全站恒
+        // offline**。判据/文案与配置期 `SouthPcsConfig::validate` **同源**（同一常量），
+        // 本层保留为**纵深防御**（`PortParams` 可不经 validate 直接构造）。
+        if params.timeout_ms < crate::config::MIN_PCS_RESPONSE_TIMEOUT_MS {
             return Err(BusError::Open(
                 conf.port.clone(),
-                "timeout_ms=0 非法（VTIME 会落 0 ⇒ 读恒即时返回）".to_string(),
+                format!(
+                    "timeout_ms={} 非法（须 ≥ {}ms：VTIME = timeout/100 向下取整 ⇒ 1..=99 会落 0 ⇒ 读恒即时返回）",
+                    params.timeout_ms,
+                    crate::config::MIN_PCS_RESPONSE_TIMEOUT_MS
+                ),
             ));
         }
         let c = bus_config(conf, params);
@@ -295,7 +303,13 @@ impl StationBus for Rs485PortBus {
 /// （YAML 写 200ms、实际 1000ms）。现由调用方经 [`PortParams`] 显式传入；站级路径传
 /// `PortParams::default()` ⇒ 与改动前逐字段等价。
 ///
-/// 其余参数（`crc_mode`/DE-RE）仍取 `Config::default()`。
+/// 其余参数（`crc_mode`）仍取 `Config::default()`；
+/// **`de_gpio`/`re_gpio` 自站级/口级配置透传**（B-4，2026-09-27 全项目审查 P2）——
+/// 此前恒取 `Config::default()` 的 `None` ⇒ `Rs485Device::set_dir` 永不生效（且它当时
+/// 在生产路径上根本没有调用方）。落点链：`StationConf`/`SouthPcsConfig` 的
+/// `de_gpio`/`re_gpio` → 本函数 → `rs485::Config` → `Rs485Device::set_dir`（`send_recv`
+/// 与 `transaction*` 都会调用，见 `rs485-plugin/src/device.rs`）。
+/// 两者皆 `None`（缺省）= 不驱动方向脚 ⇒ 与改动前逐字段相同。
 fn bus_config(
     conf: &crate::config::StationConf,
     params: PortParams,
@@ -314,6 +328,10 @@ fn bus_config(
         timeout_ms: params.timeout_ms,
         data_bits: params.data_bits,
         stop_bits: params.stop_bits,
+        // 半双工方向控制引脚（B-4）：缺省 None = 自动换向收发器，不驱动方向脚
+        de_gpio: conf.de_gpio,
+        re_gpio: conf.re_gpio,
+        // 其余仍取缺省（crc_mode = Crc16Modbus）
         ..rs485_plugin::config::Config::default()
     }
 }
@@ -603,6 +621,8 @@ mod tests {
             parity: StationParity::None,
             interval_ms: 1000,
             regs: Vec::new(),
+            de_gpio: None,
+            re_gpio: None,
         }
     }
 
@@ -841,6 +861,30 @@ mod tests {
 
     // ---------- bus_config：口层控制面三项透传（Task 10 评审项 2）----------
 
+    // ---------- B-4（2026-09-27 全项目审查 P2）：DE/RE 方向引脚透传 ----------
+
+    /// **`de_gpio`/`re_gpio` 必须真透传**到 `rs485::Config` —— 这是 `Rs485Device::set_dir`
+    /// 唯一的数据来源；此前 `bus_config` 走 `..Config::default()`（恒 `None`）⇒ 方向控制
+    /// **永不生效**（站级/口级都配不了、配了也不落地）。
+    ///
+    /// 判别力：把 `bus_config` 里两行 `de_gpio: conf.de_gpio, re_gpio: conf.re_gpio` 删掉
+    /// （回落 `Config::default()` 的 `None`）⇒ 前两条断言红。
+    /// 另钉**缺省等价**：`None` ⇒ 仍 `None`（不驱动方向脚，自动换向收发器）。
+    #[test]
+    fn bus_config_passes_de_re_gpio_through() {
+        let mut c = conf("ttyS4", "modbus");
+        c.de_gpio = Some(17);
+        c.re_gpio = Some(27);
+        let cfg = bus_config(&c, PortParams::default());
+        assert_eq!(cfg.de_gpio, Some(17), "de_gpio 须落到 rs485 Config");
+        assert_eq!(cfg.re_gpio, Some(27), "re_gpio 须落到 rs485 Config");
+
+        // 缺省（None）⇒ 与改动前的 `..Config::default()` 逐字段相同
+        let d = bus_config(&conf("ttyS4", "modbus"), PortParams::default());
+        assert_eq!(d.de_gpio, None, "缺省不得凭空驱动方向脚");
+        assert_eq!(d.re_gpio, None);
+    }
+
     /// **超时/数据位/停止位必须真透传**（此前是死配置：`south_pcs` 段写了不生效）。
     ///
     /// **改什么会让本条变红**：把 `bus_config` 里三项回填改成不读 `params`（走
@@ -904,6 +948,19 @@ mod tests {
                 data_bits: 8,
                 stop_bits: 1,
             },
+            // B-2（2026-09-27 全项目审查 P2）：`1..=99` 与 `0` 同病 ——
+            // `VTIME = timeout/100` 向下取整落 0 ⇒ 非阻塞读 ⇒ 全站恒 offline。
+            // 判别力：口层判据退回 `== 0` ⇒ 下面两条红。
+            PortParams {
+                timeout_ms: 1,
+                data_bits: 8,
+                stop_bits: 1,
+            },
+            PortParams {
+                timeout_ms: 99,
+                data_bits: 8,
+                stop_bits: 1,
+            },
         ];
         for pp in bad {
             assert!(
@@ -914,6 +971,12 @@ mod tests {
                 "越界控制面参数须 Open Err（fail-closed），实得 Ok：{pp:?}"
             );
         }
+        // 口层与配置期的**同一常量**（防两处下界各自漂移）
+        assert_eq!(
+            crate::config::MIN_PCS_RESPONSE_TIMEOUT_MS,
+            100,
+            "下界口径：1 个 VTIME 刻度 = 100ms"
+        );
     }
 }
 

@@ -80,6 +80,8 @@ fn test_mock_ai_model_predict_mid_soc() {
     assert_eq!(output.recommended_p_batt, 0.0);
 }
 
+/// **D-11**：无模型 ⇒ 不可校验 ⇒ fail-closed（不得因无遥测/超时走 `degraded_pass` 放行）。
+/// 改坏实现会怎样红：恢复"无模型时默认通过"或把模型判定移到数据早退之后 ⇒ `!valid` 红。
 #[test]
 fn test_validator_without_model() {
     let validator = AiCommandValidatorImpl::new();
@@ -95,7 +97,12 @@ fn test_validator_without_model() {
         phase_q_set: None,
     };
     let result = validator.validate_sync(&cmd);
-    assert!(result.valid);
+    assert!(!result.valid, "无模型时不得放行（fail-closed）: {result:?}");
+    assert!(
+        result.message.contains("无模型") && result.message.contains("不可校验"),
+        "文案须点明不可校验：{}",
+        result.message
+    );
 }
 
 #[test]
@@ -117,15 +124,20 @@ fn test_validator_with_model() {
         phase_q_set: None,
     };
     let result = validator.validate_sync(&cmd);
-    // Mock 模型默认 confidence=0.5，小于阈值 0.7，且差异大于 10kW
-    // SOC=85% 高 → AI 推荐放电 = 20kW，cmd=10kW，差异=10kW 在边界
-    // 所以可能被标记为无效
-    assert!(!result.valid || result.valid);
+    // 实算：SOC=85% ≥0.8 ⇒ MockAiModel 推荐放电 = pv−load = 50−30 = 20kW；cmd=10kW
+    // ⇒ diff = 10.0，判据是 `diff > 10.0`（严格大于）⇒ 恰好不触发 invalid ⇒ valid。
+    // （原为 `assert!(!result.valid || result.valid)` 的零判别力占位断言，一并订正。）
+    assert!(
+        result.valid,
+        "diff=10.0 未越严格阈值 ⇒ 应通过，实得 invalid: {}",
+        result.message
+    );
 }
 
 #[test]
 fn test_validator_switch_command_passthrough() {
-    let validator = AiCommandValidatorImpl::new();
+    // D-11 后须带模型（无模型一律 fail-closed，开关控制也不例外）
+    let validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
     let cmd = ControlCommand {
         cmd_id: 2,
         cmd_type: CommandType::SwitchControl,
@@ -149,7 +161,8 @@ fn test_validator_name() {
 
 #[tokio::test]
 async fn test_validator_async_validate() {
-    let validator = AiCommandValidatorImpl::new();
+    // D-11 后须带模型：有模型 + 无遥测 = 显式降级通过（无模型则 fail-closed）
+    let validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
     let cmd = ControlCommand {
         cmd_id: 1,
         cmd_type: CommandType::PowerRegulation,

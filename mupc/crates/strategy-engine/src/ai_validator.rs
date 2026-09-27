@@ -139,7 +139,18 @@ impl AiCommandValidatorImpl {
 
     /// 同步校验（用于测试）
     pub fn validate_sync(&self, cmd: &ControlCommand) -> ValidationResult {
-        // 无遥测数据时降级通过（保守安全策略）
+        // ── D-11：无模型 ⇒ **不可校验**，必须 fail-closed ──
+        // 旧实现在此返回 `valid()`（"无模型时默认通过"），生产注入的正是无模型实例
+        // （`startup.rs` 的 `AiCommandValidatorImpl::new()`）⇒ 本闸门恒放行 = 空闸门。
+        // 置于三条数据早退**之前**：无模型时任何遥测状态都无从校验，不得借
+        // `degraded_pass`（valid=true）绕开。
+        let Some(model) = self.model.as_ref() else {
+            return ValidationResult::invalid(
+                "无模型（AI 推理通道未接线）：指令不可校验，按 fail-closed 拒绝",
+            );
+        };
+
+        // 无遥测数据时降级通过（保守安全策略；仅在模型侧校验可得时才有"降级"可言）
         let has_data = self
             .latest_data
             .read()
@@ -153,13 +164,6 @@ impl AiCommandValidatorImpl {
         if self.is_data_stale() {
             return ValidationResult::degraded_pass("遥测数据超时(>5s)，降级通过");
         }
-
-        // 无模型时默认通过
-        if self.model.is_none() {
-            return ValidationResult::valid();
-        }
-
-        let model = self.model.as_ref().unwrap();
 
         // 只校验功率调节命令
         if cmd.cmd_type != CommandType::PowerRegulation {
@@ -284,6 +288,11 @@ mod tests {
         assert_eq!(output.recommended_p_batt, 0.0);
     }
 
+    /// **D-11**：无模型 ⇒ 不可校验 ⇒ fail-closed（**不得** `valid`）。
+    ///
+    /// 改坏实现会怎样红：回到 `self.model.is_none() → ValidationResult::valid()`
+    /// （或让无遥测/超时的 `degraded_pass` 抢先返回 valid）⇒ 断言 `!result.valid` 红。
+    /// 注意本用例**不注入遥测**：无模型判定必须排在数据早退之前，否则空闸门仍放行。
     #[test]
     fn test_validator_without_model() {
         let validator = AiCommandValidatorImpl::new();
@@ -298,9 +307,38 @@ mod tests {
             phase_p_set: None,
             phase_q_set: None,
         };
-        // 无数据时降级通过
+        // 无遥测、无模型 ⇒ 必须拒绝（旧的"降级通过/默认通过"都是 fail-open）
         let result = validator.validate_sync(&cmd);
-        assert!(result.valid);
+        assert!(!result.valid, "无模型时不得放行（fail-closed）");
+        assert!(
+            result.message.contains("无模型") && result.message.contains("不可校验"),
+            "文案须点明不可校验：{}",
+            result.message
+        );
+        // 即便注入了新鲜遥测，无模型仍不可校验
+        validator.update_data(make_test_data(50.0, 50.0, 30.0, 0.0));
+        let result2 = validator.validate_sync(&cmd);
+        assert!(!result2.valid, "无模型 + 有遥测同样不可校验");
+    }
+
+    /// D-11 对照：**有模型**时数据早退仍按原设计走降级通过（该放行是有校验能力前提下的
+    /// 显式降级，不是空闸门）。本用例钉住"改了无模型语义但没误伤有模型路径"。
+    #[test]
+    fn test_validator_with_model_degrades_on_missing_data() {
+        let validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
+        let cmd = ControlCommand {
+            cmd_id: 1,
+            cmd_type: CommandType::PowerRegulation,
+            p_batt_set: Some(10.0),
+            q_batt_set: None,
+            phase_compensation: None,
+            start_stop: None,
+            priority: 1,
+            phase_p_set: None,
+            phase_q_set: None,
+        };
+        let result = validator.validate_sync(&cmd);
+        assert!(result.valid, "有模型 + 无遥测 = 显式降级通过");
         assert!(result.message.contains("降级通过"));
         assert!(result.message.contains("无遥测数据"));
     }
@@ -323,15 +361,21 @@ mod tests {
             phase_q_set: None,
         };
         let result = validator.validate_sync(&cmd);
-        // Mock 模型默认 confidence=0.5，小于阈值 0.7，且差异可能大于 10kW
-        // SOC=85% 高 → AI 推荐放电 = 20kW，cmd=10kW，差异=10kW 刚好在边界
-        // 实际应根据具体场景调整
-        assert!(!result.valid || result.valid); // 占位，实际逻辑见上
+        // 实算：SOC=85% ≥0.8 ⇒ MockAiModel 推荐放电 = pv−load = 50−30 = 20kW；cmd=10kW
+        // ⇒ diff = 10.0，判据是 `diff > 10.0`（严格大于）⇒ 恰好不触发 invalid ⇒ valid。
+        // （原为 `assert!(!result.valid || result.valid)` 的零判别力占位断言，同时被 clippy 的
+        // `overly_complex_bool_expr`（deny-by-default）判为 logic bug，一并订正。）
+        assert!(
+            result.valid,
+            "diff=10.0 未越严格阈值 ⇒ 应通过，实得 invalid: {}",
+            result.message
+        );
     }
 
     #[test]
     fn test_validator_switch_command_passthrough() {
-        let validator = AiCommandValidatorImpl::new();
+        // D-11 后须带模型：无模型一律 fail-closed（开关控制也不例外）
+        let validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
         validator.update_data(make_test_data(50.0, 50.0, 30.0, 0.0));
 
         let cmd = ControlCommand {
@@ -365,7 +409,8 @@ mod tests {
 
     #[test]
     fn test_degraded_pass_on_stale_data() {
-        let validator = AiCommandValidatorImpl::new();
+        // D-11 后须带模型（超时降级只在"有校验能力"前提下成立）
+        let validator = AiCommandValidatorImpl::with_model(Box::new(MockAiModel));
         // 设置一个"过期"时间戳（模拟 >5s 前）
         *validator.data_timestamp.write().unwrap() =
             Some(chrono::Utc::now() - chrono::Duration::seconds(10));

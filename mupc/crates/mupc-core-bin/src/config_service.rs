@@ -46,7 +46,8 @@
 //! 这条约束**不是**"自由文本不查码表"那条既有口径：那些串（告警 `message`、型号 / 序列号、
 //! 外部库错误串）**不是我们生成的**，无从约束；而本模块的回执文案**逐字都是我们自己拼的**，
 //! 完全可控 ⇒ **必须**只用 cmap 内的字符。清单真源 = `local-display/fonts/lv_font_cmap.txt`
-//! （入库派生项，324 码位）；**逐字符**的网见 `console_host` 的
+//! （入库派生项，**462** 码位；WP5 P3-D：原写 324 系扩字库前陈旧值，2026-09-27 按清单头行订正）；
+//! **逐字符**的网见 `console_host` 的
 //! `config_receipt_messages_use_only_font_cmap_glyphs` 用例。
 //!
 //! 由此推出三条**写法规则**（本模块内不得破例）：
@@ -937,7 +938,7 @@ legacy_top:                # 未建模的**顶层段**（CoreConfig 不认，必
                     web_api:\n  tls_cert: null\n  tls_key: null\n\
                     ai_engine: {}\nplugins: {}\n";
 
-    /// 「恢复默认值」用例的输入：**7 个可写键全部与默认值不同** ⇒ 一次重置必须全部落盘
+    /// 「恢复默认值」用例的输入：**可写键全部与默认值不同** ⇒ 一次重置必须全部落盘
     /// （只改一个键的样例测不出"全量应用"，也测不出"逐字段审计条目"）。
     ///
     /// 单元 K：保留 `web_api:`（现为**未建模段**）——同 [`YAML`]，用最少的字节顺带覆盖
@@ -1904,7 +1905,8 @@ gateway:
         let sink = Arc::new(ProbeSink::default());
         let h = harness_with(sink.clone(), YAML_ALL_DIFFERENT);
         let before_text = disk(&h);
-        // 「恢复默认值」= 把 7 个可写键的**默认值**一次性下发（与现状全不同 ⇒ 全部应落盘）
+        // 「恢复默认值」= 把 5 个可写键的**默认值**一次性下发（与现状全不同 ⇒ 全部应落盘）
+        // （E-13：原 7 键含已删除的核间心跳/重连二键）
         let resp = h
             .svc
             .apply(&request(
@@ -1913,8 +1915,6 @@ gateway:
                     ("system.log_level", serde_json::json!("info")),
                     ("intercore.host", serde_json::json!("127.0.0.1")),
                     ("intercore.port", serde_json::json!(9100)),
-                    ("intercore.heartbeat_interval_sec", serde_json::json!(5)),
-                    ("intercore.reconnect_interval_sec", serde_json::json!(3)),
                     ("gateway.listen_addr", serde_json::json!("0.0.0.0")),
                     ("gateway.listen_port", serde_json::json!(2404)),
                 ],
@@ -1930,19 +1930,15 @@ gateway:
             assert_eq!(g.system.log_level, "info");
             assert_eq!(g.intercore.host, "127.0.0.1");
             assert_eq!(g.intercore.port, 9100);
-            assert_eq!(g.intercore.heartbeat_interval_sec, 5);
-            assert_eq!(g.intercore.reconnect_interval_sec, 3);
             assert_eq!(g.gateway.listen_addr, "0.0.0.0");
             assert_eq!(g.gateway.listen_port, 2404);
         }
         let after_text = disk(&h);
-        assert_ne!(after_text, before_text, "7 个键都变了 ⇒ 文件必被写");
+        assert_ne!(after_text, before_text, "5 个键都变了 ⇒ 文件必被写");
         for want in [
             "log_level: info",
             "host: 127.0.0.1",
             "port: 9100",
-            "heartbeat_interval_sec: 5",
-            "reconnect_interval_sec: 3",
             "listen_addr: 0.0.0.0",
             "listen_port: 2404",
         ] {
@@ -1950,8 +1946,8 @@ gateway:
         }
 
         let entries = sink.entries();
-        // 7 个字段 + 1 条 write_mode
-        assert_eq!(entries.len(), 8, "逐字段一条 + write_mode 一条");
+        // 5 个字段 + 1 条 write_mode（E-13：原 7 + 1）
+        assert_eq!(entries.len(), 6, "逐字段一条 + write_mode 一条");
         for e in &entries {
             assert_eq!(
                 e.op,
@@ -1964,8 +1960,6 @@ gateway:
             "system.log_level",
             "intercore.host",
             "intercore.port",
-            "intercore.heartbeat_interval_sec",
-            "intercore.reconnect_interval_sec",
             "gateway.listen_addr",
             "gateway.listen_port",
         ] {
@@ -2118,8 +2112,6 @@ gateway:
             "intercore.host" | "gateway.listen_addr" => serde_json::json!("192.168.3.21"),
             "intercore.port" => serde_json::json!(9101),
             "gateway.listen_port" => serde_json::json!(2405),
-            "intercore.heartbeat_interval_sec" => serde_json::json!(9),
-            "intercore.reconnect_interval_sec" => serde_json::json!(8),
             other => panic!("新增可写字段 `{other}` 未在此登记探针值"),
         }
     }

@@ -125,24 +125,33 @@ pub struct UplinkPoint {
     /// 语义标签（中文，供对点清单与日志）。来自 [`point_table::label`]（查不到 ⇒ `""`）
     /// 或本模块的固定表（grid 派生点名 / 聚合点名）。
     pub label: &'static str,
+    /// **工程单位**（上送载荷 `u` 的唯一真源；01 PRD §8.3.3 标必填）。
+    ///
+    /// 来自 [`point_table::unit`]（逐点显式登记，**不由 `label` 尾 token 解析**）或
+    /// 本模块的固定表（grid 派生 6 点 = [`GRID_DERIVED_6`] 第 4 元）。**位点恒空串** ——
+    /// 上送形态 `"bool"` 由消费方按 [`UplinkKind::Bit`] 决定，不属点表属性。
+    pub unit: &'static str,
 }
 
 // ───────────────────────────── 段 1：grid 派生 6 点（固定表，不得改号） ─────────────────────────────
 
-/// 段 1 固定表：`(IOA, 点名, 语义标签)`。
+/// 段 1 固定表：`(IOA, 点名, 语义标签, 工程单位)`。
 ///
 /// 这 6 点是 `DataPackage.electrical` 的**派生量**（既有"现场追认"口径），**不按
 /// `points::expand` 产出**（该站配置展开为 16 点，见 §9.7 C-1：分相 15 点不进上送）。
 /// 点名（`active_power` 等）是**点名的唯一例外**（§9.7 C-17 ②），**不得**改为
 /// `p_total_1` / `p_1` 等位置式名。
+///
+/// **单位是第 4 元**（不再由 `mupc-core-bin` 的 `grid_unit` 按点名另立一份表 —— 同一份
+/// 事实两处维护必然漂移；U-74 审查 A-1 的口径统一）。PF 无量纲 ⇒ 空串（**不臆造** `"1"`）。
 #[rustfmt::skip]
-pub const GRID_DERIVED_6: &[(u32, &str, &str)] = &[
-    (1, "active_power", "总有功功率（来源 DataPackage.electrical.active_power）"),
-    (2, "reactive_power", "总无功功率（来源 .reactive_power）"),
-    (3, "voltage", "电压（现取 A 相 u[0]，§9.7 C-13 如实登记）"),
-    (4, "current", "电流（现取 A 相幅值，§9.7 C-13）"),
-    (5, "cos_phi", "功率因数（现取 A 相，§9.7 C-13）"),
-    (6, "frequency", "频率（现为常量 50.0，§9.7 C-13）"),
+pub const GRID_DERIVED_6: &[(u32, &str, &str, &str)] = &[
+    (1, "active_power", "总有功功率（来源 DataPackage.electrical.active_power）", "kW"),
+    (2, "reactive_power", "总无功功率（来源 .reactive_power）", "kvar"),
+    (3, "voltage", "电压（现取 A 相 u[0]，§9.7 C-13 如实登记）", "V"),
+    (4, "current", "电流（现取 A 相幅值，§9.7 C-13）", "A"),
+    (5, "cos_phi", "功率因数（现取 A 相，§9.7 C-13）", ""),
+    (6, "frequency", "频率（现为常量 50.0，§9.7 C-13）", "Hz"),
 ];
 
 // ───────────────────────────── A 档表（§9.2.2 的"唯一表驱动"） ─────────────────────────────
@@ -423,6 +432,8 @@ struct StationPoint {
     /// 标量 = 寄存器块内偏移；位 = 位块内偏移（0 基）。
     offset: u16,
     label: &'static str,
+    /// 工程单位（[`point_table::unit`]；位点 / 无量纲点 = `""`）。
+    unit: &'static str,
 }
 
 impl StationPoint {
@@ -445,6 +456,7 @@ fn expand_station(st: &StationConf) -> Result<Vec<StationPoint>, String> {
                 PointKind::Bit { .. } => UplinkKind::Bit,
             };
             let label = point_table::label(st.role, &p.metric).unwrap_or("");
+            let unit = point_table::unit(st.role, &p.metric);
             out.push(StationPoint {
                 metric: p.metric,
                 kind,
@@ -453,6 +465,7 @@ fn expand_station(st: &StationConf) -> Result<Vec<StationPoint>, String> {
                 block_func: b.func,
                 offset: p.kind.offset(),
                 label,
+                unit,
             });
         }
     }
@@ -523,7 +536,7 @@ pub fn build_uplink_points(
         match st.role {
             Role::MeterGrid => {
                 // 段 1：**固定派生 6 点**（不按 points::expand —— §9.7 C-1）
-                for (ioa, metric, label) in GRID_DERIVED_6 {
+                for (ioa, metric, label, unit) in GRID_DERIVED_6 {
                     out.push(UplinkPoint {
                         ioa: SEG_GRID + *ioa,
                         station: st.id.clone(),
@@ -532,6 +545,7 @@ pub fn build_uplink_points(
                         class: DataClass::A,
                         channels: ChannelMask::BOTH,
                         label,
+                        unit,
                     });
                 }
             }
@@ -559,6 +573,8 @@ pub fn build_uplink_points(
                         class: DataClass::C,
                         channels: ChannelMask::IEC104,
                         label: g.label,
+                        // 聚合点 = 位点 ⇒ 无工程单位（上送形态 `bool` 由消费方按 kind 决定）
+                        unit: "",
                     });
                 }
                 // 288 个告警位：**MQTT-only**（PRD §8.3.1：主站无逐从控/三级粒度需求）
@@ -665,6 +681,7 @@ fn push_iec_segment(
             class: class_of(p),
             channels,
             label: p.label,
+            unit: p.unit,
         });
     }
 }
@@ -1111,11 +1128,13 @@ mod tests {
         let pts = build_uplink_points(&cfg_ref(), Some(&pcs_ref())).unwrap();
 
         // 段 1：grid 固定派生 6 点（IOA 1–6，现场追认、不得改号）
-        for (ioa, metric, _) in GRID_DERIVED_6 {
+        for (ioa, metric, _, unit) in GRID_DERIVED_6 {
             let p = get(&pts, "grid_meter", metric);
             assert_eq!(p.ioa, *ioa, "grid {metric} 须为 IOA {ioa}");
             assert_eq!(p.channels, ChannelMask::BOTH);
             assert_eq!(p.class, DataClass::A);
+            // 单位随表走（第 4 元）—— 不得再由 core-bin 另立 `grid_unit` 表（A-1 口径统一）
+            assert_eq!(p.unit, *unit, "grid {metric} 的单位须取自 GRID_DERIVED_6");
         }
 
         // 段 2：meter_batt 40 点按 (块 addr, 块内偏移) 升序 ⇒ 101–140

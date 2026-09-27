@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mupc_data_processing::latest_values::{LatestValues, PointView};
+use mupc_data_processing::latest_values::{LatestValues, PointId, PointView};
 use mupc_gateway::iec104::command::{TelemetryItem, TelemetryKind};
 use mupc_gateway::iec104::protocol::{COT_CYCLIC, COT_INTROGEN, COT_SPONT};
 use mupc_gateway::iec104::server::{DataClass as GwDataClass, Iec104Server};
@@ -62,8 +62,9 @@ pub struct Iec104UplinkDriver {
 
 impl Iec104UplinkDriver {
     /// 构造。`class_a_interval` / `class_b_interval` 为 A/B 档周期（§9.2.2「周期须可配置」
-    /// ⇒ 由调用方注入；装配层传 [`DEFAULT_CLASS_A_INTERVAL`] / [`DEFAULT_CLASS_B_INTERVAL`]，
-    /// 后续可改读配置）。C 档为 COS（变更驱动），无周期。构造**无 I/O**。
+    /// ⇒ 由调用方注入；**装配层自 U-74 审查 A-2 起传 `config.gateway.periods.{a_ms,b_ms}`
+    /// （缺省即 [`DEFAULT_CLASS_A_INTERVAL`] / [`DEFAULT_CLASS_B_INTERVAL`]，见
+    /// `core_config::Iec104PeriodsCfg`）**）。C 档为 COS（变更驱动），无周期。构造**无 I/O**。
     pub fn new(
         latest: Arc<LatestValues>,
         points: Arc<Vec<UplinkPoint>>,
@@ -78,6 +79,12 @@ impl Iec104UplinkDriver {
             class_a_interval,
             class_b_interval,
         }
+    }
+
+    /// 用例尺子：注入的 A/B 档周期（**不被 `new` 丢弃**的判据；生产无消费方 ⇒ 仅 `cfg(test)`）。
+    #[cfg(test)]
+    pub(crate) fn class_intervals(&self) -> (Duration, Duration) {
+        (self.class_a_interval, self.class_b_interval)
     }
 
     /// spawn A/B/C 三条任务，返回句柄（装配层入 abort 名单）。
@@ -205,6 +212,17 @@ fn now_millis() -> u64 {
 ///
 /// `cot` 由调用方给（周期=1 / 突发=3 / 总召=20）。**时标 = 该点采集时刻**（`pv.value.ts_ms`），
 /// 不是响应/发送时刻（§8.4）。
+///
+/// **取数方式按调用形态分流**（审查 D-1/D-2 性能条）：
+/// - `only_changed = None`（A/B 档周期、C 档首轮、总召）：全量一轮，走**单次快照 + 建索引**
+///   （避免逐点 `get` 反复取锁，§9.1.6）；
+/// - `only_changed = Some(..)`（C 档 COS）：变位数远小于点表规模 ⇒ **逐点 `get`**，免去每拍
+///   639 点全量克隆（每点 2×`String`）。
+///
+/// **两种取数语义等价**：未登记点 `get()` 返回 `Unconfigured`（`quality != Ok` ⇒
+/// `is_fresh` 为 false ⇒ 同样被跳过），与"索引里查不到 ⇒ continue"同效；
+/// 已登记点两种方式取到同一 `PointView`。逐字节一致性由
+/// `cos_and_full_paths_yield_identical_items` 锚定（同一数据集、两条真实路径对拍）。
 pub(crate) fn build_items(
     latest: &LatestValues,
     points: &[UplinkPoint],
@@ -213,12 +231,14 @@ pub(crate) fn build_items(
     class: Option<SouthDataClass>,
     only_changed: Option<&HashSet<(String, String)>>,
 ) -> Vec<TelemetryItem> {
-    // 单次全量读 + 建索引（避免逐点 get 反复取锁，§9.1.6）
-    let idx: HashMap<(String, String), PointView> = latest
-        .all()
-        .into_iter()
-        .map(|pv| ((pv.id.station.clone(), pv.id.metric.clone()), pv))
-        .collect();
+    // 仅全量路径预建索引（变位路径不需要，且建索引本身就是 639 点克隆）
+    let idx: Option<HashMap<(String, String), PointView>> = only_changed.is_none().then(|| {
+        latest
+            .all()
+            .into_iter()
+            .map(|pv| ((pv.id.station.clone(), pv.id.metric.clone()), pv))
+            .collect()
+    });
 
     let mut out: Vec<TelemetryItem> = Vec::new();
     for p in points {
@@ -236,8 +256,21 @@ pub(crate) fn build_items(
                 continue;
             }
         }
-        let Some(pv) = idx.get(&key) else {
-            continue;
+        // 取该点快照：全量路径查预建索引（`None` = 未登记 ⇒ 跳过）；变位路径逐点 `get`
+        // （未登记 ⇒ `Unconfigured`，随后 `is_fresh` 判否 ⇒ 同样跳过）
+        let fetched;
+        let pv: &PointView = match &idx {
+            Some(idx) => match idx.get(&key) {
+                Some(pv) => pv,
+                None => continue,
+            },
+            None => {
+                fetched = latest.get(&PointId {
+                    station: p.station.clone(),
+                    metric: p.metric.clone(),
+                });
+                &fetched
+            }
         };
         let is_bit = matches!(p.kind, UplinkKind::Bit);
         if !latest.is_fresh(&pv.id, &pv.value, is_bit, now_ms) {
@@ -287,6 +320,8 @@ struct UplinkPointJson {
     /// 通道掩码原值（`0b01`=IEC104 / `0b10`=MQTT / `0b11`=BOTH）
     channels: u8,
     label: String,
+    /// 工程单位（与上送载荷 `u` 同源；空串 = 无量纲/位点）
+    unit: &'static str,
 }
 
 impl From<&UplinkPoint> for UplinkPointJson {
@@ -306,6 +341,7 @@ impl From<&UplinkPoint> for UplinkPointJson {
             },
             channels: p.channels.0,
             label: p.label.to_string(),
+            unit: p.unit,
         }
     }
 }
@@ -378,6 +414,13 @@ pub const MQTT_POINTS_WITH_PCS: usize = 624;
 pub const MQTT_FAILURE_ALERT_THRESHOLD: u64 = 10;
 /// 连续失败告警的**最小间隔**（§9.3.6：之后每 5 min 最多一条，不风暴）。
 pub const MQTT_FAILURE_ALERT_MIN_INTERVAL_MS: u64 = 300_000;
+
+/// **事件类 topic 的 QoS**（§9.3.3 的 `{prefix}/event/{station}` 行 = QoS2；§9.3.4 表同口径）。
+///
+/// **钉死常量而非取 `mqtt_bridge.north.qos`**：事件是"故障/状态迁移"这类**不可丢**的上报
+/// （§9.3.4 的故障类事件），配置项 `north.qos`（缺省 1）服务的是周期遥测；让事件跟随它
+/// 会让"调低遥测 QoS 省带宽"顺手降级事件可靠性。设计未给事件 QoS 的配置面 ⇒ 不臆造。
+pub const EVENT_QOS: u8 = 2;
 /// 缓存淘汰 WARN 的聚合窗（§9.3.3：按 1 min 聚合，不风暴）。
 pub const MQTT_CACHE_WARN_INTERVAL_MS: u64 = 60_000;
 /// 证书到期检查周期（§9.3.5 TLS-3：启动期 + 每日）。
@@ -477,6 +520,10 @@ pub struct MqttAssemblyOutcome {
     pub status: MqttServiceStatus,
     /// 失败原因（`Failed` 时非空；**不得含凭据**）。
     pub detail: Option<String>,
+    /// **北向上送器实例**（未启用 / 装配失败 ⇒ `None`）—— A-5（PRD BF-6「累计失败/丢弃
+    /// 计数须**可查询**」）的出口所需：装配层据此起 [`crate::link_counters`] 的周期上报。
+    /// `None` 与"已启用但计数全 0"**不可混同**（后者是真实态，前者是"无此通道"）。
+    pub publisher: Option<Arc<MqttUplinkPublisher>>,
 }
 
 /// MQTT 装配（**唯一**的 `NorthMqttClient`/`LocalMqttClient` 构造点，§9.4 序 7）。
@@ -501,6 +548,7 @@ pub async fn assemble_mqtt_bridge(
         tasks: Vec::new(),
         status: MqttServiceStatus::Disabled,
         detail: None,
+        publisher: None,
     };
     if launch.is_empty() {
         // **零连接尝试**：没有客户端对象、没有任务、没有连接（CFG-2）
@@ -596,6 +644,9 @@ pub async fn assemble_mqtt_bridge(
                 for (label, h) in publisher.spawn() {
                     out.tasks.push((label, h));
                 }
+                // A-5：把实例交回装配层 —— PRD BF-6 的计数出口（`link_counters` 周期上报）
+                // 需要它；装配失败的早退路径不设（保持 `None`）
+                out.publisher = Some(publisher);
                 tracing::info!(
                     broker = %north_cfg.broker_addr,
                     client_id = %north_cfg.client_id,
@@ -934,43 +985,23 @@ pub fn mqtt_point_count(plan: &[StationPlan]) -> usize {
 
 // ───────────────────────────── 载荷（§9.3.4） ─────────────────────────────
 
-/// 单位解析（§9.3.4 的 `u`）。
+/// 上送单位（§9.3.4 的 `u`）——**取点表逐点登记的字段，不做任何 label 解析**。
 ///
-/// **口径**：位点恒为 `"bool"`；标量点取点表 `label` 的**尾 token 白名单**（如
-/// `"簇累计充电电量 kWh"` ⇒ `kWh`）。**未识别 ⇒ 空串**（如实表达"点表未登记单位"，
-/// **不臆造**）。登记为已知边界：02 PRD §9.7.5 是**设备级**单位表、无点级机读表，
-/// 故机械来源只能是 label 尾 token；观测量级的覆盖率见单测。
-pub fn unit_of(kind: UplinkKind, label: &str) -> &'static str {
-    if matches!(kind, UplinkKind::Bit) {
+/// **口径（U-74 审查 A-1 订正）**：位点恒 `"bool"`（上送形态，非点表属性）；标量点直接返回
+/// [`UplinkPoint::unit`]（由 `mupc-southd::point_table::PointReg::unit` 逐点显式登记，
+/// 与 02 PRD §9.7.5 同源）。空串的语义 = **"本点无工程单位 / 无量纲"**（枚举、位图、PF、
+/// 位置编号、计数），**不是**"解析失败"—— 不再存在"解析失败"这一态。
+///
+/// **为什么废掉"`label` 尾 token 白名单"**（原实现，缺陷实证）：点表 `label` 的尾部普遍是
+/// 括注（`"簇组 SOC %（控制输入；点名 \`soc\`）"`）或单位写在括注之前 ⇒ 尾 token 落到
+/// `"…（控制输入；点名 \`soc\`）"`，白名单恒不中 ⇒ A 档 1 s 点的 `u` 落空串而
+/// PRD §8.3.3 标其必填。`grid` 6 点原走本文件的另一张 `grid_unit` 表（同一事实两处维护）
+/// ⇒ 已并入 `mupc-southd::uplink::GRID_DERIVED_6` 第 4 元。
+pub fn unit_of(p: &UplinkPoint) -> &'static str {
+    if matches!(p.kind, UplinkKind::Bit) {
         return "bool";
     }
-    unit_from_label(label).unwrap_or("")
-}
-
-/// 已知单位白名单（**02 PRD §9.7.5 出现的全部单位**；大小写敏感）。
-const KNOWN_UNITS: &[&str] = &[
-    "V", "A", "kW", "kvar", "kVA", "kWh", "kvarh", "Ah", "Hz", "%", "℃", "kPa", "ppm", "dB/M",
-];
-
-/// 取 label 的尾 token 并在白名单内匹配。
-fn unit_from_label(label: &str) -> Option<&'static str> {
-    let tail = label.split_whitespace().last()?;
-    KNOWN_UNITS.iter().copied().find(|u| *u == tail)
-}
-
-/// grid 6 点（§9.7 C-17 ② 的派生名）——**label 不含单位** ⇒ 显式单位表
-/// （依据 02 PRD §9.7.5：ADL400/meter_grid 电压 V、电流 A、功率 kW/kvar、PF 无量纲、频率 Hz）。
-fn grid_unit(metric: &str) -> Option<&'static str> {
-    match metric {
-        "active_power" => Some("kW"),
-        "reactive_power" => Some("kvar"),
-        "voltage" => Some("V"),
-        "current" => Some("A"),
-        // PF 无量纲：按 02 PRD §9.7.5 的分辨率口径（0.001）不带单位 ⇒ 空串，不臆造 "1"
-        "cos_phi" => Some(""),
-        "frequency" => Some("Hz"),
-        _ => None,
-    }
+    p.unit
 }
 
 /// 载荷点位（字段名/顺序 = §9.3.4 逐字）。
@@ -1115,8 +1146,9 @@ impl MqttUplinkPublisher {
 
     /// 统计快照（§9.3.6：BF-6 **不得静默丢弃**）。
     ///
-    /// 无生产消费方（§9.3.3 留证③："供后续管理面/屏显示"）⇒ `#[allow(dead_code)]` 如实登记。
-    #[allow(dead_code)]
+    /// **生产消费方**（U-74 审查 A-5 补齐）：`crate::link_counters::BothCounters` 每
+    /// [`crate::link_counters::LINK_COUNTER_TICK_MS`] 取一次并打一行（`stats()` 之前
+    /// 带 `#[allow(dead_code)]`，注释自认"无生产消费方"—— 那是 BF-6 落空的直接证据）。
     pub fn stats(&self) -> MqttUplinkStatsSnapshot {
         MqttUplinkStatsSnapshot {
             published_total: self.counters.published_total.load(Ordering::Relaxed),
@@ -1298,59 +1330,57 @@ impl MqttUplinkPublisher {
             let Some((topic, payload, ts_ms, seq)) = msg else {
                 continue;
             };
-            self.publish_or_cache(topic, payload, ts_ms, seq).await;
+            // 遥测：QoS 取配置（§9.3.2 `mqtt_bridge.north.qos`）
+            self.publish_or_cache(topic, payload, ts_ms, seq, self.cfg.qos)
+                .await;
         }
     }
 
     /// 组装一条站内消息；**全点 `Unconfigured` ⇒ `None`**（不发空转报文）。
     ///
     /// 返回 `(topic, payload, ts_ms, seq)`。
+    ///
+    /// **取数：按需单点 `get`**（审查 D-1/D-2 性能条）——`selected` 只含本档点（首轮全量或
+    /// COS 变位集），旧实现每站先 `station_snapshot` 把**该站全部已登记点**克隆一遍
+    /// （BMS 站 288 点、全站 639 点规模，每点 2×`String`）再按 metric 命中，
+    /// 而实际消费的点数 = `selected.len()`。语义不变：未登记点 `get()` 返回
+    /// `Unconfigured`（`v=null`/`q=unconfigured`/`ts=0`），与旧实现"快照里查不到该 metric"
+    /// 的产出**逐字节相同**（由 `message_bytes_pin_pre_change_semantics` 锚定）。
     fn build_message(
         &self,
         st: &StationPlan,
         selected: &[usize],
         now_ms: u64,
     ) -> Option<(String, Vec<u8>, u64, u64)> {
-        // 单次站内读（一次读锁；避免逐点 `get` 反复取锁，§9.1.6）
-        let views: HashMap<String, mupc_data_processing::latest_values::PointView> = self
-            .latest
-            .station_snapshot(&st.id)
-            .into_iter()
-            .map(|pv| (pv.id.metric.clone(), pv))
-            .collect();
-
         let mut pts: Vec<PayloadPoint> = Vec::with_capacity(selected.len());
         let mut ts_max = 0u64;
         let mut any_configured = false;
         for i in selected {
             let p = &self.points[*i];
-            let pv = views.get(&p.metric);
-            let (value, q, ts_ms) = match pv {
-                None => (None, PointQuality::Unconfigured, 0u64),
-                Some(pv) => {
-                    let is_bit = matches!(p.kind, UplinkKind::Bit);
-                    // 新鲜度门控（§9.1.2）：质量 Ok 但已过期 ⇒ `stale`（判据唯一真源在快照）
-                    let q = if pv.value.quality == PointQuality::Ok
-                        && !self.latest.is_fresh(&pv.id, &pv.value, is_bit, now_ms)
-                    {
-                        PointQuality::Stale
-                    } else {
-                        pv.value.quality
-                    };
-                    (pv.value.value, q, pv.value.ts_ms)
-                }
+            // 单点读（`PointId.station` 与 `StationPlan.id` 同源，见 `plan_stations`）
+            let pv = self.latest.get(&PointId {
+                station: st.id.clone(),
+                metric: p.metric.clone(),
+            });
+            let is_bit = matches!(p.kind, UplinkKind::Bit);
+            // 新鲜度门控（§9.1.2）：质量 Ok 但已过期 ⇒ `stale`（判据唯一真源在快照）
+            // `quality != Ok`（含未登记 `Unconfigured`）一律按原质量输出（§9.3.4：`q != ok`
+            // 保留原值、不可得写 `null`）。
+            let q = if pv.value.quality == PointQuality::Ok
+                && !self.latest.is_fresh(&pv.id, &pv.value, is_bit, now_ms)
+            {
+                PointQuality::Stale
+            } else {
+                pv.value.quality
             };
+            let (value, q, ts_ms) = (pv.value.value, q, pv.value.ts_ms);
             if q != PointQuality::Unconfigured {
                 any_configured = true;
             }
             ts_max = ts_max.max(ts_ms);
-            // grid 6 点用**显式单位表**（它们的 label 是"总有功功率（来源 …）"形态、无尾 token）；
-            // 其余站取点表 label 的尾 token（未识别 ⇒ 空串，不臆造）
-            let unit = if p.station == "grid_meter" {
-                grid_unit(&p.metric).unwrap_or_else(|| unit_of(p.kind, p.label))
-            } else {
-                unit_of(p.kind, p.label)
-            };
+            // 单位 = 点表逐点登记的字段（含 grid 6 点，见 GRID_DERIVED_6 第 4 元）——
+            // **全站同一条路径**，不再对 grid 站特判（那正是"同一事实两处维护"的成因，A-1）
+            let unit = unit_of(p);
             pts.push(PayloadPoint {
                 n: p.metric.clone(),
                 v: value,
@@ -1386,10 +1416,23 @@ impl MqttUplinkPublisher {
         ))
     }
 
-    /// 发布（QoS1）；**未连接或发布失败 ⇒ 入离线缓存**（§9.3.3）。
-    async fn publish_or_cache(&self, topic: String, payload: Vec<u8>, ts_ms: u64, seq: u64) {
+    /// 发布并按需缓存；**未连接或发布失败 ⇒ 入离线缓存**（§9.3.3）。
+    ///
+    /// **`qos` 由调用方按 topic 分档**（U-74 审查 A-3 订正）：原实现恒用 `self.cfg.qos`
+    /// （缺省 1），与设计 §9.3.3「`event/{station}`（QoS2）」及本文件 `publish_station_edges`
+    /// 的注释"故障类事件走 QoS2（§9.3.4 表）"**自相矛盾** —— 事件实际以 QoS1 发出。
+    /// 现在：遥测类传 [`MqttPublishCfg::qos`]（可配），事件类传 [`EVENT_QOS`]（设计钉死 2）。
+    /// **缓存项一并保存 `qos`**（`Pending.qos`）⇒ 补送路径不降级。
+    async fn publish_or_cache(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        ts_ms: u64,
+        seq: u64,
+        qos: u8,
+    ) {
         if self.is_connected() {
-            match self.publish_raw(&topic, &payload, self.cfg.qos).await {
+            match self.publish_raw(&topic, &payload, qos).await {
                 Ok(()) => {
                     self.counters
                         .published_total
@@ -1407,7 +1450,7 @@ impl MqttUplinkPublisher {
         let p = Pending {
             topic,
             payload,
-            qos: self.cfg.qos,
+            qos,
             seq,
             ts_ms,
         };
@@ -1615,8 +1658,10 @@ impl MqttUplinkPublisher {
                         }
                     };
                     let topic = format!("{}/event/{}", self.cfg.topic_prefix, st.id);
-                    // 故障类事件走 QoS2（§9.3.4 表）
-                    self.publish_or_cache(topic, body, now, seq).await;
+                    // 事件类走 QoS2（§9.3.3 的 `event/{station}` 行 / §9.3.4 表）——
+                    // **设计钉死，不取 `cfg.qos`**（A-3 订正：原实现注释写 QoS2 而实发 QoS1）
+                    self.publish_or_cache(topic, body, now, seq, EVENT_QOS)
+                        .await;
                 }
             }
         }
@@ -1632,6 +1677,181 @@ mod tests {
     use mupc_data_processing::latest_values::{PointId, PointQuality, PointValue};
     use mupc_southd::config::{SouthPcsConfig, SouthStationsConfig};
     use mupc_southd::uplink::build_uplink_points;
+
+    /// A-2 判别力：**注入的 A/B 档周期必须真被驱动器持住**（而不是被 `new` 丢掉后另取常量）。
+    ///
+    /// **改坏实现即红**：把 `Iec104UplinkDriver::new` 改成忽略 `class_a_interval` 形参、
+    /// 内部写死 `DEFAULT_CLASS_A_INTERVAL` ⇒ 首条断言红。
+    #[test]
+    fn iec104_driver_keeps_injected_class_intervals() {
+        let pool = Arc::new(mupc_data_processing::latest_values::LatestValues::new(5_000));
+        let server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+            mupc_gateway::iec104::server::Iec104Config::default(),
+        ));
+        let d = Iec104UplinkDriver::new(
+            pool,
+            Arc::new(points()),
+            server,
+            Duration::from_millis(2_500),
+            Duration::from_millis(8_000),
+        );
+        assert_eq!(
+            d.class_intervals(),
+            (Duration::from_millis(2_500), Duration::from_millis(8_000)),
+            "驱动器须持住注入的周期（A-2：配了值必须生效）"
+        );
+        // 缺省构造（= 装配层未配 gateway.periods 时的取值）仍与旧编译期常量一致
+        assert_eq!(
+            crate::core_config::Iec104PeriodsCfg::default().a_ms,
+            DEFAULT_CLASS_A_INTERVAL.as_millis() as u64
+        );
+        assert_eq!(
+            crate::core_config::Iec104PeriodsCfg::default().b_ms,
+            DEFAULT_CLASS_B_INTERVAL.as_millis() as u64
+        );
+    }
+
+    /// A-1 判别力①：**A 档 22 点**（PCS 启用）的 `u` **逐点钉死**，且不得有任何一点空着
+    /// —— 值全部取自 `mupc-southd::point_table` 的显式 `unit` 字段（不由 `label` 尾 token 解析）。
+    ///
+    /// **改坏实现即红**（本轮实证）：把 `unit_of` 改回"label 尾 token 白名单"后，
+    /// `bms.soc`（label 以 `（控制输入；点名 \`soc\`）` 结尾）、`bms.bms_io_17`（单位写在括注
+    /// **之前**）、`bms.bms_meta_6` 三点落空串 ⇒ 本用例在第一条断言处失败。
+    #[test]
+    fn a_class_units_are_point_table_fields_not_label_tails() {
+        let pts = points();
+        // (station, metric, 期望单位) —— 22 项 == A 档点数（PCS 启用）
+        let expect: &[(&str, &str, &str)] = &[
+            // ② meter_batt（9）
+            ("meter_batt", "mb_power_7", "kW"),
+            ("meter_batt", "mb_power_15", "kvar"),
+            ("meter_batt", "mb_ui_1", "V"),
+            ("meter_batt", "mb_ui_2", "V"),
+            ("meter_batt", "mb_ui_3", "V"),
+            ("meter_batt", "mb_ui_4", "A"),
+            ("meter_batt", "mb_ui_5", "A"),
+            ("meter_batt", "mb_ui_6", "A"),
+            ("meter_batt", "mb_freq_line_1", "Hz"),
+            // ③ bms（4）—— 前 3 项是 A-1 的**原缺陷命中点**（改回尾 token 解析必红）
+            ("bms", "soc", "%"),
+            ("bms", "bms_io_16", "V"),
+            ("bms", "bms_io_17", "A"),
+            ("bms", "bms_meta_6", "kW"),
+            // ④ PCS（3）
+            ("pcs", "pcs_3zone_14", ""),
+            ("pcs", "pcs_3zone_33", "kW"),
+            ("pcs", "pcs_3zone_37", "kvar"),
+            // ① grid 6（派生名，单位随 `GRID_DERIVED_6` 第 4 元）
+            ("grid_meter", "active_power", "kW"),
+            ("grid_meter", "reactive_power", "kvar"),
+            ("grid_meter", "voltage", "V"),
+            ("grid_meter", "current", "A"),
+            ("grid_meter", "cos_phi", ""),
+            ("grid_meter", "frequency", "Hz"),
+        ];
+        // 期望表本身必须**恰好覆盖** A 档点集（防"漏断言某点"= 零判别力的半边）
+        let a_points: Vec<&UplinkPoint> = pts
+            .iter()
+            .filter(|p| p.class == SouthDataClass::A && p.channels.has(ChannelMask::MQTT))
+            .collect();
+        assert_eq!(a_points.len(), expect.len(), "A 档 MQTT 点数须与期望表等长");
+        for (station, metric, unit) in expect {
+            let p = pts
+                .iter()
+                .find(|p| p.station == *station && p.metric == *metric)
+                .unwrap_or_else(|| panic!("A 档点 {station}.{metric} 不在点表里"));
+            assert_eq!(
+                unit_of(p),
+                *unit,
+                "A 档点 {station}.{metric} 的 u 须为点表显式登记值（label=`{}`）",
+                p.label
+            );
+        }
+        // 除可数上例外，A 档**只允许两处**空单位：无量纲 PF 与枚举运行状态
+        let empty: Vec<String> = a_points
+            .iter()
+            .filter(|p| unit_of(p).is_empty())
+            .map(|p| format!("{}.{}", p.station, p.metric))
+            .collect();
+        assert_eq!(
+            empty,
+            vec!["grid_meter.cos_phi".to_string(), "pcs.pcs_3zone_14".to_string()],
+            "A 档空单位点须恰为「无量纲 PF + 枚举状态」两处"
+        );
+    }
+
+    /// A-1 判别力①（扩展）：**非 A 档**标量同样吃点表 `unit` 字段 —— 尤其覆盖三类
+    /// 原实现必失的点：单位**写在括注之前**、单位**写在括注之后**、括注里含假单位 token。
+    #[test]
+    fn scalar_units_come_from_point_table_across_all_stations() {
+        let pts = points();
+        let expect: &[(&str, &str, &str, &str)] = &[
+            // (station, metric, 期望单位, 该点的形态说明)
+            ("bms", "bms_io_21", "kΩ", "单位紧跟 label 末尾（原实现白名单**未收录** kΩ）"),
+            ("bms", "bms_term_1", "℃", "单位在**括注之后**：`簇端子温度 001（箱体 T1）℃`"),
+            ("bms", "bms_io_20", "%", "SOH（addr 119），同 `soc` 的括注形态"),
+            ("bms", "bms_cap_1", "Ah", "单位在括注之前：`簇累计充电容量 Ah（Q-16…）`"),
+            ("meter_batt", "mb_phase_12", "A", "零序电流，单位在括注之前"),
+            ("hvac", "hvac_in_1", "℃", "空调温度，单位在括注之前"),
+            ("hvac", "hvac_in_4", "%", "空调湿度"),
+            ("fire", "fire_det_4", "ppm", "探测器模板 +3（CO 浓度），单位在括注之前"),
+            ("fire", "fire_sys_2", "kPa", "消防钢瓶气压（addr 5）"),
+            ("pcs", "pcs_3zone_9", "V", "PCS BMS 系统总电压"),
+            ("pcs", "pcs_3zone_10", "A", "PCS BMS 系统总电流"),
+            ("pcs", "pcs_3zone_30", "kW", "PCS 输出有功功率 A 相"),
+            ("pcs", "pcs_3zone_43", "kWh", "PCS 交流累计充电电量"),
+            ("pcs", "pcs_3zone_75", "kWh", "PCS 直流累计放电电量"),
+        ];
+        for (station, metric, unit, why) in expect {
+            let p = match pts.iter().find(|p| p.station == *station && p.metric == *metric) {
+                Some(p) => p,
+                // 参考配置里没有该点名（如消防气压点），跳过而非静默通过
+                None => panic!("点 {station}.{metric} 不在参考点表里（{why}）—— 期望表写错了"),
+            };
+            assert_eq!(unit_of(p), *unit, "{station}.{metric}：{why}（label=`{}`）", p.label);
+        }
+    }
+
+    /// A-1 判别力②：**无单位的点 `u` 必须为空**（而不是被尾 token 猜成错值）；位点恒 `"bool"`。
+    #[test]
+    fn unitless_points_report_empty_and_bits_are_bool() {
+        let pts = points();
+        let empty_expect = [
+            ("grid_meter", "cos_phi", "PF 无量纲"),
+            ("pcs", "pcs_3zone_14", "运行状态枚举"),
+            ("pcs", "pcs_3zone_38", "A 相功率因数（label 含字母 A，**不是**单位安培）"),
+            ("bms", "bms_io_1", "簇状态枚举"),
+            ("bms", "bms_io_25", "最高单体电压**对应点**（位置编号，量纲无意义）"),
+            ("bms", "bms_meta_1", "程序版本号"),
+            ("bms", "bms_meta_2", "从控数量（计数，非物理单位）"),
+            ("meter_batt", "mb_phase_7", "PT 变比"),
+            ("fire", "fire_sys_6", "火警状态枚举"),
+            ("fire", "fire_det_3", "探测器数据 1（整字位域打包，无单一单位）"),
+        ];
+        for (station, metric, why) in empty_expect {
+            let p = pts
+                .iter()
+                .find(|p| p.station == *station && p.metric == *metric)
+                .unwrap_or_else(|| panic!("点 {station}.{metric} 不在参考点表里"));
+            assert_eq!(
+                unit_of(p),
+                "",
+                "{station}.{metric} 无工程单位（{why}）⇒ u 须为空串，不得臆造（label=`{}`）",
+                p.label
+            );
+        }
+        // 位点（含 BMS 告警位 / 聚合点）恒 `"bool"`，与点表 `unit` 空串无冲突
+        let bits: Vec<&UplinkPoint> = pts
+            .iter()
+            .filter(|p| p.kind == UplinkKind::Bit && p.channels.has(ChannelMask::MQTT))
+            .take(5)
+            .collect();
+        assert!(!bits.is_empty());
+        for p in bits {
+            assert_eq!(unit_of(p), "bool", "位点 {}.{} 须恒为 bool", p.station, p.metric);
+            assert_eq!(p.unit, "", "位点在点表侧须登记为空串（`bool` 是上送形态不是点属性）");
+        }
+    }
 
     /// 参考配置（含 PCS）——**复用 T11 的同一份 fixture**（不新建第二份点表真源）。
     /// **Task 6（ADR-016）起站级段为 5 站**（546 点），PCS 在独立顶层段 [`REF_PCS`]（72 点）。
@@ -2189,6 +2409,264 @@ mod tests {
         out
     }
 
+    /// **D-1/D-2 性能改造的字节级防回归锚（MQTT 侧）**：`build_message` 的取数方式由
+    /// 「整站 `station_snapshot` 克隆 + 按 metric 命中」改为「按需单点 `get`」，本用例把
+    /// **改造前实测**的载荷逐字节钉住（含 topic / ts / seq / 点序 / 每点的 n/v/u/q）。
+    ///
+    /// 数据集刻意覆盖 5 种形态，其中「快照里根本没有该 metric」正是两种取数方式语义最容易
+    /// 分叉的一档（旧：命中失败 ⇒ `(None, Unconfigured, 0)`；新：`get()` 返回
+    /// `Unconfigured` ⇒ 必须产出同一三元组）：
+    /// `active_power`=ok 新鲜值；`reactive_power`=**从未登记**；`voltage`=Invalid 保留原值；
+    /// `current`=Ok 但时标超期 ⇒ `stale`；`frequency`=Ok 且 `value=None`；`cos_phi`=ok。
+    ///
+    /// 改坏实现会怎样红：任一点的质量/取值/时标/顺序，或 topic/seq 变化 ⇒ 逐字节比对红。
+    /// （改造前后两份实测载荷已机器比对为**完全相同**，本常量取自改造前的那一份。）
+    #[test]
+    fn message_bytes_pin_pre_change_semantics() {
+        const GOLDEN_HEX: &str = concat!(
+        "7b227473223a22323032352d30392d32345430373a30363a34302e3132335a222c22646576223a224d5550432d30303031222c2273746174696f6e223a22677269645f6d65746572222c22726f6c65223a226d657465725f67726964222c22736571223a",
+        "312c22706f696e7473223a5b7b226e223a226163746976655f706f776572222c2276223a312e302c2275223a226b57222c2271223a226f6b227d2c7b226e223a2272656163746976655f706f776572222c2276223a6e756c6c2c2275223a226b76617222",
+        "2c2271223a22756e636f6e66696775726564227d2c7b226e223a22766f6c74616765222c2276223a3232302e302c2275223a2256222c2271223a22696e76616c6964227d2c7b226e223a2263757272656e74222c2276223a322e302c2275223a2241222c",
+        "2271223a227374616c65227d2c7b226e223a22636f735f706869222c2276223a302e39392c2275223a22222c2271223a226f6b227d2c7b226e223a226672657175656e6379222c2276223a6e756c6c2c2275223a22487a222c2271223a226f6b227d5d7d",
+        );
+        let pts = points();
+        let latest = LatestValues::new(5);
+        let now = 1_758_697_600_123u64;
+        latest.mark_station_polled("grid_meter", now);
+        latest.apply(vec![
+            (id("grid_meter", "active_power"), ok_val(1.0, now)),
+            (
+                id("grid_meter", "voltage"),
+                PointValue {
+                    value: Some(220.0),
+                    ts_ms: now,
+                    quality: PointQuality::Invalid,
+                },
+            ),
+            (id("grid_meter", "current"), ok_val(2.0, now - 60_000)),
+            (
+                id("grid_meter", "frequency"),
+                PointValue {
+                    value: None,
+                    ts_ms: now,
+                    quality: PointQuality::Ok,
+                },
+            ),
+            (id("grid_meter", "cos_phi"), ok_val(0.99, now)),
+            // 注意：`reactive_power` **刻意不登记**（未登记点取数路径）
+        ]);
+        let pubr = test_publisher(
+            Arc::new(latest),
+            Arc::new(pts.clone()),
+            north_cfg_with(|_| {}),
+            Arc::new(RecordingEvents::default()),
+        );
+        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
+        let (topic, body, ts_ms, seq) = pubr
+            .build_message(&st, &idx, now)
+            .expect("grid A 档有值 ⇒ 必产消息");
+        assert_eq!(topic, "mupc/north/telemetry/grid_meter");
+        assert_eq!(ts_ms, 1758697600123);
+        assert_eq!(seq, 1);
+        assert_eq!(body.len(), 400, "载荷长度须与改造前一致");
+        let hex: String = body.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, GOLDEN_HEX,
+            "载荷须逐字节与改造前一致（D-1/D-2 性能改造防回归）"
+        );
+    }
+
+    /// **B-4 / PRD 01 EX-10**：`dev` 未提供 ⇒ 载荷里**出现 `"dev":null`**（而不是把字段整条
+    /// 省掉）。这是"显式标注未提供"在**线缆上**的判据 —— 云端可据此区分「未提供」与
+    /// 「这套报文根本没这个字段」。
+    ///
+    /// **改坏实现即红**：给 `TelemetryPayload::dev` 加 `#[serde(skip_serializing_if =
+    /// "Option::is_none")]`（字段消失）或改成空串（"臆造一个空标识"）⇒ 两条断言各自红。
+    #[test]
+    fn dev_absent_is_serialized_as_explicit_null_not_omitted() {
+        let pts = points();
+        let latest = Arc::new(LatestValues::new(5));
+        let now = 1_758_697_600_123u64;
+        latest.mark_station_polled("grid_meter", now);
+        latest.apply(vec![(id("grid_meter", "active_power"), ok_val(1.0, now))]);
+        // 显式传 `None`（= 生产 `startup.rs` 的 `dev_id`）
+        let pubr = MqttUplinkPublisher::new(
+            latest,
+            Arc::new(pts.clone()),
+            test_client(),
+            roles_of(&cfg()),
+            None,
+            north_cfg_with(|_| {}),
+            Arc::new(RecordingEvents::default()),
+        )
+        .expect("上送器装配");
+        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
+        let (_topic, body, _ts, _seq) = pubr.build_message(&st, &idx, now).expect("必产消息");
+        let text = String::from_utf8(body).expect("载荷是 UTF-8 JSON");
+        assert!(
+            text.contains("\"dev\":null"),
+            "dev 未提供须显式上送 null（EX-10），实得：{text}"
+        );
+        assert!(
+            !text.contains("\"dev\":\"\""),
+            "不得臆造空串标识（EX-10「不得臆造」）：{text}"
+        );
+    }
+
+    /// **D-1/D-2 性能改造的语义锚（位点 / 未登记点大户）**：BMS 站 288 个位点只有 1 个登记，
+    /// 其余 287 个走「未登记」取数路径 ⇒ 必须仍**出现在载荷里**且为 `v=null`/`q=unconfigured`
+    /// （§9.5 AC-U74-05：不得按 `quality == Ok` 丢点——否则"站失败"与"该站无此点"云端不可分）。
+    ///
+    /// 改坏实现会怎样红：把未登记点整条丢掉（点数 ≠ 288）或把 `q` 写成 `ok`/`invalid`。
+    #[test]
+    fn unregistered_bit_points_stay_in_payload_as_unconfigured() {
+        let pts = points();
+        let latest = LatestValues::new(5);
+        let now = 1_758_697_600_123u64;
+        latest.mark_station_polled("bms", now);
+        let plan = plan_stations(&pts, &roles_of(&cfg()));
+        let bms_c = indices_of(&plan, "bms", SouthDataClass::C);
+        assert_eq!(bms_c.len(), 288, "前提：BMS C 档 288 位（点表事实）");
+        let seed = &pts[bms_c[0]];
+        latest.apply(vec![(
+            PointId {
+                station: seed.station.clone(),
+                metric: seed.metric.clone(),
+            },
+            ok_val(1.0, now),
+        )]);
+        let pubr = test_publisher(
+            Arc::new(latest),
+            Arc::new(pts.clone()),
+            north_cfg_with(|_| {}),
+            Arc::new(RecordingEvents::default()),
+        );
+        let st = pubr.plan().iter().find(|s| s.id == "bms").unwrap().clone();
+        let (_, body, _, _) = pubr
+            .build_message(&st, &bms_c, now)
+            .expect("至少一点已登记 ⇒ 必产消息");
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let points = v["points"].as_array().expect("points 数组");
+        assert_eq!(points.len(), 288, "未登记点也必须出现在载荷里（不得丢点）");
+        let mut ok_cnt = 0;
+        for p in points {
+            if p["n"] == seed.metric {
+                assert_eq!(p["v"], 1.0);
+                assert_eq!(p["q"], "ok");
+                ok_cnt += 1;
+            } else {
+                assert_eq!(p["v"], serde_json::Value::Null, "未登记点 v 须为 null");
+                assert_eq!(p["q"], "unconfigured", "未登记点 q 须为 unconfigured");
+            }
+        }
+        assert_eq!(ok_cnt, 1, "只有被登记的那一点应为 ok");
+    }
+
+    /// **D-1/D-2：C 档变位路径与全量路径必须产出逐条一致的结果**（同一数据集对拍两条
+    /// **真实生产路径**）：`only_changed=None` 走「全量 `all()` + 建索引」，`Some(..)` 走
+    /// 「逐点 `get`」。数据集含 fresh / stale / Invalid / value=None / **未登记** 五种形态。
+    ///
+    /// 改坏实现会怎样红：变位路径把未登记点当有效（少判 `quality != Ok`），或漏掉新鲜度
+    /// 门控 ⇒ 对拍向量不等。
+    #[test]
+    fn cos_and_full_paths_yield_identical_items() {
+        let pts = points();
+        let latest = LatestValues::new(5);
+        let now = 1_758_697_600_123u64;
+        let a_idx: Vec<&UplinkPoint> = pts
+            .iter()
+            .filter(|p| p.class == SouthDataClass::A && p.channels.has(ChannelMask::IEC104))
+            .collect();
+        assert_eq!(a_idx.len(), 22, "前提：A 档 22 点（PCS 启用档，点表事实）");
+        latest.mark_station_polled("grid_meter", now);
+        let key = |p: &UplinkPoint| (p.station.clone(), p.metric.clone());
+        let mut samples: Vec<(PointId, PointValue)> = Vec::new();
+        for (i, p) in a_idx.iter().enumerate() {
+            let pv = match i {
+                0..=4 => Some(ok_val(1.0 + i as f64, now)),
+                5..=7 => Some(ok_val(9.0, now - 60_000)), // Ok 但超期 ⇒ stale
+                8..=9 => Some(PointValue {
+                    value: Some(7.0),
+                    ts_ms: now,
+                    quality: PointQuality::Invalid,
+                }),
+                10 => Some(PointValue {
+                    value: None,
+                    ts_ms: now,
+                    quality: PointQuality::Ok,
+                }),
+                _ => None, // 未登记
+            };
+            if let Some(pv) = pv {
+                samples.push((
+                    PointId {
+                        station: p.station.clone(),
+                        metric: p.metric.clone(),
+                    },
+                    pv,
+                ));
+            }
+        }
+        latest.apply(samples);
+
+        let full = build_items(&latest, &pts, now, COT_CYCLIC, Some(SouthDataClass::A), None);
+        assert!(!full.is_empty(), "前提：全量路径须产出至少一条（否则对拍空转）");
+        let proj = |v: &Vec<TelemetryItem>| {
+            v.iter()
+                .map(|it| (it.ioa, it.kind, it.value.to_bits(), it.ts_ms, it.cot))
+                .collect::<Vec<_>>()
+        };
+
+        // ① 变位集 = A 档全部点 ⇒ 与全量逐条一致（顺序、ioa、kind、值、时标、cot）
+        let all_keys: HashSet<(String, String)> = a_idx.iter().map(|p| key(p)).collect();
+        let changed_all = build_items(
+            &latest,
+            &pts,
+            now,
+            COT_CYCLIC,
+            Some(SouthDataClass::A),
+            Some(&all_keys),
+        );
+        assert_eq!(
+            proj(&changed_all),
+            proj(&full),
+            "变位路径（逐点 get）与全量路径（索引）须逐条一致"
+        );
+
+        // ② 变位集 = 前 10 个 A 档点 + 1 个未登记点 ⇒ 等于全量结果按变位集过滤
+        let subset_keys: HashSet<(String, String)> = a_idx
+            .iter()
+            .take(10)
+            .map(|p| key(p))
+            .chain(std::iter::once(key(a_idx[20])))
+            .collect();
+        let expected: Vec<TelemetryItem> = full
+            .iter()
+            .filter(|it| a_idx.iter().any(|p| subset_keys.contains(&key(p)) && it.ioa == p.ioa))
+            .copied()
+            .collect();
+        let changed_subset = build_items(
+            &latest,
+            &pts,
+            now,
+            COT_CYCLIC,
+            Some(SouthDataClass::A),
+            Some(&subset_keys),
+        );
+        assert_eq!(
+            proj(&changed_subset),
+            proj(&expected),
+            "变位子集路径须等于全量结果按变位集过滤（含未登记点被跳过的语义）"
+        );
+        assert!(
+            changed_subset.len() <= 10,
+            "变位子集不得把未登记/未变位点带出，实得 {}",
+            changed_subset.len()
+        );
+    }
+
     // ── ① 点数断言（AC-U74-02 的机械判据） ──
 
     /// **MQTT 全量点数 = 624（PCS 启用）/ 552（未启用）**，且 = 点表 MQTT 子集条数。
@@ -2680,7 +3158,7 @@ mod tests {
         );
         assert!(!pubr.is_connected(), "测试客户端不跑事件循环 ⇒ 恒未连接");
         for _ in 0..130 {
-            pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now, 1)
+            pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now, 1, 1)
                 .await;
         }
         let s = pubr.stats();
@@ -2699,6 +3177,119 @@ mod tests {
             overflow.len()
         );
         assert!(overflow[0].message.contains("100") || overflow[0].message.contains("30"));
+    }
+
+    /// **A-3 判别力：事件 topic 走 QoS2，遥测 topic 走 `cfg.qos`。**
+    ///
+    /// 夹具把 `north.qos` 故意设为 **0**（≠ 事件 QoS2）—— 原实现（恒用 `self.cfg.qos`）
+    /// 会让两条断言的第一条变红（事件 qos 落 0），第二条同时钉住"遥测**没有**被顺手改成 2"。
+    #[tokio::test]
+    async fn event_topic_uses_qos2_while_telemetry_uses_configured_qos() {
+        let pts = points();
+        let latest = Arc::new(LatestValues::new(5));
+        let events = Arc::new(RecordingEvents::default());
+        let pubr = test_publisher(
+            latest.clone(),
+            Arc::new(pts.clone()),
+            north_cfg_with(|c| c.qos = 0),
+            events,
+        );
+        assert_eq!(pubr.cfg.qos, 0, "夹具前提：遥测 QoS 配成 0（与事件 2 可区分）");
+        assert!(!pubr.is_connected());
+
+        // 事件边沿：把某站在**本轮之前**记为 online，而 latest 里无任何新鲜值（= 现已失活）
+        // ⇒ `online → offline` 迁移，产出 `{prefix}/event/{station}`。
+        let mut state: HashMap<String, bool> = HashMap::new();
+        for st in pubr.plan.iter() {
+            state.insert(st.id.clone(), true);
+        }
+        pubr.publish_station_edges(&mut state).await;
+
+        let mut got: Vec<(String, u8)> = Vec::new();
+        {
+            let mut c = pubr.cache.lock().unwrap_or_else(|e| e.into_inner());
+            while let Some(p) = c.pop_front() {
+                got.push((p.topic.clone(), p.qos));
+            }
+        }
+        assert!(!got.is_empty(), "每个站都应产出 offline 边沿事件");
+        for (topic, qos) in &got {
+            assert!(
+                topic.contains("/event/"),
+                "离线缓存里应只有事件类 topic，实得 {topic}"
+            );
+            assert_eq!(
+                *qos, EVENT_QOS,
+                "事件 topic {topic} 须走 QoS{EVENT_QOS}（§9.3.3 的 event 行；原实现落 cfg.qos=0）"
+            );
+            assert_ne!(
+                *qos, pubr.cfg.qos,
+                "事件 QoS 不得跟随 north.qos（否则调低遥测 QoS 会顺手降级事件可靠性）"
+            );
+        }
+
+        // 遥测路径仍取配置（同一夹具下 = 0）—— 证明 A-3 没有把两条路径一并改成 2
+        pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now_millis(), 1, pubr.cfg.qos)
+            .await;
+        let (topic, qos) = {
+            let mut c = pubr.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let p = c.pop_front().expect("遥测消息应入缓存");
+            (p.topic.clone(), p.qos)
+        };
+        assert!(topic.contains("/telemetry/"));
+        assert_eq!(qos, 0, "遥测 QoS 须取 north.qos（本夹具 = 0）");
+    }
+
+    /// **A-5 判别力：BF-6 的计数出口真的读 `MqttUplinkPublisher::stats()`**（不是另立一份
+    /// 影子计数、也不是构造期抓的快照）。
+    ///
+    /// **改坏实现即红**：让 `BothCounters::snapshot` 对 MQTT 侧返回常量 0（或把
+    /// `mqtt_cached_len` 与 `mqtt_dropped_total` 互换）⇒ 断言红。
+    #[tokio::test]
+    async fn link_counter_source_reads_live_mqtt_stats() {
+        let pts = points();
+        let latest = Arc::new(LatestValues::new(5));
+        let events = Arc::new(RecordingEvents::default());
+        let pubr = Arc::new(test_publisher(
+            latest,
+            Arc::new(pts.clone()),
+            north_cfg_with(|c| {
+                c.cache.max_messages = 100;
+            }),
+            events,
+        ));
+        let server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
+            mupc_gateway::iec104::server::Iec104Config::default(),
+        ));
+        let src = crate::link_counters::BothCounters {
+            iec104: server,
+            mqtt: Some(pubr.clone()),
+        };
+        let before = <crate::link_counters::BothCounters as crate::link_counters::LinkCounterSource>::snapshot(&src);
+        assert!(before.mqtt_enabled);
+        assert_eq!(before.mqtt_cached_len, 0);
+
+        // 未连接 ⇒ 两条入缓存（不改计数语义，只让计数**动起来**）
+        let now = now_millis();
+        for _ in 0..2 {
+            pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now, 1, 1)
+                .await;
+        }
+        let after = crate::link_counters::report_once(&src);
+        assert_eq!(
+            after.mqtt_cached_len, 2,
+            "出口须读到 MQTT 侧的当拍 cached_len（A-5 / BF-6）"
+        );
+        assert_eq!(
+            after.mqtt_cached_len,
+            pubr.stats().cached_len,
+            "出口值与 stats() 同源"
+        );
+        assert_eq!(
+            after.mqtt_dropped_total, 0,
+            "缓存未溢出 ⇒ dropped 仍 0（两字段不得互换）"
+        );
+        assert!(after.log_line().contains("mqtt_cached_len=2"));
     }
 
     // ── ⑤ 装配缝：零连接尝试 / fail-closed（§9.4 序 7 / CFG-2 / TLS-2） ──

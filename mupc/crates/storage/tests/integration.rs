@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use mupc_storage::errors::StorageError;
 use mupc_storage::models::*;
 use mupc_storage::services::*;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::sync::Arc;
 
 async fn setup() -> (Arc<SqlitePool>, StorageService) {
@@ -960,4 +960,218 @@ async fn retention_enforce() {
 async fn health_check_passes() {
     let (_, svc) = setup().await;
     assert!(svc.health_check().await.unwrap());
+}
+
+// ── U-74 审查 B-1 / A-7：写入闸门（磁盘水位 + DB 完整性降级）──
+
+use mupc_storage::write_gate::{DiskLevel, WriteGate};
+
+/// **B-1**：磁盘 ≥95% ⇒ **停时序写入**（新点不入缓冲）；95% 以下照收。
+///
+/// 改什么会让本条红：删掉 `buffer_telemetry` 里的闸门判据（点会照收 ⇒ 首条断言红），
+/// 或把判据写成 `<= Critical`（94.9% 也会被拒 ⇒ 第二条红）。
+#[tokio::test]
+async fn write_buffer_stops_new_telemetry_at_95_percent() {
+    let (pool, path) = bare_file_pool("gate95").await;
+    let gate = Arc::new(WriteGate::new());
+    let wb = WriteBuffer::new_with_gate(100, 1000, pool.clone(), 1000, gate.clone());
+
+    // 84.9% / 94.9%：允许
+    for (usage, expect_buffered) in [(84.9f32, 1), (94.9, 2)] {
+        gate.set_disk_usage(Some(usage));
+        wb.buffer_telemetry(make_telemetry("dev-g", "v", 1.0))
+            .await
+            .unwrap();
+        assert_eq!(
+            wb.buffered_points(),
+            expect_buffered,
+            "{usage}% 应允许时序写入"
+        );
+    }
+    // 95.0%：拒收（缓冲不再增长），且计数留证
+    gate.set_disk_usage(Some(95.0));
+    wb.buffer_telemetry(make_telemetry("dev-g", "v", 9.9))
+        .await
+        .unwrap();
+    assert_eq!(wb.buffered_points(), 2, "≥95% 不得再接收新遥测点");
+    assert_eq!(gate.rejected_telemetry_total(), 1, "被拒点数须可读（不静默）");
+    assert_eq!(
+        wb.dropped_points(),
+        0,
+        "被闸门拒收**不计入**容量溢出计数（两回事：设计动作 vs 意外丢数据）"
+    );
+    // 水位回落 ⇒ 立即恢复收货（不必重启）
+    gate.set_disk_usage(Some(10.0));
+    wb.buffer_telemetry(make_telemetry("dev-g", "v", 3.0))
+        .await
+        .unwrap();
+    assert_eq!(wb.buffered_points(), 3, "水位回落须恢复写入");
+    let _ = std::fs::remove_file(path);
+}
+
+/// **B-1**：≥98% ⇒ **停全部写入**（已缓冲的点连 flush 也停）；95–98% 档 flush 照常。
+#[tokio::test]
+async fn write_buffer_flush_stops_only_at_98_percent() {
+    let (pool, path) = bare_file_pool("gate98").await;
+    let gate = Arc::new(WriteGate::new());
+    let wb = WriteBuffer::new_with_gate(100, 1000, pool.clone(), 1000, gate.clone());
+    gate.set_disk_usage(Some(94.0));
+    wb.buffer_telemetry(make_telemetry("dev-f", "v", 1.0))
+        .await
+        .unwrap();
+
+    // 95–98：停新点、**不停** flush（已在缓冲的点写出去不增加总量）。
+    // 本库**未建表** ⇒ 提交真失败（`Err`）⇒ 证明闸门**没有**拦它（拦了就会返回 `Ok(0)`）。
+    let e = wb.flush().await.expect_err("95–98 档 flush 不得被闸门拦");
+    assert!(
+        e.to_string().contains("no such table"),
+        "失败原因须是真实的「表不存在」（= 闸门放行、真的走了 DB）: {e}"
+    );
+    assert!(
+        wb.requeued_batches() >= 1,
+        "flush 真的走到了提交路径（失败回填）⇒ 证明 95–98 档未拦 flush"
+    );
+
+    // ≥98：连 flush 也拦
+    gate.set_disk_usage(Some(98.0));
+    let before_writes = gate.rejected_writes_total();
+    assert_eq!(wb.flush().await.unwrap(), 0, "≥98% flush 被拦（设计动作，非失败）");
+    assert!(gate.rejected_writes_total() > before_writes, "拦停须计数留证");
+    assert_eq!(wb.buffered_points(), 1, "点仍在缓冲，未丢");
+    let _ = std::fs::remove_file(path);
+}
+
+/// **A-7**：DB 完整性降级 ⇒ 5 个写入口**统一拒写**（`WriteGated`），而非只在遥测一条路径上兜。
+///
+/// 改什么会让本条红：去掉任一 `with_gate`（该入口会写入成功 ⇒ 对应断言红）。
+#[tokio::test]
+async fn integrity_degradation_rejects_every_write_entry() {
+    let pool = Arc::new(
+        SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库"),
+    );
+    run_migrations(&pool).await.unwrap();
+    let gate = Arc::new(WriteGate::new());
+    let svc = StorageService::new_with_gate(pool.clone(), gate.clone());
+
+    // 降级前：5 个入口全部可写（排除"本来就不通"的假信号）
+    assert!(svc.telemetry.insert(&make_telemetry("d0", "v", 1.0)).await.is_ok());
+    assert!(svc.events.insert(&make_event("t0", "s", "m")).await.is_ok());
+    assert!(svc.faults.insert(&make_fault("d0", "ft", 1)).await.is_ok());
+    assert!(svc.decisions.insert(&make_decision("sc", "{}")).await.is_ok());
+    assert!(svc
+        .assets
+        .upsert(&make_asset("d0", "dev"))
+        .await
+        .is_ok());
+
+    gate.enter_degraded();
+    let cases: Vec<(&str, Result<i64, StorageError>)> = vec![
+        ("telemetry", svc.telemetry.insert(&make_telemetry("d1", "v", 2.0)).await),
+        ("events", svc.events.insert(&make_event("t1", "s", "m")).await),
+        ("faults", svc.faults.insert(&make_fault("d1", "ft", 1)).await),
+        ("decisions", svc.decisions.insert(&make_decision("sc", "{}")).await),
+        ("assets", svc.assets.upsert(&make_asset("d1", "dev")).await),
+    ];
+    for (what, r) in cases {
+        match r {
+            Err(StorageError::WriteGated(msg)) => {
+                assert!(msg.contains("被拒"), "{what}: {msg}");
+            }
+            other => panic!("{what} 入口在降级态必须 Err(WriteGated)，实得 {other:?}"),
+        }
+    }
+    assert_eq!(gate.rejected_writes_total(), 5, "5 个入口各计一次");
+    assert!(gate.is_degraded());
+}
+
+/// **A-7**：健康库 ⇒ `quick_check` 通过；**损坏文件 ⇒ 必须报错**（`Ok(Err(_))` 或 `Err(_)`，
+/// 都不得是 `Ok(Ok(()))`）。
+///
+/// 这条是"降级"能否被触发的前提：自检若恒绿，降级就是死码。
+#[tokio::test]
+async fn integrity_check_passes_healthy_and_flags_corruption() {
+    // ① 健康库
+    let (pool, path) = bare_file_pool("intg_ok").await;
+    run_migrations(&pool).await.unwrap();
+    let healthy = mupc_storage::integrity_check(&pool).await;
+    assert!(
+        matches!(healthy, Ok(Ok(()))),
+        "健康库自检须通过，实得 {healthy:?}"
+    );
+    pool.close().await;
+    let _ = std::fs::remove_file(&path);
+
+    // ② 损坏库：把主库文件第 100 字节之后的页体整体写成 0xFF（保留 SQLite 文件头 ⇒ 仍是
+    //    "一个 SQLite 文件"，只是结构坏了）⇒ `PRAGMA quick_check` 报
+    //    `database disk image is malformed`（code 11）。
+    //
+    //    ⚠️ **不能再经 `init_pool` 打开**：它的 `PRAGMA journal_mode = WAL` 会先碰库、在
+    //    **打开阶段**就报错 ⇒ 那测到的是 `init_pool` 而不是 `integrity_check`
+    //    （把 `integrity_check` 换成恒 Ok 的桩，用例照样过 = 假绿）。故此处用裸池打开。
+    let (pool2, path2) = bare_file_pool("intg_bad").await;
+    run_migrations(&pool2).await.unwrap();
+    for i in 0..500 {
+        sqlx::query("INSERT INTO events (timestamp, event_type, source, message) VALUES (?,?,?,?)")
+            .bind(0i64)
+            .bind(format!("t{i}"))
+            .bind("s")
+            .bind("m")
+            .execute(pool2.as_ref())
+            .await
+            .unwrap();
+    }
+    pool2.close().await;
+    // WAL 侧文件先清掉，否则重放 WAL 会把损坏的主库页覆盖回去（假绿）
+    let _ = std::fs::remove_file(format!("{}-wal", path2.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", path2.display()));
+    let len = std::fs::metadata(&path2).unwrap().len();
+    assert!(len > 8 * 1024, "库文件须足够大才可注入页级损坏，实得 {len}");
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path2)
+            .expect("打开待损坏的库");
+        f.seek(SeekFrom::Start(100)).unwrap();
+        f.write_all(&vec![0xFFu8; (len - 100) as usize]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    let pool3 = Arc::new(
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path2))
+            .await
+            .expect("裸池打开损坏库（不经 init_pool 的 PRAGMA）"),
+    );
+    let corrupt = mupc_storage::integrity_check(&pool3).await;
+    assert!(
+        !matches!(corrupt, Ok(Ok(()))),
+        "损坏库自检**不得**报通过（否则 A-7 的降级是死码），实得 {corrupt:?}"
+    );
+    // 更严：报的必须是"损坏"本身（`Ok(Err(..))` = 报违规；`Err(_)` = 自检读不出来）
+    let msg = match &corrupt {
+        Ok(Err(v)) => v.clone(),
+        Err(e) => e.to_string(),
+        Ok(Ok(())) => unreachable!(),
+    };
+    assert!(
+        msg.contains("malformed") || msg.contains("corrupt") || msg.contains("not a database"),
+        "自检结论须点名「库损坏」，实得: {msg}"
+    );
+    pool3.close().await;
+}
+
+/// 闸门等级快照可读（A-7/B-1 的"状态面"最小形态）。
+#[test]
+fn disk_level_enum_is_ordered_and_named() {
+    assert!(DiskLevel::Normal < DiskLevel::Warn);
+    assert!(DiskLevel::Warn < DiskLevel::Minor);
+    assert!(DiskLevel::Minor < DiskLevel::Critical);
+    assert!(DiskLevel::Critical < DiskLevel::Emergency);
+    assert_eq!(DiskLevel::Emergency.as_str(), "emergency");
 }

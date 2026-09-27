@@ -5,9 +5,10 @@
 //! # gmsm 0.1.0 能力说明
 //! - 支持 SM2 加密/解密
 //! - 不支持签名/验签（gmsm 0.1.0 未提供签名 API）
-//! - 签名功能使用 fake_gmsm (ring) 路径
+//! - 签名/验签**显式不支持**：`sm2_sign` / `sm2_verify` 一律返回 [`GmError::Unsupported`]
 //!
-//! SM2：加密/密钥/签名框架。签名走 ring（国际）兜底，非真国密 —— framework-only（2026-09-09）。
+//! SM2：加密/密钥/签名框架 —— framework-only（2026-09-09）。签名**不再**走 ring ECDSA 兜底：
+//! 那会与同曲线的验签构成"自签自验恒通过"的自洽对，构成框架态假性合规（D-7）。
 
 use crate::errors::{GmError, Result};
 use base64::Engine;
@@ -36,6 +37,10 @@ impl std::fmt::Debug for Sm2KeyPair {
 }
 
 /// 从 PEM 文件加载 SM2 私钥
+///
+/// `#[allow(dead_code)]`：签名/验签已改为显式 `Unsupported`（D-7）⇒ 本函数当前**无调用者**。
+/// 保留它是为真国密路径（gmsm 0.14+）接线时使用，**不是**给 ring ECDSA 兜底当输入。
+#[allow(dead_code)]
 pub fn load_sm2_private_key(path: &str) -> Result<Vec<u8>> {
     let pem_data = fs::read_to_string(path)
         .map_err(|e| GmError::KeyLoadFailed(format!("读取私钥文件失败: {}", e)))?;
@@ -50,6 +55,9 @@ pub fn load_sm2_private_key(path: &str) -> Result<Vec<u8>> {
 }
 
 /// 从 PEM 文件加载 SM2 公钥
+///
+/// `#[allow(dead_code)]`：同 [`load_sm2_private_key`]（D-7 之后无调用者，供真国密路径接线用）。
+#[allow(dead_code)]
 pub fn load_sm2_public_key(path: &str) -> Result<Vec<u8>> {
     let pem_data = fs::read_to_string(path)
         .map_err(|e| GmError::KeyLoadFailed(format!("读取公钥文件失败: {}", e)))?;
@@ -65,30 +73,42 @@ pub fn load_sm2_public_key(path: &str) -> Result<Vec<u8>> {
 
 /// SM2 签名
 ///
-/// gmsm 0.1.0 不支持签名，统一使用 ring ECDSA P-256 模拟。
+/// # 为什么**一律**返回 [`GmError::Unsupported`]（而不是 ring 兜底）
+/// 本函数此前用 ring 的 ECDSA P-256 实现，而 `sm2_verify` 用**同一条曲线**验 —— 二者构成
+/// **自洽对**：自己签自己验**恒通过**，接口层完全区分不出"真 SM2"与"ECDSA"。一旦被接线，
+/// 立即可被当成"国密签名已可用"的**假性合规**凭据。故非真国密路径一律显式拒绝。
+///
+/// 真国密 SM2 签名需要 gmsm 0.14+（当前锁定的 gmsm 0.1.0 不提供签名 API）⇒ 本仓库
+/// 属"框架态"，**不得**用国际算法顶替。
 pub fn sm2_sign(data: &[u8], private_key_pem: &str) -> Result<Vec<u8>> {
-    use ring::rand::SystemRandom;
-    use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
-    let rng = SystemRandom::new();
-    let private_key_bytes = load_sm2_private_key(private_key_pem)?;
-    let ecdsa_key_pair =
-        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &private_key_bytes, &rng)
-            .map_err(|e| GmError::SignFailed(format!("密钥解析失败: {:?}", e)))?;
-    let signature = ecdsa_key_pair
-        .sign(&rng, data)
-        .map_err(|e| GmError::SignFailed(format!("签名失败: {:?}", e)))?;
-    Ok(signature.as_ref().to_vec())
+    // 参数保持签名兼容（调用方无需改动）；本路径不读文件、不产生任何签名。
+    let _ = (data, private_key_pem);
+
+    #[cfg(feature = "real_gmsm")]
+    let msg = "SM2 签名需 gmsm 0.14+ 的真国密实现；gmsm 0.1.0 无签名 API。\
+               不得用 ring ECDSA P-256 冒充（与 sm2_verify 同曲线 ⇒ 自签自验恒通过 = 假性合规）";
+    #[cfg(not(feature = "real_gmsm"))]
+    let msg = "SM2 签名在 fake_gmsm（ring 兜底）路径下不可用：ring ECDSA 不是 SM2，\
+               且自签自验恒通过 ⇒ 假性合规。真国密签名需 gmsm 0.14+";
+
+    Err(GmError::Unsupported(msg.to_string()))
 }
 
 /// SM2 验签
+///
+/// 口径同 [`sm2_sign`]：ring 兜底路径**绝不**给出"验证通过"，一律 [`GmError::Unsupported`]
+/// （`Ok(false)` 也是一种主张——"签名不对"——而本仓库根本没有能力做出这个判断）。
 pub fn sm2_verify(data: &[u8], signature: &[u8], public_key_pem: &str) -> Result<bool> {
-    use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
-    let public_key_bytes = load_sm2_public_key(public_key_pem)?;
-    let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public_key_bytes);
-    public_key
-        .verify(data, signature)
-        .map(|_| true)
-        .map_err(|e| GmError::VerifyFailed(format!("验签失败: {:?}", e)))
+    let _ = (data, signature, public_key_pem);
+
+    #[cfg(feature = "real_gmsm")]
+    let msg = "SM2 验签需 gmsm 0.14+ 的真国密实现；gmsm 0.1.0 无验签 API。\
+               不得用 ring ECDSA P-256 冒充（与 sm2_sign 同曲线 ⇒ 框架态假性通过）";
+    #[cfg(not(feature = "real_gmsm"))]
+    let msg = "SM2 验签在 fake_gmsm（ring 兜底）路径下不可用：ring ECDSA 不是 SM2。\
+               真国密验签需 gmsm 0.14+";
+
+    Err(GmError::Unsupported(msg.to_string()))
 }
 
 /// 生成 SM2 密钥对

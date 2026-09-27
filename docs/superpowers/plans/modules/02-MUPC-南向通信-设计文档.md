@@ -194,6 +194,15 @@ fn configure_port(&self, fd: RawFd) -> Result<(), Rs485Error> {
 
 ### 2.4 DE/RE GPIO 控制
 
+> 〔注（2026-09-27）：方向控制仅在配置 `de_gpio`/`re_gpio` 时生效；若现场收发器为自动换向，留空即可 —— 真机须确认。〕
+>
+> B-4 修复（2026-09-27 全项目审查 P2）后本节已可落地：配置键新增
+> `south_stations[].de_gpio|re_gpio` 与 `south_pcs.de_gpio|re_gpio`（均 `Option<u32>`，
+> 缺省留空），经 `port_runtime::bus_config` 落进 `rs485::Config`；`set_dir` 的调用点除
+> `transaction*` 外**新增 `send_recv`**（站级读/写实际路径 —— 此前它不经方向控制，
+> 属"配了也不生效"）。两键缺省 `None` ⇒ 不驱动方向脚（自动换向收发器）⇒ 既有部署
+> 行为零变化。**仍未验真机**：sysfs 写失败的表现是该口恒定无响应。
+
 RS485 为半双工通信，需要通过 GPIO 控制发送使能（DE）和接收使能（RE）。
 
 ```rust
@@ -282,6 +291,15 @@ pub enum Rs485Error {
 ---
 
 ### 2.8 南向控制指令分发（SouthCommandSender）
+
+> 〔注（2026-09-27）：**本节两类指令已随 2026-08-31 策略精简撤回** —— `pv_limit` /
+> `load_shedding` 随三策略一并移除（动作空间精简 5→2 维，见 CLAUDE.md「v2.15」与
+> `docs/technical-debt.md` v3.5），`Rs485SouthSender`（`strategy-engine/src/south_command_sender.rs`）
+> 因此在**生产路径上零构造点**（仅测试构造）。本节保留为**历史设计原文**，不代表当前
+> 生产接线；南向写能力的现行入口只有 `mupc-southd` 的 `PcsHandle` 四个受限入口。〕
+>
+> 另注（2026-09-27，B-4）：`Rs485Device::set_dir` 的**生产可达**调用点现为 `send_recv`
+> （站级读/写路径）与 `transaction*`；`de_gpio`/`re_gpio` 缺省留空 = 不驱动方向脚。
 
 **来源**：策略引擎模块通过 `SouthCommandSender` trait 向南向设备分发控制指令
 
@@ -3161,6 +3179,11 @@ pub const PCS_MIN_INTERVAL_MS: u64 = MIN_POLL_INTERVAL_MS;
 | **ADR-016** | **新增顶层配置段 `south_pcs`**，PCS 点表随之迁入；`south_stations` 中**不再允许** `role: pcs` 的站 | ① 折进 `south_stations`；② 保留 `intercore.modbus_rtu` 段名、只换代码归属 | ①的 `StationConf` 是**纯采集语义**（`regs` 只有读数），无处安放写参数；②会让段名与实际归属**长期不符**，属"名不副实"的埋坑 |
 
 ### 13.3 架构
+
+> **形态注（E-14，2026-09-27 加注）**：`mupc-southd` 是**库形态，内嵌在 `mupcd` 主控进程**内，
+> **不是独立守护进程**（crate 名的 `d` 系历史沿革 ⇒ 易误读）。唯一 bin `pcs_slave` 是 feature
+> 门控（`pcs-slave-bin`，**默认不构建**）的联调工具，非产线进程。同款说明见
+> `mupc/crates/mupc-southd/Cargo.toml` 首行注释。
 
 ```
                 PcsHandle（PCS 的完整所有者，居 southd）

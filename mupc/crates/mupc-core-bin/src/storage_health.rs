@@ -79,6 +79,44 @@ pub const HEALTH_TICK_MS: u64 = 1_000;
 /// 的 `level` 字段 ⇒ 订阅侧 `FeedItem.subtype == "major"`）。
 pub const DROP_ALERT_LEVEL: &str = "major";
 
+/// **磁盘水位档位迁移** ⇒ 告警级别与文案（U-74 审查 B-1）。
+///
+/// 判据（纯函数，**可单测**；生产循环只做"喂水位 + 投返回值"）：
+/// - **只报升级**（`now > prev`）与**"尚未定档 → 首次定档为非正常档"**；
+/// - 同档重复不报（60 s 一拍，重复报就是告警风暴）；
+/// - **降级（回落）不投告警**，由调用方记一行 `info`（与 [`StorageHealthWatch`] 的"恢复只记日志"
+///   同口径：`AlertFeed` 只有入、没有清除面，投一条 `major` 会被读成"又发生了一次"）。
+///
+/// **采集不可用不进本函数**（`set_disk_usage(None)` ⇒ 调用方整块跳过）——
+/// 不得把"采不到"当成任何档位。
+pub fn disk_level_transition_alert(
+    prev: Option<mupc_storage::DiskLevel>,
+    now: mupc_storage::DiskLevel,
+) -> Option<(&'static str, String)> {
+    use mupc_storage::DiskLevel as L;
+    let escalated = match prev {
+        Some(p) => now > p,
+        None => now != L::Normal, // 首次定档：只有非正常档才值得报
+    };
+    if !escalated {
+        return None;
+    }
+    let (level, name) = match now {
+        L::Emergency => ("critical", "emergency（≥98%）⇒ **停全部写入**"),
+        L::Critical => ("critical", "critical（≥95%）⇒ **停时序写入**"),
+        L::Minor => ("minor", "minor（≥90%）"),
+        L::Warn => ("warning", "warn（≥85%）"),
+        L::Normal => return None,
+    };
+    Some((
+        level,
+        format!(
+            "磁盘水位达到 {name} —— 03 PRD §8.1 的分级动作已由写入闸门执行（停写期间数据入缓冲，\
+             清理磁盘后自动恢复；不静默）"
+        ),
+    ))
+}
+
 /// 巡检的**本拍输出**（三条互斥出路；见模块头口径表）。
 ///
 /// **为什么是 enum 而不是 `Option<String>`**：判据有**三种**结果（静默 / 进入丢弃态 / 退出丢弃态），
@@ -279,6 +317,51 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex;
+
+    // ── U-74 审查 B-1：磁盘水位档位迁移的告警判据（纯函数） ──
+
+    /// **判别力（B-1）**：只报**升级**与**首次非正常定档**；回落/同档不报。
+    ///
+    /// **改坏实现即红**：把 `escalated` 判据改成 `Some(_) => true`（每拍都报）⇒ 同档与回落
+    /// 两组断言红；改成 `now != Normal`（含回落）⇒ 回落组红。
+    #[test]
+    fn disk_level_alert_only_on_escalation() {
+        use mupc_storage::DiskLevel as L;
+        let fire = |prev: Option<L>, now: L| disk_level_transition_alert(prev, now);
+
+        // 首次定档：正常不报；非正常必报
+        assert!(fire(None, L::Normal).is_none(), "首次读到正常水位不必告警");
+        assert!(fire(None, L::Warn).is_some(), "首次就读到 ≥85% 必须告警");
+
+        // 升级：逐档都要报，且级别按档位映射
+        assert_eq!(fire(Some(L::Normal), L::Warn).unwrap().0, "warning");
+        assert_eq!(fire(Some(L::Warn), L::Minor).unwrap().0, "minor");
+        assert_eq!(fire(Some(L::Minor), L::Critical).unwrap().0, "critical");
+        assert_eq!(fire(Some(L::Critical), L::Emergency).unwrap().0, "critical");
+        // 跨档跳升（84% → 96%）同样要报
+        assert!(fire(Some(L::Normal), L::Critical).is_some());
+
+        // 同档：不报（60 s 一拍，同档重复报 = 告警风暴）
+        for l in [L::Normal, L::Warn, L::Minor, L::Critical, L::Emergency] {
+            assert!(fire(Some(l), l).is_none(), "{l:?} 同档不得重复告警");
+        }
+
+        // 回落：不报（`AlertFeed` 只有入、没有清除面 ⇒ 投一条会被读成"又发生了一次"）
+        assert!(fire(Some(L::Emergency), L::Critical).is_none(), "回落不得投 major");
+        assert!(fire(Some(L::Critical), L::Normal).is_none(), "回落不得投 major");
+    }
+
+    /// 文案须**点名档位与动作**（现场照着一行日志就该知道"时序写入已停"）。
+    #[test]
+    fn disk_level_alert_names_level_and_action() {
+        use mupc_storage::DiskLevel as L;
+        let (_, critical) = disk_level_transition_alert(Some(L::Minor), L::Critical).unwrap();
+        assert!(critical.contains("critical"), "{critical}");
+        assert!(critical.contains("停时序写入"), "{critical}");
+        let (_, emergency) = disk_level_transition_alert(Some(L::Critical), L::Emergency).unwrap();
+        assert!(emergency.contains("emergency"), "{emergency}");
+        assert!(emergency.contains("停全部写入"), "{emergency}");
+    }
 
     /// 有上限地等 `cond` 成立（最多 **3 s**；每 10 ms 探一次）。返回是否成立。
     ///

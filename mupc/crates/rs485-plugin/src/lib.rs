@@ -95,6 +95,15 @@ impl Plugin for Rs485Plugin {
 #[no_mangle]
 pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
     let plugin = Rs485Plugin::new();
+    // SAFETY: 本函数是 `unsafe fn`，**契约由调用方（loader）承担**，本体内不 deref 任何
+    // 外来指针：`Box::new` 在堆上建实例后用 `Box::into_raw` **交出所有权**（不 drop），
+    // 返回的 fat pointer（数据指针 + vtable 指针）恒非空、对齐、指向有效对象。
+    // 调用方须保证：① 该指针**只经 [`destroy_rs485_plugin`]** 归还（`Box::from_raw`，
+    // 且类型必须是 `*mut Rs485Plugin` 而非 `dyn`，否则释放时 vtable/尺寸不符 ——
+    // 这正是"两端都是 Rust、同编译器/同 target"约定必须成立的原因）；
+    // ② 不跨进程/不跨动态库边界传递（fat pointer 的 vtable 地址在别的映像里无意义）；
+    // ③ 同一指针不得被多个线程同时使用（本插件无内部可变共享状态，但 `dyn Plugin`
+    // 本身不承诺 `Sync`）。
     Box::into_raw(Box::new(plugin)) as *mut dyn Plugin
 }
 
@@ -106,6 +115,10 @@ pub unsafe extern "C" fn create_plugin() -> *mut dyn Plugin {
 #[no_mangle]
 pub unsafe extern "C" fn destroy_rs485_plugin(ptr: *mut dyn Plugin) {
     if !ptr.is_null() {
+        // SAFETY: 前置条件（调用方保证）—— `ptr` 必须是 [`create_plugin`] 返回、且**尚未
+        // 被销毁过**的指针（双重销毁是 UB），且类型确为 `Rs485Plugin`（见 create_plugin 的
+        // 契约①）。后置：`Box::from_raw` 取回所有权后立即 drop，堆内存释放、`dyn Plugin`
+        // 的 vtable 槽位不再可用。空指针分支已先行挡掉（`Box::from_raw(null)` 是 UB）。
         let _ = Box::from_raw(ptr);
     }
 }
@@ -118,5 +131,9 @@ pub unsafe extern "C" fn destroy_rs485_plugin(ptr: *mut dyn Plugin) {
 #[allow(improper_ctypes_definitions)]
 #[no_mangle]
 pub unsafe extern "C" fn plugin_meta() -> PluginMeta {
+    // SAFETY: 无指针入参、无别名/对齐要求，本体内不 deref 任何外部内存 —— 标 `unsafe`
+    // 仅为与同文件其余 FFI 入口点保持**同一签名口径**。调用方须保证的是**返回值语义**：
+    // `PluginMeta` 按值返回（含 `String` 等堆字段），跨 ABI 返回后所有权归调用方；
+    // 与 create/destroy 同理，只在"两端都是 Rust、同编译器/同 target"的约定下成立。
     Rs485Plugin::new().meta()
 }

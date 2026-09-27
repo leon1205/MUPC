@@ -21,8 +21,8 @@ intercore:
                                 # 写 "modbus_rtu" ⇒ 启动即报错）。本通道仅供仿真/联调。
   host: "192.168.1.2"           # 实时核心 IP（tcp 通道）
   port: 9100
-  heartbeat_interval_sec: 5
-  reconnect_interval_sec: 3
+  # ⚠️ heartbeat_interval_sec / reconnect_interval_sec 二键已于 2026-09-27 删除（审查 E-13）：
+  # 本进程无消费点（TCP 传输侧无心跳/重连循环）⇒ 写上也不生效，故不再提供。
 
 # PCS（两级式 PCS = 实时控制模块，PCS 协议 V1.3 线格式；设计 §13.7 / §13.9）
 # ⚠️ `port` 须**独占**：不得与任何 `south_stations` 站同口（P-2）；`io.enabled: true` 时
@@ -37,7 +37,13 @@ south_pcs:
   stop_bits: 1
   parity: none
   interval_ms: 1000
-  response_timeout_ms: 200
+  response_timeout_ms: 200   # 下界 100ms（B-2：VTIME = 该值/100 向下取整，<100 会落 0 ⇒ read 立即返回）
+  # 半双工方向控制引脚（B-4，2026-09-27）。**BECG 板若为自动换向收发器则留空**（缺省即留空，
+  # 也是既有部署现状 ⇒ 零行为变化）。仅"手工换向收发器"板型下按板端 /sys/class/gpio 编号填：
+  # de_gpio 在每次收发事务前置高（发送使能）、re_gpio 在收发后置低（接收使能）。
+  # ⚠️ 填错的表现是"该口恒定无响应"（非静默降级），配置期无从判别 ⇒ 必须真机核对。
+  # de_gpio: 23
+  # re_gpio: 24
   regs:
     - name: pcs_3zone          # 1000–1075；_k ↔ 寄存器 999+k
       func: input
@@ -232,6 +238,13 @@ strategy:
 # 接线与设备实际核对/回写（RC-1 逐点比对含 BMS 116/186、ADL400 0x0092、BMS 2991–2994；
 # RC-5/RC-10 消防登记数与探测器地址序；RC-6 空调校验位）。各站 addr 基准亦须现场裁定（RC-3）。
 # ⚠️ 各站串口不得与 `south_pcs.port`（PCS 主链路 ttyS0）同口（规则 P-2：PCS 独占该口）。
+# 【半双工方向控制 de_gpio/re_gpio（B-4，2026-09-27）】每站可填，**BECG 板若为自动换向
+# 收发器则留空**（缺省即留空 = 不驱动方向脚，既有部署现状 ⇒ 零行为变化）。仅"手工换向
+# 收发器"板型需按板端 /sys/class/gpio 编号填 de_gpio（发送使能，事务前置高）/ re_gpio
+# （接收使能，事务后置低）。⚠️ **同一口各站应统一填**（物理共享同一条总线）；填错的表现是
+# 该口恒定无响应（非静默降级），配置期无从判别 ⇒ 必须真机核对。示例：
+#     de_gpio: 23
+#     re_gpio: 24
 south_stations:
   poll_ms: 1000
   stale_timeout_s: 5

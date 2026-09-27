@@ -55,11 +55,27 @@
 /*=====================
  *  LOG
  *====================*/
-/* 设计 §1.1.1.2：LV_USE_LOG 1（后续在薄层里把 log 回调转发到 Rust tracing）。 */
+/* 设计 §1.1.1.2：LV_USE_LOG 1 ⇒ 出口**收敛到薄层注册的回调**
+ * （`src/lvgl/mod.rs::log_bridge` → Rust `tracing`；注册点 = 同文件 `init()`）。
+ *
+ * ⚠️ **`LV_LOG_PRINTF 0` 是有意为之**（WP5 P2-A）：
+ * 1. LVGL 的 `printf` 直写 **stdout**，且发生在**渲染调用栈内**（flush / indev 回调路径上）
+ *    —— 与本模块自订纪律「回调内一律走 `diag`，禁用 `eprintln!/println!`」
+ *    （`src/lvgl/mod.rs` 模块文档纪律 3）同源冲突；
+ * 2. 置 0 后 C 侧**不再存在**任何直接 stdout 写入 ⇒ "日志一定经过薄层"这件事由
+ *    **编译产物**保证，而不是靠"记得注册回调"；
+ * 3. 观测性**没有**因此变差：`log_bridge` 在 `tracing` 未启用（进程未装配 subscriber /
+ *    被级别过滤挡掉）时**回落 `diag`（stderr，零分配、忽略写错误）**。详见该函数文档。
+ *
+ * 另注（照抄勿丢）：`lv_log.c` 里 `custom_print_cb` **优先于** `LV_LOG_PRINTF`
+ * （`if(custom_print_cb) {...} else { printf }`）⇒ 注册了回调时 printf 分支本就不可达；
+ * 置 0 只是把这件事显式化。
+ *
+ * 保留 `LV_LOG_LEVEL_WARN`（设计初值）：TRACE/INFO 由编译期滤掉，不在回调链上产生任何调用。 */
 #define LV_USE_LOG 1
 #if LV_USE_LOG
     #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
-    #define LV_LOG_PRINTF 1
+    #define LV_LOG_PRINTF 0
 #endif
 
 /*========================

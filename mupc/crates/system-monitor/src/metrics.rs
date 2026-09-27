@@ -167,14 +167,14 @@ mod tests {
                 swap_used_mb: 0,
                 usage_percent: 50.0,
             },
-            disk: DiskMetrics {
+            disk: Some(DiskMetrics {
                 total_mb: 65536,
                 used_mb: 32768,
                 available_mb: 32768,
                 usage_percent: 50.0,
                 read_iops: 0,
                 write_iops: 0,
-            },
+            }),
             temperature: TemperatureMetrics {
                 cpu_temp_c: 45.0,
                 npu_temp_c: None,

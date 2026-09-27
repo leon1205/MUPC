@@ -1,6 +1,7 @@
 use crate::errors::StorageError;
 use crate::models::*;
 use crate::repository::*;
+use crate::write_gate::WriteGate;
 use parking_lot::Mutex;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ pub struct StorageService {
 }
 
 impl StorageService {
-    /// 用共享连接池创建所有 Repository
+    /// 用共享连接池创建所有 Repository（**不设写入闸门**：既有调用形态/单测语义不变）。
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self {
             telemetry: Arc::new(SqliteTelemetryRepo::new(pool.clone())),
@@ -25,6 +26,20 @@ impl StorageService {
             decisions: Arc::new(SqliteDecisionRepo::new(pool.clone())),
             events: Arc::new(SqliteEventRepo::new(pool.clone())),
             assets: Arc::new(SqliteAssetRepo::new(pool.clone())),
+            pool,
+        }
+    }
+
+    /// 带**写入闸门**创建（生产装配用，U-74 审查 A-7/B-1）：闸门在磁盘 ≥98% 或 DB 完整性
+    /// 降级时对 **5 个写入口**统一**拒写**（`StorageError::WriteGated`），而不是只在遥测
+    /// 一条路径上兜。
+    pub fn new_with_gate(pool: Arc<SqlitePool>, gate: Arc<WriteGate>) -> Self {
+        Self {
+            telemetry: Arc::new(SqliteTelemetryRepo::with_gate(pool.clone(), gate.clone())),
+            faults: Arc::new(SqliteFaultRepo::with_gate(pool.clone(), gate.clone())),
+            decisions: Arc::new(SqliteDecisionRepo::with_gate(pool.clone(), gate.clone())),
+            events: Arc::new(SqliteEventRepo::with_gate(pool.clone(), gate.clone())),
+            assets: Arc::new(SqliteAssetRepo::with_gate(pool.clone(), gate)),
             pool,
         }
     }
@@ -263,6 +278,8 @@ pub struct WriteBuffer {
     /// [`Self::request_flush`]）。无论哪种，点都仍在缓冲里、不会因"没人接唤醒"而丢；真丢唤醒
     /// 只发生在 `Closed`（flush 任务已收工/未装配）时，语义见 [`Self::request_flush`]。
     flush_wake_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    /// 写入闸门（U-74 审查 B-1/A-7）。`None` = 不设闸（既有调用形态 / 单测语义不变）。
+    gate: Option<Arc<WriteGate>>,
 }
 
 impl WriteBuffer {
@@ -282,6 +299,29 @@ impl WriteBuffer {
         pool: Arc<SqlitePool>,
         max_points: usize,
     ) -> Self {
+        Self::new_full(capacity, flush_interval_ms, pool, max_points, None)
+    }
+
+    /// **带写入闸门**的构造器（生产装配用，U-74 审查 B-1/A-7）：
+    /// 磁盘水位 ≥95% ⇒ 不再接收**新**遥测点（时序写入）；≥98% 或完整性降级 ⇒ 连已缓冲点的
+    /// `flush()` 也停（见 [`Self::flush`]）。
+    pub fn new_with_gate(
+        capacity: usize,
+        flush_interval_ms: u64,
+        pool: Arc<SqlitePool>,
+        max_points: usize,
+        gate: Arc<WriteGate>,
+    ) -> Self {
+        Self::new_full(capacity, flush_interval_ms, pool, max_points, Some(gate))
+    }
+
+    fn new_full(
+        capacity: usize,
+        flush_interval_ms: u64,
+        pool: Arc<SqlitePool>,
+        max_points: usize,
+        gate: Option<Arc<WriteGate>>,
+    ) -> Self {
         // 容量 1：唤醒是"信号"不是"数据"⇒ 只保留"至少有一次待处理的唤醒"这一位信息即可
         // （多次触发合并不影响正确性：醒来那次 `flush()` 会把**整个**缓冲带走）。
         let (flush_wake, flush_wake_rx) = mpsc::channel(1);
@@ -299,7 +339,18 @@ impl WriteBuffer {
             pool,
             flush_wake,
             flush_wake_rx: Mutex::new(Some(flush_wake_rx)),
+            gate,
         }
+    }
+
+    /// 挂闸门（构造后注入；与 `new_with_gate` 等价，供"先建缓冲再拿到闸门"的装配顺序）。
+    pub fn set_gate(&mut self, gate: Arc<WriteGate>) {
+        self.gate = Some(gate);
+    }
+
+    /// 闸门快照（观测用；未设闸 ⇒ `None`）。
+    pub fn gate(&self) -> Option<&Arc<WriteGate>> {
+        self.gate.as_ref()
     }
 
     /// 入缓冲（满 `capacity` 触发一次批量提交；**采集调用栈里不 await DB**，见类型文档）。
@@ -314,6 +365,25 @@ impl WriteBuffer {
     ///
     /// 调用点的 `if let Err(..)` 分支因此**退化为永不触发**（保留不删：签名兼容）。
     pub async fn buffer_telemetry(&self, point: TelemetryPoint) -> Result<(), StorageError> {
+        // 闸门（U-74 审查 B-1）：磁盘 ≥95% 或完整性降级 ⇒ **不再接收新点**。
+        // 语义取"拒收入口"而非"入缓冲后不提交"：后者会让缓冲在停机时仍持有一堆**注定写不出去**
+        // 的点（退出 flush 还会白试一遍），且 `buffered_points` 会把"已停写"伪装成"待落库"。
+        // **计数 + error 日志**（不静默）：`rejected_telemetry` 与既有 `dropped_points` 分开，
+        // 前者是**设计动作**（有意的停写），后者是**容量溢出**（意外丢数据）——混一起会让排障误判。
+        if let Some(g) = &self.gate {
+            if !g.allows_telemetry() {
+                let n = g.note_rejected_telemetry(1);
+                tracing::error!(
+                    metric = %point.metric_name,
+                    device_id = %point.device_id,
+                    disk_level = g.disk_level().as_str(),
+                    degraded = g.is_degraded(),
+                    rejected_telemetry_total = n,
+                    "遥测写入被闸门拒绝（磁盘高水位 / DB 完整性降级）⇒ 本点不入缓冲"
+                );
+                return Ok(());
+            }
+        }
         let (trigger, dropped) = {
             let mut buf = self.buffer.lock();
             buf.push(point);
@@ -525,6 +595,24 @@ impl WriteBuffer {
     /// 失败时本批**留在缓冲**（回填头部）并返回 `Err`（调用方据 `Err` 记日志/告警）；
     /// 成功时缓冲里该批已移除。`since_attempt` 随 drain 归零（那批点已算"尝试过一次"）。
     pub async fn flush(&self) -> Result<usize, StorageError> {
+        // 闸门（B-1/A-7）：**≥98% 或完整性降级 ⇒ 连已缓冲的点也停写**（"停全部写入"的字面口径）。
+        // 95–98% 档**不**停 flush：那批点已在缓冲里（写出去不增加数据总量），停掉只会让缓冲涨到
+        // `max_points` 再按"容量溢出"丢——那是**意外丢数据**的计数口径，会把有意的停写记成缺陷。
+        if let Some(g) = &self.gate {
+            if !g.allows_any_write() {
+                let n = g.note_rejected_write();
+                tracing::error!(
+                    disk_level = g.disk_level().as_str(),
+                    degraded = g.is_degraded(),
+                    buffered = self.buffered_points(),
+                    rejected_writes_total = n,
+                    "遥测 flush 被闸门拒绝（≥98% 或完整性降级）⇒ 本批留在缓冲，待水位回落/重启后提交"
+                );
+                // 返回 `Ok(0)`：这是**设计动作**不是失败（报 `Err` 会让退出路径打一串"落库失败"，
+                // 掩盖真正的失败形态）。点仍在缓冲里、未丢，`rejected_writes` 已留证。
+                return Ok(0);
+            }
+        }
         let batch: Vec<TelemetryPoint> = {
             let mut buf = self.buffer.lock();
             let drained: Vec<TelemetryPoint> = buf.drain(..).collect();

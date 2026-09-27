@@ -58,6 +58,10 @@ pub enum OtaError {
     /// IO 错误
     #[error("IO 错误: {0}")]
     IoError(String),
+
+    /// 该操作当前不受支持（**显式**拒绝：不假装做过，也不用"必失败的空值"走过场）
+    #[error("不支持的操作: {0}")]
+    Unsupported(String),
 }
 
 #[cfg(test)]

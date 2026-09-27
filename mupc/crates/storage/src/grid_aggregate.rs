@@ -404,9 +404,22 @@ impl GridAggregator {
     /// `period_ms` = 聚合周期（`storage.grid_aggregate_period_ms`，默认 60000）。
     /// 取 `.max(1)` 只为挡住除零（合法配置由 `core_config::validate_storage` 门禁为 ≥ 10000）。
     pub fn new(period_ms: u64) -> Self {
+        Self::with_specs(period_ms, CHANNELS)
+    }
+
+    /// **表驱动入口**（生产恒传 [`CHANNELS`]；用例可注入畸形表以钉住"不 panic"的降级语义）。
+    ///
+    /// U-74 审查 C-2：`close_current` 原对 `extremes=true` 的行 `expect` `max_metric` /
+    /// `min_metric` —— **生产路径上的 `expect`**，其"不可达"只靠同 crate 的用例断言
+    /// （`channel_table_extreme_rows_are_complete`）。既然本类型已经把"增删通道/开关极值 =
+    /// 改本表、不改算法"写进设计，表就不该是"改错了就 panic 运行期"的形态 ⇒
+    /// **降级为 `Option` 处理**（缺名的极值行整体跳过 + `tracing::error!` 留证），
+    /// 且 [`Self::rows_per_period`] 与 [`Self::close_current`] **共用同一条判据**，
+    /// 使"声明行数 == 实产行数"这条不变量对任何表都成立（畸形表也不会少报/多报）。
+    pub fn with_specs(period_ms: u64, specs: &'static [ChannelSpec]) -> Self {
         Self {
             period_ms: period_ms.max(1),
-            specs: CHANNELS,
+            specs,
             cur: None,
             last_start_ms: None,
         }
@@ -508,10 +521,14 @@ impl GridAggregator {
     }
 
     /// 每周期产出行数（18 均值 + 2×2 极值 = 22，§4.4.4.3）。由表算出，不写死常量。
+    ///
+    /// **与 [`Self::close_current`] 共用 [`extreme_metrics`]**（C-2）：畸形表（`extremes=true`
+    /// 却缺 `max_metric`/`min_metric`）下两边同步少 2 行 ⇒ "声明 == 实产"这条不变量对任何表
+    /// 都成立，不会出现"少报 → 上游按 22 行切分而实际 20 行"的错位。
     pub fn rows_per_period(&self) -> usize {
         self.specs
             .iter()
-            .map(|s| 1 + if s.extremes { 2 } else { 0 })
+            .map(|s| 1 + extreme_metrics(s).map_or(0, |_| 2))
             .sum()
     }
 
@@ -548,14 +565,8 @@ impl GridAggregator {
                 value,
                 quality,
             });
-            if spec.extremes {
+            if let Some((max_name, min_name)) = extreme_metrics(spec) {
                 // 极值行与均值行**同时间戳**（§4.4.4.4），仅 `metric_name` 不同。
-                let (max_name, min_name) = (
-                    spec.max_metric
-                        .expect("extremes=true 的通道必须给 max_metric"),
-                    spec.min_metric
-                        .expect("extremes=true 的通道必须给 min_metric"),
-                );
                 for name in [max_name, min_name] {
                     let (value, quality) = if acc.count[i] > 0 {
                         let v = if name == max_name {
@@ -578,6 +589,30 @@ impl GridAggregator {
         }
         self.last_start_ms = Some(acc.start_ms);
         rows
+    }
+}
+
+/// 取某通道的**极值行通道名**（`(max, min)`）：`None` = 不产极值行。
+///
+/// **判据唯一**（U-74 审查 C-2）：只有 `extremes == true` **且**两个名字都给了（非空）才产；
+/// 表写坏了（`extremes=true` 却缺名）⇒ 整体跳过 + `tracing::error!` 留证（**不 panic**）。
+/// [`GridAggregator::rows_per_period`] 与 [`GridAggregator::close_current`] 共用本函数。
+fn extreme_metrics(spec: &ChannelSpec) -> Option<(&'static str, &'static str)> {
+    if !spec.extremes {
+        return None;
+    }
+    match (spec.max_metric, spec.min_metric) {
+        (Some(max), Some(min)) if !max.is_empty() && !min.is_empty() => Some((max, min)),
+        _ => {
+            tracing::error!(
+                metric = spec.metric,
+                max_metric = ?spec.max_metric,
+                min_metric = ?spec.min_metric,
+                "ChannelSpec extremes=true 但 max_metric/min_metric 缺名或为空 ⇒ 本通道**不产极值行**\
+                 （表写坏，须修表；见 storage::grid_aggregate::CHANNELS）"
+            );
+            None
+        }
     }
 }
 
@@ -922,5 +957,79 @@ mod tests {
         assert_eq!(tp.value, None, "缺测必须原样为 None（落库即真 NULL）");
         assert_eq!(tp.quality, 1);
         assert!(tp.id.is_none());
+    }
+
+    // ── C-2（U-74 审查）：畸形表**不 panic** 且"声明行数 == 实产行数" ──
+
+    /// 畸形表：第 1 行完好（`extremes=true` 两名齐备），第 2 行 `extremes=true` 但
+    /// **`min_metric = None`**（表写坏）。
+    static MALFORMED_SPECS: [ChannelSpec; 2] = [
+        ChannelSpec {
+            metric: "m_ok",
+            extremes: true,
+            pick: pick_u0,
+            note: "",
+            max_metric: Some("m_ok_max"),
+            min_metric: Some("m_ok_min"),
+        },
+        ChannelSpec {
+            metric: "m_broken",
+            extremes: true,
+            pick: pick_u1,
+            note: "",
+            max_metric: Some("m_broken_max"),
+            min_metric: None,
+        },
+    ];
+
+    /// **判别力（C-2）**：畸形表下闭合周期**不得 panic**，且**声明的行数 == 实际产出的行数**。
+    ///
+    /// **改坏实现即红**：把 `close_current` 的 `extreme_metrics(..)` 还原成
+    /// `spec.min_metric.expect("extremes=true 的通道必须给 min_metric")` ⇒ 本用例在第一次
+    /// `observe` 跨周期处 panic（"生产路径不得 `expect`"的直接证据）。
+    ///
+    /// 另：`rows_per_period` 也必须与实产同源 —— 若它仍按 `s.extremes` 数（=4），
+    /// 而实产 3，第二条断言红。
+    #[test]
+    fn malformed_extreme_spec_degrades_without_panicking() {
+        let mut agg = GridAggregator::with_specs(1_000, &MALFORMED_SPECS);
+        // 第二行缺 min_metric ⇒ 少 2 行（只剩均值 1 行）：声明 4 行 vs 完好表的 6 行
+        assert_eq!(
+            agg.rows_per_period(),
+            4,
+            "畸形行的极值不得被计入声明行数（否则与实产错位）"
+        );
+
+        // 开周期（无产出）
+        assert!(agg.observe(1_000, &full_sample(1.0)).is_empty());
+        // 跨周期 ⇒ 闭合并产出（原实现在此 panic）
+        let rows = agg.observe(2_500, &full_sample(2.0));
+        assert_eq!(
+            rows.len(),
+            agg.rows_per_period(),
+            "实产行数须等于声明行数（畸形表同样成立）"
+        );
+        let names: Vec<&str> = rows.iter().map(|r| r.metric_name).collect();
+        assert_eq!(
+            names,
+            vec!["m_ok", "m_ok_max", "m_ok_min", "m_broken"],
+            "完好行产 3 行（均值+极值），畸形行只产均值 1 行（不产半截极值）"
+        );
+        // 完好的极值行语义不变（同时间戳 = 周期起点）
+        assert_eq!(row(&rows, "m_ok_max").timestamp, rows[0].timestamp);
+        assert_eq!(row(&rows, "m_ok_max").value, Some(11.0)); // u[0] = base+10，base=1
+    }
+
+    /// C-2 反向网：**真实表** [`CHANNELS`] 必须两行齐备 ⇒ `rows_per_period == 22` 且实产 22
+    /// （防"为了不 panic 而把极值行整体关掉"这类静默减行）。
+    #[test]
+    fn real_table_still_emits_all_22_rows() {
+        let mut agg = GridAggregator::new(60_000);
+        assert_eq!(agg.rows_per_period(), 22, "18 均值 + 2×2 极值（§4.4.4.3）");
+        agg.observe(0, &full_sample(1.0));
+        let rows = agg.flush(1_000);
+        assert_eq!(rows.len(), 22, "实产必须与声明一致（真实表不受降级分支影响）");
+        assert!(rows.iter().any(|r| r.metric_name == "p_total_max"));
+        assert!(rows.iter().any(|r| r.metric_name == "q_total_min"));
     }
 }

@@ -118,8 +118,9 @@
 //!
 //! ## 字段集的**逐行差异**（如实登记：与 PRD F9 **少 3 项 / 多 3 项**）
 //!
-//! 本单元落地的 [`FIELDS`]（9 行 = 7 可写 + 2 只读）与 **PRD §3.2 F9 的 7 个配置项**
-//! **并不相同**——两个方向都如实登记，不做"只报少、不报多"的半截陈述：
+//! 本单元落地的 [`FIELDS`]（7 行 = 5 可写 + 2 只读；E-13 后核间心跳/重连二键已删）与
+//! **PRD §3.2 F9 的 7 个配置项** **并不相同**——两个方向都如实登记，不做"只报少、不报多"
+//! 的半截陈述：
 //!
 //! - **少 3 项**：`gateway.heartbeat_interval`（IEC 104 心跳间隔）、`intercore.local_port`
 //!   （核间本地端口）、`telemetry.report_interval_sec`（遥测上报周期）——三者在现网 `CoreConfig`
@@ -127,10 +128,11 @@
 //!   装置里不存在"的键——正是 §11.3「配置元数据一致性测试」要防的静默失效）：
 //!   见 [`PENDING_NO_CARRIER`]。**该降级已由 PM 于 2026-09-19 裁定接受**（PRD §3.2 F9 第二处
 //!   补注块 / 设计 §4.3.3 末注），**不再是待裁项**。
-//! - **多 3 项**：`intercore.host`（对端地址）/ `intercore.heartbeat_interval_sec` /
-//!   `intercore.reconnect_interval_sec` —— 三者在设计 §4.3.3 里明确列出、`CoreConfig` 有承载、
+//! - **多 1 项**：`intercore.host`（对端地址）—— 在设计 §4.3.3 里明确列出、`CoreConfig` 有承载、
 //!   只是 **PRD F9 的表没列**。⇒ 实现**忠实于设计**；差异的性质是 **PRD 与设计两份清单不同步**，
 //!   **不是**实现擅自加字段。
+//!   （E-13 前此处记「多 3 项」，含 `intercore.heartbeat_interval_sec` /
+//!   `reconnect_interval_sec`；二键因**零消费点**已连同 `CoreConfig` 字段一并删除。）
 //!
 //! （计数口径：与 PRD F9 的字段表比对。另有两行**只读**服务地址
 //! `display.bind_addr` / `display.control_bind_addr` 出自 §3.4 / §6.2 的只读行——
@@ -1421,8 +1423,11 @@ pub const GROUPS: [(&str, &str); 4] = [
 /// "自己造的缺陷"。故本组取**硬约束**：只用 cmap 内字符，并由
 /// [`config_receipt_messages_use_only_font_cmap_glyphs`] 逐字符兜底。
 ///
-/// **码表真源** = `local-display/fonts/lv_font_cmap.txt`（入库派生清单，**461** 码位；
+/// **码表真源** = `local-display/fonts/lv_font_cmap.txt`（入库派生清单，**462** 码位；
 /// T21a 扩字库前为 324）——**不在此处复制一份副本**（那会变成第二真源，清单漂移时两边静默不一致）。
+/// ⚠️ **本数字由 `lv_font_cmap.txt` 头行给出，且本轮（2026-09-27，WP5 P3-D）已独立复算过**：
+/// 该文件非注释、非空行 = **462** 行且**无重复码位**（复算命令与结果见本轮 WP5 报告）。
+/// 上一轮此处写 461 是"T21a 当时的实测值"，未随 T21c-2 的 `+U+7A7A / −U+2082` 同步 ⇒ 陈旧。
 ///
 /// # 三条推导出的写法规则（与 `config_service` 模块头硬口径 4 同一条）
 ///
@@ -1444,7 +1449,8 @@ pub const GROUPS: [(&str, &str); 4] = [
 /// **批的内容（范围已裁定）**：
 /// 1. **扩字库**：在生成字体的码表里补齐本模块 + `interlock_ops` 回执文案所缺的字形——
 ///    **范围以 [`PINNED_MISSING`]（下面的钉死表）的并集为准**；T21a（U-73 外设上屏扩字库）
-///    已把码表从 324 扩到 **461** 码位（它同时修好 `a` `c` `d` `p` `r` 与全角 `（` `）`）
+///    已把码表从 324 扩到 **461** 码位（T21c-2 再至 **462**，见上方"码表真源"；它同时修好
+///    `a` `c` `d` `p` `r` 与全角 `（` `）`）
 ///    ⇒ 本批并集由 **23 收窄到 16 个码位**：**6 个 ASCII**（`,` `e` `i` `l` `o` `t`）+ **2 个全角**
 ///    （`，`(U+FF0C) `：`(U+FF1A)）+ **8 个 CJK**（`丢` `候` `句` `柄` `理` `稍` `误` `错`）。
 ///    ⚠️ **上面这三个计数是手抄的**，与 [`PINNED_MISSING`] **无机械约束**，表一变则本处可能
@@ -1689,15 +1695,9 @@ fn set_intercore_port(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn set_intercore_heartbeat(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
-    c.intercore.heartbeat_interval_sec = v.as_u64().ok_or("应为非负整数")?;
-    Ok(())
-}
-
-fn set_intercore_reconnect(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
-    c.intercore.reconnect_interval_sec = v.as_u64().ok_or("应为非负整数")?;
-    Ok(())
-}
+// ⚠️ E-13（2026-09-27）：原 `set_intercore_heartbeat` / `set_intercore_reconnect` 已随
+// `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键一并删除——二键无任何
+// 消费点，留在字段表里等于给操作员一个"改了没反应"的开关（谎报）。
 
 fn set_log_level(c: &mut CoreConfig, v: &Value) -> Result<(), String> {
     c.system.log_level = v.as_str().ok_or("应为字符串")?.to_string();
@@ -1779,43 +1779,12 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
         current: |c| json!(c.intercore.port),
         set: set_intercore_port,
     },
-    // 设计 §4.3.3「核间心跳/重连间隔」行：**需重启进程生效**，副作用 = 无
-    // ⇒ **不**要求重连提示（`requires_reconnect=false`）
-    // ⚠️ 该行属**实现多出**（PRD F9 未列），见设计 §4.3.3 末注
-    ConfigFieldMeta {
-        group: GROUP_INTERCORE,
-        key: "intercore.heartbeat_interval_sec",
-        label: "心跳间隔",
-        kind: || ConfigKind::U64 {
-            min: 1,
-            max: 3600,
-            step: 1,
-        },
-        unit: Some("秒"),
-        requires_reconnect: false,
-        editable: true,
-        yaml_path: "intercore.heartbeat_interval_sec",
-        default: || json!(def().intercore.heartbeat_interval_sec),
-        current: |c| json!(c.intercore.heartbeat_interval_sec),
-        set: set_intercore_heartbeat,
-    },
-    ConfigFieldMeta {
-        group: GROUP_INTERCORE,
-        key: "intercore.reconnect_interval_sec",
-        label: "重连间隔",
-        kind: || ConfigKind::U64 {
-            min: 1,
-            max: 3600,
-            step: 1,
-        },
-        unit: Some("秒"),
-        requires_reconnect: false,
-        editable: true,
-        yaml_path: "intercore.reconnect_interval_sec",
-        default: || json!(def().intercore.reconnect_interval_sec),
-        current: |c| json!(c.intercore.reconnect_interval_sec),
-        set: set_intercore_reconnect,
-    },
+    // ⚠️ **已删除（E-13，2026-09-27）**：原设计 §4.3.3 的「核间心跳/重连间隔」两行
+    // （`intercore.heartbeat_interval_sec` / `intercore.reconnect_interval_sec`）曾是本表的
+    // **实现多出**项。实测二键在全仓**零消费点**（TCP 传输侧无心跳/重连循环；PCS 采集兼心跳的
+    // 周期取 `south_pcs.interval_ms`）⇒ 屏上"可写 + 需重启生效"是**谎报**。已连同
+    // `InterCoreConfig` 字段、两份部署 YAML 一并移除；判别力测试见
+    // `e13_dead_intercore_interval_keys_are_absent_from_field_table`。
     // ── 遥测与日志（UI §6.2 行 513–514）────────────────────────────────────
     // 设计 §4.3.3「日志级别」行：`system.log_level` 热生效（≤1 s），副作用 无 ⇒ 不要求重连提示
     ConfigFieldMeta {
@@ -1889,8 +1858,9 @@ pub const FIELDS: &[ConfigFieldMeta] = &[
 ///    （`core_config.rs:281-288`）只有 `listen_addr` / `listen_port`，**没有**心跳间隔。
 ///    造一个键 = 屏上能改、装置里不存在。
 /// 2. `intercore.local_port`（设计 §4.3.3「核间『本地端口』」行）——`InterCoreConfig`
-///    只有 `host` / `port`（**对端**地址与端口）/ `heartbeat_interval_sec` /
-///    `reconnect_interval_sec` / `transport`，**没有**本地绑定端口。
+///    只有 `host` / `port`（**对端**地址与端口）/ `transport`，**没有**本地绑定端口。
+///    （字段清单记于 E-13 之后：原 `heartbeat_interval_sec` / `reconnect_interval_sec`
+///    二键已因零消费点删除。）
 /// 3. `telemetry.report_interval_sec`（设计 §4.3.3「遥测上报周期」行）——上送节拍在 `startup.rs`
 ///    是**硬编码常量**，`CoreConfig` 无对应项（该行"现网真实 key"一栏写的是一句**代码位置描述**，
 ///    不是配置键——这本身就是该项无配置承载的证据）。
@@ -1972,7 +1942,7 @@ plugins: {}
 /// 必须**启动期可见地**失败，而不是让"默认值"静默变成 `null`
 /// （单测 `minimal_core_yaml_parses_and_yields_core_config_defaults` 同时钉死它）。
 ///
-/// **解析结果进程内缓存一次**：`FIELDS` 有 9 行、每行 `default` 闭包各调一次 ⇒ 每个
+/// **解析结果进程内缓存一次**：`FIELDS` 有 7 行、每行 `default` 闭包各调一次 ⇒ 每个
 /// `GET /v1/console/config` 请求原本要跑 9 次 `serde_yaml::from_str`（有界但纯浪费）。
 /// `OnceLock` 让解析**恰好发生一次**，之后每请求只做一次字段读取（返回 `&'static`，零拷贝）。
 fn def() -> &'static CoreConfig {
@@ -2200,8 +2170,6 @@ mod tests {
         c.system.log_level = "debug".to_string();
         c.intercore.host = "10.0.0.7".to_string();
         c.intercore.port = 9999;
-        c.intercore.heartbeat_interval_sec = 7;
-        c.intercore.reconnect_interval_sec = 11;
         c.gateway.listen_addr = "192.168.3.10".to_string();
         c.gateway.listen_port = 2405;
         c.display.bind_addr = "127.0.0.1:9810".to_string();
@@ -2259,14 +2227,6 @@ mod tests {
         assert_eq!(field(&view, "system.log_level").value, json!("debug"));
         assert_eq!(field(&view, "intercore.host").value, json!("10.0.0.7"));
         assert_eq!(field(&view, "intercore.port").value, json!(9999));
-        assert_eq!(
-            field(&view, "intercore.heartbeat_interval_sec").value,
-            json!(7)
-        );
-        assert_eq!(
-            field(&view, "intercore.reconnect_interval_sec").value,
-            json!(11)
-        );
         assert_eq!(
             field(&view, "gateway.listen_addr").value,
             json!("192.168.3.10")
@@ -2766,8 +2726,6 @@ mod tests {
         // 设计 §4.3.3 逐行：`false` 的键（日志级别行、核间心跳/重连间隔行）
         for key in [
             "system.log_level",                 // §4.3.3「日志级别」（热生效，无副作用）
-            "intercore.heartbeat_interval_sec", // §4.3.3「核间心跳/重连间隔」（需重启，无副作用）
-            "intercore.reconnect_interval_sec", // 同上
             "display.bind_addr",                // 只读字段（不可改 ⇒ 永不进「本次改动」）
             "display.control_bind_addr",        // 同上
         ] {
@@ -2813,8 +2771,6 @@ mod tests {
         b.system.log_level = "warn".to_string();
         b.intercore.host = "192.168.1.1".to_string();
         b.intercore.port = 1;
-        b.intercore.heartbeat_interval_sec = 2;
-        b.intercore.reconnect_interval_sec = 3;
         b.gateway.listen_addr = "127.0.0.1".to_string();
         b.gateway.listen_port = 1;
         let va = config_view(&a, 0, WriteMode::TextPreserve);
@@ -2827,7 +2783,7 @@ mod tests {
                 changed += 1;
             }
         }
-        // 除 2 个只读 display 字段（两份配置都写 127.0.0.1）外，其余 7 个字段的值都应随之变化
+        // 除 2 个只读 display 字段（两份配置都写 127.0.0.1）外，其余 5 个字段的值都应随之变化
         assert_eq!(
             changed,
             FIELDS.len() - 2,
@@ -2868,6 +2824,38 @@ mod tests {
         }
     }
 
+    /// **E-13 判别力测试**：`intercore.heartbeat_interval_sec` / `reconnect_interval_sec`
+    /// 二键**不得**出现在字段表里 —— 二键无消费点，"屏上可写 + 需重启生效"是谎报。
+    ///
+    /// 改坏方式（必须变红）：把二键的 `ConfigFieldMeta` 重新加回 [`FIELDS`]（或只把
+    /// `editable` 置 `true` 后加回）⇒ 本用例红。
+    #[test]
+    fn e13_dead_intercore_interval_keys_are_absent_from_field_table() {
+        for key in [
+            "intercore.heartbeat_interval_sec",
+            "intercore.reconnect_interval_sec",
+        ] {
+            assert!(
+                !FIELDS.iter().any(|m| m.key == key),
+                "`{key}` 无消费点（改完无任何效果）⇒ 不得进屏上字段表"
+            );
+        }
+        // 前提断言：本表其它核间键仍在（防止"整组被删"把上面的 for 变成空转）
+        for key in ["intercore.host", "intercore.port"] {
+            assert!(
+                FIELDS.iter().any(|m| m.key == key),
+                "核间组应当仍有 `{key}`（否则本用例失去判别环境）"
+            );
+        }
+        // 可写字段数（E-13 后 = 5）：log_level / intercore.host / intercore.port /
+        // gateway.listen_addr / gateway.listen_port
+        assert_eq!(
+            FIELDS.iter().filter(|m| m.editable).count(),
+            5,
+            "可写字段数已因 E-13 由 7 降为 5"
+        );
+    }
+
     #[test]
     fn yaml_path_matches_key_for_every_field() {
         // §4.3.2.1：保留式编辑以 yaml_path 定位标量行；本单元虽不消费，仍须与 key 同形，
@@ -2885,8 +2873,6 @@ mod tests {
         assert_eq!(d.system.log_level, "info");
         assert_eq!(d.intercore.host, "127.0.0.1");
         assert_eq!(d.intercore.port, 9100);
-        assert_eq!(d.intercore.heartbeat_interval_sec, 5);
-        assert_eq!(d.intercore.reconnect_interval_sec, 3);
         assert_eq!(d.gateway.listen_addr, "0.0.0.0");
         assert_eq!(d.gateway.listen_port, 2404);
         // display 段默认来自 display-proto 的 DisplayConfig::default()
@@ -3316,7 +3302,8 @@ gateway:
 
     // ═══ 回执文案的**用字网**（cmap ⊆）═══════════════════════════════════════════
 
-    /// 生成字体的 cmap 清单（**入库真源**：`local-display/fonts/lv_font_cmap.txt`，324 码位）。
+    /// 生成字体的 cmap 清单（**入库真源**：`local-display/fonts/lv_font_cmap.txt`，**462** 码位；
+    /// WP5 P3-D：原写 324 系扩字库前的陈旧值，2026-09-27 已按清单头行订正）。
     ///
     /// # 为什么读**兄弟 crate 的文件**而不是"在 mupc-core-bin 里抄一份清单"
     ///
@@ -3470,7 +3457,9 @@ gateway:
             check("成功/热生效", &r.message, &mut seen);
         }
 
-        // ③-b 成功 + **需重启**：全部 6 个未接线键一起改 ⇒ 逐标签点名（**6 条都**要在串里）。
+        // ③-b 成功 + **需重启**：全部 4 个未接线键一起改 ⇒ 逐标签点名（**4 条都**要在串里）。
+        // （E-13 前为 6 键：`intercore.heartbeat_interval_sec` / `reconnect_interval_sec`
+        //   已随字段删除，不再出现在 FIELDS 内 ⇒ 不能作为 apply 目标。）
         {
             let w = spawn_write_host("cmap-restart", None, None).await;
             let (_, r) = post_apply(
@@ -3481,8 +3470,6 @@ gateway:
                     "gateway.listen_port": 2405,
                     "intercore.host": "192.168.3.21",
                     "intercore.port": 2405,
-                    "intercore.heartbeat_interval_sec": 11,
-                    "intercore.reconnect_interval_sec": 12,
                 }),
                 "apply",
             )
@@ -3490,7 +3477,7 @@ gateway:
             assert!(r.ok, "{r:?}");
             assert!(
                 r.message.contains("需重启"),
-                "6 键全未接线 ⇒ 必须说需重启: {}",
+                "4 键全未接线 ⇒ 必须说需重启: {}",
                 r.message
             );
             for key in [
@@ -3498,8 +3485,6 @@ gateway:
                 "gateway.listen_port",
                 "intercore.host",
                 "intercore.port",
-                "intercore.heartbeat_interval_sec",
-                "intercore.reconnect_interval_sec",
             ] {
                 let label = field_meta(key).expect("键必须在 FIELDS 内").label;
                 assert!(

@@ -53,6 +53,15 @@ pub struct WaveformMeta {
     /// 数据质量: 0=good, 1=gap_detected, 2=major_gap
     pub data_quality: u8,
     /// 时间质量: 0=synchronized, 1=unsynchronized
+    ///
+    /// ⚠️ **本字段当前未接线**（U-74 审查 B-2 的如实登记）：03 PRD §7.5 要求"未同步须标
+    /// `time_quality = unsynchronized`"，其前提是**有 NTP/PTP 客户端并知道同步状态**；而本仓
+    /// **没有 NTP 客户端**（无时钟同步子系统），也没有任何地方会把它置成 `1`。
+    ///
+    /// ⇒ 写入侧的 `0` **不是"已同步"的测量结论，而是"本字段无人负责"的占位值**。读到 0 时
+    /// **不得**据此推断时标可信 —— 该判断当前无据可依。登记为**需独立立项**（时钟同步子系统：
+    /// NTP 客户端 + 偏差门限 + 同步状态注入本字段），**本批不实现半成品**（不加半接线字段、
+    /// 不臆造 `1`）。
     pub time_quality: u8,
 }
 
@@ -69,6 +78,7 @@ impl Default for WaveformMeta {
             post_trigger_samples: 0,
             channel_mask: 0x3FF,
             data_quality: 0,
+            // 占位值（**不是**"已同步"的测量结论）——见 `time_quality` 字段文档
             time_quality: 0,
         }
     }
@@ -376,7 +386,8 @@ fn build_header(meta: &WaveformMeta) -> Vec<u8> {
     header[56..60].copy_from_slice(&(meta.event_id as u32).to_le_bytes());
     // 60: data_quality
     header[60] = meta.data_quality;
-    // 61: time_quality
+    // 61: time_quality —— ⚠️ **恒 0**（本字段未接线，见 `WaveformMeta::time_quality` 的文档）：
+    // 本仓无 NTP 客户端 ⇒ 这里写出的 0 **不是**"已同步"的测量结论。**读侧不得据此推断时标可信。**
     header[61] = meta.time_quality;
     // 62..64: reserved
     // (already zeros)

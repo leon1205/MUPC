@@ -31,6 +31,11 @@
 
 ## 2. 交叉编译（aarch64）
 
+> ⚙️ **单一真源（U-72，2026-09-27）**：出包请用 `deploy/scripts/build-for-rk3588.sh`
+> （`--cross` 交叉 / 无参本机）—— 它**默认同时产出 `mupcd` 与 `mupc-local-display`**
+> （屏程序自动带 `--features noto-font`），并逐产物核对落点；`--no-display` 只出主控。
+> 下面的手工命令仅作**无脚本场景**的参考，与脚本**须保持一致**。
+
 ```bash
 cd mupc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc

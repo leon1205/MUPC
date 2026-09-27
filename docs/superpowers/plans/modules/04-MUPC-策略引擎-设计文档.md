@@ -54,7 +54,11 @@ AI 引擎失效:
 | **本地优先模式** | **台区储能治理（AI 旁路参考，不下发）** | 策略内置边界检查 | **部署默认**（`ai_engine.local_priority` 默认 true）；Web API `/api/v1/strategy-mode` 可切换 |
 | 基础模式 | 无自动控制 | 手动操作 | 调试/维护 |
 
+> 表内「Web API 切换 / 可切换」为历史原文（保留以述原文），时效见下方注。
+
 **本地优先模式（部署默认）**：`ai_engine.local_priority` 默认 `true`（代码 serde 默认 + 部署配置显式声明），开机即生效；也可经 Web API `/api/v1/strategy-mode` 运行时热切换。生效时 `dispatch_ai_decision` 直接执行本地台区储能治理策略（分相 P/Q 经核间下发）；AI 引擎仍加载、仍运行决策循环，但结果仅作旁路参考（记录日志，不下发核间指令）。（2026-09-09 平台调整：AI 引擎暂停，模型不加载、决策循环仅本地策略——本句「仍加载/仍运行决策循环」为暂停前旧表述，保留以述原文）需 AI 智能控制时置 `local_priority=false`。（2026-09-09 平台调整：现为默认策略；AI 恢复后回兜底位）
+
+〔注（2026-09-27）：`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`——`CoreConfig.ai_engine.local_priority` 启动期读取一次（§8 装配段 `set_local_priority`）。另：该字段现被 `CoreConfig::validate` **拒绝取 `false`**（AI 停用期置 false ⇒ `dispatch_ai_decision` 恒 `ModelNotLoaded` 而本地兜底不执行 = 静默零控制输出）。〕
 
 ### 1.3 模块依赖关系
 
@@ -619,6 +623,12 @@ struct TuningOverrides {                 // 全 Option；None = 保持代码默�
 **validate 规则**：`i_rated_a`/`s_rated_kva`/`phase_p_limit_kw`/`phase_q_limit_kvar` > 0；`has_neutral` 合法；若 `tuning` 给出：`0 < dp_max ≤ phase_p_limit_kw`、`0 < q_i_max ≤ phase_q_limit_kvar`、`p_cap > 0`、`0 ≤ soc_cap_day ≤ 1`、`0 ≤ soc_hys ≤ 1`、`window_size ≥ 1`。
 **依赖**：仅新增 `serde_yaml = "0.9"`（serde 已有；与 mupc-core-bin 等已用版本一致）。
 
+**L3 派生步：`s1_ff_step_kw` 默认 = `p_cap`**（D-24 补记；代码落点 `pcs_profile.rs` 的 `load_tai_storage_config` 第 ⑦ 步之后）：
+- 规则：**若 `tuning` 未显式给出 `s1_ff_step_kw`** ⇒ `cfg.s1_ff_step_kw = cfg.p_cap`（取**合并后**的 `p_cap`，即 tuning 覆盖过的值）；显式给出则保留 tuning 值。
+- 理由：`s1_ff_step_kw` 的语义不变量是"一周期到位"（§2.9 的 S1 前馈吸收：`move_toward` 步长 ≥ 目标变化量），其代码默认值 `60` 正是默认档 `p_cap`。换档只覆盖 `p_cap` 而不同步该步长 ⇒ S1 前馈**欠输**（吸收慢于目标，返送削不动）。
+- 覆盖顺序上的含义：该派生属"L3 派生"，优先级低于 `tuning`（显式 `s1_ff_step_kw` 胜），高于 `TaiStorageConfig::default()` 的 `60`。
+- 单测：`pcs_profile_test.rs::test_s1_ff_step_follows_p_cap_when_not_tuned`（仅 tuning `p_cap=80` ⇒ 步长 80）、`test_s1_ff_step_explicit_tuning_wins`（显式 70 ⇒ 70）。
+
 **装配与回放**：
 - **core_config 新增 `strategy` 段**：
   ```yaml
@@ -953,6 +963,8 @@ pub enum StrategyType {
 | 本地优先 | Web API `PUT /api/v1/strategy-mode`（local_priority=false）或配置 false 重启 | AI 智能（恢复 AI 控制） |
 
 > **注**：`Intelligent/Fallback` 间的自动切换仅发生在 AI 控制模式（`local_priority=false`）。部署默认本地优先模式下 AI 旁路运行，其决策结果不下发，故不触发上述自动降级/恢复路径。
+
+〔注（2026-09-27）：本表末行「Web API `PUT /api/v1/strategy-mode`」为历史原文——`web-api` crate 已删除，**运行时热切换端点不复存在**；现行切换方式见 `startup.rs`（`CoreConfig.ai_engine.local_priority` 启动期读取一次）。且该字段现被 `CoreConfig::validate` **拒绝取 `false`**（AI 停用期置 false = 静默零控制输出），故该行实际不可达。〕
 
 ### 5.3 核间通信信号
 

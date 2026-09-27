@@ -10,11 +10,11 @@
 > | 能力 | 现状 |
 > |------|------|
 > | NearLink / Wi-Fi / BLE 驱动 | **NoOp 占位** —— 调用返回 `Err(UnsupportedDevice)`（**如实拒绝，不谎报成功**）；阻断原因 = 模组选型未定，见 §11 待澄清 1/2/3 |
-> | ECDH 密钥协商 | **已实现**（`wireless/src/ecdh.rs` 用 `p256::ecdh::diffie_hellman()` + HKDF-SHA256）⚠️ 但与设计口径不一致，见 `docs/technical-debt.md` **U-100** |
+> | ECDH 密钥协商 | **已实现**（`wireless/src/ecdh.rs` 用 `p256::ecdh::diffie_hellman()` + HKDF-SHA256）。⚠️ 设计原写 X25519/32B 与本实现不符，已于 2026-09-27 裁定**统一到代码（P-256 / 65B）**并订正设计，见 `docs/technical-debt.md` **U-100（已闭合）** |
 > | AES-256-GCM 帧封装 | **未实现**（无 `aes-gcm` 依赖） |
 > | 认证 / 审计 / 通道管理 / REST 接口 | **未实现**；其中 Wi-Fi REST 相关条目原指向已删除的 `web-api` crate |
 >
-> **本文件的其余内容为需求设计（待硬件到位后实施）**，不是现网能力描述。台账：`docs/technical-debt.md` **U-06**（P0）/ **U-100**（P1）。
+> **本文件的其余内容为需求设计（待硬件到位后实施）**，不是现网能力描述。台账：`docs/technical-debt.md` **U-06**（P0）/ **U-100**（已闭合）。
 
 ---
 
@@ -178,6 +178,8 @@ MUPC 微电网特种调控装置当前已支持 Web UI 浏览器访问和北向�
 - 支持保存多个 Wi-Fi 网络配置（最多 5 个），自动按优先级连接
 - 周期性扫描可用 Wi-Fi 网络（扫描间隔：60 秒），列表通过 Web UI 展示
 
+> ⚠️ **E-04 时效注（2026-09-27）**：本条目的消费方原为 `web-api` crate（REST + Web UI），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。本条**保留为历史原文**，现状改判如下：① 若涉及"配置 / 日志 / 固件"的**本机**读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
+
 ### 3.3 Wi-Fi 模式下配置读写
 
 **User Story：**
@@ -191,6 +193,8 @@ MUPC 微电网特种调控装置当前已支持 Web UI 浏览器访问和北向�
 - API 请求认证方式：Bearer Token（通过 Web UI 登录获取）
 - 配置 API 响应时间 <= 1 秒（读取），<= 2 秒（写入）
 
+> ⚠️ **E-04 时效注（2026-09-27）**：本条目的消费方原为 `web-api` crate（REST + Web UI），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。本条**保留为历史原文**，现状改判如下：① 若涉及"配置 / 日志 / 固件"的**本机**读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
+
 ### 3.4 Wi-Fi 模式下日志导出
 
 **User Story：**
@@ -199,6 +203,8 @@ MUPC 微电网特种调控装置当前已支持 Web UI 浏览器访问和北向�
 **验收标准：**
 
 - 日志导出 API：`GET /api/v1/logs/export?start=...&end=...&level=...`
+
+> ⚠️ **E-04 时效注（2026-09-27）**：本条目的消费方原为 `web-api` crate（REST + Web UI），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。本条**保留为历史原文**，现状改判如下：① 若涉及"配置 / 日志 / 固件"的**本机**读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
 - 支持时间范围过滤（开始时间、结束时间，UTC 格式）
 - 支持日志级别过滤（ERROR / WARN / INFO / DEBUG）
 - 支持全文关键词搜索
@@ -215,6 +221,8 @@ MUPC 微电网特种调控装置当前已支持 Web UI 浏览器访问和北向�
 **验收标准：**
 
 - 固件上传 API：`POST /api/v1/ota/upload`
+
+> ⚠️ **E-04 时效注（2026-09-27）**：本条目的消费方原为 `web-api` crate（REST + Web UI），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。本条**保留为历史原文**，现状改判如下：① 若涉及"配置 / 日志 / 固件"的**本机**读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
 - 支持分块上传（每块大小：4 MB），支持断点续传
 - 固件包校验方式：上传完成后自动计算 SHA-256 并与上传时提供的校验值比对
 - 校验通过后触发升级流程
@@ -684,6 +692,8 @@ Web UI 显示安全告警信息
 | AC-19 | Wi-Fi 日志导出 API | Wi-Fi | `GET /api/v1/logs/export` 导出 100000 条 | 分页下载，支持 `.tar.gz` |
 | AC-20 | Wi-Fi 固件上传 API | Wi-Fi | `POST /api/v1/ota/upload` 上传固件 | 分块上传，断点续传，SHA-256 校验 |
 | AC-21 | Wi-Fi 固件升级进度 | Wi-Fi | `GET /api/v1/ota/progress` | 实时百分比 |
+
+> ⚠️ **E-04 时效注（2026-09-27）**：本条目的消费方原为 `web-api` crate（REST + Web UI），该 crate **已整体删除**（08 号模块 SUPERSEDED，不在 workspace `members` 内）。本条**保留为历史原文**，现状改判如下：① 若涉及"配置 / 日志 / 固件"的**本机**读写，消费方改挂 **12 号本地显示终端的本机回环控制通道**（`display.control_bind_addr` 上的 Axum `/v1/console/*`，无登录 + 审计 + 二次确认）；② 浏览器 Web UI 与 `/api/v1/*` REST 面**随 08 号作废**，本期无实现载体。
 | AC-22 | BLE GATT 广播 | BLE | 客户端扫描 BLE 设备 | 广播名称 `MUPC-BLE-{序列号后6位}` |
 | AC-23 | BLE 设备状态读取 | BLE | 读取状态特征 | JSON 格式，<= 500 ms |
 | AC-24 | BLE 配置读写 | BLE | 读写配置特征 | 需配对绑定，响应时间达标 |

@@ -5,14 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::{timeout, Duration};
 use tracing::{error, info, warn};
 
-use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType};
+use super::{HeartbeatManager, IntercoreFrame, IntercoreFrameType, FRAME_FIXED_LENGTH};
 use crate::transport::{IntercoreTransport, TcpTransport};
+
+/// 单次 `read()` 的暂存缓冲大小（仅用于把字节搬进累积缓冲，与帧长无关）
+const READ_CHUNK_LEN: usize = 512;
 
 /// 安全覆盖触发原因的默认值
 const SAFETY_OVERRIDE_REASON_UNKNOWN: &str = "unknown";
@@ -316,35 +319,50 @@ impl SafetyOverridePayload {
     }
 }
 
-/// 核间通信状态（用于通信中断检测和降级）
-pub struct IntercoreConnectionState {
+/// 核间连接状态的**一致性快照**（E-16）
+///
+/// 字段间不变式（快照内恒成立）：
+/// - `safety_override_active == safety_override_reason.is_some()`
+///   —— 修前 12 把独立 `RwLock` 逐字段读取，会读到 `active=true` 而 `reason=None`
+///   的撕裂值；单锁后快照一次取全，不再撕裂。
+#[derive(Debug, Clone, Default)]
+pub struct IntercoreConnectionSnapshot {
     /// 最后收到的有效 p_ref
-    pub last_valid_p_ref: RwLock<Option<f64>>,
+    pub last_valid_p_ref: Option<f64>,
     /// 最后收到的有效 k_droop
-    pub last_valid_k_droop: RwLock<Option<f64>>,
+    pub last_valid_k_droop: Option<f64>,
     /// 最后心跳时间戳
-    pub last_heartbeat_ms: RwLock<u64>,
+    pub last_heartbeat_ms: u64,
     /// 连接状态
-    pub connected: RwLock<bool>,
+    pub connected: bool,
     // v2.10 新增字段
     /// 最后收到的 q_realtime_margin
-    pub last_q_realtime_margin: RwLock<Option<f64>>,
+    pub last_q_realtime_margin: Option<f64>,
     /// q_realtime_margin 连续缺失计数
-    pub q_margin_missing_count: RwLock<u32>,
+    pub q_margin_missing_count: u32,
     /// 安全覆盖激活标志
-    pub safety_override_active: RwLock<bool>,
+    pub safety_override_active: bool,
     /// 安全覆盖触发原因
-    pub safety_override_reason: RwLock<Option<String>>,
+    pub safety_override_reason: Option<String>,
     /// 安全覆盖强制放电功率 (kW)
-    pub safety_override_p_ref: RwLock<Option<f64>>,
+    pub safety_override_p_ref: Option<f64>,
     /// 安全覆盖持续时间 (ms)
-    pub safety_override_duration_ms: RwLock<u64>,
+    pub safety_override_duration_ms: u64,
     /// 安全覆盖恢复条件
-    pub safety_override_recovery: RwLock<Option<String>>,
+    pub safety_override_recovery: Option<String>,
     /// 安全覆盖触发计数（用于频率限制）
-    pub safety_override_count: RwLock<u32>,
+    pub safety_override_count: u32,
     /// 安全覆盖首次触发时间戳（用于 1 分钟窗口计算）
-    pub safety_override_first_ts: RwLock<Option<i64>>,
+    pub safety_override_first_ts: Option<i64>,
+}
+
+/// 核间通信状态（用于通信中断检测和降级）
+///
+/// **单锁**（E-16）：全部字段同处一把 `RwLock` 下。修前每个字段各持一把 `RwLock`，
+/// 「读一遍全部字段」不是原子操作 ⇒ 快照可撕裂。现所有读写方法都在**同一次**加锁内
+/// 完成，并提供 [`Self::snapshot`] 一次取全。
+pub struct IntercoreConnectionState {
+    inner: RwLock<IntercoreConnectionSnapshot>,
 }
 
 impl Default for IntercoreConnectionState {
@@ -356,71 +374,64 @@ impl Default for IntercoreConnectionState {
 impl IntercoreConnectionState {
     pub fn new() -> Self {
         Self {
-            last_valid_p_ref: RwLock::new(None),
-            last_valid_k_droop: RwLock::new(None),
-            last_heartbeat_ms: RwLock::new(0),
-            connected: RwLock::new(false),
-            // v2.10 新增字段
-            last_q_realtime_margin: RwLock::new(None),
-            q_margin_missing_count: RwLock::new(0),
-            safety_override_active: RwLock::new(false),
-            safety_override_reason: RwLock::new(None),
-            safety_override_p_ref: RwLock::new(None),
-            safety_override_duration_ms: RwLock::new(0),
-            safety_override_recovery: RwLock::new(None),
-            safety_override_count: RwLock::new(0),
-            safety_override_first_ts: RwLock::new(None),
+            inner: RwLock::new(IntercoreConnectionSnapshot::default()),
         }
+    }
+
+    /// 一致性快照：一次加锁读全，字段间不变式成立（E-16）
+    pub async fn snapshot(&self) -> IntercoreConnectionSnapshot {
+        self.inner.read().await.clone()
     }
 
     /// 更新收到的双参数
     pub async fn update_valid_params(&self, p_ref: f64, k_droop: f64) {
-        *self.last_valid_p_ref.write().await = Some(p_ref);
-        *self.last_valid_k_droop.write().await = Some(k_droop);
+        let mut s = self.inner.write().await;
+        s.last_valid_p_ref = Some(p_ref);
+        s.last_valid_k_droop = Some(k_droop);
     }
 
     /// 获取最后有效的双参数（通信中断时使用）
     pub async fn get_last_valid_params(&self) -> (Option<f64>, Option<f64>) {
-        let p_ref = *self.last_valid_p_ref.read().await;
-        let k_droop = *self.last_valid_k_droop.read().await;
-        (p_ref, k_droop)
+        let s = self.inner.read().await;
+        (s.last_valid_p_ref, s.last_valid_k_droop)
     }
 
     /// 检查是否已收到有效参数
     pub async fn has_valid_params(&self) -> bool {
-        self.last_valid_p_ref.read().await.is_some()
-            && self.last_valid_k_droop.read().await.is_some()
+        let s = self.inner.read().await;
+        s.last_valid_p_ref.is_some() && s.last_valid_k_droop.is_some()
     }
 
     /// 设置连接状态
     pub async fn set_connected(&self, connected: bool) {
-        *self.connected.write().await = connected;
+        self.inner.write().await.connected = connected;
     }
 
     /// 获取连接状态
     pub async fn is_connected(&self) -> bool {
-        *self.connected.read().await
+        self.inner.read().await.connected
     }
 
-    /// 更新 q_realtime_margin（v2.10）
+    /// 更新 q_realtime_margin（v2.10）——置值与清零计数在同一次加锁内完成
     pub async fn update_q_margin(&self, q_margin: f64) {
-        *self.last_q_realtime_margin.write().await = Some(q_margin);
-        *self.q_margin_missing_count.write().await = 0;
+        let mut s = self.inner.write().await;
+        s.last_q_realtime_margin = Some(q_margin);
+        s.q_margin_missing_count = 0;
     }
 
     /// 增加 q_margin 缺失计数（v2.10）
     pub async fn increment_q_margin_missing(&self) -> u32 {
-        let count = *self.q_margin_missing_count.read().await + 1;
-        *self.q_margin_missing_count.write().await = count;
-        count
+        let mut s = self.inner.write().await;
+        s.q_margin_missing_count += 1;
+        s.q_margin_missing_count
     }
 
     /// 获取最后有效的 q_margin（v2.10）
     pub async fn get_last_q_margin(&self) -> Option<f64> {
-        *self.last_q_realtime_margin.read().await
+        self.inner.read().await.last_q_realtime_margin
     }
 
-    /// 更新安全覆盖状态（v2.10）
+    /// 更新安全覆盖状态（v2.10）——5 个字段在一次加锁内成对写入
     pub async fn update_safety_override(
         &self,
         reason: &str,
@@ -428,42 +439,43 @@ impl IntercoreConnectionState {
         duration_ms: u64,
         recovery: &str,
     ) {
-        *self.safety_override_active.write().await = true;
-        *self.safety_override_reason.write().await = Some(reason.to_string());
-        *self.safety_override_p_ref.write().await = Some(p_ref);
-        *self.safety_override_duration_ms.write().await = duration_ms;
-        *self.safety_override_recovery.write().await = Some(recovery.to_string());
+        let mut s = self.inner.write().await;
+        s.safety_override_active = true;
+        s.safety_override_reason = Some(reason.to_string());
+        s.safety_override_p_ref = Some(p_ref);
+        s.safety_override_duration_ms = duration_ms;
+        s.safety_override_recovery = Some(recovery.to_string());
     }
 
-    /// 清除安全覆盖状态（v2.10）
+    /// 清除安全覆盖状态（v2.10）——5 个字段在一次加锁内成对清除
     pub async fn clear_safety_override(&self) {
-        *self.safety_override_active.write().await = false;
-        *self.safety_override_reason.write().await = None;
-        *self.safety_override_p_ref.write().await = None;
-        *self.safety_override_duration_ms.write().await = 0;
-        *self.safety_override_recovery.write().await = None;
+        let mut s = self.inner.write().await;
+        s.safety_override_active = false;
+        s.safety_override_reason = None;
+        s.safety_override_p_ref = None;
+        s.safety_override_duration_ms = 0;
+        s.safety_override_recovery = None;
     }
 
     /// 检查并增加安全覆盖计数，返回是否超过频率限制（v2.10）
     /// 1 分钟内最多 3 次
     pub async fn check_and_increment_safety_override(&self) -> bool {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut first_ts = self.safety_override_first_ts.write().await;
-        let mut count = self.safety_override_count.write().await;
+        let mut s = self.inner.write().await;
 
         // 检查 1 分钟窗口
-        if let Some(ts) = *first_ts {
-            if now - ts > 60000 {
+        match s.safety_override_first_ts {
+            Some(ts) if now - ts > 60000 => {
                 // 窗口过期，重置计数
-                *count = 0;
-                *first_ts = Some(now);
+                s.safety_override_count = 0;
+                s.safety_override_first_ts = Some(now);
             }
-        } else {
-            *first_ts = Some(now);
+            None => s.safety_override_first_ts = Some(now),
+            _ => {}
         }
 
-        *count += 1;
-        *count > 3 // 1 分钟内最多 3 次
+        s.safety_override_count += 1;
+        s.safety_override_count > 3 // 1 分钟内最多 3 次
     }
 }
 
@@ -490,6 +502,18 @@ impl Default for CommandConfig {
 }
 
 /// 指令队列（支持断连缓存）
+///
+/// # ⚠️ 未接线（审查 E-10 / 技术债 U-76）
+///
+/// 本类型**没有驱动循环**：「发送 → 等 `ControlRsp` → 超时重试」的闭环在全仓不存在
+/// 调用点（`grep CommandQueue` 仅命中 `lib.rs` 的重导出）。原因是核间 TCP 通道在生产
+/// 路径暂无消费者，且 sim-bridge/HIL 侧不回 `ControlRsp`。与 10 号 PRD §4 的处理一致，
+/// **保留为待接入设计**而非补一个无人调用的驱动循环；`#[allow(dead_code)]` 为显式标注
+/// （本类型 `pub` 且经 `lib.rs` 重导出，编译器本不会报 dead_code）。
+///
+/// 接入时**必须**同时落地：超时源（`CommandConfig::timeout_ms`）、响应匹配（`seq_no`）
+/// 与退避策略，否则 `retry_or_drop` 仍只是空转。
+#[allow(dead_code)]
 pub struct CommandQueue {
     pending: VecDeque<(Vec<u8>, u32)>, // (payload, retries_left)
     config: CommandConfig,
@@ -513,11 +537,23 @@ impl CommandQueue {
         self.pending.pop_front().map(|(p, _)| p)
     }
 
-    /// 指令发送失败，减少重试次数或移回队列
+    /// 指令发送失败：重试计数 -1，**仍有余量则压回队首**，耗尽才丢弃。
+    ///
+    /// 修复前本方法体是 `let _ = payload;`（无条件静默丢弃），与其方法名/文档不符
+    /// —— 属于「看起来在工作」的空壳（E-10）。现按文档语义实现；但因本类型**无驱动
+    /// 循环**（见类型文档），生产路径仍不会调用它。
     pub fn retry_or_drop(&mut self, payload: Vec<u8>) {
-        // 查找失败指令并减少重试计数（简化：丢弃）
-        // Phase 2+ 需要更精确的指令匹配
-        let _ = payload;
+        // 匹配队列中第一条同内容的待发项（简化：Phase 2+ 可改为按 seq_no 精确匹配）
+        let found = self
+            .pending
+            .iter()
+            .position(|(p, _)| p.as_slice() == payload.as_slice());
+        if let Some(idx) = found {
+            let (p, retries_left) = self.pending.remove(idx).expect("idx 来自 position");
+            if retries_left > 0 {
+                self.pending.push_front((p, retries_left - 1));
+            }
+        }
     }
 
     /// 待发送指令数
@@ -646,197 +682,212 @@ impl IntercoreServer {
         heartbeat.read().await.register_connection(addr);
 
         // 读取循环
-        let mut buf = [0u8; 64];
+        //
+        // E-09：**必须跨 read 累积到完整帧再解析**。TCP 是字节流，单次 `read()` 完全
+        // 可能只返回半帧（内核缓冲区边界与帧边界无关）；旧实现把 `read` 的返回值 `n`
+        // 直接当帧长交给 `from_bytes`，半帧即被丢弃、且后续字节错位 ⇒ **流永久失步**。
         let mut reader = tokio::io::BufReader::new(read_half);
+        let mut acc: Vec<u8> = Vec::with_capacity(FRAME_FIXED_LENGTH);
 
         loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => {
+            let frame_bytes = match Self::read_fixed_frame(&mut reader, &mut acc).await {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
                     info!("Connection closed: {}", addr);
                     heartbeat.read().await.unregister_connection(addr);
                     break;
-                }
-                Ok(n) => {
-                    match IntercoreFrame::from_bytes(&buf[..n]) {
-                        Ok(frame) => {
-                            match frame.header.frame_type {
-                                IntercoreFrameType::HeartbeatReq
-                                | IntercoreFrameType::HeartbeatRsp => {
-                                    heartbeat.read().await.receive_heartbeat(addr).await;
-                                }
-                                IntercoreFrameType::ControlCmd => {
-                                    info!("Received control command from {}", addr);
-                                    if !frame.data.is_empty() {
-                                        // 统一版本分派：3=V3 分相，2=V2 双参数，其余=V1
-                                        let ver = ControlCmdPayloadV3::detect_version(&frame.data)
-                                            .unwrap_or(1);
-                                        match ver {
-                                            3 => {
-                                                match ControlCmdPayloadV3::from_json(&frame.data) {
-                                                    Ok(payload) => {
-                                                        info!(
-                                                            "ControlCmd v3 parsed: phase_p={:?}, phase_q={:?}, strategy_mode={:?}",
-                                                            payload.phase_p_set, payload.phase_q_set, payload.strategy_mode
-                                                        );
-                                                    }
-                                                    Err(e) => warn!(
-                                                        "Failed to parse ControlCmd V3 payload: {}",
-                                                        e
-                                                    ),
-                                                }
-                                            }
-                                            2 => {
-                                                match ControlCmdPayloadV2::from_json(&frame.data) {
-                                                    Ok(payload) => {
-                                                        info!(
-                                                            "ControlCmd v2 parsed: p_ref={:?}, k_droop={:?}, ai_ready={:?}, strategy_mode={:?}",
-                                                            payload.p_ref, payload.k_droop, payload.ai_ready, payload.strategy_mode
-                                                        );
-                                                    }
-                                                    Err(e) => warn!(
-                                                        "Failed to parse ControlCmd V2 payload: {}",
-                                                        e
-                                                    ),
-                                                }
-                                            }
-                                            _ => match ControlCmdPayload::from_json(&frame.data) {
-                                                Ok(payload) => {
-                                                    info!(
-                                                            "ControlCmd v1 parsed: p_batt_set={:?}, q_batt_set={:?}, ai_ready={:?}, strategy_mode={:?}",
-                                                            payload.p_batt_set, payload.q_batt_set, payload.ai_ready, payload.strategy_mode
-                                                        );
-                                                }
-                                                Err(e) => warn!(
-                                                    "Failed to parse ControlCmd V1 payload: {}",
-                                                    e
-                                                ),
-                                            },
-                                        }
-                                    }
-                                }
-                                IntercoreFrameType::ControlRsp => {
-                                    info!("Received control response from {}", addr);
-                                }
-                                IntercoreFrameType::StatusReport => {
-                                    info!("Received status report from {}", addr);
-                                }
-                                IntercoreFrameType::DataUpload => {
-                                    info!("Received data upload from {}", addr);
-                                    // v2.10: 解析 DataUpload JSON payload
-                                    if !frame.data.is_empty() {
-                                        match DataUploadPayload::from_json(&frame.data) {
-                                            Ok(payload) => {
-                                                // v2.10: 更新 q_realtime_margin
-                                                if let Some(q_margin) =
-                                                    payload.q_realtime_margin_clamped()
-                                                {
-                                                    let missing_count = intercore_state
-                                                        .increment_q_margin_missing()
-                                                        .await;
-                                                    intercore_state.update_q_margin(q_margin).await;
-                                                    if missing_count >= 3 {
-                                                        warn!("q_realtime_margin missing for {} cycles", missing_count);
-                                                    }
-                                                } else {
-                                                    let missing_count = intercore_state
-                                                        .increment_q_margin_missing()
-                                                        .await;
-                                                    if missing_count >= 3 {
-                                                        warn!("q_realtime_margin missing for {} cycles", missing_count);
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!(
-                                                    "Failed to parse DataUpload JSON payload: {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                // v2.10 新增：SafetyOverride 帧处理
-                                IntercoreFrameType::SafetyOverride => {
-                                    info!("Received safety override from {}", addr);
-                                    if !frame.data.is_empty() {
-                                        match SafetyOverridePayload::from_json(&frame.data) {
-                                            Ok(payload) => {
-                                                // 频率限制检查
-                                                if intercore_state
-                                                    .check_and_increment_safety_override()
-                                                    .await
-                                                {
-                                                    error!("SafetyOverride rate limit exceeded, rejecting frame");
-                                                    continue;
-                                                }
-
-                                                let max_batt_power = max_batt_power_kw;
-                                                let clamped_p_ref =
-                                                    payload.clamp_override_p_ref(max_batt_power);
-                                                let clamped_duration =
-                                                    payload.clamp_override_duration_ms();
-
-                                                intercore_state
-                                                    .update_safety_override(
-                                                        payload.trigger_reason(),
-                                                        clamped_p_ref,
-                                                        clamped_duration,
-                                                        payload
-                                                            .recovery_condition
-                                                            .as_deref()
-                                                            .unwrap_or(
-                                                            SAFETY_OVERRIDE_RECOVERY_TIMER_EXPIRED,
-                                                        ),
-                                                    )
-                                                    .await;
-
-                                                info!(
-                                                    "SafetyOverride active: reason={}, p_ref={}, duration={}ms",
-                                                    payload.trigger_reason(),
-                                                    clamped_p_ref,
-                                                    clamped_duration
-                                                );
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to parse SafetyOverride JSON payload: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                IntercoreFrameType::Connect => {
-                                    info!("Received connect from {}", addr);
-                                }
-                                IntercoreFrameType::Unknown => {
-                                    warn!("Unknown frame type from {}", addr);
-                                }
-                            }
-
-                            // 回复心跳响应
-                            if frame.header.frame_type == IntercoreFrameType::HeartbeatReq {
-                                let rsp = IntercoreFrame::new_heartbeat_rsp();
-                                let rsp_data = rsp.to_bytes()?;
-                                Self::send_with_timeout(
-                                    &mut write_half,
-                                    &rsp_data,
-                                    cmd_config.timeout_ms,
-                                )
-                                .await?;
-                            }
-                        }
-                        Err(e) => {
-                            error!("Frame parse error from {}: {}", addr, e);
-                        }
-                    }
                 }
                 Err(e) => {
                     error!("Read error from {}: {}", addr, e);
                     heartbeat.read().await.unregister_connection(addr);
                     break;
                 }
+            };
+
+            match IntercoreFrame::from_bytes(&frame_bytes) {
+                Ok(frame) => {
+                    match frame.header.frame_type {
+                        IntercoreFrameType::HeartbeatReq | IntercoreFrameType::HeartbeatRsp => {
+                            heartbeat.read().await.receive_heartbeat(addr).await;
+                        }
+                        IntercoreFrameType::ControlCmd => {
+                            info!("Received control command from {}", addr);
+                            if !frame.data.is_empty() {
+                                // 统一版本分派：3=V3 分相，2=V2 双参数，其余=V1
+                                let ver =
+                                    ControlCmdPayloadV3::detect_version(&frame.data).unwrap_or(1);
+                                match ver {
+                                    3 => match ControlCmdPayloadV3::from_json(&frame.data) {
+                                        Ok(payload) => {
+                                            info!(
+                                                            "ControlCmd v3 parsed: phase_p={:?}, phase_q={:?}, strategy_mode={:?}",
+                                                            payload.phase_p_set, payload.phase_q_set, payload.strategy_mode
+                                                        );
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to parse ControlCmd V3 payload: {}", e)
+                                        }
+                                    },
+                                    2 => match ControlCmdPayloadV2::from_json(&frame.data) {
+                                        Ok(payload) => {
+                                            info!(
+                                                            "ControlCmd v2 parsed: p_ref={:?}, k_droop={:?}, ai_ready={:?}, strategy_mode={:?}",
+                                                            payload.p_ref, payload.k_droop, payload.ai_ready, payload.strategy_mode
+                                                        );
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to parse ControlCmd V2 payload: {}", e)
+                                        }
+                                    },
+                                    _ => match ControlCmdPayload::from_json(&frame.data) {
+                                        Ok(payload) => {
+                                            info!(
+                                                            "ControlCmd v1 parsed: p_batt_set={:?}, q_batt_set={:?}, ai_ready={:?}, strategy_mode={:?}",
+                                                            payload.p_batt_set, payload.q_batt_set, payload.ai_ready, payload.strategy_mode
+                                                        );
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to parse ControlCmd V1 payload: {}", e)
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                        IntercoreFrameType::ControlRsp => {
+                            info!("Received control response from {}", addr);
+                        }
+                        IntercoreFrameType::StatusReport => {
+                            info!("Received status report from {}", addr);
+                        }
+                        IntercoreFrameType::DataUpload => {
+                            info!("Received data upload from {}", addr);
+                            // v2.10: 解析 DataUpload JSON payload
+                            if !frame.data.is_empty() {
+                                match DataUploadPayload::from_json(&frame.data) {
+                                    Ok(payload) => {
+                                        // v2.10: 更新 q_realtime_margin
+                                        if let Some(q_margin) = payload.q_realtime_margin_clamped()
+                                        {
+                                            let missing_count =
+                                                intercore_state.increment_q_margin_missing().await;
+                                            intercore_state.update_q_margin(q_margin).await;
+                                            if missing_count >= 3 {
+                                                warn!(
+                                                    "q_realtime_margin missing for {} cycles",
+                                                    missing_count
+                                                );
+                                            }
+                                        } else {
+                                            let missing_count =
+                                                intercore_state.increment_q_margin_missing().await;
+                                            if missing_count >= 3 {
+                                                warn!(
+                                                    "q_realtime_margin missing for {} cycles",
+                                                    missing_count
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse DataUpload JSON payload: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        // v2.10 新增：SafetyOverride 帧处理
+                        IntercoreFrameType::SafetyOverride => {
+                            info!("Received safety override from {}", addr);
+                            if !frame.data.is_empty() {
+                                match SafetyOverridePayload::from_json(&frame.data) {
+                                    Ok(payload) => {
+                                        // 频率限制检查
+                                        if intercore_state
+                                            .check_and_increment_safety_override()
+                                            .await
+                                        {
+                                            error!("SafetyOverride rate limit exceeded, rejecting frame");
+                                            continue;
+                                        }
+
+                                        let max_batt_power = max_batt_power_kw;
+                                        let clamped_p_ref =
+                                            payload.clamp_override_p_ref(max_batt_power);
+                                        let clamped_duration = payload.clamp_override_duration_ms();
+
+                                        intercore_state
+                                            .update_safety_override(
+                                                payload.trigger_reason(),
+                                                clamped_p_ref,
+                                                clamped_duration,
+                                                payload.recovery_condition.as_deref().unwrap_or(
+                                                    SAFETY_OVERRIDE_RECOVERY_TIMER_EXPIRED,
+                                                ),
+                                            )
+                                            .await;
+
+                                        info!(
+                                                    "SafetyOverride active: reason={}, p_ref={}, duration={}ms",
+                                                    payload.trigger_reason(),
+                                                    clamped_p_ref,
+                                                    clamped_duration
+                                                );
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse SafetyOverride JSON payload: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        IntercoreFrameType::Connect => {
+                            info!("Received connect from {}", addr);
+                        }
+                        IntercoreFrameType::Unknown => {
+                            warn!("Unknown frame type from {}", addr);
+                        }
+                    }
+
+                    // 回复心跳响应
+                    if frame.header.frame_type == IntercoreFrameType::HeartbeatReq {
+                        let rsp = IntercoreFrame::new_heartbeat_rsp();
+                        let rsp_data = rsp.to_bytes()?;
+                        Self::send_with_timeout(&mut write_half, &rsp_data, cmd_config.timeout_ms)
+                            .await?;
+                    }
+                }
+                Err(e) => {
+                    error!("Frame parse error from {}: {}", addr, e);
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// 从字节流累积读取**一个完整定长帧**（E-09）。
+    ///
+    /// - `acc` 是**跨 `read` 存活**的累积缓冲：不足 [`FRAME_FIXED_LENGTH`] 时继续读，
+    ///   凑满后按整帧切出（`drain`），多读到的字节留在 `acc` 里供下一次调用使用。
+    /// - 返回 `Ok(None)` 表示对端正常关闭（EOF）；`Err` 为底层 IO 错误。
+    ///
+    /// 为何以 [`FRAME_FIXED_LENGTH`] 而非 `header.length` 作为累积目标：PRD 10 §2.2 /
+    /// IC-AC-04 规定线格式为**定长 64 字节**，`header.length` 只覆盖「帧头+载荷+CRC」
+    /// （= 8 + N + 2），**不含 padding**。故定长帧的累积目标恒为 64。
+    async fn read_fixed_frame<R>(
+        reader: &mut R,
+        acc: &mut Vec<u8>,
+    ) -> std::io::Result<Option<Vec<u8>>>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut chunk = [0u8; READ_CHUNK_LEN];
+        while acc.len() < FRAME_FIXED_LENGTH {
+            let n = reader.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(None); // EOF
+            }
+            acc.extend_from_slice(&chunk[..n]);
+        }
+        Ok(Some(acc.drain(..FRAME_FIXED_LENGTH).collect()))
     }
 
     /// 带超时的发送操作（P2-16）
@@ -1009,6 +1060,215 @@ impl IntercoreClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::FrameType;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
+
+    /// 把字节流按指定分片大小喂出的 mock `AsyncRead`（模拟 TCP 半帧到达）。
+    struct FragmentedReader {
+        chunks: VecDeque<Vec<u8>>,
+    }
+
+    impl FragmentedReader {
+        /// 按 `sizes` 逐段切分 `data`；不足一段的余量作为最后一段。
+        fn split(data: &[u8], sizes: &[usize]) -> Self {
+            let mut chunks = VecDeque::new();
+            let mut pos = 0usize;
+            for &sz in sizes {
+                if pos >= data.len() {
+                    break;
+                }
+                let end = (pos + sz).min(data.len());
+                chunks.push_back(data[pos..end].to_vec());
+                pos = end;
+            }
+            if pos < data.len() {
+                chunks.push_back(data[pos..].to_vec());
+            }
+            Self { chunks }
+        }
+    }
+
+    impl AsyncRead for FragmentedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let me = self.as_mut().get_mut();
+            match me.chunks.pop_front() {
+                Some(chunk) => {
+                    let n = chunk.len().min(buf.remaining());
+                    if n == 0 {
+                        // 调用方缓冲已满：把整段放回，等下次 poll
+                        me.chunks.push_front(chunk);
+                        return Poll::Ready(Ok(()));
+                    }
+                    buf.put_slice(&chunk[..n]);
+                    if n < chunk.len() {
+                        me.chunks.push_front(chunk[n..].to_vec());
+                    }
+                    Poll::Ready(Ok(()))
+                }
+                None => Poll::Ready(Ok(())), // EOF
+            }
+        }
+    }
+
+    /// E-09 判别力测试：**帧被拆成多段到达**（没有任何一次 read 能拿到整帧）时，
+    /// 必须靠跨 read 的累积缓冲拼出完整帧，且连续多帧不丢帧、不失步。
+    ///
+    /// 改坏方式（必须变红）：把 `read_fixed_frame` 换回"单次 `read` 进 64 B 缓冲直接解析"
+    /// ⇒ 第一段只有 7 字节，返回的"帧"与期望帧不等价。
+    #[tokio::test]
+    async fn test_read_fixed_frame_accumulates_across_partial_reads() {
+        let f1 = IntercoreFrame::new_connect().to_bytes().unwrap();
+        let f2 = IntercoreFrame::new_heartbeat_rsp().to_bytes().unwrap();
+        let f3 = IntercoreFrame::new(FrameType::ControlCmd, 9, vec![1, 2, 3])
+            .to_bytes()
+            .unwrap();
+        assert_eq!(f1.len(), FRAME_FIXED_LENGTH);
+
+        let all: Vec<u8> = [f1.clone(), f2.clone(), f3.clone()].concat();
+        // 分片刻意跨帧边界：7 / 13 / 51 / 3 / 9 / 77 ⇒ 每段都小于 64、也都不与帧对齐
+        let mut reader = FragmentedReader::split(&all, &[7, 13, 51, 3, 9, 77]);
+        let mut acc: Vec<u8> = Vec::new();
+
+        for expect in [&f1, &f2, &f3] {
+            let got = IntercoreServer::read_fixed_frame(&mut reader, &mut acc)
+                .await
+                .unwrap()
+                .expect("应读出完整帧");
+            assert_eq!(&got, expect, "累积读出的帧必须与原始帧逐字节相同");
+        }
+        // 流耗尽 ⇒ EOF
+        assert!(IntercoreServer::read_fixed_frame(&mut reader, &mut acc)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// 分片边界落在帧内部时，帧仍能逐个解析（模拟 BufReader 之后仍可能半帧）。
+    #[tokio::test]
+    async fn test_read_fixed_frame_parses_each_frame_after_fragmenting() {
+        let f1 = IntercoreFrame::new_heartbeat_req(1, 45.5, 0.75)
+            .to_bytes()
+            .unwrap();
+        let f2 = IntercoreFrame::new(FrameType::StatusReport, 3, vec![7; 20])
+            .to_bytes()
+            .unwrap();
+        let all: Vec<u8> = [f1.clone(), f2.clone()].concat();
+        let mut reader = FragmentedReader::split(&all, &[1, 1, 62, 2]);
+        let mut acc: Vec<u8> = Vec::new();
+
+        let a = IntercoreServer::read_fixed_frame(&mut reader, &mut acc)
+            .await
+            .unwrap()
+            .unwrap();
+        let b = IntercoreServer::read_fixed_frame(&mut reader, &mut acc)
+            .await
+            .unwrap()
+            .unwrap();
+        let pa = IntercoreFrame::from_bytes(&a).unwrap();
+        let pb = IntercoreFrame::from_bytes(&b).unwrap();
+        assert_eq!(pa.header.frame_type, FrameType::HeartbeatReq);
+        assert_eq!(pb.header.frame_type, FrameType::StatusReport);
+        assert_eq!(pb.data, vec![7; 20]);
+        assert_eq!(pb.header.seq_no, 3);
+    }
+
+    // ========== E-16: 连接状态快照原子性 ==========
+
+    /// 快照字段间不变式：`active == reason.is_some()`（确定性版本）。
+    #[tokio::test]
+    async fn test_snapshot_safety_override_invariant() {
+        let st = IntercoreConnectionState::new();
+
+        let s = st.snapshot().await;
+        assert!(!s.safety_override_active);
+        assert_eq!(s.safety_override_active, s.safety_override_reason.is_some());
+
+        st.update_safety_override("voltage_high", 30.0, 5000, "timer_expired")
+            .await;
+        let s = st.snapshot().await;
+        assert_eq!(s.safety_override_active, s.safety_override_reason.is_some());
+        assert!(s.safety_override_active && s.safety_override_reason.is_some());
+        assert_eq!(s.safety_override_p_ref, Some(30.0));
+        assert_eq!(s.safety_override_duration_ms, 5000);
+
+        st.clear_safety_override().await;
+        let s = st.snapshot().await;
+        assert_eq!(s.safety_override_active, s.safety_override_reason.is_some());
+        assert!(!s.safety_override_active && s.safety_override_reason.is_none());
+    }
+
+    /// **并发撕裂判别力测试**：写侧不停 update/clear，读侧反复取快照并断言不变式。
+    ///
+    /// 改坏方式（必须变红）：把状态退回 12 把独立 `RwLock`（`snapshot()` 逐字段 `read()`）
+    /// ⇒ 读侧会取到 `active=true` 而 `reason=None`（或反之）的撕裂值。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_snapshot_never_tears_safety_override_under_concurrency() {
+        use std::sync::Arc;
+        const ROUNDS: usize = 5_000;
+
+        let st = Arc::new(IntercoreConnectionState::new());
+        let writer = {
+            let st = st.clone();
+            tokio::spawn(async move {
+                for _ in 0..ROUNDS {
+                    st.update_safety_override("v", 1.0, 100, "t").await;
+                    tokio::task::yield_now().await;
+                    st.clear_safety_override().await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        for i in 0..ROUNDS {
+            let s = st.snapshot().await;
+            assert_eq!(
+                s.safety_override_active,
+                s.safety_override_reason.is_some(),
+                "第 {} 次快照撕裂: active={} reason={:?}",
+                i,
+                s.safety_override_active,
+                s.safety_override_reason
+            );
+        }
+        writer.await.unwrap();
+    }
+
+    // ========== E-10: 指令队列（未接线）==========
+
+    /// `retry_or_drop` 必须真的按重试计数处理，而不是静默丢弃。
+    ///
+    /// `max_retries = 2` ⇒ 共 3 次尝试：前 2 次失败留队，第 3 次失败丢弃。
+    #[test]
+    fn test_retry_or_drop_requeues_until_retries_exhausted() {
+        let mut q = CommandQueue::new(CommandConfig {
+            timeout_ms: 5000,
+            max_retries: 2,
+        });
+        q.enqueue(vec![1, 2, 3]);
+        assert_eq!(q.pending_count(), 1);
+
+        // 第 1 次失败：额度 2 → 1 ⇒ 留队
+        q.retry_or_drop(vec![1, 2, 3]);
+        assert_eq!(q.pending_count(), 1, "第 1 次失败必须留队");
+        // 第 2 次失败：额度 1 → 0 ⇒ 仍留队（还能再试一次）
+        q.retry_or_drop(vec![1, 2, 3]);
+        assert_eq!(q.pending_count(), 1, "第 2 次失败仍有余量，必须留队");
+        // 第 3 次失败：额度已耗尽 ⇒ 丢弃
+        q.retry_or_drop(vec![1, 2, 3]);
+        assert_eq!(q.pending_count(), 0, "重试额度耗尽后必须丢弃");
+
+        // 不匹配的 payload 不得误伤队列
+        q.enqueue(vec![9, 9]);
+        q.retry_or_drop(vec![8, 8]);
+        assert_eq!(q.pending_count(), 1, "不匹配的 payload 不得影响队列");
+    }
 
     #[test]
     fn test_v3_payload_roundtrip() {

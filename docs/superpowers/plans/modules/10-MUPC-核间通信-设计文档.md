@@ -1,7 +1,7 @@
 # MUPC 核间通信模块设计文档
 
 > **⚠️ 本文档无门禁标记**（**不自行添加 `[DESIGN_APPROVED]` / `[REVIEWED: PASS]`**）。
-> **现状**：PCS 通信与控制已于 2026-09-26 整体迁出至 `mupc-southd`（来源 = 02 号设计 **§13**，ADR-014 / ADR-015 / ADR-016；T1–T12 见 `docs/technical-debt.md` **§6.13**）。本文档受此影响处以**就地加注**标出，**§1–§12 的既有结论未改**：§1.1（核间图仅指 TCP 帧协议，客户端只发不收）、§10.1（ADR-011 已被 ADR-015 取代）、§11（Modbus RTU 通道已迁出，本章降为历史与设计依据）。
+> **现状**：PCS 通信与控制已于 2026-09-26 整体迁出至 `mupc-southd`（来源 = 02 号设计 **§13**，ADR-014 / ADR-015 / ADR-016；T1–T12 见 `docs/technical-debt.md` **§6.13**）。本文档受此影响处以**就地加注**标出，**§1–§12 的既有结论未改**：§1.1（核间图仅指 TCP 帧协议，客户端只发不收）、§10.1（ADR-011 已被 ADR-015 取代）、§11（Modbus RTU 通道已迁出，本章降为历史与设计依据）、§12（PCS 接线契约章的文件归属/测试数/配置键已就地订正，见章首迁出横幅）、§6（心跳与看门狗：核间 TCP 通道无消费者 U-76 ⇒ 待接入设计，见章首时效注）。
 
 ---
 
@@ -540,6 +540,14 @@ data-processing (数据汇聚)
 ---
 
 ## 6. 心跳与看门狗设计
+
+> ⚠️ **时效注（E-02，2026-09-27 项目负责人裁定）**：本章为**待接入设计，本轮不实现**——
+> 核间 TCP 通道在生产路径**暂无消费者**（U-76）：客户端只发不收、不发心跳、不发 Connect
+> 帧；`HeartbeatManager::run()` 与 `IntercoreServer` 全仓**零调用点**（仅被模块内单测与
+> `tests/integration/test_intercore.rs` 引用）。故 §6.1–§6.3 的机制/超时/处理描述**保留为
+> 设计原文**，不计入本期实现范围；PRD 10 §4 及其验收条目 IC-AC-02 / IC-AC-18~24 已同步标 ⏸。
+> 与本章配套的 `intercore.heartbeat_interval_sec` / `reconnect_interval_sec` 二键已由 E-13
+> 删除（无消费点）。待通道接回消费者时一并恢复效力并重走评审。
 
 ### 6.1 心跳机制
 
@@ -1223,14 +1231,19 @@ intercore:
 **测试**：PCS int16 缩放/字节 swap 编解码 roundtrip、单相 clamp、模式切换缓存、写序列组装；**软件端到端**（M10）：`src/bin/pcs_slave.rs`（PCS V1.3 协议从站仿真，按启停+有功方向推演 1013 运行状态、1010 SOC 恒 66%）经虚拟串口对（Linux socat / Windows com0com）与 `ModbusRtuTransport` 对打，验证寄存器映射/字节互换/写序列/心跳判定；**最终端到端以真实 PCS RS485 联调**（填点表 / 核相）。
 
 **验证状态**：pcs.rs 编解码 + `ModbusRtuTransport` PCS 驱动重构完成，`mupc-intercore` lib 31 测试全绿（含 PCS 编解码 roundtrip / SOC 3 区 1010 校验 / 心跳 REG_RUN_STATE(1013) 判定），`cargo check --workspace` 通过（上层调用方零改动）。端到端 PCS 实机 RS485 联调待 PCS 硬件（填点表 / 核相 / 并机基线）；PCS 契约待确认清单（模式热切换 / 启停 500 时序 / 4 区 502-503 / 符号约定）仍未获厂方答复。
+ ⚠️ **E-07 时效注（2026-09-27）**：上述“lib **31** 测试全绿”已失效——PCS 相关用例随 `pcs.rs` / `transport/modbus.rs` 迁出后删除，**实测 `cargo test -p mupc-intercore` = 18**（2026-09-27 WP6 开工前基线；WP6 新增 9 条用例后为 27）；且上述“PCS 编解码 roundtrip / SOC 3 区 1010 校验 / 心跳 REG_RUN_STATE(1013) 判定”三类用例均已随模块迁入 `mupc-southd::pcs`。
 
 **验证状态补记**：
 - W1 离线清缓存 / W2 波特率默认 19200 / W3 总线事务互斥（`bus: Mutex<()>` 入口持锁）落地；`cargo check --workspace` 0 error，intercore lib 测试通过。
 - 项目级审查修复：M1 停机观测（1013=0 告警、不自动重启）、M9a 运行状态值校验（∈0..3）、M6 删只写不读的 soc 缓存、M3 startup transport 显式 match（未知值启动报错）、M8 心跳句柄入后台任务 guard、M7 config.validate 校验 modbus_rtu 配置合法性及与总表串口互斥。
 - 部署/测试配套：`mupc/deploy/config/mupc_core_config.production.yaml`（transport=modbus_rtu 生产模板，与仿真 tcp 默认配置分离）；`src/bin/pcs_slave.rs` PCS 协议从站仿真（见上测试）。
+
+> ⚠️ **E-07 时效注（2026-09-27）**：`src/bin/pcs_slave.rs` **不再属于 intercore**——现为 `mupc/crates/mupc-southd/src/bin/pcs_slave.rs`（feature `pcs-slave-bin` 门控的联调工具）；`mupc_core_config.production.yaml` 的 `transport=modbus_rtu` 模板也随之作废（现为 `transport: tcp`，PCS 主链路在 `south_pcs:` 段）。
 - 文档补记：ADR-010 取代注（M11）、§11.8 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
 
 ## 12. BECG-3568 现场接线契约与安全联锁
+
+> ⚠️ **本章的 PCS 通道（Modbus RTU / PCS 协议 V1.3）已于 2026-09-26 整体迁出至 `mupc-southd`（02 号设计 §13 / ADR-014）。本章作为历史与设计依据保留，其中「intercore 侧」的文件归属、测试数、配置键均已不再反映现网实现——逐处订正见各段末的 **E-07 时效注**（2026-09-27 加注，原文一字未改）。**
 
 > **目标平台变更**：MUPC 运行硬件为 **BECG-3568 BOX**（瑞芯微 RK3568 四核 A55 @2.0GHz、NPU 1TOPS、板载 8 路隔离 RS485 / 16 路隔离 DI / 6 路继电器 DO / 2 路 CAN / 4 路 ADC / 4×千兆网口）；后续换 **RK3588 型号接口完全一致**（仅 NPU/OTA 侧按 3588 SDK 变化，见 05 AI 引擎与 OTA 模块）。
 > **板载串口节点**：COM1-8 ↔ `ttyS0` / `ttyS2` / `ttyS3` / `ttyS4` / `ttyS5` / `ttyS6` / `ttyS7` / `ttyS8`（**无 ttyS1**，A0→ttyS0、A2→ttyS2 … A8→ttyS8）；无「USB 转 485」概念（历史 `/dev/ttyUSB0` 假设在 BECG 上不成立）。
@@ -1238,7 +1251,7 @@ intercore:
 
 ### 12.1 PCS 主链路物理接线契约
 
-**PCS 主链路**：**RS485-1 / COM1 / `/dev/ttyS0` ↔ PCS A2/B2，19200 N-8-1**（V1.3 线格式）。`intercore.modbus_rtu.serial_port` 默认 `/dev/ttyS1 → /dev/ttyS0`（YAML 可覆盖，现场以接线为准）；实施须**同步更新 core_config 默认常量与单测断言**，并建议 validate 在 `transport=modbus_rtu` 时启动即探测串口存在性（fail-fast，不等首帧超时）。总表等站级 485 节点完整分配见 **02 南向 §10 统一调度** 与 **deploy/deploy.md 现场接线章**。
+**PCS 主链路**：**RS485-1 / COM1 / `/dev/ttyS0` ↔ PCS A2/B2，19200 N-8-1**（V1.3 线格式）。`intercore.modbus_rtu.serial_port` 默认 `/dev/ttyS1 → /dev/ttyS0`（YAML 可覆盖，现场以接线为准）；实施须**同步更新 core_config 默认常量与单测断言**，并建议 validate 在 `transport=modbus_rtu` 时启动即探测串口存在性（fail-fast，不等首帧超时）。 ⚠️ **E-07 时效注（2026-09-27）**：配置键 `intercore.modbus_rtu.serial_port` **已删除**（`intercore.transport` 现仅保留 `tcp`，写 `modbus_rtu` 启动即报错）；PCS 串口现由顶层段 `south_pcs.serial_port`（默认 `/dev/ttyS0`）承载。总表等站级 485 节点完整分配见 **02 南向 §10 统一调度** 与 **deploy/deploy.md 现场接线章**。
 
 台区储能现场接线总表（BECG-3568 作 MUPC/EMS 主控）：
 
@@ -1309,6 +1322,8 @@ io:
 ### 12.5 文件结构与测试
 
 - **intercore**：`ModbusRtuTransport::stop` / `stopped_latched` / `ensure_started` 挡启动 / `is_interlock_stopped` / `clear_interlock_latch` / `restore_interlock_latched` / `last_run_state`（心跳维护 1013 最新值）；`stop()` 在 latch 期间**仍允许写 500=0**（仅挡 500=1 启动写，供 interlock 周期重试停机）；`pcs_slave.rs` 支持写 500=0 → RUN_STATE=0 停机仿真。
+
+> ⚠️ **E-07 时效注（2026-09-27）**：本行列的 `ModbusRtuTransport::stop` / `stopped_latched` / `ensure_started` / `is_interlock_stopped` / `clear_interlock_latch` / `restore_interlock_latched` / `last_run_state` 等原语**已随 PCS 迁出 intercore**，现由 `mupc-southd::pcs::PcsHandle`（`mupc/crates/mupc-southd/src/pcs/mod.rs`）承载；`pcs_slave.rs` 亦在 `mupc-southd/src/bin/`。
 - **`mupc-io`**（新）：`DigitalIn`/`DigitalOut` trait + sysfs impl + gpiod 桩 + mock。
 - **core-bin**：`interlock.rs`（采样/去抖/状态机/DO 驱动/事件）+ config `io:` 段解析与校验。
 - **storage**：faults/events 运行时写入接线（联锁事件）。
@@ -1378,6 +1393,7 @@ io:
 | 版本 | 主要变更 |
 |------|----------|
 | **v2.6（2026-09-26，PCS 迁出后的连带标注；未加任何门禁标记）** | 只加注与交叉引用，**§1–§12 既有结论一字未改**。来源 = 02 号设计 **§13**（ADR-014 PCS 通信与控制归属 `mupc-southd` / ADR-015 Modbus 栈统一到 `rs485-plugin`、删 `tokio-modbus` / ADR-016 新增顶层段 `south_pcs`）落地（T1–T12，见 `docs/technical-debt.md` §6.13；02 号设计的 **§13.11** 一致性声明）。受影响处：§1.1（PCS 已迁出、客户端只发不收、未来演进须新增客户端接收原语 —— 02 号设计 **Δ-23**）、§11（Modbus RTU 通道已整体迁出，本章降为历史与设计依据）、§10.1 ADR-011（已被 ADR-015 取代 —— 原"`rs485-plugin` 缺 FC16"理由**实测不成立**）。**本文档原无门禁标记，亦未新增。** |
+| **v2.7（2026-09-27，WP6 加注；未加任何门禁标记）** | 只加注，**既有结论一字未改**。① **§6 心跳与看门狗设计**加时效注：核间 TCP 通道生产路径无消费者（U-76）、`HeartbeatManager::run()` / `IntercoreServer` 全仓零调用点 ⇒ 本章为**待接入设计，本轮不实现**（与 PRD 10 §4 及 IC-AC-02 / IC-AC-18~24 的 ⏸ 标注同源，项目负责人 2026-09-27 裁定）。② **§12** 补与 §11 同款**迁出横幅**，并订正 4 处：lib 测试数 **31→18**（PCS 用例随迁出删除）、`intercore.modbus_rtu.serial_port` **配置键已删**、`src/bin/pcs_slave.rs` **不再属 intercore**（现址 `mupc-southd/src/bin/`）、§12 列的 PCS 原语（`ModbusRtuTransport::stop` 等）**已迁至 `PcsHandle`**。**本文档原无门禁标记，亦未新增。** |
 | v1.0 | 从 PRD v1.0、技术设计 v1.1 和代码库 intercore 实现合并整理 |
 | v2.0 | 传输通道抽象（IntercoreTransport trait，IntercoreClient 作门面）新增 Modbus RTU 备选链路：Master + Slave 参考实现，控制备选数据面边界（遥测/SafetyOverride 仍走 TCP），含执行确认寄存器区，配置 transport 选择 tcp/modbus_rtu |
 | v2.1 | TCP 回读 SOC（N3，U-26 延伸）：TcpTransport 加回读接收循环（独立连接读实时模块 DataUpload 帧 → battery_soc），`IntercoreTransport.latest_soc()` 查询，AiIntegrator 在总表模式（battery 无 SOC）时以核间 SOC 注入；Modbus 备选不承载（None） |

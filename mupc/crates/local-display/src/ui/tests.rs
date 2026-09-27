@@ -1138,13 +1138,21 @@ fn no_text_input_widget_symbol_anywhere_in_src() {
 fn local_display_manifest_has_no_direct_dependency_on_core_crates() {
     /// 本 crate **允许**的依赖（写死；新增依赖 ⇒ 本条红 —— 渲染端的依赖面是设计 §5.1 的
     /// "刻意保持最小"承诺，新增必须过评审，不能悄悄长出来）。
-    const ALLOWED: [&str; 8] = [
+    ///
+    /// **WP5 P2-A（2026-09-27）新增 `tracing`**：它不是"悄悄长出来"的，而是设计 §1.1.1.2
+    /// 明文要求的落点 —— 「`LV_USE_LOG 1`（**转发到 Rust `tracing`**）」；实现见
+    /// `src/lvgl/mod.rs::log_bridge`（+ `tests_log.rs` 的 8 条判别力用例）。
+    /// ⚠️ 只引 `tracing`（宏 + 门面），**未引** `tracing-subscriber`（日志后端装配不在本 crate，
+    /// 见 `Cargo.toml` 该行注释）。若将来要引 `tracing-subscriber` 或 `mupc-common`，
+    /// 仍须经评审并同步本清单。
+    const ALLOWED: [&str; 9] = [
         "display-proto",
         "lvgl-sys",
         "serde",
         "serde_json",
         "thiserror",
         "uuid",
+        "tracing",
         "libc",
         "evdev",
     ];

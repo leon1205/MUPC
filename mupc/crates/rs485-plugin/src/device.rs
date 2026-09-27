@@ -37,6 +37,11 @@ pub enum Rs485Dir {
 #[cfg(any(test, feature = "test-seam"))]
 type TestExchangeFn = std::sync::Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
+/// GPIO 方向钩子的闭包类型（B-4）：`(gpio_num, level)`，`level = true` 为发送使能。
+/// 抽具名别名与 [`TestExchangeFn`] 同款（避 `clippy::type_complexity`）。
+#[cfg(any(test, feature = "test-seam"))]
+type GpioHookFn = std::sync::Arc<dyn Fn(u32, bool) + Send + Sync>;
+
 /// RS485 设备驱动
 ///
 /// 实现南向 RS485 设备通信，支持 TTU、光伏逆变器、充电桩等设备
@@ -69,6 +74,11 @@ pub struct Rs485Device {
     /// 使其 `tests/*.rs` 也能驱动本缝（`cfg(test)` 不向下游传播，故不能只用它）。
     #[cfg(any(test, feature = "test-seam"))]
     test_exchange: Mutex<Option<TestExchangeFn>>,
+    /// **测试专用** GPIO 方向钩子（B-4）：`set_dir` 在 gpio 配置了且本钩子存在时，用
+    /// 钩子替代真实 sysfs 写 ⇒ "方向控制真被调用 / 调用顺序"可在无 GPIO 的环境断言。
+    /// 门控同 `test_exchange`（下游集成测经 `feature = "test-seam"` 也能装）。
+    #[cfg(any(test, feature = "test-seam"))]
+    gpio_hook: Mutex<Option<GpioHookFn>>,
 }
 
 /// 平台无关的文件描述符类型
@@ -76,6 +86,193 @@ pub struct Rs485Device {
 type RawFd = std::os::unix::io::RawFd;
 #[cfg(windows)]
 type RawFd = i32;
+
+/// 单帧接收的**字节上界**（防御性，非协议值）：Modbus RTU 单帧最长 256 字节
+/// （从站号 1 + 功能码 1 + 数据 252 + CRC 2），取 512 留一倍余量。
+/// 用于 `recv_frame` 的循环读上限与读缓冲长度（B-8）。
+#[cfg(any(unix, test))] // 产线只由 unix 的 `recv_frame` 使用；test 门控让单测在 Windows 也能跑
+const MAX_FRAME_BYTES: usize = 512;
+
+/// 由**已收前缀**推断本帧的**期望总长度**（纯函数，无 IO ⇒ 可单测；B-8）。
+///
+/// Modbus RTU 的响应长度由功能码唯一决定：
+/// - **异常帧**（`func & 0x80 != 0`）：固定 **5** 字节（`slave + func|0x80 + 异常码 + CRC2`）
+///   —— 该判据**先于**字节数取值，否则会把 5 字节异常帧的"异常码"当字节数、算出假长度；
+/// - **读类**（`0x01..=0x04`）：`3 + byte_count + 2`（第 3 字节即字节数）；
+/// - **回显类**（`0x05` / `0x06` / `0x0F` / `0x10`）：固定 **8** 字节；
+/// - **前缀不足**（拿不到第 2 字节 / 读类拿不到第 3 字节）或**未知功能码** ⇒ `None`
+///   （判不出；调用方按"至少再收 3 字节保底"处理，不无限等）。
+#[cfg(any(unix, test))]
+fn expected_frame_len(prefix: &[u8]) -> Option<usize> {
+    let func = *prefix.get(1)?;
+    if func & 0x80 != 0 {
+        return Some(5);
+    }
+    match func {
+        0x01..=0x04 => prefix.get(2).map(|bc| 3 + *bc as usize + 2),
+        0x05 | 0x06 | 0x0F | 0x10 => Some(8),
+        _ => None,
+    }
+}
+
+/// 循环收帧（**纯逻辑**：取字节的动作由 `read_chunk` 注入 ⇒ 无串口环境可单测；B-8）。
+///
+/// 每轮的**请求量**（`read_chunk` 拿到的切片长度）：
+/// 1. 前缀不足 3 字节 ⇒ 只求"够判"的最小量（`3 - len`）—— **不做盲读**；
+/// 2. 期望长度已知且未收满 ⇒ 精确请求缺口（`exp - len`）；
+/// 3. 够 3 字节仍判不出功能码（未知功能码）⇒ **一次性收干**剩余缓冲后收手
+///    （成帧规则未知，只能取"当时已缓冲的全部"，等价改动前单次读的口径；`drained`
+///    保证只做一次，不与对端比谁更能灌字节）。
+///
+/// 收满 / `read_chunk` 返回 0（`VTIME` 到期且无新字节，或读错误——由调用方标志区分）即止。
+/// 返回最终 `buf.len()`。
+///
+/// **为什么必须"按需请求"**：若每轮都请求整块 512 字节缓冲，末轮会把内核缓冲里**属于下一帧**
+/// 的字节一并收进来 ⇒ 帧尾多出垃圾字节 ⇒ `Frame::parse` 的 CRC 按"末两字节"判定 ⇒ 失败
+/// ⇒ 每帧都判错。按需请求后 `buf` 长度**恰为**帧长（或超时时的已到部分）。
+///
+/// `read_chunk(scratch) -> usize`：把新到的字节写进 `scratch` 前缀并返回**字节数**。
+/// 实现方须保证返回值 ≤ `scratch.len()`。
+#[cfg(any(unix, test))]
+fn read_frame_loop<F>(buf: &mut Vec<u8>, mut read_chunk: F) -> usize
+where
+    F: FnMut(&mut [u8]) -> usize,
+{
+    let mut scratch = [0u8; MAX_FRAME_BYTES];
+    let mut drained = false; // 未知功能码的"收干"只做一次
+    loop {
+        let want = match expected_frame_len(buf) {
+            Some(exp) if buf.len() < exp => exp - buf.len(),
+            Some(_) => break, // 已收满
+            None if buf.len() < 3 => 3 - buf.len(),
+            None if !drained => {
+                drained = true;
+                MAX_FRAME_BYTES - buf.len()
+            }
+            None => break,
+        };
+        let want = want.min(MAX_FRAME_BYTES - buf.len());
+        if want == 0 {
+            break; // 防御性：缓冲已满（正常路径不会到）
+        }
+        let n = read_chunk(&mut scratch[..want]);
+        if n == 0 {
+            break; // VTIME 到期 / 读错误（由调用方标志区分）
+        }
+        buf.extend_from_slice(&scratch[..n.min(want)]);
+    }
+    buf.len()
+}
+
+/// 把 termios 置为 **raw 模式等价**（**纯函数**，无 IO ⇒ 可在无串口环境单测）。
+///
+/// 清理位集与 `cfmakeraw(3)`（Linux）**逐位等价**：
+/// - `c_lflag`：清 `ICANON | ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL | ECHOKE | ISIG | IEXTEN`
+/// - `c_iflag`：清 `IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON | IXOFF`
+/// - `c_oflag`：清 `OPOST`
+/// - `c_cflag`：清 `CSIZE | PARENB`（**故必须在调用方设置数据位/校验位之前调用**）
+///
+/// **不触碰** `VMIN` / `VTIME`：二者是 `recv_frame` 的**读超时语义**（VMIN=0 + VTIME=n
+/// ⇒ 弱超时阻塞读），由调用方 [`build_port_termios`] 设置，与本函数的清理位集正交。
+///
+/// **为什么必须做（B-1，2026-09-27 全项目审查 P1 · 潜在 P0）**：`configure_port` 此前
+/// 只设 `c_cflag` 与 `c_cc[VMIN/VTIME]`，**从未清 `ICANON`**（全仓 `grep ICANON` 零命中）。
+/// canonical 模式下 `VMIN/VTIME` **被内核忽略** ⇒ `recv_frame` 依赖的弱超时阻塞读语义
+/// 不成立；且 `ICRNL` 会把报文里的 `0x0D` 改写成 `0x0A`、`OPOST` 会改写输出 ——
+/// Modbus RTU 是**二进制**帧，任何字节改写都会让 CRC 校验恒失败（现场现象 = 整站恒 offline）。
+///
+/// ⚠️ **真机验证仍需**：`stty -F /dev/ttySx -a` 核对 `-icanon -echo ... -opost` 与
+/// `min 0 time <n>`。本函数的单测只证明**传入的 termios 位被正确清理**，不证明内核接受。
+#[cfg(unix)]
+fn apply_raw_mode(t: &mut libc::termios) {
+    t.c_lflag &= !(libc::ICANON
+        | libc::ECHO
+        | libc::ECHOE
+        | libc::ECHOK
+        | libc::ECHONL
+        | libc::ECHOCTL
+        | libc::ECHOKE
+        | libc::ISIG
+        | libc::IEXTEN);
+    t.c_iflag &= !(libc::IGNBRK
+        | libc::BRKINT
+        | libc::PARMRK
+        | libc::ISTRIP
+        | libc::INLCR
+        | libc::IGNCR
+        | libc::ICRNL
+        | libc::IXON
+        | libc::IXOFF);
+    t.c_oflag &= !libc::OPOST;
+    t.c_cflag &= !(libc::CSIZE | libc::PARENB);
+}
+
+/// 由 `open()` 取回的 termios（`base`）算出**最终要下发的 termios**（**纯函数**）。
+///
+/// 顺序**不可调换**：先 [`apply_raw_mode`]（它会清 `CSIZE | PARENB`），再设数据位/校验位
+/// —— 反序会让 raw 清理把刚设好的数据位与校验位抹掉。
+///
+/// 语义与改动前 `configure_port` 的内联实现**逐字段等价**，只多出 raw 清理（B-1）：
+/// 波特率 9600/19200/38400/115200（其余落 9600，与既有 `_ =>` 分支一致）、数据位 5..=8
+/// （其余落 8）、校验位 none/even/odd、停止位 2/1、`CLOCAL | CREAD`、
+/// `VMIN=0` / `VTIME=timeout_ms/100`。
+#[cfg(unix)]
+fn build_port_termios(mut t: libc::termios, cfg: &Config) -> libc::termios {
+    apply_raw_mode(&mut t);
+
+    // 设置波特率
+    let speed = match cfg.baud_rate {
+        9600 => libc::B9600,
+        19200 => libc::B19200,
+        38400 => libc::B38400,
+        115200 => libc::B115200,
+        _ => libc::B9600,
+    };
+    // SAFETY: `cfsetispeed` / `cfsetospeed` 只写 `&mut t` 指向的本栈变量（非空、对齐、
+    // 有效可写），不涉及其它指针或全局状态；返回值（0/-1）在本项目的用途下可忽略
+    // —— 失败只可能因 speed 常量非法，而本处的 speed 全部取自 libc 常量。
+    unsafe { libc::cfsetispeed(&mut t, speed) };
+    unsafe { libc::cfsetospeed(&mut t, speed) };
+
+    // 设置数据位
+    t.c_cflag &= !libc::CSIZE;
+    match cfg.data_bits {
+        5 => t.c_cflag |= libc::CS5,
+        6 => t.c_cflag |= libc::CS6,
+        7 => t.c_cflag |= libc::CS7,
+        _ => t.c_cflag |= libc::CS8,
+    }
+
+    // 设置校验位
+    match cfg.parity {
+        Parity::None => {
+            t.c_cflag &= !libc::PARENB;
+        }
+        Parity::Even => {
+            t.c_cflag |= libc::PARENB;
+            t.c_cflag &= !libc::PARODD;
+        }
+        Parity::Odd => {
+            t.c_cflag |= libc::PARENB;
+            t.c_cflag |= libc::PARODD;
+        }
+    }
+
+    // 设置停止位
+    match cfg.stop_bits {
+        2 => t.c_cflag |= libc::CSTOPB,
+        _ => t.c_cflag &= !libc::CSTOPB,
+    }
+
+    // 启用接收和本地模式
+    t.c_cflag |= libc::CLOCAL | libc::CREAD;
+
+    // 设置超时（VMIN/VTIME 语义见 `recv_frame`；**不由 raw 清理触碰**）
+    t.c_cc[libc::VTIME] = (cfg.timeout_ms / 100) as u8;
+    t.c_cc[libc::VMIN] = 0;
+
+    t
+}
 
 /// 构建 Modbus 读寄存器请求帧（FC03/FC04 等读功能码通用）。
 ///
@@ -279,6 +476,8 @@ impl Rs485Device {
             test_response: Mutex::new(None),
             #[cfg(any(test, feature = "test-seam"))]
             test_exchange: Mutex::new(None),
+            #[cfg(any(test, feature = "test-seam"))]
+            gpio_hook: Mutex::new(None),
         }
     }
 
@@ -297,6 +496,10 @@ impl Rs485Device {
                 .map_err(|_| Rs485Error::config_failed("无效的端口路径"))?;
 
             // 打开串口
+            // SAFETY: `c_path` 是本栈持活的 `CString`，`as_ptr()` 指向的 NUL 结尾字节串在
+            // 调用期间有效、不被 aliasing（`open(2)` 只读该字符串、不保留指针/不写内存）；
+            // flags 为 `O_RDWR | O_NOCTTY | O_NONBLOCK` 的合法组合。返回值是裸 fd：
+            // ≥0 成功、<0 出错，紧随其后显式判错（不把负值当 fd 使用）。
             let fd = unsafe {
                 libc::open(
                     c_path.as_ptr(),
@@ -310,6 +513,9 @@ impl Rs485Device {
 
             // 配置串口参数；失败时关闭 fd 防止泄漏
             if let Err(e) = self.configure_port(fd) {
+                // SAFETY: `fd` 是上一行 `open` 返回的、尚未交给任何其它所有者的有效
+                // 文件描述符（失败分支不写入 `port_fd`）⇒ 此处 close 无双重关闭风险。
+                // `close` 返回值的忽略是刻意的：本分支已在返回错误，无处再报 close 失败。
                 unsafe {
                     libc::close(fd);
                 }
@@ -322,8 +528,13 @@ impl Rs485Device {
             // 任何 Modbus 真从站请求-响应恒超时（南向真机采集失败根因）。
             // configure_port 已置 CLOCAL|CREAD，read 回到阻塞语义后由 termios
             // VMIN=0/VTIME 控制读超时。
+            // SAFETY: `F_GETFL` 无指针参数（无别名/对齐要求），`fd` 为 `open` 刚返回的
+            // 有效 fd（尚未入 `port_fd`）；返回 flags（<0 表示出错，已判）。
             let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
             if fl >= 0 {
+                // SAFETY: 同上（`fd` 有效；`F_SETFL` 的第三个参数是纯值 `fl & !O_NONBLOCK`，
+                // 不涉及指针）。返回值有意忽略：清 O_NONBLOCK 失败不阻断打开 —— 后续
+                // `recv_frame` 的 VMIN/VTIME 语义会失效并表现为读超时，由上层离线判定暴露。
                 let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK) };
             }
 
@@ -342,9 +553,16 @@ impl Rs485Device {
     }
 
     /// 配置串口参数
+    ///
+    /// termios 的**计算**全部下沉到纯函数 [`build_port_termios`]（本函数只负责
+    /// tcgetattr / tcsetattr / tcflush 三个 syscall）⇒ 位级语义可在无串口环境下单测。
     #[cfg(unix)]
     fn configure_port(&self, fd: RawFd) -> Result<(), Rs485Error> {
         // 获取终端属性
+        // SAFETY: `fd` 由 `open()` 刚成功返回、此刻仍只在本调用栈内（尚未写入 `port_fd`，
+        // 故无并发 close 的可能）⇒ 有效 fd；`termios` 是栈上 `MaybeUninit`，指针非空且对齐，
+        // `tcgetattr` 成功时被完整写入、随后才 `assume_init`（失败分支直接 return，
+        // 绝不读未初始化内存）。
         let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
         let mut termios = unsafe {
             if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
@@ -353,62 +571,19 @@ impl Rs485Device {
             termios.assume_init()
         };
 
-        // 设置波特率
-        let baud_rate = self.config.baud_rate;
-        let speed = match baud_rate {
-            9600 => libc::B9600,
-            19200 => libc::B19200,
-            38400 => libc::B38400,
-            115200 => libc::B115200,
-            _ => libc::B9600,
-        };
-
-        unsafe { libc::cfsetispeed(&mut termios, speed) };
-        unsafe { libc::cfsetospeed(&mut termios, speed) };
-
-        // 设置数据位
-        termios.c_cflag &= !libc::CSIZE;
-        match self.config.data_bits {
-            5 => termios.c_cflag |= libc::CS5,
-            6 => termios.c_cflag |= libc::CS6,
-            7 => termios.c_cflag |= libc::CS7,
-            _ => termios.c_cflag |= libc::CS8,
-        }
-
-        // 设置校验位
-        match self.config.parity {
-            Parity::None => {
-                termios.c_cflag &= !libc::PARENB;
-            }
-            Parity::Even => {
-                termios.c_cflag |= libc::PARENB;
-                termios.c_cflag &= !libc::PARODD;
-            }
-            Parity::Odd => {
-                termios.c_cflag |= libc::PARENB;
-                termios.c_cflag |= libc::PARODD;
-            }
-        }
-
-        // 设置停止位
-        match self.config.stop_bits {
-            2 => termios.c_cflag |= libc::CSTOPB,
-            _ => termios.c_cflag &= !libc::CSTOPB,
-        }
-
-        // 启用接收和本地模式
-        termios.c_cflag |= libc::CLOCAL | libc::CREAD;
-
-        // 设置超时
-        termios.c_cc[libc::VTIME] = (self.config.timeout_ms / 100) as u8;
-        termios.c_cc[libc::VMIN] = 0;
+        // 纯计算：raw 模式 + 波特率/数据位/校验位/停止位 + VMIN/VTIME（可单测，见 raw_mode_tests）
+        let termios = build_port_termios(termios, &self.config);
 
         // 应用设置
+        // SAFETY: `fd` 同上为有效 fd（本栈内独占）；`&termios` 指向本函数栈上、
+        // 由 `build_port_termios` 完整初始化的值，`tcsetattr` 只读它、不保留引用。
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
             return Err(Rs485Error::config_failed("设置终端属性失败"));
         }
 
         // 刷新缓冲区
+        // SAFETY: `fd` 同上为有效 fd；`TCIFLUSH` 是合法 action（丢弃已收未读数据），
+        // 无指针参数、无别名要求。
         unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
 
         Ok(())
@@ -420,6 +595,9 @@ impl Rs485Device {
         if let Some(fd) = port_guard.take() {
             #[cfg(unix)]
             {
+                // SAFETY: `fd` 由 `port_guard.take()` 取出 ⇒ **所有权已移交本分支**，
+                // 该口不会再持有/复用这个 fd（这是"恰好关闭一次"的保证）；`close` 无
+                // 指针参数、无别名要求，返回负值仅表示出错（下面已记日志）。
                 if unsafe { libc::close(fd) } < 0 {
                     tracing::error!(
                         "关闭串口文件描述符 {} 失败: {}",
@@ -453,10 +631,17 @@ impl Rs485Device {
         #[cfg(unix)]
         {
             // 清空收发缓冲区（TCIOFLUSH），防止残留数据破坏帧结构
+            // SAFETY: `fd` 有效（`port_guard` 在调用期间持锁 ⇒ 无并发 close）；
+            // `TCIOFLUSH` 是合法 action，无指针参数。
             unsafe { libc::tcflush(fd, libc::TCIOFLUSH) };
 
             let mut written = 0usize;
             while written < frame.len() {
+                // SAFETY: `fd` 有效（同上）；`frame.as_ptr().add(written)` 仍在 `frame`
+                // 的同一分配内（`written < frame.len()` 是循环不变量，且每次按实际写入量
+                // 递增、`write` 返回值恒 ≤ count），长度取 `frame.len() - written` ⇒
+                // 读写的区间 `[written, frame.len())` 合法不越界；该区间只读、`&[u8]`
+                // 本身保证无别名写。
                 let result = unsafe {
                     libc::write(
                         fd,
@@ -480,18 +665,28 @@ impl Rs485Device {
 
     /// 接收原始数据帧
     ///
+    /// **按帧长循环读（B-8，2026-09-27 全项目审查 P2）**：`VMIN=0` 下"首字节可用即返回"
+    /// ⇒ 单次 `read` 可能只取到**半帧**（现场：从站分两段发、或主机被调度延迟），
+    /// 半帧交给 `parse_*` 必然 CRC/长度校验失败 ⇒ 一次**假离线**（连续 3 拍即判离线）。
+    /// 现按 [`expected_frame_len`] 收满一帧；**帧内间隔**由 `VTIME` 兜底（从站不再送字节时
+    /// `read` 返回 0，循环即止）。**前提是 raw 模式**（B-1）—— canonical 下 `VTIME` 被内核忽略。
+    ///
     /// # Arguments
-    /// - `timeout_ms`: 超时时间（毫秒）
+    /// - `timeout_ms`: 超时时间（毫秒；落进 `VTIME`，100ms 粒度）
     ///
     /// # Returns
-    /// - `Ok(Vec<u8>)`: 接收到的数据
-    /// - `Err(Rs485Error)`: 接收失败
+    /// - `Ok(Vec<u8>)`: 接收到的数据（**超时/无数据 = 空向量**，调用方据此走"响应过短"）
+    /// - `Err(Rs485Error)`: 接收失败（`read` 返回负值）或未打开
     pub fn recv_frame(&self, timeout_ms: u64) -> Result<Vec<u8>, Rs485Error> {
         let port_guard = self.port_fd.lock();
         let fd = port_guard.ok_or_else(|| Rs485Error::NotConnected(self.device_id.clone()))?;
 
         #[cfg(unix)]
         {
+            // SAFETY: `fd` 取自 `port_fd`，本函数的 `port_guard` 在调用期间持有该锁 ⇒
+            // 无并发 `close()` 能取走 fd（`close` 需同一把锁），故是有效 fd；
+            // `termios` 为栈上 `MaybeUninit`，指针非空且对齐，成功时被完整初始化后
+            // 才 `assume_init`（失败分支直接 return）。
             let mut termios: MaybeUninit<libc::termios> = MaybeUninit::uninit();
             let mut termios = unsafe {
                 if libc::tcgetattr(fd, termios.as_mut_ptr()) < 0 {
@@ -501,26 +696,43 @@ impl Rs485Device {
             };
             let original_termios = termios;
 
-            // 设置读取超时：VTIME 为十分之一秒
+            // 设置读取超时：VTIME 为十分之一秒（**帧内间隔**的兜底；B-8 的循环读依赖它收手）
             termios.c_cc[libc::VTIME] = (timeout_ms / 100) as u8;
             termios.c_cc[libc::VMIN] = 0;
 
+            // SAFETY: `fd` 有效且由本栈独占（见上）；`&termios` 为本栈已初始化的值。
             if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
                 return Err(Rs485Error::recv_failed("设置终端属性失败"));
             }
 
-            let mut buffer = vec![0u8; 1024];
-            let n =
-                unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len()) };
+            // 循环收满一帧（纯逻辑在 `read_frame_loop`，读 syscall 由闭包注入 ⇒ 可单测）
+            let mut buffer: Vec<u8> = Vec::with_capacity(MAX_FRAME_BYTES);
+            let mut read_error = false;
+            read_frame_loop(&mut buffer, |scratch| {
+                // SAFETY: `fd` 有效且本栈独占（见上）；`scratch` 由 `read_frame_loop` 提供，
+                // 是栈上 `[u8; MAX_FRAME_BYTES]` 的切片，`as_mut_ptr()` 非空、按 u8 对齐，
+                // 且 `count = scratch.len()` 与缓冲实长一致 ⇒ 内核最多写 `scratch.len()`
+                // 字节，不越界（返回值 n 恒 ≤ count，由 POSIX 保证）。
+                let n = unsafe {
+                    libc::read(fd, scratch.as_mut_ptr() as *mut libc::c_void, scratch.len())
+                };
+                if n < 0 {
+                    read_error = true;
+                    0
+                } else {
+                    n as usize
+                }
+            });
 
             // 恢复原始终端属性
+            // SAFETY: `fd` 有效；`&original_termios` 为上面 tcgetattr 得到的已初始化值。
             unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original_termios) };
 
-            if n < 0 {
+            if read_error {
                 return Err(Rs485Error::recv_failed("接收失败或超时"));
             }
 
-            Ok(buffer[..n as usize].to_vec())
+            Ok(buffer)
         }
 
         #[cfg(not(unix))]
@@ -529,10 +741,15 @@ impl Rs485Device {
         }
     }
 
-    /// 设置 RS485 方向
+    /// 设置 RS485 方向（**半双工收发使能**）：`Send` 驱动 `de_gpio` 为高、`Recv` 驱动
+    /// `re_gpio` 为低。**两个 gpio 均为 `None` 时是 no-op**（现场收发器自动换向，B-4）。
     ///
-    /// # Arguments
-    /// - `dir`: 方向（发送/接收）
+    /// 生产可达路径：`send_recv`（⇒ `read_*_from` / `write_single_register_from` /
+    /// `send_pv_limit` 等）与 `transaction` / `transaction_with_handler`。
+    ///
+    /// `#[cfg(any(test, feature = "test-seam"))]` 的 gpio 钩子：测试/下游集成测可注入
+    /// 观测闭包，**不触碰真实 `/sys/class/gpio`**（Windows/CI 上 sysfs 不可写，且挂钩使
+    /// "方向控制是否真被调用/顺序如何"成为可断言事实）。钩子未设置时行为与改动前逐字相同。
     fn set_dir(&self, dir: Rs485Dir) -> Result<(), Rs485Error> {
         let gpio_num = match dir {
             Rs485Dir::Send => self.config.de_gpio,
@@ -540,6 +757,15 @@ impl Rs485Device {
         };
 
         if let Some(gpio) = gpio_num {
+            #[cfg(any(test, feature = "test-seam"))]
+            {
+                // 同 `send_recv` 的缝纪律：先克隆出锁再调用（闭包内若回调本设备不会死锁）
+                let f = self.gpio_hook.lock().clone();
+                if let Some(f) = f {
+                    f(gpio, dir == Rs485Dir::Send);
+                    return Ok(());
+                }
+            }
             gpio_set_value(gpio, dir == Rs485Dir::Send)?;
         }
         Ok(())
@@ -635,6 +861,20 @@ impl Rs485Device {
         *self.test_exchange.lock() = None;
     }
 
+    /// 装 GPIO 方向钩子（B-4；门控同 `set_test_exchange`）：`set_dir` 将改为调用它，
+    /// **不写** `/sys/class/gpio`。用途：断言"写/读事务真的经过了方向控制"（真机 GPIO 在
+    /// Windows/CI 上不可达 ⇒ 无钩子则该事实无法被任何用例钉住）。
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn set_gpio_hook(&self, f: GpioHookFn) {
+        *self.gpio_hook.lock() = Some(f);
+    }
+
+    /// 清 GPIO 方向钩子（恢复真实 sysfs 语义）。
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn clear_gpio_hook(&self) {
+        *self.gpio_hook.lock() = None;
+    }
+
     /// 发送并接收数据。
     ///
     /// 默认（产线）构建下无任何捷径，直落真 IO。两条零 IO 捷径的**门控刻意不同**：
@@ -669,7 +909,13 @@ impl Rs485Device {
                 return Ok(injected);
             }
         }
+        // 半双工方向控制（B-4，2026-09-27 全项目审查 P2）：**本路径此前完全不经过 `set_dir`**
+        // ⇒ 站级 `de_gpio`/`re_gpio` 配了也永不生效（写使能不置位 = 帧发不出去；接收使能
+        // 不回落 = 回帧收不到）。两个 gpio 均为 `None`（现场自动换向收发器）时 `set_dir`
+        // 是 no-op ⇒ **默认配置下行为与改动前逐字节相同**。
+        self.set_dir(Rs485Dir::Send)?;
         self.send_frame(frame)?;
+        self.set_dir(Rs485Dir::Recv)?;
         self.recv_frame(recv_timeout_ms)
     }
 
@@ -1047,7 +1293,21 @@ fn gpio_set_value(gpio_num: u32, value: bool) -> Result<(), Rs485Error> {
 mod tests {
     use super::*;
 
+    /// 造一个测试设备（**默认不配置 GPIO**）。
+    ///
+    /// ⚠️ **gpio 必须缺省 `None`（2026-09-27 B-4 接线后）**：`send_recv` 现在会经
+    /// `set_dir`，而 `set_dir` 在 gpio 已配置时**写 `/sys/class/gpio/gpioN/value`** ——
+    /// 在 Linux/CI 上该写必然失败（GPIO 未 export）⇒ 所有"未打开口"用例会从
+    /// `NotConnected` 变成 `GpioError`（Windows 因 `gpio_set_value` 是 mock 而看不出来，
+    /// 属**只在 CI 暴露的隐形回归**）。需要断言方向控制的用例请用
+    /// [`create_test_device_with_gpio`] + `set_gpio_hook`。
     pub(super) fn create_test_device() -> Rs485Device {
+        create_test_device_with_gpio(None, None)
+    }
+
+    /// 同 [`create_test_device`]，但显式指定 DE/RE 引脚（配 [`Rs485Device::set_gpio_hook`]
+    /// 使用，避免触碰真实 sysfs —— 见 `create_test_device` 的警告）。
+    pub(super) fn create_test_device_with_gpio(de: Option<u32>, re: Option<u32>) -> Rs485Device {
         let config = Config {
             port: "/dev/ttyUSB0".to_string(),
             baud_rate: 9600,
@@ -1057,8 +1317,8 @@ mod tests {
             timeout_ms: 1000,
             device_addr: 0x01,
             crc_mode: device_trait::CrcMode::Crc16Modbus,
-            de_gpio: Some(17),
-            re_gpio: Some(27),
+            de_gpio: de,
+            re_gpio: re,
         };
         let handler = Arc::new(device_trait::ModbusHandler::new(
             0x01,
@@ -1092,11 +1352,78 @@ mod tests {
         assert!(!device.is_open());
     }
 
+    /// B-4（2026-09-27 全项目审查 P2）：**站级 `send_recv` 路径必须经过方向控制**。
+    ///
+    /// 改动前 `set_dir` 的**唯一调用方**是 `transaction*`（生产零调用）⇒ 方向控制不可达、
+    /// 配了 `de_gpio`/`re_gpio` 也永不生效。本用例经 gpio 钩子（不写 sysfs）断言：
+    /// `read_holding_registers_from` 这条**站级读路径**在触碰串口前**至少**调用了一次
+    /// `set_dir(Send)`，且目标引脚 = `config.de_gpio`、电平 = 发送使能。
+    ///
+    /// **判别力**：把 `send_recv` 里新增的两行 `set_dir` 删掉 ⇒ `calls` 为空 ⇒ 红。
     #[test]
-    fn test_config_with_gpio() {
-        let device = create_test_device();
-        assert_eq!(device.config.de_gpio, Some(17));
-        assert_eq!(device.config.re_gpio, Some(27));
+    fn test_send_recv_path_drives_de_gpio_before_send() {
+        let device = create_test_device_with_gpio(Some(17), Some(27));
+        let calls: Arc<StdMutex<Vec<(u32, bool)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let rec = calls.clone();
+        device.set_gpio_hook(Arc::new(move |gpio, level| {
+            rec.lock().unwrap().push((gpio, level));
+        }));
+
+        // 串口未打开 ⇒ 最终仍以 NotConnected 收场（下面同时钉住"方向控制未吞掉该错误"）
+        let err = device
+            .read_holding_registers_from(2, 0x0100, 2)
+            .unwrap_err();
+        assert!(
+            matches!(err, Rs485Error::NotConnected(_)),
+            "方向控制不得改变既有 NotConnected 语义，实际: {err:?}"
+        );
+
+        let seen = calls.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![(17, true)],
+            "站级 send_recv 路径必须先把 DE 置为发送使能（gpio=de_gpio=17, level=true）再发帧；\
+             实际调用序列: {seen:?}（空 = 方向控制未接线）"
+        );
+    }
+
+    /// 方向映射：`Send → de_gpio/高`、`Recv → re_gpio/低`（两个引脚/两个电平都钉住，
+    /// 防"只接一半"或"电平反了"）。
+    ///
+    /// **判别力**：把 `set_dir` 的 `Rs485Dir::Recv` 分支接到 `de_gpio`、或把电平取反 ⇒ 红。
+    #[test]
+    fn test_set_dir_maps_send_recv_to_de_re_pins_and_levels() {
+        let device = create_test_device_with_gpio(Some(17), Some(27));
+        let calls: Arc<StdMutex<Vec<(u32, bool)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let rec = calls.clone();
+        device.set_gpio_hook(Arc::new(move |gpio, level| {
+            rec.lock().unwrap().push((gpio, level));
+        }));
+
+        device.set_dir(Rs485Dir::Send).unwrap();
+        device.set_dir(Rs485Dir::Recv).unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![(17, true), (27, false)],
+            "Send ⇒ (de_gpio=17, true)；Recv ⇒ (re_gpio=27, false)"
+        );
+    }
+
+    /// gpio 未配置（现场自动换向收发器）时 `set_dir` 必须是 **no-op**：不带钩子也不报错，
+    /// 且 `send_recv` 的既有失败语义（NotConnected）不受影响。
+    ///
+    /// **判别力**：让 `set_dir` 在 `None` 分支也去写某个默认脚 ⇒ 本用例在 Linux/CI 红
+    /// （sysfs 写失败）。本机（Windows）的 gpio 是 mock，故这条只在 Linux 侧有判别力。
+    #[test]
+    fn test_set_dir_is_noop_when_ungpioed() {
+        let device = create_test_device(); // de/re 均 None
+        assert!(device.set_dir(Rs485Dir::Send).is_ok());
+        assert!(device.set_dir(Rs485Dir::Recv).is_ok());
+        let err = device
+            .read_holding_registers_from(2, 0x0100, 2)
+            .unwrap_err();
+        assert!(matches!(err, Rs485Error::NotConnected(_)), "实际: {err:?}");
     }
 
     #[test]
@@ -1982,5 +2309,367 @@ mod fc02_tests {
             matches!(err, Rs485Error::NotConnected(_)),
             "应返回 NotConnected（串口未打开），实际: {err:?}"
         );
+    }
+}
+
+/// B-8（2026-09-27 全项目审查 P2）：`recv_frame` 的**分帧读**纯逻辑。
+///
+/// 两个被测函数（`expected_frame_len` / `read_frame_loop`）都是**平台无关纯逻辑**，
+/// 取字节的动作由闭包注入 ⇒ 在无串口环境（Windows/CI）也能真跑。
+#[cfg(test)]
+mod frame_read_tests {
+    use super::*;
+
+    /// 期望长度只由「功能码 + Modbus 成帧规则」决定。
+    #[test]
+    fn expected_frame_len_follows_modbus_framing() {
+        // 读类（FC01..FC04）：3 + byte_count + 2
+        assert_eq!(expected_frame_len(&[0x02, 0x03, 0x04]), Some(9), "FC03");
+        assert_eq!(expected_frame_len(&[0x02, 0x04, 0x08]), Some(13), "FC04");
+        assert_eq!(
+            expected_frame_len(&[0x01, 0x02, 0x01]),
+            Some(6),
+            "FC02 位块"
+        );
+        assert_eq!(expected_frame_len(&[0x01, 0x01, 0x02]), Some(7), "FC01");
+        // 异常帧：功能码最高位置 1 ⇒ **固定 5**，不得被第 3 字节（异常码）当年字节数
+        assert_eq!(
+            expected_frame_len(&[0x01, 0x83, 0x02]),
+            Some(5),
+            "异常帧长度固定 5（异常码不是 byte_count）"
+        );
+        assert_eq!(
+            expected_frame_len(&[0x01, 0x86, 0x03]),
+            Some(5),
+            "FC06 异常帧"
+        );
+        // 回显类：固定 8
+        assert_eq!(expected_frame_len(&[0x02, 0x06, 0x01]), Some(8), "FC06");
+        assert_eq!(expected_frame_len(&[0x02, 0x10, 0x01]), Some(8), "FC10");
+        // 前缀不足 ⇒ None（判不出）
+        assert_eq!(expected_frame_len(&[]), None);
+        assert_eq!(expected_frame_len(&[0x02]), None);
+        assert_eq!(expected_frame_len(&[0x02, 0x03]), None, "读类缺 byte_count");
+        // 未知功能码（**最高位为 0**，故不是异常帧）⇒ None（退回「至少 3 字节」的保守口径）。
+        // 注意 `0x99` 之类最高位置 1 的功能码**是**异常帧形状（⇒ Some(5)），不能拿来当"未知"样本。
+        assert_eq!(expected_frame_len(&[0x02, 0x41, 0x10]), None);
+        assert_eq!(
+            expected_frame_len(&[0x02, 0x99, 0x10]),
+            Some(5),
+            "最高位置 1 = 异常帧（对 func=0x19 的异常响应）⇒ 固定 5，与上面的未知样本不同"
+        );
+    }
+
+    /// 把一段字节流包成 `read_chunk`：每次最多回 `scratch.len()` 字节（**忠实模拟内核缓冲**：
+    /// 请求多少就最多给多少，剩余留在"缓冲"里等下一次读），流耗尽后返回 0（= `VTIME` 到期）。
+    fn stream_reader(stream: Vec<u8>) -> impl FnMut(&mut [u8]) -> usize {
+        let mut pos = 0usize;
+        move |scratch: &mut [u8]| {
+            if pos >= stream.len() {
+                return 0;
+            }
+            let k = scratch.len().min(stream.len() - pos);
+            scratch[..k].copy_from_slice(&stream[pos..pos + k]);
+            pos += k;
+            k
+        }
+    }
+
+    /// **核心用例**：9 字节 FC03 帧**一字节一字节**到达（最恶劣的碎片化）⇒ 循环必须一直读到
+    /// 收满 9 字节。改动前 `recv_frame` 只读一次 ⇒ 只能拿到 1 字节半帧 ⇒ CRC/长度校验必失败
+    /// ⇒ 每拍一次假失败、连续 3 拍判离线（本项要防的现场现象）。
+    ///
+    /// 判别力：把循环退回单次 `read` ⇒ `n == 1`、`calls == 1` ⇒ 两条断言皆红。
+    #[test]
+    fn loop_collects_byte_at_a_time_until_frame_complete() {
+        let stream = vec![0x02u8, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA9, 0x7F];
+        let mut buf: Vec<u8> = Vec::new();
+        let mut calls = 0usize;
+        let mut src = stream.clone();
+        let n = read_frame_loop(&mut buf, |scratch| {
+            calls += 1;
+            // 每次只吐 1 字节（无视请求量）⇒ 强制循环 9 轮
+            if src.is_empty() {
+                return 0;
+            }
+            scratch[0] = src.remove(0);
+            1
+        });
+        assert_eq!(n, 9, "必须收满期望长度 3 + 4 + 2 = 9");
+        assert_eq!(calls, 9, "一字节一片 ⇒ 恰 9 次读（单次 read 实现恒为 1）");
+        assert_eq!(buf, stream, "碎片的字节必须按到达序拼成完整帧");
+    }
+
+    /// **按需请求**：每轮只请求"还差多少"，**不得**越读到下一帧的字节（否则帧尾多垃圾
+    /// ⇒ `Frame::parse` 按末两字节判 CRC ⇒ 每帧都判错）。
+    ///
+    /// 判别力：把 `read_chunk` 的入参改回"整块 512 缓冲"（不看 `want`）⇒ 首轮就收 512
+    /// ⇒ `asked` 与 `n` 全变 ⇒ 红。
+    #[test]
+    fn loop_reads_exactly_remaining_bytes_no_overshoot() {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut calls = 0usize;
+        let mut asked: Vec<usize> = Vec::new();
+        let n = read_frame_loop(&mut buf, |scratch| {
+            calls += 1;
+            asked.push(scratch.len());
+            // 每段至多回 64 字节；「从站号/功能码/字节数」置成 FC03 + byte_count=255
+            // ⇒ 期望长度 260（⚠️ 第 2 字节留 0xFF 会被判成异常帧、期望仅 5）
+            let fill = scratch.len().min(64);
+            scratch[..fill].fill(0xFF);
+            if fill >= 2 {
+                scratch[0] = 0x03; // 从站号
+                scratch[1] = 0x03; // 功能码 FC03（读类）
+            }
+            fill
+        });
+        assert_eq!(n, 260, "收满声明帧长（3 + 255 + 2）即止，不得越读");
+        assert_eq!(calls, 6);
+        assert_eq!(
+            asked,
+            vec![3, 257, 193, 129, 65, 1],
+            "每轮请求量 = 剩余缺口（首轮只求「够判」的 3 字节，末轮只求 1 字节）"
+        );
+        assert_eq!(expected_frame_len(&buf[..3]), Some(260));
+    }
+
+    /// 从站不再送字节（`read` 返回 0 = VTIME 到期）⇒ 立即收手：**不挂死、不空转**。
+    /// 返回已收到的半帧（上层按「响应过短」报错，语义与改动前一致）。
+    #[test]
+    fn loop_stops_on_zero_read_without_spinning() {
+        // 声明 4 字节数据（byte_count=4 ⇒ 期望 9）但流里只有 3 字节
+        let mut buf: Vec<u8> = Vec::new();
+        let mut calls = 0usize;
+        let mut src = stream_reader(vec![0x02u8, 0x03, 0x04]);
+        let n = read_frame_loop(&mut buf, |scratch| {
+            calls += 1;
+            src(scratch)
+        });
+        assert_eq!(n, 3, "超时 ⇒ 返回已收到的字节（不补零、不丢弃）");
+        assert_eq!(
+            calls, 2,
+            "首轮取满 3 字节（够判）⇒ 判出期望 9 ⇒ 第二轮请求缺口得 0（超时）⇒ 收手"
+        );
+    }
+
+    /// 帧收满后**不得**再读一轮：否则每帧白等一个 `VTIME` 周期（缺省超时 1000ms ⇒ 每帧 +1s）。
+    #[test]
+    fn loop_stops_immediately_after_frame_complete() {
+        let stream = vec![0x02u8, 0x03, 0x04, 0x01, 0x02, 0xFF, 0xFE, 0xA9, 0x7F];
+        let mut buf: Vec<u8> = Vec::new();
+        let mut calls = 0usize;
+        let mut src = stream_reader(stream.clone());
+        let n = read_frame_loop(&mut buf, |scratch| {
+            calls += 1;
+            src(scratch)
+        });
+        assert_eq!(n, 9);
+        assert_eq!(calls, 2, "3 字节探帧 + 6 字节补齐 ⇒ 恰两次；收满后不得再读");
+        assert_eq!(buf, stream);
+    }
+
+    /// 完全无数据（首段即 0）⇒ 返回空向量（**既有语义**：串口超时 = 空响应，
+    /// 上层据此报「响应过短」，而不是 Err）。
+    #[test]
+    fn loop_returns_empty_on_immediate_timeout() {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut calls = 0usize;
+        let n = read_frame_loop(&mut buf, |_scratch| {
+            calls += 1;
+            0
+        });
+        assert_eq!(n, 0);
+        assert_eq!(calls, 1, "首段无数据 ⇒ 一次调用即收手");
+        assert!(buf.is_empty());
+    }
+
+    /// 未知功能码（最高位为 0、不在已知集内）：够 3 字节后**只收干一次**再收手
+    /// （成帧规则未知 ⇒ 只能取"当时已缓冲的全部"，等价改动前单次读口径；不与对端比灌字节）。
+    #[test]
+    fn loop_unknown_func_drains_once_then_stops() {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut asked: Vec<usize> = Vec::new();
+        // 流只有 3 字节：func=0x41
+        let mut src = stream_reader(vec![0x02u8, 0x41, 0xAA]);
+        let n = read_frame_loop(&mut buf, |scratch| {
+            asked.push(scratch.len());
+            src(scratch)
+        });
+        assert_eq!(n, 3);
+        assert_eq!(
+            asked,
+            vec![3, 509],
+            "首轮 3 字节（够判）→ 判不出 ⇒ 对剩余 509 字节收干一次，之后收手"
+        );
+    }
+}
+
+/// B-1（2026-09-27 全项目审查 P1 · 潜在 P0）：串口 **raw 模式**的位级语义。
+///
+/// ⚠️ **本模块只在 unix 下编译/执行**（`libc::termios` 在 Windows 上不存在）⇒
+/// 本机（Windows 开发机）**无法运行**，需在 Linux/CI（`cargo test -p rs485-plugin`）
+/// 或真机上执行。真机行为仍需 `stty -F /dev/ttySx -a` 核对（见 `apply_raw_mode` 文档）。
+#[cfg(all(test, unix))]
+mod raw_mode_tests {
+    use super::*;
+
+    /// 造一个「canonical 模式」的 termios：把 raw 模式**必须清掉**的位全置 1
+    /// （模拟内核给串口的缺省行规程），并放两个哨兵 `VMIN=7 / VTIME=9`。
+    fn canonical_termios() -> libc::termios {
+        // SAFETY: `zeroed()` 产出全零 termios（全部标志位与 c_cc 控制字符为 0），
+        // 对本用途是合法初值：`libc::termios` 是 POD（无指针、无 Drop），全零不构成
+        // 无效状态，且随后逐字段显式赋值。
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        t.c_lflag = libc::ICANON
+            | libc::ECHO
+            | libc::ECHOE
+            | libc::ECHOK
+            | libc::ECHONL
+            | libc::ECHOCTL
+            | libc::ECHOKE
+            | libc::ISIG
+            | libc::IEXTEN;
+        t.c_iflag = libc::IGNBRK
+            | libc::BRKINT
+            | libc::PARMRK
+            | libc::ISTRIP
+            | libc::INLCR
+            | libc::IGNCR
+            | libc::ICRNL
+            | libc::IXON
+            | libc::IXOFF;
+        t.c_oflag = libc::OPOST;
+        t.c_cflag = libc::CSIZE | libc::PARENB | libc::CSTOPB | libc::CLOCAL | libc::CREAD;
+        t.c_cc[libc::VMIN] = 7;
+        t.c_cc[libc::VTIME] = 9;
+        t
+    }
+
+    /// **B-1 主判据**：raw 清理后 canonical/回显/信号/流控/输出加工位**逐位为 0**。
+    ///
+    /// 判别力：删掉 `apply_raw_mode` 的调用（= 改动前的 `configure_port`）⇒
+    /// 下面每条 `assert_eq!(.. & ICANON, 0)` 全红。
+    #[test]
+    fn raw_mode_clears_canonical_echo_signal_and_flow_control_bits() {
+        let mut t = canonical_termios();
+        assert_ne!(
+            t.c_lflag & libc::ICANON,
+            0,
+            "前提：构造的 termios 必须是 canonical（否则本用例无判别力）"
+        );
+        apply_raw_mode(&mut t);
+
+        assert_eq!(t.c_lflag & libc::ICANON, 0, "ICANON 必须清（B-1 根因）");
+        assert_eq!(t.c_lflag & libc::ECHO, 0, "ECHO");
+        assert_eq!(t.c_lflag & libc::ECHOE, 0, "ECHOE");
+        assert_eq!(t.c_lflag & libc::ECHOK, 0, "ECHOK");
+        assert_eq!(t.c_lflag & libc::ECHONL, 0, "ECHONL");
+        assert_eq!(t.c_lflag & libc::ECHOCTL, 0, "ECHOCTL");
+        assert_eq!(t.c_lflag & libc::ECHOKE, 0, "ECHOKE");
+        assert_eq!(t.c_lflag & libc::ISIG, 0, "ISIG");
+        assert_eq!(t.c_lflag & libc::IEXTEN, 0, "IEXTEN");
+        assert_eq!(
+            t.c_iflag & libc::ICRNL,
+            0,
+            "ICRNL（0x0D 被改写 ⇒ CRC 必失败）"
+        );
+        assert_eq!(t.c_iflag & libc::INLCR, 0, "INLCR");
+        assert_eq!(t.c_iflag & libc::IGNCR, 0, "IGNCR");
+        assert_eq!(t.c_iflag & libc::IXON, 0, "IXON");
+        assert_eq!(t.c_iflag & libc::IXOFF, 0, "IXOFF");
+        assert_eq!(
+            t.c_iflag & libc::ISTRIP,
+            0,
+            "ISTRIP（剥第 8 位 ⇒ 二进制数据被毁）"
+        );
+        assert_eq!(t.c_oflag & libc::OPOST, 0, "OPOST");
+        assert_eq!(
+            t.c_cflag & libc::CSIZE,
+            0,
+            "CSIZE 清零（数据位由调用方重设）"
+        );
+        assert_eq!(
+            t.c_cflag & libc::PARENB,
+            0,
+            "PARENB 清零（校验位由调用方重设）"
+        );
+    }
+
+    /// **反假绿**：raw 清理不得「清光一切」—— 与本语义无关的位必须原样保留。
+    /// **判别力**：把实现写成 `t.c_lflag = 0; t.c_iflag = 0; ...`（无差别清零）⇒ 红。
+    #[test]
+    fn raw_mode_preserves_unrelated_bits_and_vmin_vtime() {
+        let mut t = canonical_termios();
+        // 正对照：HUPCL 属 c_cflag 的调制解调器控制位，不在 raw 清理位集内
+        t.c_cflag |= libc::HUPCL;
+        apply_raw_mode(&mut t);
+        assert_ne!(t.c_cflag & libc::HUPCL, 0, "HUPCL 不在清理位集内，必须保留");
+        assert_ne!(t.c_cflag & libc::CLOCAL, 0, "CLOCAL 必须保留");
+        assert_ne!(t.c_cflag & libc::CREAD, 0, "CREAD 必须保留");
+        assert_ne!(
+            t.c_cflag & libc::CSTOPB,
+            0,
+            "CSTOPB 由调用方按 stop_bits 决定，raw 不碰"
+        );
+        // VMIN/VTIME 是读超时语义，raw 清理**不得**触碰（否则 B-1 的修复会顺带改超时语义）
+        assert_eq!(t.c_cc[libc::VMIN], 7, "VMIN 哨兵必须原样保留");
+        assert_eq!(t.c_cc[libc::VTIME], 9, "VTIME 哨兵必须原样保留");
+    }
+
+    /// `build_port_termios` 的**端到端位级结果**：raw + 8N1 + VMIN=0/VTIME=timeout/100。
+    ///
+    /// 判别力（逐条）：① 去掉 `apply_raw_mode` 调用 ⇒ ICANON 断言红；
+    /// ② 把 `VTIME` 算式写成常数 ⇒ VTIME 断言红；③ 把 `VMIN` 写成 1 ⇒ 红
+    /// （VMIN=1 会让 read 阻塞到收到 1 字节为止，读超时不再生效）。
+    #[test]
+    fn build_port_termios_yields_raw_8n1_with_vmin_vtime() {
+        let cfg = Config {
+            timeout_ms: 200,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: Parity::None,
+            ..Config::default()
+        };
+        let t = build_port_termios(canonical_termios(), &cfg);
+
+        assert_eq!(t.c_lflag & libc::ICANON, 0, "raw（ICANON 已清）");
+        assert_eq!(t.c_cflag & libc::CSIZE, libc::CS8, "数据位 8");
+        assert_eq!(t.c_cflag & libc::PARENB, 0, "无校验");
+        assert_eq!(t.c_cflag & libc::CSTOPB, 0, "停止位 1");
+        assert_ne!(t.c_cflag & libc::CREAD, 0, "CREAD");
+        assert_ne!(t.c_cflag & libc::CLOCAL, 0, "CLOCAL");
+        assert_eq!(t.c_cc[libc::VMIN], 0, "VMIN=0（弱超时阻塞读的前提）");
+        assert_eq!(
+            t.c_cc[libc::VTIME],
+            2,
+            "VTIME = timeout_ms/100 = 200/100 = 2（十分之一秒）"
+        );
+    }
+
+    /// 校验位透传（even / odd）在 raw 清理**之后**仍成立。
+    ///
+    /// 判别力：把 `apply_raw_mode` 移到数据位/校验位设置**之后** ⇒ PARENB 被清 ⇒ 红
+    /// （这正是「顺序不可调换」的回归钉）。
+    #[test]
+    fn build_port_termios_sets_parity_after_raw_clear() {
+        let even = build_port_termios(
+            canonical_termios(),
+            &Config {
+                parity: Parity::Even,
+                ..Config::default()
+            },
+        );
+        assert_ne!(even.c_cflag & libc::PARENB, 0, "偶校验须置 PARENB");
+        assert_eq!(even.c_cflag & libc::PARODD, 0, "偶校验须清 PARODD");
+
+        let odd = build_port_termios(
+            canonical_termios(),
+            &Config {
+                parity: Parity::Odd,
+                ..Config::default()
+            },
+        );
+        assert_ne!(odd.c_cflag & libc::PARENB, 0, "奇校验须置 PARENB");
+        assert_ne!(odd.c_cflag & libc::PARODD, 0, "奇校验须置 PARODD");
     }
 }

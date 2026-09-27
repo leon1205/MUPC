@@ -65,6 +65,11 @@ thiserror = { workspace = true }
 # 工作区已有 `uuid`（根 Cargo.toml，features = ["v4","serde"]）—— 本单元唯一新增的依赖行；
 # **不得**用计数器 / 时间戳自制"伪 uuid"：弱 id 会把两次不同操作误判为同一请求（静默丢操作）。
 uuid = { workspace = true }
+# WP5 P2-A：LVGL 的日志出口（`lvgl/mod.rs::log_bridge`）转发到 `tracing`
+# （设计 §1.1.1.2「`LV_USE_LOG 1`（转发到 Rust `tracing`）」）。
+# ⚠️ **只引 `tracing`**（宏 + 门面），**不引** `tracing-subscriber` —— 本 crate 不含日志后端
+# 装配（渲染进程的日志栈由部署侧装配；未装配 subscriber 时桥内走 `diag` 回落，见该函数文档）。
+tracing = { workspace = true }
 
 # /dev/fb0 mmap 与 evdev 读取仅在 Linux 需要（Windows 本机不编译这两个 cfg 块
 # ——设计 §B1/§11.2：evdev 发现与校准属真机项，其**判定逻辑**（touch.rs 上半）全平台可测）。

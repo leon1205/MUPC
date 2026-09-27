@@ -13,4 +13,6 @@ pub mod points;
 pub mod port_runtime;
 pub mod scheduler;
 pub mod station;
+/// 后台 task 完成态观测（B-9；`observe_task` + `TaskWatch`）—— 装配层用，不改 task 语义。
+pub mod task_watch;
 pub mod uplink;
