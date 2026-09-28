@@ -527,7 +527,10 @@ impl TaiStorageStrategy {
     /// 内部状态清零与 `refuse_missing_soc` 完全一致（共模/差模/Q 积分与滤波窗）：无可用
     /// 测量时不得保留力指令，恢复后从 0 起算。本函数**不**更新 `last_control_ts`
     /// —— 保护性拒绝**不得消耗控制周期**，数据恢复后立即接管。
-    pub fn refuse_stale_data(&self) -> ControlCommand {
+    /// `stale_after`：超期阈值，**由调用方传入**（`AiIntegrator::DATA_STALE_AFTER`）。
+    /// **不得**在此写死字面量 —— 阈值真源在 `mupc_data_processing::DATA_FRESHNESS_MS`，
+    /// 跨 crate 复制成字面量即"日志可能与实现不同的阈值"（评审 W-3，2026-09-29）。
+    pub fn refuse_stale_data(&self, stale_after: std::time::Duration) -> ControlCommand {
         {
             // 短锁块：先清零内部状态、出块即释放（MutexGuard 非 Send，不跨 await 持有）。
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -554,11 +557,12 @@ impl TaiStorageStrategy {
         if due {
             self.stale_warn_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // 阈值 5s 与 `AiIntegrator::DATA_STALE_AFTER` 同源（该常量为私有，此处以文案
-            // 明示；改动阈值时须同步本行文案）。
+            // 阈值取自**调用方传入**的 `stale_after`（真源 = `DATA_STALE_AFTER`）⇒
+            // 改阈值时文案自动跟随，不再有"改阈值须同步文案"的隐患（评审 W-3）。
             tracing::warn!(
-                "遥测数据超过 5s 未更新（数据源可能断连）：台区储能已下发归零（分相 P/Q=0）\
-                 ——请检查总表站与采集链路"
+                "遥测数据超过 {}s 未更新（数据源可能断连）：台区储能已下发归零（分相 P/Q=0）\
+                 ——请检查总表站与采集链路",
+                stale_after.as_secs()
             );
         }
         cmd

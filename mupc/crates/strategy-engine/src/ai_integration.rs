@@ -433,7 +433,9 @@ impl AiIntegrator {
                     // 归零指令分相 P/Q 均为 Some（构造保证）；仍走 dispatch_phase_pq，
                     // 使归零值写入 last_sent_tai——否则数据恢复后若真实目标恰等于归零前
                     // 缓存，真实指令会被去抖跳过、PCS 停等。
-                    let cmd = tai.refuse_stale_data();
+                    // 阈值**传下去**（而非在 tai_storage 里写死字面量）：告警文案与判据同源，
+                    // 改 `DATA_STALE_AFTER` 时文案自动跟随（评审 W-3）。
+                    let cmd = tai.refuse_stale_data(Self::DATA_STALE_AFTER);
                     match (cmd.phase_p_set, cmd.phase_q_set) {
                         (Some(p), Some(q)) => self.dispatch_phase_pq(p, q).await?,
                         _ => tracing::debug!("归零指令未产出完整分相 P/Q，跳过下发"),
