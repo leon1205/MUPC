@@ -648,6 +648,15 @@ impl TaiStorageStrategy {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 测试观测口（B-3）：把「数据超期告警」节流计时回拨，验证**节流到期后须再次告警**
+    /// （而非"一次性永不告警"）。与 `backdate_soc_missing_warn` 对称 —— 两条降级路径各有
+    /// 自己的计时槽，须各自可验。
+    #[cfg(test)]
+    pub(crate) fn backdate_stale_warn(&self, d: std::time::Duration) {
+        let mut w = self.stale_warned.lock().unwrap_or_else(|e| e.into_inner());
+        *w = Some(std::time::Instant::now() - d);
+    }
+
     /// 测试观测口（D-10）：在持有内部锁时 panic，令两把锁中毒（1 Hz 决策路径不得因中毒 panic）。
     #[cfg(test)]
     pub(crate) fn poison_locks_for_test(&self) {

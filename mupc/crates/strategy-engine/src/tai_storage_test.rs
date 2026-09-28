@@ -808,4 +808,116 @@ mod tai_storage_test {
         assert!(m.contains("已下发归零（分相 P/Q=0）"), "{m}");
         assert!(m.contains("请检查总表站与采集链路"), "{m}");
     }
+
+    /// **B-3（2026-09-29）**：`refuse_stale_data` 的**直接**契约 —— 归零指令形状 + 内部跨周期
+    /// 状态清零 + **不消耗控制周期**（04 设计 §2.11.1「超期处置 = 归零」三条子款）。
+    ///
+    /// 为什么要在 `tai_storage` 层单列（`ai_integration` 已有 3 条集成用例）：那 3 条断言的是
+    /// **下发侧**（写寄存器次数/值、去抖缓存、恢复重发）；本条断言的是**策略侧状态本身**。
+    ///
+    /// **覆盖关系（实测，不夸大）**：把四行清零注掉做探针 ⇒ 本条红，`b3_stale_data_*` 两条
+    /// **仍绿**、只有 `b3_recovery_resends_real_command_after_zeroing` 也红（状态残留改变了
+    /// 恢复拍的控制输出，属**间接**观测）。故本条的增量是：对「p_st/d_p/q_pcs/meter_buf 是否
+    /// 清零」「last_control_ts 是否被消耗」给出**直接断言**（改坏时失败信息直指被破字段），
+    /// 而非依赖下游输出的差分。
+    ///
+    /// **判别力**：
+    /// ① 不清 `p_st`/`d_p`/`q_pcs`/`meter_buf` ⇒ 清零断言红（前提已确保这些值非零：先跑两拍
+    ///    真实控制，见下方前提断言）；
+    /// ② 返回非零指令（如误用 `last_cmd` 缓存 / 误调 `evaluate`）⇒ 指令形状断言红；
+    /// ③ 在拒绝路径里动 `last_control_ts`（如置 0 或推进）⇒ 末条断言红。
+    #[test]
+    fn b3_refuse_stale_data_zeroes_command_and_state_without_consuming_period() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        // 前置：先跑两拍正常控制，把 last_control_ts 与内部状态推离零
+        //（否则"清零/保留"都相对 0，断言无判别力 —— 这正是本项目反复中招的形态）。
+        let _ = tokio_test::block_on(strategy.evaluate(&create_package(3600 * 12, -30.0, 0.5)))
+            .unwrap();
+        let _ =
+            tokio_test::block_on(strategy.evaluate(&create_package(3600 * 12 + 60, -30.0, 0.5)))
+                .unwrap();
+        let before = strategy.state_snapshot();
+        assert!(
+            before.last_control_ts > 0,
+            "前提：须已进入过控制周期（否则末条断言前提不成立）: {before:?}"
+        );
+        assert!(
+            before.p_st != 0.0 || before.d_p != [0.0; 3] || !before.meter_buf.is_empty(),
+            "前提：正常拍须已把内部状态推离零（否则清零断言无判别力）: {before:?}"
+        );
+
+        let cmd = strategy.refuse_stale_data(std::time::Duration::from_secs(5));
+
+        // ① 指令形状：分相 P/Q 全 0（归零，而非停发 / 而非旧指令）
+        assert_eq!(
+            cmd.phase_p_set,
+            Some([0.0; 3]),
+            "超期须下发分相 P 归零（误用缓存/旧指令 ⇒ 非 0 值）"
+        );
+        assert_eq!(cmd.phase_q_set, Some([0.0; 3]), "分相 Q 亦须归零");
+        assert_eq!(cmd.p_batt_set, Some(0.0), "总有功设定亦须归零");
+        assert_eq!(cmd.cmd_id, 4, "指令 ID 须与调度约定一致");
+
+        // ② 内部状态清零（共模/差模/Q 积分与滤波窗）—— 恢复后从 0 起算
+        let after = strategy.state_snapshot();
+        assert_eq!(after.p_st, 0.0, "共模积分须清零: {after:?}");
+        assert_eq!(after.d_p, [0.0; 3], "差模积分须清零: {after:?}");
+        assert_eq!(after.q_pcs, [0.0; 3], "分相 Q 积分须清零: {after:?}");
+        assert!(
+            after.meter_buf.is_empty(),
+            "滤波窗须清空（无可用测量时不得保留旧样本）: {after:?}"
+        );
+
+        // ③ 不消耗控制周期：last_control_ts 原值保留（数据恢复后按常规节流立即接管）
+        assert_eq!(
+            after.last_control_ts, before.last_control_ts,
+            "保护性拒绝不得消耗控制周期（改动 last_control_ts 即红）"
+        );
+    }
+
+    /// **B-3**：超期告警的 30 s 节流**可到期**（非"一次性永不告警"），且与 **SOC 全缺告警**
+    /// 的节流槽**各自独立** —— 两条降级路径不得互相吞掉对方的告警（同一时刻可能只走其一）。
+    ///
+    /// **判别力**：① 把 `STALE_WARN_INTERVAL` 判定写成"只告警一次"（如 `fetch_add` 后不再
+    /// 判 due、或把 due 恒 false）⇒ 末条「到期后再次告警」红；② 两条路径复用同一计时槽
+    /// （`refuse_stale_data` 去写 `soc_missing_warned`，或反之）⇒ 中间两条「独立」断言之一红。
+    #[test]
+    fn b3_stale_warn_throttles_then_refires_and_is_independent_of_soc_slot() {
+        let strategy = TaiStorageStrategy::new(TaiStorageConfig::default());
+        let d5 = std::time::Duration::from_secs(5);
+
+        // 首发 + 30s 节流内再调两次 ⇒ 仍只 1 次
+        let _ = strategy.refuse_stale_data(d5);
+        let _ = strategy.refuse_stale_data(d5);
+        let _ = strategy.refuse_stale_data(d5);
+        assert_eq!(
+            strategy.stale_warn_count(),
+            1,
+            "超期告警须按 30s 节流（每拍刷屏 = 红）"
+        );
+
+        // 独立槽：SOC 全缺是**另一条**路径，其告警不得被超期告警的节流吞掉
+        let mut no_soc = create_package(3600 * 10, -30.0, 0.5);
+        no_soc.battery.soc = None;
+        let _ = tokio_test::block_on(strategy.evaluate(&no_soc)).unwrap();
+        assert_eq!(
+            strategy.soc_missing_warn_count(),
+            1,
+            "SOC 全缺告警须按自己的 30s 槽发射（被超期槽吞掉 = 两条路径复用计时槽 ⇒ 红）"
+        );
+        assert_eq!(
+            strategy.stale_warn_count(),
+            1,
+            "SOC 缺路径不得反过来改动超期告警计数"
+        );
+
+        // 节流到期 ⇒ 须再次告警（防"一次性"实现）
+        strategy.backdate_stale_warn(std::time::Duration::from_secs(31));
+        let _ = strategy.refuse_stale_data(d5);
+        assert_eq!(
+            strategy.stale_warn_count(),
+            2,
+            "30s 节流到期后须再次告警（一次性实现 ⇒ 停在 1）"
+        );
+    }
 }

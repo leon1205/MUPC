@@ -826,6 +826,61 @@ mod control_tests {
         );
     }
 
+    /// **B-1 / IC-AC-34（10 号 PRD §8.2）**：**两个量程各自独立、不可互换** —— 恒功率通道
+    /// 的**未越限**入参须逐字落到 1001（含**额定 60 kW**），**不得**被分相 ±25 量程误钳；
+    /// 即"零行为变化"的正向一侧。
+    ///
+    /// **为什么要单列（如实说明增量）**：`send_dual_param_clamps_p_ref_to_device_range` 取
+    /// 150 作探针，任何"量程取值 ≠ ±100"或"接线拿错 clamp"的实现都会让它红 —— 本条**不重复**
+    /// 那份判别力。本条独有的是把契约里**另一句**变成可执行断言：B-1 声称「`|p_ref| ≤ 100`
+    /// 时线上字节**一字不变**（零行为变化）」。为此判据取**整条写序**（而非只找 1001），
+    /// 并取 60 —— 现网**唯一现实档位**（上游 IEC104 `p_set` 按 `p_cap` 缺省 60 钳），
+    /// 审查 G2 明写的功能回归形态正是"60 被静默降到 25"。同时补负额定一侧（±25 误钳 /
+    /// 只钳正向都会红）。
+    ///
+    /// **判别力（改坏即红）**：① `clamp_phase(cmd.p_ref)` ⇒ 60→25 ⇒ 红（越限条亦红）；
+    /// ② 只钳正向（`if p_ref > 100 { 100.0 } else { p_ref }`）⇒ 负额定一侧红，而越限条
+    /// 的 −150 已先红；③ 1002 误写 `p_ref`（应恒 0）⇒ 首段整条写序断言红。
+    #[tokio::test]
+    async fn send_dual_param_keeps_in_range_p_ref_verbatim() {
+        // ── 正额定：60 kW（现网合法上限）⇒ 线上字须为 to_pcs_reg(60.0) ──
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let h = handle(bus.clone());
+        h.send_dual_param(&PcsDualParam::new(60.0, 0.5, true, "intelligent"))
+            .await
+            .unwrap();
+        assert_eq!(
+            bus.write_calls.lock().unwrap().clone(),
+            vec![
+                (1, regs::REG_MODE, to_pcs_reg(regs::MODE_CONST_POWER as f64)),
+                (1, regs::REG_START_STOP, to_pcs_reg(1.0)),
+                // 未越限 ⇒ 逐字落线上；被 ±25 分相量程误钳（60→25）即红
+                (1, regs::REG_CONST_P_SET, to_pcs_reg(60.0)),
+                (1, regs::REG_CONST_Q_SET, to_pcs_reg(0.0)),
+            ],
+            "额定 60kW 恒功率指令须零行为变化地落线上（同源编码 to_pcs_reg 判据）"
+        );
+
+        // ── 负额定：−60 kW，钉住符号侧不被"只钳正向"或误用单相量程的实现改坏 ──
+        let bus2 = Arc::new(MockBus::new());
+        bus2.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let h2 = handle(bus2.clone());
+        h2.send_dual_param(&PcsDualParam::new(-60.0, 0.0, true, "intelligent"))
+            .await
+            .unwrap();
+        assert_eq!(
+            bus2.write_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|&&(_, a, _)| a == regs::REG_CONST_P_SET)
+                .copied(),
+            Some((1, regs::REG_CONST_P_SET, to_pcs_reg(-60.0))),
+            "−60kW 须逐字落线上（前提：必须写 1001，否则判据前提不成立）"
+        );
+    }
+
     /// 正向断言（质量评审 Important）：`send_tai_command` 此前**连快乐路径都没有**
     /// （原文也只从 latch 拒绝用例里碰过一次）⇒ `REG_MODE` 的分相写、`1006-1011` 六次写、
     /// `clamp_phase` 接线**全部零覆盖**。本用例钉住三者 + **写序**。

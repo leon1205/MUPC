@@ -315,6 +315,72 @@ async fn e3_holding_write_readback_signed() {
     assert_eq!(from_pcs_reg(wire), -12.0, "回读回解须还原 −12");
 }
 
+/// E8（**B-1 / IC-AC-34**，2026-09-29 新增）：恒功率通道的设备量程钳位须在**真帧层**可见
+/// —— 从站侧镜像与 FC03 回读线值都是钳后值，且**未越限的额定 60 kW 不被分相 ±25 量程误钳**。
+///
+/// 与 `src/pcs/mod.rs` 的 `send_dual_param_clamps_p_ref_to_device_range` 的差异（不重复）：
+/// 那条用 MockBus 观测 `PcsHandle` 交给总线的**值**；本条让该值走完 **`to_pcs_reg` 编码 →
+/// Modbus CRC 成帧 → 从站 `from_pcs_reg` 解码**全程（E3 同款设施），判据落在**从站寄存器
+/// 镜像**与 **FC03 回读线值**两处 —— 即"线上字节"的字面证据。上游若把钳位错放在编码之后
+/// （钳 u16 而非 f64），MockBus 条看不出来，本条看得出。
+///
+/// **判别力**：删掉 `send_dual_param` 的 `clamp_const_power` ⇒ 150 落从站为 150.0、线值
+/// `to_pcs_reg(150.0)`=0x9600 ⇒ 首两条断言红；把量程误接 `clamp_phase` ⇒ 60 落从站为 25.0 ⇒
+/// 末段红。
+#[tokio::test]
+async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
+    let (bus, state) = SeamBus::new();
+    let h = PcsHandle::new(pcs_cfg(), bus.clone(), Arc::new(NullSink));
+    write_run(&bus).await; // 前置：S-4 守卫要求先处于非停机态
+
+    // ── ① 越限 +150 ⇒ 从站镜像与回读线值都须是钳后 100 ──
+    h.send_dual_param(&PcsDualParam::new(150.0, 0.0, true, "fallback"))
+        .await
+        .expect("下发应成功");
+    {
+        let hold = state.hold.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            hold.get(&REG_CONST_P_SET).copied(),
+            Some(100.0),
+            "150 越 ±100 设备量程 ⇒ 从站镜像须为钳后的 100（未钳 ⇒ 150）"
+        );
+    }
+    let wire = bus
+        .read_holding(1, REG_CONST_P_SET, 1)
+        .await
+        .expect("FC03 回读应成功")[0];
+    assert_eq!(wire, to_pcs_reg(100.0), "回读线值须为钳后 100 的字节互换");
+    assert_ne!(
+        wire,
+        to_pcs_reg(150.0),
+        "线值不得是未钳的 150（同源编码对照，防'看着像对'的巧合）"
+    );
+
+    // ── ② 未越限 60（现网额定档位）⇒ 不得被分相 ±25 量程误钳 ──
+    h.send_dual_param(&PcsDualParam::new(60.0, 0.0, true, "fallback"))
+        .await
+        .expect("下发应成功");
+    {
+        let hold = state.hold.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            hold.get(&REG_CONST_P_SET).copied(),
+            Some(60.0),
+            "额定 60kW 须原样落从站（被 ±25 分相量程误钳 ⇒ 25）"
+        );
+    }
+
+    // ── ③ 负越限 −150 ⇒ 钳到下限 −100（只钳上限的实现会在此红）──
+    h.send_dual_param(&PcsDualParam::new(-150.0, 0.0, true, "fallback"))
+        .await
+        .expect("下发应成功");
+    let wire_neg = bus
+        .read_holding(1, REG_CONST_P_SET, 1)
+        .await
+        .expect("FC03 回读应成功")[0];
+    assert_eq!(wire_neg, to_pcs_reg(-100.0), "负越限须钳到 −100");
+    assert_eq!(from_pcs_reg(wire_neg), -100.0, "回读回解须为 −100");
+}
+
 /// E4 启停 + 功率方向推演运行状态机（对应 e4_start_stop_direction_state_machine）：
 /// 500=1 ⇒ 待机(1)；P>0 ⇒ 放电(3)；P<0 ⇒ 充电(2)；`stop()`（写 500=0）⇒ 停机(0)。
 /// **状态经 `tick_once` 刷新快照后才由 `last_run_state()` 读出**（快照口径，非现读）。
