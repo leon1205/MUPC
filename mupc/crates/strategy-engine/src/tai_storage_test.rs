@@ -772,4 +772,40 @@ mod tai_storage_test {
             "fresh SOC 恢复须立即正常下发（不得粘滞在拒绝态）: {sum2}"
         );
     }
+
+    /// **告警文案阈值须随入参跟随**（评审 W-3 的修复判别力，2026-09-29 复核补）。
+    ///
+    /// 背景：复核实测「把 `stale_after.as_secs()` 换回字面量 `5`」**不会让任何既有用例变红**
+    /// ⇒ W-3 的修复本身**可被静默回退**。本用例即为该修复的判别力覆盖。
+    ///
+    /// **改什么会让本条变红**：
+    /// ① `stale_warn_message` 里把 `{}`/`as_secs()` 换回**字面量**（如 `"超过 5s"`）
+    ///    ⇒ 传入 7/11 s 的两条断言红（文案恒为 5）；
+    /// ② 把 `as_secs()` 改成别的换算（如 `as_millis()`）⇒ 数值断言红。
+    #[test]
+    fn stale_warn_message_follows_threshold() {
+        let m5 = TaiStorageStrategy::stale_warn_message(std::time::Duration::from_secs(5));
+        assert!(
+            m5.contains("超过 5s 未更新"),
+            "5s 阈值须如实进文案: {m5}"
+        );
+
+        // 换一个**非 5** 的阈值：若文案里是硬编码字面量，这两条必红
+        for secs in [7u64, 11] {
+            let m = TaiStorageStrategy::stale_warn_message(std::time::Duration::from_secs(secs));
+            assert!(
+                m.contains(&format!("超过 {secs}s 未更新")),
+                "阈值须随入参跟随（硬编码 5 即红）: {m}"
+            );
+            assert!(
+                !m.contains("超过 5s 未更新"),
+                "不得残留字面量 5: {m}"
+            );
+        }
+
+        // 文案的**其余部分**（归零说明 + 排查指引）不得因参数化而丢失
+        let m = TaiStorageStrategy::stale_warn_message(std::time::Duration::from_secs(5));
+        assert!(m.contains("已下发归零（分相 P/Q=0）"), "{m}");
+        assert!(m.contains("请检查总表站与采集链路"), "{m}");
+    }
 }

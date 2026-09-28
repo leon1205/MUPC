@@ -557,15 +557,23 @@ impl TaiStorageStrategy {
         if due {
             self.stale_warn_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // 阈值取自**调用方传入**的 `stale_after`（真源 = `DATA_STALE_AFTER`）⇒
-            // 改阈值时文案自动跟随，不再有"改阈值须同步文案"的隐患（评审 W-3）。
-            tracing::warn!(
-                "遥测数据超过 {}s 未更新（数据源可能断连）：台区储能已下发归零（分相 P/Q=0）\
-                 ——请检查总表站与采集链路",
-                stale_after.as_secs()
-            );
+            tracing::warn!("{}", Self::stale_warn_message(stale_after));
         }
         cmd
+    }
+
+    /// 超期降级告警文案（**纯函数**，单独抽出以便单测取值随阈值跟随）。
+    ///
+    /// 为什么抽出来：评审 W-3 指出阈值不得写成字面量（否则改阈值即"日志撒谎"）；
+    /// 但复核（2026-09-29）实测「把 `as_secs()` 换回字面量 `5`」**不会让任何用例变红**
+    /// —— 即该修复本身**可被静默回退**。抽成纯函数后由 `stale_warn_message_follows_threshold`
+    /// 钉住：**改坏成字面量、或调用点传错 Duration，该用例即红**。
+    pub(crate) fn stale_warn_message(stale_after: std::time::Duration) -> String {
+        format!(
+            "遥测数据超过 {}s 未更新（数据源可能断连）：台区储能已下发归零（分相 P/Q=0）\
+             ——请检查总表站与采集链路",
+            stale_after.as_secs()
+        )
     }
 
     /// 同步评估（用于测试与回放）：内部执行控制周期
