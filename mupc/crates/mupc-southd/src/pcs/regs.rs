@@ -23,6 +23,19 @@ pub const REG_RUN_STATE: u16 = 1013;
 /// 单相功率限幅（kW）
 pub const PHASE_LIMIT_KW: f64 = 25.0;
 
+/// 恒功率通道（4 区 1001/1002）**设备量程**限幅（kW/kVar）。
+///
+/// **取值来源**：协议 V1.3 的 4 区**写**点表逐行明写取值范围 —— 1001「输出有功功率设置 /
+/// 恒功率模式输出设置 / ×1kW / **−100~100**」、1002 无功同区间；而 1006–1011 分相逐行写
+/// 「**−25~25**」（即 [`PHASE_LIMIT_KW`]）。故本常量与 `PHASE_LIMIT_KW` **同源同理**：
+/// 都是"该寄存器自己那一行的声明量程"，**不是**设备/电池的额定功率（60 kW，其权威源在
+/// 策略侧 `p_cap` —— 不在此复制，免生第二份真源）。
+///
+/// ⚠️ **勿把恒功率通道钳到 ±25**：25 是**单相**量程，恒功率 1001 是**三相总有功**设定。
+/// 上游 IEC104 `p_set` 已按额定 `p_cap`（缺省 60）钳过（`startup.rs:270`），拿 ±25 再钳
+/// 会把 60 kW 的**合法**指令静默降到 25 kW —— 那是功能回归，不是纵深防护。
+pub const CONST_POWER_LIMIT_KW: f64 = 100.0;
+
 /// 3 区 三相展示读数（显示采集，协议 V1.3 / 12-设计文档 §4.1）：
 /// 三相输出电流 A/B/C = 1022-1024、三相输出有功 A/B/C = 1029-1031、设备总有功 = 1032。
 /// 迁移前这些私有常量在 `intercore::transport::modbus`；将于 Task 11（删除 intercore
@@ -48,6 +61,12 @@ pub fn clamp_phase(v: f64) -> f64 {
     v.clamp(-PHASE_LIMIT_KW, PHASE_LIMIT_KW)
 }
 
+/// 恒功率 P/Q 值 clamp 到 ±[`CONST_POWER_LIMIT_KW`] kW/kVar
+/// （与 [`clamp_phase`] 对称：各自钳各自寄存器的声明量程）。
+pub fn clamp_const_power(v: f64) -> f64 {
+    v.clamp(-CONST_POWER_LIMIT_KW, CONST_POWER_LIMIT_KW)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +89,22 @@ mod tests {
         assert_eq!(clamp_phase(30.0), 25.0);
         assert_eq!(clamp_phase(-30.0), -25.0);
         assert_eq!(clamp_phase(10.0), 10.0);
+    }
+
+    #[test]
+    fn test_clamp_const_power() {
+        assert_eq!(clamp_const_power(150.0), 100.0);
+        assert_eq!(clamp_const_power(-150.0), -100.0);
+        // 两侧都判：只测上限会漏掉"符号侧接反/取下限"的实现。
+        assert_eq!(clamp_const_power(100.0), 100.0);
+        assert_eq!(clamp_const_power(-100.0), -100.0);
+        // **判别力锚**：恒功率量程是 ±100（协议 4 区 1001/1002），**不是**分相的 ±25 ——
+        // 额定 60 kW 必须原样通过（误用 clamp_phase 会让本行必红）。
+        assert_eq!(
+            clamp_const_power(60.0),
+            60.0,
+            "额定 60kW 不得被单相 ±25 量程误钳"
+        );
     }
 
     #[test]

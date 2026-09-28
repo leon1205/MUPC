@@ -3340,8 +3340,8 @@ struct PcsSnapshot {
 
 | 方法 | 迁自 | 语义 |
 |------|------|------|
-| `send_dual_param(&DualParamCommand)` | 同 | 写 1000/1001/1002（恒功率模式） |
-| `send_tai_command(p,q,mode)` | 同 | 写 1000=2 分相 + 1006-1011 |
+| `send_dual_param(&DualParamCommand)` | 同 | 写 1000/1001/1002（恒功率模式）；**`p_ref` 钳 ±100**（`regs::clamp_const_power`） |
+| `send_tai_command(p,q,mode)` | 同 | 写 1000=2 分相 + 1006-1011；**每相钳 ±25**（`regs::clamp_phase`） |
 | `stop() -> Result<(),String>` | 同 | 写 500=0；不清 latch；成功后复位 `started=false` + `mode=0xFF` |
 | `restore_interlock_latched(bool)` | 同 | C-1 **唯一** latch 入口 |
 | `last_run_state()` / `is_connected()` / `latest_soc()` / `read_three_phase()` | 同 | 见 §13.4 |
@@ -3350,6 +3350,46 @@ struct PcsSnapshot {
 | `shutdown()` | 同 | **现状生产零调用**；迁移时**删除**（TCP 侧保留） |
 
 `PcsHandle` 是 PCS 4 区 **500 的唯一写方**；S2 联锁经 `InterlockPort` 调用它 ⇒ **不存在两个写方**。**latch 权威源仍为 storage/DB**（C-1 双 latch 结构**不变**）；`PcsHandle` 只持"运行期兜底 latch"，与现状 `ModbusRtuTransport.stopped_latched` **同义**。
+
+> ⚠️ **两条下发通道共用同一个模式字 `1000`，且无仲裁（G9，2026-09-29 补记）**
+>
+> 上表前两行的**第一条动作都写 `REG_MODE = 1000`**，但**目标值相反**：
+> `send_dual_param` → `ensure_mode(MODE_CONST_POWER = 0)`（`pcs/mod.rs:255`）；
+> `send_tai_command` → `ensure_mode(MODE_PHASE_SPLIT = 2)`（`pcs/mod.rs:289`）。
+> 而 `ensure_mode` 带**共享缓存** `inner.mode`（`mod.rs:332-339`，命中即短路 ⇒ 跳过写）。
+>
+> **两通道交叉调用时 `1000` 会来回翻**：
+>
+> | 时刻 | 调用 | 效果 |
+> |---|---|---|
+> | T0 | 台区储能策略 `send_tai_command` | 写 `1000 = 2`（分相） |
+> | T1 | IEC 104 `p_set` → `send_dual_param` | 写 `1000 = 0`（**切走分相**）+ `1001 = p_ref` + **`1002 = 0`（清无功，`:259` 硬编码）** |
+> | T2 | 策略下一拍 | 写 `1000 = 2`（切回分相） |
+> | T3 | 调度再下发 | 写 `1000 = 0` … |
+>
+> **三条连带事实**：
+> ① **无优先级 / 无互斥 / 无仲裁** —— 两通道各写同一共享状态字，最终行为取决于调用时序；
+> ② `send_dual_param` 把 `REG_CONST_Q_SET` **硬编码 0.0**（`pcs/mod.rs:259`）⇒ 每次人工 `p_set` 都**清无功**；
+> ③ `stop()` 成功时把缓存置 `0xFF`（`mod.rs:196`）⇒ 停机后下一拍**必然重写**模式字。
+>
+> **裁定（2026-09-29）**：**符合意图**（人工 `p_set` 即"接管为恒功率"）⇒ **不改代码**；本注即"副作用必须成文"的落点。
+> **现场排查提示**：若见"模式被切走"或"无功莫名归零"，先查是否有 `p_set` 下发与台区储能策略**交叉**。
+> 相关：审查报告 `reports/数据流与策略下发链路完整性审查-2026-09-28.md` §四 **G9**。
+>
+> **两条通道各自的设备量程钳位（B-1 / G2，2026-09-29 补）**：`PcsHandle` 有**两个**量程，
+> **各自钳各自寄存器那一行的声明量程**，**不得互相套用**：
+>
+> | 通道 | 寄存器 | 量程 | 常量 | 依据 |
+> |---|---|---|---|---|
+> | 恒功率 `send_dual_param` | `1001`（P）/ `1002`（Q） | **±100 kW / ±100 kvar** | `regs::CONST_POWER_LIMIT_KW` / `clamp_const_power` | 协议 V1.3 4 区**写**点表逐行明写 `*1Kw` / `*1kvar`、`-100~100`（`hw/_ref_pcs60_proto.txt:1270/1277`） |
+> | 分相 `send_tai_command` | `1006-1011` | **每相 ±25 kW / ±25 kvar** | `regs::PHASE_LIMIT_KW` / `clamp_phase` | 同点表 `-25-25 kW`（逐相） |
+>
+> **两条刻意不做的**（评审 Warning W-1 确认理由成立，2026-09-29）：
+> ① **不取额定功率 60 kW** —— 其权威源在**策略侧** `p_cap`（`startup.rs` 装配注释明写"取台区储能容量档 p_cap"）；
+> 在 PCS 驱动里复制即生**第二份真源**，且 04 设计已登记 **125kVA 型号点表待接入** ⇒ 硬编码 60 到那时反成缺陷。
+> ② **不复用分相 ±25** —— 那是**单相**量程，而 `1001` 是**三相总有功**设定；套用会把 60 kW 的合法指令**静默降额到 25 kW**（= 功能回归）。
+>
+> 越限时 `tracing::warn!` 记录**原值与被钳后的值**（与 `startup.rs` 的 IEC104 `p_set` 上游 clamp 同风格）。
 
 #### 13.5.2 与 S2 联锁的接法
 

@@ -374,20 +374,75 @@ impl AiIntegrator {
         *self.decision_sink.write().await = Some(sink);
     }
 
+    /// 下发分相 P/Q（**去抖 → 发送 → 审计**三步的唯一实现）。
+    ///
+    /// 正常路径与「数据超期归零」（B-3，2026-09-29）共用——避免两条路径的去抖/审计语义
+    /// 分叉。**去抖命中即跳过**（值不变不 send、不触发 `decision_sink`）；去抖比较与更新
+    /// 必须在**短锁块**内完成（`MutexGuard` 非 Send，不跨 await 持有，否则破坏
+    /// `run_fallback_strategies` 经 `tokio::spawn` 驱动的 Send 约束）。
+    async fn dispatch_phase_pq(&self, p: [f64; 3], q: [f64; 3]) -> Result<(), AiEngineError> {
+        let Some(client) = self.pcs_client() else {
+            tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
+            return Ok(());
+        };
+        // 审查 R1-B6 2026-09-09：TaiStorage evaluate 命中 60s 节流（返回缓存 cmd）时分相值
+        // 必与上拍相同——跳过重发，消除每 dispatch 拍对相同指令的 RS485 空耗与抖动窗口放大。
+        let is_same = {
+            let mut last_sent = self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner());
+            if *last_sent == Some((p, q)) {
+                true
+            } else {
+                *last_sent = Some((p, q));
+                false
+            }
+        };
+        if is_same {
+            tracing::debug!("分相指令与上拍相同（节流期），跳过重发");
+            return Ok(());
+        }
+        if let Err(e) = client.send_tai_command(p, q, "fallback").await {
+            // 遗留待办 A（2026-09-09）：核间断线 send 失败 → 清 last_sent_tai 缓存，
+            // 重连后目标值不变也会下一拍重发（否则缓存误导节流跳过，PCS 停等）。
+            *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            tracing::warn!("台区储能分相指令下发失败: {:?}", e);
+        } else {
+            tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
+            // 审查 R1-A3 2026-09-09：实际下发成功才落库（freshness 停发拍不 evaluate 不
+            // 触发——语义正确）；None=启动侧未注入落库闭包。
+            if let Some(sink) = self.decision_sink.read().await.as_ref() {
+                sink(p, q);
+            }
+        }
+        Ok(())
+    }
+
     /// 运行本地兜底策略（AI 失效时）：台区储能治理（分相 P/Q 经核间下发）
     async fn run_fallback_strategies(&self) -> Result<(), AiEngineError> {
-        // U-26 审查 P1-1: 数据新鲜度守卫——总表断连后遥测冻结，若继续用旧测量驱动控制会下发
-        // 陈旧指令（危险）；超过阈值未更新 → 告警并停发（返回 Ok，不 evaluate）。
+        // U-26 审查 P1-1 / B-3 裁定（2026-09-29）：数据新鲜度守卫——总表断连后遥测冻结，
+        // 若继续用旧测量驱动控制会下发陈旧指令（危险）。超阈值时的处置由「停发」改为
+        // **下发归零**：分相 P/Q 写在 PCS 保持寄存器（FC06 1006-1011），是设定值不是脉冲
+        // ——停发反而让 PCS「一直按最后一条指令跑」数小时。与 D-2（SOC 全缺 →
+        // refuse_missing_soc）同款处置，同一「驱动数据不可信」语义不得有两种相反处置。
         match *self.last_data_ts.read().await {
             None => {
                 tracing::debug!("无遥测数据，跳过兜底策略");
                 return Ok(());
             }
             Some(ts) if ts.elapsed() > Self::DATA_STALE_AFTER => {
-                tracing::warn!(
-                    "遥测数据超过 {}s 未更新（数据源可能断连），冻结数据不再驱动兜底控制（停发）",
-                    Self::DATA_STALE_AFTER.as_secs()
-                );
+                if let Some(tai) = &self.tai_storage {
+                    // 归零指令分相 P/Q 均为 Some（构造保证）；仍走 dispatch_phase_pq，
+                    // 使归零值写入 last_sent_tai——否则数据恢复后若真实目标恰等于归零前
+                    // 缓存，真实指令会被去抖跳过、PCS 停等。
+                    // 阈值**传下去**（而非在 tai_storage 里写死字面量）：告警文案与判据同源，
+                    // 改 `DATA_STALE_AFTER` 时文案自动跟随（评审 W-3）。
+                    let cmd = tai.refuse_stale_data(Self::DATA_STALE_AFTER);
+                    match (cmd.phase_p_set, cmd.phase_q_set) {
+                        (Some(p), Some(q)) => self.dispatch_phase_pq(p, q).await?,
+                        _ => tracing::debug!("归零指令未产出完整分相 P/Q，跳过下发"),
+                    }
+                } else {
+                    tracing::debug!("数据超期但未注入台区储能策略，无归零下发");
+                }
                 return Ok(());
             }
             Some(_) => {}
@@ -407,46 +462,7 @@ impl AiIntegrator {
         if let Some(tai) = &self.tai_storage {
             match tai.evaluate(&data).await {
                 Ok(cmd) => match (cmd.phase_p_set, cmd.phase_q_set) {
-                    (Some(p), Some(q)) => {
-                        if let Some(client) = self.pcs_client() {
-                            // 审查 R1-B6 2026-09-09：TaiStorage evaluate 命中 60s 节流（返回缓存
-                            // cmd）时分相值必与上拍相同——跳过重发，消除每 dispatch 拍对相同指令
-                            // 的 RS485 空耗与抖动窗口放大。值不变不 send、不触发 decision_sink。
-                            // 短锁块内完成比对+更新，guard 出块即释放——MutexGuard 非 Send，必须
-                            // 在块内结束（不跨 await 持有），否则破坏 run_fallback_strategies 经
-                            // tokio::spawn 驱动的 Send 约束。
-                            let is_same = {
-                                let mut last_sent =
-                                    self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner());
-                                if *last_sent == Some((p, q)) {
-                                    true
-                                } else {
-                                    *last_sent = Some((p, q));
-                                    false
-                                }
-                            };
-                            if is_same {
-                                tracing::debug!("分相指令与上拍相同（节流期），跳过重发");
-                                return Ok(());
-                            }
-                            if let Err(e) = client.send_tai_command(p, q, "fallback").await {
-                                // 遗留待办 A（2026-09-09）：核间断线 send 失败 → 清 last_sent_tai 缓存，
-                                // 重连后目标值不变也会下一拍重发（否则缓存误导节流跳过，PCS 停等）。
-                                *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) =
-                                    None;
-                                tracing::warn!("台区储能分相指令下发失败: {:?}", e);
-                            } else {
-                                tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
-                                // 审查 R1-A3 2026-09-09：实际下发成功才落库（freshness 停发拍不
-                                // evaluate 不触发——语义正确）；None=启动侧未注入落库闭包。
-                                if let Some(sink) = self.decision_sink.read().await.as_ref() {
-                                    sink(p, q);
-                                }
-                            }
-                        } else {
-                            tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
-                        }
-                    }
+                    (Some(p), Some(q)) => self.dispatch_phase_pq(p, q).await?,
                     _ => tracing::debug!("台区储能策略未产出完整分相 P/Q，跳过下发"),
                 },
                 Err(e) => tracing::warn!("TaiStorageStrategy 执行失败: {}", e),
@@ -828,6 +844,7 @@ pub struct ModeInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mupc_southd::port_runtime::MockBus;
 
     #[test]
     fn test_ai_integrator_creation() {
@@ -1191,8 +1208,15 @@ mod tests {
     /// 预置窗口按 `SouthPcsConfig::default()` 的 `regs` 为空 ⇒ 本 helper 显式给一块
     /// `count = 76` 的 `pcs_3zone`（与生产段同形），使快照五字段全部可得。
     async fn stub_pcs_with_soc(soc: Option<f64>) -> Arc<PcsHandle> {
+        stub_pcs_observable(soc).await.0
+    }
+
+    /// 可观测桩：同 `stub_pcs_with_soc` 构造，但额外返回 `MockBus`（读 `write_calls`
+    /// 断言下发到分相寄存器），且把 RUN_STATE(1013) 预置为 2（充电）—— 否则
+    /// `ensure_started` 的 M1 前置守卫读到 0（停机）⇒ `send_tai_command` 恒 `Err`，
+    /// 下发路径空转（B-3 用例需要真实下发成功）。
+    async fn stub_pcs_observable(soc: Option<f64>) -> (Arc<PcsHandle>, Arc<MockBus>) {
         use mupc_southd::config::{RegBlockConf, RegFunc, SouthPcsConfig};
-        use mupc_southd::port_runtime::MockBus;
 
         let mut cfg = SouthPcsConfig {
             enabled: true,
@@ -1218,16 +1242,33 @@ mod tests {
             Some(v) => mupc_southd::pcs::to_pcs_reg(v),
             None => 0xFFFF,
         };
+        // 运行态 2（充电）：必须非 0，否则 send_tai_command 的启动守卫拒发。
+        words[(1013 - 1000) as usize] = mupc_southd::pcs::to_pcs_reg(2.0);
         let bus = Arc::new(MockBus::new());
         bus.put_input(1, 1000, words);
-        let h = PcsHandle::new(cfg, bus, Arc::new(NullSink));
+        // `ensure_started` 的 S-4 前置校验按**精确地址** FC04 读 1013 ⇒ 需单独预置该键，
+        // 否则读回 Err 致整条下发路径失败（本 helper 与台账用例的唯一差异）。
+        bus.put_input(1, 1013, vec![mupc_southd::pcs::to_pcs_reg(2.0)]);
+        let h = PcsHandle::new(cfg, bus.clone(), Arc::new(NullSink));
         h.tick_once().await; // 采一拍 ⇒ 快照 valid、ts 有效
         assert_eq!(
             h.latest_soc().await.map(|(v, _)| v),
             soc,
             "前提：stub 快照 SOC 须与用例期望一致（否则本组断言空转）"
         );
-        h
+        (h, bus)
+    }
+
+    /// B-3 观测口：分相寄存器（P 1006-1008 / Q 1009-1011）的写序列，按发生顺序。
+    /// 每次成功下发写 6 个寄存器 ⇒ `len()/6` = 下发次数。
+    fn phase_writes(bus: &MockBus) -> Vec<(u16, u16)> {
+        bus.write_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&(_, a, _)| (1006..=1011).contains(&a))
+            .map(|&(_, a, v)| (a, v))
+            .collect()
     }
 
     #[tokio::test]
@@ -1375,6 +1416,155 @@ mod tests {
             1,
             "set_latest_data 应将遥测注入校验器"
         );
+    }
+
+    // ── B-3（2026-09-29 裁定）：数据超期 ⇒ **下发归零**（不再是「停发」）──
+    //
+    // 分相 P/Q 写在 PCS 保持寄存器（FC06 1006-1011），是设定值不是脉冲：停发后 PCS 会
+    // 「一直按最后一条指令跑」数小时。故与 D-2（SOC 全缺）同款处置。
+
+    /// B-3 用例 helper：带**分相测量**的总表包。`data_to_meter` 需 phase 段，否则走 failsafe
+    /// 恒零输出、无法观测「真实指令」。三相平衡返送 + 12:00 触发 S1 充电（输出非零）。
+    fn b3_pkg(ts: u64, p_i: [f64; 3], soc: f64) -> DataPackage {
+        use mupc_data_processing::telemetry::{
+            BatteryData, DeviceStatus, ElectricalData, InverterStatus, PhaseElectricalData,
+        };
+        DataPackage {
+            timestamp: ts,
+            electrical: ElectricalData {
+                active_power: Some(p_i.iter().sum()),
+                phase: Some(PhaseElectricalData {
+                    voltage: [Some(220.0); 3],
+                    current: [Some(p_i[0].abs()), Some(p_i[1].abs()), Some(p_i[2].abs())],
+                    active_power: [Some(p_i[0]), Some(p_i[1]), Some(p_i[2])],
+                    reactive_power: [Some(0.0); 3],
+                    cos_phi: [Some(0.99); 3],
+                }),
+                ..Default::default()
+            },
+            device_status: DeviceStatus {
+                inverter_status: InverterStatus::Running,
+                pv_power: None,
+                load_power: None,
+                ev_charger_power: None,
+            },
+            battery: BatteryData {
+                soc: Some(soc),
+                soh: None,
+                temperature: None,
+            },
+        }
+    }
+
+    /// B-3 用例装配：可观测 PCS（SOC fresh 50）+ 台区储能策略，并把 `last_data_ts` 直接
+    /// 回拨成「超期」（超期分支在读 `latest_data` 之前即返回，故无需喂数据）。
+    async fn b3_integrator_stale() -> (AiIntegrator, Arc<MockBus>) {
+        let mut i = AiIntegrator::new();
+        let (pcs, bus) = stub_pcs_observable(Some(50.0)).await;
+        i.set_pcs_client(pcs);
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+        *i.last_data_ts.write().await =
+            Some(std::time::Instant::now() - AiIntegrator::DATA_STALE_AFTER * 2);
+        (i, bus)
+    }
+
+    /// **B-3（1/3）**：首次进入「数据超期」降级 ⇒ **恰好下发一次归零**（分相 6 寄存器全 0）。
+    ///
+    /// 改什么会让本条变红：① 把超期分支改回 `return Ok(())`（旧的「停发」语义）⇒ 0 次下发；
+    /// ② 归零值未取 `zero_command`（如误用缓存/旧指令）⇒ 写值非 0；
+    /// ③ stub 的 RUN_STATE 未置非零 ⇒ `ensure_started` M1 守卫拒发、下发恒 Err ⇒ 0 次。
+    #[tokio::test]
+    async fn b3_stale_data_dispatches_zero_once() {
+        let (i, bus) = b3_integrator_stale().await;
+        i.run_fallback_strategies().await.unwrap();
+
+        let w = phase_writes(&bus);
+        assert_eq!(w.len(), 6, "归零须写满分相 P/Q 6 个寄存器，实得 {w:?}");
+        assert!(
+            w.iter().all(|&(_, v)| v == 0),
+            "归零值须全 0（旧「停发」= 0 次写；错值 = 非 0）: {w:?}"
+        );
+        let tai = i.tai_storage.as_ref().expect("已注入台区储能策略");
+        assert_eq!(tai.stale_warn_count(), 1, "首发须告警一次");
+    }
+
+    /// **B-3（2/3）**：持续超期 ⇒ **不重复下发**（连喂 3 拍仍只发 1 次）、告警也只发 1 次
+    /// （30s 节流）—— 防写风暴 / 告警风暴。
+    ///
+    /// 改什么会让本条变红：① 归零路径绕过 [`AiIntegrator::dispatch_phase_pq`]（直接调
+    /// `client.send_tai_command`）⇒ 归零值未写入 `last_sent_tai`，其后每拍都被判「值变了」
+    /// 重发 ⇒ 3 次；② 告警未按 `STALE_WARN_INTERVAL` 节流 ⇒ 告警计数 3。
+    #[tokio::test]
+    async fn b3_stale_data_repeated_ticks_dispatch_once() {
+        let (i, bus) = b3_integrator_stale().await;
+        for _ in 0..3 {
+            i.run_fallback_strategies().await.unwrap();
+        }
+        let w = phase_writes(&bus);
+        assert_eq!(
+            w.len(),
+            6,
+            "持续超期只应下发一次归零（实得 {} 次）",
+            w.len() / 6
+        );
+        let tai = i.tai_storage.as_ref().expect("已注入台区储能策略");
+        assert_eq!(
+            tai.stale_warn_count(),
+            1,
+            "超期告警须按 30s 节流（每拍刷屏 = 红）"
+        );
+    }
+
+    /// **B-3（3/3）**：数据恢复后 ⇒ 真实 P/Q **能重新拉起**（不被去抖跳过）。
+    ///
+    /// 构造：① fresh 下发真实指令 V（非零）→ ② 超期归零 → ③ 数据恢复且**目标值与 ① 完全
+    /// 相同**再下发。①/③ 用同一份分相测量、时间戳相差整 1 天（`t_now % 86400` 相同 ⇒ 控制器
+    /// 输出逐位相同；且跨过 60s 控制周期节流、避开缓存指令）。
+    ///
+    /// 改什么会让本条变红：归零路径若**不**把归零值写入 `last_sent_tai`（例如绕过
+    /// `dispatch_phase_pq` 直接 `client.send_tai_command(0,0,..)`），则缓存仍留着 ① 的 V；
+    /// ③ 的真实指令 V 因「与缓存相同」被去抖跳过 ⇒ 只有 2 次下发（12 个寄存器）。
+    #[tokio::test]
+    async fn b3_recovery_resends_real_command_after_zeroing() {
+        let mut i = AiIntegrator::new();
+        let (pcs, bus) = stub_pcs_observable(Some(50.0)).await;
+        i.set_pcs_client(pcs);
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+
+        // ① fresh（12:00）⇒ 真实指令 V（S1 充电，非零）
+        i.set_latest_data(b3_pkg(3600 * 12, [-10.0, -10.0, -10.0], 50.0))
+            .await;
+        i.run_fallback_strategies().await.unwrap();
+        let v1 = phase_writes(&bus);
+        assert_eq!(v1.len(), 6, "fresh 应下发一次真实指令");
+        assert!(
+            v1.iter().any(|&(_, v)| v != 0),
+            "前提：真实指令须非零（否则 ③ 与全零无法区分，用例空转）: {v1:?}"
+        );
+
+        // ② 超期 ⇒ 归零
+        *i.last_data_ts.write().await =
+            Some(std::time::Instant::now() - AiIntegrator::DATA_STALE_AFTER * 2);
+        i.run_fallback_strategies().await.unwrap();
+        let v2 = phase_writes(&bus);
+        assert_eq!(v2.len(), 12, "超期应再下发一次归零");
+        assert!(v2[6..].iter().all(|&(_, v)| v == 0), "超期下发值须全 0");
+
+        // ③ 恢复：同一测量、时间戳 +1 天（secs 相同 ⇒ 输出与 ① 逐位一致）
+        i.set_latest_data(b3_pkg(3600 * 12 + 86400, [-10.0, -10.0, -10.0], 50.0))
+            .await;
+        i.run_fallback_strategies().await.unwrap();
+        let v3 = phase_writes(&bus);
+        assert_eq!(
+            v3.len(),
+            18,
+            "恢复后真实指令须重新下发（被去抖跳过则停在 12）"
+        );
+        assert_eq!(&v3[12..], &v1[..], "恢复后的真实指令应与 ① 相同且确实发出");
     }
 
     impl AiIntegrator {
