@@ -434,6 +434,11 @@ pub struct TaiStorageStrategy {
     soc_missing_warned: Mutex<Option<std::time::Instant>>,
     /// D-2：SOC 全缺告警**实际发射**次数（判别力用例观测「告警一次」；无生产消费者）
     soc_missing_warn_count: std::sync::atomic::AtomicU64,
+    /// B-3：**数据超期**告警节流时刻（每 30s 一次，防每拍刷屏）。与 `soc_missing_warned`
+    /// **各自独立**：两条降级路径的告警不得互相吞掉（同一时刻可能只走其中一条）。
+    stale_warned: Mutex<Option<std::time::Instant>>,
+    /// B-3：数据超期告警**实际发射**次数（判别力用例观测；无生产消费者）
+    stale_warn_count: std::sync::atomic::AtomicU64,
 }
 
 impl TaiStorageStrategy {
@@ -441,6 +446,8 @@ impl TaiStorageStrategy {
     const CMD_ID: u16 = 4;
     /// D-2：SOC 全缺告警节流间隔（防每 dispatch 拍刷屏，与 SOC 双源告警同量级）
     const SOC_MISSING_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    /// B-3：数据超期告警节流间隔（与 SOC 全缺告警同值、但**独立**计时）
+    const STALE_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// 「不下发设定」指令：分相 P/Q 全 0（SOC 全缺时下发，等效取消储能出力设定）。
     fn zero_command() -> ControlCommand {
@@ -465,6 +472,8 @@ impl TaiStorageStrategy {
             last_cmd: Arc::new(Mutex::new(last_cmd)),
             soc_missing_warned: Mutex::new(None),
             soc_missing_warn_count: std::sync::atomic::AtomicU64::new(0),
+            stale_warned: Mutex::new(None),
+            stale_warn_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -502,6 +511,54 @@ impl TaiStorageStrategy {
             tracing::warn!(
                 "SOC 全缺（无 fresh 源且无可用冻结值）：台区储能拒绝下发设定（分相 P/Q=0）——\
                  请检查 BMS 站与核间 SOC 通路（不得以假值驱动充放电保护）"
+            );
+        }
+        cmd
+    }
+
+    /// B-3 裁定（2026-09-29）：**遥测数据超期**（总表 > 5s 未更新）⇒ 与
+    /// [`Self::refuse_missing_soc`] **同款处置**（分相 P/Q 全 0 + 节流告警）。
+    ///
+    /// 为什么必须归零而非停发：分相 P/Q 写在 PCS **保持寄存器**（FC06 1006-1011），是
+    /// **设定值不是脉冲**——停发不会令 PCS 回零，而是「一直按最后一条指令跑」；数据源断连
+    /// 时这条陈旧设定可能维持数小时。故显式下发归零，与 D-2（SOC 全缺）口径一致：两者
+    /// 同属「驱动数据不可信」，同一语义不得有两种相反处置。
+    ///
+    /// 内部状态清零与 `refuse_missing_soc` 完全一致（共模/差模/Q 积分与滤波窗）：无可用
+    /// 测量时不得保留力指令，恢复后从 0 起算。本函数**不**更新 `last_control_ts`
+    /// —— 保护性拒绝**不得消耗控制周期**，数据恢复后立即接管。
+    pub fn refuse_stale_data(&self) -> ControlCommand {
+        {
+            // 短锁块：先清零内部状态、出块即释放（MutexGuard 非 Send，不跨 await 持有）。
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.p_st = 0.0;
+            state.d_p = [0.0; 3];
+            state.q_pcs = [0.0; 3];
+            state.meter_buf.clear();
+            // 注：**不**动 state.last_control_ts（保护性拒绝不消耗控制周期）。
+        }
+        let cmd = Self::zero_command();
+        *self.last_cmd.lock().unwrap_or_else(|e| e.into_inner()) = cmd.clone();
+
+        let now = std::time::Instant::now();
+        let due = {
+            let mut w = self.stale_warned.lock().unwrap_or_else(|e| e.into_inner());
+            let due = w.map_or(true, |t| {
+                now.saturating_duration_since(t) > Self::STALE_WARN_INTERVAL
+            });
+            if due {
+                *w = Some(now);
+            }
+            due
+        };
+        if due {
+            self.stale_warn_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // 阈值 5s 与 `AiIntegrator::DATA_STALE_AFTER` 同源（该常量为私有，此处以文案
+            // 明示；改动阈值时须同步本行文案）。
+            tracing::warn!(
+                "遥测数据超过 5s 未更新（数据源可能断连）：台区储能已下发归零（分相 P/Q=0）\
+                 ——请检查总表站与采集链路"
             );
         }
         cmd
@@ -570,6 +627,13 @@ impl TaiStorageStrategy {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *w = Some(std::time::Instant::now() - d);
+    }
+
+    /// 测试观测口（B-3）：数据超期告警的**实际发射**次数。
+    #[cfg(test)]
+    pub(crate) fn stale_warn_count(&self) -> u64 {
+        self.stale_warn_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 测试观测口（D-10）：在持有内部锁时 panic，令两把锁中毒（1 Hz 决策路径不得因中毒 panic）。
