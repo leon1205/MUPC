@@ -96,6 +96,10 @@ AiCommandValidator (可插拔 AI 模型)
 > **分发路径：** p_ref + k_droop 由 AI 引擎输出并经南向 `PcsHandle::send_dual_param` 下发至 PCS；台区储能治理策略（AI 失效兜底）经 `PcsHandle::send_tai_command` 下发分相 P/Q 至 PCS。
 >
 > 〔注（2026-09-27）：原「经核间通信 / 核间 V3 帧下发至实时控制模块」为 PCS 迁出前的表述。PCS 通信与控制已于 2026-09-26 由 `mupc-intercore` 整体迁入 `mupc-southd::pcs::PcsHandle`（02 号设计 §13 / ADR-014·015·016），生产下发路径 = 南向 `PcsHandle`（RS485 / Modbus RTU）；「V3 帧」现仅存于 `sim-bridge` TCP 仿真通道。〕
+>
+> ⚠️ **本行两条通道会互相干扰（G9，2026-09-29 补）**：`send_dual_param` 与 `send_tai_command` 的**第一条动作都写模式字 `1000`，目标值相反**（恒功率 `0` vs 分相 `2`）⇒ **IEC 104 `p_set` 会切走分相模式**，而策略的下一拍会**切回**；且 `send_dual_param` 把恒功率无功 `1002` **硬编码 0.0** ⇒ 每次 `p_set` 都清无功。
+> **裁定**：符合意图（`p_set` 即"接管为恒功率"），**不改代码**；**完整时序、共享缓存与 `stop()` 复位缓存**见 **02 号设计 §13.5.1 的 G9 注**（该处为权威落点）。
+> 排查提示：现场若见"模式被切 / 无功归零"，先查是否有 `p_set` 与台区储能策略交叉下发。
 
 ### 1.5 策略 ID 分配
 

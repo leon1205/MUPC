@@ -3351,6 +3351,31 @@ struct PcsSnapshot {
 
 `PcsHandle` 是 PCS 4 区 **500 的唯一写方**；S2 联锁经 `InterlockPort` 调用它 ⇒ **不存在两个写方**。**latch 权威源仍为 storage/DB**（C-1 双 latch 结构**不变**）；`PcsHandle` 只持"运行期兜底 latch"，与现状 `ModbusRtuTransport.stopped_latched` **同义**。
 
+> ⚠️ **两条下发通道共用同一个模式字 `1000`，且无仲裁（G9，2026-09-29 补记）**
+>
+> 上表前两行的**第一条动作都写 `REG_MODE = 1000`**，但**目标值相反**：
+> `send_dual_param` → `ensure_mode(MODE_CONST_POWER = 0)`（`pcs/mod.rs:255`）；
+> `send_tai_command` → `ensure_mode(MODE_PHASE_SPLIT = 2)`（`pcs/mod.rs:289`）。
+> 而 `ensure_mode` 带**共享缓存** `inner.mode`（`mod.rs:332-339`，命中即短路 ⇒ 跳过写）。
+>
+> **两通道交叉调用时 `1000` 会来回翻**：
+>
+> | 时刻 | 调用 | 效果 |
+> |---|---|---|
+> | T0 | 台区储能策略 `send_tai_command` | 写 `1000 = 2`（分相） |
+> | T1 | IEC 104 `p_set` → `send_dual_param` | 写 `1000 = 0`（**切走分相**）+ `1001 = p_ref` + **`1002 = 0`（清无功，`:259` 硬编码）** |
+> | T2 | 策略下一拍 | 写 `1000 = 2`（切回分相） |
+> | T3 | 调度再下发 | 写 `1000 = 0` … |
+>
+> **三条连带事实**：
+> ① **无优先级 / 无互斥 / 无仲裁** —— 两通道各写同一共享状态字，最终行为取决于调用时序；
+> ② `send_dual_param` 把 `REG_CONST_Q_SET` **硬编码 0.0**（`pcs/mod.rs:259`）⇒ 每次人工 `p_set` 都**清无功**；
+> ③ `stop()` 成功时把缓存置 `0xFF`（`mod.rs:196`）⇒ 停机后下一拍**必然重写**模式字。
+>
+> **裁定（2026-09-29）**：**符合意图**（人工 `p_set` 即"接管为恒功率"）⇒ **不改代码**；本注即"副作用必须成文"的落点。
+> **现场排查提示**：若见"模式被切走"或"无功莫名归零"，先查是否有 `p_set` 下发与台区储能策略**交叉**。
+> 相关：审查报告 `reports/数据流与策略下发链路完整性审查-2026-09-28.md` §四 **G9**。
+
 #### 13.5.2 与 S2 联锁的接法
 
 `core-bin` 的 `InterlockPort`（`interlock.rs:333-343`，4 方法）**签名与语义零改动**，仅把实现方由 `Arc<IntercoreClient>` 换为 `Arc<PcsHandle>`（`impl InterlockPort for Arc<PcsHandle>`，与既有 14 行适配器同构）。⇒ **约 1300 行的联锁状态机本体零改动**。
