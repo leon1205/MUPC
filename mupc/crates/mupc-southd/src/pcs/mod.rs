@@ -247,6 +247,13 @@ impl PcsHandle {
 
 impl PcsHandle {
     /// 下发 AI 双参数（恒功率）：写 `REG_MODE=0` → `ensure_started` → 写 1001/1002。
+    ///
+    /// **输入边界（B-1，2026-09-28 链路审查 G2）**：`p_ref` 在**编码前**钳到恒功率寄存器
+    /// 的设备量程 ±[`regs::CONST_POWER_LIMIT_KW`]（与分相通道 [`Self::send_tai_command`] 的
+    /// 逐相 `clamp_phase` **对称**）。理由：本类型是**安全链执行端**——上游 IEC104 路径虽已
+    /// 按额定 `p_cap` 钳过（`startup.rs:270`），但那是"靠调用方自律"，新增调用方（如 AI
+    /// 恢复）即失守。钳位只影响**越限**入参；`|p_ref| ≤ 100`（含全部现网合法值 ≤ 60）时
+    /// 线上字节**一字不变**。
     pub async fn send_dual_param(&self, cmd: &PcsDualParam) -> Result<(), PcsError> {
         // C-1 下行中止：latch 期间**任何总线 IO 前**拒绝。检查置于总线锁**之前** ——
         // latch 期间连锁都不取（不必先排在在途写序列之后），停机路径得以更快拿到锁。
@@ -254,7 +261,18 @@ impl PcsHandle {
         let _g = self.inner.lock.lock().await;
         self.ensure_mode(regs::MODE_CONST_POWER).await?;
         self.ensure_started().await?;
-        self.write_reg(regs::REG_CONST_P_SET, regs::to_pcs_reg(cmd.p_ref))
+        let p_ref = regs::clamp_const_power(cmd.p_ref);
+        if (p_ref - cmd.p_ref).abs() > 1e-6 {
+            // 与 `startup.rs:272` 的上游 clamp 告警同款：打印**原值与钳后值**（否则
+            // "设定值是 150 还是 100"只能靠回读寄存器猜）。
+            tracing::warn!(
+                "PCS 恒功率 p_ref 超出设备量程 ±{}kW，clamp 至 {}（原 {}）",
+                regs::CONST_POWER_LIMIT_KW,
+                p_ref,
+                cmd.p_ref
+            );
+        }
+        self.write_reg(regs::REG_CONST_P_SET, regs::to_pcs_reg(p_ref))
             .await?;
         self.write_reg(regs::REG_CONST_Q_SET, regs::to_pcs_reg(0.0))
             .await?;
@@ -754,6 +772,57 @@ mod control_tests {
                 (1, regs::REG_CONST_Q_SET, to_pcs_reg(0.0)),
             ],
             "恒功率写序与线上字（全部同源编码 to_pcs_reg，含字节互换）"
+        );
+    }
+
+    /// B-1（2026-09-28 链路审查 **G2**）：`send_dual_param` 的 `p_ref` **输入边界**必须与
+    /// 分相通道的 `clamp_phase` 对称 —— 越限值在**编码前**钳到恒功率寄存器量程 ±100。
+    ///
+    /// **判别力（改坏即红）**：删掉 `send_dual_param` 里的 `clamp_const_power` 调用 ⇒ 线上
+    /// 字变成 `to_pcs_reg(±150)`（150 ⇒ 0x9600，与钳后的 0x6400 不同）⇒ 本用例必红。
+    /// 判据值一律**同源编码** `to_pcs_reg`（含高/低 8 位互换），**不是字面量**。
+    ///
+    /// 两侧都判：只测正越限会漏掉"符号侧接反 / 只钳上限"的实现。
+    #[tokio::test]
+    async fn send_dual_param_clamps_p_ref_to_device_range() {
+        // ── 正越限：150 > 100 ⇒ 上线字须为 to_pcs_reg(100.0) ──
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]); // 前置：S-4 守卫需非停机态
+        let h = handle(bus.clone());
+        h.send_dual_param(&PcsDualParam::new(150.0, 0.0, true, "fallback"))
+            .await
+            .unwrap();
+        assert_eq!(
+            bus.write_calls.lock().unwrap().clone(),
+            vec![
+                (1, regs::REG_MODE, to_pcs_reg(regs::MODE_CONST_POWER as f64)),
+                (1, regs::REG_START_STOP, to_pcs_reg(1.0)),
+                // 150 越量程 ⇒ 钳到上限 100（若拿掉 clamp，此处会是 to_pcs_reg(150.0)）
+                (1, regs::REG_CONST_P_SET, to_pcs_reg(100.0)),
+                (1, regs::REG_CONST_Q_SET, to_pcs_reg(0.0)),
+            ],
+            "越限 p_ref=150 须钳到量程上限 100 后落线上（同源编码 to_pcs_reg）"
+        );
+
+        // ── 负越限：-150 ⇒ 上线字须为 to_pcs_reg(-100.0) ──
+        let bus2 = Arc::new(MockBus::new());
+        bus2.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let h2 = handle(bus2.clone());
+        h2.send_dual_param(&PcsDualParam::new(-150.0, 0.0, true, "fallback"))
+            .await
+            .unwrap();
+        let p_write = bus2
+            .write_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|&&(_, a, _)| a == regs::REG_CONST_P_SET)
+            .copied()
+            .expect("必须写 1001（否则本用例判据前提不成立）");
+        assert_eq!(
+            p_write,
+            (1, regs::REG_CONST_P_SET, to_pcs_reg(-100.0)),
+            "越限 p_ref=-150 须钳到量程下限 -100（只钳上限的实现会在此红）"
         );
     }
 
