@@ -11,6 +11,7 @@ use mupc_ai_engine::{
 };
 use mupc_data_processing::telemetry::DataPackage;
 use mupc_southd::pcs::{PcsDualParam, PcsHandle};
+use mupc_southd::scheduler::WriteToken;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -452,7 +453,10 @@ impl AiIntegrator {
             tracing::debug!("分相指令与上拍相同（节流期），跳过重发");
             return Ok(());
         }
-        if let Err(e) = client.send_tai_command(p, q, "fallback").await {
+        if let Err(e) = client
+            .send_tai_command(WriteToken::Strategy, p, q, "fallback")
+            .await
+        {
             // 遗留待办 A（2026-09-09）：核间断线 send 失败 → 清 last_sent_tai 缓存，
             // 重连后目标值不变也会下一拍重发（否则缓存误导节流跳过，PCS 停等）。
             *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -783,7 +787,7 @@ impl AiIntegrator {
                 &strategy_mode,
             );
 
-            match client.send_dual_param(&cmd).await {
+            match client.send_dual_param(WriteToken::Ai, &cmd).await {
                 Ok(_) => {
                     tracing::debug!(
                         "Sent dual-param to realtime control: p_ref={}, k_droop={}",
@@ -824,7 +828,7 @@ impl AiIntegrator {
         // 发送双参数到实时控制模块
         if let Some(client) = self.pcs_client() {
             let cmd = PcsDualParam::new(action.p_ref, action.k_droop, true, "fallback");
-            match client.send_dual_param(&cmd).await {
+            match client.send_dual_param(WriteToken::Ai, &cmd).await {
                 Ok(_) => {
                     tracing::debug!(
                         "Sent emergency dual-param: p_ref={}, k_droop={}",
@@ -1280,6 +1284,12 @@ mod tests {
         ) {
         }
         async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_pcs_write_audit(
+            &self,
+            _token: WriteToken,
+            _writes: &[mupc_southd::scheduler::PcsWriteRecord],
+        ) {
+        }
     }
 
     /// 测试用 PCS 句柄 = **真 `PcsHandle` + `MockBus`**（Task 10：不再有 transport 桩）。
@@ -1695,7 +1705,7 @@ mod tests {
 
         // 前提自证（否则"节流生效"的断言会空转）：本桩**真的**发不出去。
         assert!(
-            h.send_tai_command([1.0, 0.0, 0.0], [0.0; 3], "probe")
+            h.send_tai_command(WriteToken::Strategy, [1.0, 0.0, 0.0], [0.0; 3], "probe")
                 .await
                 .is_err(),
             "前提：本桩的下发必须恒 Err（PCS 离线语义）"

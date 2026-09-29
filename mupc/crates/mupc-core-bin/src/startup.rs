@@ -282,7 +282,9 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
                             true,
                             "intelligent",
                         );
-                        pcs.send_dual_param(&dual).await.map_err(|e| {
+                        pcs.send_dual_param(mupc_southd::scheduler::WriteToken::Iec104, &dual)
+                            .await
+                            .map_err(|e| {
                             MupcError::new(
                                 ErrorCode::SendFailed,
                                 format!("PCS 下发失败: {e}"),
@@ -1029,6 +1031,49 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
         tracing::debug!(station = %station_id, soc, "BMS 站 SOC 注入 AiIntegrator");
         self.ai_integrator.set_battery_soc(soc).await;
     }
+
+    /// **PCS 写审计**（02 设计 §13.5.3 / T5）：转 `record_event`
+    /// ⇒ **同时**写 `storage.events` **并**推 `AlertFeed`。
+    ///
+    /// 文案：调用方 token + 逐寄存器 `(reg, value, readback)`；回读缺失即"未确认"。
+    /// level：全部已确认 ⇒ `info`；有未确认 ⇒ `warning`（§13.5.3）。
+    async fn on_pcs_write_audit(
+        &self,
+        token: mupc_southd::scheduler::WriteToken,
+        writes: &[mupc_southd::scheduler::PcsWriteRecord],
+    ) {
+        let (message, level) = pcs_audit_event(token, writes);
+        self.record_event("pcs_write_audit", "pcs", &message, level)
+            .await;
+    }
+}
+
+/// PCS 写审计的**事件文案与级别**（**纯函数**，抽出以便单测）。
+///
+/// 为什么要抽出来：内联在 sink 方法里时，判它要造出完整的 storage/DB 装配（`SouthSink`
+/// 需要 `Arc<dyn EventRepository>` + `AlertFeed` + IEC104 服务器）——而**级别判错是真实
+/// 失效面**：`level` 决定这条写审计会不会把运维叫醒。（体例同 `tai_storage.rs` 的
+/// `stale_warn_message`，`b2fb887` 先例。）
+///
+/// **级别规则（§13.5.3）**：全部记录已确认 ⇒ `info`；**任一条**未确认 ⇒ `warning`。
+pub(crate) fn pcs_audit_event(
+    token: mupc_southd::scheduler::WriteToken,
+    writes: &[mupc_southd::scheduler::PcsWriteRecord],
+) -> (String, &'static str) {
+    let all_confirmed = writes.iter().all(|w| w.readback.is_some());
+    let level = if all_confirmed { "info" } else { "warning" };
+    let detail = writes
+        .iter()
+        .map(|w| match w.readback {
+            Some(rb) => format!("{:#06x}={:#06x}(回读{:#06x})", w.reg, w.value, rb),
+            None => format!("{:#06x}={:#06x}(未确认)", w.reg, w.value),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (
+        format!("PCS 写审计 调用方={} {}", token.as_str(), detail),
+        level,
+    )
 }
 
 /// 按依赖顺序初始化所有子系统
@@ -3691,6 +3736,12 @@ plugins: {}
             ) {
             }
             async fn on_battery_soc(&self, _station_id: &str, _soc: f64) {}
+            async fn on_pcs_write_audit(
+                &self,
+                _token: mupc_southd::scheduler::WriteToken,
+                _writes: &[mupc_southd::scheduler::PcsWriteRecord],
+            ) {
+            }
         }
 
         // 站序刻意让**消防不是首站**（`bms` 在下标 0）
@@ -4042,6 +4093,63 @@ stations:
         assert!(
             production.contains("let dev_id: Option<String> = None;"),
             "dev 须取显式命名的变量（便于『未提供』在源码里可查）"
+        );
+    }
+
+    /// **T5 判据②（level 侧）**：写审计事件的**文案与级别**（02 设计 §13.5.3）。
+    ///
+    /// 级别规则：全部记录已确认 ⇒ `info`；**任一条**未确认 ⇒ `warning`。
+    ///
+    /// **改什么会让本条变红**：① 级别恒 `info`（有未确认也不升）⇒ 第二条断言红；
+    /// ② 级别恒 `warning` ⇒ 第一条断言红；③ 文案漏 token / 漏"未确认"字样 ⇒ 文案断言红；
+    /// ④ 回读值不打印或打印成十进制 ⇒ 文案断言红。
+    #[test]
+    fn t5_pcs_audit_event_message_and_level() {
+        use mupc_southd::scheduler::{PcsWriteRecord, WriteToken};
+
+        // 全部已确认 ⇒ info
+        let ok = vec![
+            PcsWriteRecord {
+                reg: 0x03EE,
+                value: 0x0A00,
+                readback: Some(0x0A00),
+            },
+            PcsWriteRecord {
+                reg: 0x03ED,
+                value: 0x0000,
+                readback: Some(0x0000),
+            },
+        ];
+        let (msg, level) = pcs_audit_event(WriteToken::Iec104, &ok);
+        assert_eq!(level, "info", "全部已确认须为 info（恒 warning 即红）");
+        assert!(msg.contains("调用方=iec104"), "文案须含调用方 token: {msg}");
+        assert!(
+            msg.contains("0x03ee=0x0a00(回读0x0a00)"),
+            "须打印 (reg, value, 回读值) 三者: {msg}"
+        );
+
+        // 任一条未确认 ⇒ warning（即便其余都已确认）
+        let mixed = vec![
+            PcsWriteRecord {
+                reg: 0x03EE,
+                value: 0x0A00,
+                readback: Some(0x0A00),
+            },
+            PcsWriteRecord {
+                reg: 0x03EA,
+                value: 0x0000,
+                readback: None,
+            },
+        ];
+        let (msg2, level2) = pcs_audit_event(WriteToken::Interlock, &mixed);
+        assert_eq!(
+            level2, "warning",
+            "有任一条未确认即须升为 warning（恒 info 即红）"
+        );
+        assert!(msg2.contains("调用方=interlock"), "{msg2}");
+        assert!(
+            msg2.contains("0x03ea=0x0000(未确认)"),
+            "未确认须显式标注而非留空: {msg2}"
         );
     }
 }

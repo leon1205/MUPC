@@ -1831,6 +1831,12 @@ mod tests {
         ) {
         }
         async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_pcs_write_audit(
+            &self,
+            _token: mupc_southd::scheduler::WriteToken,
+            _writes: &[mupc_southd::scheduler::PcsWriteRecord],
+        ) {
+        }
     }
 
     /// 测试用 PCS 句柄 = **真 `PcsHandle` + `MockBus`**（Task 10：不再有 transport 桩）。

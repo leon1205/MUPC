@@ -28,7 +28,7 @@ use mupc_southd::pcs::regs::{from_pcs_reg, to_pcs_reg, REG_CONST_P_SET, REG_SOC,
 use mupc_southd::pcs::sim::{PcsSimState, PcsSlaveService, REG_ALARM_BASE};
 use mupc_southd::pcs::{PcsDualParam, PcsHandle};
 use mupc_southd::port_runtime::{BusError, StationBus};
-use mupc_southd::scheduler::StationSink;
+use mupc_southd::scheduler::{PcsWriteRecord, StationSink, WriteToken};
 use rs485_plugin::{handlers::ModbusHandler, Config, CrcMode, Parity, Rs485Device};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -182,7 +182,7 @@ impl StationBus for SeamBus {
                 reason: e.to_string(),
             })
     }
-    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<u16, BusError> {
         // 探测器**盖写侧**：E6 的并发是 `send_dual_param`（写）与 `tick_once`（读）交叉
         // ⇒ 只有读侧盖住就抓不到"写事务期间采集插进来"。让步理由同 `read_input`。
         let _probe = OverlapProbe::enter(&self.busy);
@@ -205,12 +205,15 @@ impl StationSink for NullSink {
     async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
     async fn on_station_telemetry(&self, _id: &str, _role: Role, _pts: Vec<(String, f64, bool)>) {}
     async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+    async fn on_pcs_write_audit(&self, _token: WriteToken, _writes: &[PcsWriteRecord]) {}
 }
 
 /// 记录遥测批次的 sink（E5 用：证明告警字**被采集读到**而不只被裸读看到）。
 #[derive(Default)]
 struct RecSink {
     telemetry: std::sync::Mutex<Vec<Vec<(String, f64, bool)>>>,
+    /// PCS 写审计事件（每条 = 调用方 token + 该次写序列）
+    audits: std::sync::Mutex<Vec<(WriteToken, Vec<PcsWriteRecord>)>>,
 }
 #[async_trait]
 impl StationSink for RecSink {
@@ -219,6 +222,16 @@ impl StationSink for RecSink {
         self.telemetry.lock().unwrap().push(pts);
     }
     async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+    async fn on_pcs_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]) {
+        self.audits.lock().unwrap().push((token, writes.to_vec()));
+    }
+}
+
+impl RecSink {
+    /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
+    fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
+        self.audits.lock().unwrap().clone()
+    }
 }
 
 /// 与 `tests/fixtures/south_pcs_s3b2.yaml` 的 `pcs_3zone` 同构（addr 1000 / count 76），
@@ -290,7 +303,10 @@ async fn e3_holding_write_readback_signed() {
     let h = PcsHandle::new(pcs_cfg(), bus.clone(), Arc::new(NullSink));
     write_run(&bus).await; // 前置：S-4 守卫要求先处于非停机态
 
-    h.send_dual_param(&PcsDualParam::new(-12.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(-12.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("下发应成功");
 
@@ -334,7 +350,10 @@ async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
     write_run(&bus).await; // 前置：S-4 守卫要求先处于非停机态
 
     // ── ① 越限 +150 ⇒ 从站镜像与回读线值都须是钳后 100 ──
-    h.send_dual_param(&PcsDualParam::new(150.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(150.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("下发应成功");
     {
@@ -357,7 +376,10 @@ async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
     );
 
     // ── ② 未越限 60（现网额定档位）⇒ 不得被分相 ±25 量程误钳 ──
-    h.send_dual_param(&PcsDualParam::new(60.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(60.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("下发应成功");
     {
@@ -370,7 +392,10 @@ async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
     }
 
     // ── ③ 负越限 −150 ⇒ 钳到下限 −100（只钳上限的实现会在此红）──
-    h.send_dual_param(&PcsDualParam::new(-150.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(-150.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("下发应成功");
     let wire_neg = bus
@@ -399,7 +424,10 @@ async fn e4_start_stop_direction_state_machine() {
 
     // M1：RUN_STATE=0 停机稳态下自动启动被守卫拒绝，须人工授权（单次）
     h.authorize_restart().await.expect("非 latch 下授权应成功");
-    h.send_dual_param(&PcsDualParam::new(0.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(0.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("授权后须放行一次启动");
     h.tick_once().await;
@@ -409,19 +437,27 @@ async fn e4_start_stop_direction_state_machine() {
         "500=1（授权写入）、P=0 ⇒ 待机(1)"
     );
 
-    h.send_dual_param(&PcsDualParam::new(5.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(5.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("写 P=+5 应成功");
     h.tick_once().await;
     assert_eq!(h.last_run_state(), Some(3), "P>0 ⇒ 放电(3)");
 
-    h.send_dual_param(&PcsDualParam::new(-5.0, 0.0, true, "fallback"))
+    h.send_dual_param(
+        WriteToken::Iec104,
+        &PcsDualParam::new(-5.0, 0.0, true, "fallback"),
+    )
         .await
         .expect("写 P=−5 应成功");
     h.tick_once().await;
     assert_eq!(h.last_run_state(), Some(2), "P<0 ⇒ 充电(2)");
 
-    h.stop().await.expect("stop() 写 500=0 应成功");
+    h.stop(WriteToken::Interlock)
+        .await
+        .expect("stop() 写 500=0 应成功");
     h.tick_once().await;
     assert_eq!(h.last_run_state(), Some(0), "500=0 ⇒ 停机(0)");
 }
@@ -491,7 +527,10 @@ async fn e6_concurrent_write_read_no_crosstalk() {
     let writer = tokio::spawn(async move {
         for i in 0..N {
             let p = if i % 2 == 0 { 5.0 } else { -5.0 };
-            hw.send_dual_param(&PcsDualParam::new(p, 0.0, true, "fallback"))
+            hw.send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(p, 0.0, true, "fallback"),
+            )
                 .await
                 .unwrap_or_else(|e| panic!("写 1001 第 {i} 次失败（疑似串帧/回显不符）: {e}"));
         }

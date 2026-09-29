@@ -1057,7 +1057,11 @@ impl Rs485Device {
     }
 
     /// 写入单个寄存器（Modbus 功能码 0x06），用 `config.device_addr` 作从站。
-    pub fn write_single_register(&self, addr: u16, value: u16) -> Result<(), Rs485Error> {
+    ///
+    /// 返回值 = **从站回显的寄存器值**（`Ok` 时必等于 `value`，因 R-2 已校验逐字一致）。
+    /// 该回显是 §13.10 **T5「PCS 写审计」**的"回读值"来源 —— 回显本就在线上，上抛它
+    /// **不新增任何总线往返**（此前的实现校验完即丢弃）。
+    pub fn write_single_register(&self, addr: u16, value: u16) -> Result<u16, Rs485Error> {
         self.write_single_register_from(self.config.device_addr, addr, value)
     }
 
@@ -1067,12 +1071,16 @@ impl Rs485Device {
     /// 地址、值四项必须与请求逐字一致。停机写 `REG_START_STOP=0` 属**安全动作**，
     /// "发出去了但被别的从站/错帧应答"必须能被检出。
     /// 回显不符按 `Rs485Error::ConfigFailed` 报出，报文中含两侧从站号便于定位。
+    ///
+    /// 返回值 = **从站回显的寄存器值**（`Ok` 时必 == `value`；校验失败走 `Err`，**不存在
+    /// "成功但回显与请求不同"的第三态** ⇒ 消费方（T5 写审计）只会得到"已确认(值)"或
+    /// "未取得(Err)"两种结果）。上抛它不新增总线往返。
     pub fn write_single_register_from(
         &self,
         slave: u8,
         addr: u16,
         value: u16,
-    ) -> Result<(), Rs485Error> {
+    ) -> Result<u16, Rs485Error> {
         const FUNC: u8 = 0x06;
         let mut cmd = vec![
             slave,
@@ -1139,7 +1147,7 @@ impl Rs485Device {
                 "写 reg {addr:#06x}={value:#06x}：回显为 {echo_addr:#06x}={echo_value:#06x}，与请求不符"
             )));
         }
-        Ok(())
+        Ok(echo_value)
     }
 }
 
@@ -1794,14 +1802,25 @@ mod frame_validation_tests {
             "前提：config 从站号必须与请求从站号（2）不同，否则本用例对'误把 config.device_addr 当期望从站'失去判别力"
         );
         let ok = {
-            let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x00, 0x00];
+            // 回显值取**非 0** 的 0x0A0A（与下方请求值一致）：若取 0x0000，则"返还回显值的实现"
+            // 与"恒返 Ok(0) 的实现"同绿 ⇒ 该断言对本缺陷失去判别力。
+            let mut v = vec![0x02, 0x06, 0x01, 0xF4, 0x0A, 0x0A];
             let crc = Frame::calculate_crc(0x02, 0x06, &v[2..], CrcMode::Crc16Modbus);
             v.push(crc as u8);
             v.push((crc >> 8) as u8);
             v
         };
         *device.test_response.lock() = Some(ok);
-        assert!(device.write_single_register_from(2, 0x01F4, 0x0000).is_ok());
+        // T5：返回值须为**从站回显值**（此处请求写 0x0000）。判据取"值与请求不同"的写法
+        // （写 0x0A0A 而回显 0x0A0A）——若实现改成恒返 `Ok(0)` 或丢弃回显改返 `Ok(())`，
+        // 本条即红（`Ok(())` 与 `Ok(0)` 都过不了下面的相等断言）。
+        let echoed = device
+            .write_single_register_from(2, 0x01F4, 0x0A0A)
+            .expect("回显全对须放行");
+        assert_eq!(
+            echoed, 0x0A0A,
+            "返回值须为从站回显值本身（恒 0 / 丢弃回显即红）"
+        );
     }
 
     #[test]

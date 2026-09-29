@@ -12,7 +12,7 @@ pub use regs::*;
 
 use crate::config::SouthPcsConfig;
 use crate::port_runtime::{BusError, StationBus};
-use crate::scheduler::StationSink;
+use crate::scheduler::{PcsWriteRecord, StationSink, WriteToken};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
@@ -183,20 +183,42 @@ impl PcsHandle {
     /// `restore_interlock_latched(true)` 完成）。成功后复位 `started=false` + `mode=0xFF`
     /// （否则 release 后 `ensure_started`/`ensure_mode` 见缓存命中而跳过重写 → 静默失效）。
     /// 写 500=0 在 latch 期间**仍允许**（供联锁周期重试停机）。
-    pub async fn stop(&self) -> Result<(), String> {
-        let _g = self.inner.lock.lock().await;
+    pub async fn stop(&self, token: WriteToken) -> Result<(), String> {
+        let mut writes = Vec::new();
+        let res = {
+            // 锁纪律：写序列持锁；**审计投递在锁外**（`emit_write_audit` 的文档）
+            let _g = self.inner.lock.lock().await;
+            self.sequence_stop(&mut writes).await
+        };
+        self.emit_write_audit(token, &writes).await;
+        res
+    }
+
+    /// 锁内的停机写序列（原 `stop` 正文；由审计包装 [`Self::stop`] 调用）。
+    async fn sequence_stop(&self, writes: &mut Vec<PcsWriteRecord>) -> Result<(), String> {
+        let value = regs::to_pcs_reg(0.0);
         match self
             .inner
             .bus
-            .write_single(self.slave(), regs::REG_START_STOP, regs::to_pcs_reg(0.0))
+            .write_single(self.slave(), regs::REG_START_STOP, value)
             .await
         {
-            Ok(()) => {
+            Ok(echo) => {
+                writes.push(PcsWriteRecord {
+                    reg: regs::REG_START_STOP,
+                    value,
+                    readback: Some(echo),
+                });
                 *self.inner.started.write().await = false;
                 self.inner.mode.store(0xFF, Ordering::Relaxed);
                 Ok(())
             }
             Err(e) => {
+                writes.push(PcsWriteRecord {
+                    reg: regs::REG_START_STOP,
+                    value,
+                    readback: None,
+                });
                 // M-3：中性措辞 —— 不预设调用方、不臆断 latch 必然已置位；只陈述写失败事实
                 // 与后续动作（停机未确认 ⇒ stop_failed，交由联锁流程按 latch 状态周期重试）。
                 tracing::error!(
@@ -271,13 +293,32 @@ impl PcsHandle {
     /// 按额定 `p_cap` 钳过（`startup.rs:270`），但那是"靠调用方自律"，新增调用方（如 AI
     /// 恢复）即失守。钳位只影响**越限**入参；`|p_ref| ≤ 100`（含全部现网合法值 ≤ 60）时
     /// 线上字节**一字不变**。
-    pub async fn send_dual_param(&self, cmd: &PcsDualParam) -> Result<(), PcsError> {
+    pub async fn send_dual_param(
+        &self,
+        token: WriteToken,
+        cmd: &PcsDualParam,
+    ) -> Result<(), PcsError> {
         // C-1 下行中止：latch 期间**任何总线 IO 前**拒绝。检查置于总线锁**之前** ——
         // latch 期间连锁都不取（不必先排在在途写序列之后），停机路径得以更快拿到锁。
         self.check_latched().await?;
-        let _g = self.inner.lock.lock().await;
-        self.ensure_mode(regs::MODE_CONST_POWER).await?;
-        self.ensure_started().await?;
+        let mut writes = Vec::new();
+        let res = {
+            // 锁纪律：整个写序列持锁；**审计投递在锁外**（`emit_write_audit` 的文档）
+            let _g = self.inner.lock.lock().await;
+            self.sequence_dual_param(cmd, &mut writes).await
+        };
+        self.emit_write_audit(token, &writes).await;
+        res
+    }
+
+    /// 锁内的恒功率写序列（原 `send_dual_param` 正文；由审计包装 [`Self::send_dual_param`] 调用）。
+    async fn sequence_dual_param(
+        &self,
+        cmd: &PcsDualParam,
+        writes: &mut Vec<PcsWriteRecord>,
+    ) -> Result<(), PcsError> {
+        self.ensure_mode(writes, regs::MODE_CONST_POWER).await?;
+        self.ensure_started(writes).await?;
         let p_ref = regs::clamp_const_power(cmd.p_ref);
         if (p_ref - cmd.p_ref).abs() > 1e-6 {
             // 与 `startup.rs:272` 的上游 clamp 告警同款：打印**原值与钳后值**（否则
@@ -288,9 +329,9 @@ impl PcsHandle {
                 Self::clamp_warn_message(regs::CONST_POWER_LIMIT_KW, cmd.p_ref, p_ref)
             );
         }
-        self.write_reg(regs::REG_CONST_P_SET, regs::to_pcs_reg(p_ref))
+        self.write_reg(writes, regs::REG_CONST_P_SET, regs::to_pcs_reg(p_ref))
             .await?;
-        self.write_reg(regs::REG_CONST_Q_SET, regs::to_pcs_reg(0.0))
+        self.write_reg(writes, regs::REG_CONST_Q_SET, regs::to_pcs_reg(0.0))
             .await?;
         Ok(())
     }
@@ -314,21 +355,40 @@ impl PcsHandle {
     /// 若将来要改回分组写序，须同时改该用例并复核上面的残留态论证。
     pub async fn send_tai_command(
         &self,
+        token: WriteToken,
         p: [f64; 3],
         q: [f64; 3],
         _strategy_mode: &str,
     ) -> Result<(), PcsError> {
         self.check_latched().await?;
-        let _g = self.inner.lock.lock().await;
-        self.ensure_mode(regs::MODE_PHASE_SPLIT).await?;
-        self.ensure_started().await?;
+        let mut writes = Vec::new();
+        let res = {
+            // 锁纪律：整个写序列持锁；**审计投递在锁外**（`emit_write_audit` 的文档）
+            let _g = self.inner.lock.lock().await;
+            self.sequence_tai_command(p, q, &mut writes).await
+        };
+        self.emit_write_audit(token, &writes).await;
+        res
+    }
+
+    /// 锁内的分相写序列（原 `send_tai_command` 正文；由审计包装调用）。
+    async fn sequence_tai_command(
+        &self,
+        p: [f64; 3],
+        q: [f64; 3],
+        writes: &mut Vec<PcsWriteRecord>,
+    ) -> Result<(), PcsError> {
+        self.ensure_mode(writes, regs::MODE_PHASE_SPLIT).await?;
+        self.ensure_started(writes).await?;
         for i in 0..3u16 {
             self.write_reg(
+                writes,
                 regs::REG_PHASE_P_A + i,
                 regs::to_pcs_reg(regs::clamp_phase(p[i as usize])),
             )
             .await?;
             self.write_reg(
+                writes,
                 regs::REG_PHASE_Q_A + i,
                 regs::to_pcs_reg(regs::clamp_phase(q[i as usize])),
             )
@@ -348,13 +408,54 @@ impl PcsHandle {
         Ok(())
     }
 
-    /// FC06 写单寄存器。**不动在线态**（在线/离线统一由采集循环判定 —— 设计 Δ-16）。
-    async fn write_reg(&self, addr: u16, value: u16) -> Result<(), PcsError> {
-        self.inner
-            .bus
-            .write_single(self.slave(), addr, value)
-            .await?;
-        Ok(())
+    /// FC06 写单寄存器，**并把该次写记入写审计序列**（§13.5.3 / T5）。
+    ///
+    /// **不动在线态**（在线/离线统一由采集循环判定 —— 设计 Δ-16）。
+    /// 成功 ⇒ 追加 `readback = Some(回显)`（R-2 保证回显 == value）并返回回显；
+    /// 失败 ⇒ 追加 `readback = None`（**"未确认"留痕**）后把错误上抛 —— 序列在此终止，
+    /// 后续寄存器未发出、不记录（§13.5.3 的 `writes` 组装规则）。
+    async fn write_reg(
+        &self,
+        writes: &mut Vec<PcsWriteRecord>,
+        addr: u16,
+        value: u16,
+    ) -> Result<u16, PcsError> {
+        match self.inner.bus.write_single(self.slave(), addr, value).await {
+            Ok(echo) => {
+                writes.push(PcsWriteRecord {
+                    reg: addr,
+                    value,
+                    readback: Some(echo),
+                });
+                Ok(echo)
+            }
+            Err(e) => {
+                writes.push(PcsWriteRecord {
+                    reg: addr,
+                    value,
+                    readback: None,
+                });
+                Err(e.into())
+            }
+        }
+    }
+
+    /// 投递写审计（**必须在总线锁之外**调用**）。
+    ///
+    /// 为什么在锁外：`collect.rs` 的既有不变式是"sink 调用可以在锁外（sink 可能落 SQLite
+    /// ⇒ 不得阻塞联锁安全动作）"—— 审计走的正是同一条 sink 通道。
+    ///
+    /// 为什么"空 `writes` 不投递"：`writes` 为空只可能是**序列在写任何寄存器之前就被拒**
+    /// （latch 在门口拒绝）—— 那不是一次"写序列"，投它只会让门口的每次拒绝都刷一条审计。
+    ///
+    /// **不阻断控制**：本函数返回 `()`，**不参与**写路径 `Result` 的构造 ⇒ 审计失败（或被
+    /// sink 丢弃）都不改变调用方看到的成功/失败语义（§13.5.3）。这里刻意**不** catch sink 的
+    /// panic：`StationSink` 的既有实现不 panic，且吞 panic 会掩盖真实缺陷。
+    async fn emit_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]) {
+        if writes.is_empty() {
+            return;
+        }
+        self.inner.sink.on_pcs_write_audit(token, writes).await;
     }
 
     /// FC04 读输入寄存器。**不含在线态副作用**（同 `write_reg` 的理由）。
@@ -363,11 +464,11 @@ impl PcsHandle {
     }
 
     /// 确保处于指定有功模式（缓存命中则跳过；否则写 `REG_MODE` 并更新缓存）。
-    async fn ensure_mode(&self, mode: u16) -> Result<(), PcsError> {
+    async fn ensure_mode(&self, writes: &mut Vec<PcsWriteRecord>, mode: u16) -> Result<(), PcsError> {
         if self.inner.mode.load(Ordering::Relaxed) as u16 == mode {
             return Ok(());
         }
-        self.write_reg(regs::REG_MODE, regs::to_pcs_reg(mode as f64))
+        self.write_reg(writes, regs::REG_MODE, regs::to_pcs_reg(mode as f64))
             .await?;
         self.inner.mode.store(mode as u8, Ordering::Relaxed);
         Ok(())
@@ -382,7 +483,7 @@ impl PcsHandle {
     ///    已 `restart_authorized` ⇒ **消费授权**（清位）并放行重写 500=1（M1 单次旁路）；
     ///    否则 `Err` 交上层（运维走 `authorize_restart`）。非 0 或读数无效 ⇒ 清授权并正常写 500=1。
     /// ④ **I-2 复查**：读后、写 500=1 前再查一次 latch（`restore` 不取总线锁，可随时置位）。
-    async fn ensure_started(&self) -> Result<(), PcsError> {
+    async fn ensure_started(&self, writes: &mut Vec<PcsWriteRecord>) -> Result<(), PcsError> {
         if *self.inner.stopped_latched.read().await {
             return Err(PcsError::Latched("联锁锁存禁止自动启动".into()));
         }
@@ -415,7 +516,7 @@ impl PcsHandle {
             tracing::warn!("S-4 写前复查：联锁 latch 已在此窗口置位，放弃启动");
             return Err(PcsError::Latched("S-4 写前 latch 置位，放弃启动".into()));
         }
-        self.write_reg(regs::REG_START_STOP, regs::to_pcs_reg(1.0))
+        self.write_reg(writes, regs::REG_START_STOP, regs::to_pcs_reg(1.0))
             .await?;
         *self.inner.started.write().await = true;
         Ok(())
@@ -465,6 +566,38 @@ mod control_tests {
         ) {
         }
         async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_pcs_write_audit(&self, _token: WriteToken, _writes: &[PcsWriteRecord]) {}
+    }
+
+    /// **T5 用例专用 sink**：只记录 PCS 写审计（其余方法空实现）。
+    ///
+    /// 与 `NullSink` 的区别：它把 `(token, writes)` **留下来**供断言 —— 审计是本次新增的
+    /// 可观测面，没有取数口就无从断言（null 实现的审计通道等于"没有审计"）。
+    #[derive(Default)]
+    struct AuditSink {
+        audits: std::sync::Mutex<Vec<(WriteToken, Vec<PcsWriteRecord>)>>,
+    }
+
+    impl AuditSink {
+        fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
+            self.audits.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StationSink for AuditSink {
+        async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+        async fn on_station_telemetry(
+            &self,
+            _id: &str,
+            _role: crate::config::Role,
+            _pts: Vec<(String, f64, bool)>,
+        ) {
+        }
+        async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_pcs_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]) {
+            self.audits.lock().unwrap().push((token, writes.to_vec()));
+        }
     }
 
     /// 供 `control_tests` 与后续 `collection_tests` 共用。
@@ -500,6 +633,13 @@ mod control_tests {
 
     fn handle(bus: Arc<dyn StationBus>) -> Arc<PcsHandle> {
         PcsHandle::new(cfg_for_tests(), bus, Arc::new(NullSink))
+    }
+
+    /// T5 用例用：句柄 + **会记录审计**的 sink（返回 sink 供断言）。
+    fn handle_recording(bus: Arc<dyn StationBus>) -> (Arc<PcsHandle>, Arc<AuditSink>) {
+        let sink = Arc::new(AuditSink::default());
+        let h = PcsHandle::new(cfg_for_tests(), bus, sink.clone());
+        (h, sink)
     }
 
     /// 读后置位 latch 的总线装饰器（**仅测试**）。
@@ -566,7 +706,7 @@ mod control_tests {
         ) -> Result<Vec<bool>, BusError> {
             self.inner.read_discrete(slave, addr, count).await
         }
-        async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+        async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<u16, BusError> {
             self.inner.write_single(slave, addr, value).await
         }
     }
@@ -578,7 +718,10 @@ mod control_tests {
         let h = handle(bus.clone());
         h.restore_interlock_latched(true).await.unwrap();
         let e = h
-            .send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
+            .send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+            )
             .await
             .unwrap_err();
         assert!(matches!(e, PcsError::Latched(_)), "实际: {e}");
@@ -629,11 +772,14 @@ mod control_tests {
         let bus = Arc::new(MockBus::new());
         bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]); // RUN_STATE=1 待机
         let h = handle(bus.clone());
-        h.send_dual_param(&PcsDualParam::new(0.0, 0.0, true, "intelligent"))
-            .await
-            .unwrap();
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(0.0, 0.0, true, "intelligent"),
+        )
+        .await
+        .unwrap();
         assert!(h.debug_started().await, "前提：启动成功");
-        h.stop().await.unwrap();
+        h.stop(WriteToken::Interlock).await.unwrap();
         assert!(!h.debug_started().await, "停机必须复位 started");
         assert_eq!(h.debug_mode(), 0xFF, "停机必须复位 mode 哨兵");
         assert!(bus.write_call_count(1, 500) >= 1, "必须写过 500");
@@ -646,7 +792,10 @@ mod control_tests {
         bus.put_input(1, 1013, vec![to_pcs_reg(0.0)]); // 停机稳态
         let h = handle(bus.clone());
         let e = h
-            .send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
+            .send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+            )
             .await
             .unwrap_err();
         assert!(matches!(e, PcsError::StoppedGuard(_)), "实际: {e}");
@@ -701,9 +850,12 @@ mod control_tests {
         bus.put_input(1, 1013, vec![to_pcs_reg(0.0)]);
         let h = handle(bus.clone());
         h.authorize_restart().await.unwrap();
-        h.send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
-            .await
-            .expect("授权后必须放行一次");
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+        )
+        .await
+        .expect("授权后必须放行一次");
         assert!(
             !h.debug_restart_authorized(),
             "授权必须已被消费（单次语义）"
@@ -740,7 +892,10 @@ mod control_tests {
             })
         });
         let e = h
-            .send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
+            .send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -772,9 +927,12 @@ mod control_tests {
         // 前置：S-4 守卫会先 FC04 读 RUN_STATE(1013)；造"待机"使守卫放行（否则落 StoppedGuard）
         bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
         let h = handle(bus.clone());
-        h.send_dual_param(&PcsDualParam::new(10.0, 0.5, true, "intelligent"))
-            .await
-            .unwrap();
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             bus.write_calls.lock().unwrap().clone(),
             vec![
@@ -805,7 +963,7 @@ mod control_tests {
         let bus = Arc::new(MockBus::new());
         bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]); // 前置：S-4 守卫需非停机态
         let h = handle(bus.clone());
-        h.send_dual_param(&PcsDualParam::new(150.0, 0.0, true, "fallback"))
+        h.send_dual_param(WriteToken::Iec104, &PcsDualParam::new(150.0, 0.0, true, "fallback"))
             .await
             .unwrap();
         assert_eq!(
@@ -824,7 +982,10 @@ mod control_tests {
         let bus2 = Arc::new(MockBus::new());
         bus2.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
         let h2 = handle(bus2.clone());
-        h2.send_dual_param(&PcsDualParam::new(-150.0, 0.0, true, "fallback"))
+        h2.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(-150.0, 0.0, true, "fallback"),
+        )
             .await
             .unwrap();
         let p_write = bus2
@@ -863,7 +1024,10 @@ mod control_tests {
         let bus = Arc::new(MockBus::new());
         bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
         let h = handle(bus.clone());
-        h.send_dual_param(&PcsDualParam::new(60.0, 0.5, true, "intelligent"))
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(60.0, 0.5, true, "intelligent"),
+        )
             .await
             .unwrap();
         assert_eq!(
@@ -882,7 +1046,10 @@ mod control_tests {
         let bus2 = Arc::new(MockBus::new());
         bus2.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
         let h2 = handle(bus2.clone());
-        h2.send_dual_param(&PcsDualParam::new(-60.0, 0.0, true, "intelligent"))
+        h2.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(-60.0, 0.0, true, "intelligent"),
+        )
             .await
             .unwrap();
         assert_eq!(
@@ -930,7 +1097,10 @@ mod control_tests {
             let bus = Arc::new(MockBus::new());
             bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]); // 前置：S-4 守卫需非停机态
             let h = handle(bus.clone());
-            h.send_dual_param(&PcsDualParam::new(p_ref, 0.5, true, "intelligent"))
+            h.send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(p_ref, 0.5, true, "intelligent"),
+            )
                 .await
                 .unwrap();
             let writes = bus.write_calls.lock().unwrap().clone();
@@ -999,7 +1169,12 @@ mod control_tests {
         let bus = Arc::new(MockBus::new());
         bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
         let h = handle(bus.clone());
-        h.send_tai_command([30.0, -30.0, 0.0], [1.0, -2.0, 3.0], "fallback")
+        h.send_tai_command(
+            WriteToken::Strategy,
+            [30.0, -30.0, 0.0],
+            [1.0, -2.0, 3.0],
+            "fallback",
+        )
             .await
             .unwrap();
 
@@ -1122,6 +1297,174 @@ mod control_tests {
         assert!(
             warn_stopped_once(&w, Some(0), true, false),
             "None 臂必须复位记忆（否则乱码后的首次停机不再告警）"
+        );
+    }
+
+    // ── T5「PCS 写审计」（02 设计 §13.5.3 规格 / §13.10 T5）────────────────
+    //
+    // 判据取自设计规格：① 3 条产事件入口各恰 1 条、token 对应、记录含 (reg, value, readback)；
+    // ② 写失败 ⇒ 该次 `readback = None`（"未确认"留痕）且**不改写路径的返回语义**；
+    // ③ 分相序列 ⇒ **事件恒 1 条**（记录数 = 实写次数）。
+
+    /// 建一个"能正常启动"的 bus（S-4 前置读 RUN_STATE=1 待机）。
+    fn bus_ready() -> Arc<MockBus> {
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        bus
+    }
+
+    /// **T5 判据①**：三条写入口各调一次 ⇒ **各恰 1 条**审计，token 逐条对应，且每条记录
+    /// 都 `readback = Some(值)`（MockBus 与真机同义：R-2 保证 `Ok` 时回显 == 写入值）。
+    ///
+    /// **改什么会让本条变红**：① 去掉 `emit_write_audit` 调用 ⇒ 计数 0；
+    /// ② token 接错（如三处恒传 `Iec104`）⇒ token 断言红；③ `write_reg` 不记 `readback`
+    /// ⇒ `Some` 断言红；④ 把一次序列拆成每寄存器一条事件 ⇒ 计数 > 1。
+    #[tokio::test]
+    async fn t5_audit_exactly_one_event_per_entry_with_token() {
+        // ① IEC104 恒功率
+        let bus = bus_ready();
+        let (h, sink) = handle_recording(bus.clone());
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+        )
+        .await
+        .unwrap();
+        let a = sink.audits();
+        assert_eq!(a.len(), 1, "一次写序列须恰 1 条审计（实得 {}）", a.len());
+        let (tok, writes) = &a[0];
+        assert_eq!(*tok, WriteToken::Iec104, "token 须如实反映调用方");
+        assert!(
+            writes.iter().any(|w| w.reg == regs::REG_CONST_P_SET),
+            "审计须含功率写：{writes:?}"
+        );
+        assert!(
+            writes.iter().all(|w| w.readback == Some(w.value)),
+            "成功路径每条记录的 readback 须 == 写入值（未确认即红）：{writes:?}"
+        );
+
+        // ② 台区储能分相
+        let bus = bus_ready();
+        let (h, sink) = handle_recording(bus.clone());
+        h.send_tai_command(WriteToken::Strategy, [1.0, 2.0, 3.0], [0.0; 3], "fallback")
+            .await
+            .unwrap();
+        let a = sink.audits();
+        assert_eq!(a.len(), 1, "分相一次序列也须恰 1 条（见判据③）");
+        assert_eq!(a[0].0, WriteToken::Strategy);
+
+        // ③ 联锁停机
+        let bus = bus_ready();
+        let (h, sink) = handle_recording(bus.clone());
+        h.stop(WriteToken::Interlock).await.unwrap();
+        let a = sink.audits();
+        assert_eq!(a.len(), 1, "停机一次写也须恰 1 条");
+        assert_eq!(a[0].0, WriteToken::Interlock);
+        assert_eq!(
+            a[0].1,
+            vec![PcsWriteRecord {
+                reg: regs::REG_START_STOP,
+                value: regs::to_pcs_reg(0.0),
+                readback: Some(regs::to_pcs_reg(0.0)),
+            }],
+            "停机的审计记录须就是 500=0 那一次写"
+        );
+    }
+
+    /// **T5 判据②**：某次写失败 ⇒ 该次记为 `readback = None`（"未确认"留痕），
+    /// **且写路径原本的失败语义不变**（仍返 `Err`，不被审计"吞掉"或"改写"）。
+    ///
+    /// **改什么会让本条变红**：① 失败不记记录 ⇒ 末条 reg 断言红；② 失败时记
+    /// `readback: Some(_)`（谎报已确认）⇒ `None` 断言红；③ 审计把 `Err` 吃掉改成 `Ok`
+    /// ⇒ `is_err` 断言红。
+    #[tokio::test]
+    async fn t5_audit_records_unconfirmed_on_write_failure() {
+        let bus = bus_ready();
+        // 让第二个寄存器写失败（1002）：第一个（1001）已确认、第二个未确认 ⇒ 序列在此终止。
+        bus.fail_write_once(1, regs::REG_CONST_Q_SET);
+        let (h, sink) = handle_recording(bus.clone());
+        let r = h
+            .send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+            )
+            .await;
+        assert!(r.is_err(), "前提：本拍写序列必须失败（否则本条空转）");
+
+        let a = sink.audits();
+        assert_eq!(a.len(), 1, "失败序列也要留痕（恰 1 条）");
+        let writes = &a[0].1;
+        let bad = writes
+            .iter()
+            .find(|w| w.reg == regs::REG_CONST_Q_SET)
+            .expect("失败那一次写必须被记录（否则等于漏审）");
+        assert_eq!(bad.readback, None, "失败的写须记『未确认』，不得谎报回读值");
+        assert!(
+            writes.iter().all(|w| w.readback.is_some() || w.reg == regs::REG_CONST_Q_SET),
+            "只有失败的那一次可以为 None：{writes:?}"
+        );
+    }
+
+    /// **T5 判据③**：分相序列 ⇒ **事件恒 1 条**，其 `writes` 覆盖该序列实写的全部寄存器
+    /// （6 个分相寄存器必在；模式字/启停按缓存是否命中可有可无 ⇒ 记录数 ∈ 6..=8）。
+    ///
+    /// **改什么会让本条变红**：① 每寄存器投一条事件（len > 1）⇒ 首条断言红；
+    /// ② 漏记分相寄存器（如只记模式字）⇒ 六个 `contains` 之一红。
+    #[tokio::test]
+    async fn t5_audit_phase_split_is_one_event_covering_whole_sequence() {
+        let bus = bus_ready();
+        let (h, sink) = handle_recording(bus.clone());
+        h.send_tai_command(
+            WriteToken::Strategy,
+            [1.0, -2.0, 3.0],
+            [0.0, 0.0, 0.0],
+            "fallback",
+        )
+        .await
+        .unwrap();
+
+        let a = sink.audits();
+        assert_eq!(a.len(), 1, "整条分相序列只投 1 条事件（实得 {}）", a.len());
+        let writes = &a[0].1;
+        assert!(
+            (6..=8).contains(&writes.len()),
+            "记录数须落在 6..=8（6 个分相寄存器 ± 模式字/启停），实得 {}",
+            writes.len()
+        );
+        for i in 0..3u16 {
+            assert!(
+                writes.iter().any(|w| w.reg == regs::REG_PHASE_P_A + i),
+                "必须覆盖 P 相寄存器 {:#06x}",
+                regs::REG_PHASE_P_A + i
+            );
+            assert!(
+                writes.iter().any(|w| w.reg == regs::REG_PHASE_Q_A + i),
+                "必须覆盖 Q 相寄存器 {:#06x}",
+                regs::REG_PHASE_Q_A + i
+            );
+        }
+    }
+
+    /// **T5 边界（协调者裁定，2026-09-29）**：序列在**写任何寄存器之前**就被拒（latch 在
+    /// 门口拒绝）⇒ `writes` 为空 ⇒ **不投递审计**（那不是一次写序列；投它只会让门口的每次
+    /// 拒绝都刷一条审计）。本用例把该行为钉住，避免日后被"顺手改成无条件投递"。
+    #[tokio::test]
+    async fn t5_audit_not_emitted_when_rejected_before_any_write() {
+        let bus = bus_ready();
+        let (h, sink) = handle_recording(bus.clone());
+        h.restore_interlock_latched(true).await.unwrap();
+        let r = h
+            .send_dual_param(
+                WriteToken::Iec104,
+                &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
+            )
+            .await;
+        assert!(r.is_err(), "前提：latch 期间必须拒绝")
+        ;
+        assert_eq!(
+            sink.audits().len(),
+            0,
+            "一次寄存器都没写的『拒绝』不构成写序列，不得刷审计"
         );
     }
 }

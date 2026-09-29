@@ -78,6 +78,71 @@ pub trait StationSink: Send + Sync {
         self.on_station_telemetry(station_id, role, vec![("offline".to_string(), 1.0, true)])
             .await;
     }
+
+    /// **PCS 写审计**（02 设计 §13.5.3 规格 / §13.10 **T5**）：一次**写序列**一条。
+    ///
+    /// 为什么落在这里：`StationSink` 是 `PcsHandle` 在进程内的**唯一出口**；消费侧
+    /// （core-bin `SouthSink`）把它转成 `record_event("pcs_write_audit", "pcs", msg, level)`
+    /// ⇒ **同时**写 `storage.events` **并**推 `AlertFeed`（§13.5.3 的"复用既有 `storage.events`
+    /// + `AlertFeed`"），因此**不需要** `mupc-southd` 依赖 `mupc-core-bin`。
+    ///
+    /// **为什么不给默认实现**：给了默认空实现 ⇒ 任何漏实现的 sink 会**静默吞掉审计事件**
+    /// （恰恰是"安全链可审计性 U-75"要防的 fail-silent）。故本方法**无默认实现**，实现方
+    /// 必须表态（代价 = 全部实现方同笔改，已在设计 §13.10 T5 的"改动面"中登记）。
+    ///
+    /// **调用时机（锁纪律，§13.5.3）**：必须在 `PcsHandle` 的**总线锁之外**调用（sink 可能
+    /// 落 SQLite ⇒ 不得阻塞联锁安全动作）；且**不得**影响写路径原本的返回语义。
+    async fn on_pcs_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]);
+}
+
+/// PCS 写序列的**调用方身份**（审计事件的 token 取值域；§13.5.3）。
+///
+/// **取值域只含"有真实生产者"的值** —— 每个值都能在代码里指到唯一的调用点，不预留、不臆造：
+///
+/// | 值 | 唯一生产者 |
+/// |---|---|
+/// | `Iec104` | `StrategyCommandHandler`（IEC104 `p_set`）→ `send_dual_param` |
+/// | `Strategy` | 台区储能治理兜底策略 → `send_tai_command` |
+/// | `Interlock` | 联锁状态机 → `stop` |
+/// | `Ai` | `AiIntegrator::dispatch_ai_decision` 的 AI 分支 → `send_dual_param` |
+///
+/// ⚠️ `Ai` 的调用点在 **AI 引擎停用期（2026-09-09 起）不可达**，但**代码真实存在**
+/// （`ai_integration.rs` 的 `dispatch_ai_decision`）⇒ 按"有真实生产者"入域；**不得**把它
+/// 并进 `Iec104`（那会让审计把 AI 下发记成主站下发）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteToken {
+    /// IEC104 主站下发（`p_set` → `send_dual_param`）。
+    Iec104,
+    /// 台区储能治理策略兜底（`send_tai_command`）。
+    Strategy,
+    /// 联锁状态机（`stop`）。
+    Interlock,
+    /// AI 引擎决策下发（`dispatch_ai_decision` 的 AI 分支 → `send_dual_param`；停用期不可达）。
+    Ai,
+}
+
+impl WriteToken {
+    /// 稳定字符串（进审计事件文案；**改动即等于改事件口径**，须同批改测试）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WriteToken::Iec104 => "iec104",
+            WriteToken::Strategy => "strategy",
+            WriteToken::Interlock => "interlock",
+            WriteToken::Ai => "ai",
+        }
+    }
+}
+
+/// 一次写序列中被**实际发出**的一次寄存器写（§13.5.3 的 `writes` 元素）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcsWriteRecord {
+    /// 寄存器地址
+    pub reg: u16,
+    /// 写入值（线上字）
+    pub value: u16,
+    /// 从站回显值：`Some(v)` = 已确认（由 R-2 回显校验保证 `v == value`）；
+    /// `None` = **未确认**（该次写失败 / 序列在此中断）。
+    pub readback: Option<u16>,
 }
 
 /// 本轮应采的**一个读组**（替代本模块此前**按站粒度**的那套类型 —— 本轮已整体删除，含其
@@ -1421,6 +1486,8 @@ mod tests {
         battery_socs: std::sync::Mutex<Vec<(String, f64)>>,
         /// 覆写 `on_station_offline` 收到的 `reason`（PRD §9.7.2 第 1 条的落证）
         offline_reasons: std::sync::Mutex<Vec<(String, String)>>,
+        /// PCS 写审计事件（每条 = 调用方 token + 该次写序列）
+        audits: std::sync::Mutex<Vec<(WriteToken, Vec<PcsWriteRecord>)>>,
     }
 
     impl FakeSink {
@@ -1519,6 +1586,11 @@ mod tests {
                 .filter(|&&(ref m, _, ev)| ev && m == metric)
                 .count()
         }
+
+        /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
+        fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
+            self.audits.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
@@ -1552,6 +1624,9 @@ mod tests {
                 .push((station_id.to_string(), reason.to_string()));
             self.on_station_telemetry(station_id, role, vec![("offline".to_string(), 1.0, true)])
                 .await;
+        }
+        async fn on_pcs_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]) {
+            self.audits.lock().unwrap().push((token, writes.to_vec()));
         }
     }
 
