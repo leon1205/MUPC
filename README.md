@@ -30,7 +30,7 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 | **网络框架** | Axum 0.7（**仅本地 HMI 控制通道**，`mupc-core-bin/src/console_host.rs`）。Web 访问栈（Tower / tower-http / hyper / hyper-util）随 `web-api` crate 删除 |
 | **AI 推理** | RKNN Runtime v2.3.2 (RK3588 NPU, 6 TOPS) —— **引擎停用期间不加载模型**；`npu` 为**显式 feature 开关**（默认关闭） |
 | **目标平台** | Linux (Ubuntu 20.04+ / openEuler 22.03+), ARM64 |
-| **硬件** | 主控 / AI 推理：Rockchip RK3588；本地显示 / 南向站级：BECG-3568（RK3568） |
+| **硬件** | **BECG-3588 BOX**（瑞芯微 RK3588 八核 4×A76+4×A55 @2.4GHz、NPU 6TOPS / LPDDR5 / HDMI 8K）；`mupcd` 与本地显示同在该板上运行。此前为 BECG-3568（RK3568），**2026-09-29 换代** |
 | **许可证** | MIT |
 
 ---
@@ -52,7 +52,7 @@ mupc/
 │   ├── ai-engine/               # AI 优化引擎 (LSTM/MADDPG/PPO/RKNN) —— 框架保留、引擎停用
 │   ├── intercore/               # 核间通信 (TCP/RJ45) —— 仅核间帧协议（PCS 语义面已迁出）
 │   ├── mupc-southd/             # 站级南向调度 + PCS 通信与控制（bin: pcs_slave）
-│   ├── mupc-io/                 # 数字 IO 抽象 (BECG-3568 DI/DO, sysfs)
+│   ├── mupc-io/                 # 数字 IO 抽象 (BECG-3588 DI/DO, sysfs)
 │   ├── security/                # 安全模块（国密只留框架，审计）
 │   ├── rs485-plugin/            # RS485 通信插件
 │   ├── hplc-plugin/             # HPLC 通信插件
@@ -85,7 +85,7 @@ mupc/
 
 - Rust >= 1.88（交叉编译）/ >= 1.75（本机）（推荐使用 [rustup](https://rustup.rs) 管理）
 - Linux (Ubuntu 20.04+ / openEuler 22.03+) 或 Windows 10+（开发调试）
-- RK3588 硬件（主控 / AI 推理生产部署）；BECG-3568（RK3568）（本地显示 / 南向站级）
+- **BECG-3588 BOX**（RK3588）—— `mupcd` 与本地显示的运行硬件（2026-09-29 由 BECG-3568 换代）
 ### 外部依赖安装
 
 ```bash
@@ -240,7 +240,7 @@ PCS 为 **RS485 Modbus 从站**，其通信与控制已整体迁入南向（02 �
 | Phase 2+ | IEC 61850-7-420（libIEC61850 FFI 待接入） | ⚠️ 骨架就位 |
 | Phase 2+ | OTA 固件升级（A/B 分区待实现）、安全启动（存根） | ⚠️ 模型OTA完成 |
 | Phase 2+ | WiFi/NearLink/BLE 驱动 | 📋 规划中（RBAC 鉴权中间件随 `web-api` crate 删除，不再适用） |
-| 2026-09 | 12 号本地显示终端（触摸式 HMI，LVGL，BECG-3568） | 🚧 进行中（PRD v2.2 + 设计 + UI 三份文档门禁通过；`display-proto` / `local-display` 两 crate 已落地） |
+| 2026-09 | 12 号本地显示终端（触摸式 HMI，LVGL，BECG-3588） | 🚧 进行中（PRD v2.2 + 设计 + UI 三份文档门禁通过；`display-proto` / `local-display` 两 crate 已落地） |
 | 2026-09 | PCS 通信与控制迁入 `mupc-southd`（02 号设计 §13 / ADR-014·015·016） | 🚧 进行中（设计 §13 未获门禁标记） |
 
 技术债详见 [`docs/technical-debt.md`](docs/technical-debt.md)

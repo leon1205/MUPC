@@ -15,7 +15,10 @@ MUPC 微电网特种调控装置通信管理模块是"异构双核心模块主�
 - 本地显示终端（触摸式本地 HMI，12 号模块）
 - OTA 升级与远程维护
 
-**目标平台：** Linux (openEuler 22.03 / Ubuntu 20.04+)、RK3588 硬件（主控 / AI 推理）；BECG-3568（RK3568）用于本地显示 / 南向站级
+**目标平台：** Linux (openEuler 22.03+ / Ubuntu 20.04+)；硬件 = **BECG-3588 BOX**（瑞芯微 **RK3588** 八核 4×A76+4×A55 @2.4GHz、NPU 6TOPS）—— `mupcd` 与本地显示同在该板（HDMI 8K@60Hz 外接屏）上运行
+
+> **平台换代（2026-09-29）**：此前按 **BECG-3568 BOX**（RK3568，A55@2.0GHz，NPU 1TOPS）设计，现统一到 **BECG-3588**。规格书 `hw/BECG-3588 BOX感知与控制主机规格书(20260910).docx`。**串口节点与 DI/DO GPIO 编号随之全部改变**（见 `mupc/deploy/deploy.md` §九 的重映射表；权威源 = `plans/2026-09-24-BECG-3588与60kW-PCS测试环境搭建方案.md` §5.2/§5.3）。
+
 **编程语言：** Rust
 **Rust 版本：** >= 1.88（交叉编译）；>= 1.75（本机）。workspace `rust-version = "1.75"`（`mupc/Cargo.toml`）
 **异步运行时：** Tokio
@@ -44,7 +47,7 @@ mupc/
 │   │       └── ...
 │   ├── security/           # 安全模块（国密只留框架，审计）
 │   ├── mupc-southd/        # 站级南向调度 + PCS 通信与控制（bin: pcs_slave）
-│   ├── mupc-io/            # 数字 IO 抽象（BECG-3568 DI/DO，sysfs）
+│   ├── mupc-io/            # 数字 IO 抽象（BECG-3588 DI/DO，sysfs）
 │   ├── display-proto/      # 12 号显示终端跨进程契约（DisplayFrame v3）
 │   ├── local-display/      # 12 号本地显示终端渲染端（bin: mupc-local-display）
 │   │   └── lvgl-sys/       # LVGL C 库 FFI 薄层（bindgen + allowlist）
@@ -290,7 +293,7 @@ cargo build -p mupc-sim-bridge --release
 | **gateway**         | 北向 IEC 104 协议通信、连接管理、数据收发                        | `gateway/src/` |
 | **intercore**       | 核间 TCP 帧协议（帧类型 + 服务端 + 传输门面）；心跳/看门狗        | `intercore/src/`（PCS 语义面已迁至 `mupc-southd/src/pcs/`） |
 | **mupc-southd**     | 站级南向调度（多口多从站） + PCS 通信与控制（`PcsHandle`）        | `mupc-southd/src/scheduler.rs`、`mupc-southd/src/pcs/` |
-| **mupc-io**         | 数字 IO 抽象（BECG-3568 DI/DO，sysfs 后端）                       | `mupc-io/src/lib.rs` |
+| **mupc-io**         | 数字 IO 抽象（BECG-3588 DI/DO，sysfs 后端）                       | `mupc-io/src/lib.rs` |
 | **display-proto**   | 12 号跨进程契约（`DisplayFrame` v2/v3、外设段、帧预算守卫）        | `display-proto/src/frame.rs`、`display-proto/src/peripherals.rs` |
 | **local-display**   | 12 号渲染端（通道状态机 + LVGL 会话 + 六页外壳）                   | `local-display/src/app.rs`、`local-display/src/channel.rs` |
 | **ai-engine**       | LSTM 时序预测、MADDPG/PPO 强化学习决策、RKNN Runtime（NPU 推理）——**引擎停用** | `ai-engine/src/model_manager.rs` |
@@ -395,7 +398,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 
 **权限模型（12 号 PRD §0 B5）**：**无登录 + 审计 + 二次确认**；物理在场即授权，**无 Session / PIN / RBAC**。写操作（配置保存 / 联锁释放 / M1 授权 / 任何下发）须二次确认并记审计（`ConsoleAuditService`：JSONL 追加 + SHA-256 审计链双写）。**模式切换为暂停项、本期无界面入口**。
 
-> 目标平台 BECG-3568（RK3568），HDMI 外接 8 寸 1024×768 触摸屏，**无浏览器 / 无显示服务器（无 X11 / Wayland）**。三份文档：`specs/modules/12-MUPC-本地显示终端-PRD.md`（v2.2）、`plans/modules/12-MUPC-本地显示终端-设计文档.md`、`plans/modules/12-MUPC-本地显示终端-UI设计文档.md`。
+> 目标平台 **BECG-3588**（RK3588；此前为 BECG-3568，2026-09-29 换代），HDMI 外接 8 寸 1024×768 触摸屏，**无浏览器 / 无显示服务器（无 X11 / Wayland）**。三份文档：`specs/modules/12-MUPC-本地显示终端-PRD.md`（v2.2）、`plans/modules/12-MUPC-本地显示终端-设计文档.md`、`plans/modules/12-MUPC-本地显示终端-UI设计文档.md`。
 
 > **历史残留已清除**：原 Web API 的 `RequireRole` 提取器（`X-Session-Id`）、`login()` 占位实现（硬编码 `role: "operator"`）、RBAC 鉴权中间件（技术债 U-01）等**均随 `web-api` crate 删除**，不在仓库内；12 号现行权限模型见上。
 
