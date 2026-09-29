@@ -79,6 +79,25 @@ pub struct AiIntegrator {
     /// 拍（1s）仍对相同指令重复 send_tai_command——空耗 RS485 带宽并放大在线/离线抖动窗口。
     /// std Mutex（非 tokio——纯同步值比对，无跨 await 持有）。
     last_sent_tai: std::sync::Mutex<Option<([f64; 3], [f64; 3])>>,
+    /// U-171（2026-09-29）：`send_tai_command` **失败**告警的节流时刻（每 30s 一次）。
+    ///
+    /// PCS 离线时 `last_sent_tai` 每拍被清 ⇒ 去抖恒不命中 ⇒ 每拍都走「发送→失败」，若
+    /// 告警不节流即 **1 条/秒（≈86400 条/日）刷屏** —— 与已修的 M1 停机告警无去抖
+    /// （P0/B-2）**同类**。
+    ///
+    /// **刻意不因下发成功而复位**（区别于 [`Self::soc_stale_warned`] 的"正常源接管后清 None"
+    /// 语义）：链路抖动（失败-成功逐拍交替）时复位会让**每条**失败都告警 ⇒ 刷屏回归；
+    /// 不复位则日志速率**恒有界**（≤1 条/30s），恢复与否由下发成功路径自己体现。
+    /// std Mutex（非 tokio——纯同步判时间差，无跨 await 持有）。
+    send_fail_warned: std::sync::Mutex<Option<std::time::Instant>>,
+    /// U-171：失败告警**实际发射**次数（判别力用例观测；无生产消费者）。
+    send_fail_warn_count: std::sync::atomic::AtomicU64,
+    /// U-171：**PCS 通道未注入**告警的节流时刻（`south_pcs.enabled=false` 时本分支每拍命中）。
+    /// 与 [`Self::send_fail_warned`] **各自独立**——两条"下发不可能成功"的路径不得互相吞掉
+    /// 告警（同 [`TaiStorageStrategy`] 对 `soc_missing_warned` / `stale_warned` 的分槽口径）。
+    pcs_absent_warned: std::sync::Mutex<Option<std::time::Instant>>,
+    /// U-171：PCS 通道未注入告警的实际发射次数（判别力用例观测；无生产消费者）。
+    pcs_absent_warn_count: std::sync::atomic::AtomicU64,
     /// 12-本地显示终端 Dev-B3（设计 §4.3）：SOC 展示快照缓存——`(SocResolved, 解析时刻)`。
     /// `resolve_soc_core`（控制 `apply_soc_source` 每 dispatch 拍 + 显示刷新）都会写；
     /// `soc_display_snapshot` 读未过期（< `SOC_RESOLVE_CACHE_TTL`）直接返回，避免与 dispatch
@@ -127,6 +146,10 @@ impl AiIntegrator {
     /// 12-显示终端 §4.3：SOC 展示快照缓存 TTL（≈900ms < 1s 发布周期）——显示读缓存避免与
     /// dispatch 同 tick 双活读 REG_SOC（控制每拍先 resolve 写缓存，显示下一 tick 优先读缓存）。
     const SOC_RESOLVE_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(900);
+    /// U-171：下发失败告警节流间隔（防 PCS 离线期每 dispatch 拍刷屏；与 SOC 双源告警同量级）
+    const SEND_FAIL_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    /// U-171：PCS 通道未注入告警节流间隔（与失败告警同值、但**独立**计时）
+    const PCS_ABSENT_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
     pub fn new() -> Self {
         Self {
@@ -146,6 +169,10 @@ impl AiIntegrator {
             validator: RwLock::new(None),
             decision_sink: RwLock::new(None),
             last_sent_tai: std::sync::Mutex::new(None),
+            send_fail_warned: std::sync::Mutex::new(None),
+            send_fail_warn_count: std::sync::atomic::AtomicU64::new(0),
+            pcs_absent_warned: std::sync::Mutex::new(None),
+            pcs_absent_warn_count: std::sync::atomic::AtomicU64::new(0),
             soc_resolved_cache: RwLock::new(None),
         }
     }
@@ -380,9 +407,34 @@ impl AiIntegrator {
     /// 分叉。**去抖命中即跳过**（值不变不 send、不触发 `decision_sink`）；去抖比较与更新
     /// 必须在**短锁块**内完成（`MutexGuard` 非 Send，不跨 await 持有，否则破坏
     /// `run_fallback_strategies` 经 `tokio::spawn` 驱动的 Send 约束）。
+    /// U-171：跨拍告警节流（到期则记账并返 `true`）。两条「下发不可能成功」路径各持一槽。
+    ///
+    /// 短锁块内完成判时+写入：`MutexGuard` 非 `Send`，本函数为**同步**函数（无 await）
+    /// ⇒ 不可能跨 await 持锁，不破坏 `run_fallback_strategies` 经 `tokio::spawn` 的 Send 约束。
+    fn warn_due(
+        slot: &std::sync::Mutex<Option<std::time::Instant>>,
+        interval: std::time::Duration,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        let mut w = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let due = w.map_or(true, |t| now.saturating_duration_since(t) > interval);
+        if due {
+            *w = Some(now);
+        }
+        due
+    }
+
     async fn dispatch_phase_pq(&self, p: [f64; 3], q: [f64; 3]) -> Result<(), AiEngineError> {
         let Some(client) = self.pcs_client() else {
-            tracing::warn!("核间客户端未注入，台区储能分相指令未下发");
+            // U-171：`south_pcs.enabled=false` 时本分支**每 dispatch 拍（1s）命中**且属
+            // **配置性**（不会自愈）——不节流即 1 条/秒刷屏。节流后等效"每 30s 提醒一次"。
+            if Self::warn_due(&self.pcs_absent_warned, Self::PCS_ABSENT_WARN_INTERVAL) {
+                self.pcs_absent_warn_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    "PCS 通道未注入（south_pcs.enabled=false？），台区储能分相指令未下发"
+                );
+            }
             return Ok(());
         };
         // 审查 R1-B6 2026-09-09：TaiStorage evaluate 命中 60s 节流（返回缓存 cmd）时分相值
@@ -404,7 +456,15 @@ impl AiIntegrator {
             // 遗留待办 A（2026-09-09）：核间断线 send 失败 → 清 last_sent_tai 缓存，
             // 重连后目标值不变也会下一拍重发（否则缓存误导节流跳过，PCS 停等）。
             *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            tracing::warn!("台区储能分相指令下发失败: {:?}", e);
+            // U-171（2026-09-29）：上述"每拍重试"是 **U-169 裁定刻意保留**的（不重试则重连后
+            // 目标值不变会被去抖跳过 ⇒ PCS 停等）⇒ 离线期每拍一次注定失败的 RS485 事务
+            // （约 `response_timeout_ms`/拍）是**该意图的代价**，本次**不动**。但告警**必须**
+            // 节流：无节流即 1 条/秒（≈86400 条/日）刷屏，与已修的 M1 停机告警同类。
+            if Self::warn_due(&self.send_fail_warned, Self::SEND_FAIL_WARN_INTERVAL) {
+                self.send_fail_warn_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!("台区储能分相指令下发失败（每拍重试中）: {:?}", e);
+            }
         } else {
             tracing::debug!("台区储能分相指令已下发: p={:?}, q={:?}", p, q);
             // 审查 R1-A3 2026-09-09：实际下发成功才落库（freshness 停发拍不 evaluate 不
@@ -597,6 +657,31 @@ impl AiIntegrator {
     /// 清除 last_sent_tai——目标值不变也会在下一 dispatch 周期重发（否则 PCS 停等）。
     pub async fn reset_last_sent_tai(&self) {
         *self.last_sent_tai.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// 测试观测口（U-171）：下发失败告警的**实际发射**次数。
+    #[cfg(test)]
+    pub(crate) fn send_fail_warn_count(&self) -> u64 {
+        self.send_fail_warn_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 测试观测口（U-171）：把失败告警节流计时回拨，验证**节流到期后须再次告警**
+    /// （而非"一次性永不告警"）。
+    #[cfg(test)]
+    pub(crate) fn backdate_send_fail_warn(&self, d: std::time::Duration) {
+        let mut w = self
+            .send_fail_warned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *w = Some(std::time::Instant::now() - d);
+    }
+
+    /// 测试观测口（U-171）：PCS 通道未注入告警的实际发射次数。
+    #[cfg(test)]
+    pub(crate) fn pcs_absent_warn_count(&self) -> u64 {
+        self.pcs_absent_warn_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 执行决策并下发核间指令
@@ -1565,6 +1650,214 @@ mod tests {
             "恢复后真实指令须重新下发（被去抖跳过则停在 12）"
         );
         assert_eq!(&v3[12..], &v1[..], "恢复后的真实指令应与 ① 相同且确实发出");
+    }
+
+    // ── U-171（2026-09-29）：离线/未注入期「下发不可能成功」的告警**必须节流** ──
+    //
+    // 与已修的 M1 停机告警无去抖（P0/B-2，≈86400 条/日）同类：这两条路径**每 dispatch 拍
+    // （1s）都会命中**，不节流即刷屏。**刻意不动**去抖/重试语义（U-169 裁定：不重试则重连后
+    // 目标值不变会被去抖跳过 ⇒ PCS 停等）—— 本组只收口**日志速率**。
+
+    /// U-171 用例桩：**`send_tai_command` 恒 `Err`**（模拟 PCS 离线 / 总线不可达）。
+    ///
+    /// 手法：**不预置** `ensure_started` 的 S-4 精确地址读（FC04 `1013`）—— `MockBus` 对
+    /// 未预置键恒返 `Err`（`read_input` 的 `ok_or_else`），且**不是** `fail_once` 的一次性
+    /// 队列 ⇒ **持续**失败（正是"离线"语义）。采集快照不受影响（区块读 1000..1076 已预置）。
+    async fn stub_pcs_send_always_fails() -> Arc<PcsHandle> {
+        use mupc_southd::config::{RegBlockConf, RegFunc, SouthPcsConfig};
+
+        let mut cfg = SouthPcsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        cfg.regs = vec![RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 1000,
+            func: RegFunc::Input,
+            format: mupc_data_processing::meter_regs::RegFormat::Uint16,
+            scale: 1.0,
+            count: 76,
+            offset: 0.0,
+            byte_swap: true,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        }];
+        let mut words = vec![0u16; 76];
+        words[(1010 - 1000) as usize] = mupc_southd::pcs::to_pcs_reg(50.0);
+        words[(1013 - 1000) as usize] = mupc_southd::pcs::to_pcs_reg(2.0);
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1000, words);
+        // **刻意不** `put_input(1, 1013, ..)` ⇒ ensure_started 的前置读恒 Err（见函数文档）。
+        let h = PcsHandle::new(cfg, bus.clone(), Arc::new(NullSink));
+        h.tick_once().await;
+
+        // 前提自证（否则"节流生效"的断言会空转）：本桩**真的**发不出去。
+        assert!(
+            h.send_tai_command([1.0, 0.0, 0.0], [0.0; 3], "probe")
+                .await
+                .is_err(),
+            "前提：本桩的下发必须恒 Err（PCS 离线语义）"
+        );
+        h
+    }
+
+    /// U-171 用例装配：**PCS 离线** + 台区储能策略 + 数据超期 → 每拍都产出归零指令 ⇒
+    /// 每拍都会进下发路径并失败（可观测"每拍失败、告警却只一条"）。
+    async fn u171_integrator_offline() -> AiIntegrator {
+        let mut i = AiIntegrator::new();
+        i.set_pcs_client(stub_pcs_send_always_fails().await);
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+        *i.last_data_ts.write().await =
+            Some(std::time::Instant::now() - AiIntegrator::DATA_STALE_AFTER * 2);
+        i
+    }
+
+    /// **U-171（1/3）**：PCS 离线 ⇒ 下发**每拍失败**，但**告警按 30s 节流**（连喂 3 拍恰 1 条）。
+    ///
+    /// 改什么会让本条变红：去掉 `warn_due` 节流（恢复每拍 `warn!`）⇒ 计数 3。
+    #[tokio::test]
+    async fn u171_send_failure_warn_is_throttled() {
+        let i = u171_integrator_offline().await;
+        for _ in 0..3 {
+            i.run_fallback_strategies().await.unwrap();
+        }
+        assert_eq!(
+            i.send_fail_warn_count(),
+            1,
+            "离线期每拍告警 = 刷屏（≈86400 条/日）；须 30s 节流"
+        );
+    }
+
+    /// **U-171（2/3）**：节流**到期后须再次告警**（防"只告警一次、之后永久沉默"——
+    /// 那会让运维以为链路已恢复）。
+    ///
+    /// 改什么会让本条变红：把 `warn_due` 改成"只在首拍告警"（如 `is_some()` 即返 false）
+    /// ⇒ 末条断言得 1 而非 2。
+    #[tokio::test]
+    async fn u171_send_failure_warn_repeats_after_interval() {
+        let i = u171_integrator_offline().await;
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "首发须告警");
+
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "节流窗内不得重复告警");
+
+        i.backdate_send_fail_warn(std::time::Duration::from_secs(31));
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 2, "节流到期后须再次告警");
+    }
+
+    /// **U-171（3/3）**：**PCS 通道未注入**是另一条"下发不可能成功"路径（`south_pcs.enabled=false`
+    /// ⇒ 本分支每拍命中），**独立分槽**节流：两路告警不得互相吞掉。
+    ///
+    /// 分槽取证用"运行期注入"构造（生产中配置不会中途变，此处纯为**判别力探针**）：
+    /// 先让未注入分支占满它自己的节流槽，再注入恒失败的 PCS —— **若两路共用一槽**，失败告警
+    /// 会被上一条未注入告警吃掉（`send_fail_warn_count` 仍为 0）。
+    ///
+    /// 改什么会让本条变红：① 未注入分支不节流 ⇒ 首条断言得 3；② 两路共用节流槽 ⇒ 末条得 0。
+    #[tokio::test]
+    async fn u171_pcs_absent_warn_is_throttled_and_separate() {
+        let mut i = AiIntegrator::new();
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+        *i.last_data_ts.write().await =
+            Some(std::time::Instant::now() - AiIntegrator::DATA_STALE_AFTER * 2);
+        // **不** set_pcs_client ⇒ 走"通道未注入"分支
+        for _ in 0..3 {
+            i.run_fallback_strategies().await.unwrap();
+        }
+        assert_eq!(i.pcs_absent_warn_count(), 1, "未注入分支同样须节流");
+        assert_eq!(i.send_fail_warn_count(), 0, "未注入不得记入失败槽");
+
+        i.set_pcs_client(stub_pcs_send_always_fails().await);
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            1,
+            "两路共用节流槽会吞掉失败告警（分槽才立即告警）"
+        );
+    }
+
+    /// **U-171（补，QA 缺口 ①）**：节流间隔须有**下界** —— 29 s < 30 s ⇒ 窗内**不得**告警，
+    /// 31 s > 30 s ⇒ 须告警。两个方向合在一处 ⇒ **把间隔从两侧同时钉死**。
+    ///
+    /// 为什么必须补：`u171_send_failure_warn_repeats_after_interval` 只从**上界**一侧探
+    /// （回拨 31 s 须告警），把 `SEND_FAIL_WARN_INTERVAL` 改成 1 s 它**仍然全绿** —— 即
+    /// "间隔被悄悄调小（＝节流形同虚设）"这一失效**无判别力覆盖**（QA 实测：改成 1 s 时既有
+    /// 三条用例全绿，仅本用例红）。
+    ///
+    /// 改什么会让本条变红：① 间隔改小到 ≤29 s（如 1 s）⇒ 第二段得 2 而非 1；
+    /// ② 间隔改大到 >31 s ⇒ 第三段得 1 而非 2。
+    #[tokio::test]
+    async fn u171_send_fail_warn_throttle_interval_bounded_both_sides() {
+        let i = u171_integrator_offline().await;
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "首发须告警");
+
+        // 下界侧：回拨 29 s（**不足** 30 s）⇒ 仍在窗内 ⇒ 不得再告警
+        i.backdate_send_fail_warn(std::time::Duration::from_secs(29));
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            1,
+            "29s < 30s 属窗内：再告警即「间隔被调小到形同虚设」"
+        );
+
+        // 上界侧：回拨 31 s（**超过** 30 s）⇒ 到期 ⇒ 须再告警
+        i.backdate_send_fail_warn(std::time::Duration::from_secs(31));
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            2,
+            "31s > 30s 须到期告警（间隔被调大到 >31s 即红）"
+        );
+    }
+
+    /// **U-171（补，QA 缺口 ②）**：**"刻意不因下发成功而复位"** —— 这是本项节流设计的
+    /// 承重选择（字段 `send_fail_warned` 的 doc：链路抖动时复位 ⇒ 每条失败都告警 ⇒ 刷屏回归），
+    /// 但既有三条用例**无一含成功拍** ⇒ 该理由此前**零判别力覆盖**（QA 实测：改成"成功即复位"
+    /// 时既有一条都不红，仅本用例红）。
+    ///
+    /// 序列：失败（告警 1）→ **成功一拍**（不告警，且若实现会复位则此处复位）→ 再失败
+    /// （节流槽**未**复位 ⇒ 仍不告警，计数保持 1）。
+    /// 每拍前 `reset_last_sent_tai()` 是为了**绕开去抖早返**（去抖命中时根本进不到发送分支，
+    /// 那样计数不变并非节流所致 —— 属"前提失真"的假绿）。
+    ///
+    /// 改什么会让本条变红：在成功分支加 `*send_fail_warned = None`（即"成功即复位"）⇒ 末段得 2。
+    #[tokio::test]
+    async fn u171_send_fail_warn_survives_a_success_tick() {
+        let mut i = AiIntegrator::new();
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+        *i.last_data_ts.write().await =
+            Some(std::time::Instant::now() - AiIntegrator::DATA_STALE_AFTER * 2);
+
+        // ① 失败 ⇒ 告警 1
+        i.set_pcs_client(stub_pcs_send_always_fails().await);
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "首发失败须告警");
+
+        // ② 成功一拍（可发通的桩）⇒ 成功路径不得产告警（也不得复位节流槽）
+        let (working, _bus) = stub_pcs_observable(Some(50.0)).await;
+        i.set_pcs_client(working);
+        i.reset_last_sent_tai().await; // 防去抖早返（否则本拍不进发送分支）
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "成功拍不得产告警");
+
+        // ③ 再失败 ⇒ 槽未复位 ⇒ 仍不告警（计数保持 1）
+        i.set_pcs_client(stub_pcs_send_always_fails().await);
+        i.reset_last_sent_tai().await;
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            1,
+            "成功不得复位节流槽（复位则链路抖动期每条失败都告警 = 刷屏回归）"
+        );
     }
 
     impl AiIntegrator {
