@@ -578,7 +578,7 @@ let key = Zeroizing::new(sensitive_data);
 > **⚠️ 载体订正（2026-09-27）**：上表 LEA-36 / LEA-37 / LEA-40 中「指令下发至实时控制模块」这一段的**物理载体已变更**，但**条款原文与 ID 一律保留**（本节为历史目标，不作删除）。2026-09-26 PCS（= 实时控制模块）的通信与控制由 `mupc-intercore` **整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014·015·016）：
 >
 > - **现行控制路径**：`mupc-southd::pcs::PcsHandle`，四个受限入口 `send_dual_param` / `send_tai_command` / `stop` / `tick_once`；由 `strategy-engine::AiIntegrator::set_pcs_client(Arc<PcsHandle>)` 注入（原 `set_intercore_client` 已删）
-> - **物理介质**：**RS485 / Modbus RTU**（BECG-3568 板载隔离 485 口），**不是 RJ45 TCP**
+> - **物理介质**：**RS485 / Modbus RTU**（BECG-3588 板载隔离 485 口），**不是 RJ45 TCP**
 > - **`mupc-intercore` 现状**：仅剩核间 TCP 帧协议（`protocol.rs` / `tcp_server.rs` / `transport.rs` / `heartbeat.rs`），生产路径**无消费者**；现存真实消费者只有 `sim-bridge`（11 号仿真测试环境复用帧编解码）
 > - 叠加**国密框架态**（2026-09-09：SM4-GCM 为未实现的框架占位）
 >
@@ -1181,3 +1181,4 @@ Phase 5: 安全告警与合规仪表盘（P1）
 | 版本 | 主要变更 |
 |------|----------|
 | v1.0 | 合并已评审通过的安全模块相关 PRD（国密算法、安全启动、电力合规），结构化重整理 |
+| v1.1 | 硬件平台口径订正（仅改平台名，条款与验收 ID 均未改）：§7.1 载体订正块内「物理介质 = RS485 / Modbus RTU（**BECG-3568** 板载隔离 485 口）」改为 **BECG-3588**（`mupcd` 最终运行硬件 = BECG-3588 BOX，原型号已换代） |
