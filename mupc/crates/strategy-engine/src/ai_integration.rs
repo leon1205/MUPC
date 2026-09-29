@@ -1782,6 +1782,84 @@ mod tests {
         );
     }
 
+    /// **U-171（补，QA 缺口 ①）**：节流间隔须有**下界** —— 29 s < 30 s ⇒ 窗内**不得**告警，
+    /// 31 s > 30 s ⇒ 须告警。两个方向合在一处 ⇒ **把间隔从两侧同时钉死**。
+    ///
+    /// 为什么必须补：`u171_send_failure_warn_repeats_after_interval` 只从**上界**一侧探
+    /// （回拨 31 s 须告警），把 `SEND_FAIL_WARN_INTERVAL` 改成 1 s 它**仍然全绿** —— 即
+    /// "间隔被悄悄调小（＝节流形同虚设）"这一失效**无判别力覆盖**（QA 实测：改成 1 s 时既有
+    /// 三条用例全绿，仅本用例红）。
+    ///
+    /// 改什么会让本条变红：① 间隔改小到 ≤29 s（如 1 s）⇒ 第二段得 2 而非 1；
+    /// ② 间隔改大到 >31 s ⇒ 第三段得 1 而非 2。
+    #[tokio::test]
+    async fn u171_send_fail_warn_throttle_interval_bounded_both_sides() {
+        let i = u171_integrator_offline().await;
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "首发须告警");
+
+        // 下界侧：回拨 29 s（**不足** 30 s）⇒ 仍在窗内 ⇒ 不得再告警
+        i.backdate_send_fail_warn(std::time::Duration::from_secs(29));
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            1,
+            "29s < 30s 属窗内：再告警即「间隔被调小到形同虚设」"
+        );
+
+        // 上界侧：回拨 31 s（**超过** 30 s）⇒ 到期 ⇒ 须再告警
+        i.backdate_send_fail_warn(std::time::Duration::from_secs(31));
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            2,
+            "31s > 30s 须到期告警（间隔被调大到 >31s 即红）"
+        );
+    }
+
+    /// **U-171（补，QA 缺口 ②）**：**"刻意不因下发成功而复位"** —— 这是本项节流设计的
+    /// 承重选择（字段 `send_fail_warned` 的 doc：链路抖动时复位 ⇒ 每条失败都告警 ⇒ 刷屏回归），
+    /// 但既有三条用例**无一含成功拍** ⇒ 该理由此前**零判别力覆盖**（QA 实测：改成"成功即复位"
+    /// 时既有一条都不红，仅本用例红）。
+    ///
+    /// 序列：失败（告警 1）→ **成功一拍**（不告警，且若实现会复位则此处复位）→ 再失败
+    /// （节流槽**未**复位 ⇒ 仍不告警，计数保持 1）。
+    /// 每拍前 `reset_last_sent_tai()` 是为了**绕开去抖早返**（去抖命中时根本进不到发送分支，
+    /// 那样计数不变并非节流所致 —— 属"前提失真"的假绿）。
+    ///
+    /// 改什么会让本条变红：在成功分支加 `*send_fail_warned = None`（即"成功即复位"）⇒ 末段得 2。
+    #[tokio::test]
+    async fn u171_send_fail_warn_survives_a_success_tick() {
+        let mut i = AiIntegrator::new();
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+        *i.last_data_ts.write().await =
+            Some(std::time::Instant::now() - AiIntegrator::DATA_STALE_AFTER * 2);
+
+        // ① 失败 ⇒ 告警 1
+        i.set_pcs_client(stub_pcs_send_always_fails().await);
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "首发失败须告警");
+
+        // ② 成功一拍（可发通的桩）⇒ 成功路径不得产告警（也不得复位节流槽）
+        let (working, _bus) = stub_pcs_observable(Some(50.0)).await;
+        i.set_pcs_client(working);
+        i.reset_last_sent_tai().await; // 防去抖早返（否则本拍不进发送分支）
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(i.send_fail_warn_count(), 1, "成功拍不得产告警");
+
+        // ③ 再失败 ⇒ 槽未复位 ⇒ 仍不告警（计数保持 1）
+        i.set_pcs_client(stub_pcs_send_always_fails().await);
+        i.reset_last_sent_tai().await;
+        i.run_fallback_strategies().await.unwrap();
+        assert_eq!(
+            i.send_fail_warn_count(),
+            1,
+            "成功不得复位节流槽（复位则链路抖动期每条失败都告警 = 刷屏回归）"
+        );
+    }
+
     impl AiIntegrator {
         fn is_ready_blocking(&self) -> bool {
             false
