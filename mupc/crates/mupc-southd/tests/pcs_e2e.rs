@@ -307,8 +307,8 @@ async fn e3_holding_write_readback_signed() {
         WriteToken::Iec104,
         &PcsDualParam::new(-12.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("下发应成功");
+    .await
+    .expect("下发应成功");
 
     // 块作用域（而非 `drop(hold)`）：clippy 的 `await_holding_lock` 只认**词法作用域**，
     // `drop` 消不掉该警告（评审判已实证）。锁在下面 `read_holding(...).await` 之前必须
@@ -354,8 +354,8 @@ async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
         WriteToken::Iec104,
         &PcsDualParam::new(150.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("下发应成功");
+    .await
+    .expect("下发应成功");
     {
         let hold = state.hold.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
@@ -380,8 +380,8 @@ async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
         WriteToken::Iec104,
         &PcsDualParam::new(60.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("下发应成功");
+    .await
+    .expect("下发应成功");
     {
         let hold = state.hold.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
@@ -396,8 +396,8 @@ async fn e8_dual_param_device_range_clamp_visible_from_slave_side() {
         WriteToken::Iec104,
         &PcsDualParam::new(-150.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("下发应成功");
+    .await
+    .expect("下发应成功");
     let wire_neg = bus
         .read_holding(1, REG_CONST_P_SET, 1)
         .await
@@ -428,8 +428,8 @@ async fn e4_start_stop_direction_state_machine() {
         WriteToken::Iec104,
         &PcsDualParam::new(0.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("授权后须放行一次启动");
+    .await
+    .expect("授权后须放行一次启动");
     h.tick_once().await;
     assert_eq!(
         h.last_run_state(),
@@ -441,8 +441,8 @@ async fn e4_start_stop_direction_state_machine() {
         WriteToken::Iec104,
         &PcsDualParam::new(5.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("写 P=+5 应成功");
+    .await
+    .expect("写 P=+5 应成功");
     h.tick_once().await;
     assert_eq!(h.last_run_state(), Some(3), "P>0 ⇒ 放电(3)");
 
@@ -450,8 +450,8 @@ async fn e4_start_stop_direction_state_machine() {
         WriteToken::Iec104,
         &PcsDualParam::new(-5.0, 0.0, true, "fallback"),
     )
-        .await
-        .expect("写 P=−5 应成功");
+    .await
+    .expect("写 P=−5 应成功");
     h.tick_once().await;
     assert_eq!(h.last_run_state(), Some(2), "P<0 ⇒ 充电(2)");
 
@@ -531,8 +531,8 @@ async fn e6_concurrent_write_read_no_crosstalk() {
                 WriteToken::Iec104,
                 &PcsDualParam::new(p, 0.0, true, "fallback"),
             )
-                .await
-                .unwrap_or_else(|e| panic!("写 1001 第 {i} 次失败（疑似串帧/回显不符）: {e}"));
+            .await
+            .unwrap_or_else(|e| panic!("写 1001 第 {i} 次失败（疑似串帧/回显不符）: {e}"));
         }
     });
     let hr = Arc::clone(&h);

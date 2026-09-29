@@ -285,12 +285,12 @@ impl mupc_gateway::iec104::command::CommandHandler for StrategyCommandHandler {
                         pcs.send_dual_param(mupc_southd::scheduler::WriteToken::Iec104, &dual)
                             .await
                             .map_err(|e| {
-                            MupcError::new(
-                                ErrorCode::SendFailed,
-                                format!("PCS 下发失败: {e}"),
-                                "startup",
-                            )
-                        })?;
+                                MupcError::new(
+                                    ErrorCode::SendFailed,
+                                    format!("PCS 下发失败: {e}"),
+                                    "startup",
+                                )
+                            })?;
                     } else {
                         // 无 PCS 通道 ⇒ 指令**不可能**到达执行端：如实回失败，不谎报"命令已下发"
                         tracing::warn!(

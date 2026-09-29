@@ -698,8 +698,8 @@ mod collection_tests {
             [0.0, 0.0, 0.0],
             "fallback",
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert!(h.debug_started().await, "前提：已启动");
         assert_eq!(
             h.debug_mode(),

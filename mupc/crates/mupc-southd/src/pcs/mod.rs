@@ -464,7 +464,11 @@ impl PcsHandle {
     }
 
     /// 确保处于指定有功模式（缓存命中则跳过；否则写 `REG_MODE` 并更新缓存）。
-    async fn ensure_mode(&self, writes: &mut Vec<PcsWriteRecord>, mode: u16) -> Result<(), PcsError> {
+    async fn ensure_mode(
+        &self,
+        writes: &mut Vec<PcsWriteRecord>,
+        mode: u16,
+    ) -> Result<(), PcsError> {
         if self.inner.mode.load(Ordering::Relaxed) as u16 == mode {
             return Ok(());
         }
@@ -963,9 +967,12 @@ mod control_tests {
         let bus = Arc::new(MockBus::new());
         bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]); // 前置：S-4 守卫需非停机态
         let h = handle(bus.clone());
-        h.send_dual_param(WriteToken::Iec104, &PcsDualParam::new(150.0, 0.0, true, "fallback"))
-            .await
-            .unwrap();
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(150.0, 0.0, true, "fallback"),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             bus.write_calls.lock().unwrap().clone(),
             vec![
@@ -986,8 +993,8 @@ mod control_tests {
             WriteToken::Iec104,
             &PcsDualParam::new(-150.0, 0.0, true, "fallback"),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         let p_write = bus2
             .write_calls
             .lock()
@@ -1028,8 +1035,8 @@ mod control_tests {
             WriteToken::Iec104,
             &PcsDualParam::new(60.0, 0.5, true, "intelligent"),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(
             bus.write_calls.lock().unwrap().clone(),
             vec![
@@ -1050,8 +1057,8 @@ mod control_tests {
             WriteToken::Iec104,
             &PcsDualParam::new(-60.0, 0.0, true, "intelligent"),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(
             bus2.write_calls
                 .lock()
@@ -1101,8 +1108,8 @@ mod control_tests {
                 WriteToken::Iec104,
                 &PcsDualParam::new(p_ref, 0.5, true, "intelligent"),
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
             let writes = bus.write_calls.lock().unwrap().clone();
 
             // 前提自证：本轮确实写了 1001 —— 否则「Q 恒 0」可能只是"整条写序缺失"的假象。
@@ -1175,8 +1182,8 @@ mod control_tests {
             [1.0, -2.0, 3.0],
             "fallback",
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let writes = bus.write_calls.lock().unwrap().clone();
         // ① 写序专锚：逐相**配对且相邻**（每相的 P 紧跟其后就是同相 Q，A→B→C），而非原文的
@@ -1400,7 +1407,9 @@ mod control_tests {
             .expect("失败那一次写必须被记录（否则等于漏审）");
         assert_eq!(bad.readback, None, "失败的写须记『未确认』，不得谎报回读值");
         assert!(
-            writes.iter().all(|w| w.readback.is_some() || w.reg == regs::REG_CONST_Q_SET),
+            writes
+                .iter()
+                .all(|w| w.readback.is_some() || w.reg == regs::REG_CONST_Q_SET),
             "只有失败的那一次可以为 None：{writes:?}"
         );
     }
@@ -1459,8 +1468,7 @@ mod control_tests {
                 &PcsDualParam::new(10.0, 0.5, true, "intelligent"),
             )
             .await;
-        assert!(r.is_err(), "前提：latch 期间必须拒绝")
-        ;
+        assert!(r.is_err(), "前提：latch 期间必须拒绝");
         assert_eq!(
             sink.audits().len(),
             0,
