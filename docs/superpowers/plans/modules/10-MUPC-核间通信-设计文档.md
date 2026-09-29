@@ -1324,14 +1324,16 @@ io:
   release_hold_secs: 5    # 触发源回安全态需保持时长（人工解除前置校验）
   stop_confirm_ms: 5000   # 停机确认窗口（1013 须转 0）；超时 → stop_failed + interlock 周期重试 stop
   di:
-    di1: { name: 急停,     gpio: 124, active_low: true,  debounce: 1, action: pcs_stop }  # NC 断线触发，近即时
-    di2: { name: 水浸,     gpio: 125, active_low: false, debounce: 1, action: pcs_stop }
-    di3: { name: 消防报警, gpio: 102, active_low: false, debounce: 1, action: pcs_stop }
-    di4: { name: 门禁,     gpio: 103, active_low: false, debounce: 3, action: event }     # 仅事件
+    di1: { name: 急停,     gpio: 493, active_low: false, debounce: 1, action: pcs_stop }  # NC 断线触发，近即时（见 12 章首 BECG-3588 编号与反逻辑）
+    di2: { name: 水浸,     gpio: 494, active_low: false, debounce: 1, action: pcs_stop }
+    di3: { name: 消防报警, gpio: 495, active_low: false, debounce: 1, action: pcs_stop }
+    di4: { name: 门禁,     gpio: 496, active_low: false, debounce: 3, action: event }     # 仅事件
   do:
-    do1: { name: 运行灯, gpio: 97,  active_high: true }
-    do2: { name: 故障灯, gpio: 107, active_high: true }
+    do1: { name: 运行灯, gpio: 27,  active_high: true }
+    do2: { name: 故障灯, gpio: 135, active_high: true }
 ```
+
+> 上例 gpio 编号（DI 493–496 / DO 27·135）与急停 `active_low: false` 均为 **BECG-3588** 取值（编号见 12 章首；`active_low` 系反逻辑**推导值，须现场逐路实测核销**）。
 
 持久化：联锁 latch 沿 `storage` 记录（`faults`/`events` 表，事件写库本轮接线；DB 行带 `cleared_at` 状态列）；**读回时机 = mupcd 启动、首个策略/下发行前**同步置入 transport（避免启动窗口内首个 send 抢先写 500=1）。Web API `GET /api/v1/interlock/status` + `POST /api/v1/interlock/release`（role 校验沿用占位 RBAC，08 模块）；**本地受控释放旁路**（mupcd CLI 子命令 + 本地日志审计）供现场无网/Web 不可达时人工恢复；RBAC 落地前 Web release 限内网访问并标注「占位 RBAC 仅开发期可用」为授权偏离。SSE 告警复用（startup SSE 推送）。
 
