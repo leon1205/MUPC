@@ -44,7 +44,7 @@
 
 ```
 【数据来源（现状）】南向设备：BMS / 空调 / 关口表 / 储能表 / 消防状态 / PCS …
-     │  RS485 Modbus RTU（BECG-3568 板载 8 路隔离，每路独立 master）
+     │  RS485 Modbus RTU（BECG-3588 板载 8 路隔离，每路独立 master）
      ▼
 mupc-southd（02 号设计）
      ├── scheduler / port_runtime / station / mapper   ← 站级多从站轮询（02 §10–§12）
@@ -2337,3 +2337,4 @@ mupc/crates/storage/
 | v1.3-r4 | FLS-03② 的告警聚合按 PRD R-11.5-A4 字面改为**边沿触发**（连续丢弃 10 周期 = 恰好 1 条）。 |
 | v1.3-r5 | PCS 通信与控制整体迁入南向（02 设计 §13 / ADR-014）后的连带标注：四处核间数据面表述加注，未改任何裁定与数字。 |
 | v1.4 | **§1 数据面口径改判 + web-api 残留清理**（据实订正，不改需求与数字）：§1.1 补「本模块的采集输入不是核间通道」口径（`mupc-data-processing` **不依赖 `mupc-intercore`**，`Cargo.toml` 无此边；数据源为南向 `mupc-southd`，经装配层 `SouthSink` 投递）；§1.2 模块关系图上游由「实时控制模块 → intercore → DataCollector」改为**南向采集链路**，尾部 `web-api` 出口改判；§1.3 上下游表 intercore 行标作废、`mupc-storage → web-api` 行标作废并给出**已实现/未实现**读出口清单；§1.4 数据流按现状重写并**据实登记故障录波无生产触发源**（`DualBufferManager`/`TriggerEngine`/`FaultRecorderImpl` 全仓无调用点）；§2.1/§2.3 采集来源订正（南向 `interval_ms` 量级，非「10ms 核间帧」）；§2.4 加整体作废横幅，**并查出帧号 `0x0040` 与既有 `FrameType::SafetyOverride` 撞码**、码块遗漏三个既有变体；§3.1 录波数据来源订正；§6.1 整表（REST API 35 行）加**作废横幅**并给出现行出口对照；§7.3 两行（`intercore/src/protocol.rs` / `web-api/src/router.rs`）标作废；§4.2/§8.5 crate 拆分理由订正（`data-processing`/`gateway` 实测**不依赖** `mupc-storage`，实测依赖方为 `ai-engine`/`mupc-core-bin`）。 |
+| v1.5 | 硬件平台口径订正（仅改平台名，不改任何数字与结论）：§1.2 模块关系图内「RS485 Modbus RTU（**BECG-3568** 板载 8 路隔离…）」改为 **BECG-3588**（`mupcd` 最终运行硬件 = BECG-3588 BOX，串口节点按 02 号 PRD/设计重映射；原型号已换代）。 |
