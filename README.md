@@ -17,7 +17,7 @@ MUPC（Microgrid Universal Power Controller）通信管理模块是"异构双核
 | **本地策略引擎** | 台区储能治理 —— **2026-09-09 起为唯一默认下发引擎**（AI 暂停期唯一出口）；原三策略（削峰填谷 / 需量控制 / 防逆流）已废弃（代码保留不编译） |
 | **AI 边缘优化引擎** | LSTM 分位数预测 + MADDPG/PPO 强化学习决策 + RK3588 NPU 推理 —— **框架保留、引擎停用**（2026-09-09「平台目标调整」，模型不加载、观测空间停采） |
 | **本地显示终端** | 触摸式本地 HMI（12 号模块，1024×768，LVGL）；6 页 IA；**无登录 + 审计 + 二次确认** |
-| **OTA 升级** | 固件与 AI 模型的远程更新与版本管理 |
+| **OTA 升级与系统可靠性** | 固件与 AI 模型的远程更新与版本管理；可靠性为**三层**：**进程级**（委托 systemd `Restart=`/`StartLimitBurst`/`MemoryMax`）、**服务级**（`ServiceCoordinator` + `mupc-core-bin/src/service_health.rs`，周期 15 s、边沿告警）、**跨进程**（仅显示通道连接态） |
 
 ---
 
@@ -50,7 +50,7 @@ mupc/
 │   ├── data-processing/         # 遥测数据采集与处理
 │   ├── strategy-engine/         # 本地策略引擎（台区储能治理）+ AI 集成门面
 │   ├── ai-engine/               # AI 优化引擎 (LSTM/MADDPG/PPO/RKNN) —— 框架保留、引擎停用
-│   ├── intercore/               # 核间通信 (TCP/RJ45) —— 仅核间帧协议（PCS 语义面已迁出）
+│   ├── intercore/               # 核间通信 (TCP/RJ45) —— 仅核间帧协议（PCS 语义面已迁出）；生产路径无读取方
 │   ├── mupc-southd/             # 站级南向调度 + PCS 通信与控制（bin: pcs_slave）
 │   ├── mupc-io/                 # 数字 IO 抽象 (BECG-3588 DI/DO, sysfs)
 │   ├── security/                # 安全模块（国密只留框架，审计）
@@ -162,9 +162,15 @@ cargo test -- --nocapture
 ### 代码质量
 
 ```bash
-cargo fmt --all     # 格式化
+cargo fmt --all     # 格式化（⚠️ 见下方提示）
 cargo clippy        # 静态检查
 ```
+
+> ⚠️ **`cargo fmt --all` 的提示**：全仓存在**历史 fmt 基线**（2026-09-29 实测 `cargo fmt --all -- --check`
+> 有 **69 处**既有 diff，分布在 `data-processing` / `intercore` 等**与本次改动无关**的文件）。
+> 直接 `--all` 会产生大范围无关改写、淹没真实变更 ⇒ **只格式化本次改动的文件**
+> （`rustfmt --edition 2021 <file>`，或 `cargo fmt -p <crate>` 后逐个核对）。
+> 判据：`cargo fmt --all -- --check` 的 diff **条数不应增加**。
 
 ---
 
@@ -180,7 +186,9 @@ cargo clippy        # 静态检查
                     │             （2026-09-26 由 intercore 迁入，走 RS485 Modbus RTU）
                     └─ 四条通路：插件化单设备 / 站级多从站调度 / PCS 通信与控制 / 数字 IO（mupc-io）
 
-  intercore（核间 TCP 帧协议）┈┈  保留待接：生产路径暂无消费者（现存消费者只有 sim-bridge）
+  intercore（核间 TCP 帧协议）┈┈  保留待接：mupcd 启动仍装配 IntercoreClient，但
+                                    StartupContext.intercore 字段无读取方（详见下文数据流表）；
+                                    实质消费者只有 sim-bridge，而 HIL 闭环未实现
 
   主控进程 (mupcd) ──display-proto(TCP 回环)──▶ local-display（12 号本地屏）
 ```
@@ -191,7 +199,7 @@ cargo clippy        # 静态检查
 |------|------|------|
 | 北向 ↑ | gateway → data-processing → strategy-engine | 调度数据处理与上送 |
 | 南向 ↓ | strategy-engine → mupc-southd / rs485-plugin / hplc-plugin | 设备控制指令下发 |
-| 核间 ↔ | intercore (TCP/RJ45) | 仅保留核间 TCP 帧协议（帧协议 + 服务端 + 传输门面）；**该通道在生产路径暂无消费者** |
+| 核间 ↔ | intercore (TCP/RJ45) | 仅保留核间 TCP 帧协议（帧协议 + 服务端 + 传输门面）；**该通道在生产路径无读取方**（`mupcd` 启动仍装配 `IntercoreClient`，但 `StartupContext.intercore` 字段现无消费者；`intercore.transport` 非 `tcp` 会**启动即报错**） |
 | PCS ↕ | strategy-engine ↔ mupc-southd::pcs::PcsHandle | PCS 采集（三相读数 / SOC）+ 控制（启停 / 联锁 / 重启授权），走 RS485 Modbus RTU 从站 |
 | 显示 → | mupcd → local-display | `display-proto` 帧 v3，TCP 回环 `GET /v1/display/latest`；写操作走 Axum `/v1/console/*` |
 | AI → | strategy-engine ← ai-engine | **AI 引擎停用期间不生效**（框架保留；默认 `ai_engine.local_priority = true` ⇒ 本地策略优先） |
@@ -225,7 +233,7 @@ PCS 为 **RS485 Modbus 从站**，其通信与控制已整体迁入南向（02 �
 | Phase | 内容 | 状态 |
 |-------|------|------|
 | Phase 1 | 核心架构（gateway、intercore、data-processing、strategy-engine） | ✅ 完成 |
-| Phase 2A | 南向通信（RS485/HPLC）核心架构 | ✅ 基本完成（4 个测试待修） |
+| Phase 2A | 南向通信（RS485/HPLC）核心架构 | ✅ 基本完成（**5 个测试待修**：`device-trait` 3 / `rs485-plugin` 1 / `iec61850-plugin` 1，2026-09-27 复核仍失败 —— 见 `CLAUDE.md`「已知测试失败」） |
 | Phase 2B | MQTT over TLS | ✅ 完成 |
 | Phase 2B | SM2/SM4 国密 | ⚠️ **只留框架**（`security/Cargo.toml` 注明 framework-only，2026-09-09）；真实依赖 `gmsm 0.1.0`（非 0.14），SM3/SM4-CBC 为真国密，SM2 签名 / SM4-GCM / HKDF / ECDH 未实现，现由 ring 兜底 |
 | Phase 3C | AI 优化引擎（LSTM、MADDPG/PPO、RKNN Runtime） | ✅ 完成（**2026-09-09 起引擎停用**：模型不加载、观测空间停采；框架保留） |
@@ -240,8 +248,11 @@ PCS 为 **RS485 Modbus 从站**，其通信与控制已整体迁入南向（02 �
 | Phase 2+ | IEC 61850-7-420（libIEC61850 FFI 待接入） | ⚠️ 骨架就位 |
 | Phase 2+ | OTA 固件升级（A/B 分区待实现）、安全启动（存根） | ⚠️ 模型OTA完成 |
 | Phase 2+ | WiFi/NearLink/BLE 驱动 | 📋 规划中（RBAC 鉴权中间件随 `web-api` crate 删除，不再适用） |
-| 2026-09 | 12 号本地显示终端（触摸式 HMI，LVGL，BECG-3588） | 🚧 进行中（PRD v2.2 + 设计 + UI 三份文档门禁通过；`display-proto` / `local-display` 两 crate 已落地） |
+| 2026-09 | 12 号本地显示终端（触摸式 HMI，LVGL，BECG-3588） | 🚧 进行中（**PRD v2.5 / 设计 v2.1-r16 / UI 设计** 三份文档门禁通过；`display-proto` / `local-display` 两 crate 已落地；**外设数值上屏增量**（PRD §3.9 F20–F26 / 设计 §15 / U-73）在推进） |
 | 2026-09 | PCS 通信与控制迁入 `mupc-southd`（02 号设计 §13 / ADR-014·015·016） | 🚧 进行中（设计 §13 未获门禁标记） |
+| 2026-09 | **服务级健康监控**（07 号口径改三层，U-164） | ✅ 已实现（`mupc-core-bin/src/service_health.rs`，周期 15 s + 边沿告警；打通此前**全仓零调用点**的 `ServiceCoordinator`，14 个服务从"注册后无人读"变为每 15 s 回写）。**真机项未验**：`kill -9 mupcd` 核 systemd 拉起与服务级告警行为 |
+| 2026-09 | **数据流与策略下发链路完整性审查 + 整改**（台账 U-166 ~ U-172） | ✅ **全收口**：补 `send_dual_param` 输入边界（±100 clamp）、数据超期改**下发归零**（原「停发」会让 PCS 保持陈旧设定数小时）、模式字争用成文、离线期告警节流。报告与方案见 `docs/superpowers/reports/` + `docs/superpowers/plans/2026-09-28-*` |
+| 2026-09-29 | **硬件平台口径统一到 BECG-3588**（原 BECG-3568） | ✅ 文档 + 部署配置：6 个站串口节点按新板重映射（**后四路为 `ttyP0–P3`**，A0 为唯一不变项）、DI/DO GPIO 编号全换、急停 DI 极性按规格书推导为 `active_low: false`。**真机待核销**见 `docs/technical-debt.md` §8.7 **M-11 / M-12** |
 
 技术债详见 [`docs/technical-debt.md`](docs/technical-debt.md)
 
@@ -258,7 +269,8 @@ PCS 为 **RS485 Modbus 从站**，其通信与控制已整体迁入南向（02 �
 | [`docs/superpowers/specs/`](docs/superpowers/specs/) | 项目需求与模块 PRD（**12 份模块 PRD**：01–12；08 号已 SUPERSEDED） |
 | [`docs/superpowers/plans/`](docs/superpowers/plans/) | 项目设计与模块设计（模块 01–12；**11 号仿真测试环境设计文档**路径 = `plans/modules/11-MUPC-仿真测试环境-设计文档.md`） |
 | [`docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md`](docs/superpowers/plans/modules/12-MUPC-本地显示终端-UI设计文档.md) | 12 号本地显示终端 UI 设计（版面几何权威） |
-| [`docs/superpowers/reports/`](docs/superpowers/reports/) | 审查报告、交付报告 |
+| [`docs/MUPC-数据流与储能调度-综述.md`](docs/MUPC-数据流与储能调度-综述.md) | **面向新人的综述**：正文业务向（怎么采集/处理存储/做储能调度/下发指令到 PCS）+ 技术附录（全景图、四条采集通路、代码入口、术语对照、覆盖范围） |
+| [`docs/superpowers/reports/`](docs/superpowers/reports/) | 审查报告、交付报告（含链路完整性审查、代码评审、测试报告） |
 | `docs/superpowers/plans/archive/`、`docs/superpowers/specs/archive/`、`docs/superpowers/specs/modules/archive/` | 归档计划 / 归档 PRD（2026-09-27 建立） |
 | [`docs/technical-debt.md`](docs/technical-debt.md) | 技术债清单 |
 
