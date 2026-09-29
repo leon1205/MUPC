@@ -18,7 +18,7 @@
 9. [文件结构](#9-文件结构)
 10. [技术决策记录](#10-技术决策记录)
 11. [传输通道抽象与 Modbus RTU 备选链路](#11-传输通道抽象与-modbus-rtu-备选链路)
-12. [BECG-3568 现场接线契约与安全联锁](#12-becg-3568-现场接线契约与安全联锁)
+12. [BECG-3588 现场接线契约与安全联锁](#12-becg-3588-现场接线契约与安全联锁)
 
 ---
 
@@ -1140,7 +1140,7 @@ intercore:
   heartbeat_interval_sec: 5
   reconnect_interval_sec: 3
   modbus_rtu:                   # PCS 通道参数（transport=modbus_rtu 用，生产）
-    serial_port: "/dev/ttyS0"   # PCS 主链路默认（§12.1）：BECG-3568 板载 COM1（无 ttyS1）；Linux 例，Windows 用 COM3
+    serial_port: "/dev/ttyS0"   # PCS 主链路默认（§12.1）：BECG-3588 板载 CH1 A0（无 A1/B1）；Linux 例，Windows 用 COM3
     baud_rate: 19200            # PCS 默认 19200 N-8-1
     data_bits: 8
     stop_bits: 1
@@ -1257,30 +1257,30 @@ intercore:
 > ⚠️ **E-07 时效注（2026-09-27）**：`src/bin/pcs_slave.rs` **不再属于 intercore**——现为 `mupc/crates/mupc-southd/src/bin/pcs_slave.rs`（feature `pcs-slave-bin` 门控的联调工具）；`mupc_core_config.production.yaml` 的 `transport=modbus_rtu` 模板也随之作废（现为 `transport: tcp`，PCS 主链路在 `south_pcs:` 段）。
 - 文档补记：ADR-010 取代注（M11）、§11.8 授权偏离第 8 条（写超时/重试 M4）、冷启动/缓存重同步与停机观测（M5/M1）、§7.1 PCS 形态健康映射说明（M12）。
 
-## 12. BECG-3568 现场接线契约与安全联锁
+## 12. BECG-3588 现场接线契约与安全联锁
 
-> ⚠️ **本章的 PCS 通道（Modbus RTU / PCS 协议 V1.3）已于 2026-09-26 整体迁出至 `mupc-southd`（02 号设计 §13 / ADR-014）。本章作为历史与设计依据保留，其中「intercore 侧」的文件归属、测试数、配置键均已不再反映现网实现——逐处订正见各段末的 **E-07 时效注**（2026-09-27 加注，原文一字未改）。**
+> ⚠️ **本章的 PCS 通道（Modbus RTU / PCS 协议 V1.3）已于 2026-09-26 整体迁出至 `mupc-southd`（02 号设计 §13 / ADR-014）。本章作为历史与设计依据保留，其中「intercore 侧」的文件归属、测试数、配置键均已不再反映现网实现——逐处订正见各段末的 **E-07 时效注**（2026-09-27 加注，原文一字未改）。**平台口径另于 2026-09-29 由 BECG-3568 更新为 BECG-3588（章名、串口节点、DI/DO GPIO 三处；见下）。**
 
-> **目标平台变更**：MUPC 运行硬件为 **BECG-3568 BOX**（瑞芯微 RK3568 四核 A55 @2.0GHz、NPU 1TOPS、板载 8 路隔离 RS485 / 16 路隔离 DI / 6 路继电器 DO / 2 路 CAN / 4 路 ADC / 4×千兆网口）；后续换 **RK3588 型号接口完全一致**（仅 NPU/OTA 侧按 3588 SDK 变化，见 05 AI 引擎与 OTA 模块）。
-> **板载串口节点**：COM1-8 ↔ `ttyS0` / `ttyS2` / `ttyS3` / `ttyS4` / `ttyS5` / `ttyS6` / `ttyS7` / `ttyS8`（**无 ttyS1**，A0→ttyS0、A2→ttyS2 … A8→ttyS8）；无「USB 转 485」概念（历史 `/dev/ttyUSB0` 假设在 BECG 上不成立）。
-> **DI/DO GPIO 编号**（按规格书 V1.1）：DI1=124 / DI2=125 / DI3=102 / DI4=103 / DI5=104 / DI6=66 / DI7=63 / DI8=64 / DI9=65 / DI10=88 / DI11=89 / DI12=90 / DI13=91 / DI14=148 / DI15=154 / DI16=23；DO1=97 / DO2=107 / DO3=19 / DO4=108 / DO5=109 / DO6=110。编号以板端导出后实际 `gpioN` 校准（配置化容忍 chip 偏移）。
+> **目标平台**：MUPC 运行硬件为 **BECG-3588 BOX**（RK3588 八核 4×A76+4×A55 @2.4GHz、NPU 6TOPS、板载 8 路隔离 RS485 / 16 路隔离 DI / 6 路继电器 DO / 2 路 CAN / 4 路 ADC / 4×千兆网口）；此前按 **BECG-3568 BOX**（RK3568 四核 A55 @2.0GHz、NPU 1TOPS、ADC 为电压型）设计，**已换代**——串口节点乱序、DI/DO GPIO 编号全变（见下两行与 §12.1），NPU/OTA 侧按 3588 SDK（见 05 AI 引擎与 OTA 模块）。
+> **板载串口节点（BECG-3588，物理通道 A 标号不变）**：CH1 A0/B0 → `ttyS0`、CH2 A5/B5 → `ttyP0`、CH3 A2/B2 → `ttyS3`、CH4 A6/B6 → `ttyP1`、CH5 A3/B3 → `ttyS7`、CH6 A7/B7 → `ttyP2`、CH7 A4/B4 → `ttyS8`、CH8 A8/B8 → `ttyP3`（**后四路为 `ttyP*`；无 A1/B1**。旧板 BECG-3568 为顺序节点 `ttyS0`/`ttyS2`…`ttyS8`，属换代差异）；无「USB 转 485」概念（历史 `/dev/ttyUSB0` 假设在 BECG 上不成立）。
+> **DI/DO GPIO 编号（BECG-3588，按规格书）**：DI1=493 / DI2=494 / DI3=495 / DI4=496 / DI5=497 / DI6=498 / DI7=499 / DI8=500 / DI9=501 / DI10=502 / DI11=503 / DI12=504 / DI13=505 / DI14=506 / DI15=507 / DI16=508；DO1=27 / DO2=135 / DO3=21 / DO4=152 / DO5=153 / DO6=154。**DI 为反逻辑**（默认低电平=状态 1、高 3.3~30V=状态 0）⇒ 急停 NC 回路 `active_low: false`（**推导值，须现场逐路实测核销**）。编号以板端导出后实际 `gpioN` 校准（配置化容忍 chip 偏移）。
 
 ### 12.1 PCS 主链路物理接线契约
 
 **PCS 主链路**：**RS485-1 / COM1 / `/dev/ttyS0` ↔ PCS A2/B2，19200 N-8-1**（V1.3 线格式）。`intercore.modbus_rtu.serial_port` 默认 `/dev/ttyS1 → /dev/ttyS0`（YAML 可覆盖，现场以接线为准）；实施须**同步更新 core_config 默认常量与单测断言**，并建议 validate 在 `transport=modbus_rtu` 时启动即探测串口存在性（fail-fast，不等首帧超时）。 ⚠️ **E-07 时效注（2026-09-27）**：配置键 `intercore.modbus_rtu.serial_port` **已删除**（`intercore.transport` 现仅保留 `tcp`，写 `modbus_rtu` 启动即报错）；PCS 串口现由顶层段 `south_pcs.serial_port`（默认 `/dev/ttyS0`）承载。总表等站级 485 节点完整分配见 **02 南向 §10 统一调度** 与 **deploy/deploy.md 现场接线章**。
 
-台区储能现场接线总表（BECG-3568 作 MUPC/EMS 主控）：
+台区储能现场接线总表（BECG-3588 作 MUPC/EMS 主控；物理通道 A 标号不变，节点名按 3588 重映射）：
 
 | RS485 口 | 端子/节点 | 设备 | 数据归属 |
 |---|---|---|---|
 | RS485-1 | COM1/`ttyS0` | PCS 储能变流器（A2/B2，19200 N-8-1） | **`mupc-southd::pcs`（原 `intercore.modbus_rtu`，2026-09-26 迁出；配置项 `south_pcs.serial_port`）** |
-| RS485-2 | COM2/`ttyS2` | BMS | 02 §10（role=battery，SOC 融合见 §12.6 交叉注） |
-| RS485-3 | COM3/`ttyS3` | 空调 | 02 §10（role=hvac，本版遥测） |
-| RS485-4 | COM4/`ttyS4` | 关口表/台区总表 | `master_meter` → 02 §10（role=meter_grid，策略 phase 源） |
-| RS485-5 | COM5/`ttyS5` | 储能表（第二表计） | 02 §10（role=meter_batt） |
-| RS485-6 | COM6/`ttyS6` | 消防状态 | 02 §10（role=fire） |
+| RS485-2 | COM2/`ttyS3` | BMS | 02 §10（role=battery，SOC 融合见 §12.6 交叉注） |
+| RS485-3 | COM3/`ttyS7` | 空调 | 02 §10（role=hvac，本版遥测） |
+| RS485-4 | COM4/`ttyS8` | 关口表/台区总表 | `master_meter` → 02 §10（role=meter_grid，策略 phase 源） |
+| RS485-5 | COM5/`ttyP0` | 储能表（第二表计） | 02 §10（role=meter_batt） |
+| RS485-6 | COM6/`ttyP1` | 消防状态 | 02 §10（role=fire） |
 
-DI/DO 分配（联锁输入/状态输出，接线见 deploy.md）：DI1 急停(124)、DI2 水浸(125)、DI3 消防报警(102)、DI4 门禁(103)、DO1 运行灯(97)、DO2 故障灯(107)。
+DI/DO 分配（联锁输入/状态输出，接线见 deploy.md）：DI1 急停(493)、DI2 水浸(494)、DI3 消防报警(495)、DI4 门禁(496)、DO1 运行灯(27)、DO2 故障灯(135)。
 
 ### 12.2 PCS 停机原语与联锁锁存
 
