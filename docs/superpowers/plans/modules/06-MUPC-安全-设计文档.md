@@ -1327,7 +1327,7 @@ pub struct EncryptedControlCommand {
 
 > ⚠️ **本节已作废（2026-09-27）**：**控制下行的载体已迁至南向 RS485，TCP 会话级加密对本链路不再适用**。
 >
-> - 2026-09-26，PCS（= 实时控制模块）的通信与控制由 `mupc-intercore` **整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014·015·016）。现行控制路径为 `mupc-southd::pcs::PcsHandle`（`send_dual_param` / `send_tai_command` / `stop` / `tick_once`；`strategy-engine::AiIntegrator::set_pcs_client(Arc<PcsHandle>)` 注入），物理介质 **RS485 / Modbus RTU**（BECG-3568 板载隔离 485 口）—— 这是一条**点对点串行总线，不存在 TCP 会话**，故「TCP 会话级 SM4-GCM 加密」**没有可作用的对象**。
+> - 2026-09-26，PCS（= 实时控制模块）的通信与控制由 `mupc-intercore` **整体迁入 `mupc-southd`**（02 号设计 §13 / ADR-014·015·016）。现行控制路径为 `mupc-southd::pcs::PcsHandle`（`send_dual_param` / `send_tai_command` / `stop` / `tick_once`；`strategy-engine::AiIntegrator::set_pcs_client(Arc<PcsHandle>)` 注入），物理介质 **RS485 / Modbus RTU**（BECG-3588 板载隔离 485 口）—— 这是一条**点对点串行总线，不存在 TCP 会话**，故「TCP 会话级 SM4-GCM 加密」**没有可作用的对象**。
 > - `mupc/crates/intercore/` 现仅剩核间 TCP 帧协议（`protocol.rs` / `tcp_server.rs` / `transport.rs` / `heartbeat.rs`），**生产路径无消费者**（`mupc-core-bin/src/startup.rs` 的 TCP 装配只经 `StartupContext.intercore` 移交，该字段无读取方；`CoreConfig::validate` 只接受 `intercore.transport == "tcp"`）。现存真实消费者仅 `sim-bridge`（11 号仿真测试环境复用帧编解码）。
 > - 叠加**国密框架态**（2026-09-09）：`Sm4GcmSessionEncryptor` 依赖的 SM4-GCM 与 SM2 密钥交换**均为未实现的框架占位**。⇒ 本节连同 §7.1 流转图、§7.7 的 LEA-36/37/40，**当前无实现载体**。
 > - 本节结构定义（`Sm4GcmSessionEncryptor`）**保留为设计记录**，不作现行实现依据；若将来核间 TCP 通道恢复生产用途，须连同容器（`PcsHandle` ↔ intercore 的职责边界）一并重新评审。
@@ -2060,3 +2060,4 @@ mupc/crates/web-api/
 |------|----------|
 | v1.0 | 从五份源文档合并为统一设计文档 |
 | v1.1 | 追加 SM2/SM4 国密实现笔记，补充 gmsm 版本差距技术债条目 |
+| v1.2 | 硬件平台口径订正（仅改平台名，条款与结论均未改）：§7.4「TCP 会话级加密（intercore）」作废块内「物理介质 **RS485 / Modbus RTU**（**BECG-3568** 板载隔离 485 口）」改为 **BECG-3588**（`mupcd` 最终运行硬件 = BECG-3588 BOX，原型号已换代） |
