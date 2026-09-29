@@ -1,6 +1,6 @@
 # MUPC 部署指南
 
-目标硬件：BECG-3588 BOX（瑞芯微 RK3588 ARM64），操作系统：Ubuntu 22.04 / Debian 12
+目标硬件：BECG-3588 BOX（瑞芯微 RK3588 ARM64）；操作系统：**Linux**（项目要求 `openEuler 22.03+ / Ubuntu 20.04+`；BECG-3588 **厂商可预装**的是 `Ubuntu 22.04 / Debian 12` —— 二者不冲突，后者是前者的子集）
 
 ---
 
