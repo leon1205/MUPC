@@ -2727,9 +2727,9 @@ mod tests {
         }
         // 设计 §4.3.3 逐行：`false` 的键（日志级别行、核间心跳/重连间隔行）
         for key in [
-            "system.log_level",                 // §4.3.3「日志级别」（热生效，无副作用）
-            "display.bind_addr",                // 只读字段（不可改 ⇒ 永不进「本次改动」）
-            "display.control_bind_addr",        // 同上
+            "system.log_level",          // §4.3.3「日志级别」（热生效，无副作用）
+            "display.bind_addr",         // 只读字段（不可改 ⇒ 永不进「本次改动」）
+            "display.control_bind_addr", // 同上
         ] {
             assert!(
                 !field(&view, key).requires_reconnect,

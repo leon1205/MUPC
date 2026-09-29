@@ -250,7 +250,11 @@ mod tests {
         // 先升到 emergency，再来一次"采集失败" ⇒ **等级必须保持**（不得回落 Normal）
         assert_eq!(g.set_disk_usage(Some(99.0)), Some(DiskLevel::Emergency));
         assert_eq!(g.set_disk_usage(None), None);
-        assert_eq!(g.disk_level(), DiskLevel::Emergency, "采不到不得改写已有判定");
+        assert_eq!(
+            g.disk_level(),
+            DiskLevel::Emergency,
+            "采不到不得改写已有判定"
+        );
         assert!(!g.allows_any_write());
     }
 

@@ -657,7 +657,10 @@ mod tests {
         // 只断言"不报错"：磁盘**可不可用**取决于本机环境（Windows 开发机就没有 df），
         // 旧断言 `is_ok()` 本身没有判别力 —— 真正的判别力在下一条用例。
         let result = read_disk_metrics();
-        assert!(result.is_ok(), "采集本身不得报错（不可用应表达为 Ok(None)）");
+        assert!(
+            result.is_ok(),
+            "采集本身不得报错（不可用应表达为 Ok(None)）"
+        );
     }
 
     /// 判别力：**采集失败必须是"不可用"（`None`），不是某个数字**。

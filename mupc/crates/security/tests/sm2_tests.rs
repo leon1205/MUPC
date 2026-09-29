@@ -67,10 +67,7 @@ fn sm2_verify_is_unsupported_not_a_ring_ecdsa_stand_in() {
 #[test]
 fn a_self_consistent_sign_then_verify_pair_is_structurally_impossible() {
     let signed = sm2_sign(b"payload", "/nonexistent/private_key.pem");
-    assert!(
-        signed.is_err(),
-        "签名侧不可用 ⇒ 不存在可喂给验签侧的签名"
-    );
+    assert!(signed.is_err(), "签名侧不可用 ⇒ 不存在可喂给验签侧的签名");
     assert!(
         sm2_verify(b"payload", &[0u8; 64], "/nonexistent/public_key.pem").is_err(),
         "验签侧不可用 ⇒ 不存在'框架态通过'"

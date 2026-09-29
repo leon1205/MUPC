@@ -143,8 +143,16 @@ mod tests {
 
         let buf: [u8; ACTION_FRAME_LEN] = encoded.as_slice().try_into().unwrap();
         let parsed = parse_frame(&buf).expect("intercore 产出的 ControlCmd 帧必须可解析");
-        assert!((parsed.p_ref - (-12.5)).abs() < 1e-9, "p_ref={}", parsed.p_ref);
-        assert!((parsed.k_droop - 3.25).abs() < 1e-9, "k_droop={}", parsed.k_droop);
+        assert!(
+            (parsed.p_ref - (-12.5)).abs() < 1e-9,
+            "p_ref={}",
+            parsed.p_ref
+        );
+        assert!(
+            (parsed.k_droop - 3.25).abs() < 1e-9,
+            "k_droop={}",
+            parsed.k_droop
+        );
     }
 
     /// 旧的 26 字节私有帧（补零到 64 B）**不再**被接受：其字节 0..2 是 frame_id 高 16 位

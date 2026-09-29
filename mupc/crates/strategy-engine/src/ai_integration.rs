@@ -966,7 +966,8 @@ mod tests {
     async fn apply_soc_source_writes_back_frozen_or_none() {
         // ① 冻结路径：latest_data 已带旧 SOC 30.0；BMS 超期；无 PCS 通道（核间不可达）
         let i = AiIntegrator::new();
-        i.set_latest_data(create_test_pkg_with_soc(Some(30.0))).await;
+        i.set_latest_data(create_test_pkg_with_soc(Some(30.0)))
+            .await;
         i.set_battery_soc(65.5).await;
         *i.bms_soc.write().await = Some((
             65.5,

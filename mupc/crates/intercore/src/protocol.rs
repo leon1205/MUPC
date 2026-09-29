@@ -192,15 +192,13 @@ impl IntercoreFrame {
 
         // Length —— 以实际载荷为准重算，避免 header.length 与 data 不一致时写出"说的和写的不同"的帧
         let length = (FrameHeader::FIXED_LENGTH + self.data.len() + 2) as u16;
-        result
-            .write_u16::<BigEndian>(length)
-            .map_err(|_| {
-                MupcError::new(
-                    ErrorCode::SerializeError,
-                    "Failed to write length",
-                    "intercore",
-                )
-            })?;
+        result.write_u16::<BigEndian>(length).map_err(|_| {
+            MupcError::new(
+                ErrorCode::SerializeError,
+                "Failed to write length",
+                "intercore",
+            )
+        })?;
 
         // Frame type
         let frame_type_val = match self.header.frame_type {
@@ -642,17 +640,16 @@ mod tests {
         // 残留登记（U-76）：V2/V3 的**完整** JSON ControlCmd 载荷本就超过定长帧预算，
         // 修前是"写出 130 字节超长帧 ⇒ 接收侧报 Invalid frame length ⇒ 流失步"，
         // 修后是"调用即 Err"。此处固定这一事实，防止有人把校验退回静默。
-        let payload =
-            crate::tcp_server::ControlCmdPayloadV2 {
-                p_ref: Some(10.0),
-                k_droop: Some(5.0),
-                ai_ready: Some(false),
-                strategy_mode: Some("fallback".into()),
-                timestamp_ms: Some(1_700_000_000_000),
-                frame_version: Some(2),
-            }
-            .to_json()
-            .unwrap();
+        let payload = crate::tcp_server::ControlCmdPayloadV2 {
+            p_ref: Some(10.0),
+            k_droop: Some(5.0),
+            ai_ready: Some(false),
+            strategy_mode: Some("fallback".into()),
+            timestamp_ms: Some(1_700_000_000_000),
+            frame_version: Some(2),
+        }
+        .to_json()
+        .unwrap();
         assert!(
             payload.len() > MAX_PAYLOAD_LEN,
             "前提：完整 V2 JSON 载荷 {} 字节应超过预算 {}",
@@ -678,10 +675,7 @@ mod tests {
             u16::from_be_bytes([frame_bytes[2], frame_bytes[3]]) as usize,
             FrameHeader::FIXED_LENGTH + ActionPayload::LEN + 2
         );
-        assert_eq!(
-            u16::from_be_bytes([frame_bytes[4], frame_bytes[5]]),
-            0x0010
-        );
+        assert_eq!(u16::from_be_bytes([frame_bytes[4], frame_bytes[5]]), 0x0010);
 
         let parsed = IntercoreFrame::from_bytes(&frame_bytes).unwrap();
         let back = ActionPayload::from_frame(&parsed).unwrap();

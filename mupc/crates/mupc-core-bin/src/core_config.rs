@@ -716,11 +716,13 @@ impl CoreConfig {
         // 「AI 是否已接线」没有可靠的**配置期**判据（模型加载在运行期，且需观测空间重构），
         // 故此处拒绝一切 `local_priority=false`，并把恢复条件写进错误文案。
         if !self.ai_engine.local_priority {
-            return Err("ai_engine.local_priority=false 被拒绝：AI 引擎当前停用（启动不加载\
+            return Err(
+                "ai_engine.local_priority=false 被拒绝：AI 引擎当前停用（启动不加载\
                  模型、观测空间未接线），该取值会让 dispatch_ai_decision 恒返回 \
                  ModelNotLoaded，而本地兜底分支不执行 ⇒ 静默零控制输出。\
                  恢复 AI 控制需先重新接线模型加载（load_models + 观测注入）再放开本校验"
-                .to_string());
+                    .to_string(),
+            );
         }
         // TODO(v2.24 M-1)：v2.24 §2.10.2 M-1 预留装配期校验位：策略档位（i_rated/s_rated/dp_max/
         // q_i_max）与 PCS 驱动点表型号不自动联动——放行任一非
@@ -2292,13 +2294,16 @@ io:
         };
 
         // ① 解析生效（非默认值）
-        let config: CoreConfig =
-            serde_yaml::from_str(&base("{ a_ms: 2500, b_ms: 8000 }")).unwrap();
+        let config: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 2500, b_ms: 8000 }")).unwrap();
         assert_eq!(config.gateway.periods.a_ms, 2500);
         assert_eq!(config.gateway.periods.b_ms, 8000);
         // 同段其余键不受影响（不是"整段被忽略"）
         assert_eq!(config.gateway.listen_port, 2405);
-        assert!(config.validate().is_ok(), "合法周期应通过: {:?}", config.validate());
+        assert!(
+            config.validate().is_ok(),
+            "合法周期应通过: {:?}",
+            config.validate()
+        );
 
         // ② a_ms 下界
         let c: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 99, b_ms: 5000 }")).unwrap();
@@ -2316,8 +2321,7 @@ io:
         assert!(e.contains("gateway.periods.b_ms"), "实际: {e}");
 
         // ⑤ b_ms 上界
-        let c: CoreConfig =
-            serde_yaml::from_str(&base("{ a_ms: 1000, b_ms: 600001 }")).unwrap();
+        let c: CoreConfig = serde_yaml::from_str(&base("{ a_ms: 1000, b_ms: 600001 }")).unwrap();
         let e = c.validate().unwrap_err();
         assert!(e.contains("gateway.periods.b_ms"), "实际: {e}");
 

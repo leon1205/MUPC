@@ -116,7 +116,11 @@ impl SelfHealingEngine {
         let retryable = self.can_retry(&action);
         let message = format!(
             "【未实现】{detail} —— 已登记，未执行（自愈动作尚未接线）{}",
-            if retryable { "" } else { "；重试预算已耗尽" }
+            if retryable {
+                ""
+            } else {
+                "；重试预算已耗尽"
+            }
         );
 
         tracing::warn!(
@@ -254,7 +258,14 @@ mod tests {
                 r.message
             );
             for banned in [
-                "已清理", "已轮转", "已启用", "已降低", "已切换", "已通知", "已请求", "已执行",
+                "已清理",
+                "已轮转",
+                "已启用",
+                "已降低",
+                "已切换",
+                "已通知",
+                "已请求",
+                "已执行",
             ] {
                 assert!(
                     !r.message.contains(banned),

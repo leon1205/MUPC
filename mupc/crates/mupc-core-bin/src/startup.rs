@@ -2363,7 +2363,9 @@ pub async fn initialize_all(
                         }
                         last_disk_level = Some(now_level);
                     } else {
-                        tracing::debug!("磁盘指标不可用 ⇒ 本拍不做水位判定（保持上一档，不按 0% 处理）");
+                        tracing::debug!(
+                            "磁盘指标不可用 ⇒ 本拍不做水位判定（保持上一档，不按 0% 处理）"
+                        );
                     }
                     // 自愈：分析指标 + 登记自愈动作
                     if let Ok(analysis) = threshold_analyzer.analyze(&snapshot) {
@@ -2457,10 +2459,12 @@ pub async fn initialize_all(
             iec104: iec104_server.clone(),
             mqtt: mqtt_outcome.publisher.clone(),
         });
-    guard.0.push(crate::link_counters::spawn_link_counter_reporter(
-        link_counters_src,
-        std::time::Duration::from_millis(crate::link_counters::LINK_COUNTER_TICK_MS),
-    ));
+    guard
+        .0
+        .push(crate::link_counters::spawn_link_counter_reporter(
+            link_counters_src,
+            std::time::Duration::from_millis(crate::link_counters::LINK_COUNTER_TICK_MS),
+        ));
     tracing::debug!(
         mqtt_enabled = mqtt_outcome.publisher.is_some(),
         "链路计数上报任务已登记（abort 名单；周期 {} ms）",

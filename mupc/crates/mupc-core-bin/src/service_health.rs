@@ -123,14 +123,32 @@ pub fn unhealthy_services(i: &HealthInputs) -> Vec<(&'static str, String)> {
 /// **不得**拿外部设备/对端的在线态顶替（见模块头第 2 条）。
 pub const NOT_PROBED: &[(&str, &str)] = &[
     ("message_bus", "进程内广播通道，无独立失败面"),
-    ("security", "`Stopped`（国密只留框架）；`Stopped` 不参与告警"),
+    (
+        "security",
+        "`Stopped`（国密只留框架）；`Stopped` 不参与告警",
+    ),
     ("ai_engine", "`Stopped`（2026-09-09 起引擎停用）"),
-    ("intercore", "核间 TCP 通道**生产路径无消费者**，无「可用/不可用」可言"),
-    ("plugin_loader", "运行期加载 cdylib，其失败以插件加载错误呈现，无持续健康面"),
-    ("data_processing", "无「子系统挂了」信号；`station_is_active` 反映**现场设备**离线（外部事件）"),
+    (
+        "intercore",
+        "核间 TCP 通道**生产路径无消费者**，无「可用/不可用」可言",
+    ),
+    (
+        "plugin_loader",
+        "运行期加载 cdylib，其失败以插件加载错误呈现，无持续健康面",
+    ),
+    (
+        "data_processing",
+        "无「子系统挂了」信号；`station_is_active` 反映**现场设备**离线（外部事件）",
+    ),
     ("strategy_engine", "进程内组件，无独立失败面"),
-    ("hmi_backend", "display 通道未连是**常态**（屏可关），不能当服务故障"),
-    ("gateway", "`connection_count()==0` 是**常态**（主站未连），不能当服务故障"),
+    (
+        "hmi_backend",
+        "display 通道未连是**常态**（屏可关），不能当服务故障",
+    ),
+    (
+        "gateway",
+        "`connection_count()==0` 是**常态**（主站未连），不能当服务故障",
+    ),
     ("ota_update", "`Stopped`（未启用）"),
     ("system_monitor", "本巡检任务的宿主，自观测无意义"),
     ("wireless", "`Stopped`（硬件未到）"),
@@ -244,7 +262,10 @@ pub async fn run_service_health_loop<P, E>(
             match signal {
                 SvcSignal::NewlyUnhealthy(name, detail) => {
                     coord.update_service_status(name, ServiceStatus::Failed);
-                    emit(SERVICE_UNHEALTHY_LEVEL, &format!("服务不健康：{name} —— {detail}"));
+                    emit(
+                        SERVICE_UNHEALTHY_LEVEL,
+                        &format!("服务不健康：{name} —— {detail}"),
+                    );
                 }
                 SvcSignal::Recovered(name) => {
                     coord.update_service_status(name, ServiceStatus::Running);
@@ -375,7 +396,8 @@ mod tests {
             for finished in [true, false] {
                 for panicked in [true, false] {
                     for degraded in [true, false] {
-                        let got = unhealthy_services(&inputs(enabled, finished, panicked, degraded));
+                        let got =
+                            unhealthy_services(&inputs(enabled, finished, panicked, degraded));
                         for (name, _) in &got {
                             assert!(
                                 *name == "pcs" || *name == "storage",
@@ -449,10 +471,7 @@ mod tests {
     #[test]
     fn services_are_tracked_independently() {
         let mut w = SvcHealthWatch::new();
-        let both = [
-            ("pcs", "a".to_string()),
-            ("storage", "b".to_string()),
-        ];
+        let both = [("pcs", "a".to_string()), ("storage", "b".to_string())];
         assert_eq!(w.poll(&both).len(), 2, "两个新进入 ⇒ 2 条");
 
         // pcs 恢复、storage 仍在 ⇒ 恰 1 条 Recovered，且**不**为 storage 再投
@@ -470,7 +489,8 @@ mod tests {
     async fn loop_emits_one_alert_per_episode_and_writes_back_status() {
         let failing = Arc::new(AtomicBool::new(false));
         let reads = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let seen: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let coord = Arc::new(ServiceCoordinatorImpl::new());
         coord.register_service("pcs", ServiceStatus::Running);
@@ -497,7 +517,9 @@ mod tests {
                     inputs(true, f.load(Ordering::SeqCst), false, false)
                 },
                 |level, message| {
-                    s.lock().unwrap().push((level.to_string(), message.to_string()));
+                    s.lock()
+                        .unwrap()
+                        .push((level.to_string(), message.to_string()));
                 },
             )
             .await;
@@ -505,7 +527,9 @@ mod tests {
 
         let snapshot = || {
             let v = seen.lock().unwrap();
-            v.iter().map(|(l, m)| (l.clone(), m.clone())).collect::<Vec<_>>()
+            v.iter()
+                .map(|(l, m)| (l.clone(), m.clone()))
+                .collect::<Vec<_>>()
         };
         async fn wait_ticks(reads: &std::sync::atomic::AtomicU64, n: u64) {
             let before = reads.load(Ordering::SeqCst);
@@ -520,7 +544,11 @@ mod tests {
 
         // 健康期 ⇒ 0 条
         wait_ticks(&reads, 3).await;
-        assert!(snapshot().is_empty(), "全健康 ⇒ 0 条，实得 {:?}", snapshot());
+        assert!(
+            snapshot().is_empty(),
+            "全健康 ⇒ 0 条，实得 {:?}",
+            snapshot()
+        );
 
         // 进入边沿 ⇒ 恰 1 条，级别字面量 major，文案含服务名
         failing.store(true, Ordering::SeqCst);
@@ -572,7 +600,9 @@ mod tests {
         // 协作收工
         stop_tx.send(true).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), handle).await.is_ok(),
+            tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .is_ok(),
             "收到停机信号后必须有上限地收工"
         );
     }
