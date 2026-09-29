@@ -398,7 +398,7 @@ strategy-engine ←→ AiIntegrator ←→ ai-engine::ModelManager
 
 **权限模型（12 号 PRD §0 B5）**：**无登录 + 审计 + 二次确认**；物理在场即授权，**无 Session / PIN / RBAC**。写操作（配置保存 / 联锁释放 / M1 授权 / 任何下发）须二次确认并记审计（`ConsoleAuditService`：JSONL 追加 + SHA-256 审计链双写）。**模式切换为暂停项、本期无界面入口**。
 
-> 目标平台 **BECG-3588**（RK3588；此前为 BECG-3568，2026-09-29 换代），HDMI 外接 8 寸 1024×768 触摸屏，**无浏览器 / 无显示服务器（无 X11 / Wayland）**。三份文档：`specs/modules/12-MUPC-本地显示终端-PRD.md`（v2.2）、`plans/modules/12-MUPC-本地显示终端-设计文档.md`、`plans/modules/12-MUPC-本地显示终端-UI设计文档.md`。
+> 目标平台 **BECG-3588**（RK3588；此前为 BECG-3568，2026-09-29 换代），HDMI 外接 8 寸 1024×768 触摸屏，**无浏览器 / 无显示服务器（无 X11 / Wayland）**。三份文档：`specs/modules/12-MUPC-本地显示终端-PRD.md`（v2.5）、`plans/modules/12-MUPC-本地显示终端-设计文档.md`（v2.1-r16）、`plans/modules/12-MUPC-本地显示终端-UI设计文档.md`。
 
 > **历史残留已清除**：原 Web API 的 `RequireRole` 提取器（`X-Session-Id`）、`login()` 占位实现（硬编码 `role: "operator"`）、RBAC 鉴权中间件（技术债 U-01）等**均随 `web-api` crate 删除**，不在仓库内；12 号现行权限模型见上。
 

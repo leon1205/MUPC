@@ -301,4 +301,4 @@ PCS 为 **RS485 Modbus 从站**，其通信与控制已整体迁入南向（02 �
 
 ## 许可证
 
-MIT © MUPC Team
+MIT © 2026 ANGELICO —— 全文见 [`LICENSE`](LICENSE)
