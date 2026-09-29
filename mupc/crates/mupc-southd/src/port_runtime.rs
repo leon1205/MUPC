@@ -89,7 +89,7 @@ pub trait StationBus: Send + Sync {
     /// 不提供批量写 / 任意地址范围写 —— 写能力的**门只开一条缝**，把"能写什么"交给调用方
     /// `PcsHandle` 的 **4 个受限入口**（设计 §13.5.3：`send_dual_param` / `send_tai_command`
     /// / `stop` / `restore_interlock_latched`），而非把写权限摊开在 bus 层。
-    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError>;
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<u16, BusError>;
 }
 
 /// 真机：每 port 单 `Rs485Device`。构造 open 失败 → Err（该口全站 offline，不阻断启动，§10.7）。
@@ -260,7 +260,7 @@ impl StationBus for Rs485PortBus {
         })?
     }
 
-    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<u16, BusError> {
         // 与读路径同款：per-port `bus_lock` 强制口内串行（读与写在同一条物理总线上，
         // 交错即帧污染），阻塞 IO 交给 spawn_blocking。`_g` 须**具名绑定**：`let _ =` 会立刻放锁。
         let _g = self.bus_lock.lock().await;
@@ -581,7 +581,7 @@ impl StationBus for MockBus {
             })
     }
 
-    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<(), BusError> {
+    async fn write_single(&self, slave: u8, addr: u16, value: u16) -> Result<u16, BusError> {
         self.write_calls.lock().unwrap().push((slave, addr, value));
         // 与读路径同构：同一 guard 内查 + 删（消费即清），guard 出块即释放，避免重入死锁。
         let to_fail = {
@@ -601,7 +601,8 @@ impl StationBus for MockBus {
                 reason: "mock 写失败".into(),
             });
         }
-        Ok(())
+        // 回显 = 写入值（真机的 R-2 回显校验保证 `Ok` 时两者恒等 ⇒ 桩与真机同义）
+        Ok(value)
     }
 }
 

@@ -349,7 +349,9 @@ pub trait InterlockPort: Send + Sync {
 #[async_trait]
 impl InterlockPort for Arc<PcsHandle> {
     async fn stop(&self) -> Result<(), String> {
-        (**self).stop().await
+        (**self)
+            .stop(mupc_southd::scheduler::WriteToken::Interlock)
+            .await
     }
     async fn restore_latched(&self, latched: bool) -> Result<(), String> {
         (**self).restore_interlock_latched(latched).await

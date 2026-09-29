@@ -379,6 +379,8 @@ mod collection_tests {
     struct RecSink {
         pub telemetry: StdMutex<Vec<Vec<(String, f64, bool)>>>,
         pub offline: StdMutex<Vec<String>>,
+        /// PCS 写审计事件（每条 = 调用方 token + 该次写序列）
+        pub audits: StdMutex<Vec<(WriteToken, Vec<PcsWriteRecord>)>>,
     }
 
     /// **B-3 探针 sink**：每次投递时尝试 `try_lock` 控制锁（`PcsInner.lock`），记录"当时
@@ -425,6 +427,7 @@ mod collection_tests {
             let held = self.lock_held();
             self.offline_locked.lock().unwrap().push(held);
         }
+        async fn on_pcs_write_audit(&self, _token: WriteToken, _writes: &[PcsWriteRecord]) {}
     }
 
     #[async_trait]
@@ -441,6 +444,16 @@ mod collection_tests {
         async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
         async fn on_station_offline(&self, _id: &str, _role: crate::config::Role, reason: &str) {
             self.offline.lock().unwrap().push(reason.to_string());
+        }
+        async fn on_pcs_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]) {
+            self.audits.lock().unwrap().push((token, writes.to_vec()));
+        }
+    }
+
+    impl RecSink {
+        /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
+        pub fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
+            self.audits.lock().unwrap().clone()
         }
     }
 
@@ -679,9 +692,14 @@ mod collection_tests {
         let sink = Arc::new(RecSink::default());
         let h = PcsHandle::new(cfg_with_points(), bus.clone(), sink);
         // 先建立"已下发模式 + 已启动"
-        h.send_tai_command([1.0, 2.0, 3.0], [0.0, 0.0, 0.0], "fallback")
-            .await
-            .unwrap();
+        h.send_tai_command(
+            WriteToken::Strategy,
+            [1.0, 2.0, 3.0],
+            [0.0, 0.0, 0.0],
+            "fallback",
+        )
+        .await
+        .unwrap();
         assert!(h.debug_started().await, "前提：已启动");
         assert_eq!(
             h.debug_mode(),
