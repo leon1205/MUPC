@@ -29,7 +29,7 @@ intercore:
 # 生产模板见 `mupc_core_config.production.yaml` 的 `pcs_3zone`。
 south_pcs:
   enabled: false
-  port: "/dev/ttyS0"
+  port: "/dev/ttyS0"          # BECG-3588 CH1 A0/B0 → ttyS0（3568→3588 **仅此口节点名不变**）
   protocol: modbus
   slave: 1
   baud_rate: 19200
@@ -160,7 +160,8 @@ strategy:
   # ⚠️ 非 60kW 档（如 125kVA）放行须与 south_pcs 驱动点表型号同批变更
   #    并装配期核对（§2.10.2 M-1）；has_neutral=true 档当前在档位加载侧被拦截。
 
-# 数字 IO / 安全联锁（§12.4；BECG-3568 板载 DI/DO，GPIO 编号按规格书、现场校准）
+# 数字 IO / 安全联锁（§12.4；**BECG-3588** 板载 DI/DO，GPIO 编号取自规格书 20260910、现场校准）
+# ⚠️ 3568→3588 的 GPIO 编号**全部改变**（急停 124→493 / 运行灯 97→27 …）。下表为 **3588 值**。
 # 默认全注释关闭：未配置 io: 段部署行为不变（enabled=false 跳过联锁与校验）。
 # 启用 = 去掉下方注释并按板端实际 /sys/class/gpio 校准编号（deploy §九 9.2）。
 # io:
@@ -170,13 +171,19 @@ strategy:
 #   release_hold_secs: 5
 #   stop_confirm_ms: 5000        # ⚠️ 须 ≥ 2× south_pcs.interval_ms（停机确认依赖采集拍报 1013）
 #   di:
-#     - { name: "急停",     gpio: 124, active_low: true,  debounce: 1, action: pcs_stop }   # NC 断线触发
-#     - { name: "水浸",     gpio: 125, active_low: false, debounce: 1, action: pcs_stop }
-#     - { name: "消防报警", gpio: 102, active_low: false, debounce: 1, action: pcs_stop }
-#     - { name: "门禁",     gpio: 103, active_low: false, debounce: 3, action: event }
+#     # ⚠️【安全·必读】急停的 `active_low` 是**预填值、不是已核验值**：
+#     #   3588 规格书载明 DI「默认低电平=状态1，高 3.3~30V=状态0」。NC 回路串 BECG 12V OUT 时，
+#     #   回路闭合=高=raw 0、按下/断线=低=raw 1=动作 ⇒ 推导得 **active_low: false**
+#     #   （**与 3568 模板的 true 相反**）。
+#     #   **上线前必须逐路实测两态核销**（对每路分别施加 0V 与 12V，读
+#     #   /sys/class/gpio/gpioN/value，记录哪一电平=动作态）——**不要照抄本行，也不要照抄 3568 的取值**。
+#     - { name: "急停",     gpio: 493, active_low: false, debounce: 1, action: pcs_stop }   # NC 断线触发；⚠️ 极性须实测核销
+#     - { name: "水浸",     gpio: 494, active_low: false, debounce: 1, action: pcs_stop }
+#     - { name: "消防报警", gpio: 495, active_low: false, debounce: 1, action: pcs_stop }
+#     - { name: "门禁",     gpio: 496, active_low: false, debounce: 3, action: event }
 #   do:
-#     - { name: "运行灯", gpio: 97,  active_high: true }   # do_out[0]=运行灯、[1]=故障灯（控制器按索引）
-#     - { name: "故障灯", gpio: 107, active_high: true }
+#     - { name: "运行灯", gpio: 27,  active_high: true }   # do_out[0]=运行灯、[1]=故障灯（控制器按索引）
+#     - { name: "故障灯", gpio: 135, active_high: true }
 
 # 站级南向统一调度（S3 §10.3 south_stations 段；mupc-southd 装配）
 # 【收敛】总表 phase 真源唯一走下方 grid_meter 站——master_meter 段已删除（S3b-1c），
@@ -211,7 +218,7 @@ south_stations:
     # ================= 1) 储能主控模块 BMS（FC04 遥测 + FC02 告警位）=================
     - id: bms
       role: battery
-      port: "/dev/ttyS2"
+      port: "/dev/ttyS3"          # BECG-3588 CH3 A2 → ttyS3（3568 为 ttyS2；节点乱序）
       protocol: modbus
       slave: 1
       baud_rate: 9600            # 现场核对（§9.10 Q-2）
@@ -301,7 +308,7 @@ south_stations:
     # ================= 3) 储能电能表 ADL400（FC03）=================
     - id: meter_batt
       role: meter_batt
-      port: "/dev/ttyS5"
+      port: "/dev/ttyP0"          # BECG-3588 CH2 A5 → ttyP0（3568 为 ttyS5；⚠️ 3588 后四路为 ttyP*）
       protocol: modbus
       slave: 1                     # 现场校准（§9.10 Q-12）
       baud_rate: 9600
@@ -371,7 +378,7 @@ south_stations:
     # ================= 4) 工商储火灾报警控制器（FC03）=================
     - id: fire
       role: fire
-      port: "/dev/ttyS6"
+      port: "/dev/ttyP1"          # BECG-3588 CH4 A6 → ttyP1（3568 为 ttyS6）
       protocol: modbus
       slave: 1                     # 本机地址出厂默认 1
       baud_rate: 9600
@@ -407,7 +414,7 @@ south_stations:
     # ================= 5) 风冷空调机组（FC02 告警位 + FC04 温湿度）=================
     - id: hvac
       role: hvac
-      port: "/dev/ttyS3"
+      port: "/dev/ttyS7"          # BECG-3588 CH5 A3 → ttyS7（3568 为 ttyS3）
       protocol: modbus
       slave: 1
       baud_rate: 9600
@@ -433,7 +440,8 @@ south_stations:
     # addr/format/scale/count——注意须 addr>0 且块间不重叠（0 起会拒启动）。
     - id: grid_meter
       role: meter_grid
-      port: "/dev/ttyS4"          # BECG COM4(ttyS4) ↔ 关口/台区总表（§12.1）；⚠️ 须与 intercore 串口不同
+      port: "/dev/ttyS8"          # BECG-3588 CH7 A4 → ttyS8（3568 为 ttyS4）↔ 关口/台区总表
+                                  # ⚠️ 须与 south_pcs.port（PCS ttyS0）不同（规则 P-2）
       baud_rate: 9600             # 同口多从站须一致（物理共享口波特率）
       protocol: modbus
       slave: 3
