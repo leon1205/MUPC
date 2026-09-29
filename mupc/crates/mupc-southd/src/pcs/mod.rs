@@ -246,6 +246,23 @@ impl PcsHandle {
 }
 
 impl PcsHandle {
+    /// 恒功率 `p_ref` 越限告警文案（**纯函数**，U-172③ 2026-09-29）。
+    ///
+    /// 为什么要抽出来（照 [`mupc_strategy_engine`] 侧 `TaiStorageStrategy::stale_warn_message`
+    /// 的已有先例，`b2fb887`）：内联在 `tracing::warn!` 里的文案**没有任何判别力覆盖**
+    /// ——`tracing` 无捕获设施 ⇒ 把**原值**与**钳后值**写反、或只留其一，都不会红。
+    /// 抽成纯函数后由 `clamp_warn_message_reports_limit_orig_and_clamped` 钉住。
+    ///
+    /// 为什么三要素都必须打印：运维据本行判断"设定值究竟是 150 还是 100"——若只打印其一，
+    /// 回读寄存器也推不出另一个（本函数存在的**唯一**理由）。
+    ///
+    /// `limit_kw` **由调用方传入**（而非在此写死 [`regs::CONST_POWER_LIMIT_KW`]）：同
+    /// `stale_warn_message(stale_after)` 的理由——量程真源在 `regs`，跨处复制成字面量即
+    /// "日志可能与实现不同的量程"；且**参数化才让用例有判别力**（能拿非 100 的量程探针）。
+    pub(crate) fn clamp_warn_message(limit_kw: f64, orig: f64, clamped: f64) -> String {
+        format!("PCS 恒功率 p_ref 超出设备量程 ±{limit_kw}kW，clamp 至 {clamped}（原 {orig}）")
+    }
+
     /// 下发 AI 双参数（恒功率）：写 `REG_MODE=0` → `ensure_started` → 写 1001/1002。
     ///
     /// **输入边界（B-1，2026-09-28 链路审查 G2）**：`p_ref` 在**编码前**钳到恒功率寄存器
@@ -264,12 +281,11 @@ impl PcsHandle {
         let p_ref = regs::clamp_const_power(cmd.p_ref);
         if (p_ref - cmd.p_ref).abs() > 1e-6 {
             // 与 `startup.rs:272` 的上游 clamp 告警同款：打印**原值与钳后值**（否则
-            // "设定值是 150 还是 100"只能靠回读寄存器猜）。
+            // "设定值是 150 还是 100"只能靠回读寄存器猜）。文案由纯函数产出（U-172③，
+            // 理由见 `clamp_warn_message` 的文档）。
             tracing::warn!(
-                "PCS 恒功率 p_ref 超出设备量程 ±{}kW，clamp 至 {}（原 {}）",
-                regs::CONST_POWER_LIMIT_KW,
-                p_ref,
-                cmd.p_ref
+                "{}",
+                Self::clamp_warn_message(regs::CONST_POWER_LIMIT_KW, cmd.p_ref, p_ref)
             );
         }
         self.write_reg(regs::REG_CONST_P_SET, regs::to_pcs_reg(p_ref))
@@ -879,6 +895,84 @@ mod control_tests {
             Some((1, regs::REG_CONST_P_SET, to_pcs_reg(-60.0))),
             "−60kW 须逐字落线上（前提：必须写 1001，否则判据前提不成立）"
         );
+    }
+
+    /// **U-172②（2026-09-29）**：恒功率**无功寄存器 1002 恒写 0** —— 把「Q 侧无入参通路」
+    /// 这一**真空条款**钉成显式契约。
+    ///
+    /// 背景（为什么是"真空"）：协议点表给 1002 的量程是 ±100 kVar，但 `PcsDualParam` 只有
+    /// `p_ref` / `k_droop` / `ai_ready` / `strategy_mode` —— **无 Q 入参**，实现**硬编码**
+    /// 写 0 ⇒ `clamp_const_power`（`CONST_POWER_LIMIT_KW = 100.0`）的 **Q 侧当前无作用面**
+    /// （即 U-166 的 Q 侧暂无触发路径）。
+    ///
+    /// **如实说明增量**：既有三条 `send_dual_param_*` 用例已在各自"整条写序"断言里**顺带**
+    /// 覆盖了「1002 = 0」，本条不重复那份判别力。本条独有的是：
+    /// ① 断言 Q 与 `p_ref` **无关**（取 0 / +60 / 越限钳后的两个极值各跑一遍 ⇒ 任何"把
+    ///    `p_ref` / `k_droop` 接到 1002"的实现必红）；
+    /// ② 把"真空"**写明**：将来若要填这条通路（加 Q 入参），`PcsDualParam::new` 的签名变更
+    ///    会使本用例**编译失败**，填值后断言亦红 ⇒ 迫使同时复核 `clamp_const_power` 的
+    ///    ±100 是否对 Q 也成立（协议点表 `_ref_pcs60_proto.txt:1270/1277` 给的是 P 与 Q
+    ///    **各自** ±100）。
+    ///
+    /// **判别力（改坏即红）**：把 1002 的写值改成 `to_pcs_reg(cmd.k_droop)` 或
+    /// `to_pcs_reg(p_ref)` ⇒ 本用例红。
+    #[tokio::test]
+    async fn send_dual_param_always_writes_q_zero_regardless_of_p_ref() {
+        for p_ref in [0.0, 60.0, 150.0, -150.0] {
+            let bus = Arc::new(MockBus::new());
+            bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]); // 前置：S-4 守卫需非停机态
+            let h = handle(bus.clone());
+            h.send_dual_param(&PcsDualParam::new(p_ref, 0.5, true, "intelligent"))
+                .await
+                .unwrap();
+            let writes = bus.write_calls.lock().unwrap().clone();
+
+            // 前提自证：本轮确实写了 1001 —— 否则「Q 恒 0」可能只是"整条写序缺失"的假象。
+            assert!(
+                writes.iter().any(|&(_, a, _)| a == regs::REG_CONST_P_SET),
+                "前提：p_ref={p_ref} 时必须写 1001，否则本条断言空转"
+            );
+            let q_write = writes
+                .iter()
+                .find(|&&(_, a, _)| a == regs::REG_CONST_Q_SET)
+                .copied()
+                .expect("必须写 1002（否则判据前提不成立）");
+            assert_eq!(
+                q_write,
+                (1, regs::REG_CONST_Q_SET, to_pcs_reg(0.0)),
+                "p_ref={p_ref} 时 1002 仍须为 0（Q 与 p_ref 无关；填 Q 通路须同步复核 ±100 量程）"
+            );
+        }
+    }
+
+    /// **U-172③（2026-09-29）**：恒功率**越限告警文案**的三要素（量程 / 钳后值 / 原值）。
+    ///
+    /// **如实说明与既有用例的分工**：`send_dual_param_clamps_p_ref_to_device_range` 断言的是
+    /// **线上寄存器字**（钳位生效），**不是日志文案** —— 两者是不同失效面：钳位正确而文案
+    /// 写反（"钳至 150（原 100）"）时那条用例**全绿**，运维却被日志误导。故本条不重复它。
+    ///
+    /// **判别力（改坏即红）**：
+    /// ① 把 `{clamped}` 与 `{orig}` 两个占位写反、或只留其一 ⇒ 首段
+    ///    `clamp 至 100（原 150）` 的整体断言红；
+    /// ② 把 `±{limit_kw}kW` 写成字面量 `±100kW` ⇒ 非 100 量程的探针段红（用例传 42 / 7.5）。
+    #[test]
+    fn clamp_warn_message_reports_limit_orig_and_clamped() {
+        // ① 三要素齐备 + 原值/钳后值**位置不得互换**（合成一条断言即钉住两个位置）
+        let m = PcsHandle::clamp_warn_message(100.0, 150.0, 100.0);
+        assert!(
+            m.contains("clamp 至 100（原 150）"),
+            "须同时打印钳后值与原值且位置正确: {m}"
+        );
+
+        // ② 量程随入参跟随（硬编码字面量 100 ⇒ 本段两条全红）
+        for limit in [42.0, 7.5] {
+            let m = PcsHandle::clamp_warn_message(limit, 999.0, limit);
+            assert!(
+                m.contains(&format!("量程 ±{limit}kW")),
+                "量程须随入参跟随（硬编码即红）: {m}"
+            );
+            assert!(!m.contains("±100kW"), "不得残留字面量 100: {m}");
+        }
     }
 
     /// 正向断言（质量评审 Important）：`send_tai_command` 此前**连快乐路径都没有**
