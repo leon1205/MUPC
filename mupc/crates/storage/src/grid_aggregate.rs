@@ -668,7 +668,11 @@ mod tests {
             "u_a", "u_b", "u_c", "i_a", "i_b", "i_c", "p_a", "p_b", "p_c", "q_a", "q_b", "q_c",
             "pf_a", "pf_b", "pf_c", "p_total", "q_total", "pf_total",
         ];
-        assert_eq!(names, expected.to_vec(), "通道名集合与设计 §4.4.4.3 逐条一致");
+        assert_eq!(
+            names,
+            expected.to_vec(),
+            "通道名集合与设计 §4.4.4.3 逐条一致"
+        );
         // 极值只覆盖 p_total / q_total（Q-2 裁定 (b)；频率因「无源」被排除）。
         let extreme_bases: Vec<&str> = CHANNELS
             .iter()
@@ -1028,7 +1032,11 @@ mod tests {
         assert_eq!(agg.rows_per_period(), 22, "18 均值 + 2×2 极值（§4.4.4.3）");
         agg.observe(0, &full_sample(1.0));
         let rows = agg.flush(1_000);
-        assert_eq!(rows.len(), 22, "实产必须与声明一致（真实表不受降级分支影响）");
+        assert_eq!(
+            rows.len(),
+            22,
+            "实产必须与声明一致（真实表不受降级分支影响）"
+        );
         assert!(rows.iter().any(|r| r.metric_name == "p_total_max"));
         assert!(rows.iter().any(|r| r.metric_name == "q_total_min"));
     }

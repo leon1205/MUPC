@@ -585,7 +585,11 @@ impl TaiStorageStrategy {
             return self.refuse_missing_soc(&mut state);
         };
         if data.timestamp.saturating_sub(state.last_control_ts) < self.config.control_period_s {
-            return self.last_cmd.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            return self
+                .last_cmd
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
         }
         state.last_control_ts = data.timestamp;
 

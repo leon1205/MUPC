@@ -432,13 +432,12 @@ impl AuditLogger {
         tracing::info!("开始验证审计日志哈希链...");
 
         // 链首：有清理水位则从水位处续，否则从链锚（未配置锚 = 公开创世种子的降级态）
-        let mut expected_hash = if self.meta.purged_through_sequence > 0
-            && !self.meta.purged_anchor_hash.is_empty()
-        {
-            self.meta.purged_anchor_hash.clone()
-        } else {
-            self.genesis_hash()
-        };
+        let mut expected_hash =
+            if self.meta.purged_through_sequence > 0 && !self.meta.purged_anchor_hash.is_empty() {
+                self.meta.purged_anchor_hash.clone()
+            } else {
+                self.genesis_hash()
+            };
         let mut expected_sequence = self.meta.purged_through_sequence + 1;
         let mut last_sequence = 0u64;
         let mut last_hash = String::new();
@@ -1003,7 +1002,10 @@ fn anchor_from_env() -> Option<[u8; 32]> {
     let raw = env::var(AUDIT_CHAIN_KEY_ENV).ok()?;
     let raw = raw.trim();
     if raw.is_empty() {
-        tracing::warn!(env = AUDIT_CHAIN_KEY_ENV, "链锚环境变量为空 ⇒ 按未配置处理（降级）");
+        tracing::warn!(
+            env = AUDIT_CHAIN_KEY_ENV,
+            "链锚环境变量为空 ⇒ 按未配置处理（降级）"
+        );
         return None;
     }
     match hex::decode(raw) {
@@ -1274,7 +1276,11 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .find(|p| {
-                let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let n = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 n.starts_with("audit_") && n.ends_with(".jsonl")
             })
             .expect("审计日志文件必须存在");
@@ -1353,7 +1359,9 @@ mod tests {
             fail: Some("模拟磁盘失联"),
         }));
 
-        let err = logger.flush().expect_err("fsync 失败必须上抛（凭据未落盘 = 凭据不存在）");
+        let err = logger
+            .flush()
+            .expect_err("fsync 失败必须上抛（凭据未落盘 = 凭据不存在）");
         let msg = err.to_string();
         assert!(msg.contains("fsync"), "文案须点明 fsync: {msg}");
         assert!(msg.contains("模拟磁盘失联"), "须带上底层原因: {msg}");

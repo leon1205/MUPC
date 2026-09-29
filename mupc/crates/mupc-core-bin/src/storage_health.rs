@@ -347,8 +347,14 @@ mod tests {
         }
 
         // 回落：不报（`AlertFeed` 只有入、没有清除面 ⇒ 投一条会被读成"又发生了一次"）
-        assert!(fire(Some(L::Emergency), L::Critical).is_none(), "回落不得投 major");
-        assert!(fire(Some(L::Critical), L::Normal).is_none(), "回落不得投 major");
+        assert!(
+            fire(Some(L::Emergency), L::Critical).is_none(),
+            "回落不得投 major"
+        );
+        assert!(
+            fire(Some(L::Critical), L::Normal).is_none(),
+            "回落不得投 major"
+        );
     }
 
     /// 文案须**点名档位与动作**（现场照着一行日志就该知道"时序写入已停"）。

@@ -939,10 +939,9 @@ mod tests {
         task.package_path = Some(PathBuf::from("/definitely/not/here/model.rknn"));
         task.expected_hash = Some("abc123".to_string());
         match OtaManagerImpl::resolve_apply_inputs(&task) {
-            Err(OtaError::Unsupported(msg)) => assert!(
-                msg.contains("不存在"),
-                "须点明产物不存在: {msg}"
-            ),
+            Err(OtaError::Unsupported(msg)) => {
+                assert!(msg.contains("不存在"), "须点明产物不存在: {msg}")
+            }
             other => panic!("产物不存在必须 Unsupported，实际: {other:?}"),
         }
     }

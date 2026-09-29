@@ -994,7 +994,11 @@ async fn write_buffer_stops_new_telemetry_at_95_percent() {
         .await
         .unwrap();
     assert_eq!(wb.buffered_points(), 2, "≥95% 不得再接收新遥测点");
-    assert_eq!(gate.rejected_telemetry_total(), 1, "被拒点数须可读（不静默）");
+    assert_eq!(
+        gate.rejected_telemetry_total(),
+        1,
+        "被拒点数须可读（不静默）"
+    );
     assert_eq!(
         wb.dropped_points(),
         0,
@@ -1035,8 +1039,15 @@ async fn write_buffer_flush_stops_only_at_98_percent() {
     // ≥98：连 flush 也拦
     gate.set_disk_usage(Some(98.0));
     let before_writes = gate.rejected_writes_total();
-    assert_eq!(wb.flush().await.unwrap(), 0, "≥98% flush 被拦（设计动作，非失败）");
-    assert!(gate.rejected_writes_total() > before_writes, "拦停须计数留证");
+    assert_eq!(
+        wb.flush().await.unwrap(),
+        0,
+        "≥98% flush 被拦（设计动作，非失败）"
+    );
+    assert!(
+        gate.rejected_writes_total() > before_writes,
+        "拦停须计数留证"
+    );
     assert_eq!(wb.buffered_points(), 1, "点仍在缓冲，未丢");
     let _ = std::fs::remove_file(path);
 }
@@ -1058,22 +1069,38 @@ async fn integrity_degradation_rejects_every_write_entry() {
     let svc = StorageService::new_with_gate(pool.clone(), gate.clone());
 
     // 降级前：5 个入口全部可写（排除"本来就不通"的假信号）
-    assert!(svc.telemetry.insert(&make_telemetry("d0", "v", 1.0)).await.is_ok());
-    assert!(svc.events.insert(&make_event("t0", "s", "m")).await.is_ok());
-    assert!(svc.faults.insert(&make_fault("d0", "ft", 1)).await.is_ok());
-    assert!(svc.decisions.insert(&make_decision("sc", "{}")).await.is_ok());
     assert!(svc
-        .assets
-        .upsert(&make_asset("d0", "dev"))
+        .telemetry
+        .insert(&make_telemetry("d0", "v", 1.0))
         .await
         .is_ok());
+    assert!(svc.events.insert(&make_event("t0", "s", "m")).await.is_ok());
+    assert!(svc.faults.insert(&make_fault("d0", "ft", 1)).await.is_ok());
+    assert!(svc
+        .decisions
+        .insert(&make_decision("sc", "{}"))
+        .await
+        .is_ok());
+    assert!(svc.assets.upsert(&make_asset("d0", "dev")).await.is_ok());
 
     gate.enter_degraded();
     let cases: Vec<(&str, Result<i64, StorageError>)> = vec![
-        ("telemetry", svc.telemetry.insert(&make_telemetry("d1", "v", 2.0)).await),
-        ("events", svc.events.insert(&make_event("t1", "s", "m")).await),
-        ("faults", svc.faults.insert(&make_fault("d1", "ft", 1)).await),
-        ("decisions", svc.decisions.insert(&make_decision("sc", "{}")).await),
+        (
+            "telemetry",
+            svc.telemetry.insert(&make_telemetry("d1", "v", 2.0)).await,
+        ),
+        (
+            "events",
+            svc.events.insert(&make_event("t1", "s", "m")).await,
+        ),
+        (
+            "faults",
+            svc.faults.insert(&make_fault("d1", "ft", 1)).await,
+        ),
+        (
+            "decisions",
+            svc.decisions.insert(&make_decision("sc", "{}")).await,
+        ),
         ("assets", svc.assets.upsert(&make_asset("d1", "dev")).await),
     ];
     for (what, r) in cases {

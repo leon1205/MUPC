@@ -184,7 +184,10 @@ mod tests {
         let mut m = mgr_with(cert(now - Duration::days(1), now + Duration::days(1)));
         // `Sm2Cert::serial_number()` 当前是 stub（恒 "unknown"）⇒ 按同一序列号吊销即可命中
         m.revoke_cert("unknown").unwrap();
-        assert!(!m.is_cert_valid(), "CRL 命中仍须判无效（有效期以外的既有判据不得丢）");
+        assert!(
+            !m.is_cert_valid(),
+            "CRL 命中仍须判无效（有效期以外的既有判据不得丢）"
+        );
     }
 
     /// 边界口径：**含两端**（`now == not_after` 仍有效；越界 1ns 即无效）。

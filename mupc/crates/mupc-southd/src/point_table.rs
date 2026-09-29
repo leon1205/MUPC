@@ -1270,7 +1270,7 @@ mod tests {
         assert_eq!(unit(Role::Battery, "soc"), "%");
         assert_eq!(unit(Role::Battery, "bms_io_17"), "A"); // 簇组电流
         assert_eq!(unit(Role::Battery, "bms_meta_6"), "kW"); // 实时充放电功率
-        // ② 单位写在括注**之后**
+                                                             // ② 单位写在括注**之后**
         assert_eq!(unit(Role::Battery, "bms_term_1"), "℃");
         // ③ 白名单曾漏收录的单位（点表 label 明写 `kΩ`）
         assert_eq!(unit(Role::Battery, "bms_io_21"), "kΩ");

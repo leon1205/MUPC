@@ -745,7 +745,10 @@ mod tests {
         );
 
         // 关键断言：旧模型**仍在且未变**
-        assert!(dest.exists(), "替换失败后旧模型必须仍在（旧实现此处已被删除）");
+        assert!(
+            dest.exists(),
+            "替换失败后旧模型必须仍在（旧实现此处已被删除）"
+        );
         assert_eq!(
             fs::read(&dest).await.unwrap(),
             b"OLD-MODEL-BYTES",
@@ -758,7 +761,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.contains(".tmp-"))
             .collect();
-        assert!(leftovers.is_empty(), "失败后不得残留暂存文件: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "失败后不得残留暂存文件: {leftovers:?}"
+        );
     }
 
     /// 成功路径：内容被替换成新模型，且不残留暂存文件。

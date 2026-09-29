@@ -1684,7 +1684,9 @@ mod tests {
     /// 内部写死 `DEFAULT_CLASS_A_INTERVAL` ⇒ 首条断言红。
     #[test]
     fn iec104_driver_keeps_injected_class_intervals() {
-        let pool = Arc::new(mupc_data_processing::latest_values::LatestValues::new(5_000));
+        let pool = Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+            5_000,
+        ));
         let server = Arc::new(mupc_gateway::iec104::server::Iec104Server::new(
             mupc_gateway::iec104::server::Iec104Config::default(),
         ));
@@ -1775,7 +1777,10 @@ mod tests {
             .collect();
         assert_eq!(
             empty,
-            vec!["grid_meter.cos_phi".to_string(), "pcs.pcs_3zone_14".to_string()],
+            vec![
+                "grid_meter.cos_phi".to_string(),
+                "pcs.pcs_3zone_14".to_string()
+            ],
             "A 档空单位点须恰为「无量纲 PF + 枚举状态」两处"
         );
     }
@@ -1787,14 +1792,39 @@ mod tests {
         let pts = points();
         let expect: &[(&str, &str, &str, &str)] = &[
             // (station, metric, 期望单位, 该点的形态说明)
-            ("bms", "bms_io_21", "kΩ", "单位紧跟 label 末尾（原实现白名单**未收录** kΩ）"),
-            ("bms", "bms_term_1", "℃", "单位在**括注之后**：`簇端子温度 001（箱体 T1）℃`"),
-            ("bms", "bms_io_20", "%", "SOH（addr 119），同 `soc` 的括注形态"),
-            ("bms", "bms_cap_1", "Ah", "单位在括注之前：`簇累计充电容量 Ah（Q-16…）`"),
+            (
+                "bms",
+                "bms_io_21",
+                "kΩ",
+                "单位紧跟 label 末尾（原实现白名单**未收录** kΩ）",
+            ),
+            (
+                "bms",
+                "bms_term_1",
+                "℃",
+                "单位在**括注之后**：`簇端子温度 001（箱体 T1）℃`",
+            ),
+            (
+                "bms",
+                "bms_io_20",
+                "%",
+                "SOH（addr 119），同 `soc` 的括注形态",
+            ),
+            (
+                "bms",
+                "bms_cap_1",
+                "Ah",
+                "单位在括注之前：`簇累计充电容量 Ah（Q-16…）`",
+            ),
             ("meter_batt", "mb_phase_12", "A", "零序电流，单位在括注之前"),
             ("hvac", "hvac_in_1", "℃", "空调温度，单位在括注之前"),
             ("hvac", "hvac_in_4", "%", "空调湿度"),
-            ("fire", "fire_det_4", "ppm", "探测器模板 +3（CO 浓度），单位在括注之前"),
+            (
+                "fire",
+                "fire_det_4",
+                "ppm",
+                "探测器模板 +3（CO 浓度），单位在括注之前",
+            ),
             ("fire", "fire_sys_2", "kPa", "消防钢瓶气压（addr 5）"),
             ("pcs", "pcs_3zone_9", "V", "PCS BMS 系统总电压"),
             ("pcs", "pcs_3zone_10", "A", "PCS BMS 系统总电流"),
@@ -1803,12 +1833,20 @@ mod tests {
             ("pcs", "pcs_3zone_75", "kWh", "PCS 直流累计放电电量"),
         ];
         for (station, metric, unit, why) in expect {
-            let p = match pts.iter().find(|p| p.station == *station && p.metric == *metric) {
+            let p = match pts
+                .iter()
+                .find(|p| p.station == *station && p.metric == *metric)
+            {
                 Some(p) => p,
                 // 参考配置里没有该点名（如消防气压点），跳过而非静默通过
                 None => panic!("点 {station}.{metric} 不在参考点表里（{why}）—— 期望表写错了"),
             };
-            assert_eq!(unit_of(p), *unit, "{station}.{metric}：{why}（label=`{}`）", p.label);
+            assert_eq!(
+                unit_of(p),
+                *unit,
+                "{station}.{metric}：{why}（label=`{}`）",
+                p.label
+            );
         }
     }
 
@@ -1819,14 +1857,26 @@ mod tests {
         let empty_expect = [
             ("grid_meter", "cos_phi", "PF 无量纲"),
             ("pcs", "pcs_3zone_14", "运行状态枚举"),
-            ("pcs", "pcs_3zone_38", "A 相功率因数（label 含字母 A，**不是**单位安培）"),
+            (
+                "pcs",
+                "pcs_3zone_38",
+                "A 相功率因数（label 含字母 A，**不是**单位安培）",
+            ),
             ("bms", "bms_io_1", "簇状态枚举"),
-            ("bms", "bms_io_25", "最高单体电压**对应点**（位置编号，量纲无意义）"),
+            (
+                "bms",
+                "bms_io_25",
+                "最高单体电压**对应点**（位置编号，量纲无意义）",
+            ),
             ("bms", "bms_meta_1", "程序版本号"),
             ("bms", "bms_meta_2", "从控数量（计数，非物理单位）"),
             ("meter_batt", "mb_phase_7", "PT 变比"),
             ("fire", "fire_sys_6", "火警状态枚举"),
-            ("fire", "fire_det_3", "探测器数据 1（整字位域打包，无单一单位）"),
+            (
+                "fire",
+                "fire_det_3",
+                "探测器数据 1（整字位域打包，无单一单位）",
+            ),
         ];
         for (station, metric, why) in empty_expect {
             let p = pts
@@ -1848,8 +1898,17 @@ mod tests {
             .collect();
         assert!(!bits.is_empty());
         for p in bits {
-            assert_eq!(unit_of(p), "bool", "位点 {}.{} 须恒为 bool", p.station, p.metric);
-            assert_eq!(p.unit, "", "位点在点表侧须登记为空串（`bool` 是上送形态不是点属性）");
+            assert_eq!(
+                unit_of(p),
+                "bool",
+                "位点 {}.{} 须恒为 bool",
+                p.station,
+                p.metric
+            );
+            assert_eq!(
+                p.unit, "",
+                "位点在点表侧须登记为空串（`bool` 是上送形态不是点属性）"
+            );
         }
     }
 
@@ -2461,7 +2520,12 @@ mod tests {
             north_cfg_with(|_| {}),
             Arc::new(RecordingEvents::default()),
         );
-        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let st = pubr
+            .plan()
+            .iter()
+            .find(|s| s.id == "grid_meter")
+            .unwrap()
+            .clone();
         let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
         let (topic, body, ts_ms, seq) = pubr
             .build_message(&st, &idx, now)
@@ -2501,7 +2565,12 @@ mod tests {
             Arc::new(RecordingEvents::default()),
         )
         .expect("上送器装配");
-        let st = pubr.plan().iter().find(|s| s.id == "grid_meter").unwrap().clone();
+        let st = pubr
+            .plan()
+            .iter()
+            .find(|s| s.id == "grid_meter")
+            .unwrap()
+            .clone();
         let idx = indices_of(pubr.plan(), "grid_meter", SouthDataClass::A);
         let (_topic, body, _ts, _seq) = pubr.build_message(&st, &idx, now).expect("必产消息");
         let text = String::from_utf8(body).expect("载荷是 UTF-8 JSON");
@@ -2611,8 +2680,18 @@ mod tests {
         }
         latest.apply(samples);
 
-        let full = build_items(&latest, &pts, now, COT_CYCLIC, Some(SouthDataClass::A), None);
-        assert!(!full.is_empty(), "前提：全量路径须产出至少一条（否则对拍空转）");
+        let full = build_items(
+            &latest,
+            &pts,
+            now,
+            COT_CYCLIC,
+            Some(SouthDataClass::A),
+            None,
+        );
+        assert!(
+            !full.is_empty(),
+            "前提：全量路径须产出至少一条（否则对拍空转）"
+        );
         let proj = |v: &Vec<TelemetryItem>| {
             v.iter()
                 .map(|it| (it.ioa, it.kind, it.value.to_bits(), it.ts_ms, it.cot))
@@ -2644,7 +2723,11 @@ mod tests {
             .collect();
         let expected: Vec<TelemetryItem> = full
             .iter()
-            .filter(|it| a_idx.iter().any(|p| subset_keys.contains(&key(p)) && it.ioa == p.ioa))
+            .filter(|it| {
+                a_idx
+                    .iter()
+                    .any(|p| subset_keys.contains(&key(p)) && it.ioa == p.ioa)
+            })
             .copied()
             .collect();
         let changed_subset = build_items(
@@ -3194,7 +3277,10 @@ mod tests {
             north_cfg_with(|c| c.qos = 0),
             events,
         );
-        assert_eq!(pubr.cfg.qos, 0, "夹具前提：遥测 QoS 配成 0（与事件 2 可区分）");
+        assert_eq!(
+            pubr.cfg.qos, 0,
+            "夹具前提：遥测 QoS 配成 0（与事件 2 可区分）"
+        );
         assert!(!pubr.is_connected());
 
         // 事件边沿：把某站在**本轮之前**记为 online，而 latest 里无任何新鲜值（= 现已失活）
@@ -3229,8 +3315,14 @@ mod tests {
         }
 
         // 遥测路径仍取配置（同一夹具下 = 0）—— 证明 A-3 没有把两条路径一并改成 2
-        pubr.publish_or_cache("mupc/north/telemetry/bms".into(), b"{}".to_vec(), now_millis(), 1, pubr.cfg.qos)
-            .await;
+        pubr.publish_or_cache(
+            "mupc/north/telemetry/bms".into(),
+            b"{}".to_vec(),
+            now_millis(),
+            1,
+            pubr.cfg.qos,
+        )
+        .await;
         let (topic, qos) = {
             let mut c = pubr.cache.lock().unwrap_or_else(|e| e.into_inner());
             let p = c.pop_front().expect("遥测消息应入缓存");

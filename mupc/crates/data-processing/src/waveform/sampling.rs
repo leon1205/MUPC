@@ -161,11 +161,13 @@ impl DualBufferManager {
     ///
     /// 故障前采样数据切片
     pub fn get_pre_trigger_data(&self, buf_idx: usize, pre_samples: usize) -> Vec<f32> {
-        let (Some(total), Some(write_pos)) = (
-            self.total_written.get(buf_idx),
-            self.write_pos.get(buf_idx),
-        ) else {
-            tracing::warn!(buf_idx, "get_pre_trigger_data: buf_idx 越界（须为 0/1）⇒ 空结果");
+        let (Some(total), Some(write_pos)) =
+            (self.total_written.get(buf_idx), self.write_pos.get(buf_idx))
+        else {
+            tracing::warn!(
+                buf_idx,
+                "get_pre_trigger_data: buf_idx 越界（须为 0/1）⇒ 空结果"
+            );
             return Vec::new();
         };
         let total = total.load(Ordering::Acquire);
@@ -206,11 +208,13 @@ impl DualBufferManager {
     ///
     /// 故障后采样数据切片
     pub fn get_post_trigger_data(&self, buf_idx: usize, post_samples: usize) -> Vec<f32> {
-        let (Some(total), Some(write_pos)) = (
-            self.total_written.get(buf_idx),
-            self.write_pos.get(buf_idx),
-        ) else {
-            tracing::warn!(buf_idx, "get_post_trigger_data: buf_idx 越界（须为 0/1）⇒ 空结果");
+        let (Some(total), Some(write_pos)) =
+            (self.total_written.get(buf_idx), self.write_pos.get(buf_idx))
+        else {
+            tracing::warn!(
+                buf_idx,
+                "get_post_trigger_data: buf_idx 越界（须为 0/1）⇒ 空结果"
+            );
             return Vec::new();
         };
         let total = total.load(Ordering::Acquire);

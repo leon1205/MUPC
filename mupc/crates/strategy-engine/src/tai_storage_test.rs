@@ -491,7 +491,13 @@ mod tai_storage_test {
 
     /// 构造可控分相包（功率因数/分相无功/分相电流/分相有功逐相给定）。
     /// D-9 需要 Q 通道**真实累积**（qi≠0 且 |pf|<0.95），既有 `create_phase_data` 给不出。
-    fn package_phase(ts: u64, pf: f64, q_per_phase: f64, i: [f64; 3], p_i: [f64; 3]) -> DataPackage {
+    fn package_phase(
+        ts: u64,
+        pf: f64,
+        q_per_phase: f64,
+        i: [f64; 3],
+        p_i: [f64; 3],
+    ) -> DataPackage {
         DataPackage {
             timestamp: ts,
             electrical: ElectricalData {
@@ -563,13 +569,7 @@ mod tai_storage_test {
         let cfg = TaiStorageConfig::default();
         let mut st = TaiControllerState::default();
         // 全部返送（同向、全负）但幅值不平衡：i=[-4,-12,-4]
-        let m = meter(
-            -20.0,
-            [-4.0, -12.0, -4.0],
-            [0.0; 3],
-            [220.0; 3],
-            [0.99; 3],
-        );
+        let m = meter(-20.0, [-4.0, -12.0, -4.0], [0.0; 3], [220.0; 3], [0.99; 3]);
         let _ = control(&mut st, &cfg, &m, 0.5, 3600 * 12);
         assert!(
             st.d_p_active,
@@ -693,7 +693,8 @@ mod tai_storage_test {
             "前提：两把锁须真的中毒（否则本条空转）"
         );
         // 中毒后仍须完成一拍且**真的重算**（返送包 ⇒ 非零充电指令，而非返回缓存零指令）
-        let cmd = tokio_test::block_on(strategy.evaluate(&create_package(3600 * 10, -30.0, 0.5))).unwrap();
+        let cmd = tokio_test::block_on(strategy.evaluate(&create_package(3600 * 10, -30.0, 0.5)))
+            .unwrap();
         let sum: f64 = cmd.phase_p_set.unwrap().iter().sum();
         assert!(
             sum < 0.0,
@@ -735,11 +736,7 @@ mod tai_storage_test {
         // 回拨节流计时 ⇒ 到期后须再次告警（非"一次性永不告警"）
         strategy.backdate_soc_missing_warn(std::time::Duration::from_secs(31));
         let _ = tokio_test::block_on(strategy.evaluate(&no_soc(3600 * 10 + 180))).unwrap();
-        assert_eq!(
-            strategy.soc_missing_warn_count(),
-            2,
-            "节流到期后须再次告警"
-        );
+        assert_eq!(strategy.soc_missing_warn_count(), 2, "节流到期后须再次告警");
     }
 
     /// **D-2（不得误伤冻结值）**：有可用 SOC（`apply_soc_source` 在双源皆失时写回的冻结
@@ -751,7 +748,8 @@ mod tai_storage_test {
     fn d2_available_soc_still_drives_and_recovers() {
         // ① 冻结值路径（tai 层只见 Some/None，源新鲜度由 apply_soc_source 在上层裁决并写回）
         let s1 = TaiStorageStrategy::new(TaiStorageConfig::default());
-        let cmd = tokio_test::block_on(s1.evaluate(&create_package(3600 * 10, -30.0, 0.20))).unwrap();
+        let cmd =
+            tokio_test::block_on(s1.evaluate(&create_package(3600 * 10, -30.0, 0.20))).unwrap();
         let sum: f64 = cmd.phase_p_set.unwrap().iter().sum();
         assert!(
             sum < 0.0,
@@ -785,10 +783,7 @@ mod tai_storage_test {
     #[test]
     fn stale_warn_message_follows_threshold() {
         let m5 = TaiStorageStrategy::stale_warn_message(std::time::Duration::from_secs(5));
-        assert!(
-            m5.contains("超过 5s 未更新"),
-            "5s 阈值须如实进文案: {m5}"
-        );
+        assert!(m5.contains("超过 5s 未更新"), "5s 阈值须如实进文案: {m5}");
 
         // 换一个**非 5** 的阈值：若文案里是硬编码字面量，这两条必红
         for secs in [7u64, 11] {
@@ -797,10 +792,7 @@ mod tai_storage_test {
                 m.contains(&format!("超过 {secs}s 未更新")),
                 "阈值须随入参跟随（硬编码 5 即红）: {m}"
             );
-            assert!(
-                !m.contains("超过 5s 未更新"),
-                "不得残留字面量 5: {m}"
-            );
+            assert!(!m.contains("超过 5s 未更新"), "不得残留字面量 5: {m}");
         }
 
         // 文案的**其余部分**（归零说明 + 排查指引）不得因参数化而丢失

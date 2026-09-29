@@ -183,7 +183,10 @@ mod tests {
         src.a.store(7, Ordering::Relaxed);
         src.b.store(3, Ordering::Relaxed);
         let second = report_once(&src);
-        assert_eq!(second.iec104_dropped_total, 7, "读的是当拍值（非构造期快照）");
+        assert_eq!(
+            second.iec104_dropped_total, 7,
+            "读的是当拍值（非构造期快照）"
+        );
         assert_eq!(
             second.iec104_no_subscriber_total, 3,
             "两个计数**不得互换**（dropped vs no_subscriber 语义不同）"
