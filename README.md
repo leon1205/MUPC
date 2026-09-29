@@ -166,24 +166,18 @@ cargo fmt --all     # 格式化（⚠️ 见下方提示）
 cargo clippy        # 静态检查
 ```
 
-> ⚠️ **关于 `cargo fmt --all`（2026-09-29 实测；其中第 2 条是既存的 CI 红灯）**
+> ✅ **格式化状态（2026-09-29 更新）**：仓级 rustfmt 基线建立于 2026-09-26（`031084c` 收口
+> **120 文件**，配置见 `mupc/rustfmt.toml`，钉 `max_width = 100`），其**后续漂移已由
+> PR #23（`ff7bb09`，**24 文件**）收敛** ⇒ 本机 `cargo fmt --all -- --check` 现为 **0 处 diff**。
+> CI 的 `lint` job 跑的是同一条命令（`.github/workflows/build-ubuntu.yml`，`working-directory: mupc`，
+> 且 `test` job `needs: lint`）⇒ **请保持干净**：改完 `.rs` 后跑一次 `cargo fmt` 即可
+> （全仓已干净，`--all` 不再有连带重排无关文件的风险）。
 >
-> **背景**：仓级 rustfmt 基线建立于 2026-09-26（`031084c` 一次性收口 **120 文件**，配置见
-> `mupc/rustfmt.toml`，钉 `max_width = 100`）。
->
-> **现状（漂移）**：**基线之后被改动的文件会重新漂移** —— 本机 `cargo fmt --all -- --check`
-> 现报 **69 处 diff / 24 个文件**，且**逐条核对：24/24 全部是基线提交之后被改过的文件**，
-> 无一是 rustfmt 版本差异或 CRLF 行尾所致（已用「基线覆盖且之后未改的文件」作对照，其
-> `--check` 为 0；CRLF→LF 转换后 diff 数不变）。
->
-> **两条实际影响**：
-> 1. **只想格式化自己的改动时不要用 `--all`** —— 它会连带重排那 24 个无关文件、淹没真实变更。
->    改用 `cargo fmt -p <crate>`（或 `rustfmt --edition 2021 <file>`）并逐个核对；判据是
->    `cargo fmt --all -- --check` 的 **diff 条数不增加**。
-> 2. ⚠️ **CI 的 `lint` job 会跑 `cargo fmt --all -- --check`**（`.github/workflows/build-ubuntu.yml`，
->    `working-directory: mupc`，且 `test` job `needs: lint`）⇒ 这份漂移会让该门禁**长期为红**。
->    收敛它 = 一次全仓 `cargo fmt --all`（**24 文件**，按项目规则「>5 文件须走 PR」**不得直接
->    push master**），属独立议题，不要夹在功能提交里顺手做。
+> **历史（留档，避免重蹈）**：此前曾出现「**基线之后被改动的文件重新漂移**」—— 当时 `--check`
+> 报 **69 处 diff / 24 文件**，**逐条核对 24/24 全部是基线提交后被改过的文件**；已排除另两种
+> 解释（rustfmt 版本差异：用「基线覆盖且之后未改」的文件作对照，其 `--check` 为 0；CRLF 行尾：
+> 把带 diff 的文件 CRLF→LF 后 diff 数不变）。⇒ **基线不是一次性的**，改完要跟上，否则 CI 的
+> `lint` 会长期为红。
 
 ---
 
