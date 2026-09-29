@@ -97,14 +97,14 @@ pub trait StationSink: Send + Sync {
 
 /// PCS 写序列的**调用方身份**（审计事件的 token 取值域；§13.5.3）。
 ///
-/// **取值域只含"有真实生产者"的值** —— 每个值都能在代码里指到唯一的调用点，不预留、不臆造：
+/// **取值域只含"有真实生产者"的值** —— 每个值都能在代码里指到调用点，不预留、不臆造：
 ///
-/// | 值 | 唯一生产者 |
+/// | 值 | 生产者（调用点） |
 /// |---|---|
 /// | `Iec104` | `StrategyCommandHandler`（IEC104 `p_set`）→ `send_dual_param` |
 /// | `Strategy` | 台区储能治理兜底策略 → `send_tai_command` |
 /// | `Interlock` | 联锁状态机 → `stop` |
-/// | `Ai` | `AiIntegrator::dispatch_ai_decision` 的 AI 分支 → `send_dual_param` |
+/// | `Ai` | `AiIntegrator` 的 AI 下发路径 → `send_dual_param`：**两个**调用点（`dispatch_ai_decision` = RL 决策；`dispatch_robust_action` = 应急动作，不经 RL 模型）。**订正（2026-09-29 代码评审 W-2）**：原文写"**唯一**生产者 = `dispatch_ai_decision`"，被代码自身证伪；两处同标 `Ai` 是对的（同属 AI 引擎源，**不得**并入 `Iec104`/`Strategy`），错的只是"唯一"这个措辞 |
 ///
 /// ⚠️ `Ai` 的调用点在 **AI 引擎停用期（2026-09-09 起）不可达**，但**代码真实存在**
 /// （`ai_integration.rs` 的 `dispatch_ai_decision`）⇒ 按"有真实生产者"入域；**不得**把它

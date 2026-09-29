@@ -1051,9 +1051,15 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
 /// PCS 写审计的**事件文案与级别**（**纯函数**，抽出以便单测）。
 ///
 /// 为什么要抽出来：内联在 sink 方法里时，判它要造出完整的 storage/DB 装配（`SouthSink`
-/// 需要 `Arc<dyn EventRepository>` + `AlertFeed` + IEC104 服务器）——而**级别判错是真实
-/// 失效面**：`level` 决定这条写审计会不会把运维叫醒。（体例同 `tai_storage.rs` 的
-/// `stale_warn_message`，`b2fb887` 先例。）
+/// 需要 `Arc<dyn EventRepository>` + `AlertFeed` + IEC104 服务器）⇒ **无法被断言**。
+/// （体例同 `tai_storage.rs` 的 `stale_warn_message`，`b2fb887` 先例。）
+///
+/// ⚠️ **`level` 的消费面现状（2026-09-29 代码评审 W-3 查出，如实记录）**：`level` **只**流向
+/// `AlertFeed::push_system_alert`、**不落库**（`SystemEvent` 无 level 字段，`storage` 侧只存
+/// timestamp / event_type / source / message）；而 `AlertFeed` 在本期**生产侧无订阅者**
+/// （`alert_feed.rs` 的 `subscribe()` 带 `#[allow(dead_code)]`）⇒ 当前版本下 `level` 的差异
+/// **没有运行期消费者**，只有本文件的单测覆盖它。故"级别判错"目前是**潜在**失效面（待上游订阅方
+/// 接入才真正影响运维）。该缺口连同"降级窗口内审计丢失"已登记：台账 §6.13 **U-75 残余**。
 ///
 /// **级别规则（§13.5.3）**：全部记录已确认 ⇒ `info`；**任一条**未确认 ⇒ `warning`。
 pub(crate) fn pcs_audit_event(
