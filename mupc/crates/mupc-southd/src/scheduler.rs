@@ -1586,11 +1586,6 @@ mod tests {
                 .filter(|&&(ref m, _, ev)| ev && m == metric)
                 .count()
         }
-
-        /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
-        fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
-            self.audits.lock().unwrap().clone()
-        }
     }
 
     #[async_trait]

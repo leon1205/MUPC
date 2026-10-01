@@ -456,13 +456,6 @@ mod collection_tests {
         }
     }
 
-    impl RecSink {
-        /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
-        pub fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
-            self.audits.lock().unwrap().clone()
-        }
-    }
-
     /// 造一块 76 寄存器的 3 区读数（按 PCS 线格式：已经 `to_pcs_reg` 的字节互换）。
     ///
     /// ⚠️ **量纲（与计划原文不同，以代码为准）**：3 区三相量纲 `regs::SCALE_3PH = 0.1`，
