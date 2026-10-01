@@ -2865,4 +2865,58 @@ mod runner_tests {
         assert_eq!(events.count("interlock.cleared"), 1);
         pump.abort();
     }
+
+    /// **T5 QA 补：联锁停机生产调用点（`impl InterlockPort for Arc<PcsHandle>`）的 token 判据**
+    /// （02 设计 §13.5.3「token 取值域」之 `Interlock`）—— 安全链，最不能被"无声传错"。
+    ///
+    /// **为什么必须补**：`mupc-southd` 的 token 用例把 token **作为入参**再断言原样返回，只证
+    /// `PcsHandle` 转发无损，对**适配器是否如实传**零判别力（QA 实测把本文件 `interlock.rs`
+    /// 适配器里的 `Interlock` 改成 `Iec104` 后全仓用例全绿，见测试报告 F2 取证）。本用例走
+    /// 真实适配器 `<Arc<PcsHandle> as InterlockPort>::stop()`（联锁状态机停机链的唯一出口）。
+    ///
+    /// **改什么会让本条变红**：把该适配器里的 `WriteToken::Interlock` 改成任何其它值 ⇒ 红。
+    #[tokio::test]
+    async fn t5_interlock_stop_adapter_uses_interlock_token() {
+        use mupc_southd::config::SouthPcsConfig;
+        use mupc_southd::port_runtime::MockBus;
+        use mupc_southd::scheduler::{PcsWriteRecord, StationSink, WriteToken};
+
+        #[derive(Default)]
+        struct Capture(std::sync::Mutex<Vec<WriteToken>>);
+        #[async_trait::async_trait]
+        impl StationSink for Capture {
+            async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+            async fn on_station_telemetry(
+                &self,
+                _id: &str,
+                _role: mupc_southd::config::Role,
+                _pts: Vec<(String, f64, bool)>,
+            ) {
+            }
+            async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+            async fn on_pcs_write_audit(&self, token: WriteToken, _writes: &[PcsWriteRecord]) {
+                self.0.lock().unwrap().push(token);
+            }
+        }
+
+        let capture = Arc::new(Capture::default());
+        let h = Arc::new(PcsHandle::new(
+            SouthPcsConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            Arc::new(MockBus::new()),
+            capture.clone(),
+        ));
+
+        // 走真实适配器（联锁停机链的唯一出口；停机不读总线 ⇒ 无需预置寄存器）
+        <Arc<PcsHandle> as InterlockPort>::stop(&h)
+            .await
+            .expect("MockBus 上写 500=0 必成功");
+        assert_eq!(
+            *capture.0.lock().unwrap(),
+            vec![WriteToken::Interlock],
+            "联锁停机必须以 Interlock token 留痕（改成 Iec104/Strategy 即红）"
+        );
+    }
 }
