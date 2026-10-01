@@ -1312,6 +1312,45 @@ mod tests {
     /// `ensure_started` 的 M1 前置守卫读到 0（停机）⇒ `send_tai_command` 恒 `Err`，
     /// 下发路径空转（B-3 用例需要真实下发成功）。
     async fn stub_pcs_observable(soc: Option<f64>) -> (Arc<PcsHandle>, Arc<MockBus>) {
+        stub_pcs_observable_with_sink(soc, Arc::new(NullSink)).await
+    }
+
+    /// **T5 QA 探针 sink**：记录 `on_pcs_write_audit` 收到的 `WriteToken`。
+    ///
+    /// 用途 = 断言**生产调用点**（本文件 `dispatch_phase_pq` 的 `send_tai_command` / AI 分支的
+    /// `send_dual_param`）如实传 token。既有 `mupc-southd` 用例只证"入参 token == 出参 token"
+    /// 的**转发**无损，对调用方传错**零判别力**（QA 实测：把这里的 `Strategy` 改成 `Iec104`
+    /// 后全仓用例全绿）。
+    #[derive(Default)]
+    struct AuditCaptureSink(std::sync::Mutex<Vec<WriteToken>>);
+
+    #[async_trait::async_trait]
+    impl mupc_southd::scheduler::StationSink for AuditCaptureSink {
+        async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+        async fn on_station_telemetry(
+            &self,
+            _id: &str,
+            _role: mupc_southd::config::Role,
+            _pts: Vec<(String, f64, bool)>,
+        ) {
+        }
+        async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_pcs_write_audit(
+            &self,
+            token: WriteToken,
+            _writes: &[mupc_southd::scheduler::PcsWriteRecord],
+        ) {
+            self.0.lock().unwrap().push(token);
+        }
+    }
+
+    /// 同 `stub_pcs_observable`，但**采集出口可注入**（T5 QA 用：注入 `AuditCaptureSink`
+    /// 以观测调用点 token）；既有调用方的行为零变化（`stub_pcs_observable` 转调本函数并注入
+    /// `NullSink`）。
+    async fn stub_pcs_observable_with_sink(
+        soc: Option<f64>,
+        sink: Arc<dyn mupc_southd::scheduler::StationSink>,
+    ) -> (Arc<PcsHandle>, Arc<MockBus>) {
         use mupc_southd::config::{RegBlockConf, RegFunc, SouthPcsConfig};
 
         let mut cfg = SouthPcsConfig {
@@ -1345,7 +1384,7 @@ mod tests {
         // `ensure_started` 的 S-4 前置校验按**精确地址** FC04 读 1013 ⇒ 需单独预置该键，
         // 否则读回 Err 致整条下发路径失败（本 helper 与台账用例的唯一差异）。
         bus.put_input(1, 1013, vec![mupc_southd::pcs::to_pcs_reg(2.0)]);
-        let h = PcsHandle::new(cfg, bus.clone(), Arc::new(NullSink));
+        let h = PcsHandle::new(cfg, bus.clone(), sink);
         h.tick_once().await; // 采一拍 ⇒ 快照 valid、ts 有效
         assert_eq!(
             h.latest_soc().await.map(|(v, _)| v),
@@ -1661,6 +1700,38 @@ mod tests {
             "恢复后真实指令须重新下发（被去抖跳过则停在 12）"
         );
         assert_eq!(&v3[12..], &v1[..], "恢复后的真实指令应与 ① 相同且确实发出");
+    }
+
+    /// **T5 QA 补：台区储能（唯一默认下发引擎）生产调用点的 token 判据**（02 设计 §13.5.3
+    /// 「token 取值域」之 `Strategy`）。
+    ///
+    /// **为什么必须补**：`mupc-southd` 的 token 用例把 token **作为入参**再断言原样返回 —— 只证
+    /// `PcsHandle` 转发无损，对**调用方**是否如实传零判别力（QA 实测把本文件第 457 行的
+    /// `Strategy` 改成 `Iec104` 后全仓用例全绿，见测试报告 F2 取证）。本用例驱动真实生产路径
+    /// `run_fallback_strategies` → `dispatch_phase_pq` 直到 sink 边界，把 `Strategy` 钉死。
+    ///
+    /// **改什么会让本条变红**：把 `dispatch_phase_pq` 里 `send_tai_command` 的首参 token 改成
+    /// 任何非 `Strategy` 值（如 `Iec104`）⇒ 断言得非 `Strategy` 即红。
+    #[tokio::test]
+    async fn t5_tai_storage_dispatch_is_audited_with_strategy_token() {
+        let capture = Arc::new(AuditCaptureSink::default());
+        let (pcs, _bus) = stub_pcs_observable_with_sink(Some(50.0), capture.clone()).await;
+        let mut i = AiIntegrator::new();
+        i.set_pcs_client(pcs);
+        i.set_tai_storage_strategy(Arc::new(TaiStorageStrategy::new(
+            crate::config::TaiStorageConfig::default(),
+        )));
+
+        // fresh 测量（12:00）⇒ 台区储能 evaluate 产出真实分相指令 ⇒ 经 dispatch_phase_pq 下发
+        i.set_latest_data(b3_pkg(3600 * 12, [-10.0, -10.0, -10.0], 50.0))
+            .await;
+        i.run_fallback_strategies().await.unwrap();
+
+        assert_eq!(
+            *capture.0.lock().unwrap(),
+            vec![WriteToken::Strategy],
+            "台区储能下发须以 Strategy token 留痕（改成 Iec104/Ai 即红）"
+        );
     }
 
     // ── U-171（2026-09-29）：离线/未注入期「下发不可能成功」的告警**必须节流** ──

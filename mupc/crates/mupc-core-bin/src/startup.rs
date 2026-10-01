@@ -1051,9 +1051,15 @@ impl mupc_southd::scheduler::StationSink for SouthSink {
 /// PCS 写审计的**事件文案与级别**（**纯函数**，抽出以便单测）。
 ///
 /// 为什么要抽出来：内联在 sink 方法里时，判它要造出完整的 storage/DB 装配（`SouthSink`
-/// 需要 `Arc<dyn EventRepository>` + `AlertFeed` + IEC104 服务器）——而**级别判错是真实
-/// 失效面**：`level` 决定这条写审计会不会把运维叫醒。（体例同 `tai_storage.rs` 的
-/// `stale_warn_message`，`b2fb887` 先例。）
+/// 需要 `Arc<dyn EventRepository>` + `AlertFeed` + IEC104 服务器）⇒ **无法被断言**。
+/// （体例同 `tai_storage.rs` 的 `stale_warn_message`，`b2fb887` 先例。）
+///
+/// ⚠️ **`level` 的消费面现状（2026-09-29 代码评审 W-3 查出，如实记录）**：`level` **只**流向
+/// `AlertFeed::push_system_alert`、**不落库**（`SystemEvent` 无 level 字段，`storage` 侧只存
+/// timestamp / event_type / source / message）；而 `AlertFeed` 在本期**生产侧无订阅者**
+/// （`alert_feed.rs` 的 `subscribe()` 带 `#[allow(dead_code)]`）⇒ 当前版本下 `level` 的差异
+/// **没有运行期消费者**，只有本文件的单测覆盖它。故"级别判错"目前是**潜在**失效面（待上游订阅方
+/// 接入才真正影响运维）。该缺口连同"降级窗口内审计丢失"已登记：台账 §6.13 **U-75 残余**。
 ///
 /// **级别规则（§13.5.3）**：全部记录已确认 ⇒ `info`；**任一条**未确认 ⇒ `warning`。
 pub(crate) fn pcs_audit_event(
@@ -2942,6 +2948,64 @@ plugins: {}
         );
     }
 
+    /// **T5 QA 探针 sink**：把 `on_pcs_write_audit` 收到的 `WriteToken` 原样留下。
+    ///
+    /// 用途 = 断言**生产调用点**传入的 token 正确（设计 §13.5.3「token 由调用点传入、不得
+    /// 从调用栈推断」）。既有用例只在 `mupc-southd` 内以「入参 token == 出参 token」自证
+    /// **转发**正确，**看不见**调用方是否如实传 —— 把 `startup.rs` 的 `Iec104` 改成 `Strategy`
+    /// 仍然全绿（QA 实测，见测试报告）。本桩把那一层钉住。
+    #[derive(Default)]
+    struct AuditCaptureSink(std::sync::Mutex<Vec<mupc_southd::scheduler::WriteToken>>);
+
+    #[async_trait::async_trait]
+    impl mupc_southd::scheduler::StationSink for AuditCaptureSink {
+        async fn on_grid_package(&self, _pkg: mupc_data_processing::DataPackage) {}
+        async fn on_station_telemetry(
+            &self,
+            _id: &str,
+            _role: mupc_southd::config::Role,
+            _pts: Vec<(String, f64, bool)>,
+        ) {
+        }
+        async fn on_battery_soc(&self, _id: &str, _soc: f64) {}
+        async fn on_pcs_write_audit(
+            &self,
+            token: mupc_southd::scheduler::WriteToken,
+            _writes: &[mupc_southd::scheduler::PcsWriteRecord],
+        ) {
+            self.0.lock().unwrap().push(token);
+        }
+    }
+
+    /// 造一个"可正常启动"的 `PcsHandle`：S-4 前置守卫按**精确地址** FC04 读 `1013`（待机 1）
+    /// ⇒ 单独预置该键（同 `mupc-southd` 的 `bus_ready()`，两处口径一致）。
+    fn pcs_handle_with_capture() -> (Arc<mupc_southd::pcs::PcsHandle>, Arc<AuditCaptureSink>) {
+        use mupc_southd::config::{RegBlockConf, RegFunc, SouthPcsConfig};
+
+        let mut cfg = SouthPcsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        cfg.regs = vec![RegBlockConf {
+            name: "pcs_3zone".into(),
+            addr: 1000,
+            func: RegFunc::Input,
+            format: mupc_data_processing::meter_regs::RegFormat::Uint16,
+            scale: 1.0,
+            count: 76,
+            offset: 0.0,
+            byte_swap: true,
+            points: Vec::new(),
+            read_slice: false,
+            interval_ms: None,
+        }];
+        let bus = Arc::new(mupc_southd::port_runtime::MockBus::new());
+        bus.put_input(1, 1013, vec![mupc_southd::pcs::to_pcs_reg(1.0)]);
+        let sink = Arc::new(AuditCaptureSink::default());
+        let h = mupc_southd::pcs::PcsHandle::new(cfg, bus, sink.clone());
+        (h, sink)
+    }
+
     /// 只读的事件仓储桩（`on_station_telemetry` 的事件分支只会 `insert`，其余方法用不到）。
     struct RecordingEvents(std::sync::Mutex<Vec<mupc_storage::SystemEvent>>);
 
@@ -4150,6 +4214,144 @@ stations:
         assert!(
             msg2.contains("0x03ea=0x0000(未确认)"),
             "未确认须显式标注而非留空: {msg2}"
+        );
+    }
+
+    /// **T5 / §13.5.3「事件字段映射」+「落库 + 告警」两条款的端到端判据**（QA 补，2026-10-01）。
+    ///
+    /// 为什么必须补：上一条 `t5_pcs_audit_event_message_and_level` 只钉**纯函数**
+    /// `pcs_audit_event`（文案 + 级别）——它**看不见** sink 侧的两件事：① 事件是否真写了
+    /// `storage.events`、`event_type`/`source` 是否为规格要求的 `"pcs_write_audit"`/`"pcs"`；
+    /// ② `level` 是否真的流到 `AlertFeed::push_system_alert`。把 `record_event("pcs_write_audit",
+    /// "pcs", ..)` 的**字符串实参**改错（如写成 `"pcs_audit"`），或把 `record_event` 调用整个
+    /// 删掉（只留纯函数），上一条**全绿**。本用例走**真实装配类型** `SouthSink` + 记账仓储
+    /// `RecordingEvents` + 真 `AlertFeed`（同 `south_sink_offline_event_carries_block_reason`
+    /// 范式）把这两条钉住。
+    ///
+    /// **改什么会让本条变红**：① 不落库（删 `record_event` 的 `insert` 路径）⇒ 落库条数 0；
+    /// ② `event_type`/`source` 字面量改错 ⇒ 对应断言红；③ level 不投递 / 恒 info ⇒
+    /// 第二条 `subtype == "warning"` 红。
+    #[tokio::test]
+    async fn t5_pcs_write_audit_lands_in_events_with_type_source_and_feed_level() {
+        use mupc_southd::scheduler::StationSink as _;
+        use mupc_southd::scheduler::{PcsWriteRecord, WriteToken};
+
+        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
+        let feed = Arc::new(crate::alert_feed::AlertFeed::new());
+        let mut rx = feed.subscribe();
+        let sink = south_sink_for_test("t5-pcs-write-audit", events.clone(), feed).await;
+
+        // ① 全部已确认 ⇒ info
+        sink.on_pcs_write_audit(
+            WriteToken::Iec104,
+            &[PcsWriteRecord {
+                reg: 0x03EE,
+                value: 0x0A00,
+                readback: Some(0x0A00),
+            }],
+        )
+        .await;
+        // ② 任一条未确认 ⇒ warning
+        sink.on_pcs_write_audit(
+            WriteToken::Interlock,
+            &[PcsWriteRecord {
+                reg: 0x01F4,
+                value: 0x0000,
+                readback: None,
+            }],
+        )
+        .await;
+
+        // 落库面：两条事件，类型/来源为规格字面量，内容含 token 与 (reg,value,readback)
+        let logged = events.0.lock().unwrap().clone();
+        assert_eq!(logged.len(), 2, "两次投递须各落一条（AlertFeed 不是真源）");
+        assert!(
+            logged.iter().all(|e| e.event_type == "pcs_write_audit"),
+            "event_type 须为规格字面量 'pcs_write_audit': {:?}",
+            logged.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+        );
+        assert!(
+            logged.iter().all(|e| e.source == "pcs"),
+            "source 须为规格字面量 'pcs'"
+        );
+        assert!(
+            logged[0].message.contains("调用方=iec104")
+                && logged[0].message.contains("0x03ee=0x0a00(回读0x0a00)"),
+            "第一条文案须含 token 与 (reg,value,回读): {}",
+            logged[0].message
+        );
+        assert!(
+            logged[1].message.contains("调用方=interlock")
+                && logged[1].message.contains("0x01f4=0x0000(未确认)"),
+            "第二条文案须含 token 与『未确认』: {}",
+            logged[1].message
+        );
+
+        // 告警投递面：level 真的流到 AlertFeed（info / warning 各一）
+        let g1 = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("5 s 内必须收到投递（超时 = 投递断链）")
+            .expect("订阅者必须收到事件");
+        assert_eq!(g1.subtype, "info", "全部已确认须投 info（恒 warning 即红）");
+        assert_eq!(g1.message, logged[0].message, "投递文案与落库文案同源");
+        let g2 = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("5 s 内必须收到第二条投递")
+            .expect("订阅者必须收到事件");
+        assert_eq!(
+            g2.subtype, "warning",
+            "有未确认须投 warning（恒 info 即红）"
+        );
+        assert_eq!(g2.message, logged[1].message, "投递文案与落库文案同源");
+    }
+
+    /// **T5 QA 补：IEC104 `p_set` 生产调用点的 token 判据**（设计 §13.5.3「token 取值域」
+    /// 之 `Iec104`）。
+    ///
+    /// **为什么必须补**：`mupc-southd` 的 `t5_audit_exactly_one_event_per_entry_with_token`
+    /// 把 token **作为入参**传给 `send_dual_param` 再断言它原样出来 —— 那只证明 `PcsHandle`
+    /// 的**转发**无损，对「调用方是否如实传」**零判别力**：QA 实测把本处 `Iec104` 改成
+    /// `Strategy`，全仓 433 + 253 + … 用例**全绿**（见测试报告 F2 取证）。本用例驱动**真实
+    /// 生产路径**（`StrategyCommandHandler::handle_command` 的 `PowerRegulation` 分支）直到
+    /// sink 边界，把 `Iec104` 这一值钉死。
+    ///
+    /// **改什么会让本条变红**：把 `startup.rs` 中 `pcs.send_dual_param(...)` 的首参 token 改成
+    /// 任何非 `Iec104` 值（如 `Strategy`/`Ai`）⇒ 断言得非 `Iec104` 即红。
+    #[tokio::test]
+    async fn t5_iec104_p_set_is_audited_with_iec104_token() {
+        use mupc_gateway::iec104::command::{CommandHandler as _, CommandType, ControlCommand};
+
+        let (pcs, sink) = pcs_handle_with_capture();
+        let points: Arc<Vec<mupc_southd::uplink::UplinkPoint>> = Arc::new(Vec::new());
+        let handler = StrategyCommandHandler {
+            pcs: Some(pcs.clone()),
+            interlock: None,
+            p_max_kw: 60.0,
+            latest: Arc::new(mupc_data_processing::latest_values::LatestValues::new(
+                mupc_data_processing::DATA_FRESHNESS_MS / 1000,
+            )),
+            points,
+        };
+
+        let resp = handler
+            .handle_command(ControlCommand {
+                cmd_id: 7,
+                cmd_type: CommandType::PowerRegulation,
+                p_set: Some(10.0),
+                q_set: None,
+                switch_state: None,
+                priority: 0,
+                k_value: Some(0.0),
+                deadband: None,
+            })
+            .await
+            .expect("IEC104 合法 p_set 在 PCS 通道在场时不得返回 Err");
+        assert!(resp.success, "前提：本拍下发须成功（否则 token 判据空转）");
+
+        assert_eq!(
+            *sink.0.lock().unwrap(),
+            vec![mupc_southd::scheduler::WriteToken::Iec104],
+            "IEC104 p_set 下发必须以 Iec104 token 留痕（改成 Strategy/Ai 即红）"
         );
     }
 }

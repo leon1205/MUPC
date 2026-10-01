@@ -183,6 +183,9 @@ impl PcsHandle {
     /// `restore_interlock_latched(true)` 完成）。成功后复位 `started=false` + `mode=0xFF`
     /// （否则 release 后 `ensure_started`/`ensure_mode` 见缓存命中而跳过重写 → 静默失效）。
     /// 写 500=0 在 latch 期间**仍允许**（供联锁周期重试停机）。
+    ///
+    /// `token` 须**如实传本入口的身份**（联锁链路 = `WriteToken::Interlock`）—— 审计事件的
+    /// 内容**不会自证身份**，传错即失真，且没有任何用例能发现（§13.5.3：token 由调用点负责）。
     pub async fn stop(&self, token: WriteToken) -> Result<(), String> {
         let mut writes = Vec::new();
         let res = {
@@ -293,6 +296,9 @@ impl PcsHandle {
     /// 按额定 `p_cap` 钳过（`startup.rs:270`），但那是"靠调用方自律"，新增调用方（如 AI
     /// 恢复）即失守。钳位只影响**越限**入参；`|p_ref| ≤ 100`（含全部现网合法值 ≤ 60）时
     /// 线上字节**一字不变**。
+    ///
+    /// `token` 须**如实传本入口的身份**（IEC104 人工 `p_set` = `WriteToken::Iec104`；AI 下发
+    /// 路径 = `WriteToken::Ai`）—— 审计事件的内容**不会自证身份**，传错即失真、无用例可发现。
     pub async fn send_dual_param(
         &self,
         token: WriteToken,
@@ -353,6 +359,9 @@ impl PcsHandle {
     /// 写序都无法被任何探针判红）⇒ 现用
     /// `send_tai_command_writes_phase_regs_clamped_and_interleaved` 的写序断言钉住。
     /// 若将来要改回分组写序，须同时改该用例并复核上面的残留态论证。
+    ///
+    /// `token` 须**如实传本入口的身份**（台区储能兜底 = `WriteToken::Strategy`）—— 审计事件的
+    /// 内容**不会自证身份**，传错即失真，且没有任何用例能发现（§13.5.3：token 由调用点负责）。
     pub async fn send_tai_command(
         &self,
         token: WriteToken,

@@ -398,6 +398,9 @@ mod collection_tests {
         pub telemetry_locked: StdMutex<Vec<bool>>,
         /// 每次 `on_station_offline` 时同上
         pub offline_locked: StdMutex<Vec<bool>>,
+        /// 每次 `on_pcs_write_audit` 时同上（T5 写审计的锁纪律判据 —— 见
+        /// `t5_write_audit_emitted_outside_control_lock`）
+        pub audits_locked: StdMutex<Vec<bool>>,
     }
 
     impl LockProbeSink {
@@ -427,7 +430,10 @@ mod collection_tests {
             let held = self.lock_held();
             self.offline_locked.lock().unwrap().push(held);
         }
-        async fn on_pcs_write_audit(&self, _token: WriteToken, _writes: &[PcsWriteRecord]) {}
+        async fn on_pcs_write_audit(&self, _token: WriteToken, _writes: &[PcsWriteRecord]) {
+            let held = self.lock_held();
+            self.audits_locked.lock().unwrap().push(held);
+        }
     }
 
     #[async_trait]
@@ -447,13 +453,6 @@ mod collection_tests {
         }
         async fn on_pcs_write_audit(&self, token: WriteToken, writes: &[PcsWriteRecord]) {
             self.audits.lock().unwrap().push((token, writes.to_vec()));
-        }
-    }
-
-    impl RecSink {
-        /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
-        pub fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
-            self.audits.lock().unwrap().clone()
         }
     }
 
@@ -577,6 +576,52 @@ mod collection_tests {
         assert_eq!(
             *sink.telemetry_locked.lock().unwrap(),
             vec![false, true],
+            "探针自检：持锁投递须报 true（证明 try_lock 真能识别持锁态）"
+        );
+    }
+
+    /// **T5 / 设计 §13.5.3 锁纪律（二轮设计评审的**阻断项** M-4）的运行期判据**：
+    /// 写审计的投递必须发生在 `PcsHandle` 总线锁**之外**。
+    ///
+    /// **为什么必须单列**：本文件上方 `LockProbeSink` 的注释明写这类缺陷"**只有并发时序才能
+    /// 暴露、普通断言完全无判别力**"；T5 新增的 `on_pcs_write_audit` 若不在探针里记一笔，
+    /// 则**没有任何用例**能拦住"把 emit 挪回持锁块内"这一回退 —— 而 sink 的审计实现会落
+    /// SQLite（`record_event`），锁内投递会拖延**联锁停机**这类安全动作。
+    ///
+    /// **判别力（改坏即红）**：把三个入口里的 `self.emit_write_audit(token, &writes).await`
+    /// 搬进 `_g` 仍活着的块内 ⇒ 末段断言得 `[true]` 而非 `[false]`。**探针自检**（第三段）
+    /// 保证"恒 false"不是探针失灵（如 `try_lock` 用法写错）造成的假绿。
+    #[tokio::test]
+    async fn t5_write_audit_emitted_outside_control_lock() {
+        let bus = Arc::new(MockBus::new());
+        bus.put_input(1, 1000, block_words());
+        // S-4 前置守卫按**精确地址** FC04 读 1013 ⇒ 需单独预置该键（与 `block_words` 的区块键不同）
+        bus.put_input(1, 1013, vec![to_pcs_reg(1.0)]);
+        let sink = Arc::new(LockProbeSink::default());
+        let h = PcsHandle::new(cfg_with_points(), bus.clone(), sink.clone());
+        *sink.me.lock().unwrap() = Arc::downgrade(&h);
+
+        h.send_dual_param(
+            WriteToken::Iec104,
+            &PcsDualParam::new(10.0, 0.0, true, "fallback"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *sink.audits_locked.lock().unwrap(),
+            vec![false],
+            "写审计投递必须在总线锁外（恰 1 条，且投递时无人持锁）"
+        );
+
+        // 探针自检：持锁时直接投一次，探针必须报 true。
+        // 没有这条，"探针恒返回 false"（例如 try_lock 用法写错）会让上一条断言变成假绿。
+        {
+            let _g = h.inner.lock.lock().await;
+            sink.on_pcs_write_audit(WriteToken::Iec104, &[]).await;
+        }
+        assert_eq!(
+            sink.audits_locked.lock().unwrap().last(),
+            Some(&true),
             "探针自检：持锁投递须报 true（证明 try_lock 真能识别持锁态）"
         );
     }

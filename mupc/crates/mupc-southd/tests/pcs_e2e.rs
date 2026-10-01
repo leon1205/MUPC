@@ -227,13 +227,6 @@ impl StationSink for RecSink {
     }
 }
 
-impl RecSink {
-    /// 取全部 PCS 写审计事件（调用方 token + 该次写序列）。
-    fn audits(&self) -> Vec<(WriteToken, Vec<PcsWriteRecord>)> {
-        self.audits.lock().unwrap().clone()
-    }
-}
-
 /// 与 `tests/fixtures/south_pcs_s3b2.yaml` 的 `pcs_3zone` 同构（addr 1000 / count 76），
 /// 直接复用生产 fixture（与 `config.rs` 的 `collection_tests::cfg_with_points` 同法）——
 /// `points` 已锚定覆盖满窗口（规则 11），不会被 `SouthPcsConfig::validate` 拒。
